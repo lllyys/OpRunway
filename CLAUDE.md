@@ -54,20 +54,22 @@
 ## 目录结构
 
 ```
-OpRunway/                              ← 项目根（本工作区，非 git 仓）
-├── CLAUDE.md                          ← 本文件
+OpRunway/                              ← 项目根（git 仓：GitHub lllyys/OpRunway · GitCode brian66237/OpRunway）
+├── CLAUDE.md · BUREAU.md · README.md
 ├── doc/                               ← 所有 md / 图 / 设计文档
 │   ├── oprunway-design.md             ← 设计与流水线总览（先读这个）
-│   └── oprunway-changes-brief.md      ← 改动简表（倒序，持续维护）
-└── repos/                             ← clone 进来的相关仓（12 个，~604M，均 shallow/master）
-    ├── catlass/                       ← 被测重点（cann/catlass）
-    ├── cannbot-skills/                ← 方法论参考（cann/cannbot-skills）
-    └── {asc-devkit, ops-sparse, ops-blas, ops-cv, catccos, shmem,
-         oam-tools, amct, hixl, cann-recipes-infer}/   ← 其余算子仓（cann/*）
-
-— 以下为「待实施」规划，先在 design 里定稿、确认后再建 —
-├── plugin/       ← OpRunway 的 skills / agents / workflows 实现（自维护插件仓，见发布形态）
-└── reports/      ← 验收产物：reports/<repo>/<op>/<pr>/{cases,npu,perf-compare}/
+│   ├── oprunway-changes-brief.md      ← 改动简表（倒序，持续维护）
+│   └── oprunway-todo.md               ← 剩余施工 TODO + 用教训钉住的硬约束
+├── plugin/                            ← OpRunway 实现（自维护插件仓骨架：skills/commands；agents/workflows/manifest 待补）
+│   ├── acc-common/                    ← Layer 0 契约 + Layer 1 确定性脚本（工具中立）
+│   │   ├── specs/                     ← spec.json（isclose/sign/equal）
+│   │   ├── new_example/               ← per-op runner `oprunway_<op>_runner.cpp` + `run_on_npu.sh`
+│   │   └── gen_cases · repo_adapter · validator · perf_compare · fetch_source · run_workflow .py
+│   ├── skills/ · commands/            ← Layer 2 薄壳（入口/编排；agents 在建）
+│   └── bridge/                        ← 路线 B 桥制品（catlass 去风险）
+├── canon/                             ← bureau 决策/ADR（durable 知识）
+├── reports/                           ← 验收产物 reports/<repo>/<op>/<pr>/…（gitignore 不入库）
+└── repos/                             ← clone 的算子仓（12+，~688M，gitignore 不入库）
 ```
 
 > 本机**直连 gitcode 可 clone**（无需代理）。12 个仓均已 clone（被测仓 + 参考仓）。
@@ -130,8 +132,13 @@ Task 2/3 的 build 与跑测在昇腾 NPU 上进行，本地 Mac 只做开发与
 
 ## 现状与下一步
 
-- **现状**：init + 调研收口完成——文档骨架就位；catlass 已克隆调研（build/golden/msTuner）；cannbot 验收方法论与 awesome 发布机制已摸清；`repos/` 含 catlass + cannbot-skills。
-- **下一步**（待与用户分析后实施）：① 拿真实算子任务书(md) + 一个 catlass 算子 PR；② 据此定 Task 1 数据契约与 §5 精度/性能口径（Q3/Q4）；③ 等 GPU 标杆 schema（Q5）对齐对比口径。开放问题清单见 `doc/oprunway-design.md` §10。
+- **现状**：主干 workflow 已建成 + 真机端到端验证 + 入库推公开远端。
+  - **三层可移植架构**（`plugin/acc-common/`）：Layer 0 六份 JSON 契约 · Layer 1 确定性脚本（`gen_cases`/`repo_adapter`/`validator`/`perf_compare`/`fetch_source` + `run_workflow` 驱动，工具中立、无 Claude-Code 依赖）· Layer 2 薄壳（`commands/` + `skills/`；agent 入口在建）。
+  - **真机三算子验证**（IsClose/Sign/Equal，真 A3 NPU）：裁决全对（精度=真 NPU vs numpy golden，性能=msprof 真 kernel-only vs 真内置 TBE 基线，门同时卡精度+性能）。加算子 = spec + golden + runner 三文件。
+  - **入库 + 推公开远端**：初始版已推 GitHub `lllyys/OpRunway` + GitCode `brian66237/OpRunway`（署名 lys；`repos/` 等大件已 gitignore）；后续改动经 PR 入库。
+- **在建**（产品形态入口）：真实输入 = **任务书（md 或链接）+ PR 链接** → **agent 自动**产 spec、决定跑哪些步、处理失败、出报告（**不再人肉搓 spec.json 喂 `run_workflow.py`**——那只是 demo 期临时入口）。标准 skill/agent 形式 + 跨运行时可移植。
+  - **①② 本地建成（经 PR 入库）**：`fetch_source.py`（取材：任务书/PR→中立 JSON）+ `acc-spec` skill（任务书→spec，23 份真实任务书语料 grounding + codex 审）。
+  - **下一步**：③ per-op runner 锚定 + 构建路径选择（**FAIL 先解耦 root-cause 再归因**）→ ④⑤⑥ 编排串联。清单见 `doc/oprunway-todo.md`。
 
 <!-- bureau:start -->
 @BUREAU.md
