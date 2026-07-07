@@ -21,7 +21,8 @@ def _judge_precision(verify_mode, prec, thr):
         return ("pass" if value <= thr else "fail"), f"exact mismatch={value} ≤ {thr}"
     if verify_mode == "behavioral":
         return "na", "行为型：无数值 golden，精度维度 na"
-    # numerical
+    if verify_mode != "numerical":  # 未知 verify_mode 不静默当 numerical → 显式 fail
+        return "fail", f"未知 verify_mode={verify_mode}（仅 exact/numerical/behavioral）"
     if metric != "max_rel_err":
         return "fail", f"metric={metric} 与 verify_mode=numerical 不符"
     if not thr:
@@ -36,8 +37,10 @@ def validate(spec, caseset, evidence):
     ev_list = evidence["evidence"]
     ev_ids = [e["case_id"] for e in ev_list]
 
-    # 1) 契约校验：caseset ↔ evidence 一一对应
+    # 1) 契约校验：caseset ↔ evidence 一一对应 + verify_mode 合法
     problems = []
+    if vm not in ("exact", "numerical", "behavioral"):
+        problems.append(f"spec.verify_mode={vm!r} 非法（仅 exact/numerical/behavioral）")
     if len(case_ids) != len(set(case_ids)):
         problems.append("caseset 有重复 case_id")
     if len(ev_ids) != len(set(ev_ids)):
