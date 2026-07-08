@@ -6,6 +6,8 @@
 ## 🔒 已用教训钉住的硬约束（别再违反，先写这，因为最值钱）
 
 1. **FAIL 必先解耦 root-cause 再归因**：用「被测物自己的 build + 声明支持的 dtype + 手算 golden」独立复现，确认是「被测物 vs 我的 harness」，才能下结论。曾有一次跳过这步、在质疑下来回改口，绕了远路才靠解耦测试定论。
+   - **2026-07-08 又一实证（Equal）**：我一度把 Equal 真机 fail 当「算子 bug 真阳性」写进 PR/doc。逐字节解耦发现 `out.bin` **全 0**（16B 全 `0x00`）——是 **kernel 没执行/没回写 buffer** 的特征、**我们 Equal runner 的问题**（算子自己 build 出 `[0,1,0,1]` 混合值、非全 0）。**教训：全 0 输出 = harness 嫌疑（buffer 零初始化没填），别安到算子比较逻辑头上。** 对比 Sign：runner 正常（精度 5/5 过），性能 fail 是真的。
+   - **待办**：修 Equal runner（二元输入 / bool 输出通路，疑输出 tensor 未绑定/未回写）→ 重跑解耦才能对 Equal 算子归因。
 2. **平台 / spec / 构建路径从任务书推，不猜**：equal 的 hardware/oracle/阈值我一度瞎猜（碰巧对）；`Equal_task_doc.md` 明写「适配硬件 Atlas A2/A3」→ a3 才是对的平台、a5(950) 无关。
 3. **合入状态用 gitcode 查证，别沿用假设**：「7月前=已合入」是设定、不是事实；`api.gitcode.com/api/v5/.../commits?path=` 一查即知（本机直连）。
 
