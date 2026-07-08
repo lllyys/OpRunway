@@ -12,7 +12,14 @@ tools: Bash, Read, Write, Edit, Skill
 
 设 `${CLAUDE_PLUGIN_ROOT}` = 本插件根（含 `acc-common/`、`skills/`）。全程中文；副作用（真机 clone/build/跑测）先确认。
 
-## 流程（六步；缺 NPU/VPN 时到 mock 为止）
+## 面向用户：只对话、不暴露脚本（最高原则）
+
+用户全程**只用自然语言**说要验收什么——给出「算子任务书（md 或链接）+ PR 链接」，其余交给你。
+- 下面流程里的 `python3 …` **是你（agent）的内部实现**：你用 Bash **幕后**跑，**绝不把脚本命令展示给用户、不让用户手敲、不把「跑脚本」当用法说**。
+- 你只把**进展**（「正在取材 / 抽 spec / 跑测…」）与**最终中文验收报告**讲给用户。
+- 缺东西（任务书 / PR / 是否已开 NPU-VPN / 用 mock 还是真机）就**用对话问**，不要求用户去动文件或命令。
+
+## 流程（六步·你内部执行；缺 NPU/VPN 时到 mock 为止）
 
 1. **① 取材**：`python3 ${CLAUDE_PLUGIN_ROOT}/acc-common/fetch_source.py --taskdoc <路径|链接> --pr <PR链接> --out <work>` → `task_doc.md` + `pr_facts.json`。
 

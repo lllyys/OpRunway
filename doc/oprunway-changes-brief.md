@@ -14,6 +14,7 @@
 
 ## 2026-07-08
 
+- **统一为对话式形态 + 剥 Claude 署名 + plugin 结构合规**：按用户要求把形态收敛为「**对话式**」——`op-acceptance` agent 为唯一入口，用户在会话里自然语言说要验收什么即可，**脚本(acc-common)降为 agent 内部实现、不再暴露给用户**（agent 加最高原则：幕后跑脚本、只讲进展+报告、缺料对话问）。README（插件+仓）重写成对话用法、删掉 `python3 run_workflow.py` 类脚本示例。**plugin 结构对齐 Claude Code 规范**（查文档核过）：`<plugin>` 占位 → `${CLAUDE_PLUGIN_ROOT}`；`bridge`（非组件、0 引用）移出 plugin 到仓根；`.claude-plugin/plugin.json` 只放 manifest ✓。**去所有提交的 Claude co-author/session trailer**（workspace 规则=署用户名不署 Claude；重写历史 force-push 两远端，作者只剩 `lys`），以后不再加。
 - **补齐 agent+skill 体系 + 端到端跑通（初步可用）**：装上 keystone——`agents/op-acceptance`（编排 agent：(任务书,PR)→六步→裁决/报告，人不碰 spec.json）+ `skills/acc-runner`（③ 据算子自带 example 生成并验证 per-op runner）+ `.claude-plugin/plugin.json`（可 `/plugin install` 的 manifest）+ 更新 `commands/op-acceptance` 到 (任务书,PR) 入口。**端到端 demo（新算子 Neg）**：`Neg_task_doc` + `ops-math!2680` → fetch → acc-spec 产 `neg.spec`（应用 codex 修的规则：dtype 只填支持子集 fp32/16+余入 gap、『不劣化』→target_ratio 1.0、uint8 回绕特例入 gap）→ gen_cases 注册 `golden_neg` → run_workflow mock → **裁决 PASS**（5 用例）；`task_pr_gaps` 带 3 缺口；原三算子无回归。**mock 端到端可用；new_example 真机待 VPN + runner 验证。** ③ 经 codex 审出**过度声称**（构建路径选择/验证硬门其实代码没做、attr_order 非 spec 字段、双哨兵漏写等）→ **诚实收窄**：仅 `experimental/math` aclnn 闭环、验证-才-信是**纪律非代码硬门**（sidecar 待补）、legacy/catlass 标待扩。全套推 **PR #1**（github lllyys + gitcode brian66237），评论附任务书↔PR 测试案例 + 端到端 demo 证据。
 
 ## 2026-07-07
