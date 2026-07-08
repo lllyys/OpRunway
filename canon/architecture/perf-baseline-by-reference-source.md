@@ -16,6 +16,8 @@ status: proposed
 
 **这是任务书自身的性能验收线**（主线，按参考源）。它与 [[Acceptance contract and evidence chain]] 的 `perf_baseline_source` 字段是两回事——后者当前 canonical 默认 `gpu_external`（OpRunway 在 [[Task 3 acceptance state machine]] 额外加的对比层）。⚠ **张力待 review 裁**：这批社区任务的验收线其实由任务书按参考源定（多为 TBE/GPU、非 gpu_external），是否应让 `perf_baseline_source` 也从任务书推导、而非固定默认——留人工复核，**不在此页单方改 canonical**。对比口径见 [[ADR 0006 — Compare performance at a matched timing scope]]。
 
+**2026-07-08 实锤（强化上述张力，待 review 裁）**：真机验证的 Sign / Equal / Neg 三算子，逐一读**任务书原文**均写「参考内置 **TBE**、性能不劣化 / ≥TBE 95%」——**性能基线是 TBE、GPU 非必需**（GPU 仅移植类算子要），spec 也全是 `perf.baseline=tbe`。这给「`perf_baseline_source` 应从任务书推导、别固定默认 `gpu_external`」添了具体证据 → **建议 review 裁定：这批社区任务的 Task 3 GPU 对比层为可选、非必需**。（顺带修正：`sign.spec.json` 原 `target_ratio=0.95` 与任务书「无劣化」(=ratio 1.0) 不符，2026-07-08 已改为 1.0。）
+
 依据 `doc/oprunway-spec-pr-analysis.md`。
 
-**Sources.** [[session d31ea446-dec3-479f-a7b3-d6c1dec4f611 · 2026-07-02]]（2026-07-06 检查点）
+**Sources.** [[session d31ea446-dec3-479f-a7b3-d6c1dec4f611 · 2026-07-02]]（2026-07-06 检查点；2026-07-08 续：真机三算子任务书原文查证=TBE、GPU 非必需）
