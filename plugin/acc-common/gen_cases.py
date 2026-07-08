@@ -32,9 +32,14 @@ def golden_equal(inputs, attrs):
     return np.equal(inputs[0], inputs[1])
 
 
+def golden_neg(inputs, attrs):
+    return np.negative(inputs[0])
+
+
 GOLDEN = {"IsClose": ("numpy np.isclose", golden_isclose),
           "Sign": ("numpy np.sign", golden_sign),
-          "Equal": ("numpy np.equal", golden_equal)}
+          "Equal": ("numpy np.equal", golden_equal),
+          "Neg": ("numpy np.negative", golden_neg)}
 
 
 def _gen_input(rng, shape, dt, kind, atol, rtol, ref=None):
