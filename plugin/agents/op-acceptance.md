@@ -10,19 +10,19 @@ tools: Bash, Read, Write, Edit, Skill
 **产出**：`reports/<op>/` 下 `caseset/evidence/verdict/baseline/perf_report.json` + 中文验收报告。
 **判定脑子不在这**（在 `acc-common/validator.py`，ADR 0007）；本 agent 只搬 JSON、调 skill/脚本、串流程、出报告。
 
-设 `<plugin>` = 本插件根（含 `acc-common/`、`skills/`）。全程中文；副作用（真机 clone/build/跑测）先确认。
+设 `${CLAUDE_PLUGIN_ROOT}` = 本插件根（含 `acc-common/`、`skills/`）。全程中文；副作用（真机 clone/build/跑测）先确认。
 
 ## 流程（六步；缺 NPU/VPN 时到 mock 为止）
 
-1. **① 取材**：`python3 <plugin>/acc-common/fetch_source.py --taskdoc <路径|链接> --pr <PR链接> --out <work>` → `task_doc.md` + `pr_facts.json`。
+1. **① 取材**：`python3 ${CLAUDE_PLUGIN_ROOT}/acc-common/fetch_source.py --taskdoc <路径|链接> --pr <PR链接> --out <work>` → `task_doc.md` + `pr_facts.json`。
 
 2. **② 任务书→spec**：用 **`acc-spec` skill**（读 task_doc + pr_facts → `<op>.spec.json`，缺项落 `task_pr_gaps`）。一份任务书多算子 → 多份 spec，逐个走后续。
 
-3. **先 mock 自检**：`python3 <plugin>/acc-common/run_workflow.py <spec> --mode mock --out reports/<op>/`。mock 用 numpy golden 当 NPU 输出、不需真机——先验证 spec/gen_cases/validator 链自洽、能出裁决。mock 裁决异常 → 先修 spec，别上真机。
+3. **先 mock 自检**：`python3 ${CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <spec> --mode mock --out reports/<op>/`。mock 用 numpy golden 当 NPU 输出、不需真机——先验证 spec/gen_cases/validator 链自洽、能出裁决。mock 裁决异常 → 先修 spec，别上真机。
 
 4. **③ 生成并验证 runner**（真机路径；需 NPU）：用 **`acc-runner` skill**（据 spec + pr_facts 的算子自带 example 生成 `oprunway_<op>_runner.cpp` + 选构建路径 + **验证-才-信**硬门）。**先确认用户已开 NPU/VPN**（ascend-a5 真 950 / a3 A2A3）。runner 未过验证 → 不上真机、不出裁决。
 
-5. **④ NPU 跑测**：`python3 <plugin>/acc-common/run_workflow.py <spec> --mode new_example --out reports/<op>/`（`OPRUNWAY_*` 环境变量指真实机器/路径，不写进仓）。串 Task1→2→3：真 NPU 精度 vs numpy golden、msprof 真 kernel-only 性能 vs 内置 TBE 基线。
+5. **④ NPU 跑测**：`python3 ${CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <spec> --mode new_example --out reports/<op>/`（`OPRUNWAY_*` 环境变量指真实机器/路径，不写进仓）。串 Task1→2→3：真 NPU 精度 vs numpy golden、msprof 真 kernel-only 性能 vs 内置 TBE 基线。
 
 6. **⑤ 失败解耦 root-cause**：任何 FAIL **先用「被测物自己 build + 声明支持的 dtype + 手算 golden」独立复现**，确认是「被测算子 vs 我的 harness」再归因——**不臆断、不来回改口**（Equal 那次的血教训，已固化为纪律）。
 
