@@ -9,6 +9,7 @@ import argparse, json, os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_cases, repo_adapter, validator, perf_compare  # noqa: E402
+import validate_acceptance_state as gate  # noqa: E402
 
 
 def run(spec_path, mode="mock", out_dir="reports/_run", defect=None):
@@ -50,12 +51,29 @@ def run(spec_path, mode="mock", out_dir="reports/_run", defect=None):
     _dump(report, "perf_report.json")
     print(f"[Task3 perf_compare] {report['summary']} (基线={report['baseline_source']})")
 
-    # 总体口径：精度 + 性能都要过（防只看退出码/Task2 假通过）
     ps = report["summary"]
+    # 验收门（硬 blocker）：三级机器门读**落盘产物**独立复核（防跑子集/放宽阈值/混 e2e）。
+    # 无性能要求的算子不跑 task3 门（免因缺性能用例误挡）。
+    gate_stages = ["task1", "task2"]
+    if ps.get("perf_cases", 0) > 0 or spec.get("perf", {}).get("baseline"):
+        gate_stages.append("task3")
+    gate_errs = {}
+    for st in gate_stages:
+        es = []
+        gate._GATES[st](out_dir, es)
+        if es:
+            gate_errs[st] = es
+    gate_passed = not gate_errs
+    print(f"[验收门] {'/'.join(gate_stages)} → STATUS: {'PASSED' if gate_passed else 'FAILED'}"
+          + ("" if gate_passed else f" · {gate_errs}"))
+
+    # 总体口径：精度 + 性能 + 验收门都要过（门 FAILED 一票否决，不出 pass）
     perf_pass = (ps.get("status") == "ok" and ps.get("blocked", 0) == 0
                  and ps.get("perf_cases", 0) == ps.get("达标", 0))
     prec = verdict["overall"]["verdict"]
-    if prec == "pass" and perf_pass:
+    if not gate_passed:
+        overall = "BLOCKED(验收门未过)"
+    elif prec == "pass" and perf_pass:
         overall = "PASS"
     elif prec == "fail":
         overall = "FAIL(精度)"
@@ -68,10 +86,15 @@ def run(spec_path, mode="mock", out_dir="reports/_run", defect=None):
             overall = "PASS(无性能要求)"
     else:
         overall = "NEEDS_REVIEW"
-    print(f"[总体] 精度={prec} · 性能达标 {ps.get('达标')}/{ps.get('perf_cases')}({ps.get('status')}) → {overall}")
+    print(f"[总体] 精度={prec} · 性能达标 {ps.get('达标')}/{ps.get('perf_cases')}({ps.get('status')}) · 门={'PASSED' if gate_passed else 'FAILED'} → {overall}")
 
+    # 门控后的**验收裁决**（区别于 raw verdict.json=validator 精度判定）：上游产物即下游输入
+    _dump({"op": spec["op"], "overall": overall,
+           "gate": {"passed": gate_passed, "errors": gate_errs},
+           "precision_verdict": prec, "perf_status": ps.get("status")}, "acceptance.json")
     print(f"--- 产物在 {out_dir}/ ---")
-    return {"verdict": verdict, "perf_report": report, "overall": overall}
+    return {"verdict": verdict, "perf_report": report,
+            "gate": {"passed": gate_passed, "errors": gate_errs}, "overall": overall}
 
 
 def main():
@@ -81,7 +104,9 @@ def main():
     ap.add_argument("--out", default="reports/_run")
     ap.add_argument("--defect", default=None)
     a = ap.parse_args()
-    run(a.spec, a.mode, a.out, a.defect.split(",") if a.defect else None)
+    result = run(a.spec, a.mode, a.out, a.defect.split(",") if a.defect else None)
+    # CLI 退出码：门未过 / 精度fail / 性能未达 / blocked / needs_review → 非零，CI/上层可当硬失败
+    sys.exit(0 if result["overall"].startswith("PASS") else 1)
 
 
 if __name__ == "__main__":

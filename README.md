@@ -19,41 +19,26 @@
 
 - **架构**：三层可移植设计。Layer 0 六份 JSON 契约 · Layer 1 确定性脚本（工具中立的「脑子」）· Layer 2 per-tool 薄壳（编排）。Stage 间只传 JSON。
 - **已真机验证**：三个结构互不相同的算子（IsClose 二元/bool、Sign 一元/数值、Equal 二元/bool）在真昇腾 NPU 上跑通，**裁决全部正确**——精度 = 真 NPU 输出 vs numpy golden，性能 = msprof 真 kernel-only vs 真内置 TBE 基线，总体门同时卡精度+性能。
-- **加一个算子** = `spec` + `gen_cases` 的 golden + `new_example/oprunway_<op>_runner.cpp` 三个文件。
+- **加一个算子**：agent 自动产 `spec`（acc-spec）+ `runner`（acc-runner）；`gen_cases` 的 golden 目前仍是一处手工注册（待自动化）。用户侧无感——只需在会话里给任务书 + PR。
 
-## 快速开始
+## 怎么用：在会话里对话（不跑脚本）
 
-workflow 入口在 [`plugin/acc-common/run_workflow.py`](plugin/acc-common/run_workflow.py)，两种模式：
+装上插件后，**在支持的 agent CLI 会话里，对 `op-acceptance` agent 用自然语言说要验收什么**：
 
-```bash
-cd plugin/acc-common
+> 帮我验收这个算子：任务书 `<md 路径或链接>`，PR `<链接>`。
 
-# ① mock —— 本地、即时（numpy golden 当 NPU 输出），验证流水线本身，无需 NPU
-python3 run_workflow.py specs/isclose.spec.json --out /tmp/run
+agent 内部完成全部六步（取材 → 任务书→spec → 生成并验证 runner → NPU 跑测 → 失败解耦 → 报告）。**你只对话、看进展与最终报告——不需要、也不会被要求跑任何脚本或命令。** 缺东西（任务书 / PR / 是否已开 NPU-VPN / mock 还是真机）它会**用对话问你**。
 
-# ② new_example —— 真 NPU（精度 + msprof 真性能 + 真 TBE 基线）
-python3 run_workflow.py specs/sign.spec.json --mode new_example --out /tmp/run
-```
+- 缺 NPU/VPN → 到 mock 自检为止，如实告诉你「真机跑测待开 VPN」，不假装。
+- 真机跑测的机器/路径经 `OPRUNWAY_*` 环境变量注入（agent 内部用、不写进仓、不需你手敲）。
+- 平台/精度/性能口径由 agent **从算子任务书推**（不猜）。
 
-- **换算子**：换 `specs/<op>.spec.json` 即可（现有 `isclose` / `sign` / `equal`）。
-- **new_example 前提**：可达的昇腾 NPU 机器 + 目标算子仓。连接/路径/SOC/vendor **全部零硬编码**——脚本里的默认值（如 `/home/lys/...`）只是占位，**真实的机器名、路径等经 `OPRUNWAY_*` 环境变量传入、不写进仓**（避免把私有主机/路径固化进代码）：
-
-  ```bash
-  OPRUNWAY_SSH_HOST=<机器别名> \
-  OPRUNWAY_REMOTE_DIR=<远端工作目录> \
-  OPRUNWAY_OPS_REPO=<远端算子仓路径> \
-  OPRUNWAY_OPP=<远端用户态 opp 路径> \
-  OPRUNWAY_SOC=<soc 名，如 ascend910_93> \
-  python3 run_workflow.py specs/sign.spec.json --mode new_example --out /tmp/run
-  ```
-
-  完整可覆盖项见 `repo_adapter._ne_cfg`。
-- **平台/精度/性能口径从算子任务书推**，不要猜（见 TODO 里「硬约束」）。
+> 内部实现（确定性脚本 `acc-common/*.py`、spec/runner 生成、判定 `validator.py`）是 agent 幕后的事，**不作为用法暴露给用户**。开发/契约细节见 `doc/oprunway-design.md`。
 
 ## 目录
 
 ```
-plugin/     workflow 实现（acc-common: 三层脚本 + specs + new_example runner；commands/skills/bridge）
+plugin/     agent+skill 体系（acc-common 脚本 + skills + agents + commands + .claude-plugin/manifest）
 doc/        设计与流水线（oprunway-design.md）、改动简表、TODO
 canon/      bureau 决策/ADR（durable 知识，capture→compile→review 三态）
 spec/       算子 spec 笔记

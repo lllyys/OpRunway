@@ -1,48 +1,34 @@
-# OpRunway 插件 · workflow v0
+# OpRunway — NPU 算子验收 agent+skill 体系
 
-NPU 算子验收流水线（任务书 + PR → 用例 → NPU 跑测 → NPU↔基线性能对比）。遵循**三层架构（约束 A 跨运行时可移植）**，见 `doc/oprunway-workflow-design.md`。
+输入 = **算子任务书（md 或链接）+ PR 链接** → agent 自动产 spec、跑测、出**裁决 + 中文报告**。三段式流水线：用例生成(ST) → NPU 精度+性能跑测 → NPU↔GPU 性能对比。
 
-## 结构
+## 怎么用：在会话里对话，不碰脚本
 
-```
-plugin/
-├── acc-common/                 # Layer 0 契约 + Layer 1 确定性脚本（核心脑子、工具中立）
-│   ├── specs/<op>.spec.json    #   任务书解析产物（spec.json）
-│   ├── gen_cases.py            #   Task 1: spec → caseset (+ 真 golden)
-│   ├── repo_adapter.py         #   Task 2: caseset → evidence（mock / new_example）
-│   ├── validator.py            #   Task 2: evidence → verdict（ADR 0007 唯一裁决源）
-│   ├── perf_compare.py         #   Task 3: evidence + baseline → perf_report
-│   └── run_workflow.py         #   顶层驱动：串 Task 1→2→3（本地版）
-├── skills/                     # Layer 2 薄壳（Claude Code）：驱动 Layer 1、不含脑子
-│   ├── acc-casegen/ acc-npu-run/ acc-perf-compare/
-├── agents/                     # task-doc-parse（唯一必需 NL 步）、eval
-├── commands/op-acceptance.md   # 顶层编排命令
-└── bridge/                     # catlass→aclnn 桥（generated_harness，另线）
-```
+装上本插件后，**在会话里对 `op-acceptance` agent 用自然语言说要验收什么**即可，例如：
 
-**stage 间只传 JSON/数据文件。** 换运行时（Codex/Antigravity）只换 `skills/`+`agents/`+`commands/` 薄壳，`acc-common/` 零改。
+> 帮我验收这个算子：任务书 `<md 路径或链接>`，PR `<链接>`。
 
-## 跑（v0 · mock NPU，无需真机）
+agent 内部完成六步（取材 → 任务书→spec → 生成并验证 runner → NPU 跑测 → 失败解耦 → 报告）。**你全程只对话、看进展与最终报告——不需要、也不会被要求去跑任何脚本或命令。** 缺东西（任务书 / PR / 是否已开 NPU-VPN / mock 还是真机）它会问你。
 
-```bash
-cd plugin/acc-common
-python3 run_workflow.py specs/isclose.spec.json --out reports/isclose
-# 注入缺陷看 fail：           --defect isclose_000
-```
+- 缺 NPU/VPN → 到 mock 自检为止，如实告诉你「真机跑测待开 VPN」，不假装。
+- 一份任务书含多个算子 → 自动拆成多份、逐个验收。
 
-产物：`caseset.json / evidence.json / verdict.json / baseline.json / perf_report.json` + `work/<case>/{x1,x2,golden,out}.npy`。
+## 形态（统一 · 可移植）
 
-## v0 真 vs 桩
+**一个对话式 agent 为唯一入口**，内部用 skills（NL 判断）+ 确定性脚本（工具中立）：
 
-| 件 | 状态 |
-|---|---|
-| gen_cases / validator / perf_compare | **真**（本地逻辑，真 golden + 真判定） |
-| repo_adapter `mock` | **真链路**（kernel 输出用 golden 顶替） |
-| repo_adapter `new_example` | **桩**（真机 build/run PR 工程，需 NPU + VPN，之后填） |
-| 覆盖算子 | 仅 IsClose（示范）；扩算子 = 加 `specs/<op>.spec.json` + golden 分发 |
+| 层 | 内容 | 用户可见？ |
+|---|---|---|
+| **agent** `op-acceptance` | 对话入口 + 六步编排 | ✅ 唯一入口，只对话 |
+| **skills** `acc-spec`(任务书→spec)、`acc-runner`(生成 runner) | NL 判断规则（`references/`）| 内部 |
+| **scripts** `acc-common/*.py` | 取材 / 造用例 / 裁决 / 性能（确定性核心）| 内部（agent 幕后跑，**不暴露给用户**）|
 
-## 下一步
+**跨 CLI 统一**：脚本 + JSON 契约 + skill `references/` 工具中立、一份到处用；换运行时（Codex / Antigravity）只换 agent/skill 的注册薄壳，核心不动。判定脑子在 `acc-common/validator.py`（ADR 0007），不在 agent。
 
-- 真机跑测（`new_example`）：需 ascend-a5/a3，届时接 build/run/golden/perf。
-- 扩 golden 分发（Sign/SPMV…）、rule-catalog 泛化策略、精度多口径（MERE·MARE / np.isclose / ATK）。
-- Layer 2 薄壳补全 + `.claude-plugin/plugin.json` 清单。
+## 现状（诚实）
+
+- **mock 端到端可用**（无需真机）；**真机跑测**需开 VPN + runner 验证。
+- runner 生成当前仅 `experimental/math` aclnn 算子闭环；「验证-才-信」是**纪律**非代码硬门（sidecar 待补）。
+- 已端到端验证算子（mock 裁决）：IsClose / Sign / Equal / Neg。
+
+> 设计/契约见 `../doc/oprunway-design.md`；改动流水见 `../doc/oprunway-changes-brief.md`；TODO 见 `../doc/oprunway-todo.md`。
