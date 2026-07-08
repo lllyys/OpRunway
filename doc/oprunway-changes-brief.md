@@ -12,6 +12,10 @@
 6. 远程 NPU 环境（哪台机、catlass 在哪 build、是否进 Docker）待用户提供后补进 CLAUDE.md。
 7. 优先级（Codex 排序）：Q3>Q4>Q5>Q6>Q1>Q2>Q8>Q9>Q7。完整见 `doc/oprunway-design.md` §13。
 
+## 2026-07-08
+
+- **补齐 agent+skill 体系 + 端到端跑通（初步可用）**：装上 keystone——`agents/op-acceptance`（编排 agent：(任务书,PR)→六步→裁决/报告，人不碰 spec.json）+ `skills/acc-runner`（③ 据算子自带 example 生成并验证 per-op runner）+ `.claude-plugin/plugin.json`（可 `/plugin install` 的 manifest）+ 更新 `commands/op-acceptance` 到 (任务书,PR) 入口。**端到端 demo（新算子 Neg）**：`Neg_task_doc` + `ops-math!2680` → fetch → acc-spec 产 `neg.spec`（应用 codex 修的规则：dtype 只填支持子集 fp32/16+余入 gap、『不劣化』→target_ratio 1.0、uint8 回绕特例入 gap）→ gen_cases 注册 `golden_neg` → run_workflow mock → **裁决 PASS**（5 用例）；`task_pr_gaps` 带 3 缺口；原三算子无回归。**mock 端到端可用；new_example 真机待 VPN + runner 验证。** ③ 经 codex 审出**过度声称**（构建路径选择/验证硬门其实代码没做、attr_order 非 spec 字段、双哨兵漏写等）→ **诚实收窄**：仅 `experimental/math` aclnn 闭环、验证-才-信是**纪律非代码硬门**（sidecar 待补）、legacy/catlass 标待扩。全套推 **PR #1**（github lllyys + gitcode brian66237），评论附任务书↔PR 测试案例 + 端到端 demo 证据。
+
 ## 2026-07-07
 
 - **入口改产品形态：agent 收(任务书, PR)→自动 spec（①② 建成，标准 skill/agent 形式 + 可移植）**。经用户点头定方向：真实输入 = **任务书(md 或链接) + PR 链接** → **agent 自己**产 spec、决定跑哪些步、出报告，**不再人肉搓 spec.json 喂 run_workflow.py**。**①** `fetch_source.py`（取材：任务书本地/链接 + PR gitcode API → `task_doc.md` + `pr_facts.json`，含算子自带 example + `op_def.cpp`；token 走 env 不落盘、纯 stdlib 可移植）。**②** 标准 skill `plugin/skills/acc-spec/`（任务书→spec.json）——**ultracode fan-out 27 agent 读 23 份真实任务书**归纳「任务书→spec」抽取规则、对 isclose/sign/equal 三手工 spec 验证：**IsClose 一致；Sign/Equal 分歧反证我手写 spec 有漏**（Sign 漏测 int16、『无劣化』该 1.0 非 0.95；Equal 漏 small_shape 例外 + change.kind 误标）。关键洞：**23/23 任务书不给精度阈值数值** → 兜底填惯例值标 (推断)；『支持所有 dtype』模糊 → 靠 **PR 的 `op_def.cpp` 权威 dtype 集**补（Sign 真集 `{bf16,fp16,fp,int32,int16}`、Equal `{fp16,bf16,fp,int8,uint8,int32,uint32}`）；runner 入口靠 **example 的 aclnn 调用**锚定（治 Equal 猜错入口那病）。CLAUDE.md 现状/目录已更新。下一步 ③ runner 锚定+构建路径 → ④⑤⑥。
