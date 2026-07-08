@@ -39,7 +39,6 @@ agent 内部完成全部六步（取材 → 任务书→spec → 生成并验证
 
 ```
 plugin/     agent+skill 体系（acc-common 脚本 + skills + agents + commands + .claude-plugin/manifest）
-bridge/     route-B catlass 去风险（已从 plugin 移出，非验收体系组件）
 doc/        设计与流水线（oprunway-design.md）、改动简表、TODO
 canon/      bureau 决策/ADR（durable 知识，capture→compile→review 三态）
 spec/       算子 spec 笔记
