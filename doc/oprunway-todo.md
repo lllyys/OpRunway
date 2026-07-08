@@ -9,13 +9,23 @@
 2. **平台 / spec / 构建路径从任务书推，不猜**：equal 的 hardware/oracle/阈值我一度瞎猜（碰巧对）；`Equal_task_doc.md` 明写「适配硬件 Atlas A2/A3」→ a3 才是对的平台、a5(950) 无关。
 3. **合入状态用 gitcode 查证，别沿用假设**：「7月前=已合入」是设定、不是事实；`api.gitcode.com/api/v5/.../commits?path=` 一查即知（本机直连）。
 
-## P0 · 堵了才能「加新算子不踩坑」（先做这俩）
+## 🚀 落地设计（对齐 cannbot）· P1–P3 —— 当前前沿 TODO（session 清空后从这接）
 
-1. **任务书(md) → spec 自动化（Task 0）**：解析算子任务书，抽出 dtypes、适配硬件/平台、精度口径（AscendOpTest 阈值 / MERE·MARE）、性能口径（≥TBE 95% + 小shape例外）、verify_mode、泛化要求 → 生成 `spec.json`。现状：spec 手写、我还猜过。这是「每个算子人肉且易错」的根。
-2. **per-op runner 锚定 + 构建路径选择 + root-cause 步骤入 harness**：
-   - runner 必须锚定算子自带 example（dtype、aclnn 入口、语义），不能凭 header 猜（Equal 教训）。
-   - 构建路径按算子类型选（experimental / legacy / 双实现 math+experimental 并存），不能一律 `--experimental --pkg`。
-   - 把「FAIL → 解耦复现」做成 harness 的一步，而不是靠人临场手动。
+> 背景：本 session 深研 `repos/cannbot-skills`，产出落地设计 **`doc/oprunway-agent-system-design.md`**（三层 Plugin→Agent→Skill + 机器门 + 跨CLI AGENTS.md，分期 P0–P3）。
+> **⚠ 这套 P0–P3 是「体系结构」轴，跟下面旧的 P0/P1/P2「验收口径」轴是两码事、别混。**
+> **落地设计 P0 已落地并 merge**（GitHub PR #2 → main `b23fd83`，GitCode 同步）：机器可校验门 `acc-common/validate_acceptance_state.py`（三级**完整性门**：防跑子集报100%/防放宽阈值/防混e2e、抗坏输入、只管证据可信完整不重判精度）+ 接 `run_workflow` 硬 blocker（FAILED→BLOCKED+非零退出+`acceptance.json`）+ `AGENTS.md` 跨CLI单一源 + `check_manifest_sync.py` + 28 单测 + codex 双门。
+> **开任一阶段前先按 CLAUDE.md #1 抛方案经用户同意。详规见设计 §5。**
+
+- **P1 · 编排升级**：胖 `op-acceptance` agent → **薄 primary orchestrator**（只调度+状态机+工件门）+ **3 个 mode 驱动 subagent**（单轮、禁内部循环）：`acc-spec-extractor` / `acc-runner-dev` / `acc-verify-rootcause`；+ **`acceptance-workflow` skill**（承载 CP 状态机、调 P0 的机器门）。参考 cannbot `tilelang-op-orchestrator`（AGENTS.md `mode:primary` + subagent `mode` 字段 + 3阶段状态机 + 工件门 + 断点续跑/失败恢复）。
+- **P2 · 原子化 + 分发**：`acc-spec`/`acc-runner` → 拆成**原子 skill**（`acc-casegen`/`acc-precision`/`acc-perf`/`acc-rootcause` 各一、由 subagent 组合，参考 cannbot `ops/ascendc-*` ~20 个原子 skill 库）；建 **`workflows/` 材料仓**（`development-guide.md` 蓝图 + `task-prompts.md` subagent 分阶段 dispatch prompt + `archive_ops/` 已验证算子案例，**非 skill、无 SKILL.md**）；写 **`init.sh`** 安装期扇出到各 CLI（Claude→CLAUDE.md、其余→AGENTS.md、symlink skills/agents）。
+- **P3 · catlass 验收路线 adapter**（子任务清单）：① arch 运行时探测（`environment.json`/AskUser，**禁硬编码 3510/2201**）② example/harness 选择 + CMake arch 注入(`-DCATLASS_ARCH`) ③ `gen_data/golden/verify_result` 三件套数据流 ④ **raw log → `evidence.json` parser** ⑤ msprof kernel-only 解析 ⑥ GPU/baseline schema 对齐。参考 canon `catlass-to-aclnn-bridge`，**不整包引** `catlass-op-generator`（它是开发/生成链，我们是验收）。
+
+---
+
+## P0 ·〔验收口径轴〕堵了才能「加新算子不踩坑」— ✅ 本 session 已做完
+
+1. ✅ **任务书(md) → spec 自动化（Task 0）**：已建 **`acc-spec` skill**（23 份真实任务书语料 grounding + codex 审：dtype 全集/verify_mode 决策树/threshold 兜底/多算子拆分）。spec 不再人肉搓。
+2. ✅ **per-op runner 锚定 + root-cause 步骤入 harness**：已建 **`acc-runner` skill**（锚定算子自带 example、诚实 scope）+ **`op-acceptance` agent** 把「FAIL→被测物自己build+声明dtype+手算golden 解耦」写成第⑤步纪律。（构建路径自动选仍部分待扩，见旧 P2-7 catlass。）
 
 ## P1 · 验收口径完整性
 
