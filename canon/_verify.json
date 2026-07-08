@@ -1,4 +1,11 @@
 {
+  "Machine-verifiable acceptance gate": {
+    "verifiedAt": "2026-07-08",
+    "checks": [
+      { "artifact": "plugin/acc-common/validate_acceptance_state.py", "hash": "7f6590a72183dddba22a535d75654182cfa2a665d2e3935fb79b19f72302af05", "claim": "three-stage completeness gate (防跑子集/放宽阈值/混e2e, 抗坏输入), STATUS PASSED|FAILED" },
+      { "artifact": "plugin/acc-common/test_validate_acceptance_state.py", "hash": "579ea69634fb663d7ce7f96e9f4ca4960e49d6355d8fa780c2293f5c042f3fcf", "claim": "28 unit tests incl subset/threshold/scope/bad-input/exit-code" }
+    ]
+  },
   "catlass acceptance mechanics": {
     "verifiedAt": "2026-06-29",
     "checks": [

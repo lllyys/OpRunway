@@ -18,4 +18,6 @@ reviewed: 2026-07-06
 
 > ⚠ 开放：路线 A 封 aclnn 时 group(G) + 可变 M 是动态 shape，GetWorkspaceSize/tiling 能否覆盖、group_list 作输入 tensor 还是 attr，需在原型设计时定。
 
-**Sources.** [[session f0c36755-189d-4c2c-b321-c0d2ec5c4b1b · 2026-06-29]]，[[session d31ea446-dec3-479f-a7b3-d6c1dec4f611 · 2026-07-02]]（Codex 审计修订：用户态 OPP / 自编 exe 闭环 / exe 名解析 / -k 模板符号 / 输出路径 / basic_matmul_aclnn 范式；+ A/B 白话 + 澄清 vendor 是自定义算子标准包机制）
+> **2026-07-08 补记（proposed）**：去风险原型 `plugin/bridge/route_b`（路线 B 自造 exe 实例）已**删除**——0 代码引用、跟当前 ops-math aclnn 体系不是一条路。**本页设计知识（A/B 两桥）保留**，catlass 验收路线真建时据此重造（落地设计 P3 的 adapter 子任务：arch 探测 / 三件套数据流 / log→evidence parser / msprof kernel-only / GPU baseline）。见 [[cannbot orchestration and cross-CLI]] 的复用边界。
+
+**Sources.** [[session f0c36755-189d-4c2c-b321-c0d2ec5c4b1b · 2026-06-29]]，[[session d31ea446-dec3-479f-a7b3-d6c1dec4f611 · 2026-07-02]]（Codex 审计修订：用户态 OPP / 自编 exe 闭环 / exe 名解析 / -k 模板符号 / 输出路径 / basic_matmul_aclnn 范式；+ A/B 白话 + 澄清 vendor 是自定义算子标准包机制；**2026-07-08：原型删除**）
