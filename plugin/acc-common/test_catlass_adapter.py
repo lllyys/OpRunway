@@ -419,5 +419,35 @@ class DownstreamCompatTest(unittest.TestCase):
             self.assertEqual(errs, [], f"{st} 门有 error: {errs}")
 
 
+class StaticBuildGateTest(unittest.TestCase):
+    """静态构建门（Mac 可跑）：runner extern C 符号 / CMake 单行 / arch 注入 ∈ 白名单。"""
+
+    def setUp(self):
+        import importlib.util
+        gate_path = os.path.join(_HERE, "catlass", "verify_catlass_build.py")
+        spec = importlib.util.spec_from_file_location("verify_catlass_build", gate_path)
+        self.gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.gate)
+
+    def test_template_sources_pass_both_arches(self):
+        self.assertEqual(self.gate.verify("3510"), [])
+        self.assertEqual(self.gate.verify("2201"), [])
+
+    def test_illegal_arch_fails(self):
+        errs = self.gate.verify("9999")
+        self.assertTrue(errs)
+
+    def test_missing_add_subdirectory_flagged(self):
+        d = tempfile.mkdtemp()
+        try:
+            os.makedirs(os.path.join(d, "examples"))
+            with open(os.path.join(d, "examples", "CMakeLists.txt"), "w") as f:
+                f.write("foreach(EXAMPLE ${EXAMPLE_LIST})\n  add_subdirectory(${EXAMPLE})\nendforeach()\n")
+            errs = self.gate.verify("3510", catlass_dir=d)   # 未 stage → 应报缺 add_subdirectory
+            self.assertTrue(any("add_subdirectory" in e for e in errs))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
