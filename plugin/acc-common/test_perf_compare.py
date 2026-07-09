@@ -202,5 +202,109 @@ class GpuConsumerTest(unittest.TestCase):
         self.assertIn("sub_policy_timing", r["summary"].get("risk", []))
 
 
+class ConfirmedBugRegressionTest(unittest.TestCase):
+    """钉死 codex CONFIRMED 真 bug 的负例（pc-1/2/3/4/7），防回归。"""
+
+    def test_pc2_round_must_not_rescue_below_target(self):
+        """pc-2：base=9496,npu=10000,tgt=0.95 → raw=0.9496<0.95 → 达标 False（不被 round 成 0.95 救活）。"""
+        cs = _caseset([("p", ["性能", "大shape"], [1024, 1024])])
+        r = pc.perf_compare(_spec(0.95), cs, _ev({"p": (10000, "kernel_only")}), _bl({"p": 9496}))
+        row = r["per_case"][0]
+        self.assertFalse(row["达标"])                 # 关键：不再假通过
+        self.assertEqual(row["ratio"], 0.95)          # 展示字段仍 round（但不参与达标判定）
+        self.assertEqual(r["summary"]["status"], "fail")
+        self.assertEqual(r["summary"]["达标"], 0)
+
+    def test_pc2_boundary_raw_equal_target_is_met(self):
+        """raw 恰等 tgt → 达标 True（边界不误杀）。"""
+        cs = _caseset([("p", ["性能", "大shape"], [1024, 1024])])
+        r = pc.perf_compare(_spec(0.95), cs, _ev({"p": (10000, "kernel_only")}), _bl({"p": 9500}))
+        self.assertTrue(r["per_case"][0]["达标"])     # 0.95>=0.95
+
+    def test_pc3_illegal_target_ratio_never_all_pass(self):
+        """pc-3：target_ratio=0/-1/True/'0.95'/NaN → invalid_config，绝不全达标。"""
+        cs = _caseset([("p", ["性能", "大shape"], [1024, 1024])])
+        ev = _ev({"p": (10000, "kernel_only")})
+        bl = _bl({"p": 20000})                        # raw=2.0，若阈非法误当 0/True 会全达标
+        for bad in (0, -1, True, "0.95", float("nan")):
+            r = pc.perf_compare(_spec(bad), cs, ev, bl)
+            self.assertEqual(r["summary"]["status"], "invalid_config", f"target_ratio={bad!r}")
+            self.assertEqual(r["summary"]["达标"], 0, f"target_ratio={bad!r} 不得全达标")
+            self.assertTrue(r["per_case"][0]["blocked"])
+
+    def test_pc3_missing_target_with_baseline_is_blocked(self):
+        """声明基线却缺 target_ratio → invalid_config（拒静默套 0.95）。"""
+        cs = _caseset([("p", ["性能", "大shape"], [1024, 1024])])
+        spec = {"op": "Sign", "perf": {"baseline": "tbe"}}   # 有 baseline、无 target_ratio
+        r = pc.perf_compare(spec, cs, _ev({"p": (1.0, "kernel_only")}), _bl({"p": 2.0}))
+        self.assertEqual(r["summary"]["status"], "invalid_config")
+
+    def test_pc4_both_scope_none_incomparable(self):
+        """pc-4：双边 scope 均 None → blocked_incomparable_timing_scope（None!=None 不再放行）。"""
+        cs = _caseset([("p", ["性能", "大shape"], [1024, 1024])])
+        r = pc.perf_compare(_spec(0.95), cs, _ev({"p": (1.5, None)}), _bl({"p": 1.2}, scope=None))
+        self.assertEqual(r["summary"]["status"], "blocked_incomparable_timing_scope")
+        self.assertTrue(r["per_case"][0]["blocked"])
+
+    def test_pc4_missing_scope_key_no_crash(self):
+        """evidence 条目 perf 缺 scope 键 → 判不可比、绝不 KeyError 崩溃。"""
+        cs = _caseset([("p", ["性能", "大shape"], [1024, 1024])])
+        ev = {"op": "Sign", "evidence": [{"case_id": "p", "perf": {"us": 1.5}}]}  # 无 scope 键
+        r = pc.perf_compare(_spec(0.95), cs, ev, _bl({"p": 1.2}))
+        self.assertEqual(r["summary"]["status"], "blocked_incomparable_timing_scope")
+
+    def test_pc7_bad_containers_structured_invalid_no_crash(self):
+        """pc-7：caseset/evidence/baseline 缺字段/非 list/非 dict → 结构化 invalid，不抛异常。"""
+        cs = _caseset([("p", ["性能"], [8])])
+        ev = _ev({"p": (1.5, "kernel_only")})
+        bl = _bl({"p": 1.2})
+        spec = _spec(0.95)
+        for label, args in [
+            ("caseset 缺 cases", (spec, {}, ev, bl)),
+            ("caseset.cases 非 list", (spec, {"cases": "x"}, ev, bl)),
+            ("evidence 非 dict", (spec, cs, "notadict", bl)),
+            ("evidence 缺 evidence", (spec, cs, {}, bl)),
+            ("baseline 非 dict", (spec, cs, ev, "notadict")),
+            ("baseline 缺 per_case", (spec, cs, ev, {})),
+            ("spec 缺 op", ({"perf": {"baseline": "tbe", "target_ratio": 0.95}}, cs, ev, bl)),
+        ]:
+            r = pc.perf_compare(*args)               # 不得抛异常
+            self.assertEqual(r["summary"]["status"], "invalid", label)
+            self.assertEqual(r["summary"]["达标"], 0, label)
+
+    def test_pc7_bad_entry_degrades_to_blocked_no_crash(self):
+        """条目级坏（evidence 条目缺 perf、baseline 行缺 us）→ 该 case blocked，不崩。"""
+        cs = _caseset([("p", ["性能", "大shape"], [1024, 1024])])
+        ev = {"op": "Sign", "evidence": [{"case_id": "p"}]}        # 无 perf 键
+        bl = {"source": "tbe", "scope": "kernel_only", "per_case": [{"case_id": "p"}]}  # 无 us
+        r = pc.perf_compare(_spec(0.95), cs, ev, bl)
+        self.assertTrue(r["summary"]["status"].startswith("blocked"))
+        self.assertTrue(r["per_case"][0]["blocked"])
+
+    def _main_run(self, extra):
+        """写 spec/caseset/evidence 到临时文件，跑 pc.main(...)，回读产物 report。"""
+        import json
+        cs = _caseset([("p", ["性能", "大shape"], [1024, 1024])])
+        d = tempfile.mkdtemp()
+        sp, cp, ep, op = (os.path.join(d, n) for n in ("spec.json", "cs.json", "ev.json", "out.json"))
+        for path, obj in ((sp, _spec(0.95)), (cp, cs), (ep, _ev({"p": (1.5, "kernel_only")}))):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(obj, f)
+        pc.main([sp, cp, ep, *extra, "--out", op])
+        with open(op, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_pc1_main_missing_baseline_not_ok(self):
+        """pc-1：main() 缺基线且无 --mock → 不产生 status=ok（走挂起）。"""
+        rep = self._main_run([])                      # 无 baseline、无 --mock
+        self.assertNotEqual(rep["summary"]["status"], "ok")
+        self.assertTrue(rep["summary"]["status"].startswith("blocked"))
+
+    def test_pc1_main_mock_flag_marks_untrustworthy(self):
+        """--mock 显式启用时，产物带 baseline_mock 标（不可当真通过）。"""
+        rep = self._main_run(["--mock"])
+        self.assertTrue(rep["summary"].get("baseline_mock"))
+
+
 if __name__ == "__main__":
     unittest.main()
