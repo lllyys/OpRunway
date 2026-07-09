@@ -426,6 +426,33 @@ class GateTask3PerfPackageTest(unittest.TestCase):
         _w(self.d, "perf_report.json", self._exc_report(plot_file="../evil.svg"))
         self.assertTrue(any("路径逃逸" in e for e in self._errs()))
 
+    # --- gt3-7：simulation_plot「有图强制」曾空心（可指任意文件+自填 sha）→ .svg 守卫 + 重算比对锚定 ---
+    def test_gt3_7_file_points_to_caseset_fails(self):
+        """file 指向 caseset.json（非 .svg，sha 填对该文件）→ 扩展名守卫先挡 → FAILED。"""
+        r = self._exc_report(plot_file="caseset.json")
+        # sha 填 caseset.json 自身（模拟作者把 sha 绑到可控非图文件，旧洞下会过）
+        r["simulation_plot"]["sha256"] = G._sha256(os.path.join(self.d, "caseset.json"))
+        _w(self.d, "perf_report.json", r)
+        errs = self._errs()
+        self.assertTrue(any("非 .svg" in e for e in errs))
+
+    def test_gt3_7_doctored_svg_recompute_mismatch_fails(self):
+        """.svg 文件被换成与 simulation 无关的内容、sha 与该文件自洽（过 sha 存在性检查）→
+        门内用 simulation 重算 SVG 比对字节 → 不符 → FAILED（证明重算比对真正锚定数据，非仅扩展名）。"""
+        r = self._exc_report()                      # 先渲染出合法 perf_sim_x.svg
+        svg = os.path.join(self.d, "perf_sim_x.svg")
+        with open(svg, "w", encoding="utf-8") as f:  # 换成伪造 SVG（合法 .svg 头但非本 simulation 所渲）
+            f.write('<svg xmlns="http://www.w3.org/2000/svg"><text>forged</text></svg>')
+        r["simulation_plot"]["sha256"] = G._sha256(svg)  # sha 与被换文件自洽 → 过存在性/sha 检查
+        _w(self.d, "perf_report.json", r)
+        errs = self._errs()
+        self.assertTrue(any("与 simulation 数据不符" in e for e in errs))
+
+    def test_gt3_7_normal_svg_passes(self):
+        """正常 .svg（由本 simulation 渲染、sha 相符）→ 重算比对通过 → 门放行（合法路径不误挡）。"""
+        _w(self.d, "perf_report.json", self._exc_report())
+        self.assertEqual(self._errs(), [])
+
     def test_exception_wrong_scope_fails(self):
         r = self._exc_report()
         r["per_case"][0]["scope"] = "e2e"
@@ -497,6 +524,144 @@ class RunWorkflowPerfPackageTest(unittest.TestCase):
         self.assertEqual(acc["state"], "BLOCKED_WAIT_GPU_BENCHMARK")
         self.assertNotEqual(r.returncode, 0)                   # 非 PASS
         self.assertNotIn("PASS", acc["overall"])               # 缺 GPU 数据绝不显 PASS
+
+
+# ===== gt3 CONFIRMED 绕过负例（gate_task3 零证据/wait 绕过/坏输入/空转/bool计数/空壳证据）=====
+class GateTask3ConfirmedBypassTest(unittest.TestCase):
+    """逐条钉死 codex 多维审 + 对抗复核坐实的 gate_task3 CONFIRMED 绕过。
+    setUp 写「干净」性能 caseset+evidence（p0），各用例只改 perf_report 造对应绕过。"""
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.here = os.path.dirname(os.path.abspath(__file__))
+        _w(self.d, "caseset.json", _perf_cs(["p0"]))
+        _w(self.d, "evidence.json", _perf_ev(["p0"]))
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _errs(self):
+        errs = []
+        G.gate_task3(self.d, errs)
+        return errs
+
+    def _cli(self):
+        return subprocess.run(
+            [sys.executable, os.path.join(self.here, "validate_acceptance_state.py"),
+             "--stage", "task3", "--dir", self.d], capture_output=True, text=True)
+
+    # gt3-1：status=ok + 全行 blocked=True + summary 自洽 → 门放行却零真实性能证据 → 必 FAILED。
+    def test_gt3_1_zero_evidence_blocked_ok_fails(self):
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": "p0", "blocked": True, "达标": False}],
+            "summary": {"status": "ok", "perf_cases": 1, "达标": 0, "blocked": 1}})
+        self.assertTrue(any("口径矛盾" in e and "blocked" in e for e in self._errs()))
+        self.assertEqual(self._cli().returncode, 1)     # CLI 硬失败
+
+    # gt3-2：blocked_wait_gpu_benchmark + 行标 blocked=True 但缺 npu_us → 挂起态不得豁免 NPU 证据 → FAILED。
+    def test_gt3_2_wait_blocked_missing_npu_fails(self):
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": "p0", "blocked": True, "npu_scope": "kernel_only", "达标": False}],
+            "summary": {"status": "blocked_wait_gpu_benchmark", "perf_cases": 1, "达标": 0, "blocked": 1}})
+        self.assertTrue(any("npu_us" in e for e in self._errs()))
+        self.assertEqual(self._cli().returncode, 1)
+
+    def test_gt3_2_wait_blocked_wrong_scope_fails(self):
+        """挂起态 + blocked 行 npu_scope != kernel_only → blocked 不豁免 → FAILED。"""
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": "p0", "blocked": True, "npu_us": 1.5,
+                          "npu_scope": "e2e", "达标": False}],
+            "summary": {"status": "blocked_wait_gpu_benchmark", "perf_cases": 1, "达标": 0, "blocked": 1}})
+        self.assertTrue(any("npu_scope" in e for e in self._errs()))
+
+    # gt3-3：性能 case 的 evidence 为空壳 {"case_id":...}（无 perf 载荷）→ 空壳证据 → FAILED。
+    def test_gt3_3_hollow_evidence_fails(self):
+        _w(self.d, "evidence.json", {"op": "X", "evidence": [{"case_id": "p0"}]})  # 空壳
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": "p0", "scope": "kernel_only", "blocked": False, "达标": True}],
+            "summary": {"status": "ok", "perf_cases": 1, "达标": 1, "blocked": 0}})
+        self.assertTrue(any("空壳" in e or "性能证据缺失" in e for e in self._errs()))
+        self.assertEqual(self._cli().returncode, 1)
+
+    def test_gt3_3_perf_payload_present_passes(self):
+        """evidence 带真实 perf 载荷（perf.us 有限正 + scope）→ 计入 → 门放行（不误挡合法）。"""
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": "p0", "scope": "kernel_only", "blocked": False, "达标": True}],
+            "summary": {"status": "ok", "perf_cases": 1, "达标": 1, "blocked": 0}})
+        self.assertEqual(self._errs(), [])
+
+    # gt3-4：status=ok + perf_cases=0 + per_case=[] → 空转伪 ok → 必 FAILED。
+    def test_gt3_4_ok_empty_percase_fails(self):
+        _w(self.d, "perf_report.json", {"op": "X", "per_case": [],
+            "summary": {"status": "ok", "perf_cases": 0, "达标": 0, "blocked": 0}})
+        errs = self._errs()
+        self.assertTrue(any("per_case 为空" in e for e in errs))
+        self.assertTrue(any("perf_cases=0" in e for e in errs))
+        self.assertEqual(self._cli().returncode, 1)
+
+    def test_gt3_4_ok_but_caseset_no_perf_dim_fails(self):
+        """caseset 无「性能」dim 用例却 status=ok（防跑子集空转伪 ok）→ 口径矛盾 → FAILED。"""
+        _w(self.d, "caseset.json", {"op": "X", "cases": [
+            {"id": "f0", "dims": ["func"], "inputs": [{"name": "a", "shape": [16], "dtype": "float32"}]}]})
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": "p0", "scope": "kernel_only", "blocked": False, "达标": True}],
+            "summary": {"status": "ok", "perf_cases": 1, "达标": 1, "blocked": 0}})
+        self.assertTrue(any("无「性能」dim 用例" in e for e in self._errs()))
+
+    # gt3-6：坏输入不崩——summary.status 为 dict/list；per_case[].case_id 为 list/dict → FAILED 且不抛异常。
+    def test_gt3_6_status_dict_no_crash(self):
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": "p0", "scope": "kernel_only", "blocked": False, "达标": True}],
+            "summary": {"status": {}, "perf_cases": 1, "达标": 1, "blocked": 0}})
+        errs = self._errs()   # 不抛异常
+        self.assertTrue(any("status 非字符串" in e for e in errs))
+
+    def test_gt3_6_status_list_no_crash(self):
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": "p0", "scope": "kernel_only", "blocked": False, "达标": True}],
+            "summary": {"status": [], "perf_cases": 1, "达标": 1, "blocked": 0}})
+        self.assertTrue(any("status 非字符串" in e for e in self._errs()))
+
+    def test_gt3_6_case_id_list_no_crash(self):
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": ["p0"], "scope": "kernel_only", "blocked": False, "达标": True}],
+            "summary": {"status": "ok", "perf_cases": 1, "达标": 1, "blocked": 0}})
+        errs = self._errs()   # 非空 list 的 case_id 旧代码会崩 Counter unhashable
+        self.assertTrue(any("case_id" in e for e in errs))
+        self.assertEqual(self._cli().returncode, 1)
+
+    def test_gt3_6_case_id_dict_no_crash(self):
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": {"k": 1}, "scope": "kernel_only", "blocked": False, "达标": True}],
+            "summary": {"status": "ok", "perf_cases": 1, "达标": 1, "blocked": 0}})
+        self.assertTrue(any("case_id" in e for e in self._errs()))
+
+    def test_gt3_6_case_id_empty_list_no_crash(self):
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": [], "scope": "kernel_only", "blocked": False, "达标": True}],
+            "summary": {"status": "ok", "perf_cases": 1, "达标": 1, "blocked": 0}})
+        self.assertTrue(any("case_id" in e for e in self._errs()))
+
+    # gt3-8：bool==int 计数——summary.perf_cases=True；行级 达标="yes"（truthy 计入）→ 必 FAILED。
+    def test_gt3_8_perf_cases_true_fails(self):
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": "p0", "scope": "kernel_only", "blocked": False, "达标": True}],
+            "summary": {"status": "ok", "perf_cases": True, "达标": 1, "blocked": 0}})
+        self.assertTrue(any("perf_cases" in e and ("bool" in e or "整数" in e) for e in self._errs()))
+        self.assertEqual(self._cli().returncode, 1)
+
+    def test_gt3_8_daobiao_string_fails(self):
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": "p0", "scope": "kernel_only", "blocked": False, "达标": "yes"}],
+            "summary": {"status": "ok", "perf_cases": 1, "达标": 1, "blocked": 0}})
+        self.assertTrue(any("达标 非 bool" in e for e in self._errs()))
+
+    # 回归：合法 ok 路径不被上述任何强化误挡。
+    def test_clean_ok_still_passes(self):
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": "p0", "scope": "kernel_only", "blocked": False, "达标": True}],
+            "summary": {"status": "ok", "perf_cases": 1, "达标": 1, "blocked": 0}})
+        self.assertEqual(self._errs(), [])
+        self.assertEqual(self._cli().returncode, 0)
 
 
 if __name__ == "__main__":

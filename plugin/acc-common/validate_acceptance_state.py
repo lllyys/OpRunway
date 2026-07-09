@@ -17,6 +17,9 @@ from collections import Counter
 # blocked_wait_gpu_benchmark=缺外部 GPU 标杆正规挂起；blocked_incomparable_timing_scope=双边口径不可比。
 _PERF_STATUS = {"ok", "no_perf_cases", "blocked", "fail",
                 "exception", "blocked_wait_gpu_benchmark", "blocked_incomparable_timing_scope"}
+# gt3-1：blocked 行仅在这三种「合法挂起/不可采集」态下才允许免 scope 证据校验；
+# status ∈ {ok, fail, exception} 下出现 blocked 行 = 口径矛盾（零证据放行洞），记 error。
+_BLOCKED_OK_STATUS = {"blocked", "blocked_incomparable_timing_scope", "blocked_wait_gpu_benchmark"}
 _VERDICT_ENUM = {"pass", "fail", "needs_review", "passed_with_risk"}  # validator overall.verdict 合法枚举
 
 
@@ -237,9 +240,10 @@ def _gate_small_shape_exception(pr, d, errs):
         return
     per = pr.get("per_case") if isinstance(pr.get("per_case"), list) else []
     exc_rows = {r["case_id"]: r for r in per
-                if isinstance(r, dict) and r.get("case_id") and r.get("exception")}
+                if isinstance(r, dict) and isinstance(r.get("case_id"), str) and r["case_id"]
+                and r.get("exception")}
     sim_pts = {p["case_id"]: p for p in sim["points"]
-               if isinstance(p, dict) and p.get("case_id")}
+               if isinstance(p, dict) and isinstance(p.get("case_id"), str) and p["case_id"]}
     if set(exc_rows) != set(sim_pts):
         errs.append(f"{tag}：例外行 {sorted(exc_rows)} ≠ simulation 点 {sorted(sim_pts)}")
         return
@@ -252,12 +256,36 @@ def _gate_small_shape_exception(pr, d, errs):
     if not isinstance(plot, dict) or not plot.get("file") or not plot.get("sha256"):
         errs.append(f"{tag}：缺 simulation_plot(file/sha256)")
         return
-    target = _pinned_file(d, plot["file"])
-    if target is None:
-        errs.append(f"{tag}：simulation_plot 路径逃逸/非普通文件 {plot['file']!r}")
+    fname = plot["file"]
+    # gt3-7 第一道守卫：basename 必须 .svg——挡把 file 指向 caseset.json 等非图产物（旧洞：任意文件皆过）。
+    if not (isinstance(fname, str) and os.path.basename(fname).lower().endswith(".svg")):
+        errs.append(f"{tag}：simulation_plot.file 非 .svg（{fname!r}·防指向任意产物文件）")
         return
-    if _sha256(target) != plot["sha256"]:
+    target = _pinned_file(d, fname)
+    if target is None:
+        errs.append(f"{tag}：simulation_plot 路径逃逸/非普通文件 {fname!r}")
+        return
+    on_disk = _sha256(target)
+    if on_disk != plot["sha256"]:
         errs.append(f"{tag}：simulation_plot sha256 不符（stale/被替换）")
+        return
+    # gt3-7 核心（重算比对）：用 simulation 数据在门内**确定性重算** SVG，要求落盘图字节 == 重算字节。
+    # render_svg 纯 stdlib、确定性（无时间戳/随机/字典序依赖，float 用 .2f）→ 图真正锚定 simulation：
+    # 指向任意文件/伪造 SVG（哪怕 sha 与该文件自洽）都无法与「本 simulation 派生的字节」对齐。
+    # 只 import 调用 perf_sim_plot、绝不改它（并行任务文件）；渲染失败(坏数据/意外非确定)不静默放行。
+    try:
+        import tempfile
+        import perf_sim_plot
+        with tempfile.TemporaryDirectory() as _tmp:
+            _rec = os.path.join(_tmp, "recomputed.svg")
+            perf_sim_plot.render_svg(sim, _rec)
+            expect_sha = _sha256(_rec)
+    except Exception as ex:
+        errs.append(f"{tag}：simulation_plot 重算失败（{type(ex).__name__}: {ex}）——无法锚定 simulation")
+        return
+    if on_disk != expect_sha:
+        errs.append(f"{tag}：simulation_plot 与 simulation 数据不符"
+                    "——落盘图非由本 simulation 渲染（伪造/换图/stale·图未真正锚定数据）")
 
 
 def _perf_ids_from_caseset(cs, errs):
@@ -283,12 +311,29 @@ def _perf_ids_from_caseset(cs, errs):
     return ids
 
 
-def _gate_perf_case_alignment(pr, d, per, s, has_summary, errs):
+def _perf_evidence_ids(ev_list):
+    """带**真实 perf 载荷**（perf.us 有限正 + perf.scope 存在）的 evidence case_id 集（gt3-3）。
+    只核「case_id 存在」会放过空壳 `{"case_id":"p0"}`——性能证据真实性须落到 perf 载荷本身。
+    数据模型已支持（真实 evidence 项带 perf={scope,us}），故采「有载荷才计入」的更实口径。"""
+    ids = set()
+    for e in ev_list or []:
+        if not isinstance(e, dict) or not isinstance(e.get("case_id"), str) or not e["case_id"]:
+            continue  # 缺/坏 case_id 已由 _ids_from_evidence 报，此处只挑有真实 perf 载荷者
+        perf = e.get("perf")
+        if isinstance(perf, dict) and _perf_finite_pos(perf.get("us")) and perf.get("scope"):
+            ids.add(e["case_id"])
+    return ids
+
+
+def _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs):
     """per_case 与 caseset/evidence **按 case 对齐**（补 T5 门延后 finding）——防「跑性能子集 + 伪造
     summary=ok」蒙混：① caseset(dims 含「性能」)↔perf per_case 用 Counter 全量比对（拒缺/多/重复）；
     ② 性能 case 必须真有 evidence（拒伪造 per_case 未实跑）；③ summary 的 perf_cases/达标/blocked
     计数与 per_case 行级实际一致（拒伪造 summary）。此门只查完整性/一致性，不重判达标。"""
-    per_ids = [r.get("case_id") for r in per if isinstance(r, dict) and r.get("case_id")]
+    # gt3-6②：case_id 为非空 list/dict 时 Counter(per_ids) 会崩 unhashable → 只收字符串 id
+    # （非法 case_id 的 error 已在 gate_task3 行循环记，此处过滤免崩）。
+    per_ids = [r.get("case_id") for r in per
+               if isinstance(r, dict) and isinstance(r.get("case_id"), str) and r.get("case_id")]
     per_dups = [k for k, v in Counter(per_ids).items() if v > 1]
     if per_dups:
         errs.append(f"perf per_case 有重复 case_id: {per_dups}")
@@ -298,6 +343,9 @@ def _gate_perf_case_alignment(pr, d, per, s, has_summary, errs):
     else:
         perf_ids = _perf_ids_from_caseset(cs, errs)  # cs=None 时内部记 error 并返回 None
         if perf_ids is not None:
+            # gt3-4 交叉：status=ok 但 caseset 无任何「性能」dim 用例 → 口径矛盾（应为 no_perf_cases）。
+            if st == "ok" and not perf_ids:
+                errs.append("status=ok 但 caseset 无「性能」dim 用例（0 性能用例应为 no_perf_cases·口径矛盾）")
             want, got = Counter(perf_ids), Counter(per_ids)
             miss = sorted((want - got).elements())
             extra = sorted((got - want).elements())
@@ -307,21 +355,37 @@ def _gate_perf_case_alignment(pr, d, per, s, has_summary, errs):
                 errs.append(f"perf per_case 多出 {extra}（caseset 无对应性能用例）")
             ev = _load(d, "evidence.json")
             if isinstance(ev, dict):
-                eids = set(_ids_from_evidence(ev.get("evidence"), errs))
-                ev_miss = sorted(cid for cid in set(perf_ids) if cid not in eids)
+                _ids_from_evidence(ev.get("evidence"), errs)  # 报 evidence 缺 case_id/重复（副作用）
+                perf_eids = _perf_evidence_ids(ev.get("evidence"))  # gt3-3：须带真实 perf 载荷
+                ev_miss = sorted(cid for cid in set(perf_ids) if cid not in perf_eids)
                 if ev_miss:
-                    errs.append(f"⚠性能证据缺失：evidence 无 {ev_miss}（性能用例未实跑/伪造 per_case）")
+                    errs.append(f"⚠性能证据缺失/空壳：evidence 无真实 perf 载荷 {ev_miss}"
+                                "（性能用例未实跑/伪造 per_case/空壳证据）")
             elif ev == "__BAD__":
                 errs.append("evidence.json 解析失败（无法核性能证据真实性）")
             elif ev is None:
                 errs.append("缺 evidence.json（无法核性能证据真实性、防伪造 per_case）")
     # summary 计数须与 per_case 行级一致（防伪造 summary 蒙混）——summary 缺失已在上文报，跳过免噪。
+    # gt3-8：summary 三计数用 _is_int（拒 bool，True==1 曾被当合法计数）；行级 达标 强制 bool
+    # （达标="yes" 曾按 truthy 计入），非 bool 记 error 再按严格 is True 计数。
     if has_summary:
-        n_meet = sum(1 for r in per if isinstance(r, dict) and r.get("达标"))
-        n_blocked = sum(1 for r in per if isinstance(r, dict) and r.get("blocked"))
+        n_meet = 0
+        n_blocked = 0
+        for r in per:
+            if not isinstance(r, dict):
+                continue
+            da = r.get("达标")
+            if da is not None and not isinstance(da, bool):
+                errs.append(f"{r.get('case_id', '?')}: 达标 非 bool（{da!r}）——伪计数")
+            if da is True:
+                n_meet += 1
+            if r.get("blocked") is True:
+                n_blocked += 1
         for key, actual in (("perf_cases", len(per)), ("达标", n_meet), ("blocked", n_blocked)):
             claimed = s.get(key)
-            if claimed != actual:
+            if not _is_int(claimed):
+                errs.append(f"summary.{key}={claimed!r} 非整数计数（拒 bool/非法类型）")
+            elif claimed != actual:
                 errs.append(f"summary.{key}={claimed!r} 与 per_case 行级实际 {actual} 不一致（伪造/漏计）")
 
 
@@ -343,9 +407,13 @@ def gate_task3(d, errs):
         errs.append("perf_report 缺 summary（产物不完整）")
         s = {}
     st = s.get("status")
-    wait = (st == "blocked_wait_gpu_benchmark")
+    # gt3-6①：status 为 list/dict 时 `st not in _PERF_STATUS`（对 set 成员判定）会崩 unhashable →
+    # 先 isinstance(str) 守卫，非字符串记 error 且不参与 set 判定。
+    wait = isinstance(st, str) and st == "blocked_wait_gpu_benchmark"
     if st is None:
         errs.append("perf summary 缺 status")
+    elif not isinstance(st, str):
+        errs.append(f"perf summary.status 非字符串（{type(st).__name__}）——产物损坏，不参与状态判定")
     elif st not in _PERF_STATUS:
         errs.append(f"perf status={st!r} 非法（须属 {sorted(_PERF_STATUS)}）")
     elif st == "no_perf_cases":
@@ -357,21 +425,43 @@ def gate_task3(d, errs):
     # blocked_wait_gpu_benchmark：正规挂起，不计完整性 error；NPU 侧完整性在下方 per_case 卡。
     per = pr.get("per_case") if isinstance(pr.get("per_case"), list) else []
     for i, r in enumerate(per):
-        if not isinstance(r, dict) or not r.get("case_id"):
-            errs.append(f"perf per_case[{i}] 缺 case_id")
+        if not isinstance(r, dict):
+            errs.append(f"perf per_case[{i}] 非对象")
             continue
-        if r.get("blocked"):
+        cid = r.get("case_id")
+        if not (isinstance(cid, str) and cid):  # gt3-6②：非空 list/dict 的 case_id 会让下游 Counter 崩
+            errs.append(f"perf per_case[{i}] 缺/坏 case_id（{cid!r}）")
             continue
-        if wait:  # 挂起态：仍须 NPU 侧证据完整（npu_us 有限正 + npu_scope kernel_only）
+        bl = r.get("blocked")  # gt3-8：blocked 强制 bool（非 bool 记 error 再参与判定；仅 True 视为 blocked）
+        if bl is not None and not isinstance(bl, bool):
+            errs.append(f"{cid}: blocked 非 bool（{bl!r}）")
+        is_blocked = (bl is True)
+        # gt3-2：wait 分支**先于** blocked-continue——挂起态所有性能行(含 blocked)强制 NPU 侧证据完整，
+        # blocked 不得在 wait 态豁免 npu_us/npu_scope（旧洞：blocked-continue 先跑 → 标 blocked 即绕过）。
+        if wait:
             if not _perf_finite_pos(r.get("npu_us")):
-                errs.append(f"{r['case_id']}: 挂起态缺/坏 npu_us（NPU 证据不完整）")
+                errs.append(f"{cid}: 挂起态缺/坏 npu_us（NPU 证据不完整）")
             if r.get("npu_scope") != "kernel_only":
-                errs.append(f"{r['case_id']}: npu_scope={r.get('npu_scope')!r} ≠ kernel_only")
+                errs.append(f"{cid}: npu_scope={r.get('npu_scope')!r} ≠ kernel_only")
+            continue
+        # gt3-1：blocked 行免 scope 校验只在 blocked-family（可挂起/不可采集）态成立；
+        # status ∈ {ok, fail, exception} 下出现 blocked 行 = 零证据放行·口径矛盾 → 记 error（不再无条件 continue）。
+        if is_blocked:
+            if st not in _BLOCKED_OK_STATUS:
+                errs.append(f"{cid}: status={st!r} 下出现 blocked 行"
+                            "（零真实性能证据放行·口径矛盾）")
             continue
         if r.get("scope") != "kernel_only":  # 缺 scope(None) 也判失败
-            errs.append(f"{r['case_id']}: scope={r.get('scope')!r} ≠ kernel_only（性能须 msprof op kernel-only）")
+            errs.append(f"{cid}: scope={r.get('scope')!r} ≠ kernel_only（性能须 msprof op kernel-only）")
+    # gt3-4：status=ok 与 0 性能用例自相矛盾（应为 no_perf_cases）→ 强制 perf_cases≥1 且 per_case 非空。
+    if st == "ok":
+        if not per:
+            errs.append("status=ok 但 per_case 为空（0 性能证据自相矛盾，应为 no_perf_cases）")
+        pc = s.get("perf_cases")
+        if not (_is_int(pc) and pc >= 1):
+            errs.append(f"status=ok 但 summary.perf_cases={pc!r}（须为≥1 整数；0 性能用例应为 no_perf_cases）")
     # per_case 与 caseset/evidence 按 case 对齐（补 T5 门延后 finding）：防跑性能子集 + 伪造 summary=ok。
-    _gate_perf_case_alignment(pr, d, per, s, has_summary, errs)
+    _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs)
     if st == "exception":
         _gate_small_shape_exception(pr, d, errs)
     print(f"  性能 status={st}(perf_compare 判) | 达标 {s.get('达标')}/{s.get('perf_cases')}")
