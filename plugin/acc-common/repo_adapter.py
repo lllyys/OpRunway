@@ -245,6 +245,14 @@ def run_new_example(caseset, work_dir, defect_cases=None):
 
 MODES = {"mock": run_mock, "new_example": run_new_example}
 
+# --- P3 · catlass adapter（generated_harness）注册：实现在自有模块 catlass_adapter.py，此处仅加法接入 ---
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from catlass_adapter import CATLASS_MODES  # noqa: E402  catlass/catlass_mock
+    MODES.update(CATLASS_MODES)
+except Exception:  # 缺 catlass_adapter/其依赖时不影响既有 mock/new_example
+    pass
+
 
 def main(argv):
     caseset_path, work_dir, out_path = argv[0], argv[1], argv[2]

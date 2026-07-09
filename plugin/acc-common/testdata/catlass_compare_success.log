@@ -1,0 +1,8 @@
+[OPRUNWAY_CATLASS] harness=oprunway_catlass_basic_matmul_950 arch=3510 dtype=float32
+[OPRUNWAY_CASE catlassbasicmatmul_000] m=16 n=16 k=16 running kernel
+[OPRUNWAY_CASE catlassbasicmatmul_000] Compare success.
+[OPRUNWAY_CASE catlassbasicmatmul_001] m=32 n=64 k=48 running kernel
+[OPRUNWAY_CASE catlassbasicmatmul_001] Compare success.
+[OPRUNWAY_CASE catlassbasicmatmul_002] m=512 n=512 k=512 running kernel
+[OPRUNWAY_CASE catlassbasicmatmul_002] Compare success.
+OPRUNWAY_CATLASS_DONE total=3 ok=3 fail=0

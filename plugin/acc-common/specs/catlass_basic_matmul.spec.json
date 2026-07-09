@@ -1,0 +1,51 @@
+{
+  "op": "CatlassBasicMatmul",
+  "repo": "catlass",
+  "harness_kind": "generated_harness",
+  "hardware": ["Ascend950PR/DT (arch 3510)", "Atlas A2/A3 (arch 2201)"],
+  "arch": "runtime-detected",
+  "arch_note": "arch 不写死 —— 运行时经 OPRUNWAY_CATLASS_ARCH / environment.json 探测（白名单 {2201,3510}）；3510→fp32/43_ascend950_basic_matmul 为主目标，2201→fp16/00_basic_matmul 为 de-risk",
+  "reference": {
+    "type": "catlass-example",
+    "ref": "catlass 库自带 example basic_matmul（43_ascend950_basic_matmul / 00_basic_matmul）",
+    "path": "repos/catlass/examples/{43_ascend950_basic_matmul,00_basic_matmul}"
+  },
+  "params_source": "catlass-example",
+  "params": [
+    {"name": "A", "io": "in",  "dtype": ["float32"], "layout": "RowMajor"},
+    {"name": "B", "io": "in",  "dtype": ["float32"], "layout": "RowMajor"},
+    {"name": "C", "io": "out", "dtype": ["float32"], "layout": "RowMajor"}
+  ],
+  "dtype": "float32",
+  "layouts": {"A": "RowMajor", "B": "RowMajor", "C": "RowMajor"},
+  "generalize": true,
+  "verify_mode": "numerical",
+  "precision": {
+    "oracle": "numpy-f32-matmul",
+    "dtype": "float32",
+    "threshold": 0.001,
+    "threshold_source": "占位默认 max_rel_err=1e-3（fp32 matmul）—— 大 K 累积误差阈值待真机/任务书校准；ADR0005 三层口径（MERE/MARE）是 validator 级独立 todo，本 adapter 暂用单阈值 numerical 路径",
+    "acceptance_note": "catlass 自带 Compare success/failed 只是仓内 smoke 信号，非本 spec 的验收精度结论（精度=真 NPU out vs numpy golden，ADR0002）"
+  },
+  "perf": {
+    "baseline_source": "gpu_external",
+    "baseline_source_note": "catlass 无 builtin-TBE 分母 → perf 分母走外部 GPU 标杆（Task 3 提供），ADR0006 默认；run_catlass 不写 _real_baseline",
+    "target_ratio": 1.0,
+    "target_ratio_source": "占位默认（NPU↔GPU 不劣化）；真实目标待任务书"
+  },
+  "cases": {
+    "functional": [[16, 16, 16], [32, 64, 48]],
+    "perf": [[512, 512, 512]],
+    "shape_note": "A[m,k]·B[k,n]→C[m,n]；shape 可配置（非死钉 1024³），性能 shape 真机可加大"
+  },
+  "provenance": {
+    "kind": "synthetic",
+    "reason": "CatlassBasicMatmul 是 catlass 库自带 example，无真实算子任务书↔交付 PR 对应",
+    "task_doc": null,
+    "pr": null
+  },
+  "acceptance_blocked_reason": [
+    "BLOCKED-on-real-NPU：无真机 NPU evidence（须 ascend-a5 arch3510 + VPN + 人工确认）",
+    "BLOCKED-on-real-provenance：demo spec 为 synthetic，无 verify 过的 task↔PR 对应（correspondence gate 归上游 acc-spec/fetch_source，见 verify-spec-pr-correspondence）"
+  ]
+}
