@@ -77,23 +77,19 @@ def _storage_name(dtn):
     return "uint16" if dtn == _BF16 else dtn
 
 
-def _resolve_acceptance(spec, standard, dtype):
-    """任务书验收目标口径（可选、独立于平台 standard）：spec.precision.acceptance_policy。
+def _assert_equal_nan_effective(golden_fn, inputs, attrs, cid):
+    """finding #10：nanpair 用例断言 equal_nan **真起作用**——输入含 aligned-NaN 且翻转 equal_nan 后 golden 有别。
 
-    形如 {"standard": "ascendoptest_default", "error_rate": 0.1}：以某标准为底 + 覆盖判据字段。
-    返回 (policy, tolerance_policy_id)；无声明 / exact·behavioral 标准 → None（validator 时 acceptance 继承 standard）。
-    """
-    if standard in (precision_policy.EXACT, precision_policy.BEHAVIORAL):
-        return None
-    ap = (spec.get("precision") or {}).get("acceptance_policy")
-    if not ap:
-        return None
-    ap_std = ap.get("standard", standard)
-    pol = precision_policy.threshold_for(ap_std, dtype)
-    for k in ("tolerance", "error_rate", "threshold", "max_ratio", "eps"):
-        if k in ap:
-            pol[k] = ap[k]
-    return pol, precision_policy.tolerance_policy_id(ap_std, dtype)
+    否则该 attr 对 golden 毫无影响（算子彻底忽略 equal_nan 也逐位对上 golden）→ 假覆盖，fail-fast。
+    仅在 data_kind=='nanpair' 路径调用（IsClose·float/bf16 的 equal_nan variant）。"""
+    a, b = inputs[0], inputs[1]
+    aligned_nan = bool((np.isnan(a) & np.isnan(b)).any())
+    if not aligned_nan:
+        raise ValueError(f"{cid}: nanpair 用例输入无 aligned-NaN（equal_nan 无从生效 → 假覆盖，fail-fast）")
+    g_true = golden_fn(inputs, {**attrs, "equal_nan": True})
+    g_false = golden_fn(inputs, {**attrs, "equal_nan": False})
+    if np.array_equal(g_true, g_false):
+        raise ValueError(f"{cid}: equal_nan 翻转后 golden 不变（该 attr 对 golden 无影响 → 假覆盖，fail-fast）")
 
 
 # ---- golden 参考实现（逐算子；inputs=按 spec 顺序的**逻辑**输入数组，attrs=属性字典） ----
@@ -234,11 +230,13 @@ def _mk_id(op, dtn, shp, id_kind, attr_idx, seen):
     base = f"{op.lower()}_{dtn}_{_shape_tag(shp)}_{id_kind}"
     if attr_idx is not None:
         base = f"{base}_a{attr_idx}"
-    cid, n = base, 2
-    while cid in seen:                                   # 确定性碰撞 guard
-        cid = f"{base}_{n}"; n += 1
-    seen.add(cid)
-    return cid
+    # finding #13：碰撞 fail-fast（不再静默追加 _2 改名——静默改名会让两条本应区分的 plan entry 用同一 base
+    # 冒充覆盖）。合法 plan 里 (dtype,shape,kind,attr_idx) 天然唯一；碰撞=上游有重复 dtype/plan 漂移，须暴露。
+    if base in seen:
+        raise ValueError(f"case_id 碰撞：{base!r} 已存在（plan entry 重复——多为 spec dtype 集含重复项；"
+                         f"fail-fast 而非静默改名，防伪造覆盖）")
+    seen.add(base)
+    return base
 
 
 # ================================================= 计划构建 ====================
@@ -281,12 +279,22 @@ def _plan(spec, in_params, dtypes, attrs_default, op):
     attr_matrix = spec.get("attr_matrix")
     if attr_matrix:
         rep_dt = dtypes[0]
+        attr_names = set(attrs_default)          # finding #12：variant key 须 ⊆ spec io=='attr' 名集
         for k_idx, variant in enumerate(attr_matrix):
             if not isinstance(variant, dict):
                 raise ValueError(f"attr_matrix[{k_idx}] 须为 attr 字典，得 {type(variant).__name__}")
+            unknown = set(variant) - attr_names   # 未知 attr key（如 {foo:12345}）→ 假覆盖，fail-fast
+            if unknown:
+                raise ValueError(f"attr_matrix[{k_idx}] 含未知 attr key {sorted(unknown)}"
+                                 f"（须 ⊆ spec io=='attr' 名集 {sorted(attr_names)}，防伪造覆盖）")
+            for k, v in variant.items():          # 基本值类型校验（拒 dict/list 等非标量 attr 值）
+                if not isinstance(v, (bool, int, float, str)) or v is None:
+                    raise ValueError(f"attr_matrix[{k_idx}].{k}={v!r} 非标量（须 bool/int/float/str）")
             merged = dict(attrs_default); merged.update(variant)
-            is_float = (not precision_policy.is_integer_dtype(rep_dt)) and rep_dt != _BF16
-            # equal_nan 显式出现（IsClose·float）→ nan_pair 数据让该 flag 真正生效；否则常规二元/一元数据
+            # bf16 纳入可 NaN 浮点（finding #10）：bf16 能承载 aligned-NaN(0x7FC0)、codec 保 NaN，排除会致
+            # equal_nan 假覆盖（走 pairfar 无 NaN → 两版 golden 相等 → 算子忽略 equal_nan 也逐位对上 golden）。
+            is_float = not precision_policy.is_integer_dtype(rep_dt)
+            # equal_nan 显式出现（IsClose·float/bf16）→ nan_pair 数据让该 flag 真正生效；否则常规二元/一元数据
             if arity == 2 and "equal_nan" in variant and is_float:
                 dkind = "nanpair"
             elif arity == 2:
@@ -308,6 +316,9 @@ def gen_cases(spec, work_dir):
     attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
+    if len(dtypes) != len(set(dtypes)):                   # finding #13 根因：dtype 集含重复 → plan entry 撞车
+        dup = sorted(d for d in set(dtypes) if dtypes.count(d) > 1)
+        raise ValueError(f"spec dtype 集含重复项 {dup}（会致 case_id 碰撞/伪造覆盖，fail-fast）")
     for dtn in dtypes:                                    # dtype 白名单校验（fail-fast，不静默）
         if dtn != _BF16 and dtn not in _NATIVE:
             raise ValueError(f"unsupported dtype {dtn!r}（gen_cases 支持 {sorted(_NATIVE)} + bfloat16）")
@@ -329,8 +340,14 @@ def gen_cases(spec, work_dir):
         golden = golden_fn(inputs, attrs)                # 用逻辑输入算 golden
         if not exact:
             golden = golden.astype(_compute_np(dtn))     # numerical：golden 同逻辑 dtype（bf16→fp32-on-grid）
+        # finding #11：裸 assert 被 python -O 剥离 → 改 raise，任何优化级别都生效（防 -O 下静默产坏 caseset）。
         if exact and golden.dtype == bool and golden.size > 1:
-            assert golden.any() and (~golden).any(), f"{cid}: golden 未覆盖 True/False 边界"
+            if not (golden.any() and (~golden).any()):
+                raise ValueError(f"{cid}: golden 未覆盖 True/False 边界（exact bool 用例数据缺陷）")
+        # finding #10：equal_nan variant 必须**真起作用**——断言输入含 aligned-NaN 且两版 golden 不相等，
+        # 否则 fail-fast（否则 equal_nan 被忽略也逐位对上 golden → 假覆盖，却标着「attr矩阵/功能/精度」）。
+        if data_kind == "nanpair":
+            _assert_equal_nan_effective(golden_fn, inputs, attrs, cid)
 
         # 保存：X_bin(x{j}.npy·物理位模式) 与 golden(golden.npy·op(逻辑值)) **分两份造**（canonical 职责#2/#3）
         storage_np = _storage_np(dtn)
@@ -338,24 +355,30 @@ def gen_cases(spec, work_dir):
         for j, x_logical in enumerate(inputs):
             if dtn == _BF16:                             # 物理 = 从逻辑**单独 encode** 出的 uint16 位模式
                 x_bin = _f32_to_bf16_uint16(x_logical)
-                assert not np.shares_memory(x_bin, x_logical), \
-                    f"{cid}: bf16 X_bin 与 X_logical 共享内存（违 layout 字节契约 职责#2）"
+                if np.shares_memory(x_bin, x_logical):   # finding #11：改 raise（-O 下 assert 会被剥离）
+                    raise ValueError(f"{cid}: bf16 X_bin 与 X_logical 共享内存（违 layout 字节契约 职责#2）")
             else:
                 x_bin = np.ascontiguousarray(x_logical, dtype=storage_np)
             np.save(os.path.join(cdir, f"x{j + 1}.npy"), x_bin)
             ishapes.append(list(x_logical.shape))
         np.save(os.path.join(cdir, "golden.npy"), golden)
 
-        # 精度口径 per-case：cdtype 用逻辑名（bf16→'bfloat16'）；有效标准据 §1.1/compare 派生；未支持 fail-fast
-        logical_cdtype = _BF16 if dtn == _BF16 else precision_policy.compare_dtype(golden)
+        # 精度口径 per-case：cdtype **据 spec IO 矩阵派生**（与 validator 同源 derive_output_dtype，绝不取 golden
+        # 自声明；bf16 numerical 输出→'bfloat16'、bool 输出(IsClose/Equal 即便 bf16 输入)→'bool'）。
+        case_in_dts = [(p["name"], dtn) for p in in_params]
+        logical_cdtype = precision_policy.derive_output_dtype(spec, case_in_dts)
+        out_is_bool = (golden.dtype == bool)
+        # finding #14：bf16 白名单与「输出是否 bool/exact 语义」**拆成两道独立校验**——verify_mode=exact 不再
+        # 短路豁免 bf16。bf16 且**输出非 bool**（真数值输出）且 op 不在白名单 → 需 lossy 阈值 → fail-fast。
+        if dtn == _BF16 and not out_is_bool and op not in _BF16_EXACT_OPS:
+            raise ValueError(f"bf16 numerical for op {op!r} 需 lossy 阈值（输出非 bool、不在 _BF16_EXACT_OPS，"
+                             f"本轮无此类算子，留 gap；不因 verify_mode=exact 静默放行）")
         if exact:
             compare = "exact_equal"
         elif precision_policy.is_integer_dtype(dtn):
             compare = "exact_equal"                      # §1.1 int→exact（有效标准也会强制 EXACT）
         elif dtn == _BF16:
-            if op not in _BF16_EXACT_OPS:
-                raise ValueError(f"bf16 numerical for op {op!r} 需 lossy 阈值（本轮无此类算子，留 gap）")
-            compare = "exact_equal"                      # Sign/Neg bf16 输出精确可表示
+            compare = "exact_equal"                      # Sign/Neg bf16 输出精确可表示（已过上文白名单）
         else:
             compare = "rel_err"                          # fp32/fp16 数值 → 沿用平台标准（向后兼容）
         eff_std = precision_policy.effective_standard(spec_standard, logical_cdtype, compare)
@@ -366,7 +389,7 @@ def gen_cases(spec, work_dir):
                     "compare": compare, "tolerance_policy_id": tpid, "policy": policy,
                     "threshold": precision_policy.threshold_digest(policy),  # digest：向后兼容
                     "case_origin": entry["case_origin"], "rule_ref": entry["rule_ref"]}
-        acc = _resolve_acceptance(spec, eff_std, logical_cdtype)
+        acc = precision_policy.resolve_acceptance(spec, eff_std, logical_cdtype)
         if acc:
             expected["acceptance_policy"], expected["acceptance_tolerance_policy_id"] = acc
         in_items = []

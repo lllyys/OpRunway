@@ -136,22 +136,82 @@ def select_standard(spec):
 def compare_dtype(case_or_golden):
     """解析比对 dtype——按 **golden/输出 dtype**（非输入 dtype，防 bool/int8→int32 输出误判）。
 
-    入参可为 numpy 数组（取 .dtype.name）或 caseset case 字典（读 expected.compare_dtype，
-    退回 io==out 的输出 dtype）。**无输入 dtype 兜底**（finding #4）：输入 dtype 常与输出不同
-    （Equal fp32→bool），退回它会违背「按 golden/输出 dtype」的口径 → 无 golden/output dtype 时 fail-fast。
+    ⚠ 仅用于**采集层**已持有真实 golden 数组时取 `.dtype.name`。**裁决层严禁**用它从 caseset
+    自声明（expected.compare_dtype / io=out）取 cdtype——那是攻击者可控输入，会让「据 spec 复算」退化成
+    「据攻击者输入复算」（effective-standard-security finding #1/#2）。裁决层一律走 `derive_output_dtype`。
     """
     dt = getattr(case_or_golden, "dtype", None)
     if dt is not None:
         return dt.name
-    if isinstance(case_or_golden, dict):
-        exp = case_or_golden.get("expected") or {}
-        if exp.get("compare_dtype"):
-            return exp["compare_dtype"]
-        outs = [p for p in case_or_golden.get("inputs", []) if p.get("io") == "out"]
-        if outs and outs[0].get("dtype"):
-            return outs[0]["dtype"]
-    raise ValueError("无法解析 compare_dtype：需 numpy 数组、或含 expected.compare_dtype / "
-                     "io=out 输出 dtype 的 case（不退回输入 dtype——见 finding #4）")
+    raise ValueError("compare_dtype 仅接受 numpy 数组（真实 golden）；据 spec 派生请用 derive_output_dtype")
+
+
+def derive_output_dtype(spec, case_input_dtypes):
+    """**据 spec IO 矩阵**（非 caseset 自声明）派生该 case 的输出/比对 dtype——裁决层 cdtype 的**唯一合法来源**。
+
+    核心原则（effective-standard-security）：凡决定「怎么判」的 dtype，一律从 spec 派生；caseset 的
+    `expected.compare_dtype` / `tolerance_policy_id` 后缀只能作「待核对断言」，**绝不作派生输入**。
+
+    `case_input_dtypes`：`[(name, dtype), ...]`（取自 caseset.inputs，仅作断言）。逐条校验：
+      · name ∈ spec `io=='in'` 参数；dtype ∈ 该参数允许集（IO schema，finding #5）——不符 ValueError。
+    输出 dtype 规则：
+      · in_dt ∈ out 参数允许集 → 同 dtype elementwise（Sign/Neg，out dtype==in dtype）；
+      · out 允许集为单值（如 bool：IsClose/Equal 固定 bool 输出）→ 取该单值；
+      · 否则歧义 → ValueError（保守拒绝，不猜）。
+    多输入须同 dtype（elementwise 前提）；不一致 → ValueError。gen_cases 与 validator **共用本函数**，
+    保证「造用例的 compare_dtype」与「裁决派生的 cdtype」同源、绝不漂移。
+    """
+    params = spec.get("params") if isinstance(spec, dict) else None
+    if not isinstance(params, list) or not params:
+        raise ValueError("spec 无 IO 矩阵（params）——无法据 spec 派生输出 dtype，拒绝以 caseset 自声明代替")
+    in_params = {p["name"]: p for p in params
+                 if isinstance(p, dict) and p.get("io") == "in" and p.get("name")}
+    out_params = [p for p in params if isinstance(p, dict) and p.get("io") == "out"]
+    if not in_params or not out_params:
+        raise ValueError("spec IO 矩阵缺 in/out 参数（无法据 spec 派生输出 dtype）")
+    in_dts = []
+    for name, dt in case_input_dtypes:
+        if name not in in_params:
+            raise ValueError(f"case 输入 {name!r} 不在 spec in-参数 {sorted(in_params)}（IO schema 不符）")
+        allowed = in_params[name].get("dtype") or []
+        if dt not in allowed:
+            raise ValueError(f"case 输入 {name} dtype={dt!r} 不在 spec 允许集 {allowed}（IO schema 不符）")
+        in_dts.append(dt)
+    if not in_dts:
+        raise ValueError("case 无有效输入 dtype（无法派生输出 dtype）")
+    in_dt = in_dts[0]
+    if any(d != in_dt for d in in_dts):
+        raise ValueError(f"case 多输入 dtype 不一致 {in_dts}（elementwise 需同 dtype）")
+    out_allowed = out_params[0].get("dtype") or []
+    if in_dt in out_allowed:
+        return in_dt                              # 同 dtype elementwise（Sign/Neg）
+    uniq = set(out_allowed)
+    if len(uniq) == 1:
+        return next(iter(uniq))                   # 固定输出（bool：IsClose/Equal）
+    raise ValueError(f"无法据 spec 派生输出 dtype：in={in_dt} out集={out_allowed}（歧义，保守拒绝）")
+
+
+def resolve_acceptance(spec, standard, dtype):
+    """任务书验收目标口径（可选、独立于平台 standard）的 **canonical 复算**——gen_cases 与 validator 共用。
+
+    据 `spec.precision.acceptance_policy`（形如 `{"standard": "ascendoptest_default", "error_rate": 0.1}`：
+    以某标准为底 + 覆盖判据字段）复算 canonical (policy, tolerance_policy_id)。
+    无声明 / exact·behavioral 标准 → None（acceptance 继承 standard）。
+
+    ⚠ 安全（finding #3）：validator 用本函数据 **spec** 复算 canonical acceptance，要求 caseset/evidence 三处全等；
+    **spec 未声明 acceptance → 返回 None → caseset+evidence 一律不得私带 acceptance**（防 T5 原洞在 acceptance 层重演）。
+    """
+    if standard in (EXACT, BEHAVIORAL):
+        return None
+    ap = (spec.get("precision") or {}).get("acceptance_policy")
+    if not ap:
+        return None
+    ap_std = ap.get("standard", standard)
+    pol = threshold_for(ap_std, dtype)
+    for k in ("tolerance", "error_rate", "threshold", "max_ratio", "eps"):
+        if k in ap:
+            pol[k] = ap[k]
+    return pol, tolerance_policy_id(ap_std, dtype)
 
 
 def _check_compute_supported(dtype):

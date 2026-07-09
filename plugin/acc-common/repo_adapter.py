@@ -54,27 +54,50 @@ def _safe(work_dir, rel):
     return p
 
 
+def _expected_storage(dtype):
+    """逻辑 dtype -> **物理落盘/字节 dtype 名**（白名单，findings #6/#7）：bf16→uint16、native→自身、未知→拒。
+    存储 dtype 一律**从逻辑 dtype 反推**，绝不采 caseset 自声明的 storage_dtype（那是可伪造的攻击面）。"""
+    if dtype == gen_cases._BF16:
+        return "uint16"
+    if dtype in gen_cases._NATIVE:
+        return dtype
+    raise ValueError(f"未知/未支持 dtype {dtype!r}（storage 白名单：{sorted(gen_cases._NATIVE)} + bfloat16）")
+
+
 def materialize_input(logical, meta):
-    """X_logical（numpy 逻辑值）-> X_bin 物理字节缓冲（numpy storage dtype），**独立于 logical 另造**
+    """X_logical（numpy 逻辑值）-> X_bin 物理字节缓冲（storage dtype），**独立于 logical 另造**
     （canonical harness 职责#2/#3：喂 kernel 的物理字节与喂 golden 的逻辑值分两份）。
-    bf16：逻辑 fp32-on-grid -> uint16 位模式；int/fp：astype 原生 storage。供本地 round-trip 单测（codex#9）。"""
+
+    finding #9：**native 路径绝不做值 cast**——`logical.dtype` 必须已等于 storage dtype，否则 ValueError
+    （旧洞：`ascontiguousarray(uint16, dtype=float32)` 把 100→100.0 值转换、污染送真机的字节）。
+    bf16：逻辑须 fp32-on-grid → encode 成 uint16 位模式（唯一合法的「变 dtype」路径，且是位重解释非值 cast）。"""
     dtn = meta["dtype"]
+    expected = _expected_storage(dtn)                 # 未知 dtype 在此 fail-fast
+    arr = np.asarray(logical)
     if dtn == gen_cases._BF16:
-        return gen_cases._f32_to_bf16_uint16(np.asarray(logical, dtype=np.float32))
-    if dtn not in gen_cases._NATIVE:
-        raise ValueError(f"materialize_input: 未知 dtype {dtn!r}")
-    return np.ascontiguousarray(logical, dtype=gen_cases._NATIVE[dtn])
+        if arr.dtype != np.float32:
+            raise ValueError(f"materialize_input: bf16 逻辑值须 float32-on-grid，得 {arr.dtype}（拒值 cast）")
+        return gen_cases._f32_to_bf16_uint16(arr)
+    if str(arr.dtype) != expected:                    # native：dtype 必须已相符，不静默 cast（finding #9）
+        raise ValueError(f"materialize_input: 逻辑数组 dtype={arr.dtype} ≠ 期望 storage {expected}"
+                         f"（native 路径拒值 cast，防污染真机字节）")
+    return np.ascontiguousarray(arr)
 
 
 def readback_output(raw_storage, meta):
-    """X_bin 物理字节（numpy storage dtype）读回 -> 逻辑 numpy（与 golden 比对用）。
-    bf16：uint16 位模式 -> fp32-on-grid；int/fp：原样。round-trip 与 materialize_input 互逆（codex#9）。"""
+    """X_bin 物理字节（storage dtype）读回 -> 逻辑 numpy（与 golden 比对用）。
+    bf16：uint16 位模式 -> fp32-on-grid；native：dtype 须已相符（finding #9：拒值 cast）。round-trip 与
+    materialize_input 互逆（codex#9）。"""
     dtn = meta["dtype"]
+    expected = _expected_storage(dtn)                 # 未知 dtype fail-fast
+    arr = np.asarray(raw_storage)
     if dtn == gen_cases._BF16:
-        return gen_cases._bf16_uint16_to_f32(np.asarray(raw_storage, dtype=np.uint16))
-    if dtn not in gen_cases._NATIVE:
-        raise ValueError(f"readback_output: 未知 dtype {dtn!r}")
-    return np.asarray(raw_storage, dtype=gen_cases._NATIVE[dtn])
+        if arr.dtype != np.uint16:
+            raise ValueError(f"readback_output: bf16 物理字节须 uint16，得 {arr.dtype}")
+        return gen_cases._bf16_uint16_to_f32(arr)
+    if str(arr.dtype) != expected:                    # native：拒值 cast（finding #9）
+        raise ValueError(f"readback_output: 物理数组 dtype={arr.dtype} ≠ 期望 storage {expected}（拒值 cast）")
+    return np.ascontiguousarray(arr)
 
 
 def _precision_evidence(case, out, golden, out_path, ascendoptest_bool=None):
@@ -126,13 +149,18 @@ def run_mock(caseset, work_dir, defect_cases=None):
     ev = []
     for c in caseset["cases"]:
         # 加载并校验所有 input（v0 mock 也核，防 caseset 契约漂移）。
-        # T7：x{j}.npy 存**物理**（bf16→uint16 位模式），故比 storage_dtype（缺省=逻辑 dtype，向后兼容）。
+        # T7/finding #7：x{j}.npy 存**物理**（bf16→uint16 位模式）。storage dtype **从逻辑 dtype 反推**
+        # （_expected_storage 白名单），**不采**自声明 storage_dtype；自声明若与反推不符 → 直接拒（防伪造）。
         for inp in c["inputs"]:
             arr = np.load(_safe(work_dir, inp["path"]))
-            storage = inp.get("storage_dtype", inp["dtype"])
-            if list(arr.shape) != list(inp["shape"]) or str(arr.dtype) != storage:
+            expected_storage = _expected_storage(inp["dtype"])
+            declared = inp.get("storage_dtype")
+            if declared is not None and declared != expected_storage:
+                raise ValueError(f"{c['id']} input {inp['name']}: 自声明 storage_dtype={declared!r} "
+                                 f"≠ 据逻辑 dtype={inp['dtype']!r} 反推 {expected_storage!r}（拒伪造 storage）")
+            if list(arr.shape) != list(inp["shape"]) or str(arr.dtype) != expected_storage:
                 raise ValueError(f"{c['id']} input {inp['name']}: got {arr.dtype}{list(arr.shape)} "
-                                 f"≠ caseset storage {storage}{inp['shape']}（逻辑 dtype={inp['dtype']}）")
+                                 f"≠ 期望 storage {expected_storage}{inp['shape']}（逻辑 dtype={inp['dtype']}）")
         golden = np.load(_safe(work_dir, c["expected"]["golden_path"]))
         out = golden.copy()  # mock：完美 NPU = golden
         if c["id"] in defect_cases and out.size:  # 注入缺陷 → 让 validator 现 fail
@@ -203,10 +231,16 @@ def run_new_example(caseset, work_dir, defect_cases=None):
         arrs = []
         for inp in c["inputs"]:
             arr = np.load(_safe(work_dir, inp["path"]))
-            storage = inp.get("storage_dtype", inp["dtype"])  # T7：物理落盘 dtype（bf16→uint16；native=逻辑）
-            if list(arr.shape) != list(inp["shape"]) or str(arr.dtype) != storage:
+            # finding #6：storage dtype **从逻辑 dtype 反推**（白名单），不采自声明 storage_dtype（可伪造）；
+            # 自声明若与反推不符 → 直接拒（旧洞：伪造 storage_dtype=uint16 + 后续值 cast 污染真机 x{j}.bin）。
+            expected_storage = _expected_storage(inp["dtype"])
+            declared = inp.get("storage_dtype")
+            if declared is not None and declared != expected_storage:
+                raise ValueError(f"{cid} {inp['name']}: 自声明 storage_dtype={declared!r} ≠ 据逻辑 "
+                                 f"dtype={inp['dtype']!r} 反推 {expected_storage!r}（拒伪造 storage）")
+            if list(arr.shape) != list(inp["shape"]) or str(arr.dtype) != expected_storage:
                 raise ValueError(f"{cid} {inp['name']}: npy {arr.dtype}{list(arr.shape)} "
-                                 f"≠ caseset storage {storage}{inp['shape']}（逻辑 {inp['dtype']}）")
+                                 f"≠ 期望 storage {expected_storage}{inp['shape']}（逻辑 {inp['dtype']}）")
             arrs.append(arr)
         out_shape = np.broadcast_shapes(*[a.shape for a in arrs])
         if int(np.prod(out_shape)) == 0:
@@ -303,10 +337,16 @@ def run_new_example(caseset, work_dir, defect_cases=None):
                 raise RuntimeError(f"{cid}: out.bin 含非 0/1 值，非法 bool 输出")
             out = raw.reshape(golden.shape).astype(bool) if golden.size else raw.astype(bool)
         else:                                 # numerical：out.bin 同输入 dtype
+            # finding #8：storage-aware 读回——当前 new_example v1 仅 fp32/fp16（storage==logical，Track C 已拦
+            # int/bf16）。显式断言 storage==logical，杜绝「numerical out 却非原生落盘」被 np.fromfile(golden.dtype)
+            # 静默按逻辑 dtype 误读。bf16 放开前须在此补 uint16→f32 读回分支（走 readback_output）。
+            if _expected_storage(dtn) != dtn:
+                raise RuntimeError(f"{cid}: numerical out storage({_expected_storage(dtn)})≠logical({dtn})——"
+                                   f"new_example v1 未接 storage-aware 读回（bf16 须补 readback_output 分支）")
             raw = np.fromfile(obin, dtype=golden.dtype)
             if raw.size != golden.size:
                 raise RuntimeError(f"{cid}: out.bin {raw.size} elem ≠ 期望 {golden.size}（形状/传输异常）")
-            out = raw.reshape(golden.shape) if golden.size else raw
+            out = readback_output(raw, {"dtype": dtn}).reshape(golden.shape) if golden.size else raw
         prec = _precision_evidence(c, out, golden, f"{cid}/out.bin", ascendoptest_bool=None)
         prec["ascendoptest_bool"] = None   # 待 NPU：真机接 compare.py bool 作交叉核对（现桩位）
         prec.setdefault("ascendoptest_bool_note", "待 NPU：真机接 AscendOpTest compare.py bool 交叉核对")

@@ -204,12 +204,14 @@ class SemanticIdTest(unittest.TestCase):
         finally:
             shutil.rmtree(d1, ignore_errors=True); shutil.rmtree(d2, ignore_errors=True)
 
-    def test_collision_guard_deterministic(self):
+    def test_collision_guard_fail_fast(self):
+        """finding #13：case_id 碰撞 **fail-fast**（不再静默追加 _2 改名——静默改名会让两条本应区分的
+        plan entry 用同一 base 冒充覆盖）。"""
         seen = set()
         a = GC._mk_id("Sign", "float32", (16,), "varied", None, seen)
-        b = GC._mk_id("Sign", "float32", (16,), "varied", None, seen)
         self.assertEqual(a, "sign_float32_16_varied")
-        self.assertEqual(b, "sign_float32_16_varied_2")          # 碰撞确定性追加 _2
+        with self.assertRaises(ValueError):                      # 二次同 base → 碰撞 raise
+            GC._mk_id("Sign", "float32", (16,), "varied", None, seen)
 
 
 # ============================================================ attr_matrix ======
@@ -425,6 +427,145 @@ class SubprocessE2ETest(unittest.TestCase):
                 "assert 'numpy' not in sys.modules, 'validator 拉入了 numpy'; print('OK')")
         r = subprocess.run([sys.executable, "-c", code], cwd=_HERE, capture_output=True, text=True)
         self.assertIn("OK", r.stdout, r.stderr)
+
+
+# ============================================ 对抗式负例（gen_cases / repo_adapter）===
+def _isclose_bf16_nan_spec():
+    return {"op": "IsClose", "verify_mode": "exact",
+            "params": [{"name": "self", "io": "in", "dtype": ["bfloat16", "float32"]},
+                       {"name": "other", "io": "in", "dtype": ["bfloat16", "float32"]},
+                       {"name": "rtol", "io": "attr", "dtype": ["double"], "default": 1e-05},
+                       {"name": "atol", "io": "attr", "dtype": ["double"], "default": 1e-08},
+                       {"name": "equal_nan", "io": "attr", "dtype": ["bool"], "default": False},
+                       {"name": "out", "io": "out", "dtype": ["bool"]}],
+            "precision": {"standard": "exact"},
+            "attr_matrix": [{"equal_nan": True}, {"equal_nan": False}]}
+
+
+class GenCasesSecurityNegativeTest(unittest.TestCase):
+    """gen_cases 对抗式负例——每条对应一个已实跑复现的 exploit。"""
+
+    def test_bf16_equal_nan_effective_not_fake_coverage(self):
+        """finding #10：bf16 dtype0 + attr_matrix equal_nan **不再假覆盖**——走 nanpair(含 aligned-NaN)、
+        两版 golden 有别；旧洞里 bf16 被排除出 nanpair → pairfar 无 NaN → 两版 golden 相等 → 假覆盖。"""
+        d = tempfile.mkdtemp()
+        try:
+            cs = GC.gen_cases(_isclose_bf16_nan_spec(), d)      # 生成不报错即证 _assert_equal_nan_effective 通过
+            attr_cases = [c for c in cs["cases"] if "attr矩阵" in c.get("tags", [])]
+            self.assertTrue(attr_cases)
+            for c in attr_cases:                                # 全走 nanpair（不是 pairfar）
+                self.assertIn("nanpair", c["id"])
+            c0 = attr_cases[0]
+            a = GC._bf16_uint16_to_f32(np.load(os.path.join(d, c0["inputs"][0]["path"])))
+            b = GC._bf16_uint16_to_f32(np.load(os.path.join(d, c0["inputs"][1]["path"])))
+            self.assertTrue((np.isnan(a) & np.isnan(b)).any())  # 输入确含 aligned-NaN
+            g_t = np.isclose(a, b, rtol=1e-5, atol=1e-8, equal_nan=True)
+            g_f = np.isclose(a, b, rtol=1e-5, atol=1e-8, equal_nan=False)
+            self.assertFalse(np.array_equal(g_t, g_f))          # equal_nan 翻转后 golden 有别（真覆盖）
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_attr_matrix_unknown_key_fail_fast(self):
+        """finding #12：attr_matrix variant 含 spec 未声明 attr key（{foo:...}）→ fail-fast（防伪造覆盖）。"""
+        sp = _isclose_bf16_nan_spec()
+        sp["attr_matrix"] = [{"foo": 12345, "rtol": 1e-3}]
+        with self.assertRaises(ValueError):
+            GC.gen_cases(sp, tempfile.mkdtemp())
+
+    def test_duplicate_dtype_fail_fast(self):
+        """finding #13：spec dtype 集含重复项 → fail-fast（防 case_id 碰撞/静默改名冒充覆盖）。"""
+        sp = _isclose_bf16_nan_spec(); del sp["attr_matrix"]
+        sp["params"][0]["dtype"] = ["float32", "float32"]
+        sp["params"][1]["dtype"] = ["float32", "float32"]
+        with self.assertRaises(ValueError):
+            GC.gen_cases(sp, tempfile.mkdtemp())
+
+    def test_bf16_lossy_op_via_verify_mode_exact_fail_fast(self):
+        """finding #14：lossy bf16 op（输出非 bool、不在 _BF16_EXACT_OPS）借 verify_mode=exact 想绕白名单
+        → 白名单与「输出是否 bool」拆成两道独立校验 → fail-fast（不因 verify_mode=exact 短路豁免）。"""
+        GC.GOLDEN["FakeLossyBf"] = ("fake", lambda inputs, attrs: np.negative(inputs[0]))
+        try:
+            sp = {"op": "FakeLossyBf", "verify_mode": "exact",
+                  "params": [{"name": "self", "io": "in", "dtype": ["bfloat16"]},
+                             {"name": "out", "io": "out", "dtype": ["bfloat16"]}],
+                  "precision": {"standard": "exact"}}
+            with self.assertRaises(ValueError):
+                GC.gen_cases(sp, tempfile.mkdtemp())
+        finally:
+            GC.GOLDEN.pop("FakeLossyBf", None)
+
+    def test_bool_golden_no_boundary_fail_fast_even_under_O(self):
+        """finding #11：golden 未覆盖 True/False 的 exact bool op → 用 raise（非裸 assert）→ **python -O 下也拦**
+        （裸 assert 会被 -O 剥离，静默产坏 caseset）。"""
+        code = (
+            "import sys, tempfile; sys.path.insert(0, %r);\n"
+            "import numpy as np, gen_cases as gc;\n"
+            "gc.GOLDEN['AllTrueB'] = ('fake', lambda i, a: np.ones_like(i[0], dtype=bool));\n"
+            "sp = {'op':'AllTrueB','verify_mode':'exact','params':["
+            "{'name':'self','io':'in','dtype':['float32']},"
+            "{'name':'other','io':'in','dtype':['float32']},"
+            "{'name':'out','io':'out','dtype':['bool']}],'precision':{'standard':'exact'}};\n"
+            "\ntry:\n gc.gen_cases(sp, tempfile.mkdtemp()); print('NOT_BLOCKED')\n"
+            "except ValueError: print('BLOCKED')\n" % _HERE)
+        r = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True, text=True)
+        self.assertIn("BLOCKED", r.stdout, r.stdout + r.stderr)
+
+
+class RepoAdapterSecurityNegativeTest(unittest.TestCase):
+    """repo_adapter 对抗式负例——storage 伪造 / 值 cast 污染。"""
+
+    def test_materialize_native_value_cast_rejected(self):
+        """finding #9：materialize_input(uint16数组, dtype=float32) 旧洞会值 cast(100→100.0)污染字节 → 现拒。"""
+        u = np.array([100, 200, 65535], dtype=np.uint16)
+        with self.assertRaises(ValueError):
+            RA.materialize_input(u, {"dtype": "float32"})
+
+    def test_readback_native_value_cast_rejected(self):
+        with self.assertRaises(ValueError):
+            RA.readback_output(np.array([1, 2], dtype=np.uint16), {"dtype": "float32"})
+
+    def test_run_mock_forged_storage_dtype_rejected(self):
+        """finding #7：逻辑 dtype=bfloat16 但自声明 storage_dtype=float32（≠ 反推 uint16）→ run_mock 拒。"""
+        d = tempfile.mkdtemp()
+        try:
+            work = os.path.join(d, "work"); cid = "sign_bfloat16_16_varied"
+            os.makedirs(os.path.join(work, cid))
+            np.save(os.path.join(work, cid, "x1.npy"), np.ones(16, np.float32))
+            np.save(os.path.join(work, cid, "golden.npy"), np.ones(16, np.float32))
+            cs = {"op": "Sign", "cases": [{"id": cid, "dims": ["功能"],
+                  "inputs": [{"name": "self", "shape": [16], "dtype": "bfloat16",
+                              "storage_dtype": "float32", "path": f"{cid}/x1.npy"}],
+                  "attrs": {}, "expected": {"golden_path": f"{cid}/golden.npy",
+                            "verify_mode": "numerical", "standard": "exact"}}]}
+            with self.assertRaises(ValueError):
+                RA.run_mock(cs, work)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_run_new_example_forged_storage_rejected_before_remote(self):
+        """finding #6：逻辑 dtype=float32 但自声明 storage_dtype=uint16 + npy 落 uint16 → run_new_example
+        在**任何远端调用之前**拒（旧洞：过校验后 materialize 值 cast 污染送真机的 x{j}.bin）。"""
+        d = tempfile.mkdtemp()
+        try:
+            cid = "C1"; os.makedirs(os.path.join(d, cid))
+            np.save(os.path.join(d, cid, "x1.npy"), np.array([100, 200, 300, 400], np.uint16))
+            np.save(os.path.join(d, cid, "golden.npy"), np.ones(4, np.float32))
+            cs = {"op": "Sign", "attr_order": [],
+                  "cases": [{"id": cid, "dims": ["功能"], "attrs": {},
+                             "inputs": [{"name": "self", "path": f"{cid}/x1.npy",
+                                         "dtype": "float32", "storage_dtype": "uint16", "shape": [4]}],
+                             "expected": {"golden_path": f"{cid}/golden.npy", "verify_mode": "numerical"}}]}
+            import subprocess as _sp
+            orig = _sp.run
+            _sp.run = lambda *a, **k: (_ for _ in ()).throw(AssertionError("reached remote"))
+            try:
+                with self.assertRaises(ValueError):    # storage 伪造在输入校验期即拒，未到远端
+                    RA.run_new_example(cs, d)
+                self.assertFalse(os.path.exists(os.path.join(d, cid, "x1.bin")))  # 未写污染 bin
+            finally:
+                _sp.run = orig
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":

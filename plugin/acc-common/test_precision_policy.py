@@ -151,16 +151,20 @@ class FailFastAndRoutingTest(unittest.TestCase):
 class ValidatorRiskTest(unittest.TestCase):
     """validator 层：acceptance 过 & standard 不过 → risk=true、overall=passed_with_risk。"""
     def _spec(self):
+        # spec **声明** acceptance（任务书宽于平台底线的合法 risk 路径）+ 完整 IO 矩阵（validator 据此派生 cdtype）。
         return {"op": "X", "verify_mode": "numerical",
-                "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default"}}
+                "params": [{"name": "self", "io": "in", "dtype": ["float32"]},
+                           {"name": "out", "io": "out", "dtype": ["float32"]}],
+                "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default",
+                              "acceptance_policy": {"standard": "ascendoptest_default", "error_rate": 0.1}}}
 
     def _pair(self, std_pol, acc_pol, metrics, acc_metrics):
         cid = "x_000"
         caseset = {"op": "X", "cases": [{
             "id": cid, "dims": ["功能", "精度"],
-            "inputs": [{"name": "a", "shape": [16], "dtype": "float32"}],
+            "inputs": [{"name": "self", "shape": [16], "dtype": "float32"}],
             "expected": {"golden_path": "g.npy", "verify_mode": "numerical",
-                         "standard": "ascendoptest_default",
+                         "standard": "ascendoptest_default", "compare_dtype": "float32",
                          "tolerance_policy_id": "ascendoptest_default:float32",
                          "policy": std_pol, "threshold": std_pol["tolerance"],
                          "acceptance_policy": acc_pol,
@@ -315,7 +319,7 @@ class SpecAuthoritativeTest(unittest.TestCase):
                "compare_dtype": "float32", "tolerance_policy_id": "ascendoptest_default:float32",
                "policy": policy, "threshold": digest}
         caseset = {"op": "Sign", "cases": [{"id": cid, "dims": ["功能", "精度"],
-                   "inputs": [{"name": "a", "shape": [16], "dtype": "float32"}], "expected": exp}]}
+                   "inputs": [{"name": "self", "shape": [16], "dtype": "float32"}], "expected": exp}]}
         evidence = {"op": "Sign", "evidence": [{"case_id": cid, "status": "ok",
                     "precision": {"standard": "ascendoptest_default",
                                   "tolerance_policy_id": "ascendoptest_default:float32",
@@ -325,6 +329,8 @@ class SpecAuthoritativeTest(unittest.TestCase):
 
     def _spec(self):
         return {"op": "Sign", "verify_mode": "numerical",
+                "params": [{"name": "self", "io": "in", "dtype": ["float32"]},
+                           {"name": "out", "io": "out", "dtype": ["float32"]}],
                 "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default"}}
 
     def test_sync_loosen_caught_by_spec_canonical(self):
@@ -365,6 +371,171 @@ class ValidatorStdlibOnlyTest(unittest.TestCase):
         r = subprocess.run([sys.executable, "-c", code], cwd=_HERE, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("OK", r.stdout)
+
+
+# ==================================================== effective-standard-security ===
+def _sign_spec(dtype="float32", acc_spec=None):
+    """Sign 型完整 IO 矩阵 spec（validator 据此派生 cdtype；同 dtype elementwise，out dtype==in dtype）。"""
+    spec = {"op": "Sign", "verify_mode": "numerical",
+            "params": [{"name": "self", "io": "in", "dtype": [dtype]},
+                       {"name": "out", "io": "out", "dtype": [dtype]}],
+            "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default"}}
+    if acc_spec is not None:
+        spec["precision"]["acceptance_policy"] = acc_spec
+    return spec
+
+
+def _honest_triple(dtype="float32", metrics=None, acc_spec=None):
+    """据 spec 复算的**诚实**三元组（spec/caseset/evidence 全等 canonical）——反事实对照的基准。
+    dtype=int* → 有效标准 EXACT（同 gen_cases）。metrics 缺省无坏点（pass）。"""
+    spec = _sign_spec(dtype, acc_spec)
+    eff = P.effective_standard("ascendoptest_default", dtype,
+                               "exact_equal" if P.is_integer_dtype(dtype) else "rel_err")
+    pol = P.threshold_for(eff, dtype)
+    tpid = P.tolerance_policy_id(eff, dtype)
+    dig = P.threshold_digest(pol)
+    compare = "exact_equal" if eff == P.EXACT else "rel_err"
+    if metrics is None:
+        metrics = ({"exact_mismatch": 0, "numel": 16} if eff == P.EXACT
+                   else {"bad_count": 0, "numel": 16})
+    exp = {"golden_path": "g.npy", "verify_mode": "numerical", "standard": eff,
+           "compare_dtype": dtype, "compare": compare, "tolerance_policy_id": tpid,
+           "policy": pol, "threshold": dig}
+    prec = {"standard": eff, "tolerance_policy_id": tpid, "policy": pol, "threshold": dig,
+            "metrics": metrics}
+    acc = P.resolve_acceptance(spec, eff, dtype)
+    if acc:
+        exp["acceptance_policy"], exp["acceptance_tolerance_policy_id"] = acc
+        prec["acceptance_policy"], prec["acceptance_tolerance_policy_id"] = acc
+        prec["acceptance_metrics"] = metrics
+    caseset = {"op": "Sign", "cases": [{"id": "c0", "dims": ["功能", "精度"],
+               "inputs": [{"name": "self", "shape": [16], "dtype": dtype}], "expected": exp}]}
+    evidence = {"op": "Sign", "evidence": [{"case_id": "c0", "status": "ok", "precision": prec}]}
+    return spec, caseset, evidence
+
+
+class EffectiveStandardSecurityTest(unittest.TestCase):
+    """对抗式负例（effective-standard-security）：凡决定「怎么判」的 dtype/口径必须**据 spec 派生**；
+    caseset/evidence 谎报 → contract fail。每条对应一个已实跑复现的 exploit。"""
+
+    def test_counterfactual_honest_paths_unchanged(self):
+        """反事实对照：诚实 caseset/evidence 裁决**不因加严而误伤**——0 坏点 pass、超阈 fail（非 contract fail）。"""
+        spec, cs, ev = _honest_triple("float32", {"bad_count": 0, "numel": 16})
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["counts"]["contract_problems"], 0)
+        self.assertEqual(vd["per_case"][0]["精度"], "pass")
+        spec, cs, ev = _honest_triple("float32", {"bad_count": 8, "numel": 16})
+        vd = V.validate(spec, cs, ev)                      # 8>16*1e-4 → 精度 fail（是判定 fail 非契约 fail）
+        self.assertEqual(vd["overall"]["counts"]["contract_problems"], 0)
+        self.assertEqual(vd["per_case"][0]["精度"], "fail")
+        # 诚实 int32：有效标准 EXACT，exact_mismatch=1 → fail（无契约问题）
+        spec, cs, ev = _honest_triple("int32", {"exact_mismatch": 1, "numel": 16})
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["counts"]["contract_problems"], 0)
+        self.assertEqual(vd["per_case"][0]["精度"], "fail")
+
+    def test_dtype_lie_float32_as_float16_caught(self):
+        """exploit A：真 float32（1/1000 坏点该按 float32 门 fail），caseset 谎报 compare_dtype='float16'
+        （门松 10×）→ validator 据 spec 派生 float32、强制 compare_dtype 相符 → contract fail（不进 judge）。"""
+        spec, cs, ev = _honest_triple("float32", {"bad_count": 1, "numel": 1000})
+        cs["cases"][0]["expected"]["compare_dtype"] = "float16"     # 谎报更松 dtype
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail")
+        self.assertIn("compare_dtype", vd["per_case"][0]["判据"])
+        self.assertNotEqual(vd["per_case"][0]["精度"], "pass")
+
+    def test_int_lie_as_float32_bypasses_exact_caught(self):
+        """exploit B：真 int32（应强制 EXACT），caseset 谎报 compare_dtype='float32' 绕过整型判定 →
+        validator 据 spec 派生 int32 → compare_dtype 不符 → contract fail（整型→EXACT 基于真实输出 dtype）。"""
+        spec, cs, ev = _honest_triple("int32", {"exact_mismatch": 1, "numel": 10000})
+        cs["cases"][0]["expected"]["compare_dtype"] = "float32"     # 谎报 float32 想走 AOT 数值口径
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail")
+        self.assertIn("compare_dtype", vd["per_case"][0]["判据"])
+
+    def test_acceptance_injection_when_spec_silent_caught(self):
+        """exploit C：spec 未 pin acceptance，caseset+evidence **同步注入** error_rate=1.0 的 acceptance →
+        validator 据 spec 复算 canonical acceptance=None → 拒绝私带 → contract fail（堵 T5 洞在 acceptance 层重演）。"""
+        spec, cs, ev = _honest_triple("float32", {"bad_count": 50, "numel": 1000})  # 无 acc（spec 未声明）
+        inj = {"kind": "ascendoptest_default", "tolerance": 1e-4, "error_rate": 1.0,
+               "eps": 1e-9, "legacy": 0.1, "not_settled": False}
+        cs["cases"][0]["expected"]["acceptance_policy"] = inj
+        cs["cases"][0]["expected"]["acceptance_tolerance_policy_id"] = "ascendoptest_default:float32"
+        ep = ev["evidence"][0]["precision"]
+        ep["acceptance_policy"] = inj
+        ep["acceptance_tolerance_policy_id"] = "ascendoptest_default:float32"
+        ep["acceptance_metrics"] = {"bad_count": 50, "numel": 1000}
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail")
+        self.assertIn("acceptance", vd["per_case"][0]["判据"])
+        self.assertNotEqual(vd["overall"]["verdict"], "passed_with_risk")
+
+    def test_acceptance_canonical_loosen_caught(self):
+        """spec **声明** acceptance(error_rate=0.1)，但 caseset+evidence 把 acceptance 同步放宽到 1.0 →
+        validator 据 spec 复算 canonical acceptance → 三处不等 → contract fail（acceptance 也据 spec 复算）。"""
+        spec, cs, ev = _honest_triple(
+            "float32", {"bad_count": 50, "numel": 1000},
+            acc_spec={"standard": "ascendoptest_default", "error_rate": 0.1})
+        loose = dict(cs["cases"][0]["expected"]["acceptance_policy"]); loose["error_rate"] = 1.0
+        cs["cases"][0]["expected"]["acceptance_policy"] = loose
+        ev["evidence"][0]["precision"]["acceptance_policy"] = loose
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail")
+        self.assertIn("acceptance_policy", vd["per_case"][0]["判据"])
+
+    def test_dims_empty_numerical_caught(self):
+        """exploit D：numerical case dims=[] 抹掉精度维 + 坏 evidence(999/1000) → dims 受控词表拒空 → contract fail。"""
+        spec, cs, ev = _honest_triple("float32", {"bad_count": 999, "numel": 1000})
+        cs["cases"][0]["dims"] = []
+        ev["evidence"][0]["status"] = "bad"
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail")
+        self.assertIn("dims", vd["per_case"][0]["判据"])
+
+    def test_dims_unknown_token_caught(self):
+        """dims 含受控词表外 token → contract fail（防伪造维度）。"""
+        spec, cs, ev = _honest_triple("float32")
+        cs["cases"][0]["dims"] = ["功能", "精度", "玄学"]
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail")
+
+    def test_numerical_case_missing_precision_dim_caught(self):
+        """数值 case（非纯性能）dims 缺「精度」→ contract fail（数值 case 不可漏裁精度）。"""
+        spec, cs, ev = _honest_triple("float32")
+        cs["cases"][0]["dims"] = ["功能"]              # 有功能无精度、又非纯性能
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail")
+
+    def test_op_impersonation_caught(self):
+        """exploit #6：另一算子的真通过 caseset+evidence 冒充（op 名不一致）→ 算子身份三处锚定 → contract fail。"""
+        spec, cs, ev = _honest_triple("float32")
+        cs["op"] = "Equal"                             # caseset 冒充成另一算子
+        ev["op"] = "Equal"
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail")
+        self.assertTrue(any("身份" in p for p in vd["contract_problems"]))
+
+    def test_input_dtype_not_in_spec_set_caught(self):
+        """case 输入 dtype 不在 spec 允许集（IO schema）→ 派生输出 dtype 失败 → contract fail。"""
+        spec, cs, ev = _honest_triple("float32")       # spec 只允许 float32
+        cs["cases"][0]["inputs"][0]["dtype"] = "float64"   # 越出允许集
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail")
+
+    def test_attr_not_declared_in_spec_caught(self):
+        """case.attrs 含 spec 未声明的 attr key → IO schema 不符 → contract fail。"""
+        spec, cs, ev = _honest_triple("float32")
+        cs["cases"][0]["attrs"] = {"bogus": 12345}
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail")
+
+    def test_spec_without_io_matrix_refuses_precision(self):
+        """spec 无 params IO 矩阵 → 无从据 spec 派生 cdtype → 拒绝以 caseset 自声明代替 → contract fail
+        （凡决定怎么判的 dtype 必须从 spec 派生；无 spec 锚点则不放行）。"""
+        spec, cs, ev = _honest_triple("float32")
+        del spec["params"]
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail")
 
 
 if __name__ == "__main__":

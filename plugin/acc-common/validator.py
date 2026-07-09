@@ -1,13 +1,21 @@
 """Task 2 · validator — spec + caseset + evidence.json -> verdict.json（确定性裁决）。
 
 ADR 0007：裁决只从这里出。ADR 0005：精度三层口径、放行只看 acceptance。职责：
+0) **算子身份 + IO schema 锚定**（effective-standard-security finding #5）——`spec.op == caseset.op ==
+   evidence.op`；每个 case 的 inputs(name/dtype)/attrs 须符合 spec IO 矩阵。防「另一算子/另一 dtype 的
+   真通过 caseset+evidence 冒充」。
 1) 契约校验——evidence 与 caseset **一一对应**（无缺/多/重复），否则整体 fail（防空 evidence 假通过）。
-2) 口径以 **spec 为权威**——由 `spec_standard` + case 的 compare_dtype 用 `precision_policy.threshold_for/
-   tolerance_policy_id` **复算 canonical policy**，要求 spec-canonical / caseset.expected / evidence.precision
-   **三处结构化 policy 全等**（standard + tolerance_policy_id + 结构化 policy + threshold digest 向后兼容）。
-   仅比 caseset↔evidence 不够——两侧**同步放宽**即可绕过（finding #6），故锚回 spec。
-   acceptance 层另做结构化校验（有 acceptance_policy → 三处一致 + acceptance_metrics 必填；无 →
-   拒绝 evidence 私带额外 acceptance 口径，finding #7）。
+2) **核心原则**：凡决定「怎么判」的东西一律**从 spec 派生**；caseset/evidence 的声明只作「待与 spec 派生值
+   核对的断言」，**绝不作派生输入**。故：
+   · 比对 dtype `cdtype` **据 spec IO 矩阵派生**（`precision_policy.derive_output_dtype`），**不取** caseset 自
+     声明的 `expected.compare_dtype`/`tolerance_policy_id` 后缀；随后强制 `expected.compare_dtype == 派生值`
+     （不符 → contract fail）。整型→EXACT、选 AOT 哪一 dtype 行，全基于**真实输出 dtype**（finding #1/#2）。
+   · 由 `spec_standard` + 派生 cdtype 复算 canonical policy，要求 spec-canonical / caseset.expected /
+     evidence.precision **三处结构化 policy 全等**（standard + tolerance_policy_id + 结构化 policy + threshold
+     digest 向后兼容）。仅比 caseset↔evidence 不够——两侧**同步放宽**即可绕过，故锚回 spec。
+   · acceptance 层同样**据 spec 复算 canonical**（`precision_policy.resolve_acceptance`）：spec 声明 acceptance
+     → 三处一致 + acceptance_metrics 必填；**spec 未声明 → caseset+evidence 一律不得私带 acceptance**
+     （finding #3：防 T5「值被同步放宽」原洞在 acceptance 层换入口重演）。
 3) 三层 pass 同出（canonical 字段名）：`catlass_compare_pass` / `standard_profile_pass` /
    `acceptance_precision_pass`；**放行只看 acceptance**；acceptance 过 & standard(平台底线) 不过
    → 该 case `risk=true`、overall=`passed_with_risk`（人工 CP）。ecosystem_mere_mare 单标杆不过
@@ -111,30 +119,32 @@ def _judge_by_policy(policy, metrics):
 
 
 # ------------------------------------------------ 三处一致（spec 权威 canonical）---
-def _case_compare_dtype(exp):
-    """取 case 的比对 dtype：优先 expected.compare_dtype，退回 tolerance_policy_id 的 `standard:dtype` 后缀。"""
-    cd = exp.get("compare_dtype")
-    if cd:
-        return cd
-    tpid = exp.get("tolerance_policy_id")
-    if isinstance(tpid, str) and ":" in tpid:
-        return tpid.split(":", 1)[1]
-    return None
+def _case_input_dtypes(case):
+    """取该 case 的 [(input name, dtype), ...]（仅作断言，交 derive_output_dtype 据 spec 校验+派生）。"""
+    ins = case.get("inputs")
+    if not isinstance(ins, list):
+        raise ValueError("case 缺 inputs 列表（无法据 spec 派生输出 dtype）")
+    out = []
+    for inp in ins:
+        if not isinstance(inp, dict) or not inp.get("name") or not inp.get("dtype"):
+            raise ValueError(f"case input 项缺 name/dtype：{inp!r}")
+        out.append((inp["name"], inp["dtype"]))
+    return out
 
 
 def _canonical(spec_standard, cdtype):
-    """按 spec 权威 standard + case dtype 复算 canonical (policy, tpid)；不可复算 → 抛 ValueError。"""
+    """按 spec 权威 standard + **spec 派生 cdtype** 复算 canonical (policy, tpid)；不可复算 → 抛 ValueError。"""
     tpid = precision_policy.tolerance_policy_id(spec_standard, cdtype)
     pol = precision_policy.threshold_for(spec_standard, cdtype)
     return pol, tpid
 
 
-def _precision_contract(eff_standard, exp, ev_prec):
-    """口径三处一致（spec 权威 + T7 per-case 有效标准）——防 caseset+evidence 同步放宽（finding #6/#7）。返回 (ok, why)。
+def _precision_contract(eff_standard, cdtype, exp, ev_prec, canon_acc):
+    """口径三处一致（**spec 派生 canonical**）——防 caseset+evidence 同步放宽。返回 (ok, why)。
 
-    以 **eff_standard**（据 spec + case dtype/compare 复算，int→EXACT 不可绕过）+ case dtype 复算 canonical policy，
-    要求 canonical / caseset / evidence 三处 standard + tolerance_policy_id + 结构化 policy + threshold digest **全等**；
-    acceptance 另校验。
+    以 **eff_standard**（据 spec + spec 派生 cdtype/compare 复算）+ **spec 派生 cdtype**（非 caseset 自声明）
+    复算 canonical policy，要求 canonical / caseset / evidence 三处 standard + tolerance_policy_id + 结构化 policy
+    + threshold digest **全等**。acceptance 据 spec 复算的 `canon_acc`（None=spec 未声明）另校验（finding #3）。
     """
     if not isinstance(ev_prec, dict):
         return False, "evidence 缺 precision（非对象）"
@@ -142,7 +152,6 @@ def _precision_contract(eff_standard, exp, ev_prec):
         return False, "caseset.expected 缺结构化 policy"
     if not isinstance(ev_prec.get("policy"), dict):
         return False, "evidence.precision 缺结构化 policy"
-    cdtype = _case_compare_dtype(exp)
     try:
         canon_pol, canon_tpid = _canonical(eff_standard, cdtype)
     except (ValueError, KeyError) as ex:
@@ -159,21 +168,45 @@ def _precision_contract(eff_standard, exp, ev_prec):
         if obj.get("threshold") != canon_digest:
             return False, (f"{side}.threshold(digest)={obj.get('threshold')} "
                            f"≠ spec-canonical {canon_digest}")
-    # acceptance 层结构化校验（finding #7）
-    exp_acc = exp.get("acceptance_policy")
-    ev_acc = ev_prec.get("acceptance_policy")
-    if exp_acc is not None:
-        if ev_acc != exp_acc:
-            return False, "acceptance_policy 三处不一致（evidence ≠ caseset）"
-        if exp.get("acceptance_tolerance_policy_id") != ev_prec.get("acceptance_tolerance_policy_id"):
-            return False, "acceptance_tolerance_policy_id 不一致"
+    # acceptance 层：据 **spec** 复算 canonical（finding #3），非仅比 caseset↔evidence。
+    if canon_acc is not None:                                 # spec 声明了 acceptance → 三处全等
+        canon_acc_pol, canon_acc_tpid = canon_acc
+        for side, obj in (("caseset", exp), ("evidence", ev_prec)):
+            if obj.get("acceptance_policy") != canon_acc_pol:
+                return False, f"{side}.acceptance_policy 与 spec-canonical 不一致（放宽/漏字段/多字段）"
+            if obj.get("acceptance_tolerance_policy_id") != canon_acc_tpid:
+                return False, f"{side}.acceptance_tolerance_policy_id 与 spec-canonical 不一致"
         if not isinstance(ev_prec.get("acceptance_metrics"), dict):
-            return False, "acceptance_policy 存在但 evidence 缺 acceptance_metrics（必填）"
-    else:
-        for k in ("acceptance_policy", "acceptance_tolerance_policy_id", "acceptance_metrics"):
-            if ev_prec.get(k) is not None:
-                return False, f"caseset 无 acceptance 但 evidence 私带 {k}（额外口径，拒绝）"
+            return False, "spec 声明 acceptance 但 evidence 缺 acceptance_metrics（必填）"
+    else:                                                    # spec 未声明 → 两侧一律不得私带（防 T5 洞重演）
+        for side, obj in (("caseset", exp), ("evidence", ev_prec)):
+            for k in ("acceptance_policy", "acceptance_tolerance_policy_id"):
+                if obj.get(k) is not None:
+                    return False, f"spec 未声明 acceptance，但 {side} 私带 {k}（额外口径，拒绝）"
+        if ev_prec.get("acceptance_metrics") is not None:
+            return False, "spec 未声明 acceptance，但 evidence 私带 acceptance_metrics（拒绝）"
     return True, ""
+
+
+# ---- dims 受控词表（finding #4）：只认 功能/精度/性能；空/未知/数值 case 缺精度 → contract fail ----
+_DIM_VOCAB = frozenset({"功能", "精度", "性能"})
+
+
+def _dims_contract(dims, vm):
+    """校验 case.dims（finding #4）。返回 err 字符串或 None（合法）。
+
+    · 非列表/空 → 非法（防 dims=[] 抹掉裁决维度让 na-only 假通过）；
+    · 含受控词表外 token → 非法（防伪造维度）；
+    · verify_mode ∈ {exact, numerical} 且**非纯性能 case**（dims != {性能}）→ 必须含「精度」（数值 case 不可漏裁精度）。
+    """
+    if not isinstance(dims, list) or not dims:
+        return f"dims 非列表或空（{dims!r}）——数值/功能维度被抹，拒绝（防 na-only 假通过）"
+    unknown = set(dims) - _DIM_VOCAB
+    if unknown:
+        return f"dims 含受控词表外 token {sorted(unknown)}（仅 {sorted(_DIM_VOCAB)}）"
+    if vm in ("exact", "numerical") and set(dims) != {"性能"} and "精度" not in dims:
+        return f"verify_mode={vm} 的数值 case 必须含「精度」维（dims={dims}，纯性能 case 例外）"
+    return None
 
 
 # ------------------------------------------------------- 空 per_case 的骨架 ---
@@ -193,6 +226,13 @@ def _verdict(op, vm, spec_standard, problems, per):
                 or p["acceptance_precision_pass"] == "uncertain"):
             if p["case_id"] not in seen:
                 seen.add(p["case_id"]); unc_ids.append(p["case_id"])
+    # finding #4：区分 na（未裁）与 pass（裁过且过）——**应裁精度却停 na** 的数值 case 不得贡献 overall=pass；
+    # 计入 needs_review（不静默放过）。`_prec_expected` 由主循环按 dims 标注，随后从行内剥除（不进产物）。
+    # （已 fail 的 case 不重复计入——它已在 fails/overall=fail 里。）
+    for p in per:
+        if (p.pop("_prec_expected", False) and p["精度"] == "na" and p["功能"] != "fail"
+                and p["case_id"] not in seen):
+            seen.add(p["case_id"]); unc_ids.append(p["case_id"])
     risks = [p["case_id"] for p in per if p.get("risk")]
     catlass_na = [p["case_id"] for p in per if p["catlass_compare_pass"] == "na"]
     if problems or fails:
@@ -221,14 +261,21 @@ def validate(spec, caseset, evidence):
         return _verdict("?", None, None, ["spec 非对象（无法裁决）"], [])
     vm = spec.get("verify_mode")
     op = spec.get("op", "?")
+    # finding #5：算子身份三处锚定——spec.op == caseset.op == evidence.op（防另一算子的真通过产物冒充）。
+    caseset_op = caseset.get("op") if isinstance(caseset, dict) else None
+    evidence_op = evidence.get("op") if isinstance(evidence, dict) else None
+    if caseset_op != op:
+        problems.append(f"caseset.op={caseset_op!r} ≠ spec.op={op!r}（算子身份不符，防冒充）")
+    if evidence_op != op:
+        problems.append(f"evidence.op={evidence_op!r} ≠ spec.op={op!r}（算子身份不符，防冒充）")
     cases = caseset.get("cases") if isinstance(caseset, dict) else None
     ev_list = evidence.get("evidence") if isinstance(evidence, dict) else None
     if not isinstance(cases, list) or not cases:
         problems.append("caseset.cases 缺失/非列表/空（无用例可裁）")
     if not isinstance(ev_list, list):
         problems.append("evidence.evidence 缺失或非列表")
-    if problems:                                     # 结构性致命 → 直接出 fail verdict（不崩）
-        return _verdict(op, vm, None, problems, [])
+    if not isinstance(cases, list) or not cases or not isinstance(ev_list, list):
+        return _verdict(op, vm, None, problems, [])  # 结构性致命 → 直接出 fail verdict（不崩）
 
     try:
         spec_standard = precision_policy.select_standard(spec)
@@ -238,6 +285,11 @@ def validate(spec, caseset, evidence):
 
     if vm not in ("exact", "numerical", "behavioral"):
         problems.append(f"spec.verify_mode={vm!r} 非法（仅 exact/numerical/behavioral）")
+
+    # finding #5：spec io=='attr' 名集——case.attrs 的 key 须 ⊆ 此集（防伪造 attr 冒充覆盖）。
+    spec_params = spec.get("params") if isinstance(spec.get("params"), list) else []
+    attr_names = {p["name"] for p in spec_params
+                  if isinstance(p, dict) and p.get("io") == "attr" and p.get("name")}
 
     # case_ids / ev_ids：逐项抗坏（缺 id / 非对象 → contract 问题，不崩）
     case_ids = []
@@ -278,6 +330,18 @@ def validate(spec, caseset, evidence):
             row.update(功能="fail", 判据="evidence 缺此 case")
             per.append(row); continue
         ev_prec = e.get("precision") or {}
+        # finding #4：dims 受控词表——空/未知/数值 case 缺「精度」→ contract fail（防 na-only 假通过）。
+        dim_err = _dims_contract(dims, vm)
+        if dim_err:
+            row.update(功能="fail", 判据=f"dims 契约{dim_err}")
+            per.append(row); continue
+        # finding #5：case.attrs key 须 ⊆ spec attr 名集（防伪造 attr 冒充覆盖）。
+        bad_attrs = set(c.get("attrs") or {}) - attr_names
+        if bad_attrs:
+            row.update(功能="fail", 判据=f"case.attrs 含 spec 未声明 attr {sorted(bad_attrs)}（IO schema 不符）")
+            per.append(row); continue
+        # 是否**应裁精度**（数值/exact 的非纯性能 case）——供 _verdict 区分 na 与 pass（finding #4）。
+        row["_prec_expected"] = (vm in ("exact", "numerical") and "精度" in dims)
         # 2) 口径一致性（spec 权威）：verify_mode + 标准 + policy 三处一致
         if exp.get("verify_mode") != vm:
             row.update(功能="fail", 判据=f"case.verify_mode={exp.get('verify_mode')} ≠ spec {vm}")
@@ -285,16 +349,33 @@ def validate(spec, caseset, evidence):
         if spec_standard is None:
             row.update(功能="fail", 判据="spec 精度标准不可解析，无法据 spec 校验口径")
             per.append(row); continue
-        # T7：per-case **有效标准**（int→EXACT 不可绕过；bf16 靠 compare=exact_equal 收紧；余=spec 标准）。
-        # 据 cdtype+compare 复算，故 caseset 同步误标别的口径也过不了下方三处一致门（防放宽仍成立）。
-        cdtype = _case_compare_dtype(exp)
+        # 核心原则（finding #1/#2/#5）：cdtype **据 spec IO 矩阵派生**（校验 case.inputs name/dtype ∈ spec 允许集），
+        # **不取** caseset 自声明的 compare_dtype/tpid 后缀；随后强制 expected.compare_dtype == 派生值。
+        try:
+            cdtype = precision_policy.derive_output_dtype(spec, _case_input_dtypes(c))
+        except (ValueError, KeyError) as ex:
+            row.update(功能="fail", 判据=f"IO schema/派生输出 dtype 失败：{ex}")
+            per.append(row); continue
+        if exp.get("compare_dtype") != cdtype:
+            row.update(功能="fail",
+                       判据=f"expected.compare_dtype={exp.get('compare_dtype')!r} ≠ spec 派生输出 dtype {cdtype!r}"
+                            "（比对 dtype 谎报——据 spec 派生值核对不符，拒绝）")
+            per.append(row); continue
+        # T7：per-case **有效标准**（int→EXACT；bf16 靠 compare=exact_equal 收紧；余=spec 标准）。据**派生 cdtype**
+        # + compare 复算，故 caseset 谎报别的 dtype/口径也过不了（int→EXACT 基于真实输出 dtype，防换入口绕过）。
         eff_std = precision_policy.effective_standard(spec_standard, cdtype, exp.get("compare"))
         if exp.get("standard") != eff_std:
             row.update(功能="fail",
                        判据=f"standard 与有效标准不一致 eff={eff_std}/case={exp.get('standard')}"
                             f"（spec={spec_standard} dtype={cdtype} compare={exp.get('compare')}）")
             per.append(row); continue
-        ok, why = _precision_contract(eff_std, exp, ev_prec)
+        # acceptance canonical **据 spec 复算**（None=spec 未声明 → caseset+evidence 不得私带，finding #3）。
+        try:
+            canon_acc = precision_policy.resolve_acceptance(spec, eff_std, cdtype)
+        except (ValueError, KeyError) as ex:
+            row.update(功能="fail", 判据=f"无法据 spec 复算 canonical acceptance：{ex}")
+            per.append(row); continue
+        ok, why = _precision_contract(eff_std, cdtype, exp, ev_prec, canon_acc)
         if not ok:
             row.update(功能="fail", 判据=f"精度口径{why}")
             per.append(row); continue
@@ -304,6 +385,10 @@ def validate(spec, caseset, evidence):
             row["功能"] = "pass" if e.get("status") == "ok" else "fail"
         if "精度" in dims:
             policy = exp["policy"]
+            # ⚠ 边界（effective-standard-security-7，**未防**、待 canon 决策）：validator 全信 evidence.precision.
+            #   metrics 的**数值**，与真实 NPU 产物（out.bin / golden）之间**无 hash/签名 provenance 绑定**——
+            #   能伪造 out.bin/metrics 的攻击者可注 bad_count=0 直接 pass。本文件只据 spec 复算「**用哪套阈值/口径**」
+            #   判（防口径被放宽），**不**证明「metrics 来自真实产物」。真绑定属架构级问题，别声称此处已防。
             metrics = ev_prec.get("metrics")
             if not isinstance(metrics, dict):
                 row.update(精度="fail", 判据="evidence 缺 precision.metrics（误差分布未复算）")
