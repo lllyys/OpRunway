@@ -18,6 +18,7 @@ _STATE_MAP = {
     "PASSED_WITH_RISK": "PASSED_WITH_RISK",
     "BLOCKED_WAIT_GPU_BENCHMARK": "BLOCKED_WAIT_GPU_BENCHMARK",
     "BLOCKED_INCOMPARABLE_TIMING_SCOPE": "BLOCKED_INCOMPARABLE_TIMING_SCOPE",
+    "BLOCKED_GPU_BASELINE_INVALID": "BLOCKED_GPU_BASELINE_INVALID",  # gb-9：标杆被判废（非缺标杆）
 }
 
 def _canonical_state(overall, ps):
@@ -28,6 +29,8 @@ def _canonical_state(overall, ps):
     st = ps.get("status")
     if st == "blocked_incomparable_timing_scope":
         return "BLOCKED_INCOMPARABLE_TIMING_SCOPE"
+    if st == "blocked_gpu_baseline_invalid":       # gb-9：有硬错的标杆被判废 ≠ 缺标杆
+        return "BLOCKED_GPU_BASELINE_INVALID"
     if st == "blocked_wait_gpu_benchmark":
         return "BLOCKED_WAIT_GPU_BENCHMARK"
     if isinstance(overall, str) and overall.startswith("性能未达成"):
@@ -86,14 +89,18 @@ def run(spec_path, mode="mock", out_dir="reports/_run", defect=None, perf_slow=N
                   or spec.get("perf", {}).get("baseline") in ("gpu", "gpu_external"))
     expect_source = "gpu_external" if expect_gpu else None
     gpu_prov = None
+    baseline_blocked_status = None  # gb-9：标杆被判废时携专门挂起码（区分「口径不可比」vs「标杆无效」vs「缺标杆」）
     if gpu_baseline is not None:  # T8：解析外部 GPU 标杆(consumer 侧)；hard error→baseline None→挂起(非 PASS)
         import gpu_baseline as gpubl
         baseline, parse_report = gpubl.parse_gpu_baseline(gpu_baseline, caseset)
         _dump(parse_report, "gpu_baseline_parse_report.json")
+        if baseline is None:  # gb-9：别把「有硬错的 baseline=None」等同「缺标杆」——据 parse 落正确挂起码
+            baseline_blocked_status = parse_report.get("blocked_status") or "blocked_gpu_baseline_invalid"
         gpu_prov = {"source": expect_source, "path": gpu_baseline,
                     "contract_version": parse_report.get("contract_version"),
                     "parse_report": "gpu_baseline_parse_report.json",
-                    "hard_errors": parse_report.get("hard_errors", 0)}
+                    "hard_errors": parse_report.get("hard_errors", 0),
+                    "blocked_status": baseline_blocked_status}
     elif os.path.exists(real_bl):
         baseline = json.load(open(real_bl, encoding="utf-8"))
     elif expect_gpu:  # 期待 GPU 标杆但没给 → 正规挂起（perf_compare 产 blocked_wait_gpu_benchmark）
@@ -102,7 +109,8 @@ def run(spec_path, mode="mock", out_dir="reports/_run", defect=None, perf_slow=N
         baseline = perf_compare.mock_baseline(spec, evidence, slow_cases=perf_slow)
     if baseline is not None:
         _dump(baseline, "baseline.json")
-    report = perf_compare.perf_compare(spec, caseset, evidence, baseline, expect_source=expect_source)
+    report = perf_compare.perf_compare(spec, caseset, evidence, baseline, expect_source=expect_source,
+                                       baseline_blocked_status=baseline_blocked_status)
     if report["summary"].get("status") == "exception":  # T6：例外态渲染仿真图，门循环前落盘+记 sha
         import perf_sim_plot
         svg_name = f"perf_sim_{spec['op'].lower()}.svg"
@@ -147,8 +155,10 @@ def run(spec_path, mode="mock", out_dir="reports/_run", defect=None, perf_slow=N
             overall, requires_human_cp = "PASSED_WITH_RISK", True
         elif st == "blocked_wait_gpu_benchmark":         # T8 缺外部 GPU 标杆：正规挂起、非 fail
             overall = "BLOCKED_WAIT_GPU_BENCHMARK"
-        elif st == "blocked_incomparable_timing_scope":  # T8 双边口径不可比（通常门已先判 FAILED）
+        elif st == "blocked_incomparable_timing_scope":  # T8 双边口径不可比（含 GPU 标杆内部混合 scope，gb-9）
             overall = "BLOCKED_INCOMPARABLE_TIMING_SCOPE"
+        elif st == "blocked_gpu_baseline_invalid":       # gb-9 外部 GPU 标杆有硬错被判废（≠缺标杆）
+            overall = "BLOCKED_GPU_BASELINE_INVALID"
         elif ps.get("perf_cases"):
             overall = f"性能未达成({st})"
         elif spec.get("perf", {}).get("baseline"):

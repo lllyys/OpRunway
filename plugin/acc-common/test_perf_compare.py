@@ -305,6 +305,18 @@ class ConfirmedBugRegressionTest(unittest.TestCase):
         rep = self._main_run(["--mock"])
         self.assertTrue(rep["summary"].get("baseline_mock"))
 
+    def test_gb9_baseline_none_routes_blocked_status(self):
+        """gb-9：baseline=None 但携 blocked_incomparable 挂起码 → 该状态（不落 wait）。"""
+        cs = _caseset([("p", ["性能", "大shape"], [1024, 1024])])
+        r = pc.perf_compare(_spec(0.95), cs, _ev({"p": (1.5, "kernel_only")}), None,
+                            expect_source="gpu_external",
+                            baseline_blocked_status="blocked_incomparable_timing_scope")
+        self.assertEqual(r["summary"]["status"], "blocked_incomparable_timing_scope")
+        r2 = pc.perf_compare(_spec(0.95), cs, _ev({"p": (1.5, "kernel_only")}), None,
+                             expect_source="gpu_external",
+                             baseline_blocked_status="blocked_gpu_baseline_invalid")
+        self.assertEqual(r2["summary"]["status"], "blocked_gpu_baseline_invalid")
+
 
 if __name__ == "__main__":
     unittest.main()
