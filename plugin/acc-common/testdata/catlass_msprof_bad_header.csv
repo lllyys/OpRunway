@@ -1,0 +1,5 @@
+Op Name,OP Type,Some Other Column,Block Dim
+
+oprunway_catlass_basic_matmul_950,MatMul,foo,20
+
+oprunway_catlass_basic_matmul_950,MatMul,bar,20

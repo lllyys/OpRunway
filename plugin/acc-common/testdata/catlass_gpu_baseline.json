@@ -1,0 +1,14 @@
+{
+  "source": "gpu-A100-cublas",
+  "scope": "kernel_only",
+  "tool": "nsight-compute",
+  "note": "外部 Task 3 提供的 GPU 标杆样例 fixture（synthetic·非真实测量）；字段对齐 ADR0006 GPU 基线契约",
+  "per_case": [
+    {"case_id": "catlassbasicmatmul_002", "dtype": "float32", "shape": [512, 512, 512],
+     "timing_scope": "kernel_only", "warmup": 10, "iters": 30, "sync": true,
+     "statistic": "median", "unit": "us", "value": 30.5, "us": 30.5,
+     "tool": "nsight-compute", "data_transfer_included": false},
+    {"case_id": "catlassbasicmatmul_extra", "dtype": "float32", "shape": [64, 64, 64],
+     "timing_scope": "kernel_only", "us": 3.2, "value": 3.2}
+  ]
+}
