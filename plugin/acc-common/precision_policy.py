@@ -315,8 +315,14 @@ def compute_metrics(out, golden, policy):
 
     入口统一（finding #1）：`o=asarray(out).reshape(-1)` / `g=asarray(golden).reshape(-1)`，
     size 不等 **fail-fast**（对齐 compare.py `reshape(-1)` + 长度不等直接 compare failed）。
-    dtype 校验（finding #2）：数值口径（会 astype float64）遇 complex/bf16/fp8 等未支持 dtype 直接
-    `ValueError`——**绝不静默**（complex→float64 会丢虚部返 0 误差，是假通过温床）。
+    dtype 校验（finding #2 + pv-4）：**out 与 golden 双侧 dtype 都校验**（旧洞：只校 golden 侧 →
+    out=complex64 时 `_replace_inf(o).astype(float64)` 静默丢虚部返 bad_count=0；out=uint8 与 golden=bool
+    跨型 `!=` 值相等返 exact_mismatch=0，都是假通过温床）。
+      · 数值口径（会 astype float64）：两侧都须 ∈ SUPPORTED_COMPUTE_DTYPES 且 **out.dtype == golden.dtype**，
+        任一侧 complex/bf16/fp8 或两侧不一致 → `ValueError` fail-fast。
+      · exact 口径：要求 **out.dtype == golden.dtype**（逐位比按同一 dtype），拒 uint8 与 bool 等跨型相等。
+    （合法产物两侧本就同 dtype——采集层 out=golden.copy()（mock）或 bool→astype(bool)/numerical 同 _NP[dtn]
+    （真机），四算子实测 on-disk 组合恒为 fp32/fp32·fp16/fp16·bool/bool，无 uint8↔bool，故严等不误伤。）
 
     按 policy.kind 分开实现：
       - ascendoptest_default → 复刻掩码：{bad_count, numel, max_abs_err, max_rel_err, nan_pair_count}
@@ -332,14 +338,25 @@ def compute_metrics(out, golden, policy):
                          f"（长度不等，对齐 compare.py 直接判失败，不静默）")
 
     if kind == EXACT:
-        # exact 用 != 逐位比，对 complex/bf16 无信息损失 → 不做数值 dtype 限制。
+        # exact 用 != 逐位比：**同一 dtype** 下对 complex/bf16 亦无信息损失，故不限制具体 dtype，
+        # 但 pv-4：**两侧 dtype 必须一致**——拒 uint8 与 bool 跨型逐位比（numpy `uint8([1,0]) != bool([T,F])`
+        # 做值提升后相等 → exact_mismatch=0 假通过；uint8 含值 2 vs bool 亦不该被判等价）。
+        if o.dtype != g.dtype:
+            raise ValueError(f"exact 口径 out/golden dtype 不一致：out={o.dtype.name} golden={g.dtype.name}"
+                             "（拒跨型逐位比，如 uint8 与 bool 会值相等假通过）——fail-fast，不静默")
         return {"exact_mismatch": int(np.count_nonzero(o != g)), "numel": int(g.size)}
 
     if kind == BEHAVIORAL:
         return {"numel": int(g.size)}
 
-    # 数值口径（下均 astype(float64)）：dtype 必须受支持——complex/bf16/fp8 等在此 fail-fast（finding #2）。
-    _check_compute_supported(g.dtype.name)
+    # 数值口径（下均 astype(float64)）：**out 与 golden 双侧** dtype 都须受支持且一致——complex/bf16/fp8
+    # 或跨型不一致在此 fail-fast（finding #2 + pv-4）。旧洞：只校 golden 侧，out=complex64 时
+    # `_replace_inf(o).astype(float64)` 静默丢虚部 → bad_count=0 假通过。out 侧先校（给 complex-out 更精确的错）。
+    _check_compute_supported(o.dtype.name)   # pv-4：out 侧（complex/bf16/fp8 out 在此 fail-fast）
+    _check_compute_supported(g.dtype.name)   # golden 侧（既有）
+    if o.dtype != g.dtype:
+        raise ValueError(f"数值口径 out/golden dtype 不一致：out={o.dtype.name} golden={g.dtype.name}"
+                         "（两侧须同 dtype，防 out=complex/错位 dtype 在 float64 化时丢信息假通过）——fail-fast")
 
     if kind == ASCENDOPTEST_DEFAULT:
         tol = float(policy["tolerance"])

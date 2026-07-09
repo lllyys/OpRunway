@@ -454,10 +454,15 @@ class StaticBuildGateTest(unittest.TestCase):
     def test_missing_add_subdirectory_flagged(self):
         d = tempfile.mkdtemp()
         try:
+            # 合法 catlass 根特征（scripts/build.sh + examples/）——否则被 _is_catlass_root
+            # 前置守卫（对抗门加固：堵伪 catlass 根蒙混）拦在前面，走不到 add_subdirectory 检测。
+            os.makedirs(os.path.join(d, "scripts"))
+            with open(os.path.join(d, "scripts", "build.sh"), "w") as f:
+                f.write("#!/bin/bash\n# stub\n")
             os.makedirs(os.path.join(d, "examples"))
             with open(os.path.join(d, "examples", "CMakeLists.txt"), "w") as f:
                 f.write("foreach(EXAMPLE ${EXAMPLE_LIST})\n  add_subdirectory(${EXAMPLE})\nendforeach()\n")
-            errs = self.gate.verify("3510", catlass_dir=d)   # 未 stage → 应报缺 add_subdirectory
+            errs = self.gate.verify("3510", catlass_dir=d)   # 合法根但未 stage → 应报缺 add_subdirectory
             self.assertTrue(any("add_subdirectory" in e for e in errs))
         finally:
             shutil.rmtree(d, ignore_errors=True)

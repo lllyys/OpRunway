@@ -244,14 +244,20 @@ def _sha256(path):
 # ========================= A 方案：evidence.metrics ↔ 磁盘产物 provenance 绑定 =========================
 def _pinned_product(d, rel):
     """把 per-case 产物（golden/out .npy）钉在 `<d>/work` 下解析——run_workflow 固定用 `<out_dir>/work` 承载
-    repo_adapter 的 work_dir 产物，而门 `--dir=<out_dir>`，故产物在门视角下位于 `work/` 子目录。绝对路径 /
-    `..` 逃逸 / symlink / 非普通文件 → None。安全模型同 `_pinned_file`，只是根落在 `<d>/work`。"""
+    repo_adapter 的 work_dir 产物，而门 `--dir=<out_dir>`，故产物在门视角下位于 `work/` 子目录。
+    绝对路径 / `rel` 含 `..` 组件 / 逃出 `<d>/work` / symlink / 非普通文件 → None。
+
+    pv-1 修正：**根落在 `realpath(<d>/work)`**（旧实现误用 `realpath(d)`——比 docstring 宽：`rel='../evil.npy'`
+    realpath 到 `<d>/evil.npy`，`commonpath([<d>,<d>/evil.npy])==<d>` 会通过 → 可读 work/ 之外、`<d>` 之内的文件）。
+    并**显式拒 `rel` 含 `..` 组件**（产物路径形如 `<cid>/out.npy`，`..` 无合法用途；不依赖 realpath 事后兜）。"""
     if not isinstance(rel, str) or not rel or os.path.isabs(rel):
         return None
+    if ".." in rel.replace("\\", "/").split("/"):   # pv-1：显式拒 `..` 组件（含 "../x"、"a/../b"、".."）
+        return None
+    base = os.path.realpath(os.path.join(d, "work"))   # pv-1：根落在 <d>/work（非 <d>）——与 joined 同根
     joined = os.path.join(d, "work", rel)
     if os.path.islink(joined):
         return None
-    base = os.path.realpath(d)
     target = os.path.realpath(joined)
     try:
         if os.path.commonpath([base, target]) != base:
@@ -282,6 +288,28 @@ def _metrics_match(recalc, claimed, cid, errs, tag="metrics"):
                 errs.append(f"{cid}: 重算 {tag}.{k}={rv} ≉ evidence {cv!r}（浮点超容差·疑伪造）")
 
 
+def _load_verified(np, path, want_sha, cid, kind, errs):
+    """pv-3：**一次性读入 bytes** → `hashlib.sha256(bytes)` 校 provenance → 从内存 `io.BytesIO` 交
+    `np.load(allow_pickle=False)`——消灭「`_sha256(path)` 读一次、`np.load(path)` 再 open 一次」的 TOCTOU
+    （两次 open 之间产物可被换：sha 属坏文件、load 读好文件）。sha 不符/加载失败 → 记 error 返回 None
+    （调用方据 None 提前返回，判 FAILED）。措辞保留「sha256/篡改」以维持既有断言。"""
+    import io
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as ex:
+        errs.append(f"{cid}: {kind} 产物读取失败（{type(ex).__name__}: {ex}）")
+        return None
+    if hashlib.sha256(data).hexdigest() != want_sha:
+        errs.append(f"{cid}: {kind} 产物 sha256 与 provenance 不符（产物被替换/篡改）")
+        return None
+    try:
+        return np.load(io.BytesIO(data), allow_pickle=False)   # allow_pickle=False：防恶意 .npy 反序列化
+    except Exception as ex:
+        errs.append(f"{cid}: {kind} 产物 np.load 失败（{type(ex).__name__}: {ex}）")
+        return None
+
+
 def _recompute_case(np, precision_policy, d, cid, exp, prec, errs):
     """单 case 的 evidence↔产物绑定：读 provenance 指的产物 → 先校 sha256 → np.load → 依 caseset policy 重算
     metrics → 与 evidence 自报 metrics 逐字段比对。任一环不符/缺失 → FAILED（mock 也不放宽）。"""
@@ -302,17 +330,10 @@ def _recompute_case(np, precision_policy, d, cid, exp, prec, errs):
     if gt is None or ot is None:
         return
     # 先校 sha256——产物字节被替换/篡改而 provenance 未同改 → 不符 → FAILED（堵「改 out.npy 字节」洞）。
-    if _sha256(gt) != prov["golden_sha256"]:
-        errs.append(f"{cid}: golden 产物 sha256 与 provenance 不符（产物被替换/篡改）")
-        return
-    if _sha256(ot) != prov["out_sha256"]:
-        errs.append(f"{cid}: out 产物 sha256 与 provenance 不符（产物字节被篡改）")
-        return
-    try:
-        golden = np.load(gt, allow_pickle=False)   # allow_pickle=False：防恶意 .npy 反序列化
-        out = np.load(ot, allow_pickle=False)
-    except Exception as ex:
-        errs.append(f"{cid}: 产物 np.load 失败（{type(ex).__name__}: {ex}）")
+    # pv-3：读 bytes 与 sha/load 共用同一份内存（_load_verified），杜绝二次 open 的 TOCTOU。
+    golden = _load_verified(np, gt, prov["golden_sha256"], cid, "golden", errs)
+    out = _load_verified(np, ot, prov["out_sha256"], cid, "out", errs)
+    if golden is None or out is None:
         return
     if not _is_int(prov["numel"]) or int(golden.size) != prov["numel"]:
         errs.append(f"{cid}: golden.numel={int(golden.size)} ≠ provenance.numel={prov['numel']!r}")
@@ -351,11 +372,13 @@ def _gate_precision_provenance(d, ev_list, exp_by_id, errs):
        只是它没测 NPU。产物↔真机来源的绑定须 OPRUNWAY_DONE 哨兵 / raw log hash / msprof 输出绑定（本轮不做）。"""
     try:
         import numpy as np
-    except ImportError as ex:
-        errs.append(f"numpy 不可用（{ex}）——A 方案产物重算无法进行，判 FAILED"
-                    "（绝不静默 skip，否则「删掉 numpy 即绕过」）")
+        import precision_policy
+    except Exception as ex:   # pv-5：不止 ImportError——破损/伪 numpy 抛 RuntimeError 等非 ImportError 亦须判
+        # FAILED（旧洞：`import precision_policy` 在 try 外 + 只兜 ImportError → 非 ImportError 穿透
+        # gate_task2→main 无 try → 门 traceback 崩溃，违反模块「抗坏输入…绝不崩溃」契约）。
+        errs.append(f"numpy/precision_policy 不可用（{type(ex).__name__}: {ex}）——A 方案产物重算无法进行，"
+                    "判 FAILED（绝不静默 skip，否则「删掉/弄坏 numpy 即绕过」；亦不 traceback 崩溃）")
         return
-    import precision_policy
     for e in ev_list:
         if not isinstance(e, dict) or not isinstance(e.get("case_id"), str) or not e["case_id"]:
             continue                                   # 缺/坏 case_id 已在上文报

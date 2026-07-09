@@ -270,6 +270,67 @@ class ComputeMetricsGuardTest(unittest.TestCase):
         self.assertTrue(np.isfinite(m["max_rel_err"]))
 
 
+class ComputeMetricsOutDtypeGuardTest(unittest.TestCase):
+    """pv-4：compute_metrics 从前只校 golden 侧 dtype，**从不校 out 侧** → out=complex 静默丢虚部返
+    bad_count=0；exact 下 out=uint8 与 golden=bool 跨型 `!=` 值相等返 exact_mismatch=0。双侧同校 + 严等后堵住。
+    合法产物两侧本就同 dtype（四算子实测 fp32/fp32·fp16/fp16·bool/bool），故严等不误伤。"""
+
+    def test_numerical_out_complex_golden_real_fail_fast(self):
+        """数值口径：out=complex64（真部==golden、虚部非零）、golden=float32 → 必 ValueError（旧洞：
+        `_replace_inf(o).astype(float64)` 静默丢虚部 → bad_count=0 假通过）。"""
+        pol = P.threshold_for("ascendoptest_default", "float32")
+        g = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        o = np.array([1 + 1000j, 2 + 1000j, 3 + 1000j], dtype=np.complex64)  # 真部==golden、虚部=1000j
+        with self.assertRaises(ValueError):
+            P.compute_metrics(o, g, pol)
+
+    def test_numerical_out_golden_dtype_mismatch_fail_fast(self):
+        """数值口径：out/golden 均受支持但 dtype 不一致（float64 vs float32）→ ValueError（防错位 dtype 化归丢信息）。"""
+        pol = P.threshold_for("ascendoptest_default", "float32")
+        g = np.array([1.0, 2.0], dtype=np.float32)
+        o = np.array([1.0, 2.0], dtype=np.float64)
+        with self.assertRaises(ValueError):
+            P.compute_metrics(o, g, pol)
+
+    def test_mere_mare_out_complex_fail_fast(self):
+        pol = P.threshold_for("ecosystem_mere_mare", "float32")
+        g = np.array([1.0], dtype=np.float32)
+        o = np.array([1 + 5j], dtype=np.complex64)
+        with self.assertRaises(ValueError):
+            P.compute_metrics(o, g, pol)
+
+    def test_exact_out_uint8_golden_bool_cross_type_fail_fast(self):
+        """exact：out=uint8[1,0,1]（跨型值等）、golden=bool[T,F,T] → 必 ValueError（旧洞：
+        numpy `uint8 != bool` 值提升后相等 → exact_mismatch=0 假通过）。"""
+        pol = P.threshold_for("exact", "bool")
+        g = np.array([True, False, True])
+        o = np.array([1, 0, 1], dtype=np.uint8)
+        with self.assertRaises(ValueError):
+            P.compute_metrics(o, g, pol)
+
+    def test_exact_out_uint8_value2_golden_bool_not_equivalent(self):
+        """exact：out=uint8 含值 2（非 {0,1}）vs bool golden → 不判等价（跨型即 ValueError，不给 exact_mismatch=0）。"""
+        pol = P.threshold_for("exact", "bool")
+        g = np.array([True, False, True])
+        o = np.array([2, 0, 1], dtype=np.uint8)
+        with self.assertRaises(ValueError):
+            P.compute_metrics(o, g, pol)
+
+    def test_legit_same_dtype_still_works(self):
+        """合法回归（严等不误伤）：bool/bool exact、fp32/fp32 数值、int8/int8 数值、同型 complex exact 逐位比 均正常。"""
+        pex = P.threshold_for("exact", "bool")
+        gb = np.array([True, False, True])
+        self.assertEqual(P.compute_metrics(gb.copy(), gb, pex)["exact_mismatch"], 0)
+        p32 = P.threshold_for("ascendoptest_default", "float32")
+        g32 = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        self.assertEqual(P.compute_metrics(g32.copy(), g32, p32)["bad_count"], 0)
+        p8 = P.threshold_for("ascendoptest_default", "int8")
+        g8 = np.array([1, -2, 3], dtype=np.int8)
+        self.assertEqual(P.compute_metrics(g8.copy(), g8, p8)["bad_count"], 0)
+        gc = np.array([1 + 2j, 3 + 4j], dtype=np.complex64)   # exact 同型 complex：逐位比无损、不误挡
+        self.assertEqual(P.compute_metrics(gc.copy(), gc, pex)["exact_mismatch"], 0)
+
+
 class AscendOpTestIntegerTest(unittest.TestCase):
     """finding #3：整数按 **原 dtype** 复刻 compare.py（保留溢出回绕），非 float64 近似。"""
     def test_int8_overflow_faithful_to_compare_py(self):

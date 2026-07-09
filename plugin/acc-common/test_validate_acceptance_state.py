@@ -309,6 +309,59 @@ class GateTest(unittest.TestCase):
             sys.modules["numpy"] = saved
         self.assertTrue(any("numpy" in e and "FAILED" in e for e in errs))
 
+    def test_task2_provenance_path_escape_dotdot_fails(self):
+        """pv-1：evidence.out_path 含 `..`（realpath 到 <d> 内、work 外的文件）→ 路径逃逸 → FAILED。
+        旧洞：`_pinned_product` base 误用 realpath(<d>)（非 <d>/work）→ `../evil.npy` realpath 到 <d>/evil.npy，
+        commonpath([<d>,<d>/evil.npy])==<d> 通过 → 读到 work 外文件。修后：显式拒 `..` + 根落 <d>/work。"""
+        _w(self.d, "caseset.json", CASESET)
+        # 攻击者在 <d> 内、work 外放 evil.npy（内容与合法 out 同 → sha 会自洽，旧洞下会被读进重算）
+        np.save(os.path.join(self.d, "evil.npy"), np.arange(16, dtype=np.float32))
+        ev = _ev(self.d, ["x_000", "x_001"],
+                 mutate=lambda i: {"out_path": "../evil.npy"} if i == "x_000" else {})
+        _w(self.d, "evidence.json", ev)
+        _w(self.d, "verdict.json", _vd("pass"))
+        errs = self._errs("task2")
+        self.assertTrue(any("x_000" in e and "逃逸" in e for e in errs))
+
+    def test_task2_provenance_path_escape_golden_dotdot_fails(self):
+        """pv-1 姊妹：golden_path 含 `..` 亦 FAILED（out/golden 两侧都钉死在 <d>/work）。"""
+        _w(self.d, "caseset.json", CASESET)
+        np.save(os.path.join(self.d, "evil_g.npy"), np.arange(16, dtype=np.float32))
+        ev = _ev(self.d, ["x_000", "x_001"],
+                 mutate=lambda i: {"golden_path": "x_000/../../evil_g.npy"} if i == "x_000" else {})
+        _w(self.d, "evidence.json", ev)
+        _w(self.d, "verdict.json", _vd("pass"))
+        errs = self._errs("task2")
+        self.assertTrue(any("x_000" in e and "逃逸" in e for e in errs))
+
+    def test_task2_provenance_broken_numpy_non_importerror_fails_not_crash(self):
+        """pv-5：破损/伪 numpy 抛**非 ImportError**（RuntimeError）→ 门判 FAILED、**不 traceback 崩溃**。
+        旧洞：`_gate_precision_provenance` 只 `except ImportError` + `import precision_policy` 在 try 外 →
+        非 ImportError 穿透 gate_task2→main（无 try）→ 门崩溃，违反模块「抗坏输入…绝不崩溃」契约。"""
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+
+        class _BoomFinder:  # 伪 numpy：re-import 时抛 RuntimeError（模拟破损 numpy）
+            def find_spec(self, name, path, target=None):
+                if name == "numpy":
+                    raise RuntimeError("boom: 伪 numpy 抛非 ImportError")
+                return None
+
+        saved = sys.modules.pop("numpy", None)     # 摘掉已加载 numpy → 下次 import 走 meta_path
+        boom = _BoomFinder()
+        sys.meta_path.insert(0, boom)
+        try:
+            errs = self._errs("task2")             # 不应抛异常（旧代码会 traceback 崩）
+        finally:
+            try:
+                sys.meta_path.remove(boom)
+            except ValueError:
+                pass
+            if saved is not None:
+                sys.modules["numpy"] = saved
+        self.assertTrue(any("FAILED" in e for e in errs))
+
     def test_task1_null_shape_no_crash(self):
         """finding #15：inputs[0].shape 为 null → 不崩、记 error（list(None) 会 TypeError）。"""
         cs = json.loads(json.dumps(CASESET))
