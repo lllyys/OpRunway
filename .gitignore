@@ -1,6 +1,9 @@
 # 外部克隆的算子仓（~688M、含 14 个嵌套 .git）——被测对象，不入库
 /repos/
 
+# 任务书/规格素材（本地输入，不入库）
+/spec/
+
 # 生成物：bureau gazette / gazette 打包 / 验收跑测产物 / pycache
 /gazette/
 oprunway-canon-gazette.zip

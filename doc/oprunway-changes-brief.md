@@ -1,6 +1,8 @@
 # OpRunway 改动简表
 
 > 倒序：最新在上。每天一节，一条一句，大白话。`待决` 置顶。
+>
+> ⚠ **2026-07-09 全局更正（覆盖以下所有历史条目）**：本表历史条目中**一切关于 Equal 的验收结论**——「真阳性 / A3 未达标 / 精度 fail / FAIL(精度) / 输出≠golden / #2890 双核 merged / 真机 6 挂 5 / 由 op_def 取 dtype 集」等——**均已作废**。正式确认：**#2890 系误配（非本社区 Equal 任务的交付 PR）、Equal 社区任务未验收通过、无已验收对应 PR**（详见下方 07-09 条）。历史条目**保留作流水、不逐条改写**，读时一律以本横幅 + 07-09 条为准。**仅 IsClose / Sign / Neg 的裁决与数据仍有效。**
 
 ## 待决（还没定的事）
 
@@ -12,8 +14,13 @@
 6. 远程 NPU 环境（哪台机、catlass 在哪 build、是否进 Docker）待用户提供后补进 CLAUDE.md。
 7. 优先级（Codex 排序）：Q3>Q4>Q5>Q6>Q1>Q2>Q8>Q9>Q7。完整见 `doc/oprunway-design.md` §13。
 
+## 2026-07-09
+
+- **Equal 再翻案·结论作废——「任务书↔PR 对应配错 + 空任务」**：正式确认 ① **PR #2890 不是本社区 Equal 任务的交付 PR**（我们误配）；② **Equal 社区任务至今未验收通过、无已验收对应 PR**。故下方 2026-07-08 那条「Equal A3 未达标·真阳性」**整体作废**（系拿误配 PR 去对不相干任务书判的）。**删** `doc/equal-a3-defect-report.md`；**改**台账（Equal 行→无有效 PR/无结论）+ TODO（Equal 硬约束整块换）+ 对应表（Equal→误配、未找到 +1=8）。**立新头号硬约束**（比「解耦」更上游）：验收前先验证「任务书↔PR 对应」本身——配错或对应「未验收空任务」→ 下游一切裁决作废。**待办**：canon 两决策页+一架构页走 bureau 门更正；公开台账 push + PR#2 body 更正待批（外发）；上报取消（无缺陷可报）。lint（bureau:lint）另跑完，2 survivor（ADR 0002 msTuner→msprof op superseded、1.2×→target_ratio drift，与上版一致），已写 `canon/lint/findings.md`。
+
 ## 2026-07-08
 
+- ⚠ **【本条结论已作废——见上方 2026-07-09 条：#2890 系误配、Equal 社区任务未验收，「真阳性」不成立。以下保留作历史流水。】** ~~Equal 归因解耦到底·纠正入档——技术真阳性(A3 未达标)、runner 清白；程序验收口径待确认~~：把 TODO + 台账里旧的错误归因（「全 0 = 我们 runner 的问题」）**纠正**为：Equal 真机 fail 是被测 [PR!2890](https://gitcode.com/cann/ops-math/merge_requests/2890) 在 A3 上未达任务书要求的**真阳性**，harness/runner 清白。**A3 硬要求四重锚定**：[任务书](https://gitcode.com/cann/cann-ops-competitions/blob/master/04_tasks/01_community-task-2026/docs/202604/Equal_task_doc.md) A2/A3（非模板：SlidingTileAttention 单 A2）+ 作者 design.md「目标 A2/A3 √」+ Sign/IsClose 同要求已交 A3 + 内置 TBE 在 A3 fp32/fp16 正常。**两层缺陷（实测）**：① `equal_def.cpp` 漏 `AddConfig("ascend910_93")`→build 静默丢 A3 kernel（`config/ascend910_93/` 空）→全 0、aclnn 却 ACL_SUCCESS；② 补注册后 double 通、**fp32/fp16 仍 `561103`**→float 的 A3 路没做完（「一行修好」被证伪）。产本地 bug 报告 `doc/equal-a3-defect-report.md`（含 PR/任务书链接，**未上报**）。⏳ PR 是否算官方验收通过在向组织方询问中（决定程序性结论/是否上报）。**教训升级**：全 0=输出未写、但可能是被测 kernel 没写非 harness；源码「一行诊断」须经真机重编坐实范围。
 - **bureau:compile —— 2026-07-08 checkpoint 蒸馏进 cabinet**：新建 5 页（`architecture/`：机器可校验门[verified]、cannbot 编排+跨CLI、跨CLI 中立 AGENTS.md 单一源；`decisions/`：门只管完整性不重判 verdict、对话式为唯一交付形态）+ catlass-bridge 页加「原型已删」补记 + `_verify.json` 记机器门制品 hash。build ✓ 37 dossier、0 orphan/contradiction；2 dangling 是 logbook 简写链（页存在、未用全 title）。均 proposed/verified，待 `bureau:review` 升 canonical。
 - **建已验证案例台账 `doc/oprunway-acceptance-evidence.md`**：把「用哪些真『任务书+PR』验收、什么裁决、证据」落成可查证台账（PR 经 gitcode API + `pr_facts.json` 双核：Sign #2702 / Equal #2890 / Neg #2680 均 merged，附真链接；IsClose 无社区任务 PR）。含真机失败真数据（Sign `sign_004` 9.68us vs TBE 6.32us ratio 0.653；Equal 真机 6 挂 5）+ 关键洞「mock 全过、真机才暴露→验收必须上真机」。GitHub PR #2 merged；GitCode 镜像靠此 doc 承载说明。
 - **P0 落地（机器可校验门 + 跨 CLI AGENTS.md）**：按落地设计 P0 实施 5 子任务、全绿——① 证据契约（复用 `evidence.json`）；② `acc-common/validate_acceptance_state.py` 三级**完整性门**（读**落盘** evidence.json 独立复核：**防跑子集报100% / 防 adapter 放宽阈值 / 防混 e2e 墙钟**；**只管证据可信完整、不重判精度 pass-fail**——合法精度 fail 不被门盖成 BLOCKED，真因由 verdict 表达）；③ 接进 `run_workflow.py` 做**硬 blocker**（门 FAILED→总体 `BLOCKED` 一票否决；无性能要求算子不跑 task3 门免误挡）；④ `test_validate_acceptance_state.py` **12 单测**（含子集/放宽阈值/混e2e/合法fail不挡/契约破损挡）；⑤ `AGENTS.md`（跨 CLI 中立**单一源**、Codex 免费读、含硬门规则）+ plugin.json 补 `agents` + `check_manifest_sync.py` 验同步防漂移。**实证**：干净 mock→PASS(exit0)、defect→FAIL(精度)不被盖(exit1)、篡改子集→门 FAILED。**codex 代码门（9维）审出 12 项并全修**：门重写为**抗坏输入**（坏/缺字段产物→判 FAILED 不崩溃/不静默放过：缺 id/threshold/precision/scope/summary、坏 JSON、status 枚举校验）、`run_workflow` 门 FAILED→**非零退出**（CI 可当硬失败）+ 落 `acceptance.json`（门控后验收裁决，区别于 raw verdict.json）、frontmatter 解析器加固（flow list/注释/标量）+ name/description 校验。**28 单测复验全绿**（含各坏输入反例、解析器、退出码集成）。

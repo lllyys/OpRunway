@@ -2,13 +2,14 @@
 
 来源：`gitcode.com/cann/cann-ops-competitions` 的 `04_tasks/01_community-task-2026/docs/202604`(4月) + `202605`(5月)，共 **41 份任务书**。PR 由 3 个 agent 在各算子仓里逐个查、用 `/pulls/<n>/files` 核实「改动落在该算子源码目录」+ 社区任务 issue 追踪号确认（不是只看标题）。
 
-**总览**：41 份任务书（其中 `Cast&EmbeddingDenseGrad` 等一份含 2 算子）。多数找到开发 PR；**7 个未找到 / 仅设计 / 未开发**（见末尾）；另 Gcd 找到 #1087 但在 2 月、无社区标记，算「找到但存疑」。**很多主开发 PR 还是 open（在评审）**。**一任务对多 PR 是常态**（设计文档 PR + 主开发 PR + 后续修复 + 多人并行提交）。
+**总览**：41 份任务书（其中 `Cast&EmbeddingDenseGrad` 等一份含 2 算子）。多数找到开发 PR；**7 个未找到 / 仅设计 / 未开发**（见末尾；**+ Equal 后经确认为误配·实为未验收 → 合计 8**）；另 Gcd 找到 #1087 但在 2 月、无社区标记，算「找到但存疑」。**很多主开发 PR 还是 open（在评审）**。**一任务对多 PR 是常态**（设计文档 PR + 主开发 PR + 后续修复 + 多人并行提交）。
+> ⚠ **Equal 更正（2026-07-09）**：原记「Equal→#2890 merged·高置信」系**误配**（正式确认 #2890 非本任务交付 PR），Equal 社区任务实为**未验收通过、无已验收 PR** → 「未找到」实际应 **+1（=8）**。这正是本表「按标题/算子名匹配不可靠」风险的又一实例：对应须以 issue 追踪号 + 改动落点复核，仍会误配。
 
 ## ops-math（18）
 
 | 月 | 算子 | 主开发 PR（状态） | 其他相关 PR | 置信 | 落点 / issue |
 |---|---|---|---|---|---|
-| 04 | Equal | #2890 merged | #3289、#3419 后续(golden/用例) | 高 | experimental/math/equal；issue#368（排除#2303 ApproximateEqual） |
+| 04 | Equal | **未找到已验收 PR（任务未验收通过）** | ~~#2890 merged~~ **误配**（2026-07-09 正式确认：#2890 非本任务交付 PR）；#3289/#3419 待重核 | — | experimental/math/equal；issue#368（排除#2303 ApproximateEqual） |
 | 04 | IsClose | #2943 merged | #2873 早期同款；#3607 后续st | 高 | experimental/math/is_close；issue#1629/#384 |
 | 04 | MaxUnpool2d | **未找到** | #2831 仅设计文档 | — | 无实现 PR、无社区 issue |
 | 04 | Neg | #2680 merged | #2540/#2566 设计；#2128 另条 AICPU neg | 高 | experimental/math/neg；issue#375 |
@@ -60,14 +61,15 @@
 | SlidingTileAttention | ops-transformer | **仅设计 #4853** | 实现未找到 | 高 | experimental/attention 无该子目录 |
 | aclsolverCheevj | ops-solver | **未找到** | issue#76 需求(open) | 高 | 未开发（Hermitian 特征值 Jacobi） |
 
-## 7 个未找到 / 仅设计 / 未开发（对工作流设计重要）
+## 8 个未找到 / 仅设计 / 未开发 / 误配（对工作流设计重要）
 
 - **未开发 / 复用已有**：MaxUnpool3d（复用 gather_elements）、aclsolverCheevj（仅需求 issue #76）、EmbeddingDenseGrad（无实现无 issue）。
 - **仅设计、无实现**：SlidingTileAttention（只有方案 PR #4853）、MaxUnpool2d（仅设计文档 #2831）。
 - **dtype 已被批量 PR 引入、无离散交付**：UpsampleNearest3d（uint8 混在批量 #90 里）。
 - **成熟算子、开发早于数据窗口、无社区任务交付 PR**：MinDim&MaxDim（疑 ArgMin/MaxWithValue）。
+- **后验发现的误配（实为未验收）**：Equal——原误记为 #2890(merged)·高置信，2026-07-09 正式确认 #2890 **非本任务交付 PR**，Equal 社区任务**未验收通过、无已验收 PR**。
 
-> 合计 7 个：MaxUnpool2d、EmbeddingDenseGrad、MinDim&MaxDim、MaxUnpool3d、UpsampleNearest3d、SlidingTileAttention、aclsolverCheevj。**另 Gcd 找到 #1087（merged）但在 2 月、无「社区任务」标记——算「找到但存疑」，不计入这 7 个。**
+> 合计 8 个：MaxUnpool2d、EmbeddingDenseGrad、MinDim&MaxDim、MaxUnpool3d、UpsampleNearest3d、SlidingTileAttention、aclsolverCheevj、**Equal（#2890 误配·任务未验收，2026-07-09 补）**。**另 Gcd 找到 #1087（merged）但在 2 月、无「社区任务」标记——算「找到但存疑」，不计入。**
 
 ## 对工作流设计的输入（规律）
 

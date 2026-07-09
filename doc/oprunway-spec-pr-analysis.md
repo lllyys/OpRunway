@@ -33,7 +33,7 @@
 ⚠ **diff 大小 ≠ 影响面**：「改已有算子」原地改（Relu/Sigmoid/upsample）vs「新建目录」整包首次开源（IndexFill/SyncBatchNorm），后者表面全新增。
 
 ### 测试 / golden / 性能证据完整度差异极大
-- **测试完整度**：零测试（Sign/Equal，只有 aclnn example + printf）→ UT + gen/compare golden（IsClose/foreach）→ 全套 ST + UT + **自验证报告进 PR**（Pdist）。
+- **测试完整度**：零测试（Sign；~~Equal~~ 此前样本 #2890 已确认误配、不计作 Equal 社区任务样本）→ UT + gen/compare golden（IsClose/foreach）→ 全套 ST + UT + **自验证报告进 PR**（Pdist）。
 - **golden 来源多样**：numpy `np.isclose` / torch `interpolate` / scipy `solve_triangular` / host `std::unordered_map` / 内嵌 C++ double / 内建 host 参考对拍。
 - **性能证据基本缺席**：仓内多**无 msprof/perf 脚本**；少数（Trsm 有 `Duration μs` 报告、dynamicMap 有 `std::chrono` 墙钟）。精度也多外包 AscendOpTest。
 - **PR 自带 UT ≠ 精度验收**：部分 UT 只覆盖 workspace/shape/error 分支（如 Fmod 仅 `TestGetWorkspaceSize`、Mod kernel UT 仅 `SUCCEED()`）；许多 PR 的 golden / 验收证据在 PR 外（AscendOpTest / 外链自验证报告）。
@@ -42,7 +42,7 @@
 
 ## 三、给 workflow 设计的关键信号
 
-1. **任务书是权威，PR 不逐项对齐** → Task 1 生成用例**以任务书为准**，把「任务书↔PR 落差」显式标为**待确认项**。实证落差：Fmod 任务书 INT16／PR 交付 INT32；im2col 任务书 A2/A3／PR 主攻 950；RightShift 10× 性能目标／PR 零证据。
+1. **先验证「任务书↔PR 对应」本身；对应成立后，任务书才是权威、PR 不逐项对齐** → 先确认「这个 PR 确是这份任务书的交付」（**Equal 即栽在此：#2890 误配、任务实为未验收**），对应成立后 Task 1 才**以任务书为准**、把「任务书↔PR 落差」标为**待确认项**。实证落差：Fmod 任务书 INT16／PR 交付 INT32；im2col 任务书 A2/A3／PR 主攻 950；RightShift 10× 性能目标／PR 零证据。
 2. **证据得 OpRunway 自己产** → 性能证据基本缺席、精度证据强弱不一。**这正是 OpRunway 的价值**：自产精度 + 性能证据，别指望 PR 里有、别把「PR 有测试」当「验收过了」。
 3. **契约要覆盖的多样性维度**：
    - **验证模式**：数值型（golden + 阈值）／ 行为型（返回码 + 计时，如 Sleep）／ 精确型（整数/bool **二进制一致**）。
@@ -55,10 +55,12 @@
 
 ## 附：18 个样本速查
 
+> ⚠ **Equal 行更正（2026-07-09）**：该行「改动 / PR 内测试」等 **PR 侧**数据取自 #2890，而 #2890 经正式确认**非本社区 Equal 任务的交付 PR**（误配），且 Equal 社区任务实为**未验收**——故该行 PR 侧数据**不可作 Equal 任务的样本**；任务书侧口径（TBE / AscendOpTest / TBE 95%）仍以任务书为准。聚合规律不受此一样本影响。
+
 | 算子 | 仓 | 改动 | 参考 | 精度 oracle | 性能基线 | 工程范式 | PR 内测试/golden |
 |---|---|---|---|---|---|---|---|
 | Sign | ops-math | 加 int16 | TBE | AscendOpTest | TBE 无劣化 | 标准GE | 无（仅 example） |
-| Equal | ops-math | 语义改造 | TBE | AscendOpTest | TBE 95% | 标准GE | 无（5 example） |
+| Equal〔⚠ #2890 误配·见上注〕 | ops-math | 语义改造 | TBE | AscendOpTest | TBE 95% | 标准GE | 无（5 example） |
 | IsClose | ops-math | 语义改造 | TBE | AscendOpTest | TBE 95% | 标准GE | ut + numpy golden |
 | Pdist | ops-math | 新算子+修复 | TBE/torch | AscendOpTest | TBE 95% | 标准GE+op_graph | st+ut+**自验证报告** |
 | Fmod | ops-math | 新算子（任务 INT16/PR INT32） | TBE | AscendOpTest | TBE 95% | 标准GE | ut（仅 WS）·golden 外 |
