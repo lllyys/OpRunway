@@ -216,15 +216,17 @@ class PassedWithRiskE2ETest(unittest.TestCase):
         with open(spec_path, "w", encoding="utf-8") as f:
             json.dump(spec, f, ensure_ascii=False)
         out = os.path.join(self.d, "run")
+        # T7：语义化稳定 id——Sign fp32 的 (16,) 用例 = sign_float32_16_varied（弃旧索引 sign_000）
+        defect_id = "sign_float32_16_varied"
         r = subprocess.run([sys.executable, os.path.join(_HERE, "run_workflow.py"), spec_path,
-                            "--mode", "mock", "--out", out, "--defect", "sign_000"],
+                            "--mode", "mock", "--out", out, "--defect", defect_id],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         with open(os.path.join(out, "acceptance.json"), encoding="utf-8") as f:
             acc = json.load(f)
         self.assertEqual(acc["overall"], "PASSED_WITH_RISK")
         self.assertTrue(acc["requires_human_cp"])
-        self.assertIn("sign_000", acc["three_layer"]["risk_cases"])
+        self.assertIn(defect_id, acc["three_layer"]["risk_cases"])
 
 
 class ComputeMetricsGuardTest(unittest.TestCase):

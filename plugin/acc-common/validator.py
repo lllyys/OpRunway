@@ -129,11 +129,12 @@ def _canonical(spec_standard, cdtype):
     return pol, tpid
 
 
-def _precision_contract(spec_standard, exp, ev_prec):
-    """口径三处一致（spec 权威）——防 caseset+evidence 同步放宽（finding #6/#7）。返回 (ok, why)。
+def _precision_contract(eff_standard, exp, ev_prec):
+    """口径三处一致（spec 权威 + T7 per-case 有效标准）——防 caseset+evidence 同步放宽（finding #6/#7）。返回 (ok, why)。
 
-    以 spec_standard + case dtype 复算 canonical policy，要求 spec-canonical / caseset / evidence
-    三处 standard + tolerance_policy_id + 结构化 policy + threshold digest **全等**；acceptance 另校验。
+    以 **eff_standard**（据 spec + case dtype/compare 复算，int→EXACT 不可绕过）+ case dtype 复算 canonical policy，
+    要求 canonical / caseset / evidence 三处 standard + tolerance_policy_id + 结构化 policy + threshold digest **全等**；
+    acceptance 另校验。
     """
     if not isinstance(ev_prec, dict):
         return False, "evidence 缺 precision（非对象）"
@@ -143,13 +144,13 @@ def _precision_contract(spec_standard, exp, ev_prec):
         return False, "evidence.precision 缺结构化 policy"
     cdtype = _case_compare_dtype(exp)
     try:
-        canon_pol, canon_tpid = _canonical(spec_standard, cdtype)
+        canon_pol, canon_tpid = _canonical(eff_standard, cdtype)
     except (ValueError, KeyError) as ex:
-        return False, f"无法据 spec 复算 canonical（standard={spec_standard} dtype={cdtype}）：{ex}"
+        return False, f"无法据 spec 复算 canonical（standard={eff_standard} dtype={cdtype}）：{ex}"
     canon_digest = precision_policy.threshold_digest(canon_pol)
     for side, obj in (("caseset", exp), ("evidence", ev_prec)):
-        if obj.get("standard") != spec_standard:
-            return False, f"{side}.standard={obj.get('standard')} ≠ spec {spec_standard}"
+        if obj.get("standard") != eff_standard:
+            return False, f"{side}.standard={obj.get('standard')} ≠ 有效标准 {eff_standard}"
         if obj.get("tolerance_policy_id") != canon_tpid:
             return False, (f"{side}.tolerance_policy_id={obj.get('tolerance_policy_id')} "
                            f"≠ spec-canonical {canon_tpid}")
@@ -284,11 +285,16 @@ def validate(spec, caseset, evidence):
         if spec_standard is None:
             row.update(功能="fail", 判据="spec 精度标准不可解析，无法据 spec 校验口径")
             per.append(row); continue
-        if exp.get("standard") != spec_standard:
+        # T7：per-case **有效标准**（int→EXACT 不可绕过；bf16 靠 compare=exact_equal 收紧；余=spec 标准）。
+        # 据 cdtype+compare 复算，故 caseset 同步误标别的口径也过不了下方三处一致门（防放宽仍成立）。
+        cdtype = _case_compare_dtype(exp)
+        eff_std = precision_policy.effective_standard(spec_standard, cdtype, exp.get("compare"))
+        if exp.get("standard") != eff_std:
             row.update(功能="fail",
-                       判据=f"standard 与 spec 不一致 spec={spec_standard}/case={exp.get('standard')}")
+                       判据=f"standard 与有效标准不一致 eff={eff_std}/case={exp.get('standard')}"
+                            f"（spec={spec_standard} dtype={cdtype} compare={exp.get('compare')}）")
             per.append(row); continue
-        ok, why = _precision_contract(spec_standard, exp, ev_prec)
+        ok, why = _precision_contract(eff_std, exp, ev_prec)
         if not ok:
             row.update(功能="fail", 判据=f"精度口径{why}")
             per.append(row); continue

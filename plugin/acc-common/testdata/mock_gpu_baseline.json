@@ -1,9 +1,9 @@
 {
-  "_note": "人读示例（codex M3）：A100 · kernel_only · us · median · warmup20/iters50 · data_transfer_included=false。⚠ 单测不静态依赖本文件——caseset 由 gen_cases 运行时产、baseline 程序化构造，防 fixture 漂移；本文件仅作契约示例。case_id/shape 对应 gpu_demo.spec.json(Sign) 的性能维用例 sign_004(1024×1024 float32)。",
+  "_note": "人读示例（codex M3）：A100 · kernel_only · us · median · warmup20/iters50 · data_transfer_included=false。⚠ 单测不静态依赖本文件——caseset 由 gen_cases 运行时产、baseline 程序化构造，防 fixture 漂移；本文件仅作契约示例。case_id/shape 对应 gpu_demo.spec.json(Sign) 的性能维用例 sign_float32_1024x1024_perf(1024×1024 float32)。⚠ T7 语义化稳定 id 迁移：旧索引 id sign_004 → sign_float32_1024x1024_perf。",
   "contract_version": "0.1.0-provisional",
   "cases": [
     {
-      "case_id": "sign_004",
+      "case_id": "sign_float32_1024x1024_perf",
       "device": "NVIDIA A100-SXM4-80GB",
       "dtype": "float32",
       "shape": [1024, 1024],

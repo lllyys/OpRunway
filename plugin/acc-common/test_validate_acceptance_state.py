@@ -361,7 +361,8 @@ class RunWorkflowExitTest(unittest.TestCase):
         self.assertEqual(self._run().returncode, 0)
 
     def test_defect_exit_nonzero(self):
-        self.assertNotEqual(self._run("--defect", "isclose_000").returncode, 0)
+        # T7 语义化稳定 id：IsClose fp32 的 (16,) 用例 = isclose_float32_16_pairfar（弃旧索引 isclose_000）
+        self.assertNotEqual(self._run("--defect", "isclose_float32_16_pairfar").returncode, 0)
 
 
 # ===== T6/T8 perf 包新增（自包含，与上方 GateTest 无耦合，便于与主树 T5 干净合并）=====
@@ -475,7 +476,9 @@ class RunWorkflowPerfPackageTest(unittest.TestCase):
             return json.load(f)
 
     def test_perf_slow_passed_with_risk(self):
-        r = self._run("specs/sign.spec.json", "--perf-slow", "sign_005,sign_006")
+        # T7 语义化稳定 id：Sign 的两个小 shape 性能用例 = sign_float32_{64,256}_perfsmall（弃旧索引 sign_005/006）
+        r = self._run("specs/sign.spec.json", "--perf-slow",
+                      "sign_float32_64_perfsmall,sign_float32_256_perfsmall")
         self.assertEqual(r.returncode, 2)                       # PASSED_WITH_RISK
         acc = self._json("acceptance.json")
         self.assertEqual(acc["state"], "PASSED_WITH_RISK")

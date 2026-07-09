@@ -191,6 +191,38 @@ def tolerance_policy_id(standard, dtype):
     return f"{standard}:{dtype}"
 
 
+# ---- 整数 dtype 判定 + per-case 有效标准（T7 dtype 扩面） ----
+_INTEGER_DTYPES = frozenset({"int8", "int16", "int32", "int64",
+                             "uint8", "uint16", "uint32", "uint64"})
+
+
+def is_integer_dtype(name):
+    """按 dtype 名判整数（含无符号）——rule-catalog §1.1『int→exact_equal』的判据。"""
+    return name in _INTEGER_DTYPES
+
+
+def effective_standard(spec_standard, cdtype, compare=None):
+    """per-case **有效标准**（T7；rule-catalog §1.1 + canonical harness 职责）——只会**收紧**、绝不放宽。
+
+    - spec 已是 exact/behavioral → 原样（per-case 无权改）。
+    - 数值 spec 但 case 的比对 dtype 是**整数** → 强制 EXACT（§1.1，**不可绕过**：即便 caseset 声明别的，
+      validator 据 cdtype 复算也会得 EXACT，同步放宽无效）。
+    - 数值 spec 且 case 显式 `compare=="exact_equal"`（算子输出在该 dtype 网格上精确可表示，如 Sign/Neg 的
+      bf16/fp16）→ EXACT。这是**更严**方向（阈值 0），故安全；反向（把 exact 降级为数值）本函数不提供。
+    - 其余 → 沿用 spec 标准（fp32/fp16 数值不变，**向后兼容**）。
+
+    ⚠ bf16 走此路时 cdtype 记逻辑名 'bfloat16'（非整数）→ 只能靠 compare=='exact_equal' 收紧；若误标
+    compare!='exact_equal'，下游 threshold_for(spec_standard,'bfloat16') 会 fail-fast，不会静默放行。
+    """
+    if spec_standard in (EXACT, BEHAVIORAL):
+        return spec_standard
+    if cdtype is not None and is_integer_dtype(cdtype):
+        return EXACT
+    if compare == "exact_equal":
+        return EXACT
+    return spec_standard
+
+
 def threshold_digest(policy):
     """向后兼容的标量阈值 digest（旧 gate/spec 的 precision.threshold 语义）。"""
     kind = policy.get("kind")

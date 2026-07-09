@@ -33,7 +33,11 @@
 
 3. **接真 AscendOpTest oracle / MERE·MARE**：现在是简化的 exact-mismatch / max_rel_err，任务书要的是 AscendOpTest 工具默认阈值（数值算子还要 MERE·MARE 按 dtype）。
 4. **性能小shape例外**：任务书要求「<10us 场景相差 3us 时，出性能仿真图 + 分析证明与 TBE 一致/更优」——现在没实现。
-5. **dtype / attr 覆盖扩面**：runner 只支持 float32/16；attr 只测默认值（如 IsClose 的 `equal_nan=True`、不同 rtol/atol 分支没覆盖）。补 int/bf16 + attr 值矩阵。
+5. **dtype / attr 覆盖扩面（T7）**：
+   - ✅ **Track A（本地能力·已落）**：`gen_cases`/`repo_adapter`/`validator`/`precision_policy` 扩 int16/int32/**bfloat16**（位级双表示 uint16，零依赖）+ **attr_matrix**（显式列表）+ **storage_dtype/per-case compare/case_origin/rule_ref** 契约 + **语义化稳定 case_id**。用 `test_fixtures/{sign_dtype,isclose_attr}.spec.json`（非权威 fixture）本地 mock 端到端 + 机器门全绿（`test_gen_cases_dtype_attr.py` 41 测）。int→exact_equal、Sign/Neg 的 bf16/fp16→exact_equal（输出精确可表示）；fp32/fp16 数值→ascendoptest(rel_err)，向后兼容。
+   - ⏳ **Track B（挂任务书原文 + 用户批·未做）**：把新增 dtype 提进**权威** spec 的 `params[].dtype`（Sign 已 `change.dtypes_added:[int16]`、Neg `task_pr_gaps` 已列 bf16/int/uint8 缺口）——触碰 canon 硬约束「dtype 从任务书推不猜」，须 gate。**权威 4 spec 本轮未动。**
+   - ⏳ **Track C（挂真机 NPU + pr_facts·未做）**：`runner.cpp` 的 int/bf16 分支 + `neg_runner`（当前 new_example 仅 sign/equal/isclose）——按 acc-runner 纪律须**从算子自带 example/op_def 抠入口+支持 dtype、不猜 header**，且要真机编译 + msprof 数值校验。`repo_adapter.run_new_example` 遇 int/bf16 现 **fail-fast 标 Track C**（不静默跑）。**Neg 的 int-min 取负 / uint8 回绕(256-x) / int64 溢出语义 = out-of-scope**（neg.spec `task_pr_gaps` 已列）。
+   - ⏳ **散文/canon 待办**：acc-spec skill 的「何时/如何产 attr_matrix」抽取规则（skills worktree 领）；storage_dtype 契约若定为 durable → bureau capture→compile→review（未跑）。
 
 ## P2 · 广度 + 收尾
 

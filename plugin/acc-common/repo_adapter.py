@@ -8,8 +8,9 @@
 import json, math, os, posixpath, re, shlex, subprocess, sys
 import numpy as np
 import precision_policy
+import gen_cases  # T7：复用 bf16 位级 codec（_f32_to_bf16_uint16/_bf16_uint16_to_f32）+ 原生 dtype 表
 
-_NP = {"float32": np.float32, "float16": np.float16}
+_NP = {"float32": np.float32, "float16": np.float16}  # **runner-supported**（真机 new_example 用）；int/bf16 属 Track C
 _ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")     # case_id / host / op：拒空白、slash、shell 特殊字符
 _SOC_RE = re.compile(r"^ascend[0-9a-z_]+$")
 _PATH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")  # 远端路径：拒 shell 特殊字符（防 scp/ssh 拼接注入）
@@ -51,6 +52,29 @@ def _safe(work_dir, rel):
     if p != base and not p.startswith(base + os.sep):
         raise ValueError(f"path escapes work_dir: {rel}")
     return p
+
+
+def materialize_input(logical, meta):
+    """X_logical（numpy 逻辑值）-> X_bin 物理字节缓冲（numpy storage dtype），**独立于 logical 另造**
+    （canonical harness 职责#2/#3：喂 kernel 的物理字节与喂 golden 的逻辑值分两份）。
+    bf16：逻辑 fp32-on-grid -> uint16 位模式；int/fp：astype 原生 storage。供本地 round-trip 单测（codex#9）。"""
+    dtn = meta["dtype"]
+    if dtn == gen_cases._BF16:
+        return gen_cases._f32_to_bf16_uint16(np.asarray(logical, dtype=np.float32))
+    if dtn not in gen_cases._NATIVE:
+        raise ValueError(f"materialize_input: 未知 dtype {dtn!r}")
+    return np.ascontiguousarray(logical, dtype=gen_cases._NATIVE[dtn])
+
+
+def readback_output(raw_storage, meta):
+    """X_bin 物理字节（numpy storage dtype）读回 -> 逻辑 numpy（与 golden 比对用）。
+    bf16：uint16 位模式 -> fp32-on-grid；int/fp：原样。round-trip 与 materialize_input 互逆（codex#9）。"""
+    dtn = meta["dtype"]
+    if dtn == gen_cases._BF16:
+        return gen_cases._bf16_uint16_to_f32(np.asarray(raw_storage, dtype=np.uint16))
+    if dtn not in gen_cases._NATIVE:
+        raise ValueError(f"readback_output: 未知 dtype {dtn!r}")
+    return np.asarray(raw_storage, dtype=gen_cases._NATIVE[dtn])
 
 
 def _precision_evidence(case, out, golden, out_path, ascendoptest_bool=None):
@@ -101,12 +125,14 @@ def run_mock(caseset, work_dir, defect_cases=None):
     defect_cases = set(defect_cases or [])
     ev = []
     for c in caseset["cases"]:
-        # 加载并校验所有 input（v0 mock 也核，防 caseset 契约漂移）
+        # 加载并校验所有 input（v0 mock 也核，防 caseset 契约漂移）。
+        # T7：x{j}.npy 存**物理**（bf16→uint16 位模式），故比 storage_dtype（缺省=逻辑 dtype，向后兼容）。
         for inp in c["inputs"]:
             arr = np.load(_safe(work_dir, inp["path"]))
-            if list(arr.shape) != list(inp["shape"]) or str(arr.dtype) != inp["dtype"]:
+            storage = inp.get("storage_dtype", inp["dtype"])
+            if list(arr.shape) != list(inp["shape"]) or str(arr.dtype) != storage:
                 raise ValueError(f"{c['id']} input {inp['name']}: got {arr.dtype}{list(arr.shape)} "
-                                 f"≠ caseset {inp['dtype']}{inp['shape']}")
+                                 f"≠ caseset storage {storage}{inp['shape']}（逻辑 dtype={inp['dtype']}）")
         golden = np.load(_safe(work_dir, c["expected"]["golden_path"]))
         out = golden.copy()  # mock：完美 NPU = golden
         if c["id"] in defect_cases and out.size:  # 注入缺陷 → 让 validator 现 fail
@@ -168,17 +194,19 @@ def run_new_example(caseset, work_dir, defect_cases=None):
         cid = c["id"]
         _check_id("case_id", cid)
         dtn = c["inputs"][0]["dtype"]
-        if dtn not in _NP:
-            raise ValueError(f"{cid}: runner v1 不支持 dtype {dtn}（仅 {sorted(_NP)}）")
+        if dtn not in _NP:  # T7：int16/int32/bfloat16 的 runner.cpp 分支属 **Track C**（挂真机+pr_facts）
+            raise ValueError(f"{cid}: runner v1 仅支持 {sorted(_NP)}；dtype {dtn!r} 属 Track C——"
+                             f"runner.cpp 新 dtype 分支须从算子 example/op_def 抠+真机验证，见 doc/oprunway-todo.md gap")
         if any(inp["dtype"] != dtn for inp in c["inputs"]):  # runner v1 全输入同 dtype，拒静默强转
             raise ValueError(f"{cid}: 多输入 dtype 不一致 {[i['dtype'] for i in c['inputs']]}"
                              f"（runner v1 要求同 dtype；混合 dtype 需 per-input manifest）")
         arrs = []
         for inp in c["inputs"]:
             arr = np.load(_safe(work_dir, inp["path"]))
-            if list(arr.shape) != list(inp["shape"]) or str(arr.dtype) != inp["dtype"]:
+            storage = inp.get("storage_dtype", inp["dtype"])  # T7：物理落盘 dtype（bf16→uint16；native=逻辑）
+            if list(arr.shape) != list(inp["shape"]) or str(arr.dtype) != storage:
                 raise ValueError(f"{cid} {inp['name']}: npy {arr.dtype}{list(arr.shape)} "
-                                 f"≠ caseset {inp['dtype']}{inp['shape']}")
+                                 f"≠ caseset storage {storage}{inp['shape']}（逻辑 {inp['dtype']}）")
             arrs.append(arr)
         out_shape = np.broadcast_shapes(*[a.shape for a in arrs])
         if int(np.prod(out_shape)) == 0:
@@ -190,8 +218,9 @@ def run_new_example(caseset, work_dir, defect_cases=None):
                              f"{np.dtype(exp_dt).name}{tuple(out_shape)}")
         for j, arr in enumerate(arrs):
             if arr.shape != out_shape:
-                arr = np.broadcast_to(arr, out_shape).copy()
-            arr.astype(_NP[dtn]).tofile(_safe(work_dir, f"{cid}/x{j + 1}.bin"))
+                arr = np.broadcast_to(arr, out_shape).copy()   # 广播 materialize 为独立 X_bin（不与 npy 共 buffer）
+            # T7：经 materialize_input 落物理字节（当前 dtn∈fp32/fp16，storage=逻辑；bf16/int 已在上文 Track C 拦截）
+            materialize_input(arr, {"dtype": dtn}).tofile(_safe(work_dir, f"{cid}/x{j + 1}.bin"))
         at = c["attrs"]
         attr_vals = ["1" if at.get(a) is True else ("0" if at.get(a) is False else str(at.get(a)))
                      for a in attr_order]

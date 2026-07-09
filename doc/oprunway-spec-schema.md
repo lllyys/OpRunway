@@ -46,12 +46,29 @@
                                           //   机读阈值独立字段(when_us_below/abs_gap_us_within)供 perf_compare；
                                           //   legacy 纯字符串向后兼容(perf_compare 正则兜底解析)
   },
+  "attr_matrix?": [ { } ],                // ★ T7：**显式 attr 字典列表**（非笛卡尔）。每项在**一个代表 (dtype0,(4,4))**
+                                          //   产**恰好一条** case、golden 用该项 attrs；缺省 → 现默认单值(向后兼容)。
+                                          //   每项是 attr 覆盖字典(如 [{equal_nan:false},{equal_nan:true},{rtol:1e-2,atol:1e-3}])；
+                                          //   合法值类型随对应 attr(bool/number)；显式含 equal_nan(float)→ gen_cases 用 nan_pair 数据令其生效。
   "deliverables": ["string"],
   "task_pr_gaps": ["string"]              // 任务书↔PR 落差（待确认）
 }
 ```
 
 ★ = 坐实过程中新加的字段（见 §3）。
+
+### 1.1 T7 caseset 契约扩展（gen_cases 产物·下游读它）
+
+`spec.json` 之外，T7 dtype/attr 扩面在 **caseset.json** 的 `inputs[]` / `expected` 增了几处契约（machine-only、由确定性 `gen_cases` 落，validator/机器门校验）：
+
+| 字段 | 位置 | 语义 |
+|---|---|---|
+| `storage_dtype` | `inputs[]` | **物理落盘 dtype**（喂 kernel 的字节 dtype）。**仅当物理≠逻辑时出现**（bf16→`"uint16"`；fp32/fp16/int native 省略=逻辑 dtype，向后兼容）。canonical harness 职责#2/#3：`x{j}.npy` 存物理位模式(X_bin)、`golden.npy` 存 op(逻辑值)，**两份分造禁共用 reshape**。 |
+| `compare` | `expected` | per-case 比对分支：`exact_equal`（int / Sign·Neg 的 bf16·fp16——输出精确可表示）\| `rel_err`（fp32/fp16 数值，沿用平台标准）。有效标准由 `precision_policy.effective_standard(spec_standard, compare_dtype, compare)` 派生：**int→EXACT 不可绕过**；bf16 靠 `compare=="exact_equal"` 收紧（误标非 exact_equal → 下游 `threshold_for` fail-fast，不静默放行）。 |
+| `compare_dtype` | `expected` | 逻辑比对 dtype 名（bf16 记 `"bfloat16"`，非 golden 的 fp32）——供有效标准派生与覆盖矩阵。 |
+| `case_origin` / `rule_ref` | `expected` | 用例来源（`gen_cases:functional_precision` / `attr_matrix[k]` / …）与规则依据（rule-catalog §引用 / attr_matrix 下标），可追溯（codex#18）。 |
+
+> **bf16 表示**：numpy 无原生 bf16、本机无 `ml_dtypes` → **位级双表示**（逻辑 fp32-on-grid + 物理 uint16 位模式，round-half-to-even），零第三方依赖。真机（真 NPU）int/bf16 数值校验属 **Track C**（挂真机+pr_facts，见 `oprunway-todo.md` gap），本轮仅证流水线**能力**、非「被验收」。
 
 ## 2. 三个真实例（验证多样性）
 

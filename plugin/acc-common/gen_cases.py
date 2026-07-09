@@ -1,24 +1,90 @@
 """Task 1 · gen_cases — spec.json -> caseset.json (+ per-case input/golden .npy).
 
-Layer 1 确定性脚本（工具中立、op 驱动）。据 spec（参数 arity/attrs、verify_mode）× dtype × shape × 泛化
-生成用例，用参考实现算 golden（逐算子分发；golden_source 记来源，不设全局假设）。
-支持 IsClose（二元、bool、exact）、Sign（一元、同 dtype、numerical）。加算子 = 注册 GOLDEN[op]。
+Layer 1 确定性脚本（工具中立、op 驱动）。据 spec（参数 arity/attrs、verify_mode、dtype 集、可选 attr_matrix）
+× dtype × shape × 泛化生成用例，用参考实现算 golden（逐算子分发；golden_source 记来源，不设全局假设）。
+支持 IsClose（二元、bool、exact）、Sign/Neg（一元、numerical）、Equal（二元、bool、exact）。加算子 = 注册 GOLDEN[op]。
 确定性：固定种子 SEED，无时间/系统随机。
+
+T7 dtype/attr 扩面（据 codex 审终版）：
+  · dtype 扩到 int16/int32（原生）+ bfloat16（**位级双表示**：numpy 无 bf16、本机无 ml_dtypes，故逻辑用 fp32、
+    物理落 uint16 位模式，round-half-to-even）。dtype 集从 **spec `params[].dtype` 驱动**（不改 spec 就不产新 dtype）。
+  · **storage_dtype 契约**（canonical harness 职责#2/#3）：inputs 项在物理≠逻辑时带 `storage_dtype`（bf16→uint16）；
+    `x{j}.npy` 存物理位模式（X_bin·喂 kernel），`golden.npy` 存 op(逻辑值)（喂 golden）——**两份分造、禁共用 reshape**。
+  · **per-case compare**（rule-catalog §1.1）：int → exact_equal；Sign/Neg 的 bf16/fp16 输出在网格上精确可表示 →
+    也 exact_equal（绕开 bf16 阈值权威难题）；fp32/fp16 数值 → rel_err（沿用 ascendoptest，向后兼容）。
+    有效标准由 `precision_policy.effective_standard` 派生（int 不可绕过；bf16 靠 compare 收紧）。
+  · **attr_matrix**（显式列表语义，非笛卡尔）：spec.attr_matrix=[{...attrs}] → 每项在**一个代表 (dtype,shape)** 产
+    **恰好一条** case；缺省 → 现默认单值行为（向后兼容）。
+  · **语义化稳定 case_id** `{op}_{dtype}_{shapetag}_{kind}[_a{k}]` + 碰撞 guard（弃索引 id，扩面重排不毁旧 id）。
+  · 每 case 带 `case_origin`/`rule_ref` 可追溯（codex#18）。
+
+⚠ 真机（真 NPU）上 int/bf16 的数值校验本轮**不做**——runner.cpp 的新 dtype 分支属 Track C（挂真机+pr_facts），
+  见 doc/oprunway-todo.md gap。本文件仅证「流水线能造/收发 int/bf16 用例」，非「某算子在该 dtype 被验收」。
 """
 import json, os, sys
 import numpy as np
 import precision_policy
 
 SEED = 2026
-_DTYPES = {"float32": np.float32, "float16": np.float16, "int32": np.int32}
+_BF16 = "bfloat16"
+# 原生 numpy dtype（bf16 不在此——它逻辑 fp32、物理 uint16，特判）
+_NATIVE = {"float32": np.float32, "float16": np.float16, "int32": np.int32, "int16": np.int16}
+# Sign/Neg：输出在 bf16 网格上**精确可表示**（sign∈{-1,0,1}、neg 精确取负）→ bf16/fp16 走 exact_equal。
+# genuinely-lossy 数值算子（bf16 阈值须来自 policy/ascendoptest）本轮无、留 gap。
+_BF16_EXACT_OPS = frozenset({"Sign", "Neg"})
+
+
+# ================================================= bf16 位级 codec（零依赖）====
+# 前提：little-endian host 落盘（.tofile/.npy）；远端 NPU 同序。round-half-to-even 截 fp32 高 16 位。
+def _f32_to_bf16_uint16(v):
+    """fp32 -> bf16 的 uint16 位模式（round-half-to-even）。
+    ±0 保符号；inf 保 inf；进位可正确溢为 inf；NaN 保 quiet（尾数高位置 1）+ 保符号（low#17）。"""
+    x = np.asarray(v, dtype=np.float32)
+    u32 = x.view(np.uint32)
+    is_nan = np.isnan(x)
+    lsb = (u32 >> np.uint32(16)) & np.uint32(1)          # 目标 LSB，用于 round-half-to-even
+    bias = np.uint32(0x7FFF) + lsb
+    rounded = (u32 + bias) >> np.uint32(16)              # 进位可传入指数域 → 正确溢为 inf
+    bf = rounded.astype(np.uint16)
+    sign16 = ((u32 >> np.uint32(16)) & np.uint32(0x8000)).astype(np.uint16)
+    bf = np.where(is_nan, np.uint16(0x7FC0) | sign16, bf)  # NaN → quiet NaN（防截断后误成 inf）
+    return np.ascontiguousarray(bf, dtype=np.uint16)
+
+
+def _bf16_uint16_to_f32(u):
+    """bf16 的 uint16 位模式 -> fp32（低 16 位零扩展；对网格上的值无损）。"""
+    uu = (np.asarray(u, dtype=np.uint16).astype(np.uint32) << np.uint32(16))
+    return np.ascontiguousarray(uu.view(np.float32), dtype=np.float32)
+
+
+def _bf16_round(v):
+    """fp32 -> fp32-on-bf16-grid（decode(encode(v))）——喂 golden 的逻辑值。"""
+    return _bf16_uint16_to_f32(_f32_to_bf16_uint16(v))
+
+
+def _compute_np(dtn):
+    """逻辑/计算 numpy dtype（造 X_logical + 算 golden 用）：bf16→fp32（在网格上）；余原生。"""
+    return np.float32 if dtn == _BF16 else _NATIVE[dtn]
+
+
+def _storage_np(dtn):
+    """物理/落盘 numpy dtype（X_bin 用）：bf16→uint16；余=逻辑。"""
+    return np.uint16 if dtn == _BF16 else _NATIVE[dtn]
+
+
+def _storage_name(dtn):
+    """物理 storage_dtype 名字（喂 kernel/落盘的字节 dtype）：bf16→uint16；余=逻辑名。"""
+    return "uint16" if dtn == _BF16 else dtn
 
 
 def _resolve_acceptance(spec, standard, dtype):
     """任务书验收目标口径（可选、独立于平台 standard）：spec.precision.acceptance_policy。
 
     形如 {"standard": "ascendoptest_default", "error_rate": 0.1}：以某标准为底 + 覆盖判据字段。
-    返回 (policy, tolerance_policy_id)；无声明 → None（validator 时 acceptance 继承 standard）。
+    返回 (policy, tolerance_policy_id)；无声明 / exact·behavioral 标准 → None（validator 时 acceptance 继承 standard）。
     """
+    if standard in (precision_policy.EXACT, precision_policy.BEHAVIORAL):
+        return None
     ap = (spec.get("precision") or {}).get("acceptance_policy")
     if not ap:
         return None
@@ -30,13 +96,7 @@ def _resolve_acceptance(spec, standard, dtype):
     return pol, precision_policy.tolerance_policy_id(ap_std, dtype)
 
 
-def _np_dtype(name):
-    if name not in _DTYPES:
-        raise ValueError(f"unsupported dtype {name!r}, supported={list(_DTYPES)}")
-    return _DTYPES[name]
-
-
-# ---- golden 参考实现（逐算子；inputs=按 spec 顺序的输入数组，attrs=属性字典） ----
+# ---- golden 参考实现（逐算子；inputs=按 spec 顺序的**逻辑**输入数组，attrs=属性字典） ----
 def golden_isclose(inputs, attrs):
     return np.isclose(inputs[0], inputs[1], rtol=attrs["rtol"], atol=attrs["atol"],
                       equal_nan=attrs["equal_nan"])
@@ -60,24 +120,182 @@ GOLDEN = {"IsClose": ("numpy np.isclose", golden_isclose),
           "Neg": ("numpy np.negative", golden_neg)}
 
 
-def _gen_input(rng, shape, dt, kind, atol, rtol, ref=None):
-    """造一个输入。kind='pair_far'：与 ref 前半 near(→True)后半 far(→False)；'varied'：含负/零/正。"""
-    if kind == "pair_far":
-        near = (ref * (1.0 + rng.uniform(-rtol, rtol, size=shape))
-                + rng.uniform(-atol, atol, size=shape)).astype(dt)
-        far = (ref + 0.1 + rng.uniform(0.05, 0.2, size=shape)).astype(dt)
-        x = far.copy().reshape(-1)
-        x[: x.size // 2] = near.reshape(-1)[: x.size // 2]  # 前半 near、后半 far → golden 混合
-        return x.reshape(shape)
-    if kind == "pair_half":  # 前半严格相等(→True)、后半+1(→False)：exact-equal 类(Equal)混合覆盖
-        x = ref.astype(dt).copy().reshape(-1)
-        x[x.size // 2:] = (x[x.size // 2:] + dt(1)).astype(dt)
-        return x.reshape(shape)
-    x = rng.uniform(-5.0, 5.0, size=shape).astype(dt)
-    if kind == "varied" and x.size >= 3:  # 保证含负/零/正（Sign 全分支覆盖）
+# ================================================= 逻辑输入构造（compute dtype）
+def _make_varied(rng, shape, dtn):
+    """含负/零/正的一般输入（Sign 全分支覆盖）。int：整数网格且**排除 dtype 最小值**（避 np.negative 溢出，
+    codex#14）；bf16：fp32 造后 round 到 bf16 网格（返回 fp32-on-grid 逻辑值）。"""
+    cdt = _compute_np(dtn)
+    if precision_policy.is_integer_dtype(dtn):
+        info = np.iinfo(cdt)
+        lo = max(-100, int(info.min) + 1)               # 排除 dtype-min（避免取负溢出未定义）
+        hi = min(100, int(info.max))
+        x = rng.integers(lo, hi + 1, size=shape).astype(cdt)
         f = x.reshape(-1)
-        f[0], f[1], f[2] = dt(-2.0), dt(0.0), dt(3.0)
-    return x
+        if f.size >= 3:
+            f[0], f[1], f[2] = cdt(-2), cdt(0), cdt(3)  # 保证含负/零/正
+        return x
+    x = rng.uniform(-5.0, 5.0, size=shape).astype(np.float32)
+    f = x.reshape(-1)
+    if f.size >= 3:
+        f[0], f[1], f[2] = np.float32(-2.0), np.float32(0.0), np.float32(3.0)
+    return _bf16_round(x) if dtn == _BF16 else x.astype(cdt)
+
+
+def _make_pairfar(rng, shape, dtn, ref, attrs):
+    """浮点 IsClose 第二输入：前半 near(→True)、后半 far(→False)，跨 tol 边界。"""
+    cdt = _compute_np(dtn)
+    atol, rtol = float(attrs.get("atol", 0.0)), float(attrs.get("rtol", 0.0))
+    near = (ref * (1.0 + rng.uniform(-rtol, rtol, size=shape))
+            + rng.uniform(-atol, atol, size=shape)).astype(np.float32)
+    far = (np.asarray(ref, dtype=np.float32) + 0.1
+           + rng.uniform(0.05, 0.2, size=shape)).astype(np.float32)
+    x = far.copy().reshape(-1)
+    x[: x.size // 2] = near.reshape(-1)[: x.size // 2]   # 前半 near、后半 far → golden 混合
+    x = x.reshape(shape)
+    return _bf16_round(x) if dtn == _BF16 else x.astype(cdt)
+
+
+def _make_pairhalf(shape, dtn, ref):
+    """exact-equal 类(Equal, float)第二输入：前半严格相等(→True)、后半+1(→False)。"""
+    cdt = _compute_np(dtn)
+    x = np.asarray(ref, dtype=np.float32).copy().reshape(-1)
+    x[x.size // 2:] = x[x.size // 2:] + np.float32(1.0)
+    x = x.reshape(shape)
+    return _bf16_round(x) if dtn == _BF16 else x.astype(cdt)
+
+
+def _make_pairint(shape, dtn, ref):
+    """整数 IsClose/Equal 第二输入（codex#13）：前半=ref(相等→near/True)、后半=ref+5(差>atol→far/False)，
+    整数网格上构造；golden 天然含 True/False（下游 exact bool 断言校验）。"""
+    cdt = _compute_np(dtn)
+    x = np.asarray(ref, dtype=cdt).copy().reshape(-1)
+    x[x.size // 2:] = x[x.size // 2:] + cdt(5)
+    return x.reshape(shape)
+
+
+def _make_nanpair(rng, shape, dtn, attrs):
+    """浮点 IsClose 的 equal_nan/NaN 数据（rule-catalog §1.3）：四段 = 对齐NaN / near相等 / 错位NaN / far；
+    equal_nan=True → [T,T,F,F]、=False → [F,T,F,F]，两分支都含 True/False。返回 (a, b)。"""
+    n = int(np.prod(shape)) if shape else 0
+    a = rng.uniform(-3.0, 3.0, size=n).astype(np.float32)
+    b = a.copy()
+    q = max(1, n // 4)
+    nan = np.float32("nan")
+    a[0:q] = nan; b[0:q] = nan                          # seg0 对齐 NaN
+    if n >= 3 * q:
+        a[2 * q:3 * q] = nan; b[2 * q:3 * q] = np.float32(5.0)  # seg2 错位 NaN
+    b[3 * q:] = a[3 * q:] + np.float32(1.0)             # seg3 far（不含 NaN 位）→ False
+    a2, b2 = a.reshape(shape), b.reshape(shape)
+    if dtn == _BF16:
+        return _bf16_round(a2), _bf16_round(b2)
+    cdt = _compute_np(dtn)
+    return a2.astype(cdt), b2.astype(cdt)
+
+
+def _build_inputs(rng, in_params, shp, dtn, attrs, data_kind):
+    """造该 case 的**逻辑**输入数组列表（compute dtype；bf16=fp32-on-grid）。物理化在保存步单独做。"""
+    arity = len(in_params)
+    if shp == "broadcast":                               # 仅二元：self (4,1) vs other (1,5)
+        return [_make_varied(rng, (4, 1), dtn), _make_varied(rng, (1, 5), dtn)]
+    if data_kind == "nanpair":                           # nan_pair 同造 a、b
+        a, b = _make_nanpair(rng, shp, dtn, attrs)
+        return [a, b]
+    x0 = _make_varied(rng, shp, dtn)
+    if arity == 1:
+        return [x0]
+    if data_kind == "pairfar":
+        x1 = _make_pairfar(rng, shp, dtn, x0, attrs)
+    elif data_kind == "pairhalf":
+        x1 = _make_pairhalf(shp, dtn, x0)
+    elif data_kind == "pairint":
+        x1 = _make_pairint(shp, dtn, x0)
+    else:                                                # varied（广播已上文返回）
+        x1 = _make_varied(rng, shp, dtn)
+    return [x0, x1]
+
+
+# ================================================= 语义化稳定 case_id ===========
+def _shape_tag(shp):
+    if shp == "broadcast":
+        return "bcast"
+    return "x".join(str(int(d)) for d in shp)
+
+
+def _binary_data_kind(dtn, attrs):
+    """二元算子数据构造 kind：int→整数网格；close 类(有 rtol)→跨 tol 边界；否则 exact-equal 前后半。"""
+    if precision_policy.is_integer_dtype(dtn):
+        return "pairint"
+    if "rtol" in attrs:
+        return "pairfar"
+    return "pairhalf"
+
+
+def _mk_id(op, dtn, shp, id_kind, attr_idx, seen):
+    base = f"{op.lower()}_{dtn}_{_shape_tag(shp)}_{id_kind}"
+    if attr_idx is not None:
+        base = f"{base}_a{attr_idx}"
+    cid, n = base, 2
+    while cid in seen:                                   # 确定性碰撞 guard
+        cid = f"{base}_{n}"; n += 1
+    seen.add(cid)
+    return cid
+
+
+# ================================================= 计划构建 ====================
+def _plan(spec, in_params, dtypes, attrs_default, op):
+    """产用例计划（顺序确定）。每项 dict：dims/shape/dtype/tags/data_kind/id_kind/attrs/attr_idx/origin/rule。
+    缺省（无 attr_matrix、dtype 集=fp32/fp16）与现状完全一致，仅 id 变语义化。"""
+    arity = len(in_params)
+    plan = []
+
+    def add(dims, shp, dtn, tags, data_kind, id_kind, attrs, attr_idx, origin, rule):
+        plan.append({"dims": dims, "shape": shp, "dtype": dtn, "tags": tags,
+                     "data_kind": data_kind, "id_kind": id_kind, "attrs": attrs,
+                     "attr_idx": attr_idx, "case_origin": origin, "rule_ref": rule})
+
+    # 功能/精度：dtype × shape（dtype 集从 spec 驱动）
+    for dtn in dtypes:
+        rule = ("rule-catalog §1.1 int→exact_equal" if precision_policy.is_integer_dtype(dtn)
+                else ("rule-catalog §1.1 bf16 + harness 职责#2/#3(storage_dtype=uint16)" if dtn == _BF16
+                      else "rule-catalog §1.0 base + §1.1 dtype"))
+        dkind = "varied" if arity == 1 else _binary_data_kind(dtn, attrs_default)
+        for shp in [(16,), (4, 4)]:
+            add(["功能", "精度"], shp, dtn, ["常规"], dkind, dkind, dict(attrs_default), None,
+                "gen_cases:functional_precision", rule)
+    # 广播（仅二元）
+    if arity == 2:
+        add(["功能", "精度"], "broadcast", "float32", ["泛化", "广播"], "varied", "varied",
+            dict(attrs_default), None, "gen_cases:broadcast", "rule-catalog §2.5 broadcast")
+    # 性能：大 shape（id_kind=perf；数据仍按 arity 造）
+    big_dkind = "varied" if arity == 1 else _binary_data_kind("float32", attrs_default)
+    add(["性能"], (1024, 1024), "float32", ["性能", "大shape"], big_dkind, "perf",
+        dict(attrs_default), None, "gen_cases:perf", "spec.perf.baseline + rule performance")
+    # T6：spec 声明小 shape 例外 → 追加 ≥2 个小 shape 性能用例（dtype 从 spec 取 dtypes[0]；id_kind=perfsmall）
+    if (spec.get("perf") or {}).get("small_shape_exception"):
+        sdt = dtypes[0]
+        s_dkind = "varied" if arity == 1 else _binary_data_kind(sdt, attrs_default)
+        for shp in [(64,), (256,)]:
+            add(["性能"], shp, sdt, ["性能", "小shape"], s_dkind, "perfsmall", dict(attrs_default),
+                None, "gen_cases:small_shape_exception", "spec.perf.small_shape_exception + rule performance")
+    # T7：attr_matrix 显式列表 → 每 variant 在代表 (dtype0, (4,4)) 产恰好一条 case
+    attr_matrix = spec.get("attr_matrix")
+    if attr_matrix:
+        rep_dt = dtypes[0]
+        for k_idx, variant in enumerate(attr_matrix):
+            if not isinstance(variant, dict):
+                raise ValueError(f"attr_matrix[{k_idx}] 须为 attr 字典，得 {type(variant).__name__}")
+            merged = dict(attrs_default); merged.update(variant)
+            is_float = (not precision_policy.is_integer_dtype(rep_dt)) and rep_dt != _BF16
+            # equal_nan 显式出现（IsClose·float）→ nan_pair 数据让该 flag 真正生效；否则常规二元/一元数据
+            if arity == 2 and "equal_nan" in variant and is_float:
+                dkind = "nanpair"
+            elif arity == 2:
+                dkind = _binary_data_kind(rep_dt, merged)
+            else:
+                dkind = "varied"
+            add(["功能", "精度"], (4, 4), rep_dt, ["常规", "attr矩阵"], dkind, dkind, merged, k_idx,
+                f"attr_matrix[{k_idx}]", f"spec.attr_matrix#{k_idx} {variant}")
+    return plan
 
 
 def gen_cases(spec, work_dir):
@@ -87,75 +305,79 @@ def gen_cases(spec, work_dir):
     src_name, golden_fn = GOLDEN[op]
     rng = np.random.default_rng(SEED)
     in_params = [p for p in spec["params"] if p["io"] == "in"]
-    attrs = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
+    attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
-    standard = precision_policy.select_standard(spec)   # 平台层标准（显式或按 oracle+verify_mode 映射）
+    for dtn in dtypes:                                    # dtype 白名单校验（fail-fast，不静默）
+        if dtn != _BF16 and dtn not in _NATIVE:
+            raise ValueError(f"unsupported dtype {dtn!r}（gen_cases 支持 {sorted(_NATIVE)} + bfloat16）")
+    spec_standard = precision_policy.select_standard(spec)  # 平台层标准（显式或按 oracle+verify_mode 映射）
     vmode = spec["verify_mode"]
     exact = vmode == "exact"
     os.makedirs(work_dir, exist_ok=True)
 
-    plan = []  # (dims, shape, dtype, tags)
-    for dt in dtypes:
-        for shp in [(16,), (4, 4)]:
-            plan.append((["功能", "精度"], shp, dt, ["常规"]))
-    if len(in_params) == 2:  # 二元才有广播用例
-        plan.append((["功能", "精度"], "broadcast", "float32", ["泛化", "广播"]))
-    plan.append((["性能"], (1024, 1024), "float32", ["性能", "大shape"]))
-    # T6：spec 声明小 shape 例外 → 追加 ≥2 个小 shape 性能用例（dtype 从 spec 取；shape 为当前
-    # elementwise 算子族(Sign/IsClose/Equal/Neg) 的 fixture 默认，非通用规则——带 dtype_combinations/
-    # 特殊 shape 的算子需各自派生规则，见 doc TODO follow-up）。无此声明的 spec 行为完全不变。
-    if (spec.get("perf") or {}).get("small_shape_exception"):
-        sdt = dtypes[0]
-        for shp in [(64,), (256,)]:
-            plan.append((["性能"], shp, sdt, ["性能", "小shape"]))
-
-    cases = []
-    for i, (dims, shp, dtn, tags) in enumerate(plan):
-        cid = f"{op.lower()}_{i:03d}"
+    plan = _plan(spec, in_params, dtypes, attrs_default, op)
+    seen_ids, cases = set(), []
+    for entry in plan:
+        dims, shp, dtn = entry["dims"], entry["shape"], entry["dtype"]
+        attrs, data_kind = entry["attrs"], entry["data_kind"]
+        cid = _mk_id(op, dtn, shp, entry["id_kind"], entry["attr_idx"], seen_ids)
         cdir = os.path.join(work_dir, cid)
         os.makedirs(cdir, exist_ok=True)
-        dt = _np_dtype(dtn)
-        inputs, ishapes = [], []
-        for j, p in enumerate(in_params):
-            if shp == "broadcast":  # 仅二元：self (4,1) vs other (1,5)
-                s = (4, 1) if j == 0 else (1, 5)
-                x = _gen_input(rng, s, dt, "varied", attrs.get("atol", 0), attrs.get("rtol", 0))
-            elif j == 1:  # 二元第二输入
-                if "rtol" in attrs:  # close 类(IsClose)：跨 tol 边界（near/far）
-                    x = _gen_input(rng, shp, dt, "pair_far", attrs["atol"], attrs["rtol"], ref=inputs[0])
-                else:  # exact-equal 类(Equal)：前半严格相等、后半不等
-                    x = _gen_input(rng, shp, dt, "pair_half", 0, 0, ref=inputs[0])
-            else:
-                x = _gen_input(rng, shp, dt, "varied", attrs.get("atol", 0), attrs.get("rtol", 0))
-            inputs.append(x)
-            ishapes.append(list(x.shape))
-        golden = golden_fn(inputs, attrs)
+
+        inputs = _build_inputs(rng, in_params, shp, dtn, attrs, data_kind)  # 逻辑数组（compute dtype）
+        golden = golden_fn(inputs, attrs)                # 用逻辑输入算 golden
         if not exact:
-            golden = golden.astype(dt)  # numerical：输出同 dtype
+            golden = golden.astype(_compute_np(dtn))     # numerical：golden 同逻辑 dtype（bf16→fp32-on-grid）
         if exact and golden.dtype == bool and golden.size > 1:
             assert golden.any() and (~golden).any(), f"{cid}: golden 未覆盖 True/False 边界"
-        for j, x in enumerate(inputs):
-            np.save(os.path.join(cdir, f"x{j + 1}.npy"), x)
+
+        # 保存：X_bin(x{j}.npy·物理位模式) 与 golden(golden.npy·op(逻辑值)) **分两份造**（canonical 职责#2/#3）
+        storage_np = _storage_np(dtn)
+        ishapes, has_storage = [], (dtn == _BF16)
+        for j, x_logical in enumerate(inputs):
+            if dtn == _BF16:                             # 物理 = 从逻辑**单独 encode** 出的 uint16 位模式
+                x_bin = _f32_to_bf16_uint16(x_logical)
+                assert not np.shares_memory(x_bin, x_logical), \
+                    f"{cid}: bf16 X_bin 与 X_logical 共享内存（违 layout 字节契约 职责#2）"
+            else:
+                x_bin = np.ascontiguousarray(x_logical, dtype=storage_np)
+            np.save(os.path.join(cdir, f"x{j + 1}.npy"), x_bin)
+            ishapes.append(list(x_logical.shape))
         np.save(os.path.join(cdir, "golden.npy"), golden)
-        # 精度口径 per-case：按 golden/输出 dtype 解析 policy（非输入 dtype）；未支持 dtype fail-fast
-        cdtype = precision_policy.compare_dtype(golden)
-        policy = precision_policy.threshold_for(standard, cdtype)
-        tpid = precision_policy.tolerance_policy_id(standard, cdtype)
+
+        # 精度口径 per-case：cdtype 用逻辑名（bf16→'bfloat16'）；有效标准据 §1.1/compare 派生；未支持 fail-fast
+        logical_cdtype = _BF16 if dtn == _BF16 else precision_policy.compare_dtype(golden)
+        if exact:
+            compare = "exact_equal"
+        elif precision_policy.is_integer_dtype(dtn):
+            compare = "exact_equal"                      # §1.1 int→exact（有效标准也会强制 EXACT）
+        elif dtn == _BF16:
+            if op not in _BF16_EXACT_OPS:
+                raise ValueError(f"bf16 numerical for op {op!r} 需 lossy 阈值（本轮无此类算子，留 gap）")
+            compare = "exact_equal"                      # Sign/Neg bf16 输出精确可表示
+        else:
+            compare = "rel_err"                          # fp32/fp16 数值 → 沿用平台标准（向后兼容）
+        eff_std = precision_policy.effective_standard(spec_standard, logical_cdtype, compare)
+        policy = precision_policy.threshold_for(eff_std, logical_cdtype)
+        tpid = precision_policy.tolerance_policy_id(eff_std, logical_cdtype)
         expected = {"golden_source": src_name, "golden_path": f"{cid}/golden.npy",
-                    "verify_mode": vmode, "standard": standard, "compare_dtype": cdtype,
-                    "tolerance_policy_id": tpid, "policy": policy,
-                    "threshold": precision_policy.threshold_digest(policy)}  # digest：向后兼容
-        acc = _resolve_acceptance(spec, standard, cdtype)
+                    "verify_mode": vmode, "standard": eff_std, "compare_dtype": logical_cdtype,
+                    "compare": compare, "tolerance_policy_id": tpid, "policy": policy,
+                    "threshold": precision_policy.threshold_digest(policy),  # digest：向后兼容
+                    "case_origin": entry["case_origin"], "rule_ref": entry["rule_ref"]}
+        acc = _resolve_acceptance(spec, eff_std, logical_cdtype)
         if acc:
             expected["acceptance_policy"], expected["acceptance_tolerance_policy_id"] = acc
-        cases.append({
-            "id": cid, "dims": dims, "tags": tags,
-            "inputs": [{"name": in_params[j]["name"], "shape": ishapes[j], "dtype": dtn,
-                        "path": f"{cid}/x{j + 1}.npy"} for j in range(len(inputs))],
-            "attrs": attrs,
-            "expected": expected,
-        })
+        in_items = []
+        for j in range(len(inputs)):
+            item = {"name": in_params[j]["name"], "shape": ishapes[j], "dtype": dtn,
+                    "path": f"{cid}/x{j + 1}.npy"}
+            if has_storage:                              # 仅物理≠逻辑时带 storage_dtype（native 保向后兼容）
+                item["storage_dtype"] = _storage_name(dtn)
+            in_items.append(item)
+        cases.append({"id": cid, "dims": dims, "tags": entry["tags"],
+                      "inputs": in_items, "attrs": attrs, "expected": expected})
     attr_order = [p["name"] for p in spec["params"] if p["io"] == "attr"]
     return {"op": op, "spec_ref": spec.get("op"), "work_dir": work_dir,
             "attr_order": attr_order, "cases": cases}

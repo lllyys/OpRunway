@@ -1,0 +1,22 @@
+{
+  "_fixture": true,
+  "_fixture_note": "T7 Track A 专设 fixture（**非权威 op spec**）——只验流水线**能力**：gen_cases 产 int16/int32/bfloat16 用例、repo_adapter mock 收发、validator 按 per-case compare 判、机器门覆盖。⚠ 不等于『Sign 在这些 dtype 上被验收』：真机能力(aclnn 是否支持)+ 权威 dtype(任务书)是 Track B/C 硬缺口。绝不用本文件冒充权威 spec。",
+  "op": "Sign",
+  "repo": "test-fixture-only",
+  "hardware": ["Atlas A2", "Atlas A3"],
+  "reference": {"type": "tbe", "ref": "fixture 占位：Sign 输出∈{-1,0,1}，各 dtype 精确可表示 → exact_equal"},
+  "change": {"kind": "fixture", "note": "扩 int16/int32/bfloat16 覆盖矩阵（fixture，不改权威 sign.spec.json）"},
+  "params_source": "fixture",
+  "params": [
+    {"name": "self", "io": "in",  "dtype": ["float32", "float16", "int16", "int32", "bfloat16"]},
+    {"name": "out",  "io": "out", "dtype": ["float32", "float16", "int16", "int32", "bfloat16"]}
+  ],
+  "generalize": true,
+  "verify_mode": "numerical",
+  "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default",
+                "tolerance_policy_id": "ascendoptest_default", "threshold": 0.001,
+                "policy": {"kind": "ascendoptest_default", "tolerance": 0.001, "error_rate": 0.001,
+                           "eps": 1e-9, "legacy": 0.1, "not_settled": false},
+                "policy_note": "spec 级 policy 为 fp16 代表；per-case：fp32/fp16→ascendoptest(rel_err)、int/bf16→exact_equal(有效标准 EXACT)"},
+  "perf": {"baseline": "tbe", "target_ratio": 0.95}
+}
