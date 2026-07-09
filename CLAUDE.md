@@ -23,6 +23,11 @@
    audit-fix 结论需复述「发现了什么、改了什么、还有什么风险」；粒度可按「一个逻辑制品 / 一次变更」批量。
    ⚠ `nlpm`（`nlpm:check/score/fix`）**不是本门**——它是 NL 制品（skill/agent/command）的确定性质量 lint，
    仅在打磨已发布 skills 时另行使用。理由与 provenance 见 bureau ADR 0010。
+6. **开工前必须通读 canon**。动手做任何 durable 工作（改设计 / 建组件 / 写 bureau / FAIL 归因）前，先通读
+   `canon/`——全部 `architecture/` dossier + `decisions/` ADR + `lint/findings.md`，并按 BUREAU 的 trust tier 读
+   （只有 `canonical` 当事实；`proposed / verified / stale / contested` 存疑，载重前先核）。目的是让自己被已定
+   决策 grounding、不重推 canon 已 settle 的东西（血教训：漏掉上游前提会一路错到底）。**通读（grounding）与
+   `bureau:query`（按需查证）并用、不互斥**；canon 大到通读不划算时，再退回「`00-overview` + query 优先」。
 
 ## 这个项目是干什么的
 

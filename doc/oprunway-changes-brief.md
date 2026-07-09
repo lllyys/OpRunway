@@ -16,6 +16,7 @@
 
 ## 2026-07-09
 
+- **CLAUDE.md 加最高优先级规则 #6「开工前必须通读 canon」**：动 durable 工作前先通读 `canon/`（architecture dossier + decisions ADR + lint/findings），按 trust tier 读（只 `canonical` 当事实）；与 `bureau:query` 并用不互斥、canon 变大再退回「overview + query 优先」。（用户要求）
 - **Equal 再翻案·结论作废——「任务书↔PR 对应配错 + 空任务」**：正式确认 ① **PR #2890 不是本社区 Equal 任务的交付 PR**（我们误配）；② **Equal 社区任务至今未验收通过、无已验收对应 PR**。故下方 2026-07-08 那条「Equal A3 未达标·真阳性」**整体作废**（系拿误配 PR 去对不相干任务书判的）。**删** `doc/equal-a3-defect-report.md`；**改**台账（Equal 行→无有效 PR/无结论）+ TODO（Equal 硬约束整块换）+ 对应表（Equal→误配、未找到 +1=8）。**立新头号硬约束**（比「解耦」更上游）：验收前先验证「任务书↔PR 对应」本身——配错或对应「未验收空任务」→ 下游一切裁决作废。**待办**：canon 两决策页+一架构页走 bureau 门更正；公开台账 push + PR#2 body 更正待批（外发）；上报取消（无缺陷可报）。lint（bureau:lint）另跑完，2 survivor（ADR 0002 msTuner→msprof op superseded、1.2×→target_ratio drift，与上版一致），已写 `canon/lint/findings.md`。
 
 ## 2026-07-08
