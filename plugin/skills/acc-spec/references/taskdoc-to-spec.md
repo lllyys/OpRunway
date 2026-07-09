@@ -27,7 +27,10 @@
   //   保留 oracle + threshold(digest) 向后兼容；per-case 结构化 policy 由 gen_cases 按 golden dtype 派生。
   "precision": {"oracle":"ascendoptest","standard":"exact","tolerance_policy_id":"exact",
                 "threshold":0,"threshold_source":"..."},
-  "perf": {"baseline":"tbe","target_ratio":0.95,"small_shape_exception":"<10us 差3us→仿真图"},
+  // T6/T8（待散文门）：perf.small_shape_exception 升为对象——机读阈值供 perf_compare 判小shape例外
+  //   (<when_us_below 且 |差|≤abs_gap_us_within → 出仿真图挂人核)；legacy 纯字符串 perf_compare 正则兜底。
+  "perf": {"baseline":"tbe","target_ratio":0.95,
+           "small_shape_exception":{"text":"<10us 差3us→仿真图","when_us_below":10,"abs_gap_us_within":3}},
   "task_pr_gaps": []
 }
 ```
@@ -60,7 +63,7 @@
 | `precision.threshold_source` | 必填，记数字依据+推断链 | 自由文本 |
 | `perf.baseline` | 『性能要求-基线』 | tbe / self_fp16 / small_op_concat / gpu / theoretical / none |
 | `perf.target_ratio` | 『性能目标』换算 | ≥95%→0.95；**无劣化/持平→1.0**（『无劣化』=不得更慢=ratio≥1.0，literal 读法；勿误宽成 0.95）；10X→10.0；0.5倍A100→0.5；0.8倍H100→0.8；90%→0.9 |
-| `perf.small_shape_exception` | 小 shape 例外条款 | 原文，常『<10us 差3us→仿真图』 |
+| `perf.small_shape_exception` | 小 shape 例外条款 | T6(待散文门)：产**对象** `{text(人读原文), when_us_below, abs_gap_us_within, requires}`——机读阈值供 perf_compare 判例外(<阈 且 差≤容差→出仿真图挂人核)；legacy 纯字符串 perf_compare 正则兜底解析。抽取脚本是否也产 object 见 follow-up |
 | `task_pr_gaps[]` | 由格式变体/缺口收敛 | 结构化缺口/矛盾/推断项 |
 
 ## 1.1 precision.standard 选择决策树（T5，与 `precision_policy.select_standard` 对齐）

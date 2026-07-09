@@ -51,8 +51,24 @@ def _vd(v, fail=0, unc=0, cp=0):
 
 
 def _pr(status, scope="kernel_only", blocked=False):
-    return {"op": "X", "per_case": [{"case_id": "x_000", "scope": scope, "blocked": blocked}],
-            "summary": {"status": status, "perf_cases": 1, "达标": 1}}
+    # per_case 行带 达标/blocked，使 summary 计数与行级一致（gate_task3 现校验计数一致性）。
+    return {"op": "X", "per_case": [{"case_id": "x_000", "scope": scope,
+            "blocked": blocked, "达标": not blocked}],
+            "summary": {"status": status, "perf_cases": 1, "达标": (0 if blocked else 1),
+                        "blocked": (1 if blocked else 0)}}
+
+
+def _perf_cs(ids):
+    """gate_task3 per_case 对齐用的 caseset：dims 含「性能」的用例集（防跑性能子集/伪造 summary）。"""
+    return {"op": "X", "cases": [
+        {"id": i, "dims": ["性能"], "tags": ["性能"],
+         "inputs": [{"name": "a", "shape": [1024, 1024], "dtype": "float32"}]} for i in ids]}
+
+
+def _perf_ev(ids):
+    """性能用例 evidence（gate_task3 对齐只核 case_id 是否有真实证据）。"""
+    return {"op": "X", "evidence": [
+        {"case_id": i, "status": "ok", "perf": {"us": 1.5, "scope": "kernel_only"}} for i in ids]}
 
 
 class GateTest(unittest.TestCase):
@@ -202,12 +218,42 @@ class GateTest(unittest.TestCase):
 
     # --- task3 ---
     def test_task3_ok(self):
+        _w(self.d, "caseset.json", _perf_cs(["x_000"]))
+        _w(self.d, "evidence.json", _perf_ev(["x_000"]))
         _w(self.d, "perf_report.json", _pr("ok"))
         self.assertEqual(self._errs("task3"), [])
 
     def test_task3_blocked_fails(self):
         _w(self.d, "perf_report.json", _pr("blocked"))
         self.assertTrue(self._errs("task3"))
+
+    # --- task3 per_case 对齐（补 T5 门延后 finding：防跑性能子集 + 伪造 summary） ---
+    def test_task3_perf_subset_fails(self):
+        """跑性能子集：caseset 2 个性能用例、perf_report 只 1 个 → 必 FAIL（防跑子集）。"""
+        _w(self.d, "caseset.json", _perf_cs(["p0", "p1"]))
+        _w(self.d, "evidence.json", _perf_ev(["p0", "p1"]))
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": "p0", "scope": "kernel_only", "blocked": False, "达标": True}],
+            "summary": {"status": "ok", "perf_cases": 1, "达标": 1, "blocked": 0}})
+        self.assertTrue(any("性能子集" in e for e in self._errs("task3")))
+
+    def test_task3_forged_summary_fails(self):
+        """伪造 summary=ok：per_case 实际未达标、summary 谎报 达标=1 → 计数不一致 → 必 FAIL。"""
+        _w(self.d, "caseset.json", _perf_cs(["p0"]))
+        _w(self.d, "evidence.json", _perf_ev(["p0"]))
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": "p0", "scope": "kernel_only", "blocked": False, "达标": False}],
+            "summary": {"status": "ok", "perf_cases": 1, "达标": 1, "blocked": 0}})
+        self.assertTrue(any("不一致" in e for e in self._errs("task3")))
+
+    def test_task3_perf_evidence_missing_fails(self):
+        """伪造 per_case 但性能用例无 evidence（未实跑）→ 必 FAIL。"""
+        _w(self.d, "caseset.json", _perf_cs(["p0"]))
+        _w(self.d, "evidence.json", _perf_ev([]))    # 空证据
+        _w(self.d, "perf_report.json", {"op": "X",
+            "per_case": [{"case_id": "p0", "scope": "kernel_only", "blocked": False, "达标": True}],
+            "summary": {"status": "ok", "perf_cases": 1, "达标": 1, "blocked": 0}})
+        self.assertTrue(any("性能证据缺失" in e for e in self._errs("task3")))
 
     def test_task3_wrong_scope_fails(self):
         """性能不是 kernel-only（混入 e2e 墙钟）→ 必 FAIL。"""
@@ -316,6 +362,138 @@ class RunWorkflowExitTest(unittest.TestCase):
 
     def test_defect_exit_nonzero(self):
         self.assertNotEqual(self._run("--defect", "isclose_000").returncode, 0)
+
+
+# ===== T6/T8 perf 包新增（自包含，与上方 GateTest 无耦合，便于与主树 T5 干净合并）=====
+class GateTask3PerfPackageTest(unittest.TestCase):
+    """gate_task3 的小shape例外门(T6) + 挂起/不可比态(T8)。"""
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        # gate_task3 现按 case 对齐 caseset/evidence（防跑子集）；本类 perf_report 均用 case_id x0。
+        _w(self.d, "caseset.json", _perf_cs(["x0"]))
+        _w(self.d, "evidence.json", _perf_ev(["x0"]))
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _errs(self):
+        errs = []
+        G.gate_task3(self.d, errs)
+        return errs
+
+    def _exc_report(self, plot_file="perf_sim_x.svg", tamper_sha=False):
+        import perf_sim_plot
+        sim = {"op": "X", "when_us_below": 10, "abs_gap_us_within": 3,
+               "points": [{"case_id": "x0", "numel": 64, "npu_us": 1.5, "baseline_us": 1.2,
+                           "gap": 0.3, "within": 3, "conclusion": "c"}],
+               "overall": "o"}
+        svg = os.path.join(self.d, "perf_sim_x.svg")
+        perf_sim_plot.render_svg(sim, svg)
+        sha = perf_sim_plot.sha256_of(svg)
+        report = {"op": "X", "per_case": [
+            {"case_id": "x0", "scope": "kernel_only", "npu_us": 1.5,
+             "baseline": {"source": "tbe", "us": 1.2}, "ratio": 0.8, "达标": False,
+             "exception": "small_shape",
+             "exception_detail": {"npu_us": 1.5, "baseline_us": 1.2, "gap": 0.3, "within": 3,
+                                  "when_us_below": 10, "conclusion": "c"}}],
+            "notes": [], "summary": {"perf_cases": 1, "达标": 0, "blocked": 0, "status": "exception"},
+            "simulation": sim,
+            "simulation_plot": {"file": plot_file, "sha256": ("deadbeef" if tamper_sha else sha)}}
+        return report
+
+    def test_exception_ok(self):
+        _w(self.d, "perf_report.json", self._exc_report())
+        self.assertEqual(self._errs(), [])
+
+    def test_exception_missing_svg_fails(self):
+        r = self._exc_report()
+        _w(self.d, "perf_report.json", r)
+        os.remove(os.path.join(self.d, "perf_sim_x.svg"))
+        self.assertTrue(any("仿真图" in e for e in self._errs()))
+
+    def test_exception_sha_mismatch_fails(self):
+        _w(self.d, "perf_report.json", self._exc_report(tamper_sha=True))
+        self.assertTrue(any("sha256" in e for e in self._errs()))
+
+    def test_exception_simulation_mismatch_fails(self):
+        r = self._exc_report()
+        r["simulation"]["points"][0]["case_id"] = "other"   # 与例外行对不上
+        _w(self.d, "perf_report.json", r)
+        self.assertTrue(any("仿真图" in e for e in self._errs()))
+
+    def test_exception_path_escape_fails(self):
+        _w(self.d, "perf_report.json", self._exc_report(plot_file="../evil.svg"))
+        self.assertTrue(any("路径逃逸" in e for e in self._errs()))
+
+    def test_exception_wrong_scope_fails(self):
+        r = self._exc_report()
+        r["per_case"][0]["scope"] = "e2e"
+        _w(self.d, "perf_report.json", r)
+        self.assertTrue(any("kernel_only" in e for e in self._errs()))
+
+    def test_wait_suspend_ok(self):
+        _w(self.d, "perf_report.json", {"op": "X", "per_case": [
+            {"case_id": "x0", "npu_us": 1.5, "npu_scope": "kernel_only", "达标": False, "blocked": False}],
+            "summary": {"status": "blocked_wait_gpu_benchmark", "perf_cases": 1, "达标": 0, "blocked": 0}})
+        self.assertEqual(self._errs(), [])          # 正规挂起、非门 FAILED
+
+    def test_wait_missing_npu_fails(self):
+        _w(self.d, "perf_report.json", {"op": "X", "per_case": [
+            {"case_id": "x0", "npu_scope": "kernel_only", "达标": False, "blocked": False}],  # 缺 npu_us
+            "summary": {"status": "blocked_wait_gpu_benchmark", "perf_cases": 1, "达标": 0, "blocked": 0}})
+        self.assertTrue(any("npu_us" in e for e in self._errs()))
+
+    def test_incomparable_fails(self):
+        _w(self.d, "perf_report.json", {"op": "X", "per_case": [
+            {"case_id": "x0", "达标": False, "blocked": True, "note": "scope 不符"}],
+            "summary": {"status": "blocked_incomparable_timing_scope", "perf_cases": 1, "达标": 0, "blocked": 1}})
+        self.assertTrue(any("不可比" in e for e in self._errs()))
+
+
+class RunWorkflowPerfPackageTest(unittest.TestCase):
+    """端到端子进程：小shape例外→exit2+PASSED_WITH_RISK；缺 GPU 标杆→BLOCKED_WAIT(非 fail)。"""
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.here = os.path.dirname(os.path.abspath(__file__))
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _run(self, spec, *extra):
+        return subprocess.run(
+            [sys.executable, os.path.join(self.here, "run_workflow.py"),
+             os.path.join(self.here, spec), "--mode", "mock", "--out", self.d, *extra],
+            capture_output=True, text=True)
+
+    def _gate(self, stage):
+        return subprocess.run(
+            [sys.executable, os.path.join(self.here, "validate_acceptance_state.py"),
+             "--stage", stage, "--dir", self.d], capture_output=True, text=True)
+
+    def _json(self, name):
+        with open(os.path.join(self.d, name), encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_perf_slow_passed_with_risk(self):
+        r = self._run("specs/sign.spec.json", "--perf-slow", "sign_005,sign_006")
+        self.assertEqual(r.returncode, 2)                       # PASSED_WITH_RISK
+        acc = self._json("acceptance.json")
+        self.assertEqual(acc["state"], "PASSED_WITH_RISK")
+        self.assertEqual(acc["human_cp"]["status"], "pending")
+        self.assertEqual(acc["repo_mode"], "mock")
+        pr = self._json("perf_report.json")
+        self.assertEqual(pr["summary"]["status"], "exception")
+        self.assertTrue(os.path.exists(os.path.join(self.d, "perf_sim_sign.svg")))
+        self.assertEqual(self._gate("task3").returncode, 0)     # 有图+一致 → 门过
+        os.remove(os.path.join(self.d, "perf_sim_sign.svg"))
+        self.assertEqual(self._gate("task3").returncode, 1)     # 删图 → 门 FAILED（不静默绕过）
+
+    def test_gpu_wait_blocked_not_fail(self):
+        r = self._run("testdata/gpu_demo.spec.json")            # spec.perf.baseline=gpu_external, 无 --gpu-baseline
+        acc = self._json("acceptance.json")
+        self.assertEqual(acc["state"], "BLOCKED_WAIT_GPU_BENCHMARK")
+        self.assertNotEqual(r.returncode, 0)                   # 非 PASS
+        self.assertNotIn("PASS", acc["overall"])               # 缺 GPU 数据绝不显 PASS
 
 
 if __name__ == "__main__":

@@ -102,6 +102,13 @@ def gen_cases(spec, work_dir):
     if len(in_params) == 2:  # 二元才有广播用例
         plan.append((["功能", "精度"], "broadcast", "float32", ["泛化", "广播"]))
     plan.append((["性能"], (1024, 1024), "float32", ["性能", "大shape"]))
+    # T6：spec 声明小 shape 例外 → 追加 ≥2 个小 shape 性能用例（dtype 从 spec 取；shape 为当前
+    # elementwise 算子族(Sign/IsClose/Equal/Neg) 的 fixture 默认，非通用规则——带 dtype_combinations/
+    # 特殊 shape 的算子需各自派生规则，见 doc TODO follow-up）。无此声明的 spec 行为完全不变。
+    if (spec.get("perf") or {}).get("small_shape_exception"):
+        sdt = dtypes[0]
+        for shp in [(64,), (256,)]:
+            plan.append((["性能"], shp, sdt, ["性能", "小shape"]))
 
     cases = []
     for i, (dims, shp, dtn, tags) in enumerate(plan):

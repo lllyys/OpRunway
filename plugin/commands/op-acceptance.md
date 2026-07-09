@@ -26,6 +26,10 @@ argument-hint: "<任务书 md路径或链接> <PR链接> [--mode mock|new_exampl
 - **mock**（默认，无需真机）：走到 CP-B（spec + numpy-golden 自检裁决），验证流水线自洽。
 - **new_example**（真机）：**先确认用户已开 NPU/VPN**；走全 CP-A..E；`OPRUNWAY_*` 环境变量指真实机器/路径（不写进仓）。
 
+## 性能对比（Task 3，待散文门）
+- **GPU 标杆 consumer（T8）**：`run_workflow.py --gpu-baseline <外部 GPU 标杆 JSON>` 或 `spec.perf.baseline∈{gpu,gpu_external}` → 解析外部 GPU 标杆(按 case_id+完整输入签名对齐)出 NPU↔GPU 对比。缺标杆 → `BLOCKED_WAIT_GPU_BENCHMARK`（正规挂起、非 fail、绝不显 PASS）；双边 timing_scope 不一致 → `BLOCKED_INCOMPARABLE_TIMING_SCOPE`。真 GPU 数据待外部方给。
+- **小 shape 例外（T6）**：任务书『<Nus 差 Nus→仿真图』条款 → 达标记 False + 出仿真图证据 → `PASSED_WITH_RISK`（挂人工 CP，退出码 2）。
+
 ## 约束
 - 全程中文；副作用（真机 clone/build/跑测）先确认；`needs_review` 不当 pass；验收门 `validate_acceptance_state.py` STATUS: FAILED → **不出 pass 裁决；仍由 run_workflow 写 `acceptance.json`.overall=BLOCKED**（验收门未过=证据不可信/不完整）。
 - 只认任务书为验收权威；缺 NPU/VPN 就明说「真机待开 VPN」，不假装跑了真机。
