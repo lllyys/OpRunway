@@ -249,13 +249,20 @@ class MsprofParseTest(unittest.TestCase):
         self.assertFalse(r["ok"])
 
     def test_profile_hit_gate(self):
-        g = P.profile_hit_gate(_read("catlass_msprof_OpBasicInfo.csv"),
-                               expected_kernel="oprunway_catlass_basic_matmul")
+        csv = _read("catlass_msprof_OpBasicInfo.csv")
+        # 精确全名 → 命中且非 pending（加固后不再前缀匹配，避免过宽命中）
+        g = P.profile_hit_gate(csv, expected_kernel="oprunway_catlass_basic_matmul_950")
         self.assertTrue(g["hit"])
-        self.assertTrue(g["matched"])
-        # 符号未预知：回填实测 kernel 名、标 pending（诚实：真机才落实）
-        g2 = P.profile_hit_gate(_read("catlass_msprof_OpBasicInfo.csv"))
-        self.assertTrue(g2["hit"])
+        self.assertFalse(g["pending"])
+        self.assertIn("oprunway_catlass_basic_matmul_950", g["matched"])
+        # 前缀场景改走受控 regex（对抗门 #9：startswith 过宽已消除）
+        g_re = P.profile_hit_gate(csv, kernel_regex="oprunway_catlass_basic_matmul.*")
+        self.assertTrue(g_re["hit"])
+        self.assertFalse(g_re["pending"])
+        # 符号未预知：诚实标 pending，且**不**声称 hit（对抗门 #8：hit ⟺ ¬pending 不变量，
+        # 禁「一边命中一边说未验证」的自相矛盾态）；实测 kernel 名回填 observed 供人核。
+        g2 = P.profile_hit_gate(csv)
+        self.assertFalse(g2["hit"])
         self.assertTrue(g2["pending"])
         self.assertIn("oprunway_catlass_basic_matmul_950", g2["observed_kernels"])
 
