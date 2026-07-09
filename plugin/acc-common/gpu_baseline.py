@@ -27,7 +27,7 @@ _GPU_ALLOW = ("nvidia", "geforce", "rtx", "gtx", "tesla", "quadro", "titan",
               "a100", "a800", "a40", "a30", "a10", "h100", "h800", "h200", "v100",
               "l40", "l4", "amd", "radeon", "instinct", "mi300", "mi250", "mi210", "mi100")
 _NON_GPU_DENY = ("ascend", "npu", "昇腾", "华为", "kunpeng", "鲲鹏", "tpu",
-                 "cpu", "xeon", "epyc", "core i", "ryzen", "arm ")
+                 "cpu", "xeon", "epyc", "core i", "ryzen")  # 仅收明确非 GPU 词（不含歧义的 arm）
 # gb-7：抗 DoS 上限（外部不可信文件）。
 _MAX_FILE_BYTES = 8 * 1024 * 1024
 _MAX_ENTRIES = 100000
