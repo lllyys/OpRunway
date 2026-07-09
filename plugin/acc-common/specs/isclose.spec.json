@@ -16,6 +16,8 @@
   "generalize": true,
   "verify_mode": "exact",
   "precision": {"oracle": "ascendoptest", "threshold": 0, "threshold_source": "AscendOpTest 默认阈值（bool 输出 → 精确逐位）"},
-  "perf": {"baseline": "tbe", "target_ratio": 0.95, "small_shape_exception": "<10us 差 3us→仿真图"},
+  "perf": {"baseline": "tbe", "target_ratio": 0.95,
+           "small_shape_exception": {"text": "<10us 差 3us→仿真图", "when_us_below": 10,
+                                     "abs_gap_us_within": 3, "requires": "simulation_plot+analysis"}},
   "task_pr_gaps": []
 }

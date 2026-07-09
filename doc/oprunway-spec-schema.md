@@ -42,7 +42,9 @@
     "baseline": "tbe | gpu_a100 | same_op_dtype | none",
     "target": "string",                   // 如 "无劣化" / "≥95%" / "0.5×A100"
     "reference_cases": [ { "desc": "", "dtype": "", "us": 0 } ],  // ★ 有具体用例基线时（SPMV 有）
-    "small_shape_exception": "string?"
+    "small_shape_exception": "object?"    // ★ T6(待散文门)：{text, when_us_below, abs_gap_us_within, requires}；
+                                          //   机读阈值独立字段(when_us_below/abs_gap_us_within)供 perf_compare；
+                                          //   legacy 纯字符串向后兼容(perf_compare 正则兜底解析)
   },
   "deliverables": ["string"],
   "task_pr_gaps": ["string"]              // 任务书↔PR 落差（待确认）
@@ -62,7 +64,8 @@
   "params_source":"derived_from_reference",   // 任务书无参数表 → 从 TBE Sign 推
   "generalize":true, "verify_mode":"numerical",
   "precision":{"oracle":"ascendoptest","threshold_source":"AscendOpTest 默认阈值"},
-  "perf":{"baseline":"tbe","target":"无劣化","small_shape_exception":"<10us 差 3us→仿真图证明"},
+  "perf":{"baseline":"tbe","target":"无劣化",
+          "small_shape_exception":{"text":"<10us 差 3us→仿真图证明","when_us_below":10,"abs_gap_us_within":3,"requires":"simulation_plot+analysis"}},  // T6(待散文门)：string→object
   "task_pr_gaps":["PR 额外加了 ascend910_93(A3) config，任务书只写 A2/A3——一致"] }
 ```
 
@@ -79,7 +82,8 @@
             {"name":"out","io":"out","dtype":["BOOL"]}],
   "generalize":true, "verify_mode":"exact",    // 输出 BOOL → 精确逐位（agent 实证 int8 精确比对）
   "precision":{"oracle":"ascendoptest","threshold_source":"AscendOpTest 默认阈值（bool 实为精确）"},
-  "perf":{"baseline":"tbe","target":"所有核参与场景 ≥95%","small_shape_exception":"<10us 差 3us→仿真图"},
+  "perf":{"baseline":"tbe","target":"所有核参与场景 ≥95%",
+          "small_shape_exception":{"text":"<10us 差 3us→仿真图","when_us_below":10,"abs_gap_us_within":3,"requires":"simulation_plot+analysis"}},  // T6(待散文门)：string→object
   "task_pr_gaps":[] }
 ```
 

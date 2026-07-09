@@ -31,6 +31,9 @@ precision:  { oracle: ascendoptest | mere_mare | torch | np_isclose | scipy | st
               threshold_source, dtype_thresholds? }             # 精度口径(多态,含 np.isclose/scipy/整数精确/ATK双标杆/无)
 perf:       { baseline: tbe | gpu_a100 | same_op_dtype | npu_torch_unfused_chain | none,
               target, small_shape_exception }                   # 性能基线(随任务书/参考源/改动目标)
+                                                                # T6(待散文门)：small_shape_exception 为对象
+                                                                #   {text, when_us_below, abs_gap_us_within, requires}
+                                                                #   (机读阈值供 perf_compare；legacy 字符串向后兼容)
 deliverables[]                                                  # 交付件清单
 task_pr_gaps[]                                                  # 任务书↔PR 落差(待确认)
 ```
