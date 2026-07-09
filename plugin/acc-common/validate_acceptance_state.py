@@ -7,8 +7,16 @@ caseset 全部用例、id 一一对应、每 (dtype,shape) 计数不缺。
 **门是完整性门**：只保证证据可信+完整（不重判精度/性能 pass-fail，那是 validator/perf_compare 的活）。
 **抗坏输入**：坏/缺字段的产物 → 累计成 error、判 FAILED，绝不崩溃、绝不静默放过。
 
+A 方案（gate_task2 · evidence↔产物 provenance 绑定）：除「阈值/口径三处一致」外，再按 evidence 的 provenance
+读磁盘产物（golden/out .npy）、先校 sha256、再依 caseset policy **重算** metrics 并与 evidence 自报值逐字段比对，
+堵「伪造 bad_count=0 直接 pass」的自报数字洞。这仍属**证据可信**（验证「数字是否真从产物算出」），不重判 verdict。
+⚠ 已知边界（诚实）：A 只证「metrics 由产物算出」，**不证**「产物来自真 NPU 跑测」——产物↔真机绑定须
+OPRUNWAY_DONE 哨兵 / raw log hash / msprof 输出绑定（本轮不做）；别把本门说成「已防伪造」。
+
 用法: python3 validate_acceptance_state.py --stage task1|task2|task3 --dir <reports 产物目录>
-只读、stdlib、零硬编码。打印累积 error（非 fail-fast）+ 末行 `STATUS: PASSED|FAILED`，exit 0/1。
+只读、零硬编码。打印累积 error（非 fail-fast）+ 末行 `STATUS: PASSED|FAILED`，exit 0/1。
+（task1/task3 为 stdlib；**task2 的 A 方案重算按需惰性 import numpy + precision_policy**——numpy 缺失即 FAILED、
+不静默 skip。validator.py 仍 stdlib-only、不受本门引入 numpy 影响。）
 """
 import argparse, hashlib, json, math, os, sys
 from collections import Counter
@@ -196,6 +204,10 @@ def gate_task2(d, errs):
                 continue
             if ce != ee:
                 errs.append(f"{cid}: evidence {key}={ee} ≠ caseset {ce}（防放宽假通过）")
+    # === A 方案：evidence.precision.metrics ↔ 磁盘产物 provenance 绑定（重算比对）===
+    # 上文只校「阈值/口径三处一致」（防放宽），却全信 evidence 自报的 metrics **数值**；此段按 provenance 读产物、
+    # 先校 sha、再依 caseset policy 重算 metrics 并逐字段比对，堵「伪造 bad_count=0 直接 pass」的自报数字洞。
+    _gate_precision_provenance(d, ev_list, exp_by_id, errs)
     print(f"  精度裁决={ov.get('verdict')}(validator 判) | 证据覆盖={'一致' if cids == eids else '不一致'}")
 
 
@@ -227,6 +239,135 @@ def _sha256(path):
         for chunk in iter(lambda: fh.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+# ========================= A 方案：evidence.metrics ↔ 磁盘产物 provenance 绑定 =========================
+def _pinned_product(d, rel):
+    """把 per-case 产物（golden/out .npy）钉在 `<d>/work` 下解析——run_workflow 固定用 `<out_dir>/work` 承载
+    repo_adapter 的 work_dir 产物，而门 `--dir=<out_dir>`，故产物在门视角下位于 `work/` 子目录。绝对路径 /
+    `..` 逃逸 / symlink / 非普通文件 → None。安全模型同 `_pinned_file`，只是根落在 `<d>/work`。"""
+    if not isinstance(rel, str) or not rel or os.path.isabs(rel):
+        return None
+    joined = os.path.join(d, "work", rel)
+    if os.path.islink(joined):
+        return None
+    base = os.path.realpath(d)
+    target = os.path.realpath(joined)
+    try:
+        if os.path.commonpath([base, target]) != base:
+            return None
+    except ValueError:
+        return None
+    return target if os.path.isfile(target) else None
+
+
+def _metrics_match(recalc, claimed, cid, errs, tag="metrics"):
+    """逐字段比对：**重算出的每个 metric 都须在 evidence 自报值里 present 且相符**——计数类(int)精确相等、
+    浮点带合理容差（同函数同字节重算本应逐位相等，容差只兜 JSON 往返末位）。evidence 多余键忽略。"""
+    if not isinstance(claimed, dict):
+        errs.append(f"{cid}: evidence 缺 precision.{tag}（无法与产物重算比对）")
+        return
+    for k, rv in recalc.items():
+        cv = claimed.get(k)
+        if isinstance(rv, bool):                       # 防御：目前无 bool metric
+            if cv is not rv:
+                errs.append(f"{cid}: 重算 {tag}.{k}={rv} ≠ evidence {cv!r}")
+        elif isinstance(rv, int):                      # 计数类：精确相等（拒 bool 冒充 int）
+            if not (isinstance(cv, int) and not isinstance(cv, bool) and cv == rv):
+                errs.append(f"{cid}: 重算 {tag}.{k}={rv}（计数须精确）≠ evidence {cv!r}"
+                            "（自报数字与产物重算不符·疑伪造）")
+        else:                                          # 浮点：合理容差
+            if not (isinstance(cv, (int, float)) and not isinstance(cv, bool)
+                    and math.isclose(float(cv), float(rv), rel_tol=1e-9, abs_tol=1e-12)):
+                errs.append(f"{cid}: 重算 {tag}.{k}={rv} ≉ evidence {cv!r}（浮点超容差·疑伪造）")
+
+
+def _recompute_case(np, precision_policy, d, cid, exp, prec, errs):
+    """单 case 的 evidence↔产物绑定：读 provenance 指的产物 → 先校 sha256 → np.load → 依 caseset policy 重算
+    metrics → 与 evidence 自报 metrics 逐字段比对。任一环不符/缺失 → FAILED（mock 也不放宽）。"""
+    prov = prec.get("provenance")
+    if not isinstance(prov, dict):
+        errs.append(f"{cid}: evidence.precision 缺 provenance（A 方案产物绑定缺失·metrics 真伪不可校验）")
+        return
+    miss = [k for k in ("golden_sha256", "out_sha256", "numel") if prov.get(k) is None]
+    if miss:
+        errs.append(f"{cid}: provenance 缺字段 {miss}")
+        return
+    gt = _pinned_product(d, prec.get("golden_path"))
+    ot = _pinned_product(d, prec.get("out_path"))
+    if gt is None:
+        errs.append(f"{cid}: golden 产物缺失/路径逃逸/非普通文件（{prec.get('golden_path')!r}）")
+    if ot is None:
+        errs.append(f"{cid}: out 产物缺失/路径逃逸/非普通文件（{prec.get('out_path')!r}）")
+    if gt is None or ot is None:
+        return
+    # 先校 sha256——产物字节被替换/篡改而 provenance 未同改 → 不符 → FAILED（堵「改 out.npy 字节」洞）。
+    if _sha256(gt) != prov["golden_sha256"]:
+        errs.append(f"{cid}: golden 产物 sha256 与 provenance 不符（产物被替换/篡改）")
+        return
+    if _sha256(ot) != prov["out_sha256"]:
+        errs.append(f"{cid}: out 产物 sha256 与 provenance 不符（产物字节被篡改）")
+        return
+    try:
+        golden = np.load(gt, allow_pickle=False)   # allow_pickle=False：防恶意 .npy 反序列化
+        out = np.load(ot, allow_pickle=False)
+    except Exception as ex:
+        errs.append(f"{cid}: 产物 np.load 失败（{type(ex).__name__}: {ex}）")
+        return
+    if not _is_int(prov["numel"]) or int(golden.size) != prov["numel"]:
+        errs.append(f"{cid}: golden.numel={int(golden.size)} ≠ provenance.numel={prov['numel']!r}")
+    policy = exp.get("policy")
+    if not isinstance(policy, dict):
+        errs.append(f"{cid}: caseset.expected.policy 非 dict（无法据 caseset 口径重算 metrics）")
+        return
+    # 依 caseset 的 standard/compare_dtype 重算（policy 已在上文三处一致门校过 == evidence policy）。
+    # ⚠ 用与 repo_adapter **同一份** precision_policy.compute_metrics——目的是绑定 evidence↔产物，**不是**
+    #   交叉验证 metric 实现（若换一份实现比对，就变成验证算法而非「数字是否真从产物算出」了）。
+    try:
+        recalc = precision_policy.compute_metrics(out, golden, policy)
+    except Exception as ex:
+        errs.append(f"{cid}: 依 caseset policy 重算 metrics 失败（{type(ex).__name__}: {ex}）——不静默放行")
+        return
+    _metrics_match(recalc, prec.get("metrics"), cid, errs, tag="metrics")
+    acc_pol = exp.get("acceptance_policy")   # spec 声明 acceptance 时一并绑定（本 scope 一般不触发）
+    if isinstance(acc_pol, dict):
+        try:
+            racc = precision_policy.compute_metrics(out, golden, acc_pol)
+        except Exception as ex:
+            errs.append(f"{cid}: 依 caseset acceptance_policy 重算失败（{type(ex).__name__}: {ex}）")
+            return
+        _metrics_match(racc, prec.get("acceptance_metrics"), cid, errs, tag="acceptance_metrics")
+
+
+def _gate_precision_provenance(d, ev_list, exp_by_id, errs):
+    """A 方案总入口：证明 evidence.precision.metrics **确实从磁盘产物算出**（属**证据可信**，不重判 verdict——
+    canon 定「门只管证据可信完整、pass/fail 归 validator」，重算校验的是「evidence 声称的数字是否真从产物算出」，
+    仍属证据可信，pass/fail 由 validator 依阈值裁）。
+
+    硬纪律：numpy 缺失 / 产物缺失 / sha 不符 / 重算不符 一律 FAILED（mock 也不放宽），**绝不静默 skip**——否则
+    等于留「删掉 numpy 即绕过」的后门。
+    ⚠ 已知边界（诚实、勿写成「已防伪造」）：A 只证「metrics 由 golden/out 这两文件算出」，**不证**「这两文件来自
+       一次真 NPU 跑测」。同时控制产物+evidence 的攻击者把 out.npy 写成 golden.npy 的副本 → bad_count=0 是「真的」，
+       只是它没测 NPU。产物↔真机来源的绑定须 OPRUNWAY_DONE 哨兵 / raw log hash / msprof 输出绑定（本轮不做）。"""
+    try:
+        import numpy as np
+    except ImportError as ex:
+        errs.append(f"numpy 不可用（{ex}）——A 方案产物重算无法进行，判 FAILED"
+                    "（绝不静默 skip，否则「删掉 numpy 即绕过」）")
+        return
+    import precision_policy
+    for e in ev_list:
+        if not isinstance(e, dict) or not isinstance(e.get("case_id"), str) or not e["case_id"]:
+            continue                                   # 缺/坏 case_id 已在上文报
+        cid = e["case_id"]
+        exp = exp_by_id.get(cid)
+        prec = e.get("precision")
+        if exp is None or not isinstance(prec, dict):
+            continue                                   # 多余 case / 缺 precision 已在上文报
+        try:
+            _recompute_case(np, precision_policy, d, cid, exp, prec, errs)
+        except Exception as ex:                        # 抗坏输入：任何意外 → FAILED、绝不崩溃/静默放过
+            errs.append(f"{cid}: 产物重算校验异常（{type(ex).__name__}: {ex}）——判 FAILED，不崩溃")
 
 
 def _gate_small_shape_exception(pr, d, errs):

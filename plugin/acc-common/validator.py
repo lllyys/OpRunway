@@ -385,10 +385,13 @@ def validate(spec, caseset, evidence):
             row["功能"] = "pass" if e.get("status") == "ok" else "fail"
         if "精度" in dims:
             policy = exp["policy"]
-            # ⚠ 边界（effective-standard-security-7，**未防**、待 canon 决策）：validator 全信 evidence.precision.
-            #   metrics 的**数值**，与真实 NPU 产物（out.bin / golden）之间**无 hash/签名 provenance 绑定**——
-            #   能伪造 out.bin/metrics 的攻击者可注 bad_count=0 直接 pass。本文件只据 spec 复算「**用哪套阈值/口径**」
-            #   判（防口径被放宽），**不**证明「metrics 来自真实产物」。真绑定属架构级问题，别声称此处已防。
+            # ⚠ 边界（effective-standard-security-7）：validator **本身**仍全信 evidence.precision.metrics 的数值
+            #   （本文件只据 spec 复算「用哪套阈值/口径」判，防口径放宽，不证明 metrics 来自真实产物）。
+            #   metrics↔产物的绑定已由**门 gate_task2（A 方案）**补上：门按 provenance 读磁盘 golden/out、校 sha256、
+            #   依 caseset policy 重算 metrics 并逐字段比对，故「伪造 bad_count=0 而产物不动」会被门判 FAILED。
+            #   **但仍有未防的一层**（诚实）：A 只绑定「metrics↔这两文件」，**不绑定**「文件↔一次真 NPU 跑测」——
+            #   同控产物+evidence 者把 out 写成 golden 副本即得「真的」bad_count=0（未测 NPU）。产物↔真机来源须
+            #   OPRUNWAY_DONE 哨兵 / raw log hash / msprof 输出绑定（本轮不做）；别声称已彻底防伪造。
             metrics = ev_prec.get("metrics")
             if not isinstance(metrics, dict):
                 row.update(精度="fail", 判据="evidence 缺 precision.metrics（误差分布未复算）")

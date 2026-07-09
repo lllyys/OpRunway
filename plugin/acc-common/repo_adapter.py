@@ -5,7 +5,7 @@
 - new_example   : 真机 build/run PR 自带工程（留桩，需 NPU + VPN，之后填）。
 证据只记「测到什么」（metric value / us / 路径），pass/fail 交给 validator（ADR 0007）。
 """
-import json, math, os, posixpath, re, shlex, subprocess, sys
+import hashlib, json, math, os, posixpath, re, shlex, subprocess, sys
 import numpy as np
 import precision_policy
 import gen_cases  # T7：复用 bf16 位级 codec（_f32_to_bf16_uint16/_bf16_uint16_to_f32）+ 原生 dtype 表
@@ -100,11 +100,27 @@ def readback_output(raw_storage, meta):
     return np.ascontiguousarray(arr)
 
 
-def _precision_evidence(case, out, golden, out_path, ascendoptest_bool=None):
+def _sha256_file(path):
+    """对文件字节算 sha256（A 方案 provenance 用）。文件必须已落盘（缺失 → OSError，不静默兜 None）。"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _precision_evidence(case, out, golden, out_path, work_dir, ascendoptest_bool=None):
     """采集层构建 evidence.precision——**误差分布确定性复算**（compute_metrics）但**不判 pass/fail**。
 
     结构化 policy/tolerance_policy_id/threshold(digest) 一律**从 caseset.expected 抄**（三处一致的一环，
     adapter 不自造阈值），只 metrics 是重算。有 acceptance_policy 时另算 acceptance_metrics。
+
+    A 方案（evidence↔产物 provenance 绑定）：对落盘的 golden/out 产物字节算 sha256 + numel，写入
+    `provenance`，供门 gate_task2 **独立重算校验**——门按此路径读产物、先校 sha、再依 caseset policy 重算
+    metrics 并与本处自报的 metrics 逐字段比对，不符即 FAILED。目的是让「metrics 可被证明是从磁盘产物算出」。
+    ⚠ 已知边界（诚实、勿夸大）：A 只证「metrics 由 golden/out 这两文件算出」，**不证**「这两文件来自一次
+       真 NPU 跑测」——同时控制产物+evidence 的攻击者把 out 写成 golden 的副本 → bad_count=0 是「真的」，
+       只是它没测 NPU。产物↔真机来源的绑定须 OPRUNWAY_DONE 哨兵 / raw log hash / msprof 输出绑定（本轮不做）。
     """
     exp = case["expected"]
     policy = exp["policy"]
@@ -115,7 +131,10 @@ def _precision_evidence(case, out, golden, out_path, ascendoptest_bool=None):
             "oracle_source": "cpu_ref",          # numpy 融合 golden = host CPU 参考
             "not_settled": bool(policy.get("not_settled", False)),
             "metrics": precision_policy.compute_metrics(out, golden, policy),
-            "golden_path": exp["golden_path"], "out_path": out_path}
+            "golden_path": exp["golden_path"], "out_path": out_path,
+            "provenance": {"golden_sha256": _sha256_file(_safe(work_dir, exp["golden_path"])),
+                           "out_sha256": _sha256_file(_safe(work_dir, out_path)),
+                           "numel": int(np.asarray(golden).size)}}
     ap = exp.get("acceptance_policy")
     if ap:
         prec["acceptance_policy"] = ap
@@ -169,7 +188,7 @@ def run_mock(caseset, work_dir, defect_cases=None):
         np.save(_safe(work_dir, out_path), out)
         ev.append({
             "case_id": c["id"], "status": "ok",
-            "precision": _precision_evidence(c, out, golden, out_path),
+            "precision": _precision_evidence(c, out, golden, out_path, work_dir),
             "perf": {"scope": "kernel_only", "us": _mock_us(int(golden.size))},  # 用输出 size（广播正确）
         })
     return {"op": caseset["op"], "repo_mode": "mock", "evidence": ev}
@@ -347,7 +366,11 @@ def run_new_example(caseset, work_dir, defect_cases=None):
             if raw.size != golden.size:
                 raise RuntimeError(f"{cid}: out.bin {raw.size} elem ≠ 期望 {golden.size}（形状/传输异常）")
             out = readback_output(raw, {"dtype": dtn}).reshape(golden.shape) if golden.size else raw
-        prec = _precision_evidence(c, out, golden, f"{cid}/out.bin", ascendoptest_bool=None)
+        # A 方案：把 readback 逻辑数组另落 out.npy（供门 gate_task2 以 np.load 统一重算；out.bin 原始 dump 保留
+        # 作原始产物）。provenance 的 out_sha256 绑定 out.npy（门重算所依的那份字节）。
+        out_npy_rel = f"{cid}/out.npy"
+        np.save(_safe(work_dir, out_npy_rel), out)
+        prec = _precision_evidence(c, out, golden, out_npy_rel, work_dir, ascendoptest_bool=None)
         prec["ascendoptest_bool"] = None   # 待 NPU：真机接 compare.py bool 作交叉核对（现桩位）
         prec.setdefault("ascendoptest_bool_note", "待 NPU：真机接 AscendOpTest compare.py bool 交叉核对")
         ev.append({"case_id": cid, "status": "ok",

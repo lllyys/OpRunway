@@ -3,6 +3,8 @@
 跑: python3 -m unittest test_validate_acceptance_state -v   （在 acc-common/ 下）
 """
 import json, os, subprocess, sys, tempfile, shutil, unittest
+import numpy as np
+import precision_policy
 import validate_acceptance_state as G
 import check_manifest_sync as C
 
@@ -31,14 +33,45 @@ CASESET = {"op": "X", "cases": [
 ]}
 
 
-def _ev(ids, mutate=None):
-    """据 caseset.expected 构一致的 evidence.precision（含 metrics）；mutate(id)->dict 覆盖单例（造不一致）。"""
+# A 方案：gate_task2 现按 provenance 读磁盘产物、校 sha、依 caseset policy 重算 metrics 并比对。
+# 故 _ev 须**真落盘** golden.npy/out.npy 到 <d>/work/<cid>/（门解析根），并以真实重算值 + sha256 构 evidence。
+_DT = {"x_000": np.float32, "x_001": np.float16}
+
+
+def _mkprod(d, cid, golden, out):
+    """落盘 <d>/work/<cid>/golden.npy + out.npy（门 gate_task2 从 <d>/work 解析产物）；返回 (golden_sha, out_sha)。"""
+    cdir = os.path.join(d, "work", cid)
+    os.makedirs(cdir, exist_ok=True)
+    gp, op = os.path.join(cdir, "golden.npy"), os.path.join(cdir, "out.npy")
+    np.save(gp, golden)
+    np.save(op, out)
+    return G._sha256(gp), G._sha256(op)
+
+
+def _prec_for(d, i, corrupt_out=0):
+    """构与磁盘产物自洽的 evidence.precision：out 默认 = golden 副本（完美 mock，bad_count=0）；
+    corrupt_out=k → out 真有 k 个坏点（真实 bad_count≥k），metrics 用真实重算值、provenance 用真实 sha。"""
+    exp = _EXP[i]
+    dt = _DT[i]
+    golden = np.arange(16, dtype=dt)
+    out = golden.copy()
+    for k in range(corrupt_out):
+        out[k] = out[k] + dt(10)                       # 制造真实坏点（out ≠ golden）
+    g_sha, o_sha = _mkprod(d, i, golden, out)
+    metrics = precision_policy.compute_metrics(out, golden, exp["policy"])
+    return {"standard": exp["standard"], "tolerance_policy_id": exp["tolerance_policy_id"],
+            "policy": dict(exp["policy"]), "threshold": exp["threshold"], "metrics": metrics,
+            "golden_path": f"{i}/golden.npy", "out_path": f"{i}/out.npy",
+            "provenance": {"golden_sha256": g_sha, "out_sha256": o_sha, "numel": 16}}
+
+
+def _ev(d, ids, mutate=None, corrupt=None):
+    """据 caseset.expected 构与磁盘产物一致的 evidence（含 provenance + 真实重算 metrics）；
+    mutate(id)->dict 覆盖单例 precision（造口径不一致）；corrupt={id:k} 让 out 真有 k 个坏点。"""
+    corrupt = corrupt or {}
     out = []
     for i in ids:
-        exp = _EXP[i]
-        prec = {"standard": exp["standard"], "tolerance_policy_id": exp["tolerance_policy_id"],
-                "policy": dict(exp["policy"]), "threshold": exp["threshold"],
-                "metrics": {"bad_count": 0, "numel": 16}}
+        prec = _prec_for(d, i, corrupt_out=corrupt.get(i, 0))
         if mutate:
             prec.update(mutate(i))
         out.append({"case_id": i, "status": "pass", "precision": prec})
@@ -100,41 +133,41 @@ class GateTest(unittest.TestCase):
     # --- task2 (核心：防跑子集) ---
     def test_task2_full_ok(self):
         _w(self.d, "caseset.json", CASESET)
-        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
         _w(self.d, "verdict.json", _vd("pass"))
         self.assertEqual(self._errs("task2"), [])
 
     def test_task2_subset_fails(self):
         """跑子集报 100%：caseset 2 例、evidence 只 1 例 → 必 FAIL。"""
         _w(self.d, "caseset.json", CASESET)
-        _w(self.d, "evidence.json", _ev(["x_000"]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000"]))
         _w(self.d, "verdict.json", _vd("pass"))
         self.assertTrue(any("跑子集" in e for e in self._errs("task2")))
 
     def test_task2_legit_fail_not_blocked(self):
         """合法精度 fail（证据完整）→ 门不挡：真因由 verdict 表达，不该被门盖成 BLOCKED。"""
         _w(self.d, "caseset.json", CASESET)
-        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
         _w(self.d, "verdict.json", _vd("fail", fail=1))
         self.assertEqual(self._errs("task2"), [])
 
     def test_task2_needs_review_not_blocked(self):
         _w(self.d, "caseset.json", CASESET)
-        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
         _w(self.d, "verdict.json", _vd("needs_review", unc=1))
         self.assertEqual(self._errs("task2"), [])
 
     def test_task2_contract_problems_fails(self):
         """validator 标契约破损 → 证据不可信 → 门挡。"""
         _w(self.d, "caseset.json", CASESET)
-        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
         _w(self.d, "verdict.json", _vd("pass", cp=2))
         self.assertTrue(any("契约" in e for e in self._errs("task2")))
 
     def test_task2_threshold_mismatch_fails(self):
         """adapter 偷偷放宽阈值 digest → 必 FAIL。"""
         _w(self.d, "caseset.json", CASESET)
-        _w(self.d, "evidence.json", _ev(["x_000", "x_001"],
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"],
                                         mutate=lambda i: {"threshold": 0.1}))
         _w(self.d, "verdict.json", _vd("pass"))
         self.assertTrue(any("防放宽" in e and "threshold" in e for e in self._errs("task2")))
@@ -144,7 +177,7 @@ class GateTest(unittest.TestCase):
         _w(self.d, "caseset.json", CASESET)
         looser = {"kind": "ascendoptest_default", "tolerance": 0.0001, "error_rate": 0.5,
                   "eps": 1e-9, "legacy": 0.1, "not_settled": False}
-        _w(self.d, "evidence.json", _ev(["x_000", "x_001"],
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"],
                                         mutate=lambda i: {"policy": looser} if i == "x_000" else {}))
         _w(self.d, "verdict.json", _vd("pass"))
         self.assertTrue(any("policy" in e and "防放宽" in e for e in self._errs("task2")))
@@ -152,7 +185,7 @@ class GateTest(unittest.TestCase):
     def test_task2_missing_tolerance_policy_id_fails(self):
         """evidence 缺 tolerance_policy_id（口径不可追溯）→ 必 FAIL。"""
         _w(self.d, "caseset.json", CASESET)
-        ev = _ev(["x_000", "x_001"])
+        ev = _ev(self.d, ["x_000", "x_001"])
         del ev["evidence"][0]["precision"]["tolerance_policy_id"]
         _w(self.d, "evidence.json", ev)
         _w(self.d, "verdict.json", _vd("pass"))
@@ -163,7 +196,7 @@ class GateTest(unittest.TestCase):
         cs = json.loads(json.dumps(CASESET))
         del cs["cases"][0]["expected"]["tolerance_policy_id"]
         _w(self.d, "caseset.json", cs)
-        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
         _w(self.d, "verdict.json", _vd("pass"))
         self.assertTrue(any("caseset expected 缺 tolerance_policy_id" in e for e in self._errs("task2")))
 
@@ -172,7 +205,7 @@ class GateTest(unittest.TestCase):
         cs = json.loads(json.dumps(CASESET))
         del cs["cases"][0]["expected"]["policy"]
         _w(self.d, "caseset.json", cs)
-        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
         _w(self.d, "verdict.json", _vd("pass"))
         self.assertTrue(any("caseset expected 缺 policy" in e for e in self._errs("task2")))
 
@@ -180,7 +213,7 @@ class GateTest(unittest.TestCase):
         """finding #12/#16：三处不一致（evidence policy 放宽 error_rate）→ 必 FAIL。"""
         _w(self.d, "caseset.json", CASESET)
         looser = dict(_POL32); looser["error_rate"] = 0.9
-        _w(self.d, "evidence.json", _ev(["x_000", "x_001"],
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"],
                                         mutate=lambda i: {"policy": looser} if i == "x_000" else {}))
         _w(self.d, "verdict.json", _vd("pass"))
         self.assertTrue(any("防放宽" in e and "policy" in e for e in self._errs("task2")))
@@ -188,7 +221,7 @@ class GateTest(unittest.TestCase):
     def test_task2_bad_verdict_enum_fails(self):
         """finding #14：overall.verdict 非合法枚举 → 必 FAIL。"""
         _w(self.d, "caseset.json", CASESET)
-        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
         _w(self.d, "verdict.json", {"op": "X", "overall": {"verdict": "weird",
             "counts": {"fail": 0, "uncertain": 0, "contract_problems": 0}}})
         self.assertTrue(any("非法" in e for e in self._errs("task2")))
@@ -196,7 +229,7 @@ class GateTest(unittest.TestCase):
     def test_task2_counts_non_int_fails(self):
         """finding #14：counts.fail 非整数 → 必 FAIL。"""
         _w(self.d, "caseset.json", CASESET)
-        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
         _w(self.d, "verdict.json", {"op": "X", "overall": {"verdict": "pass",
             "counts": {"fail": "0", "uncertain": 0, "contract_problems": 0}}})
         self.assertTrue(any("非整数" in e for e in self._errs("task2")))
@@ -204,9 +237,77 @@ class GateTest(unittest.TestCase):
     def test_task2_nonlist_cases_fails(self):
         """finding #13：cases 非列表 → 直接 FAILED（不静默兜成空列表放过）。"""
         _w(self.d, "caseset.json", {"op": "X", "cases": None})
-        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
         _w(self.d, "verdict.json", _vd("pass"))
         self.assertTrue(any("非列表" in e for e in self._errs("task2")))
+
+    # --- task2 · A 方案 evidence↔产物 provenance 绑定负例（钉死）---
+    def test_task2_provenance_forged_bad_count_recompute_fails(self):
+        """篡改 evidence.metrics.bad_count=0 而产物真有坏点 → 依 caseset policy 重算不符 → FAILED。"""
+        _w(self.d, "caseset.json", CASESET)
+        ev = _ev(self.d, ["x_000", "x_001"], corrupt={"x_000": 1})  # 产物真有 1 坏点（真实 bad_count≥1）
+        ev["evidence"][0]["precision"]["metrics"]["bad_count"] = 0   # 伪造自报 bad_count=0
+        _w(self.d, "evidence.json", ev)
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertTrue(any("bad_count" in e and "重算" in e for e in self._errs("task2")))
+
+    def test_task2_provenance_tampered_out_bytes_sha_fails(self):
+        """篡改 out.npy 磁盘字节而 provenance.sha/metrics 不动 → sha 不符 → FAILED（重算前先挡）。"""
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+        p = os.path.join(self.d, "work", "x_000", "out.npy")
+        a = np.load(p); a[0] = a[0] + np.float32(9); np.save(p, a)   # 改字节、不更新 provenance
+        self.assertTrue(any("sha256" in e and "篡改" in e for e in self._errs("task2")))
+
+    def test_task2_provenance_selfconsistent_forgery_passes_known_boundary(self):
+        """⚠ A 的**已知边界**（诚实钉死，不假装防住）：自洽伪造——攻击者不跑 NPU，把 out 写成 golden 的副本，
+        provenance.sha 与 metrics 全部自洽 → bad_count=0 是「真的」（确从产物算出），门**放行**。
+        A 只绑定「metrics↔产物」，**不绑定**「产物↔一次真 NPU 跑测」；后者须 OPRUNWAY_DONE 哨兵 /
+        raw log hash / msprof 输出绑定（本轮不做）。故此处必然放行，断言之以固化边界。"""
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))  # out=golden 副本、sha/metrics 全自洽
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertEqual(self._errs("task2"), [])   # 门放行 —— 已知边界，非「已防伪造」
+
+    def test_task2_provenance_deleted_golden_fails(self):
+        """删除 golden.npy → 产物缺失 → FAILED（mock 也不放宽）。"""
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+        os.remove(os.path.join(self.d, "work", "x_000", "golden.npy"))
+        self.assertTrue(any("golden 产物缺失" in e for e in self._errs("task2")))
+
+    def test_task2_provenance_deleted_out_fails(self):
+        """删除 out.npy → 产物缺失 → FAILED。"""
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+        os.remove(os.path.join(self.d, "work", "x_001", "out.npy"))
+        self.assertTrue(any("out 产物缺失" in e for e in self._errs("task2")))
+
+    def test_task2_provenance_missing_field_fails(self):
+        """provenance 整体缺失 → FAILED（无从校验 metrics 真伪）。"""
+        _w(self.d, "caseset.json", CASESET)
+        ev = _ev(self.d, ["x_000", "x_001"])
+        del ev["evidence"][0]["precision"]["provenance"]
+        _w(self.d, "evidence.json", ev)
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertTrue(any("缺 provenance" in e for e in self._errs("task2")))
+
+    def test_task2_provenance_numpy_unavailable_fails_not_skip(self):
+        """模拟 numpy 不可用（sys.modules['numpy']=None 令 import 抛 ImportError）→ 门 FAILED、
+        **不是静默 skip**（否则留「删掉 numpy 即绕过」后门）。"""
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+        saved = sys.modules.get("numpy", np)
+        sys.modules["numpy"] = None
+        try:
+            errs = self._errs("task2")
+        finally:
+            sys.modules["numpy"] = saved
+        self.assertTrue(any("numpy" in e and "FAILED" in e for e in errs))
 
     def test_task1_null_shape_no_crash(self):
         """finding #15：inputs[0].shape 为 null → 不崩、记 error（list(None) 会 TypeError）。"""
@@ -294,7 +395,7 @@ class GateTest(unittest.TestCase):
 
     def test_task2_missing_verdict_overall_fails(self):
         _w(self.d, "caseset.json", CASESET)
-        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
         _w(self.d, "verdict.json", {"op": "X"})  # 无 overall
         self.assertTrue(any("verdict.overall" in e for e in self._errs("task2")))
 

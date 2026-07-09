@@ -377,7 +377,13 @@ def parse_results(ctx, outs, perfs, defect_cases=None):
                 "oracle_source": "cpu_ref",          # numpy f32 matmul golden = host CPU 参考
                 "not_settled": bool(policy.get("not_settled", False)),
                 "metrics": precision_policy.compute_metrics(out, golden, policy),
-                "golden_path": exp["golden_path"], "out_path": f"{cid}/out.npy"}
+                "golden_path": exp["golden_path"], "out_path": f"{cid}/out.npy",
+                # A 方案 evidence↔产物绑定（同 repo_adapter._precision_evidence）：对落盘 golden/out 字节算
+                # sha256+numel，供门 gate_task2 独立重算校验 metrics 真伪。catlass 若缺 provenance 会被新门判
+                # FAILED，故此处必须同带。⚠ 边界同上：只证 metrics 由这两文件算出，不证文件来自真 NPU 跑测。
+                "provenance": {"golden_sha256": _file_sha256(_safe(wd, exp["golden_path"])),
+                               "out_sha256": _file_sha256(_safe(wd, f"{cid}/out.npy")),
+                               "numel": int(np.asarray(golden).size)}}
         ap = exp.get("acceptance_policy")
         if ap:  # spec 未声明 acceptance → 无此键 → evidence 不带 acceptance_*（防 finding #3）
             prec["acceptance_policy"] = ap
