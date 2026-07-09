@@ -5,13 +5,39 @@
 - new_example   : 真机 build/run PR 自带工程（留桩，需 NPU + VPN，之后填）。
 证据只记「测到什么」（metric value / us / 路径），pass/fail 交给 validator（ADR 0007）。
 """
-import json, math, os, re, shlex, subprocess, sys
+import json, math, os, posixpath, re, shlex, subprocess, sys
 import numpy as np
+import precision_policy
 
 _NP = {"float32": np.float32, "float16": np.float16}
 _ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")     # case_id / host / op：拒空白、slash、shell 特殊字符
 _SOC_RE = re.compile(r"^ascend[0-9a-z_]+$")
 _PATH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")  # 远端路径：拒 shell 特殊字符（防 scp/ssh 拼接注入）
+
+
+def _check_id(label, val):
+    """ID（host/op/vendor/case_id 等）安全校验（finding #17）：拒空白/斜杠/shell 特殊字符、
+    **首字符 '-'**（防被 ssh/scp/远端命令当选项，如 '-rf'）、以及 '.'/'..'。"""
+    if not isinstance(val, str) or not _ID_RE.match(val) or val.startswith("-") or val in (".", ".."):
+        raise ValueError(f"非法 {label}: {val!r}（拒首字符 '-'、'.'/'..'、空白/斜杠/shell 特殊字符）")
+
+
+def _check_remote_path(label, val):
+    """远端路径安全校验（finding #17）：**须绝对** + 无 shell 特殊字符 + **无 '..' 组件**（防穿越）+
+    各组件不以 '-' 开头（防被 rm/mkdir/tar/cp 当选项）；posixpath.normpath 兜底再核一次。"""
+    if not isinstance(val, str) or not _PATH_RE.match(val):
+        raise ValueError(f"非法路径 {label}: {val!r}（含非法字符）")
+    if not val.startswith("/"):
+        raise ValueError(f"非法路径 {label}: {val!r}（远端路径须绝对，防相对路径拼接歧义）")
+    parts = val.split("/")
+    if ".." in parts:
+        raise ValueError(f"非法路径 {label}: {val!r}（禁 '..' 组件，防目录穿越）")
+    for seg in parts:
+        if seg.startswith("-"):
+            raise ValueError(f"非法路径 {label}: {val!r}（组件 {seg!r} 首字符 '-'，防被当选项）")
+    norm = posixpath.normpath(val)
+    if not norm.startswith("/") or ".." in norm.split("/"):
+        raise ValueError(f"非法路径 {label}: {val!r}（normpath 规范化后仍非绝对/含 '..'）")
 
 
 def _snake(camel):  # IsClose → is_close, Sign → sign（build.sh --ops + experimental/math/<snake>）
@@ -27,13 +53,43 @@ def _safe(work_dir, rel):
     return p
 
 
-def _metric(verify_mode, out, golden):
-    """采集：按 verify_mode 测误差值（不判 pass/fail）。"""
-    if verify_mode == "exact":
-        return "exact_mismatch", int(np.count_nonzero(out != golden))
-    g, o = golden.astype(np.float64), out.astype(np.float64)
-    rel = np.abs(o - g) / (np.abs(g) + 1e-7)
-    return "max_rel_err", (float(rel.max()) if rel.size else 0.0)
+def _precision_evidence(case, out, golden, out_path, ascendoptest_bool=None):
+    """采集层构建 evidence.precision——**误差分布确定性复算**（compute_metrics）但**不判 pass/fail**。
+
+    结构化 policy/tolerance_policy_id/threshold(digest) 一律**从 caseset.expected 抄**（三处一致的一环，
+    adapter 不自造阈值），只 metrics 是重算。有 acceptance_policy 时另算 acceptance_metrics。
+    """
+    exp = case["expected"]
+    policy = exp["policy"]
+    prec = {"standard": exp["standard"],
+            "tolerance_policy_id": exp["tolerance_policy_id"],
+            "policy": policy,
+            "threshold": exp["threshold"],
+            "oracle_source": "cpu_ref",          # numpy 融合 golden = host CPU 参考
+            "not_settled": bool(policy.get("not_settled", False)),
+            "metrics": precision_policy.compute_metrics(out, golden, policy),
+            "golden_path": exp["golden_path"], "out_path": out_path}
+    ap = exp.get("acceptance_policy")
+    if ap:
+        prec["acceptance_policy"] = ap
+        prec["acceptance_tolerance_policy_id"] = exp.get("acceptance_tolerance_policy_id")
+        prec["acceptance_metrics"] = precision_policy.compute_metrics(out, golden, ap)
+    if ascendoptest_bool is not None or "ascendoptest_bool" in exp:
+        prec["ascendoptest_bool"] = ascendoptest_bool  # 真机 compare.py 交叉核对，桩位（现 None）
+    return prec
+
+
+def _inject_defect(out, policy):
+    """mock 注入缺陷：按 floor(numel*error_rate)+1 个坏点（非单点，避免大数组随机飘），让 validator 现 fail。"""
+    n = int(out.size)
+    if n == 0:
+        return out
+    err = float((policy or {}).get("error_rate", 0.0))
+    k = min(n, int(math.floor(n * err)) + 1)
+    flat = out.reshape(-1)
+    for i in range(k):
+        flat[i] = (~flat[i]) if out.dtype == bool else (flat[i] + 10)
+    return out
 
 
 def _mock_us(numel):
@@ -54,16 +110,12 @@ def run_mock(caseset, work_dir, defect_cases=None):
         golden = np.load(_safe(work_dir, c["expected"]["golden_path"]))
         out = golden.copy()  # mock：完美 NPU = golden
         if c["id"] in defect_cases and out.size:  # 注入缺陷 → 让 validator 现 fail
-            flat = out.reshape(-1)
-            flat[0] = (~flat[0]) if out.dtype == bool else (flat[0] + 1)
+            _inject_defect(out, c["expected"].get("policy"))
         out_path = f"{c['id']}/out.npy"
         np.save(_safe(work_dir, out_path), out)
-        metric, value = _metric(c["expected"]["verify_mode"], out, golden)
         ev.append({
             "case_id": c["id"], "status": "ok",
-            "precision": {"metric": metric, "value": value,
-                          "threshold": c["expected"]["threshold"],
-                          "golden_path": c["expected"]["golden_path"], "out_path": out_path},
+            "precision": _precision_evidence(c, out, golden, out_path),
             "perf": {"scope": "kernel_only", "us": _mock_us(int(golden.size))},  # 用输出 size（广播正确）
         })
     return {"op": caseset["op"], "repo_mode": "mock", "evidence": ev}
@@ -92,13 +144,14 @@ def run_new_example(caseset, work_dir, defect_cases=None):
     cfg = _ne_cfg()
     host, rroot, ops, opp = cfg["host"], cfg["rroot"], cfg["ops"], cfg["opp"]
     soc, vendor = cfg["soc"], cfg["vendor"]
+    _check_id("op_name", caseset["op"])          # 原始算子名（驱动 runner 文件名/OPRUNWAY_OPNAME）
     op = _snake(caseset["op"])   # 算子 snake 名驱动 build/目录（IsClose→is_close, Sign→sign）
-    if not _ID_RE.match(host): raise ValueError(f"非法 host: {host!r}")
-    if not _ID_RE.match(op): raise ValueError(f"非法 op: {op!r}")
-    if not _ID_RE.match(vendor): raise ValueError(f"非法 vendor: {vendor!r}")
+    _check_id("host", host)
+    _check_id("op", op)
+    _check_id("vendor", vendor)
     if not _SOC_RE.match(soc): raise ValueError(f"非法 soc: {soc!r}")
     for k, p in (("remote_dir", rroot), ("ops_repo", ops), ("opp", opp), ("setenv", cfg["setenv"])):
-        if not _PATH_RE.match(p): raise ValueError(f"非法路径 {k}: {p!r}")
+        _check_remote_path(k, p)
     here = os.path.dirname(os.path.abspath(__file__))
     runner_name = f"oprunway_{caseset['op'].lower()}_runner.cpp"   # 按算子选 runner
     runner = os.path.join(here, "new_example", runner_name)
@@ -113,8 +166,7 @@ def run_new_example(caseset, work_dir, defect_cases=None):
     manifest = []
     for c in caseset["cases"]:
         cid = c["id"]
-        if not _ID_RE.match(cid):
-            raise ValueError(f"非法 case_id: {cid!r}")
+        _check_id("case_id", cid)
         dtn = c["inputs"][0]["dtype"]
         if dtn not in _NP:
             raise ValueError(f"{cid}: runner v1 不支持 dtype {dtn}（仅 {sorted(_NP)}）")
@@ -157,10 +209,11 @@ def run_new_example(caseset, work_dir, defect_cases=None):
                     "--exclude=_deploy.tgz", "."], check=True, timeout=300)
     subprocess.run(["scp", "-q", tar, f"{host}:/tmp/oprunway_deploy.tgz"], check=True, timeout=300)
     qcases = q(rroot + "/cases")
+    # 远端命令对支持者加 `--` 终止选项解析（finding #17，纵深防御；配合上文路径/ID 校验）。
     subprocess.run(["ssh", host,
-                    f"rm -rf {qcases} && mkdir -p {qcases} && "
-                    f"tar xzf /tmp/oprunway_deploy.tgz -C {qcases} && rm -f /tmp/oprunway_deploy.tgz && "
-                    f"cp {qcases}/perfcases_list.txt {q(rroot + '/perfcases_list.txt')}"],
+                    f"rm -rf -- {qcases} && mkdir -p -- {qcases} && "
+                    f"tar xzf /tmp/oprunway_deploy.tgz -C {qcases} && rm -f -- /tmp/oprunway_deploy.tgz && "
+                    f"cp -- {qcases}/perfcases_list.txt {q(rroot + '/perfcases_list.txt')}"],
                    check=True, timeout=300)
     subprocess.run(["scp", "-q", runner, f"{host}:{rroot}/{runner_name}"], check=True, timeout=120)
     subprocess.run(["scp", "-q", npu_sh, f"{host}:{rroot}/run_on_npu.sh"], check=True, timeout=120)
@@ -225,12 +278,11 @@ def run_new_example(caseset, work_dir, defect_cases=None):
             if raw.size != golden.size:
                 raise RuntimeError(f"{cid}: out.bin {raw.size} elem ≠ 期望 {golden.size}（形状/传输异常）")
             out = raw.reshape(golden.shape) if golden.size else raw
-        metric, value = _metric(c["expected"]["verify_mode"], out, golden)
+        prec = _precision_evidence(c, out, golden, f"{cid}/out.bin", ascendoptest_bool=None)
+        prec["ascendoptest_bool"] = None   # 待 NPU：真机接 compare.py bool 作交叉核对（现桩位）
+        prec.setdefault("ascendoptest_bool_note", "待 NPU：真机接 AscendOpTest compare.py bool 交叉核对")
         ev.append({"case_id": cid, "status": "ok",
-                   "precision": {"metric": metric, "value": value,
-                                 "threshold": c["expected"]["threshold"],
-                                 "golden_path": c["expected"]["golden_path"],
-                                 "out_path": f"{cid}/out.bin"},
+                   "precision": prec,
                    "perf": {"scope": "kernel_only", "us": perf_us.get(cid),
                             "note": "msprof op Task Duration(us) 中位（真 kernel-only）"}})
 

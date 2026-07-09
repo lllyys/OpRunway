@@ -12,17 +12,37 @@ def _w(d, name, obj):
         json.dump(obj, f)
 
 
+# T5：结构化口径（standard + tolerance_policy_id + 结构化 policy + threshold digest）
+_POL32 = {"kind": "ascendoptest_default", "tolerance": 0.0001, "error_rate": 0.0001,
+          "eps": 1e-9, "legacy": 0.1, "not_settled": False}
+_POL16 = {"kind": "ascendoptest_default", "tolerance": 0.001, "error_rate": 0.001,
+          "eps": 1e-9, "legacy": 0.1, "not_settled": False}
+_EXP = {
+    "x_000": {"golden_path": "g0.npy", "threshold": 0.0001, "standard": "ascendoptest_default",
+              "tolerance_policy_id": "ascendoptest_default:float32", "policy": _POL32},
+    "x_001": {"golden_path": "g1.npy", "threshold": 0.001, "standard": "ascendoptest_default",
+              "tolerance_policy_id": "ascendoptest_default:float16", "policy": _POL16},
+}
 CASESET = {"op": "X", "cases": [
     {"id": "x_000", "dims": ["func"], "inputs": [{"name": "a", "shape": [16], "dtype": "float32"}],
-     "expected": {"golden_path": "g0.npy", "threshold": 0.001}},
+     "expected": dict(_EXP["x_000"])},
     {"id": "x_001", "dims": ["func"], "inputs": [{"name": "a", "shape": [16], "dtype": "float16"}],
-     "expected": {"golden_path": "g1.npy", "threshold": 0.001}},
+     "expected": dict(_EXP["x_001"])},
 ]}
 
 
-def _ev(ids, thr=0.001):
-    return {"op": "X", "evidence": [{"case_id": i, "status": "pass",
-            "precision": {"threshold": thr}} for i in ids]}
+def _ev(ids, mutate=None):
+    """据 caseset.expected 构一致的 evidence.precision（含 metrics）；mutate(id)->dict 覆盖单例（造不一致）。"""
+    out = []
+    for i in ids:
+        exp = _EXP[i]
+        prec = {"standard": exp["standard"], "tolerance_policy_id": exp["tolerance_policy_id"],
+                "policy": dict(exp["policy"]), "threshold": exp["threshold"],
+                "metrics": {"bad_count": 0, "numel": 16}}
+        if mutate:
+            prec.update(mutate(i))
+        out.append({"case_id": i, "status": "pass", "precision": prec})
+    return {"op": "X", "evidence": out}
 
 
 def _vd(v, fail=0, unc=0, cp=0):
@@ -96,11 +116,89 @@ class GateTest(unittest.TestCase):
         self.assertTrue(any("契约" in e for e in self._errs("task2")))
 
     def test_task2_threshold_mismatch_fails(self):
-        """adapter 偷偷放宽阈值 → 必 FAIL。"""
+        """adapter 偷偷放宽阈值 digest → 必 FAIL。"""
         _w(self.d, "caseset.json", CASESET)
-        _w(self.d, "evidence.json", _ev(["x_000", "x_001"], thr=0.1))
+        _w(self.d, "evidence.json", _ev(["x_000", "x_001"],
+                                        mutate=lambda i: {"threshold": 0.1}))
         _w(self.d, "verdict.json", _vd("pass"))
-        self.assertTrue(any("阈值" in e for e in self._errs("task2")))
+        self.assertTrue(any("防放宽" in e and "threshold" in e for e in self._errs("task2")))
+
+    def test_task2_policy_mismatch_fails(self):
+        """三处不一致：evidence 结构化 policy 被放宽（error_rate 抬高）→ 必 FAIL。"""
+        _w(self.d, "caseset.json", CASESET)
+        looser = {"kind": "ascendoptest_default", "tolerance": 0.0001, "error_rate": 0.5,
+                  "eps": 1e-9, "legacy": 0.1, "not_settled": False}
+        _w(self.d, "evidence.json", _ev(["x_000", "x_001"],
+                                        mutate=lambda i: {"policy": looser} if i == "x_000" else {}))
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertTrue(any("policy" in e and "防放宽" in e for e in self._errs("task2")))
+
+    def test_task2_missing_tolerance_policy_id_fails(self):
+        """evidence 缺 tolerance_policy_id（口径不可追溯）→ 必 FAIL。"""
+        _w(self.d, "caseset.json", CASESET)
+        ev = _ev(["x_000", "x_001"])
+        del ev["evidence"][0]["precision"]["tolerance_policy_id"]
+        _w(self.d, "evidence.json", ev)
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertTrue(any("tolerance_policy_id" in e for e in self._errs("task2")))
+
+    def test_task2_caseset_missing_tolerance_policy_id_fails(self):
+        """finding #12/#16：caseset expected 缺 tolerance_policy_id → 三处一致门失效 → 必 FAIL。"""
+        cs = json.loads(json.dumps(CASESET))
+        del cs["cases"][0]["expected"]["tolerance_policy_id"]
+        _w(self.d, "caseset.json", cs)
+        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertTrue(any("caseset expected 缺 tolerance_policy_id" in e for e in self._errs("task2")))
+
+    def test_task2_caseset_missing_policy_fails(self):
+        """finding #12/#16：caseset expected 缺结构化 policy → 必 FAIL。"""
+        cs = json.loads(json.dumps(CASESET))
+        del cs["cases"][0]["expected"]["policy"]
+        _w(self.d, "caseset.json", cs)
+        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertTrue(any("caseset expected 缺 policy" in e for e in self._errs("task2")))
+
+    def test_task2_three_way_inconsistent_fails(self):
+        """finding #12/#16：三处不一致（evidence policy 放宽 error_rate）→ 必 FAIL。"""
+        _w(self.d, "caseset.json", CASESET)
+        looser = dict(_POL32); looser["error_rate"] = 0.9
+        _w(self.d, "evidence.json", _ev(["x_000", "x_001"],
+                                        mutate=lambda i: {"policy": looser} if i == "x_000" else {}))
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertTrue(any("防放宽" in e and "policy" in e for e in self._errs("task2")))
+
+    def test_task2_bad_verdict_enum_fails(self):
+        """finding #14：overall.verdict 非合法枚举 → 必 FAIL。"""
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "verdict.json", {"op": "X", "overall": {"verdict": "weird",
+            "counts": {"fail": 0, "uncertain": 0, "contract_problems": 0}}})
+        self.assertTrue(any("非法" in e for e in self._errs("task2")))
+
+    def test_task2_counts_non_int_fails(self):
+        """finding #14：counts.fail 非整数 → 必 FAIL。"""
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "verdict.json", {"op": "X", "overall": {"verdict": "pass",
+            "counts": {"fail": "0", "uncertain": 0, "contract_problems": 0}}})
+        self.assertTrue(any("非整数" in e for e in self._errs("task2")))
+
+    def test_task2_nonlist_cases_fails(self):
+        """finding #13：cases 非列表 → 直接 FAILED（不静默兜成空列表放过）。"""
+        _w(self.d, "caseset.json", {"op": "X", "cases": None})
+        _w(self.d, "evidence.json", _ev(["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertTrue(any("非列表" in e for e in self._errs("task2")))
+
+    def test_task1_null_shape_no_crash(self):
+        """finding #15：inputs[0].shape 为 null → 不崩、记 error（list(None) 会 TypeError）。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs["cases"][0]["inputs"][0]["shape"] = None
+        _w(self.d, "caseset.json", cs)
+        errs = self._errs("task1")          # 不抛异常
+        self.assertTrue(any("shape" in e for e in errs))
 
     # --- task3 ---
     def test_task3_ok(self):

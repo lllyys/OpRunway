@@ -7,9 +7,27 @@ Layer 1 确定性脚本（工具中立、op 驱动）。据 spec（参数 arity/
 """
 import json, os, sys
 import numpy as np
+import precision_policy
 
 SEED = 2026
 _DTYPES = {"float32": np.float32, "float16": np.float16, "int32": np.int32}
+
+
+def _resolve_acceptance(spec, standard, dtype):
+    """任务书验收目标口径（可选、独立于平台 standard）：spec.precision.acceptance_policy。
+
+    形如 {"standard": "ascendoptest_default", "error_rate": 0.1}：以某标准为底 + 覆盖判据字段。
+    返回 (policy, tolerance_policy_id)；无声明 → None（validator 时 acceptance 继承 standard）。
+    """
+    ap = (spec.get("precision") or {}).get("acceptance_policy")
+    if not ap:
+        return None
+    ap_std = ap.get("standard", standard)
+    pol = precision_policy.threshold_for(ap_std, dtype)
+    for k in ("tolerance", "error_rate", "threshold", "max_ratio", "eps"):
+        if k in ap:
+            pol[k] = ap[k]
+    return pol, precision_policy.tolerance_policy_id(ap_std, dtype)
 
 
 def _np_dtype(name):
@@ -72,7 +90,7 @@ def gen_cases(spec, work_dir):
     attrs = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
-    threshold = spec["precision"].get("threshold", 0)
+    standard = precision_policy.select_standard(spec)   # 平台层标准（显式或按 oracle+verify_mode 映射）
     vmode = spec["verify_mode"]
     exact = vmode == "exact"
     os.makedirs(work_dir, exist_ok=True)
@@ -113,13 +131,23 @@ def gen_cases(spec, work_dir):
         for j, x in enumerate(inputs):
             np.save(os.path.join(cdir, f"x{j + 1}.npy"), x)
         np.save(os.path.join(cdir, "golden.npy"), golden)
+        # 精度口径 per-case：按 golden/输出 dtype 解析 policy（非输入 dtype）；未支持 dtype fail-fast
+        cdtype = precision_policy.compare_dtype(golden)
+        policy = precision_policy.threshold_for(standard, cdtype)
+        tpid = precision_policy.tolerance_policy_id(standard, cdtype)
+        expected = {"golden_source": src_name, "golden_path": f"{cid}/golden.npy",
+                    "verify_mode": vmode, "standard": standard, "compare_dtype": cdtype,
+                    "tolerance_policy_id": tpid, "policy": policy,
+                    "threshold": precision_policy.threshold_digest(policy)}  # digest：向后兼容
+        acc = _resolve_acceptance(spec, standard, cdtype)
+        if acc:
+            expected["acceptance_policy"], expected["acceptance_tolerance_policy_id"] = acc
         cases.append({
             "id": cid, "dims": dims, "tags": tags,
             "inputs": [{"name": in_params[j]["name"], "shape": ishapes[j], "dtype": dtn,
                         "path": f"{cid}/x{j + 1}.npy"} for j in range(len(inputs))],
             "attrs": attrs,
-            "expected": {"golden_source": src_name, "golden_path": f"{cid}/golden.npy",
-                         "verify_mode": vmode, "threshold": threshold},
+            "expected": expected,
         })
     attr_order = [p["name"] for p in spec["params"] if p["io"] == "attr"]
     return {"op": op, "spec_ref": spec.get("op"), "work_dir": work_dir,

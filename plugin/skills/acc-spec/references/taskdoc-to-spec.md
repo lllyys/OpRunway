@@ -23,7 +23,10 @@
   ],
   "generalize": true,
   "verify_mode": "exact",             // exact | numerical | behavioral（三值，与 validator 一致）
-  "precision": {"oracle":"ascendoptest","threshold":0,"threshold_source":"..."},
+  // T5 精度口径升级（待散文门）：precision 显式声明 standard + tolerance_policy_id；
+  //   保留 oracle + threshold(digest) 向后兼容；per-case 结构化 policy 由 gen_cases 按 golden dtype 派生。
+  "precision": {"oracle":"ascendoptest","standard":"exact","tolerance_policy_id":"exact",
+                "threshold":0,"threshold_source":"..."},
   "perf": {"baseline":"tbe","target_ratio":0.95,"small_shape_exception":"<10us 差3us→仿真图"},
   "task_pr_gaps": []
 }
@@ -49,13 +52,34 @@
 | `params[]` | 参数说明表 | 每参 `{name,io:in\|out\|attr,dtype:[],default?,noncontiguous?}`；Tensor→in/out，标量/属性→attr |
 | `generalize` | 测试标准是否要泛化数据 | 默认 true；无张量IO(Sleep)/融合无泛化要求→false |
 | `verify_mode` | 见 §2 决策树 | exact / numerical / behavioral |
-| `precision.oracle` | 精度校验工具/真值来源 | 受控词表 `ascendoptest / mere_mare / torch / scipy / std_exact / dual_benchmark / none`，**按任务书原文抽**（多数社区任务=ascendoptest；SPMV=生态标准 MERE·MARE + 双标杆；Sleep=none）——**勿一律填 ascendoptest** |
+| `precision.oracle` | 精度校验工具/真值来源 | 受控词表 `ascendoptest / mere_mare / atk_double / torch / scipy / std_exact / none`，**按任务书原文抽**（多数社区任务=ascendoptest；SPMV=生态标准 MERE·MARE + ATK 双标杆=`atk_double`；Sleep=none）——**勿一律填 ascendoptest**。⚠ 旧文写的 `dual_benchmark` 已统一为 `atk_double`（与 `precision_policy.select_standard` 识别的词一致）；`mere_mare` 与 `atk_double` **都**映射到 standard `ecosystem_mere_mare`（ATK 双标杆 fallback 本轮 out-of-scope、未实现）|
+| `precision.standard`（T5，待散文门）| 平台层标准，从 oracle+verify_mode 映射（见 §1.1 决策树）| 受控词表 `ascendoptest_default / ecosystem_mere_mare / exact / behavioral`。缺省不填时 `precision_policy.select_standard` 会按 §1.1 兜底 |
+| `precision.tolerance_policy_id`（T5，待散文门）| **口径 id（分两层，别混）**：`spec.precision.tolerance_policy_id`=**spec 级摘要/向后兼容**（exact→`exact`、ascendoptest→`ascendoptest_default`、mere_mare/atk_double→`ecosystem_mere_mare`，**无 dtype 后缀**）；`caseset.expected.tolerance_policy_id`=**门控用、格式 `standard:dtype`**（如 `ascendoptest_default:float32`，per-case 由 `gen_cases` 按 golden dtype 生成，exact/behavioral 无 dtype 后缀）。validator/gate 的三处一致比的是**caseset 级**那份 | 
+| `precision.acceptance_policy?`（T5，待散文门）| 任务书验收目标宽于平台底线时 | 可选 `{"standard":"...","error_rate":...}` 等覆盖；acceptance 过而 standard 不过 → PASSED_WITH_RISK 走人工 CP。**仅任务书明确放宽时才填**，勿臆造 |
 | `precision.threshold` | 见 §3 | 数字：exact→0；behavioral→省略；numerical→AscendOpTest 主 dtype 默认值 |
 | `precision.threshold_source` | 必填，记数字依据+推断链 | 自由文本 |
 | `perf.baseline` | 『性能要求-基线』 | tbe / self_fp16 / small_op_concat / gpu / theoretical / none |
 | `perf.target_ratio` | 『性能目标』换算 | ≥95%→0.95；**无劣化/持平→1.0**（『无劣化』=不得更慢=ratio≥1.0，literal 读法；勿误宽成 0.95）；10X→10.0；0.5倍A100→0.5；0.8倍H100→0.8；90%→0.9 |
 | `perf.small_shape_exception` | 小 shape 例外条款 | 原文，常『<10us 差3us→仿真图』 |
 | `task_pr_gaps[]` | 由格式变体/缺口收敛 | 结构化缺口/矛盾/推断项 |
+
+## 1.1 precision.standard 选择决策树（T5，与 `precision_policy.select_standard` 对齐）
+
+先定 `verify_mode`（§2），再定 `standard`：
+
+```
+① verify_mode=behavioral（无数值输出，Sleep 类）           → standard = behavioral（精度维度 na）
+② verify_mode=exact（输出 bool / 逐位对齐，Equal/IsClose） → standard = exact（threshold=0）
+③ verify_mode=numerical：
+   ├─ 任务书引用「生态《算子开源精度标准》」/ oracle∈{mere_mare, atk_double}
+   │  / 落在 experimental 目录（cann/opbase experimental_standard）        → standard = ecosystem_mere_mare
+   └─ 否则（oracle=ascendoptest / 缺省）                                  → standard = ascendoptest_default
+```
+
+⚠ `ecosystem_mere_mare` 是 **proposed / NOT_SETTLED**（来自 `canon/architecture/ecosystem-precision-standard.md`
+status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事实、未 settle**）：其常量与判据都打 `NOT_SETTLED`，
+**单标杆不过不自动 fail、记 `needs_review`**（ATK 双标杆 fallback 本轮不实现、out-of-scope）。抽到它时在 `task_pr_gaps`
+显式标注「生态标准 proposed / 单标杆 needs_review」。缺省不确定就退回 `ascendoptest_default`（平台底线）。
 
 ## 2. verify_mode 决策树（⚠ 三值）
 
@@ -68,15 +92,21 @@
 - **整型挂阈值 oracle 的歧义**（Sign∈{-1,0,1}、Gcd 整数、ForeachMul 整型乘）→ 任务口径挂 AscendOpTest 阈值仍归 numerical，`threshold_source` 注『整型实为精确』。
 - 任务书**从不直写** exact/numerical → 一律推断，`threshold_source` 标 (推断)。
 
-## 3. precision.threshold —— 最普遍的缺口（23/23 缺具体数值）
+## 3. precision.threshold —— 向后兼容 digest（不再是唯一门控口径）
 
-任务书恒为『满足 AscendOpTest 工具默认阈值』，无一给数字。落 spec 必须是数字（validator 做 `value<thr`，空→needs_review）：
+⚠ **T5 后语义变了**：`precision.threshold` 现在只是**向后兼容的标量 digest**（旧 gate/spec 的
+`value<thr` 语义），**真正的门控走结构化 policy**——validator/gate 按 `standard` 分支用
+`precision_policy.threshold_for()` 派生 canonical policy（ascendoptest 走坏点占比门、mere_mare 走 MERE/MARE、
+exact 走 mismatch），再要求 spec/caseset/evidence 三处一致。所以 threshold 只需**与所选 standard 的 digest 对齐**
+（`threshold_digest(policy)`：exact→0、ascendoptest→tolerance、mere_mare→Th、behavioral→0）。任务书 23/23 缺具体
+数值时，spec 级仍落一个「主 dtype 代表值」作 digest + 标 (推断)，per-case 精确 policy 由 `gen_cases` 按 golden dtype 派生：
 
-| verify_mode | threshold | threshold_source 写法 |
+| standard | threshold（digest，按 standard 分支）| threshold_source 写法 |
 |---|---|---|
 | exact | `0` | 『bool/整型逐位、==无容差』 |
-| behavioral | 省略 threshold | 『无数值输出，精度维度 na』 |
-| numerical | 主 dtype 的 AscendOpTest 默认值（**必落数字**）| 『AscendOpTest 默认阈值(fp16 1e-3) (推断/待工具核实)』 |
+| behavioral | 省略 threshold（`{"oracle":"none"}` 即可）| 『无数值输出，精度维度 na』 |
+| ascendoptest_default | 主 dtype 的 AscendOpTest 默认 tolerance（**必落数字**，含 fp16 取 1e-3）| 『AscendOpTest 默认阈值(fp16 1e-3) (推断/待工具核实)』 |
+| ecosystem_mere_mare | 主 dtype 的 Th=2^-k（digest；判据是 MERE<Th 且 MARE<10Th）| 『生态标准 Th=2^-10(fp16) proposed/NOT_SETTLED；单标杆不过→needs_review』 |
 
 > ⚠ **`precision` 对象任何 verify_mode 都要留**（至少 `{"oracle":"..."}`；behavioral 用 `"oracle":"none"`）——`validator.py`/`gen_cases.py` 无条件读 `spec["precision"]`，省略整个对象会 KeyError。只是 behavioral 的 `threshold` 可省。
 > ⚠ **numerical 默认必落推断数字**（并标 gap），不留空——留空会走 `needs_review`（非 pass），仅在明确阻塞时才留空。
