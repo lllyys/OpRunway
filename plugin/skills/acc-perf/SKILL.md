@@ -8,7 +8,7 @@ description: OpRunway 验收性能维的方法论薄壳——msprof kernel-only 
 **定位（诚实，P2 边界）**：本 skill 是 P2 规划的**原子能力 skill**，只装「性能该怎么比、为什么」的**方法论指针**。
 
 - **不算达标、不落盘**：ratio 与达标判定唯一归 `${OPRUNWAY_PLUGIN_ROOT}/acc-common/perf_compare.py`（`report['simulation']` 亦只此处产），渲染归 `${OPRUNWAY_PLUGIN_ROOT}/acc-common/perf_sim_plot.py`（只画不判）。`${OPRUNWAY_PLUGIN_ROOT}` = 本插件根中立变量，Claude 下等价 `${CLAUDE_PLUGIN_ROOT}`。**本 skill 不复制阈值、不复刻比值、不宣告达标**（ADR 0007 canonical）。
-- **注册 ≠ 接线**：P2 把本 skill 列进 `plugin/AGENTS.md` 的 `skills:` 注册清单（跨 CLI 分发 / 发现），**但未接进 `op-acceptance` runtime 调用链**——live 性能对比仍走 perf_compare，本 skill 勿被自动触发。接线属 P1 / 后续。
+- **未登记进 AGENTS.md（诚实先例）**：本 skill **不列入** `plugin/AGENTS.md` 的 `skills:` 清单——登记 = 声称已接入 live 流，而本 skill 未接入（live 性能对比仍走 perf_compare）。分发 / 发现由 `init.sh` 扇出保证（symlink `plugin/skills/` 下**全部** skill 目录、**不依赖 AGENTS.md 登记**）。待 P1 / 后续真接线再登记；本 skill 勿被自动触发。
 - **阈值零复制**：`target_ratio` 取自 `spec.perf.target_ratio`；小 shape 例外阈值取自 `spec.perf.small_shape_exception`（`when_us_below` / `abs_gap_us_within`），**均不写死进本 skill**。
 
 ## 方法论一 · 计时口径（timing_scope 必填、双边同口径）

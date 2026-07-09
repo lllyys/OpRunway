@@ -8,7 +8,7 @@ description: OpRunway 验收精度维的方法论薄壳——oracle 分层（谁
 **定位（诚实，P2 边界）**：本 skill 是 P2 规划的**原子能力 skill**，只装「精度该怎么判、为什么」的**方法论指针**。
 
 - **不判定、不落盘**：pass/fail 的实算唯一归确定性脚本链——`${OPRUNWAY_PLUGIN_ROOT}/acc-common/precision_policy.py`（三标准 SSOT + 误差分布复算 `compute_metrics`）+ `${OPRUNWAY_PLUGIN_ROOT}/acc-common/validator.py`（读 evidence 出 `verdict.json` 的纯算术 judge）。`${OPRUNWAY_PLUGIN_ROOT}` = 本插件根中立变量，Claude 下等价 `${CLAUDE_PLUGIN_ROOT}`。**本 skill 不复制阈值数字、不复刻 judge、不宣告通过**（ADR 0007 canonical）。
-- **注册 ≠ 接线**：P2 把本 skill 列进 `plugin/AGENTS.md` 的 `skills:` 注册清单（跨 CLI 分发 / 发现），**但未接进 `op-acceptance` runtime 调用链**——live 精度判定仍走 validator/precision_policy，本 skill 勿被自动触发。接线属 P1 / 后续。
+- **未登记进 AGENTS.md（诚实先例）**：本 skill **不列入** `plugin/AGENTS.md` 的 `skills:` 清单——登记 = 声称已接入 live 流，而本 skill 未接入（live 精度判定仍走 validator / precision_policy）。分发 / 发现由 `init.sh` 扇出保证（symlink `plugin/skills/` 下**全部** skill 目录、**不依赖 AGENTS.md 登记**）。待 P1 / 后续真接线再登记；本 skill 勿被自动触发。
 - **阈值零复制**：AscendOpTest 默认表（逐 dtype `tolerance/error_rate`）、生态 MERE/MARE 的 `Th`（逐 dtype 2⁻ᵏ）等**判定阈值常量的唯一真源在 `precision_policy.py` + canon 页**；本 skill **不写死任何 pass/fail 判定阈值**，只描述「用哪套标准、按什么口径」。
 
 ## 方法论一 · oracle 分层（谁当真值 golden）
