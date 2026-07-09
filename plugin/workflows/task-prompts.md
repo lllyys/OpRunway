@@ -69,7 +69,7 @@ dispatch_mode: run_npu
 输入工件: <op>.spec.json + 自检满足的 runner
 验收标准: 真机 run_workflow.py --mode new_example（OPRUNWAY_* 指真实机器/路径，不写进仓）——
           Task2 真 NPU 精度 vs numpy golden + Task3 msprof kernel-only 性能 vs 基线 + 末尾统一校三级门，一次原子跑完。
-本次产出: evidence.json / verdict.json / baseline.json / perf_report.json / acceptance.json；
+本次产出: evidence.json / verdict.json / baseline.json（有基线时）/ perf_report.json / acceptance.json；
           摘要回：acceptance.json.overall + 各维度通过数（逐字引用，不自判）。
 ```
 

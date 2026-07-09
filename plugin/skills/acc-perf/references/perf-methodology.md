@@ -23,7 +23,7 @@
 
 | 改动类型 | 基线 | 备注 |
 |---|---|---|
-| 重写类（参考内置 TBE） | TBE，任务书给定比例（无劣化 / ≥ 给定百分比） | 当前接入算子 spec 均 `baseline=tbe` |
+| 重写类（参考内置 TBE） | TBE，任务书给定比例（无劣化 / ≥ 给定百分比） | 当前接入 aclnn 类算子 isclose/sign/equal/neg 均 `baseline=tbe`；catlass matmul 属对标类(synthetic demo、未定基线)——「均」仅限这批重写类 |
 | 移植类（对标 GPU 库 cuSPARSE/cuBLAS…） | GPU（A100，任务书给定比例区间） | GPU 标杆数据由外部 Task 3 给 |
 | 加 dtype 类 | 同 op 其他 dtype 不劣化 | 新 dtype 不劣于同宽既有 dtype |
 | 可选单标杆 | 昇腾小算子拼接（torch 链） | 与生态精度标准单标杆同源 |
@@ -35,7 +35,7 @@
 - **触发**：`小shape` tag 的性能用例；阈值 `when_us_below` / `abs_gap_us_within` 取自 `spec.perf.small_shape_exception`（对象；legacy 字符串正则兜底），**零硬编码**。
 - **判定**：`max(NPU,基线) < when_us_below` 且 `|NPU−基线| ≤ abs_gap_us_within` → **达标保持 False** + `exception` 标 + `exception_detail`。
 - **仿真图**：`report['simulation']` 由 `perf_compare` **独家产**（唯一事实源）；`perf_sim_plot.py` 只据此渲染 SVG（阈值线/容差带数据驱动 + XML escape），**不二次推断**。`gate_task3` 强制「有图 + 例外行↔simulation 交叉一致 + SVG sha256 + 路径钉死」才放行；删图/篡改/对不上 → FAILED。
-- **映射**：status=exception → 编排层 `PASSED_WITH_RISK` + 挂人工 CP，**绝不偷偷把达标置 True**。
+- **映射（有门前置）**：status=exception 且 **`gate_task3` 过**（图齐备 + 例外行↔simulation 交叉一致 + SVG sha 钉死）→ 编排层 `PASSED_WITH_RISK` + 挂人工 CP，**绝不偷偷把达标置 True**；**门未过 → `BLOCKED(验收门未过)`、不 PASSED_WITH_RISK**（run_workflow 先判门、后判例外态）。
 
 ## 4. Task3 blocked 路由（GPU consumer，T8 已实现）
 

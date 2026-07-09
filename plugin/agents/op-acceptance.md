@@ -14,7 +14,7 @@ agents:
 # op-acceptance — 算子验收编排（Layer 2 · 薄 primary orchestrator）
 
 **输入**：算子任务书（md 本地路径 **或** `http(s)` 链接）+ PR 链接。
-**产出**：`reports/<op>/` 下 correspondence.json / caseset.json / evidence.json / verdict.json / baseline.json / perf_report.json / acceptance.json + 中文验收报告。
+**产出**：`reports/<op>/` 下 correspondence.json / caseset.json / evidence.json / verdict.json / baseline.json（有基线时）/ perf_report.json / acceptance.json + 中文验收报告。
 
 本 agent 只做**调度 + CP-A..E 检查点状态机 + 工件门禁 + 对应校验前置 + 失败路由**；
 CP 的逐步落法、脚本参数、门级判定，沉在 `acceptance-workflow` skill 与 3 个 subagent，本文件不复述。
@@ -33,7 +33,7 @@ CP 的逐步落法、脚本参数、门级判定，沉在 `acceptance-workflow` 
 
 出**任何 pass 裁决前**，**必须**先过机器可校验验收门 `acc-common/validate_acceptance_state.py`
 （三级 `--stage task1|task2|task3`，读**落盘** `evidence.json` 独立复核：**防跑子集报 100%、防放宽阈值、防混 e2e 墙钟**）。
-验收门 validate_acceptance_state.py STATUS: FAILED → **不出 pass 裁决；仍由 run_workflow 写 acceptance.json.overall=BLOCKED**（验收门未过=证据不可信/不完整）。`run_workflow.py` 已内嵌此门（Task1→2→3 全跑完后统一校门 → 门未过总体 `BLOCKED`；
+验收门 validate_acceptance_state.py STATUS: FAILED → **不出 pass 裁决；仍由 run_workflow 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整）。`run_workflow.py` 已内嵌此门（Task1→2→3 全跑完后统一校门 → 门未过总体 `BLOCKED`；
 注：**批量驱动、非阶段间实时阻断**）；「不推进下一 Task」是 **agent 编排纪律**。
 判定脑子在 `acc-common/validator.py`（ADR 0007）、**不在编排层**；门只管「证据可信完整」，精度/性能 pass-fail 由 validator/perf_compare 判。
 
@@ -53,9 +53,9 @@ CP 的逐步落法、脚本参数、门级判定，沉在 `acceptance-workflow` 
   - `correspondence.json` `status ∈ {confirmed, mismatch, empty_task, needs_user_confirmation}`：`confirmed` → 继续；`mismatch` / `empty_task` → 出**程序结论（非 pass/fail）**并停跑；`needs_user_confirmation` → primary 摆证据、由用户拍板，**不自动 judge 空任务**。
 - **CP-B Task1 用例**：dispatch `acc-spec-extractor:extract_spec` → `<op>.spec.json` + `task_pr_gaps`（一份任务书多算子 → 多 spec，逐个走后续）；primary inline 跑 `run_workflow.py --mode mock`（产 `caseset.json` + `acceptance.json`(mock)，用 numpy golden 自检 spec/gen_cases/validator 链自洽）；run_workflow 内部**末尾统一校门**（validate_acceptance_state.py 批量驱动、**非阶段间实时阻断**）；CP-B 只关注 task1/caseset 自洽。**mock 裁决异常 → dispatch `acc-spec-extractor:refine_spec` 修 spec，不上真机。**
 - **CP-C runner**（真机路径、需 NPU）：dispatch `acc-runner-dev:gen_runner`（**先过 scope gate**；非 `experimental/math/<op>` aclnn 闭环 → `BLOCKED`/转 P3，不硬塞）→ `acc-runner-dev:verify_runner`。**未过验证不上真机、不产真机验收裁决**（runner 自证门，非算子 pass/fail 判定）。 先确认用户已开 NPU/VPN（ascend-a5 真 950 / a3 A2A3）。
-- **CP-D 真机跑测（一次原子）**：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode new_example`（Task1→2→3 **一次串完**：Task2 真 NPU 精度 vs numpy golden、Task3 msprof 真 kernel-only 性能 vs 内置基线、三级门 task1/task2/task3 一次成）→ evidence.json / verdict.json / baseline.json / perf_report.json / acceptance.json。**任何 FAIL → dispatch `acc-verify-rootcause:rootcause`**（先独立复现解耦「被测算子 vs harness」再归因，本 agent 不自行臆断）。
-  - Task3 缺外部 GPU 标杆 → `BLOCKED_WAIT_GPU_BENCHMARK`；口径不可比 → `BLOCKED_INCOMPARABLE_TIMING_SCOPE`。基线来源按任务书参考源（`spec.perf.baseline` 驱动，当前三算子 = `tbe`）；GPU external 对比层**当前未接入 pipeline**——任务书要求 GPU 基线而无数据即 BLOCKED，不出 pass。
-- **CP-E 报告**（primary）：**逐字引用** `acceptance.json` / `verdict.json` / `perf_report.json` 的裁决 + `task_pr_gaps` + 各维度（功能/精度/性能）通过数、失败用例+判据、性能达标比。`needs_review` **不当 pass**；验收门 validate_acceptance_state.py STATUS: FAILED → **不出 pass 裁决；仍由 run_workflow 写 acceptance.json.overall=BLOCKED**（验收门未过=证据不可信/不完整）。数字全引真实产物，推断项显式标 `(推断)`。
+- **CP-D 真机跑测（一次原子）**：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode new_example`（Task1→2→3 **一次串完**：Task2 真 NPU 精度 vs numpy golden、Task3 msprof 真 kernel-only 性能 vs `spec.perf.baseline` 指定基线、三级门 task1/task2/task3 一次成）→ evidence.json / verdict.json / baseline.json（有基线时）/ perf_report.json / acceptance.json。**任何 FAIL → dispatch `acc-verify-rootcause:rootcause`**（先独立复现解耦「被测算子 vs harness」再归因，本 agent 不自行臆断）。
+  - Task3 缺外部 GPU 标杆 → `BLOCKED_WAIT_GPU_BENCHMARK`；口径不可比 → `BLOCKED_INCOMPARABLE_TIMING_SCOPE`。基线来源按任务书参考源（`spec.perf.baseline` 驱动，当前 aclnn 重写类 isclose/sign/equal/neg = `tbe`，catlass matmul 属对标类·未定基线）；GPU external 对比层**当前未接入 pipeline**——任务书要求 GPU 基线而无数据即 BLOCKED，不出 pass。
+- **CP-E 报告**（primary）：**逐字引用** `acceptance.json` / `verdict.json` / `perf_report.json` 的裁决 + `task_pr_gaps` + 各维度（功能/精度/性能）通过数、失败用例+判据、性能达标比。`needs_review` **不当 pass**；验收门 validate_acceptance_state.py STATUS: FAILED → **不出 pass 裁决；仍由 run_workflow 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整）。数字全引真实产物，推断项显式标 `(推断)`。
 
 ## 环境与副作用
 

@@ -7,7 +7,7 @@
 ## 0. 输入 / 输出
 
 - **输入**：算子任务书（md 本地路径或链接）+ PR 链接。
-- **输出**：`reports/<op>/` 下 `correspondence.json` / `<op>.spec.json` / `caseset.json` / `evidence.json` / `verdict.json` / `baseline.json` / `perf_report.json` / `acceptance.json` + 中文验收报告。
+- **输出**：`reports/<op>/` 下 `correspondence.json` / `<op>.spec.json` / `caseset.json` / `evidence.json` / `verdict.json` / `baseline.json`（**仅有基线时**——缺 GPU 标杆挂起时不产）/ `perf_report.json` / `acceptance.json` + 中文验收报告。
 - **产物只落用户 CWD 的 `reports/`**；私有主机名/远端路径走 `OPRUNWAY_*` 环境变量、**不入仓**；副作用（clone/build/真机跑测/对外动作）先列计划、点头再做。
 
 ## 1. 六步验收流水线（对齐 AGENTS.md 硬门 + design §2）
@@ -23,7 +23,7 @@
 | ③ spec → 用例集 | 产覆盖「功能/精度/性能」的 caseset | `acc-casegen`（展开规则）+ `gen_cases.py`（确定性落盘，仅注册算子） | 无原语匹配 → `UNCOVERED_PRIMITIVE`，禁静默归并 |
 | ④ runner 锚定 + 自检 | 生成 per-op runner，验证-才-信 | `acc-runner`（NL 锚定 example）+ `run_on_npu.sh` | aclnn 入口/dtype/顺序**抠 example 不猜**；自检不满足停在此、不上真机 |
 | ⑤ 真机跑测 | Task2 精度 vs golden + Task3 性能 vs 基线 | `repo_adapter` / `run_workflow.py --mode new_example`；方法论 `acc-precision` / `acc-perf` | 精度=真 NPU vs numpy golden；性能=msprof kernel-only vs 基线；`OPRUNWAY_*` 指真机 |
-| ⑥ 门 + 裁决 + 报告 | 三级完整性门 → 裁决 → 中文报告 | `validate_acceptance_state.py` + `validator.py` + `perf_compare.py`；FAIL→`acc-rootcause` | 门 FAILED → `acceptance.json.overall=BLOCKED`；报告逐字引用产物、`needs_review` 不当 pass |
+| ⑥ 门 + 裁决 + 报告 | 三级完整性门 → 裁决 → 中文报告 | `validate_acceptance_state.py` + `validator.py` + `perf_compare.py`；FAIL→`acc-rootcause` | 门 FAILED → `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）；报告逐字引用产物、`needs_review` 不当 pass |
 
 ## 2. CP-A..E 检查点（对话暂停点 + 工件门）
 

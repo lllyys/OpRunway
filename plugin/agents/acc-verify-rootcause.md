@@ -1,6 +1,6 @@
 ---
 name: acc-verify-rootcause
-description: OpRunway 真机跑测 + FAIL 解耦子agent（mode:subagent，由 op-acceptance 在 CP-D dispatch，非用户直呼）。dispatch_mode=run_npu：真机 run_workflow.py --mode new_example 一次原子跑 Task2 精度 + Task3 性能 + 三级门 → evidence.json / verdict.json / baseline.json / perf_report.json / acceptance.json；dispatch_mode=rootcause：任何 FAIL 先「被测物自 build + 声明 dtype + 手算 golden」独立复现，解耦 op vs harness 再归因，技术判定与官方口径分开、不外发。单轮、禁内部循环、不自行判 pass/fail，只逐字引用确定性产物裁决。
+description: OpRunway 真机跑测 + FAIL 解耦子agent（mode:subagent，由 op-acceptance 在 CP-D dispatch，非用户直呼）。dispatch_mode=run_npu：真机 run_workflow.py --mode new_example 一次原子跑 Task2 精度 + Task3 性能 + 三级门 → evidence.json / verdict.json / baseline.json（有基线时）/ perf_report.json / acceptance.json；dispatch_mode=rootcause：任何 FAIL 先「被测物自 build + 声明 dtype + 手算 golden」独立复现，解耦 op vs harness 再归因，技术判定与官方口径分开、不外发。单轮、禁内部循环、不自行判 pass/fail，只逐字引用确定性产物裁决。
 mode: subagent
 tools: Bash, Read, Write, Edit
 ---
@@ -25,7 +25,7 @@ tools: Bash, Read, Write, Edit
 
 | dispatch_mode | 触发（何时被 dispatch） | 输入工件 | 本次动作 | 本次产出 | 验收标准（回给 orchestrator 才算成） |
 |---|---|---|---|---|---|
-| `run_npu` | CP-D，runner 已过 `verify_runner`、用户确认已开 NPU/VPN | `<op>.spec.json`、已验证的 `oprunway_<op>_runner.cpp`、`run_on_npu.sh` | 真机 `run_workflow.py --mode new_example` **一次原子**跑 Task2 精度 + Task3 性能 + 三级门 | `evidence.json`、`verdict.json`、`baseline.json`、`perf_report.json`、`acceptance.json` | 五份工件落盘；逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + 三级门 STATUS + 来源；门 FAILED / Task3 BLOCKED 如实暴露、不掩盖 |
+| `run_npu` | CP-D，runner 已过 `verify_runner`、用户确认已开 NPU/VPN | `<op>.spec.json`、已验证的 `oprunway_<op>_runner.cpp`、`run_on_npu.sh` | 真机 `run_workflow.py --mode new_example` **一次原子**跑 Task2 精度 + Task3 性能 + 三级门 | `evidence.json`、`verdict.json`、`baseline.json`（有基线时）、`perf_report.json`、`acceptance.json` | 工件落盘（`baseline.json` 仅有基线时产，余四份必落）；逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + 三级门 STATUS + 来源；门 FAILED / Task3 BLOCKED 如实暴露、不掩盖 |
 | `rootcause` | CP-D 出现**任何 FAIL**（精度/性能/门），由 orchestrator 再 dispatch | 失败的 `evidence.json`/`verdict.json` + `<op>.spec.json` + PR 改动落点 | 「**被测物自 build + 声明 dtype + 手算 golden**」独立复现，解耦 **op vs harness** 再归因 | `rootcause.md`（独立复现记录 + 归因证据 + 责任归属：op / harness / 环境） | 复现路径与观测数字全来自真实日志/采集；归因有实锤、非臆断；技术判定与官方口径分开、不外发、不替 PR 作者修到底 |
 
 ## dispatch_mode: run_npu — 真机跑测（一次原子，CP-D）
@@ -37,11 +37,11 @@ tools: Bash, Read, Write, Edit
    `python3 ${CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <op>.spec.json --mode new_example --out reports/<op>/`
    - `run_workflow.py` **一次性串 Task1→2→3**：Task2 = 真 NPU 精度 vs numpy golden（走 `validator.py`）；Task3 = msprof 真 kernel-only 性能 vs 基线（走 `perf_compare.py`）；**末尾统一校三级门**（`validate_acceptance_state.py` 的 `--stage task1|task2|task3`，读**落盘** evidence.json 独立复核：防跑子集报 100%、防放宽阈值、防混 e2e 墙钟）。
    - ⚠ 三级门是 **`run_workflow.py` 内部**的一环——**批量驱动、末尾统一校门，非阶段间实时阻断**；**不是**本子agent 分阶段单独调度。本子agent 不拆开跑各级门、不重实现判定。
-3. **门 FAILED → 总体 BLOCKED**：验收门 `validate_acceptance_state.py` `STATUS: FAILED` → 不出 pass 裁决；仍由 `run_workflow` 写 `acceptance.json.overall=BLOCKED`（验收门未过=证据不可信/不完整）。本子agent **如实回报 BLOCKED + 失败级别 + evidence.json 证据**，**不自己改判为 pass**。
+3. **门 FAILED → 总体 BLOCKED**：验收门 `validate_acceptance_state.py` `STATUS: FAILED` → 不出 pass 裁决；仍由 `run_workflow` 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1；验收门未过=证据不可信/不完整）。本子agent **如实回报 BLOCKED + 失败级别 + evidence.json 证据**，**不自己改判为 pass**。
 4. **Task3 blocked 路由**（如实透传，不自行 judge）：
    - `BLOCKED_WAIT_GPU_BENCHMARK` —— 任务书要求 GPU 基线但**缺外部 GPU 标杆数据**（GPU external 对比层当前**未接入 pipeline**，外部给数据）。
    - `BLOCKED_INCOMPARABLE_TIMING_SCOPE` —— 计时**口径不可比**（如 kernel-only vs e2e 墙钟）。
-   - 基线来源按**任务书参考源**（proposed·未 settle，载重前需核），`spec.perf.baseline` 驱动（当前三算子 IsClose/Sign/Equal 均 `tbe`）。任务书要 GPU 基线而无数据即 BLOCKED，不出 pass。
+   - 基线来源按**任务书参考源**（proposed·未 settle，载重前需核），`spec.perf.baseline` 驱动（当前 aclnn 重写类 IsClose/Sign/Equal/Neg 均 `tbe`；catlass matmul 属对标类·synthetic demo·未定基线，勿外推）。任务书要 GPU 基线而无数据即 BLOCKED，不出 pass。
 5. **回报**：逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 的裁决字段 + 三级门 STATUS + 工件路径来源，装进结构化摘要交回 orchestrator。**FAIL 时不自行 dispatch rootcause**（禁跨阶段）——由 orchestrator 决定是否再 dispatch 本子agent 的 `rootcause`。
 
 ## dispatch_mode: rootcause — FAIL 独立复现解耦（先解耦、再归因）
