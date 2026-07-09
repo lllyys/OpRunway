@@ -318,5 +318,25 @@ class ConfirmedBugRegressionTest(unittest.TestCase):
         self.assertEqual(r2["summary"]["status"], "blocked_gpu_baseline_invalid")
 
 
+class SharedConstantDriftTest(unittest.TestCase):
+    """跨模块常量漂移守卫（T4-④ 调查结论：不抽匹配逻辑，只钉共享常量）。
+
+    perf_compare 与 gpu_baseline 各自独立定义 timing_scope 三元集；若两处不同步演化，
+    会出现 gpu_baseline 判「baseline 合法」而 perf_compare 判 BLOCKED_INCOMPARABLE_SCOPE
+    的自相矛盾。此测试断言两常量恒等，低成本兜住该漂移（无需重构 join 逻辑）。
+    """
+
+    def test_timing_scope_sets_identical_across_modules(self):
+        self.assertEqual(
+            pc._VALID_SCOPES, gb._SCOPES,
+            "perf_compare._VALID_SCOPES 与 gpu_baseline._SCOPES 漂移了——"
+            "timing_scope 枚举须单一事实、两处同步（改一处必改另一处）")
+
+    def test_scope_transfer_keys_cover_valid_scopes(self):
+        # gpu_baseline 的 H2D/D2H 判据表须恰好覆盖合法 scope 全集（漏 key→KeyError 假挂）
+        self.assertEqual(set(gb._SCOPE_TRANSFER), gb._SCOPES,
+                         "_SCOPE_TRANSFER 的 key 集须与 _SCOPES 恰好一致")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -183,9 +183,11 @@ def split_logical_physical(arr, layout):
 
 
 # ============================================================ Task-1 侧：matmul caseset builder（demo·synthetic）
-# 注：gen_cases.py 的 GOLDEN 尚未注册 CatlassBasicMatmul（该扩展由并行任务落）。本 builder 是 adapter 自带的
-# demo caseset 产生器，schema 与 gen_cases 产物一致（id/dims/tags/inputs/attrs/expected），供本 adapter 端到端跑穿；
-# 并行 gen_cases 扩展就绪后，caseset 可改由 gen_cases 产、本 builder 退役。matmul 走独立 plan，不套 elementwise broadcast。
+# 注：matmul caseset **有意**由本 builder 产、不进 gen_cases 的 GOLDEN 字典——GOLDEN 是 elementwise 引擎
+# （golden_fn(inputs, attrs)、plan=dtype×shape/broadcast/attr_matrix），与 matmul 的 (m,n,k) plan + A[m,k]/B[k,n]
+# 专属输入构造结构不兼容，塞进去无法工作（T4-① 调查结论）。本 builder 是 adapter 自带 demo caseset 产生器，
+# schema 与 gen_cases 产物一致（id/dims/tags/inputs/attrs/expected），供本 adapter 端到端跑穿；matmul 走独立
+# plan，不套 elementwise broadcast。（若日后要统一 Task-1 生成器，是「单一 oracle」的产品级设计取舍，非本注释所指的即将落地项。）
 _SEED = 2026
 
 
