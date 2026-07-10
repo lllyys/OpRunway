@@ -1,8 +1,9 @@
 # acc-casegen 规则库（rule-catalog）v2
 
+> **定位 guard**：acc-casegen 是落地设计 **P2 规划**、**尚未接入 live 流、不落盘 `caseset.json`、不调用/不替代 `gen_cases.py`**；本库只描述展开规则（live 用例生成由确定性 `gen_cases.py` 负责，判定归确定性 validator）。
 > acc-casegen 的知识库：**「算子含某原语 → 必须生成哪些测试用例」**。跨算子复用。
 > canon 设计页：`Primitive-to-case rule library`。种子：夹具 LayerNormGroupedMatmulBiasSilu 评审 + rule-catalog v1 对 catlass 74 example 的对抗评审（`doc/oprunway-task1-cases-critique.md` / `doc/oprunway-rule-catalog-critique.md`）。
-> 本文件是**清单**；「拆原语→查库→实例化→去重→元规则」的展开逻辑在 acc-casegen 的 SKILL.md。**阈值/口径不在此（在 policy）；本库只管「测什么形状/什么数据/为什么」。**
+> 本文件是**清单**；「拆原语→查库→实例化→去重→元规则」的展开逻辑见 [`../SKILL.md`](../SKILL.md)（acc-casegen skill）。**阈值/口径不在此（在 policy）；本库只管「测什么形状/什么数据/为什么」。**
 
 ## 怎么用（展开算法）
 
@@ -21,7 +22,7 @@
 golden:
   compose: "按任务书公式把各原语 numpy 参考按数据流串起来"
   intermediate_dtype_from_spec: "中间精度逐段对齐算子 spec 声明的中间 dtype，不得默认一路 fp32；含中途 cast/requant 的融合（swiglu→bf16→requant、finalize_routing）必须有一条专测中间 cast 截断"
-  normalization_rsqrt: "归一化的 1/sqrt 若算子用硬件 Rsqrt(牛顿迭代近似)，golden 要么建模该近似、要么 policy 按 rsqrt ULP 放宽——否则 var 两端 false-fail"
+  normalization_rsqrt: "归一化的 1/sqrt 若算子用硬件 Rsqrt(牛顿迭代近似)，golden 要么建模该近似、要么 policy 按 rsqrt ULP 放宽——否则 var 两端误报不一致"
   layout_agnostic: "golden 用逻辑索引；物理字节摆放交 harness（generated_harness responsibilities 职责#2）"
 dynamic_semantics_first: "分组/动态 shape（group_list vs 规则张量、变长 M、空 group）先从算子 host 接口锁定；错则 golden 全错"
 per_case_tags: [id, kind, case_origin, spec_clause_ref, pr_change_ref, dtype, shape, exec_unit, arch, data_source, oracle_source, policy_id, compare_branch, workspace_size]
@@ -73,7 +74,7 @@ align_rules:
 ```yaml
 special_value_rules:
   - { tag: zeros, why: "除零/log0/激活零点" }
-  - { tag: inf_nan, mandatory_if: "算子声明 inf/nan 传播语义", why: "inf->finfo.max、NaN==NaN pass、±inf 都要" }
+  - { tag: inf_nan, mandatory_if: "算子声明 inf/nan 传播语义", why: "inf->finfo.max、NaN==NaN 按 policy 视为等价、±inf 都要" }
   - { tag: extremes, why: "上/下溢边界（引用 dtype.overflow_at/max）" }
   - { tag: cast_boundary, why: "输出 cast：fp16/bf16 round-half-even 中点 tie、刚过 overflow_at 溢为 inf" }
   - { tag: denormal, optional: true, why: "flush-to-zero" }
@@ -295,7 +296,7 @@ composition:
     - "并保留一条『单原语独立』case 兜底该边界"
   dedup: "同 shape/data 命中多原语→合一条（kind 并集、policy 最严、case_origin 记全部）"
   precision_promotion: "从 functional 挑数值最硬(large_K/near_constant/mixedsign/低比特/round_mode)升级 precision，绑 tolerance_policy"
-  performance_selection: "另选真实负载目标 shape 作 performance，绑 timing_policy+perf_baseline；补一条 launch-bound(多组/小K)专测融合省 launch"
+  performance_selection: "另选真实负载目标 shape 作 performance，绑 timing_policy + spec.perf.baseline（基线来源=spec.perf.baseline；perf-baseline-by-reference-source 属 proposed·未 settle，载重前需核）；GPU external 对比层当前未接入 pipeline——缺外部 GPU 标杆走 BLOCKED_WAIT_GPU_BENCHMARK、口径不可比走 BLOCKED_INCOMPARABLE_TIMING_SCOPE；补一条 launch-bound(多组/小K)专测融合省 launch"
   minimal_degenerate: "始终保留全最小(各维=1)冒烟"
 coverage_report:
   dims: "原语 × mandatory tag × 三轴(dtype/特殊值/layout)"

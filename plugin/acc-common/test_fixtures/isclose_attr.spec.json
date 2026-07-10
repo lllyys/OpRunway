@@ -1,0 +1,29 @@
+{
+  "_fixture": true,
+  "_fixture_note": "T7 Track A 专设 fixture（**非权威 op spec**）——验 attr_matrix 显式展开（equal_nan 分支 + rtol/atol 分支）+ int 近/远整数网格（codex#13）。⚠ 只验流水线能力，非『IsClose 在这些 attr/dtype 上被验收』。不改权威 isclose.spec.json。",
+  "op": "IsClose",
+  "repo": "test-fixture-only",
+  "hardware": ["Atlas A2", "Atlas A3"],
+  "reference": {"type": "tbe", "ref": "fixture 占位：bool 输出逐位精确"},
+  "change": {"kind": "fixture", "note": "扩 int32 near/far + attr_matrix（fixture，不改权威 spec）"},
+  "params_source": "fixture",
+  "params": [
+    {"name": "self",  "io": "in",  "dtype": ["float32", "float16", "int32"]},
+    {"name": "other", "io": "in",  "dtype": ["float32", "float16", "int32"]},
+    {"name": "rtol",  "io": "attr", "dtype": ["double"], "default": 1e-05},
+    {"name": "atol",  "io": "attr", "dtype": ["double"], "default": 1e-08},
+    {"name": "equal_nan", "io": "attr", "dtype": ["bool"], "default": false},
+    {"name": "out",   "io": "out", "dtype": ["bool"]}
+  ],
+  "generalize": true,
+  "verify_mode": "exact",
+  "precision": {"oracle": "ascendoptest", "standard": "exact", "tolerance_policy_id": "exact",
+                "threshold": 0, "policy": {"kind": "exact", "max_mismatch": 0, "not_settled": false},
+                "threshold_source": "bool 输出 → 精确逐位"},
+  "attr_matrix": [
+    {"equal_nan": false},
+    {"equal_nan": true},
+    {"rtol": 0.01, "atol": 0.001}
+  ],
+  "perf": {"baseline": "tbe", "target_ratio": 0.95}
+}

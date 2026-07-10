@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "contract_version": "0.1.0-provisional",
+  "待散文门": true,
+  "provenance": "canon/decisions/0006-performance-timing-scope.md (proposed·未 settle) + acceptance-contract-evidence-chain.md (canonical: GPU 只作性能标杆非精度 oracle)",
+  "note": "外部 GPU 标杆最小字段契约 15 项（codex M1）。枚举取值 provisional，待外部方真数据按 contract_version 迭代；旧 parser 保留、变更走版本递增不覆盖历史（codex L2）。本文件为 data-driven 版本源，解析规则内嵌于 gpu_baseline.py（缺此文件时用内嵌默认，仅 contract_version 记为 unknown）。",
+  "top_level_optional": ["device", "device_type", "tool", "timing_scope", "sync_policy", "statistic", "unit", "clock_power_state", "data_transfer_included"],
+  "per_case_fields": {
+    "case_id": {"required": true, "type": "string", "note": "对齐 caseset 性能维用例 id"},
+    "device": {"required": true, "type": "string", "must_be_gpu": true, "note": "正向白名单：device_type=='gpu' 或型号命中 nvidia/geforce/rtx/tesla/a100/h100/amd/mi300… 才放行；ascend/npu/tpu/cpu/xeon 等黑名单兜底拒"},
+    "device_type": {"required": false, "type": "string", "note": "可选逃生门：显式 =='gpu' 即通过白名单（不依赖型号串匹配，gb-2）"},
+    "dtype": {"required": true, "type": "string", "note": "参与 case_fingerprint 交叉核对"},
+    "shape": {"required": true, "type": "array", "note": "参与 case_fingerprint"},
+    "attrs": {"required": false, "type": "object", "default": {}, "note": "参与 case_fingerprint"},
+    "timing_scope": {"required": true, "enum": ["kernel_only", "device_e2e_no_h2d_d2h", "host_e2e_with_h2d_d2h"], "note": "须与 NPU 侧同 scope，否则 blocked_incomparable_timing_scope"},
+    "warmup": {"required": true, "type": "number", "policy_min": 10, "note": "<10 → policy_risk(warn)"},
+    "iters": {"required": true, "type": "number", "policy_min": 30, "note": "<30 → policy_risk(warn)"},
+    "sync_policy": {"required": true, "type": "string"},
+    "statistic": {"required": true, "enum": ["median", "p50", "mean", "min", "max"], "policy_prefer": ["median", "p50"], "note": "非 median/p50 → policy_risk(warn)"},
+    "unit": {"required": true, "enum": ["ns", "us", "ms", "s"], "note": "→us 归一"},
+    "value": {"required": true, "type": "number", "note": "有限正数；按 unit 换算成 us"},
+    "tool": {"required": true, "type": "string"},
+    "clock_power_state": {"required": false, "type": "string", "note": "自由文本、不参与对比判定；不做别名归一（gb-10：删除未落实的 aliases 声明）"},
+    "data_transfer_included": {"required": true, "type": "boolean", "note": "须与 timing_scope 自洽：host_e2e_with_h2d_d2h→true，其余→false"}
+  },
+  "unit_to_us": {"ns": 0.001, "us": 1.0, "ms": 1000.0, "s": 1000000.0},
+  "scope_transfer_expected": {"kernel_only": false, "device_e2e_no_h2d_d2h": false, "host_e2e_with_h2d_d2h": true},
+  "set_semantics": "GPU 标杆须恰好覆盖 caseset 全部性能维用例：缺→该 case blocked，多→拒 extra（codex M2）",
+  "example_per_case": {
+    "case_id": "sign_004", "device": "NVIDIA A100-SXM4-80GB", "dtype": "float32",
+    "shape": [1024, 1024], "attrs": {}, "timing_scope": "kernel_only",
+    "warmup": 20, "iters": 50, "sync_policy": "cudaDeviceSynchronize",
+    "statistic": "median", "unit": "us", "value": 5.0, "tool": "nsys",
+    "clock_power_state": "locked", "data_transfer_included": false
+  }
+}

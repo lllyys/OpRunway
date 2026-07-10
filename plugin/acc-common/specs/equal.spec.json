@@ -12,7 +12,8 @@
   ],
   "generalize": true,
   "verify_mode": "exact",
-  "precision": {"oracle": "ascendoptest", "threshold": 0,
+  "precision": {"oracle": "ascendoptest", "standard": "exact", "tolerance_policy_id": "exact",
+                "threshold": 0, "policy": {"kind": "exact", "max_mismatch": 0, "not_settled": false},
                 "threshold_source": "bool 逐元素严格一致（== 无容差）"},
   "perf": {"baseline": "tbe", "target_ratio": 0.95}
 }
