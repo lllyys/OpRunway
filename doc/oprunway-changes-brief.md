@@ -16,6 +16,15 @@
 
 ## 2026-07-10
 
+- **硬件口径更正：「任务书目标算子是 950」只对 13/52 成立** —— 全扫 52 份社区任务书的 `适配硬件` 字段（52/52 均有），**任务书侧统计**为 A2/A3 系 38 份 · 950 系 13 份 · 纯 Atlas 300V Pro 1 份（互斥分桶，38+13+1=52；涉及 300V Pro 的共 2 份）。连带：`ascend-a3` 此前被写成「备用 / 只能 de-risk」，实为 A2/A3 系任务书的目标机；IsClose 即其一（任务书 `Atlas A2/A3` ↔ `op_def` `AddConfig("ascend910b")`+`("ascend910_93")`，双源一致，**a5 不在其声明平台内，能否运行未验证（推断）**）。
+  - `CLAUDE.md` 新增硬规则：**目标硬件不假定，按任务书 `适配硬件` ＋ 算子 `op_def` 的 `AddConfig()` 双源交叉核验，不一致入 `task_pr_gaps`**。⚠ 双源核验须**逐算子**做，目前**仅 IsClose 已核**；38/13/1 是任务书字段统计，不是 52 项双源实测。
+  - **300V Pro 本仓无硬件、无 de-risk 记录**，那 2 份任务书须先停下确认平台（此前完全没纳入考虑）。
+  - `doc/oprunway-todo-plans.md:619` 同一错话的另一处实例一并改：它在 catlass 语境里称 a5 为「任务书目标平台」，而同节 #3 已写明 `CatlassBasicMatmul` 是 synthetic、无真实 task_doc↔PR。
+
+- **新增设计方案 `doc/oprunway-plugin-op-decoupling-design.md`（未动代码）** —— 起因是「模拟干净用户测插件」，挖出插件与算子的耦合：`gen_cases.GOLDEN` 硬注册 4 个 elementwise 算子，**该路径**不认第 5 个（catlass matmul 走独立 builder，但只产 development-grade evidence、不出验收裁决）。另记三处 fail-open 与 canonical 契约的落差。方案含 golden 契约、`oracle_source` 真实化、落点、fail-closed 边界，**均为提案、待拍板**。
+
+- **本轮过程 capture 进 `canon/logbook/2026/07/0513d745-*.md`**（低权威 logbook，待 compile→review），含两个 checkpoint 与十余处自陈的判断/方法失误。全批过 codex 散文门（`gpt-5.6-sol`/low）一轮，修掉 4 High + 5 Med。
+
 - **真 bug：当前 manifest 配置下，插件的 4 个 agent 实测从未被加载** —— `plugin.json` 里那个 `"agents": ["./agents/x.md"]` 数组会被 Claude Code（实测 `2.1.206`）**静默忽略**：插件照常加载、`plugin validate` 照常 ✔、8 个 skill 照常在，但 `Agents (0)`。即该配置启动的会话里 `/op-acceptance` 调不起 primary，产品入口实际是坏的，而三道自查（`check_manifest_sync.py` / `check_agent_frontmatter.py` / `claude plugin validate`）全绿、谁也没抓到。实测四种写法：带 `./` 的路径数组 → Agents(0)；去 `./` → 整个插件加载失败；写成 `"./agents/"` 字符串 → 同样加载失败；**只有完全不写该字段、靠约定目录自动发现 → Agents(4)**（grill 等能正常加载 agent 的插件也都不写）。修后真会话实测四个 agent 均可调度。修法与连带改动：
   - `plugin.json` 删掉 `agents` 字段（**当前唯一实测可用**的写法，不等于 schema 唯一合法；其它版本未验证）；`AGENTS.md` 与 README 各加一条 ⚠ 警告，防有人「好心」加回来。
   - `check_manifest_sync.py` **不再拿 `plugin.json` 的 `agents` 参与同步**——原来拿一个 Claude Code **不据以注册 agent** 的字段当比对的一侧，校得再绿也是假的。现改为 `AGENTS.md` 注册清单 ↔ **文件系统**（`agents/*.md`、`skills/*/SKILL.md`）**两方集合比对**（漏登记/多登记都报 DRIFT），另加**反向门**：`plugin.json` 一出现 `agents` 字段即 DRIFT。反向测试验过两条都能红（exit 1）。

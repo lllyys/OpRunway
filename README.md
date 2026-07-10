@@ -23,6 +23,56 @@
 - **裁决可信（确定性 + 对抗加固）**：pass/fail 只出自确定性脚本——`validator.py` 判精度、`perf_compare.py` 判性能，编排层与 subagent **只引用不自判**（ADR 0007）；**三级完整性门不重判 pass/fail**，只校验证据可信完整，门失败映射 `BLOCKED`。并对 evidence↔落盘产物做 sha256 绑定 + 门内重算比对，堵「伪造 metrics / 跑子集报 100% / 放宽阈值 / 混 e2e 墙钟」等假通过；`validator` 保持 stdlib-only。`acc-common` 由 **368 个 unittest 用例**覆盖——含判定链、三级门、适配器与脚本，以及对抗负例（谎报 dtype、伪造 summary、跑性能子集、越界产物路径等）。
 - **加一个算子**：对 `experimental/math/<op>` 的 aclnn 两段式算子，agent 可自动产 `spec`（acc-spec）+ `runner`（acc-runner）；**catlass / legacy / 非 math 族 / dtype 超范围会返回 `BLOCKED` 或转 P3，不硬塞**。`gen_cases` 的 golden 仍是一处手工注册（待自动化）；runner 自检目前是**纪律、非代码强制门**。用户侧无感——只需在会话里给任务书 + PR。
 
+## 支持范围（精度标准 / 机型 / dtype）
+
+> 下表的「任务书份数」来自对 **52 份社区任务书**（`cann-ops-competitions`，2026-04/05/07）字段的实测统计。
+> 精度要求取各任务书的「精度要求」小节原文，硬件取 `适配硬件` 字段（52/52 均有）。
+> ⚠ **任务书字段 ≠ 算子真实能力**：目标硬件与 dtype 全集须再与算子 `op_def` 交叉核验，**目前仅 IsClose 做过**。
+
+### 精度标准
+
+| 标准 | 任务书份数 | 实现 | 状态 |
+|---|---:|---|---|
+| `ascendoptest_default` | **43** | `precision_policy.py`，AscendOpTest `default_acc` 15-dtype 阈值表逐字快照 | ✅ 已实现，真机验证过（IsClose / Sign） |
+| `exact` | —（由 `verify_mode` 推断：bool 输出 / 逐位对齐） | `threshold=0` | ✅ 已实现，真机验证过（IsClose） |
+| `behavioral` | 1（Sleep 类，无数值输出） | 精度维度 `na` | ⚠️ **仅 policy/validator 层已实现**；端到端跑不了——`gen_cases` 只认 `GOLDEN` 里的 4 个算子，生成不了 Sleep 类用例。**未真机验证** |
+| `ecosystem_mere_mare` | 5 | MERE/MARE 已实现；**ATK 双标杆 fallback 未实现**（明写 out-of-scope） | ⚠️ canon tier **`proposed` / NOT_SETTLED**；单标杆不过只能判 `needs_review`，**给不出终局裁决** |
+| 「与 python / 预期实现一致」 | 3 | 无对应 standard | ❌ **不支持** |
+
+合计 43 + 5 + 3 + 1 = 52。
+
+> ⚠ **当前行为是 fail-open，不是拒绝**：`precision_policy.select_standard` 对 `oracle` 非 `mere_mare`/`atk_double` 的
+> numerical 算子一律 `return ASCENDOPTEST_DEFAULT`（catch-all）。故上表「不支持」的 3 份任务书若真跑，
+> 会被**静默套上 AscendOpTest 的尺子**。改为 fail-closed 拒绝 + 提示「该标准未验证过，建议 agent 自行探索」
+> 是**已定方案、尚未实现**（见 [`doc/oprunway-plugin-op-decoupling-design.md`](doc/oprunway-plugin-op-decoupling-design.md)）。
+
+### 机型
+
+| 机型 | catlass arch | 任务书份数 | 状态 |
+|---|---|---:|---|
+| **Atlas A2 / A3**（`ascend-a3`，`Ascend910_9382`） | `2201` | **38** | ✅ 环境已 de-risk；IsClose / Sign 真机跑通、裁决核对正确 |
+| **Ascend 950PR / 950DT**（`ascend-a5`，`Ascend950PR_9579`） | `3510` | 13 | ✅ 环境已 de-risk（catlass 编译 + `Compare success.`）；**尚无 aclnn 算子在此完成验收** |
+| **Atlas 300V Pro** | — | 2 | ❌ **无硬件、无 de-risk** —— 撞上须先停 |
+
+互斥分桶 38 + 13 + 1 = 52；涉及 300V Pro 的共 2 份（1 份纯 300V Pro，1 份在 A2/A3 桶内兼列）。
+
+### dtype（真机可跑的才算数）
+
+| 层 | dtype | 数 |
+|---|---|---:|
+| `precision_policy` 阈值表 | fp32 fp64 fp16 bf16 int8/16/32/64 uint8/32 bool complex64/128 hfloat32 … | 15 |
+| `gen_cases` 可造用例 + golden | `float32` `float16` `int32` `int16` `bfloat16` | 5 |
+| **真机 runner（`new_example`）** | **`float32` `float16`** | **2** |
+
+`int32` / `int16` / `bfloat16` 属 **Track C**：`gen_cases` 造得出，但 `runner.cpp` 无对应分支，真机跑不了。
+`repo_adapter` 对「spec 声明了但 runner 不支持」的 dtype **fail-closed 抛错**，不静默跳过。
+
+> 例：IsClose 的 `op_def` 声明输入 dtype 为 `{float32, float16, bfloat16, int32}`（4 种），真机 runner 只支持前 2 种。
+>
+> ⚠ **当前无人拿 `op_def` 去核对 spec**：`gen_cases` 的 dtype 集由 `spec.params[].dtype` 驱动，
+> spec 里没写的 dtype 不会触发任何检查（现存 `specs/isclose.spec.json` 只填了 2 种、`task_pr_gaps` 为空）。
+> 「差额须显式声明 + 人工确认 + 裁决落 `PASSED_WITH_GAPS`」是**已定方案、尚未实现**。
+
 ## 安装
 
 **前置**：Claude Code `2.1.206`（当前唯一实测版本，其它版本未验证）· `python3` + `numpy`（确定性脚本依赖；仓内暂无依赖声明文件）。
