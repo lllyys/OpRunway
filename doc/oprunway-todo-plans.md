@@ -616,7 +616,8 @@ minimal-first：先 CatlassBasicMatmul 单算子跑穿再谈融合/其它 exampl
 3. **demo spec 的 synthetic 定位**：`CatlassBasicMatmul` 无真实 task_doc↔PR，spec 标 synthetic、acceptance 阻塞、只验管路——请确认接受此定位（codex #4/#6）；若用户希望改用某个有真实 task↔PR 的 catlass 相关算子作首例，则先走上游 acc-spec verify 对应再回本 todo。
 4. **ADR0005 三层精度口径暂缓**：`validator.py` 现仅 max_rel_err 单阈值；MERE/MARE/RMSE/NaN-Inf/小值绝对误差/三层放行是 **validator 级扩展**，本 adapter todo 先用现有 numerical 路径 + 文档化 fp32 阈值来源，三层扩展列为独立 validator todo。需确认此暂缓（codex #12）。
 5. **7 方法是否现在抽 ABC**：推荐保持「每模式一函数、内部分段」以 minimal-first，正式接口化列后续。需确认暂缓（动接口即动架构）。
-6. **首建平台**：主目标 = ascend-a5 arch 3510/fp32（任务书目标平台）；a2/2201/fp16 作 de-risk。真机可用时先跑哪条、以及路线 B(冒牌 exe) vs A(封 aclnn) 首建顺序，均阻塞于真机+人工确认，实施阶段再拍。
+6. **首建平台**：主目标 = ascend-a5 arch 3510/fp32；a2/2201/fp16 作 de-risk。真机可用时先跑哪条、以及路线 B(冒牌 exe) vs A(封 aclnn) 首建顺序，均阻塞于真机+人工确认，实施阶段再拍。
+   ⚠ **2026-07-10 更正**：此处「首建平台」仅 **catlass adapter** 语境，且 `CatlassBasicMatmul` 属 synthetic、**无真实 task_doc↔PR**（见本节 #3）——故不得称 a5 为「任务书目标平台」。真实社区任务书的目标硬件按各自 `适配硬件` 字段 + `op_def` 的 `AddConfig` 双源判定（实测：A2/A3 系 38 份 · 950 系 13 份 · 纯 300V Pro 1 份），详见 `CLAUDE.md` 远程 NPU 环境段。
 
 
 ---

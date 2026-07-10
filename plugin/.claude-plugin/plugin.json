@@ -3,11 +3,5 @@
   "version": "0.1.0",
   "description": "NPU 算子验收（acceptance）agent+skill 体系：输入=算子任务书(md/链接)+PR 链接 → agent 自动产 spec、生成并验证 runner、真机跑测、出裁决与报告。三段式流水线（用例生成 ST → NPU 精度+性能跑测 → NPU↔GPU 性能对比），判定脑子在工具中立的确定性脚本、跨运行时可移植。",
   "author": { "name": "lys" },
-  "keywords": ["ascend", "npu", "operator", "acceptance", "cann"],
-  "agents": [
-    "./agents/op-acceptance.md",
-    "./agents/acc-spec-extractor.md",
-    "./agents/acc-runner-dev.md",
-    "./agents/acc-verify-rootcause.md"
-  ]
+  "keywords": ["ascend", "npu", "operator", "acceptance", "cann"]
 }

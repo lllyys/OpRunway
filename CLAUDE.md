@@ -12,14 +12,20 @@
 4. **本项目所有 doc 产出（md / 图 / svg 等）放项目根的 `doc/`**
    （`/Users/ll/Desktop/workspace-ascend/OpRunway/doc/`），**不**放上层 `markdown/`。
    每次改动落地后，同步在简表 `doc/oprunway-changes-brief.md` 追加一两句（倒序、大白话）。
-5. **Codex audit-fix 双门**：在 #1 / #3 的用户确认规则之外，再加一层独立审修门；它不替代方案确认、
+5. **Codex audit-fix 门（commit 前）**：在 #1 / #3 的用户确认规则之外，再加一层独立审修门；它不替代方案确认、
    副作用确认，也不替代 #4 的 `doc/` 落点与改动简表。触发点：
-   - **bureau 新增/变更之前**：先审「拟写入文本」，确认无误后才进入 bureau 写入 / compile / review；
-   - **md / 代码生成之后**：先审+修产物，再交付、引用或记录改动。
+   - **commit 之前**：对本次 commit 涉及的全部改动（代码 / md / bureau 文本）统一审+修，通过后才 commit。
+     开发迭代中的中间产物不必逐个审，攒到 commit 前一次过。
+   ⚠ **本条 2026-07-10 由用户改定，领先于 canon**：canonical 的 **ADR 0010** 仍记旧触发点（bureau 写入前 + md/代码
+   生成后），并写明「执行点 = 本规则 #5」。差异已 capture 进 logbook，**ADR 0010 待走 bureau capture→compile→review
+   更新**；在此之前以本条为现行执行规则，ADR 0010 的触发点段落视为 stale（其余部分仍 canonical）。
    按制品类型分工：
    - **代码 / 脚本**（假 exe、run_derisk.sh、skill 脚本等）→ **`cc-suite:audit-fix`**（9 维代码审→修→验循环）；
    - **散文**（CLAUDE.md 规则 / bureau 决策文本 / 设计 md）→ 底层 `codex exec`（Codex CLI）定制审（cc-suite 的代码维度套不上散文、且过重）。
+     默认模型 **`gpt-5.6-sol`、reasoning `low`**（`codex exec -m gpt-5.6-sol -c model_reasoning_effort=low`）。
      （注：早先的 `mcp__plugin_nlpm_codex-cli__codex` MCP 由 nlpm 1.1.0 提供，nlpm 1.1.1+ 已移除该 MCP → 一律走 `codex exec` CLI。）
+   **只跑一轮**：audit → fix → verify 各一次即收工（`cc-suite:audit-fix` 默认最多迭代 3 轮，**别迭代、太久**）；
+   verify 剩下的 finding 如实列进结论、交用户定夺，不自动再修下一轮。
    audit-fix 结论需复述「发现了什么、改了什么、还有什么风险」；粒度可按「一个逻辑制品 / 一次变更」批量。
    ⚠ `nlpm`（`nlpm:check/score/fix`）**不是本门**——它是 NL 制品（skill/agent/command）的确定性质量 lint，
    仅在打磨已发布 skills 时另行使用。理由与 provenance 见 bureau ADR 0010。
@@ -100,27 +106,38 @@ OpRunway/                              ← 项目根（git 仓：GitHub lllyys/O
 - **跑测多层判定**：退出码 → 强失败信号 → 强成功信号 → 待复核（UNCERTAIN 不阻塞，最后统一复核）。
 - **不凭空捏造**：报告里的数字/错误必须来自真实日志/采集，推断项显式标 `(推断)`。
 
-## 远程 NPU 环境（两台，均 de-risk 通过；连接均 `ssh ascend-aX` + 工作目录 `/home/lys`，host 编译、非 root）
+## 远程 NPU 环境（两台，环境均已验证；**各自对应不同任务书的目标硬件、无主备之分**；连接均 `ssh ascend-aX` + 工作目录 `/home/lys`，host 编译、非 root）
 
 Task 2/3 的 build 与跑测在昇腾 NPU 上进行，本地 Mac 只做开发与设计。
 
-### ⭐ ascend-a5 —— 真 950 主力（任务书目标平台）
+> ⚠ **目标硬件不假定、按算子判**（2026-07-10 更正）。判定规则：**任务书的 `适配硬件` 字段**（52/52 份均有此字段）
+> ＋ **算子 `op_def` 的 `AICore().AddConfig(...)`** 双源交叉核验；两者应一致，不一致入 `task_pr_gaps`。
+> **双源核验须逐算子做，不可外推**——目前**仅 IsClose 已核**（任务书 `Atlas A2/A3` ↔ op_def `ascend910b` + `ascend910_93`，一致）。
+>
+> 52 份社区任务书的 **`适配硬件` 字段统计**（**仅任务书侧**，未逐份核 op_def）：
+> **A2/A3 系 38 份 · 950 系 13 份 · 纯 Atlas 300V Pro 1 份**（互斥分桶，38+13+1=52）。
+> **涉及 300V Pro 的共 2 份**：1 份纯 300V Pro，另 1 份落在 A2/A3 桶内、兼列 300V Pro。
+> **本仓无 300V Pro 硬件、无 de-risk 记录 → 这 2 份都须先停下确认目标平台。**
+> spec 的 `hardware` 字段承载此信息。
+> （早前「任务书目标算子是 950」的表述只对 13/52 成立，已按下表更正。）
+
+### ⭐ ascend-a5 —— 真 950 机（**950 系**任务书的目标平台，13/52）
 
 | 项 | 值 |
 |---|---|
-| NPU/SOC | **2× Ascend950PR（`Ascend950PR_9579`，catlass arch `3510`，128GB HBM）** —— 任务书目标算子(950PR/DT)的**真机** |
+| NPU/SOC | **2× Ascend950PR（`Ascend950PR_9579`，catlass arch `3510`，128GB HBM）** —— `适配硬件` 为 **950 系**（Ascend 950PR / 950DT / Atlas 950 系列，按任务书字段共 13 份）的任务书的目标机。⚠ 这 13 份**尚未逐份核 `op_def` 的 `AddConfig`**，开跑前须逐算子交叉核验 |
 | CANN | active **9.0.0**（`/usr/local/Ascend/cann-9.0.0`）；`bisheng`/`ccec`/`msprof` ✓，ccache 缺 |
 | Python | 系统 **py3.11**（catlass 支持区间 <3.12 内）；**无 conda**；Docker 无权限 → host 编译 |
 | ⚠ 共享机 | **多用户共享**（一堆 /home/xxx，disk 1.3T/~80G free）→ 只在 `/home/lys` 干活、**绝不碰共享 CANN**；AscendOpTest 优先走**路线 B（自造 exe 不装 vendor）**，避免写共享 `opp/vendors/` |
 | 已验证 | catlass → `build.sh 43_ascend950_basic_matmul -DCATLASS_ARCH=3510` 编成 → 跑 → **Compare success.**（2026-07-02）。catlass 在 `/home/lys/catlass` |
 
-### ascend-a3 —— 910/A3 备用（de-risk / A2A3 example，arch 2201）
+### ⭐ ascend-a3 —— 910/A3 真机（**A2/A3 系**任务书的目标平台，38/52，含 IsClose）
 
 | 项 | 值 |
 |---|---|
 | 连接 | `ssh ascend-a3`（非 root=lys），**工作目录 `/home/lys`**（3.5T，~340G free） |
 | 主机 | `<内网主机名·已抹>`（= 姊妹项目 cann-ops-test 那台，已有 conda + ops 仓） |
-| NPU / SOC | **8× Ascend910（NPU_MODEL `Ascend910_9382` = A3，64GB HBM）→ catlass arch `2201`**。⚠ **不是 950(3510)**——任务书目标算子是 950，本机只能 de-risk / 跑 A2/A3 example，真 950 算子需 950 机器 |
+| NPU / SOC | **8× Ascend910（NPU_MODEL `Ascend910_9382` = A3，64GB HBM）→ catlass arch `2201`**（非 950 的 `3510`）。**A2/A3 系任务书（38/52，按 `适配硬件` 字段）的目标机、非备用**——例：IsClose 任务书 `适配硬件` = Atlas A2/A3，其 `op_def` 为 `AddConfig("ascend910b")` + `AddConfig("ascend910_93")`，**故其声明支持平台是 A2/A3，应在本机验收；a5 不在其声明平台内、能否运行未验证（推断，无 a5 编译/跑测日志）**。`适配硬件` 为 950 系的任务书（13/52）须走 a5 |
 | CANN | active **9.0.0-beta.1**（`ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0-beta.1`）；另有 9.0.0 / beta.2。`source /usr/local/Ascend/ascend-toolkit/set_env.sh` |
 | 编译器 | **`bisheng`/`ccec`（ASC 编译器）在** ✓，cmake/gcc/git/msprof ✓；**ccache 缺**（不影响，慢点） |
 | Python/torch | 系统 py3.13；conda `base` + `cann-ops`；**torch_npu 未装**（perf 的 torch 基线要用时先装） |

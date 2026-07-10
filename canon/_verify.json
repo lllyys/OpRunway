@@ -2,34 +2,86 @@
   "Machine-verifiable acceptance gate": {
     "verifiedAt": "2026-07-08",
     "checks": [
-      { "artifact": "plugin/acc-common/validate_acceptance_state.py", "hash": "7f6590a72183dddba22a535d75654182cfa2a665d2e3935fb79b19f72302af05", "claim": "three-stage completeness gate (防跑子集/放宽阈值/混e2e, 抗坏输入), STATUS PASSED|FAILED" },
-      { "artifact": "plugin/acc-common/test_validate_acceptance_state.py", "hash": "579ea69634fb663d7ce7f96e9f4ca4960e49d6355d8fa780c2293f5c042f3fcf", "claim": "28 unit tests incl subset/threshold/scope/bad-input/exit-code" }
+      {
+        "artifact": "plugin/acc-common/validate_acceptance_state.py",
+        "hash": "7f6590a72183dddba22a535d75654182cfa2a665d2e3935fb79b19f72302af05",
+        "claim": "three-stage completeness gate (防跑子集/放宽阈值/混e2e, 抗坏输入), STATUS PASSED|FAILED"
+      },
+      {
+        "artifact": "plugin/acc-common/test_validate_acceptance_state.py",
+        "hash": "579ea69634fb663d7ce7f96e9f4ca4960e49d6355d8fa780c2293f5c042f3fcf",
+        "claim": "28 unit tests incl subset/threshold/scope/bad-input/exit-code"
+      }
     ]
   },
   "catlass acceptance mechanics": {
     "verifiedAt": "2026-06-29",
     "checks": [
-      { "artifact": "repos/catlass/scripts/build.sh", "hash": "eefa66678aeeacc76d5815b2c18d57adb9e8d03af194087fcb68c8f82e833f52", "claim": "build/run via scripts/build.sh" },
-      { "artifact": "repos/catlass/examples/common/golden/compare_data.hpp", "hash": "5e7442fbdf5e5a82a8acbbe1478e0800b1ff008ba1a674307e2ff8cbb8d51e38", "claim": "CPU golden compare lib (precision judge)" },
-      { "artifact": "repos/catlass/examples/common/golden/matmul.hpp", "hash": "b8a27496cd6f1b9624e39780f26e28e417cf72890482cfe4bb87f1f16e6e93d6", "claim": "CPU golden matmul reference" },
-      { "artifact": "repos/catlass/tools/tuner/README.md", "hash": "23e6253ee77e35b0fdcb40d7b2a3cedac98bd79884d09b61234dd05142230f5d", "claim": "msTuner perf tool (task_duration us, kernel-only)" }
+      {
+        "artifact": "repos/catlass/scripts/build.sh",
+        "hash": "eefa66678aeeacc76d5815b2c18d57adb9e8d03af194087fcb68c8f82e833f52",
+        "claim": "build/run via scripts/build.sh"
+      },
+      {
+        "artifact": "repos/catlass/examples/common/golden/compare_data.hpp",
+        "hash": "5e7442fbdf5e5a82a8acbbe1478e0800b1ff008ba1a674307e2ff8cbb8d51e38",
+        "claim": "CPU golden compare lib (precision judge)"
+      },
+      {
+        "artifact": "repos/catlass/examples/common/golden/matmul.hpp",
+        "hash": "b8a27496cd6f1b9624e39780f26e28e417cf72890482cfe4bb87f1f16e6e93d6",
+        "claim": "CPU golden matmul reference"
+      },
+      {
+        "artifact": "repos/catlass/tools/tuner/README.md",
+        "hash": "23e6253ee77e35b0fdcb40d7b2a3cedac98bd79884d09b61234dd05142230f5d",
+        "claim": "msTuner perf tool (task_duration us, kernel-only)"
+      }
     ]
   },
   "cannbot ops-registry-invoke workflow": {
     "verifiedAt": "2026-06-29",
     "checks": [
-      { "artifact": "repos/cannbot-skills/plugins-official/ops-registry-invoke/workflow/SKILL.md", "hash": "5f049c560aefdffe8ed868c8db8ce60871a417eb0898596f44fc4c710d6bb80f", "claim": "workflow orchestration playbook (4 phases + 5 CPs)" },
-      { "artifact": "repos/cannbot-skills/plugins-official/ops-registry-invoke/agents/ascendc-ops-architect.md", "hash": "5e67ba2a5804e5a047ef4bb6d1ba559aec6001da179ac7f095c580cd24d51a2e", "claim": "role subagent: architect" },
-      { "artifact": "repos/cannbot-skills/plugins-official/ops-registry-invoke/agents/ascendc-ops-developer.md", "hash": "c92b5c05bafa9de548c0553468982958580fa3b180953f50f6112a4eb67dcafe", "claim": "role subagent: developer" },
-      { "artifact": "repos/cannbot-skills/plugins-official/ops-registry-invoke/agents/ascendc-ops-tester.md", "hash": "7eae75a25d9eb71f18afe37ffc3a21ce88be05ef92824986e9d6412a8390a74e", "claim": "role subagent: tester" },
-      { "artifact": "repos/cannbot-skills/plugins-official/ops-registry-invoke/workflow/resources/validate_workflow_state.py", "hash": "957d73672dd803e4c8aa1335246e82adfda49023cd6fe424c19b0a2d86a3d6e4", "claim": "deterministic JSON workflow-state validator" }
+      {
+        "artifact": "repos/cannbot-skills/plugins-official/ops-registry-invoke/workflow/SKILL.md",
+        "hash": "5f049c560aefdffe8ed868c8db8ce60871a417eb0898596f44fc4c710d6bb80f",
+        "claim": "workflow orchestration playbook (4 phases + 5 CPs)"
+      },
+      {
+        "artifact": "repos/cannbot-skills/plugins-official/ops-registry-invoke/agents/ascendc-ops-architect.md",
+        "hash": "5e67ba2a5804e5a047ef4bb6d1ba559aec6001da179ac7f095c580cd24d51a2e",
+        "claim": "role subagent: architect"
+      },
+      {
+        "artifact": "repos/cannbot-skills/plugins-official/ops-registry-invoke/agents/ascendc-ops-developer.md",
+        "hash": "c92b5c05bafa9de548c0553468982958580fa3b180953f50f6112a4eb67dcafe",
+        "claim": "role subagent: developer"
+      },
+      {
+        "artifact": "repos/cannbot-skills/plugins-official/ops-registry-invoke/agents/ascendc-ops-tester.md",
+        "hash": "7eae75a25d9eb71f18afe37ffc3a21ce88be05ef92824986e9d6412a8390a74e",
+        "claim": "role subagent: tester"
+      },
+      {
+        "artifact": "repos/cannbot-skills/plugins-official/ops-registry-invoke/workflow/resources/validate_workflow_state.py",
+        "hash": "957d73672dd803e4c8aa1335246e82adfda49023cd6fe424c19b0a2d86a3d6e4",
+        "claim": "deterministic JSON workflow-state validator"
+      }
     ]
   },
   "AscendOpTest precision thresholds": {
     "verifiedAt": "2026-07-01",
     "checks": [
-      { "artifact": "repos/AscendOpTest/compare/compare/accuracy_config.py", "hash": "3f439ff320ac483463c184ee1b6792a3c5ae8092af57da2d55571cf24146f91b", "claim": "default_acc float16=[0.001,0.001,0.1]; fp32/int=1e-4; bf16=4e-3" },
-      { "artifact": "repos/AscendOpTest/compare/compare/compare.py", "hash": "be009ab5824d13dddbc1bfeec12f40e2959611f6bbf7bcb7560d1e035b015b33", "claim": "compare_default: |golden|>=1 rel / else abs (shared tol) + bad-point ratio; empty threshold falls back to default_acc" }
+      {
+        "artifact": "repos/AscendOpTest/compare/compare/accuracy_config.py",
+        "hash": "3f439ff320ac483463c184ee1b6792a3c5ae8092af57da2d55571cf24146f91b",
+        "claim": "default_acc float16=[0.001,0.001,0.1]; fp32/int=1e-4; bf16=4e-3"
+      },
+      {
+        "artifact": "repos/AscendOpTest/compare/compare/compare.py",
+        "hash": "be009ab5824d13dddbc1bfeec12f40e2959611f6bbf7bcb7560d1e035b015b33",
+        "claim": "compare_default: |golden|>=1 rel / else abs (shared tol) + bad-point ratio; empty threshold falls back to default_acc"
+      }
     ]
   }
 }

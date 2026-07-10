@@ -6,7 +6,6 @@ import json, os, subprocess, sys, tempfile, shutil, unittest
 import numpy as np
 import precision_policy
 import validate_acceptance_state as G
-import check_manifest_sync as C
 
 
 def _w(d, name, obj):
@@ -464,35 +463,6 @@ class GateTest(unittest.TestCase):
     def test_task3_bad_status_fails(self):
         _w(self.d, "perf_report.json", _pr("weird"))
         self.assertTrue(any("非法" in e for e in self._errs("task3")))
-
-
-class FrontmatterParserTest(unittest.TestCase):
-    def setUp(self):
-        self.d = tempfile.mkdtemp()
-
-    def tearDown(self):
-        shutil.rmtree(self.d, ignore_errors=True)
-
-    def _fm(self, text):
-        p = os.path.join(self.d, "AGENTS.md")
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(text)
-        return C._parse_frontmatter(p)
-
-    def test_block_list(self):
-        self.assertEqual(self._fm("---\nname: x\nskills:\n  - a\n  - b\n---\n")["skills"], ["a", "b"])
-
-    def test_flow_list(self):
-        self.assertEqual(self._fm("---\nname: x\nskills: [a, b]\n---\n")["skills"], ["a", "b"])
-
-    def test_comment_skipped(self):
-        self.assertEqual(self._fm("---\nname: x\n# c\nskills:\n  - a\n---\n")["skills"], ["a"])
-
-    def test_scalar_not_list(self):
-        self.assertEqual(self._fm("---\nname: op-x\ndescription: hi\n---\n")["name"], "op-x")
-
-    def test_no_frontmatter(self):
-        self.assertEqual(self._fm("# just markdown\n"), {})
 
 
 class RunWorkflowExitTest(unittest.TestCase):
