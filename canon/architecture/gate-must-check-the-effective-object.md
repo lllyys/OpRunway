@@ -17,6 +17,13 @@ status: proposed
 同源的第二例：`check_agent_frontmatter.py` 校的是项目自定约定（`mode` / `dispatch_mode` / 单轮纪律），
 与「Claude Code 认不认这个 agent」无关。两个 checker 都 PASS，也证明不了 agent 能被加载。
 
+第三例（2026-07-10，acceptance 门）：[[Machine-verifiable acceptance gate]] 校 `evidence ⊂ caseset`
+（evidence 覆盖 caseset 全部用例、id 一一对应），但看不见 `caseset ⊂ 任务书要求`。任务书要「所有数据类型」，
+spec 只填 runner 支持的子集、`task_pr_gaps` 留空，caseset 因而只造那个子集——门校 caseset↔evidence 全绿、
+裁决 PASSED，而任务书要求的 dtype 根本没测。门校的是 caseset↔evidence，实际该生效的对象是「任务书要求↔evidence」。
+同源还有 [[oracle_source is a hardcoded constant not a recorded fact]]：门永远读到合法的 `cpu_ref` 常量，
+无论 golden 实际从哪来。
+
 **推论**：
 
 - 比对的一侧应取**实际生效的事实源**。故 `check_manifest_sync.py` 改为
@@ -31,4 +38,4 @@ status: proposed
 
 与 [[Machine-verifiable acceptance gate]] 同宗：那条讲「防跑子集报 100%」，本条讲「防校错对象」。
 
-**Sources.** [[session 64604f71-dd13-4256-9a74-072fec018b48 · 2026-07-09]]
+**Sources.** [[session 64604f71-dd13-4256-9a74-072fec018b48 · 2026-07-09]], [[session 0513d745-9176-41f0-8f4b-cb7a2d19ff86 · 2026-07-10]]

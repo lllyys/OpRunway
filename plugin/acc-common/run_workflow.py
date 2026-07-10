@@ -47,8 +47,8 @@ def _exit_code(overall):
       1 = 其余（FAIL 精度 / 性能未达 / BLOCKED_* / NEEDS_REVIEW）。"""
     if overall in ("PASS", "PASS(无性能要求)"):
         return 0
-    if overall == "PASSED_WITH_RISK":
-        return 2
+    if overall == "PASSED_WITH_RISK" or overall.startswith("NEEDS_REVIEW(插件样例"):
+        return 2       # 挂起转人工（跑的是插件样例、非本任务生成）——非自动失败、非干净 PASS
     return 1
 
 
@@ -143,8 +143,20 @@ def run(spec_path, mode="mock", out_dir="reports/_run", defect=None, perf_slow=N
     ov = verdict["overall"]
     prec = ov["verdict"]
     requires_human_cp = False       # T6：PASSED_WITH_RISK 走人工 CP（挂起转人工，非自动合并/失败）
+    # 跑的是**插件自带样例 runner**（非为本任务生成）→ 绝不出干净 PASS。
+    # 落点改造后 fallback 仍可命中（用户没提供 runner 时），但那验的是插件 demo、不是用户算子，
+    # 必须挂人工 CP（provenance 见 evidence.runner_source，repo_adapter.find_runner 写入）。
+    # fail-closed：new_example（真机）模式必须携带合法 runner_source。
+    #   user           → 用户为本任务生成的 runner，正常走后续裁决；
+    #   builtin_sample  → 跑的是插件 demo，挂人工 CP（不出干净 PASS）；
+    #   缺失 / 未知值    → 无法确认跑的是谁的 runner，一律 BLOCKED（防字段缺失/拼错时静默放行）。
+    runner_source = evidence.get("runner_source")
     if not gate_passed:
         overall = "BLOCKED(验收门未过)"
+    elif mode == "new_example" and runner_source not in ("user", "builtin_sample"):
+        overall = f"BLOCKED(runner_source 非法/缺失: {runner_source!r})"
+    elif runner_source == "builtin_sample":
+        overall, requires_human_cp = "NEEDS_REVIEW(插件样例runner非本任务生成)", True
     elif prec == "fail":
         overall = "FAIL(精度)"
     elif prec == "needs_review":

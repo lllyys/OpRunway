@@ -6,7 +6,13 @@ description: 为 ops-math 风格、experimental/math 目录、aclnn 两段式接
 # acc-runner — 生成并验证 per-op NPU runner（③）
 
 **输入**：`<op>.spec.json`（②acc-spec 产）+ `pr_facts.json`（①fetch_source 产，含算子自带 `test_aclnn_*.cpp` + `*_def.cpp`）。
-**输出**：`plugin/acc-common/new_example/oprunway_<op.lower()>_runner.cpp` + 构建路径配置。
+**输出**：**`<ops_root>/<op>/oprunway_<op.lower()>_runner.cpp`** + 构建路径配置
+（`ops_root` = `$OPRUNWAY_OPS_DIR`(绝对) 或 `${OPRUNWAY_WORK_DIR:-$CWD}/.oprunway/ops`）。
+⚠ **落用户工作目录、不写插件安装目录**（升版即冲；工程约定要求产物落用户 CWD；`ops_root` 落插件目录内会被拒）。
+插件里的 `acc-common/new_example/oprunway_*_runner.cpp` 是**随插件发行的样例，按只读用、不得改写**。
+`repo_adapter.find_runner()` 查找顺序 = **用户目录优先 → 插件样例 fallback**；命中样例（=用户没为本任务提供 runner）时
+会在 stderr 告警「跑的不是为你的任务生成的 runner」，真机 `new_example` 的 evidence 记 `runner_source=builtin_sample`，
+**裁决被强制降为 `NEEDS_REVIEW`、进人工 CP、绝不出干净 PASS**。
 **当前范围（诚实）**：仅 **`experimental/math/<op>` aclnn 算子**代码闭环；余待扩（见 ref §3）。**runner 自检证据满足/不满足 纪律当前非代码强制 sidecar 硬门、待补**（`repo_adapter` 只查文件在不在，不识别 unverified；ref §4）。
 **核心纪律（Equal 教训固化）**：aclnn 入口/dtype/参数顺序**从算子自带 example 抠、不猜**；**runner 自检证据不满足则停在 CP-C、不上真机**（靠 agent/人自觉，直到 sidecar 门落地）；acceptance 裁决只逐字引用 validator.py / perf_compare.py / validate_acceptance_state.py 产物（ADR 0007）。
 **调用者**：本 skill 由 acc-runner-dev subagent 以 `dispatch_mode=gen_runner`/`verify_runner` 调用；单轮 / 禁内部循环 / 不自行判定等纪律以该 agent 为准（指针，不在此复制）。
@@ -24,7 +30,7 @@ description: 为 ops-math 风格、experimental/math 目录、aclnn 两段式接
 
 3. **runner 自检证据满足/不满足**（真机·**当前非代码强制 sidecar 硬门、待补**，skeleton §4）：编出 runner → 造**手算 golden 的小用例** → 喂 **custom exe** 跑 → 检查 rc/`OPRUNWAY_DONE`/out.bin 字节 + 值**逐元素等于手算 golden** 即自检证据满足。不一致 → **custom vs builtin exe 同 case 对照**解耦 root-cause（runner 错 vs 算子错），**别产假裁决**、显式暴露。自检证据不满足 → 停在 CP-C、不上真机、不接 `run_new_example`（靠自觉，直到 sidecar 门落地）；acceptance 裁决只逐字引用 validator.py / perf_compare.py / validate_acceptance_state.py 产物（ADR 0007）。
 
-4. **交付**：自检证据满足 → runner 落 `new_example/`，把构建路径配置（`OPRUNWAY_OPS_REPO/SOC/VENDOR/OP` 等）交 `repo_adapter.run_new_example`（④）跑全量用例 + msprof。
+4. **交付**：自检证据满足 → runner 落 **`<用户 CWD>/.oprunway/ops/<op>/`**（不是插件目录），把构建路径配置（`OPRUNWAY_OPS_REPO/SOC/VENDOR/OP` 等）交 `repo_adapter.run_new_example`（④）跑全量用例 + msprof。
 
 ## 约束（跨运行时可移植）
 - 全程中文；**runner 一律锚定算子自带 example，不猜**；**runner 自检证据满足/不满足 是必守纪律**（当前非代码强制 sidecar 硬门、待补，见本页开头「当前范围」与 skeleton §4），不可跳过。

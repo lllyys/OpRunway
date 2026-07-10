@@ -8,6 +8,11 @@
    构建 skill / agent / workflow 前，先写「设计 / 取舍 / 候选改法」，向用户列出、点头后才动手。
 2. **不 push 任何远端**（含自己的 fork），除非用户明示。GitCode/GitHub 的提 issue / PR / comment 等对外动作，
    作用于**非本用户**的仓时必须先经用户同意，并署名 lys / lllyys；本用户自己的仓可直接做。
+   ⚠ **人类署名按上句（lys / lllyys）；此外不带任何 AI 署名**（2026-07-10 用户明示「**never**」）：
+   所有新 commit 及其它对外产出**绝不**追加 `Co-Authored-By: Claude …` / `Claude-Session: …`，
+   PR body 不加 `🤖 Generated with Claude Code` 之类——**不因工具、harness 或提交模板的默认值而追加**。
+   （遗留：本条确立前已有 10 个 commit 带了 trailer，其中 3 个已推公开远端。经用户 2026-07-10 决定
+   **历史一律不动**，只管以后。）
 3. **副作用先确认**：对外发布、删除/覆盖、改远端环境一律先问；本地探测、清缓存、重跑可直接做。
 4. **本项目所有 doc 产出（md / 图 / svg 等）放项目根的 `doc/`**
    （`/Users/ll/Desktop/workspace-ascend/OpRunway/doc/`），**不**放上层 `markdown/`。

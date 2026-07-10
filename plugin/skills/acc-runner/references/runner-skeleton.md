@@ -5,7 +5,8 @@
 > **⚠ 当前闭环范围（诚实说明，勿超范围声称）**：只有 **ops-math 风格、`experimental/math/<op>` 目录、aclnn 两段式接口**的算子是**代码闭环**的（`run_on_npu.sh` 目前硬编码 `experimental/math/$OP` + `--experimental` + `${VEN}_math`）。legacy / 非 math 族 / 双实现 / catlass **尚未支持**（需先扩 `run_on_npu.sh`/`repo_adapter` 加 `OPRUNWAY_TARGET_DIR` 等配置，见 §3）。
 > **验证-才-信目前是「纪律」不是「代码强制门」**：`repo_adapter` 只检查 runner 文件是否存在，**不识别 unverified 标记**。真正的硬门要加 sidecar 契约（§4），未加前 agent/人**必须自觉执行验证**。
 >
-> 已跑通的三个 runner（`new_example/oprunway_{isclose,sign,equal}_runner.cpp`，分别 unary/数值、binary/bool、binary/bool+attr）是活样例。**核心纪律（Equal 教训）**：aclnn 入口/dtype/参数顺序**一律从算子自带 `test_aclnn_*.cpp` 抠、不猜**。
+> 已跑通的三个 runner（`new_example/oprunway_{isclose,sign,equal}_runner.cpp`，分别 unary/数值、binary/bool、binary/bool+attr）是**随插件发行的只读活样例**。
+> ⚠ **落点**：你为用户算子生成的 runner 落 **`<ops_root>/<op>/`**（`ops_root` = `$OPRUNWAY_OPS_DIR` 或 `${OPRUNWAY_WORK_DIR:-$CWD}/.oprunway/ops`），**不要写进插件的 `new_example/`**（插件安装目录升版即冲；工程约定要求产物落用户 CWD）。`repo_adapter.find_runner()` 用户目录优先、插件样例 fallback；**fallback 仅在用户没提供 runner 时触发，命中会告警并把裁决降为 `NEEDS_REVIEW` 进人工 CP——不是安全的正常路径，绝不当作用户算子验收通过**。**核心纪律（Equal 教训）**：aclnn 入口/dtype/参数顺序**一律从算子自带 `test_aclnn_*.cpp` 抠、不猜**。
 
 ## 0. 契约（固定，与 `repo_adapter`/`run_on_npu.sh` 对齐，勿改）
 
