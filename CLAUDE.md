@@ -12,14 +12,20 @@
 4. **本项目所有 doc 产出（md / 图 / svg 等）放项目根的 `doc/`**
    （`/Users/ll/Desktop/workspace-ascend/OpRunway/doc/`），**不**放上层 `markdown/`。
    每次改动落地后，同步在简表 `doc/oprunway-changes-brief.md` 追加一两句（倒序、大白话）。
-5. **Codex audit-fix 双门**：在 #1 / #3 的用户确认规则之外，再加一层独立审修门；它不替代方案确认、
+5. **Codex audit-fix 门（commit 前）**：在 #1 / #3 的用户确认规则之外，再加一层独立审修门；它不替代方案确认、
    副作用确认，也不替代 #4 的 `doc/` 落点与改动简表。触发点：
-   - **bureau 新增/变更之前**：先审「拟写入文本」，确认无误后才进入 bureau 写入 / compile / review；
-   - **md / 代码生成之后**：先审+修产物，再交付、引用或记录改动。
+   - **commit 之前**：对本次 commit 涉及的全部改动（代码 / md / bureau 文本）统一审+修，通过后才 commit。
+     开发迭代中的中间产物不必逐个审，攒到 commit 前一次过。
+   ⚠ **本条 2026-07-10 由用户改定，领先于 canon**：canonical 的 **ADR 0010** 仍记旧触发点（bureau 写入前 + md/代码
+   生成后），并写明「执行点 = 本规则 #5」。差异已 capture 进 logbook，**ADR 0010 待走 bureau capture→compile→review
+   更新**；在此之前以本条为现行执行规则，ADR 0010 的触发点段落视为 stale（其余部分仍 canonical）。
    按制品类型分工：
    - **代码 / 脚本**（假 exe、run_derisk.sh、skill 脚本等）→ **`cc-suite:audit-fix`**（9 维代码审→修→验循环）；
    - **散文**（CLAUDE.md 规则 / bureau 决策文本 / 设计 md）→ 底层 `codex exec`（Codex CLI）定制审（cc-suite 的代码维度套不上散文、且过重）。
+     默认模型 **`gpt-5.6-sol`、reasoning `low`**（`codex exec -m gpt-5.6-sol -c model_reasoning_effort=low`）。
      （注：早先的 `mcp__plugin_nlpm_codex-cli__codex` MCP 由 nlpm 1.1.0 提供，nlpm 1.1.1+ 已移除该 MCP → 一律走 `codex exec` CLI。）
+   **只跑一轮**：audit → fix → verify 各一次即收工（`cc-suite:audit-fix` 默认最多迭代 3 轮，**别迭代、太久**）；
+   verify 剩下的 finding 如实列进结论、交用户定夺，不自动再修下一轮。
    audit-fix 结论需复述「发现了什么、改了什么、还有什么风险」；粒度可按「一个逻辑制品 / 一次变更」批量。
    ⚠ `nlpm`（`nlpm:check/score/fix`）**不是本门**——它是 NL 制品（skill/agent/command）的确定性质量 lint，
    仅在打磨已发布 skills 时另行使用。理由与 provenance 见 bureau ADR 0010。

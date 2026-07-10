@@ -23,6 +23,39 @@
 - **裁决可信（确定性 + 对抗加固）**：pass/fail 只出自确定性脚本——`validator.py` 判精度、`perf_compare.py` 判性能，编排层与 subagent **只引用不自判**（ADR 0007）；**三级完整性门不重判 pass/fail**，只校验证据可信完整，门失败映射 `BLOCKED`。并对 evidence↔落盘产物做 sha256 绑定 + 门内重算比对，堵「伪造 metrics / 跑子集报 100% / 放宽阈值 / 混 e2e 墙钟」等假通过；`validator` 保持 stdlib-only。`acc-common` 由 **368 个 unittest 用例**覆盖——含判定链、三级门、适配器与脚本，以及对抗负例（谎报 dtype、伪造 summary、跑性能子集、越界产物路径等）。
 - **加一个算子**：对 `experimental/math/<op>` 的 aclnn 两段式算子，agent 可自动产 `spec`（acc-spec）+ `runner`（acc-runner）；**catlass / legacy / 非 math 族 / dtype 超范围会返回 `BLOCKED` 或转 P3，不硬塞**。`gen_cases` 的 golden 仍是一处手工注册（待自动化）；runner 自检目前是**纪律、非代码强制门**。用户侧无感——只需在会话里给任务书 + PR。
 
+## 安装
+
+**前置**：Claude Code `2.1.206`（当前唯一实测版本，其它版本未验证）· `python3` + `numpy`（确定性脚本依赖；仓内暂无依赖声明文件）。
+
+**加载插件**（当前唯一支持的方式）：
+
+```bash
+cd /path/to/OpRunway
+claude --plugin-dir ./plugin
+```
+
+**确认装好了**——组件数必须是 `Skills (8)` + `Agents (4)`：
+
+```bash
+claude --plugin-dir ./plugin plugin details oprunway
+```
+
+若显示 `Agents (0)`，则 agent 没加载、`/op-acceptance` 调不起 primary（见下方陷阱）。
+
+**开发迭代**：改完插件文件可先试 `/reload-plugins` 热加载（各类组件是否都能可靠热更新，本次未逐类实测；若 `plugin details` 的组件数或定义没更新，重启会话再查）。改动 `AGENTS.md` / `agents/` / `skills/` 后跑一次漂移门：
+
+```bash
+python3 plugin/acc-common/check_manifest_sync.py   # 期望 STATUS: SYNCED
+```
+
+> ⚠ **陷阱：`.claude-plugin/plugin.json` 不要声明 `agents` 字段。** 在实测的 `2.1.206` 上，写成 `["./agents/x.md"]` 会被
+> **静默忽略**——插件照常加载、`claude plugin validate` 照常 ✔、skills 照常在，但 `Agents (0)`、4 个 agent 全不生效；
+> 写成 `["agents/x.md"]`（去 `./`）或 `"./agents/"`（字符串）则**整个插件加载失败**。已测的四种写法里，**只有省略该字段**
+> 能得到 `Agents (4)`（靠约定目录 `agents/` 自动发现）——这是当前唯一实测可用的写法，不等于 schema 上唯一合法。
+> `check_manifest_sync.py` 已设反向门拦这条。
+
+> marketplace 分发（`claude plugin marketplace add` + `plugin install`）尚未提供——仓内还没有 `marketplace.json`。
+
 ## 怎么用：在会话里对话（不跑脚本）
 
 装上插件后，**在支持的 agent CLI 会话里，对 `op-acceptance` agent 用自然语言说要验收什么**：
