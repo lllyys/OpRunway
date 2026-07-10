@@ -18,9 +18,10 @@
 **主干施工完毕 + 真机端到端验证通过**，但还不是「能对任意算子一键验收」的成品——见 [`doc/oprunway-todo.md`](doc/oprunway-todo.md)。
 
 - **架构**：三层可移植设计。Layer 0 六份 JSON 契约 · Layer 1 确定性脚本（工具中立的「脑子」）· Layer 2 per-tool 薄壳（编排）。Stage 间只传 JSON。
-- **已真机验证**：三个结构互不相同的算子（IsClose 二元/bool、Sign 一元/数值、Equal 二元/bool）在真昇腾 NPU 上跑通，**裁决全部正确**——精度 = 真 NPU 输出 vs numpy golden，性能 = msprof 真 kernel-only vs 真内置 TBE 基线，总体门同时卡精度+性能。另 Neg 已接入 mock 级流水线；catlass（GEMM 系）走路线 C（注入其自带 example 树），真机待 950（ascend-a5）验证。
-- **裁决可信（确定性 + 对抗加固）**：pass/fail 只出自确定性脚本链（`validator.py` 精度 + `perf_compare.py` 性能 + 三级完整性门），编排层与 subagent **只引用不自判**（ADR 0007）。并对 evidence↔落盘产物做 sha256 绑定 + 门内重算比对，堵「伪造 metrics / 跑子集报 100% / 放宽阈值 / 混 e2e 墙钟」等假通过；`validator` 保持 stdlib-only。
-- **加一个算子**：agent 自动产 `spec`（acc-spec）+ `runner`（acc-runner）；`gen_cases` 的 golden 目前仍是一处手工注册（待自动化）。用户侧无感——只需在会话里给任务书 + PR。
+- **已真机验证**：两个结构不同的算子（IsClose 二元/bool、Sign 一元/数值）在真昇腾 NPU 上跑通且**裁决经核对正确**——精度 = 真 NPU 输出 vs numpy golden，性能 = msprof 真 kernel-only vs 真内置 TBE 基线，总体门同时卡精度+性能。
+  ⚠ **Equal 不计入有效结论**：它虽也在真机跑过，但事后确认**任务书↔PR 配错、且该 Equal 社区任务本身从未验收通过**，故其验收裁决已整体作废（见 [`doc/oprunway-changes-brief.md`](doc/oprunway-changes-brief.md) 顶部横幅）。Neg 仅接入 mock 级流水线；catlass（GEMM 系）当前实现为「注入其自带 example 树」的 repo-native harness（对应 canon 的「路线 C」更正仍待 compile→review，非既定 canonical），真机待 950（ascend-a5）+ VPN 验证。
+- **裁决可信（确定性 + 对抗加固）**：pass/fail 只出自确定性脚本——`validator.py` 判精度、`perf_compare.py` 判性能，编排层与 subagent **只引用不自判**（ADR 0007）；**三级完整性门不重判 pass/fail**，只校验证据可信完整，门失败映射 `BLOCKED`。并对 evidence↔落盘产物做 sha256 绑定 + 门内重算比对，堵「伪造 metrics / 跑子集报 100% / 放宽阈值 / 混 e2e 墙钟」等假通过；`validator` 保持 stdlib-only。`acc-common` 由 **368 个 unittest 用例**覆盖——含判定链、三级门、适配器与脚本，以及对抗负例（谎报 dtype、伪造 summary、跑性能子集、越界产物路径等）。
+- **加一个算子**：对 `experimental/math/<op>` 的 aclnn 两段式算子，agent 可自动产 `spec`（acc-spec）+ `runner`（acc-runner）；**catlass / legacy / 非 math 族 / dtype 超范围会返回 `BLOCKED` 或转 P3，不硬塞**。`gen_cases` 的 golden 仍是一处手工注册（待自动化）；runner 自检目前是**纪律、非代码强制门**。用户侧无感——只需在会话里给任务书 + PR。
 
 ## 怎么用：在会话里对话（不跑脚本）
 
