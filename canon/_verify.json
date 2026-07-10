@@ -83,5 +83,55 @@
         "claim": "compare_default: |golden|>=1 rel / else abs (shared tol) + bad-point ratio; empty threshold falls back to default_acc"
       }
     ]
+  },
+  "gen_cases GOLDEN hardcodes four elementwise operators": {
+    "verifiedAt": "2026-07-10",
+    "checks": [
+      {
+        "artifact": "plugin/acc-common/gen_cases.py",
+        "hash": "a9a2ee4d2e1868efcf3c4e1114603a1320f9e0b5548180a922de51625d3987d5",
+        "claim": "GOLDEN dict hardcodes IsClose/Sign/Equal/Neg; `if op not in GOLDEN: raise ValueError`; does not emit oracle_source"
+      }
+    ]
+  },
+  "oracle_source is a hardcoded constant not a recorded fact": {
+    "verifiedAt": "2026-07-10",
+    "checks": [
+      {
+        "artifact": "plugin/acc-common/repo_adapter.py",
+        "hash": "d85e27f85ee5bcfcf6cb5a05aade9dddaf70c1c3d14929f959d9399df6688230",
+        "claim": "hardcoded \"oracle_source\": \"cpu_ref\" constant"
+      },
+      {
+        "artifact": "plugin/acc-common/catlass_adapter.py",
+        "hash": "26819b76787149cd168b2e868c988901e89c42f624188b99de3d31bfa0aff754",
+        "claim": "hardcoded \"oracle_source\": \"cpu_ref\" constant"
+      },
+      {
+        "artifact": "plugin/acc-common/gen_cases.py",
+        "hash": "a9a2ee4d2e1868efcf3c4e1114603a1320f9e0b5548180a922de51625d3987d5",
+        "claim": "gen_cases does not produce oracle_source field at all"
+      }
+    ]
+  },
+  "select_standard silently maps unknown oracle to ascendoptest_default": {
+    "verifiedAt": "2026-07-10",
+    "checks": [
+      {
+        "artifact": "plugin/acc-common/precision_policy.py",
+        "hash": "6b8a6e6ef2b916aeb4fe653b4bca2459cb7a6855bacd48d4e6c8c2ed21c48fb1",
+        "claim": "select_standard ends with catch-all `return ASCENDOPTEST_DEFAULT` for numerical oracle not in {mere_mare,atk_double}"
+      }
+    ]
+  },
+  "Real-NPU runner supports only float32 and float16": {
+    "verifiedAt": "2026-07-10",
+    "checks": [
+      {
+        "artifact": "plugin/acc-common/repo_adapter.py",
+        "hash": "d85e27f85ee5bcfcf6cb5a05aade9dddaf70c1c3d14929f959d9399df6688230",
+        "claim": "_NP = {float32, float16}; unsupported dtype raises ValueError (fail-closed)"
+      }
+    ]
   }
 }
