@@ -14,9 +14,21 @@
 6. 远程 NPU 环境（哪台机、catlass 在哪 build、是否进 Docker）待用户提供后补进 CLAUDE.md。
 7. 优先级（Codex 排序）：Q3>Q4>Q5>Q6>Q1>Q2>Q8>Q9>Q7。完整见 `doc/oprunway-design.md` §13。
 
+## 2026-07-10
+
+- **改走 PR 入库（更正下方 07-09 各条的「本地 commit·未 push」措辞——那批已全部推公开远端）**：本轮 Wave 1–3 的
+  30 个 commit 起初误**直推 main**（双镜像），经用户纠正「应先提 PR 再合入、不直接合」→ 回退 main 到基点
+  `4dcd355`（用户授权 force-with-lease、双镜像；回退前先把 30 commit 推成 feat 分支上保险、逐个比对**零丢失**），
+  改经 **PR #3**（`feat/acceptance-pipeline-wave1-3 → main`，GitHub `lllyys/OpRunway`）审入，**未自动合、待人审**。
+  连带：push 前剥掉 7 个 commit 正文里的 Claude trailer（filter-branch，树逐字未变、全 author=lys）——故 07-09 各条
+  引用的短 hash（`306d975`/`8d3d515` 等）**已因改写失效**，语义描述仍准，新 hash 以 PR #3 为准。README 同步更新
+  （裁决可信条 + Neg/catlass 诚实标注 + 双镜像信息），作为 PR 第 31 个 commit。**往后一律走 PR、不再直推 main。**
+- **仍归用户**：合并 PR #3；bureau `/compile`（logbook→cabinet proposed）+ `/review`（人门 promote canonical）；
+  T11a 外发（台账 push 核验 + PR#2 body 更正，卡隧道/gh token）。
+
 ## 2026-07-09
 
-- **收口②·散文全仓同步 + provenance 门 4 CONFIRMED（本地 commit `306d975`/`8d3d515`·未 push）**：接下条「仍待办」清账两项。① **provenance 门对抗攻击 4 条**（`306d975`）：`compute_metrics` 补 out 侧 dtype 支持校验 + out/golden dtype 严等（拒 complex-out 数值、拒 uint8/bool 跨型逐位比假通过）；产物定位 base 走 realpath 且拒 `..`；numpy/precision_policy import 失败统一判 FAILED 不 crash；sha 校验与 `np.load` 收进「读一次字节→算 sha→BytesIO→load(allow_pickle=False)」堵 TOCTOU。169 测全绿、隔离沙箱亲手复现每条。② **散文 5 缺陷 → 经 codex 散文门 3 轮扩为全仓同步 9 文件**（`8d3d515`）：门抓出「同一旧口径散落多处、只改命中点=没扫净」——(a) `acceptance.json.overall` 门失败真实值 `"BLOCKED(验收门未过)"(exit 1)` 非裸 `BLOCKED`（扫净 8 处、概念性范畴态保留）；(b)「均 tbe」加 catlass matmul(baseline=None) 后成假 → 全限定「aclnn 重写类 isclose/sign/equal/neg，catlass 对标类·未定基线」（含 "vs 内置基线"→"vs spec.perf.baseline 指定基线"）；(c) exception→`PASSED_WITH_RISK` 补「须先过 gate_task3、门未过→BLOCKED」；(d) `baseline.json` 产物枚举 7 处标「有基线时」（仅 `baseline is not None` 落盘）；(e) ADR 0006(timing_scope,proposed) 与 0007(比值/裁决,canonical) tier 分清。诚实：SVG「内置基线」标签属 T6 例外(本就 TBE 类)语境准确、保留。markdown 完整性自查全过。
+- **收口②·散文全仓同步 + provenance 门 4 CONFIRMED（后经 PR #3 入库；下方「本地 commit·未 push」措辞见 07-10 更正）**：接下条「仍待办」清账两项。① **provenance 门对抗攻击 4 条**（`306d975`）：`compute_metrics` 补 out 侧 dtype 支持校验 + out/golden dtype 严等（拒 complex-out 数值、拒 uint8/bool 跨型逐位比假通过）；产物定位 base 走 realpath 且拒 `..`；numpy/precision_policy import 失败统一判 FAILED 不 crash；sha 校验与 `np.load` 收进「读一次字节→算 sha→BytesIO→load(allow_pickle=False)」堵 TOCTOU。169 测全绿、隔离沙箱亲手复现每条。② **散文 5 缺陷 → 经 codex 散文门 3 轮扩为全仓同步 9 文件**（`8d3d515`）：门抓出「同一旧口径散落多处、只改命中点=没扫净」——(a) `acceptance.json.overall` 门失败真实值 `"BLOCKED(验收门未过)"(exit 1)` 非裸 `BLOCKED`（扫净 8 处、概念性范畴态保留）；(b)「均 tbe」加 catlass matmul(baseline=None) 后成假 → 全限定「aclnn 重写类 isclose/sign/equal/neg，catlass 对标类·未定基线」（含 "vs 内置基线"→"vs spec.perf.baseline 指定基线"）；(c) exception→`PASSED_WITH_RISK` 补「须先过 gate_task3、门未过→BLOCKED」；(d) `baseline.json` 产物枚举 7 处标「有基线时」（仅 `baseline is not None` 落盘）；(e) ADR 0006(timing_scope,proposed) 与 0007(比值/裁决,canonical) tier 分清。诚实：SVG「内置基线」标签属 T6 例外(本就 TBE 类)语境准确、保留。markdown 完整性自查全过。
 - **⚠ Wave 2/3 收口（仅覆盖下方 worktree 期条目里的『待合并 / 未 commit / 待散文门』**状态措辞**——那些均已过时、以本条为准；不覆盖历史技术细节，也不影响顶部 Equal 全局作废横幅）**：并行推进的 T5/T6/T7/T8/T3/T4 **全部已合并并本地提交**（截至本条 main 领先 origin 22 个 commit、**未 push**）。**压缩里程碑序列**（非逐 commit，实际 commit 有分支/修复穿插）：Wave 1 → T5 精度双标准 → T6+T8 性能包合并 → T7 dtype/attr → gate_task3 修复 → 安全修复 → T3-P2 合并 → perf-fix 合并 → T4-catlass 合并 → provenance 绑定。**测试计数 270**（precision_policy 40 / validate_acceptance_state 76 / perf_compare 27 / gpu_baseline 21 / perf_sim_plot 12 / gen_cases_dtype_attr 50 / catlass_adapter 44），本地可写环境自测全绿；四算子 mock 三级门全 PASSED、退出码 0/1/2、`python -O` 过、validator 仍 stdlib-only。
   - **对抗式代码门是本轮主线，按各轮 codex/audit findings 累计百余条审计发现、其中十余条已实跑坐实为假通过或可毁用户文件的漏洞——全都藏在「测试全绿」之下**。关键：validator 曾可被 caseset+evidence 谎报 `compare_dtype`（真 fp32 报 fp16 放宽 10×、真 int32 绕整型 EXACT）而放行 → 改「凡决定怎么判者一律从 spec 派生，caseset/evidence 声明只作待核对断言」；gate_task3 曾允许「零真实性能证据」放行、「有图强制」空心 → 改门内据 simulation 确定性重算 SVG 比对；perf_compare 曾 `round(ratio)` 后再比致 [0.9495,0.95) 全段假达标、`target_ratio` 零校验、GPU device 黑名单 → 全修 + 负例钉死。
   - **evidence↔产物 provenance 绑定（方案 A，用户拍板）**：evidence.precision 加 `{golden_sha256,out_sha256,numel}`，gate_task2 先校 sha 再用 `precision_policy.compute_metrics` 依 caseset 口径重算、与自报 metrics 逐字段比对，堵「伪造 bad_count=0 即 pass」。硬纪律：numpy 缺失 / 产物缺失 / sha 不符 → FAILED，mock 不放宽。**诚实边界（测试钉死 + docstring 明写、不假装防住）**：A 只证 metrics 由这两文件算出、**不证文件来自真 NPU 跑测**（自洽伪造 out=golden 副本仍放行，产物↔真机绑定属另一层、本轮不做）。门做重算不越职责——属证据可信、非重判 verdict（ADR 0007）。
