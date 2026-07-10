@@ -194,6 +194,109 @@ def run_mock(caseset, work_dir, defect_cases=None):
     return {"op": caseset["op"], "repo_mode": "mock", "evidence": ev}
 
 
+def user_root():
+    """**用户工作目录**根。默认 = 进程 CWD；`OPRUNWAY_WORK_DIR` 可覆盖。
+
+    工程约定「零持久化配置；所有产物落用户 CWD」——运行时产物（spec / runner / caseset / evidence / 报告）
+    一律落这里，**绝不写插件安装目录**（真实 `/plugin install` 后插件在 `~/.claude/plugins/cache/…`，
+    插件一升版就整目录换掉、用户产物被冲）。
+    """
+    return os.path.realpath(os.environ.get("OPRUNWAY_WORK_DIR") or os.getcwd())
+
+
+def _plugin_root():
+    """插件安装根 = `plugin/`（本文件在 `plugin/acc-common/` 下，故上溯一层）。
+    用于「ops_root 不得落在插件目录内」的守卫——须覆盖**整个插件**（skills/ agents/ commands/ acc-common/ …），
+    不能只挡 acc-common 子树，否则 OPRUNWAY_OPS_DIR 指向 plugin/skills/ 仍能绕过。"""
+    return os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
+
+
+def _builtin_runner_dir():
+    """插件自带样例 runner 目录（acc-common/new_example/）——不受 _plugin_root 上溯影响。"""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "new_example")
+
+
+def _contains(root, path):
+    """path 是否在 root 之内（含 root 自身）。用 commonpath，避免 startswith 对 `/`、
+    `/a` vs `/ab` 这类前缀歧义误判。两者均须已 realpath。"""
+    try:
+        return os.path.commonpath([root, path]) == root
+    except ValueError:                                         # 跨盘 / 一相对一绝对 → 判不在内
+        return False
+
+
+def ops_root():
+    """per-op **输入**产物根。默认 `<user_root>/.oprunway/ops`；`OPRUNWAY_OPS_DIR` 可覆盖（须绝对路径）。
+
+    与 `reports/`（跑测**输出**、且在 .gitignore 里）分开：spec / runner / golden 是流水线的**输入**，
+    性质不同、生命周期不同，不混在同一目录。
+
+    ⚠ 无论默认还是 override，**ops_root 不得落在插件安装目录内**（否则「产物不写插件目录」的保证被绕过、
+    且插件样例会被误标成 user 来源）。override 为空串按未设处理；相对路径拒绝（防 CWD 漂移）。
+    """
+    env = os.environ.get("OPRUNWAY_OPS_DIR")
+    if env:
+        if not os.path.isabs(env):
+            raise ValueError(f"OPRUNWAY_OPS_DIR 须为绝对路径: {env!r}")
+        root = os.path.realpath(env)
+    else:
+        root = os.path.join(user_root(), ".oprunway", "ops")
+    if _contains(_plugin_root(), os.path.realpath(root)):
+        raise ValueError(f"ops_root 不得落在插件安装目录内: {root!r}（产物须落用户工作目录）")
+    return root
+
+
+def op_dir(op_name):
+    """单个算子的输入目录：`<ops_root>/<op>/`（spec.json · runner.cpp · 将来的 golden）。"""
+    _check_id("op_name", op_name)
+    return os.path.join(ops_root(), op_name)
+
+
+def find_runner(op_name):
+    """按算子名找 runner.cpp，返回 `(path, source, remote_name)`；`source ∈ {"user", "builtin_sample"}`。
+
+    查找顺序：
+      1. **用户目录** `<ops_root>/<op>/oprunway_<op>_runner.cpp` —— acc-runner 为本次任务生成的。
+      2. **插件自带样例** `<plugin>/acc-common/new_example/oprunway_<op>_runner.cpp` —— 随插件发行的 demo。
+
+    命中 2 时调用方**必须显式告知用户**「跑的是插件自带样例、不是为你的任务生成的」，
+    否则会重演「以为验收了自己的算子、实际跑的是插件里的化石」。`source` 落进 evidence 作 provenance。
+
+    安全（runner 会被 scp 到远端，是真实注入面）：
+    - `op_name` 经 `_check_id` 校验；`remote_name` **由已校验的 op_name 定死**（`oprunway_<lower>_runner.cpp`），
+      **不从解析后的本地路径取 basename**——否则符号链接可把远端文件名变成 `bad;rm...` 注入远端命令。
+    - 用户侧 runner **拒符号链接**（`os.path.islink`）：防 realpath 逃逸 + 防 TOCTOU 换靶。
+    - 用户侧只在 `ENOENT`（真不存在）时才 fallback；权限错误/异常文件类型一律抛错（fail-closed，不静默换跑样例）。
+    """
+    _check_id("op_name", op_name)
+    name = f"oprunway_{op_name.lower()}_runner.cpp"          # 远端文件名的唯一真相源（已校验，无注入）
+
+    upath = os.path.join(op_dir(op_name), name)              # 不 realpath，先按声明路径查（拒软链，见下）
+    try:
+        st = os.lstat(upath)                                 # lstat：不跟随软链
+    except FileNotFoundError:
+        st = None                                            # 真不存在 → 允许 fallback
+    except OSError as ex:
+        raise ValueError(f"用户 runner 不可访问（非 fallback）: {upath!r}: {ex}")
+    if st is not None:
+        if os.path.islink(upath):
+            raise ValueError(f"用户 runner 是符号链接，拒绝（防路径逃逸/远端注入）: {upath!r}")
+        if not os.path.isfile(upath):
+            raise ValueError(f"用户 runner 路径存在但不是普通文件: {upath!r}")
+        return upath, "user", name
+
+    bpath = os.path.join(_builtin_runner_dir(), name)
+    if os.path.isfile(bpath):
+        return bpath, "builtin_sample", name
+
+    raise ValueError(
+        f"缺 runner: {name}\n"
+        f"  用户目录（应放这里）: {upath}\n"
+        f"  插件自带样例（未命中）: {bpath}\n"
+        f"  → 新算子需先由 acc-runner 生成 runner.cpp 落到用户目录；"
+        f"或设 OPRUNWAY_OPS_DIR / OPRUNWAY_WORK_DIR 指向正确的工作目录。")
+
+
 def _ne_cfg():
     """真机配置——零硬编码：全部可用环境变量覆盖，默认给 a3 常见值。"""
     g = os.environ.get
@@ -226,11 +329,15 @@ def run_new_example(caseset, work_dir, defect_cases=None):
     for k, p in (("remote_dir", rroot), ("ops_repo", ops), ("opp", opp), ("setenv", cfg["setenv"])):
         _check_remote_path(k, p)
     here = os.path.dirname(os.path.abspath(__file__))
-    runner_name = f"oprunway_{caseset['op'].lower()}_runner.cpp"   # 按算子选 runner
-    runner = os.path.join(here, "new_example", runner_name)
-    if not os.path.exists(runner):
-        raise ValueError(f"缺 runner: {runner_name}（新算子需先写 new_example/{runner_name}）")
-    npu_sh = os.path.join(here, "new_example", "run_on_npu.sh")
+    # runner：用户目录优先 → 插件自带样例 fallback（命中 fallback 必须出声，见 find_runner docstring）。
+    # runner_name 由 find_runner 从**已校验的 op_name** 定死（不取 basename），远端 scp 文件名无注入面。
+    runner, runner_source, runner_name = find_runner(caseset["op"])
+    if runner_source == "builtin_sample":
+        print(f"⚠ 使用**插件自带样例** runner：{runner}\n"
+              f"  它随插件发行、**不是为你的任务生成的**。若要验收你自己的算子，"
+              f"请让 acc-runner 生成 runner.cpp 落到 {op_dir(caseset['op'])}/",
+              file=sys.stderr)
+    npu_sh = os.path.join(here, "new_example", "run_on_npu.sh")   # 通用编排脚本（非 per-op），留在插件内
     n = len(caseset["cases"])
     perf_ids = [c["id"] for c in caseset["cases"] if "性能" in c.get("dims", [])]
 
@@ -384,7 +491,10 @@ def run_new_example(caseset, work_dir, defect_cases=None):
                               for cid, us in base_us.items()]}
     with open(os.path.join(work_dir, "_real_baseline.json"), "w", encoding="utf-8") as f:
         json.dump(real_base, f, ensure_ascii=False, indent=2)
-    return {"op": caseset["op"], "repo_mode": "new_example", "evidence": ev}
+    # runner_source 进 evidence：跑的是用户生成的 runner 还是插件自带样例，属 provenance，
+    # 报告/门须能分辨（builtin_sample 时裁决不得被当成「验收了用户自己的算子」）。
+    return {"op": caseset["op"], "repo_mode": "new_example",
+            "runner_source": runner_source, "runner_path": runner, "evidence": ev}
 
 
 MODES = {"mock": run_mock, "new_example": run_new_example}
