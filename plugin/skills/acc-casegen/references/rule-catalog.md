@@ -296,7 +296,7 @@ composition:
     - "并保留一条『单原语独立』case 兜底该边界"
   dedup: "同 shape/data 命中多原语→合一条（kind 并集、policy 最严、case_origin 记全部）"
   precision_promotion: "从 functional 挑数值最硬(large_K/near_constant/mixedsign/低比特/round_mode)升级 precision，绑 tolerance_policy"
-  performance_selection: "另选真实负载目标 shape 作 performance，绑 timing_policy + spec.perf.baseline（基线来源=spec.perf.baseline；perf-baseline-by-reference-source 属 proposed·未 settle，载重前需核）；GPU external 对比层当前未接入 pipeline——缺外部 GPU 标杆走 BLOCKED_WAIT_GPU_BENCHMARK、口径不可比走 BLOCKED_INCOMPARABLE_TIMING_SCOPE；补一条 launch-bound(多组/小K)专测融合省 launch"
+  performance_selection: "另选真实负载目标 shape 作 performance，绑 timing_policy + spec.perf.baseline（基线来源=spec.perf.baseline；perf-baseline-by-reference-source 属 proposed·未 settle，载重前需核）；GPU external 对比层 consumer 侧已接入 pipeline，但真实 GPU 标杆数据待外部提供——缺数据走 BLOCKED_WAIT_GPU_BENCHMARK、口径不可比走 BLOCKED_INCOMPARABLE_TIMING_SCOPE；补一条 launch-bound(多组/小K)专测融合省 launch"
   minimal_degenerate: "始终保留全最小(各维=1)冒烟"
 coverage_report:
   dims: "原语 × mandatory tag × 三轴(dtype/特殊值/layout)"

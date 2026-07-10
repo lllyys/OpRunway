@@ -39,7 +39,7 @@ tools: Bash, Read, Write, Edit
    - ⚠ 三级门是 **`run_workflow.py` 内部**的一环——**批量驱动、末尾统一校门，非阶段间实时阻断**；**不是**本子agent 分阶段单独调度。本子agent 不拆开跑各级门、不重实现判定。
 3. **门 FAILED → 总体 BLOCKED**：验收门 `validate_acceptance_state.py` `STATUS: FAILED` → 不出 pass 裁决；仍由 `run_workflow` 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1；验收门未过=证据不可信/不完整）。本子agent **如实回报 BLOCKED + 失败级别 + evidence.json 证据**，**不自己改判为 pass**。
 4. **Task3 blocked 路由**（如实透传，不自行 judge）：
-   - `BLOCKED_WAIT_GPU_BENCHMARK` —— 任务书要求 GPU 基线但**缺外部 GPU 标杆数据**（GPU external 对比层当前**未接入 pipeline**，外部给数据）。
+   - `BLOCKED_WAIT_GPU_BENCHMARK` —— 任务书要求 GPU 基线但**缺外部 GPU 标杆数据**（GPU external 对比层 **consumer 侧已接入 pipeline**，缺的是外部提供的真实数据）。
    - `BLOCKED_INCOMPARABLE_TIMING_SCOPE` —— 计时**口径不可比**（如 kernel-only vs e2e 墙钟）。
    - 基线来源按**任务书参考源**（proposed·未 settle，载重前需核），`spec.perf.baseline` 驱动（当前 aclnn 重写类 IsClose/Sign/Equal/Neg 均 `tbe`；catlass matmul 属对标类·synthetic demo·未定基线，勿外推）。任务书要 GPU 基线而无数据即 BLOCKED，不出 pass。
 5. **回报**：逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 的裁决字段 + 三级门 STATUS + 工件路径来源，装进结构化摘要交回 orchestrator。**FAIL 时不自行 dispatch rootcause**（禁跨阶段）——由 orchestrator 决定是否再 dispatch 本子agent 的 `rootcause`。

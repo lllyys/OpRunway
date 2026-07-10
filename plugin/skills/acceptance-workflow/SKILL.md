@@ -164,4 +164,4 @@ CP-A 落盘的对应校验工件（断点续跑读它）。最小 schema：
 - **Task3 blocked 状态路由**（task3-state-machine）：
   - `BLOCKED_WAIT_GPU_BENCHMARK`：任务书要求 GPU 基线但**缺外部 GPU 标杆数据** → BLOCKED、不出 pass；
   - `BLOCKED_INCOMPARABLE_TIMING_SCOPE`：计时**口径不可比**（如一边 kernel-only 一边含 H2D/D2H 墙钟）→ BLOCKED、不出 pass。
-- **GPU external 对比层当前未接入 pipeline**：GPU 标杆数据由外部给，NPU↔GPU 对比层尚未接进 `run_workflow`。移植类算子（需 GPU 基线）在拿到数据前一律走 `BLOCKED_WAIT_GPU_BENCHMARK`，本 skill 只写路由文本、不接数据。
+- **GPU external 对比层：consumer 侧已接入 pipeline，缺的是真实数据**。`run_workflow --gpu-baseline <json>` → `gpu_baseline.parse_gpu_baseline`（按字段契约严格校验 + `case_id` 与完整输入签名交叉核对）→ `perf_compare` 出 NPU↔GPU 对比。**真实 GPU 标杆数据仍待外部方提供**；未给数据（或标杆被判废）时，移植类算子一律走 `BLOCKED_WAIT_GPU_BENCHMARK`（正规挂起、非 fail）。本 skill 只写路由文本、不产数据。

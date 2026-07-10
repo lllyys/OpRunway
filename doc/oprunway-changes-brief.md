@@ -2,7 +2,7 @@
 
 > 倒序：最新在上。每天一节，一条一句，大白话。`待决` 置顶。
 >
-> ⚠ **2026-07-09 全局更正（覆盖以下所有历史条目）**：本表历史条目中**一切关于 Equal 的验收结论**——「真阳性 / A3 未达标 / 精度 fail / FAIL(精度) / 输出≠golden / #2890 双核 merged / 真机 6 挂 5 / 由 op_def 取 dtype 集」等——**均已作废**。正式确认：**#2890 系误配（非本社区 Equal 任务的交付 PR）、Equal 社区任务未验收通过、无已验收对应 PR**（详见下方 07-09 条）。历史条目**保留作流水、不逐条改写**，读时一律以本横幅 + 07-09 条为准。**仅 IsClose / Sign / Neg 的裁决与数据仍有效。**
+> ⚠ **2026-07-09 全局更正（覆盖以下所有历史条目）**：本表历史条目中**一切关于 Equal 的验收结论**——「真阳性 / A3 未达标 / 精度 fail / FAIL(精度) / 输出≠golden / #2890 双核 merged / 真机 6 挂 5 / 由 op_def 取 dtype 集」等——**均已作废**。正式确认：**#2890 系误配（非本社区 Equal 任务的交付 PR）、Equal 社区任务未验收通过、无已验收对应 PR**（详见下方 07-09 条）。历史条目**保留作流水、不逐条改写**，读时一律以本横幅 + 07-09 条为准。**真机有效裁决仅 IsClose / Sign**——Neg 只跑到 mock 级流水线（其 mock demo 数据有效，但**不是真机验收裁决**）。
 
 ## 待决（还没定的事）
 
@@ -16,6 +16,12 @@
 
 ## 2026-07-10
 
+- **PR #3 合并入库 + 双镜像收口**：合前本地全量自查（仓内无 CI）——**368 测全过**、`check_manifest_sync=SYNCED`、`check_agent_frontmatter=PASS`、mock 端到端 exit 0、三级门全 `PASSED`；PR `MERGEABLE/CLEAN`。用 **merge commit**（非 squash）合入以保住 32 条 commit 里对抗式门加固的实证记录。GitHub `origin/main` + GitCode `gitcode/main` 均推到同一 OID（推前校 fast-forward 基线、推后复核三方一致）；已合并分支 `feat/acceptance-pipeline-wave1-3` 本地 + 远端删除。
+- **PR#2 body 在线复核（T11a 收口，无需编辑）**：gh 认证与网络恢复后按 verify-first 纪律在线核——body **早已含 Equal 作废更正**（裁决表 Equal 行当前值 = 「无结论·结论作废」，正文另有 #2890 误配 + 任务未验收专段）；denylist 词（真阳性/精度 fail）仅出现在**作废叙述**内（allowlist 情形），评论/review 区无旧结论。**追加横幅分支不触发**。
+- **散文去过度声称（README + TODO + 全仓 GPU 口径）·过 codex 散文门两轮**：
+  - **README**：原写「三算子(含 **Equal**)真机跑通、裁决全部正确」——Equal 裁决已作废，属挂在公开首页的过度声称，改为「**IsClose + Sign** 真机验证、裁决经核对正确」，Equal 单列作废说明。另修三处:catlass「路线 C」不再写成既定事实（canon 更正待 compile→review）；「加一个算子」范围收窄到 `experimental/math` aclnn（catlass/legacy/非 math/dtype 超范围→BLOCKED 转 P3）；**门不判 pass/fail**（三级完整性门只校验证据可信完整、失败映射 `BLOCKED`，pass/fail 归 validator/perf_compare）。补可核查事实「acc-common 由 368 个 unittest 用例覆盖」。
+  - **TODO 正源**（`doc/oprunway-todo.md`）：原把已落地项仍写成待办（AscendOpTest oracle/MERE·MARE、性能小 shape「现在没实现」、catlass「未做」、发布形态「待定稿」）。重写为真实状态 + 诚实边界（生态 MERE·MARE 端到端 out-of-scope、ATK fallback 未实现、`ascendoptest_bool` 是桩位、provenance 方案 A **不证「文件来自真 NPU」**）。**并纠正我自己一句过度断言**——原写「剩余没有一条是写代码能推进的」，codex 与 stop-hook 均指出太绝对：ATK fallback / Track C runner / sidecar 硬门 / 其余 11 仓 adapter 都是代码活，只是卡在标准·真机·目标任务未明。
+  - **GPU 口径全仓扫（「已做写成未做」漂移）**：`AGENTS.md` / `acceptance-workflow/SKILL.md` / `rule-catalog.md` 三处仍写「GPU external 对比层**未接入** pipeline」。实核：`run_workflow` 已有 `--gpu-baseline` + import `gpu_baseline`，`perf_compare` 处理 `expect_source∈{gpu,gpu_external}` 与 blocked 路由——**consumer 侧已接入**，缺的只是真实数据。三处一并更正（散文缺陷全仓同步、不只改命中点）。
 - **改走 PR 入库（更正下方 07-09 各条的「本地 commit·未 push」措辞——那批已全部推公开远端）**：本轮 Wave 1–3 的
   30 个 commit 起初误**直推 main**（双镜像），经用户纠正「应先提 PR 再合入、不直接合」→ 回退 main 到基点
   `4dcd355`（用户授权 force-with-lease、双镜像；回退前先把 30 commit 推成 feat 分支上保险、逐个比对**零丢失**），
