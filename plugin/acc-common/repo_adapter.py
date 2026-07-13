@@ -5,7 +5,7 @@
 - new_example   : 真机 build/run PR 自带工程（留桩，需 NPU + VPN，之后填）。
 证据只记「测到什么」（metric value / us / 路径），pass/fail 交给 validator（ADR 0007）。
 """
-import hashlib, json, math, os, posixpath, re, shlex, subprocess, sys
+import hashlib, json, math, os, posixpath, re, shlex, shutil, subprocess, sys, uuid
 import numpy as np
 import precision_policy
 import gen_cases  # T7：复用 bf16 位级 codec（_f32_to_bf16_uint16/_bf16_uint16_to_f32）+ 原生 dtype 表
@@ -298,16 +298,82 @@ def find_runner(op_name):
 
 
 def _ne_cfg():
-    """真机配置——零硬编码：全部可用环境变量覆盖，默认给 a3 常见值。"""
+    """真机配置——**零硬编码、无私有默认值**。
+
+    ⚠ 机器名 / 远端路径 / 被测仓路径**必须由调用方（编排层经 `OPRUNWAY_*` 环境变量）显式提供**，
+    缺失即报错——绝不用某台私有机器的名字/路径兜底（否则别人拿到插件默认连一台不存在的机器、
+    找一个不存在的路径，直接失败）。由 orchestrator 在 CP-D 前 `AskUserQuestion` 问清后灌进 env。
+
+    **传输模式** `OPRUNWAY_TARGET`：
+      - `local`  —— 目标机就是本机，直接跑（无 ssh/scp）；此时 `OPRUNWAY_SSH_HOST` 不需要。
+      - `remote`（默认）—— ssh 到 `OPRUNWAY_SSH_HOST`；host 必填。
+
+    仅 `soc` / `vendor` / `setenv` 保留"常见值"默认（它们是昇腾工具链的通用约定，非某台机私有）。
+    """
     g = os.environ.get
-    return {"host": g("OPRUNWAY_SSH_HOST", "ascend-a3"),
-            "rroot": g("OPRUNWAY_REMOTE_DIR", "/home/lys/oprunway_run"),
-            "ops": g("OPRUNWAY_OPS_REPO", "/home/lys/ops-math"),
-            "opp": g("OPRUNWAY_OPP", "/home/lys/oprunway_opp"),
-            "soc": g("OPRUNWAY_SOC", "ascend910_93"),
-            "op": g("OPRUNWAY_OP", "is_close"),
-            "vendor": g("OPRUNWAY_VENDOR", "oprunway"),
-            "setenv": g("OPRUNWAY_SETENV", "/usr/local/Ascend/ascend-toolkit/set_env.sh")}
+    target = (g("OPRUNWAY_TARGET") or "remote").strip().lower()
+    if target not in ("local", "remote"):
+        raise ValueError(f"OPRUNWAY_TARGET 须为 'local' 或 'remote'，得到 {target!r}")
+
+    def _req(key, why):
+        v = (g(key) or "").strip()
+        if not v:
+            raise ValueError(
+                f"缺 {key}（{why}）——本函数**不提供私有默认值**。\n"
+                f"  请由编排层在 CP-D 前询问用户（本机直连 / ssh 远端 + 路径）后经 {key} 传入。")
+        return v
+
+    cfg = {"target": target,
+           # 被测仓 / 远端工作根 / 用户态 opp 都无私有默认，必须显式提供
+           "rroot": _req("OPRUNWAY_REMOTE_DIR", "远端（或本机）工作根目录"),
+           "ops":   _req("OPRUNWAY_OPS_REPO", "被测算子仓路径；不存在时须先 clone（Track: 按需 clone）"),
+           "opp":   _req("OPRUNWAY_OPP", "用户态 custom opp 目录（避免写共享 opp/vendors）"),
+           "soc":   g("OPRUNWAY_SOC", "ascend910_93"),       # 昇腾通用约定，非私有机名
+           "op":    g("OPRUNWAY_OP", ""),                     # 由 caseset 驱动，见 run_new_example
+           "vendor": g("OPRUNWAY_VENDOR", "oprunway"),
+           "setenv": g("OPRUNWAY_SETENV", "/usr/local/Ascend/ascend-toolkit/set_env.sh")}
+    # host 仅 remote 模式必填；local 模式忽略
+    cfg["host"] = _req("OPRUNWAY_SSH_HOST",
+                       "远端机器名（ssh）；若本机即目标机，设 OPRUNWAY_TARGET=local 即可免此项"
+                       ) if target == "remote" else None
+    return cfg
+
+
+# ── 传输层：local / remote 各一实现 ─────────────────────────────────────────
+# run_new_example 里所有跨机操作只经这三个原语；local 模式直接在本机跑、不碰 ssh/scp。
+# 安全沿用既有校验：host 过 _check_id、远端路径过 _check_remote_path，故拼进命令无注入面。
+
+def _shell(host, script, *, timeout, check, capture=False):
+    """执行一段 shell：remote 走 `ssh host bash -l -s`，local 走本机 `bash -l -s`。
+    脚本经 stdin 喂给 `bash -l -s`（唯一脚本入参 = script）。"""
+    argv = (["ssh", host, "bash", "-l", "-s"] if host else ["bash", "-l", "-s"])
+    return subprocess.run(argv, input=script,
+                          capture_output=capture, text=True, timeout=timeout, check=check)
+
+
+def _copy_to(host, local_path, remote_path, *, timeout, check=True):
+    """本地文件 → 目标机。remote 用 scp；local 用 cp（同机拷贝，目标即真实路径）。"""
+    if host:
+        subprocess.run(["scp", "-q", local_path, f"{host}:{remote_path}"],
+                       check=check, timeout=timeout)
+    else:
+        os.makedirs(os.path.dirname(remote_path) or ".", exist_ok=True)
+        shutil.copy2(local_path, remote_path)
+
+
+def _copy_from(host, remote_path, local_path, *, timeout, check=True, quiet_stderr=False):
+    """目标机文件 → 本地。remote 用 scp；local 用 cp。"""
+    if host:
+        subprocess.run(["scp", "-q", f"{host}:{remote_path}", local_path],
+                       check=check, timeout=timeout,
+                       stderr=(subprocess.DEVNULL if quiet_stderr else None))
+    else:
+        if not os.path.exists(remote_path):
+            if check:
+                raise FileNotFoundError(remote_path)
+            return
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        shutil.copy2(remote_path, local_path)
 
 
 def run_new_example(caseset, work_dir, defect_cases=None):
@@ -322,12 +388,23 @@ def run_new_example(caseset, work_dir, defect_cases=None):
     soc, vendor = cfg["soc"], cfg["vendor"]
     _check_id("op_name", caseset["op"])          # 原始算子名（驱动 runner 文件名/OPRUNWAY_OPNAME）
     op = _snake(caseset["op"])   # 算子 snake 名驱动 build/目录（IsClose→is_close, Sign→sign）
-    _check_id("host", host)
+    if host is not None:         # remote 才有 host；local 模式 host=None、不 ssh
+        _check_id("host", host)
     _check_id("op", op)
     _check_id("vendor", vendor)
     if not _SOC_RE.match(soc): raise ValueError(f"非法 soc: {soc!r}")
     for k, p in (("remote_dir", rroot), ("ops_repo", ops), ("opp", opp), ("setenv", cfg["setenv"])):
         _check_remote_path(k, p)
+    # local 模式下 rroot/ops/opp 是**本机真实目录**，且 §部署 会对 rroot/cases 执行 `rm -rf`。
+    # 必须与 work_dir 双向不相交，否则用户把 rroot 指到含产物的目录 → 静默删。remote 模式 rroot 在远端、天然不相交。
+    if host is None:
+        wd = os.path.realpath(work_dir)
+        for k, p in (("remote_dir", rroot), ("ops_repo", ops), ("opp", opp)):
+            rp = os.path.realpath(p)
+            if _contains(wd, rp) or _contains(rp, wd):
+                raise ValueError(
+                    f"local 模式下 {k}={p!r} 与 work_dir={work_dir!r} 相交——"
+                    f"§部署会对其执行 rm -rf，拒绝以防误删。请指向独立的专用 scratch 目录。")
     here = os.path.dirname(os.path.abspath(__file__))
     # runner：用户目录优先 → 插件自带样例 fallback（命中 fallback 必须出声，见 find_runner docstring）。
     # runner_name 由 find_runner 从**已校验的 op_name** 定死（不取 basename），远端 scp 文件名无注入面。
@@ -391,21 +468,26 @@ def run_new_example(caseset, work_dir, defect_cases=None):
     with open(os.path.join(work_dir, "perfcases_list.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(perf_ids) + ("\n" if perf_ids else ""))
 
-    # 2) 部署（tar 送 bin + manifest + perfcases_list，排除 npy/out.bin）+ runner cpp + 编排脚本
+    # 2) 部署（tar 送 bin + manifest + perfcases_list，排除 npy/out.bin）+ runner cpp + 编排脚本。
+    #    两模式同构：先把 tar 送到目标机 /tmp，再解到 rroot/cases（local 时"送"= 本地 cp、"目标机"= 本机）。
     q = shlex.quote
     tar = os.path.join(work_dir, "_deploy.tgz")
     subprocess.run(["tar", "czf", tar, "-C", work_dir, "--exclude=*.npy", "--exclude=out.bin",
                     "--exclude=_deploy.tgz", "."], check=True, timeout=300)
-    subprocess.run(["scp", "-q", tar, f"{host}:/tmp/oprunway_deploy.tgz"], check=True, timeout=300)
+    # 每次运行唯一的临时路径（token），避免并发/多用户共享机上两个验收互相覆盖 /tmp 里的 tgz：
+    # A 上传、B 覆盖、A 解出 B 的用例 → "测到的不是本次输入"。local 模式同样中招，故两模式都用唯一路径。
+    token = uuid.uuid4().hex[:16]
+    tmp_tgz = f"/tmp/oprunway_deploy_{token}.tgz"
+    _copy_to(host, tar, tmp_tgz, timeout=300)
     qcases = q(rroot + "/cases")
     # 远端命令对支持者加 `--` 终止选项解析（finding #17，纵深防御；配合上文路径/ID 校验）。
-    subprocess.run(["ssh", host,
-                    f"rm -rf -- {qcases} && mkdir -p -- {qcases} && "
-                    f"tar xzf /tmp/oprunway_deploy.tgz -C {qcases} && rm -f -- /tmp/oprunway_deploy.tgz && "
-                    f"cp -- {qcases}/perfcases_list.txt {q(rroot + '/perfcases_list.txt')}"],
-                   check=True, timeout=300)
-    subprocess.run(["scp", "-q", runner, f"{host}:{rroot}/{runner_name}"], check=True, timeout=120)
-    subprocess.run(["scp", "-q", npu_sh, f"{host}:{rroot}/run_on_npu.sh"], check=True, timeout=120)
+    _shell(host,
+           f"rm -rf -- {qcases} && mkdir -p -- {qcases} && "
+           f"tar xzf {q(tmp_tgz)} -C {qcases} && rm -f -- {q(tmp_tgz)} && "
+           f"cp -- {qcases}/perfcases_list.txt {q(rroot + '/perfcases_list.txt')}\n",
+           timeout=300, check=True)
+    _copy_to(host, runner, f"{rroot}/{runner_name}", timeout=120)
+    _copy_to(host, npu_sh, f"{rroot}/run_on_npu.sh", timeout=120)
     os.remove(tar)
 
     # 3) 远程编排（建双 exe + 正确性 + msprof 双测）；靠双哨兵 + returncode 判成败
@@ -415,22 +497,21 @@ def run_new_example(caseset, work_dir, defect_cases=None):
               f"OPRUNWAY_SETENV={q(cfg['setenv'])}\n"
               f"export OPRUNWAY_RUNNER={q(runner_name)} OPRUNWAY_OPNAME={q(caseset['op'])}\n"
               f"bash {q(rroot + '/run_on_npu.sh')}\n")
-    r = subprocess.run(["ssh", host, "bash -l -s"], input=script,
-                       capture_output=True, text=True, timeout=2400)
-    blob = r.stdout + r.stderr
+    r = _shell(host, script, timeout=2400, check=False, capture=True)
+    blob = (r.stdout or "") + (r.stderr or "")
     done = f"OPRUNWAY_DONE total={n} ok={n} fail=0"
+    label = "本机" if host is None else "远程"
     if r.returncode != 0 or done not in blob or "OPRUNWAY_NPU_DONE" not in blob:
-        raise RuntimeError(f"[new_example] 远程跑测失败 rc={r.returncode}:\n{blob[-2000:]}")
+        raise RuntimeError(f"[new_example] {label}跑测失败 rc={r.returncode}:\n{blob[-2000:]}")
 
-    # 4) 拉回 out.bin + perf_result.txt
+    # 4) 拉回 out.bin + perf_result.txt（local 时 = 本机 cp）
     for c in caseset["cases"]:
-        subprocess.run(["scp", "-q", f"{host}:{rroot}/cases/{c['id']}/out.bin",
-                        _safe(work_dir, f"{c['id']}/out.bin")], check=True, timeout=120)
+        _copy_from(host, f"{rroot}/cases/{c['id']}/out.bin",
+                   _safe(work_dir, f"{c['id']}/out.bin"), timeout=120, check=True)
     prp = os.path.join(work_dir, "perf_result.txt")
     if os.path.exists(prp):
-        os.remove(prp)   # 删本地旧文件，防 scp 失败时解析 stale
-    subprocess.run(["scp", "-q", f"{host}:{rroot}/perf_result.txt", prp],
-                   check=False, timeout=120, stderr=subprocess.DEVNULL)
+        os.remove(prp)   # 删本地旧文件，防拷贝失败时解析 stale
+    _copy_from(host, f"{rroot}/perf_result.txt", prp, timeout=120, check=False, quiet_stderr=True)
 
     # 解析 perf_result（每行 "case_id custom_us tbe_us"；NA=未测到）→ perf_us / 真基线 base_us
     perf_us, base_us = {}, {}
