@@ -16,6 +16,12 @@
 
 ## 2026-07-10
 
+- **产物落点搬到用户工作目录（`a7c8417`，PR #5 入 main）** —— 兑现「产物落用户项目目录、不写 plugin」。原来 acc-runner 生成的 runner / acc-spec 生成的 spec 默认写插件安装目录，且 `repo_adapter` 只从插件目录读 runner——升版即冲、写读硬绑。现改：落点 = `<ops_root>/<op>/`（`ops_root`=`$OPRUNWAY_OPS_DIR` 或 `${OPRUNWAY_WORK_DIR:-$CWD}/.oprunway/ops`），查找顺序 = 用户目录优先 → 插件自带样例 fallback（现存 5 spec+3 runner 留作只读样例，用户「可以带样例」）。顺带堵两个 High 安全洞（代码门 codex 抓出）：① runner 会 scp 到远端，远端名原取 `basename(realpath)` → 符号链接可注入命令，改由已校验 op_name 定死；② 插件样例跑「干净 PASS」看不出验的不是用户算子 → `runner_source` 进 evidence + 门层 `builtin_sample`→`NEEDS_REVIEW`+人工CP、缺失/未知→`BLOCKED`。428 单测全绿（新增 `test_runner_lookup` 24 测）、mock 端到端仍 PASS、插件目录零写入。`a7c8417` 提交前过代码门+散文门各一轮。**遗留（codex，待定夺）**：M1 scp 的 TOCTOU 无 runner hash；L2 异常信息含绝对路径。
+
+- **补 `.claude-plugin/marketplace.json`（真缺口）** —— ADR 0003 定的分发方式是 `/plugin install`，而仓里一直缺 marketplace 清单、根本装不了。补上 `source: "./plugin"`。实测：`marketplace add` 本地路径不拷贝（只记路径指向活仓），`install` 拷 `plugin/` 3.7M 进 cache、记 `gitCommitSha`；`Agents (4)`/`Skills (8)` 真注册。描述如实标能力边界（只 4 个 elementwise 算子、真机仅 fp32/fp16），不冒充通用产品。过散文门（收窄 2 处过度声称）。
+- **canon compile（`f27572c`）**：2 minute→10 dossier（4 verified+6 proposed）+ gate 页第三例。全 proposed/verified、**未过 bureau:review 人门**。
+- **规则：commit / 对外产出不带 AI 署名 trailer**（用户「never」）——入 CLAUDE.md #2 + memory。历史 10 个带 trailer 的 commit 按用户决定不动。
+
 - **硬件口径更正：「任务书目标算子是 950」只对 13/52 成立** —— 全扫 52 份社区任务书的 `适配硬件` 字段（52/52 均有），**任务书侧统计**为 A2/A3 系 38 份 · 950 系 13 份 · 纯 Atlas 300V Pro 1 份（互斥分桶，38+13+1=52；涉及 300V Pro 的共 2 份）。连带：`ascend-a3` 此前被写成「备用 / 只能 de-risk」，实为 A2/A3 系任务书的目标机；IsClose 即其一（任务书 `Atlas A2/A3` ↔ `op_def` `AddConfig("ascend910b")`+`("ascend910_93")`，双源一致，**a5 不在其声明平台内，能否运行未验证（推断）**）。
   - `CLAUDE.md` 新增硬规则：**目标硬件不假定，按任务书 `适配硬件` ＋ 算子 `op_def` 的 `AddConfig()` 双源交叉核验，不一致入 `task_pr_gaps`**。⚠ 双源核验须**逐算子**做，目前**仅 IsClose 已核**；38/13/1 是任务书字段统计，不是 52 项双源实测。
   - **300V Pro 本仓无硬件、无 de-risk 记录**，那 2 份任务书须先停下确认平台（此前完全没纳入考虑）。
