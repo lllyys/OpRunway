@@ -18,11 +18,14 @@ _POL32 = {"kind": "ascendoptest_default", "tolerance": 0.0001, "error_rate": 0.0
           "eps": 1e-9, "legacy": 0.1, "not_settled": False}
 _POL16 = {"kind": "ascendoptest_default", "tolerance": 0.001, "error_rate": 0.001,
           "eps": 1e-9, "legacy": 0.1, "not_settled": False}
+# golden_source="numpy reference" → oracle_source_from_golden 首 token=numpy → "analytical_ref"（Q9 门校两侧须一致）。
 _EXP = {
     "x_000": {"golden_path": "g0.npy", "threshold": 0.0001, "standard": "ascendoptest_default",
-              "tolerance_policy_id": "ascendoptest_default:float32", "policy": _POL32},
+              "tolerance_policy_id": "ascendoptest_default:float32", "policy": _POL32,
+              "golden_source": "numpy reference"},
     "x_001": {"golden_path": "g1.npy", "threshold": 0.001, "standard": "ascendoptest_default",
-              "tolerance_policy_id": "ascendoptest_default:float16", "policy": _POL16},
+              "tolerance_policy_id": "ascendoptest_default:float16", "policy": _POL16,
+              "golden_source": "numpy reference"},
 }
 CASESET = {"op": "X", "cases": [
     {"id": "x_000", "dims": ["func"], "inputs": [{"name": "a", "shape": [16], "dtype": "float32"}],
@@ -58,8 +61,10 @@ def _prec_for(d, i, corrupt_out=0):
         out[k] = out[k] + dt(10)                       # 制造真实坏点（out ≠ golden）
     g_sha, o_sha = _mkprod(d, i, golden, out)
     metrics = precision_policy.compute_metrics(out, golden, exp["policy"])
+    # Q9：oracle_source 须与 caseset.expected.golden_source(=numpy…) 映射的 analytical_ref 一致（门校）。
     return {"standard": exp["standard"], "tolerance_policy_id": exp["tolerance_policy_id"],
             "policy": dict(exp["policy"]), "threshold": exp["threshold"], "metrics": metrics,
+            "oracle_source": "analytical_ref",
             "golden_path": f"{i}/golden.npy", "out_path": f"{i}/out.npy",
             "provenance": {"golden_sha256": g_sha, "out_sha256": o_sha, "numel": 16}}
 
@@ -128,6 +133,90 @@ class GateTest(unittest.TestCase):
         cs["cases"][1]["id"] = "x_000"
         _w(self.d, "caseset.json", cs)
         self.assertTrue(any("重复" in e for e in self._errs("task1")))
+
+    # --- task1 · Q7 dtype 覆盖门（声明且覆盖→pass / 声明未覆盖无gap→BLOCKED / 未声明→不BLOCK） ---
+    def test_task1_dtype_covered_ok(self):
+        """dtype_required 全被 dtype_tested 覆盖 → 门放行。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs["dtype_required"] = ["float32", "float16"]
+        cs["dtype_tested"] = ["float32", "float16"]
+        _w(self.d, "caseset.json", cs)
+        self.assertEqual(self._errs("task1"), [])
+
+    def test_task1_dtype_uncovered_no_gap_fails(self):
+        """任务书要 bfloat16/int32 但未实测、task_pr_gaps 无 dtype_deferred → 静默收窄 → BLOCKED。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs["dtype_required"] = ["float32", "float16", "bfloat16", "int32"]
+        cs["dtype_tested"] = ["float32", "float16"]
+        cs["task_pr_gaps"] = []
+        _w(self.d, "caseset.json", cs)
+        self.assertTrue(any("dtype 覆盖不足" in e for e in self._errs("task1")))
+
+    def test_task1_dtype_uncovered_with_gap_ok(self):
+        """缺的 dtype 均有 task_pr_gaps.dtype_deferred 显式挂账 → 非静默收窄 → 门放行。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs["dtype_required"] = ["float32", "float16", "bfloat16", "int32"]
+        cs["dtype_tested"] = ["float32", "float16"]
+        cs["task_pr_gaps"] = [{"kind": "dtype_deferred", "dtypes": ["bfloat16", "int32"],
+                               "reason": "runner 未支持·Track C"}]
+        _w(self.d, "caseset.json", cs)
+        self.assertEqual(self._errs("task1"), [])
+
+    def test_task1_dtype_partial_gap_fails(self):
+        """缺 2 个只挂账 1 个 → 另一个仍静默收窄 → BLOCKED。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs["dtype_required"] = ["float32", "float16", "bfloat16", "int32"]
+        cs["dtype_tested"] = ["float32", "float16"]
+        cs["task_pr_gaps"] = [{"kind": "dtype_deferred", "dtypes": ["bfloat16"]}]  # 漏 int32
+        _w(self.d, "caseset.json", cs)
+        errs = self._errs("task1")
+        self.assertTrue(any("dtype 覆盖不足" in e and "int32" in e for e in errs))
+
+    def test_task1_dtype_needs_user_not_blocked(self):
+        """dtype_required=needs_user（全集未知）→ 覆盖门未行使、不 BLOCK（不谎报也不硬崩）。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs["dtype_required"] = "needs_user"
+        _w(self.d, "caseset.json", cs)
+        self.assertEqual(self._errs("task1"), [])
+
+    def test_task1_dtype_undeclared_not_blocked(self):
+        """dtype_required 未声明（legacy）→ 不 BLOCK（避免一刀切炸掉现有 spec）。"""
+        _w(self.d, "caseset.json", CASESET)   # 无 dtype_required 字段
+        self.assertEqual(self._errs("task1"), [])
+
+    def test_task1_dtype_tested_missing_uses_actual_cases(self):
+        """新语义：dtype_tested 缺失 → 门用**真实 cases** 判覆盖（不因缺自报字段而阻塞）。
+        CASESET 真实 cases = {float32, float16} 覆盖 required → 放行。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs["dtype_required"] = ["float32", "float16"]
+        # 不给 dtype_tested → 门从真实 cases 归并实测集
+        _w(self.d, "caseset.json", cs)
+        self.assertEqual(self._errs("task1"), [])
+
+    def test_task1_dtype_tested_mismatch_actual_fails(self):
+        """新语义（防「跑子集报全」·gate-must-check-the-effective-object）：dtype_tested 自报与真实 cases
+        dtype 集不符 → error。真实 cases={float32,float16}，自报灌 4 种冒充全覆盖 → 门抓不符。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs["dtype_required"] = ["float32", "float16", "bfloat16", "int32"]
+        cs["dtype_tested"] = ["float32", "float16", "bfloat16", "int32"]   # 灌满冒充全覆盖
+        _w(self.d, "caseset.json", cs)
+        self.assertTrue(any("dtype_tested" in e and "不符" in e for e in self._errs("task1")))
+
+    def test_task1_dtype_bad_type_errors_not_crash(self):
+        """抗坏输入（codex#1）：case 的 dtype 为非字符串(dict) → 记 error、不 TypeError 崩（canon 抗坏输入门不崩）。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs["cases"][0]["inputs"][0]["dtype"] = {"bad": 1}
+        cs["dtype_required"] = ["float32", "float16"]
+        _w(self.d, "caseset.json", cs)
+        self.assertTrue(any("非字符串" in e for e in self._errs("task1")))
+
+    def test_task1_delete_required_still_crosschecks_tested(self):
+        """codex#2：删掉 dtype_required 不能同时绕过 dtype_tested 对账——tested 自报与真实不符仍 error。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs.pop("dtype_required", None)                                     # 无 required（legacy 宽容）
+        cs["dtype_tested"] = ["float32", "float16", "bfloat16", "int32"]   # 但灌满冒充，真实=fp32/fp16
+        _w(self.d, "caseset.json", cs)
+        self.assertTrue(any("不符" in e for e in self._errs("task1")))
 
     # --- task2 (核心：防跑子集) ---
     def test_task2_full_ok(self):
@@ -360,6 +449,57 @@ class GateTest(unittest.TestCase):
             if saved is not None:
                 sys.modules["numpy"] = saved
         self.assertTrue(any("FAILED" in e for e in errs))
+
+    # --- task2 · Q9 oracle_source 门校（防伪造 evidence 篡改 oracle_source）---
+    def test_task2_oracle_source_consistent_ok(self):
+        """oracle_source(analytical_ref) == 据 caseset golden_source(numpy…) 映射值 → 门放行。"""
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertEqual(self._errs("task2"), [])   # 冗余于 full_ok，钉死一致路径不误挡
+
+    def test_task2_oracle_source_mismatch_fails(self):
+        """伪造 evidence.oracle_source=torch_ref，但 caseset golden_source=numpy(→analytical_ref) → 不符 → FAILED。"""
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"],
+                                        mutate=lambda i: {"oracle_source": "torch_ref"} if i == "x_000" else {}))
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertTrue(any("oracle_source" in e and "≠" in e for e in self._errs("task2")))
+
+    def test_task2_oracle_source_missing_fails(self):
+        """evidence 缺 oracle_source → 证据不完整 → FAILED（fail-closed，不静默）。"""
+        _w(self.d, "caseset.json", CASESET)
+        ev = _ev(self.d, ["x_000", "x_001"])
+        del ev["evidence"][0]["precision"]["oracle_source"]
+        _w(self.d, "evidence.json", ev)
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertTrue(any("缺 precision.oracle_source" in e for e in self._errs("task2")))
+
+    def test_task2_oracle_source_illegal_enum_fails(self):
+        """evidence.oracle_source 不属六枚举 → FAILED。"""
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"],
+                                        mutate=lambda i: {"oracle_source": "bogus_ref"} if i == "x_000" else {}))
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertTrue(any("oracle_source" in e and "非法" in e for e in self._errs("task2")))
+
+    def test_task2_caseset_missing_golden_source_fails(self):
+        """caseset expected 缺 golden_source → 无法核 oracle_source 真伪 → FAILED（防篡改门失效）。"""
+        cs = json.loads(json.dumps(CASESET))
+        del cs["cases"][0]["expected"]["golden_source"]
+        _w(self.d, "caseset.json", cs)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertTrue(any("缺 golden_source" in e for e in self._errs("task2")))
+
+    def test_task2_unmappable_golden_source_fails(self):
+        """caseset golden_source 前缀无法映射 oracle_source（fail-closed）→ FAILED。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs["cases"][0]["expected"]["golden_source"] = "scipy something"  # 未知前缀
+        _w(self.d, "caseset.json", cs)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertTrue(any("无法映射 oracle_source" in e for e in self._errs("task2")))
 
     def test_task1_null_shape_no_crash(self):
         """finding #15：inputs[0].shape 为 null → 不崩、记 error（list(None) 会 TypeError）。"""

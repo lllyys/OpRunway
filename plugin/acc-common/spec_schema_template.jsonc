@@ -21,6 +21,14 @@
     {"name": "<参数名>", "io": "<in | out | attr>", "dtype": ["<当前 pipeline 支持子集，如 float32/float16>"], "noncontiguous": "<可选 true/false>", "default": "<attr 才有：默认值>"}
   ],
   "generalize": "<bool：默认 true；无张量 IO / 融合无泛化要求→false>",
+  // Q7 dtype 覆盖门（gate 消费）——分两字段，别混：
+  //   dtype_required=任务书**权威 dtype 全集**（来源优先级见 ref §1 dtype 行：任务书显式表 > 原 TBE 信息库 > 问用户）。
+  //     任务书只写『支持所有类型』且信息库未接通/全集未知 → 填字符串 "needs_user"（不谎报覆盖、也不臆造）；
+  //     legacy 未迁 → 整字段省略（门判『未声明→覆盖门未行使』、不阻塞）。
+  //   dtype_tested=当前 pipeline **实测子集** = params 各 in 的 dtype 并集（= gen_cases 实际会造的 dtype，通常 float32/float16）。
+  //   门校：dtype_required 是 list 且 (required − tested) 非空、且 task_pr_gaps 无对应 {kind:dtype_deferred,dtypes:[…]} → BLOCKED。
+  "dtype_required": ["<权威全集>  或  \"needs_user\"  或  省略(legacy)"],
+  "dtype_tested": ["<实测子集，如 float32/float16>"],
   "verify_mode": "<exact | numerical | behavioral，见 ref §2 决策树>",
   "precision": {
     "oracle": "<ascendoptest | mere_mare | atk_double | torch | scipy | std_exact | none，按任务书原文抽>",

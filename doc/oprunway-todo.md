@@ -37,13 +37,15 @@
 - [x] **select_standard 白名单 fail-closed**（=Q7 落点1）：未知 oracle raise、堵 class C 静默降级。
 - [x] **oracle_source 止血**：删写死 `cpu_ref`、据 `golden_source` 据实映射（严格首 token 前缀）、缺失 fail-closed。
 - [x] **catlass spec 补 standard** + codex 9 维门一轮（#1/#2/#4/#5 修）+ a3 真 torch 全量绿。
-- [ ] **剩余 · 门校 oracle_source 一致性**（防伪造 evidence 篡改）：现有手搓 fixture 无 `golden_source`、硬校会误伤 → 先补 fixture 再纳入门必校（validate_acceptance_state 已留 TODO 注释）。
+- [x] **门校 oracle_source 一致性**（防伪造）已建：`evidence.oracle_source` ∈ 六枚举 且 == 映射(caseset `golden_source`)，fixture 已补字段、a3 真 torch 绿。
 - [ ] **剩余 · 深覆盖**（codex #6）：torch golden 的 NaN/±0/Inf 边界向量测试（现测无边界随机输入 torch==numpy + 负容差 fail-closed）。
 - 附：本轮顺带修传输 GNU-tar 可移植性 bug（`_deploy.tgz` 写打包目录外），server 上 transport 才通。
 
-### 🟡 P1 · 正确性剩余（Q7）
-- [ ] spec 记 `dtype_required`(任务书全集) vs `dtype_tested` + 门校 dtype 覆盖（⊄ 且无 gap → BLOCKED）。
-- [ ] ⚠ 白名单改动**必修** `catlass_basic_matmul.spec.json`（`oracle=numpy-f32-matmul` 无 standard，否则裸崩）。
+### 🟢 Q7 dtype 覆盖门（**已建 + a3 真 torch 验 · 2026-07-14**）
+- [x] spec `dtype_required`(任务书全集) / `dtype_tested` 字段 + 门校 dtype 覆盖（`required ⊄ 真实用例 dtype` 且无 `dtype_deferred` → BLOCKED）。**用真实 cases 判、不信自报**（防跑子集报全）。
+- [x] IsClose 权威全集回填 {fp32,fp16,bf16,int32}+deferred gap；Sign/Equal/Neg=`needs_user`（全集待信息库/用户，门不硬 BLOCK）。
+- [x] 白名单 catlass spec 补 standard（Q9 已做）；抗坏输入不崩、删 required 仍对账（codex 修）。
+- [ ] **剩余**：run_workflow 级「Q7/Q9 失败→BLOCKED」端到端断言（codex #3）；legacy 无 dtype_required 的宽容是 migration tradeoff（可加 schema version 收紧）。
 
 ### 🔵 P2 · 扩展 / 接通
 - [ ] **(a) TBE 信息库接通**（dtype 独立源）：每份任务书自带路径 `.../tbe/config/ascend910b`；读法随运行环境探测、**不写死 ssh**。

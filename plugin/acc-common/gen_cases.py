@@ -446,8 +446,17 @@ def gen_cases(spec, work_dir):
         cases.append({"id": cid, "dims": dims, "tags": entry["tags"],
                       "inputs": in_items, "attrs": attrs, "expected": expected})
     attr_order = [p["name"] for p in spec["params"] if p["io"] == "attr"]
+    # Q7 dtype 覆盖门用：dtype_required=任务书权威全集（spec 透传，未声明则 None→门不阻塞）；
+    # dtype_tested=实测子集，**从实际生成的 cases 归并**（非 in 参数并集——门也用真实 cases 对账，两侧口径一致、
+    # 消除「并集过报」与「自报漂移」）；task_pr_gaps 透传供门查 dtype_deferred。
+    dtype_tested = sorted({c["inputs"][0]["dtype"] for c in cases
+                           if c.get("inputs") and c["inputs"][0].get("dtype")})
     return {"op": op, "spec_ref": spec.get("op"), "work_dir": work_dir,
-            "attr_order": attr_order, "cases": cases}
+            "attr_order": attr_order,
+            "dtype_required": spec.get("dtype_required"),
+            "dtype_tested": dtype_tested,
+            "task_pr_gaps": spec.get("task_pr_gaps", []),
+            "cases": cases}
 
 
 def main(argv):

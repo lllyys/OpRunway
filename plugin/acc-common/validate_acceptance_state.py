@@ -73,6 +73,88 @@ def _ids_from_evidence(ev_list, errs):
     return ids
 
 
+def _gate_dtype_coverage(cs, errs):
+    """Q7 dtype 覆盖门（gate-must-check-the-effective-object）：任务书要求的 dtype 全集 `dtype_required`
+    若未被实测集 `dtype_tested` 覆盖、且 `task_pr_gaps` 无对应 `dtype_deferred` 记录 → **静默收窄=证据不完整**
+    → error（走 BLOCKED）。防误伤/防阻塞：
+      · `dtype_required` **未声明**（legacy 未迁）→ 不 BLOCK，仅提示「覆盖门未行使」（避免一刀切炸掉现有 spec）。
+      · `dtype_required` == `"needs_user"`（全集未知·信息库未接通）→ 不 BLOCK，提示「不谎报覆盖」。
+    读的是 caseset 顶层的 dtype_required/dtype_tested/task_pr_gaps（gen_cases 从 spec 透传/派生）。"""
+    # 从真实 cases 归并实测 dtype 集（gate-must-check-the-effective-object·不信自报汇总）。
+    # 抗坏输入：非字符串 dtype（坏 JSON 里 dtype 为 dict/list）→ 记 error 不崩（否则 set.add/sorted 抛 TypeError、落不成 BLOCKED）。
+    cases = cs.get("cases") if isinstance(cs.get("cases"), list) else []
+    actual = set()
+    for c in cases:
+        ins = c.get("inputs") if isinstance(c, dict) else None
+        if isinstance(ins, list) and ins and isinstance(ins[0], dict):
+            dt = ins[0].get("dtype")
+            if isinstance(dt, str) and dt:
+                actual.add(dt)
+            elif dt is not None:
+                errs.append(f"case {c.get('id', '?')}: inputs[0].dtype 非字符串（{type(dt).__name__}·证据不可信）")
+    # 自报 dtype_tested 若声明 → **恒**与真实用例 dtype 集对账（不因 dtype_required 缺失而跳过——否则删 required 即同时绕过对账）。
+    tested = cs.get("dtype_tested")
+    if tested is not None:
+        if not isinstance(tested, list) or not all(isinstance(x, str) for x in tested):
+            errs.append("dtype_tested 须为 dtype 字符串列表（证据不可信）")
+        elif set(tested) != actual:
+            errs.append(f"dtype_tested 自报 {sorted(set(tested))} 与真实用例 dtype 集 {sorted(actual)} 不符"
+                        "（自报覆盖与实际生成漂移/伪造·证据不可信）")
+    # 覆盖门：仅 dtype_required 声明为 list 时行使；未声明(legacy)/needs_user(全集未知) → 不 BLOCK（migration 宽容·见 doc TODO）。
+    req = cs.get("dtype_required")
+    if req in (None, [], ""):
+        print("  dtype_required 未声明 → dtype 覆盖门未行使（不阻塞·避免误伤 legacy spec）")
+        return
+    if req == "needs_user":
+        print("  dtype_required=needs_user（全集未知·信息库/用户未接通）→ 覆盖门未行使、不谎报覆盖")
+        return
+    if not isinstance(req, list) or not all(isinstance(x, str) for x in req):
+        errs.append("dtype_required 类型非法（须 list of dtype 字符串 或 \"needs_user\"）")
+        return
+    gaps = cs.get("task_pr_gaps") if isinstance(cs.get("task_pr_gaps"), list) else []
+    deferred = set()
+    for g in gaps:
+        if isinstance(g, dict) and g.get("kind") == "dtype_deferred":
+            dts = g.get("dtypes")
+            if isinstance(dts, list):
+                deferred.update(x for x in dts if isinstance(x, str))
+    uncovered = [dt for dt in req if dt not in actual and dt not in deferred]
+    if uncovered:
+        errs.append(
+            f"dtype 覆盖不足：任务书要求 {req}、实测(真实用例) {sorted(actual)}、"
+            f"缺 {uncovered} 且 task_pr_gaps 无 dtype_deferred 记录"
+            "（静默收窄 dtype 覆盖·证据不完整）")
+    else:
+        print(f"  dtype 覆盖 OK：要求={req} 实测(真实用例)={sorted(actual)} 已 deferred={sorted(deferred)}")
+
+
+def _check_oracle_source(cid, exp, prec, errs, pp):
+    """Q9 oracle_source 门校（gate-must-check-the-effective-object · Gate-checks-evidence-integrity-not-verdict）：
+    evidence.precision.oracle_source 必须 (a) ∈ 六枚举 `precision_policy.ORACLE_SOURCES`，且 (b) ==
+    `oracle_source_from_golden(caseset.expected.golden_source)`。防伪造 evidence 直接篡改 oracle_source 蒙混。
+    fail-closed：caseset 缺 golden_source / 映射失败 / oracle_source 缺失/非法/不符 → 累计 error（证据不可信）。"""
+    gs = exp.get("golden_source") if isinstance(exp, dict) else None
+    if not gs:
+        errs.append(f"{cid}: caseset expected 缺 golden_source"
+                    "（无法核 evidence oracle_source 是否属实·防篡改门失效）")
+        return
+    try:
+        expect = pp.oracle_source_from_golden(gs)
+    except Exception as ex:
+        errs.append(f"{cid}: caseset golden_source={gs!r} 无法映射 oracle_source（{type(ex).__name__}: {ex}）")
+        return
+    claimed = prec.get("oracle_source")
+    if claimed is None:
+        errs.append(f"{cid}: evidence 缺 precision.oracle_source（证据不完整·不可信）")
+        return
+    if claimed not in pp.ORACLE_SOURCES:
+        errs.append(f"{cid}: evidence oracle_source={claimed!r} 非法（须属 {list(pp.ORACLE_SOURCES)}）")
+        return
+    if claimed != expect:
+        errs.append(f"{cid}: evidence oracle_source={claimed!r} ≠ 据 caseset golden_source 映射的 {expect!r}"
+                    "（伪造/篡改 oracle_source·证据不可信）")
+
+
 def gate_task1(d, errs):
     """用例集自洽 + （有 evidence 时）id 一一对应，专防跑子集。"""
     cs = _load(d, "caseset.json")
@@ -114,6 +196,7 @@ def gate_task1(d, errs):
         errs.append(f"caseset 有重复 case_id: {dup}")
     cov = Counter(_case_key(c, errs) for c in cases if isinstance(c, dict))
     print(f"  用例数={len(cases)} | (dtype,shape) 覆盖={dict(cov)}")
+    _gate_dtype_coverage(cs, errs)   # Q7：任务书 dtype 全集 vs 实测覆盖（未声明→不阻塞）
     ev = _load(d, "evidence.json")  # 有 evidence（已跑）→ id 必须一一对应、不许子集
     if isinstance(ev, dict):
         eids = _ids_from_evidence(ev.get("evidence"), errs)
@@ -127,8 +210,10 @@ def gate_task1(d, errs):
 
 
 def gate_task2(d, errs):
-    """精度证据**完整性**门：全覆盖(防子集) + precision 必填 + 阈值三处一致(防放宽) + 无契约问题。
-    注：精度 pass/fail 本身由 validator 判、**此门不重判**——合法的精度 fail 不该被门当 BLOCKED。"""
+    """精度证据**完整性**门：全覆盖(防子集) + precision 必填 + 阈值三处一致(防放宽) + oracle_source 门校 + 无契约问题。
+    注：精度 pass/fail 本身由 validator 判、**此门不重判**——合法的精度 fail 不该被门当 BLOCKED。
+    Q9 oracle_source 门校（gate-must-check-the-effective-object）：evidence.precision.oracle_source 须 ∈ 六枚举
+    且 == oracle_source_from_golden(caseset.expected.golden_source)——防手搓/伪造 evidence 直接写任意 oracle_source 蒙混。"""
     cs, ev, vd = _load(d, "caseset.json"), _load(d, "evidence.json"), _load(d, "verdict.json")
     if not (isinstance(cs, dict) and isinstance(ev, dict) and isinstance(vd, dict)):
         errs.append("缺/坏 caseset/evidence/verdict.json（Task2 未跑全）")
@@ -171,6 +256,13 @@ def gate_task2(d, errs):
     # T5：由「标量 threshold 相等」升级为「tolerance_policy_id + 结构化 policy 一致」（保留 threshold digest）。
     exp_by_id = {c["id"]: (c.get("expected") or {})
                  for c in cases if isinstance(c, dict) and c.get("id")}
+    # Q9 oracle_source 门校用 precision_policy（纯 stdlib：ORACLE_SOURCES + oracle_source_from_golden，不拉 numpy）。
+    # import 失败（几乎不会）→ 记 error、oracle 校跳过（但门 FAILED），不静默放过。
+    try:
+        import precision_policy as _pp
+    except Exception as ex:
+        _pp = None
+        errs.append(f"precision_policy 不可用（{type(ex).__name__}: {ex}）——oracle_source 门校无法进行，判 FAILED")
     for e in ev_list:
         if not isinstance(e, dict) or not e.get("case_id"):
             continue
@@ -204,10 +296,10 @@ def gate_task2(d, errs):
                 continue
             if ce != ee:
                 errs.append(f"{cid}: evidence {key}={ee} ≠ caseset {ce}（防放宽假通过）")
-        # TODO(oracle_source 一致校，Q9-Part C 可选项)：evidence.precision.oracle_source 应与
-        #   precision_policy.oracle_source_from_golden(exp['golden_source']) 一致（gate-must-check-the-effective-object）。
-        #   本轮**未强做**——现有 gate 测大量手搓 caseset/evidence 不带 golden_source/oracle_source，fail-closed 会误伤。
-        #   接入前须先给这些 fixture 补 golden_source，再把本校纳入「三处一致」同款必填+相等。
+        # Q9 oracle_source 门校（gate-must-check-the-effective-object）：evidence.precision.oracle_source 须
+        #   ∈ 六枚举 且 == oracle_source_from_golden(caseset.expected.golden_source)。防伪造 evidence 篡改 oracle_source。
+        if _pp is not None:
+            _check_oracle_source(cid, exp, prec, errs, _pp)
     # === A 方案：evidence.precision.metrics ↔ 磁盘产物 provenance 绑定（重算比对）===
     # 上文只校「阈值/口径三处一致」（防放宽），却全信 evidence 自报的 metrics **数值**；此段按 provenance 读产物、
     # 先校 sha、再依 caseset policy 重算 metrics 并逐字段比对，堵「伪造 bad_count=0 直接 pass」的自报数字洞。

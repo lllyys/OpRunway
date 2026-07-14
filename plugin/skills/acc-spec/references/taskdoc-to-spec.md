@@ -27,6 +27,10 @@
     {"name":"out","io":"out","dtype":["<输出 dtype>"]}
   ],
   "generalize": true,
+  // Q7 dtype 覆盖门（gate 消费）：dtype_required=任务书**权威全集**（来源见 §1 dtype 行）；全集未知/信息库未接通→"needs_user"；
+  //   legacy 未迁→省略。dtype_tested=实测子集（gen_cases 据**真实生成的 cases** 归并写入 caseset、门据此对账）。缺项由 task_pr_gaps 的 dtype_deferred 记录。
+  "dtype_required": ["<权威全集>  或  \"needs_user\"  或  省略"],
+  "dtype_tested": ["<实测子集，如 float32/float16>"],
   "verify_mode": "<exact|numerical|behavioral>",   // 三值，与 validator 一致
   // T5 精度口径升级（待散文门）：precision 显式声明 standard + tolerance_policy_id；
   //   保留 oracle + threshold(digest) 向后兼容；per-case 结构化 policy 由 gen_cases 按 golden dtype 派生。
@@ -59,6 +63,9 @@
 | `params_source` | 有无完整参数表 | 有表→`task_doc_table`；只写『原算子所有类型』→`derived_from_reference` |
 | `params[]` | 参数说明表 | 每参 `{name,io:in\|out\|attr,dtype:[],default?,noncontiguous?}`；Tensor→in/out，标量/属性→attr |
 | `generalize` | 测试标准是否要泛化数据 | 默认 true；无张量IO(Sleep)/融合无泛化要求→false |
+| `dtype_required`（Q7 dtype 覆盖门）| 任务书**权威 dtype 全集**（来源优先级同下 dtype 行：任务书显式表 > 原 TBE 信息库 > 问用户）| list of dtype。任务书只写『支持所有类型』且信息库未接通/全集未知 → **填 `"needs_user"`**（不谎报覆盖、也不臆造全集）；legacy 未迁 → **整字段省略**（门判『未声明→覆盖门未行使』、不阻塞）。**IsClose 已核**：op_def 正源={float32,float16,bfloat16,int32} |
+| `dtype_tested`（Q7 dtype 覆盖门）| 当前 pipeline **实测子集**（通常 float32/float16）| list。**gen_cases 据实际生成的 cases 归并并写入 caseset**（门也用真实 cases 对账，口径一致、消除「并集过报」）；spec 侧此字段作声明/文档，**须与真实一致否则门抓「自报不符」→ BLOCKED** |
+| dtype 覆盖缺口 → `task_pr_gaps` | required 有、tested 无的 dtype | 每缺口一条 `{"kind":"dtype_deferred","dtypes":["bfloat16","int32"],"reason":"…runner 未支持/Track C…"}`——**门据此放行**（有 deferred 记录=显式挂账、非静默收窄）；无 deferred 记录 → 门 BLOCKED |
 | `verify_mode` | 见 §2 决策树 | exact / numerical / behavioral |
 | `precision.oracle` | 精度校验工具/真值来源 | 受控词表 `ascendoptest / mere_mare / atk_double / torch / scipy / std_exact / none`，**按任务书原文抽**（多数社区任务=ascendoptest；SPMV=生态标准 MERE·MARE + ATK 双标杆=`atk_double`；Sleep=none）——**勿一律填 ascendoptest**。⚠ 旧文写的 `dual_benchmark` 已统一为 `atk_double`（与 `precision_policy.select_standard` 识别的词一致）；`mere_mare` 与 `atk_double` **都**映射到 standard `ecosystem_mere_mare`（ATK 双标杆 fallback 本轮 out-of-scope、未实现）|
 | `precision.standard`（T5，待散文门）| 平台层标准，从 oracle+verify_mode 映射（见 §1.1 决策树）| 受控词表 `ascendoptest_default / ecosystem_mere_mare / exact / behavioral`。缺省不填时 `precision_policy.select_standard` 会按 §1.1 兜底 |

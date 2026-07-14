@@ -14,6 +14,8 @@
     {"name": "out",   "io": "out", "dtype": ["bool"]}
   ],
   "generalize": true,
+  "dtype_required": ["float32", "float16", "bfloat16", "int32"],
+  "dtype_tested": ["float32", "float16"],
   "verify_mode": "exact",
   "precision": {"oracle": "ascendoptest", "standard": "exact", "tolerance_policy_id": "exact",
                 "threshold": 0, "policy": {"kind": "exact", "max_mismatch": 0, "not_settled": false},
@@ -21,5 +23,8 @@
   "perf": {"baseline": "tbe", "target_ratio": 0.95,
            "small_shape_exception": {"text": "<10us 差 3us→仿真图", "when_us_below": 10,
                                      "abs_gap_us_within": 3, "requires": "simulation_plot+analysis"}},
-  "task_pr_gaps": []
+  "task_pr_gaps": [
+    {"kind": "dtype_deferred", "dtypes": ["bfloat16", "int32"],
+     "reason": "任务书全集(op_def 正源)={float32,float16,bfloat16,int32}；当前 pipeline runner 仅支持 float32/float16，bfloat16/int32 需 runner 新分支(Track C)，暂缓实测、非静默收窄"}
+  ]
 }
