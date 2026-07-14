@@ -376,7 +376,10 @@ def parse_results(ctx, outs, perfs, defect_cases=None):
                 "tolerance_policy_id": exp["tolerance_policy_id"],
                 "policy": policy,
                 "threshold": exp["threshold"],
-                "oracle_source": "cpu_ref",          # numpy f32 matmul golden = host CPU 参考
+                # oracle_source **据 caseset 声明的 golden_source 据实映射**（不再写死 cpu_ref）：
+                # catlass 的 numpy f32 matmul（GOLDEN_SOURCE 以 "numpy" 起头）→ analytical_ref；
+                # 来源缺失/不可识别 → fail-closed（不默认）。
+                "oracle_source": precision_policy.oracle_source_from_golden(exp.get("golden_source")),
                 "not_settled": bool(policy.get("not_settled", False)),
                 "metrics": precision_policy.compute_metrics(out, golden, policy),
                 "golden_path": exp["golden_path"], "out_path": f"{cid}/out.npy",

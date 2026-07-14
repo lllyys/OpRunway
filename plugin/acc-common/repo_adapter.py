@@ -128,7 +128,9 @@ def _precision_evidence(case, out, golden, out_path, work_dir, ascendoptest_bool
             "tolerance_policy_id": exp["tolerance_policy_id"],
             "policy": policy,
             "threshold": exp["threshold"],
-            "oracle_source": "cpu_ref",          # numpy 融合 golden = host CPU 参考
+            # oracle_source **据 caseset 声明的 golden_source 据实映射**（不再写死 cpu_ref）：
+            # torch→torch_ref、numpy→analytical_ref；来源缺失/不可识别 → fail-closed（不默认）。
+            "oracle_source": precision_policy.oracle_source_from_golden(exp.get("golden_source")),
             "not_settled": bool(policy.get("not_settled", False)),
             "metrics": precision_policy.compute_metrics(out, golden, policy),
             "golden_path": exp["golden_path"], "out_path": out_path,
@@ -471,9 +473,11 @@ def run_new_example(caseset, work_dir, defect_cases=None):
     # 2) 部署（tar 送 bin + manifest + perfcases_list，排除 npy/out.bin）+ runner cpp + 编排脚本。
     #    两模式同构：先把 tar 送到目标机 /tmp，再解到 rroot/cases（local 时"送"= 本地 cp、"目标机"= 本机）。
     q = shlex.quote
-    tar = os.path.join(work_dir, "_deploy.tgz")
+    # tgz 写到 work_dir **外面**（父目录）：否则「边打包 work_dir、边把 _deploy.tgz 写进 work_dir」会让
+    # GNU tar（Linux/server）报 "file changed as we read it" → exit 1（BSD tar/Mac 宽容、GNU tar 严）。
+    tar = os.path.join(os.path.dirname(os.path.abspath(work_dir.rstrip("/"))), "_deploy.tgz")
     subprocess.run(["tar", "czf", tar, "-C", work_dir, "--exclude=*.npy", "--exclude=out.bin",
-                    "--exclude=_deploy.tgz", "."], check=True, timeout=300)
+                    "."], check=True, timeout=300)
     # 每次运行唯一的临时路径（token），避免并发/多用户共享机上两个验收互相覆盖 /tmp 里的 tgz：
     # A 上传、B 覆盖、A 解出 B 的用例 → "测到的不是本次输入"。local 模式同样中招，故两模式都用唯一路径。
     token = uuid.uuid4().hex[:16]

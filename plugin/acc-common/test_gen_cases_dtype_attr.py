@@ -584,5 +584,60 @@ class RepoAdapterSecurityNegativeTest(unittest.TestCase):
             shutil.rmtree(e, ignore_errors=True)
 
 
+class GoldenTorchPreferredTest(unittest.TestCase):
+    """Q9-Part A：golden 固定用 torch(CPU) 单后端（确定性、**不回退 numpy**）。
+
+    torch 缺失 → golden fail-closed 报错；故这些测试需要 torch（在装了 torch 的机器上跑，验收本就在 NPU 机）。
+    无 torch 环境 → skip（不 mask，明示需 torch）。"""
+
+    def _need_torch(self):
+        try:
+            import torch  # noqa: F401
+        except Exception:
+            self.skipTest("无 torch → golden fail-closed；本测试需在装了 torch 的机器上跑（精度验收在 NPU 机）")
+
+    def test_golden_source_label_is_torch(self):
+        self._need_torch()
+        for op in ("IsClose", "Sign", "Equal", "Neg"):
+            src_name, _ = GC.GOLDEN[op]
+            label = GC.golden_source_label(op, src_name)
+            self.assertTrue(label.startswith("torch "), label)      # 恒 torch、无环境分支
+
+    def test_caseset_records_torch_source(self):
+        """caseset.expected.golden_source 恒 "torch ..."、映到 torch_ref。"""
+        self._need_torch()
+        sp = {"op": "Sign", "verify_mode": "numerical",
+              "params": [{"name": "self", "io": "in", "dtype": ["float32"]},
+                         {"name": "out", "io": "out", "dtype": ["float32"]}],
+              "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default"}}
+        d = tempfile.mkdtemp()
+        try:
+            cs = GC.gen_cases(sp, d)
+            for c in cs["cases"]:
+                gsrc = c["expected"]["golden_source"]
+                self.assertTrue(gsrc.startswith("torch "), gsrc)
+                self.assertEqual(P.oracle_source_from_golden(gsrc), "torch_ref")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_torch_golden_values(self):
+        """golden(torch) 在无边界值(NaN/Inf)的随机输入上与 numpy 参考逐值相同（精确逐元素算子）；
+        边界(如 sign(NaN))torch 与 numpy 有意不同——torch 是选定的确定性后端、不与 numpy 比。
+        另核 rtol/atol 非法 → fail-closed。"""
+        self._need_torch()
+        rng = np.random.default_rng(0)
+        for dt in (np.float32, np.float16):
+            a = rng.uniform(-5, 5, size=(4, 4)).astype(dt)
+            b = rng.uniform(-5, 5, size=(4, 4)).astype(dt)
+            np.testing.assert_array_equal(GC.golden_sign([a], {}), np.sign(a))
+            np.testing.assert_array_equal(GC.golden_neg([a], {}), np.negative(a))
+            np.testing.assert_array_equal(GC.golden_equal([a, b], {}), np.equal(a, b))
+            np.testing.assert_array_equal(
+                GC.golden_isclose([a, b], {"rtol": 1e-5, "atol": 1e-8, "equal_nan": False}),
+                np.isclose(a, b, rtol=1e-5, atol=1e-8, equal_nan=False))
+        with self.assertRaises(ValueError):                          # 负容差 fail-closed
+            GC.golden_isclose([a, b], {"rtol": -1e-5, "atol": 1e-8, "equal_nan": False})
+
+
 if __name__ == "__main__":
     unittest.main()

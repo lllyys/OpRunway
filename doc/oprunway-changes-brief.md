@@ -14,6 +14,10 @@
 6. 远程 NPU 环境（哪台机、catlass 在哪 build、是否进 Docker）待用户提供后补进 CLAUDE.md。
 7. 优先级（Codex 排序）：Q3>Q4>Q5>Q6>Q1>Q2>Q8>Q9>Q7。完整见 `doc/oprunway-design.md` §13。
 
+## 2026-07-14
+
+- **Q9 golden 接线（torch-required CPU 标杆）+ 传输 GNU-tar 可移植性修** —— golden 定为 CPU 标杆、**固定用 torch(CPU) 单后端**（确定性；**不回退 numpy**——torch 与 numpy 在边界如 `sign(NaN)`（torch=0/numpy=NaN）不一致，「谁装了用谁」会产非确定 golden）；torch 缺失 → fail-closed 报错要求安装。配套：`select_standard` 白名单 fail-closed（未知 oracle raise、堵 class C「与 python 一致」静默降级，= **Q7 落点1**）+ `oracle_source` 止血（删两处写死 `cpu_ref`、据 caseset `golden_source` 据实映射 torch→`torch_ref`/numpy→`analytical_ref`，缺失 fail-closed）+ catlass spec 补 `precision.standard`（伴随白名单防裸崩）。过 **codex 9 维代码门一轮**（6 finding：#1 非确定性→torch-required 根除、#2 容差校验、#4 前缀严格 token、#5 单后端自动解；#3 门校 oracle_source 留 TODO、#6 覆盖）。**在 a3 真 torch（py3.13, torch 2.13.0+cpu）跑全量 14 测全绿**（torch 测试真跑、非 skip）。顺带修一处传输 tar bug（`_deploy.tgz` 写到打包目录**外**，否则 GNU tar/server 报 `file changed` exit 1——Q2/Q3 遗留、非 Q9，但 server 上必踩）。**剩余：门对 oracle_source 的一致性校待补 fixture（TODO）。**
+
 ## 2026-07-13
 
 - **Q1 spec 样例隔离落地（未 commit，fan-out 4 路核验 SOUND）** —— 干净用户测挖出「taskdoc-to-spec 把三份填满答案的真 spec 指作『目标 schema』→ acc-spec 产 spec 前读到同题标准答案」的软污染。改法：5 份真样例 `git mv` 到 **repo 根 `samples/specs/`**（避开 gitignore 的 `/spec/`）、建**零真值空模板** `plugin/acc-common/spec_schema_template.jsonc`（taskdoc §5/§0 改指它 + §0 内联 IsClose 真值中性化）、acc-spec 三入口（SKILL/taskdoc/agent）写死「产 spec 阶段禁读任何 `.spec.json`（含 samples/）」硬纪律、测试引用重定 `samples/`（**不造合成 fixture**——用真 spec 内容零断言破坏风险）、archive_ops 两 symlink 改**内联副本**（分发态 samples/ 在 plugin 外够不着）、新增 `test_spec_isolation.py` 把「真样例不回流运行时路径」固化为回归。14 测全 exit0/~453 用例、subprocess 场景独立复跑对齐。⚠ 连带：canon 页 `spec-examples-pollute-acc-spec-derivation`(verified) 因缺陷已修而 stale，待 bureau 重编刷新。

@@ -21,7 +21,7 @@ T7 dtype/attr 扩面（据 codex 审终版）：
 ⚠ 真机（真 NPU）上 int/bf16 的数值校验本轮**不做**——runner.cpp 的新 dtype 分支属 Track C（挂真机+pr_facts），
   见 doc/oprunway-todo.md gap。本文件仅证「流水线能造/收发 int/bf16 用例」，非「某算子在该 dtype 被验收」。
 """
-import json, os, sys
+import json, math, os, sys
 import numpy as np
 import precision_policy
 
@@ -93,27 +93,70 @@ def _assert_equal_nan_effective(golden_fn, inputs, attrs, cid):
 
 
 # ---- golden 参考实现（逐算子；inputs=按 spec 顺序的**逻辑**输入数组，attrs=属性字典） ----
+# 决策（已定 2026-07-14）：golden = CPU 标杆，**固定用 torch(CPU)** —— 确定性单一后端，**不回退 numpy**。
+# 理由：torch 与 numpy 在边界上不一致（如 torch.sign(NaN)=0 vs np.sign(NaN)=NaN），"谁装了用谁"会产
+# 出随环境而变的非确定 golden。故 golden 恒走 torch；torch 缺失 → **fail-closed 报错要求安装**（不静默降级）。
+# 精度验证一般在装了 torch 的 NPU 机器(a3/a5)上做。
+def _require_torch():
+    """import torch(CPU 参考)；缺失 → fail-closed 报错要求安装（不回退 numpy，保证 golden 确定性）。"""
+    try:
+        import torch
+        return torch
+    except Exception as e:                              # noqa: BLE001 —— 缺失/损坏一律要求安装，不静默兜底
+        raise RuntimeError(
+            "golden 需 torch(CPU) 作 CPU 标杆参考、但未安装/不可用。请安装 CPU 版："
+            "pip install torch --index-url https://download.pytorch.org/whl/cpu。"
+            "不回退 numpy——两者边界语义(如 sign(NaN))不一致会产非确定 golden；"
+            "精度验证一般在装了 torch 的 NPU 机器上做。"
+        ) from e
+
+
+# 内置四算子的 torch(CPU) 参考——golden 恒走 torch，故 oracle_source 恒 torch_ref。
+_TORCH_OP = {"IsClose": "torch.isclose", "Sign": "torch.sign",
+             "Equal": "torch.eq", "Neg": "torch.neg"}
+
+
 def golden_isclose(inputs, attrs):
-    return np.isclose(inputs[0], inputs[1], rtol=attrs["rtol"], atol=attrs["atol"],
-                      equal_nan=attrs["equal_nan"])
+    t = _require_torch()
+    rtol, atol = float(attrs["rtol"]), float(attrs["atol"])
+    if not (math.isfinite(rtol) and math.isfinite(atol) and rtol >= 0 and atol >= 0):
+        raise ValueError(f"IsClose golden: rtol/atol 须有限非负，得 rtol={rtol} atol={atol}")
+    a = t.from_numpy(np.ascontiguousarray(inputs[0]))
+    b = t.from_numpy(np.ascontiguousarray(inputs[1]))
+    r = t.isclose(a, b, rtol=rtol, atol=atol, equal_nan=bool(attrs["equal_nan"]))
+    return np.ascontiguousarray(r.numpy())              # bool 输出
 
 
 def golden_sign(inputs, attrs):
-    return np.sign(inputs[0])
+    t = _require_torch()
+    return np.ascontiguousarray(t.sign(t.from_numpy(np.ascontiguousarray(inputs[0]))).numpy())
 
 
 def golden_equal(inputs, attrs):
-    return np.equal(inputs[0], inputs[1])
+    t = _require_torch()
+    a = t.from_numpy(np.ascontiguousarray(inputs[0]))
+    b = t.from_numpy(np.ascontiguousarray(inputs[1]))
+    return np.ascontiguousarray(t.eq(a, b).numpy())
 
 
 def golden_neg(inputs, attrs):
-    return np.negative(inputs[0])
+    t = _require_torch()
+    return np.ascontiguousarray(t.neg(t.from_numpy(np.ascontiguousarray(inputs[0]))).numpy())
 
 
-GOLDEN = {"IsClose": ("numpy np.isclose", golden_isclose),
-          "Sign": ("numpy np.sign", golden_sign),
-          "Equal": ("numpy np.equal", golden_equal),
-          "Neg": ("numpy np.negative", golden_neg)}
+# GOLDEN: (src_name, fn)。golden 恒走 torch(CPU) 单后端 → src_name = "torch <fn>"（确定性、无 numpy 兜底）。
+GOLDEN = {"IsClose": ("torch torch.isclose", golden_isclose),
+          "Sign": ("torch torch.sign", golden_sign),
+          "Equal": ("torch torch.eq", golden_equal),
+          "Neg": ("torch torch.neg", golden_neg)}
+
+
+def golden_source_label(op, fallback_src):
+    """golden 来源串（供 oracle_source 映射）。内置四算子 golden 恒走 torch → 恒 "torch <fn>"；
+    非内置算子(不在 _TORCH_OP)用其 fallback_src。golden 无环境分支，故标签恒与实际后端一致。"""
+    if op in _TORCH_OP:
+        return f"torch {_TORCH_OP[op]}"
+    return fallback_src
 
 
 # ================================================= 逻辑输入构造（compute dtype）
@@ -311,6 +354,7 @@ def gen_cases(spec, work_dir):
     if op not in GOLDEN:
         raise ValueError(f"unsupported op {op!r}, supported={list(GOLDEN)}")
     src_name, golden_fn = GOLDEN[op]
+    golden_source = golden_source_label(op, src_name)   # 真来源：torch 可用记 "torch <fn>"、否则 "numpy <fn>"
     rng = np.random.default_rng(SEED)
     in_params = [p for p in spec["params"] if p["io"] == "in"]
     attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
@@ -384,7 +428,7 @@ def gen_cases(spec, work_dir):
         eff_std = precision_policy.effective_standard(spec_standard, logical_cdtype, compare)
         policy = precision_policy.threshold_for(eff_std, logical_cdtype)
         tpid = precision_policy.tolerance_policy_id(eff_std, logical_cdtype)
-        expected = {"golden_source": src_name, "golden_path": f"{cid}/golden.npy",
+        expected = {"golden_source": golden_source, "golden_path": f"{cid}/golden.npy",
                     "verify_mode": vmode, "standard": eff_std, "compare_dtype": logical_cdtype,
                     "compare": compare, "tolerance_policy_id": tpid, "policy": policy,
                     "threshold": precision_policy.threshold_digest(policy),  # digest：向后兼容

@@ -147,6 +147,36 @@ class FailFastAndRoutingTest(unittest.TestCase):
         self.assertEqual(P.select_standard({"verify_mode": "numerical",
                          "precision": {"standard": "ecosystem_mere_mare"}}), "ecosystem_mere_mare")
 
+    def test_select_standard_unknown_oracle_fail_closed(self):
+        """Q9-Part B：numerical + 非白名单 oracle（如 torch/scipy/std_exact「与 python 一致」类）→ 显式 raise，
+        堵 class C 静默降级为 ascendoptest_default。白名单只含 {ascendoptest, none, 缺省}。"""
+        for orc in ("torch", "scipy", "std_exact", "numpy-f32-matmul"):
+            with self.assertRaises(ValueError, msg=orc):
+                P.select_standard({"verify_mode": "numerical", "precision": {"oracle": orc}})
+        # 白名单成员仍放行
+        self.assertEqual(P.select_standard({"verify_mode": "numerical",
+                         "precision": {"oracle": "none"}}), "ascendoptest_default")
+        self.assertEqual(P.select_standard({"verify_mode": "numerical",
+                         "precision": {}}), "ascendoptest_default")  # 缺省 oracle → 默认
+        # 显式 standard 优先，绕过 oracle 白名单（catlass spec 正是此路）
+        self.assertEqual(P.select_standard({"verify_mode": "numerical",
+                         "precision": {"oracle": "numpy-f32-matmul",
+                                       "standard": "ascendoptest_default"}}), "ascendoptest_default")
+
+    def test_oracle_source_from_golden_maps_by_prefix(self):
+        """Q9-Part C：golden_source 据实映射到 canonical 六枚举——torch→torch_ref、numpy→analytical_ref；
+        识别不出 → fail-closed（不默认 cpu_ref）。"""
+        self.assertEqual(P.oracle_source_from_golden("torch torch.isclose"), "torch_ref")
+        self.assertEqual(P.oracle_source_from_golden("torch torch.sign"), "torch_ref")
+        self.assertEqual(P.oracle_source_from_golden("numpy np.isclose"), "analytical_ref")
+        self.assertEqual(P.oracle_source_from_golden(
+            "numpy f32 matmul（A.f32@B.f32 再回落 dtype）"), "analytical_ref")
+        self.assertIn("analytical_ref", P.ORACLE_SOURCES)
+        self.assertIn("torch_ref", P.ORACLE_SOURCES)
+        for bad in (None, "", "cpu_ref", "scipy foo", "unknown"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                P.oracle_source_from_golden(bad)
+
 
 class ValidatorRiskTest(unittest.TestCase):
     """validator 层：acceptance 过 & standard 不过 → risk=true、overall=passed_with_risk。"""

@@ -31,11 +31,15 @@
 - [ ] **commit + 入库**：走 PR 进 main；**PR #6（marketplace+Q2/Q3）待用户 merge**，合后同步 GitCode 镜像。
 - [ ] **bureau 刷新**：capture golden 律令；Q1 修复 →刷 stale 页 `spec-examples-pollute-acc-spec-derivation`(verified) + `_verify.json` 指纹（capture→compile→review，不手改）。
 
-### 🟠 P0 · Q9 golden（**决策已定 2026-07-14**：全算子 CPU 标杆，torch/numpy 实现）
-> 决策：golden = **CPU 参考实现**，用 **torch 或 numpy**（per-op 选忠实任务书语义的那个）。放弃「真机跑内置 TBE」(乙)。当前 fp32/fp16 的 numpy golden 已是 CPU 参考、基本沿用。
-- [ ] **建落点**：① `gen_cases` 造 golden fail-closed（reference 指定方法产不出→raise）② `select_standard` 白名单 fail-closed（=Q7 落点1）③ `oracle_source` 止血（记 CPU-ref 真来源、删写死 `cpu_ref`、门校）④ 逐算子核 numpy/torch 忠实任务书语义。
-- [ ] **torch 依赖**：仅在 numpy 顶不住时引（Neg uint8 用 `torch.neg` 回绕）；uint8 属 Track C·暂 out-of-scope → 现支持的 fp32/fp16 仍纯 numpy、暂不引 torch。
-- [ ] **连带**：现 IsClose/Sign「PASSED」精度维按此把 `oracle_source` 记成 CPU-ref 即算合规。
+### 🟢 Q9 golden（**已建 + a3 真 torch 验证 14 测全绿 · 2026-07-14**）
+> 决策终稿：golden = CPU 标杆、**固定用 torch(CPU) 单后端**（确定性，**不回退 numpy**——torch/numpy 边界不一致如 `sign(NaN)` 会产非确定 golden）；torch 缺失 → fail-closed 报错要求安装。精度验证在装了 torch 的机器上（NPU 机）。
+- [x] **golden torch-required**：`gen_cases` `_require_torch()` + 四 golden_fn 恒 torch；`golden_source`/`oracle_source` 恒 torch_ref。
+- [x] **select_standard 白名单 fail-closed**（=Q7 落点1）：未知 oracle raise、堵 class C 静默降级。
+- [x] **oracle_source 止血**：删写死 `cpu_ref`、据 `golden_source` 据实映射（严格首 token 前缀）、缺失 fail-closed。
+- [x] **catlass spec 补 standard** + codex 9 维门一轮（#1/#2/#4/#5 修）+ a3 真 torch 全量绿。
+- [ ] **剩余 · 门校 oracle_source 一致性**（防伪造 evidence 篡改）：现有手搓 fixture 无 `golden_source`、硬校会误伤 → 先补 fixture 再纳入门必校（validate_acceptance_state 已留 TODO 注释）。
+- [ ] **剩余 · 深覆盖**（codex #6）：torch golden 的 NaN/±0/Inf 边界向量测试（现测无边界随机输入 torch==numpy + 负容差 fail-closed）。
+- 附：本轮顺带修传输 GNU-tar 可移植性 bug（`_deploy.tgz` 写打包目录外），server 上 transport 才通。
 
 ### 🟡 P1 · 正确性剩余（Q7）
 - [ ] spec 记 `dtype_required`(任务书全集) vs `dtype_tested` + 门校 dtype 覆盖（⊄ 且无 gap → BLOCKED）。

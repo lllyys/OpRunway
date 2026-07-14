@@ -204,6 +204,10 @@ def gate_task2(d, errs):
                 continue
             if ce != ee:
                 errs.append(f"{cid}: evidence {key}={ee} ≠ caseset {ce}（防放宽假通过）")
+        # TODO(oracle_source 一致校，Q9-Part C 可选项)：evidence.precision.oracle_source 应与
+        #   precision_policy.oracle_source_from_golden(exp['golden_source']) 一致（gate-must-check-the-effective-object）。
+        #   本轮**未强做**——现有 gate 测大量手搓 caseset/evidence 不带 golden_source/oracle_source，fail-closed 会误伤。
+        #   接入前须先给这些 fixture 补 golden_source，再把本校纳入「三处一致」同款必填+相等。
     # === A 方案：evidence.precision.metrics ↔ 磁盘产物 provenance 绑定（重算比对）===
     # 上文只校「阈值/口径三处一致」（防放宽），却全信 evidence 自报的 metrics **数值**；此段按 provenance 读产物、
     # 先校 sha、再依 caseset policy 重算 metrics 并逐字段比对，堵「伪造 bad_count=0 直接 pass」的自报数字洞。
