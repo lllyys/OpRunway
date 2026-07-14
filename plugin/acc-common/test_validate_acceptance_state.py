@@ -477,7 +477,7 @@ class RunWorkflowExitTest(unittest.TestCase):
     def _run(self, *extra):
         return subprocess.run(
             [sys.executable, os.path.join(self.here, "run_workflow.py"),
-             os.path.join(self.here, "specs", "isclose.spec.json"),
+             os.path.join(self.here, "..", "..", "samples", "specs", "isclose.spec.json"),
              "--mode", "mock", "--out", self.d, *extra],
             capture_output=True, text=True)
 
@@ -628,7 +628,7 @@ class RunWorkflowPerfPackageTest(unittest.TestCase):
 
     def test_perf_slow_passed_with_risk(self):
         # T7 语义化稳定 id：Sign 的两个小 shape 性能用例 = sign_float32_{64,256}_perfsmall（弃旧索引 sign_005/006）
-        r = self._run("specs/sign.spec.json", "--perf-slow",
+        r = self._run("../../samples/specs/sign.spec.json", "--perf-slow",
                       "sign_float32_64_perfsmall,sign_float32_256_perfsmall")
         self.assertEqual(r.returncode, 2)                       # PASSED_WITH_RISK
         acc = self._json("acceptance.json")

@@ -259,7 +259,7 @@
 4. **改薄 `op-acceptance.md`**：frontmatter `mode:primary` + `skills:[acceptance-workflow]` + `agents:[3 child]`；正文薄化，显式职责边界（可跑脚本/不 NL 生成/不判定）。
 5. **同步 manifest（手工同步 + 机器校验）**：AGENTS.md frontmatter agents(4)/skills(3) + 正文编排更新；plugin.json agents 补 4 路径；跑 `python3 plugin/acc-common/check_manifest_sync.py` → 必须 `STATUS: SYNCED`。
 6. **（可选）加 `check_agent_frontmatter.py` + 轻改 command**：若 open decision (a) 采纳则写 lint 脚本；command 指向新 orchestrator + 提 CP-A 前置。
-7. **本地回归验证**：`python3 plugin/acc-common/test_validate_acceptance_state.py`（**测试套件全过，并记录实际用例数——当前 28**，解 codex #16）+ `python3 plugin/acc-common/run_workflow.py plugin/acc-common/specs/isclose.spec.json --mode mock --out <scratchpad>`（确认仍出 `acceptance.json` 且内嵌验收门 PASSED、pipeline 未被 .md 改动破坏）+ check_manifest_sync SYNCED +（若加）check_agent_frontmatter 通过 + 用 fixture task_doc/pr_facts 走一遍 CP-A 对应校验逻辑（issue 号/target_dir 比对 + 空任务识别 + `correspondence.json` 落盘）。
+7. **本地回归验证**：`python3 plugin/acc-common/test_validate_acceptance_state.py`（**测试套件全过，并记录实际用例数——当前 28**，解 codex #16）+ `python3 plugin/acc-common/run_workflow.py samples/specs/isclose.spec.json --mode mock --out <scratchpad>`（确认仍出 `acceptance.json` 且内嵌验收门 PASSED、pipeline 未被 .md 改动破坏）+ check_manifest_sync SYNCED +（若加）check_agent_frontmatter 通过 + 用 fixture task_doc/pr_facts 走一遍 CP-A 对应校验逻辑（issue 号/target_dir 比对 + 空任务识别 + `correspondence.json` 落盘）。
 8. **散文门 codex exec 审修**：对全部新增/改动 .md（orchestrator + 3 subagent + skill + AGENTS.md + command）跑 codex exec 定制审（散文，非 cc-suite 代码 9 维）；若加 check_agent_frontmatter.py 则走 `cc-suite:audit-fix` 代码门。审→修→复述「发现什么/改了什么/剩余风险」。
 9. **收尾落档**：`doc/oprunway-changes-brief.md` 倒序 append；（可选、若动 canon）bureau:note 捕获 P1 落地，note 文本先过 codex exec 审再写入。
 
@@ -879,7 +879,7 @@ LOW：
 
 13. **`plugin/acc-common/test_validate_acceptance_state.py`** · edit（既有 28 测不回归）
     - gate_task3 例外：`status=exception`+完整 simulation+交叉一致+plot 文件在 dir 且 sha 对→PASSED；缺 plot / sha 不符 / simulation 与例外行对不上→FAILED(含『仿真图』字样)；plot 指向 `../` 或绝对路径外→FAILED(路径钉死)；例外行 `scope!=kernel_only`→FAILED。
-    - **扩 `RunWorkflowExitTest`（codex M9）**：新增 `test_perf_slow_passed_with_risk`——subprocess 跑 `run_workflow.py specs/sign.spec.json --mode mock --perf-slow <小shape cid> --out D`，断言 **exit==2**、`acceptance.json` `state=="PASSED_WITH_RISK"`+`human_cp.status=="pending"`+`repo_mode=="mock"`、`D/perf_sim_sign.svg` 存在、`perf_report.json` `summary.status=="exception"`；再 subprocess 跑 gate `--stage task3 --dir D` 应 exit0；删 SVG 后再跑 gate → exit1（证不静默绕过）。
+    - **扩 `RunWorkflowExitTest`（codex M9）**：新增 `test_perf_slow_passed_with_risk`——subprocess 跑 `run_workflow.py ../../samples/specs/sign.spec.json --mode mock --perf-slow <小shape cid> --out D`，断言 **exit==2**、`acceptance.json` `state=="PASSED_WITH_RISK"`+`human_cp.status=="pending"`+`repo_mode=="mock"`、`D/perf_sim_sign.svg` 存在、`perf_report.json` `summary.status=="exception"`；再 subprocess 跑 gate `--stage task3 --dir D` 应 exit0；删 SVG 后再跑 gate → exit1（证不静默绕过）。
 
 14. **`doc/oprunway-changes-brief.md`** · edit — 按 CLAUDE.md#4 **倒序**追加一两句大白话：小 shape 例外通道落地（perf status exception→PASSED_WITH_RISK+human_cp pending、perf_compare 独家产 simulation、perf_sim_plot 只渲染、门强制有图+交叉一致+sha 才放行、阈值从 spec/任务书取、复用 canonical 状态不动 canon、mock 注入明标 demo 不作真实 CP 依据）。
 
@@ -919,7 +919,7 @@ LOW：
 
 ## Acceptance（可验证标准；命令均以 `cd plugin/acc-common` 为前提，codex M10）
 1. **单测**：`cd plugin/acc-common && python3 -m unittest test_validate_acceptance_state test_perf_compare test_perf_sim_plot -v` 全 PASS；既有 28 测无回归。
-2. **例外正路（mock 注入）**：`cd plugin/acc-common && python3 run_workflow.py specs/sign.spec.json --mode mock --perf-slow <小shape性能cid> --out D` 后 —— `perf_report.json` `summary.status=="exception"`；该例外行 `达标==false` 且带 `exception` 标 且 `scope=="kernel_only"`；`D/perf_sim_sign.svg` 存在且含两序列+阈值线+容差带；`perf_report['simulation']` 有逐点结论与总体判词 + `simulation_plot{file,sha256}`；`acceptance.json` `state=="PASSED_WITH_RISK"`、`human_cp.status=="pending"`、`repo_mode=="mock"`；进程 **exit==2**；`[验收门] STATUS PASSED`。
+2. **例外正路（mock 注入）**：`cd plugin/acc-common && python3 run_workflow.py ../../samples/specs/sign.spec.json --mode mock --perf-slow <小shape性能cid> --out D` 后 —— `perf_report.json` `summary.status=="exception"`；该例外行 `达标==false` 且带 `exception` 标 且 `scope=="kernel_only"`；`D/perf_sim_sign.svg` 存在且含两序列+阈值线+容差带；`perf_report['simulation']` 有逐点结论与总体判词 + `simulation_plot{file,sha256}`；`acceptance.json` `state=="PASSED_WITH_RISK"`、`human_cp.status=="pending"`、`repo_mode=="mock"`；进程 **exit==2**；`[验收门] STATUS PASSED`。
 3. **不静默绕过（负路）**：删 `D/perf_sim_sign.svg` 后 `python3 validate_acceptance_state.py --stage task3 --dir D` 输出含『仿真图』的 error 且 exit1；篡改 SVG（sha 不符）/让 simulation 与例外行对不上/例外行 scope 改非 kernel_only/plot 指向 `../` → 门同样 FAILED。
 4. **无例外资格→不误放行**：构造 gap>容差 或 max(npu,base)≥阈 或 非小shape-tag 的未达标用例 → `status=="fail"`、`state=="FAILED_PERFORMANCE"`、exit1，无 exception 标（不静默转例外）。
 5. **无声明例外的 spec（equal/neg）行为不变**：常规 mock 跑通、用例数与状态与改前一致（gen_cases 不加小 shape 用例）。

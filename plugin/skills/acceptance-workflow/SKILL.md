@@ -157,7 +157,7 @@ CP-A 落盘的对应校验工件（断点续跑读它）。最小 schema：
 ## 6. Task3 基线来源与 blocked 路由
 
 - **基线来源按任务书参考源**（`spec.perf.baseline` 驱动；canon perf-baseline-by-reference-source·proposed·未 settle，载重前需核）：
-  - **重写类** → `tbe`（无劣化 / `target_ratio` 按任务书；当前接入的 aclnn 重写类 isclose/sign/equal/neg 均 `perf.baseline=tbe`，catlass matmul 属对标类·synthetic demo·未定基线——「均」勿外推为全局，见 `acc-common/specs/`）；
+  - **重写类** → `tbe`（无劣化 / `target_ratio` 按任务书；当前接入的 aclnn 重写类 isclose/sign/equal/neg 均 `perf.baseline=tbe`，catlass matmul 属对标类·synthetic demo·未定基线——「均」勿外推为全局，见 `samples/specs/`）；
   - **移植类** → GPU（如 A100，比例区间）；
   - **加 dtype 类** → 同 op 不劣化。
   基线口径以 `spec.perf.baseline` 为准，不写死。

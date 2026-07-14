@@ -70,7 +70,7 @@
 > 例：IsClose 的 `op_def` 声明输入 dtype 为 `{float32, float16, bfloat16, int32}`（4 种），真机 runner 只支持前 2 种。
 >
 > ⚠ **当前无人拿 `op_def` 去核对 spec**：`gen_cases` 的 dtype 集由 `spec.params[].dtype` 驱动，
-> spec 里没写的 dtype 不会触发任何检查（现存 `specs/isclose.spec.json` 只填了 2 种、`task_pr_gaps` 为空）。
+> spec 里没写的 dtype 不会触发任何检查（现存 `samples/specs/isclose.spec.json` 只填了 2 种、`task_pr_gaps` 为空）。
 > 「差额须显式声明 + 人工确认 + 裁决落 `PASSED_WITH_GAPS`」是**已定方案、尚未实现**。
 
 ## 安装

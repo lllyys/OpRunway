@@ -17,6 +17,39 @@
 
 ---
 
+## 🗂 当前 TODO（2026-07-14 整理）
+
+> **新最高律令（用户明示）**：**精度标准与 golden 只能来自任务书指定的测试方法**，不是自撰 numpy（除非任务书要求）；不在支持范围 → **fail-closed 抛用户**、不静默降级。（「绝不信 PR」在精度维的延伸。）
+
+### ✅ 本会话已做（都未 commit）
+- [x] **V1 dtype 来源红线**：acc-spec 三入口改「dtype 全集 = 任务书 > 原 TBE 信息库 > 问用户」，PR op_def 仅对照。核验 SOUND。
+- [x] **Q1 样例隔离**：真样例迁 `samples/`、零真值模板、三入口禁读 `.spec.json`、测试重定、archive_ops 内联、守门测试。4 路核验 SOUND。
+- [x] **compile**：4 页 canon（其中 1 页因 Q1 已变 stale，见下）。
+
+### 🔴 P0 · 收尾（把已做的落袋）
+- [ ] **codex 门**：V1/Q1/compile 改动 commit 前统一过一轮（代码 `cc-suite:audit-fix` / 散文 `codex exec` gpt-5.6-sol low）。
+- [ ] **commit + 入库**：走 PR 进 main；**PR #6（marketplace+Q2/Q3）待用户 merge**，合后同步 GitCode 镜像。
+- [ ] **bureau 刷新**：capture golden 律令；Q1 修复 →刷 stale 页 `spec-examples-pollute-acc-spec-derivation`(verified) + `_verify.json` 指纹（capture→compile→review，不手改）。
+
+### 🟠 P0 · Q9 golden（**决策已定 2026-07-14**：全算子 CPU 标杆，torch/numpy 实现）
+> 决策：golden = **CPU 参考实现**，用 **torch 或 numpy**（per-op 选忠实任务书语义的那个）。放弃「真机跑内置 TBE」(乙)。当前 fp32/fp16 的 numpy golden 已是 CPU 参考、基本沿用。
+- [ ] **建落点**：① `gen_cases` 造 golden fail-closed（reference 指定方法产不出→raise）② `select_standard` 白名单 fail-closed（=Q7 落点1）③ `oracle_source` 止血（记 CPU-ref 真来源、删写死 `cpu_ref`、门校）④ 逐算子核 numpy/torch 忠实任务书语义。
+- [ ] **torch 依赖**：仅在 numpy 顶不住时引（Neg uint8 用 `torch.neg` 回绕）；uint8 属 Track C·暂 out-of-scope → 现支持的 fp32/fp16 仍纯 numpy、暂不引 torch。
+- [ ] **连带**：现 IsClose/Sign「PASSED」精度维按此把 `oracle_source` 记成 CPU-ref 即算合规。
+
+### 🟡 P1 · 正确性剩余（Q7）
+- [ ] spec 记 `dtype_required`(任务书全集) vs `dtype_tested` + 门校 dtype 覆盖（⊄ 且无 gap → BLOCKED）。
+- [ ] ⚠ 白名单改动**必修** `catlass_basic_matmul.spec.json`（`oracle=numpy-f32-matmul` 无 standard，否则裸崩）。
+
+### 🔵 P2 · 扩展 / 接通
+- [ ] **(a) TBE 信息库接通**（dtype 独立源）：每份任务书自带路径 `.../tbe/config/ascend910b`；读法随运行环境探测、**不写死 ssh**。
+- [ ] int32 扩展（Track C，锁已解）。
+
+### ⏸ 外部阻塞（等资源，非我们能推）
+- [ ] 真实 GPU 基线数据（Task3 真对比）｜其余 11 仓 adapter｜catlass 真机验收（需 950 + generated_harness）。
+
+> **golden resume 要点（别丢）**：AscendOpTest 自己没 golden 源、只有 `expect_func`/`golden_path` 槽位（开发者填）→ 真问题是 numpy 忠不忠实任务书语义 + 有无交叉核/诚实记录。四算子 reference 已核（`repos/cann-ops-competitions/.../docs/202604/*_task_doc.md`）：IsClose/Equal=语义改造→CPU 逻辑（np.isclose/np.equal 忠实）；Sign=纯重写（np.sign 忠实）；Neg=uint8 点名 torch.neg 回绕（待核）。连带：现 IsClose/Sign「PASSED」精度维需重核 golden 忠实性才算合规。
+
 ## ✅ 已落地（Wave 1–3，均在 main）
 
 ### 体系结构轴（落地设计 P0–P3）

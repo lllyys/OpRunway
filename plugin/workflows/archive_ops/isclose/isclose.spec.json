@@ -1,1 +1,25 @@
-../../../acc-common/specs/isclose.spec.json
+{
+  "op": "IsClose",
+  "repo": "ops-math",
+  "hardware": ["Atlas A2", "Atlas A3"],
+  "reference": {"type": "tbe", "ref": "内置 aclnnIsClose TBE"},
+  "change": {"kind": "semantic", "note": "二进制比较→逻辑值比较（对齐 CPU）"},
+  "params_source": "derived_from_reference",
+  "params": [
+    {"name": "self",  "io": "in",  "dtype": ["float32", "float16"], "noncontiguous": true},
+    {"name": "other", "io": "in",  "dtype": ["float32", "float16"], "noncontiguous": true},
+    {"name": "rtol",  "io": "attr", "dtype": ["double"], "default": 1e-05},
+    {"name": "atol",  "io": "attr", "dtype": ["double"], "default": 1e-08},
+    {"name": "equal_nan", "io": "attr", "dtype": ["bool"], "default": false},
+    {"name": "out",   "io": "out", "dtype": ["bool"]}
+  ],
+  "generalize": true,
+  "verify_mode": "exact",
+  "precision": {"oracle": "ascendoptest", "standard": "exact", "tolerance_policy_id": "exact",
+                "threshold": 0, "policy": {"kind": "exact", "max_mismatch": 0, "not_settled": false},
+                "threshold_source": "AscendOpTest 默认阈值（bool 输出 → 精确逐位）"},
+  "perf": {"baseline": "tbe", "target_ratio": 0.95,
+           "small_shape_exception": {"text": "<10us 差 3us→仿真图", "when_us_below": 10,
+                                     "abs_gap_us_within": 3, "requires": "simulation_plot+analysis"}},
+  "task_pr_gaps": []
+}

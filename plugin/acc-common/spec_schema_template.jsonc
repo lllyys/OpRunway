@@ -1,0 +1,42 @@
+// spec 空模板（零真值）—— acc-spec 产 spec 时看这份的「结构/字段/类型」，
+// 绝不看任何真实算子样例（samples/specs/*.spec.json）的数值，避免先看答案再推导的污染。
+// 字段集对齐 references/taskdoc-to-spec.md §0 权威 schema；下面所有值都是占位符/取值口径说明，
+// 不是任何真实算子的答案。产 spec 时逐字段从 task_doc.md + pr_facts.json 抽，缺项落 task_pr_gaps。
+{
+  "op": "<PascalCase 算子名，去 aclnn 前缀>",
+  "repo": "<顶层仓名：ops-math / ops-nn / ops-transformer / catlass>",
+  "hardware": ["<从任务书『适配硬件』抽，如 Atlas A2 / Atlas A3 / Ascend 950PR>"],
+  "reference": {
+    "type": "<tbe | torch | numpy | gpu | cpu | builtin>",
+    "ref": "<参考实现定位 + 语义改造点，自由文本>",
+    "path": "<可选：TBE 内置三件套路径 kernel/proto/config>"
+  },
+  "change": {
+    "kind": "<rewrite_tbe | add_dtype | align_dtype | semantic | new_op | gpu_port | bugfix>",
+    "note": "<定性说明>",
+    "dtypes_added": ["<add_dtype 时新增类型，否则省略>"]
+  },
+  "params_source": "<有完整参数表→task_doc_table；只写『原算子所有类型』→derived_from_reference>",
+  "params": [
+    {"name": "<参数名>", "io": "<in | out | attr>", "dtype": ["<当前 pipeline 支持子集，如 float32/float16>"], "noncontiguous": "<可选 true/false>", "default": "<attr 才有：默认值>"}
+  ],
+  "generalize": "<bool：默认 true；无张量 IO / 融合无泛化要求→false>",
+  "verify_mode": "<exact | numerical | behavioral，见 ref §2 决策树>",
+  "precision": {
+    "oracle": "<ascendoptest | mere_mare | atk_double | torch | scipy | std_exact | none，按任务书原文抽>",
+    "standard": "<ascendoptest_default | ecosystem_mere_mare | exact | behavioral，据 oracle+verify_mode 映射>",
+    "tolerance_policy_id": "<spec 级摘要：exact→exact；ascendoptest→ascendoptest_default；mere_mare/atk_double→ecosystem_mere_mare>",
+    "threshold": "<number：exact→0；numerical→主 dtype 默认（AscendOpTest fp16≈1e-3 等），标『(推断/待工具核实)』>",
+    "threshold_source": "<阈值出处说明>"
+  },
+  "perf": {
+    "baseline": "<tbe | gpu_external>",
+    "target_ratio": "<number：任务书『性能无劣化』→1.0；『≥95%』→0.95…按任务书原文换算>",
+    "small_shape_exception": {
+      "text": "<小 shape 例外的人读说明>",
+      "when_us_below": "<number：kernel 耗时低于该值才触发例外>",
+      "abs_gap_us_within": "<number：绝对差在该值内才算例外>"
+    }
+  },
+  "task_pr_gaps": ["<所有缺口/矛盾/推断，推断项标 (推断)；无则空数组>"]
+}

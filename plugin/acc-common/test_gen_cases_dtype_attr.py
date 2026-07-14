@@ -255,7 +255,7 @@ class AttrMatrixTest(unittest.TestCase):
         """缺省无 attr_matrix → 与权威 isclose.spec.json 用例数/id 一致（不引入 attr case）。"""
         d1, d2 = tempfile.mkdtemp(), tempfile.mkdtemp()
         try:
-            auth = GC.gen_cases(_spec(os.path.join(_HERE, "specs", "isclose.spec.json")), d1)
+            auth = GC.gen_cases(_spec(os.path.join(_HERE, "..", "..", "samples", "specs", "isclose.spec.json")), d1)
             self.assertFalse(any(c["expected"]["case_origin"].startswith("attr_matrix")
                                  for c in auth["cases"]))
         finally:

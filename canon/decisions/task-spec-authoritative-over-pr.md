@@ -1,6 +1,6 @@
 ---
 title: Task spec is authoritative over PR
-updated: 2026-07-09
+updated: 2026-07-13
 status: proposed
 ---
 
@@ -16,4 +16,14 @@ status: proposed
 
 依据 `doc/oprunway-spec-pr-analysis.md`（41 任务书 + 18 PR 规律）。
 
-**Sources.** [[session d31ea446-dec3-479f-a7b3-d6c1dec4f611 · 2026-07-02]]（2026-07-06 检查点），[[session 7f7b1411-e1d0-47aa-93d5-19ccd6fcd130 · 2026-07-08]]（原 Equal 平台错配例，2026-07-09 撤），[[session 37223d6d-c20e-48a9-84f5-99aeaddb7f51 · 2026-07-09]]（Equal 例作废+前置「先验证对应」）
+## 标准来源路由（2026-07-13 用户明示强化：绝不信 PR）
+
+用户 2026-07-13 定为**最高律令**：**验收标准始终基于任务书，PR 是被验收的，永远不要相信 PR。** 关键是把两件事分开：
+
+- **被测物**（受审对象）= PR 的代码。用 PR **识别 / 构建 / 运行**被测算子**合法**（被测代码版本另有硬门 [[PR head commit is the tested object]]）。
+- **验收标准**（判通过/不通过的尺子：dtype 集 / 精度阈值 / 性能目标 / 硬件 / shape·属性 / 算子语义→golden）**必须来自任务书**，或任务书引用的、**独立于 PR** 的权威源（如原 TBE 算子的算子信息库 `opp/built-in/.../tbe/config/`）。**从 PR 数据推出任何一条验收标准 = 违反 = bug。**
+- **灰区厘清**：PR 的 `op_def` 声明可作**对照**（PR 声明 < 任务书要求 → 记 `task_pr_gaps`），但**绝不能当标准来源**。与 [[Target hardware and dtype set are determined per operator from taskdoc and op_def]] 的「任务书 + op_def 双源交叉核验」**一致**——交叉核验 = 对照查 gap，不等于把 op_def 当全集权威。
+
+审计（session 0513d745 只读 workflow）定位当前**唯一硬违反 V1**：dtype 全集来源把被测 PR 的 `op_def` 当权威（`acc-spec` 的 `SKILL.md` + `taskdoc-to-spec.md` + `agents/acc-spec-extractor.md` 三入口把 PR 排在独立源之上）。纠正方向：dtype 全集 = **任务书显式表/规格 > 原 TBE 算子信息库（独立源）> 问用户**，PR `op_def` 仅对照（PR 声明 < 全集 → 记 gap，遮住 Fmod 式「PR 缩 dtype」缺口即危害所在）。其余 5 类（精度/性能/shape/golden/硬件）审计判**合法**（PR 建被测物 or 仅对照）。**落地形态待定**（用户建议成文进 `CLAUDE.md` 红线或立 ADR）；「原 TBE 信息库」这条中间档当前端到端**未接通**（`fetch_source` 不取、样例 `reference.path` 多空/占位），接通前实际回退到问用户——proposed，待 `bureau:review`。
+
+**Sources.** [[session d31ea446-dec3-479f-a7b3-d6c1dec4f611 · 2026-07-02]]（2026-07-06 检查点），[[session 7f7b1411-e1d0-47aa-93d5-19ccd6fcd130 · 2026-07-08]]（原 Equal 平台错配例，2026-07-09 撤），[[session 37223d6d-c20e-48a9-84f5-99aeaddb7f51 · 2026-07-09]]（Equal 例作废+前置「先验证对应」），[[session 0513d745-9176-41f0-8f4b-cb7a2d19ff86 · 2026-07-10]]（2026-07-13：绝不信 PR 律令 + 标准来源路由 + V1 硬违反）
