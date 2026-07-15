@@ -1,16 +1,16 @@
 {
   "Machine-verifiable acceptance gate": {
-    "verifiedAt": "2026-07-08",
+    "verifiedAt": "2026-07-15",
     "checks": [
       {
         "artifact": "plugin/acc-common/validate_acceptance_state.py",
-        "hash": "7f6590a72183dddba22a535d75654182cfa2a665d2e3935fb79b19f72302af05",
+        "hash": "b70970729b5488e7b0fe982683c41e20e93b7d5cc5d26778656a5297b0c57e31",
         "claim": "three-stage completeness gate (防跑子集/放宽阈值/混e2e, 抗坏输入), STATUS PASSED|FAILED"
       },
       {
         "artifact": "plugin/acc-common/test_validate_acceptance_state.py",
-        "hash": "579ea69634fb663d7ce7f96e9f4ca4960e49d6355d8fa780c2293f5c042f3fcf",
-        "claim": "28 unit tests incl subset/threshold/scope/bad-input/exit-code"
+        "hash": "f528b7ff54e9b7e81d637e7d295d18f2b1315593c370caddf0cea97f8a981c00",
+        "claim": "90 unit tests incl subset/threshold/scope/bad-input/exit-code/dtype-coverage/oracle-source"
       }
     ]
   },
@@ -85,51 +85,21 @@
     ]
   },
   "gen_cases GOLDEN hardcodes four elementwise operators": {
-    "verifiedAt": "2026-07-10",
+    "verifiedAt": "2026-07-15",
     "checks": [
       {
         "artifact": "plugin/acc-common/gen_cases.py",
-        "hash": "a9a2ee4d2e1868efcf3c4e1114603a1320f9e0b5548180a922de51625d3987d5",
+        "hash": "4a0ccbb81389895c23b4888f6450f4274a5b50ae694afc3db76553827e87198e",
         "claim": "GOLDEN dict hardcodes IsClose/Sign/Equal/Neg; `if op not in GOLDEN: raise ValueError`; does not emit oracle_source"
       }
     ]
   },
-  "oracle_source is a hardcoded constant not a recorded fact": {
-    "verifiedAt": "2026-07-10",
-    "checks": [
-      {
-        "artifact": "plugin/acc-common/repo_adapter.py",
-        "hash": "d85e27f85ee5bcfcf6cb5a05aade9dddaf70c1c3d14929f959d9399df6688230",
-        "claim": "hardcoded \"oracle_source\": \"cpu_ref\" constant"
-      },
-      {
-        "artifact": "plugin/acc-common/catlass_adapter.py",
-        "hash": "26819b76787149cd168b2e868c988901e89c42f624188b99de3d31bfa0aff754",
-        "claim": "hardcoded \"oracle_source\": \"cpu_ref\" constant"
-      },
-      {
-        "artifact": "plugin/acc-common/gen_cases.py",
-        "hash": "a9a2ee4d2e1868efcf3c4e1114603a1320f9e0b5548180a922de51625d3987d5",
-        "claim": "gen_cases does not produce oracle_source field at all"
-      }
-    ]
-  },
-  "select_standard silently maps unknown oracle to ascendoptest_default": {
-    "verifiedAt": "2026-07-10",
-    "checks": [
-      {
-        "artifact": "plugin/acc-common/precision_policy.py",
-        "hash": "6b8a6e6ef2b916aeb4fe653b4bca2459cb7a6855bacd48d4e6c8c2ed21c48fb1",
-        "claim": "select_standard ends with catch-all `return ASCENDOPTEST_DEFAULT` for numerical oracle not in {mere_mare,atk_double}"
-      }
-    ]
-  },
   "Real-NPU runner supports only float32 and float16": {
-    "verifiedAt": "2026-07-10",
+    "verifiedAt": "2026-07-15",
     "checks": [
       {
         "artifact": "plugin/acc-common/repo_adapter.py",
-        "hash": "d85e27f85ee5bcfcf6cb5a05aade9dddaf70c1c3d14929f959d9399df6688230",
+        "hash": "683bfc9ecb689f04e50bd91fd65179aecf7fdbcc8b50bb243f40a0a0d57a3521",
         "claim": "_NP = {float32, float16}; unsupported dtype raises ValueError (fail-closed)"
       }
     ]

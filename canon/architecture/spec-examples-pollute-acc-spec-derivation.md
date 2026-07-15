@@ -1,6 +1,6 @@
 ---
 title: Spec examples pollute acc-spec derivation
-updated: 2026-07-14
+updated: 2026-07-15
 status: proposed
 ---
 
@@ -20,4 +20,4 @@ status: proposed
 
 **残留边界（故本页 `proposed`）**：① 隔离是「改指向 + 迁位置 + 位置回归测试 + prompt 纪律」四件，**非文件系统沙箱**——NL agent 仍物理可 `Read` `samples/`，防污染靠纪律；② 「agent 确实被锚定」这一**因果**由 transcript 复盘推断、未机械坐实（自产 spec 与样例逐项一致，但 derivation 真做了、挂了出处，无法排除也无法坐实必然锚定）。旧 `verified` 认定（基于修复前的 taskdoc:5 指向 + `specs/` 含真答案）已随本次修复过时，降回 `proposed`、待 `bureau:review` 复核。
 
-**Sources.** [[session 0513d745-9176-41f0-8f4b-cb7a2d19ff86 · 2026-07-10]]（2026-07-13：Q1 发现；2026-07-14：Q1 修复落地）
+**Sources.** [[session 0513d745-9176-41f0-8f4b-cb7a2d19ff86 · 2026-07-10]]（2026-07-13：Q1 发现），[[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]（2026-07-14/15：Q1 修复落地 `45084c0`）

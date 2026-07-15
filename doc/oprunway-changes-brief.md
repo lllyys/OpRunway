@@ -14,6 +14,10 @@
 6. 远程 NPU 环境（哪台机、catlass 在哪 build、是否进 Docker）待用户提供后补进 CLAUDE.md。
 7. 优先级（Codex 排序）：Q3>Q4>Q5>Q6>Q1>Q2>Q8>Q9>Q7。完整见 `doc/oprunway-design.md` §13。
 
+## 2026-07-15
+
+- **bureau 刷新（compile 本会话 minute → canon）** —— 把 V1/Q1/Q9/Q7 这一波落地正式编进 canon：新建 3 页（golden 只来自任务书指定测试方法「最高律令」/ golden 固定 torch(CPU) / AscendOpTest 自己没 golden 源），2 个「已被 Q9 治好」的缺陷页（`oracle_source` 写死 cpu_ref、`select_standard` 静默降级）降 verified→proposed 并注明「描述修复前状态、指纹已撤、待 review 重核」，其余 6 页补本会话出处 + 落地注（机器门加两门/单测 28→90、gen_cases golden 定 torch、V1 已落地、golden 侧已止血等）。过 **codex 散文门一轮**（5 finding 全修：主要是把 dtype 覆盖门「堵住收窄」的**过度声称**改成「仅半闭合」——`dtype_required` 仍取自 caseset 自报、任务书权威来源未接通；oracle_source 侧才是彻底闭合）。结构体检 0 悬链/0 矛盾/0 账本漂移。**未 push。**
+
 ## 2026-07-14
 
 - **Q7 dtype 覆盖门 + Q9 oracle_source 门校（gate-must-check-the-effective-object）** —— 两门都在 `validate_acceptance_state`：① **Q9 oracle_source 门校**（`evidence.oracle_source` ∈ 六枚举 且 == 映射(caseset `golden_source`)，防伪造 evidence 篡改）；② **Q7 dtype 覆盖门**（`dtype_required` 未被**真实用例**的 dtype 覆盖、且无 `dtype_deferred` 挂账 → BLOCKED；**用真实 cases 判、不信自报 `dtype_tested`**——防「跑子集报全」dtype 粒度）。spec 加 `dtype_required`（IsClose 权威 {fp32,fp16,bf16,int32}+deferred gap；Sign/Equal/Neg=`needs_user`）/`dtype_tested`；gen_cases 据真实 cases 派生 `dtype_tested`。fan-out 3 路核验（门正确性/不误伤 SOUND；fail-closed 抓出「信自报」弱点 → 已改真实 cases 对账）+ **codex 9 维门**（2 High：抗坏输入 TypeError 崩、删 required 绕过对账 → 均修；+#4 doc/#5 specs）。**a3 真 torch 全量 14 测绿**。剩余：run_workflow 级「Q7/Q9 失败→BLOCKED」端到端断言（codex #3，a3 e2e 已跑真实流）、legacy 无 dtype_required 的宽容（migration tradeoff）。

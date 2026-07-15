@@ -1,6 +1,6 @@
 ---
 title: gen_cases GOLDEN hardcodes four elementwise operators
-updated: 2026-07-10
+updated: 2026-07-15
 status: verified
 ---
 
@@ -21,7 +21,13 @@ development-grade evidence、不出验收裁决（见 [[Synthetic catlass demo c
 golden 的源码归属仍待 ADR 确认）。另注：`GOLDEN` 里的 golden 是**函数**，不是文件，与
 「加算子 = spec + golden + runner 三文件」的口头说法不符。
 
-**Verified.** `plugin/acc-common/gen_cases.py`（2026-07-10）：`GOLDEN = {"IsClose"…"Sign"…"Equal"…"Neg"…}`
-四键、`if op not in GOLDEN: raise ValueError` 均存在；指纹记 `_verify.json`。
+**后端已定为 torch（2026-07-15，Q9）**：四键结构不变（仍是硬注册四算子、`if op not in GOLDEN: raise`），
+但每个 golden 的实现从「agent 自撰 numpy」改为**恒走 torch(CPU)**——`GOLDEN` 值现为 `("torch <fn>", golden_fn)`
+二元组、`golden_source`/下游 `oracle_source` 恒 `torch_ref`，torch 缺失 → fail-closed（不回退 numpy）。理由与后端选择见
+[[Golden is fixed to torch on CPU for determinism]] 与 [[Golden and precision standard come only from the task-doc-specified method]]。
+本页claim（四算子硬注册、加第五个须改源码）**不受影响、仍 verified**。
 
-**Sources.** [[session 0513d745-9176-41f0-8f4b-cb7a2d19ff86 · 2026-07-10]]
+**Verified.** `plugin/acc-common/gen_cases.py`（2026-07-15 重核，指纹匹配）：`GOLDEN = {"IsClose"…"Sign"…"Equal"…"Neg"…}`
+四键、`if op not in GOLDEN: raise ValueError` 均存在；gen_cases 只出 `golden_source`、不直出 `oracle_source`（映射在 adapter 层）。指纹记 `_verify.json`。
+
+**Sources.** [[session 0513d745-9176-41f0-8f4b-cb7a2d19ff86 · 2026-07-10]]，[[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]（2026-07-15：Q9 golden 定 torch 后端）

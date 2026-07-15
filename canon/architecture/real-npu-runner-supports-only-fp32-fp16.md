@@ -1,6 +1,6 @@
 ---
 title: Real-NPU runner supports only float32 and float16
-updated: 2026-07-10
+updated: 2026-07-15
 status: verified
 ---
 
@@ -19,7 +19,8 @@ dtype 集由 `spec.params[].dtype` 驱动，没人拿算子 `op_def` 去核对 s
 → **真机 runner 仅 2 种**。例：IsClose 的 op_def 声明 4 种输入 dtype（fp32/fp16/bf16/int32），真机只跑得了前 2 种
 （此 4 种统计源在 `repos/` 内、gitignore 不入库，属 proposed，见 [[Target hardware and dtype set are determined per operator from taskdoc and op_def]]）。
 
-**Verified.** `plugin/acc-common/repo_adapter.py`（2026-07-10）：`_NP = {"float32"…"float16"…}`、
-未支持 dtype `raise` 均存在。指纹记 `_verify.json`。
+**Verified.** `plugin/acc-common/repo_adapter.py`（2026-07-15 重核，指纹匹配）：`_NP = {"float32"…"float16"…}`、
+未支持 dtype `raise` 均存在。本会话 Q9 改的是同文件的 `oracle_source` 映射（`cpu_ref` 常量 → 据 `golden_source` 据实映射）与
+`_deploy.tgz` 打包位置，**`_NP` Track C 门未动**、claim 不变；指纹重录 `_verify.json`。
 
-**Sources.** [[session 0513d745-9176-41f0-8f4b-cb7a2d19ff86 · 2026-07-10]]
+**Sources.** [[session 0513d745-9176-41f0-8f4b-cb7a2d19ff86 · 2026-07-10]]，[[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]（2026-07-15：repo_adapter 因 Q9 改动重核、`_NP` 未变）
