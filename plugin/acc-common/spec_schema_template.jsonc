@@ -35,7 +35,8 @@
     "standard": "<ascendoptest_default | ecosystem_mere_mare | exact | behavioral，据 oracle+verify_mode 映射>",
     "tolerance_policy_id": "<spec 级摘要：exact→exact；ascendoptest→ascendoptest_default；mere_mare/atk_double→ecosystem_mere_mare>",
     "threshold": "<number：exact→0；numerical→主 dtype 默认（AscendOpTest fp16≈1e-3 等），标『(推断/待工具核实)』>",
-    "threshold_source": "<阈值出处说明>"
+    "threshold_source": "<阈值出处说明>",
+    "case_target": "<int，精度用例目标数；缺省 50。acc-spec 运行时 AskUserQuestion 问用户（建议 50），可先 gen_cases --dry-run 拿 [forced_total(=强制下限 S), pool_max] 区间呈现；须 ≥1（0/负→gen_cases fail-fast，堵零用例空跑冒充验收）。gen_cases 按 opbase §1 覆盖-预算铺到此数（覆盖驱动、封顶；< S 抬到 S、> pool_max 封顶且数量门软化 PASS+note）>"
   },
   "perf": {
     "baseline": "<tbe | gpu_external>",

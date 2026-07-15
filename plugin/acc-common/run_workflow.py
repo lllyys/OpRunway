@@ -83,48 +83,59 @@ def run(spec_path, mode="mock", out_dir="reports/_run", defect=None, perf_slow=N
     _dump(verdict, "verdict.json")
     o = verdict["overall"]
     print(f"[Task2 run+validate] 裁决={o['verdict']} {o['counts']}")
-    # Task 3（new_example 会写真基线 _real_baseline.json；否则 mock；T8：--gpu-baseline / spec gpu_external）
-    real_bl = os.path.join(work, "_real_baseline.json")
-    expect_gpu = (gpu_baseline is not None
-                  or spec.get("perf", {}).get("baseline") in ("gpu", "gpu_external"))
-    expect_source = "gpu_external" if expect_gpu else None
     gpu_prov = None
-    baseline_blocked_status = None  # gb-9：标杆被判废时携专门挂起码（区分「口径不可比」vs「标杆无效」vs「缺标杆」）
-    if gpu_baseline is not None:  # T8：解析外部 GPU 标杆(consumer 侧)；hard error→baseline None→挂起(非 PASS)
-        import gpu_baseline as gpubl
-        baseline, parse_report = gpubl.parse_gpu_baseline(gpu_baseline, caseset)
-        _dump(parse_report, "gpu_baseline_parse_report.json")
-        if baseline is None:  # gb-9：别把「有硬错的 baseline=None」等同「缺标杆」——据 parse 落正确挂起码
-            baseline_blocked_status = parse_report.get("blocked_status") or "blocked_gpu_baseline_invalid"
-        gpu_prov = {"source": expect_source, "path": gpu_baseline,
-                    "contract_version": parse_report.get("contract_version"),
-                    "parse_report": "gpu_baseline_parse_report.json",
-                    "hard_errors": parse_report.get("hard_errors", 0),
-                    "blocked_status": baseline_blocked_status}
-    elif os.path.exists(real_bl):
-        baseline = json.load(open(real_bl, encoding="utf-8"))
-    elif expect_gpu:  # 期待 GPU 标杆但没给 → 正规挂起（perf_compare 产 blocked_wait_gpu_benchmark）
-        baseline = None
+    # §精度门前置 + fail-fast（用户 2026-07-15，评审 #4）：精度非全过（pass/passed_with_risk）→ **跳过 Task3 性能**、
+    # 提前结束。**不 early-return**——照走下方统一 overall/门流程（gate/runner_source 优先级不变、prec==fail 自然
+    # 落 FAIL(精度)），只是不跑 perf_compare、不把 task3 加入门。fail-fast 粒度=跑完精度再判（精度已在 Task2 全跑）。
+    precision_ok = o["verdict"] in ("pass", "passed_with_risk")
+    if not precision_ok:
+        report = {"op": spec["op"], "baseline_source": None, "target_ratio": None, "per_case": [],
+                  "notes": [f"精度未全过（{o['verdict']}）→ 跳过性能测试（fail-fast，精度已全跑再判）"],
+                  "summary": {"perf_cases": 0, "达标": 0, "blocked": 0, "status": "skipped_precision_gate"}}
+        _dump(report, "perf_report.json")
+        print(f"[Task3 perf_compare] 跳过（精度={o['verdict']} 未全过 → fail-fast）")
     else:
-        baseline = perf_compare.mock_baseline(spec, evidence, slow_cases=perf_slow)
-    if baseline is not None:
-        _dump(baseline, "baseline.json")
-    report = perf_compare.perf_compare(spec, caseset, evidence, baseline, expect_source=expect_source,
-                                       baseline_blocked_status=baseline_blocked_status)
-    if report["summary"].get("status") == "exception":  # T6：例外态渲染仿真图，门循环前落盘+记 sha
-        import perf_sim_plot
-        svg_name = f"perf_sim_{spec['op'].lower()}.svg"
-        svg_path = os.path.join(out_dir, svg_name)
-        perf_sim_plot.render_svg(report["simulation"], svg_path)
-        report["simulation_plot"] = {"file": svg_name, "sha256": perf_sim_plot.sha256_of(svg_path)}
-    _dump(report, "perf_report.json")
-    print(f"[Task3 perf_compare] {report['summary']} (基线={report['baseline_source']})")
+        # Task 3（new_example 会写真基线 _real_baseline.json；否则 mock；T8：--gpu-baseline / spec gpu_external）
+        real_bl = os.path.join(work, "_real_baseline.json")
+        expect_gpu = (gpu_baseline is not None
+                      or spec.get("perf", {}).get("baseline") in ("gpu", "gpu_external"))
+        expect_source = "gpu_external" if expect_gpu else None
+        baseline_blocked_status = None  # gb-9：标杆被判废时携专门挂起码（区分「口径不可比」vs「标杆无效」vs「缺标杆」）
+        if gpu_baseline is not None:  # T8：解析外部 GPU 标杆(consumer 侧)；hard error→baseline None→挂起(非 PASS)
+            import gpu_baseline as gpubl
+            baseline, parse_report = gpubl.parse_gpu_baseline(gpu_baseline, caseset)
+            _dump(parse_report, "gpu_baseline_parse_report.json")
+            if baseline is None:  # gb-9：别把「有硬错的 baseline=None」等同「缺标杆」——据 parse 落正确挂起码
+                baseline_blocked_status = parse_report.get("blocked_status") or "blocked_gpu_baseline_invalid"
+            gpu_prov = {"source": expect_source, "path": gpu_baseline,
+                        "contract_version": parse_report.get("contract_version"),
+                        "parse_report": "gpu_baseline_parse_report.json",
+                        "hard_errors": parse_report.get("hard_errors", 0),
+                        "blocked_status": baseline_blocked_status}
+        elif os.path.exists(real_bl):
+            baseline = json.load(open(real_bl, encoding="utf-8"))
+        elif expect_gpu:  # 期待 GPU 标杆但没给 → 正规挂起（perf_compare 产 blocked_wait_gpu_benchmark）
+            baseline = None
+        else:
+            baseline = perf_compare.mock_baseline(spec, evidence, slow_cases=perf_slow)
+        if baseline is not None:
+            _dump(baseline, "baseline.json")
+        report = perf_compare.perf_compare(spec, caseset, evidence, baseline, expect_source=expect_source,
+                                           baseline_blocked_status=baseline_blocked_status)
+        if report["summary"].get("status") == "exception":  # T6：例外态渲染仿真图，门循环前落盘+记 sha
+            import perf_sim_plot
+            svg_name = f"perf_sim_{spec['op'].lower()}.svg"
+            svg_path = os.path.join(out_dir, svg_name)
+            perf_sim_plot.render_svg(report["simulation"], svg_path)
+            report["simulation_plot"] = {"file": svg_name, "sha256": perf_sim_plot.sha256_of(svg_path)}
+        _dump(report, "perf_report.json")
+        print(f"[Task3 perf_compare] {report['summary']} (基线={report['baseline_source']})")
 
     ps = report["summary"]
     # 验收门（硬 blocker）：三级机器门读**落盘产物**独立复核（防跑子集/放宽阈值/混 e2e）。
-    # 无性能要求的算子不跑 task3 门（免因缺性能用例误挡）。
+    # 无性能要求的算子不跑 task3 门（免因缺性能用例误挡）；精度未全过跳了 Task3 → 也不加 task3 门（评审 #4）。
     gate_stages = ["task1", "task2"]
-    if ps.get("perf_cases", 0) > 0 or spec.get("perf", {}).get("baseline"):
+    if precision_ok and (ps.get("perf_cases", 0) > 0 or spec.get("perf", {}).get("baseline")):
         gate_stages.append("task3")
     gate_errs = {}
     for st in gate_stages:

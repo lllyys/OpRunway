@@ -40,6 +40,23 @@ def _u32_as_f32(u):
     return np.array([u], dtype=np.uint32).view(np.float32).astype(np.float32)
 
 
+def _find_case(cs, *, dtype=None, dim="精度", regular=True, exclude_na=True):
+    """§1 覆盖-预算重写后 case id 变——按属性找 case（不硬编码 id）。
+    regular=True → 只取常规网格/白名单（tags 含「常规」或「白名单」），排除 §1.4 特殊场景
+    （inf/nan/empty——那些 torch 与 np 参考在边界值上可不同、且空 case 无 golden）。"""
+    for c in cs["cases"]:
+        if dtype is not None and c["inputs"][0]["dtype"] != dtype:
+            continue
+        if dim is not None and dim not in c.get("dims", []):
+            continue
+        if exclude_na and c.get("expected", {}).get("compare") == "na":
+            continue
+        if regular and not (set(c.get("tags", [])) & {"常规", "白名单"}):
+            continue
+        return c
+    raise AssertionError(f"未找到 case: dtype={dtype} dim={dim} regular={regular}")
+
+
 # ============================================================ bf16 位级 codec ===
 class Bf16CodecTest(unittest.TestCase):
     def test_round_half_to_even_down(self):
@@ -137,16 +154,16 @@ class GenCasesDtypeTest(unittest.TestCase):
         return next(c for c in self.cs["cases"] if c["id"] == cid)
 
     def test_int_golden_native_and_exact_compare(self):
-        for cid in ("sign_int16_16_varied", "sign_int32_16_varied"):
-            c = self._case(cid)
+        for dtype in ("int16", "int32"):
+            c = _find_case(self.cs, dtype=dtype)               # §1 后按 dtype 找（非硬编码 id）
             g = np.load(os.path.join(self.d, c["expected"]["golden_path"]))
-            self.assertTrue(np.issubdtype(g.dtype, np.integer), cid)  # int golden 原生 int
-            self.assertTrue(set(np.unique(g)).issubset({-1, 0, 1}), cid)  # sign∈{-1,0,1}
+            self.assertTrue(np.issubdtype(g.dtype, np.integer), dtype)  # int golden 原生 int
+            self.assertTrue(set(np.unique(g)).issubset({-1, 0, 1}), dtype)  # sign∈{-1,0,1}
             self.assertEqual(c["expected"]["compare"], "exact_equal")
             self.assertEqual(c["expected"]["standard"], P.EXACT)
 
     def test_bf16_golden_fp32_on_grid_and_storage_uint16(self):
-        c = self._case("sign_bfloat16_16_varied")
+        c = _find_case(self.cs, dtype="bfloat16")
         g = np.load(os.path.join(self.d, c["expected"]["golden_path"]))
         self.assertEqual(g.dtype, np.float32)                   # golden = fp32-on-grid
         self.assertTrue(set(np.unique(g)).issubset({-1.0, 0.0, 1.0}))
@@ -155,7 +172,7 @@ class GenCasesDtypeTest(unittest.TestCase):
 
     def test_bf16_x_bin_physical_uint16_consistent_with_golden(self):
         """layout 字节契约（acceptance#6）：x{j}.npy 存 uint16 物理位模式；decode 后与 golden 一致（分造但同源）。"""
-        c = self._case("sign_bfloat16_4x4_varied")
+        c = _find_case(self.cs, dtype="bfloat16")               # 常规 case：有限值，torch.sign==np.sign
         x_bin = np.load(os.path.join(self.d, c["inputs"][0]["path"]))
         self.assertEqual(x_bin.dtype, np.uint16)                # 物理是 uint16、**非** fp32
         logical = GC._bf16_uint16_to_f32(x_bin)                 # decode 回逻辑
@@ -163,8 +180,8 @@ class GenCasesDtypeTest(unittest.TestCase):
         np.testing.assert_array_equal(np.sign(logical), g)      # golden == sign(decode(X_bin))
 
     def test_native_dtype_no_storage_field(self):
-        for cid in ("sign_float32_16_varied", "sign_int32_16_varied"):
-            self.assertNotIn("storage_dtype", self._case(cid)["inputs"][0])  # 向后兼容：native 不带
+        for dtype in ("float32", "int32"):
+            self.assertNotIn("storage_dtype", _find_case(self.cs, dtype=dtype)["inputs"][0])  # native 不带
 
     def test_case_origin_rule_ref_present(self):
         for c in self.cs["cases"]:
@@ -189,8 +206,10 @@ class SemanticIdTest(unittest.TestCase):
         finally:
             shutil.rmtree(d1, ignore_errors=True); shutil.rmtree(d2, ignore_errors=True)
 
-    def test_id_stable_across_dtype_expansion(self):
-        """扩面（加 dtype）不打乱既有 dtype 的 id（弃索引 id 的核心收益·codex#12）。"""
+    def test_data_stable_per_id_across_dtype_expansion(self):
+        """§1 per-case 独立种子（评审 #7）：同 case_id 在不同 dtype 集下**数据字节一致**（数据只依赖稳定 id、
+        与 dtype 集/target/采样解耦）。注：§1 覆盖-预算下**哪些 id 被 emit** 随预算采样变，故不再断言「id 集
+        ⊆ 扩面后集」；新不变式是「同 id → 同数据」。"""
         two = {"op": "Sign", "verify_mode": "numerical", "params_source": "fixture",
                "params": [{"name": "self", "io": "in", "dtype": ["float32", "float16"]},
                           {"name": "out", "io": "out", "dtype": ["float32", "float16"]}],
@@ -198,10 +217,14 @@ class SemanticIdTest(unittest.TestCase):
                "perf": {"baseline": "tbe", "target_ratio": 0.95}}
         d1, d2 = tempfile.mkdtemp(), tempfile.mkdtemp()
         try:
-            ids_two = {c["id"] for c in GC.gen_cases(two, d1)["cases"]}
-            ids_five = {c["id"] for c in GC.gen_cases(_spec(_SIGN_FX), d2)["cases"]}
-            self.assertTrue(ids_two.issubset(ids_five))          # fp32/fp16 id 原样保留
-            self.assertIn("sign_float32_16_varied", ids_two)
+            c2 = {c["id"]: c for c in GC.gen_cases(two, d1)["cases"]}
+            c5 = {c["id"]: c for c in GC.gen_cases(_spec(_SIGN_FX), d2)["cases"]}
+            common = set(c2) & set(c5)
+            self.assertTrue(common, "两次生成应有共同 case_id（forced 特殊/白名单稳定）")
+            for cid in sorted(common):
+                x2 = np.load(os.path.join(d1, c2[cid]["inputs"][0]["path"]))
+                x5 = np.load(os.path.join(d2, c5[cid]["inputs"][0]["path"]))
+                np.testing.assert_array_equal(x2, x5, err_msg=f"{cid} 数据应稳定（per-case 种子）")
         finally:
             shutil.rmtree(d1, ignore_errors=True); shutil.rmtree(d2, ignore_errors=True)
 
@@ -225,9 +248,12 @@ class AttrMatrixTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.d, ignore_errors=True)
 
-    def test_exactly_len_attr_matrix_cases(self):
-        attr_cases = [c for c in self.cs["cases"] if c["expected"]["case_origin"].startswith("attr_matrix")]
-        self.assertEqual(len(attr_cases), len(self.spec["attr_matrix"]))  # 恰好 len(attr_matrix)
+    def test_attr_cartesian_covers_equal_nan(self):
+        """§1.3 attr 作正交轴（笛卡尔展开，取值集从 attr_matrix 派生）——equal_nan T/F 都出现在用例里。
+        取代旧「恰好 len(attr_matrix) 条单代表点 case」（attr 不再坍缩到单点）。"""
+        vals = {c["attrs"].get("equal_nan") for c in self.cs["cases"] if "equal_nan" in c["attrs"]}
+        self.assertIn(True, vals)
+        self.assertIn(False, vals)
 
     def test_golden_uses_case_attrs(self):
         for c in self.cs["cases"]:
@@ -239,17 +265,19 @@ class AttrMatrixTest(unittest.TestCase):
             recomputed = GC.golden_isclose([x1, x2], c["attrs"])
             np.testing.assert_array_equal(recomputed, g)         # golden 用该 case 的 attrs 算
 
-    def test_equal_nan_true_has_nan_data(self):
-        found = False
-        for c in self.cs["cases"]:
-            if c["attrs"].get("equal_nan") is True and "attr矩阵" in c.get("tags", []):
-                x1 = np.load(os.path.join(self.d, c["inputs"][0]["path"]))
-                x2 = np.load(os.path.join(self.d, c["inputs"][1]["path"]))
-                self.assertTrue(np.isnan(x1).any() or np.isnan(x2).any())
-                g = np.load(os.path.join(self.d, c["expected"]["golden_path"]))
-                self.assertTrue(g.any() and (~g).any())          # 覆盖 True/False
-                found = True
-        self.assertTrue(found, "attr_matrix 应含 equal_nan=True 的 NaN case")
+    def test_nan_special_and_equal_nan_covered(self):
+        """§1.4 NaN 特殊场景 + §1.3 equal_nan 覆盖（两条**独立**覆盖）。
+        ⚠ 偏离（见报告）：§1 不再把 equal_nan=True 与 aligned-NaN 数据**交叉**在同一 case（旧 nanpair 行为）——
+        equal_nan 由 attr 笛卡尔覆盖、NaN 由 §1.4 特殊场景覆盖，二者不再强制交叉。"""
+        en = {c["attrs"].get("equal_nan") for c in self.cs["cases"] if "equal_nan" in c["attrs"]}
+        self.assertTrue({True, False}.issubset(en), "equal_nan T/F 应都覆盖")
+        nan_cases = [c for c in self.cs["cases"]
+                     if not P.is_integer_dtype(c["inputs"][0]["dtype"])
+                     and c["expected"].get("compare") != "na"
+                     and "nan" in c["id"].split("_")]
+        self.assertTrue(nan_cases, "应有 §1.4 NaN 特殊场景用例")
+        x1 = np.load(os.path.join(self.d, nan_cases[0]["inputs"][0]["path"]))
+        self.assertTrue(np.isnan(x1).any(), "NaN 特殊场景输入应含 NaN")
 
     def test_no_attr_matrix_backward_compat(self):
         """缺省无 attr_matrix → 与权威 isclose.spec.json 用例数/id 一致（不引入 attr case）。"""
@@ -262,8 +290,8 @@ class AttrMatrixTest(unittest.TestCase):
             shutil.rmtree(d1, ignore_errors=True); shutil.rmtree(d2, ignore_errors=True)
 
     def test_int_near_far_both_hit(self):
-        """codex#13：int IsClose near/far 整数网格 → golden 各命中 True/False。"""
-        c = next(x for x in self.cs["cases"] if x["id"] == "isclose_int32_16_pairint")
+        """codex#13：int IsClose 整数网格 → golden 各命中 True/False（exact bool 边界覆盖）。"""
+        c = _find_case(self.cs, dtype="int32", dim="精度")      # §1 后按 dtype 找（非硬编码 id）
         g = np.load(os.path.join(self.d, c["expected"]["golden_path"]))
         self.assertTrue(g.any() and (~g).any())
 
@@ -340,12 +368,14 @@ class MockGateExpandedTest(unittest.TestCase):
 
     def test_defect_on_int_precision_fail_gate_not_blocked(self):
         """codex#3：int case 注 defect → validator FAIL(精度)，但门 task2 仍 PASSED（不被盖成 BLOCKED）。"""
-        cs, ev, vd = _run_pipeline(_spec(_SIGN_FX), self.d, defect=["sign_int32_16_varied"])
+        did = _find_case(GC.gen_cases(_spec(_SIGN_FX), tempfile.mkdtemp()), dtype="int32")["id"]
+        cs, ev, vd = _run_pipeline(_spec(_SIGN_FX), self.d, defect=[did])
         self.assertEqual(vd["overall"]["verdict"], "fail")        # 合法精度 fail
         self.assertEqual(self._errs("task2"), [])                 # 门不重判 verdict、不 BLOCK
 
     def test_defect_on_bf16_precision_fail(self):
-        cs, ev, vd = _run_pipeline(_spec(_SIGN_FX), self.d, defect=["sign_bfloat16_16_varied"])
+        did = _find_case(GC.gen_cases(_spec(_SIGN_FX), tempfile.mkdtemp()), dtype="bfloat16")["id"]
+        cs, ev, vd = _run_pipeline(_spec(_SIGN_FX), self.d, defect=[did])
         self.assertEqual(vd["overall"]["verdict"], "fail")
 
     def test_subset_after_expansion_fails_gate_task1(self):
@@ -358,7 +388,11 @@ class MockGateExpandedTest(unittest.TestCase):
 
     def test_tamper_threshold_fails_gate_task2(self):
         cs, ev, vd = _run_pipeline(_spec(_SIGN_FX), self.d)
-        ev["evidence"][0]["precision"]["threshold"] = 0.5         # 偷偷放宽 digest
+        # 篡改一条**非 na**（有 threshold）精度证据（§1 后 evidence[0] 可能是空 Tensor na 用例、无 threshold）
+        idx = next(i for i, e in enumerate(ev["evidence"])
+                   if isinstance(e.get("precision"), dict) and not e["precision"].get("na")
+                   and "threshold" in e["precision"])
+        ev["evidence"][idx]["precision"]["threshold"] = 0.5      # 偷偷放宽 digest
         _wj(os.path.join(self.d, "evidence.json"), ev)
         self.assertTrue(any("防放宽" in e and "threshold" in e for e in self._errs("task2")))
 
@@ -417,7 +451,8 @@ class SubprocessE2ETest(unittest.TestCase):
             self.assertEqual(r.returncode, 0, fx + "\n" + r.stdout + r.stderr)
 
     def test_fixture_int_defect_exit1_gate_passed(self):
-        r = self._run(_SIGN_FX, "--defect", "sign_int32_16_varied")
+        did = _find_case(GC.gen_cases(_spec(_SIGN_FX), tempfile.mkdtemp()), dtype="int32")["id"]
+        r = self._run(_SIGN_FX, "--defect", did)
         self.assertEqual(r.returncode, 1)
         acc = _rj(os.path.join(self.d, "acceptance.json"))
         self.assertEqual(acc["state"], "FAILED_PRECISION")
@@ -446,28 +481,19 @@ def _isclose_bf16_nan_spec():
 class GenCasesSecurityNegativeTest(unittest.TestCase):
     """gen_cases 对抗式负例——每条对应一个已实跑复现的 exploit。"""
 
-    def test_bf16_equal_nan_effective_not_fake_coverage(self):
-        """finding #10：bf16 dtype0 + attr_matrix equal_nan **不再假覆盖**——走 nanpair(含 aligned-NaN)、
-        两版 golden 有别；旧洞里 bf16 被排除出 nanpair → pairfar 无 NaN → 两版 golden 相等 → 假覆盖。"""
+    def test_bf16_equal_nan_covered_cartesian(self):
+        """§1.3：bf16 IsClose 的 equal_nan 由 attr 笛卡尔覆盖（T/F 都出现）。
+        ⚠ 偏离（见报告）：§1 不再走 nanpair 把 equal_nan=True 与 aligned-NaN **交叉**证「真起作用」（旧 finding #10）——
+        equal_nan 结构性覆盖 + NaN §1.4 特殊场景分别覆盖，`_assert_equal_nan_effective` 不再触发（新 §1 不产 nanpair）。"""
         d = tempfile.mkdtemp()
         try:
-            cs = GC.gen_cases(_isclose_bf16_nan_spec(), d)      # 生成不报错即证 _assert_equal_nan_effective 通过
-            attr_cases = [c for c in cs["cases"] if "attr矩阵" in c.get("tags", [])]
-            self.assertTrue(attr_cases)
-            for c in attr_cases:                                # 全走 nanpair（不是 pairfar）
-                self.assertIn("nanpair", c["id"])
-            c0 = attr_cases[0]
-            a = GC._bf16_uint16_to_f32(np.load(os.path.join(d, c0["inputs"][0]["path"])))
-            b = GC._bf16_uint16_to_f32(np.load(os.path.join(d, c0["inputs"][1]["path"])))
-            self.assertTrue((np.isnan(a) & np.isnan(b)).any())  # 输入确含 aligned-NaN
-            g_t = np.isclose(a, b, rtol=1e-5, atol=1e-8, equal_nan=True)
-            g_f = np.isclose(a, b, rtol=1e-5, atol=1e-8, equal_nan=False)
-            self.assertFalse(np.array_equal(g_t, g_f))          # equal_nan 翻转后 golden 有别（真覆盖）
+            cs = GC.gen_cases(_isclose_bf16_nan_spec(), d)
+            en = {c["attrs"].get("equal_nan") for c in cs["cases"] if "equal_nan" in c["attrs"]}
+            self.assertTrue({True, False}.issubset(en), "equal_nan T/F 应都覆盖")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
     def test_attr_matrix_unknown_key_fail_fast(self):
-        """finding #12：attr_matrix variant 含 spec 未声明 attr key（{foo:...}）→ fail-fast（防伪造覆盖）。"""
         sp = _isclose_bf16_nan_spec()
         sp["attr_matrix"] = [{"foo": 12345, "rtol": 1e-3}]
         with self.assertRaises(ValueError):

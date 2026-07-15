@@ -180,15 +180,21 @@ def gate_task1(d, errs):
         exp = c.get("expected") if isinstance(c.get("expected"), dict) else {}
         if not exp.get("golden_path"):
             errs.append(f"{cid}: 无 golden_path")
-        if exp.get("threshold") is None:
-            errs.append(f"{cid}: 缺 expected.threshold")
-        # T5 结构化口径必填（缺 → 无法做三处一致的防放宽门）
-        if not exp.get("standard"):
-            errs.append(f"{cid}: 缺 expected.standard（精度标准未声明）")
-        if not exp.get("tolerance_policy_id"):
-            errs.append(f"{cid}: 缺 expected.tolerance_policy_id")
-        if not isinstance(exp.get("policy"), dict):
-            errs.append(f"{cid}: 缺结构化 expected.policy")
+        # §1.4 空 Tensor 功能用例（compare=na，numel=0）：无精度口径可判 → 豁免阈值/标准/policy 完整性
+        #  （validator 判 na）；防伪造：na 仅对真空 Tensor（某 input shape 含 0）合法，否则记 error。
+        if exp.get("compare") == "na":
+            if not _case_strict_empty(c):    # codex #4：严格真空（拒 shape:[false]/[0.0] 伪造）
+                errs.append(f"{cid}: expected.compare=na 但非严格真空 Tensor（伪造 na 跳精度门，拒绝）")
+        else:
+            if exp.get("threshold") is None:
+                errs.append(f"{cid}: 缺 expected.threshold")
+            # T5 结构化口径必填（缺 → 无法做三处一致的防放宽门）
+            if not exp.get("standard"):
+                errs.append(f"{cid}: 缺 expected.standard（精度标准未声明）")
+            if not exp.get("tolerance_policy_id"):
+                errs.append(f"{cid}: 缺 expected.tolerance_policy_id")
+            if not isinstance(exp.get("policy"), dict):
+                errs.append(f"{cid}: 缺结构化 expected.policy")
         if not c.get("dims"):
             errs.append(f"{cid}: 无 dims（功能/精度/性能维度）")
     dup = [k for k, v in Counter(ids).items() if v > 1]
@@ -256,6 +262,12 @@ def gate_task2(d, errs):
     # T5：由「标量 threshold 相等」升级为「tolerance_policy_id + 结构化 policy 一致」（保留 threshold digest）。
     exp_by_id = {c["id"]: (c.get("expected") or {})
                  for c in cases if isinstance(c, dict) and c.get("id")}
+    # §1.4 空 Tensor 功能用例（compare=na，numel=0）：无精度 metrics/阈值 → 豁免精度证据完整性（validator 判 na）。
+    #  codex #4：Task2 **独立**复核真空（不依赖 Task1）——compare=na 且**真严格真空**才入豁免集；伪造 na（非真空）
+    #  不豁免 → 下方精度证据完整性照校、因缺字段被门 FAILED。
+    na_ids = {c["id"] for c in cases if isinstance(c, dict) and c.get("id")
+              and isinstance(c.get("expected"), dict) and c["expected"].get("compare") == "na"
+              and _case_strict_empty(c)}
     # Q9 oracle_source 门校用 precision_policy（纯 stdlib：ORACLE_SOURCES + oracle_source_from_golden，不拉 numpy）。
     # import 失败（几乎不会）→ 记 error、oracle 校跳过（但门 FAILED），不静默放过。
     try:
@@ -267,6 +279,8 @@ def gate_task2(d, errs):
         if not isinstance(e, dict) or not e.get("case_id"):
             continue
         cid = e["case_id"]
+        if cid in na_ids:
+            continue                                  # 空 Tensor 功能用例：无精度证据可校（validator→na）
         prec = e.get("precision")
         if not isinstance(prec, dict):
             errs.append(f"{cid}: evidence 缺 precision（证据不完整、不可信）")
@@ -303,13 +317,82 @@ def gate_task2(d, errs):
     # === A 方案：evidence.precision.metrics ↔ 磁盘产物 provenance 绑定（重算比对）===
     # 上文只校「阈值/口径三处一致」（防放宽），却全信 evidence 自报的 metrics **数值**；此段按 provenance 读产物、
     # 先校 sha、再依 caseset policy 重算 metrics 并逐字段比对，堵「伪造 bad_count=0 直接 pass」的自报数字洞。
-    _gate_precision_provenance(d, ev_list, exp_by_id, errs)
+    _gate_precision_provenance(d, [e for e in ev_list if isinstance(e, dict) and e.get("case_id") not in na_ids],
+                               exp_by_id, errs)  # 空 Tensor 功能用例无产物 provenance，过滤（validator→na）
     print(f"  精度裁决={ov.get('verdict')}(validator 判) | 证据覆盖={'一致' if cids == eids else '不一致'}")
 
 
 def _perf_finite_pos(x):
     """有限正数（拒 bool/None/NaN/inf/≤0）——挂起态 NPU 侧 us 完整性用。"""
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x > 0
+
+
+# §trivial-met 复核阈值：perf_compare 默认 perf_min_numel=4096；退化 case（numel<此）免测 perf。门据此复核
+# 「trivial 声明」防伪造（大 case 谎报 trivial 跳 perf）。默认 shape 阶梯里退化 case<256、大 shape≥65535，
+# 4096 落两者间的大间隙、无误伤；spec 若上调 perf_min_numel 超此，超出段的 trivial 会被门要求 scope（fail-closed 更严）。
+_GATE_TRIVIAL_MAX_NUMEL = 4096
+
+
+def _broadcast_shape(shapes):
+    """numpy 广播规则纯 py 实现：右对齐、每维 1 可广播到 N、冲突→None；维须非 bool 非负 int 否则 None。"""
+    out_rev, maxlen = [], max((len(s) for s in shapes), default=0)
+    for i in range(maxlen):
+        dim = 1
+        for s in shapes:
+            if i >= len(s):
+                continue
+            dd = s[len(s) - 1 - i]
+            if not isinstance(dd, int) or isinstance(dd, bool) or dd < 0:
+                return None
+            if dd == 1:
+                continue
+            if dim == 1:
+                dim = dd
+            elif dim != dd:
+                return None
+        out_rev.append(dim)
+    return list(reversed(out_rev))
+
+
+def _strict_empty_shape(shape):
+    """严格真空判定（codex #4）：shape 须非空 list、每维**非 bool 非负 int**、且至少一维严格==整数 0。
+    防伪造 shape:[false]/[0.0] 被 `0 in shape` 当作空 Tensor 蒙混（False==0、0.0==0）。"""
+    if not isinstance(shape, list) or not shape:
+        return False
+    for d in shape:
+        if not isinstance(d, int) or isinstance(d, bool) or d < 0:
+            return False
+    return 0 in shape                    # 此时全为非负 int，0 in 仅匹配整数 0
+
+
+def _case_strict_empty(case):
+    """case 是否**真空 Tensor**：某输入 shape 严格真空（codex #4，三处门/validator 共用口径）。"""
+    return isinstance(case, dict) and any(
+        isinstance(it, dict) and _strict_empty_shape(it.get("shape"))
+        for it in (case.get("inputs") or []))
+
+
+def _caseset_numels(d):
+    """{case_id: numel}（据全部输入 **broadcast 输出** numel，codex #1 防广播蒙混）；坏/不可广播 → None。
+    供 gate_task3 trivial 复核。"""
+    cs = _load(d, "caseset.json")
+    out = {}
+    if not (isinstance(cs, dict) and isinstance(cs.get("cases"), list)):
+        return out
+    for c in cs["cases"]:
+        if not (isinstance(c, dict) and c.get("id")):
+            continue
+        inp = c.get("inputs") or []
+        shapes = [it["shape"] for it in inp if isinstance(it, dict) and isinstance(it.get("shape"), list)]
+        n = None
+        if shapes and len(shapes) == len(inp):
+            bs = _broadcast_shape(shapes)
+            if bs is not None:
+                n = 1
+                for dd in bs:
+                    n *= dd
+        out[c["id"]] = n
+    return out
 
 
 def _pinned_file(d, rel):
@@ -684,6 +767,7 @@ def gate_task3(d, errs):
         errs.append(f"性能 timing_scope 不可比·NPU/基线口径不一致（不出结论）：{pr.get('notes')}")
     # blocked_wait_gpu_benchmark：正规挂起，不计完整性 error；NPU 侧完整性在下方 per_case 卡。
     per = pr.get("per_case") if isinstance(pr.get("per_case"), list) else []
+    numel_by_id = _caseset_numels(d)              # §trivial-met 复核用：据 caseset numel 防伪造 trivial
     for i, r in enumerate(per):
         if not isinstance(r, dict):
             errs.append(f"perf per_case[{i}] 非对象")
@@ -691,6 +775,15 @@ def gate_task3(d, errs):
         cid = r.get("case_id")
         if not (isinstance(cid, str) and cid):  # gt3-6②：非空 list/dict 的 case_id 会让下游 Counter 崩
             errs.append(f"perf per_case[{i}] 缺/坏 case_id（{cid!r}）")
+            continue
+        # §trivial-met（用户 2026-07-15，评审 #2）：perf_compare 标退化 case（numel<阈值）免测、无 scope。
+        #  门放行但**据 caseset numel 复核**——大 case 谎报 trivial 跳 perf → error（gate-must-check-effective-object）。
+        if r.get("trivial") is True:
+            n = numel_by_id.get(cid)
+            if isinstance(n, int) and 0 < n < _GATE_TRIVIAL_MAX_NUMEL:
+                continue
+            errs.append(f"{cid}: 标 trivial 但 caseset numel={n}（须 0<numel<{_GATE_TRIVIAL_MAX_NUMEL}；"
+                        "疑伪造 trivial 跳 perf 完整性）")
             continue
         bl = r.get("blocked")  # gt3-8：blocked 强制 bool（非 bool 记 error 再参与判定；仅 True 视为 blocked）
         if bl is not None and not isinstance(bl, bool):

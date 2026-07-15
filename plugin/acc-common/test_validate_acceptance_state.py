@@ -625,8 +625,31 @@ class RunWorkflowExitTest(unittest.TestCase):
         self.assertEqual(self._run().returncode, 0)
 
     def test_defect_exit_nonzero(self):
-        # T7 语义化稳定 id：IsClose fp32 的 (16,) 用例 = isclose_float32_16_pairfar（弃旧索引 isclose_000）
-        self.assertNotEqual(self._run("--defect", "isclose_float32_16_pairfar").returncode, 0)
+        # §1 覆盖-预算重写后 case id 变——从生成的 caseset 取真实 fp32 精度 case id 注缺陷（稳健、不硬编码）。
+        import gen_cases
+        spec_path = os.path.join(self.here, "..", "..", "samples", "specs", "isclose.spec.json")
+        cs = gen_cases.gen_cases(json.load(open(spec_path, encoding="utf-8")),
+                                 os.path.join(self.d, "gen"))
+        did = next(c["id"] for c in cs["cases"]
+                   if "精度" in c["dims"] and c["expected"].get("compare") != "na")
+        self.assertNotEqual(self._run("--defect", did).returncode, 0)
+
+    def test_failfast_skips_perf(self):
+        # §精度门前置 + fail-fast（用户 2026-07-15）：任一精度挂 → 跳过 Task3 性能 → FAIL(精度)、exit 1、task3 门未跑。
+        import gen_cases
+        spec_path = os.path.join(self.here, "..", "..", "samples", "specs", "isclose.spec.json")
+        cs = gen_cases.gen_cases(json.load(open(spec_path, encoding="utf-8")),
+                                 os.path.join(self.d, "gen"))
+        did = next(c["id"] for c in cs["cases"]
+                   if "精度" in c["dims"] and c["expected"].get("compare") != "na")
+        r = self._run("--defect", did)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        with open(os.path.join(self.d, "perf_report.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["summary"]["status"], "skipped_precision_gate")
+        with open(os.path.join(self.d, "acceptance.json"), encoding="utf-8") as f:
+            acc = json.load(f)
+        self.assertEqual(acc["overall"], "FAIL(精度)")
+        self.assertNotIn("task3", acc["gate"]["errors"])       # 精度未全过 → task3 门未纳入
 
 
 # ===== T6/T8 perf 包新增（自包含，与上方 GateTest 无耦合，便于与主树 T5 干净合并）=====
@@ -766,21 +789,24 @@ class RunWorkflowPerfPackageTest(unittest.TestCase):
         with open(os.path.join(self.d, name), encoding="utf-8") as f:
             return json.load(f)
 
-    def test_perf_slow_passed_with_risk(self):
-        # T7 语义化稳定 id：Sign 的两个小 shape 性能用例 = sign_float32_{64,256}_perfsmall（弃旧索引 sign_005/006）
-        r = self._run("../../samples/specs/sign.spec.json", "--perf-slow",
-                      "sign_float32_64_perfsmall,sign_float32_256_perfsmall")
-        self.assertEqual(r.returncode, 2)                       # PASSED_WITH_RISK
+    def test_perf_trivial_met_small_shapes(self):
+        # §1 覆盖-预算重写 + trivial-met：§1 不再产「小shape」标签用例；小 shape 性能用例（numel<4096）
+        #  改标 **trivial-met**（达标、免测），perf 达标由代表性大 shape（whitelist/bndhi, numel≥4096）主导。
+        #  取代已被 trivial-met 取代的 small-shape-exception e2e 路径（该 exception 逻辑仍存 perf_compare、
+        #  只是 §1 pipeline 不再触发；其直测覆盖见 test_perf_compare.SmallShapeExceptionTest）。
+        r = self._run("../../samples/specs/sign.spec.json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)   # 全 trivial + 大 shape 达标 → PASS
         acc = self._json("acceptance.json")
-        self.assertEqual(acc["state"], "PASSED_WITH_RISK")
-        self.assertEqual(acc["human_cp"]["status"], "pending")
+        self.assertEqual(acc["state"], "PASSED")
         self.assertEqual(acc["repo_mode"], "mock")
         pr = self._json("perf_report.json")
-        self.assertEqual(pr["summary"]["status"], "exception")
-        self.assertTrue(os.path.exists(os.path.join(self.d, "perf_sim_sign.svg")))
-        self.assertEqual(self._gate("task3").returncode, 0)     # 有图+一致 → 门过
-        os.remove(os.path.join(self.d, "perf_sim_sign.svg"))
-        self.assertEqual(self._gate("task3").returncode, 1)     # 删图 → 门 FAILED（不静默绕过）
+        self.assertEqual(pr["summary"]["status"], "ok")
+        trivial = [row for row in pr["per_case"] if row.get("trivial")]
+        nontrivial = [row for row in pr["per_case"] if not row.get("trivial")]
+        self.assertTrue(trivial, "应有 trivial-met 退化用例（小 shape numel<4096）")
+        self.assertTrue(nontrivial, "应有非 trivial 大 shape 性能用例（whitelist/bndhi）")
+        self.assertTrue(all(row.get("达标") for row in nontrivial), "大 shape 性能用例应达标")
+        self.assertEqual(self._gate("task3").returncode, 0)     # trivial 门豁免 + 大 shape 完整 → 门过
 
     def test_gpu_wait_blocked_not_fail(self):
         r = self._run("testdata/gpu_demo.spec.json")            # spec.perf.baseline=gpu_external, 无 --gpu-baseline
@@ -926,6 +952,59 @@ class GateTask3ConfirmedBypassTest(unittest.TestCase):
             "summary": {"status": "ok", "perf_cases": 1, "达标": 1, "blocked": 0}})
         self.assertEqual(self._errs(), [])
         self.assertEqual(self._cli().returncode, 0)
+
+
+class Cases50NaTrivialGateTest(unittest.TestCase):
+    """§1 覆盖-预算 + Layer B/C 门集成：空 Tensor(na) 豁免 + 防伪造 na；trivial-met 豁免 + 防伪造 trivial。"""
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _na_cs(self, shape):
+        return {"op": "X", "cases": [
+            {"id": "e0", "dims": ["功能"], "tags": ["特殊"],
+             "inputs": [{"name": "a", "shape": shape, "dtype": "float32"}],
+             "expected": {"golden_path": "e0/golden.npy", "compare": "na", "standard": "na",
+                          "verify_mode": "exact", "compare_dtype": None}}]}
+
+    def test_task1_empty_na_ok(self):
+        _w(self.d, "caseset.json", self._na_cs([0]))          # 真空 Tensor（某维=0）
+        errs = []
+        G.gate_task1(self.d, errs)
+        self.assertEqual(errs, [], errs)                      # na 用例豁免精度字段完整性
+
+    def test_task1_forged_na_errors(self):
+        _w(self.d, "caseset.json", self._na_cs([16]))         # compare=na 但非空 Tensor
+        errs = []
+        G.gate_task1(self.d, errs)
+        self.assertTrue(any("真空 Tensor" in e for e in errs), errs)  # codex #4：消息升级为「非严格真空」
+
+    def _pr_rows(self, rows):
+        return {"op": "X", "baseline_source": "tbe", "target_ratio": 0.95, "per_case": rows,
+                "summary": {"status": "ok", "perf_cases": len(rows),
+                            "达标": sum(1 for r in rows if r.get("达标")), "blocked": 0}}
+
+    def test_task3_trivial_ok(self):
+        _w(self.d, "caseset.json", {"op": "X", "cases": [
+            {"id": "t0", "dims": ["性能"], "tags": ["常规"],
+             "inputs": [{"name": "a", "shape": [16], "dtype": "float32"}]}]})
+        _w(self.d, "evidence.json", _perf_ev(["t0"]))
+        _w(self.d, "perf_report.json",
+           self._pr_rows([{"case_id": "t0", "达标": True, "trivial": True, "numel": 16}]))
+        errs = []
+        G.gate_task3(self.d, errs)
+        self.assertEqual(errs, [], errs)                      # trivial 行豁免 scope（numel<4096 复核通过）
+
+    def test_task3_forged_trivial_errors(self):
+        _w(self.d, "caseset.json", _perf_cs(["b0"]))          # shape [1024,1024]，numel≥4096
+        _w(self.d, "evidence.json", _perf_ev(["b0"]))
+        _w(self.d, "perf_report.json",
+           self._pr_rows([{"case_id": "b0", "达标": True, "trivial": True}]))  # 大 case 谎报 trivial
+        errs = []
+        G.gate_task3(self.d, errs)
+        self.assertTrue(any("trivial" in e and "numel" in e for e in errs), errs)
 
 
 if __name__ == "__main__":

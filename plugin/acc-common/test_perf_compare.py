@@ -41,8 +41,12 @@ _EXC = {"when_us_below": 10, "abs_gap_us_within": 3}
 
 
 class SmallShapeExceptionTest(unittest.TestCase):
+    """小shape 例外逻辑直测（该逻辑仍存于 perf_compare）。⚠ §1 覆盖-预算 pipeline 已不再产「小shape」标签用例，
+    且 trivial-met 会截住 numel<4096 的退化 case——故本类 fixture **刻意用 numel≥4096（[8192]）+ 小 us**
+    绕开 trivial-met、直测例外逻辑本身（例外由「小shape」tag 驱动、非实际 shape）。该 e2e 路径已被 trivial-met
+    取代，见 test_validate_acceptance_state.test_perf_trivial_met_small_shapes。"""
     def test_hit_exception(self):
-        cs = _caseset([("s0", ["性能", "小shape"], [64])])
+        cs = _caseset([("s0", ["性能", "小shape"], [8192])])
         r = pc.perf_compare(_spec(1.0, _EXC), cs, _ev({"s0": (1.5, "kernel_only")}), _bl({"s0": 1.2}))
         self.assertEqual(r["summary"]["status"], "exception")
         row = r["per_case"][0]
@@ -53,14 +57,14 @@ class SmallShapeExceptionTest(unittest.TestCase):
         self.assertEqual([p["case_id"] for p in r["simulation"]["points"]], ["s0"])
 
     def test_gap_over_tol_is_fail(self):
-        cs = _caseset([("s0", ["性能", "小shape"], [64])])
+        cs = _caseset([("s0", ["性能", "小shape"], [8192])])
         r = pc.perf_compare(_spec(1.0, _EXC), cs, _ev({"s0": (6.0, "kernel_only")}), _bl({"s0": 1.0}))
         self.assertEqual(r["summary"]["status"], "fail")   # gap=5>3
         self.assertNotIn("exception", r["per_case"][0])
 
     def test_threshold_boundary_strict(self):
         """max(npu,base)==when_us_below → `<` 严格 → 不命中例外 → fail。"""
-        cs = _caseset([("s0", ["性能", "小shape"], [64])])
+        cs = _caseset([("s0", ["性能", "小shape"], [8192])])
         r = pc.perf_compare(_spec(1.0, _EXC), cs, _ev({"s0": (10.0, "kernel_only")}), _bl({"s0": 8.0}))
         self.assertEqual(r["summary"]["status"], "fail")
 
@@ -72,28 +76,28 @@ class SmallShapeExceptionTest(unittest.TestCase):
         self.assertNotIn("exception", r["per_case"][0])
 
     def test_mixed_pass_and_exception(self):
-        cs = _caseset([("s0", ["性能", "小shape"], [64]), ("b0", ["性能", "大shape"], [1024, 1024])])
+        cs = _caseset([("s0", ["性能", "小shape"], [8192]), ("b0", ["性能", "大shape"], [1024, 1024])])
         r = pc.perf_compare(_spec(1.0, _EXC), cs,
                             _ev({"s0": (1.5, "kernel_only"), "b0": (2.0, "kernel_only")}),
                             _bl({"s0": 1.2, "b0": 3.0}))   # b0 ratio 1.5 达标
         self.assertEqual(r["summary"]["status"], "exception")
 
     def test_genuine_fail_beats_exception(self):
-        cs = _caseset([("s0", ["性能", "小shape"], [64]), ("g0", ["性能", "大shape"], [1024, 1024])])
+        cs = _caseset([("s0", ["性能", "小shape"], [8192]), ("g0", ["性能", "大shape"], [1024, 1024])])
         r = pc.perf_compare(_spec(1.0, _EXC), cs,
                             _ev({"s0": (1.5, "kernel_only"), "g0": (6.0, "kernel_only")}),
                             _bl({"s0": 1.2, "g0": 1.0}))    # g0 genuine fail
         self.assertEqual(r["summary"]["status"], "fail")
 
     def test_scope_mismatch_incomparable(self):
-        cs = _caseset([("s0", ["性能", "小shape"], [64])])
+        cs = _caseset([("s0", ["性能", "小shape"], [8192])])
         r = pc.perf_compare(_spec(1.0, _EXC), cs, _ev({"s0": (1.5, "device_e2e_no_h2d_d2h")}),
                             _bl({"s0": 1.2}, scope="kernel_only"))
         self.assertEqual(r["summary"]["status"], "blocked_incomparable_timing_scope")
 
     def test_illegal_numbers_blocked(self):
-        cs = _caseset([("z", ["性能", "小shape"], [64]), ("n", ["性能", "小shape"], [64]),
-                       ("i", ["性能", "小shape"], [64]), ("u", ["性能", "小shape"], [64])])
+        cs = _caseset([("z", ["性能", "小shape"], [8192]), ("n", ["性能", "小shape"], [8192]),
+                       ("i", ["性能", "小shape"], [8192]), ("u", ["性能", "小shape"], [8192])])
         ev = _ev({"z": (1.5, "kernel_only"), "n": (1.5, "kernel_only"),
                   "i": (1.5, "kernel_only"), "u": (None, "kernel_only")})
         bl = _bl({"z": 0, "n": -1.0, "i": float("inf"), "u": 1.2})
@@ -102,7 +106,7 @@ class SmallShapeExceptionTest(unittest.TestCase):
         self.assertEqual(r["summary"]["blocked"], 4)       # 0/负/inf/None 全 blocked、不进例外
 
     def test_disabled_when_no_exception_declared(self):
-        cs = _caseset([("s0", ["性能", "小shape"], [64])])
+        cs = _caseset([("s0", ["性能", "小shape"], [8192])])
         r = pc.perf_compare(_spec(1.0, exc=None), cs, _ev({"s0": (1.5, "kernel_only")}), _bl({"s0": 1.2}))
         self.assertEqual(r["summary"]["status"], "fail")   # 无声明 → 例外禁用 → 未达标即 fail
 
@@ -120,7 +124,7 @@ class SmallShapeExceptionTest(unittest.TestCase):
 
     def test_svg_threshold_from_spec_not_hardcoded(self):
         """阈值零硬编码：换 when_us_below=2 → max(1.5,1.2)<2 仍命中；换 1 → 1.5≥1 不命中。"""
-        cs = _caseset([("s0", ["性能", "小shape"], [64])])
+        cs = _caseset([("s0", ["性能", "小shape"], [8192])])
         r2 = pc.perf_compare(_spec(1.0, {"when_us_below": 2, "abs_gap_us_within": 1}), cs,
                              _ev({"s0": (1.5, "kernel_only")}), _bl({"s0": 1.2}))
         self.assertEqual(r2["summary"]["status"], "exception")
@@ -182,7 +186,9 @@ class GpuConsumerTest(unittest.TestCase):
         r = pc.perf_compare(spec, cs, ev, bl, expect_source="gpu_external")
         self.assertEqual(r["summary"]["status"], "ok")
         self.assertEqual(r["baseline_source"], "gpu_external")
-        self.assertTrue(all("ratio" in row for row in r["per_case"]))
+        # §trivial-met：退化 case（numel<4096）标 trivial、无 ratio；非退化 case 有 ratio。二者其一。
+        self.assertTrue(all("ratio" in row or row.get("trivial") for row in r["per_case"]))
+        self.assertTrue(any("ratio" in row for row in r["per_case"]), "应有非退化 case 真判 ratio")
 
     def test_gpu_scope_mismatch_incomparable(self):
         spec, cs, wd = self._live_caseset()
@@ -336,6 +342,25 @@ class SharedConstantDriftTest(unittest.TestCase):
         # gpu_baseline 的 H2D/D2H 判据表须恰好覆盖合法 scope 全集（漏 key→KeyError 假挂）
         self.assertEqual(set(gb._SCOPE_TRANSFER), gb._SCOPES,
                          "_SCOPE_TRANSFER 的 key 集须与 _SCOPES 恰好一致")
+
+
+class TrivialMetTest(unittest.TestCase):
+    """§trivial-met（用户 2026-07-15，评审 #2）：退化 case（numel<4096）达标、免测、无需基线/scope/us；
+    perf 达标由代表性大 shape 主导。"""
+    def test_trivial_case_met_without_baseline(self):
+        cs = _caseset([("t0", ["性能", "常规"], [16])])       # numel 16 < 4096 → trivial
+        r = pc.perf_compare(_spec(1.0), cs, _ev({"t0": (1.5, "kernel_only")}), _bl({}))  # 基线无 t0
+        row = r["per_case"][0]
+        self.assertTrue(row["达标"])
+        self.assertTrue(row.get("trivial"))
+        self.assertEqual(r["summary"]["status"], "ok")
+
+    def test_large_case_not_trivial(self):
+        cs = _caseset([("b0", ["性能", "大shape"], [128, 128])])  # numel 16384 ≥ 4096 → 真判
+        r = pc.perf_compare(_spec(1.0), cs, _ev({"b0": (1.0, "kernel_only")}), _bl({"b0": 2.0}))
+        row = r["per_case"][0]
+        self.assertNotIn("trivial", row)
+        self.assertIn("ratio", row)
 
 
 if __name__ == "__main__":

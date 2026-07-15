@@ -376,7 +376,12 @@ def compute_metrics(out, golden, policy):
         if o.dtype != g.dtype:
             raise ValueError(f"exact 口径 out/golden dtype 不一致：out={o.dtype.name} golden={g.dtype.name}"
                              "（拒跨型逐位比，如 uint8 与 bool 会值相等假通过）——fail-fast，不静默")
-        return {"exact_mismatch": int(np.count_nonzero(o != g)), "numel": int(g.size)}
+        mism = (o != g)
+        # §1.4 NaN 特殊场景（如 bf16/int Neg 的 torch.neg(NaN)=NaN 输出）：NaN!=NaN=True 会误计 mismatch。
+        # 对齐 both_nan 视为通过（同数值口径 L422-423 与 compare.py）。仅浮点有 NaN；bool/int 无、不受影响。
+        if np.issubdtype(o.dtype, np.floating):
+            mism = mism & ~(np.isnan(o) & np.isnan(g))
+        return {"exact_mismatch": int(np.count_nonzero(mism)), "numel": int(g.size)}
 
     if kind == BEHAVIORAL:
         return {"numel": int(g.size)}

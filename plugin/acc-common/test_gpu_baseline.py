@@ -115,9 +115,10 @@ class GpuBaselineTest(unittest.TestCase):
     # ---- CONFIRMED 真 bug 负例（gb-2/3/4/8/9），钉死防回归 ----
 
     def _synth_cs(self, n=2):
-        """程序化 n 个性能用例的 caseset（用于需 ≥2 用例的场景，如混合 scope）。"""
+        """程序化 n 个性能用例的 caseset（用于需 ≥2 用例的场景，如混合 scope）。
+        shape 取**非 trivial**（numel≥4096）——否则 §trivial-met 会把它们从 GPU 标杆 required 剔除、不参与 scope 校验。"""
         cases = [{"id": f"p{i}", "dims": ["性能"], "tags": [],
-                  "inputs": [{"name": "self", "dtype": "float32", "shape": [64 + i]}], "attrs": {}}
+                  "inputs": [{"name": "self", "dtype": "float32", "shape": [8192 + i]}], "attrs": {}}
                  for i in range(n)]
         return {"op": "Sign", "cases": cases}
 

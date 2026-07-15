@@ -19,12 +19,13 @@
   "verify_mode": "exact",
   "precision": {"oracle": "ascendoptest", "standard": "exact", "tolerance_policy_id": "exact",
                 "threshold": 0, "policy": {"kind": "exact", "max_mismatch": 0, "not_settled": false},
-                "threshold_source": "AscendOpTest 默认阈值（bool 输出 → 精确逐位）"},
+                "threshold_source": "AscendOpTest 默认阈值（bool 输出 → 精确逐位）",
+                "case_target": 50},
   "perf": {"baseline": "tbe", "target_ratio": 0.95,
            "small_shape_exception": {"text": "<10us 差 3us→仿真图", "when_us_below": 10,
                                      "abs_gap_us_within": 3, "requires": "simulation_plot+analysis"}},
   "task_pr_gaps": [
     {"kind": "dtype_deferred", "dtypes": ["bfloat16", "int32"],
-     "reason": "任务书全集(op_def 正源)={float32,float16,bfloat16,int32}；当前 pipeline runner 仅支持 float32/float16，bfloat16/int32 需 runner 新分支(Track C)，暂缓实测、非静默收窄"}
+     "reason": "任务书全集(op_def 正源)={float32,float16,bfloat16,int32}。bf16：runner ACL_BF16 dispatch + repo_adapter 已扩、mock 全验（生成/codec/storage/readback/门），但**真机验收阻塞在 a3 op-build 环境重建**（build.sh --ops=isclose 失败，挡所有 dtype，非 bf16 独有）+ isclose kernel bf16 支持性待真跑确认 → 暂 deferred；op-build 修复 + bf16 kernel 确认后移入 tested。int32：runner 仍无 int 分支(Track C)。均显式挂账、非静默收窄"}
   ]
 }

@@ -250,8 +250,15 @@ class PassedWithRiskE2ETest(unittest.TestCase):
         with open(spec_path, "w", encoding="utf-8") as f:
             json.dump(spec, f, ensure_ascii=False)
         out = os.path.join(self.d, "run")
-        # T7：语义化稳定 id——Sign fp32 的 (16,) 用例 = sign_float32_16_varied（弃旧索引 sign_000）
-        defect_id = "sign_float32_16_varied"
+        # §1 覆盖-预算重写后 case id 变——从**生成的 caseset** 取真实 fp32 精度 case id（稳健、不硬编码）。
+        # ⚠ 取 numel≥16 的 case：risk 需「1 坏点超 standard 阈但落 acceptance error_rate=0.1 内」→ numel*0.1≥1
+        #   即 numel≥10；scalar/边界(numel=1) 会让 1 坏点也超 acceptance → 变纯 fail、非 risk。
+        import gen_cases
+        cs = gen_cases.gen_cases(spec, os.path.join(self.d, "gen"))
+        defect_id = next(c["id"] for c in cs["cases"]
+                         if "精度" in c["dims"] and c["inputs"][0]["dtype"] == "float32"
+                         and c["expected"].get("compare") != "na"
+                         and int(np.prod(c["inputs"][0]["shape"])) >= 16)
         r = subprocess.run([sys.executable, os.path.join(_HERE, "run_workflow.py"), spec_path,
                             "--mode", "mock", "--out", out, "--defect", defect_id],
                            capture_output=True, text=True)
@@ -282,6 +289,18 @@ class ComputeMetricsGuardTest(unittest.TestCase):
         c = np.array([1 + 2j], dtype=np.complex128)
         with self.assertRaises(ValueError):
             P.compute_metrics(c, c, pol)
+
+    def test_exact_nan_aligned_equal(self):
+        """§1.4 NaN 特殊场景：EXACT 分支同位 NaN 视为相等（bf16/int Neg 的 neg(NaN)=NaN 不假 fail）。
+        NaN!=NaN=True 若误计 mismatch，则本用例 exact_mismatch=2 而非 0。"""
+        pol = {"kind": P.EXACT, "max_mismatch": 0}   # compute_metrics EXACT 分支只读 kind
+        g = np.array([np.nan, 1.0, np.nan, -2.0], dtype=np.float32)
+        out = g.copy()                               # 同位 NaN + 其余相等 → 0 mismatch
+        m = P.compute_metrics(out, g, pol)
+        self.assertEqual(m["exact_mismatch"], 0, "同位 NaN 应视为相等（exact_mismatch=0）")
+        # 反例：一处 NaN 变实数 → 该位真 mismatch
+        bad = g.copy(); bad[0] = 3.0
+        self.assertEqual(P.compute_metrics(bad, g, pol)["exact_mismatch"], 1)
 
     def test_flatten_multidim(self):
         pol = P.threshold_for("ascendoptest_default", "float32")

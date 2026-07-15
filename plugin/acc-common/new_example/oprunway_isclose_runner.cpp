@@ -447,6 +447,9 @@ bool RunCase(const std::string &baseDir, const CaseSpec &spec, aclrtStream strea
     if (spec.dtype == "float16") {
         return RunTypedCase<uint16_t>(caseDir, spec, numel, ACL_FLOAT16, stream, err);
     }
+    if (spec.dtype == "bfloat16") {  // bf16：uint16 位模式存储 + ACL_BF16（本轮扩，与 gen_cases codec 对齐）
+        return RunTypedCase<uint16_t>(caseDir, spec, numel, ACL_BF16, stream, err);
+    }
     *err = "unsupported dtype: " + spec.dtype;
     return false;
 }

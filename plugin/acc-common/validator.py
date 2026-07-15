@@ -192,21 +192,41 @@ def _precision_contract(eff_standard, cdtype, exp, ev_prec, canon_acc):
 _DIM_VOCAB = frozenset({"功能", "精度", "性能"})
 
 
-def _dims_contract(dims, vm):
+def _dims_contract(dims, vm, allow_na=False):
     """校验 case.dims（finding #4）。返回 err 字符串或 None（合法）。
 
     · 非列表/空 → 非法（防 dims=[] 抹掉裁决维度让 na-only 假通过）；
     · 含受控词表外 token → 非法（防伪造维度）；
     · verify_mode ∈ {exact, numerical} 且**非纯性能 case**（dims != {性能}）→ 必须含「精度」（数值 case 不可漏裁精度）。
+    · `allow_na=True`（§1.4 空 Tensor 功能用例，numel=0 无精度可判）→ 豁免「必含精度」；仍校非空+词表。
+      调用方须先确认确为真空 Tensor（防伪造 na 跳精度）。
     """
     if not isinstance(dims, list) or not dims:
         return f"dims 非列表或空（{dims!r}）——数值/功能维度被抹，拒绝（防 na-only 假通过）"
     unknown = set(dims) - _DIM_VOCAB
     if unknown:
         return f"dims 含受控词表外 token {sorted(unknown)}（仅 {sorted(_DIM_VOCAB)}）"
+    if allow_na:
+        return None
     if vm in ("exact", "numerical") and set(dims) != {"性能"} and "精度" not in dims:
         return f"verify_mode={vm} 的数值 case 必须含「精度」维（dims={dims}，纯性能 case 例外）"
     return None
+
+
+# ---- 严格真空判定（codex #4，与门口径一致）：拒 shape:[false]/[0.0] 被 `0 in shape` 蒙混 ----
+def _strict_empty_shape(shape):
+    if not isinstance(shape, list) or not shape:
+        return False
+    for d in shape:
+        if not isinstance(d, int) or isinstance(d, bool) or d < 0:
+            return False
+    return 0 in shape                    # 全为非负 int 时，0 in 仅匹配整数 0
+
+
+def _case_strict_empty(c):
+    return isinstance(c, dict) and any(
+        isinstance(it, dict) and _strict_empty_shape(it.get("shape"))
+        for it in (c.get("inputs") or []))
 
 
 # ------------------------------------------------------- 空 per_case 的骨架 ---
@@ -330,6 +350,21 @@ def validate(spec, caseset, evidence):
             row.update(功能="fail", 判据="evidence 缺此 case")
             per.append(row); continue
         ev_prec = e.get("precision") or {}
+        # §1.4 空 Tensor 功能用例（Layer A：expected.compare=na、dims=["功能"]）→ 判 na、不判精度。
+        # ⚠ 防伪造：compare=na 仅对**真空 Tensor**（某输入 shape 含 0）合法；否则=正常 case 冒充 na
+        #   跳精度 → fail（不信自报，与 gate-must-check-effective-object 同纪律）。
+        if exp.get("compare") == "na":
+            if not _case_strict_empty(c):    # codex #4：严格真空（拒 shape:[false]/[0.0] 伪造）
+                row.update(功能="fail", 判据="expected.compare=na 但非严格真空 Tensor（伪造 na 跳精度，拒绝）")
+                per.append(row); continue
+            dim_err = _dims_contract(dims, vm, allow_na=True)
+            if dim_err:
+                row.update(功能="fail", 判据=f"dims 契约{dim_err}")
+                per.append(row); continue
+            row["功能"] = "pass" if e.get("status") in ("ok", "skipped_empty") else "fail"
+            row["精度"] = "na"; row["性能"] = "na"
+            row["判据"] = "空Tensor 功能用例（numel=0，精度 na）"
+            per.append(row); continue
         # finding #4：dims 受控词表——空/未知/数值 case 缺「精度」→ contract fail（防 na-only 假通过）。
         dim_err = _dims_contract(dims, vm)
         if dim_err:

@@ -10,7 +10,7 @@ import numpy as np
 import precision_policy
 import gen_cases  # T7：复用 bf16 位级 codec（_f32_to_bf16_uint16/_bf16_uint16_to_f32）+ 原生 dtype 表
 
-_NP = {"float32": np.float32, "float16": np.float16}  # **runner-supported**（真机 new_example 用）；int/bf16 属 Track C
+_NP = {"float32": np.float32, "float16": np.float16, "bfloat16": np.float32}  # **runner-supported**（真机 new_example）；bf16 逻辑=fp32-on-grid（本轮扩，runner.cpp 加 ACL_BF16 分支）；int 仍 Track C
 _ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")     # case_id / host / op：拒空白、slash、shell 特殊字符
 _SOC_RE = re.compile(r"^ascend[0-9a-z_]+$")
 _PATH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")  # 远端路径：拒 shell 特殊字符（防 scp/ssh 拼接注入）
@@ -188,6 +188,12 @@ def run_mock(caseset, work_dir, defect_cases=None):
             _inject_defect(out, c["expected"].get("policy"))
         out_path = f"{c['id']}/out.npy"
         np.save(_safe(work_dir, out_path), out)
+        # §1.4 空 Tensor 功能用例（Layer A：expected.compare=na、无 policy）→ 无精度 metrics、status ok（validator→na）。
+        if c["expected"].get("compare") == "na":
+            ev.append({"case_id": c["id"], "status": "ok",
+                       "precision": {"na": True, "note": "空Tensor numel=0，无精度 metrics（validator→na）"},
+                       "perf": {"scope": "kernel_only", "us": _mock_us(int(golden.size))}})
+            continue
         ev.append({
             "case_id": c["id"], "status": "ok",
             "precision": _precision_evidence(c, out, golden, out_path, work_dir),
@@ -448,8 +454,9 @@ def run_new_example(caseset, work_dir, defect_cases=None):
                                  f"≠ 期望 storage {expected_storage}{inp['shape']}（逻辑 {inp['dtype']}）")
             arrs.append(arr)
         out_shape = np.broadcast_shapes(*[a.shape for a in arrs])
-        if int(np.prod(out_shape)) == 0:
-            raise ValueError(f"{cid}: new_example v1 不支持空 Tensor（numel=0，runner 会绕过 NPU）")
+        # §1.4 空 Tensor 功能用例（compare=na）：runner 已处理 numel=0（空入空出），放行部署；非 na 的 numel=0=异常。
+        if int(np.prod(out_shape)) == 0 and c["expected"].get("compare") != "na":
+            raise ValueError(f"{cid}: 非 na 的 numel=0（异常；空 Tensor 功能用例应标 expected.compare=na）")
         exp_dt = np.bool_ if c["expected"].get("verify_mode") == "exact" else _NP[dtn]
         golden = np.load(_safe(work_dir, c["expected"]["golden_path"]))
         if golden.shape != out_shape or golden.dtype != exp_dt:
@@ -457,9 +464,11 @@ def run_new_example(caseset, work_dir, defect_cases=None):
                              f"{np.dtype(exp_dt).name}{tuple(out_shape)}")
         for j, arr in enumerate(arrs):
             if arr.shape != out_shape:
-                arr = np.broadcast_to(arr, out_shape).copy()   # 广播 materialize 为独立 X_bin（不与 npy 共 buffer）
-            # T7：经 materialize_input 落物理字节（当前 dtn∈fp32/fp16，storage=逻辑；bf16/int 已在上文 Track C 拦截）
-            materialize_input(arr, {"dtype": dtn}).tofile(_safe(work_dir, f"{cid}/x{j + 1}.bin"))
+                arr = np.broadcast_to(arr, out_shape).copy()   # 广播为独立缓冲（不与 npy 共 buffer）
+            # `x{j}.npy` gen_cases 已存**物理 storage** 字节（bf16→uint16 位模式、native→逻辑；上文 L452 已校
+            # dtype==expected_storage）→ **直接落 .bin**。旧代码再过 materialize_input(期望逻辑 fp32→encode)对 bf16
+            # 是二次 encode（uint16 当逻辑喂→raise）；native 时逻辑==物理才未暴露。bf16 放开后此路必经，故改直写。
+            np.ascontiguousarray(arr).tofile(_safe(work_dir, f"{cid}/x{j + 1}.bin"))
         at = c["attrs"]
         attr_vals = ["1" if at.get(a) is True else ("0" if at.get(a) is False else str(at.get(a)))
                      for a in attr_order]
@@ -538,6 +547,13 @@ def run_new_example(caseset, work_dir, defect_cases=None):
     ev = []
     for c in caseset["cases"]:
         cid = c["id"]
+        dtn = c["inputs"][0]["dtype"]         # per-case 逻辑 dtype（修：本段旧误用 manifest 循环残留 dtn；多 dtype 会错）
+        # §1.4 空 Tensor 功能用例（compare=na）：runner 空入空出、无精度可判 → na 证据（validator→na）。
+        if c["expected"].get("compare") == "na":
+            ev.append({"case_id": cid, "status": "skipped_empty",
+                       "precision": {"na": True,
+                                     "note": "空Tensor numel=0，真机空入空出、无精度 metrics（validator→na）"}})
+            continue
         golden = np.load(_safe(work_dir, c["expected"]["golden_path"]))
         obin = _safe(work_dir, f"{cid}/out.bin")
         if golden.dtype == np.bool_:          # exact/bool：out.bin 是 uint8 0/1
@@ -547,17 +563,15 @@ def run_new_example(caseset, work_dir, defect_cases=None):
             if raw.size and not np.isin(raw, (0, 1)).all():
                 raise RuntimeError(f"{cid}: out.bin 含非 0/1 值，非法 bool 输出")
             out = raw.reshape(golden.shape).astype(bool) if golden.size else raw.astype(bool)
-        else:                                 # numerical：out.bin 同输入 dtype
-            # finding #8：storage-aware 读回——当前 new_example v1 仅 fp32/fp16（storage==logical，Track C 已拦
-            # int/bf16）。显式断言 storage==logical，杜绝「numerical out 却非原生落盘」被 np.fromfile(golden.dtype)
-            # 静默按逻辑 dtype 误读。bf16 放开前须在此补 uint16→f32 读回分支（走 readback_output）。
-            if _expected_storage(dtn) != dtn:
-                raise RuntimeError(f"{cid}: numerical out storage({_expected_storage(dtn)})≠logical({dtn})——"
-                                   f"new_example v1 未接 storage-aware 读回（bf16 须补 readback_output 分支）")
-            raw = np.fromfile(obin, dtype=golden.dtype)
+        else:                                 # numerical：out.bin 是 **storage** dtype（bf16→uint16、native→逻辑）
+            # storage-aware 读回：bf16 的 out.bin 是 uint16 位模式 → readback_output 解码回 fp32-on-grid；
+            # native(fp32/fp16) storage==logical，readback_output 断言 dtype 相符（不做值 cast）。
+            storage = np.dtype(_expected_storage(dtn))
+            raw = np.fromfile(obin, dtype=storage)
             if raw.size != golden.size:
                 raise RuntimeError(f"{cid}: out.bin {raw.size} elem ≠ 期望 {golden.size}（形状/传输异常）")
-            out = readback_output(raw, {"dtype": dtn}).reshape(golden.shape) if golden.size else raw
+            dec = readback_output(raw, {"dtype": dtn})
+            out = dec.reshape(golden.shape) if golden.size else dec
         # A 方案：把 readback 逻辑数组另落 out.npy（供门 gate_task2 以 np.load 统一重算；out.bin 原始 dump 保留
         # 作原始产物）。provenance 的 out_sha256 绑定 out.npy（门重算所依的那份字节）。
         out_npy_rel = f"{cid}/out.npy"

@@ -35,7 +35,8 @@
   // T5 精度口径升级（待散文门）：precision 显式声明 standard + tolerance_policy_id；
   //   保留 oracle + threshold(digest) 向后兼容；per-case 结构化 policy 由 gen_cases 按 golden dtype 派生。
   "precision": {"oracle":"<按任务书原文抽>","standard":"<据 oracle+verify_mode 映射>","tolerance_policy_id":"<spec 级摘要>",
-                "threshold":"<exact→0；numerical→主 dtype 默认>","threshold_source":"..."},
+                "threshold":"<exact→0；numerical→主 dtype 默认>","threshold_source":"...",
+                "case_target":"<int 精度用例目标数，缺省 50；见下『case_target 交互』——AskUserQuestion 问用户>"},
   // T6/T8（待散文门）：perf.small_shape_exception 升为对象——机读阈值供 perf_compare 判小shape例外
   //   (<when_us_below 且 |差|≤abs_gap_us_within → 出仿真图挂人核)；legacy 纯字符串 perf_compare 正则兜底。
   "perf": {"baseline":"<tbe|gpu_external>","target_ratio":"<任务书性能目标换算：无劣化→1.0，≥95%→0.95>",
@@ -43,6 +44,13 @@
   "task_pr_gaps": []
 }
 ```
+
+**`case_target` 交互（精度用例数，用户口径优先）**：`precision.case_target` = 精度用例目标数，**缺省 50**。
+opbase 精度标准 §1.1 说「用例数不设固定下限、覆盖优先」，但**用户 2026-07-15 明示：数量以用户为准、默认 50、运行时问用户**（覆盖 §1.1 的不设下限）。产 spec 时：
+1. 先 `python gen_cases.py --dry-run <spec.json>`（plan-only、无 torch、不落产物）——它打印 **`forced_total`（=强制下限 S，特殊场景+白名单）** 与 **`pool_max`**（覆盖池上限）及区间行。
+2. `AskUserQuestion`「本算子精度用例造多少条？建议 50（该算子区间 [S, pool_max]）」，把区间呈现给用户。
+3. 用户答（默认 50）→ 写入 `precision.case_target`。**须 ≥1**（0/负 → gen_cases fail-fast，堵零用例空跑冒充验收）；`< S` 时 gen_cases 用 `max(case_target,S)`、emit 略超并 note；`> pool_max` 时实际 emit=pool_max，数量门软化（PASS+note，不硬 BLOCK）。
+4. gen_cases 按 §1 覆盖-预算（dtype 分层 fp16/fp32/bf16 重点 + 其他 1-2、shape 阶梯、值域 uniform/normal、attr 笛卡尔、§1.4 特殊场景、白名单必覆盖 + 1-wise 采样）铺到 `case_target`。
 
 **下游硬依赖**（抽错会崩/误判）：
 - `gen_cases.py` 读 `params`(区分 in/attr、取 self 的 dtype、attr 的 default)、`verify_mode`、`precision.threshold`。

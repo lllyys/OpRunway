@@ -47,6 +47,25 @@
 - [x] 白名单 catlass spec 补 standard（Q9 已做）；抗坏输入不崩、删 required 仍对账（codex 修）。
 - [ ] **剩余**：run_workflow 级「Q7/Q9 失败→BLOCKED」端到端断言（codex #3）；legacy 无 dtype_required 的宽容是 migration tradeoff（可加 schema version 收紧）。
 
+### 🟠 精度用例按 opbase §1 生成 + 阈值走 ascendoptest + 精度门前置 fail-fast + 性能同输入（**已落地；真机验收阻塞 op-build、有 follow-up** · 2026-07-15）
+> **权威源**：`cann/opbase` `docs/zh/ops_precision_standard/experimental_standard.md`（pin `f69d4e4e3f2626ddd37855a8d05063a1764ac4c9`，gitcode 公开读）。用户 2026-07-15 定：
+> - **§1 用例生成规则 → 采纳为权威**（§0：仅浮点计算类算子；整型/搬运类另定，遇到先停确认）。
+> - **§2 误差指标/通过标准 → 不采纳**；阈值继续走 **ascendoptest**（= 现有 `precision_policy` 快照，**零改动**）。§0 也印证 IsClose/Equal(bool)/Sign(符号)=逐位精确、不适用 §2 混合容差。
+> - **数量以用户为准**：`case_target` 默认 50、运行时问用户（**覆盖 §1.1「不设固定下限」——用户明示以其为准**）。
+> - **性能与精度同一套输入**（用户明示）：不再单独造大 shape 性能用例；**性能在全部相同输入上判**（§1 覆盖里维度可到 2²⁰、总元素 2³¹，大 shape 本在集里）。
+> - **精度门前置 + fail-fast**：跑完整套 → 任一精度挂 → `FAILED_PRECISION` + 跳过性能 + 提前结束（fail-fast 粒度=**跑完再判**、非首个短路）。
+- [ ] **① 数量可配**：spec 加 `precision.case_target`（默认 50）；`acc-spec` agent `AskUserQuestion` 问用户写入；`gen_cases`/门读同一字段。
+- [ ] **② gen_cases 重写按 §1**：轴 = `dtype(可跑集) × 数据格式 × 维度 × attr` 正交覆盖——维度 1~8、每维取 **2ᵏ / 2ᵏ−1**、总元素 ≤ 2³¹；值域 **50% 均匀[-5,5] + 50% 正态(μ∈[-5,5],σ∈[0.1,2])**；attr 走等价类/布尔 T,F/枚举全值。§1.4 特殊场景（空 Tensor、标量[1]、边界全1维/某维最大、INF/-INF/NAN 遍历）**优先纳入、不与常规正交**，余量用正交组合确定性填到 `case_target`（SEED 稳定序）。每条 torch golden。**边界值域正好落实 Q9 剩余 NaN/±0/Inf 边界（codex #6）**。defer 的 dtype（runner 跑不了）隔 blocked-pending、不计必过集。
+- [ ] **③ 单集单跑双出**：`run_workflow` Task2 一套用例在 NPU 跑一次 → 每条出精度(vs torch golden, ascendoptest 阈值)+性能(kernel-only us)。精度门前置 fail-fast：任一挂 → `FAILED_PRECISION`+跳过 Task3+非零退出+`acceptance.json` 记「精度未全过、性能未跑」。全过 → Task3 性能对比在**全部相同输入**上做。
+- [ ] **④ 门加两道**：精度全过门（任一 case≠pass → FAILED）+ 精度数量门（precision case 数 ≥ `case_target`，否则 BLOCKED——补「跑子集报全」的**数量维**）。
+- 落地方式（拟）：ultracode fan-out + codex 门 + **a3 真 torch 全量测**（边界语义最吃 torch 确定性、真机不可省）。**待用户点头开工。**
+
+**✅ 已落地（2026-07-15）**：①②③④ 全实现 + Layer A（gen_cases §1）/B（validator na·nan/perf_compare trivial-met/run_workflow fail-fast/门 na·trivial 豁免+防伪造）/C（bf16 runner+repo_adapter）/D（acc-spec case_target）。**a3 真 torch mock e2e 全绿 + fail-fast 验 + bf16 生成验 + 274 单测全绿**。设计+验证详见 `doc/oprunway-cases50-design.md`。
+- [ ] **⛔ follow-up · 真机验收阻塞（环境）**：a3 `build.sh --ops=isclose` 失败（ops-math/clean 都报 --ops not found/CMake error）——prior session op-build 配置从当前 a3 复现不出。**挡所有 dtype 真机跑（非 bf16 独有）**。bf16 代码 ready+mock 全验、管道验到真 NPU op-build 步；真机验收（含 bf16 kernel 支持性）待 op-build 环境重建。isclose spec 里 bf16 现诚实 deferred，环境修复+bf16 kernel 确认后移入 tested。
+- [x] **GPU 标杆 trivial 豁免**（fork finding #4/reviewer #2/codex #4，**已做**）：`gpu_baseline.parse_gpu_baseline` 改为只要求覆盖**非 trivial**（numel≥4096）性能 case、trivial 宽容忽略（不当 extra）；GPU 标杆逐 trivial case 给数不现实的问题消除。
+- **codex 源码门（一轮）修的 4 项**：广播 numel 蒙混 trivial（`_case_numel`/gate/gpu 改按全输入 broadcast 输出算）· inf/nan 补「性能」维（v2 非空皆带性能）· `perf_min_numel` 覆盖删→固定 4096（防 compare↔gate 阈值不一致+类型崩）· 「真空」严格判定（拒 `shape:[false]/[0.0]` 伪造，validator+gate_task1+gate_task2 三处共用、Task2 独立复核）。
+- [ ] **follow-up · equal_nan 有效性**（deviation #4）：§1 不产 nanpair、`_assert_equal_nan_effective` 不再触发；equal_nan T/F 结构覆盖 + NaN §1.4 覆盖但未**交集**证明（aligned-NaN 翻转）。minor。
+
 ### 🔵 P2 · 扩展 / 接通
 - [ ] **(a) TBE 信息库接通**（dtype 独立源）：每份任务书自带路径 `.../tbe/config/ascend910b`；读法随运行环境探测、**不写死 ssh**。
 - [ ] int32 扩展（Track C，锁已解）。

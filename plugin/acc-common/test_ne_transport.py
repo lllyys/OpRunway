@@ -165,7 +165,10 @@ def _mk_local_sandbox():
         p["dtype"] = ["float32"]
     scratch = os.path.join(base, "scratch")
     cs = GC.gen_cases(sp, scratch)
-    c = cs["cases"][0]
+    # §1 后 cases[0] 是空 Tensor na 用例（§1.4 特殊场景排在前、无 metrics）——挑**常规网格**非 na 小 case，
+    # 保证有真精度 metrics（transport roundtrip 要证 bad_count=0）。
+    c = next(x for x in cs["cases"]
+             if x["expected"].get("compare") != "na" and ("常规" in x.get("tags", [])))
     cid = c["id"]
     shutil.copytree(os.path.join(scratch, cid), os.path.join(d["work"], cid))
     caseset = {"op": cs["op"], "attr_order": cs.get("attr_order", []), "cases": [c]}
