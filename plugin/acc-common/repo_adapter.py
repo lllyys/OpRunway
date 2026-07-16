@@ -41,10 +41,6 @@ def _check_remote_path(label, val):
         raise ValueError(f"非法路径 {label}: {val!r}（normpath 规范化后仍非绝对/含 '..'）")
 
 
-def _snake(camel):  # IsClose → is_close, Sign → sign（build.sh --ops + experimental/math/<snake>）
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", camel).lower()
-
-
 def _safe(work_dir, rel):
     """把 caseset 里的相对路径钉在 work_dir 内，拒绝绝对路径 / .. 穿越。"""
     base = os.path.normpath(os.path.abspath(work_dir))
@@ -343,7 +339,6 @@ def _ne_cfg():
                           "被测 op 源码子路径（相对 OPS 仓，如 experimental/math/is_close）——绑 opp provenance 用"),
            "opp_rebuild": (g("OPRUNWAY_OPP_REBUILD") or "0").strip(),  # =1 授权从当前源重建 opp（含 rm -rf $V）
            "soc":   g("OPRUNWAY_SOC", "ascend910_93"),       # 昇腾通用约定，非私有机名
-           "op":    g("OPRUNWAY_OP", ""),                     # 由 caseset 驱动，见 run_new_example
            "vendor": g("OPRUNWAY_VENDOR", "oprunway"),
            "setenv": g("OPRUNWAY_SETENV", "/usr/local/Ascend/ascend-toolkit/set_env.sh")}
     # op_src 安全校验：须为安全的**嵌套**相对路径。除路径逃逸/注入外，还须堵 `.` / `./` / 裸子树根（如 `experimental`）
@@ -413,10 +408,8 @@ def run_new_example(caseset, work_dir, defect_cases=None):
     host, rroot, ops, opp = cfg["host"], cfg["rroot"], cfg["ops"], cfg["opp"]
     soc, vendor = cfg["soc"], cfg["vendor"]
     _check_id("op_name", caseset["op"])          # 原始算子名（驱动 runner 文件名/OPRUNWAY_OPNAME）
-    op = _snake(caseset["op"])   # 算子 snake 名驱动 build/目录（IsClose→is_close, Sign→sign）
     if host is not None:         # remote 才有 host；local 模式 host=None、不 ssh
         _check_id("host", host)
-    _check_id("op", op)
     _check_id("vendor", vendor)
     if not _SOC_RE.match(soc): raise ValueError(f"非法 soc: {soc!r}")
     for k, p in (("remote_dir", rroot), ("ops_repo", ops), ("opp", opp), ("setenv", cfg["setenv"])):
@@ -500,31 +493,35 @@ def run_new_example(caseset, work_dir, defect_cases=None):
     # 2) 部署（tar 送 bin + manifest + perfcases_list，排除 npy/out.bin）+ runner cpp + 编排脚本。
     #    两模式同构：先把 tar 送到目标机 /tmp，再解到 rroot/cases（local 时"送"= 本地 cp、"目标机"= 本机）。
     q = shlex.quote
-    # tgz 写到 work_dir **外面**（父目录）：否则「边打包 work_dir、边把 _deploy.tgz 写进 work_dir」会让
-    # GNU tar（Linux/server）报 "file changed as we read it" → exit 1（BSD tar/Mac 宽容、GNU tar 严）。
-    tar = os.path.join(os.path.dirname(os.path.abspath(work_dir.rstrip("/"))), "_deploy.tgz")
-    subprocess.run(["tar", "czf", tar, "-C", work_dir, "--exclude=*.npy", "--exclude=out.bin",
-                    "."], check=True, timeout=300)
-    # 每次运行唯一的临时路径（token），避免并发/多用户共享机上两个验收互相覆盖 /tmp 里的 tgz：
-    # A 上传、B 覆盖、A 解出 B 的用例 → "测到的不是本次输入"。local 模式同样中招，故两模式都用唯一路径。
+    # 每次运行唯一 token：本地暂存 tgz 与远端 /tmp tgz 都带它，避免并发/多用户共享机上两个验收互相覆盖：
+    # 本地——两次跑共享 work_dir 父目录时若定名 `_deploy.tgz` 会互相覆盖（且失败不清理会留垃圾）；
+    # 远端——A 上传、B 覆盖、A 解出 B 的用例 → "测到的不是本次输入"。local 模式同样中招，故都用唯一路径。
     token = uuid.uuid4().hex[:16]
-    tmp_tgz = f"/tmp/oprunway_deploy_{token}.tgz"
-    _copy_to(host, tar, tmp_tgz, timeout=300)
-    qcases = q(rroot + "/cases")
-    # 远端命令对支持者加 `--` 终止选项解析（finding #17，纵深防御；配合上文路径/ID 校验）。
-    _shell(host,
-           f"rm -rf -- {qcases} && mkdir -p -- {qcases} && "
-           f"tar xzf {q(tmp_tgz)} -C {qcases} && rm -f -- {q(tmp_tgz)} && "
-           f"cp -- {qcases}/perfcases_list.txt {q(rroot + '/perfcases_list.txt')}\n",
-           timeout=300, check=True)
-    _copy_to(host, runner, f"{rroot}/{runner_name}", timeout=120)
-    _copy_to(host, npu_sh, f"{rroot}/run_on_npu.sh", timeout=120)
-    os.remove(tar)
+    # tgz 写到 work_dir **外面**（父目录）：否则「边打包 work_dir、边把 tgz 写进 work_dir」会让
+    # GNU tar（Linux/server）报 "file changed as we read it" → exit 1（BSD tar/Mac 宽容、GNU tar 严）。
+    tar = os.path.join(os.path.dirname(os.path.abspath(work_dir.rstrip("/"))), f"_deploy_{token}.tgz")
+    try:
+        subprocess.run(["tar", "czf", tar, "-C", work_dir, "--exclude=*.npy", "--exclude=out.bin",
+                        "."], check=True, timeout=300)
+        tmp_tgz = f"/tmp/oprunway_deploy_{token}.tgz"
+        _copy_to(host, tar, tmp_tgz, timeout=300)
+        qcases = q(rroot + "/cases")
+        # 远端命令对支持者加 `--` 终止选项解析（finding #17，纵深防御；配合上文路径/ID 校验）。
+        _shell(host,
+               f"rm -rf -- {qcases} && mkdir -p -- {qcases} && "
+               f"tar xzf {q(tmp_tgz)} -C {qcases} && rm -f -- {q(tmp_tgz)} && "
+               f"cp -- {qcases}/perfcases_list.txt {q(rroot + '/perfcases_list.txt')}\n",
+               timeout=300, check=True)
+        _copy_to(host, runner, f"{rroot}/{runner_name}", timeout=120)
+        _copy_to(host, npu_sh, f"{rroot}/run_on_npu.sh", timeout=120)
+    finally:
+        if os.path.exists(tar):
+            os.remove(tar)   # 无论成败都清理本地暂存 tgz（失败不清理会在共享父目录留垃圾）
 
     # 3) 远程编排（建双 exe + 正确性 + msprof 双测）；靠双哨兵 + returncode 判成败
     script = (f"source {q(cfg['setenv'])} 2>/dev/null || true\n"
               f"export OPRUNWAY_OPS_REPO={q(ops)} OPRUNWAY_OPP={q(opp)} OPRUNWAY_RUN_DIR={q(rroot)}\n"
-              f"export OPRUNWAY_SOC={soc} OPRUNWAY_OP={op} OPRUNWAY_VENDOR={vendor} "
+              f"export OPRUNWAY_SOC={soc} OPRUNWAY_VENDOR={vendor} "
               f"OPRUNWAY_SETENV={q(cfg['setenv'])}\n"
               f"export OPRUNWAY_RUNNER={q(runner_name)} OPRUNWAY_OPNAME={q(caseset['op'])} "
               f"OPRUNWAY_OP_SRC={q(cfg['op_src'])} OPRUNWAY_OPP_REBUILD={q(cfg['opp_rebuild'])}\n"
@@ -538,8 +535,11 @@ def run_new_example(caseset, work_dir, defect_cases=None):
 
     # 4) 拉回 out.bin + perf_result.txt（local 时 = 本机 cp）
     for c in caseset["cases"]:
+        # na（空 Tensor 功能用例）：步骤 5 对 na 直接 skip（不读 out.bin）→ na 用 check=False，**解耦对 runner
+        # 是否落空 out.bin 的依赖**（runner numel==0 未落文件也不硬崩）；非 na 仍 check=True（真失败照崩、不掩盖）。
+        is_na = c["expected"].get("compare") == "na"
         _copy_from(host, f"{rroot}/cases/{c['id']}/out.bin",
-                   _safe(work_dir, f"{c['id']}/out.bin"), timeout=120, check=True)
+                   _safe(work_dir, f"{c['id']}/out.bin"), timeout=120, check=not is_na, quiet_stderr=is_na)
     prp = os.path.join(work_dir, "perf_result.txt")
     if os.path.exists(prp):
         os.remove(prp)   # 删本地旧文件，防拷贝失败时解析 stale
@@ -549,18 +549,19 @@ def run_new_example(caseset, work_dir, defect_cases=None):
     perf_us, base_us = {}, {}
     pr = os.path.join(work_dir, "perf_result.txt")
     if os.path.exists(pr):
-        for line in open(pr, encoding="utf-8"):
-            parts = line.split()
-            if len(parts) != 3:
-                continue
-            cid, cus, tus = parts
-            for d, v in ((perf_us, cus), (base_us, tus)):
-                try:
-                    fv = float(v)
-                    if math.isfinite(fv) and fv > 0:  # 有限正数（拒 NaN/inf/≤0）
-                        d[cid] = round(fv, 3)
-                except ValueError:
-                    pass
+        with open(pr, encoding="utf-8") as pf:
+            for line in pf:
+                parts = line.split()
+                if len(parts) != 3:
+                    continue
+                cid, cus, tus = parts
+                for d, v in ((perf_us, cus), (base_us, tus)):
+                    try:
+                        fv = float(v)
+                        if math.isfinite(fv) and fv > 0:  # 有限正数（拒 NaN/inf/≤0）
+                            d[cid] = round(fv, 3)
+                    except ValueError:
+                        pass
 
     # 5) 采集 evidence（真 NPU out vs 本机 golden；perf = msprof kernel-only）
     ev = []
@@ -632,9 +633,11 @@ def main(argv):
     if mode not in MODES:
         raise SystemExit(f"unknown mode {mode!r}, supported={list(MODES)}")
     defect = argv[4].split(",") if len(argv) > 4 and argv[4] else None
-    caseset = json.load(open(caseset_path, encoding="utf-8"))
+    with open(caseset_path, encoding="utf-8") as cf:
+        caseset = json.load(cf)
     evidence = MODES[mode](caseset, work_dir, defect_cases=defect)
-    json.dump(evidence, open(out_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    with open(out_path, "w", encoding="utf-8") as of:
+        json.dump(evidence, of, ensure_ascii=False, indent=2)
     print(f"[repo_adapter/{mode}] {len(evidence['evidence'])} evidence -> {out_path}")
 
 

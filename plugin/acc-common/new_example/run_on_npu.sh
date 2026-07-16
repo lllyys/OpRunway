@@ -1,18 +1,18 @@
 #!/bin/bash
 # OpRunway new_example 真机编排（在 a3 上跑）：建双 exe → 正确性(custom) → 性能(msprof custom + 内置 TBE 基线)。
 # ⚠ 共享机：只写用户目录；op 走用户态 ASCEND_CUSTOM_OPP_PATH，不碰共享 opp/vendors。
-# 入参经环境变量：OPRUNWAY_OPS_REPO/OPP/RUN_DIR/SOC/OP/VENDOR/RUNNER(runner cpp 名)/OPNAME(CamelCase, msprof 行名)
+# 入参经环境变量：OPRUNWAY_OPS_REPO/OPP/RUN_DIR/SOC/VENDOR/RUNNER(runner cpp 名)/OPNAME(CamelCase, msprof 行名)
 #   /OP_SRC(被测 op 源码子路径·相对 OPS 仓·绑 provenance 用·必填) [/SETENV] [/OPP_REBUILD(=1 授权从源重建 opp)]
 set -e   # 不用 -u：vendor set_env.bash 引用未绑定变量会在 set -u 下直接退出（|| true 拦不住）
 : "${OPRUNWAY_OPS_REPO:?}"; : "${OPRUNWAY_OPP:?}"; : "${OPRUNWAY_RUN_DIR:?}"
-: "${OPRUNWAY_SOC:?}"; : "${OPRUNWAY_OP:?}"; : "${OPRUNWAY_VENDOR:?}"
+: "${OPRUNWAY_SOC:?}"; : "${OPRUNWAY_VENDOR:?}"
 : "${OPRUNWAY_RUNNER:?}"; : "${OPRUNWAY_OPNAME:?}"
 : "${OPRUNWAY_OP_SRC:?被测 op 源码子路径(相对 OPS 仓，如 experimental/math/is_close)——绑 opp provenance 用，必填}"
 source "${OPRUNWAY_SETENV:-/usr/local/Ascend/ascend-toolkit/set_env.sh}" 2>/dev/null || true
 SYS_LD="${LD_LIBRARY_PATH:-}"   # 系统基线 LD（内置 TBE 测试用，避免被 custom 用户态库污染）
 
 OPS="$OPRUNWAY_OPS_REPO"; OPP="$OPRUNWAY_OPP"; RUN="$OPRUNWAY_RUN_DIR"
-SOC="$OPRUNWAY_SOC"; OP="$OPRUNWAY_OP"; VEN="$OPRUNWAY_VENDOR"
+SOC="$OPRUNWAY_SOC"; VEN="$OPRUNWAY_VENDOR"
 OP_SRC="$OPRUNWAY_OP_SRC"   # 短名桥接：下文 OPHASH/EXP/OP_BUILD/WANT_PROV 全用 $OP_SRC；缺此赋值 → $OP_SRC 恒空
                             # → SRC=$OPS/（整仓）、EXP 空、--ops 空、stamp op_src 空 = provenance 绑到垃圾、且没走 --experimental
 # 纵深防御（不只靠 repo_adapter._ne_cfg）：脚本侧自校 OP_SRC——拒前导 /、`..`/`.` 段、非嵌套裸值/仓根，
