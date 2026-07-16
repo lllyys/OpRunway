@@ -27,6 +27,7 @@ _FULL_REMOTE = {
     "OPRUNWAY_REMOTE_DIR": "/remote/run",
     "OPRUNWAY_OPS_REPO": "/remote/ops-repo",
     "OPRUNWAY_OPP": "/remote/opp",
+    "OPRUNWAY_OP_SRC": "experimental/math/is_close",   # provenance：被测 op 源子路径（必填）
 }
 
 
@@ -78,11 +79,46 @@ class NeCfgTransportModeTest(unittest.TestCase):
             _cfg(env)
 
     def test_local_does_not_require_host(self):
-        env = {"OPRUNWAY_TARGET": "local",
-               "OPRUNWAY_REMOTE_DIR": "/work", "OPRUNWAY_OPS_REPO": "/ops", "OPRUNWAY_OPP": "/opp"}
+        env = {"OPRUNWAY_TARGET": "local", "OPRUNWAY_REMOTE_DIR": "/work",
+               "OPRUNWAY_OPS_REPO": "/ops", "OPRUNWAY_OPP": "/opp",
+               "OPRUNWAY_OP_SRC": "experimental/math/is_close"}
         c = _cfg(env)
         self.assertEqual(c["target"], "local")
         self.assertIsNone(c["host"])
+
+    def test_op_src_required(self):
+        """provenance：OPRUNWAY_OP_SRC 缺失 → _ne_cfg fail-fast（绑源必填、防恒定空 hash 未绑源）。"""
+        env = dict(_FULL_REMOTE); env.pop("OPRUNWAY_OP_SRC")
+        with self.assertRaises(ValueError):
+            _cfg(env)
+
+    def test_op_src_unsafe_path_rejected(self):
+        """provenance：OPRUNWAY_OP_SRC 前导 / 或含 .. 或非法字符 → 拒（防路径逃逸/注入）。"""
+        for bad in ("/abs/path", "../escape", "math/is_close;rm -rf", "math/$(x)"):
+            env = dict(_FULL_REMOTE); env["OPRUNWAY_OP_SRC"] = bad
+            with self.assertRaises(ValueError):
+                _cfg(env)
+
+    def test_op_src_repo_root_or_bare_subtree_rejected(self):
+        """provenance：`.`/`./`/裸子树根/`.`段/尾斜杠 → 拒。否则 run_on_npu.sh 会把 OPHASH 绑整仓、跳
+        --experimental、且 provenance 非算子专属 → 跨算子复用异源 opp 假通过（与 OP_SRC 空同类洞、走另一门）。"""
+        for bad in (".", "./", "experimental", "math", "./math/is_close", "math/is_close/",
+                    "math//is_close", "experimental/./is_close", "experimental/../math/is_close"):
+            env = dict(_FULL_REMOTE); env["OPRUNWAY_OP_SRC"] = bad
+            with self.assertRaises(ValueError, msg=f"op_src={bad!r} 应被拒"):
+                _cfg(env)
+
+    def test_op_src_valid_nested_accepted(self):
+        """provenance：合法嵌套算子源路径（≥2 段、canonical）不被误伤。"""
+        for good in ("experimental/math/is_close", "math/is_close"):
+            env = dict(_FULL_REMOTE); env["OPRUNWAY_OP_SRC"] = good
+            self.assertEqual(_cfg(env)["op_src"], good)
+
+    def test_opp_rebuild_default_off(self):
+        """OPRUNWAY_OPP_REBUILD 缺省 = '0'（不授权重建）；显式 '1' 才透传授权。"""
+        self.assertEqual(_cfg(dict(_FULL_REMOTE))["opp_rebuild"], "0")
+        env = dict(_FULL_REMOTE); env["OPRUNWAY_OPP_REBUILD"] = "1"
+        self.assertEqual(_cfg(env)["opp_rebuild"], "1")
 
     def test_default_target_is_remote(self):
         env = dict(_FULL_REMOTE); env.pop("OPRUNWAY_TARGET")   # 不设 → remote
@@ -181,6 +217,7 @@ def _mk_local_sandbox():
     # OPRUNWAY_WORK_DIR=home → find_runner 的 ops_root 落 home/.oprunway/ops（不在插件树内）
     d["env"] = {"OPRUNWAY_TARGET": "local", "OPRUNWAY_REMOTE_DIR": d["rroot"],
                 "OPRUNWAY_OPS_REPO": d["ops"], "OPRUNWAY_OPP": d["opp"],
+                "OPRUNWAY_OP_SRC": "experimental/math/is_close",   # provenance：被测 op 源子路径（必填）
                 "OPRUNWAY_WORK_DIR": d["home"]}
     return d
 

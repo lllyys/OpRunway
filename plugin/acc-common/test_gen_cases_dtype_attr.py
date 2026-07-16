@@ -593,6 +593,7 @@ class RepoAdapterSecurityNegativeTest(unittest.TestCase):
                    "OPRUNWAY_REMOTE_DIR": os.path.join(e, "rroot"),  # 与 d 不相交 → 过 _contains 守卫
                    "OPRUNWAY_OPS_REPO": os.path.join(e, "ops"),
                    "OPRUNWAY_OPP": os.path.join(e, "opp"),
+                   "OPRUNWAY_OP_SRC": "experimental/math/is_close",  # provenance：op 源子路径（必填），让 _ne_cfg 放行、走到 storage 校验
                    "OPRUNWAY_WORK_DIR": e}   # user_root→e，令 ops_root 落 e/.oprunway（非插件目录内）→ find_runner 命中自带 sign 样例
             import subprocess as _sp
             orig = _sp.run

@@ -336,10 +336,28 @@ def _ne_cfg():
            "rroot": _req("OPRUNWAY_REMOTE_DIR", "远端（或本机）工作根目录"),
            "ops":   _req("OPRUNWAY_OPS_REPO", "被测算子仓路径；不存在时须先 clone（Track: 按需 clone）"),
            "opp":   _req("OPRUNWAY_OPP", "用户态 custom opp 目录（避免写共享 opp/vendors）"),
+           # 被测 op 源码子路径（相对 OPS 仓，如 experimental/math/is_close）——run_on_npu.sh 据此算 OPHASH 绑源、
+           # 落 opp provenance；**必填**（旧启发 experimental/math/$OP 对多数 op 路径不存在→恒定空 hash→未绑源→
+           # stale opp 假通过，codex 门坐实）。由编排层 CP-D 前探测/问用户（哪份源是被测 PR 的 op、在仓内哪个子路径）。
+           "op_src": _req("OPRUNWAY_OP_SRC",
+                          "被测 op 源码子路径（相对 OPS 仓，如 experimental/math/is_close）——绑 opp provenance 用"),
+           "opp_rebuild": (g("OPRUNWAY_OPP_REBUILD") or "0").strip(),  # =1 授权从当前源重建 opp（含 rm -rf $V）
            "soc":   g("OPRUNWAY_SOC", "ascend910_93"),       # 昇腾通用约定，非私有机名
            "op":    g("OPRUNWAY_OP", ""),                     # 由 caseset 驱动，见 run_new_example
            "vendor": g("OPRUNWAY_VENDOR", "oprunway"),
            "setenv": g("OPRUNWAY_SETENV", "/usr/local/Ascend/ascend-toolkit/set_env.sh")}
+    # op_src 安全校验：须为安全的**嵌套**相对路径。除路径逃逸/注入外，还须堵 `.` / `./` / 裸子树根（如 `experimental`）
+    #   /`.` 段/尾斜杠——否则 run_on_npu.sh 里 SRC=$OPS/. 会把 OPHASH 绑到**整仓**、`case $OP_SRC in experimental/*`
+    #   不匹配 → 跳 `--experimental`、且 provenance stamp **非算子专属**（同仓不同算子得同 WANT_PROV）→ 算子 B 复用
+    #   算子 A 的 opp 假通过：与 line-16 `$OP_SRC` 修的**同类洞、走另一扇门**。故用 normpath 归一后强制 canonical + ≥2 段。
+    _osrc = cfg["op_src"]
+    _seg = _osrc.split("/")
+    if (_osrc.startswith("/") or ".." in _seg or "." in _seg              # 无前导 /、无 ..、无 . 段
+            or _osrc != posixpath.normpath(_osrc)                          # 须 canonical（拒 ./、尾斜杠、// 等归一差异）
+            or "/" not in _osrc                                            # 须嵌套 ≥2 段（拒仓根 . 与裸子树根 experimental/math）
+            or not _PATH_RE.match(_osrc)):                                 # 仅安全字符（防 scp/ssh 拼接注入）
+        raise ValueError(f"OPRUNWAY_OP_SRC={cfg['op_src']!r} 须为安全的嵌套相对路径"
+                         f"（相对 OPS 仓、无前导 /、无 ./.. 段、须 ≥2 段指向具体算子源目录如 experimental/math/is_close、仅 [A-Za-z0-9_./-]）")
     # host 仅 remote 模式必填；local 模式忽略
     cfg["host"] = _req("OPRUNWAY_SSH_HOST",
                        "远端机器名（ssh）；若本机即目标机，设 OPRUNWAY_TARGET=local 即可免此项"
@@ -508,7 +526,8 @@ def run_new_example(caseset, work_dir, defect_cases=None):
               f"export OPRUNWAY_OPS_REPO={q(ops)} OPRUNWAY_OPP={q(opp)} OPRUNWAY_RUN_DIR={q(rroot)}\n"
               f"export OPRUNWAY_SOC={soc} OPRUNWAY_OP={op} OPRUNWAY_VENDOR={vendor} "
               f"OPRUNWAY_SETENV={q(cfg['setenv'])}\n"
-              f"export OPRUNWAY_RUNNER={q(runner_name)} OPRUNWAY_OPNAME={q(caseset['op'])}\n"
+              f"export OPRUNWAY_RUNNER={q(runner_name)} OPRUNWAY_OPNAME={q(caseset['op'])} "
+              f"OPRUNWAY_OP_SRC={q(cfg['op_src'])} OPRUNWAY_OPP_REBUILD={q(cfg['opp_rebuild'])}\n"
               f"bash {q(rroot + '/run_on_npu.sh')}\n")
     r = _shell(host, script, timeout=2400, check=False, capture=True)
     blob = (r.stdout or "") + (r.stderr or "")

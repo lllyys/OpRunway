@@ -6,8 +6,8 @@
   "change": {"kind": "semantic", "note": "二进制比较→逻辑值比较（对齐 CPU）"},
   "params_source": "derived_from_reference",
   "params": [
-    {"name": "self",  "io": "in",  "dtype": ["float32", "float16"], "noncontiguous": true},
-    {"name": "other", "io": "in",  "dtype": ["float32", "float16"], "noncontiguous": true},
+    {"name": "self",  "io": "in",  "dtype": ["float32", "float16", "bfloat16"], "noncontiguous": true},
+    {"name": "other", "io": "in",  "dtype": ["float32", "float16", "bfloat16"], "noncontiguous": true},
     {"name": "rtol",  "io": "attr", "dtype": ["double"], "default": 1e-05},
     {"name": "atol",  "io": "attr", "dtype": ["double"], "default": 1e-08},
     {"name": "equal_nan", "io": "attr", "dtype": ["bool"], "default": false},
@@ -15,7 +15,7 @@
   ],
   "generalize": true,
   "dtype_required": ["float32", "float16", "bfloat16", "int32"],
-  "dtype_tested": ["float32", "float16"],
+  "dtype_tested": ["float32", "float16", "bfloat16"],
   "verify_mode": "exact",
   "precision": {"oracle": "ascendoptest", "standard": "exact", "tolerance_policy_id": "exact",
                 "threshold": 0, "policy": {"kind": "exact", "max_mismatch": 0, "not_settled": false},
@@ -25,7 +25,7 @@
            "small_shape_exception": {"text": "<10us 差 3us→仿真图", "when_us_below": 10,
                                      "abs_gap_us_within": 3, "requires": "simulation_plot+analysis"}},
   "task_pr_gaps": [
-    {"kind": "dtype_deferred", "dtypes": ["bfloat16", "int32"],
-     "reason": "任务书全集(op_def 正源)={float32,float16,bfloat16,int32}。bf16：runner ACL_BF16 dispatch(两道关卡)+repo_adapter 已扩、mock 全验；**a3 真 NPU 实测 bf16 精度全过**(2026-07-16，含完整 3-dtype 50 用例 Task2 全 pass)——但那次跑**复用了 prior 建的 opp、未从当前 op 源码 provenance-clean 重建**(run_on_npu.sh OPHASH 路径 bug=恒定空值、未绑 op 源；codex 门坐实)，据本项目『证据须 provenance 绑定、防 stale 假通过』标准，**不足以转 tested** → 暂 deferred，待 run_on_npu.sh 修 opp 源码绑定 + 从当前源重建后重验。int32：runner 无 int 分支(Track C)、真机未验。均显式挂账、非静默收窄"}
+    {"kind": "dtype_deferred", "dtypes": ["int32"],
+     "reason": "任务书全集(op_def 正源)={float32,float16,bfloat16,int32}。fp32/fp16/bf16 已转 tested：2026-07-16 在 a3 真 NPU（CANN 9.0.1 容器）**从 experimental/math/is_close(A2/A3 正源) provenance-clean 从源重建 opp**(--experimental --ops=is_close · soc=ascend910_93)后重验——opp stamp op_src=experimental/math/is_close、ophash 与真源逐字节 sha256 一致(2c4d0ed1…)、Task2 裁决=pass(27 用例含 9 个 bf16 全过、0 fail)、门 PASSED；且 provenance 门 fail-closed 已验(源不存在→exit3、stamp 不符且未授权重建→exit4、符则复用不重建)。**修因**：run_on_npu.sh 漏 OP_SRC=\"$OPRUNWAY_OP_SRC\" 短名桥接→$OP_SRC 恒空→旧跑绑整仓 hash 且没走 --experimental(实为异源)，故先前『bf16 实测过但 provenance 未绑』的判断偏保守、修后已 provenance-clean 坐实。int32：runner 无 int 分支(Track C)、真机未验，显式挂账、非静默收窄"}
   ]
 }
