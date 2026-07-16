@@ -20,12 +20,23 @@ WANT="$(md5sum "$RUNNER" 2>/dev/null | cut -d' ' -f1)|$SOC|$VEN|$OPHASH"
 
 # 1) 建双 exe（缺 or runner/SOC/vendor 变才重建；hash-stamp 防 stale exe 假通过）
 if [ ! -x "$EXE" ] || [ ! -x "$BEXE" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$WANT" ]; then
-  cd "$OPS"
-  bash build.sh --pkg --experimental --ops="$OP" --soc="$SOC" --vendor_name="$VEN" -j8 >/dev/null 2>&1
-  PKG="$(find build_out -maxdepth 1 -name "*${VEN}*.run" | head -1)"
-  chmod -R u+w "$OPP" 2>/dev/null || true   # .run 装的目录可能只读，先放权再删
-  rm -rf "$OPP"; mkdir -p "$OPP"
-  "$PKG" --install-path="$OPP" --quiet >/dev/null 2>&1
+  # route B：被测 op 一次装进**用户态 opp**（$V）后稳定，不随 fresh rroot 重建。$V/op_api 已在 → 跳过 op build+install、
+  # 只（重）建 runner_exe。防两患：① op 源码路径/名 per-op 差异（如 isclose 在 math/is_close 非 experimental）致每次
+  # fresh `build.sh --ops` 失败；② 重装前 `rm -rf $OPP` 会毁掉现成 opp。⚠ **op 源码变（PR 改被测 op）须显式重装**：
+  # 删 $OPP（或 $V）后再跑——本脚本不再据 experimental 路径自动重建（该启发对多数 op 本就失效）。
+  # ⚠⚠ **provenance 局限（codex 门坐实、待修）**：本复用**不绑当前 op 源**（上文 OPHASH 用 experimental/math/$OP、
+  # 对 isclose 路径不存在=恒定空 hash、未真绑 op 源）→ 复用为 **dev-grade**、**不足验收级 provenance**（无法自动
+  # 排除 stale opp 假通过）。**据此复用跑出的结果不得直接转 dtype tested**；验收级须先修：正确 op 源路径算 OPHASH
+  # + opp 独立 provenance stamp（绑 op 源 hash/SOC/vendor/构建参数）+ 缺 provenance/路径不存在则 fail-closed + 从当前源重建。
+  # 见 doc/oprunway-todo.md「真机 opp provenance 绑定」。
+  if [ ! -d "$V/op_api/include" ]; then
+    cd "$OPS"
+    bash build.sh --pkg --experimental --ops="$OP" --soc="$SOC" --vendor_name="$VEN" -j8 >/dev/null 2>&1
+    PKG="$(find build_out -maxdepth 1 -name "*${VEN}*.run" | head -1)"
+    chmod -R u+w "$OPP" 2>/dev/null || true   # .run 装的目录可能只读，先放权再删
+    rm -rf "$OPP"; mkdir -p "$OPP"
+    "$PKG" --install-path="$OPP" --quiet >/dev/null 2>&1
+  fi
   source "$V/bin/set_env.bash" 2>/dev/null || true
   g++ -std=c++17 "$RUNNER" -o "$EXE" -I"$ASCEND_HOME_PATH/include" -I"$V/op_api/include" \
     -L"$ASCEND_HOME_PATH/lib64" -L"$V/op_api/lib" -lascendcl -lnnopbase -lcust_opapi

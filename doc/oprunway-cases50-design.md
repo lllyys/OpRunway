@@ -53,10 +53,11 @@
 
 **⏳ 剩余**
 - **Layer C 真机**（代码 + a3 真 NPU）：`repo_adapter._NP` 加 bf16 + `new_example` 空 Tensor 别 raise（runner 已处理 numel=0）+ 空 case 真机 evidence；`runner.cpp × 3` 加 bf16 dispatch（`ACL_BF16` + uint16 storage，一行/文件）。
-  ⚠ **外部未知**：isclose/sign/equal kernel 在 NPU 上是否真支持 bf16（op_def AddConfig 是否列 bf16）——真跑才知；不支持则 bf16 回退 deferred。
-  **✅ Layer C 代码完成**：`repo_adapter._NP` 加 bf16 + `new_example` 空 Tensor 放行 + 数值 storage-aware readback（bf16 uint16→fp32）+ 修 evidence 段 per-case dtn；`runner.cpp × 3` 加 `ACL_BF16` dispatch。mock 3-dtype e2e 仍 PASS。
-  真机跑还抓修一个 bf16 bug：`new_example` 对 `x{j}.npy`（gen_cases 已存**物理** storage）又调 `materialize_input`（期望逻辑 fp32）= 二次 encode，bf16 一开就撞（native 逻辑==物理未暴露）→ 改**直写物理字节**。
-  **⛔ 真机验证阻塞（环境、非代码）**：a3 上 `build.sh --ops=isclose` 失败（ops-math/ops-math-clean 都报 `--ops not found`/CMake error）——prior session 的 op-build 配置从当前 a3 状态**复现不出**。此阻塞挡**所有 dtype** 的真机跑（非 bf16 独有）。bf16 代码已 mock 全验 + 管道验到真 NPU 的 op-build 步；真机验收（含 bf16 kernel 支持性）**待 op-build 环境重建**（单列 follow-up）。
+  **✅ Layer C 代码完成 + 真机 bf16 验收通过（2026-07-16）**：`repo_adapter._NP` 加 bf16 + `new_example` 空 Tensor 放行 + 数值 storage-aware readback（bf16 uint16→fp32）+ 修 evidence 段 per-case dtn；`runner.cpp × 3` 加 `ACL_BF16` dispatch + **isclose runner 补第二道 manifest 解析处 dtype 关卡**（line 152，原只补了 RunCase dispatch、bf16 被解析处先拦）。
+  真机跑抓修的 bug：① `new_example` 对 `x{j}.npy`（gen_cases 已存**物理** storage）又调 `materialize_input`（期望逻辑 fp32）= 二次 encode，bf16 一开就撞 → 改**直写物理字节**；② isclose runner 第二道 dtype 关卡漏补 bf16。
+  **真机 blocker 已解（非环境坏、是脚本 bug）**：`build.sh --ops=isclose` 失败根因＝run_on_npu.sh 每次 fresh 都重建 op（op 名/experimental 路径对 isclose 不适用——isclose 在 `math/is_close/` 非 experimental）且会 `rm -rf $OPP` 毁掉现成 opp。**修 run_on_npu.sh：用户态 opp（route B）已建则复用、跳 op 重建、只建 runner_exe**。
+  **真机解封 + bf16 实测（a3 真 NPU，复用 opp）**：完整 3-dtype 50 用例 **Task2 pass、50/50、0 fail**（fp32/fp16 回归+bf16 精度全过 vs torch golden）、**三门全 PASSED**、perf 46/47（1 真实略慢）、总体 NEEDS_REVIEW（插件样例 runner→挂人核）。
+  ⚠ **provenance 洞（codex 门坐实）**：这次跑**复用了 prior 建的 opp、未从当前 op 源 provenance-clean 重建**（run_on_npu.sh OPHASH 用 `experimental/math/$OP`、对 isclose 路径不存在=恒定空 hash、未绑源；复用只查目录在否）→ 无法自动排除 stale opp 假通过、复用为 **dev-grade**。故按「证据 provenance 绑定、防 stale 假通过」标准，**bf16 实测虽全过、仍留 deferred、不转 tested**。**follow-up**：正确源路径算 OPHASH + opp 独立 provenance stamp + 缺则 fail-closed + 从当前源重建、再转 tested。int32 仍 Track C。
 - **✅ Layer D 已落地**：acc-spec 三入口（SKILL/taskdoc/schema）补 `case_target` 交互（AskUserQuestion 问用户、默认 50）；gen_cases `--dry-run` 补 **`forced_total`(=强制下限 S)** + [S,pool_max] 区间行，使区间可真取（原只打 forced_special、非真 S，codex 散文门坐实并修）。
 - **✅ 测试重整已完成**：fork 重整 + 我修 codex 4 项后 **274 单测全绿**（a3 真 torch）。**✅ codex 门**（源码 + 散文各一轮）全修。
 - **剩余（非阻塞）**：其余 spec（sign/equal/neg）可补 `case_target`（现走默认 50）；真机验收（op-build 阻塞，见上）；GPU 标杆真数据（外部阻塞）。

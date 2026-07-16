@@ -149,7 +149,7 @@ bool ParseCaseLine(const std::string &line, int64_t lineNo, CaseSpec *spec, std:
         *err = "malformed manifest fields";
         return false;
     }
-    if (spec->dtype != "float32" && spec->dtype != "float16") {
+    if (spec->dtype != "float32" && spec->dtype != "float16" && spec->dtype != "bfloat16") {
         *err = "unsupported dtype: " + spec->dtype;
         return false;
     }

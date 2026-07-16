@@ -14,6 +14,10 @@
 6. 远程 NPU 环境（哪台机、catlass 在哪 build、是否进 Docker）待用户提供后补进 CLAUDE.md。
 7. 优先级（Codex 排序）：Q3>Q4>Q5>Q6>Q1>Q2>Q8>Q9>Q7。完整见 `doc/oprunway-design.md` §13。
 
+## 2026-07-16
+
+- **真机 bf16 验收通过 + 真机 blocker 解除（非环境坏、是脚本 bug）** —— 上条说的「真机 op-build 阻塞」根因查明：**run_on_npu.sh 每次 fresh rroot 都重建 op**，而对 isclose（源在 `math/is_close/`、非 experimental）用 `build.sh --experimental --ops=isclose` 路径/名都错 → `--ops not found`；且重装前 `rm -rf $OPP` 会毁掉现成 opp。**修 run_on_npu.sh：用户态 opp（route B 本意，一次装、稳定）已建则复用、跳 op 重建、只建 runner_exe**。另修 isclose runner **第二道 manifest 解析处 dtype 关卡**漏补 bf16（原只补了 RunCase dispatch）。**a3 真 NPU（复用 opp）**：完整 3-dtype 50 用例 **Task2 pass 50/50、三门 PASSED**（fp32/fp16 回归+bf16 精度全过 vs torch golden；perf 46/47 有 1 真实略慢；总体 NEEDS_REVIEW 因插件样例 runner 挂人核）。真机彻底解封。⚠ **但 codex 门坐实一个 provenance 洞**：这次跑**复用了 prior 建的 opp、未从当前 op 源 provenance-clean 重建**（OPHASH 路径 bug=恒定空值、未绑源）→ 无法自动排除 stale opp 假通过。故按本项目「证据 provenance 绑定」标准，**bf16 实测虽全过、仍留 deferred、不转 tested**；provenance 修（正确源路径+opp 源绑定 stamp+fail-closed+从源重建）列 follow-up。**未 push。**
+
 ## 2026-07-15
 
 - **精度用例按 opbase §1 生成 + 阈值走 ascendoptest + 精度门前置 fail-fast + 性能同输入 + bf16 扩 runner（大特性）** —— 权威源 `cann/opbase` 精度标准（pin `f69d4e…`）。**§1 用例生成规则采纳**（dtype 分层 fp16/fp32/bf16 重点+其他 1-2、shape 阶梯 2ᵏ/2ᵏ−1、值域 uniform/normal、attr 笛卡尔、§1.4 特殊场景空/标量/边界/inf·nan、白名单必覆盖+1-wise 采样、per-case 种子、导出覆盖账本）；**§2 误差指标不用、阈值走 ascendoptest**（现有快照零改）；**数量以用户为准**默认 50、acc-spec `AskUserQuestion` 问（覆盖 §1.1 不设下限）；**精度全过才跑性能 + fail-fast**（一个精度挂→跳性能→FAIL(精度)、exit 1，跑完再判、不 early-return）；**性能同输入 + trivial-met**（退化 case numel<4096 达标免测、贯穿 perf_compare/门/GPU 对齐）；**空 Tensor 实现**（validator 判 na、三门豁免+防伪造复核、runner 已处理 numel=0）；**bf16 扩 runner**（`ACL_BF16` dispatch×3 + repo_adapter `_NP`/storage-aware readback、修二次-encode bug）。改 gen_cases/validator/perf_compare/run_workflow/validate_acceptance_state/repo_adapter/precision_policy/runner.cpp×3/acc-spec/specs。**流程**：ultracode 蓝图评审（4 lens 抓 12 必修，先审地基）→ fork 落 Layer A → 主线 Layer B/C/D → **a3 真 torch mock e2e 全绿 + fail-fast 验 + bf16 生成验** → fork 重整测试**274 测全绿** → codex 门。⛔ **真机验收阻塞**：a3 `build.sh --ops=isclose` 环境失败（挡所有 dtype、非 bf16）→ bf16 诚实 deferred、单列 follow-up。**未 push。**
