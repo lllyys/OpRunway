@@ -95,12 +95,37 @@
     ]
   },
   "Real-NPU runner supports only float32 and float16": {
-    "verifiedAt": "2026-07-15",
+    "verifiedAt": "2026-07-16",
     "checks": [
       {
         "artifact": "plugin/acc-common/repo_adapter.py",
-        "hash": "683bfc9ecb689f04e50bd91fd65179aecf7fdbcc8b50bb243f40a0a0d57a3521",
-        "claim": "_NP = {float32, float16}; unsupported dtype raises ValueError (fail-closed)"
+        "hash": "23a87d99c53719b402c2f471224a11cb7c4bf46cba1d5725d30ae3fa11e71555",
+        "claim": "_NP = {float32, float16, bfloat16}; unsupported dtype raises ValueError (fail-closed)"
+      },
+      {
+        "artifact": "plugin/acc-common/new_example/oprunway_isclose_runner.cpp",
+        "hash": "6c50300eff1ba8c5dab015f9c7b0f01e9ac8f27b0f0f72b59ad6d829e106463a",
+        "claim": "ACL_BF16 dispatch present (bf16 physically stored as uint16)"
+      },
+      {
+        "artifact": "samples/specs/isclose.spec.json",
+        "hash": "9d76a62b4bef32b2cf9a8e0fa2617d5e5bf8ad048f506f4495faf13162134e5f",
+        "claim": "dtype_tested includes bfloat16; int32 stays in dtype_deferred (Track C)"
+      }
+    ]
+  },
+  "opp is provenance-bound to the op source with a fail-closed gate": {
+    "verifiedAt": "2026-07-16",
+    "checks": [
+      {
+        "artifact": "plugin/acc-common/new_example/run_on_npu.sh",
+        "hash": "750c53f1c64c3e91466870658f833e86b7eed56b870500edb2ddb1d81b71f664",
+        "claim": "OPHASH binds $OPS/$OP_SRC; .oprunway_opp_provenance stamp; fail-closed exit 3/4/5; OP_SRC bridge + script-side guard"
+      },
+      {
+        "artifact": "plugin/acc-common/repo_adapter.py",
+        "hash": "23a87d99c53719b402c2f471224a11cb7c4bf46cba1d5725d30ae3fa11e71555",
+        "claim": "_ne_cfg requires op_src with posixpath.normpath nested-path validation; opp_rebuild passthrough"
       }
     ]
   }
