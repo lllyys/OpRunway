@@ -49,6 +49,42 @@ def _valid_shape(shape):
         isinstance(d, int) and not isinstance(d, bool) and d >= 0 for d in shape)
 
 
+# §trivial-met（评审 #2 / codex #4）：退化 case（numel<阈值）perf 无意义、免测 → GPU 标杆**无需覆盖**
+# （真机 GPU 逐 trivial case 给数不现实）。阈值固定 4096，同 perf_compare/门口径。
+_GPU_TRIVIAL_MAX_NUMEL = 4096
+
+
+def _bcast_numel(inputs):
+    """全部输入 broadcast 输出 numel（右对齐、1 广播、冲突/坏维→None）。供 trivial 判定，与 perf_compare 同规范。"""
+    shapes = []
+    for it in (inputs or []):
+        if not isinstance(it, dict) or not isinstance(it.get("shape"), list):
+            return None
+        shapes.append(it["shape"])
+    if not shapes:
+        return None
+    out_rev, maxlen = [], max((len(s) for s in shapes), default=0)
+    for i in range(maxlen):
+        dim = 1
+        for s in shapes:
+            if i >= len(s):
+                continue
+            dd = s[len(s) - 1 - i]
+            if not isinstance(dd, int) or isinstance(dd, bool) or dd < 0:
+                return None
+            if dd == 1:
+                continue
+            if dim == 1:
+                dim = dd
+            elif dim != dd:
+                return None
+        out_rev.append(dim)
+    n = 1
+    for dd in out_rev:
+        n *= dd
+    return n
+
+
 def _contract_version():
     """从同目录 gpu_baseline_contract.json 读 contract_version；缺文件/坏 JSON → 'unknown'。"""
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu_baseline_contract.json")
@@ -164,9 +200,14 @@ def parse_gpu_baseline(path, caseset):
         _issue(issues, "TOO_MANY", "error", None, "cases", f"条目数超上限 {_MAX_ENTRIES}")
         return _finish(None)
 
-    # caseset 性能维用例 + 其完整输入签名
-    perf_cases = {c["id"]: c for c in caseset.get("cases", [])
-                  if isinstance(c, dict) and c.get("id") and "性能" in (c.get("dims") or [])}
+    # caseset 性能维用例（§trivial-met：退化 case numel<阈值免测 → GPU 标杆**无需覆盖**、从 required 剔除；
+    #  GPU 若给 trivial 数据也宽容忽略、不当 extra）。完整输入签名仅对 required（非 trivial）建。
+    all_perf = {c["id"]: c for c in caseset.get("cases", [])
+                if isinstance(c, dict) and c.get("id") and "性能" in (c.get("dims") or [])}
+    trivial_ids = {cid for cid, c in all_perf.items()
+                   if isinstance(_bcast_numel(c.get("inputs")), int)
+                   and 0 < _bcast_numel(c.get("inputs")) < _GPU_TRIVIAL_MAX_NUMEL}
+    perf_cases = {cid: c for cid, c in all_perf.items() if cid not in trivial_ids}
     perf_fp = {cid: case_fingerprint(c.get("inputs"), c.get("attrs"))
                for cid, c in perf_cases.items()}
     top = {k: raw.get(k) for k in ("device", "device_type", "tool", "timing_scope", "sync_policy",
@@ -195,6 +236,8 @@ def parse_gpu_baseline(path, caseset):
             return v if v is not None else top.get(field)
 
         if cid not in perf_cases:  # 多出 caseset 没有的 → 拒 extra（集合语义）
+            if cid in trivial_ids:  # §trivial-met：GPU 给了 trivial case 数据 → 宽容忽略（不当 extra、不参与对比）
+                continue
             _issue(issues, "EXTRA_CASE", "error", cid, "case_id", "caseset 无此性能用例（拒 extra）")
             continue
 

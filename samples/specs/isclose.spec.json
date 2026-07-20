@@ -1,0 +1,31 @@
+{
+  "op": "IsClose",
+  "repo": "ops-math",
+  "hardware": ["Atlas A2", "Atlas A3"],
+  "reference": {"type": "tbe", "ref": "内置 aclnnIsClose TBE"},
+  "change": {"kind": "semantic", "note": "二进制比较→逻辑值比较（对齐 CPU）"},
+  "params_source": "derived_from_reference",
+  "params": [
+    {"name": "self",  "io": "in",  "dtype": ["float32", "float16", "bfloat16"], "noncontiguous": true},
+    {"name": "other", "io": "in",  "dtype": ["float32", "float16", "bfloat16"], "noncontiguous": true},
+    {"name": "rtol",  "io": "attr", "dtype": ["double"], "default": 1e-05},
+    {"name": "atol",  "io": "attr", "dtype": ["double"], "default": 1e-08},
+    {"name": "equal_nan", "io": "attr", "dtype": ["bool"], "default": false},
+    {"name": "out",   "io": "out", "dtype": ["bool"]}
+  ],
+  "generalize": true,
+  "dtype_required": ["float32", "float16", "bfloat16", "int32"],
+  "dtype_tested": ["float32", "float16", "bfloat16"],
+  "verify_mode": "exact",
+  "precision": {"oracle": "ascendoptest", "standard": "exact", "tolerance_policy_id": "exact",
+                "threshold": 0, "policy": {"kind": "exact", "max_mismatch": 0, "not_settled": false},
+                "threshold_source": "AscendOpTest 默认阈值（bool 输出 → 精确逐位）",
+                "case_target": 50},
+  "perf": {"baseline": "tbe", "target_ratio": 0.95,
+           "small_shape_exception": {"text": "<10us 差 3us→仿真图", "when_us_below": 10,
+                                     "abs_gap_us_within": 3, "requires": "simulation_plot+analysis"}},
+  "task_pr_gaps": [
+    {"kind": "dtype_deferred", "dtypes": ["int32"],
+     "reason": "任务书全集(op_def 正源)={float32,float16,bfloat16,int32}。fp32/fp16/bf16 已转 tested：2026-07-16 在 a3 真 NPU（CANN 9.0.1 容器）**从 experimental/math/is_close(A2/A3 正源) provenance-clean 从源重建 opp**(--experimental --ops=is_close · soc=ascend910_93)后重验——opp stamp op_src=experimental/math/is_close、ophash 与真源逐字节 sha256 一致(2c4d0ed1…)、Task2 裁决=pass(27 用例含 9 个 bf16 全过、0 fail)、门 PASSED；且 provenance 门 fail-closed 已验(源不存在→exit3、stamp 不符且未授权重建→exit4、符则复用不重建)。**修因**：run_on_npu.sh 漏 OP_SRC=\"$OPRUNWAY_OP_SRC\" 短名桥接→$OP_SRC 恒空→旧跑绑整仓 hash 且没走 --experimental(实为异源)，故先前『bf16 实测过但 provenance 未绑』的判断偏保守、修后已 provenance-clean 坐实。int32：runner 无 int 分支(Track C)、真机未验，显式挂账、非静默收窄"}
+  ]
+}

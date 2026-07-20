@@ -147,6 +147,36 @@ class FailFastAndRoutingTest(unittest.TestCase):
         self.assertEqual(P.select_standard({"verify_mode": "numerical",
                          "precision": {"standard": "ecosystem_mere_mare"}}), "ecosystem_mere_mare")
 
+    def test_select_standard_unknown_oracle_fail_closed(self):
+        """Q9-Part B：numerical + 非白名单 oracle（如 torch/scipy/std_exact「与 python 一致」类）→ 显式 raise，
+        堵 class C 静默降级为 ascendoptest_default。白名单只含 {ascendoptest, none, 缺省}。"""
+        for orc in ("torch", "scipy", "std_exact", "numpy-f32-matmul"):
+            with self.assertRaises(ValueError, msg=orc):
+                P.select_standard({"verify_mode": "numerical", "precision": {"oracle": orc}})
+        # 白名单成员仍放行
+        self.assertEqual(P.select_standard({"verify_mode": "numerical",
+                         "precision": {"oracle": "none"}}), "ascendoptest_default")
+        self.assertEqual(P.select_standard({"verify_mode": "numerical",
+                         "precision": {}}), "ascendoptest_default")  # 缺省 oracle → 默认
+        # 显式 standard 优先，绕过 oracle 白名单（catlass spec 正是此路）
+        self.assertEqual(P.select_standard({"verify_mode": "numerical",
+                         "precision": {"oracle": "numpy-f32-matmul",
+                                       "standard": "ascendoptest_default"}}), "ascendoptest_default")
+
+    def test_oracle_source_from_golden_maps_by_prefix(self):
+        """Q9-Part C：golden_source 据实映射到 canonical 六枚举——torch→torch_ref、numpy→analytical_ref；
+        识别不出 → fail-closed（不默认 cpu_ref）。"""
+        self.assertEqual(P.oracle_source_from_golden("torch torch.isclose"), "torch_ref")
+        self.assertEqual(P.oracle_source_from_golden("torch torch.sign"), "torch_ref")
+        self.assertEqual(P.oracle_source_from_golden("numpy np.isclose"), "analytical_ref")
+        self.assertEqual(P.oracle_source_from_golden(
+            "numpy f32 matmul（A.f32@B.f32 再回落 dtype）"), "analytical_ref")
+        self.assertIn("analytical_ref", P.ORACLE_SOURCES)
+        self.assertIn("torch_ref", P.ORACLE_SOURCES)
+        for bad in (None, "", "cpu_ref", "scipy foo", "unknown"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                P.oracle_source_from_golden(bad)
+
 
 class ValidatorRiskTest(unittest.TestCase):
     """validator 层：acceptance 过 & standard 不过 → risk=true、overall=passed_with_risk。"""
@@ -220,8 +250,15 @@ class PassedWithRiskE2ETest(unittest.TestCase):
         with open(spec_path, "w", encoding="utf-8") as f:
             json.dump(spec, f, ensure_ascii=False)
         out = os.path.join(self.d, "run")
-        # T7：语义化稳定 id——Sign fp32 的 (16,) 用例 = sign_float32_16_varied（弃旧索引 sign_000）
-        defect_id = "sign_float32_16_varied"
+        # §1 覆盖-预算重写后 case id 变——从**生成的 caseset** 取真实 fp32 精度 case id（稳健、不硬编码）。
+        # ⚠ 取 numel≥16 的 case：risk 需「1 坏点超 standard 阈但落 acceptance error_rate=0.1 内」→ numel*0.1≥1
+        #   即 numel≥10；scalar/边界(numel=1) 会让 1 坏点也超 acceptance → 变纯 fail、非 risk。
+        import gen_cases
+        cs = gen_cases.gen_cases(spec, os.path.join(self.d, "gen"))
+        defect_id = next(c["id"] for c in cs["cases"]
+                         if "精度" in c["dims"] and c["inputs"][0]["dtype"] == "float32"
+                         and c["expected"].get("compare") != "na"
+                         and int(np.prod(c["inputs"][0]["shape"])) >= 16)
         r = subprocess.run([sys.executable, os.path.join(_HERE, "run_workflow.py"), spec_path,
                             "--mode", "mock", "--out", out, "--defect", defect_id],
                            capture_output=True, text=True)
@@ -252,6 +289,18 @@ class ComputeMetricsGuardTest(unittest.TestCase):
         c = np.array([1 + 2j], dtype=np.complex128)
         with self.assertRaises(ValueError):
             P.compute_metrics(c, c, pol)
+
+    def test_exact_nan_aligned_equal(self):
+        """§1.4 NaN 特殊场景：EXACT 分支同位 NaN 视为相等（bf16/int Neg 的 neg(NaN)=NaN 不假 fail）。
+        NaN!=NaN=True 若误计 mismatch，则本用例 exact_mismatch=2 而非 0。"""
+        pol = {"kind": P.EXACT, "max_mismatch": 0}   # compute_metrics EXACT 分支只读 kind
+        g = np.array([np.nan, 1.0, np.nan, -2.0], dtype=np.float32)
+        out = g.copy()                               # 同位 NaN + 其余相等 → 0 mismatch
+        m = P.compute_metrics(out, g, pol)
+        self.assertEqual(m["exact_mismatch"], 0, "同位 NaN 应视为相等（exact_mismatch=0）")
+        # 反例：一处 NaN 变实数 → 该位真 mismatch
+        bad = g.copy(); bad[0] = 3.0
+        self.assertEqual(P.compute_metrics(bad, g, pol)["exact_mismatch"], 1)
 
     def test_flatten_multidim(self):
         pol = P.threshold_for("ascendoptest_default", "float32")

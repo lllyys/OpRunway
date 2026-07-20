@@ -411,7 +411,7 @@ class DownstreamCompatTest(unittest.TestCase):
             import validate_acceptance_state as gate
         except Exception as e:  # 下游模块在并行改动中不可用 → 跳过（非本 adapter 失败）
             self.skipTest(f"下游模块暂不可用（并行改动）：{e}")
-        with open(os.path.join(_HERE, "specs", "catlass_basic_matmul.spec.json"), encoding="utf-8") as f:
+        with open(os.path.join(_HERE, "..", "..", "samples", "specs", "catlass_basic_matmul.spec.json"), encoding="utf-8") as f:
             spec = json.load(f)
         cs = A.build_matmul_caseset(spec, self.work)
         self._dump(cs, "caseset.json")

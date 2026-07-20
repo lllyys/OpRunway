@@ -22,6 +22,8 @@
   "verify_mode": "numerical",
   "precision": {
     "oracle": "numpy-f32-matmul",
+    "standard": "ascendoptest_default",
+    "standard_source": "显式声明平台层标准（fp32 matmul numerical 走 AscendOpTest 默认阈值）；oracle=numpy-f32-matmul 非 select_standard 白名单值，须显式 standard 才不被 fail-closed 拒",
     "dtype": "float32",
     "threshold": 0.001,
     "threshold_source": "占位默认 max_rel_err=1e-3（fp32 matmul）—— 大 K 累积误差阈值待真机/任务书校准；ADR0005 三层口径（MERE/MARE）是 validator 级独立 todo，本 adapter 暂用单阈值 numerical 路径",

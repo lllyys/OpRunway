@@ -1,0 +1,62 @@
+{
+  "op": "Equal",
+  "repo": "ops-math",
+  "hardware": [
+    "Atlas A2",
+    "Atlas A3"
+  ],
+  "reference": {
+    "type": "tbe",
+    "ref": "内置 TBE Equal (aclnnEqTensor)"
+  },
+  "change": {
+    "kind": "align_dtype",
+    "note": "与 TBE 对齐 dtype 集"
+  },
+  "params_source": "derived_from_reference",
+  "params": [
+    {
+      "name": "self",
+      "io": "in",
+      "dtype": [
+        "float32",
+        "float16"
+      ]
+    },
+    {
+      "name": "other",
+      "io": "in",
+      "dtype": [
+        "float32",
+        "float16"
+      ]
+    },
+    {
+      "name": "out",
+      "io": "out",
+      "dtype": [
+        "bool"
+      ]
+    }
+  ],
+  "generalize": true,
+  "dtype_required": "needs_user",
+  "dtype_tested": ["float32", "float16"],
+  "verify_mode": "exact",
+  "precision": {
+    "oracle": "ascendoptest",
+    "standard": "exact",
+    "tolerance_policy_id": "exact",
+    "threshold": 0,
+    "policy": {
+      "kind": "exact",
+      "max_mismatch": 0,
+      "not_settled": false
+    },
+    "threshold_source": "bool 逐元素严格一致（== 无容差）"
+  },
+  "perf": {
+    "baseline": "tbe",
+    "target_ratio": 0.95
+  }
+}

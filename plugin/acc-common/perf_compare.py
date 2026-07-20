@@ -174,6 +174,56 @@ def _no_perf_cases(spec, src, tgt, perf_spec, extra_notes=None):
             "summary": {"perf_cases": 0, "达标": 0, "blocked": 0, "status": "no_perf_cases"}}
 
 
+# §perf 同输入 + trivial-met（用户 2026-07-15 + 评审 #2）：perf 测/比**全部相同输入**，但退化/微小 case
+# （numel < 阈值）kernel 时间纯启动开销、perf 无意义 → 标 trivial-met（达标、不失败、不 blocked、不需基线），
+# perf 达标实际由代表性大 shape 主导。阈值**固定 4096**——与门 `_GATE_TRIVIAL_MAX_NUMEL` 同口径、**不 spec 覆盖**
+# （codex 门 #3：可覆盖会致 compare↔gate 阈值不一致 + 字符串值 TypeError 崩；固定值杜绝两患）。
+_DEFAULT_TRIVIAL_NUMEL = 4096
+
+
+def _broadcast_shape(shapes):
+    """numpy 广播规则的纯 py 实现：右对齐，每维 1 可广播到 N、冲突→None；维须**非 bool 非负 int**否则 None。"""
+    out_rev, maxlen = [], max((len(s) for s in shapes), default=0)
+    for i in range(maxlen):
+        dim = 1
+        for s in shapes:
+            if i >= len(s):
+                continue
+            d = s[len(s) - 1 - i]
+            if not isinstance(d, int) or isinstance(d, bool) or d < 0:
+                return None
+            if d == 1:
+                continue
+            if dim == 1:
+                dim = d
+            elif dim != d:
+                return None
+        out_rev.append(dim)
+    return list(reversed(out_rev))
+
+
+def _case_numel(case):
+    """case 输出元素数=**全部输入 broadcast 后**的输出 numel（codex #1：只取 inputs[0] 会让广播用例
+    (1,)+(8192,) 被误判 numel=1 蒙混 trivial）；坏/不可广播 → None（不当退化、走正常判定，fail-closed）。"""
+    if not isinstance(case, dict):
+        return None
+    inp = case.get("inputs") or []
+    shapes = []
+    for it in inp:
+        if not isinstance(it, dict) or not isinstance(it.get("shape"), list):
+            return None
+        shapes.append(it["shape"])
+    if not shapes:
+        return None
+    out = _broadcast_shape(shapes)
+    if out is None:
+        return None
+    n = 1
+    for d in out:
+        n *= d
+    return n
+
+
 def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline_blocked_status=None):
     # pc-7：入口轻量 schema 校验——坏输入收敛为结构化 invalid，绝不下标崩溃。
     bad = _precheck(spec, caseset, evidence, baseline)
@@ -186,6 +236,7 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
     perf_spec = spec.get("perf") or {}
     case_by_id = {c["id"]: c for c in cases if isinstance(c, dict) and c.get("id")}
     exc, exc_note = _parse_small_shape_exception(spec)
+    trivial_numel = _DEFAULT_TRIVIAL_NUMEL   # 固定，与门同口径（不 spec 覆盖，codex #3）
     # pc-3：target_ratio 严格化（非法/声明基线却缺 → invalid_config；绝不静默套 0.95 放行）。
     tgt, tgt_err = _resolve_target_ratio(perf_spec)
 
@@ -249,6 +300,13 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
     scope_mismatch = 0
     risk_flags = set()
     for cid in perf_ids:
+        # §trivial-met：退化/微小 case（numel<阈值）无意义 → 达标、不需基线/scope/us（评审 #2、用户 Q4）。
+        # 放循环首：连缺基线（如 GPU 标杆只给大 shape）也不 blocked，perf 达标由大 shape 主导。
+        cnumel = _case_numel(case_by_id.get(cid))
+        if isinstance(cnumel, int) and 0 < cnumel < trivial_numel:
+            rows.append({"case_id": cid, "达标": True, "trivial": True, "numel": cnumel,
+                         "note": f"trivial-met（numel={cnumel}<{trivial_numel}，退化 case perf 无意义免测）"})
+            continue
         e, b = ev.get(cid), bl.get(cid)
         if not e or not b:
             miss = ("evidence " if not e else "") + ("baseline" if not b else "")

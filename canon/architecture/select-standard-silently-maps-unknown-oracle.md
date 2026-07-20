@@ -1,7 +1,7 @@
 ---
 title: select_standard silently maps unknown oracle to ascendoptest_default
-updated: 2026-07-10
-status: verified
+updated: 2026-07-15
+status: proposed
 ---
 
 # select_standard silently maps unknown oracle to ascendoptest_default
@@ -22,7 +22,10 @@ AscendOpTest 的阈值尺子，而不是拒绝。
 **已定方案（尚未实现）**：把 catch-all 改为显式白名单 `{ascendoptest, none, 缺省}`，其余 oracle 一律 `raise`
 并提示「该精度标准未验证过，建议 agent 自行探索」——即 fail-closed。用户 2026-07-10 定：先拒绝、后期再改降级告知。
 
-**Verified.** `plugin/acc-common/precision_policy.py`（2026-07-10）：`select_standard` 末尾
-`return ASCENDOPTEST_DEFAULT` catch-all 存在。指纹记 `_verify.json`。映射到 torch/scipy 的后果为推断、未验。
+**已修复（2026-07-15，Q9）**：按上文「已定方案」落地——`select_standard` 的 catch-all 改为显式白名单
+`oracle ∈ {ascendoptest, none, 缺省} → ASCENDOPTEST_DEFAULT`，其余未知 oracle（torch/scipy/std_exact 等）
+一律 `raise` 抛用户（fail-closed），堵住了「与 python 一致」类 class C 的静默降级。上文描述的是**修复前**状态；
+原 `_verify.json` 指纹（catch-all 存在）已随修复过时、本次撤除，故本页降回 `proposed` 待 `bureau:review`
+依修复后代码重核。是 [[Golden and precision standard come only from the task-doc-specified method]] 的落地一环。
 
-**Sources.** [[session 0513d745-9176-41f0-8f4b-cb7a2d19ff86 · 2026-07-10]]
+**Sources.** [[session 0513d745-9176-41f0-8f4b-cb7a2d19ff86 · 2026-07-10]]，[[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]（2026-07-15：Q9 落地白名单 fail-closed）

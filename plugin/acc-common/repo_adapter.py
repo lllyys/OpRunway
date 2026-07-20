@@ -5,12 +5,12 @@
 - new_example   : 真机 build/run PR 自带工程（留桩，需 NPU + VPN，之后填）。
 证据只记「测到什么」（metric value / us / 路径），pass/fail 交给 validator（ADR 0007）。
 """
-import hashlib, json, math, os, posixpath, re, shlex, subprocess, sys
+import hashlib, json, math, os, posixpath, re, shlex, shutil, subprocess, sys, uuid
 import numpy as np
 import precision_policy
 import gen_cases  # T7：复用 bf16 位级 codec（_f32_to_bf16_uint16/_bf16_uint16_to_f32）+ 原生 dtype 表
 
-_NP = {"float32": np.float32, "float16": np.float16}  # **runner-supported**（真机 new_example 用）；int/bf16 属 Track C
+_NP = {"float32": np.float32, "float16": np.float16, "bfloat16": np.float32}  # **runner-supported**（真机 new_example）；bf16 逻辑=fp32-on-grid（本轮扩，runner.cpp 加 ACL_BF16 分支）；int 仍 Track C
 _ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")     # case_id / host / op：拒空白、slash、shell 特殊字符
 _SOC_RE = re.compile(r"^ascend[0-9a-z_]+$")
 _PATH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")  # 远端路径：拒 shell 特殊字符（防 scp/ssh 拼接注入）
@@ -39,10 +39,6 @@ def _check_remote_path(label, val):
     norm = posixpath.normpath(val)
     if not norm.startswith("/") or ".." in norm.split("/"):
         raise ValueError(f"非法路径 {label}: {val!r}（normpath 规范化后仍非绝对/含 '..'）")
-
-
-def _snake(camel):  # IsClose → is_close, Sign → sign（build.sh --ops + experimental/math/<snake>）
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", camel).lower()
 
 
 def _safe(work_dir, rel):
@@ -128,7 +124,9 @@ def _precision_evidence(case, out, golden, out_path, work_dir, ascendoptest_bool
             "tolerance_policy_id": exp["tolerance_policy_id"],
             "policy": policy,
             "threshold": exp["threshold"],
-            "oracle_source": "cpu_ref",          # numpy 融合 golden = host CPU 参考
+            # oracle_source **据 caseset 声明的 golden_source 据实映射**（不再写死 cpu_ref）：
+            # torch→torch_ref、numpy→analytical_ref；来源缺失/不可识别 → fail-closed（不默认）。
+            "oracle_source": precision_policy.oracle_source_from_golden(exp.get("golden_source")),
             "not_settled": bool(policy.get("not_settled", False)),
             "metrics": precision_policy.compute_metrics(out, golden, policy),
             "golden_path": exp["golden_path"], "out_path": out_path,
@@ -186,6 +184,12 @@ def run_mock(caseset, work_dir, defect_cases=None):
             _inject_defect(out, c["expected"].get("policy"))
         out_path = f"{c['id']}/out.npy"
         np.save(_safe(work_dir, out_path), out)
+        # §1.4 空 Tensor 功能用例（Layer A：expected.compare=na、无 policy）→ 无精度 metrics、status ok（validator→na）。
+        if c["expected"].get("compare") == "na":
+            ev.append({"case_id": c["id"], "status": "ok",
+                       "precision": {"na": True, "note": "空Tensor numel=0，无精度 metrics（validator→na）"},
+                       "perf": {"scope": "kernel_only", "us": _mock_us(int(golden.size))}})
+            continue
         ev.append({
             "case_id": c["id"], "status": "ok",
             "precision": _precision_evidence(c, out, golden, out_path, work_dir),
@@ -298,16 +302,99 @@ def find_runner(op_name):
 
 
 def _ne_cfg():
-    """真机配置——零硬编码：全部可用环境变量覆盖，默认给 a3 常见值。"""
+    """真机配置——**零硬编码、无私有默认值**。
+
+    ⚠ 机器名 / 远端路径 / 被测仓路径**必须由调用方（编排层经 `OPRUNWAY_*` 环境变量）显式提供**，
+    缺失即报错——绝不用某台私有机器的名字/路径兜底（否则别人拿到插件默认连一台不存在的机器、
+    找一个不存在的路径，直接失败）。由 orchestrator 在 CP-D 前 `AskUserQuestion` 问清后灌进 env。
+
+    **传输模式** `OPRUNWAY_TARGET`：
+      - `local`  —— 目标机就是本机，直接跑（无 ssh/scp）；此时 `OPRUNWAY_SSH_HOST` 不需要。
+      - `remote`（默认）—— ssh 到 `OPRUNWAY_SSH_HOST`；host 必填。
+
+    仅 `soc` / `vendor` / `setenv` 保留"常见值"默认（它们是昇腾工具链的通用约定，非某台机私有）。
+    """
     g = os.environ.get
-    return {"host": g("OPRUNWAY_SSH_HOST", "ascend-a3"),
-            "rroot": g("OPRUNWAY_REMOTE_DIR", "/home/lys/oprunway_run"),
-            "ops": g("OPRUNWAY_OPS_REPO", "/home/lys/ops-math"),
-            "opp": g("OPRUNWAY_OPP", "/home/lys/oprunway_opp"),
-            "soc": g("OPRUNWAY_SOC", "ascend910_93"),
-            "op": g("OPRUNWAY_OP", "is_close"),
-            "vendor": g("OPRUNWAY_VENDOR", "oprunway"),
-            "setenv": g("OPRUNWAY_SETENV", "/usr/local/Ascend/ascend-toolkit/set_env.sh")}
+    target = (g("OPRUNWAY_TARGET") or "remote").strip().lower()
+    if target not in ("local", "remote"):
+        raise ValueError(f"OPRUNWAY_TARGET 须为 'local' 或 'remote'，得到 {target!r}")
+
+    def _req(key, why):
+        v = (g(key) or "").strip()
+        if not v:
+            raise ValueError(
+                f"缺 {key}（{why}）——本函数**不提供私有默认值**。\n"
+                f"  请由编排层在 CP-D 前询问用户（本机直连 / ssh 远端 + 路径）后经 {key} 传入。")
+        return v
+
+    cfg = {"target": target,
+           # 被测仓 / 远端工作根 / 用户态 opp 都无私有默认，必须显式提供
+           "rroot": _req("OPRUNWAY_REMOTE_DIR", "远端（或本机）工作根目录"),
+           "ops":   _req("OPRUNWAY_OPS_REPO", "被测算子仓路径；不存在时须先 clone（Track: 按需 clone）"),
+           "opp":   _req("OPRUNWAY_OPP", "用户态 custom opp 目录（避免写共享 opp/vendors）"),
+           # 被测 op 源码子路径（相对 OPS 仓，如 experimental/math/is_close）——run_on_npu.sh 据此算 OPHASH 绑源、
+           # 落 opp provenance；**必填**（旧启发 experimental/math/$OP 对多数 op 路径不存在→恒定空 hash→未绑源→
+           # stale opp 假通过，codex 门坐实）。由编排层 CP-D 前探测/问用户（哪份源是被测 PR 的 op、在仓内哪个子路径）。
+           "op_src": _req("OPRUNWAY_OP_SRC",
+                          "被测 op 源码子路径（相对 OPS 仓，如 experimental/math/is_close）——绑 opp provenance 用"),
+           "opp_rebuild": (g("OPRUNWAY_OPP_REBUILD") or "0").strip(),  # =1 授权从当前源重建 opp（含 rm -rf $V）
+           "soc":   g("OPRUNWAY_SOC", "ascend910_93"),       # 昇腾通用约定，非私有机名
+           "vendor": g("OPRUNWAY_VENDOR", "oprunway"),
+           "setenv": g("OPRUNWAY_SETENV", "/usr/local/Ascend/ascend-toolkit/set_env.sh")}
+    # op_src 安全校验：须为安全的**嵌套**相对路径。除路径逃逸/注入外，还须堵 `.` / `./` / 裸子树根（如 `experimental`）
+    #   /`.` 段/尾斜杠——否则 run_on_npu.sh 里 SRC=$OPS/. 会把 OPHASH 绑到**整仓**、`case $OP_SRC in experimental/*`
+    #   不匹配 → 跳 `--experimental`、且 provenance stamp **非算子专属**（同仓不同算子得同 WANT_PROV）→ 算子 B 复用
+    #   算子 A 的 opp 假通过：与 line-16 `$OP_SRC` 修的**同类洞、走另一扇门**。故用 normpath 归一后强制 canonical + ≥2 段。
+    _osrc = cfg["op_src"]
+    _seg = _osrc.split("/")
+    if (_osrc.startswith("/") or ".." in _seg or "." in _seg              # 无前导 /、无 ..、无 . 段
+            or _osrc != posixpath.normpath(_osrc)                          # 须 canonical（拒 ./、尾斜杠、// 等归一差异）
+            or "/" not in _osrc                                            # 须嵌套 ≥2 段（拒仓根 . 与裸子树根 experimental/math）
+            or not _PATH_RE.match(_osrc)):                                 # 仅安全字符（防 scp/ssh 拼接注入）
+        raise ValueError(f"OPRUNWAY_OP_SRC={cfg['op_src']!r} 须为安全的嵌套相对路径"
+                         f"（相对 OPS 仓、无前导 /、无 ./.. 段、须 ≥2 段指向具体算子源目录如 experimental/math/is_close、仅 [A-Za-z0-9_./-]）")
+    # host 仅 remote 模式必填；local 模式忽略
+    cfg["host"] = _req("OPRUNWAY_SSH_HOST",
+                       "远端机器名（ssh）；若本机即目标机，设 OPRUNWAY_TARGET=local 即可免此项"
+                       ) if target == "remote" else None
+    return cfg
+
+
+# ── 传输层：local / remote 各一实现 ─────────────────────────────────────────
+# run_new_example 里所有跨机操作只经这三个原语；local 模式直接在本机跑、不碰 ssh/scp。
+# 安全沿用既有校验：host 过 _check_id、远端路径过 _check_remote_path，故拼进命令无注入面。
+
+def _shell(host, script, *, timeout, check, capture=False):
+    """执行一段 shell：remote 走 `ssh host bash -l -s`，local 走本机 `bash -l -s`。
+    脚本经 stdin 喂给 `bash -l -s`（唯一脚本入参 = script）。"""
+    argv = (["ssh", host, "bash", "-l", "-s"] if host else ["bash", "-l", "-s"])
+    return subprocess.run(argv, input=script,
+                          capture_output=capture, text=True, timeout=timeout, check=check)
+
+
+def _copy_to(host, local_path, remote_path, *, timeout, check=True):
+    """本地文件 → 目标机。remote 用 scp；local 用 cp（同机拷贝，目标即真实路径）。"""
+    if host:
+        subprocess.run(["scp", "-q", local_path, f"{host}:{remote_path}"],
+                       check=check, timeout=timeout)
+    else:
+        os.makedirs(os.path.dirname(remote_path) or ".", exist_ok=True)
+        shutil.copy2(local_path, remote_path)
+
+
+def _copy_from(host, remote_path, local_path, *, timeout, check=True, quiet_stderr=False):
+    """目标机文件 → 本地。remote 用 scp；local 用 cp。"""
+    if host:
+        subprocess.run(["scp", "-q", f"{host}:{remote_path}", local_path],
+                       check=check, timeout=timeout,
+                       stderr=(subprocess.DEVNULL if quiet_stderr else None))
+    else:
+        if not os.path.exists(remote_path):
+            if check:
+                raise FileNotFoundError(remote_path)
+            return
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        shutil.copy2(remote_path, local_path)
 
 
 def run_new_example(caseset, work_dir, defect_cases=None):
@@ -321,13 +408,22 @@ def run_new_example(caseset, work_dir, defect_cases=None):
     host, rroot, ops, opp = cfg["host"], cfg["rroot"], cfg["ops"], cfg["opp"]
     soc, vendor = cfg["soc"], cfg["vendor"]
     _check_id("op_name", caseset["op"])          # 原始算子名（驱动 runner 文件名/OPRUNWAY_OPNAME）
-    op = _snake(caseset["op"])   # 算子 snake 名驱动 build/目录（IsClose→is_close, Sign→sign）
-    _check_id("host", host)
-    _check_id("op", op)
+    if host is not None:         # remote 才有 host；local 模式 host=None、不 ssh
+        _check_id("host", host)
     _check_id("vendor", vendor)
     if not _SOC_RE.match(soc): raise ValueError(f"非法 soc: {soc!r}")
     for k, p in (("remote_dir", rroot), ("ops_repo", ops), ("opp", opp), ("setenv", cfg["setenv"])):
         _check_remote_path(k, p)
+    # local 模式下 rroot/ops/opp 是**本机真实目录**，且 §部署 会对 rroot/cases 执行 `rm -rf`。
+    # 必须与 work_dir 双向不相交，否则用户把 rroot 指到含产物的目录 → 静默删。remote 模式 rroot 在远端、天然不相交。
+    if host is None:
+        wd = os.path.realpath(work_dir)
+        for k, p in (("remote_dir", rroot), ("ops_repo", ops), ("opp", opp)):
+            rp = os.path.realpath(p)
+            if _contains(wd, rp) or _contains(rp, wd):
+                raise ValueError(
+                    f"local 模式下 {k}={p!r} 与 work_dir={work_dir!r} 相交——"
+                    f"§部署会对其执行 rm -rf，拒绝以防误删。请指向独立的专用 scratch 目录。")
     here = os.path.dirname(os.path.abspath(__file__))
     # runner：用户目录优先 → 插件自带样例 fallback（命中 fallback 必须出声，见 find_runner docstring）。
     # runner_name 由 find_runner 从**已校验的 op_name** 定死（不取 basename），远端 scp 文件名无注入面。
@@ -369,8 +465,9 @@ def run_new_example(caseset, work_dir, defect_cases=None):
                                  f"≠ 期望 storage {expected_storage}{inp['shape']}（逻辑 {inp['dtype']}）")
             arrs.append(arr)
         out_shape = np.broadcast_shapes(*[a.shape for a in arrs])
-        if int(np.prod(out_shape)) == 0:
-            raise ValueError(f"{cid}: new_example v1 不支持空 Tensor（numel=0，runner 会绕过 NPU）")
+        # §1.4 空 Tensor 功能用例（compare=na）：runner 已处理 numel=0（空入空出），放行部署；非 na 的 numel=0=异常。
+        if int(np.prod(out_shape)) == 0 and c["expected"].get("compare") != "na":
+            raise ValueError(f"{cid}: 非 na 的 numel=0（异常；空 Tensor 功能用例应标 expected.compare=na）")
         exp_dt = np.bool_ if c["expected"].get("verify_mode") == "exact" else _NP[dtn]
         golden = np.load(_safe(work_dir, c["expected"]["golden_path"]))
         if golden.shape != out_shape or golden.dtype != exp_dt:
@@ -378,9 +475,11 @@ def run_new_example(caseset, work_dir, defect_cases=None):
                              f"{np.dtype(exp_dt).name}{tuple(out_shape)}")
         for j, arr in enumerate(arrs):
             if arr.shape != out_shape:
-                arr = np.broadcast_to(arr, out_shape).copy()   # 广播 materialize 为独立 X_bin（不与 npy 共 buffer）
-            # T7：经 materialize_input 落物理字节（当前 dtn∈fp32/fp16，storage=逻辑；bf16/int 已在上文 Track C 拦截）
-            materialize_input(arr, {"dtype": dtn}).tofile(_safe(work_dir, f"{cid}/x{j + 1}.bin"))
+                arr = np.broadcast_to(arr, out_shape).copy()   # 广播为独立缓冲（不与 npy 共 buffer）
+            # `x{j}.npy` gen_cases 已存**物理 storage** 字节（bf16→uint16 位模式、native→逻辑；上文 L452 已校
+            # dtype==expected_storage）→ **直接落 .bin**。旧代码再过 materialize_input(期望逻辑 fp32→encode)对 bf16
+            # 是二次 encode（uint16 当逻辑喂→raise）；native 时逻辑==物理才未暴露。bf16 放开后此路必经，故改直写。
+            np.ascontiguousarray(arr).tofile(_safe(work_dir, f"{cid}/x{j + 1}.bin"))
         at = c["attrs"]
         attr_vals = ["1" if at.get(a) is True else ("0" if at.get(a) is False else str(at.get(a)))
                      for a in attr_order]
@@ -391,68 +490,90 @@ def run_new_example(caseset, work_dir, defect_cases=None):
     with open(os.path.join(work_dir, "perfcases_list.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(perf_ids) + ("\n" if perf_ids else ""))
 
-    # 2) 部署（tar 送 bin + manifest + perfcases_list，排除 npy/out.bin）+ runner cpp + 编排脚本
+    # 2) 部署（tar 送 bin + manifest + perfcases_list，排除 npy/out.bin）+ runner cpp + 编排脚本。
+    #    两模式同构：先把 tar 送到目标机 /tmp，再解到 rroot/cases（local 时"送"= 本地 cp、"目标机"= 本机）。
     q = shlex.quote
-    tar = os.path.join(work_dir, "_deploy.tgz")
-    subprocess.run(["tar", "czf", tar, "-C", work_dir, "--exclude=*.npy", "--exclude=out.bin",
-                    "--exclude=_deploy.tgz", "."], check=True, timeout=300)
-    subprocess.run(["scp", "-q", tar, f"{host}:/tmp/oprunway_deploy.tgz"], check=True, timeout=300)
-    qcases = q(rroot + "/cases")
-    # 远端命令对支持者加 `--` 终止选项解析（finding #17，纵深防御；配合上文路径/ID 校验）。
-    subprocess.run(["ssh", host,
-                    f"rm -rf -- {qcases} && mkdir -p -- {qcases} && "
-                    f"tar xzf /tmp/oprunway_deploy.tgz -C {qcases} && rm -f -- /tmp/oprunway_deploy.tgz && "
-                    f"cp -- {qcases}/perfcases_list.txt {q(rroot + '/perfcases_list.txt')}"],
-                   check=True, timeout=300)
-    subprocess.run(["scp", "-q", runner, f"{host}:{rroot}/{runner_name}"], check=True, timeout=120)
-    subprocess.run(["scp", "-q", npu_sh, f"{host}:{rroot}/run_on_npu.sh"], check=True, timeout=120)
-    os.remove(tar)
+    # 每次运行唯一 token：本地暂存 tgz 与远端 /tmp tgz 都带它，避免并发/多用户共享机上两个验收互相覆盖：
+    # 本地——两次跑共享 work_dir 父目录时若定名 `_deploy.tgz` 会互相覆盖（且失败不清理会留垃圾）；
+    # 远端——A 上传、B 覆盖、A 解出 B 的用例 → "测到的不是本次输入"。local 模式同样中招，故都用唯一路径。
+    token = uuid.uuid4().hex[:16]
+    # tgz 写到 work_dir **外面**（父目录）：否则「边打包 work_dir、边把 tgz 写进 work_dir」会让
+    # GNU tar（Linux/server）报 "file changed as we read it" → exit 1（BSD tar/Mac 宽容、GNU tar 严）。
+    tar = os.path.join(os.path.dirname(os.path.abspath(work_dir.rstrip("/"))), f"_deploy_{token}.tgz")
+    try:
+        subprocess.run(["tar", "czf", tar, "-C", work_dir, "--exclude=*.npy", "--exclude=out.bin",
+                        "."], check=True, timeout=300)
+        tmp_tgz = f"/tmp/oprunway_deploy_{token}.tgz"
+        _copy_to(host, tar, tmp_tgz, timeout=300)
+        qcases = q(rroot + "/cases")
+        # 远端命令对支持者加 `--` 终止选项解析（finding #17，纵深防御；配合上文路径/ID 校验）。
+        _shell(host,
+               f"rm -rf -- {qcases} && mkdir -p -- {qcases} && "
+               f"tar xzf {q(tmp_tgz)} -C {qcases} && rm -f -- {q(tmp_tgz)} && "
+               f"cp -- {qcases}/perfcases_list.txt {q(rroot + '/perfcases_list.txt')}\n",
+               timeout=300, check=True)
+        _copy_to(host, runner, f"{rroot}/{runner_name}", timeout=120)
+        _copy_to(host, npu_sh, f"{rroot}/run_on_npu.sh", timeout=120)
+    finally:
+        if os.path.exists(tar):
+            os.remove(tar)   # 无论成败都清理本地暂存 tgz（失败不清理会在共享父目录留垃圾）
 
     # 3) 远程编排（建双 exe + 正确性 + msprof 双测）；靠双哨兵 + returncode 判成败
     script = (f"source {q(cfg['setenv'])} 2>/dev/null || true\n"
               f"export OPRUNWAY_OPS_REPO={q(ops)} OPRUNWAY_OPP={q(opp)} OPRUNWAY_RUN_DIR={q(rroot)}\n"
-              f"export OPRUNWAY_SOC={soc} OPRUNWAY_OP={op} OPRUNWAY_VENDOR={vendor} "
+              f"export OPRUNWAY_SOC={soc} OPRUNWAY_VENDOR={vendor} "
               f"OPRUNWAY_SETENV={q(cfg['setenv'])}\n"
-              f"export OPRUNWAY_RUNNER={q(runner_name)} OPRUNWAY_OPNAME={q(caseset['op'])}\n"
+              f"export OPRUNWAY_RUNNER={q(runner_name)} OPRUNWAY_OPNAME={q(caseset['op'])} "
+              f"OPRUNWAY_OP_SRC={q(cfg['op_src'])} OPRUNWAY_OPP_REBUILD={q(cfg['opp_rebuild'])}\n"
               f"bash {q(rroot + '/run_on_npu.sh')}\n")
-    r = subprocess.run(["ssh", host, "bash -l -s"], input=script,
-                       capture_output=True, text=True, timeout=2400)
-    blob = r.stdout + r.stderr
+    r = _shell(host, script, timeout=2400, check=False, capture=True)
+    blob = (r.stdout or "") + (r.stderr or "")
     done = f"OPRUNWAY_DONE total={n} ok={n} fail=0"
+    label = "本机" if host is None else "远程"
     if r.returncode != 0 or done not in blob or "OPRUNWAY_NPU_DONE" not in blob:
-        raise RuntimeError(f"[new_example] 远程跑测失败 rc={r.returncode}:\n{blob[-2000:]}")
+        raise RuntimeError(f"[new_example] {label}跑测失败 rc={r.returncode}:\n{blob[-2000:]}")
 
-    # 4) 拉回 out.bin + perf_result.txt
+    # 4) 拉回 out.bin + perf_result.txt（local 时 = 本机 cp）
     for c in caseset["cases"]:
-        subprocess.run(["scp", "-q", f"{host}:{rroot}/cases/{c['id']}/out.bin",
-                        _safe(work_dir, f"{c['id']}/out.bin")], check=True, timeout=120)
+        # na（空 Tensor 功能用例）：步骤 5 对 na 直接 skip（不读 out.bin）→ na 用 check=False，**解耦对 runner
+        # 是否落空 out.bin 的依赖**（runner numel==0 未落文件也不硬崩）；非 na 仍 check=True（真失败照崩、不掩盖）。
+        is_na = c["expected"].get("compare") == "na"
+        _copy_from(host, f"{rroot}/cases/{c['id']}/out.bin",
+                   _safe(work_dir, f"{c['id']}/out.bin"), timeout=120, check=not is_na, quiet_stderr=is_na)
     prp = os.path.join(work_dir, "perf_result.txt")
     if os.path.exists(prp):
-        os.remove(prp)   # 删本地旧文件，防 scp 失败时解析 stale
-    subprocess.run(["scp", "-q", f"{host}:{rroot}/perf_result.txt", prp],
-                   check=False, timeout=120, stderr=subprocess.DEVNULL)
+        os.remove(prp)   # 删本地旧文件，防拷贝失败时解析 stale
+    _copy_from(host, f"{rroot}/perf_result.txt", prp, timeout=120, check=False, quiet_stderr=True)
 
     # 解析 perf_result（每行 "case_id custom_us tbe_us"；NA=未测到）→ perf_us / 真基线 base_us
     perf_us, base_us = {}, {}
     pr = os.path.join(work_dir, "perf_result.txt")
     if os.path.exists(pr):
-        for line in open(pr, encoding="utf-8"):
-            parts = line.split()
-            if len(parts) != 3:
-                continue
-            cid, cus, tus = parts
-            for d, v in ((perf_us, cus), (base_us, tus)):
-                try:
-                    fv = float(v)
-                    if math.isfinite(fv) and fv > 0:  # 有限正数（拒 NaN/inf/≤0）
-                        d[cid] = round(fv, 3)
-                except ValueError:
-                    pass
+        with open(pr, encoding="utf-8") as pf:
+            for line in pf:
+                parts = line.split()
+                if len(parts) != 3:
+                    continue
+                cid, cus, tus = parts
+                for d, v in ((perf_us, cus), (base_us, tus)):
+                    try:
+                        fv = float(v)
+                        if math.isfinite(fv) and fv > 0:  # 有限正数（拒 NaN/inf/≤0）
+                            d[cid] = round(fv, 3)
+                    except ValueError:
+                        pass
 
     # 5) 采集 evidence（真 NPU out vs 本机 golden；perf = msprof kernel-only）
     ev = []
     for c in caseset["cases"]:
         cid = c["id"]
+        dtn = c["inputs"][0]["dtype"]         # per-case 逻辑 dtype（修：本段旧误用 manifest 循环残留 dtn；多 dtype 会错）
+        # §1.4 空 Tensor 功能用例（compare=na）：runner 空入空出、无精度可判 → na 证据（validator→na）。
+        if c["expected"].get("compare") == "na":
+            ev.append({"case_id": cid, "status": "skipped_empty",
+                       "precision": {"na": True,
+                                     "note": "空Tensor numel=0，真机空入空出、无精度 metrics（validator→na）"}})
+            continue
         golden = np.load(_safe(work_dir, c["expected"]["golden_path"]))
         obin = _safe(work_dir, f"{cid}/out.bin")
         if golden.dtype == np.bool_:          # exact/bool：out.bin 是 uint8 0/1
@@ -462,17 +583,15 @@ def run_new_example(caseset, work_dir, defect_cases=None):
             if raw.size and not np.isin(raw, (0, 1)).all():
                 raise RuntimeError(f"{cid}: out.bin 含非 0/1 值，非法 bool 输出")
             out = raw.reshape(golden.shape).astype(bool) if golden.size else raw.astype(bool)
-        else:                                 # numerical：out.bin 同输入 dtype
-            # finding #8：storage-aware 读回——当前 new_example v1 仅 fp32/fp16（storage==logical，Track C 已拦
-            # int/bf16）。显式断言 storage==logical，杜绝「numerical out 却非原生落盘」被 np.fromfile(golden.dtype)
-            # 静默按逻辑 dtype 误读。bf16 放开前须在此补 uint16→f32 读回分支（走 readback_output）。
-            if _expected_storage(dtn) != dtn:
-                raise RuntimeError(f"{cid}: numerical out storage({_expected_storage(dtn)})≠logical({dtn})——"
-                                   f"new_example v1 未接 storage-aware 读回（bf16 须补 readback_output 分支）")
-            raw = np.fromfile(obin, dtype=golden.dtype)
+        else:                                 # numerical：out.bin 是 **storage** dtype（bf16→uint16、native→逻辑）
+            # storage-aware 读回：bf16 的 out.bin 是 uint16 位模式 → readback_output 解码回 fp32-on-grid；
+            # native(fp32/fp16) storage==logical，readback_output 断言 dtype 相符（不做值 cast）。
+            storage = np.dtype(_expected_storage(dtn))
+            raw = np.fromfile(obin, dtype=storage)
             if raw.size != golden.size:
                 raise RuntimeError(f"{cid}: out.bin {raw.size} elem ≠ 期望 {golden.size}（形状/传输异常）")
-            out = readback_output(raw, {"dtype": dtn}).reshape(golden.shape) if golden.size else raw
+            dec = readback_output(raw, {"dtype": dtn})
+            out = dec.reshape(golden.shape) if golden.size else dec
         # A 方案：把 readback 逻辑数组另落 out.npy（供门 gate_task2 以 np.load 统一重算；out.bin 原始 dump 保留
         # 作原始产物）。provenance 的 out_sha256 绑定 out.npy（门重算所依的那份字节）。
         out_npy_rel = f"{cid}/out.npy"
@@ -514,9 +633,11 @@ def main(argv):
     if mode not in MODES:
         raise SystemExit(f"unknown mode {mode!r}, supported={list(MODES)}")
     defect = argv[4].split(",") if len(argv) > 4 and argv[4] else None
-    caseset = json.load(open(caseset_path, encoding="utf-8"))
+    with open(caseset_path, encoding="utf-8") as cf:
+        caseset = json.load(cf)
     evidence = MODES[mode](caseset, work_dir, defect_cases=defect)
-    json.dump(evidence, open(out_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    with open(out_path, "w", encoding="utf-8") as of:
+        json.dump(evidence, of, ensure_ascii=False, indent=2)
     print(f"[repo_adapter/{mode}] {len(evidence['evidence'])} evidence -> {out_path}")
 
 

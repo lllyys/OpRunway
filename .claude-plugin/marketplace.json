@@ -1,0 +1,17 @@
+{
+  "name": "oprunway",
+  "owner": {
+    "name": "lys"
+  },
+  "metadata": {
+    "description": "OpRunway —— NPU 算子验收（acceptance）插件。判定归工具中立的确定性脚本（ADR 0007）。早期阶段，能力有边界，见各 skill 说明。",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "oprunway",
+      "source": "./plugin",
+      "description": "NPU 算子验收 agent+skill 体系：任务书(md/链接)+PR → 编排 spec/runner 生成与验证、在已支持路径上真机跑测、出确定性裁决与报告；判定脚本按跨运行时复用设计（ADR 0007）。⚠ 早期阶段、能力有边界：用例生成内置 IsClose/Sign/Equal/Neg 四个 elementwise 算子（其余暂不支持），真机 runner 仅 float32/float16。"
+    }
+  ]
+}

@@ -129,7 +129,15 @@ def select_standard(spec):
         oracle = prec.get("oracle")
         if oracle in ("mere_mare", "atk_double"):
             return ECOSYSTEM_MERE_MARE
-        return ASCENDOPTEST_DEFAULT  # ascendoptest / none / 缺省
+        # 显式白名单（fail-closed）：只有 {ascendoptest, none, 缺省} 才映射默认标准。其余 oracle（如
+        # torch/scipy/std_exact 这类「与 python 一致」）一律 raise，堵 class C 静默降级为 ascendoptest_default。
+        if oracle in ("ascendoptest", "none", None):
+            return ASCENDOPTEST_DEFAULT
+        raise ValueError(
+            f"未验证过的 precision.oracle={oracle!r} 的精度标准——拒绝静默降级为 ascendoptest_default。"
+            f"已知映射：{{ascendoptest,none,缺省}}→ascendoptest_default、"
+            f"{{mere_mare,atk_double}}→ecosystem_mere_mare。"
+            f"请在 spec 显式声明 precision.standard，或由 agent 自行探索/询问用户后再纳入白名单。")
     raise ValueError(f"无法映射 standard：verify_mode={vmode!r}")
 
 
@@ -251,6 +259,30 @@ def tolerance_policy_id(standard, dtype):
     return f"{standard}:{dtype}"
 
 
+# ---- oracle_source 六枚举（canonical，acceptance-contract-evidence-chain）+ 据 golden_source 据实映射 ----
+ORACLE_SOURCES = ("analytical_ref", "cpu_ref", "torch_ref",
+                  "catlass_existing_ref", "task_spec_expected", "external_ref")
+
+
+def oracle_source_from_golden(golden_source):
+    """把 caseset.expected.golden_source（造 golden 时记的**真来源串**）据实映射到 canonical oracle_source 六枚举。
+
+    - "torch ..."  → torch_ref（torch CPU 参考）。
+    - "numpy ..."  → analytical_ref（按公式的 numpy 参考——语义上是解析参考、**非 cpu_ref**；
+                     见 canon oracle-source-is-a-hardcoded-constant 的诚实边界）。
+    识别不出来源前缀 → **fail-closed**（ValueError，绝不默认 cpu_ref）。新增来源须显式纳入本映射。
+    """
+    s = (golden_source or "").strip().lower()
+    first = s.split(None, 1)[0] if s.split() else ""     # 严格首 token，避免 "torchvision"/"numpyish" 误判
+    if first == "torch":
+        return "torch_ref"
+    if first == "numpy":
+        return "analytical_ref"
+    raise ValueError(
+        f"无法从 golden_source={golden_source!r} 映射 oracle_source —— 已知前缀 "
+        f"torch→torch_ref / numpy→analytical_ref；新来源须显式纳入映射（fail-closed，不默认 cpu_ref）。")
+
+
 # ---- 整数 dtype 判定 + per-case 有效标准（T7 dtype 扩面） ----
 _INTEGER_DTYPES = frozenset({"int8", "int16", "int32", "int64",
                              "uint8", "uint16", "uint32", "uint64"})
@@ -344,7 +376,12 @@ def compute_metrics(out, golden, policy):
         if o.dtype != g.dtype:
             raise ValueError(f"exact 口径 out/golden dtype 不一致：out={o.dtype.name} golden={g.dtype.name}"
                              "（拒跨型逐位比，如 uint8 与 bool 会值相等假通过）——fail-fast，不静默")
-        return {"exact_mismatch": int(np.count_nonzero(o != g)), "numel": int(g.size)}
+        mism = (o != g)
+        # §1.4 NaN 特殊场景（如 bf16/int Neg 的 torch.neg(NaN)=NaN 输出）：NaN!=NaN=True 会误计 mismatch。
+        # 对齐 both_nan 视为通过（同数值口径 L422-423 与 compare.py）。仅浮点有 NaN；bool/int 无、不受影响。
+        if np.issubdtype(o.dtype, np.floating):
+            mism = mism & ~(np.isnan(o) & np.isnan(g))
+        return {"exact_mismatch": int(np.count_nonzero(mism)), "numel": int(g.size)}
 
     if kind == BEHAVIORAL:
         return {"numel": int(g.size)}

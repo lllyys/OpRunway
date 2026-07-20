@@ -149,7 +149,7 @@ bool ParseCaseLine(const std::string &line, int64_t lineNo, CaseSpec *spec, std:
         *err = "malformed manifest fields";
         return false;
     }
-    if (spec->dtype != "float32" && spec->dtype != "float16") {
+    if (spec->dtype != "float32" && spec->dtype != "float16" && spec->dtype != "bfloat16") {
         *err = "unsupported dtype: " + spec->dtype;
         return false;
     }
@@ -446,6 +446,9 @@ bool RunCase(const std::string &baseDir, const CaseSpec &spec, aclrtStream strea
     }
     if (spec.dtype == "float16") {
         return RunTypedCase<uint16_t>(caseDir, spec, numel, ACL_FLOAT16, stream, err);
+    }
+    if (spec.dtype == "bfloat16") {  // bf16：uint16 位模式存储 + ACL_BF16（本轮扩，与 gen_cases codec 对齐）
+        return RunTypedCase<uint16_t>(caseDir, spec, numel, ACL_BF16, stream, err);
     }
     *err = "unsupported dtype: " + spec.dtype;
     return false;

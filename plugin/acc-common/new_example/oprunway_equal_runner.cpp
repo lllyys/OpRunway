@@ -107,6 +107,7 @@ bool RunCase(const std::string &base, const Case &c, aclrtStream stream, std::st
     if (numel == 0) { const uint8_t e = 0; return WriteExact(JoinPath(dir, "out.bin"), &e, 0, err); }
     if (c.dtype == "float32") return RunTyped<float>(dir, c, numel, ACL_FLOAT, stream, err);
     if (c.dtype == "float16") return RunTyped<uint16_t>(dir, c, numel, ACL_FLOAT16, stream, err);
+    if (c.dtype == "bfloat16") return RunTyped<uint16_t>(dir, c, numel, ACL_BF16, stream, err);  // bf16：uint16+ACL_BF16
     *err = "unsupported dtype " + c.dtype;
     return false;
 }
