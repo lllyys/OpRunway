@@ -95,7 +95,7 @@
     ]
   },
   "Real-NPU runner supports only float32 and float16": {
-    "verifiedAt": "2026-07-16",
+    "verifiedAt": "2026-07-20",
     "checks": [
       {
         "artifact": "plugin/acc-common/repo_adapter.py",
@@ -103,7 +103,7 @@
         "claim": "_NP = {float32, float16, bfloat16}; unsupported dtype raises ValueError (fail-closed)"
       },
       {
-        "artifact": "plugin/acc-common/new_example/oprunway_isclose_runner.cpp",
+        "artifact": "samples/runners/oprunway_isclose_runner.cpp",
         "hash": "6c50300eff1ba8c5dab015f9c7b0f01e9ac8f27b0f0f72b59ad6d829e106463a",
         "claim": "ACL_BF16 dispatch present (bf16 physically stored as uint16)"
       },

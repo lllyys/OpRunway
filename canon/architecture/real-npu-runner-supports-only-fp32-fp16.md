@@ -1,6 +1,6 @@
 ---
 title: Real-NPU runner supports only float32 and float16
-updated: 2026-07-16
+updated: 2026-07-20
 status: verified
 ---
 
@@ -27,13 +27,13 @@ status: verified
 a3（CANN 9.0.1 容器、真 A3 NPU）从任务书正源 `experimental/math/is_close`(Atlas A2/A3) **provenance-clean
 从源重建 opp** 后重验——opp stamp `op_src=experimental/math/is_close`、ophash 与真源逐字节 sha256 一致、Task2
 裁决=pass（27 用例含 9 个 bf16、0 fail）、三门 PASSED；provenance 门 fail-closed 三情形实测通过。该跑**整体**判
-NEEDS_REVIEW·requires_human_cp（因用**插件样例 runner** 走 route B、按既定纪律挂人核，exit 2）——这与 bf16 的
+NEEDS_REVIEW·requires_human_cp（因用**插件样例 runner** 走 route B、按当时既定纪律挂人核，exit 2；该「插件样例 runner→人核」路径已于 2026-07-20 退役、改 fail-closed，见 [[Runner is an output of the engine not a component]]）——这与 bf16 的
 **dtype 覆盖正交**、不动摇「bf16 精度全过」的结论：故 `samples/specs/isclose.spec.json` 把 bf16 从 `dtype_deferred`
 转 `dtype_tested`（int32 仍 Track C）。绑源机制见
 [[opp is provenance-bound to the op source with a fail-closed gate]]；「实测跑过≠验收了正确的东西」的教训亦在其中。
 
-**Verified.** 2026-07-16 核，均存在：`plugin/acc-common/repo_adapter.py`（`_NP` 含 `bfloat16`）、
-`plugin/acc-common/new_example/oprunway_isclose_runner.cpp`（`ACL_BF16` dispatch）、
+**Verified.** 2026-07-16 核、2026-07-20 重录 runner 路径（runner 移出引擎），均存在：`plugin/acc-common/repo_adapter.py`（`_NP` 含 `bfloat16`）、
+`samples/runners/oprunway_isclose_runner.cpp`（`ACL_BF16` dispatch；2026-07-20 由 `new_example/` 迁此、内容/hash 不变）、
 `samples/specs/isclose.spec.json`（`dtype_tested` 含 `bfloat16`、`int32` 挂 `dtype_deferred`）。
 
-**Sources.** [[session 0513d745-9176-41f0-8f4b-cb7a2d19ff86 · 2026-07-10]]，[[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]（2026-07-15：Q9 重核 `_NP` 未变；2026-07-16：bf16 扩 runner + provenance-clean 验收 → `_NP` 加 `bfloat16`、claim 更新）
+**Sources.** [[session 0513d745-9176-41f0-8f4b-cb7a2d19ff86 · 2026-07-10]]，[[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]（2026-07-15：Q9 重核 `_NP` 未变；2026-07-16：bf16 扩 runner + provenance-clean 验收 → `_NP` 加 `bfloat16`、claim 更新；2026-07-20：runner 移出引擎 → Verified 路径 `new_example/` → `samples/runners/` 重录、claim 不变）
