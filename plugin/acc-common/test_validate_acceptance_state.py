@@ -6,6 +6,9 @@ import json, os, subprocess, sys, tempfile, shutil, unittest
 import numpy as np
 import precision_policy
 import validate_acceptance_state as G
+import _golden_fixture as _gf
+setUpModule = _gf.install        # golden 去引擎化：gen_cases/run_workflow 需 <ops_root>/<op>/golden.py（ADR 0011）
+tearDownModule = _gf.uninstall
 
 
 def _w(d, name, obj):

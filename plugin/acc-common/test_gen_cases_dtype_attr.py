@@ -57,6 +57,23 @@ def _find_case(cs, *, dtype=None, dim="精度", regular=True, exclude_na=True):
     raise AssertionError(f"未找到 case: dtype={dtype} dim={dim} regular={regular}")
 
 
+# ===== golden 去引擎化（ADR 0011）：引擎不含算子 golden、按算子从 <ops_root>/<op>/golden.py 加载。 =====
+# 共享 fixture 建临时 ops_root（拷 samples/golden 的 4 算子）+ 设 OPRUNWAY_OPS_DIR，令本模块 gen_cases 调用能
+# 加载到 golden（缺则 fail-closed）；子进程继承 os.environ。假算子测试用 _place_golden(_GOLDEN_ROOT, op, body) 另落。
+import _golden_fixture as _gf
+_place_golden = _gf.place_golden
+_GOLDEN_ROOT = None
+
+
+def setUpModule():
+    global _GOLDEN_ROOT
+    _GOLDEN_ROOT = _gf.install()
+
+
+def tearDownModule():
+    _gf.uninstall()
+
+
 # ============================================================ bf16 位级 codec ===
 class Bf16CodecTest(unittest.TestCase):
     def test_round_half_to_even_down(self):
@@ -256,13 +273,14 @@ class AttrMatrixTest(unittest.TestCase):
         self.assertIn(False, vals)
 
     def test_golden_uses_case_attrs(self):
+        isclose_fn, _, _ = GC.load_golden("IsClose")             # golden 现按算子加载（引擎零内置）
         for c in self.cs["cases"]:
             if not c["expected"]["case_origin"].startswith("attr_matrix"):
                 continue
             x1 = np.load(os.path.join(self.d, c["inputs"][0]["path"]))
             x2 = np.load(os.path.join(self.d, c["inputs"][1]["path"]))
             g = np.load(os.path.join(self.d, c["expected"]["golden_path"]))
-            recomputed = GC.golden_isclose([x1, x2], c["attrs"])
+            recomputed = isclose_fn([x1, x2], c["attrs"])
             np.testing.assert_array_equal(recomputed, g)         # golden 用该 case 的 attrs 算
 
     def test_nan_special_and_equal_nan_covered(self):
@@ -510,7 +528,8 @@ class GenCasesSecurityNegativeTest(unittest.TestCase):
     def test_bf16_lossy_op_via_verify_mode_exact_fail_fast(self):
         """finding #14：lossy bf16 op（输出非 bool、不在 _BF16_EXACT_OPS）借 verify_mode=exact 想绕白名单
         → 白名单与「输出是否 bool」拆成两道独立校验 → fail-fast（不因 verify_mode=exact 短路豁免）。"""
-        GC.GOLDEN["FakeLossyBf"] = ("fake", lambda inputs, attrs: np.negative(inputs[0]))
+        _place_golden(_GOLDEN_ROOT, "FakeLossyBf",
+                      "def golden_fn(inputs, attrs):\n    return np.negative(inputs[0])\n")
         try:
             sp = {"op": "FakeLossyBf", "verify_mode": "exact",
                   "params": [{"name": "self", "io": "in", "dtype": ["bfloat16"]},
@@ -519,23 +538,30 @@ class GenCasesSecurityNegativeTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 GC.gen_cases(sp, tempfile.mkdtemp())
         finally:
-            GC.GOLDEN.pop("FakeLossyBf", None)
+            shutil.rmtree(os.path.join(_GOLDEN_ROOT, "FakeLossyBf"), ignore_errors=True)
 
     def test_bool_golden_no_boundary_fail_fast_even_under_O(self):
         """finding #11：golden 未覆盖 True/False 的 exact bool op → 用 raise（非裸 assert）→ **python -O 下也拦**
         （裸 assert 会被 -O 剥离，静默产坏 caseset）。"""
-        code = (
-            "import sys, tempfile; sys.path.insert(0, %r);\n"
-            "import numpy as np, gen_cases as gc;\n"
-            "gc.GOLDEN['AllTrueB'] = ('fake', lambda i, a: np.ones_like(i[0], dtype=bool));\n"
-            "sp = {'op':'AllTrueB','verify_mode':'exact','params':["
-            "{'name':'self','io':'in','dtype':['float32']},"
-            "{'name':'other','io':'in','dtype':['float32']},"
-            "{'name':'out','io':'out','dtype':['bool']}],'precision':{'standard':'exact'}};\n"
-            "\ntry:\n gc.gen_cases(sp, tempfile.mkdtemp()); print('NOT_BLOCKED')\n"
-            "except ValueError: print('BLOCKED')\n" % _HERE)
-        r = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True, text=True)
-        self.assertIn("BLOCKED", r.stdout, r.stdout + r.stderr)
+        ops = os.path.realpath(tempfile.mkdtemp())
+        _place_golden(ops, "AllTrueB",
+                      "def golden_fn(inputs, attrs):\n    return np.ones_like(inputs[0], dtype=bool)\n")
+        try:
+            code = (
+                "import sys, tempfile; sys.path.insert(0, %r);\n"
+                "import gen_cases as gc;\n"
+                "sp = {'op':'AllTrueB','verify_mode':'exact','params':["
+                "{'name':'self','io':'in','dtype':['float32']},"
+                "{'name':'other','io':'in','dtype':['float32']},"
+                "{'name':'out','io':'out','dtype':['bool']}],'precision':{'standard':'exact'}};\n"
+                "\ntry:\n gc.gen_cases(sp, tempfile.mkdtemp()); print('NOT_BLOCKED')\n"
+                "except ValueError: print('BLOCKED')\n" % _HERE)
+            env = dict(os.environ, OPRUNWAY_OPS_DIR=ops)     # 子进程从落点加载 AllTrueB golden.py
+            r = subprocess.run([sys.executable, "-O", "-c", code],
+                               capture_output=True, text=True, env=env)
+            self.assertIn("BLOCKED", r.stdout, r.stdout + r.stderr)
+        finally:
+            shutil.rmtree(ops, ignore_errors=True)
 
 
 class RepoAdapterSecurityNegativeTest(unittest.TestCase):
@@ -629,11 +655,10 @@ class GoldenTorchPreferredTest(unittest.TestCase):
             self.skipTest("无 torch → golden fail-closed；本测试需在装了 torch 的机器上跑（精度验收在 NPU 机）")
 
     def test_golden_source_label_is_torch(self):
-        self._need_torch()
+        # 加载器只读元数据、不跑 golden_fn，故不需 torch。4 算子 golden.py 的 GOLDEN_SOURCE 恒 "torch ..."。
         for op in ("IsClose", "Sign", "Equal", "Neg"):
-            src_name, _ = GC.GOLDEN[op]
-            label = GC.golden_source_label(op, src_name)
-            self.assertTrue(label.startswith("torch "), label)      # 恒 torch、无环境分支
+            _fn, gsrc, _prov = GC.load_golden(op)
+            self.assertTrue(gsrc.startswith("torch "), gsrc)
 
     def test_caseset_records_torch_source(self):
         """caseset.expected.golden_source 恒 "torch ..."、映到 torch_ref。"""
@@ -655,20 +680,64 @@ class GoldenTorchPreferredTest(unittest.TestCase):
     def test_torch_golden_values(self):
         """golden(torch) 在无边界值(NaN/Inf)的随机输入上与 numpy 参考逐值相同（精确逐元素算子）；
         边界(如 sign(NaN))torch 与 numpy 有意不同——torch 是选定的确定性后端、不与 numpy 比。
-        另核 rtol/atol 非法 → fail-closed。"""
+        另核 rtol/atol 非法 → fail-closed。golden 现按算子从 samples/golden 加载（经 load_golden）。"""
         self._need_torch()
+        sign_fn, _, _ = GC.load_golden("Sign")
+        neg_fn, _, _ = GC.load_golden("Neg")
+        eq_fn, _, _ = GC.load_golden("Equal")
+        isclose_fn, _, _ = GC.load_golden("IsClose")
         rng = np.random.default_rng(0)
         for dt in (np.float32, np.float16):
             a = rng.uniform(-5, 5, size=(4, 4)).astype(dt)
             b = rng.uniform(-5, 5, size=(4, 4)).astype(dt)
-            np.testing.assert_array_equal(GC.golden_sign([a], {}), np.sign(a))
-            np.testing.assert_array_equal(GC.golden_neg([a], {}), np.negative(a))
-            np.testing.assert_array_equal(GC.golden_equal([a, b], {}), np.equal(a, b))
+            np.testing.assert_array_equal(sign_fn([a], {}), np.sign(a))
+            np.testing.assert_array_equal(neg_fn([a], {}), np.negative(a))
+            np.testing.assert_array_equal(eq_fn([a, b], {}), np.equal(a, b))
             np.testing.assert_array_equal(
-                GC.golden_isclose([a, b], {"rtol": 1e-5, "atol": 1e-8, "equal_nan": False}),
+                isclose_fn([a, b], {"rtol": 1e-5, "atol": 1e-8, "equal_nan": False}),
                 np.isclose(a, b, rtol=1e-5, atol=1e-8, equal_nan=False))
         with self.assertRaises(ValueError):                          # 负容差 fail-closed
-            GC.golden_isclose([a, b], {"rtol": -1e-5, "atol": 1e-8, "equal_nan": False})
+            isclose_fn([a, b], {"rtol": -1e-5, "atol": 1e-8, "equal_nan": False})
+
+
+class LoadGoldenTest(unittest.TestCase):
+    """golden 加载器（ADR 0011 决策 1/6）：只查 <ops_root>/<op>/golden.py、缺则 fail-closed 不回退、拒软链、缺元数据拒。"""
+
+    def _ops(self, d):
+        return mock.patch.dict(os.environ, {"OPRUNWAY_OPS_DIR": os.path.realpath(d)})
+
+    def test_missing_golden_fail_closed(self):
+        with tempfile.TemporaryDirectory() as d, self._ops(d):
+            with self.assertRaises(ValueError) as cm:
+                GC.load_golden("NoSuchOp")
+            self.assertIn("不回退", str(cm.exception))              # 引擎不回退内置/样例
+
+    def test_missing_metadata_rejected(self):
+        with tempfile.TemporaryDirectory() as d, self._ops(d):
+            opd = os.path.join(os.path.realpath(d), "BadOp"); os.makedirs(opd)
+            with open(os.path.join(opd, "golden.py"), "w", encoding="utf-8") as f:
+                f.write("def golden_fn(inputs, attrs):\n    return inputs[0]\n")   # 缺 GOLDEN_SOURCE/PROVENANCE
+            with self.assertRaises(ValueError):
+                GC.load_golden("BadOp")
+
+    def test_symlink_golden_rejected(self):
+        with tempfile.TemporaryDirectory() as d, self._ops(d):
+            real = os.path.join(os.path.realpath(d), "elsewhere.py")
+            with open(real, "w", encoding="utf-8") as f:
+                f.write("GOLDEN_SOURCE='x'\nGOLDEN_PROVENANCE='x'\ndef golden_fn(i, a):\n    return i[0]\n")
+            opd = os.path.join(os.path.realpath(d), "LinkOp"); os.makedirs(opd)
+            os.symlink(real, os.path.join(opd, "golden.py"))
+            with self.assertRaises(ValueError) as cm:
+                GC.load_golden("LinkOp")
+            self.assertIn("符号链接", str(cm.exception))
+
+    def test_valid_golden_loads(self):
+        with tempfile.TemporaryDirectory() as d, self._ops(d):
+            _place_golden(os.path.realpath(d), "Sign")            # 从 samples/golden 拷
+            fn, src, prov = GC.load_golden("Sign")
+            self.assertTrue(callable(fn))
+            self.assertTrue(src.startswith("torch "))
+            self.assertTrue(prov)
 
 
 if __name__ == "__main__":

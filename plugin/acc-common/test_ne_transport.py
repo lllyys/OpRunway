@@ -15,6 +15,7 @@ from unittest import mock
 import numpy as np
 import gen_cases as GC
 import repo_adapter as R
+import _golden_fixture as _gf   # golden 去引擎化：沙盒 ops_root 放 golden.py 供 gen_cases 加载（ADR 0011）
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SIGN_SPEC = os.path.join(_HERE, "..", "..", "samples", "specs", "sign.spec.json")
@@ -199,8 +200,15 @@ def _mk_local_sandbox():
         sp = json.load(f)
     for p in sp["params"]:
         p["dtype"] = ["float32"]
+    # 沙盒 ops_root（home/.oprunway/ops/Sign）放 golden.py（gen_cases 加载，ADR 0011）+ user runner（find_runner 命中）
+    opdir = os.path.join(d["home"], ".oprunway", "ops", "Sign")
+    os.makedirs(opdir)
+    _gf.place_golden(os.path.join(d["home"], ".oprunway", "ops"), "Sign")
+    with open(os.path.join(opdir, "oprunway_sign_runner.cpp"), "w", encoding="utf-8") as f:
+        f.write("// stub runner\n")
     scratch = os.path.join(base, "scratch")
-    cs = GC.gen_cases(sp, scratch)
+    with mock.patch.dict(os.environ, {"OPRUNWAY_WORK_DIR": d["home"]}):   # gen_cases 用沙盒 ops_root 加载 golden
+        cs = GC.gen_cases(sp, scratch)
     # §1 后 cases[0] 是空 Tensor na 用例（§1.4 特殊场景排在前、无 metrics）——挑**常规网格**非 na 小 case，
     # 保证有真精度 metrics（transport roundtrip 要证 bad_count=0）。
     c = next(x for x in cs["cases"]
@@ -208,11 +216,6 @@ def _mk_local_sandbox():
     cid = c["id"]
     shutil.copytree(os.path.join(scratch, cid), os.path.join(d["work"], cid))
     caseset = {"op": cs["op"], "attr_order": cs.get("attr_order", []), "cases": [c]}
-    # user runner：证 _copy_to 部署 runner（fallback 已退役、无此 user runner 则 find_runner 直接 fail-closed 报错）
-    opdir = os.path.join(d["home"], ".oprunway", "ops", "Sign")
-    os.makedirs(opdir)
-    with open(os.path.join(opdir, "oprunway_sign_runner.cpp"), "w", encoding="utf-8") as f:
-        f.write("// stub runner\n")
     d["base"], d["caseset"], d["cid"] = base, caseset, cid
     # OPRUNWAY_WORK_DIR=home → find_runner 的 ops_root 落 home/.oprunway/ops（不在插件树内）
     d["env"] = {"OPRUNWAY_TARGET": "local", "OPRUNWAY_REMOTE_DIR": d["rroot"],

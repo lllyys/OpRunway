@@ -13,6 +13,9 @@ import numpy as np
 
 import precision_policy as P
 import validator as V
+import _golden_fixture as _gf
+setUpModule = _gf.install        # golden 去引擎化：gen_cases/run_workflow 需 <ops_root>/<op>/golden.py（ADR 0011）
+tearDownModule = _gf.uninstall
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
