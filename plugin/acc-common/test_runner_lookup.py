@@ -5,8 +5,8 @@
 
 守的契约（工程约定「零持久化配置；所有产物落用户 CWD」）：
 - 运行时产物（runner.cpp）落**用户工作目录** `<ops_root>/<op>/`，**不写插件安装目录**；
-- 查找顺序 = 用户目录优先 → 插件自带样例 fallback，且 fallback 命中时 `source == "builtin_sample"`
-  （调用方据此显式告知用户「跑的不是为你的任务生成的 runner」）；
+- 查找顺序 = **只查用户目录**（引擎不回退插件样例，fallback 已退役 2026-07-20）；`source` 恒 `"user"`，
+  缺 runner 直接 fail-closed 报错（runner 是引擎的**输出**、非组件，样例只在 `samples/runners/` 作只读参考）；
 - `OPRUNWAY_WORK_DIR` 覆盖用户根（默认 = 进程 CWD）；`OPRUNWAY_OPS_DIR` 覆盖 per-op 输入根
   （默认 `<user_root>/.oprunway/ops`）；输入根与跑测输出 `reports/` 分开；
 - 两处都没有 → 报错，且错误信息同时给出两条查找路径（fail-closed，不静默兜底）；
@@ -18,7 +18,6 @@ from unittest import mock
 import repo_adapter as R
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_BUILTIN_DIR = os.path.join(_HERE, "new_example")
 
 
 def _touch(path):
@@ -82,10 +81,8 @@ class UserRootTest(unittest.TestCase):
 
 
 class FindRunnerTest(unittest.TestCase):
-    def test_user_dir_wins_over_builtin_sample(self):
-        """IsClose 在插件里有自带样例；用户目录也放一份 → 必须选用户那份。"""
-        self.assertTrue(os.path.isfile(os.path.join(_BUILTIN_DIR, "oprunway_isclose_runner.cpp")),
-                        "前提失效：插件自带样例 oprunway_isclose_runner.cpp 不在了")
+    def test_user_dir_runner_found(self):
+        """用户目录放了 runner → 命中、source=user、远端名由 op_name 定死。"""
         with tempfile.TemporaryDirectory() as d:
             want = _touch(os.path.join(d, ".oprunway", "ops", "IsClose", "oprunway_isclose_runner.cpp"))
             with mock.patch.dict(os.environ, {"OPRUNWAY_WORK_DIR": d}):
@@ -95,17 +92,18 @@ class FindRunnerTest(unittest.TestCase):
             self.assertEqual(os.path.realpath(path), os.path.realpath(want))
             self.assertEqual(remote, "oprunway_isclose_runner.cpp")   # 远端名由 op_name 定死
 
-    def test_falls_back_to_builtin_sample_and_labels_it(self):
-        """用户目录没有 → 回落插件自带样例，且 source 必须标成 builtin_sample（供调用方出声）。"""
+    def test_missing_user_runner_no_fallback_raises(self):
+        """用户目录没有 runner → **不回退插件样例**、直接 fail-closed 报错（fallback 已退役 2026-07-20）。
+        即便是插件曾自带样例的 IsClose，也不再回退——引擎不含算子 runner。"""
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.dict(os.environ, {"OPRUNWAY_WORK_DIR": d}):
                 os.environ.pop("OPRUNWAY_OPS_DIR", None)
-                path, source, remote = R.find_runner("IsClose")
-            self.assertEqual(source, "builtin_sample")
-            self.assertTrue(path.startswith(_BUILTIN_DIR + os.sep))
+                with self.assertRaises(ValueError) as cm:
+                    R.find_runner("IsClose")
+            self.assertIn("不回退", str(cm.exception))
 
-    def test_missing_everywhere_raises_with_both_paths(self):
-        """两处都没有 → fail-closed 报错，错误里同时给出用户路径与样例路径。"""
+    def test_missing_runner_raises_with_user_path_and_guidance(self):
+        """缺 runner → fail-closed 报错，给出用户路径 + acc-runner 补法 + samples/runners 只读样例 + env 覆盖口。"""
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.dict(os.environ, {"OPRUNWAY_WORK_DIR": d}):
                 os.environ.pop("OPRUNWAY_OPS_DIR", None)
@@ -113,9 +111,9 @@ class FindRunnerTest(unittest.TestCase):
                     R.find_runner("NoSuchOpXyz")
             msg = str(cm.exception)
             self.assertIn(".oprunway", msg)          # 指出用户目录
-            self.assertIn("new_example", msg)        # 指出插件样例位置
+            self.assertIn("samples/runners", msg)    # 只读样例位置（非回退靶）
             self.assertIn("acc-runner", msg)         # 指出怎么补
-            self.assertIn("OPRUNWAY_OPS_DIR", msg)   # 指出 env 覆盖口
+            self.assertIn("OPRUNWAY_OPS_DIR", msg)   # env 覆盖口
 
     def test_case_insensitive_filename(self):
         with tempfile.TemporaryDirectory() as d:
@@ -224,33 +222,25 @@ class FindRunnerHardeningTest(unittest.TestCase):
                 os.chmod(opd, 0o755)
 
 
-class BuiltinSampleVerdictTest(unittest.TestCase):
-    """H2：跑插件自带样例 runner 时，裁决绝不能是干净 PASS。"""
-    def test_exit_code_maps_builtin_sample_to_human_cp(self):
+class RunnerSourceGateTest(unittest.TestCase):
+    """fail-closed 门：new_example 模式 runner_source 必须为 'user'（fallback 已退役、runner 是引擎输出非组件）。"""
+    def test_exit_code_mapping(self):
         import run_workflow as W
-        # 干净 PASS = 0；插件样例串 = 2（挂起转人工），不是 0、不是 1
         self.assertEqual(W._exit_code("PASS"), 0)
-        self.assertEqual(W._exit_code("NEEDS_REVIEW(插件样例runner非本任务生成)"), 2)
-        self.assertEqual(W._exit_code("PASSED_WITH_RISK"), 2)
+        self.assertEqual(W._exit_code("PASSED_WITH_RISK"), 2)      # 挂起转人工
         self.assertEqual(W._exit_code("FAIL(精度)"), 1)
+        self.assertEqual(W._exit_code("NEEDS_REVIEW"), 1)          # 非干净 PASS、非挂起
 
-    def test_canonical_state_of_builtin_sample_is_needs_review(self):
+    def test_non_user_runner_source_blocked(self):
+        """new_example 下 runner_source 非 user（缺失/未知/伪造 builtin_sample）→ BLOCKED、退出码 1、非干净 PASS。"""
         import run_workflow as W
-        self.assertEqual(
-            W._canonical_state("NEEDS_REVIEW(插件样例runner非本任务生成)", {"status": "ok"}),
-            "NEEDS_REVIEW")
-
-    def test_new_example_missing_runner_source_is_blocked(self):
-        """fail-closed：new_example 模式下 runner_source 缺失/未知 → BLOCKED、退出码 1、非干净 PASS。"""
-        import run_workflow as W
-        # 缺失与未知值都不该映射成 0；BLOCKED 串走 _canonical_state 的 BLOCKED 兜底
-        self.assertEqual(W._exit_code("BLOCKED(runner_source 非法/缺失: None)"), 1)
-        self.assertEqual(
-            W._canonical_state("BLOCKED(runner_source 非法/缺失: None)", {"status": "ok"}),
-            "BLOCKED_EVIDENCE_INCOMPLETE")
+        for bad in ("BLOCKED(runner_source 非 user/缺失: None)",
+                    "BLOCKED(runner_source 非 user/缺失: 'builtin_sample')"):
+            self.assertEqual(W._exit_code(bad), 1)
+            self.assertEqual(W._canonical_state(bad, {"status": "ok"}), "BLOCKED_EVIDENCE_INCOMPLETE")
 
     def test_run_new_example_return_carries_runner_source(self):
-        """契约：run_new_example 的返回字典带 runner_source（provenance 进 evidence）。"""
+        """契约：run_new_example 的返回字典带 runner_source（provenance 进 evidence，恒 user）。"""
         import inspect, repo_adapter as R
         src = inspect.getsource(R.run_new_example)
         self.assertIn('"runner_source": runner_source', src)

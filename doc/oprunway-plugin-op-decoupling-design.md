@@ -3,7 +3,7 @@
 > 起因：想在隔离环境里「模拟一个已安装插件的用户」验收 IsClose，发现插件肚子里带着 IsClose 的现成答案。
 > 追问「为什么会有答案」，挖出的不是残留，是**能力边界**：通用 elementwise 路径只认识 4 个算子。
 >
-> **状态：方案，未实施，未 commit。** 按 CLAUDE.md #1，先抛设计、点头后动手。
+> **状态：方案。runner 侧（S5-runner）已实施**（2026-07-20，分支 `refactor/runner-out-of-engine`：3 份样例 runner 迁 `samples/runners/`、fallback 退役改 fail-closed、runner 只作输出）；**golden 侧（D1/S1）+ 来源分级（S2）+ oracle_source 门（S3）仍未实施**，须先走 ADR（golden 归属，见 §五 #5）。
 
 ---
 
@@ -146,7 +146,7 @@ spec 里现在没有能表达这个性质的字段。
 真实用户 `/plugin install` 后插件在 `~/.claude/plugins/cache/` 下，插件一更新就冲掉。**这才是落点违规。**
 
 **(b) 随插件发布的样例 / fixture** —— 仓里现存的这些文件：
-`acc-common/specs/*.spec.json` × 5 · `acc-common/new_example/oprunway_{isclose,sign,equal}_runner.cpp` × 3 ·
+`samples/specs/*.spec.json` × 5（Q1 已迁）· `samples/runners/oprunway_{isclose,sign,equal}_runner.cpp` × 3（2026-07-20 已迁）·
 `acc-common/catlass/oprunway_catlass_basic_matmul_{950,a2}_runner.cpp` × 2 · `workflows/archive_ops/{isclose,sign}/`
 
 它们随插件分发，本身**不构成落点违规**（发行物带样例是正常的）。它们的问题是**另一个**：

@@ -19,6 +19,6 @@
 ## 关联制品（symlink，相对拓扑）
 
 - spec：[`isclose.spec.json`](./isclose.spec.json)（**内联真实副本**，源 `samples/specs/isclose.spec.json`；真样例已迁出运行时路径，不再 symlink）
-- runner：[`oprunway_isclose_runner.cpp`](./oprunway_isclose_runner.cpp) → `../../../acc-common/new_example/oprunway_isclose_runner.cpp`
+- runner：[`oprunway_isclose_runner.cpp`](./oprunway_isclose_runner.cpp) → `../../../../samples/runners/oprunway_isclose_runner.cpp`
 
 > `ls -l` 应见箭头（→）；`readlink` 可解析。加新算子时对照本卡的三件套（spec + gen_cases 注册 golden + runner）。

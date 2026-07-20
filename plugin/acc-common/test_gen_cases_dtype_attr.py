@@ -594,7 +594,12 @@ class RepoAdapterSecurityNegativeTest(unittest.TestCase):
                    "OPRUNWAY_OPS_REPO": os.path.join(e, "ops"),
                    "OPRUNWAY_OPP": os.path.join(e, "opp"),
                    "OPRUNWAY_OP_SRC": "experimental/math/is_close",  # provenance：op 源子路径（必填），让 _ne_cfg 放行、走到 storage 校验
-                   "OPRUNWAY_WORK_DIR": e}   # user_root→e，令 ops_root 落 e/.oprunway（非插件目录内）→ find_runner 命中自带 sign 样例
+                   "OPRUNWAY_WORK_DIR": e}   # user_root→e，令 ops_root 落 e/.oprunway（非插件目录内）
+            # fallback 已退役（2026-07-20）：放一份 user Sign runner，让 find_runner 命中 user、走到 storage 伪造校验
+            # （否则 find_runner 先抛「缺 runner」、regex 不匹配、防线假红）
+            _sopd = os.path.join(e, ".oprunway", "ops", "Sign"); os.makedirs(_sopd, exist_ok=True)
+            with open(os.path.join(_sopd, "oprunway_sign_runner.cpp"), "w", encoding="utf-8") as _rf:
+                _rf.write("// stub user runner\n")
             import subprocess as _sp
             orig = _sp.run
             _sp.run = lambda *a, **k: (_ for _ in ()).throw(AssertionError("reached remote"))

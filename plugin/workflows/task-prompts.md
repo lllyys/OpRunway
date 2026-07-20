@@ -48,7 +48,7 @@ dispatch_mode: gen_runner
 验收标准: 先过 scope gate——仅 experimental/math/<op> aclnn 两段式；catlass/legacy/非 math 族/未支持 dtype
           → 返回 BLOCKED / 转 P3，不硬塞。过 gate 后据 spec + 自带 example 锚定 aclnn 入口/dtype/参数顺序
           （抠 example 不猜——Equal 曾猜错入口翻车），生成 oprunway_<op>_runner.cpp + 选构建路径。
-本次产出: new_example/oprunway_<op>_runner.cpp + 构建路径配置；摘要回：锚了哪个 example、四槽填法、gap。
+本次产出: <ops_root>/<op>/oprunway_<op>_runner.cpp（用户 CWD，非插件目录）+ 构建路径配置；摘要回：锚了哪个 example、四槽填法、gap。
 ```
 
 ### 2b. `dispatch_mode = verify_runner`
