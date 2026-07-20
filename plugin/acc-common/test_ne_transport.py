@@ -187,7 +187,7 @@ class LocalTransportPrimitiveTest(unittest.TestCase):
 def _mk_local_sandbox():
     """建 local 模式沙盒：work/rroot/ops/opp/home 五个互不相交的目录（均在同一 base 下作兄弟，
     commonpath=base≠任一，故两两不相交），用 gen_cases 造 **1 个 fp32 小 Sign case** 落进 work，
-    另放一份 user runner（让 find_runner 命中"用户"来源、无 builtin 样例告警）。
+    另放一份 user runner（让 find_runner 命中"用户"来源；fallback 已退役、无此 runner 则 find_runner 直接报错）。
     返回 dict(base, work, rroot, ops, opp, home, caseset, cid, env)。"""
     base = tempfile.mkdtemp()
     d = {k: os.path.join(base, k) for k in ("work", "rroot", "ops", "opp", "home")}
@@ -208,7 +208,7 @@ def _mk_local_sandbox():
     cid = c["id"]
     shutil.copytree(os.path.join(scratch, cid), os.path.join(d["work"], cid))
     caseset = {"op": cs["op"], "attr_order": cs.get("attr_order", []), "cases": [c]}
-    # user runner：证 _copy_to 部署 runner，且避免 builtin_sample 告警噪声
+    # user runner：证 _copy_to 部署 runner（fallback 已退役、无此 user runner 则 find_runner 直接 fail-closed 报错）
     opdir = os.path.join(d["home"], ".oprunway", "ops", "Sign")
     os.makedirs(opdir)
     with open(os.path.join(opdir, "oprunway_sign_runner.cpp"), "w", encoding="utf-8") as f:

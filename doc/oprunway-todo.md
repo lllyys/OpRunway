@@ -1,9 +1,9 @@
 # OpRunway 施工 TODO（离「通用算子验收工具」还差的）
 
-> **现状（2026-07-10 更新）**：Wave 1–3 已全部经 **GitHub PR #3 合入 main**（merge commit `055a85d` 已进入 main 历史；当前 GitHub + GitCode 双镜像 main = `6390f74`，包含该 merge）。
-> 编排升级 / 精度双标准 / 性能小 shape + GPU consumer / dtype 扩面 / catlass adapter / P2 原子化分发 **均已落地**，`acc-common` 由 **368 个 unittest 用例**覆盖（含判定链、三级门、适配器与脚本、对抗负例）。
+> **现状（2026-07-20 更新）**：Wave 1–3 经 **PR #3** 合入 main；本轮 **PR #6 已合入 main**（merge commit `f91ccda`；GitHub + GitCode 双镜像 main = `f91ccda` **同 OID**）——含 V1/Q1（dtype 来源红线 + 样例隔离）、Q9（golden 固定 torch·CPU）、Q7（dtype 覆盖门）、**cases50**（opbase §1 生成 + 精度门前置 fail-fast + 性能同输入 trivial-met + bf16 扩 runner）、**真机 opp provenance 绑源 + IsClose bf16 转 tested**、两次 bureau compile、provenance 批 4-finding 收口。
+> 编排升级 / 精度双标准 / 性能小 shape + GPU consumer / dtype 扩面 / catlass adapter / P2 原子化分发 **均已落地**，`acc-common` 由 **487 个 unittest 用例**覆盖（a3 容器全绿；含判定链、三级门、适配器与脚本、provenance 回归、对抗负例）。
 > **但仍不是「能对任意算子一键验收」的成品**——剩余的洞见下。
-> ⚠ **别误读**：剩余项里**确有代码型后续**（ATK 双标杆 fallback、Track C 的 int/bf16 runner + `neg_runner`、runner 自检 sidecar 硬门、其余 11 仓 adapter）；只是它们**各自卡在标准未定 / 真机未开 / 目标任务未明**，动手前得先有依据，不能凭空写。**能立刻把「验收结论」往前推的那部分，确实只剩人门裁决与外部资源**（见文末）。
+> ⚠ **别误读**：剩余项里**确有代码型后续**（sign/equal/neg 的 bf16 真机验收、Track C 的 int32 runner + `neg_runner`、ATK 双标杆 fallback、其余 11 仓 adapter）；只是它们**各自卡在真机未开 / 标准未定 / 目标任务未明**，动手前得先有依据，不能凭空写。**能立刻把「验收结论」往前推的那部分，主要剩人门裁决与外部资源**（见文末）。
 > 〔~~Equal~~ 那条 **2026-07-09 作废**：任务书↔PR 配错、Equal 社区任务实为「未验收空任务」，见硬约束 #1。真机有效裁决仅 **IsClose / Sign**〕
 
 ## 🔒 已用教训钉住的硬约束（别再违反，先写这，因为最值钱）
@@ -21,15 +21,16 @@
 
 > **新最高律令（用户明示）**：**精度标准与 golden 只能来自任务书指定的测试方法**，不是自撰 numpy（除非任务书要求）；不在支持范围 → **fail-closed 抛用户**、不静默降级。（「绝不信 PR」在精度维的延伸。）
 
-### ✅ 本会话已做（都未 commit）
+### ✅ 已合入 main（PR #6 · 2026-07-13~20）
 - [x] **V1 dtype 来源红线**：acc-spec 三入口改「dtype 全集 = 任务书 > 原 TBE 信息库 > 问用户」，PR op_def 仅对照。核验 SOUND。
-- [x] **Q1 样例隔离**：真样例迁 `samples/`、零真值模板、三入口禁读 `.spec.json`、测试重定、archive_ops 内联、守门测试。4 路核验 SOUND。
-- [x] **compile**：4 页 canon（其中 1 页因 Q1 已变 stale，见下）。
+- [x] **Q1 样例隔离**：真样例迁 `samples/`、零真值模板、三入口禁读 `.spec.json`、测试重定、archive_ops 内联、守门测试。4 路核验 SOUND。**stale 页 `spec-examples-pollute` 已刷「已修复」（`proposed` 待 review）。**
+- [x] **compile ×2**：首轮 4 页（V1/Q1/Q9/Q7）+ 次轮 5 页（cases50/provenance：`opp-provenance-bound`·`opbase§1 生成`·`精度门 fail-fast`·`perf trivial-met`·`runner-dtype` 更新）。gazette health 全 0。
+- [x] **provenance 批 4-finding 收口**：`_deploy.tgz` token+清理 · na out.bin 解耦 · 裸 open→with · 去 `OPRUNWAY_OP` 死字段。独立审一轮、a3 容器 487 测全绿。
 
-### 🔴 P0 · 收尾（把已做的落袋）
-- [ ] **codex 门**：V1/Q1/compile 改动 commit 前统一过一轮（代码 `cc-suite:audit-fix` / 散文 `codex exec` gpt-5.6-sol low）。
-- [ ] **commit + 入库**：走 PR 进 main；**PR #6（marketplace+Q2/Q3）待用户 merge**，合后同步 GitCode 镜像。
-- [ ] **bureau 刷新**：capture golden 律令；Q1 修复 →刷 stale 页 `spec-examples-pollute-acc-spec-derivation`(verified) + `_verify.json` 指纹（capture→compile→review，不手改）。
+### ✅ P0 · 收尾（已完成 2026-07-20）
+- [x] **codex 门**：各批 commit 前均过一轮（代码走独立 Claude 新眼审=cc-suite 委托结构 / 散文 codex 或独立审；**codex 无人值守空转已坐实、退回独立 Claude**）。
+- [x] **commit + 入库**：**PR #6 已 push + merge 进 main**（`f91ccda`）、GitCode 镜像已同步（双镜像同 OID）。
+- [x] **bureau 刷新**：golden 律令已入 canon（`golden-source-from-taskdoc-method` + `golden-fixed-to-torch-cpu`）；Q1 stale 页 `spec-examples-pollute` 已刷「已修复」+ `_verify.json` 指纹更新；cases50/provenance 决策已 compile。
 
 ### 🟢 Q9 golden（**已建 + a3 真 torch 验证 14 测全绿 · 2026-07-14**）
 > 决策终稿：golden = CPU 标杆、**固定用 torch(CPU) 单后端**（确定性，**不回退 numpy**——torch/numpy 边界不一致如 `sign(NaN)` 会产非确定 golden）；torch 缺失 → fail-closed 报错要求安装。精度验证在装了 torch 的机器上（NPU 机）。
@@ -54,11 +55,11 @@
 > - **数量以用户为准**：`case_target` 默认 50、运行时问用户（**覆盖 §1.1「不设固定下限」——用户明示以其为准**）。
 > - **性能与精度同一套输入**（用户明示）：不再单独造大 shape 性能用例；**性能在全部相同输入上判**（§1 覆盖里维度可到 2²⁰、总元素 2³¹，大 shape 本在集里）。
 > - **精度门前置 + fail-fast**：跑完整套 → 任一精度挂 → `FAILED_PRECISION` + 跳过性能 + 提前结束（fail-fast 粒度=**跑完再判**、非首个短路）。
-- [ ] **① 数量可配**：spec 加 `precision.case_target`（默认 50）；`acc-spec` agent `AskUserQuestion` 问用户写入；`gen_cases`/门读同一字段。
-- [ ] **② gen_cases 重写按 §1**：轴 = `dtype(可跑集) × 数据格式 × 维度 × attr` 正交覆盖——维度 1~8、每维取 **2ᵏ / 2ᵏ−1**、总元素 ≤ 2³¹；值域 **50% 均匀[-5,5] + 50% 正态(μ∈[-5,5],σ∈[0.1,2])**；attr 走等价类/布尔 T,F/枚举全值。§1.4 特殊场景（空 Tensor、标量[1]、边界全1维/某维最大、INF/-INF/NAN 遍历）**优先纳入、不与常规正交**，余量用正交组合确定性填到 `case_target`（SEED 稳定序）。每条 torch golden。**边界值域正好落实 Q9 剩余 NaN/±0/Inf 边界（codex #6）**。defer 的 dtype（runner 跑不了）隔 blocked-pending、不计必过集。
-- [ ] **③ 单集单跑双出**：`run_workflow` Task2 一套用例在 NPU 跑一次 → 每条出精度(vs torch golden, ascendoptest 阈值)+性能(kernel-only us)。精度门前置 fail-fast：任一挂 → `FAILED_PRECISION`+跳过 Task3+非零退出+`acceptance.json` 记「精度未全过、性能未跑」。全过 → Task3 性能对比在**全部相同输入**上做。
-- [ ] **④ 门加两道**：精度全过门（任一 case≠pass → FAILED）+ 精度数量门（precision case 数 ≥ `case_target`，否则 BLOCKED——补「跑子集报全」的**数量维**）。
-- 落地方式（拟）：ultracode fan-out + codex 门 + **a3 真 torch 全量测**（边界语义最吃 torch 确定性、真机不可省）。**待用户点头开工。**
+- [x] **① 数量可配**：spec 加 `precision.case_target`（默认 50）；`acc-spec` agent `AskUserQuestion` 问用户写入；`gen_cases`/门读同一字段。
+- [x] **② gen_cases 重写按 §1**：轴 = `dtype(可跑集) × 数据格式 × 维度 × attr` 正交覆盖——维度 1~8、每维取 **2ᵏ / 2ᵏ−1**、总元素 ≤ 2³¹；值域 **50% 均匀[-5,5] + 50% 正态(μ∈[-5,5],σ∈[0.1,2])**；attr 走等价类/布尔 T,F/枚举全值。§1.4 特殊场景（空 Tensor、标量[1]、边界全1维/某维最大、INF/-INF/NAN 遍历）**优先纳入、不与常规正交**，余量用正交组合确定性填到 `case_target`（SEED 稳定序）。每条 torch golden。**边界值域正好落实 Q9 剩余 NaN/±0/Inf 边界（codex #6）**。defer 的 dtype（runner 跑不了）隔 blocked-pending、不计必过集。
+- [x] **③ 单集单跑双出**：`run_workflow` Task2 一套用例在 NPU 跑一次 → 每条出精度(vs torch golden, ascendoptest 阈值)+性能(kernel-only us)。精度门前置 fail-fast：任一挂 → `FAILED_PRECISION`+跳过 Task3+非零退出+`acceptance.json` 记「精度未全过、性能未跑」。全过 → Task3 性能对比在**全部相同输入**上做。
+- [x] **④ 门加两道**：精度全过门（任一 case≠pass → FAILED）+ 精度数量门（precision case 数 ≥ `case_target`，否则 BLOCKED——补「跑子集报全」的**数量维**）。
+- 落地方式：ultracode fan-out + codex 门 + a3 真 torch 全量测。**①②③④ 已全部落地（2026-07-15），见下条 ✅。**
 
 **✅ 已落地（2026-07-15）**：①②③④ 全实现 + Layer A（gen_cases §1）/B（validator na·nan/perf_compare trivial-met/run_workflow fail-fast/门 na·trivial 豁免+防伪造）/C（bf16 runner+repo_adapter）/D（acc-spec case_target）。**a3 真 torch mock e2e 全绿 + fail-fast 验 + bf16 生成验 + 274 单测全绿**。设计+验证详见 `doc/oprunway-cases50-design.md`。
 - [x] **真机 blocker 已解（2026-07-16）**：根因非环境坏、是 **run_on_npu.sh 每次 fresh 都重建 op**（对 isclose 的 experimental/op 名路径不适用 + `rm -rf $OPP` 毁 opp）→ 修「用户态 opp 已建则复用、只建 runner_exe」；另修 isclose runner 第二道解析处 dtype 关卡漏补 bf16。真机彻底解封（完整 3-dtype 50 用例 Task2 全 pass、三门 PASSED）。
@@ -69,6 +70,7 @@
 - [ ] **follow-up · equal_nan 有效性**（deviation #4）：§1 不产 nanpair、`_assert_equal_nan_effective` 不再触发；equal_nan T/F 结构覆盖 + NaN §1.4 覆盖但未**交集**证明（aligned-NaN 翻转）。minor。
 
 ### 🔵 P2 · 扩展 / 接通
+- [ ] **插件-算子解耦**（`doc/oprunway-plugin-op-decoupling-design.md`）：① **runner 去引擎化已做**（分支 `refactor/runner-out-of-engine`：3 份样例 runner 移出引擎 → `samples/runners/`、runner 只作输出、`find_runner` fallback 退役改 fail-closed、门 runner_source 仅 user；a3 容器 486 测全绿、待 PR）；② **golden 去引擎化下一刀**——`gen_cases` 的 `GOLDEN` 硬表（4 算子 numpy 参考）改加载器（S1），引擎才真 op-中立；**须先走 ADR**（golden 归属属推导非 canon，设计开放问题 #5）。
 - [ ] **(a) TBE 信息库接通**（dtype 独立源）：每份任务书自带路径 `.../tbe/config/ascend910b`；读法随运行环境探测、**不写死 ssh**。
 - [ ] int32 扩展（Track C，锁已解）。
 
@@ -113,6 +115,7 @@
 ### A. 人门裁决（agent 不可越门）
 1. **`bureau:review` promote**（BUREAU.md：只有人能升 `canonical`，agent 不得手编 cabinet prose、不得手升）：
    - Equal 翻案 4 页：`verify-spec-pr-correspondence` / `root-cause-decoupling` / `task-spec-authoritative` 可按 checklist 直接 promote；**`perf-baseline-by-reference-source` 须先裁 `perf_baseline_source` 张力**（GPU 对比层是否为可选/非必需）再升，否则 hold。
+   - **本会话新/改 6 页**（`opp-provenance-bound` / `case-generation-follows-opbase-section-1` / `precision-gate-precedes-performance-fail-fast` / `performance-reuses-precision-inputs-with-trivial-met` / `real-npu-runner` 更新 / `spec-examples-pollute`「已修复」）：待复核 promote。⚠ **`real-npu-runner` 页「标题 vs body」改名**在此步收口——body 已 fp32/fp16/bf16、标题仍「only fp32/fp16」+ supersede 横幅，人审时决定改名并修其它页对它的 `[[…]]` 入链。
    - T9 发布形态决定（当前 `proposed`）、门职责扩展（「门内重算比对」属证据可信、非重判 verdict）。
    - **2 条 lint survivor**：ADR0002 `msTuner`→`msprof op`；5 页 `1.2×`→`target_ratio`。⚠ 护栏：ADR0006/0008 未同步 rename 前**不宜单独 promote**（否则固化 drift）。survivors **单靠 `bureau:note` 不进 review 视图**，需 `bureau:lint --apply`（改 canonical status、消耗性）或 `bureau:compile` 才可见——用户已选「先不跑、留 review 一次处置」。
 2. **T4 catlass 偏离 canonical 需人裁**：未走 canon `catlass-to-aclnn-bridge`【canonical】的路线 A/B，自选「注入其自带 example 树的 repo-native harness」第三路径。要么人门追认（改 canon），要么改回 A/B。
@@ -123,7 +126,8 @@
 5. **真 GPU 基线数据**：consumer 侧与最小字段契约已就绪，缺数据即走 `BLOCKED_WAIT_GPU_BENCHMARK`。
 
 ### C. 已收口（不再是待办）
-- ✅ 公开台账 push：双镜像同步至同一 OID。
+- ✅ 公开台账 push + **PR merge**：本会话 **PR #6 已 merge 进 main**、双镜像（GitHub `lllyys` + GitCode `brian66237`）同步至同一 OID `f91ccda`。
+- ✅ 真机 opp provenance 绑源 + IsClose bf16 转 tested（2026-07-16）；provenance 批 4-finding 收口（2026-07-16）。
 - ✅ PR#2 body Equal 作废更正：2026-07-10 在线复核确认 body **早已含更正**（裁决表 Equal 行 = 「无结论·结论作废」），denylist 词仅出现在作废叙述内，评论/review 无旧结论 → **无需编辑**。
 
 ## 备注

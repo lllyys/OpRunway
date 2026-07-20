@@ -14,6 +14,11 @@
 6. 远程 NPU 环境（哪台机、catlass 在哪 build、是否进 Docker）待用户提供后补进 CLAUDE.md。
 7. 优先级（Codex 排序）：Q3>Q4>Q5>Q6>Q1>Q2>Q8>Q9>Q7。完整见 `doc/oprunway-design.md` §13。
 
+## 2026-07-20
+
+- **引擎去 runner 化（第一刀）：runner 移出引擎、只作输出、fallback 退役** —— 按「引擎 op-中立、runner 是**输出**非组件」原则（用户明示），把 3 份具体算子 runner（`oprunway_{isclose,sign,equal}_runner.cpp`）**移出引擎** `plugin/acc-common/new_example/` → 顶层 `samples/runners/`（降为只读参考 / 生成器骨架种子）；**删 `find_runner` 的 `builtin_sample` 回退、改 fail-closed**（缺 runner→报错，引擎绝不回退插件样例；**撤销 a7c8417 的「可以带样例」兜底**、用户 2026-07-20 确认，logbook 记重决）；`run_workflow` 门 runner_source 白名单收窄仅 `user`（伪造/缺失/`builtin_sample` 一律 BLOCKED，比旧的 NEEDS_REVIEW 更严）、清 `_exit_code` 的死特判。测试重写（builtin 簇→fail-closed 语义、forged-storage 补 user runner fixture）+ 文档/symlink 同步。**a3 CANN 9.0.1 容器 486 单测全绿**。范围仅 runner——**golden（D1 `GOLDEN` 硬表）作下一刀、须先走 ADR**（引擎当前仍认死 4 算子 golden、还不算完全 op-中立）。分支 `refactor/runner-out-of-engine`，**未 push**。
+- **PR #6 合入 main + 双镜像同步 + TODO 文档刷新** —— 本会话全部工作（V1/Q1/Q9/Q7 + cases50 + provenance 绑源 + IsClose bf16 转 tested + 两次 compile + provenance 批 4-finding 收口）经 **PR #6 merge 进 main**（merge commit `f91ccda`），GitHub `lllyys` + GitCode `brian66237` 双镜像同步至同一 OID。`doc/oprunway-todo.md` 刷新到当前状态：P0 收尾 + cases50 ①②③④ 标完成、头部现状/单测数（368→487）更新、「人门裁决」加本会话 6 页待 review（含 `real-npu-runner` 标题改名收口）、「已收口」记 PR merge。
+
 ## 2026-07-16
 
 - **bureau compile：本会话决策编入 canon（改 1 页 + 建 4 页）** —— 把本会话 minute 后半（opbase §1 生成规则 / 精度门前置 fail-fast / 性能同输入 trivial-met / opp provenance 绑源 / bf16 转 tested）compile 进 canon：更新「Real-NPU runner supports only fp32/fp16」页（body 改为现行真相 fp32/fp16/bf16、标题保留护入链、标 supersede 待人审改名）+ 新建 4 页（opp-provenance-bound-to-op-source · case-generation-follows-opbase-§1 · precision-gate-precedes-performance-fail-fast · performance-reuses-precision-inputs-with-trivial-met）。**gazette health 全 0**（无 dangling/orphan/contradiction/unsourced）；2 张 verified 页记指纹进 `_verify.json`。过 rule #5 散文门（独立 Claude 审校：无失真/夸大、verified tier 名副其实、补一句澄清 bf16 那次跑整体 human-cp 与 dtype 覆盖正交）。**未 push。**

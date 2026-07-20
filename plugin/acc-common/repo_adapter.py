@@ -215,11 +215,6 @@ def _plugin_root():
     return os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
 
 
-def _builtin_runner_dir():
-    """插件自带样例 runner 目录（acc-common/new_example/）——不受 _plugin_root 上溯影响。"""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "new_example")
-
-
 def _contains(root, path):
     """path 是否在 root 之内（含 root 自身）。用 commonpath，避免 startswith 对 `/`、
     `/a` vs `/ab` 这类前缀歧义误判。两者均须已 realpath。"""
@@ -257,20 +252,18 @@ def op_dir(op_name):
 
 
 def find_runner(op_name):
-    """按算子名找 runner.cpp，返回 `(path, source, remote_name)`；`source ∈ {"user", "builtin_sample"}`。
+    """按算子名找 runner.cpp，返回 `(path, "user", remote_name)`。
 
-    查找顺序：
-      1. **用户目录** `<ops_root>/<op>/oprunway_<op>_runner.cpp` —— acc-runner 为本次任务生成的。
-      2. **插件自带样例** `<plugin>/acc-common/new_example/oprunway_<op>_runner.cpp` —— 随插件发行的 demo。
-
-    命中 2 时调用方**必须显式告知用户**「跑的是插件自带样例、不是为你的任务生成的」，
-    否则会重演「以为验收了自己的算子、实际跑的是插件里的化石」。`source` 落进 evidence 作 provenance。
+    **只查用户目录** `<ops_root>/<op>/oprunway_<op>_runner.cpp`——acc-runner 为本次任务生成的、或用户自带的。
+    **引擎不含任何算子 runner、绝不回退到插件自带样例**（fallback 已退役 2026-07-20，撤销 a7c8417 的「可以带
+    样例」兜底）：缺 runner 直接 **fail-closed** 报错，要求先经 acc-runner 生成或用户放置。样例 runner 现只在顶层
+    `samples/runners/` 作**只读参考 / 生成器骨架种子**，**不是**引擎运行时的回退靶（runner 是引擎的**输出**、非组件）。
 
     安全（runner 会被 scp 到远端，是真实注入面）：
     - `op_name` 经 `_check_id` 校验；`remote_name` **由已校验的 op_name 定死**（`oprunway_<lower>_runner.cpp`），
       **不从解析后的本地路径取 basename**——否则符号链接可把远端文件名变成 `bad;rm...` 注入远端命令。
     - 用户侧 runner **拒符号链接**（`os.path.islink`）：防 realpath 逃逸 + 防 TOCTOU 换靶。
-    - 用户侧只在 `ENOENT`（真不存在）时才 fallback；权限错误/异常文件类型一律抛错（fail-closed，不静默换跑样例）。
+    - 权限错误/异常文件类型一律抛错（fail-closed，不静默兜底）。
     """
     _check_id("op_name", op_name)
     name = f"oprunway_{op_name.lower()}_runner.cpp"          # 远端文件名的唯一真相源（已校验，无注入）
@@ -279,9 +272,9 @@ def find_runner(op_name):
     try:
         st = os.lstat(upath)                                 # lstat：不跟随软链
     except FileNotFoundError:
-        st = None                                            # 真不存在 → 允许 fallback
+        st = None                                            # 真不存在 → fail-closed 报错（不回退样例）
     except OSError as ex:
-        raise ValueError(f"用户 runner 不可访问（非 fallback）: {upath!r}: {ex}")
+        raise ValueError(f"用户 runner 不可访问: {upath!r}: {ex}")
     if st is not None:
         if os.path.islink(upath):
             raise ValueError(f"用户 runner 是符号链接，拒绝（防路径逃逸/远端注入）: {upath!r}")
@@ -289,15 +282,10 @@ def find_runner(op_name):
             raise ValueError(f"用户 runner 路径存在但不是普通文件: {upath!r}")
         return upath, "user", name
 
-    bpath = os.path.join(_builtin_runner_dir(), name)
-    if os.path.isfile(bpath):
-        return bpath, "builtin_sample", name
-
     raise ValueError(
-        f"缺 runner: {name}\n"
+        f"缺 runner: {name}（引擎不回退插件样例，fail-closed）\n"
         f"  用户目录（应放这里）: {upath}\n"
-        f"  插件自带样例（未命中）: {bpath}\n"
-        f"  → 新算子需先由 acc-runner 生成 runner.cpp 落到用户目录；"
+        f"  → 新算子需先由 acc-runner 生成 runner.cpp 落到用户目录（可照 samples/runners/ 的只读样例）；"
         f"或设 OPRUNWAY_OPS_DIR / OPRUNWAY_WORK_DIR 指向正确的工作目录。")
 
 
@@ -425,14 +413,10 @@ def run_new_example(caseset, work_dir, defect_cases=None):
                     f"local 模式下 {k}={p!r} 与 work_dir={work_dir!r} 相交——"
                     f"§部署会对其执行 rm -rf，拒绝以防误删。请指向独立的专用 scratch 目录。")
     here = os.path.dirname(os.path.abspath(__file__))
-    # runner：用户目录优先 → 插件自带样例 fallback（命中 fallback 必须出声，见 find_runner docstring）。
-    # runner_name 由 find_runner 从**已校验的 op_name** 定死（不取 basename），远端 scp 文件名无注入面。
+    # runner：**只查用户目录**（引擎不回退插件样例，fallback 已退役 2026-07-20）；runner_source 恒 "user"，
+    # 缺 runner 则 find_runner 直接 fail-closed 报错。runner_name 由 find_runner 从**已校验的 op_name** 定死
+    # （不取 basename），远端 scp 文件名无注入面。
     runner, runner_source, runner_name = find_runner(caseset["op"])
-    if runner_source == "builtin_sample":
-        print(f"⚠ 使用**插件自带样例** runner：{runner}\n"
-              f"  它随插件发行、**不是为你的任务生成的**。若要验收你自己的算子，"
-              f"请让 acc-runner 生成 runner.cpp 落到 {op_dir(caseset['op'])}/",
-              file=sys.stderr)
     npu_sh = os.path.join(here, "new_example", "run_on_npu.sh")   # 通用编排脚本（非 per-op），留在插件内
     n = len(caseset["cases"])
     perf_ids = [c["id"] for c in caseset["cases"] if "性能" in c.get("dims", [])]
@@ -610,8 +594,8 @@ def run_new_example(caseset, work_dir, defect_cases=None):
                               for cid, us in base_us.items()]}
     with open(os.path.join(work_dir, "_real_baseline.json"), "w", encoding="utf-8") as f:
         json.dump(real_base, f, ensure_ascii=False, indent=2)
-    # runner_source 进 evidence：跑的是用户生成的 runner 还是插件自带样例，属 provenance，
-    # 报告/门须能分辨（builtin_sample 时裁决不得被当成「验收了用户自己的算子」）。
+    # runner_source 进 evidence（provenance）：fallback 已退役后恒 "user"（引擎不回退插件样例）；
+    # 门据此 fail-closed——非 user 一律 BLOCKED（防伪造 evidence 冒充「验收了用户自己的算子」）。
     return {"op": caseset["op"], "repo_mode": "new_example",
             "runner_source": runner_source, "runner_path": runner, "evidence": ev}
 

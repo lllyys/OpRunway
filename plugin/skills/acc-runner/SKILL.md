@@ -9,10 +9,10 @@ description: 为 ops-math 风格、experimental/math 目录、aclnn 两段式接
 **输出**：**`<ops_root>/<op>/oprunway_<op.lower()>_runner.cpp`** + 构建路径配置
 （`ops_root` = `$OPRUNWAY_OPS_DIR`(绝对) 或 `${OPRUNWAY_WORK_DIR:-$CWD}/.oprunway/ops`）。
 ⚠ **落用户工作目录、不写插件安装目录**（升版即冲；工程约定要求产物落用户 CWD；`ops_root` 落插件目录内会被拒）。
-插件里的 `acc-common/new_example/oprunway_*_runner.cpp` 是**随插件发行的样例，按只读用、不得改写**。
-`repo_adapter.find_runner()` 查找顺序 = **用户目录优先 → 插件样例 fallback**；命中样例（=用户没为本任务提供 runner）时
-会在 stderr 告警「跑的不是为你的任务生成的 runner」，真机 `new_example` 的 evidence 记 `runner_source=builtin_sample`，
-**裁决被强制降为 `NEEDS_REVIEW`、进人工 CP、绝不出干净 PASS**。
+顶层 `samples/runners/oprunway_*_runner.cpp` 是**只读参考样例 / 生成器骨架种子**（非引擎组件、非运行时回退靶）。
+`repo_adapter.find_runner()` **只查用户目录**（`<ops_root>/<op>/`）——**引擎不回退插件样例，fallback 已退役 2026-07-20**：
+缺 runner 直接 **fail-closed** 报错，真机 `new_example` 模式 `runner_source` 恒 `user`、非 user 一律 `BLOCKED`。
+runner 是引擎的**输出**、非组件；样例只供参照生成（照 §2 四槽拷），绝不作运行时兜底。
 **当前范围（诚实）**：仅 **`experimental/math/<op>` aclnn 算子**代码闭环；余待扩（见 ref §3）。**runner 自检证据满足/不满足 纪律当前非代码强制 sidecar 硬门、待补**（`repo_adapter` 只查文件在不在，不识别 unverified；ref §4）。
 **核心纪律（Equal 教训固化）**：aclnn 入口/dtype/参数顺序**从算子自带 example 抠、不猜**；**runner 自检证据不满足则停在 CP-C、不上真机**（靠 agent/人自觉，直到 sidecar 门落地）；acceptance 裁决只逐字引用 validator.py / perf_compare.py / validate_acceptance_state.py 产物（ADR 0007）。
 **调用者**：本 skill 由 acc-runner-dev subagent 以 `dispatch_mode=gen_runner`/`verify_runner` 调用；单轮 / 禁内部循环 / 不自行判定等纪律以该 agent 为准（指针，不在此复制）。

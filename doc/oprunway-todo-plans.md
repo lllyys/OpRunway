@@ -401,7 +401,7 @@
 | `plugin/workflows/development-guide.md` | create | 六步验收蓝图 + CP 门（源 AGENTS.md 流程 + design §2），材料仓、无 SKILL.md |
 | `plugin/workflows/task-prompts.md` | create | P1 subagent 分阶段 dispatch prompt 模板库；**显式前向声明依赖 P1 subagent（本 P2 未建）**，标「模板待 P1 落地后接线」 |
 | `plugin/workflows/archive_ops/README.md` | create | 案例库说明 + **case.md 字段 schema + 入库校验清单**（见 §8-⑦）+ 入库判据（仅真机-verified 才收；**须标 verdict 类别，不混称 PASS**） |
-| `plugin/workflows/archive_ops/isclose/case.md` | create | **PASS 案例**（精度+性能皆过；⚠ 无社区任务 PR，provenance 标「from-scratch example」）+ symlink 到 `acc-common/specs/isclose.spec.json` 与 `new_example/oprunway_isclose_runner.cpp` |
+| `plugin/workflows/archive_ops/isclose/case.md` | create | **PASS 案例**（精度+性能皆过；⚠ 无社区任务 PR，provenance 标「from-scratch example」）+ symlink 到 `samples/specs/isclose.spec.json` 与 `samples/runners/oprunway_isclose_runner.cpp` |
 | `plugin/workflows/archive_ops/sign/case.md` | create | **精度-PASS / 性能-FAIL 案例**（PR #2702；`sign_004` 9.68us vs TBE 6.32us、ratio 0.653；含 caveat）——**明标为「已实测·性能未达成」样本，非 PASS** + symlink 到对应 spec/runner |
 | `plugin/init.sh` | create | 安装期扇出（见 §6 安装矩阵）：`--tool`/`--level`/`--dry-run`/`--force`/`--uninstall`；主变量 `OPRUNWAY_PLUGIN_ROOT`；不 sed 私有/绝对路径、不搬 `external_directory:allow`；symlink 存活校验 + 断链检测 + 不保 symlink 时 materialize-with-provenance 兜底 |
 | `plugin/AGENTS.md` | edit | frontmatter `skills:` 由 `acc-spec/acc-runner` → 补齐 6（+ casegen/precision/perf/rootcause）。**只改这一处** |
