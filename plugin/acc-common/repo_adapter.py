@@ -215,6 +215,31 @@ def _out_shape_is_declared(case):
     return exp.get("out_shape_source") == _OUT_SHAPE_DECLARED_SRC
 
 
+def _readback_shape(case, golden, cid):
+    """真机读回时 `out.bin` 该 reshape 成什么形状。
+
+    ⚠ **诚实边界（别把这里说成「逐维验了 NPU 输出形状」）**：`out.bin` 是**扁平 dump**，
+    只携带元素数、**不携带形状**。所以「NPU 实际产出的是几维、每维多少」在采集层
+    **根本观测不到**——能验的只有 numel（上游已 fail-closed 校过）。
+    真要逐维验，得让 runner 把自己实际的输出形状一并写出来（runner 契约变更，见 TODO）。
+    在那之前，往 evidence 里塞一个「实际输出形状」字段等于拿声明跟自己比 = **假验证**，
+    比不验更坏，故本仓**有意不做**。
+
+    这里做的是**纵深防御**：reshape 的靶子取 caseset **声明**的输出形状（而非顺手用 `golden.shape`），
+    并断言两者一致。gen_cases 已在生成期对过一次账，这里再对一次能挡住「adapter 自己把靶子弄错」
+    这类真实 bug（例如声明 `[N,1]` 却按 golden 的 `[N]` 收）。"""
+    decl = _declared_out_shape(case)
+    if decl is None:
+        return golden.shape
+    decl = tuple(int(d) for d in decl)
+    if decl != tuple(golden.shape):
+        raise RuntimeError(
+            f"{cid}: caseset 声明输出形状 {decl} ≠ golden 形状 {tuple(golden.shape)}——"
+            f"两者本应在 gen_cases 生成期就对过账，此处不一致说明 caseset 被改过或 adapter 取错靶子。"
+            f"fail-closed，不静默按其中一个 reshape。")
+    return decl
+
+
 def _manifest_attr_token(val, name, cid):
     """attr 值 → manifest 行里的**单个 token**（manifest 是空格分隔的扁平 token 序列，一个 attr 占一个位）。
 
@@ -786,7 +811,9 @@ def run_new_example(caseset, work_dir, defect_cases=None):
                 raise RuntimeError(f"{cid}: out.bin {raw.size}B ≠ 期望 {golden.size}（形状/传输异常）")
             if raw.size and not np.isin(raw, (0, 1)).all():
                 raise RuntimeError(f"{cid}: out.bin 含非 0/1 值，非法 bool 输出")
-            out = raw.reshape(golden.shape).astype(bool) if golden.size else raw.astype(bool)
+            # ⚠ **空 Tensor 也要还原形状**：`numel==0` 不代表形状无意义——声明 `(0,3)` 若退成 `(0,)`
+            # 就是静默丢了维度信息（且绕过纵深断言）。reshape 对 0 元素同样成立，无需特判。
+            out = raw.reshape(_readback_shape(c, golden, cid)).astype(bool)
         else:                                 # numerical：out.bin 是 **storage** dtype（bf16→uint16、native→逻辑）
             # storage-aware 读回：bf16 的 out.bin 是 uint16 位模式 → readback_output 解码回 fp32-on-grid；
             # native(fp32/fp16) storage==logical，readback_output 断言 dtype 相符（不做值 cast）。
@@ -795,7 +822,7 @@ def run_new_example(caseset, work_dir, defect_cases=None):
             if raw.size != golden.size:
                 raise RuntimeError(f"{cid}: out.bin {raw.size} elem ≠ 期望 {golden.size}（形状/传输异常）")
             dec = readback_output(raw, {"dtype": dtn})
-            out = dec.reshape(golden.shape) if golden.size else dec
+            out = dec.reshape(_readback_shape(c, golden, cid))   # 空 Tensor 同样还原形状，理由见上
         # A 方案：把 readback 逻辑数组另落 out.npy（供门 gate_task2 以 np.load 统一重算；out.bin 原始 dump 保留
         # 作原始产物）。provenance 的 out_sha256 绑定 out.npy（门重算所依的那份字节）。
         out_npy_rel = f"{cid}/out.npy"

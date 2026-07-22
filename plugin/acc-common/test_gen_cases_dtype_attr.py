@@ -476,6 +476,19 @@ class DtypeRejectTest(unittest.TestCase):
         two = GC._build_inputs(GC._case_rng("x"), in_params[:2], [4], "float32", {}, "varied")
         self.assertEqual(len(two), 2)
 
+    def test_empty_dtype_set_fails_closed_in_both_paths(self):
+        """空 dtype 集 → 产不出任何用例 → **两条路都 fail-closed**（0 用例不得冒充验收）。
+
+        ⚠ `_dry_run` 那条尤其要紧：它现在是 **CP-B 的契约自检**。原来它没这道闸，
+        空 dtype 集会安静地 `emitted=0` 通过 CP-B，跑 0 条也显示「无失败」。"""
+        spec = {"op": "FakeEmptyDtype", "verify_mode": "exact",
+                "params": [{"name": "self", "io": "in", "dtype": []}]}
+        for label, fn in (("gen_cases", lambda: GC.gen_cases(spec, tempfile.mkdtemp())),
+                          ("_dry_run", lambda: GC._dry_run(spec))):
+            with self.assertRaises(ValueError, msg=label) as cm:
+                fn()
+            self.assertIn("0 用例不得冒充验收", str(cm.exception), label)
+
     def test_arity_guard_fires_in_dry_run_not_only_at_cp_d(self):
         """能力边界须在 **CP-B 的 dry-run** 就拦下，别拖到 CP-D 正式生成输入时才炸。
 

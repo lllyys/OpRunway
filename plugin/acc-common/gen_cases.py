@@ -313,6 +313,24 @@ def check_spec_capability(in_params):
         raise ValueError(
             f"gen_cases 暂不支持 {arity} 元输入算子（in 参数：{[p['name'] for p in in_params]}）——"
             f"常规输入构造是二元的，多出来的输入会被静默丢弃。请先一般化 _build_inputs（TODO U7b）。")
+    if not in_params:
+        raise ValueError("spec 无 io=='in' 参数 → 产不出任何用例（0 用例不得冒充验收），fail-closed。")
+    # dtype 集的三道校验也放这里，好让 **`_dry_run`（= CP-B 契约自检）** 也能拦住，
+    # 而不是只在正式生成期才炸——CP-B 过了却在 CP-D 才发现，正是本轮要消灭的「漏到下游」。
+    self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
+    dtypes = self_param.get("dtype") or []
+    if not dtypes:
+        # 空 dtype 集 → 一条用例都产不出。**0 用例冒充验收**是本仓明令禁止的
+        # （跑 0 条也能显示「无失败」），与 case_target=0 同一判据。（预先存在的洞，2026-07-22 补。）
+        raise ValueError(
+            f"spec 的输入参数 {self_param['name']!r} dtype 集为空 → 产不出任何用例。"
+            f"0 用例不得冒充验收（同 case_target=0 的判据），fail-closed。")
+    if len(dtypes) != len(set(dtypes)):               # finding #13：dtype 集含重复 → plan entry 撞车
+        dup = sorted(d for d in set(dtypes) if dtypes.count(d) > 1)
+        raise ValueError(f"spec dtype 集含重复项 {dup}（会致 case_id 碰撞/伪造覆盖，fail-fast）")
+    for dtn in dtypes:                                # dtype 白名单（fail-fast，不静默）
+        if dtn != _BF16 and dtn not in _NATIVE:
+            raise ValueError(f"unsupported dtype {dtn!r}（gen_cases 支持 {sorted(_NATIVE)} + bfloat16）")
 
 
 def _build_inputs(rng, in_params, shp, dtn, attrs, data_kind):
@@ -763,12 +781,7 @@ def gen_cases(spec, work_dir):
     attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
-    if len(dtypes) != len(set(dtypes)):                   # finding #13 根因：dtype 集含重复 → plan entry 撞车
-        dup = sorted(d for d in set(dtypes) if dtypes.count(d) > 1)
-        raise ValueError(f"spec dtype 集含重复项 {dup}（会致 case_id 碰撞/伪造覆盖，fail-fast）")
-    for dtn in dtypes:                                    # dtype 白名单校验（fail-fast，不静默）
-        if dtn != _BF16 and dtn not in _NATIVE:
-            raise ValueError(f"unsupported dtype {dtn!r}（gen_cases 支持 {sorted(_NATIVE)} + bfloat16）")
+    # （dtype 空/重复/白名单三道校验已提进 check_spec_capability，先于 load_golden 执行）
     spec_standard = precision_policy.select_standard(spec)  # 平台层标准（显式或按 oracle+verify_mode 映射）
     vmode = spec["verify_mode"]
     exact = vmode == "exact"

@@ -251,11 +251,19 @@
 - [ ] **4.3 · C1–C5 的遗留项**（复核报上来、本批没做完的）：
   - [ ] **`--mode catlass` 真机通路被顺手降成非验收**（`_acceptance_capable` 单元素白名单的副作用，**零测试覆盖**）。
     本项目 Task 2 明确以 catlass 打底，「真机 catlass 永远出不了验收裁决」应当是**显式决定**而非白名单副作用。**须用户拍板。**
-  - [ ] **`validator._EV_SHAPE_KEYS` 无任何生产者** → 逐维形状对账当下**恒不触发**，真正生效的只有 numel 那层。
-    要它咬合，采集层须在 `evidence.precision` 里记真实读回的 NPU 输出形状。⚠ **别把现在说成「已逐维验形」。**
-  - [ ] `repo_adapter` 的 `out = dec.reshape(golden.shape)` 只校元素数、**静默按 golden 形状 reshape** —— 正是「静默 reshape 藏形状 bug」。
+  - [x] **`repo_adapter` 的静默 reshape 已收紧**（2026-07-22）：reshape 靶子从顺手用的 `golden.shape`
+    改成 caseset **声明**的输出形状，并断言两者一致（`_readback_shape`）。挡的是「adapter 自己把靶子弄错」
+    这类真实 bug（声明 `[N,1]` 却按 golden 的 `[N]` 收）。
+  - [ ] **逐维验 NPU 实际输出形状：做不到，且有意不假装做**。`out.bin` 是**扁平 dump**、只带元素数不带形状 →
+    「NPU 实际产出几维、每维多少」在采集层**根本观测不到**，能验的只有 numel。
+    ⚠ 往 evidence 里塞一个「实际输出形状」字段等于**拿声明跟自己比 = 假验证，比不验更坏**，故本仓有意不做。
+    真要逐维验，须**让 runner 把自己实际的输出形状一并写出来**（runner 契约变更）。
+    在那之前，`validator._EV_SHAPE_KEYS` 恒不触发是**如实反映现状**，不是缺陷。**别把现在说成「已逐维验形」。**
   - [ ] `repo_adapter.main()` 缺 `refuse_reserved_out` 守卫（两条 CLI 出口口径不对称）；`run_catlass_mock` 不自报 `defect_injected`。
-  - [ ] `dtypes: []` 会产 0 条 case（**预先存在**的洞，与本批无关）——按「0 用例冒充验收明令禁止」值得单独补 fail-closed。
+  - [x] **`dtypes: []` 产 0 条 case 已补 fail-closed**（2026-07-22）：连同「dtype 集重复 / 白名单」三道校验一起
+    提进共享预检 `check_spec_capability`，**`gen_cases` 与 `_dry_run` 共用、且先于 `load_golden`**。
+    ⚠ 原来 `_dry_run` **压根没这道闸** —— 而它现在正是 CP-B 的契约自检，空 dtype 集会安静地
+    `emitted=0` 通过 CP-B、跑 0 条也显示「无失败」。这是活的「0 用例冒充验收」。
   - [ ] rank≥5 当前必然 fail-closed（`_REG_SHAPES` 只到 4 维）——是能力边界不是 bug，但填了 rank=5 的算子跑不了。
   - [ ] `--perf-slow` 是否也下架（同类注入旋钮）。
   - [ ] canon 页 `catlass-synthetic-demo-cannot-forge-pass`：① 「全文不含 acceptance.json 字样」**已失真**（字样在、语义相反——
