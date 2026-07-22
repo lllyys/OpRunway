@@ -21,7 +21,7 @@
 - 缺陷注入降级为**测试专用夹具**：CLI 不可达（`main()` 拒第 5 个参数），in-process 仍可用，
   且注入过的 evidence **自报** `defect_injected`。
 """
-import json, os, sys, tempfile, unittest
+import json, os, sys, tempfile, unittest, shutil
 from unittest import mock
 
 import numpy as np
@@ -431,6 +431,49 @@ class MockNonAcceptanceTest(unittest.TestCase):
             with self.assertRaises(ValueError) as cm:
                 R.run_mock(cs, d)
             self.assertIn("显式输出形状", str(cm.exception))
+
+
+class TaskdocSnapshotPathTest(unittest.TestCase):
+    """R12 / 批 3：快照落点 = `<ops_root>/<op>/task_doc.snapshot.md`，复用 op_dir 的软链守卫。
+
+    ⚠ 落在**算子目录内**（与 spec / runner.cpp / golden.py 同处），不是取材工作区：
+    引文锚要能随算子一起被复核、被搬运；放临时工作区里换台机器就核不了了。"""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self._old = os.environ.get("OPRUNWAY_OPS_DIR")
+        os.environ["OPRUNWAY_OPS_DIR"] = os.path.join(self.d, "ops")
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("OPRUNWAY_OPS_DIR", None)
+        else:
+            os.environ["OPRUNWAY_OPS_DIR"] = self._old
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_path_is_inside_op_dir_with_the_only_legal_name(self):
+        import precision_policy as P
+        p = R.taskdoc_snapshot_path("IsClose")
+        self.assertEqual(os.path.basename(p), P.TASKDOC_SNAPSHOT_NAME)
+        self.assertEqual(os.path.basename(os.path.dirname(p)), "IsClose")
+
+    def test_digest_absent_returns_none_not_raise(self):
+        """缺文件 → (None, path)，**不抛**：调用方常常就是想知道「有没有」。
+
+        真正的 fail-closed 在 verify_authorization 里，不在这个查询函数。"""
+        dig, p = R.taskdoc_snapshot_digest("IsClose")
+        self.assertIsNone(dig)
+        self.assertTrue(p.endswith("task_doc.snapshot.md"))
+
+    def test_digest_matches_file_bytes(self):
+        import hashlib
+        p = R.taskdoc_snapshot_path("IsClose")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write("abc\r\n中".encode("utf-8"))   # CRLF + 非 ASCII：确保按字节算、不经文本层
+        dig, _ = R.taskdoc_snapshot_digest("IsClose")
+        with open(p, "rb") as f:
+            self.assertEqual(dig, hashlib.sha256(f.read()).hexdigest())
 
 
 if __name__ == "__main__":

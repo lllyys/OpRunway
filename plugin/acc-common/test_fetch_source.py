@@ -152,6 +152,100 @@ class FetchPrFailModeTest(unittest.TestCase):
         self.assertEqual(facts["target_dir"], "math/isclose")
 
 
+class TaskdocSnapshotTest(unittest.TestCase):
+    """R12 / 批 3：任务书**全文快照**入库——整条 golden 来源契约链的**前提**。
+
+    没有它，`precision_policy.verify_authorization` 恒返 False → 任何声称「任务书指定了真值口径」
+    的 golden 都被 `derive_golden_tier` 规则② 判 tier 4（unverifiable_authorization）、直接 blocked。
+    快照不是可选装饰。"""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        # 刻意造：CRLF + 尾行无换行 + 中文 —— 任何「规范化」都会改字节、进而移行号
+        self.src = os.path.join(self.d, "td.md")
+        with open(self.src, "wb") as f:
+            f.write("第一行\r\n实现方式更改成和cpu一致的比较逻辑值\r\n尾行无换行".encode("utf-8"))
+
+    def test_snapshot_is_byte_identical(self):
+        """**逐字节原样**，不许任何规范化。
+
+        改一个字节，行号就可能移位、引文就可能对不上；而那时报出来的是
+        「引文与出处对不上」这种**看起来像 agent 编造引文**的错，真病因（快照被规范化过）反而查不出来。"""
+        dst = os.path.join(self.d, "ops", "Op", "task_doc.snapshot.md")
+        digest, path = fs.write_taskdoc_snapshot(self.src, dst)
+        with open(self.src, "rb") as f:
+            raw = f.read()
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), raw, "快照必须与原文逐字节相同")
+        import hashlib
+        self.assertEqual(digest, hashlib.sha256(raw).hexdigest())
+
+    def test_identical_content_is_idempotent(self):
+        """内容一致时幂等：不重写、返回同一 sha256。"""
+        dst = os.path.join(self.d, "ops", "Op", "task_doc.snapshot.md")
+        first, _ = fs.write_taskdoc_snapshot(self.src, dst)
+        second, _ = fs.write_taskdoc_snapshot(self.src, dst)
+        self.assertEqual(first, second)
+
+    def test_upstream_changed_fails_loud_instead_of_silently_keeping_stale(self):
+        """上游任务书改版 → **fail-loud**，既不覆盖也不装没事。
+
+        「不覆盖」是对的（引文锚绑着旧快照），但**安静地留着旧快照还打印旧 sha256** 更坏——
+        调用方会以为刷新过了，于是验收基于一份自己都不知道过期的引文锚。
+        报错要同时给出两个指纹 + 处置方式（删了重来 **并复核 cite 行号**，因为行号极可能移位）。"""
+        dst = os.path.join(self.d, "ops", "Op", "task_doc.snapshot.md")
+        old_digest, _ = fs.write_taskdoc_snapshot(self.src, dst)
+        with open(self.src, "wb") as f:                      # 上游改版
+            f.write("完全不同的新版任务书".encode("utf-8"))
+        with self.assertRaises(RuntimeError) as cm:
+            fs.write_taskdoc_snapshot(self.src, dst)
+        msg = str(cm.exception)
+        self.assertIn(old_digest, msg, "报错须给出既有快照指纹")
+        self.assertIn("cite", msg, "须提醒复核 cite 行号（改版后行号极可能移位）")
+        # 且**快照本身没被动过**
+        with open(dst, "rb") as f:
+            import hashlib
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), old_digest)
+
+    def test_snapshot_unblocks_authorization_and_tampering_is_caught(self):
+        """端到端：有快照 → 授权核得过（tier 1）；掉包 / 编造引文 → 当场拒。"""
+        import precision_policy as P
+        dst = os.path.join(self.d, "ops", "Op", "task_doc.snapshot.md")
+        digest, path = fs.write_taskdoc_snapshot(self.src, dst)
+        g = {"source": "single_api", "method_kind": "torch_cpu",
+             "authorization": {"kind": "oracle_method",
+                               "cite": f"{P.TASKDOC_SNAPSHOT_NAME}:2",
+                               "quote": "更改成和cpu一致的比较逻辑值"},
+             "taskdoc_snapshot": {"sha256": digest}}
+        ok, why = P.verify_authorization(g, path)
+        self.assertTrue(ok, why)
+        self.assertEqual(P.derive_golden_tier(g, ok)[0], 1, "有据可核的任务书授权应落 tier 1")
+
+        tampered = dict(g, taskdoc_snapshot={"sha256": "0" * 64})   # 掉包快照
+        ok2, why2 = P.verify_authorization(tampered, path)
+        self.assertFalse(ok2)
+        self.assertIn("指纹不符", why2)
+        self.assertEqual(P.derive_golden_tier(tampered, ok2), (4, True, "unverifiable_authorization"))
+
+        forged = dict(g, authorization=dict(g["authorization"], quote="任务书里没有这句话"))
+        ok3, why3 = P.verify_authorization(forged, path)
+        self.assertFalse(ok3)
+        self.assertIn("逐字子串", why3)
+
+    def test_cli_writes_snapshot_and_prints_digest(self):
+        """CLI `--snapshot-into` 落快照并打印 sha256（供 golden 作者直接粘进契约块）。"""
+        out = os.path.join(self.d, "out"); ops = os.path.join(self.d, "ops", "Op")
+        import contextlib, io as _io
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            fs.main(["--taskdoc", self.src, "--out", out, "--snapshot-into", ops])
+        text = buf.getvalue()
+        snap = os.path.join(ops, "task_doc.snapshot.md")
+        self.assertTrue(os.path.isfile(snap), text)
+        self.assertIn("sha256 = ", text)
+        self.assertIn("task_doc.snapshot.md", text)
+
+
 class HeadShaPinningTest(unittest.TestCase):
     """U5：**被测对象 = PR head 那个 commit** —— 钉 `head.sha`，不按分支名兜底。
 

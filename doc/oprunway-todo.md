@@ -437,7 +437,19 @@
 #### ⏳ 批 2–7（标题级；**全部未做**。⚠ 批次切分是按批 1 的接线顺序**推的**，编号/边界待主线确认）
 
 - [ ] **批 2 · golden.py 来源契约字段 + `load_golden` 接线**：`GOLDEN_SOURCE` 之外补声明式来源块（source_kind / method_kind / authorization / cite / quote），加载时派生 tier 写进每条 case。
-- [ ] **批 3 · 任务书全文快照入库（R12）**：`task_doc.snapshot.md` 的落点 / 命名 / sha256 契约与生成路径——`verify_authorization` 没它就核不了。
+- [x] **批 3 已落地（2026-07-23）· 任务书全文快照入库（R12）**——**它是整条 golden 来源契约链的前提，不是可选装饰**：
+  没有快照，`verify_authorization` **恒返 False** → 任何声称「任务书指定了真值口径」的 golden 都被
+  `derive_golden_tier` 规则② 判 tier 4（unverifiable_authorization）、直接 blocked。**所以批 2 必须等它。**
+  - **落点**：`<ops_root>/<op>/task_doc.snapshot.md`（`repo_adapter.taskdoc_snapshot_path`）——
+    落在**算子目录内**、与 spec/runner/golden 同处，不是取材工作区：引文锚要能随算子一起被复核、被搬运。
+    文件名**只认这一个**（R2 的落地方式：cite 指向 PR / 仓内文件一律不接受，值域里没那个格子）。
+    软链守卫复用 `op_dir`（从 ops_root 起逐段拒）。
+  - **生成**：`fetch_source.py --snapshot-into <dir>`，**逐字节原样复制**（二进制读写、不经文本层）。
+    ⚠ 不许任何规范化：改一个字节行号就可能移位，报出来的却是「引文与出处对不上」这种
+    **看起来像 agent 编造引文**的错，真病因反而查不出来。
+    ⚠ **已存在就不覆盖**——快照是引文锚，既有 golden 的 sha256 绑着它；静默覆盖 = 让所有既有锚一起失效却不报错。
+  - **端到端实证**：有快照 + 真引文 → 核过、**tier 1**；掉包快照 → tier 4 blocked；编造引文 → 拒。
+  - 新增 7 条测试（含 CRLF + 尾行无换行 + 中文的字节保真用例）。
 - [ ] **批 4 · spec 侧承载**：`acc-spec` 产出 golden 来源声明 + 两档链判定 + 人核标记，写进 spec（判定权威只在 spec，硬约束 #5）。
 - [ ] **批 5 · 门侧接线**：`validator` / `validate_acceptance_state` / `run_workflow` 消费 tier——blocked → BLOCKED、`requires_human_review` → 人核 CP，不静默放行。
 - [ ] **批 6 · agent 产出侧**：`acc-runner-dev` 补产 `golden.py`（**R6 生成期选 torch/numpy 并写死进文件**）+ 放宽 runner 的 scope gate 覆盖面（从任务书推，守最高律令）。⚠ 连带：该 agent 的 scope gate 仍写 dtype 仅 {fp32,fp16}、`bf16→BLOCKED`，**已 stale**（bf16 真机已验收过），须同步。

@@ -446,6 +446,34 @@ def op_dir(op_name):
     return d
 
 
+
+def taskdoc_snapshot_path(op_name):
+    """任务书**全文快照**的落点：`<ops_root>/<op>/task_doc.snapshot.md`（R12 / 批 3）。
+
+    为什么需要它：`precision_policy.verify_authorization` 要核「golden 声称的任务书授权
+    是不是真出自任务书那几行」——它按 `task_doc.snapshot.md:<行区间>` 逐字比对，
+    **没有这份落盘快照就恒返 False**，于是任何声称「任务书指定了真值口径」的 golden
+    都会被 `derive_golden_tier` 规则②判 tier 4（unverifiable_authorization）、直接 blocked。
+    所以快照是整条 golden 来源契约链的**前提**，不是可选装饰。
+
+    ⚠ 落在**算子目录内**（与 spec / runner.cpp / golden.py 同处），不是取材工作区：
+    引文锚要能随算子一起被复核、被搬运；放在临时工作区里，换台机器就核不了了。
+    ⚠ 文件名**只认这一个**（`precision_policy.TASKDOC_SNAPSHOT_NAME`）——R2 的落地方式：
+    cite 指向 PR / 仓内文件 / 其它路径一律不接受，值域里根本没有那个格子。
+    软链守卫复用 `op_dir`（从 ops_root 起逐段拒）。"""
+    return os.path.join(op_dir(op_name), precision_policy.TASKDOC_SNAPSHOT_NAME)
+
+
+def taskdoc_snapshot_digest(op_name):
+    """快照的 sha256（写进 golden 契约块的 `taskdoc_snapshot.sha256`）。缺文件 → (None, 路径)。
+
+    返回 `(sha256|None, path)`——**不抛**：调用方（agent / 报告）常常就是想知道「有没有」，
+    把「没有」做成异常会逼每个调用点写 try。真正的 fail-closed 在 `verify_authorization` 里。"""
+    p = taskdoc_snapshot_path(op_name)
+    if not os.path.isfile(p):
+        return None, p
+    return _sha256_file(p), p
+
 def find_runner(op_name):
     """按算子名找 runner.cpp，返回 `(path, "user", remote_name)`。
 

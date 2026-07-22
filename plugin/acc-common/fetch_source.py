@@ -14,7 +14,7 @@ gitcode token 走环境：优先 $GITCODE_TOKEN，退回 $OPRUNWAY_GITCODE_TOKEN
 说明：链接失败/无权限时不静默——task_doc 取不到直接报错；PR 链接**形态不认识→直接报错（fail-loud，属用户输入错）、不产空壳**；
       PR 链接认识但字段取不到（网络/权限）→记进 pr_facts.notes 继续（属环境问题，与「URL 写错」错误信息分开）。
 """
-import argparse, json, os, re, sys, urllib.parse, urllib.request
+import argparse, hashlib, json, os, re, sys, urllib.parse, urllib.request
 
 API = "https://api.gitcode.com/api/v5"
 _BLOB_RE = re.compile(r"^https?://gitcode\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/blob/(?P<ref>[^/]+)/(?P<path>.+)$")
@@ -223,11 +223,51 @@ def _dump_facts(facts, out_dir):
     return dst
 
 
+def write_taskdoc_snapshot(taskdoc_path, snapshot_path):
+    """把取到的任务书原文**逐字节原样**落成快照，返回 (sha256, path)。R12 / 批 3。
+
+    ⚠ **必须逐字节复制，不许任何规范化**（不改行尾、不补末尾换行、不转码）——
+    `verify_authorization` 按**行号 + 逐字子串**核引文；改动一个字节，行号就可能移位、
+    引文就可能对不上，而那时报出来的是「引文与出处对不上」这种**看起来像 agent 编造引文**
+    的错，真正的病因（快照被规范化过）却查不出来。故这里刻意用二进制读写。
+
+    ⚠ **不覆盖已存在的快照**：快照是引文锚，已有 golden 的 `taskdoc_snapshot.sha256` 绑着它。
+    静默覆盖 = 让所有既有引文锚一起失效却不报错。要换须显式删了重来（人为动作、留痕）。
+
+    ⚠ **但「不覆盖」不等于「不吭声」**：上游任务书若已改版，安静地留着旧快照、还打印旧 sha256，
+    调用方会以为刷新过了——**那是比覆盖更坏的静默**（验收基于一份自己都不知道过期的引文锚）。
+    故内容不一致时 **fail-loud 抛错**，把两个指纹与处置方式一并说清，由人决定要不要换锚。"""
+    if os.path.exists(snapshot_path):
+        with open(snapshot_path, "rb") as f:
+            old = f.read()
+        with open(taskdoc_path, "rb") as f:
+            new = f.read()
+        old_d, new_d = hashlib.sha256(old).hexdigest(), hashlib.sha256(new).hexdigest()
+        if old_d != new_d:
+            raise RuntimeError(
+                f"任务书快照已存在但**内容与本次取到的原文不一致**：{snapshot_path}\n"
+                f"  既有快照 sha256: {old_d}\n"
+                f"  本次取到 sha256: {new_d}\n"
+                f"  → 说明上游任务书改版了。**不自动覆盖**：既有 golden 的引文锚"
+                f"（taskdoc_snapshot.sha256 + cite 行号）绑在旧快照上，换掉会让它们一起失效。\n"
+                f"  → 要换锚：先删掉这份快照重跑，**并逐个复核受影响 golden 的 cite 行号与 quote**"
+                f"（行号极可能已移位）。这是人为动作，不该由脚本替你做。")
+        return old_d, snapshot_path
+    os.makedirs(os.path.dirname(snapshot_path) or ".", exist_ok=True)
+    with open(taskdoc_path, "rb") as src, open(snapshot_path, "wb") as dst:
+        raw = src.read()
+        dst.write(raw)                                  # 逐字节，不经文本层
+    return hashlib.sha256(raw).hexdigest(), snapshot_path
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description="① 取材：任务书(md/链接) + PR(链接) → 中立 JSON/文件")
     ap.add_argument("--taskdoc", required=True, help="任务书 md 本地路径 或 http(s) 链接")
     ap.add_argument("--pr", default=None, help="gitcode PR 链接（可选）")
     ap.add_argument("--out", required=True, help="产出目录")
+    ap.add_argument("--snapshot-into", default=None, metavar="DIR",
+                    help="另把任务书原文逐字节落成 task_doc.snapshot.md 到该目录"
+                         "（通常是 <ops_root>/<op>/），并打印 sha256——供 golden 契约块的引文锚绑定（R12）")
     a = ap.parse_args(argv)
     # PR URL 形态校验**前置到一切网络调用与产物写入之前**：否则任务书是链接时，会先发一次网络请求、
     # 先写出 task_doc.md，然后才报「PR 格式不认识」——半个产物已经落盘了，与 fail-loud 的承诺不符。
@@ -237,6 +277,14 @@ def main(argv):
     os.makedirs(a.out, exist_ok=True)
     td = fetch_taskdoc(a.taskdoc, a.out)
     print(f"[fetch] 任务书 → {td}")
+    if a.snapshot_into:
+        import precision_policy                            # 只在需要时 import，保持纯 stdlib 主路
+        sp = os.path.join(a.snapshot_into, precision_policy.TASKDOC_SNAPSHOT_NAME)
+        digest, sp = write_taskdoc_snapshot(td, sp)
+        print(f"[fetch] 任务书快照 → {sp}")
+        print(f"        sha256 = {digest}")
+        print(f"        ↑ 写进 golden.py 契约块的 taskdoc_snapshot.sha256；"
+              f"引文 cite 用 {precision_policy.TASKDOC_SNAPSHOT_NAME}:<起>[-<止>]")
     if a.pr:
         pf = fetch_pr(a.pr, a.out)
         facts = json.load(open(pf, encoding="utf-8"))
