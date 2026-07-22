@@ -113,6 +113,20 @@
 - [ ] **U4 · 「干净 session」隔离实为无效**：skill 注入时报的 base directory 是**活仓** `/…/OpRunway/plugin/skills/acceptance-workflow`（**不是** `~/.claude/plugins/cache/`）——marketplace 是 `directory` 源、`installLocation` 直指仓根。于是 agent 那 30 条 Bash 几乎全在读活仓源码。**连带**（⚠ 下句是**按本次实测推的**、未穷举验证）：`/plugin install` 的快照看来只决定**组件注册**（有哪些 agent/skill、frontmatter 长什么样）；至少对「按 base directory 解析的文件」和「agent 直接读的源码」这两类，读的是**活仓工作树** → 仓一旦切分支，这部分行为就可能与安装时的快照对不上。要真隔离得换非 `directory` 源。
 - [ ] **U5 · head 兜底照旧（预测命中）**：`pr_facts.json` 得 `"base": "master", "head": "master", "merged": true` —— head 兜底真的触发了，全程无 sha。本次因 PR 已合入而无害，但「被测 = PR 版」仍无机器保证（承 canon `pr-head-commit-is-the-tested-object`，`proposed`）。
 
+#### 修复批次（**未开工**——分支 `fix/pdist-usertest-gaps` 目前只有记账 commit `65308a2`）
+
+按「挡路程度 × 改动成本」排。**用户 2026-07-22 定：先记账、暂不动手。**
+
+- [ ] **0 · GitCode 镜像同步 PR #8**（`brian66237`；GitHub `lllyys` 侧已同步）。与代码修复无关，但别忘。
+- [ ] **1 · U1**（一行，最挡路）——改法二选一，**倾向 (b)**：
+  - (a) `tools:` 显式补 `AskUserQuestion` + 派 subagent 的工具：可读性好，但以后加工具还得记得回来同步改这里。
+  - (b) **直接删掉 `tools:` 让它继承全部**：primary agent 本来就该有全套；且这仓在「声明式白名单被静默忽略」上**已经栽过一次**（`plugin.json` 的 `agents` 数组，见分支 `fix/plugin-agents-not-loading`）。
+  - ⚠ **改完必须真跑一次验证**——「frontmatter 里写了」≠「工具真给到了」，这正是 U1 本身的教训。光看 `plugin validate` 绿不算数。
+- [ ] **2 · U2**（小，但影响正确性）：`fetch_source.py` 接受 `/pull/N` 形态；解析失败 **fail-loud**，不产空壳继续往下传。
+- [ ] **3 · U3**（中）：`samples/` 搬进 `plugin/`，或把 runner 骨架内联进 `acc-runner/references/runner-skeleton.md`。⚠ 搬 `samples/` 会连带改 `_golden_fixture.py` 的相对路径、`archive_ops/` 那两个软链、以及 canon/doc 里对 `samples/` 的引用。
+- [ ] **4 · U4 / U5 本批不动**：U4 要换 marketplace 源形态 → 影响分发方式，得先定发布形态（T9 `proposed`）；U5 属 canon `pr-head-commit-is-the-tested-object`（`proposed`）的落地，该页自带前置「未合并 PR 的 head 常在贡献者 fork，open+fork 的 API 可解析性**尚未实测**」。
+- [ ] **5 · G1–G4 另立项**，不进本批。
+
 #### Pdist 暴露的「非 elementwise 通路」空白（G1–G4；能力边界扩展，须单独立项）
 
 > 均由验收 agent 实跑取证，逐条落在 `work/reports/pdist/scope_conclusion.json` 的 `hard_evidence`。
