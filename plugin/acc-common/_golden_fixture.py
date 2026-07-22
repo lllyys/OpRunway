@@ -22,7 +22,14 @@ def place_golden(ops_root, op, body=None, source="numpy fake", provenance="test 
     os.makedirs(d, exist_ok=True)
     dst = os.path.join(d, "golden.py")
     if body is None:
-        shutil.copy(os.path.join(_SAMPLES_GOLDEN, op, "golden.py"), dst)
+        src_dir = os.path.join(_SAMPLES_GOLDEN, op)
+        shutil.copy(os.path.join(src_dir, "golden.py"), dst)
+        # 批 2/3：样例若带任务书快照，**一并拷过去**——`GOLDEN_CONTRACT` 的引文锚绑着它，
+        # 只拷 golden.py 会让 `verify_authorization` 找不到快照 → 授权核不过 → 档位掉到 tier 4。
+        # 那样测试看到的就不是样例的真实档位了。
+        snap = os.path.join(src_dir, "task_doc.snapshot.md")
+        if os.path.isfile(snap):
+            shutil.copy(snap, os.path.join(d, "task_doc.snapshot.md"))
     else:
         with open(dst, "w", encoding="utf-8") as f:
             f.write(f"GOLDEN_SOURCE = {source!r}\nGOLDEN_PROVENANCE = {provenance!r}\nimport numpy as np\n{body}")

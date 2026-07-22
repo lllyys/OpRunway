@@ -23,6 +23,24 @@ import math
 import numpy as np
 
 GOLDEN_SOURCE = "torch torch.isclose"      # 供 oracle_source 映射（首 token torch → torch_ref）
+
+# ── 批 2 · 声明式来源块 ─────────────────────────────────────────────────────────
+# 本文件是**完整自证**的参考实现：任务书全文快照与 golden.py 同处算子目录，
+# 引文按 `task_doc.snapshot.md:<行号>` 锚定、可被 `precision_policy.verify_authorization`
+# 逐字复核（校快照 sha256 → 校 cite 行区间 → 校 quote 是该区间的逐字子串）。
+# ⚠ 引文必须**逐字**摘自快照那一行，一个字都不能改——改了就核不过（这正是它的作用）。
+GOLDEN_CONTRACT = {
+    "source": "single_api",              # 一个现成 API 直出，非多步自拼
+    "method_kind": "torch_cpu",          # R3 第二档的可跑方法族之一
+    "method": "torch.isclose",           # 人读：到底调的哪个 API
+    "authorization": {
+        # 任务书**就真值口径本身**作出的指定（不是「参考谁的实现」）→ oracle_method → 第一档
+        "kind": "oracle_method",
+        "cite": "task_doc.snapshot.md:13",
+        "quote": "实现方式从原来比较二进制的实现方式，更改成和cpu一致的比较逻辑值的实现方式",
+    },
+    "taskdoc_snapshot": {"sha256": "04f27afdf9a1435b44e33c8e121f6224261d29bbfc597db7bf95c17e24aa35e9"},
+}
 # 判档依据（IsClose 任务书原文，两处同款语义改造要求）：
 #   正文    「实现方式从原来比较二进制的实现方式，更改成和cpu一致的比较逻辑值的实现方式」
 #   功能要求「比较方式从二进制比较改为逻辑值比较」

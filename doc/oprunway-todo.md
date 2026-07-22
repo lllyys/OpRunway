@@ -436,7 +436,28 @@
 
 #### ⏳ 批 2–7（标题级；**全部未做**。⚠ 批次切分是按批 1 的接线顺序**推的**，编号/边界待主线确认）
 
-- [ ] **批 2 · golden.py 来源契约字段 + `load_golden` 接线**：`GOLDEN_SOURCE` 之外补声明式来源块（source_kind / method_kind / authorization / cite / quote），加载时派生 tier 写进每条 case。
+- [x] **批 2 已落地（2026-07-23）· 声明式来源块 + tier 派生写进每条 case**
+  - `golden.py` **可选**导出 `GOLDEN_CONTRACT`（`source` / `method_kind` / `method` /
+    `authorization{kind,cite,quote}` / `taskdoc_snapshot{sha256}`）。**不导出 → `golden_tier` 为 None、
+    行为与批 2 前完全一致**——不强制既有 golden 立刻改写。
+  - `load_golden` 返回改**具名元组** `Golden(fn, source, provenance, out_shape, contract)`。
+    ⚠ 刻意用具名元组而非再加位置项：字段增删时位置解包会**静默错位**，具名取则当场报错。
+    实证——改完 6 处旧的 4 元解包**当场炸**（`too many values to unpack`），不是悄悄错位。
+  - **`precision_policy.validate_golden_contract`**：只校**词表 + 结构**，不核授权真伪、不判档（三者分开，
+    避免「自己核自己」）。⚠ 词表拼错必须早拦：`derive_golden_tier` 的兜底会把不认识的组合判成 tier 4，
+    于是**一个本该 tier 2 的正当 golden 被判 blocked**，而报错是含糊的 `unverifiable_authorization`——查半天查不到是拼错了。
+  - **记录不阻断**（批 2 的边界）：tier 4 也照常产用例，只把 `blocked_reason` 如实写进每条 case。
+    阻断归批 5 的门。理由：档位是**结论的一部分**，得先可见可审；先阻断会让「快照还没入库」这种真问题
+    以「算子跑不了」的面目出现，反而更难查。
+  - ⭐ **IsClose 做成了完整自证的参考实现**：真任务书快照（`IsClose_task_doc.md` 逐字节）与 golden.py 同处，
+    引文锚 `task_doc.snapshot.md:13` + 逐字 quote → **实测派生 tier 1**（authorization_verified=True、
+    不需人核、未 blocked）。**改一个字（`cpu`→`CPU`）就掉回 tier 4** —— 引文锚真在起作用。
+  - 新增 6 条测试（无契约保持旧行为 / impl_reference+single_api → tier 2 / 声称授权无快照 → tier 4 不降级 /
+    真快照逐字引文 → tier 1 且改一字即掉档 / 词表拼错早拦 / 声称授权缺 cite 早拦并提示该用 impl_reference）。
+  - ⚠ **未做的两件（原计划在批 2 里、实际拆出去）**：`GOLDEN_SOURCE` 收紧到可产四枚举 ·
+    `catlass_adapter` 那处 `"numpy f32 …"`。**它们会改变现有 oracle_source 映射行为**（`"torch …"`/
+    `"numpy …"` 的 backend 简写现仍受支持），属破坏性变更、且 catlass 那处 TODO 早就点名
+    「测试不会红、但真跑时炸」——**单独一批做，别混在这里**。
 - [x] **批 3 已落地（2026-07-23）· 任务书全文快照入库（R12）**——**它是整条 golden 来源契约链的前提，不是可选装饰**：
   没有快照，`verify_authorization` **恒返 False** → 任何声称「任务书指定了真值口径」的 golden 都被
   `derive_golden_tier` 规则② 判 tier 4（unverifiable_authorization）、直接 blocked。**所以批 2 必须等它。**

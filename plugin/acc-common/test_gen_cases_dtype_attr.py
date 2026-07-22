@@ -287,7 +287,7 @@ class AttrMatrixTest(unittest.TestCase):
         self.assertIn(False, vals)
 
     def test_golden_uses_case_attrs(self):
-        isclose_fn, _, _, _ = GC.load_golden("IsClose")          # golden 现按算子加载（elementwise 通路不内置）
+        isclose_fn = GC.load_golden("IsClose").fn                # golden 现按算子加载（elementwise 通路不内置）
         for c in self.cs["cases"]:
             if not c["expected"]["case_origin"].startswith("attr_matrix"):
                 continue
@@ -714,7 +714,7 @@ class GoldenTorchPreferredTest(unittest.TestCase):
     def test_golden_source_label_is_torch(self):
         # 加载器只读元数据、不跑 golden_fn，故不需 torch。4 算子 golden.py 的 GOLDEN_SOURCE 恒 "torch ..."。
         for op in ("IsClose", "Sign", "Equal", "Neg"):
-            _fn, gsrc, _prov, _osh = GC.load_golden(op)
+            gsrc = GC.load_golden(op).source
             self.assertTrue(gsrc.startswith("torch "), gsrc)
 
     def test_caseset_records_torch_source(self):
@@ -739,10 +739,10 @@ class GoldenTorchPreferredTest(unittest.TestCase):
         边界(如 sign(NaN))torch 与 numpy 有意不同——torch 是选定的确定性后端、不与 numpy 比。
         另核 rtol/atol 非法 → fail-closed。golden 现按算子从 samples/golden 加载（经 load_golden）。"""
         self._need_torch()
-        sign_fn, _, _, _ = GC.load_golden("Sign")
-        neg_fn, _, _, _ = GC.load_golden("Neg")
-        eq_fn, _, _, _ = GC.load_golden("Equal")
-        isclose_fn, _, _, _ = GC.load_golden("IsClose")
+        sign_fn = GC.load_golden("Sign").fn
+        neg_fn = GC.load_golden("Neg").fn
+        eq_fn = GC.load_golden("Equal").fn
+        isclose_fn = GC.load_golden("IsClose").fn
         rng = np.random.default_rng(0)
         for dt in (np.float32, np.float16):
             a = rng.uniform(-5, 5, size=(4, 4)).astype(dt)
@@ -810,11 +810,12 @@ class LoadGoldenTest(unittest.TestCase):
     def test_valid_golden_loads(self):
         with tempfile.TemporaryDirectory() as d, self._ops(d):
             _place_golden(os.path.realpath(d), "Sign")            # 从 samples/golden 拷
-            fn, src, prov, out_shape_fn = GC.load_golden("Sign")
+            g = GC.load_golden("Sign")
+            fn, src, prov = g.fn, g.source, g.provenance
             self.assertTrue(callable(fn))
             self.assertTrue(src.startswith("torch "))
             self.assertTrue(prov)
-            self.assertIsNone(out_shape_fn)                       # C1：样例 golden 不导出 out_shape → None
+            self.assertIsNone(g.out_shape)                        # C1：elementwise 样例不导出 out_shape → None
 
 
 # ==================================================================================================
@@ -936,13 +937,16 @@ class OutShapeContractTest(_FakeOpCase):
     """C1：out_shape 由 per-op golden.py 可选导出；未导出=同形；声明与实测打架→fail-closed。"""
 
     def test_load_golden_returns_out_shape_when_exported(self):
-        """load_golden 现返回 4 元组，第 4 项是 out_shape（未导出 → None）。"""
+        """load_golden 现返回**具名元组** `Golden(fn, source, provenance, out_shape, contract)`。
+
+        批 2 起加了第 5 项 `contract`——刻意用具名元组而非再加一个位置项：
+        位置解包在字段增删时会**静默错位**，具名取则在字段没了时当场报错。"""
         self.place("FakeOsExported", _BODY_REDUCE_LAST)
         self.place("FakeOsAbsent", _BODY_ELEMENTWISE)
-        _fn, _src, _prov, osh = GC.load_golden("FakeOsExported")
+        osh = GC.load_golden("FakeOsExported").out_shape
         self.assertTrue(callable(osh))
         self.assertEqual(osh([(2, 3, 4)], {}), (2, 3))
-        _fn2, _src2, _prov2, osh2 = GC.load_golden("FakeOsAbsent")
+        osh2 = GC.load_golden("FakeOsAbsent").out_shape
         self.assertIsNone(osh2)                                  # 未导出 → None（缺省同形语义）
 
     def test_out_shape_drives_caseset_expected(self):
@@ -1285,7 +1289,8 @@ class GoldenCostBudgetTest(_FakeOpCase):
                       "改前的计划本就含 1024x1024 —— 病灶在计划期，不在 golden 里")
         self.assertIsNone(meta["golden_cost"]["budget"])              # 未行使预算
         self.assertIn("未核", meta["golden_cost"]["model"])           # 且不谎称已核
-        gfn, _src, _prov, osh = GC.load_golden("FakePdistPre")
+        _gp = GC.load_golden("FakePdistPre")
+        gfn, osh = _gp.fn, _gp.out_shape
         self.assertEqual(osh([(1024, 1024)], {}), (549755289600,))    # 真算的数：5.5e11 对
         with self.assertRaises(MemoryError):                          # 真喂进去就炸（输出 2.2 TB）
             gfn([np.zeros((1024, 1024), np.float32)], {})
@@ -1756,6 +1761,95 @@ class ExactIsNotBoolTest(_FakeOpCase):
         self.assertNotIn("bool", _RA._NP)                 # bool 不在 _NP，由分支单独处理
         # 未支持的 compare_dtype 必须被拒（不静默回退到某个默认 dtype）
         self.assertNotIn("complex64", _RA._NP)
+
+
+class GoldenContractTierTest(_FakeOpCase):
+    """批 2：`GOLDEN_CONTRACT` 声明式来源块 → 派生档位 → **写进每条 case**（记录不阻断）。
+
+    阻断是批 5 门侧的事。这里刻意只记录：档位是**结论的一部分**，得先让它可见、可审；
+    先阻断会让「快照还没入库」这种真问题以「算子跑不了」的面目出现，反而更难查。"""
+
+    _BODY = "def golden_fn(inputs, attrs):\n    return np.negative(inputs[0])\n"
+
+    def _place_with_contract(self, op, contract, snapshot=None):
+        root = _GOLDEN_ROOT
+        d = os.path.join(root, op)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "golden.py"), "w", encoding="utf-8") as f:
+            f.write("import numpy as np\n"
+                    "GOLDEN_SOURCE = 'torch fake'\nGOLDEN_PROVENANCE = 'fixture'\n"
+                    f"GOLDEN_CONTRACT = {contract!r}\n" + self._BODY)
+        if snapshot is not None:
+            with open(os.path.join(d, "task_doc.snapshot.md"), "wb") as f:
+                f.write(snapshot)
+
+    def test_no_contract_keeps_old_behaviour(self):
+        """不导出 `GOLDEN_CONTRACT` → `golden_tier` 为 None，**行为与批 2 前完全一致**。"""
+        self.place("FakeNoContract", self._BODY)
+        cs = GC.gen_cases(_fake_spec("FakeNoContract", case_target=3), self.work())
+        self.assertTrue(all(c["expected"]["golden_tier"] is None for c in cs["cases"]))
+
+    def test_impl_reference_single_api_is_tier2_no_human(self):
+        """无授权 + 现成 API 单调 → 第二档、不必人核（Sign 归此格）。无需快照。"""
+        self._place_with_contract("FakeTier2", {
+            "source": "single_api", "method_kind": "torch_cpu",
+            "authorization": {"kind": "impl_reference"}})
+        cs = GC.gen_cases(_fake_spec("FakeTier2", case_target=3), self.work())
+        t = cs["cases"][0]["expected"]["golden_tier"]
+        self.assertEqual((t["tier"], t["requires_human_review"], t["blocked_reason"]), (2, False, None))
+
+    def test_claimed_authorization_without_snapshot_is_tier4_not_silently_downgraded(self):
+        """声称有任务书授权、却核不实 → **tier 4 blocked**，不降级到 2/3 照跑。
+
+        这条是整套设计防 fail-open 的核心：假授权若只降档，R2/R4 等于没设。"""
+        self._place_with_contract("FakeTier4", {
+            "source": "single_api", "method_kind": "torch_cpu",
+            "authorization": {"kind": "oracle_method",
+                              "cite": "task_doc.snapshot.md:1", "quote": "某句话"},
+            "taskdoc_snapshot": {"sha256": "0" * 64}})          # 快照根本不存在
+        cs = GC.gen_cases(_fake_spec("FakeTier4", case_target=3), self.work())
+        t = cs["cases"][0]["expected"]["golden_tier"]
+        self.assertEqual(t["tier"], 4)
+        self.assertEqual(t["blocked_reason"], "unverifiable_authorization")
+        self.assertFalse(t["authorization_verified"])
+        self.assertIn("快照", t["authorization_note"])          # 原因要准，不能只留个 False
+
+    def test_real_snapshot_and_verbatim_quote_yields_tier1(self):
+        """有快照 + **逐字**引文 → 第一档。改一个字就核不过（这正是引文锚的作用）。"""
+        snap = "第一行\n实现方式更改成和cpu一致的比较逻辑值\n第三行".encode("utf-8")
+        import hashlib
+        base = {"source": "single_api", "method_kind": "torch_cpu",
+                "taskdoc_snapshot": {"sha256": hashlib.sha256(snap).hexdigest()}}
+        self._place_with_contract("FakeTier1", dict(base, authorization={
+            "kind": "oracle_method", "cite": "task_doc.snapshot.md:2",
+            "quote": "更改成和cpu一致的比较逻辑值"}), snapshot=snap)
+        cs = GC.gen_cases(_fake_spec("FakeTier1", case_target=3), self.work())
+        self.assertEqual(cs["cases"][0]["expected"]["golden_tier"]["tier"], 1)
+
+        # 改一个字 → 核不过 → 掉回 tier 4
+        self._place_with_contract("FakeTier1x", dict(base, authorization={
+            "kind": "oracle_method", "cite": "task_doc.snapshot.md:2",
+            "quote": "更改成和CPU一致的比较逻辑值"}), snapshot=snap)     # cpu → CPU
+        cs2 = GC.gen_cases(_fake_spec("FakeTier1x", case_target=3), self.work())
+        self.assertEqual(cs2["cases"][0]["expected"]["golden_tier"]["tier"], 4)
+
+    def test_bad_vocabulary_fails_closed_early(self):
+        """词表拼错 → **当场报准**，不留给 derive_golden_tier 的兜底判成含糊的 tier 4。"""
+        self._place_with_contract("FakeBadVocab", {
+            "source": "singleapi", "method_kind": "torch_cpu",   # 少个下划线
+            "authorization": {"kind": "impl_reference"}})
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(_fake_spec("FakeBadVocab", case_target=1), self.work())
+        self.assertIn("source", str(cm.exception))
+
+    def test_claimed_authorization_missing_cite_fails_closed(self):
+        """声称有授权却连引文都没写 → 早拦，并指出「其实只是参考实现就该用 impl_reference」。"""
+        self._place_with_contract("FakeNoCite", {
+            "source": "single_api", "method_kind": "torch_cpu",
+            "authorization": {"kind": "oracle_method"}})
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(_fake_spec("FakeNoCite", case_target=1), self.work())
+        self.assertIn("impl_reference", str(cm.exception))
 
 
 if __name__ == "__main__":
