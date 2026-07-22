@@ -14,6 +14,11 @@
 6. 远程 NPU 环境（哪台机、catlass 在哪 build、是否进 Docker）待用户提供后补进 CLAUDE.md。
 7. 优先级（Codex 排序）：Q3>Q4>Q5>Q6>Q1>Q2>Q8>Q9>Q7。完整见 `doc/oprunway-design.md` §13。
 
+## 2026-07-22
+
+- **golden 分支推上去 + 开 PR #8 + TODO 刷到当前** —— `feat/golden-out-of-engine` 三个 commit（ADR 0011——**用户已逐条拍板，但 canon 页 `status: proposed`、未经 `bureau:review` 人门 promote** / `GOLDEN` 硬表改 `load_golden(op)` 加载器 / 来源契约扩六枚举，a3 容器 490 测全绿）push 到 GitHub 并开 **PR #8**，合后再同步 gitcode。`doc/oprunway-todo.md` 刷新：现状补 PR #7 已合入 + PR #8 待合、单测 487→490、P2「插件-算子解耦」标成「一刀已入 main、一刀待合」（**main 上 `gen_cases` 仍是硬表，「引擎零内置算子」要等 PR #8 合入才成立**），**新增「🔴 下一刀 · agent 产出侧」**——产出侧实况是一半有一半没有：`runner.cpp` 有 `acc-runner-dev` 的 `gen_runner` 产但 scope gate 限死 `experimental/math/<op>`+{fp32,fp16}（**覆盖面才是洞**），`golden.py` 则全仓无人产（**纯空缺**）；同时更正头部那句「剩下主要靠人门裁决与外部资源」的旧判断（产出侧依据充分、当下就能写，不等真机不等外部数据）。人门裁决清单补 ADR 0011（`proposed`）与 **ADR 0010 触发点 stale**（canon 记的还是旧触发点，与 CLAUDE.md #5 现行规则不一致，待走一次 compile→review）；Q9 段补 supersede 说明（「固定 torch 单后端不回退 numpy」已被 ADR 0011 放宽为「按算子 torch>numpy 定档」，两说并存待 promote）。顺带清掉 6 个 SessionEnd 机械空 stub（`canon/logbook/2026/07/`，无内容、非 `file-session` 产物）。
+  - ⚠ **审修门抓到的自我更正**：原稿把「ADR 0011 已拍定」写成既成事实（实为 `proposed` 待人门）、把 PR #8 的改动列进「已收口」、把产出侧说成「完全没有组件产」——三处均已按仓内实况改正。
+
 ## 2026-07-20
 
 - **golden 来源契约扩六枚举（支撑多仓多算子）** —— 更正「4 算子够用」错框法（用户指出目标是**兼容多仓的很多算子**）：`oracle_source_from_golden` 从「只认 torch/numpy 两前缀 → torch_ref/analytical_ref」扩到「**首 token = oracle_source 六枚举之一 → 直接用**」（`cpu_ref` 仓/PR 参考 · `catlass_existing_ref` 仓自带 golden · `task_spec_expected` 任务书期望 · `torch_ref` · `analytical_ref` · `external_ref`）——别的仓的 golden.py 可直接声明各类来源、不再 fail-closed 崩；torch/numpy 保留作 backend 简写。`load_golden` 契约文档 + 测试同步（6 枚举直接声明 + near-miss 仍 fail-closed）。改动加性（保留原 torch/numpy 行为、只放开六枚举直接声明）；**a3 容器复验 490 全绿**。分支 `feat/golden-out-of-engine`。

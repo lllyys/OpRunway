@@ -1,9 +1,17 @@
 # OpRunway 施工 TODO（离「通用算子验收工具」还差的）
 
-> **现状（2026-07-20 更新）**：Wave 1–3 经 **PR #3** 合入 main；本轮 **PR #6 已合入 main**（merge commit `f91ccda`；GitHub + GitCode 双镜像 main = `f91ccda` **同 OID**）——含 V1/Q1（dtype 来源红线 + 样例隔离）、Q9（golden 固定 torch·CPU）、Q7（dtype 覆盖门）、**cases50**（opbase §1 生成 + 精度门前置 fail-fast + 性能同输入 trivial-met + bf16 扩 runner）、**真机 opp provenance 绑源 + IsClose bf16 转 tested**、两次 bureau compile、provenance 批 4-finding 收口。
-> 编排升级 / 精度双标准 / 性能小 shape + GPU consumer / dtype 扩面 / catlass adapter / P2 原子化分发 **均已落地**，`acc-common` 由 **487 个 unittest 用例**覆盖（a3 容器全绿；含判定链、三级门、适配器与脚本、provenance 回归、对抗负例）。
+> **现状（2026-07-22 更新）**：Wave 1–3 经 **PR #3**、**PR #6**（V1/Q1 + Q9 + Q7 + cases50 + 真机 opp provenance 绑源 + IsClose bf16 转 tested）、**PR #7**（**runner 去引擎化**：runner 移出引擎作输出、`find_runner` fallback 退役 fail-closed）先后合入 main（当前 main = `b727d6f`，GitHub + GitCode 双镜像同 OID）。
+> **PR #8 开着待合**（分支 `feat/golden-out-of-engine`，3 commit）：**golden 去引擎化**——`gen_cases` 的 `GOLDEN` 硬表改 `load_golden(op)` 按算子加载器 + golden 来源契约扩六枚举 + ADR 0011（proposed）。
+> 编排升级 / 精度双标准 / 性能小 shape + GPU consumer / dtype 扩面 / catlass adapter / P2 原子化分发 **均已落地**，`acc-common` 的 unittest 覆盖：**main 486 个** · **PR #8 分支 490 个**（新增 4 个是 golden 加载器的 fail-closed 真测；两者均在 a3 容器全绿。含判定链、三级门、适配器与脚本、provenance 回归、对抗负例）。
+> **引擎去具体算子化两刀已写完，但只落地了一半**：runner 那刀已在 main（PR #7）；golden 那刀在 PR #8 分支上——
+> **「引擎零内置算子」要等 PR #8 合入才在 main 成立**（当前 main `gen_cases` 仍是 `GOLDEN` 硬表）。产出侧另有洞，见下「🔴 下一刀」。
 > **但仍不是「能对任意算子一键验收」的成品**——剩余的洞见下。
-> ⚠ **别误读**：剩余项里**确有代码型后续**（sign/equal/neg 的 bf16 真机验收、Track C 的 int32 runner + `neg_runner`、ATK 双标杆 fallback、其余 11 仓 adapter）；只是它们**各自卡在真机未开 / 标准未定 / 目标任务未明**，动手前得先有依据，不能凭空写。**能立刻把「验收结论」往前推的那部分，主要剩人门裁决与外部资源**（见文末）。
+> ⚠ **别误读**（2026-07-22 更正）：**「剩下的主要靠人门裁决与外部资源」这个旧判断已不成立**——`agent 产出侧`（下一刀）
+> 是**依据充分、当下就能写**的代码工作：引擎接口（`find_runner`/`load_golden`）已在代码里定死，来源分级有 ADR 0011
+> 可依（⚠ **该 ADR 仍是 `proposed`、未经 `bureau:review` promote**，载重前按 BUREAU trust tier 复核），不等真机、
+> 不等外部数据。其余代码型后续（sign/equal/neg 的 bf16 真机验收、Track C 的 int32 runner +
+> `neg_runner`、ATK 双标杆 fallback、其余 11 仓 adapter）才是**各自卡在真机未开 / 标准未定 / 目标任务未明**、
+> 动手前得先有依据的那批。人门裁决与外部资源见文末 A/B。
 > 〔~~Equal~~ 那条 **2026-07-09 作废**：任务书↔PR 配错、Equal 社区任务实为「未验收空任务」，见硬约束 #1。真机有效裁决仅 **IsClose / Sign**〕
 
 ## 🔒 已用教训钉住的硬约束（别再违反，先写这，因为最值钱）
@@ -33,8 +41,15 @@
 - [x] **bureau 刷新**：golden 律令已入 canon（`golden-source-from-taskdoc-method` + `golden-fixed-to-torch-cpu`）；Q1 stale 页 `spec-examples-pollute` 已刷「已修复」+ `_verify.json` 指纹更新；cases50/provenance 决策已 compile。
 
 ### 🟢 Q9 golden（**已建 + a3 真 torch 验证 14 测全绿 · 2026-07-14**）
-> 决策终稿：golden = CPU 标杆、**固定用 torch(CPU) 单后端**（确定性，**不回退 numpy**——torch/numpy 边界不一致如 `sign(NaN)` 会产非确定 golden）；torch 缺失 → fail-closed 报错要求安装。精度验证在装了 torch 的机器上（NPU 机）。
-- [x] **golden torch-required**：`gen_cases` `_require_torch()` + 四 golden_fn 恒 torch；`golden_source`/`oracle_source` 恒 torch_ref。
+> ⚠ **本段（2026-07-14 口径）仍是现行有效口径**——main 上的实现就是它。ADR 0011 提出下述调整，但该 ADR
+> **`status: proposed`、未经 `bureau:review` 人门 promote**，且代码在未合的 PR #8 分支上，故 **promote + 合入后才生效；
+> 在此之前一律以本段原文为准**：
+> ① 拟把「固定 torch 单后端、绝不回退 numpy」放宽为「**按算子 torch > numpy 定档并记录**」——确定性红线仍在（按算子**定档**、非运行时「谁装了用谁」的兜底）；
+> ② 拟把 golden 值移出引擎，改由 `<ops_root>/<op>/golden.py` 按算子加载；
+> ③ 拟把 `oracle_source` 的**推导**从「只认 torch/numpy 两前缀」放宽为「六枚举可直接声明」（六枚举本身 main 上已有，放宽的是推导侧）。
+>
+> 原文（2026-07-14 决策终稿，**现行**）：golden = CPU 标杆、**固定用 torch(CPU) 单后端**（确定性，**不回退 numpy**——torch/numpy 边界不一致如 `sign(NaN)` 会产非确定 golden）；torch 缺失 → fail-closed 报错要求安装。精度验证在装了 torch 的机器上（NPU 机）。
+- [x] **golden torch-required**：`gen_cases` `_require_torch()` + 四 golden_fn 恒 torch；`golden_source`/`oracle_source` 恒 torch_ref。（⚠ 这描述的是 **main 上的现行实现**；PR #8 分支已把 `_require_torch` 与四个内置 golden_fn 移除、改按算子 `golden.py` 定档——合入后本条须改写。）
 - [x] **select_standard 白名单 fail-closed**（=Q7 落点1）：未知 oracle raise、堵 class C 静默降级。
 - [x] **oracle_source 止血**：删写死 `cpu_ref`、据 `golden_source` 据实映射（严格首 token 前缀）、缺失 fail-closed。
 - [x] **catlass spec 补 standard** + codex 9 维门一轮（#1/#2/#4/#5 修）+ a3 真 torch 全量绿。
@@ -69,8 +84,22 @@
 - **codex 源码门（一轮）修的 4 项**：广播 numel 蒙混 trivial（`_case_numel`/gate/gpu 改按全输入 broadcast 输出算）· inf/nan 补「性能」维（v2 非空皆带性能）· `perf_min_numel` 覆盖删→固定 4096（防 compare↔gate 阈值不一致+类型崩）· 「真空」严格判定（拒 `shape:[false]/[0.0]` 伪造，validator+gate_task1+gate_task2 三处共用、Task2 独立复核）。
 - [ ] **follow-up · equal_nan 有效性**（deviation #4）：§1 不产 nanpair、`_assert_equal_nan_effective` 不再触发；equal_nan T/F 结构覆盖 + NaN §1.4 覆盖但未**交集**证明（aligned-NaN 翻转）。minor。
 
+### 🔴 下一刀 · agent 产出侧（通往「兼容多仓的很多算子」的**真使能件**）
+
+> 用户 2026-07-22 强调：目标是**兼容多仓的很多算子**，别再用「几个算子够用」的框法。
+> 引擎侧去具体算子化两刀已写完（**PR #7 已在 main、PR #8 待合**）——引擎 fail-closed 要 `runner.cpp` + `golden.py`
+> （runner 那道 main 上已生效，golden 那道随 PR #8 合入才生效）。产出侧的实况是
+> **一半有、一半没有**（别说成「完全没有」）：
+> - **`runner.cpp` 有人产**：`acc-runner-dev` 的 `gen_runner` mode 据 spec + 算子自带 example 锚定生成，
+>   但 **scope gate 限死** `experimental/math/<op>` + dtype ∈ {fp32, fp16}，其余一律 BLOCKED → **覆盖面才是洞**。
+> - **`golden.py` 没人产**：全仓无任何 agent / skill 产它（PR #8 后引擎也不再内置）→ **纯空缺**。
+
+- [ ] **`acc-spec`：定 golden 来源 + 分级**（依 ADR 0011 decision 3，**该 ADR 当前 `proposed`、待 `bureau:review` 人门 promote**）——任务书指定方法优先 · `analytical_ref` 末位且须人核 · 不支持则 fail-closed 抛用户。
+- [ ] **`acc-runner-dev`：补产 `golden.py`** + **放宽 runner 的 scope gate 覆盖面**（从任务书推，守最高律令）。⚠ 连带：该 agent 的 scope gate 仍写 dtype 仅 {fp32,fp16}、`bf16→BLOCKED`，**已 stale**（bf16 真机已验收过），须同步。
+- [ ] 产出物落点 `<ops_root>/<op>/`，与 `find_runner`/`load_golden` 的安全边界（拒软链、`_check_id`、缺则 fail-closed）对齐。
+
 ### 🔵 P2 · 扩展 / 接通
-- [ ] **插件-算子解耦**（`doc/oprunway-plugin-op-decoupling-design.md`）：① **runner 去引擎化已做**（分支 `refactor/runner-out-of-engine`：3 份样例 runner 移出引擎 → `samples/runners/`、runner 只作输出、`find_runner` fallback 退役改 fail-closed、门 runner_source 仅 user；a3 容器 486 测全绿、待 PR）；② **golden 去引擎化下一刀**——`gen_cases` 的 `GOLDEN` 硬表（4 算子 numpy 参考）改加载器（S1），引擎才真 op-中立；**须先走 ADR**（golden 归属属推导非 canon，设计开放问题 #5）。
+- [~] **插件-算子解耦**（`doc/oprunway-plugin-op-decoupling-design.md`）**引擎侧两刀：一刀已入 main、一刀待合**：① **runner 去引擎化**（**PR #7 已合入 main** ✅：3 份样例 runner 移出引擎 → `samples/runners/`、runner 只作输出、`find_runner` fallback 退役改 fail-closed、门 runner_source 仅 user）；② **golden 去引擎化**（**分支已实现、PR #8 待合** ⏳：`GOLDEN` 硬表 → `load_golden(op)` 加载器、4 内置 golden 迁 `samples/golden/<op>/`、来源契约扩六枚举、ADR 0011 `proposed`）。⚠ **口径**：main（`b727d6f`）上 `gen_cases` 仍是 `GOLDEN` 硬表——「引擎零内置算子」**要等 PR #8 合入才成立**。剩下的是产出侧，见上「🔴 下一刀」。
 - [ ] **(a) TBE 信息库接通**（dtype 独立源）：每份任务书自带路径 `.../tbe/config/ascend910b`；读法随运行环境探测、**不写死 ssh**。
 - [ ] int32 扩展（Track C，锁已解）。
 
@@ -116,6 +145,8 @@
 1. **`bureau:review` promote**（BUREAU.md：只有人能升 `canonical`，agent 不得手编 cabinet prose、不得手升）：
    - Equal 翻案 4 页：`verify-spec-pr-correspondence` / `root-cause-decoupling` / `task-spec-authoritative` 可按 checklist 直接 promote；**`perf-baseline-by-reference-source` 须先裁 `perf_baseline_source` 张力**（GPU 对比层是否为可选/非必需）再升，否则 hold。
    - **本会话新/改 6 页**（`opp-provenance-bound` / `case-generation-follows-opbase-section-1` / `precision-gate-precedes-performance-fail-fast` / `performance-reuses-precision-inputs-with-trivial-met` / `real-npu-runner` 更新 / `spec-examples-pollute`「已修复」）：待复核 promote。⚠ **`real-npu-runner` 页「标题 vs body」改名**在此步收口——body 已 fp32/fp16/bf16、标题仍「only fp32/fp16」+ supersede 横幅，人审时决定改名并修其它页对它的 `[[…]]` 入链。
+   - **ADR 0011 golden 去引擎化**（`canon/decisions/0011-golden-decoupling.md`，`proposed`，随 PR #8）+ 连带被标 supersede 的 `golden-fixed-to-torch-cpu` 页（决策 4 把「恒 torch 单后端」放宽为「按算子 torch>numpy 定档」）。
+   - **ADR 0010 触发点 stale**：canon 记的仍是旧的「bureau 写入前 + md/代码生成后」，而现行规则（CLAUDE.md #5，用户 2026-07-10 改定）是「**commit 之前统一审一次**」；连带「散文门走 codex」也与实践不符（codex 无人值守空转已坐实、已退回独立 Claude 新眼审）。差异已 capture，**待走一次 `capture→compile→review`**。
    - T9 发布形态决定（当前 `proposed`）、门职责扩展（「门内重算比对」属证据可信、非重判 verdict）。
    - **2 条 lint survivor**：ADR0002 `msTuner`→`msprof op`；5 页 `1.2×`→`target_ratio`。⚠ 护栏：ADR0006/0008 未同步 rename 前**不宜单独 promote**（否则固化 drift）。survivors **单靠 `bureau:note` 不进 review 视图**，需 `bureau:lint --apply`（改 canonical status、消耗性）或 `bureau:compile` 才可见——用户已选「先不跑、留 review 一次处置」。
 2. **T4 catlass 偏离 canonical 需人裁**：未走 canon `catlass-to-aclnn-bridge`【canonical】的路线 A/B，自选「注入其自带 example 树的 repo-native harness」第三路径。要么人门追认（改 canon），要么改回 A/B。
@@ -126,7 +157,9 @@
 5. **真 GPU 基线数据**：consumer 侧与最小字段契约已就绪，缺数据即走 `BLOCKED_WAIT_GPU_BENCHMARK`。
 
 ### C. 已收口（不再是待办）
-- ✅ 公开台账 push + **PR merge**：本会话 **PR #6 已 merge 进 main**、双镜像（GitHub `lllyys` + GitCode `brian66237`）同步至同一 OID `f91ccda`。
+- ✅ 公开台账 push + **PR merge**：**PR #6**（`f91ccda`）与 **PR #7**（`b727d6f`）已 merge 进 main、双镜像（GitHub `lllyys` + GitCode `brian66237`）同 OID；**PR #8 已开、待合**（合后需同步 gitcode 镜像）。
+- ✅ **引擎去 runner 化**（PR #7，已在 main）——引擎不再内置任何算子的 runner。⏳ golden 那刀在 PR #8 分支上、**未合入 main 前不算收口**（合入后「第 5 个算子不再撞死在硬表上」才成立）。
+- ✅ 清掉 6 个 SessionEnd 机械空 stub（`canon/logbook/2026/07/`，无内容、非 `bureau:file-session` 产物）。
 - ✅ 真机 opp provenance 绑源 + IsClose bf16 转 tested（2026-07-16）；provenance 批 4-finding 收口（2026-07-16）。
 - ✅ PR#2 body Equal 作废更正：2026-07-10 在线复核确认 body **早已含更正**（裁决表 Equal 行 = 「无结论·结论作废」），denylist 词仅出现在作废叙述内，评论/review 无旧结论 → **无需编辑**。
 
