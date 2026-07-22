@@ -301,8 +301,15 @@
 - [x] **已修（2026-07-23）** `run_on_npu.sh` 的 vendor 后缀硬编码：改成按序解析——
   ① 显式 `OPRUNWAY_VENDOR_SUFFIX`；② 从 OPS 仓目录名推（`ops-math`→math、`ops-cv`→cv、`cann-ops-blas`→blas）；
   ③ **推不出来 fail-closed，不猜**。配 3 条回归（含「推不出必须是空串，脚本据此 fail-closed」+ 源码级钉住无 `_math`）。
-- [ ] `taskdoc-to-spec.md §1.2` 缺第三类 dtype gap：「op_def 声明了、但目标硬件的 aclnn 分支没实现」
-  （im2col 的 bool 就是这格，现被迫按 `dtype_deferred` 落）。
+- [~] **已记进规则、但 kind 本身待你裁**：`taskdoc-to-spec.md §1.2` 缺第三类 dtype gap ——
+  「**`op_def` 声明了、但目标硬件那一支的 aclnn 实现没有**」。im2col 的 `bool` 就是这格：
+  `im2col_def.cpp` 的 `VALUE_DATA_TYPE_LIST` 含 `DT_BOOL`，而 `aclnn_im2col.cpp:222-225` 的
+  `IsRegBase` 分流下、非 regbase（A2/A3）那支的 `DTYPE_SUPPORT_LIST` 只有 {FLOAT, FLOAT16, BF16}。
+  - 用不了 `dtype_unsupported_by_op_def`（它有「op_def 确实没声明」的自洽硬校，会当场判不符）
+  - 只能退 `dtype_deferred`，可那个 kind 的语义是「**我们的**能力缺口」，
+    而这明明是**被测物的**缺口 → **语义被迫说反了**
+  已在规则文里写清这一情形 + 要求 reason 逐字写明真实成因，别让措辞盖掉验收发现。
+  **要不要补第三类 kind（如 `dtype_unsupported_on_target_hw`）须你拍板。**
 - [ ] **im2col 硬件双源冲突未裁**：任务书 `适配硬件` = A2/A3（→ a3），仓内 `im2col_def.cpp:41` 只
   `AddConfig("ascend950")`、kernel 只有 arch35（→ a5）。**开跑前必须先定目标机**。
 - [ ] **Upsample 算子名二义（正踩 Equal 那个老坑）**：op_def 注册的是 `UpsampleNearest`

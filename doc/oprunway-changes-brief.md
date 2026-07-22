@@ -20,6 +20,15 @@
 
 ## 2026-07-23
 
+- **继续清引擎侧的账：bf16 白名单退役 · `empty_axis` · 两个真机必炸点 · U5 钉 head_sha** —— 都是纯 bug/纯硬编码，不需拍板。
+  - **`_BF16_EXACT_OPS` 那张写死的算子名白名单退役**（「引擎零内置算子知识」的又一处反例）→ 改由 spec 声明 `precision.bf16_bitexact`，旧表降为历史默认（Sign/Neg 行为零变更）。⚠ 语义是「输出恒等于某个输入元素、不做算术」，**不是放松阈值的旋钮**。连带解锁三个 shape_transform 算子的 bf16 —— 它们的 gap 早就写着「任务书与 op_def 都支持、纯粹被引擎白名单挡住」。
+  - **`empty_axis`**：`_fit_rank` 左补 1 使 **0 恒落最后一维**，而 im2col 的空 Tensor 只在「4 维且 N==0」时合法 → 这类算子只能整个关掉空用例 = 本该测的那一种也没了。新增轴号声明，且**轴号定不了 rank**（im2col rank 是 [3,4]、只有 4 维那个合法）→ 按合法 rank 逐个**问算子自己的 `out_shape()`**，引擎不猜；全被拒就 fail-closed、绝不挑个算子不认的形状硬塞。**a3 真 torch 实测：im2col 空 Tensor 覆盖 0 → 3 条**。
+  - **两个真机必炸点**：`verify_mode=exact ⇒ bool`（把**判据**当成了**输出类型**，mock 通路不经这行所以本机全绿完全掩盖了它）· `run_on_npu.sh` 把 vendor 后缀写死 `_math`（ops-cv 的 Upsample 真机跑必撞）。
+  - **U5 钉 head_sha**：实测 MR 3400 的 `head.ref` **字面就叫 master**，旧兜底会去 base 仓取到完全不相干的代码却报告「取自 PR head」。
+  - **第三类 dtype gap 情形已写进规则**（im2col 的 `bool`：op_def 声明了、但目标硬件那支的 aclnn 没实现）——现被迫按 `dtype_deferred` 落，而那个 kind 的语义是「我们的能力缺口」，**语义被迫说反了**。要不要补专属 kind 待你裁。
+  - ⚠ **我自己捅的两个娄子，都被外部审抓到**：① 几轮用 `cat >>` 追加的测试类落在 `unittest.main()` **之后** → 直接跑文件时**一条都不收集**（三个文件受影响，已挪正）；② `self.place("Sign", 假body)` 把共享 fixture 里**真正的 Sign golden 覆盖成了假的**，当场污染同模块 19 条测试。**测试之间不能互相下毒。**
+  - 验证：a3 真 torch **704 测全绿**，本机替身同样全绿、裸跑与基线零 diff、两道门 PASS/SYNCED。
+
 - **拿真算子把 shape_transform 的「生成 + mock 契约」通路走通了 —— 三个全通（⚠ 不是真机验收全通），结论中途被自己推翻过一次** —— 4 路并行施工 + 5 路复核。此前 C1–C5 的引擎侧全是用假算子（`FakeReduce` 之类）单测的，这轮换成三个真算子。
   - **最终结果：三个真算子全通** —— Im2col 50 用例 · UpsampleNearestExact2d 18 · UpsampleNearest3d 20（rank 5）。关键实测 `(2,2,2,2) → (2,8,9)`：**4 维入、3 维出，输出 rank 随输入 rank 跳变**。这是 C1 那个决定的直接检验 —— 这种形状任何「spec 里写小表达式」的方案都表达不下，而 `out_shape()` 十来行普通 Python 就写完了。C2（`[2,2]`→manifest 单 token `2,2`）、C3（`rank` 过滤阶梯）也一并端到端跑通。
   - ⚠ **但这个结论中途被推翻过一次，过程本身值得记**：施工阶段报的是「Im2col 通了 50 用例 PASS、两个 Upsample 卡住」。而 codex 审出来——那次 PASS 有一部分建立在 golden **为非法空输入编造输出**上（即下面那条诚实性缺口）。**补完 0 维闸，Im2col 也 fail-closed 了**。这反而暴露出更干净的事实：**三个算子撞的是同一堵墙**，不是各自的个案。

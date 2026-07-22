@@ -148,6 +148,17 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 | `dtype_deferred` | 任务书要、算子也做了，**是我们这条 pipeline 暂时测不了**（runner 无该 dtype 分支、真机环境阻塞…）| **我们的**能力缺口 |
 | `dtype_unsupported_by_op_def` | 任务书要、**算子 `op_def` 压根没声明支持** | **被测物的**缺口 = 验收**发现** |
 
+⚠ **有第三种情形，目前没有专属 kind**（2026-07-23 由 im2col 的 `bool` 撞出来）：
+**`op_def` 声明了、但目标硬件那一支的 aclnn 实现没有**。
+im2col 的 `im2col_def.cpp` 的 `VALUE_DATA_TYPE_LIST` 含 `DT_BOOL`，而 `aclnn_im2col.cpp:222-225` 的
+`IsRegBase` 分流下，非 regbase（= A2/A3）那一支的 `DTYPE_SUPPORT_LIST` **只有 {FLOAT, FLOAT16, BF16}**。
+- **不能用 `dtype_unsupported_by_op_def`**：那条有「op_def 确实没声明」的自洽硬校，会当场判不符。
+- **只能退 `dtype_deferred`**，并在 `reason` 里写清「op_def 声明了、目标硬件分支未实现」——
+  但那个 kind 的语义是「**我们的**能力缺口」，而这明明是**被测物的**缺口。**语义被迫说反了。**
+⚠ 要不要补第三类 kind（如 `dtype_unsupported_on_target_hw`）**待用户裁**。在此之前：
+**按 `dtype_deferred` 落，但 reason 必须逐字写明真实成因**，别让「我们测不了」这个措辞把
+「算子在目标硬件上没实现」这个**验收发现**给盖掉了。
+
 ⚠ **裁决标签怎么用**：`passed_with_gaps` 是 `validator` 产的**精度 verdict**（`validate_acceptance_state`
 也已把它纳入合法枚举，并交叉核验「自称 passed_with_gaps 就得真有结构合法的 gap 撑着」）。
 **实读 `run_workflow.run`（2026-07-22 当日稍晚已接线）**：`passed_with_gaps` 属**精度放行集合**
