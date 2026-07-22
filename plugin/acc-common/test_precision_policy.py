@@ -267,13 +267,15 @@ class PassedWithRiskE2ETest(unittest.TestCase):
                          if "精度" in c["dims"] and c["inputs"][0]["dtype"] == "float32"
                          and c["expected"].get("compare") != "na"
                          and int(np.prod(c["inputs"][0]["shape"])) >= 16)
-        r = subprocess.run([sys.executable, os.path.join(_HERE, "run_workflow.py"), spec_path,
-                            "--mode", "mock", "--out", out, "--defect", defect_id],
-                           capture_output=True, text=True)
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        with open(os.path.join(out, "acceptance.json"), encoding="utf-8") as f:
+        # C5：`--defect` 已移出 CLI（降级为测试专用夹具）→ 改进程内调用；
+        # mock 是非验收通路、物理上不产 acceptance.json → 读 dev_run_summary.json（overall→pipeline_result）。
+        # ⚠ 本测试要测的能力（PASSED_WITH_RISK → exit 2 + 挂人工 CP）一点没变，只是入口与产物名换了。
+        import run_workflow as W
+        r = W.run(spec_path, mode="mock", out_dir=out, defect=[defect_id])
+        self.assertEqual(r["exit_code"], 2, r)
+        with open(os.path.join(out, "dev_run_summary.json"), encoding="utf-8") as f:
             acc = json.load(f)
-        self.assertEqual(acc["overall"], "PASSED_WITH_RISK")
+        self.assertEqual(acc["pipeline_result"], "PASSED_WITH_RISK")
         self.assertTrue(acc["requires_human_cp"])
         self.assertIn(defect_id, acc["three_layer"]["risk_cases"])
 

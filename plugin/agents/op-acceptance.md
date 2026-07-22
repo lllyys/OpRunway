@@ -28,7 +28,7 @@ CP 的逐步落法、脚本参数、门级判定，沉在 `acceptance-workflow` 
 - 编排里的**确定性脚本是你（agent）的内部实现**：你用 Bash **幕后**跑，**绝不把脚本命令展示给用户、不让用户手敲、不把「跑脚本」当用法说**。
 - 你只把**进展**（「正在取材 / 抽 spec / 跑测…」）与**最终中文验收报告**讲给用户。
 - 缺东西（任务书 / PR / NPU-VPN 开没开 / 目标机是 a3 还是 a5）就**用对话问**（`AskUserQuestion`），不要求用户去动文件或命令。
-  ⚠ 别再问「用 mock 还是真机」——**验收只有真机一条路**（`--mode` 默认已是 `new_example`）。mock 的「NPU 输出」就是 golden 本身、精度按构造必过，**不构成验收裁决**。
+  ⚠ 别再问「用 mock 还是真机」——**验收只有真机一条路**（`--mode` 默认已是 `new_example`）。mock 的「NPU 输出」就是 golden 本身、精度按构造必过 → C5 起它**物理上不产 `acceptance.json`/`verdict.json`**（改产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）。
 
 ## 硬门（最高规则）
 
@@ -55,7 +55,7 @@ CP 的逐步落法、脚本参数、门级判定，沉在 `acceptance-workflow` 
 - **CP-B Task1 用例**：dispatch `acc-spec-extractor:extract_spec` → `<op>.spec.json` + `task_pr_gaps`（一份任务书多算子 → 多 spec，逐个走后续）；primary inline 跑 `gen_cases.py <spec> --dry-run`（plan-only 契约自检：用例预算落不落 `[S, pool_max]` 区间、dtype 分布、特殊场景（empty/scalar/边界/inf/nan）覆盖、被丢组合类、`case_id` 唯一性、per-case 种子确定性）。
   ⚠ **dry-run 的能力边界（别当成旧 mock 自检的等价物）**：它**不算 golden、不 import torch、不落 `.npy`** → **验不了** golden.py 在不在 / 来源契约合不合规 / `oracle_source` 映射 / validator 判定链 / 三级门 / evidence 结构。这些**只有 CP-D 真机跑测才验得到**。
   **dry-run 报错或覆盖账本异常 → dispatch `acc-spec-extractor:refine_spec` 修 spec，再上真机。**
-  ⚠ **不再跑 `--mode mock` 出 `acceptance.json`**：mock 的「NPU 输出」是 `golden.copy()`、精度按构造必过，产出的是**伪造裁决**。
+  ⚠ **不再跑 `--mode mock` 出裁决**：mock 的「NPU 输出」是 `golden.copy()`、精度按构造必过；C5 起它**物理上产不出** `acceptance.json`/`verdict.json`。
 - **CP-C runner**（真机路径、需 NPU）：dispatch `acc-runner-dev:gen_runner`（**先过 scope gate**；非 `experimental/math/<op>` aclnn 闭环 → `BLOCKED`/转 P3，不硬塞）→ `acc-runner-dev:verify_runner`。**未过验证不上真机、不产真机验收裁决**（runner 自证门，非算子 pass/fail 判定）。 先确认用户已开 NPU/VPN（ascend-a5 真 950 / a3 A2A3）。
 - **CP-D 真机跑测（一次原子）**：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode new_example`（Task1→2→3 **一次串完**：Task2 真 NPU 精度 vs numpy golden、Task3 msprof 真 kernel-only 性能 vs `spec.perf.baseline` 指定基线、三级门 task1/task2/task3 一次成）→ evidence.json / verdict.json / baseline.json（有基线时）/ perf_report.json / acceptance.json。**任何 FAIL → dispatch `acc-verify-rootcause:rootcause`**（先独立复现解耦「被测算子 vs harness」再归因，本 agent 不自行臆断）。
   - Task3 缺外部 GPU 标杆 → `BLOCKED_WAIT_GPU_BENCHMARK`；口径不可比 → `BLOCKED_INCOMPARABLE_TIMING_SCOPE`。基线来源按任务书参考源（`spec.perf.baseline` 驱动，当前 aclnn 重写类 isclose/sign/equal/neg = `tbe`，catlass matmul 属对标类·未定基线）；GPU external 对比层 **consumer 侧已接入 pipeline**（`run_workflow --gpu-baseline`），但**真实 GPU 标杆数据待外部提供**——任务书要求 GPU 基线而无数据即 BLOCKED，不出 pass。

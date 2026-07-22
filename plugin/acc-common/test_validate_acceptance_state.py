@@ -6,6 +6,7 @@ import json, os, subprocess, sys, tempfile, shutil, unittest
 import numpy as np
 import precision_policy
 import validate_acceptance_state as G
+import validator as V              # C1 输出形状对账 / C4 dtype 冲突裁决在 validator，与本门配套钉死
 import _golden_fixture as _gf
 setUpModule = _gf.install        # golden 去引擎化：gen_cases/run_workflow 需 <ops_root>/<op>/golden.py（ADR 0011）
 tearDownModule = _gf.uninstall
@@ -635,7 +636,11 @@ class RunWorkflowExitTest(unittest.TestCase):
                                  os.path.join(self.d, "gen"))
         did = next(c["id"] for c in cs["cases"]
                    if "精度" in c["dims"] and c["expected"].get("compare") != "na")
-        self.assertNotEqual(self._run("--defect", did).returncode, 0)
+        # ⚠ 不能用 CLI `--defect`（C5 已下架）：argparse 用法错恰好回 2，assertNotEqual(rc,0) 会**假绿**——
+        # 一次都没跑到门却报绿，正是 C5 要消灭的那类东西。改进程内调用，并把断言收紧到 rc==1（真精度 FAIL）。
+        import run_workflow as W
+        r = W.run(spec_path, mode="mock", out_dir=self.d, defect=[did])
+        self.assertEqual(r["exit_code"], 1, r)
 
     def test_failfast_skips_perf(self):
         # §精度门前置 + fail-fast（用户 2026-07-15）：任一精度挂 → 跳过 Task3 性能 → FAIL(精度)、exit 1、task3 门未跑。
@@ -645,14 +650,19 @@ class RunWorkflowExitTest(unittest.TestCase):
                                  os.path.join(self.d, "gen"))
         did = next(c["id"] for c in cs["cases"]
                    if "精度" in c["dims"] and c["expected"].get("compare") != "na")
-        r = self._run("--defect", did)
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        import run_workflow as W
+        r = W.run(spec_path, mode="mock", out_dir=self.d, defect=[did])
+        self.assertEqual(r["exit_code"], 1, r)
         with open(os.path.join(self.d, "perf_report.json"), encoding="utf-8") as f:
             self.assertEqual(json.load(f)["summary"]["status"], "skipped_precision_gate")
-        with open(os.path.join(self.d, "acceptance.json"), encoding="utf-8") as f:
+        # C5：mock 是**非验收通路**，物理上不产 acceptance.json，改产 dev_run_summary.json
+        # （overall→pipeline_result、gate.errors→selfcheck.errors；state 键刻意不写）。
+        with open(os.path.join(self.d, "dev_run_summary.json"), encoding="utf-8") as f:
             acc = json.load(f)
-        self.assertEqual(acc["overall"], "FAIL(精度)")
-        self.assertNotIn("task3", acc["gate"]["errors"])       # 精度未全过 → task3 门未纳入
+        self.assertEqual(acc["pipeline_result"], "FAIL(精度)")
+        self.assertNotIn("task3", acc["selfcheck"]["errors"])  # 精度未全过 → task3 门未纳入
+        self.assertFalse(os.path.exists(os.path.join(self.d, "acceptance.json")),
+                         "非验收通路绝不产 acceptance.json（C5）")
 
 
 # ===== T6/T8 perf 包新增（自包含，与上方 GateTest 无耦合，便于与主树 T5 干净合并）=====
@@ -799,8 +809,8 @@ class RunWorkflowPerfPackageTest(unittest.TestCase):
         #  只是 §1 pipeline 不再触发；其直测覆盖见 test_perf_compare.SmallShapeExceptionTest）。
         r = self._run("../samples/specs/sign.spec.json")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)   # 全 trivial + 大 shape 达标 → PASS
-        acc = self._json("acceptance.json")
-        self.assertEqual(acc["state"], "PASSED")
+        acc = self._json("dev_run_summary.json")   # C5：mock 不产 acceptance.json
+        self.assertEqual(acc["pipeline_result"], "PASS")   # state 键刻意不写（非验收通路无 canonical 状态）
         self.assertEqual(acc["repo_mode"], "mock")
         pr = self._json("perf_report.json")
         self.assertEqual(pr["summary"]["status"], "ok")
@@ -813,10 +823,10 @@ class RunWorkflowPerfPackageTest(unittest.TestCase):
 
     def test_gpu_wait_blocked_not_fail(self):
         r = self._run("testdata/gpu_demo.spec.json")            # spec.perf.baseline=gpu_external, 无 --gpu-baseline
-        acc = self._json("acceptance.json")
-        self.assertEqual(acc["state"], "BLOCKED_WAIT_GPU_BENCHMARK")
+        acc = self._json("dev_run_summary.json")               # C5：mock 不产 acceptance.json
+        self.assertEqual(acc["pipeline_result"], "BLOCKED_WAIT_GPU_BENCHMARK")
         self.assertNotEqual(r.returncode, 0)                   # 非 PASS
-        self.assertNotIn("PASS", acc["overall"])               # 缺 GPU 数据绝不显 PASS
+        self.assertNotIn("PASS", acc["pipeline_result"])       # 缺 GPU 数据绝不显 PASS
 
 
 # ===== gt3 CONFIRMED 绕过负例（gate_task3 零证据/wait 绕过/坏输入/空转/bool计数/空壳证据）=====
@@ -1040,6 +1050,363 @@ class DefaultModeIsRealMachineTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.d, "acceptance.json")),
                          "默认走真机、缺配置时绝不产出伪造 acceptance.json")   # 不落半产物
         self.assertIn("--mode mock", r.stdout + r.stderr)                     # 指路提示存在（要本地自检加 mock）
+
+
+# ===== C1 下游 · 输出形状对账 + C4 · dtype 冲突（用户 2026-07-22 拍板的两条）=====
+def _prod(shape):
+    n = 1
+    for d in shape:
+        n *= d
+    return n
+
+
+def _v_triple(out_shape=None, ev_out_shape=None, ev_prov_shape=None, numel=None,
+              in_shape=(16,), spec_gaps=None, cs_gaps=None, dtype_required=None,
+              dtype="float32", extra_exp=None):
+    """构一份**据 spec 复算的诚实**三元组（spec/caseset/evidence 口径全等 canonical），只在需要处注入差异。
+
+    默认（不传任何形状/gap）= 现行 elementwise 通路：caseset 不声明 out_shape、evidence 不自报形状，
+    validator 行为与本轮改动前**完全一致**——用作「不误伤」的反事实对照。"""
+    spec = {"op": "S", "verify_mode": "numerical",
+            "params": [{"name": "self", "io": "in", "dtype": [dtype]},
+                       {"name": "out", "io": "out", "dtype": [dtype]}],
+            "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default"}}
+    if dtype_required is not None:
+        spec["dtype_required"] = dtype_required
+    if spec_gaps is not None:
+        spec["task_pr_gaps"] = spec_gaps
+    eff = precision_policy.effective_standard("ascendoptest_default", dtype, "rel_err")
+    pol = precision_policy.threshold_for(eff, dtype)
+    tpid = precision_policy.tolerance_policy_id(eff, dtype)
+    dig = precision_policy.threshold_digest(pol)
+    exp = {"golden_path": "g.npy", "verify_mode": "numerical", "standard": eff,
+           "compare_dtype": dtype, "compare": "rel_err", "tolerance_policy_id": tpid,
+           "policy": pol, "threshold": dig}
+    if out_shape is not None:
+        exp["out_shape"] = list(out_shape)
+    if extra_exp:
+        exp.update(extra_exp)
+    n = numel if numel is not None else _prod(out_shape if out_shape is not None else in_shape)
+    prec = {"standard": eff, "tolerance_policy_id": tpid, "policy": pol, "threshold": dig,
+            "metrics": {"bad_count": 0, "numel": n}}
+    if ev_out_shape is not None:
+        prec["out_shape"] = list(ev_out_shape)
+    if ev_prov_shape is not None:
+        prec["provenance"] = {"out_shape": list(ev_prov_shape)}
+    acc = precision_policy.resolve_acceptance(spec, eff, dtype)
+    if acc:
+        exp["acceptance_policy"], exp["acceptance_tolerance_policy_id"] = acc
+        prec["acceptance_policy"], prec["acceptance_tolerance_policy_id"] = acc
+        prec["acceptance_metrics"] = dict(prec["metrics"])
+    cs = {"op": "S", "cases": [{"id": "c0", "dims": ["功能", "精度"],
+          "inputs": [{"name": "self", "shape": list(in_shape), "dtype": dtype}],
+          "expected": exp}]}
+    if cs_gaps is not None:
+        cs["task_pr_gaps"] = cs_gaps
+    ev = {"op": "S", "evidence": [{"case_id": "c0", "status": "ok", "precision": prec}]}
+    return spec, cs, ev
+
+
+class OutShapeReconcileTest(unittest.TestCase):
+    """C1 下游：caseset 声明显式输出形状（per-op golden.py `out_shape` 派生）后，validator 按它对账；
+    NPU 实际输出形状/规模 ≠ 期望 → fail-closed 判失败并说清差异，**绝不静默 reshape / 广播凑合**。"""
+
+    def _vd(self, **kw):
+        return V.validate(*_v_triple(**kw))
+
+    # --- 不误伤：缺省 elementwise 语义（未声明 out_shape）行为零变更 ---
+    def test_no_declaration_unchanged(self):
+        vd = self._vd()
+        self.assertEqual(vd["overall"]["verdict"], "pass", vd)
+        self.assertEqual(vd["overall"]["counts"]["contract_problems"], 0)
+
+    def test_declared_shape_consistent_passes(self):
+        """声明 out_shape=[2,8]（numel 16，与 metrics.numel 一致）+ evidence 自报同形 → 放行（不误挡）。"""
+        vd = self._vd(out_shape=[2, 8], ev_out_shape=[2, 8], numel=16)
+        self.assertEqual(vd["overall"]["verdict"], "pass", vd)
+
+    # --- 核心负例：形状不符 → fail 且报清「实际 vs 期望」 ---
+    def test_actual_shape_differs_fails_with_diff(self):
+        vd = self._vd(out_shape=[2, 8], ev_out_shape=[8, 2], numel=16)
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        why = vd["per_case"][0]["判据"]
+        self.assertIn("[8, 2]", why)          # 实际
+        self.assertIn("[2, 8]", why)          # 期望
+        self.assertIn("形状", why)
+
+    def test_provenance_layer_shape_differs_fails(self):
+        """实际形状写在 evidence.precision.provenance 层同样对账（换个入口不放行）。"""
+        vd = self._vd(out_shape=[4, 4], ev_prov_shape=[16], numel=16)
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        self.assertIn("形状", vd["per_case"][0]["判据"])
+
+    def test_evidence_two_layers_conflict_fails(self):
+        """evidence 两层自报形状互相打架 → 拒（不静默择一）。"""
+        vd = self._vd(out_shape=[4, 4], ev_out_shape=[4, 4], ev_prov_shape=[16], numel=16)
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        self.assertIn("不一致", vd["per_case"][0]["判据"])
+
+    def test_numel_mismatch_fails_even_without_actual_shape(self):
+        """采集层还没产实际形状字段时，也要靠现成的 metrics.numel 抓到规模不符（本轮的主生效路径）。"""
+        vd = self._vd(out_shape=[2, 8], numel=100)
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        why = vd["per_case"][0]["判据"]
+        self.assertIn("100", why)
+        self.assertIn("16", why)
+
+    def test_declared_shape_bad_type_fails(self):
+        """out_shape 是坏值（含负数/非 int）→ 拒，不猜、不容忍。"""
+        vd = self._vd(out_shape=[2, -8], numel=16)
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        self.assertIn("非法", vd["per_case"][0]["判据"])
+
+    def test_conflicting_expected_keys_fails(self):
+        """caseset 同时写 out_shape 与 output_shape 且不一致 → 拒（不静默择一）。"""
+        vd = self._vd(out_shape=[2, 8], numel=16, extra_exp={"output_shape": [16]})
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        self.assertIn("矛盾", vd["per_case"][0]["判据"])
+
+    def test_evidence_shape_without_declaration_checked_against_default(self):
+        """caseset 未声明期望、evidence 却自报了实际形状 → 用缺省 elementwise 语义（输入形状）兜底对账，
+        不符即拒——不让一个无人对账的自报形状溜过去。"""
+        vd = self._vd(ev_out_shape=[4, 4], in_shape=(16,), numel=16)
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        self.assertIn("[4, 4]", vd["per_case"][0]["判据"])
+
+    def test_evidence_shape_matching_default_passes(self):
+        vd = self._vd(ev_out_shape=[16], in_shape=(16,), numel=16)
+        self.assertEqual(vd["overall"]["verdict"], "pass", vd)
+
+    def test_case_level_declaration_also_reconciled(self):
+        """期望形状落在 case 层（而非 expected 层）同样对账——字段落点未最终对齐，两处都收。"""
+        spec, cs, ev = _v_triple(ev_out_shape=[8, 2], numel=16)
+        cs["cases"][0]["out_shape"] = [2, 8]
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        self.assertIn("[8, 2]", vd["per_case"][0]["判据"])
+
+    def test_case_and_expected_declarations_conflict_fails(self):
+        spec, cs, ev = _v_triple(out_shape=[2, 8], numel=16)
+        cs["cases"][0]["out_shape"] = [16]
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        self.assertIn("不一致", vd["per_case"][0]["判据"])
+
+
+# --- C4 的合法 gap 样板：有据可查（任务书原文 + op_def 出处 + op_def 自报支持集）---
+def _gap(dtypes=("bfloat16",), op_def_dtypes=("float32", "float16"),
+         task_doc_ref="任务书 §2 数据类型：float32/float16/bfloat16",
+         op_def_ref="<ops 仓>/<op>/op_def.py AICore().AddConfig(...) DataType 列", **over):
+    g = {"kind": "dtype_unsupported_by_op_def", "dtypes": list(dtypes),
+         "op_def_dtypes": list(op_def_dtypes),
+         "task_doc_ref": task_doc_ref, "op_def_ref": op_def_ref}
+    g.update(over)
+    return g
+
+
+class DtypeConflictGapVerdictTest(unittest.TestCase):
+    """C4：任务书要求、op_def 不支持的 dtype 差额 → 挂 task_pr_gaps、裁决落 passed_with_gaps。
+    **反后门**：gap 无据 / 自相矛盾 / 想罩住「实现了但跑挂了」/ caseset 私塞 → 一律 contract fail。"""
+
+    def test_valid_gap_yields_passed_with_gaps(self):
+        g = _gap()
+        vd = V.validate(*_v_triple(spec_gaps=[g], cs_gaps=[g],
+                                   dtype_required=["float32", "float16", "bfloat16"]))
+        self.assertEqual(vd["overall"]["verdict"], "passed_with_gaps", vd)
+        self.assertEqual(vd["overall"]["counts"]["gaps"], 1)
+        # 有据可查随裁决一起带出，人工复核能直接读到出处
+        self.assertIn("task_doc_ref", vd["overall"]["gaps"][0])
+        self.assertIn("op_def_ref", vd["overall"]["gaps"][0])
+
+    def test_no_gap_stays_pass(self):
+        vd = V.validate(*_v_triple(dtype_required=["float32"]))
+        self.assertEqual(vd["overall"]["verdict"], "pass", vd)
+
+    # --- 负例①：无据（缺任务书/op_def 出处）---
+    def test_gap_missing_task_doc_ref_rejected(self):
+        g = _gap(); g.pop("task_doc_ref")
+        vd = V.validate(*_v_triple(spec_gaps=[g], cs_gaps=[g],
+                                   dtype_required=["float32", "bfloat16"]))
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        self.assertTrue(any("task_doc_ref" in p for p in vd["contract_problems"]), vd)
+
+    def test_gap_missing_op_def_ref_rejected(self):
+        g = _gap(op_def_ref="   ")               # 空白串不算出处
+        vd = V.validate(*_v_triple(spec_gaps=[g], cs_gaps=[g],
+                                   dtype_required=["float32", "bfloat16"]))
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        self.assertTrue(any("op_def_ref" in p for p in vd["contract_problems"]), vd)
+
+    # --- 负例②：自相矛盾（声称不支持却又列在自报 op_def_dtypes 里）---
+    def test_gap_self_contradiction_rejected(self):
+        g = _gap(dtypes=["bfloat16"], op_def_dtypes=["float32", "bfloat16"])
+        vd = V.validate(*_v_triple(spec_gaps=[g], cs_gaps=[g],
+                                   dtype_required=["float32", "bfloat16"]))
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        self.assertTrue(any("自相矛盾" in p for p in vd["contract_problems"]), vd)
+
+    # --- 负例③（最关键）：拿「没实现」罩住「实现了但跑挂了」---
+    def test_gap_cannot_cover_a_dtype_that_actually_runs(self):
+        """float32 明明有真实用例在跑，却挂「op_def 不支持 float32」想免检 → 拒。
+        这就是「没实现」与「实现了但跑挂了」的判别式：后者一定有用例 + evidence。"""
+        g = _gap(dtypes=["float32"], op_def_dtypes=["float16"])
+        vd = V.validate(*_v_triple(spec_gaps=[g], cs_gaps=[g], dtype="float32",
+                                   dtype_required=["float32", "float16"]))
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        self.assertTrue(any("跑挂了" in p for p in vd["contract_problems"]), vd)
+
+    # --- 负例④：给任务书没要求的 dtype 挂账 ---
+    def test_gap_outside_dtype_required_rejected(self):
+        g = _gap(dtypes=["complex64"])
+        vd = V.validate(*_v_triple(spec_gaps=[g], cs_gaps=[g],
+                                   dtype_required=["float32", "float16"]))
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        self.assertTrue(any("dtype_required" in p for p in vd["contract_problems"]), vd)
+
+    # --- 负例⑤：caseset 私塞 gap（权威在 spec）---
+    def test_caseset_smuggled_gap_rejected(self):
+        g = _gap()
+        vd = V.validate(*_v_triple(cs_gaps=[g], dtype_required=["float32", "bfloat16"]))
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+        self.assertTrue(any("私改/私塞" in p for p in vd["contract_problems"]), vd)
+
+    def test_spec_gap_dropped_by_caseset_rejected(self):
+        """反向：spec 有 gap 而 caseset 透传时抹掉 → 同样拒（两侧必须逐条一致）。"""
+        g = _gap()
+        vd = V.validate(*_v_triple(spec_gaps=[g], cs_gaps=[],
+                                   dtype_required=["float32", "bfloat16"]))
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+
+    def test_freetext_gaps_ignored_not_error(self):
+        """历史的自由文本 task_pr_gaps（现有 sample spec 就是）原样忽略、不误报。"""
+        txt = ["精度阈值待工具核实", "uint8 回绕语义未覆盖"]
+        vd = V.validate(*_v_triple(spec_gaps=txt, cs_gaps=txt, dtype_required=["float32"]))
+        self.assertEqual(vd["overall"]["verdict"], "pass", vd)
+
+    # --- gap 不吞掉更严的终态 ---
+    def test_gap_does_not_swallow_precision_fail(self):
+        """同时有合法 gap 和真实精度 fail → 仍是 fail（gap 只在「其余全过」时才降级为 passed_with_gaps）。"""
+        g = _gap()
+        spec, cs, ev = _v_triple(spec_gaps=[g], cs_gaps=[g],
+                                 dtype_required=["float32", "bfloat16"])
+        ev["evidence"][0]["precision"]["metrics"]["bad_count"] = 999
+        if "acceptance_metrics" in ev["evidence"][0]["precision"]:
+            ev["evidence"][0]["precision"]["acceptance_metrics"]["bad_count"] = 999
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail", vd)
+
+
+class GateDtypeConflictGapTest(unittest.TestCase):
+    """门侧（task1 覆盖门 / task2 裁决交叉核验）对 C4 gap 的硬校。"""
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _errs(self, stage):
+        errs = []
+        G._GATES[stage](self.d, errs)
+        return errs
+
+    def _cs(self, gaps, required=("float32", "float16", "bfloat16")):
+        cs = json.loads(json.dumps(CASESET))          # 真实用例 dtype = {float32, float16}
+        cs["dtype_required"] = list(required)
+        cs["task_pr_gaps"] = gaps
+        return cs
+
+    def test_valid_unsupported_gap_accounts_coverage(self):
+        """bfloat16 任务书要、op_def 不支持、gap 有据 → 非静默收窄 → 覆盖门放行。"""
+        _w(self.d, "caseset.json", self._cs([_gap()]))
+        self.assertEqual(self._errs("task1"), [])
+
+    def test_unsupported_gap_missing_refs_blocks(self):
+        g = _gap(); g.pop("op_def_ref")
+        _w(self.d, "caseset.json", self._cs([g]))
+        errs = self._errs("task1")
+        self.assertTrue(any("op_def_ref" in e for e in errs), errs)
+        self.assertTrue(any("dtype 覆盖不足" in e for e in errs), errs)   # 无据 → 不计入挂账 → 仍 BLOCKED
+
+    def test_unsupported_gap_self_contradiction_blocks(self):
+        _w(self.d, "caseset.json", self._cs([_gap(op_def_dtypes=["float32", "bfloat16"])]))
+        errs = self._errs("task1")
+        self.assertTrue(any("自相矛盾" in e for e in errs), errs)
+
+    def test_unsupported_gap_covering_tested_dtype_blocks(self):
+        """挂「op_def 不支持 float16」但 float16 有真实用例在跑 → 拒（不许拿没实现当跑挂了的借口）。"""
+        _w(self.d, "caseset.json", self._cs([_gap(dtypes=["float16"], op_def_dtypes=["float32"])]))
+        errs = self._errs("task1")
+        self.assertTrue(any("跑挂了" in e for e in errs), errs)
+
+    def test_unsupported_gap_outside_required_blocks(self):
+        _w(self.d, "caseset.json", self._cs([_gap(dtypes=["complex64"])],
+                                            required=("float32", "float16")))
+        errs = self._errs("task1")
+        self.assertTrue(any("dtype_required" in e for e in errs), errs)
+
+    def test_gap_checked_even_without_dtype_required(self):
+        """删掉 dtype_required 不得连带绕过 gap 硬校（同 codex#2 对 dtype_tested 的教训）。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs["task_pr_gaps"] = [_gap(dtypes=["float32"], op_def_dtypes=["float16"])]  # 谎称在跑的 dtype 不支持
+        _w(self.d, "caseset.json", cs)
+        errs = self._errs("task1")
+        self.assertTrue(any("跑挂了" in e for e in errs), errs)
+
+    def test_task2_accepts_passed_with_gaps_with_backing(self):
+        _w(self.d, "caseset.json", self._cs([_gap()]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("passed_with_gaps"))
+        self.assertEqual(self._errs("task2"), [])
+
+    def test_task2_passed_with_gaps_without_backing_fails(self):
+        """手改 verdict.json 写 passed_with_gaps、caseset 却无合法 gap → 拒（裁决自称有 gap 却无据）。"""
+        _w(self.d, "caseset.json", CASESET)                  # 无任何 task_pr_gaps
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("passed_with_gaps"))
+        errs = self._errs("task2")
+        self.assertTrue(any("无据" in e for e in errs), errs)
+
+    def test_task2_passed_with_gaps_with_forged_gap_fails(self):
+        """伪造 gap（缺出处）+ verdict 写 passed_with_gaps → 门仍拒。"""
+        g = _gap(); g.pop("task_doc_ref")
+        _w(self.d, "caseset.json", self._cs([g]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("passed_with_gaps"))
+        errs = self._errs("task2")
+        self.assertTrue(any("无据" in e for e in errs), errs)
+
+
+class PassedWithGapsWiringTest(unittest.TestCase):
+    """C4 最危险的拼接点：`passed_with_gaps` 从 validator 一路走到 `run_workflow` 的终态/退出码。
+
+    **为什么单开一类**：这条链断过一次——validator 与门都认，`run_workflow` 不认，实测落成
+    `state='PASSED'` / exit 0，「算子没实现任务书要求的 dtype」被机读成干净通过、CI 可自动合并。
+    修完若无回归钉住，随时能再退化且**测试仍全绿**（因为别处覆盖不到这一段）。
+    这里直接钉 `run_workflow` 的三个纯函数，不依赖真跑，稳定且快。"""
+
+    def test_exit_code_is_2_not_0(self):
+        """**最关键一条**：绝不能回 0——0 = 干净通过 = CI 可自动合并。"""
+        import run_workflow as W
+        self.assertEqual(W._exit_code("PASSED_WITH_GAPS"), 2)
+        self.assertEqual(W._exit_code("PASSED_WITH_RISK"), 2)      # 对照：同档
+        self.assertEqual(W._exit_code("PASS"), 0)                  # 对照：干净 PASS 才是 0
+
+    def test_canonical_state_maps_through(self):
+        """人读 overall → 机读 state 必须映射到同名终态，别掉进兜底分支。"""
+        import run_workflow as W
+        self.assertIn("PASSED_WITH_GAPS", W._STATE_MAP)
+        self.assertEqual(W._STATE_MAP["PASSED_WITH_GAPS"], "PASSED_WITH_GAPS")
+
+    def test_precision_ok_whitelist_includes_gaps(self):
+        """`passed_with_gaps` 的精度本身是**全过**的 → 必须继续跑 Task3。
+
+        漏掉它的后果不是「少跑性能」这么轻：归因会错成「spec 声明性能目标但无性能用例」，
+        或在无性能要求时直接落 `PASS(无性能要求)`——两种都掩盖了真实结论。"""
+        import inspect, run_workflow as W
+        src = inspect.getsource(W.run)
+        line = next(l for l in src.splitlines() if "precision_ok =" in l)
+        for v in ("pass", "passed_with_risk", "passed_with_gaps"):
+            self.assertIn(f'"{v}"', line, f"precision_ok 白名单漏了 {v}：{line.strip()}")
 
 
 if __name__ == "__main__":

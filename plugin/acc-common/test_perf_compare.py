@@ -146,6 +146,68 @@ class MockBaselineTest(unittest.TestCase):
         self.assertEqual(by["b"]["us"], round(2.0 * 1.08, 3))
 
 
+class MockBaselineIsNonAcceptanceTest(unittest.TestCase):
+    """C5：假基线比出来的「达标」绝不能读起来像真达标。
+
+    `mock_baseline` 造的是 NPU mock us × 1.08 的编造数——它当分母算出的 ratio 天然 ≥1、天然「达标」。
+    本类钉死：凡消费 mock 基线的产物（基线本身 + perf_report 的**每一个出口**）都带
+    `evidence_grade=development` + `acceptance_note` 含 NON-ACCEPTANCE；而真基线/外部 GPU 标杆一个戳都不许多。
+    """
+    def _cs_ev(self):
+        return (_caseset([("b0", ["性能", "大shape"], [1024, 1024])]),
+                _ev({"b0": (2.0, "kernel_only")}))
+
+    def _assert_stamped(self, obj, label):
+        self.assertEqual(obj.get("evidence_grade"), "development", label)
+        self.assertIn("NON-ACCEPTANCE", obj.get("acceptance_note", ""), label)
+
+    def test_mock_baseline_itself_stamped(self):
+        """baseline.json 落盘后一眼可辨是假基线（不必先读 perf_report 才知道）。"""
+        bl = pc.mock_baseline(_spec(), _ev({"a": (2.0, "kernel_only")}))
+        self.assertTrue(bl["mock"])
+        self._assert_stamped(bl, "mock_baseline 自身")
+
+    def test_report_stamped_and_met_is_not_real_met(self):
+        """正常出口：mock 基线 → 全达标（1.08≥1.0），但报告带 NON-ACCEPTANCE 戳 + summary.baseline_mock。"""
+        cs, ev = self._cs_ev()
+        r = pc.perf_compare(_spec(1.0), cs, ev, pc.mock_baseline(_spec(), ev))
+        self.assertEqual(r["summary"]["status"], "ok")
+        self.assertTrue(r["per_case"][0]["达标"])          # 假基线下「达标」是必然结果，不是结论
+        self.assertTrue(r["summary"]["baseline_mock"])
+        self._assert_stamped(r, "正常出口")
+        self.assertTrue(any("mock 基线" in n for n in r["notes"]))
+
+    def test_every_exit_stamped(self):
+        """**每一条 return 都得盖戳**——漏一个出口就留一条「假基线报告看起来像真的」的缝。
+        覆盖 invalid(_precheck) / no_perf_cases / invalid_config / 正常 四个出口。"""
+        cs, ev = self._cs_ev()
+        mock_bl = pc.mock_baseline(_spec(), ev)
+        no_perf_cs = {"op": "Sign", "cases": [dict(cs["cases"][0], dims=["功能"])]}
+        for label, args in (
+                ("invalid(坏 evidence)", (_spec(1.0), cs, {"evidence": "bad"}, mock_bl)),
+                ("no_perf_cases", (_spec(1.0), no_perf_cs, ev, mock_bl)),
+                ("invalid_config", ({"op": "Sign", "perf": {"baseline": "tbe"}}, cs, ev, mock_bl)),
+                ("ok", (_spec(1.0), cs, ev, mock_bl))):
+            self._assert_stamped(pc.perf_compare(*args), label)
+
+    def test_real_baseline_not_stamped(self):
+        """真基线（无 mock 标）→ 报告**一个戳都不多**（真机通路不受本改动影响）。"""
+        cs, ev = self._cs_ev()
+        r = pc.perf_compare(_spec(1.0), cs, ev, _bl({"b0": 3.0}))
+        self.assertNotIn("evidence_grade", r)
+        self.assertNotIn("acceptance_note", r)
+        self.assertNotIn("baseline_mock", r["summary"])
+
+    def test_stamp_helper_idempotent(self):
+        """反复盖戳不叠加 notes（run_workflow 会再补一手 setdefault，须幂等）。"""
+        cs, ev = self._cs_ev()
+        mock_bl = pc.mock_baseline(_spec(), ev)
+        r = pc.perf_compare(_spec(1.0), cs, ev, mock_bl)
+        n1 = list(r["notes"])
+        pc._mark_non_acceptance(r, mock_bl)
+        self.assertEqual(r["notes"], n1)
+
+
 class GpuConsumerTest(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -364,6 +426,69 @@ class TrivialMetTest(unittest.TestCase):
         row = r["per_case"][0]
         self.assertNotIn("trivial", row)
         self.assertIn("ratio", row)
+
+
+class RunWorkflowNonAcceptanceSurfaceTest(unittest.TestCase):
+    """C5 · run_workflow 侧的**入口面**回归（放这里是因为本轮只有本测试文件归本改动所有）。
+
+    只测不需要真跑 pipeline 的部分——`--defect` 是否真从 CLI 上消失、注入夹具会不会误伤验收通路、
+    非验收产物名是否与验收产物物理隔离。端到端那半（mock 跑完产 dev_run_summary.json 而非 acceptance.json）
+    要 golden，本机无 torch 跑不了，留给 a3 容器。"""
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+
+    def test_defect_flag_removed_from_cli(self):
+        """`--defect` 已不是 CLI 参数：argparse 直接拒（退出码 2 = argparse 用法错）。
+        ⚠ 别因为「调试方便」把它加回来——回归测试请走进程内 `run_workflow.run(..., defect=[...])`。"""
+        import subprocess, sys as _sys
+        r = subprocess.run([_sys.executable, os.path.join(self._HERE, "run_workflow.py"),
+                            "nonexistent.spec.json", "--mode", "mock", "--defect", "x"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("--defect", r.stderr)          # argparse 的 "unrecognized arguments: --defect"
+
+    def test_defect_fixture_still_reachable_in_process(self):
+        """夹具本身**保留**：`run()` 仍收 defect 形参（证明「validator 真会 fail」的回归能力没被删掉）。"""
+        import inspect
+        import run_workflow as W
+        self.assertIn("defect", inspect.signature(W.run).parameters)
+
+    def test_injection_fixtures_rejected_on_acceptance_path(self):
+        """注入夹具作用于验收通路 → fail-closed 直接拒跑（不靠下游「反正会忽略」的沉默）。"""
+        import run_workflow as W
+        for kw in ({"defect": ["c0"]}, {"perf_slow": ["c0"]}):
+            with self.assertRaises(SystemExit):
+                W.run("nonexistent.spec.json", mode="new_example", **kw)
+
+    def test_dev_artifact_names_physically_disjoint(self):
+        """非验收产物名与验收产物名不得重合——同名就等于下游按老路径能读走当裁决。"""
+        import run_workflow as W
+        self.assertFalse(set(W._DEV_FILES) & set(W._ACCEPTANCE_FILES))
+        self.assertEqual(W._ACCEPTANCE_FILES, ("acceptance.json", "verdict.json"))
+
+    def test_acceptance_capable_is_fail_closed(self):
+        """只有真机通路算验收；mock / catlass_mock / 没登记过的新模式一律非验收。"""
+        import run_workflow as W
+        self.assertTrue(W._acceptance_capable("new_example"))
+        for m in ("mock", "catlass_mock", "catlass", "some_future_mode"):
+            self.assertFalse(W._acceptance_capable(m), m)
+
+    def test_stamp_dev_marks_only_non_acceptance(self):
+        import run_workflow as W
+        dev = W._stamp_dev({"summary": {}}, False, "development")
+        self.assertEqual(dev["evidence_grade"], "development")
+        self.assertIn("NON-ACCEPTANCE", dev["acceptance_note"])
+        acc = W._stamp_dev({"summary": {}}, True, "acceptance_candidate")
+        self.assertNotIn("acceptance_note", acc)     # 验收通路一个字节不动
+        # 幂等 + 不覆盖 perf_compare 已写的措辞
+        pre = {"acceptance_note": "已有措辞", "evidence_grade": "development"}
+        self.assertEqual(W._stamp_dev(pre, False, "development")["acceptance_note"], "已有措辞")
+
+    def test_dev_and_acceptance_notes_share_the_marker(self):
+        """两处的戳用同一个标记词（catlass_adapter 已有口径），别各写各的。"""
+        import run_workflow as W
+        for note in (W._NON_ACCEPTANCE_NOTE, pc._NON_ACCEPTANCE_NOTE):
+            self.assertIn("NON-ACCEPTANCE (mock evidence)", note)
+        self.assertEqual(W._DEV_GRADE, pc._DEV_GRADE)
 
 
 if __name__ == "__main__":

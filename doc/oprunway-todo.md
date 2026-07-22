@@ -145,6 +145,28 @@
   删 mock 后这条自证路径没了，需要替代（候选：留一条**明确非验收、不产 `acceptance.json`** 的测试专用夹具，
   与验收通路彻底隔离）。**这条须用户拍板**，别默默删掉。
 
+#### 🔑 用户 2026-07-22 拍板的四条（本轮据此施工，**别再重开讨论**）
+
+拿分类学数据（44 个算子行、elementwise 仅 34%）给用户看后定的：
+
+1. **下一刀 = shape_transform 三个**（`UpsampleNearestExact1d&2d` · `UpsampleNearest3d` · `im2col`）。
+   理由：卡点只有两个（输出 shape 由属性公式推、attr 得能是 `list[int]`），改完顺带解锁 reduction 的一部分；
+   且它们是「给已有成熟算子加 dtype」这类最典型的社区任务。**不是**先啃数量最多的 Foreach 族（8 个）——
+   那是对 case 结构的根本改造（一个 case 现在 = 一组同形单张量，表达不了列表），spec/runner/validator 三处都得动。
+2. **`out_shape` 交给 per-op `golden.py`**，**不搞 spec 表达式语言**。
+   签名 `out_shape(in_shapes, attrs) -> tuple`，**可选**导出；不导出 = 输出同输入形状（elementwise，现有 4 份样例零变更）。
+   ⚠ **代价用户明确接受**：这是**代码不是数据**，门没法「不执行就校验」它。
+   否掉表达式语言的理由：`im2col` 的实际公式带 floor / 连乘 / 多维归约，小表达式语言表达不下。
+3. **`--defect` 改成测试专用夹具**：保住「证明 validator 真会 fail、门不是假门」的回归能力，
+   但**移出 CLI 入口**，不给任何人拿它冒充验收的机会。
+4. **dtype 冲突以任务书为准**：任务书 dtype 全集当需求，`op_def` 支持不了的差额入 `task_pr_gaps`、
+   裁决落 `PASSED_WITH_GAPS`。「没实现」是**发现**不是借口。承 canon `task-spec-authoritative-over-pr`。
+   ⚠ 但**不能变成「宣称有 gap 就免检」的后门**——gap 须有据可查（指向任务书原文 + op_def 出处），
+   且不得覆盖「算子实现了但跑挂了」那种真失败。
+
+连带定的第 5 条（C5）：**mock 通路本体保留**（测试与本地演示要用），但**物理上不再产 `acceptance.json`/`verdict.json`**，
+只产标明 non-acceptance 的产物 —— 消除「伪造裁决」这个真正的危害，而不必动那 89 处合理的测试引用。
+
 #### U8 · `_build_inputs` 在 arity≥3 时静默丢输入（2026-07-22 施工中发现，**已修**）
 
 `gen_cases._build_inputs` 的常规 `varied` / `pair*` 路径末尾写死 `return [x0, x1]`（二元构造），
@@ -219,6 +241,26 @@
   - **U6b**：CP-B 自检从 `run_workflow --mode mock`（产伪造裁决）改成 `gen_cases.py --dry-run`（plan-only 契约自检）。改了 `acceptance-workflow/SKILL.md` 9 处 + `agents/op-acceptance.md` 5 处 + `commands/op-acceptance.md`（那句「默认 mock」在 U6a 落地后已成假话）。
   - ⚠ **散文里逐字写明了 dry-run 的能力边界**：它**不算 golden、不 import torch、不落 `.npy`** → 验不了 golden.py 在不在 / 来源契约 / `oracle_source` 映射 / validator 链 / 三级门。**CP-B 过了不代表用例链整体可用**，缺 golden 这类问题会漏到 CP-D 才炸，且 `refine_spec` 变不出 `golden.py`（真撞上要停下告知用户，别在 refine 循环里空转）。
   - **U6c/U6d 仍未做**（删 mock 通路）：连带 89 处测试引用 + `--defect`「证明门真会 fail」的自证路径要先定替代方案，**须用户拍板**。
+- [x] **4.2 · C1–C5 已落地（2026-07-22）**：shape_transform 通路打通（`out_shape` 4 元组契约 + attr `list[int]` +
+  spec `rank` 约束）· dtype 挂账 `passed_with_gaps` 全链接线（validator → 门 → `run_workflow`，**exit 2 挂人工、绝不回 0**）·
+  mock 物理上产不出 `acceptance.json`（改产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）· `--defect` 出 CLI。
+  验证：torch 替身跑 **634 测全绿**，裸跑与基线零 diff，两道门 PASS/SYNCED。
+- [ ] **4.3 · C1–C5 的遗留项**（复核报上来、本批没做完的）：
+  - [ ] **`--mode catlass` 真机通路被顺手降成非验收**（`_acceptance_capable` 单元素白名单的副作用，**零测试覆盖**）。
+    本项目 Task 2 明确以 catlass 打底，「真机 catlass 永远出不了验收裁决」应当是**显式决定**而非白名单副作用。**须用户拍板。**
+  - [ ] **`validator._EV_SHAPE_KEYS` 无任何生产者** → 逐维形状对账当下**恒不触发**，真正生效的只有 numel 那层。
+    要它咬合，采集层须在 `evidence.precision` 里记真实读回的 NPU 输出形状。⚠ **别把现在说成「已逐维验形」。**
+  - [ ] `repo_adapter` 的 `out = dec.reshape(golden.shape)` 只校元素数、**静默按 golden 形状 reshape** —— 正是「静默 reshape 藏形状 bug」。
+  - [ ] `repo_adapter.main()` 缺 `refuse_reserved_out` 守卫（两条 CLI 出口口径不对称）；`run_catlass_mock` 不自报 `defect_injected`。
+  - [ ] `dtypes: []` 会产 0 条 case（**预先存在**的洞，与本批无关）——按「0 用例冒充验收明令禁止」值得单独补 fail-closed。
+  - [ ] rank≥5 当前必然 fail-closed（`_REG_SHAPES` 只到 4 维）——是能力边界不是 bug，但填了 rank=5 的算子跑不了。
+  - [ ] `--perf-slow` 是否也下架（同类注入旋钮）。
+  - [ ] canon 页 `catlass-synthetic-demo-cannot-forge-pass`：① 「全文不含 acceptance.json 字样」**已失真**（字样在、语义相反——
+    现在是「拒绝以裁决产物名落盘」的白名单，比原表述更强）；② 它自己点名要的**负向测试已补**（7 条），
+    proposed→verified 的前置条件已满足、**请人门裁**；③ 记的报错原因已变成 ADR 0011 的「缺 golden.py」。
+    ⚠ **走 bureau `capture → compile → review`，不可手改。**
+  - [ ] 新增大写状态 `PASSED_WITH_GAPS` 扩了 canonical 状态词表 → `canon/architecture/task3-state-machine.md`
+    **必须走 bureau，绝不手改**。
 - [ ] **4.5 · `canon/_verify.json` 的 samples 路径已失效（须走 bureau，不许手改）**：`:106` / `:111` 两条 artifact 仍记
   `samples/runners/oprunway_isclose_runner.cpp` 与 `samples/specs/isclose.spec.json`——**仓根这两个路径 U3 之后已不存在**。
   这不是历史文字，是**机器可读的指纹条目**：canon 复核会把已迁移的工件判成缺失。

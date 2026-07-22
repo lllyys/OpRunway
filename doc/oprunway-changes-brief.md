@@ -20,6 +20,15 @@
 
 ## 2026-07-22
 
+- **shape_transform 通路打通 + mock 拔出验收路径 + dtype 挂账落地（C1–C5）** —— 用户拍了四个决定后，6 路并行 agent 施工、7 路复核 + 集成对账。
+  - **C1 · 输出形状交给 per-op `golden.py`**：`load_golden` 从 3 元组改 4 元组（第 4 项是可选的 `out_shape(in_shapes, attrs)`）。**故意改 arity 而不是另开函数** —— 老写法 `a,b,c = load_golden(op)` 会当场炸，不会静默把输出形状声明丢掉。每条 case 都拿声明值与 `golden_fn` 实测形状**对账**，不一致直接报错（不许「以其中一个为准」糊过去）。不导出 = 输出同输入形状，现有 4 份样例 golden 零变更。
+  - **C2/C3**：attr 放开到 `list[int]`（manifest 编码 = 逗号连接的单 token）；spec 的 in 参数可带 `rank` 限制 shape 阶梯，过滤后无合法 shape → fail-closed（不产 0 条用例）。
+  - **C4 · dtype 冲突以任务书为准**：新 gap 类型 `dtype_unsupported_by_op_def` + 四道硬校 + 新终态 `passed_with_gaps`。
+  - **C5 · mock 物理上产不出验收裁决**：不再写 `acceptance.json`/`verdict.json`，改产 `dev_run_summary.json` + `dev_precision_check.json`（均带 `evidence_grade=development` + NON-ACCEPTANCE 戳）。`--defect` 移出 CLI、降级测试夹具。catlass 通路本来就做对了，这轮把它的「不产裁决」从文本承诺升成**可执行断言**并补了负向测试。
+  - ⚠ **复核抓到一条真「假通过」**：C4 的 `passed_with_gaps` 只做了半条 —— validator/门认、`run_workflow` 不认，实测会落成 `state='PASSED'` / exit 0，「算子没实现任务书要求的 dtype」被机读成干净通过、CI 可自动合并。已接线：落 `PASSED_WITH_GAPS` + **exit 2 挂人工**（绝不回 0）。
+  - ⚠ **最值钱的验证手法**：本机没 torch → 59 条恒红会**掩盖真断裂**（上一轮就吃过这个亏）。这轮集成对账**造了个只读 torch 替身**重跑，把 5 条被掩盖的结构性断裂全揪出来（「文件不存在」「argparse 不认参数」这类，与数值无关）。**「零新增红」这个数字本身没有说服力**，别拿它当放行依据。现替身跑 634 测全绿。
+  - 顺带修：`runner-skeleton.md` 两句与引擎**正好相反**（扩展行其实至今没产生过；isclose runner 是显式拒多余 token 的，不是「都忽略」）· bincount 类算子在两份文件里指令打架 · attr 的 `default` 值不过类型闸（`default: []` 会本机全绿真机炸）· stale 清理用降级前的判据 · 5 处散文仍指向 C5 后物理上不存在的文件。
+
 - **U1/U2/U3/U6a/U6b/U8 一批修完 + a3 真 torch 全绿 + 算子形态分类学落地** —— 7 路并行 agent（按**文件所有权互斥**切分）施工，逐项独立复核 + 集成对账，再上 a3 容器真验。
   - **U1（要你点头那条）**：`op-acceptance` 的 `tools` 补成 `… , AskUserQuestion, Agent(acc-spec-extractor), Agent(acc-runner-dev), Agent(acc-verify-rootcause)`。`Agent(<type>)` 是 Claude Code 声明「可派哪个 subagent」的写法（依据 anthropic-docs CHANGELOG v2.1.147），**只放行这三个、不是任意派活**。⚠ 施工中出过一件事：给 agent 的指令里把「删掉整行 `tools:`」写成了「用户已定倾向」，**用户当时并未表态**，被安全分类器拦下才发现——拦得对。后来用户明确选了最小权限方案。⚠ 这条**仍待真起 session 验**：「frontmatter 写了」≠「工具真给了」，这正是 U1 本身的教训。
   - **U2**：`fetch_source.py` 抽出纯函数 `_parse_pr_url()`，容错 `/pull/N`·`/pulls/N`·`/merge_requests/N`；形态不认识**在一切网络调用与产物写入之前**抛错（codex 抓到原实现顺序错了——先写 `task_doc.md` 再校 PR，半个产物已落盘）；正则末尾从 `\b` 收紧成 `(?=[/?#]|$)`（`\d+\b` 会把 `/pull/12-foo` 当成 PR 12 放行 = fail-open）。

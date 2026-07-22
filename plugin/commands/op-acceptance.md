@@ -1,7 +1,7 @@
 ---
 name: op-acceptance
 description: 跑一个 NPU 算子的验收流水线——输入=算子任务书(md 路径或链接)+PR 链接，自动产 spec→跑测→跑确定性脚本、逐字引用 acceptance.json 裁决并标来源→报告。
-argument-hint: "<任务书 md路径或链接> <PR链接> [--mode mock|new_example]"
+argument-hint: "<任务书 md路径或链接> <PR链接> [--mode new_example|mock]"
 ---
 
 # /op-acceptance — 算子验收（人手动触发）
@@ -11,23 +11,27 @@ argument-hint: "<任务书 md路径或链接> <PR链接> [--mode mock|new_exampl
 **参数**：`$1`=任务书（md 本地路径或 http(s) 链接）、`$2`=PR 链接、可选 `--mode`（**默认 `new_example`，即真机**；2026-07-22 由 `mock` 翻正）。
 
 ⚠ **验收只有真机一条路**。`mock` 通路仍在（供测试与本地演示），但它的「NPU 输出」就是 golden 本身、
-精度按构造必过，**产出的 `acceptance.json` 不构成验收裁决**——别拿它当验收结果用。
+精度按构造必过 → C5（2026-07-22）起它**物理上不再产 `acceptance.json` / `verdict.json`**，
+改产 `dev_run_summary.json` + `dev_precision_check.json`（均带 `evidence_grade="development"` +
+`acceptance_note` 标 NON-ACCEPTANCE）。**不是「产了但不算数」，是压根不产。**
 
 ## 做什么
 
 调起 **`op-acceptance` agent**（`agents/op-acceptance.md`，`mode:primary` 薄编排器）。它首响应先加载 **`acceptance-workflow` skill**，按其 **CP-A..E 状态机**推进——**先 CP-A 前置，再 CP-B..E**：
 
-- **CP-A 前置**：primary 跑**确定性** `fetch_source.py` 取材 → **任务书↔PR 对应校验**（verify-spec-pr-correspondence，proposed·未 settle，载重前需核）→ 环境/模式确认（mock vs new_example、NPU/VPN）。组装 `correspondence.json` 时，issue/追踪号这类 **NL-read 字段显式标 `source=NL-read` + 出处（task_doc / PR title）**；status 判定靠 **`pr_facts.target_dir` 机器比对 + 用户确认**（`needs_user_confirmation` 由用户拍板），primary **不自行 NL judge 空任务、不把 NL 结论当事实落盘**。
+- **CP-A 前置**：primary 跑**确定性** `fetch_source.py` 取材 → **任务书↔PR 对应校验**（verify-spec-pr-correspondence，proposed·未 settle，载重前需核）→ 环境确认（NPU/VPN 开没开、目标机按任务书 `适配硬件` × op_def `AddConfig` 双源定）。组装 `correspondence.json` 时，issue/追踪号这类 **NL-read 字段显式标 `source=NL-read` + 出处（task_doc / PR title）**；status 判定靠 **`pr_facts.target_dir` 机器比对 + 用户确认**（`needs_user_confirmation` 由用户拍板），primary **不自行 NL judge 空任务、不把 NL 结论当事实落盘**。
   - **对应不成立（`mismatch`，由 `pr_facts.target_dir` 机器比对判定）→ 出「程序结论」（非 pass/fail）、不跑**；**疑似空任务/证据不足**（需 NL 判断的）→ 归 `needs_user_confirmation`、摆证据由用户拍板（primary 不自行 NL judge 空任务）；`confirmed` 才继续。
-- **CP-B Task1 用例**（只关注 task1/caseset 自洽）：dispatch `acc-spec-extractor:extract_spec` → `<op>.spec.json` + `task_pr_gaps`；primary inline `run_workflow.py --mode mock`（产 `caseset.json` + `acceptance.json`(mock)；校门由 run_workflow 内部**末尾统一校门**——`validate_acceptance_state.py` 批量驱动、**非阶段间实时阻断**）；mock 的 `acceptance.json` 裁决异常 → `refine_spec`。
+- **CP-B Task1 用例**（只关注 task1/caseset 自洽）：dispatch `acc-spec-extractor:extract_spec` → `<op>.spec.json` + `task_pr_gaps`；primary inline `gen_cases.py <spec> --dry-run`（plan-only 契约自检：预算区间 / dtype 分布 / 特殊场景覆盖 / id 唯一 / 种子确定）。
+  ⚠ **能力边界**：dry-run 不算 golden、不 import torch → 验不了 golden.py 在不在 / 来源契约 / validator 链 / 三级门，那些只有 CP-D 才验得到。
+  dry-run 报错或账本异常 → `refine_spec`。
 - **CP-C runner**（真机路径、需 NPU）：dispatch `acc-runner-dev:gen_runner`（先过 scope gate）→ `verify_runner`；按 acc-runner-dev 的 **runner 自检证据满足/不满足** 纪律（当前**非代码强制 sidecar 硬门、待补**）——未满足则停在 CP-C、不上真机。（acceptance 裁决只逐字引用 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py` 产物，ADR 0007。）
 - **CP-D 真机跑测**（一次原子）：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode new_example`（Task2 精度 + Task3 性能 + 三级门一次成）→ `evidence.json` / `verdict.json` / `baseline.json`（有基线时）/ `perf_report.json` / `acceptance.json`。**Task3 性能**：基线来源=`spec.perf.baseline`（perf-baseline-by-reference-source，proposed·未 settle，载重前需核）；缺外部 GPU 标杆 → 路由 `BLOCKED_WAIT_GPU_BENCHMARK`，口径不可比 → `BLOCKED_INCOMPARABLE_TIMING_SCOPE`；**GPU external 对比层 consumer 侧已接入 pipeline，缺的是外部真实数据**。FAIL → primary 再 dispatch `acc-verify-rootcause:rootcause`（先解耦再归因）。
 - **CP-E 报告**（primary）：逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + `task_pr_gaps` + 各维度出中文报告。
 
 两种模式：
 
-- **mock**（默认，无需真机）：走到 CP-B（spec + numpy-golden 自检裁决），验证流水线自洽。
-- **new_example**（真机）：**先确认用户已开 NPU/VPN**；走全 CP-A..E；`OPRUNWAY_*` 环境变量指真实机器/路径（不写进仓）。
+- **new_example**（**默认**，真机）：**先确认用户已开 NPU/VPN**；走全 CP-A..E；`OPRUNWAY_*` 环境变量指真实机器/路径（不写进仓）。**验收裁决只出自这条路。**
+- **mock**（非默认，无需真机）：本地演示与管路自检用。**不产验收裁决**（见上 C5），产物一律标 NON-ACCEPTANCE。
 
 ## 性能对比（Task 3，待散文门）
 - **GPU 标杆 consumer（T8）**：`run_workflow.py --gpu-baseline <外部 GPU 标杆 JSON>` 或 `spec.perf.baseline∈{gpu,gpu_external}` → 解析外部 GPU 标杆(按 case_id+完整输入签名对齐)出 NPU↔GPU 对比。缺标杆 → `BLOCKED_WAIT_GPU_BENCHMARK`（正规挂起、非 fail、绝不显 PASS）；双边 timing_scope 不一致 → `BLOCKED_INCOMPARABLE_TIMING_SCOPE`。真 GPU 数据待外部方给。

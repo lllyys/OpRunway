@@ -13,10 +13,19 @@
 - 非法 op_name（`..` / `/` / shell 特殊字符）被拒，runner 路径不得逃出用户目录；
 - 软链**分两层**拒：最终文件那一层由 `find_runner` 的 `os.path.islink` 拒，`<ops_root>/<op>` **目录段**
   由 `op_dir()` 的 `_reject_symlink_segments` 逐段拒（只查末段挡不住目录段，会静默跟随出去）。
+
+另含 **C5（mock 拔出验收路径）在 repo_adapter 这半边**的守门用例（放这里是因为本文件已在守
+`runner_source` 那类 fail-closed 门；`run_workflow` 那半边归编排层测）：
+- `run_mock` 产的 evidence **自带 NON-ACCEPTANCE 标记**（`evidence_grade=development` + `acceptance_note`），
+  口径与 `catlass_adapter.run_catlass_mock` 一致；真机 `run_new_example` 则标 `acceptance_candidate`；
+- 缺陷注入降级为**测试专用夹具**：CLI 不可达（`main()` 拒第 5 个参数），in-process 仍可用，
+  且注入过的 evidence **自报** `defect_injected`。
 """
-import os, sys, tempfile, unittest
+import json, os, sys, tempfile, unittest
 from unittest import mock
 
+import numpy as np
+import precision_policy as PP
 import repo_adapter as R
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -346,6 +355,82 @@ class RunnerSourceGateTest(unittest.TestCase):
         src = inspect.getsource(R.run_new_example)
         self.assertIn('"runner_source": runner_source', src)
         self.assertIn('"runner_path": runner', src)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# C5 · mock 拔出验收路径（repo_adapter 这半边）。caseset 全手搓，不经 gen_cases/golden.py（本机无 torch）。
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _mk_mock_caseset(work, cid="c1", shape=(4, 4)):
+    """落 x1.npy / golden.npy，返回 (caseset, cid)：单输入 fp32 数值用例，与 gen_cases 产物同构。"""
+    os.makedirs(os.path.join(work, cid), exist_ok=True)
+    np.save(os.path.join(work, cid, "x1.npy"), np.zeros(shape, dtype=np.float32))
+    np.save(os.path.join(work, cid, "golden.npy"), np.zeros(shape, dtype=np.float32))
+    std = PP.effective_standard(PP.ASCENDOPTEST_DEFAULT, "float32", "rel_err")
+    pol = PP.threshold_for(std, "float32")
+    exp = {"golden_source": "numpy analytical", "golden_path": f"{cid}/golden.npy",
+           "verify_mode": "approx", "standard": std, "compare": "rel_err",
+           "compare_dtype": "float32", "tolerance_policy_id": PP.tolerance_policy_id(std, "float32"),
+           "policy": pol, "threshold": PP.threshold_digest(pol),
+           "out_shape": list(shape), "out_shape_source": "golden_fn_actual"}
+    case = {"id": cid, "dims": ["功能"], "tags": ["常规"], "attrs": {},
+            "inputs": [{"name": "x1", "shape": list(shape), "dtype": "float32",
+                        "path": f"{cid}/x1.npy"}],
+            "expected": exp}
+    return {"op": "Foo", "attr_order": [], "cases": [case]}, cid
+
+
+class MockNonAcceptanceTest(unittest.TestCase):
+    """mock 产物必须自报「非验收」——消除「伪造裁决」这个真正的危害（C5）。"""
+
+    def test_mock_evidence_marks_non_acceptance(self):
+        with tempfile.TemporaryDirectory() as d:
+            cs, _ = _mk_mock_caseset(d)
+            ev = R.run_mock(cs, d)
+        self.assertEqual(ev["evidence_grade"], "development")     # 口径同 catlass_adapter，不另发明
+        self.assertIn("NON-ACCEPTANCE", ev["acceptance_note"])
+        self.assertNotIn("defect_injected", ev)                   # 没注入就不带这个键
+
+    def test_real_path_evidence_grade_is_acceptance_candidate(self):
+        """正面标记成对：真机 evidence 才是验收候选（下游门可以「只认 acceptance_candidate」）。"""
+        import inspect
+        src = inspect.getsource(R.run_new_example)
+        self.assertIn('"evidence_grade": "acceptance_candidate"', src)
+
+    def test_defect_fixture_still_works_in_process(self):
+        """回归能力保住：test 里直接调仍能造坏点（证明 validator 真会 fail、门不是假门）。"""
+        with tempfile.TemporaryDirectory() as d:
+            cs, cid = _mk_mock_caseset(d)
+            ev = R.run_mock(cs, d, defect_cases=[cid])
+        self.assertEqual(ev["defect_injected"], [cid])            # evidence **自报**被人为破坏
+        self.assertIn("人为注入", ev["acceptance_note"])
+        self.assertGreater(ev["evidence"][0]["precision"]["metrics"]["bad_count"], 0)
+
+    def test_cli_cannot_reach_defect_injection(self):
+        """CLI 不可达：第 5 个参数直接 fail-closed 报错（不静默忽略，免得以为注入生效了）。"""
+        with tempfile.TemporaryDirectory() as d:
+            cs, cid = _mk_mock_caseset(d)
+            cs_path = os.path.join(d, "caseset.json")
+            with open(cs_path, "w", encoding="utf-8") as f:
+                json.dump(cs, f)
+            out = os.path.join(d, "evidence.json")
+            with self.assertRaises(SystemExit):
+                R.main([cs_path, d, out, "mock", cid])
+            # 不带第 5 个参数时正常产 evidence，且仍标 NON-ACCEPTANCE
+            R.main([cs_path, d, out, "mock"])
+            with open(out, encoding="utf-8") as f:
+                ev = json.load(f)
+            self.assertEqual(ev["evidence_grade"], "development")
+            self.assertNotIn("defect_injected", ev)
+
+    def test_mock_rejects_golden_disagreeing_with_declared_out_shape(self):
+        """C1：caseset 声明的输出形状与 golden 不符 → mock 也拒（契约漂移不分通路）。"""
+        with tempfile.TemporaryDirectory() as d:
+            cs, cid = _mk_mock_caseset(d)
+            cs["cases"][0]["expected"]["out_shape"] = [2, 8]      # golden 实为 (4,4)
+            with self.assertRaises(ValueError) as cm:
+                R.run_mock(cs, d)
+            self.assertIn("显式输出形状", str(cm.exception))
 
 
 if __name__ == "__main__":

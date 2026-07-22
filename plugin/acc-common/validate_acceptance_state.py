@@ -28,7 +28,12 @@ _PERF_STATUS = {"ok", "no_perf_cases", "blocked", "fail",
 # gt3-1：blocked 行仅在这三种「合法挂起/不可采集」态下才允许免 scope 证据校验；
 # status ∈ {ok, fail, exception} 下出现 blocked 行 = 口径矛盾（零证据放行洞），记 error。
 _BLOCKED_OK_STATUS = {"blocked", "blocked_incomparable_timing_scope", "blocked_wait_gpu_benchmark"}
-_VERDICT_ENUM = {"pass", "fail", "needs_review", "passed_with_risk"}  # validator overall.verdict 合法枚举
+# validator overall.verdict 合法枚举（C4 2026-07-22 加 passed_with_gaps：任务书要求的 dtype 有一部分
+# 算子 op_def 压根不支持 → 带发现的通过；差额挂 task_pr_gaps，见 _check_unsupported_gap 的反后门硬校）。
+_VERDICT_ENUM = {"pass", "fail", "needs_review", "passed_with_risk", "passed_with_gaps"}
+# C4 结构化 gap 类型：任务书要求、算子 op_def 不声明支持的 dtype 差额（与既有 dtype_deferred 语义不同——
+# deferred = 我们这条 pipeline 暂未测；unsupported = PR/算子根本没实现，是对被测方的**发现**）。
+_DTYPE_GAP_KIND = "dtype_unsupported_by_op_def"
 
 
 def _is_int(x):
@@ -73,16 +78,11 @@ def _ids_from_evidence(ev_list, errs):
     return ids
 
 
-def _gate_dtype_coverage(cs, errs):
-    """Q7 dtype 覆盖门（gate-must-check-the-effective-object）：任务书要求的 dtype 全集 `dtype_required`
-    若未被实测集 `dtype_tested` 覆盖、且 `task_pr_gaps` 无对应 `dtype_deferred` 记录 → **静默收窄=证据不完整**
-    → error（走 BLOCKED）。防误伤/防阻塞：
-      · `dtype_required` **未声明**（legacy 未迁）→ 不 BLOCK，仅提示「覆盖门未行使」（避免一刀切炸掉现有 spec）。
-      · `dtype_required` == `"needs_user"`（全集未知·信息库未接通）→ 不 BLOCK，提示「不谎报覆盖」。
-    读的是 caseset 顶层的 dtype_required/dtype_tested/task_pr_gaps（gen_cases 从 spec 透传/派生）。"""
-    # 从真实 cases 归并实测 dtype 集（gate-must-check-the-effective-object·不信自报汇总）。
-    # 抗坏输入：非字符串 dtype（坏 JSON 里 dtype 为 dict/list）→ 记 error 不崩（否则 set.add/sorted 抛 TypeError、落不成 BLOCKED）。
-    cases = cs.get("cases") if isinstance(cs.get("cases"), list) else []
+def _actual_dtypes(cs, errs):
+    """从**真实 cases** 归并实测 dtype 集（gate-must-check-the-effective-object·不信自报汇总）。
+    抗坏输入：非字符串 dtype（坏 JSON 里 dtype 为 dict/list）→ 记 error 不崩（否则 set.add/sorted 抛
+    TypeError、落不成 BLOCKED）。`errs=None` 时只归并、不记 error（供只读探测复用）。"""
+    cases = cs.get("cases") if isinstance(cs, dict) and isinstance(cs.get("cases"), list) else []
     actual = set()
     for c in cases:
         ins = c.get("inputs") if isinstance(c, dict) else None
@@ -90,8 +90,89 @@ def _gate_dtype_coverage(cs, errs):
             dt = ins[0].get("dtype")
             if isinstance(dt, str) and dt:
                 actual.add(dt)
-            elif dt is not None:
+            elif dt is not None and errs is not None:
                 errs.append(f"case {c.get('id', '?')}: inputs[0].dtype 非字符串（{type(dt).__name__}·证据不可信）")
+    return actual
+
+
+def _check_unsupported_gap(g, i, required, actual, errs):
+    """C4 单条 `dtype_unsupported_by_op_def` gap 的「有据可查」硬校；合法 → 返回其 dtypes，否则 []（并记 error）。
+
+    ⚠ **这条绝不能变成「宣称有 gap 就免检」的后门**，故四道硬校缺一即拒（拒 = 该 gap 不计入已挂账集，
+    对应 dtype 仍按「静默收窄」判 → BLOCKED；同时把理由写清）：
+      ① **有据**——`task_doc_ref`（任务书原文定位）+ `op_def_ref`（op_def 出处）+ `op_def_dtypes`
+         （op_def 实际声明的支持集）必填且类型正确。
+      ② **自洽**——声称不支持的 dtype 不得同时列在自报的 `op_def_dtypes` 里。
+      ③ **不得覆盖真失败**——该 dtype 若**有真实用例在跑**（实测集含之），说明它被实现且被测了，
+         属「算子实现了但跑挂了」，必须走精度/功能裁决。**这就是「没实现」与「跑挂了」的判别式**：
+         前者压根造不出用例，后者一定有用例+evidence。
+      ④ **在需求内**——`dtype_required` 是 list 时，gap 的 dtype 须确在任务书要求内。
+    """
+    tag = f"task_pr_gaps[{i}]({_DTYPE_GAP_KIND})"
+    dts = g.get("dtypes")
+    if not (isinstance(dts, list) and dts and all(isinstance(x, str) and x for x in dts)):
+        errs.append(f"{tag}: dtypes 须为非空 dtype 字符串列表（{dts!r}）")
+        return []
+    bad = False
+    for k in ("task_doc_ref", "op_def_ref"):
+        v = g.get(k)
+        if not (isinstance(v, str) and v.strip()):
+            errs.append(f"{tag}: 缺 {k}（gap 须有据可查：指向任务书原文 / op_def 出处，"
+                        "否则就成了『宣称有 gap 就免检』）")
+            bad = True
+    od = g.get("op_def_dtypes")
+    if not (isinstance(od, list) and all(isinstance(x, str) and x for x in od)):
+        errs.append(f"{tag}: op_def_dtypes 须为 dtype 字符串列表（op_def 实际声明的支持集，供交叉核验）")
+        bad = True
+    else:
+        contra = sorted(set(dts) & set(od))
+        if contra:
+            errs.append(f"{tag}: {contra} 既称 op_def 不支持、又列在自报 op_def_dtypes 里（自相矛盾·伪造 gap）")
+            bad = True
+    ran = sorted(set(dts) & set(actual))
+    if ran:
+        errs.append(f"{tag}: {ran} 有真实用例在跑——属「算子实现了但跑挂了」，须走精度/功能裁决，"
+                    "不得用「op_def 不支持」的 gap 罩住")
+        bad = True
+    if required is not None:
+        outside = sorted(set(dts) - set(required))
+        if outside:
+            errs.append(f"{tag}: {outside} 不在任务书 dtype_required {sorted(required)} 内"
+                        "（为任务书没要求的 dtype 挂账·gap 无据）")
+            bad = True
+    return [] if bad else dts
+
+
+def _collect_dtype_gaps(cs, actual, required, errs):
+    """归并 `task_pr_gaps` 里两类「已挂账」dtype，返回 (deferred 集, unsupported 集)。
+
+    · `dtype_deferred`——我们这条 pipeline 暂未测（既有语义/字段要求**原样不动**）；
+    · `dtype_unsupported_by_op_def`（C4）——任务书要求但算子 op_def 根本不声明支持，逐条硬校（见上）。
+    ⚠ 硬校**无条件行使**：不因 `dtype_required` 缺失而跳过——否则删掉 dtype_required 即可连带绕过 gap 校验
+      （同 codex#2 对 dtype_tested 的教训）。"""
+    gaps = cs.get("task_pr_gaps") if isinstance(cs, dict) and isinstance(cs.get("task_pr_gaps"), list) else []
+    deferred, unsupported = set(), set()
+    for i, g in enumerate(gaps):
+        if not isinstance(g, dict):
+            continue                                  # 历史自由文本条目：原样忽略、不报错
+        if g.get("kind") == "dtype_deferred":
+            dts = g.get("dtypes")
+            if isinstance(dts, list):
+                deferred.update(x for x in dts if isinstance(x, str))
+        elif g.get("kind") == _DTYPE_GAP_KIND:
+            unsupported.update(_check_unsupported_gap(g, i, required, actual, errs))
+    return deferred, unsupported
+
+
+def _gate_dtype_coverage(cs, errs):
+    """Q7 dtype 覆盖门（gate-must-check-the-effective-object）：任务书要求的 dtype 全集 `dtype_required`
+    若未被实测集 `dtype_tested` 覆盖、且 `task_pr_gaps` 无对应挂账记录 → **静默收窄=证据不完整**
+    → error（走 BLOCKED）。挂账有两类：`dtype_deferred`（我们暂未测）与 C4 的
+    `dtype_unsupported_by_op_def`（算子 op_def 根本不支持 → 裁决落 passed_with_gaps）。防误伤/防阻塞：
+      · `dtype_required` **未声明**（legacy 未迁）→ 不 BLOCK，仅提示「覆盖门未行使」（避免一刀切炸掉现有 spec）。
+      · `dtype_required` == `"needs_user"`（全集未知·信息库未接通）→ 不 BLOCK，提示「不谎报覆盖」。
+    读的是 caseset 顶层的 dtype_required/dtype_tested/task_pr_gaps（gen_cases 从 spec 透传/派生）。"""
+    actual = _actual_dtypes(cs, errs)
     # 自报 dtype_tested 若声明 → **恒**与真实用例 dtype 集对账（不因 dtype_required 缺失而跳过——否则删 required 即同时绕过对账）。
     tested = cs.get("dtype_tested")
     if tested is not None:
@@ -100,32 +181,31 @@ def _gate_dtype_coverage(cs, errs):
         elif set(tested) != actual:
             errs.append(f"dtype_tested 自报 {sorted(set(tested))} 与真实用例 dtype 集 {sorted(actual)} 不符"
                         "（自报覆盖与实际生成漂移/伪造·证据不可信）")
-    # 覆盖门：仅 dtype_required 声明为 list 时行使；未声明(legacy)/needs_user(全集未知) → 不 BLOCK（migration 宽容·见 doc TODO）。
     req = cs.get("dtype_required")
+    required = req if isinstance(req, list) and all(isinstance(x, str) for x in req) else None
+    # gap 归并+硬校**先于**下面所有 early return——不因 dtype_required 未声明/needs_user/类型非法而跳过，
+    # 否则「删掉 dtype_required」即可连带绕过 C4 的伪造 gap 校验（同 codex#2 对 dtype_tested 的教训）。
+    deferred, unsupported = _collect_dtype_gaps(cs, actual, required, errs)
+    # 覆盖门：仅 dtype_required 声明为 list 时行使；未声明(legacy)/needs_user(全集未知) → 不 BLOCK（migration 宽容·见 doc TODO）。
     if req in (None, [], ""):
         print("  dtype_required 未声明 → dtype 覆盖门未行使（不阻塞·避免误伤 legacy spec）")
         return
     if req == "needs_user":
         print("  dtype_required=needs_user（全集未知·信息库/用户未接通）→ 覆盖门未行使、不谎报覆盖")
         return
-    if not isinstance(req, list) or not all(isinstance(x, str) for x in req):
+    if required is None:
         errs.append("dtype_required 类型非法（须 list of dtype 字符串 或 \"needs_user\"）")
         return
-    gaps = cs.get("task_pr_gaps") if isinstance(cs.get("task_pr_gaps"), list) else []
-    deferred = set()
-    for g in gaps:
-        if isinstance(g, dict) and g.get("kind") == "dtype_deferred":
-            dts = g.get("dtypes")
-            if isinstance(dts, list):
-                deferred.update(x for x in dts if isinstance(x, str))
-    uncovered = [dt for dt in req if dt not in actual and dt not in deferred]
+    accounted = deferred | unsupported
+    uncovered = [dt for dt in req if dt not in actual and dt not in accounted]
     if uncovered:
         errs.append(
             f"dtype 覆盖不足：任务书要求 {req}、实测(真实用例) {sorted(actual)}、"
-            f"缺 {uncovered} 且 task_pr_gaps 无 dtype_deferred 记录"
+            f"缺 {uncovered} 且 task_pr_gaps 无 dtype_deferred / {_DTYPE_GAP_KIND} 记录"
             "（静默收窄 dtype 覆盖·证据不完整）")
     else:
-        print(f"  dtype 覆盖 OK：要求={req} 实测(真实用例)={sorted(actual)} 已 deferred={sorted(deferred)}")
+        print(f"  dtype 覆盖 OK：要求={req} 实测(真实用例)={sorted(actual)} "
+              f"已 deferred={sorted(deferred)} op_def 不支持={sorted(unsupported)}")
 
 
 def _check_oracle_source(cid, exp, prec, errs, pp):
@@ -249,6 +329,17 @@ def gate_task2(d, errs):
         ov = {}
     elif ov.get("verdict") not in _VERDICT_ENUM:
         errs.append(f"verdict.overall.verdict={ov.get('verdict')!r} 非法（须属 {sorted(_VERDICT_ENUM)}）")
+    # C4 交叉核验：裁决自称 passed_with_gaps → caseset 必须真有**结构合法**的 dtype 冲突 gap 撑着
+    # （防手改 verdict.json 写个 passed_with_gaps 冒充「有 gap 所以放过」）。合法性用与 task1 **同一套**硬校。
+    if ov.get("verdict") == "passed_with_gaps":
+        probe = []
+        _req = cs.get("dtype_required")
+        _, _unsup = _collect_dtype_gaps(
+            cs, _actual_dtypes(cs, None),
+            _req if isinstance(_req, list) and all(isinstance(x, str) for x in _req) else None, probe)
+        if not _unsup:
+            errs.append(f"verdict=passed_with_gaps 但 caseset 无结构合法的 {_DTYPE_GAP_KIND} 记录"
+                        f"（裁决自称有 gap 却无据·拒）：{probe}")
     counts = ov.get("counts") if isinstance(ov.get("counts"), dict) else None
     if counts is None:
         errs.append("verdict.overall.counts 缺失")

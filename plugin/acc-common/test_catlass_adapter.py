@@ -7,6 +7,9 @@
 CMake arch 注入拼装、三件套数据流（X_logical vs X_bin 分两份·禁共用 reshape）、log parser（success/
 failed/崩溃/空日志·坏输入不崩）、msprof kernel-only 解析（真实 CSV·非 kernel-only 拒·按列名）、7 方法签名齐全、
 mock 端到端 + defect 翻 FAIL、外部 GPU 基线校验（scope 不符/缺用例 blocked）、profile 命中门、下游门兼容。
+
+另含 **C5 负向门 `NonAcceptanceInvariantTest`**：断言 catlass_mock **产不出**干净 PASS 的验收产物
+（canon 页 [[Synthetic catlass demo cannot forge a PASS acceptance]] 点名要、一直缺的那条自动化负向测试）。
 """
 import inspect, json, os, shutil, tempfile, unittest
 import numpy as np
@@ -431,6 +434,139 @@ class DownstreamCompatTest(unittest.TestCase):
             errs = []
             gate._GATES[st](self.out, errs)
             self.assertEqual(errs, [], f"{st} 门有 error: {errs}")
+
+
+class NonAcceptanceInvariantTest(unittest.TestCase):
+    """C5 负向门：catlass_mock **无法**产出干净 PASS 的验收产物。
+
+    这就是 canon 页 [[Synthetic catlass demo cannot forge a PASS acceptance]]（`proposed`）自己点名要、
+    但一直缺的那条自动化负向测试（「要升 verified，须补一条自动化负向测试，实际断言 catlass_mock
+    无法生成干净 PASS 的 acceptance.json」）。
+
+    写法要求（别写成永远绿的假测试）：每条都**真的把「有人让它伪造验收」演一遍**——改 CATLASS_MODES 里的
+    实现让它吐干净 PASS、给 CLI 递 acceptance.json 当输出名、把 envelope 洗白——再断言被挡住 + 不落盘。
+    """
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.work = os.path.join(self.d, "work")
+        os.makedirs(self.work, exist_ok=True)
+        self.cs_path = os.path.join(self.d, "caseset.json")
+        os.environ["OPRUNWAY_CATLASS_ARCH"] = "3510"
+        cs = A.build_matmul_caseset(_demo_spec(), self.work)
+        with open(self.cs_path, "w", encoding="utf-8") as f:
+            json.dump(cs, f, ensure_ascii=False)
+        self.cs = cs
+
+    def tearDown(self):
+        os.environ.pop("OPRUNWAY_CATLASS_ARCH", None)
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    # —— ① 标记本身：常量被人改掉即红（否则「洗白」可以两边一起改而无人察觉）
+    def test_stamp_constants_pinned(self):
+        self.assertEqual(A.EVIDENCE_GRADE_MOCK, "development")
+        self.assertIn("NON-ACCEPTANCE", A.ACCEPTANCE_NOTE_MOCK)
+        self.assertIn("catlass_mock", A.NON_ACCEPTANCE_MODES)
+        for name in ("acceptance.json", "verdict.json", "perf_report.json"):
+            self.assertIn(name, A.RESERVED_ACCEPTANCE_ARTIFACTS)
+
+    # —— ② CLI 跑完整一轮：不产任何验收产物，且输出自带 non-acceptance 标记
+    def test_cli_produces_no_acceptance_artifact(self):
+        out = os.path.join(self.d, "evidence.json")
+        A.main([self.cs_path, self.work, out])
+        ev = json.load(open(out, encoding="utf-8"))
+        self.assertEqual(ev["evidence_grade"], "development")
+        self.assertIn("NON-ACCEPTANCE", ev["acceptance_note"])
+        # 整棵目录树里不许出现裁决/结论产物（含 work_dir 下的 per-case 目录）
+        produced = {f for _r, _ds, fs in os.walk(self.d) for f in fs}
+        for name in A.RESERVED_ACCEPTANCE_ARTIFACTS:
+            self.assertNotIn(name, produced, f"catlass_mock 竟产出了裁决产物 {name}")
+        # envelope 也不许带裁决形状的键
+        for k in ("overall", "state", "exit_code", "verdict", "gate"):
+            self.assertNotIn(k, ev)
+
+    # —— ③ 把「有人递 acceptance.json 当输出名」演一遍：必须拒绝 + 不落盘
+    def test_cli_refuses_reserved_output_names(self):
+        for name in A.RESERVED_ACCEPTANCE_ARTIFACTS:
+            out = os.path.join(self.d, name)
+            with self.assertRaises(SystemExit, msg=f"{name} 竟被允许作输出名"):
+                A.main([self.cs_path, self.work, out])
+            self.assertFalse(os.path.exists(out), f"{name} 被拒后仍落了盘")
+
+    # —— ④ 把「有人改 catlass_mock 让它吐干净 PASS」真的演一遍：CLI 出口必须炸 + 不落盘
+    #      （这条是本类的**咬合力证明**：伪造实现返回的是字面量，不随本模块常量一起改）
+    def test_forged_clean_pass_mode_blocked_at_cli(self):
+        def _forger(caseset, work_dir, **_kw):
+            return {"op": caseset["op"], "repo_mode": "catlass_mock",
+                    "harness_kind": "generated_harness",
+                    "evidence_grade": "acceptance_candidate",   # 洗白成「够格裁决」
+                    "acceptance_note": "ACCEPTED",              # 抹掉 NON-ACCEPTANCE
+                    "overall": "PASS", "state": "PASSED", "exit_code": 0,
+                    "arch": "3510", "evidence": []}
+        out = os.path.join(self.d, "evidence.json")
+        saved = A.CATLASS_MODES["catlass_mock"]
+        A.CATLASS_MODES["catlass_mock"] = _forger
+        try:
+            with self.assertRaises(ValueError):
+                A.main([self.cs_path, self.work, out])
+        finally:
+            A.CATLASS_MODES["catlass_mock"] = saved
+        self.assertFalse(os.path.exists(out), "伪造的干净 PASS envelope 竟落了盘")
+
+    # —— ⑤ 洗白 envelope 的各种姿势，逐个断言被 assert_non_acceptance 咬住
+    def test_whitewashed_envelopes_rejected(self):
+        base = A.run_catlass_mock(self.cs, self.work)
+        A.assert_non_acceptance(base, "catlass_mock")          # 正常的必须过（否则测试是反的）
+        forgeries = {
+            "删掉 evidence_grade": {k: v for k, v in base.items() if k != "evidence_grade"},
+            "升级成 acceptance_candidate": {**base, "evidence_grade": "acceptance_candidate"},
+            "编造未知 grade": {**base, "evidence_grade": "acceptance"},
+            "抹掉 NON-ACCEPTANCE 标记": {**base, "acceptance_note": "验收通过"},
+            "删掉 acceptance_note": {k: v for k, v in base.items() if k != "acceptance_note"},
+            "塞进裁决键 overall": {**base, "overall": "PASS"},
+            "塞进裁决键 state/exit_code": {**base, "state": "PASSED", "exit_code": 0},
+            "整个换成 acceptance 形状": {"op": "X", "overall": "PASS", "state": "PASSED"},
+            "非对象": ["PASS"],
+        }
+        for why, forged in forgeries.items():
+            with self.assertRaises(ValueError, msg=f"洗白姿势「{why}」竟被放过"):
+                A.assert_non_acceptance(forged, "catlass_mock")
+
+    # —— ⑥ 结构性拦截：非 matmul（如 elementwise 引擎产的）caseset 进不来，不会静默出证据
+    def test_non_matmul_caseset_rejected(self):
+        cs = json.loads(json.dumps(self.cs))
+        for c in cs["cases"]:
+            c.pop("matmul", None)
+        with self.assertRaises(ValueError) as cm:
+            A.discover(cs, self.work)
+        self.assertIn("matmul", str(cm.exception))
+
+    # —— ⑦ 端到端：唯一能产 acceptance.json 的入口（run_workflow）喂 catlass_mock，必须拿不到干净 PASS
+    def test_run_workflow_catlass_mock_cannot_produce_clean_pass(self):
+        """未来若有人把 catlass 接进 run_workflow，这条会在「产出干净 PASS」的那一刻变红。
+
+        断言写成**面向未来**的形式：不要求它必须以某个具体报错失败（那会被上游改动误伤），
+        只要求「要么跑不出 acceptance.json、要么产出的不是干净 PASS」。
+        """
+        import subprocess, sys as _sys
+        wf = os.path.join(_HERE, "run_workflow.py")
+        spec = os.path.join(_HERE, "..", "samples", "specs", "catlass_basic_matmul.spec.json")
+        if not (os.path.exists(wf) and os.path.exists(spec)):
+            self.skipTest("run_workflow.py / catlass demo spec 不在（并行改动中）")
+        out = os.path.join(self.d, "wf_out")
+        env = dict(os.environ, OPRUNWAY_CATLASS_ARCH="3510",
+                   OPRUNWAY_OPS_DIR=os.path.join(self.d, "ops"))   # 绝对路径，隔离用户目录
+        r = subprocess.run([_sys.executable, wf, spec, "--mode", "catlass_mock", "--out", out],
+                           capture_output=True, text=True, cwd=self.d)
+        acc_path = os.path.join(out, "acceptance.json")
+        if not os.path.exists(acc_path):
+            self.assertNotEqual(r.returncode, 0, "没产 acceptance.json 却报了成功退出码")
+            return
+        acc = json.load(open(acc_path, encoding="utf-8"))
+        self.assertNotEqual(r.returncode, 0,
+                            f"catlass_mock 竟跑出干净退出码 + acceptance.json：{acc.get('overall')}")
+        self.assertNotIn(acc.get("state"), ("PASSED",),
+                         f"catlass_mock 竟产出干净 PASS 的 acceptance.json：{acc}")
 
 
 class StaticBuildGateTest(unittest.TestCase):

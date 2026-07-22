@@ -22,6 +22,22 @@ T7 dtype/attr 扩面（据 codex 审终版）：
 
 ⚠ 真机（真 NPU）上 int/bf16 的数值校验本轮**不做**——runner.cpp 的新 dtype 分支属 Track C（挂真机+pr_facts），
   见 doc/oprunway-todo.md gap。本文件仅证「流水线能造/收发 int/bf16 用例」，非「某算子在该 dtype 被验收」。
+
+shape_transform 形态扩面（2026-07-22 用户拍板的契约 C1/C2/C3，落地见下面各处 `C1:` / `C2:` / `C3:` 标记）：
+  · **C1 · 输出形状交给 per-op golden.py**：`<ops_root>/<op>/golden.py` **可选**导出
+    `out_shape(in_shapes, attrs) -> tuple[int,...]`。**未导出 = 输出同输入形状**（elementwise 缺省语义，
+    现有 4 份样例 golden 一律不加此函数、行为零变更）；导出了就以它为准，并**与 golden_fn 实际返回的形状对账**
+    （不一致 → fail-closed，别让声明与实际悄悄打架）。caseset 的 `expected.out_shape` 记最终输出形状、
+    `expected.out_shape_source` 记这形状是「声明并已核」还是「从 golden 实测」。
+    ⚠ **诚实边界**：`out_shape` 是**代码不是数据**——门没法「不执行就校验」它（校验必须真跑一次 golden.py）。
+    对照方案「spec 里写表达式语言」被用户否掉（im2col 那类带 floor/连乘/多维归约的公式表达不下），
+    这份执行代价是**用户明确接受**的取舍，不是遗漏。
+  · **C2 · attr 值放开到 `list[int]`**：原本只吃标量；`output_size`/`kernel_size` 这类**既是数组、又决定输出
+    形状**的属性靠它。attr_matrix 笛卡尔展开 / combo 索引 / JSON 落盘全线支持；**case_id 仍用 `a{k}` 索引**
+    表示 attr（不把数组值编进文件名——既保文件名安全，也保「同 id → 同数据字节」那条回归不变）。
+  · **C3 · spec 的 in 参数可选 `rank`**（int 或 int 列表）：限制 shape 阶梯只在合法维度内取值。不写 = 不限制。
+    常规网格按 rank **过滤**；过滤后没有合法常规 shape → **fail-closed**（拒绝产 0 条常规用例冒充验收）。
+    §1.4 特殊场景与白名单大 shape 是**强制**项、过滤会丢掉强制覆盖 → 改用 `_fit_rank` **保 numel 调维**。
 """
 import hashlib, importlib.util, json, math, os, sys
 import numpy as np
@@ -101,14 +117,24 @@ def _assert_equal_nan_effective(golden_fn, inputs, attrs, cid):
 # 4 个历史内置 golden（IsClose/Sign/Equal/Neg）迁 `samples/golden/<op>/golden.py` 作只读参考（非运行时回退靶）。
 # 后端（决策 4）：golden 恒 CPU、torch 优先——现 4 算子 golden.py 皆 torch；torch 缺失在 golden.py 内 fail-closed。
 def load_golden(op):
-    """按算子名从用户侧加载 golden——`<ops_root>/<op>/golden.py`，返回 `(golden_fn, golden_source, provenance)`。
+    """按算子名从用户侧加载 golden——`<ops_root>/<op>/golden.py`，返回
+    `(golden_fn, golden_source, provenance, out_shape_fn)`。
+
+    ⚠ **返回 4 元组**（C1 起；此前是 3 元组）。第 4 项 `out_shape_fn` 是**可选**的，未导出即 `None`。
+    刻意改 arity 而非另开函数：老式 `a, b, c = load_golden(op)` 会当场 ValueError 炸掉，
+    **不会**静默丢掉输出形状声明（fail-closed 优于静默降级）。
 
     **本加载路径不含内置 golden 值、绝不回退内置/样例**（ADR 0011 决策 1/2）：缺 golden.py → **fail-closed** 报错。
     （⚠ 仅指 elementwise 通路；catlass 通路与 `_BF16_EXACT_OPS` 仍是引擎里的算子知识。）
     golden.py 须导出 `golden_fn(inputs, attrs) -> ndarray` + `GOLDEN_SOURCE`（首 token = oracle_source 六枚举之一：
     cpu_ref/catlass_existing_ref/task_spec_expected/torch_ref/analytical_ref/external_ref——**支撑多仓多算子的各类来源**；
     elementwise 内置样例可用 backend 简写 torch/numpy）+ `GOLDEN_PROVENANCE`（来源出处）；缺任一 → fail-closed。
-    样例见 `samples/golden/<op>/golden.py`。
+    **可选**导出 `out_shape(in_shapes, attrs) -> tuple[int,...]`（C1，见模块 docstring）：
+    `in_shapes` 是按 spec 顺序的输入形状列表（`list[tuple[int,...]]`），`attrs` 是该 case 的属性字典。
+    未导出 = 缺省语义「输出同输入形状」（elementwise）。导出了必须可调用，否则 fail-closed。
+    ⚠ **门校不了它**：`out_shape` 是代码、不是数据，唯一的核法是真跑一次（`gen_cases` 每条 case 都拿它与
+    `golden_fn` 的实际输出形状对账）——这份执行代价是用户明知并接受的取舍，别当成「已被静态校验」。
+    样例见 `samples/golden/<op>/golden.py`（4 份样例**都不导出** `out_shape`，走缺省同形语义）。
 
     安全（golden.py 会被 import 执行 = 执行用户/生成的 Python，性质同 runner.cpp、同信任级，ADR 0011 决策 6）：
     `op` 经 `_check_id` 校验、路径由已校验 op 名定死；**软链分两层挡**——`<ops_root>/<op>` **目录段**由
@@ -153,7 +179,33 @@ def load_golden(op):
         raise ValueError(f"golden.py 的 GOLDEN_SOURCE 须非空字符串（供 oracle_source 映射）: {gpath}")
     if not (isinstance(mod.GOLDEN_PROVENANCE, str) and mod.GOLDEN_PROVENANCE.strip()):
         raise ValueError(f"golden.py 的 GOLDEN_PROVENANCE 须非空字符串（来源出处）: {gpath}")
-    return mod.golden_fn, mod.GOLDEN_SOURCE, mod.GOLDEN_PROVENANCE
+    # C1：可选 out_shape。导出了但不可调用 → fail-closed（别把一个字符串/数组当函数、到 case 循环里才炸）。
+    out_shape_fn = getattr(mod, "out_shape", None)
+    if out_shape_fn is not None and not callable(out_shape_fn):
+        raise ValueError(f"golden.py 的 out_shape 须可调用 `def out_shape(in_shapes, attrs)`，"
+                         f"得 {type(out_shape_fn).__name__}: {gpath}")
+    return mod.golden_fn, mod.GOLDEN_SOURCE, mod.GOLDEN_PROVENANCE, out_shape_fn
+
+
+def _declared_out_shape(out_shape_fn, inputs, attrs, cid):
+    """C1：调 golden.py 的 `out_shape(in_shapes, attrs)` 取**声明**输出形状 → 规范化成 `tuple[int,...]`。
+
+    坏返回一律 fail-closed（不猜、不修正）：非序列 / 含负数 / 含 bool / 含非整数 → 报错。
+    允许 `numpy` 整数（用户常写 `int(np.floor(...))` 之外也可能直接回 `np.int64`），转成 python int 落盘。
+    允许 0 维（`()`，标量输出）与含 0 的维度（空 Tensor 输出）。"""
+    in_shapes = [tuple(int(d) for d in np.asarray(x).shape) for x in inputs]
+    try:
+        raw = out_shape_fn(in_shapes, dict(attrs))
+    except Exception as ex:                              # noqa: BLE001 —— 用户代码异常统一收敛成 ValueError
+        raise ValueError(f"{cid}: golden.py 的 out_shape({in_shapes}, …) 执行失败: {ex}") from ex
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, (tuple, list)):
+        raise ValueError(f"{cid}: out_shape() 须返回 int 序列（tuple/list），得 {raw!r}")
+    dims = []
+    for d in raw:
+        if isinstance(d, bool) or not isinstance(d, (int, np.integer)) or int(d) < 0:
+            raise ValueError(f"{cid}: out_shape() 的维度须为非负整数，得 {raw!r}")
+        dims.append(int(d))
+    return tuple(dims)
 
 
 # ================================================= 逻辑输入构造（compute dtype）
@@ -359,14 +411,51 @@ def _numel(shape):
     return n
 
 
+# ================================================= C2 · attr 值类型（含 list[int]）
+def _check_attr_value(v, where):
+    """C2 attr 值类型闸：标量 `bool/int/float/str` **或** `list[int]`。
+
+    放开 list 是为 `output_size`/`kernel_size` 这类**既是数组、又决定输出形状**的属性。
+    只放开到 `list[int]`、不放开嵌套/浮点数组：多一层就多一种「悄悄改变语义还对上了 golden」的假覆盖面，
+    真需要时再单独放（本仓纪律：fail-closed 优于静默降级）。⚠ list 里的 `bool` 也拒——`[True]` 与 `[1]`
+    在 python 里等值，放行就等于让两种写法在 combo 去重时互相吞掉。
+
+    ⚠ **空数组 `[]` 也拒**，且刻意在这里拒（而不是等到部署时）：`repo_adapter._manifest_attr_token` 把
+    `list[int]` 编成逗号连接的**单个** token，空数组会编成空串、把后面所有 token 挤错位——它那边已 fail-closed。
+    但 mock 通路不造 manifest，只在那边拦就成了「本机跑得过、上真机才炸」。宁可在造用例时就停。"""
+    if isinstance(v, list):
+        if not v:
+            raise ValueError(f"{where}=[] 是空数组（manifest 行是空格分隔的扁平 token，空数组编成空串会让"
+                             f"后续 token 全错位；repo_adapter 侧同样拒）——请给非空 list[int]")
+        for i, d in enumerate(v):
+            if isinstance(d, bool) or not isinstance(d, int):
+                raise ValueError(f"{where}[{i}]={d!r} 非 int（attr 的数组值只支持 list[int]，"
+                                 f"拒嵌套/浮点/bool 元素）")
+        return
+    if not isinstance(v, (bool, int, float, str)):
+        raise ValueError(f"{where}={v!r} 非法（attr 值须为 bool/int/float/str 标量，或 list[int]）")
+
+
+def _attr_hashable(v):
+    """attr 值 → 可哈希键（`list` → `tuple`；标量原样）。仅供 combo 索引 `_akey` 用，不改落盘的值。"""
+    return tuple(v) if isinstance(v, list) else v
+
+
+def _copy_attrs(a):
+    """attrs 拷一份、**list 值另拷**：不让同一个 list 对象被多条 case 共享。
+    `golden_fn` / `out_shape` 是用户代码，就地改一下 attr 的数组就会串到别的 case（数据被污染还查不出来）。"""
+    return {k: (list(v) if isinstance(v, list) else v) for k, v in a.items()}
+
+
 def _attr_value_sets(spec, attrs_default):
     """§1.3：每 attr 的取值集——布尔→[F,T]、枚举→全值、标量→等价类代表（默认值）。
     有 attr_matrix 时用它给的取值集（每 key 的并集，保序）；否则据 attr dtype/默认派生。
     返回 [(name, [values])]，供笛卡尔展开（attr 作真正交轴，评审 #12）。"""
     attr_params = [p for p in spec["params"] if p["io"] == "attr"]
     matrix = spec.get("attr_matrix")
-    # finding #12（§1 重写勿丢）：attr_matrix 每项须为 dict、key ⊆ spec io=='attr' 名集、值为标量——
-    # 防伪造 attr key（如 {foo:12345}）冒充覆盖 / 非标量值。fail-fast，不静默忽略未知 key。
+    # finding #12（§1 重写勿丢）：attr_matrix 每项须为 dict、key ⊆ spec io=='attr' 名集、值受类型闸约束——
+    # 防伪造 attr key（如 {foo:12345}）冒充覆盖 / 非法值类型。fail-fast，不静默忽略未知 key。
+    # C2：值类型闸从「只许标量」放开到「标量 或 list[int]」，判定统一走 _check_attr_value。
     if matrix:
         attr_names = {p["name"] for p in attr_params}
         for k_idx, variant in enumerate(matrix):
@@ -377,8 +466,7 @@ def _attr_value_sets(spec, attrs_default):
                 raise ValueError(f"attr_matrix[{k_idx}] 含未知 attr key {sorted(unknown)}"
                                  f"（须 ⊆ spec io=='attr' 名集 {sorted(attr_names)}，防伪造覆盖）")
             for k, v in variant.items():
-                if not isinstance(v, (bool, int, float, str)) or v is None:
-                    raise ValueError(f"attr_matrix[{k_idx}].{k}={v!r} 非标量（须 bool/int/float/str）")
+                _check_attr_value(v, f"attr_matrix[{k_idx}].{k}")
     out = []
     for p in attr_params:
         name = p["name"]
@@ -392,42 +480,130 @@ def _attr_value_sets(spec, attrs_default):
         else:
             dt = (p.get("dtype") or [None])[0]
             vals = [False, True] if dt == "bool" else [attrs_default.get(name)]
+        # C2 补闸：**`default` 值也要过类型闸**，不能只校 attr_matrix。
+        # 否则 `"default": []` / `[1.5, 2.0]` 这类会一路 gen_cases + mock 全绿、
+        # 直到真机造 manifest 才炸——正是本文件声称已堵住的那条「本机过、真机炸」。
+        # ⚠ 只对 list 值行使：标量与 `None`（未定哨兵）的既有语义**一字不动**，避免误伤现存 spec。
+        for v in vals:
+            if isinstance(v, list):
+                _check_attr_value(v, f"params[attr={name}].default")
         out.append((name, vals))
     return out
 
 
 def _attr_combos(attr_sets, attrs_default):
-    """attr 取值集笛卡尔展开为 attr 字典列表（保序、确定）。空 attr → 单个默认字典。"""
-    combos = [dict(attrs_default)]
+    """attr 取值集笛卡尔展开为 attr 字典列表（保序、确定）。空 attr → 单个默认字典。
+    C2：每一层都过 `_copy_attrs`，list[int] 值每条 combo 各持一份（不共享同一个 list 对象）。"""
+    combos = [_copy_attrs(attrs_default)]
     for name, vals in attr_sets:
-        combos = [{**c, name: v} for c in combos for v in vals]
+        combos = [_copy_attrs({**c, name: v}) for c in combos for v in vals]
     return combos
 
 
-def _dtype_shapes(dtn, is_key):
-    """该 dtype 的常规 shape 集：key dtype 用全阶梯 + 大 shape；非 key 只取前 N 个主流 shape（配额）。"""
-    reg = [s for s in _REG_SHAPES if _numel(s) <= _MAX_NUMEL]
+# ================================================= C3 · input_rank 约束 =========
+_MAX_RANK = 8                                        # §1.2 阶梯设定 dims 1~8，rank 声明不得越界
+
+
+def _allowed_ranks(in_params):
+    """C3：从 spec 的 in 参数读可选 `rank`（int 或 int 列表）→ 合法输入维度集（frozenset）；
+    **无人声明 → None = 不限制**（现行为，零变更）。
+
+    多个 in 参数各自声明时取**交集**：常规构造路径下所有输入同形，只有交集里的维度对每个输入都合法。
+    交集为空 → fail-closed（与其挑一个「大概能跑」的维度，不如停下让人改 spec）。"""
+    sets = []
+    for p in in_params:
+        if "rank" not in p or p.get("rank") is None:
+            continue
+        raw = p["rank"]
+        vals = raw if isinstance(raw, list) else [raw]
+        if isinstance(raw, list) and not raw:
+            raise ValueError(f"in 参数 {p.get('name')!r} 的 rank 是空列表（无任何合法维度，"
+                             f"等于把用例集清零）——不写 rank 才表示不限制")
+        got = set()
+        for r in vals:
+            if isinstance(r, bool) or not isinstance(r, int) or not (1 <= r <= _MAX_RANK):
+                raise ValueError(f"in 参数 {p.get('name')!r} 的 rank={r!r} 非法"
+                                 f"（须为 1..{_MAX_RANK} 的整数，或这种整数的列表）")
+            got.add(int(r))
+        sets.append(got)
+    if not sets:
+        return None
+    inter = set.intersection(*sets)
+    if not inter:
+        raise ValueError(f"各 in 参数声明的 rank 交集为空（{[sorted(s) for s in sets]}）——"
+                         f"常规构造路径下所有输入同形，没有对每个输入都合法的维度，fail-closed")
+    return frozenset(inter)
+
+
+def _rank_ok(shape, ranks):
+    return ranks is None or len(shape) in ranks
+
+
+def _fit_rank(shape, ranks):
+    """把**强制**用例的基准 shape 调到合法 rank（`ranks=None` 或本来就合法 → 原样返回，零行为变更）。
+
+    为什么强制项不能像常规网格那样过滤掉：§1.4 特殊场景（空/标量/边界/inf-nan）与白名单大 shape 是
+    「必覆盖」项，过滤=直接丢掉强制覆盖。故按确定性规则改维、**保 numel**（numel 保住了，「空 / 标量 /
+    大」这些特殊场景的性质也就保住了）：
+      · 目标 rank r = 合法集中离原 rank 最近的（并列取小）；
+      · r > 原 rank → 左补 1（如 (1024,1024) @rank4 → (1,1,1024,1024)）；
+      · r < 原 rank → 前 (原rank-r+1) 维连乘折进首维（如 (1024,1024) @rank1 → (1048576,)）。
+    调完的 shape 会照常进 case_id 与 caseset（可见、可审计，不是静默降级）。"""
+    if ranks is None:
+        return shape
+    shp = tuple(int(d) for d in shape)
+    r0 = len(shp)
+    if r0 in ranks:
+        return shape
+    r = min(sorted(ranks), key=lambda x: (abs(x - r0), x))
+    if r > r0:
+        return (1,) * (r - r0) + shp
+    head = 1
+    for d in shp[: r0 - r + 1]:
+        head *= d
+    return (head,) + shp[r0 - r + 1:]
+
+
+def _shape_ladder(ranks):
+    """按 rank 约束过滤 §1.2 shape 阶梯，返回 (reg, large)。
+
+    ⚠ 常规阶梯被过滤空 → **fail-closed**：常规网格是 dtype×shape×值域×attr 正交采样的唯一来源，
+    它空了就只剩强制项——那是「用例数虚高但没有一条常规覆盖」的假验收。宁可停下让人补阶梯/放宽 rank。"""
+    reg = [s for s in _REG_SHAPES if _numel(s) <= _MAX_NUMEL and _rank_ok(s, ranks)]
+    large = [s for s in _LARGE_SHAPES if _numel(s) <= _MAX_NUMEL and _rank_ok(s, ranks)]
+    if not reg:
+        raise ValueError(
+            f"input_rank 约束 {sorted(ranks)} 过滤后无合法常规 shape（阶梯 _REG_SHAPES 覆盖的 rank 为 "
+            f"{sorted({len(s) for s in _REG_SHAPES})}）——拒绝只产强制用例冒充覆盖。"
+            f"请放宽 spec 中 in 参数的 rank，或给 _REG_SHAPES 补该 rank 的阶梯值")
+    return reg, large
+
+
+def _dtype_shapes(dtn, is_key, reg, large):
+    """该 dtype 的常规 shape 集：key dtype 用全阶梯 + 大 shape；非 key 只取前 N 个主流 shape（配额）。
+    reg/large 由 `_shape_ladder(ranks)` 供（已按 numel 上限 + C3 rank 约束过滤）。"""
     if is_key:
-        return reg + [s for s in _LARGE_SHAPES if _numel(s) <= _MAX_NUMEL]
-    return reg[:_OTHER_DTYPE_QUOTA]                     # 非重点 dtype：主流少量
+        return list(reg) + list(large)
+    return list(reg[:_OTHER_DTYPE_QUOTA])               # 非重点 dtype：主流少量
 
 
-def _special_entries(op, dtn, arity, is_float, rep_attrs):
+def _special_entries(op, dtn, arity, is_float, rep_attrs, ranks=None):
     """§1.4 特殊场景（不与常规正交、强制纳入）：空(功能only)/标量[1]/边界下(全1)/边界上(大)/inf/-inf/nan。
-    每项 (dims, shape, data_kind, id_kind)。整型 dtype 跳过 inf/nan（无此值）。"""
+    每项 (dims, shape, data_kind, id_kind)。整型 dtype 跳过 inf/nan（无此值）。
+    C3：每个基准 shape 过 `_fit_rank`——ranks=None 时恒等（现行为），有约束时保 numel 调到合法维度。"""
     E = []
     # 空 Tensor：某维=0 → 只挂「功能」（无精度/无 kernel profile；validator numel=0→na、adapter 优雅跳过）
-    E.append((["功能"], ((0,) if arity else (0,)), "empty", "empty"))
+    E.append((["功能"], _fit_rank((0,) if arity else (0,), ranks), "empty", "empty"))
     # 标量 Tensor [1]（numel=1，退化 perf → 下游 trivial-met）
-    E.append((["功能", "精度", "性能"], (1,), "varied", "scalar"))
+    E.append((["功能", "精度", "性能"], _fit_rank((1,), ranks), "varied", "scalar"))
     # 边界：下=各维均 1；上=大 shape 某维取大
-    E.append((["功能", "精度", "性能"], (1, 1, 1), "varied", "bndlo"))
-    E.append((["功能", "精度", "性能"], _LARGE_SHAPES[0], "varied", "bndhi"))
+    E.append((["功能", "精度", "性能"], _fit_rank((1, 1, 1), ranks), "varied", "bndlo"))
+    E.append((["功能", "精度", "性能"], _fit_rank(_LARGE_SHAPES[0], ranks), "varied", "bndhi"))
     # INF/-INF/NAN 遍历（仅浮点；每种值一条，shape 用中等 (16,)）——**带「性能」**（v2：非空皆带性能/同输入；
     # numel=16<阈值 → perf_compare 判 trivial-met 免测，不假 fail）。
     if is_float:
         for val_kind in ("inf", "ninf", "nan"):
-            E.append((["功能", "精度", "性能"], (16,), val_kind, val_kind))
+            E.append((["功能", "精度", "性能"], _fit_rank((16,), ranks), val_kind, val_kind))
     return E
 
 
@@ -502,25 +678,30 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target):
     """§1 覆盖-预算计划。返回 (entries, meta)。选择端无 rng（结构序 + 原始索引 tie-break）。
     ① §1.4 特殊场景（每 dtype，强制）→ ② 白名单必覆盖（key dtype × 每 attr × 大 shape，强制，防关键联合被采样丢）
     → ③ 常规正交网格（dtype×shape×值域×attr）作 1-wise 采样源，填到 budget=max(case_target, |forced|)。
-    format 轴：elementwise 仅 ND（op_def/example 佐证）→ 退化为单值，不进网格。"""
+    format 轴：elementwise 仅 ND（op_def/example 佐证）→ 退化为单值，不进网格。
+    C3：先解出 in 参数的 rank 约束（无声明→None=不限制），常规阶梯按它过滤（空则 fail-closed）、
+    强制项按它保 numel 调维。"""
     arity = len(in_params)
+    ranks = _allowed_ranks(in_params)                    # C3：None=不限制（现行为）
+    reg_shapes, large_shapes = _shape_ladder(ranks)      # 过滤后无合法常规 shape → 已 fail-closed
+    big_shape = _fit_rank(_LARGE_SHAPES[0], ranks)       # 白名单/bndhi 的大 shape（ranks=None 时恒等）
     attr_sets = _attr_value_sets(spec, attrs_default)
     attr_combos = _attr_combos(attr_sets, attrs_default)
 
-    def _akey(a):
-        return tuple((k, a.get(k)) for k in attrs_default)
+    def _akey(a):                                        # C2：list[int] 值转 tuple 才可哈希
+        return tuple((k, _attr_hashable(a.get(k))) for k in attrs_default)
     combo_idx = {_akey(a): i for i, a in enumerate(attr_combos)}
 
     def mk(dims, shp, dtn, data_kind, id_kind, attrs, origin, rule, tags):
         return {"dims": list(dims), "shape": shp, "dtype": dtn, "tags": list(tags),
-                "data_kind": data_kind, "id_kind": id_kind, "attrs": dict(attrs),
+                "data_kind": data_kind, "id_kind": id_kind, "attrs": _copy_attrs(attrs),
                 "attr_idx": combo_idx.get(_akey(attrs)), "case_origin": origin, "rule_ref": rule}
 
     forced, grid = [], []
     # ① §1.4 特殊场景（每 dtype 强制；id_kind 独立命名空间，评审 #8）
     for dtn in dtypes:
         is_float = not precision_policy.is_integer_dtype(dtn)
-        for dims, shp, dk, ik in _special_entries(op, dtn, arity, is_float, attr_combos[0]):
+        for dims, shp, dk, ik in _special_entries(op, dtn, arity, is_float, attr_combos[0], ranks):
             forced.append(mk(dims, shp, dtn, dk, ik, attr_combos[0],
                              f"special:{ik}", f"opbase §1.4 {ik}", ["特殊"]))
     # ② 白名单必覆盖（key dtype × 每 attr 取值 × 大 shape）——保证关键联合不被 1-wise 采样丢（评审 #6）
@@ -530,14 +711,14 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target):
         dk = _regular_data_kind(dtn, attrs_default, arity)
         for attrs in attr_combos:
             ai = combo_idx[_akey(attrs)]
-            forced.append(mk(["功能", "精度", "性能"], _LARGE_SHAPES[0], dtn, f"{dk}:uniform",
+            forced.append(mk(["功能", "精度", "性能"], big_shape, dtn, f"{dk}:uniform",
                              f"wl{ai}", attrs, f"whitelist:{dtn}:a{ai}",
                              "opbase §1.1 必覆盖组合(key×attr×大shape)", ["白名单"]))
     # ③ 常规正交网格（1-wise 采样源）：dtype × shape × 值域 × attr（regime 编进 id_kind 保 case_id 唯一）
     for dtn in dtypes:
         is_key = dtn in KEY_DTYPES
         dk = _regular_data_kind(dtn, attrs_default, arity)
-        for shp in _dtype_shapes(dtn, is_key):
+        for shp in _dtype_shapes(dtn, is_key, reg_shapes, large_shapes):
             for regime in _VALUE_REGIMES:
                 for attrs in attr_combos:
                     ai = combo_idx[_akey(attrs)]
@@ -577,7 +758,8 @@ def gen_cases(spec, work_dir):
     # golden_source 来自加载的 GOLDEN_SOURCE 元数据（决策 5），下游门继续校 oracle_source==映射(golden_source)。
     in_params = [p for p in spec["params"] if p["io"] == "in"]
     check_spec_capability(in_params)                     # 能力边界前置：先于 load_golden，别为不支持的算子白加载 golden
-    golden_fn, golden_source, _golden_provenance = load_golden(op)
+    # C1：load_golden 返回 4 元组，第 4 项是**可选**的 out_shape（未导出=None → 缺省同形语义）。
+    golden_fn, golden_source, _golden_provenance, out_shape_fn = load_golden(op)
     attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
@@ -610,6 +792,31 @@ def gen_cases(spec, work_dir):
 
         inputs = _build_inputs(case_rng, in_params, shp, dtn, attrs, data_kind)  # 逻辑数组（compute dtype）
         golden = golden_fn(inputs, attrs)                # 用逻辑输入算 golden
+        # C1：算子声明了 out_shape → **与 golden_fn 实际返回的形状对账**，不一致即 fail-closed。
+        # 两者打架时既不信声明也不信实测：下游 runner 按 caseset 的形状收发、validator 按 golden 判，
+        # 谁静默胜出都会产出「看起来对」的结果。out_shape_source 如实记这形状是「声明并已核」还是「实测」。
+        actual_out_shape = tuple(int(d) for d in np.shape(golden))
+        if out_shape_fn is not None:
+            declared = _declared_out_shape(out_shape_fn, inputs, attrs, cid)
+            if actual_out_shape != declared:
+                raise ValueError(f"{cid}: golden_fn 实际输出形状 {actual_out_shape} ≠ golden.py 的 "
+                                 f"out_shape() 声明 {declared}（声明与实现打架，fail-closed；"
+                                 f"in_shapes={[tuple(np.asarray(x).shape) for x in inputs]} attrs={attrs}）")
+            out_shape_source = "golden.out_shape"        # 声明并已与实测对账
+        else:
+            # 未声明 → 缺省语义是「输出同各输入广播形状」。**必须当场校**，别只是照抄实测形状：
+            # 一个真会改形状的 golden 若**忘了导出 out_shape**，照抄下去 CP-B 全绿、拖到下游 runner
+            # 按错形状收发才炸——正是本仓最忌的「本机过、真机炸」。缺省语义是承诺，不是默认值。
+            bshape = tuple(int(d) for d in np.broadcast_shapes(
+                *[np.asarray(x).shape for x in inputs])) if inputs else ()
+            if actual_out_shape != bshape:
+                raise ValueError(
+                    f"{cid}: golden_fn 实际输出形状 {actual_out_shape} ≠ 各输入广播形状 {bshape}，"
+                    f"但 golden.py **未导出 out_shape()**。缺省语义是「输出同输入形状」（elementwise）——"
+                    f"该算子既然改形状，就必须导出 out_shape(in_shapes, attrs) 显式声明（C1），"
+                    f"否则下游按错形状收发。fail-closed。"
+                    f"（in_shapes={[tuple(np.asarray(x).shape) for x in inputs]} attrs={attrs}）")
+            out_shape_source = "golden_fn_actual"        # 未声明且已核 = 缺省同形语义成立
         if not exact:
             golden = golden.astype(_compute_np(dtn))     # numerical：golden 同逻辑 dtype（bf16→fp32-on-grid）
 
@@ -630,6 +837,8 @@ def gen_cases(spec, work_dir):
                                        "verify_mode": vmode, "compare": "na", "standard": "na",
                                        "compare_dtype": None, "case_origin": entry["case_origin"],
                                        "rule_ref": entry["rule_ref"],
+                                       "out_shape": list(actual_out_shape),      # C1：输出形状（供下游收发）
+                                       "out_shape_source": out_shape_source,
                                        "note": "空Tensor 功能用例（numel=0，无精度判定，validator→na）"}})
             continue
 
@@ -682,6 +891,8 @@ def gen_cases(spec, work_dir):
                     "verify_mode": vmode, "standard": eff_std, "compare_dtype": logical_cdtype,
                     "compare": compare, "tolerance_policy_id": tpid, "policy": policy,
                     "threshold": precision_policy.threshold_digest(policy),  # digest：向后兼容
+                    "out_shape": list(actual_out_shape),      # C1：输出形状（供下游 runner/validator 收发）
+                    "out_shape_source": out_shape_source,     # golden.out_shape（声明并已核）/ golden_fn_actual
                     "case_origin": entry["case_origin"], "rule_ref": entry["rule_ref"]}
         acc = precision_policy.resolve_acceptance(spec, eff_std, logical_cdtype)
         if acc:
@@ -734,6 +945,9 @@ def _dry_run(spec):
           f"forced_total(=强制下限S)={meta['forced_total']} forced_special={meta['forced_special']}")
     print(f"  区间: case_target 建议落 [S={meta['forced_total']}, pool_max={meta['pool_max']}]"
           f"（< S 则 emit 抬到 S；> pool_max 则 emit=pool_max、数量门软化 PASS+note）")
+    _rk = _allowed_ranks(in_params)                      # C3：rank 约束（None=不限制）
+    print(f"  input_rank: {'不限制' if _rk is None else sorted(_rk)}  "
+          f"shapes: {sorted({_shape_tag(e['shape']) for e in entries})}")
     print(f"  by_dtype : {dict(Counter(e['dtype'] for e in entries))}")
     print(f"  id_kinds : {dict(Counter(e['id_kind'] for e in entries))}")
     print(f"  special  : {sorted({e['id_kind'] for e in entries if e['id_kind'] in specials})}")
