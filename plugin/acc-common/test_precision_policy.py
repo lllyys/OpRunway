@@ -8,7 +8,7 @@
   · exact：mismatch<=0；未支持 dtype fail-fast；select_standard 向后兼容映射。
   · PASSED_WITH_RISK 路径（acceptance_policy 宽于 standard）→ run_workflow 退出码 2 + requires_human_cp。
 """
-import json, os, subprocess, sys, tempfile, shutil, unittest
+import hashlib, json, os, subprocess, sys, tempfile, shutil, unittest
 import numpy as np
 
 import precision_policy as P
@@ -654,6 +654,274 @@ class EffectiveStandardSecurityTest(unittest.TestCase):
         del spec["params"]
         vd = V.validate(spec, cs, ev)
         self.assertEqual(vd["overall"]["verdict"], "fail")
+
+
+class GoldenTierDerivationTest(unittest.TestCase):
+    """golden 档位派生表（批 1）——用户 2026-07-22 裁定 R2/R3/R4/R5/R9 的机器落点。
+
+    最吃重的是 test_exhaustive_*：**穷举全部输入组合**，堵住「派生表自称全覆盖、实则留未定义态」
+    这个只靠读表看不出来的洞（上一轮批判点名项）。
+    """
+
+    def _g(self, source, method_kind, auth_kind):
+        return {"source": source, "method_kind": method_kind,
+                "authorization": {"kind": auth_kind, "cite": "", "quote": ""}}
+
+    def test_exhaustive_cartesian_always_returns_valid_triple(self):
+        """4 source × 6 method_kind × 4 auth × 2 verified = 192 组，逐组必须有合法返回、无未定义态。"""
+        n = 0
+        for src in P.GOLDEN_SOURCE_KIND:
+            for mk in P.GOLDEN_METHOD_KIND:
+                for ak in P.AUTHORIZATION_KIND:
+                    for ver in (True, False):
+                        n += 1
+                        tier, human, reason = P.derive_golden_tier(self._g(src, mk, ak), ver)
+                        with self.subTest(src=src, method=mk, auth=ak, verified=ver):
+                            self.assertIn(tier, (1, 2, 3, 4))
+                            self.assertIsInstance(human, bool)
+                            self.assertTrue(reason is None or reason in P.GOLDEN_BLOCKED_REASON)
+                            # tier==4 ⟺ 有 blocked_reason（双向，防「挡住了却不说为什么」/「说了却没挡」）
+                            self.assertEqual(tier == 4, reason is not None)
+                            # requires_human_review 的唯一算法，全组合恒成立
+                            self.assertEqual(human, (tier >= 3 or src == "multistep"))
+        self.assertEqual(n, 192)
+
+    @staticmethod
+    def _expected(src, mk, ak, verified):
+        """**独立**重写的期望矩阵——照用户 R2/R3/R4/R5 裁决直述，**不调 derive_golden_tier**。
+
+        上一版穷举测试只断言「返回值在合法值域内」，删掉任意一条派生规则、让那些组合统统落进兜底
+        tier 4，测试照样绿——它只能证明「没有未定义态」，证明不了「派生得对」（codex 审出）。
+        本矩阵与实现各写一遍、逐组比对，才抓得住规则被删 / 被前面的分支遮蔽 / 顺序写反。
+        """
+        runnable = mk in ("torch_cpu", "numpy_cpu")
+        if src == "needs_user" or mk == "needs_user":
+            tier, reason = 4, "needs_user"
+        elif ak in ("oracle_method", "formula") and not verified:
+            tier, reason = 4, "unverifiable_authorization"
+        elif not runnable:
+            tier, reason = 4, "method_unavailable"
+        elif ak == "oracle_method" and src in ("single_api", "multistep"):
+            tier, reason = 1, None
+        elif ak == "formula" and src == "multistep":
+            tier, reason = 3, None
+        elif ak in ("formula", "impl_reference", "none") and src == "single_api":
+            tier, reason = 2, None
+        elif ak in ("impl_reference", "none") and src == "multistep":
+            tier, reason = 4, "unverifiable_authorization"
+        else:                                   # external_method 等一切剩余组合
+            tier, reason = 4, "unverifiable_authorization"
+        return tier, (tier >= 3 or src == "multistep"), reason
+
+    def test_exhaustive_matches_independent_expected_matrix(self):
+        """192 组逐组与独立期望矩阵**精确相等**——这条才真正锁住派生规则本身。"""
+        for src in P.GOLDEN_SOURCE_KIND:
+            for mk in P.GOLDEN_METHOD_KIND:
+                for ak in P.AUTHORIZATION_KIND:
+                    for ver in (True, False):
+                        with self.subTest(src=src, method=mk, auth=ak, verified=ver):
+                            self.assertEqual(P.derive_golden_tier(self._g(src, mk, ak), ver),
+                                             self._expected(src, mk, ak, ver))
+
+    def test_authorization_verified_must_be_strict_bool(self):
+        """安全边界参数不做真值性转换——否则 "false" / 1 这类 truthy 值会把未核授权抬进 tier 1（fail-open）。"""
+        g = self._g("single_api", "torch_cpu", "oracle_method")
+        for bad in ("false", "no", "", 0, 1, None, [], {}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(TypeError):
+                    P.derive_golden_tier(g, bad)
+        # 真布尔才放行，且 False 必须挡住
+        self.assertEqual(P.derive_golden_tier(g, True)[0], 1)
+        self.assertEqual(P.derive_golden_tier(g, False), (4, True, "unverifiable_authorization"))
+
+    def test_malformed_container_types_do_not_crash(self):
+        """g 或 authorization 不是 dict（agent 产坏了）→ 按未定处理落 tier 4，不许抛别的异常。"""
+        for g in (None, [], "wat", 42, {"authorization": "not-a-dict"}, {"authorization": None}):
+            with self.subTest(g=g):
+                tier, _, reason = P.derive_golden_tier(g, True)
+                self.assertEqual(tier, 4)
+                self.assertIn(reason, P.GOLDEN_BLOCKED_REASON)
+
+    def test_exhaustive_unknown_inputs_still_blocked(self):
+        """词表外的垃圾输入（含 None / 空 dict）也必须落 tier 4，绝不放行。"""
+        for g in ({}, {"source": "wat"}, {"source": None, "method_kind": "torch_cpu"},
+                  {"source": "single_api", "method_kind": "torch_cpu", "authorization": {"kind": "bogus"}}):
+            for ver in (True, False):
+                tier, _, reason = P.derive_golden_tier(g, ver)
+                with self.subTest(g=g, verified=ver):
+                    self.assertEqual(tier, 4)
+                    self.assertIsNotNone(reason)
+        self.assertEqual(P.derive_golden_tier(None, True)[0], 4)
+
+    def test_rule_needs_user_sentinel(self):
+        for g in (self._g("needs_user", "torch_cpu", "none"),
+                  self._g("single_api", "needs_user", "none")):
+            self.assertEqual(P.derive_golden_tier(g, True), (4, True, "needs_user"))
+
+    def test_forged_authorization_is_blocked_not_downgraded(self):
+        """**核心防线**：声称任务书授权却核不实 → 直接 blocked，不许降级成 tier 2/3 照跑。
+
+        若假授权只降档，R2（禁 PR 来源）与 R4（指定了但跑不了要 fail-closed）就等于没设。
+        """
+        for ak in ("oracle_method", "formula"):
+            for src in ("single_api", "multistep"):
+                g = self._g(src, "torch_cpu", ak)
+                self.assertEqual(P.derive_golden_tier(g, False),
+                                 (4, True, "unverifiable_authorization"))
+                # 同一份输入，授权核实后才允许进 1/2/3
+                self.assertLess(P.derive_golden_tier(g, True)[0], 4)
+
+    def test_rule_method_unavailable_does_not_fall_back(self):
+        """R4：任务书指定了但本环境跑不起来 → blocked，**不自动回落**第二档（torch/numpy）。"""
+        for mk in ("builtin_tbe", "gpu_lib", "other_external"):
+            g = self._g("single_api", mk, "oracle_method")
+            self.assertEqual(P.derive_golden_tier(g, True), (4, True, "method_unavailable"))
+        # external_method 形态同样出局（走穷举兜底）
+        self.assertEqual(P.derive_golden_tier(self._g("external_method", "gpu_lib", "oracle_method"), True)[0], 4)
+
+    def test_rule_tier1_taskdoc_specified(self):
+        """第一档：任务书就真值口径作出指定 + 本环境跑得起来。单 API 不人核、多步自拼仍人核。"""
+        self.assertEqual(P.derive_golden_tier(self._g("single_api", "torch_cpu", "oracle_method"), True),
+                         (1, False, None))
+        self.assertEqual(P.derive_golden_tier(self._g("multistep", "torch_cpu", "oracle_method"), True),
+                         (1, True, None))
+
+    def test_rule_tier3_formula_multistep_requires_human(self):
+        """R5 末位档：任务书给公式、自拼多步 → tier 3 且必须人核（catlass 系 LaTeX 任务书归此）。"""
+        self.assertEqual(P.derive_golden_tier(self._g("multistep", "numpy_cpu", "formula"), True),
+                         (3, True, None))
+
+    def test_rule_tier2_single_api_fallback_no_human(self):
+        """R3 第二档 / R5 一级：没有任务书授权，回落 CPU 现成 API 单调 → 正当、**不人核**。
+
+        **Sign 归此**：其任务书只说「参考内置 TBE」(= impl_reference，不构成 golden 授权)，
+        一字未提 torch/numpy/公式 → 回落 torch.sign 是对的；样例里写「任务书指定纯重写」才是错的。
+        """
+        for ak in ("none", "impl_reference"):
+            self.assertEqual(P.derive_golden_tier(self._g("single_api", "torch_cpu", ak), True),
+                             (2, False, None))
+        # 公式恰好等于一个现成 API → 同档
+        self.assertEqual(P.derive_golden_tier(self._g("single_api", "torch_cpu", "formula"), True),
+                         (2, False, None))
+
+    def test_rule_multistep_without_authorization_is_fabrication(self):
+        """无授权却要自拼多步 = 凭空捏造 → blocked。"""
+        for ak in ("none", "impl_reference"):
+            self.assertEqual(P.derive_golden_tier(self._g("multistep", "numpy_cpu", ak), True),
+                             (4, True, "unverifiable_authorization"))
+
+    def test_producible_subset_excludes_repo_and_pr_refs(self):
+        """R2：可产集里**没有** cpu_ref（含「PR 的 CPU 参考」）与 catlass_existing_ref 的格子；
+        但 canonical 六枚举定义本身不动（改它须走 bureau review）。"""
+        self.assertNotIn("cpu_ref", P.PRODUCIBLE_ORACLE_SOURCES)
+        self.assertNotIn("catlass_existing_ref", P.PRODUCIBLE_ORACLE_SOURCES)
+        self.assertTrue(set(P.PRODUCIBLE_ORACLE_SOURCES) < set(P.ORACLE_SOURCES))
+        self.assertEqual(len(P.ORACLE_SOURCES), 6)          # canonical 契约未被本批改动
+
+    def test_single_unknown_sentinel_across_vocabularies(self):
+        """未定哨兵全篇只有 needs_user 一个——不许再冒出 undetermined/unknown/TBD 第二套词汇。"""
+        for vocab in (P.GOLDEN_SOURCE_KIND, P.GOLDEN_METHOD_KIND):
+            self.assertIn("needs_user", vocab)
+            for bad in ("undetermined", "unknown", "tbd", "TBD"):
+                self.assertNotIn(bad, vocab)
+
+
+class VerifyAuthorizationTest(unittest.TestCase):
+    """任务书授权锚核验（R12：全文快照入库 → 锚才可机器核）。"""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="oprunway_auth_")
+        self.snap = os.path.join(self.d, P.TASKDOC_SNAPSHOT_NAME)
+        body = ("# IsClose 任务书\n"                       # 1
+                "\n"                                        # 2
+                "实现方式从原来比较二进制的实现方式，更改成和cpu一致的比较逻辑值的实现方式\n"   # 3
+                "\n"                                        # 4
+                "精度需满足 AscendOpTest 工具默认阈值\n")   # 5
+        with open(self.snap, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        self.sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _g(self, kind="oracle_method", cite="task_doc.snapshot.md:3", quote="更改成和cpu一致的比较逻辑值", sha=None):
+        return {"taskdoc_snapshot": {"sha256": self.sha if sha is None else sha},
+                "authorization": {"kind": kind, "cite": cite, "quote": quote}}
+
+    def test_happy_path(self):
+        ok, reason = P.verify_authorization(self._g(), self.snap)
+        self.assertTrue(ok, reason)
+        self.assertIsNone(reason)
+
+    def test_line_range_form(self):
+        self.assertTrue(P.verify_authorization(
+            self._g(cite="task_doc.snapshot.md:1-5", quote="AscendOpTest"), self.snap)[0])
+
+    def test_no_anchor_needed_for_non_authorizing_kinds(self):
+        """impl_reference / none 本就不构成授权 → 无需锚，直接放行（档位另由派生表按无授权处理）。"""
+        for kind in ("impl_reference", "none"):
+            self.assertEqual(P.verify_authorization({"authorization": {"kind": kind}}, None), (True, None))
+
+    def test_quote_not_in_cited_range_is_rejected(self):
+        """引了一句原文里没有的话 → 拒。这是本函数的主要价值。"""
+        ok, reason = P.verify_authorization(self._g(quote="任务书指定纯重写为 torch.sign"), self.snap)
+        self.assertFalse(ok)
+        self.assertIn("逐字子串", reason)
+
+    def test_quote_in_file_but_wrong_line_is_rejected(self):
+        """引文确在文中、但不在 cite 指的行区间 → 拒（防「行号随手写」）。"""
+        ok, _ = P.verify_authorization(self._g(cite="task_doc.snapshot.md:5", quote="比较逻辑值"), self.snap)
+        self.assertFalse(ok)
+
+    def test_snapshot_hash_mismatch_is_rejected(self):
+        ok, reason = P.verify_authorization(self._g(sha="0" * 64), self.snap)
+        self.assertFalse(ok)
+        self.assertIn("指纹不符", reason)
+
+    def test_missing_snapshot_is_rejected(self):
+        ok, _ = P.verify_authorization(self._g(), os.path.join(self.d, "nope.md"))
+        self.assertFalse(ok)
+
+    def test_cite_pointing_outside_taskdoc_is_rejected(self):
+        """R2 落到机器上的那一刀：PR / 仓内文件连被引用的资格都没有。"""
+        for bad in ("pr_facts.json:12", "../pr_facts.json:12", "repos/foo/impl.py:3",
+                    "task_doc.md:3", "/abs/task_doc.snapshot.md:3"):
+            ok, reason = P.verify_authorization(self._g(cite=bad), self.snap)
+            with self.subTest(cite=bad):
+                self.assertFalse(ok)
+                self.assertIn("格式非法", reason)
+
+    def test_out_of_range_and_empty_quote_rejected(self):
+        self.assertFalse(P.verify_authorization(self._g(cite="task_doc.snapshot.md:99"), self.snap)[0])
+        self.assertFalse(P.verify_authorization(self._g(quote="   "), self.snap)[0])
+
+    def test_malformed_container_types_are_fail_closed_not_crash(self):
+        """与 derive_golden_tier 对称的容器类型防御：坏类型必须返 (False, 原因)，**不许抛 AttributeError**
+        ——异常在调用方可能被 except 吞成放行，那就成了 fail-open。"""
+        for g in (None, [], "wat", 42,
+                  {"authorization": "not-a-dict"}, {"authorization": None},
+                  {"authorization": {"kind": "oracle_method"}, "taskdoc_snapshot": "not-a-dict"}):
+            with self.subTest(g=g):
+                ok, reason = P.verify_authorization(g, self.snap)
+                self.assertFalse(ok)
+                self.assertTrue(reason)
+
+    def test_missing_snapshot_fingerprint_is_fail_closed(self):
+        g = self._g()
+        del g["taskdoc_snapshot"]
+        ok, reason = P.verify_authorization(g, self.snap)
+        self.assertFalse(ok)
+        self.assertIn("快照指纹", reason)
+
+
+class GoldenContractStdlibTest(unittest.TestCase):
+    def test_import_does_not_pull_numpy(self):
+        """批 1 新增的顶层 import 必须全是 stdlib——validator 靠 `import precision_policy` 保持 stdlib-only。"""
+        code = ("import sys; sys.modules.pop('numpy', None); import precision_policy; "
+                "print('numpy' in sys.modules)")
+        out = subprocess.run([sys.executable, "-c", code], cwd=_HERE,
+                             capture_output=True, text=True, check=True)
+        self.assertEqual(out.stdout.strip(), "False")
 
 
 if __name__ == "__main__":
