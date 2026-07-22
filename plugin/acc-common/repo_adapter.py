@@ -6,6 +6,10 @@
                   2026-07-22 用户拍板）。缺陷注入降级为**测试专用夹具**、CLI 不可达。无需 NPU。
 - new_example   : 真机 build/run（`evidence_grade="acceptance_candidate"`）。
 证据只记「测到什么」（metric value / us / 路径），pass/fail 交给 validator（ADR 0007）。
+
+⚠ 本模块的 CLI（`main()`）落盘前过两道 C5 守卫——产物名不得冒充裁决（`refuse_reserved_out`）、envelope
+须自带 non-acceptance 标记（`assert_non_acceptance`）——**实现直接取自 `catlass_adapter`、不另抄一份**：
+`MODES` 里同样有 `catlass_mock`，两条 CLI 出口口径不对称就等于没堵（见文件末 import 处的说明）。
 """
 import hashlib, json, math, numbers, os, posixpath, re, shlex, shutil, subprocess, sys, uuid
 import numpy as np
@@ -854,20 +858,48 @@ def run_new_example(caseset, work_dir, defect_cases=None):
 MODES = {"mock": run_mock, "new_example": run_new_example}
 
 # --- P3 · catlass adapter（generated_harness）注册：实现在自有模块 catlass_adapter.py，此处仅加法接入 ---
+# 顺带取回 C5 的**两道 CLI 出口守卫**（`refuse_reserved_out` 名字 / `assert_non_acceptance` 内容）：
+# 唯一真相源在 catlass_adapter，**本模块不另抄一份清单**——两条 CLI 出口各写各的口径，迟早漂移。
+# ⚠ 为什么本模块非有不可：`MODES` 在上一行之后就含 `catlass_mock`，于是
+# `repo_adapter.py cs wd acceptance.json catlass_mock` 是绕开 catlass CLI 那两道守卫的现成后门。
+_CATLASS_IMPORT_ERR = None
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from catlass_adapter import CATLASS_MODES  # noqa: E402  catlass/catlass_mock
+    from catlass_adapter import (CATLASS_MODES, RESERVED_ACCEPTANCE_ARTIFACTS,  # noqa: E402
+                                 refuse_reserved_out, assert_non_acceptance)
     MODES.update(CATLASS_MODES)
-except Exception:  # 缺 catlass_adapter/其依赖时不影响既有 mock/new_example
-    pass
+except Exception as _ex:  # 缺 catlass_adapter/其依赖时**不影响库用法**（MODES 的 mock/new_example 照跑）
+    _CATLASS_IMPORT_ERR = _ex
+    # ⚠ 此处**有意不给** `RESERVED_ACCEPTANCE_ARTIFACTS` 兜个空元组：读到「空清单」的调用方会以为
+    #   「没有名字是保留的」，那正是静默降级。清单读不到就该炸（AttributeError），别给假答案。
+
+    def _guards_unavailable(*_a, **_kw):
+        """守卫加载不到 → **CLI fail-closed 拒跑**（不静默降级成「没有守卫的落盘」）。
+
+        影响面**只有 CLI**：库调用方（run_workflow / 测试）拿 `MODES[...]` 直接跑，不经这里。
+        这是取舍不是遗漏——落盘出口若无法复核「名字不冒充裁决 / 内容自带 NON-ACCEPTANCE」，
+        宁可停下报错，也不落一份没被复核过的产物。
+        """
+        raise SystemExit(
+            f"catlass_adapter 不可用（{_CATLASS_IMPORT_ERR}）→ 无法复核 C5 落盘守卫"
+            f"（产物名不得冒充裁决 / envelope 须自带 NON-ACCEPTANCE 标记），fail-closed 拒绝落盘。")
+
+    refuse_reserved_out = _guards_unavailable
+    assert_non_acceptance = _guards_unavailable
 
 
 def main(argv):
-    """CLI：`repo_adapter.py <caseset.json> <work_dir> <out.json> [mode]`。
+    """CLI：`repo_adapter.py <caseset.json> <work_dir> <out.json> [mode]`。**只产采集证据，不产裁决。**
 
     ⚠ **C5：不再接受第 5 个参数（defect 注入）**——造坏点已降级为**测试专用夹具**（只在 `test_*.py` 里
       直接调 `run_mock(..., defect_cases=[...])` 可达），不给任何人在命令行上拿它冒充/污染验收的机会。
       多传参数一律 fail-closed 报错，不静默忽略（静默忽略会让人以为注入生效了）。
+    ⚠ **落盘前两道守卫，与 `catlass_adapter.main()` 同一套实现**（不是照抄一份口径相近的）：
+      ① `refuse_reserved_out` —— 输出名不得是 `acceptance.json`/`verdict.json`/`perf_report.json`
+         这类裁决产物名（三级机器门按**文件名**读，叫对名字摆进验收目录就可能被当裁决）；
+      ② `assert_non_acceptance` —— envelope 内容须自带合法 `evidence_grade`、mock 通路恒
+         development + NON-ACCEPTANCE 标记、且不得出现裁决形状的键。
+      本模块的 `MODES` 含 `catlass_mock`，只在 catlass CLI 上堵这两道 = 从这里就能绕过去（本轮堵的正是它）。
     """
     caseset_path, work_dir, out_path = argv[0], argv[1], argv[2]
     mode = argv[3] if len(argv) > 3 else "mock"
@@ -876,12 +908,17 @@ def main(argv):
     if len(argv) > 4:
         raise SystemExit("repo_adapter CLI 不再接受第 5 个参数（defect 注入已降级为测试专用夹具，C5）："
                          f"多余参数 {argv[4:]!r}")
+    refuse_reserved_out(out_path)                    # ① 名字不许冒充裁决产物（跑之前就拒，不留半产物）
     with open(caseset_path, encoding="utf-8") as cf:
         caseset = json.load(cf)
     evidence = MODES[mode](caseset, work_dir)
+    assert_non_acceptance(evidence, mode)            # ② 内容须自带 non-acceptance 标记，否则不落盘
     with open(out_path, "w", encoding="utf-8") as of:
         json.dump(evidence, of, ensure_ascii=False, indent=2)
-    print(f"[repo_adapter/{mode}] {len(evidence['evidence'])} evidence -> {out_path}")
+    print(f"[repo_adapter/{mode}] {len(evidence['evidence'])} evidence "
+          f"(grade={evidence.get('evidence_grade')}) -> {out_path}")
+    if evidence.get("acceptance_note"):
+        print(f"  ⚠ {evidence['acceptance_note']}")
 
 
 if __name__ == "__main__":

@@ -104,8 +104,9 @@ def run(spec_path, mode="new_example", out_dir="reports/_run", defect=None, perf
     """跑一遍 Task1→2→3。
 
     ⚠ `defect` / `perf_slow` 是**测试专用夹具**（在 mock 里造坏点 / 造略慢基线，用来证明「validator 真会 fail、
-    门不是假门」），**已不在 CLI 上暴露**（C5：拿掉 `--defect`）——只有 `test_*.py` 以 `import run_workflow` 的
-    方式进程内调用得到。它们只对非验收通路有意义；若作用于验收通路，本函数直接 fail-closed 拒跑。
+    门不是假门」），**两个都不在 CLI 上暴露**（C5 拿掉 `--defect`；`--perf-slow` 同批理由、2026-07-22 补下架）
+    ——只有 `test_*.py` 以 `import run_workflow` 的方式进程内调用得到。它们只对非验收通路有意义；
+    若作用于验收通路，本函数直接 fail-closed 拒跑。
     """
     if mode not in repo_adapter.MODES:  # 先校验，避免 Task1 已跑再 KeyError、留半产物
         raise SystemExit(f"unknown mode {mode!r}, supported={list(repo_adapter.MODES)}")
@@ -372,10 +373,15 @@ def run(spec_path, mode="new_example", out_dir="reports/_run", defect=None, perf
 
 
 def main():
-    # C5：**`--defect` 已从 CLI 拿掉**。它靠 mock 造坏点，唯一正当用途是回归测试「validator 真会 fail、
-    # 门不是假门」——那个用途 `test_*.py` 直接 `import run_workflow; run_workflow.run(..., defect=[...])`
-    # 就够了。挂在 CLI 上则等于对所有人开放「按需制造一份想要的裁决」的入口，收益为零、风险实打实。
-    # ⚠ 别因为「加回去方便调试」就恢复它：调试请走进程内 API。
+    # C5：**`--defect` 与 `--perf-slow` 都已从 CLI 拿掉**（后者 2026-07-22 补，同批理由）。两者都靠 mock
+    # 造假数——一个造坏点、一个把假基线调慢好触发小 shape 例外通道——唯一正当用途是回归测试
+    # 「validator 真会 fail、门不是假门」，那个用途 `test_*.py` 直接
+    # `import run_workflow; run_workflow.run(..., defect=[...], perf_slow=[...])` 就够了。
+    # 挂在 CLI 上则等于对所有人开放「按需制造一份想要的结论」的入口，收益为零、风险实打实：
+    # `--perf-slow` 能让本地跑出 `PASSED_WITH_RISK`(exit 2) 或「性能未达成」，那是一份**人造的**
+    # 性能结论——mock 已不产 acceptance.json 削弱了它，但削弱的是「落成裁决文件」，**没削弱**终端
+    # 输出/退出码/`baseline.json` 被人截图或抄进报告的那条路（本仓最不能容忍的「看起来对」）。
+    # ⚠ 别因为「加回去方便调试/演示」就恢复它们：调试与演示请走进程内 API。
     ap = argparse.ArgumentParser(
         description="OpRunway Task1→2→3 编排。验收裁决(acceptance.json/verdict.json)只有真机通路 "
                     "new_example 产得出；mock 等非验收通路改产 dev_run_summary.json / "
@@ -385,14 +391,9 @@ def main():
                     help="默认 new_example（真机通路，需 OPRUNWAY_* + NPU，是唯一产验收裁决的通路）；"
                          "mock 仅本地用例链自检、精度按构造必过、**非验收**")
     ap.add_argument("--out", default="reports/_run")
-    ap.add_argument("--perf-slow", default=None,
-                    help="逗号分隔 cid：mock 下把这些用例基线造成略慢(本地演示小shape例外)；"
-                         "**仅非验收通路可用**，作用于验收通路直接报错")
     ap.add_argument("--gpu-baseline", default=None, help="外部 GPU 标杆 JSON（Task3 consumer 侧对比）")
     a = ap.parse_args()
-    result = run(a.spec, a.mode, a.out,
-                 perf_slow=a.perf_slow.split(",") if a.perf_slow else None,
-                 gpu_baseline=a.gpu_baseline)
+    result = run(a.spec, a.mode, a.out, gpu_baseline=a.gpu_baseline)
     # CLI 退出码：0 干净 PASS / 2 PASSED_WITH_RISK(挂起转人工) / 1 其余（门未过/精度fail/性能未达/BLOCKED/needs_review）
     sys.exit(result["exit_code"])
 

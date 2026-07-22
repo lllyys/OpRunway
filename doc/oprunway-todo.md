@@ -226,6 +226,68 @@
 
 #### 修复批次（**U1/U2/U3/U6a/U6b/U7a 已落地，2026-07-22**；分支 `fix/pdist-usertest-gaps`）
 
+#### 🟢 shape_transform 用真算子跑通了（2026-07-23）——**三个全通**
+
+此前 C1–C5 的引擎侧全是用**假算子**单测的。这轮换真算子，结论是**有条件的通**：
+
+- **✅ Im2col 通了**（ops-math `conversion/im2col`）：50 用例 · PASS · `contract_problems=0` ·
+  `out_shape_source` 50/50 = `golden.out_shape`。关键实测 `(2,2,2,2) → (2,8,9)`：
+  **4 维入 3 维出、输出 rank 随输入 rank 跳变**。
+  ⭐ **这是 C1「out_shape 放 golden.py、不搞 spec 表达式语言」那个决定的正面证据**——
+  这种形状小表达式语言表达不下，`out_shape()` 十来行普通 Python 就写完了。
+- **✅ 两个 Upsample 也通了**：`UpsampleNearestExact2d` 18 用例 · `UpsampleNearest3d` 20 用例（**rank 5**）。
+  它们原本卡在两个引擎缺口，本轮一并补掉：
+  - [x] **`allow_empty_tensor`（spec 新开关，缺省 `true` = 现行为不变）**：opbase §1.4 把「空 Tensor」
+    当普适特殊场景**无条件强塞**，但很多算子任务书白纸黑字写「不支持空Tensor」。强塞只有两个出口——
+    golden **为非法输入编造输出**（= 替算子发明它不支持的语义），或整条链卡死。
+    ⚠ 开关**只收真布尔**：写成 `"false"` / `0` 直接拒（真值性判断会把它们悄悄读成「允许」，
+    本仓在批 1 的 `authorization_verified` 上栽过同款 fail-open）。
+    ⚠ `doc/oprunway-op-shape-taxonomy.md` §3.5 早就点名要这个字段——**这次才补上**。
+  - [x] **`_EXT_RANK_SHAPES` 补 5 维，且只在 rank 约束点名时并入**：`_MAX_RANK` 本是 8 而阶梯只到 4 维。
+    ⚠ **第一版直接并进 `_REG_SHAPES`，当场误伤 elementwise**（`sign` 用例集多出两个 5 维 shape、
+    4 个测试变红）——**改变既有算子的用例集 = 悄悄改变已验收过的东西**。改成按需并入，
+    并加回归 `test_ext_rank_ladder_does_not_leak_into_unconstrained_ops` 钉住。
+    ⚠ 只补到 5 维：**没有实际算子要求 6~8 维**，凭空铺满只让笛卡尔积与 golden 开销白涨。
+  - [ ] **遗留**：`_fit_rank` 恒把 0 放最后一维、**造不出 `(0,C,H,W)`** —— 那恰是 im2col 唯一合法的空形态，
+    所以 im2col 现在是「整类空 Tensor 都不测」而非「只测那一种合法的」。要真覆盖得让 `_fit_rank` 知道 0 该放哪轴。
+- ⭐ **过程本身值得记：这个结论中途被推翻过一次。** 施工阶段报的是「Im2col 通了 50 用例 PASS」，
+  而 codex 审出那次 PASS 有一部分建立在 golden **为非法空输入编造输出**上（见下条诚实性缺口）。
+  **补完 0 维闸，Im2col 也 fail-closed 了** —— 反而暴露出更干净的事实：**三个算子撞的是同一堵墙**。
+  ⭐ 另：三个施工 agent **都没有为了跑通而降 rank 或编假 golden**，当场停下并记 gap。这比「跑通了」更值钱。
+- [x] **G4 归约类规模预算已落地**：从 `out_shape()` 推 cost（零新契约、4 份 elementwise 样例一字不动），
+  超预算 → **显式降规模 + 三处留痕**，**不是静默跳过大 shape**（那会让覆盖悄悄缩水而报告显示「已覆盖」）。
+  改前实测 Pdist 类算子直接 `MemoryError`（5.5e11 对 / 2.2 TB）。
+  - [x] **连带闸已补**（codex 抓的静默错过路径）：被降过规模的 case **不得走 trivial-met**。
+    trivial-met 的正当性是「这 case 本来就小、perf 没意义」；降规模 case 是「它本来很大、
+    我们没按目标规模跑」——**没测却算过**。现改判 blocked 并带上原规模。
+  - [ ] 遗留：`validator` 侧仍未消费 `golden_cost`（perf 侧已堵）。
+- [x] **两处对称性收口**：`repo_adapter.main()` 复用 `catlass_adapter` **同一套**守卫
+  （`assertIs` 钉住是同一对象、不是各抄一份）· `run_catlass_mock` 补自报 `defect_injected`。
+- [x] **诚实性缺口已修 + 补上守门**：`Im2col/golden.py` 的 `GOLDEN_PROVENANCE` 声称「不为 numel=0 编造输出」，
+  实测却返回 `(4,2)`——**声明写了、代码没做**，fail-closed 被委托给了 torch（换个替身结论就变，
+  且 dry-run 不 import torch、走不到那层）。同批 `UpsampleNearestExact2d` 有这道闸：
+  **三份 golden 两份防了一份没防**。根因是**三个新算子零测试覆盖**。
+  已补 0 维闸 + 新建 `test_samples_golden_contract.py`（含「provenance 声称 ↔ 实际行为」对账）。
+
+**这轮的引擎侧新账（下一刀的主线，3 个 agent 独立点名）**
+- [ ] `repo_adapter`：`exp_dt = np.bool_ if verify_mode == "exact" else _NP[dtn]`——
+  把「逐位一致」当成了「bool 输出」。**真机通路必炸、mock 通路不经这行** = 典型「本机过、真机炸」。
+  im2col 任务书要求「精度标准为二进制一致」→ exact，而输出是 float32 → 真机实跑报
+  `golden float32(4,2) ≠ 期望 bool(4,2)`。应改走 `precision_policy.derive_output_dtype`。
+- [ ] `gen_cases._BF16_EXACT_OPS = {Sign, Neg}` 是**写死的算子名白名单**，任何新的纯搬运算子
+  （bf16 精确可表示）都被迫把 bf16 挂 deferred——「引擎零内置算子知识」的又一处反例。
+- [ ] `gen_cases._NATIVE` 没有 `bool`，任务书要求的 BOOL 增量造不出用例。
+- [ ] `new_example/run_on_npu.sh:24` 把 vendor 后缀写死 `_math`，而 ops-cv 产出的是 `_cv`——
+  两个 Upsample 在 ops-cv，**真机跑必撞**。与「零硬编码」约定直接冲突。
+- [ ] `taskdoc-to-spec.md §1.2` 缺第三类 dtype gap：「op_def 声明了、但目标硬件的 aclnn 分支没实现」
+  （im2col 的 bool 就是这格，现被迫按 `dtype_deferred` 落）。
+- [ ] **im2col 硬件双源冲突未裁**：任务书 `适配硬件` = A2/A3（→ a3），仓内 `im2col_def.cpp:41` 只
+  `AddConfig("ascend950")`、kernel 只有 arch35（→ a5）。**开跑前必须先定目标机**。
+- [ ] **Upsample 算子名二义（正踩 Equal 那个老坑）**：op_def 注册的是 `UpsampleNearest`
+  （1d/2d/exact 共用一个 kernel、靠 attr 区分），而 spec/golden 用的是 aclnn 接口名 `UpsampleNearestExact2d`。
+  **runner 文件名与 opp 部署按哪个名字定位，须在 acc-runner 环节实读确认。**
+
+
 > 施工方式：7 路并行 agent（按**文件所有权互斥**切分）+ 逐项独立复核 + 集成对账。
 > ⚠ **本机验证有天花板**：Mac 无 torch → 523 测里 59 条红全因此而起，golden 相关通路本机根本验不了。
 > 本机只能证「与基线一致」，**真结论以 a3 容器（真 torch）为准**。
@@ -282,7 +344,11 @@
     ⚠ 原来 `_dry_run` **压根没这道闸** —— 而它现在正是 CP-B 的契约自检，空 dtype 集会安静地
     `emitted=0` 通过 CP-B、跑 0 条也显示「无失败」。这是活的「0 用例冒充验收」。
   - [ ] rank≥5 当前必然 fail-closed（`_REG_SHAPES` 只到 4 维）——是能力边界不是 bug，但填了 rank=5 的算子跑不了。
-  - [ ] `--perf-slow` 是否也下架（同类注入旋钮）。
+  - [x] **`--perf-slow` 已下架**（2026-07-23）——与 `--defect` 同批理由：同类注入旋钮、只对非验收通路有意义；
+    进程内 `run_workflow.run(..., perf_slow=[...])` 的回归能力**完整保留**，拿掉的只是 CLI 旋钮。
+    ⚠ **这是施工 agent 自行拍的板，而本条原记为「未决」**——如实记账，**可推翻**：否决的话要连
+    `PerfSlowFlagRetiredTest` 一起回退，且 `doc/oprunway-todo-plans.md` §922 的本地演示配方
+    已因下架失效、需改写成进程内调用。
   - [ ] canon 页 `catlass-synthetic-demo-cannot-forge-pass`：① 「全文不含 acceptance.json 字样」**已失真**（字样在、语义相反——
     现在是「拒绝以裁决产物名落盘」的白名单，比原表述更强）；② 它自己点名要的**负向测试已补**（7 条），
     proposed→verified 的前置条件已满足、**请人门裁**；③ 记的报错原因已变成 ADR 0011 的「缺 golden.py」。

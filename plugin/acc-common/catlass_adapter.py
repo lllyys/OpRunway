@@ -323,10 +323,17 @@ def materialize_case(case, ctx):
 
 
 def run_correctness(ctx, defect_cases=None, real_outs=None):
-    """④ run_correctness —— mock：kernel out=golden（可注入 defect）；real：读拉回的 out.bin。返回 {cid: out ndarray}。"""
+    """④ run_correctness —— mock：kernel out=golden（可注入 defect）；real：读拉回的 out.bin。返回 {cid: out ndarray}。
+
+    ⚠ **实际注入了哪些 case 记进 `ctx["defect_injected"]`**（不是把调用方传的 `defect_cases` 原样抄回去）：
+    numel==0 或 cid 不在本 caseset 里时并不会真注入，自报的必须是**真发生过的那份**。
+    上游 `run_catlass_mock` 据此在 envelope 上自报 `defect_injected`——口径与 `repo_adapter.run_mock` 对齐
+    （同一契约的两条 mock 通路不许一报一不报）。
+    """
     defect_cases = set(defect_cases or [])
     wd = ctx["work_dir"]
     outs = {}
+    injected = []
     for c in ctx["cases"]:
         cid = c["id"]
         golden = np.load(_safe(wd, c["expected"]["golden_path"]))
@@ -336,8 +343,10 @@ def run_correctness(ctx, defect_cases=None, real_outs=None):
             out = golden.copy()
             if cid in defect_cases and out.size:   # 注入缺陷 → 让 validator 现 fail
                 out.reshape(-1)[0] = out.reshape(-1)[0] + out.dtype.type(1)
+                injected.append(cid)
         np.save(_safe(wd, f"{cid}/out.npy"), out)
         outs[cid] = out
+    ctx["defect_injected"] = sorted(injected)
     return outs
 
 
@@ -450,7 +459,10 @@ def _file_sha256(path):
 EVIDENCE_GRADE_MOCK = "development"          # mock 通路恒此级别：只证管路，不谈裁决
 ACCEPTANCE_NOTE_MOCK = "NON-ACCEPTANCE (mock evidence)：仅证管路/门接通，非 NPU 验收"
 _KNOWN_EVIDENCE_GRADES = (EVIDENCE_GRADE_MOCK, "acceptance_candidate")  # 后者留给真机 evidence
-NON_ACCEPTANCE_MODES = ("catlass_mock",)     # 只准出 development-grade evidence 的通路
+# 只准出 development-grade evidence 的通路。**两个 adapter 的 mock 都在册**：`repo_adapter.run_mock`
+# 的 `"mock"` 同样是「kernel 输出 = golden.copy()」的构造通路，只是实现在另一个模块；漏登记就等于
+# 「洗白 run_mock 的 evidence_grade」没人喊（`repo_adapter.main` 现也过本断言，见该模块 CLI 出口）。
+NON_ACCEPTANCE_MODES = ("catlass_mock", "mock")
 # 裁决/结论类产物名：由 validator / perf_compare / run_workflow 产、被三级机器门按**文件名**读。
 # adapter 只做采集，绝不写这些名字。⚠ `evidence.json` **不在此列**——那正是 adapter 的合法产物。
 RESERVED_ACCEPTANCE_ARTIFACTS = ("acceptance.json", "verdict.json", "perf_report.json")
@@ -466,6 +478,8 @@ def assert_non_acceptance(ev, mode="catlass_mock"):
     的两条依据里，「mock 只产 development-grade」以前**仅体现为 run_catlass_mock 返回字典里的两个字面量**
     ——将来谁把标记删掉、或改成 acceptance_candidate，没有任何东西会喊。本函数把那句文本承诺升成代码断言，
     mock 通路自身（返回前）与 CLI 落盘出口（写文件前）各复核一次。
+    ⚠ **两条 CLI 出口共用本函数**：`catlass_adapter.main` 与 `repo_adapter.main`（后者的 MODES 里同样有
+    `catlass_mock`，只堵一边等于没堵——`repo_adapter.py cs wd out.json catlass_mock` 就是那条绕行道）。
 
     校验三条（任一不满足即 raise，绝不落一份「看起来像验收」的产物）：
     ① `evidence_grade` ∈ 已知枚举；`NON_ACCEPTANCE_MODES` 里的通路恒 `development`；
@@ -503,6 +517,9 @@ def refuse_reserved_out(path):
     危害不在内容而在**文件名**：三级机器门按名读 out_dir 下的 `verdict.json`/`perf_report.json`，
     `acceptance.json` 又是人和 CI 直接看的那份。一份 mock evidence 只要叫对名字摆进验收目录，
     就可能被人（或脚本）当成裁决产物。宁可停下报错，也不给这条捷径。
+
+    ⚠ **凡是往盘上落 adapter 证据的 CLI 都必须先过本函数**——本模块的 `main()` 与 `repo_adapter.main()`
+    都调它（同一份实现、同一份清单，不各写各的；两条出口口径不对称就是漏洞的温床）。
     """
     base = os.path.basename(os.path.normpath(str(path))).lower()
     if base in RESERVED_ACCEPTANCE_ARTIFACTS:
@@ -541,6 +558,14 @@ def run_catlass_mock(caseset, work_dir, defect_cases=None):
                 "harness_kind": "generated_harness", "evidence_grade": EVIDENCE_GRADE_MOCK,
                 "acceptance_note": ACCEPTANCE_NOTE_MOCK,
                 "arch": ctx["arch"], "evidence": ev_list}
+    # 注入过缺陷的 evidence **自报**被人为破坏（口径照 `repo_adapter.run_mock`，不另发明）：
+    # 否则「这份 bad_count>0 是夹具造的还是算子真错的」只能靠调用方自觉，读者无从分辨——同一契约的
+    # 两条 mock 通路一报一不报，本身就是下一个「看起来对」的温床。取 ctx 里**真发生过**的那份。
+    injected = ctx.get("defect_injected") or []
+    if injected:
+        envelope["defect_injected"] = sorted(injected)
+        envelope["acceptance_note"] = (ACCEPTANCE_NOTE_MOCK +
+                                       "；⚠ 本次由测试夹具**人为注入缺陷**，结果不代表任何真实算子")
     # C5：标记与 envelope 同生共死——任何调用方（本 CLI / repo_adapter.main / run_workflow / 测试）拿到的
     # 都是复核过的 non-acceptance envelope，而不是「但愿注释还在」。
     return assert_non_acceptance(envelope, "catlass_mock")

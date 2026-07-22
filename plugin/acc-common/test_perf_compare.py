@@ -493,3 +493,35 @@ class RunWorkflowNonAcceptanceSurfaceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScaledCaseNotTrivialMetTest(unittest.TestCase):
+    """G4 连带闸：被 golden 规模预算**降过规模**的 case，不得走 trivial-met 冒充达标。
+
+    trivial-met 的正当性是「这个 case 本来就小、perf 没意义」；
+    降规模 case 是「它本来很大、我们没按目标规模跑」——**没测却算过**，两者性质完全不同。
+    不拦的话：G4 把大 shape 降到阈值以下 → 这里判达标 → 报告显示性能通过，而目标规模一次没跑。"""
+
+    @staticmethod
+    def _cs(cid, shape, scaled):
+        cs = _caseset([(cid, ["常规"], shape)])
+        cs["cases"][0]["expected"] = {"golden_path": f"{cid}/golden.npy"}
+        if scaled:
+            cs["cases"][0]["expected"]["cost_scaled"] = {
+                "from": [1024, 1024], "to": list(shape), "reason": "golden 规模预算"}
+        return cs
+
+    def test_scaled_small_case_is_blocked_not_trivial_met(self):
+        r = pc.perf_compare(_spec(1.0), self._cs("s0", [8, 8], True), _ev({}), _bl({}))
+        row = next(x for x in r["per_case"] if x["case_id"] == "s0")
+        self.assertFalse(row["达标"], row)
+        self.assertTrue(row.get("blocked"), row)
+        self.assertNotIn("trivial", row)
+        self.assertIn("cost_scaled", row)
+
+    def test_genuinely_small_case_still_trivial_met(self):
+        """对照：**没被降过规模**的小 case 仍走 trivial-met，证补的闸没矫枉过正。"""
+        r = pc.perf_compare(_spec(1.0), self._cs("s0", [8, 8], False), _ev({}), _bl({}))
+        row = next(x for x in r["per_case"] if x["case_id"] == "s0")
+        self.assertTrue(row["达标"], row)
+        self.assertTrue(row.get("trivial"), row)

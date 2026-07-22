@@ -16,8 +16,12 @@
 
 | 文件 | 说明 |
 |---|---|
-| `isclose.spec.json` · `sign.spec.json` · `equal.spec.json` · `neg.spec.json` | 真实社区算子的参考 spec（人读示形用） |
+| `isclose.spec.json` · `sign.spec.json` · `equal.spec.json` · `neg.spec.json` | **elementwise** 真实社区算子（输出同输入形状，对应 golden 不导出 `out_shape`） |
+| `im2col.spec.json` | **shape_transform**（2026-07-23 新增）。输出形状由属性公式推：`L = ∏ floor((spatial+2p−d(k−1)−1)/s + 1)`，且**输出 rank 随输入 rank 跳变**（3 维入→2 维出、4 维入→3 维出）。C1/C2/C3 三条契约的正例：`out_shape()` · `list[int]` attr · `rank: [3,4]` |
+| `upsample_nearest_exact2d.spec.json` · `upsample_nearest_3d.spec.json` | **shape_transform**（2026-07-23 新增）。输出形状由 `output_size` 属性直接给定。⚠ **两者当前都跑不通**（3d 卡 rank=5 超出 `_REG_SHAPES` 阶梯、2d 卡引擎强制的空 Tensor 用例与任务书「不支持空Tensor」冲突）——保留是因为**它们准确记录了引擎缺口在哪**，见各自的 `task_pr_gaps` |
 | `catlass_basic_matmul.spec.json` | **synthetic demo**（catlass 库 example，无 task_doc/PR，非社区任务） |
+
+⚠ **禁读纪律对新增的这三份同样适用**——本表只是索引，不是「可以读」的许可。
 
 > 单元测试也从这里读真样例（真 op 名 → GOLDEN 可解析、真内容 → 断言稳定），
 > 但**测试消费 ≠ acc-spec 产 spec 时可查阅**：禁读纪律只约束「产 spec」阶段。

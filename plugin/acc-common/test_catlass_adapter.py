@@ -10,6 +10,12 @@ mock 端到端 + defect 翻 FAIL、外部 GPU 基线校验（scope 不符/缺用
 
 另含 **C5 负向门 `NonAcceptanceInvariantTest`**：断言 catlass_mock **产不出**干净 PASS 的验收产物
 （canon 页 [[Synthetic catlass demo cannot forge a PASS acceptance]] 点名要、一直缺的那条自动化负向测试）。
+
+再含 **C5 收口三组（2026-07-22）**，堵的都是「一边堵了、另一边没堵」：
+- `CliExitSymmetryTest` —— `repo_adapter` 的 CLI 出口与 `catlass_adapter` 的**同一套**守卫（真走一遍
+  `repo_adapter.py … acceptance.json catlass_mock` 这条绕行道）；
+- `DefectSelfReportSymmetryTest` —— 两条 mock 通路对 `defect_injected` 的自报口径一致；
+- `PerfSlowFlagRetiredTest` —— `--perf-slow` 与 `--defect` 同批下架（夹具进程内仍在）。
 """
 import inspect, json, os, shutil, tempfile, unittest
 import numpy as np
@@ -567,6 +573,158 @@ class NonAcceptanceInvariantTest(unittest.TestCase):
                             f"catlass_mock 竟跑出干净退出码 + acceptance.json：{acc.get('overall')}")
         self.assertNotIn(acc.get("state"), ("PASSED",),
                          f"catlass_mock 竟产出干净 PASS 的 acceptance.json：{acc}")
+
+
+class CliExitSymmetryTest(unittest.TestCase):
+    """C5 收口 · **两条 CLI 出口口径对称**（2026-07-22）。
+
+    上一轮只给 `catlass_adapter.main()` 加了「名字不许冒充裁决产物 + envelope 须自带 NON-ACCEPTANCE」，
+    但 `repo_adapter.MODES` 里同样有 `catlass_mock` → `repo_adapter.py cs wd acceptance.json catlass_mock`
+    是现成的绕行道。本类把绕行道**真的走一遍**，断言它被同一套守卫挡住。
+
+    测试放本文件而非 test_runner_lookup：守卫的唯一真相源在 `catlass_adapter`，测试跟着守卫走。
+    """
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.work = os.path.join(self.d, "work")
+        os.makedirs(self.work, exist_ok=True)
+        os.environ["OPRUNWAY_CATLASS_ARCH"] = "3510"
+        self.cs = A.build_matmul_caseset(_demo_spec(), self.work)
+        self.cs_path = os.path.join(self.d, "caseset.json")
+        with open(self.cs_path, "w", encoding="utf-8") as f:
+            json.dump(self.cs, f, ensure_ascii=False)
+
+    def tearDown(self):
+        os.environ.pop("OPRUNWAY_CATLASS_ARCH", None)
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    # —— ① 用的是**同一个**守卫对象，不是各写各的同名副本（副本必漂移）
+    def test_repo_adapter_reuses_the_very_same_guards(self):
+        import repo_adapter as R
+        self.assertIs(R.refuse_reserved_out, A.refuse_reserved_out)
+        self.assertIs(R.assert_non_acceptance, A.assert_non_acceptance)
+        self.assertEqual(R.RESERVED_ACCEPTANCE_ARTIFACTS, A.RESERVED_ACCEPTANCE_ARTIFACTS)
+        self.assertIsNone(R._CATLASS_IMPORT_ERR, "catlass_adapter 没导入成功，守卫退成了 fail-closed 桩")
+
+    # —— ② 正向对照（防写成永远绿的假测试）：普通输出名必须真跑通、真落盘
+    def test_normal_output_name_still_works(self):
+        import repo_adapter as R
+        out = os.path.join(self.d, "evidence.json")
+        R.main([self.cs_path, self.work, out, "catlass_mock"])
+        ev = json.load(open(out, encoding="utf-8"))
+        self.assertEqual(ev["evidence_grade"], "development")
+        self.assertIn("NON-ACCEPTANCE", ev["acceptance_note"])
+
+    # —— ③ 绕行道本体：经 repo_adapter CLI 递裁决产物名 → 必须拒 + 不落盘（两个 mode 都试）
+    def test_repo_adapter_cli_refuses_reserved_output_names(self):
+        import repo_adapter as R
+        for mode in ("mock", "catlass_mock"):
+            for name in A.RESERVED_ACCEPTANCE_ARTIFACTS:
+                out = os.path.join(self.d, name)
+                with self.assertRaises(SystemExit, msg=f"{mode}/{name} 竟被允许作输出名"):
+                    R.main([self.cs_path, self.work, out, mode])
+                self.assertFalse(os.path.exists(out), f"{mode}/{name} 被拒后仍落了盘")
+
+    # —— ④ 内容侧同样对称：伪造成「够格裁决」的 envelope 经 repo_adapter CLI 也必须炸 + 不落盘
+    def test_repo_adapter_cli_blocks_forged_envelope(self):
+        import repo_adapter as R
+
+        def _forger(caseset, work_dir, **_kw):
+            return {"op": caseset["op"], "repo_mode": "catlass_mock",
+                    "evidence_grade": "acceptance_candidate",   # 洗白成「够格裁决」
+                    "acceptance_note": "ACCEPTED",              # 抹掉 NON-ACCEPTANCE
+                    "overall": "PASS", "state": "PASSED", "exit_code": 0, "evidence": []}
+        out = os.path.join(self.d, "evidence.json")
+        saved = R.MODES["catlass_mock"]
+        R.MODES["catlass_mock"] = _forger
+        try:
+            with self.assertRaises(ValueError):
+                R.main([self.cs_path, self.work, out, "catlass_mock"])
+        finally:
+            R.MODES["catlass_mock"] = saved
+        self.assertFalse(os.path.exists(out), "伪造的 envelope 竟经 repo_adapter 落了盘")
+
+    # —— ⑤ run_mock 通路也在 non-acceptance 名册里（漏登记＝洗白它的 grade 没人喊）
+    def test_mock_mode_registered_as_non_acceptance(self):
+        self.assertIn("mock", A.NON_ACCEPTANCE_MODES)
+        with self.assertRaises(ValueError):   # 把 run_mock 的产物洗白成验收级 → 必须被咬住
+            A.assert_non_acceptance(
+                {"op": "X", "repo_mode": "mock", "evidence_grade": "acceptance_candidate",
+                 "evidence": []}, "mock")
+
+
+class DefectSelfReportSymmetryTest(unittest.TestCase):
+    """C5 收口 · 两条 mock 通路对 `defect_injected` 的**自报口径必须一致**（2026-07-22）。
+
+    `repo_adapter.run_mock` 早就自报「本次被人为注入过缺陷」，`catlass_adapter.run_catlass_mock` 不报
+    —— 同一契约一报一不报，读者就得靠调用方自觉才分得清「bad_count>0 是夹具造的还是算子真错的」。
+    """
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        os.environ["OPRUNWAY_CATLASS_ARCH"] = "3510"
+        self.cs = A.build_matmul_caseset(_demo_spec(), self.d)
+
+    def tearDown(self):
+        os.environ.pop("OPRUNWAY_CATLASS_ARCH", None)
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_no_injection_no_key(self):
+        ev = A.run_catlass_mock(self.cs, self.d)
+        self.assertNotIn("defect_injected", ev)          # 没注入就不带这个键（同 run_mock）
+
+    def test_injection_is_self_reported(self):
+        bad = self.cs["cases"][0]["id"]
+        ev = A.run_catlass_mock(self.cs, self.d, defect_cases=[bad])
+        self.assertEqual(ev["defect_injected"], [bad])   # evidence **自报**被人为破坏
+        self.assertIn("人为注入", ev["acceptance_note"])
+        self.assertIn("NON-ACCEPTANCE", ev["acceptance_note"])   # 自报不许把原标记挤掉
+        A.assert_non_acceptance(ev, "catlass_mock")      # 加了字段仍过不变量（否则等于堵死夹具）
+
+    def test_reports_what_actually_happened_not_what_was_asked(self):
+        """自报的是**真注入过**的那份：caseset 里根本没有的 cid 不能凭空写进 defect_injected。"""
+        ev = A.run_catlass_mock(self.cs, self.d, defect_cases=["no_such_case_id"])
+        self.assertNotIn("defect_injected", ev)
+
+    def test_two_mock_paths_agree(self):
+        """同一份 caseset、同一个 cid：两条 mock 通路都得报出同样的 `defect_injected`。"""
+        import repo_adapter as R
+        bad = self.cs["cases"][0]["id"]
+        ev_catlass = A.run_catlass_mock(self.cs, self.d, defect_cases=[bad])
+        ev_generic = R.run_mock(self.cs, self.d, defect_cases=[bad])
+        self.assertEqual(ev_catlass["defect_injected"], ev_generic["defect_injected"])
+        for ev in (ev_catlass, ev_generic):
+            self.assertIn("NON-ACCEPTANCE", ev["acceptance_note"])
+            self.assertIn("人为注入", ev["acceptance_note"])
+
+
+class PerfSlowFlagRetiredTest(unittest.TestCase):
+    """C5 收口 · `--perf-slow` 与 `--defect` 同批下架（2026-07-22 本轮判定）。
+
+    判据：它同属「CLI 上的注入旋钮」，能让 mock 跑出一份**人造的性能结论**（`PASSED_WITH_RISK`/exit 2
+    或「性能未达成」）。mock 不再产 acceptance.json 只削弱了「落成裁决文件」那条路，**没削弱**终端输出、
+    退出码、`baseline.json` 被截图/抄进报告那条路。夹具本身保留（进程内可达），拿掉的只是 CLI 入口。
+    """
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+
+    def test_flag_removed_from_cli(self):
+        import subprocess, sys as _sys
+        r = subprocess.run([_sys.executable, os.path.join(self._HERE, "run_workflow.py"),
+                            "nonexistent.spec.json", "--mode", "mock", "--perf-slow", "x"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)   # 2 = argparse 用法错
+        self.assertIn("--perf-slow", r.stderr)                   # unrecognized arguments
+
+    def test_fixture_still_reachable_in_process(self):
+        import run_workflow as W
+        self.assertIn("perf_slow", inspect.signature(W.run).parameters)
+
+    def test_still_refused_on_acceptance_path(self):
+        """进程内夹具作用于验收通路仍 fail-closed（下架 CLI 不等于放松这条）。"""
+        import run_workflow as W
+        with self.assertRaises(SystemExit):
+            W.run("nonexistent.spec.json", mode="new_example", perf_slow=["c0"])
 
 
 class StaticBuildGateTest(unittest.TestCase):

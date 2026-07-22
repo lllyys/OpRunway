@@ -343,6 +343,18 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
         # §trivial-met：退化/微小 case（numel<阈值）无意义 → 达标、不需基线/scope/us（评审 #2、用户 Q4）。
         # 放循环首：连缺基线（如 GPU 标杆只给大 shape）也不 blocked，perf 达标由大 shape 主导。
         cnumel = _case_numel(case_by_id.get(cid))
+        # ⚠ G4 连带闸（2026-07-23）：被 golden 规模预算**降过规模**的 case，**不得走 trivial-met**。
+        # trivial-met 的正当性是「这个 case 本来就小、perf 没意义」；而降规模 case 是
+        # 「它本来很大、我们没按目标规模跑」——同样是「免测达标」，前者是事实，后者是**没测却算过**。
+        # 不拦的话：G4 把大 shape 降到 4096 以下 → 这里判达标 → 报告显示性能通过，而目标规模一次没跑。
+        _cs = ((case_by_id.get(cid) or {}).get("expected") or {}).get("cost_scaled")
+        if _cs and isinstance(cnumel, int) and 0 < cnumel < trivial_numel:
+            rows.append({"case_id": cid, "达标": False, "blocked": True, "numel": cnumel,
+                         "cost_scaled": _cs,
+                         "note": f"降规模后落到 trivial 阈值以下（numel={cnumel}<{trivial_numel}）——"
+                                 f"**不按 trivial-met 免测**：该 case 的目标规模从未跑过，"
+                                 f"判它达标等于「没测却算过」。原规模见 cost_scaled。"})
+            continue
         if isinstance(cnumel, int) and 0 < cnumel < trivial_numel:
             rows.append({"case_id": cid, "达标": True, "trivial": True, "numel": cnumel,
                          "note": f"trivial-met（numel={cnumel}<{trivial_numel}，退化 case perf 无意义免测）"})

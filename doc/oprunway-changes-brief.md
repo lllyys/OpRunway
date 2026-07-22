@@ -18,6 +18,23 @@
 6. 远程 NPU 环境（哪台机、catlass 在哪 build、是否进 Docker）待用户提供后补进 CLAUDE.md。
 7. 优先级（Codex 排序）：Q3>Q4>Q5>Q6>Q1>Q2>Q8>Q9>Q7。完整见 `doc/oprunway-design.md` §13。
 
+## 2026-07-23
+
+- **拿真算子把 shape_transform 的「生成 + mock 契约」通路走通了 —— 三个全通（⚠ 不是真机验收全通），结论中途被自己推翻过一次** —— 4 路并行施工 + 5 路复核。此前 C1–C5 的引擎侧全是用假算子（`FakeReduce` 之类）单测的，这轮换成三个真算子。
+  - **最终结果：三个真算子全通** —— Im2col 50 用例 · UpsampleNearestExact2d 18 · UpsampleNearest3d 20（rank 5）。关键实测 `(2,2,2,2) → (2,8,9)`：**4 维入、3 维出，输出 rank 随输入 rank 跳变**。这是 C1 那个决定的直接检验 —— 这种形状任何「spec 里写小表达式」的方案都表达不下，而 `out_shape()` 十来行普通 Python 就写完了。C2（`[2,2]`→manifest 单 token `2,2`）、C3（`rank` 过滤阶梯）也一并端到端跑通。
+  - ⚠ **但这个结论中途被推翻过一次，过程本身值得记**：施工阶段报的是「Im2col 通了 50 用例 PASS、两个 Upsample 卡住」。而 codex 审出来——那次 PASS 有一部分建立在 golden **为非法空输入编造输出**上（即下面那条诚实性缺口）。**补完 0 维闸，Im2col 也 fail-closed 了**。这反而暴露出更干净的事实：**三个算子撞的是同一堵墙**，不是各自的个案。
+  - 于是把那堵墙拆了，两个引擎缺口都补上：
+    - **`allow_empty_tensor`（spec 新开关，缺省 true = 现行为不变）**：opbase §1.4 把「空 Tensor」当普适特殊场景强塞，但**很多算子任务书白纸黑字写「不支持空Tensor」**。强塞只有两个出口——golden 为非法输入编造输出（= 替算子发明它不支持的语义），或整条链卡死。⚠ 开关只收真布尔，写成 `"false"`/`0` 直接拒（真值性判断会把它们悄悄读成「允许」，本仓栽过这种 fail-open）。
+    - **`_EXT_RANK_SHAPES` 补 5 维，且只在 rank 约束点名时并入**：`_MAX_RANK` 本是 8 而阶梯只到 4 维，rank=5 的算子过滤后一条 shape 不剩。⚠ **第一版直接并进 `_REG_SHAPES`，当场误伤 elementwise**（`sign` 用例集多出两个 5 维 shape、4 个测试变红）—— 改变既有算子的用例集 = 悄悄改变已验收过的东西。改成按需并入，并加了一条回归钉住「无 rank 约束的算子不得看到 5 维」。
+  - **G4 归约类规模预算**：从 `out_shape()` 推 cost（零新契约），超预算→**显式降规模 + 三处留痕**，不是静默跳过大 shape。改前实测 Pdist 类算子会 `MemoryError`（5.5e11 对 / 2.2 TB），改后降到 `(64,128)` 并把 `scaled_cases` / `skipped_shapes` 记进账本。
+  - **两处对称性收口**：`repo_adapter.main()` 复用 `catlass_adapter` **同一套**守卫（不是抄一份，测试用 `assertIs` 钉住是同一个对象）· `run_catlass_mock` 补自报 `defect_injected` · `--perf-slow` 下架（与 `--defect` 同批理由）。
+  - ⚠ **抓到一条诚实性缺口，形状很典型**：`Im2col/golden.py` 的 `GOLDEN_PROVENANCE` 白纸黑字写「**本文件不为 numel=0 编造输出**」，实测 `out_shape([(1,1,0)],…)` 却返回 `(4,2)` —— **声明写了、代码没做**，fail-closed 其实被委托给了 torch（换个替身结论就变，且 dry-run 阶段根本不 import torch、走不到那层）。同批的 `UpsampleNearestExact2d:107` 却有这道闸：**三份 golden，两份防了、一份没防**。根因是**三个新算子零测试覆盖**（`grep -l 'Im2col\|Upsample' test_*.py` 零命中）。已补 0 维闸 + 新建 `test_samples_golden_contract.py`（5 测，含「provenance 声称 ↔ 实际行为」的对账）。
+  - **又一条静默错过路径（codex 抓的）**：G4 的降规模留痕**没有任何门去消费** —— 一个被降到 trivial 阈值以下的性能用例，下游会判「trivial-met 免测达标」。但 trivial-met 的正当性是「这 case 本来就小、perf 没意义」，而降规模 case 是「它本来很大、我们没按目标规模跑」——**没测却算过**。已改成 blocked 并带上原规模。
+  - 另修：一条**撒谎的测试**（docstring 声称覆盖「无 golden.py 时坏预算也拦」，实际那条路从未被行使）· im2col 补记 rank 覆盖窟窿（4 维入只有 2/50、空 Tensor 0 覆盖）· `gen_cases` docstring 还写着「4 份样例都不导出 out_shape」（现已 7 份、3 份导出）· `samples/specs/README.md` 补上新增三份的索引与禁读纪律。
+  - **验证**：torch 替身 678 测全绿、裸跑与基线零 diff、两道门 PASS/SYNCED。⚠ **三份新 golden 的数值一份都没跟真 PyTorch 对过**（本机无 torch，用的是各自的替身）——能证的只有「与按算子文档独立转写的规格逐位一致」。
+
+- **U5 · 钉死被测 commit（`head_sha` 取材，退役分支名兜底）** —— canon `pr-head-commit-is-the-tested-object` 自带的「open+fork 可解析性尚未实测」这个开放问题，**实测有答案了**，而且现行兜底被实锤是错的：MR 3400 的 `head.ref` **字面就叫 `master`**，旧兜底会拿它去 base 仓取（实测 sha `e16a230c` ≠ head `9b494b2d`）——**静默取到完全不相干的代码，却仍报告「取自 PR head」**。改成只按 `head_sha` 取、base 优先 fork 兜底（同一个 sha，不引入分支名风险）；拿不到 sha → 一个文件都不取 + 机读 `blocked="missing_head_sha"`（只记 note 照常返回 = fail-open）。实测复跑：MR 3400 的 7 份、MR 2663（正是 Pdist 首跑那个）的 6 份关键文件全部取自各自 head commit。⚠ codex 抓到我把 n=2 的实测写成了「是常态」「不必特判 fork 仓」——把有限观测扩大成平台保证，已改回。
+
 ## 2026-07-22
 
 - **shape_transform 通路打通 + mock 拔出验收路径 + dtype 挂账落地（C1–C5）** —— 用户拍了四个决定后，6 路并行 agent 施工、7 路复核 + 集成对账。
