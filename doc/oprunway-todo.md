@@ -111,7 +111,24 @@
 - [ ] **U2 · `fetch_source.py` 的 PR URL 正则太窄 + 失败太安静**：用户给 `/pull/2663`（GitHub 风格），脚本只认 `pulls|merge_requests`，**不报错**、产出空 `pr_facts` + 一条 note 就继续往下走。agent 是 `grep` 脚本源码才诊断出来、自己把 URL 规范化成 `/merge_requests/2663` 重跑的。→ 换个不肯读源码的 agent，对应校验就会带着空 `target_dir` 糊过去。改法：接受 `/pull/N` 形态；解析失败 **fail-loud**，不产空壳往下传。
 - [ ] **U3 · `samples/` 不随插件分发（预测命中）**：实测 agent 在 `plugin/` 下 `find samples/golden` 得 `No such file or directory`——`samples/` 在**仓根**，而 marketplace `source: "./plugin"`。→ `acc-runner/SKILL.md` 让 agent「照抄 `samples/runners/*.cpp`」指向的是不存在的文件，runner 生成会静默退化成凭空写（正撞 Equal 血教训）。改法：搬进 `plugin/`，或把骨架内联进 skill 参考文档。
 - [ ] **U4 · 「干净 session」隔离实为无效**：skill 注入时报的 base directory 是**活仓** `/…/OpRunway/plugin/skills/acceptance-workflow`（**不是** `~/.claude/plugins/cache/`）——marketplace 是 `directory` 源、`installLocation` 直指仓根。于是 agent 那 30 条 Bash 几乎全在读活仓源码。**连带**（⚠ 下句是**按本次实测推的**、未穷举验证）：`/plugin install` 的快照看来只决定**组件注册**（有哪些 agent/skill、frontmatter 长什么样）；至少对「按 base directory 解析的文件」和「agent 直接读的源码」这两类，读的是**活仓工作树** → 仓一旦切分支，这部分行为就可能与安装时的快照对不上。要真隔离得换非 `directory` 源。
-- [ ] **U5 · head 兜底照旧（预测命中）**：`pr_facts.json` 得 `"base": "master", "head": "master", "merged": true` —— head 兜底真的触发了，全程无 sha。本次因 PR 已合入而无害，但「被测 = PR 版」仍无机器保证（承 canon `pr-head-commit-is-the-tested-object`，`proposed`）。
+- [x] **U5 · 已修（2026-07-22），且 canon 那个「尚未实测」的开放问题有答案了**：
+  原状是 `pr_facts.json` 得 `"base": "master", "head": "master"`、**全程无 sha**，兜底 `head→base→master→main`。
+  **真打 gitcode API 实测（cann/ops-math）**：
+  - **MR 3400（open）**：`head.repo` 是**贡献者 fork**、`head.ref` **字面就叫 `"master"`** →
+    按分支名去 base 仓取会拿到 base 的 master（**实测 sha `e16a230c` ≠ head `9b494b2d`**）——
+    **静默取到完全不相干的代码，却仍记成「取自 PR head」**。这不是理论风险，是活的。
+  - **MR 2663（merged，正是 Pdist 首跑那个）**：head 同样在 fork（`xiaoy2459/ops-math`）上。
+    **实测的这 2 个 PR head 都在 fork 上。**⚠ n=2，只能说「fork 情形真实存在且不罕见」，
+    **不足以断言「是常态」**——要下这个结论得抽样统计（未做）。
+  - **canon 页问的「open+fork 的 `contents?ref=<sha>` 可解析性」→ 在实测的这 2 个 PR 上可以**：
+    `ref=<head_sha>` 对 **base 仓** HTTP 200。⚠ **这不是平台保证**——两次 200 不能证明
+    「所有仓、所有 fork commit 都可达」。故实现仍留了一层退路：base 仓拿不到时，
+    **用同一个 sha** 退到 `head_repo`（不引入分支名风险）。
+  **改法**：`pr_facts` 记 `head_sha`/`head_repo`/`is_fork`；关键文件**只按 head_sha 取、退役分支名兜底**；
+  拿不到 sha → **一个文件都不取**并说清为什么（宁可没有，不要来源不明的）。
+  实测复跑：MR 3400 的 7 份、MR 2663 的 6 份关键文件**全部取自各自 head commit**。
+  ⚠ 连带：canon `pr-head-commit-is-the-tested-object`（`proposed`）的前置疑问已被实测解答，
+  **具备 promote 材料**——但**须走 bureau**，不可手改。
 
 #### U6 · 默认走 mock 是错的；mock 本身就不该存在（用户 2026-07-22 定）
 

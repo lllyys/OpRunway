@@ -139,6 +139,20 @@ def fetch_pr(pr_url, out_dir):
         facts["state"] = pr.get("state")
         facts["base"] = (pr.get("base") or {}).get("ref")
         facts["head"] = (pr.get("head") or {}).get("ref")
+        # U5：**被测对象 = PR head 那个 commit**，钉 sha 而非分支名。分支名不可靠有两个实测理由：
+        #   ① merged PR 的 head 分支常被删；
+        #   ② open PR 的 head 多在**贡献者 fork** 上，且 head.ref 可能字面就叫 "master"
+        #      （实测 cann/ops-math MR 3400：head.repo=<fork>、head.ref="master"）——
+        #      按分支名去 base 仓取会**静默取到 base 仓的 master**（实测 sha e16a230c ≠ head 9b494b2d），
+        #      拿到完全不相干的代码却报告「取自 PR head」。
+        # 实测结论（2026-07-22，真打 gitcode API）：**fork 的 head sha 可直接从 base 仓解析**
+        #   （`contents?ref=<head_sha>` 对 base 仓 HTTP 200），故不需特判 fork 仓。
+        facts["head_sha"] = (pr.get("head") or {}).get("sha")
+        facts["head_repo"] = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
+        # is_fork：**不知道就是 None，别默认「同仓」**（unknown 当成同仓会让下游少一层警觉）；
+        # 比较前两边同样规范化（大小写/首尾空白），否则 Cann/Ops-Math 会被误判成 fork。
+        _hr = (facts["head_repo"] or "").strip().casefold()
+        facts["is_fork"] = (_hr != f"{owner}/{repo}".strip().casefold()) if _hr else None
         facts["merged"] = pr.get("merged") if "merged" in pr else (pr.get("state") == "merged")
     else:
         facts["notes"].append(f"取 PR 元信息失败 HTTP {st}")
@@ -150,14 +164,36 @@ def fetch_pr(pr_url, out_dir):
     op, target_dir = _guess_op(paths)
     facts["op"], facts["target_dir"] = op, target_dir
     # 关键文件：op 自带 example（runner 锚定用）+ op_def（支持 dtype）
-    # merged PR 的 head 分支常被删 → 按 head→base→master→main 多 ref 兜底
-    refs = [r for r in [facts.get("head"), facts.get("base"), "master", "main"] if r]
+    # ⚠ **只按 head_sha 取，不再按分支名兜底**（U5，2026-07-22 实测后收紧）。
+    #   旧兜底 `head→base→master→main` 是**静默取错代码**的路：open PR 的 head.ref 可能字面叫 "master"，
+    #   拿它去 base 仓会取到 base 的 master（实测两者 sha 不同），却仍被记成「取自 PR head」。
+    #   宁可取不到（下游据 notes 判断），也不拿一份来源不明的代码冒充被测对象。
+    head_sha = facts.get("head_sha")
+    refs = [head_sha] if head_sha else []
+    if not head_sha:
+        # ⚠ 不能只记 note 就照常返回——下游（CP-A / acc-spec）没有机器硬门查 head_sha，
+        # 「照常返回」等于让它带着无法溯源的取材继续抽 spec = fail-open。给一个**机读**的阻断状态。
+        facts["blocked"] = "missing_head_sha"
+        facts["notes"].append(
+            "PR 元信息里没有 head.sha → **无法钉死被测 commit**，关键文件一律不取"
+            "（不按分支名兜底：那会静默取到 base 仓同名分支的代码、与 PR 实际内容无关）。"
+            "已置 blocked='missing_head_sha'：编排层须停下，**不得据此往下抽 spec / 产 runner**。")
+
+    # 取仓顺序：base 仓优先，**404 时用同一个 sha 退到 head_repo**。
+    # ⚠ 「fork 的 sha 一定能从 base 仓解析」只在 2026-07-22 实测的两个 PR 上观察到，
+    #   **不是平台保证**——不能据此断定所有仓/所有 fork commit 都可达。退一层是廉价的保险，
+    #   且因为**用的仍是同一个 sha**，不会重新引入「按分支名取错代码」的风险。
+    _repos = [(owner, repo)]
+    _hr = facts.get("head_repo")
+    if _hr and "/" in _hr and _hr.strip().casefold() != f"{owner}/{repo}".strip().casefold():
+        _repos.append(tuple(_hr.split("/", 1)))
 
     def _grab(rel):
         for r in refs:
-            c = _repo_file(owner, repo, rel, r)
-            if c:
-                return c, r
+            for o2, r2 in _repos:
+                c = _repo_file(o2, r2, rel, r)
+                if c:
+                    return c, r
         return None, None
 
     key, key_ref = {}, {}
@@ -170,10 +206,11 @@ def fetch_pr(pr_url, out_dir):
                 key[rel], key_ref[rel] = c, r
     facts["key_files"] = key
     facts["key_files_ref"] = key_ref  # 每个关键文件实际取自哪个 ref（供下游判新鲜度）
-    stale = [rel for rel, r in key_ref.items() if facts.get("head") and r != facts["head"]]
-    if stale:
-        facts["notes"].append(f"{len(stale)} 个关键文件非取自 PR head（head 分支已删/为 fork/open PR）"
-                              f"，兜底取自 base/master——内容可能与 PR 实际 head 有差，请核")
+    # 现在只有 head_sha 一个 ref，取到的必定就是 head；stale 概念随兜底一并退役。
+    # 保留一条正向记账：明确告知下游「这些文件确实钉在哪个 commit 上」。
+    if key and head_sha:
+        where = ("fork " + str(facts.get("head_repo"))) if facts.get("is_fork") else "同仓"
+        facts["notes"].append("关键文件均取自 PR head commit %s（%s）" % (head_sha[:12], where))
     if not key:
         facts["notes"].append("未取到 example/op_def 关键文件内容（runner 锚定需另取）")
     return _dump_facts(facts, out_dir)

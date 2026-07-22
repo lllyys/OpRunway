@@ -152,6 +152,93 @@ class FetchPrFailModeTest(unittest.TestCase):
         self.assertEqual(facts["target_dir"], "math/isclose")
 
 
+class HeadShaPinningTest(unittest.TestCase):
+    """U5：**被测对象 = PR head 那个 commit** —— 钉 `head.sha`，不按分支名兜底。
+
+    2026-07-22 真打 gitcode API 实测（cann/ops-math）：
+      · MR 3400（open）：`head.repo` 是**贡献者 fork**、`head.ref` 字面就叫 `"master"`；
+        按分支名去 base 仓取会拿到 base 的 master（sha `e16a230c` ≠ head `9b494b2d`）——
+        **静默取到完全不相干的代码，却仍被记成「取自 PR head」**。
+      · MR 2663（merged，正是 Pdist 首跑那个）：head 同样在 fork 上，旧实现记的是 `head=base="master"`、无 sha。
+      · `contents?ref=<head_sha>` 对 **base 仓** HTTP 200（**仅这 2 个 PR 实测，非平台保证**）→
+        实现以 base 仓为首选、拿不到时用**同一个 sha** 退到 head_repo。
+    桩掉 `_get`/`_repo_file`，绝不打真网络。"""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self._get, self._file = fs._get, fs._repo_file
+        self.asked = []          # [(owner, repo, ref)]
+
+    def tearDown(self):
+        fs._get, fs._repo_file = self._get, self._file
+
+    def _stub(self, head_sha, head_ref="master", head_repo="contrib/ops-math"):
+        head = {"ref": head_ref, "sha": head_sha, "repo": {"full_name": head_repo}}
+
+        def g(url, params=None, timeout=30):
+            if url.endswith("/files"):
+                return 200, [{"filename": "experimental/math/foo/examples/test_aclnn_foo.cpp"}]
+            return 200, {"title": "t", "state": "open", "base": {"ref": "master"}, "head": head}
+        fs._get = g
+        # ⚠ 桩必须记 **(owner, repo, ref) 三元组**：只记 ref 的话，实现哪怕向错误的仓请求，测试也全绿。
+        fs._repo_file = lambda o, r, p, ref=None: (self.asked.append((o, r, ref)) or "src") if ref else None
+
+    def test_key_files_pinned_to_head_sha_not_branch_name(self):
+        self._stub("9b494b2d835fd8a9")
+        fs.fetch_pr("https://gitcode.com/cann/ops-math/merge_requests/3400", self.d)
+        facts = json.load(open(os.path.join(self.d, "pr_facts.json"), encoding="utf-8"))
+        self.assertEqual(facts["head_sha"], "9b494b2d835fd8a9")
+        self.assertTrue(facts["is_fork"], "head.repo 与 base 仓不同 → 应判 fork")
+        # 核心断言：**只按 sha 问过**，一次都没拿分支名去问（那正是取错代码的路）
+        refs = {a[2] for a in self.asked}
+        self.assertEqual(refs, {"9b494b2d835fd8a9"}, self.asked)
+        self.assertNotIn("master", refs)
+        # 且首选 base 仓（fork 只作 404 退路）——证没有一上来就打 fork
+        self.assertEqual(self.asked[0][:2], ("cann", "ops-math"), self.asked[0])
+
+    def test_no_head_sha_fetches_nothing_and_says_why(self):
+        """拿不到 head.sha → **一个关键文件都不取**，并说清为什么（宁可没有，不要来源不明的）。"""
+        self._stub(None)
+        fs.fetch_pr("https://gitcode.com/cann/ops-math/merge_requests/1", self.d)
+        facts = json.load(open(os.path.join(self.d, "pr_facts.json"), encoding="utf-8"))
+        self.assertEqual(self.asked, [], "无 sha 时不该按任何 ref 取文件")
+        self.assertFalse(facts.get("key_files"))
+        self.assertEqual(facts.get("blocked"), "missing_head_sha",
+                         "缺 head.sha 须给**机读**阻断状态，只记 note 是 fail-open")
+        self.assertTrue(any("无法钉死被测 commit" in n for n in facts["notes"]), facts["notes"])
+
+
+    def test_same_repo_head_is_not_flagged_as_fork_case_insensitive(self):
+        """同仓（仅大小写不同）不得误判成 fork——否则会平白多打一次 fork 仓的请求。"""
+        self._stub("abc123", head_repo="CANN/Ops-Math")
+        fs.fetch_pr("https://gitcode.com/cann/ops-math/merge_requests/7", self.d)
+        facts = json.load(open(os.path.join(self.d, "pr_facts.json"), encoding="utf-8"))
+        self.assertFalse(facts["is_fork"], facts["head_repo"])
+        self.assertEqual({a[:2] for a in self.asked}, {("cann", "ops-math")}, self.asked)
+
+    def test_unknown_head_repo_is_none_not_false(self):
+        """`head.repo` 缺失 → is_fork 应为 **None（不知道）**，不是 False（同仓）。
+
+        默认成「同仓」会让下游少一层警觉，正是本仓最忌的「不知道当成没问题」。"""
+        self._stub("abc123", head_repo=None)
+        fs.fetch_pr("https://gitcode.com/cann/ops-math/merge_requests/8", self.d)
+        facts = json.load(open(os.path.join(self.d, "pr_facts.json"), encoding="utf-8"))
+        self.assertIsNone(facts["is_fork"])
+
+    def test_falls_back_to_head_repo_when_base_lacks_the_sha(self):
+        """base 仓拿不到该 sha → 用**同一个 sha**退到 head_repo（不引入分支名风险）。
+
+        「fork 的 sha 一定能从 base 仓解析」只在实测的两个 PR 上观察到，**不是平台保证**。"""
+        self._stub("deadbeef", head_repo="contrib/ops-math")
+        base = ("cann", "ops-math")
+        real = fs._repo_file
+        fs._repo_file = lambda o, r, p, ref=None: None if (o, r) == base else real(o, r, p, ref)
+        fs.fetch_pr("https://gitcode.com/cann/ops-math/merge_requests/9", self.d)
+        facts = json.load(open(os.path.join(self.d, "pr_facts.json"), encoding="utf-8"))
+        self.assertTrue(facts.get("key_files"), "应经 head_repo 退路取到")
+        self.assertIn(("contrib", "ops-math", "deadbeef"), self.asked, self.asked)
+
+
 class MalformedTailRejectedTest(unittest.TestCase):
     """编号后的残尾必须是 / ? # 或串尾——`\\d+\\b` 不够（`12-foo` 处也有词边界 → fail-open）。"""
 
