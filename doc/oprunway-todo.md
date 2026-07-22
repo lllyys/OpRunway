@@ -274,7 +274,12 @@
   - [x] **连带闸已补**（codex 抓的静默错过路径）：被降过规模的 case **不得走 trivial-met**。
     trivial-met 的正当性是「这 case 本来就小、perf 没意义」；降规模 case 是「它本来很大、
     我们没按目标规模跑」——**没测却算过**。现改判 blocked 并带上原规模。
-  - [ ] 遗留：`validator` 侧仍未消费 `golden_cost`（perf 侧已堵）。
+  - [x] **已补（2026-07-23）** `validator` 侧消费 `golden_cost`：降规模的 case 进裁决的
+    `overall.scaled_cases` + `counts.scaled`。不带出来的话，caseset 账本里明明记着「这条的目标规模没跑」，
+    裁决与报告却只字不提 → 下游据裁决写「已覆盖大 shape」就成了没根据的话。
+    ⚠ 带出来 **≠ 判失败**：降规模是显式、有账的取舍，但**必须在结论里可见**，由人/门定它够不够。
+    账本原样透传、不重算（它是 gen_cases 生成期写的事实）；账本形状不对 → 视为无降规模、**不报错**
+    （它是记账不是判定依据，为一份坏账本把整个裁决判死是过度反应）。
 - [x] **两处对称性收口**：`repo_adapter.main()` 复用 `catlass_adapter` **同一套**守卫
   （`assertIs` 钉住是同一对象、不是各抄一份）· `run_catlass_mock` 补自报 `defect_injected`。
 - [x] **诚实性缺口已修 + 补上守门**：`Im2col/golden.py` 的 `GOLDEN_PROVENANCE` 声称「不为 numel=0 编造输出」，

@@ -488,7 +488,7 @@ def _empty_row(cid):
             "判据": "", "evidence_ref": cid}
 
 
-def _verdict(op, vm, spec_standard, problems, per, gaps=None):
+def _verdict(op, vm, spec_standard, problems, per, gaps=None, scaled=None):
     fails = [p for p in per if p["功能"] == "fail" or p["精度"] == "fail"]
     # finding #9：standard 或 acceptance 任一 uncertain 都要计入 needs_review（不被 acceptance pass 吞）。
     unc_ids, seen = [], set()
@@ -519,16 +519,23 @@ def _verdict(op, vm, spec_standard, problems, per, gaps=None):
         overall = "passed_with_gaps"
     else:
         overall = "pass"
+    # G4 连带（2026-07-23）：把**降过规模的 case** 带进裁决。
+    # 不带的话，caseset 的 `golden_cost` 账本里明明记着「这条的目标规模没跑」，裁决与报告却只字不提——
+    # 下游据裁决写「已覆盖大 shape」就成了没根据的话。带出来 ≠ 判失败：降规模是**显式、有账**的取舍，
+    # 但**必须在结论里可见**，由人/门决定它够不够。
+    scaled = list(scaled or [])
     return {"op": op, "verify_mode": vm, "standard": spec_standard,
             "contract_problems": problems, "per_case": per,
             "catlass_compare_na": catlass_na,
             "overall": {"verdict": overall, "uncertain": unc_ids, "risk": risks,
                         # gap 原样带出处一起进产物——「有据可查」要能被下游报告/人工复核直接读到。
                         "gaps": gaps,
+                        # 降规模留痕：每项 {case_id, from, to, reason}，原样透传 caseset 的账本。
+                        "scaled_cases": scaled,
                         "requires_human_cp": overall == "passed_with_risk",
                         "counts": {"total": len(per), "fail": len(fails),
                                    "uncertain": len(unc_ids), "risk": len(risks),
-                                   "gaps": len(gaps),
+                                   "gaps": len(gaps), "scaled": len(scaled),
                                    "contract_problems": len(problems)}}}
 
 
@@ -719,7 +726,12 @@ def validate(spec, caseset, evidence):
         row["判据"] = "；".join(whys) if whys else f"dims={dims}（性能交 perf_compare）"
         per.append(row)
 
-    return _verdict(op, vm, spec_standard, problems, per, gaps)
+    # G4：从 caseset 的账本里取降规模记录（**原样透传，不重算**——账本是 gen_cases 生成期写的事实，
+    # validator 无从也不该复算它）。结构容错：账本缺失/形状不对 → 视为无降规模，不报错（不是判定依据）。
+    _gc = caseset.get("golden_cost") if isinstance(caseset, dict) else None
+    _scaled = _gc.get("scaled_cases") if isinstance(_gc, dict) else None
+    return _verdict(op, vm, spec_standard, problems, per, gaps,
+                    scaled=_scaled if isinstance(_scaled, list) else None)
 
 
 def main(argv):

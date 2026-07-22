@@ -1107,6 +1107,46 @@ def _v_triple(out_shape=None, ev_out_shape=None, ev_prov_shape=None, numel=None,
     return spec, cs, ev
 
 
+class ScaledCasesSurfacedInVerdictTest(unittest.TestCase):
+    """G4 连带（2026-07-23）：**降过规模的 case 必须出现在裁决里**。
+
+    不带出来的话，caseset 的 `golden_cost` 账本里明明记着「这条的目标规模没跑」，
+    裁决与报告却只字不提 —— 下游据裁决写「已覆盖大 shape」就成了没根据的话。
+    ⚠ 带出来 **≠ 判失败**：降规模是显式、有账的取舍；但**必须在结论里可见**，
+    由人/门决定它够不够。"""
+
+    _LEDGER = [{"case_id": "c0", "from": [1024, 1024], "to": [64, 128],
+                "reason": "golden 规模预算"}]
+
+    def test_ledger_is_transparently_carried_into_verdict(self):
+        spec, cs, ev = _v_triple()
+        cs["golden_cost"] = {"scaled_cases": list(self._LEDGER)}
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["scaled_cases"], self._LEDGER)
+        self.assertEqual(vd["overall"]["counts"]["scaled"], 1)
+        # 不改变裁决本身——降规模是取舍、不是失败
+        self.assertEqual(vd["overall"]["verdict"], "pass", vd["overall"])
+
+    def test_absent_ledger_yields_empty_not_error(self):
+        """没账本（elementwise 常态）→ 空列表、计数 0，**行为零变更**。"""
+        spec, cs, ev = _v_triple()
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["scaled_cases"], [])
+        self.assertEqual(vd["overall"]["counts"]["scaled"], 0)
+
+    def test_malformed_ledger_is_tolerated_not_fatal(self):
+        """账本形状不对 → 视为无降规模，**不报错**。
+
+        它是**透传的记账**、不是判定依据；为一份坏账本把整个裁决判死是过度反应。
+        真正的判定（精度/性能）不依赖它。"""
+        for bad in ({"scaled_cases": "nope"}, {"scaled_cases": None}, "not-a-dict", 123):
+            spec, cs, ev = _v_triple()
+            cs["golden_cost"] = bad
+            vd = V.validate(spec, cs, ev)
+            self.assertEqual(vd["overall"]["scaled_cases"], [], repr(bad))
+            self.assertEqual(vd["overall"]["verdict"], "pass", repr(bad))
+
+
 class OutShapeReconcileTest(unittest.TestCase):
     """C1 下游：caseset 声明显式输出形状（per-op golden.py `out_shape` 派生）后，validator 按它对账；
     NPU 实际输出形状/规模 ≠ 期望 → fail-closed 判失败并说清差异，**绝不静默 reshape / 广播凑合**。"""
