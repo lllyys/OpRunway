@@ -10,7 +10,9 @@
 - `OPRUNWAY_WORK_DIR` 覆盖用户根（默认 = 进程 CWD）；`OPRUNWAY_OPS_DIR` 覆盖 per-op 输入根
   （默认 `<user_root>/.oprunway/ops`）；输入根与跑测输出 `reports/` 分开；
 - 两处都没有 → 报错，且错误信息同时给出两条查找路径（fail-closed，不静默兜底）；
-- 非法 op_name（`..` / `/` / shell 特殊字符）被拒，runner 路径不得逃出用户目录。
+- 非法 op_name（`..` / `/` / shell 特殊字符）被拒，runner 路径不得逃出用户目录；
+- 软链**分两层**拒：最终文件那一层由 `find_runner` 的 `os.path.islink` 拒，`<ops_root>/<op>` **目录段**
+  由 `op_dir()` 的 `_reject_symlink_segments` 逐段拒（只查末段挡不住目录段，会静默跟随出去）。
 """
 import os, sys, tempfile, unittest
 from unittest import mock
@@ -18,6 +20,21 @@ from unittest import mock
 import repo_adapter as R
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _symlink_supported():
+    """本平台能否真建软链（无开发者模式的 Windows 不能）——不能则跳过软链用例，不假绿。"""
+    if not hasattr(os, "symlink"):
+        return False
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            os.symlink(os.path.join(d, "target"), os.path.join(d, "link"))
+        return True
+    except (OSError, NotImplementedError, AttributeError):
+        return False
+
+
+_SYMLINK_OK = _symlink_supported()
 
 
 def _touch(path):
@@ -220,6 +237,90 @@ class FindRunnerHardeningTest(unittest.TestCase):
                 self.assertIn("不可访问", str(cm.exception))
             finally:
                 os.chmod(opd, 0o755)
+
+
+@unittest.skipUnless(_SYMLINK_OK, "本平台不支持创建符号链接")
+class OpDirSegmentSymlinkTest(unittest.TestCase):
+    """**目录段**软链（旧洞）：`os.path.islink` 只查最终文件名那一层，`<ops_root>/<op>` 目录本身是软链时
+    路径解析会静默跟随出去 → `op_dir()` 起 `_reject_symlink_segments` 逐段拒。"""
+
+    def _link_op_dir(self, d, op, target):
+        """在默认 ops_root（`<d>/.oprunway/ops`）下把 `<op>` 目录做成指向 target 的软链。返回链路径。"""
+        ops = os.path.join(d, ".oprunway", "ops")
+        os.makedirs(ops, exist_ok=True)
+        link = os.path.join(ops, op)
+        os.symlink(target, link)
+        return link
+
+    def test_op_dir_rejects_symlinked_op_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            outside = os.path.join(d, "outside")
+            os.makedirs(outside)
+            self._link_op_dir(d, "IsClose", outside)
+            with mock.patch.dict(os.environ, {"OPRUNWAY_WORK_DIR": d}):
+                os.environ.pop("OPRUNWAY_OPS_DIR", None)
+                with self.assertRaises(ValueError) as cm:
+                    R.op_dir("IsClose")
+            self.assertIn("符号链接", str(cm.exception))
+
+    def test_find_runner_rejects_symlinked_op_directory(self):
+        """洞的实证：runner.cpp 本身是**真文件**（最终组件 islink=False、旧检查放行），
+        但它在软链目录之下——逐段校验必须拒。"""
+        with tempfile.TemporaryDirectory() as d:
+            outside = os.path.join(d, "outside")
+            real = _touch(os.path.join(outside, "oprunway_isclose_runner.cpp"))
+            link = self._link_op_dir(d, "IsClose", outside)
+            through = os.path.join(link, os.path.basename(real))
+            self.assertTrue(os.path.isfile(through))       # 跟随软链后确实能读到（洞真实存在）
+            self.assertFalse(os.path.islink(through))      # 最终组件不是软链 → 旧检查挡不住
+            with mock.patch.dict(os.environ, {"OPRUNWAY_WORK_DIR": d}):
+                os.environ.pop("OPRUNWAY_OPS_DIR", None)
+                with self.assertRaises(ValueError) as cm:
+                    R.find_runner("IsClose")
+            self.assertIn("符号链接", str(cm.exception))
+
+    def test_symlinked_op_dir_into_plugin_tree_rejected(self):
+        """ops_root 的『不得落在插件安装目录内』守卫在 join `<op>` 之前就做完了——
+        目录段软链正好从它下面绕过去；逐段校验把这条绕行路堵死。"""
+        _PLUGIN = os.path.realpath(os.path.join(_HERE, os.pardir))
+        with tempfile.TemporaryDirectory() as d:
+            self._link_op_dir(d, "IsClose", _PLUGIN)
+            with mock.patch.dict(os.environ, {"OPRUNWAY_WORK_DIR": d}):
+                os.environ.pop("OPRUNWAY_OPS_DIR", None)
+                with self.assertRaises(ValueError):
+                    R.op_dir("IsClose")
+
+    def test_real_directory_still_accepted(self):
+        """回归：真实目录（非软链）照常放行，逐段校验不误伤。"""
+        with tempfile.TemporaryDirectory() as d:
+            _touch(os.path.join(d, ".oprunway", "ops", "IsClose", "oprunway_isclose_runner.cpp"))
+            with mock.patch.dict(os.environ, {"OPRUNWAY_WORK_DIR": d}):
+                os.environ.pop("OPRUNWAY_OPS_DIR", None)
+                self.assertEqual(R.op_dir("IsClose"),
+                                 os.path.join(os.path.realpath(d), ".oprunway", "ops", "IsClose"))
+                path, source, remote = R.find_runner("IsClose")
+            self.assertEqual((source, remote), ("user", "oprunway_isclose_runner.cpp"))
+            self.assertTrue(os.path.isfile(path))
+
+    def test_middle_segment_symlink_rejected(self):
+        """逐段（非只查末段）：中间段是软链也拒——守住 ops_root 下更深路径的将来用法。"""
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, "root")
+            outside = os.path.join(d, "outside", "deep")
+            os.makedirs(root); os.makedirs(outside)
+            os.symlink(os.path.dirname(outside), os.path.join(root, "mid"))
+            with self.assertRaises(ValueError) as cm:
+                R._reject_symlink_segments(root, os.path.join(root, "mid", "deep", "leaf"), "测试路径")
+            self.assertIn("符号链接", str(cm.exception))
+
+    def test_path_escaping_root_rejected(self):
+        """越界（rel 以 `..` 开头）在逐段校验前就拒——校验对象必须真在 root 之内。"""
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, "root")
+            os.makedirs(root)
+            with self.assertRaises(ValueError) as cm:
+                R._reject_symlink_segments(root, os.path.join(d, "elsewhere"), "测试路径")
+            self.assertIn("逃出", str(cm.exception))
 
 
 class RunnerSourceGateTest(unittest.TestCase):

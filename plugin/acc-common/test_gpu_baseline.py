@@ -6,6 +6,9 @@ caseset 由 gen_cases 运行时产、baseline 程序化构造（防 fixture 漂�
 import json, os, tempfile, unittest
 import gen_cases
 import gpu_baseline as gb
+import _golden_fixture as _gf
+setUpModule = _gf.install        # golden 去引擎化：gen_cases 需 <ops_root>/<op>/golden.py（ADR 0011）
+tearDownModule = _gf.uninstall
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 

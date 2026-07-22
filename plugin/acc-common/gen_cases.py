@@ -2,7 +2,9 @@
 
 Layer 1 确定性脚本（工具中立、op 驱动）。据 spec（参数 arity/attrs、verify_mode、dtype 集、可选 attr_matrix）
 × dtype × shape × 泛化生成用例，用参考实现算 golden（逐算子分发；golden_source 记来源，不设全局假设）。
-支持 IsClose（二元、bool、exact）、Sign/Neg（一元、numerical）、Equal（二元、bool、exact）。加算子 = 注册 GOLDEN[op]。
+支持 IsClose/Sign/Equal/Neg（样例 golden 在 `samples/golden/<op>/golden.py`）。**加算子 = 用户侧 `<ops_root>/<op>/golden.py`**——**elementwise 通路**不含内置 golden 值、按算子加载
+（ADR 0011：golden 去引擎化，`proposed`）。⚠ 非「引擎零内置算子」：catlass_adapter 的 matmul golden 与本文件
+`_BF16_EXACT_OPS` 是两处已知例外。
 确定性：固定种子 SEED，无时间/系统随机。
 
 T7 dtype/attr 扩面（据 codex 审终版）：
@@ -21,7 +23,7 @@ T7 dtype/attr 扩面（据 codex 审终版）：
 ⚠ 真机（真 NPU）上 int/bf16 的数值校验本轮**不做**——runner.cpp 的新 dtype 分支属 Track C（挂真机+pr_facts），
   见 doc/oprunway-todo.md gap。本文件仅证「流水线能造/收发 int/bf16 用例」，非「某算子在该 dtype 被验收」。
 """
-import hashlib, json, math, os, sys
+import hashlib, importlib.util, json, math, os, sys
 import numpy as np
 import precision_policy
 
@@ -93,70 +95,64 @@ def _assert_equal_nan_effective(golden_fn, inputs, attrs, cid):
 
 
 # ---- golden 参考实现（逐算子；inputs=按 spec 顺序的**逻辑**输入数组，attrs=属性字典） ----
-# 决策（已定 2026-07-14）：golden = CPU 标杆，**固定用 torch(CPU)** —— 确定性单一后端，**不回退 numpy**。
-# 理由：torch 与 numpy 在边界上不一致（如 torch.sign(NaN)=0 vs np.sign(NaN)=NaN），"谁装了用谁"会产
-# 出随环境而变的非确定 golden。故 golden 恒走 torch；torch 缺失 → **fail-closed 报错要求安装**（不静默降级）。
-# 精度验证一般在装了 torch 的 NPU 机器(a3/a5)上做。
-def _require_torch():
-    """import torch(CPU 参考)；缺失 → fail-closed 报错要求安装（不回退 numpy，保证 golden 确定性）。"""
+# ADR 0011（golden 去引擎化，proposed）：**本 elementwise 通路**不含内置 golden 值——按算子从用户侧
+# `<ops_root>/<op>/golden.py` 加载。⚠ 非「引擎零内置算子」：catlass_adapter 的 matmul golden 与上面的
+# `_BF16_EXACT_OPS` 仍是引擎里的算子知识（两处已知例外，如实记账）。
+# 4 个历史内置 golden（IsClose/Sign/Equal/Neg）迁 `samples/golden/<op>/golden.py` 作只读参考（非运行时回退靶）。
+# 后端（决策 4）：golden 恒 CPU、torch 优先——现 4 算子 golden.py 皆 torch；torch 缺失在 golden.py 内 fail-closed。
+def load_golden(op):
+    """按算子名从用户侧加载 golden——`<ops_root>/<op>/golden.py`，返回 `(golden_fn, golden_source, provenance)`。
+
+    **本加载路径不含内置 golden 值、绝不回退内置/样例**（ADR 0011 决策 1/2）：缺 golden.py → **fail-closed** 报错。
+    （⚠ 仅指 elementwise 通路；catlass 通路与 `_BF16_EXACT_OPS` 仍是引擎里的算子知识。）
+    golden.py 须导出 `golden_fn(inputs, attrs) -> ndarray` + `GOLDEN_SOURCE`（首 token = oracle_source 六枚举之一：
+    cpu_ref/catlass_existing_ref/task_spec_expected/torch_ref/analytical_ref/external_ref——**支撑多仓多算子的各类来源**；
+    elementwise 内置样例可用 backend 简写 torch/numpy）+ `GOLDEN_PROVENANCE`（来源出处）；缺任一 → fail-closed。
+    样例见 `samples/golden/<op>/golden.py`。
+
+    安全（golden.py 会被 import 执行 = 执行用户/生成的 Python，性质同 runner.cpp、同信任级，ADR 0011 决策 6）：
+    `op` 经 `_check_id` 校验、路径由已校验 op 名定死；**软链分两层挡**——`<ops_root>/<op>` **目录段**由
+    `repo_adapter.op_dir()` 的 `_reject_symlink_segments` 逐段拒，`golden.py` **最终文件**那一层由本函数
+    `os.path.islink` 拒（⚠ 旧注释只写「拒符号链接」，读起来像已全防住：`islink` 只看最终组件，目录段软链
+    会被 import 静默跟随出去）。⚠ **两层只挡静态软链、不解 TOCTOU**：校完到真正 import 之间的窗口仍在，
+    可被 rename 换靶；真封堵要 `O_NOFOLLOW`/`openat` 逐级打开（本仓 `perf_sim_plot._safe_open_write` 是那
+    个路子，此处未跟进）。另 ops_root 自身与 `.oprunway`/`ops` 两段未逐段查（`realpath` 会抹掉「root 本身
+    是软链」这一事实）——如实记账，别当已全防住；
+    缺则 fail-closed（不回退内置/样例）；`importlib` 隔离 import、不污染 `sys.path`。
+    """
+    import repo_adapter                              # 延迟 import：repo_adapter 顶层已 import gen_cases，避加载期循环
+    repo_adapter._check_id("op_name", op)
+    # <ops_root>/<op>/golden.py（拒落插件树、env 覆盖、目录段软链，同 runner——三者都由 op_dir() 把关）
+    gpath = os.path.join(repo_adapter.op_dir(op), "golden.py")
     try:
-        import torch
-        return torch
-    except Exception as e:                              # noqa: BLE001 —— 缺失/损坏一律要求安装，不静默兜底
-        raise RuntimeError(
-            "golden 需 torch(CPU) 作 CPU 标杆参考、但未安装/不可用。请安装 CPU 版："
-            "pip install torch --index-url https://download.pytorch.org/whl/cpu。"
-            "不回退 numpy——两者边界语义(如 sign(NaN))不一致会产非确定 golden；"
-            "精度验证一般在装了 torch 的 NPU 机器上做。"
-        ) from e
-
-
-# 内置四算子的 torch(CPU) 参考——golden 恒走 torch，故 oracle_source 恒 torch_ref。
-_TORCH_OP = {"IsClose": "torch.isclose", "Sign": "torch.sign",
-             "Equal": "torch.eq", "Neg": "torch.neg"}
-
-
-def golden_isclose(inputs, attrs):
-    t = _require_torch()
-    rtol, atol = float(attrs["rtol"]), float(attrs["atol"])
-    if not (math.isfinite(rtol) and math.isfinite(atol) and rtol >= 0 and atol >= 0):
-        raise ValueError(f"IsClose golden: rtol/atol 须有限非负，得 rtol={rtol} atol={atol}")
-    a = t.from_numpy(np.ascontiguousarray(inputs[0]))
-    b = t.from_numpy(np.ascontiguousarray(inputs[1]))
-    r = t.isclose(a, b, rtol=rtol, atol=atol, equal_nan=bool(attrs["equal_nan"]))
-    return np.ascontiguousarray(r.numpy())              # bool 输出
-
-
-def golden_sign(inputs, attrs):
-    t = _require_torch()
-    return np.ascontiguousarray(t.sign(t.from_numpy(np.ascontiguousarray(inputs[0]))).numpy())
-
-
-def golden_equal(inputs, attrs):
-    t = _require_torch()
-    a = t.from_numpy(np.ascontiguousarray(inputs[0]))
-    b = t.from_numpy(np.ascontiguousarray(inputs[1]))
-    return np.ascontiguousarray(t.eq(a, b).numpy())
-
-
-def golden_neg(inputs, attrs):
-    t = _require_torch()
-    return np.ascontiguousarray(t.neg(t.from_numpy(np.ascontiguousarray(inputs[0]))).numpy())
-
-
-# GOLDEN: (src_name, fn)。golden 恒走 torch(CPU) 单后端 → src_name = "torch <fn>"（确定性、无 numpy 兜底）。
-GOLDEN = {"IsClose": ("torch torch.isclose", golden_isclose),
-          "Sign": ("torch torch.sign", golden_sign),
-          "Equal": ("torch torch.eq", golden_equal),
-          "Neg": ("torch torch.neg", golden_neg)}
-
-
-def golden_source_label(op, fallback_src):
-    """golden 来源串（供 oracle_source 映射）。内置四算子 golden 恒走 torch → 恒 "torch <fn>"；
-    非内置算子(不在 _TORCH_OP)用其 fallback_src。golden 无环境分支，故标签恒与实际后端一致。"""
-    if op in _TORCH_OP:
-        return f"torch {_TORCH_OP[op]}"
-    return fallback_src
+        os.lstat(gpath)                             # lstat：不跟随软链
+    except FileNotFoundError:
+        raise ValueError(
+            f"缺 golden: {gpath}（引擎不回退内置 golden，fail-closed）\n"
+            f"  → 新算子需先由 acc-spec/acc-runner-dev 从任务书生成 golden.py 落到用户目录"
+            f"（可照 samples/golden/<op>/golden.py 的只读样例）；或设 OPRUNWAY_OPS_DIR / OPRUNWAY_WORK_DIR。")
+    except OSError as ex:
+        raise ValueError(f"golden.py 不可访问: {gpath!r}: {ex}")
+    if os.path.islink(gpath):                       # 仅最终组件；目录段由 repo_adapter.op_dir() 逐段拒
+        raise ValueError(f"golden.py 是符号链接，拒绝（防路径逃逸/换靶）: {gpath!r}")
+    if not os.path.isfile(gpath):
+        raise ValueError(f"golden.py 路径存在但不是普通文件: {gpath!r}")
+    spec = importlib.util.spec_from_file_location(f"oprunway_golden_{op.lower()}", gpath)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)                 # 执行 golden.py（同 runner.cpp 信任级：用户/生成的代码）
+    except Exception as ex:                          # noqa: BLE001 —— 语法/import 期异常统一 fail-closed 成 ValueError
+        raise ValueError(f"golden.py 执行失败: {gpath}: {ex}") from ex
+    for attr in ("golden_fn", "GOLDEN_SOURCE", "GOLDEN_PROVENANCE"):
+        if not hasattr(mod, attr):
+            raise ValueError(f"golden.py 缺 `{attr}`（须导出 golden_fn + GOLDEN_SOURCE + GOLDEN_PROVENANCE）: {gpath}")
+    if not callable(mod.golden_fn):
+        raise ValueError(f"golden.py 的 golden_fn 不可调用: {gpath}")
+    if not (isinstance(mod.GOLDEN_SOURCE, str) and mod.GOLDEN_SOURCE.strip()):
+        raise ValueError(f"golden.py 的 GOLDEN_SOURCE 须非空字符串（供 oracle_source 映射）: {gpath}")
+    if not (isinstance(mod.GOLDEN_PROVENANCE, str) and mod.GOLDEN_PROVENANCE.strip()):
+        raise ValueError(f"golden.py 的 GOLDEN_PROVENANCE 须非空字符串（来源出处）: {gpath}")
+    return mod.golden_fn, mod.GOLDEN_SOURCE, mod.GOLDEN_PROVENANCE
 
 
 # ================================================= 逻辑输入构造（compute dtype）
@@ -559,10 +555,11 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target):
 
 def gen_cases(spec, work_dir):
     op = spec["op"]
-    if op not in GOLDEN:
-        raise ValueError(f"unsupported op {op!r}, supported={list(GOLDEN)}")
-    src_name, golden_fn = GOLDEN[op]
-    golden_source = golden_source_label(op, src_name)   # 真来源：torch 可用记 "torch <fn>"、否则 "numpy <fn>"
+    # golden 按算子从用户侧 <ops_root>/<op>/golden.py 加载（elementwise 通路不内置 golden 值、缺则 fail-closed；
+    # ADR 0011 决策 1/2/5，proposed）。⚠ 非「引擎零内置算子」——catlass_adapter 的 matmul golden 与本文件 :34
+    # 的 _BF16_EXACT_OPS 是两处已知例外，仍是引擎里的算子知识。
+    # golden_source 来自加载的 GOLDEN_SOURCE 元数据（决策 5），下游门继续校 oracle_source==映射(golden_source)。
+    golden_fn, golden_source, _golden_provenance = load_golden(op)
     in_params = [p for p in spec["params"] if p["io"] == "in"]
     attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
