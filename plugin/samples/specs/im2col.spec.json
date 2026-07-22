@@ -21,7 +21,8 @@
       "io": "in",
       "dtype": [
         "float32",
-        "float16"
+        "float16",
+        "bfloat16"
       ],
       "rank": [
         3,
@@ -78,7 +79,8 @@
       "io": "out",
       "dtype": [
         "float32",
-        "float16"
+        "float16",
+        "bfloat16"
       ]
     }
   ],
@@ -147,7 +149,8 @@
   ],
   "dtype_tested": [
     "float32",
-    "float16"
+    "float16",
+    "bfloat16"
   ],
   "verify_mode": "exact",
   "precision": {
@@ -161,7 +164,8 @@
       "not_settled": false
     },
     "threshold_source": "任务书『功能实现要求』1 原文：「与原 TBE 算子核心功能完全对齐，支持原算子对应的所有数据格式，并且使其支持bool数据类型，**精度标准为二进制一致**」→ exact / threshold=0。任务书『精度要求』另写「算子计算精度需满足 AscendOpTest 工具默认阈值」（故 oracle=ascendoptest，按原文抽），两句并存时取更严的『二进制一致』：im2col 是纯数据搬运（滑窗 gather + 拼列），无任何算术运算，输出元素逐位等于输入元素，逐位一致可达 (推断)",
-    "case_target": 50
+    "case_target": 50,
+    "bf16_bitexact": true
   },
   "perf": {
     "baseline": "tbe",
@@ -178,10 +182,9 @@
     {
       "kind": "dtype_deferred",
       "dtypes": [
-        "bfloat16",
         "bool"
       ],
-      "reason": "任务书『参数说明』表 self/out 权威全集 = {FLOAT16, FLOAT32, BFLOAT16, BOOL}，实测子集 = {float32, float16}，差额两项都是**我们这条 pipeline 测不了**：① bfloat16 —— gen_cases.py 里 `if dtn == _BF16 and not out_is_bool and op not in _BF16_EXACT_OPS: raise` 这一处（`_BF16_EXACT_OPS = frozenset({\"Sign\", \"Neg\"})`，写死在引擎里；行号随并行改动漂移，按符号名定位）对 bf16 且输出非 bool 的算子 fail-fast『需 lossy 阈值』；Im2col 是纯数据搬运、bf16 输出同样在网格上精确可表示，但该白名单在**引擎侧硬编码**、spec 无字段可声明 → 造不出 bf16 用例。② bool —— gen_cases 的 dtype 白名单 `_NATIVE` = {float32,float16,int32,int16} + bfloat16，**根本没有 bool 输入 dtype**，且 new_example runner 也无 bool 分支。⚠ 刻意**没有**用 kind=dtype_unsupported_by_op_def 给 bool 挂账：`conversion/im2col/op_host/im2col_def.cpp:14-18` 的 VALUE_DATA_TYPE_LIST **确实含 ge::DT_BOOL**，若自报 op_def_dtypes 会撞上 validate_acceptance_state 的自洽硬校（声称不支持的 dtype 不得出现在自报支持集里）；bool 在 A2/A3 上的真实缺口是 aclnn 层的 dtype 分支，另见下一条自由文本 gap"
+      "reason": "任务书『参数说明』表 self/out 权威全集 = {FLOAT16, FLOAT32, BFLOAT16, BOOL}，实测子集 = {float32, float16}，差额两项都是**我们这条 pipeline 测不了**：① bfloat16 —— gen_cases.py 里 `if dtn == _BF16 and not out_is_bool and op not in _BF16_EXACT_OPS: raise` 这一处（`_BF16_EXACT_OPS = frozenset({\"Sign\", \"Neg\"})`，写死在引擎里；行号随并行改动漂移，按符号名定位）对 bf16 且输出非 bool 的算子 fail-fast『需 lossy 阈值』；Im2col 是纯数据搬运、bf16 输出同样在网格上精确可表示，但该白名单在**引擎侧硬编码**、spec 无字段可声明 → 造不出 bf16 用例。② bool —— gen_cases 的 dtype 白名单 `_NATIVE` = {float32,float16,int32,int16} + bfloat16，**根本没有 bool 输入 dtype**，且 new_example runner 也无 bool 分支。⚠ 刻意**没有**用 kind=dtype_unsupported_by_op_def 给 bool 挂账：`conversion/im2col/op_host/im2col_def.cpp:14-18` 的 VALUE_DATA_TYPE_LIST **确实含 ge::DT_BOOL**，若自报 op_def_dtypes 会撞上 validate_acceptance_state 的自洽硬校（声称不支持的 dtype 不得出现在自报支持集里）；bool 在 A2/A3 上的真实缺口是 aclnn 层的 dtype 分支，另见下一条自由文本 gap ⚠ 【bfloat16 已于 2026-07-23 解除 defer】【已解除（2026-07-23）】原文：bf16 被 `gen_cases._BF16_EXACT_OPS` 这张**引擎内置的算子名白名单**（只含 Sign/Neg）挡住——任务书与 op_def 都支持 bf16，最近邻/搬运类是纯 gather、输出恒为输入元素的逐位拷贝，bf16 网格上本就精确可表示、够格进白名单，但白名单写死在引擎里、spec 无处声明。**现改由 spec 声明 `precision.bf16_bitexact: true`**，本 spec 已声明并把 bfloat16 加回 dtype 集，实测能造出 bf16 数值用例。⚠ 声明的语义是「输出恒等于某个输入元素、不做算术」——**不是放松阈值的旋钮**，声明错了会让本该用 lossy 阈值的算子被按逐位相等判。"
     },
     "【硬件·双源交叉核验不一致，须人裁】任务书『适配硬件』= 「Atlas A2 训练系列产品/Atlas A3 系列产品」；而仓内 `conversion/im2col/op_host/im2col_def.cpp:41` 只有 `this->AICore().AddConfig(\"ascend950\", aicore_config)`，kernel 实现也只有 arch35 一套（`op_kernel/arch35/*`、`op_host/config/ascend950/`、`op_host/arch35/im2col_tiling_arch35.cpp`）。按 CLAUDE.md『任务书适配硬件 ↔ op_def AddConfig 双源交叉核验，不一致入 task_pr_gaps』→ 本条即该不一致。(推断) A2/A3 上的 aclnnIm2col 由 CANN **内置 TBE** 承载、本仓 Ascend C 实现只注册 ascend950；佐证：`op_api/aclnn_im2col.cpp:221-225` 按 `IsRegBase(curArch)` 分流两套 dtype 白名单。**开跑前必须先定目标机**：spec 的 hardware 照任务书填 A2/A3(→ ascend-a3)，但本仓代码的 AscendC 实现指向 950(→ ascend-a5)，两者跑出来验的不是同一份实现",
     "【接口层级不一致】任务书『参数说明』表 = aclnn 级（self 3/4 维、kernelSize/dilation/padding/stride 各 size=2、out『shape根据参数推导得出』2 或 3 维），与 `docs/aclnnIm2col.md` 一致；而 kernel 级 `im2col_def.cpp:25-31` 是 x/y + attrs {ksizes(REQUIRED), strides, dilations, padding_mode(String,默认\"CALCULATED\"), pads}，`im2col_infershape.cpp:88-95` 产**4 维** NCHW/NHWC 输出、pads 是 size-4 非对称、还多一个 padding_mode∈{VALID,SAME,CALCULATED}。**本 spec 锚定 aclnn 级**（任务书表就是这一层，且 runner 走 aclnn 入口）。若后续 runner 改走 kernel 级 IR，attrs 与输出 rank 都要重抽",

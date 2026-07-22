@@ -283,8 +283,14 @@
   并强制相等**，谎报过不了裁决层，故采集层用声明值是安全的）。空 Tensor（compare=na）无 compare_dtype →
   只校形状、不断言 dtype，且要求 compare 必须是 na（否则 fail-closed）。
   配两条回归：exact+浮点算子的 compare_dtype 必须是浮点；源码级钉住不得再从 verify_mode 推 bool。
-- [ ] `gen_cases._BF16_EXACT_OPS = {Sign, Neg}` 是**写死的算子名白名单**，任何新的纯搬运算子
-  （bf16 精确可表示）都被迫把 bf16 挂 deferred——「引擎零内置算子知识」的又一处反例。
+- [x] **已修（2026-07-23）** `_BF16_EXACT_OPS` 那张写死的算子名白名单 →
+  改由 spec 声明 `precision.bf16_bitexact`（旧表退役成**历史默认**，Sign/Neg 行为零变更）。
+  ⚠ 声明的语义是「输出恒等于某个输入元素、不做算术」——**不是放松阈值的旋钮**：
+  声明错了会让本该用 lossy 阈值的算子被按逐位相等判，直接产假 fail 或假 pass。报错文案给两条出路
+  （真是搬运类就声明 / 真做算术就挂 deferred）。只收真布尔。
+  **连带解锁**：三个 shape_transform 算子的 bf16 defer 全部解除（它们的 gap 早就写着
+  「任务书与 op_def 都支持、纯粹被引擎白名单挡住、最近邻是纯 gather 够格进白名单」）——
+  实测 Im2col 50 用例含 16 条 bf16、两个 Upsample 各 21 用例含 7 条 bf16。
 - [ ] `gen_cases._NATIVE` 没有 `bool`，任务书要求的 BOOL 增量造不出用例。
 - [x] **已修（2026-07-23）** `run_on_npu.sh` 的 vendor 后缀硬编码：改成按序解析——
   ① 显式 `OPRUNWAY_VENDOR_SUFFIX`；② 从 OPS 仓目录名推（`ops-math`→math、`ops-cv`→cv、`cann-ops-blas`→blas）；

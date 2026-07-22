@@ -1561,6 +1561,65 @@ class AllowEmptyTensorTest(_FakeOpCase):
         self.assertFalse([c["id"] for c in cs["cases"] if "_empty" in c["id"]])
 
 
+class Bf16BitexactDeclarationTest(_FakeOpCase):
+    """bf16 逐位可达改由 **spec 声明**，不再是引擎里写死的算子名白名单（2026-07-23）。
+
+    旧状：`_BF16_EXACT_OPS = frozenset({"Sign", "Neg"})` —— 「引擎零内置算子知识」的一处反例，
+    且任何新的**纯搬运**算子（im2col、Upsample 最近邻…）都被迫把 bf16 挂 deferred。
+    ⚠ 这不是「放松阈值」的旋钮：声明为真 = 断言「输出恒等于某个输入元素、不做算术」，
+    声明错了会让本该用 lossy 阈值的算子被按逐位相等判 → 直接产假 fail 或假 pass。"""
+
+    _BODY = "def golden_fn(inputs, attrs):\n    return np.negative(inputs[0])\n"
+
+    def _spec(self, op, declare=None):
+        sp = _fake_spec(op, dtypes=("bfloat16",), case_target=4)
+        if declare is not None:
+            sp["precision"]["bf16_bitexact"] = declare
+        return sp
+
+    def test_undeclared_new_op_still_fails_closed(self):
+        """没声明的新算子 → 仍 fail-closed，且报错要给出**两条可操作的出路**。"""
+        self.place("FakeBf16New", self._BODY)
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(self._spec("FakeBf16New"), self.work())
+        msg = str(cm.exception)
+        self.assertIn("bf16_bitexact", msg)          # 出路一：真是搬运类就声明
+        self.assertIn("dtype_deferred", msg)         # 出路二：真做算术就挂 deferred
+
+    def test_declared_true_unlocks_bf16(self):
+        """声明为真 → bf16 数值用例造得出来（这正是 im2col/Upsample 这类算子需要的）。"""
+        self.place("FakeBf16Decl", self._BODY)
+        cs = GC.gen_cases(self._spec("FakeBf16Decl", declare=True), self.work())
+        self.assertTrue(cs["cases"])
+        self.assertTrue(all(c["inputs"][0]["dtype"] == "bfloat16" for c in cs["cases"]))
+
+    # ⚠ 下面两条**直接测纯函数 `_bf16_bitexact`**，不走 gen_cases。
+    # 原因：`self.place("Sign", …)` 会把共享 fixture 里**真正的 Sign golden 覆盖成假的**，
+    # 污染同模块其它测试（我第一版就这么写，当场炸了 19 条）。测试之间不能互相下毒。
+
+    def test_declared_false_overrides_historic_default(self):
+        """显式声明 false 能**推翻**历史默认——Sign 在老白名单里，声明 false 后应判不可逐位。
+
+        证「spec 声明 > 历史默认」，而不是两者取或。"""
+        self.assertFalse(GC._bf16_bitexact({"precision": {"bf16_bitexact": False}}, "Sign"))
+
+    def test_historic_default_keeps_sign_neg_working(self):
+        """不声明时 Sign/Neg 仍走历史默认 → **行为零变更**（既有 spec 不必改）。"""
+        for op in ("Sign", "Neg"):
+            self.assertTrue(GC._bf16_bitexact({}, op), op)
+            self.assertTrue(GC._bf16_bitexact({"precision": {}}, op), op)
+        # 对照：不在历史默认里的算子，不声明就是 False
+        self.assertFalse(GC._bf16_bitexact({}, "SomeNewOp"))
+
+    def test_non_bool_declaration_rejected(self):
+        """只收真布尔：`"false"` / `0` / `1` 一律拒（真值性判断会误读）。"""
+        self.place("FakeBf16Bad", self._BODY)
+        for bad in ("false", "true", 0, 1, []):
+            with self.assertRaises(ValueError, msg=repr(bad)) as cm:
+                GC.gen_cases(self._spec("FakeBf16Bad", declare=bad), self.work())
+            self.assertIn("bf16_bitexact", str(cm.exception))
+
+
 class ExactIsNotBoolTest(_FakeOpCase):
     """回归：`verify_mode=exact` **不等于**「输出是 bool」。
 

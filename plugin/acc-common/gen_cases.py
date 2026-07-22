@@ -76,7 +76,12 @@ _BF16 = "bfloat16"
 _NATIVE = {"float32": np.float32, "float16": np.float16, "int32": np.int32, "int16": np.int16}
 # Sign/Neg：输出在 bf16 网格上**精确可表示**（sign∈{-1,0,1}、neg 精确取负）→ bf16/fp16 走 exact_equal。
 # genuinely-lossy 数值算子（bf16 阈值须来自 policy/ascendoptest）本轮无、留 gap。
-_BF16_EXACT_OPS = frozenset({"Sign", "Neg"})
+# bf16 数值输出**逐位可达**的算子（纯搬运/纯符号类：输出恒等于某个输入元素、不做算术）。
+# ⚠ 这曾是**写死的算子名白名单**——「引擎零内置算子知识」的一处反例，且任何新的纯搬运算子
+# （im2col、Upsample 最近邻…）都被迫把 bf16 挂 deferred。2026-07-23 改由 **spec 显式声明**
+# `precision.bf16_bitexact: true`；本表退役成**历史默认**，只为让这两个既有算子的 spec 不必改动、
+# 行为零变更。新算子一律走 spec 声明，别再往这张表里加名字。
+_BF16_EXACT_OPS = frozenset({"Sign", "Neg"})   # 历史默认，勿扩充——新算子用 spec.precision.bf16_bitexact
 
 
 # ================================================= bf16 位级 codec（零依赖）====
@@ -791,6 +796,23 @@ def _dtype_shapes(dtn, is_key, reg, large):
     return list(reg[:_OTHER_DTYPE_QUOTA])               # 非重点 dtype：主流少量
 
 
+def _bf16_bitexact(spec, op):
+    """该算子的 bf16 数值输出是否**逐位可达**（纯搬运/纯符号类）。
+
+    来源优先级：spec 显式声明 `precision.bf16_bitexact` > `_BF16_EXACT_OPS` 历史默认。
+    ⚠ 只接受真布尔——`"false"`/`0` 会被真值性判断误读，fail-closed 拒收（同 allow_empty_tensor）。
+    ⚠ 这不是「放松阈值」的旋钮：声明为真等于断言「该算子输出恒等于某个输入元素、不做算术」，
+    声明错了会让**本该用 lossy 阈值的算子被按逐位相等判**，直接产假 fail 或假 pass。"""
+    v = (spec.get("precision") or {}).get("bf16_bitexact")
+    if v is None:
+        return op in _BF16_EXACT_OPS                  # 历史默认（Sign/Neg），行为零变更
+    if not isinstance(v, bool):
+        raise ValueError(
+            f"spec.precision.bf16_bitexact 须为布尔真值，得 {v!r}（{type(v).__name__}）——"
+            f"字符串 \"false\" / 数字 0 会被真值性判断误读，fail-closed 拒收。")
+    return v
+
+
 def _allow_empty_tensor(spec):
     """spec 是否允许空 Tensor 用例（缺省 True = 现行为）。
 
@@ -1112,9 +1134,14 @@ def gen_cases(spec, work_dir):
         out_is_bool = (golden.dtype == bool)
         # finding #14：bf16 白名单与「输出是否 bool/exact 语义」**拆成两道独立校验**——verify_mode=exact 不再
         # 短路豁免 bf16。bf16 且**输出非 bool**（真数值输出）且 op 不在白名单 → 需 lossy 阈值 → fail-fast。
-        if dtn == _BF16 and not out_is_bool and op not in _BF16_EXACT_OPS:
-            raise ValueError(f"bf16 numerical for op {op!r} 需 lossy 阈值（输出非 bool、不在 _BF16_EXACT_OPS，"
-                             f"本轮无此类算子，留 gap；不因 verify_mode=exact 静默放行）")
+        if dtn == _BF16 and not out_is_bool and not _bf16_bitexact(spec, op):
+            raise ValueError(
+                f"bf16 numerical for op {op!r} 需 lossy 阈值：输出非 bool，且该算子未声明 bf16 逐位可达。\n"
+                f"  → 若本算子是**纯搬运/纯符号**类（输出恒等于某个输入元素、不做算术，如 gather/\n"
+                f"    转置/最近邻采样/符号），在 spec 写 `precision.bf16_bitexact: true` 显式声明；\n"
+                f"  → 若它真做算术（加乘、插值、归约），bf16 输出本就不可能逐位重现，"
+                f"应挂 dtype_deferred 或给 lossy 阈值。\n"
+                f"  ⚠ 不因 verify_mode=exact 静默放行——exact 是判据、不是算子性质。")
         if exact:
             compare = "exact_equal"
         elif precision_policy.is_integer_dtype(dtn):
