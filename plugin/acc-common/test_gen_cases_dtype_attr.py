@@ -57,7 +57,19 @@ def _find_case(cs, *, dtype=None, dim="精度", regular=True, exclude_na=True):
     raise AssertionError(f"未找到 case: dtype={dtype} dim={dim} regular={regular}")
 
 
-# ===== golden 去引擎化（ADR 0011）：引擎不含算子 golden、按算子从 <ops_root>/<op>/golden.py 加载。 =====
+def _symlink_supported():
+    """本平台能否真建软链（无开发者模式的 Windows 不能）——不能则跳过软链用例，不假绿。"""
+    if not hasattr(os, "symlink"):
+        return False
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            os.symlink(os.path.join(d, "target"), os.path.join(d, "link"))
+        return True
+    except (OSError, NotImplementedError, AttributeError):
+        return False
+
+
+# ===== golden 去引擎化（ADR 0011）：elementwise 通路不含内置 golden 值、按算子从 <ops_root>/<op>/golden.py 加载。 =====
 # 共享 fixture 建临时 ops_root（拷 samples/golden 的 4 算子）+ 设 OPRUNWAY_OPS_DIR，令本模块 gen_cases 调用能
 # 加载到 golden（缺则 fail-closed）；子进程继承 os.environ。假算子测试用 _place_golden(_GOLDEN_ROOT, op, body) 另落。
 import _golden_fixture as _gf
@@ -273,7 +285,7 @@ class AttrMatrixTest(unittest.TestCase):
         self.assertIn(False, vals)
 
     def test_golden_uses_case_attrs(self):
-        isclose_fn, _, _ = GC.load_golden("IsClose")             # golden 现按算子加载（引擎零内置）
+        isclose_fn, _, _ = GC.load_golden("IsClose")             # golden 现按算子加载（elementwise 通路不内置）
         for c in self.cs["cases"]:
             if not c["expected"]["case_origin"].startswith("attr_matrix"):
                 continue
@@ -701,7 +713,8 @@ class GoldenTorchPreferredTest(unittest.TestCase):
 
 
 class LoadGoldenTest(unittest.TestCase):
-    """golden 加载器（ADR 0011 决策 1/6）：只查 <ops_root>/<op>/golden.py、缺则 fail-closed 不回退、拒软链、缺元数据拒。"""
+    """golden 加载器（ADR 0011 决策 1/6）：只查 <ops_root>/<op>/golden.py、缺则 fail-closed 不回退、
+    **软链分两层拒**（最终文件 islink + 目录段逐段，见 repo_adapter._reject_symlink_segments）、缺元数据拒。"""
 
     def _ops(self, d):
         return mock.patch.dict(os.environ, {"OPRUNWAY_OPS_DIR": os.path.realpath(d)})
@@ -729,6 +742,24 @@ class LoadGoldenTest(unittest.TestCase):
             os.symlink(real, os.path.join(opd, "golden.py"))
             with self.assertRaises(ValueError) as cm:
                 GC.load_golden("LinkOp")
+            self.assertIn("符号链接", str(cm.exception))
+
+    @unittest.skipUnless(_symlink_supported(), "本平台不支持创建符号链接")
+    def test_symlinked_op_directory_rejected(self):
+        """**目录段**软链（旧洞）：golden.py 本身是真文件（最终组件 islink=False、旧检查放行），
+        但 `<ops_root>/<op>` 目录是软链 → import 会静默跟随出去。逐段校验（repo_adapter.op_dir）必须拒。"""
+        with tempfile.TemporaryDirectory() as d, self._ops(d):
+            root = os.path.realpath(d)
+            outside = os.path.join(root, "outside")
+            os.makedirs(outside)
+            with open(os.path.join(outside, "golden.py"), "w", encoding="utf-8") as f:
+                f.write("GOLDEN_SOURCE='x'\nGOLDEN_PROVENANCE='x'\ndef golden_fn(i, a):\n    return i[0]\n")
+            os.symlink(outside, os.path.join(root, "LinkDirOp"))
+            through = os.path.join(root, "LinkDirOp", "golden.py")
+            self.assertTrue(os.path.isfile(through))       # 跟随软链后确实能读到（洞真实存在）
+            self.assertFalse(os.path.islink(through))      # 最终组件不是软链 → 旧检查挡不住
+            with self.assertRaises(ValueError) as cm:
+                GC.load_golden("LinkDirOp")
             self.assertIn("符号链接", str(cm.exception))
 
     def test_valid_golden_loads(self):

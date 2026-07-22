@@ -224,6 +224,33 @@ def _contains(root, path):
         return False
 
 
+def _reject_symlink_segments(root, path, label):
+    """校验 `path` 相对 `root` 的**每一段**（含最后一段）都不是符号链接。
+
+    ⚠ 为什么「只查最终组件」不够（本函数存在的理由）：`os.path.islink(<ops_root>/<op>/golden.py)` 只看
+    **文件名那一层**；`<ops_root>/<op>` **目录本身**若是软链，open/import/scp 会静默跟随出去——
+    ① `ops_root()` 的「不得落在插件安装目录内」守卫在 join `<op>` **之前**就做完了，目录段软链正好从它下面
+    绕过去。故从 root 起逐段查。⚠ 本函数**只挡静态软链、不解 TOCTOU**（校完到真正使用之间仍有窗口）。
+
+    `find_runner`（runner.cpp）与 `gen_cases.load_golden`（golden.py）都经 `op_dir()` 取目录 → 守卫只此一份。
+
+    边界（说准、别让读者以为全防住）：`root` **自身不查**——env 覆盖时 `ops_root()` 已 realpath（软链已解掉）；
+    默认 `<user_root>/.oprunway/ops` 时 `user_root` 已 realpath，但 `.oprunway` / `ops` 这两段**未逐段查**：
+    它们不由 `<op>` 名决定，且插件树守卫是对 `realpath(root)` 做的、软链绕不过去；代价是用户把 `.oprunway`
+    软链到别处时产物随之落到别处（用户自己的配置，不视作攻击面）。
+    """
+    rel = os.path.relpath(path, root)
+    if os.path.isabs(rel) or rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        raise ValueError(f"{label} 逃出 ops_root: {path!r}（root={root!r}）")
+    cur = root
+    for seg in rel.split(os.sep):
+        if seg in ("", os.curdir):
+            continue
+        cur = os.path.join(cur, seg)
+        if os.path.islink(cur):
+            raise ValueError(f"{label} 的路径段是符号链接，拒绝（防路径逃逸/换靶）: {cur!r}")
+
+
 def ops_root():
     """per-op **输入**产物根。默认 `<user_root>/.oprunway/ops`；`OPRUNWAY_OPS_DIR` 可覆盖（须绝对路径）。
 
@@ -246,9 +273,18 @@ def ops_root():
 
 
 def op_dir(op_name):
-    """单个算子的输入目录：`<ops_root>/<op>/`（spec.json · runner.cpp · 将来的 golden）。"""
+    """单个算子的输入目录：`<ops_root>/<op>/`（spec.json · runner.cpp · golden.py）。
+
+    ⚠ 返回前 **从 ops_root 起逐段拒软链**（`_reject_symlink_segments`）：下游对 runner.cpp / golden.py 的
+    `os.path.islink` 只挡最终**文件名**那一层，挡不住 `<ops_root>/<op>` **目录段**本身是软链的情形
+    （详见 `_reject_symlink_segments` 的理由段）。两个消费方（`find_runner` / `gen_cases.load_golden`）
+    都经本函数取目录，故守卫写在这里、只一份。
+    """
     _check_id("op_name", op_name)
-    return os.path.join(ops_root(), op_name)
+    root = ops_root()
+    d = os.path.join(root, op_name)
+    _reject_symlink_segments(root, d, f"算子目录({op_name})")
+    return d
 
 
 def find_runner(op_name):
@@ -262,13 +298,20 @@ def find_runner(op_name):
     安全（runner 会被 scp 到远端，是真实注入面）：
     - `op_name` 经 `_check_id` 校验；`remote_name` **由已校验的 op_name 定死**（`oprunway_<lower>_runner.cpp`），
       **不从解析后的本地路径取 basename**——否则符号链接可把远端文件名变成 `bad;rm...` 注入远端命令。
-    - 用户侧 runner **拒符号链接**（`os.path.islink`）：防 realpath 逃逸 + 防 TOCTOU 换靶。
+    - **软链分两层挡，缺一不可**：最终文件 `oprunway_<op>_runner.cpp` 那一层由下文 `os.path.islink` 挡；
+      其上的 `<ops_root>/<op>` **目录段**由 `op_dir()` 的 `_reject_symlink_segments` 逐段挡。
+      ⚠ 本行旧注释只写「拒符号链接（os.path.islink）」，读起来像已全防住——实则 `islink` 只看最终组件，
+      目录段软链会被静默跟随（旧洞，已由 `op_dir()` 补上）。两层合起来挡住**静态**软链（最终文件 + 目录段）。⚠ **不封 TOCTOU**：校完到真正 open/import/scp
+      之间的窗口仍在，攻击者可在此期间 rename 换靶；真封堵要 O_NOFOLLOW/openat 逐级打开（本仓
+      perf_sim_plot._safe_open_write 是那个路子，此处未跟进）。另 root 自身与 `.oprunway`/`ops`
+      两段未逐段查（realpath 会抹掉「root 本身是软链」），如实记账、别当已全防住。
     - 权限错误/异常文件类型一律抛错（fail-closed，不静默兜底）。
     """
     _check_id("op_name", op_name)
     name = f"oprunway_{op_name.lower()}_runner.cpp"          # 远端文件名的唯一真相源（已校验，无注入）
 
-    upath = os.path.join(op_dir(op_name), name)              # 不 realpath，先按声明路径查（拒软链，见下）
+    # 不 realpath，先按声明路径查：目录段软链已在 op_dir() 里逐段拒，最终文件那一层的 islink 见下。
+    upath = os.path.join(op_dir(op_name), name)
     try:
         st = os.lstat(upath)                                 # lstat：不跟随软链
     except FileNotFoundError:
@@ -276,7 +319,7 @@ def find_runner(op_name):
     except OSError as ex:
         raise ValueError(f"用户 runner 不可访问: {upath!r}: {ex}")
     if st is not None:
-        if os.path.islink(upath):
+        if os.path.islink(upath):                            # 仅最终组件；目录段由 op_dir() 逐段拒
             raise ValueError(f"用户 runner 是符号链接，拒绝（防路径逃逸/远端注入）: {upath!r}")
         if not os.path.isfile(upath):
             raise ValueError(f"用户 runner 路径存在但不是普通文件: {upath!r}")

@@ -4,6 +4,10 @@
 >
 > ⚠ **2026-07-09 全局更正（覆盖以下所有历史条目）**：本表历史条目中**一切关于 Equal 的验收结论**——「真阳性 / A3 未达标 / 精度 fail / FAIL(精度) / 输出≠golden / #2890 双核 merged / 真机 6 挂 5 / 由 op_def 取 dtype 集」等——**均已作废**。正式确认：**#2890 系误配（非本社区 Equal 任务的交付 PR）、Equal 社区任务未验收通过、无已验收对应 PR**（详见下方 07-09 条）。历史条目**保留作流水、不逐条改写**，读时一律以本横幅 + 07-09 条为准。**真机有效裁决仅 IsClose / Sign**——Neg 只跑到 mock 级流水线（其 mock demo 数据有效，但**不是真机验收裁决**）。
 
+> ⚠ **2026-07-22 全局更正（覆盖以下所有历史条目）**：本表历史条目里两类说法**均已作废**，历史条目保留作流水、不逐条改写，读时一律以本横幅为准——
+> ① **「引擎零内置算子 golden / 引擎真 op-中立」**（如 07-20 条）：**过度声称**。golden 去引擎化**只覆盖 elementwise 通路**；`plugin/acc-common/catlass_adapter.py:152/:162` 的内置 matmul golden（注释明写**有意**不进加载器路径）与 `gen_cases.py:34` 的 `_BF16_EXACT_OPS` 按算子名硬表是**两处已知例外**，仍是引擎里的算子知识。
+> ② **「golden 只能来自任务书指定的测试方法、否则 fail-closed」**：**写窄了**、漏了第二档。实为**两档链**——① 任务书指定的测试方法 → ② CPU 上的 torch/numpy 现成 API；任务书指定了但本环境跑不起来 → fail-closed 问用户、**不自动回落**；现成 API 单调免人核、按公式自拼多步必人核。连带 ADR 0011 决策 3 的旧分级（把「仓自带/PR 参考」列最高档）**已被推翻**：PR 里的参考实现**一律禁止**作 golden 源。
+
 ## 待决（还没定的事）
 
 1. 算子任务书的真实格式没拿到（已知是 md）→ M1 拿真实样例校准 §3 契约字段。
@@ -16,6 +20,9 @@
 
 ## 2026-07-22
 
+- **golden 来源契约批 1 落地 + 三处错记更正 + 软链洞补上** —— 按用户 2026-07-22 的裁定，在 `precision_policy.py` 新增「档位怎么算」的唯一实现：**受控词表**（可产集**故意不含**「仓/PR 的 CPU 参考」那两个格子——**禁 PR 作 golden 源的落地方式是值域里没那个格子**，写条禁令会被绕过；canonical 六枚举定义没动）+ `derive_golden_tier`（tier 整数 1..4，**假授权直接判 4、不降级照跑**）+ `verify_authorization`（校任务书全文快照 sha256 + 引文按 `task_doc.snapshot.md:<行区间>` 逐字对）。**纯新增、不接任何调用者**（接线是后续批次），a3 容器 **523 测全绿**（基线 490：批 1 +26、软链洞 +7，均在真容器跑过）；批 1 = commit `0192e49`。**批 2–7 全没做、PR #8 也还没合。**
+  - **三处错记一并更正**：① **律令写窄了**——golden 来源其实是**两档链**（① 任务书指定的测试方法 → ② CPU 上 torch/numpy 现成 API）；任务书指定了但本环境跑不起来 → **fail-closed 问用户、不自动回落**；现成 API 单调免人核、按公式自拼多步必须人核。② **「引擎零内置算子 golden」是错的**——去引擎化**只覆盖 elementwise 那条通路**，`catlass_adapter.py:152/:162` 的内置 matmul golden（注释明写**有意**不进加载器路径）与 `gen_cases.py:34` 的 `_BF16_EXACT_OPS` 按算子名硬表是**两处已知例外**，catlass 通路本轮 out-of-scope。③ **Sign 的 provenance 措辞不实**（`samples/golden/Sign/golden.py`，已在代码侧改掉）——Sign 任务书一字未提 torch/numpy/公式，只说「参考昇腾内置 Sign 的 TBE 实现」，那是 `impl_reference`、**不构成授权** → 实为**第二档回落**，写「任务书指定」是错的（golden 值本身没错）；对照 IsClose/Equal 任务书**有**原文，写「任务书指定」才准确。更正落在 `doc/oprunway-todo.md`（律令段 + 头部口径 + P2/已收口 + golden resume 注）与 `doc/oprunway-golden-decoupling-adr.md`（决策 3 整节重写成两档链）。
+  - **顺带补一个软链洞**：原来只拒 `golden.py` / `runner.cpp` **文件名那一层**是软链，`<ops_root>/<op>/` **目录段**是软链就能溜过去（`ops_root()` 的「不落插件树」守卫在拼 `<op>` **之前**就做完了，正好从它下面绕出去；还留 TOCTOU 换靶窗口）→ `repo_adapter.op_dir` 改成**从 ops_root 起逐段拒软链**，`find_runner` 与 `load_golden` 两个消费方共用这一份守卫。
 - **golden 分支推上去 + 开 PR #8 + TODO 刷到当前** —— `feat/golden-out-of-engine` 三个 commit（ADR 0011——**用户已逐条拍板，但 canon 页 `status: proposed`、未经 `bureau:review` 人门 promote** / `GOLDEN` 硬表改 `load_golden(op)` 加载器 / 来源契约扩六枚举，a3 容器 490 测全绿）push 到 GitHub 并开 **PR #8**，合后再同步 gitcode。`doc/oprunway-todo.md` 刷新：现状补 PR #7 已合入 + PR #8 待合、单测 487→490、P2「插件-算子解耦」标成「一刀已入 main、一刀待合」（**main 上 `gen_cases` 仍是硬表，「引擎零内置算子」要等 PR #8 合入才成立**），**新增「🔴 下一刀 · agent 产出侧」**——产出侧实况是一半有一半没有：`runner.cpp` 有 `acc-runner-dev` 的 `gen_runner` 产但 scope gate 限死 `experimental/math/<op>`+{fp32,fp16}（**覆盖面才是洞**），`golden.py` 则全仓无人产（**纯空缺**）；同时更正头部那句「剩下主要靠人门裁决与外部资源」的旧判断（产出侧依据充分、当下就能写，不等真机不等外部数据）。人门裁决清单补 ADR 0011（`proposed`）与 **ADR 0010 触发点 stale**（canon 记的还是旧触发点，与 CLAUDE.md #5 现行规则不一致，待走一次 compile→review）；Q9 段补 supersede 说明（「固定 torch 单后端不回退 numpy」已被 ADR 0011 放宽为「按算子 torch>numpy 定档」，两说并存待 promote）。顺带清掉 6 个 SessionEnd 机械空 stub（`canon/logbook/2026/07/`，无内容、非 `file-session` 产物）。
   - ⚠ **审修门抓到的自我更正**：原稿把「ADR 0011 已拍定」写成既成事实（实为 `proposed` 待人门）、把 PR #8 的改动列进「已收口」、把产出侧说成「完全没有组件产」——三处均已按仓内实况改正。
 

@@ -1,5 +1,6 @@
 """共享测试 fixture（**非** test_*.py、不被 unittest 收集）：golden 去引擎化（ADR 0011）后，`gen_cases`
-按算子从 `<ops_root>/<op>/golden.py` 加载 golden（引擎零内置、缺则 fail-closed）。
+按算子从 `<ops_root>/<op>/golden.py` 加载 golden（**elementwise 通路**不内置 golden 值、缺则 fail-closed；
+⚠ 非「引擎零内置算子」——catlass 通路与 `gen_cases._BF16_EXACT_OPS` 是已知例外）。
 
 各测试文件的 `setUpModule = install` / `tearDownModule = uninstall` 即可——`install` 建一个临时 ops_root、
 拷 4 份 `samples/golden/<op>/golden.py` 进去、设 `OPRUNWAY_OPS_DIR` 指向它；子进程（run_workflow）不传 env=、

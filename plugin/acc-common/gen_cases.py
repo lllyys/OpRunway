@@ -2,7 +2,9 @@
 
 Layer 1 确定性脚本（工具中立、op 驱动）。据 spec（参数 arity/attrs、verify_mode、dtype 集、可选 attr_matrix）
 × dtype × shape × 泛化生成用例，用参考实现算 golden（逐算子分发；golden_source 记来源，不设全局假设）。
-支持 IsClose/Sign/Equal/Neg（样例 golden 在 `samples/golden/<op>/golden.py`）。**加算子 = 用户侧 `<ops_root>/<op>/golden.py`**——引擎不含任何算子 golden，按算子加载（ADR 0011：golden 去引擎化）。
+支持 IsClose/Sign/Equal/Neg（样例 golden 在 `samples/golden/<op>/golden.py`）。**加算子 = 用户侧 `<ops_root>/<op>/golden.py`**——**elementwise 通路**不含内置 golden 值、按算子加载
+（ADR 0011：golden 去引擎化，`proposed`）。⚠ 非「引擎零内置算子」：catlass_adapter 的 matmul golden 与本文件
+`_BF16_EXACT_OPS` 是两处已知例外。
 确定性：固定种子 SEED，无时间/系统随机。
 
 T7 dtype/attr 扩面（据 codex 审终版）：
@@ -93,25 +95,35 @@ def _assert_equal_nan_effective(golden_fn, inputs, attrs, cid):
 
 
 # ---- golden 参考实现（逐算子；inputs=按 spec 顺序的**逻辑**输入数组，attrs=属性字典） ----
-# ADR 0011（golden 去引擎化）：引擎**不含任何算子 golden**——按算子从用户侧 `<ops_root>/<op>/golden.py` 加载。
+# ADR 0011（golden 去引擎化，proposed）：**本 elementwise 通路**不含内置 golden 值——按算子从用户侧
+# `<ops_root>/<op>/golden.py` 加载。⚠ 非「引擎零内置算子」：catlass_adapter 的 matmul golden 与上面的
+# `_BF16_EXACT_OPS` 仍是引擎里的算子知识（两处已知例外，如实记账）。
 # 4 个历史内置 golden（IsClose/Sign/Equal/Neg）迁 `samples/golden/<op>/golden.py` 作只读参考（非运行时回退靶）。
 # 后端（决策 4）：golden 恒 CPU、torch 优先——现 4 算子 golden.py 皆 torch；torch 缺失在 golden.py 内 fail-closed。
 def load_golden(op):
     """按算子名从用户侧加载 golden——`<ops_root>/<op>/golden.py`，返回 `(golden_fn, golden_source, provenance)`。
 
-    **引擎不含任何算子 golden、绝不回退内置/样例**（ADR 0011 决策 1/2）：缺 golden.py → **fail-closed** 报错。
+    **本加载路径不含内置 golden 值、绝不回退内置/样例**（ADR 0011 决策 1/2）：缺 golden.py → **fail-closed** 报错。
+    （⚠ 仅指 elementwise 通路；catlass 通路与 `_BF16_EXACT_OPS` 仍是引擎里的算子知识。）
     golden.py 须导出 `golden_fn(inputs, attrs) -> ndarray` + `GOLDEN_SOURCE`（首 token = oracle_source 六枚举之一：
     cpu_ref/catlass_existing_ref/task_spec_expected/torch_ref/analytical_ref/external_ref——**支撑多仓多算子的各类来源**；
     elementwise 内置样例可用 backend 简写 torch/numpy）+ `GOLDEN_PROVENANCE`（来源出处）；缺任一 → fail-closed。
     样例见 `samples/golden/<op>/golden.py`。
 
     安全（golden.py 会被 import 执行 = 执行用户/生成的 Python，性质同 runner.cpp、同信任级，ADR 0011 决策 6）：
-    `op` 经 `_check_id` 校验、路径由已校验 op 名定死；**拒符号链接**（防 realpath 逃逸 + TOCTOU 换靶）；
+    `op` 经 `_check_id` 校验、路径由已校验 op 名定死；**软链分两层挡**——`<ops_root>/<op>` **目录段**由
+    `repo_adapter.op_dir()` 的 `_reject_symlink_segments` 逐段拒，`golden.py` **最终文件**那一层由本函数
+    `os.path.islink` 拒（⚠ 旧注释只写「拒符号链接」，读起来像已全防住：`islink` 只看最终组件，目录段软链
+    会被 import 静默跟随出去）。⚠ **两层只挡静态软链、不解 TOCTOU**：校完到真正 import 之间的窗口仍在，
+    可被 rename 换靶；真封堵要 `O_NOFOLLOW`/`openat` 逐级打开（本仓 `perf_sim_plot._safe_open_write` 是那
+    个路子，此处未跟进）。另 ops_root 自身与 `.oprunway`/`ops` 两段未逐段查（`realpath` 会抹掉「root 本身
+    是软链」这一事实）——如实记账，别当已全防住；
     缺则 fail-closed（不回退内置/样例）；`importlib` 隔离 import、不污染 `sys.path`。
     """
     import repo_adapter                              # 延迟 import：repo_adapter 顶层已 import gen_cases，避加载期循环
     repo_adapter._check_id("op_name", op)
-    gpath = os.path.join(repo_adapter.op_dir(op), "golden.py")   # <ops_root>/<op>/golden.py（拒落插件树、env 覆盖，同 runner）
+    # <ops_root>/<op>/golden.py（拒落插件树、env 覆盖、目录段软链，同 runner——三者都由 op_dir() 把关）
+    gpath = os.path.join(repo_adapter.op_dir(op), "golden.py")
     try:
         os.lstat(gpath)                             # lstat：不跟随软链
     except FileNotFoundError:
@@ -121,7 +133,7 @@ def load_golden(op):
             f"（可照 samples/golden/<op>/golden.py 的只读样例）；或设 OPRUNWAY_OPS_DIR / OPRUNWAY_WORK_DIR。")
     except OSError as ex:
         raise ValueError(f"golden.py 不可访问: {gpath!r}: {ex}")
-    if os.path.islink(gpath):
+    if os.path.islink(gpath):                       # 仅最终组件；目录段由 repo_adapter.op_dir() 逐段拒
         raise ValueError(f"golden.py 是符号链接，拒绝（防路径逃逸/换靶）: {gpath!r}")
     if not os.path.isfile(gpath):
         raise ValueError(f"golden.py 路径存在但不是普通文件: {gpath!r}")
@@ -543,7 +555,9 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target):
 
 def gen_cases(spec, work_dir):
     op = spec["op"]
-    # golden 按算子从用户侧 <ops_root>/<op>/golden.py 加载（引擎零内置、缺则 fail-closed；ADR 0011 决策 1/2/5）。
+    # golden 按算子从用户侧 <ops_root>/<op>/golden.py 加载（elementwise 通路不内置 golden 值、缺则 fail-closed；
+    # ADR 0011 决策 1/2/5，proposed）。⚠ 非「引擎零内置算子」——catlass_adapter 的 matmul golden 与本文件 :34
+    # 的 _BF16_EXACT_OPS 是两处已知例外，仍是引擎里的算子知识。
     # golden_source 来自加载的 GOLDEN_SOURCE 元数据（决策 5），下游门继续校 oracle_source==映射(golden_source)。
     golden_fn, golden_source, _golden_provenance = load_golden(op)
     in_params = [p for p in spec["params"] if p["io"] == "in"]
