@@ -244,7 +244,10 @@
 - [x] **4.2 · C1–C5 已落地（2026-07-22）**：shape_transform 通路打通（`out_shape` 4 元组契约 + attr `list[int]` +
   spec `rank` 约束）· dtype 挂账 `passed_with_gaps` 全链接线（validator → 门 → `run_workflow`，**exit 2 挂人工、绝不回 0**）·
   mock 物理上产不出 `acceptance.json`（改产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）· `--defect` 出 CLI。
-  验证：torch 替身跑 **634 测全绿**，裸跑与基线零 diff，两道门 PASS/SYNCED。
+  验证：**a3 `oprunway_prov` 容器真 torch 2.10.0+cpu 跑 639 测全绿**（`OK (skipped=2)`，54.6s；
+  传输逐文件 sha256 双侧一致 `6f0ac4a9…`）。本机：torch 替身 639 全绿 + 裸跑与基线零 diff + 两道门 PASS/SYNCED。
+  ⚠ **本机「零新增红」不能当放行依据**——59 条恒红会掩盖结构性断裂（本轮就掩盖了 5 条：
+  「文件不存在」「argparse 不认参数」这类，与数值无关）。**造 torch 替身重跑**才是本机唯一有效的自证手段。
 - [ ] **4.3 · C1–C5 的遗留项**（复核报上来、本批没做完的）：
   - [ ] **`--mode catlass` 真机通路被顺手降成非验收**（`_acceptance_capable` 单元素白名单的副作用，**零测试覆盖**）。
     本项目 Task 2 明确以 catlass 打底，「真机 catlass 永远出不了验收裁决」应当是**显式决定**而非白名单副作用。**须用户拍板。**
