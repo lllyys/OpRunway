@@ -1,10 +1,10 @@
 # OpRunway 施工 TODO（离「通用算子验收工具」还差的）
 
-> **现状（2026-07-22 更新）**：Wave 1–3 经 **PR #3**、**PR #6**（V1/Q1 + Q9 + Q7 + cases50 + 真机 opp provenance 绑源 + IsClose bf16 转 tested）、**PR #7**（**runner 去引擎化**：runner 移出引擎作输出、`find_runner` fallback 退役 fail-closed）先后合入 main（当前 main = `b727d6f`，GitHub + GitCode 双镜像同 OID）。
-> **PR #8 开着待合**（分支 `feat/golden-out-of-engine`；PR 开时 3 commit，现分支已 5 commit）：**golden 去引擎化**——`gen_cases` 的 `GOLDEN` 硬表改 `load_golden(op)` 按算子加载器 + golden 来源契约扩六枚举 + ADR 0011（proposed）+ **来源契约批 1**（`0192e49`，见下「🔴 下一刀」）。
-> 编排升级 / 精度双标准 / 性能小 shape + GPU consumer / dtype 扩面 / catlass adapter / P2 原子化分发 **均已落地**，`acc-common` 的 unittest 覆盖：**main 486 个** · **PR #8 分支 523 个**（486 → 490 是 +4 golden 加载器的 fail-closed 真测、490 → 516 是 +26 批 1 的派生表穷举与授权核验测、516 → 523 是 +7 目录段软链洞的回归；三者均在 a3 容器全绿。含判定链、三级门、适配器与脚本、provenance 回归、对抗负例）。
-> **引擎去具体算子化两刀已写完，但只落地了一半**：runner 那刀已在 main（PR #7）；golden 那刀在 PR #8 分支上——
-> **合入后成立的也只是「elementwise 那条通路的 golden 值已去引擎化」**（当前 main `gen_cases` 仍是 `GOLDEN` 硬表）。
+> **现状（2026-07-22 更新）**：Wave 1–3 经 **PR #3**、**PR #6**（V1/Q1 + Q9 + Q7 + cases50 + 真机 opp provenance 绑源 + IsClose bf16 转 tested）、**PR #7**（**runner 去引擎化**：runner 移出引擎作输出、`find_runner` fallback 退役 fail-closed）先后合入 main（PR #7 合入时 main = `b727d6f`，GitHub + GitCode 双镜像同 OID；**PR #8 合入后当前 main = `1d2bb3a`**，GitCode 镜像见下）。
+> **PR #8 已合入 main**（2026-07-22，merge commit `1d2bb3a`；分支 `feat/golden-out-of-engine`，8 commit / 25 文件）：**golden 去引擎化**——`gen_cases` 的 `GOLDEN` 硬表改 `load_golden(op)` 按算子加载器 + golden 来源契约扩六枚举 + ADR 0011（proposed）+ **来源契约批 1**（`0192e49`，见下「🔴 下一刀」）。⏳ **GitCode 镜像尚未同步**。
+> 编排升级 / 精度双标准 / 性能小 shape + GPU consumer / dtype 扩面 / catlass adapter / P2 原子化分发 **均已落地**，`acc-common` 的 unittest 覆盖：**合入前 main 486 个** · **现 main 523 个**（486 → 490 是 +4 golden 加载器的 fail-closed 真测、490 → 516 是 +26 批 1 的派生表穷举与授权核验测、516 → 523 是 +7 目录段软链洞的回归；三者均在 a3 容器全绿。含判定链、三级门、适配器与脚本、provenance 回归、对抗负例）。
+> **引擎去具体算子化两刀均已入 main**（runner = PR #7、golden = PR #8）——
+> **但成立的只是「elementwise 那条通路的 golden 值已去引擎化」**。
 > ⚠ **别说成「引擎零内置算子」**（2026-07-22 更正，此前这么写是错的）——去引擎化**只覆盖 elementwise 通路**，仓里有**两处已知例外、如实记账**：
 > ① `plugin/acc-common/catlass_adapter.py:152` 的 `golden_catlass_matmul` + `:162` 的模块级 `GOLDEN_SOURCE`——catlass matmul 的 golden **仍内置在引擎里**，且 `:186-190` 的注释明写「**有意**不进 `gen_cases` 的 golden 加载器路径」（matmul 的 (m,n,k) plan + A/B 专属输入构造与 elementwise 引擎结构不兼容）；**catlass 通路本轮 out-of-scope**；
 > ② `plugin/acc-common/gen_cases.py:34` 的 `_BF16_EXACT_OPS = frozenset({"Sign", "Neg"})`——一张**按算子名硬编码**的表（决定 bf16 走 exact_equal 还是须 lossy 阈值），仍是引擎里的算子知识。
@@ -55,15 +55,16 @@
 - [x] **bureau 刷新**：golden 律令已入 canon（`golden-source-from-taskdoc-method` + `golden-fixed-to-torch-cpu`）；Q1 stale 页 `spec-examples-pollute` 已刷「已修复」+ `_verify.json` 指纹更新；cases50/provenance 决策已 compile。
 
 ### 🟢 Q9 golden（**已建 + a3 真 torch 验证 14 测全绿 · 2026-07-14**）
-> ⚠ **本段（2026-07-14 口径）仍是现行有效口径**——main 上的实现就是它。ADR 0011 提出下述调整，但该 ADR
-> **`status: proposed`、未经 `bureau:review` 人门 promote**，且代码在未合的 PR #8 分支上，故 **promote + 合入后才生效；
-> 在此之前一律以本段原文为准**：
+> ⚠ **本段留的是 2026-07-14 的 canon 口径，已不再描述 main 上的实现**（别把「规范状态」和「代码状态」混着读）。
+> ADR 0011 提出下述调整，其**代码已随 PR #8 合入 main**（`1d2bb3a`），但该 ADR 本身
+> **`status: proposed`、未经 `bureau:review` 人门 promote** → **代码现状与 canon 口径暂时并存**；
+> canon 侧一律以本段原文为准，直到人门裁决：
 > ① 拟把「固定 torch 单后端、绝不回退 numpy」放宽为「**按算子 torch > numpy 定档并记录**」——确定性红线仍在（按算子**定档**、非运行时「谁装了用谁」的兜底）；
 > ② 拟把 golden 值移出引擎，改由 `<ops_root>/<op>/golden.py` 按算子加载；
 > ③ 拟把 `oracle_source` 的**推导**从「只认 torch/numpy 两前缀」放宽为「六枚举可直接声明」（六枚举本身 main 上已有，放宽的是推导侧）。
 >
 > 原文（2026-07-14 决策终稿，**现行**）：golden = CPU 标杆、**固定用 torch(CPU) 单后端**（确定性，**不回退 numpy**——torch/numpy 边界不一致如 `sign(NaN)` 会产非确定 golden）；torch 缺失 → fail-closed 报错要求安装。精度验证在装了 torch 的机器上（NPU 机）。
-- [x] **golden torch-required**：`gen_cases` `_require_torch()` + 四 golden_fn 恒 torch；`golden_source`/`oracle_source` 恒 torch_ref。（⚠ 这描述的是 **main 上的现行实现**；PR #8 分支已把 `_require_torch` 与四个内置 golden_fn 移除、改按算子 `golden.py` 定档——合入后本条须改写。）
+- [x] **golden torch-required**：`gen_cases` `_require_torch()` + 四 golden_fn 恒 torch；`golden_source`/`oracle_source` 恒 torch_ref。（⚠ **本条已被 PR #8 覆盖、现为历史记录**：`1d2bb3a` 起 main 上 `_require_torch` 与四个内置 golden_fn 已移除、改按算子 `golden.py` 定档，`_require_torch` 迁进各份 `samples/golden/<op>/golden.py`。）
 - [x] **select_standard 白名单 fail-closed**（=Q7 落点1）：未知 oracle raise、堵 class C 静默降级。
 - [x] **oracle_source 止血**：删写死 `cpu_ref`、据 `golden_source` 据实映射（严格首 token 前缀）、缺失 fail-closed。
 - [x] **catlass spec 补 standard** + codex 9 维门一轮（#1/#2/#4/#5 修）+ a3 真 torch 全量绿。
@@ -98,15 +99,42 @@
 - **codex 源码门（一轮）修的 4 项**：广播 numel 蒙混 trivial（`_case_numel`/gate/gpu 改按全输入 broadcast 输出算）· inf/nan 补「性能」维（v2 非空皆带性能）· `perf_min_numel` 覆盖删→固定 4096（防 compare↔gate 阈值不一致+类型崩）· 「真空」严格判定（拒 `shape:[false]/[0.0]` 伪造，validator+gate_task1+gate_task2 三处共用、Task2 独立复核）。
 - [ ] **follow-up · equal_nan 有效性**（deviation #4）：§1 不产 nanpair、`_assert_equal_nan_effective` 不再触发；equal_nan T/F 结构覆盖 + NaN §1.4 覆盖但未**交集**证明（aligned-NaN 翻转）。minor。
 
+### 🔴🔴 首跑实测暴露的编排层洞（Pdist 用户测试 · 2026-07-22）
+
+> **provenance**：在 `OpRunway-usertest/work` 起干净 session 真跑 Pdist（任务书 `Pdist_task_doc.md` + `cann/ops-math` MR 2663，已合入），
+> 插件快照 `b2a1b6f`，耗时 13 分钟（16:04:23→16:17:27）。durable 产物 `work/reports/pdist/{correspondence,scope_conclusion}.json`。
+> transcript：`~/.claude/projects/-…-OpRunway-usertest-work/5ed5cb8d-….jsonl`（主）+ `subagents/agent-adad37aacf7324284.jsonl`（验收 agent，130 条）。
+> ⚠ **结论本身是合格的**——判 `OUT_OF_SCOPE_P3`、明标 `verdict_type: NOT_pass_fail`、拒绝在无证据基础上判 pass/fail、探针落 scratchpad 跑完清理、**插件仓零改动**。
+> **洞全在编排层**，且 U1 是主脊。
+
+- [ ] **U1 · `op-acceptance` 派不出 subagent、也问不了用户（最贵；改动只一行）**：实测该 agent 130 条消息里工具只有 `Bash`×30 + `Write`×1 —— 设计里的三个 subagent（`acc-spec-extractor` / `acc-runner-dev` / `acc-verify-rootcause`）**一个没派**，`AskUserQuestion` 是**主循环替它问的**。根因在 `plugin/agents/op-acceptance.md:5` 的 `tools: Bash, Read, Write, Edit, Skill` —— **既无派 subagent 的工具、也无 `AskUserQuestion`**；frontmatter 的 `agents:` 声明**不授予工具**。→ CP-B/C/D 的分工、subagent 单轮约束、循环控制权**全是空的**，它只能自己读源码手搓。改法：`tools` 补齐，或直接删掉 `tools:` 让它继承全部。（对照：`skills:` 那条**有效**——`acceptance-workflow` 两次都自动注入了。）
+- [ ] **U2 · `fetch_source.py` 的 PR URL 正则太窄 + 失败太安静**：用户给 `/pull/2663`（GitHub 风格），脚本只认 `pulls|merge_requests`，**不报错**、产出空 `pr_facts` + 一条 note 就继续往下走。agent 是 `grep` 脚本源码才诊断出来、自己把 URL 规范化成 `/merge_requests/2663` 重跑的。→ 换个不肯读源码的 agent，对应校验就会带着空 `target_dir` 糊过去。改法：接受 `/pull/N` 形态；解析失败 **fail-loud**，不产空壳往下传。
+- [ ] **U3 · `samples/` 不随插件分发（预测命中）**：实测 agent 在 `plugin/` 下 `find samples/golden` 得 `No such file or directory`——`samples/` 在**仓根**，而 marketplace `source: "./plugin"`。→ `acc-runner/SKILL.md` 让 agent「照抄 `samples/runners/*.cpp`」指向的是不存在的文件，runner 生成会静默退化成凭空写（正撞 Equal 血教训）。改法：搬进 `plugin/`，或把骨架内联进 skill 参考文档。
+- [ ] **U4 · 「干净 session」隔离实为无效**：skill 注入时报的 base directory 是**活仓** `/…/OpRunway/plugin/skills/acceptance-workflow`（**不是** `~/.claude/plugins/cache/`）——marketplace 是 `directory` 源、`installLocation` 直指仓根。于是 agent 那 30 条 Bash 几乎全在读活仓源码。**连带**（⚠ 下句是**按本次实测推的**、未穷举验证）：`/plugin install` 的快照看来只决定**组件注册**（有哪些 agent/skill、frontmatter 长什么样）；至少对「按 base directory 解析的文件」和「agent 直接读的源码」这两类，读的是**活仓工作树** → 仓一旦切分支，这部分行为就可能与安装时的快照对不上。要真隔离得换非 `directory` 源。
+- [ ] **U5 · head 兜底照旧（预测命中）**：`pr_facts.json` 得 `"base": "master", "head": "master", "merged": true` —— head 兜底真的触发了，全程无 sha。本次因 PR 已合入而无害，但「被测 = PR 版」仍无机器保证（承 canon `pr-head-commit-is-the-tested-object`，`proposed`）。
+
+#### Pdist 暴露的「非 elementwise 通路」空白（G1–G4；能力边界扩展，须单独立项）
+
+> 均由验收 agent 实跑取证，逐条落在 `work/reports/pdist/scope_conclusion.json` 的 `hard_evidence`。
+> Pdist = 成对归约：输入 `(N,M)` 二维点集 + float 属性 `p` → 输出 `(N*(N-1)/2,)` 一维。
+
+- [ ] **G1 · rank 约束的归约类用例生成**：spec schema **无任何** rank/ndim/shape 约束字段，`gen_cases` 只按内部 `_REG_SHAPES`/`_LARGE_SHAPES` 造 1~8 维（`(3,)`、`(2,3,4)`、`(2,2,2,2)` 等对 Pdist 全非法），且假设输出同形。需支持「输入固定 rank + 输出 shape 由输入结构派生」。
+- [ ] **G2 · 度量属性 `p` 没进覆盖轴（这条最刺眼）**：任务书**核心要求就是修 `p=inf` 的精度问题**，而 `--dry-run` 实测 `id_kinds` 里的 `inf`/`ninf`/`nan` 全是**输入数据**的特殊值、**不是属性 `p` 的取值**；无 `attr_matrix` → `p` 恒等默认 2.0 → **核心验收场景 0 覆盖**。现有 attr 机制是照 IsClose 的 `rtol`/`atol`/`equal_nan` 设计的，需扩到「决定算子语义的度量参数」且能表达 `inf`。
+- [ ] **G3 · reshape 输出的 runner 骨架**：`acc-runner-dev` 的固定四槽骨架假设输出 numel = 输入 numel；Pdist 需按行数 N 算出输出 buffer `N*(N-1)/2`，且 `GetWorkspaceSize` 里 `p` 是夹在 input 与 output **之间**的 float 标量参数（照 `test_aclnn_pdist.cpp` 锚定）。
+- [ ] **G4 · 归约类的规模/复杂度感知预算**：实测 mock 探针 **2 分钟超时**（Exit 143）——大 shape 下 O(N²) 成对计算爆炸（N=65535 → ~2.1e9 对）。需给归约类设规模上限，或改向量化 golden。
+
+> **顺带一条正面发现（对批 6 有用）**：`golden.py`「没人产」是**流程空缺、不是能力空缺**——本次 agent 为做探针，**自己手写了一份 Pdist 的 `golden.py` + `spec.json`** 丢进 scratchpad，`--dry-run` 跑通了。批 6 要做的是把这件事写进流程，而不是从零教它怎么写。
+
 ### 🔴 下一刀 · agent 产出侧（通往「兼容多仓的很多算子」的**真使能件**）
 
 > 用户 2026-07-22 强调：目标是**兼容多仓的很多算子**，别再用「几个算子够用」的框法。
-> 引擎侧去具体算子化两刀已写完（**PR #7 已在 main、PR #8 待合**）——**elementwise 通路**的引擎 fail-closed 要 `runner.cpp` + `golden.py`
-> （runner 那道 main 上已生效，golden 那道随 PR #8 合入才生效；catlass 通路与 `_BF16_EXACT_OPS` 是已知例外，见头部）。产出侧的实况是
+> 引擎侧去具体算子化两刀已写完（**PR #7 / PR #8 均已合入 main**，`1d2bb3a`）——**elementwise 通路**的引擎 fail-closed 要 `runner.cpp` + `golden.py`
+> （两道现均已在 main 生效；catlass 通路与 `_BF16_EXACT_OPS` 是已知例外，见头部）。产出侧的实况是
 > **一半有、一半没有**（别说成「完全没有」）：
 > - **`runner.cpp` 有人产**：`acc-runner-dev` 的 `gen_runner` mode 据 spec + 算子自带 example 锚定生成，
 >   但 **scope gate 限死** `experimental/math/<op>` + dtype ∈ {fp32, fp16}，其余一律 BLOCKED → **覆盖面才是洞**。
-> - **`golden.py` 没人产**：全仓无任何 agent / skill 产它（PR #8 后引擎也不再内置）→ **纯空缺**。
+> - **`golden.py` 在正式流程里没有固定产出者**：现有 agent / skill 都没把它列为交付物（PR #8 后引擎也不再内置）→ **流程空缺**。
+>   ⚠ 别写成「能力空缺」：Pdist 首跑里验收 agent 为做探针**临时手写并跑通了一份**（见上「🔴🔴 首跑实测」节），只是这条路没进可重复执行的流程。
 
 #### ✅ 批 1 已落地（`0192e49`，2026-07-22）——「档位怎么算」的唯一实现
 
@@ -133,7 +161,7 @@
 - [ ] **R8 记账**：catlass 通路（`catlass_adapter.py` 的内置 matmul golden）本轮 **out-of-scope**，两档链暂不覆盖它。
 
 ### 🔵 P2 · 扩展 / 接通
-- [~] **插件-算子解耦**（`doc/oprunway-plugin-op-decoupling-design.md`）**引擎侧两刀：一刀已入 main、一刀待合**：① **runner 去引擎化**（**PR #7 已合入 main** ✅：3 份样例 runner 移出引擎 → `samples/runners/`、runner 只作输出、`find_runner` fallback 退役改 fail-closed、门 runner_source 仅 user）；② **golden 去引擎化**（**分支已实现、PR #8 待合** ⏳：`GOLDEN` 硬表 → `load_golden(op)` 加载器、4 内置 golden 迁 `samples/golden/<op>/`、来源契约扩六枚举、ADR 0011 `proposed`、来源契约批 1 `0192e49`）。⚠ **口径（2026-07-22 收窄）**：main（`b727d6f`）上 `gen_cases` 仍是 `GOLDEN` 硬表；且合入后成立的只是「**elementwise 通路**的 golden 值已去引擎化」，**不是「引擎零内置算子」**——`catlass_adapter.py:152/:162`（matmul golden 内置、注释明写有意不进加载器路径）与 `gen_cases.py:34` 的 `_BF16_EXACT_OPS` 按算子名硬表是**两处已知例外**（catlass 通路本轮 out-of-scope）。剩下的是产出侧，见上「🔴 下一刀」。
+- [~] **插件-算子解耦**（`doc/oprunway-plugin-op-decoupling-design.md`）**引擎侧两刀均已入 main** ✅：① **runner 去引擎化**（**PR #7**：3 份样例 runner 移出引擎 → `samples/runners/`、runner 只作输出、`find_runner` fallback 退役改 fail-closed、门 runner_source 仅 user）；② **golden 去引擎化**（**PR #8**，`1d2bb3a`：`GOLDEN` 硬表 → `load_golden(op)` 加载器、4 内置 golden 迁 `samples/golden/<op>/`、来源契约扩六枚举、ADR 0011 `proposed`、来源契约批 1 `0192e49`）。⚠ **口径（2026-07-22 收窄）**：成立的只是「**elementwise 通路**的 golden 值已去引擎化」，**不是「引擎零内置算子」**——`catlass_adapter.py:152/:162`（matmul golden 内置、注释明写有意不进加载器路径）与 `gen_cases.py:34` 的 `_BF16_EXACT_OPS` 按算子名硬表是**两处已知例外**（catlass 通路本轮 out-of-scope）。剩下的是产出侧，见上「🔴 下一刀」。
 - [ ] **(a) TBE 信息库接通**（dtype 独立源）：每份任务书自带路径 `.../tbe/config/ascend910b`；读法随运行环境探测、**不写死 ssh**。
 - [ ] int32 扩展（Track C，锁已解）。
 
@@ -180,7 +208,7 @@
 1. **`bureau:review` promote**（BUREAU.md：只有人能升 `canonical`，agent 不得手编 cabinet prose、不得手升）：
    - Equal 翻案 4 页：`verify-spec-pr-correspondence` / `root-cause-decoupling` / `task-spec-authoritative` 可按 checklist 直接 promote；**`perf-baseline-by-reference-source` 须先裁 `perf_baseline_source` 张力**（GPU 对比层是否为可选/非必需）再升，否则 hold。
    - **本会话新/改 6 页**（`opp-provenance-bound` / `case-generation-follows-opbase-section-1` / `precision-gate-precedes-performance-fail-fast` / `performance-reuses-precision-inputs-with-trivial-met` / `real-npu-runner` 更新 / `spec-examples-pollute`「已修复」）：待复核 promote。⚠ **`real-npu-runner` 页「标题 vs body」改名**在此步收口——body 已 fp32/fp16/bf16、标题仍「only fp32/fp16」+ supersede 横幅，人审时决定改名并修其它页对它的 `[[…]]` 入链。
-   - **ADR 0011 golden 去引擎化**（`canon/decisions/0011-golden-decoupling.md`，`proposed`，随 PR #8）+ 连带被标 supersede 的 `golden-fixed-to-torch-cpu` 页（决策 4 把「恒 torch 单后端」放宽为「按算子 torch>numpy 定档」）。
+   - **ADR 0011 golden 去引擎化**（`canon/decisions/0011-golden-decoupling.md`，`proposed`；**代码已随 PR #8 入 main，ADR 本身仍待 promote**）+ 连带被标 supersede 的 `golden-fixed-to-torch-cpu` 页（决策 4 把「恒 torch 单后端」放宽为「按算子 torch>numpy 定档」）。
    - ⚠ **`golden-source-from-taskdoc-method` 页记的是写窄了的旧律令**（「只能来自任务书指定方法」，**漏了第二档**）——用户 2026-07-22 重定为**两档链 + R2/R4/R5/R6**（见上「最高律令」段）。canon 页**不得手改**，须走一次 `capture → compile → review`；在此之前该页视为**待更正**，载重前以本 doc 为准。
    - **ADR 0010 现为 `contested`，只欠人裁**（2026-07-22 实读 frontmatter 更正——此前记「stale / 待走 capture→compile→review」**是错的**，capture 与 compile 都已完成）：页上已并列两个 claim——**Claim A** 双触发点（2026-07-06 canonical：bureau 写入前审拟写文本 + md/代码生成后审产物）、**Claim B** 单触发点收敛到 commit 之前（2026-07-10 用户下令，未经 review），页首明写须经 `bureau:review` 由人裁决后才恢复单一 canonical 表述。**现行执行规则仍以 CLAUDE.md #5（= Claim B）为准。**⚠ 连带：CLAUDE.md #5 那句「ADR 0010 仍记旧触发点…待走 capture→compile→review」的注脚同样过时，但改 CLAUDE.md 须先经用户点头。
    - T9 发布形态决定（当前 `proposed`）、门职责扩展（「门内重算比对」属证据可信、非重判 verdict）。
@@ -193,8 +221,8 @@
 5. **真 GPU 基线数据**：consumer 侧与最小字段契约已就绪，缺数据即走 `BLOCKED_WAIT_GPU_BENCHMARK`。
 
 ### C. 已收口（不再是待办）
-- ✅ 公开台账 push + **PR merge**：**PR #6**（`f91ccda`）与 **PR #7**（`b727d6f`）已 merge 进 main、双镜像（GitHub `lllyys` + GitCode `brian66237`）同 OID；**PR #8 已开、待合**（合后需同步 gitcode 镜像）。
-- ✅ **引擎去 runner 化**（PR #7，已在 main）——引擎不再内置任何算子的 runner。⏳ golden 那刀在 PR #8 分支上、**未合入 main 前不算收口**（合入后「**elementwise 通路**第 5 个算子不再撞死在硬表上」才成立；catlass 通路的内置 matmul golden 与 `_BF16_EXACT_OPS` 硬表**仍在**，见头部两处例外）。
+- ✅ 公开台账 push + **PR merge**：**PR #6**（`f91ccda`）、**PR #7**（`b727d6f`）、**PR #8**（`1d2bb3a`，2026-07-22）均已 merge 进 main。⏳ **GitCode 镜像 `brian66237` 尚未同步 PR #8**（GitHub `lllyys` 已同步）。
+- ✅ **引擎去 runner 化 + 去 golden 化两刀均已入 main**（PR #7 / PR #8）——「**elementwise 通路**第 5 个算子不再撞死在硬表上」现已成立。⚠ catlass 通路的内置 matmul golden 与 `_BF16_EXACT_OPS` 硬表**仍在**（见头部两处例外）。
 - ✅ 清掉 6 个 SessionEnd 机械空 stub（`canon/logbook/2026/07/`，无内容、非 `bureau:file-session` 产物）。
 - ✅ 真机 opp provenance 绑源 + IsClose bf16 转 tested（2026-07-16）；provenance 批 4-finding 收口（2026-07-16）。
 - ✅ PR#2 body Equal 作废更正：2026-07-10 在线复核确认 body **早已含更正**（裁决表 Equal 行 = 「无结论·结论作废」），denylist 词仅出现在作废叙述内，评论/review 无旧结论 → **无需编辑**。
