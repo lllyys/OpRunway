@@ -100,8 +100,10 @@ def load_golden(op):
     """按算子名从用户侧加载 golden——`<ops_root>/<op>/golden.py`，返回 `(golden_fn, golden_source, provenance)`。
 
     **引擎不含任何算子 golden、绝不回退内置/样例**（ADR 0011 决策 1/2）：缺 golden.py → **fail-closed** 报错。
-    golden.py 须导出 `golden_fn(inputs, attrs) -> ndarray` + `GOLDEN_SOURCE`（供 oracle_source 映射的来源串、
-    首 token 决定枚举）+ `GOLDEN_PROVENANCE`（来源出处）；缺任一 → fail-closed。样例见 `samples/golden/<op>/golden.py`。
+    golden.py 须导出 `golden_fn(inputs, attrs) -> ndarray` + `GOLDEN_SOURCE`（首 token = oracle_source 六枚举之一：
+    cpu_ref/catlass_existing_ref/task_spec_expected/torch_ref/analytical_ref/external_ref——**支撑多仓多算子的各类来源**；
+    elementwise 内置样例可用 backend 简写 torch/numpy）+ `GOLDEN_PROVENANCE`（来源出处）；缺任一 → fail-closed。
+    样例见 `samples/golden/<op>/golden.py`。
 
     安全（golden.py 会被 import 执行 = 执行用户/生成的 Python，性质同 runner.cpp、同信任级，ADR 0011 决策 6）：
     `op` 经 `_check_id` 校验、路径由已校验 op 名定死；**拒符号链接**（防 realpath 逃逸 + TOCTOU 换靶）；

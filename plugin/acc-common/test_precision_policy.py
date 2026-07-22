@@ -167,16 +167,21 @@ class FailFastAndRoutingTest(unittest.TestCase):
                                        "standard": "ascendoptest_default"}}), "ascendoptest_default")
 
     def test_oracle_source_from_golden_maps_by_prefix(self):
-        """Q9-Part C：golden_source 据实映射到 canonical 六枚举——torch→torch_ref、numpy→analytical_ref；
-        识别不出 → fail-closed（不默认 cpu_ref）。"""
+        """golden_source 据实映射到 canonical 六枚举。**首 token = 六枚举之一 → 直接用**（多仓多算子：golden.py
+        直接声明 cpu_ref/catlass_existing_ref/task_spec_expected/external_ref/torch_ref/analytical_ref）；
+        backend 简写 torch→torch_ref、numpy→analytical_ref；识别不出 → fail-closed（不默认 cpu_ref）。"""
+        # backend 简写（elementwise 内置样例沿用）
         self.assertEqual(P.oracle_source_from_golden("torch torch.isclose"), "torch_ref")
         self.assertEqual(P.oracle_source_from_golden("torch torch.sign"), "torch_ref")
         self.assertEqual(P.oracle_source_from_golden("numpy np.isclose"), "analytical_ref")
         self.assertEqual(P.oracle_source_from_golden(
             "numpy f32 matmul（A.f32@B.f32 再回落 dtype）"), "analytical_ref")
-        self.assertIn("analytical_ref", P.ORACLE_SOURCES)
-        self.assertIn("torch_ref", P.ORACLE_SOURCES)
-        for bad in (None, "", "cpu_ref", "scipy foo", "unknown"):
+        # **六枚举直接声明**（多仓多算子——别的仓的 golden 来自 cpu_ref/仓自带/任务书期望等，现都能声明）
+        for enum in P.ORACLE_SOURCES:
+            self.assertEqual(P.oracle_source_from_golden(f"{enum} src/xxx.cc"), enum, enum)
+            self.assertEqual(P.oracle_source_from_golden(enum), enum, f"{enum} 单 token")
+        # 识别不出 → fail-closed（不默认 cpu_ref）；near-miss（无下划线/别名）也不放行
+        for bad in (None, "", "scipy foo", "unknown", "cpuref x", "cpu ref"):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 P.oracle_source_from_golden(bad)
 

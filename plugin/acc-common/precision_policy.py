@@ -267,20 +267,23 @@ ORACLE_SOURCES = ("analytical_ref", "cpu_ref", "torch_ref",
 def oracle_source_from_golden(golden_source):
     """把 caseset.expected.golden_source（造 golden 时记的**真来源串**）据实映射到 canonical oracle_source 六枚举。
 
-    - "torch ..."  → torch_ref（torch CPU 参考）。
-    - "numpy ..."  → analytical_ref（按公式的 numpy 参考——语义上是解析参考、**非 cpu_ref**；
-                     见 canon oracle-source-is-a-hardcoded-constant 的诚实边界）。
-    识别不出来源前缀 → **fail-closed**（ValueError，绝不默认 cpu_ref）。新增来源须显式纳入本映射。
+    **首 token = 六枚举之一 → 直接用**（golden.py 直接声明来源 provenance，支撑**多仓多算子**的全部来源）：
+      `cpu_ref`(仓/PR 的 CPU 参考) · `catlass_existing_ref`(仓自带 golden) · `task_spec_expected`(任务书期望值) ·
+      `torch_ref` · `analytical_ref`(agent 按公式自写) · `external_ref`(外部给定)。
+    兼容 **backend 简写**（elementwise 内置样例沿用）：`"torch ..."`→torch_ref、`"numpy ..."`→analytical_ref。
+    识别不出 → **fail-closed**（ValueError，绝不默认 cpu_ref）。
     """
-    s = (golden_source or "").strip().lower()
-    first = s.split(None, 1)[0] if s.split() else ""     # 严格首 token，避免 "torchvision"/"numpyish" 误判
-    if first == "torch":
+    s = (golden_source or "").strip()
+    first = s.split(None, 1)[0].lower() if s.split() else ""     # 严格首 token，避免 "torchvision"/"numpyish" 误判
+    if first in ORACLE_SOURCES:                                  # golden.py 直接声明 provenance 枚举（多仓多算子）
+        return first
+    if first == "torch":                                        # backend 简写：torch CPU 参考
         return "torch_ref"
-    if first == "numpy":
+    if first == "numpy":                                        # backend 简写：解析 numpy 参考（语义上非 cpu_ref）
         return "analytical_ref"
     raise ValueError(
-        f"无法从 golden_source={golden_source!r} 映射 oracle_source —— 已知前缀 "
-        f"torch→torch_ref / numpy→analytical_ref；新来源须显式纳入映射（fail-closed，不默认 cpu_ref）。")
+        f"无法从 golden_source={golden_source!r} 映射 oracle_source —— 首 token 须为六枚举之一 {ORACLE_SOURCES} "
+        f"或 backend 简写 torch/numpy；新来源须显式声明（fail-closed，不默认 cpu_ref）。")
 
 
 # ---- 整数 dtype 判定 + per-case 有效标准（T7 dtype 扩面） ----
