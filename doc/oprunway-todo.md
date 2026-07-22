@@ -226,7 +226,15 @@
 
 #### 修复批次（**U1/U2/U3/U6a/U6b/U7a 已落地，2026-07-22**；分支 `fix/pdist-usertest-gaps`）
 
-#### 🟢 shape_transform 用真算子跑通了（2026-07-23）——**三个全通**
+#### 🟢 shape_transform 用真算子跑通了（2026-07-23）——**三个全通，且经 a3 真 torch 复跑**
+
+> **a3 `oprunway_prov`（真 torch 2.10.0+cpu）实跑**：Im2col 50 用例 `(2,2,2,2)→(2,8,9)` ·
+> UpsampleNearestExact2d 18 · UpsampleNearest3d 20 `(2,3,2,4,4)→(2,3,4,6,8)`（**rank 5**）。
+> 三者 `out_shape_source` 均为 `golden.out_shape` —— **声明值驱动整条链、且与真 torch 实际产出
+> 的形状逐 case 对过账**（对不上引擎 fail-closed）。全量 686 测在 a3 亦全绿。
+> ⚠ **仍未证**：golden 的**数值本身**只证了「真 torch 跑得出来、形状对得上」，**没跟另一个独立实现
+> 逐位比对过数值**；且**真机 NPU 一次没跑**（`--mode new_example` 卡在 `verify_mode=exact⇒bool`
+> 那条已记账的引擎缺口）。**精度/性能验收结论不得由这些推出。**
 
 此前 C1–C5 的引擎侧全是用**假算子**单测的。这轮换真算子，结论是**有条件的通**：
 

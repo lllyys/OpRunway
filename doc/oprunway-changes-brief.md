@@ -31,7 +31,9 @@
   - ⚠ **抓到一条诚实性缺口，形状很典型**：`Im2col/golden.py` 的 `GOLDEN_PROVENANCE` 白纸黑字写「**本文件不为 numel=0 编造输出**」，实测 `out_shape([(1,1,0)],…)` 却返回 `(4,2)` —— **声明写了、代码没做**，fail-closed 其实被委托给了 torch（换个替身结论就变，且 dry-run 阶段根本不 import torch、走不到那层）。同批的 `UpsampleNearestExact2d:107` 却有这道闸：**三份 golden，两份防了、一份没防**。根因是**三个新算子零测试覆盖**（`grep -l 'Im2col\|Upsample' test_*.py` 零命中）。已补 0 维闸 + 新建 `test_samples_golden_contract.py`（5 测，含「provenance 声称 ↔ 实际行为」的对账）。
   - **又一条静默错过路径（codex 抓的）**：G4 的降规模留痕**没有任何门去消费** —— 一个被降到 trivial 阈值以下的性能用例，下游会判「trivial-met 免测达标」。但 trivial-met 的正当性是「这 case 本来就小、perf 没意义」，而降规模 case 是「它本来很大、我们没按目标规模跑」——**没测却算过**。已改成 blocked 并带上原规模。
   - 另修：一条**撒谎的测试**（docstring 声称覆盖「无 golden.py 时坏预算也拦」，实际那条路从未被行使）· im2col 补记 rank 覆盖窟窿（4 维入只有 2/50、空 Tensor 0 覆盖）· `gen_cases` docstring 还写着「4 份样例都不导出 out_shape」（现已 7 份、3 份导出）· `samples/specs/README.md` 补上新增三份的索引与禁读纪律。
-  - **验证**：torch 替身 678 测全绿、裸跑与基线零 diff、两道门 PASS/SYNCED。⚠ **三份新 golden 的数值一份都没跟真 PyTorch 对过**（本机无 torch，用的是各自的替身）——能证的只有「与按算子文档独立转写的规格逐位一致」。
+  - **验证**：a3 `oprunway_prov` 容器 **真 torch 2.10.0+cpu 跑 686 测全绿**（传输逐文件 sha256 双侧一致）；本机 torch 替身同样全绿、裸跑与基线零 diff、两道门 PASS/SYNCED。
+  - ⭐ **三个真算子在 a3 的真 torch 下也全跑通了**（不再只是「和自造替身一致」）：Im2col 50 用例 `(2,2,2,2)→(2,8,9)` · Upsample2d 18 用例 · Upsample3d 20 用例 `(2,3,2,4,4)→(2,3,4,6,8)`（rank 5）。三者 `out_shape_source` 均为 `golden.out_shape` —— 即**声明值驱动整条链，且与真 torch 实际产出的形状逐 case 对过账**（对不上引擎会 fail-closed）。
+  - ⚠ 仍未证的：**golden 的数值本身**只证了「真 torch 跑得出来、形状对得上」，**没有跟另一个独立实现逐位比对过数值**；且**真机 NPU 一次没跑**（`--mode new_example` 还卡在 `verify_mode=exact⇒bool` 那条已记账的引擎缺口上）。精度/性能验收结论不能由这些推出。
 
 - **U5 · 钉死被测 commit（`head_sha` 取材，退役分支名兜底）** —— canon `pr-head-commit-is-the-tested-object` 自带的「open+fork 可解析性尚未实测」这个开放问题，**实测有答案了**，而且现行兜底被实锤是错的：MR 3400 的 `head.ref` **字面就叫 `master`**，旧兜底会拿它去 base 仓取（实测 sha `e16a230c` ≠ head `9b494b2d`）——**静默取到完全不相干的代码，却仍报告「取自 PR head」**。改成只按 `head_sha` 取、base 优先 fork 兜底（同一个 sha，不引入分支名风险）；拿不到 sha → 一个文件都不取 + 机读 `blocked="missing_head_sha"`（只记 note 照常返回 = fail-open）。实测复跑：MR 3400 的 7 份、MR 2663（正是 Pdist 首跑那个）的 6 份关键文件全部取自各自 head commit。⚠ codex 抓到我把 n=2 的实测写成了「是常态」「不必特判 fork 仓」——把有限观测扩大成平台保证，已改回。
 
