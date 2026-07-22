@@ -28,6 +28,9 @@
   - **U5（不算编排洞，是取证缺口）**：`pr_facts.json` 得 `head = base = "master"` —— head 兜底真的触发了、全程没记 sha。本次因 PR 已合入而无害，但「被测 = PR 那版代码」仍然只是口头承诺。
   - 另记 **G1–G4**：Pdist 是成对归约（`(N,M)`→`(N*(N-1)/2,)` + 属性 `p`），而 `gen_cases` 整条是 elementwise 假设 —— shape 阶梯造出大批非法维度、**任务书核心要求的 `p=inf` 场景 0 覆盖**（`p` 根本没进 attr 轴）、runner 四槽假设输出同 numel、大 shape O(N²) 把 mock 跑到 2 分钟超时。属能力边界扩展，单独立项。
   - **一条正面发现**：`golden.py`「没人产」是**流程空缺、不是能力空缺** —— agent 为做探针**自己手写了一份** Pdist 的 `golden.py` + `spec.json` 并跑通 `--dry-run`。批 6 是把它写进流程，不是从零教。
+  - **用户当天另定两条（U6 / U7），都已记进 TODO**：
+    - **U6 · mock 不该存在、默认该走 NPU**。实况核了：`run_workflow.py:230` 的 `--mode` 默认就是 `mock`，编排层还把它定成 CP-B 必跑的一步。⚠ 更严重的是 `repo_adapter.py:182` 的 mock「NPU 输出」literally 就是 `out = golden.copy()` —— **精度按构造必过**，性能也是按元素数编的假数，**却产出与真验收同名同形的 `acceptance.json`**。拆开看它混了两件事：契约自检（有用，但 `gen_cases --dry-run` 已经能做）和伪造裁决（有害，要删的是这个）。删的连带面已估：**8 个测试文件 89 处 mock 引用** + `--defect` 那条「证明门真会 fail」的自证路径会一起没，得先定替代。
+    - **U7 · 用例生成得覆盖任务书里所有算子类型，不能只吃 elementwise**。清点 41 份任务书后确认 **elementwise 是少数派**：Foreach 族 8 份进出都是**张量列表**、`bincount` 的**输出长度由输入内容决定**、`Arange`/`logspace` **压根没有输入张量**、`im2col`/`MaxUnpool`/`Upsample` 输出 shape 由属性公式推、`Polar`/`AngleV2` 要**复数 dtype**、SPMV/Trsm/Cheevj 是稀疏与线代。（其中 `bincount`/`Arange`/`im2col` 已读仓内 README、`ForeachAddListV2` 读的是任务书仓里的 `docs/design.md`；其余按算子名推、待逐份核。）Pdist 那组 G1–G4 只是「归约类」一格的实例。第一步是 **U7a 形态分类学**——先把 41 份逐份归类成机读清单，没这个清单后面全是拍脑袋。
   - **修复批次已排好但未开工**（用户定：先记账）：0 GitCode 镜像同步 → 1 U1（倾向直接删 `tools:` 让它继承全部，而非逐个补；改完**必须真跑一次**验证）→ 2 U2 → 3 U3；U4/U5 本批不动，G1–G4 另立项。
   - 全部记进 `doc/oprunway-todo.md` 新增的「🔴🔴 首跑实测暴露的编排层洞」节；transcript 与产物留在 `OpRunway-usertest/`（含 7-13 那次 IsClose 全绿跑的归档，可做退化对照）。
 

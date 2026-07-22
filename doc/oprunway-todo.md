@@ -113,24 +113,87 @@
 - [ ] **U4 · 「干净 session」隔离实为无效**：skill 注入时报的 base directory 是**活仓** `/…/OpRunway/plugin/skills/acceptance-workflow`（**不是** `~/.claude/plugins/cache/`）——marketplace 是 `directory` 源、`installLocation` 直指仓根。于是 agent 那 30 条 Bash 几乎全在读活仓源码。**连带**（⚠ 下句是**按本次实测推的**、未穷举验证）：`/plugin install` 的快照看来只决定**组件注册**（有哪些 agent/skill、frontmatter 长什么样）；至少对「按 base directory 解析的文件」和「agent 直接读的源码」这两类，读的是**活仓工作树** → 仓一旦切分支，这部分行为就可能与安装时的快照对不上。要真隔离得换非 `directory` 源。
 - [ ] **U5 · head 兜底照旧（预测命中）**：`pr_facts.json` 得 `"base": "master", "head": "master", "merged": true` —— head 兜底真的触发了，全程无 sha。本次因 PR 已合入而无害，但「被测 = PR 版」仍无机器保证（承 canon `pr-head-commit-is-the-tested-object`，`proposed`）。
 
+#### U6 · 默认走 mock 是错的；mock 本身就不该存在（用户 2026-07-22 定）
+
+> **用户原话**：「为什么默认走 mock？默认应该走 NPU，且不应该有 mock 的存在。」
+
+**实况（已核）**：mock **确实是全局默认**——`run_workflow.py:230` `ap.add_argument("--mode", default="mock", …)`，
+连函数签名 `run_workflow.py:55` `def run(spec_path, mode="mock", …)` 也默认它。编排层更把它定成**强制一步**：
+`acceptance-workflow/SKILL.md:84` 要求 CP-B 必跑 `--mode mock`，`:86` 还写「mock 裁决异常先修 spec，别上真机」；
+`plugin/agents/op-acceptance.md:63`（注意仓里还有个同名的 `plugin/commands/op-acceptance.md`）规定缺 NPU/VPN 就「到 CP-B（mock）为止」。
+
+⚠ **比「默认值选错」更严重的是它产什么**：`repo_adapter.py:182` 的 mock「NPU 输出」literally 是
+`out = golden.copy()  # mock：完美 NPU = golden` —— **精度维按构造必过**（除非人为 `--defect` 注入坏点）；
+性能是 `_mock_us(numel)`（`:159`，按元素数算的假数）+ `perf_compare.mock_baseline`（`:73`，假基线）。
+而它**产出的是与真验收同名同形的 `acceptance.json` 裁决**。这与本项目「不基于跑没跑崩式判定」的立场直接冲突。
+（canon `catlass-synthetic-demo-cannot-forge-pass`【`proposed`】只证了 **catlass 通路**的 mock 造不出 PASS，
+**没覆盖 elementwise 通路**——那条路上 mock 是实实在在出裁决的。）
+
+**mock 现在混了两个职责，拆开看才好办**：
+- (a) **契约自检**（spec / gen_cases / validator 链是否自洽、id 一一对应、防跑子集）—— 这个有价值。
+  **但 `gen_cases --dry-run` 已经能做**（plan-only、不算 golden、不 import torch），Pdist 首跑里验收 agent 取证用的正是它。
+- (b) **伪造 `acceptance.json` 裁决**（拿 golden 冒充 NPU 输出）—— 这个是有害的，就是要删的那部分。
+
+- [ ] **U6a · 默认值翻过来**：`--mode` 默认改 `new_example`（真机）；没 NPU **fail-closed 说清楚跑不了**，不再静默退到 mock。
+- [ ] **U6b · CP-B 的自检改用 `--dry-run`**，不再产 mock 裁决；`acceptance-workflow` / `op-acceptance` 两处散文同步改写。
+- [ ] **U6c · 删 mock 通路**。⚠ **连带面已估（别低估）**：`repo_adapter.MODES`（`:646`）· `run_mock`/`_inject_defect`/`_mock_us`（`:146-198`）·
+  `perf_compare.mock_baseline`（`:73`、`:398` 有调用点）· `catlass_adapter.run_catlass_mock`（`:452`）+ `CATLASS_MODES` ·
+  **8 个测试文件共 89 处 mock 引用**（`test_runner_lookup` 25 · `test_gen_cases_dtype_attr` 16 · `test_ne_transport` 15 ·
+  `test_catlass_adapter` 13 · `test_perf_compare` 10 · 余 3 个合计 10）。**删之前先想清楚这些测试改测什么**——
+  它们现在靠 mock 当「可确定性复现的假 NPU」，删干净会连带失去一批不依赖真机的回归能力。
+- [ ] **U6d · `--defect` 注入机制何去何从**：现在它靠 mock 造坏点来证明 validator 真会 fail（防「门是假的」）。
+  删 mock 后这条自证路径没了，需要替代（候选：留一条**明确非验收、不产 `acceptance.json`** 的测试专用夹具，
+  与验收通路彻底隔离）。**这条须用户拍板**，别默默删掉。
+
+#### U7 · 用例生成只支持 elementwise，得覆盖任务书里出现的全部算子类型（用户 2026-07-22 定）
+
+> **用户原话**：「要能支持所有在任务书里出现过的算子类型，不要只支持 elementwise 类型。」
+> Pdist 的 G1–G4（见下节）是这条的**一个实例**，不是全部。
+
+**实底（`doc/oprunway-task-pr-map.md` 41 份任务书清点，算子形态按名称+仓内 README 抽查）**：
+**elementwise 是少数派**。至少还有这些结构上过不去的类，每类都不是「加个 `golden.py` 」能解决的：
+
+| 类 | 例 | 卡在哪（结构性，非参数问题） |
+|---|---|---|
+| **张量列表（Foreach 族，8 个）** | `ForeachAddListV2` / `AddScalarV2` / `MulList` / `SubListV2` / `RoundOffNumberV2` / `Exp` / `Expm1` / `Neg` | 输入输出都是 **Tensor List**、不是单张量（**已核**：`ForeachAddListV2` 设计文档「对两个张量列表（Tensor List）执行逐元素…」）。`gen_cases` 的 case 结构是「一组同形单张量」，表达不了列表 |
+| **归约类** | Pdist · `median` · `MinDim&MaxDim` | 输出 shape ≠ 输入 shape；`MinDim&MaxDim` 还是**双输出**（values + indices） |
+| **输出 shape 依赖输入内容** | `bincount` | **已核**（README）：「out 大小为 (self 的最大值+1) 与 minlength 中的最大值」→ golden 与 runner 的输出 buffer 都得**运行期定**。当前最狠的一类 |
+| **无输入张量的生成类** | `Arange` · `logspace` | **已核**（README）：`Arange` 从标量 start/end/step 算出 1 维张量 → **根本没有输入张量可造** |
+| **形状由属性推导** | `im2col` · `MaxUnpool2d/3d` · `UpsampleNearestExact1d&2d` / `Nearest3d` | **已核**（`im2col` README）：输出 shape 由 kernel_size/padding/dilation/stride 公式推导 |
+| **复数 dtype** | `Polar`（实→复）· `AngleV2`（复→实） | 当前 dtype 集只有 {fp32, fp16, bf16, int16, int32}。⚠ `im2col` README 更列了 COMPLEX32/64 · DOUBLE · BOOL · INT64/UINT64 等一大票 |
+| **稀疏 / 线代** | `SPMV`（ops-sparse）· `aclblasTrsmBatched`（ops-blas）· `aclsolverCheevj`（ops-solver） | 输入不是稠密张量；且这些仓的 adapter 都还没有 |
+| **跨卡 / 融合 / 注意力** | `SyncBatchNormGatherStats` · `SlidingTileAttention` · `dynamicMap` | 多设备或复合语义 |
+
+- [ ] **U7a · 先做形态分类学**：把 41 份任务书逐份归类到上表（或修订上表），产出一份**机读**的算子形态清单
+  （每份任务书 → I/O 形态 / dtype 集 / 属性轴 / 输出 shape 来源）。**没有这个清单，后面的扩展就是拍脑袋。**
+  ⚠ 上表的分类**部分是按算子名推的**，只有标「已核」的四个（`ForeachAddListV2` / `bincount` / `Arange` / `im2col`）
+  真读过仓内 README 或任务书；其余须逐份核实后再当事实用。
+- [ ] **U7b · spec schema 要能表达这些形态**：至少需要 I/O arity（含列表）、rank/shape 约束、输出 shape 来源
+  （同形 / 公式推导 / 依赖输入内容）、属性作语义轴、多输出、复数与更宽 dtype 集。**这是 G1/G2/G4 的一般化。**
+- [ ] **U7c · runner 骨架同步一般化**：现在是「固定四槽 + 输出 numel = 输入 numel」，装不下列表输入、多输出、动态输出 buffer。**这是 G3 的一般化。**
+- [ ] **U7d · 分期**：全覆盖是大工程，须**排优先级**（建议按任务书份数排：Foreach 族 8 份是单类最多的，
+  归约类次之）。**优先级须用户拍板**，别自作主张从最简单的开始。
+
 #### 修复批次（**未开工**——分支 `fix/pdist-usertest-gaps` 目前只有记账 commit `65308a2`）
 
 按「挡路程度 × 改动成本」排。**用户 2026-07-22 定：先记账、暂不动手。**
 
-- [ ] **0 · GitCode 镜像同步 PR #8**（`brian66237`；GitHub `lllyys` 侧已同步）。与代码修复无关，但别忘。
+- [x] **0 · GitCode 镜像同步 PR #8** —— 2026-07-22 已推，双镜像同 OID `1d2bb3a`。
 - [ ] **1 · U1**（一行，最挡路）——改法二选一，**倾向 (b)**：
   - (a) `tools:` 显式补 `AskUserQuestion` + 派 subagent 的工具：可读性好，但以后加工具还得记得回来同步改这里。
   - (b) **直接删掉 `tools:` 让它继承全部**：primary agent 本来就该有全套；且这仓在「声明式白名单被静默忽略」上**已经栽过一次**（`plugin.json` 的 `agents` 数组，见分支 `fix/plugin-agents-not-loading`）。
   - ⚠ **改完必须真跑一次验证**——「frontmatter 里写了」≠「工具真给到了」，这正是 U1 本身的教训。光看 `plugin validate` 绿不算数。
 - [ ] **2 · U2**（小，但影响正确性）：`fetch_source.py` 接受 `/pull/N` 形态；解析失败 **fail-loud**，不产空壳继续往下传。
 - [ ] **3 · U3**（中）：`samples/` 搬进 `plugin/`，或把 runner 骨架内联进 `acc-runner/references/runner-skeleton.md`。⚠ 搬 `samples/` 会连带改 `_golden_fixture.py` 的相对路径、`archive_ops/` 那两个软链、以及 canon/doc 里对 `samples/` 的引用。
-- [ ] **4 · U4 / U5 本批不动**：U4 要换 marketplace 源形态 → 影响分发方式，得先定发布形态（T9 `proposed`）；U5 属 canon `pr-head-commit-is-the-tested-object`（`proposed`）的落地，该页自带前置「未合并 PR 的 head 常在贡献者 fork，open+fork 的 API 可解析性**尚未实测**」。
-- [ ] **5 · G1–G4 另立项**，不进本批。
+- [ ] **4 · U6a/U6b**（默认值翻成真机 + CP-B 自检改 `--dry-run`）：小改动、且直接改「默认行为」这条最要紧的语义。**U6c/U6d 删 mock 通路不进本批**——连带 89 处测试引用 + `--defect` 自证路径要先定替代方案。
+- [ ] **5 · U4 / U5 本批不动**：U4 要换 marketplace 源形态 → 影响分发方式，得先定发布形态（T9 `proposed`）；U5 属 canon `pr-head-commit-is-the-tested-object`（`proposed`）的落地，该页自带前置「未合并 PR 的 head 常在贡献者 fork，open+fork 的 API 可解析性**尚未实测**」。
+- [ ] **6 · U7 / G1–G4 另立项**，不进本批。⚠ **U7a（形态分类学）应当先做**——它是 U7b/c/d 和 G1–G4 的共同前提，且只是调研、不改代码，可与上面几条并行。
 
 #### Pdist 暴露的「非 elementwise 通路」空白（G1–G4；能力边界扩展，须单独立项）
 
 > 均由验收 agent 实跑取证，逐条落在 `work/reports/pdist/scope_conclusion.json` 的 `hard_evidence`。
 > Pdist = 成对归约：输入 `(N,M)` 二维点集 + float 属性 `p` → 输出 `(N*(N-1)/2,)` 一维。
+> ⚠ **G1–G4 是 U7「归约类」那一格的实例，不是 U7 的全部**——按 U7a 的清单做一般化时，别只照 Pdist 修。
 
 - [ ] **G1 · rank 约束的归约类用例生成**：spec schema **无任何** rank/ndim/shape 约束字段，`gen_cases` 只按内部 `_REG_SHAPES`/`_LARGE_SHAPES` 造 1~8 维（`(3,)`、`(2,3,4)`、`(2,2,2,2)` 等对 Pdist 全非法），且假设输出同形。需支持「输入固定 rank + 输出 shape 由输入结构派生」。
 - [ ] **G2 · 度量属性 `p` 没进覆盖轴（这条最刺眼）**：任务书**核心要求就是修 `p=inf` 的精度问题**，而 `--dry-run` 实测 `id_kinds` 里的 `inf`/`ninf`/`nan` 全是**输入数据**的特殊值、**不是属性 `p` 的取值**；无 `attr_matrix` → `p` 恒等默认 2.0 → **核心验收场景 0 覆盖**。现有 attr 机制是照 IsClose 的 `rtol`/`atol`/`equal_nan` 设计的，需扩到「决定算子语义的度量参数」且能表达 `inf`。
