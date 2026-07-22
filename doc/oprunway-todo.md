@@ -475,7 +475,21 @@
   - **端到端实证**：有快照 + 真引文 → 核过、**tier 1**；掉包快照 → tier 4 blocked；编造引文 → 拒。
   - 新增 7 条测试（含 CRLF + 尾行无换行 + 中文的字节保真用例）。
 - [ ] **批 4 · spec 侧承载**：`acc-spec` 产出 golden 来源声明 + 两档链判定 + 人核标记，写进 spec（判定权威只在 spec，硬约束 #5）。
-- [ ] **批 5 · 门侧接线**：`validator` / `validate_acceptance_state` / `run_workflow` 消费 tier——blocked → BLOCKED、`requires_human_review` → 人核 CP，不静默放行。
+- [x] **批 5 已落地（2026-07-23）· 门侧接线：tier 真正参与裁决路由**
+  ⭐ **核心判断（这条比实现更重要）**：golden 授权核不实 **≠ 精度 fail，也 ≠ needs_review**。
+  它意味着**这份真值本身来路不明** → 基于它的每一条精度判定都不成立。
+  - 报成 `fail` 会让人去查算子 —— **查错方向**（算子可能好好的）。
+  - 报成 `needs_review` 也不对 —— 指标算得好好的，不确定的是**真值本身**。
+  故单列 `blocked_golden_unauthorized` → 编排层 `BLOCKED_GOLDEN_UNAUTHORIZED`（exit 1）。
+  - **排在所有别的判定之前**：来路不明的真值下，「精度 fail」「性能未达」这些结论本身就不成立，
+    不该被它们盖住。配了「精度真的挂了 + tier 4」的负例钉住这条优先级。
+  - **不进精度放行集** → 不跑 Task3：拿一份不知对不对的 golden 判过的「精度通过」去支撑
+    「性能达标」，是把无效结论往下传。
+  - `requires_human_review`（tier 3 / multistep，R5 末位档）→ 与 `passed_with_risk` 同档挂人工 CP，
+    但原因分开如实记（`golden_needs_human_review`）。
+  - **向后兼容**：`golden_tier=None`（未声明契约块）不参与门，裁决与批 5 前一致。
+  - 裁决产物新增 `overall.golden_blocked` / `golden_needs_human_review` / `counts.golden_blocked`。
+  - 新增 6 条测试（含优先级负例 + 编排层不落 FAIL(精度) 的源码级钉子）。
 - [ ] **批 6 · agent 产出侧**：`acc-runner-dev` 补产 `golden.py`（**R6 生成期选 torch/numpy 并写死进文件**）+ 放宽 runner 的 scope gate 覆盖面（从任务书推，守最高律令）。⚠ 连带：该 agent 的 scope gate 仍写 dtype 仅 {fp32,fp16}、`bf16→BLOCKED`，**已 stale**（bf16 真机已验收过），须同步。
 - [ ] **批 7 · 报告 + canon 收口**：报告展示 tier / provenance / 人核项；ADR 0011 与本轮裁定走 `capture → compile → review`（**现 ADR 0011 仍 `proposed`**）。
 - [ ] 贯穿项：产出物落点 `<ops_root>/<op>/`，与 `find_runner`/`load_golden` 的安全边界（**逐段拒软链**、`_check_id`、缺则 fail-closed）对齐。

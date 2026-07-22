@@ -20,6 +20,14 @@
 
 ## 2026-07-23
 
+- **golden 来源契约 批 2 + 批 5 落地：从「有档位」到「档位真起作用」** —— 批 3 打通前提后一口气推完两批。
+  - **批 2**：`golden.py` 可选导出 `GOLDEN_CONTRACT`（来源/方法族/授权引文锚/快照指纹），加载时派生档位写进每条 case。`load_golden` 返回改**具名元组** —— 刻意不再加位置项：字段增删时位置解包会**静默错位**，具名取则当场报错（实证：6 处旧的 4 元解包当场炸，不是悄悄把 contract 当成 out_shape 用）。
+  - ⭐ **IsClose 做成了完整自证的参考实现**：真任务书快照与 golden.py 同处，引文锚 `task_doc.snapshot.md:13` + 逐字 quote → **a3 真 torch 实测派生 tier 1**。**改一个字（`cpu`→`CPU`）就掉回 tier 4** —— 引文锚不是摆设。
+  - **批 5 的核心判断（比实现更重要）**：授权核不实 **≠ 精度 fail、≠ needs_review**。它意味着**真值本身来路不明** → 基于它的每条精度判定都不成立。报成 fail 会让人**去查算子、查错方向**（算子可能好好的）；报成 needs_review 也不对（指标算得好好的，不确定的是真值）。故单列 `BLOCKED_GOLDEN_UNAUTHORIZED`，且**排在所有别的判定之前**、**不进精度放行集**（不跑 Task3——拿不知对不对的 golden 判过的「精度通过」去支撑「性能达标」，是把无效结论往下传）。
+  - 校验刻意拆三层：`validate_golden_contract` 只校词表结构 · `verify_authorization` 读快照核引文真伪 · `derive_golden_tier` 只按词表判档。混一起就是「自己核自己」。词表拼错必须早拦，否则兜底会把它判成含糊的 `unverifiable_authorization` —— 一个本该 tier 2 的正当 golden 被判 blocked，查半天查不到是拼错了。
+  - ⚠ **主动拆出去没做的**：`GOLDEN_SOURCE` 收紧到四枚举 · `catlass_adapter` 那处 `"numpy f32 …"`。它们会**改变现有 oracle_source 映射行为**，属破坏性变更，且 TODO 早点名 catlass 那处「测试不会红、但真跑时炸」。**混进来会把可回滚的增量变成不可回滚的。**
+  - 验证：a3 真 torch 727 测全绿、裸跑与基线零 diff、两道门 PASS/SYNCED。
+
 - **golden 来源契约 批 3 落地：任务书全文快照入库（R12）** —— 这是**批 2 的前提，不是可选装饰**：没有快照，`verify_authorization` **恒返 False** → 任何声称「任务书指定了真值口径」的 golden 都被 `derive_golden_tier` 规则② 判 tier 4 blocked。批 2 一直接不上就卡在这。
   - **落点** `<ops_root>/<op>/task_doc.snapshot.md` —— 与 spec/runner/golden **同处算子目录**，不是取材工作区：引文锚要能随算子一起被复核、被搬运，放临时目录里换台机器就核不了。文件名只认这一个（R2 的落地方式：cite 指向 PR / 仓内文件一律不接受，值域里没那个格子）。
   - **生成** `fetch_source.py --snapshot-into <dir>`，**逐字节原样**（二进制读写、不经文本层）。⚠ 不许任何规范化：改一个字节行号就可能移位，而报出来的却是「引文与出处对不上」这种**看起来像 agent 编造引文**的错，真病因反而查不出来。

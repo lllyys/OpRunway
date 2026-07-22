@@ -1107,6 +1107,72 @@ def _v_triple(out_shape=None, ev_out_shape=None, ev_prov_shape=None, numel=None,
     return spec, cs, ev
 
 
+class GoldenTierGateTest(unittest.TestCase):
+    """批 5：golden 档位真正参与裁决路由。
+
+    ⚠ **核心判断**：授权核不实 ≠ 精度 fail，也 ≠ needs_review。
+    它意味着**这份真值本身来路不明** → 基于它的每一条精度判定都不成立。
+    - 报成 `fail` 会让人去查算子——**查错方向**（算子可能好好的）。
+    - 报成 `needs_review` 也不对——指标算得好好的，不确定的是真值本身。
+    所以单列 `blocked_golden_unauthorized`，且**排在所有别的判定之前**：
+    来路不明的真值下，「精度 fail」「性能未达」这些结论本身就不成立，不该被它们盖住。"""
+
+    @staticmethod
+    def _with_tier(tier):
+        spec, cs, ev = _v_triple()
+        cs["cases"][0]["expected"]["golden_tier"] = tier
+        return V.validate(spec, cs, ev)
+
+    def test_no_contract_is_backward_compatible(self):
+        """`golden_tier=None`（未声明契约块）→ 不参与门，裁决与批 5 前一致。"""
+        vd = self._with_tier(None)
+        self.assertEqual(vd["overall"]["verdict"], "pass", vd["overall"])
+        self.assertEqual(vd["overall"]["counts"]["golden_blocked"], 0)
+
+    def test_tier1_verified_passes_clean(self):
+        vd = self._with_tier({"tier": 1, "requires_human_review": False, "blocked_reason": None})
+        self.assertEqual(vd["overall"]["verdict"], "pass", vd["overall"])
+
+    def test_tier4_blocked_is_not_fail_and_not_needs_review(self):
+        vd = self._with_tier({"tier": 4, "requires_human_review": True,
+                              "blocked_reason": "unverifiable_authorization"})
+        o = vd["overall"]
+        self.assertEqual(o["verdict"], "blocked_golden_unauthorized")
+        self.assertNotEqual(o["verdict"], "fail")           # 别让人去查算子
+        self.assertNotEqual(o["verdict"], "needs_review")   # 指标没问题，真值才有问题
+        self.assertEqual(o["counts"]["golden_blocked"], 1)
+        self.assertEqual(o["golden_blocked"][0]["blocked_reason"], "unverifiable_authorization")
+
+    def test_tier3_multistep_routes_to_human_cp(self):
+        """tier 3（按公式自拼多步）→ 正当但必须人核（R5 末位档），与 passed_with_risk 同档。"""
+        vd = self._with_tier({"tier": 3, "requires_human_review": True, "blocked_reason": None})
+        o = vd["overall"]
+        self.assertEqual(o["verdict"], "passed_with_risk")
+        self.assertTrue(o["requires_human_cp"])
+        self.assertEqual(len(o["golden_needs_human_review"]), 1)
+
+    def test_blocked_takes_precedence_over_precision_fail(self):
+        """**优先级**：真值来路不明时，精度 fail 这个结论本身不成立，不该盖住 blocked。"""
+        spec, cs, ev = _v_triple()
+        cs["cases"][0]["expected"]["golden_tier"] = {
+            "tier": 4, "requires_human_review": True, "blocked_reason": "method_unavailable"}
+        ev["evidence"][0]["precision"]["metrics"] = {"bad_count": 999, "numel": 16}   # 精度真的挂了
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "blocked_golden_unauthorized",
+                         "blocked 必须盖过 fail —— 否则会把人引去查算子")
+
+    def test_run_workflow_routes_blocked_to_its_own_state_not_fail_precision(self):
+        """编排层：`blocked_golden_unauthorized` → 独立终态，**不落 FAIL(精度)**、不进 Task3 放行集。"""
+        import run_workflow as W
+        self.assertIn("BLOCKED_GOLDEN_UNAUTHORIZED", W._STATE_MAP)
+        self.assertEqual(W._STATE_MAP["BLOCKED_GOLDEN_UNAUTHORIZED"], "BLOCKED_GOLDEN_UNAUTHORIZED")
+        self.assertEqual(W._exit_code("BLOCKED_GOLDEN_UNAUTHORIZED"), 1)   # 非 0（不是干净通过）、非 2（不是挂人工）
+        import inspect
+        line = next(l for l in inspect.getsource(W.run).splitlines() if "precision_ok =" in l)
+        self.assertNotIn("blocked_golden_unauthorized", line,
+                         "blocked 不得进精度放行集——真值来路不明时性能对比也没意义")
+
+
 class ScaledCasesSurfacedInVerdictTest(unittest.TestCase):
     """G4 连带（2026-07-23）：**降过规模的 case 必须出现在裁决里**。
 

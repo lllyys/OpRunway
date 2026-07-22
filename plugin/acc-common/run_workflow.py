@@ -61,6 +61,7 @@ _STATE_MAP = {
     "FAIL(精度)": "FAILED_PRECISION", "NEEDS_REVIEW": "NEEDS_REVIEW",
     "PASSED_WITH_RISK": "PASSED_WITH_RISK",
     "PASSED_WITH_GAPS": "PASSED_WITH_GAPS",   # C4：精度全过但任务书要求的 dtype 有差额挂账
+    "BLOCKED_GOLDEN_UNAUTHORIZED": "BLOCKED_GOLDEN_UNAUTHORIZED",  # 批 5：golden 授权核不实
 
     "BLOCKED_WAIT_GPU_BENCHMARK": "BLOCKED_WAIT_GPU_BENCHMARK",
     "BLOCKED_INCOMPARABLE_TIMING_SCOPE": "BLOCKED_INCOMPARABLE_TIMING_SCOPE",
@@ -192,6 +193,15 @@ def run(spec_path, mode="new_example", out_dir="reports/_run", defect=None, perf
     # passed_with_gaps（C4：任务书要求的 dtype 算子 op_def 不支持、差额挂 task_pr_gaps）**精度本身是全过的**，
     # 必须与 pass 同样继续跑 Task3——漏掉它会静默跳过性能、且归因错成「无性能用例」。
     precision_ok = o["verdict"] in ("pass", "passed_with_risk", "passed_with_gaps")
+    # 批 5：`blocked_golden_unauthorized` **不在放行集**——真值来路不明时，连性能对比都没有意义
+    #（拿一份不知对不对的 golden 判过的「精度通过」去支撑「性能达标」，是把无效结论往下传）。
+    # 批 5：golden 授权核不实 → 直接 BLOCKED，且**排在所有别的判定之前**。
+    # 来路不明的真值下，「精度 fail」「性能未达」这些结论都没有意义，不该被报成那些。
+    if o["verdict"] == "blocked_golden_unauthorized":
+        _gb = o.get("golden_blocked") or []
+        _why = "; ".join(f"tier{t.get('tier')}:{t.get('blocked_reason')}" for t in _gb) or "?"
+        print(f"[Task2] golden 授权核不实 → BLOCKED（{_why}）——"
+              f"真值来路不明，基于它的精度判定不成立；跳过 Task3。")
     if not precision_ok:
         report = {"op": spec["op"], "baseline_source": None, "target_ratio": None, "per_case": [],
                   "notes": [f"精度未全过（{o['verdict']}）→ 跳过性能测试（fail-fast，精度已全跑再判）"],
@@ -278,6 +288,10 @@ def run(spec_path, mode="new_example", out_dir="reports/_run", defect=None, perf
         overall = "BLOCKED(验收门未过)" if is_acceptance else "BLOCKED(管路自检未过)"
     elif mode == "new_example" and runner_source != "user":
         overall = f"BLOCKED(runner_source 非 user/缺失: {runner_source!r})"
+    elif prec == "blocked_golden_unauthorized":
+        # 批 5：真值来路不明 → 无从得出结论。**不能报成 FAIL(精度)**——那会让人去查算子、查错方向。
+        # 排在 fail 之前：来路不明的真值下，「精度 fail」这个结论本身就不成立。
+        overall = "BLOCKED_GOLDEN_UNAUTHORIZED"
     elif prec == "fail":
         overall = "FAIL(精度)"
     elif prec == "needs_review":

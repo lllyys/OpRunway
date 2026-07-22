@@ -488,7 +488,7 @@ def _empty_row(cid):
             "判据": "", "evidence_ref": cid}
 
 
-def _verdict(op, vm, spec_standard, problems, per, gaps=None, scaled=None):
+def _verdict(op, vm, spec_standard, problems, per, gaps=None, scaled=None, golden_tiers=None):
     fails = [p for p in per if p["功能"] == "fail" or p["精度"] == "fail"]
     # finding #9：standard 或 acceptance 任一 uncertain 都要计入 needs_review（不被 acceptance pass 吞）。
     unc_ids, seen = [], set()
@@ -507,11 +507,26 @@ def _verdict(op, vm, spec_standard, problems, per, gaps=None, scaled=None):
     risks = [p["case_id"] for p in per if p.get("risk")]
     catlass_na = [p["case_id"] for p in per if p["catlass_compare_pass"] == "na"]
     gaps = list(gaps or [])
-    if problems or fails:
+    # 批 5：golden 授权核不实（tier 4 / blocked_reason）→ **BLOCKED，不是 fail 也不是 needs_review**。
+    # 为什么单列一档：授权核不实意味着**这份真值本身来路不明**——那么基于它的每一条精度判定都
+    # 不成立。这既不是「算子错了」（算子可能好好的），也不是「指标不确定」（指标算得好好的），
+    # 而是**我们无从得出结论**。混进 fail 会让人去查算子，查错方向。
+    # ⚠ 排在最前：来路不明的真值下，别的结论（fail / risk / gap）都没有意义，不该被它们盖住。
+    golden_blocked = [t for t in (golden_tiers or []) if t.get("blocked_reason")]
+    # tier 3 或 multistep → 需人核（R5：按公式自拼多步，出错面远大于单 API）
+    golden_needs_human = [t for t in (golden_tiers or [])
+                          if t.get("requires_human_review") and not t.get("blocked_reason")]
+    if golden_blocked:
+        overall = "blocked_golden_unauthorized"
+    elif problems or fails:
         overall = "fail"
     elif unc_ids:
         overall = "needs_review"
     elif risks:
+        overall = "passed_with_risk"
+    elif golden_needs_human:
+        # tier 3 / multistep：golden 是按公式自拼多步实现的 → 正当但必须人核（R5 末位档）。
+        # 与 passed_with_risk 同档处理（挂人工 CP），但原因不同、如实分开记。
         overall = "passed_with_risk"
     elif gaps:
         # C4：全过、但任务书要求的 dtype 有一部分 op_def 压根不支持 → 不是干净 pass，是「带发现的通过」。
@@ -532,10 +547,14 @@ def _verdict(op, vm, spec_standard, problems, per, gaps=None, scaled=None):
                         "gaps": gaps,
                         # 降规模留痕：每项 {case_id, from, to, reason}，原样透传 caseset 的账本。
                         "scaled_cases": scaled,
+                        # 批 5：golden 档位如实进裁决——blocked 的原因、需人核的原因都要能被下游直接读到
+                        "golden_blocked": golden_blocked,
+                        "golden_needs_human_review": golden_needs_human,
                         "requires_human_cp": overall == "passed_with_risk",
                         "counts": {"total": len(per), "fail": len(fails),
                                    "uncertain": len(unc_ids), "risk": len(risks),
                                    "gaps": len(gaps), "scaled": len(scaled),
+                                   "golden_blocked": len(golden_blocked),
                                    "contract_problems": len(problems)}}}
 
 
@@ -730,8 +749,19 @@ def validate(spec, caseset, evidence):
     # validator 无从也不该复算它）。结构容错：账本缺失/形状不对 → 视为无降规模，不报错（不是判定依据）。
     _gc = caseset.get("golden_cost") if isinstance(caseset, dict) else None
     _scaled = _gc.get("scaled_cases") if isinstance(_gc, dict) else None
+    # 批 5：收集各 case 的 golden 档位（同一算子全同，按 (tier, blocked_reason) 去重）。
+    _tiers, _seen_t = [], set()
+    for c in cases:
+        t = (c.get("expected") or {}).get("golden_tier") if isinstance(c, dict) else None
+        if not isinstance(t, dict):
+            continue                                  # None = 该 golden 未声明契约块 → 不参与门（向后兼容）
+        k = (t.get("tier"), t.get("blocked_reason"), bool(t.get("requires_human_review")))
+        if k in _seen_t:
+            continue
+        _seen_t.add(k); _tiers.append(t)
     return _verdict(op, vm, spec_standard, problems, per, gaps,
-                    scaled=_scaled if isinstance(_scaled, list) else None)
+                    scaled=_scaled if isinstance(_scaled, list) else None,
+                    golden_tiers=_tiers)
 
 
 def main(argv):
