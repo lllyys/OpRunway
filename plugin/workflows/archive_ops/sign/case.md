@@ -18,7 +18,7 @@
 
 ## 关联制品（symlink，相对拓扑）
 
-- spec：[`sign.spec.json`](./sign.spec.json)（**内联真实副本**，源 `samples/specs/sign.spec.json`；真样例已迁出运行时路径，不再 symlink）
-- runner：[`oprunway_sign_runner.cpp`](./oprunway_sign_runner.cpp) → `../../../../samples/runners/oprunway_sign_runner.cpp`
+- spec：[`sign.spec.json`](./sign.spec.json)（**内联真实副本**，源 `plugin/samples/specs/sign.spec.json`；真样例已迁出运行时路径，不再 symlink）
+- runner：[`oprunway_sign_runner.cpp`](./oprunway_sign_runner.cpp) → `../../../samples/runners/oprunway_sign_runner.cpp`
 
 > `ls -l` 应见箭头（→）；`readlink` 可解析。本卡是「精度过但性能 FAIL」的真实样本——存档以证「性能门真能拦、裁决不美化」。

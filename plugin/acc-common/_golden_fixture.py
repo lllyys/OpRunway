@@ -3,20 +3,21 @@
 ⚠ 非「引擎零内置算子」——catlass 通路与 `gen_cases._BF16_EXACT_OPS` 是已知例外）。
 
 各测试文件的 `setUpModule = install` / `tearDownModule = uninstall` 即可——`install` 建一个临时 ops_root、
-拷 4 份 `samples/golden/<op>/golden.py` 进去、设 `OPRUNWAY_OPS_DIR` 指向它；子进程（run_workflow）不传 env=、
+拷 4 份 `plugin/samples/golden/<op>/golden.py` 进去、设 `OPRUNWAY_OPS_DIR` 指向它；子进程（run_workflow）不传 env=、
 继承 `os.environ` 即得同一 root。假算子测试用 `place_golden(root, op, body=...)` 另落。
 """
 import os, shutil, tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SAMPLES_GOLDEN = os.path.join(_HERE, "..", "..", "samples", "golden")
+# samples/ 随插件分发（在 plugin/ 内，2026-07-22 由仓根迁入）：_HERE=plugin/acc-common → 上溯一层到 plugin/samples/golden
+_SAMPLES_GOLDEN = os.path.join(_HERE, "..", "samples", "golden")
 _root = None
 _old = None
 _refs = 0
 
 
 def place_golden(ops_root, op, body=None, source="numpy fake", provenance="test fixture"):
-    """在 `<ops_root>/<op>/golden.py` 落 golden（body=golden_fn 源码；缺省从 samples/golden 拷该算子）。"""
+    """在 `<ops_root>/<op>/golden.py` 落 golden（body=golden_fn 源码；缺省从 plugin/samples/golden 拷该算子）。"""
     d = os.path.join(ops_root, op)
     os.makedirs(d, exist_ok=True)
     dst = os.path.join(d, "golden.py")

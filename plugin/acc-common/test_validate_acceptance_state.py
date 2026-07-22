@@ -620,7 +620,7 @@ class RunWorkflowExitTest(unittest.TestCase):
     def _run(self, *extra):
         return subprocess.run(
             [sys.executable, os.path.join(self.here, "run_workflow.py"),
-             os.path.join(self.here, "..", "..", "samples", "specs", "isclose.spec.json"),
+             os.path.join(self.here, "..", "samples", "specs", "isclose.spec.json"),
              "--mode", "mock", "--out", self.d, *extra],
             capture_output=True, text=True)
 
@@ -630,7 +630,7 @@ class RunWorkflowExitTest(unittest.TestCase):
     def test_defect_exit_nonzero(self):
         # §1 覆盖-预算重写后 case id 变——从生成的 caseset 取真实 fp32 精度 case id 注缺陷（稳健、不硬编码）。
         import gen_cases
-        spec_path = os.path.join(self.here, "..", "..", "samples", "specs", "isclose.spec.json")
+        spec_path = os.path.join(self.here, "..", "samples", "specs", "isclose.spec.json")
         cs = gen_cases.gen_cases(json.load(open(spec_path, encoding="utf-8")),
                                  os.path.join(self.d, "gen"))
         did = next(c["id"] for c in cs["cases"]
@@ -640,7 +640,7 @@ class RunWorkflowExitTest(unittest.TestCase):
     def test_failfast_skips_perf(self):
         # §精度门前置 + fail-fast（用户 2026-07-15）：任一精度挂 → 跳过 Task3 性能 → FAIL(精度)、exit 1、task3 门未跑。
         import gen_cases
-        spec_path = os.path.join(self.here, "..", "..", "samples", "specs", "isclose.spec.json")
+        spec_path = os.path.join(self.here, "..", "samples", "specs", "isclose.spec.json")
         cs = gen_cases.gen_cases(json.load(open(spec_path, encoding="utf-8")),
                                  os.path.join(self.d, "gen"))
         did = next(c["id"] for c in cs["cases"]
@@ -797,7 +797,7 @@ class RunWorkflowPerfPackageTest(unittest.TestCase):
         #  改标 **trivial-met**（达标、免测），perf 达标由代表性大 shape（whitelist/bndhi, numel≥4096）主导。
         #  取代已被 trivial-met 取代的 small-shape-exception e2e 路径（该 exception 逻辑仍存 perf_compare、
         #  只是 §1 pipeline 不再触发；其直测覆盖见 test_perf_compare.SmallShapeExceptionTest）。
-        r = self._run("../../samples/specs/sign.spec.json")
+        r = self._run("../samples/specs/sign.spec.json")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)   # 全 trivial + 大 shape 达标 → PASS
         acc = self._json("acceptance.json")
         self.assertEqual(acc["state"], "PASSED")
@@ -1008,6 +1008,38 @@ class Cases50NaTrivialGateTest(unittest.TestCase):
         errs = []
         G.gate_task3(self.d, errs)
         self.assertTrue(any("trivial" in e and "numel" in e for e in errs), errs)
+
+
+class DefaultModeIsRealMachineTest(unittest.TestCase):
+    """U6a：`--mode` 默认已从 mock 翻为 new_example（真机通路）。钉死两点，防被悄悄改回危险的 mock 默认
+    （mock 的「NPU 输出」= golden.copy()、精度按构造必过 → 默认 mock = 默认产出伪造 acceptance.json）：
+    (1) run() 签名默认 == 'new_example'；
+    (2) 不带 --mode + 无真机 OPRUNWAY_* 配置 → fail-closed 非零退出，且**绝不**落伪造 acceptance.json。"""
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.here = os.path.dirname(os.path.abspath(__file__))
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_run_signature_default_is_new_example(self):
+        import inspect
+        import run_workflow as W
+        self.assertEqual(inspect.signature(W.run).parameters["mode"].default, "new_example")
+
+    def test_no_mode_without_realcfg_failclosed_no_forged_acceptance(self):
+        # 清掉真机 OPRUNWAY_* 配置（其余 env 保留，与本用例无关）→ 不带 --mode 即走默认（应 = new_example）。
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("OPRUNWAY_REMOTE_DIR", "OPRUNWAY_OPS_REPO", "OPRUNWAY_OPP",
+                            "OPRUNWAY_OP_SRC", "OPRUNWAY_TARGET", "OPRUNWAY_SSH_HOST")}
+        spec = os.path.join(self.here, "..", "samples", "specs", "isclose.spec.json")
+        r = subprocess.run(
+            [sys.executable, os.path.join(self.here, "run_workflow.py"), spec, "--out", self.d],
+            capture_output=True, text=True, env=env)                          # 关键：不带 --mode
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)             # fail-closed（非零退出）
+        self.assertFalse(os.path.exists(os.path.join(self.d, "acceptance.json")),
+                         "默认走真机、缺配置时绝不产出伪造 acceptance.json")   # 不落半产物
+        self.assertIn("--mode mock", r.stdout + r.stderr)                     # 指路提示存在（要本地自检加 mock）
 
 
 if __name__ == "__main__":

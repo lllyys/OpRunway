@@ -8,7 +8,10 @@ argument-hint: "<任务书 md路径或链接> <PR链接> [--mode mock|new_exampl
 
 人触发版：把「任务书 + PR」交给 **`op-acceptance` agent** 跑完整验收。与 agent 同一流程，只是入口不同（agent 供别的 agent 自动调、本命令供人手动跑）。
 
-**参数**：`$1`=任务书（md 本地路径或 http(s) 链接）、`$2`=PR 链接、可选 `--mode mock|new_example`（默认 mock）。
+**参数**：`$1`=任务书（md 本地路径或 http(s) 链接）、`$2`=PR 链接、可选 `--mode`（**默认 `new_example`，即真机**；2026-07-22 由 `mock` 翻正）。
+
+⚠ **验收只有真机一条路**。`mock` 通路仍在（供测试与本地演示），但它的「NPU 输出」就是 golden 本身、
+精度按构造必过，**产出的 `acceptance.json` 不构成验收裁决**——别拿它当验收结果用。
 
 ## 做什么
 

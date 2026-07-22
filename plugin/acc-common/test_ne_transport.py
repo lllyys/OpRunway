@@ -18,7 +18,7 @@ import repo_adapter as R
 import _golden_fixture as _gf   # golden 去引擎化：沙盒 ops_root 放 golden.py 供 gen_cases 加载（ADR 0011）
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SIGN_SPEC = os.path.join(_HERE, "..", "..", "samples", "specs", "sign.spec.json")
+_SIGN_SPEC = os.path.join(_HERE, "..", "samples", "specs", "sign.spec.json")
 _REAL_SHELL = R._shell   # 原始 _shell（任何 patch 之前捕获）：fake_shell 让"部署步"委托真跑本机 bash
 
 # 一份"齐全"的 remote env（各用例按需删字段来触发缺失报错）

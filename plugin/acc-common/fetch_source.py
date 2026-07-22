@@ -11,14 +11,19 @@ gitcode token 走环境：优先 $GITCODE_TOKEN，退回 $OPRUNWAY_GITCODE_TOKEN
   <out>/task_doc.md      任务书原文（本地读或链接取）
   <out>/pr_facts.json    PR 事实（给了 --pr 才有）：op / 目标仓·目录 / base·head / changed_files /
                          关键文件内容（op 自带 example、op_def）——供 ② 抽 spec、③ 锚定 runner
-说明：链接失败/无权限时不静默——task_doc 取不到直接报错；PR 部分字段取不到记进 pr_facts.notes。
+说明：链接失败/无权限时不静默——task_doc 取不到直接报错；PR 链接**形态不认识→直接报错（fail-loud，属用户输入错）、不产空壳**；
+      PR 链接认识但字段取不到（网络/权限）→记进 pr_facts.notes 继续（属环境问题，与「URL 写错」错误信息分开）。
 """
 import argparse, json, os, re, sys, urllib.parse, urllib.request
 
 API = "https://api.gitcode.com/api/v5"
 _BLOB_RE = re.compile(r"^https?://gitcode\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/blob/(?P<ref>[^/]+)/(?P<path>.+)$")
+# PR 链接三段抽取：容错 GitHub 风格单数 /pull/N、复数 /pulls/N、GitCode 原生 /merge_requests/N，
+# 统一抽 owner/repo/编号（编号即 merge_request 号）。
+# ⚠ 末尾必须是路径分隔符 / query / fragment / 串尾——**不能只用 `\b`**：`\d+\b` 在 `/pull/12-foo`、
+# `/pull/12.xyz` 处也成立（数字与 `-`/`.` 之间有词边界），会把畸形 URL 当成 PR 12 放行 = fail-open。
 _PR_RE = re.compile(r"^https?://gitcode\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/"
-                    r"(?:merge_requests|pulls)/(?P<num>\d+)")
+                    r"(?:merge_requests|pulls?)/(?P<num>\d+)(?=[/?#]|$)")
 
 
 def _token():
@@ -99,15 +104,35 @@ def _guess_op(paths):
     return None, None
 
 
-def fetch_pr(pr_url, out_dir):
-    """PR：解析 gitcode PR 链接 → API 取 元信息 + 改动文件 + 关键文件（example/op_def），写 pr_facts.json。"""
-    m = _PR_RE.match(pr_url)
-    facts = {"pr_url": pr_url, "notes": []}
+def _parse_pr_url(pr_url):
+    """解析 gitcode PR 链接 → (owner, repo, num)。
+
+    容错三种路径写法，统一抽 owner/repo/编号（编号即 GitCode 的 merge_request 号）：
+      - GitCode 原生   /merge_requests/<编号>
+      - GitHub 风格单数 /pull/<编号>（用户常按 GitHub 习惯粘这个 → 内部规范化为 merge_request 编号）
+      - 复数           /pulls/<编号>
+    形态不认识（host 非 gitcode.com / owner·repo·编号三段不全 / 编号非数字）→ 抛 ValueError
+    （fail-loud，附可操作中文提示）。调用方据此明确失败、**绝不产空壳 pr_facts 往下传**。
+    ⚠ 这只判「URL 形态」，不碰网络；能否真取到数据是另一回事（网络/token 失败在 fetch_pr 里记 notes）。"""
+    m = _PR_RE.match((pr_url or "").strip())
     if not m:
-        facts["notes"].append("PR 链接非 gitcode pulls/merge_requests 格式，未解析")
-        return _dump_facts(facts, out_dir)
-    owner, repo, num = m["owner"], m["repo"], m["num"]
-    facts["source_repo"] = f"{owner}/{repo}"
+        raise ValueError(
+            f"无法解析 PR 链接：{pr_url!r}\n"
+            "  期望形态：https://gitcode.com/<owner>/<repo>/merge_requests/<编号>\n"
+            "  亦接受 GitHub 风格路径 /pull/<编号> 或 /pulls/<编号>（内部规范化为 merge_requests 编号）。\n"
+            "  请检查：协议+host 是否为 http(s)://gitcode.com、owner/repo/编号三段是否齐全、编号为纯数字。"
+        )
+    return m["owner"], m["repo"], m["num"]
+
+
+def fetch_pr(pr_url, out_dir):
+    """PR：解析 gitcode PR 链接 → API 取 元信息 + 改动文件 + 关键文件（example/op_def），写 pr_facts.json。
+
+    两种失败严格区分：
+      · URL 形态不认识 → `_parse_pr_url` 抛 ValueError（fail-loud，属用户输入错），**在任何网络调用之前**中止、不落 pr_facts.json；
+      · URL 认识但网络/token 取不到字段 → 不抛，记进 facts["notes"] 继续（属环境问题，错误信息与「URL 写错」不同，别让用户误改 URL）。"""
+    owner, repo, num = _parse_pr_url(pr_url)  # 形态错 → 抛出（fail-loud），不产空壳
+    facts = {"pr_url": pr_url, "notes": [], "source_repo": f"{owner}/{repo}"}
     st, pr = _get(f"{API}/repos/{owner}/{repo}/pulls/{num}")
     if st == 200 and isinstance(pr, dict):
         facts["title"] = pr.get("title")
@@ -167,6 +192,11 @@ def main(argv):
     ap.add_argument("--pr", default=None, help="gitcode PR 链接（可选）")
     ap.add_argument("--out", required=True, help="产出目录")
     a = ap.parse_args(argv)
+    # PR URL 形态校验**前置到一切网络调用与产物写入之前**：否则任务书是链接时，会先发一次网络请求、
+    # 先写出 task_doc.md，然后才报「PR 格式不认识」——半个产物已经落盘了，与 fail-loud 的承诺不符。
+    # 这里只校形态（纯函数、不联网）；取不到 PR 的网络失败仍在 fetch_pr 内按环境问题处理。
+    if a.pr:
+        _parse_pr_url(a.pr)
     os.makedirs(a.out, exist_ok=True)
     td = fetch_taskdoc(a.taskdoc, a.out)
     print(f"[fetch] 任务书 → {td}")

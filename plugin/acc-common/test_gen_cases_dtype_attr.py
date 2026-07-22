@@ -313,7 +313,7 @@ class AttrMatrixTest(unittest.TestCase):
         """缺省无 attr_matrix → 与权威 isclose.spec.json 用例数/id 一致（不引入 attr case）。"""
         d1, d2 = tempfile.mkdtemp(), tempfile.mkdtemp()
         try:
-            auth = GC.gen_cases(_spec(os.path.join(_HERE, "..", "..", "samples", "specs", "isclose.spec.json")), d1)
+            auth = GC.gen_cases(_spec(os.path.join(_HERE, "..", "samples", "specs", "isclose.spec.json")), d1)
             self.assertFalse(any(c["expected"]["case_origin"].startswith("attr_matrix")
                                  for c in auth["cases"]))
         finally:
@@ -460,6 +460,33 @@ class DtypeRejectTest(unittest.TestCase):
                         "threshold": 0}}]}
         with self.assertRaises(ValueError):
             RA.run_mock(cs, work)
+
+    def test_arity_ge3_rejected_not_silently_truncated(self):
+        """3 元输入 → fail-closed 报错，**不静默丢掉第 3 个输入**。
+
+        `_build_inputs` 常规 varied/pair* 路径末尾写死 `return [x0, x1]`（二元构造），
+        而 empty / 特殊值路径按 arity 产满——两边行为不一致，arity≥3 会无声截断。
+        本测试钉住「宁可报错也不静默降级」这条纪律。支持多输入须先一般化（TODO U7b）。"""
+        in_params = [{"name": n, "io": "in", "dtype": ["float32"]} for n in ("a", "b", "c")]
+        with self.assertRaises(ValueError) as cm:
+            GC._build_inputs(GC._case_rng("x"), in_params, [4], "float32", {}, "varied")
+        self.assertIn("3 元输入", str(cm.exception))       # 报清楚是几元、别只说「不支持」
+        # 对照：二元仍正常产 2 个（证不是把整条路堵死）
+        two = GC._build_inputs(GC._case_rng("x"), in_params[:2], [4], "float32", {}, "varied")
+        self.assertEqual(len(two), 2)
+
+    def test_arity_guard_fires_in_dry_run_not_only_at_cp_d(self):
+        """能力边界须在 **CP-B 的 dry-run** 就拦下，别拖到 CP-D 正式生成输入时才炸。
+
+        `_dry_run` 只调 `_plan()`、不走 `_build_inputs`，所以守卫必须提到 spec 级共享预检
+        （`check_spec_capability`），否则三元 spec 能一路混过契约自检。"""
+        spec = {"op": "FakeTernary", "verify_mode": "exact",
+                "params": [{"name": n, "io": "in", "dtype": ["float32"]} for n in ("self", "b", "c")]}
+        with self.assertRaises(ValueError) as cm:
+            GC._dry_run(spec)
+        self.assertIn("3 元输入", str(cm.exception))
+        # 且预检先于 load_golden：三元 spec 不该因为「缺 golden」而报错，应报能力边界
+        self.assertNotIn("缺 golden", str(cm.exception))
 
 
 # ===================================================== 子进程端到端（退出码） ====

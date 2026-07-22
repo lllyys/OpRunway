@@ -9,7 +9,7 @@ description: 为 ops-math 风格、experimental/math 目录、aclnn 两段式接
 **输出**：**`<ops_root>/<op>/oprunway_<op.lower()>_runner.cpp`** + 构建路径配置
 （`ops_root` = `$OPRUNWAY_OPS_DIR`(绝对) 或 `${OPRUNWAY_WORK_DIR:-$CWD}/.oprunway/ops`）。
 ⚠ **落用户工作目录、不写插件安装目录**（升版即冲；工程约定要求产物落用户 CWD；`ops_root` 落插件目录内会被拒）。
-顶层 `samples/runners/oprunway_*_runner.cpp` 是**只读参考样例 / 生成器骨架种子**（非引擎组件、非运行时回退靶）。
+`${OPRUNWAY_PLUGIN_ROOT}/samples/runners/oprunway_*_runner.cpp` 是**只读参考样例 / 生成器骨架种子**（非引擎组件、非运行时回退靶）。`samples/` 随插件分发（在插件内，2026-07-22 由仓根迁入）；`${OPRUNWAY_PLUGIN_ROOT}` = 本插件根中立变量，Claude 下等价 `${CLAUDE_PLUGIN_ROOT}`。
 `repo_adapter.find_runner()` **只查用户目录**（`<ops_root>/<op>/`）——**引擎不回退插件样例，fallback 已退役 2026-07-20**：
 缺 runner 直接 **fail-closed** 报错，真机 `new_example` 模式 `runner_source` 恒 `user`、非 user 一律 `BLOCKED`。
 runner 是引擎的**输出**、非组件；样例只供参照生成（照 §2 四槽拷），绝不作运行时兜底。

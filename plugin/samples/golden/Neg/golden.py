@@ -26,7 +26,7 @@ GOLDEN_SOURCE = "torch torch.neg"
 #   正文    「参考昇腾版本内置neg算子的 TBE 实现，……实现功能一致的算子」  → impl_reference，不构成授权
 #   功能要求「特别地需要支持int16、uint8、int64类型输入。说明：当输入类型为 uint8时，其行为和`torch.neg`一致，
 #            `torch.neg(uint8)` ……其值等于 `256 - x`……即发生“回绕”」   → 唯一点名 torch.neg 处，**限定 uint8**
-# 本样例实测 dtype = {float32, float16}（samples/specs/neg.spec.json 的 params[].dtype），不落在 uint8 上，
+# 本样例实测 dtype = {float32, float16}（plugin/samples/specs/neg.spec.json 的 params[].dtype），不落在 uint8 上，
 # 故该点名对本样例不生效 → 按 per-op 取最保守档，整体归第二档回落（single_api、按 R5 不需人核）。
 GOLDEN_PROVENANCE = (
     "第二档（tier 2）·任务书未就本样例实测 dtype 指定真值口径"

@@ -328,7 +328,8 @@ def find_runner(op_name):
     raise ValueError(
         f"缺 runner: {name}（引擎不回退插件样例，fail-closed）\n"
         f"  用户目录（应放这里）: {upath}\n"
-        f"  → 新算子需先由 acc-runner 生成 runner.cpp 落到用户目录（可照 samples/runners/ 的只读样例）；"
+        f"  → 新算子需先由 acc-runner 生成 runner.cpp 落到用户目录"
+        f"（可照 ${{OPRUNWAY_PLUGIN_ROOT}}/samples/runners/ 的只读样例；samples/ 随插件分发、2026-07-22 由仓根迁入插件内）；"
         f"或设 OPRUNWAY_OPS_DIR / OPRUNWAY_WORK_DIR 指向正确的工作目录。")
 
 

@@ -145,6 +145,17 @@
   删 mock 后这条自证路径没了，需要替代（候选：留一条**明确非验收、不产 `acceptance.json`** 的测试专用夹具，
   与验收通路彻底隔离）。**这条须用户拍板**，别默默删掉。
 
+#### U8 · `_build_inputs` 在 arity≥3 时静默丢输入（2026-07-22 施工中发现，**已修**）
+
+`gen_cases._build_inputs` 的常规 `varied` / `pair*` 路径末尾写死 `return [x0, x1]`（二元构造），
+而 `empty` 与特殊值路径却按 `arity` 产满 —— **arity≥3 时多出来的输入被无声丢掉，两边行为还不一致**。
+当前 4 个内置算子都是 1/2 元所以踩不到，但 `bincount(self, weights)`、SPMV 这类一来就中招：
+**会悄悄少造一个输入且不报错**，直接违反本仓「fail-closed 优于静默降级」。
+
+- [x] **已修**：`arity > 2` 直接 `raise ValueError`（报清楚是几元、指向 U7b），**不假装支持**。
+  加 `test_arity_ge3_rejected_not_silently_truncated` 钉住（并对照验二元仍正常产 2 个，证不是把整条路堵死）。
+  ⚠ 这只是**止血**——真要支持多输入算子得一般化 pair 构造，属 U7b。
+
 #### U7 · 用例生成只支持 elementwise，得覆盖任务书里出现的全部算子类型（用户 2026-07-22 定）
 
 > **用户原话**：「要能支持所有在任务书里出现过的算子类型，不要只支持 elementwise 类型。」
@@ -174,20 +185,47 @@
 - [ ] **U7d · 分期**：全覆盖是大工程，须**排优先级**（建议按任务书份数排：Foreach 族 8 份是单类最多的，
   归约类次之）。**优先级须用户拍板**，别自作主张从最简单的开始。
 
-#### 修复批次（**未开工**——分支 `fix/pdist-usertest-gaps` 目前只有记账 commit `65308a2`）
+#### 修复批次（**U1/U2/U3/U6a/U6b/U7a 已落地，2026-07-22**；分支 `fix/pdist-usertest-gaps`）
+
+> 施工方式：7 路并行 agent（按**文件所有权互斥**切分）+ 逐项独立复核 + 集成对账。
+> ⚠ **本机验证有天花板**：Mac 无 torch → 523 测里 59 条红全因此而起，golden 相关通路本机根本验不了。
+> 本机只能证「与基线一致」，**真结论以 a3 容器（真 torch）为准**。
 
 按「挡路程度 × 改动成本」排。**用户 2026-07-22 定：先记账、暂不动手。**
 
 - [x] **0 · GitCode 镜像同步 PR #8** —— 2026-07-22 已推，双镜像同 OID `1d2bb3a`。
-- [ ] **1 · U1**（一行，最挡路）——改法二选一，**倾向 (b)**：
-  - (a) `tools:` 显式补 `AskUserQuestion` + 派 subagent 的工具：可读性好，但以后加工具还得记得回来同步改这里。
-  - (b) **直接删掉 `tools:` 让它继承全部**：primary agent 本来就该有全套；且这仓在「声明式白名单被静默忽略」上**已经栽过一次**（`plugin.json` 的 `agents` 数组，见分支 `fix/plugin-agents-not-loading`）。
-  - ⚠ **改完必须真跑一次验证**——「frontmatter 里写了」≠「工具真给到了」，这正是 U1 本身的教训。光看 `plugin validate` 绿不算数。
-- [ ] **2 · U2**（小，但影响正确性）：`fetch_source.py` 接受 `/pull/N` 形态；解析失败 **fail-loud**，不产空壳继续往下传。
-- [ ] **3 · U3**（中）：`samples/` 搬进 `plugin/`，或把 runner 骨架内联进 `acc-runner/references/runner-skeleton.md`。⚠ 搬 `samples/` 会连带改 `_golden_fixture.py` 的相对路径、`archive_ops/` 那两个软链、以及 canon/doc 里对 `samples/` 的引用。
-- [ ] **4 · U6a/U6b**（默认值翻成真机 + CP-B 自检改 `--dry-run`）：小改动、且直接改「默认行为」这条最要紧的语义。**U6c/U6d 删 mock 通路不进本批**——连带 89 处测试引用 + `--defect` 自证路径要先定替代方案。
+- [x] **1 · U1 已改（2026-07-22）**——`tools:` **显式补最小权限**，用户明确批准：
+  ```
+  tools: Bash, Read, Write, Edit, Skill, AskUserQuestion,
+         Agent(acc-spec-extractor), Agent(acc-runner-dev), Agent(acc-verify-rootcause)
+  ```
+  `Agent(<type>)` 是 Claude Code 在 `tools:` 里声明「可派哪个 subagent」的写法（依据：anthropic-docs
+  CHANGELOG v2.1.147 · 2026-05-21「plugin agents that declare multiple `Agent(...)` types in `tools:` frontmatter」）。
+  比泛用的派活工具更窄——**只放行这三个 subagent**，不是任意派活。三个 subagent 的 `tools` 行未动。
+  - ⚠ **更正一条我先前写错的记录**：此处原写「**倾向直接删掉 `tools:`**，理由是这仓在『声明式白名单被静默忽略』
+    上栽过（`plugin.json` 的 `agents` 数组）」——**那条先例套不上**。`plugin.json` 的 `agents` 数组是**被忽略**，
+    而 `tools:` 这次**恰恰生效了**（agent 就只有那 5 个工具，一个不多）。机制不同，不能拿来论证裸删。
+    且原记录把「删掉 tools:」写成用户倾向，**用户当时并未表态**，是记录者自己的判断被误记成了用户决定。
+  - ⚠ **仍待真验**：`Agent(...)` 这个写法本机找不到现成用例佐证（只有 CHANGELOG 一条文字依据）。
+    **必须真起一次 session 跑验收，确认 primary 真能派 subagent、真能 `AskUserQuestion`**——
+    「frontmatter 里写了」≠「工具真给到了」，这正是 U1 本身的教训。光看 `check_agent_frontmatter.py` 绿**不算数**。
+- [x] **2 · U2 已改**：`fetch_source.py` 抽出纯函数 `_parse_pr_url()`，容错 `/pull/N`·`/pulls/N`·`/merge_requests/N`；**形态不认识在任何网络调用之前抛 `ValueError`**、绝不落空壳 `pr_facts.json`；网络失败仍记 notes 照常写（**区分「用户输错 URL」与「环境取不到」两类失败**）。新增 `test_fetch_source.py` 12 条测（含「网络之前就抛」的断言、不打真网络）。
+  - 遗留：报错以裸 traceback 冒泡（语义对、UX 糙）；`www.` 前缀与大写 host 现被拒（旧行为是产空壳，更糟）。
+- [x] **3 · U3 已改**：`git mv samples → plugin/samples`（13 文件 rename 保历史），随插件分发。连带改：`_golden_fixture.py` 的 `_SAMPLES_GOLDEN`、`archive_ops/` 两条软链（验证无断）、`acc-runner` 两份散文改用 `${OPRUNWAY_PLUGIN_ROOT}/samples/...`（工具中立变量，`init.sh:55` 既有约定、Claude 下等价 `${CLAUDE_PLUGIN_ROOT}`）、`gen_cases.py` 与 `repo_adapter.py` 两条**用户可见报错**里的样例路径。
+  - ⚠ **施工 agent 漏报了 8 处测试引用**（`test_ne_transport.py:21`、`test_gen_cases_dtype_attr.py:316`、`test_validate_acceptance_state.py` ×5、`test_spec_isolation.py` 的 `_ROOT`），由主控补齐。**本机只暴露 2 条新红，另约 9 条被 torch 红掩盖**——这正是「本机对账不能当验收依据」的实例。
+  - ⚠ 二阶影响：samples 进插件后 agent 物理上够得到真 spec 样例，**防污染只剩纪律、没有文件系统屏障**（canon 本就写明「隔离是纪律非沙箱」，但姿态实质变弱）。
+- [x] **4 · U6a/U6b 已改**：
+  - **U6a**：`--mode` 默认 `mock` → `new_example`（argparse + `run()` 签名两处），并在 `makedirs`/`json.load` **之前**加 `_ne_cfg()` fail-closed 预检——缺 `OPRUNWAY_*` 直接 `SystemExit`、**不落半个产物**。加 2 条测试钉死。全仓 5 个 `run_workflow.py` 子进程调用点逐行核过，均已显式带 `--mode mock`（测试用 mock 合理，**测试不是验收**）。
+  - **U6b**：CP-B 自检从 `run_workflow --mode mock`（产伪造裁决）改成 `gen_cases.py --dry-run`（plan-only 契约自检）。改了 `acceptance-workflow/SKILL.md` 9 处 + `agents/op-acceptance.md` 5 处 + `commands/op-acceptance.md`（那句「默认 mock」在 U6a 落地后已成假话）。
+  - ⚠ **散文里逐字写明了 dry-run 的能力边界**：它**不算 golden、不 import torch、不落 `.npy`** → 验不了 golden.py 在不在 / 来源契约 / `oracle_source` 映射 / validator 链 / 三级门。**CP-B 过了不代表用例链整体可用**，缺 golden 这类问题会漏到 CP-D 才炸，且 `refine_spec` 变不出 `golden.py`（真撞上要停下告知用户，别在 refine 循环里空转）。
+  - **U6c/U6d 仍未做**（删 mock 通路）：连带 89 处测试引用 + `--defect`「证明门真会 fail」的自证路径要先定替代方案，**须用户拍板**。
+- [ ] **4.5 · `canon/_verify.json` 的 samples 路径已失效（须走 bureau，不许手改）**：`:106` / `:111` 两条 artifact 仍记
+  `samples/runners/oprunway_isclose_runner.cpp` 与 `samples/specs/isclose.spec.json`——**仓根这两个路径 U3 之后已不存在**。
+  这不是历史文字，是**机器可读的指纹条目**：canon 复核会把已迁移的工件判成缺失。
+  ⚠ 按 BUREAU 写门，canon 页**不得手编**、`canonical` 不得手设 → 须走一次 `capture → compile → review`
+  把路径重录为 `plugin/samples/...` **并重算 hash**；不许只改路径却留着未经确认的 verified 状态。
 - [ ] **5 · U4 / U5 本批不动**：U4 要换 marketplace 源形态 → 影响分发方式，得先定发布形态（T9 `proposed`）；U5 属 canon `pr-head-commit-is-the-tested-object`（`proposed`）的落地，该页自带前置「未合并 PR 的 head 常在贡献者 fork，open+fork 的 API 可解析性**尚未实测**」。
-- [ ] **6 · U7 / G1–G4 另立项**，不进本批。⚠ **U7a（形态分类学）应当先做**——它是 U7b/c/d 和 G1–G4 的共同前提，且只是调研、不改代码，可与上面几条并行。
+- [~] **6 · U7a 形态分类学进行中**：产出 `doc/oprunway-op-shape-taxonomy.md`。首轮 ops-math 18 份完成，ops-nn 16 份 + 其余 6 仓 7 份**首轮 agent 交了桩**（已重跑补齐）。U7b/c/d 与 G1–G4 仍未开工，**优先级须用户拍板**。
 
 #### Pdist 暴露的「非 elementwise 通路」空白（G1–G4；能力边界扩展，须单独立项）
 

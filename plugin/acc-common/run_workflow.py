@@ -3,7 +3,8 @@
 Task 1 gen_cases → Task 2 repo_adapter + validator → Task 3 perf_compare。
 stage 间只经 JSON/数据文件交接。CC/Codex/Antigravity 的薄壳只需换调用方式，核心不动。
 
-用法：python run_workflow.py <spec.json> [--mode mock] [--out <dir>] [--defect id1,id2]
+用法：python run_workflow.py <spec.json> [--mode new_example|mock] [--out <dir>] [--defect id1,id2]
+默认 `--mode new_example`（真机通路，需 OPRUNWAY_* + NPU）；`mock` 仅本地用例链自检、精度按构造必过、非验收。
 """
 import argparse, json, os, sys
 
@@ -52,9 +53,22 @@ def _exit_code(overall):
     return 1
 
 
-def run(spec_path, mode="mock", out_dir="reports/_run", defect=None, perf_slow=None, gpu_baseline=None):
+def run(spec_path, mode="new_example", out_dir="reports/_run", defect=None, perf_slow=None, gpu_baseline=None):
     if mode not in repo_adapter.MODES:  # 先校验，避免 Task1 已跑再 KeyError、留半产物
         raise SystemExit(f"unknown mode {mode!r}, supported={list(repo_adapter.MODES)}")
+    # U6a：默认已从 mock 翻为 new_example（真机通路）。mock 的「NPU 输出」= golden.copy()、精度按构造必过，
+    # 默认指向它 = 默认产出一份与真验收同名同形的**伪造** acceptance.json（危险的默认）。翻真机后，缺真机
+    # OPRUNWAY_* 配置时**在跑 Task1 之前**就 fail-closed 停下——绝不落半产物、绝不出「看起来对」的裁决，
+    # 并明确指路（要本地自检 → --mode mock；要真机 → 把 OPRUNWAY_* 设好）。_ne_cfg 只读 env、无副作用、可重入
+    # （run_new_example 内还会再校一次），此处仅提前把「缺配置」这类失败从 Task2 中段的 traceback 挪到最前、给清晰提示。
+    if mode == "new_example":
+        try:
+            repo_adapter._ne_cfg()
+        except ValueError as ex:
+            raise SystemExit(
+                f"[new_example] 真机跑测无法启动——真机配置缺失或无效：\n{ex}\n"
+                f"  · 只想本地自检用例链（非验收）→ 显式加 --mode mock。\n"
+                f"  · 要真机跑测 → 先按上面提示设好 OPRUNWAY_* 环境变量（真值不写进仓）。")
     os.makedirs(out_dir, exist_ok=True)
     work = os.path.join(out_dir, "work")
     spec = json.load(open(spec_path, encoding="utf-8"))
@@ -227,7 +241,9 @@ def run(spec_path, mode="mock", out_dir="reports/_run", defect=None, perf_slow=N
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("spec")
-    ap.add_argument("--mode", default="mock", choices=list(repo_adapter.MODES))
+    ap.add_argument("--mode", default="new_example", choices=list(repo_adapter.MODES),
+                    help="默认 new_example（真机通路，需 OPRUNWAY_* + NPU）；"
+                         "mock 仅本地用例链自检、精度按构造必过、非验收")
     ap.add_argument("--out", default="reports/_run")
     ap.add_argument("--defect", default=None)
     ap.add_argument("--perf-slow", default=None,

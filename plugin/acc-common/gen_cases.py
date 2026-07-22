@@ -130,7 +130,8 @@ def load_golden(op):
         raise ValueError(
             f"缺 golden: {gpath}（引擎不回退内置 golden，fail-closed）\n"
             f"  → 新算子需先由 acc-spec/acc-runner-dev 从任务书生成 golden.py 落到用户目录"
-            f"（可照 samples/golden/<op>/golden.py 的只读样例）；或设 OPRUNWAY_OPS_DIR / OPRUNWAY_WORK_DIR。")
+            f"（可照 ${{OPRUNWAY_PLUGIN_ROOT}}/samples/golden/<op>/golden.py 的只读样例；"
+            f"samples/ 随插件分发、2026-07-22 由仓根迁入插件内）；或设 OPRUNWAY_OPS_DIR / OPRUNWAY_WORK_DIR。")
     except OSError as ex:
         raise ValueError(f"golden.py 不可访问: {gpath!r}: {ex}")
     if os.path.islink(gpath):                       # 仅最终组件；目录段由 repo_adapter.op_dir() 逐段拒
@@ -248,6 +249,20 @@ def _build_value_special(rng, arity, shp, dtn, kind):
     return [one() for _ in range(max(1, arity))]
 
 
+def check_spec_capability(in_params):
+    """引擎**能力边界**的 spec 级预检——`gen_cases()` 与 `_dry_run()` 共用，故 CP-B 契约自检就能拦住。
+
+    为什么必须有：`_build_inputs` 的常规 `varied` / `pair*` 路径末尾写死 `return [x0, x1]`（二元构造），
+    而 `empty` 与特殊值路径按 `arity` 产满——**arity≥3 时多出来的输入被无声丢掉，两边行为还不一致**。
+    与其静默截断，不如明说不支持（本仓纪律：**fail-closed 优于静默降级**）。
+    支持多输入算子须先一般化 pair 构造，见 `doc/oprunway-todo.md` 的 U7b。"""
+    arity = len(in_params)
+    if arity > 2:
+        raise ValueError(
+            f"gen_cases 暂不支持 {arity} 元输入算子（in 参数：{[p['name'] for p in in_params]}）——"
+            f"常规输入构造是二元的，多出来的输入会被静默丢弃。请先一般化 _build_inputs（TODO U7b）。")
+
+
 def _build_inputs(rng, in_params, shp, dtn, attrs, data_kind):
     """造该 case 的**逻辑**输入数组列表（compute dtype；bf16=fp32-on-grid）。物理化在保存步单独做。
     data_kind 形如 base 或 base:regime（regime∈{uniform,normal}，仅 varied/pair 系用）；
@@ -255,6 +270,7 @@ def _build_inputs(rng, in_params, shp, dtn, attrs, data_kind):
     arity = len(in_params)
     base = data_kind.split(":")[0]
     regime = data_kind.split(":")[1] if ":" in data_kind else "uniform"
+    check_spec_capability(in_params)                     # 兜底：正式路径也再校一次（dry-run 已前置校过）
     if base == "empty":                                  # §1.4 空 Tensor（numel=0）：按 shape 造空数组
         cdt = _compute_np(dtn)
         z = np.zeros(shp, dtype=cdt)
@@ -559,8 +575,9 @@ def gen_cases(spec, work_dir):
     # ADR 0011 决策 1/2/5，proposed）。⚠ 非「引擎零内置算子」——catlass_adapter 的 matmul golden 与本文件 :34
     # 的 _BF16_EXACT_OPS 是两处已知例外，仍是引擎里的算子知识。
     # golden_source 来自加载的 GOLDEN_SOURCE 元数据（决策 5），下游门继续校 oracle_source==映射(golden_source)。
-    golden_fn, golden_source, _golden_provenance = load_golden(op)
     in_params = [p for p in spec["params"] if p["io"] == "in"]
+    check_spec_capability(in_params)                     # 能力边界前置：先于 load_golden，别为不支持的算子白加载 golden
+    golden_fn, golden_source, _golden_provenance = load_golden(op)
     attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
@@ -703,6 +720,7 @@ def _dry_run(spec):
     from collections import Counter
     op = spec["op"]
     in_params = [p for p in spec["params"] if p["io"] == "in"]
+    check_spec_capability(in_params)                     # 能力边界前置：三元算子在 CP-B 就拦下，不拖到 CP-D
     attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]

@@ -20,6 +20,16 @@
 
 ## 2026-07-22
 
+- **U1/U2/U3/U6a/U6b/U8 一批修完 + a3 真 torch 全绿 + 算子形态分类学落地** —— 7 路并行 agent（按**文件所有权互斥**切分）施工，逐项独立复核 + 集成对账，再上 a3 容器真验。
+  - **U1（要你点头那条）**：`op-acceptance` 的 `tools` 补成 `… , AskUserQuestion, Agent(acc-spec-extractor), Agent(acc-runner-dev), Agent(acc-verify-rootcause)`。`Agent(<type>)` 是 Claude Code 声明「可派哪个 subagent」的写法（依据 anthropic-docs CHANGELOG v2.1.147），**只放行这三个、不是任意派活**。⚠ 施工中出过一件事：给 agent 的指令里把「删掉整行 `tools:`」写成了「用户已定倾向」，**用户当时并未表态**，被安全分类器拦下才发现——拦得对。后来用户明确选了最小权限方案。⚠ 这条**仍待真起 session 验**：「frontmatter 写了」≠「工具真给了」，这正是 U1 本身的教训。
+  - **U2**：`fetch_source.py` 抽出纯函数 `_parse_pr_url()`，容错 `/pull/N`·`/pulls/N`·`/merge_requests/N`；形态不认识**在一切网络调用与产物写入之前**抛错（codex 抓到原实现顺序错了——先写 `task_doc.md` 再校 PR，半个产物已落盘）；正则末尾从 `\b` 收紧成 `(?=[/?#]|$)`（`\d+\b` 会把 `/pull/12-foo` 当成 PR 12 放行 = fail-open）。
+  - **U3**：`samples/` `git mv` 进 `plugin/`（13 文件保历史），随插件分发。施工 agent 漏报 8 处测试引用，主控补齐——**本机只暴露 2 条新红，另约 9 条被 torch 红掩盖**，这正是「本机对账不能当验收依据」的活教材。
+  - **U6a/U6b**：`--mode` 默认 `mock`→`new_example`，并在 `makedirs`/`json.load` **之前**加 fail-closed 预检（缺 `OPRUNWAY_*` 直接退出、不落半产物）；CP-B 自检从「跑 mock 出伪造裁决」改成 `gen_cases --dry-run`，并在散文里**逐字写明 dry-run 的能力边界**（不算 golden、不 import torch → 验不了 golden.py/来源契约/validator 链/三级门，缺 golden 会漏到 CP-D 才炸）。
+  - **U8（施工中新发现的 bug）**：`_build_inputs` 常规路径末尾写死 `return [x0, x1]`，而 empty/特殊值路径按 arity 产满 → **arity≥3 时无声丢输入**。改成 spec 级共享预检 `check_spec_capability()`，`gen_cases()` 与 `_dry_run()` 共用，**CP-B 就拦得住**、且先于 `load_golden`。
+  - **a3 真验**：`oprunway_prov` 容器（torch 2.10.0+cpu）**537 测全绿**。传输逐文件 sha256 对齐、跑完复算未变。最硬的是**反事实对照**——塞个假 torch 重跑得 59 红，与本机 Mac 分毫不差，同时钉死「本机 59 红全因缺 torch」和「真 torch 下绿是真绿、不是路径被绕过」。
+  - **分类学**：`doc/oprunway-op-shape-taxonomy.md`，41 份任务书 = **44 个算子行全部在表**。**elementwise 只占 34%**（上一轮残缺样本报的 52% 已作废）；张量列表 8、index_scatter 5、other 5、reduction 4、shape_transform 3、generator 2、sparse_linalg 1、fused_comm 1。核实度 verified 31 / 单源非官方 10 / inferred 3，逐条标注。
+  - **诚实边界**：a3 那次跑的快照**不含**最后 3 个编排 md 的改动（它们本就没有测试覆盖）；容器内是 root，2 条 EACCES fail-closed 测试被 skip、等于**没验**；**真机跑测通路本轮没端到端跑**，精度/性能验收结论不能由这 537 绿推出。
+
 - **PR #8 合入 main + 首次真跑「任务书+PR」暴露四个编排实现洞（另命中一个 PR 取证缺口）** —— PR #8（golden 去引擎化，8 commit / 25 文件）已 merge 进 main（`1d2bb3a`），GitCode 镜像还没同步。合完在 `OpRunway-usertest/work` 起干净 session 真跑了一次 **Pdist**（`cann/ops-math` MR 2663 + 社区任务书），13 分钟，插件快照 `b2a1b6f`。**结论本身合格**——判 `OUT_OF_SCOPE_P3`、明标「不是 pass/fail」、拒绝在没证据的情况下下裁决、探针跑完自己清理、插件仓零改动。**但编排层塌了**：
   - **U1（最贵，改一行）**：`op-acceptance` agent 全程只用了 `Bash`×30 + `Write`×1 —— 设计里那三个 subagent **一个没派**，`AskUserQuestion` 是**主循环替它问的**。根因是它 frontmatter 的 `tools:` 里既没有派 subagent 的工具、也没有 `AskUserQuestion`（`agents:` 声明**不授予工具**）。于是 CP-B/C/D 的分工、单轮约束、循环控制权全是空的，它只能自己读源码手搓。
   - **U2**：`fetch_source.py` 的 PR URL 只认 `pulls|merge_requests`，用户给的 `/pull/2663` 解析不出来却**不报错**，产个空 `pr_facts` 就往下走 —— agent 是去 grep 脚本源码才自救的。换个不读源码的 agent，对应校验就带着空 `target_dir` 糊过去了。

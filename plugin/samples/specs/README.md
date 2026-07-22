@@ -1,4 +1,4 @@
-# samples/specs —— spec 参考案例（**非运行时路径**）
+# plugin/samples/specs —— spec 参考案例（**非运行时路径**）
 
 这里放几份填满真值的 `<op>.spec.json`，作为**人读的参考案例**，帮助理解 spec 长什么样、字段怎么填。
 
