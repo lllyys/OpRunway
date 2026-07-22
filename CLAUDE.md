@@ -21,9 +21,10 @@
    副作用确认，也不替代 #4 的 `doc/` 落点与改动简表。触发点：
    - **commit 之前**：对本次 commit 涉及的全部改动（代码 / md / bureau 文本）统一审+修，通过后才 commit。
      开发迭代中的中间产物不必逐个审，攒到 commit 前一次过。
-   ⚠ **本条 2026-07-10 由用户改定，领先于 canon**：canonical 的 **ADR 0010** 仍记旧触发点（bureau 写入前 + md/代码
-   生成后），并写明「执行点 = 本规则 #5」。差异已 capture 进 logbook，**ADR 0010 待走 bureau capture→compile→review
-   更新**；在此之前以本条为现行执行规则，ADR 0010 的触发点段落视为 stale（其余部分仍 canonical）。
+   ⚠ **本条 2026-07-10 由用户改定，领先于 canon**：**ADR 0010 现为 `contested`**（2026-07-22 实读 frontmatter
+   更正——此前本条写「canonical 仍记旧触发点、待走 capture→compile→review」**是错的**）。该页已并列 compile 出
+   两个 claim：**Claim A** 双触发点（2026-07-06 canonical）/ **Claim B** 单触发点收敛到 commit 之前（本条）。
+   capture 与 compile 都已完成，**只欠 `bureau:review` 人门裁决**。在裁决前**以本条（= Claim B）为现行执行规则**。
    按制品类型分工：
    - **代码 / 脚本**（假 exe、run_derisk.sh、skill 脚本等）→ **`cc-suite:audit-fix`**（9 维代码审→修→验循环）；
    - **散文**（CLAUDE.md 规则 / bureau 决策文本 / 设计 md）→ 底层 `codex exec`（Codex CLI）定制审（cc-suite 的代码维度套不上散文、且过重）。
@@ -114,6 +115,11 @@ OpRunway/                              ← 项目根（git 仓：GitHub lllyys/O
 ## 远程 NPU 环境（两台，环境均已验证；**各自对应不同任务书的目标硬件、无主备之分**；连接均 `ssh ascend-aX` + 工作目录 `/home/lys`，host 编译、非 root）
 
 Task 2/3 的 build 与跑测在昇腾 NPU 上进行，本地 Mac 只做开发与设计。
+
+> 🔒 **本节的用户名 / 家目录 / 主机名都是脱敏占位，不是真值**（工程约定：私有基建不写进仓）。
+> 本节出现的 `lys`、`/home/lys`、`<内网主机名·已抹>` **照字面敲会扑空**——真值经 `~/.ssh/config` 的
+> `ascend-aX` 别名 + 运行时探测取（`ssh ascend-aX 'whoami; echo $HOME'`），或从 `OPRUNWAY_*` 环境变量传入。
+> 脚本里**一律不得**硬编码这些串。
 
 > ⚠ **目标硬件不假定、按算子判**（2026-07-10 更正）。判定规则：**任务书的 `适配硬件` 字段**（52/52 份均有此字段）
 > ＋ **算子 `op_def` 的 `AICore().AddConfig(...)`** 双源交叉核验；两者应一致，不一致入 `task_pr_gaps`。
