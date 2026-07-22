@@ -21,7 +21,21 @@ case "/$OP_SRC/" in //*|*/../*|*/./*)
   echo "[run_on_npu] fail-closed：OPRUNWAY_OP_SRC=$OP_SRC 非法（前导 / 或含 ./.. 段）" >&2; exit 3;; esac
 case "$OP_SRC" in */?*) : ;; *)
   echo "[run_on_npu] fail-closed：OPRUNWAY_OP_SRC=$OP_SRC 须为 ≥2 段嵌套路径(如 experimental/math/is_close)、非仓根/裸子树" >&2; exit 3;; esac
-V="$OPP/vendors/${VEN}_math"
+# vendor 目录后缀：算子仓的 build.sh 产出的是 `${VENDOR}_<仓族>`（ops-math→`_math`、ops-cv→`_cv`…）。
+# ⚠ 原来这里写死 `_math`——与本仓「零硬编码」约定直接冲突，且 **ops-cv 的算子（如 Upsample 系）真机跑必撞**。
+# 现按序解析：① 显式 OPRUNWAY_VENDOR_SUFFIX（用户/编排层给）；② 从 OPS 仓目录名推（ops-math→math、
+# ops-cv→cv、cann-ops-xxx→xxx）；③ 推不出来 → **fail-closed**，不猜。
+if [ -n "${OPRUNWAY_VENDOR_SUFFIX:-}" ]; then
+  VSUF="$OPRUNWAY_VENDOR_SUFFIX"
+else
+  VSUF="$(basename "$OPS" | sed -n 's/^\(cann-\)\{0,1\}ops-\([A-Za-z0-9_]\{1,\}\)$/\2/p')"
+fi
+case "$VSUF" in
+  "" ) echo "[run_on_npu] fail-closed：推不出 vendor 目录后缀。OPS 仓目录名=$(basename "$OPS")" \
+         "不匹配 ops-<族> 形态，请显式设 OPRUNWAY_VENDOR_SUFFIX（如 math / cv / blas）。" >&2; exit 3;;
+  *[!A-Za-z0-9_]* ) echo "[run_on_npu] fail-closed：vendor 后缀 $VSUF 含非法字符" >&2; exit 3;;
+esac
+V="$OPP/vendors/${VEN}_${VSUF}"
 EXE="$RUN/runner_exe"; BEXE="$RUN/runner_builtin"; RUNNER="$RUN/$OPRUNWAY_RUNNER"
 STAMP="$RUN/.exe_stamp"
 # ---- OPHASH：绑**真实 op 源** $OPS/$OP_SRC 的内容(sha256)。**fail-closed**：源目录不存在/无文件→非零退出，

@@ -543,6 +543,73 @@ class ListAttrInManifestTest(_NeSandboxBase):
         with self.assertRaises(ValueError):
             self._run([c], attr_order=["output_size"])
 
+class VendorSuffixDerivationTest(unittest.TestCase):
+    """`run_on_npu.sh` 的 vendor 目录后缀：**推导 + fail-closed**，不再写死 `_math`。
+
+    为什么要改（2026-07-23）：算子仓 build.sh 产出的是 `${VENDOR}_<仓族>`——ops-math→`_math`、
+    ops-cv→`_cv`。脚本里写死 `_math` 既违反本仓「零硬编码」约定，也让 **ops-cv 的算子
+    （Upsample 系）真机跑必撞**。
+
+    ⚠ 本类**真的执行 run_on_npu.sh**，不复制它的 sed 表达式自己算一遍——
+    那样脚本哪怕忘了 `exit`，测试也照样绿（「脚本据此 fail-closed」就成了空口声称）。
+    脚本无需真机即可跑到这一步：vendor 后缀解析在任何 ssh/编译动作之前。"""
+
+    _SH = os.path.join(_HERE, "new_example", "run_on_npu.sh")
+
+    def _run(self, ops_dirname, **extra):
+        """用最小合法 env 起脚本，返回 CompletedProcess。ops 仓只建目录名、不需内容。"""
+        d = tempfile.mkdtemp()
+        ops = os.path.join(d, ops_dirname)
+        os.makedirs(ops, exist_ok=True)
+        env = dict(os.environ,
+                   OPRUNWAY_OPS_REPO=ops, OPRUNWAY_OPP=os.path.join(d, "opp"),
+                   OPRUNWAY_RUN_DIR=os.path.join(d, "run"), OPRUNWAY_SOC="ascend910b",
+                   OPRUNWAY_VENDOR="oprunway", OPRUNWAY_RUNNER="r.cpp",
+                   OPRUNWAY_OPNAME="Foo", OPRUNWAY_OP_SRC="experimental/math/foo")
+        env.pop("OPRUNWAY_VENDOR_SUFFIX", None)
+        env.update(extra)
+        os.makedirs(env["OPRUNWAY_OPP"], exist_ok=True)
+        os.makedirs(env["OPRUNWAY_RUN_DIR"], exist_ok=True)
+        # ⚠ errors="replace"：脚本源码本身是正确 UTF-8（已按字节核过），
+        # 但本机 bash 的 locale 可能把中文标点截断成坏字节——那是环境噪声，不是仓里的问题，
+        # 不能让它把测试搞崩。断言只匹配 ASCII 变量名与中文关键词，不依赖标点完整。
+        env.setdefault("LC_ALL", "C.UTF-8")
+        return subprocess.run(["bash", self._SH], env=env, capture_output=True,
+                              text=True, errors="replace")
+
+    def test_undecidable_repo_name_fails_closed_with_actionable_message(self):
+        """仓名推不出族名（如 `catlass`）→ **exit 3 停下**，并告诉用户该设哪个变量。"""
+        r = self._run("catlass")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("推不出 vendor 目录后缀", r.stderr)
+        self.assertIn("OPRUNWAY_VENDOR_SUFFIX", r.stderr)      # 给出可操作的出路
+
+    def test_derivable_repo_names_pass_the_suffix_gate(self):
+        """`ops-cv` / `ops-math` / `cann-ops-blas` 能推出族名 → **越过后缀闸**，
+        停在后面的闸（op 源目录不存在）而不是这一道。证推导真生效、不是恰好都被拦下。"""
+        for dirname in ("ops-cv", "ops-math", "cann-ops-blas"):
+            r = self._run(dirname)
+            self.assertNotIn("推不出 vendor 目录后缀", r.stderr, dirname)
+            self.assertIn("op 源目录不存在", r.stderr, f"{dirname} 应走到下一道闸：{r.stderr[:200]}")
+
+    def test_explicit_suffix_overrides_undecidable_name(self):
+        """显式 `OPRUNWAY_VENDOR_SUFFIX` 能救推不出来的仓名（catlass 这类）。"""
+        r = self._run("catlass", OPRUNWAY_VENDOR_SUFFIX="math")
+        self.assertNotIn("推不出 vendor 目录后缀", r.stderr)
+
+    def test_illegal_suffix_rejected(self):
+        """后缀含非法字符 → fail-closed（防被拼进路径）。"""
+        r = self._run("ops-math", OPRUNWAY_VENDOR_SUFFIX="../evil")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("含非法字符", r.stderr)
+
+    def test_script_has_no_hardcoded_math_suffix(self):
+        """源码级钉子（辅助，非主证据）：不得再出现写死的 `_math` vendor 路径。"""
+        with open(self._SH, encoding="utf-8") as f:      # with：别留句柄（ResourceWarning）
+            src = f.read()
+        self.assertNotIn("vendors/${VEN}_math", src)
+        self.assertIn("OPRUNWAY_VENDOR_SUFFIX", src)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

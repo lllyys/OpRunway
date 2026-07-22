@@ -490,11 +490,6 @@ class RunWorkflowNonAcceptanceSurfaceTest(unittest.TestCase):
             self.assertIn("NON-ACCEPTANCE (mock evidence)", note)
         self.assertEqual(W._DEV_GRADE, pc._DEV_GRADE)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ScaledCaseNotTrivialMetTest(unittest.TestCase):
     """G4 连带闸：被 golden 规模预算**降过规模**的 case，不得走 trivial-met 冒充达标。
 
@@ -525,3 +520,7 @@ class ScaledCaseNotTrivialMetTest(unittest.TestCase):
         row = next(x for x in r["per_case"] if x["case_id"] == "s0")
         self.assertTrue(row["达标"], row)
         self.assertTrue(row.get("trivial"), row)
+
+
+if __name__ == "__main__":
+    unittest.main()

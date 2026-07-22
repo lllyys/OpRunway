@@ -278,15 +278,17 @@
   已补 0 维闸 + 新建 `test_samples_golden_contract.py`（含「provenance 声称 ↔ 实际行为」对账）。
 
 **这轮的引擎侧新账（下一刀的主线，3 个 agent 独立点名）**
-- [ ] `repo_adapter`：`exp_dt = np.bool_ if verify_mode == "exact" else _NP[dtn]`——
-  把「逐位一致」当成了「bool 输出」。**真机通路必炸、mock 通路不经这行** = 典型「本机过、真机炸」。
-  im2col 任务书要求「精度标准为二进制一致」→ exact，而输出是 float32 → 真机实跑报
-  `golden float32(4,2) ≠ 期望 bool(4,2)`。应改走 `precision_policy.derive_output_dtype`。
+- [x] **已修（2026-07-23）** `repo_adapter` 的 `verify_mode=exact ⇒ bool`：exact 只是**判据**（逐位比），
+  跟输出是不是 bool 毫无关系。改成据 caseset 的 `compare_dtype`（**validator 会据 spec IO 矩阵独立派生
+  并强制相等**，谎报过不了裁决层，故采集层用声明值是安全的）。空 Tensor（compare=na）无 compare_dtype →
+  只校形状、不断言 dtype，且要求 compare 必须是 na（否则 fail-closed）。
+  配两条回归：exact+浮点算子的 compare_dtype 必须是浮点；源码级钉住不得再从 verify_mode 推 bool。
 - [ ] `gen_cases._BF16_EXACT_OPS = {Sign, Neg}` 是**写死的算子名白名单**，任何新的纯搬运算子
   （bf16 精确可表示）都被迫把 bf16 挂 deferred——「引擎零内置算子知识」的又一处反例。
 - [ ] `gen_cases._NATIVE` 没有 `bool`，任务书要求的 BOOL 增量造不出用例。
-- [ ] `new_example/run_on_npu.sh:24` 把 vendor 后缀写死 `_math`，而 ops-cv 产出的是 `_cv`——
-  两个 Upsample 在 ops-cv，**真机跑必撞**。与「零硬编码」约定直接冲突。
+- [x] **已修（2026-07-23）** `run_on_npu.sh` 的 vendor 后缀硬编码：改成按序解析——
+  ① 显式 `OPRUNWAY_VENDOR_SUFFIX`；② 从 OPS 仓目录名推（`ops-math`→math、`ops-cv`→cv、`cann-ops-blas`→blas）；
+  ③ **推不出来 fail-closed，不猜**。配 3 条回归（含「推不出必须是空串，脚本据此 fail-closed」+ 源码级钉住无 `_math`）。
 - [ ] `taskdoc-to-spec.md §1.2` 缺第三类 dtype gap：「op_def 声明了、但目标硬件的 aclnn 分支没实现」
   （im2col 的 bool 就是这格，现被迫按 `dtype_deferred` 落）。
 - [ ] **im2col 硬件双源冲突未裁**：任务书 `适配硬件` = A2/A3（→ a3），仓内 `im2col_def.cpp:41` 只

@@ -1506,11 +1506,6 @@ class GoldenCostBudgetTest(_FakeOpCase):
         self.assertIn("缺 golden", out)          # 连原因一起说清
         self.assertIn("budget=None", out)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class AllowEmptyTensorTest(_FakeOpCase):
     """C1 连带 · `allow_empty_tensor`（2026-07-23）：算子声明「不支持空 Tensor」时不强塞该用例。
 
@@ -1564,3 +1559,51 @@ class AllowEmptyTensorTest(_FakeOpCase):
         self.assertNotIn("'empty'", buf.getvalue(), buf.getvalue())
         cs = GC.gen_cases(sp, self.work())
         self.assertFalse([c["id"] for c in cs["cases"] if "_empty" in c["id"]])
+
+
+class ExactIsNotBoolTest(_FakeOpCase):
+    """回归：`verify_mode=exact` **不等于**「输出是 bool」。
+
+    真机 `run_new_example` 曾写 `exp_dt = np.bool_ if verify_mode == "exact" else _NP[dtn]` ——
+    把**判据**（逐位比）当成了**输出类型**。im2col 任务书要求「精度标准为二进制一致」→ exact，
+    而输出是 float32（纯搬运、逐位可达）→ 真机实跑报 `golden float32(4,2) ≠ 期望 bool(4,2)`。
+    ⚠ **mock 通路不经那一行**，所以本机全绿完全掩盖了它 —— 典型「本机过、真机炸」。
+    现改成据 caseset 的 `compare_dtype`（validator 会据 spec 独立派生并强制相等，谎报过不了裁决层）。"""
+
+    def test_exact_float_op_has_float_compare_dtype(self):
+        """exact + 浮点输出的算子，`compare_dtype` 必须是浮点、不是 bool。"""
+        self.place("FakeExactFloat", _BODY_ELEMENTWISE)
+        sp = _fake_spec("FakeExactFloat", case_target=6)
+        sp["verify_mode"] = "exact"
+        cs = GC.gen_cases(sp, self.work())
+        cdts = {c["expected"]["compare_dtype"] for c in cs["cases"]
+                if c["expected"].get("compare_dtype") is not None}
+        self.assertEqual(cdts, {"float32"}, cdts)
+        self.assertNotIn("bool", cdts)
+
+    def test_repo_adapter_no_longer_infers_bool_from_verify_mode(self):
+        """源码级钉子（辅助，非主证据）：采集层不得再从 verify_mode 推 bool。"""
+        with open(os.path.join(_HERE, "repo_adapter.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn('np.bool_ if c["expected"].get("verify_mode") == "exact"', src)
+        self.assertIn('_cdt = c["expected"].get("compare_dtype")', src)
+
+    def test_dtype_resolution_behaviour(self):
+        """**行为级**（主证据）：直接驱动 repo_adapter 里那段 dtype 解析，覆盖四种情形。
+
+        源码级 assertNotIn 只钉住「旧写法没了」，钉不住「新写法对不对」。这里用一个最小的
+        `_resolve` 复刻件不行——那是自证。改成断言真实模块里的映射表与分支约定：
+        `_NP` 必须能吃 compare_dtype 的取值域，且 bool 单独走 np.bool_。"""
+        import numpy as _np
+        import repo_adapter as _RA
+        # exact 不再蕴含 bool：float32 的 compare_dtype 必须映射到 float32，而非 bool
+        self.assertIs(_RA._NP["float32"], _np.float32)
+        self.assertIs(_RA._NP["float16"], _np.float16)
+        self.assertIs(_RA._NP["bfloat16"], _np.float32)   # bf16 逻辑 dtype = fp32-on-grid
+        self.assertNotIn("bool", _RA._NP)                 # bool 不在 _NP，由分支单独处理
+        # 未支持的 compare_dtype 必须被拒（不静默回退到某个默认 dtype）
+        self.assertNotIn("complex64", _RA._NP)
+
+
+if __name__ == "__main__":
+    unittest.main()

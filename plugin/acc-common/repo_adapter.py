@@ -696,13 +696,34 @@ def run_new_example(caseset, work_dir, defect_cases=None):
         # §1.4 空 Tensor 功能用例（compare=na）：runner 已处理 numel=0（空入空出），放行部署；非 na 的 numel=0=异常。
         if int(np.prod(out_shape)) == 0 and c["expected"].get("compare") != "na":
             raise ValueError(f"{cid}: 非 na 的 numel=0（异常；空 Tensor 功能用例应标 expected.compare=na）")
-        exp_dt = np.bool_ if c["expected"].get("verify_mode") == "exact" else _NP[dtn]
+        # 输出 dtype **取 caseset 派生值，不再从 verify_mode 猜**（2026-07-23）。
+        # 旧写法 `np.bool_ if verify_mode == "exact" else _NP[dtn]` 把「逐位一致」当成了「bool 输出」——
+        # 而 exact 只是**判据**（逐位比），跟输出是不是 bool 毫无关系。im2col 任务书要求
+        # 「精度标准为二进制一致」→ exact，输出却是 float32（纯搬运、逐位可达）→ 真机实跑报
+        # `golden float32(4,2) ≠ 期望 bool(4,2)`。⚠ **mock 通路不经这一行**，所以本机 50/50 全绿
+        # 完全掩盖了它 —— 典型「本机过、真机炸」。
+        # 安全性：`compare_dtype` 是 caseset 自声明值，但 **validator 会据 spec IO 矩阵独立派生并强制相等**
+        # （`expected.compare_dtype != 派生值` 直接判 fail），所以谎报过不了裁决层这一关。
+        _cdt = c["expected"].get("compare_dtype")
+        if _cdt is None:
+            # 仅空 Tensor 功能用例（compare=na）允许无 compare_dtype——无精度比对、无 dtype 断言可言。
+            if c["expected"].get("compare") != "na":
+                raise ValueError(f"{cid}: expected.compare_dtype 缺失且 compare≠na——无法确定输出 dtype，fail-closed")
+            exp_dt = None
+        else:
+            if _cdt == "bool":
+                exp_dt = np.bool_
+            elif _cdt in _NP:
+                exp_dt = _NP[_cdt]                       # bf16 逻辑 dtype = fp32-on-grid
+            else:
+                raise ValueError(f"{cid}: 未支持的 compare_dtype {_cdt!r}（真机可收发集：{sorted(_NP)} + bool）")
         golden = np.load(_safe(work_dir, c["expected"]["golden_path"]))
         # 校验没删、只是**期望值换了来源**：golden 必须与「真正会被分配/读回的输出形状」一致，
         # 否则 metrics 是拿错东西算的（契约漂移，本仓最不能容忍的「看起来对」）。
-        if golden.shape != tuple(out_shape) or golden.dtype != exp_dt:
+        if golden.shape != tuple(out_shape) or (exp_dt is not None and golden.dtype != exp_dt):
+            _want = "（compare=na，dtype 不作断言）" if exp_dt is None else np.dtype(exp_dt).name
             raise ValueError(f"{cid}: golden {golden.dtype}{golden.shape} ≠ 期望 "
-                             f"{np.dtype(exp_dt).name}{tuple(out_shape)}（输出形状来源：{shape_src}）")
+                             f"{_want}{tuple(out_shape)}（输出形状来源：{shape_src}）")
         for j, arr in enumerate(arrs):
             if arr.shape != tuple(in_shape):
                 arr = np.broadcast_to(arr, in_shape).copy()    # 广播为独立缓冲（不与 npy 共 buffer）
