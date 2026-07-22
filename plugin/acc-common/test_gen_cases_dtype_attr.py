@@ -1561,6 +1561,100 @@ class AllowEmptyTensorTest(_FakeOpCase):
         self.assertFalse([c["id"] for c in cs["cases"] if "_empty" in c["id"]])
 
 
+class EmptyAxisTest(_FakeOpCase):
+    """`empty_axis`（2026-07-23）：空 Tensor 用例把 0 放**哪一轴**，由 spec 声明。
+
+    为什么需要：`_fit_rank((0,), ranks)` 是左补 1，**0 恒落最后一维**（rank=[3,4] → `(1,1,0)`）。
+    而很多算子的空 Tensor 只在某一特定轴为 0 时合法（im2col 只允许「4 维且 N==0」）。
+    没这个字段时，这类算子只能整个关掉空 Tensor 用例 = **本该测的那一种合法空形态也一起没了**。
+
+    ⚠ **轴号定不了 rank**：im2col 的 rank 是 [3,4]，合法空形态只有 4 维那个。
+    所以按合法 rank 从小到大逐个试，**判据交给算子自己的 `out_shape()`** ——
+    「哪个 rank 的空形态合法」本就是算子知识，而 out_shape 正是它的所在地（C1 的前提）。引擎不猜。"""
+
+    # 假 golden **精确模仿 im2col 的约束**：3/4 维都收（非空时），但 0 只许出现在 4 维的 dim0。
+    # 这样 rank 候选 [3,4] 里只有 4 维那个的空形态合法 —— 正是「轴号定不了 rank」要测的情形。
+    _BODY_4D_ONLY = (
+        # ⚠ 显式算维度、不用 -1：`np.zeros((0,1,1,1)).reshape(0, -1)` 会炸
+        # （size=0 时 numpy 推不出 -1；真 torch 能处理）。这本身也是个真实的坑。
+        "def golden_fn(inputs, attrs):\n"
+        "    x = inputs[0]\n"
+        "    if x.ndim == 4:\n"
+        "        n = 1\n"
+        "        for d in x.shape[1:]:\n"
+        "            n *= d\n"
+        "        return x.reshape(x.shape[0], n)\n"
+        "    n = 1\n"
+        "    for d in x.shape:\n"
+        "        n *= d\n"
+        "    return x.reshape(n)\n"
+        "\n"
+        "def out_shape(in_shapes, attrs):\n"
+        "    s = tuple(in_shapes[0])\n"
+        "    if len(s) not in (3, 4):\n"
+        "        raise ValueError('only 3d/4d')\n"
+        "    if len(s) == 3:\n"
+        "        if any(d == 0 for d in s):\n"
+        "            raise ValueError('3d must be all-positive')\n"
+        "        n = 1\n"
+        "        for d in s:\n"
+        "            n *= d\n"
+        "        return (n,)\n"
+        "    if any(d == 0 for d in s[1:]):\n"
+        "        raise ValueError('only dim0 may be 0')\n"
+        "    n = 1\n"
+        "    for d in s[1:]:\n"
+        "        n *= d\n"
+        "    return (s[0], n)\n")
+
+    def _spec(self, op, axis=None, rank=(3, 4)):
+        sp = _fake_spec(op, rank=list(rank), case_target=8)
+        sp["allow_empty_tensor"] = True
+        if axis is not None:
+            sp["empty_axis"] = axis
+        return sp
+
+    def test_picks_the_rank_the_operator_accepts(self):
+        """rank 候选 [3,4]、算子只认 4 维 → 应选 4 维的 `(0,1,1,1)`，不是 3 维的 `(0,1,1)`。"""
+        self.place("FakeEmptyAxis", self._BODY_4D_ONLY)
+        cs = GC.gen_cases(self._spec("FakeEmptyAxis", axis=0), self.work())
+        empties = [tuple(c["inputs"][0]["shape"]) for c in cs["cases"] if "_empty" in c["id"]]
+        self.assertTrue(empties, [c["id"] for c in cs["cases"]])
+        self.assertEqual(set(empties), {(0, 1, 1, 1)}, empties)
+
+    def test_all_candidates_rejected_fails_closed(self):
+        """算子拒绝所有候选空形态 → **fail-closed**，并指出两条出路（改轴 / 关掉 allow_empty_tensor）。
+
+        绝不为它挑一个算子不认的形状硬塞——那就是「替算子发明它不支持的语义」。"""
+        self.place("FakeEmptyNever", self._BODY_4D_ONLY)
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(self._spec("FakeEmptyNever", axis=1), self.work())   # 轴 1 恒非法
+        msg = str(cm.exception)
+        self.assertIn("拒绝了所有候选空形态", msg)
+        self.assertIn("allow_empty_tensor", msg)
+
+    def test_axis_out_of_range_for_every_rank(self):
+        self.place("FakeEmptyOOR", _BODY_ELEMENTWISE)
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(self._spec("FakeEmptyOOR", axis=9, rank=(3,)), self.work())
+        self.assertIn("越界", str(cm.exception))
+
+    def test_illegal_axis_value_rejected(self):
+        """只收非负 int：bool / 负数 / 字符串一律拒（True 是 bool 子类，会被 isinstance 放过）。"""
+        self.place("FakeEmptyBadAxis", _BODY_ELEMENTWISE)
+        for bad in (True, False, -1, "0", 1.0):
+            with self.assertRaises(ValueError, msg=repr(bad)) as cm:
+                GC.gen_cases(self._spec("FakeEmptyBadAxis", axis=bad), self.work())
+            self.assertIn("empty_axis", str(cm.exception))
+
+    def test_unset_keeps_old_behaviour(self):
+        """不声明 → 走老路 `_fit_rank`（0 落最后一维），**行为零变更**。"""
+        self.place("FakeEmptyOld", _BODY_ELEMENTWISE)
+        cs = GC.gen_cases(self._spec("FakeEmptyOld", rank=(3,)), self.work())
+        empties = [tuple(c["inputs"][0]["shape"]) for c in cs["cases"] if "_empty" in c["id"]]
+        self.assertEqual(set(empties), {(1, 1, 0)}, empties)
+
+
 class Bf16BitexactDeclarationTest(_FakeOpCase):
     """bf16 逐位可达改由 **spec 声明**，不再是引擎里写死的算子名白名单（2026-07-23）。
 

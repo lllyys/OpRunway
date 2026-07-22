@@ -796,6 +796,23 @@ def _dtype_shapes(dtn, is_key, reg, large):
     return list(reg[:_OTHER_DTYPE_QUOTA])               # 非重点 dtype：主流少量
 
 
+def _empty_axis(spec):
+    """空 Tensor 用例把 0 放在**哪一轴**（`spec.empty_axis`，缺省 None = 现行为）。
+
+    ⚠ 为什么需要：`_fit_rank((0,), ranks)` 是左补 1，**0 恒落在最后一维**（rank=[3,4] → `(1,1,0)`）。
+    而很多算子的空 Tensor 只在**某一特定轴**为 0 时合法——im2col 只允许「4 维且 N==0」
+    （`aclnn_im2col.cpp` CheckInputDims 只放过 dim0），`(1,1,0)` 是 W=0、非法。
+    结果是这类算子只能整个关掉空 Tensor 用例（`allow_empty_tensor: false`）=
+    **本该测的那一种合法空形态也一起没了**。声明轴号后就能精确造出 `(0,C,H,W)`。
+    取值：非负 int（0=首轴/batch）。⚠ 只收真 int（`True` 是 bool 子类、会被 isinstance 放过，显式排除）。"""
+    v = spec.get("empty_axis")
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+        raise ValueError(f"spec.empty_axis 须为非负整数（轴号，0=首轴），得 {v!r}")
+    return v
+
+
 def _bf16_bitexact(spec, op):
     """该算子的 bf16 数值输出是否**逐位可达**（纯搬运/纯符号类）。
 
@@ -826,7 +843,35 @@ def _allow_empty_tensor(spec):
     return v
 
 
-def _special_entries(op, dtn, arity, is_float, rep_attrs, ranks=None, allow_empty=True):
+def _empty_shape(ranks, axis, accepts=None):
+    """按声明的轴造空 shape：该轴 0、其余 1。`ranks=None` → 退回 1 维 `(0,)`（现行为）。
+
+    ⚠ **轴号定不了 rank**：im2col 的 rank 是 `[3,4]`，而合法空形态只有「**4 维**且 N==0」——
+    取最小 rank 会造出 3 维的 `(0,1,1)`，算子当场拒。
+    所以按合法 rank **从小到大逐个试**，第一个被算子接受的就是它；一个都不接受 → fail-closed。
+    **判据交给算子自己的 `out_shape()`**（`accepts`）——「哪个 rank 的空形态合法」本就是算子知识，
+    而 `out_shape` 正是算子知识的所在地（C1 的前提）。引擎不猜。
+    `accepts=None`（算子没导出 out_shape）→ 退回取最小合法 rank，无从询问、也无从校验。"""
+    if ranks is None:
+        return (0,)
+    cands = [tuple(0 if i == axis else 1 for i in range(r)) for r in sorted(ranks) if axis < r]
+    if not cands:
+        raise ValueError(
+            f"spec.empty_axis={axis} 对该算子的所有合法 rank {sorted(ranks)} 都越界（轴号需 < rank）。"
+            f"fail-closed——不静默退回「0 放最后一维」，那正是本字段要修的。")
+    if accepts is None:
+        return cands[0]
+    for shp in cands:
+        if accepts(shp):
+            return shp
+    raise ValueError(
+        f"spec 声明了 allow_empty_tensor + empty_axis={axis}，但算子的 out_shape() **拒绝了所有候选空形态** "
+        f"{cands}。要么 empty_axis 写错了轴，要么该算子根本不支持空 Tensor（那就设 allow_empty_tensor: false）。"
+        f"fail-closed——绝不为它挑一个算子不认的形状硬塞。")
+
+
+def _special_entries(op, dtn, arity, is_float, rep_attrs, ranks=None, allow_empty=True,
+                     empty_axis=None, empty_accepts=None):
     """§1.4 特殊场景（不与常规正交、强制纳入）：空(功能only)/标量[1]/边界下(全1)/边界上(大)/inf/-inf/nan。
     每项 (dims, shape, data_kind, id_kind)。整型 dtype 跳过 inf/nan（无此值）。
     C3：每个基准 shape 过 `_fit_rank`——ranks=None 时恒等（现行为），有约束时保 numel 调到合法维度。
@@ -841,7 +886,10 @@ def _special_entries(op, dtn, arity, is_float, rep_attrs, ranks=None, allow_empt
     E = []
     # 空 Tensor：某维=0 → 只挂「功能」（无精度/无 kernel profile；validator numel=0→na、adapter 优雅跳过）
     if allow_empty:
-        E.append((["功能"], _fit_rank((0,) if arity else (0,), ranks), "empty", "empty"))
+        # 空 shape：声明了 empty_axis 就按轴精确造（如 (0,1,1,1)）；没声明走老路 _fit_rank（0 落最后一维）。
+        _es = (_empty_shape(ranks, empty_axis, empty_accepts) if empty_axis is not None
+               else _fit_rank((0,), ranks))
+        E.append((["功能"], _es, "empty", "empty"))
     # 标量 Tensor [1]（numel=1，退化 perf → 下游 trivial-met）
     E.append((["功能", "精度", "性能"], _fit_rank((1,), ranks), "varied", "scalar"))
     # 边界：下=各维均 1；上=大 shape 某维取大
@@ -922,7 +970,26 @@ def _dropped_classes(grid, emitted):
 
 
 # ================================================= 计划构建（§1 覆盖-预算）=========
-def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None):
+def _make_empty_accepts(in_params, out_shape_fn, attrs):
+    """造 `accepts(shape) -> bool`：拿候选空 shape 问算子的 `out_shape()` 认不认。
+
+    只吞 ValueError（算子自己的 fail-closed 报错就是「不认」的表达）；别的异常照抛——
+    那是 golden 本身写坏了，不该被当成「这个形状不合法」悄悄跳过。
+    `out_shape_fn=None`（算子没导出）→ 返回 None，调用方退回取最小合法 rank。"""
+    if out_shape_fn is None:
+        return None
+    arity = max(1, len(in_params))
+
+    def accepts(shp):
+        try:
+            out_shape_fn(_entry_in_shapes(shp, arity), _copy_attrs(attrs))
+            return True
+        except ValueError:
+            return False
+    return accepts
+
+
+def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None, empty_accepts=None):
     """§1 覆盖-预算计划。返回 (entries, meta)。选择端无 rng（结构序 + 原始索引 tie-break）。
     ① §1.4 特殊场景（每 dtype，强制）→ ② 白名单必覆盖（key dtype × 每 attr × 大 shape，强制，防关键联合被采样丢）
     → ③ 常规正交网格（dtype×shape×值域×attr）作 1-wise 采样源，填到 budget=max(case_target, |forced|)。
@@ -953,7 +1020,9 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None)
     for dtn in dtypes:
         is_float = not precision_policy.is_integer_dtype(dtn)
         for dims, shp, dk, ik in _special_entries(op, dtn, arity, is_float, attr_combos[0], ranks,
-                                                  allow_empty=_allow_empty_tensor(spec)):
+                                                  allow_empty=_allow_empty_tensor(spec),
+                                                  empty_axis=_empty_axis(spec),
+                                                  empty_accepts=empty_accepts):
             forced.append(mk(dims, shp, dtn, dk, ik, attr_combos[0],
                              f"special:{ik}", f"opbase §1.4 {ik}", ["特殊"]))
     # ② 白名单必覆盖（key dtype × 每 attr 取值 × 大 shape）——保证关键联合不被 1-wise 采样丢（评审 #6）
@@ -1039,7 +1108,8 @@ def gen_cases(spec, work_dir):
 
     # G4：据 C1 的 out_shape 造生成期规模预算的 cost 模型（未导出 out_shape → 按输入广播形状 = elementwise）。
     cost_fn = _make_cost_fn(in_params, out_shape_fn)
-    entries, plan_meta = _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=cost_fn)
+    entries, plan_meta = _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=cost_fn,
+                               empty_accepts=_make_empty_accepts(in_params, out_shape_fn, attrs_default))
     seen_ids, cases = set(), []
     for entry in entries:
         dims, shp, dtn = entry["dims"], entry["shape"], entry["dtype"]
@@ -1217,15 +1287,17 @@ def _dry_run(spec):
     # ⚠ 原来是 `except Exception` 一把吞：一份**已存在但坏掉**的 golden.py（语法错、顶层抛异常、
     # 契约导出不全）也能安静通过 CP-B —— 而散文把 dry-run 称作「契约自检」，这就是 fail-open。
     # 「还没写」是合法的预览场景（spec 先行、golden 后补）；「写了但坏了」是**真错误**，必须当场炸。
-    cost_fn, cost_why = None, ""
+    cost_fn, cost_why, _dry_out_shape_fn = None, "", None
     try:
-        cost_fn = _make_cost_fn(in_params, load_golden(op)[3])
+        _dry_out_shape_fn = load_golden(op)[3]
+        cost_fn = _make_cost_fn(in_params, _dry_out_shape_fn)
     except ValueError as ex:
         msg = str(ex)
         if not msg.startswith("缺 golden:"):            # 文件在、但契约/执行有问题 → 不降级
             raise
         cost_why = f" ← 未核（{msg.splitlines()[0][:80]}）"
-    entries, meta = _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=cost_fn)
+    entries, meta = _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=cost_fn,
+                          empty_accepts=_make_empty_accepts(in_params, _dry_out_shape_fn, attrs_default))
     seen, ids = set(), []
     for e in entries:                                    # 跑 _mk_id 校 id 唯一（撞则 raise）
         ids.append(_mk_id(op, e["dtype"], e["shape"], e["id_kind"], e["attr_idx"], seen))
