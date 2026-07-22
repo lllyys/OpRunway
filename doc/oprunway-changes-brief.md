@@ -20,8 +20,35 @@
 
 ## 2026-07-23
 
+- **批 6：`golden.py` 终于有产出者了** —— 给 `acc-runner-dev` 加 `gen_golden` 模式（据任务书产 `<ops_root>/<op>/golden.py`），并接进 CP-B、排在 `--dry-run` 之前。
+  - **补的是流程空缺、不是能力空缺**：Pdist 首跑时 agent 自己手写了一份 golden.py 就跑通了 dry-run——它会写，只是**流程里没人被指派去写**。`gen_cases` 的报错文本和 `acc-casegen` skill 都写着「由 acc-spec/acc-runner-dev 产」，而那两个 agent 的 dispatch 表里都没有这件事，指到了空处。
+  - **为什么归 `acc-runner-dev` 而不是 `acc-spec-extractor`**：golden.py 和 runner.cpp 都是**会被 import/编译执行的代码**、同信任级，都靠「锚定权威来源不猜」这条同款纪律守；acc-spec 产的是 JSON 数据、且带禁读纪律。
+  - **runner 的 scope gate 明确不套到 golden 上**：golden 是纯 CPU Python、跟算子仓目录布局无关。套上去会把一堆本可以先产 golden 的算子挡在 CP-B 外——这正是「只支持 elementwise」那类窄化的来源。
+  - 新增 `check_golden.py`（确定性自检，串起词表→授权→判档三层）。**做成脚本而不是让 agent 抄 `python -c`**：这段要被反复照抄，抄错一个字就是假绿；而且三层分立的语义（谁也不核自己）揉成一坨就退化成自证。退出码三态 `0/2/1` 被单测钉死——`tier 3` 若从 2 漂成 1，「要人核」会被当成「不许跑」挡死，而账本 JSON 看上去一切正常。
+  - **顺手修的两处真 stale**：① 四处文档还写 `load_golden` 返「4 元组」，实际早已是 5 字段具名元组；② IsClose 样例里那段「快照尚未做、全仓 0 个」的注释——批 3 已经做了，sha256 就写在它上面几行，自相矛盾。
+  - 🔴 **审修门逮到 4 个 fail-open，全是「账本看着正常、退出码却是绿的」**（codex 审 + 逐条实测复现，不是照单全收）：
+    - **golden.py 里一句 `raise SystemExit(0)` → `check_golden.py` 退出码 0**。`SystemExit` 不是 `Exception` 的子类，
+      `except Exception` 挡不住它。于是**一个连 `GOLDEN_CONTRACT` 都没有的 golden 被判绿**——检查器被被检查者一句话关掉了。
+      ⚠ **同一个洞在引擎主路 `gen_cases.load_golden` 里也有**（同样 `except Exception`），一并修：两处都改捕 `BaseException`
+      （`KeyboardInterrupt` 除外——用户主动中断不该被伪装成 golden 的问题）。
+    - **argparse 参数错误默认退出 2**，而 2 在本脚本是「需人核、可继续」。少打一个算子名 → 编排读成「golden 没问题」→ 放行。
+    - **退出码的路由键从来就不是档位数字**。`derive_golden_tier` 对 `multistep + oracle_method` 判的是 **(tier 1, 需人核=True)**——
+      我按 `tier in (1,2)` 给 0，把「档位高但仍要人核」的 golden 静默放行了。改成按 `needs_human_review` 路由，
+      并把 `blocked_reason` 非空、`authorized is False`、tier 越界一律落 1（矛盾账本按坏的算）。
+    - **必需导出只查了 `hasattr`**：`golden_fn = None` / 空 `GOLDEN_SOURCE` / 不可调用 `out_shape` 都能拿 exit 0，
+      而 `load_golden` 会拒——典型的「自检说没事、CP-D 才炸」。改成逐条镜像 `load_golden` 的真实约束。
+    - 另加：三层策略函数在**任何 golden 执行之前**就固化成引用（golden 与检查器同进程，能改绑 `precision_policy` 的属性把自己判绿）；
+      快照最终文件单独拒软链（`op_dir` 只逐段查目录，挡不住引文锚被指到 ops_root 之外）。
+    - ⚠ **挡不住的照实写在 docstring 里**：`os._exit(0)` / C 层退出 / 解释器篡改，要挡须换子进程隔离。**当前不做**——
+      runner.cpp 本身就要被编译并在 NPU 上跑，只给 golden 加沙箱是不对称的安全戏。
+    - 8 条 fail-open 回归钉死（含用**子进程**测真实参数错误退出码），全套 735→743。
+  - **散文侧审出 9 条，最贵的一条是我把一个事实错误传播进了 5 个文件**：「`--dry-run` 根本不 import torch / 验不了 golden.py 在不在」。
+    实际 `_dry_run` **会加载执行 golden.py** 取 `out_shape`——所以覆盖是**半道**的：缺文件只记「未核」，文件在但坏了当场抛。
+    我还把手册骨架写成顶层 `import torch`，与仓里四份真样例的 `_require_torch()` 延迟 import 约定**正好相反**——照抄就会破坏那条性质。全部改正。
+  - **a3 真机复盘**：先报 25 红，查下来全是我只同步了半个目录；补齐后剩 6 红，是 `test_catlass_scripts` 把解释器写死成字面 `"python3"`（a3 系统 python 无 numpy）→ 改 `sys.executable`。**这 6 个跟批 6 无关，是测试自身的可移植性缺陷**，在任何「跑测试的解释器 ≠ PATH 上的 python3」的机器上都会假红。最终 a3 真 torch 2.13.0：**735/735 绿**。
+
 - **golden 来源契约 批 2 + 批 5 落地：从「有档位」到「档位真起作用」** —— 批 3 打通前提后一口气推完两批。
-  - **批 2**：`golden.py` 可选导出 `GOLDEN_CONTRACT`（来源/方法族/授权引文锚/快照指纹），加载时派生档位写进每条 case。`load_golden` 返回改**具名元组** —— 刻意不再加位置项：字段增删时位置解包会**静默错位**，具名取则当场报错（实证：6 处旧的 4 元解包当场炸，不是悄悄把 contract 当成 out_shape 用）。
+  - **批 2**：`golden.py` 可选导出 `GOLDEN_CONTRACT`（来源/方法族/授权引文锚/快照指纹），加载时派生档位写进每条 case。`load_golden` 返回改**具名元组**。⚠ **两类风险要分开说**（原表述把它们混了）：**改 arity 时旧的 `a,b,c,d = ` 解包会当场 `ValueError`**——这是好事，实证 6 处旧解包立刻炸出来；真正会**静默指错**的是**固定数字下标**（`load_golden(op)[3]`），字段插入/重排后下标依然合法、只是指向变了。所以结论是**按字段名取**（`g.out_shape`），两类风险都躲开。
   - ⭐ **IsClose 做成了完整自证的参考实现**：真任务书快照与 golden.py 同处，引文锚 `task_doc.snapshot.md:13` + 逐字 quote → **a3 真 torch 实测派生 tier 1**。**改一个字（`cpu`→`CPU`）就掉回 tier 4** —— 引文锚不是摆设。
   - **批 5 的核心判断（比实现更重要）**：授权核不实 **≠ 精度 fail、≠ needs_review**。它意味着**真值本身来路不明** → 基于它的每条精度判定都不成立。报成 fail 会让人**去查算子、查错方向**（算子可能好好的）；报成 needs_review 也不对（指标算得好好的，不确定的是真值）。故单列 `BLOCKED_GOLDEN_UNAUTHORIZED`，且**排在所有别的判定之前**、**不进精度放行集**（不跑 Task3——拿不知对不对的 golden 判过的「精度通过」去支撑「性能达标」，是把无效结论往下传）。
   - 校验刻意拆三层：`validate_golden_contract` 只校词表结构 · `verify_authorization` 读快照核引文真伪 · `derive_golden_tier` 只按词表判档。混一起就是「自己核自己」。词表拼错必须早拦，否则兜底会把它判成含糊的 `unverifiable_authorization` —— 一个本该 tier 2 的正当 golden 被判 blocked，查半天查不到是拼错了。

@@ -134,8 +134,9 @@ def out_shape(in_shapes, attrs):
 
 - **不导出 = 输出同输入形状**（elementwise 缺省语义，等同现行广播行为）。
   **现有 4 份样例 golden（IsClose / Equal / Sign / Neg）一律不加此函数**，行为零变更。
-- **导出了就以它为准**：`gen_cases.load_golden` 现返回 **4 元组** `(golden_fn, GOLDEN_SOURCE, GOLDEN_PROVENANCE, out_shape_fn)`，
-  第 4 项未导出即 `None`；导出了但不可调用 → fail-closed。
+- **导出了就以它为准**：`gen_cases.load_golden` 返回**具名元组**
+  `Golden(fn, source, provenance, out_shape, contract)`（`out_shape` / `contract` 未导出即 `None`；
+  导出了但不可调用 → fail-closed）。**按名取用**（`g.out_shape`），别按下标——下标会随契约再扩而漂。
   `gen_cases` 每条 case 都把最终输出形状写进 caseset 的 **`expected.out_shape`**，
   并用 **`expected.out_shape_source`** 如实记来源：`"golden.out_shape"`（声明并已与实测对账）/ `"golden_fn_actual"`（未声明、取自 golden 实测）。
   下游（`repo_adapter` 造 manifest、runner 开输出 buffer、`validator` 比对）**据 caseset 走**，不各自重算。
@@ -170,7 +171,7 @@ def out_shape(in_shapes, attrs):
 ⚠ **引擎侧消费状态**：`out_shape` 的读取与消费在 `gen_cases.py`（加载 + 逐 case 对账 + 写 caseset）与
 `repo_adapter.py`（据 caseset 的 `expected.out_shape` 造 manifest）——**非本页所属文件**，本轮同批落地、
 **本机无 torch 验不到 golden 通路**（真结论以真机为准）。**以引擎实际行为为准**：环境里的引擎若还是旧版
-（`load_golden` 返 3 元组、caseset 无 `expected.out_shape`），导出了也不生效、按缺省同形走，
+（`load_golden` 还没有 `out_shape` 字段、caseset 无 `expected.out_shape`），导出了也不生效、按缺省同形走，
 **不得据本页断言「非 elementwise 已通」**。
 
 ### 6.2 runner 骨架该怎么变（**本轮不要求你真写出新 runner**，但别照旧骨架硬套）

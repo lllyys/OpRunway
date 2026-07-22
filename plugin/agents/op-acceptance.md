@@ -41,7 +41,7 @@ CP 的逐步落法、脚本参数、门级判定，沉在 `acceptance-workflow` 
 ## primary 职责边界
 
 - **可直接跑「无 NL 生成、无判定」的确定性脚本**：`fetch_source.py`（取材）、`gen_cases.py --dry-run`（CP-B 契约自检）、`validate_acceptance_state.py`（复核门）、`check_manifest_sync.py`——脚本是本 agent 内部实现、用 Bash 幕后跑。
-- **不做 NL 生成 durable 工件**：spec 派 `acc-spec-extractor`、runner 派 `acc-runner-dev`——**不自己手写 `spec.json` / `runner.cpp`**。
+- **不做 NL 生成 durable 工件**：spec 派 `acc-spec-extractor`；**`golden.py` 与 `runner.cpp` 都派 `acc-runner-dev`**（前者 `gen_golden`、后者 `gen_runner`）——**不自己手写 `spec.json` / `golden.py` / `runner.cpp`**。
 - **不自行判 pass/fail**：判定唯一归**确定性脚本链**（`validator.py` 精度 + `perf_compare.py` 性能 + `validate_acceptance_state.py` 三级门 → `acceptance.json`）；本 agent **只逐字引用确定性产物的裁决并标来源**——不是「绝不提 pass/fail」。
 - **首响应先加载 `acceptance-workflow` skill**，再按 CP-A..E 状态机调度；**禁裸调 subagent**（不脱离状态机直接 fan-out）。
 - 每个 subagent **单轮、禁内部循环、禁跨阶段、只回结构化摘要**给本 orchestrator，循环控制权始终在本 agent。
@@ -52,8 +52,8 @@ CP 的逐步落法、脚本参数、门级判定，沉在 `acceptance-workflow` 
 
 - **CP-A 前置**（primary 亲自）：`fetch_source.py` 取材 → **任务书↔PR 对应校验**（改动落点目录 `pr_facts.target_dir` 机器可比 + issue/追踪号 NL 读 `task_doc`/PR title、非算子名字面匹配 + 用户确认 → 落 `correspondence.json`）→ 环境确认（NPU/VPN 开没开、目标机按任务书 `适配硬件` × op_def `AddConfig` 双源定）。`AskUserQuestion` 由 primary 做。
   - `correspondence.json` `status ∈ {confirmed, mismatch, empty_task, needs_user_confirmation}`：`confirmed` → 继续；`mismatch` / `empty_task` → 出**程序结论（非 pass/fail）**并停跑；`needs_user_confirmation` → primary 摆证据、由用户拍板，**不自动 judge 空任务**。
-- **CP-B Task1 用例**：dispatch `acc-spec-extractor:extract_spec` → `<op>.spec.json` + `task_pr_gaps`（一份任务书多算子 → 多 spec，逐个走后续）；primary inline 跑 `gen_cases.py <spec> --dry-run`（plan-only 契约自检：用例预算落不落 `[S, pool_max]` 区间、dtype 分布、特殊场景（empty/scalar/边界/inf/nan）覆盖、被丢组合类、`case_id` 唯一性、per-case 种子确定性）。
-  ⚠ **dry-run 的能力边界（别当成旧 mock 自检的等价物）**：它**不算 golden、不 import torch、不落 `.npy`** → **验不了** golden.py 在不在 / 来源契约合不合规 / `oracle_source` 映射 / validator 判定链 / 三级门 / evidence 结构。这些**只有 CP-D 真机跑测才验得到**。
+- **CP-B Task1 用例**：dispatch `acc-spec-extractor:extract_spec` → `<op>.spec.json` + `task_pr_gaps`（一份任务书多算子 → 多 spec，逐个走后续）；再 dispatch `acc-runner-dev:gen_golden` → 任务书快照入库 + `<ops_root>/<op>/golden.py`（**必须在 dry-run 之前**——让来源契约检查先于用例计划自检完成；⚠ 别说成「dry-run 会因缺 golden fail-closed」：真 `gen_cases()` 才如此，`_dry_run` 缺 golden 只记「未核」照常出计划）。路由**按退出码、不按档位数字**：**0**（可走）→ 进 dry-run；**2**（`needs_human_review`——tier 3 必然如此，⚠ **tier 1 也可能**：`multistep + oracle_method` 判 `(tier 1, 需人核)`）→ 进 dry-run 但**报告里显式标「golden 需人核」**；**1**（blocked / 词表不合规 / 缺件 / 账本自相矛盾 / 参数错误）→ **停在 CP-B**，把 `blocked_reason` 摆给用户，**不自动回落第二档**（R4）。然后 primary inline 跑 `gen_cases.py <spec> --dry-run`（plan-only 契约自检：用例预算落不落 `[S, pool_max]` 区间、dtype 分布、特殊场景（empty/scalar/边界/inf/nan）覆盖、被丢组合类、`case_id` 唯一性、per-case 种子确定性）。
+  ⚠ **能力边界（别当成旧 mock 自检的等价物）**：dry-run **不调 `golden_fn`、不落 `.npy`、不产任何裁决**；但它**会加载执行 `golden.py`**（取 `out_shape` 造规模预算）——所以对 golden 的覆盖是**半道**的：**缺文件 → 只记「未核」、不阻塞**；**文件在但坏了（语法错 / 顶层抛 / 必需导出不全）→ 当场抛、拦得住**。仍**验不了**：来源契约合不合规（那是 `check_golden.py` 的活）/ `oracle_source` 映射 / `validator` 判定链 / 三级门 / evidence 结构——**这些只有 CP-D 真机跑测才验得到**。（照本仓约定 golden.py 把 torch 延迟 import，故 dry-run 通常不拉 torch；某算子若在模块顶层 `import torch`，它会跟着 import。）
   **dry-run 报错或覆盖账本异常 → dispatch `acc-spec-extractor:refine_spec` 修 spec，再上真机。**
   ⚠ **不再跑 `--mode mock` 出裁决**：mock 的「NPU 输出」是 `golden.copy()`、精度按构造必过；C5 起它**物理上产不出** `acceptance.json`/`verdict.json`。
 - **CP-C runner**（真机路径、需 NPU）：dispatch `acc-runner-dev:gen_runner`（**先过 scope gate**；非 `experimental/math/<op>` aclnn 闭环 → `BLOCKED`/转 P3，不硬塞）→ `acc-runner-dev:verify_runner`。**未过验证不上真机、不产真机验收裁决**（runner 自证门，非算子 pass/fail 判定）。 先确认用户已开 NPU/VPN（ascend-a5 真 950 / a3 A2A3）。
@@ -66,4 +66,4 @@ CP 的逐步落法、脚本参数、门级判定，沉在 `acceptance-workflow` 
 - 私有主机名 / 远端路径经 `OPRUNWAY_*` 环境变量传入、**不写进仓**（仓里默认值是占位）；所有产物只落 CWD 下 `reports/<op>/`。
 - **副作用先确认**：真机 clone / build / 跑测、对外提交、删除覆盖，先列计划、点头再做。缺 NPU/VPN → 到 **CP-B（dry-run 契约自检）为止**，明确告知「**验收跑不了**，真机跑测待开 VPN」，**不假装跑了真机**、也**不拿 dry-run 冒充验收结论**（dry-run 只证用例计划自洽，不产任何 pass/fail）。
 - 换运行时（Codex/Antigravity 等）：只换本 agent 薄壳，`acc-common/` 脚本 + skills 的 `references/` 不动。
-- 相关：`skills/acceptance-workflow`（CP-A..E 状态机）、`agents/acc-spec-extractor`（CP-B）、`agents/acc-runner-dev`（CP-C）、`agents/acc-verify-rootcause`（CP-D/rootcause）、`commands/op-acceptance.md`（人手动触发同一流程）。
+- 相关：`skills/acceptance-workflow`（CP-A..E 状态机）、`agents/acc-spec-extractor`（CP-B）、`agents/acc-runner-dev`（CP-B 产 golden / CP-C 产 runner）、`agents/acc-verify-rootcause`（CP-D/rootcause）、`commands/op-acceptance.md`（人手动触发同一流程）。

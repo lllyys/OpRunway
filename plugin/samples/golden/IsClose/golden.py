@@ -45,11 +45,11 @@ GOLDEN_CONTRACT = {
 #   正文    「实现方式从原来比较二进制的实现方式，更改成和cpu一致的比较逻辑值的实现方式」
 #   功能要求「比较方式从二进制比较改为逻辑值比较」
 # 这是任务书**就真值口径本身**作出的指定（authorization.kind = oracle_method）→ 第一档，非回落。
-# ⚠ 诚实边界（2026-07-22）：这里的 tier 1 是**快照就位后的目标档位**，今天机器上核不出来——
-#   R12「任务书全文快照入库」属批 4、**尚未做**（全仓 find task_doc.snapshot* = 0 个）。在快照落地前
-#   `precision_policy.verify_authorization` 必返 False，`derive_golden_tier` 会按规则 ② 判
-#   **tier 4 · unverifiable_authorization**（假授权不降级、直接 blocked）。对照 Sign/Neg 走
-#   impl_reference → 规则 ⑦ → tier 2，今天就机器自洽。引文本身已逐字核对属实。
+# 快照已入库（2026-07-23 批 3）：同目录 `task_doc.snapshot.md`，sha256 即上面契约块那串。
+#   `python3 acc-common/check_golden.py IsClose` 实测 → **tier 1 · authorized · exit 0**，机器自洽。
+#   ⚠ 但 `verify_authorization` 只证「这句引文确实出自快照那几行」，**不证**「这句话算 oracle_method
+#   还是 impl_reference」——那一刀仍是 agent 自报、机器拦不住（Sign 的错源正在这一刀上）。
+#   别把这里的 tier 1 读成「授权已被完整验证」。对照 Sign/Neg 走 impl_reference → tier 2。
 GOLDEN_PROVENANCE = (
     "第一档（tier 1）·任务书指定真值口径"
     "（IsClose 任务书：「实现方式从原来比较二进制的实现方式，更改成和cpu一致的比较逻辑值的实现方式」；"

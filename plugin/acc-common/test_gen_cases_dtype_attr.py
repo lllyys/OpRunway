@@ -1374,7 +1374,7 @@ class GoldenCostBudgetTest(_FakeOpCase):
                    os.path.join(_HERE, "..", "samples", "specs", "isclose.spec.json")):
             sp = _spec(fx)
             args = _plan_args(sp)
-            out_shape_fn = GC.load_golden(sp["op"])[3]                # 4 份样例都不导出 → None
+            out_shape_fn = GC.load_golden(sp["op"]).out_shape         # 4 份样例都不导出 → None
             cost_fn = GC._make_cost_fn(args[1], out_shape_fn)
             e_on, m_on = GC._plan(*args, cost_fn=cost_fn)
             e_off, _m_off = GC._plan(*args, cost_fn=None)

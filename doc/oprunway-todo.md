@@ -107,9 +107,9 @@
 > ⚠ **结论本身是合格的**——判 `OUT_OF_SCOPE_P3`、明标 `verdict_type: NOT_pass_fail`、拒绝在无证据基础上判 pass/fail、探针落 scratchpad 跑完清理、**插件仓零改动**。
 > **洞全在编排层**，且 U1 是主脊。
 
-- [ ] **U1 · `op-acceptance` 派不出 subagent、也问不了用户（最贵；改动只一行）**：实测该 agent 130 条消息里工具只有 `Bash`×30 + `Write`×1 —— 设计里的三个 subagent（`acc-spec-extractor` / `acc-runner-dev` / `acc-verify-rootcause`）**一个没派**，`AskUserQuestion` 是**主循环替它问的**。根因在 `plugin/agents/op-acceptance.md:5` 的 `tools: Bash, Read, Write, Edit, Skill` —— **既无派 subagent 的工具、也无 `AskUserQuestion`**；frontmatter 的 `agents:` 声明**不授予工具**。→ CP-B/C/D 的分工、subagent 单轮约束、循环控制权**全是空的**，它只能自己读源码手搓。改法：`tools` 补齐，或直接删掉 `tools:` 让它继承全部。（对照：`skills:` 那条**有效**——`acceptance-workflow` 两次都自动注入了。）
-- [ ] **U2 · `fetch_source.py` 的 PR URL 正则太窄 + 失败太安静**：用户给 `/pull/2663`（GitHub 风格），脚本只认 `pulls|merge_requests`，**不报错**、产出空 `pr_facts` + 一条 note 就继续往下走。agent 是 `grep` 脚本源码才诊断出来、自己把 URL 规范化成 `/merge_requests/2663` 重跑的。→ 换个不肯读源码的 agent，对应校验就会带着空 `target_dir` 糊过去。改法：接受 `/pull/N` 形态；解析失败 **fail-loud**，不产空壳往下传。
-- [ ] **U3 · `samples/` 不随插件分发（预测命中）**：实测 agent 在 `plugin/` 下 `find samples/golden` 得 `No such file or directory`——`samples/` 在**仓根**，而 marketplace `source: "./plugin"`。→ `acc-runner/SKILL.md` 让 agent「照抄 `samples/runners/*.cpp`」指向的是不存在的文件，runner 生成会静默退化成凭空写（正撞 Equal 血教训）。改法：搬进 `plugin/`，或把骨架内联进 skill 参考文档。
+- [x] **U1 · 已修（2026-07-22，用户拍板取最小授权）**：`op-acceptance.md:5` 现为 `tools: Bash, Read, Write, Edit, Skill, AskUserQuestion, Agent(acc-spec-extractor), Agent(acc-runner-dev), Agent(acc-verify-rootcause)`——**显式补两个能力、不删 `tools:` 继承全部**（用户选的口径）。⚠ **仍欠真 session 复验**：改的是 frontmatter，「它真的会派 subagent 了」只有再跑一次干净 session 才算数，本地无从自证。原始诊断——实测该 agent 130 条消息里工具只有 `Bash`×30 + `Write`×1 —— 设计里的三个 subagent（`acc-spec-extractor` / `acc-runner-dev` / `acc-verify-rootcause`）**一个没派**，`AskUserQuestion` 是**主循环替它问的**。根因在 `plugin/agents/op-acceptance.md:5` 的 `tools: Bash, Read, Write, Edit, Skill` —— **既无派 subagent 的工具、也无 `AskUserQuestion`**；frontmatter 的 `agents:` 声明**不授予工具**。→ CP-B/C/D 的分工、subagent 单轮约束、循环控制权**全是空的**，它只能自己读源码手搓。改法：`tools` 补齐，或直接删掉 `tools:` 让它继承全部。（对照：`skills:` 那条**有效**——`acceptance-workflow` 两次都自动注入了。）
+- [x] **U2 · 已修（2026-07-22）**：`_PR_RE` 收成锚定正则（`^https?://gitcode\.com/<owner>/<repo>/(merge_requests|pulls?)/<num>` + 右界 `(?=[/?#]|$)`，`/pull/N` 形态已认），`_parse_pr_url` 在**任何网络调用与 makedirs 之前**调用，形态不认识 → **抛 ValueError fail-loud**、不落空壳 `pr_facts.json`。原始诊断——用户给 `/pull/2663`（GitHub 风格），脚本只认 `pulls|merge_requests`，**不报错**、产出空 `pr_facts` + 一条 note 就继续往下走。agent 是 `grep` 脚本源码才诊断出来、自己把 URL 规范化成 `/merge_requests/2663` 重跑的。→ 换个不肯读源码的 agent，对应校验就会带着空 `target_dir` 糊过去。改法：接受 `/pull/N` 形态；解析失败 **fail-loud**，不产空壳往下传。
+- [x] **U3 · 已修（2026-07-22）**：`samples/` 已由仓根迁入 `plugin/samples/`（仓根 `samples/` 已不存在），marketplace `source: "./plugin"` 下随插件分发。原始诊断——实测 agent 在 `plugin/` 下 `find samples/golden` 得 `No such file or directory`——`samples/` 在**仓根**，而 marketplace `source: "./plugin"`。→ `acc-runner/SKILL.md` 让 agent「照抄 `samples/runners/*.cpp`」指向的是不存在的文件，runner 生成会静默退化成凭空写（正撞 Equal 血教训）。改法：搬进 `plugin/`，或把骨架内联进 skill 参考文档。
 - [ ] **U4 · 「干净 session」隔离实为无效**：skill 注入时报的 base directory 是**活仓** `/…/OpRunway/plugin/skills/acceptance-workflow`（**不是** `~/.claude/plugins/cache/`）——marketplace 是 `directory` 源、`installLocation` 直指仓根。于是 agent 那 30 条 Bash 几乎全在读活仓源码。**连带**（⚠ 下句是**按本次实测推的**、未穷举验证）：`/plugin install` 的快照看来只决定**组件注册**（有哪些 agent/skill、frontmatter 长什么样）；至少对「按 base directory 解析的文件」和「agent 直接读的源码」这两类，读的是**活仓工作树** → 仓一旦切分支，这部分行为就可能与安装时的快照对不上。要真隔离得换非 `directory` 源。
 - [x] **U5 · 已修（2026-07-22），且 canon 那个「尚未实测」的开放问题有答案了**：
   原状是 `pr_facts.json` 得 `"base": "master", "head": "master"`、**全程无 sha**，兜底 `head→base→master→main`。
@@ -354,7 +354,7 @@
   - **U6b**：CP-B 自检从 `run_workflow --mode mock`（产伪造裁决）改成 `gen_cases.py --dry-run`（plan-only 契约自检）。改了 `acceptance-workflow/SKILL.md` 9 处 + `agents/op-acceptance.md` 5 处 + `commands/op-acceptance.md`（那句「默认 mock」在 U6a 落地后已成假话）。
   - ⚠ **散文里逐字写明了 dry-run 的能力边界**：它**不算 golden、不 import torch、不落 `.npy`** → 验不了 golden.py 在不在 / 来源契约 / `oracle_source` 映射 / validator 链 / 三级门。**CP-B 过了不代表用例链整体可用**，缺 golden 这类问题会漏到 CP-D 才炸，且 `refine_spec` 变不出 `golden.py`（真撞上要停下告知用户，别在 refine 循环里空转）。
   - **U6c/U6d 仍未做**（删 mock 通路）：连带 89 处测试引用 + `--defect`「证明门真会 fail」的自证路径要先定替代方案，**须用户拍板**。
-- [x] **4.2 · C1–C5 已落地（2026-07-22）**：shape_transform 通路打通（`out_shape` 4 元组契约 + attr `list[int]` +
+- [x] **4.2 · C1–C5 已落地（2026-07-22）**：shape_transform 通路打通（`out_shape` 契约——**当时是 4 元组，2026-07-23 已扩为 5 字段具名元组** `Golden(fn, source, provenance, out_shape, contract)`，别读作现行契约 —— 加 attr `list[int]` +
   spec `rank` 约束）· dtype 挂账 `passed_with_gaps` 全链接线（validator → 门 → `run_workflow`，**exit 2 挂人工、绝不回 0**）·
   mock 物理上产不出 `acceptance.json`（改产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）· `--defect` 出 CLI。
   验证：**a3 `oprunway_prov` 容器真 torch 2.10.0+cpu 跑 639 测全绿**（`OK (skipped=2)`，54.6s；
@@ -372,12 +372,12 @@
     ⚠ 往 evidence 里塞一个「实际输出形状」字段等于**拿声明跟自己比 = 假验证，比不验更坏**，故本仓有意不做。
     真要逐维验，须**让 runner 把自己实际的输出形状一并写出来**（runner 契约变更）。
     在那之前，`validator._EV_SHAPE_KEYS` 恒不触发是**如实反映现状**，不是缺陷。**别把现在说成「已逐维验形」。**
-  - [ ] `repo_adapter.main()` 缺 `refuse_reserved_out` 守卫（两条 CLI 出口口径不对称）；`run_catlass_mock` 不自报 `defect_injected`。
+  - [x] **两条 CLI 出口已对称（2026-07-23 复核确认已在位）**：`repo_adapter.main()` 落盘前过 `refuse_reserved_out(out_path)`（`repo_adapter.py:960`）+ `assert_non_acceptance(evidence, mode)`（`:965`），与 `catlass_adapter.main()` **共用同一份实现**而非各抄一份口径相近的；`run_catlass_mock` 自报 `envelope["defect_injected"]`（`catlass_adapter.py:566`）。
   - [x] **`dtypes: []` 产 0 条 case 已补 fail-closed**（2026-07-22）：连同「dtype 集重复 / 白名单」三道校验一起
     提进共享预检 `check_spec_capability`，**`gen_cases` 与 `_dry_run` 共用、且先于 `load_golden`**。
     ⚠ 原来 `_dry_run` **压根没这道闸** —— 而它现在正是 CP-B 的契约自检，空 dtype 集会安静地
     `emitted=0` 通过 CP-B、跑 0 条也显示「无失败」。这是活的「0 用例冒充验收」。
-  - [ ] rank≥5 当前必然 fail-closed（`_REG_SHAPES` 只到 4 维）——是能力边界不是 bug，但填了 rank=5 的算子跑不了。
+  - [x] **rank≥5 已通（2026-07-23）**：`_EXT_RANK_SHAPES = [(2,3,2,4,4), (1,2,3,3,3)]`，**仅当 spec 的 rank 约束点名了 `_REG_SHAPES` 覆盖不到的 rank 时才并入池**——不是无条件加进去，否则会漏进无 rank 约束的 elementwise 算子、静默改变它们的用例集（当场红过 4 个测试，有回归钉住）。实测：`upsample_nearest_3d.spec.json`（rank 5）`--dry-run` 出 21 条，用的正是 `1x2x3x3x3` / `2x3x2x4x4`。
   - [x] **`--perf-slow` 已下架**（2026-07-23）——与 `--defect` 同批理由：同类注入旋钮、只对非验收通路有意义；
     进程内 `run_workflow.run(..., perf_slow=[...])` 的回归能力**完整保留**，拿掉的只是 CLI 旋钮。
     ⚠ **这是施工 agent 自行拍的板，而本条原记为「未决」**——如实记账，**可推翻**：否决的话要连
@@ -490,7 +490,16 @@
   - **向后兼容**：`golden_tier=None`（未声明契约块）不参与门，裁决与批 5 前一致。
   - 裁决产物新增 `overall.golden_blocked` / `golden_needs_human_review` / `counts.golden_blocked`。
   - 新增 6 条测试（含优先级负例 + 编排层不落 FAIL(精度) 的源码级钉子）。
-- [ ] **批 6 · agent 产出侧**：`acc-runner-dev` 补产 `golden.py`（**R6 生成期选 torch/numpy 并写死进文件**）+ 放宽 runner 的 scope gate 覆盖面（从任务书推，守最高律令）。⚠ 连带：该 agent 的 scope gate 仍写 dtype 仅 {fp32,fp16}、`bf16→BLOCKED`，**已 stale**（bf16 真机已验收过），须同步。
+- [x] **批 6 · agent 产出侧（2026-07-23 落地）**：`acc-runner-dev` 加 `gen_golden` 模式，`golden.py` 有产出者了。
+  - 三处事实源原子同步（漏一处 `check_agent_frontmatter.py` 就 exit 1）：契约表 SUBAGENTS · `agents/acc-runner-dev.md` · `plugin/AGENTS.md`；连带接进 CP-B 两处编排（`skills/acceptance-workflow/SKILL.md` + `agents/op-acceptance.md`），**排在 `--dry-run` 之前**——理由是让 CP-B 在 dry-run 前就完成来源契约检查（`check_golden.py`）。⚠ **不能说成「dry-run 会因缺 golden fail-closed」**：真 `gen_cases()` 缺 golden 才 fail-closed，`_dry_run` 专门捕获「缺 golden」降级成「未核」照常出计划（文件在但坏了才抛）。
+  - 新增手册 `skills/acc-runner/references/golden-authoring.md`（两档链决策树 · 文件骨架 · `GOLDEN_CONTRACT` 逐字段 · 何时 BLOCKED）+ 确定性自检 `acc-common/check_golden.py`（退出码 0/2/1 三态，8 条单测钉死）。
+  - **runner 的 scope gate 明确不套到 `gen_golden`**（已在 agent 文本里写死）——golden 是纯 CPU Python、与算子仓布局无关；套上去正是「只支持 elementwise」那类窄化的来源。
+  - ⚠ **原条目里「scope gate 仍写 bf16→BLOCKED 已 stale」那句本身是错记**：实读该行，它早已改成「runner 侧有 bf16 分支，但真机 kernel 支持须逐算子确认」——**不是 stale，是有意的逐算子纪律**，本批未动它。
+  - ⚠ **「放宽 runner scope gate 覆盖面」未做**，仍是 P1 的独立一刀（见下条）。本批只解耦了 golden 与该 gate 的绑定。
+  - **审修门逮到 4 个 fail-open**（详见简表 07-23 条）：golden 里 `SystemExit(0)` 假绿（**引擎主路 `load_golden` 同洞、一并修**）· argparse 参数错误退 2 与「需人核」撞车 · 退出码按 tier 路由漏掉 `(tier 1, 需人核)` · 必需导出只查 `hasattr`。已全修 + 8 条回归。
+  - ⚠ **留下的诚实边界（已写进 `check_golden.py` docstring，不是遗漏）**：golden.py 与检查器**同进程**执行，`os._exit(0)` / C 层退出挡不住，要挡须换子进程隔离。**有意不做**——runner.cpp 本身就要编译并在 NPU 上跑，只给 golden 加沙箱是不对称的。
+  - 验证：本地 shim **743 绿** · **a3 真 torch 2.13.0 743/743 绿** · a3 上 `check_golden.py IsClose --load` exit 0、`SystemExit(0)` exit 1。
+- [ ] **批 6b · 放宽 runner 的 scope gate 覆盖面**（从批 6 拆出）：现仍只认 `experimental/math/<op>` + aclnn 两段式，非此一律 BLOCKED/转 P3。要从任务书推目标目录与接口形态（守「零硬编码 / 探测或问」的最高律令），配 `OPRUNWAY_TARGET_DIR` 等。⚠ 这是「支持所有任务书里出现过的算子类型」那条用户指令的**剩余大头**——批 6 只让 golden 侧不受它拖累，runner 侧仍窄。
 - [ ] **批 7 · 报告 + canon 收口**：报告展示 tier / provenance / 人核项；ADR 0011 与本轮裁定走 `capture → compile → review`（**现 ADR 0011 仍 `proposed`**）。
 - [ ] 贯穿项：产出物落点 `<ops_root>/<op>/`，与 `find_runner`/`load_golden` 的安全边界（**逐段拒软链**、`_check_id`、缺则 fail-closed）对齐。
 - [ ] **R8 记账**：catlass 通路（`catlass_adapter.py` 的内置 matmul golden）本轮 **out-of-scope**，两档链暂不覆盖它。
