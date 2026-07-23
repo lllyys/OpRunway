@@ -108,9 +108,9 @@ def _check_in_shape(shape):
         raise ValueError(
             f"UpsampleNearestExact2d: 输入含 0 维（shape={shape}）——任务书 :35 明写「不支持空Tensor」，"
             f"最近邻采样在空轴上无源像素可取、**无真值可言**，fail-closed。"
-            f"⚠ 这条用例是 gen_cases `_special_entries` **无条件**强制注入的（`empty`，opbase §1.4）："
-            f"引擎目前没有「本算子不支持空 Tensor」的表达位，spec 关不掉它 → 这是引擎侧缺口，"
-            f"不是 golden 该靠造一个假 golden 绕过去的东西")
+            f"⚠ 曾是引擎缺口，**已解（2026-07-23）**：gen_cases 有 `allow_empty_tensor` 开关，"
+            f"本 spec 已设 `allow_empty_tensor: false` → 不再注入 empty 用例、此 raise 在正常配置下不可达，"
+            f"留作纵深防御（防有人误开）。不靠造假 golden 绕过。")
     return shape
 
 
