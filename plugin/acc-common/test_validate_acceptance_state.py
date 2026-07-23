@@ -2,6 +2,7 @@
 
 跑: python3 -m unittest test_validate_acceptance_state -v   （在 acc-common/ 下）
 """
+import copy
 import json, os, subprocess, sys, tempfile, shutil, unittest
 import numpy as np
 import precision_policy
@@ -1171,6 +1172,168 @@ class GoldenTierGateTest(unittest.TestCase):
         line = next(l for l in inspect.getsource(W.run).splitlines() if "precision_ok =" in l)
         self.assertNotIn("blocked_golden_unauthorized", line,
                          "blocked 不得进精度放行集——真值来路不明时性能对比也没意义")
+
+
+class GoldenSpecAuthorityTest(unittest.TestCase):
+    """批 4（硬约束 #5：判据只从 spec 派生）。
+
+    背景实证（真管路，2026-07-23）：批 5 那道 BLOCKED 门吃的是 **caseset 的自声明**
+    `expected.golden_tier.blocked_reason`——改 caseset 一行（blocked→null）即绕过。
+    批 4 把判据锚拉回 `spec.golden`：validator 对账后**用 spec 重新派生**档位判门。
+
+    ⚠ **残余边界（documented，非 bug）**：`authorization_verified`（读快照逐字核的结果）
+       validator 纯函数复现不了，仍取 caseset。对账 `snapshot_sha` 把它钉到 spec，
+       残余篡改面收窄到「真快照在场 + sha 对 + 引文不逐字」。见 `test_residual_boundary_documented`。"""
+
+    _ANCHOR = {"source": "single_api", "method_kind": "torch_cpu",
+               "authorization": {"kind": "oracle_method"},
+               "taskdoc_snapshot": {"sha256": "a" * 64}}
+
+    def _triple(self, spec_golden=_ANCHOR, tier_extra=None):
+        """一份 tier-1 正例：spec.golden 锚 + caseset 与之对账一致 + 授权已核。"""
+        spec, cs, ev = _v_triple()
+        if spec_golden is not None:
+            spec["golden"] = spec_golden
+        tier = {"tier": 1, "requires_human_review": False, "blocked_reason": None,
+                "authorization_verified": True, "source": "single_api",
+                "method_kind": "torch_cpu", "authorization_kind": "oracle_method",
+                "snapshot_sha": "a" * 64}
+        if tier_extra:
+            tier.update(tier_extra)
+        cs["cases"][0]["expected"]["golden_tier"] = tier
+        return spec, cs, ev
+
+    def test_spec_authoritative_clean_pass(self):
+        spec, cs, ev = self._triple()
+        o = V.validate(spec, cs, ev)["overall"]
+        self.assertEqual(o["verdict"], "pass", o)
+        self.assertEqual(o["golden_judged_from"], "spec")
+
+    def test_tampering_blocked_reason_is_ineffective(self):
+        """**批 5 那个洞的回归**：真实档位是 blocked，攻击者把 caseset 的 blocked_reason 抹成 null。
+
+        批 5：门信 caseset → pass（绕过）。批 4：validator 从 spec 重新派生，看 av 是真实的
+        False → 仍 blocked。这条是整批的立身理由。"""
+        # 真实态：授权没核过（av=False）。攻击者只抹掉 blocked_reason，忘了 av（或够不着 av 的语义）。
+        spec, cs, ev = self._triple(tier_extra={
+            "authorization_verified": False, "blocked_reason": None,   # ← 攻击者抹掉了
+            "tier": 1, "requires_human_review": False})
+        o = V.validate(spec, cs, ev)["overall"]
+        self.assertEqual(o["verdict"], "blocked_golden_unauthorized",
+                         "改 blocked_reason 必须无效——validator 从 spec 重新派生")
+
+    def test_tampering_snapshot_sha_fails_closed(self):
+        """改 caseset 的 snapshot_sha 想指向别的快照 → 对账不符 → **fail-closed（归 blocked：判据链不可信）**。"""
+        spec, cs, ev = self._triple(tier_extra={"snapshot_sha": "d" * 64})
+        r = V.validate(spec, cs, ev)
+        self.assertEqual(r["overall"]["verdict"], "blocked_golden_unauthorized", r["overall"])
+        self.assertTrue(any("判据锚不符" in p for p in r["contract_problems"]))
+
+    def test_tampering_authorization_kind_fails_closed(self):
+        """改 caseset 的 authorization_kind（想换判档路径）→ 与 spec 锚不符 → fail-closed（归 blocked）。"""
+        spec, cs, ev = self._triple(tier_extra={"authorization_kind": "impl_reference"})
+        self.assertEqual(V.validate(spec, cs, ev)["overall"]["verdict"], "blocked_golden_unauthorized")
+
+    def test_real_unverified_authorization_blocks(self):
+        """正常路径：授权真没核过（av=False）→ 重新派生 tier 4 → blocked。"""
+        spec, cs, ev = self._triple(tier_extra={"authorization_verified": False})
+        self.assertEqual(V.validate(spec, cs, ev)["overall"]["verdict"],
+                         "blocked_golden_unauthorized")
+
+    def test_non_bool_av_treated_as_unverified(self):
+        """caseset 的 av 是非布尔（`"true"` / 1）→ 按未核实处理 + 记 problem（不 fail-open）。"""
+        spec, cs, ev = self._triple(tier_extra={"authorization_verified": "true"})
+        r = V.validate(spec, cs, ev)
+        self.assertEqual(r["overall"]["verdict"], "blocked_golden_unauthorized")
+        self.assertTrue(any("非布尔" in p for p in r["contract_problems"]))
+
+    def test_legacy_no_spec_golden_is_backward_compatible(self):
+        """无 spec.golden → 向后兼容（caseset 自声明），但 judged_from 显式标出 legacy。"""
+        spec, cs, ev = self._triple(spec_golden=None)
+        o = V.validate(spec, cs, ev)["overall"]
+        self.assertEqual(o["verdict"], "pass", o)
+        self.assertEqual(o["golden_judged_from"], "caseset_self_declared")
+
+    # ── codex + 红队独立逮到的 Critical + 一圈 fail-open（重写后回归钉死）────────────
+    def _blocking_spec(self):
+        """spec.golden = builtin_tbe（不可跑 → derive 恒 tier4 blocked，与 av 无关）。
+        诚实产物每条 case 都会带 blocked 的 golden_tier；攻击者想靠动 caseset 让门不触发。"""
+        spec, cs, ev = self._triple(spec_golden={
+            "source": "single_api", "method_kind": "builtin_tbe",
+            "authorization": {"kind": "impl_reference"}})
+        cs["cases"][0]["expected"]["golden_tier"] = {
+            "tier": 4, "requires_human_review": True, "blocked_reason": "method_unavailable",
+            "authorization_verified": False, "source": "single_api", "method_kind": "builtin_tbe",
+            "authorization_kind": "impl_reference", "snapshot_sha": None}
+        return spec, cs, ev
+
+    def test_deleting_golden_tier_when_spec_present_blocks(self):
+        """⭐ **codex Critical + 红队 real-bypass 的回归**：spec.golden 说本算子有 golden 判据（且恒 blocked），
+        攻击者删掉 / 置空 caseset 的 golden_tier 想让收集空集合、门整个不触发。重写后必须 blocked。"""
+        for label, mut in (("删除", lambda e: e.pop("golden_tier")),
+                           ("置 None", lambda e: e.__setitem__("golden_tier", None)),
+                           ("置字符串", lambda e: e.__setitem__("golden_tier", "n/a")),
+                           ("置 0", lambda e: e.__setitem__("golden_tier", 0)),
+                           ("置 []", lambda e: e.__setitem__("golden_tier", []))):
+            spec, cs, ev = self._blocking_spec()
+            mut(cs["cases"][0]["expected"])
+            o = V.validate(spec, cs, ev)["overall"]
+            self.assertEqual(o["verdict"], "blocked_golden_unauthorized",
+                             f"{label} golden_tier 必须 fail-closed，不得让门静默不触发")
+            self.assertNotEqual(o["golden_judged_from"], "caseset_self_declared",
+                                f"{label}：spec.golden 在场，不该退成 legacy")
+
+    def test_malformed_spec_golden_fails_closed(self):
+        """spec.golden 键在场但畸形（None / 非 dict / 词表错 / oracle 缺合法 sha）→ blocked，**不降级信 caseset**。"""
+        for sg in (None, "oops", [], {}, {"source": "bad", "method_kind": "torch_cpu",
+                                          "authorization": {"kind": "oracle_method"}},
+                   {"source": "single_api", "method_kind": "torch_cpu",
+                    "authorization": {"kind": "oracle_method"}, "taskdoc_snapshot": {"sha256": "tooshort"}}):
+            spec, cs, ev = self._triple()
+            spec["golden"] = sg                       # 键在、值畸形（区别于「不设键」的 legacy）
+            o = V.validate(spec, cs, ev)["overall"]
+            self.assertEqual(o["verdict"], "blocked_golden_unauthorized", f"spec.golden={sg!r} 应 fail-closed")
+
+    def test_inconsistent_av_across_cases_blocks(self):
+        """多 case 声明同一 golden 但 authorization_verified 一真一假 → 核验结果只能有一个真相 → fail-closed。
+        （codex High #2：pre-reconcile 去重会按顺序丢掉其中一个，让裁决受攻击者控制的 case 顺序影响。）"""
+        spec, cs, ev = self._triple()
+        c0 = cs["cases"][0]
+        c1 = copy.deepcopy(c0); c1["id"] = "c1"
+        c1["expected"]["golden_tier"] = dict(c0["expected"]["golden_tier"], authorization_verified=False)
+        cs["cases"].append(c1)
+        ev["evidence"].append(dict(ev["evidence"][0], case_id="c1"))
+        self.assertEqual(V.validate(spec, cs, ev)["overall"]["verdict"], "blocked_golden_unauthorized")
+
+    def test_validate_never_raises_on_malformed_golden(self):
+        """`validate()` 是 total function：畸形 golden（非 dict authorization/taskdoc、不可哈希 tier 字段）
+        一律返回裁决、绝不抛异常逃出（codex Medium #5/#6：AttributeError/TypeError 曾直接逃出 validate）。"""
+        cases = [
+            lambda s, c, e: s.__setitem__("golden", {"source": "single_api", "method_kind": "torch_cpu",
+                "authorization": "notdict", "taskdoc_snapshot": {"sha256": "a" * 64}}),
+            lambda s, c, e: s.__setitem__("golden", {"source": "single_api", "method_kind": "torch_cpu",
+                "authorization": {"kind": "oracle_method"}, "taskdoc_snapshot": "notdict"}),
+            lambda s, c, e: c["cases"][0]["expected"]["golden_tier"].__setitem__("tier", []),
+            lambda s, c, e: c["cases"][0]["expected"]["golden_tier"].__setitem__("blocked_reason", {"x": 1}),
+        ]
+        for i, mut in enumerate(cases):
+            spec, cs, ev = self._triple()
+            mut(spec, cs, ev)
+            try:
+                V.validate(spec, cs, ev)
+            except Exception as ex:                   # noqa: BLE001 — 正是本测试要证的
+                self.fail(f"case {i}: validate 抛了 {type(ex).__name__}: {ex}（承诺 total，不得逃逸）")
+
+    def test_residual_boundary_documented(self):
+        """**残余边界的显式记录**：av=True + snapshot_sha 与 spec 一致 → pass。
+
+        这是 documented 边界不是遗漏：validator 纯函数无法复现「读快照逐字核引文」，
+        攻击者若能把 av 改 True **且** snapshot_sha 保持与 spec 一致（要求真快照在场、sha 对），
+        就钻进了「引文不逐字」那条窄缝。把它钉成测试，是为了让任何人想收窄它时，
+        这条 assert 会提醒他边界在哪、以及为什么当前停在这。"""
+        spec, cs, ev = self._triple()   # av=True、sha 与 spec 一致
+        self.assertEqual(V.validate(spec, cs, ev)["overall"]["verdict"], "pass",
+                         "此为 documented 残余边界；要收窄须让 validator 读快照（口径 B）或引签名")
 
 
 class ScaledCasesSurfacedInVerdictTest(unittest.TestCase):

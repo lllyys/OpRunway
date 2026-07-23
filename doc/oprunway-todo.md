@@ -474,7 +474,17 @@
     故内容不一致 **fail-loud**，报错同时给两个指纹 + 处置方式（删了重来**并复核 cite 行号**，改版后行号极可能移位）。
   - **端到端实证**：有快照 + 真引文 → 核过、**tier 1**；掉包快照 → tier 4 blocked；编造引文 → 拒。
   - 新增 7 条测试（含 CRLF + 尾行无换行 + 中文的字节保真用例）。
-- [ ] **批 4 · spec 侧承载**：`acc-spec` 产出 golden 来源声明 + 两档链判定 + 人核标记，写进 spec（判定权威只在 spec，硬约束 #5）。
+- [x] **批 4 · 判据锚拉回 spec（2026-07-23 · 口径 C，用户拍板）**：判据只从 spec 派生，caseset 自声明只作待核对断言（硬约束 #5）。
+  - ⭐ **动因（真管路实证）**：批 5 那道 BLOCKED 门吃的是 **caseset 的 `expected.golden_tier.blocked_reason`**——改 `caseset.json` 一行（blocked→null）即绕过。逐步复现：真 tier1 `pass` → caseset 改 blocked → `blocked_golden_unauthorized` → 再从 blocked 改回冒充 tier2 → `pass`。门吃生成物的自声明，这正是 #5 存在的理由。
+  - **⚠ 发现口径 C 的 preview（纯对账 authorization_kind + snapshot_sha）有洞**：门实际吃 `blocked_reason`/`requires_human_review`，攻击者只改 `blocked_reason=null`、不动对账字段，纯对账照样过、门照样失效。故做的是**更强版**：validator 对账后**用 spec 锚重新 `derive_golden_tier`**，判门用重新算的、不信 caseset 的 blocked_reason。
+  - **落地**：`spec.golden` 判据锚（`source`/`method_kind`/`authorization.kind`/`taskdoc_snapshot.sha256`）· `gen_cases._derive_tier` 加 `snapshot_sha` 随 case 走 · `validator._reconcile_golden`（对账不符 fail-closed + 重新派生 + `golden_judged_from` 显式进裁决）。与 `golden.py` 的 `GOLDEN_CONTRACT` 是**双源交叉核验**（同硬约束 #4 模式），不一致 fail-closed。
+  - **行为矩阵**（真管路 IsClose）：spec.golden 在场原始 `pass` · 改 blocked_reason **无效**（重新派生 → 仍 blocked）· 改 snapshot_sha `fail` · 改 authorization_kind `fail` · av=False 真实态 `blocked` · 无 spec.golden `pass`+`caseset_self_declared`（向后兼容但判据来源显式标出）。
+  - **⚠ 残余边界（documented，非 bug，同 check_golden 的 os._exit）**：`authorization_verified`（读快照逐字核引文的结果）validator 纯函数复现不了，仍取 caseset。对账 `snapshot_sha` 把它钉到 spec，残余篡改面收窄到「真快照在场 + sha 对 + 引文不逐字」那一窄缝（授权本不实的常见情形无真快照 → 撞 snapshot_sha 对账 fail）。要消除须让 validator 读快照（口径 B）或引签名——不做，因跑测机 ≠ 裁决机时拿不到快照。钉成 `test_residual_boundary_documented`。
+  - 🔴 **审修门（ultracode 红队 8 角度 + codex 代码审）各自独立逮到同一个 Critical**：第一版 `_reconcile_golden` 遍历 caseset 收集的 tiers，**spec.golden 在场时删掉 / 置空 caseset 的 golden_tier → 收集空集合 → 门整个不触发 → 静默 pass，还谎标 `judged_from="spec"`**。两条独立对抗审查指向同一洞 = 高置信。加上一圈 fail-open：畸形 spec.golden 当 legacy 放行 · oracle 缺 sha 的 None==None 假通过 · 去重丢 av · 非 dict authorization/不可哈希 tier 抛异常逃出 `validate()`。
+  - **重写（codex 的架构建议对）**：**spec.golden 是判据权威，caseset 只用于「逐项核对 + 供 av」，从不决定 blocked**。三路径：无 golden 键=legacy · 有键但畸形=fail-closed blocked · 合法=从 spec 派生权威档（每 case 必带 dict golden_tier 否则删改信号 blocked、anchor 四字段对账、av 严格布尔且全体一致、有任何 problem 派生非 blocked 则强制 blocked）。对账不符归 **blocked**（判据链不可信，盖过 fail，符合批 5「真值来路不明盖过一切」）。全程 isinstance 守护、`validate()` 保持 total（异常不逃逸）。
+  - **重写后攻击矩阵 11 场景全 fail-closed**（删 golden_tier/None/非dict/spec.golden畸形/缺sha/非dict authorization/不可哈希 tier 全 blocked 且不崩；改 blocked_reason 无效；legacy 兼容；残余边界 documented）。
+  - **acc-spec 侧**（agent 行为，本地测不了、需真 session 复验，同 U1）：`acc-spec:extract_spec` 加产 `spec.golden`（两档链独立判，与 golden.py 双源）；`spec.golden.taskdoc_snapshot.sha256` 有**顺序依赖**（需快照先入库，否则留空记 gap 待 gen_golden 回填，**别编 sha**）。
+  - 验证：本地 shim 751 绿 · 新增 8 条 `GoldenSpecAuthorityTest`（含批 5 洞的回归 + 残余边界钉子）。<a3 待补>
 - [x] **批 5 已落地（2026-07-23）· 门侧接线：tier 真正参与裁决路由**
   ⭐ **核心判断（这条比实现更重要）**：golden 授权核不实 **≠ 精度 fail，也 ≠ needs_review**。
   它意味着**这份真值本身来路不明** → 基于它的每一条精度判定都不成立。

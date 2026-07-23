@@ -852,6 +852,14 @@ def _bf16_bitexact(spec, op):
     return v
 
 
+def _snapshot_sha(contract):
+    """从契约块取规范化的快照 sha（供 validator 对账 spec.golden）。taskdoc_snapshot 非 dict → None；
+    SHA `strip().lower()` 对齐 `precision_policy.verify_authorization` 与 `validator._norm_sha` 的口径。"""
+    snap = contract.get("taskdoc_snapshot") if isinstance(contract, dict) else None
+    v = snap.get("sha256") if isinstance(snap, dict) else None
+    return v.strip().lower() if isinstance(v, str) else None
+
+
 def _derive_tier(op, contract):
     """据 golden 契约块派生档位，返回可直接写进 caseset 的 dict（无契约 → None）。
 
@@ -873,7 +881,12 @@ def _derive_tier(op, contract):
             "authorization_verified": bool(ok),
             "authorization_note": why,          # 核不过时的准确原因，别只留一个 False
             "source": contract.get("source"), "method_kind": contract.get("method_kind"),
-            "authorization_kind": (contract.get("authorization") or {}).get("kind")}
+            "authorization_kind": (contract.get("authorization") or {}).get("kind"),
+            # 批 4：快照指纹随 case 走，供 validator 对账 spec 的判据锚（硬约束 #5）——
+            # 「核的是哪份快照」被钉死到 spec.golden.taskdoc_snapshot.sha256，改 caseset 一行绕不过去。
+            # ⚠ taskdoc_snapshot 可能非 dict（validate_golden_contract 对 impl_reference/none 不约束它，
+            #   codex 审 Medium #7）→ 类型守护；SHA 规范化（strip+lower）对齐 validator/verify_authorization 的对账口径。
+            "snapshot_sha": _snapshot_sha(contract)}
 
 
 def _allow_empty_tensor(spec):

@@ -1797,6 +1797,31 @@ class GoldenContractTierTest(_FakeOpCase):
         cs = GC.gen_cases(_fake_spec("FakeTier2", case_target=3), self.work())
         t = cs["cases"][0]["expected"]["golden_tier"]
         self.assertEqual((t["tier"], t["requires_human_review"], t["blocked_reason"]), (2, False, None))
+        self.assertIsNone(t["snapshot_sha"], "impl_reference 无快照 → snapshot_sha 应为 None")
+
+    def test_snapshot_sha_emitted_normalized_for_validator_reconcile(self):
+        """批 4：`golden_tier.snapshot_sha` 随 case 走、且**规范化**（strip+lower），供 validator 对账 spec.golden。
+
+        大写 / 带空格的合法 SHA 若原样发射，会与 spec 侧规范化后的 sha 对账假 fail（codex Low #8）。"""
+        import hashlib
+        snap = "第二行 授权句".encode("utf-8")
+        sha = hashlib.sha256(snap).hexdigest()
+        self._place_with_contract("FakeShaNorm", {
+            "source": "single_api", "method_kind": "torch_cpu",
+            "authorization": {"kind": "oracle_method", "cite": "task_doc.snapshot.md:1", "quote": "授权句"},
+            "taskdoc_snapshot": {"sha256": f"  {sha.upper()}  "}},   # 故意大写 + 外围空格
+            snapshot=snap)
+        t = GC.gen_cases(_fake_spec("FakeShaNorm", case_target=3), self.work())["cases"][0]["expected"]["golden_tier"]
+        self.assertEqual(t["snapshot_sha"], sha, "发射的 snapshot_sha 必须已规范化为小写无空格")
+
+    def test_non_dict_taskdoc_snapshot_does_not_crash_derive(self):
+        """`taskdoc_snapshot` 非 dict（validate_golden_contract 对 impl_reference 不约束它）→ `_derive_tier`
+        不得崩（codex Medium #7：`(x or {}).get` 对 list 抛 AttributeError）。snapshot_sha 落 None。"""
+        self._place_with_contract("FakeSnapList", {
+            "source": "single_api", "method_kind": "torch_cpu",
+            "authorization": {"kind": "impl_reference"}, "taskdoc_snapshot": [1, 2]})
+        t = GC.gen_cases(_fake_spec("FakeSnapList", case_target=3), self.work())["cases"][0]["expected"]["golden_tier"]
+        self.assertIsNone(t["snapshot_sha"])
 
     def test_claimed_authorization_without_snapshot_is_tier4_not_silently_downgraded(self):
         """声称有任务书授权、却核不实 → **tier 4 blocked**，不降级到 2/3 照跑。

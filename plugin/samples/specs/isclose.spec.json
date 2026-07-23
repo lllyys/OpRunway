@@ -5,6 +5,13 @@
   "reference": {"type": "tbe", "ref": "内置 aclnnIsClose TBE"},
   "change": {"kind": "semantic", "note": "二进制比较→逻辑值比较（对齐 CPU）"},
   "params_source": "derived_from_reference",
+  "golden": {
+    "_note": "批 4·判据锚（硬约束 #5：判据只从 spec 派生）。acc-spec 据任务书独立判这几个字段；validator 拿它对账 caseset 的自声明并重新派生档位。与 golden.py 的 GOLDEN_CONTRACT 是两个独立源，对账不一致即 fail-closed（双源交叉核验）。",
+    "source": "single_api",
+    "method_kind": "torch_cpu",
+    "authorization": {"kind": "oracle_method"},
+    "taskdoc_snapshot": {"sha256": "04f27afdf9a1435b44e33c8e121f6224261d29bbfc597db7bf95c17e24aa35e9"}
+  },
   "params": [
     {"name": "self",  "io": "in",  "dtype": ["float32", "float16", "bfloat16"], "noncontiguous": true},
     {"name": "other", "io": "in",  "dtype": ["float32", "float16", "bfloat16"], "noncontiguous": true},

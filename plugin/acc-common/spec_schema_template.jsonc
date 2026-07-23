@@ -60,5 +60,21 @@
       "abs_gap_us_within": "<number：绝对差在该值内才算例外>"
     }
   },
-  "task_pr_gaps": ["<所有缺口/矛盾/推断，推断项标 (推断)；无则空数组>"]
+  "task_pr_gaps": ["<所有缺口/矛盾/推断，推断项标 (推断)；无则空数组>"],
+  // 批 4 · golden 判据锚（**判据只从 spec 派生**，硬约束 #5）。可选但**正式验收强烈建议写**：
+  //   不写 → validator 走 legacy（信 caseset 自声明），裁决里 golden_judged_from="caseset_self_declared"
+  //          （= 判据没从 spec 派生这件事被显式标出，不是隐形的洞，但不如 spec 权威）。
+  //   写了 → validator 对账 caseset 的 golden_tier 与本锚逐字段一致（不符 fail-closed），并**用本锚重新派生档位判门**，
+  //          不信 caseset 自声明的 blocked_reason —— 改 caseset 一行绕不过 golden 门。
+  // ⚠ 这是与 golden.py 的 GOLDEN_CONTRACT **平行的独立源**：acc-spec 据任务书独立判、gen_golden 在 golden.py 独立判，
+  //   validator 对账两源；不一致即「有人动过手脚 / 两处判档不一致」→ fail-closed（双源交叉核验，同硬约束 #4 的模式）。
+  // ⚠ 字段取值全部对齐 precision_policy 的受控词表；authorization.kind 与 source 的判定同 gen_golden（手册 golden-authoring.md §1）。
+  //   snapshot_sha 只在 authorization.kind ∈ {oracle_method, formula} 时有（= fetch_source --snapshot-into 打印的那串）；
+  //   impl_reference / none 无快照 → 省略 taskdoc_snapshot。
+  "golden": {
+    "source": "<single_api | multistep | external_method | needs_user>",
+    "method_kind": "<torch_cpu | numpy_cpu | builtin_tbe | gpu_lib | other_external | needs_user>",
+    "authorization": {"kind": "<oracle_method | formula | impl_reference | none>"},
+    "taskdoc_snapshot": {"sha256": "<仅 oracle_method/formula：任务书快照 sha256；其余省略此键>"}
+  }
 }

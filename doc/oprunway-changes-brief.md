@@ -20,6 +20,16 @@
 
 ## 2026-07-23
 
+- **批 4：golden 判据锚拉回 spec（判据只从 spec 派生·硬约束 #5）——ultracode 红队 + codex 联手把它锤实**
+  - **动因（真管路实证）**：批 5 那道 BLOCKED 门吃的是 **caseset 的自声明** `expected.golden_tier.blocked_reason`——改 `caseset.json` 一行（blocked→null）即绕过。逐步复现：真 tier1 `pass` → 改 blocked → `blocked` → 再改回 tier2 → `pass`。
+  - **口径 C 的 preview 有洞（实证发现）**：门吃 `blocked_reason`，纯对账 authorization_kind/snapshot_sha 拦不住「只改 blocked_reason」。故做**更强版**：validator 对账后**用 spec 锚重新 `derive_golden_tier`**，不信 caseset 的 blocked_reason。
+  - 🔴 **审修门抓到我第一版的 Critical（红队 8 角度 + codex 代码审各自独立命中同一个）**：spec.golden 在场时，攻击者**删掉/置空 caseset 的 golden_tier** → validator 收集空集合 → 门整个不触发 → **静默 pass，还谎标 `judged_from="spec"`**。两条独立对抗审查指向同一洞，是最强的可信信号。连带一圈 fail-open：畸形 spec.golden 当 legacy 放行 · oracle 缺 sha 的 `None==None` 假通过 · pre-reconcile 去重按顺序丢掉 blocked 的 case · 非 dict authorization / 不可哈希 tier 字段抛异常**逃出** `validate()`（它本该是 total function）。
+  - **重写（codex 的架构建议对）**：**spec.golden 是判据权威，caseset 只用于「逐项核对 + 供 authorization_verified」，从不决定 blocked 与否**。三路径：无 golden 键 = legacy（向后兼容）· 有键但畸形 = fail-closed blocked（不降级信 caseset）· 合法 = 从 spec 派生权威档（**每条 case 必带 dict golden_tier**，否则就是删改信号 → blocked；anchor 四字段对账；av 严格布尔且全体一致；有任何 problem 而派生非 blocked → 强制 blocked）。对账不符归 **blocked**（判据链不可信，盖过 fail——符合批 5「真值来路不明盖过一切」）。全程 `isinstance` 守护，`validate()` 恢复 total（异常不逃逸）。
+  - **重写后攻击矩阵 11 场景全 fail-closed**（删/None/非dict golden_tier · spec.golden 畸形 · 缺 sha · 非 dict authorization · 不可哈希 tier 全 blocked 且不崩；改 blocked_reason 无效；legacy 兼容；残余边界 documented）。
+  - **⚠ 残余边界（documented，同 check_golden 的 os._exit）**：`authorization_verified`（读快照逐字核引文的结果）validator 纯函数复现不了，仍取 caseset。对账 `snapshot_sha` 把它钉到 spec，收窄到「真快照在场 + sha 对 + 引文不逐字」那一窄缝。钉成 `test_residual_boundary_documented`。
+  - **红队规模**：16 agent（8 找 + 8 对抗复核）、~160 万 token、14 分钟。**这种「改一行绕过安全门」的洞，单靠自己想想不全——多个独立 agent 真跑 PoC 才逼出来。**
+  - 验证：本地 shim 757 绿 · **a3 真 torch 2.13.0 757/757 绿** · 新增 15 条测试（Critical 回归 + 一圈 fail-open + snapshot_sha 规范化 + validate 不抛）。
+
 - **批 6：`golden.py` 终于有产出者了** —— 给 `acc-runner-dev` 加 `gen_golden` 模式（据任务书产 `<ops_root>/<op>/golden.py`），并接进 CP-B、排在 `--dry-run` 之前。
   - **补的是流程空缺、不是能力空缺**：Pdist 首跑时 agent 自己手写了一份 golden.py 就跑通了 dry-run——它会写，只是**流程里没人被指派去写**。`gen_cases` 的报错文本和 `acc-casegen` skill 都写着「由 acc-spec/acc-runner-dev 产」，而那两个 agent 的 dispatch 表里都没有这件事，指到了空处。
   - **为什么归 `acc-runner-dev` 而不是 `acc-spec-extractor`**：golden.py 和 runner.cpp 都是**会被 import/编译执行的代码**、同信任级，都靠「锚定权威来源不猜」这条同款纪律守；acc-spec 产的是 JSON 数据、且带禁读纪律。
