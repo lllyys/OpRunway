@@ -20,6 +20,12 @@
 
 ## 2026-07-23
 
+- **批 6b 期2 C ✅（gen_cases 层）：3 个 shape_transform 样例真 torch 全通**
+  - a3 真 torch:Im2col 50 case · UpsampleNearestExact2d 21 · UpsampleNearest3d 21,`out_shape_source=golden.out_shape` 对账全过。
+  - ⭐ **旧记「upsample 两者跑不通」是 stale**:这个 session 的批 4/6 改动(rank≥5 通 + gen_cases 修)已让它们通,只是 README 没更新。已更正。
+  - im2col 本地 torch shim 炸空 reshape = **shim 的 numpy unfold 对空输入局限、非真 bug**(golden_fn 用真 torch `F.unfold`,a3 真 torch 通)。
+  - 真机 NPU 验收(runner 编译跑测)另需 a3 build,标注卡点。
+
 - **批 6b B-core 落地:接口探测器 + 18 算子据实核放行清单(clone 4 仓 + 两轮 fan-out)**
   - `fetch_source` 加 `_detect_interface_kind`:据算子自带 example 机器判 5 类接口形态,**从 test_aclnn 正则抽真实入口函数名**(含 V3/V5 后缀——解决 Equal 血教训 + transformer `aclnnPromptFlashAttentionV3`)。gate 第一闸改机器探测驱动。10 单测 + 真实 example 复验。
   - clone ops-nn/transformer/collections/solver 4 仓(浅克隆、gitignore)。两轮 fan-out(4 路分类 + 18 算子逐个双源核)。**期1-A 可放行 6 个**(elu/foreach_abs/foreach_acos/binary_cross_entropy/interleave_rope/apply_rotary_pos_emb,逐算子双源核过、不外推)。
