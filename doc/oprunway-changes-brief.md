@@ -20,6 +20,13 @@
 
 ## 2026-07-23
 
+- **批 6b 真机验收 ✅:Elu + Silu 在真 A5-950 NPU 上坐实(Elu=B-core 放行清单首个 · Silu=本轮新加验证、不在放行 6 之列)**
+  - **Elu**(3 float 属性 alpha/scale/inputScale):build elu opp(`--soc ascend950`)成 + 自造 runner 编成 + 20 例真跑,**18/18 非空例 bad_count=0**(含 inf/-inf/nan/边界全1维/网格等特殊例);2 例空张量 `metrics={}` = 无元素可比的 vacuous、**非精度失配**(runner 本有空张量守卫)。
+  - **Silu**(0 属性,不同 runner 形):目录 `activation/swish`(aclnnSilu 内部派发 Swish kernel scale=1),`--ops swish` 构建靶点**一次过、没撞坑**;同样 **18/18 非空例 bad_count=0** + 2 空 vacuous。
+  - ⭐ **两形态都过 = 通路不只对带属性算子成立**:Elu 证「带属性 runner」、Silu 证「零属性 runner + aclnn 派发到别名 kernel(Silu→Swish)」。批 6b 从「gen_cases 层通」升级到「真 NPU 端到端通」。
+  - Silu/Sigmoid 由 **ultracode fanout 并行备料**(golden.py=torch 单 API→tier2 + runner 拷 Elu 模板改四槽 + 本地 check_golden 退出码 0),趁 Elu 真机构建时准备、完了流水线接验、不空等。Sigmoid 已备未跑(单张量零属性、同 950,可续)。Gelu/FastGelu 被 safety classifier 瞬时误挡未产,非必要未追。
+  - ⚠ 真机产物(golden/runner/spec/caseset)在 scratchpad、**不入库**(测试产物);本批无代码改动、不涉提交。硬约束遵守:全程在 a5 服务器容器 `oprunway_elu_verify` 里 build/跑、**mac 零操作**;torch/torch_npu 用 pta 镜像自带(见 memory `realmachine-torch-npu-and-server-only`)。
+
 - **批 6b 期2 C ✅（gen_cases 层）：3 个 shape_transform 样例真 torch 全通**
   - a3 真 torch:Im2col 50 case · UpsampleNearestExact2d 21 · UpsampleNearest3d 21,`out_shape_source=golden.out_shape` 对账全过。
   - ⭐ **旧记「upsample 两者跑不通」是 stale**:这个 session 的批 4/6 改动(rank≥5 通 + gen_cases 修)已让它们通,只是 README 没更新。已更正。
