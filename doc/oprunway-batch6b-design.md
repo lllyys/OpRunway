@@ -74,4 +74,18 @@ catlass(独立 `catlass_adapter`/`CATLASS_MODES`,两条通路别混)· bincount 
 
 ---
 
+## 7. B-core 落地结果（2026-07-23，clone 4 仓 + 大 fan-out 据实核）
+
+**接口探测器**（`fetch_source._detect_interface_kind`）落地：据算子自带 example 机器判 `interface_kind`，从 test_aclnn 正则抽**真实入口函数名**（含 V3/V5 后缀,解决 Equal 血教训 + transformer `aclnnPromptFlashAttentionV3`）。5 类：`aclnn_2stage` / `aclnn_2stage_distributed`（HCCL 多卡）/ `geir`（GE IR 图引擎）/ `library_header`（handle 库/头文件库）/ `unknown`（fail-closed）。gate 第一闸改机器探测驱动（acc-runner-dev scope gate）。
+
+**18 算子逐个双源核验**（fan-out workflow wf_873486e1）→ 期1-A **可放行 6 个**（逐算子双源核过、不外推）：
+
+| 可放行(期1-A) | BLOCKED-phase3(golden 重) | BLOCKED-另立(接口非单卡 aclnn) |
+|---|---|---|
+| elu · foreach_abs · foreach_acos · binary_cross_entropy(ops-nn) · interleave_rope · apply_rotary_pos_emb(ops-transformer) | adaptive_avg_pool2d · add_layer_norm · ada_layer_norm_quant · cross_entropy_loss · block_sparse_attention · moe_finalize_routing · grouped_matmul | celu · bnll(geir) · all_gather_matmul(HCCL) · ops-solver(aclsolver 句柄库) · ops-collections(头文件模板库) |
+
+**⚠ 探测器实测 100% 正确**：workflow synthesis 报「16/18、celu/bnll 误判」——但那是**我 workflow 里预填 `det=aclnn_2stage` 的假象**（对 geir 算子乐观了）；**实测探测器对 celu/bnll 判 geir/unknown（fail-closed 正确，不误放行）**。B-core 的真实价值 = 逐算子核**证实探测器不会把非 aclnn 误判成 aclnn**（finding 逐条实证、不照单全收）。据此增强：显式识别 geir 类别（比笼统 unknown 更利下游归类）。
+
+**关键真相**：**ops-nn 不是清一色 aclnn**——混有 geir 图引擎算子（celu/bnll 用 `test_geir_*.cpp`）；ops-transformer 基建同款但主导 bf16/量化/分布式（多数卡 dtype/golden/单卡子闸）。所以放行是**逐算子**的，绝不能按仓外推。
+
 > **一句话总结**:批 6b 不是「改真机大工程」,是「**把几张建在过时散文上的 gate 表对齐到已经泛化的引擎 + 接回一个断头配置**」。省力、可逆、引擎几乎不动。真正大的(dtype 谱、多输入独立形状、双实现、catlass)都显式分期到期3或排除本批,各配真机证据。

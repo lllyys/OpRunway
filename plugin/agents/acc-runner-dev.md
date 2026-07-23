@@ -37,6 +37,20 @@ tools: Bash, Read, Write, Edit, Skill
 
 > ⚠ 不在范围 = **诚实返回 BLOCKED + 原因 + 建议（转 P3 / 扩 adapter）**，交回 orchestrator，绝不强行生成一个跑不起来的 runner。
 
+### 接口形态机器探测（批 6b B-core · scope gate 第一闸）
+
+scope gate 的**第一闸**改由 `pr_facts.interface_kind` 驱动——`fetch_source._detect_interface_kind` **据算子自带 example 机器探测**（规则据实 clone ops-nn/transformer/collections/solver 4 仓分类得出，18 算子逐个双源核过）：
+
+| `pr_facts.interface_kind` | 处置 |
+|---|---|
+| `aclnn_2stage` | ✅ **接口在通路内**——仍须过子闸：dtype∈{fp32,fp16} · 单卡（无 HCCL）· golden 能 numpy 搭（elementwise/简单）· 逐算子双源核验（适配硬件↔`AddConfig`，**不外推**）。⚠ **runner 锚定用 `pr_facts.aclnn_entry`**（从 test_aclnn 正则抽的真实函数名、含 `V3`/`V5` 后缀）——**别按目录名派生 `aclnn<Op>`**（Equal 血教训 + transformer `aclnnPromptFlashAttentionV3`/`aclnnGroupedMatmulV5` 实测）|
+| `aclnn_2stage_distributed` | ⛔ **BLOCKED-另立**：含 HCCL 多卡通信（MC2 族），出单卡单进程通路 |
+| `geir` | ⛔ **BLOCKED-另立**：GE IR 图引擎示例（`op::X`+`ge::Session`+AddGraph/RunGraph，如 ops-nn 的 celu/bnll）——非 aclnn 两段式，需图引擎构建路径。⚠ **ops-nn 不是清一色 aclnn**（B-core 18 算子核暴露），混有 geir 算子 |
+| `library_header` | ⛔ **BLOCKED-另立**：handle 型 C 库（ops-solver `aclsolver*`）/ 纯头文件模板库（ops-collections）——非 aclnn 通路，另起 de-risk |
+| `unknown` | ⛔ **fail-closed BLOCKED**：有 op_def 迹象但探不到确切 aclnn 两段式配对，不猜 |
+
+> 这把 scope 判定从「agent 读 example 人肉判」升级为「`fetch_source` 机器探测 + gate 据字段判」——更确定、且真实入口函数名一并抽出（V3/V5 后缀不再靠猜）。dtype/golden/单卡子闸仍逐算子判，**放行清单不外推**。
+
 ## dispatch_mode
 
 被调度时由 orchestrator 指定 `dispatch_mode`；每 mode 单轮、只回结构化摘要，是否进下一 mode 由 orchestrator 决定。

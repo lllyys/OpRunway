@@ -89,6 +89,86 @@ class ParsePrUrlTest(unittest.TestCase):
             self.fail("形态不认识应抛 ValueError")
 
 
+class InterfaceKindDetectTest(unittest.TestCase):
+    """批 6b B-core：`_detect_interface_kind` 的 5 条规则（据实 clone 4 仓分类得出）逐条钉死。
+
+    合成最小 fixture（不依赖 repos/ 在场）；真实 example 的端到端验证在 workflow wf_873486e1 里。"""
+
+    def test_aclnn_2stage_and_entry(self):
+        c = ("aclnnGeluGetWorkspaceSize(self, out, &ws, &exe);\n"
+             "aclnnGelu(wsAddr, ws, exe, stream);\n")
+        ik, entry, _ = fs._detect_interface_kind({"activation/gelu/examples/test_aclnn_gelu.cpp": c})
+        self.assertEqual(ik, "aclnn_2stage")
+        self.assertEqual(entry, "aclnnGelu")
+
+    def test_entry_is_real_name_not_op_derived(self):
+        """带版本后缀的入口从 test_aclnn 抽真实名（aclnnPromptFlashAttentionV3），非目录名派生。
+
+        这是 Equal 血教训 + transformer V3/V5 实测的落地：runner 锚定用真实函数名。"""
+        c = ("aclnnPromptFlashAttentionV3GetWorkspaceSize(q, k, v, &ws, &exe);\n"
+             "aclnnPromptFlashAttentionV3(a, ws, exe, stream);\n")
+        _, entry, _ = fs._detect_interface_kind({"attention/pfa/examples/test_aclnn_pfa.cpp": c})
+        self.assertEqual(entry, "aclnnPromptFlashAttentionV3")
+
+    def test_hccl_is_distributed_blocked(self):
+        c = ('#include "hccl/hccl.h"\n'
+             "aclnnAllGatherMatmulGetWorkspaceSize(x, &ws, &exe);\n"
+             "aclnnAllGatherMatmul(a, ws, exe, stream);\nHcclComm comm;\n")
+        ik, _, _ = fs._detect_interface_kind({"mc2/agm/examples/test_aclnn_agm.cpp": c})
+        self.assertEqual(ik, "aclnn_2stage_distributed")
+
+    def test_library_header_no_aclnn(self):
+        ik, entry, _ = fs._detect_interface_kind(
+            {"include/solver.h": "aclsolverCreate(&handle);", "README.md": "x"})
+        self.assertEqual(ik, "library_header")
+        self.assertIsNone(entry)
+
+    def test_ws_without_second_stage_not_aclnn(self):
+        """只有 GetWorkspaceSize、无配对第二段 → **不**判 aclnn_2stage（fail-closed 到 unknown）。"""
+        c = "aclnnGeluGetWorkspaceSize(self, out, &ws, &exe);\n"   # 无 aclnnGelu(...executor...)
+        ik, _, _ = fs._detect_interface_kind(
+            {"examples/test_aclnn_gelu.cpp": c, "op_host/gelu_def.cpp": 'AddConfig("ascend950")'})
+        self.assertEqual(ik, "unknown")
+
+    def test_op_def_without_aclnn_is_unknown_failclosed(self):
+        """有 op_def 迹象但探不到 aclnn 配对 → unknown（fail-closed，不猜成可放行）。"""
+        ik, _, _ = fs._detect_interface_kind({"op_host/foo_def.cpp": 'AddConfig("ascend950")'})
+        self.assertEqual(ik, "unknown")
+
+    def test_empty_keyfiles_is_library_header(self):
+        """取不到任何 key_files（网络/无 PR）→ library_header，下游 fail-closed，不假装 aclnn。"""
+        ik, entry, _ = fs._detect_interface_kind({})
+        self.assertEqual(ik, "library_header")
+        self.assertIsNone(entry)
+
+    def test_commented_aclnn_not_matched(self):
+        """注释掉的 aclnn 调用不算（codex 审：`// aclnnFooGetWorkspaceSize(...)` 曾被误判成 aclnn）。"""
+        c = ("// aclnnFakeGetWorkspaceSize(a, &ws, &exe);\n"
+             "/* aclnnFake(b, ws, exe, stream); */\nge::Session s;\n")
+        ik, _, _ = fs._detect_interface_kind({"x/examples/test_geir_x.cpp": c})
+        self.assertNotEqual(ik, "aclnn_2stage")
+
+    def test_hccl_in_auxiliary_file_still_distributed(self):
+        """HCCL include 落在辅助文件（非命中 aclnn 的那个）→ 仍判 distributed（codex 审跨文件加固）。"""
+        kf = {"mc2/agm/examples/test_aclnn_agm.cpp": "aclnnAgmGetWorkspaceSize(a,&ws,&exe);\naclnnAgm(b,ws,exe,stream);",
+              "mc2/agm/examples/hccl_helper.cpp": '#include "hccl/hccl.h"\nHcclComm comm;'}
+        ik, _, _ = fs._detect_interface_kind(kf)
+        self.assertEqual(ik, "aclnn_2stage_distributed")
+
+    def test_geir_graph_engine_detected(self):
+        """ops-nn 混有 geir 图引擎算子（celu/bnll 用 test_geir_*.cpp + ge::Session）→ geir（BLOCKED-另立），非 aclnn。
+
+        批 6b B-core 18 算子逐个核暴露：ops-nn **不是清一色 aclnn**。探测器对它们本就 fail-closed（不误放行），
+        此测试钉住「显式识别 geir、给准类别」——比笼统 unknown 更利于下游归类。"""
+        c = ("op::Celu celu;\nge::Session session(options);\n"
+             "session.AddGraph(0, graph);\nsession.RunGraph(0, inputs, outputs);\n")
+        ik, entry, _ = fs._detect_interface_kind(
+            {"activation/celu/examples/test_geir_celu.cpp": c,
+             "activation/celu/op_host/celu_def.cpp": 'AddConfig("ascend950")'})
+        self.assertEqual(ik, "geir")
+        self.assertIsNone(entry)
+
+
 class FetchPrFailModeTest(unittest.TestCase):
     """fetch_pr 层：区分「URL 形态错(fail-loud，不写文件)」与「网络取不到(记 note，仍写文件)」。
 

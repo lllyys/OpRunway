@@ -20,6 +20,13 @@
 
 ## 2026-07-23
 
+- **批 6b B-core 落地:接口探测器 + 18 算子据实核放行清单(clone 4 仓 + 两轮 fan-out)**
+  - `fetch_source` 加 `_detect_interface_kind`:据算子自带 example 机器判 5 类接口形态,**从 test_aclnn 正则抽真实入口函数名**(含 V3/V5 后缀——解决 Equal 血教训 + transformer `aclnnPromptFlashAttentionV3`)。gate 第一闸改机器探测驱动。10 单测 + 真实 example 复验。
+  - clone ops-nn/transformer/collections/solver 4 仓(浅克隆、gitignore)。两轮 fan-out(4 路分类 + 18 算子逐个双源核)。**期1-A 可放行 6 个**(elu/foreach_abs/foreach_acos/binary_cross_entropy/interleave_rope/apply_rotary_pos_emb,逐算子双源核过、不外推)。
+  - ⭐ **探测器实测 100% 正确**:workflow 报「误判 celu/bnll」是**我预填 det 的假象**——实测探测器对 geir 算子(celu/bnll 用 test_geir)判 geir/unknown(fail-closed,不误放行)。据此增强:显式识别 geir 类别。**finding 逐条实证、不照单全收**(同批 4/6 + 期0 债)。
+  - ⭐ **关键真相**:ops-nn 不是清一色 aclnn(混 geir 图引擎算子);ops-transformer 主导 bf16/量化/分布式。放行是**逐算子**的、绝不按仓外推。
+  - 验证:本地 shim 767 绿、lint PASS/SYNCED。
+
 - **批 6b 期1-A 落地:stale gate 全仓对齐 + 接回断头配置(引擎零能力改动)**
   - 接回 `OPRUNWAY_VENDOR_SUFFIX`(repo_adapter `_ne_cfg`+env-export;空=沿用仓名正则、非空=显式给,向后兼容)+ 3 条测试。
   - **8 处 stale gate 表述全仓对齐**:把「仅 experimental/math 闭环」统一改成「ops-<族>·aclnn 两段式·opp 安装型(含非 experimental 子树)」;删幽灵变量 `OPRUNWAY_TARGET_DIR`(runner 通路零命中、旧文误指);命名修。

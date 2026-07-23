@@ -125,6 +125,73 @@ def _parse_pr_url(pr_url):
     return m["owner"], m["repo"], m["num"]
 
 
+_ACLNN_WS_RE = re.compile(r"\baclnn(\w+)GetWorkspaceSize\s*\(")
+_HCCL_RE = re.compile(r'hccl/hccl\.h|HcclComm|HcclGetCommName|\brankId\b')
+_GEIR_RE = re.compile(r"ge::Session|->\s*AddGraph\s*\(|->\s*RunGraph\s*\(")
+
+
+def _detect_interface_kind(key_files):
+    """据 `pr_facts.key_files` 的迹象**机器判**算子接口形态（批 6b B-core）。
+
+    返回 `(interface_kind, aclnn_entry|None, note)`。规则据实 clone 的 4 仓（ops-nn/transformer/
+    collections/solver）分类得出（workflow wf_b07a40d8），落到「文件存在性 + 内容正则」的可判组合：
+
+      - `aclnn_2stage`：某 `test_aclnn_*.cpp`（或 examples/*.cpp）里命中 `aclnn<X>GetWorkspaceSize(`
+        且有配对的第二段 `aclnn<X>(… executor …)`，且**不含 HCCL**。→ 当前通路可放行的接口形态
+        （逐算子仍须过 dtype∈{fp32,fp16} + golden 可搭 子闸，不在此判）。
+      - `aclnn_2stage_distributed`：命中 aclnn 两段式**但含 HCCL 多卡通信**（MC2 族）→ 出单卡通路，BLOCKED-另立。
+      - `library_header`：**零** test_aclnn / 零 op_def → handle 型 C 库（ops-solver aclsolver*）/ 纯头文件
+        模板库（ops-collections）→ 非 aclnn 通路，BLOCKED-另立。
+      - `unknown`：有 op_def 迹象但探不到确切 aclnn 两段式配对 → **fail-closed**，BLOCKED，不猜。
+
+    ⚠ **aclnn 入口函数名从 test_aclnn 正则抽真实名**（`aclnnPromptFlashAttentionV3` 这类带版本后缀，
+       ≠ 目录名派生的 `aclnn<Op>`）——供 runner 锚定，别再按 op 名猜（Equal 血教训 + transformer 实测 V3/V5）。
+    ⚠ 探测**只用取到的 key_files**：取不到（网络/无 PR）→ `unknown`/`library_header`，下游 fail-closed，不假装是 aclnn。"""
+    kf = key_files or {}
+    # 先去 C/C++ 注释：注释掉的 aclnn 调用不算（codex 审：`// aclnnFooGetWorkspaceSize(...)` 曾被误判成 aclnn）。
+    def _nc(c):
+        c = re.sub(r"/\*.*?\*/", " ", c or "", flags=re.S)
+        return re.sub(r"//[^\n]*", " ", c)
+    examples = {p: _nc(c) for p, c in kf.items()
+                if str(p).endswith(".cpp") and ("test_aclnn" in os.path.basename(str(p)) or "/examples/" in str(p))}
+    # HCCL 跨**所有** key_files 查（codex 审加固）：MC2 算子的 `hccl/hccl.h` include 可能落在辅助文件、
+    # 不在命中 aclnn 的那个 → 只查单文件会把分布式漏判成单卡 aclnn。跨文件查 = fail-closed 方向。
+    _any_hccl = any(_HCCL_RE.search(_nc(c)) for c in kf.values())
+    for p, c in examples.items():
+        m = _ACLNN_WS_RE.search(c)
+        if not m:
+            continue
+        # ⚠ 已知边界（codex 审）：多入口 example（如量化 matmul 先调 `aclnnTransQuantParamV2GetWorkspaceSize`
+        #   再调主入口 `aclnnQuantMatmulV3`）抽到的是**第一个** WS 调用、可能是辅助入口——`aclnn_entry`
+        #   仅作 runner 锚定的**线索**，gen_runner 仍须读 example 确认真入口（不改分类：还是 aclnn_2stage）。
+        #   期1-A 放行的 6 个均单入口，不受影响。
+        entry = "aclnn" + m.group(1)
+        # 第二段配对：把所有 `aclnn*GetWorkspaceSize(` 调用抹掉后，仍能找到同名 `aclnn<Entry>(`
+        # —— 即两段式的执行段。不认参数名（executor/exe 变量名可变、脆弱），只认「同名函数被调两次、
+        # 其一非 GetWorkspaceSize」。
+        _exec_seg = re.sub(r"\baclnn\w+GetWorkspaceSize\s*\(", "", c)
+        if not re.search(r"\b" + re.escape(entry) + r"\s*\(", _exec_seg):
+            continue
+        if _any_hccl:
+            return ("aclnn_2stage_distributed", entry,
+                    f"aclnn 两段式但含 HCCL 多卡通信（{entry}，MC2 族）→ 出单卡单进程通路，BLOCKED-另立")
+        return ("aclnn_2stage", entry,
+                f"aclnn 两段式，入口 {entry}（从 test_aclnn 正则抽真实函数名、非目录名派生）；"
+                f"逐算子仍须过 dtype∈{{fp32,fp16}} + golden 可搭 子闸")
+    # geir 图引擎示例（`op::X` + `ge::Session` + AddGraph/RunGraph，如 ops-nn 的 celu/bnll 用 test_geir_*.cpp）——
+    # 显式识别给准 note（否则笼统落 unknown）。同样 BLOCKED-另立：图引擎构建路径，非 aclnn 两段式。
+    # 批 6b B-core 逐算子核暴露：ops-nn 不是清一色 aclnn，混有 geir 算子（探测器对它们本就 fail-closed，此处只给更准的类别）。
+    if any(("test_geir" in os.path.basename(str(p))) or _GEIR_RE.search(c) for p, c in examples.items()):
+        return ("geir", None,
+                "GE IR 图引擎示例（op::X + ge::Session + AddGraph/RunGraph）→ 非 aclnn 两段式，BLOCKED-另立（图引擎构建路径）")
+    has_def = any(str(p).endswith("_def.cpp") for p in kf)
+    if not examples and not has_def:
+        return ("library_header", None,
+                "无 test_aclnn / 无 op_def → handle 型 C 库或纯头文件模板库（非 aclnn 两段式通路），BLOCKED-另立")
+    return ("unknown", None,
+            "有 op_def 迹象但探不到确切的 aclnn 两段式配对 → fail-closed，BLOCKED，不猜")
+
+
 def fetch_pr(pr_url, out_dir):
     """PR：解析 gitcode PR 链接 → API 取 元信息 + 改动文件 + 关键文件（example/op_def），写 pr_facts.json。
 
@@ -206,6 +273,10 @@ def fetch_pr(pr_url, out_dir):
                 key[rel], key_ref[rel] = c, r
     facts["key_files"] = key
     facts["key_files_ref"] = key_ref  # 每个关键文件实际取自哪个 ref（供下游判新鲜度）
+    # 批 6b B-core：据 key_files 机器判接口形态 + 抽真实 aclnn 入口（供 runner 锚定、scope gate 消费）。
+    _ik, _entry, _ik_note = _detect_interface_kind(key)
+    facts["interface_kind"], facts["aclnn_entry"] = _ik, _entry
+    facts["notes"].append(f"接口形态(批6b探测)：{_ik_note}")
     # 现在只有 head_sha 一个 ref，取到的必定就是 head；stale 概念随兜底一并退役。
     # 保留一条正向记账：明确告知下游「这些文件确实钉在哪个 commit 上」。
     if key and head_sha:
