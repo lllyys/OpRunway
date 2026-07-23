@@ -141,32 +141,70 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
    **这就是「没实现」与「实现了但跑挂了」的判别式**：前者压根造不出用例，后者一定有用例 + 证据，必须走精度/功能裁决。
 4. **在需求内**：spec 声明了 `dtype_required` 时，gap 的 dtype 须确在任务书要求内（给任务书没要求的 dtype 挂账 = 无据）。
 
-**与 `dtype_deferred` 别混**（两类挂账，`validate_acceptance_state` 的 dtype 覆盖门都认）：
+**与 `dtype_deferred` 别混**（三类挂账，`validate_acceptance_state` 的 dtype 覆盖门都认）：
 
 | kind | 什么情形 | 谁的问题 |
 |---|---|---|
 | `dtype_deferred` | 任务书要、算子也做了，**是我们这条 pipeline 暂时测不了**（runner 无该 dtype 分支、真机环境阻塞…）| **我们的**能力缺口 |
 | `dtype_unsupported_by_op_def` | 任务书要、**算子 `op_def` 压根没声明支持** | **被测物的**缺口 = 验收**发现** |
+| `dtype_unsupported_on_target_hw` | 任务书要、**`op_def` 声明了**，但**目标硬件那一支的 aclnn 实现没有**（分支 `DTYPE_SUPPORT_LIST` 不含）| **被测物的**缺口 = 验收**发现** |
 
-⚠ **有第三种情形，目前没有专属 kind**（2026-07-23 由 im2col 的 `bool` 撞出来）：
-**`op_def` 声明了、但目标硬件那一支的 aclnn 实现没有**。
-im2col 的 `im2col_def.cpp` 的 `VALUE_DATA_TYPE_LIST` 含 `DT_BOOL`，而 `aclnn_im2col.cpp:222-225` 的
-`IsRegBase` 分流下，非 regbase（= A2/A3）那一支的 `DTYPE_SUPPORT_LIST` **只有 {FLOAT, FLOAT16, BF16}**。
-- **不能用 `dtype_unsupported_by_op_def`**：那条有「op_def 确实没声明」的自洽硬校，会当场判不符。
-- **只能退 `dtype_deferred`**，并在 `reason` 里写清「op_def 声明了、目标硬件分支未实现」——
-  但那个 kind 的语义是「**我们的**能力缺口」，而这明明是**被测物的**缺口。**语义被迫说反了。**
-⚠ 要不要补第三类 kind（如 `dtype_unsupported_on_target_hw`）**待用户裁**。在此之前：
-**按 `dtype_deferred` 落，但 reason 必须逐字写明真实成因**，别让「我们测不了」这个措辞把
-「算子在目标硬件上没实现」这个**验收发现**给盖掉了。
+### §1.2b 第三类 `dtype_unsupported_on_target_hw`（已裁定补入，2026-07-23）
 
-⚠ **裁决标签怎么用**：`passed_with_gaps` 是 `validator` 产的**精度 verdict**（`validate_acceptance_state`
-也已把它纳入合法枚举，并交叉核验「自称 passed_with_gaps 就得真有结构合法的 gap 撑着」）。
-**实读 `run_workflow.run`（2026-07-22 当日稍晚已接线）**：`passed_with_gaps` 属**精度放行集合**
-（与 `pass`/`passed_with_risk` 同列）→ **继续跑 Task3**；性能达标或无性能要求时顶层 `overall` 均为
-`PASSED_WITH_GAPS`，canonical state 同名、**退出码 2（挂人工 CP）**、`requires_human_cp=true`。
-⚠ 早前一版此处记「`precision_ok` 不认它、会跳过 Task3」——那是**接线前的实况、现已过时**；
-当时那条断链会让「算子没实现任务书要求的 dtype」落成干净 `PASSED`/exit 0，已修。一律**逐字引用确定性产物的实际字段并标来源**（ADR 0007），
-不自行宣告裁决。
+⚠ **已裁定：补第三类 kind `dtype_unsupported_on_target_hw`**（2026-07-23 由 im2col 的 `bool` 撞出、用户拍板）。
+此前「按 `dtype_deferred` 落」是**接线前的过渡**、现已过时——`dtype_deferred` 语义是「**我们的**能力缺口」，
+会把「算子在目标硬件上没实现」这个**被测物侧验收发现**说反，**别再用它罩这种情形**。
+
+**语义**：任务书要 dtype X；算子 `op_def` **声明支持** X；但**目标硬件那一支的 aclnn 实现**（如 im2col 的
+`aclnn_im2col.cpp:222-225` 的 `IsRegBase` 分流下，非 regbase = A2/A3 那一支的 `DTYPE_SUPPORT_LIST`）**不含** X。
+它是**被测物侧的验收发现**（不是「我们 pipeline 测不了」）→ 覆盖门放行、裁决落 `passed_with_gaps`，与
+`dtype_unsupported_by_op_def`（C4）**同档、同桶**。
+
+**怎么写这条 gap**（结构化条目，字段名与硬校**实读自 `validate_acceptance_state._check_target_hw_gap`**，别自造别名）：
+
+```jsonc
+{"kind": "dtype_unsupported_on_target_hw",
+ "dtypes": ["<任务书要、目标硬件那支实现没有的 dtype，非空>"],
+ "task_doc_ref": "<任务书原文定位：章节/行/原句摘要>",
+ "op_def_ref":   "<op_def 出处：文件路径 + 行号/字段（证 op_def 确实声明了）>",
+ "impl_ref":     "<目标硬件实现出处：aclnn_xxx.cpp:行 + 分支名（DTYPE_SUPPORT_LIST）>",
+ "target_hw":    "<哪支硬件：如 Atlas A2/A3（非 regbase 分支）>",
+ "op_def_dtypes": ["<op_def 实际声明的支持集，供交叉核验——须含上面的 dtypes>"],
+ "impl_dtypes":   ["<目标硬件实现实际支持集，供交叉核验——须不含上面的 dtypes>"]}
+```
+
+⚠ **它绝不是「宣称有 gap 就免检」的后门**——与 C4 同为反后门硬校、**方向相反**（C4 证「op_def 没声明」，
+本 kind 证「op_def 声明了、目标硬件那支没实现」）。`validate_acceptance_state` 五道硬校缺一即**拒**（拒 = 该 gap
+不计入已挂账集 → 对应 dtype 仍按「静默收窄」判 → BLOCKED）：
+
+1. **有据**：`dtypes`（非空）+ `task_doc_ref` + `op_def_ref` + `impl_ref` + `target_hw` 五者必填、类型正确。
+2. **op_def 确实声明**：gap 的 dtype **须在**自报 `op_def_dtypes` 里（与 C4「不得在」相反）；不在 → 说明 op_def 其实
+   没声明该 dtype → **该走 C4**，本 kind 拒。
+3. **目标硬件那支确实没实现**：gap 的 dtype **不得在**自报 `impl_dtypes` 里；在 → 说明目标硬件其实实现了 →
+   不是「没实现」的发现，本 kind 拒（自相矛盾/伪造）。
+4. **不得覆盖真失败**：该 dtype 若**有真实用例在跑**（实测集含之）→ 拒。**这就是「没实现」与「实现了但跑挂了」
+   的判别式**：前者压根造不出用例，后者一定有用例 + 证据，必须走精度/功能裁决。
+5. **在需求内**：spec 声明了 `dtype_required` 时，gap 的 dtype 须确在任务书要求内。
+
+**示例（im2col `bool`）**：`im2col_def.cpp` 的 `VALUE_DATA_TYPE_LIST` 含 `DT_BOOL`（→ `op_def_dtypes` 含 `bool`），
+而 `aclnn_im2col.cpp:222-225` 非 regbase 分支的 `DTYPE_SUPPORT_LIST` 只有 `{float32, float16, bfloat16}`
+（→ `impl_dtypes` 不含 `bool`）。任务书要 `bool` → 挂 `dtype_unsupported_on_target_hw`。
+
+⚠ **两类 finding gap 的 verdict 侧接线状态不同——别把 target_hw 也当成能落 `passed_with_gaps`**：
+- **C4 `dtype_unsupported_by_op_def`**：`validator` **已识别**该 kind → 裁决落 `passed_with_gaps`；
+  `validate_acceptance_state` 把它纳入合法枚举并交叉核验，`run_workflow.run`（2026-07-22 当日稍晚接线）把
+  `passed_with_gaps` 归入**精度放行集合**（与 `pass`/`passed_with_risk` 同列）→ **继续跑 Task3**，顶层
+  `overall=PASSED_WITH_GAPS`、canonical state 同名、**退出码 2（挂人工 CP）**、`requires_human_cp=true`。
+  端到端**已通**。
+- **`dtype_unsupported_on_target_hw`**：**`validator` 侧尚未识别该 kind**（只识别 C4）→ 对这条 gap 仍产
+  **干净 `pass`**，**当前不会**落 `passed_with_gaps`。门 `validate_acceptance_state` 已把它接进**覆盖门认账**
+  与**双向交叉核验**：gate_task2 方向② 逮住「caseset 有结构合法的 target_hw gap，但裁决是干净 pass」→ 记 error
+  → **gate FAILED → BLOCKED**（fail-closed，绝不让「算子未实现任务书要求的 dtype」机读成干净 `PASSED`/exit 0）。
+  **故现阶段挂 `dtype_unsupported_on_target_hw` 的算子会走 BLOCKED、而非 `passed_with_gaps`**；要它端到端落
+  `passed_with_gaps`，须先补 `validator` 侧对该 kind 的识别（本批未做）。落 spec 前知悉这一状态差。
+
+⚠ 早前一版记「`precision_ok` 不认 `passed_with_gaps`、会跳过 Task3」——那是 C4 接线前的实况、现已过时。
+一律**逐字引用确定性产物的实际字段并标来源**（ADR 0007），不自行宣告裁决。
 
 ## 2. verify_mode 决策树（⚠ 三值）
 
@@ -229,7 +267,8 @@ N 个算子 → N 个 `<op>.spec.json`。**共享字段抽一次复用**(hardwar
 ## 6. task_pr_gaps 收敛
 
 **两种形态并存**：`kind` 已定义的**结构化条目**（门/validator 会读并硬校——`dtype_deferred`、
-C4 的 `dtype_unsupported_by_op_def`，见 §1.2）必须按字段写全；其余仍写自由文本条目（历史条目原样被忽略、不报错）。
+C4 的 `dtype_unsupported_by_op_def`、`dtype_unsupported_on_target_hw`，见 §1.2/§1.2b）必须按字段写全；
+其余仍写自由文本条目（历史条目原样被忽略、不报错）。
 **别给自由文本条目乱安 `kind`**——安上就要过对应硬校，过不了就是 `overall=fail`。
 
 每条记『缺什么 / 影响字段 / 兜底』。常见类型：缺 dtype 列表、缺 threshold 数值、缺 verify_mode 明写、缺 per_dtype 声明、缺 shape 规格、缺 CANN 版本、缺性能绝对基线、**语义矛盾需澄清**(bincount 支持负数 vs 必须非负)、**模板残留**(MaxUnpool2d 仓名矛盾、Cast 合入路径矛盾、自验证报告 `xxx` 占位)。供 op-acceptance 报告步骤列『任务书↔PR 落差』，推断项标 (推断)。无缺口→`[]`。

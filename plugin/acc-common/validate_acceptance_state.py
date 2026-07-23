@@ -30,10 +30,20 @@ _PERF_STATUS = {"ok", "no_perf_cases", "blocked", "fail",
 _BLOCKED_OK_STATUS = {"blocked", "blocked_incomparable_timing_scope", "blocked_wait_gpu_benchmark"}
 # validator overall.verdict 合法枚举（C4 2026-07-22 加 passed_with_gaps：任务书要求的 dtype 有一部分
 # 算子 op_def 压根不支持 → 带发现的通过；差额挂 task_pr_gaps，见 _check_unsupported_gap 的反后门硬校）。
+# 2026-07-23：passed_with_gaps 再添一类撑法——op_def 声明了、但目标硬件那支实现没有
+# （`dtype_unsupported_on_target_hw`，见 _check_target_hw_gap）；两类均为被测物侧发现、同进 unsupported 桶。
 _VERDICT_ENUM = {"pass", "fail", "needs_review", "passed_with_risk", "passed_with_gaps"}
 # C4 结构化 gap 类型：任务书要求、算子 op_def 不声明支持的 dtype 差额（与既有 dtype_deferred 语义不同——
 # deferred = 我们这条 pipeline 暂未测；unsupported = PR/算子根本没实现，是对被测方的**发现**）。
 _DTYPE_GAP_KIND = "dtype_unsupported_by_op_def"
+# 第三类结构化 gap（2026-07-23，im2col 的 bool 撞出）：任务书要 dtype X、算子 op_def **声明支持** X，
+# 但**目标硬件那一支的 aclnn 实现**（如 im2col A2/A3 非 regbase 分支的 DTYPE_SUPPORT_LIST）**不含** X。
+# 仍是**被测物侧的验收发现**（≠ dtype_deferred 的「我们这条 pipeline 测不了」）→ 与 C4 同桶、裁决落
+# passed_with_gaps；反后门硬校方向与 C4 相反（op_def **须含**、目标硬件实现 **须不含**），见 _check_target_hw_gap。
+_TARGET_HW_GAP_KIND = "dtype_unsupported_on_target_hw"
+# 被测物侧「发现类」gap——都喂 passed_with_gaps、都进 unsupported 桶（覆盖门认作已挂账、passed_with_gaps
+# 交叉核验认作有据）。`dtype_deferred` 是「**我们的**能力缺口」，语义不同、不在此集。
+_FINDING_GAP_KINDS = {_DTYPE_GAP_KIND, _TARGET_HW_GAP_KIND}
 
 
 def _is_int(x):
@@ -143,11 +153,84 @@ def _check_unsupported_gap(g, i, required, actual, errs):
     return [] if bad else dts
 
 
+def _check_target_hw_gap(g, i, required, actual, errs):
+    """第三类 `dtype_unsupported_on_target_hw` gap 的「有据可查」硬校；合法 → 返回其 dtypes，否则 []（并记 error）。
+
+    语义：任务书要 dtype X；算子 op_def **声明支持** X；但**目标硬件那一支的 aclnn 实现**（如 im2col 的
+    A2/A3 非 regbase 分支 `DTYPE_SUPPORT_LIST`）**不含** X → **被测物侧**的验收发现（≠ `dtype_deferred`
+    的「我们这条 pipeline 测不了」）。故与 C4 同桶（unsupported）、裁决落 passed_with_gaps。
+
+    ⚠ 与 C4 同为反后门硬校、**方向相反**：C4 证「op_def 压根没声明」（op_def_dtypes 不得含）；本 kind 证
+    「op_def 声明了、但目标硬件那支没实现」（op_def_dtypes **须含**、impl_dtypes **须不含**）。五道硬校
+    缺一即拒（拒 = 该 gap 不计入已挂账集 → 对应 dtype 仍按「静默收窄」判 → BLOCKED；同时把理由写清）：
+      ① **有据**——`dtypes`（非空 dtype 串表）+ `task_doc_ref`（任务书原文）+ `op_def_ref`（op_def 出处）
+         + `impl_ref`（目标硬件实现出处，如 aclnn_xxx.cpp:行）+ `target_hw`（哪支硬件）必填且类型正确。
+      ② **op_def 确实声明**——`op_def_dtypes`（op_def 实际声明集）须**含**全部 gap dtype；若不含
+         说明 op_def 其实没声明该 dtype → 该走 C4（`dtype_unsupported_by_op_def`），本 kind 拒。
+      ③ **目标硬件那支确实没实现**——`impl_dtypes`（目标硬件实现实际支持集）须**不含**任一 gap dtype；
+         若含说明目标硬件其实实现了 → 不是「没实现」的发现，本 kind 拒。
+      ④ **不得覆盖真失败**——gap dtype 若**有真实用例在跑**（实测集含之），属「实现了但跑挂了」，
+         必须走精度/功能裁决；这就是「没实现」与「跑挂了」的判别式（后者一定有用例 + evidence）。
+      ⑤ **在需求内**——`dtype_required` 是 list 时，gap 的 dtype 须确在任务书要求内。
+    """
+    tag = f"task_pr_gaps[{i}]({_TARGET_HW_GAP_KIND})"
+    dts = g.get("dtypes")
+    if not (isinstance(dts, list) and dts and all(isinstance(x, str) and x for x in dts)):
+        errs.append(f"{tag}: dtypes 须为非空 dtype 字符串列表（{dts!r}）")
+        return []
+    bad = False
+    for k in ("task_doc_ref", "op_def_ref", "impl_ref", "target_hw"):
+        v = g.get(k)
+        if not (isinstance(v, str) and v.strip()):
+            errs.append(f"{tag}: 缺 {k}（gap 须有据可查：任务书原文 / op_def 出处 / "
+                        "目标硬件实现出处 / 哪支硬件，否则就成了『宣称有 gap 就免检』）")
+            bad = True
+    # ② op_def **须含**全部 gap dtype（与 C4「不得含」相反）——证「op_def 确实声明了」。
+    od = g.get("op_def_dtypes")
+    if not (isinstance(od, list) and all(isinstance(x, str) and x for x in od)):
+        errs.append(f"{tag}: op_def_dtypes 须为 dtype 字符串列表（op_def 实际声明的支持集，供交叉核验）")
+        bad = True
+    else:
+        undeclared = sorted(set(dts) - set(od))
+        if undeclared:
+            errs.append(f"{tag}: {undeclared} 不在自报 op_def_dtypes {sorted(set(od))} 里"
+                        f"（op_def 其实没声明该 dtype → 属 {_DTYPE_GAP_KIND}(C4)，非本 kind）")
+            bad = True
+    # ③ impl_dtypes **须不含**任一 gap dtype——证「目标硬件那支确实没实现」。
+    im = g.get("impl_dtypes")
+    if not (isinstance(im, list) and all(isinstance(x, str) and x for x in im)):
+        errs.append(f"{tag}: impl_dtypes 须为 dtype 字符串列表（目标硬件实现实际支持集，供交叉核验）")
+        bad = True
+    else:
+        implemented = sorted(set(dts) & set(im))
+        if implemented:
+            errs.append(f"{tag}: {implemented} 既称目标硬件实现不支持、又列在自报 impl_dtypes 里"
+                        "（自相矛盾·伪造 gap）")
+            bad = True
+    # ④ 不得罩住「实现了但跑挂了」。
+    ran = sorted(set(dts) & set(actual))
+    if ran:
+        errs.append(f"{tag}: {ran} 有真实用例在跑——属「实现了但跑挂了」，须走精度/功能裁决，"
+                    "不得用「目标硬件不支持」的 gap 罩住")
+        bad = True
+    # ⑤ 在需求内。
+    if required is not None:
+        outside = sorted(set(dts) - set(required))
+        if outside:
+            errs.append(f"{tag}: {outside} 不在任务书 dtype_required {sorted(required)} 内"
+                        "（为任务书没要求的 dtype 挂账·gap 无据）")
+            bad = True
+    return [] if bad else dts
+
+
 def _collect_dtype_gaps(cs, actual, required, errs):
-    """归并 `task_pr_gaps` 里两类「已挂账」dtype，返回 (deferred 集, unsupported 集)。
+    """归并 `task_pr_gaps` 里各类「已挂账」dtype，返回 (deferred 集, unsupported 集)。
 
     · `dtype_deferred`——我们这条 pipeline 暂未测（既有语义/字段要求**原样不动**）；
-    · `dtype_unsupported_by_op_def`（C4）——任务书要求但算子 op_def 根本不声明支持，逐条硬校（见上）。
+    · `dtype_unsupported_by_op_def`（C4）——任务书要求但算子 op_def 根本不声明支持，逐条硬校（见上）；
+    · `dtype_unsupported_on_target_hw`——op_def 声明了、但目标硬件那支 aclnn 实现没有，逐条硬校（见上）。
+    后两类同属**被测物侧发现类**（`_FINDING_GAP_KINDS`）→ 并进 **unsupported 桶**（覆盖门认作已挂账、
+    passed_with_gaps 交叉核验认作有据）。
     ⚠ 硬校**无条件行使**：不因 `dtype_required` 缺失而跳过——否则删掉 dtype_required 即可连带绕过 gap 校验
       （同 codex#2 对 dtype_tested 的教训）。"""
     gaps = cs.get("task_pr_gaps") if isinstance(cs, dict) and isinstance(cs.get("task_pr_gaps"), list) else []
@@ -155,20 +238,24 @@ def _collect_dtype_gaps(cs, actual, required, errs):
     for i, g in enumerate(gaps):
         if not isinstance(g, dict):
             continue                                  # 历史自由文本条目：原样忽略、不报错
-        if g.get("kind") == "dtype_deferred":
+        kind = g.get("kind")
+        if kind == "dtype_deferred":
             dts = g.get("dtypes")
             if isinstance(dts, list):
                 deferred.update(x for x in dts if isinstance(x, str))
-        elif g.get("kind") == _DTYPE_GAP_KIND:
+        elif kind == _DTYPE_GAP_KIND:
             unsupported.update(_check_unsupported_gap(g, i, required, actual, errs))
+        elif kind == _TARGET_HW_GAP_KIND:
+            unsupported.update(_check_target_hw_gap(g, i, required, actual, errs))
     return deferred, unsupported
 
 
 def _gate_dtype_coverage(cs, errs):
     """Q7 dtype 覆盖门（gate-must-check-the-effective-object）：任务书要求的 dtype 全集 `dtype_required`
     若未被实测集 `dtype_tested` 覆盖、且 `task_pr_gaps` 无对应挂账记录 → **静默收窄=证据不完整**
-    → error（走 BLOCKED）。挂账有两类：`dtype_deferred`（我们暂未测）与 C4 的
-    `dtype_unsupported_by_op_def`（算子 op_def 根本不支持 → 裁决落 passed_with_gaps）。防误伤/防阻塞：
+    → error（走 BLOCKED）。挂账有三类：`dtype_deferred`（我们暂未测）、C4 的
+    `dtype_unsupported_by_op_def`（算子 op_def 根本不声明支持）、`dtype_unsupported_on_target_hw`
+    （op_def 声明了、目标硬件那支实现没有）——后两类均落 passed_with_gaps。防误伤/防阻塞：
       · `dtype_required` **未声明**（legacy 未迁）→ 不 BLOCK，仅提示「覆盖门未行使」（避免一刀切炸掉现有 spec）。
       · `dtype_required` == `"needs_user"`（全集未知·信息库未接通）→ 不 BLOCK，提示「不谎报覆盖」。
     读的是 caseset 顶层的 dtype_required/dtype_tested/task_pr_gaps（gen_cases 从 spec 透传/派生）。"""
@@ -201,7 +288,8 @@ def _gate_dtype_coverage(cs, errs):
     if uncovered:
         errs.append(
             f"dtype 覆盖不足：任务书要求 {req}、实测(真实用例) {sorted(actual)}、"
-            f"缺 {uncovered} 且 task_pr_gaps 无 dtype_deferred / {_DTYPE_GAP_KIND} 记录"
+            f"缺 {uncovered} 且 task_pr_gaps 无 dtype_deferred / "
+            f"{' / '.join(sorted(_FINDING_GAP_KINDS))} 记录"
             "（静默收窄 dtype 覆盖·证据不完整）")
     else:
         print(f"  dtype 覆盖 OK：要求={req} 实测(真实用例)={sorted(actual)} "
@@ -329,17 +417,32 @@ def gate_task2(d, errs):
         ov = {}
     elif ov.get("verdict") not in _VERDICT_ENUM:
         errs.append(f"verdict.overall.verdict={ov.get('verdict')!r} 非法（须属 {sorted(_VERDICT_ENUM)}）")
-    # C4 交叉核验：裁决自称 passed_with_gaps → caseset 必须真有**结构合法**的 dtype 冲突 gap 撑着
-    # （防手改 verdict.json 写个 passed_with_gaps 冒充「有 gap 所以放过」）。合法性用与 task1 **同一套**硬校。
-    if ov.get("verdict") == "passed_with_gaps":
-        probe = []
-        _req = cs.get("dtype_required")
-        _, _unsup = _collect_dtype_gaps(
-            cs, _actual_dtypes(cs, None),
-            _req if isinstance(_req, list) and all(isinstance(x, str) for x in _req) else None, probe)
-        if not _unsup:
-            errs.append(f"verdict=passed_with_gaps 但 caseset 无结构合法的 {_DTYPE_GAP_KIND} 记录"
-                        f"（裁决自称有 gap 却无据·拒）：{probe}")
+    # 交叉核验（**双向**）：裁决 verdict 与「caseset 里结构合法的被测物侧 dtype gap」必须自洽。两类 finding
+    # gap（op_def 侧 C4 / target_hw 侧）任一有据即认——合法性用与 task1 **同一套**硬校、同进 unsupported 桶。
+    # 无条件先算一次 _valid_finding（结构合法的 finding gap dtype 集），两个方向共用。
+    probe = []
+    _req = cs.get("dtype_required")
+    _, _valid_finding = _collect_dtype_gaps(
+        cs, _actual_dtypes(cs, None),
+        _req if isinstance(_req, list) and all(isinstance(x, str) for x in _req) else None, probe)
+    _verdict = ov.get("verdict")
+    # 方向①：裁决自称 passed_with_gaps → caseset 必须真有结构合法的 finding gap 撑着
+    #        （防手改 verdict.json 写个 passed_with_gaps 冒充「有 gap 所以放过」）。
+    if _verdict == "passed_with_gaps" and not _valid_finding:
+        errs.append("verdict=passed_with_gaps 但 caseset 无结构合法的 "
+                    f"{' / '.join(sorted(_FINDING_GAP_KINDS))} 记录"
+                    f"（裁决自称有 gap 却无据·拒）：{probe}")
+    # 方向②（防 fail-open 断链·2026-07-23 红队）：caseset 有结构合法的 finding gap（覆盖门据此认账放行），
+    #        validator 裁决却是**最低档的干净 pass**——说明这条被测物侧发现没被反映进 verdict（典型：
+    #        `dtype_unsupported_on_target_hw` 这一 kind validator 侧尚未识别，被当自由文本吞掉 → 干净 pass）。
+    #        任它过 = 「算子未实现任务书要求的 dtype」被机读成干净通过、CI 可自动合并（fail-open）。
+    #        fail-closed 判 FAILED（BLOCKED）：有已挂账 finding gap 时，合法 verdict 至少是 passed_with_gaps
+    #        （或更严的 fail / needs_review / passed_with_risk），唯独最低档 'pass' 与「有已挂账 gap」矛盾。
+    if _verdict == "pass" and _valid_finding:
+        errs.append(f"caseset 有结构合法的被测物侧 dtype gap {sorted(_valid_finding)}"
+                    "（覆盖门据此认账放行），validator 裁决却是干净 pass——该 gap 未反映进 verdict"
+                    "（verdict 侧未接线/被抹）→「算子未实现任务书要求的 dtype」不得机读成干净通过·"
+                    "fail-closed 判 FAILED")
     counts = ov.get("counts") if isinstance(ov.get("counts"), dict) else None
     if counts is None:
         errs.append("verdict.overall.counts 缺失")

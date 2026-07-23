@@ -20,6 +20,13 @@
 
 ## 2026-07-23
 
+- **第三类 dtype gap kind `dtype_unsupported_on_target_hw`(ultracode fanout 落地)+ 用户 6 条裁定入 TODO**
+  - 语义:op_def **声明了** dtype、但**目标硬件那支 aclnn 实现**没有(im2col 的 bool 撞出)。此前只能误用 `dtype_deferred`(把「被测物缺口」说成「我们缺口」)→ 补专属 kind,比照 C4 反后门五道硬校、**方向相反**(op_def_dtypes **须含** + 目标硬件 impl_dtypes **须不含** + 四 ref + 不罩真失败 + 在需求内)。
+  - ⭐ **红队三视角(后门/fail-open/一致性)独立命中同一 HIGH fail-open**:门侧认了新 kind(覆盖门放行),但 `validator.py` 侧不识别 → 挂新 kind 的算子 validator 出干净 `pass` → 全链回**干净 PASS/exit 0/CI 自动合并**。**是回归**(改动前该 dtype 会 BLOCKED)。implement agent 还把它误判成「benign、超 scope」,红队纠正——**批 4 那种「改一处开一个洞」单靠自己想不全,多 agent 真跑才逼出来**。
+  - **Fix 走 fail-closed + 诚实**:gate_task2 加**双向**交叉核验(方向②:结构合法 finding-gap 被覆盖门认账、validator 却给最低档干净 pass → 判 FAILED/BLOCKED);doc 明写「target_hw kind 现阶段走 BLOCKED、**非** passed_with_gaps,要端到端须补 validator 侧识别(本批未做)」——不谎称已通。
+  - 验证:168 测(+15 新)新测全绿;5 失败经 `git stash` 在净 HEAD 复验=预存在 torch 缺失、**零新增回归**。父 agent 独立审代码(硬校/双向门无假阳、`validate()` total)+ 跑测 + 核 doc 诚实 = 过 rule #5 门。
+  - **用户 2026-07-23 六条裁定入 TODO 横幅**:(a) mock 奥卡姆不删 (b) 补本 kind (c) 目标机以任务书为准+泛化 (d) 算子名泛化不特判 (e) catlass 降级、无对应 PR (f) U4 关闭(每次就测当前最新分支)。
+
 - **批 6b 真机验收 ✅:Elu + Silu 在真 A5-950 NPU 上坐实(Elu=B-core 放行清单首个 · Silu=本轮新加验证、不在放行 6 之列)**
   - **Elu**(3 float 属性 alpha/scale/inputScale):build elu opp(`--soc ascend950`)成 + 自造 runner 编成 + 20 例真跑,**18/18 非空例 bad_count=0**(含 inf/-inf/nan/边界全1维/网格等特殊例);2 例空张量 `metrics={}` = 无元素可比的 vacuous、**非精度失配**(runner 本有空张量守卫)。
   - **Silu**(0 属性,不同 runner 形):目录 `activation/swish`(aclnnSilu 内部派发 Swish kernel scale=1),`--ops swish` 构建靶点**一次过、没撞坑**;同样 **18/18 非空例 bad_count=0** + 2 空 vacuous。

@@ -43,6 +43,15 @@
 > ⚠ **旧记「golden 只能来自任务书指定的测试方法、否则 fail-closed」漏了第二档、是错的**（2026-07-22 更正），一律以本段为准。
 > 详见 `doc/oprunway-golden-decoupling-adr.md` 决策 3（⚠ 该 doc 是**设计稿**；canon 侧 **ADR 0011 仍 `proposed`**、未经 `bureau:review` promote）。
 
+### 🆕 用户 2026-07-23 追加裁定（覆盖下方相关开放项，别再重开讨论）
+
+就「需拍板」清单逐条定：
+- **(a) mock 通路** → **奥卡姆剃刀，不删**。危害已消除（物理上产不出 `acceptance.json`、改产 non-acceptance），保留其契约自检 + 89 处回归能力。**U6c/U6d 关闭为「不做」。**
+- **(b) 第三类 dtype gap** → **补** `dtype_unsupported_on_target_hw`（op_def 声明了、但**目标硬件那支 aclnn 实现**没有；im2col 的 bool 即此格）。**泛化的 gap 类别、非针对某算子**；比照 C4 `dtype_unsupported_by_op_def` 的「有据可查、反后门」硬校（方向相反：op_def_dtypes **含** + 目标硬件 impl_dtypes **不含**）。裁决落 `passed_with_gaps`。← **本轮活动 task，走 ultracode fanout 落地**。§1.2 line 155-159 的「待用户裁」随之更新。
+- **(c) 目标机 / (d) 算子名** → **以任务书为准 + 泛化设计，绝不针对某算子特判**。目标硬件走「任务书 `适配硬件` × op_def `AddConfig` 双源核验」通用机制；算子名走「从 op_def/example 探测」通用机制（承 B-core 接口探测器）。im2col/Upsample 只是撞上它的实例，**不为它们写专用分支**。
+- **(e) catlass 真机** → **优先级下降**；且**目前无对应 PR**（无被测物）→ 记账降级、暂不推（承下方 4.3 catlass 通路项）。
+- **(f) U4「干净 session 隔离」** → **关闭（非 bug）**：每次就是要测**当前最新分支**，读活仓工作树正是期望行为，不追「换非 directory 源」。
+
 ### ✅ 已合入 main（PR #6 · 2026-07-13~20）
 - [x] **V1 dtype 来源红线**：acc-spec 三入口改「dtype 全集 = 任务书 > 原 TBE 信息库 > 问用户」，PR op_def 仅对照。核验 SOUND。
 - [x] **Q1 样例隔离**：真样例迁 `samples/`、零真值模板、三入口禁读 `.spec.json`、测试重定、archive_ops 内联、守门测试。4 路核验 SOUND。**stale 页 `spec-examples-pollute` 已刷「已修复」（`proposed` 待 review）。**

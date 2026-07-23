@@ -1473,6 +1473,23 @@ def _gap(dtypes=("bfloat16",), op_def_dtypes=("float32", "float16"),
     return g
 
 
+# --- 第三类 `dtype_unsupported_on_target_hw` 的合法 gap 样板（im2col bool 撞出）：op_def **声明了** bool、
+#     但目标硬件那支 aclnn 实现（A2/A3 非 regbase 分支 DTYPE_SUPPORT_LIST）**没有** bool。方向与 C4 相反：
+#     op_def_dtypes **须含** gap dtype、impl_dtypes **须不含**。---
+def _hwgap(dtypes=("bool",), op_def_dtypes=("float32", "float16", "bool"),
+           impl_dtypes=("float32", "float16"),
+           task_doc_ref="任务书 §2 数据类型：float32/float16/bool",
+           op_def_ref="<ops>/im2col/im2col_def.cpp VALUE_DATA_TYPE_LIST 含 DT_BOOL",
+           impl_ref="<ops>/im2col/aclnn_im2col.cpp:222-225 非 regbase 分支 DTYPE_SUPPORT_LIST",
+           target_hw="Atlas A2/A3（非 regbase 分支）", **over):
+    g = {"kind": "dtype_unsupported_on_target_hw", "dtypes": list(dtypes),
+         "op_def_dtypes": list(op_def_dtypes), "impl_dtypes": list(impl_dtypes),
+         "task_doc_ref": task_doc_ref, "op_def_ref": op_def_ref,
+         "impl_ref": impl_ref, "target_hw": target_hw}
+    g.update(over)
+    return g
+
+
 class DtypeConflictGapVerdictTest(unittest.TestCase):
     """C4：任务书要求、op_def 不支持的 dtype 差额 → 挂 task_pr_gaps、裁决落 passed_with_gaps。
     **反后门**：gap 无据 / 自相矛盾 / 想罩住「实现了但跑挂了」/ caseset 私塞 → 一律 contract fail。"""
@@ -1627,6 +1644,22 @@ class GateDtypeConflictGapTest(unittest.TestCase):
         _w(self.d, "verdict.json", _vd("passed_with_gaps"))
         self.assertEqual(self._errs("task2"), [])
 
+    def test_task2_valid_gap_but_clean_pass_verdict_blocks(self):
+        """方向② 同样钉在 C4：合法 gap 已被覆盖门认账，verdict 却是干净 pass（validator 被绕过/手改 verdict）
+        → 门 fail-closed 判 FAILED，不放行。"""
+        _w(self.d, "caseset.json", self._cs([_gap()]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+        errs = self._errs("task2")
+        self.assertTrue(any("干净 pass" in e and "fail-closed" in e for e in errs), errs)
+
+    def test_task2_no_gap_clean_pass_not_flagged(self):
+        """反向不误伤：无任何 finding gap 时干净 pass 是合法的，方向② 不得记 error。"""
+        _w(self.d, "caseset.json", CASESET)                  # 无 task_pr_gaps
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+        self.assertEqual(self._errs("task2"), [])
+
     def test_task2_passed_with_gaps_without_backing_fails(self):
         """手改 verdict.json 写 passed_with_gaps、caseset 却无合法 gap → 拒（裁决自称有 gap 却无据）。"""
         _w(self.d, "caseset.json", CASESET)                  # 无任何 task_pr_gaps
@@ -1643,6 +1676,145 @@ class GateDtypeConflictGapTest(unittest.TestCase):
         _w(self.d, "verdict.json", _vd("passed_with_gaps"))
         errs = self._errs("task2")
         self.assertTrue(any("无据" in e for e in errs), errs)
+
+
+class GateTargetHwGapTest(unittest.TestCase):
+    """门侧（task1 覆盖门 / task2 裁决交叉核验）对第三类 `dtype_unsupported_on_target_hw` gap 的硬校。
+
+    与 `GateDtypeConflictGapTest`（C4）镜像、**方向相反**：C4 证「op_def 压根没声明」，本 kind 证
+    「op_def 声明了、但目标硬件那支实现没有」。反后门五道硬校缺一即拒（拒 = 不计入挂账 → 仍按静默收窄 BLOCKED）。"""
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _errs(self, stage):
+        errs = []
+        G._GATES[stage](self.d, errs)
+        return errs
+
+    def _cs(self, gaps, required=("float32", "float16", "bool")):
+        cs = json.loads(json.dumps(CASESET))          # 真实用例 dtype = {float32, float16}
+        cs["dtype_required"] = list(required)
+        cs["task_pr_gaps"] = gaps
+        return cs
+
+    # --- 正例：合法 target_hw gap → 计入 unsupported → 覆盖门放行 ---
+    def test_valid_target_hw_gap_accounts_coverage(self):
+        """bool 任务书要、op_def 声明了、目标硬件那支没实现、gap 有据 → 非静默收窄 → 覆盖门放行。"""
+        _w(self.d, "caseset.json", self._cs([_hwgap()]))
+        self.assertEqual(self._errs("task1"), [])
+
+    def test_task2_accepts_passed_with_gaps_with_backing(self):
+        """裁决 passed_with_gaps 由合法 target_hw gap 撑住（与 C4 同桶，交叉核验放行）。"""
+        _w(self.d, "caseset.json", self._cs([_hwgap()]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("passed_with_gaps"))
+        self.assertEqual(self._errs("task2"), [])
+
+    # --- 红队 fail-open 回归钉（2026-07-23）：合法 target_hw gap + validator 干净 pass → 门必 FAILED ---
+    def test_task2_valid_gap_but_clean_pass_verdict_blocks(self):
+        """最关键回归：caseset 有**结构合法**的 target_hw gap（覆盖门据此认账放行），但 `validator` 侧
+        尚未识别该 kind → 对这条 gap 产**干净 `pass`**。gate_task2 方向② 必须逮住「有已挂账 finding gap
+        却是最低档干净 pass」→ 记 error → FAILED（fail-closed BLOCKED）。绝不让『算子未实现任务书要求的
+        dtype』被机读成干净通过 / exit0 / CI 自动合并。"""
+        _w(self.d, "caseset.json", self._cs([_hwgap()]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+        errs = self._errs("task2")
+        self.assertTrue(any("干净 pass" in e and "fail-closed" in e for e in errs), errs)
+
+    # --- 负例①：缺 impl_ref（目标硬件实现出处）→ 拒 + 仍 BLOCKED ---
+    def test_missing_impl_ref_blocks(self):
+        g = _hwgap(); g.pop("impl_ref")
+        _w(self.d, "caseset.json", self._cs([g]))
+        errs = self._errs("task1")
+        self.assertTrue(any("impl_ref" in e for e in errs), errs)
+        self.assertTrue(any("dtype 覆盖不足" in e for e in errs), errs)   # 无据 → 不计入挂账 → 仍 BLOCKED
+
+    # --- 负例①b：缺 target_hw（哪支硬件）→ 拒 ---
+    def test_missing_target_hw_blocks(self):
+        g = _hwgap(target_hw="   ")               # 空白串不算出处
+        _w(self.d, "caseset.json", self._cs([g]))
+        errs = self._errs("task1")
+        self.assertTrue(any("target_hw" in e for e in errs), errs)
+
+    # --- 负例②：op_def_dtypes 不含 gap（op_def 其实没声明）→ 拒（该走 C4）---
+    def test_op_def_not_declaring_gap_blocks(self):
+        """bool 不在自报 op_def_dtypes 里 → 说明 op_def 压根没声明 → 属 C4，本 kind 拒。"""
+        _w(self.d, "caseset.json",
+           self._cs([_hwgap(op_def_dtypes=["float32", "float16"])]))   # 缺 bool
+        errs = self._errs("task1")
+        self.assertTrue(any("dtype_unsupported_by_op_def" in e and "没声明" in e for e in errs), errs)
+        self.assertTrue(any("dtype 覆盖不足" in e for e in errs), errs)
+
+    # --- 负例③：impl_dtypes 含 gap（目标硬件其实实现了）→ 拒（自相矛盾/伪造）---
+    def test_impl_declaring_gap_blocks(self):
+        _w(self.d, "caseset.json",
+           self._cs([_hwgap(impl_dtypes=["float32", "float16", "bool"])]))   # bool 竟在 impl 支持集里
+        errs = self._errs("task1")
+        self.assertTrue(any("自相矛盾" in e for e in errs), errs)
+
+    # --- 负例④（最关键）：gap dtype 有真实用例在跑 → 拒（属「实现了但跑挂了」）---
+    def test_gap_covering_running_dtype_blocks(self):
+        """挂「目标硬件不支持 float16」但 float16 有真实用例在跑 → 拒。
+        判别式：没实现 → 造不出用例；实现了但跑挂 → 一定有用例 + evidence，须走精度/功能裁决。"""
+        _w(self.d, "caseset.json",
+           self._cs([_hwgap(dtypes=["float16"], op_def_dtypes=["float32", "float16"],
+                            impl_dtypes=["float32"])],
+                    required=("float32", "float16")))
+        errs = self._errs("task1")
+        self.assertTrue(any("跑挂了" in e for e in errs), errs)
+
+    # --- 负例⑤：给任务书没要求的 dtype 挂账 ---
+    def test_gap_outside_dtype_required_blocks(self):
+        _w(self.d, "caseset.json",
+           self._cs([_hwgap(dtypes=["complex64"],
+                            op_def_dtypes=["float32", "float16", "complex64"],
+                            impl_dtypes=["float32", "float16"])],
+                    required=("float32", "float16")))
+        errs = self._errs("task1")
+        self.assertTrue(any("dtype_required" in e for e in errs), errs)
+
+    def test_gap_checked_even_without_dtype_required(self):
+        """删掉 dtype_required 不得连带绕过 target_hw gap 硬校（同 codex#2 对 dtype_tested 的教训）。"""
+        cs = json.loads(json.dumps(CASESET))
+        # 谎称在跑的 float16 目标硬件不支持——即便无 dtype_required，「跑挂了」硬校仍须行使
+        cs["task_pr_gaps"] = [_hwgap(dtypes=["float16"], op_def_dtypes=["float32", "float16"],
+                                     impl_dtypes=["float32"])]
+        _w(self.d, "caseset.json", cs)
+        errs = self._errs("task1")
+        self.assertTrue(any("跑挂了" in e for e in errs), errs)
+
+    def test_task2_forged_target_hw_gap_fails(self):
+        """伪造 target_hw gap（缺 impl_ref）+ verdict 写 passed_with_gaps → 门仍拒（自称有 gap 却无据）。"""
+        g = _hwgap(); g.pop("impl_ref")
+        _w(self.d, "caseset.json", self._cs([g]))
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("passed_with_gaps"))
+        errs = self._errs("task2")
+        self.assertTrue(any("无据" in e for e in errs), errs)
+
+    # --- 抗坏输入：畸形字段不得让门崩溃（validate total，与 C4 同规矩）---
+    def test_malformed_fields_do_not_crash(self):
+        """op_def_dtypes/impl_dtypes/各 ref 字段类型全错 → 门累计 error、判 BLOCKED，绝不抛异常逃出。"""
+        bad = {"kind": "dtype_unsupported_on_target_hw", "dtypes": ["bool"],
+               "op_def_dtypes": {"not": "a list"}, "impl_dtypes": 5,
+               "task_doc_ref": 123, "op_def_ref": None, "impl_ref": ["x"], "target_hw": {}}
+        _w(self.d, "caseset.json", self._cs([bad]))
+        errs = self._errs("task1")                    # 不抛异常即证 total
+        self.assertTrue(errs)                         # 畸形 → 拒 → 非空 error（走 BLOCKED）
+
+    def test_malformed_dtypes_do_not_crash(self):
+        """dtypes 本身非法（非 list / 元素非 str）→ 早退记 error、不崩、不计入挂账。"""
+        for bad_dtypes in ("bool", [1, 2], [], None):
+            g = {"kind": "dtype_unsupported_on_target_hw", "dtypes": bad_dtypes,
+                 "op_def_dtypes": ["float32", "float16", "bool"], "impl_dtypes": ["float32", "float16"],
+                 "task_doc_ref": "t", "op_def_ref": "o", "impl_ref": "i", "target_hw": "hw"}
+            _w(self.d, "caseset.json", self._cs([g]))
+            errs = self._errs("task1")                # 不抛异常即证 total
+            self.assertTrue(any("dtypes" in e for e in errs), (bad_dtypes, errs))
 
 
 class PassedWithGapsWiringTest(unittest.TestCase):
