@@ -20,6 +20,20 @@
 
 ## 2026-07-23
 
+- **批 6b 期1-A 落地:stale gate 全仓对齐 + 接回断头配置(引擎零能力改动)**
+  - 接回 `OPRUNWAY_VENDOR_SUFFIX`(repo_adapter `_ne_cfg`+env-export;空=沿用仓名正则、非空=显式给,向后兼容)+ 3 条测试。
+  - **8 处 stale gate 表述全仓对齐**:把「仅 experimental/math 闭环」统一改成「ops-<族>·aclnn 两段式·opp 安装型(含非 experimental 子树)」;删幽灵变量 `OPRUNWAY_TARGET_DIR`(runner 通路零命中、旧文误指);命名修。
+  - ⭐ **codex 审逮到我第一版改得不全**(只改 3 份的 gate 表主体,漏了同文件 frontmatter/description + 别处 5 个入口/编排文档 AGENTS/README/task-prompts/acceptance-workflow/op-acceptance)——「stale 散布多处、改一处不够」的典型,清完 8 处。
+  - ⭐ **意外收获**:清 stale 时发现「**ops-<族> 非 experimental 子树的 aclnn 算子引擎本来就能跑**」(run_on_npu.sh:49 `experimental/` 前缀→`--experimental`、非 experimental→`EXP=""`),只被过时散文挡着 → **零引擎改动就放行了这一类**,不需要 B-core。
+  - **期0 债已确认还清**(非本批新做):scout 说的「arity≥3 静默截断违 fail-closed」是**误报**——`check_spec_capability`(2026-07-22)已 fail-closed,实证 arity=3 在 dry_run/gen_cases 都拦死。scout 读 `_build_inputs` 二元 return 就下结论,没看到前置闸(finding 逐条实证、不照单全收,同批 4/6)。
+  - 验证:本地 shim 759 绿、lint PASS/SYNCED。本批纯散文 + 向后兼容 env 接线、无真机专属逻辑改动 → 未单独 a3。
+
+- **批 6b 抛方案(调研 workflow,未实施)**:4 路并行摸底 + 综合 → `doc/oprunway-batch6b-design.md`。
+  - ⭐ **调研纠正了我(和三份 runner 散文)的错误前提**:批 6b 以为要「改 run_on_npu.sh 里硬编码的 experimental/math/$OP」——实读代码发现**那些早被生成化了**(commit 422ed52)。真正锁死通路的**不是引擎**,是几张建在 stale 散文上的 gate 表:散文还叫 agent 去扩一个**幽灵变量 `OPRUNWAY_TARGET_DIR`**(runner 通路的 .sh/.py 里零命中)。这把批 6b 从「改真机大工程」变成「文档对齐 + 微接线的省力第一刀」。
+  - 真闸门三块:build.sh CLI 方案 · opp 自定义 vendor 布局 · aclnn 两段式链接(只对换构建体系/换接口的算子是硬闸)。断头配置:`OPRUNWAY_VENDOR_SUFFIX` shell 认但 repo_adapter 不导出。
+  - 推荐 A(doc 对齐+接回配置)+B-core(接口从 example 探测)第一刀 · C(per-op out_shape 摘 shape-transform 3)第二刀 · D(dtype 谱)分期。期0 先还 arity≥3 静默截断的 fail-closed 债。
+  - **6 个 open questions 待用户拍板**(第一刀范围、clone 4 仓副作用、dtype 冻不冻等)。**只调研+抛方案,零代码改动。**
+
 - **批 4：golden 判据锚拉回 spec（判据只从 spec 派生·硬约束 #5）——ultracode 红队 + codex 联手把它锤实**
   - **动因（真管路实证）**：批 5 那道 BLOCKED 门吃的是 **caseset 的自声明** `expected.golden_tier.blocked_reason`——改 `caseset.json` 一行（blocked→null）即绕过。逐步复现：真 tier1 `pass` → 改 blocked → `blocked` → 再改回 tier2 → `pass`。
   - **口径 C 的 preview 有洞（实证发现）**：门吃 `blocked_reason`，纯对账 authorization_kind/snapshot_sha 拦不住「只改 blocked_reason」。故做**更强版**：validator 对账后**用 spec 锚重新 `derive_golden_tier`**，不信 caseset 的 blocked_reason。

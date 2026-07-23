@@ -509,7 +509,7 @@
   - **审修门逮到 4 个 fail-open**（详见简表 07-23 条）：golden 里 `SystemExit(0)` 假绿（**引擎主路 `load_golden` 同洞、一并修**）· argparse 参数错误退 2 与「需人核」撞车 · 退出码按 tier 路由漏掉 `(tier 1, 需人核)` · 必需导出只查 `hasattr`。已全修 + 8 条回归。
   - ⚠ **留下的诚实边界（已写进 `check_golden.py` docstring，不是遗漏）**：golden.py 与检查器**同进程**执行，`os._exit(0)` / C 层退出挡不住，要挡须换子进程隔离。**有意不做**——runner.cpp 本身就要编译并在 NPU 上跑，只给 golden 加沙箱是不对称的。
   - 验证：本地 shim **743 绿** · **a3 真 torch 2.13.0 743/743 绿** · a3 上 `check_golden.py IsClose --load` exit 0、`SystemExit(0)` exit 1。
-- [ ] **批 6b · 放宽 runner 的 scope gate 覆盖面**（从批 6 拆出）：现仍只认 `experimental/math/<op>` + aclnn 两段式，非此一律 BLOCKED/转 P3。要从任务书推目标目录与接口形态（守「零硬编码 / 探测或问」的最高律令），配 `OPRUNWAY_TARGET_DIR` 等。⚠ 这是「支持所有任务书里出现过的算子类型」那条用户指令的**剩余大头**——批 6 只让 golden 侧不受它拖累，runner 侧仍窄。
+- [~] **批 6b · 放宽 runner 的 scope gate 覆盖面**（方案 `doc/oprunway-batch6b-design.md`；期1-A 已落地）：**期1-A ✅**(接回 VENDOR_SUFFIX + 8 处 stale gate 全仓对齐 + 零引擎改动放行 ops-<族> 非 experimental aclnn;期0 债经实证确认已还、scout 误报)。**剩** B-core(接口探测,需 clone 4 仓)+ 期2 C(per-op out_shape)+ 期3 D(dtype/多输入/双实现/catlass,逐项立项)。原条目——现仍只认 `experimental/math/<op>` + aclnn 两段式，非此一律 BLOCKED/转 P3。要从任务书推目标目录与接口形态（守「零硬编码 / 探测或问」的最高律令），配 `OPRUNWAY_TARGET_DIR` 等。⚠ 这是「支持所有任务书里出现过的算子类型」那条用户指令的**剩余大头**——批 6 只让 golden 侧不受它拖累，runner 侧仍窄。
 - [ ] **批 7 · 报告 + canon 收口**：报告展示 tier / provenance / 人核项；ADR 0011 与本轮裁定走 `capture → compile → review`（**现 ADR 0011 仍 `proposed`**）。
 - [ ] 贯穿项：产出物落点 `<ops_root>/<op>/`，与 `find_runner`/`load_golden` 的安全边界（**逐段拒软链**、`_check_id`、缺则 fail-closed）对齐。
 - [ ] **R8 记账**：catlass 通路（`catlass_adapter.py` 的内置 matmul golden）本轮 **out-of-scope**，两档链暂不覆盖它。

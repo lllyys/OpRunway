@@ -2,7 +2,7 @@
 
 > `acc-runner` skill 的 reference。据 spec + `pr_facts`（算子自带 example + op_def）**生成一个锚定算子实测路径的 runner** `oprunway_<op>_runner.cpp`，供 `repo_adapter.run_new_example` 在真 NPU 上跑正确性 + msprof 测性能。
 >
-> **⚠ 当前闭环范围（诚实说明，勿超范围声称）**：只有 **ops-math 风格、`experimental/math/<op>` 目录、aclnn 两段式接口**的算子是**代码闭环**的（`run_on_npu.sh` 目前硬编码 `experimental/math/$OP` + `--experimental` + `${VEN}_math`）。legacy / 非 math 族 / 双实现 / catlass **尚未支持**（需先扩 `run_on_npu.sh`/`repo_adapter` 加 `OPRUNWAY_TARGET_DIR` 等配置，见 §3）。
+> **⚠ 当前闭环范围（诚实说明，勿超范围声称）**：**代码闭环 = ops-<族> 仓 · opp 安装型产物 · aclnn 两段式接口**。⚠ 引擎的目录/vendor 后缀/build 旗标**已生成化**（`OPRUNWAY_OP_SRC`/`OPRUNWAY_VENDOR_SUFFIX`/`experimental/` 前缀），**不再硬编码 `experimental/math/$OP` + `${VEN}_math`**（2026-07-23 批 6b 调研更正）。真正的闸是三块：`build.sh --pkg --ops` 家族命令 · opp vendor 布局 · aclnn 链接。catlass（换构建体系+换接口）/ 双实现 **尚未支持**（放宽计划见 `doc/oprunway-batch6b-design.md`；⚠ 旧文提的 `OPRUNWAY_TARGET_DIR` 是幽灵变量、runner 通路无此配置）。
 > **验证-才-信目前是「纪律」不是「代码强制门」**：`repo_adapter` 只检查 runner 文件是否存在，**不识别 unverified 标记**。真正的硬门要加 sidecar 契约（§4），未加前 agent/人**必须自觉执行验证**。
 >
 > 已跑通的三个 runner（`${OPRUNWAY_PLUGIN_ROOT}/samples/runners/oprunway_{isclose,sign,equal}_runner.cpp`，分别 unary/数值、binary/bool、binary/bool+attr）是**只读参考样例 / 生成器骨架种子**（非引擎组件、非运行时回退靶）。`samples/` 随插件分发（在插件内，2026-07-22 由仓根迁入）；`${OPRUNWAY_PLUGIN_ROOT}` = 本插件根中立变量，Claude 下等价 `${CLAUDE_PLUGIN_ROOT}`。
@@ -67,12 +67,12 @@ main: 读 OPRUNWAY_CASES/manifest → 逐行 ParseLine+RunCase → 打印 OPRUNW
 
 **三档填法**：一元数值(Sign)：A=`aclnn_sign.h`/B=1输入0attr/C=同dtype/D=`aclnnSignGetWorkspaceSize(self,out,…)`；二元bool(Equal)：A=`aclnn_eq_tensor.h`/B=2输入0attr/C=bool/D=`aclnnEqTensorGetWorkspaceSize(self,other,out,…)`；二元bool+attr(IsClose)：A=`aclnn_is_close.h`/B=2输入+3attr(`double rtol,double atol,bool equalNan`)/C=bool/D=`aclnnIsCloseGetWorkspaceSize(self,other,rtol,atol,equalNan,out,…)`。
 
-## 3. 构建路径选择（**当前仅 experimental/math 闭环，余待扩展**）
+## 3. 构建路径选择（**当前 ops-<族>·aclnn·opp 安装型闭环；catlass 换构建体系待扩**）
 
 | pr_facts.target_dir | 状态 | 做法 |
 |---|---|---|
-| `experimental/math/<op>`（is_close/sign/equal）| ✅ **已闭环** | `run_on_npu.sh` 现走 `--experimental --pkg --ops=<op> --soc=<soc> --vendor_name=<v>` |
-| `<族>/<op>` 非 experimental（`activation/relu`、`math/equal`…）/ 双实现 / catlass | ⛔ **未支持** | **先扩** `run_on_npu.sh`/`repo_adapter`（加 `OPRUNWAY_TARGET_DIR`/`OPRUNWAY_EXPERIMENTAL` 等配置并消费）再用；当前遇到 → 记 gap、不假装能跑 |
+| ops-<族> 仓 · aclnn 两段式 · opp 安装型（is_close/sign/equal，含 experimental 与非 experimental 子树）| ✅ **已闭环** | `run_on_npu.sh` 走 `build.sh --pkg [--experimental] --ops=<basename OP_SRC> --soc --vendor_name`；目录/后缀由 `OPRUNWAY_OP_SRC`/`OPRUNWAY_VENDOR_SUFFIX` 生成 |
+| **换构建体系**（catlass `scripts/build.sh <example>`）/ **换接口**（非 aclnn 两段式）/ 双实现 | ⛔ **未支持** | 按 `doc/oprunway-batch6b-design.md` 扩「构建策略 + 接口分派」；当前遇到 → 记 gap、不假装能跑（⚠ 别指幽灵变量 `OPRUNWAY_TARGET_DIR`）|
 > ⚠ Equal 那次 = experimental 实现本身坏、非路径选错；但 legacy/双实现确要选对——**现在代码还没做，别声称能选**。
 
 ## 4. 验证-才-信（**当前是纪律；代码硬门待补 sidecar**）
@@ -91,7 +91,7 @@ main: 读 OPRUNWAY_CASES/manifest → 逐行 ParseLine+RunCase → 打印 OPRUNW
 - out.bin 写法与 verify_mode/out tensor dtype 一致；保留 `OPRUNWAY_DONE` 原格式 + 退出码语义。
 - 文件名 = `oprunway_<op.lower()>_runner.cpp`。
 - **未过 §4 验证前，runner 不接 run_new_example**（当前靠自觉，直到 sidecar 门落地）。
-- target_dir 非 `experimental/math` → 记 gap、不硬跑（§3）。
+- 换构建体系（catlass）/ 非 aclnn 接口 / 双实现 → 记 gap、不硬跑（§3；非 experimental 的 ops-<族> aclnn 算子**在范围内**，引擎已生成化）。
 - **输出形状（§6）**：该算子输出形状 = 各输入广播结果吗？
   - 是（elementwise）→ `golden.py` **不导出** `out_shape`，骨架照旧。
   - 否 → `golden.py` 必须导出 `out_shape`（§6.1）；runner 的输入 buffer 与输出 buffer **分开算**（§6.2）；

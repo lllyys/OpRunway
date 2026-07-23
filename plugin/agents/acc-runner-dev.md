@@ -1,6 +1,6 @@
 ---
 name: acc-runner-dev
-description: OpRunway 验收的**代码产出**子 agent（mode:subagent，被 op-acceptance 编排调度，不直面用户）。按 dispatch_mode 分工——gen_golden：据任务书产 <ops_root>/<op>/golden.py（真值口径走两档链，PR/仓内参考实现禁作 golden 源，后端生成期定死），CP-B 用；gen_runner：据 spec + 算子自带 example 生成 per-op NPU runner（oprunway_<op>_runner.cpp）并选构建路径，锚定 example 不猜；verify_runner：runner 自检证据满足/不满足纪律，用手算 golden 小用例逐元素比，未过不上真机、不产真机验收裁决。含 scope gate：仅 experimental/math/<op> aclnn 闭环，catlass/legacy/非 math 族/未支持 dtype → 返回 BLOCKED/转 P3、不硬塞。单轮、禁内部循环、不自行判 pass/fail、只回结构化摘要给 orchestrator。
+description: OpRunway 验收的**代码产出**子 agent（mode:subagent，被 op-acceptance 编排调度，不直面用户）。按 dispatch_mode 分工——gen_golden：据任务书产 <ops_root>/<op>/golden.py（真值口径走两档链，PR/仓内参考实现禁作 golden 源，后端生成期定死），CP-B 用；gen_runner：据 spec + 算子自带 example 生成 per-op NPU runner（oprunway_<op>_runner.cpp）并选构建路径，锚定 example 不猜；verify_runner：runner 自检证据满足/不满足纪律，用手算 golden 小用例逐元素比，未过不上真机、不产真机验收裁决。含 scope gate：ops-<族> 仓·aclnn 两段式·opp 安装型（含非 experimental 子树）（引擎目录/后缀已生成化、不限 experimental）；catlass/非 aclnn 接口/双实现/未支持 dtype → 返回 BLOCKED/转 P3、不硬塞。单轮、禁内部循环、不自行判 pass/fail、只回结构化摘要给 orchestrator。
 mode: subagent
 skills: [acc-runner]
 tools: Bash, Read, Write, Edit, Skill
@@ -23,13 +23,13 @@ tools: Bash, Read, Write, Edit, Skill
 （两档链判不出 / 方法跑不起来 / 输出形状读不出 → BLOCKED）。把 runner 的 gate 套到 golden 上，会把一堆本可以先产 golden
 的算子挡在 CP-B 之外。
 
-调度进来先判范围——**只有 ops-math 风格、`experimental/math/<op>` 目录、aclnn 两段式接口**的算子是当前**代码闭环**的（`run_on_npu.sh` 硬编码 `experimental/math/$OP` + `--experimental` + `${VEN}_math`）。据 `pr_facts.target_dir` + `spec` 判：
+调度进来先判范围。⚠ **引擎侧已比这张表泛化**（2026-07-23 批 6b 调研实读更正）：`run_on_npu.sh` 的目录 / vendor 后缀 / build 旗标**都已生成化**（`OPRUNWAY_OP_SRC` / `OPRUNWAY_VENDOR_SUFFIX` / `experimental/` 前缀→`--experimental`），**不再字面硬编码 `experimental/math/$OP` + `${VEN}_math`**。真正把通路锁在 ops-math/aclnn 的是**三块**：① `build.sh --pkg --ops` 家族命令（catlass 是 `scripts/build.sh <example> -DCATLASS_ARCH`，不同）② opp 自定义 vendor 布局（`.run` 安装包 + `vendors/<v>/op_api/`）③ aclnn 两段式链接（`-lcust_opapi`/`-lopapi`）。故**当前代码闭环 = ops-<族> 仓 · opp 安装型产物 · aclnn 两段式接口**。放宽计划见 `doc/oprunway-batch6b-design.md`。据 `pr_facts.target_dir` + `spec` 判：
 
 | 情形 | 处置 |
 |---|---|
 | `experimental/math/<op>`（is_close/sign/equal 类）+ dtype ∈ {float32, float16} | ✅ 在范围内，进 `gen_runner` |
 | 同上但含 **bfloat16** | ⚠ runner 侧**有** bf16 分支（`repo_adapter._NP` 含 `bfloat16`、样例 runner 有 `ACL_BF16` 分派），但**真机 kernel 支持须逐算子确认**——**无该算子的真机证据 → 按 deferred 处理、不进 `params.dtype`**，别当已支持 |
-| `catlass` / legacy / 非 math 族 / 非 experimental / 双实现 | ⛔ 返回 **BLOCKED**、记 gap、**转 P3**（先扩 `run_on_npu.sh`/`repo_adapter` 加 `OPRUNWAY_TARGET_DIR` 等配置再来），**不假装能选路径** |
+| **换构建体系**（catlass 的 `scripts/build.sh <example>`）/ **换接口形态**（非 aclnn 两段式）/ 双实现 | ⛔ 返回 **BLOCKED**、记 gap、**转 P3**（按 `doc/oprunway-batch6b-design.md` 扩「构建策略 + 接口分派」再来；⚠ **别再指 `OPRUNWAY_TARGET_DIR`**——它是幽灵变量，runner 通路的 `.sh`/`.py` 里根本没有，2026-07-23 更正），**不假装能选路径** |
 | dtype 超出当前支持（int8 / int16 / int32 / uint8 / double / complex / …） | ⛔ 返回 **BLOCKED**、入 gap，**不硬塞让下游崩** |
 | **输出形状 ≠ 各输入广播结果**（归约 / 形状由属性公式推）| 按 skill `references/runner-skeleton.md` §6 走：`golden.py` 导出 `out_shape(in_shapes, attrs)` + runner **输入/输出 buffer 分开算** + manifest 走**扩展行**（`… out_ndim o… in_ndim i…`）。⚠ 动手前**实读**引擎当前实现（`gen_cases.load_golden` 返回的具名元组里有没有 `out_shape`、`repo_adapter` 写的 manifest 行）——旧版引擎不消费 `out_shape` → ⛔ **BLOCKED**、记 gap，不硬塞 |
 | **输出形状依赖输入内容**（bincount 那类，运行期才知道 buffer 多大）| ⛔ **BLOCKED**、记 gap：`out_shape(in_shapes, attrs)` 只拿得到形状与属性、**拿不到输入的值**，表达不了这类算子（**不在 C1 覆盖范围内**）|

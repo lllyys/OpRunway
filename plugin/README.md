@@ -28,7 +28,7 @@ agent 内部完成六步（取材 → 任务书→spec → 生成并验证 runne
 ## 现状（诚实）
 
 - **mock 端到端可用**（无需真机）；**真机跑测**需开 VPN + runner 验证。
-- runner 生成当前仅 `experimental/math` aclnn 算子闭环；「验证-才-信」是**纪律**非代码硬门（sidecar 待补）。
+- runner 生成当前闭环 = ops-<族> 仓·aclnn 两段式·opp 安装型（含非 experimental 子树）（catlass/非 aclnn/双实现待扩，见 doc/oprunway-batch6b-design.md）；「验证-才-信」是**纪律**非代码硬门（sidecar 待补）。
 - 已端到端跑通管路的算子：IsClose / Sign / Equal / Neg。⚠ 其中经**真 NPU 验收裁决**的只有 IsClose / Sign；
   mock 通路自 C5（2026-07-22）起**不产验收裁决**（只产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）。
 

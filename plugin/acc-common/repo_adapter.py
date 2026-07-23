@@ -559,6 +559,11 @@ def _ne_cfg():
            "opp_rebuild": (g("OPRUNWAY_OPP_REBUILD") or "0").strip(),  # =1 授权从当前源重建 opp（含 rm -rf $V）
            "soc":   g("OPRUNWAY_SOC", "ascend910_93"),       # 昇腾通用约定，非私有机名
            "vendor": g("OPRUNWAY_VENDOR", "oprunway"),
+           # 批 6b：vendor 后缀显式配置点。**空 = 沿用现行为**（run_on_npu.sh 从 OPS 仓目录名
+           #   `(cann-)?ops-<族>` 正则推，推不出 fail-closed）；**非空 = 编排层显式给**（catlass /
+           #   cann-recipes-infer 这类仓名不匹配正则的算子靠它，不必手工 env）。此前 shell 认（run_on_npu.sh:28）
+           #   但本 env-export 块不导出它 → 断头配置，编排通路够不着（批 6b 调研实读坐实）。
+           "vendor_suffix": (g("OPRUNWAY_VENDOR_SUFFIX") or "").strip(),
            "setenv": g("OPRUNWAY_SETENV", "/usr/local/Ascend/ascend-toolkit/set_env.sh")}
     # op_src 安全校验：须为安全的**嵌套**相对路径。除路径逃逸/注入外，还须堵 `.` / `./` / 裸子树根（如 `experimental`）
     #   /`.` 段/尾斜杠——否则 run_on_npu.sh 里 SRC=$OPS/. 会把 OPHASH 绑到**整仓**、`case $OP_SRC in experimental/*`
@@ -807,6 +812,8 @@ def run_new_example(caseset, work_dir, defect_cases=None):
               f"OPRUNWAY_SETENV={q(cfg['setenv'])}\n"
               f"export OPRUNWAY_RUNNER={q(runner_name)} OPRUNWAY_OPNAME={q(caseset['op'])} "
               f"OPRUNWAY_OP_SRC={q(cfg['op_src'])} OPRUNWAY_OPP_REBUILD={q(cfg['opp_rebuild'])}\n"
+              # 批 6b：接回断头配置。空串无害（shell `[ -n ... ]` 判 false → 走仓名正则，现行为不变）。
+              f"export OPRUNWAY_VENDOR_SUFFIX={q(cfg['vendor_suffix'])}\n"
               f"bash {q(rroot + '/run_on_npu.sh')}\n")
     r = _shell(host, script, timeout=2400, check=False, capture=True)
     blob = (r.stdout or "") + (r.stderr or "")

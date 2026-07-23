@@ -49,6 +49,15 @@ class NeCfgNoPrivateDefaultsTest(unittest.TestCase):
         self.assertEqual(c["host"], "somehost")
         self.assertEqual(c["ops"], "/remote/ops-repo")
 
+    def test_vendor_suffix_default_empty_backward_compatible(self):
+        """批 6b：未给 OPRUNWAY_VENDOR_SUFFIX → 空串（sentinel=沿用现行为·shell 走仓名正则），不报错。"""
+        self.assertEqual(_cfg(_FULL_REMOTE)["vendor_suffix"], "")
+
+    def test_vendor_suffix_passed_through(self):
+        """给了 → 原样带进 cfg（供 env-export 显式导出，catlass/非 ops-<族> 仓靠它）。"""
+        env = dict(_FULL_REMOTE, OPRUNWAY_VENDOR_SUFFIX="cv")
+        self.assertEqual(_cfg(env)["vendor_suffix"], "cv")
+
     def test_missing_each_required_field_raises(self):
         for drop in ("OPRUNWAY_REMOTE_DIR", "OPRUNWAY_OPS_REPO", "OPRUNWAY_OPP"):
             env = dict(_FULL_REMOTE); env.pop(drop)
@@ -318,6 +327,10 @@ class LocalRunNewExampleWiringTest(unittest.TestCase):
         self.assertTrue(any("runner" in os.path.basename(t) for t in to_targets), "runner.cpp 未经 _copy_to 上传")
         from_srcs = [c.args[1] for c in m_from.call_args_list]     # (host, remote, local)
         self.assertTrue(any(s.endswith("out.bin") for s in from_srcs), "out.bin 未经 _copy_from 拉回")
+        # 批 6b：orchestrate 那次 _shell 的 script 确含 VENDOR_SUFFIX 的 export（证断头配置已接回）。
+        orch = next(c.args[1] for c in m_shell.call_args_list if "run_on_npu.sh" in c.args[1])
+        self.assertIn("export OPRUNWAY_VENDOR_SUFFIX=", orch,
+                      "env-export 未导出 OPRUNWAY_VENDOR_SUFFIX——断头配置没接回")
         # 每处 host（首位置实参）都是 None —— 证 local 模式没漏出 ssh/scp
         for m, label in ((m_shell, "_shell"), (m_to, "_copy_to"), (m_from, "_copy_from")):
             for call in m.call_args_list:
