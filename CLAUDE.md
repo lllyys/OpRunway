@@ -4,6 +4,24 @@
 
 ## ⚠ 最高优先级规则
 
+0. **🔴 泛化优先 · 绝不针对具体算子做优化 / 特判**（用户 2026-07-24 明定为**最高原则**，位列 #1 之前）。
+   本项目是**通用算子验收工具**——**一切设计与改进必须泛化**：接口 / 目标目录 / 形状 / dtype 一律从
+   「任务书 × op_def × example」**按字段分源通用探测**（承「零硬编码」）。**禁的是「按算子身份分派」**：
+   代码里绝不出现按算子名的分支（`if op == "<名>"`）、绝不为**某个算子**裁专属逻辑 / 复制一份验收语义。
+   - **允许**按「稳定的接口能力 / 仓 / 框架」扩通用机制——canonical 的 per-repo `repo_adapter` / `generated_harness`
+     是按**能力 / 仓**扩（合法），**不是**按算子身份。把「各按一类形状裁的机制」并起来冒充「通用」才是违规（见 U7 设计 §3.1）。
+   - **具体算子只作「见证 / 测试输入」验证通用通路，绝不是优化目标**。**建通用能力**时见证挑「最压满结构轴」的、
+     别只挑最简单的类去裁机制；最小见证作冒烟 / 隔离故障 / baseline 不在此限。
+   - **判据（可操作）**：一个制品**是否特判**——看它**是否表达可复用能力、是否由通用 schema / 生成器处理**，
+     不只看是「数据」还是「代码」。per-op 的 spec / IR / gap / 目标机 是通用工具消费的**数据**（核实这些不违规）；
+     手写 per-op runner / 为某算子改工具代码 = 违规。
+   - **换任意「域内」算子（域内定义见 `plugin/acc-common/contract_ir/`：无状态 / 标准 aclnn 两段式 / 无 opaque descriptor），
+     工具零改即可跑**；跑不了 = 通用性缺口 → 补**通用机制**、绝不开特例。**域外**（稀疏库 API / 有状态容器 / 无张量时序 …，
+     **列表非穷尽**）命中即 **fail-closed 标「不支持的接口能力」**、绝不硬塞、绝不自动归某类 adapter；**未列的新形态默认按域外 fail-closed 待人裁**。
+   - **三源缺失 / 冲突时**：ABI 走 header/example、语义 / dtype / 硬件走 op_def × 任务书交叉；**任务书权威**
+     （PR / op_def ≠ 任务书 → 可能选错 PR，承硬约束 #1）；仍定不出 → **fail-closed 或 `AskUserQuestion` 问用户**，绝不静默猜。
+   ⚠ 本条**已 capture 进 bureau logbook、待 `bureau:review` promote**；**promote 前以本条（CLAUDE.md）为现行权威**、bureau 副本按 trust tier 读。
+
 1. **先抛方案、经用户同意才落地实施**。当前处于 init 阶段，骨架已搭、组件未建。
    构建 skill / agent / workflow 前，先写「设计 / 取舍 / 候选改法」，向用户列出、点头后才动手。
 2. **不 push 任何远端**（含自己的 fork），除非用户明示。GitCode/GitHub 的提 issue / PR / comment 等对外动作，
@@ -17,14 +35,13 @@
 4. **本项目所有 doc 产出（md / 图 / svg 等）放项目根的 `doc/`**
    （`/Users/ll/Desktop/workspace-ascend/OpRunway/doc/`），**不**放上层 `markdown/`。
    每次改动落地后，同步在简表 `doc/oprunway-changes-brief.md` 追加一两句（倒序、大白话）。
-5. **Codex audit-fix 门（commit 前）**：在 #1 / #3 的用户确认规则之外，再加一层独立审修门；它不替代方案确认、
-   副作用确认，也不替代 #4 的 `doc/` 落点与改动简表。触发点：
-   - **commit 之前**：对本次 commit 涉及的全部改动（代码 / md / bureau 文本）统一审+修，通过后才 commit。
-     开发迭代中的中间产物不必逐个审，攒到 commit 前一次过。
-   ⚠ **本条 2026-07-10 由用户改定，领先于 canon**：**ADR 0010 现为 `contested`**（2026-07-22 实读 frontmatter
-   更正——此前本条写「canonical 仍记旧触发点、待走 capture→compile→review」**是错的**）。该页已并列 compile 出
-   两个 claim：**Claim A** 双触发点（2026-07-06 canonical）/ **Claim B** 单触发点收敛到 commit 之前（本条）。
-   capture 与 compile 都已完成，**只欠 `bureau:review` 人门裁决**。在裁决前**以本条（= Claim B）为现行执行规则**。
+5. **Codex audit-fix 门（push 前）**（⚠ **2026-07-24 用户改定：门时机从「commit 前」移到「push 前」，且不用每次 commit 都审**）：
+   在 #1 / #3 的用户确认规则之外，再加一层独立审修门；它不替代方案确认、副作用确认，也不替代 #4 的 `doc/` 落点与改动简表。触发点：
+   - **push 之前**：对**自上次 push 以来**本次要推的全部改动（代码 / md / bureau 文本）统一审+修一轮，通过后才 push。
+     **commit 可自由进行、不逐个审**；开发迭代中的中间产物也不审，攒到 push 前一次过。
+   ⚠ **本条 2026-07-24 再次由用户改定，领先于 canon**（此前是「commit 前」）：**ADR 0010 现为 `contested`**——原并列
+   Claim A（双触发点，2026-07-06 canonical）/ Claim B（单触发点·commit 之前）都已被本次「push 之前」**再次覆盖**；
+   须补 capture→compile、走 `bureau:review` 人门裁决。裁决前**以本条（push 前、不逐 commit 审）为现行执行规则**。
    按制品类型分工：
    - **代码 / 脚本**（假 exe、run_derisk.sh、skill 脚本等）→ **`cc-suite:audit-fix`**（9 维代码审→修→验循环）；
    - **散文**（CLAUDE.md 规则 / bureau 决策文本 / 设计 md）→ 底层 `codex exec`（Codex CLI）定制审（cc-suite 的代码维度套不上散文、且过重）。

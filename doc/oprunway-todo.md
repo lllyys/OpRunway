@@ -55,7 +55,39 @@
 > 🔴 **(g) 期3 D / U7「泛化到任务书里所有算子类型」= 现为必要**（用户 2026-07-23 **改定**，此前记的「非必要」作废）。
 > 理由：分类学清点里 **elementwise 仅占 ~34%**（44 算子行；任务书 41 份）；gen_cases 层已通 shape_transform，但**列表输入 / 多输出 / 动态输出 buffer / 复数 / 稀疏等尚未一般化**（真机 runner 仍只单张量）→ 这是「通用算子验收工具」的**真缺口**、不是可选优化。
 > 承 (c)/(d) 的泛化律令（不针对某算子特判）。开工路径见本文档「U7」节 + 「Pdist G1–G4」节。
-> ⚠ 是**多 session 大工程**：先补全 **U7a 形态清单**（已 [~]、ops-math 18 份归类、其余待补）→ 抛方案（rule #1）定 U7b/c schema&runner 一般化 → 分期（U7d 优先级：建议 Foreach 8 份最多者先、归约次之，**仍待你拍板**）。
+> ⚠ 是**多 session 大工程**。**2026-07-23 只读设计 fanout 已产方案** → `doc/oprunway-u7-generalization-design.md`
+> （经实读核实的现状、per-class U7b/c 设计、分期候选、载重前必核缺口）。关键更正：
+> - **瓶颈是 U7c（通用真机 runner）、不是 U7b（spec schema）**——shape_transform 只落 gen_cases 层、**一次没上真机**；
+>   `samples/runners/` 仅三份三浮点单张量骨架，扩展 manifest 在 runner 侧无消费者（isclose 遇 extra 字段 hard fail）。
+> - **「七道硬闸」快照已部分 stale**（实读 blame 证实）：闸 1 输出形状已由 C1 解耦、闸 5 attr 已抬到 `list[int]`、
+>   `run_on_npu.sh` `_math` 硬编码已删、`verify_mode=exact⇒bool` 真机墙已由 `compare_dtype` 修——以设计 doc §1 为准，别再引旧行号。
+> - **分期单位是「泛化能力」、见证算子仅作跑通证据不特判**（承用户 2026-07-23 **强硬重申规则 ③**）。
+>   fanout 建议 **A（通用真机 runner）→ B（归约能力）**，C/D（张量列表/索引）**推迟到 clone ops-nn + U7a 交叉核之后**。
+>   ⚠ 此前「建议 Foreach 8 份最多者先」**已作废**——Foreach 硬卡 `ops-nn 未 clone`、op_def 一个没核，现在落 spec 就撞 #1/#2。
+> - **✅ 已裁（用户 2026-07-23）**：300V Pro 优先级降低、往后放（`Cast&EmbeddingDenseGrad`+`SyncBatchNormGatherStats`
+>   2 份挂起、EmbeddingDenseGrad 从 D 首批见证集剔除；310p 是否即 300V Pro 未核、不落 a3/a5）。
+> - **仍待拍板**：U7d 分期优先级（A→B 建议）+ fused_comm 标签（非阻塞，默认去掉归 reduction）。**在拍板前不落地实施（rule #1）。**
+
+### 🔖 U7 落地进度 + 剩余 TODO —— 2026-07-24 **暂停存档**（用户主动暂停、转更重要事；回来从这接）
+
+> 全链细节见 `doc/oprunway-u7-generalization-design.md`（§3.5 契约 / §3.6 实测 / §3.7 Schema+G / §6 核实批）+ 简表 07-24 条。
+> ⚠ **架构已被用户 2 次纠偏定型**：**泛化优先、绝不针对具体算子做优化/特判**（= CLAUDE.md 最高律令 **#0**，已入 bureau logbook 待 review）。旧「A→B 按类分期」**作废**——改为「先建一份通用契约 + 生成式 binding，见证算子只作测试输入」。
+
+**✅ 已做成（真代码进 `plugin/acc-common/contract_ir/`，16 测全绿）**
+- **F3 通用流水线全建成**：`contract_ir.schema.v1.json`（9 正交 IR 元素 + G1–G5）+ `prober.py`（源码→IR 骨架，语义 fail-closed）+ `codegen.py`（IR→类型化 binding.cpp）+ 4 见证 IR（`examples/*.ir.json`）+ 测（test_prober/codegen/generalize）。
+  - **四轴 emit 全对**：tensor_list / inout（readback_binding 真消费）/ 多输出反转（output_mapping 真消费）/ data-dependent（fail-closed）。
+  - **泛化硬证据**：同一 prober **零改跑 40 个域内算子**全抠出接口；**元测试钉源码零 `if op==X`**。
+  - **codex 审修门跑过**：逮到 output_mapping/readback「只注释没消费」+ fail-closed 可绕，**修 5 条**（3 严 honesty/fail-closed + 2 硬化：去 `_v2` 软特判、binding 加 malloc 检查+资源清理）。
+- **核实完成**：#6 泛化 · #8 inferred（MaxUnpool2d verified、SlidingTile 仍 inferred）· #9 Foreach 语义（ForeachAddScalarV2=单 scalar 等 + per-platform dtype 机读表）。
+- **🔴 #7 对应核（重磅，印证任务书权威）**：**im2col/logspace/MinDim/MaxDim/bincount 5 个全部选错 PR/未落地 → 作废挂起、不进验收**（Equal 血教训在 5 op 重演；被测 op_def 只有 ascend950 vs 任务书 A2/A3、或真交付 PR 仍 open）。⚠ **fixture ≠ 验收目标**：argmax(=MaxDim)/bincount 作 codegen 结构 fixture 仍有效、作验收目标已作废。
+- **治理**：泛化优先入 CLAUDE.md #0 + bureau logbook（`canon/logbook/2026/07/9f5c778e….md`）；session task 板 13 项按 #0 审过。
+
+**🔴 剩余（回来接；多数卡真机/用户/人门）**
+- [ ] **#5 真机四见证**：`covered≠真机绿`。**须先确认 a3/a5 可连 + pta container 可用** → 在 container build+run 4 见证（foreach/inplace_sigmoid/bincount/argmax，⚠ 后两个是结构 fixture 非验收目标）、钉真机绿。**所有真机操作全在服务器 container 执行、绝不 mac。**
+- [ ] **#11 commit 本批**：审修门已跑、关键已修；**commit 须用户明示**。点头后先补散文（doc/CLAUDE.md）codex 审、再 commit（分支 `fix/pdist-usertest-gaps`，**不 push/merge 除非明示**、署名 lys、无 AI trailer）。
+- [ ] **#10 bureau**：#0 原则 + 本轮 stale（ops-nn 已 clone / MinDim-MaxDim 有实现 / 七道闸快照）已 capture 进 logbook；**promote 到 canonical 须用户跑 `bureau:review`**（compile 可 AI 跑、review 是人门）。
+- [ ] **#13 prober/codegen v2 硬化**（真 v2、鲁莽做即过度设计、现 fail-close 于难例）：scalar/array 的 `abi_ctype` 区分 · C-lexer 签名解析（跳注释/字符串/嵌套逗号/EOF depth）· 全 error-path RAII · Schema 关系完整性约束（output_mapping 必填/id 唯一/abi_position 连续）· prober 语义 v2（从 example D2H 抠 direction、glue std::get→ViewCopy 抠 output_mapping——建议走 grounded 语义 fanout、别焊死脆 regex）。
+- [ ] **#12 旧 follow-up**（非 U7）：Q9 NaN/±0/Inf 边界测 · run_workflow Q7/Q9→BLOCKED 端到端断言 · 真机 msprof 跳 trivial · equal_nan 交集证明 · 其余 11 仓 adapter。⚠ 「int32 runner/neg_runner」等**手写 per-op runner 已被通用 codegen 取代**（承 #0）。
 
 ### ✅ 已合入 main（PR #6 · 2026-07-13~20）
 - [x] **V1 dtype 来源红线**：acc-spec 三入口改「dtype 全集 = 任务书 > 原 TBE 信息库 > 问用户」，PR op_def 仅对照。核验 SOUND。

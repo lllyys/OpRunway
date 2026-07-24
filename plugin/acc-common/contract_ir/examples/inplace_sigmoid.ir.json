@@ -1,0 +1,249 @@
+{
+  "ir_version": "1.0",
+  "op": "InplaceSigmoid",
+  "aclnn_entry": {
+    "exec_symbol": "aclnnInplaceSigmoid",
+    "getworkspace_symbol": "aclnnInplaceSigmoidGetWorkspaceSize",
+    "variant_of_opdef": "Sigmoid",
+    "include_header": "activation/sigmoid/op_api/aclnn_sigmoid.h",
+    "aclnn_lib": "aclnn_ops_infer",
+    "source": {
+      "source": "header",
+      "cross_check": [
+        "example"
+      ],
+      "cite": "repos/ops-nn/activation/sigmoid/op_api/aclnn_sigmoid.h:61-62,74-75; examples/test_aclnn_inplace_sigmoid.cpp:101,111; aclnn_lib 取自 header @domain aclnn_ops_infer:52",
+      "conflict_resolution": "同一 Sigmoid op_def 裂两 aclnn 入口(aclnnSigmoid / aclnnInplaceSigmoid)；本 IR 单描述 InplaceSigmoid（selfRef、无 out 参）",
+      "state": "resolved",
+      "fail_closed": false
+    }
+  },
+  "applicability": {
+    "in_domain": true,
+    "reason": "无状态；标准两段式 aclnn(probe=matched)；无 opaque descriptor 生命周期；输出即 selfRef inout 同一 buffer、extent=输入 shape 已物化(exact_prealloc)"
+  },
+  "abi_signature": {
+    "stage1": {
+      "ordered_param_ids": [
+        "selfRef"
+      ],
+      "trailing": [
+        "workspaceSize_out",
+        "executor_out"
+      ]
+    },
+    "stage2": {
+      "full_signature": "aclnnInplaceSigmoid(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor, const aclrtStream stream)",
+      "probe": "matched"
+    },
+    "dual_abi_note": "stage1 arity=3（selfRef + 2 plumbing 出参），非恒 4；无列表 flatten。与同 op_def 的非原地 aclnnSigmoid（stage1 = self,out 两个数据槽）不同，InplaceSigmoid 只有 1 个数据槽 selfRef，同时占输入位与输出位（inout），无独立 out 参。证据：aclnn_sigmoid.h:61-62 vs :33-34"
+  },
+  "parameters": [
+    {
+      "abi_position": 0,
+      "kind": "tensor",
+      "logical_value_id": "selfRef",
+      "direction": "inout",
+      "copy_in": true,
+      "copy_out": true,
+      "presence": "required",
+      "binding": "device_tensor",
+      "allow_empty_element": true,
+      "empty_conflict": "code↔doc 对空 tensor 合法性分歧：共享 Exec 有 self->IsEmpty() 短路直接返回 SUCCESS（aclnn_sigmoid.cpp:137-142）→ code 支持 numel=0；但 InplaceSigmoid 的 doc selfRef 维度写 '1-8'（docs/aclnnSigmoid&aclnnInplaceSigmoid.md:257）隐含禁空，且不带非原地 self 的『支持空Tensor』注（对比 :104）。不静默取一边——记账：runtime code 支持空、inplace doc 表述禁空。",
+      "cardinality": {
+        "kind": "single"
+      },
+      "value_domain": {
+        "kind": "enum",
+        "enum_set": [
+          "FLOAT16",
+          "BF16",
+          "FLOAT",
+          "INT16",
+          "INT8",
+          "UINT8"
+        ],
+        "selector": {
+          "key": "platform_predicate",
+          "branches": [
+            {
+              "soc_versions": [
+                "ascend910b",
+                "ascend910_93"
+              ],
+              "dtype_set": [
+                "FLOAT16",
+                "BF16",
+                "FLOAT",
+                "INT16",
+                "INT8",
+                "UINT8"
+              ]
+            },
+            {
+              "soc_versions": [
+                "ascend950"
+              ],
+              "dtype_set": [
+                "FLOAT16",
+                "BF16",
+                "FLOAT"
+              ]
+            }
+          ]
+        },
+        "provenance": {
+          "source": "op_def",
+          "cross_check": [
+            "glue",
+            "doc"
+          ],
+          "cite": "op_def sigmoid_def.cpp:24,30(默认 AICore ascend910b/ascend910_93: FLOAT16,BF16,FLOAT,INT16,INT8,UINT8),:34-35(AddConfig); :47,53(config950: FLOAT16,BF16,FLOAT),:56(AddConfig ascend950); 交叉 glue aclnn_sigmoid.cpp:42-50 GetSelfRefDtypeList + :34-37 DTYPE_OUT_LIST + :39-40 ASCEND910_OUTPUT; doc:283-288 id8/id9; enum 证据 tests/ut/op_api/stub/opdev/platform.h:19-34",
+          "conflict_resolution": "按 task 从 op_def 取 dtype（kernel 计算域，随 SocVersion 分档：910b/910_93=6 类，950=3 类）。aclnn InplaceSigmoid 运行期闸门=glue GetSelfRefDtypeList→(SocVersion∈[ASCEND910B,ASCEND910E]) DTYPE_OUT_LIST 9 类；关键：stub enum ASCEND950=3 落在 [ASCEND910B=1,ASCEND910E=5] 内→a3 与 a5 闸门同为 9 类（含 BF16），无 a3/a5 分档差（早前『950 落 else 丢 BF16』的推断被 enum 证伪）。闸门 9 类是 op_def kernel 域的超集（额外含 DOUBLE/COMPLEX64/COMPLEX128；a5 上还额外含 INT16/INT8/UINT8——闸门放行但 config950 无 kernel）。因 op_def⊆闸门（每个 op_def dtype 都过闸门且有 kernel）→ op_def 子集必可跑，故 value_domain 取 op_def 子集、state=resolved；闸门多出的 DOUBLE/COMPLEX/(a5 的整型) inplace 时 castDtype=self dtype 不改型、直喂 l0op::Sigmoid(无对应 op_def kernel)→cast/fail 未定，出 prober 域、须真机确认。",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "storage_alias": {
+        "storage_alias_group": "selfRef",
+        "alias_of": "selfRef",
+        "readback_binding": true,
+        "alias_kind": "full",
+        "const_untrusted": true,
+        "provenance": {
+          "source": "example",
+          "cross_check": [
+            "glue",
+            "header"
+          ],
+          "cite": "D2H 源=selfDeviceAddr（selfRef 的 buffer）test_aclnn_inplace_sigmoid.cpp:121-122；inplace 调用仅传 self→selfRef，未传 out(:101)；example 里 out tensor 是 vestigial（建于:87/94、从不入 inplace 调用、freed:130/133），回读须忽略它。glue: out=const_cast<aclTensor*>(selfRef) aclnn_sigmoid.cpp:185, ViewCopy(castOut,out=selfRef):164。header aclnn_sigmoid.h:61 selfRef 为非 const aclTensor*",
+          "conflict_resolution": "方向以 example D2H 回读为唯一 ground truth：从 selfRef buffer 回读→selfRef 是写目标（copy_out）+ 亦是输入(copy_in)→inout，输出别名输入同一 device 存储。const_untrusted=true 记『const 不可作方向依据』：boundary selfRef 本身非 const（诚实标注写），但共享 Exec 以 const aclTensor* self(:125) 读同一存储、经 out=const_cast(selfRef)(:185) 写回→任何 const 视图都不可信推方向；out tensor 的 const/vestigial 亦不可信。",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "provenance": {
+        "source": "header",
+        "cross_check": [
+          "example",
+          "glue"
+        ],
+        "cite": "aclnn_sigmoid.h:61 aclnnInplaceSigmoidGetWorkspaceSize(aclTensor* selfRef,...)；example:101 只传 self→selfRef；glue aclnn_sigmoid.cpp:180-187 Inplace 入口 copy_in(H2D example:57) + copy_out(D2H example:121-122)",
+        "state": "resolved",
+        "fail_closed": false
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "logical_value_id": "selfRef",
+      "shape_materialization": {
+        "modes": [
+          {
+            "mode": "manifest",
+            "value_dependency": "输出即 selfRef 本体（inout），shape=caller 预分配的 selfRef shape，已定",
+            "extent_readback": "exact_prealloc"
+          },
+          {
+            "mode": "host_oracle",
+            "execution_path": "aclnn_single_op",
+            "value_dependency": "shape(selfRef_out)==shape(selfRef_in)（逐元素恒等 InferShape4Elewise）",
+            "extent_readback": "exact_prealloc"
+          }
+        ],
+        "consistency_assertion": "inout：输出与输入是同一 device buffer，out shape 恒==输入 selfRef shape。glue CheckShape OP_CHECK_SHAPE_NOT_EQUAL(self,out)(aclnn_sigmoid.cpp:93) 对 inplace self==out 平凡成立；真实约束=InferShape4Elewise 逐元素 out==in + OP_CHECK_MAX_DIM(self,8)(:96) 即 ≤8 维",
+        "provenance": {
+          "source": "infershape",
+          "cross_check": [
+            "glue",
+            "example"
+          ],
+          "cite": "sigmoid_infershape.cpp:21-25 InferShape4Elewise; glue CheckShape aclnn_sigmoid.cpp:90-99; example selfShape={2,2}:82",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "value_domain": {
+        "kind": "follows",
+        "follows_ref": "selfRef",
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "header"
+          ],
+          "cite": "inout 同一 tensor，输出 dtype 恒==selfRef dtype；aclnn_sigmoid.cpp:185 out=selfRef、无独立 out dtype",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "acceptance": {
+        "kind": "pointwise",
+        "compare": "isclose",
+        "tol_ref": "by_output_dtype: 浮点(FLOAT/FLOAT16/BF16)→isclose 按 dtype 容差；整型(INT16/INT8/UINT8, 仅 a3)→sigmoid∈(0,1) 取整语义须真机对拍确认后再定 exact/isclose",
+        "threshold_source": {
+          "tier": "semantic_inference",
+          "value": "sigmoid=1/(1+e^-x) 为有界超越函数→浮点用 isclose；无随仓 taskbook，阈值按 dtype 语义降级推断、须真机对拍坐实",
+          "provenance": {
+            "source": "doc",
+            "cite": "计算公式 docs/aclnnSigmoid&aclnnInplaceSigmoid.md:33; 本 witness 无 taskbook→降级 tier=semantic_inference（G4），须真机对拍坐实",
+            "conflict_resolution": "无 taskbook 时容降级来源并显式标 tier，不永远 needs_source；真机对拍前阈值未钉",
+            "state": "needs_source",
+            "fail_closed": false
+          }
+        }
+      }
+    }
+  ],
+  "output_mapping": {
+    "output_edges": [
+      {
+        "source_output_id": 0,
+        "api_param_id": 0,
+        "confidence": 1,
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "op_def"
+          ],
+          "cite": "op_def 单 Output y(sigmoid_def.cpp:28); aclnn InplaceSigmoid 无 out 数据槽，输出写回 selfRef(abi_position 0)——out=const_cast(selfRef) aclnn_sigmoid.cpp:185 + ViewCopy(castOut,out):164。y→selfRef 槽(0) 一对一，非反转",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      }
+    ],
+    "input_edges": [
+      {
+        "api_param_id": 0,
+        "op_def_input_id": 0,
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "op_def"
+          ],
+          "cite": "op_def 单 Input x(sigmoid_def.cpp:22); aclnn selfRef(槽0) 作读侧喂 Exec 的 const aclTensor* self(aclnn_sigmoid.cpp:125,186)→x。selfRef 同一槽同时对 op_def Input x(0) 与 Output y(0)（inout 别名）",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      }
+    ]
+  },
+  "target_hardware": {
+    "resolved_target": "a3_and_a5",
+    "opdef_addconfig": [
+      "ascend910b",
+      "ascend910_93",
+      "ascend950"
+    ],
+    "state": "agreed",
+    "source": {
+      "source": "op_def",
+      "cross_check": [
+        "doc"
+      ],
+      "cite": "op_def AddConfig sigmoid_def.cpp:34(ascend910b),35(ascend910_93),56(ascend950); doc 产品支持情况 docs/aclnnSigmoid&aclnnInplaceSigmoid.md:8(Ascend950PR/DT 支持),11(Atlas A3 支持),14(Atlas A2 支持)",
+      "conflict_resolution": "witness 算子无随仓 taskbook→双源(任务书×op_def)降级为 op_def×doc。op_def 三 AddConfig 跨 a3(ascend910b/ascend910_93)+a5(ascend950)，doc 产品支持情况相符→resolved_target=a3_and_a5；无 taskbook 反证故记 agreed（op_def↔doc 一致、无 contested）。注：op_def 默认档(a3)6 dtype vs config950(a5)3 dtype，dtype 覆盖差已入 value_domain platform_predicate，不影响目标机判定",
+      "state": "resolved",
+      "fail_closed": false
+    }
+  }
+}

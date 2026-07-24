@@ -18,7 +18,58 @@
 6. 远程 NPU 环境（哪台机、catlass 在哪 build、是否进 Docker）待用户提供后补进 CLAUDE.md。
 7. 优先级（Codex 排序）：Q3>Q4>Q5>Q6>Q1>Q2>Q8>Q9>Q7。完整见 `doc/oprunway-design.md` §13。
 
+## 2026-07-24
+
+- **⏸ U7 暂停存档（用户主动暂停、转更重要事）** → `doc/oprunway-todo.md` 的「🔖 U7 落地进度 + 剩余 TODO —— 2026-07-24 暂停存档」节：已做成（F3 流水线 + 5 项核实 + 治理）+ 剩余（#5 真机 / #11 commit / #10 bureau / #13 硬化 / #12 旧 follow-up），回来从那接。
+
+- **🔴 泛化优先入最高律令 + bureau（用户明定为最高原则）**
+  - **绝不针对具体算子做优化/特判、一切设计必须泛化**——写进 `CLAUDE.md` 最高优先级规则 **#0**（位列 #1 之前）：接口/算子名/目标目录/形状/dtype 一律通用探测、代码零 op 名分支、绝不为某类算子裁专属机制；具体算子只作见证/测试输入非优化目标；per-op 的 spec/IR/gap 是通用工具消费的**数据**（核实数据不违规、为某算子改工具代码才违规）；判据=换任意域内算子工具零改即可跑；域外 fail-closed 标「不支持」。
+  - **同步捕入 bureau**（`canon/logbook/2026/07/9f5c778e….md`，status: logbook；promote 到 canonical 须人门 `bureau:review`）。
+  - **按 #0 审 12 个 task**：通用本体（prober/codegen/泛化验证）= #0 的实现 ✓；核实类（目标机/inferred/Foreach 语义）产**逐算子数据**喂通用工具、不违规 ✓；**修两处边缘**——删 #2「手搓 per-op IR」（并入 #3：见证只作 prober 测试输入、不手搓）+ 标注 #12 的「int32 runner/neg_runner」等**手写 per-op runner 已被通用 codegen 取代**。
+
+- **只读核实批（fanout `weilj1w65`，3 agent，完成 task #8/#9、备齐 #7 数据）** → doc §6
+  - **#7 目标机冲突坐实（待人裁）**：im2col/MinDim/MaxDim/logspace 四个 op_def 全只声明 `ascend950` vs 任务书 A2/A3（目标平台完全不在 op_def 声明集内，比 Upsample 超集含 950 更严重）；无冲突=a3：Upsample家族/Arange(确认 ascend310b 非 310p)/Pdist。
+  - **#9 Foreach 语义全坐实**：ForeachAddScalarV2=单 scalar（悬案关闭）· roundMode=输入张量非 attr · alpha dtype 映射(helper 真名 `DtypeScalarToTensor2`) · **8 Foreach per-platform dtype 机读表**（int8/uint8 A2/A3 已实现=AddList/AddScalar/Exp/Expm1，未实现 4 个不得造 int8/uint8 例）。
+  - **#8 inferred**：MaxUnpool2d→verified（ops-nn/index/scatter_elements，PR delta=self 加 bf16，无独立 op_def→硬件双源核做不成）；SlidingTileAttention→仍 inferred（所有已 clone 仓零实现、缺外部 FastVideo 源）。宁标 inferred 不假装核过。
+
+- **F3 落地：codegen v1 建成 + 测（task#4 in_progress）** → `plugin/acc-common/contract_ir/codegen.py` + `test_codegen.py`
+  - 吃 IR JSON → 机械 emit 类型化 `binding.cpp`，**结构驱动、零 op 名分支**（元测试 `test_no_op_name_branch` 硬钉 #0）。对 foreach_add_list 正确 emit（aclCreateTensorList 打包三列表 + 按 IR 位序调用 + 按 output_mapping 回读）。三条 **fail-closed** 过：域外 / provenance.fail_closed / data-dependent 出尺寸算不出（拒绝硬凑、退 4）。5 测全绿。
+  - ⚠ 未完：inout/多输出反转/aclScalar/aclIntArray 四条 emit 路径待 prober(#3) 产 IR 后验证；真机编译前未验证（covered≠真机绿）。
+
+- **F3 落地：prober v1 建成 + 测（task#3 in_progress）** → `plugin/acc-common/contract_ir/prober.py` + `test_prober.py`
+  - 给算子目录 → 探测 header/op_def → 产 Schema 合规的 IR 骨架，**零 op 名分支**（元测试钉住）。v1 机械抠 resolved：aclnn 两段式符号 + stage1 有序参数表（kind 从 C 类型）+ AddConfig→目标 socs。语义字段（direction「const 不可信」/别名/output_mapping/shape/dtype/acceptance）**诚实标 needs_source**——喂 codegen 即**正确 fail-closed**（8 处，拒绝硬凑）。**F3 全链跑通**：prober 抠机械 → codegen 拒绝硬凑语义，10 测全绿。v2=从 example/glue/infershape 抠语义把 needs_source 转 resolved。
+- **⚠ 处置更正（用户 2026-07-24：任务书权威）**：**PR（op_def/被测物）与任务书不一致 → 可能选错了 PR**（承硬约束 #1 Equal 教训 + canon task-spec-authoritative-over-pr）。#7 那 4 个「op_def 只有 ascend950 vs 任务书 A2/A3」**不是选机器题**——绝不按 op_def 自动定 a5，须先验证「任务书↔PR 对应」（issue 号+落点目录），对应错/未落地则该算子整体挂起。已落 prober 的 target note + doc §6.A + task#7。bincount 本轮也撞同款 contested（op_def ascend950 vs 任务书 A2）。
+
+- **#7 对应核完成（fanout `w6rs1z8xz`）——5 个算子选错 PR/未落地、全作废挂起，完整印证任务书权威**
+  - **im2col** likely_wrong_pr（被测是任务书自列「代码样例」参考算子、非交付；真候选在 experimental/conversion 但无 bool）· **logspace** not_landed（PR #3496 open、int dtypes 没实现）· **MinDim/MaxDim** likely_wrong_pr（op_def 在成熟树 math/、任务要 experimental/math 那下面根本没这俩、无 issue 号）· **bincount** not_landed（真交付 #3640 open、读的是官方 TF 式主线非任务 torch 式）。**5 个整体停验收**（Equal 血教训在 5 op 重演）。
+  - ⚠ **连带**：argmax(=MaxDim)/bincount 作 codegen 结构 fixture（测多输出反转/data-dependent 机制）**仍有效**，但**作验收目标已作废**——**fixture ≠ 验收目标**，已标清 doc §6.A + README + task#7。
+
+- **F3 全链本地验证完成（codegen 4 轴全对，13 测全绿）** —— fanout `wgnxjij7r` 从真 example/glue/infershape 抠出 3 见证的完整 grounding IR（inplace_sigmoid/bincount/argmax，落 `examples/*.ir.json`），跑 codegen 坐实四轴：
+  - **tensor_list**（foreach）emit ✓ · **inout**（inplace_sigmoid：单 selfRef 槽、自身 buffer 回读、const 不可信）emit ✓ · **多输出反转**（argmax：`aclnnMaxDim` + output_mapping `{src0→slot1,src1→slot0}` 反转）emit ✓ · **data-dependent**（bincount：out 尺寸算不出）**正确 fail-closed** ⊘。
+  - 3 新见证 IR 语义字段全从真源码 resolved（provenance 带 file:line）——既是 codegen 验证 fixture、又是 prober v2 的 ground-truth 靶子。**F3 生成式 binding 方向在四轴上本地坐实**（真机编译前未验证、covered≠真机绿）。
+
+- **codex 审修门（commit 前，rule #5）逮到并修了 honesty/fail-closed 关键 bug**
+  - codex(gpt-5.6-sol) 审 prober/codegen，逮到**两条打脸的**：codegen 的 `output_mapping`/`readback_binding` **只 emit 注释、没真消费**（argmax 反转、inout 回读源实际没用上，测试只断言注释——正是本仓最忌「声明写了、代码没做」）；`fail-closed` 可绕（靠输入自觉设旗标）。
+  - **修 3 条最严 + 验**：① output_mapping 真消费（argmax golden 列 0←indices、1←out，反转坐实）② readback_binding 真消费（inout 无回读源即 fail-closed）③ fail-closed 改**状态驱动**（needs_source/conflict/out_of_domain 一律拦、acceptance 阈值 validator-only 除外）。连带纠正：「已裁决的冲突」应标 `resolved` 非 `conflict`。14 测全绿复验。
+  - **续修 2 条硬化（task#13）**：去 prober 的 `_v2` 软特判（改通用最短路径、无接口版本分支，#0 相关）+ 生成 binding 加 malloc 检查 + 成功路径资源清理。剩余（scalar/array abi_ctype 区分、C-lexer 签名解析、全 error-path RAII、Schema 关系校验）**留 v2**——硬修需较大改动、现 fail-close 于难例，鲁莽补即过度设计（承目标「避免过度设计」）。
+
+- **#6 泛化验证完成——#0 的硬证据** → `test_generalize.py`
+  - **同一份 prober 零改跑 40 个域内算子**（跨 ops-nn/ops-math/ops-cv 6 族：upsample 全家 / grid_sample / concat 的 tensor_list / cholesky / cummax / neg…）→ **40/40 抠出接口签名**（补 int 类型后），唯一 fail-closed 的（`int m` 未识别）已通用修。固化成冒烟测试（泛化率≥90%、不许崩只许 fail-closed）+ 元测试证源码零 `if op==X`。**14 测全绿。** 这是「换任意域内算子、工具零改即跑」（#0 判据）的直接坐实。
+
 ## 2026-07-23
+
+- **U7 泛化方案落 doc（只读设计 fanout，待用户拍板分期）** → `doc/oprunway-u7-generalization-design.md`
+  - **核心翻案**：瓶颈是 **U7c（共享真机 runner），不是 U7b（spec schema）**。shape_transform 三算子只落到 gen_cases 层、真 torch 全绿，但**一次没上真机**（`samples/runners/` 只三份三浮点单张量骨架，扩展 manifest 在 runner 侧无消费者）。
+  - **修正「七道硬闸」快照 stale**：实读 blame 证实闸 1（输出形状）已由 C1 解耦、闸 5（attr 标量）已抬到 `list[int]`、`run_on_npu.sh` `_math` 硬编码已删、`verify_mode=exact⇒bool` 真机墙已由 `compare_dtype` 修。仍未抬=闸 3/4/6 + U7c runner 全空白。
+  - **分期建议 A→B**：先用 shape_transform 当最干净载体建 U7c runner（op_def 双源已核、零人裁悬挂）→ 再 Pdist 补 reduction（G4 已落、C1 白送、p=inf 证 G2）；C/D（tensor_list/index_scatter）**推迟到 clone ops-nn + U7a 交叉核之后**（现在落 spec 就撞 #1/#2「漏上游前提一路错」）。**优先级须用户拍板。**
+  - **只读**：10 agent、零改代码；per-class U7b/c 设计 + 决策点 + U7a 载重前必核缺口见 doc。
+  - **用户纠偏（强硬重申规则 ③）**：绝不针对某算子做优化/特判、所有设计必须泛化 → doc 加最高律令横幅、§3 分期重构成「泛化**能力** × 见证算子（仅见证不特判）」，im2col/Pdist/Foreach 全部只作「见证算子」（前置依赖已齐、用来跑通通用机制），不为其改一行专属逻辑。
+  - **用户裁定**：**300V Pro 优先级降低、往后放**（2 份任务书维持挂起、从近期各期剔除，EmbeddingDenseGrad 从 D 首批见证集剔除；310p 是否即 300V Pro 未核，不落 a3/a5）。
+  - **验证 fanout（8 agent 只读）**：锚定 7 见证算子真 aclnn 入口签名 → 产 18 字段「op 无关探测器契约」。⭐ 逮到泛化铁证：im2col 的 aclIntArray 真序 `kernelSize→dilation→padding→stride`（stride **末位**）≠ 派单，attr 顺序**必从 ground truth 抠**。另纠 2 处 stale：**`repos/ops-nn` 其实早已 clone**（285M 完整，「未 clone」是分类学 stale、fanout 照搬没鲜核）+ **MinDim/MaxDim「仓内无实现」也 stale**（实核实现齐全）。目标机冲突：im2col/MinDim/logspace op_def 仅 ascend950 vs 任务书 A2/A3，须停下人核。
+  - **codex review（rule #5）逮到 14 条结构性问题**：那份「18 字段契约」**还没真泛化**——表达不了 tensor_list（F1）/ inout-alias（F2）/ data-dependent 输出（F4）；`list_parallel_to`/`tie_break`/`role` 等是**按类反推的专名机制**（F6，还是「按类长」）；且有**实现断点**（F3：一个编译好的 runner 没法运行时调任意 C++ 签名 → 须探测器出 IR + codegen 生成 binding）。**契约重设计已完成（fanout `wxomtglah`，5 agent 只读）**：先从真 ops-nn/ops-math example 锚定 codex 说漏掉的硬轴（tensor_list/inout-alias/data-dependent/多输出反转），再重设计成 **9 个正交 IR 元素**——`parameter_descriptor[]`（递归、单一真相源）/ `constraint_graph`（并列关系图）/ `value_domain`（per-输出 dtype tagged union）/ `shape_materialization`（extent 三来源，取消 shape-class 词表）/ `output_mapping`（声明序→槽序二部图，实测 argmax 反转）/ `acceptance_predicate`（等价关系判据，消解 tie_break）/ `storage_alias_layer`（readback_binding 是唯一 ground truth，const 不可信）/ `abi_signature`（两段式都探测、不假定恒4参）/ `provenance`（按字段分源状态机）。适用域外一律 fail-closed。**对抗式自查：已无「只有 X 类算子才走的字段」**（唯一残余=equivalence_relation/absent_semantics 的内容须逐算子填，但结构通用）。⭐ 锚定铁证：aclnn 参 `const` 不可信（foreach x1 是 `const aclTensorList*` 却被写）→ 方向唯一 ground truth 是 example 的 D2H 源 buffer。折进 doc §3.5、§2 按 F12 降级。
+  - **契约实测 fanout（5 agent 只读，`wpptsjdag`）**：把重设计契约对最硬 4 跨轴见证（foreach 列表 / InplaceSigmoid inout / bincount data-dependent / ArgMax 多输出反转）从真源码填完整 IR 实例 + 对抗式核「能否机械 codegen」。裁决 **「没零缺口站住」但方向坐实**：三支柱被正向证实（output_mapping 显式二部图——ArgMax 实测反转 {0→1,1→0}、readback 锚 D2H 源、stage1 逐入口 probe 证伪「恒4参」），但 **bincount blocked**（`value_dependency` 表达不出 `reduce_max(self)+clamp`）。**5 缺口 2 关键已就地补进契约**（shape_materialization.mode 复合化解 bincount / constraint_graph 增 zip+intra-list 边解 foreach），G3–G5 待补。**F3 生成式 binding de-risk 坐实**（3/4 轴可机械 emit，bincount 是词表缺口非架构缺陷）。折进 doc §3.6。
+  - **✅ 用户 2026-07-23 拍板**：**F3 批**（生成式 binding：探测器→IR→codegen→编译、禁手写 binding）· **目标 a3/a5 两台** · **先补 G3–G5 再真机四见证**。
+  - **落地首步——契约锁成版本化 Schema**（进 `plugin/`，真代码非设计稿）：`plugin/acc-common/contract_ir/contract_ir.schema.v1.json`（draft 2020-12 合法）+ README + 首个 round-trip 正例 `examples/foreach_add_list.ir.json`。**G3/G4/G5 全补进 Schema**：G3 `dtype_selector` 三键源（含 `platform_predicate` 承 a3/a5 双机 SocVersion 分支）· G4 `acceptance_predicate` 跨输出引用 + 阈值 tier 降级链 · G5 输入侧反向映射 + 被抑制参 + `allow_empty` 拆 list/element。**foreach 实例 jsonschema 校验通过**——tensor_list 递归/index_zip+intra_list 边/dtype selector/复合 shape mode+一致性断言/const_untrusted 全在真实例上坐实。**下一步**：其余 3 见证 IR 实例 + 探测器 + codegen 模板 + 真机四见证（未上真机、covered≠真机绿）。
 
 - **第三类 dtype gap kind `dtype_unsupported_on_target_hw`(ultracode fanout 落地)+ 用户 6 条裁定入 TODO**
   - 语义:op_def **声明了** dtype、但**目标硬件那支 aclnn 实现**没有(im2col 的 bool 撞出)。此前只能误用 `dtype_deferred`(把「被测物缺口」说成「我们缺口」)→ 补专属 kind,比照 C4 反后门五道硬校、**方向相反**(op_def_dtypes **须含** + 目标硬件 impl_dtypes **须不含** + 四 ref + 不罩真失败 + 在需求内)。
