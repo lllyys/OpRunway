@@ -23,15 +23,33 @@ import math
 import numpy as np
 
 GOLDEN_SOURCE = "torch torch.isclose"      # 供 oracle_source 映射（首 token torch → torch_ref）
+
+# ── 批 2 · 声明式来源块 ─────────────────────────────────────────────────────────
+# 本文件是**完整自证**的参考实现：任务书全文快照与 golden.py 同处算子目录，
+# 引文按 `task_doc.snapshot.md:<行号>` 锚定、可被 `precision_policy.verify_authorization`
+# 逐字复核（校快照 sha256 → 校 cite 行区间 → 校 quote 是该区间的逐字子串）。
+# ⚠ 引文必须**逐字**摘自快照那一行，一个字都不能改——改了就核不过（这正是它的作用）。
+GOLDEN_CONTRACT = {
+    "source": "single_api",              # 一个现成 API 直出，非多步自拼
+    "method_kind": "torch_cpu",          # R3 第二档的可跑方法族之一
+    "method": "torch.isclose",           # 人读：到底调的哪个 API
+    "authorization": {
+        # 任务书**就真值口径本身**作出的指定（不是「参考谁的实现」）→ oracle_method → 第一档
+        "kind": "oracle_method",
+        "cite": "task_doc.snapshot.md:13",
+        "quote": "实现方式从原来比较二进制的实现方式，更改成和cpu一致的比较逻辑值的实现方式",
+    },
+    "taskdoc_snapshot": {"sha256": "04f27afdf9a1435b44e33c8e121f6224261d29bbfc597db7bf95c17e24aa35e9"},
+}
 # 判档依据（IsClose 任务书原文，两处同款语义改造要求）：
 #   正文    「实现方式从原来比较二进制的实现方式，更改成和cpu一致的比较逻辑值的实现方式」
 #   功能要求「比较方式从二进制比较改为逻辑值比较」
 # 这是任务书**就真值口径本身**作出的指定（authorization.kind = oracle_method）→ 第一档，非回落。
-# ⚠ 诚实边界（2026-07-22）：这里的 tier 1 是**快照就位后的目标档位**，今天机器上核不出来——
-#   R12「任务书全文快照入库」属批 4、**尚未做**（全仓 find task_doc.snapshot* = 0 个）。在快照落地前
-#   `precision_policy.verify_authorization` 必返 False，`derive_golden_tier` 会按规则 ② 判
-#   **tier 4 · unverifiable_authorization**（假授权不降级、直接 blocked）。对照 Sign/Neg 走
-#   impl_reference → 规则 ⑦ → tier 2，今天就机器自洽。引文本身已逐字核对属实。
+# 快照已入库（2026-07-23 批 3）：同目录 `task_doc.snapshot.md`，sha256 即上面契约块那串。
+#   `python3 acc-common/check_golden.py IsClose` 实测 → **tier 1 · authorized · exit 0**，机器自洽。
+#   ⚠ 但 `verify_authorization` 只证「这句引文确实出自快照那几行」，**不证**「这句话算 oracle_method
+#   还是 impl_reference」——那一刀仍是 agent 自报、机器拦不住（Sign 的错源正在这一刀上）。
+#   别把这里的 tier 1 读成「授权已被完整验证」。对照 Sign/Neg 走 impl_reference → tier 2。
 GOLDEN_PROVENANCE = (
     "第一档（tier 1）·任务书指定真值口径"
     "（IsClose 任务书：「实现方式从原来比较二进制的实现方式，更改成和cpu一致的比较逻辑值的实现方式」；"

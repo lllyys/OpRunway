@@ -11,7 +11,8 @@ import os
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
+# samples/ 随插件分发（在 plugin/ 内，2026-07-22 由仓根迁入）：_HERE=plugin/acc-common → 上溯一层到 plugin/
+_PLUGIN_ROOT = os.path.abspath(os.path.join(_HERE, ".."))
 
 
 class SpecIsolationTest(unittest.TestCase):
@@ -34,7 +35,7 @@ class SpecIsolationTest(unittest.TestCase):
 
     def test_samples_specs_present(self):
         """迁移目的地 samples/specs/ 应存在且含参考样例（证迁移落地、非凭空删除）。"""
-        samples = os.path.join(_ROOT, "samples", "specs")
+        samples = os.path.join(_PLUGIN_ROOT, "samples", "specs")
         self.assertTrue(os.path.isdir(samples), "samples/specs/ 缺失：迁移目的地不存在")
         self.assertTrue(
             glob.glob(os.path.join(samples, "*.spec.json")),

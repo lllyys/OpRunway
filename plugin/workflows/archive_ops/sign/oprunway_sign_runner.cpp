@@ -1,1 +1,1 @@
-../../../../samples/runners/oprunway_sign_runner.cpp
+../../../samples/runners/oprunway_sign_runner.cpp

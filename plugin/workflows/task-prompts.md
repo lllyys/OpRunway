@@ -34,7 +34,7 @@ dispatch_mode: extract_spec
 ### 1b. `dispatch_mode = refine_spec`
 ```
 dispatch_mode: refine_spec
-输入工件: 上轮 spec + mock 门失败的 gate error 文本
+输入工件: 上轮 spec + 契约自检失败的报错文本（dry-run stderr；若走过 mock 则取 `dev_run_summary.json.selfcheck.errors`——C5 起 mock 侧只有管路自检、没有「门」）
 验收标准: 据 gate error 定向修 spec（如 dtype 子集/threshold/policy 口径），不扩范围。
 本次产出: 修订后 <op>.spec.json；摘要回：改了哪几处、为何、是否仍有 gap。
 ```
@@ -45,7 +45,7 @@ dispatch_mode: refine_spec
 ```
 dispatch_mode: gen_runner
 输入工件: <op>.spec.json + pr_facts.json（含 test_aclnn_*.cpp + *_def.cpp）
-验收标准: 先过 scope gate——仅 experimental/math/<op> aclnn 两段式；catlass/legacy/非 math 族/未支持 dtype
+验收标准: 先过 scope gate——ops-<族> 仓·aclnn 两段式·opp 安装型（含非 experimental 子树）；catlass/非 aclnn/双实现/未支持 dtype
           → 返回 BLOCKED / 转 P3，不硬塞。过 gate 后据 spec + 自带 example 锚定 aclnn 入口/dtype/参数顺序
           （抠 example 不猜——Equal 曾猜错入口翻车），生成 oprunway_<op>_runner.cpp + 选构建路径。
 本次产出: <ops_root>/<op>/oprunway_<op>_runner.cpp（用户 CWD，非插件目录）+ 构建路径配置；摘要回：锚了哪个 example、四槽填法、gap。

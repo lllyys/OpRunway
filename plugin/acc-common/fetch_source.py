@@ -11,14 +11,19 @@ gitcode token 走环境：优先 $GITCODE_TOKEN，退回 $OPRUNWAY_GITCODE_TOKEN
   <out>/task_doc.md      任务书原文（本地读或链接取）
   <out>/pr_facts.json    PR 事实（给了 --pr 才有）：op / 目标仓·目录 / base·head / changed_files /
                          关键文件内容（op 自带 example、op_def）——供 ② 抽 spec、③ 锚定 runner
-说明：链接失败/无权限时不静默——task_doc 取不到直接报错；PR 部分字段取不到记进 pr_facts.notes。
+说明：链接失败/无权限时不静默——task_doc 取不到直接报错；PR 链接**形态不认识→直接报错（fail-loud，属用户输入错）、不产空壳**；
+      PR 链接认识但字段取不到（网络/权限）→记进 pr_facts.notes 继续（属环境问题，与「URL 写错」错误信息分开）。
 """
-import argparse, json, os, re, sys, urllib.parse, urllib.request
+import argparse, hashlib, json, os, re, sys, urllib.parse, urllib.request
 
 API = "https://api.gitcode.com/api/v5"
 _BLOB_RE = re.compile(r"^https?://gitcode\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/blob/(?P<ref>[^/]+)/(?P<path>.+)$")
+# PR 链接三段抽取：容错 GitHub 风格单数 /pull/N、复数 /pulls/N、GitCode 原生 /merge_requests/N，
+# 统一抽 owner/repo/编号（编号即 merge_request 号）。
+# ⚠ 末尾必须是路径分隔符 / query / fragment / 串尾——**不能只用 `\b`**：`\d+\b` 在 `/pull/12-foo`、
+# `/pull/12.xyz` 处也成立（数字与 `-`/`.` 之间有词边界），会把畸形 URL 当成 PR 12 放行 = fail-open。
 _PR_RE = re.compile(r"^https?://gitcode\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/"
-                    r"(?:merge_requests|pulls)/(?P<num>\d+)")
+                    r"(?:merge_requests|pulls?)/(?P<num>\d+)(?=[/?#]|$)")
 
 
 def _token():
@@ -99,21 +104,122 @@ def _guess_op(paths):
     return None, None
 
 
-def fetch_pr(pr_url, out_dir):
-    """PR：解析 gitcode PR 链接 → API 取 元信息 + 改动文件 + 关键文件（example/op_def），写 pr_facts.json。"""
-    m = _PR_RE.match(pr_url)
-    facts = {"pr_url": pr_url, "notes": []}
+def _parse_pr_url(pr_url):
+    """解析 gitcode PR 链接 → (owner, repo, num)。
+
+    容错三种路径写法，统一抽 owner/repo/编号（编号即 GitCode 的 merge_request 号）：
+      - GitCode 原生   /merge_requests/<编号>
+      - GitHub 风格单数 /pull/<编号>（用户常按 GitHub 习惯粘这个 → 内部规范化为 merge_request 编号）
+      - 复数           /pulls/<编号>
+    形态不认识（host 非 gitcode.com / owner·repo·编号三段不全 / 编号非数字）→ 抛 ValueError
+    （fail-loud，附可操作中文提示）。调用方据此明确失败、**绝不产空壳 pr_facts 往下传**。
+    ⚠ 这只判「URL 形态」，不碰网络；能否真取到数据是另一回事（网络/token 失败在 fetch_pr 里记 notes）。"""
+    m = _PR_RE.match((pr_url or "").strip())
     if not m:
-        facts["notes"].append("PR 链接非 gitcode pulls/merge_requests 格式，未解析")
-        return _dump_facts(facts, out_dir)
-    owner, repo, num = m["owner"], m["repo"], m["num"]
-    facts["source_repo"] = f"{owner}/{repo}"
+        raise ValueError(
+            f"无法解析 PR 链接：{pr_url!r}\n"
+            "  期望形态：https://gitcode.com/<owner>/<repo>/merge_requests/<编号>\n"
+            "  亦接受 GitHub 风格路径 /pull/<编号> 或 /pulls/<编号>（内部规范化为 merge_requests 编号）。\n"
+            "  请检查：协议+host 是否为 http(s)://gitcode.com、owner/repo/编号三段是否齐全、编号为纯数字。"
+        )
+    return m["owner"], m["repo"], m["num"]
+
+
+_ACLNN_WS_RE = re.compile(r"\baclnn(\w+)GetWorkspaceSize\s*\(")
+_HCCL_RE = re.compile(r'hccl/hccl\.h|HcclComm|HcclGetCommName|\brankId\b')
+_GEIR_RE = re.compile(r"ge::Session|->\s*AddGraph\s*\(|->\s*RunGraph\s*\(")
+
+
+def _detect_interface_kind(key_files):
+    """据 `pr_facts.key_files` 的迹象**机器判**算子接口形态（批 6b B-core）。
+
+    返回 `(interface_kind, aclnn_entry|None, note)`。规则据实 clone 的 4 仓（ops-nn/transformer/
+    collections/solver）分类得出（workflow wf_b07a40d8），落到「文件存在性 + 内容正则」的可判组合：
+
+      - `aclnn_2stage`：某 `test_aclnn_*.cpp`（或 examples/*.cpp）里命中 `aclnn<X>GetWorkspaceSize(`
+        且有配对的第二段 `aclnn<X>(… executor …)`，且**不含 HCCL**。→ 当前通路可放行的接口形态
+        （逐算子仍须过 dtype∈{fp32,fp16} + golden 可搭 子闸，不在此判）。
+      - `aclnn_2stage_distributed`：命中 aclnn 两段式**但含 HCCL 多卡通信**（MC2 族）→ 出单卡通路，BLOCKED-另立。
+      - `library_header`：**零** test_aclnn / 零 op_def → handle 型 C 库（ops-solver aclsolver*）/ 纯头文件
+        模板库（ops-collections）→ 非 aclnn 通路，BLOCKED-另立。
+      - `unknown`：有 op_def 迹象但探不到确切 aclnn 两段式配对 → **fail-closed**，BLOCKED，不猜。
+
+    ⚠ **aclnn 入口函数名从 test_aclnn 正则抽真实名**（`aclnnPromptFlashAttentionV3` 这类带版本后缀，
+       ≠ 目录名派生的 `aclnn<Op>`）——供 runner 锚定，别再按 op 名猜（Equal 血教训 + transformer 实测 V3/V5）。
+    ⚠ 探测**只用取到的 key_files**：取不到（网络/无 PR）→ `unknown`/`library_header`，下游 fail-closed，不假装是 aclnn。"""
+    kf = key_files or {}
+    # 先去 C/C++ 注释：注释掉的 aclnn 调用不算（codex 审：`// aclnnFooGetWorkspaceSize(...)` 曾被误判成 aclnn）。
+    def _nc(c):
+        c = re.sub(r"/\*.*?\*/", " ", c or "", flags=re.S)
+        return re.sub(r"//[^\n]*", " ", c)
+    examples = {p: _nc(c) for p, c in kf.items()
+                if str(p).endswith(".cpp") and ("test_aclnn" in os.path.basename(str(p)) or "/examples/" in str(p))}
+    # HCCL 跨**所有** key_files 查（codex 审加固）：MC2 算子的 `hccl/hccl.h` include 可能落在辅助文件、
+    # 不在命中 aclnn 的那个 → 只查单文件会把分布式漏判成单卡 aclnn。跨文件查 = fail-closed 方向。
+    _any_hccl = any(_HCCL_RE.search(_nc(c)) for c in kf.values())
+    for p, c in examples.items():
+        m = _ACLNN_WS_RE.search(c)
+        if not m:
+            continue
+        # ⚠ 已知边界（codex 审）：多入口 example（如量化 matmul 先调 `aclnnTransQuantParamV2GetWorkspaceSize`
+        #   再调主入口 `aclnnQuantMatmulV3`）抽到的是**第一个** WS 调用、可能是辅助入口——`aclnn_entry`
+        #   仅作 runner 锚定的**线索**，gen_runner 仍须读 example 确认真入口（不改分类：还是 aclnn_2stage）。
+        #   期1-A 放行的 6 个均单入口，不受影响。
+        entry = "aclnn" + m.group(1)
+        # 第二段配对：把所有 `aclnn*GetWorkspaceSize(` 调用抹掉后，仍能找到同名 `aclnn<Entry>(`
+        # —— 即两段式的执行段。不认参数名（executor/exe 变量名可变、脆弱），只认「同名函数被调两次、
+        # 其一非 GetWorkspaceSize」。
+        _exec_seg = re.sub(r"\baclnn\w+GetWorkspaceSize\s*\(", "", c)
+        if not re.search(r"\b" + re.escape(entry) + r"\s*\(", _exec_seg):
+            continue
+        if _any_hccl:
+            return ("aclnn_2stage_distributed", entry,
+                    f"aclnn 两段式但含 HCCL 多卡通信（{entry}，MC2 族）→ 出单卡单进程通路，BLOCKED-另立")
+        return ("aclnn_2stage", entry,
+                f"aclnn 两段式，入口 {entry}（从 test_aclnn 正则抽真实函数名、非目录名派生）；"
+                f"逐算子仍须过 dtype∈{{fp32,fp16}} + golden 可搭 子闸")
+    # geir 图引擎示例（`op::X` + `ge::Session` + AddGraph/RunGraph，如 ops-nn 的 celu/bnll 用 test_geir_*.cpp）——
+    # 显式识别给准 note（否则笼统落 unknown）。同样 BLOCKED-另立：图引擎构建路径，非 aclnn 两段式。
+    # 批 6b B-core 逐算子核暴露：ops-nn 不是清一色 aclnn，混有 geir 算子（探测器对它们本就 fail-closed，此处只给更准的类别）。
+    if any(("test_geir" in os.path.basename(str(p))) or _GEIR_RE.search(c) for p, c in examples.items()):
+        return ("geir", None,
+                "GE IR 图引擎示例（op::X + ge::Session + AddGraph/RunGraph）→ 非 aclnn 两段式，BLOCKED-另立（图引擎构建路径）")
+    has_def = any(str(p).endswith("_def.cpp") for p in kf)
+    if not examples and not has_def:
+        return ("library_header", None,
+                "无 test_aclnn / 无 op_def → handle 型 C 库或纯头文件模板库（非 aclnn 两段式通路），BLOCKED-另立")
+    return ("unknown", None,
+            "有 op_def 迹象但探不到确切的 aclnn 两段式配对 → fail-closed，BLOCKED，不猜")
+
+
+def fetch_pr(pr_url, out_dir):
+    """PR：解析 gitcode PR 链接 → API 取 元信息 + 改动文件 + 关键文件（example/op_def），写 pr_facts.json。
+
+    两种失败严格区分：
+      · URL 形态不认识 → `_parse_pr_url` 抛 ValueError（fail-loud，属用户输入错），**在任何网络调用之前**中止、不落 pr_facts.json；
+      · URL 认识但网络/token 取不到字段 → 不抛，记进 facts["notes"] 继续（属环境问题，错误信息与「URL 写错」不同，别让用户误改 URL）。"""
+    owner, repo, num = _parse_pr_url(pr_url)  # 形态错 → 抛出（fail-loud），不产空壳
+    facts = {"pr_url": pr_url, "notes": [], "source_repo": f"{owner}/{repo}"}
     st, pr = _get(f"{API}/repos/{owner}/{repo}/pulls/{num}")
     if st == 200 and isinstance(pr, dict):
         facts["title"] = pr.get("title")
         facts["state"] = pr.get("state")
         facts["base"] = (pr.get("base") or {}).get("ref")
         facts["head"] = (pr.get("head") or {}).get("ref")
+        # U5：**被测对象 = PR head 那个 commit**，钉 sha 而非分支名。分支名不可靠有两个实测理由：
+        #   ① merged PR 的 head 分支常被删；
+        #   ② open PR 的 head 多在**贡献者 fork** 上，且 head.ref 可能字面就叫 "master"
+        #      （实测 cann/ops-math MR 3400：head.repo=<fork>、head.ref="master"）——
+        #      按分支名去 base 仓取会**静默取到 base 仓的 master**（实测 sha e16a230c ≠ head 9b494b2d），
+        #      拿到完全不相干的代码却报告「取自 PR head」。
+        # 实测结论（2026-07-22，真打 gitcode API）：**fork 的 head sha 可直接从 base 仓解析**
+        #   （`contents?ref=<head_sha>` 对 base 仓 HTTP 200），故不需特判 fork 仓。
+        facts["head_sha"] = (pr.get("head") or {}).get("sha")
+        facts["head_repo"] = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
+        # is_fork：**不知道就是 None，别默认「同仓」**（unknown 当成同仓会让下游少一层警觉）；
+        # 比较前两边同样规范化（大小写/首尾空白），否则 Cann/Ops-Math 会被误判成 fork。
+        _hr = (facts["head_repo"] or "").strip().casefold()
+        facts["is_fork"] = (_hr != f"{owner}/{repo}".strip().casefold()) if _hr else None
         facts["merged"] = pr.get("merged") if "merged" in pr else (pr.get("state") == "merged")
     else:
         facts["notes"].append(f"取 PR 元信息失败 HTTP {st}")
@@ -125,14 +231,36 @@ def fetch_pr(pr_url, out_dir):
     op, target_dir = _guess_op(paths)
     facts["op"], facts["target_dir"] = op, target_dir
     # 关键文件：op 自带 example（runner 锚定用）+ op_def（支持 dtype）
-    # merged PR 的 head 分支常被删 → 按 head→base→master→main 多 ref 兜底
-    refs = [r for r in [facts.get("head"), facts.get("base"), "master", "main"] if r]
+    # ⚠ **只按 head_sha 取，不再按分支名兜底**（U5，2026-07-22 实测后收紧）。
+    #   旧兜底 `head→base→master→main` 是**静默取错代码**的路：open PR 的 head.ref 可能字面叫 "master"，
+    #   拿它去 base 仓会取到 base 的 master（实测两者 sha 不同），却仍被记成「取自 PR head」。
+    #   宁可取不到（下游据 notes 判断），也不拿一份来源不明的代码冒充被测对象。
+    head_sha = facts.get("head_sha")
+    refs = [head_sha] if head_sha else []
+    if not head_sha:
+        # ⚠ 不能只记 note 就照常返回——下游（CP-A / acc-spec）没有机器硬门查 head_sha，
+        # 「照常返回」等于让它带着无法溯源的取材继续抽 spec = fail-open。给一个**机读**的阻断状态。
+        facts["blocked"] = "missing_head_sha"
+        facts["notes"].append(
+            "PR 元信息里没有 head.sha → **无法钉死被测 commit**，关键文件一律不取"
+            "（不按分支名兜底：那会静默取到 base 仓同名分支的代码、与 PR 实际内容无关）。"
+            "已置 blocked='missing_head_sha'：编排层须停下，**不得据此往下抽 spec / 产 runner**。")
+
+    # 取仓顺序：base 仓优先，**404 时用同一个 sha 退到 head_repo**。
+    # ⚠ 「fork 的 sha 一定能从 base 仓解析」只在 2026-07-22 实测的两个 PR 上观察到，
+    #   **不是平台保证**——不能据此断定所有仓/所有 fork commit 都可达。退一层是廉价的保险，
+    #   且因为**用的仍是同一个 sha**，不会重新引入「按分支名取错代码」的风险。
+    _repos = [(owner, repo)]
+    _hr = facts.get("head_repo")
+    if _hr and "/" in _hr and _hr.strip().casefold() != f"{owner}/{repo}".strip().casefold():
+        _repos.append(tuple(_hr.split("/", 1)))
 
     def _grab(rel):
         for r in refs:
-            c = _repo_file(owner, repo, rel, r)
-            if c:
-                return c, r
+            for o2, r2 in _repos:
+                c = _repo_file(o2, r2, rel, r)
+                if c:
+                    return c, r
         return None, None
 
     key, key_ref = {}, {}
@@ -145,10 +273,15 @@ def fetch_pr(pr_url, out_dir):
                 key[rel], key_ref[rel] = c, r
     facts["key_files"] = key
     facts["key_files_ref"] = key_ref  # 每个关键文件实际取自哪个 ref（供下游判新鲜度）
-    stale = [rel for rel, r in key_ref.items() if facts.get("head") and r != facts["head"]]
-    if stale:
-        facts["notes"].append(f"{len(stale)} 个关键文件非取自 PR head（head 分支已删/为 fork/open PR）"
-                              f"，兜底取自 base/master——内容可能与 PR 实际 head 有差，请核")
+    # 批 6b B-core：据 key_files 机器判接口形态 + 抽真实 aclnn 入口（供 runner 锚定、scope gate 消费）。
+    _ik, _entry, _ik_note = _detect_interface_kind(key)
+    facts["interface_kind"], facts["aclnn_entry"] = _ik, _entry
+    facts["notes"].append(f"接口形态(批6b探测)：{_ik_note}")
+    # 现在只有 head_sha 一个 ref，取到的必定就是 head；stale 概念随兜底一并退役。
+    # 保留一条正向记账：明确告知下游「这些文件确实钉在哪个 commit 上」。
+    if key and head_sha:
+        where = ("fork " + str(facts.get("head_repo"))) if facts.get("is_fork") else "同仓"
+        facts["notes"].append("关键文件均取自 PR head commit %s（%s）" % (head_sha[:12], where))
     if not key:
         facts["notes"].append("未取到 example/op_def 关键文件内容（runner 锚定需另取）")
     return _dump_facts(facts, out_dir)
@@ -161,15 +294,68 @@ def _dump_facts(facts, out_dir):
     return dst
 
 
+def write_taskdoc_snapshot(taskdoc_path, snapshot_path):
+    """把取到的任务书原文**逐字节原样**落成快照，返回 (sha256, path)。R12 / 批 3。
+
+    ⚠ **必须逐字节复制，不许任何规范化**（不改行尾、不补末尾换行、不转码）——
+    `verify_authorization` 按**行号 + 逐字子串**核引文；改动一个字节，行号就可能移位、
+    引文就可能对不上，而那时报出来的是「引文与出处对不上」这种**看起来像 agent 编造引文**
+    的错，真正的病因（快照被规范化过）却查不出来。故这里刻意用二进制读写。
+
+    ⚠ **不覆盖已存在的快照**：快照是引文锚，已有 golden 的 `taskdoc_snapshot.sha256` 绑着它。
+    静默覆盖 = 让所有既有引文锚一起失效却不报错。要换须显式删了重来（人为动作、留痕）。
+
+    ⚠ **但「不覆盖」不等于「不吭声」**：上游任务书若已改版，安静地留着旧快照、还打印旧 sha256，
+    调用方会以为刷新过了——**那是比覆盖更坏的静默**（验收基于一份自己都不知道过期的引文锚）。
+    故内容不一致时 **fail-loud 抛错**，把两个指纹与处置方式一并说清，由人决定要不要换锚。"""
+    if os.path.exists(snapshot_path):
+        with open(snapshot_path, "rb") as f:
+            old = f.read()
+        with open(taskdoc_path, "rb") as f:
+            new = f.read()
+        old_d, new_d = hashlib.sha256(old).hexdigest(), hashlib.sha256(new).hexdigest()
+        if old_d != new_d:
+            raise RuntimeError(
+                f"任务书快照已存在但**内容与本次取到的原文不一致**：{snapshot_path}\n"
+                f"  既有快照 sha256: {old_d}\n"
+                f"  本次取到 sha256: {new_d}\n"
+                f"  → 说明上游任务书改版了。**不自动覆盖**：既有 golden 的引文锚"
+                f"（taskdoc_snapshot.sha256 + cite 行号）绑在旧快照上，换掉会让它们一起失效。\n"
+                f"  → 要换锚：先删掉这份快照重跑，**并逐个复核受影响 golden 的 cite 行号与 quote**"
+                f"（行号极可能已移位）。这是人为动作，不该由脚本替你做。")
+        return old_d, snapshot_path
+    os.makedirs(os.path.dirname(snapshot_path) or ".", exist_ok=True)
+    with open(taskdoc_path, "rb") as src, open(snapshot_path, "wb") as dst:
+        raw = src.read()
+        dst.write(raw)                                  # 逐字节，不经文本层
+    return hashlib.sha256(raw).hexdigest(), snapshot_path
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description="① 取材：任务书(md/链接) + PR(链接) → 中立 JSON/文件")
     ap.add_argument("--taskdoc", required=True, help="任务书 md 本地路径 或 http(s) 链接")
     ap.add_argument("--pr", default=None, help="gitcode PR 链接（可选）")
     ap.add_argument("--out", required=True, help="产出目录")
+    ap.add_argument("--snapshot-into", default=None, metavar="DIR",
+                    help="另把任务书原文逐字节落成 task_doc.snapshot.md 到该目录"
+                         "（通常是 <ops_root>/<op>/），并打印 sha256——供 golden 契约块的引文锚绑定（R12）")
     a = ap.parse_args(argv)
+    # PR URL 形态校验**前置到一切网络调用与产物写入之前**：否则任务书是链接时，会先发一次网络请求、
+    # 先写出 task_doc.md，然后才报「PR 格式不认识」——半个产物已经落盘了，与 fail-loud 的承诺不符。
+    # 这里只校形态（纯函数、不联网）；取不到 PR 的网络失败仍在 fetch_pr 内按环境问题处理。
+    if a.pr:
+        _parse_pr_url(a.pr)
     os.makedirs(a.out, exist_ok=True)
     td = fetch_taskdoc(a.taskdoc, a.out)
     print(f"[fetch] 任务书 → {td}")
+    if a.snapshot_into:
+        import precision_policy                            # 只在需要时 import，保持纯 stdlib 主路
+        sp = os.path.join(a.snapshot_into, precision_policy.TASKDOC_SNAPSHOT_NAME)
+        digest, sp = write_taskdoc_snapshot(td, sp)
+        print(f"[fetch] 任务书快照 → {sp}")
+        print(f"        sha256 = {digest}")
+        print(f"        ↑ 写进 golden.py 契约块的 taskdoc_snapshot.sha256；"
+              f"引文 cite 用 {precision_policy.TASKDOC_SNAPSHOT_NAME}:<起>[-<止>]")
     if a.pr:
         pf = fetch_pr(a.pr, a.out)
         facts = json.load(open(pf, encoding="utf-8"))

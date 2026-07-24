@@ -2,11 +2,13 @@
 materialize/readback round-trip、int/bf16 golden、attr_matrix 计数+golden 用 attrs+equal_nan NaN、语义 id
 稳定+唯一、storage_dtype/layout 契约（X_logical vs X_bin 分造）、per-case compare 派生+未支持 fail-fast、
 扩面后机器门（覆盖/子集/篡改·codex#3）+ mock 端到端。
+另含 shape_transform 扩面三契约（C1 out_shape / C2 attr list[int] / C3 input rank）的正反用例，见文件末尾。
+再含 G4「归约/成对类算子的生成期规模预算」正反用例（`GoldenCostBudgetTest`，文件最末）。
 
 跑: cd plugin/acc-common && python3 -m unittest test_gen_cases_dtype_attr -v
 ⚠ 真机（真 NPU）上 int/bf16 数值校验本轮不做——本文件只证「流水线能造/收发/裁 int/bf16」，非「被验收」。
 """
-import json, os, subprocess, sys, tempfile, shutil, unittest
+import contextlib, io, json, os, subprocess, sys, tempfile, shutil, unittest
 from unittest import mock
 import numpy as np
 
@@ -285,7 +287,7 @@ class AttrMatrixTest(unittest.TestCase):
         self.assertIn(False, vals)
 
     def test_golden_uses_case_attrs(self):
-        isclose_fn, _, _ = GC.load_golden("IsClose")             # golden 现按算子加载（elementwise 通路不内置）
+        isclose_fn = GC.load_golden("IsClose").fn                # golden 现按算子加载（elementwise 通路不内置）
         for c in self.cs["cases"]:
             if not c["expected"]["case_origin"].startswith("attr_matrix"):
                 continue
@@ -313,7 +315,7 @@ class AttrMatrixTest(unittest.TestCase):
         """缺省无 attr_matrix → 与权威 isclose.spec.json 用例数/id 一致（不引入 attr case）。"""
         d1, d2 = tempfile.mkdtemp(), tempfile.mkdtemp()
         try:
-            auth = GC.gen_cases(_spec(os.path.join(_HERE, "..", "..", "samples", "specs", "isclose.spec.json")), d1)
+            auth = GC.gen_cases(_spec(os.path.join(_HERE, "..", "samples", "specs", "isclose.spec.json")), d1)
             self.assertFalse(any(c["expected"]["case_origin"].startswith("attr_matrix")
                                  for c in auth["cases"]))
         finally:
@@ -461,6 +463,46 @@ class DtypeRejectTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             RA.run_mock(cs, work)
 
+    def test_arity_ge3_rejected_not_silently_truncated(self):
+        """3 元输入 → fail-closed 报错，**不静默丢掉第 3 个输入**。
+
+        `_build_inputs` 常规 varied/pair* 路径末尾写死 `return [x0, x1]`（二元构造），
+        而 empty / 特殊值路径按 arity 产满——两边行为不一致，arity≥3 会无声截断。
+        本测试钉住「宁可报错也不静默降级」这条纪律。支持多输入须先一般化（TODO U7b）。"""
+        in_params = [{"name": n, "io": "in", "dtype": ["float32"]} for n in ("a", "b", "c")]
+        with self.assertRaises(ValueError) as cm:
+            GC._build_inputs(GC._case_rng("x"), in_params, [4], "float32", {}, "varied")
+        self.assertIn("3 元输入", str(cm.exception))       # 报清楚是几元、别只说「不支持」
+        # 对照：二元仍正常产 2 个（证不是把整条路堵死）
+        two = GC._build_inputs(GC._case_rng("x"), in_params[:2], [4], "float32", {}, "varied")
+        self.assertEqual(len(two), 2)
+
+    def test_empty_dtype_set_fails_closed_in_both_paths(self):
+        """空 dtype 集 → 产不出任何用例 → **两条路都 fail-closed**（0 用例不得冒充验收）。
+
+        ⚠ `_dry_run` 那条尤其要紧：它现在是 **CP-B 的契约自检**。原来它没这道闸，
+        空 dtype 集会安静地 `emitted=0` 通过 CP-B，跑 0 条也显示「无失败」。"""
+        spec = {"op": "FakeEmptyDtype", "verify_mode": "exact",
+                "params": [{"name": "self", "io": "in", "dtype": []}]}
+        for label, fn in (("gen_cases", lambda: GC.gen_cases(spec, tempfile.mkdtemp())),
+                          ("_dry_run", lambda: GC._dry_run(spec))):
+            with self.assertRaises(ValueError, msg=label) as cm:
+                fn()
+            self.assertIn("0 用例不得冒充验收", str(cm.exception), label)
+
+    def test_arity_guard_fires_in_dry_run_not_only_at_cp_d(self):
+        """能力边界须在 **CP-B 的 dry-run** 就拦下，别拖到 CP-D 正式生成输入时才炸。
+
+        `_dry_run` 只调 `_plan()`、不走 `_build_inputs`，所以守卫必须提到 spec 级共享预检
+        （`check_spec_capability`），否则三元 spec 能一路混过契约自检。"""
+        spec = {"op": "FakeTernary", "verify_mode": "exact",
+                "params": [{"name": n, "io": "in", "dtype": ["float32"]} for n in ("self", "b", "c")]}
+        with self.assertRaises(ValueError) as cm:
+            GC._dry_run(spec)
+        self.assertIn("3 元输入", str(cm.exception))
+        # 且预检先于 load_golden：三元 spec 不该因为「缺 golden」而报错，应报能力边界
+        self.assertNotIn("缺 golden", str(cm.exception))
+
 
 # ===================================================== 子进程端到端（退出码） ====
 class SubprocessE2ETest(unittest.TestCase):
@@ -482,11 +524,14 @@ class SubprocessE2ETest(unittest.TestCase):
 
     def test_fixture_int_defect_exit1_gate_passed(self):
         did = _find_case(GC.gen_cases(_spec(_SIGN_FX), tempfile.mkdtemp()), dtype="int32")["id"]
-        r = self._run(_SIGN_FX, "--defect", did)
-        self.assertEqual(r.returncode, 1)
-        acc = _rj(os.path.join(self.d, "acceptance.json"))
-        self.assertEqual(acc["state"], "FAILED_PRECISION")
-        self.assertTrue(acc["gate"]["passed"])                    # 门 PASSED（合法 fail 不被门盖·codex#3）
+        # C5：`--defect` 出 CLI → 进程内调用；mock 非验收通路 → 读 dev_run_summary.json。
+        # ⚠ 要测的能力（合法精度 fail 不被门盖成 BLOCKED·codex#3）一点没动。
+        import run_workflow as W
+        r = W.run(_SIGN_FX, mode="mock", out_dir=self.d, defect=[did])
+        self.assertEqual(r["exit_code"], 1, r)
+        self.assertEqual(r["state"], "FAILED_PRECISION")          # 返回值里 state 仍在
+        acc = _rj(os.path.join(self.d, "dev_run_summary.json"))
+        self.assertTrue(acc["selfcheck"]["passed"])               # 自检 PASSED（合法 fail 不被盖·codex#3）
 
     def test_validator_stays_stdlib_only(self):
         code = ("import sys, validator; "
@@ -669,7 +714,7 @@ class GoldenTorchPreferredTest(unittest.TestCase):
     def test_golden_source_label_is_torch(self):
         # 加载器只读元数据、不跑 golden_fn，故不需 torch。4 算子 golden.py 的 GOLDEN_SOURCE 恒 "torch ..."。
         for op in ("IsClose", "Sign", "Equal", "Neg"):
-            _fn, gsrc, _prov = GC.load_golden(op)
+            gsrc = GC.load_golden(op).source
             self.assertTrue(gsrc.startswith("torch "), gsrc)
 
     def test_caseset_records_torch_source(self):
@@ -694,10 +739,10 @@ class GoldenTorchPreferredTest(unittest.TestCase):
         边界(如 sign(NaN))torch 与 numpy 有意不同——torch 是选定的确定性后端、不与 numpy 比。
         另核 rtol/atol 非法 → fail-closed。golden 现按算子从 samples/golden 加载（经 load_golden）。"""
         self._need_torch()
-        sign_fn, _, _ = GC.load_golden("Sign")
-        neg_fn, _, _ = GC.load_golden("Neg")
-        eq_fn, _, _ = GC.load_golden("Equal")
-        isclose_fn, _, _ = GC.load_golden("IsClose")
+        sign_fn = GC.load_golden("Sign").fn
+        neg_fn = GC.load_golden("Neg").fn
+        eq_fn = GC.load_golden("Equal").fn
+        isclose_fn = GC.load_golden("IsClose").fn
         rng = np.random.default_rng(0)
         for dt in (np.float32, np.float16):
             a = rng.uniform(-5, 5, size=(4, 4)).astype(dt)
@@ -765,10 +810,1071 @@ class LoadGoldenTest(unittest.TestCase):
     def test_valid_golden_loads(self):
         with tempfile.TemporaryDirectory() as d, self._ops(d):
             _place_golden(os.path.realpath(d), "Sign")            # 从 samples/golden 拷
-            fn, src, prov = GC.load_golden("Sign")
+            g = GC.load_golden("Sign")
+            fn, src, prov = g.fn, g.source, g.provenance
             self.assertTrue(callable(fn))
             self.assertTrue(src.startswith("torch "))
             self.assertTrue(prov)
+            self.assertIsNone(g.out_shape)                        # C1：elementwise 样例不导出 out_shape → None
+
+
+# ==================================================================================================
+# shape_transform 扩面三契约（用户 2026-07-22 拍板）：
+#   C1 · 输出形状交给 per-op golden.py 的可选 `out_shape(in_shapes, attrs)`（**不搞 spec 表达式语言**）；
+#   C2 · attr 值放开到 `list[int]`（output_size/kernel_size 这类既是数组、又决定输出形状的属性）；
+#   C3 · spec 的 in 参数可选 `rank`，限制 shape 阶梯只在合法维度内取值。
+# 这些测试**不需要 torch**（都用 numpy 假 golden），本机与真机都能跑。
+# ==================================================================================================
+def _fake_spec(op, *, dtypes=("float32",), attrs=None, attr_matrix=None, rank=None, case_target=1,
+               arity=1):
+    """造一份最小可跑 spec（零真实算子数值；只为驱动 gen_cases）。case_target=1 → 只出强制项，跑得快。"""
+    names = ["self", "other"][:arity]
+    ins = []
+    for n in names:
+        p = {"name": n, "io": "in", "dtype": list(dtypes)}
+        if rank is not None:
+            p["rank"] = rank
+        ins.append(p)
+    params = ins + [{"name": k, "io": "attr", "dtype": ["listInt"], "default": v}
+                    for k, v in (attrs or {}).items()]
+    params.append({"name": "out", "io": "out", "dtype": list(dtypes)})
+    sp = {"op": op, "verify_mode": "numerical", "params_source": "fixture", "params": params,
+          "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default",
+                        "case_target": case_target},
+          "perf": {"baseline": "tbe", "target_ratio": 0.95}}
+    if attr_matrix is not None:
+        sp["attr_matrix"] = attr_matrix
+    return sp
+
+
+def _special_cases(cs):
+    """§1.4 特殊场景 case → {id_kind: case}。按 `expected.case_origin`（gen_cases 写的 `special:<kind>`）
+    识别，**不**从 case_id 尾段猜——id 尾段是 attr 索引 `a{k}`、不是 kind。"""
+    out = {}
+    for c in cs["cases"]:
+        origin = c.get("expected", {}).get("case_origin", "")
+        if origin.startswith("special:"):
+            out[origin.split(":", 1)[1]] = c
+    return out
+
+
+def _special_kinds(cs):
+    return set(_special_cases(cs))
+
+
+class _FakeOpCase(unittest.TestCase):
+    """给假算子落 golden.py 到模块级 golden root，用完删掉（避免污染同模块别的用例）。"""
+
+    def setUp(self):
+        self._ops, self._dirs = [], []
+
+    def tearDown(self):
+        for op in self._ops:
+            shutil.rmtree(os.path.join(_GOLDEN_ROOT, op), ignore_errors=True)
+        for d in self._dirs:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def place(self, op, body):
+        _place_golden(_GOLDEN_ROOT, op, body)
+        self._ops.append(op)
+
+    def work(self):
+        d = tempfile.mkdtemp()
+        self._dirs.append(d)
+        return d
+
+
+# golden 体：逐元素取负（输出同输入形状，**不导出** out_shape → 走缺省语义）
+_BODY_ELEMENTWISE = "def golden_fn(inputs, attrs):\n    return np.negative(inputs[0])\n"
+# golden 体：沿最后一维求和（**真 shape_transform**：输出比输入少一维），并导出 out_shape
+_BODY_REDUCE_LAST = (
+    "def golden_fn(inputs, attrs):\n"
+    "    return np.sum(inputs[0], axis=-1)\n"
+    "\n"
+    "def out_shape(in_shapes, attrs):\n"
+    "    return tuple(in_shapes[0][:-1])\n")
+# golden 体：输出形状**由 list[int] attr `output_size` 决定**（C1+C2 合流的真实形态）
+_BODY_ATTR_SHAPED = (
+    "def golden_fn(inputs, attrs):\n"
+    "    x = inputs[0]\n"
+    "    fill = x.reshape(-1)[:1].sum() if x.size else x.dtype.type(0)\n"
+    "    return np.full(tuple(attrs['output_size']), fill, dtype=x.dtype)\n"
+    "\n"
+    "def out_shape(in_shapes, attrs):\n"
+    "    return tuple(attrs['output_size'])\n")
+
+
+# golden 体：**真会改形状，却「忘了」导出 out_shape** —— C1 缺省语义的负例
+_BODY_RESHAPES_BUT_UNDECLARED = (
+    "def golden_fn(inputs, attrs):\n"
+    "    return np.sum(inputs[0], axis=-1)\n")
+
+
+class OutShapeDefaultSemanticsTest(_FakeOpCase):
+    """C1 缺省语义是**承诺、不是默认值**：没导出 `out_shape` 就必须真的输出同输入形状。
+
+    负例的危害：一个真会改形状的 golden 若忘了导出 `out_shape`，若引擎只是照抄实测形状，
+    CP-B 会全绿、拖到下游 runner 按错形状收发才炸——正是本仓最忌的「本机过、真机炸」。"""
+
+    def test_reshaping_golden_without_out_shape_fails_closed(self):
+        self.place("FakeUndeclaredReshape", _BODY_RESHAPES_BUT_UNDECLARED)
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(_fake_spec("FakeUndeclaredReshape", case_target=1), self.work())
+        msg = str(cm.exception)
+        self.assertIn("未导出 out_shape", msg, msg)      # 报清病因，别只说「形状不符」
+        self.assertIn("out_shape(in_shapes, attrs)", msg, msg)   # 并给出改法
+
+    def test_true_elementwise_still_passes_without_out_shape(self):
+        """对照：真 elementwise 不导出 out_shape 照常通过，证补的闸没误伤缺省通路。"""
+        self.place("FakeTrulyElementwise", _BODY_ELEMENTWISE)
+        cs = GC.gen_cases(_fake_spec("FakeTrulyElementwise", case_target=3), self.work())
+        self.assertTrue(cs["cases"])
+        self.assertTrue(all(c["expected"]["out_shape_source"] == "golden_fn_actual"
+                            for c in cs["cases"]), "缺省通路的 source 应是 golden_fn_actual")
+
+
+class OutShapeContractTest(_FakeOpCase):
+    """C1：out_shape 由 per-op golden.py 可选导出；未导出=同形；声明与实测打架→fail-closed。"""
+
+    def test_load_golden_returns_out_shape_when_exported(self):
+        """load_golden 现返回**具名元组** `Golden(fn, source, provenance, out_shape, contract)`。
+
+        批 2 起加了第 5 项 `contract`——刻意用具名元组而非再加一个位置项：
+        位置解包在字段增删时会**静默错位**，具名取则在字段没了时当场报错。"""
+        self.place("FakeOsExported", _BODY_REDUCE_LAST)
+        self.place("FakeOsAbsent", _BODY_ELEMENTWISE)
+        osh = GC.load_golden("FakeOsExported").out_shape
+        self.assertTrue(callable(osh))
+        self.assertEqual(osh([(2, 3, 4)], {}), (2, 3))
+        osh2 = GC.load_golden("FakeOsAbsent").out_shape
+        self.assertIsNone(osh2)                                  # 未导出 → None（缺省同形语义）
+
+    def test_out_shape_drives_caseset_expected(self):
+        """导出 out_shape 的 shape_transform 算子：caseset 的输出形状 = out_shape() 声明，
+        且与落盘 golden.npy 的真实形状一致（不是自报的、是对过账的）。"""
+        self.place("FakeReduceLast", _BODY_REDUCE_LAST)
+        d = self.work()
+        cs = GC.gen_cases(_fake_spec("FakeReduceLast"), d)
+        self.assertTrue(cs["cases"])
+        for c in cs["cases"]:
+            in_shape = tuple(c["inputs"][0]["shape"])
+            exp = c["expected"]
+            self.assertEqual(exp["out_shape"], list(in_shape[:-1]), c["id"])
+            self.assertEqual(exp["out_shape_source"], "golden.out_shape", c["id"])
+            g = np.load(os.path.join(d, exp["golden_path"]))
+            self.assertEqual(list(g.shape), exp["out_shape"], c["id"])  # 落盘 golden 与账面一致
+            self.assertNotEqual(list(g.shape), list(in_shape), c["id"])  # 确实变了形（非 elementwise）
+
+    def test_no_out_shape_keeps_same_shape_semantics(self):
+        """未导出 out_shape → 维持现状：输出同输入形状，来源标 golden_fn_actual（不谎称『已声明』）。"""
+        self.place("FakeElemwise", _BODY_ELEMENTWISE)
+        d = self.work()
+        cs = GC.gen_cases(_fake_spec("FakeElemwise"), d)
+        self.assertTrue(cs["cases"])
+        for c in cs["cases"]:
+            exp = c["expected"]
+            self.assertEqual(exp["out_shape"], list(c["inputs"][0]["shape"]), c["id"])
+            self.assertEqual(exp["out_shape_source"], "golden_fn_actual", c["id"])
+
+    def test_out_shape_disagrees_with_golden_fail_closed(self):
+        """声明与实现打架（out_shape 说 n+1、golden_fn 实际产 n）→ fail-closed，不许任一方静默胜出。"""
+        self.place("FakeOsLiar",
+                   "def golden_fn(inputs, attrs):\n"
+                   "    return np.negative(inputs[0])\n"
+                   "\n"
+                   "def out_shape(in_shapes, attrs):\n"
+                   "    return (in_shapes[0][0] + 1,)\n")
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(_fake_spec("FakeOsLiar"), self.work())
+        self.assertIn("out_shape", str(cm.exception))
+        self.assertIn("≠", str(cm.exception))
+
+    def test_out_shape_not_callable_rejected(self):
+        """导出了 out_shape 但不是函数（写成数组常量）→ load_golden 就拒，不拖到 case 循环。"""
+        self.place("FakeOsNotFn", _BODY_ELEMENTWISE + "\nout_shape = [1, 2]\n")
+        with self.assertRaises(ValueError) as cm:
+            GC.load_golden("FakeOsNotFn")
+        self.assertIn("out_shape", str(cm.exception))
+
+    def test_out_shape_bad_return_rejected(self):
+        """out_shape 返回非序列 / 负维度 → fail-closed（不猜、不修正）。"""
+        for body_tail, op in (("    return 5\n", "FakeOsScalarRet"),
+                              ("    return (-1, 2)\n", "FakeOsNegRet")):
+            self.place(op, _BODY_ELEMENTWISE + "\ndef out_shape(in_shapes, attrs):\n" + body_tail)
+            with self.assertRaises(ValueError) as cm:
+                GC.gen_cases(_fake_spec(op), self.work())
+            self.assertIn("out_shape", str(cm.exception))
+
+    def test_out_shape_raising_is_wrapped_not_leaked(self):
+        """out_shape 自己抛异常 → 收敛成带上下文的 ValueError（用户代码炸了要说清是哪条 entry / 哪组形状）。
+
+        ⚠ G4 起 `out_shape` 会在**计划期**先被调一次（算规模预算），所以这里的上下文标签是
+        `dtype·shape·id_kind` 而非 case_id——比 case_id 更早，但一样定位得到。原始异常挂在 `__cause__`。"""
+        self.place("FakeOsBoom", _BODY_ELEMENTWISE +
+                   "\ndef out_shape(in_shapes, attrs):\n    raise KeyError('missing attr')\n")
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(_fake_spec("FakeOsBoom"), self.work())
+        self.assertIn("out_shape", str(cm.exception))
+        self.assertIsInstance(cm.exception.__cause__, KeyError)   # 原因没被吞掉
+
+
+class AttrListIntTest(_FakeOpCase):
+    """C2：attr 值放开到 list[int]——笛卡尔展开 / combo 索引 / case_id / JSON 落盘全线吃得下。"""
+
+    def _spec(self):
+        return _fake_spec("FakeAttrShaped", attrs={"output_size": [2, 2]},
+                          attr_matrix=[{"output_size": [1, 1]}, {"output_size": [2, 3]}])
+
+    def test_list_attr_cartesian_and_shapes(self):
+        """list[int] attr 参与笛卡尔展开；输出形状随该 attr 变（C1+C2 合流的真实形态）。"""
+        self.place("FakeAttrShaped", _BODY_ATTR_SHAPED)
+        d = self.work()
+        cs = GC.gen_cases(self._spec(), d)
+        seen = {tuple(c["attrs"]["output_size"]) for c in cs["cases"]}
+        self.assertEqual(seen, {(1, 1), (2, 3)})                 # 两个数组取值都出现
+        for c in cs["cases"]:
+            want = list(c["attrs"]["output_size"])
+            self.assertEqual(c["expected"]["out_shape"], want, c["id"])
+            g = np.load(os.path.join(d, c["expected"]["golden_path"]))
+            self.assertEqual(list(g.shape), want, c["id"])
+
+    def test_list_attr_case_id_stays_index_based_and_filename_safe(self):
+        """case_id 里 attr 仍用 `a{k}` 索引表示——数组值**不**进文件名（既保文件名安全，
+        也保住『同 id → 同数据字节』那条回归：id 不含数组值，per-case 种子就不随 attr 写法漂移）。"""
+        self.place("FakeAttrShaped", _BODY_ATTR_SHAPED)
+        d1, d2 = self.work(), self.work()
+        cs1 = GC.gen_cases(self._spec(), d1)
+        cs2 = GC.gen_cases(self._spec(), d2)
+        ids1 = [c["id"] for c in cs1["cases"]]
+        self.assertEqual(len(ids1), len(set(ids1)))              # 唯一
+        self.assertEqual(ids1, [c["id"] for c in cs2["cases"]])  # 确定性稳定
+        for cid in ids1:
+            for ch in "[](), ":
+                self.assertNotIn(ch, cid, f"{cid} 含文件名不安全字符 {ch!r}")
+        self.assertTrue(any(cid.endswith("_a1") for cid in ids1), ids1)   # 第二个 combo 用 a1
+        # 同 id → 同数据字节（per-case 种子只依赖 id）
+        by2 = {c["id"]: c for c in cs2["cases"]}
+        for c in cs1["cases"]:
+            x1 = np.load(os.path.join(d1, c["inputs"][0]["path"]))
+            x2 = np.load(os.path.join(d2, by2[c["id"]]["inputs"][0]["path"]))
+            np.testing.assert_array_equal(x1, x2, err_msg=c["id"])
+
+    def test_list_attr_survives_json_roundtrip(self):
+        """caseset 落 JSON 再读回来，数组 attr 与输出形状不变（下游拿到的是同一份口径）。"""
+        self.place("FakeAttrShaped", _BODY_ATTR_SHAPED)
+        d = self.work()
+        cs = GC.gen_cases(self._spec(), d)
+        back = json.loads(json.dumps(cs, ensure_ascii=False))
+        for a, b in zip(cs["cases"], back["cases"]):
+            self.assertEqual(a["attrs"]["output_size"], b["attrs"]["output_size"])
+            self.assertEqual(a["expected"]["out_shape"], b["expected"]["out_shape"])
+
+    def test_list_attr_not_shared_between_cases(self):
+        """各 case 的数组 attr 是**各自一份**——golden_fn/out_shape 是用户代码，就地改一下不能串到别的 case。"""
+        self.place("FakeAttrShaped", _BODY_ATTR_SHAPED)
+        cs = GC.gen_cases(self._spec(), self.work())
+        objs = [id(c["attrs"]["output_size"]) for c in cs["cases"]]
+        self.assertEqual(len(objs), len(set(objs)), "数组 attr 在多条 case 间共享了同一个 list 对象")
+
+    def test_bad_list_attr_values_fail_fast(self):
+        """只放开到 list[int]：嵌套数组 / 浮点元素 / bool 元素 / **空数组**一律 fail-fast。
+        空数组特别说明：`repo_adapter._manifest_attr_token` 那边也拒（空串会挤错 manifest token），
+        但 mock 通路不造 manifest——只在那边拦就成了「本机过、真机炸」，故 gen_cases 侧同样早拦。"""
+        self.place("FakeAttrShaped", _BODY_ATTR_SHAPED)
+        for bad in ([[1], [2]], [1.5, 2], [True, False], {"h": 1}, []):
+            sp = _fake_spec("FakeAttrShaped", attrs={"output_size": [2, 2]},
+                            attr_matrix=[{"output_size": bad}])
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                GC.gen_cases(sp, self.work())
+
+    def test_bad_list_attr_default_fail_fast_without_matrix(self):
+        """**只走 `default` 路径**（无 attr_matrix）的坏 list 值同样要早拦。
+
+        上一条测的全是 attr_matrix 分支；`default` 分支原来不过类型闸——
+        `"default": []` / `[1.5, 2.0]` 会一路 gen_cases + mock 全绿、真机造 manifest 才炸，
+        正是「本机过、真机炸」。这条钉住 default 也过闸。"""
+        self.place("FakeAttrShaped", _BODY_ATTR_SHAPED)
+        for bad in ([[1], [2]], [1.5, 2], [True, False], []):
+            sp = _fake_spec("FakeAttrShaped", attrs={"output_size": bad})   # 不给 attr_matrix
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                GC.gen_cases(sp, self.work())
+
+    def test_scalar_and_none_defaults_untouched(self):
+        """对照：标量与 None（未定哨兵）默认值语义**一字不动**，证补闸没误伤现存 spec。"""
+        self.place("FakeAttrShaped", _BODY_ATTR_SHAPED)
+        cs = GC.gen_cases(_fake_spec("FakeAttrShaped", attrs={"output_size": [2, 2]}), self.work())
+        self.assertTrue(cs["cases"])
+
+
+class InputRankTest(_FakeOpCase):
+    """C3：spec 的 in 参数可选 rank，限制 shape 阶梯；过滤空 → fail-closed（不产 0 条常规用例）。"""
+
+    def test_rank_filters_shape_ladder(self):
+        """rank=4 → 每条用例的输入都是 4 维（常规网格按 rank 过滤、强制项按 rank 保 numel 调维）。"""
+        self.place("FakeRank4", _BODY_ELEMENTWISE)
+        d = self.work()
+        cs = GC.gen_cases(_fake_spec("FakeRank4", rank=4, case_target=30), d)
+        self.assertTrue(cs["cases"])
+        for c in cs["cases"]:
+            self.assertEqual(len(c["inputs"][0]["shape"]), 4,
+                             f'{c["id"]} 输入 shape={c["inputs"][0]["shape"]} 不是 4 维')
+        # 常规网格没被清空（否则就只剩强制项冒充覆盖）
+        self.assertTrue(any("常规" in c.get("tags", []) for c in cs["cases"]))
+        # 强制的 §1.4 特殊场景都还在（空/标量/边界/inf-nan 不因 rank 约束丢失）
+        kinds = _special_kinds(cs)
+        for k in ("empty", "scalar", "bndlo", "bndhi", "inf", "ninf", "nan"):
+            self.assertIn(k, kinds, f"rank 约束下丢了强制场景 {k}")
+
+    def test_rank_list_accepts_any_of(self):
+        """rank=[1,2] → 只在 1/2 维里取值（列表形式=允许多种维度）。"""
+        self.place("FakeRank12", _BODY_ELEMENTWISE)
+        cs = GC.gen_cases(_fake_spec("FakeRank12", rank=[1, 2], case_target=30), self.work())
+        ranks = {len(c["inputs"][0]["shape"]) for c in cs["cases"]}
+        self.assertTrue(ranks <= {1, 2}, ranks)
+        self.assertEqual(ranks, {1, 2}, "1/2 维都该取到（阶梯里两种都有）")
+
+    def test_rank_keeps_special_numel(self):
+        """调维保 numel：空 Tensor 仍空、标量仍 numel=1、大 shape 仍大（特殊场景的性质不能被调没）。"""
+        self.place("FakeRankNumel", _BODY_ELEMENTWISE)
+        cs = GC.gen_cases(_fake_spec("FakeRankNumel", rank=4, case_target=1), self.work())
+        by_kind = {k: c["inputs"][0]["shape"] for k, c in _special_cases(cs).items()}
+        self.assertEqual(int(np.prod(by_kind["empty"])), 0)
+        self.assertEqual(int(np.prod(by_kind["scalar"])), 1)
+        self.assertEqual(int(np.prod(by_kind["bndhi"])), int(np.prod(GC._LARGE_SHAPES[0])))
+
+    def test_no_rank_means_unconstrained(self):
+        """不写 rank = 不限制（现行为零变更）：阶梯里多种维度都还在。"""
+        self.place("FakeNoRank", _BODY_ELEMENTWISE)
+        cs = GC.gen_cases(_fake_spec("FakeNoRank", case_target=30), self.work())
+        self.assertGreater(len({len(c["inputs"][0]["shape"]) for c in cs["cases"]}), 1)
+
+    def test_rank_with_no_legal_shape_fail_closed(self):
+        """阶梯覆盖不到的 rank → 过滤后无合法常规 shape → **报错**，绝不产 0 条常规用例冒充验收。
+
+        ⚠ 例子用 **rank=6**，不是 5：2026-07-23 起 `_EXT_RANK_SHAPES` 已补 5 维
+        （UpsampleNearest3d 的 (N,C,D,H,W) 要它）。测试的**意图**没变——变的只是「哪个 rank 还没覆盖」。
+        6 仍 ≤ `_MAX_RANK`(8)，所以走的确实是「取值合法但阶梯给不出 shape」这条路，不是取值校验。"""
+        self.place("FakeRank6", _BODY_ELEMENTWISE)
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(_fake_spec("FakeRank6", rank=6), self.work())
+        self.assertIn("rank", str(cm.exception).lower())
+
+    def test_rank5_now_covered_by_ext_ladder(self):
+        """对照：rank=5 **现在能跑**（`_EXT_RANK_SHAPES` 按需并入），证补阶梯真生效。"""
+        self.place("FakeRank5", _BODY_ELEMENTWISE)
+        cs = GC.gen_cases(_fake_spec("FakeRank5", rank=5, case_target=10), self.work())
+        self.assertTrue(cs["cases"])
+        self.assertTrue(all(len(c["inputs"][0]["shape"]) == 5 for c in cs["cases"]),
+                        [c["inputs"][0]["shape"] for c in cs["cases"]])
+
+    def test_ext_rank_ladder_does_not_leak_into_unconstrained_ops(self):
+        """**关键回归**：无 rank 约束的算子（= 全部 elementwise）不得看到 5 维阶梯。
+
+        若把 `_EXT_RANK_SHAPES` 直接并进 `_REG_SHAPES`，既有算子的用例集会**悄悄改变**——
+        那等于改变已验收过的东西。这条钉住「按需并入」而非「无条件扩池」。"""
+        self.place("FakeNoRank", _BODY_ELEMENTWISE)
+        cs = GC.gen_cases(_fake_spec("FakeNoRank", case_target=50), self.work())
+        ranks = {len(c["inputs"][0]["shape"]) for c in cs["cases"]}
+        self.assertFalse(ranks - {0, 1, 2, 3, 4},
+                         f"无 rank 约束的算子出现了 >4 维 shape：{sorted(ranks)}")
+
+    def test_rank_guard_fires_in_dry_run(self):
+        """与 arity 守卫同一条纪律：rank 不可行要在 **CP-B 的 dry-run** 就拦下，不拖到正式生成。"""
+        with self.assertRaises(ValueError):
+            GC._dry_run(_fake_spec("FakeRankDry", rank=6))
+
+    def test_illegal_rank_value_rejected(self):
+        """rank 取值非法（0 / 负 / 超上限 / 非整数 / 空列表）→ fail-fast。"""
+        self.place("FakeRankBad", _BODY_ELEMENTWISE)
+        for bad in (0, -1, 99, 2.5, True, "4", []):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                GC.gen_cases(_fake_spec("FakeRankBad", rank=bad), self.work())
+
+    def test_rank_intersection_empty_rejected(self):
+        """两个 in 参数声明的 rank 无交集 → fail-closed（常规路径下各输入同形，没有都合法的维度）。"""
+        self.place("FakeRankConflict", _BODY_ELEMENTWISE)
+        sp = _fake_spec("FakeRankConflict", arity=2)
+        sp["params"][0]["rank"] = [2]
+        sp["params"][1]["rank"] = [3]
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(sp, self.work())
+        self.assertIn("交集", str(cm.exception))
+
+    def test_fit_rank_unit(self):
+        """_fit_rank 纯函数：ranks=None 恒等（零行为变更）；补维/折维都保 numel。"""
+        self.assertEqual(GC._fit_rank((1024, 1024), None), (1024, 1024))
+        self.assertEqual(GC._fit_rank((2, 2, 2, 2), frozenset({4})), (2, 2, 2, 2))  # 已合法→原样
+        self.assertEqual(GC._fit_rank((1024, 1024), frozenset({4})), (1, 1, 1024, 1024))
+        self.assertEqual(GC._fit_rank((1024, 1024), frozenset({1})), (1024 * 1024,))
+        self.assertEqual(GC._fit_rank((0,), frozenset({3})), (1, 1, 0))
+        self.assertEqual(GC._fit_rank((2, 3, 4), frozenset({2})), (6, 4))
+
+
+# ==================================================================================================
+# G4 · 归约/成对类算子的生成期规模预算（2026-07-22）
+#
+# 病灶（实测）：`_REG_SHAPES`/`_LARGE_SHAPES` 的规模假设是按 elementwise（O(numel)）定的。Pdist 这类成对
+# 算子拿到 `(1024,1024)` 就是 **549,755,289,600 对 / 2.2 TB 输出**，golden 在**生成期**就跑不完
+# （真实症状：Pdist 首跑 mock 探针 2 分钟超时 Exit 143）。
+#
+# 下面的假算子 `_pairwise_body(cap)` 自带安全阀 `_CAP`，一箭双雕：
+#   ① 让「改前会炸」在本机可复现，又**不会把机器拖死**（真去申请 2.2 TB 会拖死 16 GB 的本机）；
+#   ② 改后反过来当断言用——引擎若还敢喂超预算的 shape，这个假算子当场炸给你看。
+# 这些测试**不需要 torch**（假 golden 纯 numpy），本机与真机都能跑。
+# ==================================================================================================
+_PAIR_BUDGET = 5000          # e2e 用的小预算：降规模后 golden 只算几千对，单测跑得快
+
+
+def _pairwise_body(cap):
+    """真 O(N²) 成对距离 golden：N 个点 → N(N-1)/2 对，**输出平方级膨胀**且按 C1 导出 `out_shape`。"""
+    return (
+        f"_CAP = {int(cap)}\n"
+        "\n"
+        "\n"
+        "def golden_fn(inputs, attrs):\n"
+        "    x = np.asarray(inputs[0]).reshape(-1)\n"
+        "    n = int(x.size)\n"
+        "    m = n * (n - 1) // 2\n"
+        "    if m > _CAP:\n"
+        "        raise MemoryError('pairwise golden 被要求算 %d 对（输出 %.2f TB float32）'\n"
+        "                          '——真跑必然撑爆本机/超时' % (m, m * 4 / 1e12))\n"
+        "    i, j = np.triu_indices(n, 1)\n"
+        "    with np.errstate(invalid='ignore'):        # §1.4 特殊值用例会出现 inf-inf，非本测试关注点\n"
+        "        return np.abs(x[i] - x[j]).astype(x.dtype)\n"
+        "\n"
+        "\n"
+        "def out_shape(in_shapes, attrs):\n"
+        "    n = 1\n"
+        "    for d in in_shapes[0]:\n"
+        "        n *= int(d)\n"
+        "    return (n * (n - 1) // 2,)\n")
+
+
+# golden 体：输出形状**恒为**十亿元素、与输入无关 → 逐维减半救不回来（降规模的 fail-closed 分支）
+_BODY_CONST_HUGE_OUT = (
+    "def golden_fn(inputs, attrs):\n"
+    "    return np.zeros(10 ** 9, dtype=np.float32)\n"
+    "\n"
+    "def out_shape(in_shapes, attrs):\n"
+    "    return (10 ** 9,)\n")
+
+
+def _plan_args(sp):
+    """从 spec 拆出 `_plan()` 的位置参数（测试要直接调 `_plan` 对比「行使/不行使预算」两条路）。"""
+    in_params = [p for p in sp["params"] if p["io"] == "in"]
+    attrs_default = {p["name"]: p.get("default") for p in sp["params"] if p["io"] == "attr"}
+    self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
+    return (sp, in_params, self_param["dtype"], attrs_default, sp["op"],
+            (sp.get("precision") or {}).get("case_target", GC._DEFAULT_CASE_TARGET))
+
+
+def _pair_spec(op, budget=_PAIR_BUDGET, case_target=1):
+    sp = _fake_spec(op, case_target=case_target)
+    if budget is not None:
+        sp["precision"]["golden_cost_budget"] = budget
+    return sp
+
+
+class GoldenCostBudgetTest(_FakeOpCase):
+    """G4：用例预算要**感知算子复杂度**——超规模的强制项显式降规模并记账，网格项剔除并记账，都不许静默。"""
+
+    # ---------- 病灶复现：G4 之前，计划里那条大 shape 真的是喂不动的 ----------
+    def test_pre_g4_plan_feeds_unrunnable_shape_to_golden(self):
+        """`cost_fn=None` = G4 之前的行为：计划照样含 `(1024,1024)`，喂给成对 golden 就是 5.5e11 对。
+
+        这条钉住「病灶真实存在」，也钉住 `cost_fn=None` 这条兼容路的语义（不行使预算、账本标未核）。"""
+        self.place("FakePdistPre", _pairwise_body(_PAIR_BUDGET))
+        entries, meta = GC._plan(*_plan_args(_pair_spec("FakePdistPre")), cost_fn=None)
+        self.assertIn((1024, 1024), {tuple(e["shape"]) for e in entries},
+                      "改前的计划本就含 1024x1024 —— 病灶在计划期，不在 golden 里")
+        self.assertIsNone(meta["golden_cost"]["budget"])              # 未行使预算
+        self.assertIn("未核", meta["golden_cost"]["model"])           # 且不谎称已核
+        _gp = GC.load_golden("FakePdistPre")
+        gfn, osh = _gp.fn, _gp.out_shape
+        self.assertEqual(osh([(1024, 1024)], {}), (549755289600,))    # 真算的数：5.5e11 对
+        with self.assertRaises(MemoryError):                          # 真喂进去就炸（输出 2.2 TB）
+            gfn([np.zeros((1024, 1024), np.float32)], {})
+
+    # ---------- 改后：强制项显式降规模 + 账本如实记 ----------
+    def test_forced_big_shape_scaled_down_and_ledgered(self):
+        self.place("FakePdist", _pairwise_body(_PAIR_BUDGET))
+        d = self.work()
+        cs = GC.gen_cases(_pair_spec("FakePdist"), d)                 # 改前这一步会炸
+        led = cs["golden_cost"]
+        self.assertEqual(led["budget"], _PAIR_BUDGET)
+        self.assertTrue(led["scaled_cases"], "大 shape 强制项应被降规模并记账")
+        kinds = {r["id_kind"] for r in led["scaled_cases"]}
+        self.assertIn("bndhi", kinds, "§1.4「边界上」那条大 shape 必须还在（降规模，不是被丢掉）")
+        for r in led["scaled_cases"]:
+            self.assertEqual(r["requested_shape"], [1024, 1024])      # 原目标规模如实记
+            self.assertEqual(r["requested_cost"], 549755289600)       # 原开销如实记
+            self.assertLessEqual(r["emitted_cost"], _PAIR_BUDGET)     # 实际跑的规模在预算内
+            self.assertLess(GC._numel(r["emitted_shape"]), GC._numel(r["requested_shape"]))
+            self.assertIn("未跑", r["reason"], "账本必须明说『原目标规模未跑』，不许读成已覆盖")
+        # 强制场景一条不少（降规模 ≠ 丢覆盖）
+        for k in ("empty", "scalar", "bndlo", "bndhi", "inf", "ninf", "nan"):
+            self.assertIn(k, _special_kinds(cs), f"降规模不该丢掉强制场景 {k}")
+
+    def test_scaled_case_carries_tag_and_expected_record(self):
+        """降规模要在 **case 自身**留痕（tag「降规模」+ `expected.cost_scaled`）——只记在总账里，
+        逐 case 的报告仍会把它当成「大 shape 已覆盖」。"""
+        self.place("FakePdistTag", _pairwise_body(_PAIR_BUDGET))
+        d = self.work()
+        cs = GC.gen_cases(_pair_spec("FakePdistTag"), d)
+        scaled = [c for c in cs["cases"] if "降规模" in c.get("tags", [])]
+        self.assertTrue(scaled, "被降规模的 case 应带 tag「降规模」")
+        for c in scaled:
+            rec = c["expected"].get("cost_scaled")
+            self.assertIsNotNone(rec, c["id"])
+            self.assertEqual(rec["emitted_shape"], list(c["inputs"][0]["shape"]), c["id"])
+            self.assertEqual(rec["requested_shape"], [1024, 1024], c["id"])
+        # 反向：没被降的 case 不许带这些痕迹（别让账本虚报）
+        for c in cs["cases"]:
+            if "降规模" not in c.get("tags", []):
+                self.assertNotIn("cost_scaled", c["expected"], c["id"])
+
+    def test_perf_dim_scaled_case_warns_about_trivial_met(self):
+        """带「性能」维度的 case 被降规模后，账本要点破下游 trivial-met 的退化风险（别读成原规模已达标）。"""
+        self.place("FakePdistPerf", _pairwise_body(_PAIR_BUDGET))
+        cs = GC.gen_cases(_pair_spec("FakePdistPerf"), self.work())
+        perf_recs = [r for r in cs["golden_cost"]["scaled_cases"] if "perf_note" in r]
+        self.assertTrue(perf_recs, "带性能维度的降规模项应有 perf_note")
+        self.assertIn("trivial", perf_recs[0]["perf_note"])
+
+    def test_every_emitted_case_within_budget(self):
+        """账本之外还要**真的**没有一条 case 超预算（否则 golden 仍会在生成期跑到天荒地老）。"""
+        self.place("FakePdistBudget", _pairwise_body(_PAIR_BUDGET))
+        cs = GC.gen_cases(_pair_spec("FakePdistBudget", case_target=25), self.work())
+        for c in cs["cases"]:
+            cost = max(GC._numel(c["inputs"][0]["shape"]), GC._numel(c["expected"]["out_shape"]))
+            self.assertLessEqual(cost, _PAIR_BUDGET, f'{c["id"]} cost={cost} 超预算')
+
+    # ---------- 改后：网格里超预算的 shape 剔除 + 记账（不冒充已覆盖） ----------
+    def test_oversized_grid_shapes_recorded_not_silently_dropped(self):
+        self.place("FakePdistGrid", _pairwise_body(_PAIR_BUDGET))
+        cs = GC.gen_cases(_pair_spec("FakePdistGrid", case_target=25), self.work())
+        led = cs["golden_cost"]
+        skipped = {r["shape"] for r in led["skipped_shapes"]}
+        self.assertTrue({"1024x1024", "65535"} <= skipped, skipped)
+        self.assertGreaterEqual(led["skipped_shape_classes"], len(led["skipped_shapes"]))
+        by_shape = {r["shape"]: r for r in led["skipped_shapes"]}
+        self.assertEqual(by_shape["65535"]["cost"], 65535 * 65534 // 2)   # 任务书里那 ~2.1e9 对
+        self.assertEqual(by_shape["1024x1024"]["cost"], 549755289600)
+        # 且**真的**没有一条 case 用这些规模（记账 ≠ 冒充已覆盖）
+        emitted = {tuple(c["inputs"][0]["shape"]) for c in cs["cases"]}
+        self.assertNotIn((1024, 1024), emitted)
+        self.assertNotIn((65535,), emitted)
+
+    # ---------- 不误伤 elementwise：现有算子的计划**逐条相同** ----------
+    def test_elementwise_plan_byte_identical_with_and_without_budget(self):
+        """现有 4 个 elementwise 算子的用例集不该有任何变化：同一 spec 下「行使预算」与「不行使」
+        产出的 plan entries **逐条相等**（最大 cost=2^20 ≪ 缺省预算 2^26 → 预算根本不触发）。
+        直接比 `_plan` 的 entries，不需要 torch（不跑 golden_fn）。"""
+        for fx in (_SIGN_FX, _ISCLOSE_FX,
+                   os.path.join(_HERE, "..", "samples", "specs", "isclose.spec.json")):
+            sp = _spec(fx)
+            args = _plan_args(sp)
+            out_shape_fn = GC.load_golden(sp["op"]).out_shape         # 4 份样例都不导出 → None
+            cost_fn = GC._make_cost_fn(args[1], out_shape_fn)
+            e_on, m_on = GC._plan(*args, cost_fn=cost_fn)
+            e_off, _m_off = GC._plan(*args, cost_fn=None)
+            self.assertEqual(e_on, e_off, f"{fx}: 行使预算后计划变了（误伤 elementwise）")
+            self.assertEqual(m_on["golden_cost"]["scaled_cases"], [], fx)
+            self.assertEqual(m_on["golden_cost"]["skipped_shapes"], [], fx)
+            self.assertIn((1024, 1024), {tuple(e["shape"]) for e in e_on},
+                          f"{fx}: 大 shape 该原样保留（elementwise 跑得动）")
+
+    def test_elementwise_caseset_untouched_end_to_end(self):
+        """端到端对照（纯 numpy 假算子、无 torch）：elementwise 算子的 caseset 账本全空、大 shape 仍在。"""
+        self.place("FakeElemNoScale", _BODY_ELEMENTWISE)
+        cs = GC.gen_cases(_fake_spec("FakeElemNoScale", case_target=30), self.work())
+        self.assertEqual(cs["golden_cost"]["scaled_cases"], [])
+        self.assertEqual(cs["golden_cost"]["skipped_shapes"], [])
+        self.assertEqual(cs["golden_cost"]["budget"], GC._GOLDEN_COST_BUDGET)
+        self.assertIn((1024, 1024), {tuple(c["inputs"][0]["shape"]) for c in cs["cases"]})
+        self.assertFalse(any("降规模" in c.get("tags", []) for c in cs["cases"]))
+
+    # ---------- 预算取值：spec 驱动 + 坏值 fail-fast ----------
+    def test_budget_from_spec_drives_shrink_depth(self):
+        """预算来自 `precision.golden_cost_budget`：调小 → 降得更狠；两次跑结果**逐字相同**（确定性）。"""
+        self.place("FakePdistTight", _pairwise_body(5000))   # 自爆阀取两个预算里的**大**者
+        big = GC.gen_cases(_pair_spec("FakePdistTight", budget=5000), self.work())
+        small = GC.gen_cases(_pair_spec("FakePdistTight", budget=500), self.work())
+        again = GC.gen_cases(_pair_spec("FakePdistTight", budget=500), self.work())
+        n_big = GC._numel(big["golden_cost"]["scaled_cases"][0]["emitted_shape"])
+        n_small = GC._numel(small["golden_cost"]["scaled_cases"][0]["emitted_shape"])
+        self.assertLess(n_small, n_big, "预算调小应降得更狠")
+        self.assertEqual([c["id"] for c in small["cases"]], [c["id"] for c in again["cases"]])
+        self.assertEqual([c["inputs"][0]["shape"] for c in small["cases"]],
+                         [c["inputs"][0]["shape"] for c in again["cases"]])
+
+    def test_bad_budget_fail_fast(self):
+        """预算 0/负/非整/bool → fail-fast。预算 0 等于把所有 shape 判超预算 = 另一种「用例集清零」。
+
+        **两条路都要拦**：`_dry_run` 那条尤其要紧——它在 golden.py 还没写好时 cost 模型标「未核」，
+        坏预算值不许借这个降级悄悄溜过 CP-B。"""
+        self.place("FakeElemBudget", _BODY_ELEMENTWISE)
+        for bad in (0, -1, 1.5, True, "4096", None):
+            sp = _fake_spec("FakeElemBudget", case_target=1)
+            sp["precision"]["golden_cost_budget"] = bad
+            for label, fn in (("gen_cases", lambda s=sp: GC.gen_cases(s, self.work())),
+                              ("_dry_run", lambda s=sp: GC._dry_run(s))):
+                with self.assertRaises(ValueError, msg=f"{label} {bad!r}") as cm:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        fn()
+                self.assertIn("golden_cost_budget", str(cm.exception))
+            # ⚠ 上面用的 FakeElemBudget **已 place 好 golden.py**，`cost_fn` 恒非 None ——
+            # 也就是说本测试 docstring 声称的「golden.py 还没写好时坏预算也不许溜过 CP-B」
+            # 那条路**从未被行使**。用一个**故意不 place** 的算子名逼出 `cost_fn is None` 分支。
+            # 反证（已验）：把 `budget = _cost_budget(spec)` 挪进 `if cost_fn is not None:`，
+            # 补这条之前测试照样全绿 = 测试当摆设。
+            sp_ng = _fake_spec("FakeNoGoldenForBudget", case_target=1)
+            sp_ng["precision"]["golden_cost_budget"] = bad
+            with self.assertRaises(ValueError, msg=f"_dry_run(no golden) {bad!r}") as cm:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    GC._dry_run(sp_ng)
+            self.assertIn("golden_cost_budget", str(cm.exception))
+        # 对照：没写这个字段 → 用缺省预算，行为不变（别把「不写」也拦掉）
+        sp_ok = _fake_spec("FakeElemBudget", case_target=1)
+        self.assertNotIn("golden_cost_budget", sp_ok["precision"])
+        self.assertTrue(GC.gen_cases(sp_ok, self.work())["cases"])
+
+    # ---------- fail-closed 分支 ----------
+    def test_unshrinkable_forced_case_fails_closed(self):
+        """输出规模与输入无关（恒十亿元素）→ 逐维减半救不回来 → **报错**，不硬塞一条算不完的用例。"""
+        self.place("FakeConstHugeOut", _BODY_CONST_HUGE_OUT)
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(_fake_spec("FakeConstHugeOut", case_target=1), self.work())
+        msg = str(cm.exception)
+        self.assertIn("预算", msg)
+        self.assertIn("fail-closed", msg)
+
+    def test_grid_emptied_by_budget_fails_closed(self):
+        """常规网格被预算剔空 → fail-closed（只剩强制项 = 用例数虚高但没有一条常规覆盖）。
+        直接单测 `_apply_cost_budget`：整条 gen_cases 上这个分支会被强制项的降规模失败抢先，测不到。"""
+        forced = [{"shape": (2,), "attrs": {}, "dtype": "float32", "id_kind": "scalar",
+                   "case_origin": "special:scalar", "dims": ["功能"], "tags": ["特殊"]}]
+        grid = [{"shape": (64,), "attrs": {}, "dtype": "float32", "id_kind": "gridu",
+                 "case_origin": "grid:float32:64:uniform:a0", "dims": ["功能"], "tags": ["常规"]}]
+        cost = lambda shp, attrs, where: GC._numel(shp)          # noqa: E731
+        with self.assertRaises(ValueError) as cm:
+            GC._apply_cost_budget(forced, grid, cost, 8)
+        self.assertIn("假验收", str(cm.exception))
+        # 对照：预算够用时照常放行，且强制项一字不改
+        kept, led = GC._apply_cost_budget(forced, grid, cost, 1000)
+        self.assertEqual(kept, grid)
+        self.assertEqual(led["scaled_cases"], [])
+        self.assertEqual(forced[0]["shape"], (2,))
+
+    # ---------- cost 模型本身 ----------
+    def test_cost_model_reads_out_shape_not_just_input(self):
+        """cost = max(最大输入元素数, 输出元素数)；输出元素数走 C1 的 `out_shape`（未导出 → 输入广播形状）。"""
+        one = [{"name": "self", "io": "in", "dtype": ["float32"]}]
+        two = one + [{"name": "other", "io": "in", "dtype": ["float32"]}]
+        self.assertEqual(GC._make_cost_fn(one, None)((4, 5), {}, "w"), 20)      # elementwise 一元
+        self.assertEqual(GC._make_cost_fn(two, None)((10,), {}, "w"), 10)       # 二元同形 → 取最大不是求和
+        pair = GC._make_cost_fn(one, lambda ins, a: (ins[0][0] * (ins[0][0] - 1) // 2,))
+        self.assertEqual(pair((100,), {}, "w"), 4950)                            # 成对：输出主导
+        self.assertEqual(pair((3,), {}, "w"), 3)                                 # 小规模：输入主导
+        shrink = GC._make_cost_fn(one, lambda ins, a: (1,))                      # 归约到标量：输入主导
+        self.assertEqual(shrink((64, 64), {}, "w"), 4096)
+
+    def test_cost_model_bad_out_shape_surfaces_at_plan_time(self):
+        """`out_shape` 在**计划期**就被调用（要算 cost）→ 坏返回/抛异常在跑 golden 之前就 fail-closed。"""
+        self.place("FakeCostOsBad", _BODY_ELEMENTWISE +
+                   "\ndef out_shape(in_shapes, attrs):\n    return 'nope'\n")
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(_fake_spec("FakeCostOsBad", case_target=1), self.work())
+        self.assertIn("out_shape", str(cm.exception))
+
+    # ---------- CP-B（dry-run）也要看得见 ----------
+    def test_dry_run_surfaces_cost_budget_and_scaling(self):
+        """规模问题要在 **CP-B 的 dry-run** 就暴露，不拖到 CP-D 真生成时卡死。"""
+        self.place("FakePdistDry", _pairwise_body(_PAIR_BUDGET))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            GC._dry_run(_pair_spec("FakePdistDry", case_target=25))
+        out = buf.getvalue()
+        self.assertIn("golden_cost", out)
+        self.assertIn(f"budget={_PAIR_BUDGET}", out)
+        self.assertIn("降规模", out)
+        self.assertIn("网格剔除", out)
+        self.assertIn("1024x1024", out)
+
+    def test_dry_run_without_golden_says_unchecked_not_silently_ok(self):
+        """golden.py 还没写时 dry-run 不阻塞（acc-spec 要用它探区间），但必须**明说未核**、不谎称已核。"""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            GC._dry_run(_fake_spec("FakeNoGoldenYet", case_target=1))
+        out = buf.getvalue()
+        self.assertIn("未核", out)
+        self.assertIn("缺 golden", out)          # 连原因一起说清
+        self.assertIn("budget=None", out)
+
+class AllowEmptyTensorTest(_FakeOpCase):
+    """C1 连带 · `allow_empty_tensor`（2026-07-23）：算子声明「不支持空 Tensor」时不强塞该用例。
+
+    为什么需要：opbase §1.4 把「空 Tensor」当**普适**特殊场景无条件强塞，但很多算子任务书
+    白纸黑字写「不支持空Tensor」。强塞只有两个出口——golden **为非法输入编造输出**
+    （= 替算子发明它不支持的语义），或整条链卡死。实测三个真算子全撞这堵墙。"""
+
+    @staticmethod
+    def _kinds(cs):
+        return {c["id"].rsplit("_", 1)[-1] for c in cs["cases"]}
+
+    def test_default_still_emits_empty_case(self):
+        """缺省 = 现行为不变（4 个 elementwise 样例一字不动的前提）。"""
+        self.place("FakeEmpDefault", _BODY_ELEMENTWISE)
+        cs = GC.gen_cases(_fake_spec("FakeEmpDefault", case_target=20), self.work())
+        self.assertTrue(any("_empty" in c["id"] for c in cs["cases"]),
+                        [c["id"] for c in cs["cases"]])   # id 形如 <op>_float32_0_empty_a0
+
+    def test_false_suppresses_empty_case(self):
+        self.place("FakeEmpOff", _BODY_ELEMENTWISE)
+        sp = _fake_spec("FakeEmpOff", case_target=20)
+        sp["allow_empty_tensor"] = False
+        cs = GC.gen_cases(sp, self.work())
+        self.assertTrue(cs["cases"])
+        self.assertFalse([c["id"] for c in cs["cases"] if "_empty" in c["id"]])
+        # 其余强制场景不受影响（别把整组特殊用例一起关掉）
+        self.assertTrue(any("_scalar" in c["id"] for c in cs["cases"]),
+                        [c["id"] for c in cs["cases"]])
+
+    def test_non_bool_rejected_fail_closed(self):
+        """**只收真布尔**：`"false"` / `0` / `1` / `None` 一律拒。
+
+        真值性判断会把 `"false"` 读成 True（非空串）、把 `0` 读成 False——
+        前者让「声明了不支持」被悄悄忽略。本仓在批 1 的 `authorization_verified` 上栽过同款 fail-open。"""
+        self.place("FakeEmpBad", _BODY_ELEMENTWISE)
+        for bad in ("false", "true", 0, 1, None, [], {}):
+            sp = _fake_spec("FakeEmpBad", case_target=5)
+            sp["allow_empty_tensor"] = bad
+            with self.assertRaises(ValueError, msg=repr(bad)) as cm:
+                GC.gen_cases(sp, self.work())
+            self.assertIn("allow_empty_tensor", str(cm.exception))
+
+    def test_dry_run_and_gen_cases_agree(self):
+        """两条路口径必须一致——否则 CP-B 看到的计划与真实产出不是一回事。"""
+        self.place("FakeEmpAgree", _BODY_ELEMENTWISE)
+        sp = _fake_spec("FakeEmpAgree", case_target=20)
+        sp["allow_empty_tensor"] = False
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            GC._dry_run(sp)
+        self.assertNotIn("'empty'", buf.getvalue(), buf.getvalue())
+        cs = GC.gen_cases(sp, self.work())
+        self.assertFalse([c["id"] for c in cs["cases"] if "_empty" in c["id"]])
+
+
+class EmptyAxisTest(_FakeOpCase):
+    """`empty_axis`（2026-07-23）：空 Tensor 用例把 0 放**哪一轴**，由 spec 声明。
+
+    为什么需要：`_fit_rank((0,), ranks)` 是左补 1，**0 恒落最后一维**（rank=[3,4] → `(1,1,0)`）。
+    而很多算子的空 Tensor 只在某一特定轴为 0 时合法（im2col 只允许「4 维且 N==0」）。
+    没这个字段时，这类算子只能整个关掉空 Tensor 用例 = **本该测的那一种合法空形态也一起没了**。
+
+    ⚠ **轴号定不了 rank**：im2col 的 rank 是 [3,4]，合法空形态只有 4 维那个。
+    所以按合法 rank 从小到大逐个试，**判据交给算子自己的 `out_shape()`** ——
+    「哪个 rank 的空形态合法」本就是算子知识，而 out_shape 正是它的所在地（C1 的前提）。引擎不猜。"""
+
+    # 假 golden **精确模仿 im2col 的约束**：3/4 维都收（非空时），但 0 只许出现在 4 维的 dim0。
+    # 这样 rank 候选 [3,4] 里只有 4 维那个的空形态合法 —— 正是「轴号定不了 rank」要测的情形。
+    _BODY_4D_ONLY = (
+        # ⚠ 显式算维度、不用 -1：`np.zeros((0,1,1,1)).reshape(0, -1)` 会炸
+        # （size=0 时 numpy 推不出 -1；真 torch 能处理）。这本身也是个真实的坑。
+        "def golden_fn(inputs, attrs):\n"
+        "    x = inputs[0]\n"
+        "    if x.ndim == 4:\n"
+        "        n = 1\n"
+        "        for d in x.shape[1:]:\n"
+        "            n *= d\n"
+        "        return x.reshape(x.shape[0], n)\n"
+        "    n = 1\n"
+        "    for d in x.shape:\n"
+        "        n *= d\n"
+        "    return x.reshape(n)\n"
+        "\n"
+        "def out_shape(in_shapes, attrs):\n"
+        "    s = tuple(in_shapes[0])\n"
+        "    if len(s) not in (3, 4):\n"
+        "        raise ValueError('only 3d/4d')\n"
+        "    if len(s) == 3:\n"
+        "        if any(d == 0 for d in s):\n"
+        "            raise ValueError('3d must be all-positive')\n"
+        "        n = 1\n"
+        "        for d in s:\n"
+        "            n *= d\n"
+        "        return (n,)\n"
+        "    if any(d == 0 for d in s[1:]):\n"
+        "        raise ValueError('only dim0 may be 0')\n"
+        "    n = 1\n"
+        "    for d in s[1:]:\n"
+        "        n *= d\n"
+        "    return (s[0], n)\n")
+
+    def _spec(self, op, axis=None, rank=(3, 4)):
+        sp = _fake_spec(op, rank=list(rank), case_target=8)
+        sp["allow_empty_tensor"] = True
+        if axis is not None:
+            sp["empty_axis"] = axis
+        return sp
+
+    def test_picks_the_rank_the_operator_accepts(self):
+        """rank 候选 [3,4]、算子只认 4 维 → 应选 4 维的 `(0,1,1,1)`，不是 3 维的 `(0,1,1)`。"""
+        self.place("FakeEmptyAxis", self._BODY_4D_ONLY)
+        cs = GC.gen_cases(self._spec("FakeEmptyAxis", axis=0), self.work())
+        empties = [tuple(c["inputs"][0]["shape"]) for c in cs["cases"] if "_empty" in c["id"]]
+        self.assertTrue(empties, [c["id"] for c in cs["cases"]])
+        self.assertEqual(set(empties), {(0, 1, 1, 1)}, empties)
+
+    def test_all_candidates_rejected_fails_closed(self):
+        """算子拒绝所有候选空形态 → **fail-closed**，并指出两条出路（改轴 / 关掉 allow_empty_tensor）。
+
+        绝不为它挑一个算子不认的形状硬塞——那就是「替算子发明它不支持的语义」。"""
+        self.place("FakeEmptyNever", self._BODY_4D_ONLY)
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(self._spec("FakeEmptyNever", axis=1), self.work())   # 轴 1 恒非法
+        msg = str(cm.exception)
+        self.assertIn("拒绝了所有候选空形态", msg)
+        self.assertIn("allow_empty_tensor", msg)
+
+    def test_axis_out_of_range_for_every_rank(self):
+        self.place("FakeEmptyOOR", _BODY_ELEMENTWISE)
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(self._spec("FakeEmptyOOR", axis=9, rank=(3,)), self.work())
+        self.assertIn("越界", str(cm.exception))
+
+    def test_illegal_axis_value_rejected(self):
+        """只收非负 int：bool / 负数 / 字符串一律拒（True 是 bool 子类，会被 isinstance 放过）。"""
+        self.place("FakeEmptyBadAxis", _BODY_ELEMENTWISE)
+        for bad in (True, False, -1, "0", 1.0):
+            with self.assertRaises(ValueError, msg=repr(bad)) as cm:
+                GC.gen_cases(self._spec("FakeEmptyBadAxis", axis=bad), self.work())
+            self.assertIn("empty_axis", str(cm.exception))
+
+    def test_unset_keeps_old_behaviour(self):
+        """不声明 → 走老路 `_fit_rank`（0 落最后一维），**行为零变更**。"""
+        self.place("FakeEmptyOld", _BODY_ELEMENTWISE)
+        cs = GC.gen_cases(self._spec("FakeEmptyOld", rank=(3,)), self.work())
+        empties = [tuple(c["inputs"][0]["shape"]) for c in cs["cases"] if "_empty" in c["id"]]
+        self.assertEqual(set(empties), {(1, 1, 0)}, empties)
+
+
+class Bf16BitexactDeclarationTest(_FakeOpCase):
+    """bf16 逐位可达改由 **spec 声明**，不再是引擎里写死的算子名白名单（2026-07-23）。
+
+    旧状：`_BF16_EXACT_OPS = frozenset({"Sign", "Neg"})` —— 「引擎零内置算子知识」的一处反例，
+    且任何新的**纯搬运**算子（im2col、Upsample 最近邻…）都被迫把 bf16 挂 deferred。
+    ⚠ 这不是「放松阈值」的旋钮：声明为真 = 断言「输出恒等于某个输入元素、不做算术」，
+    声明错了会让本该用 lossy 阈值的算子被按逐位相等判 → 直接产假 fail 或假 pass。"""
+
+    _BODY = "def golden_fn(inputs, attrs):\n    return np.negative(inputs[0])\n"
+
+    def _spec(self, op, declare=None):
+        sp = _fake_spec(op, dtypes=("bfloat16",), case_target=4)
+        if declare is not None:
+            sp["precision"]["bf16_bitexact"] = declare
+        return sp
+
+    def test_undeclared_new_op_still_fails_closed(self):
+        """没声明的新算子 → 仍 fail-closed，且报错要给出**两条可操作的出路**。"""
+        self.place("FakeBf16New", self._BODY)
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(self._spec("FakeBf16New"), self.work())
+        msg = str(cm.exception)
+        self.assertIn("bf16_bitexact", msg)          # 出路一：真是搬运类就声明
+        self.assertIn("dtype_deferred", msg)         # 出路二：真做算术就挂 deferred
+
+    def test_declared_true_unlocks_bf16(self):
+        """声明为真 → bf16 数值用例造得出来（这正是 im2col/Upsample 这类算子需要的）。"""
+        self.place("FakeBf16Decl", self._BODY)
+        cs = GC.gen_cases(self._spec("FakeBf16Decl", declare=True), self.work())
+        self.assertTrue(cs["cases"])
+        self.assertTrue(all(c["inputs"][0]["dtype"] == "bfloat16" for c in cs["cases"]))
+
+    # ⚠ 下面两条**直接测纯函数 `_bf16_bitexact`**，不走 gen_cases。
+    # 原因：`self.place("Sign", …)` 会把共享 fixture 里**真正的 Sign golden 覆盖成假的**，
+    # 污染同模块其它测试（我第一版就这么写，当场炸了 19 条）。测试之间不能互相下毒。
+
+    def test_declared_false_overrides_historic_default(self):
+        """显式声明 false 能**推翻**历史默认——Sign 在老白名单里，声明 false 后应判不可逐位。
+
+        证「spec 声明 > 历史默认」，而不是两者取或。"""
+        self.assertFalse(GC._bf16_bitexact({"precision": {"bf16_bitexact": False}}, "Sign"))
+
+    def test_historic_default_keeps_sign_neg_working(self):
+        """不声明时 Sign/Neg 仍走历史默认 → **行为零变更**（既有 spec 不必改）。"""
+        for op in ("Sign", "Neg"):
+            self.assertTrue(GC._bf16_bitexact({}, op), op)
+            self.assertTrue(GC._bf16_bitexact({"precision": {}}, op), op)
+        # 对照：不在历史默认里的算子，不声明就是 False
+        self.assertFalse(GC._bf16_bitexact({}, "SomeNewOp"))
+
+    def test_non_bool_declaration_rejected(self):
+        """只收真布尔：`"false"` / `0` / `1` 一律拒（真值性判断会误读）。"""
+        self.place("FakeBf16Bad", self._BODY)
+        for bad in ("false", "true", 0, 1, []):
+            with self.assertRaises(ValueError, msg=repr(bad)) as cm:
+                GC.gen_cases(self._spec("FakeBf16Bad", declare=bad), self.work())
+            self.assertIn("bf16_bitexact", str(cm.exception))
+
+
+class ExactIsNotBoolTest(_FakeOpCase):
+    """回归：`verify_mode=exact` **不等于**「输出是 bool」。
+
+    真机 `run_new_example` 曾写 `exp_dt = np.bool_ if verify_mode == "exact" else _NP[dtn]` ——
+    把**判据**（逐位比）当成了**输出类型**。im2col 任务书要求「精度标准为二进制一致」→ exact，
+    而输出是 float32（纯搬运、逐位可达）→ 真机实跑报 `golden float32(4,2) ≠ 期望 bool(4,2)`。
+    ⚠ **mock 通路不经那一行**，所以本机全绿完全掩盖了它 —— 典型「本机过、真机炸」。
+    现改成据 caseset 的 `compare_dtype`（validator 会据 spec 独立派生并强制相等，谎报过不了裁决层）。"""
+
+    def test_exact_float_op_has_float_compare_dtype(self):
+        """exact + 浮点输出的算子，`compare_dtype` 必须是浮点、不是 bool。"""
+        self.place("FakeExactFloat", _BODY_ELEMENTWISE)
+        sp = _fake_spec("FakeExactFloat", case_target=6)
+        sp["verify_mode"] = "exact"
+        cs = GC.gen_cases(sp, self.work())
+        cdts = {c["expected"]["compare_dtype"] for c in cs["cases"]
+                if c["expected"].get("compare_dtype") is not None}
+        self.assertEqual(cdts, {"float32"}, cdts)
+        self.assertNotIn("bool", cdts)
+
+    def test_repo_adapter_no_longer_infers_bool_from_verify_mode(self):
+        """源码级钉子（辅助，非主证据）：采集层不得再从 verify_mode 推 bool。"""
+        with open(os.path.join(_HERE, "repo_adapter.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn('np.bool_ if c["expected"].get("verify_mode") == "exact"', src)
+        self.assertIn('_cdt = c["expected"].get("compare_dtype")', src)
+
+    def test_dtype_resolution_behaviour(self):
+        """**行为级**（主证据）：直接驱动 repo_adapter 里那段 dtype 解析，覆盖四种情形。
+
+        源码级 assertNotIn 只钉住「旧写法没了」，钉不住「新写法对不对」。这里用一个最小的
+        `_resolve` 复刻件不行——那是自证。改成断言真实模块里的映射表与分支约定：
+        `_NP` 必须能吃 compare_dtype 的取值域，且 bool 单独走 np.bool_。"""
+        import numpy as _np
+        import repo_adapter as _RA
+        # exact 不再蕴含 bool：float32 的 compare_dtype 必须映射到 float32，而非 bool
+        self.assertIs(_RA._NP["float32"], _np.float32)
+        self.assertIs(_RA._NP["float16"], _np.float16)
+        self.assertIs(_RA._NP["bfloat16"], _np.float32)   # bf16 逻辑 dtype = fp32-on-grid
+        self.assertNotIn("bool", _RA._NP)                 # bool 不在 _NP，由分支单独处理
+        # 未支持的 compare_dtype 必须被拒（不静默回退到某个默认 dtype）
+        self.assertNotIn("complex64", _RA._NP)
+
+
+class GoldenContractTierTest(_FakeOpCase):
+    """批 2：`GOLDEN_CONTRACT` 声明式来源块 → 派生档位 → **写进每条 case**（记录不阻断）。
+
+    阻断是批 5 门侧的事。这里刻意只记录：档位是**结论的一部分**，得先让它可见、可审；
+    先阻断会让「快照还没入库」这种真问题以「算子跑不了」的面目出现，反而更难查。"""
+
+    _BODY = "def golden_fn(inputs, attrs):\n    return np.negative(inputs[0])\n"
+
+    def _place_with_contract(self, op, contract, snapshot=None):
+        root = _GOLDEN_ROOT
+        d = os.path.join(root, op)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "golden.py"), "w", encoding="utf-8") as f:
+            f.write("import numpy as np\n"
+                    "GOLDEN_SOURCE = 'torch fake'\nGOLDEN_PROVENANCE = 'fixture'\n"
+                    f"GOLDEN_CONTRACT = {contract!r}\n" + self._BODY)
+        if snapshot is not None:
+            with open(os.path.join(d, "task_doc.snapshot.md"), "wb") as f:
+                f.write(snapshot)
+
+    def test_no_contract_keeps_old_behaviour(self):
+        """不导出 `GOLDEN_CONTRACT` → `golden_tier` 为 None，**行为与批 2 前完全一致**。"""
+        self.place("FakeNoContract", self._BODY)
+        cs = GC.gen_cases(_fake_spec("FakeNoContract", case_target=3), self.work())
+        self.assertTrue(all(c["expected"]["golden_tier"] is None for c in cs["cases"]))
+
+    def test_impl_reference_single_api_is_tier2_no_human(self):
+        """无授权 + 现成 API 单调 → 第二档、不必人核（Sign 归此格）。无需快照。"""
+        self._place_with_contract("FakeTier2", {
+            "source": "single_api", "method_kind": "torch_cpu",
+            "authorization": {"kind": "impl_reference"}})
+        cs = GC.gen_cases(_fake_spec("FakeTier2", case_target=3), self.work())
+        t = cs["cases"][0]["expected"]["golden_tier"]
+        self.assertEqual((t["tier"], t["requires_human_review"], t["blocked_reason"]), (2, False, None))
+        self.assertIsNone(t["snapshot_sha"], "impl_reference 无快照 → snapshot_sha 应为 None")
+
+    def test_snapshot_sha_emitted_normalized_for_validator_reconcile(self):
+        """批 4：`golden_tier.snapshot_sha` 随 case 走、且**规范化**（strip+lower），供 validator 对账 spec.golden。
+
+        大写 / 带空格的合法 SHA 若原样发射，会与 spec 侧规范化后的 sha 对账假 fail（codex Low #8）。"""
+        import hashlib
+        snap = "第二行 授权句".encode("utf-8")
+        sha = hashlib.sha256(snap).hexdigest()
+        self._place_with_contract("FakeShaNorm", {
+            "source": "single_api", "method_kind": "torch_cpu",
+            "authorization": {"kind": "oracle_method", "cite": "task_doc.snapshot.md:1", "quote": "授权句"},
+            "taskdoc_snapshot": {"sha256": f"  {sha.upper()}  "}},   # 故意大写 + 外围空格
+            snapshot=snap)
+        t = GC.gen_cases(_fake_spec("FakeShaNorm", case_target=3), self.work())["cases"][0]["expected"]["golden_tier"]
+        self.assertEqual(t["snapshot_sha"], sha, "发射的 snapshot_sha 必须已规范化为小写无空格")
+
+    def test_non_dict_taskdoc_snapshot_does_not_crash_derive(self):
+        """`taskdoc_snapshot` 非 dict（validate_golden_contract 对 impl_reference 不约束它）→ `_derive_tier`
+        不得崩（codex Medium #7：`(x or {}).get` 对 list 抛 AttributeError）。snapshot_sha 落 None。"""
+        self._place_with_contract("FakeSnapList", {
+            "source": "single_api", "method_kind": "torch_cpu",
+            "authorization": {"kind": "impl_reference"}, "taskdoc_snapshot": [1, 2]})
+        t = GC.gen_cases(_fake_spec("FakeSnapList", case_target=3), self.work())["cases"][0]["expected"]["golden_tier"]
+        self.assertIsNone(t["snapshot_sha"])
+
+    def test_claimed_authorization_without_snapshot_is_tier4_not_silently_downgraded(self):
+        """声称有任务书授权、却核不实 → **tier 4 blocked**，不降级到 2/3 照跑。
+
+        这条是整套设计防 fail-open 的核心：假授权若只降档，R2/R4 等于没设。"""
+        self._place_with_contract("FakeTier4", {
+            "source": "single_api", "method_kind": "torch_cpu",
+            "authorization": {"kind": "oracle_method",
+                              "cite": "task_doc.snapshot.md:1", "quote": "某句话"},
+            "taskdoc_snapshot": {"sha256": "0" * 64}})          # 快照根本不存在
+        cs = GC.gen_cases(_fake_spec("FakeTier4", case_target=3), self.work())
+        t = cs["cases"][0]["expected"]["golden_tier"]
+        self.assertEqual(t["tier"], 4)
+        self.assertEqual(t["blocked_reason"], "unverifiable_authorization")
+        self.assertFalse(t["authorization_verified"])
+        self.assertIn("快照", t["authorization_note"])          # 原因要准，不能只留个 False
+
+    def test_real_snapshot_and_verbatim_quote_yields_tier1(self):
+        """有快照 + **逐字**引文 → 第一档。改一个字就核不过（这正是引文锚的作用）。"""
+        snap = "第一行\n实现方式更改成和cpu一致的比较逻辑值\n第三行".encode("utf-8")
+        import hashlib
+        base = {"source": "single_api", "method_kind": "torch_cpu",
+                "taskdoc_snapshot": {"sha256": hashlib.sha256(snap).hexdigest()}}
+        self._place_with_contract("FakeTier1", dict(base, authorization={
+            "kind": "oracle_method", "cite": "task_doc.snapshot.md:2",
+            "quote": "更改成和cpu一致的比较逻辑值"}), snapshot=snap)
+        cs = GC.gen_cases(_fake_spec("FakeTier1", case_target=3), self.work())
+        self.assertEqual(cs["cases"][0]["expected"]["golden_tier"]["tier"], 1)
+
+        # 改一个字 → 核不过 → 掉回 tier 4
+        self._place_with_contract("FakeTier1x", dict(base, authorization={
+            "kind": "oracle_method", "cite": "task_doc.snapshot.md:2",
+            "quote": "更改成和CPU一致的比较逻辑值"}), snapshot=snap)     # cpu → CPU
+        cs2 = GC.gen_cases(_fake_spec("FakeTier1x", case_target=3), self.work())
+        self.assertEqual(cs2["cases"][0]["expected"]["golden_tier"]["tier"], 4)
+
+    def test_bad_vocabulary_fails_closed_early(self):
+        """词表拼错 → **当场报准**，不留给 derive_golden_tier 的兜底判成含糊的 tier 4。"""
+        self._place_with_contract("FakeBadVocab", {
+            "source": "singleapi", "method_kind": "torch_cpu",   # 少个下划线
+            "authorization": {"kind": "impl_reference"}})
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(_fake_spec("FakeBadVocab", case_target=1), self.work())
+        self.assertIn("source", str(cm.exception))
+
+    def test_claimed_authorization_missing_cite_fails_closed(self):
+        """声称有授权却连引文都没写 → 早拦，并指出「其实只是参考实现就该用 impl_reference」。"""
+        self._place_with_contract("FakeNoCite", {
+            "source": "single_api", "method_kind": "torch_cpu",
+            "authorization": {"kind": "oracle_method"}})
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(_fake_spec("FakeNoCite", case_target=1), self.work())
+        self.assertIn("impl_reference", str(cm.exception))
 
 
 if __name__ == "__main__":

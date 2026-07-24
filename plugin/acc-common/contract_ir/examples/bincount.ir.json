@@ -1,0 +1,465 @@
+{
+  "ir_version": "1.0",
+  "op": "Bincount",
+  "aclnn_entry": {
+    "exec_symbol": "aclnnBincount",
+    "getworkspace_symbol": "aclnnBincountGetWorkspaceSize",
+    "variant_of_opdef": "Bincount",
+    "include_header": "math/bincount/op_api/aclnn_bincount.h",
+    "aclnn_lib": "aclnn_math",
+    "source": {
+      "source": "header",
+      "cross_check": [
+        "example",
+        "doc"
+      ],
+      "cite": "repos/ops-math/math/bincount/op_api/aclnn_bincount.h:45-47,65-66; examples/test_aclnn_bincount.cpp:14,119; docs/aclnnBincount.md:41-47 (@domain aclnn_math h:23)",
+      "state": "resolved",
+      "fail_closed": false
+    }
+  },
+  "applicability": {
+    "in_domain": false,
+    "out_of_domain_axes": [
+      "output_extent_unmaterializable"
+    ],
+    "reason": "输出 out 的 extent 数据依赖输入值：out.dim0 = max(reduce_max(self)+1, minlength)（docs:20 / aclnn_bincount.h:37-40 / proto:38）。aclnn 单算子面要求调用方预分配 out 且其 dim0 已等于该式（glue 仅 clamp size=max(out.dim0,minlength)，不自算最大值，见 example 注释 test_aclnn_bincount.cpp:83「先调 max 计算 self 最大值」）；graph 面 size 是 data-dependent 输入（InputsDataDependency({1})，infershape 读 size_tensor 值）。机械 codegen 无 self 的运行时数据值→无法求 reduce_max(self)→无法物化 per-output shape→fail-closed（须用户给尺寸或真机回填，绝不猜）。另一独立 gap：target_hardware contested（op_def 仅 AddConfig ascend950 vs 任务书 适配硬件 Atlas A2）→入 task_pr_gaps。"
+  },
+  "abi_signature": {
+    "stage1": {
+      "ordered_param_ids": [
+        "self",
+        "weights",
+        "minlength",
+        "out"
+      ],
+      "trailing": [
+        "workspaceSize_out",
+        "executor_out"
+      ]
+    },
+    "stage2": {
+      "full_signature": "aclnnBincount(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor, const aclrtStream stream)",
+      "probe": "matched"
+    },
+    "dual_abi_note": "aclnn C-ABI（getworkspace 段，实测 arity=6）: (self:aclTensor*, weights:aclTensor*可空, minlength:int64_t 主机标量, out:aclTensor*, workspaceSize_out, executor_out)。ge/graph op_def ABI 完全不同: Input(array, size, weights) + Output(bins)——其中 'size' 是一个 shape=[1] 的 int32 值依赖输入张量，其值即 out.dim0（ttk_st csv attributes {'size':N} → output_shapes [[N]]），并由 InputsDataDependency({1})+ValueDepend(OPTIONAL) 标为值依赖。aclnn 面无 size 参：glue 从 out.dim0 与 minlength 合成 size=max(out.dim0,minlength) 传 l0op::Bincount(x,weights,size)（aclnn_bincount.cpp:223-224,236）。两层 ABI 分开记账、不混。"
+  },
+  "parameters": [
+    {
+      "abi_position": 0,
+      "kind": "tensor",
+      "logical_value_id": "self",
+      "direction": "in",
+      "copy_in": true,
+      "copy_out": false,
+      "presence": "required",
+      "binding": "device_tensor",
+      "allow_empty_element": true,
+      "cardinality": {
+        "kind": "single"
+      },
+      "value_domain": {
+        "kind": "enum",
+        "enum_set": [
+          "INT8",
+          "INT16",
+          "INT32",
+          "INT64",
+          "UINT8"
+        ],
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "header",
+            "doc",
+            "op_def"
+          ],
+          "cite": "SELF_DTYPE_SUPPORT_LIST aclnn_bincount.cpp:35-37; aclnn_bincount.h:32; docs:89; op_def array=DT_INT32 bincount_def.cpp:23",
+          "conflict_resolution": "描述 aclnn 入口→取 header=doc=glue 一致的 5 类整型；op_def/proto 仅声明 DT_INT32 属 ge 面较窄，aclnn 内部 l0op::Cast(self→INT32) aclnn_bincount.cpp:220 统一，故不算冲突",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "provenance": {
+        "source": "header",
+        "cross_check": [
+          "example",
+          "doc",
+          "glue"
+        ],
+        "cite": "aclnn_bincount.h:32 (非负整数,1维ND); example self=INT32 test_aclnn_bincount.cpp:90-93; self->IsEmpty 分支 aclnn_bincount.cpp:205-215",
+        "state": "resolved",
+        "fail_closed": false
+      }
+    },
+    {
+      "abi_position": 1,
+      "kind": "tensor",
+      "logical_value_id": "weights",
+      "direction": "in",
+      "copy_in": true,
+      "copy_out": false,
+      "presence": "optional_nullable",
+      "absent_semantics": "缺省(空指针)=全 1 权重，即 out[self_i]+=1（等价计数）。实现分两支：非-RegBase 走 l0op::Fill 造全1张量(aclnn_bincount.cpp:116-141)；950/RegBase(=本算子唯一目标) 走 AllocTensor shape{0} DT_FLOAT 空张量由 kernel 内部按全1处理(dealWeightsTensor_950 aclnn_bincount.cpp:143-176)。proto:34 亦述『length-0 weights 等价全权重=1』",
+      "binding": "device_tensor",
+      "allow_empty_element": true,
+      "cardinality": {
+        "kind": "single"
+      },
+      "value_domain": {
+        "kind": "enum",
+        "enum_set": [
+          "FLOAT",
+          "FLOAT16",
+          "DOUBLE",
+          "INT8",
+          "INT16",
+          "INT32",
+          "INT64",
+          "UINT8",
+          "BOOL"
+        ],
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "header",
+            "doc",
+            "op_def"
+          ],
+          "cite": "WEIGHTS_DTYPE_SUPPORT_LIST aclnn_bincount.cpp:39-42; aclnn_bincount.h:34-35; docs:99; op_def weights=DT_FLOAT bincount_def.cpp:25 / proto {FLOAT,INT32,INT64,DOUBLE} bincount_proto.h:48",
+          "conflict_resolution": "aclnn 面 header=doc=glue 一致 9 类；op_def(仅 FLOAT)/proto(4类) 属 ge 面较窄。非 FLOAT/DOUBLE 的 weights 由 glue l0op::Cast→DOUBLE(aclnn_bincount.cpp:133-135)，故 aclnn 面按 9 类记、resolved",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "provenance": {
+        "source": "header",
+        "cross_check": [
+          "glue",
+          "doc",
+          "example"
+        ],
+        "cite": "aclnn_bincount.h:34-35 (可为空指针); glue 空指针分支 aclnn_bincount.cpp:51-53,120,149; example weights=FLOAT test_aclnn_bincount.cpp:106-112",
+        "state": "resolved",
+        "fail_closed": false
+      }
+    },
+    {
+      "abi_position": 2,
+      "kind": "scalar",
+      "logical_value_id": "minlength",
+      "direction": "in",
+      "copy_in": false,
+      "copy_out": false,
+      "presence": "required",
+      "binding": "host_scalar",
+      "cardinality": {
+        "kind": "single"
+      },
+      "value_domain": {
+        "kind": "fixed",
+        "fixed_dtype": "INT64",
+        "provenance": {
+          "source": "header",
+          "cross_check": [
+            "doc"
+          ],
+          "cite": "aclnn_bincount.h:37,46 int64_t minlength; docs:105",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "provenance": {
+        "source": "header",
+        "cross_check": [
+          "doc",
+          "glue",
+          "example"
+        ],
+        "cite": "aclnn_bincount.h:37-40,46 (host int64,指定输出最小长度); 参与输出尺寸 size=max(out.dim0,minlength) aclnn_bincount.cpp:223-224; example minlength=0 test_aclnn_bincount.cpp:97",
+        "state": "resolved",
+        "fail_closed": false
+      }
+    },
+    {
+      "abi_position": 3,
+      "kind": "tensor",
+      "logical_value_id": "out",
+      "direction": "out",
+      "copy_in": false,
+      "copy_out": true,
+      "presence": "required",
+      "binding": "device_tensor",
+      "allow_empty_element": true,
+      "cardinality": {
+        "kind": "single"
+      },
+      "value_domain": {
+        "kind": "enum",
+        "enum_set": [
+          "INT32",
+          "INT64",
+          "FLOAT",
+          "DOUBLE"
+        ],
+        "selector": {
+          "key": "keyed_on_output_dtype",
+          "ref": "out"
+        },
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "header",
+            "doc"
+          ],
+          "cite": "OUT_DTYPE_SUPPORT_LIST aclnn_bincount.cpp:44-45; aclnn_bincount.h:39-40; docs:119; glue 末尾 l0op::Cast(BincountOut → out->GetDataType()) aclnn_bincount.cpp:239",
+          "conflict_resolution": "out dtype 由调用方预分配的 out 张量自带；glue 把内核结果 Cast 到 out.dtype。故 keyed_on_output_dtype 自指 out 槽。op_def bins=DT_FLOAT 属 ge 面较窄",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "storage_alias": {
+        "storage_alias_group": "out",
+        "readback_binding": true,
+        "alias_kind": "full",
+        "const_untrusted": false,
+        "provenance": {
+          "source": "example",
+          "cross_check": [
+            "glue"
+          ],
+          "cite": "D2H 源 outDeviceAddr test_aclnn_bincount.cpp:138-141; 写目标 l0op::ViewCopy(castResult,out) aclnn_bincount.cpp:242; out 声明为非 const aclTensor* aclnn_bincount.h:46 → 方向 out 干净、无 const 陷阱",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "provenance": {
+        "source": "glue",
+        "cross_check": [
+          "op_def",
+          "example"
+        ],
+        "cite": "aclnn_bincount.cpp:242 ViewCopy 写 out; op_def Output(bins) bincount_def.cpp:26; example out 预分配 outSize=9 test_aclnn_bincount.cpp:98-112",
+        "state": "resolved",
+        "fail_closed": false
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "logical_value_id": "out",
+      "shape_materialization": {
+        "modes": [
+          {
+            "mode": "host_oracle",
+            "execution_path": "aclnn_single_op",
+            "value_dependency": "max(reduce_max(self)+1, minlength)（数据依赖 self 的值）。glue 仅读预分配 out.dim0 并 clamp: sizes=out->GetViewShape().GetDim(0); size=max(sizes,minlength)（aclnn_bincount.cpp:223-224），不自算 reduce_max——调用方须先在 host 求 self 最大值再预分配 out（example 注释:83）",
+            "extent_readback": "count_from_oracle"
+          },
+          {
+            "mode": "host_oracle",
+            "execution_path": "graph_ge",
+            "value_dependency": "out.dim0 = value(size 输入张量[input idx1])。infershape 读 size_tensor->GetData<int32_t>()[0] 作 bins；若 size 非 const 已知则 bins=UNKNOWN_DIM(-1)（bincount_infershape.cpp:79-87）。op_def size 为 ValueDepend(OPTIONAL)+InputsDataDependency({1})，其值语义 = max(reduce_max(array)+1, minlength) 由图作者供",
+            "extent_readback": "exact_prealloc"
+          }
+        ],
+        "consistency_assertion": "两执行路径 out.dim0 语义须同 = max(reduce_max(self)+1, minlength)（docs:20 / aclnn_bincount.h:37-40 / proto:38）。⚠ aclnn 面 glue 只 clamp 到 max(out.dim0,minlength)、不验证 out.dim0 是否真等于该式：若调用方给的 out.dim0 偏小，越界桶被丢/结果错但不报错——验收须自行以该式核对 out.dim0，不能信任预分配值。",
+        "provenance": {
+          "source": "infershape",
+          "cross_check": [
+            "glue",
+            "doc",
+            "header",
+            "op_def",
+            "example"
+          ],
+          "cite": "bincount_infershape.cpp:79-87,91 InputsDataDependency({1}); aclnn_bincount.cpp:223-224; docs:20,108,118; aclnn_bincount.h:37-40; example 预算 outSize=max=9 test_aclnn_bincount.cpp:83,98",
+          "conflict_resolution": "extent 依赖 self 数据值(reduce_max)，机械层无数据→不可物化 per-output shape",
+          "state": "out_of_domain",
+          "fail_closed": true
+        }
+      },
+      "value_domain": {
+        "kind": "enum",
+        "enum_set": [
+          "INT32",
+          "INT64",
+          "FLOAT",
+          "DOUBLE"
+        ],
+        "selector": {
+          "key": "keyed_on_output_dtype",
+          "ref": "out"
+        },
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "header",
+            "doc",
+            "infershape"
+          ],
+          "cite": "OUT_DTYPE_SUPPORT_LIST aclnn_bincount.cpp:44-45; docs:119; graph 面 InferDataType 令 bins.dtype=weights.dtype bincount_graph_infer.cpp:21-22（aclnn 面则由 out 预分配 dtype 决定）",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "acceptance": {
+        "kind": "pointwise",
+        "compare": "isclose",
+        "tol_ref": "by_output_dtype+weights-presence: weights 缺省=整数计数→整型 out 应 exact；weights 给定=浮点加权和(float 累加、且 kernel 内部走 DOUBLE)→isclose 按 out dtype 容差。故通用取 isclose、纯计数场景收紧为 exact",
+        "threshold_source": {
+          "tier": "doc_support_table",
+          "value": "任务书 精度要求=满足 AscendOpTest 工具默认阈值（bincount_task_doc.md:44-46）；ops-math 随仓 ttk_st precision_tolerances=1e-3 absolute（tests/st/arch35/ttk_kernel_bincount_st.csv）。无随仓 taskbook 明写数值阈值",
+          "provenance": {
+            "source": "taskbook",
+            "cross_check": [
+              "doc"
+            ],
+            "cite": "bincount_task_doc.md:44-46; ttk_kernel_bincount_st.csv:2-",
+            "state": "needs_source",
+            "fail_closed": false
+          }
+        }
+      }
+    }
+  ],
+  "constraint_graph": {
+    "edges": [
+      {
+        "type": "shape_relation",
+        "from": "self",
+        "to": "weights",
+        "detail": "weights 非空时 shape(weights)==shape(self)（均 1 维、等长）",
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "doc",
+            "op_def"
+          ],
+          "cite": "CheckFormat OP_CHECK_SHAPE_NOT_EQUAL aclnn_bincount.cpp:94; docs:98; op_graph proto same shape as arr bincount_proto.h:33-34",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      {
+        "type": "shape_relation",
+        "from": "self",
+        "to": "out",
+        "detail": "out.dim0 = max(reduce_max(self)+1, minlength)（数据依赖，非静态可算；见 shape_materialization/out fail-closed）",
+        "provenance": {
+          "source": "doc",
+          "cross_check": [
+            "header",
+            "infershape"
+          ],
+          "cite": "docs:20; aclnn_bincount.h:37-40; bincount_infershape.cpp:79-87",
+          "state": "out_of_domain",
+          "fail_closed": true
+        }
+      },
+      {
+        "type": "dtype_relation",
+        "from": "weights",
+        "to": "out",
+        "detail": "仅 graph_ge 路径成立：InferDataType 令 dtype(bins)=dtype(weights)（bincount_graph_infer.cpp:21-22）。aclnn 单算子路径不成立——out dtype 由调用方预分配、glue Cast 到之",
+        "provenance": {
+          "source": "infershape",
+          "cross_check": [
+            "glue"
+          ],
+          "cite": "bincount_graph_infer.cpp:21-22; aclnn 面 aclnn_bincount.cpp:239",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      }
+    ]
+  },
+  "output_mapping": {
+    "provenance": {
+      "source": "glue",
+      "cross_check": [
+        "op_def"
+      ],
+      "cite": "单输出 bins→out 一对一; ViewCopy 写 out aclnn_bincount.cpp:242; op_def Output(bins) bincount_def.cpp:26",
+      "state": "resolved",
+      "fail_closed": false
+    },
+    "output_edges": [
+      {
+        "source_output_id": 0,
+        "api_param_id": 0,
+        "confidence": 1,
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "op_def"
+          ],
+          "cite": "op_def 唯一 Output(bins)@idx0 bincount_def.cpp:26 → aclnn 唯一数据输出槽 out(api 0); glue 写目标 l0op::ViewCopy(castResult,out) aclnn_bincount.cpp:242（恒等、非反转，单输出无 std::get 多路）",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      }
+    ],
+    "input_edges": [
+      {
+        "api_param_id": 0,
+        "op_def_input_id": 0,
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "op_def"
+          ],
+          "cite": "aclnn self(api0) ↔ op_def Input(array)@idx0 bincount_def.cpp:23",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      {
+        "api_param_id": 1,
+        "op_def_input_id": 2,
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "op_def"
+          ],
+          "cite": "aclnn weights(api1) ↔ op_def Input(weights)@idx2 bincount_def.cpp:25（op_def 输入序为 array,size,weights → weights 是 idx2，非 idx1）",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      {
+        "api_param_id": 2,
+        "op_def_input_id": 1,
+        "synthesized_from": "max(out.dim0, minlength)",
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "op_def",
+            "infershape"
+          ],
+          "cite": "op_def Input(size)@idx1 ValueDepend(OPTIONAL) bincount_def.cpp:24 无对应 aclnn 数据参；glue 由 minlength(api2,host) 与预分配 out.dim0 合成 size=max(out->GetViewShape().GetDim(0),minlength) 传 l0op::Bincount(x,weights,size) aclnn_bincount.cpp:223-224,236；graph 面则以 [1] int32 值依赖输入张量喂入 InputsDataDependency({1}) bincount_infershape.cpp:91。锚 api_param_id=2(minlength) 为驱动主机参，完整来源见 synthesized_from",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      }
+    ]
+  },
+  "target_hardware": {
+    "taskdoc_hardware": "Atlas A2 训练系列产品",
+    "opdef_addconfig": [
+      "ascend950"
+    ],
+    "state": "contested",
+    "source": {
+      "source": "op_def",
+      "cross_check": [
+        "taskbook",
+        "doc"
+      ],
+      "cite": "op_def 仅 AICore().AddConfig(\"ascend950\") bincount_def.cpp:33（→a5/RegBase，glue IsRegBase 走 dealWeightsTensor_950 aclnn_bincount.cpp:231-233）; 任务书 适配硬件=Atlas A2 bincount_task_doc.md:6; docs 产品支持表并列 950PR/DT+A3+A2+Atlas 推理/训练 均√ docs:9-14",
+      "conflict_resolution": "op_def 编译目标(仅 ascend950=a5) 与 任务书(Atlas A2=a3) 不一致、docs 又声称双支持 → contested，停下人核、入 task_pr_gaps，不外推选机",
+      "state": "conflict",
+      "fail_closed": true
+    }
+  }
+}

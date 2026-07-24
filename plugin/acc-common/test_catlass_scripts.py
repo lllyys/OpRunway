@@ -14,6 +14,7 @@
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -374,7 +375,9 @@ class VerifyTests(unittest.TestCase):
         return d
 
     def _verify(self, catlass_dir=None):
-        argv = ["python3", VERIFY, "--arch", "3510"]
+        # `sys.executable` 而非字面 "python3"：被测脚本 import numpy，而跑测试的解释器
+        # 与 PATH 上的 python3 常常不是同一个（a3 上系统 python3 无 numpy → 6 个假红）。
+        argv = [sys.executable, VERIFY, "--arch", "3510"]
         if catlass_dir:
             argv += ["--catlass-dir", catlass_dir]
         return _run(argv, dict(os.environ))

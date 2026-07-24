@@ -1,0 +1,537 @@
+{
+  "ir_version": "1.0",
+  "op": "aclnnMaxDim",
+  "aclnn_entry": {
+    "exec_symbol": "aclnnMaxDim",
+    "getworkspace_symbol": "aclnnMaxDimGetWorkspaceSize",
+    "variant_of_opdef": "ArgMaxWithValue",
+    "include_header": "math/arg_max_with_value/op_api/aclnn_max_dim.h",
+    "aclnn_lib": "aclnn_math",
+    "source": {
+      "source": "header",
+      "cross_check": [
+        "glue",
+        "example"
+      ],
+      "cite": "repos/ops-math/math/arg_max_with_value/op_api/aclnn_max_dim.h:46-48,72 (@domain aclnn_math:22); glue aclnn_max_dim.cpp:123-124; example docs/aclnnMaxDim.md:334 + test_aclnn_arg_max_with_value.cpp:108",
+      "state": "resolved",
+      "fail_closed": false
+    }
+  },
+  "applicability": {
+    "in_domain": true,
+    "reason": "无状态 + 标准 aclnn 两段式(probe=matched) + 无 opaque descriptor + 两个输出各有 manifest(caller 预分配) 与 host_oracle(从 self reduce dim 推) 双物化通路。结构在域内；target_hardware 三源不一致属 per-field fail-close，不使整体域外。"
+  },
+  "abi_signature": {
+    "stage1": {
+      "ordered_param_ids": [
+        "self",
+        "dim",
+        "keepdim",
+        "out",
+        "indices"
+      ],
+      "trailing": [
+        "workspaceSize_out",
+        "executor_out"
+      ]
+    },
+    "stage2": {
+      "full_signature": "aclnnMaxDim(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor, aclrtStream stream)",
+      "probe": "matched"
+    },
+    "dual_abi_note": "aclnn C-ABI: 两个独立 aclTenster* 输出槽 out(pos3)/indices(pos4)，无列表 FLATTEN。ge/op_def 侧 Output 声明序为 indice(0),values(1)，与 aclnn 槽序 out(0),indices(1) 相反——见 output_mapping.output_edges 反转 {0->1,1->0}。dim/keepdim 为 host attr（op_def Attr dimension/keep_dims），非数据槽。"
+  },
+  "parameters": [
+    {
+      "abi_position": 0,
+      "kind": "tensor",
+      "logical_value_id": "self",
+      "direction": "in",
+      "copy_in": true,
+      "copy_out": false,
+      "presence": "required",
+      "binding": "device_tensor",
+      "allow_empty_element": true,
+      "cardinality": {
+        "kind": "single"
+      },
+      "value_domain": {
+        "kind": "enum",
+        "enum_set": [
+          "FLOAT",
+          "FLOAT16",
+          "BF16",
+          "INT64",
+          "BOOL",
+          "INT32"
+        ],
+        "selector": {
+          "key": "platform_predicate",
+          "branches": [
+            {
+              "soc_versions": [
+                "ascend950",
+                "RegBase"
+              ],
+              "dtype_set": [
+                "FLOAT",
+                "FLOAT16",
+                "INT64",
+                "BOOL",
+                "BF16",
+                "INT32"
+              ]
+            },
+            {
+              "soc_versions": [
+                "ascend910b",
+                "ascend910_93"
+              ],
+              "dtype_set": [
+                "FLOAT",
+                "FLOAT16",
+                "INT64",
+                "BOOL",
+                "BF16"
+              ]
+            },
+            {
+              "soc_versions": [
+                "ascend910"
+              ],
+              "dtype_set": [
+                "FLOAT",
+                "FLOAT16",
+                "INT64",
+                "BOOL"
+              ]
+            }
+          ]
+        },
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "op_def",
+            "doc",
+            "taskbook"
+          ],
+          "cite": "aclnn_max_dim.cpp:34-46 三张 DTYPE_SUPPORT_*_LIST + CheckDtypeValid:62-74(IsRegBase→REGBASE; CheckSocVersionGe910B:50-53 DAV_2201||RegBase→GE910B; else 910); doc aclnnMaxDim.md:74,141-145; op_def:23-24 x DataType",
+          "conflict_resolution": "dtype 白名单按 SocVersion 分支(platform_predicate)，非参数驱动。三分支从 glue 全枚举=resolved；具体取哪支取决于 target_hardware（当前 contested，见 target_hardware.state）→ 该 selection 在目标裁定前 fail-close。⚠ 任务书:26,35 列 INT16、doc/glue/op_def 均无 INT16 → 记 task_pr_gap；op_def:23 亦无 BOOL 但 glue 支持 BOOL(会先 Cast→FLOAT:144)",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "provenance": {
+        "source": "header",
+        "cross_check": [
+          "glue",
+          "doc"
+        ],
+        "cite": "aclnn_max_dim.h:46 const aclTensor* self; glue:123",
+        "state": "resolved",
+        "fail_closed": false
+      }
+    },
+    {
+      "abi_position": 1,
+      "kind": "attr",
+      "logical_value_id": "dim",
+      "direction": "in",
+      "copy_in": true,
+      "copy_out": false,
+      "presence": "required",
+      "binding": "attr",
+      "cardinality": {
+        "kind": "single"
+      },
+      "provenance": {
+        "source": "header",
+        "cross_check": [
+          "op_def"
+        ],
+        "cite": "aclnn_max_dim.h:46 int64_t dim（host int64，取值[-self.dim(),self.dim())）; op_def:45 Attr(dimension) REQUIRED Int; l0op argmax_with_value.cpp:42 OP_ATTR(dim,keepdim)",
+        "conflict_resolution": "dim 是 host 按值直传的 reduce 轴，映射 op_def REQUIRED_ATTR dimension；影响两个输出的 extent（见 outputs.shape_materialization）",
+        "state": "resolved",
+        "fail_closed": false
+      }
+    },
+    {
+      "abi_position": 2,
+      "kind": "attr",
+      "logical_value_id": "keepdim",
+      "direction": "in",
+      "copy_in": true,
+      "copy_out": false,
+      "presence": "required",
+      "binding": "attr",
+      "cardinality": {
+        "kind": "single"
+      },
+      "provenance": {
+        "source": "header",
+        "cross_check": [
+          "op_def"
+        ],
+        "cite": "aclnn_max_dim.h:46 bool keepdim; op_def:46 Attr(keep_dims) OPTIONAL Bool(false)",
+        "conflict_resolution": "op_def 默认 false，但 aclnn 签名恒传该参→在 aclnn 面 presence=required；true→保留轴设1，false→去掉轴（infershape:57-65）",
+        "state": "resolved",
+        "fail_closed": false
+      }
+    },
+    {
+      "abi_position": 3,
+      "kind": "tensor",
+      "logical_value_id": "out",
+      "direction": "out",
+      "copy_in": false,
+      "copy_out": true,
+      "presence": "required",
+      "binding": "device_tensor",
+      "allow_empty_element": true,
+      "cardinality": {
+        "kind": "single"
+      },
+      "value_domain": {
+        "kind": "follows",
+        "follows_ref": "self",
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "op_def",
+            "doc"
+          ],
+          "cite": "aclnn_max_dim.cpp:72 OP_CHECK_DTYPE_NOT_SAME(self,out) 强制 dtype(out)==dtype(self); l0op argmax_with_value.cpp:40 out=AllocTensor(self->GetDataType()); doc:103 数据类型和self一致",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "storage_alias": {
+        "storage_alias_group": "out",
+        "readback_binding": true,
+        "alias_kind": "full",
+        "provenance": {
+          "source": "example",
+          "cross_check": [
+            "glue"
+          ],
+          "cite": "D2H 源 outDeviceAddr docs/aclnnMaxDim.md:353 (+ test_aclnn_arg_max_with_value.cpp:127); 写入源 glue ViewCopy(out_res,out):174",
+          "conflict_resolution": "回读源 = out buffer（example 唯一 D2H 的 buffer）。⚠ header doxygen:41 把 out 误标 @param [in]——方向不据注释、以 glue ViewCopy 写入源为准=out",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "provenance": {
+        "source": "glue",
+        "cross_check": [
+          "header",
+          "example"
+        ],
+        "cite": "aclnn_max_dim.cpp:174 ViewCopy(out_res,out) 写 out（direction=out）; header:47 aclTensor* out（非 const）; example D2H:353",
+        "conflict_resolution": "header 注释:41 标 [in] 不可信；方向以 ViewCopy 写入源定=out",
+        "state": "resolved",
+        "fail_closed": false
+      }
+    },
+    {
+      "abi_position": 4,
+      "kind": "tensor",
+      "logical_value_id": "indices",
+      "direction": "out",
+      "copy_in": false,
+      "copy_out": true,
+      "presence": "required",
+      "binding": "device_tensor",
+      "allow_empty_element": true,
+      "suppressed": true,
+      "cardinality": {
+        "kind": "single"
+      },
+      "value_domain": {
+        "kind": "enum",
+        "enum_set": [
+          "INT32",
+          "INT64"
+        ],
+        "selector": {
+          "key": "keyed_on_output_dtype",
+          "ref": "indices"
+        },
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "header",
+            "op_def",
+            "doc"
+          ],
+          "cite": "aclnn_max_dim.cpp:155-159 (RegBase: l0op(...,indices->GetDataType()); else INT32) + :167 Cast(argmax_indices, indices->GetDataType()) + :172 ViewCopy→indices; header:40 INT32/INT64; doc:114 INT32/INT64",
+          "conflict_resolution": "最终 indices dtype = 调用方给 indices 张量的 dtype（自指）→ keyed_on_output_dtype ref=indices。op_def:47 有 Attr(indice_dtype) 默认 int32，但 aclnn 入口不暴露该 attr、由张量 dtype 重派→本参 suppressed=true。⚠ 任务书:30,39 只写 INT32；header/glue 支持 INT32+INT64→取 aclnn 面(宽)、任务书窄记 task_pr_gap",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "storage_alias": {
+        "storage_alias_group": "indices",
+        "readback_binding": true,
+        "alias_kind": "full",
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "example"
+          ],
+          "cite": "写入源 ViewCopy(indices_res,indices) aclnn_max_dim.cpp:172; example 创建 indicesDeviceAddr:98 但只 D2H out:127（未 D2H indices）",
+          "conflict_resolution": "example 未回读 indices→回读源以 glue ViewCopy 写入目标 indices buffer 为准（authoritative）。header doxygen:40 误标 [in] indices 不可信",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "provenance": {
+        "source": "glue",
+        "cross_check": [
+          "header",
+          "op_def"
+        ],
+        "cite": "aclnn_max_dim.cpp:172 ViewCopy(indices_res,indices) 写 indices（direction=out）; header:47 aclTensor* indices",
+        "conflict_resolution": "header 注释:40 标 [in] indices 不可信；方向以 ViewCopy 写入源定=out",
+        "state": "resolved",
+        "fail_closed": false
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "logical_value_id": "out",
+      "shape_materialization": {
+        "modes": [
+          {
+            "mode": "manifest",
+            "value_dependency": "caller 预分配 out，shape 已定",
+            "extent_readback": "exact_prealloc"
+          },
+          {
+            "mode": "host_oracle",
+            "execution_path": "aclnn_single_op",
+            "value_dependency": "reduce(self, dim): keepdim=false 去掉 dim 轴（维度-1），keepdim=true 该轴设 1（维度不变）；dim/keepdim 均 host attr 静态可知。特例：self 为标量/1维时 out 退化为标量 shape{}（l0op argmax_with_value.cpp:48-51；infershape:44-47,26-31）",
+            "extent_readback": "exact_prealloc"
+          }
+        ],
+        "consistency_assertion": "manifest 供的 out shape 必须 == host_oracle 从 self reduce 推——glue CheckShapeAndScalarSame(argmax_out, out) aclnn_max_dim.cpp:165 强制一致，不一致即验收失败",
+        "provenance": {
+          "source": "infershape",
+          "cross_check": [
+            "glue"
+          ],
+          "cite": "arg_common_base_infershape.cpp:41-69 ArgMaxWithValueInfer（keepdim 分支 ReduceDimsWithKeepDims/WithoutKeepDims）; glue CheckShapeAndScalarSame:165",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "value_domain": {
+        "kind": "follows",
+        "follows_ref": "self",
+        "provenance": {
+          "source": "glue",
+          "cite": "aclnn_max_dim.cpp:72 dtype(out)==dtype(self); l0op:40 AllocTensor(self->GetDataType())",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "acceptance": {
+        "kind": "pointwise",
+        "compare": "exact",
+        "tol_ref": "reduce-选择：out 是 self 中被选中的最大元素（无算术累加，argmax_out→Cast(同 dtype，无损)→ViewCopy），逐元素 bit-exact；FLOAT/FLOAT16/BF16 亦 exact（选中元素与 golden 选中元素同值）",
+        "threshold_source": {
+          "tier": "semantic_inference",
+          "value": "exact（reduce-选择，无算术）",
+          "provenance": {
+            "source": "doc",
+            "cross_check": [
+              "taskbook"
+            ],
+            "cite": "语义推断：max 为选择而非累加→exact；任务书:56 精度委派 AscendOpTest 默认阈值（按 dtype MERE/MARE）作浮点容差兜底。须真机对拍坐实 exact 成立",
+            "state": "resolved",
+            "fail_closed": false
+          }
+        }
+      }
+    },
+    {
+      "logical_value_id": "indices",
+      "shape_materialization": {
+        "modes": [
+          {
+            "mode": "manifest",
+            "value_dependency": "caller 预分配 indices，shape 已定",
+            "extent_readback": "exact_prealloc"
+          },
+          {
+            "mode": "host_oracle",
+            "execution_path": "aclnn_single_op",
+            "value_dependency": "shape(indices) == shape(out)（同一 reduce 结果；infershape:66 *indice_shape=*value_shape）",
+            "extent_readback": "exact_prealloc"
+          }
+        ],
+        "consistency_assertion": "manifest 供的 indices shape 必须 == out shape（== host_oracle）——glue CheckShapeAndScalarSame(argmax_indices, indices) aclnn_max_dim.cpp:164 强制一致",
+        "provenance": {
+          "source": "infershape",
+          "cross_check": [
+            "glue"
+          ],
+          "cite": "arg_common_base_infershape.cpp:66 *indice_shape=*value_shape; glue CheckShapeAndScalarSame:164",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "value_domain": {
+        "kind": "enum",
+        "enum_set": [
+          "INT32",
+          "INT64"
+        ],
+        "selector": {
+          "key": "keyed_on_output_dtype",
+          "ref": "indices"
+        },
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "op_def",
+            "header"
+          ],
+          "cite": "aclnn_max_dim.cpp:155-172 dtype 由 indices->GetDataType() 重派; op_def:47 indice_dtype attr 被抑制",
+          "conflict_resolution": "输出槽自身 dtype 自指；op_def indice_dtype attr(默认int32) 被 aclnn 面抑制重派",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      "acceptance": {
+        "kind": "equivalence_relation",
+        "equivalence": {
+          "relation_ref": "take_along_axis(self, dim, npu_idx) == values_out —— NPU 报的索引处、self 的取值须等于 NPU 报的最大值。消解并列(ties)：多个位置同为最大时 argmax 非唯一，不强求 npu_idx==golden_idx（proto:47 注『取第一个最大值索引』仅供参考、真机可返回任一），只验被选值匹配。关系内容来自 per-op golden/oracle，契约仅持引用",
+          "over": [
+            "self",
+            "dim",
+            "out"
+          ]
+        },
+        "threshold_source": {
+          "tier": "semantic_inference",
+          "value": "关系内相等为 exact（int 索引→取 self 浮点元素→与 values 浮点 exact 比）",
+          "provenance": {
+            "source": "doc",
+            "cross_check": [
+              "taskbook"
+            ],
+            "cite": "语义推断：argmax 并列→用等价关系而非逐元素 exact 比索引；任务书:56 委派 AscendOpTest 默认阈值。须真机对拍坐实",
+            "state": "resolved",
+            "fail_closed": false
+          }
+        }
+      }
+    }
+  ],
+  "constraint_graph": {
+    "edges": [
+      {
+        "type": "dtype_relation",
+        "from": "self",
+        "to": "out",
+        "detail": "dtype(out)==dtype(self)",
+        "provenance": {
+          "source": "glue",
+          "cite": "aclnn_max_dim.cpp:72 OP_CHECK_DTYPE_NOT_SAME(self,out)",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      {
+        "type": "shape_relation",
+        "from": "self",
+        "to": "out",
+        "detail": "out = reduce(self, dim); keepdim=false 维度-1、keepdim=true 该轴设1（infershape ArgMaxWithValueInfer:57-65）",
+        "provenance": {
+          "source": "infershape",
+          "cite": "arg_common_base_infershape.cpp:41-69",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      {
+        "type": "shape_relation",
+        "from": "out",
+        "to": "indices",
+        "detail": "shape(indices)==shape(out)（两输出同形）",
+        "provenance": {
+          "source": "infershape",
+          "cross_check": [
+            "glue"
+          ],
+          "cite": "arg_common_base_infershape.cpp:66; glue:164-165 双 CheckShapeAndScalarSame",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      }
+    ]
+  },
+  "output_mapping": {
+    "provenance": {
+      "source": "glue",
+      "cross_check": [
+        "op_def",
+        "doc"
+      ],
+      "cite": "证据分级 glue std::get→ViewCopy(aclnn_max_dim.cpp:160-175) > op_def 声明序(arg_max_with_value_def.cpp:29,37) > proto 注(arg_max_with_value_proto.h:52-54 『output sequence is opposite to that of PyTorch』)",
+      "conflict_resolution": "l0op tuple 序=op_def Output 声明序(indice=get<0>,values=get<1>，见 argmax_with_value.cpp:34,42 OP_OUTPUT(indices,out) + return tuple(indices,out)); glue 把 get<0>(indice)→ViewCopy→aclnn indices槽(pos4)、get<1>(values)→ViewCopy→aclnn out槽(pos3) → 反转",
+      "state": "resolved",
+      "fail_closed": false
+    },
+    "output_edges": [
+      {
+        "source_output_id": 0,
+        "api_param_id": 1,
+        "confidence": 1,
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "op_def"
+          ],
+          "cite": "op_def Output0=indice(arg_max_with_value_def.cpp:29)=l0 std::get<0>; glue aclnn_max_dim.cpp:162 argmax_indices=get<0>, :167 Cast, :172 ViewCopy(indices_res, indices)→aclnn indices 槽(abi_position4=数据输出槽1)",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      },
+      {
+        "source_output_id": 1,
+        "api_param_id": 0,
+        "confidence": 1,
+        "provenance": {
+          "source": "glue",
+          "cross_check": [
+            "op_def"
+          ],
+          "cite": "op_def Output1=values(arg_max_with_value_def.cpp:37)=l0 std::get<1>; glue aclnn_max_dim.cpp:163 argmax_out=get<1>, :169 Cast, :174 ViewCopy(out_res, out)→aclnn out 槽(abi_position3=数据输出槽0)",
+          "state": "resolved",
+          "fail_closed": false
+        }
+      }
+    ]
+  },
+  "target_hardware": {
+    "taskdoc_hardware": "Atlas A2/A3（任务书 适配硬件）",
+    "opdef_addconfig": [
+      "ascend950"
+    ],
+    "state": "contested",
+    "source": {
+      "source": "op_def",
+      "cross_check": [
+        "taskbook",
+        "doc"
+      ],
+      "cite": "op_def arg_max_with_value_def.cpp:57 AICore().AddConfig(\"ascend950\") 唯一; taskbook MinDim&MaxDim_task_doc.md:6 适配硬件 Atlas A2/A3; doc aclnnMaxDim.md:9-14 产品支持表列 Ascend950PR/DT + A2/A3 + Atlas 推理/训练",
+      "conflict_resolution": "三源不一致：op_def 仅声明 ascend950(RegBase/a5) 的 Ascend C kernel；任务书写 A2/A3；doc 表两者皆列（A2/A3 支持来自 legacy TBE 路径）。按 schema→contested，停下人核、入 task_pr_gaps，不外推选机；self.value_domain 的 platform_predicate 分支选择因此在目标裁定前 fail-close",
+      "state": "conflict",
+      "fail_closed": true
+    }
+  }
+}

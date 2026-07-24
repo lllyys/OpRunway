@@ -8,17 +8,22 @@
 - 两种传输模式：`OPRUNWAY_TARGET=local`（本机直连，无 ssh/scp）/ `remote`（默认，ssh）；
   remote 缺 `OPRUNWAY_SSH_HOST` 报错，local 不需要 host；
 - 传输原语 `_copy_to`/`_copy_from`/`_shell` 在 local（host=None）模式走本机 cp/bash、不碰 ssh。
+- **输出形状（契约 C1）**：`run_new_example` 不再硬拒「输出 ≠ 输入广播形状」——算子在 `golden.py` 声明了
+  `out_shape()`（caseset 记 `expected.out_shape` + `out_shape_source="golden.out_shape"`）时按声明形状
+  分配/校验输出、manifest 补一组输入维度；**未声明时旧硬校验原样保留**（漂移照拒）。
+- **manifest attr 编码**：`list[int]` → 逗号连接的**单** token（契约 C2）；空数组/含空白/None 一律 fail-closed。
 """
 import inspect, json, os, shutil, subprocess, tempfile, unittest
 from unittest import mock
 
 import numpy as np
 import gen_cases as GC
+import precision_policy as PP
 import repo_adapter as R
 import _golden_fixture as _gf   # golden 去引擎化：沙盒 ops_root 放 golden.py 供 gen_cases 加载（ADR 0011）
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SIGN_SPEC = os.path.join(_HERE, "..", "..", "samples", "specs", "sign.spec.json")
+_SIGN_SPEC = os.path.join(_HERE, "..", "samples", "specs", "sign.spec.json")
 _REAL_SHELL = R._shell   # 原始 _shell（任何 patch 之前捕获）：fake_shell 让"部署步"委托真跑本机 bash
 
 # 一份"齐全"的 remote env（各用例按需删字段来触发缺失报错）
@@ -43,6 +48,15 @@ class NeCfgNoPrivateDefaultsTest(unittest.TestCase):
         self.assertEqual(c["target"], "remote")
         self.assertEqual(c["host"], "somehost")
         self.assertEqual(c["ops"], "/remote/ops-repo")
+
+    def test_vendor_suffix_default_empty_backward_compatible(self):
+        """批 6b：未给 OPRUNWAY_VENDOR_SUFFIX → 空串（sentinel=沿用现行为·shell 走仓名正则），不报错。"""
+        self.assertEqual(_cfg(_FULL_REMOTE)["vendor_suffix"], "")
+
+    def test_vendor_suffix_passed_through(self):
+        """给了 → 原样带进 cfg（供 env-export 显式导出，catlass/非 ops-<族> 仓靠它）。"""
+        env = dict(_FULL_REMOTE, OPRUNWAY_VENDOR_SUFFIX="cv")
+        self.assertEqual(_cfg(env)["vendor_suffix"], "cv")
 
     def test_missing_each_required_field_raises(self):
         for drop in ("OPRUNWAY_REMOTE_DIR", "OPRUNWAY_OPS_REPO", "OPRUNWAY_OPP"):
@@ -313,6 +327,10 @@ class LocalRunNewExampleWiringTest(unittest.TestCase):
         self.assertTrue(any("runner" in os.path.basename(t) for t in to_targets), "runner.cpp 未经 _copy_to 上传")
         from_srcs = [c.args[1] for c in m_from.call_args_list]     # (host, remote, local)
         self.assertTrue(any(s.endswith("out.bin") for s in from_srcs), "out.bin 未经 _copy_from 拉回")
+        # 批 6b：orchestrate 那次 _shell 的 script 确含 VENDOR_SUFFIX 的 export（证断头配置已接回）。
+        orch = next(c.args[1] for c in m_shell.call_args_list if "run_on_npu.sh" in c.args[1])
+        self.assertIn("export OPRUNWAY_VENDOR_SUFFIX=", orch,
+                      "env-export 未导出 OPRUNWAY_VENDOR_SUFFIX——断头配置没接回")
         # 每处 host（首位置实参）都是 None —— 证 local 模式没漏出 ssh/scp
         for m, label in ((m_shell, "_shell"), (m_to, "_copy_to"), (m_from, "_copy_from")):
             for call in m.call_args_list:
@@ -348,6 +366,262 @@ class LocalIntersectionGuardTest(unittest.TestCase):
     def test_work_dir_under_rroot_rejected(self):
         # 反向：work_dir 落在 rroot 之内也须拒（双向不相交）。rroot=base，work=base/work → 相交。
         self._expect_intersection_raise({"OPRUNWAY_REMOTE_DIR": self.sb["base"]})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 组 D · 契约 C1（输出形状）+ C2（list[int] attr）在 run_new_example 的落地。
+# **不经 gen_cases / golden.py**（本机无 torch，那条路恒红）——caseset 全手搓，只测 repo_adapter 自己那段：
+# 输入/输出形状分开算、golden 按「真正会被读回的输出形状」校、manifest 行格式、attr token 编码。
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _mk_expected(cid, dtype="float32"):
+    """手搓一份与 gen_cases 同构的 `expected`（数值 fp32 路径）。"""
+    std = PP.effective_standard(PP.ASCENDOPTEST_DEFAULT, dtype, "rel_err")
+    pol = PP.threshold_for(std, dtype)
+    return {"golden_source": "numpy analytical", "golden_path": f"{cid}/golden.npy",
+            "verify_mode": "approx", "standard": std, "compare": "rel_err",
+            "compare_dtype": dtype, "tolerance_policy_id": PP.tolerance_policy_id(std, dtype),
+            "policy": pol, "threshold": PP.threshold_digest(pol)}
+
+
+def _mk_case(work, cid, in_shapes, out_shape, *, declared=False, attrs=None, golden_shape=None):
+    """在 work 下落 x{j}.npy / golden.npy，返回一条 caseset case。
+
+    `declared=True` → 标 `out_shape_source="golden.out_shape"`（算子自己声明了输出形状）；
+    否则标 `golden_fn_actual`（gen_cases 从 golden 实测填的，elementwise 缺省语义）。
+    `golden_shape` 可与 `out_shape` 不同 —— 专供「声明与 golden 打架应被拒」的负例。
+    """
+    os.makedirs(os.path.join(work, cid), exist_ok=True)
+    inputs = []
+    for j, s in enumerate(in_shapes):
+        np.save(os.path.join(work, cid, f"x{j + 1}.npy"), np.zeros(s, dtype=np.float32))
+        inputs.append({"name": f"x{j + 1}", "shape": list(s), "dtype": "float32",
+                       "path": f"{cid}/x{j + 1}.npy"})
+    np.save(os.path.join(work, cid, "golden.npy"),
+            np.zeros(golden_shape if golden_shape is not None else out_shape, dtype=np.float32))
+    exp = _mk_expected(cid)
+    exp["out_shape"] = list(out_shape)
+    exp["out_shape_source"] = "golden.out_shape" if declared else "golden_fn_actual"
+    return {"id": cid, "dims": ["功能"], "tags": ["常规"], "inputs": inputs,
+            "attrs": dict(attrs or {}), "expected": exp}
+
+
+def _fake_orch(work_dir, rroot, cids):
+    """编排步 stub：按 golden 字节伪造 out.bin（完美 NPU）+ 回双哨兵；部署步委托真跑本机 bash。"""
+    def fake(host, script, *, input=None, timeout, check, capture=False):
+        if "run_on_npu.sh" in script:
+            for cid in cids:
+                g = np.load(os.path.join(work_dir, cid, "golden.npy"))
+                od = os.path.join(rroot, "cases", cid)
+                os.makedirs(od, exist_ok=True)
+                np.ascontiguousarray(g).tofile(os.path.join(od, "out.bin"))
+            n = len(cids)
+            return subprocess.CompletedProcess(
+                [], 0, stdout=f"OPRUNWAY_DONE total={n} ok={n} fail=0\nOPRUNWAY_NPU_DONE\n", stderr="")
+        return _REAL_SHELL(host, script, timeout=timeout, check=check, capture=capture)
+    return fake
+
+
+class _NeSandboxBase(unittest.TestCase):
+    """local 沙盒基类（自身无用例）：五个互不相交的目录 + 一份 stub runner + local env。"""
+
+    OP = "Foo"
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp()
+        self.d = {k: os.path.join(self.base, k) for k in ("work", "rroot", "ops", "opp", "home")}
+        for p in self.d.values():
+            os.makedirs(p)
+        opdir = os.path.join(self.d["home"], ".oprunway", "ops", self.OP)
+        os.makedirs(opdir)
+        with open(os.path.join(opdir, f"oprunway_{self.OP.lower()}_runner.cpp"), "w",
+                  encoding="utf-8") as f:
+            f.write("// stub runner\n")
+        self.env = {"OPRUNWAY_TARGET": "local", "OPRUNWAY_REMOTE_DIR": self.d["rroot"],
+                    "OPRUNWAY_OPS_REPO": self.d["ops"], "OPRUNWAY_OPP": self.d["opp"],
+                    "OPRUNWAY_OP_SRC": "experimental/math/foo",
+                    "OPRUNWAY_WORK_DIR": self.d["home"]}
+
+    def tearDown(self):
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def _run(self, cases, attr_order=()):
+        cs = {"op": self.OP, "attr_order": list(attr_order), "cases": cases}
+        cids = [c["id"] for c in cases]
+        with mock.patch.dict(os.environ, self.env), \
+             mock.patch("repo_adapter._shell", side_effect=_fake_orch(self.d["work"], self.d["rroot"], cids)):
+            return R.run_new_example(cs, self.d["work"])
+
+    def _manifest(self):
+        with open(os.path.join(self.d["work"], "manifest.txt"), encoding="utf-8") as f:
+            return [ln for ln in f.read().splitlines() if ln.strip()]
+
+
+class OutShapeContractTest(_NeSandboxBase):
+    """C1：输出形状显式声明优先、缺省退回同形假设；两支的校验都在（放开 ≠ 不校）。"""
+
+    def test_elementwise_manifest_stays_legacy_format(self):
+        """回归（真机已验证过的格式）：算子未声明 out_shape → 行仍是 `cid dtype ndim dims…`、一组 dims。"""
+        c = _mk_case(self.d["work"], "c1", [(2, 3)], (2, 3))
+        res = self._run([c])
+        self.assertEqual(self._manifest(), ["c1 float32 2 2 3"])
+        self.assertEqual(res["evidence"][0]["precision"]["metrics"]["bad_count"], 0)
+
+    def test_declared_out_shape_no_longer_hard_rejected(self):
+        """核心：输出 (1,1,4,4) ≠ 输入 (1,1,2,2) —— 旧代码在 golden 校验处直接 raise，现应跑通。"""
+        c = _mk_case(self.d["work"], "up1", [(1, 1, 2, 2)], (1, 1, 4, 4), declared=True)
+        res = self._run([c])
+        self.assertEqual(len(res["evidence"]), 1)
+        self.assertEqual(res["evidence"][0]["status"], "ok")
+        self.assertEqual(res["evidence"][0]["precision"]["metrics"]["numel"], 16)
+
+    def test_declared_out_shape_extends_manifest_and_keeps_input_bytes(self):
+        """扩展行 = `cid dtype [attr…] out_ndim o… in_ndim i…`；x1.bin 按**输入**形状落，不再广播到输出。"""
+        c = _mk_case(self.d["work"], "up1", [(1, 1, 2, 2)], (1, 1, 4, 4), declared=True)
+        self._run([c])
+        self.assertEqual(self._manifest(), ["up1 float32 4 1 1 4 4 4 1 1 2 2"])
+        self.assertEqual(os.path.getsize(os.path.join(self.d["work"], "up1", "x1.bin")),
+                         4 * np.dtype(np.float32).itemsize)      # 输入 4 元素，不是输出的 16
+
+    def test_manifest_format_is_per_caseset_not_per_case(self):
+        """格式按整份 caseset 定：声明了 out_shape 的算子，**恰好同形**的那条 case 也走扩展行（口径不摇摆）。"""
+        cases = [_mk_case(self.d["work"], "same", [(2, 2)], (2, 2), declared=True),
+                 _mk_case(self.d["work"], "diff", [(2, 2)], (4, 4), declared=True)]
+        self._run(cases)
+        self.assertEqual(self._manifest(), ["same float32 2 2 2 2 2 2", "diff float32 2 4 4 2 2 2"])
+
+    def test_undeclared_shape_drift_still_rejected(self):
+        """未声明 out_shape 却出现「输出 ≠ 输入广播」→ 契约漂移，照拒（旧硬校验没被删掉）。"""
+        c = _mk_case(self.d["work"], "bad", [(1, 1, 2, 2)], (1, 1, 4, 4), declared=False)
+        with self.assertRaises(ValueError) as cm:
+            self._run([c])
+        self.assertIn("契约漂移", str(cm.exception))
+
+    def test_golden_disagreeing_with_declared_shape_rejected(self):
+        """声明 (1,1,4,4) 但 golden 落的是 (1,1,2,2) → 拒（metrics 不能拿错东西算）。"""
+        c = _mk_case(self.d["work"], "bad", [(1, 1, 2, 2)], (1, 1, 4, 4), declared=True,
+                     golden_shape=(1, 1, 2, 2))
+        with self.assertRaises(ValueError) as cm:
+            self._run([c])
+        self.assertIn("golden", str(cm.exception))
+
+    def test_inconsistent_duplicate_declarations_rejected(self):
+        """同一条 case 在两处声明了不同的输出形状 → 拒挑一个信（fail-closed）。"""
+        c = _mk_case(self.d["work"], "c1", [(2, 3)], (2, 3))
+        c["out_shape"] = [3, 2]                     # 与 expected.out_shape 打架
+        with self.assertRaises(ValueError) as cm:
+            self._run([c])
+        self.assertIn("不一致", str(cm.exception))
+
+    def test_defect_injection_refused_on_real_path(self):
+        """C5：真机是验收路径，绝不接受 defect 注入（进 _ne_cfg 之前就拒，故无需 env）。"""
+        with self.assertRaises(ValueError) as cm:
+            R.run_new_example({"op": self.OP, "cases": []}, self.d["work"], defect_cases=["x"])
+        self.assertIn("defect", str(cm.exception))
+
+
+class ManifestAttrTokenTest(unittest.TestCase):
+    """C2：attr 值 → manifest **单** token 的编码；不可编码的一律 fail-closed（不产坏 manifest）。"""
+
+    def test_scalar_tokens(self):
+        self.assertEqual(R._manifest_attr_token(True, "equal_nan", "c1"), "1")
+        self.assertEqual(R._manifest_attr_token(False, "equal_nan", "c1"), "0")
+        self.assertEqual(R._manifest_attr_token(3, "n", "c1"), "3")
+        self.assertEqual(R._manifest_attr_token(1e-05, "rtol", "c1"), "1e-05")
+
+    def test_int_list_is_one_comma_joined_token(self):
+        """`str([4, 4])` 会带空格、把一个 token 撑成两个 → 必须是 `4,4`。"""
+        tok = R._manifest_attr_token([4, 4], "output_size", "c1")
+        self.assertEqual(tok, "4,4")
+        self.assertNotIn(" ", tok)
+
+    def test_unencodable_attrs_rejected(self):
+        for bad in ([], [1.5], [True], None, {"a": 1}, "a b", ""):
+            with self.assertRaises(ValueError, msg=f"未拒 {bad!r}"):
+                R._manifest_attr_token(bad, "k", "c1")
+
+
+class ListAttrInManifestTest(_NeSandboxBase):
+    """C2 端到端：list[int] attr 进 manifest 行（复用上面的 local 沙盒）。"""
+
+    def test_list_attr_lands_as_single_token(self):
+        c = _mk_case(self.d["work"], "up1", [(1, 1, 2, 2)], (1, 1, 4, 4), declared=True,
+                     attrs={"output_size": [4, 4]})
+        self._run([c], attr_order=["output_size"])
+        self.assertEqual(self._manifest(), ["up1 float32 4,4 4 1 1 4 4 4 1 1 2 2"])
+
+    def test_empty_list_attr_rejected_end_to_end(self):
+        c = _mk_case(self.d["work"], "up1", [(1, 1, 2, 2)], (1, 1, 4, 4), declared=True,
+                     attrs={"output_size": []})
+        with self.assertRaises(ValueError):
+            self._run([c], attr_order=["output_size"])
+
+class VendorSuffixDerivationTest(unittest.TestCase):
+    """`run_on_npu.sh` 的 vendor 目录后缀：**推导 + fail-closed**，不再写死 `_math`。
+
+    为什么要改（2026-07-23）：算子仓 build.sh 产出的是 `${VENDOR}_<仓族>`——ops-math→`_math`、
+    ops-cv→`_cv`。脚本里写死 `_math` 既违反本仓「零硬编码」约定，也让 **ops-cv 的算子
+    （Upsample 系）真机跑必撞**。
+
+    ⚠ 本类**真的执行 run_on_npu.sh**，不复制它的 sed 表达式自己算一遍——
+    那样脚本哪怕忘了 `exit`，测试也照样绿（「脚本据此 fail-closed」就成了空口声称）。
+    脚本无需真机即可跑到这一步：vendor 后缀解析在任何 ssh/编译动作之前。"""
+
+    _SH = os.path.join(_HERE, "new_example", "run_on_npu.sh")
+
+    def _run(self, ops_dirname, **extra):
+        """用最小合法 env 起脚本，返回 CompletedProcess。ops 仓只建目录名、不需内容。"""
+        d = tempfile.mkdtemp()
+        ops = os.path.join(d, ops_dirname)
+        os.makedirs(ops, exist_ok=True)
+        env = dict(os.environ,
+                   OPRUNWAY_OPS_REPO=ops, OPRUNWAY_OPP=os.path.join(d, "opp"),
+                   OPRUNWAY_RUN_DIR=os.path.join(d, "run"), OPRUNWAY_SOC="ascend910b",
+                   OPRUNWAY_VENDOR="oprunway", OPRUNWAY_RUNNER="r.cpp",
+                   OPRUNWAY_OPNAME="Foo", OPRUNWAY_OP_SRC="experimental/math/foo")
+        env.pop("OPRUNWAY_VENDOR_SUFFIX", None)
+        env.update(extra)
+        os.makedirs(env["OPRUNWAY_OPP"], exist_ok=True)
+        os.makedirs(env["OPRUNWAY_RUN_DIR"], exist_ok=True)
+        # ⚠ errors="replace"：脚本源码本身是正确 UTF-8（已按字节核过），
+        # 但本机 bash 的 locale 可能把中文标点截断成坏字节——那是环境噪声，不是仓里的问题，
+        # 不能让它把测试搞崩。断言只匹配 ASCII 变量名与中文关键词，不依赖标点完整。
+        env.setdefault("LC_ALL", "C.UTF-8")
+        return subprocess.run(["bash", self._SH], env=env, capture_output=True,
+                              text=True, errors="replace")
+
+    def test_undecidable_repo_name_fails_closed_with_actionable_message(self):
+        """仓名推不出族名（如 `catlass`）→ **exit 3 停下**，并告诉用户该设哪个变量。"""
+        r = self._run("catlass")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("推不出 vendor 目录后缀", r.stderr)
+        self.assertIn("OPRUNWAY_VENDOR_SUFFIX", r.stderr)      # 给出可操作的出路
+
+    def test_derivable_repo_names_pass_the_suffix_gate(self):
+        """`ops-cv` / `ops-math` / `cann-ops-blas` 能推出族名 → **越过后缀闸**，
+        停在后面的闸（op 源目录不存在）而不是这一道。证推导真生效、不是恰好都被拦下。"""
+        for dirname in ("ops-cv", "ops-math", "cann-ops-blas"):
+            r = self._run(dirname)
+            self.assertNotIn("推不出 vendor 目录后缀", r.stderr, dirname)
+            self.assertIn("op 源目录不存在", r.stderr, f"{dirname} 应走到下一道闸：{r.stderr[:200]}")
+
+    def test_explicit_suffix_overrides_undecidable_name(self):
+        """显式 `OPRUNWAY_VENDOR_SUFFIX` 能救推不出来的仓名（catlass 这类）。"""
+        r = self._run("catlass", OPRUNWAY_VENDOR_SUFFIX="math")
+        self.assertNotIn("推不出 vendor 目录后缀", r.stderr)
+
+    def test_illegal_suffix_rejected(self):
+        """后缀含非法字符 → fail-closed（防被拼进路径）。"""
+        r = self._run("ops-math", OPRUNWAY_VENDOR_SUFFIX="../evil")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("含非法字符", r.stderr)
+
+    def test_script_has_no_hardcoded_math_suffix(self):
+        """源码级钉子（辅助，非主证据）：不得再出现写死的 `_math` vendor 路径。"""
+        with open(self._SH, encoding="utf-8") as f:      # with：别留句柄（ResourceWarning）
+            src = f.read()
+        self.assertNotIn("vendors/${VEN}_math", src)
+        self.assertIn("OPRUNWAY_VENDOR_SUFFIX", src)
 
 
 if __name__ == "__main__":

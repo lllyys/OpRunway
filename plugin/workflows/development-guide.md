@@ -23,14 +23,14 @@
 | ③ spec → 用例集 | 产覆盖「功能/精度/性能」的 caseset | `acc-casegen`（展开规则）+ `gen_cases.py`（确定性落盘，仅注册算子） | 无原语匹配 → `UNCOVERED_PRIMITIVE`，禁静默归并 |
 | ④ runner 锚定 + 自检 | 生成 per-op runner，验证-才-信 | `acc-runner`（NL 锚定 example）+ `run_on_npu.sh` | aclnn 入口/dtype/顺序**抠 example 不猜**；自检不满足停在此、不上真机 |
 | ⑤ 真机跑测 | Task2 精度 vs golden + Task3 性能 vs 基线 | `repo_adapter` / `run_workflow.py --mode new_example`；方法论 `acc-precision` / `acc-perf` | 精度=真 NPU vs numpy golden；性能=msprof kernel-only vs 基线；`OPRUNWAY_*` 指真机 |
-| ⑥ 门 + 裁决 + 报告 | 三级完整性门 → 裁决 → 中文报告 | `validate_acceptance_state.py` + `validator.py` + `perf_compare.py`；FAIL→`acc-rootcause` | 门 FAILED → `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）；报告逐字引用产物、`needs_review` 不当 pass |
+| ⑥ 门 + 裁决 + 报告 | 三级完整性门 → 裁决 → 中文报告 | `validate_acceptance_state.py` + `validator.py` + `perf_compare.py`；FAIL→`acc-rootcause` | 门 FAILED → `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**——仅真机通路**；非验收通路（mock）产 `dev_run_summary.json.pipeline_result`、不跑验收门。报告逐字引用产物、`needs_review` 不当 pass |
 
 ## 2. CP-A..E 检查点（对话暂停点 + 工件门）
 
 蓝图层面的 CP 语义（权威状态机在 `skills/acceptance-workflow/SKILL.md`，此处只作导航）：
 
 - **CP-A 前置**（primary 亲自）：取材 + 对应校验（落 `correspondence.json`）+ 环境/模式确认（mock vs new_example、NPU/VPN）。`status=confirmed` 才进 CP-B；`mismatch`/`empty_task` → 出程序结论、停跑。
-- **CP-B Task1 用例**：dispatch `acc-spec-extractor` 产 spec；primary inline `run_workflow.py --mode mock` 自检用例链自洽。
+- **CP-B Task1 用例**：dispatch `acc-spec-extractor` 产 spec；primary inline `gen_cases.py <spec> --dry-run` 做用例计划契约自检（C5 起不再跑 mock 出裁决）。
 - **CP-C runner**（需 NPU）：dispatch `acc-runner-dev`（先过 scope gate）→ runner 自检证据满足才允许上真机。
 - **CP-D 真机跑测**（一次原子）：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode new_example`，Task2+3+三级门一次成；FAIL → `rootcause`。
 - **CP-E 报告**（primary）：逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + `task_pr_gaps` + 各维度通过数。

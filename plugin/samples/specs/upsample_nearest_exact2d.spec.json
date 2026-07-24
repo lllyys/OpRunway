@@ -1,0 +1,138 @@
+{
+  "op": "UpsampleNearestExact2d",
+  "repo": "ops-cv",
+  "hardware": [
+    "Atlas A2",
+    "Atlas A3"
+  ],
+  "reference": {
+    "type": "builtin",
+    "ref": "仓内既有 Ascend C 实现 ops-cv image/upsample_nearest（op_def 算子名 UpsampleNearest，1d/2d/exact 共用同一 kernel）；本任务是在其上增开 uint8 通路",
+    "path": "repos/ops-cv/image/upsample_nearest/{op_host,op_kernel}"
+  },
+  "change": {
+    "kind": "add_dtype",
+    "dtypes_added": [
+      "uint8"
+    ],
+    "note": "任务书『使其支持uint8数据类型』；语义（最近邻 exact 半像素规则）不变，只加 dtype"
+  },
+  "params_source": "task_doc_table",
+  "params": [
+    {
+      "name": "self",
+      "io": "in",
+      "dtype": [
+        "float32",
+        "float16",
+        "bfloat16"
+      ],
+      "rank": 4,
+      "noncontiguous": true
+    },
+    {
+      "name": "output_size",
+      "io": "attr",
+      "dtype": [
+        "list_int"
+      ],
+      "default": [
+        8,
+        4
+      ]
+    },
+    {
+      "name": "scales_h",
+      "io": "attr",
+      "dtype": [
+        "double"
+      ],
+      "default": 0.0
+    },
+    {
+      "name": "scales_w",
+      "io": "attr",
+      "dtype": [
+        "double"
+      ],
+      "default": 0.0
+    },
+    {
+      "name": "out",
+      "io": "out",
+      "dtype": [
+        "float32",
+        "float16",
+        "bfloat16"
+      ]
+    }
+  ],
+  "generalize": true,
+  "dtype_required": [
+    "float32",
+    "float16",
+    "bfloat16",
+    "uint8"
+  ],
+  "dtype_tested": [
+    "float32",
+    "float16",
+    "bfloat16"
+  ],
+  "verify_mode": "numerical",
+  "precision": {
+    "oracle": "ascendoptest",
+    "standard": "ascendoptest_default",
+    "tolerance_policy_id": "ascendoptest_default",
+    "threshold": 0.001,
+    "policy": {
+      "kind": "ascendoptest_default",
+      "tolerance": 0.001,
+      "error_rate": 0.001,
+      "eps": 1e-09,
+      "legacy": 0.1,
+      "not_settled": false
+    },
+    "policy_note": "spec 级 policy 为主 dtype(fp16) 代表；per-case policy 由 gen_cases 按 golden dtype 派生(fp32=1e-4/fp16=1e-3)",
+    "threshold_source": "任务书『算子计算精度需满足 AscendOpTest 工具默认阈值』无数值；0.001 为 fp16 惯例 (推断/待工具核实)。注：最近邻插值是纯 gather，输出恒为输入元素的逐位拷贝、理论上应精确相等，此阈值实际是宽松上界",
+    "case_target": 20,
+    "bf16_bitexact": true
+  },
+  "perf": {
+    "baseline": "tbe",
+    "target_ratio": 0.95,
+    "target_ratio_source": "任务书性能要求『uint8性能对比fp16数据类型性能相比，劣化5%之内』→ 0.95",
+    "small_shape_exception": {
+      "text": "<10us 差 3us→仿真图",
+      "when_us_below": 10,
+      "abs_gap_us_within": 3,
+      "requires": "simulation_plot+analysis"
+    }
+  },
+  "task_pr_gaps": [
+    {
+      "kind": "dtype_unsupported_by_op_def",
+      "dtypes": [
+        "uint8"
+      ],
+      "op_def_dtypes": [
+        "float32",
+        "float16",
+        "bfloat16"
+      ],
+      "task_doc_ref": "repos/cann-ops-competitions/04_tasks/01_community-task-2026/docs/202605/UpsampleNearestExact1d&UpsampleNearestExact2d_task_doc.md:13,19,26,29,35,39（任务概述+功能实现要求+1d/2d 参数表 self/out 的数据类型列均含 UINT8；:13/:19 把 uint8 误拼作 unit8）",
+      "op_def_ref": "repos/ops-cv/image/upsample_nearest/op_host/upsample_nearest_def.cpp:26,31（Input x / Output y 的 DataType 只有 {DT_BF16, DT_FLOAT16, DT_FLOAT}）+ :38-39（AddConfig ascend910b / ascend910_93）+ :48-57（config310p 更窄，只 {DT_FLOAT16, DT_FLOAT}）",
+      "reason": "任务书要求 uint8，但仓内 op_def **所有 config 都不声明 uint8**（与 UpsampleNearest3d 不同：本算子连 ascend950 regbase config 都没有）——即『任务尚未交付』而非『实现了但跑挂了』，本 pipeline 造不出该 dtype 的用例。按用户 2026-07-22 拍板：任务书为准、差额挂账。另 gen_cases 本轮 dtype 白名单只有 {float32,float16,int16,int32,bfloat16}，uint8 即便 op_def 支持了也需先扩 gen_cases+runner"
+    },
+    "【bf16 defer 已解除·2026-07-23】【已解除（2026-07-23）】原文：bf16 被 `gen_cases._BF16_EXACT_OPS` 这张**引擎内置的算子名白名单**（只含 Sign/Neg）挡住——任务书与 op_def 都支持 bf16，最近邻/搬运类是纯 gather、输出恒为输入元素的逐位拷贝，bf16 网格上本就精确可表示、够格进白名单，但白名单写死在引擎里、spec 无处声明。**现改由 spec 声明 `precision.bf16_bitexact: true`**，本 spec 已声明并把 bfloat16 加回 dtype 集，实测能造出 bf16 数值用例。⚠ 声明的语义是「输出恒等于某个输入元素、不做算术」——**不是放松阈值的旋钮**，声明错了会让本该用 lossy 阈值的算子被按逐位相等判。",
+    "op_def 算子名与 aclnn 接口名不一致：op_def 注册的是 `UpsampleNearest`（upsample_nearest_def.cpp:20,64），1d/2d/exact 与否共用同一 kernel op，由 attr `exact_mode` 区分；本 spec 的 op 字段用 aclnn 接口名 UpsampleNearestExact2d（与任务书/验收对象口径一致）。真机 runner 与 opp 部署按哪个名字定位，须在 acc-runner 环节实读确认，别按算子名字面匹配（本仓被 Equal 误配坑过）",
+    "attr exact_mode 未进 spec：op_def 有该 attr（upsample_nearest_def.cpp:37，Bool 默认 false），但 aclnn_upsample_nearest_exact2d.cpp:257,270 调 l0op 时**恒传 true**，故走 aclnnUpsampleNearestExact2d 入口时它不是可变参数。若纳入 spec，gen_cases 的 `_attr_value_sets` 会把 bool attr 自动展开成 [False, True] 两个 attr combo → 凭空多出一半用例去测一条 aclnn 根本到不了的分支",
+    "一份任务书两个算子：UpsampleNearestExact1d&UpsampleNearestExact2d_task_doc.md 同时覆盖 aclnnUpsampleNearestExact1d（rank 3、outputSize size 1）与 aclnnUpsampleNearestExact2d（rank 4、outputSize size 2）。spec 是一算子一份，本 spec **只覆盖 2d**；1d 需另出一份 spec + golden，验收结论不得由本 spec 外推到 1d",
+    "任务书 2d 参数表自身有错：:31 的小节标题重复写成『aclnnUpsampleNearestExact1d参数说明』（应为 2d）；:39 的 out 行数据格式写『NCL、ND』、维度写『3』，与 :35 的 self（NCHW/NHWC/ND、4 维）及 aclnn 文档 aclnnUpsampleNearestExact2d.md:127-129（NCHW/NHWC/ND、4）矛盾——本 spec 按 self 行与 aclnn 文档取 rank 4，任务书那两处判为笔误 (推断)",
+    "性能基线口径与引擎槽位不符：任务书要求的是『uint8 对比同算子 fp16』的**跨 dtype 自比**，而 spec.perf.baseline 的取值域只有 {tbe, gpu_external}。本轮 uint8 未测 → 该性能要求实际无法行使；填 tbe 只是占位，真要行使须先给引擎加『同算子跨 dtype 基线』这一档",
+    "空 Tensor 冲突（本轮实跑撞上的硬阻塞·本 spec 的头号 blocker）：任务书 :26/:29/:35/:39 四处明写『不支持空Tensor』，但 gen_cases 的 `_special_entries`（opbase §1.4）**无条件**为每个 dtype 强制注入一条 `empty` 用例（rank 4 下经 `_fit_rank` 变成 (1,1,1,0)）。**已解（2026-07-23）**：gen_cases 已有 `allow_empty_tensor` 开关，本 spec 已设 `allow_empty_tensor: false` → 不再注入 empty 用例；a3 真 torch 21 case、out_shape 对账过。旧记『引擎缺口、须加表达位』已 stale（这个 session 的批 4/6 已实现开关）。golden.py 的 0 维闸留作纵深防御。把 empty 用例的 golden 编假值绕过仍被明令禁止",
+    "scales 通路未建模：golden 只算 output_size 驱动的通路，scales_h/scales_w 非 0 即 fail-closed（aclnn 文档只给一致性约束 outputSize_H = floor(self_H * scalesH)，未定义冲突时谁优先）。本 spec 两个 scales 默认 0.0，故常规用例不触发",
+    "op_def 另有 ascend310p / kirinx90 / kirin9030 三个 config（upsample_nearest_def.cpp:58-60），dtype 更窄（只 {FLOAT16, FLOAT}，见 :50,:55）。本 spec 的 hardware 只取任务书『适配硬件』的 A2/A3，未覆盖这三支"
+  ],
+  "allow_empty_tensor": false
+}

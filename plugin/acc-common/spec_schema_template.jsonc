@@ -17,8 +17,21 @@
     "dtypes_added": ["<add_dtype 时新增类型，否则省略>"]
   },
   "params_source": "<有完整参数表→task_doc_table；只写『原算子所有类型』→derived_from_reference>",
+  // params 各字段口径：
+  //   rank（**可选，仅 io=='in'**）——该输入允许的**维度数**，int 或 int 列表（如 <单个维度数> 或 [<维度数A>, <维度数B>]，取值 1..8）。
+  //     写了 → gen_cases 的 shape 阶梯只在这些维度内取值；**不写 = 不限制**（沿用全阶梯，1~4 维混排）。
+  //     ⚠ 只有任务书/op_def 真写死了维度（如「仅支持 4D NCHW 输入」）才填；拿不准就别填——填错会把合法 shape 挡掉。
+  //     多个 in 参数都写 → 取**交集**（常规构造路径下各输入同形）；交集空、或过滤后无合法常规 shape → gen_cases fail-closed。
+  //   default（**仅 io=='attr'**）——取值类型：bool / int / float / str **标量**，或 **list[int] 数组**
+  //     （`output_size` / `kernel_size` 这类既是数组、又决定输出形状的属性用数组；不支持嵌套数组、浮点数组、bool 数组，
+  //     也**不支持空数组 `[]`**——manifest 行是空格分隔的扁平 token，空数组编成空串会把后续 token 全挤错位）。
+  //     同一类型约束也适用于 spec 可选的 `attr_matrix`（若写）里的每个取值。
+  // ⚠ **输出形状不在 spec 里表达**（用户 2026-07-22 拍板：不搞 spec 表达式语言）——输出形状与输入不同的算子
+  //   （shape_transform：pooling / im2col / reduce 之类），由 per-op `<ops_root>/<op>/golden.py` **可选**导出
+  //   `def out_shape(in_shapes, attrs)` 交代；不导出即缺省语义「输出同输入形状」（elementwise）。
+  //   gen_cases 每条 case 都会拿它与 golden_fn 的实际输出形状对账，不一致 fail-closed。
   "params": [
-    {"name": "<参数名>", "io": "<in | out | attr>", "dtype": ["<当前 pipeline 支持子集，如 float32/float16>"], "noncontiguous": "<可选 true/false>", "default": "<attr 才有：默认值>"}
+    {"name": "<参数名>", "io": "<in | out | attr>", "dtype": ["<当前 pipeline 支持子集，如 float32/float16>"], "rank": "<可选·仅 in：int 或 int 列表，限制输入维度数；不写=不限制>", "noncontiguous": "<可选 true/false>", "default": "<attr 才有：默认值，标量或 list[int]>"}
   ],
   "generalize": "<bool：默认 true；无张量 IO / 融合无泛化要求→false>",
   // Q7 dtype 覆盖门（gate 消费）——分两字段，别混：
@@ -47,5 +60,21 @@
       "abs_gap_us_within": "<number：绝对差在该值内才算例外>"
     }
   },
-  "task_pr_gaps": ["<所有缺口/矛盾/推断，推断项标 (推断)；无则空数组>"]
+  "task_pr_gaps": ["<所有缺口/矛盾/推断，推断项标 (推断)；无则空数组>"],
+  // 批 4 · golden 判据锚（**判据只从 spec 派生**，硬约束 #5）。可选但**正式验收强烈建议写**：
+  //   不写 → validator 走 legacy（信 caseset 自声明），裁决里 golden_judged_from="caseset_self_declared"
+  //          （= 判据没从 spec 派生这件事被显式标出，不是隐形的洞，但不如 spec 权威）。
+  //   写了 → validator 对账 caseset 的 golden_tier 与本锚逐字段一致（不符 fail-closed），并**用本锚重新派生档位判门**，
+  //          不信 caseset 自声明的 blocked_reason —— 改 caseset 一行绕不过 golden 门。
+  // ⚠ 这是与 golden.py 的 GOLDEN_CONTRACT **平行的独立源**：acc-spec 据任务书独立判、gen_golden 在 golden.py 独立判，
+  //   validator 对账两源；不一致即「有人动过手脚 / 两处判档不一致」→ fail-closed（双源交叉核验，同硬约束 #4 的模式）。
+  // ⚠ 字段取值全部对齐 precision_policy 的受控词表；authorization.kind 与 source 的判定同 gen_golden（手册 golden-authoring.md §1）。
+  //   snapshot_sha 只在 authorization.kind ∈ {oracle_method, formula} 时有（= fetch_source --snapshot-into 打印的那串）；
+  //   impl_reference / none 无快照 → 省略 taskdoc_snapshot。
+  "golden": {
+    "source": "<single_api | multistep | external_method | needs_user>",
+    "method_kind": "<torch_cpu | numpy_cpu | builtin_tbe | gpu_lib | other_external | needs_user>",
+    "authorization": {"kind": "<oracle_method | formula | impl_reference | none>"},
+    "taskdoc_snapshot": {"sha256": "<仅 oracle_method/formula：任务书快照 sha256；其余省略此键>"}
+  }
 }

@@ -1,0 +1,129 @@
+{
+  "ir_version": "1.0",
+  "op": "ForeachAddList",
+  "aclnn_entry": {
+    "exec_symbol": "aclnnForeachAddList",
+    "getworkspace_symbol": "aclnnForeachAddListGetWorkspaceSize",
+    "variant_of_opdef": "ForeachAddList",
+    "include_header": "foreach/foreach_add_list/op_host/op_api/aclnn_foreach_add_list.h",
+    "source": { "source": "header", "cross_check": ["example"], "cite": "repos/ops-nn/foreach/foreach_add_list/op_host/op_api/aclnn_foreach_add_list.h:33-35; examples/test_aclnn_foreach_add_list.cpp:145", "state": "resolved", "fail_closed": false }
+  },
+  "applicability": { "in_domain": true },
+  "abi_signature": {
+    "stage1": {
+      "ordered_param_ids": ["x1", "x2", "alpha", "y"],
+      "trailing": ["workspaceSize_out", "executor_out"]
+    },
+    "stage2": {
+      "full_signature": "aclnnForeachAddList(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor, aclrtStream stream)",
+      "probe": "matched"
+    },
+    "dual_abi_note": "aclnn C-ABI: x1 是 1 个 aclTensorList*(pos0); ge/InferShape/tiling ABI 把它 FLATTEN 成 x1×N,x2×N,alpha×1（test IrInstanceNum({3,3,1},{3})）。两层记账。"
+  },
+  "parameters": [
+    {
+      "abi_position": 0, "kind": "tensor_list", "logical_value_id": "x1", "direction": "in",
+      "copy_in": true, "copy_out": false, "presence": "required", "binding": "device_tensor",
+      "allow_empty_list": true, "allow_empty_element": false,
+      "cardinality": { "kind": "list", "length_symbol": "N", "min_length": 0, "length_domain": "正整数含0" },
+      "element_descriptor": {
+        "abi_position": 0, "kind": "tensor", "logical_value_id": "x1_elem", "direction": "in",
+        "cardinality": { "kind": "single" }, "binding": "device_tensor", "presence": "required",
+        "provenance": { "source": "header", "state": "resolved", "fail_closed": false }
+      },
+      "value_domain": {
+        "kind": "enum", "enum_set": ["FLOAT", "FLOAT16", "INT32", "BF16"],
+        "provenance": { "source": "glue", "cross_check": ["op_def", "doc"], "cite": "aclnn_foreach_add_list.cpp:29-30", "conflict_resolution": "验 aclnn v1 入口→取 glue GetDtypeSupportList(4 类); op_def/proto/doc 的 7 类属 v2 面（已裁决取 glue v1、非未决冲突 → state=resolved）", "state": "resolved", "fail_closed": false }
+      },
+      "provenance": { "source": "header", "cross_check": ["example", "doc"], "cite": "aclnn_foreach_add_list.h:33; docs/aclnnForeachAddList.md:83", "state": "resolved", "fail_closed": false }
+    },
+    {
+      "abi_position": 1, "kind": "tensor_list", "logical_value_id": "x2", "direction": "in",
+      "copy_in": true, "copy_out": false, "presence": "required", "binding": "device_tensor",
+      "allow_empty_list": true, "allow_empty_element": false,
+      "cardinality": { "kind": "list", "length_symbol": "N", "min_length": 0, "length_domain": "正整数含0" },
+      "element_descriptor": {
+        "abi_position": 0, "kind": "tensor", "logical_value_id": "x2_elem", "direction": "in",
+        "cardinality": { "kind": "single" }, "binding": "device_tensor", "presence": "required",
+        "provenance": { "source": "header", "state": "resolved", "fail_closed": false }
+      },
+      "value_domain": { "kind": "follows", "follows_ref": "x1", "provenance": { "source": "glue", "cite": "aclnn_foreach_add_list.cpp:94-96", "state": "resolved", "fail_closed": false } },
+      "provenance": { "source": "header", "cite": "aclnn_foreach_add_list.h:33", "state": "resolved", "fail_closed": false }
+    },
+    {
+      "abi_position": 2, "kind": "tensor", "logical_value_id": "alpha", "direction": "in",
+      "copy_in": true, "copy_out": false, "presence": "required", "binding": "device_tensor",
+      "allow_empty_element": false,
+      "cardinality": { "kind": "single" },
+      "value_domain": {
+        "kind": "enum", "enum_set": ["FLOAT", "DOUBLE", "FLOAT16", "INT32", "INT64"],
+        "selector": {
+          "key": "keyed_on_param_dtype", "ref": "x1",
+          "map": { "FLOAT": "FLOAT", "BF16": "FLOAT", "FLOAT16": "FLOAT16", "INT32": "INT32" }
+        },
+        "provenance": { "source": "glue", "cross_check": ["op_def"], "cite": "aclnn_foreach_add_list.cpp:86-92; foreach_proto_utils.h:38-53 DtypeScalarToTensor2", "conflict_resolution": "alpha dtype 随 x1[0] 运行时选定，非平凡映射；双源印证 BF16→FLOAT", "state": "resolved", "fail_closed": false }
+      },
+      "provenance": { "source": "example", "cite": "test_aclnn_foreach_add_list.cpp:125 CreateAclTensor(alpha) 落 device、非 host scalar", "state": "resolved", "fail_closed": false }
+    },
+    {
+      "abi_position": 3, "kind": "tensor_list", "logical_value_id": "y", "direction": "out",
+      "copy_in": false, "copy_out": true, "presence": "required", "binding": "device_tensor",
+      "allow_empty_list": true, "allow_empty_element": false,
+      "cardinality": { "kind": "list", "length_symbol": "N", "min_length": 0, "length_domain": "正整数含0" },
+      "element_descriptor": {
+        "abi_position": 0, "kind": "tensor", "logical_value_id": "y_elem", "direction": "out",
+        "cardinality": { "kind": "single" }, "binding": "device_tensor", "presence": "required",
+        "provenance": { "source": "header", "state": "resolved", "fail_closed": false }
+      },
+      "storage_alias": {
+        "storage_alias_group": "y",
+        "readback_binding": true,
+        "alias_kind": "full",
+        "const_untrusted": true,
+        "provenance": { "source": "example", "cross_check": ["glue"], "cite": "D2H 源 out1DeviceAddr test_aclnn_foreach_add_list.cpp:166-167; docs 原型写 const aclTensorList* out 但实为写目标", "conflict_resolution": "const 不可信；回读源以 example D2H 为准", "state": "resolved", "fail_closed": false }
+      },
+      "provenance": { "source": "glue", "cite": "foreach_add_list_v2.cpp:31 OP_OUTPUT(out); ViewCopyToOutputTensorList aclnn_foreach_add_list.cpp:170", "state": "resolved", "fail_closed": false }
+    }
+  ],
+  "outputs": [
+    {
+      "logical_value_id": "y",
+      "shape_materialization": {
+        "modes": [
+          { "mode": "manifest", "value_dependency": "caller 预分配 out[i]，shape 已定", "extent_readback": "exact_prealloc" },
+          { "mode": "host_oracle", "execution_path": "aclnn_single_op", "value_dependency": "shape(x1[i])（InferShape *yShape=*xShape 逐 i）", "extent_readback": "exact_prealloc" }
+        ],
+        "consistency_assertion": "manifest 供的 out[i] shape 必须 == host_oracle 从 x1[i] 推（glue CheckShape:123 OP_CHECK_SHAPE_NOT_EQUAL 强制 ==，非 docs 的 ≥）",
+        "provenance": { "source": "infershape", "cross_check": ["glue", "example"], "cite": "foreach_infershape.cpp:38-45; glue CheckShape:123", "conflict_resolution": "取 glue == 而非 docs ≥", "state": "resolved", "fail_closed": false }
+      },
+      "value_domain": { "kind": "follows", "follows_ref": "x1", "provenance": { "source": "glue", "cite": "aclnn_foreach_add_list.cpp:100-102", "state": "resolved", "fail_closed": false } },
+      "acceptance": {
+        "kind": "pointwise",
+        "compare": "isclose",
+        "tol_ref": "by_output_dtype: 浮点(FLOAT/FLOAT16/BF16)→isclose 按 dtype 容差; INT32→exact",
+        "threshold_source": { "tier": "real_machine_pinned", "provenance": { "source": "taskbook", "cite": "本仓 isclose/equal spec 既有分档；真机对拍钉死", "state": "needs_source", "fail_closed": false } }
+      }
+    }
+  ],
+  "constraint_graph": {
+    "edges": [
+      { "type": "length_equality", "from": "x1", "to": "x2", "detail": "len(x1)==len(x2)（共享符号 N）", "provenance": { "source": "glue", "cite": "CheckShape:112 x2->Size()!=x1->Size() 报错", "state": "resolved", "fail_closed": false } },
+      { "type": "length_equality", "from": "x1", "to": "y", "detail": "len(x1)==len(y)", "provenance": { "source": "infershape", "cite": "foreach_infershape.cpp:35 GetIrInputInstanceInfo(0) 实例数!=输出数即失败（位置推断非算子名）", "state": "resolved", "fail_closed": false } },
+      { "type": "index_zip", "from": "x1", "to": "x2", "detail": "∀i shape(x1[i])==shape(x2[i])", "provenance": { "source": "glue", "cite": "CheckShape:119 OP_CHECK_SHAPE_NOT_EQUAL", "state": "resolved", "fail_closed": false } },
+      { "type": "index_zip", "from": "x1", "to": "y", "detail": "∀i shape(y[i])==shape(x1[i])（infershape:44 *yShape=*xShape）", "provenance": { "source": "infershape", "cite": "foreach_infershape.cpp:44", "state": "resolved", "fail_closed": false } },
+      { "type": "intra_list_homogeneous", "from": "x1", "to": "x1", "detail": "∀i dtype(x1[i])==dtype(x1[0])（列表内单一 dtype）", "provenance": { "source": "glue", "cite": "aclnn_foreach_add_list.cpp:97-99", "state": "resolved", "fail_closed": false } }
+    ]
+  },
+  "output_mapping": {
+    "output_edges": [
+      { "source_output_id": 0, "api_param_id": 0, "confidence": 1.0, "provenance": { "source": "glue", "cross_check": ["op_def"], "cite": "单输出 y→out 一对一; foreach_add_list_v2.cpp:31 OP_OUTPUT(out)", "state": "resolved", "fail_closed": false } }
+    ]
+  },
+  "target_hardware": {
+    "resolved_target": "a3",
+    "taskdoc_hardware": "Atlas A2/A3",
+    "opdef_addconfig": ["ascend910b"],
+    "state": "agreed",
+    "source": { "source": "glue", "cross_check": ["op_def", "taskbook"], "cite": "glue GetDtypeSupportList → ASCEND910BC 表 aclnn_foreach_add_list.cpp:29", "state": "resolved", "fail_closed": false }
+  }
+}

@@ -1,0 +1,324 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oprunway/contract_ir/v1",
+  "title": "OpRunway U7 通用算子接口契约 IR（版本化 Schema v1）",
+  "description": "op 无关的接口描述。探测器（只读 header×op_def×example×glue×doc×infershape）产出符合本 Schema 的实例；唯一 codegen 模板机械消费它 emit 每算子的类型化薄 binding。契约不含任何按算子名的分支——见 doc/oprunway-u7-generalization-design.md §3.5/§3.6。缺源/冲突/域外一律经每字段 provenance.state 走 fail-closed，绝不静默猜。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ir_version", "op", "aclnn_entry", "applicability", "abi_signature", "parameters", "outputs"],
+  "properties": {
+    "ir_version": { "const": "1.0" },
+    "op": { "type": "string", "description": "算子名，仅作标识，绝不用于代码分支" },
+    "aclnn_entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["exec_symbol", "getworkspace_symbol", "source"],
+      "properties": {
+        "exec_symbol": { "type": "string", "description": "如 aclnnForeachAddList" },
+        "getworkspace_symbol": { "type": "string", "description": "如 aclnnForeachAddListGetWorkspaceSize" },
+        "variant_of_opdef": { "type": "string", "description": "一个 op_def 裂多 aclnn 入口时的 op_def 名；签名单位是 aclnn 入口、非 op_def" },
+        "include_header": { "type": "string" },
+        "aclnn_lib": { "type": "string", "description": "随仓变，如 aclnn_ops_math / aclnn_ops_cv" },
+        "source": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "applicability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["in_domain"],
+      "description": "适用域三条：无状态 + 标准 aclnn 两段式(probe=matched) + 无 opaque descriptor 生命周期，且每输出 extent 至少一条物化通路。域外一律 fail-closed。",
+      "properties": {
+        "in_domain": { "type": "boolean" },
+        "out_of_domain_axes": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["opaque_handle", "stateful", "non_two_stage_abi", "output_extent_unmaterializable", "nullable_unresolved", "binding_ambiguous", "golden_nonunique_no_relation"] }
+        },
+        "reason": { "type": "string" }
+      }
+    },
+    "abi_signature": {
+      "type": "object", "additionalProperties": false,
+      "required": ["stage1", "stage2"],
+      "description": "两段式都完整描述，不假定 stage1 恒 4 参（实测 arity=3/6/7）。",
+      "properties": {
+        "stage1": {
+          "type": "object", "additionalProperties": false,
+          "required": ["ordered_param_ids", "trailing"],
+          "properties": {
+            "ordered_param_ids": { "type": "array", "items": { "type": "string" }, "description": "按 ABI 位序引用 parameters[].logical_value_id（排除 plumbing 出参）" },
+            "trailing": { "type": "array", "items": { "type": "string", "enum": ["workspaceSize_out", "executor_out"] }, "description": "非功能 plumbing 出参，模板识别为非数据槽" }
+          }
+        },
+        "stage2": {
+          "type": "object", "additionalProperties": false,
+          "required": ["full_signature", "probe"],
+          "properties": {
+            "full_signature": { "type": "string", "description": "执行段完整签名，不假定恒 (workspace,size,executor,stream)" },
+            "abi_version_range": { "type": "string", "description": "若固定须注明所依据 ACLNN ABI/版本范围" },
+            "probe": { "type": "string", "enum": ["matched", "mismatch"], "description": "mismatch → applicability.out_of_domain non_two_stage_abi" }
+          }
+        },
+        "dual_abi_note": { "type": "string", "description": "aclnn C-ABI 把列表当 1 个 handle，而 ge/InferShape/tiling ABI 会 FLATTEN 成 N 个位（foreach）；两层记账、不混" }
+      }
+    },
+    "parameters": {
+      "type": "array", "minItems": 0,
+      "items": { "$ref": "#/$defs/parameter_descriptor" },
+      "description": "单一真相源。输入/输出/标量计数一律由本表 count 派生，不另设计数字段（防双份真相漂移，F1/F8）。"
+    },
+    "outputs": {
+      "type": "array", "minItems": 0,
+      "items": { "$ref": "#/$defs/output_descriptor" },
+      "description": "每个逻辑输出的 shape 物化 + dtype 值域 + 验收判据；引用 parameters 里 direction∈{out,inout} 的槽。"
+    },
+    "constraint_graph": { "$ref": "#/$defs/constraint_graph" },
+    "output_mapping": { "$ref": "#/$defs/output_mapping" },
+    "target_hardware": {
+      "type": "object", "additionalProperties": false,
+      "description": "目标机由「任务书 适配硬件 × op_def AddConfig」双源交叉核定（用户 2026-07-23：目标 a3/a5 两台均支持，逐算子定）。",
+      "required": ["state"],
+      "properties": {
+        "resolved_target": { "type": "string", "enum": ["a3", "a5", "a3_and_a5"], "description": "a3=Atlas A2/A3(ascend910b/910_93)；a5=Ascend950(ascend950/RegBase)" },
+        "taskdoc_hardware": { "type": "string" },
+        "opdef_addconfig": { "type": "array", "items": { "type": "string" } },
+        "state": { "type": "string", "enum": ["agreed", "contested", "missing"], "description": "contested（如 op_def 仅 ascend950 vs 任务书 A2/A3）→ 停下人核、入 task_pr_gaps，不外推选机" },
+        "source": { "$ref": "#/$defs/provenance" }
+      }
+    }
+  },
+  "$defs": {
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "state"],
+      "description": "每原子字段的来源与冲突裁决状态机。按字段分源：ABI/签名以 header 为主 example 佐证；语义/dtype/shape/硬件以 op_def×任务书交叉；方向以被验 aclnn 入口为准（F13）。",
+      "properties": {
+        "source": { "type": "string", "enum": ["header", "op_def", "example", "taskbook", "glue", "doc", "infershape"] },
+        "cross_check": { "type": "array", "items": { "type": "string", "enum": ["header", "op_def", "example", "taskbook", "glue", "doc", "infershape"] } },
+        "cite": { "type": "string", "description": "file:line" },
+        "conflict_resolution": { "type": "string", "description": "冲突时依据哪条规则裁（如『out shape 取 glue == 而非 docs ≥』『const 不可信、方向以 D2H 源定』）" },
+        "state": { "type": "string", "enum": ["resolved", "needs_source", "conflict", "out_of_domain", "partial"] },
+        "fail_closed": { "type": "boolean", "description": "state∈{needs_source,conflict,out_of_domain} 时必须 true，模板停手不生成" }
+      }
+    },
+    "parameter_descriptor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["abi_position", "kind", "logical_value_id", "direction", "cardinality", "binding", "presence", "provenance"],
+      "description": "递归（tensor_list 的元素本身是 parameter_descriptor）。",
+      "properties": {
+        "abi_position": { "type": "integer", "minimum": 0, "description": "stage1 签名槽序" },
+        "kind": { "type": "string", "enum": ["tensor", "tensor_list", "scalar", "scalar_list", "array", "attr", "opaque", "plumbing_out"] },
+        "element_descriptor": {
+          "$ref": "#/$defs/parameter_descriptor",
+          "description": "仅 kind∈{tensor_list,scalar_list} 时：列表元素的描述（递归一层）"
+        },
+        "cardinality": {
+          "oneOf": [
+            { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "single" } } },
+            { "type": "object", "additionalProperties": false, "required": ["kind", "length_symbol"],
+              "properties": {
+                "kind": { "const": "list" },
+                "length_symbol": { "type": "string", "description": "共享符号（并列列表用同一符号，见 constraint_graph.length_equality）；源自 InferShape 位置推断非算子名" },
+                "min_length": { "type": "integer", "minimum": 0 },
+                "length_domain": { "type": "string", "description": "如 '正整数含0' / '{1}'" }
+              }
+            }
+          ]
+        },
+        "logical_value_id": { "type": "string", "description": "把方向/别名挂到抽象逻辑值；一个值可同时占输入槽与输出槽（inout）" },
+        "direction": { "type": "string", "enum": ["in", "out", "inout"] },
+        "copy_in": { "type": "boolean" },
+        "copy_out": { "type": "boolean" },
+        "presence": { "type": "string", "enum": ["required", "optional_nullable"] },
+        "absent_semantics": { "type": "string", "description": "presence=optional_nullable 且缺省时的行为，逐参从 doc+代码抄（如 bincount weights 缺省=全1）" },
+        "binding": { "type": "string", "enum": ["device_tensor", "host_scalar", "host_array", "attr"], "description": "device_tensor=malloc+H2D；host_scalar/host_array=按值直传免 malloc；attr" },
+        "allow_empty_list": { "type": "boolean", "description": "G5：n=0 空列表是否合法（与下条正交）" },
+        "allow_empty_element": { "type": "boolean", "description": "G5：元素张量 numel=0（含 0 维）是否合法。'空 list' 与 'numel=0 tensor' 是两件事，绝不塌成单 bool" },
+        "empty_conflict": { "type": "string", "description": "G5：doc↔code 对空的合法性分歧原文记账（如 InplaceSigmoid code 支持空 vs doc 写 1-8 禁），不静默取一边" },
+        "suppressed": { "type": "boolean", "description": "G5：op_def 有此 attr 但 aclnn 入口抑制/重派（如 ArgMax indice_dtype 被 aclnn 由张量 dtype 重派）" },
+        "synthesized_by": { "type": "string", "description": "G5：该参非调用方直传、由 glue 合成注入（如 bincount 的 size = glue max(out.dim0,minlength)）" },
+        "value_domain": { "$ref": "#/$defs/value_domain" },
+        "storage_alias": { "$ref": "#/$defs/storage_alias" },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "value_domain": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind"],
+      "description": "per-参/per-输出 dtype 值域，各自独立，绝不设算子级单一 dtype 规则（F6/G3）。",
+      "properties": {
+        "kind": { "type": "string", "enum": ["follows", "enum", "fixed", "promote"] },
+        "follows_ref": { "type": "string", "description": "kind=follows：dtype 跟随某 logical_value_id" },
+        "fixed_dtype": { "type": "string" },
+        "enum_set": { "type": "array", "items": { "type": "string" }, "description": "kind=enum：候选 dtype 集" },
+        "selector": { "$ref": "#/$defs/dtype_selector", "description": "kind=enum：调用期从集合里由选择器定 dtype（G3）" },
+        "promote": {
+          "type": "object", "additionalProperties": false,
+          "properties": { "rule_id": { "type": "string" }, "operand_refs": { "type": "array", "items": { "type": "string" } } }
+        },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "dtype_selector": {
+      "description": "G3：三种键源。机械 codegen 据此发正确 dtype；求值不出则停下要人/要目标平台，绝不盲发并集。",
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["key"],
+          "properties": {
+            "key": { "const": "keyed_on_param_dtype" },
+            "ref": { "type": "string", "description": "另一参的运行时 dtype（如 alpha←x1[0]）" },
+            "map": { "type": "object", "description": "非平凡映射表，如 {BF16: FLOAT, FLOAT16: FLOAT16, INT32: INT32}", "additionalProperties": { "type": "string" } }
+          }
+        },
+        { "type": "object", "additionalProperties": false, "required": ["key", "ref"],
+          "properties": {
+            "key": { "const": "keyed_on_output_dtype" },
+            "ref": { "type": "string", "description": "输出槽自身 dtype 自指（如 ArgMax indices=dtype-of(indices 槽)）" }
+          }
+        },
+        { "type": "object", "additionalProperties": false, "required": ["key", "branches"],
+          "properties": {
+            "key": { "const": "platform_predicate" },
+            "branches": {
+              "type": "array", "minItems": 1,
+              "description": "dtype 白名单按 SocVersion 区间分支（非参数驱动）。目标机（a3/a5）决定取哪支。op_def AddConfig 名与 glue SOC 区间边界不 1:1 时须显式给映射，否则 fail-closed。",
+              "items": {
+                "type": "object", "additionalProperties": false, "required": ["soc_versions", "dtype_set"],
+                "properties": {
+                  "soc_versions": { "type": "array", "items": { "type": "string" }, "description": "如 [ascend910b, ascend910_93]（a3）或 [ascend950, RegBase]（a5）" },
+                  "dtype_set": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "constraint_graph": {
+      "type": "object", "additionalProperties": false,
+      "description": "参数关系图。节点=logical_value_id，边有类型。并列关系靠 InferShape 位置推断（input0 实例数=输出数），非算子名（F6/G2）。",
+      "properties": {
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["type", "from", "to", "provenance"],
+            "properties": {
+              "type": { "type": "string", "enum": ["length_equality", "index_zip", "intra_list_homogeneous", "dtype_relation", "shape_relation"], "description": "G2 新增 index_zip（x1[i]↔x2[i]↔y[i] 逐下标对齐 shape/dtype 相等）与 intra_list_homogeneous（∀i dtype(x[i])==dtype(x[0])）" },
+              "from": { "type": "string" },
+              "to": { "type": "string" },
+              "detail": { "type": "string", "description": "如 'shape 相等' / 'dtype 相等'" },
+              "provenance": { "$ref": "#/$defs/provenance" }
+            }
+          }
+        }
+      }
+    },
+    "output_descriptor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["logical_value_id", "shape_materialization", "value_domain", "acceptance"],
+      "properties": {
+        "logical_value_id": { "type": "string", "description": "引用 parameters 里 direction∈{out,inout} 的槽" },
+        "shape_materialization": { "$ref": "#/$defs/shape_materialization" },
+        "value_domain": { "$ref": "#/$defs/value_domain" },
+        "acceptance": { "$ref": "#/$defs/acceptance_predicate" }
+      }
+    },
+    "shape_materialization": {
+      "type": "object", "additionalProperties": false,
+      "required": ["modes"],
+      "description": "G1：mode 从单选改可复合 + per-execution-path。runner 只消费已物化 per-output shape，不懂 broadcast/reduction 语义。取消 shape-class 词表（F4）。",
+      "properties": {
+        "modes": {
+          "type": "array", "minItems": 1,
+          "description": "可多条并存（如 foreach out 既是 manifest 又须==host_oracle 从 x1 推）。",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["mode"],
+            "properties": {
+              "mode": { "type": "string", "enum": ["manifest", "host_oracle", "runtime_query"] },
+              "execution_path": { "type": "string", "enum": ["aclnn_single_op", "graph_ge"], "description": "同算子不同路径 mode 可不同（bincount aclnn=host_oracle、图=数据依赖）" },
+              "value_dependency": { "type": "string", "description": "extent 依赖什么。可为参数形状引用，或数据依赖的求值式（如 'max(reduce_max(self)+1, minlength)'——机械层若无法求解此式→标 unmaterializable、要用户给尺寸或真机回填，绝不猜）" },
+              "shape_upper_bound": { "type": "string", "description": "runtime_query 用" },
+              "extent_readback": { "type": "string", "enum": ["exact_prealloc", "count_from_oracle", "runtime_view_shape"] }
+            }
+          }
+        },
+        "consistency_assertion": { "type": "string", "description": "G1：多 mode 并存时的一致性断言（如 'manifest 供的 out shape 必须 == host_oracle 从 x1 推'——不一致是验收失败）" },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "output_mapping": {
+      "type": "object", "additionalProperties": false,
+      "description": "op_def 声明序 ↔ aclnn 数据槽序 的显式二部图（默认不是恒等；F5/G5）。证据分级 glue std::get→ViewCopy > value_domain > name > example。",
+      "properties": {
+        "provenance": { "$ref": "#/$defs/provenance", "description": "整份映射的来源/状态；未核（needs_source）时挂此、codegen 会 fail-closed" },
+        "output_edges": {
+          "type": "array",
+          "description": "op_def Output 声明序 → aclnn 数据输出槽序（ArgMax 实测反转 {0→1,1→0}）",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["source_output_id", "api_param_id", "provenance"],
+            "properties": {
+              "source_output_id": { "type": "integer", "description": "op_def Output() 书写序 0-based" },
+              "api_param_id": { "type": "integer", "description": "aclnn 数据输出槽序（排除 plumbing）" },
+              "confidence": { "type": "number" },
+              "provenance": { "$ref": "#/$defs/provenance" }
+            }
+          }
+        },
+        "input_edges": {
+          "type": "array",
+          "description": "G5：aclnn 参数 → op_def 输入 的反向对应；synthesized_from 承载 glue 合成注入的参（bincount size）",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["api_param_id"],
+            "properties": {
+              "api_param_id": { "type": "integer" },
+              "op_def_input_id": { "type": "integer" },
+              "synthesized_from": { "type": "string", "description": "如 'max(out.dim0, minlength)'" },
+              "provenance": { "$ref": "#/$defs/provenance" }
+            }
+          }
+        }
+      }
+    },
+    "acceptance_predicate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "threshold_source"],
+      "description": "判据是『关系』而非固定比较（F6）。G4：支持跨输出引用 + 阈值来源降级 tier。",
+      "properties": {
+        "kind": { "type": "string", "enum": ["pointwise", "equivalence_relation"] },
+        "compare": { "type": "string", "enum": ["exact", "isclose"], "description": "kind=pointwise：整型/计数/reduce-选择→exact；浮点超越/加和→isclose" },
+        "tol_ref": { "type": "string" },
+        "equivalence": {
+          "type": "object", "additionalProperties": false,
+          "description": "kind=equivalence_relation：消解并列歧义（ArgMax: take_along_axis(self,dim,npu_idx)==values_out）",
+          "properties": {
+            "relation_ref": { "type": "string", "description": "关系内容来自 per-op golden/oracle spec，契约只持引用（结构通用、内容按算子=算子语义本质）" },
+            "over": { "type": "array", "items": { "type": "string" }, "description": "G4：可引用 inputs 与 other_outputs 的 logical_value_id" }
+          }
+        },
+        "threshold_source": {
+          "type": "object", "additionalProperties": false,
+          "required": ["tier"],
+          "description": "G4：阈值来源降级 tier。无随仓 taskbook 的算子须容降级来源并显式标 tier，否则该轴永远 needs_source 不站。",
+          "properties": {
+            "tier": { "type": "string", "enum": ["taskbook", "doc_support_table", "semantic_inference", "real_machine_pinned"], "description": "权威度递降；semantic_inference 须真机对拍坐实" },
+            "value": { "type": "string" },
+            "provenance": { "$ref": "#/$defs/provenance" }
+          }
+        }
+      }
+    },
+    "storage_alias": {
+      "type": "object", "additionalProperties": false,
+      "required": ["storage_alias_group"],
+      "description": "存储别名层，与逻辑值层分离（F2）。唯一运行期 ground truth = example 那句 D2H 从哪个 buffer 回读。⚠ const 不可信（foreach x1 是 const aclTensorList* 却被写）。",
+      "properties": {
+        "storage_alias_group": { "type": "string", "description": "必须指向同一 device 存储的物理绑定共享一组 id" },
+        "alias_of": { "type": "string", "description": "有向糖衣：某输出别名某输入的存储（Output(var) alias_of Input(var)）" },
+        "readback_binding": { "type": "boolean", "description": "copy_out 时对本绑定做 D2H 取结果——inout/foreach 取输入位绑定本身、out-of-place 取 out 绑定；忽略 example 里 vestigial 张量" },
+        "alias_kind": { "type": "string", "enum": ["full", "view_offset"], "description": "view_offset(as_strided) 本轮无见证、预留；未知一律 fail-closed 当可能别名" },
+        "const_untrusted": { "type": "boolean", "description": "标记该参 aclnn 声明为 const 但实际被写，方向不得据 const 推" },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    }
+  }
+}

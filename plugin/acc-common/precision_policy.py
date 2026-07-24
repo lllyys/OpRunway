@@ -339,6 +339,49 @@ TASKDOC_SNAPSHOT_NAME = "task_doc.snapshot.md"
 _CITE_RE = re.compile(r"^" + re.escape(TASKDOC_SNAPSHOT_NAME) + r":(\d+)(?:-(\d+))?$")
 
 
+def validate_golden_contract(g, where="golden.py 的 GOLDEN_CONTRACT"):
+    """校 golden 契约块的**受控词表**，不合规 → ValueError（批 2）。
+
+    只校「词表 + 结构」，**不核授权真伪**（那是 `verify_authorization` 读快照做的），
+    也不判档（那是 `derive_golden_tier`）。三者分开，避免「自己核自己」。
+
+    ⚠ 为什么必须 fail-closed 而不是「不认识就忽略」：`derive_golden_tier` 的第 ⑨ 条穷举兜底
+    会把任何不认识的组合判成 tier 4。若这里静默放过拼错的词（如 `source: "singleapi"`），
+    结果是**一个本该 tier 2 的正当 golden 被判 blocked**，而报错信息是含糊的
+    「unverifiable_authorization」——查半天查不到是拼错了。早拦、报准。"""
+    if not isinstance(g, dict):
+        raise ValueError(f"{where} 须为对象，得 {type(g).__name__}")
+    src = g.get("source")
+    if src not in GOLDEN_SOURCE_KIND:
+        raise ValueError(f"{where}.source={src!r} 不在受控词表 {GOLDEN_SOURCE_KIND}")
+    mk = g.get("method_kind")
+    if mk not in GOLDEN_METHOD_KIND:
+        raise ValueError(f"{where}.method_kind={mk!r} 不在受控词表 {GOLDEN_METHOD_KIND}")
+    auth = g.get("authorization")
+    if not isinstance(auth, dict):
+        raise ValueError(f"{where}.authorization 须为对象，得 {type(auth).__name__}")
+    kind = auth.get("kind")
+    if kind not in AUTHORIZATION_KIND:
+        raise ValueError(f"{where}.authorization.kind={kind!r} 不在受控词表 {AUTHORIZATION_KIND}")
+    if kind in ("oracle_method", "formula"):
+        # 声称有任务书授权 → 引文锚三件必须齐（cite / quote / 快照指纹）。
+        # 缺任一都**不在这里判死**（`verify_authorization` 会给出更准的原因），但要求字段存在，
+        # 免得「声称有授权却连引文都没写」这种一眼可见的漏也要跑到读文件那步才发现。
+        for k in ("cite", "quote"):
+            if not str(auth.get(k) or "").strip():
+                raise ValueError(
+                    f"{where}.authorization.kind={kind!r} 声称有任务书授权，但 {k} 为空——"
+                    f"引文锚不全则授权无从核实（R12）。若本算子其实只是「参考谁的实现」，"
+                    f"kind 应为 impl_reference（它不构成 golden 授权）。")
+        snap = g.get("taskdoc_snapshot")
+        if not isinstance(snap, dict) or not str(snap.get("sha256") or "").strip():
+            raise ValueError(
+                f"{where} 声称有任务书授权，但缺 taskdoc_snapshot.sha256——"
+                f"须先把任务书全文快照入库（`fetch_source.py --snapshot-into <ops_root>/<op>/`）"
+                f"再把它打印的 sha256 填进来（R12 / 批 3）。")
+    return True
+
+
 def derive_golden_tier(g, authorization_verified):
     """据 golden 契约块派生 **(tier:int 1..4, requires_human_review:bool, blocked_reason:str|None)**。
 
