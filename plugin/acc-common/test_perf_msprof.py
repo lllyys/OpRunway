@@ -6,6 +6,7 @@ api_statistic_*.csv 三件套，落进 `<prof>/mindstudio_profiler_output/`）�
 """
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -181,6 +182,370 @@ class TestKernelAggregation(unittest.TestCase):
             m2 = PM.parse_kernel_measurement(self._prof(d, rows7), repeat=3,
                                              measurement_window=self.WIN)
             self.assertEqual(m2["us"], 2.0)   # 7 → 丢 1 → 6 行 / 3 = 每次 2 launch
+
+
+def _write_db(root, *, tasks, mstx=None, string_ids=None, enum_table=None,
+              string_ids_fk=False, name="ascend_pytorch_profiler_1.db"):
+    """造一份 profiler db（`TASK ⋈ COMPUTE_TASK_INFO` + `MSTX_EVENTS` + 可选字典表）→ 返回目录。
+
+    `tasks` = `[(globalTaskId, startNs, endNs, taskType, kernelName)]`，`taskType` **可为数值 id**
+    （真机实测就是数值：CANN 9.0.1 + torch_npu 2.10）。
+
+    `string_ids_fk=True` → 在 schema 里**声明** `TASK.taskType → STRING_IDS(id)` 外键，
+    这是「taskType 的确以 STRING_IDS 为字典」的**唯一**可查证据（审计高危 #2）。
+    """
+    path = os.path.join(root, name)
+    conn = sqlite3.connect(path)
+    if string_ids is not None:
+        conn.execute("CREATE TABLE STRING_IDS (id INTEGER PRIMARY KEY, value TEXT)")
+        for key, val in string_ids.items():
+            conn.execute("INSERT INTO STRING_IDS VALUES (?,?)", (key, val))
+    fk = ", FOREIGN KEY(taskType) REFERENCES STRING_IDS(id)" if string_ids_fk else ""
+    conn.execute("CREATE TABLE TASK (globalTaskId INTEGER, startNs INTEGER, endNs INTEGER, "
+                 f"taskType, deviceId INTEGER{fk})")
+    conn.execute("CREATE TABLE COMPUTE_TASK_INFO (globalTaskId INTEGER, name)")
+    conn.execute("CREATE TABLE MSTX_EVENTS (startNs INTEGER, endNs INTEGER, message TEXT)")
+    for gid, start, end, ktype, kname in tasks:
+        conn.execute("INSERT INTO TASK VALUES (?,?,?,?,?)", (gid, start, end, ktype, 0))
+        conn.execute("INSERT INTO COMPUTE_TASK_INFO VALUES (?,?)", (gid, kname))
+    for start, end, msg in (mstx or []):
+        conn.execute("INSERT INTO MSTX_EVENTS VALUES (?,?,?)", (start, end, msg))
+    if enum_table is not None:
+        conn.execute("CREATE TABLE ENUM_TASK_TYPE (id INTEGER, name TEXT)")
+        for key, val in enum_table.items():
+            conn.execute("INSERT INTO ENUM_TASK_TYPE VALUES (?,?)", (key, val))
+    conn.commit()
+    conn.close()
+    return root
+
+
+def _good_provenance(**over):
+    """一份**结构化且逐字段填实**的 override provenance（审计高危 #3 的合格样本）。"""
+    doc = {"db": "PROF_000_20260724/ascend_pytorch_profiler_1.db (sha256 ab12cd34)",
+           "cann_version": "9.0.1",
+           "torch_npu_version": "2.10.0",
+           "collect_command": "msprof --task-time=on --ascendcl=on --ai-core=off ./run.sh",
+           "collected_at": "2026-07-24"}
+    doc.update(over)
+    return doc
+
+
+def _numeric_tasks(type_id, count=4, *, name="aclnnMedian_Median_Median", dur_ns=5_000):
+    """同名 kernel 的 `count` 行 TASK（taskType 用**数值 id**），时间戳落在 [0, 1e6) ns 内。"""
+    return [(i, i * 10_000, i * 10_000 + dur_ns, type_id, name) for i in range(count)]
+
+
+class TestNumericTaskType(unittest.TestCase):
+    """bug#7 · db 路线的 `TASK.taskType` 是**数值枚举 id** 时也得能归类；解不出仍 fail-closed。
+
+    实测（2026-07-24 a3 容器，CANN 9.0.1 + torch_npu 2.10）：custom 侧 15/17/19/20/24、
+    baseline 侧 10~33 —— 按字符串比 `KERNEL_*` 一个都不中，双边 46/46 `unknown_task_type_in_window`。
+    """
+
+    MSTX = [(0, 1_000_000, "R")]
+
+    def _measure(self, d, repeat=4):
+        win, err = PM.parse_measurement_window(d, "R")
+        self.assertIsNone(err, f"MSTX 窗应解得出，得 {err}")
+        self.assertEqual(win["route"], PM.ROUTE_DB)
+        return PM.parse_kernel_measurement(d, repeat=repeat, measurement_window=win)
+
+    def test_string_task_type_still_works(self):
+        """向后兼容：taskType 本来就是字符串时，行为一字不变。"""
+        with tempfile.TemporaryDirectory() as d:
+            _write_db(d, tasks=_numeric_tasks("KERNEL_AIVEC"), mstx=self.MSTX)
+            m = self._measure(d)
+            self.assertIsNone(m["error"])
+            self.assertEqual(m["us"], 5.0)
+            self.assertEqual(m["execution_path"], PM.PATH_DEVICE_KERNEL)
+
+    def test_numeric_id_resolved_via_enum_table(self):
+        """db 自带的专用枚举表能把 id 解回名字 → 正常计入（性能通路恢复可用）。"""
+        with tempfile.TemporaryDirectory() as d:
+            _write_db(d, tasks=_numeric_tasks(15), mstx=self.MSTX,
+                      enum_table={15: "KERNEL_AIVEC", 17: "KERNEL_MIX_AIV"})
+            m = self._measure(d)
+            self.assertIsNone(m["error"], m)
+            self.assertEqual(m["us"], 5.0)
+            self.assertEqual(list(m["observed_task_types"]), ["KERNEL_AIVEC"])
+            self.assertEqual(m["unresolved_task_type_ids"], [])
+            self.assertIn(PM.DICT_SOURCE_TABLE, m["task_type_dict_sources"])
+
+    def test_string_ids_without_fk_evidence_is_fail_closed(self):
+        """审计高危 #2：没有外键证据时，`STRING_IDS` **整条不启用** → 保持 unresolved。
+
+        db 通用字符串池里恰好有个长得像类型枚举的串（纯 ID 碰撞），光凭外形闸就会把它当 taskType
+        解出来 → 产出**看似合法实则编造的 us**。现在必须 fail-closed。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            _write_db(d, tasks=_numeric_tasks(19), mstx=self.MSTX,
+                      string_ids={19: "KERNEL_MIX_AIV", 20: "MEMCPY_ASYNC"})
+            m = self._measure(d)
+            self.assertEqual(m["error"], PM.ERR_UNKNOWN_TASK_TYPE)
+            self.assertIsNone(m["us"])
+            self.assertEqual(m["unresolved_task_type_ids"], ["19"])
+            self.assertNotIn(PM.DICT_SOURCE_STRING_IDS, m["task_type_dict_sources"])
+            # 「凭什么不认」必须留证，别让 fail-closed 看起来像工具没本事
+            self.assertIn("无外键证据",
+                          m["task_type_dict_provenance"]["evidence"][PM.DICT_SOURCE_STRING_IDS])
+
+    def test_id_collision_with_stale_kernel_name_is_fail_closed(self):
+        """审计高危 #2 的**原始复现**：`taskType=15` + `STRING_IDS[15]="KERNEL_STALE_NAME"`。
+
+        修前 → `error=None, us=5.0`（纯 ID 碰撞就生成了假的 kernel-only 性能数字）。
+        修后 → 无外键证据 → unresolved → fail-closed。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            _write_db(d, tasks=_numeric_tasks(15), mstx=self.MSTX,
+                      string_ids={15: "KERNEL_STALE_NAME"})
+            m = self._measure(d)
+            self.assertEqual(m["error"], PM.ERR_UNKNOWN_TASK_TYPE)
+            self.assertIsNone(m["us"])
+            self.assertEqual(m["unresolved_task_type_ids"], ["15"])
+
+    def test_string_ids_with_fk_evidence_resolves(self):
+        """有 schema 外键（`TASK.taskType → STRING_IDS.id`）＝ 有据可查 → 才允许兜底解析并计时。"""
+        with tempfile.TemporaryDirectory() as d:
+            _write_db(d, tasks=_numeric_tasks(19), mstx=self.MSTX, string_ids_fk=True,
+                      string_ids={19: "KERNEL_MIX_AIV", 20: "MEMCPY_ASYNC"})
+            m = self._measure(d)
+            self.assertIsNone(m["error"], m)
+            self.assertEqual(m["us"], 5.0)
+            self.assertIn(PM.DICT_SOURCE_STRING_IDS, m["task_type_dict_sources"])
+            evidence = m["task_type_dict_provenance"]["evidence"]
+            self.assertIn("外键", evidence[PM.DICT_SOURCE_STRING_IDS])
+
+    def test_string_ids_id_overlapping_name_pool_is_rejected(self):
+        """即使有外键：该 id **同时**被 kernel 名引用 → 分不清是类型还是名字 → 拒（仍 fail-closed）。"""
+        with tempfile.TemporaryDirectory() as d:
+            # kernelName 也用 string id 15 → 15 落进 name 池
+            tasks = [(i, i * 10_000, i * 10_000 + 5_000, 15, 15) for i in range(4)]
+            _write_db(d, tasks=tasks, mstx=self.MSTX, string_ids_fk=True,
+                      string_ids={15: "KERNEL_AIVEC"})
+            m = self._measure(d)
+            self.assertEqual(m["error"], PM.ERR_UNKNOWN_TASK_TYPE)
+            self.assertIsNone(m["us"])
+            reasons = [r["reason"] for r in m["task_type_dict_provenance"]["rejected"]]
+            self.assertTrue(any("名池" in r for r in reasons), reasons)
+
+    def test_memcpy_id_resolved_and_excluded(self):
+        """解出来是搬运类 → 照旧**不计入** kernel-only（解析修好了，口径不许跟着松）。"""
+        with tempfile.TemporaryDirectory() as d:
+            _write_db(d, tasks=_numeric_tasks(20, name="cpy"), mstx=self.MSTX,
+                      enum_table={20: PM.DEVICE_MEMCPY_TYPE})
+            m = self._measure(d)
+            self.assertIsNone(m["us"])
+            self.assertEqual(m["execution_path"], PM.PATH_DEVICE_MEMCPY_ONLY)
+
+    def test_unknown_id_is_fail_closed(self):
+        """字典里没有这个 id → **仍 fail-closed**，绝不静默算 0 us；id 带进 detail 供下一轮补字典。"""
+        with tempfile.TemporaryDirectory() as d:
+            _write_db(d, tasks=_numeric_tasks(24), mstx=self.MSTX,
+                      enum_table={15: "KERNEL_AIVEC"})
+            m = self._measure(d)
+            self.assertEqual(m["error"], PM.ERR_UNKNOWN_TASK_TYPE)
+            self.assertIsNone(m["us"])
+            self.assertEqual(m["unresolved_task_type_ids"], ["24"])
+            behavior, detail = PM.classify_behavior(returncode=0, output="", measurement=m)
+            self.assertEqual(behavior, PM.BEHAVIOR_FAILED)      # 不是 no_device_kernel_observed
+            self.assertEqual(detail["unresolved_task_type_ids"], ["24"])
+            self.assertIn(PM.ENV_TASK_TYPE_MAP, detail["note"])
+
+    def test_no_dictionary_at_all_is_fail_closed(self):
+        """db 里一张字典表都没有 → 数值 id 全解不出 → fail-closed（这正是真机 46/46 的现场）。"""
+        with tempfile.TemporaryDirectory() as d:
+            _write_db(d, tasks=_numeric_tasks(15) + _numeric_tasks(17, name="k2"), mstx=self.MSTX)
+            m = self._measure(d)
+            self.assertEqual(m["error"], PM.ERR_UNKNOWN_TASK_TYPE)
+            self.assertEqual(m["unresolved_task_type_ids"], ["15", "17"])
+
+    def test_string_ids_only_accepts_type_like_tokens(self):
+        """`STRING_IDS` 是通用字符串池：kernel 名不得被当成 taskType 解出来（宁可解不出 → fail-closed）。"""
+        with tempfile.TemporaryDirectory() as d:
+            _write_db(d, tasks=_numeric_tasks(15), mstx=self.MSTX,
+                      string_ids={15: "aclnnMedian_Median_Median", 16: "preload_stack_16KB"})
+            m = self._measure(d)
+            self.assertEqual(m["error"], PM.ERR_UNKNOWN_TASK_TYPE)
+            self.assertEqual(m["unresolved_task_type_ids"], ["15"])
+
+    def test_enum_table_used_when_string_ids_has_no_evidence(self):
+        """通用字符串池没证据 → 压根不参与；db 的**专用**枚举表照常解析并计时（合法路径没被修没）。"""
+        with tempfile.TemporaryDirectory() as d:
+            _write_db(d, tasks=_numeric_tasks(15), mstx=self.MSTX,
+                      enum_table={15: "KERNEL_AIVEC"}, string_ids={15: "MEMCPY_ASYNC"})
+            m = self._measure(d)
+            self.assertEqual(m["us"], 5.0)
+            self.assertEqual(m["execution_path"], PM.PATH_DEVICE_KERNEL)
+            self.assertEqual(m["task_type_dict_sources"], [PM.DICT_SOURCE_TABLE])
+
+    def test_conflicting_sources_are_rejected(self):
+        """多来源对同一 id 给出不同名字 → **冲突即拒**（不做「后者覆盖前者」），该 id 作废 → fail-closed。"""
+        with tempfile.TemporaryDirectory() as d:
+            _write_db(d, tasks=_numeric_tasks(15), mstx=self.MSTX, string_ids_fk=True,
+                      enum_table={15: "KERNEL_AIVEC"}, string_ids={15: "MEMCPY_ASYNC"})
+            m = self._measure(d)
+            self.assertEqual(m["error"], PM.ERR_UNKNOWN_TASK_TYPE)
+            self.assertIsNone(m["us"])
+            conflicts = m["task_type_dict_provenance"]["conflicts"]
+            self.assertEqual([c["id"] for c in conflicts], ["15"])
+            self.assertEqual(conflicts[0]["names"], ["KERNEL_AIVEC", "MEMCPY_ASYNC"])
+
+    def test_override_conflicting_with_db_table_is_rejected(self):
+        """override 与 db 专用枚举表打架 → 同样作废该 id（人手写的不许覆盖 db 首方数据）。"""
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "map.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"provenance": _good_provenance(), "map": {"15": "MEMCPY_ASYNC"}}, f)
+            _write_db(d, tasks=_numeric_tasks(15), mstx=self.MSTX, enum_table={15: "KERNEL_AIVEC"})
+            db = PM.find_profiler_db(d)
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                mapping, prov = PM.task_type_dictionary(
+                    conn, PM._db_tables(conn), {PM.ENV_TASK_TYPE_MAP: path}, type_col="taskType")
+            finally:
+                conn.close()
+            self.assertNotIn("15", mapping)
+            self.assertEqual([c["id"] for c in prov["conflicts"]], ["15"])
+
+    def test_classify_never_matches_bare_number(self):
+        """裸数字 / 未解出的占位一律 unknown——绝不按字面去撞白名单。"""
+        for raw in ("15", "24", PM.UNRESOLVED_TASK_TYPE_PREFIX + "15"):
+            self.assertEqual(PM.classify_task_type(raw, PM.ROUTE_DB), PM.KIND_UNKNOWN, raw)
+        self.assertEqual(PM.classify_task_type("KERNEL_AIVEC", PM.ROUTE_DB), PM.KIND_COMPUTE)
+
+
+class TestTaskTypeOverrideMap(unittest.TestCase):
+    """外部 id→名映射（审计高危 #3）：**结构化 provenance 逐字段必填 + 值限受控枚举**，任一条不合格整份拒。
+
+    原来只要 `provenance` 是任意非空串、映射值非空就收 → `{"provenance":"实测占位",
+    "map":{"15":"KERNEL_TYPO"}}` 直接产出 `5.0 us`。拼写错误 / 未经核实的手工映射把 fail-closed
+    变成**假性能数字**，比拿不到数严重得多。
+    """
+
+    def _write(self, d, doc):
+        path = os.path.join(d, "map.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        return {PM.ENV_TASK_TYPE_MAP: path}
+
+    def test_accepted_with_structured_provenance(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = self._write(d, {"provenance": _good_provenance(),
+                                  "map": {"15": "KERNEL_AIVEC"}})
+            mapping, note = PM.load_task_type_overrides(env)
+            self.assertEqual(mapping, {"15": "KERNEL_AIVEC"})
+            self.assertIn("provenance", note)
+
+    def test_rejected_without_provenance(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = self._write(d, {"map": {"15": "KERNEL_AIVEC"}})
+            mapping, note = PM.load_task_type_overrides(env)
+            self.assertEqual(mapping, {})
+            self.assertIn("provenance", note)
+
+    def test_rejected_when_provenance_is_prose(self):
+        """一句散文（哪怕看着像实测记录）核不了 → 拒；必须是结构化对象。"""
+        with tempfile.TemporaryDirectory() as d:
+            env = self._write(d, {"provenance": "a3 容器 CANN 9.0.1 + torch_npu 2.10（2026-07-24 实测）",
+                                  "map": {"15": "KERNEL_AIVEC"}})
+            mapping, note = PM.load_task_type_overrides(env)
+            self.assertEqual(mapping, {})
+            self.assertIn("provenance", note)
+
+    def test_rejected_when_placeholder_provenance(self):
+        """审计高危 #3 的**原始复现**：`{"provenance":"实测占位","map":{"15":"KERNEL_TYPO"}}` → 5.0 us。"""
+        with tempfile.TemporaryDirectory() as d:
+            env = self._write(d, {"provenance": "实测占位", "map": {"15": "KERNEL_TYPO"}})
+            self.assertEqual(PM.load_task_type_overrides(env)[0], {})
+
+    def test_rejected_when_any_field_missing(self):
+        """结构化了但缺任一必填字段 → 拒（每个字段都点名在 note 里）。"""
+        for field in PM.OVERRIDE_PROVENANCE_FIELDS:
+            prov = _good_provenance()
+            prov.pop(field)
+            with tempfile.TemporaryDirectory() as d:
+                env = self._write(d, {"provenance": prov, "map": {"15": "KERNEL_AIVEC"}})
+                mapping, note = PM.load_task_type_overrides(env)
+                self.assertEqual(mapping, {}, f"{field} 缺失却放行了")
+                self.assertIn(field, note)
+
+    def test_rejected_when_field_is_placeholder(self):
+        """字段填了但是占位 / 太短 / 纯符号 → 等于没填 → 拒。"""
+        for field, bad in (("db", "TODO"), ("cann_version", "待补"), ("torch_npu_version", "----"),
+                           ("collect_command", "占位"), ("collected_at", "N/A")):
+            with tempfile.TemporaryDirectory() as d:
+                env = self._write(d, {"provenance": _good_provenance(**{field: bad}),
+                                      "map": {"15": "KERNEL_AIVEC"}})
+                self.assertEqual(PM.load_task_type_overrides(env)[0], {}, f"{field}={bad!r} 却放行了")
+
+    def test_short_but_real_version_still_accepted(self):
+        """闸别拧过头：`2.1` 这种合法短版本号照收（误拒也是成本，只是方向安全）。"""
+        with tempfile.TemporaryDirectory() as d:
+            env = self._write(d, {"provenance": _good_provenance(torch_npu_version="2.1"),
+                                  "map": {"15": "KERNEL_AIVEC"}})
+            self.assertEqual(PM.load_task_type_overrides(env)[0], {"15": "KERNEL_AIVEC"})
+
+    def test_rejected_when_version_has_no_digit_or_date_is_fake(self):
+        """版本字段须含版本号数字；采集日期须是 `YYYY-MM-DD` 的**真实**日期。"""
+        for prov in (_good_provenance(cann_version="最新版"),
+                     _good_provenance(torch_npu_version="latest"),
+                     _good_provenance(collected_at="2026/07/24"),
+                     _good_provenance(collected_at="2026-13-45")):
+            with tempfile.TemporaryDirectory() as d:
+                env = self._write(d, {"provenance": prov, "map": {"15": "KERNEL_AIVEC"}})
+                self.assertEqual(PM.load_task_type_overrides(env)[0], {}, prov)
+
+    def test_rejected_when_value_outside_controlled_enum(self):
+        """映射值须落在**版本化受控枚举**内——未知 `KERNEL_*` 不许靠前缀放行（拼写错误就在这被逮）。"""
+        for bad in ("KERNEL_TYPO", "KERNEL_AIC", "AI_CORE", "kernel_aivec", ""):
+            with tempfile.TemporaryDirectory() as d:
+                env = self._write(d, {"provenance": _good_provenance(), "map": {"15": bad}})
+                mapping, note = PM.load_task_type_overrides(env)
+                self.assertEqual(mapping, {}, f"{bad!r} 却放行了")
+                self.assertIn("受控枚举", note)
+
+    def test_one_bad_entry_rejects_whole_file(self):
+        """一份 map 里混进一个不合格项 → **整份拒收**（不静默丢坏留好，免得手误被吞掉）。"""
+        with tempfile.TemporaryDirectory() as d:
+            env = self._write(d, {"provenance": _good_provenance(),
+                                  "map": {"15": "KERNEL_AIVEC", "17": "KERNEL_TYPO"}})
+            self.assertEqual(PM.load_task_type_overrides(env)[0], {})
+
+    def test_controlled_enum_is_versioned_and_narrow(self):
+        """受控枚举**版本化**、且只含实测坐实的名字（扩它必须带实测依据并升版本）。"""
+        self.assertTrue(PM.TASK_TYPE_ENUM_VERSION)
+        self.assertTrue(PM.CONTROLLED_TASK_TYPE_NAMES >= PM.DB_DEVICE_KERNEL_TYPES)
+        self.assertNotIn("KERNEL_AIC", PM.CONTROLLED_TASK_TYPE_NAMES)
+        self.assertIn("受控枚举", PM.CONTROLLED_TASK_TYPE_NAMES_PROVENANCE)
+
+    def test_rejected_when_unreadable(self):
+        env = {PM.ENV_TASK_TYPE_MAP: "/definitely/not/here.json"}
+        self.assertEqual(PM.load_task_type_overrides(env)[0], {})
+
+    def test_unset_is_silent(self):
+        self.assertEqual(PM.load_task_type_overrides({}), ({}, None))
+
+    def test_no_hardcoded_map_shipped(self):
+        """仓里**不写死**任何 id→名对照——dogfood 只抓到 id、没抓到名字，编一份就是造数据。"""
+        self.assertEqual(PM.DB_TASK_TYPE_ID_NAMES, {})
+        self.assertIn("未实测", PM.DB_TASK_TYPE_ID_NAMES_PROVENANCE)
+
+    def test_override_fills_gap_end_to_end(self):
+        """db 无字典表 + **合格**的 override → 解得出、计得上（真机可用的兜底路径没被修没）。"""
+        with tempfile.TemporaryDirectory() as d:
+            env = self._write(d, {"provenance": _good_provenance(),
+                                  "map": {"15": "KERNEL_AIVEC"}})
+            _write_db(d, tasks=_numeric_tasks(15), mstx=[(0, 1_000_000, "R")])
+            db = PM.find_profiler_db(d)
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                mapping, prov = PM.task_type_dictionary(conn, PM._db_tables(conn), env,
+                                                        type_col="taskType")
+            finally:
+                conn.close()
+            self.assertEqual(mapping.get("15"), "KERNEL_AIVEC")
+            self.assertIn(PM.DICT_SOURCE_ENV, prov["sources"])
+            self.assertEqual(prov["enum_version"], PM.TASK_TYPE_ENUM_VERSION)
 
 
 class TestBehaviorClassification(unittest.TestCase):
@@ -596,6 +961,148 @@ class TestWiring(unittest.TestCase):
         self.assertIn("python -m aclnn_runtime.perf_msprof", s)
         self.assertIn("OPRUNWAY_ACLNN_PERF_DONE", s)
         self.assertIn("OPRUNWAY_ACLNN_PERF_FAIL", s)
+
+
+class TestCustomWrapperStrictAndClose(unittest.TestCase):
+    """洞 2：性能通路的 runner 必须与精度通路**同口径**（严格档）且**跑完 close**。
+
+    旧版 wrapper 是裸 `AclnnRunner(device=...)`（宽松档）且从不 close：
+    极端情况「精度验的是 custom vendor、性能测的是 CANN 内置同名实现」——假 PASS 缺口的性能版本；
+    外加逐 case 泄一条 stream。
+    """
+
+    #: 本次被测物（DUT）：build install 出来的那一个 libcust_opapi.so。
+    _DUT = "/opt/vendors/customize_nn/op_api/lib/libcust_opapi.so"
+
+    def test_wrapper_opens_strict_runner_by_default(self):
+        w = PM._CUSTOM_WRAPPER
+        self.assertIn('strict = CFG.get("strict_custom_vendor", True)', w)          # 缺省即严格
+        self.assertNotIn('bool(CFG.get("strict_custom_vendor"', w)                  # 别宽松转真
+        self.assertIn("if not isinstance(strict, bool):", w)                        # "false" 也拦
+        self.assertIn("require_custom_vendor=strict", w)
+
+    def test_wrapper_binds_declared_dut(self):
+        """wrapper 必须把 DUT 一路带进 runner：只证明「来自某个 custom so」挡不住陈旧产物代跑。"""
+        w = PM._CUSTOM_WRAPPER
+        self.assertIn('dut_lib = CFG.get("dut_lib")', w)
+        self.assertIn("dut_lib=dut_lib", w)
+        self.assertIn("if strict and not dut_lib:", w)      # 严格档没 DUT → wrapper 自己先 fail-closed
+
+    def test_wrapper_closes_runner(self):
+        w = PM._CUSTOM_WRAPPER
+        self.assertIn("with AclnnRunner(", w)          # 出 with 即 close（销毁自建 stream + reset）
+        self.assertNotIn("runner = AclnnRunner(", w)   # 不再是裸建、无人回收的那份
+
+    def _collect_with(self, plan_extra, *, dut=_DUT):
+        """跑一趟 collect，但把 measure_side 换成桩——只看下发给 wrapper 的 cfg_extra。"""
+        from unittest import mock
+        captured = []
+
+        def fake_measure_side(**kw):
+            captured.append(kw)
+            return {"behavior": PM.BEHAVIOR_NPU, "us": 1.0, "scope": "kernel_only",
+                    "execution_path": PM.PATH_DEVICE_KERNEL}
+
+        old = os.environ.get("OPRUNWAY_ACLNN_REAL")
+        os.environ["OPRUNWAY_ACLNN_REAL"] = "1"
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                cs = os.path.join(d, "caseset.json")
+                with open(cs, "w", encoding="utf-8") as f:
+                    json.dump({"op": "Foo", "cases": [{"id": "c0"}]}, f)
+                plan = {"op": "Foo", "device": 0, "cases": ["c0"]}
+                if dut:
+                    plan["dut_lib"] = dut
+                plan.update(plan_extra)
+                with mock.patch.object(PM, "measure_side", fake_measure_side):
+                    PM.collect(cs, d, plan, os.path.join(d, "out.json"))
+        finally:
+            os.environ.pop("OPRUNWAY_ACLNN_REAL", None)
+            if old is not None:
+                os.environ["OPRUNWAY_ACLNN_REAL"] = old
+        return {kw["side"]: kw for kw in captured}
+
+    def test_collect_sends_strict_flag_by_default(self):
+        sides = self._collect_with({})
+        self.assertIs(sides["custom"]["cfg_extra"]["strict_custom_vendor"], True)
+
+    def test_collect_switch_can_relax_like_driver_flag(self):
+        """同一开关：plan 的 `allow_builtin_symbols` = driver 的 `--allow-builtin-symbols`。"""
+        sides = self._collect_with({"allow_builtin_symbols": True}, dut=None)
+        self.assertIs(sides["custom"]["cfg_extra"]["strict_custom_vendor"], False)
+        self.assertIsNone(sides["custom"]["cfg_extra"]["dut_lib"])   # 宽松档不要求 DUT
+
+
+class TestPerfPlanDutDeclaration(unittest.TestCase):
+    """DUT 从 perf plan 一路传到 wrapper 的 CFG（改动⑪ 的性能通路侧）。
+
+    精度侧已钉死「符号必须由**本次 build 出的** libcust_opapi.so 定义」；性能侧若还停在
+    「来自某个 custom vendor so」，环境里继承来的**上次**安装产物照样能代跑 → 性能数字
+    根本不是被测物的。定不出 DUT 一律 fail-closed，**绝不默默退回宽松档**。
+    """
+
+    _collect_with = TestCustomWrapperStrictAndClose._collect_with
+    _DUT = TestCustomWrapperStrictAndClose._DUT
+
+    def test_dut_lib_reaches_wrapper_cfg(self):
+        sides = self._collect_with({})
+        self.assertEqual(sides["custom"]["cfg_extra"]["dut_lib"], self._DUT)
+
+    def test_dut_vendor_root_derives_lib_path(self):
+        """按 vendor **内容根**声明：DUT so = `<root>/op_api/lib/libcust_opapi.so`。"""
+        sides = self._collect_with({"dut_vendor_root": "/opt/vendors/customize_nn"}, dut=None)
+        self.assertEqual(sides["custom"]["cfg_extra"]["dut_lib"], self._DUT)
+
+    def test_falls_back_to_adapter_vendor_fields(self):
+        """plan 没给 dut_* 时，沿用 adapter 已知的 vendor 字段（与 `_ENV_PREAMBLE` 的 VC 同口径）。"""
+        sides = self._collect_with({"vendor_dir": "/opt", "vendor_name": "customize"}, dut=None)
+        self.assertEqual(sides["custom"]["cfg_extra"]["dut_lib"], self._DUT)
+
+    def test_strict_without_any_dut_source_fails_closed(self):
+        with self.assertRaises(PM.PerfCollectError) as ctx:
+            self._collect_with({}, dut=None)
+        msg = str(ctx.exception)
+        self.assertIn("dut_lib", msg)
+        self.assertIn("dut_vendor_root", msg)
+        self.assertIn("allow_builtin_symbols", msg)          # 说清另一条合法出路（内置基线场景）
+
+    def test_conflicting_dut_declarations_fail_closed(self):
+        """两种声明指向不同文件 → fail-closed（唯一性判据复用 runner，绝不替调用方挑一个）。"""
+        from aclnn_runtime.base import AclnnRunnerError
+        with self.assertRaises(AclnnRunnerError) as ctx:
+            self._collect_with({"dut_vendor_root": "/opt/vendors/other_nn"})
+        self.assertIn("DUT 必须唯一", str(ctx.exception))
+
+    def test_non_string_dut_field_fails_closed(self):
+        with self.assertRaises(PM.PerfCollectError) as ctx:
+            self._collect_with({"dut_lib": 42}, dut=None)
+        self.assertIn("非空字符串", str(ctx.exception))
+
+    def test_plan_bool_rejects_stringly_typed_switch(self):
+        """`bool("false")` / `bool("0")` 都是 True——字符串写法必须 raise，绝不静默放行。"""
+        for bad in ("false", "0", "true", 0, 1):
+            with self.subTest(bad=bad):
+                with self.assertRaises(PM.PerfCollectError):
+                    PM.plan_bool({"allow_builtin_symbols": bad}, "allow_builtin_symbols")
+        self.assertIs(PM.plan_bool({}, "allow_builtin_symbols"), False)          # 缺省即严格
+        self.assertIs(PM.plan_bool({"allow_builtin_symbols": True},
+                                   "allow_builtin_symbols"), True)
+
+    def test_collect_rejects_stringly_typed_switch(self):
+        """整条通路上也拦得住：plan 里写 "false" → collect 直接抛，不静默关掉严格档。"""
+        for bad in ("false", "0"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(PM.PerfCollectError) as ctx:
+                    self._collect_with({"allow_builtin_symbols": bad})
+                self.assertIn("假 PASS", str(ctx.exception))
+
+    def test_same_switch_semantics_as_adapter(self):
+        """与 `aclnn_adapter._plan_bool` 同口径（host 侧早失败、容器侧最后一道，两处一致）。"""
+        import aclnn_adapter as A
+        with self.assertRaises(ValueError):
+            A._plan_bool({"allow_builtin_symbols": "false"}, "allow_builtin_symbols")
+        with self.assertRaises(PM.PerfCollectError):
+            PM.plan_bool({"allow_builtin_symbols": "false"}, "allow_builtin_symbols")
 
 
 class TestSpecTargetRatio(unittest.TestCase):

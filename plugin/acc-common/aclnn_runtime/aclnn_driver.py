@@ -29,6 +29,23 @@
 输入文件读取：优先 caseset ``inputs[].path``。``.npy`` 直接 ``np.load``；``.bin``（repo_adapter
 落的扁平 storage 字节）按 storage dtype + 声明 shape 读回。bf16 的 storage=uint16 位模式，
 经 in-slot 的 ``dtype``（逻辑 dtype）传给 runner（runner 据此不做二次窄化、直接用位模式）。
+
+**符号 provenance 进证据链**（D2 真机 Bug#A）：runner 逐符号记「实际调的实现来自哪个 ``.so``」，
+本脚本把它原样写进 ``out_manifest.json`` 的 ``runtime`` 字段——用来证明**验的是被测 PR build 的
+custom vendor 产物、不是 CANN 内置同名算子**（内置 ``libopapi.so`` 就导出 ``aclnnMedian`` 之类的
+同名符号，旧版从全局取会静默打到内置 → **假 PASS**）。CLI **默认走严格档**
+（``require_custom_vendor=True``，符号未被证明**由本次 DUT** 定义即 fail-closed）；确要跑
+CANN 内置算子（无 PR 的基线场景）须显式 ``--allow-builtin-symbols``。
+**严格档必须声明本次 DUT**（runner 改动⑪）：``--dut-lib <libcust_opapi.so 绝对路径>`` 或
+``--dut-vendor-root <本次 install 的 vendor 内容根>``（DUT so = ``<root>/op_api/lib/libcust_opapi.so``）；
+两个都给必须指同一文件（由 runner 校）。**两个都不给 → CLI 直接 fail-closed 并提示该加什么**——
+不然「符号来自某个 custom vendor so」只证明得了它来自**环境里某个** custom so（``ASCEND_CUSTOM_OPP_PATH``
+/ ``LD_LIBRARY_PATH`` 里继承来的**上次**安装产物同样满足），本次漏导符号时旧产物会代跑并报假 PASS。
+⚠ 判读 ``runtime.symbols[*]`` 时**最载重的是 ``is_dut``**（定义方就是本次声明的 DUT so）；
+``defining_lib_verified`` 只说明定义方属于「某个已加载 custom so」，**不等于本次被测物**。
+``resolved_via``（dlsym 走的 handle）**不是**来源证据——dlsym 会沿 handle 的 DT_NEEDED 依赖树打到
+CANN 内置 so；``global_conflict`` 也**不能单独**当 DUT 证据（两边可能都是内置实现）。
+详见 ``aclnn_runner`` 模块文档改动⑩ / ⑪。
 """
 
 from __future__ import annotations
@@ -250,6 +267,36 @@ class _SignatureResolver:
             f'ASCEND_CUSTOM_OPP_PATH）'}；逐个失败原因: {errors}")
 
 
+def _slot_digest(s: dict) -> str:
+    """单个 slot 的**单行摘要**（role/name/shape/dtype，不含张量数据）——真机报错定位用。"""
+    kind, name = s.get("kind"), s.get("name")
+    if kind == "in":
+        shape = list(getattr(s.get("array"), "shape", ()) or ())
+        return f"in:{name}[{','.join(str(d) for d in shape)}]:{s.get('dtype')}"
+    if kind == "attr":
+        v = repr(s.get("value"))
+        if len(v) > 64:
+            v = v[:61] + "..."
+        return f"attr:{name}:{s.get('ctype')}={v}"
+    if kind == "out":
+        shape = list(s.get("shape") or ())
+        return (f"out#{s.get('index')}:{name}[{','.join(str(d) for d in shape)}]"
+                f":{s.get('dtype')}({s.get('role')})")
+    return f"{kind}:{name}"
+
+
+def _slots_digest(slots) -> str:
+    """slots 的紧凑摘要串（`in:self[2,3]:float32 | attr:dim:int64=1 | out#0:values[2]:float32(value)`）。
+
+    真机 bug#11：runner 抛 `ACL 561103` 之类时，异常里若没有 case_id + 调用形状，60 条用例里根本
+    定位不到是哪条、什么形状/dtype 触发的 —— 只能人肉逐条重放。摘要**只带元数据、不带数据**。
+    """
+    try:
+        return " | ".join(_slot_digest(s) for s in slots)
+    except Exception as exc:                     # 摘要本身绝不能盖掉原始故障
+        return f"<slots 摘要生成失败: {exc}>"
+
+
 def run_driver(caseset: dict, work_dir: str | Path, out_dir: str | Path, runner, *,
                signatures: dict | None = None, op_dir: str | Path | None = None) -> dict:
     """逐 case 跑 runner，落 out_k.bin，返回产物 manifest（**纯元数据、无判定**）。
@@ -257,7 +304,13 @@ def run_driver(caseset: dict, work_dir: str | Path, out_dir: str | Path, runner,
     每个 case 用**它自己**已解析好的 ``aclnn_call``（:func:`_case_call` / :func:`_build_slots`），
     符号 = ``aclnn_call.symbol``，签名由 :class:`_SignatureResolver` 据已安装的头解析（或调用方注入）。
     ``runner`` 须实现 ``run(op_name, slots, *, signature) -> list[np.ndarray]``（真机为
-    :class:`~.aclnn_runner.AclnnRunner`，测试可注入 mock）。
+    :class:`~.aclnn_runner.AclnnRunner`，测试可注入 mock）。runner 若还实现
+    ``runtime_provenance() -> dict``（真机 runner 都实现），其返回值**原样整份**写进 manifest 的
+    ``runtime`` 字段（``dut_lib`` / ``symbols[*].is_dut`` / ``ignored_custom_opapi_libs`` /
+    ``device_owned`` / ``teardown`` … 一个都不裁），这是「验的是被测物」的证据链；未实现的
+    mock/旧 runner → ``runtime=None``，不影响跑测。
+    ⚠ 此刻 runner **还开着**，``teardown`` 恒 ``{"closed": false}``——close 之后的完整状态由
+    :func:`refresh_manifest_runtime` 回写（CLI 路径已接）。
     """
     op = caseset["op"]
     out_root = Path(out_dir).resolve()
@@ -272,7 +325,13 @@ def run_driver(caseset: dict, work_dir: str | Path, out_dir: str | Path, runner,
         if symbol not in symbols:
             symbols.append(symbol)
         slots = _build_slots(call, case, work_dir)
-        outs = runner.run(symbol, slots, signature=resolver.get(symbol))
+        sig = resolver.get(symbol)
+        try:
+            outs = runner.run(symbol, slots, signature=sig)
+        except Exception as exc:                 # bug#11：原始异常不带 case 上下文 → 真机无从定位
+            raise AclnnRunnerError(
+                f"{cid}: 调用 aclnn{symbol} 失败：{type(exc).__name__}: {exc}"
+                f"；slots=[{_slots_digest(slots)}]") from exc
         out_slots = [s for s in slots if s["kind"] == "out"]   # out_null 不产出 → 不计
         if len(outs) != len(out_slots):
             raise AclnnRunnerError(
@@ -288,10 +347,36 @@ def run_driver(caseset: dict, work_dir: str | Path, out_dir: str | Path, runner,
                           "path": f"{cid}/{fname}", "shape": list(arr.shape),
                           "dtype": str(arr.dtype.name), "nbytes": int(arr.nbytes)})
         produced.append({"case_id": cid, "symbol": symbol, "outputs": files})
+    # 符号 provenance（Bug#A 的证据）：runner 实现了就原样收进 manifest，没实现则记 None。
+    prov_fn = getattr(runner, "runtime_provenance", None)
+    runtime = prov_fn() if callable(prov_fn) else None
     manifest = {"op": op, "symbol": symbols[0] if len(symbols) == 1 else None,
-                "symbols": symbols, "out_dir": str(out_root), "produced": produced}
-    (out_root / "out_manifest.json").write_text(
+                "symbols": symbols, "out_dir": str(out_root), "produced": produced,
+                "runtime": runtime}
+    _write_manifest(manifest)
+    return manifest
+
+
+def _write_manifest(manifest: dict) -> None:
+    """把 manifest 落到它自己记的 ``out_dir/out_manifest.json``（初次写与 provenance 回写共用）。"""
+    Path(manifest["out_dir"], "out_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def refresh_manifest_runtime(manifest: dict, runner) -> dict:
+    """runner **close 之后**重取 ``runtime_provenance()`` 覆写 ``manifest["runtime"]`` 并回写盘上文件。
+
+    :func:`run_driver` 落 manifest 时 runner 还开着：那一刻 ``teardown`` 恒
+    ``{"closed": false, "errors": []}``、``custom_opapi_libs`` 也还没转成 close 前的指纹快照——
+    而「资源回收干没干净」「DUT 与被采信的 so 指纹是什么」都属证据链，得落全（不然报告里
+    看到的 teardown 永远是「没关」，等于这一栏白记）。
+    runner 未实现 ``runtime_provenance`` 的（mock / 旧 runner）→ 原样返回、不动盘上文件。
+    """
+    prov_fn = getattr(runner, "runtime_provenance", None)
+    if not callable(prov_fn):
+        return manifest
+    manifest["runtime"] = prov_fn()
+    _write_manifest(manifest)
     return manifest
 
 
@@ -306,7 +391,36 @@ def main(argv=None) -> int:
                         help="aclnn 头所在的 op 工程 / 已安装 vendor 内容根（缺省读 env "
                              "OPRUNWAY_ACLNN_OP_DIR，再退 ASCEND_CUSTOM_OPP_PATH）；取不到签名即 fail-closed")
     parser.add_argument("--device", type=int, default=0, help="NPU device id（缺省 0/davinci0）")
+    parser.add_argument("--allow-builtin-symbols", action="store_true",
+                        help="允许目标 aclnn 符号来自 CANN 内置实现（默认**不允许**：验收路径走严格档，"
+                             "符号必须由 custom vendor 的 libcust_opapi.so **定义**——dladdr 反查定义方，"
+                             "不认 dlsym 沿依赖树打到的内置 so，否则等于验了内置算子=假 PASS）。"
+                             "仅当本次确实要跑 CANN 内置算子（无 PR 的基线场景）才开。"
+                             "性能采集侧的同款开关是 perf plan 的 allow_builtin_symbols")
+    parser.add_argument("--dut-lib", default=None,
+                        help="本次被测物（DUT）的 libcust_opapi.so **绝对路径**——严格档（默认）必给"
+                             "（或改用 --dut-vendor-root）。严格档下只加载这一个 so，环境里探到的其它 "
+                             "custom so 只作诊断记进 provenance 的 ignored_custom_opapi_libs")
+    parser.add_argument("--dut-vendor-root", default=None,
+                        help="本次 install 出的 vendor **内容根**（与 $ASCEND_CUSTOM_OPP_PATH 各段同口径），"
+                             "DUT so = <root>/op_api/lib/libcust_opapi.so。与 --dut-lib 二选一；"
+                             "两个都给必须指同一文件（由 runner 校，不一致即 fail-closed）")
+    parser.add_argument("--hash-symbol-libs", action="store_true",
+                        help="provenance 里附各 .so 的 sha256（大 so 要整读一遍；默认只记路径+size+mtime）")
     args = parser.parse_args(argv)
+
+    # 严格档（默认）必须知道「本次该绑哪个 so」——这里先卡一道，给的是**CLI 语汇**的提示：
+    # 不然调用方只会看到 runner 构造异常里的 dut_lib= 字样，不知道命令行该加什么参数。
+    strict = not args.allow_builtin_symbols
+    if strict and not (args.dut_lib or args.dut_vendor_root):
+        raise AclnnRunnerError(
+            "严格档（默认）必须声明本次 DUT，请加 --dut-lib <.../op_api/lib/libcust_opapi.so>，"
+            "或 --dut-vendor-root <本次 install 出的 vendor 内容根>"
+            "（DUT so = <root>/op_api/lib/libcust_opapi.so）。"
+            "没有它，「符号来自某个 custom vendor so」证明不了它来自**本次 PR build 出来的**那个"
+            "——ASCEND_CUSTOM_OPP_PATH / ASCEND_OPP_PATH / LD_LIBRARY_PATH 里继承来的**上次**"
+            "安装产物同样满足，本次漏导符号时旧产物会代跑并报假 PASS。"
+            "确要跑 CANN 内置算子（无 PR 的基线场景）才加 --allow-builtin-symbols。")
 
     caseset = json.loads(Path(args.caseset).read_text(encoding="utf-8"))
     work_dir = args.work_dir or caseset.get("work_dir") or str(Path(args.caseset).resolve().parent)
@@ -314,10 +428,32 @@ def main(argv=None) -> int:
     # 真机才 import ctypes 执行体（离线单测注入 mock，不经此路）。
     from .aclnn_runner import AclnnRunner
 
-    runner = AclnnRunner(device=args.device)
-    manifest = run_driver(caseset, work_dir, args.out_dir, runner, op_dir=args.op_dir)
+    # 验收路径默认严格档：符号必须由**本次 DUT** 定义（--allow-builtin-symbols 显式放行内置算子）。
+    # DUT 的两种写法原样透传给 runner——「二选一 / 都给须一致」的判据只此一处（runner 的
+    # _resolve_dut_lib），CLI 不复制一份自己的解释。
+    runner = AclnnRunner(device=args.device, require_custom_vendor=strict,
+                         dut_lib=args.dut_lib, dut_vendor_root=args.dut_vendor_root,
+                         hash_symbol_libs=args.hash_symbol_libs)
+    manifest = None
+    try:
+        with runner:
+            manifest = run_driver(caseset, work_dir, args.out_dir, runner, op_dir=args.op_dir)
+    finally:
+        # close 之后再把 provenance 落全（teardown / 指纹快照此刻才完整）。close 自己报错时
+        # 也照落——那份「没回收干净」的记录正是要留的证据，异常仍照抛不吞。
+        if manifest is not None:
+            manifest = refresh_manifest_runtime(manifest, runner)
+    runtime = manifest.get("runtime") or {}
     print(json.dumps({"op": manifest["op"], "cases": len(manifest["produced"]),
-                      "out_dir": manifest["out_dir"]}, ensure_ascii=False))
+                      "out_dir": manifest["out_dir"],
+                      "strict_custom_vendor": runtime.get("strict_custom_vendor"),
+                      "dut_lib": (runtime.get("dut_lib") or {}).get("path"),
+                      # 载重字段：符号的定义方**是不是本次 DUT**（不是「属于某个 custom so」）。
+                      "symbol_is_dut": {s.get("symbol"): s.get("is_dut")
+                                        for s in runtime.get("symbols", [])},
+                      "symbol_sources": sorted({str(s.get("source"))
+                                                for s in runtime.get("symbols", [])})},
+                     ensure_ascii=False))
     return 0
 
 

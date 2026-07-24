@@ -166,6 +166,24 @@ SUPPORTED_NP_BY_FORM = {
                  "int8": np.int8, "uint8": np.uint8, "bool": np.bool_},
 }
 
+# runner_form → **真机尚未实现、但生成期允许先造用例**的 dtype（Track C 挂账集；U3）。
+# 为什么不并进 `SUPPORTED_NP_BY_FORM`：两者语义**不同**，并起来会把真机门一起放开 = 假验收。
+#   · `SUPPORTED_NP_BY_FORM` = 「真机现在就能收发」——`run_new_example` / `run_aclnn_py` 的入口门读它，
+#     不在其中的 dtype 真机跑到当场拒；
+#   · 本表 = 「用例可以造、覆盖账可以记，但真机跑到仍 fail-closed」——spec 须以 `task_pr_gaps` 的
+#     `dtype_deferred` 显式挂账（isclose.spec 的 int32 即此例）。
+# cpp（runner v1）：int16/int32 自 T7 起 gen_cases 已能造，runner.cpp 的 int 分支属 Track C（未实现）。
+# aclnn_py（ctypes-aclnn runner v2）：通用 runner 已覆盖 gen_cases 能造的全部 dtype，无挂账项。
+# ⚠ 按**能力/形态**分（合法扩），非按算子身份（律令#0）。
+DEFERRED_NP_BY_FORM = {
+    "cpp": frozenset({"int16", "int32"}),
+    "aclnn_py": frozenset(),
+}
+if set(DEFERRED_NP_BY_FORM) != set(SUPPORTED_NP_BY_FORM):
+    # 两表 key 必须同步：新增 runner_form 只改一张表，另一张就会**静默**按缺省处理（挂账集空 / 未知 form）。
+    raise RuntimeError(f"runner_form 表不同步：SUPPORTED={sorted(SUPPORTED_NP_BY_FORM)} "
+                       f"DEFERRED={sorted(DEFERRED_NP_BY_FORM)}——请同时维护，fail-closed")
+
 
 def supported_np(runner_form):
     """按 runner_form 取真机可收发 dtype 白名单（缺省 cpp）。未知 form → fail-closed（不静默兜 cpp）。"""
@@ -173,6 +191,16 @@ def supported_np(runner_form):
     if form not in SUPPORTED_NP_BY_FORM:
         raise ValueError(f"未知 runner_form={form!r}（可选 {sorted(SUPPORTED_NP_BY_FORM)}）")
     return SUPPORTED_NP_BY_FORM[form]
+
+
+def deferred_np(runner_form):
+    """按 runner_form 取 **Track C 挂账** dtype 集（真机未实现、生成期放行）。未知 form → fail-closed。
+
+    只被**生成期**能力门（`gen_cases.check_spec_capability`）消费；真机侧一律只认 `supported_np`。"""
+    form = runner_form or "cpp"
+    if form not in DEFERRED_NP_BY_FORM:
+        raise ValueError(f"未知 runner_form={form!r}（可选 {sorted(DEFERRED_NP_BY_FORM)}）")
+    return DEFERRED_NP_BY_FORM[form]
 
 
 def _load_logical_input(work_dir, inp):

@@ -31,10 +31,23 @@ description: 把算子任务书（md 本地路径或链接）+ PR 链接，抽�
    - **precision.standard + tolerance_policy_id**（T5，待散文门）：显式声明平台层标准（`ascendoptest_default / ecosystem_mere_mare / exact / behavioral`，据 oracle+verify_mode 映射，见 ref §1.1 决策树）+ tolerance_policy_id。⚠ 两层 id 别混：**spec 级** `tolerance_policy_id` 是摘要/向后兼容（无 dtype 后缀），**caseset 级** `expected.tolerance_policy_id` 才是门控口径（格式 `standard:dtype`，由 `gen_cases` 派生）。`threshold` 现仅是向后兼容 digest（真门控走结构化 policy，见 ref §3）；per-case 结构化 policy 由 `gen_cases` 按 golden dtype 自动派生，不用手写。`ecosystem_mere_mare` 为 proposed/NOT_SETTLED——单标杆不过记 needs_review、不自动 fail。任务书验收目标明确宽于平台底线时才加可选 `acceptance_policy`。
    - **precision.case_target**（精度用例数，**用户口径优先**）：缺省 50。**运行时 `AskUserQuestion` 问用户「本算子精度用例造多少条？建议 50」**——先 `python gen_cases.py --dry-run <spec>`（plan-only、无 torch）拿该算子 **[强制下限 S, pool_max]** 区间呈现给用户（覆盖 opbase §1.1「不设下限」，用户 2026-07-15 定：数量以用户为准）。写入 `precision.case_target`（**须 ≥1**，0/负→gen_cases fail-fast）。gen_cases 按 opbase §1 覆盖-预算铺到此数。详见 ref『case_target 交互』。
    - **runner 锚定线索**：从 `pr_facts.key_files` 的 `test_aclnn_*.cpp` 读**算子实测用的 aclnn 入口 + 输入 dtype**，记进 spec 供 ③ 生成 runner——**别凭 header 猜**（Equal 曾因猜错入口/dtype 翻车）。
+   - **torch 对标 / 多输出 / aclnn_py 形态**（ref **§1.3**，只有这条通路才用得到的一组字段；不属该场景就**一个都别写**，全部可省略=现行 cpp 通路、行为零变更）：
+     四件事**各自独立触发、不打包**（§1.3.0）——① 任务书把 **torch 立为真值口径** → `precision.oracle=torch` + `precision.standard=torch_allclose`（§1.1 决策树已加该支）；② PR 是**标准 aclnn 两段式工程**（仓根 `build.sh` + 算子目录有 `op_host/` + **在 `<op_subdir>` 下有界递归**能找到 `aclnn_*.h`（剔 `*_impl.h`）、**不得预设目录层级**，无 opaque descriptor）→ `runner_form="aclnn_py"`（**必须**同时给 `call_variants`，否则 gen_cases fail-closed；且 dtype 白名单据 form 放开 int/bf16）；①②同时成立才写合并标签 `scenario="torch_ref_aclnn"`；③ 多输出 → 逐 out 写 `out_role`（受控词表 `value|index`），**每个 `index` 输出必填 `index_of`（指某 value 输出）+ `gather_from`（指某 in 参数）**——下标**不逐位比**，判据是 `index_value_consistency`（§1.3.2）；④ `call_variants`——**`runner_form=="aclnn_py"` 一律必填**（不是「有多个入口才写」；单入口也必须有一条 `when={"always":true}` 的 variant，多入口只是产多条），`when`/`symbol`/`active_outputs` 必填，按 **attr 取值**分派、**绝不按算子名**，且须覆盖 `attr_matrix` 每一行（§1.3.3）。
+     配套三项：`precision.tolerance_source`（`dtype_table`(缺省)/`taskdoc`(须带 `taskdoc_tol:[rtol,atol]`)/`torch_default`，**只有整字段省略才落缺省**，§1.3.4）、`precision.value_profiles`（`["nan","tie"]` 子集，压 NaN 传播与并列下标；**声明了产不出即 fail-closed**；⚠ **`nan` 只配 `operator_class=="floating_compute"`**，其它类别声明它即 fail-closed，见下条）、`perf.baseline="torch_npu"` + **必填** `perf.torch_baseline`（`{api,positional,keyword}`，键是 aclnn 形参名/slot name、值是 torch 形参名，§1.3.5）。
+   - **🔴 `operator_class`（受控词表 `floating_compute | integer_compute | structural`，ref **§1.5**）——判错会直接改变验收结论，务必判**：
+     它决定**要不要产 `nan` / `±inf` 特殊值用例**。依据是生态方法学（参考仓 `design_contract.py:512` 只对 `floating_compute` 强制 `nan/pos_inf/neg_inf/mixed_inf`；其 `aclnnMedian` 设计标 `structural`、**全文零 NaN/Inf**，对照 `aclnnPdist` 标 `floating_compute`、有 nan/inf）。
+     - **浮点算术 / 归约求和类**（做加乘累加、结果是算出来的）→ `floating_compute`：产 nan/±inf。
+     - **选值 / 排序 / 索引 / 归约取元素类**（median / min / max / topk / sort / argmax…，结果是输入里**真实存在的某个元素**）→ **`structural`**：**不产 nan/±inf**。
+     - 纯整型逻辑 → `integer_compute`：不产 nan/±inf。
+     - **省略 = 沿用现行为（照产 nan/±inf）**，故现有 cpp 算子零影响；但**新写 spec 应显式判**。`empty`/`scalar`/边界极值/`tie` 四档**所有类别都保留**。
+     ⚠ **判错代价两头都疼**：判宽（该 structural 却标 floating_compute）→ **把不该判挂的判挂**（2026-07-24 median 血教训：6 条 NaN 用例把合格 PR 判成 `FAIL(精度)`）；判窄（该 floating_compute 却标 structural）→ **该测的 NaN 没测**。工具只校词表合法性与自洽，**判错会静默生效**，唯一护栏是 ref §1.5 的判法。
+     ⚠ **`perf.target_ratio` 只从任务书原文换算**（『无劣化』=**1.0**），**绝不抄参考仓 cannbot-ops-input 的通用默认 0.6**——那是它自家口径，抄来会把「比基线慢 40%」判成达标。
+     ⚠ 顶层 `allow_empty_tensor`（缺省 true，只收真 bool）：任务书明写「不支持空 Tensor」才写 `false`，并在 gaps 记依据原句（§1.3.6）。
+   - **任务书点名的轴维度边界 → 顶层 `attr_axis_lengths`**（§1.4，可选、与上面那组场景字段互相独立）：任务书写了「**`dim`/归约维所指的那根轴上维度为 1**」这类边界，就写 `[{"attr":"<已声明 attr 名>","lengths":[1]}]` **定向生成**——shape 阶梯与 attr 取值是正交独立取的，**指望撞上就是零覆盖**（median 实测该边界跑出 0 条、而裁决里 `gaps=0` 看不出来）。`attr` 必须引用已声明的 attr、`lengths` 是非空正整数列表（长度 0 走 `allow_empty_tensor`/`empty_axis`）；attr 值为 `null` 的变体自动跳过；**声明了却一条都产不出 → gen_cases 当场 fail-closed**（假覆盖），撞上回去核 attr/rank、别删字段绕。任务书没点名就整字段省略。
 
 3. **多算子**：一份任务书含 N 个算子 → N 份 spec（共享字段复用 + 逐算子独立，ref §5）。
 
-4. **自检**：按 ref §7 校验（verify_mode 合法、numerical 有 threshold、params 有 out、exact⇒threshold=0、add_dtype⇒dtypes_added 非空且其中 pipeline 支持项已并入 params.dtype、不支持项只记 gap、**C2 attr 值类型合法（含 `list[int]` 限制）**、**C3 `rank` 合法且确有依据**、**C4 dtype 冲突 gap 四字段齐全且其 dtype 不在 `params.dtype`**、**C1 spec 里没有自造的输出形状字段**…）。
+4. **自检**：按 ref §7 校验（verify_mode 合法、numerical 有 threshold、params 有 out、exact⇒threshold=0、add_dtype⇒dtypes_added 非空且其中 pipeline 支持项已并入 params.dtype、不支持项只记 gap、**C2 attr 值类型合法（含 `list[int]` 限制）**、**C3 `rank` 合法且确有依据**、**C4 dtype 冲突 gap 四字段齐全且其 dtype 不在 `params.dtype`**、**C1 spec 里没有自造的输出形状字段**、**§1.3.7 torch 对标/多输出/aclnn_py 形态自检（写了那组字段才需要过；没写就该一个都不出现）**、**§1.4 `attr_axis_lengths`：任务书点名了轴维度边界就必须声明、字段合法、且产得出来（产不出即 fail-closed，不许删字段绕）**…）。
 
 5. **落盘**：写 **`<ops_root>/<op>/<op>.spec.json`**，其中 `ops_root` = 绝对路径 `$OPRUNWAY_OPS_DIR`（若设），否则 `${OPRUNWAY_WORK_DIR:-$CWD}/.oprunway/ops`。
    ⚠ **落用户工作目录、不写插件安装目录**——真实 `/plugin install` 后插件在 `~/.claude/plugins/cache/…`，升版即整目录换掉、用户产物被冲；
@@ -51,4 +64,4 @@ description: 把算子任务书（md 本地路径或链接）+ PR 链接，抽�
 - **spec 的自检 ≠ 验收裁决**：本 skill 只产 spec 与 gaps，裁决唯一归确定性脚本链（`validator.py` + `perf_compare.py` + `validate_acceptance_state.py`，ADR 0007），引用时逐字标来源、不自行宣告。
   ⚠ **mock 不产验收裁决**（C5，用户 2026-07-22 拍板）：mock 的「NPU 输出」= `golden.copy()`、精度按构造必过、性能是编的假数，它**物理上不再写 `acceptance.json` / `verdict.json`**（改产标明 NON-ACCEPTANCE 的 `dev_run_summary.json`，evidence 带 `evidence_grade="development"` + `acceptance_note`）。CP-B 的契约自检走 **`gen_cases.py --dry-run`**（**plan-only**：不调 `golden_fn`、不落 `.npy`、不产任何裁决；会加载执行 `golden.py` 取 `out_shape`（缺文件只记「未核」，文件在但坏了则当场抛）），**别再说「跑 mock 看裁决」**。
 
-**详规见** `references/taskdoc-to-spec.md`（目标 schema · 字段映射 · **§1.2 dtype 冲突以任务书为准(C4)** · verify_mode 决策树 · threshold 兜底 · 多算子拆分 · GPU 移植特例 · 自检清单）。
+**详规见** `references/taskdoc-to-spec.md`（目标 schema · 字段映射 · **§1.2 dtype 冲突以任务书为准(C4)** · **§1.3 torch 对标 / 多输出 / aclnn_py 形态怎么填** · verify_mode 决策树 · threshold 兜底 · 多算子拆分 · GPU 移植特例 · 自检清单）。

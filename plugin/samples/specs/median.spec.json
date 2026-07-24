@@ -7,6 +7,8 @@
   "reference": {"type": "torch", "ref": "torch.median（任务书指定真值口径）"},
   "change": {"kind": "new_op", "note": "aclnnMedian/aclnnMedianDim 统一实现（experimental/index/median），双输出 values+indices"},
   "params_source": "derived_from_taskdoc",
+  "operator_class": "structural",
+  "_operator_class_note": "median = 选值/规约取元素类（输出恒等于某个输入元素、不做浮点算术）→ structural。依据 = 参考仓 Justbin/cannbot-ops-input：design_contract.py:427 受控词表 {floating_compute,integer_compute,structural}、:512 只对 floating_compute 调 _validate_floating_rules（= 只有那一类强制 nan/pos_inf/neg_inf/mixed_inf）；其 ops-bench/ops-eval-dataset/designs/aclnnMedian/case_design.json 的 operator_class 正是 structural、全文零 nan 零 inf（对照 aclnnPdist=floating_compute 有 nan 2 处、inf 8 处）。⚠ 这条是本次判错的根因修正：先前无条件产 NaN/inf 用例，6 条 NaN 用例把合格的 PR6429 判成 FAIL(精度) —— 用超出验收口径的用例判挂合格 PR。",
   "_scenario_note": "scenario=torch_ref_aclnn ⟺ 任务书声明对标 torch + PR 是 aclnn 两段式；编排层据此字段路由、不做 if-算子名分派。runner_form=aclnn_py：op工程即 DUT、无 per-op runner 源（ctypes-aclnn 通用 runner）。见 doc/oprunway-torch-baseline-design.md §2.1。",
   "golden": {
     "_note": "判据锚（硬约束 #5：判据只从 spec 派生）。与 golden.py 的 GOLDEN_CONTRACT 双源交叉核验；不一致即 fail-closed。任务书把真值口径本身指定为 torch.median → oracle_method → tier1（非 impl_reference）。",
@@ -47,10 +49,10 @@
     "oracle": "torch",
     "standard": "torch_allclose",
     "tolerance_source": "dtype_table",
-    "value_profiles": ["nan", "tie"],
+    "value_profiles": ["tie"],
     "case_target": 56,
     "_tolerance_note": "torch_allclose 逐 dtype 容差走 dtype_table（precision_policy._TA_DTYPE_TOLS，adapt 自参考仓 accuracy.py→一手 tilelang2ascend verification_ascendc.py）。value 输出 fp→torch_allclose、int→exact；index 输出→index_value_consistency（gather 值一致，据 out_role 字段派生、op-中立）。",
-    "_value_profiles_note": "nan（NaN 传播·equal_nan 判据）+ tie（并列值·压 index_value_consistency）——借参考仓 case_generator.generate_array 的 special_values/tie 数值生成机制，op-中立、据 spec 计划驱动。"
+    "_value_profiles_note": "tie（并列值·压 index_value_consistency）——借参考仓 case_generator.generate_array 的 tie 数值生成机制，op-中立、据 spec 计划驱动。⚠ 原先还有 'nan'（NaN 传播·equal_nan 判据），2026-07-24 去掉：operator_class=structural 这一类按参考仓方法学不适用 NaN/Inf（design_contract.py:512 只对 floating_compute 强制），留着会被 gen_cases fail-closed。tie 保留 —— 参考仓给结构/整型类列的特殊值正是「极值、0/1/-1、**重复**、负/越界索引、广播、规约轴、饱和」（SKILL.md:252），并列/重复值属这一档。"
   },
   "perf": {
     "baseline": "torch_npu",

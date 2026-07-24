@@ -19,8 +19,11 @@ descriptor）工具零改即跑。
 
 ✅ §9.4 张力已按 §9.6 a3 实测配方收敛（2026-07-24 D0/D1/D2 坐实，覆盖蓝图 §5.1 三签名旧约定）：
   PR6429（ops-nn 框架内实验算子）**无 per-op build.sh / 无 op_graph**——DUT 是 **ops-<族>仓 checkout**：
-  仓根有 `build.sh`、op 在子目录（如 `experimental/index/median/`，含 `op_host/` + `op_api/aclnn_*.h` 手写接口）。
-  故 `find_aclnn_project` 判据改为「ops 仓形态」（仓根 build.sh + op 子目录 op_host/op_api），`_run_aclnn_real`
+  仓根有 `build.sh`、op 在子目录（如 `experimental/index/median/`，含 `op_host/` + 手写 aclnn 接口头）。
+  ⚠ 接口头的**落点不固定**（2026-07-24 dogfood 实测订正）：PR6429 真实布局是 `<op_subdir>/op_host/op_api/aclnn_median.h`，
+  `<op_subdir>/` 下**并没有** `op_api/`；旧判据钉死 `<op_subdir>/op_api/aclnn_*.h` → 真 PR 被误判「非域内」硬阻塞。
+  故 `find_aclnn_project` 判据改为「ops 仓形态」（仓根 build.sh + op 子目录含 op_host/ + **在 op 子目录下有界递归**
+  能找到 `aclnn_*.h`，不预设它在哪一层），`_run_aclnn_real`
   的 build 按 §9.6 实测配方：取源(fetch PR head)→依赖门(pigz/dos2unix)→仓根 `build.sh --pkg --experimental
   --ops=<snake> --soc=<soc> --vendor_name=<v> --no_force`→install(`.run --install-path=<用户目录>`)。
   op 子路径 / soc / vendor / PR-ref 全从 cfg（`OPRUNWAY_ACLNN_*`，承 spec/pr_facts 字段）取，**绝无按算子名分支**。
@@ -146,24 +149,89 @@ def _safe_op_subdir(op_subdir):
     return op_subdir
 
 
+#: 接口头**有界递归**搜索的最大深度（op 子目录自身算深度 0）。
+#: 已知形态：`op_api/aclnn_x.h`（深度 1）、`op_host/op_api/aclnn_x.h`（深度 2，PR6429 真实布局）、
+#: `op_api/include/aclnn_x.h`（深度 2）。取 3 留一层余量——**不预设头在哪一层**（那正是旧判据踩的坑），
+#: 但也不无限递归（op 子目录下常挂 tests/examples/build 产物，全走穿既慢又易误命中）。
+_HEADER_MAX_DEPTH = 3
+#: 单次形态核验最多扫描的目录数（含 op 子目录自身）；超出即截断并在报错里如实说明（防遍历爆炸）。
+_HEADER_MAX_DIRS = 256
+#: 报错里回显的路径条数上限（够定位即可，不刷屏）。
+_REPORT_CAP = 40
+
+
+def _scan_aclnn_headers(op_path, max_depth=_HEADER_MAX_DEPTH, max_dirs=_HEADER_MAX_DIRS):
+    """在 op 子目录下**有界递归**找对外 aclnn 接口头（`aclnn_*.h`，排除 `*_impl.h`）。
+
+    为什么递归而不是钉死一层（2026-07-24 dogfood 实测）：手写接口头的落点**按仓/模块而异**——
+    PR6429 是 `<op_subdir>/op_host/op_api/aclnn_median.h`，别处是 `<op_subdir>/op_api/…` 或
+    `…/op_api/include/…`。钉死任一条就是拿一种布局冒充「通用」，换个仓即误判「非域内」硬阻塞。
+    故只据**稳定形态特征**（文件名 `aclnn_*.h` 且非 `_impl`）在**有界**深度内找，绝不预设目录名、
+    更不按算子名分支。
+
+    软链纪律（承审计 Medium#6）：遍历**从不跟随任何软链条目**——软链目录不进、软链头不算数
+    （软链能指到仓外另一份源，形态核验一过下游就当「这是被测 PR 的源」）。被跳过的软链如实回传，
+    进报错信息，免得用户对着「明明有这文件」发懵。
+
+    返回 `(headers, scanned, seen_h, skipped_links, truncated)`——全部是相对 op 子目录的 POSIX 路径：
+      · headers：命中的接口头（已排序）  · scanned：实际扫过的目录（`.` = op 子目录自身）
+      · seen_h：扫到的**全部** `.h` 文件（含被排除的 `_impl.h`，帮用户看清「头在但不算数」）
+      · skipped_links：跳过的软链条目  · truncated：是否因目录数上限提前停
+    """
+    headers, scanned, seen_h, skipped_links = [], [], [], []
+    queue, truncated = [(op_path, "", 0)], False
+    while queue:
+        if len(scanned) >= max_dirs:
+            truncated = True
+            break
+        cur, rel, depth = queue.pop(0)
+        scanned.append(rel or ".")
+        try:
+            with os.scandir(cur) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError:                       # 权限/竞态：这一支扫不动就跳过，别把整次核验拖崩
+            continue
+        for e in entries:
+            child = posixpath.join(rel, e.name) if rel else e.name
+            if e.is_symlink():                # 一律不跟随（目录/文件同）——换靶面
+                skipped_links.append(child)
+                continue
+            if e.is_dir(follow_symlinks=False):
+                if depth < max_depth:
+                    queue.append((os.path.join(cur, e.name), child, depth + 1))
+                continue
+            if not e.is_file(follow_symlinks=False):
+                continue                      # fifo/设备等一概不算
+            if e.name.endswith(".h"):
+                seen_h.append(child)
+            if e.name.startswith("aclnn_") and e.name.endswith(".h") and not e.name.endswith("_impl.h"):
+                headers.append(child)
+    return sorted(headers), scanned, sorted(seen_h), sorted(skipped_links), truncated
+
+
 def find_aclnn_project(op, ops_root=None, op_subdir=None):
     """按 **ops-<族>仓形态** 核验 aclnn DUT（§9.4/§9.6 实测收敛，取代蓝图 §5.1 三签名旧约定）。
 
     判据（据**稳定形态特征**、绝无按算子名分支）：
       · DUT 根 = ops 仓 checkout，**仓根有 `build.sh`**（非 per-op）；
       · op 在子目录 `<root>/<op_subdir>`（op_subdir 从 spec/pr_facts/cfg 字段取，如 experimental/index/median），
-        该子目录含 `op_host/`（算子实现）+ `op_api/aclnn_*.h`（**手写** aclnn 两段式接口头）。
+        该子目录含 `op_host/`（算子实现）+ **在其下（有界递归，深度 ≤ `_HEADER_MAX_DEPTH`）能找到**
+        `aclnn_*.h`（**手写** aclnn 两段式接口头，`*_impl.h` 不算）——`op_api/`、`op_host/op_api/`、
+        `op_api/include/` 等落点**都认**，不预设是哪一层。
       · **无** op_graph、**无** per-op build.sh（ops-nn CMake 框架内实验算子的真实形态）。
     **缺任一 → fail-closed（不回退、不硬塞、不自动归某类 adapter）**（承 runner-is-output：op 工程即 DUT，
     缺件说明该 PR 非域内标准 aclnn 两段式或未 checkout）。返回**仓根**绝对路径（build.sh 所在）。
+    ⚠ 本函数只核「有没有」；**多份头的消歧**在 `aclnn_runtime.parse_aclnn_op`（据 caseset 的
+    `aclnn_call.symbol` 选，未给 symbol 且多份可解析 → 那边 fail-closed），此处不重复、也不抢着挑。
 
     安全（op 工程会被 build/加载符号，是真实注入/换靶面）——**复用 repo_adapter 的守卫**：
     - `op` 经 `_check_id`（拒首字符 '-'、'.'/'..'、空白/斜杠/shell 特殊字符）；
     - `op_subdir` 经 `_safe_op_subdir`（嵌套相对、canonical、白名单）；
     - 从 ops_root 起**逐段拒软链**（`_reject_symlink_segments`）：挡 `<root>/<op_subdir>` 任一目录段是软链的换靶。
     - ⚠ 审计 Medium#6：**所有必需节点自身也逐段查**——旧版逐段守卫只走到 `op_path`，仓根 `build.sh`、
-      `op_host/`、`op_api/`、`aclnn_*.h` **自身**仍可以是软链（指向仓外的另一份源）；形态核验一过，
-      下游就按「这是被测 PR 的源」跑下去。故这些节点一律要求「非软链 + 真实文件/目录」。
+      `op_host/`、头文件 **自身**仍可以是软链（指向仓外的另一份源）；形态核验一过，
+      下游就按「这是被测 PR 的源」跑下去。故这些节点一律要求「非软链 + 真实文件/目录」，
+      递归扫描也**从不跟随软链**。
     """
     import repo_adapter as RA
     RA._check_id("op_name", op)
@@ -179,7 +247,7 @@ def find_aclnn_project(op, ops_root=None, op_subdir=None):
             return os.path.isdir(node) and not os.path.islink(node)
         return os.path.isfile(node) and not os.path.islink(node)
 
-    missing = []
+    missing, scan = [], None
     if not _real(os.path.join(root, "build.sh"), "仓根 build.sh", want_dir=False):
         missing.append("仓根 build.sh(普通文件、非软链)")
     if not _real(op_path, f"op 子目录({sub})", want_dir=True):
@@ -187,18 +255,28 @@ def find_aclnn_project(op, ops_root=None, op_subdir=None):
     else:
         if not _real(os.path.join(op_path, "op_host"), "op_host", want_dir=True):
             missing.append("<op_subdir>/op_host/(真实目录)")
-        op_api = os.path.join(op_path, "op_api")
-        if not _real(op_api, "op_api", want_dir=True):
-            missing.append("<op_subdir>/op_api/(真实目录)")
-        elif not any(n.startswith("aclnn_") and n.endswith(".h") and not n.endswith("_impl.h")
-                     and _real(os.path.join(op_api, n), f"op_api/{n}", want_dir=False)
-                     for n in sorted(os.listdir(op_api))):
-            missing.append("<op_subdir>/op_api/aclnn_*.h(手写 aclnn 接口头，普通文件、非软链)")
+        headers, scanned, seen_h, skipped_links, truncated = _scan_aclnn_headers(op_path)
+        scan = (scanned, seen_h, skipped_links, truncated)
+        if not headers:
+            missing.append("<op_subdir> 下（含 op_api/、op_host/op_api/ 等任一层）的 "
+                           "aclnn_*.h(手写 aclnn 接口头，非 *_impl.h、普通文件、非软链)")
     if missing:
+        detail = ""
+        if scan is not None:
+            scanned, seen_h, skipped_links, truncated = scan
+            def _cap(xs):
+                return (sorted(xs)[:_REPORT_CAP] + [f"…(共 {len(xs)} 项)"]) if len(xs) > _REPORT_CAP else xs
+            detail = (
+                f"\n  实际扫描（相对 {sub}/，深度≤{_HEADER_MAX_DEPTH}、最多 {_HEADER_MAX_DIRS} 个目录"
+                f"{'；⚠ 已达上限截断' if truncated else ''}）：\n"
+                f"    扫过的目录 = {_cap(scanned)}\n"
+                f"    扫到的 .h  = {_cap(seen_h) or '（一个都没有）'}\n"
+                f"    跳过的软链 = {_cap(skipped_links) or '（无）'}（软链一律不跟随、不算数）")
         raise ValueError(
             f"aclnn DUT 非 ops-<族>仓形态，缺签名件 {missing}（root={root!r} op_subdir={sub!r}）——"
             f"fail-closed（不硬塞、不回退、不自动归某类 adapter）。"
-            f"域内假设（§9.4/§9.6 实测收敛）：ops 仓 checkout（仓根 build.sh）+ op 子目录含 op_host/ + op_api/aclnn_*.h。")
+            f"域内假设（§9.4/§9.6 实测收敛）：ops 仓 checkout（仓根 build.sh）+ op 子目录含 op_host/ + "
+            f"在 op 子目录下能找到 aclnn_*.h（`op_api/` 或 `op_host/op_api/` 等，不限定层级）。{detail}")
     return root
 
 
@@ -268,6 +346,10 @@ def _aclnn_cfg():
            "proxy": proxy,
            "soc": (g("OPRUNWAY_ACLNN_SOC") or g("OPRUNWAY_SOC") or "ascend910_93").strip(),  # 昇腾通用约定
            "snake_op": (g("OPRUNWAY_ACLNN_SNAKE_OP") or "").strip(),   # 缺省从 op_subdir 末段派生
+           # 可选：aclnn **头搜索目录**的显式覆盖（现有用法 = 指向源码树里的 op 目录，如
+           # `<checkout>/<op_subdir>`）。缺省 None → `_op_dir_arg` 落到「本次 DUT 的 vendor 内容根」；
+           # **绝不**再退到容器里继承来的 `ASCEND_CUSTOM_OPP_PATH` 旧段（见 `_op_dir_arg` 注释）。
+           "op_dir": (g("OPRUNWAY_ACLNN_OP_DIR") or "").strip() or None,
            "device": g("OPRUNWAY_NPU_DEVICE", "0"),
            "setenv": g("OPRUNWAY_SETENV", "/usr/local/Ascend/ascend-toolkit/set_env.sh")}
     if not cfg["snake_op"]:
@@ -360,8 +442,36 @@ def _render(tmpl, repl):
 #: 远端 shell 的公共守卫函数（build / deploy / exec / perf 共用一份，避免漂移）。
 #: 承审计 High#5 / Medium#7：**副作用发生前**在同一个 shell 里逐段拒软链、核专用根属主与权限、
 #: 且 `source set_env.sh` 失败必须立即退出（不再 `|| true` 吞掉，防用了登录 shell 里残留的另一套 CANN）。
+#:
+#: ⚠ **setenv 段例外**（真机 bug#3，2026-07-24 a3 dogfood 实测）：`oprw_guard_seg` 的「逐段拒软链」防的是
+#: **我们要写入**的目标被软链换靶；而 CANN 官方入口 `/usr/local/Ascend/ascend-toolkit/set_env.sh`
+#: **恒是软链**（指向具体版本目录），且它是**只读**输入、我们只 source 不写 —— 换靶模型套不上，
+#: 逐段拒软链只会逼每台机器人肉解链、把版本号写死进路径。故 setenv 放宽为 **realpath 后再校验**：
+#: 仍要绝对路径 + 普通可读文件，并对**解析后的真身**校属主（当前用户或 root）与可写位
+#: （同组/他人可写即拒 —— 那才是「被人改了内容再被我 source」的真实攻击面）。
+#:
+#: ⚠⚠ **TOCTOU 残余窗口（如实记，别当已消除）**（2026-07-24 审计 High）：
+#: 校验（`oprw_guard_ancestors` / `oprw_guard_owner_perm`）与真正 `source` 之间**仍有时间窗**——
+#: 纯 shell 里没有「按 inode/文件句柄执行」的手段（`source` 只能给路径、会重新查一次目录项）。
+#: 本轮把窗口**收窄**到：解析一次真身 → 只校真身 → **source 的就是校过的那个真身**（不再回头
+#: source 原始软链 `$se`，那等于把校验作废重解析一遍）＋ 真身的**每一级父目录**都不可被非可信用户
+#: 改写（父目录可写 = 攻击者能在窗口内 rename 换靶，只校末端文件挡不住）。
+#: 要**彻底**消除得换执行形态（按 O_NOFOLLOW 打开的稳定 fd / inode 复核后再从该 fd 执行），
+#: 属 shell 之外的改造；在此之前请把残余窗口当**已知残留风险**，别声称已消除。
+#: 另一条**未消除**的残留：入口 `$se` 自身若可被换靶，攻击者仍能在「若干个可信脚本」里挑一个让我们
+#: source（内容仍不可控，但选谁可控）——影响是「起了另一套 CANN 环境」而非任意代码执行，故不拒、只记。
 _SH_GUARDS = r'''set -u
 oprw_fail() { echo "$1"; exit 6; }
+oprw_qfind() {
+  # 安全查询的**唯一入口**：跑 find 谓词 → **先存退出码、再解释输出**。
+  # 审计 Medium：旧写法 `[ -n "$(find ... 2>/dev/null)" ]` 把「find 缺失/出错」和「未命中」混成同一件事
+  # —— 查询挂了 = 空输出 = 判定「安全」，于是 group/world-writable 的脚本一路放行。
+  # 现在查询失败一律 oprw_fail（查不动就拒，绝不当未命中）。命中结果留在变量 OPRW_QF_OUT 里。
+  oprw_qf_lbl="$1"; oprw_qf_p="$2"; shift 2
+  OPRW_QF_OUT=$(find -L "$oprw_qf_p" -maxdepth 0 "$@" 2>/dev/null); oprw_qf_rc=$?
+  # ⚠ `${...}` 不可省：bash 5.x 在 UTF-8 locale 下会把紧跟其后的中文字节吃进变量名（实测 unbound variable）。
+  [ "$oprw_qf_rc" -eq 0 ] || oprw_fail "OPRUNWAY_ACLNN_GUARD_FAIL ${oprw_qf_lbl} 安全查询失败(find rc=${oprw_qf_rc}；find 不可用或路径查不动即拒，不当作未命中): ${oprw_qf_p}"
+}
 oprw_guard_seg() {
   p="$1"; lbl="$2"; cur=""
   case "$p" in /*) ;; *) oprw_fail "OPRUNWAY_ACLNN_GUARD_FAIL $lbl 非绝对路径: $p" ;; esac
@@ -373,15 +483,41 @@ oprw_guard_seg() {
   done
   IFS="$oldifs"; set +f
 }
+oprw_guard_owner_perm() {
+  # 单个节点（文件或目录）的属主 / 可写位硬门：属主须**当前用户或 root**，且不得同组/他人可写。
+  # 第三参 kind=dir 时豁免「带 sticky 的可写目录」（如 /tmp 的 1777）：sticky 下非属主无法
+  # rename/unlink 他人条目 → 换靶前提不成立；kind=file **无**此豁免（内容可被直接改写）。
+  oprw_gn_lbl="$1"; oprw_gn_p="$2"; oprw_gn_kind="$3"
+  if [ "$oprw_gn_kind" = dir ]; then
+    oprw_qfind "$oprw_gn_lbl" "$oprw_gn_p" \( -perm -0020 -o -perm -0002 \) ! -perm -1000
+  else
+    oprw_qfind "$oprw_gn_lbl" "$oprw_gn_p" \( -perm -0020 -o -perm -0002 \)
+  fi
+  [ -z "$OPRW_QF_OUT" ] || oprw_fail "OPRUNWAY_ACLNN_GUARD_FAIL $oprw_gn_lbl 可被同组/他人写: $oprw_gn_p"
+  if [ ! -O "$oprw_gn_p" ]; then
+    oprw_qfind "$oprw_gn_lbl" "$oprw_gn_p" -user root
+    [ -n "$OPRW_QF_OUT" ] || oprw_fail "OPRUNWAY_ACLNN_GUARD_FAIL $oprw_gn_lbl 既非当前用户所有、也非 root 所有: $oprw_gn_p"
+  fi
+}
+oprw_guard_ancestors() {
+  # 逐级校验 <path> 的**所有父目录**直到 `/`。只校末端文件是不够的：任一级父目录能被非可信用户
+  # 改写，攻击者就能在「校验通过」与「真正 source」之间把该级目录项 rename 换靶到自己的脚本。
+  oprw_ga_lbl="$1"; oprw_ga_cur="${2%/*}"
+  while : ; do
+    [ -n "$oprw_ga_cur" ] || oprw_ga_cur="/"
+    oprw_guard_owner_perm "$oprw_ga_lbl 父目录" "$oprw_ga_cur" dir
+    [ "$oprw_ga_cur" = "/" ] && break
+    oprw_ga_cur="${oprw_ga_cur%/*}"
+  done
+}
 oprw_guard_root() {
   r="$1"; lbl="$2"
   oprw_guard_seg "$r" "$lbl"
   if [ -e "$r" ]; then
     [ -d "$r" ] || oprw_fail "OPRUNWAY_ACLNN_GUARD_FAIL $lbl 不是目录: $r"
     [ -O "$r" ] || oprw_fail "OPRUNWAY_ACLNN_GUARD_FAIL $lbl 非当前用户所有（共享机换靶面）: $r"
-    if [ -n "$(find "$r" -maxdepth 0 \( -perm -0020 -o -perm -0002 \) 2>/dev/null)" ]; then
-      oprw_fail "OPRUNWAY_ACLNN_GUARD_FAIL $lbl 可被同组/他人写: $r"
-    fi
+    oprw_qfind "$lbl" "$r" \( -perm -0020 -o -perm -0002 \)
+    [ -z "$OPRW_QF_OUT" ] || oprw_fail "OPRUNWAY_ACLNN_GUARD_FAIL $lbl 可被同组/他人写: $r"
   fi
 }
 oprw_sha256() {
@@ -389,11 +525,33 @@ oprw_sha256() {
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
   else echo ""; fi
 }
+oprw_realpath() {
+  # 解析真身路径 → stdout；**成功才 return 0**，失败一律「不打印 + 返回非零」。
+  # ⚠ 本函数注定在**命令替换子 shell** 里被调用 → 这里调 oprw_fail 只会杀子 shell、杀不掉主脚本，
+  #   且错误串会被当成路径吞回去。故失败靠 rc 上报，由调用方 fail-closed。
+  # 审计 Medium：旧实现「无实现/解析失败就退回原始路径」= 等于没解析，安全工具失败反而放行。
+  if command -v realpath >/dev/null 2>&1; then oprw_rp_o=$(realpath "$1" 2>/dev/null); oprw_rp_rc=$?
+  elif command -v readlink >/dev/null 2>&1; then oprw_rp_o=$(readlink -f "$1" 2>/dev/null); oprw_rp_rc=$?
+  else return 90; fi
+  [ "$oprw_rp_rc" -eq 0 ] || return 91
+  [ -n "$oprw_rp_o" ] || return 92
+  case "$oprw_rp_o" in /*) ;; *) return 93 ;; esac
+  printf '%s\n' "$oprw_rp_o"
+}
 oprw_setenv() {
   se="$1"
-  oprw_guard_seg "$se" setenv
-  [ -f "$se" ] && [ -r "$se" ] || { echo "OPRUNWAY_ACLNN_SETENV_MISSING $se"; exit 2; }
-  set +u; source "$se"; rc=$?; set -u
+  case "$se" in /*) ;; *) oprw_fail "OPRUNWAY_ACLNN_GUARD_FAIL setenv 非绝对路径: $se" ;; esac
+  # 「不存在」先于「解析」判：BSD realpath 对不存在路径直接报错，不先判会把「这台机没装 CANN」
+  # 误报成安全拒绝（两者归因完全不同：MISSING=exit 2 可换机，GUARD_FAIL=exit 6 是安全门）。
+  [ -e "$se" ] || { echo "OPRUNWAY_ACLNN_SETENV_MISSING $se"; exit 2; }
+  ser=$(oprw_realpath "$se"); rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$ser" ] || oprw_fail "OPRUNWAY_ACLNN_GUARD_FAIL setenv 真身路径解析失败(rc=${rc}；realpath/readlink 不可用或解析不出)——解析不出就不敢 source: ${se}"
+  [ -f "$ser" ] && [ -r "$ser" ] || { echo "OPRUNWAY_ACLNN_SETENV_MISSING $se"; exit 2; }
+  oprw_guard_owner_perm "setenv" "$ser" file
+  oprw_guard_ancestors "setenv" "$ser"
+  # ⚠ source 的是**校过的真身**（变量 ser），不是原始入口（变量 se）——source 原始入口会重新解析
+  #   一次软链，等于把上面的校验作废（攻击者换靶入口即可绕过）。残余 TOCTOU 窗口见本常量顶部注释。
+  set +u; source "$ser"; rc=$?; set -u
   [ $rc -eq 0 ] || { echo "OPRUNWAY_ACLNN_SETENV_FAIL $se rc=$rc"; exit 2; }
   [ -n "${ASCEND_TOOLKIT_HOME:-}" ] || { echo OPRUNWAY_ACLNN_NO_TOOLKIT; exit 2; }
   [ -d "$ASCEND_TOOLKIT_HOME" ] || { echo "OPRUNWAY_ACLNN_NO_TOOLKIT $ASCEND_TOOLKIT_HOME"; exit 2; }
@@ -596,31 +754,113 @@ _RUNTIME_FILES = ("__init__.py", "base.py", "acl_consts.py", "aclnn_runner.py",
 # 运行时 env 前置段（exec / perf 共用，避免两份漂移）。占位符由 `_render` 替换。
 # ⚠ `source ... || true` 已按审计 Medium#7 改为 `oprw_setenv`（失败立即退出 + 校 CANN 环境真起来），
 #   否则 set_env.sh 加载失败会被吞掉、跑在登录 shell 里残留的另一套 CANN 上。
+#
+# ⚠ **两条真机实测的血教训**（2026-07-24 a3 首跑 aclnn_py 通路，此前该通路从未真机跑过）：
+#   · bug#4 —— **绝不把 `$ASCEND_TOOLKIT_HOME/devlib` 塞进 LD_LIBRARY_PATH**。devlib 里是**链接期
+#     stub 库**，运行期加载即 `stub library cannot be used for execution` → `aclInit failed with ACL
+#     status 500000`，exec/perf 100% 必死。二分证据：只前置 `lib64` → `aclInit=0` 正常；只前置
+#     `devlib` → stub 错。运行期一律用 `lib64` 的真库。
+#   · bug#5 —— **绝不覆盖 `ASCEND_OPP_PATH`**。它是 CANN 自己的 opp 根（kernel 查找靠它）；旧代码
+#     `export ASCEND_OPP_PATH="$VROOT"`（install-path）把它顶掉 → 60/60 用例
+#     `aclnn<Op>GetWorkspaceSize failed with ACL status 561103`（找不到 kernel）。对照证据：
+#     `=CANN 真根 → 60/60 pass`；`=install-path → 0/60`。而 custom lib 由
+#     `aclnn_runner._find_custom_opapi_libs` **来源①**（`ASCEND_CUSTOM_OPP_PATH`，即下面这行、也是
+#     install 生成的 set_env.bash 导的那个）就已找到 —— 那行覆盖既多余又有害，直接删。
+#     真要加 vendors glob 兜底也只能用**追加**语义（`"$VROOT:${ASCEND_OPP_PATH}"`），绝不覆盖。
 _ENV_PREAMBLE = _SH_GUARDS + r'''oprw_setenv @@SETENV@@
 VROOT=@@VENDOR_DIR@@
 oprw_guard_root "$VROOT" vendor_dir
 VC="$VROOT/vendors/@@VENDOR_NAME@@_nn"
 oprw_guard_seg "$VC" vendor_content
 [ -d "$VC" ] || { echo "OPRUNWAY_ACLNN_NO_VENDOR $VC"; exit 2; }
-export ASCEND_OPP_PATH="$VROOT"
 export ASCEND_CUSTOM_OPP_PATH="$VC:${ASCEND_CUSTOM_OPP_PATH:-}"
-export LD_LIBRARY_PATH="$VC/op_api/lib:${ASCEND_TOOLKIT_HOME}/lib64:${ASCEND_TOOLKIT_HOME}/devlib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$VC/op_api/lib:${ASCEND_TOOLKIT_HOME}/lib64:${LD_LIBRARY_PATH:-}"
 cd @@RROOT@@ || { echo OPRUNWAY_ACLNN_NO_RROOT; exit 2; }
 '''
+
+
+def _explicit_op_dir(cfg, plan=None):
+    """调用方**显式**给的 aclnn 头搜索目录 → `(值, 来源标签)`；没给 → `(None, None)`。
+
+    显式来源只此两条（都由编排层/用户主动写下，故「尊重显式」）：
+      ① perf plan 的 `op_dir`（spec → `run_workflow._PERF_PLAN_KEYS` → `_perf_plan.json`）；
+      ② env `OPRUNWAY_ACLNN_OP_DIR`（现有用法：指向**源码树**里的 op 目录）。
+    值是**目标机上的路径**，故过 `_check_remote_path`（绝对 / 无 `..` / 无 shell 特殊字符 / 段不以 `-` 开头）
+    ——它会被拼进容器内命令行与上送的 plan，非法即 fail-closed，绝不带着可疑串发出去。
+    """
+    import repo_adapter as RA
+    for raw, label in (((plan or {}).get("op_dir"), "perf plan 的 op_dir"),
+                       (cfg.get("op_dir"), "env OPRUNWAY_ACLNN_OP_DIR")):
+        if raw is None:
+            continue
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError(f"{label}={raw!r} 非法——须是非空字符串（目标机上的绝对路径），fail-closed")
+        val = raw.strip()
+        RA._check_remote_path(f"op_dir（{label}）", val)
+        return val, label
+    return None, None
+
+
+def _op_dir_arg(cfg, paths, plan=None):
+    """本次跑测**实际生效**的 aclnn 头搜索目录 → `(值, 来源人话)`。精度 / 性能共用这一个决策点。
+
+    优先级：`_explicit_op_dir`（plan → env）→ **默认 = 本次 DUT 的 vendor 内容根 `paths["vc"]`**。
+
+    ⚠ 为什么必须永远显式传（堵最后一条「本次 install 之外的东西参与验收」的口子）：
+    driver 的 `_header_dirs` 回退链末位是 **env `ASCEND_CUSTOM_OPP_PATH` 冒号分隔的每一段**，
+    而 `_ENV_PREAMBLE` 是**追加**语义（`"$VC:${ASCEND_CUSTOM_OPP_PATH:-}"`，bug#5 的教训所致）——
+    继承来的**旧 vendor 段仍在列表里**，`_SignatureResolver.get()` 逐目录 try、第一个 parse 成功就用。
+    于是 `$VC` 的头一旦解析不出（落点层级不同、符号名不匹配…），签名就**静默**取自上次安装的旧头。
+    `.so` 已被 `--dut-vendor-root` / plan 的 `dut_vendor_root` 钉死，后果多是崩而非静默算错，
+    但「旧头定 arity/ABI」仍是本次 install 之外的东西参与验收。故这里**永远填一个可信值**，
+    让 driver 走 `_header_dirs` 的第一支、根本落不到 env 回退；解析不出就 fail-closed（见 `_op_dir_note`）。
+    （`_header_dirs` 的回退链本身在 `aclnn_runtime/aclnn_driver.py`，本模块不动它——只保证不去踩它。）
+    """
+    val, label = _explicit_op_dir(cfg, plan)
+    if val:
+        return val, f"调用方显式指定，来源 = {label}"
+    return paths["vc"], "默认 = 本次 DUT 的 vendor 内容根，即本次 build/install 落地处"
+
+
+def _op_dir_note(cfg, paths, plan=None):
+    """报错里那句人话：本次用的头目录是哪个、为什么、解析不出该怎么办（精度 / 性能失败共用）。"""
+    val, why = _op_dir_arg(cfg, paths, plan)
+    return (f"本次 aclnn 头搜索目录 = {val!r}（{why}）。日志里若是「取不到 aclnn<Symbol>GetWorkspaceSize "
+            f"的头签名」，即**该目录下没找到可解析的 aclnn 头**——本模块已不再回退到容器里继承的 "
+            f"ASCEND_CUSTOM_OPP_PATH 旧 vendor 头（那等于让本次 install 之外的东西参与验收），"
+            f"请用 driver 的 `--op-dir` / perf plan 的 `op_dir`（或 env OPRUNWAY_ACLNN_OP_DIR）显式指定。")
 
 
 def _exec_script(cfg, paths):
     """组装容器内 **运行时 env + 跑 aclnn_driver** 一段 shell（§9.6 运行时 env；driver 只产 out_k.bin、不判定）。
 
-    运行时 env（§9.6）：`ASCEND_CUSTOM_OPP_PATH` 指 vendor 内容根、`LD_LIBRARY_PATH` 前置 vendor op_api/lib
-    + CANN lib64/devlib。⚠ 另置 `ASCEND_OPP_PATH=<vendor_dir>`（install-path）：`aclnn_runner._find_custom_opapi_libs`
-    以 `Path($ASCEND_OPP_PATH).glob('vendors/*/op_api/lib/libcust_opapi.so')` **单路径** glob custom lib——
-    须指到含 `vendors/` 的 install-path 才 glob 得到（不改 aclnn_runner，令 env 迁就其契约）。真机待验。"""
+    运行时 env（§9.6，已按真机实测收敛）：`ASCEND_CUSTOM_OPP_PATH` 指 vendor 内容根（custom lib 由它找到
+    = `_find_custom_opapi_libs` 来源①；**头不再靠它** —— 头目录已由 `--op-dir` 显式钉死，见下）、`LD_LIBRARY_PATH` 前置
+    vendor `op_api/lib` + CANN **lib64**（**不含 devlib**：那是链接期 stub，见 `_ENV_PREAMBLE` bug#4）。
+    `ASCEND_OPP_PATH` **原样保留 CANN 自己的值、绝不覆盖**（覆盖 → kernel 全找不到，bug#5）。
+
+    ⚠ **DUT 必须显式声明**（runner 改动⑪的 host 侧对接）：driver 默认走严格档
+    （`require_custom_vendor=True`），不给 `--dut-lib` / `--dut-vendor-root` 即构造期 fail-closed。
+    这里传的是 `--dut-vendor-root "$VC"`——`$VC` 就是本段 env 前置里算出的 vendor **内容根**
+    （`_ENV_PREAMBLE` 的 `VC="$VROOT/vendors/<name>_nn"`，与 `ASCEND_CUSTOM_OPP_PATH` 首段同一个值），
+    故「精度跑的 so」= 「本次 build install 落地的 so」，环境里继承来的**上次**安装产物再也代跑不了。
+    用内容根而非 `.so` 绝对路径：口径与 env 只此一处（`$VC`），不再拼第二套 `op_api/lib/...` 推导。
+
+    ⚠ **`--op-dir` 同理必须显式给**（堵签名解析这条口子）：不给 → driver 的 `_header_dirs` 会退到
+    `ASCEND_CUSTOM_OPP_PATH`，而 `_ENV_PREAMBLE` 是追加语义 → **继承来的旧 vendor 头**仍在搜索列表里、
+    第一个 parse 成功就用（详见 `_op_dir_arg`）。故：调用方显式给了就尊重（`OPRUNWAY_ACLNN_OP_DIR`
+    指源码树 op 目录的现有用法照旧），没给就默认 `"$VC"`——与 `--dut-vendor-root` 同源同一个 shell 变量，
+    「解析签名的头」与「真正加载的 so」自此出自同一次 install。"""
     import shlex
     q = shlex.quote
+    # 显式值经 `_check_remote_path` 白名单（`[A-Za-z0-9_./-]`，不含 `@`）→ 直接内联进模板不会被
+    # `_render` 误认作占位符；缺省则用 shell 变量 `"$VC"`（与 --dut-vendor-root 同源，不新增占位符）。
+    od, _why = _explicit_op_dir(cfg)
+    od_arg = q(od) if od else '"$VC"'
     tmpl = _ENV_PREAMBLE + (
         'python -m aclnn_runtime.aclnn_driver @@CASESET@@ @@ROUT@@ --work-dir @@RCASES@@ '
-        '--device @@DEVICE@@ && echo OPRUNWAY_ACLNN_EXEC_DONE '
+        '--device @@DEVICE@@ --op-dir ' + od_arg + ' --dut-vendor-root "$VC" '
+        '&& echo OPRUNWAY_ACLNN_EXEC_DONE '
         '|| { echo OPRUNWAY_ACLNN_EXEC_FAIL; exit 4; }\n')
     repl = {"@@SETENV@@": q(cfg["setenv"]), "@@VENDOR_DIR@@": q(cfg["vendor_dir"]),
             "@@VENDOR_NAME@@": cfg["vendor_name"], "@@RROOT@@": q(cfg["rroot"]),
@@ -645,6 +885,10 @@ def _perf_script(cfg, paths):
     与 exec 共用运行时 env 前置段；另置 `OPRUNWAY_ACLNN_REAL=1`——采集模块自己有真机 gate
     （`perf_msprof._require_real_gate`），容器侧不显式带上就跑不起来（fail-closed 方向正确）。
     采集只产计时数与行为分类，**不判定**（裁决归 perf_compare）。
+
+    ⚠ 性能侧的 **DUT 声明不走命令行**，而是随 **perf plan 文件**（`@@PLAN@@`）上送——
+    由 `collect_perf` 往 `remote_plan` 写 `dut_vendor_root`（+ `vendor_dir`/`vendor_name` 冗余），
+    容器侧 `perf_msprof.resolve_plan_dut_lib` 解析；定不出即 fail-closed，绝不从容器 env 猜。
     """
     import shlex
     q = shlex.quote
@@ -671,7 +915,28 @@ def load_perf_plan(work):
         plan = json.load(f)
     if not isinstance(plan, dict):
         raise ValueError(f"{PERF_PLAN_FILE} 须为 JSON object，得 {type(plan).__name__}")
+    _plan_bool(plan, "allow_builtin_symbols")   # 早失败：严格档字段类型不对，别等真机跑完才炸
     return plan
+
+
+def _plan_bool(plan, key, default=False):
+    """perf plan 的**严格布尔**取值：只认真正的 JSON `true` / `false`（fail-closed）。
+
+    审计 Medium：`bool("false")` / `bool("0")` 都是 **True**——外部或手写的 plan 把 JSON 布尔误写成
+    字符串，`allow_builtin_symbols` 就被悄悄打开、关掉 custom-vendor provenance 硬门，于是
+    「精度验的是 custom vendor、性能却测到 CANN 内置同名实现」这种假 PASS 从这里溜进来。
+    字段缺省 → `default`；字段在但不是 `bool` → **立刻抛错**（宁可停下报错，绝不猜用户想表达什么）。
+    调用方拿到的已是真 bool，**下游不得再 `bool(...)` 二次解释**（那又把宽松真值放回来了）。
+    """
+    if key not in plan:
+        return default
+    v = plan[key]
+    if not isinstance(v, bool):
+        raise ValueError(
+            f"{PERF_PLAN_FILE} 的 {key} 须为 JSON 布尔（true / false），得 {v!r}"
+            f"（{type(v).__name__}）——字符串 \"false\" / \"0\" 一律不接受："
+            f"宽松真值会把严格档悄悄关掉（=放行 CANN 内置同名实现，正是本项目要防的假 PASS）")
+    return v
 
 
 def _perf_enabled(plan):
@@ -715,7 +980,25 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
                    "warmup": int(plan.get("warmup", PM.DEFAULT_WARMUP)),
                    "repeat": int(plan.get("repeat", PM.DEFAULT_REPEAT)),
                    "device": int(cfg["device"]),
-                   "op_dir": plan.get("op_dir"),
+                   # aclnn **头搜索目录**：plan / env 显式给了就尊重，没给则默认本次 DUT 的 vendor
+                   # 内容根 `paths["vc"]`（= `_ENV_PREAMBLE` 的 `$VC`、= 精度侧 `--op-dir` 的缺省值）。
+                   # 旧写法 `plan.get("op_dir")` 缺省是 `None` → 容器侧 `_SignatureResolver` 退到
+                   # `ASCEND_CUSTOM_OPP_PATH`，把**继承来的旧 vendor 头**也纳入搜索（追加语义所致）
+                   # → 签名可能静默取自上次安装。这里永远填一个可信值，让它落不到那条回退支。
+                   "op_dir": _op_dir_arg(cfg, paths, plan)[0],
+                   # 本次 DUT 声明（runner 改动⑪的 host 侧对接）：性能侧同样走严格档，
+                   # `perf_msprof.resolve_plan_dut_lib` 只认 plan 显式给的字段、**绝不从容器 env 猜**
+                   # （env 里可能继承着上次安装的陈旧 vendor —— 那正是「旧产物代跑报假 PASS」的入口）。
+                   # 直接给**内容根** `paths["vc"]`（= `_ENV_PREAMBLE` 的 `$VC`，同一处算出，
+                   # 走解析链第②条，少一层推导）；`vendor_dir` + `vendor_name` 作同口径的第③条来源冗余，
+                   # 三者由同一个 cfg 派生、天然一致（`_aclnn_paths` 的 vc 与 resolve 的 ③ 是同一个公式）。
+                   "dut_vendor_root": paths["vc"],
+                   "vendor_dir": cfg["vendor_dir"],
+                   "vendor_name": cfg["vendor_name"],
+                   # 性能侧符号严格档开关（同 aclnn_driver 的 --allow-builtin-symbols）：缺省 false
+                   # = 严格，防「精度验 custom vendor、性能测 CANN 内置同名实现」。
+                   # 取值走 _plan_bool（只认真 bool）——**别退回 `bool(...)`**：那会把 "false"/"0" 判成开。
+                   "allow_builtin_symbols": _plan_bool(plan, "allow_builtin_symbols"),
                    "torch_baseline": plan.get("torch_baseline"),
                    "cases": selected, "skipped": skipped}
     plan_local = os.path.join(work, "_aclnn_perf_plan_sent.json")
@@ -729,7 +1012,8 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
     blob = (rp.stdout or "") + (rp.stderr or "")
     if rp.returncode != 0 or "OPRUNWAY_ACLNN_PERF_DONE" not in blob:
         notes.append(f"[aclnn_py] 真机性能采集失败 rc={rp.returncode}（精度证据不受影响；"
-                     f"性能一律 us=None → perf_compare 挂起，不冒充达标）:\n{blob[-1500:]}")
+                     f"性能一律 us=None → perf_compare 挂起，不冒充达标）。"
+                     f"{_op_dir_note(cfg, paths, plan)}\n{blob[-1500:]}")
         return {}, PM.build_baseline_document([], op=caseset.get("op"), skipped=skipped), notes
 
     # ④ 拉回采集结果 → 组 custom us map + torch_npu 基线文档。
@@ -846,7 +1130,8 @@ def _run_aclnn_real(cfg, proj, caseset, work_dir, out_dir):
     re_ = RA._shell(host, escript, timeout=2400, check=False, capture=True)
     eblob = (re_.stdout or "") + (re_.stderr or "")
     if re_.returncode != 0 or "OPRUNWAY_ACLNN_EXEC_DONE" not in eblob:
-        raise RuntimeError(f"[aclnn_py] 真机 exec 失败 rc={re_.returncode}:\n{eblob[-2000:]}")
+        raise RuntimeError(f"[aclnn_py] 真机 exec 失败 rc={re_.returncode}。"
+                           f"{_op_dir_note(cfg, paths)}\n{eblob[-2000:]}")
 
     # 4) collect：拉回 out_manifest.json + 各 out_k.bin（据 manifest 逐个拉）。
     #    ⚠ manifest 来自**远端**（审计 High#4：它是不可信输入）——其 `path` 与 `case_id` 必须过与输入侧

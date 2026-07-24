@@ -5,8 +5,10 @@
      真机传输原语 _shell/_copy_to/_copy_from 全打桩，绝不发起 ssh/scp/git/build。）
 
 覆盖（全部 op-中立、据 spec/caseset/cfg 字段驱动，**无算子名分支**）：
-  · find_aclnn_project：**ops-<族>仓形态**判据（仓根 build.sh + op 子目录 op_host/ + op_api/aclnn_*.h，
-    §9.4/§9.6 实测收敛，不再要 per-op build.sh / op_graph）+ 软链守卫 + op_subdir 安全校验 + 缺件 fail-closed；
+  · find_aclnn_project：**ops-<族>仓形态**判据（仓根 build.sh + op 子目录 op_host/ + **在 op 子目录下
+    有界递归**能找到 aclnn_*.h——`op_api/`、`op_host/op_api/`（PR6429 真实布局）、`op_api/include/` 都认，
+    §9.4/§9.6 实测收敛，不再要 per-op build.sh / op_graph）+ 软链守卫 + op_subdir 安全校验 + 缺件 fail-closed
+    （报错列出实际扫过的目录 / .h / 跳过的软链）；
   · _aclnn_cfg：关键项缺失 fail-closed、snake_op 从 op_subdir 末段派生、PR-ref/URL 白名单；
   · build 配方组装（§9.6）：git fetch PR head / 仓根 build.sh 六参 / .run --install-path /
     pigz+dos2unix 依赖门 shim / vendor 落地目录补 `_nn`；exec 运行时 env；
@@ -33,7 +35,9 @@
 import contextlib
 import json
 import os
+import shlex
 import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -122,6 +126,7 @@ def _cfg_env(ops_root, **over):
          "OPRUNWAY_ACLNN_SOC": "ascend910_93",
          "OPRUNWAY_SSH_HOST": None,
          "OPRUNWAY_ACLNN_SNAKE_OP": None,
+         "OPRUNWAY_ACLNN_OP_DIR": None,          # 缺省不显式给 → 默认落到本次 DUT 的 vendor 内容根
          "OPRUNWAY_ACLNN_PROXY": None,
          "OPRUNWAY_ACLNN_REBUILD": None,
          "OPRUNWAY_ACLNN_REUSE_BUILD": None,     # 验收模式默认强制重建（审计 High#1）
@@ -132,8 +137,12 @@ def _cfg_env(ops_root, **over):
 
 
 def _make_ops_repo(root, op_subdir=_OP_SUBDIR, repo_build=True, op_host=True,
-                   op_api=True, header=True):
-    """造一个 ops-<族>仓 checkout 形态：仓根 build.sh + <op_subdir>/{op_host,op_api/aclnn_*.h}。"""
+                   op_api=True, header=True, api_rel="op_api"):
+    """造一个 ops-<族>仓 checkout 形态：仓根 build.sh + <op_subdir>/{op_host, <api_rel>/aclnn_*.h}。
+
+    `api_rel` = 接口头所在目录**相对 op 子目录**的路径（默认 `op_api`——旧的一层布局；
+    真实 PR6429 是 `op_host/op_api`）。工具侧不预设是哪一层，故夹具也把它做成参数。
+    """
     if repo_build:
         open(os.path.join(root, "build.sh"), "w").close()
     d = os.path.join(root, *op_subdir.split("/"))
@@ -141,9 +150,10 @@ def _make_ops_repo(root, op_subdir=_OP_SUBDIR, repo_build=True, op_host=True,
     if op_host:
         os.makedirs(os.path.join(d, "op_host"), exist_ok=True)
     if op_api:
-        os.makedirs(os.path.join(d, "op_api"), exist_ok=True)
+        api_dir = os.path.join(d, *api_rel.split("/"))
+        os.makedirs(api_dir, exist_ok=True)
         if header:
-            with open(os.path.join(d, "op_api", "aclnn_median.h"), "w") as f:
+            with open(os.path.join(api_dir, "aclnn_median.h"), "w") as f:
                 f.write("aclnnStatus aclnnMedianGetWorkspaceSize(const aclTensor *self, ...);\n")
     return d
 
@@ -207,7 +217,8 @@ def _emit_mock_outputs(caseset, work, out_dir):
 
 
 class FindAclnnProjectTest(unittest.TestCase):
-    """ops-<族>仓形态判据（§9.4/§9.6 收敛）：仓根 build.sh + op 子目录 op_host/ + op_api/aclnn_*.h。"""
+    """ops-<族>仓形态判据（§9.4/§9.6 收敛）：仓根 build.sh + op 子目录 op_host/ +
+    **在 op 子目录下（有界递归、含 op_host/op_api/）能找到** aclnn_*.h。"""
 
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="aclnn_repo_")
@@ -217,6 +228,43 @@ class FindAclnnProjectTest(unittest.TestCase):
         _make_ops_repo(self.root)
         self.assertEqual(A.find_aclnn_project("Median", self.root, _OP_SUBDIR),
                          os.path.realpath(self.root))
+
+    def test_real_pr_layout_header_under_op_host_op_api(self):
+        """真实 PR6429 布局：`<op_subdir>/op_host/op_api/aclnn_median.h`，`<op_subdir>/` 下**无** op_api/。
+        旧判据钉死一层 → 真 PR 被误判「非域内」硬阻塞（dogfood 实测）。必须过 gate。"""
+        d = _make_ops_repo(self.root, api_rel="op_host/op_api")
+        self.assertFalse(os.path.exists(os.path.join(d, "op_api")))
+        self.assertTrue(os.path.isfile(os.path.join(d, "op_host", "op_api", "aclnn_median.h")))
+        self.assertEqual(A.find_aclnn_project("Median", self.root, _OP_SUBDIR),
+                         os.path.realpath(self.root))
+
+    def test_header_under_op_api_include_also_ok(self):
+        """`op_api/include/aclnn_*.h`（另一种已知落点）同样放行——工具不预设头在哪一层。"""
+        _make_ops_repo(self.root, api_rel="op_api/include")
+        self.assertEqual(A.find_aclnn_project("Median", self.root, _OP_SUBDIR),
+                         os.path.realpath(self.root))
+
+    def test_header_beyond_max_depth_not_counted(self):
+        """深度有界：超出 `_HEADER_MAX_DEPTH` 的头不算数（防遍历爆炸；越界即 fail-closed）。"""
+        deep = os.path.join(*(["a"] * (A._HEADER_MAX_DEPTH + 1)))
+        _make_ops_repo(self.root, api_rel=deep)
+        with self.assertRaises(ValueError) as e:
+            A.find_aclnn_project("Median", self.root, _OP_SUBDIR)
+        self.assertIn("aclnn_*.h", str(e.exception))
+
+    def test_error_lists_scanned_dirs_and_files(self):
+        """报错须列出**实际扫到了哪些目录 / .h 文件**——否则用户猜不到接口头该放哪（U1 反馈）。"""
+        d = _make_ops_repo(self.root, header=False)
+        os.makedirs(os.path.join(d, "tests"), exist_ok=True)
+        with open(os.path.join(d, "op_api", "aclnn_median_impl.h"), "w") as f:
+            f.write("// impl only\n")
+        with self.assertRaises(ValueError) as e:
+            A.find_aclnn_project("Median", self.root, _OP_SUBDIR)
+        msg = str(e.exception)
+        self.assertIn("实际扫描", msg)
+        self.assertIn("扫过的目录", msg)
+        for expect in ("op_api", "op_host", "tests", "aclnn_median_impl.h"):
+            self.assertIn(expect, msg)
 
     def test_no_op_graph_and_no_per_op_build_sh_still_ok(self):
         """§9.4 实测：ops-nn 框架内算子**无** per-op build.sh、**无** op_graph —— 不再要求，须放行。"""
@@ -258,6 +306,23 @@ class FindAclnnProjectTest(unittest.TestCase):
         with self.assertRaises(ValueError) as e:
             A.find_aclnn_project("Median", self.root, _OP_SUBDIR)
         self.assertIn("aclnn_*.h", str(e.exception))
+
+    def test_symlinked_header_in_nested_layout_not_counted(self):
+        """深层布局下的软链头同样不算数（软链能指到仓外另一份源）→ fail-closed，且报错如实列出被跳过的软链。"""
+        d = _make_ops_repo(self.root, api_rel="op_host/op_api", header=False)
+        outside = tempfile.mkdtemp(prefix="aclnn_outside_")
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        src = os.path.join(outside, "aclnn_median.h")
+        open(src, "w").close()
+        try:
+            os.symlink(src, os.path.join(d, "op_host", "op_api", "aclnn_median.h"))
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink 不可用")
+        with self.assertRaises(ValueError) as e:
+            A.find_aclnn_project("Median", self.root, _OP_SUBDIR)
+        msg = str(e.exception)
+        self.assertIn("跳过的软链", msg)
+        self.assertIn("op_host/op_api/aclnn_median.h", msg)
 
     def test_nonexistent_op_subdir_fail_closed(self):
         _make_ops_repo(self.root)
@@ -554,7 +619,10 @@ class BuildRecipeScriptTest(unittest.TestCase):
                   self._script_of(A._deploy_reset_script)):
             # 旧写法 `source <setenv> || true`（或 `. <setenv> || true`）一律不许再出现
             self.assertEqual([], _re.findall(r"(?:^|\s)(?:source|\.)\s+\S*set_env[^\n]*\|\|\s*true", s))
-            self.assertIn('set +u; source "$se"; rc=$?; set -u', s)
+            # source 的必须是**校过的真身 $ser**：source 原始入口 $se 会重新解析一次软链，
+            # 把前面的属主/权限校验作废（TOCTOU 换靶面，2026-07-24 审计 High）。
+            self.assertIn('set +u; source "$ser"; rc=$?; set -u', s)
+            self.assertNotIn('source "$se"; ', s)
             self.assertIn('[ $rc -eq 0 ] ||', s)
         s = self._script()
         for token in ("oprw_setenv", "OPRUNWAY_ACLNN_SETENV_MISSING", "OPRUNWAY_ACLNN_SETENV_FAIL",
@@ -615,11 +683,426 @@ class BuildRecipeScriptTest(unittest.TestCase):
             s = A._exec_script(cfg, A._aclnn_paths(cfg))
         self.assertIn('VC="$VROOT/vendors/customize_nn"', s)
         self.assertIn('export ASCEND_CUSTOM_OPP_PATH="$VC:${ASCEND_CUSTOM_OPP_PATH:-}"', s)
-        self.assertIn('export ASCEND_OPP_PATH="$VROOT"', s)        # aclnn_runner 单路径 glob custom lib
-        self.assertIn("$VC/op_api/lib:${ASCEND_TOOLKIT_HOME}/lib64:${ASCEND_TOOLKIT_HOME}/devlib", s)
         self.assertIn("python -m aclnn_runtime.aclnn_driver", s)
         self.assertIn("--device 0", s)
         self.assertIn("OPRUNWAY_ACLNN_EXEC_DONE", s)
+
+    def test_exec_script_declares_dut_vendor_root_to_driver(self):
+        """**精度通路的 DUT 传递链**（runner 改动⑪ host 侧对接）：
+
+        driver 默认严格档（`require_custom_vendor=True`），不给 `--dut-lib` / `--dut-vendor-root`
+        构造即 fail-closed → 不补这一环，真机精度**一例都跑不起来**。这里钉住：
+        命令行确实带 `--dut-vendor-root`，且值就是本段 env 算出的 vendor **内容根** `$VC`
+        （= `ASCEND_CUSTOM_OPP_PATH` 首段、= 本次 install 落地目录），不是另拼的第二套路径。
+        """
+        with _env(**_cfg_env(self.root)):
+            cfg = A._aclnn_cfg()
+            s = A._exec_script(cfg, A._aclnn_paths(cfg))
+        # ① `$VC` 就是本次 install 的 vendor 内容根（与 _aclnn_paths 的 vc 同一个值）
+        self.assertIn('VC="$VROOT/vendors/customize_nn"', s)
+        # ② driver 命令行带 DUT 声明，且值 == "$VC"（同一行命令内，不是散落在别处的字样）
+        cmd = [ln for ln in s.splitlines() if "aclnn_runtime.aclnn_driver" in ln]
+        self.assertEqual(1, len(cmd))
+        self.assertIn('--dut-vendor-root "$VC"', cmd[0])
+        # ③ 严格档不得被顺手关掉——放行内置实现 = 本项目一直在防的假 PASS
+        self.assertNotIn("--allow-builtin-symbols", s)
+
+    def test_exec_script_pins_op_dir_to_this_dut_vendor_root_by_default(self):
+        """**签名解析这条口子**：不显式传 `--op-dir`，driver 的 `_header_dirs` 会退到
+        `ASCEND_CUSTOM_OPP_PATH`；而 `_ENV_PREAMBLE` 是**追加**语义（`"$VC:${ASCEND_CUSTOM_OPP_PATH:-}"`）
+        → 继承来的**旧 vendor 头**仍在搜索列表里，第一个 parse 成功就用 = 本次 install 之外的东西参与验收。
+
+        故缺省必须显式钉 `--op-dir "$VC"`——与 `--dut-vendor-root` 同一个 shell 变量、同一次 install：
+        「解析签名的头」与「真正加载的 so」自此同源。
+        """
+        with _env(**_cfg_env(self.root)):
+            cfg = A._aclnn_cfg()
+            s = A._exec_script(cfg, A._aclnn_paths(cfg))
+        cmd = [ln for ln in s.splitlines() if "aclnn_runtime.aclnn_driver" in ln]
+        self.assertEqual(1, len(cmd))
+        self.assertIn('--op-dir "$VC"', cmd[0])
+        # 与 DUT 声明同源（同一行、同一个 $VC），不是另拼的第二套路径
+        self.assertIn('--dut-vendor-root "$VC"', cmd[0])
+
+    def test_exec_script_respects_explicit_op_dir(self):
+        """显式给了就尊重（保留「`OPRUNWAY_ACLNN_OP_DIR` 指源码树 op 目录」的现有用法）——
+        默认值只在缺省时生效，绝不覆盖调用方的显式选择。"""
+        explicit = "/tmp/oprunway_aclnn_rr/aclnn_src/" + _OP_SUBDIR
+        with _env(**_cfg_env(self.root, OPRUNWAY_ACLNN_OP_DIR=explicit)):
+            cfg = A._aclnn_cfg()
+            s = A._exec_script(cfg, A._aclnn_paths(cfg))
+        cmd = [ln for ln in s.splitlines() if "aclnn_runtime.aclnn_driver" in ln]
+        self.assertEqual(1, len(cmd))
+        self.assertIn(f"--op-dir {shlex.quote(explicit)}", cmd[0])
+        self.assertNotIn('--op-dir "$VC"', cmd[0])          # 显式值没被默认值顶掉
+
+    def test_explicit_op_dir_must_be_safe_absolute_path(self):
+        """显式值会被拼进容器内命令行 → 过 `_check_remote_path`（绝对 / 无 `..` / 无 shell 特殊字符）。
+        非法即 fail-closed，绝不带着可疑串发出去（也就不会悄悄退回默认值继续跑）。"""
+        for bad in ("relative/dir", "/tmp/../etc", "/tmp/a;rm -rf /", "/tmp/$(id)", "/tmp/-rf", ""):
+            with _env(**_cfg_env(self.root, OPRUNWAY_ACLNN_OP_DIR=bad)):
+                cfg = A._aclnn_cfg()
+                paths = A._aclnn_paths(cfg)
+                if not bad:                                  # 空串 = 没给 → 走默认，不报错
+                    self.assertIn('--op-dir "$VC"', A._exec_script(cfg, paths))
+                    continue
+                with self.assertRaises(ValueError, msg=repr(bad)):
+                    A._exec_script(cfg, paths)
+
+    def test_runtime_env_has_no_devlib_and_never_overrides_opp_path(self):
+        """真机 bug#4 / bug#5（2026-07-24 a3 首跑实测，exec/perf 两条都 100% 必死）：
+
+        · bug#4 `$ASCEND_TOOLKIT_HOME/devlib` 是**链接期 stub 库**，前置进 LD_LIBRARY_PATH → 运行期
+          `stub library cannot be used for execution` → `aclInit failed with ACL status 500000`。
+          二分证据：只前置 lib64 → aclInit=0；只前置 devlib → stub 错。
+        · bug#5 `export ASCEND_OPP_PATH="$VROOT"` 覆盖了 CANN 自己的 opp 根 → 60/60 用例
+          `aclnn<Op>GetWorkspaceSize failed with ACL status 561103`（kernel 找不到）。对照证据：
+          `=CANN 真根 → 60/60 pass`；`=install-path → 0/60`。custom lib 由 ASCEND_CUSTOM_OPP_PATH
+          （`_find_custom_opapi_libs` 来源①）已找到，这行多余且有害。
+        """
+        import re as _re
+        for s in (self._script_of(A._exec_script), self._script_of(A._perf_script)):
+            # bug#4：运行期只认 lib64 的真库，devlib 一个字都不许出现。
+            self.assertNotIn("devlib", s)
+            self.assertIn('export LD_LIBRARY_PATH="$VC/op_api/lib:${ASCEND_TOOLKIT_HOME}/lib64:'
+                          '${LD_LIBRARY_PATH:-}"', s)
+            # bug#5：绝不覆盖；将来若要加 vendors glob 兜底，只许**追加**语义（形态断言）。
+            self.assertNotIn('export ASCEND_OPP_PATH="$VROOT"', s)
+            for m in _re.finditer(r"(?m)^\s*export\s+ASCEND_OPP_PATH=(.*)$", s):
+                self.assertIn("${ASCEND_OPP_PATH", m.group(1),
+                              msg=f"ASCEND_OPP_PATH 只许追加、绝不覆盖：{m.group(0)!r}")
+
+
+class SetenvGuardTest(unittest.TestCase):
+    """真机 bug#3：`OPRUNWAY_SETENV` 的守卫**真跑 bash**（只跑守卫段，不发 ssh、不碰 CANN）。
+
+    CANN 官方入口 `/usr/local/Ascend/ascend-toolkit/set_env.sh` **恒是软链**，旧的「逐段拒软链」
+    直接把官方入口判死，逼每台机器人肉解链、把版本号写死进路径。setenv 是**只读**输入、我们只
+    source 不写 → 换靶模型套不上，放宽为 realpath 后再校验（仍要普通可读文件 + 属主/可写位）。
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="oprw_setenv_")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        # 假 toolkit：oprw_setenv 会核 ASCEND_TOOLKIT_HOME 存在且有 lib64。
+        self.tk = os.path.join(self.root, "cann-9.0.0")
+        os.makedirs(os.path.join(self.tk, "lib64"))
+        self.real = os.path.join(self.tk, "set_env.sh")
+        with open(self.real, "w", encoding="utf-8") as f:
+            f.write(f'export ASCEND_TOOLKIT_HOME={shlex.quote(self.tk)}\n')
+        os.chmod(self.real, 0o644)
+
+    def _run(self, path, env=None):
+        script = A._SH_GUARDS + f"oprw_setenv {shlex.quote(path)}\n"
+        bash = shutil.which("bash") or "/bin/bash"
+        # errors="replace"：守卫消息是中文，一旦脚本把多字节字符切坏也要**看得见断言失败**，
+        # 而不是让测试自己 UnicodeDecodeError 崩掉（那会掩盖真正的 shell bug）。
+        return subprocess.run([bash, "-c", script], capture_output=True, text=True,
+                              errors="replace", env=env)
+
+    def _fakebin(self, name, body):
+        """造一个「劫持 PATH 用」的假可执行（模拟安全工具缺失 / 失败），返回其所在目录。"""
+        d = os.path.join(self.root, "fakebin")
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, name)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.chmod(p, 0o755)
+        return d
+
+    def _make_toolkit(self, parent):
+        """在 <parent> 下造一份「假 CANN」，返回 set_env.sh 路径。"""
+        tk = os.path.join(parent, "cann-x")
+        os.makedirs(os.path.join(tk, "lib64"))
+        se = os.path.join(tk, "set_env.sh")
+        with open(se, "w", encoding="utf-8") as f:
+            f.write(f'export ASCEND_TOOLKIT_HOME={shlex.quote(tk)}\n')
+        os.chmod(se, 0o644)
+        return se
+
+    def test_symlinked_official_entry_is_accepted_after_realpath(self):
+        link_dir = os.path.join(self.root, "ascend-toolkit")
+        os.makedirs(link_dir)
+        link = os.path.join(link_dir, "set_env.sh")
+        os.symlink(self.real, link)                       # 官方入口的形态：软链指向具体版本
+        r = self._run(link)
+        self.assertEqual(0, r.returncode, msg=r.stdout + r.stderr)
+        self.assertIn("OPRUNWAY_ACLNN_ENV toolkit=", r.stdout)
+        self.assertNotIn("OPRUNWAY_ACLNN_GUARD_FAIL", r.stdout)
+
+    def test_symlinked_directory_segment_is_accepted(self):
+        """路径**中间段**是软链（`/usr/local/Ascend/ascend-toolkit` 常见形态）也不该被判死。"""
+        os.symlink(self.tk, os.path.join(self.root, "latest"))
+        r = self._run(os.path.join(self.root, "latest", "set_env.sh"))
+        self.assertEqual(0, r.returncode, msg=r.stdout + r.stderr)
+        self.assertIn("OPRUNWAY_ACLNN_ENV toolkit=", r.stdout)
+
+    def test_non_regular_file_still_rejected(self):
+        for bad in (self.tk,                                        # 目录
+                    os.path.join(self.tk, "nope.sh"),               # 不存在
+                    "/dev/null"):                                   # 非普通文件
+            r = self._run(bad)
+            self.assertEqual(2, r.returncode, msg=f"{bad}: {r.stdout}{r.stderr}")
+            self.assertIn("OPRUNWAY_ACLNN_SETENV_MISSING", r.stdout)
+
+    def test_relative_path_still_rejected(self):
+        r = self._run("rel/set_env.sh")
+        self.assertEqual(6, r.returncode, msg=r.stdout + r.stderr)
+        self.assertIn("OPRUNWAY_ACLNN_GUARD_FAIL", r.stdout)
+
+    def test_group_or_world_writable_still_rejected(self):
+        """真身可被同组/他人写 = 「被人改了内容再被我 source」——realpath 之后仍必须拒。"""
+        os.chmod(self.real, 0o666)
+        r = self._run(self.real)
+        self.assertEqual(6, r.returncode, msg=r.stdout + r.stderr)
+        self.assertIn("OPRUNWAY_ACLNN_GUARD_FAIL", r.stdout)
+        self.assertIn("可被同组/他人写", r.stdout)
+
+    def test_writable_check_follows_symlink_to_real_target(self):
+        """软链本身恒 0777——校的必须是 realpath 后的真身，别被软链自身的权限位骗过/误杀。"""
+        link = os.path.join(self.root, "entry.sh")
+        os.symlink(self.real, link)
+        self.assertEqual(0, self._run(link).returncode)               # 真身 0644 → 放行
+        os.chmod(self.real, 0o666)
+        self.assertEqual(6, self._run(link).returncode)               # 真身 0666 → 拒
+
+    # ── 2026-07-24 审计 High（TOCTOU source 劫持）+ Medium（安全工具失败非 fail-closed）──────
+
+    def test_group_or_world_writable_parent_dir_rejected(self):
+        """真身**父目录**可被非可信用户改写 → 校验与 source 之间可 rename 换靶 → 必须拒。
+
+        只校末端文件挡不住这条：文件本身 0644 且属主没问题，攻击者照样能把整个目录项换掉。
+        """
+        openpar = os.path.join(self.root, "openpar")
+        os.makedirs(openpar)
+        se = self._make_toolkit(openpar)
+        os.chmod(openpar, 0o777)                      # 无 sticky 的 world-writable 父目录
+        r = self._run(se)
+        self.assertEqual(6, r.returncode, msg=r.stdout + r.stderr)
+        self.assertIn("OPRUNWAY_ACLNN_GUARD_FAIL", r.stdout)
+        self.assertIn("父目录 可被同组/他人写", r.stdout)
+
+    def test_sticky_writable_parent_dir_is_exempt(self):
+        """带 sticky 的可写目录（/tmp 的 1777）豁免：非属主无法 rename/unlink 他人条目 → 换靶前提不成立。
+
+        没这条豁免，Linux 上凡是落在 `/tmp` 下的路径会被一律判死（含本套测试的临时目录）。
+        """
+        openpar = os.path.join(self.root, "stickypar")
+        os.makedirs(openpar)
+        se = self._make_toolkit(openpar)
+        os.chmod(openpar, 0o1777)
+        r = self._run(se)
+        self.assertEqual(0, r.returncode, msg=r.stdout + r.stderr)
+        self.assertIn("OPRUNWAY_ACLNN_ENV toolkit=", r.stdout)
+
+    def test_realpath_unavailable_is_fail_closed(self):
+        """`realpath`/`readlink` 都不可用 → **拒**，绝不退回未解析的原始路径（那等于没解析）。"""
+        emptybin = os.path.join(self.root, "emptybin")
+        os.makedirs(emptybin)
+        r = self._run(self.real, env={"PATH": emptybin})
+        self.assertEqual(6, r.returncode, msg=r.stdout + r.stderr)
+        self.assertIn("OPRUNWAY_ACLNN_GUARD_FAIL", r.stdout)
+        self.assertIn("真身路径解析失败", r.stdout)
+
+    def test_find_failure_is_fail_closed(self):
+        """`find` 失败（缺失 / 报错）→ **拒**：旧写法把「查不动」和「未命中」混成一件事 → 放行。"""
+        d = self._fakebin("find", "#!/bin/sh\necho 'boom' >&2\nexit 3\n")
+        env = dict(os.environ, PATH=d + os.pathsep + os.environ.get("PATH", ""))
+        r = self._run(self.real, env=env)
+        self.assertEqual(6, r.returncode, msg=r.stdout + r.stderr)
+        self.assertIn("OPRUNWAY_ACLNN_GUARD_FAIL", r.stdout)
+        self.assertIn("安全查询失败", r.stdout)
+
+    def test_find_failure_not_treated_as_permission_ok(self):
+        """`find` 失败时**不得**被当成「不匹配」：当前用户所有但 0666 的脚本必须仍被拒。
+
+        旧路径正是这么漏的：find 挂了 → 权限查询空串 → `-perm` 那条不触发；`-O` 又短路通过。
+        """
+        os.chmod(self.real, 0o666)
+        d = self._fakebin("find", "#!/bin/sh\nexit 1\n")
+        env = dict(os.environ, PATH=d + os.pathsep + os.environ.get("PATH", ""))
+        r = self._run(self.real, env=env)
+        self.assertEqual(6, r.returncode, msg=r.stdout + r.stderr)
+        self.assertIn("OPRUNWAY_ACLNN_GUARD_FAIL", r.stdout)
+
+    def test_no_variable_name_swallows_cjk_byte(self):
+        """`$var` 后**紧跟**中文 → bash 5.x（UTF-8 locale）会把中文首字节吃进变量名 → `unbound variable`。
+
+        实测：`rc=$oprw_qf_rc；...` 在 homebrew bash 5.3 下直接把整段守卫打成 127 退出（守卫形同虚设）。
+        中文消息里挨着变量的地方一律写 `${var}`；本条覆盖模块内**全部** shell 模板（含注释行，图省心）。
+        """
+        import re as _re
+        with open(A.__file__, encoding="utf-8") as f:
+            src = f.read()
+        self.assertEqual([], _re.findall(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]", src))
+
+    def test_official_symlink_entry_still_accepted_when_parents_safe(self):
+        """父目录都安全时，官方入口那种软链仍须放行（收紧不能把真机唯一入口判死）。"""
+        link_dir = os.path.join(self.root, "ascend-toolkit")
+        os.makedirs(link_dir, mode=0o755)
+        link = os.path.join(link_dir, "set_env.sh")
+        os.symlink(self.real, link)
+        r = self._run(link)
+        self.assertEqual(0, r.returncode, msg=r.stdout + r.stderr)
+        self.assertIn("OPRUNWAY_ACLNN_ENV toolkit=", r.stdout)
+        self.assertIn(self.tk, r.stdout)                  # source 的确实是解析后的真身
+
+
+class PerfPlanStrictBoolTest(unittest.TestCase):
+    """审计 Medium：严格档开关**只认真 bool**——`bool("false")` / `bool("0")` 都是 True。
+
+    perf plan 是外部/手工也会写的 JSON：布尔误写成字符串就会把 `allow_builtin_symbols` 悄悄打开、
+    关掉 custom-vendor provenance 硬门 → 性能可能测到 CANN 内置同名实现（本项目一直在防的假 PASS）。
+    """
+
+    def test_string_truthy_values_raise(self):
+        for bad in ("false", "0", "true", "no", "", 0, 1, None, [], {}):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                A._plan_bool({"allow_builtin_symbols": bad}, "allow_builtin_symbols")
+
+    def test_missing_defaults_to_strict_false(self):
+        self.assertIs(False, A._plan_bool({}, "allow_builtin_symbols"))
+        self.assertIs(False, A._plan_bool({"other": True}, "allow_builtin_symbols"))
+
+    def test_real_bools_pass_through(self):
+        self.assertIs(True, A._plan_bool({"allow_builtin_symbols": True}, "allow_builtin_symbols"))
+        self.assertIs(False, A._plan_bool({"allow_builtin_symbols": False}, "allow_builtin_symbols"))
+
+    def test_load_perf_plan_rejects_string_bool_early(self):
+        """早失败：plan 一读进来就查类型，别等真机跑完才炸。"""
+        work = tempfile.mkdtemp(prefix="oprw_plan_")
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        path = os.path.join(work, A.PERF_PLAN_FILE)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"allow_builtin_symbols": "false"}, f)
+        with self.assertRaises(ValueError) as e:
+            A.load_perf_plan(work)
+        self.assertIn("allow_builtin_symbols", str(e.exception))
+        with open(path, "w", encoding="utf-8") as f:                  # 真 bool → 正常读
+            json.dump({"allow_builtin_symbols": False, "warmup": 3}, f)
+        self.assertEqual(3, A.load_perf_plan(work)["warmup"])
+
+    def test_no_loose_truthiness_left_in_module(self):
+        """守住不回潮：本模块**代码里**不得再出现 `bool(...)` 调用（配置一律严格解释）。
+
+        走 AST 而非文本匹配——注释/文档串里提 `bool(...)` 是在讲为什么不能用，不该被判违规。
+        """
+        import ast
+        import inspect
+        tree = ast.parse(inspect.getsource(A))
+        hits = [n.lineno for n in ast.walk(tree)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "bool"]
+        self.assertEqual([], hits)
+
+
+class PerfPlanDutDeclarationTest(unittest.TestCase):
+    """**性能通路的 DUT 传递链**（与 `_exec_script` 的精度通路配对，两条都得喂到）。
+
+    性能侧不走命令行：`collect_perf` 组的 `remote_plan` 随 `_perf_plan.json` 上送，容器侧
+    `perf_msprof.resolve_plan_dut_lib` 解析。严格档（plan 没开 `allow_builtin_symbols`）定不出
+    DUT 即 fail-closed → 不补这一环，真机性能**一例都采不到**。
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="aclnn_perfplan_")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        _make_ops_repo(self.root)
+        self.work = tempfile.mkdtemp(prefix="aclnn_perfwork_")
+        self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)
+        # `dims` 含「性能」才会被 select_perf_cases 选中（与 perf_compare 同口径、非按算子名）。
+        self.caseset = {"op": "MedAcl", "cases": [
+            {"id": "c0", "dims": ["功能", "性能"], "attrs": {},
+             "aclnn_call": {"symbol": "MedianDim", "slots": []},
+             "inputs": [{"name": "self", "dtype": "float32", "shape": [2], "path": "c0/x1.bin"}]}]}
+        # 精度前筛只看 evidence 的 policy+metrics（judge 复用 validator）；behavioral → "na" 视同过筛。
+        # 本用例要验的是 DUT 传递链，精度判定形态在别处已覆盖，这里取最省的合法形态。
+        self.evidence = [{"case_id": "c0",
+                          "precision": {"outputs": [{"policy": {"kind": "behavioral"}, "metrics": {}}]}}]
+        self.plan_sent, self.scripts = [], []
+
+        class _R:
+            returncode = 0
+            stdout = "OPRUNWAY_ACLNN_PERF_DONE\n"
+            stderr = ""
+
+        def fake_shell(host, script, **kw):
+            self.scripts.append(script)
+            return _R()
+
+        def fake_copy_to(host, local, remote, **kw):
+            if remote.endswith(A.PERF_PLAN_FILE):
+                with open(local, encoding="utf-8") as f:
+                    self.plan_sent.append(json.load(f))
+
+        def fake_copy_from(host, remote, local, **kw):
+            os.makedirs(os.path.dirname(local) or ".", exist_ok=True)
+            with open(local, "w", encoding="utf-8") as f:
+                json.dump({"records": []}, f)
+
+        for name, fn in (("_shell", fake_shell), ("_copy_to", fake_copy_to),
+                         ("_copy_from", fake_copy_from)):
+            orig = getattr(RA, name)
+            self.addCleanup(setattr, RA, name, orig)
+            setattr(RA, name, fn)
+
+    def _collect(self, plan=None, **env_over):
+        with _env(**_cfg_env(self.root, **env_over)):
+            cfg = A._aclnn_cfg()
+            paths = A._aclnn_paths(cfg)
+            A.collect_perf(cfg, paths, self.caseset, self.work, self.evidence,
+                           plan if plan is not None else {})
+        self.assertEqual(1, len(self.plan_sent), "perf plan 未上送 → 后面全白验")
+        return self.plan_sent[0], paths
+
+    def test_remote_plan_carries_dut_vendor_root_and_vendor_fields(self):
+        sent, paths = self._collect()
+        # ① 首选来源②：内容根直给（与 _ENV_PREAMBLE 的 $VC / paths["vc"] 同一个值，不留第二套推导）
+        self.assertEqual(paths["vc"], sent["dut_vendor_root"])
+        # ② 冗余来源③：adapter cfg 的 vendor_dir + vendor_name（resolve 的第三条链）
+        self.assertEqual("/tmp/oprunway_aclnn_vendor", sent["vendor_dir"])
+        self.assertEqual("customize", sent["vendor_name"])
+        # ③ 两条来源必须**同口径**：`<vendor_dir>/vendors/<name>_nn` == 直给的内容根，绝不打架
+        self.assertEqual(sent["dut_vendor_root"],
+                         sent["vendor_dir"] + "/vendors/" + sent["vendor_name"] + "_nn")
+        # ④ 严格档没被顺手关掉（关了就等于放行 CANN 内置同名实现）
+        self.assertIs(False, sent["allow_builtin_symbols"])
+
+    def test_remote_plan_op_dir_defaults_to_this_dut_vendor_root(self):
+        """性能侧的**同一条口子**：`remote_plan["op_dir"]` 旧缺省是 `None` → 容器侧
+        `_SignatureResolver` 退到 `ASCEND_CUSTOM_OPP_PATH`，把继承来的旧 vendor 头也纳入搜索
+        （追加语义所致）→ 签名可能静默取自上次安装。缺省必须填本次 DUT 的 vendor 内容根。
+        """
+        sent, paths = self._collect()
+        self.assertEqual(paths["vc"], sent["op_dir"])
+        # 与 DUT 声明同源：解析签名的头 与 真正加载的 so 出自同一次 install
+        self.assertEqual(sent["dut_vendor_root"], sent["op_dir"])
+
+    def test_remote_plan_op_dir_explicit_wins(self):
+        """plan / env 显式给了就尊重，默认值只在缺省时生效（两条来源都验一遍）。"""
+        explicit = "/tmp/oprunway_aclnn_rr/aclnn_src/" + _OP_SUBDIR
+        sent, _ = self._collect(plan={"op_dir": explicit})
+        self.assertEqual(explicit, sent["op_dir"])
+        self.plan_sent.clear()
+        other = "/tmp/oprunway_aclnn_rr/hand_picked_headers"
+        sent2, _ = self._collect(OPRUNWAY_ACLNN_OP_DIR=other)
+        self.assertEqual(other, sent2["op_dir"])
+
+    def test_sent_plan_resolves_to_this_build_dut_lib_under_strict(self):
+        """端到端口径核对：容器侧**真拿这份 plan** 去解析，必须解出本次 install 的 `.so`。"""
+        from aclnn_runtime import perf_msprof as PM
+        sent, paths = self._collect()
+        self.assertEqual(os.path.abspath(paths["lib"]),
+                         PM.resolve_plan_dut_lib(sent, strict=True))
+
+    def test_plan_without_dut_fields_is_fail_closed_at_collector(self):
+        """反证这一环真的载重：把 DUT 字段摘掉，严格档立刻 fail-closed（不静默从 env 猜）。"""
+        from aclnn_runtime import perf_msprof as PM
+        sent, _ = self._collect()
+        stripped = {k: v for k, v in sent.items()
+                    if k not in ("dut_lib", "dut_vendor_root", "vendor_dir", "vendor_name")}
+        with self.assertRaises(Exception) as e:
+            PM.resolve_plan_dut_lib(stripped, strict=True)
+        self.assertIn("DUT", str(e.exception))
 
 
 class CaseRelPathGuardTest(unittest.TestCase):

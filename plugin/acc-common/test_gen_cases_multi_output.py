@@ -92,7 +92,7 @@ _FAKE_VARIANTS = [
 
 def _fake_median_spec(op="MedMulti", dtypes=("float32", "int32"),
                       dim_vals=(None, 0, -1), value_profiles=None, case_target=24,
-                      call_variants=_FAKE_VARIANTS, ranks=(1, 2, 3)):
+                      call_variants=_FAKE_VARIANTS, ranks=(1, 2, 3), operator_class=None):
     # dim ∈ {null(全局), 0(first), -1(last)} 对任意 rank≥1 恒有效；middle=rank//2 需 per-rank 解析（scale 阶段）。
     matrix = [{"dim": d, "keepdim": False} for d in dim_vals] + [{"dim": 0, "keepdim": True}]
     prec = {"oracle": "torch", "standard": "torch_allclose", "tolerance_source": "dtype_table",
@@ -111,6 +111,8 @@ def _fake_median_spec(op="MedMulti", dtypes=("float32", "int32"),
              "index_of": "values", "gather_from": "self"},   # finding #7：gather 源必由 spec 锚定
         ],
     }
+    if operator_class is not None:      # OC：不传 = 整字段省略 = 现行为（向后兼容口径）
+        spec["operator_class"] = operator_class
     if call_variants is not None:
         spec["call_variants"] = json.loads(json.dumps(call_variants))   # 深拷贝，测试间互不污染
     return spec
@@ -260,6 +262,101 @@ class ValueProfileTest(unittest.TestCase):
         xt = np.load(os.path.join(work, tie_cases[0]["inputs"][0]["path"]))
         _, cnt = np.unique(xt, return_counts=True)
         self.assertGreater(int(cnt.max()), 1)
+
+
+class IndexGoldenDtypeTest(unittest.TestCase):
+    """F2（a3 真机首跑实测的阻断级洞）：index golden 的落盘 dtype **按 spec 声明取**、不再恒 int64。
+
+    旧洞机理：真机 actual 的 dtype 由 caseset `expected.outputs[k].compare_dtype`（= spec 声明，driver
+    据它开输出 buffer）决定，而 golden 恒存 int64 → **声明 int32 indices 的算子两侧必然打架**，
+    `compute_metrics` 的 index 分支「两侧下标 dtype 须一致」当场 fail-closed → 永远出不了裁决。
+    全部据 `out_role`/`dtype` 字段驱动，无算子名分支。"""
+
+    def _gen_idx(self, dtype_name, op, body=_FAKE_MEDIAN_BODY):
+        spec = _fake_median_spec(op=op)
+        idx_p = next(p for p in spec["params"] if p.get("out_role") == "index")
+        idx_p["dtype"] = [dtype_name]                     # ← 唯一变量：spec 声明的 index dtype
+        cs, work = _gen(spec, body, op=op)
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        return spec, cs, work
+
+    def _bydim(self, cs):
+        got = [c for c in cs["cases"] if len(c["expected"]["outputs"]) == 2]
+        self.assertTrue(got, "用例集里无 by-dim 双输出 case（测试前提不成立）")
+        return got
+
+    def _ctx(self, work, case):
+        """gather 上下文：源 = case 的 self 输入，dim/keepdim 取自 case attrs（确定、不靠形状反推）。"""
+        return {"source": _load(work, case["inputs"][0]["path"]),
+                "dim": case["attrs"]["dim"], "keepdim": bool(case["attrs"].get("keepdim"))}
+
+    def test_int32_indices_generate_and_judge(self):
+        """⭐ 核心：声明 int32 → golden 存 int32，且能跑通 index 判据（旧实现在此存 int64 → 判据必抛）。"""
+        _, cs, work = self._gen_idx("int32", "MedIdx32")
+        for c in self._bydim(cs):
+            idx = c["expected"]["outputs"][1]
+            self.assertEqual(idx["compare_dtype"], "int32", c["id"])
+            arr = _load(work, idx["golden_path"])
+            self.assertEqual(arr.dtype, np.int32, c["id"])
+            # 真机按 compare_dtype 收 → actual 同为 int32；判据须真跑出 metrics（而非抛 dtype 不一致）
+            m = P.compute_metrics(arr, arr, idx["policy"], gather_ctx=self._ctx(work, c))
+            self.assertEqual(m["mismatch"], 0, c["id"])
+            self.assertEqual(m["numel"], int(np.asarray(arr).size), c["id"])
+
+    def test_int64_indices_still_work(self):
+        """向后兼容：声明 int64（median.spec.json 现状）行为不变——golden 仍是 int64、判据照跑。"""
+        _, cs, work = self._gen_idx("int64", "MedIdx64")
+        for c in self._bydim(cs):
+            idx = c["expected"]["outputs"][1]
+            self.assertEqual(idx["compare_dtype"], "int64", c["id"])
+            arr = _load(work, idx["golden_path"])
+            self.assertEqual(arr.dtype, np.int64, c["id"])
+            m = P.compute_metrics(arr, arr, idx["policy"], gather_ctx=self._ctx(work, c))
+            self.assertEqual(m["mismatch"], 0, c["id"])
+
+    def test_value_output_dtype_unaffected(self):
+        """index dtype 换成 int32 不得殃及 value 输出（value 仍按 compare dtype 落盘）。"""
+        _, cs, work = self._gen_idx("int32", "MedIdx32v")
+        for c in self._bydim(cs):
+            v = c["expected"]["outputs"][0]
+            self.assertEqual(_load(work, v["golden_path"]).dtype, np.dtype(v["compare_dtype"]), c["id"])
+
+    def test_two_side_dtype_conflict_fail_closed(self):
+        """两侧 dtype 冲突（实现返回了非声明 dtype）→ **fail-closed、不隐式归一**（静默通过是最坏结果）。"""
+        _, cs, work = self._gen_idx("int32", "MedIdx32c")
+        c = self._bydim(cs)[0]
+        idx = c["expected"]["outputs"][1]
+        golden = _load(work, idx["golden_path"])
+        with self.assertRaises(ValueError) as cm:                 # actual 是 int64、golden 是 int32
+            P.compute_metrics(golden.astype(np.int64), golden, idx["policy"], gather_ctx=self._ctx(work, c))
+        self.assertIn("dtype 不一致", str(cm.exception))
+
+    def test_out_of_declared_range_fail_closed_end_to_end(self):
+        """下标超出声明 dtype 值域（int32 装不下）→ gen_cases 当场 fail-closed，绝不静默回绕。"""
+        big_body = _FAKE_MEDIAN_BODY.replace("return (vv, vi.astype(np.int64))",
+                                             "return (vv, (vi + 2**31).astype(np.int64))")
+        with self.assertRaises(ValueError) as cm:
+            self._gen_idx("int32", "MedIdxBig", body=big_body)
+        self.assertIn("装不下", str(cm.exception))
+
+    def test_index_golden_array_guards(self):
+        """`_index_golden_array` 三道闸：值域、非整数 golden、非法声明 dtype（边界内不误伤）。"""
+        w = "t: 输出#1(indices/index)"
+        with self.assertRaises(ValueError) as cm:
+            GC._index_golden_array(np.array([2 ** 31], np.int64), "int32", w)
+        self.assertIn("装不下", str(cm.exception))
+        with self.assertRaises(ValueError):
+            GC._index_golden_array(np.array([-2 ** 31 - 1], np.int64), "int32", w)
+        ok = GC._index_golden_array(np.array([2 ** 31 - 1], np.int64), "int32", w)   # 边界内不误伤
+        self.assertEqual(ok.dtype, np.int32)
+        self.assertEqual(int(ok[0]), 2 ** 31 - 1)
+        for bad in (np.array([0.9], np.float32), np.array([True])):                  # 非整数下标一律拒
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                GC._index_golden_array(bad, "int64", w)
+        for bad_dt in ("float32", "bfloat16", "bogus"):                              # 声明 dtype 非整数/未知
+            with self.assertRaises(ValueError, msg=bad_dt):
+                GC._index_golden_array(np.array([0], np.int64), bad_dt, w)
+        self.assertEqual(GC._index_golden_array(np.zeros((0,), np.int64), "int32", w).dtype, np.int32)
 
 
 class SingleOutputBackwardCompatTest(unittest.TestCase):
@@ -527,9 +624,9 @@ class AclnnCallPerCaseTest(unittest.TestCase):
 class OutputIdentityBindingTest(unittest.TestCase):
     """finding #4：输出**数量与身份**严格绑 spec —— 缺输出 / 换序都必须被逮。"""
 
-    def _spec_all_outputs(self, op):
+    def _spec_all_outputs(self, op, dtypes=("float32",)):
         """无变体表 → 落地集 = spec 全部 out 参数（by-dim 与全局都得给 2 个输出）。"""
-        return _fake_median_spec(op=op, dtypes=("float32",), dim_vals=(0,), call_variants=None)
+        return _fake_median_spec(op=op, dtypes=dtypes, dim_vals=(0,), call_variants=None)
 
     def test_missing_output_is_rejected(self):
         """by-dim golden 漏掉 indices（只返回 values）→ 不再当「更短的前缀」收下，直接 fail-closed。"""
@@ -556,24 +653,35 @@ class OutputIdentityBindingTest(unittest.TestCase):
                 self.assertEqual(o["role"], p["out_role"], (c["id"], o["name"]))
 
     def test_swapped_golden_order_is_detected(self):
-        """golden 把 (values, indices) 换成 (indices, values) → 形状/dtype 都合法，但 int 值进 value 判据
-        会被 out_shape/契约对账逮住（换序不再无声）。"""
+        """golden 把 (values, indices) 换成 (indices, values) → **换序不再无声**。两条闸按 dtype 分工：
+
+        · 浮点 value 落进 index 槽（float32 算子）→ **生成期当场 fail-closed**（F2 起 index golden 按
+          spec 声明的整数 dtype 存，浮点「下标」一律拒；旧实现 `astype(int64)` 把中位值静默截成整数存下，
+          只能靠下游看值反推）；
+        · 两侧都是整数（int32 算子，dtype 上换序合法）→ 仍按 spec 声明的身份落盘，靠 (index,name,role)
+          三元组 + 值本身可判别（旧断言原样保留）。"""
         body = _FAKE_MEDIAN_BODY.replace("return (vv, vi.astype(np.int64))",
                                          "return (vi.astype(np.int64), vv)")
         _gf.place_golden(_gf.root(), "MedSwap", body=body)
         work = tempfile.mkdtemp(prefix="mo_swap_")
         self.addCleanup(shutil.rmtree, work, ignore_errors=True)
-        spec = self._spec_all_outputs("MedSwap")
-        cs = GC.gen_cases(spec, work)
+        with self.assertRaises(ValueError) as cm:            # float32：换序后 index 槽拿到浮点 → 当场拒
+            GC.gen_cases(self._spec_all_outputs("MedSwap"), work)
+        self.assertIn("非整数", str(cm.exception))
+        # int32 算子：换序在 dtype 上合法 → 生成通过，但身份仍按 spec 落，值本身可判别。
+        _gf.place_golden(_gf.root(), "MedSwapInt", body=body)
+        work2 = tempfile.mkdtemp(prefix="mo_swap_int_")
+        self.addCleanup(shutil.rmtree, work2, ignore_errors=True)
+        cs = GC.gen_cases(self._spec_all_outputs("MedSwapInt", dtypes=("int32",)), work2)
         # 身份仍按 spec 声明落：outputs[0] 恒是 values（value 判据），outputs[1] 恒是 indices。
         # 于是换序后的 golden 值被存进了「名不副实」的槽 —— 下游按 (index,name,role) 三元组对账即可发现。
         for c in cs["cases"]:
             outs = c["expected"]["outputs"]
             self.assertEqual([(o["index"], o["name"], o["role"]) for o in outs],
                              [(0, "values", "value"), (1, "indices", "index")], c["id"])
-        v0 = _load(work, cs["cases"][0]["expected"]["outputs"][0]["golden_path"])
-        i0 = _load(work, cs["cases"][0]["expected"]["outputs"][1]["golden_path"])
-        # values 槽里装的其实是下标（整数），indices 槽里装的是被截断的中位值 → 与正确产物不同，可判别。
+        v0 = _load(work2, cs["cases"][0]["expected"]["outputs"][0]["golden_path"])
+        i0 = _load(work2, cs["cases"][0]["expected"]["outputs"][1]["golden_path"])
+        # values 槽里装的其实是下标（整数），indices 槽里装的是中位值 → 与正确产物不同，可判别。
         self.assertTrue(np.array_equal(v0, np.floor(v0)), "换序后 values 槽装的是整数下标")
         self.assertEqual(i0.dtype, np.int64)
 
@@ -700,6 +808,490 @@ class ValueProfileCoverageTest(unittest.TestCase):
             self.assertEqual(x.ndim, 3)
             self.assertTrue(all(d >= 4 for d in x.shape), x.shape)
             GC._assert_tie_per_axis(x, "float32")          # 不抛即每轴每切片都有并列
+
+
+class UnpairedComboLedgerTest(unittest.TestCase):
+    """零配对告警（bug#12 底线）：某 attr 取值 × 某 shape 结构类**从未同时出现**要被 dry-run 账本报出来。
+
+    实测教训——任务书点名「归约轴上维度为 1」，而含长度-1 轴的 shape 只由特殊场景产、只配
+    `attr_combos[0]`（`dim=None`），于是点名场景实跑 0 条且**全程无告警**，只能事后人肉核 caseset。
+    """
+
+    def _plan_meta(self, spec):
+        in_params = [p for p in spec["params"] if p["io"] == "in"]
+        attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
+        dtypes = next(p for p in in_params if p["name"] == "self")["dtype"]
+        target = (spec.get("precision") or {}).get("case_target", GC._DEFAULT_CASE_TARGET)
+        of = GC.load_golden(spec["op"]).out_shape
+        _entries, meta = GC._plan(
+            spec, in_params, dtypes, attrs_default, spec["op"], target,
+            cost_fn=GC._make_cost_fn(in_params, of),
+            empty_accepts=GC._make_empty_accepts(in_params, of, attrs_default))
+        return meta
+
+    def test_shape_class_is_structural(self):
+        """shape 结构类按结构判、与算子无关：全 1 轴 / 含 1 轴 / 空 / 大 / 常规各归各的。"""
+        self.assertEqual(GC._shape_class((1,)), GC.SHAPE_CLASS_ALL_UNIT)
+        self.assertEqual(GC._shape_class((1, 1, 1)), GC.SHAPE_CLASS_ALL_UNIT)
+        self.assertEqual(GC._shape_class((4, 1)), GC.SHAPE_CLASS_HAS_UNIT)
+        self.assertEqual(GC._shape_class((0,)), GC.SHAPE_CLASS_EMPTY)
+        self.assertEqual(GC._shape_class((3, 0, 4)), GC.SHAPE_CLASS_EMPTY)
+        self.assertEqual(GC._shape_class((1024, 1024)), GC.SHAPE_CLASS_LARGE)
+        self.assertEqual(GC._shape_class((4, 6)), GC.SHAPE_CLASS_REGULAR)
+        self.assertEqual(GC._shape_class("broadcast"), GC.SHAPE_CLASS_BCAST)
+
+    def test_zero_pairing_is_reported(self):
+        """归约 attr 的具体取值从未配上「被指轴长度=1」的 shape → 必须出现在零配对账本里。
+
+        ⚠ 断言口径随 finding #8 修正：轴型 attr 的配对类不再是「shape 结构类」（那会把
+        `shape=(4,1), dim=0` 当成已配上单位轴 = 漏报），改成「归一化轴号 + rank + 被指轴长度档」。"""
+        spec = _fake_median_spec(op="MedUnpaired", dtypes=("float32",), ranks=(1, 2, 3))
+        _gf.place_golden(_gf.root(), "MedUnpaired", body=_FAKE_MEDIAN_BODY)
+        led = self._plan_meta(spec)["unpaired_combo_classes"]
+        self.assertGreater(led["count"], 0, "含长度-1 轴的 shape 只配 combo0，零配对必然存在")
+        self.assertTrue(any("dim=0" in c and "被指轴长度=1" in c for c in led["classes"]),
+                        f"应报出「dim=0 × 被指轴长度=1 从未配对」，实得 {led['classes']}")
+        # 非轴 attr（keepdim 是 bool）仍走 shape 结构类口径，口径不串
+        self.assertTrue(all("shape类=" in c for c in led["classes"] if c.startswith("keepdim=")),
+                        f"非轴 attr 应沿用 shape 结构类口径，实得 {led['classes']}")
+        self.assertLessEqual(len(led["classes"]), GC._UNPAIRED_CAP)   # 有上限，不炸账本
+
+    def test_axis_attr_pairing_keys_on_pointed_axis_length(self):
+        """finding #8 漏报复现：`shape=(4,1), dim=0` 的归约轴长度其实是 **4**，不该算「已配上单位轴」。
+
+        旧口径按 shape 结构类（(4,1) 属 `has_unit_axis`）→ 认为 `dim=0 × 含单位轴` 已配对、count=0；
+        新口径按「归一化轴号 + rank + 被指轴长度档」→ `dim=0 × 被指轴长度=1` 仍是缺口，必须报出来。"""
+        entries = [{"shape": (4, 1), "attrs": {"dim": 0}},      # dim=0 指的轴长 4（不是 1）
+                   {"shape": (1, 4), "attrs": {"dim": 1}}]      # 池子里确有「rank2·轴0 长度=1」的形状
+        # 见证旧口径为什么会漏：两条 shape 的**结构类完全相同**，按结构类判就成了「已配对」
+        self.assertEqual(GC._shape_class((4, 1)), GC._shape_class((1, 4)))
+        led = GC._unpaired_combo_classes(entries, [("dim", [0, 1])])
+        self.assertGreater(led["count"], 0, "dim=0 从未配上『被指轴长度=1』，不该是 0")
+        self.assertTrue(any("dim=0" in c and "被指轴长度=1" in c for c in led["classes"]),
+                        f"应报出「dim=0 × 被指轴长度=1」，实得 {led['classes']}")
+        # 对照：真配上了就不该再报（别把已覆盖的说成缺口）
+        entries.append({"shape": (1, 4), "attrs": {"dim": 0}})
+        led2 = GC._unpaired_combo_classes(entries, [("dim", [0, 1])])
+        self.assertFalse(any("dim=0" in c and "被指轴长度=1" in c for c in led2["classes"]),
+                         f"dim=0 已配上长度-1 轴，不该再报，实得 {led2['classes']}")
+
+    def test_axis_attr_pairing_never_reports_unrealizable(self):
+        """反向（误报面）：某 rank 下已越界的轴值，绝不拿来做笛卡尔积——那是不可实现的「缺口」。"""
+        entries = [{"shape": (4, 6), "attrs": {"dim": 0}},              # rank2：dim=3 越界
+                   {"shape": (4, 6, 4, 1), "attrs": {"dim": 3}}]        # rank4：dim=3 合法
+        led = GC._unpaired_combo_classes(entries, [("dim", [0, 3])])
+        self.assertFalse(any("dim=3" in c and "rank2" in c for c in led["classes"]),
+                         f"rank2 下 dim=3 越界，不可实现，不该报，实得 {led['classes']}")
+
+    def test_repeated_index_value_is_not_treated_as_axes(self):
+        """`stride=[2,2]` 这类几何参数**不是**轴集合（同一根轴不会被指两次）→ 仍走 shape 结构类口径。
+
+        据结构判、不看字段名：不加这条，im2col 的 stride/dilation 会被误判成轴型 attr，
+        告警变成读不懂的「轴2,2·被指轴长度=1,1」。"""
+        self.assertIsNone(GC._norm_axes([2, 2], 4))          # 重复 → 非法轴集合
+        self.assertIsNone(GC._norm_axes([0, -2], 2))         # 归一化后重复，同样非法
+        self.assertEqual(GC._norm_axes([0, -1], 3), [0, 2])  # 正常多轴值照常归一化
+        entries = [{"shape": (4, 6, 4, 6), "attrs": {"stride": [2, 2]}},
+                   {"shape": (1, 1, 1, 1), "attrs": {"stride": [1, 1]}}]
+        led = GC._unpaired_combo_classes(entries, [("stride", [[2, 2], [1, 1]])])
+        self.assertTrue(all("shape类=" in c for c in led["classes"]), led["classes"])
+
+    def test_non_axis_attr_keeps_shape_class_semantics(self):
+        """普通非轴 attr（bool/float）口径不变：仍按 shape 结构类配对（回归护栏）。"""
+        entries = [{"shape": (4, 6), "attrs": {"equal_nan": False}},
+                   {"shape": (1, 1), "attrs": {"equal_nan": True}}]
+        led = GC._unpaired_combo_classes(entries, [("equal_nan", [False, True])])
+        self.assertTrue(all("shape类=" in c for c in led["classes"]), led["classes"])
+        self.assertIn(f"equal_nan=False × shape类={GC.SHAPE_CLASS_ALL_UNIT}", led["classes"])
+
+    def test_ledger_only_counts_classes_that_exist(self):
+        """不报「不可能」：某 shape 结构类根本没出现过时，不该拿它去凑零配对（那不是缺口）。"""
+        spec = _fake_median_spec(op="MedNoBcast", dtypes=("float32",), ranks=(1, 2, 3))
+        _gf.place_golden(_gf.root(), "MedNoBcast", body=_FAKE_MEDIAN_BODY)
+        led = self._plan_meta(spec)["unpaired_combo_classes"]
+        self.assertFalse(any(GC.SHAPE_CLASS_BCAST in c for c in led["classes"]),
+                         "该算子没有广播 shape，不该报它的零配对")
+
+    def test_dry_run_prints_warning(self):
+        """账本要真的打进 dry-run 输出（这条通路才是人/agent 实际看到的那一份）。"""
+        import contextlib, io
+        spec = _fake_median_spec(op="MedDryUnpaired", dtypes=("float32",), ranks=(1, 2, 3))
+        _gf.place_golden(_gf.root(), "MedDryUnpaired", body=_FAKE_MEDIAN_BODY)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            GC._dry_run(spec)
+        text = buf.getvalue()
+        self.assertIn("unpaired_combo_classes", text)
+        self.assertIn("shape_classes", text)
+
+    def test_four_ops_ledger_is_low_noise(self):
+        """现有 4 算子（无归约轴）零配对应当极少——告警得可读，否则等于没有。"""
+        for path in ("isclose", "sign", "equal", "neg"):
+            with open(os.path.join(_HERE, "..", "samples", "specs", f"{path}.spec.json"),
+                      encoding="utf-8") as fh:
+                spec = json.load(fh)
+            led = self._plan_meta(spec)["unpaired_combo_classes"]
+            self.assertLessEqual(led["count"], 4, f"{path} 零配对告警过多（{led['classes']}）")
+
+
+class AttrAxisLengthTest(unittest.TestCase):
+    """轴维度约束（bug#12 进一步）：spec 可声明「某 attr 指向的轴取哪些长度」→ **定向生成**。"""
+
+    def _spec(self, op, lengths=(1,), attr="dim", **kw):
+        kw.setdefault("ranks", (1, 2, 3))                # 调用方可覆盖（多 rank 用例要 (2,4)）
+        spec = _fake_median_spec(op=op, dtypes=("float32",), **kw)
+        spec["attr_axis_lengths"] = [{"attr": attr, "lengths": list(lengths)}]
+        _gf.place_golden(_gf.root(), op, body=_FAKE_MEDIAN_BODY)
+        return spec
+
+    def _cases(self, spec):
+        work = tempfile.mkdtemp(prefix="axlen_")
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        return GC.gen_cases(spec, work)
+
+    def test_axis_length_cases_are_generated(self):
+        """dim 指的轴长度恰为 1 的用例必须真的出现（且 dim=None 的全局变体自然缺席）。"""
+        cs = self._cases(self._spec("MedAx1"))
+        hits = [c for c in cs["cases"] if "ax0len1" in c["id"]]
+        self.assertTrue(hits, "声明了 attr_axis_lengths 却一条定向用例都没有")
+        for c in hits:
+            dim = c["attrs"].get("dim")
+            self.assertIsNotNone(dim, "全局变体（dim=None）没有『那根轴』，不该被造出来")
+            shp = c["inputs"][0]["shape"]
+            idx = dim if dim >= 0 else dim + len(shp)
+            self.assertEqual(int(shp[idx]), 1,
+                             f"{c['id']}: dim={dim} 指的轴长度应为 1，实得 shape={shp}")
+
+    def test_multiple_lengths(self):
+        cs = self._cases(self._spec("MedAx12", lengths=(1, 2)))
+        got = set()
+        for c in cs["cases"]:
+            dim = c["attrs"].get("dim")
+            if dim is None or "len" not in c["id"]:
+                continue
+            shp = c["inputs"][0]["shape"]
+            got.add(int(shp[dim if dim >= 0 else dim + len(shp)]))
+        self.assertEqual(got, {1, 2})
+
+    def test_absent_field_changes_nothing(self):
+        """**向后兼容硬约束**：不声明该字段 → plan entries 与账本口径一字不变（现有算子零影响）。"""
+        spec = _fake_median_spec(op="MedNoAx", dtypes=("float32",), ranks=(1, 2, 3))
+        _gf.place_golden(_gf.root(), "MedNoAx", body=_FAKE_MEDIAN_BODY)
+        in_params = [p for p in spec["params"] if p["io"] == "in"]
+        attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
+        of = GC.load_golden("MedNoAx").out_shape
+        entries, meta = GC._plan(spec, in_params, ["float32"], attrs_default, "MedNoAx", 24,
+                                 cost_fn=GC._make_cost_fn(in_params, of),
+                                 empty_accepts=GC._make_empty_accepts(in_params, of, attrs_default))
+        self.assertEqual(meta["attr_axis_lengths"]["emitted"], 0)
+        self.assertFalse(any("轴长度" in (e.get("tags") or []) for e in entries))
+
+    def test_schema_fail_closed(self):
+        """结构不对 / 未知 attr / 非正长度一律 fail-closed（声明了却产不出 = 假覆盖）。"""
+        defaults = {"dim": None, "keepdim": False}
+        for bad in ([], {"attr": "dim"}, [{"attr": "nope", "lengths": [1]}],
+                    [{"attr": "dim", "lengths": []}], [{"attr": "dim", "lengths": [0]}],
+                    [{"attr": "dim", "lengths": [-1]}], [{"attr": "dim", "lengths": [True]}]):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                GC._attr_axis_lengths({"attr_axis_lengths": bad}, defaults)
+        self.assertEqual(GC._attr_axis_lengths({}, defaults), [])
+
+    def test_declared_but_unsatisfiable_fail_closed(self):
+        """attr 取值全都不是轴下标（这里只留 dim=None）→ 一条都产不出 → 当场炸，不静默零覆盖。"""
+        spec = self._spec("MedAxNone")
+        spec["attr_matrix"] = [{"dim": None, "keepdim": False}]     # 只剩全局变体，没有任何轴下标
+        with self.assertRaises(ValueError) as cm:
+            self._cases(spec)
+        self.assertIn("假覆盖", str(cm.exception))
+
+    def _plan(self, spec, op, cost=True):
+        """跑 `_plan` 拿 (entries, meta)。`cost=False` 时不带 cost_fn（等价 dry-run 的未核路径），
+        用于「网格里存在该 rank 下越界的 attr 组合」这类**只看计划、不执行 golden** 的断言。"""
+        in_params = [p for p in spec["params"] if p["io"] == "in"]
+        attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
+        dtypes = next(p for p in in_params if p["name"] == "self")["dtype"]
+        of = GC.load_golden(op).out_shape
+        return GC._plan(spec, in_params, dtypes, attrs_default, op, 24,
+                        cost_fn=GC._make_cost_fn(in_params, of) if cost else None,
+                        empty_accepts=GC._make_empty_accepts(in_params, of, attrs_default)
+                        if cost else None)
+
+    # ---------- finding #5：多 rank 下逐轴值挑 rank，别静默丢掉可生成的变体 ----------
+    def test_multi_rank_picks_a_rank_that_fits_each_axis(self):
+        """rank 允许 {2,4}、attr 含 dim=0 与 dim=3 → **dim=3 要落到 rank4**，不是被当越界静默跳过。
+
+        原实现全局只挑一个基准 rank（离 rank2 最近 → 2），dim=3 直接进 skipped，而全局 emitted>0
+        让 fail-closed 判据看不出来 —— 「部分轴变体静默缺失」。"""
+        spec = self._spec("MedAxRank24", lengths=(1,), dim_vals=(None, 0, 3), ranks=(2, 4))
+        entries, meta = self._plan(spec, "MedAxRank24", cost=False)
+        led = meta["attr_axis_lengths"]
+        by_val = {}
+        for it in led["items"]:
+            by_val.setdefault(it["attr_value"], set()).add(it["status"])
+        self.assertEqual(by_val.get(0), {"emitted"}, f"dim=0 应产出，实得账本 {led['items']}")
+        self.assertEqual(by_val.get(3), {"emitted"}, f"dim=3 应落到 rank4 产出，实得账本 {led['items']}")
+        self.assertEqual(by_val.get(None), {"not_applicable"})   # 全局归约合法缺席
+        self.assertEqual(led["skipped"], [], "逐轴值挑 rank 后不该再有静默缺失")
+        hit3 = [e for e in entries if e.get("axis_lock", {}).get("axes") == [3]]
+        self.assertTrue(hit3, "dim=3 的定向用例没生成")
+        for e in hit3:
+            self.assertEqual(len(e["shape"]), 4, f"dim=3 需要 rank≥4，实得 {e['shape']}")
+            self.assertEqual(int(e["shape"][3]), 1)
+        # dim=0 仍按「离 rank2 最近」落 rank2（确定性规则没被改坏）
+        hit0 = [e for e in entries if e.get("axis_lock", {}).get("axes") == [0]]
+        self.assertTrue(hit0 and all(len(e["shape"]) == 2 for e in hit0), [e["shape"] for e in hit0])
+        # 见证 finding #5 的旧行为：全局基准 shape 只有 rank2，dim=3 在它上面必然越界 → 静默跳过
+        self.assertEqual(len(GC._vp_shape((2, 4))), 2)
+        self.assertIsNone(GC._axis_length_shape(GC._vp_shape((2, 4)), [3], 1))
+        self.assertEqual(len(GC._axis_base_shape((2, 4), [3])), 4)   # 新：按轴值挑得下的 rank
+
+    def test_axis_value_with_no_legal_rank_fails_closed(self):
+        """轴取值在**所有**声明 rank 下都越界 → 逐项判据当场炸（不再靠总数非零蒙混过关）。"""
+        spec = self._spec("MedAxNoRank", lengths=(1,), dim_vals=(None, 0, 5), ranks=(1, 2))
+        with self.assertRaises(ValueError) as cm:
+            self._plan(spec, "MedAxNoRank", cost=False)
+        msg = str(cm.exception)
+        self.assertIn("部分轴取值产不出", msg)
+        self.assertIn("假覆盖", msg)
+
+    def test_ledger_is_per_item_not_just_a_total(self):
+        """账本逐 `(constraint, length, attr 组合)` 记状态——只报总数就是 finding #5 的病根。"""
+        spec = self._spec("MedAxLedger", lengths=(1, 2), ranks=(1, 2, 3))
+        _entries, meta = self._plan(spec, "MedAxLedger", cost=False)
+        led = meta["attr_axis_lengths"]
+        self.assertTrue(led["items"])
+        self.assertTrue(all({"status", "attr", "length", "attr_idx", "attr_value"} <= set(it)
+                            for it in led["items"]))
+        self.assertEqual(led["emitted"], sum(1 for it in led["items"] if it["status"] == "emitted"))
+        self.assertEqual({it["length"] for it in led["items"]}, {1, 2})
+
+    # ---------- finding #4：轴长度约束维在 cost 降规模中锁定，且降完复验 ----------
+    def test_locked_axis_survives_shrink(self):
+        """降规模只许动**没被约束**的维：声明轴长 100 的 case，降完那根轴仍是 100。"""
+        forced = [{"shape": (100, 6), "attrs": {}, "dtype": "float32", "id_kind": "ax0len100",
+                   "case_origin": "axis_length:dim:100:a1", "dims": ["功能"], "tags": ["轴长度"],
+                   "axis_lock": {"attr": "dim", "axes": [0], "length": 100, "rank": 2}}]
+        grid = [{"shape": (16,), "attrs": {}, "dtype": "float32", "id_kind": "gridu",
+                 "case_origin": "grid", "dims": ["功能"], "tags": ["常规"]}]
+        cost = lambda shp, attrs, where: GC._numel(shp)          # noqa: E731
+        _kept, led = GC._apply_cost_budget(forced, grid, cost, 400)
+        self.assertEqual(forced[0]["shape"][0], 100, "被约束的轴不许降")
+        self.assertLess(GC._numel(forced[0]["shape"]), 400)
+        self.assertIn("降规模", forced[0]["tags"])                # 降了规模照常留痕
+        self.assertEqual(led["scaled_cases"][0]["id_kind"], "ax0len100")
+        GC._verify_axis_locks(forced)                            # 复验通过（身份与实际一致）
+
+    def test_axis_length_vs_budget_conflict_fails_closed(self):
+        """锁定后仍超预算 → **fail-closed** 明说「轴长度约束与 cost 预算冲突」，不静默降规模。"""
+        forced = [{"shape": (100, 6), "attrs": {}, "dtype": "float32", "id_kind": "ax0len100",
+                   "case_origin": "axis_length:dim:100:a1", "dims": ["功能"], "tags": ["轴长度"],
+                   "axis_lock": {"attr": "dim", "axes": [0], "length": 100, "rank": 2}}]
+        cost = lambda shp, attrs, where: GC._numel(shp)          # noqa: E731
+        with self.assertRaises(ValueError) as cm:
+            GC._apply_cost_budget(forced, [], cost, 50)
+        msg = str(cm.exception)
+        self.assertIn("轴长度约束与 golden 生成期规模预算冲突", msg)
+        self.assertIn("假覆盖", msg)
+        self.assertEqual(forced[0]["shape"], (100, 6), "炸了就不许留下被改过的形状")
+        # 见证 finding #4 的旧行为：**不带 lock** 时同一条会被悄悄降成 (6,6)——约束的那根轴从 100 变成 6，
+        # 而 id_kind/case_origin 仍写着 ax0len100 → 账本与 case ID 冒充覆盖了任务书边界。
+        old, _c = GC._shrink_to_budget((100, 6), {}, cost, 50, "w")
+        self.assertEqual(old, (6, 6))
+        self.assertNotEqual(int(old[0]), 100)
+
+    def test_shrunk_axis_length_case_raises_instead_of_lying(self):
+        """兜底门：若哪天有人绕过锁把约束维改小，复验必须**抛**，而不是让 id/账本继续宣称覆盖。"""
+        e = {"shape": (4, 3), "attrs": {}, "dtype": "float32", "id_kind": "ax0len100",
+             "case_origin": "axis_length:dim:100:a1", "dims": ["功能"], "tags": ["轴长度", "降规模"],
+             "axis_lock": {"attr": "dim", "axes": [0], "length": 100, "rank": 2}}
+        with self.assertRaises(ValueError) as cm:
+            GC._verify_axis_locks([e])
+        msg = str(cm.exception)
+        self.assertIn("假覆盖", msg)
+        self.assertIn("ax0len100", msg)
+
+    def test_end_to_end_budget_conflict_fails_closed(self):
+        """整条 gen_cases 上也炸（不是只有单测里炸）：小预算 + 大轴长 → 冲突当场停。"""
+        spec = self._spec("MedAxBudget", lengths=(100,), ranks=(1, 2, 3))
+        spec["precision"]["golden_cost_budget"] = 50
+        with self.assertRaises(ValueError) as cm:
+            self._cases(spec)
+        self.assertIn("轴长度约束与 golden 生成期规模预算冲突", str(cm.exception))
+
+    def test_end_to_end_shrink_keeps_declared_axis_length(self):
+        """预算够降但不够宽时：case 真的落盘，且**声明的轴长度在真实输入里成立**（不是嘴上覆盖）。"""
+        spec = self._spec("MedAxKeep", lengths=(100,), ranks=(1, 2, 3))
+        spec["precision"]["golden_cost_budget"] = 400
+        cs = self._cases(spec)
+        hits = [c for c in cs["cases"] if "ax0len100" in c["id"]]
+        self.assertTrue(hits, "轴长度 case 没生成")
+        for c in hits:
+            dim = c["attrs"]["dim"]
+            shp = c["inputs"][0]["shape"]
+            idx = dim if dim >= 0 else dim + len(shp)
+            self.assertEqual(int(shp[idx]), 100,
+                             f"{c['id']}: 宣称覆盖轴长 100，实际 shape={shp} → 假覆盖")
+
+    def test_directed_generation_closes_the_gap(self):
+        """定向生成后，`dim` 取值 × 含长度-1 轴的 shape **不再零配对**（bug#12 的实质修复）。"""
+        spec = self._spec("MedAxFix")
+        in_params = [p for p in spec["params"] if p["io"] == "in"]
+        attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
+        of = GC.load_golden("MedAxFix").out_shape
+        entries, _meta = GC._plan(spec, in_params, ["float32"], attrs_default, "MedAxFix", 24,
+                                  cost_fn=GC._make_cost_fn(in_params, of),
+                                  empty_accepts=GC._make_empty_accepts(in_params, of, attrs_default))
+        paired = {(e["attrs"].get("dim"), GC._shape_class(e["shape"])) for e in entries}
+        unit = {GC.SHAPE_CLASS_ALL_UNIT, GC.SHAPE_CLASS_HAS_UNIT}
+        self.assertTrue(any(d == 0 and sc in unit for d, sc in paired),
+                        f"dim=0 仍未配上任何含长度-1 轴的 shape：{sorted(paired, key=repr)}")
+
+
+class OperatorClassSpecialsTest(unittest.TestCase):
+    """OC · `spec.operator_class` → 特殊值口径分档（字段驱动、op-中立，**无算子名分支**）。
+
+    修的是**导致合格 PR 被误判 FAIL 的流程缺陷**：引擎原先无条件给每个浮点 dtype 铺 inf/-inf/nan，
+    median PR6429 的 6 条 fail 全是 NaN 用例——用**超出验收口径**的用例把合格 PR 判挂了。
+    依据（参考仓 `Justbin/cannbot-ops-input`）：`design_contract.py:512` 只对 `floating_compute`
+    调 `_validate_floating_rules`（:360-393，只有那一类强制 nan/pos_inf/neg_inf/mixed_inf）；
+    `SKILL.md:252` 给结构/整型类列的是「极值、0/1/-1、**重复**、越界索引、广播、规约轴、饱和」。
+    """
+    _NONFINITE = {"inf", "ninf", "nan"}
+
+    def _kinds(self, spec):
+        """跑 plan（不落盘、不需 golden）→ (id_kind 集合, meta)。"""
+        in_params = [p for p in spec["params"] if p["io"] == "in"]
+        attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
+        entries, meta = GC._plan(spec, in_params, in_params[0]["dtype"], attrs_default,
+                                 spec["op"], spec["precision"]["case_target"])
+        return {e["id_kind"] for e in entries}, meta
+
+    # ── 词表与缺省语义 ───────────────────────────────────────────────────────────────
+    def test_vocabulary_and_default(self):
+        self.assertIsNone(GC._operator_class({}))                       # 未声明 → None
+        for v in ("floating_compute", "integer_compute", "structural"):
+            self.assertEqual(GC._operator_class({"operator_class": v}), v)
+        self.assertTrue(GC._emits_nonfinite(None))                      # 未声明 = 现行为（照产）
+        self.assertTrue(GC._emits_nonfinite("floating_compute"))
+        self.assertFalse(GC._emits_nonfinite("structural"))
+        self.assertFalse(GC._emits_nonfinite("integer_compute"))
+
+    def test_unknown_class_fail_closed(self):
+        for bad in ("bogus", "", "Structural", 1, True, ["structural"]):
+            with self.assertRaises(ValueError, msg=f"{bad!r} 应 fail-closed") as cm:
+                GC._operator_class({"operator_class": bad})
+            self.assertIn("受控词表", str(cm.exception))
+
+    def test_unknown_class_fail_closed_end_to_end(self):
+        spec = _fake_median_spec(op="MedOCBad", dtypes=("float32",), operator_class="bogus")
+        with self.assertRaises(ValueError) as cm:
+            self._kinds(spec)
+        self.assertIn("operator_class", str(cm.exception))
+
+    # ── 分档：structural / integer_compute 不产 nan·inf；floating_compute 与缺省照产 ──────
+    def test_structural_omits_nonfinite_specials(self):
+        kinds, meta = self._kinds(_fake_median_spec(op="MedOCStruct", dtypes=("float32",),
+                                                    operator_class="structural"))
+        self.assertFalse(kinds & self._NONFINITE,
+                         f"structural 算子仍产了非有限特殊场景 {sorted(kinds & self._NONFINITE)}")
+        self.assertEqual(meta["operator_class"], "structural")
+        self.assertFalse(meta["emits_nonfinite_specials"])
+
+    def test_integer_compute_omits_nonfinite_specials(self):
+        kinds, _ = self._kinds(_fake_median_spec(op="MedOCInt", dtypes=("float32",),
+                                                 operator_class="integer_compute"))
+        self.assertFalse(kinds & self._NONFINITE)
+
+    def test_floating_compute_still_emits_nonfinite_specials(self):
+        kinds, meta = self._kinds(_fake_median_spec(op="MedOCFloat", dtypes=("float32",),
+                                                    operator_class="floating_compute"))
+        self.assertEqual(self._NONFINITE, kinds & self._NONFINITE,
+                         f"floating_compute 少了非有限特殊场景：{sorted(self._NONFINITE - kinds)}")
+        self.assertTrue(meta["emits_nonfinite_specials"])
+
+    def test_absent_field_keeps_current_behavior(self):
+        """**向后兼容硬约束**：整字段省略 → 与改动前一致（照产 inf/-inf/nan）。"""
+        kinds, meta = self._kinds(_fake_median_spec(op="MedOCNone", dtypes=("float32",)))
+        self.assertEqual(self._NONFINITE, kinds & self._NONFINITE)
+        self.assertIsNone(meta["operator_class"])
+        self.assertTrue(meta["emits_nonfinite_specials"])
+
+    def test_boundary_specials_kept_for_every_class(self):
+        """只砍 inf/-inf/nan：标量 / 上下边界（scalar·bndlo·bndhi）**所有类别都保留**。"""
+        for oc in (None, "floating_compute", "integer_compute", "structural"):
+            kinds, _ = self._kinds(_fake_median_spec(op=f"MedOCB{oc or 'None'}", dtypes=("float32",),
+                                                     operator_class=oc))
+            self.assertTrue({"scalar", "bndlo", "bndhi"} <= kinds, f"{oc}: 边界特殊场景被误砍 {sorted(kinds)}")
+
+    # ── value_profiles 与类别的自洽（nan 冲突 fail-closed；tie 全类别保留）───────────────
+    def test_nan_profile_conflicts_with_non_floating_class(self):
+        for oc in ("structural", "integer_compute"):
+            with self.assertRaises(ValueError, msg=oc) as cm:
+                GC._value_profiles({"operator_class": oc,
+                                    "precision": {"value_profiles": ["nan", "tie"]}})
+            msg = str(cm.exception)
+            self.assertIn("nan", msg)
+            self.assertIn("operator_class", msg)          # 报错点名怎么改（改类别 or 去掉 profile）
+
+    def test_nan_profile_conflict_fail_closed_end_to_end(self):
+        spec = _fake_median_spec(op="MedOCNanConf", dtypes=("float32",),
+                                 operator_class="structural", value_profiles=("nan",))
+        with self.assertRaises(ValueError) as cm:
+            self._kinds(spec)
+        self.assertIn("nan", str(cm.exception))
+
+    def test_nan_profile_ok_for_floating_compute(self):
+        self.assertEqual(GC._value_profiles({"operator_class": "floating_compute",
+                                             "precision": {"value_profiles": ["nan", "tie"]}}),
+                         ["nan", "tie"])
+        self.assertEqual(GC._value_profiles({"precision": {"value_profiles": ["nan"]}}), ["nan"])
+
+    def test_tie_profile_survives_in_every_class(self):
+        for oc in (None, "floating_compute", "integer_compute", "structural"):
+            self.assertEqual(GC._value_profiles({**({"operator_class": oc} if oc else {}),
+                                                 "precision": {"value_profiles": ["tie"]}}), ["tie"])
+            kinds, _ = self._kinds(_fake_median_spec(op=f"MedOCT{oc or 'None'}", dtypes=("float32",),
+                                                     operator_class=oc, value_profiles=("tie",),
+                                                     case_target=20))
+            self.assertIn("vptie", kinds, f"{oc}: tie value_profile 用例丢了")
+
+    # ── 端到端：结构类算子的输入里**真的**一个 NaN/Inf 都没有（不是嘴上不产）──────────────
+    def test_structural_inputs_contain_no_nan_or_inf(self):
+        spec = _fake_median_spec(op="MedOCE2E", dtypes=("float32",), operator_class="structural",
+                                 value_profiles=("tie",), case_target=24)
+        cs, work = _gen(spec, _FAKE_MEDIAN_BODY, op="MedOCE2E")
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        self.assertTrue(cs["cases"])
+        self.assertEqual(cs["operator_class"], "structural")     # 声明了才落进 caseset（账本可追溯）
+        self.assertFalse(cs["emits_nonfinite_specials"])
+        for c in cs["cases"]:
+            for item in c["inputs"]:
+                x = np.load(os.path.join(work, item["path"]))
+                if x.dtype.kind != "f" or x.size == 0:
+                    continue
+                self.assertFalse(bool(np.isnan(x).any()),
+                                 f"{c['id']}: structural 算子输入含 NaN（超出验收口径 → 会误判合格 PR）")
+                self.assertTrue(bool(np.isfinite(x).all()),
+                                f"{c['id']}: structural 算子输入含 Inf（超出验收口径）")
+        self.assertTrue(any("vptie" in c["id"] for c in cs["cases"]), "tie 用例应保留")
+
+    def test_caseset_field_absent_when_class_undeclared(self):
+        """未声明 → caseset **不出现** operator_class 键（现有算子 caseset 逐字节不变的前提）。"""
+        spec = _fake_median_spec(op="MedOCNoKey", dtypes=("float32",), case_target=12)
+        cs, work = _gen(spec, _FAKE_MEDIAN_BODY, op="MedOCNoKey")
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        self.assertNotIn("operator_class", cs)
+        self.assertNotIn("emits_nonfinite_specials", cs)
+
+    # ── 真 median spec 的口径守卫（本次判错的直接修正）────────────────────────────────
+    def test_real_median_spec_is_structural_without_nan_profile(self):
+        with open(_MEDIAN_SPEC, encoding="utf-8") as fh:
+            spec = json.load(fh)
+        self.assertEqual(spec.get("operator_class"), "structural")
+        self.assertNotIn("nan", spec["precision"].get("value_profiles", []),
+                         "median 是 structural 类，nan profile 会 fail-closed")
+        self.assertIn("tie", spec["precision"].get("value_profiles", []),
+                      "tie 属结构类特殊值那一档（重复/并列），不该被一起砍掉")
 
 
 if __name__ == "__main__":

@@ -1170,8 +1170,13 @@ def compute_metrics(out, golden, policy, gather_ctx=None):
         _check_index_array(ia, "actual")
         _check_index_array(ig, "golden")
         if ia.dtype != ig.dtype:
+            # F2：两侧 dtype 应同出 **spec 声明的 index out-param dtype**——真机 buffer 按 caseset 的
+            # `compare_dtype` 开、golden 按同一声明落盘（gen_cases._index_golden_array）。到这里还不一致，
+            # 说明某一侧偏离了声明（实现返回了别的 dtype / 产物串了轮次）——那正是要被看见的缺陷，
+            # **绝不在比较端隐式归一铺平**（归一会把真问题一起抹掉）。
             raise ValueError(f"index_value_consistency 两侧下标 dtype 不一致 actual={ia.dtype.name} "
-                             f"golden={ig.dtype.name}（须同一整数 dtype）——fail-closed")
+                             f"golden={ig.dtype.name}（须同一整数 dtype，即 spec 声明的 index dtype；"
+                             f"不做隐式归一）——fail-closed")
         rtol = _checked_tol(policy["value_rtol"], "policy.value_rtol")
         atol = _checked_tol(policy["value_atol"], "policy.value_atol")
         ga = _gather_along_dim(src, ia, dim, keepdim).astype(np.float64)
@@ -1179,6 +1184,10 @@ def compute_metrics(out, golden, policy, gather_ctx=None):
         # 与 value 路径**同一个实现**（finding #3）：inf 四象限一致、equal_nan 语义一致。
         close, diff = _allclose_close_mask(ga, gg, rtol, atol, True)
         finite = np.isfinite(diff)
+        # ⚠ 不往 metrics 里加 dtype 记账字段：`validate_acceptance_state._metrics_match` 只认
+        # int/float（字符串 metric 会被它当浮点比 → 门恒 FAILED）。下标 dtype 的账已由既有字段承载——
+        # caseset `expected.outputs[k].compare_dtype`（= golden 落盘 dtype，F2 后同源）+ evidence
+        # `out_dtype`（真机 manifest 自报），且门侧 `_recompute_case_multi` 已卡「out dtype ≠ golden dtype」。
         return {"mismatch": int(np.count_nonzero(~close)), "numel": int(ig.size),
                 "gathered_max_abs_err": float(diff[finite].max()) if finite.any() else 0.0}
 

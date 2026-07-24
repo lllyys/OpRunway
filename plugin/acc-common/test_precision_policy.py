@@ -1181,6 +1181,16 @@ class IndexGuardTest(unittest.TestCase):
     def test_legit_index_still_works(self):
         self.assertEqual(self._run(np.array([2], np.int64), np.array([2], np.int64))["mismatch"], 0)
 
+    def test_declared_int32_index_pair_judged_normally(self):
+        """F2：spec 声明 int32 indices 时两侧同为 int32 → 判据正常出结果（不再被 dtype 闸卡死）。
+
+        闸只拒**跨型**，不拒「非 int64」——旧洞在生成侧（golden 恒 int64）而非此处，故此正反例都要留。"""
+        self.assertEqual(self._run(np.array([2], np.int32), np.array([2], np.int32))["mismatch"], 0)
+        self.assertEqual(self._run(np.array([0], np.int32), np.array([1], np.int32))["mismatch"], 1)
+        with self.assertRaises(ValueError) as cm:      # int32 actual vs int64 golden：仍严拒、不归一
+            self._run(np.array([2], np.int32), np.array([2], np.int64))
+        self.assertIn("dtype 不一致", str(cm.exception))
+
 
 class ToleranceFailClosedTest(unittest.TestCase):
     """finding #5：容差源与容差值一律受控——只有 `None` 落缺省，rtol/atol 须非 bool、有限、非负。"""

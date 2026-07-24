@@ -8,7 +8,7 @@ materialize/readback round-trip、int/bf16 golden、attr_matrix 计数+golden �
 跑: cd plugin/acc-common && python3 -m unittest test_gen_cases_dtype_attr -v
 ⚠ 真机（真 NPU）上 int/bf16 数值校验本轮不做——本文件只证「流水线能造/收发/裁 int/bf16」，非「被验收」。
 """
-import contextlib, io, json, os, subprocess, sys, tempfile, shutil, unittest
+import contextlib, hashlib, io, json, os, subprocess, sys, tempfile, shutil, unittest
 from unittest import mock
 import numpy as np
 
@@ -1875,6 +1875,190 @@ class GoldenContractTierTest(_FakeOpCase):
         with self.assertRaises(ValueError) as cm:
             GC.gen_cases(_fake_spec("FakeNoCite", case_target=1), self.work())
         self.assertIn("impl_reference", str(cm.exception))
+
+
+# ================== U3：dtype 白名单单一真源（生成层 × 真机层）+ 向后兼容 =========
+# 背景（dogfood 实测）：`repo_adapter.SUPPORTED_NP_BY_FORM["aclnn_py"]` 早已放开 int64/int8/uint8，
+# 但 `gen_cases.check_spec_capability` 自带另一份硬表 `{fp16,fp32,int16,int32}+bf16`，把任务书 8 类
+# dtype 压到 4/8 —— **覆盖率被工具而非算子限住**。现在两层各自单一真源、门同时问两层，缺哪层报哪层。
+def _u3_spec(op, dtypes, *, runner_form=None, arity=1):
+    """最小可跑 spec（U3 用）：可指定 runner_form + 是否带 aclnn 调用变体。"""
+    names = ["self", "other"][:arity]
+    params = [{"name": n, "io": "in", "dtype": list(dtypes)} for n in names]
+    params.append({"name": "out", "io": "out", "dtype": list(dtypes)})
+    sp = {"op": op, "verify_mode": "numerical", "params_source": "fixture", "params": params,
+          "allow_empty_tensor": False,
+          "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default", "case_target": 6}}
+    if runner_form:
+        sp["runner_form"] = runner_form
+    if runner_form == "aclnn_py":                            # aclnn_py 必须显式声明调用变体（不许兜默认）
+        sp["call_variants"] = [{"when": {"always": True}, "symbol": op,
+                                "active_attrs": [], "active_outputs": ["out"]}]
+    return sp
+
+
+class DtypeSingleSourceTest(unittest.TestCase):
+    """dtype 能力门 = 生成层(`gen_cases._NATIVE`+bf16) × 真机层(`repo_adapter.supported_np/deferred_np`)。"""
+
+    def _in(self, dt):
+        return [{"name": "self", "io": "in", "dtype": [dt]}]
+
+    def test_aclnn_py_accepts_int64_int8_uint8(self):
+        """U3 主诉：aclnn_py runner 早就能收发 int64/int8/uint8，用例生成端不得再挡。"""
+        for dt in ("int64", "int8", "uint8", "int32", "int16", "float32", "float16", "bfloat16"):
+            GC.check_spec_capability(self._in(dt), "aclnn_py")   # 不抛即通过
+
+    def test_cpp_still_rejects_int64_and_names_both_layers(self):
+        """cpp（runner v1）仍拒 int64/int8/uint8——真机收发不了；报错**两层支持集都点名**，别让人猜。"""
+        for dt in ("int64", "int8", "uint8"):
+            with self.assertRaises(ValueError, msg=dt) as cm:
+                GC.check_spec_capability(self._in(dt), None)     # None → 缺省 cpp
+            msg = str(cm.exception)
+            self.assertIn(dt, msg)
+            self.assertIn("生成层", msg)                          # 两层各自的支持集都写出来了
+            self.assertIn("真机层", msg)
+            self.assertIn("runner_form='cpp'", msg)               # 说清是按哪一支口径判的
+            # 明说是「造得出、真机收发不了」——用户不必翻代码去猜是哪一层挡的
+            self.assertIn("该 dtype 造得出、但 cpp runner 收发不了", msg)
+
+    def test_cpp_keeps_int16_int32_track_c_backward_compat(self):
+        """向后兼容：int16/int32 在 cpp 下**仍放行**（T7 起就能造用例，真机分支属 Track C、spec 以
+        dtype_deferred 挂账）。把它们一起拒掉会当场废掉两个既有 test fixture spec。"""
+        for dt in ("int16", "int32", "float32", "float16", "bfloat16"):
+            GC.check_spec_capability(self._in(dt), None)
+
+    def test_bool_rejected_points_at_generation_layer(self):
+        """反向缺口：aclnn_py runner 收得了 bool，但 gen_cases 造不出 → fail-closed，且报错点名**生成层**。"""
+        with self.assertRaises(ValueError) as cm:
+            GC.check_spec_capability(self._in("bool"), "aclnn_py")
+        msg = str(cm.exception)
+        self.assertIn("真机收得了、但 gen_cases 造不出", msg)
+        self.assertIn("bool", msg.split("真机层")[-1])           # 真机层那行的集合里确实有 bool
+
+    def test_unknown_runner_form_fail_closed(self):
+        """未知 runner_form → 直接炸，绝不静默兜 cpp（兜了就会用错口径判 dtype）。"""
+        with self.assertRaises(ValueError):
+            GC.check_spec_capability(self._in("float32"), "bogus_form")
+
+    def test_deferred_table_is_runner_side_only(self):
+        """Track-C 挂账集只放行**生成期**；真机侧白名单一点没放开（放开了就是假验收）。"""
+        self.assertNotIn("int32", RA.supported_np("cpp"))
+        self.assertIn("int32", RA.deferred_np("cpp"))
+        self.assertEqual(set(RA.deferred_np("aclnn_py")), set())
+        with self.assertRaises(ValueError):
+            RA.deferred_np("bogus_form")
+
+    def test_gen_cases_really_builds_int64_int8_uint8(self):
+        """能进门 ≠ 造得出：真跑一趟 gen_cases，核 int64/int8/uint8 的输入/golden/落盘/读回都成立。"""
+        op = "FakeU3Wide"
+        _place_golden(_GOLDEN_ROOT, op,
+                      body="def golden_fn(inputs, attrs):\n    return np.negative(inputs[0])\n")
+        work = tempfile.mkdtemp()
+        try:
+            cs = GC.gen_cases(_u3_spec(op, ["int64", "int8", "uint8"], runner_form="aclnn_py"), work)
+            self.assertEqual(cs["dtype_tested"], ["int64", "int8", "uint8"])
+            for dt in ("int64", "int8", "uint8"):
+                c = next(c for c in cs["cases"] if c["inputs"][0]["dtype"] == dt)
+                x = np.load(os.path.join(work, c["inputs"][0]["path"]))
+                g = np.load(os.path.join(work, c["expected"]["golden_path"]))
+                self.assertEqual(str(x.dtype), dt)                    # 落盘就是原生 dtype
+                self.assertNotIn("storage_dtype", c["inputs"][0])     # native：物理==逻辑，不带该字段
+                self.assertEqual(str(g.dtype), dt)                    # golden 同逻辑 dtype
+                self.assertEqual(c["expected"]["compare"], "exact_equal")   # 整型 → exact
+                # 物理收发 round-trip（真机字节口径）：materialize/readback 互逆且不做值 cast
+                meta = {"dtype": dt}
+                self.assertTrue(np.array_equal(
+                    RA.readback_output(RA.materialize_input(x, meta), meta), x))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_unsigned_inputs_have_no_negative_anchor(self):
+        """无符号 dtype 没有「负」这一支：锚点用 (0,1,3)。
+        ⚠ 旧锚点 `cdt(-2)` 在 numpy≥2 上直接 OverflowError（若静默回绕成 254 更坏——会假装测了负数）。
+        有符号 dtype 的锚点 (-2,0,3) **逐值不变**（向后兼容的直接钉子）。"""
+        for dt in ("int16", "int32", "int64", "int8"):
+            head = GC._make_varied(GC._case_rng("u3"), (32,), dt).reshape(-1)[:3].tolist()
+            self.assertEqual(head, [-2, 0, 3], dt)
+        for dt in ("uint8",):
+            x = GC._make_varied(GC._case_rng("u3"), (32,), dt)
+            self.assertEqual(x.reshape(-1)[:3].tolist(), [0, 1, 3], dt)
+            self.assertGreaterEqual(int(x.min()), 0, dt)
+
+
+# ---- 向后兼容硬约束：现有算子 caseset **逐字节不变** ----------------------------
+# 本机无 torch（samples/golden/* 的 golden.py 一律 torch 后端、缺则 fail-closed），故这里用**确定性
+# numpy 假 golden** 驱动同一批真 spec 走完整生成路径，对 caseset.json + 全部落盘 .npy 取 sha256 钉住。
+# 它证的是「gen_cases 的生成行为没被 U3 改动碰到」——不是「golden 数值正确」（那是别的测试的事）。
+# ⚠ 摘要与 numpy 的随机流绑定：numpy 大版本变了摘要可能整体漂 → 版本不符时 **skip 并说明**，
+#   不假装通过、也不误报回归。重取摘要：改 `_U3_BASELINE_NUMPY` 与下表，并在 PR 里说明为何变。
+_U3_BASELINE_NUMPY = "2.4"
+_U3_FAKE_GOLDEN = {
+    "IsClose": ("def golden_fn(inputs, attrs):\n"
+                "    a, b = inputs\n"
+                "    return np.isclose(a, b, rtol=float(attrs.get('rtol', 1e-5)),\n"
+                "                      atol=float(attrs.get('atol', 1e-8)),\n"
+                "                      equal_nan=bool(attrs.get('equal_nan', False)))\n"),
+    "Sign": "def golden_fn(inputs, attrs):\n    return np.sign(inputs[0])\n",
+    "Equal": "def golden_fn(inputs, attrs):\n    return inputs[0] == inputs[1]\n",
+    "Neg": "def golden_fn(inputs, attrs):\n    return np.negative(inputs[0])\n",
+}
+_U3_CASESET_DIGEST = {
+    "../samples/specs/equal.spec.json": "08041f0e2e7b840f117d0f28ee4b748782a27d9b74427e1ec9608554e04c4b52",
+    "../samples/specs/isclose.spec.json": "7a4390ecf21c383504f79f375a98a4f0b3ec24793092169f6f514b624eb2fd92",
+    "../samples/specs/neg.spec.json": "e538781640a6e81ad217c2831dafc2c2635104cd5f32a1facd9152d75983210c",
+    "../samples/specs/sign.spec.json": "c8f1bc8964fa8d242eb4112e0f94a55b73f0134e884d5ba134570755727d9a7e",
+    "test_fixtures/isclose_attr.spec.json":
+        "7bce89043c6170fc5fc7c98480357f31ee080148826a8f57b2ef9706b887486e",
+    "test_fixtures/sign_dtype.spec.json":
+        "7e01b619718bb691cd9abf9d02759a93653c7b660183362de429311028c9d701",
+}
+
+
+class ExistingOpsByteIdenticalTest(unittest.TestCase):
+    """现有 4 算子（+2 个 test fixture spec，覆盖 int16/int32 与 attr 矩阵）caseset 逐字节不变。"""
+
+    def setUp(self):
+        if not np.__version__.startswith(_U3_BASELINE_NUMPY + "."):
+            self.skipTest(f"caseset 摘要基线取自 numpy {_U3_BASELINE_NUMPY}.x，本机 {np.__version__} "
+                          f"—— 随机流可能不同，跳过而非误报回归")
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="u3_bytes_root_"))
+        for op, body in _U3_FAKE_GOLDEN.items():
+            _place_golden(self.root, op, body=body)
+        self.old = os.environ.get("OPRUNWAY_OPS_DIR")
+        os.environ["OPRUNWAY_OPS_DIR"] = self.root
+
+    def tearDown(self):
+        if getattr(self, "root", None) is None:
+            return
+        if self.old is None:
+            os.environ.pop("OPRUNWAY_OPS_DIR", None)
+        else:
+            os.environ["OPRUNWAY_OPS_DIR"] = self.old
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _digest(self, spec_rel):
+        spec = _spec(os.path.join(_HERE, spec_rel))
+        work = tempfile.mkdtemp(prefix="u3_bytes_work_")
+        try:
+            cs = GC.gen_cases(spec, work)
+            blob = json.dumps(cs, ensure_ascii=False, sort_keys=True).replace(work, "<WORK>")
+            parts = [hashlib.sha256(blob.encode()).hexdigest()]
+            files = []
+            for dirpath, _, names in os.walk(work):
+                for n in names:
+                    p = os.path.join(dirpath, n)
+                    with open(p, "rb") as f:
+                        files.append(f"{os.path.relpath(p, work)} {hashlib.sha256(f.read()).hexdigest()}")
+            parts.extend(sorted(files))
+            return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_caseset_digests_pinned(self):
+        for rel, want in sorted(_U3_CASESET_DIGEST.items()):
+            self.assertEqual(self._digest(rel), want,
+                             f"{rel} 的 caseset/产物字节变了 —— 现有算子的用例集必须逐字节不变"
+                             f"（向后兼容硬约束）。若确属有意变更，须单独说明并重取基线摘要。")
 
 
 if __name__ == "__main__":

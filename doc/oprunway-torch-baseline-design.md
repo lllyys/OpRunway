@@ -1,14 +1,27 @@
 ---
 title: OpRunway torch-对标验收场景 · Vendoring 设计与实现蓝图
 created: 2026-07-24
-status: 架构已获用户批准（Option A）。**分维状态**——accuracy 主链 + 编排接线：离线实现完成（905 单测绿）；
-        perf（torch_npu 基线采集）：**未实现**（第二里程碑）；runner 修复后的**真机复验**：未做；
-        median 端到端验收：**未跑**。covered≠真机绿。
+status: 架构已获用户批准（Option A）。**分维状态（2026-07-24 真机首跑后更新，以本行为准）**——
+        **median(PR6429) 端到端验收已跑，最终裁决 = `FAIL(精度)`**（a3 真机 60 例，`fail=6` 全部且仅有
+        NaN 输入场景；`gate.passed=true` → 是**成立的精度 FAIL、不是 BLOCKED**；产物 `reports/Median/`，
+        报告 `reports/Median/验收报告-median-pr6429.md`）。accuracy 主链 + 编排接线：已在真机跑通并出裁决。
+        perf（torch_npu 基线采集）：**代码已接通但真机仍 BLOCKED**——一个耗时数都没产出过（精度 fail-fast，
+        且 taskType id→名未解出）。covered≠真机绿：本文正文多处写于首跑之前，**凡与 §9.8 / 最终裁决冲突，
+        一律以 §9.8 + `reports/Median/` 落盘产物为准**。
 witness: median（PR6429）
 sources: 用户 2026-07-24 指定参考仓 gitcode Justbin/cannbot-ops-input；3 份调研 + 1 轮 Workflow 综合
 ---
 
 # OpRunway torch-对标模式 · Vendoring 蓝图（可执行）
+
+> 🔴 **全文级 SUPERSEDE 横幅（2026-07-24 真机首跑后加，覆盖下文所有「当前状态」类表述）**
+> **median(PR6429) 的最终验收裁决是 `FAIL(精度)`**——a3 真机 60 例、`fail=6`（全部且仅有 NaN 输入场景）、
+> `gate.passed=true`（证据可信完整，是**成立的精度 FAIL**、不是 BLOCKED）；性能维**全 BLOCKED、零个耗时数**。
+> 逐字产物在 `reports/Median/`（`acceptance.json` / `verdict.json` / `perf_report.json` / `harness_trust_gate.json`），
+> 人读报告 `reports/Median/验收报告-median-pr6429.md`。
+> 本文 §1–§8 大多写于首跑**之前**，其中「未跑 / 未实现 / 均须真机验证 / 一条 case 都还没跑过」等状态描述
+> **已过时**；**凡与本横幅、§9.8 或 `reports/Median/` 落盘产物冲突，一律以后者为准**。
+> ⚠ 同时守住反向的诚实：**跑过 ≠ 跑通**——精度是 FAIL、性能一个数都没有，别把「已上真机」读成「已达标」。
 
 > **由来**：用户 2026-07-24 定新规则——「任务书对标 torch」场景下参考 `cannbot-ops-input` 仓的精度/性能 case 生成规则、
 > 测试方式方法、torch 封装算子方式，改造 OpRunway 并对 median 任务书 + PR6429 做端到端验收。架构经用户拍板走
@@ -100,7 +113,17 @@ plugin/acc-common/
 }
 ```
 
-`scenario` 触发判据（编排层零 if-算子名）：`scenario=="torch_ref_aclnn"` ⟺ 任务书声明对标 torch + PR 是 aclnn 两段式（op工程有 build.sh+op_api+op_graph）。由 `acc-spec-extractor` 从任务书×op_def 抽出。
+⚠ **上面这块是首程草案，有三处后来被推翻，别照抄**（权威 schema 看 `plugin/acc-common/spec_schema_template.jsonc`
++ `skills/acc-spec/references/taskdoc-to-spec.md`）：
+① `indices` 的 `dtype:["int64"]` **是错的口径**——index 输出的 dtype **必须照算子 header/op_def 实际声明填**
+（PR6429 的 op_def 固定 `DT_INT32`；写 int64 会把 `indices_dtype_mismatch` 这条落差掩掉）；且 index 输出还**必填 `gather_from`**（指某 in 参数），这里漏了。
+② `perf.target_ratio: 0.6` **是错的**——0.6 是参考仓 cannbot-ops-input 的自家默认，median 任务书写的是「不劣化」→ **1.0**；照 0.6 会把「比基线慢 40%」判成达标。
+③ `runner_form=="aclnn_py"` **必须**同时给 `call_variants`（这里没写），否则 `gen_cases` 当场 fail-closed。
+
+`scenario` 触发判据（编排层零 if-算子名）：`scenario=="torch_ref_aclnn"` ⟺ 任务书声明对标 torch + PR 是 aclnn 两段式
+（**仓根** `build.sh` + 算子目录有 `op_host/` + 在 `<op_subdir>` 下**有界递归**能找到 `aclnn_*.h`；⚠ 原文的
+「op工程有 build.sh+op_api+op_graph」**已被 §9.4 实测推翻**——无 per-op build.sh、无 `op_graph/`、接口头层级不预设）。
+由 `acc-spec-extractor` 从任务书×op_def 抽出。
 
 ### 2.2 caseset.json（gen_cases 产出）
 
@@ -198,6 +221,12 @@ plugin/acc-common/
 
 ### 组件⑤ perf msprof 基线（run_on_npu.sh + repo_adapter + perf_compare）
 
+> ⚠ **状态已变（2026-07-24，覆盖本小节末尾的「perf 列为第二里程碑」）**：perf 采集端**代码已接通**
+> （`aclnn_runtime/perf_msprof.py` + `repo_adapter.parse_torch_npu_baseline` 真消费口 + 基线行为五分类
+> + 精度先筛 + 双边 scope 校验，实测修正见 §9.7）。**但真机仍 BLOCKED、一个耗时数都没产出过**
+> （首跑：精度 fail-fast；且即便不 fail-fast，profiler db 的 `TASK.taskType` 是数值枚举 id、未解回名字 → 双边 fail-closed）。
+> **口径：有有效基线且双边 scope 同为 `kernel_only` 才出性能裁决；否则 BLOCKED，绝不冒充达标。**
+
 - **首程 perf 走 torch_npu 基线**（median 的 torch-对标语义）：基线 = `torch_npu` 上 `torch.median` 的 kernel-only 耗时；custom = ctypes-aclnn 的 median kernel 耗时。
 - perf_compare **零改**（源无关，只读 us+scope+ratio）。
 - 采集端改造（§5 详）：aclnn runner 的 perf 需 python-ctypes 的 kernel-only msprof 采集。**首程可复用参考仓 torch-based msprof wrapper**（容器有 torch_npu 2.10）跑基线；custom 侧 ctypes 用 `msprof --task-time` 圈 range。**perf 列为第二里程碑**，accuracy 通路优先绿。
@@ -215,7 +244,7 @@ plugin/acc-common/
 ## 4. ctypes-aclnn runner 落地细节（核心）
 
 > ⚠ **本节 §4.1 的调起链路、§4.2 的「`<ops_root>/<op>/` 含 build.sh+op_api+op_graph」定位与 vendor 路径写法均已被 §9.4/§9.6 实测推翻、不可照抄执行**：
-> 真实形态是 **ops 仓根 `build.sh --ops=<op>`** + `<op_subdir>/op_host/` + `<op_subdir>/op_api/aclnn_*.h`（**无** per-op build.sh、**无** op_graph）；
+> 真实形态是 **ops 仓根 `build.sh --ops=<op>`** + `<op_subdir>/op_host/` + `<op_subdir>/op_host/op_api/aclnn_*.h`（**无** per-op build.sh、**无** op_graph；⚠ 接口头在 `op_host/op_api/`，`<op_subdir>/` 下**没有** `op_api/`——故 gate 一律**在 `<op_subdir>` 下有界递归**找、不钉死层级）；
 > custom vendor 实际落 `<install-path>/vendors/<vendor_name>**_nn**/op_api/lib/libcust_opapi.so`（`_nn` 后缀由 install 自动追加），
 > 运行时须同时设 `ASCEND_CUSTOM_OPP_PATH` 与 `LD_LIBRARY_PATH`（权威见 install 生成的 `vendors/<v>_nn/bin/set_env.bash`）。**执行一律以 §9.6 为准。**
 
@@ -296,7 +325,10 @@ arity 来源：header 签名 `aclnnMedian(self, dim, keepdim, valuesOut, indices
 
 ### 5.2 runner 找 DUT
 
-`find_aclnn_project(op)` → `<ops_root>/<op>/`（含 build.sh+op_api+op_graph）；`AclnnRunner` 从 `$ASCEND_OPP_PATH/vendors/*/op_api/lib/libcust_opapi.so` glob 到 median 符号；op 名从 `op_api/aclnn_median.h` 正则拿。
+~~`find_aclnn_project(op)` → `<ops_root>/<op>/`（含 build.sh+op_api+op_graph）；`AclnnRunner` 从 `$ASCEND_OPP_PATH/vendors/*/op_api/lib/libcust_opapi.so` glob 到 median 符号；op 名从 `op_api/aclnn_median.h` 正则拿。~~
+⚠ **SUPERSEDED（§9.4/§9.6 实测）**：实际是 **仓根 `build.sh --ops=<op>`**（无 per-op build.sh、无 `op_graph/`），
+接口头**在 `<op_subdir>` 下有界递归**找（PR6429 真实落点 `<op_subdir>/op_host/op_api/aclnn_median.h`，`<op_subdir>/` 下**没有** `op_api/`），
+**绝不钉死某一层**；custom lib 的发现走 **`ASCEND_CUSTOM_OPP_PATH`**（**别覆盖 `ASCEND_OPP_PATH`**，见 §9.7 末的 env 订正）。
 
 ### 5.3 De-risk 顺序（先 stand-in 验通路，再上 PR 真算子）
 
@@ -332,7 +364,8 @@ arity 来源：header 签名 `aclnnMedian(self, dim, keepdim, valuesOut, indices
 | ADR 0005/0007（三层口径/裁决只从 validator） | torch_allclose judge 落进现有三层字段，不新增裁决出口 | **无张力·保持** |
 | ADR 0011（golden 冻结） | torch golden.py `authorization.kind=oracle_method`→tier1 | 现有机制承载·无张力 |
 
-**未上真机提醒**（承 golden-branch-handoff）：全部为静态集成点+设计，torch_allclose NPU 实测、ctypes-aclnn 在 9.0.1 运行时能否跑通、多输出 arity 解析、bf16 窄化、torch_npu perf kernel-only 口径——**均须 a3 `oprunway_prov` 真机验证，covered≠真机绿**。
+~~**未上真机提醒**（承 golden-branch-handoff）：全部为静态集成点+设计，torch_allclose NPU 实测、ctypes-aclnn 在 9.0.1 运行时能否跑通、多输出 arity 解析、bf16 窄化、torch_npu perf kernel-only 口径——**均须 a3 `oprunway_prov` 真机验证，covered≠真机绿**。~~
+⚠ **SUPERSEDED（2026-07-24 真机首跑）**：上面这条**已过时**。实际结果——torch_allclose 判据 / ctypes-aclnn 在 9.0.1 / 多输出 arity / bf16 窄化**都已在 a3 真机跑过**，端到端出了裁决 **`FAIL(精度)`**（60 例 fail=6，见文首横幅与 §9.8）；**唯独 `torch_npu` perf kernel-only 口径仍未验证**——性能维一个耗时数都没产出（BLOCKED）。**别再据本条说「一切都还没上真机」，也别反过来说「都验过了」。**
 
 ---
 
@@ -482,7 +515,14 @@ arity 来源：header 签名 `aclnnMedian(self, dim, keepdim, valuesOut, indices
 | c16 | 按维 | bf16 | 偶(4) | rank2 dim=1 | true | tie | bf16·tie·偶·keepdim |
 
 **计划覆盖账本**（⚠ **这 16 条是计划清单、整套见证集尚未执行**——下列一律读作「计划覆盖」，**不是已达成的实测覆盖**；承 covered≠真机绿）：全局/按维两分派、双输出(c05+)、fp32/fp16/bf16/int32、奇偶、dim=1退化(c11)、nan(c12)、tie(c13/c14/c16)、first/middle/last(c05/c07/c06)、keepdim T/F。
-**已实测覆盖（截至 2026-07-24，仅 D0/D1，且用的是内置算子非 PR DUT）**：D0 `aclnnAbs` fp32 + bf16（单输出）；D1 `aclnnMedianDim` fp32-distinct / fp32-tie / bf16（多输出 + index 值一致性）。**PR6429 自定义 median 一条 case 都还没跑过。**
+~~**已实测覆盖（截至 2026-07-24，仅 D0/D1，且用的是内置算子非 PR DUT）**：D0 `aclnnAbs` fp32 + bf16（单输出）；D1 `aclnnMedianDim` fp32-distinct / fp32-tie / bf16（多输出 + index 值一致性）。**PR6429 自定义 median 一条 case 都还没跑过。**~~
+⚠ **SUPERSEDED（2026-07-24 当日稍晚）**：「PR6429 一条 case 都还没跑过」**已过时**——当日已用 PR6429 自定义 `aclnnMedian`
+跑完 **60 条**正式用例，裁决 **`FAIL(精度)`**（`fail=6`，全部且仅有 NaN 输入场景；见文首横幅 / §9.8 / `reports/Median/`）。
+⚠ 但**这 60 条不是上表那 16 条见证集**，且**覆盖仍不完整**——诚实的未覆盖清单：
+输入 dtype 只测到 float32/float16/int32/int16（**bfloat16 / int64 / int8 / uint8 未测**）；
+**op_def 声明的 int32 indices 路径未测**（首跑被工具逼着按 int64 走）；
+**任务书点名的「dim 所指轴维度 = 1」零覆盖**；**性能维全 BLOCKED**；
+**任务书要求的 `aclnnMedianDim` 入口 PR 根本没提供**（`api_surface_mismatch`），自然一条没测。
 **未覆盖（scale 阶段补）**：rank5-8、int8/int64/uint8 输入、±inf、complex（median 无）、empty tensor、6 轴全笛卡尔。首程 16 case 通 + 账本诚实 → 再 scale。
 
 ### 其它未知
@@ -513,7 +553,9 @@ PR6429（fork `LiJianhao2/ops-nn` @ `0290d61ac066f9f4e620a3714f5941e82dc4e72a`�
 2. `source .../ascend-toolkit/set_env.sh` 后跑**仓根** `bash build.sh --pkg --experimental --soc=ascend910_93 --ops=median --vendor_name=customize --no_force`（op 名 `median` 取自 op_host CMakeLists 的 `OPTYPE median`；`--no_force` 规避 install_deps 联网）。
 3. 产**自定义 vendor 包**（`libcust_opapi.so` 导出 `aclnnMedian`）；**install 前 `ASCEND_CUSTOM_OPP_PATH` 指用户目录**（不污染共享 opp）；runner 靠 `LD_LIBRARY_PATH` 指到该 vendor 加载符号。
 4. 预估：数分钟~十几分钟、几百 MB~1G、风险=install_deps 联网(用 --no_force)+ 自定义 vendor 与内置 `aclnnMedian` 符号加载优先级。
-→ `aclnn_adapter.find_aclnn_project` / CP-C scope gate 的「三签名」判据要改成「**ops-<族> 仓 + 仓根 build.sh --ops=<op> + op_api/aclnn_*.h 手写接口**」；`aclnn_median.h` 两段式签名（self→dim→keepDim→valuesOut→indicesOut→ws→exec，1-in/2-out）**已坐实**、与蓝图一致，runner arity 按此。
+→ `aclnn_adapter.find_aclnn_project` / CP-C scope gate 的「三签名」判据要改成「**ops-<族> 仓 + 仓根 build.sh --ops=<op> + `<op_subdir>` 下能找到手写 `aclnn_*.h` 接口头**」。
+⚠ **接口头的落点是 `<op_subdir>/op_host/op_api/aclnn_median.h`**（本节早先写成 `<op_subdir>/op_api/…` 属笔误，2026-07-24 dogfood 实测订正——`experimental/index/median/` 下只有 `CMakeLists.txt README.md docs examples op_host op_kernel tests`，**没有** `op_api/`；参见 §9.6 D1 用的真 header 路径）。
+故 gate 的实现是**在 `<op_subdir>` 下有界递归**（深度 ≤3、目录数上限，逐段拒软链）找 `aclnn_*.h`（剔 `*_impl.h`）——`op_api/`、`op_host/op_api/`、`op_api/include/` 各种落点都认，**绝不钉死某一层**（钉死即拿一种布局冒充「通用」，换个仓就把真 PR 判成「非域内」硬阻塞）；一份都找不到才 fail-closed，并在报错里列出**实际扫过的目录 / 扫到的 .h / 跳过的软链**。`aclnn_median.h` 两段式签名（self→dim→keepDim→valuesOut→indicesOut→ws→exec，1-in/2-out）**已坐实**、与蓝图一致，runner arity 按此。
 
 ### 9.5 aclnn 调用流坐实
 example `test_aclnn_median.cpp` 的流程 = aclInit(nullptr)→aclrtSetDevice→CreateStream→aclrtMalloc(HUGE_FIRST)→Memcpy(H2D)→aclCreateTensor(+strides)→GetWorkspaceSize→aclrtMalloc(ws)→aclnnMedian→同步→Memcpy(D2H)，与 §9.1 枚举一一对应，正是 ctypes runner 要复刻的流程。空张量不支持（numel==0→`ACLNN_ERR_PARAM_INVALID`）。
@@ -522,6 +564,59 @@ example `test_aclnn_median.cpp` 的流程 = aclInit(nullptr)→aclrtSetDevice→
 **D0（内置 `aclnnAbs`，走真实 `AclnnRunner.run` 1in/1out）✅**：fp32 max_abs_err=0.0、bf16 max_abs_err=0.0 → ctypes 底座（CDLL/CreateTensor/H2D/两段/D2H/枚举）+ **bf16=27** 真机全对。
 **D1（内置 `aclnnMedianDim`，手写正确签名）✅**：fp32 distinct/ties + bf16 三例全绿——多输出逐 D2H、int64 indices、index 值一致性、bf16 窄化机制真机成立。**但暴露 runner 两处必修**（已修复中）：① `_ensure_init` 无条件要 custom vendor lib → 内置算子被拦（改可选）；② `run()` 不能传 median 的 `dim`/`keepDim` 标量 attr（须按签名真实顺序交织 tensor/scalar）。
 **D2（PR6429 自定义 Median build）✅**：9.0.1 一次 build 通过（~2min），`libcust_opapi.so` 导出 `aclnnMedian`(+GetWorkspaceSize)，ctypes 可加载。
+
+### 9.8 修后 runner 打真 DUT + ctypes MSTX 实测（2026-07-24，a3 容器）
+
+**① 修后 runner × PR6429 自定义 `aclnnMedian`：局部 runner 冒烟 7/7 通过（⚠ 非验收结论）。**
+⚠ **别摘引成「验收已绿」**：这 7 条是 runner 打通用的**局部冒烟**、**不含**后来失败的 NaN 场景，
+与验收裁决无关。**同日的正式验收是 60 例、最终裁决 `FAIL(精度)`**（`fail=6`，全部且仅有 NaN 输入场景：
+NaN 未按 `torch.median` 语义传播，失败只在 `dim=None`（拍平）与 `dim=0`（非末轴 transpose 路径），
+`dim=-1` 末轴 pass）——逐字见 `reports/Median/acceptance.json` / `verdict.json`。
+下面这 7 条里「values 与 torch 逐位一致」的说法**只对这 7 条无 NaN 输入成立**，不可外推。
+签名从真 header（`experimental/index/median/op_host/op_api/aclnn_median.h`）用 `parse_aclnn_op(op_dir, symbol="Median")` 解析，**零改动零特判**即得正确有序形参表 `self(in) / dim(int64) / keepDim(bool) / valuesOut(out) / indicesOut(out)`。
+覆盖：fp32 奇/偶长度、tie、bf16、int32、**全局（`indicesOut=NULL` → `shape=[]` 0-d 标量）**、keepdim。
+- **下中位数语义坐实**：`[6.94,-7.40,-2.81,-0.90]` → `-2.81`（**非**均值 -1.855）。
+- **bf16**：runner 的 round-half-even 窄化位模式 **== torch bf16 位模式**（断言过）。
+- **📌 给验收报告的副产**：PR 文档 `docs/aclnnMedian.md` 称 indices 取「沿规约维**首个出现**」，但输入 `[3,1,3,1]`（中位值 1、首现下标 1）DUT 返回 **3**；**torch 也返回 3** → DUT 与 torch 契约一致，属**文档措辞不准、非功能 gap**。
+
+**② 🔴 逮到会造成「假 PASS」的符号解析缺陷（分「当时发现」/「当前状态」两段读，别混）。**
+
+**【当时发现·2026-07-24 de-risk 现场】**
+`_ensure_init` 用 `RTLD_GLOBAL` 加载后从 `CDLL(None)` 全局取符号，而 **ELF 全局符号先加载者赢**、**CANN 9.0.1 的 `libopapi.so` 本身就导出 `aclnnMedian`/`aclnnMedianDim`**：
+```
+aclnnMedianGetWorkspaceSize  global=0xffff80dfeef0
+                  libopapi.so(内置)=0xffff80dfeef0   ← 全局解析到内置
+            libcust_opapi.so(DUT)=0xffff7f3b6ae0
+```
+本次因内置 arity 不同当场报 `ACL 161001` 才暴露。**危险场景是 PR 改一个同名同签名的既有算子——runner 会静默验证内置版本、报假 PASS**（验收工具最坏失效）。
+**当时定的修法**：`aclnn*` 符号**优先从 custom vendor handle `dlsym`**、找不到再退全局；**记录每个符号来自哪个 `.so`** 作 provenance 进证据链；提供**严格档 fail-closed**（声明「必须来自 custom vendor」时只在全局找到即 raise）。
+⚠ **LD_PRELOAD 不是可选方案**：实测每次进程退出必 `double free`/SIGABRT，且已定位非我方代码所致（裸 `aclInit+aclrtSetDevice` 在有 LD_PRELOAD 时同样 abort）。
+当时另记两条：**B** `_find_custom_opapi_libs` 只读 `ASCEND_OPP_PATH`，而官方 install 的 `set_env.bash` 导出的是 **`ASCEND_CUSTOM_OPP_PATH`** → 按官方 env 跑**一个 custom lib 都找不到**（driver 却用对了，两模块口径不一致）；**C** 每 runner 建一条 stream 从不销毁、无 teardown、无法注入外部 stream（影响 perf 按 stream 归并）。
+
+**【当前状态·2026-07-24 收工时】**（"已进修复队列" 这句已过时，别再照它办事）
+- **已实现**（代码落地 + 离线单测）：① custom vendor handle 优先 `dlsym`；② **`dladdr` 反查定义方 so** ——
+  只 dlsym 不够，POSIX dlsym 会沿 `DT_NEEDED` 依赖树继续找（实测 `libcust_opapi.so` 依赖内置 `libopapi_math.so`，
+  后者定义了 `aclnnAbs/aclnnIsClose/aclnnSign/aclnnSort…` 整个 math 家族 → 严格档对这类算子**原本根本没 fail-closed**、
+  provenance 还记成 custom vendor）；③ provenance 载重字段改为 `defining_lib`(+`defining_lib_verified`)，
+  dlsym 走的 handle 另记 `resolved_via`，并写明 **`global_conflict` 不能单独当 DUT 证据**；
+  ④ **严格档 fail-closed** 默认开；⑤ perf wrapper 同样改默认严格档 + `with` 销毁自建 stream（补上了 C 那条），
+  并修 `close()` 后指纹丢失；⑥ B 那条（`ASCEND_CUSTOM_OPP_PATH` 口径）已统一。
+- **已在真机复验的部分**：CP-C **harness 信任门**在 a3 复跑并留证——`reports/Median/harness_trust_gate.json`
+  记 `strict_custom_vendor: true`、`symbol_sources: ["custom_vendor"]`、DUT 指向
+  `.../vendors/customize_nn/op_api/lib/libcust_opapi.so`（PR head `0290d61a`）→ **该次自检验的确实是 PR 的算子、非 CANN 内置**。
+- **⚠ 不确定（如实记，别编）**：**那 60 例正式验收跑用的是修前还是修后的符号解析，当前从落盘产物判定不了**——
+  `reports/Median/evidence.json` 里**没有任何符号 provenance 字段**（`defining_lib` / `resolved_via` / `strict_*` 一个都没有，
+  只有 golden/out 的 sha256），且信任门 JSON 的落盘时间（10:15:58）**晚于** evidence/acceptance（10:14:06）。
+  故只能说：**信任门那次是修后 + 严格档**；60 例那次**不确定**。
+- **下一步（未做）**：把符号 provenance（`defining_lib` / `defining_lib_verified` / `resolved_via` / 严格档开关）
+  **落进 evidence.json**，让「验的是不是 DUT」成为每次验收的机读证据，而不是靠旁证推断。
+
+**③ ctypes 侧能打 MSTX（perf 最后一个未知已解）。**
+`torch_npu.profiler.profile(_ExperimentalConfig(mstx=True))` 包住 **ctypes** 调用 → **rid=1..5 非 0**、`MSTX_EVENTS` 5 行、`COMPUTE_TASK_INFO` 含 `aclnnMedian_Median_Median`×4（**确认是 DUT**）、`taskType=KERNEL_AIVEC`（**正落 db 白名单**）；按 MSTX 窗裁剪每窗恰好 2 kernel、三次散布 <3%（21.94/21.40/21.52us）。host-only range（不传 stream）同样能正确裁到 device kernel（时间戳同 ns 域、不要求同流）。
+msprof CLI 包住**纯 ctypes**（完全不 import torch）也采得到（19.78/20.02/19.48us，与上者互印证；`Task Type=AI_VECTOR_CORE`）但**无 MSTX**。
+- **对 fail-closed 的意味**：ctypes 通路**不必放宽**，可与 torch 通路共用 db 路线 + 同一 `KERNEL_*` 白名单。**代价**：MSTX 让 `torch_npu` 成为 ctypes 性能通路的硬依赖（虽然被测算子完全不经 torch）。建议门写成「**MSTX 证据** 或 **msprof CLI op_summary + 每 case 独立进程隔离**」二选一，且**产物显式标注走了哪条**，别让弱证据冒充强证据。
+- **⚠ 一次 aclnn 调用 ≠ 一个 kernel**：indices 要 int64 时 aclnn 层会插一个 `CastAiCore_Cast`（~1.8us、占 8%）→ 性能口径必须是**窗内累加**，不能只取首个 kernel。
+- iter0 的 MSTX 窗达 110ms（ACL 惰性初始化），但**kernel 本身时间第一次就稳**（20.20 vs 19.64/19.90）——warmup 是削 host 毛刺、不是削 kernel。
 
 ### 9.7 perf 采集通路 de-risk 实测（2026-07-24，a3 容器）——**推翻设计 3 条，补防御 3 条**
 见证：`torch.median(x,dim=1)` fp32 1024×1024。**凡与 §3 组件⑤ 冲突以本节为准。**
@@ -559,5 +654,10 @@ example `test_aclnn_median.cpp` 的流程 = aclInit(nullptr)→aclrtSetDevice→
    ⚠ **`--vendor_name=customize` 落地目录是 `customize_nn`**（自动补 `_nn` 后缀）——adapter 定位 vendor 路径用 `customize_nn`。
 5. **运行时 env**（install 生成的 `vendors/customize_nn/bin/set_env.bash` 为权威）：
    `ASCEND_CUSTOM_OPP_PATH=<...>/median_vendor/vendors/customize_nn:$ASCEND_CUSTOM_OPP_PATH`；
-   `LD_LIBRARY_PATH=<...>/customize_nn/op_api/lib:<CANN>/lib64:<CANN>/devlib:$LD_LIBRARY_PATH`；ctypes `RTLD_GLOBAL` 加载 `libcust_opapi.so` 即解析 custom `aclnnMedian`。
+   `LD_LIBRARY_PATH=<...>/customize_nn/op_api/lib:<CANN>/lib64:$LD_LIBRARY_PATH`；ctypes `RTLD_GLOBAL` 加载 `libcust_opapi.so` 即解析 custom `aclnnMedian`。
+   ⚠ **绝不要把 `<CANN>/devlib` 放进 `LD_LIBRARY_PATH`**（2026-07-24 dogfood 真机实测订正，旧文写了是错的）：`devlib` 是**编译期 stub 库**，运行期加载会让 CANN 报
+   `stub library cannot be used for execution` → **`aclInit failed with ACL status 500000`，exec/perf 100% 必死**。二分证据：只前置 `lib64` → `aclInit=0` 正常；只前置 `devlib` → stub 错。
+   （§9.2 那句「`libascendcl.so`(devlib) 加载成功」是 D0 **只读探测期**的观察——能 `CDLL` 打开 ≠ 能用它跑 kernel，勿据此配 env。）
+   ⚠ **同理绝不要覆盖 `ASCEND_OPP_PATH`**：曾 `export ASCEND_OPP_PATH="<install-path>"` 盖掉 CANN 自己的 opp 根 → 60/60 用例 `ACL 561103`（找不到 kernel）。
+   对照证据：`ASCEND_OPP_PATH=CANN 真根 → 60/60 pass`；`=install-path → 0/60`。custom lib 的发现由 **`ASCEND_CUSTOM_OPP_PATH`** 负责，不需要动 `ASCEND_OPP_PATH`。
    median 顶层 CMakeLists 无 add_sources → `--experimental` 虽置 torch-ext 但对 median 空转、**不依赖 torch**；install_deps 的实际安装函数在 main 流程未被调用（只有前置检查门）。

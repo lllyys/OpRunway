@@ -23,6 +23,15 @@ T7 dtype/attr 扩面（据 codex 审终版）：
 ⚠ 真机（真 NPU）上 int/bf16 的数值校验本轮**不做**——runner.cpp 的新 dtype 分支属 Track C（挂真机+pr_facts），
   见 doc/oprunway-todo.md gap。本文件仅证「流水线能造/收发 int/bf16 用例」，非「某算子在该 dtype 被验收」。
 
+U3 dtype 单一真源（2026-07-24）：dtype 支持不再由本文件独家说了算，拆成**两层、各自单一真源**——
+  · 生成层 = 本文件 `_NATIVE` + bf16（能造输入 / 能算 golden / 能落盘读回；本轮补齐 int64/int8/uint8）；
+  · 真机层 = `repo_adapter.supported_np(runner_form)`（能收发）+ `repo_adapter.deferred_np(runner_form)`
+    （Track-C 挂账：生成期放行、真机跑到仍 fail-closed）。
+  `check_spec_capability` **两层都问**，缺哪层就在报错里点名哪层、并列出两侧各自的支持集。
+  修的是这个真 bug：aclnn_py runner 早已支持 int64/int8/uint8，生成端却自带旧硬表挡掉 →
+  任务书 8 类 dtype 的覆盖被**工具**压到 4/8（不是被算子）。缺省 `runner_form=cpp` 口径不变，
+  现有算子 caseset 逐字节不变（测试以 sha256 钉住）。
+
 shape_transform 形态扩面（2026-07-22 用户拍板的契约 C1/C2/C3，落地见下面各处 `C1:` / `C2:` / `C3:` 标记）：
   · **C1 · 输出形状交给 per-op golden.py**：`<ops_root>/<op>/golden.py` **可选**导出
     `out_shape(in_shapes, attrs) -> tuple[int,...]`。**未导出 = 输出同输入形状**（elementwise 缺省语义，
@@ -65,6 +74,46 @@ G4 · 归约/成对类算子的**生成期规模预算**（2026-07-22，落地�
     ——matmul（O(M·N·K) 但 I/O 只 O(M·K+K·N+M·N)）、成对求和归约（O(N²) 却输出 O(N)）——**本模型看不见**，
     它们仍会在生成期跑很久。这类算子目前只能由用户把 `precision.golden_cost_budget` 调小（降规模会照常记账）。
     别把本机制当成「大 shape 已全防住」。
+
+算子类别 `spec.operator_class` → **特殊值口径分档**（字段驱动、op-中立；2026-07-24 修，落地见各处 `OC:` 标记）：
+  · **要修的真 bug（实证，不是推测）**：本引擎原先**无条件**给每个浮点 dtype 铺 §1.4 的
+    `inf` / `-inf` / `nan` 特殊值用例。对 median 这类**结构类**（选值 / 排序 / 索引 / 规约取元素）算子，
+    这些用例**超出验收口径** —— median PR6429 实跑判 `FAIL(精度)`，**6 条 fail 全是 NaN 用例**，
+    一个合格 PR 就这么被工具判挂了。
+  · **依据**（本项目 case 生成规则要求参照的仓 `Justbin/cannbot-ops-input`）：
+      `skills/operator-case-generation/common/design_contract.py:427` 受控词表
+      `{floating_compute, integer_compute, structural}`；同文件 `:512`
+      `if design["operator_class"] == "floating_compute": _validate_floating_rules(design)` ——
+      而 `_validate_floating_rules`（:360-393）**只在这一类里**强制 `nan/pos_inf/neg_inf/mixed_inf`。
+      另两类的口径见该仓 `SKILL.md:252`：「define value profiles and specials from the Torch semantics:
+      extrema, zero/one/minus-one, duplicate/negative/boundary indices, broadcasting relationships,
+      reduction axes, saturation…」——**极值 / 0·1·-1 / 重复 / 越界索引 / 广播 / 规约轴 / 饱和**，不含 NaN·Inf。
+      实证：该仓 `ops-bench/ops-eval-dataset/designs/aclnnMedian/case_design.json` 的
+      `operator_class = "structural"`、全文零 nan 零 inf；对照 `aclnnPdist`（`floating_compute`）
+      有 nan 2 处、inf 8 处。
+  · **分档**：`floating_compute` → 保持现状（照产 inf/-inf/nan，`nan` value_profile 可用）；
+    `structural` / `integer_compute` → **不产** inf/-inf/nan 特殊场景，且 spec 再声明 `value_profiles` 含
+    `nan` → **fail-closed**（不静默忽略——静默会让「账面声明了 NaN 覆盖」与「实际一条没产」长期打架）；
+    **整字段省略（未声明）→ 行为与改动前逐字节一致**（向后兼容硬约束：现有 4 算子 isclose/sign/equal/neg
+    都没声明，caseset + 全部 .npy 的 sha256 已实测全等）；词表外取值 → fail-closed。
+  · **`scalar`/`bndlo`/`bndhi`（标量·上下边界）与 `tie` value_profile 对所有类别保留**——参考仓给结构 /
+    整型类列的正是「极值、0/1/-1、**重复**、…」这一档，tie（并列 / 重复值）属其中，不该被一起砍掉。
+
+轴维度边界的定向生成 `spec.attr_axis_lengths`（字段驱动、op-中立；2026-07-24 审计修复后的不变式）：
+  · **要解决的**：任务书点名「归约轴上维度为 1」这类边界，而 shape 阶梯与 attr 取值在正交网格里各自独立取，
+    含长度-1 轴的 shape 只跟排在前面的 attr combo 撞上 → 点名场景实跑 0 条（pdist/median 首跑实测）。
+    声明 `[{"attr":"dim","lengths":[1]}]` 即**定向生成**「dim 指的那根轴长度=1」的强制用例。
+  · **不变式 ①（finding #4·高危假覆盖）**：被约束的那根轴在 G4 降规模中**锁定不许动**；锁后仍超预算 →
+    **fail-closed**（明说「轴长度约束与 cost 预算冲突」）。预算处理**完成后**还要逐条复验实际轴长
+    （`_verify_axis_locks`）。否则 `ax0len100` 会被降成 `(4,3)`、`id_kind`/`case_origin` 却仍宣称覆盖
+    长度 100 —— **账本与 case ID 声称覆盖了任务书边界、实际输入根本没覆盖**，比没有这套机制更糟。
+  · **不变式 ②（finding #5）**：基准 shape 的 rank **逐轴值挑**（`_axis_base_shape`）——rank 允许 `{2,4}`
+    而 attr 含 `dim=3` 时，`dim=3` 必须落到 rank4，不许被当越界静默跳过。账本与 fail-closed 判据按
+    `(constraint, length, attr 组合)` **逐项**判，**不看全局 emitted 总数**（部分缺失也是缺失）。
+  · **不变式 ③（finding #8）**：零配对告警对**轴型 attr** 用「归一化轴号 + rank + 被指轴的实际长度档」
+    作配对键（`_unpaired_combo_classes`）——按 shape 结构类判会把 `shape=(4,1), dim=0`（归约轴其实长 4）
+    误记成「已配上单位轴」（漏报），反向又会对该 rank 下已越界的轴值报出不可实现的缺口（误报）。
+    普通非轴 attr 仍走 shape 结构类口径。
 """
 import collections, hashlib, importlib.util, json, math, os, sys
 import numpy as np
@@ -72,8 +121,15 @@ import precision_policy
 
 SEED = 2026
 _BF16 = "bfloat16"
-# 原生 numpy dtype（bf16 不在此——它逻辑 fp32、物理 uint16，特判）
-_NATIVE = {"float32": np.float32, "float16": np.float16, "int32": np.int32, "int16": np.int16}
+# 原生 numpy dtype（bf16 不在此——它逻辑 fp32、物理 uint16，特判）。
+# 这张表 = **生成层**的 dtype 能力真源（能造输入 / 能算 golden / 能落盘读回），
+# 与 `repo_adapter.SUPPORTED_NP_BY_FORM`（**真机层**能收发什么）是两回事、各自单一真源；
+# 两层都过才允许进用例生成（`check_spec_capability`），缺哪层报错里点名哪层（U3）。
+# U3 扩：int64（aclnn indices 与整型算子必需）+ int8/uint8（op_def 常见整型档）。
+# 无符号 dtype 的输入构造见 `_make_varied`（没有负数分支，按有无符号位分、与算子身份无关）。
+_NATIVE = {"float32": np.float32, "float16": np.float16,
+           "int64": np.int64, "int32": np.int32, "int16": np.int16,
+           "int8": np.int8, "uint8": np.uint8}
 # Sign/Neg：输出在 bf16 网格上**精确可表示**（sign∈{-1,0,1}、neg 精确取负）→ bf16/fp16 走 exact_equal。
 # genuinely-lossy 数值算子（bf16 阈值须来自 policy/ascendoptest）本轮无、留 gap。
 # bf16 数值输出**逐位可达**的算子（纯搬运/纯符号类：输出恒等于某个输入元素、不做算术）。
@@ -289,7 +345,11 @@ def _make_varied(rng, shape, dtn, regime="uniform"):
         x = rng.integers(lo, hi + 1, size=shape).astype(cdt)
         f = x.reshape(-1)
         if f.size >= 3:
-            f[0], f[1], f[2] = cdt(-2), cdt(0), cdt(3)  # 保证含负/零/正
+            # 分支覆盖锚点：**有符号** dtype 钉 (-2,0,3)（负/零/正三分支，行为与 U3 前逐字节一致）；
+            # **无符号** dtype 根本没有负数这一支，钉 (0,1,3)——`cdt(-2)` 在 numpy≥2 上直接 OverflowError，
+            # 静默回绕成 254 更坏（会假装「测了负数」）。按 dtype **有无符号位**分，与算子身份无关。
+            anchors = (-2, 0, 3) if int(info.min) < 0 else (0, 1, 3)
+            f[0], f[1], f[2] = cdt(anchors[0]), cdt(anchors[1]), cdt(anchors[2])
         return x
     if regime == "normal":                               # §1.2 正态 50%（clip 到 [-5,5] 避极端离群主导）
         x = np.clip(rng.normal(_NORMAL_MU, _NORMAL_SIGMA, size=shape), -5.0, 5.0).astype(np.float32)
@@ -326,7 +386,11 @@ def _make_pairhalf(shape, dtn, ref):
 
 def _make_pairint(shape, dtn, ref):
     """整数 IsClose/Equal 第二输入（codex#13）：前半=ref(相等→near/True)、后半=ref+5(差>atol→far/False)，
-    整数网格上构造；golden 天然含 True/False（下游 exact bool 断言校验）。"""
+    整数网格上构造；golden 天然含 True/False（下游 exact bool 断言校验）。
+
+    ⚠ +5 为什么不会溢出（U3 扩到 int8/uint8/int64 后仍成立）：`_make_varied` 把整型值域夹在
+    `[max(-100,min+1), min(100,max)]`，故 ref ≤ 100；本仓最窄的整型是 int8（max=127）→ 105 ≤ 127。
+    再窄的整型（若将来加 int4 之类）须重挑增量，别默认这条不变式还成立。"""
     cdt = _compute_np(dtn)
     x = np.asarray(ref, dtype=cdt).copy().reshape(-1)
     x[x.size // 2:] = x[x.size // 2:] + cdt(5)
@@ -367,6 +431,41 @@ def _build_value_special(rng, arity, shp, dtn, kind):
         x = f.reshape(shp)
         return _bf16_round(x) if dtn == _BF16 else x.astype(cdt)
     return [one() for _ in range(max(1, arity))]
+
+
+# ===================== OC: operator_class —— 算子类别决定「该不该喂 NaN·Inf」（受控词表）==========
+# 详见模块 docstring「算子类别 → 特殊值口径分档」一节（含 median PR6429 的实证与参考仓依据出处）。
+# ⚠ 这是**字段驱动**：引擎只读 spec 里这个词，**绝不按算子名分支**（律令 #0）。
+_OPERATOR_CLASSES = ("floating_compute", "integer_compute", "structural")
+# 只有这些类别铺非有限特殊值（inf / -inf / nan）。**未声明**另按「现行为」处理，见 `_emits_nonfinite`。
+_NONFINITE_CLASSES = frozenset({"floating_compute"})
+
+
+def _operator_class(spec):
+    """spec.`operator_class` → 受控词表值；**未声明 → `None`**（= 改动前的现行为，向后兼容硬约束）。
+
+    词表外取值 / 非字符串 → fail-closed。这个字段决定「该不该给它喂 NaN·Inf」，猜错的代价两头都很贵：
+    该判 floating_compute 的判成 structural → **该测的 NaN 没测**（漏）；反过来 → **不该判挂的判挂**
+    （median PR6429：6 条 NaN 用例把合格 PR 判成 FAIL(精度)）。故不兜默认、不猜。"""
+    v = spec.get("operator_class")
+    if v is None:
+        return None
+    if not isinstance(v, str) or v not in _OPERATOR_CLASSES:
+        raise ValueError(
+            f"spec.operator_class={v!r} 不在受控词表 {list(_OPERATOR_CLASSES)} 里 —— fail-closed，不猜。\n"
+            f"  判法：浮点算术 / 规约求和类 → floating_compute；"
+            f"选值 / 排序 / 索引 / 规约取元素类（median、min、max、topk、sort、argmax…）→ structural；"
+            f"纯整型逻辑 → integer_compute。\n"
+            f"  拿不准就**整字段省略**（= 现行为：照产 inf/-inf/nan），别编词表外的值。")
+    return v
+
+
+def _emits_nonfinite(op_class):
+    """该类别是否铺 §1.4 的非有限特殊值（inf / -inf / nan）。
+
+    `None`（未声明）→ **True**：向后兼容硬约束——现有 4 个算子（isclose/sign/equal/neg）都没声明，
+    它们的 caseset 与 .npy 必须逐字节不变（已用 sha256 实测钉住，非推断）。"""
+    return op_class is None or op_class in _NONFINITE_CLASSES
 
 
 # ============================ value_profile 受控数值生成（借参考仓 generate_array，op-中立）=========
@@ -473,7 +572,11 @@ def _vp_shape(ranks):
 
 def _value_profiles(spec):
     """spec.precision.value_profiles → 受控 profile 列表（去重保序）；缺省 [] = 现行为（不产 value_profile 用例）。
-    非列表/含词表外值 → fail-closed（防伪造 profile 冒充覆盖）。"""
+    非列表/含词表外值 → fail-closed（防伪造 profile 冒充覆盖）。
+
+    OC：`operator_class` 声明的类别**不铺 NaN·Inf**（structural / integer_compute）时，
+    再声明 `value_profiles: ["nan"]` 是**自相矛盾** → fail-closed，**绝不静默丢掉该 profile**
+    （静默 = 账面声明了 NaN 覆盖、实际一条没产 = 假覆盖，本仓最忌）。`tie` 不受影响、所有类别都保留。"""
     raw = (spec.get("precision") or {}).get("value_profiles")
     if raw is None:
         return []
@@ -483,11 +586,225 @@ def _value_profiles(spec):
     for p in raw:
         if p not in out:
             out.append(p)
+    op_class = _operator_class(spec)                     # OC：词表外取值在这里也会当场 fail-closed
+    if "nan" in out and not _emits_nonfinite(op_class):
+        raise ValueError(
+            f"spec.operator_class={op_class!r} 这一类**不适用 nan profile**，但 precision.value_profiles "
+            f"里仍写着 'nan'（得 {out!r}）—— 两处自相矛盾，fail-closed。\n"
+            f"  依据：参考仓 `Justbin/cannbot-ops-input` 的 design_contract.py:512 只对 "
+            f"`floating_compute` 调 `_validate_floating_rules`（= 只有那一类强制 nan/pos_inf/neg_inf/"
+            f"mixed_inf）；structural / integer_compute 的特殊值走「极值 / 0·1·-1 / 重复 / 越界索引 / "
+            f"广播 / 规约轴 / 饱和」那一档（SKILL.md:252）。\n"
+            f"  两条出路，二选一（**别指望引擎静默忽略**）：\n"
+            f"    ① 该算子确实要按浮点算术口径验 NaN 传播 → 把 operator_class 改成 'floating_compute'；\n"
+            f"    ② 该算子是结构 / 整型类 → 从 precision.value_profiles 里去掉 'nan'（'tie' 可留，"
+            f"并列 / 重复值本就属结构类那一档）。")
     return out
 
 
-def check_spec_capability(in_params):
+def _attr_axis_lengths(spec, attrs_default):
+    """spec.`attr_axis_lengths` → 轴维度约束（**定向生成**「某 attr 指向的轴取某长度」的用例）。
+
+    契约（字段驱动、op-中立）::
+
+        "attr_axis_lengths": [{"attr": "dim", "lengths": [1]}]
+
+    语义：把该 attr 的值当作**轴下标**（int 或 int 列表，允许负数），对 `lengths` 里的每个 L 生成
+    一条「这些轴的长度 = L」的用例。**为什么需要**：任务书常点名「归约轴上维度为 1」这类边界，
+    而 shape 阶梯与 attr 取值在正交网格里是**各自独立**取的——含长度-1 轴的 shape 只会跟排在前面的
+    attr combo 撞上，点名的组合可能一条都不出（实测 pdist/median 通路就 0 条且无告警）。
+
+    缺省 `None` → `[]`（现有算子零变更）。结构不对 / 未知 attr / 非正长度一律 fail-closed
+    （声明了覆盖却产不出 = 假覆盖，本仓最忌）。长度 0 请走 `allow_empty_tensor` + `empty_axis`，
+    这里不收——空张量有它自己的一整套语义（dims 只留「功能」等），不该被轴长度约束顺手造出来。
+    """
+    raw = spec.get("attr_axis_lengths")
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"attr_axis_lengths 须为非空列表（[{{'attr','lengths'}}]），得 {raw!r}")
+    out = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"attr_axis_lengths[{i}] 须为字典，得 {type(item).__name__}")
+        name = item.get("attr")
+        if name not in attrs_default:
+            raise ValueError(f"attr_axis_lengths[{i}].attr={name!r} 不在 spec 的 attr 名集 "
+                             f"{sorted(attrs_default)} 里（防伪造覆盖）")
+        lengths = item.get("lengths")
+        if not isinstance(lengths, list) or not lengths:
+            raise ValueError(f"attr_axis_lengths[{i}].lengths 须为非空 int 列表，得 {lengths!r}")
+        vals = []
+        for L in lengths:
+            if isinstance(L, bool) or not isinstance(L, int) or L < 1:
+                raise ValueError(f"attr_axis_lengths[{i}].lengths 含 {L!r}——须为 ≥1 的整数"
+                                 f"（长度 0 的空张量请用 allow_empty_tensor + empty_axis 表达）")
+            if L not in vals:
+                vals.append(L)
+        out.append({"attr": name, "lengths": vals})
+    return out
+
+
+def _check_axis_length_coverage(ledger):
+    """轴长度定向生成的 **fail-closed 判据：逐 `(constraint, length, attr 组合)` 判**（审计 finding #5）。
+
+    原先只看全局 `emitted > 0`：rank 允许 `{2,4}`、attr 含 `dim=0` 与 `dim=3` 时，`dim=0` 产出来了、
+    `dim=3` 被静默跳过，总数非零 → 一声不吭。**部分缺失也是缺失**，账本与判据都得逐项算。
+
+    三档语义（据字段判、op-中立）：
+      · `not_applicable` —— 该 attr 取值压根不是轴下标（`dim=None` 的全局归约）→ **合法缺席**，不算缺口；
+      · `skipped` —— 取值是轴下标、却生成不出来（没有容得下它的合法 rank / numel 超上限）→ **真缺口**，
+        多半是 spec 自相矛盾（attr 取值与 in 参数的 rank 约束对不上），fail-closed 交人改；
+      · `emitted` —— 真产出来了。
+    另：某 `(attr, length)` 下**一个 applicable 都没有** → 声明的覆盖不可能兑现，同样 fail-closed。"""
+    groups = {}
+    for it in ledger["items"]:
+        groups.setdefault((it["constraint_idx"], it["attr"], it["length"]), []).append(it)
+    for (_ci, attr, length), items in sorted(groups.items()):
+        applicable = [it for it in items if it["status"] != "not_applicable"]
+        emitted = [it for it in items if it["status"] == "emitted"]
+        skipped = [it for it in items if it["status"] == "skipped"]
+        if not applicable:
+            raise ValueError(
+                f"attr_axis_lengths 声明了「{attr} 指的轴长度={length}」，但**没有任何 attr 取值是轴下标**"
+                f"（{[it['attr_value'] for it in items]}）→ 一条都产不出。"
+                f"声明覆盖却产零条 = 假覆盖，fail-closed。请核对该 attr 的取值是否为轴下标")
+        if not emitted:
+            raise ValueError(
+                f"attr_axis_lengths 声明了「{attr} 指的轴长度={length}」，可用的轴取值有 "
+                f"{[it['attr_value'] for it in applicable]}，但**一条都没产出来**"
+                f"（原因：{sorted({it['reason'] for it in skipped})}）——"
+                f"声明覆盖却产零条 = 假覆盖，fail-closed。请核对 in 参数的 rank 约束")
+        if skipped:
+            raise ValueError(
+                f"attr_axis_lengths 的「{attr} 指的轴长度={length}」**部分轴取值产不出**："
+                f"{[(it['attr_value'], it['reason']) for it in skipped]}（已产出的："
+                f"{[it['attr_value'] for it in emitted]}）。"
+                f"部分缺失也是缺失——只看总数非零就放行，正是「账本说覆盖了、其实漏了一半」的假覆盖，"
+                f"fail-closed。请核对这些 attr 取值与 in 参数的 rank 约束是否自洽")
+
+
+def _axis_indices(value):
+    """attr 值 → 轴下标列表；不是轴下标（None / bool / 非 int）→ None（该变体自然缺席，不报错）。
+
+    `None` 是合法的「该 attr 省略」语义（如 median 的 `dim=None` = 全局归约，压根没有「那根轴」），
+    故这里返回 None 让调用方跳过——**不是错误**，别为此 fail-closed。
+
+    ⚠ 也收 `tuple`：零配对告警那条通路拿到的是 `_attr_hashable` 转过的可哈希值（list→tuple），
+    不收就会把多轴 attr 误判成「非轴型」、退回旧的结构类口径（正是审计 finding #8 的漏报面）。
+    spec 侧的值一律是 list（`_check_attr_value` 只放行 `list[int]`），故对生成路径零影响。"""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return [value]
+    if isinstance(value, (list, tuple)) and value and all(
+            isinstance(v, int) and not isinstance(v, bool) for v in value):
+        return list(value)
+    return None
+
+
+def _norm_axes(axes, rank):
+    """轴下标列表 → **归一化轴号**（负数 +rank）；任一越界 / rank<1 / **归一化后有重复** → None。
+
+    归一化是「轴型 attr」一切判定的地基：`dim=-1` 在 rank2 与 rank3 下指的根本不是同一根轴，
+    不归一化就没法说「这个 attr 取值有没有跟『被指轴长度=1』配过对」。
+
+    ⚠ **重复即判非轴集合**（`(2,2)` / rank2 下的 `[0,-2]`）：同一根轴不可能被指两次，这类值
+    十有八九根本不是轴（`stride=[2,2]` / `kernel_size=[3,3]` 这种几何参数）。据结构判、不看字段名——
+    既压住零配对告警的误判噪声，也让「拿这种 attr 去声明 attr_axis_lengths」走 fail-closed 而非产废用例。"""
+    if rank < 1:
+        return None
+    out = []
+    for ax in axes:
+        idx = ax + rank if ax < 0 else ax
+        if not (0 <= idx < rank) or idx in out:
+            return None
+        out.append(idx)
+    return out
+
+
+def _min_rank_for_axes(axes):
+    """容得下这组轴下标的**最小 rank**：正下标 `ax` 要 rank ≥ ax+1，负下标 `ax` 要 rank ≥ -ax。"""
+    return max((ax + 1) if ax >= 0 else (-ax) for ax in axes)
+
+
+def _pick_axis_dtype(dtypes):
+    """轴长度用例的代表 dtype：按 `KEY_DTYPES` 序取首个命中，都不在则取 dtype 集首个（确定性）。"""
+    for d in KEY_DTYPES:
+        if d in dtypes:
+            return d
+    return dtypes[0]
+
+
+def _axis_base_shape(ranks, axes):
+    """轴长度用例的基准 shape：**按这组轴下标挑一个容得下它们的合法 rank**，每维取 `_VP_BASE_DIMS`（均 ≥4）。
+
+    ⚠ 为什么不能像原先那样全局只选一个基准 rank（审计 finding #5）：rank 允许 `{2,4}`、attr 含 `dim=0`
+    与 `dim=3` 时，只按「离 rank2 最近」选出 rank2 → `dim=3` 被当越界跳过，**可生成的轴变体静默缺失**，
+    而全局 `emitted>0` 又让 fail-closed 判据看不出来（覆盖缺口没人知道）。改成**逐轴值**挑 rank：
+    先滤掉容不下它的 rank，再在余下的里按同一确定性规则（离基准 rank2 最近、并列取小）选。
+
+    `ranks=None`（无 rank 约束）→ 取 `max(需要的最小 rank, len(_VP_BASE_DIMS))`——轴值容得下时与旧行为同。
+    一个合法 rank 都没有（含超 `_MAX_RANK`）→ None：调用方记账并按**逐项**判据 fail-closed。"""
+    need = _min_rank_for_axes(axes)
+    base_rank = len(_VP_BASE_DIMS)
+    if ranks is None:
+        r = max(need, base_rank)
+    else:
+        ok = [x for x in sorted(ranks) if x >= need]
+        if not ok:
+            return None
+        r = min(ok, key=lambda x: (abs(x - base_rank), x))
+    if r > _MAX_RANK:
+        return None
+    return tuple(_VP_BASE_DIMS[i % len(_VP_BASE_DIMS)] for i in range(r))
+
+
+def _axis_length_shape(base, axes, length):
+    """把 `base` shape 里 `axes` 指的轴长度改成 `length` → 新 shape；轴越界 → None（调用方跳过并记账）。"""
+    dims = [int(d) for d in base]
+    rank = len(dims)
+    for ax in axes:
+        idx = ax + rank if ax < 0 else ax
+        if not (0 <= idx < rank):
+            return None
+        dims[idx] = int(length)
+    if _numel(dims) > _MAX_NUMEL:
+        return None
+    return tuple(dims)
+
+
+def generatable_dtypes():
+    """**生成层**能造的 dtype 名集合（`_NATIVE` + bf16）——gen_cases 侧的单一真源，供门与报错点名用。"""
+    return sorted(set(_NATIVE) | {_BF16})
+
+
+def _dtype_layer_error(dtn, form, gen_ok, run_ok, runner_set, deferred_set):
+    """dtype 不过能力门时的报错——**两层各自的支持集都点名**，不让用户猜是哪一层挡的（U3）。"""
+    lines = [f"unsupported dtype {dtn!r}（runner_form={form!r}）——用例生成要求**生成层 × 真机层都支持**，"
+             f"缺哪层见下：",
+             f"  · 生成层 gen_cases（造输入/算 golden/落盘读回）："
+             f"{'支持' if gen_ok else '**不支持**'}；可造 = {generatable_dtypes()}",
+             f"  · 真机层 runner（repo_adapter，单一真源）：{'支持' if run_ok else '**不支持**'}；"
+             f"{form} 可收发 = {sorted(runner_set)}"
+             + (f"；另 Track-C 挂账（生成期放行、真机跑到仍拒）= {sorted(deferred_set)}" if deferred_set else "")]
+    if gen_ok and not run_ok:
+        lines.append(f"  → 该 dtype 造得出、但 {form} runner 收发不了：换支持它的 runner_form，"
+                     f"或先给 runner 补该 dtype 分支（补完把它加进 repo_adapter 的对应表）。")
+    elif run_ok and not gen_ok:
+        lines.append(f"  → 真机收得了、但 gen_cases 造不出（随机/边界/特殊值生成与 golden 落盘未覆盖该 dtype）："
+                     f"须先扩 gen_cases 的 `_NATIVE` 与输入构造，不静默降级。")
+    lines.append("  fail-closed —— 绝不静默跳过该 dtype（跳过 = 声明覆盖却没覆盖，假验收）。")
+    return "\n".join(lines)
+
+
+def check_spec_capability(in_params, runner_form=None):
     """引擎**能力边界**的 spec 级预检——`gen_cases()` 与 `_dry_run()` 共用，故 CP-B 契约自检就能拦住。
+
+    ⚠ dtype 白名单**不再自带一份硬表**（U3）：真机侧一律问 `repo_adapter.supported_np(runner_form)`
+    （+ `deferred_np` 的 Track-C 挂账集），生成侧问本模块的 `_NATIVE`——**两处口径不一致**曾把任务书
+    8 类 dtype 压到 4/8（int64/int8/uint8 被生成端挡掉，覆盖率是被工具而非算子限住的）。
+    `runner_form` 缺省 `cpp` = 现有 4 个算子的口径，行为逐字节不变。
 
     为什么必须有：`_build_inputs` 的常规 `varied` / `pair*` 路径末尾写死 `return [x0, x1]`（二元构造），
     而 `empty` 与特殊值路径按 `arity` 产满——**arity≥3 时多出来的输入被无声丢掉，两边行为还不一致**。
@@ -513,19 +830,28 @@ def check_spec_capability(in_params):
     if len(dtypes) != len(set(dtypes)):               # finding #13：dtype 集含重复 → plan entry 撞车
         dup = sorted(d for d in set(dtypes) if dtypes.count(d) > 1)
         raise ValueError(f"spec dtype 集含重复项 {dup}（会致 case_id 碰撞/伪造覆盖，fail-fast）")
-    for dtn in dtypes:                                # dtype 白名单（fail-fast，不静默）
-        if dtn != _BF16 and dtn not in _NATIVE:
-            raise ValueError(f"unsupported dtype {dtn!r}（gen_cases 支持 {sorted(_NATIVE)} + bfloat16）")
+    # dtype 白名单（fail-fast，不静默）——**双层单一真源**：生成层 `_NATIVE`+bf16 × 真机层 repo_adapter。
+    import repo_adapter                                # 延迟 import：repo_adapter 顶层已 import gen_cases
+    form = runner_form or "cpp"
+    runner_set = repo_adapter.supported_np(form)       # 未知 form 在此 fail-closed（不兜 cpp）
+    deferred_set = repo_adapter.deferred_np(form)
+    gen_set = set(_NATIVE) | {_BF16}
+    for dtn in dtypes:
+        gen_ok = dtn in gen_set
+        run_ok = dtn in runner_set or dtn in deferred_set
+        if not (gen_ok and run_ok):
+            raise ValueError(_dtype_layer_error(dtn, form, gen_ok, run_ok, runner_set, deferred_set))
 
 
-def _build_inputs(rng, in_params, shp, dtn, attrs, data_kind):
+def _build_inputs(rng, in_params, shp, dtn, attrs, data_kind, runner_form=None):
     """造该 case 的**逻辑**输入数组列表（compute dtype；bf16=fp32-on-grid）。物理化在保存步单独做。
     data_kind 形如 base 或 base:regime（regime∈{uniform,normal}，仅 varied/pair 系用）；
-    特殊 base：empty(§1.4 空)/inf/ninf/nan(§1.4 特殊值)。"""
+    特殊 base：empty(§1.4 空)/inf/ninf/nan(§1.4 特殊值)。
+    `runner_form` 只为把兜底预检校在**同一层口径**上——不传就按 cpp 校，aclnn_py 的 int64 会在这被误拒。"""
     arity = len(in_params)
     base = data_kind.split(":")[0]
     regime = data_kind.split(":")[1] if ":" in data_kind else "uniform"
-    check_spec_capability(in_params)                     # 兜底：正式路径也再校一次（dry-run 已前置校过）
+    check_spec_capability(in_params, runner_form)         # 兜底：正式路径也再校一次（dry-run 已前置校过）
     if base == "empty":                                  # §1.4 空 Tensor（numel=0）：按 shape 造空数组
         cdt = _compute_np(dtn)
         z = np.zeros(shp, dtype=cdt)
@@ -559,6 +885,36 @@ def _shape_tag(shp):
     if shp == "broadcast":
         return "bcast"
     return "x".join(str(int(d)) for d in shp)
+
+
+# ── shape 的**结构类**（零配对告警用；按结构、不按具体尺寸，故类数少、告警才读得动）──────
+SHAPE_CLASS_BCAST = "bcast"          # 广播哨兵
+SHAPE_CLASS_EMPTY = "empty"          # 含 0 长度轴（numel=0）
+SHAPE_CLASS_ALL_UNIT = "all_unit"    # 每一轴长度都是 1（标量类）——「归约轴长度=1」这类边界落这
+SHAPE_CLASS_HAS_UNIT = "has_unit_axis"   # 含长度 1 的轴、但不全是
+SHAPE_CLASS_LARGE = "large"          # numel ≥ 大 shape 门槛（perf 有意义）
+SHAPE_CLASS_REGULAR = "regular"
+_LARGE_NUMEL = 2 ** 16               # 与 `_LARGE_SHAPES`（2^20 / 2^16-1）同量级的门槛
+
+
+def _shape_class(shp):
+    """shape → 结构类（见 `SHAPE_CLASS_*`）。**纯按结构判**，不看算子、不看具体尺寸。
+
+    为什么不用 `_shape_tag` 当类：tag 是具体尺寸（`4x4` / `2x3x4` …），十几个 tag × 几个 attr 取值
+    会报出上百条「从未配对」——噪声淹掉真信号。结构类只有 6 个，「`dim=0` 从没配过全 1 轴的 shape」
+    这种任务书点名的边界才浮得出来。"""
+    if shp == "broadcast":
+        return SHAPE_CLASS_BCAST
+    dims = [int(d) for d in shp]
+    if not dims or any(d == 0 for d in dims):
+        return SHAPE_CLASS_EMPTY
+    if all(d == 1 for d in dims):
+        return SHAPE_CLASS_ALL_UNIT
+    if any(d == 1 for d in dims):
+        return SHAPE_CLASS_HAS_UNIT
+    if _numel(dims) >= _LARGE_NUMEL:
+        return SHAPE_CLASS_LARGE
+    return SHAPE_CLASS_REGULAR
 
 
 def _binary_data_kind(dtn, attrs):
@@ -681,26 +1037,42 @@ def _make_cost_fn(in_params, out_shape_fn):
     return cost
 
 
-def _shrink_to_budget(shape, attrs, cost_fn, budget, where):
+def _shrink_to_budget(shape, attrs, cost_fn, budget, where, lock=None):
     """把**强制**用例的 shape 逐维减半到进预算，返回 `(新shape, 新cost)`。确定性：每步砍当前最大维、
     并列取最左；**保 rank**（不删维，免与 C3 的 rank 约束打架）。
 
     为什么强制项只能降规模、不能像常规网格那样剔掉：§1.4 特殊场景与白名单大 shape 是「必覆盖」项，
     剔掉 = 覆盖悄悄缩水。降下来的规模会照常进 case_id / caseset / 覆盖账本（可见、可审计，**不是**静默降级）。
-    减到各维皆 1 仍超预算 → fail-closed（不硬塞一条算不完的用例）。"""
+    减到各维皆 1 仍超预算 → fail-closed（不硬塞一条算不完的用例）。
+
+    ⚠ `lock`（`{"attr","axes"(归一化轴号),"length"}`，审计 finding #4）：**被轴长度约束锁住的那几根轴
+    一律不许动**。原先不锁：声明「轴长 100」的强制项被降成 `(4,3)`，`id_kind` / `case_origin` 却仍宣称
+    覆盖长度 100 —— 账本与 case ID 声称覆盖了任务书点名的边界、实际输入根本没覆盖 = **假覆盖**
+    （比压根没有这套定向生成更糟：它让人以为缺口已补上）。锁住后其余维降到底仍超预算 →
+    fail-closed 明说「轴长度约束与 cost 预算冲突」，绝不静默降规模。"""
     if shape == "broadcast":                             # 哨兵形状固定微小，理论上到不了这里
         raise ValueError(f"{where}: broadcast 哨兵形状的 golden 开销超预算 {budget}，无维可降 → fail-closed")
     cur = [int(d) for d in shape]
     if not cur:
         raise ValueError(f"{where}: 0 维 shape 的 golden 开销超预算 {budget}，无维可降 → fail-closed")
+    locked = set(lock["axes"]) if lock else set()
     for _ in range(_COST_SHRINK_MAX_STEPS):
-        i = max(range(len(cur)), key=lambda k: (cur[k], -k))
-        if cur[i] <= 1:                                  # 各维皆 1，降无可降
+        cand = [k for k in range(len(cur)) if k not in locked and cur[k] > 1]
+        if not cand:                                     # 可降的维都到 1 了（锁住的维不算），降无可降
             break
+        i = max(cand, key=lambda k: (cur[k], -k))
         cur[i] //= 2
         c = cost_fn(tuple(cur), attrs, where)
         if c <= budget:
             return tuple(cur), c
+    if lock:
+        raise ValueError(
+            f"{where}: **轴长度约束与 golden 生成期规模预算冲突**——约束「{lock['attr']} 指的轴 "
+            f"{lock['axes']} 长度={lock['length']}」的维已锁定不许降，其余维降到 {tuple(cur)}"
+            f"（cost={cost_fn(tuple(cur), attrs, where)}）仍超预算 {budget} → fail-closed。"
+            f"若在这里降规模，这条 case 的 id_kind / case_origin 会继续宣称覆盖了长度 "
+            f"{lock['length']}、实际输入却没有 = **假覆盖**。"
+            f"请调 spec 的 precision.golden_cost_budget，或改小/撤掉该 attr_axis_lengths 声明")
     raise ValueError(
         f"{where}: 输入形状 {tuple(int(d) for d in shape)} 的 golden 生成期开销超预算 {budget}，"
         f"且逐维减半到 {tuple(cur)}（cost={cost_fn(tuple(cur), attrs, where)}）仍超预算——"
@@ -708,19 +1080,45 @@ def _shrink_to_budget(shape, attrs, cost_fn, budget, where):
         f"请调 spec 的 precision.golden_cost_budget，或核 golden.py 的 out_shape() 是否合理")
 
 
+def _verify_axis_locks(entries, where_hint=""):
+    """预算处理**完成后**逐条重新校验轴长度 case 的**实际轴长**与声明一致（审计 finding #4 的第二道）。
+
+    第一道（`_shrink_to_budget` 锁定约束维）是「不去改」，这道是「改没改都验一遍」：将来任何新的
+    规模 / 形状后处理若忘了尊重锁，这里当场炸——而不是让 `id_kind` / `case_origin` 继续宣称覆盖了一个
+    实际没跑的轴长度。**声称覆盖 ≠ 真覆盖** 是本仓最忌的错，值得多花这一遍 O(n) 的校验。"""
+    for e in entries:
+        lock = e.get("axis_lock")
+        if not lock:
+            continue
+        shp = e["shape"]
+        dims = None if shp == "broadcast" else [int(d) for d in shp]
+        bad = dims is None or any(not (0 <= ax < len(dims)) or dims[ax] != int(lock["length"])
+                                  for ax in lock["axes"])
+        if bad:
+            raise ValueError(
+                f"{where_hint}轴长度覆盖身份与实际输入不符（假覆盖）："
+                f"case({e['dtype']}·{_shape_tag(shp)}·{e['id_kind']}) 宣称「{lock['attr']} 指的轴 "
+                f"{lock['axes']} 长度={lock['length']}」，实际 shape={shp}。"
+                f"该 case 的 id / 覆盖账本会冒充覆盖任务书点名的边界 → fail-closed")
+
+
 def _apply_cost_budget(forced, grid, cost_fn, budget):
     """G4：按生成期规模预算处理 plan entries。返回 `(保留的 grid, 覆盖账本)`；`forced` **就地**降规模。
 
     强制项 → 降规模 + 三处留痕（账本 / `entry["cost_scaled"]`（后续写进 case 的 expected）/ tag「降规模」）。
     常规网格项 → 超预算就剔出采样池，并按 (dtype, shape) 归类记账（**不**冒充已覆盖）。
-    网格被剔空 → fail-closed（只剩强制项 = 「用例数虚高但没有一条常规覆盖」的假验收，同 `_shape_ladder`）。"""
+    网格被剔空 → fail-closed（只剩强制项 = 「用例数虚高但没有一条常规覆盖」的假验收，同 `_shape_ladder`）。
+
+    ⚠ 带 `axis_lock` 的强制项（轴长度约束，finding #4）：**约束的那根轴在降规模中锁定**，
+    锁后仍超预算 → fail-closed（详见 `_shrink_to_budget`）。降完还要过 `_verify_axis_locks` 复验。"""
     scaled, skipped, kept, seen_skip = [], [], [], set()
     for e in forced:
         where = f'{e["dtype"]}·{_shape_tag(e["shape"])}·{e["id_kind"]}'
         c0 = cost_fn(e["shape"], e["attrs"], where)
         if c0 <= budget:
             continue
-        new_shp, c1 = _shrink_to_budget(e["shape"], e["attrs"], cost_fn, budget, where)
+        new_shp, c1 = _shrink_to_budget(e["shape"], e["attrs"], cost_fn, budget, where,
+                                        lock=e.get("axis_lock"))
         rec = {"case_origin": e["case_origin"], "id_kind": e["id_kind"], "dtype": e["dtype"],
                "requested_shape": list(e["shape"]), "requested_cost": int(c0),
                "emitted_shape": list(new_shp), "emitted_cost": int(c1),
@@ -1056,10 +1454,17 @@ def _empty_shape(ranks, axis, accepts=None):
 
 
 def _special_entries(op, dtn, arity, is_float, rep_attrs, ranks=None, allow_empty=True,
-                     empty_axis=None, empty_accepts=None):
+                     empty_axis=None, empty_accepts=None, emit_nonfinite=True):
     """§1.4 特殊场景（不与常规正交、强制纳入）：空(功能only)/标量[1]/边界下(全1)/边界上(大)/inf/-inf/nan。
     每项 (dims, shape, data_kind, id_kind)。整型 dtype 跳过 inf/nan（无此值）。
     C3：每个基准 shape 过 `_fit_rank`——ranks=None 时恒等（现行为），有约束时保 numel 调到合法维度。
+
+    OC · `emit_nonfinite=False`（spec 的 `operator_class` ∈ {structural, integer_compute}）时
+    **不产 inf/-inf/nan 三条**——结构 / 整型类算子按参考仓方法学根本不该被喂 NaN·Inf
+    （依据见模块 docstring；实证：median PR6429 的 6 条 fail 全是 NaN 用例，合格 PR 被判挂）。
+    ⚠ 只砍这三条：`empty` / `scalar` / `bndlo` / `bndhi`（空 / 标量 / 上下边界）**所有类别一律保留**——
+    参考仓给结构 / 整型类列的正是「极值、0/1/-1、重复、越界索引、规约轴、饱和」这一档，边界属其中。
+    ⚠ 缺省 `True` = **现行为不变**（未声明 operator_class 的 4 个既有算子逐字节不动）。
 
     `allow_empty=False`（spec 声明 `allow_empty_tensor: false`）时**不产空 Tensor 用例**。
     ⚠ 为什么需要这个开关（2026-07-23 · 三个真算子实测撞上）：opbase §1.4 把「空 Tensor」当成
@@ -1080,9 +1485,10 @@ def _special_entries(op, dtn, arity, is_float, rep_attrs, ranks=None, allow_empt
     # 边界：下=各维均 1；上=大 shape 某维取大
     E.append((["功能", "精度", "性能"], _fit_rank((1, 1, 1), ranks), "varied", "bndlo"))
     E.append((["功能", "精度", "性能"], _fit_rank(_LARGE_SHAPES[0], ranks), "varied", "bndhi"))
-    # INF/-INF/NAN 遍历（仅浮点；每种值一条，shape 用中等 (16,)）——**带「性能」**（v2：非空皆带性能/同输入；
-    # numel=16<阈值 → perf_compare 判 trivial-met 免测，不假 fail）。
-    if is_float:
+    # INF/-INF/NAN 遍历（仅浮点**且该算子类别适用**；每种值一条，shape 用中等 (16,)）——**带「性能」**
+    # （v2：非空皆带性能/同输入；numel=16<阈值 → perf_compare 判 trivial-met 免测，不假 fail）。
+    # OC：`emit_nonfinite=False` = spec 声明了 structural / integer_compute → 整段不产（见本函数 docstring）。
+    if is_float and emit_nonfinite:
         for val_kind in ("inf", "ninf", "nan"):
             E.append((["功能", "精度", "性能"], _fit_rank((16,), ranks), val_kind, val_kind))
     return E
@@ -1146,6 +1552,126 @@ def _one_wise_pick(grid, n, used):
     return picked
 
 
+_UNPAIRED_CAP = 50
+
+
+def _entry_dims(shp):
+    """entry 的 shape → 维度列表；广播哨兵 → None（不可按轴索引）。"""
+    return None if shp == "broadcast" else [int(d) for d in shp]
+
+
+def _axis_len_class(n):
+    """**被指轴长度**的档：`0`(空轴) / `1`(单位轴) / `>1`。
+
+    用档不用原值：原值（4/6/16/255…）会把告警炸成上百条噪声、真信号被淹；而任务书点名的边界
+    （「归约轴上维度为 1」）恰恰就落在「1」这一档，分档不丢它。"""
+    n = int(n)
+    return "0" if n == 0 else ("1" if n == 1 else ">1")
+
+
+def _axis_class_label(norm, prof, rank):
+    """轴型 attr 的配对类标签：`rank{r}·轴{归一化轴号}·被指轴长度={档}`。"""
+    return (f"rank{rank}·轴{','.join(str(a) for a in norm)}"
+            f"·被指轴长度={','.join(prof)}")
+
+
+def _axis_like_attrs(entries):
+    """哪些 attr 是**轴型**（值当轴下标解）——据**值的结构**判，不按算子名、不按字段名（泛化优先）。
+
+    判据：该 attr 至少有一个非 None 取值，且**每个**非 None 取值都能解成轴下标（int / int 列表），
+    且每个取值在**实际出现过的某个 rank** 下都不越界。`keepdim`(bool) / `rtol`(float) 这类自然落选。
+
+    ⚠ 诚实边界：`kernel_size=[3,3]` 这种「恰好是合法下标」的非轴数组会被误判成轴型。误判的后果只是
+    配对口径变细（告警条数变多），**不会**把没覆盖的说成已覆盖——漏报才是危险方向，这里刻意偏保守。"""
+    ranks, cand = set(), {}
+    for e in entries:
+        dims = _entry_dims(e["shape"])
+        if dims:
+            ranks.add(len(dims))
+        for name, value in (e.get("attrs") or {}).items():
+            cand.setdefault(name, set()).add(_attr_hashable(value))
+    out = set()
+    for name, vals in cand.items():
+        axis_vals = [_axis_indices(v) for v in vals if v is not None]
+        if not axis_vals or any(a is None for a in axis_vals):
+            continue
+        if all(any(_norm_axes(a, r) is not None for r in ranks) for a in axis_vals):
+            out.add(name)
+    return out
+
+
+def _unpaired_combo_classes(entries, attr_sets):
+    """**零配对告警**：哪些「attr 取值 × 形状类」在最终用例集里**从未同时出现**。
+
+    为什么要有：`dropped_combo_classes` 只报「被采样丢掉的 dtype×shape 类」，报不出「某 attr 取值
+    从没跟某类 shape 撞上」。实测教训——任务书点名要「归约轴维度为 1」，而含长度-1 轴的 shape
+    （`[1]`/`[1,1,1]`）全被特殊场景生成、只配 `attr_combos[0]`（如 `dim=None`），于是点名场景**实跑 0 条
+    且全程无告警**，只能事后人肉核 caseset 才发现。
+
+    口径分两支（审计 finding #8）：
+      · **轴型 attr**（`_axis_like_attrs` 据值结构判，如 `dim`）→ 配对键 = 「**归一化轴号 + rank +
+        被指轴的实际长度档**」。原先一律按 shape 结构类，两头都错：`shape=(4,1), dim=0` 的归约轴长度
+        其实是 4，却因为这条 shape 属于 `has_unit_axis` 就把「dim=0 × 含单位轴」记成**已配对**
+        （**漏报**——任务书点名的「归约轴长度=1」被冒充覆盖）；反过来又会拿「该 rank 下已越界的轴值」
+        做笛卡尔积，报出**不可实现**的缺口（误报）。归一化轴号 + rank 两头都堵住。
+      · **普通非轴 attr** → 沿用 shape 结构类口径（`_shape_class`），口径与行为不变。
+
+    口径（**只报可疑、不报不可能**）：
+      · 非轴 attr 的 shape 类取**实际出现过**的那些（没出现过的类不是「配对缺口」，是这个算子压根没这类 shape）；
+      · 轴型 attr 的候选类同理只取**池子里真存在**的：某 (rank, 归一化轴, 长度档) 组合，必须真有一条
+        用例的形状长这样，才算「本可以配上却没配」；
+      · attr 取值同样只算**实际出现过**的；spec 声明了却一条没生成的取值另记
+        `attr_values_never_emitted`（那是更严重的一档：取值本身零覆盖）。
+    返回 `{"count", "classes"(≤50), "attr_values_never_emitted"}`。**只报不拦**——这里是告警，
+    不是门；要不要补，交人/上层门定。"""
+    axis_names = _axis_like_attrs(entries)
+    shape_classes, paired, seen_values, dims_by_rank = set(), set(), {}, {}
+    for e in entries:
+        sc = _shape_class(e["shape"])
+        shape_classes.add(sc)
+        dims = _entry_dims(e["shape"])
+        if dims:
+            dims_by_rank.setdefault(len(dims), []).append(dims)
+        for name, value in (e.get("attrs") or {}).items():
+            key = _attr_hashable(value)
+            seen_values.setdefault(name, set()).add(key)
+            if name not in axis_names:
+                paired.add((name, key, sc))
+                continue
+            axes = _axis_indices(key)
+            norm = _norm_axes(axes, len(dims)) if (axes is not None and dims) else None
+            if norm is not None:                         # 解不出（None / 越界 / 广播）→ 这条不构成轴向配对
+                paired.add((name, key, _axis_class_label(
+                    norm, tuple(_axis_len_class(dims[i]) for i in norm), len(dims))))
+    unpaired = []
+    for name, _vals in attr_sets:
+        for key in sorted(seen_values.get(name, ()), key=repr):
+            if name not in axis_names:
+                for sc in sorted(shape_classes):
+                    if (name, key, sc) not in paired:
+                        unpaired.append(f"{name}={key!r} × shape类={sc}")
+                continue
+            axes = _axis_indices(key)
+            if axes is None:
+                continue                                 # 全局语义（如 dim=None）没有「那根轴」，不是缺口
+            for rank in sorted(dims_by_rank):
+                norm = _norm_axes(axes, rank)
+                if norm is None:
+                    continue                             # 该 rank 下越界 → 不可实现，绝不当缺口报（误报源）
+                profiles = {tuple(_axis_len_class(d[i]) for i in norm) for d in dims_by_rank[rank]}
+                for prof in sorted(profiles):
+                    cls = _axis_class_label(norm, prof, rank)
+                    if (name, key, cls) not in paired:
+                        unpaired.append(f"{name}={key!r} × {cls}")
+    never = []
+    for name, vals in attr_sets:
+        for v in vals:
+            if _attr_hashable(v) not in seen_values.get(name, ()):
+                never.append(f"{name}={v!r}")
+    return {"count": len(unpaired), "classes": sorted(unpaired)[:_UNPAIRED_CAP],
+            "attr_values_never_emitted": never}
+
+
 def _dropped_classes(grid, emitted):
     """被采样丢弃的 (dtype×shape) 组合类简述（可审计；上限 50 条防爆）。"""
     emk = {(e["dtype"], _shape_tag(e["shape"])) for e in emitted}
@@ -1200,6 +1726,9 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
                 "data_kind": data_kind, "id_kind": id_kind, "attrs": _copy_attrs(attrs),
                 "attr_idx": combo_idx.get(_akey(attrs)), "case_origin": origin, "rule_ref": rule}
 
+    # OC：算子类别 → 特殊值口径（受控词表；未声明=None=现行为）。词表外取值在此当场 fail-closed。
+    op_class = _operator_class(spec)
+    emit_nonfinite = _emits_nonfinite(op_class)
     forced, grid = [], []
     # ① §1.4 特殊场景（每 dtype 强制；id_kind 独立命名空间，评审 #8）
     for dtn in dtypes:
@@ -1207,7 +1736,8 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
         for dims, shp, dk, ik in _special_entries(op, dtn, arity, is_float, attr_combos[0], ranks,
                                                   allow_empty=_allow_empty_tensor(spec),
                                                   empty_axis=_empty_axis(spec),
-                                                  empty_accepts=empty_accepts):
+                                                  empty_accepts=empty_accepts,
+                                                  emit_nonfinite=emit_nonfinite):
             forced.append(mk(dims, shp, dtn, dk, ik, attr_combos[0],
                              f"special:{ik}", f"opbase §1.4 {ik}", ["特殊"]))
     # ② 白名单必覆盖（key dtype × 每 attr 取值 × 大 shape）——保证关键联合不被 1-wise 采样丢（评审 #6）
@@ -1237,6 +1767,62 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
                                  f"vp{profile}", attrs, f"value_profile:{profile}:a{ai}",
                                  "torch-baseline §3.② value_profile（nan/tie 数值生成·op-中立·借 generate_array）",
                                  ["value_profile"]))
+    # ②'' 轴维度约束强制项（据 spec.attr_axis_lengths 驱动、op-中立）：把「某 attr 指向的轴取长度 L」
+    #     **定向生成**出来，而不是指望 shape 阶梯与 attr 取值在正交网格里恰好撞上（实测撞不上：
+    #     含长度-1 轴的 shape 全由特殊场景产、只配 attr_combos[0]，任务书点名的「归约轴长度=1」实跑 0 条）。
+    #     attr 值当轴下标解（int / list[int]，允许负）；值是 None（如 median 的全局归约）→ 该变体没有
+    #     「那根轴」，自然跳过、**不是错误**。现有 4 算子不声明本字段 → 整段不执行、caseset 零变更。
+    #     ⚠ 基准 shape **逐（轴值）挑 rank**（`_axis_base_shape`，finding #5）：原先全局只挑一个基准
+    #     rank，rank 允许 {2,4} 而 attr 含 dim=3 时，dim=3 被当越界静默跳过、又因全局 emitted>0 不报错。
+    axis_constraints = _attr_axis_lengths(spec, attrs_default)
+    axis_ledger = {"declared": axis_constraints, "emitted": 0, "items": [], "skipped": []}
+    if axis_constraints:
+        ax_dtype = _pick_axis_dtype(dtypes)
+        ax_dk = _regular_data_kind(ax_dtype, attrs_default, arity)
+        for ci, constraint in enumerate(axis_constraints):
+            for length in constraint["lengths"]:
+                for attrs in attr_combos:
+                    ai = combo_idx[_akey(attrs)]
+                    val = attrs.get(constraint["attr"])
+                    item = {"constraint_idx": ci, "attr": constraint["attr"], "length": int(length),
+                            "attr_idx": ai,
+                            "attr_value": list(val) if isinstance(val, list) else val}
+                    axis_ledger["items"].append(item)
+                    axes = _axis_indices(val)
+                    if axes is None:                     # 该变体没有这根轴（如 dim=None 的全局归约）
+                        item["status"] = "not_applicable"
+                        item["reason"] = ("该 attr 取值不是轴下标（如 dim=None 的全局归约）→ "
+                                          "压根没有『那根轴』，自然缺席、不是缺口")
+                        continue
+                    item["axes"] = list(axes)
+                    ax_base = _axis_base_shape(ranks, axes)   # 每维 ≥4、且容得下这组轴下标
+                    norm = None if ax_base is None else _norm_axes(axes, len(ax_base))
+                    shp = None if norm is None else _axis_length_shape(ax_base, axes, length)
+                    if shp is None:
+                        item["status"] = "skipped"
+                        item["base_shape"] = None if ax_base is None else list(ax_base)
+                        item["reason"] = (
+                            "没有容得下这组轴下标的合法 rank" if ax_base is None else
+                            "轴下标归一化后重复（同一根轴被指了两次）→ 不是合法的轴集合"
+                            if norm is None else "改后 numel 超上限")
+                        axis_ledger["skipped"].append(item)
+                        continue
+                    item["status"] = "emitted"
+                    item["rank"] = len(ax_base)
+                    item["shape"] = list(shp)
+                    item["norm_axes"] = norm
+                    e = mk(["功能", "精度"], shp, ax_dtype, f"{ax_dk}:uniform",
+                           f"ax{ci}len{length}", attrs,
+                           f"axis_length:{constraint['attr']}:{length}:a{ai}",
+                           "任务书点名的轴维度边界（spec.attr_axis_lengths·字段驱动·op-中立）",
+                           ["轴长度"])
+                    # finding #4：把「这条 case 宣称覆盖的轴长度」钉在 entry 上——后续 cost 降规模
+                    # 必须锁住这几根轴，且预算处理完还要复验（`_verify_axis_locks`）。
+                    e["axis_lock"] = {"attr": constraint["attr"], "axes": item["norm_axes"],
+                                      "length": int(length), "rank": len(ax_base)}
+                    forced.append(e)
+                    axis_ledger["emitted"] += 1
+        _check_axis_length_coverage(axis_ledger)
     # ③ 常规正交网格（1-wise 采样源）：dtype × shape × 值域 × attr（regime 编进 id_kind 保 case_id 唯一）
     for dtn in dtypes:
         is_key = dtn in KEY_DTYPES
@@ -1258,6 +1844,9 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
         grid, cost_ledger = _apply_cost_budget(forced, grid, cost_fn, budget)
     else:
         cost_ledger = _empty_cost_ledger()
+    # finding #4 第二道：预算处理**完成后**逐条复验轴长度 case 的实际轴长与声明一致（改没改都验）。
+    # 无条件跑（cost_fn=None 的 dry-run 也跑）——O(n) 而已，换的是「id/账本绝不冒充覆盖」。
+    _verify_axis_locks(forced, where_hint="cost 预算处理后复验：")
     # 预算：forced 全量 + grid 1-wise 采样填到 budget（forced 大于 target 时 emit>target，评审 #8 允许并 note）
     n_special = sum(1 for e in forced if e["tags"] == ["特殊"])
     budget = max(int(case_target), len(forced))
@@ -1270,9 +1859,16 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
         "requested_target": int(case_target),
         "emitted": len(entries),
         "forced_special": n_special,
+        # OC 账本：这批用例是按哪个算子类别的特殊值口径产的（None=未声明=现行为），以及有没有铺 inf/-inf/nan。
+        # 报告侧读这里就能如实说「结构类算子按方法学不喂 NaN·Inf」，不必事后人肉数 case。
+        "operator_class": op_class,
+        "emits_nonfinite_specials": emit_nonfinite,
         "forced_total": len(forced),          # 强制下限 S = 特殊场景 + 白名单（emit 不会少于此；acc-spec 取此作 S）
         "dropped_combo_classes": (_dropped_classes(grid, entries)
                                   if emitted_from_grid < grid_avail else []),
+        # 零配对告警：某 attr 取值 × 某 shape 结构类**从未同时出现**（dropped_combo_classes 报不出这个）。
+        "unpaired_combo_classes": _unpaired_combo_classes(entries, attr_sets),
+        "attr_axis_lengths": axis_ledger,     # 轴维度约束的定向生成账本（未声明则 emitted=0）
         "coverage_strength": ("1-wise+whitelist：特殊场景(§1.4) + key dtype×attr×大shape 全覆盖；"
                               "常规 dtype×shape×值域×attr 联合仅边际 1-wise（50 封顶下 §1.1 100% 正交不可达）"),
         "golden_cost": cost_ledger,           # G4 覆盖账本：降规模的强制项 + 被剔除的超预算 shape
@@ -1430,6 +2026,43 @@ def _save_inputs_multi(cdir, cid, inputs, in_params, dtn):
     return items
 
 
+def _index_golden_array(arr, dtype_name, where):
+    """index 角色 golden 的落盘数组——dtype **按 spec 声明的 index out-param 取**（F2 修复，2026-07-24）。
+
+    旧洞（a3 真机首跑 aclnn_py 通路实测）：这里恒存 `np.int64`，而真机 actual 的 dtype 由 caseset 的
+    `expected.outputs[k].compare_dtype`（= 同一份 spec 声明，driver 据它开输出 buffer）决定 →
+    **spec 声明 int32 indices 的算子两侧 dtype 必然打架**，走到 `precision_policy.compute_metrics` 的
+    index 分支「两侧下标 dtype 必须一致」当场 fail-closed → **永远出不了裁决**（工具盲区，只能靠改 spec 绕）。
+
+    修法取「golden 按声明存」而非「比较前归一」，理由：
+      · 单一真源——golden 落盘 dtype 与真机 buffer dtype 同出 spec 一处声明，天然同型、无需归一；
+      · 归一在比较端做会**抹掉真问题**——实现真的返回了非声明 dtype 时，那正是要被看见的缺陷，
+        不该被采集层悄悄铺平（fail-closed 优于静默）；
+      · 越界能在**生成期**就拒（此处），比留到比较端再发现更早、错更明确。
+
+    两道 fail-closed：
+      · golden_fn 返回的下标必须是**真整数**（bool / 浮点一律拒——`astype` 会静默截断 `[0.9]→[0]`）；
+      · 声明 dtype 装不下下标取值域（如 int32 装不下 ≥2**31 的下标）→ 拒，绝不静默回绕/截断。
+    """
+    np_dt = _NATIVE.get(dtype_name)
+    if np_dt is None or not np.issubdtype(np_dt, np.integer):
+        raise ValueError(f"{where}: spec 声明的 index dtype={dtype_name!r} 非生成层支持的整数 dtype "
+                         f"（可选 {sorted(n for n, t in _NATIVE.items() if np.issubdtype(t, np.integer))}）"
+                         f"——下标 dtype 不猜、不兜底，fail-closed")
+    a = np.asarray(arr)
+    if a.dtype == np.bool_ or not np.issubdtype(a.dtype, np.integer):
+        raise ValueError(f"{where}: golden 下标 dtype={a.dtype.name!r} 非整数（bool/浮点一律拒，"
+                         f"禁止静默截断成整型），fail-closed")
+    info = np.iinfo(np_dt)
+    if a.size:
+        lo, hi = int(a.min()), int(a.max())
+        if lo < info.min or hi > info.max:
+            raise ValueError(f"{where}: golden 下标取值域 [{lo},{hi}] 装不下 spec 声明的 index dtype "
+                             f"{dtype_name}（可表示 [{info.min},{info.max}]）——窄化会静默回绕成合法下标，"
+                             f"一律拒，fail-closed")
+    return a.astype(np_dt, copy=False)
+
+
 def _active_output_names(spec, variant, cid):
     """本 case **真正落地**的输出名——**实现已上提到 precision_policy**（与裁决侧共用唯一真源）。"""
     return precision_policy.active_output_names_for_variant(spec, variant, cid)
@@ -1480,10 +2113,15 @@ def _build_multi_output_case(spec, op, cid, cdir, entry, inputs, in_params, dtn,
         if declared is not None and actual_shape != declared:
             raise ValueError(f"{cid}: 输出#{k}({name}/{ct['role']}) 实测形状 {actual_shape} ≠ out_shape() "
                              f"声明 {declared}（value/index 归约后同形；声明与实现打架，fail-closed；attrs={attrs}）")
-        _gdt = np.int64 if ct["role"] == "index" else _compute_np(ct["dtype"])  # index 恒 int64；value 按 compare dtype
+        # golden 落盘 dtype：index 角色按 **spec 声明的 index dtype**（F2：不再恒 int64——恒 int64 与
+        # 真机按 compare_dtype 开的 buffer 打架，int32 indices 的算子永远出不了裁决）；value 按 compare dtype。
+        if ct["role"] == precision_policy.OUT_ROLE_INDEX:
+            garr = _index_golden_array(arr, ct["dtype"], f"{cid}: 输出#{k}({name}/index)")
+        else:
+            garr = np.asarray(arr, dtype=_compute_np(ct["dtype"]))
         # ⚠ np.ascontiguousarray 会把 0-d 标量**提成 (1,)**（强制 ndim≥1）——全局归约(median 全局)输出是 0-d，
         #   直接存会让落盘 npy 形状 ≠ 记录的 out_shape。故 ascontiguousarray 后 reshape 回 actual_shape（元素数不变、恒合法）。
-        gsave = np.ascontiguousarray(np.asarray(arr, dtype=_gdt)).reshape(actual_shape)
+        gsave = np.ascontiguousarray(garr).reshape(actual_shape)
         np.save(os.path.join(cdir, f"golden_{k}.npy"), gsave)
         item = {"index": k, "name": name, "role": ct["role"],
                 "golden_path": f"{cid}/golden_{k}.npy", "golden_tier": tier,
@@ -1518,7 +2156,8 @@ def gen_cases(spec, work_dir):
     # 的 _BF16_EXACT_OPS 是两处已知例外，仍是引擎里的算子知识。
     # golden_source 来自加载的 GOLDEN_SOURCE 元数据（决策 5），下游门继续校 oracle_source==映射(golden_source)。
     in_params = [p for p in spec["params"] if p["io"] == "in"]
-    check_spec_capability(in_params)                     # 能力边界前置：先于 load_golden，别为不支持的算子白加载 golden
+    runner_form = spec.get("runner_form")                # dtype 能力门按 form 分派（缺省 cpp）；U3
+    check_spec_capability(in_params, runner_form)        # 能力边界前置：先于 load_golden，别为不支持的算子白加载 golden
     # C1：load_golden 返回具名元组，`.out_shape` 是**可选**的（未导出=None → 缺省同形语义）。
     _g = load_golden(op)                             # 具名元组：按名取，别再位置解包
     golden_fn, golden_source, out_shape_fn = _g.fn, _g.source, _g.out_shape
@@ -1549,7 +2188,7 @@ def gen_cases(spec, work_dir):
     # `aclnn_call`，driver 不再自己推变体。变体表必填——没它就只能靠 driver 兜默认值，而兜出来的
     # `dim=0` 既不是全局语义、又可能与单输出签名不符（越界写 / ABI 崩）。
     variants = _call_variants(spec)
-    needs_aclnn_call = spec.get("runner_form") == "aclnn_py"
+    needs_aclnn_call = runner_form == "aclnn_py"
     if needs_aclnn_call and not variants:
         raise ValueError(f"{op}: runner_form=='aclnn_py' 但 spec 未声明 call_variants —— "
                          f"aclnn 调用形态（符号/实参表/落地输出）必须由 spec 显式声明、逐 case 解析，"
@@ -1568,7 +2207,8 @@ def gen_cases(spec, work_dir):
         os.makedirs(cdir, exist_ok=True)
         case_rng = _case_rng(cid)                        # per-case 独立种子（数据只依赖稳定 cid，评审 #7）
 
-        inputs = _build_inputs(case_rng, in_params, shp, dtn, attrs, data_kind)  # 逻辑数组（compute dtype）
+        inputs = _build_inputs(case_rng, in_params, shp, dtn, attrs, data_kind,
+                               runner_form)              # 逻辑数组（compute dtype）
         # 逐 case 选中调用变体（无变体声明 → None；有声明但无匹配 → fail-closed，绝不退默认）。
         variant = _select_call_variant(variants, attrs, cid) if variants else None
         if uses_multi:                                   # 多输出契约（torch 对标 median）：全程 op-中立据字段
@@ -1736,6 +2376,11 @@ def gen_cases(spec, work_dir):
             # G4 覆盖账本：预算 + cost 模型（含其诚实边界）+ 被降规模的强制项 + 被剔除的超预算 shape。
             # 报告侧读这里就能说清「大 shape 是降规模后覆盖的 / 哪些规模根本没跑」，不靠猜。
             "golden_cost": plan_meta["golden_cost"],
+            # OC 账本：**仅在 spec 声明了 operator_class 时才出现**——未声明的算子 caseset 逐字节不变
+            # （向后兼容硬约束）。声明了就把「按哪类口径产的 / 有没有铺 inf·-inf·nan」如实落进产物。
+            **({"operator_class": plan_meta["operator_class"],
+                "emits_nonfinite_specials": plan_meta["emits_nonfinite_specials"]}
+               if plan_meta["operator_class"] is not None else {}),
             "cases": cases}
     # ⚠ 原先这里挂一份 **op 级** `aclnn_call_template`，由 driver 自己按 case 兜变体（`dim=None`→`dim=0`）——
     # 已被 finding #3 判为不合规并**整体替换**：调用形态现在逐 case 解析、写在 `case["aclnn_call"]` 里。
@@ -1754,7 +2399,8 @@ def _dry_run(spec):
     from collections import Counter
     op = spec["op"]
     in_params = [p for p in spec["params"] if p["io"] == "in"]
-    check_spec_capability(in_params)                     # 能力边界前置：三元算子在 CP-B 就拦下，不拖到 CP-D
+    # 能力边界前置：三元算子 / dtype 双层能力门在 CP-B 就拦下，不拖到 CP-D（form 缺省 cpp）
+    check_spec_capability(in_params, spec.get("runner_form"))
     attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
@@ -1782,6 +2428,10 @@ def _dry_run(spec):
           f"forced_total(=强制下限S)={meta['forced_total']} forced_special={meta['forced_special']}")
     print(f"  区间: case_target 建议落 [S={meta['forced_total']}, pool_max={meta['pool_max']}]"
           f"（< S 则 emit 抬到 S；> pool_max 则 emit=pool_max、数量门软化 PASS+note）")
+    # OC：算子类别 → 特殊值口径。未声明时明说「= 现行为」，别让人误以为已经按类别裁过。
+    print(f"  operator_class: {meta['operator_class'] or '未声明（缺省 = 现行为）'}"
+          f"  → inf/-inf/nan 特殊场景: "
+          f"{'产' if meta['emits_nonfinite_specials'] else '**不产**（该类别按方法学不适用 NaN·Inf）'}")
     _rk = _allowed_ranks(in_params)                      # C3：rank 约束（None=不限制）
     print(f"  input_rank: {'不限制' if _rk is None else sorted(_rk)}  "
           f"shapes: {sorted({_shape_tag(e['shape']) for e in entries})}")
@@ -1793,6 +2443,34 @@ def _dry_run(spec):
         print(f"  equal_nan values seen: {eqn}")
     print(f"  dropped_combo_classes: {len(meta['dropped_combo_classes'])} "
           f"(first3={meta['dropped_combo_classes'][:3]})")
+    # 零配对告警：「attr 取值 × shape 结构类」从未同时出现。任务书点名的边界（如「归约轴维度为 1」）
+    # 实跑 0 条时，以前**全程无告警**、只能事后人肉核 caseset；现在在计划期就报出来。
+    _up = meta["unpaired_combo_classes"]
+    print(f"  shape_classes: {sorted({_shape_class(e['shape']) for e in entries})}")
+    if _up["attr_values_never_emitted"]:
+        print(f"  ⚠ attr 取值零覆盖（spec 声明了但一条没生成）: {_up['attr_values_never_emitted']}")
+    if _up["count"]:
+        print(f"  ⚠ unpaired_combo_classes（从未配对）: {_up['count']} 条"
+              + "".join(f"\n      · {c}" for c in _up["classes"][:8])
+              + ("\n      · …（余下已截断）" if _up["count"] > 8 else ""))
+        print("     提示：任务书点名的边界若落在这些组合里，可用 spec.attr_axis_lengths 定向生成"
+              "（如 [{'attr':'dim','lengths':[1]}] = 让 dim 指的轴长度取 1）")
+    else:
+        print("  unpaired_combo_classes（从未配对）: 0")
+    _ax = meta["attr_axis_lengths"]
+    if _ax["declared"]:
+        _na = sum(1 for it in _ax["items"] if it["status"] == "not_applicable")
+        print(f"  attr_axis_lengths: 声明 {_ax['declared']} → 定向生成 {_ax['emitted']} 条"
+              f"（逐项账本 {len(_ax['items'])} 项：emitted={_ax['emitted']} "
+              f"not_applicable={_na}（如 dim=None 的全局归约，合法缺席） skipped={len(_ax['skipped'])}）")
+        for it in _ax["items"]:                          # 逐项列，别只报总数（finding #5 的教训）
+            if it["status"] == "emitted":
+                print(f"      · {it['attr']}={it['attr_value']!r}(a{it['attr_idx']}) "
+                      f"轴长度={it['length']} → rank{it['rank']} shape={it['shape']}"
+                      f"（轴 {it['norm_axes']} 已锁定，不随 cost 降规模）")
+            elif it["status"] == "skipped":                # 到不了这（逐项判据已 fail-closed），留作诊断
+                print(f"      · ⚠ {it['attr']}={it['attr_value']!r}(a{it['attr_idx']}) "
+                      f"轴长度={it['length']} → 未产出：{it['reason']}")
     _gc = meta["golden_cost"]                            # G4 规模预算账本
     print(f"  golden_cost: budget={_gc['budget']} model={_gc['model']}{cost_why}")
     if _gc["scaled_cases"]:

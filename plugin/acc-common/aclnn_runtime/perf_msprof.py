@@ -15,6 +15,31 @@
   （:data:`DB_DEVICE_KERNEL_TYPES` + `KERNEL_` 家族规则），用 CSV 那套**一个都匹配不上 → 静默得 0 us**。
   → 窗内出现**任何未分类的 taskType 一律 fail-closed**（:data:`ERR_UNKNOWN_TASK_TYPE`，并把观察到的
   类型直方图带进 detail），**绝不让空结果冒充「没有 kernel」**。
+* **B′（`TASK.taskType` 可能是数值枚举 id）**——2026-07-24 a3 真机 dogfood 实测补充：
+  CANN 9.0.1 + torch_npu 2.10 的 profiler db 里 `TASK.taskType` **不是字符串而是数值 id**
+  （custom 侧 `15/17/19/20/24`、baseline 侧 `10~33`），拿 `KERNEL_*` 前缀去比**一个都不中**
+  → 双边 46/46 `unknown_task_type_in_window`，db 路线整个不可用（MSTX 窗本身两侧都成立，卡的只是归类）。
+  → **先 join db 自带的字典表**把 id 解回名字（:func:`task_type_dictionary`：专用枚举表 →
+  **有 schema 外键证据时**才轮到 `STRING_IDS`），拿不到字典表才退到外部传入的**带结构化 provenance**
+  映射（:data:`ENV_TASK_TYPE_MAP`）。
+  **解不出的 id 一律照 unknown 处理 → fail-closed**（显示成 `taskType_id:<id>`，永不可能误撞白名单），
+  并把 `unresolved_task_type_ids` 带进 detail 供下一轮取字典。
+* **B″（字典解析本身能被污染 → 三道闸，2026-07-24 审计高危 #2/#3）**：id→名的解析一旦解错，
+  产出的就不是「拿不到数」而是**看着合法、实则编造的 us 数字**——对验收工具这比拿不到数严重得多。
+  故 :func:`task_type_dictionary` 只认**有据可查**的字典：
+  1. **专用枚举表**（表名按 :data:`_TASK_TYPE_DICT_TABLE_RE` 通用探测）＝ db 为 taskType 专设的表，可信；
+  2. **`STRING_IDS` 是通用字符串池、默认不认**——只有 db schema 里**声明了外键**
+     （`PRAGMA foreign_key_list(TASK)` 有 `taskType → STRING_IDS`）才证明「taskType 的确以它为字典」，
+     才允许兜底；且该 id **不得与 kernel-name / API-name / MSTX-message 池重合**
+     （:func:`string_id_name_pool`：同一个数字既被当名字引用又当类型 id，根本分不清 → 不认）。
+     **没有外键证据 → 一律保持 unresolved（fail-closed），绝不靠「长得像枚举」的正则外形放行**
+     （光看外形时，`STRING_IDS[15]="KERNEL_STALE_NAME"` 这种纯 ID 碰撞就能造出假的 kernel-only 数字）。
+  3. **外部 override**（:data:`ENV_TASK_TYPE_MAP`）＝ 人手写的，闸最紧：`provenance` 须**结构化**
+     且 :data:`OVERRIDE_PROVENANCE_FIELDS` 逐字段必填（db / CANN 版本 / torch_npu 版本 / 采集命令 /
+     采集日期），占位串（空、纯符号、`TODO`/`占位`…）一律拒；映射值**只许落在版本化受控枚举**
+     :data:`CONTROLLED_TASK_TYPE_NAMES` 内，**未知 `KERNEL_*` 不许靠前缀放行**；任一条不合格 → **整份拒收**。
+  另：**多来源之间冲突即拒**（同一 id 被两个来源解成不同名字 → 该 id 直接丢弃、不做「后者覆盖前者」）。
+  「凭什么信这份字典」全程记进 `task_type_dict_provenance`，随 detail 出证。
 * **C（`--ai-core` 必须显式关）**：msprof 默认 `--ai-core=on` 让 Sort(MIX_AIV) 虚高 **3.75×**、
   每次调用总和虚高 **2.0×**；关掉后 msprof / torch_npu profiler 三路吻合（150~159 us/call）。
   → :data:`MSPROF_EXTRA_ARGS` 显式带 `--ai-core=off`，且**双边采集配置须一致**
@@ -83,12 +108,14 @@ import csv
 import glob
 import json
 import os
+import re
 import shutil
 import sqlite3
 import statistics
 import subprocess
 import sys
 import tempfile
+from datetime import date
 from pathlib import Path
 
 # ── 常量（单一真源）────────────────────────────────────────────────────────────────
@@ -108,10 +135,77 @@ DB_DEVICE_KERNEL_TYPES = frozenset(("KERNEL_AIVEC", "KERNEL_MIX_AIV"))
 #: 但同族且不在非计算集内 → 计入；真出现没见过的族外类型会被判 unknown → fail-closed）。
 DB_DEVICE_KERNEL_PREFIX = "KERNEL_"
 
+# —— §9.7 B′：`TASK.taskType` 的**数值枚举 id** → 名字（实测 CANN 9.0.1 + torch_npu 2.10 就是数值）——
+#: `TASK` 表里放类型的列，**优先本来就是字符串的那列**，最后才落到可能为数值 id 的 `taskType`。
+_TASK_TYPE_COLUMNS = ("taskTypeName", "taskTypeStr", "taskType")
+#: db 自带字典表的**通用**表名探测（不写死某个版本的表名）：`TASK_TYPE` / `TASK_TYPES` / `ENUM_TASK_TYPE`…
+_TASK_TYPE_DICT_TABLE_RE = re.compile(r"^(ENUM_)?TASK_?TYPES?$", re.IGNORECASE)
+#: 从**通用**字符串池（`STRING_IDS`）取值时的**外形**闸：只收长得像类型枚举的全大写 token
+#: （`KERNEL_AIVEC` / `MEMCPY_ASYNC` ✓；`aclnnMedian_Median_Median` / `preload_stack_16KB` ✗）。
+#: ⚠ **外形只是最后一道、绝非许可证**——它证明不了「这个数字是 taskType 的字典 key」（审计高危 #2：
+#: `STRING_IDS[15]="KERNEL_STALE_NAME"` 纯 ID 碰撞就能骗过外形闸、造出假 us）。用它前必须先过
+#: :func:`string_ids_is_task_type_dictionary` 的**外键证据**闸。
+_TASK_TYPE_TOKEN_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
+#: 解不出的数值 id 的显示前缀——**故意不像任何真类型名**，保证永不可能误撞白名单。
+UNRESOLVED_TASK_TYPE_PREFIX = "taskType_id:"
+#: 字典来源标签（进 detail，便于说清「这次是靠哪张表解出来的」）。
+DICT_SOURCE_TABLE = "db_task_type_table"
+DICT_SOURCE_STRING_IDS = "db_string_ids"
+DICT_SOURCE_ENV = "env_override"
+
+# —— 受控枚举（审计高危 #3）：字典**只许解出**这些名字，未知 `KERNEL_*` 不靠前缀放行 ——
+#: 受控枚举的版本号。**扩这份枚举必须带真机实测依据并升版本**，且升版本要连带更新
+#: :data:`CONTROLLED_TASK_TYPE_NAMES_PROVENANCE`——否则就是拿「猜的名字」换「假的性能数」。
+TASK_TYPE_ENUM_VERSION = "2026-07-24.1"
+CONTROLLED_TASK_TYPE_NAMES_PROVENANCE = (
+    "受控枚举依据 = §9.7 B 实测坐实的 db 路线计算 kernel 类型（KERNEL_AIVEC / KERNEL_MIX_AIV）"
+    "+ 搬运类型集合。"
+    "只有落在这份枚举里的名字才允许由**外部 override** 解出——手写映射的拼写错误"
+    "（如 KERNEL_TYPO）会让 fail-closed 变成假性能数字，故一律拒。")
+
+#: 外部映射的环境变量（指向一份 JSON 文件）。仓里**不写死**任何 id→名对照：
+#: 2026-07-24 的 dogfood 只观察到 id（15/17/19/20/24、10~33）、**没取到对应名字**，
+#: 编一份映射就是造数据（本仓最忌，且「解错」比「解不出」更坏）。需要时经本变量传入，
+#: JSON 必须自带**结构化** `provenance`（:data:`OVERRIDE_PROVENANCE_FIELDS` 逐字段必填），否则整份拒收。
+ENV_TASK_TYPE_MAP = "OPRUNWAY_PERF_TASK_TYPE_MAP"
+#: override 的 `provenance` **必填结构化字段**——一句散文（"实测占位"）核不了，也拦不住手误。
+OVERRIDE_PROVENANCE_FIELDS = ("db", "cann_version", "torch_npu_version",
+                              "collect_command", "collected_at")
+#: 必须含版本号数字的字段 / 必须是 `YYYY-MM-DD` 真实日期的字段。
+_PROV_VERSION_FIELDS = frozenset(("cann_version", "torch_npu_version"))
+_PROV_DATE_FIELD = "collected_at"
+#: 字段最短长度；版本号本来就可能很短（`2.1`）→ 单独放宽，别把合法输入误拒。
+_PROV_MIN_LEN = 4
+_PROV_VERSION_MIN_LEN = 3
+_PROV_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+#: 占位串识别（整串命中 / 子串命中 两套）——占位 provenance 等于没有 provenance。
+_PLACEHOLDER_EXACT = frozenset((
+    "todo", "tbd", "na", "n/a", "none", "null", "nil", "unknown", "unspecified",
+    "placeholder", "example", "sample", "dummy", "foo", "bar", "test", "x", "xx",
+    "待补", "待定", "待填", "未知", "无", "略", "占位", "同上", "见上", "实测", "临时",
+))
+_PLACEHOLDER_SUBSTR = ("占位", "待补", "待填", "待确认", "待核", "placeholder",
+                       "todo", "tbd", "fixme", "xxx", "???", "填这里", "fill me", "your_")
+#: 「有内容」的最低要求：至少一个字母 / 数字 / 汉字（纯符号 `---` 之类不算）。
+_MEANINGFUL_RE = re.compile(r"[0-9A-Za-z一-鿿]")
+#: 内置 id→名映射：**故意为空**，理由见 :data:`DB_TASK_TYPE_ID_NAMES_PROVENANCE`。
+DB_TASK_TYPE_ID_NAMES = {}
+DB_TASK_TYPE_ID_NAMES_PROVENANCE = (
+    "空 · 未实测：2026-07-24 a3 dogfood 只观察到数值 id（custom 15/17/19/20/24、baseline 10~33），"
+    "**没有取到 id→名对照**。编一份映射就是造数据，且「解错」比「解不出」更坏 → 这里不放任何默认值；"
+    f"字典优先从 db 的**专用枚举表**解（{DICT_SOURCE_TABLE}），"
+    f"通用字符串池（{DICT_SOURCE_STRING_IDS}）**只在 schema 声明了外键时**才认，"
+    f"实在拿不到再经 {ENV_TASK_TYPE_MAP} 传入带结构化 provenance 的映射。")
+
 #: 异步搬运类型——**一律不计入** kernel-only 时间。⚠ §9.7 📌 **未验证**（Level0 下没见过 memcpy TASK 行）。
 DEVICE_MEMCPY_TYPE = "MEMCPY_ASYNC"
 CSV_MEMCPY_TYPES = frozenset((DEVICE_MEMCPY_TYPE, "MEMSET"))
 DB_MEMCPY_TYPES = frozenset((DEVICE_MEMCPY_TYPE, "KERNEL_MEMCPY", "MEMSET_ASYNC", "MEMSET"))
+
+#: **受控枚举**（版本 :data:`TASK_TYPE_ENUM_VERSION`）：外部 override 的映射值只许落在这里面。
+#: 计算类只有 :data:`DB_DEVICE_KERNEL_TYPES` 那两个实测坐实的，搬运类是 :data:`DB_MEMCPY_TYPES`——
+#: 别的 `KERNEL_*` 一律拒（拒了只是继续 fail-closed；放行则可能把非计算 task 计成 kernel-only 耗时）。
+CONTROLLED_TASK_TYPE_NAMES = frozenset(DB_DEVICE_KERNEL_TYPES | DB_MEMCPY_TYPES)
 
 #: 类型分类结果。
 KIND_COMPUTE = "compute"
@@ -354,6 +448,334 @@ def _resolve(value, strings):
     return value
 
 
+# ── taskType 数值枚举 id 的解析（§9.7 B′）─────────────────────────────────────────
+
+def _numeric_id(value):
+    """值是不是「纯数值 id」→ 归一成 `str(int)`；不是则 None（`KERNEL_AIVEC` 这类名字走这条）。"""
+    if isinstance(value, bool):
+        return None
+    try:
+        return str(int(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _two_column_map(conn, table):
+    """两列字典表 → `{"<id>": "<name>"}`。**列名不写死**：优先 id/name 惯例列，否则取前两列。"""
+    cols = _db_columns(conn, table)
+    if len(cols) < 2:
+        return {}
+    id_col = next((c for c in ("id", "typeId", "taskType", "value") if c in cols), cols[0])
+    name_col = next((c for c in ("name", "typeName", "value", "desc", "description")
+                     if c in cols and c != id_col),
+                    next((c for c in cols if c != id_col), None))
+    if name_col is None:
+        return {}
+    try:
+        cur = conn.execute(f"SELECT {id_col}, {name_col} FROM {table}")
+        rows = cur.fetchall()
+    except sqlite3.Error:
+        return {}
+    out = {}
+    for key, val in rows:
+        norm = _numeric_id(key)
+        if norm is None or val is None or str(val).strip() == "":
+            continue
+        out.setdefault(norm, str(val).strip())
+    return out
+
+
+def _foreign_key_targets(conn, table):
+    """`PRAGMA foreign_key_list(<table>)` → `{来源列小写: {(目标表小写, 目标列小写)}}`；无声明 → `{}`。
+
+    这是**唯一**能证明「某列以某张表为字典」的 schema 级证据（sqlite 把 `REFERENCES` 原样记下来）。
+    """
+    try:
+        rows = conn.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+    except sqlite3.Error:
+        return {}
+    out = {}
+    for row in rows or ():
+        # PRAGMA 行 = (id, seq, table, from, to, on_update, on_delete, match)
+        if len(row) < 5 or row[3] is None:
+            continue
+        target_table = str(row[2] or "").strip().lower()
+        target_col = str(row[4] or "").strip().lower()
+        out.setdefault(str(row[3]).strip().lower(), set()).add((target_table, target_col))
+    return out
+
+
+def string_ids_is_task_type_dictionary(conn, tables, type_col):
+    """`TASK.<type_col>` 是否**有据可查地**以 `STRING_IDS` 为字典 → `(bool, 依据文本)`。
+
+    审计高危 #2：`STRING_IDS` 是 db 的**通用**字符串池（kernel 名 / API 名 / MSTX 消息都在里面），
+    「取出来的字符串长得像类型枚举」**证明不了** `TASK.taskType` 是它的外键——纯 ID 碰撞
+    （`taskType=15` 恰好撞上 `STRING_IDS[15]="KERNEL_STALE_NAME"`）就能造出**看似合法的假 us**。
+    故这里只认 **schema 声明的外键**；拿不到证据 → `(False, …)` → 整条 `STRING_IDS` 兜底不启用，
+    数值 id 保持 unresolved（fail-closed）。**宁可拿不到性能数，也不产假的。**
+    """
+    if TABLE_STRING_IDS not in (tables or ()) or not type_col:
+        return False, f"{TABLE_STRING_IDS} 表不存在或 taskType 列未定位"
+    fks = _foreign_key_targets(conn, TABLE_TASK)
+    targets = fks.get(str(type_col).strip().lower(), set())
+    for target_table, target_col in targets:
+        if target_table == TABLE_STRING_IDS.lower():
+            col = target_col or "(隐式主键)"
+            return True, (f"schema 外键证据：PRAGMA foreign_key_list({TABLE_TASK}) 声明 "
+                          f"{TABLE_TASK}.{type_col} → {TABLE_STRING_IDS}.{col}")
+    return False, (f"无外键证据：{TABLE_TASK}.{type_col} 未声明指向 {TABLE_STRING_IDS} 的外键"
+                   f"（通用字符串池不当 taskType 字典用）")
+
+
+def string_id_name_pool(conn, tables):
+    """被当作**名字 / 消息**引用的 string id 集合（归一成 `str(int)`）。
+
+    同一个数字既被 kernel 名 / API 名 / MSTX 消息引用、又出现在 `TASK.taskType` 里 → 这个数字到底是
+    「类型枚举 id」还是「字符串 id」根本分不清，**一律不拿它解 taskType**（审计高危 #2 要求的最低拒收项）。
+    """
+    pool = set()
+    for table, cols in ((TABLE_COMPUTE_TASK_INFO, _CTI_NAME_COLUMNS),
+                        (TABLE_CANN_API, ("name", "apiName", "type")),
+                        (TABLE_MSTX, ("message",))):
+        if table not in (tables or ()):
+            continue
+        available = set(_db_columns(conn, table))
+        for col in cols:
+            if col not in available:
+                continue
+            try:
+                rows = conn.execute(f"SELECT DISTINCT {col} FROM {table}").fetchall()
+            except sqlite3.Error:
+                continue
+            for row in rows:
+                norm = _numeric_id(row[0])
+                if norm is not None:
+                    pool.add(norm)
+    return pool
+
+
+def _is_placeholder(text):
+    """是不是「等于没写」的占位串（空 / 纯符号 / TODO / 占位 / 待补 …）。"""
+    low = str(text or "").strip().lower()
+    if not low or low in _PLACEHOLDER_EXACT:
+        return True
+    if any(tok in low for tok in _PLACEHOLDER_SUBSTR):
+        return True
+    return not _MEANINGFUL_RE.search(low)
+
+
+def validate_override_provenance(prov):
+    """override 的 `provenance` 结构化校验 → **不合格原因列表**（空列表 = 通过）。
+
+    审计高危 #3：原来只要求「任意非空字符串」，于是 `"provenance": "实测占位"` 就能放行一份手打映射，
+    把 fail-closed 变成**假性能数字**。现在 :data:`OVERRIDE_PROVENANCE_FIELDS` **逐字段必填**、
+    占位串拒、版本字段须含数字、日期须是 `YYYY-MM-DD` 真实日期。
+    """
+    if not isinstance(prov, dict):
+        return [f"provenance 须是对象且含 {list(OVERRIDE_PROVENANCE_FIELDS)}"
+                f"（一句散文核不了、也拦不住手误）"]
+    problems = []
+    for field in OVERRIDE_PROVENANCE_FIELDS:
+        raw = prov.get(field)
+        if not isinstance(raw, str) or not raw.strip():
+            problems.append(f"{field}：缺失或非字符串")
+            continue
+        text = raw.strip()
+        floor = _PROV_VERSION_MIN_LEN if field in _PROV_VERSION_FIELDS else _PROV_MIN_LEN
+        if len(text) < floor or _is_placeholder(text):
+            problems.append(f"{field}：像占位 / 太短（{text[:40]!r}）")
+        elif field in _PROV_VERSION_FIELDS and not re.search(r"\d", text):
+            problems.append(f"{field}：不含版本号数字（{text[:40]!r}）")
+        elif field == _PROV_DATE_FIELD and not _is_real_date(text):
+            problems.append(f"{field}：须是 YYYY-MM-DD 的真实日期（{text[:40]!r}）")
+    return problems
+
+
+def _is_real_date(text):
+    if not _PROV_DATE_RE.match(str(text).strip()):
+        return False
+    try:
+        date.fromisoformat(str(text).strip())
+        return True
+    except ValueError:
+        return False
+
+
+def load_task_type_overrides(env=None):
+    """读 :data:`ENV_TASK_TYPE_MAP` 指的 JSON → `(mapping, note)`。未设 → `({}, None)`。
+
+    结构（`provenance` **必须是结构化对象**，字段见 :data:`OVERRIDE_PROVENANCE_FIELDS`）::
+
+        {"provenance": {"db": "PROF_000_.../ascend_pytorch_profiler_1.db (sha256 ab12…)",
+                        "cann_version": "9.0.1",
+                        "torch_npu_version": "2.10.0",
+                        "collect_command": "msprof --task-time=on --ai-core=off ./run.sh",
+                        "collected_at": "2026-07-24"},
+         "map": {"15": "KERNEL_AIVEC", "17": "KERNEL_MIX_AIV"}}
+
+    两道闸（审计高危 #3）：
+      · **provenance 逐字段必填 + 拒占位**（:func:`validate_override_provenance`）；
+      · **映射值只许落在受控枚举** :data:`CONTROLLED_TASK_TYPE_NAMES`（版本
+        :data:`TASK_TYPE_ENUM_VERSION`）——未知 `KERNEL_*` **不靠前缀放行**（`KERNEL_TYPO` 这种手误
+        原来直接产 us）。
+    **任一条不合格 → 整份拒收**（不做「丢坏的、留好的」，免得手误被静默吞掉），只回 note；
+    采集侧照旧 fail-closed，绝不因此放行。
+    """
+    env = os.environ if env is None else env
+    path = env.get(ENV_TASK_TYPE_MAP)
+    if not path:
+        return {}, None
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as ex:
+        return {}, f"{ENV_TASK_TYPE_MAP} 读不了 / 非法 JSON，已拒收（{type(ex).__name__}）"
+    if not isinstance(doc, dict) or not isinstance(doc.get("map"), dict) or not doc["map"]:
+        return {}, (f"{ENV_TASK_TYPE_MAP} 结构不对（须 {{'provenance': {{…}}, 'map': {{非空}}}}），已拒收")
+    problems = validate_override_provenance(doc.get("provenance"))
+    if problems:
+        return {}, (f"{ENV_TASK_TYPE_MAP} 的 provenance 不合格 → 整份拒收："
+                    f"{'；'.join(problems[:6])}"
+                    f"（必填 {list(OVERRIDE_PROVENANCE_FIELDS)}）")
+    mapping, bad = {}, []
+    for key, val in doc["map"].items():
+        norm = _numeric_id(key)
+        if norm is None:
+            bad.append(f"{key!r}：不是数值 taskType id")
+            continue
+        name = val.strip() if isinstance(val, str) else ""
+        if name not in CONTROLLED_TASK_TYPE_NAMES:
+            bad.append(f"{key}→{val!r}：不在受控枚举内")
+            continue
+        if norm in mapping and mapping[norm] != name:
+            bad.append(f"{key}：同一份 map 里自相矛盾")
+            continue
+        mapping[norm] = name
+    if bad:
+        return {}, (f"{ENV_TASK_TYPE_MAP} 的 map 有不合格项 → 整份拒收：{'；'.join(bad[:6])}"
+                    f"（受控枚举 v{TASK_TYPE_ENUM_VERSION}="
+                    f"{sorted(CONTROLLED_TASK_TYPE_NAMES)}；未知 KERNEL_* 不靠前缀放行）")
+    prov = doc["provenance"]
+    summary = " · ".join(f"{f}={prov[f].strip()[:40]}" for f in OVERRIDE_PROVENANCE_FIELDS)
+    return mapping, (f"taskType 映射来自 {ENV_TASK_TYPE_MAP}"
+                     f"（结构化 provenance: {summary}；受控枚举 v{TASK_TYPE_ENUM_VERSION}）")
+
+
+def _dict_provenance(**kwargs):
+    """字典 provenance 骨架——「凭什么信这份字典」全记在这，随 detail 出证。"""
+    base = {"sources": [], "considered": [], "evidence": {}, "rejected": [], "conflicts": [],
+            "enum_version": TASK_TYPE_ENUM_VERSION}
+    base.update(kwargs)
+    return base
+
+
+def task_type_dictionary(conn, tables, env=None, *, type_col=None):
+    """taskType 数值 id → 名字的字典 → `(mapping, provenance)`。**每个来源都要拿得出依据**。
+
+    来源（可信度从高到低）：
+      1. **db 专用枚举表**（表名按 :data:`_TASK_TYPE_DICT_TABLE_RE` 通用探测）——db 为 taskType 专设，
+         首方数据，可信；
+      2. **`STRING_IDS`**（通用字符串池）——**只在 schema 声明了外键时**才启用
+         （:func:`string_ids_is_task_type_dictionary`），且 id 不得与 kernel/API 名池重合
+         （:func:`string_id_name_pool`）、取出的字符串还须过外形闸；
+      3. **外部 override**（:data:`ENV_TASK_TYPE_MAP`）——须过结构化 provenance + 受控枚举双闸。
+
+    **合并规则：冲突即拒，绝不「后者覆盖前者」也绝不「先到先得」**——同一个 id 被两个来源解成不同名字，
+    说明至少有一个是错的，该 id 直接丢弃（→ unresolved → 上层 fail-closed）。
+    一个都拿不到 → `({}, provenance)`，数值 id 全部解不出 → 上层 fail-closed（**绝不猜**）。
+    """
+    prov = _dict_provenance()
+    per_source = {}
+
+    # 1) db 专用枚举表
+    prov["considered"].append(DICT_SOURCE_TABLE)
+    table_map, table_names = {}, []
+    for table in sorted(tables or ()):
+        if not _TASK_TYPE_DICT_TABLE_RE.match(str(table)):
+            continue
+        found = _two_column_map(conn, table)
+        if not found:
+            continue
+        table_names.append(str(table))
+        for key, val in found.items():
+            if key in table_map and table_map[key] != val:
+                prov["conflicts"].append({"id": key, "source": DICT_SOURCE_TABLE,
+                                          "names": sorted({table_map[key], val})})
+                table_map[key] = None                     # 同类来源内部打架 → 该 id 作废
+            else:
+                table_map.setdefault(key, val)
+    table_map = {k: v for k, v in table_map.items() if v}
+    if table_names:
+        prov["evidence"][DICT_SOURCE_TABLE] = f"db 专用 taskType 枚举表：{', '.join(table_names)}"
+    if table_map:
+        per_source[DICT_SOURCE_TABLE] = table_map
+
+    # 2) STRING_IDS —— 默认不认，须有 schema 外键证据（审计高危 #2）
+    prov["considered"].append(DICT_SOURCE_STRING_IDS)
+    ok, why = string_ids_is_task_type_dictionary(conn, tables, type_col)
+    prov["evidence"][DICT_SOURCE_STRING_IDS] = why
+    if ok:
+        name_pool = string_id_name_pool(conn, tables)
+        picked = {}
+        for key, val in (_string_ids(conn, tables) or {}).items():
+            norm = _numeric_id(key)
+            if norm is None or val is None:
+                continue
+            text = str(val).strip()
+            if norm in name_pool:
+                prov["rejected"].append({"id": norm, "name": text,
+                                         "source": DICT_SOURCE_STRING_IDS,
+                                         "reason": "与 kernel/API 名池的 string id 重合，分不清是类型还是名字"})
+                continue
+            if not _TASK_TYPE_TOKEN_RE.match(text):
+                continue                                  # 不像类型枚举 → 静默略过（解不出 → fail-closed）
+            picked[norm] = text
+        if picked:
+            per_source[DICT_SOURCE_STRING_IDS] = picked
+
+    # 3) 外部 override
+    prov["considered"].append(DICT_SOURCE_ENV)
+    override, note = load_task_type_overrides(env)
+    if note:
+        prov["evidence"][DICT_SOURCE_ENV] = note
+    if override:
+        per_source[DICT_SOURCE_ENV] = override
+
+    # 合并：冲突即拒
+    mapping, seen = {}, {}
+    for source in (DICT_SOURCE_TABLE, DICT_SOURCE_STRING_IDS, DICT_SOURCE_ENV):
+        for key, val in (per_source.get(source) or {}).items():
+            seen.setdefault(key, []).append((source, val))
+    for key, entries in seen.items():
+        names = {val for _src, val in entries}
+        if len(names) > 1:
+            prov["conflicts"].append({"id": key, "names": sorted(names),
+                                      "sources": [src for src, _v in entries],
+                                      "reason": "多来源解出不同名字 → 该 id 作废（不做后者覆盖前者）"})
+            continue
+        mapping[key] = entries[0][1]
+    used = {src for key in mapping for src, _v in seen[key]}
+    prov["sources"] = [s for s in (DICT_SOURCE_TABLE, DICT_SOURCE_STRING_IDS, DICT_SOURCE_ENV)
+                       if s in used]
+    return mapping, prov
+
+
+def resolve_task_type(value, mapping=None):
+    """`TASK.taskType` 原始值 → `(显示文本, 是否解出名字, 原始数值 id|None)`。
+
+    · 本来就是名字（`KERNEL_AIVEC`）→ 原样、`resolved=True`；
+    · 数值 id 且字典查得到 → 名字、`resolved=True`、带回原 id；
+    · 数值 id 查不到 → `taskType_id:<id>`、`resolved=False`——**绝不拿字面数字去比白名单**，
+      上层照 unknown 处理 → fail-closed。
+    """
+    raw = _numeric_id(value)
+    if raw is None:
+        return str(value).strip(), True, None
+    name = (mapping or {}).get(raw)
+    if name:
+        return str(name).strip(), True, raw
+    return f"{UNRESOLVED_TASK_TYPE_PREFIX}{raw}", False, raw
+
+
 def read_db_mstx_rows(db_path):
     """读 `MSTX_EVENTS` → `[{"message","start_ns","end_ns","device_id"}]`；表缺 → `(None, err)`。"""
     conn = _connect_ro(db_path)
@@ -387,6 +809,9 @@ def read_db_task_rows(db_path):
 
     **必须 join `COMPUTE_TASK_INFO on globalTaskId` 且丢弃 name 为 NULL 的行**——MIX 类 kernel 在
     `TASK` 表出现两次（实测多出 52 个无 name 的 `KERNEL_MIX_AIV`），不去重就翻倍。
+
+    §9.7 B′：taskType 列**可能是数值枚举 id**，故一律过 :func:`resolve_task_type`——解得出记名字
+    （`type_resolved=True`），解不出记 `taskType_id:<id>`（`type_resolved=False`）交上层 fail-closed。
     """
     conn = _connect_ro(db_path)
     if conn is None:
@@ -397,14 +822,17 @@ def read_db_task_rows(db_path):
             return None, ERR_NO_TASK_TABLE
         tcols = set(_db_columns(conn, TABLE_TASK))
         ccols = _db_columns(conn, TABLE_COMPUTE_TASK_INFO)
-        if not ({"globalTaskId", "startNs", "endNs", "taskType"} <= tcols):
+        type_col = next((c for c in _TASK_TYPE_COLUMNS if c in tcols), None)
+        if type_col is None or not ({"globalTaskId", "startNs", "endNs"} <= tcols):
             return None, ERR_NO_TASK_TABLE
         name_col = next((c for c in _CTI_NAME_COLUMNS if c in ccols), None)
         if name_col is None or "globalTaskId" not in ccols:
             return None, ERR_NO_TASK_TABLE
         dev_col = next((c for c in _DEVICE_COLUMNS if c in tcols), None)
         strings = _string_ids(conn, tables)
-        sel = ["t.startNs", "t.endNs", "t.taskType", f"c.{name_col}"]
+        type_dict, dict_prov = task_type_dictionary(conn, tables, type_col=type_col)
+        dict_sources = list(dict_prov.get("sources") or ())
+        sel = ["t.startNs", "t.endNs", f"t.{type_col}", f"c.{name_col}"]
         if dev_col:
             sel.append(f"t.{dev_col}")
         sql = (f"SELECT {', '.join(sel)} FROM {TABLE_TASK} t "
@@ -416,8 +844,11 @@ def read_db_task_rows(db_path):
             start, end = _as_int(row[0]), _as_int(row[1])
             if start is None or end is None:
                 continue
+            text, resolved, type_id = resolve_task_type(row[2], type_dict)
             out.append({"name": str(_resolve(row[3], strings)),
-                        "type": str(row[2]).strip(),
+                        "type": text, "type_resolved": resolved, "type_id": type_id,
+                        "type_dict_sources": list(dict_sources),
+                        "type_dict_provenance": dict_prov,
                         "start": start, "end": end,
                         "duration_us": (end - start) / 1000.0, "unit": "ns",
                         "device_id": _dev(row[4]) if dev_col else None})
@@ -550,6 +981,9 @@ def classify_task_type(task_type, route):
     """
     text = str(task_type or "").strip()
     if route == ROUTE_DB:
+        # §9.7 B′：没解成名字的数值 id（`15` / `taskType_id:15`）**绝不按字面比白名单** → unknown。
+        if text.startswith(UNRESOLVED_TASK_TYPE_PREFIX) or _numeric_id(text) is not None:
+            return KIND_UNKNOWN
         if text in DB_MEMCPY_TYPES:
             return KIND_MEMCPY
         if text in DB_DEVICE_KERNEL_TYPES or text.startswith(DB_DEVICE_KERNEL_PREFIX):
@@ -636,7 +1070,9 @@ def parse_kernel_measurement(prof_dir, *, repeat, measurement_window, route=None
     """
     empty = {"us": None, "kernel_name": None, "execution_path": None,
              "breakdown": [], "device_memcpy_only_us": None,
-             "route": route, "observed_task_types": {}, "window_wall_us": None, "error": None}
+             "route": route, "observed_task_types": {}, "window_wall_us": None,
+             "unresolved_task_type_ids": [], "task_type_dict_sources": [],
+             "task_type_dict_provenance": {}, "error": None}
     if measurement_window is None:
         return {**empty, "error": ERR_WINDOW_REQUIRED}
     route = route or measurement_window.get("route")
@@ -650,7 +1086,8 @@ def parse_kernel_measurement(prof_dir, *, repeat, measurement_window, route=None
     empty["route"] = route
 
     window_dev = measurement_window.get("device_id")
-    in_window, observed = [], {}
+    in_window, observed, unresolved, dict_sources = [], {}, set(), []
+    dict_prov = {}
     for row in rows:
         if not _in_window(row, measurement_window):
             continue
@@ -660,7 +1097,19 @@ def parse_kernel_measurement(prof_dir, *, repeat, measurement_window, route=None
             continue
         in_window.append(row)
         observed[row.get("type") or ""] = observed.get(row.get("type") or "", 0) + 1
+        # §9.7 B′：数值 taskType 没解出名字 → 记下 id，供下一轮补字典（detail 里带给人看）。
+        if row.get("type_resolved") is False and row.get("type_id") is not None:
+            unresolved.add(str(row["type_id"]))
+        for src in row.get("type_dict_sources") or ():
+            if src not in dict_sources:
+                dict_sources.append(src)
+        # 「凭什么信这份字典」——db 级信息，取第一份即可（同一 db 的所有行共用同一个 provenance）。
+        if not dict_prov and row.get("type_dict_provenance"):
+            dict_prov = row["type_dict_provenance"]
     empty["observed_task_types"] = observed
+    empty["unresolved_task_type_ids"] = sorted(unresolved, key=lambda s: (len(s), s))
+    empty["task_type_dict_sources"] = dict_sources
+    empty["task_type_dict_provenance"] = dict_prov
 
     compute, memcpy, unknown = [], [], []
     for row in in_window:
@@ -774,6 +1223,14 @@ def classify_behavior(*, returncode, output, measurement, host_transfer=None,
         detail["parse_route"] = measurement.get("route")
         if measurement.get("observed_task_types"):
             detail["observed_task_types"] = measurement["observed_task_types"]
+        if measurement.get("unresolved_task_type_ids"):
+            # §9.7 B′：数值枚举 id 没解出名字——把 id 与字典来源都带出来，下一轮好补字典。
+            detail["unresolved_task_type_ids"] = measurement["unresolved_task_type_ids"]
+            detail["task_type_dict_sources"] = measurement.get("task_type_dict_sources") or []
+            # 审计高危 #2/#3：把「每个字典来源凭什么信 / 拒了什么 / 哪些 id 多来源打架」一并出证，
+            # 免得「解不出」看起来像工具没本事——它常常是**证据不足、主动 fail-closed**。
+            if measurement.get("task_type_dict_provenance"):
+                detail["task_type_dict_provenance"] = measurement["task_type_dict_provenance"]
         if measurement.get("window_wall_us") is not None:
             # ⚠ §9.7 E：只作诊断，**绝不是**性能数字（实测 wall 与窗内 kernel 累加差 90 倍）。
             detail["window_wall_us_not_a_perf_number"] = measurement["window_wall_us"]
@@ -797,6 +1254,14 @@ def classify_behavior(*, returncode, output, measurement, host_transfer=None,
     if err == ERR_UNKNOWN_TASK_TYPE:
         detail["note"] = ("窗内出现未分类的 taskType → 计时口径有缺口（§9.7 B），"
                           "fail-closed 判采集失败；observed_task_types 待归类")
+        if detail.get("unresolved_task_type_ids"):
+            detail["note"] += (f"；其中 {len(detail['unresolved_task_type_ids'])} 个是**数值枚举 id**"
+                               f"（db 里没找到**有据可查**的字典，已认下的来源="
+                               f"{detail.get('task_type_dict_sources') or '无'}；"
+                               f"依据/拒收原因见 task_type_dict_provenance）——"
+                               f"可经 {ENV_TASK_TYPE_MAP} 传入映射，但须带结构化 provenance"
+                               f"（{list(OVERRIDE_PROVENANCE_FIELDS)}）且值落在受控枚举 "
+                               f"v{TASK_TYPE_ENUM_VERSION} 内（§9.7 B′/B″）")
         return BEHAVIOR_FAILED, detail
     if err:
         return BEHAVIOR_FAILED, detail
@@ -1109,6 +1574,74 @@ def _require_real_gate():
             "离线只提供解析 / 聚合 / 分类 / speedup / scope / 采集配置校验（可单测）。")
 
 
+def plan_bool(plan, key, default=False):
+    """perf plan 的**严格布尔**取值：只认真正的 JSON `true` / `false`（fail-closed）。
+
+    与 `aclnn_adapter._plan_bool` **同口径**（两侧隔着 ssh：host 侧的 adapter 早失败一次，
+    容器侧这份是最后一道——采集端不能因为 plan 在传输/手写环节被改坏就把硬门放开）。
+    `bool("false")` / `bool("0")` 都是 **True**：字段被误写成字符串，`allow_builtin_symbols`
+    就悄悄打开、关掉 custom-vendor provenance 硬门，于是「精度验 custom vendor、性能却测到
+    CANN 内置同名实现」的假 PASS 从这里溜进来。字段缺省 → `default`；字段在但不是 `bool` → 立刻抛。
+    **调用方拿到的已是真 bool，下游不得再 `bool(...)` 二次解释。**
+    """
+    if key not in plan:
+        return default
+    value = plan[key]
+    if not isinstance(value, bool):
+        raise PerfCollectError(
+            f"perf plan 的 {key} 须为 JSON 布尔（true / false），得 {value!r}"
+            f"（{type(value).__name__}）——字符串 \"false\" / \"0\" 一律不接受："
+            f"宽松真值会把严格档悄悄关掉（=放行 CANN 内置同名实现，正是本项目要防的假 PASS）")
+    return value
+
+
+def _plan_str(plan, key):
+    """perf plan 里的可选路径字段：缺省 → None；给了必须是**非空字符串**（否则 fail-closed）。"""
+    if key not in plan or plan[key] is None:
+        return None
+    value = plan[key]
+    if not isinstance(value, str) or not value.strip():
+        raise PerfCollectError(
+            f"perf plan 的 {key} 须为非空字符串路径，得 {value!r}（{type(value).__name__}）——fail-closed")
+    return value.strip()
+
+
+def resolve_plan_dut_lib(plan, *, strict):
+    """据 perf plan 定出**本次 DUT** 的 `libcust_opapi.so` 绝对路径；严格档下定不出即 fail-closed。
+
+    来源链（**只认 plan 显式给的字段，绝不从容器 env 猜**——`ASCEND_CUSTOM_OPP_PATH` /
+    `LD_LIBRARY_PATH` 里可能继承着上次安装的陈旧 vendor，拿它当 DUT 正是要防的假 PASS）：
+
+      1. `dut_lib` —— 本次 build install 出的 `.so` 绝对路径；
+      2. `dut_vendor_root` —— vendor **内容根** → `<root>/op_api/lib/libcust_opapi.so`；
+      3. `vendor_dir` + `vendor_name` —— aclnn_adapter cfg 的已知字段，与其 `_ENV_PREAMBLE` 里
+         `VC="$VROOT/vendors/<name>_nn"` **同口径** → 内容根 → 同 2。
+         （只在 1/2 都没给时才用，不与 1/2 交叉校验：显式声明优先，避免制造假冲突。）
+
+    1 与 2 都给且指向不同文件 → fail-closed，判据复用 `aclnn_runner._resolve_dut_lib`（DUT 唯一性
+    只此一处解释）。严格档定不出 → 抛错并说清 plan 该补什么；**绝不默默退回宽松档**。
+    宽松档（`allow_builtin_symbols=true`，跑 CANN 内置算子的基线场景）定不出 → 返回 None，正常。
+    """
+    from .aclnn_runner import _resolve_dut_lib          # 纯路径推导，无 CANN 依赖
+
+    dut_lib = _plan_str(plan, "dut_lib")
+    vendor_root = _plan_str(plan, "dut_vendor_root")
+    if not dut_lib and not vendor_root:
+        vendor_dir = _plan_str(plan, "vendor_dir")
+        vendor_name = _plan_str(plan, "vendor_name")
+        if vendor_dir and vendor_name:
+            vendor_root = str(Path(vendor_dir) / "vendors" / f"{vendor_name}_nn")
+    resolved = _resolve_dut_lib(dut_lib, vendor_root)
+    if strict and not resolved:
+        raise PerfCollectError(
+            "严格档（perf plan 未开 allow_builtin_symbols）定不出本次 DUT——plan 须给 "
+            "dut_lib=<.../op_api/lib/libcust_opapi.so>，或 dut_vendor_root=<本次 install 的 vendor "
+            "内容根>，或 aclnn_adapter 的 vendor_dir + vendor_name。没有它，性能侧只能证明符号「来自"
+            "某个 custom vendor so」——环境里继承来的**上次**安装产物同样满足 → 旧产物代跑、报假 PASS。"
+            "确要测 CANN 内置算子（无 PR 的基线场景）才在 plan 里写 allow_builtin_symbols: true。")
+    return resolved
+
+
 def range_name_for(case_id, side):
     """MSTX range 名（每 (case, side) 唯一；只含安全字符——case_id 已过 `_check_id`）。"""
     return f"oprunway_perf_{side}_{case_id}"
@@ -1123,6 +1656,13 @@ _CUSTOM_WRAPPER = r'''# OpRunway perf wrapper · custom(ctypes-aclnn) —— 由
 # ⚠ §9.7「下一个待 de-risk」：ctypes runner 侧能否打出 MSTX **尚未实测**（Python/torch 侧才坐实）。
 #   CANN mstx C API 在 tools/mstx/include/mstx/ms_tools_ext.h + lib64/mstx.so；打不出即 rid=0 → 直接抛，
 #   **绝不静默拿整进程 kernel 当测量窗**（§9.7 A：MSTX 的失败是静默的）。
+# ⚠ 洞 2：runner **与精度通路同口径走严格档**（require_custom_vendor），否则会出现
+#   「精度验的是 custom vendor、性能测的是 CANN 内置同名实现」——同一个假 PASS 缺口的性能通路版本。
+#   开关 = cfg 的 strict_custom_vendor（缺省 True；plan 的 allow_builtin_symbols 才关得掉，
+#   对应 aclnn_driver 的 --allow-builtin-symbols）。跑完 close()，别泄 stream/device 上下文。
+# ⚠ 严格档还必须带 cfg 的 dut_lib（= 本次 build install 出的 libcust_opapi.so 绝对路径，由 perf plan
+#   一路传下来）：只证明「来自某个 custom so」拦不住环境里继承来的**上次**安装产物代跑（runner 改动⑪）。
+#   两个开关都**只认真 bool / 非空串**，绝不 bool(...) 宽松转真——"false" 会把硬门悄悄关掉。
 import ctypes, json, sys
 from pathlib import Path
 
@@ -1137,44 +1677,54 @@ case = next(c for c in caseset["cases"] if c["id"] == CFG["case_id"])
 call = D._case_call(case)
 resolver = D._SignatureResolver(op_dir=CFG.get("op_dir"))
 signature = resolver.get(call["symbol"])
-runner = AclnnRunner(device=int(CFG["device"]))
-runner._ensure_init()   # 先建好 device/stream：warmup=0 时 MSTX 也得拿到真 stream，不能圈到 NULL 上
+strict = CFG.get("strict_custom_vendor", True)
+if not isinstance(strict, bool):
+    raise RuntimeError("cfg strict_custom_vendor 须为 JSON 布尔（true/false），得 %r——"
+                       "字符串 \"false\"/\"0\" 一律不接受（宽松真值会把严格档悄悄关掉）" % (strict,))
+dut_lib = CFG.get("dut_lib")
+if strict and not dut_lib:
+    raise RuntimeError("严格档缺 dut_lib——perf plan 须给 dut_lib / dut_vendor_root（或 adapter 的 "
+                       "vendor_dir + vendor_name），否则证明不了测的是本次 build 出的 custom vendor 产物")
+with AclnnRunner(device=int(CFG["device"]), require_custom_vendor=strict,
+                 dut_lib=dut_lib) as runner:
+    runner._ensure_init()   # 先建好 device/stream：warmup=0 时 MSTX 也得拿到真 stream，不能圈到 NULL 上
 
-def invoke():
-    # 每次调用重新组 slots = 重新物化新鲜输入（承 runner form 语义：H2D/D2H 属 runner 固有开销，
-    # 由 kernel 类型白名单排除在 kernel-only 口径之外）。
-    slots = D._build_slots(call, case, CFG["work_dir"])
-    runner.run(call["symbol"], slots, signature=signature)
+    def invoke():
+        # 每次调用重新组 slots = 重新物化新鲜输入（承 runner form 语义：H2D/D2H 属 runner 固有开销，
+        # 由 kernel 类型白名单排除在 kernel-only 口径之外）。
+        slots = D._build_slots(call, case, CFG["work_dir"])
+        runner.run(call["symbol"], slots, signature=signature)
 
-print("%sWARMUP_START" % CFG["marker_phase"], flush=True)
-for _ in range(max(0, int(CFG["warmup"]))):
-    invoke()
-print("%sWARMUP_DONE" % CFG["marker_phase"], flush=True)
-
-mstx = None
-for lib in ("libms_tools_ext.so", "libmstx.so", "mstx.so"):
-    try:
-        mstx = ctypes.CDLL(lib)
-        break
-    except OSError:
-        continue
-if mstx is None:
-    raise RuntimeError("device MSTX library not loadable (libms_tools_ext.so / mstx.so)")
-mstx.mstxRangeStartA.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
-mstx.mstxRangeStartA.restype = ctypes.c_uint64
-mstx.mstxRangeEnd.argtypes = [ctypes.c_uint64]
-mstx.mstxRangeEnd.restype = None
-range_id = mstx.mstxRangeStartA(CFG["range_name"].encode("utf-8"),
-                                ctypes.c_void_p(runner._stream.value if runner._stream else None))
-if not range_id:
-    raise RuntimeError("failed to start device MSTX measurement range (rid=0)")
-print("%sMEASURE_START" % CFG["marker_phase"], flush=True)
-try:
-    for _ in range(max(1, int(CFG["repeat"]))):
+    print("%sWARMUP_START" % CFG["marker_phase"], flush=True)
+    for _ in range(max(0, int(CFG["warmup"]))):
         invoke()
-finally:
-    mstx.mstxRangeEnd(range_id)
-print("%sMEASURE_DONE" % CFG["marker_phase"], flush=True)
+    print("%sWARMUP_DONE" % CFG["marker_phase"], flush=True)
+
+    mstx = None
+    for lib in ("libms_tools_ext.so", "libmstx.so", "mstx.so"):
+        try:
+            mstx = ctypes.CDLL(lib)
+            break
+        except OSError:
+            continue
+    if mstx is None:
+        raise RuntimeError("device MSTX library not loadable (libms_tools_ext.so / mstx.so)")
+    mstx.mstxRangeStartA.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+    mstx.mstxRangeStartA.restype = ctypes.c_uint64
+    mstx.mstxRangeEnd.argtypes = [ctypes.c_uint64]
+    mstx.mstxRangeEnd.restype = None
+    range_id = mstx.mstxRangeStartA(CFG["range_name"].encode("utf-8"),
+                                    ctypes.c_void_p(runner._stream.value if runner._stream else None))
+    if not range_id:
+        raise RuntimeError("failed to start device MSTX measurement range (rid=0)")
+    print("%sMEASURE_START" % CFG["marker_phase"], flush=True)
+    try:
+        for _ in range(max(1, int(CFG["repeat"]))):
+            invoke()
+    finally:
+        mstx.mstxRangeEnd(range_id)
+    print("%sMEASURE_DONE" % CFG["marker_phase"], flush=True)
+# 出 with = runner.close()：销毁自建 stream + reset device 上下文（旧版从不 close，逐 case 泄一条 stream）。
 print(CFG["marker_devices"] + json.dumps(["npu:%d" % int(CFG["device"])]), flush=True)
 '''
 
@@ -1367,6 +1917,7 @@ def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repea
             measurement = {"us": None, "kernel_name": None, "execution_path": None,
                            "breakdown": [], "device_memcpy_only_us": None,
                            "route": None, "observed_task_types": {}, "window_wall_us": None,
+                           "unresolved_task_type_ids": [], "task_type_dict_sources": [],
                            "error": window_err}
         else:
             measurement = parse_kernel_measurement(prof_dir, repeat=repeat,
@@ -1402,11 +1953,16 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
 
         {"op": "<Op>", "warmup": 5, "repeat": 20, "device": 0,
          "op_dir": "<aclnn 头目录>",              # 可选，缺省走 driver 的 env 探测
+         "allow_builtin_symbols": false,          # 可选，缺省 false = 严格档（同精度通路口径）
+         "dut_lib": "<.../op_api/lib/libcust_opapi.so>",   # 本次 DUT；严格档必给其一
+         "dut_vendor_root": "<vendor 内容根>",     #   （或退 adapter 的 vendor_dir + vendor_name）
          "torch_baseline": {"api","positional","keyword"},
          "cases": ["<case id>", ...],             # 已过精度先筛的 case
          "skipped": [{"case_id","reason"}]}
 
     ⚠ `device` **必须显式给**：容器内 `device_count()=16`（§9.7 环境更正），默认 0 就是在猜卡。
+    ⚠ 严格档（缺省）**必须**能定出 DUT（见 :func:`resolve_plan_dut_lib`），定不出即 fail-closed
+      ——性能侧与精度侧同口径钉死「测的就是本次 build 出的那个 so」，不许退回宽松档凑数。
     """
     _require_real_gate()
     caseset = json.loads(Path(caseset_path).read_text(encoding="utf-8"))
@@ -1417,6 +1973,15 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
         raise PerfCollectError(
             "perf plan 缺 device —— 容器内 device_count=16（§9.7），采集卡号不许默认/猜（fail-closed）")
     device = int(plan["device"])
+    # 洞 2：性能侧默认**严格档**，与精度通路（aclnn_driver 默认严格）同口径——否则可能
+    # 「精度验 custom vendor、性能测 CANN 内置同名实现」。plan 的 allow_builtin_symbols
+    # = aclnn_driver 的 --allow-builtin-symbols，同一开关同一语义。
+    # ⚠ 取值走 plan_bool（只认真 bool）——**别退回 `bool(...)`**：plan 里写字符串 "false"/"0"
+    # 会被判成开，硬门就这么静默关了。
+    strict_custom_vendor = not plan_bool(plan, "allow_builtin_symbols")
+    # 严格档还得知道「本次该绑哪个 so」（runner 改动⑪）：DUT 从 plan 一路传到 wrapper 的 CFG，
+    # 再进 AclnnRunner(dut_lib=...)。定不出即 fail-closed，绝不默默用宽松档。
+    dut_lib = resolve_plan_dut_lib(plan, strict=strict_custom_vendor)
     torch_baseline = plan.get("torch_baseline")
     scratch = scratch_dir or tempfile.mkdtemp(prefix="oprunway-perf-")
     records = []
@@ -1426,7 +1991,9 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
             raise PerfCollectError(f"plan 里的 case_id={cid!r} 不在 caseset 中——fail-closed")
         custom = measure_side(side="custom", case=case, caseset_path=caseset_path,
                               work_dir=work_dir,
-                              cfg_extra={"op_dir": plan.get("op_dir")},
+                              cfg_extra={"op_dir": plan.get("op_dir"),
+                                         "strict_custom_vendor": strict_custom_vendor,
+                                         "dut_lib": dut_lib},
                               warmup=warmup, repeat=repeat, device=device,
                               scratch_dir=scratch, detect_hybrid=False)
         baseline = measure_side(side="baseline", case=case, caseset_path=caseset_path,
