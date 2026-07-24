@@ -369,6 +369,123 @@ def _build_value_special(rng, arity, shp, dtn, kind):
     return [one() for _ in range(max(1, arity))]
 
 
+# ============================ value_profile 受控数值生成（借参考仓 generate_array，op-中立）=========
+# 借 `cannbot-ops-input .../common/case_generator.py::generate_array` 的两处**数值生成机制**
+# （**只借机制、不搬整个 case_generator**，且据 spec 的 value_profile 计划驱动、绝非按算子名特判）：
+#   · special_values：nan/±inf **别名映射** + `np.resize` **循环填充**（原文 aliases + np.resize(values,size)）；
+#   · tie：用**小值集循环填充**构造大量重复值 → 归约类算子（median/mode…）命中并列，index 可合法分歧。
+# 这是 op-中立的输入构造：它只据 profile 名产受控数值，不知道也不关心是哪个算子。
+_SPECIAL_ALIASES = {"nan": np.nan, "+inf": np.inf, "inf": np.inf, "-inf": -np.inf}
+_VALUE_PROFILE_KINDS = ("nan", "tie")           # 受控词表（spec.precision.value_profiles 的合法值）
+# value_profile 代表 dtype 的**确定性优先序**（审计 finding #8）：原先写死 `float32`，spec 声明了 profile
+# 但 dtype 集里没有 float32（如只跑 fp16/bf16）就**静默产零条** value_profile 用例——「声明了覆盖、实际没覆盖」
+# 正是本仓最忌的假验收。现在从可用浮点 dtype 里按本序确定性选代表；一个都没有 → fail-closed。
+_VP_DTYPE_PREF = ("float32", "float16", "bfloat16")
+# tie 的**受控值集**：只有 3 个不同值，而 vp shape 的每一维都 ≥4 → 鸽巢原理保证**任意轴**的任意一条
+# 1-D 切片里必有重复值（= 归约类算子必命中并列）。值集大小与最小维长的这个不等式是 tie 成立的依据，
+# 改任一边都要重新验（`_assert_tie_per_axis` 会当场把违约逮出来）。
+_TIE_VALUES = (-1.0, 0.0, 1.0)
+_VP_BASE_DIMS = (4, 6)                          # value_profile 代表 shape 的循环维长（均 > len(_TIE_VALUES)）
+
+
+def _fill_cyclic(values, shape, cdt):
+    """借 generate_array 的 special_values 填充：别名映射（nan/±inf 字符串→np 值）+ `np.resize` 循环铺满 shape。
+    op-中立、确定（值序固定，不吃 rng）。"""
+    mapped = [(_SPECIAL_ALIASES[v] if isinstance(v, str) and v in _SPECIAL_ALIASES else v) for v in values]
+    n = _numel(shape) if shape else 1
+    arr = np.resize(np.asarray(mapped, dtype=np.float32), n).reshape(shape)
+    return arr.astype(cdt)
+
+
+def _make_value_profile(rng, shape, dtn, profile):
+    """value_profile 输入构造（借 generate_array 的 special_values/tie 机制，op-中立、非某算子特判）：
+      · nan：均匀底 + 前 1/4 位置 NaN（既含 NaN 又含常规值 → 归约类可测 NaN 传播、torch_allclose equal_nan 判据）；
+      · tie：小值集循环填充 → 大量重复值/并列（median 偶数长度取 lower-middle、index 可合法分歧 → 压 index_value_consistency）。
+    bf16 造后 round 到 bf16 网格（返回 fp32-on-grid 逻辑值，同 _make_varied）。"""
+    cdt = _compute_np(dtn)
+    if profile == "nan":
+        if precision_policy.is_integer_dtype(dtn):
+            raise ValueError(f"value_profile=nan 不适用于整数 dtype {dtn!r}（整型无 NaN）")
+        x = rng.uniform(-5.0, 5.0, size=shape).astype(np.float32)
+        f = x.reshape(-1)
+        if f.size:
+            f[: max(1, f.size // 4)] = np.float32(np.nan)   # 前 1/4 位 NaN（对齐 generate_array special_values 语义）
+        x = f.reshape(shape)
+        return _bf16_round(x) if dtn == _BF16 else x.astype(cdt)
+    if profile == "tie":
+        x = _fill_cyclic(list(_TIE_VALUES), shape, np.float32)   # 含负/零/正、值集小 → 每轴每切片必有并列
+        x = _bf16_round(x) if dtn == _BF16 else x.astype(cdt)
+        _assert_tie_per_axis(x, dtn)                     # 生成后**逐归约轴**验证：真有重复候选，不只是声明
+        return x
+    raise ValueError(f"未知 value_profile={profile!r}（受控词表 {list(_VALUE_PROFILE_KINDS)}）")
+
+
+def _assert_tie_per_axis(arr, dtn):
+    """tie 用例的**事后核验**（审计 finding #8）：逐归约轴（= 每个轴）检查**每一条** 1-D 切片都含重复值。
+
+    为什么必须核：`_fit_rank` 会给强制项左补 1（如 (4,6)→(1,4,6)），沿 dim=0 归约时每条切片只有 1 个元素、
+    **根本不存在并列**——tie 用例就此退化成普通用例，`index_value_consistency` 那条判据一次也没被压到，
+    但账面上「tie 覆盖」是绿的。声明覆盖 ≠ 形成覆盖，这里当场对账、不成立就 fail-closed。"""
+    a = np.asarray(arr)
+    if a.ndim == 0 or a.size == 0:
+        raise ValueError(f"value_profile=tie 生成了 {a.shape} 的数组（0 维/空）——构造不出并列，fail-closed")
+    for ax in range(a.ndim):
+        if a.shape[ax] < 2:
+            raise ValueError(f"value_profile=tie 的 shape {a.shape} 在轴 {ax} 长度 {a.shape[ax]}<2 —— "
+                             f"该轴归约时每条切片只有 1 个元素、构造不出并列（tie 覆盖名存实亡），fail-closed")
+        m = np.moveaxis(a, ax, -1)
+        s = np.sort(m, axis=-1)
+        has_dup = (np.diff(s, axis=-1) == 0).any(axis=-1)
+        if not bool(np.all(has_dup)):
+            raise ValueError(f"value_profile=tie（dtype={dtn}）在轴 {ax} 上有切片不含重复值 "
+                             f"（shape={a.shape}，{int((~has_dup).sum())} 条切片无并列）—— "
+                             f"tie 未真正形成，fail-closed（值集 {list(_TIE_VALUES)} 与该轴长度不匹配？）")
+
+
+def _pick_vp_dtype(dtypes):
+    """从 spec dtype 集里**确定性**选 value_profile 的代表浮点 dtype（按 `_VP_DTYPE_PREF` 序取首个命中）。
+
+    一个浮点 dtype 都没有 → fail-closed：spec 声明了 value_profiles（nan 需浮点、tie 的并列语义也按浮点
+    见证），却产不出任何 profile 用例 = 声明的覆盖是假的。宁可停下让人改 spec。"""
+    for d in _VP_DTYPE_PREF:
+        if d in dtypes:
+            return d
+    raise ValueError(f"spec 声明了 precision.value_profiles，但 dtype 集 {list(dtypes)} 里没有任何可用浮点 "
+                     f"dtype（候选优先序 {list(_VP_DTYPE_PREF)}）→ 一条 value_profile 用例都产不出。"
+                     f"声明覆盖却产零条 = 假覆盖，fail-closed（请给 spec 补浮点 dtype 或撤掉 value_profiles）")
+
+
+def _vp_shape(ranks):
+    """value_profile 用例的代表 shape：**每一维都取自 `_VP_BASE_DIMS`（均 ≥4）**，保证任意轴都能形成并列。
+
+    ⚠ 不能用旧写法 `_fit_rank((4,6), ranks)`（审计 finding #8）：它是**左补 1**，rank=3 会得到 (1,4,6)，
+    沿 dim=0 归约每条切片只有 1 个元素 → tie 根本不存在。这里改成按目标 rank **循环取基准维长**：
+    rank1→(4,)、rank2→(4,6)、rank3→(4,6,4)、rank4→(4,6,4,6)，全部维长 ≥4 > |_TIE_VALUES|。
+    目标 rank 的选法与 `_fit_rank` 同规则（离基准 rank2 最近、并列取小），故无 rank 约束时仍是 (4,6)、零变更。"""
+    base_rank = len(_VP_BASE_DIMS)
+    if ranks is None:
+        return tuple(_VP_BASE_DIMS)
+    r = min(sorted(ranks), key=lambda x: (abs(x - base_rank), x))
+    if r < 1:
+        raise ValueError(f"value_profile 无法为 rank={r} 构造 shape（须 ≥1），fail-closed")
+    return tuple(_VP_BASE_DIMS[i % len(_VP_BASE_DIMS)] for i in range(r))
+
+
+def _value_profiles(spec):
+    """spec.precision.value_profiles → 受控 profile 列表（去重保序）；缺省 [] = 现行为（不产 value_profile 用例）。
+    非列表/含词表外值 → fail-closed（防伪造 profile 冒充覆盖）。"""
+    raw = (spec.get("precision") or {}).get("value_profiles")
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or any(p not in _VALUE_PROFILE_KINDS for p in raw):
+        raise ValueError(f"precision.value_profiles 须为 {list(_VALUE_PROFILE_KINDS)} 的子集列表，得 {raw!r}")
+    out = []
+    for p in raw:
+        if p not in out:
+            out.append(p)
+    return out
+
+
 def check_spec_capability(in_params):
     """引擎**能力边界**的 spec 级预检——`gen_cases()` 与 `_dry_run()` 共用，故 CP-B 契约自检就能拦住。
 
@@ -415,6 +532,9 @@ def _build_inputs(rng, in_params, shp, dtn, attrs, data_kind):
         return [z for _ in range(max(1, arity))]
     if base in ("inf", "ninf", "nan"):                   # §1.4 特殊值遍历
         return _build_value_special(rng, arity, shp, dtn, base)
+    if base in ("vpnan", "vptie"):                       # value_profile（借 generate_array 的 special_values/tie 机制）
+        profile = "nan" if base == "vpnan" else "tie"
+        return [_make_value_profile(rng, shp, dtn, profile) for _ in range(max(1, arity))]
     if shp == "broadcast":                               # 仅二元：self (4,1) vs other (1,5)
         return [_make_varied(rng, (4, 1), dtn, regime), _make_varied(rng, (1, 5), dtn, regime)]
     if base == "nanpair":                                # nan_pair 同造 a、b
@@ -648,7 +768,13 @@ def _check_attr_value(v, where):
 
     ⚠ **空数组 `[]` 也拒**，且刻意在这里拒（而不是等到部署时）：`repo_adapter._manifest_attr_token` 把
     `list[int]` 编成逗号连接的**单个** token，空数组会编成空串、把后面所有 token 挤错位——它那边已 fail-closed。
-    但 mock 通路不造 manifest，只在那边拦就成了「本机跑得过、上真机才炸」。宁可在造用例时就停。"""
+    但 mock 通路不造 manifest，只在那边拦就成了「本机跑得过、上真机才炸」。宁可在造用例时就停。
+
+    ⚠ **`None` 合法**（2026-07-24 加）：表示「该 attr 省略/取算子的缺省语义」——如 median 的 `dim=None` 即
+    **全局归约**（单输出，vs by-dim 双输出）。这是**据字段**表达可选 attr、op-中立（golden.py/out_shape 自行按
+    `attrs.get(name) is None` 分派），非按算子名。现有 4 算子的 attr_matrix 不含 None → 行为零变更。"""
+    if v is None:
+        return
     if isinstance(v, list):
         if not v:
             raise ValueError(f"{where}=[] 是空数组（manifest 行是空格分隔的扁平 token，空数组编成空串会让"
@@ -1094,6 +1220,23 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
             forced.append(mk(["功能", "精度", "性能"], big_shape, dtn, f"{dk}:uniform",
                              f"wl{ai}", attrs, f"whitelist:{dtn}:a{ai}",
                              "opbase §1.1 必覆盖组合(key×attr×大shape)", ["白名单"]))
+    # ②' value_profile 强制项（据 spec.precision.value_profiles 驱动、op-中立）：借 generate_array 的
+    #     special_values/tie 机制在**代表 dtype × 全部 attr 取值**上各产一条——iterate attr_combos 使
+    #     全局(dim=None,单输出) 与 by-dim(双输出) 都被覆盖，by-dim 的 tie 恰压 index_value_consistency。
+    #     代表 dtype **从可用浮点里确定性选**（`_pick_vp_dtype`，一个都没有→fail-closed，不静默产零条）；
+    #     shape 用 `_vp_shape(ranks)`（每维 ≥4，不走会左补 1 的 `_fit_rank`，否则 tie 名存实亡）。
+    #     现有 4 算子不声明 value_profiles → 整段不执行、零变更（向后兼容硬约束）。
+    vprofiles = _value_profiles(spec)
+    if vprofiles:
+        vp_dtype = _pick_vp_dtype(dtypes)
+        vp_shp = _vp_shape(ranks)
+        for profile in vprofiles:
+            for attrs in attr_combos:
+                ai = combo_idx[_akey(attrs)]
+                forced.append(mk(["功能", "精度"], vp_shp, vp_dtype, f"vp{profile}",
+                                 f"vp{profile}", attrs, f"value_profile:{profile}:a{ai}",
+                                 "torch-baseline §3.② value_profile（nan/tie 数值生成·op-中立·借 generate_array）",
+                                 ["value_profile"]))
     # ③ 常规正交网格（1-wise 采样源）：dtype × shape × 值域 × attr（regime 编进 id_kind 保 case_id 唯一）
     for dtn in dtypes:
         is_key = dtn in KEY_DTYPES
@@ -1140,6 +1283,234 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
     return entries, meta
 
 
+# ============================ 多输出契约扩展（torch 对标 median 见证，op-中立）====================
+# 触发**据 spec 字段、绝非按算子名**：out 参数 >1 或任一 out 参数声明 out_role → 走多输出契约；
+# 否则（现有 4 算子：单 out 参数、无 out_role）走 legacy 单输出通路、caseset 字节零变更（向后兼容硬约束）。
+def _uses_output_contract(spec):
+    """是否走多输出契约（`expected.outputs[]`）——**实现已上提到 precision_policy**（唯一真源）。
+
+    造用例侧（本文件）与裁决侧（validator）必须对「这份 spec 是不是多输出」得出同一个答案：
+    严重#1 的一半就是「走不走多输出路径由 caseset 自报」。上提后两侧共用同一判据、不可能漂移。"""
+    return precision_policy.uses_output_contract(spec)
+
+
+# ── aclnn 调用变体（仅 runner_form=="aclnn_py"；据 spec.call_variants **逐 case 解析**、op-中立）─────
+# 为什么不是「一份 op 级模板」（审计 finding #3）：同一个算子的不同 attr 取值可能对应**不同的 aclnn 符号**
+# 与**不同的实参表**（全局归约 vs 按维归约就是两个 API、两种输出 arity）。原先的 op 级模板让 driver 自己把
+# `dim=None` 兜成 `dim=0` —— 那既不是「全局」的语义，还可能与单输出签名对不上（越界写 / ABI 崩）。
+# 现在改成：**spec 声明式变体表 + gen_cases 逐 case 选中并完全解析**，写进该 case 的 `aclnn_call`；
+# driver 直接执行、不再推断。无匹配变体 → fail-closed，**绝不默认**。
+# 变体是**字段驱动**的（按 attr 取值判），不是按算子名分派——换任意声明了 call_variants 的算子零改即用。
+_ATTR_CTYPE_MAP = {"int64": "int64", "bool": "bool", "float32": "float", "float": "float"}
+
+
+def _attr_ctype(p):
+    """attr 参数的 aclnn 标量 C 类型：int64→"int64"、bool→"bool"、float32/float→"float"。
+
+    ⚠ dtype 候选必须**恰有一个**且在映射表内（审计 finding #5）：原先取 `dt[0]`，`["int64","int8"]` /
+    `["float32","bogus"]` 都被静默收下 —— 而 attr 的 C 标量宽度拼错 = 远端 argtypes 错位 = 段错误。
+    多候选 / 空 / 未知一律 fail-closed（记 gap 交人裁，别静默挑一个）。"""
+    dt = p.get("dtype")
+    if isinstance(dt, (list, tuple)):
+        cands = list(dt)
+        if len(cands) != 1:
+            raise ValueError(
+                f"aclnn_call: attr {p.get('name')!r} 的 dtype 候选 {cands!r} 不唯一"
+                f"（标量 ABI 宽度必须确定，多候选/空一律 fail-closed；请在 spec 收敛成单值或记 gap）")
+        dt = cands[0]
+    if dt not in _ATTR_CTYPE_MAP:
+        raise ValueError(
+            f"aclnn_call: attr {p.get('name')!r} 的 dtype {dt!r} 不支持标量映射"
+            f"（仅 {sorted(_ATTR_CTYPE_MAP)}），fail-closed（记 gap，别静默塞默认）")
+    return _ATTR_CTYPE_MAP[dt]
+
+
+def _spec_out_names(spec):
+    return precision_policy.spec_out_names(spec)
+
+
+def _spec_attr_names(spec):
+    return precision_policy.spec_attr_names(spec)
+
+
+def _call_variants(spec):
+    """读 + 强校 `spec.call_variants`——**实现已上提到 precision_policy.call_variants**（唯一真源）。
+
+    上提理由（严重#1）：「本 case 该有哪些输出」必须由 spec × attrs 派生，裁决侧（stdlib-only 的
+    validator）也要算同一份答案；两处各写一遍必然漂移。"""
+    return precision_policy.call_variants(spec)
+
+
+def _variant_matches(when, attrs):
+    return precision_policy.variant_matches(when, attrs)
+
+
+def _select_call_variant(variants, attrs, cid):
+    """逐 case 选中匹配变体（声明序**首个**匹配者胜）；无匹配 → fail-closed，绝不退默认。"""
+    return precision_policy.select_call_variant(variants, attrs, cid)
+
+
+def _build_aclnn_call(spec, variant, attrs, active_names, cid):
+    """把选中的变体 + 本 case 的 attr 取值**完全解析**成该 case 的 `aclnn_call`（driver 直接执行、不再推断）。
+
+    slots 顺序 = spec.params 顺序 = aclnn 签名顺序（穿插的标量属性据此保位，ctypes runner 才拼得对 argtypes）。
+    每个 slot 都带 `name`（供与 header 签名逐项对账）：
+      · `{"role":"in","name":..,"input_idx":i}`      —— 第 i 个 case 输入；
+      · `{"role":"attr","name":..,"ctype":..,"value":..}` —— 已解析的标量实参（**None 一律 fail-closed**）；
+      · `{"role":"out","name":..,"output_idx":k}`    —— 对应 expected.outputs[k]；
+      · `{"role":"out_null","name":..}`              —— 该变体不落地此输出 → 传 NULL、不回读。
+    """
+    out_pos = {n: k for k, n in enumerate(active_names)}
+    slots, in_i = [], 0
+    for p in spec.get("params", []):
+        if not isinstance(p, dict):
+            raise ValueError(f"{cid}: 非法 param 条目 {p!r}")
+        io, name = p.get("io"), p.get("name")
+        if io == "in":
+            slots.append({"role": "in", "name": name, "input_idx": in_i})
+            in_i += 1
+        elif io == "attr":
+            if name not in variant["active_attrs"]:
+                continue                                 # 该变体签名里没有这个标量槽（如全局 API 无 dim/keepdim）
+            value = variant["attrs"][name] if name in variant["attrs"] else attrs.get(name)
+            if value is None:
+                raise ValueError(
+                    f"{cid}: 变体 {variant['symbol']!r} 的 attr {name!r} 取值为 None —— "
+                    f"**绝不静默转标量默认值**（那既不是该 case 的语义、又可能与签名不符）。"
+                    f"请在 spec 的该变体里显式声明 attrs.{name}，或把它移出 active_attrs（换用无此形参的变体），"
+                    f"fail-closed")
+            slots.append({"role": "attr", "name": name, "ctype": _attr_ctype(p), "value": value})
+        elif io == "out":
+            if name in out_pos:
+                slots.append({"role": "out", "name": name, "output_idx": out_pos[name]})
+            else:
+                slots.append({"role": "out_null", "name": name})
+        else:
+            raise ValueError(f"{cid}: param {name!r} 的 io {io!r} 未知（须 in/attr/out）")
+    return {"symbol": variant["symbol"], "slots": slots}
+
+
+def _normalize_golden_outputs(golden):
+    """golden_fn 返回值 → **数组列表**：tuple/list→list（多输出）；单数组→[数组]（单输出）。
+    多输出算子的某些 case 可能只出前缀个输出（如全局 median 只出 values、无 indices）→ 列表随之变短。"""
+    if isinstance(golden, (tuple, list)):
+        return [np.asarray(g) for g in golden]
+    return [np.asarray(golden)]
+
+
+def _tolerance_source(spec):
+    """spec.precision.tolerance_source（torch_allclose 容差权威来源；仅 torch 对标场景用，缺=None）。"""
+    return (spec.get("precision") or {}).get("tolerance_source")
+
+
+def _mo_taskdoc_tol(spec):
+    """spec.precision.taskdoc_tol → (rtol, atol)（仅 tolerance_source==taskdoc 时用）；缺/畸形→None（下游 fail-closed）。"""
+    t = (spec.get("precision") or {}).get("taskdoc_tol")
+    if isinstance(t, (list, tuple)) and len(t) == 2:
+        return (t[0], t[1])
+    return None
+
+
+def _save_inputs_multi(cdir, cid, inputs, in_params, dtn):
+    """多输出通路存输入（与 legacy 单输出**同口径**：bf16→uint16 位模式 + storage_dtype，其余原生）。"""
+    items = []
+    for j, x_logical in enumerate(inputs):
+        if dtn == _BF16:                                 # 物理 = 从逻辑单独 encode 出的 uint16 位模式
+            x_bin = _f32_to_bf16_uint16(x_logical)
+            if x_bin.size and np.shares_memory(x_bin, x_logical):
+                raise ValueError(f"{cid}: bf16 X_bin 与 X_logical 共享内存（违 layout 字节契约 职责#2）")
+        else:
+            x_bin = np.ascontiguousarray(x_logical, dtype=_storage_np(dtn))
+        np.save(os.path.join(cdir, f"x{j + 1}.npy"), x_bin)
+        item = {"name": in_params[j]["name"], "shape": list(np.asarray(x_logical).shape),
+                "dtype": dtn, "path": f"{cid}/x{j + 1}.npy"}
+        if dtn == _BF16:
+            item["storage_dtype"] = _storage_name(dtn)
+        items.append(item)
+    return items
+
+
+def _active_output_names(spec, variant, cid):
+    """本 case **真正落地**的输出名——**实现已上提到 precision_policy**（与裁决侧共用唯一真源）。"""
+    return precision_policy.active_output_names_for_variant(spec, variant, cid)
+
+
+def _build_multi_output_case(spec, op, cid, cdir, entry, inputs, in_params, dtn, attrs, dims,
+                             vmode, golden_fn, out_shape_fn, golden_source, tier,
+                             spec_standard, tol_src, tol_tuple, active_names):
+    """多输出契约（torch 对标 median 见证）：golden_fn 返回 tuple → 逐输出 `np.save(golden_{k}.npy)`、
+    逐输出 out_shape 对账、据 spec **op-中立**派生每输出判据契约（`derive_output_contracts`：只据 out_role/
+    index_of/dtype 字段，绝无算子名分支）→ `expected.outputs[]`。
+
+    ⚠ **输出数量与身份严格绑 spec**（审计 finding #4）：本 case 落地哪些输出由 `active_names`（spec 的
+    `call_variants.active_outputs`，无变体则全部 out 参数）**声明**，golden_fn 返回数必须**恰好相等**——
+    不再接受「更短的前缀」（by-dim 漏 indices 会整条丢掉 index 验证链却一路绿）。每个 outputs[] 条目保存
+    `index`+`name`+`role` 三者，下游按三元组交叉核验、换序当场可见。"""
+    if entry["id_kind"] == "empty":
+        raise ValueError(f"{cid}: 多输出契约暂不支持空 Tensor 用例（median 等归约类 numel==0 非法、"
+                         f"spec 应设 allow_empty_tensor:false）——fail-closed，不为多输出空 case 编造语义")
+    gouts = _normalize_golden_outputs(golden_fn(inputs, attrs))   # [values(, indices)]，长度随 case 分派
+    if not gouts:
+        raise ValueError(f"{cid}: golden_fn 未返回任何输出（多输出契约至少 1 个）")
+    declared = None                                      # value/index 归约后同形 → 共用一个声明形状
+    if out_shape_fn is not None:
+        declared = _declared_out_shape(out_shape_fn, inputs, attrs, cid)
+        out_shape_source = "golden.out_shape"
+    else:
+        out_shape_source = "golden_fn_actual"            # 未导出 → 用实测、不跨校（多输出归约应导出 out_shape）
+    # 据 spec 逐输出派生 canonical 判据契约（op-中立）。按 spec out-param 顺序 → 转 name 索引，按身份取。
+    case_in_dts = [(p["name"], dtn) for p in in_params]
+    contracts = precision_policy.derive_output_contracts(spec, case_in_dts, spec_standard, tol_src, tol_tuple)
+    # acceptance 层（任务书验收口径，可选）逐输出 canonical——spec 声明了就必须随 case 落盘，
+    # 否则 validator 那边「spec 声明 acceptance 却在 caseset 里找不到」会 fail-closed（审计 finding #2）。
+    acc_contracts = precision_policy.derive_acceptance_contracts(spec, contracts)
+    by_name = {c["name"]: c for c in contracts}
+    acc_by_name = ({c["name"]: acc_contracts[i] for i, c in enumerate(contracts)}
+                   if acc_contracts is not None else {})
+    if len(gouts) != len(active_names):
+        raise ValueError(f"{cid}: golden_fn 返回 {len(gouts)} 个输出 ≠ spec 声明本 case 落地的 "
+                         f"{len(active_names)} 个输出 {active_names}（数量严格相等，**不接受更短的前缀**——"
+                         f"漏一个输出就少一整条判据链，fail-closed；attrs={attrs}）")
+    out_items = []
+    for k, arr in enumerate(gouts):
+        arr = np.asarray(arr)
+        name = active_names[k]                           # 身份由 spec 声明的落地序给，不由 golden 返回序反推
+        ct = by_name[name]
+        actual_shape = tuple(int(d) for d in arr.shape)
+        if declared is not None and actual_shape != declared:
+            raise ValueError(f"{cid}: 输出#{k}({name}/{ct['role']}) 实测形状 {actual_shape} ≠ out_shape() "
+                             f"声明 {declared}（value/index 归约后同形；声明与实现打架，fail-closed；attrs={attrs}）")
+        _gdt = np.int64 if ct["role"] == "index" else _compute_np(ct["dtype"])  # index 恒 int64；value 按 compare dtype
+        # ⚠ np.ascontiguousarray 会把 0-d 标量**提成 (1,)**（强制 ndim≥1）——全局归约(median 全局)输出是 0-d，
+        #   直接存会让落盘 npy 形状 ≠ 记录的 out_shape。故 ascontiguousarray 后 reshape 回 actual_shape（元素数不变、恒合法）。
+        gsave = np.ascontiguousarray(np.asarray(arr, dtype=_gdt)).reshape(actual_shape)
+        np.save(os.path.join(cdir, f"golden_{k}.npy"), gsave)
+        item = {"index": k, "name": name, "role": ct["role"],
+                "golden_path": f"{cid}/golden_{k}.npy", "golden_tier": tier,
+                "out_shape": list(actual_shape), "out_shape_source": out_shape_source,
+                "compare": ct["policy"]["kind"], "compare_dtype": ct["dtype"],
+                "standard": ct["standard"], "tolerance_policy_id": ct["tolerance_policy_id"],
+                "policy": ct["policy"], "threshold": precision_policy.threshold_digest(ct["policy"])}
+        if ct.get("index_of") is not None:               # index 输出：所引 value 输出名（同 spec 的 index_of 字段）
+            item["index_of"] = ct["index_of"]
+        out_items.append(item)
+    # 收口自检：(index, name, role) 三元组必须与 spec 声明逐项一致——身份/顺序任一被动过都在这里现形。
+    if [(o["index"], o["name"]) for o in out_items] != list(enumerate(active_names)):
+        raise ValueError(f"{cid}: outputs[] 的 (index,name) {[(o['index'], o['name']) for o in out_items]}"
+                         f" ≠ spec 声明落地序 {list(enumerate(active_names))}（换序/错配，fail-closed）")
+    for o in out_items:
+        if o["role"] != by_name[o["name"]]["role"]:
+            raise ValueError(f"{cid}: 输出 {o['name']!r} 的 role {o['role']!r} ≠ spec out_role "
+                             f"{by_name[o['name']]['role']!r}（身份三元组不自洽，fail-closed）")
+    in_items = _save_inputs_multi(cdir, cid, inputs, in_params, dtn)
+    expected = {"golden_source": golden_source, "golden_tier": tier, "verify_mode": vmode,
+                "outputs": out_items, "case_origin": entry["case_origin"], "rule_ref": entry["rule_ref"]}
+    if entry.get("cost_scaled"):                         # G4：该 case 被降过规模 → 随 case 一起如实留痕
+        expected["cost_scaled"] = entry["cost_scaled"]
+    return {"id": cid, "dims": dims, "tags": entry["tags"],
+            "inputs": in_items, "attrs": attrs, "expected": expected}
+
+
 def gen_cases(spec, work_dir):
     op = spec["op"]
     # golden 按算子从用户侧 <ops_root>/<op>/golden.py 加载（elementwise 通路不内置 golden 值、缺则 fail-closed；
@@ -1170,6 +1541,20 @@ def gen_cases(spec, work_dir):
     if isinstance(case_target, bool) or not isinstance(case_target, int) or case_target < 1:
         raise ValueError(f"precision.case_target 须为 ≥1 的整数（防零用例空跑冒充验收），得 {case_target!r}")
 
+    # 多输出契约触发（据 spec 字段、op-中立）+ torch_allclose 容差分源参数（仅 torch 对标场景用）。
+    uses_multi = _uses_output_contract(spec)
+    tol_src = _tolerance_source(spec)
+    tol_tuple = _mo_taskdoc_tol(spec)
+    # aclnn 调用变体（finding #3）：`runner_form=="aclnn_py"` 的 caseset 每个 case 自带**完全解析好**的
+    # `aclnn_call`，driver 不再自己推变体。变体表必填——没它就只能靠 driver 兜默认值，而兜出来的
+    # `dim=0` 既不是全局语义、又可能与单输出签名不符（越界写 / ABI 崩）。
+    variants = _call_variants(spec)
+    needs_aclnn_call = spec.get("runner_form") == "aclnn_py"
+    if needs_aclnn_call and not variants:
+        raise ValueError(f"{op}: runner_form=='aclnn_py' 但 spec 未声明 call_variants —— "
+                         f"aclnn 调用形态（符号/实参表/落地输出）必须由 spec 显式声明、逐 case 解析，"
+                         f"不许下游兜默认值，fail-closed")
+
     # G4：据 C1 的 out_shape 造生成期规模预算的 cost 模型（未导出 out_shape → 按输入广播形状 = elementwise）。
     cost_fn = _make_cost_fn(in_params, out_shape_fn)
     entries, plan_meta = _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=cost_fn,
@@ -1184,6 +1569,18 @@ def gen_cases(spec, work_dir):
         case_rng = _case_rng(cid)                        # per-case 独立种子（数据只依赖稳定 cid，评审 #7）
 
         inputs = _build_inputs(case_rng, in_params, shp, dtn, attrs, data_kind)  # 逻辑数组（compute dtype）
+        # 逐 case 选中调用变体（无变体声明 → None；有声明但无匹配 → fail-closed，绝不退默认）。
+        variant = _select_call_variant(variants, attrs, cid) if variants else None
+        if uses_multi:                                   # 多输出契约（torch 对标 median）：全程 op-中立据字段
+            case = _build_multi_output_case(
+                spec, op, cid, cdir, entry, inputs, in_params, dtn, attrs, dims, vmode,
+                golden_fn, out_shape_fn, golden_source, _tier, spec_standard, tol_src, tol_tuple,
+                _active_output_names(spec, variant, cid))
+            if needs_aclnn_call:                         # 该 case **完全解析好**的调用（driver 直接执行）
+                case["aclnn_call"] = _build_aclnn_call(
+                    spec, variant, attrs, [o["name"] for o in case["expected"]["outputs"]], cid)
+            cases.append(case)
+            continue
         golden = golden_fn(inputs, attrs)                # 用逻辑输入算 golden
         # C1：算子声明了 out_shape → **与 golden_fn 实际返回的形状对账**，不一致即 fail-closed。
         # 两者打架时既不信声明也不信实测：下游 runner 按 caseset 的形状收发、validator 按 golden 判，
@@ -1235,8 +1632,12 @@ def gen_cases(spec, work_dir):
                               "note": "空Tensor 功能用例（numel=0，无精度判定，validator→na）"}
             if entry.get("cost_scaled"):                 # G4：该 case 被降过规模 → 随 case 一起如实留痕
                 empty_expected["cost_scaled"] = entry["cost_scaled"]
-            cases.append({"id": cid, "dims": dims, "tags": entry["tags"], "inputs": in_items,
-                          "attrs": attrs, "expected": empty_expected})
+            empty_case = {"id": cid, "dims": dims, "tags": entry["tags"], "inputs": in_items,
+                          "attrs": attrs, "expected": empty_expected}
+            if needs_aclnn_call:                         # legacy 单输出 + aclnn_py：同样逐 case 解析调用
+                empty_case["aclnn_call"] = _build_aclnn_call(
+                    spec, variant, attrs, _active_output_names(spec, variant, cid), cid)
+            cases.append(empty_case)
             continue
 
         # finding #11：裸 assert 被 python -O 剥离 → 改 raise，任何优化级别都生效（防 -O 下静默产坏 caseset）。
@@ -1309,15 +1710,19 @@ def gen_cases(spec, work_dir):
             if has_storage:                              # 仅物理≠逻辑时带 storage_dtype（native 保向后兼容）
                 item["storage_dtype"] = _storage_name(dtn)
             in_items.append(item)
-        cases.append({"id": cid, "dims": dims, "tags": entry["tags"],
-                      "inputs": in_items, "attrs": attrs, "expected": expected})
+        legacy_case = {"id": cid, "dims": dims, "tags": entry["tags"],
+                       "inputs": in_items, "attrs": attrs, "expected": expected}
+        if needs_aclnn_call:                             # legacy 单输出 + aclnn_py：同样逐 case 解析调用
+            legacy_case["aclnn_call"] = _build_aclnn_call(
+                spec, variant, attrs, _active_output_names(spec, variant, cid), cid)
+        cases.append(legacy_case)
     attr_order = [p["name"] for p in spec["params"] if p["io"] == "attr"]
     # Q7 dtype 覆盖门用：dtype_required=任务书权威全集（spec 透传，未声明则 None→门不阻塞）；
     # dtype_tested=实测子集，**从实际生成的 cases 归并**（非 in 参数并集——门也用真实 cases 对账，两侧口径一致、
     # 消除「并集过报」与「自报漂移」）；task_pr_gaps 透传供门查 dtype_deferred。
     dtype_tested = sorted({c["inputs"][0]["dtype"] for c in cases
                            if c.get("inputs") and c["inputs"][0].get("dtype")})
-    return {"op": op, "spec_ref": spec.get("op"), "work_dir": work_dir,
+    caseset = {"op": op, "spec_ref": spec.get("op"), "work_dir": work_dir,
             "attr_order": attr_order,
             "dtype_required": spec.get("dtype_required"),
             "dtype_tested": dtype_tested,
@@ -1332,6 +1737,10 @@ def gen_cases(spec, work_dir):
             # 报告侧读这里就能说清「大 shape 是降规模后覆盖的 / 哪些规模根本没跑」，不靠猜。
             "golden_cost": plan_meta["golden_cost"],
             "cases": cases}
+    # ⚠ 原先这里挂一份 **op 级** `aclnn_call_template`，由 driver 自己按 case 兜变体（`dim=None`→`dim=0`）——
+    # 已被 finding #3 判为不合规并**整体替换**：调用形态现在逐 case 解析、写在 `case["aclnn_call"]` 里。
+    # 其它 runner_form（含缺省=cpp）零变更、caseset 字节不动（向后兼容硬约束：现有 4 算子不破）。
+    return caseset
 
 
 def _dry_run(spec):

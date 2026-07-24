@@ -31,14 +31,88 @@ _DEV_SUMMARY_FILE = "dev_run_summary.json"     # ← 取代 acceptance.json
 _DEV_VERDICT_FILE = "dev_precision_check.json"  # ← 取代 verdict.json
 _ACCEPTANCE_FILES = ("acceptance.json", "verdict.json")
 _DEV_FILES = (_DEV_SUMMARY_FILE, _DEV_VERDICT_FILE)
-_REAL_MACHINE_MODE = "new_example"      # 唯一可能产验收裁决的通路（真 NPU 证据）
+# 可能产验收裁决的**真机通路**集合：new_example（cpp runner v1）+ aclnn_py（ctypes-aclnn runner form，
+# torch 对标 median 见证）。两者都产真 NPU 证据（evidence_grade=acceptance_candidate）。按**能力/形态**扩，
+# 非按算子身份——aclnn_py 无 per-op runner 源、op 工程即 DUT（蓝图 §6）。
+_REAL_MACHINE_MODES = frozenset({"new_example", "aclnn_py"})
+_REAL_MACHINE_MODE = "new_example"      # new_example 专属预检（_ne_cfg）用；aclnn_py 有自己的 _aclnn_cfg
+
+# —— 验收通路的性能基线：**只认真数、禁 mock 兜底**（codex High#2）——————————————————————
+# 病历：aclnn_py 的 evidence `perf.us=None`（采集端第二里程碑未接）、也不产 `_real_baseline.json`，
+# 于是原来的 `else:` 一路落进 `perf_compare.mock_baseline()`——**mock 基线混进验收通路**。
+# mock 基线 = 「NPU mock us × 1.08」编出来的数，拿它算出的 ratio 天然 ≥1、天然「达标」；
+# 而 aclnn_py 是验收通路，会物理写出 acceptance.json——那就是一份**冒充达标**的验收裁决。
+# 现在：验收通路缺真实基线一律挂起 `blocked_wait_real_baseline`（非 fail、非 pass），绝不兜底。
+_BLOCKED_WAIT_REAL_BASELINE = "blocked_wait_real_baseline"
+_BLOCKED_WAIT_REAL_BASELINE_STATE = "BLOCKED_WAIT_REAL_BASELINE"
+# 真实基线的**来源 → 取数**登记表：按 `spec.perf.baseline` 这个**字段**分派（承律令#0，非按算子身份；
+# median 只是当前唯一见证）。每项 = (work 下的产物文件名, 解析函数)。采集端把真数落成该文件本函数才认；
+# 文件不在 = 采集端未接通 → 挂起。**新增来源在这里加一行即可，无需改判定逻辑。**
+# 注：`tbe`（new_example 通路）不在此表——它的真基线由 `run_on_npu.sh` 直接落成 `_real_baseline.json`，
+#     由下方更早的那个分支消费；此表只登记「需要专门解析器」的来源。
+_REAL_BASELINE_SOURCES = {
+    # torch 对标场景：torch_npu 上同算子的 kernel-only 耗时（真机内基线、非 GPU 外部数据）。
+    "torch_npu": ("_torch_npu_baseline.json", lambda p: repo_adapter.parse_torch_npu_baseline(p)),
+}
+
+
+# —— 性能采集计划：spec.perf → `work/_perf_plan.json`（采集端按字段读，**非按算子身份**）——————
+# 为什么走文件：`repo_adapter.MODES[mode](caseset, work)` 的统一签名里没有 spec，而基线侧要跑的
+# torch reference 只有 spec 说得清（`perf.torch_baseline` 的 slot-name → torch 形参映射）。
+# 落成 work 下的一份数据，与 `_real_baseline.json` 同一种流法；不认识这份计划的 mode 一律无视它。
+_PERF_PLAN_FILE = "_perf_plan.json"
+#: 采集计划里**可透传的字段白名单**——只搬 spec.perf 里与「怎么采」有关的项，
+#: 绝不把 `target_ratio` 这类**判据**字段带进采集端（判定归 perf_compare，采集端不许看见阈值）。
+_PERF_PLAN_KEYS = ("warmup", "repeat", "torch_baseline", "op_dir")
+
+
+def _emit_perf_plan(spec, work):
+    """据 `spec.perf` 落 `work/_perf_plan.json`；spec 没声明可采集的基线 → 不落（= 本次不采性能）。
+
+    触发条件 = `perf.baseline` 在真实基线取数登记表里**且**该来源需要采集端配合（当前 `torch_npu`）。
+    ⚠ 这里**不**做「能不能采」的判断（那是采集端的事），也**不**写任何阈值——计划只回答「采什么、怎么采」。
+    """
+    perf = spec.get("perf") or {}
+    if perf.get("baseline") not in _REAL_BASELINE_SOURCES:
+        return None
+    plan = {k: perf[k] for k in _PERF_PLAN_KEYS if perf.get(k) is not None}
+    plan["baseline"] = perf["baseline"]
+    plan["op"] = spec.get("op")
+    path = os.path.join(work, _PERF_PLAN_FILE)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(plan, f, ensure_ascii=False, indent=2)
+    print(f"[Task2 perf] 采集计划 → {_PERF_PLAN_FILE}（baseline={plan['baseline']}，"
+          f"torch_baseline={'有' if plan.get('torch_baseline') else '**缺**（采集端将 fail-closed）'}）")
+    return path
+
+
+def _real_baseline_or_blocked(spec, work):
+    """验收通路取性能基线：**真数或挂起，二选一，没有第三条路**。返回 `(baseline|None, blocked_status|None)`。
+
+    ⚠ 本函数**永远不会**返回 mock 基线——这正是它存在的理由。缺真数时返回 `(None, blocked_wait_real_baseline)`，
+    由 perf_compare 落成正规挂起态、run_workflow 映射成 `BLOCKED_WAIT_REAL_BASELINE`（exit≠0）。
+    """
+    src = (spec.get("perf") or {}).get("baseline")
+    entry = _REAL_BASELINE_SOURCES.get(src)
+    if entry is None:
+        print(f"[Task3] ⚠ 验收通路缺真实基线：spec.perf.baseline={src!r} 未在真实基线取数登记表 "
+              f"{sorted(_REAL_BASELINE_SOURCES)} 中，且 work/_real_baseline.json 不存在 → 挂起"
+              f"（**不 mock 兜底**：mock 基线在验收通路上等于冒充达标）")
+        return None, _BLOCKED_WAIT_REAL_BASELINE
+    fname, parse = entry
+    path = os.path.join(work, fname)
+    if not os.path.exists(path):
+        print(f"[Task3] ⚠ 验收通路缺真实基线：{src} 采集端未接通（缺 work/{fname}）→ 挂起"
+              f"（**不 mock 兜底**）")
+        return None, _BLOCKED_WAIT_REAL_BASELINE
+    return parse(path), None
 
 
 def _acceptance_capable(mode):
-    """本模式**是否可能**产出验收裁决。**fail-closed**：只有真机通路算数，
+    """本模式**是否可能**产出验收裁决。**fail-closed**：只有真机通路（_REAL_MACHINE_MODES）算数，
     其余（mock / catlass_mock / 日后新增的任何模式）默认一律按非验收对待——
     新增模式忘了登记时的失败方向是「少产一份裁决」，而不是「多产一份假裁决」。"""
-    return mode == _REAL_MACHINE_MODE
+    return mode in _REAL_MACHINE_MODES
 
 
 def _stamp_dev(obj, is_acceptance, grade):
@@ -64,6 +138,8 @@ _STATE_MAP = {
     "BLOCKED_GOLDEN_UNAUTHORIZED": "BLOCKED_GOLDEN_UNAUTHORIZED",  # 批 5：golden 授权核不实
 
     "BLOCKED_WAIT_GPU_BENCHMARK": "BLOCKED_WAIT_GPU_BENCHMARK",
+    # High#2：验收通路缺真实基线（采集端未接通）→ 正规挂起，**不是** fail、更**不是** pass。
+    _BLOCKED_WAIT_REAL_BASELINE_STATE: _BLOCKED_WAIT_REAL_BASELINE_STATE,
     "BLOCKED_INCOMPARABLE_TIMING_SCOPE": "BLOCKED_INCOMPARABLE_TIMING_SCOPE",
     "BLOCKED_GPU_BASELINE_INVALID": "BLOCKED_GPU_BASELINE_INVALID",  # gb-9：标杆被判废（非缺标杆）
 }
@@ -80,6 +156,11 @@ def _canonical_state(overall, ps):
         return "BLOCKED_GPU_BASELINE_INVALID"
     if st == "blocked_wait_gpu_benchmark":
         return "BLOCKED_WAIT_GPU_BENCHMARK"
+    if st == _BLOCKED_WAIT_REAL_BASELINE:
+        # High#2：门也可能因「挂起态下 NPU 侧计时缺失」而 FAILED（perf 采集端整条未接通时正是如此）。
+        # 那种情况 overall 是笼统的 BLOCKED(验收门未过)，这里据 perf status 细化出机读 canonical 出口，
+        # 免得「等真实基线」被读成「证据破损」。
+        return _BLOCKED_WAIT_REAL_BASELINE_STATE
     if isinstance(overall, str) and overall.startswith("性能未达成"):
         return "FAILED_PERFORMANCE"
     if isinstance(overall, str) and overall.startswith("BLOCKED"):
@@ -141,7 +222,11 @@ def run(spec_path, mode="new_example", out_dir="reports/_run", defect=None, perf
     print(f"=== OpRunway workflow · {spec['op']} · mode={mode} ===")
     if not is_acceptance:
         print(f"=== ⚠ {_NON_ACCEPTANCE_NOTE} ===")
-    for stale in ("_real_baseline.json", "perf_result.txt"):  # 清上轮残留，防 stale 真基线被复用
+    # 清上轮残留，防 stale 真基线被复用。`_torch_npu_baseline.json` / `perf_collect.json` / `_perf_plan.json`
+    # 同理必清：本轮若性能没采成，留在 work 里的上一轮基线会被 `_real_baseline_or_blocked` 当成本轮真数读走
+    # ——那正是「用旧数冒充这次达标」，比缺基线挂起坏得多。
+    for stale in ("_real_baseline.json", "perf_result.txt", "_torch_npu_baseline.json",
+                  "perf_collect.json", "_perf_plan.json", "_aclnn_perf_plan_sent.json"):
         sp = os.path.join(work, stale)
         if os.path.exists(sp):
             os.remove(sp)
@@ -163,6 +248,7 @@ def run(spec_path, mode="new_example", out_dir="reports/_run", defect=None, perf
     caseset = gen_cases.gen_cases(spec, work)
     _dump(caseset, "caseset.json")
     print(f"[Task1 gen_cases] {len(caseset['cases'])} 用例")
+    _emit_perf_plan(spec, work)
     # Task 2
     # defect 只在测试夹具下非 None；平时**不传该 kwarg**，让 adapter 侧的签名怎么演化都不影响生产路径。
     evidence = (repo_adapter.MODES[mode](caseset, work, defect_cases=defect) if defect
@@ -230,8 +316,14 @@ def run(spec_path, mode="new_example", out_dir="reports/_run", defect=None, perf
             baseline = json.load(open(real_bl, encoding="utf-8"))
         elif expect_gpu:  # 期待 GPU 标杆但没给 → 正规挂起（perf_compare 产 blocked_wait_gpu_benchmark）
             baseline = None
-        else:
+        elif not is_acceptance:
+            # 非验收通路（mock / catlass_mock / 被 adapter 降级的任何一轮）：mock 基线仍可用——
+            # 这条路**物理上不写** acceptance.json / verdict.json，且 perf_compare + _stamp_dev 会给
+            # 报告打 NON-ACCEPTANCE 戳，「达标」不可能被当成验收结论。
             baseline = perf_compare.mock_baseline(spec, evidence, slow_cases=perf_slow)
+        else:
+            # ★ High#2：**验收通路禁 mock 兜底**。真数或挂起，二选一（详见 _real_baseline_or_blocked）。
+            baseline, baseline_blocked_status = _real_baseline_or_blocked(spec, work)
         if baseline is not None:
             _dump(baseline, "baseline.json")
         report = perf_compare.perf_compare(spec, caseset, evidence, baseline, expect_source=expect_source,
@@ -286,7 +378,7 @@ def run(spec_path, mode="new_example", out_dir="reports/_run", defect=None, perf
     runner_source = evidence.get("runner_source")
     if not gate_passed:
         overall = "BLOCKED(验收门未过)" if is_acceptance else "BLOCKED(管路自检未过)"
-    elif mode == "new_example" and runner_source != "user":
+    elif mode in _REAL_MACHINE_MODES and runner_source != "user":
         overall = f"BLOCKED(runner_source 非 user/缺失: {runner_source!r})"
     elif prec == "blocked_golden_unauthorized":
         # 批 5：真值来路不明 → 无从得出结论。**不能报成 FAIL(精度)**——那会让人去查算子、查错方向。
@@ -306,6 +398,8 @@ def run(spec_path, mode="new_example", out_dir="reports/_run", defect=None, perf
             overall = "BLOCKED_INCOMPARABLE_TIMING_SCOPE"
         elif st == "blocked_gpu_baseline_invalid":       # gb-9 外部 GPU 标杆有硬错被判废（≠缺标杆）
             overall = "BLOCKED_GPU_BASELINE_INVALID"
+        elif st == _BLOCKED_WAIT_REAL_BASELINE:          # High#2 验收通路缺真实基线：正规挂起、非 fail 非 pass
+            overall = _BLOCKED_WAIT_REAL_BASELINE_STATE
         elif ps.get("perf_cases"):
             overall = f"性能未达成({st})"
         elif spec.get("perf", {}).get("baseline"):

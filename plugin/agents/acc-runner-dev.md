@@ -27,6 +27,7 @@ tools: Bash, Read, Write, Edit, Skill
 
 | 情形 | 处置 |
 |---|---|
+| **`spec.runner_form == "aclnn_py"`（torch 对标 · ctypes-aclnn runner form）** | ✅ **放行、但本 agent 不产 runner**：此形态**无 per-op runner 源**（op 工程即 DUT，`aclnn_runtime` ctypes runner op-中立、从 header 推 arity）→ **不生成 `oprunway_<op>_runner.cpp`、无 verify_runner 环**。scope gate 只校 **ops-<族>仓形态**（**仓根** `build.sh` + `<op_subdir>/op_host/` + `<op_subdir>/op_api/aclnn_*.h`（剔 `*_impl.h`）；由 `aclnn_adapter.find_aclnn_project` 复核 + 逐段软链守卫）。⚠ **不要求 per-op `build.sh`、不要求 `op_graph/`**——2026-07-24 实测坐实 ops-nn 实验算子（PR6429 median）二者皆无、build 走**仓根** `build.sh --pkg --experimental --ops=<op>`（见 `doc/oprunway-torch-baseline-design.md` §9.4/§9.6）；缺件 / 非标准两段式 / 有 opaque descriptor → ⛔ **BLOCKED**「不支持的接口能力」（域内假设：无状态 / 标准 aclnn 两段式 / 无 opaque descriptor）。过 gate → 回「无 runner 源、op 工程即 DUT、进 CP-D `--mode aclnn_py`」摘要，**不硬塞**。dtype 白名单据 form 放开 int/bf16（`repo_adapter.supported_np("aclnn_py")`），故本表下方「dtype 超范围 → BLOCKED」那行**不适用 aclnn_py** |
 | `experimental/math/<op>`（is_close/sign/equal 类）+ dtype ∈ {float32, float16} | ✅ 在范围内，进 `gen_runner` |
 | 同上但含 **bfloat16** | ⚠ runner 侧**有** bf16 分支（`repo_adapter._NP` 含 `bfloat16`、样例 runner 有 `ACL_BF16` 分派），但**真机 kernel 支持须逐算子确认**——**无该算子的真机证据 → 按 deferred 处理、不进 `params.dtype`**，别当已支持 |
 | **换构建体系**（catlass 的 `scripts/build.sh <example>`）/ **换接口形态**（非 aclnn 两段式）/ 双实现 | ⛔ 返回 **BLOCKED**、记 gap、**转 P3**（按 `doc/oprunway-batch6b-design.md` 扩「构建策略 + 接口分派」再来；⚠ **别再指 `OPRUNWAY_TARGET_DIR`**——它是幽灵变量，runner 通路的 `.sh`/`.py` 里根本没有，2026-07-23 更正），**不假装能选路径** |

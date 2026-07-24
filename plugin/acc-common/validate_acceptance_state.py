@@ -24,10 +24,17 @@ from collections import Counter
 # T6/T8 扩枚举：exception=小shape例外(合法放行需交叉校验)；
 # blocked_wait_gpu_benchmark=缺外部 GPU 标杆正规挂起；blocked_incomparable_timing_scope=双边口径不可比。
 _PERF_STATUS = {"ok", "no_perf_cases", "blocked", "fail",
-                "exception", "blocked_wait_gpu_benchmark", "blocked_incomparable_timing_scope"}
-# gt3-1：blocked 行仅在这三种「合法挂起/不可采集」态下才允许免 scope 证据校验；
+                "exception", "blocked_wait_gpu_benchmark", "blocked_incomparable_timing_scope",
+                # High#2（2026-07-24）：验收通路缺**真实**基线（采集端未接通）→ 正规挂起。
+                # 它取代的是原来那条「静默 mock 兜底」的路——mock 基线在验收通路上等于冒充达标。
+                "blocked_wait_real_baseline"}
+# gt3-1：blocked 行仅在这几种「合法挂起/不可采集」态下才允许免 scope 证据校验；
 # status ∈ {ok, fail, exception} 下出现 blocked 行 = 口径矛盾（零证据放行洞），记 error。
-_BLOCKED_OK_STATUS = {"blocked", "blocked_incomparable_timing_scope", "blocked_wait_gpu_benchmark"}
+_BLOCKED_OK_STATUS = {"blocked", "blocked_incomparable_timing_scope", "blocked_wait_gpu_benchmark",
+                      "blocked_wait_real_baseline"}
+# gt3-2 的「挂起态」族：缺**基线**（NPU 侧已测）→ 门仍强制 NPU 侧证据完整（npu_us + kernel_only）。
+# 采集端整条没接通时 npu_us 为 None → 门 FAILED（fail-closed，正确方向：不给「等基线」当免检牌）。
+_PERF_WAIT_STATUS = {"blocked_wait_gpu_benchmark", "blocked_wait_real_baseline"}
 # validator overall.verdict 合法枚举（C4 2026-07-22 加 passed_with_gaps：任务书要求的 dtype 有一部分
 # 算子 op_def 压根不支持 → 带发现的通过；差额挂 task_pr_gaps，见 _check_unsupported_gap 的反后门硬校）。
 # 2026-07-23：passed_with_gaps 再添一类撑法——op_def 声明了、但目标硬件那支实现没有
@@ -323,6 +330,131 @@ def _check_oracle_source(cid, exp, prec, errs, pp):
                     "（伪造/篡改 oracle_source·证据不可信）")
 
 
+# ══════════════ 多输出契约（`expected.outputs[]`）的门支持 —— op-中立、据字段触发 ══════════════
+# 触发**只据结构字段**：caseset `expected` 里出现 `outputs` 键 → 走多输出分支；否则**原封不动**走 legacy
+# 单输出通路（向后兼容硬约束：现有 4 个单输出算子 isclose/sign/equal/neg 的判定链零变更）。
+# 与 validator `_judge_multi` 同纪律：逐输出按 **role** 对齐、role 须唯一且非空（否则无从按角色匹配 canonical
+# 判据）；缺输出 / 多输出 / 结构不合法 一律 fail-closed 记 error（走 BLOCKED），绝不静默兜底。
+_MO_KEY = "outputs"
+# 多输出 case 的 `expected` **不得**同时带 legacy 单输出口径字段——两套结构并存 = 门/validator 各读一套，
+# 是典型的「看起来对」。fail-closed 拒。
+_MO_FORBIDDEN_LEGACY_KEYS = ("golden_path", "policy", "threshold", "standard",
+                             "tolerance_policy_id", "compare", "acceptance_policy")
+# 逐输出口径三处一致所校的字段（与 legacy 的四字段同口径；threshold 在 torch_allclose/index 口径下是
+# `(rtol, atol)` 二元组 → JSON 落地为 list，故类型放行 list，**不是**只认标量）。
+_MO_FIELD_TYPES = {"standard": (str,), "tolerance_policy_id": (str, type(None)),
+                   "policy": (dict,), "threshold": (int, float, list)}
+
+
+def _is_multi_output(exp):
+    """caseset case 的 expected 是否走多输出契约（据字段，绝非按算子名）。"""
+    return isinstance(exp, dict) and _MO_KEY in exp
+
+
+def _mo_shape_ok(v):
+    """输出形状：list 且每维非 bool 非负 int（0-d 归约输出 → 空 list，合法）。"""
+    return isinstance(v, list) and all(isinstance(x, int) and not isinstance(x, bool) and x >= 0 for x in v)
+
+
+def _mo_numel(shape):
+    n = 1
+    for x in shape:
+        n *= x
+    return n
+
+
+def _mo_caseset_outputs(cid, exp, errs, where="caseset"):
+    """取 caseset `expected.outputs` 并做**结构合法性**校验；不合法 → 记 error 返回 None（fail-closed）。"""
+    for k in _MO_FORBIDDEN_LEGACY_KEYS:
+        if k in exp:
+            errs.append(f"{cid}: {where} expected 同时带多输出 outputs[] 与 legacy 单输出字段 {k!r}"
+                        "（两套精度结构并存·读哪套都可能是错的，拒）")
+    outs = exp.get(_MO_KEY)
+    if not isinstance(outs, list) or not outs:
+        errs.append(f"{cid}: {where} expected.outputs 非列表或为空（多输出契约无输出可校·证据不完整）")
+        return None
+    roles, ok = [], True
+    for k, o in enumerate(outs):
+        if not isinstance(o, dict):
+            errs.append(f"{cid}: 输出#{k} 非对象")
+            ok = False
+            continue
+        role = o.get("role")
+        if not isinstance(role, str) or not role:
+            errs.append(f"{cid}: 输出#{k} 缺 role（多输出按 role 对齐 canonical 判据，须非空字符串）")
+            ok = False
+        else:
+            roles.append(role)
+        if not o.get("golden_path"):
+            errs.append(f"{cid}: 输出#{k}({role}) 无 golden_path")
+            ok = False
+        if not _mo_shape_ok(o.get("out_shape")):
+            errs.append(f"{cid}: 输出#{k}({role}) 的 out_shape 非法（须非负整数 list）：{o.get('out_shape')!r}")
+            ok = False
+        for key, types in _MO_FIELD_TYPES.items():
+            if key not in o:
+                errs.append(f"{cid}: 输出#{k}({role}) 缺 expected.{key}（无法做三处一致、防放宽门失效）")
+                ok = False
+            elif not isinstance(o[key], types) or isinstance(o[key], bool):
+                errs.append(f"{cid}: 输出#{k}({role}) 的 expected.{key} 类型错"
+                            f"（{type(o[key]).__name__}，须 {tuple(t.__name__ for t in types)}）")
+                ok = False
+        if role == "index":
+            if not isinstance(o.get("index_of"), str) or not o["index_of"]:
+                errs.append(f"{cid}: 输出#{k} role=index 但 index_of 缺失/非字符串"
+                            "（index 判据须指明所引 value 输出）")
+                ok = False
+    dup = [r for r, n in Counter(roles).items() if n > 1]
+    if dup:
+        errs.append(f"{cid}: 输出 role 重复 {dup}（多输出按 role 对齐 canonical，须唯一）")
+        ok = False
+    if any(r == "index" for r in roles) and not any(r != "index" for r in roles):
+        errs.append(f"{cid}: 只有 index 输出、无被引的 value 输出（index 判据无所依·结构不合法）")
+        ok = False
+    return outs if ok else None
+
+
+def _gate_task2_outputs(cid, exp, prec, errs):
+    """多输出契约的**逐输出**口径三处一致门（防放宽/防缺输出/防换序）——legacy 单输出不走此路。
+
+    caseset `expected.outputs[k]` ↔ evidence `precision.outputs[k]` 按**位置**配对、再校 role 相等
+    （位置=spec out-param 顺序，与 validator `_judge_multi` 同口径），逐输出比 standard /
+    tolerance_policy_id / policy / threshold 全等。任一侧缺字段即 error（不做「双非 None 才比」的宽容——
+    那会放过缺字段假通过，见 legacy finding #12 的同一教训）。"""
+    outs = _mo_caseset_outputs(cid, exp, errs)          # caseset 侧结构合法性（不合法 → None）
+    ev_outs = prec.get(_MO_KEY)
+    if not isinstance(ev_outs, list) or not ev_outs:
+        errs.append(f"{cid}: evidence precision.outputs 缺失/非列表/为空（多输出证据不完整）")
+        return
+    if outs is None:
+        return                                          # caseset 侧已不合法，逐输出比对无意义（已记 error）
+    if len(ev_outs) != len(outs):
+        errs.append(f"{cid}: evidence precision.outputs 长度 {len(ev_outs)} ≠ caseset {len(outs)}"
+                    "（缺输出/多输出·⚠跑子集到输出粒度）")
+        return
+    for k, (exp_o, ev_o) in enumerate(zip(outs, ev_outs)):
+        if not isinstance(ev_o, dict):
+            errs.append(f"{cid}: evidence 输出#{k} 非对象")
+            continue
+        role = exp_o.get("role")
+        if ev_o.get("role") != role:
+            errs.append(f"{cid}: 输出#{k} role 不一致 caseset={role!r}/evidence={ev_o.get('role')!r}"
+                        "（输出换序/张冠李戴·证据不可信）")
+            continue
+        if ev_o.get("golden_path") != exp_o.get("golden_path"):
+            errs.append(f"{cid}: 输出#{k}({role}) evidence golden_path={ev_o.get('golden_path')!r} "
+                        f"≠ caseset {exp_o.get('golden_path')!r}（真值来源被换·证据不可信）")
+        for key in _MO_FIELD_TYPES:
+            if key not in ev_o:
+                errs.append(f"{cid}: 输出#{k}({role}) evidence 缺 {key}（无法做三处一致、防放宽门失效）")
+                continue
+            if ev_o[key] != exp_o.get(key):
+                errs.append(f"{cid}: 输出#{k}({role}) evidence {key}={ev_o[key]!r} "
+                            f"≠ caseset {exp_o.get(key)!r}（防放宽假通过）")
+        if not isinstance(ev_o.get("metrics"), dict):
+            errs.append(f"{cid}: 输出#{k}({role}) evidence 缺 metrics（误差分布未复算·证据不完整）")
+
+
 def gate_task1(d, errs):
     """用例集自洽 + （有 evidence 时）id 一一对应，专防跑子集。"""
     cs = _load(d, "caseset.json")
@@ -346,6 +478,13 @@ def gate_task1(d, errs):
         if not c.get("inputs"):
             errs.append(f"{cid}: 无 inputs")
         exp = c.get("expected") if isinstance(c.get("expected"), dict) else {}
+        if _is_multi_output(exp):
+            # 多输出契约：口径/golden 逐输出落在 `expected.outputs[]`，顶层无 golden_path/threshold/policy。
+            # 逐输出校完整性（结构不合法即 fail-closed），legacy 单输出分支**一行不走**（向后兼容硬约束）。
+            _mo_caseset_outputs(cid, exp, errs)
+            if not c.get("dims"):
+                errs.append(f"{cid}: 无 dims（功能/精度/性能维度）")
+            continue
         if not exp.get("golden_path"):
             errs.append(f"{cid}: 无 golden_path")
         # §1.4 空 Tensor 功能用例（compare=na，numel=0）：无精度口径可判 → 豁免阈值/标准/policy 完整性
@@ -456,6 +595,8 @@ def gate_task2(d, errs):
     # T5：由「标量 threshold 相等」升级为「tolerance_policy_id + 结构化 policy 一致」（保留 threshold digest）。
     exp_by_id = {c["id"]: (c.get("expected") or {})
                  for c in cases if isinstance(c, dict) and c.get("id")}
+    # 多输出 index 输出的 gather 重算要拿到**整条 case**（输入路径 + attr 值 → 归约轴），故另备一份 case 索引。
+    case_by_id = {c["id"]: c for c in cases if isinstance(c, dict) and c.get("id")}
     # §1.4 空 Tensor 功能用例（compare=na，numel=0）：无精度 metrics/阈值 → 豁免精度证据完整性（validator 判 na）。
     #  codex #4：Task2 **独立**复核真空（不依赖 Task1）——compare=na 且**真严格真空**才入豁免集；伪造 na（非真空）
     #  不豁免 → 下方精度证据完整性照校、因缺字段被门 FAILED。
@@ -478,6 +619,14 @@ def gate_task2(d, errs):
         prec = e.get("precision")
         if not isinstance(prec, dict):
             errs.append(f"{cid}: evidence 缺 precision（证据不完整、不可信）")
+            continue
+        exp0 = exp_by_id.get(cid)
+        if _is_multi_output(exp0):
+            # 多输出契约：口径三处一致**逐输出**做（缺输出/换序/放宽任一 → error）；随后仍走同一套
+            # Q9 oracle_source 门校（多输出的 oracle_source 仍在 precision 顶层）。legacy 分支零变更。
+            _gate_task2_outputs(cid, exp0, prec, errs)
+            if _pp is not None:
+                _check_oracle_source(cid, exp0, prec, errs, _pp)
             continue
         if prec.get("threshold") is None:
             errs.append(f"{cid}: evidence 缺 precision.threshold（证据不完整、不可信）")
@@ -512,7 +661,7 @@ def gate_task2(d, errs):
     # 上文只校「阈值/口径三处一致」（防放宽），却全信 evidence 自报的 metrics **数值**；此段按 provenance 读产物、
     # 先校 sha、再依 caseset policy 重算 metrics 并逐字段比对，堵「伪造 bad_count=0 直接 pass」的自报数字洞。
     _gate_precision_provenance(d, [e for e in ev_list if isinstance(e, dict) and e.get("case_id") not in na_ids],
-                               exp_by_id, errs)  # 空 Tensor 功能用例无产物 provenance，过滤（validator→na）
+                               exp_by_id, errs, case_by_id)  # 空 Tensor 功能用例无产物 provenance，过滤（validator→na）
     print(f"  精度裁决={ov.get('verdict')}(validator 判) | 证据覆盖={'一致' if cids == eids else '不一致'}")
 
 
@@ -733,7 +882,137 @@ def _recompute_case(np, precision_policy, d, cid, exp, prec, errs):
         _metrics_match(racc, prec.get("acceptance_metrics"), cid, errs, tag="acceptance_metrics")
 
 
-def _gate_precision_provenance(d, ev_list, exp_by_id, errs):
+def _load_verified_bin(np, path, want_sha, dtype_name, shape, cid, kind, errs):
+    """多输出通路的 out 产物是 **raw `.bin`**（driver 扁平 dump），不是 `.npy` → 不能走 `np.load`。
+
+    与 `_load_verified` 同纪律：**一次性读入 bytes** → sha256 校 provenance → 从**同一份内存** `frombuffer`
+    按「evidence 自报的 dtype/shape」解释（消灭二次 open 的 TOCTOU）。防「dtype/shape 随便报、字节随便解释」：
+    要求 `nbytes == numel(shape) * itemsize` **精确相等**（多一字节少一字节都拒），不合法即 error 返回 None。"""
+    if not isinstance(dtype_name, str) or not dtype_name:
+        errs.append(f"{cid}: {kind} 产物缺 out_dtype（无法按真实字节口径读回·证据不完整）")
+        return None
+    if not _mo_shape_ok(shape):
+        errs.append(f"{cid}: {kind} 产物 out_shape 非法（须非负整数 list）：{shape!r}")
+        return None
+    try:
+        dt = np.dtype(dtype_name)
+    except Exception as ex:
+        errs.append(f"{cid}: {kind} 产物 out_dtype={dtype_name!r} 非法（{type(ex).__name__}: {ex}）")
+        return None
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as ex:
+        errs.append(f"{cid}: {kind} 产物读取失败（{type(ex).__name__}: {ex}）")
+        return None
+    if hashlib.sha256(data).hexdigest() != want_sha:
+        errs.append(f"{cid}: {kind} 产物 sha256 与 provenance 不符（产物被替换/篡改）")
+        return None
+    want_bytes = _mo_numel(shape) * dt.itemsize
+    if len(data) != want_bytes:
+        errs.append(f"{cid}: {kind} 产物字节数 {len(data)} ≠ dtype/shape 应有的 {want_bytes}"
+                    f"（dtype={dtype_name} shape={shape}·自报口径与磁盘字节不符）")
+        return None
+    try:
+        return np.frombuffer(data, dtype=dt).reshape(shape)
+    except Exception as ex:
+        errs.append(f"{cid}: {kind} 产物按 dtype/shape 解释失败（{type(ex).__name__}: {ex}）")
+        return None
+
+
+def _mo_gather_ctx(d, case, policy, out_shape, cid, errs):
+    """index 输出重算所需的 gather 上下文（source/dim/keepdim）——**与采集层同一份实现**。
+
+    复用 `repo_adapter._index_gather_ctx`（据 policy.gather_from 定位输入 + 据 attr 值和形状唯一解出归约轴，
+    全程 op-中立、绝不读 attr 名/算子名）。**刻意共用同一实现**：本门的目的是绑定「evidence 的数字是否真从
+    产物算出」，不是交叉验证 gather 算法——换一份实现比对会变成验证算法本身（同 compute_metrics 的既有纪律）。
+    import 失败 / 归约轴歧义 → 记 error 返回 None（fail-closed，绝不猜轴：猜错轴会静默算出「看起来对」的数）。"""
+    try:
+        import repo_adapter
+    except Exception as ex:
+        errs.append(f"{cid}: repo_adapter 不可用（{type(ex).__name__}: {ex}）——index 输出 gather 重算无法进行，判 FAILED")
+        return None
+    try:
+        return repo_adapter._index_gather_ctx(case, os.path.join(d, "work"), policy, list(out_shape))
+    except Exception as ex:
+        errs.append(f"{cid}: index 输出 gather 上下文重建失败（{type(ex).__name__}: {ex}）——不静默放行")
+        return None
+
+
+def _recompute_case_multi(np, precision_policy, d, cid, case, exp, prec, errs):
+    """多输出契约的 evidence↔产物绑定（**逐输出**）：golden `.npy` + out `.bin` 各自校 sha → 依 caseset
+    该输出的 policy 重算 metrics → 与 evidence 自报值逐字段比对。任一环不符 → FAILED。
+
+    · golden/out 路径均**相对 `<d>/work`** 解析（与 legacy 同一根，`_pinned_product` 钉死、拒逃逸）。
+      out 是 raw `.bin`，按 evidence 自报的 `out_dtype`/`out_shape` 读回，并要求字节数精确吻合。
+    · 两侧一律 reshape 到 **caseset 声明**的 `out_shape`（authoritative；0-d 归约输出的 `(1,)` vs `()` 差异
+      在此归一，与采集层同口径），numel 不等即 fail-closed。
+    · index 输出走 `index_value_consistency`：重建 gather 上下文（gather 源 + 归约轴）后再重算。"""
+    outs = exp.get(_MO_KEY)
+    ev_outs = prec.get(_MO_KEY)
+    if not isinstance(outs, list) or not isinstance(ev_outs, list) or len(outs) != len(ev_outs) or not outs:
+        return                                          # 结构问题已由 _gate_task2_outputs 记 error
+    for k, (exp_o, ev_o) in enumerate(zip(outs, ev_outs)):
+        if not isinstance(exp_o, dict) or not isinstance(ev_o, dict):
+            continue                                    # 已记 error
+        role = exp_o.get("role")
+        tag = f"{cid}#{k}({role})"
+        prov = ev_o.get("provenance")
+        if not isinstance(prov, dict):
+            errs.append(f"{tag}: evidence 输出缺 provenance（产物绑定缺失·metrics 真伪不可校验）")
+            continue
+        miss = [x for x in ("golden_sha256", "out_sha256", "numel") if prov.get(x) is None]
+        if miss:
+            errs.append(f"{tag}: provenance 缺字段 {miss}")
+            continue
+        gt = _pinned_product(d, ev_o.get("golden_path"))
+        ot = _pinned_product(d, ev_o.get("out_path"))
+        if gt is None:
+            errs.append(f"{tag}: golden 产物缺失/路径逃逸/非普通文件（{ev_o.get('golden_path')!r}）")
+        if ot is None:
+            errs.append(f"{tag}: out 产物缺失/路径逃逸/非普通文件（{ev_o.get('out_path')!r}）")
+        if gt is None or ot is None:
+            continue
+        golden = _load_verified(np, gt, prov["golden_sha256"], tag, "golden", errs)
+        out = _load_verified_bin(np, ot, prov["out_sha256"], ev_o.get("out_dtype"),
+                                 ev_o.get("out_shape"), tag, "out", errs)
+        if golden is None or out is None:
+            continue
+        if not _is_int(prov["numel"]) or int(golden.size) != prov["numel"]:
+            errs.append(f"{tag}: golden.numel={int(golden.size)} ≠ provenance.numel={prov['numel']!r}")
+        if str(out.dtype) != str(golden.dtype):
+            errs.append(f"{tag}: out 产物 dtype={out.dtype} ≠ golden dtype={golden.dtype}"
+                        "（两侧口径不同·无法按同一口径重算·fail-closed）")
+            continue
+        shape = exp_o.get("out_shape")                  # caseset 声明形状为权威（与采集层同口径）
+        if not _mo_shape_ok(shape):
+            errs.append(f"{tag}: caseset 输出 out_shape 非法（{shape!r}）——无法归一形状重算")
+            continue
+        want = _mo_numel(shape)
+        if int(golden.size) != want or int(out.size) != want:
+            errs.append(f"{tag}: golden/out 元素数（{int(golden.size)}/{int(out.size)}）"
+                        f"≠ caseset out_shape {shape} 应有的 {want}（形状契约不符）")
+            continue
+        golden, out = golden.reshape(shape), out.reshape(shape)
+        policy = exp_o.get("policy")
+        if not isinstance(policy, dict):
+            errs.append(f"{tag}: caseset 输出 policy 非 dict（无法据 caseset 口径重算 metrics）")
+            continue
+        kwargs = {}
+        if policy.get("kind") == "index_value_consistency":
+            gctx = _mo_gather_ctx(d, case, policy, shape, tag, errs)
+            if gctx is None:
+                continue
+            kwargs["gather_ctx"] = gctx
+        try:
+            recalc = precision_policy.compute_metrics(out, golden, policy, **kwargs)
+        except Exception as ex:
+            errs.append(f"{tag}: 依 caseset policy 重算 metrics 失败（{type(ex).__name__}: {ex}）——不静默放行")
+            continue
+        _metrics_match(recalc, ev_o.get("metrics"), tag, errs, tag="metrics")
+
+
+def _gate_precision_provenance(d, ev_list, exp_by_id, errs, case_by_id=None):
     """A 方案总入口：证明 evidence.precision.metrics **确实从磁盘产物算出**（属**证据可信**，不重判 verdict——
     canon 定「门只管证据可信完整、pass/fail 归 validator」，重算校验的是「evidence 声称的数字是否真从产物算出」，
     仍属证据可信，pass/fail 由 validator 依阈值裁）。
@@ -761,7 +1040,14 @@ def _gate_precision_provenance(d, ev_list, exp_by_id, errs):
         if exp is None or not isinstance(prec, dict):
             continue                                   # 多余 case / 缺 precision 已在上文报
         try:
-            _recompute_case(np, precision_policy, d, cid, exp, prec, errs)
+            if _is_multi_output(exp):                  # 多输出契约：逐输出绑定（legacy 单输出走原路径、零变更）
+                case = (case_by_id or {}).get(cid)
+                if not isinstance(case, dict):
+                    errs.append(f"{cid}: caseset 无该 case（多输出重算需整条 case 的输入/attr）")
+                    continue
+                _recompute_case_multi(np, precision_policy, d, cid, case, exp, prec, errs)
+            else:
+                _recompute_case(np, precision_policy, d, cid, exp, prec, errs)
         except Exception as ex:                        # 抗坏输入：任何意外 → FAILED、绝不崩溃/静默放过
             errs.append(f"{cid}: 产物重算校验异常（{type(ex).__name__}: {ex}）——判 FAILED，不崩溃")
 
@@ -946,7 +1232,7 @@ def gate_task3(d, errs):
     st = s.get("status")
     # gt3-6①：status 为 list/dict 时 `st not in _PERF_STATUS`（对 set 成员判定）会崩 unhashable →
     # 先 isinstance(str) 守卫，非字符串记 error 且不参与 set 判定。
-    wait = isinstance(st, str) and st == "blocked_wait_gpu_benchmark"
+    wait = isinstance(st, str) and st in _PERF_WAIT_STATUS
     if st is None:
         errs.append("perf summary 缺 status")
     elif not isinstance(st, str):

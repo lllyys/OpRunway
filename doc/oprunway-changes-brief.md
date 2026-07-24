@@ -1,6 +1,23 @@
 # OpRunway 改动简表
 
 > 倒序：最新在上。每天一节，一条一句，大白话。`待决` 置顶。
+
+## 2026-07-24（torch-对标场景）
+- 用户定新规则：「任务书对标 torch」场景参考 gitcode `Justbin/cannbot-ops-input` 仓的 case 生成/测试/torch 封装法，改造 OpRunway + 对 median(PR6429) 端到端验收。见证=median（双输出、reduce、tie、int dtype）。
+- 三份调研到位：参考仓（六轴 case-gen + 逐 dtype allclose 判据 + **ctypes-aclnn Python runner**）、median 任务书+PR6429（对标 torch.median、双输出、A2/A3→a3、PR open 未合）、a3 环境（torch_npu 在容器 `oprunway_prov` 现成、根盘曾 100% 满）。
+- 架构经用户拍板 Option A（adapt/vendor 参考仓进 OpRunway）；出 `doc/oprunway-torch-baseline-design.md` 可执行蓝图：新增面仅 4 块（ctypes-aclnn runner / torch_allclose 标准 / torch golden / 多输出契约），判定仍归确定性脚本链。
+- a3 磁盘排查：根盘 3.5T 满非我方所致（大头别人退出容器 `cyj` 765GB 等）；只清我方 `oprunway_prov` 容器 `/tmp` 旧残渣 36GB → 根盘腾到 44G 可用。
+- torch-对标 **accuracy 主链 + 编排接线离线实现完成**（Workflow fanout；⚠ **perf 维未实现**——`torch_npu` 基线采集端、ctypes kernel-only msprof、perf evidence 接线全属第二里程碑未接）：新增 `acc-common/aclnn_runtime/`（ctypes-aclnn Python runner：base/acl_consts/aclnn_runner/aclnn_driver）+ `aclnn_adapter.py`（新 MODES `aclnn_py`）；就地扩 precision_policy（`torch_allclose` 标准 + `index_value_consistency`）/validator（多输出逐输出折叠）/gen_cases（多输出契约 `expected.outputs[]` + value_profile nan/tie + `aclnn_call_template`）/repo_adapter/run_workflow；新增 samples/golden/Median + samples/specs/median.spec.json。**全量单测 905 passed / 零回归 / 无按算子名分支**。
+- a3 真机 de-risk（只读+build，未跑完整验收）：**D0** 内置 aclnnAbs ctypes 冒烟绿（证实 BF16=27）；**D1** 内置 aclnnMedianDim 多输出/index/bf16 机制绿，逮出 runner 两处（custom lib 无条件要求 + 标量 attr 接线缺）——**代码已修并过离线单测，但修后的 D1 真机复跑尚未做**；**D2** PR6429 自定义 Median 在 9.0.1 一次 build 通过、`libcust_opapi.so` 导出 `aclnnMedian` 可 ctypes 加载（仅验符号，**未跑过一条 case**）。配方见设计文档 §9.6。
+- **perf 通路按参考仓设计接通**（此前被误降级为「第二里程碑」，用户已纠正）：新增 `acc-common/aclnn_runtime/perf_msprof.py`——msprof kernel-only 采集（`--task-time/--ascendcl/--msproftx`），**MSTX range 圈测量窗、缺 MSTX 证据即 fail-closed**；只累加 device 计算 kernel（AI_CORE/AI_VECTOR_CORE/MIX*/AI_CPU），**MEMCPY_ASYNC 一律不计入**（纯 device-copy 单独记 `device_memcpy_only`、不产 us）；warmup 5 / repeat 20，warmup 后**重新物化新鲜输入**，每 kernel 取中位数 × 每次调用启动数、多 kernel 求和、一次性 setup kernel 剔除。
+- perf 基线 = **同机 torch_npu 跑同一份 torch reference**：基线行为五分类（`npu/cpu_fallback/hybrid_host_device/execution_failed/no_device_kernel_observed`），**只有 npu 侧才计时**，其余只报行为不硬算比值；双边 `timing_scope` 必须同为 `kernel_only`，不一致 → `BLOCKED_INCOMPARABLE_TIMING_SCOPE`；**精度先筛**（只测已过精度的 case，其余记 `skipped_accuracy_failed`）。基线调用由 spec `perf.torch_baseline` 的 **slot-name→torch 形参**映射驱动，变体自动跟随 case，**零算子名分支**。
+- perf 接线：`repo_adapter.parse_torch_npu_baseline` 从占位改成**真消费口**（scope/us/重复 id 全 fail-closed，非 npu 行为进 `excluded` 不冒充基线）；evidence 的 `perf.us` 由采集回填（没采到恒 `us=None`）；`run_workflow` 据 spec 落 `_perf_plan.json`（**只带「采什么怎么采」、绝不把阈值给采集端**）并清 stale 基线。真机采集全程 gated（`OPRUNWAY_ACLNN_REAL=1`），**未接通/无有效基线一律 BLOCKED、绝不冒充达标**；`perf_compare` 判定逻辑一行未改（源无关）。
+- **修一个真 spec 错**：`samples/specs/median.spec.json` 的 `perf.target_ratio` 从 **0.6 改成 1.0**——0.6 是抄参考仓通用默认阈，而 median 任务书写的是「相比小算子拼接版本性能不劣化」（= ratio ≥ 1.0），照 0.6 会把「比基线慢 40%」判成达标。另记一条诚实缺口：任务书点名的对照物是「小算子拼接版」，spec 声明的是 `torch_npu`，二者是否等同**未核**，上真机前须核。
+- 磁盘那批 home 小残渣（~940M）批量 rm 被安全分类器拦，未清（空间已够、可选）。
+- **三级验收门补上「认多输出」**：门原来只按单输出看证据，多输出算子（如 median 的 values/indices）逐输出的阈值/判据核不到。现在改成**逐输出**校 policy 三处一致（spec ↔ 落盘 evidence ↔ 门内重算）+ 记 provenance（每个判据从哪来）+ **index 类输出按 gather 重算复核**（不信 runner 自报）。拿 A/B 反证跑过：修复前 **280/448 errors**，修复后 **0/0**。
+- **ctypes runner 7 条安全/正确性修复**：aclnn 符号**强制签名校验**（不再靠 ctypes 默认 int 返回蒙混）、输出 buffer **dtype 欠分配**（按元素字节算不再按 4 字节假定）、资源释放全部改 **try/finally**（异常路径不再泄 device 内存/句柄）、**0-d 张量**取回路径修正等。都补了离线单测。
+- **perf 通路接通、但未上真机**：msprof kernel-only 采集 + 同机 `torch_npu` 基线 + 行为五分类 + 精度先筛 + scope 校验 + speedup 全部落地（`perf_compare` 判定逻辑一行未改），**但一条真机 perf 都还没跑过——covered ≠ 真机绿**。同时按 a3 实测**推翻 3 条原设计**：① MSTX 只能走 `torch_npu.profiler`（msprof CLI 下 Python 打 MSTX 静默失败、rid 恒 0）② db 路线的 kernel 类型白名单跟 CSV 那套完全不同（原白名单一个都匹配不上 → 静默得 0 us，现命中数为 0 即 fail-closed）③ msprof 默认 `--ai-core=on` 把数字抬高 2~3.75 倍、必须显式关且基线与被测同配置。细节见 `doc/oprunway-torch-baseline-design.md` §9.7。
+- **md 与代码打架已修**：`plugin/agents/op-acceptance.md` + `plugin/skills/acceptance-workflow/SKILL.md` 里「torch_npu 基线尚未接入 / `parse_torch_npu_baseline` 仅 schema 占位 / `aclnn_py` 的 Task3 必须 pending」三处**已被落地 perf 代码推翻**，而 agent 是照 md 办事的，不改会让它按「perf 永不跑」执行。改成准确口径：**有有效基线且双边 scope 一致才出性能裁决；无有效基线 / 缺 MSTX 证据 / scope 不可比 → BLOCKED，绝不冒充达标**；并写清 median 的 `target_ratio=1.0`（任务书「不劣化」，非参考仓默认 0.6）。
 >
 > ⚠ **2026-07-09 全局更正（覆盖以下所有历史条目）**：本表历史条目中**一切关于 Equal 的验收结论**——「真阳性 / A3 未达标 / 精度 fail / FAIL(精度) / 输出≠golden / #2890 双核 merged / 真机 6 挂 5 / 由 op_def 取 dtype 集」等——**均已作废**。正式确认：**#2890 系误配（非本社区 Equal 任务的交付 PR）、Equal 社区任务未验收通过、无已验收对应 PR**（详见下方 07-09 条）。历史条目**保留作流水、不逐条改写**，读时一律以本横幅 + 07-09 条为准。**真机有效裁决仅 IsClose / Sign**——Neg 只跑到 mock 级流水线（其 mock demo 数据有效，但**不是真机验收裁决**）。
 

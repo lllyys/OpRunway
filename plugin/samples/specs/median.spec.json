@@ -1,0 +1,71 @@
+{
+  "op": "Median",
+  "repo": "ops-nn",
+  "hardware": ["Atlas A2", "Atlas A3"],
+  "scenario": "torch_ref_aclnn",
+  "runner_form": "aclnn_py",
+  "reference": {"type": "torch", "ref": "torch.median（任务书指定真值口径）"},
+  "change": {"kind": "new_op", "note": "aclnnMedian/aclnnMedianDim 统一实现（experimental/index/median），双输出 values+indices"},
+  "params_source": "derived_from_taskdoc",
+  "_scenario_note": "scenario=torch_ref_aclnn ⟺ 任务书声明对标 torch + PR 是 aclnn 两段式；编排层据此字段路由、不做 if-算子名分派。runner_form=aclnn_py：op工程即 DUT、无 per-op runner 源（ctypes-aclnn 通用 runner）。见 doc/oprunway-torch-baseline-design.md §2.1。",
+  "golden": {
+    "_note": "判据锚（硬约束 #5：判据只从 spec 派生）。与 golden.py 的 GOLDEN_CONTRACT 双源交叉核验；不一致即 fail-closed。任务书把真值口径本身指定为 torch.median → oracle_method → tier1（非 impl_reference）。",
+    "source": "single_api",
+    "method_kind": "torch_cpu",
+    "authorization": {
+      "kind": "oracle_method",
+      "cite": "task_doc.snapshot.md:13",
+      "quote": "参考torch.median功能，在昇腾 NPU 上基于 Ascend C 编程语言实现功能一致的算子"
+    },
+    "taskdoc_snapshot": {"sha256": "5d24e7337d79fb5e0835df51e8fdb7d337c57e9b8a53fd6aba1296c466ef11cf"}
+  },
+  "params": [
+    {"name": "self", "io": "in", "dtype": ["float32", "float16", "bfloat16", "int32"], "rank": [1, 2, 3, 4]},
+    {"name": "dim", "io": "attr", "dtype": ["int64"], "default": null},
+    {"name": "keepdim", "io": "attr", "dtype": ["bool"], "default": false},
+    {"name": "values", "io": "out", "dtype": ["<from_input>"], "out_role": "value"},
+    {"name": "indices", "io": "out", "dtype": ["int64"], "out_role": "index", "index_of": "values", "gather_from": "self"}
+  ],
+  "_call_variants_note": "aclnn 调用变体表（字段驱动、gen_cases 逐 case 解析成 case.aclnn_call；driver 直接执行、不再自己推变体）。symbol = CamelCase 基名（真符号 = aclnn<symbol>GetWorkspaceSize / aclnn<symbol>）。dim=null 走全局 API aclnnMedian(self, out)——**它的签名里根本没有 dim/keepdim**，故 active_attrs 为空、只落地 values；dim 有值走 aclnnMedianDim(self, dim, keepdim, valuesOut, indicesOut)、双输出。绝不把 dim=null 兜成 dim=0（那既不是全局语义、又与单输出签名不符）。",
+  "call_variants": [
+    {"when": {"attr": "dim", "is_null": true},
+     "symbol": "Median", "active_attrs": [], "active_outputs": ["values"]},
+    {"when": {"attr": "dim", "is_null": false},
+     "symbol": "MedianDim", "active_attrs": ["dim", "keepdim"], "active_outputs": ["values", "indices"]}
+  ],
+  "attr_matrix": [
+    {"dim": null, "keepdim": false},
+    {"dim": 0, "keepdim": false},
+    {"dim": 0, "keepdim": true},
+    {"dim": -1, "keepdim": false}
+  ],
+  "generalize": true,
+  "allow_empty_tensor": false,
+  "dtype_required": ["float32", "float16", "bfloat16", "int32"],
+  "verify_mode": "numerical",
+  "precision": {
+    "oracle": "torch",
+    "standard": "torch_allclose",
+    "tolerance_source": "dtype_table",
+    "value_profiles": ["nan", "tie"],
+    "case_target": 56,
+    "_tolerance_note": "torch_allclose 逐 dtype 容差走 dtype_table（precision_policy._TA_DTYPE_TOLS，adapt 自参考仓 accuracy.py→一手 tilelang2ascend verification_ascendc.py）。value 输出 fp→torch_allclose、int→exact；index 输出→index_value_consistency（gather 值一致，据 out_role 字段派生、op-中立）。",
+    "_value_profiles_note": "nan（NaN 传播·equal_nan 判据）+ tie（并列值·压 index_value_consistency）——借参考仓 case_generator.generate_array 的 special_values/tie 数值生成机制，op-中立、据 spec 计划驱动。"
+  },
+  "perf": {
+    "baseline": "torch_npu",
+    "target_ratio": 1.0,
+    "_target_ratio_note": "⚠ 依据 = **任务书**（验收权威，硬约束 #1）。task_doc.snapshot.md:28 逐字：「相比于aclnnMedian、aclnnMedianDim的小算子拼接版本性能不劣化。」——『不劣化』即 ratio = baseline_us / npu_us ≥ **1.0**。此前写 0.6 是**抄自参考仓 cannbot-ops-input 的通用默认阈**（`performance.py:PERF_SPEEDUP_THRESHOLD = 0.6`，那是它自家「达到 torch 0.6× 即合格」的口径），与本任务书不符、会把「比基线慢 40%」判成达标 → 2026-07-24 更正为 1.0。",
+    "_baseline_gap_note": "⚠ 诚实边界（未消解，留给人核）：任务书点名的对照物是「aclnnMedian/aclnnMedianDim 的**小算子拼接版本**」，而本 spec 声明的 baseline 是 `torch_npu`（同机 torch.median）。二者是否等同**未经核实**——若 torch_npu 的 median 就是那份小算子拼接实现则等同，否则 ratio 的对照物与任务书条款不是同一个东西。上真机前须核；核不实则本条按 task_pr_gaps 记，不得当作已满足任务书性能条款。",
+    "warmup": 5,
+    "repeat": 20,
+    "torch_baseline": {
+      "api": "torch.median",
+      "positional": ["self"],
+      "keyword": {"dim": "dim", "keepdim": "keepdim"},
+      "_note": "torch_npu 基线的调用映射（**字段驱动、op-中立**）：键是该 case `aclnn_call.slots` 里的 **slot name**（与 aclnn 头签名同名），值是 torch 形参名。positional 缺任一 slot → fail-closed；keyword 里某 slot 在该 case 不存在（如全局 median 无 dim）→ 该 kwarg 自然缺席 → 调到的就是 torch 的全局 arity。**变体自动跟随 case，采集端无需也不得为此写任何算子分支**（律令#0）。"
+    },
+    "_baseline_note": "torch-对标场景基线 = 同一台真机上 torch_npu 跑 torch.median 的 kernel-only 耗时（真机内基线，非 GPU 外部数据）。采集 = aclnn_runtime/perf_msprof.py（msprof --task-time + MSTX 测量窗，只累加 device 计算 kernel、MEMCPY_ASYNC 不计入）；perf_compare 源无关、只读 us+scope+ratio、逻辑零改。**未接通 / 无有效基线一律 BLOCKED，绝不冒充达标。**"
+  },
+  "task_pr_gaps": []
+}

@@ -111,9 +111,26 @@ def judge_exact(policy, metrics):
     return ("pass" if mism <= mm else "fail"), f"exact_mismatch={mism}"
 
 
+def judge_torch_allclose(policy, metrics):
+    """torch.allclose 语义（value 输出 与 index_value_consistency 复用同一 judge）：容错率=0，
+    `mismatch == 0` 才过（一元素超差即 fail）。
+    schema：mismatch 非负整数、numel 正整数；非法/缺失 → fail（finding #8，不抛异常、不进 pass）。"""
+    if not isinstance(metrics, dict) or "mismatch" not in metrics or "numel" not in metrics:
+        got = sorted(metrics) if isinstance(metrics, dict) else type(metrics).__name__
+        return "fail", f"metrics 缺 mismatch/numel（{got}）"
+    mism, n = metrics["mismatch"], metrics["numel"]
+    if not _is_nonneg_int(mism):
+        return "fail", f"mismatch 非法（须非负整数）: {mism!r}"
+    if not _is_pos_int(n):
+        return "fail", f"numel 非法（须正整数，防空输出假通过）: {n!r}"
+    return ("pass" if mism == 0 else "fail"), f"mismatch={mism}/numel={n}"
+
+
 _JUDGES = {precision_policy.ASCENDOPTEST_DEFAULT: judge_ascendoptest,
            precision_policy.ECOSYSTEM_MERE_MARE: judge_mere_mare,
-           precision_policy.EXACT: judge_exact}
+           precision_policy.EXACT: judge_exact,
+           precision_policy.TORCH_ALLCLOSE: judge_torch_allclose,
+           precision_policy.INDEX_VALUE_CONSISTENCY: judge_torch_allclose}
 
 
 def _judge_by_policy(policy, metrics):
@@ -140,14 +157,16 @@ def _case_input_dtypes(case):
     return out
 
 
-def _canonical(spec_standard, cdtype):
-    """按 spec 权威 standard + **spec 派生 cdtype** 复算 canonical (policy, tpid)；不可复算 → 抛 ValueError。"""
+def _canonical(spec_standard, cdtype, tolerance_source=None):
+    """按 spec 权威 standard + **spec 派生 cdtype** 复算 canonical (policy, tpid)；不可复算 → 抛 ValueError。
+
+    `tolerance_source` 仅对 torch_allclose 生效（其余标准忽略，向后兼容）——单输出 torch 对标场景据此分源容差。"""
     tpid = precision_policy.tolerance_policy_id(spec_standard, cdtype)
-    pol = precision_policy.threshold_for(spec_standard, cdtype)
+    pol = precision_policy.threshold_for(spec_standard, cdtype, tolerance_source)
     return pol, tpid
 
 
-def _precision_contract(eff_standard, cdtype, exp, ev_prec, canon_acc):
+def _precision_contract(eff_standard, cdtype, exp, ev_prec, canon_acc, tolerance_source=None):
     """口径三处一致（**spec 派生 canonical**）——防 caseset+evidence 同步放宽。返回 (ok, why)。
 
     以 **eff_standard**（据 spec + spec 派生 cdtype/compare 复算）+ **spec 派生 cdtype**（非 caseset 自声明）
@@ -161,7 +180,7 @@ def _precision_contract(eff_standard, cdtype, exp, ev_prec, canon_acc):
     if not isinstance(ev_prec.get("policy"), dict):
         return False, "evidence.precision 缺结构化 policy"
     try:
-        canon_pol, canon_tpid = _canonical(eff_standard, cdtype)
+        canon_pol, canon_tpid = _canonical(eff_standard, cdtype, tolerance_source)
     except (ValueError, KeyError) as ex:
         return False, f"无法据 spec 复算 canonical（standard={eff_standard} dtype={cdtype}）：{ex}"
     canon_digest = precision_policy.threshold_digest(canon_pol)
@@ -194,6 +213,194 @@ def _precision_contract(eff_standard, cdtype, exp, ev_prec, canon_acc):
         if ev_prec.get("acceptance_metrics") is not None:
             return False, "spec 未声明 acceptance，但 evidence 私带 acceptance_metrics（拒绝）"
     return True, ""
+
+
+# ============================================ 多输出逐输出判定 + AND 折叠（torch 对标）============
+# 触发：caseset `expected.outputs[]` 为列表（多输出契约扩展）。单输出算子（无 outputs 字段）走上方 legacy
+# 路径**完全不变**（向后兼容硬约束）。每个输出的判据仍**据 spec 复算 canonical**（derive_output_contracts）、
+# 与 caseset/evidence 三处对齐——防「caseset+evidence 同步放宽」在多输出层换入口重演。
+def _fold_precision_states(states):
+    """AND 折叠：任一 fail→fail；否则任一 uncertain→uncertain；全 pass→pass；空/异常→fail（不静默放过）。"""
+    if any(s == "fail" for s in states):
+        return "fail"
+    if any(s == "uncertain" for s in states):
+        return "uncertain"
+    if states and all(s == "pass" for s in states):
+        return "pass"
+    return "fail"
+
+
+def _mark_prec_fail(row):
+    """把三层精度字段一并落 fail，保 verdict 字段自洽（多输出口径/契约失败时用）。"""
+    row["catlass_compare_pass"] = "na"
+    row["standard_profile_pass"] = "fail"
+    row["acceptance_precision_pass"] = "fail"
+    row["精度"] = "fail"
+
+
+def _taskdoc_tol(spec):
+    """spec.precision.taskdoc_tol → (rtol, atol)（仅 tolerance_source==taskdoc 时用）；缺/畸形 → None（下游 fail-closed）。"""
+    t = (spec.get("precision") or {}).get("taskdoc_tol") if isinstance(spec, dict) else None
+    if isinstance(t, (list, tuple)) and len(t) == 2:
+        return (t[0], t[1])
+    return None
+
+
+def _one_output_contract(canon, canon_acc, exp_o, ev_o):
+    """单个输出的口径三处对齐（canonical 据 spec 派生 vs caseset.expected.outputs[k] vs evidence.precision.outputs[k]）。
+
+    对齐 standard + 结构化 policy + tolerance_policy_id + **threshold digest**，外加 acceptance 层。
+    返回 (ok, why)。**不信 caseset 自声明的容差**，canonical 一律由 derive_output_contracts 据 spec 复算。
+
+    审计修补：
+      · finding #6 —— 加校 `threshold`（digest）。此前多输出只核 standard/policy/tpid，**不核 threshold**，
+        于是 caseset 与 evidence 可以同步填任意 digest 而三处一致门照过（「三处 digest 一致」并未成立）。
+        tpid 也从「canonical 非 None 才校」改成**无条件全等**（index 输出 canonical tpid=None，
+        旧写法等于放任两侧乱填）。
+      · finding #2 —— acceptance 层不再被忽略：spec 声明了就逐输出按 canonical 比对并要求 acceptance_metrics；
+        spec 没声明（含该输出标准为 exact/behavioral 而继承 standard）则两侧一律**不得私带** acceptance 字段。
+    """
+    if not isinstance(exp_o, dict):
+        return False, "：caseset 输出项非对象"
+    if not isinstance(ev_o, dict):
+        return False, "：evidence 输出项非对象"
+    if not isinstance(exp_o.get("policy"), dict):
+        return False, "：caseset 输出缺结构化 policy"
+    if not isinstance(ev_o.get("policy"), dict):
+        return False, "：evidence 输出缺结构化 policy"
+    try:
+        canon_digest = precision_policy.threshold_digest(canon["policy"])
+    except (ValueError, KeyError) as ex:
+        return False, f"：无法为 canonical policy 出 threshold digest：{ex}"
+    for side, obj in (("caseset", exp_o), ("evidence", ev_o)):
+        if obj.get("standard") != canon["standard"]:
+            return False, f"：{side}.standard={obj.get('standard')} ≠ canonical {canon['standard']}"
+        if obj.get("policy") != canon["policy"]:
+            return False, f"：{side}.policy 与 canonical 不一致（放宽/漏字段/多字段）"
+        if obj.get("tolerance_policy_id") != canon["tolerance_policy_id"]:
+            return False, (f"：{side}.tolerance_policy_id={obj.get('tolerance_policy_id')} "
+                           f"≠ canonical {canon['tolerance_policy_id']}")
+        if obj.get("threshold") != canon_digest:
+            return False, (f"：{side}.threshold(digest)={obj.get('threshold')} ≠ canonical {canon_digest}")
+    if canon_acc is not None:                             # spec 声明 acceptance → 三处全等 + 须有 acceptance_metrics
+        for side, obj in (("caseset", exp_o), ("evidence", ev_o)):
+            if obj.get("acceptance_policy") != canon_acc["policy"]:
+                return False, f"：{side}.acceptance_policy 与 spec-canonical 不一致（放宽/漏字段/多字段）"
+            if obj.get("acceptance_tolerance_policy_id") != canon_acc["tolerance_policy_id"]:
+                return False, f"：{side}.acceptance_tolerance_policy_id 与 spec-canonical 不一致"
+        if not isinstance(ev_o.get("acceptance_metrics"), dict):
+            return False, "：spec 声明 acceptance 但 evidence 该输出缺 acceptance_metrics（必填）"
+    else:                                                 # 未声明 → 两侧一律不得私带（防在多输出层重演 T5 洞）
+        for side, obj in (("caseset", exp_o), ("evidence", ev_o)):
+            for key in ("acceptance_policy", "acceptance_tolerance_policy_id"):
+                if obj.get(key) is not None:
+                    return False, f"：spec 未声明该输出的 acceptance，但 {side} 私带 {key}（额外口径，拒绝）"
+        if ev_o.get("acceptance_metrics") is not None:
+            return False, "：spec 未声明该输出的 acceptance，但 evidence 私带 acceptance_metrics（拒绝）"
+    return True, ""
+
+
+def _judge_multi(spec, spec_standard, tol_src, e, c, exp, ev_prec, dims, row):
+    """多输出逐输出判定 + AND 折叠，就地写 row（功能/精度/三层字段/判据）。任一环失败即整案精度 fail。
+
+    ⚠ **本 case 该有哪些输出，由 spec 说了算**（审计严重#1）。旧实现只要求 `evidence.outputs` 与
+    `caseset.outputs` 等长、再按 role 匹配 canonical —— 于是**从 caseset 和 evidence 里同步删掉一个输出
+    （如 dim=0 双输出 case 的 indices）整案照样 pass**：少一个输出就少一整条判据链，却谁也没发现。
+    现在权威输出集 = `precision_policy.active_output_names(spec, case.attrs)`（spec 的 out 参数 ×
+    `call_variants` 变体表 × 本 case 的 attr 取值），并逐位严格校 **数量 / 顺序 / name / role**。
+    """
+    cid = c.get("id") or "case"
+    # ① 本 case 的**权威**输出身份序列——只从 spec × attrs 派生，caseset/evidence 无权参与。
+    try:
+        active = precision_policy.active_output_names(spec, c.get("attrs") or {}, cid)
+    except (ValueError, KeyError) as ex:
+        row.update(功能="fail", 判据=f"据 spec 派生本 case 的 active outputs 失败：{ex}")
+        return
+    if not active:
+        row.update(功能="fail", 判据="spec 据本 case attrs 派生出的输出集为空（无输出可判）")
+        return
+    # ② canonical 逐输出契约（standard 层 + acceptance 层）——同样只据 spec。
+    tol_tuple = _taskdoc_tol(spec) if tol_src == "taskdoc" else None
+    try:
+        contracts = precision_policy.derive_output_contracts(
+            spec, _case_input_dtypes(c), spec_standard, tol_src, tol_tuple)
+        acc_contracts = precision_policy.derive_acceptance_contracts(spec, contracts)
+    except (ValueError, KeyError) as ex:
+        row.update(功能="fail", 判据=f"多输出 IO 契约派生失败：{ex}")
+        return
+    # 身份主键 = **输出 name**（审计 finding #8）。旧实现按 role 建唯一映射 → 合法的「两个 value 输出」
+    # 会被直接拒；role 只决定判据类型，不足以当身份。
+    by_name = {ct["name"]: (i, ct) for i, ct in enumerate(contracts)}
+    canon_seq = []
+    for n in active:
+        if n not in by_name:
+            row.update(功能="fail", 判据=f"spec 变体声明的输出 {n!r} 不在 out 参数契约中（spec 自相矛盾）")
+            return
+        i, ct = by_name[n]
+        canon_seq.append((ct, acc_contracts[i] if acc_contracts is not None else None))
+    # ③ caseset / evidence 的输出集必须与权威序列**逐位同一**（数量/顺序/name/role）。
+    outs = exp.get("outputs")
+    if not isinstance(outs, list) or not outs:
+        row.update(功能="fail", 判据="expected.outputs 缺失/空（spec 为多输出契约，caseset 必须逐输出声明）")
+        return
+    if len(outs) != len(active):
+        row.update(功能="fail",
+                   判据=f"caseset 声明 {len(outs)} 个输出 ≠ spec 据本 case attrs 派生的 {len(active)} 个 "
+                        f"{active}（删/加输出即少/多一整条判据链，拒）")
+        return
+    ev_outs = ev_prec.get("outputs") if isinstance(ev_prec, dict) else None
+    if not isinstance(ev_outs, list) or len(ev_outs) != len(active):
+        n = len(ev_outs) if isinstance(ev_outs, list) else ev_outs
+        row.update(功能="fail", 判据=f"evidence.precision.outputs 缺失/长度({n})≠spec 派生 {len(active)}")
+        return
+    # 功能维（与单输出一致：evidence.status==ok 才 pass）
+    if "功能" in dims:
+        row["功能"] = "pass" if e.get("status") == "ok" else "fail"
+    if "精度" not in dims:
+        row["判据"] = f"dims={dims}（多输出·性能交 perf_compare）"
+        return
+    std_states, acc_states, whys = [], [], []
+    for k, (exp_o, ev_o) in enumerate(zip(outs, ev_outs)):
+        if not isinstance(exp_o, dict) or not isinstance(ev_o, dict):
+            row.update(判据=f"输出#{k} caseset/evidence 项非对象"); _mark_prec_fail(row); return
+        canon, canon_acc = canon_seq[k]
+        name, role = canon["name"], canon["role"]
+        for side, obj in (("caseset", exp_o), ("evidence", ev_o)):
+            if obj.get("name") != name:
+                row.update(判据=f"输出#{k} {side}.name={obj.get('name')!r} ≠ spec 派生身份 {name!r}"
+                                f"（顺序/身份被动过，拒）")
+                _mark_prec_fail(row); return
+            if obj.get("role") != role:
+                row.update(判据=f"输出#{k}({name}) {side}.role={obj.get('role')!r} ≠ spec out_role {role!r}")
+                _mark_prec_fail(row); return
+        if exp_o.get("index") is not None and exp_o["index"] != k:
+            row.update(判据=f"输出#{k}({name}) caseset.index={exp_o['index']!r} ≠ 落地序 {k}（换序，拒）")
+            _mark_prec_fail(row); return
+        ok, why = _one_output_contract(canon, canon_acc, exp_o, ev_o)
+        if not ok:
+            row.update(判据=f"输出#{k}({name}/{role}) 口径{why}"); _mark_prec_fail(row); return
+        metrics = ev_o.get("metrics")
+        if not isinstance(metrics, dict):
+            row.update(判据=f"输出#{k}({name}/{role}) 缺 metrics（误差分布未复算）"); _mark_prec_fail(row); return
+        st, w = _judge_by_policy(canon["policy"], metrics)
+        std_states.append(st)
+        if canon_acc is not None:                        # acceptance 有独立口径 → 用 acceptance_metrics 单判
+            ast, aw = _judge_by_policy(canon_acc["policy"], ev_o.get("acceptance_metrics"))
+        else:                                            # 无独立 acceptance → 继承 standard（同 legacy 语义）
+            ast, aw = st, w
+        acc_states.append(ast)
+        whys.append(f"#{k}{name}({role}):acceptance={ast}({aw})"
+                    + (f" | standard={st}({w})" if canon_acc is not None else ""))
+    std_folded = _fold_precision_states(std_states)
+    acc_folded = _fold_precision_states(acc_states)
+    row["catlass_compare_pass"] = "na"
+    row["standard_profile_pass"] = std_folded
+    row["acceptance_precision_pass"] = acc_folded
+    row["精度"] = acc_folded                              # 放行只看 acceptance（同单输出）
+    row["risk"] = (acc_folded == "pass" and std_folded == "fail")
+    if row["risk"]:
+        whys.append("⚠risk：acceptance 过但平台底线(standard) 不过 → 需人工 CP")
+    row["判据"] = "多输出折叠[" + "；".join(whys) + f"]→{acc_folded}"
 
 
 # ---- dims 受控词表（finding #4）：只认 功能/精度/性能；空/未知/数值 case 缺精度 → contract fail ----
@@ -594,6 +801,8 @@ def validate(spec, caseset, evidence):
     except ValueError as ex:
         spec_standard = None
         problems.append(f"spec 精度标准无法解析：{ex}")
+    # torch_allclose 容差来源（仅该标准用；其余标准忽略，向后兼容）——单/多输出路径复算 canonical 时据此分源。
+    tol_src = (spec.get("precision") or {}).get("tolerance_source") if isinstance(spec.get("precision"), dict) else None
 
     if vm not in ("exact", "numerical", "behavioral"):
         problems.append(f"spec.verify_mode={vm!r} 非法（仅 exact/numerical/behavioral）")
@@ -687,6 +896,19 @@ def validate(spec, caseset, evidence):
         if spec_standard is None:
             row.update(功能="fail", 判据="spec 精度标准不可解析，无法据 spec 校验口径")
             per.append(row); continue
+        # 多输出契约扩展（torch 对标：median values+indices）：**走哪条路径由 spec 决定**（审计严重#1）。
+        # 旧写法是 `isinstance(exp.get("outputs"), list)` —— 由 caseset 自报，于是把 `outputs` 整个删掉
+        # 就能把一个多输出算子伪装成 legacy 单输出（只要它的输出 dtype 不含 `<from_input>`，legacy 派生
+        # 还真能算出来）→ index 判据链整条消失却一路绿。现在：spec 说是多输出就必须走多输出；
+        # spec 说是单输出而 caseset 私带 outputs[] → 直接拒（反向伪装同样堵死）。
+        # 单输出算子（现有 4 个：单 out 参数、无 out_role）照走下方 legacy 路径，判定链零变更。
+        if precision_policy.uses_output_contract(spec):
+            _judge_multi(spec, spec_standard, tol_src, e, c, exp, ev_prec, dims, row)
+            per.append(row); continue
+        if exp.get("outputs") is not None:
+            row.update(功能="fail",
+                       判据="spec 是单输出契约，但 caseset.expected 私带 outputs[]（多/单输出路径不由 caseset 自选），拒")
+            per.append(row); continue
         # 核心原则（finding #1/#2/#5）：cdtype **据 spec IO 矩阵派生**（校验 case.inputs name/dtype ∈ spec 允许集），
         # **不取** caseset 自声明的 compare_dtype/tpid 后缀；随后强制 expected.compare_dtype == 派生值。
         try:
@@ -713,7 +935,7 @@ def validate(spec, caseset, evidence):
         except (ValueError, KeyError) as ex:
             row.update(功能="fail", 判据=f"无法据 spec 复算 canonical acceptance：{ex}")
             per.append(row); continue
-        ok, why = _precision_contract(eff_std, cdtype, exp, ev_prec, canon_acc)
+        ok, why = _precision_contract(eff_std, cdtype, exp, ev_prec, canon_acc, tol_src)
         if not ok:
             row.update(功能="fail", 判据=f"精度口径{why}")
             per.append(row); continue

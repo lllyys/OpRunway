@@ -149,6 +149,328 @@ def _precision_evidence(case, out, golden, out_path, work_dir, ascendoptest_bool
     return prec
 
 
+# ══ 多输出契约 readback + 逐输出 evidence（torch 对标 median 见证；OpRunway 侧 compute_metrics）══════
+# 蓝图 §2.3：aclnn_py form 的 collect 拉回 out_k.bin 后，evidence 组装（含误差复算 compute_metrics）在
+# **OpRunway 侧**（判定唯一归确定性脚本链，ADR 0007）。aclnn_adapter 只做 deploy/build/exec/collect，
+# 不算 metrics、不下 pass/fail。本组函数即那条「OpRunway 侧 readback+复算」通路，**全程 op-中立**：
+# 逐输出据 caseset `expected.outputs[]` 的 role/policy/out_shape 字段驱动，**绝无按算子名分支**（律令#0）。
+
+# runner_form → 真机可收发 dtype 白名单（蓝图 §6「_NP 白名单据 runner_form 分派」）。
+#   cpp（new_example 的 runner v1）：fp32/fp16 + bf16(逻辑=fp32-on-grid)——int 仍 Track C（runner.cpp 未加分支）。
+#   aclnn_py（ctypes-aclnn runner v2）：原生 int（int64 indices 必需）+ bf16 真窄化 → 放开 int/bf16。
+# 据**能力/形态**分（合法扩），非按算子身份。
+SUPPORTED_NP_BY_FORM = {
+    "cpp": dict(_NP),
+    "aclnn_py": {"float32": np.float32, "float16": np.float16, "bfloat16": np.float32,
+                 "int64": np.int64, "int32": np.int32, "int16": np.int16,
+                 "int8": np.int8, "uint8": np.uint8, "bool": np.bool_},
+}
+
+
+def supported_np(runner_form):
+    """按 runner_form 取真机可收发 dtype 白名单（缺省 cpp）。未知 form → fail-closed（不静默兜 cpp）。"""
+    form = runner_form or "cpp"
+    if form not in SUPPORTED_NP_BY_FORM:
+        raise ValueError(f"未知 runner_form={form!r}（可选 {sorted(SUPPORTED_NP_BY_FORM)}）")
+    return SUPPORTED_NP_BY_FORM[form]
+
+
+def _load_logical_input(work_dir, inp):
+    """读一个输入张量为**逻辑** numpy（bf16 的 uint16 位模式 → fp32-on-grid；native 原样）。
+
+    index_value_consistency 的 gather 源须逻辑值（gather(self, idx)）；gen_cases 落盘的 x{j}.npy 是
+    storage 字节（bf16→uint16），故此处按逻辑 dtype 解码。"""
+    arr = np.load(_safe(work_dir, inp["path"]))
+    dtn = inp["dtype"]
+    if dtn == gen_cases._BF16:
+        return gen_cases._bf16_uint16_to_f32(np.asarray(arr, dtype=np.uint16))
+    return arr
+
+
+def _reduced_shape(src_shape, dim, keepdim):
+    """沿 dim 归约后的形状（keepdim 保 1，否则去掉该轴）；dim 越界返 None。"""
+    n = len(src_shape)
+    d = dim if dim >= 0 else dim + n
+    if not (0 <= d < n):
+        return None
+    if keepdim:
+        return src_shape[:d] + [1] + src_shape[d + 1:]
+    return src_shape[:d] + src_shape[d + 1:]
+
+
+def _resolve_reduce_axis(attrs, src_shape, out_shape):
+    """据 case **attr 值** + 形状解出 (dim, keepdim)——**op-中立**（用 attr 值 + 形状，**绝不读 attr 名、不认算子名**）。
+
+    归约类（median/max/min/mode/kthvalue…）的 index 判据需归约轴 + keepdim；纯形状推在**方阵**上歧义
+    （src=(1024,1024)→out=(1024,) 分不清 dim 0/1），故以 case 里的整型 attr 作**归约轴候选**、布尔 attr 作
+    **keepdim 候选**（无布尔 attr → 缺省 False），逐组合验「reduce(src,dim,keepdim)==out」。唯一命中才返回；
+    0 个或多个命中 → **fail-closed**（宁停勿猜错轴——错轴 gather 会静默算错值）。这是归约-带-下标族的**结构**属性
+    （必有整型 dim + 可选布尔 keepdim），据数据发现、非按算子身份裁。"""
+    src = [int(d) for d in src_shape]
+    out = [int(d) for d in out_shape]
+    dim_cands = [v for v in attrs.values() if isinstance(v, int) and not isinstance(v, bool)]
+    keep_cands = [v for v in attrs.values() if isinstance(v, bool)] or [False]
+    hits = []
+    for d in dim_cands:
+        dn = d if d >= 0 else d + len(src)
+        for kd in keep_cands:
+            if _reduced_shape(src, d, kd) == out:
+                hits.append((dn, bool(kd)))
+    hits = list(dict.fromkeys(hits))
+    if len(hits) != 1:
+        raise ValueError(
+            f"无法据 attr 值+形状唯一解出归约轴：attrs={attrs} src={src} out={out} 命中={hits}"
+            f"（index_value_consistency 需确定的归约轴；歧义/无解 fail-closed，不猜）")
+    return hits[0]
+
+
+def _index_gather_ctx(case, work_dir, policy, out_index_shape):
+    """为 index 输出构建 compute_metrics 的 gather_ctx={source, dim, keepdim}——op-中立。
+
+    source：policy.gather_from 指的**输入名** → 从 case.inputs 定位、按逻辑 dtype 解码；
+    dim/keepdim：据 case attr 值 + 源形状 vs index 输出形状解出（_resolve_reduce_axis，用值不用名）。"""
+    gather_from = policy.get("gather_from")
+    inp = next((i for i in case["inputs"] if i.get("name") == gather_from), None)
+    if inp is None:
+        raise ValueError(f"{case.get('id')}: index policy.gather_from={gather_from!r} 不在 case 输入 "
+                         f"{[i.get('name') for i in case['inputs']]}（无法取 gather 源）")
+    src = _load_logical_input(work_dir, inp)
+    dim, keepdim = _resolve_reduce_axis(case.get("attrs") or {}, list(src.shape), list(out_index_shape))
+    return {"source": src, "dim": dim, "keepdim": keepdim}
+
+
+def _read_out_bin(out_dir, produced_out):
+    """按 out_manifest 记录的 dtype+shape 读回一个 out_k.bin（driver 落盘、collect 拉回的原始输出）。
+
+    dtype/shape 取自 driver 自报的 out_manifest（**它是磁盘字节的权威**），不据 caseset 反推——
+    bf16 输出经 runner 已展宽为 fp32 落盘，manifest dtype 即 float32，据它读才不错位。"""
+    path = _safe(out_dir, produced_out["path"])
+    dt = np.dtype(produced_out["dtype"])
+    shp = [int(d) for d in produced_out.get("shape") or []]
+    arr = np.fromfile(path, dtype=dt)
+    return arr.reshape(shp) if shp else arr
+
+
+_PERF_PENDING_NOTE = "aclnn_py perf 未采集（未设 OPRUNWAY_ACLNN_PERF=1 或采集端未接通）→ us=None"
+
+
+def _perf_entry(cid, perf_by_case):
+    """该 case 的 evidence `perf` 块。**采集到才有 us；没采到一律 `us=None` + note**（绝不填 0/估计值）。
+
+    `perf_by_case` 由 `aclnn_runtime.perf_msprof.build_custom_perf_map` 产（scope 恒 kernel_only，
+    未计时的 case 带 behavior/note）。缺项 → 未采集占位；perf_compare 那边自然落 blocked，不冒充达标。
+    """
+    entry = (perf_by_case or {}).get(cid)
+    if not isinstance(entry, dict):
+        return {"scope": "kernel_only", "us": None, "note": _PERF_PENDING_NOTE}
+    out = {"scope": entry.get("scope") or "kernel_only", "us": entry.get("us")}
+    for key in ("behavior", "execution_path", "note"):
+        if entry.get(key) is not None:
+            out[key] = entry[key]
+    return out
+
+
+def build_multi_output_evidence(caseset, work_dir, out_dir, perf_by_case=None):
+    """多输出契约的 evidence 组装（OpRunway 侧 readback + 逐输出 compute_metrics，蓝图 §2.3）。
+
+    读 out_dir/out_manifest.json（aclnn_driver 产）→ 逐 case 逐输出：读 out_k.bin + golden_{k}.npy →
+    据 caseset `expected.outputs[k].policy` **复算误差分布**（value=torch_allclose/exact；index=
+    index_value_consistency，gather 源 + 归约轴 op-中立几何推）→ 组 `precision.outputs[]`。**不判 pass/fail**
+    （judge 在 validator）。standard/policy/tpid 一律**从 caseset.expected 抄**（三处一致的一环，adapter 不自造）。
+
+    单输出旧 caseset（无 `expected.outputs[]`）→ 走 legacy `_precision_evidence`（向后兼容）。
+
+    路径口径（验收门要按同一根独立复核）：`golden_path` 相对 `work_dir`（gen_cases 落盘处），`out_path`
+    **也相对 `work_dir`**（= `<out_dir 相对 work_dir>/<manifest 里的 case-相对路径>`）。另随每个输出记
+    `out_dtype`/`out_shape`（照抄 out_manifest）——`.bin` 是无自描述的裸字节，门没有这两项就读不回来。
+    """
+    man_path = _safe(out_dir, "out_manifest.json")
+    with open(man_path, encoding="utf-8") as f:
+        manifest = json.load(f)
+    # evidence 里的 `out_path` 一律**相对 work_dir**（与 legacy 单输出同一根）——验收门按 `<reports>/work`
+    # 解析产物，若这里写成「相对 out_dir」，门就找不到 out_k.bin（契约审计 High#1 的一半）。
+    # 根不写死："aclnn_out" 这层由 adapter 自己算出来（out_dir 相对 work_dir），逃出 work_dir 即 fail-closed。
+    out_root_rel = os.path.relpath(os.path.realpath(out_dir), os.path.realpath(work_dir))
+    if out_root_rel == os.curdir:
+        out_root_rel = ""
+    if out_root_rel.startswith(os.pardir) or os.path.isabs(out_root_rel):
+        raise RuntimeError(f"out_dir({out_dir}) 不在 work_dir({work_dir}) 之内——产物落在门解析根之外，拒")
+    out_root_rel = out_root_rel.replace(os.sep, "/")
+
+    def _out_rel(rel_in_out_dir):
+        """out_manifest 里的 case-相对路径 → **work_dir 相对**路径（供门按 `<reports>/work` 解析）。"""
+        return f"{out_root_rel}/{rel_in_out_dir}" if out_root_rel else rel_in_out_dir
+    # —— manifest 严格校验（codex Medium#7）——————————————————————————————————————
+    # 原来两行字典推导，两个洞：① 重复的 case_id / 重复的 output index **后写覆盖前写**——覆盖是静默的，
+    # 「到底拿哪一份字节算的 metrics」不可知；② caseset 里没有的多余 index（如 index=99）被**完全忽略**——
+    # driver 多写了输出、写错了位置，evidence 照样正常生成。两者都属本仓最忌的「看起来对」。
+    # 现在逐项显式校，任何重复 / 多余 / 缺失一律 fail-closed。
+    produced_by_cid = {}
+    for rec in manifest.get("produced", []):
+        if not isinstance(rec, dict):
+            raise RuntimeError(f"out_manifest.produced 含非对象条目（{rec!r}）——产物损坏，拒")
+        cid_m = rec.get("case_id")
+        if not (isinstance(cid_m, str) and cid_m):
+            raise RuntimeError(f"out_manifest.produced 有条目缺/坏 case_id（{cid_m!r}）——产物损坏，拒")
+        if cid_m in produced_by_cid:
+            raise RuntimeError(f"out_manifest 有重复 case_id={cid_m!r}——后写会静默覆盖前写，"
+                               f"「metrics 是拿哪一份 out.bin 算的」不可知，拒")
+        by_idx = {}
+        for o in rec.get("outputs") or []:
+            if not isinstance(o, dict) or "index" not in o:
+                raise RuntimeError(f"{cid_m}: out_manifest 输出项缺/坏 index（{o!r}）")
+            try:
+                idx = int(o["index"])
+            except (TypeError, ValueError):
+                raise RuntimeError(f"{cid_m}: out_manifest 输出项 index={o['index']!r} 非整数")
+            if idx in by_idx:
+                raise RuntimeError(f"{cid_m}: out_manifest 输出 index={idx} 重复——后写会静默覆盖前写，拒")
+            by_idx[idx] = o
+        produced_by_cid[cid_m] = by_idx
+    # manifest 记了 caseset 里没有的 case = driver 跑的不是这份用例集（或产物串了轮次）→ 拒。
+    _cs_ids = {c["id"] for c in caseset["cases"]}
+    _extra_cids = sorted(set(produced_by_cid) - _cs_ids)
+    if _extra_cids:
+        raise RuntimeError(f"out_manifest 含 caseset 之外的 case_id {_extra_cids}"
+                           f"——跑的不是这份用例集（或混了上一轮产物），拒")
+    ev = []
+    for c in caseset["cases"]:
+        cid = c["id"]
+        _check_id("case_id", cid)
+        exp = c["expected"]
+        outs = exp.get("outputs")
+        prod = produced_by_cid.get(cid)
+        if prod is None:
+            raise RuntimeError(f"{cid}: out_manifest 无该 case 的产物（driver 未跑该 case？）")
+        # Medium#7：**index 集必须精确等于 range(n)**——多一个（driver 多写/写错位）或少一个（漏跑某输出）
+        # 都拒。缺失单看下面逐 k 的 `po is None` 也拦得住，但**多余**的以前完全没人管；两边一起卡才闭合。
+        # 单输出旧 caseset（无 `outputs[]`）的期望集就是 {0}。
+        _n_out = len(outs) if isinstance(outs, list) else 1
+        _want_idx, _got_idx = set(range(_n_out)), set(prod)
+        if _got_idx != _want_idx:
+            raise RuntimeError(
+                f"{cid}: out_manifest 输出 index 集 {sorted(_got_idx)} ≠ 期望 {sorted(_want_idx)}"
+                f"（多余 {sorted(_got_idx - _want_idx)} / 缺失 {sorted(_want_idx - _got_idx)}）"
+                f"——caseset 声明 {_n_out} 个输出，多一个少一个都拒（fail-closed）")
+        if not isinstance(outs, list):
+            # 向后兼容：单输出旧 caseset（无 outputs[]）→ legacy 单输出路径（读 out_0.bin）。
+            po = prod.get(0)
+            if po is None:
+                raise RuntimeError(f"{cid}: 单输出 caseset 但 out_manifest 无 index=0 产物")
+            golden = np.load(_safe(work_dir, exp["golden_path"]))
+            out = _read_out_bin(out_dir, po)
+            out_rel = _out_rel(po["path"])
+            ev.append({"case_id": cid, "status": "ok",
+                       "precision": _precision_evidence(c, out, golden, out_rel, work_dir),
+                       "perf": _perf_entry(cid, perf_by_case)})
+            continue
+        ev_outs = []
+        golden_src = exp.get("golden_source")
+        for k, o in enumerate(outs):
+            po = prod.get(k)
+            if po is None:
+                raise RuntimeError(f"{cid}: out_manifest 缺输出 index={k}（role={o.get('role')}）")
+            if po.get("role") != o.get("role"):
+                raise RuntimeError(f"{cid}: 输出#{k} out_manifest role={po.get('role')} ≠ caseset role={o.get('role')}")
+            policy = o["policy"]
+            golden = np.load(_safe(work_dir, o["golden_path"]))
+            out = _read_out_bin(out_dir, po)
+            # 归一到 caseset **声明**的输出形状（authoritative）：out.bin 的扁平 dump 经 ascontiguousarray 会把
+            # 0-d 标量（rank1 归约）提成 (1,)，与 golden 的 0-d 不同形；据声明形状 reshape 两侧（numel 恒等、合法）。
+            oshape = [int(d) for d in (o.get("out_shape") or [])]
+            golden = np.asarray(golden).reshape(oshape) if oshape else np.asarray(golden).reshape(())
+            out = out.reshape(oshape) if oshape else out.reshape(())
+            if o.get("role") == "index":
+                gctx = _index_gather_ctx(c, work_dir, policy, list(out.shape))
+                metrics = precision_policy.compute_metrics(out, golden, policy, gather_ctx=gctx)
+            else:
+                metrics = precision_policy.compute_metrics(out, golden, policy)
+            # out 是 raw `.bin`（driver 扁平 dump），门要独立读回它就必须知道**磁盘字节的口径**：
+            # `out_dtype`/`out_shape` 一律**照抄 out_manifest**（driver 自报、它是字节的权威；bf16 已在
+            # runner 侧展宽为 fp32，故此处 dtype 可能与 caseset 的 compare_dtype 不同，属正常）。
+            # `threshold` 与 standard/policy/tpid 同理**从 caseset.expected 抄**，凑齐门的「三处一致」四字段。
+            # `name` 与 role 一起构成输出身份：validator 会把两侧的 (name, role) 逐位与 **spec 派生**的
+            # 权威输出序列对齐（严重#1）——只有 role 的话，同 role 的两个输出互换查不出来。
+            item = {"name": o.get("name"), "role": o.get("role"), "standard": o.get("standard"),
+                    "tolerance_policy_id": o.get("tolerance_policy_id"), "policy": policy,
+                    "threshold": o.get("threshold"),
+                    "metrics": metrics, "golden_path": o["golden_path"], "out_path": _out_rel(po["path"]),
+                    "out_dtype": str(po.get("dtype")), "out_shape": [int(x) for x in (po.get("shape") or [])],
+                    "provenance": {"golden_sha256": _sha256_file(_safe(work_dir, o["golden_path"])),
+                                   "out_sha256": _sha256_file(_safe(out_dir, po["path"])),
+                                   "numel": int(np.asarray(golden).size)}}
+            if o.get("index_of") is not None:
+                item["index_of"] = o["index_of"]
+            ev_outs.append(item)
+        prec = {"outputs": ev_outs,
+                "oracle_source": precision_policy.oracle_source_from_golden(golden_src),
+                "not_settled": False}
+        ev.append({"case_id": cid, "status": "ok", "precision": prec,
+                   "perf": _perf_entry(cid, perf_by_case)})
+    return ev
+
+
+def _finite_pos_us(x):
+    """计时值合法性：有限正数（拒 bool/None/NaN/inf/≤0）——与 `perf_compare._finite_pos` 同口径。"""
+    return (isinstance(x, (int, float)) and not isinstance(x, bool)
+            and math.isfinite(x) and x > 0)
+
+
+def parse_torch_npu_baseline(path):
+    """解析 torch_npu 基线 JSON → perf_compare 可吃的 baseline（**源无关**，perf_compare 逻辑零改）。
+
+    蓝图 §2.5/§3 组件⑤：torch-对标场景的基线 = **同一台真机上 torch_npu 跑同一份 torch reference** 的
+    kernel-only 耗时（真机内基线、非 GPU 外部数据）。文件由
+    `aclnn_runtime.perf_msprof.build_baseline_document` 产（`aclnn_adapter` 落到 `work/_torch_npu_baseline.json`）。
+
+    本函数是**采集端的消费口**，只做 schema 归一 + fail-closed 校验，**绝不补数、绝不估算**：
+      · `scope` 必须是 `kernel_only`（双边同口径是 perf_compare 可比性的前提），否则拒；
+      · `per_case[].us` 必须是**有限正数**（0/负/NaN/inf/字符串 → 该条丢弃并记 note，不进基线）；
+      · 重复 `case_id` → 拒（哪一份字节算的都不可知，属「看起来对」）；
+      · `excluded[]`（行为不是 `npu` 的 case：cpu_fallback / hybrid / 无 kernel / 精度未过）**原样透传**到
+        `notes`，让「为什么这个 case 没有基线」在产物里可读；它们不进 `per_case`，于是 perf_compare
+        自然判 blocked——**不会拿非 device 数据冒充基线**。
+      · `per_case` 为空是**合法**结果（= 一条有效基线都没采到）→ perf_compare 逐 case blocked，非达标。
+    """
+    with open(path, encoding="utf-8") as f:
+        bl = json.load(f)
+    if not isinstance(bl, dict):
+        raise ValueError(f"torch_npu 基线须为 JSON object，得 {type(bl).__name__}")
+    if bl.get("scope") != "kernel_only":
+        raise ValueError(f"torch_npu 基线 scope 须为 kernel_only（得 {bl.get('scope')!r}）——"
+                         f"口径不一致的基线不可比，拒（fail-closed）")
+    raw = bl.get("per_case")
+    if not isinstance(raw, list):
+        raise ValueError("torch_npu 基线缺/坏 per_case（须 list）")
+    per, notes, seen = [], [], set()
+    for r in raw:
+        if not isinstance(r, dict) or not isinstance(r.get("case_id"), str) or not r["case_id"]:
+            notes.append(f"丢弃畸形基线条目: {r!r}")
+            continue
+        cid = r["case_id"]
+        if cid in seen:
+            raise ValueError(f"torch_npu 基线有重复 case_id={cid!r}——拒（取哪一份不可知）")
+        seen.add(cid)
+        if not _finite_pos_us(r.get("us")):
+            notes.append(f"{cid}: 基线 us={r.get('us')!r} 非有限正数 → 不计入基线")
+            continue
+        item = {"case_id": cid, "us": float(r["us"]), "env": r.get("env") or "torch_npu msprof"}
+        if r.get("execution_path") is not None:
+            item["execution_path"] = r["execution_path"]
+        per.append(item)
+    for ex in bl.get("excluded") or []:
+        if isinstance(ex, dict):
+            notes.append(f"{ex.get('case_id')}: 无有效 torch_npu 基线（behavior={ex.get('behavior')!r}，"
+                         f"{ex.get('reason')}）")
+    out = {"source": "torch_npu", "scope": "kernel_only", "per_case": per,
+           "baseline_source": "torch_npu"}
+    if bl.get("collection") is not None:
+        out["collection"] = bl["collection"]
+    if notes:
+        out["notes"] = notes
+    return out
+
+
 # ── 输出形状：显式声明优先，缺省退回「输出 = 各输入广播结果」（契约 C1 的下游）────────────────────
 # **当初为什么要校**（别把它当无意义的死板检查删掉）：runner v1 的 manifest 一行只带**一组** dims，
 # 输入 buffer 与输出 buffer 共用它——这在 elementwise 上成立，于是 host 侧把「golden 形状 == 各输入广播
@@ -942,6 +1264,19 @@ except Exception as _ex:  # 缺 catlass_adapter/其依赖时**不影响库用法
 
     refuse_reserved_out = _guards_unavailable
     assert_non_acceptance = _guards_unavailable
+
+
+# --- torch 对标 · aclnn_py adapter（ctypes-aclnn runner form）注册：实现在 aclnn_adapter.py，此处加法接入 ---
+# 比照 CATLASS_MODES 的接入范式（按**能力/形态**扩、非按算子身份）。aclnn_adapter 只做 deploy/build/exec/
+# collect；evidence 组装（含 compute_metrics 误差复算）走本模块 build_multi_output_evidence（判定唯一归
+# 确定性脚本链，ADR 0007）。缺 aclnn_runtime/其依赖时不影响 MODES 的 mock/new_example/catlass_* 照跑。
+_ACLNN_IMPORT_ERR = None
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from aclnn_adapter import ACLNN_MODES  # noqa: E402
+    MODES.update(ACLNN_MODES)
+except Exception as _ex2:                   # 缺件不阻塞库用法（aclnn_py mode 届时不可用、其余照跑）
+    _ACLNN_IMPORT_ERR = _ex2
 
 
 def main(argv):

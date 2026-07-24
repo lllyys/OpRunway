@@ -8,7 +8,7 @@
   · exact：mismatch<=0；未支持 dtype fail-fast；select_standard 向后兼容映射。
   · PASSED_WITH_RISK 路径（acceptance_policy 宽于 standard）→ run_workflow 退出码 2 + requires_human_cp。
 """
-import hashlib, json, os, subprocess, sys, tempfile, shutil, unittest
+import copy, hashlib, json, os, subprocess, sys, tempfile, shutil, unittest
 import numpy as np
 
 import precision_policy as P
@@ -151,9 +151,10 @@ class FailFastAndRoutingTest(unittest.TestCase):
                          "precision": {"standard": "ecosystem_mere_mare"}}), "ecosystem_mere_mare")
 
     def test_select_standard_unknown_oracle_fail_closed(self):
-        """Q9-Part B：numerical + 非白名单 oracle（如 torch/scipy/std_exact「与 python 一致」类）→ 显式 raise，
-        堵 class C 静默降级为 ascendoptest_default。白名单只含 {ascendoptest, none, 缺省}。"""
-        for orc in ("torch", "scipy", "std_exact", "numpy-f32-matmul"):
+        """Q9-Part B：numerical + 非白名单 oracle（如 scipy/std_exact「与 python 一致」类）→ 显式 raise，
+        堵 class C 静默降级为 ascendoptest_default。白名单只含 {ascendoptest, none, 缺省}。
+        （torch 已明确映射到 torch_allclose——见 test_select_standard_torch_maps_allclose，不在此 raise 集。）"""
+        for orc in ("scipy", "std_exact", "numpy-f32-matmul"):
             with self.assertRaises(ValueError, msg=orc):
                 P.select_standard({"verify_mode": "numerical", "precision": {"oracle": orc}})
         # 白名单成员仍放行
@@ -924,6 +925,477 @@ class GoldenContractStdlibTest(unittest.TestCase):
         out = subprocess.run([sys.executable, "-c", code], cwd=_HERE,
                              capture_output=True, text=True, check=True)
         self.assertEqual(out.stdout.strip(), "False")
+
+
+def _median_spec(tol_src="dtype_table", in_dtypes=("float32", "float16", "bfloat16", "int32")):
+    """见证用 median spec（多输出 values+indices；op-中立字段驱动，非按算子名）。
+
+    ⚠ `indices` 必带 `gather_from`（审计 finding #7）：index 判据的 gather 源只能由 spec 锚定，
+    不得取「caseset 的第一个输入」。`call_variants` 声明「dim=null → 只落 values」——本 case
+    该有哪些输出由 **spec** 说了算（审计严重#1）。"""
+    return {
+        "op": "Median", "verify_mode": "numerical",
+        "precision": {"oracle": "torch", "standard": "torch_allclose", "tolerance_source": tol_src},
+        "params": [
+            {"name": "self", "io": "in", "dtype": list(in_dtypes)},
+            {"name": "dim", "io": "attr", "dtype": ["int64"]},
+            {"name": "keepdim", "io": "attr", "dtype": ["bool"]},
+            {"name": "values", "io": "out", "out_role": "value", "dtype": ["<from_input>"]},
+            {"name": "indices", "io": "out", "out_role": "index", "index_of": "values",
+             "gather_from": "self", "dtype": ["int64"]},
+        ],
+        "call_variants": [
+            {"when": {"attr": "dim", "is_null": True}, "symbol": "Median",
+             "active_attrs": [], "active_outputs": ["values"]},
+            {"when": {"attr": "dim", "is_null": False}, "symbol": "MedianDim",
+             "active_attrs": ["dim", "keepdim"], "active_outputs": ["values", "indices"]},
+        ],
+    }
+
+
+class TorchAllcloseStandardTest(unittest.TestCase):
+    """WI-A1：torch_allclose standard 接入——select/threshold_for/digest/compute_metrics 语义。"""
+
+    def test_select_standard_torch_maps_allclose(self):
+        # oracle=torch（无显式 standard）→ torch_allclose（不再 raise）
+        self.assertEqual(P.select_standard({"verify_mode": "numerical",
+                         "precision": {"oracle": "torch"}}), P.TORCH_ALLCLOSE)
+        # 显式 standard=torch_allclose 优先放行
+        self.assertEqual(P.select_standard({"verify_mode": "numerical",
+                         "precision": {"standard": "torch_allclose"}}), P.TORCH_ALLCLOSE)
+
+    def test_threshold_for_dtype_table_values(self):
+        """dtype_table 逐 dtype (rtol, atol)——抄自参考仓 accuracy.py:47-54（存 atol,rtol，本表转成 rtol,atol）。"""
+        exp = {"float16": (2 ** -10, 9e-2), "bfloat16": (2 ** -7, 1e-1),
+               "float32": (2 ** -13, 1e-3), "float64": (2 ** -30, 1e-6)}
+        for dt, (rtol, atol) in exp.items():
+            pol = P.threshold_for("torch_allclose", dt)   # 缺省 tolerance_source=dtype_table
+            self.assertEqual(pol["kind"], "torch_allclose", dt)
+            self.assertAlmostEqual(pol["rtol"], rtol, places=12, msg=dt)
+            self.assertAlmostEqual(pol["atol"], atol, places=12, msg=dt)
+            self.assertIs(pol["equal_nan"], True, dt)
+
+    def test_threshold_for_torch_default_and_taskdoc(self):
+        pd = P.threshold_for("torch_allclose", "float32", "torch_default")
+        self.assertAlmostEqual(pd["rtol"], 1e-5); self.assertAlmostEqual(pd["atol"], 1e-8)
+        pt = P.threshold_for("torch_allclose", "float32", "taskdoc", taskdoc_tol=(3e-4, 5e-3))
+        self.assertAlmostEqual(pt["rtol"], 3e-4); self.assertAlmostEqual(pt["atol"], 5e-3)
+        with self.assertRaises(ValueError):   # taskdoc 缺 taskdoc_tol → fail-closed
+            P.threshold_for("torch_allclose", "float32", "taskdoc")
+
+    def test_threshold_for_dtype_table_rejects_int(self):
+        with self.assertRaises(ValueError):   # 整型应走 exact，不在 dtype_table
+            P.threshold_for("torch_allclose", "int32")
+
+    def test_threshold_digest_torch_allclose(self):
+        """finding #6：digest 必须是 **JSON-native list**（tuple 落 JSON 变 list → 往返后恒不等）。"""
+        pol = P.threshold_for("torch_allclose", "float32")
+        self.assertEqual(P.threshold_digest(pol), [pol["rtol"], pol["atol"]])
+        ipol = {"kind": "index_value_consistency", "gather_from": "self",
+                "value_rtol": 0.1, "value_atol": 0.2}
+        self.assertEqual(P.threshold_digest(ipol), [0.1, 0.2])
+
+    def test_threshold_digest_json_roundtrip_stable(self):
+        """负向（finding #6）：落盘 JSON 再读回来必须与内存值**相等**——旧的 tuple 返回值在这里必挂。"""
+        for pol in (P.threshold_for("torch_allclose", "float32"),
+                    P.threshold_for("torch_allclose", "float16"),
+                    P.threshold_for("exact", "int32"),
+                    P.threshold_for("ascendoptest_default", "float32"),
+                    {"kind": "index_value_consistency", "gather_from": "self",
+                     "value_rtol": 0.1, "value_atol": 0.2}):
+            d = P.threshold_digest(pol)
+            self.assertEqual(json.loads(json.dumps(d)), d, pol.get("kind"))
+
+    def test_compute_metrics_allclose_semantics(self):
+        pol = P.threshold_for("torch_allclose", "float32")   # rtol 2^-13, atol 1e-3
+        g = np.array([1.0, 100.0, 0.0], dtype=np.float32)
+        o_ok = np.array([1.0005, 100.01, 0.0005], dtype=np.float32)
+        self.assertEqual(P.compute_metrics(o_ok, g, pol)["mismatch"], 0)
+        o_bad = np.array([1.5, 100.0, 0.0], dtype=np.float32)   # elem0 diff 0.5 ≫ tol
+        self.assertEqual(P.compute_metrics(o_bad, g, pol)["mismatch"], 1)
+
+    def test_compute_metrics_allclose_equal_nan(self):
+        pol = P.threshold_for("torch_allclose", "float32")   # equal_nan True
+        g = np.array([np.nan, 1.0], dtype=np.float32)
+        self.assertEqual(P.compute_metrics(np.array([np.nan, 1.0], np.float32), g, pol)["mismatch"], 0)
+        # 单侧 NaN（数值 vs NaN）必须记 mismatch（不能被 nan>thr=False 吞掉）
+        self.assertEqual(P.compute_metrics(np.array([2.0, 1.0], np.float32), g, pol)["mismatch"], 1)
+
+    def test_compute_metrics_dtype_mismatch_fail_fast(self):
+        pol = P.threshold_for("torch_allclose", "float32")
+        with self.assertRaises(ValueError):
+            P.compute_metrics(np.ones(3, np.float32), np.ones(3, np.float64), pol)
+
+
+class IndexValueConsistencyTest(unittest.TestCase):
+    """WI-A4：index_value_consistency——gather(self,idx) 一致性判据 + 多输出契约派生。"""
+
+    def test_derive_output_contracts_median_float(self):
+        spec = _median_spec()
+        cts = P.derive_output_contracts(spec, [("self", "float32")], "torch_allclose", "dtype_table")
+        self.assertEqual([c["role"] for c in cts], ["value", "index"])
+        v, idx = cts
+        self.assertEqual(v["standard"], "torch_allclose")
+        self.assertEqual(v["policy"]["kind"], "torch_allclose")
+        self.assertEqual(v["tolerance_policy_id"], "torch_allclose:float32")
+        self.assertEqual(idx["policy"]["kind"], "index_value_consistency")
+        self.assertEqual(idx["policy"]["gather_from"], "self")
+        # index 的 value 容差 == 所引 value 输出的 rtol/atol
+        self.assertAlmostEqual(idx["policy"]["value_rtol"], v["policy"]["rtol"])
+        self.assertAlmostEqual(idx["policy"]["value_atol"], v["policy"]["atol"])
+        self.assertEqual(idx["standard"], "torch_allclose")
+
+    def test_derive_output_contracts_median_int_value_exact(self):
+        """int32 → value 输出走 EXACT（int→exact），index 的 value 容差 (0,0)。"""
+        spec = _median_spec()
+        cts = P.derive_output_contracts(spec, [("self", "int32")], "torch_allclose", "dtype_table")
+        v, idx = cts
+        self.assertEqual(v["standard"], "exact")
+        self.assertEqual(v["policy"]["kind"], "exact")
+        self.assertEqual((idx["policy"]["value_rtol"], idx["policy"]["value_atol"]), (0.0, 0.0))
+        self.assertEqual(idx["standard"], "exact")
+
+    def test_index_consistency_tie_pass(self):
+        """tie 输入两组不同 index、gather 值一致 → mismatch 0（合法 tie，不是 bug）。"""
+        self_arr = np.array([[3.0, 1.0, 3.0, 1.0]], dtype=np.float32)   # dim=1；median(偶4)=1.0，tie pos1/pos3
+        pol = {"kind": "index_value_consistency", "gather_from": "self",
+               "value_rtol": 2 ** -13, "value_atol": 1e-3}
+        ctx = {"source": self_arr, "dim": 1, "keepdim": False}
+        m = P.compute_metrics(np.array([3], np.int64), np.array([1], np.int64), pol, ctx)
+        self.assertEqual(m["mismatch"], 0)
+        self.assertEqual(m["numel"], 1)
+
+    def test_index_consistency_value_diff_fail(self):
+        """index 指向值不同（真下标 bug）→ mismatch>0。"""
+        self_arr = np.array([[3.0, 1.0, 3.0, 1.0]], dtype=np.float32)
+        pol = {"kind": "index_value_consistency", "gather_from": "self",
+               "value_rtol": 2 ** -13, "value_atol": 1e-3}
+        ctx = {"source": self_arr, "dim": 1, "keepdim": False}
+        m = P.compute_metrics(np.array([0], np.int64), np.array([1], np.int64), pol, ctx)  # self[0,0]=3 vs golden 1
+        self.assertEqual(m["mismatch"], 1)
+
+    def test_index_consistency_keepdim(self):
+        self_arr = np.array([[5.0, 2.0, 5.0]], dtype=np.float32)       # dim=1 keepdim → idx shape (1,1)
+        pol = {"kind": "index_value_consistency", "gather_from": "self",
+               "value_rtol": 2 ** -13, "value_atol": 1e-3}
+        ctx = {"source": self_arr, "dim": 1, "keepdim": True}
+        m = P.compute_metrics(np.array([[2]], np.int64), np.array([[0]], np.int64), pol, ctx)  # 5.0 vs 5.0 tie
+        self.assertEqual(m["mismatch"], 0)
+
+    def test_index_consistency_needs_gather_ctx(self):
+        pol = {"kind": "index_value_consistency", "gather_from": "self",
+               "value_rtol": 0.0, "value_atol": 0.0}
+        with self.assertRaises(ValueError):
+            P.compute_metrics(np.array([0], np.int64), np.array([0], np.int64), pol)
+
+
+# ============================== 审计负向回归（R2-L1：9 条 finding 的「被逮住」证据）==============
+class InfSemanticsTest(unittest.TestCase):
+    """finding #3：inf 四象限——value / index 两条路径**复用同一实现**、语义与 torch.allclose 一致。
+
+    旧洞两条互相矛盾：value 路径 `_replace_inf` 把 ±inf 换成 ±finfo.max（→ `finfo.max` 冒充 `+inf`
+    被判相等）；index 路径不换（→ `inf-inf=NaN` 把**同号 inf** 判成失配）。"""
+
+    POL = {"kind": "torch_allclose", "rtol": 1e-3, "atol": 1e-5, "equal_nan": True}
+
+    def _mism(self, o, g):
+        return P.compute_metrics(np.array(o, np.float32), np.array(g, np.float32), self.POL)["mismatch"]
+
+    def test_same_sign_inf_equal(self):
+        self.assertEqual(self._mism([np.inf], [np.inf]), 0)
+        self.assertEqual(self._mism([-np.inf], [-np.inf]), 0)
+
+    def test_opposite_sign_inf_mismatch(self):
+        self.assertEqual(self._mism([np.inf], [-np.inf]), 1)
+        self.assertEqual(self._mism([-np.inf], [np.inf]), 1)
+
+    def test_finite_max_is_not_inf(self):
+        """⭐ 核心负向：`actual=finfo.max, golden=+inf` **必须失配**（旧 `_replace_inf` 判它相等）。"""
+        fmax = float(np.finfo(np.float32).max)
+        self.assertEqual(self._mism([fmax], [np.inf]), 1)
+        self.assertEqual(self._mism([np.inf], [fmax]), 1)
+
+    def test_finite_pair_uses_allclose_formula(self):
+        self.assertEqual(self._mism([1.0], [1.0]), 0)
+        self.assertEqual(self._mism([2.0], [1.0]), 1)
+
+    def test_nan_only_by_equal_nan(self):
+        self.assertEqual(self._mism([np.nan], [np.nan]), 0)                  # equal_nan=True
+        self.assertEqual(self._mism([np.nan], [1.0]), 1)
+        self.assertEqual(self._mism([1.0], [np.nan]), 1)
+        strict = dict(self.POL, equal_nan=False)
+        m = P.compute_metrics(np.array([np.nan], np.float32), np.array([np.nan], np.float32), strict)
+        self.assertEqual(m["mismatch"], 1)
+        # NaN vs inf 也必须失配（别被任何一侧的特判吞掉）
+        self.assertEqual(self._mism([np.nan], [np.inf]), 1)
+
+    def test_index_path_shares_same_inf_semantics(self):
+        """index 路径的 gather 值命中 inf 时，判定必须与 value 路径**逐条相同**（旧洞方向相反）。"""
+        pol = {"kind": "index_value_consistency", "gather_from": "self",
+               "value_rtol": 1e-3, "value_atol": 1e-5}
+        src = np.array([[np.inf, np.inf, 1.0]], dtype=np.float32)
+        ctx = {"source": src, "dim": 1, "keepdim": False}
+        # 两个下标都指向 +inf → gather 后同号 inf → 相等（旧实现在此判失配）
+        m = P.compute_metrics(np.array([0], np.int64), np.array([1], np.int64), pol, ctx)
+        self.assertEqual(m["mismatch"], 0)
+        # 一侧 inf、一侧有限 → 失配
+        m2 = P.compute_metrics(np.array([0], np.int64), np.array([2], np.int64), pol, ctx)
+        self.assertEqual(m2["mismatch"], 1)
+
+
+class IndexGuardTest(unittest.TestCase):
+    """finding #4：index 的类型闸 + 逐元素越界闸（旧洞：astype(intp) 静默截断浮点、负下标被回绕）。"""
+
+    POL = {"kind": "index_value_consistency", "gather_from": "self",
+           "value_rtol": 1e-3, "value_atol": 1e-5}
+    SRC = np.array([[3.0, 1.0, 4.0]], dtype=np.float32)
+    CTX = {"source": SRC, "dim": 1, "keepdim": False}
+
+    def _run(self, a, g):
+        return P.compute_metrics(a, g, self.POL, self.CTX)
+
+    def test_negative_index_rejected(self):
+        """⭐ 旧洞：actual index=-1 被 take_along_axis 回绕成最后一个元素 → mismatch=0 假通过。"""
+        with self.assertRaises(ValueError) as cm:
+            self._run(np.array([-1], np.int64), np.array([2], np.int64))
+        self.assertIn("越界", str(cm.exception))
+
+    def test_out_of_range_index_rejected(self):
+        with self.assertRaises(ValueError):
+            self._run(np.array([3], np.int64), np.array([0], np.int64))
+
+    def test_float_index_rejected(self):
+        """⭐ 旧洞：`[0.9]` 被 astype(intp) 静默截成 `[0]`。"""
+        with self.assertRaises(ValueError) as cm:
+            self._run(np.array([0.9], np.float32), np.array([0], np.int64))
+        self.assertIn("非整数", str(cm.exception))
+
+    def test_bool_index_rejected(self):
+        with self.assertRaises(ValueError):
+            self._run(np.array([True], np.bool_), np.array([1], np.int64))
+
+    def test_cross_integer_dtype_rejected(self):
+        with self.assertRaises(ValueError):
+            self._run(np.array([0], np.int32), np.array([0], np.int64))
+
+    def test_legit_index_still_works(self):
+        self.assertEqual(self._run(np.array([2], np.int64), np.array([2], np.int64))["mismatch"], 0)
+
+
+class ToleranceFailClosedTest(unittest.TestCase):
+    """finding #5：容差源与容差值一律受控——只有 `None` 落缺省，rtol/atol 须非 bool、有限、非负。"""
+
+    def test_only_none_falls_back_to_default_source(self):
+        self.assertEqual(P.threshold_for("torch_allclose", "float32")["rtol"], 2 ** -13)
+        for bad in ("", False, 0, "dtype-table", [], {}):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                P.threshold_for("torch_allclose", "float32", bad)
+
+    def test_taskdoc_rtol_inf_rejected(self):
+        """⭐ 旧洞：`rtol=inf` 能生成 canonical policy → `|o-g| <= atol + inf*|g|` 恒真、判据整条废掉。"""
+        with self.assertRaises(ValueError) as cm:
+            P.threshold_for("torch_allclose", "float32", "taskdoc", taskdoc_tol=(float("inf"), 1e-8))
+        self.assertIn("有限", str(cm.exception))
+
+    def test_taskdoc_bad_values_rejected(self):
+        for bad in ((float("nan"), 1e-8), (1e-5, float("inf")), (-1e-5, 1e-8), (1e-5, -1.0),
+                    (True, 1e-8), (1e-5, None), ("1e-5", 1e-8)):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                P.threshold_for("torch_allclose", "float32", "taskdoc", taskdoc_tol=bad)
+
+    def test_taskdoc_valid_values_accepted(self):
+        pol = P.threshold_for("torch_allclose", "float32", "taskdoc", taskdoc_tol=(0.0, 0.0))
+        self.assertEqual((pol["rtol"], pol["atol"]), (0.0, 0.0))
+
+    def test_compute_metrics_rejects_inf_policy_tolerance(self):
+        """policy 直接被塞 inf（绕开 threshold_for）也必须在复算入口被拒。"""
+        pol = {"kind": "torch_allclose", "rtol": float("inf"), "atol": 1e-8, "equal_nan": True}
+        with self.assertRaises(ValueError):
+            P.compute_metrics(np.array([9e9], np.float32), np.array([1.0], np.float32), pol)
+
+    def test_acceptance_override_values_are_checked(self):
+        """同族残留：acceptance 的覆盖字段旧写法原样搬运 → `{"tolerance": inf}` 能造出恒真阈值。
+
+        acceptance 允许**放宽**（由 risk/passed_with_risk 如实上报），但不许放宽成 inf/NaN/负数。"""
+        base = {"verify_mode": "numerical", "precision": {"oracle": "ascendoptest"}}
+        for bad in (float("inf"), float("nan"), -1.0, True, "0.1", None):
+            spec = copy.deepcopy(base)
+            spec["precision"]["acceptance_policy"] = {"standard": "ascendoptest_default", "tolerance": bad}
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                P.resolve_acceptance(spec, "ascendoptest_default", "float32")
+        ok = copy.deepcopy(base)
+        ok["precision"]["acceptance_policy"] = {"standard": "ascendoptest_default", "error_rate": 0.1}
+        pol, tpid = P.resolve_acceptance(ok, "ascendoptest_default", "float32")
+        self.assertEqual(pol["error_rate"], 0.1)
+        self.assertEqual(tpid, "ascendoptest_default:float32")
+
+    def test_malformed_precision_block_is_fail_closed_not_crash(self):
+        """`spec.precision` 是字符串时，旧写法 `(spec.get("precision") or {}).get(...)` 抛 AttributeError
+        （逃出 validator 的 `except (ValueError, KeyError)`）。现在统一收敛成 ValueError。"""
+        spec = {"verify_mode": "numerical", "precision": "oops"}
+        with self.assertRaises(ValueError):
+            P.resolve_acceptance(spec, "ascendoptest_default", "float32")
+        with self.assertRaises(ValueError):
+            P.derive_acceptance_contracts(spec, [])
+
+
+class ComplexPolicyConsistencyTest(unittest.TestCase):
+    """finding #9：不留「能生成、算不出来」的 policy——complex 要么实现、要么不出 policy。"""
+
+    def test_complex_not_in_torch_allclose_table(self):
+        for dt in ("complex64", "complex128"):
+            with self.assertRaises(ValueError, msg=dt):
+                P.threshold_for("torch_allclose", dt)
+
+    def test_complex_ascendoptest_fails_fast_not_produce_dead_policy(self):
+        """`_AOT_TABLE` 保留 complex 快照作 provenance，但 threshold_for 当场 fail-fast，不产出死 policy。"""
+        for dt in ("complex64", "complex128"):
+            with self.assertRaises(ValueError, msg=dt):
+                P.threshold_for("ascendoptest_default", dt)
+            self.assertNotIn(dt, P.SUPPORTED_COMPUTE_DTYPES)
+
+
+class GatherFromAnchorTest(unittest.TestCase):
+    """finding #7：gather 源由 spec 的必填 `gather_from` 锚定，不随 case.inputs 顺序漂移。"""
+
+    def _two_input_spec(self, gather_from="a"):
+        idx = {"name": "indices", "io": "out", "out_role": "index", "index_of": "values",
+               "dtype": ["int64"]}
+        if gather_from is not None:
+            idx["gather_from"] = gather_from
+        return {"op": "TwoIn", "verify_mode": "numerical",
+                "precision": {"oracle": "torch", "standard": "torch_allclose"},
+                "params": [{"name": "a", "io": "in", "dtype": ["float32"]},
+                           {"name": "b", "io": "in", "dtype": ["float32"]},
+                           {"name": "values", "io": "out", "out_role": "value",
+                            "dtype": ["<from_input>"]}, idx]}
+
+    def test_missing_gather_from_rejected(self):
+        with self.assertRaises(ValueError) as cm:
+            P.derive_output_contracts(self._two_input_spec(gather_from=None),
+                                      [("a", "float32"), ("b", "float32")], "torch_allclose")
+        self.assertIn("gather_from", str(cm.exception))
+
+    def test_gather_from_must_point_at_named_input(self):
+        with self.assertRaises(ValueError):
+            P.derive_output_contracts(self._two_input_spec("nope"),
+                                      [("a", "float32"), ("b", "float32")], "torch_allclose")
+
+    def test_reordering_case_inputs_cannot_move_gather_source(self):
+        """⭐ 旧洞：gather 源取「case 的第一个输入」→ 调 case.inputs 顺序即换掉 canonical。现在换序直接拒。"""
+        spec = self._two_input_spec("a")
+        cts = P.derive_output_contracts(spec, [("a", "float32"), ("b", "float32")], "torch_allclose")
+        self.assertEqual(cts[1]["policy"]["gather_from"], "a")
+        with self.assertRaises(ValueError) as cm:                 # 换序 → 拒（不是「换个 gather 源照跑」）
+            P.derive_output_contracts(spec, [("b", "float32"), ("a", "float32")], "torch_allclose")
+        self.assertIn("同一序同一身份", str(cm.exception))
+
+    def test_incomplete_or_duplicate_case_inputs_rejected(self):
+        spec = self._two_input_spec("a")
+        for bad in ([("a", "float32")], [("a", "float32"), ("a", "float32")],
+                    [("a", "float32"), ("b", "float32"), ("b", "float32")]):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                P.derive_output_contracts(spec, bad, "torch_allclose")
+
+
+class TwoValueOutputsTest(unittest.TestCase):
+    """finding #8：身份主键是 **name**，role 只决定判据类型 → 合法的「两个 value 输出」必须可判。"""
+
+    SPEC = {"op": "TwoVal", "verify_mode": "numerical",
+            "precision": {"oracle": "torch", "standard": "torch_allclose",
+                          "tolerance_source": "dtype_table"},
+            "params": [{"name": "self", "io": "in", "dtype": ["float32"]},
+                       {"name": "out_a", "io": "out", "out_role": "value", "dtype": ["<from_input>"]},
+                       {"name": "out_b", "io": "out", "out_role": "value", "dtype": ["float32"]}]}
+
+    def test_two_value_contracts_derivable(self):
+        cts = P.derive_output_contracts(self.SPEC, [("self", "float32")], "torch_allclose", "dtype_table")
+        self.assertEqual([c["name"] for c in cts], ["out_a", "out_b"])
+        self.assertEqual([c["role"] for c in cts], ["value", "value"])
+        self.assertEqual([c["policy"]["kind"] for c in cts], ["torch_allclose", "torch_allclose"])
+
+    def test_duplicate_output_names_rejected(self):
+        spec = json.loads(json.dumps(self.SPEC))
+        spec["params"][2]["name"] = "out_a"
+        with self.assertRaises(ValueError) as cm:
+            P.derive_output_contracts(spec, [("self", "float32")], "torch_allclose", "dtype_table")
+        self.assertIn("重复", str(cm.exception))
+
+
+class ActiveOutputsFromSpecTest(unittest.TestCase):
+    """严重#1 的派生侧：本 case 该有哪些输出，只由 spec × attrs 决定（caseset 无权参与）。"""
+
+    def test_variant_selects_output_set(self):
+        spec = _median_spec()
+        self.assertEqual(P.active_output_names(spec, {"dim": 1, "keepdim": False}),
+                         ["values", "indices"])
+        self.assertEqual(P.active_output_names(spec, {"dim": None, "keepdim": False}), ["values"])
+
+    def test_no_matching_variant_fail_closed(self):
+        spec = _median_spec()
+        spec["call_variants"] = [{"when": {"attr": "dim", "equals": 0}, "symbol": "S",
+                                  "active_outputs": ["values", "indices"]}]
+        with self.assertRaises(ValueError):
+            P.active_output_names(spec, {"dim": 7})
+
+    def test_no_variants_means_all_spec_outputs(self):
+        spec = _median_spec()
+        spec.pop("call_variants")
+        self.assertEqual(P.active_output_names(spec, {"dim": 1}), ["values", "indices"])
+
+    def test_index_without_its_value_is_fail_closed(self):
+        spec = _median_spec()
+        spec["call_variants"] = [{"when": {"always": True}, "symbol": "S",
+                                  "active_outputs": ["indices"]}]
+        with self.assertRaises(ValueError) as cm:
+            P.active_output_names(spec, {"dim": 1})
+        self.assertIn("index_value_consistency", str(cm.exception))
+
+    def test_uses_output_contract_is_spec_driven(self):
+        self.assertTrue(P.uses_output_contract(_median_spec()))
+        legacy = {"params": [{"name": "x", "io": "in", "dtype": ["float32"]},
+                             {"name": "y", "io": "out", "dtype": ["float32"]}]}
+        self.assertFalse(P.uses_output_contract(legacy))
+        # `out_role: ""` 是写坏的 spec —— 必须仍走多输出路径、在受控词表上炸掉，不许悄悄退回 legacy
+        broken = {"params": [{"name": "x", "io": "in", "dtype": ["float32"]},
+                             {"name": "y", "io": "out", "out_role": "", "dtype": ["float32"]}]}
+        self.assertTrue(P.uses_output_contract(broken))
+
+
+class MultiOutputAcceptanceContractTest(unittest.TestCase):
+    """finding #2 的派生侧：多输出 acceptance canonical 逐输出复算，取不出容差就 fail-closed。"""
+
+    def test_none_when_spec_silent(self):
+        spec = _median_spec()
+        cts = P.derive_output_contracts(spec, [("self", "float32")], "torch_allclose", "dtype_table")
+        self.assertIsNone(P.derive_acceptance_contracts(spec, cts))
+
+    def test_acceptance_applied_per_output_and_index_inherits(self):
+        spec = _median_spec()
+        spec["precision"]["acceptance_policy"] = {"standard": "torch_allclose"}
+        cts = P.derive_output_contracts(spec, [("self", "float32")], "torch_allclose", "dtype_table")
+        accs = P.derive_acceptance_contracts(spec, cts)
+        self.assertEqual(len(accs), 2)
+        self.assertEqual(accs[0]["policy"]["kind"], "torch_allclose")
+        self.assertEqual(accs[1]["policy"]["kind"], "index_value_consistency")
+        # index 的 acceptance 容差 == 所引 value 输出的 acceptance 容差（不是 standard 层的）
+        self.assertAlmostEqual(accs[1]["policy"]["value_rtol"], accs[0]["policy"]["rtol"])
+
+    def test_unsupported_acceptance_kind_for_index_fail_closed(self):
+        """acceptance 底是 ascendoptest_default → index 取不出 (rtol,atol) → **拒**，绝不静默退回 standard。"""
+        spec = _median_spec()
+        spec["precision"]["acceptance_policy"] = {"standard": "ascendoptest_default"}
+        cts = P.derive_output_contracts(spec, [("self", "float32")], "torch_allclose", "dtype_table")
+        with self.assertRaises(ValueError):
+            P.derive_acceptance_contracts(spec, cts)
+
+    def test_int_value_output_inherits_standard(self):
+        """int32 → 有效标准 exact（阈值已是 0，没有可放宽的 acceptance）→ 该输出 acceptance 继承 standard。"""
+        spec = _median_spec()
+        spec["precision"]["acceptance_policy"] = {"standard": "torch_allclose"}
+        cts = P.derive_output_contracts(spec, [("self", "int32")], "torch_allclose", "dtype_table")
+        accs = P.derive_acceptance_contracts(spec, cts)
+        self.assertEqual(accs, [None, None])
 
 
 if __name__ == "__main__":
