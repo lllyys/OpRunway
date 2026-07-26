@@ -15,7 +15,9 @@ ADR 0011 决策 6），归产代码的 agent；`acc-spec-extractor` 产的是 JS
 授权引文要能被机器复核（R12），任务书全文快照必须与 golden.py **同处算子目录**：
 
 ```bash
-cd ${CLAUDE_PLUGIN_ROOT}/acc-common          # ← 必须先 cd：repo_adapter 靠 cwd 才 import 得到
+cd ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common   # ← 必须先 cd：repo_adapter 靠 cwd 才 import 得到
+# ↑ 插件根用中立主变量 OPRUNWAY_PLUGIN_ROOT，缺了才回落 Claude 专有别名 CLAUDE_PLUGIN_ROOT（Claude 下 harness 自动设）；
+#   Codex 等非 Claude 运行时须先 export OPRUNWAY_PLUGIN_ROOT=<插件根绝对路径>。
 OPDIR=$(python3 -c 'import repo_adapter,sys; print(repo_adapter.op_dir(sys.argv[1]))' <Op>)
 python3 fetch_source.py --taskdoc <路径|链接> --pr <PR链接> --out <work> --snapshot-into "$OPDIR"
 ```
@@ -176,7 +178,7 @@ elementwise（输出同输入形状）→ **不导出** `out_shape`，缺省语�
 ## 5. 生成后自检（三步，全是确定性脚本）
 
 ```bash
-cd ${CLAUDE_PLUGIN_ROOT}/acc-common
+cd ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common   # 插件根：中立主变量优先，缺了回落 Claude 别名
 
 python3 check_golden.py <Op>            # 契约层：词表 → 授权真伪 → 档位，输出 JSON 账本
 python3 check_golden.py <Op> --load     # 额外真跑 gen_cases.load_golden（会 import torch）

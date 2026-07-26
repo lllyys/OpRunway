@@ -803,24 +803,19 @@ class RunWorkflowPerfPackageTest(unittest.TestCase):
         with open(os.path.join(self.d, name), encoding="utf-8") as f:
             return json.load(f)
 
-    def test_perf_trivial_met_small_shapes(self):
-        # §1 覆盖-预算重写 + trivial-met：§1 不再产「小shape」标签用例；小 shape 性能用例（numel<4096）
-        #  改标 **trivial-met**（达标、免测），perf 达标由代表性大 shape（whitelist/bndhi, numel≥4096）主导。
-        #  取代已被 trivial-met 取代的 small-shape-exception e2e 路径（该 exception 逻辑仍存 perf_compare、
-        #  只是 §1 pipeline 不再触发；其直测覆盖见 test_perf_compare.SmallShapeExceptionTest）。
+    def test_perf_all_shapes_are_measured(self):
+        # mock 仅作开发回归：所有性能 case（包括小 numel）都应产双边计时与 ratio，不再自动免测。
         r = self._run("../samples/specs/sign.spec.json")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)   # 全 trivial + 大 shape 达标 → PASS
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         acc = self._json("dev_run_summary.json")   # C5：mock 不产 acceptance.json
         self.assertEqual(acc["pipeline_result"], "PASS")   # state 键刻意不写（非验收通路无 canonical 状态）
         self.assertEqual(acc["repo_mode"], "mock")
         pr = self._json("perf_report.json")
         self.assertEqual(pr["summary"]["status"], "ok")
-        trivial = [row for row in pr["per_case"] if row.get("trivial")]
-        nontrivial = [row for row in pr["per_case"] if not row.get("trivial")]
-        self.assertTrue(trivial, "应有 trivial-met 退化用例（小 shape numel<4096）")
-        self.assertTrue(nontrivial, "应有非 trivial 大 shape 性能用例（whitelist/bndhi）")
-        self.assertTrue(all(row.get("达标") for row in nontrivial), "大 shape 性能用例应达标")
-        self.assertEqual(self._gate("task3").returncode, 0)     # trivial 门豁免 + 大 shape 完整 → 门过
+        self.assertTrue(pr["per_case"])
+        self.assertTrue(all("ratio" in row and not row.get("trivial") for row in pr["per_case"]))
+        self.assertEqual(pr["summary"]["cases_scored"], pr["summary"]["perf_cases"])
+        self.assertEqual(self._gate("task3").returncode, 0)
 
     def test_gpu_wait_blocked_not_fail(self):
         r = self._run("testdata/gpu_demo.spec.json")            # spec.perf.baseline=gpu_external, 无 --gpu-baseline
@@ -968,8 +963,8 @@ class GateTask3ConfirmedBypassTest(unittest.TestCase):
         self.assertEqual(self._cli().returncode, 0)
 
 
-class Cases50NaTrivialGateTest(unittest.TestCase):
-    """§1 覆盖-预算 + Layer B/C 门集成：空 Tensor(na) 豁免 + 防伪造 na；trivial-met 豁免 + 防伪造 trivial。"""
+class Cases50NaAndPerfGateTest(unittest.TestCase):
+    """§1 覆盖-预算 + Layer B/C 门集成：空 Tensor(na) 豁免；性能不允许 trivial 绕过。"""
     def setUp(self):
         self.d = tempfile.mkdtemp()
 
@@ -1000,32 +995,33 @@ class Cases50NaTrivialGateTest(unittest.TestCase):
                 "summary": {"status": "ok", "perf_cases": len(rows),
                             "达标": sum(1 for r in rows if r.get("达标")), "blocked": 0}}
 
-    def test_task3_trivial_ok(self):
+    def test_task3_small_measured_ok(self):
         _w(self.d, "caseset.json", {"op": "X", "cases": [
             {"id": "t0", "dims": ["性能"], "tags": ["常规"],
              "inputs": [{"name": "a", "shape": [16], "dtype": "float32"}]}]})
         _w(self.d, "evidence.json", _perf_ev(["t0"]))
         _w(self.d, "perf_report.json",
-           self._pr_rows([{"case_id": "t0", "达标": True, "trivial": True, "numel": 16}]))
+           self._pr_rows([{"case_id": "t0", "达标": True, "blocked": False,
+                           "scope": "kernel_only", "npu_us": 1.0,
+                           "baseline": {"source": "tbe", "us": 2.0}, "ratio": 2.0}]))
         errs = []
         G.gate_task3(self.d, errs)
-        self.assertEqual(errs, [], errs)                      # trivial 行豁免 scope（numel<4096 复核通过）
+        self.assertEqual(errs, [], errs)
 
-    def test_task3_forged_trivial_errors(self):
-        _w(self.d, "caseset.json", _perf_cs(["b0"]))          # shape [1024,1024]，numel≥4096
-        _w(self.d, "evidence.json", _perf_ev(["b0"]))
+    def test_task3_trivial_is_rejected_even_for_small_case(self):
+        _w(self.d, "caseset.json", {"op": "X", "cases": [
+            {"id": "t0", "dims": ["性能"], "tags": ["常规"],
+             "inputs": [{"name": "a", "shape": [16], "dtype": "float32"}]}]})
+        _w(self.d, "evidence.json", _perf_ev(["t0"]))
         _w(self.d, "perf_report.json",
-           self._pr_rows([{"case_id": "b0", "达标": True, "trivial": True}]))  # 大 case 谎报 trivial
+           self._pr_rows([{"case_id": "t0", "达标": True, "trivial": True}]))
         errs = []
         G.gate_task3(self.d, errs)
-        self.assertTrue(any("trivial" in e and "numel" in e for e in errs), errs)
+        self.assertTrue(any("trivial 自动免测已废止" in e for e in errs), errs)
 
 
 class DefaultModeIsRealMachineTest(unittest.TestCase):
-    """U6a：`--mode` 默认已从 mock 翻为 new_example（真机通路）。钉死两点，防被悄悄改回危险的 mock 默认
-    （mock 的「NPU 输出」= golden.copy()、精度按构造必过 → 默认 mock = 默认产出伪造 acceptance.json）：
-    (1) run() 签名默认 == 'new_example'；
-    (2) 不带 --mode + 无真机 OPRUNWAY_* 配置 → fail-closed 非零退出，且**绝不**落伪造 acceptance.json。"""
+    """U6a：省略 mode 时必须由 runner_form 派生到真机通路，绝不能回落危险的 mock。"""
     def setUp(self):
         self.d = tempfile.mkdtemp()
         self.here = os.path.dirname(os.path.abspath(__file__))
@@ -1033,10 +1029,13 @@ class DefaultModeIsRealMachineTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.d, ignore_errors=True)
 
-    def test_run_signature_default_is_new_example(self):
+    def test_run_signature_default_defers_to_runner_form(self):
         import inspect
         import run_workflow as W
-        self.assertEqual(inspect.signature(W.run).parameters["mode"].default, "new_example")
+        self.assertIsNone(inspect.signature(W.run).parameters["mode"].default)
+        self.assertEqual(W._resolve_mode({}, None), "new_example")
+        self.assertEqual(
+            W._resolve_mode({"runner_form": "aclnn_py"}, None), "aclnn_py")
 
     def test_no_mode_without_realcfg_failclosed_no_forged_acceptance(self):
         # 清掉真机 OPRUNWAY_* 配置（其余 env 保留，与本用例无关）→ 不带 --mode 即走默认（应 = new_example）。

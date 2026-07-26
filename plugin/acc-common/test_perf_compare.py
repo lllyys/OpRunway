@@ -44,10 +44,7 @@ _EXC = {"when_us_below": 10, "abs_gap_us_within": 3}
 
 
 class SmallShapeExceptionTest(unittest.TestCase):
-    """小shape 例外逻辑直测（该逻辑仍存于 perf_compare）。⚠ §1 覆盖-预算 pipeline 已不再产「小shape」标签用例，
-    且 trivial-met 会截住 numel<4096 的退化 case——故本类 fixture **刻意用 numel≥4096（[8192]）+ 小 us**
-    绕开 trivial-met、直测例外逻辑本身（例外由「小shape」tag 驱动、非实际 shape）。该 e2e 路径已被 trivial-met
-    取代，见 test_validate_acceptance_state.test_perf_trivial_met_small_shapes。"""
+    """小shape 例外逻辑直测（例外由「小shape」tag 与实测 us 驱动，不按 numel 自动免测）。"""
     def test_hit_exception(self):
         cs = _caseset([("s0", ["性能", "小shape"], [8192])])
         r = pc.perf_compare(_spec(1.0, _EXC), cs, _ev({"s0": (1.5, "kernel_only")}), _bl({"s0": 1.2}))
@@ -251,9 +248,8 @@ class GpuConsumerTest(unittest.TestCase):
         r = pc.perf_compare(spec, cs, ev, bl, expect_source="gpu_external")
         self.assertEqual(r["summary"]["status"], "ok")
         self.assertEqual(r["baseline_source"], "gpu_external")
-        # §trivial-met：退化 case（numel<4096）标 trivial、无 ratio；非退化 case 有 ratio。二者其一。
-        self.assertTrue(all("ratio" in row or row.get("trivial") for row in r["per_case"]))
-        self.assertTrue(any("ratio" in row for row in r["per_case"]), "应有非退化 case 真判 ratio")
+        self.assertTrue(all("ratio" in row for row in r["per_case"]),
+                        "所有性能 case（包括小 numel）都应以真实双边计时计算 ratio")
 
     def test_gpu_scope_mismatch_incomparable(self):
         spec, cs, wd = self._live_caseset()
@@ -409,23 +405,25 @@ class SharedConstantDriftTest(unittest.TestCase):
                          "_SCOPE_TRANSFER 的 key 集须与 _SCOPES 恰好一致")
 
 
-class TrivialMetTest(unittest.TestCase):
-    """§trivial-met（用户 2026-07-15，评审 #2）：退化 case（numel<4096）达标、免测、无需基线/scope/us；
-    perf 达标由代表性大 shape 主导。"""
-    def test_trivial_case_met_without_baseline(self):
-        cs = _caseset([("t0", ["性能", "常规"], [16])])       # numel 16 < 4096 → trivial
-        r = pc.perf_compare(_spec(1.0), cs, _ev({"t0": (1.5, "kernel_only")}), _bl({}))  # 基线无 t0
+class SmallCaseMeasuredTest(unittest.TestCase):
+    """小 numel 与大 shape 走同一真实性能判定；不存在自动免测。"""
+    def test_small_case_without_baseline_is_blocked(self):
+        cs = _caseset([("t0", ["性能", "常规"], [16])])
+        r = pc.perf_compare(_spec(1.0), cs, _ev({"t0": (1.5, "kernel_only")}), _bl({}))
         row = r["per_case"][0]
-        self.assertTrue(row["达标"])
-        self.assertTrue(row.get("trivial"))
-        self.assertEqual(r["summary"]["status"], "ok")
+        self.assertFalse(row["达标"])
+        self.assertTrue(row.get("blocked"))
+        self.assertNotIn("trivial", row)
+        self.assertEqual(r["summary"]["status"], "blocked")
 
-    def test_large_case_not_trivial(self):
-        cs = _caseset([("b0", ["性能", "大shape"], [128, 128])])  # numel 16384 ≥ 4096 → 真判
-        r = pc.perf_compare(_spec(1.0), cs, _ev({"b0": (1.0, "kernel_only")}), _bl({"b0": 2.0}))
+    def test_small_case_with_baseline_is_scored(self):
+        cs = _caseset([("t0", ["性能", "常规"], [1])])
+        r = pc.perf_compare(_spec(1.0), cs, _ev({"t0": (1.0, "kernel_only")}), _bl({"t0": 2.0}))
         row = r["per_case"][0]
         self.assertNotIn("trivial", row)
-        self.assertIn("ratio", row)
+        self.assertEqual(row["ratio"], 2.0)
+        self.assertTrue(row["达标"])
+        self.assertEqual(r["summary"]["cases_scored"], 1)
 
 
 class RunWorkflowNonAcceptanceSurfaceTest(unittest.TestCase):
@@ -490,12 +488,8 @@ class RunWorkflowNonAcceptanceSurfaceTest(unittest.TestCase):
             self.assertIn("NON-ACCEPTANCE (mock evidence)", note)
         self.assertEqual(W._DEV_GRADE, pc._DEV_GRADE)
 
-class ScaledCaseNotTrivialMetTest(unittest.TestCase):
-    """G4 连带闸：被 golden 规模预算**降过规模**的 case，不得走 trivial-met 冒充达标。
-
-    trivial-met 的正当性是「这个 case 本来就小、perf 没意义」；
-    降规模 case 是「它本来很大、我们没按目标规模跑」——**没测却算过**，两者性质完全不同。
-    不拦的话：G4 把大 shape 降到阈值以下 → 这里判达标 → 报告显示性能通过，而目标规模一次没跑。"""
+class ScaledCaseMeasuredTest(unittest.TestCase):
+    """移除 trivial 后，cost_scaled 不再触发额外免测或自动通过，仍按实际双边证据判定。"""
 
     @staticmethod
     def _cs(cid, shape, scaled):
@@ -506,20 +500,222 @@ class ScaledCaseNotTrivialMetTest(unittest.TestCase):
                 "from": [1024, 1024], "to": list(shape), "reason": "golden 规模预算"}
         return cs
 
-    def test_scaled_small_case_is_blocked_not_trivial_met(self):
+    def test_scaled_case_without_measurement_is_blocked(self):
         r = pc.perf_compare(_spec(1.0), self._cs("s0", [8, 8], True), _ev({}), _bl({}))
         row = next(x for x in r["per_case"] if x["case_id"] == "s0")
         self.assertFalse(row["达标"], row)
         self.assertTrue(row.get("blocked"), row)
         self.assertNotIn("trivial", row)
-        self.assertIn("cost_scaled", row)
 
-    def test_genuinely_small_case_still_trivial_met(self):
-        """对照：**没被降过规模**的小 case 仍走 trivial-met，证补的闸没矫枉过正。"""
-        r = pc.perf_compare(_spec(1.0), self._cs("s0", [8, 8], False), _ev({}), _bl({}))
+    def test_scaled_small_case_with_measurement_is_scored(self):
+        r = pc.perf_compare(
+            _spec(1.0), self._cs("s0", [8, 8], True),
+            _ev({"s0": (1.0, "kernel_only")}), _bl({"s0": 2.0}))
         row = next(x for x in r["per_case"] if x["case_id"] == "s0")
         self.assertTrue(row["达标"], row)
-        self.assertTrue(row.get("trivial"), row)
+        self.assertEqual(row["ratio"], 2.0)
+        self.assertNotIn("trivial", row)
+
+
+class PerfReportAggregateTest(unittest.TestCase):
+    """M3 · cannbot 报告三件套：`by_dtype` / `overall_speedup` / `cases_above_threshold`+`cases_scored`
+    （+ `custom_only_by_dtype`）。对标
+    `repos/cannbot-ops-input/skills/operator-evaluation/scripts/performance.py`
+    的 `summarize_latency`(34-59) / `build_performance_report`(98-112) / `count_speedup_above`(80-95)
+    / `summarize_custom_only_latency`(62-77)。
+
+    本类钉两件事：① 聚合口径与 cannbot 一致；② **聚合没碰裁决**——凡断言里同时出现
+    `达标`/`status` 的，都是在守「只读增量」这条线。
+    """
+
+    _BIG = [128, 128]
+
+    @classmethod
+    def _cs(cls, rows):
+        """rows: [(cid, dtype)] → 只含性能维、统一大 shape 的 caseset。
+        dtype 传 None = 把 `inputs[0].dtype` 抠掉，用来造「取不到 dtype」的行（应归 unknown 桶）。"""
+        cs = _caseset([(cid, ["性能", "大shape"], cls._BIG) for cid, _ in rows])
+        for case, (_, dt) in zip(cs["cases"], rows):
+            if dt is None:
+                case["inputs"][0].pop("dtype")
+            else:
+                case["inputs"][0]["dtype"] = dt
+        return cs
+
+    def test_by_dtype_median_is_statistics_median_not_lower_middle(self):
+        """偶数个样本取**中间两数的平均**（= cannbot `median_us` 用的 statistics.median）。
+        样本 [1,2,3,4]：取下中位会得 2.0，正确答案是 2.5——本断言就是冲这个差来的。"""
+        cs = self._cs([("c0", "float32"), ("c1", "float32"), ("c2", "float32"), ("c3", "float32")])
+        ev = _ev({"c0": (1.0, "kernel_only"), "c1": (2.0, "kernel_only"),
+                  "c2": (3.0, "kernel_only"), "c3": (4.0, "kernel_only")})
+        r = pc.perf_compare(_spec(0.5), cs, ev,
+                            _bl({"c0": 10.0, "c1": 10.0, "c2": 10.0, "c3": 10.0}))
+        self.assertEqual(r["by_dtype"], [{"dtype": "float32", "count": 4,
+                                          "npu_us": 2.5, "baseline_us": 10.0, "speedup": 4.0}])
+        self.assertEqual(r["overall_speedup"], 4.0)
+        self.assertEqual(r["summary"]["status"], "ok")           # 裁决不受聚合影响
+
+    def test_by_dtype_groups_sorted_and_unknown_bucket(self):
+        """按 dtype 分组、按 dtype 名排序（产物稳定可 diff）；取不到 dtype 的行归 unknown、**不丢行**。"""
+        cs = self._cs([("a", "float16"), ("b", "float32"), ("c", None)])
+        ev = _ev({"a": (2.0, "kernel_only"), "b": (2.0, "kernel_only"), "c": (2.0, "kernel_only")})
+        r = pc.perf_compare(_spec(0.5), cs, ev, _bl({"a": 4.0, "b": 4.0, "c": 4.0}))
+        self.assertEqual([g["dtype"] for g in r["by_dtype"]], ["float16", "float32", "unknown"])
+        self.assertEqual([g["count"] for g in r["by_dtype"]], [1, 1, 1])
+        self.assertEqual(r["summary"]["cases_scored"], 3)        # 3 行都进了分母，一行没丢
+
+    def test_overall_speedup_is_count_weighted_not_mean_of_speedups(self):
+        """Σ(baseline median×count)/Σ(npu median×count)——**按 count 加权**，不是各 dtype speedup 求平均。"""
+        cs = self._cs([("h0", "float16"), ("h1", "float16"), ("h2", "float16"), ("f0", "float32")])
+        ev = _ev({"h0": (2.0, "kernel_only"), "h1": (2.0, "kernel_only"),
+                  "h2": (2.0, "kernel_only"), "f0": (1.0, "kernel_only")})
+        r = pc.perf_compare(_spec(0.5), cs, ev, _bl({"h0": 4.0, "h1": 4.0, "h2": 4.0, "f0": 8.0}))
+        by = {g["dtype"]: g for g in r["by_dtype"]}
+        self.assertEqual((by["float16"]["count"], by["float16"]["speedup"]), (3, 2.0))
+        self.assertEqual((by["float32"]["count"], by["float32"]["speedup"]), (1, 8.0))
+        # (4×3 + 8×1)/(2×3 + 1×1) = 20/7 ≈ 2.857；写成「speedup 求平均」会得 (2+8)/2 = 5。
+        self.assertAlmostEqual(r["overall_speedup"], 20.0 / 7.0, places=12)
+        self.assertNotAlmostEqual(r["overall_speedup"], 5.0, places=3)
+
+    def test_ratio_equal_threshold_meets_hard_gate_but_not_above_threshold(self):
+        """⚠ 两把尺子的口径差（蓝本 L1 裁决）——同一个 case 两个答案，且**两个都对**：
+        硬门 `raw >= tgt` 判**达标**；展示口径 `raw > tgt`（cannbot count_speedup_above）**不计入**。
+        谁要是「顺手统一」成一把尺子，本条会当场炸。"""
+        cs = self._cs([("eq", "float32")])
+        r = pc.perf_compare(_spec(0.95), cs, _ev({"eq": (10000, "kernel_only")}), _bl({"eq": 9500}))
+        row = r["per_case"][0]
+        self.assertEqual(row["ratio"], 0.95)
+        self.assertTrue(row["达标"], "硬门 >= 必须仍判达标（这一条一个字都不许动）")
+        self.assertEqual(r["summary"]["达标"], 1)
+        self.assertEqual(r["summary"]["status"], "ok")
+        self.assertEqual(r["summary"]["cases_scored"], 1)
+        self.assertEqual(r["summary"]["cases_above_threshold"], 0, "严格 > 下恰等阈值不计入")
+
+    def test_above_threshold_uses_raw_ratio_not_rounded_display_value(self):
+        """严格 `>` 比的是重算的**原始比**，不是 `row["ratio"]` 那个 round 过的展示值。
+        hi: raw=0.9504>0.95 → 计入（若误用 round 后的 0.95，严格 > 会漏计）；
+        lo: raw=0.9496<0.95 → 不达标也不计入（round 后同样是 0.95，不许被救活，pc-2 同型）。"""
+        cs = self._cs([("hi", "float32"), ("lo", "float32")])
+        ev = _ev({"hi": (10000, "kernel_only"), "lo": (10000, "kernel_only")})
+        r = pc.perf_compare(_spec(0.95), cs, ev, _bl({"hi": 9504, "lo": 9496}))
+        by_id = {x["case_id"]: x for x in r["per_case"]}
+        self.assertEqual((by_id["hi"]["ratio"], by_id["lo"]["ratio"]), (0.95, 0.95))  # 展示值都是 0.95
+        self.assertTrue(by_id["hi"]["达标"])
+        self.assertFalse(by_id["lo"]["达标"])
+        self.assertEqual(r["summary"]["cases_scored"], 2)
+        self.assertEqual(r["summary"]["cases_above_threshold"], 1)
+
+    def test_small_measured_and_missing_baseline_rows_aggregate_correctly(self):
+        """没有可比测量的行**不进** by_dtype/cases_scored（塞进 median 就是编数字）；
+        小 shape 只要双边量到就正常进入聚合；
+        「量到了但根本没基线」的行走 custom_only_by_dtype——只报绝对时延、**不硬算 speedup**
+        （cannbot `summarize_custom_only_latency` 同款纪律）。"""
+        cs = _caseset([("t0", ["性能", "常规"], [16]),            # 小 shape：仍须真实比较
+                       ("m0", ["性能", "大shape"], [128, 128]),   # 有 npu 计时、无基线条目
+                       ("g0", ["性能", "大shape"], [128, 128])])
+        ev = _ev({"t0": (1.5, "kernel_only"), "m0": (4.0, "kernel_only"), "g0": (2.0, "kernel_only")})
+        r = pc.perf_compare(_spec(0.5), cs, ev, _bl({"t0": 3.0, "g0": 4.0}))
+        self.assertEqual(r["summary"]["status"], "blocked")       # 裁决照旧（m0 缺基线）
+        self.assertEqual(r["summary"]["cases_scored"], 2)
+        self.assertEqual(r["by_dtype"], [{"dtype": "float32", "count": 2,
+                                          "npu_us": 1.75, "baseline_us": 3.5, "speedup": 2.0}])
+        # 这一行**没有** speedup 键：无基线时不许推出加速比
+        self.assertEqual(r["custom_only_by_dtype"],
+                         [{"dtype": "float32", "count": 1, "npu_us": 4.0,
+                           "comparison": "no_npu_baseline"}])
+
+    def test_no_comparable_row_yields_empty_aggregate_not_fabricated_numbers(self):
+        """一行可比测量都没有 → by_dtype 空、overall_speedup None（分母为 0 绝不编数）、计数为 0、不炸。
+        另钉：有基线只是 scope 不可比 ≠ 无基线，不许混进 custom_only（那标签会撒谎）。"""
+        cs = self._cs([("p", "float32")])
+        r = pc.perf_compare(_spec(0.95), cs, _ev({"p": (1.5, "device_e2e_no_h2d_d2h")}),
+                            _bl({"p": 1.2}, scope="kernel_only"))
+        self.assertEqual(r["summary"]["status"], "blocked_incomparable_timing_scope")
+        self.assertEqual(r["by_dtype"], [])
+        self.assertIsNone(r["overall_speedup"])
+        self.assertEqual((r["summary"]["cases_scored"], r["summary"]["cases_above_threshold"]), (0, 0))
+        self.assertNotIn("custom_only_by_dtype", r)
+
+    def test_early_exits_carry_no_aggregate_fields(self):
+        """四个提前出口（invalid / no_perf_cases / invalid_config / 缺基线挂起）**一个新键都不加**——
+        它们按定义没有可比测量，挂空聚合会让「没数据」看起来像「数据是 0」。下游读这些键须当可选。"""
+        cs = self._cs([("p", "float32")])
+        ev, bl = _ev({"p": (1.5, "kernel_only")}), _bl({"p": 1.2})
+        no_perf_cs = {"op": "Sign", "cases": [dict(cs["cases"][0], dims=["功能"])]}
+        for label, args in (("invalid", (_spec(0.95), {"cases": "x"}, ev, bl)),
+                            ("no_perf_cases", (_spec(0.95), no_perf_cs, ev, bl)),
+                            ("invalid_config", ({"op": "Sign", "perf": {"baseline": "tbe"}}, cs, ev, bl)),
+                            ("blocked_wait", (_spec(0.95), cs, ev, None))):
+            r = pc.perf_compare(*args)
+            for key in ("by_dtype", "overall_speedup", "custom_only_by_dtype"):
+                self.assertNotIn(key, r, f"{label}/{key}")
+            for key in ("cases_above_threshold", "cases_scored"):
+                self.assertNotIn(key, r["summary"], f"{label}/{key}")
+
+    def test_summary_gains_exactly_two_keys_and_loses_none(self):
+        """字节安全线：summary **只许多这两个键**，既有四个键的名与值一个不动
+        （4 个 pin 算子 + Median 的真机结论挂在 perf_cases/达标/blocked/status 上）。"""
+        cs = self._cs([("p", "float32")])
+        r = pc.perf_compare(_spec(0.5), cs, _ev({"p": (1.0, "kernel_only")}), _bl({"p": 2.0}))
+        self.assertEqual(set(r["summary"]),
+                         {"perf_cases", "达标", "blocked", "status",
+                          "cases_above_threshold", "cases_scored"})
+        self.assertEqual((r["summary"]["perf_cases"], r["summary"]["达标"],
+                          r["summary"]["blocked"], r["summary"]["status"]), (1, 1, 0, "ok"))
+
+    def test_aggregate_failure_degrades_without_touching_the_verdict(self):
+        """只读报表塌了 → 整块不出 + notes 记一笔，**裁决一字不变**
+        （绝不允许「一块好看的统计」把结论炸掉或改写；与 validator L3 聚合同一条纪律）。"""
+        def boom(*a, **k):
+            raise RuntimeError("boom")
+        cs = self._cs([("p", "float32")])
+        orig, pc._report_aggregate = pc._report_aggregate, boom
+        try:
+            r = pc.perf_compare(_spec(0.5), cs, _ev({"p": (1.0, "kernel_only")}), _bl({"p": 2.0}))
+        finally:
+            pc._report_aggregate = orig
+        self.assertEqual(r["summary"]["status"], "ok")
+        self.assertEqual((r["summary"]["perf_cases"], r["summary"]["达标"]), (1, 1))
+        self.assertNotIn("by_dtype", r)
+        self.assertNotIn("overall_speedup", r)
+        self.assertNotIn("cases_scored", r["summary"])
+        self.assertTrue(any("报告聚合块" in n for n in r["notes"]), r["notes"])
+
+    def test_exception_rows_are_scored_but_never_above_threshold(self):
+        """小shape 例外行是**真量到的可比测量** → 进 cases_scored/by_dtype；但它按定义 ratio<阈，
+        既不计入 cases_above_threshold，`达标` 也仍是 False（例外绝不偷偷置 True）。"""
+        cs = _caseset([("s0", ["性能", "小shape"], [8192])])
+        r = pc.perf_compare(_spec(1.0, _EXC), cs, _ev({"s0": (1.5, "kernel_only")}), _bl({"s0": 1.2}))
+        self.assertEqual(r["summary"]["status"], "exception")
+        self.assertFalse(r["per_case"][0]["达标"])
+        self.assertEqual(r["summary"]["cases_scored"], 1)
+        self.assertEqual(r["summary"]["cases_above_threshold"], 0)
+        self.assertEqual(r["by_dtype"][0]["count"], 1)
+
+    def test_mock_baseline_aggregate_still_carries_non_acceptance_stamp(self):
+        """假基线照样能算出 by_dtype/overall_speedup——同一份报告上的 NON-ACCEPTANCE 戳必须还在，
+        否则这些聚合数会被读成真性能结论（C5）。"""
+        cs = self._cs([("b0", "float32")])
+        ev = _ev({"b0": (2.0, "kernel_only")})
+        r = pc.perf_compare(_spec(1.0), cs, ev, pc.mock_baseline(_spec(), ev))
+        self.assertIsNotNone(r["overall_speedup"])
+        self.assertEqual(r.get("evidence_grade"), "development")
+        self.assertIn("NON-ACCEPTANCE", r.get("acceptance_note", ""))
+
+    def test_median_helper_matches_statistics_median_and_survives_empty(self):
+        """`_median` 就是 statistics.median（cannbot median_us 同款）；空集返回 None、**不抛**——
+        只读报告字段绝不允许把整份 perf_report 炸掉。"""
+        import statistics
+        self.assertEqual(pc._median([1, 2, 3, 4]), statistics.median([1, 2, 3, 4]))
+        self.assertEqual(pc._median([3.0]), 3.0)
+        self.assertIsNone(pc._median([]))
+
+    def test_case_dtype_fallback_never_drops_a_row(self):
+        """坏/缺 dtype → 'unknown'（照 cannbot 兜底），而不是异常、也不是悄悄丢行。"""
+        for bad in (None, "x", {}, {"inputs": []}, {"inputs": "x"}, {"inputs": [{"dtype": ""}]},
+                    {"inputs": [{"dtype": 7}]}):
+            self.assertEqual(pc._case_dtype(bad), "unknown", repr(bad))
+        self.assertEqual(pc._case_dtype({"inputs": [{"dtype": "bfloat16"}]}), "bfloat16")
 
 
 if __name__ == "__main__":

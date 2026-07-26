@@ -5,7 +5,7 @@
 > **⚠ 当前闭环范围（诚实说明，勿超范围声称）**：**代码闭环 = ops-<族> 仓 · opp 安装型产物 · aclnn 两段式接口**。⚠ 引擎的目录/vendor 后缀/build 旗标**已生成化**（`OPRUNWAY_OP_SRC`/`OPRUNWAY_VENDOR_SUFFIX`/`experimental/` 前缀），**不再硬编码 `experimental/math/$OP` + `${VEN}_math`**（2026-07-23 批 6b 调研更正）。真正的闸是三块：`build.sh --pkg --ops` 家族命令 · opp vendor 布局 · aclnn 链接。catlass（换构建体系+换接口）/ 双实现 **尚未支持**（放宽计划见 `doc/oprunway-batch6b-design.md`；⚠ 旧文提的 `OPRUNWAY_TARGET_DIR` 是幽灵变量、runner 通路无此配置）。
 > **验证-才-信目前是「纪律」不是「代码强制门」**：`repo_adapter` 只检查 runner 文件是否存在，**不识别 unverified 标记**。真正的硬门要加 sidecar 契约（§4），未加前 agent/人**必须自觉执行验证**。
 >
-> 已跑通的三个 runner（`${OPRUNWAY_PLUGIN_ROOT}/samples/runners/oprunway_{isclose,sign,equal}_runner.cpp`，分别 unary/数值、binary/bool、binary/bool+attr）是**只读参考样例 / 生成器骨架种子**（非引擎组件、非运行时回退靶）。`samples/` 随插件分发（在插件内，2026-07-22 由仓根迁入）；`${OPRUNWAY_PLUGIN_ROOT}` = 本插件根中立变量，Claude 下等价 `${CLAUDE_PLUGIN_ROOT}`。
+> 已跑通的三个 runner（`${OPRUNWAY_PLUGIN_ROOT}/samples/runners/oprunway_{isclose,sign,equal}_runner.cpp`，分别 unary/数值、binary/bool、binary/bool+attr）是**只读参考样例 / 生成器骨架种子**（非引擎组件、非运行时回退靶）。`samples/` 随插件分发（在插件内，2026-07-22 由仓根迁入）；`${OPRUNWAY_PLUGIN_ROOT}` = 本插件根中立变量，Claude 下等价 `${CLAUDE_PLUGIN_ROOT}`（harness 自动设），**Codex 等非 Claude 运行时须显式 `export OPRUNWAY_PLUGIN_ROOT=<插件根绝对路径>`**；写进可执行命令时用自兜底形式 `${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`。
 > ⚠ **落点**：你为用户算子生成的 runner 落 **`<ops_root>/<op>/`**（`ops_root` = `$OPRUNWAY_OPS_DIR` 或 `${OPRUNWAY_WORK_DIR:-$CWD}/.oprunway/ops`），**不要写进插件的 `new_example/`**（插件安装目录升版即冲；工程约定要求产物落用户 CWD）。`repo_adapter.find_runner()` **只查用户目录、无 fallback**（fallback 已退役 2026-07-20）：**缺 runner 直接 fail-closed BLOCKED，引擎绝不回退插件样例**——runner 是引擎的**输出**、非组件。**核心纪律（Equal 教训）**：aclnn 入口/dtype/参数顺序**一律从算子自带 `test_aclnn_*.cpp` 抠、不猜**。
 
 ## 0. 契约（固定，与 `repo_adapter`/`run_on_npu.sh` 对齐，勿改）

@@ -8,6 +8,8 @@
   - 回归: 解析失败**绝不产出空壳 pr_facts**（out 目录里不落 pr_facts.json）
   - 区分两种失败: URL 认识但网络取不到 → 不抛、记 notes、仍写 pr_facts（含 source_repo），
     且 notes 不把它说成「URL 格式错」（免得误导用户改 URL）
+  - Gap-1: `aclnn_*.h` 接口头是**一等 key_file**——不受 `/op_host/` 档 `[:4]` 截断、优先取、
+    剔 `*_impl.h`、层级不预设、只收目标算子目录下的、去重、缺席时 notes 点名
 不打真网络: URL 形态用例走纯函数 _parse_pr_url（解析在网络之前）; 网络分支用桩替掉 fetch_source._get。
 """
 import os, json, tempfile, unittest
@@ -232,6 +234,113 @@ class FetchPrFailModeTest(unittest.TestCase):
         self.assertEqual(facts["target_dir"], "math/isclose")
 
 
+class AclnnHeaderIsFirstClassKeyFileTest(unittest.TestCase):
+    """Gap-1（2026-07-25 dogfood 逼出）：`aclnn_*.h` 接口头是 **aclnn 路由的第一依据**，
+    必须作**一等 key_file**、不被 `/op_host/` 那一档的 `[:4]` 截断挤掉。
+
+    实测病灶（median PR6429）：接口头在 `<op_subdir>/op_host/op_api/aclnn_median.h`，与一堆
+    `op_host/*.cpp` 挤在同一档、排在第 5 位后被截断 → `key_files` 里没有头 → 下游只能凭 example
+    的调用写法或算子名猜符号（= 「验的不是 PR、是 CANN 内置同名实现」那条假 PASS 的入口）。
+    桩掉 `_get`/`_repo_file`，绝不打真网络。"""
+
+    OP_DIR = "experimental/index/median"
+    HDR = OP_DIR + "/op_host/op_api/aclnn_median.h"
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self._get, self._file = fs._get, fs._repo_file
+        self.asked = []
+
+    def tearDown(self):
+        fs._get, fs._repo_file = self._get, self._file
+
+    def _stub(self, files):
+        def g(url, params=None, timeout=30):
+            if url.endswith("/files"):
+                return 200, [{"filename": f} for f in files]
+            return 200, {"title": "t", "state": "open", "base": {"ref": "master"},
+                         "head": {"ref": "feat", "sha": "abc123", "repo": {"full_name": "cann/ops-nn"}}}
+        fs._get = g
+        fs._repo_file = lambda o, r, p, ref=None: (self.asked.append(p) or f"// {p}") if ref else None
+
+    def _facts(self, files, num=6429):
+        self._stub(files)
+        fs.fetch_pr(f"https://gitcode.com/cann/ops-nn/merge_requests/{num}", self.d)
+        with open(os.path.join(self.d, "pr_facts.json"), encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_header_survives_when_op_host_files_exceed_the_cap(self):
+        """op_host 下先摆 6 个 .cpp（超过 `[:4]`）→ 接口头仍必须在 key_files 里。"""
+        files = [f"{self.OP_DIR}/op_host/median_tiling_{i}.cpp" for i in range(6)]
+        files.append(self.HDR)
+        facts = self._facts(files)
+        self.assertIn(self.HDR, facts["key_files"],
+                      f"接口头被截断挤掉了（key_files={sorted(facts['key_files'])}）——"
+                      f"aclnn 路由的第一依据不得受 [:4] 截断")
+
+    def test_header_is_fetched_first(self):
+        """顺序即优先级：接口头排在所有其它候选之前被取（取材失败时先保住最要紧的那份）。"""
+        files = [f"{self.OP_DIR}/op_host/a{i}.cpp" for i in range(5)] + [
+            f"{self.OP_DIR}/examples/test_aclnn_median.cpp", self.HDR]
+        self._facts(files)
+        self.assertEqual(self.asked[0], self.HDR, self.asked)
+
+    def test_impl_header_excluded(self):
+        """`*_impl.h` 是内部实现头、不是对外两段式接口 → **不得算作一等接口头**（与 aclnn_adapter 同口径）。
+
+        ⚠ 这里断言的是 `aclnn_headers`（一等档）而**不是** `key_files`：`_impl.h` 落在 `/op_host/` 那一档、
+        被当作普通上下文文件捞进 `key_files` 是无害且合理的（多一份实现上下文没坏处）。
+        真正要防的是它**冒充第一依据**——尤其别把「缺席告警」压掉（它同样匹配 `aclnn_*.h` 正则）。"""
+        impl = self.OP_DIR + "/op_host/op_api/aclnn_median_impl.h"
+        facts = self._facts([impl, f"{self.OP_DIR}/op_host/median.cpp"])
+        self.assertNotIn(impl, facts["aclnn_headers"], "*_impl.h 不得被当成对外接口头")
+        self.assertEqual(facts["aclnn_headers"], [], "只有 impl 头 = 一等接口头仍然缺席")
+        self.assertTrue(any("aclnn 接口头" in n for n in facts["notes"]),
+                        f"只有 *_impl.h 时必须仍报「第一依据缺席」，不许被压掉（fail-open）：{facts['notes']}")
+
+    def test_header_layer_is_not_hardcoded(self):
+        """落点**不预设层级**：`op_api/` 直挂在算子目录下的布局同样要收（钉死一层会把真 PR 判成非域内）。"""
+        flat = self.OP_DIR + "/op_api/aclnn_median.h"
+        facts = self._facts([flat, f"{self.OP_DIR}/op_host/median.cpp"])
+        self.assertIn(flat, facts["key_files"])
+
+    def test_other_ops_header_not_collected(self):
+        """一等档只收**目标算子目录下**的头——同 PR 里别的算子的接口头不得冒充第一依据（会拿错签名）。
+
+        ⚠ 同 `test_impl_header_excluded`：断言在 `aclnn_headers` 上。别的算子的头被 `/op_host/` 档
+        当普通上下文捞进 `key_files` 无害；有害的是它**冒充本算子的签名来源**。"""
+        other = "experimental/index/other_op/op_host/op_api/aclnn_other.h"
+        # 目标算子目录由**首个**匹配的改动文件判出 → 把本算子的文件摆首位，别让桩自己跑偏
+        facts = self._facts([f"{self.OP_DIR}/op_host/median.cpp", other, self.HDR])
+        self.assertEqual(facts["aclnn_headers"], [self.HDR],
+                         f"一等接口头只该有本算子那份：{facts['aclnn_headers']}")
+
+    def test_other_ops_header_does_not_suppress_missing_note(self):
+        """回归（fail-open）：本算子**没有**接口头、但同 PR 里别的算子有 → 缺席告警**仍须报**。
+
+        旧写法拿 `_ACLNN_HDR_RE` 扫整个 `key_files`，`other_op` 的头会把告警压掉，
+        下游于是在「第一依据缺席」的情况下静默去猜符号——这正是「验的不是 PR、是同名内置」那条路。"""
+        other = "experimental/index/other_op/op_host/op_api/aclnn_other.h"
+        facts = self._facts([f"{self.OP_DIR}/op_host/median.cpp", other])
+        self.assertEqual(facts["aclnn_headers"], [])
+        self.assertTrue(any("aclnn 接口头" in n for n in facts["notes"]), facts["notes"])
+
+    def test_header_not_requested_twice(self):
+        """接口头同时命中「一等档」与「/op_host/ 档」→ 去重，别多打一次请求。"""
+        self._facts([self.HDR, f"{self.OP_DIR}/op_host/median.cpp"])
+        self.assertEqual(self.asked.count(self.HDR), 1, self.asked)
+
+    def test_missing_header_is_called_out_in_notes(self):
+        """一份接口头都没取到 → notes 必须点名说「第一依据缺席」，不许静默往下走。"""
+        facts = self._facts([f"{self.OP_DIR}/op_host/median.cpp"])
+        self.assertTrue(any("aclnn 接口头" in n for n in facts["notes"]), facts["notes"])
+
+    def test_header_present_no_missing_note(self):
+        """取到了就不该再报缺席（免得告警噪声把真信号淹掉）。"""
+        facts = self._facts([self.HDR])
+        self.assertFalse(any("没有取到 aclnn 接口头" in n for n in facts["notes"]), facts["notes"])
+
+
 class TaskdocSnapshotTest(unittest.TestCase):
     """R12 / 批 3：任务书**全文快照**入库——整条 golden 来源契约链的**前提**。
 
@@ -324,6 +433,41 @@ class TaskdocSnapshotTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(snap), text)
         self.assertIn("sha256 = ", text)
         self.assertIn("task_doc.snapshot.md", text)
+        work_snap = os.path.join(out, "task_doc.snapshot.md")
+        self.assertTrue(os.path.isfile(work_snap), text)
+        with open(work_snap, "rb") as got, open(self.src, "rb") as want:
+            self.assertEqual(got.read(), want.read())
+
+    def test_changed_taskdoc_leaves_existing_workdir_byte_identical(self):
+        out = os.path.join(self.d, "out")
+        ops = os.path.join(self.d, "ops", "Op")
+        fs.main(["--taskdoc", self.src, "--out", out, "--snapshot-into", ops])
+        paths = [
+            os.path.join(out, "task_doc.md"),
+            os.path.join(out, "task_doc.snapshot.md"),
+            os.path.join(ops, "task_doc.snapshot.md"),
+        ]
+        before = {path: open(path, "rb").read() for path in paths}
+        with open(self.src, "wb") as changed:
+            changed.write("新版任务书".encode("utf-8"))
+        with self.assertRaisesRegex(RuntimeError, "未写任何新任务书工件"):
+            fs.main([
+                "--taskdoc", self.src, "--out", out,
+                "--snapshot-into", ops,
+            ])
+        after = {path: open(path, "rb").read() for path in paths}
+        self.assertEqual(after, before)
+
+    def test_snapshot_symlink_is_rejected(self):
+        target = os.path.join(self.d, "victim")
+        with open(target, "wb") as out:
+            out.write(b"do not touch")
+        snapshot = os.path.join(self.d, "task_doc.snapshot.md")
+        os.symlink(target, snapshot)
+        with self.assertRaisesRegex(RuntimeError, "符号链接"):
+            fs.write_taskdoc_snapshot(self.src, snapshot)
+        with open(target, "rb") as src:
+            self.assertEqual(src.read(), b"do not touch")
 
 
 class HeadShaPinningTest(unittest.TestCase):
@@ -454,6 +598,78 @@ class MainAbortsBeforeSideEffectsTest(unittest.TestCase):
                      "https://gitcode.com/cann/catlass", "--out", out])
         self.assertEqual(self.called, [], "取任务书在 PR 校验之前被调用了（顺序错）")
         self.assertFalse(os.path.exists(out), "产出目录被建了（不该落任何半产物）")
+
+
+class SourceFactsTest(unittest.TestCase):
+    def _facts(self):
+        sha = "a" * 40
+        return {
+            "pr_url": "https://gitcode.com/cann/ops-nn/pull/6429",
+            "source_repo": "cann/ops-nn",
+            "head_sha": sha,
+            "head_repo": "contributor/ops-nn",
+            "is_fork": True,
+            "state": "opened",
+            "changed_files": ["index/median/op_host/aclnn_median.h"],
+            "key_files": {"index/median/op_host/aclnn_median.h": "void aclnnMedian();"},
+            "key_files_ref": {"index/median/op_host/aclnn_median.h": sha},
+            "aclnn_headers": ["index/median/op_host/aclnn_median.h"],
+            "op": "median",
+            "target_dir": "index/median",
+            "interface_kind": "aclnn_2stage",
+            "aclnn_entry": "aclnnMedian",
+        }
+
+    def test_complete_payload_binds_taskdoc_head_and_key_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            task = os.path.join(d, "task_doc.md")
+            with open(task, "wb") as out:
+                out.write("任务书".encode())
+            payload = fs.build_source_facts(task, self._facts())
+        self.assertEqual(payload["completeness"], {"status": "complete", "reasons": []})
+        self.assertEqual(payload["pr"]["head_sha"], "a" * 40)
+        self.assertRegex(payload["taskdoc"]["bytes_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(payload["taskdoc"]["snapshot_sha256"],
+                         payload["taskdoc"]["bytes_sha256"])
+        self.assertRegex(payload["key_files"][0]["bytes_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("content", payload["key_files"][0])
+
+    def test_wrong_key_ref_and_partial_facts_are_blocked(self):
+        with tempfile.TemporaryDirectory() as d:
+            task = os.path.join(d, "task_doc.md")
+            with open(task, "wb") as out:
+                out.write(b"x")
+            facts = self._facts()
+            facts["key_files_ref"] = {
+                "index/median/op_host/aclnn_median.h": "b" * 40}
+            payload = fs.build_source_facts(task, facts)
+            self.assertEqual(payload["completeness"]["status"], "blocked")
+            self.assertIn("key_file_ref_not_head:index/median/op_host/aclnn_median.h",
+                          payload["completeness"]["reasons"])
+
+            partial = {"pr_url": facts["pr_url"], "source_repo": "cann/ops-nn",
+                       "notes": ["network down"], "blocked": "missing_head_sha"}
+            payload = fs.build_source_facts(task, partial)
+            self.assertEqual(payload["completeness"]["status"], "blocked")
+            self.assertIn("missing_or_invalid_head_sha", payload["completeness"]["reasons"])
+
+    def test_write_round_trip_and_taskdoc_change_changes_digest(self):
+        import content_address as ca
+
+        with tempfile.TemporaryDirectory() as d:
+            task = os.path.join(d, "task_doc.md")
+            with open(task, "wb") as out:
+                out.write(b"v1")
+            path = fs.write_source_facts(task, self._facts(), d)
+            first = json.load(open(path, encoding="utf-8"))
+            payload = ca.read_artifact(
+                d, "source_facts.json", "oprunway/source-facts/v1")
+            self.assertEqual(payload["completeness"]["status"], "complete")
+            with open(task, "wb") as out:
+                out.write(b"v2")
+            fs.write_source_facts(task, self._facts(), d)
+            second = json.load(open(path, encoding="utf-8"))
+            self.assertNotEqual(first["digest"], second["digest"])
 
 
 if __name__ == "__main__":

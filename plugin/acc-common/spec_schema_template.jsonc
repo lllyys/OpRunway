@@ -2,66 +2,94 @@
 // 绝不看任何真实算子样例（samples/specs/*.spec.json）的数值，避免先看答案再推导的污染。
 // 字段集对齐 references/taskdoc-to-spec.md §0 权威 schema；下面所有值都是占位符/取值口径说明，
 // 不是任何真实算子的答案。产 spec 时逐字段从 task_doc.md + pr_facts.json 抽，缺项落 task_pr_gaps。
+//
+// ⚠ **怎么用这份模板**（2026-07-24 订正，dogfood 血教训）：
+//   · **JSON 主体只留「每份 spec 都必须有」的字段**——照抄下来把占位值换成真值即可跑。
+//   · **可选字段一律只在文件末尾的《可选字段目录》里给注释示例，主体不留占位键**。
+//     理由：可选字段的语义是「不属该场景就**整字段省略**」；若把 `"runner_form": "<可选·cpp | aclnn_py>"`
+//     这种占位串真留在 JSON 里，复制走没删就是**一份写坏的 spec**——引擎当场 fail-closed，
+//     而报错指向的是模板、不是算子。要用哪个可选字段，就从目录里把那一行**照结构抄进主体**、填真值。
+//   · 末尾另附两份**最小合法骨架**（cpp 缺省通路 / aclnn_py torch-对标通路），照着抄即可跑。
+//   · 占位串的形状（`"<…>"`）只是给人看的口径说明，**不是**合法取值：主体里每个占位串都必须被替换。
 {
   "op": "<PascalCase 算子名，去 aclnn 前缀>",
   "repo": "<顶层仓名：ops-math / ops-nn / ops-transformer / catlass>",
   "hardware": ["<从任务书『适配硬件』抽，如 Atlas A2 / Atlas A3 / Ascend 950PR>"],
   "reference": {
     "type": "<tbe | torch | numpy | gpu | cpu | builtin>",
-    "ref": "<参考实现定位 + 语义改造点，自由文本>",
-    "path": "<可选：TBE 内置三件套路径 kernel/proto/config>"
+    "ref": "<参考实现定位 + 语义改造点，自由文本>"
   },
   "change": {
     "kind": "<rewrite_tbe | add_dtype | align_dtype | semantic | new_op | gpu_port | bugfix>",
-    "note": "<定性说明>",
-    "dtypes_added": ["<add_dtype 时新增类型，否则省略>"]
+    "note": "<定性说明>"
   },
   "params_source": "<有完整参数表→task_doc_table；只写『原算子所有类型』→derived_from_reference>",
+  // ── operator_class · 算子类别（受控词表，决定「该不该给它喂 NaN·Inf」）───────────────────────────
+  //   ⚠ 本条只给**口径**，不给任何具体算子的答案（本模板零真值）。**逐算子怎么判**（判别问句 + 类别举例
+  //     + 判错代价）看 `skills/acc-spec/references/taskdoc-to-spec.md` §1.5。
+  //   受控词表（三选一，无第四种；实现见 `gen_cases._operator_class` / `_emits_nonfinite`）：
+  //     · floating_compute —— **做真正的浮点算术**：逐元素算术 / 超越函数 / 规约求和 / 距离 / 归一化，
+  //                           输出是**算出来的新数**。
+  //     · structural       —— **选值 / 排序 / 索引 / 规约取元素 / 纯搬运**：输出**恒等于某个输入元素**
+  //                           （或它的下标），不做算术。
+  //     · integer_compute  —— **纯整型逻辑**：位运算 / 整数比较 / 整数算术，语义上不存在 NaN·Inf。
+  //   **各档对特殊值的影响**（gen_cases 据本字段分档，op-中立、绝无按算子名分支）：
+  //     · floating_compute            → §1.4 照产 `inf` / `-inf` / `nan` 特殊场景；`precision.value_profiles`
+  //                                     可用 `"nan"`。
+  //     · structural / integer_compute → **不产** inf/-inf/nan 特殊场景；若还声明 `value_profiles` 含 `"nan"`
+  //                                     → **fail-closed**（两处自相矛盾，引擎不静默丢 profile）。
+  //     · **三档都保留**：空 / 标量 `[1]` / 上下边界（`scalar`/`bndlo`/`bndhi`）与 `"tie"` value_profile ——
+  //       参考仓给结构 / 整型类列的特殊值正是「极值、0/1/-1、**重复**、负 / 越界索引、广播、规约轴、饱和」。
+  //   **缺省语义**：整字段省略 = 未声明 → **行为与本字段引入前完全一致**（照产 inf/-inf/nan）。这只是
+  //     legacy spec 的向后兼容出口（本字段引入前写的 spec 未声明、caseset 逐字节不变），
+  //     **新 spec 一律显式声明**——每个算子都落得进这三类之一，没有「不适用」，别拿省略当「拿不准」的出口。
+  //     词表外取值 → fail-closed（这个字段猜错两头都很贵：判宽了 → **不该判挂的判挂**，判窄了 → **该测的没测**）。
+  //   **依据出处**（本项目 case 生成规则要求参照的仓 `Justbin/cannbot-ops-input`）：
+  //     `skills/operator-case-generation/common/design_contract.py:427` 定义同一份受控词表；同文件 `:512`
+  //     `if design["operator_class"] == "floating_compute": _validate_floating_rules(design)` ——
+  //     `_validate_floating_rules`（`:360-393`）**只在这一类**强制 `nan / pos_inf / neg_inf / mixed_inf`；
+  //     另两类的特殊值口径见该仓 `SKILL.md:252`（extrema / zero·one·minus-one / duplicate·negative·boundary
+  //     indices / broadcasting / reduction axes / saturation）。
+  "operator_class": "<floating_compute | integer_compute | structural>",
   // params 各字段口径：
-  //   rank（**可选，仅 io=='in'**）——该输入允许的**维度数**，int 或 int 列表（如 <单个维度数> 或 [<维度数A>, <维度数B>]，取值 1..8）。
-  //     写了 → gen_cases 的 shape 阶梯只在这些维度内取值；**不写 = 不限制**（沿用全阶梯，1~4 维混排）。
-  //     ⚠ 只有任务书/op_def 真写死了维度（如「仅支持 4D NCHW 输入」）才填；拿不准就别填——填错会把合法 shape 挡掉。
-  //     多个 in 参数都写 → 取**交集**（常规构造路径下各输入同形）；交集空、或过滤后无合法常规 shape → gen_cases fail-closed。
-  //   default（**仅 io=='attr'**）——取值类型：bool / int / float / str **标量**，或 **list[int] 数组**
-  //     （`output_size` / `kernel_size` 这类既是数组、又决定输出形状的属性用数组；不支持嵌套数组、浮点数组、bool 数组，
-  //     也**不支持空数组 `[]`**——manifest 行是空格分隔的扁平 token，空数组编成空串会把后续 token 全挤错位）。
-  //     同一类型约束也适用于 spec 可选的 `attr_matrix`（若写）里的每个取值。
-  // ⚠ **输出形状不在 spec 里表达**（用户 2026-07-22 拍板：不搞 spec 表达式语言）——输出形状与输入不同的算子
+  //   ⚠ 下面三行是**形状示例**，按算子真实参数表增删：无 attr 的算子删 attr 行；多输入/多输出各写一行。
+  //   `rank` / `noncontiguous` / `out_role` / `index_of` / `gather_from` 等**可选参数级字段**见末尾目录，
+  //   不需要就整字段省略（别留占位串）。
+  //   ⚠ **输出形状不在 spec 里表达**（用户 2026-07-22 拍板：不搞 spec 表达式语言）——输出形状与输入不同的算子
   //   （shape_transform：pooling / im2col / reduce 之类），由 per-op `<ops_root>/<op>/golden.py` **可选**导出
   //   `def out_shape(in_shapes, attrs)` 交代；不导出即缺省语义「输出同输入形状」（elementwise）。
   //   gen_cases 每条 case 都会拿它与 golden_fn 的实际输出形状对账，不一致 fail-closed。
+  //   ⚠ 输出 dtype 只有两种合法写法：**单值**（如 `["int32"]` / `["int64"]`），或哨兵 `["<from_input>"]`
+  //     （= 随输入 dtype，用于「值输出与输入同类型」的归约/选择类）。多候选 → 歧义 → fail-closed。
+  //   ⚠ **index 类输出的 dtype 必须照算子 header / op_def 实际声明填**（int32 或 int64），**不是恒 int64**；
+  //     **不得因为 torch 参考返回 int64 就改写 DUT 的输出契约**——DUT 声明 int32 而参考给 int64
+  //     是**一条要挂账的落差**（写进 `task_pr_gaps`），不是可以顺手抹平的差异。
+  //   ⚠ out 参数必须**具名且不重名**（outputs[] / manifest / evidence 三处按 name 交叉核验身份）。
   "params": [
-    {"name": "<参数名>", "io": "<in | out | attr>", "dtype": ["<当前 pipeline 支持子集，如 float32/float16>"], "rank": "<可选·仅 in：int 或 int 列表，限制输入维度数；不写=不限制>", "noncontiguous": "<可选 true/false>", "default": "<attr 才有：默认值，标量或 list[int]>"}
+    {"name": "<in 参数名>", "io": "in", "dtype": ["<当前 pipeline 支持子集，如 float32/float16>"]},
+    {"name": "<attr 参数名>", "io": "attr", "dtype": ["<单值，如 int64 / bool / float32——标量 ABI 宽度须确定>"], "default": "<默认值，标量或 list[int]>"},
+    {"name": "<out 参数名>", "io": "out", "dtype": ["<输出 dtype 单值>  或  \"<from_input>\""]}
   ],
-  "generalize": "<bool：默认 true；无张量 IO / 融合无泛化要求→false>",
+  "generalize": true,                   // bool：默认 true；无张量 IO / 融合无泛化要求→改 false
   // Q7 dtype 覆盖门（gate 消费）——分两字段，别混：
   //   dtype_required=任务书**权威 dtype 全集**（来源优先级见 ref §1 dtype 行：任务书显式表 > 原 TBE 信息库 > 问用户）。
   //     任务书只写『支持所有类型』且信息库未接通/全集未知 → 填字符串 "needs_user"（不谎报覆盖、也不臆造）；
   //     legacy 未迁 → 整字段省略（门判『未声明→覆盖门未行使』、不阻塞）。
   //   dtype_tested=当前 pipeline **实测子集** = params 各 in 的 dtype 并集（= gen_cases 实际会造的 dtype，通常 float32/float16）。
   //   门校：dtype_required 是 list 且 (required − tested) 非空、且 task_pr_gaps 无对应 {kind:dtype_deferred,dtypes:[…]} → BLOCKED。
-  "dtype_required": ["<权威全集>  或  \"needs_user\"  或  省略(legacy)"],
+  "dtype_required": ["<权威全集>  或  \"needs_user\""],
   "dtype_tested": ["<实测子集，如 float32/float16>"],
   "verify_mode": "<exact | numerical | behavioral，见 ref §2 决策树>",
   "precision": {
     "oracle": "<ascendoptest | mere_mare | atk_double | torch | scipy | std_exact | none，按任务书原文抽>",
-    "standard": "<ascendoptest_default | ecosystem_mere_mare | exact | behavioral，据 oracle+verify_mode 映射>",
-    "tolerance_policy_id": "<spec 级摘要：exact→exact；ascendoptest→ascendoptest_default；mere_mare/atk_double→ecosystem_mere_mare>",
-    "threshold": "<number：exact→0；numerical→主 dtype 默认（AscendOpTest fp16≈1e-3 等），标『(推断/待工具核实)』>",
+    "standard": "<ascendoptest_default | ecosystem_mere_mare | exact | behavioral | torch_allclose，据 oracle+verify_mode 映射>",
+    "tolerance_policy_id": "<spec 级摘要：exact→exact；ascendoptest→ascendoptest_default；mere_mare/atk_double→ecosystem_mere_mare；torch→torch_allclose>",
+    "threshold": "<number：exact→0；numerical→主 dtype 默认（AscendOpTest fp16≈1e-3 等），标『(推断/待工具核实)』；behavioral 则删掉本键>",
     "threshold_source": "<阈值出处说明>",
     "case_target": "<int，精度用例目标数；缺省 50。acc-spec 运行时 AskUserQuestion 问用户（建议 50），可先 gen_cases --dry-run 拿 [forced_total(=强制下限 S), pool_max] 区间呈现；须 ≥1（0/负→gen_cases fail-fast，堵零用例空跑冒充验收）。gen_cases 按 opbase §1 覆盖-预算铺到此数（覆盖驱动、封顶；< S 抬到 S、> pool_max 封顶且数量门软化 PASS+note）>"
   },
-  "perf": {
-    "baseline": "<tbe | gpu_external>",
-    "target_ratio": "<number：任务书『性能无劣化』→1.0；『≥95%』→0.95…按任务书原文换算>",
-    "small_shape_exception": {
-      "text": "<小 shape 例外的人读说明>",
-      "when_us_below": "<number：kernel 耗时低于该值才触发例外>",
-      "abs_gap_us_within": "<number：绝对差在该值内才算例外>"
-    }
-  },
   "task_pr_gaps": ["<所有缺口/矛盾/推断，推断项标 (推断)；无则空数组>"],
-  // 批 4 · golden 判据锚（**判据只从 spec 派生**，硬约束 #5）。可选但**正式验收强烈建议写**：
+  // 批 4 · golden 判据锚（**判据只从 spec 派生**，硬约束 #5）。可选但**正式验收强烈建议写**，故留在主体：
   //   不写 → validator 走 legacy（信 caseset 自声明），裁决里 golden_judged_from="caseset_self_declared"
   //          （= 判据没从 spec 派生这件事被显式标出，不是隐形的洞，但不如 spec 权威）。
   //   写了 → validator 对账 caseset 的 golden_tier 与本锚逐字段一致（不符 fail-closed），并**用本锚重新派生档位判门**，
@@ -69,12 +97,240 @@
   // ⚠ 这是与 golden.py 的 GOLDEN_CONTRACT **平行的独立源**：acc-spec 据任务书独立判、gen_golden 在 golden.py 独立判，
   //   validator 对账两源；不一致即「有人动过手脚 / 两处判档不一致」→ fail-closed（双源交叉核验，同硬约束 #4 的模式）。
   // ⚠ 字段取值全部对齐 precision_policy 的受控词表；authorization.kind 与 source 的判定同 gen_golden（手册 golden-authoring.md §1）。
-  //   snapshot_sha 只在 authorization.kind ∈ {oracle_method, formula} 时有（= fetch_source --snapshot-into 打印的那串）；
-  //   impl_reference / none 无快照 → 省略 taskdoc_snapshot。
+  //   `taskdoc_snapshot.sha256` 只在 authorization.kind ∈ {oracle_method, formula} 时有（= fetch_source --snapshot-into 打印的那串）；
+  //   impl_reference / none 无快照 → **整个 taskdoc_snapshot 键省略**（见末尾目录）。
   "golden": {
     "source": "<single_api | multistep | external_method | needs_user>",
     "method_kind": "<torch_cpu | numpy_cpu | builtin_tbe | gpu_lib | other_external | needs_user>",
-    "authorization": {"kind": "<oracle_method | formula | impl_reference | none>"},
-    "taskdoc_snapshot": {"sha256": "<仅 oracle_method/formula：任务书快照 sha256；其余省略此键>"}
+    "authorization": {"kind": "<oracle_method | formula | impl_reference | none>"}
   }
 }
+//
+// ════════════════════════════════════════════════════════════════════════════════
+// 《可选字段目录》——**要用才抄进上面的 JSON 主体，不用就一个都别出现**
+// ════════════════════════════════════════════════════════════════════════════════
+//
+// ── 顶层 · 场景 / runner 形态（**编排层据字段路由，绝不 if-算子名**；缺省=常规 cpp 通路）─────────────
+//   "scenario":    "torch_ref_aclnn"        // 受控值只此一个，不属该场景→整字段省略、别编新值
+//   "runner_form": "aclnn_py"               // 缺省 cpp（= 省略即此）
+//   scenario   ：场景标识（⟺ 任务书把 **torch 指定为真值口径** × PR 是**标准 aclnn 两段式**工程）。
+//                它是给编排层/人读的路由标签（Layer 1 脚本目前不读它），真正驱动执行的是 runner_form。
+//   runner_form：runner 形态。`cpp`（缺省）= per-op `oprunway_<op>_runner.cpp`；
+//                `aclnn_py` = **无 per-op runner 源**、op 工程即 DUT，走 op-中立的 ctypes-aclnn runner
+//                （`aclnn_runtime`，从 aclnn header 推 arity）。
+//                ⚠ `runner_form=="aclnn_py"` **必须**同时声明 `call_variants`（gen_cases 当场 fail-closed）；
+//                ⚠ 它还决定真机可收发 dtype 白名单（`repo_adapter.supported_np(runner_form)`：aclnn_py 放开 int/bf16）。
+//
+// ── 顶层 · aclnn 调用变体表（**仅 runner_form=="aclnn_py"，且此时必填**；实现见 ────────────────────
+//    `precision_policy.call_variants` / `gen_cases._build_aclnn_call`）：
+//   ⚠ 触发条件是 **runner_form==aclnn_py**，不是「header 里有多个入口」——**单入口也必须写一条**
+//     （`when` 用 `{"always": true}`），多入口只是产多条。
+//   为什么要它：同一个算子的**不同 attr 取值**可能对应**不同的 aclnn 符号**与**不同的输出 arity**
+//   （典型：某属性为 null 时走「无该形参的 API、只出 1 个输出」，有值时走「多一个形参的 API、出 2 个输出」）。
+//   没有变体表，driver 只能自己把 null 兜成某个默认值——那既不是该 case 的语义、又可能与签名不符（越界写/ABI 崩）。
+//   现在改成：**spec 声明式变体表 → gen_cases 逐 case 选中并完全解析成 `case.aclnn_call`**，driver 直接执行、不再推断。
+//   ⚠ 变体按 **attr 取值**分派（字段驱动），**绝不是**按算子名分派；无匹配变体 → fail-closed，绝不退默认。
+//   字段：
+//     `when`  （必填）匹配谓词，三选一：`{"always": true}` / `{"attr":"<attr名>","is_null":true|false}` /
+//             `{"attr":"<attr名>","equals":<值>}`。**不允许隐式全匹配**，要无条件就显式写 `always`。
+//             逐 case 按**声明顺序取首个匹配者**。
+//     `symbol`（必填）该变体调用的 aclnn 符号**基名**（CamelCase，去 aclnn 前缀；真符号 =
+//             `aclnn<symbol>GetWorkspaceSize` / `aclnn<symbol>`）。不同变体可以是不同 API。
+//     `active_attrs`（选填）该变体**签名里真正出现**的 attr 槽，须为 spec attr 顺序的**子序列**；
+//             缺省 = spec 全部 attr。签名里没有的形参**必须**排除掉（否则 ctypes argtypes 错位）。
+//     `attrs`（选填）该变体**显式写死**的 attr 取值覆盖（人在 spec 里定的，不是代码兜的默认值）。
+//             ⚠ 某 attr 在 `active_attrs` 里、而该 case 取值为 null 且此处也没覆盖 → **fail-closed**
+//             （绝不静默转标量默认值）。
+//     `active_outputs`（必填）该变体**真正落地**的 out 参数名，须为 spec out 顺序的**子序列**、不重名。
+//             它同时决定本 case 的 `expected.outputs[]` 身份集；未列出的 out 在 slots 里写成 `out_null`（传 NULL、不回读）。
+//             ⚠ 落地了 index 输出、却没落地它 `index_of` 所引的 value 输出 → fail-closed（判据悬空）。
+//   示例（**纯占位、非任何真实算子**：设该算子有一个可为 null 的 attr `<attrA>`，为 null 时走无该形参的
+//   单输出 API、非 null 时走双输出 API）：
+//     "call_variants": [
+//       {"when": {"attr": "<attrA>", "is_null": true},
+//        "symbol": "<SymbolBase>",    "active_attrs": [],                     "active_outputs": ["<value输出名>"]},
+//       {"when": {"attr": "<attrA>", "is_null": false},
+//        "symbol": "<SymbolBaseX>",   "active_attrs": ["<attrA>", "<attrB>"], "active_outputs": ["<value输出名>", "<index输出名>"]}
+//     ]
+//
+// ── 顶层 · attr 取值矩阵 ────────────────────────────────────────────────────────────
+//   "attr_matrix": [{"<attr名>": <取值>}, {"<attr名>": <取值>}]
+//   逐行给「一组 attr 取值」，gen_cases 按行铺覆盖。取值类型限制同 params 的 `default`
+//   （bool / int / float / str 标量，或 list[int]；不支持嵌套/浮点数组/bool 数组/空数组）。
+//
+// ── 顶层 · 轴维度约束（**定向生成**任务书点名的「某 attr 所指轴长度 = L」；实现见 ──────────────────
+//    `gen_cases._attr_axis_lengths`）：
+//   "attr_axis_lengths": [{"attr": "<attr名>", "lengths": [<正整数>, …]}]
+//   为什么要它：任务书常点名「归约轴上维度为 1」这类边界，而 shape 阶梯与 attr 取值在正交网格里是
+//   **各自独立**取的——含长度-1 轴的 shape 只由特殊场景产、只配第一组 attr，点名的组合可能**一条都不出**
+//   （2026-07-24 dogfood 实测：median 的「dim 所指轴长度=1」实跑 **0 条**，且当时连告警都没有）。
+//   语义：把该 attr 的值当作**轴下标**（int 或 int 列表，允许负数），对 `lengths` 里的每个 L
+//   定向生成一条「这些轴的长度 = L」的用例。
+//   硬校（全部 fail-closed）：
+//     · 整字段省略 = 不生成此类用例（现有算子零变更）；写了就必须是**非空**对象列表。
+//     · `attr` **必须引用本 spec 已声明的 attr 参数名**（不在 attr 名集里 → 拒，防伪造覆盖）。
+//     · `lengths` 必须是**非空正整数列表**（≥1；bool / 非 int / ≤0 一律拒）。
+//       ⚠ 长度 **0**（空张量）不走这里——用 `allow_empty_tensor` + `empty_axis` 表达。
+//     · 某组 attr 取值里该 attr 是 `null`（如「全局归约、压根没有那根轴」）→ 该变体**自然跳过、不是错误**。
+//     · **声明了却一条都产不出 → 当场 fail-closed**（「声明覆盖却产零条」= 假覆盖，本仓最忌）。
+//       撞上一般是：attr 的取值不是轴下标 / 轴下标越界 / in 参数的 `rank` 约束把 shape 掐死了 → 回去核，别删字段绕。
+//   dry-run 账本会打印 `attr_axis_lengths: 声明 N → 定向生成 M 条`，M=0 即上面的 fail-closed。
+//
+// ── 顶层 · 空 Tensor 开关 ───────────────────────────────────────────────────────────
+//   "allow_empty_tensor": false          // **只接受真布尔**，`"false"`/`0` 一律 fail-closed 拒收
+//   "empty_axis": <非负 int>             // 允许空 Tensor、但 0 只能落在某一特定轴时声明轴号
+//   缺省（两者都不写）= 现行为：铺空 Tensor 用例、0 落最后一维。
+//   opbase §1.4 把「空 Tensor」当普适特殊场景强制铺，但**任务书白纸黑字写「不支持空 Tensor」**的算子
+//   （实测 Upsample 系 / im2col 的部分形态）没有第三条路——要么 golden 替算子**编造**它并不支持的语义、
+//   要么整链 fail-closed 卡死。故：任务书明写不支持 → `false`（这是**算子的显式声明**，不是默认放松），
+//   并在 task_pr_gaps 记依据原句。
+//
+// ── params 行内 · 可选字段 ──────────────────────────────────────────────────────────
+//   "rank": <int 或 int 列表>            // **仅 io=="in"**：该输入允许的**维度数**（取值 1..8）
+//     写了 → gen_cases 的 shape 阶梯只在这些维度内取值；**不写 = 不限制**（沿用全阶梯，1~4 维混排）。
+//     ⚠ 只有任务书/op_def 真写死了维度（如「仅支持 4D NCHW 输入」）才填；拿不准就别填——填错会把合法 shape 挡掉。
+//     多个 in 参数都写 → 取**交集**（常规构造路径下各输入同形）；交集空、或过滤后无合法常规 shape → gen_cases fail-closed。
+//   "noncontiguous": true|false          // 仅 io=="in"
+//   "default": <标量 或 list[int]>       // **仅 io=="attr"**（在主体里已给）：bool / int / float / str **标量**，
+//     或 **list[int] 数组**（`output_size` / `kernel_size` 这类既是数组、又决定输出形状的属性用数组；
+//     不支持嵌套数组、浮点数组、bool 数组，也**不支持空数组 `[]`**——manifest 行是空格分隔的扁平 token，
+//     空数组编成空串会把后续 token 全挤错位）。同一类型约束也适用于 `attr_matrix` 里的每个取值。
+//
+// ── params 行内 · 多输出契约（`out_role` / `index_of` / `gather_from`；**op-中立、按字段驱动**，─────
+//    实现见 `precision_policy.derive_output_contracts` / `uses_output_contract`）：
+//   触发：out 参数 **>1 个**，或任一 out **声明了 `out_role` 键**（`"out_role" in p`，**不做真值判断**——
+//         `out_role: ""` 也算触发、随后在受控词表上当场 fail-closed；否则一份写坏的 spec 会悄悄退回
+//         legacy 单输出通路 = 判据链整条被换掉还没人发现）。**单输出、不写 out_role = legacy，行为零变更。**
+//   `out_role`（多输出时**每个** out 必填，受控词表 `value | index`）：输出的**角色**。
+//         空串 / 未知值一律 fail-closed（不搞「非 index 即 value」的猜测——伪造角色能骗过判据派生）。
+//   `index_of`（**仅 out_role=="index" 必填**）：指向本 spec 里**某个 `out_role=="value"` 的具名输出**。
+//         index 输出**不逐位比下标**（并列时 NPU 与 golden 可合法给不同下标），判据改为
+//         `index_value_consistency`：gather 出来的**值**一致。容差**取自它所引的那个 value 输出**。
+//   `gather_from`（**仅 out_role=="index" 必填**）：指向本 spec 里**某个 `io=="in"` 的具名输入**——
+//         即 gather 的**数据源**。必须由 spec 锚定：早期实现取「case 的第一个输入」，调一下 caseset 里
+//         inputs 的顺序就能换掉 canonical 判据的 gather 源（判据只从 spec 派生，硬约束 #5）。
+//   示例行：
+//     {"name": "<value输出名>", "io": "out", "dtype": ["<from_input>"], "out_role": "value"}
+//     {"name": "<index输出名>", "io": "out", "dtype": ["<int32|int64：照 header/op_def 声明>"],
+//      "out_role": "index", "index_of": "<value输出名>", "gather_from": "<in 参数名>"}
+//
+// ── reference / change 行内 · 可选字段 ──────────────────────────────────────────────
+//   "reference.path":       "<TBE 内置三件套路径 kernel/proto/config>"
+//   "change.dtypes_added":  ["<add_dtype 时新增类型>"]      // 非 add_dtype 就整字段省略
+//
+// ── precision 行内 · 造例档位 case_profile（受控词表；**整字段省略 = legacy = 现行为**）──────
+//   "case_profile": "legacy" | "torch_parity"      // 省略 = legacy；实现见 `gen_cases._case_profile`
+//     选**这份 spec 按哪套造例规则产用例**（gen_cases 据本字段分档，op-中立、**绝无按算子名分支**；
+//     换任意声明了 torch_parity 的域内算子，工具零改即用）：
+//       · legacy       —— 现行造例规则。**已真机验收的算子靠它逐字节不变**（caseset + 全部 .npy 有 sha256
+//                         pin），所以它既是缺省、也是拿不准时的正确选择。
+//       · torch_parity —— **忠实对齐**参考仓 `Justbin/cannbot-ops-input` 的造例规则（完整笛卡尔精度网格、
+//                         medium shape 档、normal 值域重采样、4-kind 非有限特殊值…）。**仅**用于
+//                         「任务书对标 torch」场景（`precision.standard == "torch_allclose"`），不碰 catlass 通路。
+//     ⚠ 翻档 = **换一整套用例**：case id 与 golden 字节全变 → 必须**重生成 golden + 真机重验**，绿了才算数。
+//       别为「看起来更全」顺手翻档，更别在还没重验的算子上翻。
+//     ⚠ 字段一旦出现就必须是这两个字符串之一（写 null / "" / 数字 → fail-closed，同 tolerance_source 口径）；
+//       不确定就**整字段省略**。
+//     ⚠ 声明与否会**如实落进 caseset**：声明了才多一个 `case_profile` 键（未声明的算子产物一个键都不多，
+//       这正是字节安全的做法）。报告侧据此说清「这批用例是按哪套规则产的」，不必回头猜。
+//
+// ── precision 行内 · torch 对标场景（standard=="torch_allclose"）专用 ────────────────────
+//   判据：|actual-golden| <= atol + rtol*|golden|，**容错率 = 0**（不是坏点占比门），equal_nan=true。
+//   "tolerance_source": "dtype_table | taskdoc | torch_default"   // **整字段省略 = 缺省走 dtype_table**
+//     ⚠ 写成 `""` / `false` / `0` 一律 fail-closed 拒——字段一旦出现就必须是词表内的字符串，
+//       绝不让一份写坏的 spec 悄悄拿到 dtype_table 的容差。
+//       · dtype_table   —— 逐 dtype 容差表（precision_policy._TA_DTYPE_TOLS，adapt 自参考仓）。
+//                          **表里只有 float16/bfloat16/float32/float64**；整型 / bool 输出走 exact、不进此表。
+//       · taskdoc       —— 任务书**自己写了** rtol/atol 时选它，并**必须**同时给 `taskdoc_tol: [rtol, atol]`
+//                          （缺 → fail-closed）。两值须为非 bool 有限非负实数。
+//       · torch_default —— torch.allclose 缺省 (rtol=1e-5, atol=1e-8)。**只在任务书明确要求「按 torch 默认判」时用**。
+//   "taskdoc_tol": [<rtol>, <atol>]                              // 仅 tolerance_source=="taskdoc" 必填
+//   "value_profiles": ["nan"] / ["tie"] / ["nan","tie"]           // 省略 = 不产此类用例 = 现行为
+//     在常规覆盖之外**强制补**的受控数值形态用例，op-中立（只据 profile 名产数值，不知道是哪个算子）：
+//       · "nan" —— 均匀底 + 前 1/4 位 NaN：压 **NaN 传播语义** 与 equal_nan 判据。**整型 dtype 不适用**。
+//       · "tie" —— 小值集循环填充造大量并列：压归约/选择类的 **index_value_consistency**（并列时下标可合法分歧）。
+//     ⚠ 声明了却产不出（dtype 集里一个浮点都没有 / tie 的形状造不出并列）→ **fail-closed**：
+//       「声明覆盖却产零条」= 假覆盖，本仓最忌。只在任务书/语义确有这类边界要求时才声明。
+//     ⚠ **`"nan"` 只允许配 `operator_class: "floating_compute"`**（或未声明该字段的 legacy spec）：
+//       structural / integer_compute 再写 `"nan"` → **fail-closed**（两处自相矛盾，引擎不静默丢 profile）。
+//       `"tie"` 三档通吃——重复 / 并列本就属结构 / 整型类特殊值那一档。
+//   "acceptance_policy": {…}                                     // 仅任务书验收目标明确宽于平台底线时才写
+//
+// ── 顶层 · perf（任务书性能栏为『无』时**整个 perf 字段省略**，勿写 {baseline:"none"}）────────────
+//   "perf": {
+//     "baseline": "<tbe | gpu_external | torch_npu>",
+//     "target_ratio": <number>,
+//     "warmup": <int>,          // 可选，缺省 5
+//     "repeat": <int>,          // 可选，缺省 20
+//     "small_shape_exception": {"text": "<人读说明>", "when_us_below": <number>, "abs_gap_us_within": <number>},
+//     "torch_baseline": {"api": "<torch.xxx 点路径>", "positional": ["<slot name>"], "keyword": {"<slot name>": "<torch 形参名>"}}
+//   }
+//   ⚠ `target_ratio` **只从任务书原文换算**，绝不抄任何参考仓的通用默认值
+//     （参考仓 cannbot-ops-input `performance.py` 的 `PERF_SPEEDUP_THRESHOLD = 0.6` 是**它自家**口径，
+//      抄过来会把「比基线慢 40%」判成达标）。任务书是验收权威（硬约束 #1）：
+//      『无劣化 / 持平』→ 1.0（literal 读法，勿误宽成 0.95）；『≥95%』→ 0.95；『10X』→ 10.0；『0.5 倍 A100』→ 0.5。
+//      任务书没写→记 task_pr_gaps 并问用户，别填默认值。
+//   ⚠ `torch_baseline` **仅 baseline=="torch_npu" 且此时必填**（否则采集端 fail-closed，本模块不猜 torch 形参）。
+//     基线 = **同一台真机上** torch_npu 跑 torch API 的 kernel-only 耗时（真机内基线，非 GPU 外部数据；
+//     采集 = `aclnn_runtime/perf_msprof.py`，msprof --task-time + MSTX 测量窗）。实现见
+//     `perf_msprof.resolve_torch_baseline_plan`：
+//       · `api`        —— `torch.` 开头的点路径；非 `torch.*` → fail-closed。
+//       · `positional` —— **slot name** 列表（slot name = 该 case `aclnn_call.slots` 里的名字 = aclnn 头签名形参名），
+//                         按列出顺序作 torch 位置实参。**本 case 缺任一即 fail-closed**（不猜、不重排）。
+//       · `keyword`    —— `{ "<slot name>": "<torch 形参名>" }`。某 slot 在该 case 不存在（如无该形参的变体）→
+//                         该 kwarg **自然缺席** → 调到的就是 torch 侧对应 arity。**变体自动跟随 case，
+//                         采集端无需也不得为此写任何算子分支**（律令 #0）。
+//       · out / out_null slot 一律忽略（torch 侧输出是返回值）。
+//   ⚠ **对照物要与任务书条款同一个东西**：任务书点名的基线若是「某某拼接版本 / 内置 TBE」，而这里填 torch_npu，
+//     二者是否等同**须先核实**；核不实就按 `task_pr_gaps` 记，不得当作已满足任务书性能条款。
+//
+// ── golden 行内 · 可选字段 ──────────────────────────────────────────────────────────
+//   "taskdoc_snapshot": {"sha256": "<任务书快照 sha256>"}   // **仅** authorization.kind ∈ {oracle_method, formula}
+//                                                          // impl_reference / none 无快照 → 整键省略
+//
+// ════════════════════════════════════════════════════════════════════════════════
+// 《最小合法骨架》——照抄哪一份看 runner_form；抄完把 `<…>` 全部替换成真值
+// ════════════════════════════════════════════════════════════════════════════════
+//
+// ① cpp 缺省通路（per-op runner，不写任何 §1.3 字段）：
+//   {
+//     "op": "<Op>", "repo": "<repo>", "hardware": ["<适配硬件>"],
+//     "reference": {"type": "<tbe|torch|numpy|gpu|cpu|builtin>", "ref": "<定位+语义改造点>"},
+//     "change": {"kind": "<kind>", "note": "<定性说明>"},
+//     "params_source": "<task_doc_table|derived_from_reference>",
+//     "operator_class": "<floating_compute|integer_compute|structural>",
+//     "params": [
+//       {"name": "<in>",  "io": "in",  "dtype": ["float32", "float16"]},
+//       {"name": "<out>", "io": "out", "dtype": ["<from_input>"]}
+//     ],
+//     "generalize": true,
+//     "dtype_required": ["<权威全集>"], "dtype_tested": ["float32", "float16"],
+//     "verify_mode": "numerical",
+//     "precision": {"oracle": "<oracle>", "standard": "<standard>", "tolerance_policy_id": "<id>",
+//                   "threshold": <number>, "threshold_source": "<出处>", "case_target": 50},
+//     "task_pr_gaps": [],
+//     "golden": {"source": "<source>", "method_kind": "<method_kind>",
+//                "authorization": {"kind": "<kind>"}}
+//   }
+//
+// ② aclnn_py（torch 对标通路）—— 在 ① 之上**必加** runner_form + call_variants；
+//    多输出算子再逐 out 加 out_role/index_of/gather_from；perf 走 torch_npu 时必加 torch_baseline：
+//   {
+//     …① 的全部必填字段…,
+//     "scenario": "torch_ref_aclnn",            // ①②同时成立才写；只成立②则省略
+//     "runner_form": "aclnn_py",
+//     "params": [
+//       {"name": "<in>", "io": "in", "dtype": ["float32", "float16"]},
+//       {"name": "<attr>", "io": "attr", "dtype": ["int64"], "default": 0},
+//       {"name": "<value输出名>", "io": "out", "dtype": ["<from_input>"], "out_role": "value"},
+//       {"name": "<index输出名>", "io": "out", "dtype": ["<int32|int64：照 header/op_def 声明>"],
+//        "out_role": "index", "index_of": "<value输出名>", "gather_from": "<in>"}
+//     ],
+//     "call_variants": [
+//       {"when": {"always": true}, "symbol": "<SymbolBase>",
+//        "active_attrs": ["<attr>"], "active_outputs": ["<value输出名>", "<index输出名>"]}
+//     ],
+//     "precision": {…, "standard": "torch_allclose", "oracle": "torch"},
+//     "perf": {"baseline": "torch_npu", "target_ratio": <按任务书原文换算>,
+//              "torch_baseline": {"api": "torch.<api>", "positional": ["<in>"], "keyword": {"<attr>": "<torch 形参名>"}}}
+//   }

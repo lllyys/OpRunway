@@ -64,6 +64,7 @@ error_rate 是**第 2 位**、逐 dtype 变；第 3 位 legacy=0.1 代码不读�
 # 顶层只允许 **stdlib**——本模块的不变量是「`import precision_policy` 不拉 numpy」
 # （validator 靠它保持 stdlib-only）。numpy 仍在 compute_metrics 等函数体内惰性 import，勿上提。
 import hashlib
+import math
 import os
 import re
 
@@ -72,7 +73,33 @@ ASCENDOPTEST_DEFAULT = "ascendoptest_default"
 ECOSYSTEM_MERE_MARE = "ecosystem_mere_mare"
 EXACT = "exact"
 BEHAVIORAL = "behavioral"  # 无数值输出（Sleep 类）：精度维度 na，无标准
-STANDARDS = (ASCENDOPTEST_DEFAULT, ECOSYSTEM_MERE_MARE, EXACT, BEHAVIORAL)
+TORCH_ALLCLOSE = "torch_allclose"  # torch-对标场景：任务书指定 torch 为真值口径 → |o-g|<=atol+rtol*|g|，容错率=0
+STANDARDS = (ASCENDOPTEST_DEFAULT, ECOSYSTEM_MERE_MARE, EXACT, BEHAVIORAL, TORCH_ALLCLOSE)
+
+# ---- policy.kind（≠ spec-level standard）：多输出 index 一致性判据 ----
+# 不入 STANDARDS——它不是 spec 声明的标准，而是 index 输出的**比对形态**（compare/policy.kind）：
+# 下标不逐位比（tie 上 NPU 与 golden 可合法给不同下标），改判 gather(self,idx_npu) allclose gather(self,idx_golden)。
+#
+# 🔖 **provenance：这条判据是 OpRunway 原创，参考仓 cannbot-ops-input 里没有任何出处**
+#    （2026-07-25 逐文件核实，别再去参考仓里找「我们抄歪了哪一行」——找不到，因为没有）：
+#      · `skills/operator-evaluation/scripts/accuracy_worker.py:73` 只 `np.asarray(result.outputs[0])`——
+#        **多输出算子的第 2 个输出根本不落盘**；
+#      · 同目录 `accuracy.py:92` 只读 `case["golden_files"][0]`——**只比第一个输出**。
+#      → 即：median 这类 (values, indices) 算子，参考仓**根本不比 indices**。
+#    它**潜在**的口径（假如哪天真去比）是：indices 是 int64 → 落 `accuracy.py:55` 的 `_EXACT_DTYPES`
+#    → 下标**逐位精确**。我们这条判据**比它更强也更对**：tie（并列中位数/最值）上允许两侧给出不同下标，
+#    但**要求下标处的值一致**——逐位精确会把合法的 tie 判成失败，而「完全不比」会把错下标放过去。
+#    ⛔ **刻意保留、不回退**（既不退回「不比」，也不退回「逐位精确」）；注释里也别写成 cannbot 口径。
+INDEX_VALUE_CONSISTENCY = "index_value_consistency"
+FROM_INPUT_SENTINEL = "<from_input>"  # 输出 dtype 随（某个）输入 dtype（如 median.values 随 self）
+
+# ---- out_role 受控词表（多输出契约的输出角色；op-中立、据字段驱动）----
+# ⚠ 必须是**受控词表**、不能「非 index 即 value」：审计实证 `out_role="bogus"` 会被当 value 收下，
+# 且 index 的 `index_of` 还能合法指向这个伪 value —— 判据链就此建在一个谁也没定义的角色上。
+# 空串同理（`out_role=""` 既非缺省也非合法值）。未知/空 → fail-closed（本仓纪律：fail-closed 优于静默兜底）。
+OUT_ROLE_VALUE = "value"
+OUT_ROLE_INDEX = "index"
+OUT_ROLES = (OUT_ROLE_VALUE, OUT_ROLE_INDEX)
 
 # ---- AscendOpTest 常量（完整 15 dtype 快照，逐字见文件头 provenance） ----
 _AOT_EPS = 1e-9  # compare.py minimum = 10e-10
@@ -106,6 +133,38 @@ _MM_TH_EXP = {             # Th = 2 ** -exp
 _MM_PROVENANCE = ("canon/architecture/ecosystem-precision-standard.md (proposed) · "
                   "cann/opbase experimental_standard.md")
 
+# ---- torch_allclose 逐 dtype 容差 (rtol, atol) ----
+# provenance（adapt，勿凭记忆改）：抄自参考仓 cannbot-ops-input
+#   `skills/operator-evaluation/scripts/accuracy.py:47-54` 的 `_ALLCLOSE_TOLS`（该表存 **(atol, rtol)**），
+#   一手出自 tilelang2ascend `verification_ascendc.py`。判据 |actual-golden| <= atol + rtol*|golden|。
+#   fp16/bf16/fp32 逐字抄参考表；fp64 为**外推**；整型/bool 输出走 exact（不入此表）。
+#   ⚠ 本表刻意存 **(rtol, atol)**，与参考仓 (atol, rtol) 顺序相反——下方逐条已按此顺序核对，勿对调。
+#   ✅ **行号与值 2026-07-25 复核属实**：参考仓 47-54 行的四条浮点条目与本表一一对应
+#     （fp16 9e-2/2^-10、bf16 1e-1/2^-7、fp32 1e-3/2^-13、fp64 1e-6/2^-30），仅元组顺序相反。
+# ⚠ **complex64/complex128：本表比参考仓「少两条」是 OpRunway 的有意收窄，不是漏抄、更不是 bug。**
+#   参考仓 `accuracy.py:52-53` **有**这两条（complex64=(atol 1e-3, rtol 2**-13)、
+#   complex128=(atol 1e-6, rtol 2**-30)）；我们**移除**了 → 复数输出的算子在本仓 **fail-closed**
+#   （`threshold_for` → `_check_compute_supported` 当场抛，不产出 policy），而不是拿一份算不出来的
+#   容差假装支持。依据是审计 finding #9：`compute_metrics` 的 SUPPORTED_COMPUTE_DTYPES 不含 complex
+#   （复数 allclose 从没实现），留着条目等于「能生成一份永远算不出来的 policy」——**声明与实现不一致
+#   比缺能力更坏**（缺能力是明着挡住，不一致是等着在真机上假通过/假失败）。
+#   ⛔ **别为「对齐 cannbot」把这两条加回来**：单加容差表 = 只把 fail-closed 挪后、错得更隐蔽。
+#   要补齐复数支持必须**同时**改三处，缺一不可：
+#     ① 本表 `_TA_DTYPE_TOLS` 补 complex64/complex128；
+#     ② `compute_metrics` 的 TORCH_ALLCLOSE 分支实现复数比对（现在 `astype(np.float64)` 会**静默丢虚部**，
+#        这正是 finding #2 记的假通过温床——须改按模长/实虚分量的 allclose）；
+#     ③ `SUPPORTED_COMPUTE_DTYPES` 放行 complex（否则 ①② 做完仍在 `_check_compute_supported` 被挡）。
+#   （`_AOT_TABLE` 里的 complex 条目是 AscendOpTest 的**逐字快照**、保留作 provenance；那条路径同样由
+#    `threshold_for` 里的 `_check_compute_supported` 当场 fail-fast，不会产出不可执行 policy。）
+_TA_DTYPE_TOLS = {                 # dtype: (rtol, atol)
+    "float16":    (2 ** -10, 9e-2),
+    "bfloat16":   (2 ** -7,  1e-1),
+    "float32":    (2 ** -13, 1e-3),
+    "float64":    (2 ** -30, 1e-6),
+}
+_TA_TORCH_DEFAULT = (1e-5, 1e-8)   # torch.allclose 缺省 (rtol=1e-5, atol=1e-8)
+TOLERANCE_SOURCES = ("dtype_table", "taskdoc", "torch_default")  # rtol/atol 权威来源（spec.precision.tolerance_source）
+
 # ---- 可复算 dtype 支持矩阵（float64 直算，覆盖精度维极小用例；bf16/fp8/complex 未支持→fail-fast） ----
 SUPPORTED_COMPUTE_DTYPES = frozenset({
     "float16", "float32", "float64", "float",
@@ -135,14 +194,17 @@ def select_standard(spec):
         oracle = prec.get("oracle")
         if oracle in ("mere_mare", "atk_double"):
             return ECOSYSTEM_MERE_MARE
+        # torch-对标：任务书把 torch 指定为真值口径 → torch_allclose（容差按 tolerance_source 分源，见 threshold_for）。
+        if oracle == "torch":
+            return TORCH_ALLCLOSE
         # 显式白名单（fail-closed）：只有 {ascendoptest, none, 缺省} 才映射默认标准。其余 oracle（如
-        # torch/scipy/std_exact 这类「与 python 一致」）一律 raise，堵 class C 静默降级为 ascendoptest_default。
+        # scipy/std_exact 这类「与 python 一致」但未验证的）一律 raise，堵 class C 静默降级为 ascendoptest_default。
         if oracle in ("ascendoptest", "none", None):
             return ASCENDOPTEST_DEFAULT
         raise ValueError(
             f"未验证过的 precision.oracle={oracle!r} 的精度标准——拒绝静默降级为 ascendoptest_default。"
             f"已知映射：{{ascendoptest,none,缺省}}→ascendoptest_default、"
-            f"{{mere_mare,atk_double}}→ecosystem_mere_mare。"
+            f"{{mere_mare,atk_double}}→ecosystem_mere_mare、torch→torch_allclose。"
             f"请在 spec 显式声明 precision.standard，或由 agent 自行探索/询问用户后再纳入白名单。")
     raise ValueError(f"无法映射 standard：verify_mode={vmode!r}")
 
@@ -174,6 +236,13 @@ def derive_output_dtype(spec, case_input_dtypes):
       · 否则歧义 → ValueError（保守拒绝，不猜）。
     多输入须同 dtype（elementwise 前提）；不一致 → ValueError。gen_cases 与 validator **共用本函数**，
     保证「造用例的 compare_dtype」与「裁决派生的 cdtype」同源、绝不漂移。
+
+    🔖 **与参考仓的有意偏离（别当 bug 去「对齐」）**：容差表的 dtype 键，我们取 **输出 dtype**（本函数），
+    参考仓 cannbot-ops-input `skills/operator-evaluation/scripts/accuracy.py:93` 取的是**输入** `case["dtype"]`
+    —— 它在 91-92 行明明算出了 `out_dtype` 并用它读 golden 二进制，第 93 行选容差时却又换回了输入 dtype
+    （2026-07-25 读码复核）。对同型 elementwise 两者等价，但**非同型算子会键错**：如 IsClose(float→bool)，
+    输出是 bool（该走 exact 逐位），按输入 float32 键就会拿到 (2**-13, 1e-3) 的浮点容差去判 bool——
+    松到把错的判成对的。**我们是修正了它的潜在瑕，不是抄漏**；⛔ 别为对齐而改回按输入 dtype 取键。
     """
     params = spec.get("params") if isinstance(spec, dict) else None
     if not isinstance(params, list) or not params:
@@ -205,6 +274,147 @@ def derive_output_dtype(spec, case_input_dtypes):
     raise ValueError(f"无法据 spec 派生输出 dtype：in={in_dt} out集={out_allowed}（歧义，保守拒绝）")
 
 
+def _value_tol_of(policy):
+    """从一个 value 输出的 canonical policy 取 (rtol, atol)，供 index 输出的 value_consistency 复用。
+
+    torch_allclose → (rtol, atol)；exact（int/bf16 逐位）→ (0.0, 0.0)。其余 kind fail-closed（域外、不硬塞）。"""
+    kind = policy.get("kind")
+    if kind == TORCH_ALLCLOSE:
+        return float(policy["rtol"]), float(policy["atol"])
+    if kind == EXACT:
+        return 0.0, 0.0
+    raise ValueError(f"index_value_consistency 无法从 value 输出 policy.kind={kind!r} 取容差"
+                     f"（仅 value 输出为 torch_allclose / exact 时可派生 index 判据）")
+
+
+def derive_output_contracts(spec, case_input_dtypes, spec_standard,
+                            tolerance_source=None, taskdoc_tol=None):
+    """据 **spec params**（io=='out' + out_role）逐输出派生 canonical 判据契约——**op-中立**。
+
+    只据 `out_role` / `index_of` / `dtype`(可含 `<from_input>`) 字段驱动，**绝无算子名分支**（律令#0）：
+    换任意声明「多输出 + torch 对标」的域内算子零改即用。gen_cases 造 caseset.expected.outputs[] 与
+    validator 多输出裁决**共用本函数**，保证同源不漂移（同 derive_output_dtype 的纪律）。
+
+    返回按 spec out-param 顺序的列表，每项：
+      `{"name", "role", "dtype", "standard", "tolerance_policy_id"(可 None), "policy", "index_of"}`
+
+    派生规则（分两趟：先 value/plain、后 index——index 的容差取自它所引 value 输出）：
+      · value/plain 输出：dtype 若 `<from_input>` → 取输入 dtype；`eff_std=effective_standard(spec_standard,dtype)`
+        （int→exact、bf16 靠 compare、余=spec 标准）→ `policy=threshold_for(eff_std,dtype,tolerance_source,...)`。
+      · index 输出：`policy={kind:index_value_consistency, gather_from:<spec 的 gather_from 字段>,
+        value_rtol/atol:<所引 value 容差>}`；`standard` 随所引 value 输出（float→torch_allclose / int→exact）；
+        tolerance_policy_id=None（index 无 dtype 阈）。
+
+    ⚠ 输入校验（审计 finding #7 收紧）：case inputs 必须与 spec in-params **完整、唯一、同序同名**——
+      旧版只校「⊆ spec in-params」，而 index 的 gather 源当时取「case 的第一个输入」→ 调一下 case.inputs
+      的顺序就换掉了 canonical 判据的 gather 源（判据必须只从 spec 派生，不得随攻击者可控输入漂移）。
+      现在 gather 源改由 spec out-param 的**必填 `gather_from`** 锚定，case inputs 只作身份对账。
+    """
+    params = spec.get("params") if isinstance(spec, dict) else None
+    if not isinstance(params, list) or not params:
+        raise ValueError("spec 无 IO 矩阵（params）——无法派生多输出契约")
+    in_params = {p["name"]: p for p in params
+                 if isinstance(p, dict) and p.get("io") == "in" and p.get("name")}
+    out_params = [p for p in params if isinstance(p, dict) and p.get("io") == "out"]
+    if not in_params or not out_params:
+        raise ValueError("spec IO 矩阵缺 in/out 参数（无法派生多输出契约）")
+    # ── out 参数身份 + 角色的**前置强校**（审计 finding #6）──────────────────────────────
+    # ① 名字必须**具名且唯一**：outputs[] / manifest / evidence 三处都靠 name 交叉核验身份，
+    #    无名或重名 → 「换序不可发现」的洞（同 role/同 shape 的两个输出互换查不出来）。
+    # ② out_role 必须**在受控词表内**：不做「非 index 即 value」的真值判断（`""`/`"bogus"` 都得拒）。
+    out_names = [p.get("name") for p in out_params]
+    if any(not isinstance(n, str) or not n for n in out_names):
+        raise ValueError(f"spec out-params 存在无名输出 {out_names}（多输出契约按 name 核身份），fail-closed")
+    dup_out = sorted({n for n in out_names if out_names.count(n) > 1})
+    if dup_out:
+        raise ValueError(f"spec out-params 名字重复 {dup_out}（身份不唯一→换序/错配不可发现），fail-closed")
+    for p in out_params:
+        if "out_role" not in p:
+            raise ValueError(f"输出 {p.get('name')!r} 未声明 out_role（多输出契约必填，受控词表 "
+                             f"{list(OUT_ROLES)}）——不猜角色，fail-closed")
+        if p.get("out_role") not in OUT_ROLES:
+            raise ValueError(f"输出 {p.get('name')!r} 的 out_role={p.get('out_role')!r} 不在受控词表 "
+                             f"{list(OUT_ROLES)}（空值/未知角色一律拒，防伪造角色骗过判据派生），fail-closed")
+    # ③ index 输出必须**显式声明 `gather_from`**（finding #7）：gather 源是 index 判据的一半，
+    #    它必须由 spec 锚定、绝不能取「case 的第一个输入」——后者随 caseset 的输入顺序漂移。
+    in_order = [p["name"] for p in params
+                if isinstance(p, dict) and p.get("io") == "in" and p.get("name")]
+    for p in out_params:
+        if p.get("out_role") != OUT_ROLE_INDEX:
+            continue
+        gf = p.get("gather_from")
+        if not isinstance(gf, str) or gf not in in_params:
+            raise ValueError(f"index 输出 {p.get('name')!r} 的 gather_from={gf!r} 未指向 spec 的具名 in-参数 "
+                             f"{in_order}（index_value_consistency 的 gather 源必须由 spec 锚定，"
+                             f"不得取 caseset 的「第一个输入」——那随输入顺序漂移），fail-closed")
+    # ── case inputs 与 spec in-params 的**完整/唯一/同序同名**对账（finding #7）────────────
+    case_names = [n for n, _ in case_input_dtypes]
+    if len(set(case_names)) != len(case_names):
+        raise ValueError(f"case 输入名重复 {case_names}（身份不唯一 → gather 源/dtype 对账不可靠），fail-closed")
+    if case_names != in_order:
+        raise ValueError(f"case 输入 {case_names} 与 spec in-参数 {in_order} 不是同一序同一身份"
+                         f"（缺项/多项/换序一律拒——判据只从 spec 派生，输入顺序不得改变 canonical），fail-closed")
+    in_dts = []
+    for name, dt in case_input_dtypes:
+        allowed = in_params[name].get("dtype") or []
+        if dt not in allowed:
+            raise ValueError(f"case 输入 {name} dtype={dt!r} 不在 spec 允许集 {allowed}（IO schema 不符）")
+        in_dts.append(dt)
+    if not in_dts:
+        raise ValueError("case 无有效输入 dtype（无法派生多输出契约）")
+    in_dt = in_dts[0]
+    if any(d != in_dt for d in in_dts):
+        raise ValueError(f"case 多输入 dtype 不一致 {in_dts}（reduce/elementwise 需同 dtype）")
+
+    def _resolve_out_dtype(p):
+        allowed = p.get("dtype") or []
+        if FROM_INPUT_SENTINEL in allowed:
+            return in_dt
+        uniq = list(dict.fromkeys(allowed))
+        if len(uniq) == 1:
+            return uniq[0]
+        raise ValueError(f"输出 {p.get('name')!r} dtype 无法据 spec 派生 allowed={allowed}"
+                         f"（须 <from_input> 或单值）")
+
+    contracts = [None] * len(out_params)
+    value_tol_by_name, value_std_by_name = {}, {}
+    for i, p in enumerate(out_params):                    # 第一趟：value 输出（词表已保证非 index 即 value）
+        if p.get("out_role") == OUT_ROLE_INDEX:
+            continue
+        odt = _resolve_out_dtype(p)
+        eff = effective_standard(spec_standard, odt, p.get("compare"))
+        pol = threshold_for(eff, odt, tolerance_source, taskdoc_tol)
+        contracts[i] = {"name": p.get("name"), "role": p.get("out_role"), "dtype": odt,
+                        "standard": eff, "tolerance_policy_id": tolerance_policy_id(eff, odt),
+                        "policy": pol, "index_of": None}
+        value_tol_by_name[p.get("name")] = _value_tol_of(pol)
+        value_std_by_name[p.get("name")] = eff
+    for i, p in enumerate(out_params):                    # 第二趟：index 输出
+        if p.get("out_role") != OUT_ROLE_INDEX:
+            continue
+        ref = p.get("index_of")
+        # index_of 必须指向 out_role=="value" 的**唯一具名**输出（名字唯一性上文已强校）。
+        # 不接受 None/空/非字符串，也不接受指向另一个 index 输出——否则容差会从一条不存在的
+        # value 判据上抄过来，index 判据就悬空了。
+        if not isinstance(ref, str) or not ref or ref not in value_tol_by_name:
+            raise ValueError(f"index 输出 {p.get('name')!r} 的 index_of={ref!r} 未指向任一 "
+                             f"out_role=='value' 的具名输出（可引 {sorted(value_tol_by_name)}），fail-closed")
+        rtol, atol = value_tol_by_name[ref]
+        # 🔖 index 判据的 provenance 见 `INDEX_VALUE_CONSISTENCY` 定义处：**OpRunway 原创、参考仓无此物**
+        # （参考仓 accuracy_worker.py:73 / accuracy.py:92 只处理第 0 个输出，index 压根不比）。
+        # 「容差从所引 value 输出抄过来」也是本仓自定的：index 本身没有 dtype 阈，它的对错只能用
+        # 「gather 回来的值是否在 value 的容差内」表达 —— 所以两者必须是同一组 (rtol, atol)，别各定一套。
+        pol = {"kind": INDEX_VALUE_CONSISTENCY, "gather_from": p["gather_from"],
+               "value_rtol": rtol, "value_atol": atol}
+        contracts[i] = {"name": p.get("name"), "role": OUT_ROLE_INDEX, "dtype": _resolve_out_dtype(p),
+                        "standard": value_std_by_name[ref], "tolerance_policy_id": None,
+                        "policy": pol, "index_of": ref}
+    if any(c is None for c in contracts):
+        bad = [out_params[i].get("name") for i, c in enumerate(contracts) if c is None]
+        raise ValueError(f"spec out-params 存在未能派生契约的输出 {bad}（out_role 缺失/非法？）")
+    return contracts
+
+
 def resolve_acceptance(spec, standard, dtype):
     """任务书验收目标口径（可选、独立于平台 standard）的 **canonical 复算**——gen_cases 与 validator 共用。
 
@@ -214,18 +424,221 @@ def resolve_acceptance(spec, standard, dtype):
 
     ⚠ 安全（finding #3）：validator 用本函数据 **spec** 复算 canonical acceptance，要求 caseset/evidence 三处全等；
     **spec 未声明 acceptance → 返回 None → caseset+evidence 一律不得私带 acceptance**（防 T5 原洞在 acceptance 层重演）。
+
+    ⚠ 覆盖字段**逐个受控校验**（承 finding #5 同一族的残留）：旧写法 `pol[k] = ap[k]` 原样搬运，
+    于是 `{"tolerance": inf}` 之类能生成一份「阈值恒真」的 acceptance policy —— 判据整条被废掉却一路绿。
+    acceptance 是任务书授权的**放宽口径**（放宽本身合法、由 risk/passed_with_risk 如实上报），
+    但「放宽到无穷大」不是口径、是把门拆了。故：非 bool 实数、有限、非负，否则 fail-closed。
     """
     if standard in (EXACT, BEHAVIORAL):
         return None
-    ap = (spec.get("precision") or {}).get("acceptance_policy")
+    prec = spec.get("precision") if isinstance(spec, dict) else None
+    if prec is not None and not isinstance(prec, dict):
+        raise ValueError(f"spec.precision 须为对象，得 {type(prec).__name__}（无法据 spec 复算 acceptance），fail-closed")
+    ap = (prec or {}).get("acceptance_policy")
     if not ap:
         return None
+    if not isinstance(ap, dict):
+        raise ValueError(f"spec.precision.acceptance_policy 须为对象，得 {type(ap).__name__}，fail-closed")
     ap_std = ap.get("standard", standard)
     pol = threshold_for(ap_std, dtype)
     for k in ("tolerance", "error_rate", "threshold", "max_ratio", "eps"):
         if k in ap:
-            pol[k] = ap[k]
+            pol[k] = _checked_tol(ap[k], f"acceptance_policy.{k}")
     return pol, tolerance_policy_id(ap_std, dtype)
+
+
+def derive_acceptance_contracts(spec, contracts):
+    """多输出场景的 **acceptance canonical 逐输出复算**（审计 finding #2）——op-中立。
+
+    `contracts` = `derive_output_contracts` 的返回值。返回：
+      · `None` —— spec 未声明 `precision.acceptance_policy`（→ 全部输出 acceptance 继承 standard，
+        且 caseset/evidence 两侧一律不得私带 acceptance 字段）；
+      · 与 `contracts` 等长同序的列表，每项为 `{"policy", "tolerance_policy_id"}`
+        或 `None`（该输出的有效标准是 exact/behavioral → acceptance 继承 standard，无独立口径）。
+
+    规则：value 输出直接走 `resolve_acceptance(spec, 该输出有效标准, 该输出 dtype)`；
+    index 输出**复用它所引 value 输出的 acceptance 容差**（同 canonical 派生里 standard 层的做法）。
+    ⚠ 旧洞：多输出路径**整个忽略** `acceptance_policy`，直接令 acceptance=standard —— spec 声明了更严的
+    任务书验收口径也照样按平台 standard 放行。取不出 acceptance 容差（如 acceptance 底是 ascendoptest_default，
+    `_value_tol_of` 无法据它派生 index 判据）→ **fail-closed**，绝不静默退回 standard。
+    """
+    prec = spec.get("precision") if isinstance(spec, dict) else None
+    if prec is not None and not isinstance(prec, dict):
+        raise ValueError(f"spec.precision 须为对象，得 {type(prec).__name__}"
+                         f"（无法据 spec 派生多输出 acceptance），fail-closed")
+    if not isinstance(spec, dict) or not (prec or {}).get("acceptance_policy"):
+        return None
+    acc_by_name, out = {}, [None] * len(contracts)
+    for i, ct in enumerate(contracts):                       # 第一趟：value 输出
+        if ct["role"] == OUT_ROLE_INDEX:
+            continue
+        acc = resolve_acceptance(spec, ct["standard"], ct["dtype"])
+        # acc is None ⟺ 该输出有效标准是 exact/behavioral（阈值已是 0，没有可放宽的 acceptance 口径）
+        # → 与单输出 legacy 同语义：继承 standard。**不是**「忽略 acceptance_policy」。
+        if acc is not None:
+            out[i] = {"policy": acc[0], "tolerance_policy_id": acc[1]}
+            acc_by_name[ct["name"]] = acc[0]
+        else:
+            acc_by_name[ct["name"]] = None
+    for i, ct in enumerate(contracts):                       # 第二趟：index 输出（复用所引 value 的 acceptance 容差）
+        if ct["role"] != OUT_ROLE_INDEX:
+            continue
+        if ct["index_of"] not in acc_by_name:
+            raise ValueError(f"index 输出 {ct['name']!r} 的 index_of={ct['index_of']!r} 无对应 value 输出"
+                             f"（可引 {sorted(acc_by_name)}），fail-closed")
+        ref_pol = acc_by_name[ct["index_of"]]
+        if ref_pol is None:                                  # 所引 value 继承 standard → index 一并继承
+            continue
+        rtol, atol = _value_tol_of(ref_pol)                  # 不支持的 acceptance kind 在此 fail-closed
+        out[i] = {"policy": {"kind": INDEX_VALUE_CONSISTENCY,
+                             "gather_from": ct["policy"]["gather_from"],
+                             "value_rtol": rtol, "value_atol": atol},
+                  "tolerance_policy_id": None}
+    return out
+
+
+# ==================================================== spec 驱动的「本 case 有哪些输出」====
+# 判据链的**入口身份**：一条 case 该有哪些输出，只能由 **spec**（out 参数 + call_variants × case attrs）
+# 说了算，绝不能由 caseset 自报（审计严重#1：caseset 删掉一个输出即整体假通过）。
+# gen_cases（造用例）与 validator（裁决）**共用下面这组函数**，保证两边看到同一份权威输出集。
+def spec_out_names(spec):
+    return [p.get("name") for p in (spec.get("params") or []) if isinstance(p, dict) and p.get("io") == "out"]
+
+
+def spec_attr_names(spec):
+    return [p.get("name") for p in (spec.get("params") or []) if isinstance(p, dict) and p.get("io") == "attr"]
+
+
+def uses_output_contract(spec):
+    """是否走多输出契约（`expected.outputs[]`）。据字段：out 参数 >1 个 或 任一 out **声明了** out_role 键。
+
+    ⚠ 触发门用 `"out_role" in p`、**不做真值判断**：`out_role: ""` 是一份写坏的 spec，真值判断会让它
+    悄悄退回 legacy 单输出通路（= 判据链整条换掉还没人发现）。声明了这个键就必须走多输出契约、
+    在 `derive_output_contracts` 的受控词表上当场炸掉；没声明才是 legacy。"""
+    outs = [p for p in (spec.get("params") or []) if isinstance(p, dict) and p.get("io") == "out"]
+    return len(outs) > 1 or any("out_role" in p for p in outs)
+
+
+def call_variants(spec):
+    """读 + 强校 `spec.call_variants`（缺省 None = 不声明变体）。返回校验过的变体列表。
+
+    变体字段（全部 op-中立、按**字段**判，绝无算子名）：
+      · `when`   ：匹配谓词。`{"always": true}` = 无条件；`{"attr":"<名>","is_null":true|false}` = 按该 attr
+                   是否为 null 判；`{"attr":"<名>","equals":<值>}` = 按取值判。**必填**。
+      · `symbol` ：该变体调用的 aclnn 符号（不同变体可以是不同 API）。**必填**。
+      · `attrs`  ：选填。该变体**显式声明**的 attr 取值覆盖（人在 spec 里写死的，不是代码兜的默认值）。
+      · `active_attrs`：选填。该变体签名里真正出现的 attr 槽（缺省 = spec 全部 attr 参数，按 spec 顺序）。
+      · `active_outputs`：**必填**。该变体真正落地的 out 参数名；其余 out 参数在 slots 里写成 `out_null`。
+                   它同时决定本 case 的 `expected.outputs[]` 身份集（严格绑定就绑在这）。
+    """
+    raw = spec.get("call_variants")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"spec.call_variants 须为非空列表，得 {raw!r}（fail-closed）")
+    out_names, attr_names = spec_out_names(spec), spec_attr_names(spec)
+    checked = []
+    for i, v in enumerate(raw):
+        if not isinstance(v, dict):
+            raise ValueError(f"call_variants[{i}] 须为对象，得 {v!r}")
+        sym = v.get("symbol")
+        if not isinstance(sym, str) or not sym:
+            raise ValueError(f"call_variants[{i}] 缺 symbol（aclnn 符号名必填），得 {sym!r}")
+        when = v.get("when")
+        if not isinstance(when, dict) or not when:
+            raise ValueError(f"call_variants[{i}]({sym}) 缺 when 谓词（不允许隐式全匹配；"
+                             f"要无条件请显式写 {{\"always\": true}}）")
+        if not when.get("always"):
+            an = when.get("attr")
+            if an not in attr_names:
+                raise ValueError(f"call_variants[{i}]({sym}) 的 when.attr={an!r} 不是 spec attr 参数 {attr_names}")
+            if ("is_null" in when) == ("equals" in when):
+                raise ValueError(f"call_variants[{i}]({sym}) 的 when 须**恰有一个**判据 is_null / equals，得 {when!r}")
+            if "is_null" in when and not isinstance(when["is_null"], bool):
+                raise ValueError(f"call_variants[{i}]({sym}) 的 when.is_null 须为 bool，得 {when['is_null']!r}")
+        act = v.get("active_outputs")
+        if not isinstance(act, list) or not act:
+            raise ValueError(f"call_variants[{i}]({sym}) 缺 active_outputs（该变体落地的输出名，必填非空）")
+        if len(set(act)) != len(act):
+            raise ValueError(f"call_variants[{i}]({sym}) 的 active_outputs 有重复名 {act}")
+        unknown = [n for n in act if n not in out_names]
+        if unknown:
+            raise ValueError(f"call_variants[{i}]({sym}) 的 active_outputs 含非 spec out 参数 {unknown}"
+                             f"（spec out：{out_names}）")
+        # 必须是 spec out 顺序的**子序列**：golden 返回序与 outputs[] 落盘序都按 spec 序，
+        # 变体里换序 = 身份/顺序两套口径打架 → 换序不可发现。
+        if act != [n for n in out_names if n in act]:
+            raise ValueError(f"call_variants[{i}]({sym}) 的 active_outputs {act} 未按 spec out 参数顺序 "
+                             f"{out_names} 排列（须为其子序列），fail-closed")
+        aa = v.get("active_attrs")
+        if aa is None:
+            aa = list(attr_names)
+        else:
+            if not isinstance(aa, list):
+                raise ValueError(f"call_variants[{i}]({sym}) 的 active_attrs 须为列表，得 {aa!r}")
+            bad = [n for n in aa if n not in attr_names]
+            if bad:
+                raise ValueError(f"call_variants[{i}]({sym}) 的 active_attrs 含非 spec attr 参数 {bad}")
+            if aa != [n for n in attr_names if n in aa]:
+                raise ValueError(f"call_variants[{i}]({sym}) 的 active_attrs {aa} 未按 spec attr 顺序 "
+                                 f"{attr_names} 排列（须为其子序列），fail-closed")
+        ov = v.get("attrs") or {}
+        if not isinstance(ov, dict):
+            raise ValueError(f"call_variants[{i}]({sym}) 的 attrs 须为对象，得 {ov!r}")
+        bad = [k for k in ov if k not in attr_names]
+        if bad:
+            raise ValueError(f"call_variants[{i}]({sym}) 的 attrs 覆盖了非 spec attr 参数 {bad}")
+        checked.append({"when": when, "symbol": sym, "attrs": dict(ov),
+                        "active_attrs": list(aa), "active_outputs": list(act)})
+    return checked
+
+
+def variant_matches(when, attrs):
+    if when.get("always"):
+        return True
+    val = attrs.get(when["attr"])
+    if "is_null" in when:
+        return (val is None) == bool(when["is_null"])
+    return val == when["equals"]
+
+
+def select_call_variant(variants, attrs, cid):
+    """逐 case 选中匹配变体（声明序**首个**匹配者胜）；无匹配 → fail-closed，绝不退默认。"""
+    for v in variants:
+        if variant_matches(v["when"], attrs):
+            return v
+    raise ValueError(f"{cid}: attrs={attrs} 无匹配的 call_variants 条目 "
+                     f"（已声明 {[v['when'] for v in variants]}）——不为它编造调用形态，fail-closed")
+
+
+def active_output_names_for_variant(spec, variant, cid):
+    """本 case **真正落地**的输出名（有序、= spec out 顺序的子序列）。
+
+    有变体 → 取该变体的 `active_outputs`（spec 显式声明）；`variant is None` → **spec 全部 out 参数**。
+    ⚠ 这是「输出集由 spec 声明、不由产物反推」的锚。"""
+    out_names = spec_out_names(spec)
+    if variant is None:
+        return list(out_names)
+    act = list(variant["active_outputs"])
+    idx_names = {p.get("name") for p in (spec.get("params") or [])
+                 if isinstance(p, dict) and p.get("io") == "out" and p.get("out_role") == OUT_ROLE_INDEX}
+    for n in act:                                        # index 输出落地了、它引的 value 却没落地 → 判据悬空
+        if n in idx_names:
+            ref = next(p.get("index_of") for p in spec["params"]
+                       if isinstance(p, dict) and p.get("name") == n)
+            if ref not in act:
+                raise ValueError(f"{cid}: 变体 {variant['symbol']!r} 落地了 index 输出 {n!r}，"
+                                 f"但它 index_of 所引的 value 输出 {ref!r} 不在 active_outputs {act}"
+                                 f"（index_value_consistency 判据无所依），fail-closed")
+    return act
+
+
+def active_output_names(spec, attrs, cid="case"):
+    """据 **spec × 本 case 的 attrs** 派生本 case 的权威输出名序列（裁决层的输出集唯一合法来源）。"""
+    variants = call_variants(spec)
+    variant = None if variants is None else select_call_variant(variants, attrs or {}, cid)
+    return active_output_names_for_variant(spec, variant, cid)
 
 
 def _check_compute_supported(dtype):
@@ -234,12 +647,64 @@ def _check_compute_supported(dtype):
                          f"{sorted(SUPPORTED_COMPUTE_DTYPES)}）——fail-fast，不静默")
 
 
-def threshold_for(standard, dtype):
-    """返回结构化 policy dict（含 kind + 判据常量）。未支持 dtype **fail-fast**（不静默兜底）。"""
+def _checked_tol(v, what):
+    """容差标量的**受控校验**（审计 finding #5）：非 bool 的实数、有限、非负——否则 fail-closed。
+
+    旧洞：taskdoc 容差只做 `float()` → `rtol=inf` 也能生成 canonical policy，
+    而 `|o-g| <= atol + inf*|g|` 对任意有限误差恒真 = 判据被整条废掉却一路绿。
+    `True` 会被 `float()` 悄悄变成 1.0，同样拒。"""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise ValueError(f"{what}={v!r} 须为非 bool 的实数（容差不接受 bool/字符串/None），fail-closed")
+    f = float(v)
+    if not math.isfinite(f):
+        raise ValueError(f"{what}={v!r} 须有限（inf/NaN 会让 allclose 判据恒真或恒假），fail-closed")
+    if f < 0:
+        raise ValueError(f"{what}={v!r} 须非负，fail-closed")
+    return f
+
+
+def _torch_allclose_tol(dtype, tolerance_source=None, taskdoc_tol=None):
+    """返回 torch_allclose 的 (rtol, atol)，按 tolerance_source 分源（op-中立、**仅 None 用缺省**）。
+
+    · dtype_table → adapt 参考仓逐 dtype 表（_TA_DTYPE_TOLS，provenance 见其定义处）；
+    · torch_default → torch.allclose 缺省 (1e-5, 1e-8)；
+    · taskdoc → 从 spec 派生，须由调用方传入 `taskdoc_tol=(rtol, atol)`（缺则 fail-closed）。
+
+    ⚠ finding #5：**只有 `None` 才落缺省源**。旧写法 `tolerance_source or "dtype_table"` 把显式写坏的
+    `""` / `False` / `0` 也当「没写」→ 一份坏 spec 悄悄拿到了 dtype_table 的容差。字段一旦出现就必须是
+    `TOLERANCE_SOURCES` 里的受控字符串。
+    """
+    src = "dtype_table" if tolerance_source is None else tolerance_source
+    if not isinstance(src, str) or src not in TOLERANCE_SOURCES:
+        raise ValueError(f"未知/非法 tolerance_source={tolerance_source!r}（须为 {list(TOLERANCE_SOURCES)} "
+                         f"之一，或省略=None 用缺省 dtype_table）——空串/False/0 一律拒，fail-closed")
+    if src == "torch_default":
+        return _TA_TORCH_DEFAULT
+    if src == "taskdoc":
+        if not (isinstance(taskdoc_tol, (list, tuple)) and len(taskdoc_tol) == 2):
+            raise ValueError("tolerance_source=taskdoc 需从 spec 派生 (rtol, atol) 并传入 taskdoc_tol；缺 → fail-closed")
+        return (_checked_tol(taskdoc_tol[0], "taskdoc rtol"),
+                _checked_tol(taskdoc_tol[1], "taskdoc atol"))
+    if src == "dtype_table":
+        if dtype not in _TA_DTYPE_TOLS:
+            raise ValueError(f"torch_allclose dtype_table 无 dtype={dtype!r} 容差（表={list(_TA_DTYPE_TOLS)}；"
+                             "整型/bool 输出应走 exact，不进本表）")
+        return _TA_DTYPE_TOLS[dtype]
+    raise ValueError(f"未知 tolerance_source={tolerance_source!r}（仅 {TOLERANCE_SOURCES}）")
+
+
+def threshold_for(standard, dtype, tolerance_source=None, taskdoc_tol=None):
+    """返回结构化 policy dict（含 kind + 判据常量）。未支持 dtype **fail-fast**（不静默兜底）。
+
+    `tolerance_source`/`taskdoc_tol` 仅对 `torch_allclose` 生效（其余标准忽略，向后兼容原 2 参调用）。"""
     if standard == EXACT:
         return {"kind": EXACT, "max_mismatch": 0, "not_settled": False}
     if standard == BEHAVIORAL:
         return {"kind": BEHAVIORAL, "not_settled": False}
+    if standard == TORCH_ALLCLOSE:
+        rtol, atol = _torch_allclose_tol(dtype, tolerance_source, taskdoc_tol)
+        # equal_nan=True：torch.allclose(..., equal_nan=True) 语义——both-NaN 视为相等（NaN 传播 case 需要）。
+        return {"kind": TORCH_ALLCLOSE, "rtol": rtol, "atol": atol, "equal_nan": True, "not_settled": False}
     if standard == ASCENDOPTEST_DEFAULT:
         if dtype not in _AOT_TABLE:
             raise ValueError(f"ascendoptest_default 无 dtype={dtype!r} 阈值（表={list(_AOT_TABLE)}）")
@@ -547,7 +1012,11 @@ def effective_standard(spec_standard, cdtype, compare=None):
 
 
 def threshold_digest(policy):
-    """向后兼容的标量阈值 digest（旧 gate/spec 的 precision.threshold 语义）。"""
+    """向后兼容的标量阈值 digest（旧 gate/spec 的 precision.threshold 语义）。
+
+    ⚠ 返回值必须 **JSON-native**（审计 finding #6）：多阈值口径返回 **list**、不是 tuple。
+    digest 会落进 caseset/evidence 再被读回来做「三处一致」比对——tuple 落 JSON 变 list，
+    内存里比得过、JSON 往返就 `list != tuple` 恒不等，对账门等于自己把自己判死。"""
     kind = policy.get("kind")
     if kind == EXACT:
         return 0
@@ -557,6 +1026,10 @@ def threshold_digest(policy):
         return policy["threshold"]
     if kind == BEHAVIORAL:
         return 0
+    if kind == TORCH_ALLCLOSE:
+        return [policy["rtol"], policy["atol"]]          # 无单标量阈值——digest = [rtol, atol]（JSON-native）
+    if kind == INDEX_VALUE_CONSISTENCY:
+        return [policy["value_rtol"], policy["value_atol"]]
     raise ValueError(f"无法为 policy.kind={kind!r} 出 digest")
 
 
@@ -573,8 +1046,80 @@ def _replace_inf(arr):
     return arr
 
 
-def compute_metrics(out, golden, policy):
+def _allclose_close_mask(a, g, rtol, atol, equal_nan):
+    """torch.allclose 语义的逐元素「接近」掩码 + 诊断用 diff（**inf 显式处理，绝不替换成 finfo.max**）。
+
+    审计 finding #3：旧实现在 value 路径先 `_replace_inf`（±inf→±finfo.max）——于是
+    `actual=finfo.max, golden=+inf` 被判相等（一个有限数冒充无穷大而毫无察觉）；index 路径又不替换，
+    `inf-inf=NaN` 反把**同号 inf** 判成失配。两条路径互相矛盾且都不是 torch 语义。现在显式四象限：
+      · 两侧同号 inf        → 相等；
+      · 单侧 inf / 异号 inf → 失配；
+      · 两侧有限            → `|a-g| <= atol + rtol*|g|`；
+      · NaN                 → 只由 `equal_nan`（两侧同为 NaN）决定，其余一律失配。
+    `_replace_inf` 保留给 `ascendoptest_default`——那条路径是 compare.py 的逐字复刻，语义由 provenance 锚定。
+    返回 `(close, diff)`；`diff` 在 inf/NaN 位可能是 inf/NaN，诊断 max 只取有限位（调用方已如此）。
+    """
+    import numpy as np
+    with np.errstate(invalid="ignore"):
+        diff = np.abs(a - g)
+    fin = np.isfinite(a) & np.isfinite(g)
+    close = fin & (diff <= (atol + rtol * np.abs(g)))
+    both_inf_same = np.isinf(a) & np.isinf(g) & (np.signbit(a) == np.signbit(g))
+    close = close | both_inf_same
+    if equal_nan:
+        close = close | (np.isnan(a) & np.isnan(g))
+    return close, diff
+
+
+def _check_index_array(arr, side):
+    """index 输出的**类型闸**（审计 finding #4）：必须是真整数数组，拒 bool / 浮点 / 静默转换。
+
+    旧洞：`astype(np.intp)` 把 `[0.9, 1.7]` 静默截成 `[0, 1]`——一份浮点/坏 dtype 的「下标」就这样
+    被 gather 消费掉了，判据看起来还全绿。"""
+    import numpy as np
+    if arr.dtype == np.bool_ or not np.issubdtype(arr.dtype, np.integer):
+        raise ValueError(f"index_value_consistency 的 {side} 下标 dtype={arr.dtype.name!r} 非整数"
+                         f"（bool/浮点/字符串一律拒，禁止静默转换），fail-closed")
+
+
+def _gather_along_dim(src, idx, dim, keepdim):
+    """`take_along_axis` 的薄封装：沿 dim 用 idx 从 src 取值，返回与 idx 同形（归约轴已去）的数组。
+
+    idx 是「沿 dim 的下标」（median/argmax 类归约输出）：keepdim=False 时 idx 比 src 少一维（dim 被归约掉），
+    keepdim=True 时 idx 在 dim 处为长度 1。用于 index_value_consistency——gather(src,idx) 还原下标处的值。
+
+    ⚠ finding #4：gather 前**逐元素校 `0 <= idx < src.shape[dim]`**。`take_along_axis` 会把负下标按
+    Python 语义回绕（实测 idx=-1 取到最后一个元素、mismatch=0 假通过），正向越界又抛未归一的 IndexError；
+    两者统一收敛成 ValueError，由上层判 fail。"""
+    import numpy as np
+    src = np.asarray(src)
+    idx = np.asarray(idx)
+    _check_index_array(idx, "gather")
+    ndim = src.ndim
+    d = dim if dim >= 0 else dim + ndim
+    if not (0 <= d < ndim):
+        raise ValueError(f"index_value_consistency dim={dim} 越界（源 ndim={ndim}）")
+    limit = int(src.shape[d])
+    if idx.size:
+        lo, hi = int(idx.min()), int(idx.max())
+        if lo < 0 or hi >= limit:
+            raise ValueError(f"index_value_consistency 下标越界：取值域 [{lo},{hi}] 不在 "
+                             f"[0,{limit - 1}]（dim={d} 源长 {limit}）——负下标会被回绕成合法取值，"
+                             f"一律拒，fail-closed")
+    idx = idx.astype(np.intp, copy=False)
+    idx_exp = idx if keepdim else np.expand_dims(idx, axis=d)
+    if idx_exp.ndim != ndim:
+        raise ValueError(f"index_value_consistency 下标维度 {idx_exp.ndim} 与源 {ndim} 不匹配"
+                         f"（keepdim={keepdim} dim={d}）")
+    gathered = np.take_along_axis(src, idx_exp, axis=d)
+    return np.squeeze(gathered, axis=d)
+
+
+def compute_metrics(out, golden, policy, gather_ctx=None):
     """采集层复算误差分布（numpy，惰性 import）——**只量误差、不判 pass/fail**（judge 在 validator）。
+
+    `gather_ctx`（仅 index_value_consistency 用）：`{"source": <输入张量 self>, "dim": int, "keepdim": bool}`——
+    采集层从 case 重读 policy.gather_from 指的输入 + 归约轴，供 gather 还原下标处的值做 allclose。
 
     入口统一（finding #1）：`o=asarray(out).reshape(-1)` / `g=asarray(golden).reshape(-1)`，
     size 不等 **fail-fast**（对齐 compare.py `reshape(-1)` + 长度不等直接 compare failed）。
@@ -616,6 +1161,73 @@ def compute_metrics(out, golden, policy):
 
     if kind == BEHAVIORAL:
         return {"numel": int(g.size)}
+
+    if kind == TORCH_ALLCLOSE:
+        # |o-g| <= atol + rtol*|g|；容错率=0（judge 判 mismatch==0）。equal_nan=True 时 both-NaN 视为通过。
+        # 双侧 dtype 严校（承 finding #2/pv-4）：bf16 以 storage fp32 落盘比对，故 on-disk 恒 fp32/fp16/int，
+        # 两侧须同 dtype 且受支持——complex/真 bf16 数组在此 fail-fast（median 见证集不触发）。
+        _check_compute_supported(o.dtype.name)
+        _check_compute_supported(g.dtype.name)
+        if o.dtype != g.dtype:
+            raise ValueError(f"torch_allclose out/golden dtype 不一致：out={o.dtype.name} golden={g.dtype.name}"
+                             "（两侧须同 dtype）——fail-fast，不静默")
+        rtol = _checked_tol(policy["rtol"], "policy.rtol")
+        atol = _checked_tol(policy["atol"], "policy.atol")
+        equal_nan = bool(policy.get("equal_nan", True))
+        # ⚠ **不做 _replace_inf**（finding #3）：inf 由 `_allclose_close_mask` 显式按四象限判，
+        #   把 ±inf 换成 ±finfo.max 会让「有限最大值 vs 无穷大」被判相等。
+        o64 = o.astype(np.float64)
+        g64 = g.astype(np.float64)
+        close, diff = _allclose_close_mask(o64, g64, rtol, atol, equal_nan)
+        finite = np.isfinite(diff)
+        denom = np.abs(g64)
+        # 诊断量只在**有限 diff 且分母>0** 的位置算（inf/NaN 位算出来是 inf/nan，既无意义又会刷 RuntimeWarning）。
+        rel = np.divide(diff, denom, out=np.zeros_like(diff), where=finite & (denom > 0))
+        return {"mismatch": int(np.count_nonzero(~close)), "numel": int(g64.size),
+                "max_abs_err": float(diff[finite].max()) if finite.any() else 0.0,
+                "max_rel_err": float(rel[finite].max()) if finite.any() else 0.0}
+
+    if kind == INDEX_VALUE_CONSISTENCY:
+        # 下标不逐位比：gather(self, idx_actual) allclose gather(self, idx_golden)（tie 上下标可合法不同、值须一致）。
+        # 🔖 **本分支整段是 OpRunway 原创，参考仓 cannbot-ops-input 没有对应实现**（定义处 provenance 详述）：
+        #    参考仓 `accuracy_worker.py:73` 只存 `outputs[0]`、`accuracy.py:92` 只读 `golden_files[0]`，
+        #    index 输出从头到尾不进比对；其潜在口径（int64 → `_EXACT_DTYPES`）是**下标逐位精确**。
+        #    我们**故意比它强**：tie 上容忍下标不同、但要求值一致。读到这里别按「对齐参考仓」把它改回逐位比。
+        if not isinstance(gather_ctx, dict) or "source" not in gather_ctx or "dim" not in gather_ctx:
+            raise ValueError("index_value_consistency 需 gather_ctx={source, dim, keepdim}"
+                             "（采集层据 policy.gather_from 重读输入 + 归约轴）")
+        src = np.asarray(gather_ctx["source"])
+        dim = gather_ctx["dim"]
+        keepdim = bool(gather_ctx.get("keepdim", False))
+        ia = np.asarray(out)                              # 用未 flatten 的原下标数组（gather 需保形）
+        ig = np.asarray(golden)
+        if ia.shape != ig.shape:
+            raise ValueError(f"index_value_consistency 下标形状不一致 actual={ia.shape} golden={ig.shape}")
+        # finding #4：两侧都必须是**同一个**整数 dtype（int64 下标 vs float 下标不是同一种东西；
+        # 跨整型比也会掩盖窄化截断）。逐元素越界/负数在 `_gather_along_dim` 里拒。
+        _check_index_array(ia, "actual")
+        _check_index_array(ig, "golden")
+        if ia.dtype != ig.dtype:
+            # F2：两侧 dtype 应同出 **spec 声明的 index out-param dtype**——真机 buffer 按 caseset 的
+            # `compare_dtype` 开、golden 按同一声明落盘（gen_cases._index_golden_array）。到这里还不一致，
+            # 说明某一侧偏离了声明（实现返回了别的 dtype / 产物串了轮次）——那正是要被看见的缺陷，
+            # **绝不在比较端隐式归一铺平**（归一会把真问题一起抹掉）。
+            raise ValueError(f"index_value_consistency 两侧下标 dtype 不一致 actual={ia.dtype.name} "
+                             f"golden={ig.dtype.name}（须同一整数 dtype，即 spec 声明的 index dtype；"
+                             f"不做隐式归一）——fail-closed")
+        rtol = _checked_tol(policy["value_rtol"], "policy.value_rtol")
+        atol = _checked_tol(policy["value_atol"], "policy.value_atol")
+        ga = _gather_along_dim(src, ia, dim, keepdim).astype(np.float64)
+        gg = _gather_along_dim(src, ig, dim, keepdim).astype(np.float64)
+        # 与 value 路径**同一个实现**（finding #3）：inf 四象限一致、equal_nan 语义一致。
+        close, diff = _allclose_close_mask(ga, gg, rtol, atol, True)
+        finite = np.isfinite(diff)
+        # ⚠ 不往 metrics 里加 dtype 记账字段：`validate_acceptance_state._metrics_match` 只认
+        # int/float（字符串 metric 会被它当浮点比 → 门恒 FAILED）。下标 dtype 的账已由既有字段承载——
+        # caseset `expected.outputs[k].compare_dtype`（= golden 落盘 dtype，F2 后同源）+ evidence
+        # `out_dtype`（真机 manifest 自报），且门侧 `_recompute_case_multi` 已卡「out dtype ≠ golden dtype」。
+        return {"mismatch": int(np.count_nonzero(~close)), "numel": int(ig.size),
+                "gathered_max_abs_err": float(diff[finite].max()) if finite.any() else 0.0}
 
     # 数值口径（下均 astype(float64)）：**out 与 golden 双侧** dtype 都须受支持且一致——complex/bf16/fp8
     # 或跨型不一致在此 fail-fast（finding #2 + pv-4）。旧洞：只校 golden 侧，out=complex64 时

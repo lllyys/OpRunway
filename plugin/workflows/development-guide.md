@@ -22,27 +22,29 @@
 | ② 任务书 → spec | 抽 `<op>.spec.json` + `task_pr_gaps` | `acc-spec` skill（NL）+ `fetch_source.py`（取材） | 缺项落 gaps 不臆造；dtype 只填支持子集、余入 gaps |
 | ③ spec → 用例集 | 产覆盖「功能/精度/性能」的 caseset | `acc-casegen`（展开规则）+ `gen_cases.py`（确定性落盘，仅注册算子） | 无原语匹配 → `UNCOVERED_PRIMITIVE`，禁静默归并 |
 | ④ runner 锚定 + 自检 | 生成 per-op runner，验证-才-信 | `acc-runner`（NL 锚定 example）+ `run_on_npu.sh` | aclnn 入口/dtype/顺序**抠 example 不猜**；自检不满足停在此、不上真机 |
-| ⑤ 真机跑测 | Task2 精度 vs golden + Task3 性能 vs 基线 | `repo_adapter` / `run_workflow.py --mode new_example`；方法论 `acc-precision` / `acc-perf` | 精度=真 NPU vs numpy golden；性能=msprof kernel-only vs 基线；`OPRUNWAY_*` 指真机 |
+| ⑤ 真机跑测 | Task2 精度 vs golden + Task3 性能 vs 基线 | `repo_adapter` / `run_workflow.py --mode <mode>`（`<mode>` 据 `spec.runner_form` 派生：cpp→`new_example`、`aclnn_py`→`aclnn_py`；`mock`/`catlass*` 派生不出、须显式指定）；方法论 `acc-precision` / `acc-perf` | 精度=真 NPU vs numpy golden；性能=msprof kernel-only vs 基线（基线对照物按通路分：`new_example`=内置 TBE、`aclnn_py`=同机 `torch_npu`）；`OPRUNWAY_*` 指真机 |
 | ⑥ 门 + 裁决 + 报告 | 三级完整性门 → 裁决 → 中文报告 | `validate_acceptance_state.py` + `validator.py` + `perf_compare.py`；FAIL→`acc-rootcause` | 门 FAILED → `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**——仅真机通路**；非验收通路（mock）产 `dev_run_summary.json.pipeline_result`、不跑验收门。报告逐字引用产物、`needs_review` 不当 pass |
 
 ## 2. CP-A..E 检查点（对话暂停点 + 工件门）
 
 蓝图层面的 CP 语义（权威状态机在 `skills/acceptance-workflow/SKILL.md`，此处只作导航）：
 
-- **CP-A 前置**（primary 亲自）：取材 + 对应校验（落 `correspondence.json`）+ 环境/模式确认（mock vs new_example、NPU/VPN）。`status=confirmed` 才进 CP-B；`mismatch`/`empty_task` → 出程序结论、停跑。
-- **CP-B Task1 用例**：dispatch `acc-spec-extractor` 产 spec；primary inline `gen_cases.py <spec> --dry-run` 做用例计划契约自检（C5 起不再跑 mock 出裁决）。
+- **CP-A 前置**（primary 亲自）：取材 + 对应校验（落 `correspondence.json`）+ 环境确认（NPU/VPN 开没开、目标机按任务书 `适配硬件` × op_def `AddConfig` 双源定）。`status=confirmed` 才进 CP-B；`mismatch`/`empty_task` → 出程序结论、停跑。
+  ⚠ **别问「mock 还是真机」**（对齐 `acceptance-workflow/SKILL.md` §0.5）：验收只走真机通路，而真机通路有**两条**——`--mode` 据 `spec.runner_form` 派生（cpp→`new_example`、`aclnn_py`→`aclnn_py`），不是让用户挑的选项；`mock`/`catlass*` 派生不出、只能显式指定，且不产验收裁决。
+- **CP-B Task1 用例**：dispatch `acc-spec-extractor` 产 spec；primary inline `gen_cases.py <spec> --dry-run --ledger-out <case_plan.json> --source-facts <source_facts.json> --correspondence <correspondence.json>` 做用例计划契约自检并把事实包/用户确认绑定进 durable 账本，再由 `validate_preparation_state.py` 复核非真机断点（C5 起不再跑 mock 出裁决）。
 - **CP-C runner**（需 NPU）：dispatch `acc-runner-dev`（先过 scope gate）→ runner 自检证据满足才允许上真机。
-- **CP-D 真机跑测**（一次原子）：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode new_example`，Task2+3+三级门一次成；FAIL → `rootcause`。
+- **CP-D 真机跑测**（一次原子）：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode <mode>`（**`<mode>` 据 `spec.runner_form` 定**：cpp runner v1 → `new_example`；`runner_form == "aclnn_py"`（torch 对标）→ `aclnn_py`，且须 `OPRUNWAY_ACLNN_REAL=1`），Task2+3+三级门一次成；FAIL → `rootcause`。
+  ⚠ **两条都是真机验收通路**（`run_workflow.py:37` `_REAL_MACHINE_MODES = {"new_example", "aclnn_py"}`）——别写成「`new_example` 是唯一产裁决的路」。走错的代价：`cpp` 那条路真机 dtype 白名单只有 fp32/fp16/bf16（`repo_adapter.py:19` `_NP`，int32 等落 `DEFERRED_NP_BY_FORM["cpp"]`、真机 fail-closed）→ 覆盖缺一块；且性能基线换了对照物（TBE vs torch），「任务书对标 torch」场景走错就没验到任务书那条款。
 - **CP-E 报告**（primary）：逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + `task_pr_gaps` + 各维度通过数。
 
 ## 3. 铁律（每步都受约束）
 
 1. **判定唯一归确定性脚本链**，编排层/skill 只引用不自判（ADR 0007）。
 2. **验收权威 = 任务书**；「PR 有测试」≠「验收过了」。
-3. **缺 NPU/VPN → 到 mock 为止**，明确告知「真机待开 VPN」、不假装真机（mock 全过、真机才暴露——Sign 慢就是真机才现的）。
+3. **缺 NPU/VPN → cpp 到 CP-B 的准备收据，`aclnn_py` 再到 CP-C0 静态 preflight**，明确告知「真机待开 VPN」、不假装真机；dry-run/preflight 都不产验收裁决。
 4. **零硬编码**：仓名/路径/SOC/阈值不写死，运行时探测或问用户；`OPRUNWAY_*` 不入仓。
 5. **FAIL 先解耦再归因**：先验对应（①）、再解耦「被测物 vs harness」（`acc-rootcause`），别凭 signature 猜、别来回改口。
 
 ## 4. 加一个新算子要几步
 
-`spec + golden(gen_cases 注册) + runner` 三件套 → mock 端到端自洽 → 真机跑测。案例见 `archive_ops/`（已验证算子，如实标 verdict）。
+`spec + golden + case_plan/preparation receipt + runner/preflight` 准备自洽 → 真机跑测。案例见 `archive_ops/`（已验证算子，如实标 verdict）。
