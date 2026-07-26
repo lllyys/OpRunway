@@ -58,7 +58,7 @@ scope gate 的**第一闸**改由 `pr_facts.interface_kind` 驱动——`fetch_s
 
 | dispatch_mode | 输入工件 | 干什么 | 本次产出 / 回摘要 |
 |---|---|---|---|
-| **gen_golden**（CP-B，不需 NPU）| `task_doc.md`（①fetch_source 产）+ `<op>.spec.json`（②acc-spec 产）| 先把**任务书全文快照**入库（`fetch_source.py --snapshot-into <ops_root>/<op>/`），再按 **R3 两档链**定真值口径 → 产 `<ops_root>/<op>/golden.py`（`golden_fn` + `GOLDEN_SOURCE` + `GOLDEN_PROVENANCE` + `GOLDEN_CONTRACT`，非 elementwise 再加 `out_shape`）→ 跑 `check_golden.py <Op>` 自检 | golden.py 路径 + **档位（tier 1..4）** + 是否要人核 + `blocked_reason` + 快照 sha256；摘要报「口径取自任务书哪句（逐字引文 + 行号）、后端选了谁、自检退出码」，**不宣称数值已验证** |
+| **gen_golden**（CP-B，不需 NPU）| `task_doc.md` + `task_doc.snapshot.md`（①fetch_source 在工作区已产）+ `<op>.spec.json`（②acc-spec 产）| 先把 CP-A 快照**逐字节复制**到 `<ops_root>/<op>/task_doc.snapshot.md` 并核 SHA 与 spec 一致（不重新 fetch、不改变引文锚），再按 **R3 两档链**定真值口径 → 产 `<ops_root>/<op>/golden.py`（`golden_fn` + `GOLDEN_SOURCE` + `GOLDEN_PROVENANCE` + `GOLDEN_CONTRACT`，非 elementwise 再加 `out_shape`）→ 跑 `check_golden.py <Op>` 自检 | golden.py 路径 + **档位（tier 1..4）** + 是否要人核 + `blocked_reason` + 快照 sha256；摘要报「口径取自任务书哪句（逐字引文 + 行号）、后端选了谁、自检退出码」，**不宣称数值已验证** |
 | **gen_runner**（⚠ **只对 `spec.runner_form == "cpp"`（或未声明）派发**；`aclnn_py` 形态无 per-op runner 源 → 根本不派本 mode）| `<op>.spec.json`（②acc-spec 产）+ `pr_facts.json`（①fetch_source 产，含算子自带 `test_aclnn_*.cpp` + `*_def.cpp`）| **先过 scope gate**；据 spec + example **锚定生成** `oprunway_<op.lower()>_runner.cpp`（拷固定 I/O 骨架，只填四槽：A aclnn 头 / B 输入数+attr / C 输出 dtype / D aclnn 两段调用——**全从 example 抠**）；**选构建路径**（确定性，据 `target_dir` 定 build flags）| runner 文件路径 + 构建路径配置（`OPRUNWAY_OPS_REPO/SOC/VENDOR/OP` 等）+ 落差 gap；摘要报「填了哪四槽、来源 example、构建路径、有无 gap」，**不宣称已验证** |
 | **verify_runner**（⚠ 同上，**只对 `cpp` 形态**；`aclnn_py` 无源可自检 → 跳过本 mode，改由 CP-C 的 **harness 真机信任门**接住，**不是免验证**）| 上一步的 runner + `spec`（dtype/verify_mode）+ 真机 NPU | **验证-才-信**（真机）：编出 runner → 造 1–2 个**手算 golden 的小 case** → 喂 **custom exe** 跑 → 检查 `rc==0` + `OPRUNWAY_DONE total=n ok=n fail=0` + `out.bin` 字节数 = **输出** numel×sizeof(输出元素)（非 elementwise 时**输出 numel ≠ 输入 numel**，按 `out_shape` 算）+ 值**逐元素等于手算 golden** | runner 自证结论 `verified` / `unverified` + 手算 case 证据；摘要报「小 case、期望 vs 实测、是否逐元素相等、结论」 |
 
@@ -73,6 +73,7 @@ scope gate 的**第一闸**改由 `pr_facts.interface_kind` 驱动——`fetch_s
 - **后端生成期定死（R6）**：torch 优先、numpy 兜底，但**选择发生在生成这一刻**、结果写死进文件；**禁**运行时 `try: import torch except: numpy` ——两者在舍入/bf16/subnormal/nan 传播上并不逐位等价，运行时切后端 = 同一份 golden 换台机器给出不同真值，而裁决拿它当基准。torch 缺失即 fail-closed。
 - **授权引文必须逐字**：`quote` 逐字摘自快照该行区间、`cite` 行号对得上、`taskdoc_snapshot.sha256` 是 `--snapshot-into` 打印的那串。改一个字就核不过——这正是它的作用。**没快照就别写 `oracle_method`**，写了核不过是 tier 4 blocked（假授权不降级）。
 - **`GOLDEN_PROVENANCE` 会被下一个算子逐字照抄**——含糊一份、抄错一片。用手册 §4 的两种统一句式，且**声称什么就必须做到什么**（写了「不为 numel=0 编造输出」，`out_shape` 就得真 `raise`；拦截**不得**委托给 torch——换个 torch 版本结论就变，且照手册 §3 骨架延迟 import 后，`--dry-run` / `check_golden.py` 这两条只取 `out_shape` 与契约块的路径根本调不到 torch）。
+- **CP-B 时间边界**：`gen_golden` 只读 dispatch 点名的 taskdoc/snapshot/spec 与 `golden-authoring.md` 路由章节，不重新联网、不遍历无关实现。单轮预算 300 秒；预算将尽仍缺来源或形状事实时返回结构化 BLOCKED/gap，由 primary 决定，不靠扩展阅读无界拖延。该边界只约束非真机编排，不减少任何真机 case。
 - **产完必跑 `python3 check_golden.py <Op>`**，退出码 0/2/1 三态照手册 §5 判读并如实回摘要。⚠ **2 = 需人核（`needs_human_review`），不等于「tier 3」**——`multistep + oracle_method` 是 tier 1 却仍要人核；**别按档位数字自行路由**。**自检全过 ≠ 数值对**，数值只有 CP-D 真机才验得到。
 - 判档的**唯一**实现是 `precision_policy.derive_golden_tier`——golden.py 的注释里**只抄录本算子的判定结果，不复述判档逻辑**（复述会漂）。
 
@@ -82,7 +83,7 @@ scope gate 的**第一闸**改由 `pr_facts.interface_kind` 驱动——`fetch_s
 - **输出形状口径（C1）**：elementwise → `golden.py` **不导出** `out_shape`（缺省 = 输出同输入形状），骨架照旧，**现有 4 份样例 golden 一律不加此函数**；非 elementwise → `out_shape(in_shapes, attrs)` **是权威**，runner 按它开输出 buffer、**不得再拿输入 numel 当输出 numel**。写法/例子/骨架改法见 skill `references/runner-skeleton.md` §6。
   ⚠ **诚实边界照写不漏**：`out_shape` 是**代码不是数据**，门没法「不执行就校验」它——用户 2026-07-22 明确接受此代价；写它只据任务书原文 / 算子 `*_infershape.cpp` 的公式，**写不准就别导出**，把「输出形状规则未知」记进 gap 并停下。
   ⚠ **`golden.py` 的产出者就是本 agent 的 `gen_golden`**（2026-07-23 补上；此前全流程无人产它，Pdist 首跑撞的正是这个洞）。若 `gen_runner` 阶段才发现输出形状规则不对，**回 `gen_golden` 改 golden.py**，不要在 runner 里另写一份形状推导——两份实现必然漂。
-- 四槽只填 example/spec 里 pipeline 支持的子集（float32/float16；bf16 见 scope gate 那行的逐算子确认要求）；填不出或超范围 → 记 gap、返回 BLOCKED，别留 TODO/占位硬交。
+- **仅 cpp `gen_runner` 的四槽**按 `repo_adapter.supported_np("cpp")` 与 spec 交集生成；不要把旧的 float32/float16 文案外推到 `aclnn_py` 的 Python golden/ctypes 路径。任何 form 都以确定性能力源为准，填不出或超范围 → 记 gap、返回 BLOCKED，别留 TODO/占位硬交。
 - runner 是 C++、真机专属；编译/跑测的确定性活在 `run_on_npu.sh` / `repo_adapter`，本 agent 只「据 example 生成 + 定义验证」。
 
 ### verify_runner 纪律（未过不上真机、不产真机验收裁决）

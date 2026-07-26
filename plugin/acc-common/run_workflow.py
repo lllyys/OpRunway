@@ -3,8 +3,9 @@
 Task 1 gen_cases → Task 2 repo_adapter + validator → Task 3 perf_compare。
 stage 间只经 JSON/数据文件交接。CC/Codex/Antigravity 的薄壳只需换调用方式，核心不动。
 
-用法：python run_workflow.py <spec.json> [--mode new_example|mock] [--out <dir>]
-默认 `--mode new_example`（真机通路，需 OPRUNWAY_* + NPU）；`mock` 仅本地用例链自检、精度按构造必过、非验收。
+用法：python run_workflow.py <spec.json> [--mode new_example|aclnn_py|mock] [--out <dir>]
+省略 `--mode` 时据 `spec.runner_form` 唯一派生（cpp/缺省→new_example，aclnn_py→aclnn_py）；
+`mock` 仅本地用例链自检、精度按构造必过、非验收。
 
 ⚠ **验收裁决只有真机通路产得出来**（C5，用户 2026-07-22 拍板）。mock 的「NPU 输出」= `golden.copy()`
 （精度按构造必过）、性能是 `_mock_us(numel)` 编的假数 + `perf_compare.mock_baseline` 的假基线——它跑出来的
@@ -19,6 +20,7 @@ import argparse, json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_cases, repo_adapter, validator, perf_compare  # noqa: E402
 import validate_acceptance_state as gate  # noqa: E402
+import verify_aclnn_harness  # noqa: E402
 
 # —— C5 · 验收 / 非验收两套产物的口径（唯一定义处）——————————————————————————
 _DEV_GRADE = "development"              # 照 catlass_adapter.run_catlass_mock
@@ -36,6 +38,7 @@ _DEV_FILES = (_DEV_SUMMARY_FILE, _DEV_VERDICT_FILE)
 # 非按算子身份——aclnn_py 无 per-op runner 源、op 工程即 DUT（蓝图 §6）。
 _REAL_MACHINE_MODES = frozenset({"new_example", "aclnn_py"})
 _REAL_MACHINE_MODE = "new_example"      # new_example 专属预检（_ne_cfg）用；aclnn_py 有自己的 _aclnn_cfg
+_RUNNER_FORM_TO_MODE = {"cpp": "new_example", "aclnn_py": "aclnn_py"}
 
 # —— 验收通路的性能基线：**只认真数、禁 mock 兜底**（codex High#2）——————————————————————
 # 病历：aclnn_py 的 evidence `perf.us=None`（采集端第二里程碑未接）、也不产 `_real_baseline.json`，
@@ -182,7 +185,28 @@ def _exit_code(overall):
     return 1
 
 
-def run(spec_path, mode="new_example", out_dir="reports/_run", defect=None, perf_slow=None, gpu_baseline=None):
+def _resolve_mode(spec, requested_mode):
+    """据 runner_form 派生真机 mode，并拒绝显式走错真机通路。
+
+    mock/catlass 等显式逃生口保持原语义；这里只阻断会改变 DUT form/性能基线的两条真机通路错配。
+    """
+    runner_form = spec.get("runner_form", "cpp")
+    expected = _RUNNER_FORM_TO_MODE.get(runner_form)
+    if expected is None:
+        raise SystemExit(
+            f"spec.runner_form={runner_form!r} 不受支持，"
+            f"supported={sorted(_RUNNER_FORM_TO_MODE)}")
+    if requested_mode is None:
+        return expected
+    if requested_mode in _REAL_MACHINE_MODES and requested_mode != expected:
+        raise SystemExit(
+            f"真机 mode 与 spec.runner_form 不匹配：runner_form={runner_form!r} "
+            f"必须使用 mode={expected!r}，实际请求 {requested_mode!r}。"
+            "拒绝走错 DUT/基线路径。")
+    return requested_mode
+
+
+def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=None, gpu_baseline=None):
     """跑一遍 Task1→2→3。
 
     ⚠ `defect` / `perf_slow` 是**测试专用夹具**（在 mock 里造坏点 / 造略慢基线，用来证明「validator 真会 fail、
@@ -190,6 +214,14 @@ def run(spec_path, mode="new_example", out_dir="reports/_run", defect=None, perf
     ——只有 `test_*.py` 以 `import run_workflow` 的方式进程内调用得到。它们只对非验收通路有意义；
     若作用于验收通路，本函数直接 fail-closed 拒跑。
     """
+    # 显式真机 mode + 注入夹具可在读取 spec 前拒绝，保留既有 fail-closed/无副作用顺序。
+    if (defect or perf_slow) and mode is not None and _acceptance_capable(mode):
+        raise SystemExit(
+            f"defect / perf_slow 是测试专用注入夹具，禁止作用于验收通路 mode={mode!r}——拒绝执行。")
+    spec = json.load(open(spec_path, encoding="utf-8"))
+    if not isinstance(spec, dict):
+        raise SystemExit("spec 须为 JSON object")
+    mode = _resolve_mode(spec, mode)
     if mode not in repo_adapter.MODES:  # 先校验，避免 Task1 已跑再 KeyError、留半产物
         raise SystemExit(f"unknown mode {mode!r}, supported={list(repo_adapter.MODES)}")
     if (defect or perf_slow) and _acceptance_capable(mode):
@@ -211,8 +243,6 @@ def run(spec_path, mode="new_example", out_dir="reports/_run", defect=None, perf
                 f"  · 要真机跑测 → 先按上面提示设好 OPRUNWAY_* 环境变量（真值不写进仓）。")
     os.makedirs(out_dir, exist_ok=True)
     work = os.path.join(out_dir, "work")
-    spec = json.load(open(spec_path, encoding="utf-8"))
-
     def _dump(obj, name):
         p = os.path.join(out_dir, name)
         json.dump(obj, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
@@ -248,6 +278,25 @@ def run(spec_path, mode="new_example", out_dir="reports/_run", defect=None, perf
     caseset = gen_cases.gen_cases(spec, work)
     _dump(caseset, "caseset.json")
     print(f"[Task1 gen_cases] {len(caseset['cases'])} 用例")
+    # aclnn_py 无 per-op runner 源，因此 CP-C 由真机 harness 信任门接住。这里在正式 adapter
+    # 启动前复核内容寻址收据与**本轮重新生成的完整 caseset**、当前 spec 及 harness 执行逻辑
+    # 全部仍绑定；缺失/漂移一律停在 CP-C。收据只验证 harness，不改变或裁剪下方 Task2/Task3。
+    if mode == "aclnn_py":
+        try:
+            trust = verify_aclnn_harness.validate_receipt(
+                os.path.abspath(out_dir), "work/aclnn_harness_trust.json",
+                spec, caseset)
+        except (OSError, TypeError, ValueError) as ex:
+            # `content_address.ContentAddressError` 是 ValueError 子类；保持这里不额外 import，
+            # 同时让错误收敛成清晰的 CP-C blocker，而非进 adapter 后才跑出半轮真机产物。
+            raise SystemExit(
+                "[aclnn_py] CP-C harness 真机信任门未通过或收据已漂移：\n"
+                f"{ex}\n"
+                "请先运行 verify_aclnn_harness.py 生成 "
+                "work/aclnn_harness_trust.json；正式 Task2/Task3 未启动。")
+        print("[CP-C harness trust] "
+              f"{trust['status']} · 见证 {trust['coverage']['selected_count']}/"
+              f"{trust['coverage']['full_case_count']}（正式用例仍全量执行）")
     _emit_perf_plan(spec, work)
     # Task 2
     # defect 只在测试夹具下非 None；平时**不传该 kwarg**，让 adapter 侧的签名怎么演化都不影响生产路径。
@@ -491,13 +540,13 @@ def main():
     # 输出/退出码/`baseline.json` 被人截图或抄进报告的那条路（本仓最不能容忍的「看起来对」）。
     # ⚠ 别因为「加回去方便调试/演示」就恢复它们：调试与演示请走进程内 API。
     ap = argparse.ArgumentParser(
-        description="OpRunway Task1→2→3 编排。验收裁决(acceptance.json/verdict.json)只有真机通路 "
-                    "new_example 产得出；mock 等非验收通路改产 dev_run_summary.json / "
+        description="OpRunway Task1→2→3 编排。验收裁决可由真机通路 "
+                    "new_example 或 aclnn_py 产出；mock 等非验收通路改产 dev_run_summary.json / "
                     "dev_precision_check.json（均标 NON-ACCEPTANCE）。")
     ap.add_argument("spec")
-    ap.add_argument("--mode", default="new_example", choices=list(repo_adapter.MODES),
-                    help="默认 new_example（真机通路，需 OPRUNWAY_* + NPU，是唯一产验收裁决的通路）；"
-                         "mock 仅本地用例链自检、精度按构造必过、**非验收**")
+    ap.add_argument("--mode", default=None, choices=list(repo_adapter.MODES),
+                    help="省略时据 spec.runner_form 派生：cpp→new_example、aclnn_py→aclnn_py；"
+                         "两者都是真机验收通路。mock 仅本地用例链自检、精度按构造必过、**非验收**")
     ap.add_argument("--out", default="reports/_run")
     ap.add_argument("--gpu-baseline", default=None, help="外部 GPU 标杆 JSON（Task3 consumer 侧对比）")
     a = ap.parse_args()

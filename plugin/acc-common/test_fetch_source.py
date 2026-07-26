@@ -433,6 +433,41 @@ class TaskdocSnapshotTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(snap), text)
         self.assertIn("sha256 = ", text)
         self.assertIn("task_doc.snapshot.md", text)
+        work_snap = os.path.join(out, "task_doc.snapshot.md")
+        self.assertTrue(os.path.isfile(work_snap), text)
+        with open(work_snap, "rb") as got, open(self.src, "rb") as want:
+            self.assertEqual(got.read(), want.read())
+
+    def test_changed_taskdoc_leaves_existing_workdir_byte_identical(self):
+        out = os.path.join(self.d, "out")
+        ops = os.path.join(self.d, "ops", "Op")
+        fs.main(["--taskdoc", self.src, "--out", out, "--snapshot-into", ops])
+        paths = [
+            os.path.join(out, "task_doc.md"),
+            os.path.join(out, "task_doc.snapshot.md"),
+            os.path.join(ops, "task_doc.snapshot.md"),
+        ]
+        before = {path: open(path, "rb").read() for path in paths}
+        with open(self.src, "wb") as changed:
+            changed.write("新版任务书".encode("utf-8"))
+        with self.assertRaisesRegex(RuntimeError, "未写任何新任务书工件"):
+            fs.main([
+                "--taskdoc", self.src, "--out", out,
+                "--snapshot-into", ops,
+            ])
+        after = {path: open(path, "rb").read() for path in paths}
+        self.assertEqual(after, before)
+
+    def test_snapshot_symlink_is_rejected(self):
+        target = os.path.join(self.d, "victim")
+        with open(target, "wb") as out:
+            out.write(b"do not touch")
+        snapshot = os.path.join(self.d, "task_doc.snapshot.md")
+        os.symlink(target, snapshot)
+        with self.assertRaisesRegex(RuntimeError, "符号链接"):
+            fs.write_taskdoc_snapshot(self.src, snapshot)
+        with open(target, "rb") as src:
+            self.assertEqual(src.read(), b"do not touch")
 
 
 class HeadShaPinningTest(unittest.TestCase):
@@ -563,6 +598,78 @@ class MainAbortsBeforeSideEffectsTest(unittest.TestCase):
                      "https://gitcode.com/cann/catlass", "--out", out])
         self.assertEqual(self.called, [], "取任务书在 PR 校验之前被调用了（顺序错）")
         self.assertFalse(os.path.exists(out), "产出目录被建了（不该落任何半产物）")
+
+
+class SourceFactsTest(unittest.TestCase):
+    def _facts(self):
+        sha = "a" * 40
+        return {
+            "pr_url": "https://gitcode.com/cann/ops-nn/pull/6429",
+            "source_repo": "cann/ops-nn",
+            "head_sha": sha,
+            "head_repo": "contributor/ops-nn",
+            "is_fork": True,
+            "state": "opened",
+            "changed_files": ["index/median/op_host/aclnn_median.h"],
+            "key_files": {"index/median/op_host/aclnn_median.h": "void aclnnMedian();"},
+            "key_files_ref": {"index/median/op_host/aclnn_median.h": sha},
+            "aclnn_headers": ["index/median/op_host/aclnn_median.h"],
+            "op": "median",
+            "target_dir": "index/median",
+            "interface_kind": "aclnn_2stage",
+            "aclnn_entry": "aclnnMedian",
+        }
+
+    def test_complete_payload_binds_taskdoc_head_and_key_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            task = os.path.join(d, "task_doc.md")
+            with open(task, "wb") as out:
+                out.write("任务书".encode())
+            payload = fs.build_source_facts(task, self._facts())
+        self.assertEqual(payload["completeness"], {"status": "complete", "reasons": []})
+        self.assertEqual(payload["pr"]["head_sha"], "a" * 40)
+        self.assertRegex(payload["taskdoc"]["bytes_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(payload["taskdoc"]["snapshot_sha256"],
+                         payload["taskdoc"]["bytes_sha256"])
+        self.assertRegex(payload["key_files"][0]["bytes_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("content", payload["key_files"][0])
+
+    def test_wrong_key_ref_and_partial_facts_are_blocked(self):
+        with tempfile.TemporaryDirectory() as d:
+            task = os.path.join(d, "task_doc.md")
+            with open(task, "wb") as out:
+                out.write(b"x")
+            facts = self._facts()
+            facts["key_files_ref"] = {
+                "index/median/op_host/aclnn_median.h": "b" * 40}
+            payload = fs.build_source_facts(task, facts)
+            self.assertEqual(payload["completeness"]["status"], "blocked")
+            self.assertIn("key_file_ref_not_head:index/median/op_host/aclnn_median.h",
+                          payload["completeness"]["reasons"])
+
+            partial = {"pr_url": facts["pr_url"], "source_repo": "cann/ops-nn",
+                       "notes": ["network down"], "blocked": "missing_head_sha"}
+            payload = fs.build_source_facts(task, partial)
+            self.assertEqual(payload["completeness"]["status"], "blocked")
+            self.assertIn("missing_or_invalid_head_sha", payload["completeness"]["reasons"])
+
+    def test_write_round_trip_and_taskdoc_change_changes_digest(self):
+        import content_address as ca
+
+        with tempfile.TemporaryDirectory() as d:
+            task = os.path.join(d, "task_doc.md")
+            with open(task, "wb") as out:
+                out.write(b"v1")
+            path = fs.write_source_facts(task, self._facts(), d)
+            first = json.load(open(path, encoding="utf-8"))
+            payload = ca.read_artifact(
+                d, "source_facts.json", "oprunway/source-facts/v1")
+            self.assertEqual(payload["completeness"]["status"], "complete")
+            with open(task, "wb") as out:
+                out.write(b"v2")
+            fs.write_source_facts(task, self._facts(), d)
+            second = json.load(open(path, encoding="utf-8"))
+            self.assertNotEqual(first["digest"], second["digest"])
 
 
 if __name__ == "__main__":

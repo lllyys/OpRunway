@@ -135,6 +135,7 @@ G4 · 归约/成对类算子的**生成期规模预算**（2026-07-22，落地�
 """
 import collections, hashlib, importlib.util, json, math, os, sys
 import numpy as np
+import content_address
 import precision_policy
 
 SEED = 2026
@@ -490,6 +491,11 @@ def _emits_nonfinite(op_class):
 # 详见模块 docstring「造例档位 case_profile」一节（含引入动机与字节安全依据）。
 # ⚠ 这是**字段驱动**：引擎只读 spec 里这个词，**绝不按算子名分支**（律令 #0）。
 _CASE_PROFILES = ("legacy", "torch_parity")
+_PLANNER_DEPENDENCIES = (
+    "gen_cases.py",
+    "repo_adapter.py",
+    "precision_policy.py",
+)
 # 未声明时的缺省档 = 现行造例规则（向后兼容硬约束：老算子 caseset 逐字节不变）。
 _DEFAULT_CASE_PROFILE = "legacy"
 
@@ -2479,15 +2485,14 @@ def gen_cases(spec, work_dir):
     return caseset
 
 
-def _dry_run(spec):
-    """plan-only（**不跑 golden_fn**、不落 .npy）：打印覆盖账本 + 确定性自检。供测试与 acc-spec 预探。
+def _build_dry_run_ledger(spec, preparation_inputs=None):
+    """plan-only（**不跑 golden_fn**、不落 .npy）：构造可持久化覆盖账本 + 确定性自检。
 
     G4 起会**尽力**加载 golden.py 取 `out_shape` 造规模预算的 cost 模型——好让「归约/成对类算子的大 shape
     算不完」在 **CP-B 契约自检**就暴露，而不是拖到 CP-D 真生成时卡死。加载不到（golden.py 还没写、或写坏了）
     → 明说「未核」并照常出计划，**不阻塞**（那种 spec 到了 gen_cases 本来就会 fail-closed）。
     ⚠ 本仓 golden.py 约定 torch 延迟 import（见 `samples/golden/*/golden.py`），故此处仍不拉 torch；
     但若某算子在模块顶层 `import torch`，dry-run 会跟着 import ——这是加载用户代码的代价，如实记在这。"""
-    from collections import Counter
     op = spec["op"]
     in_params = [p for p in spec["params"] if p["io"] == "in"]
     # 能力边界前置：三元算子 / dtype 双层能力门在 CP-B 就拦下，不拖到 CP-D（form 缺省 cpp）
@@ -2501,9 +2506,22 @@ def _dry_run(spec):
     # 契约导出不全）也能安静通过 CP-B —— 而散文把 dry-run 称作「契约自检」，这就是 fail-open。
     # 「还没写」是合法的预览场景（spec 先行、golden 后补）；「写了但坏了」是**真错误**，必须当场炸。
     cost_fn, cost_why, _dry_out_shape_fn = None, "", None
+    golden_dependency = {"status": "missing", "bytes_sha256": None,
+                         "contract_sha256": None}
     try:
-        _dry_out_shape_fn = load_golden(op).out_shape   # 具名取：下标在字段重排后会静默指错
+        golden = load_golden(op)
+        _dry_out_shape_fn = golden.out_shape            # 具名取：下标在字段重排后会静默指错
         cost_fn = _make_cost_fn(in_params, _dry_out_shape_fn)
+        import repo_adapter
+        golden_path = os.path.join(repo_adapter.op_dir(op), "golden.py")
+        with open(golden_path, "rb") as golden_fh:
+            golden_bytes = golden_fh.read()
+        contract_bytes = content_address.canonical_json_bytes(golden.contract)
+        golden_dependency = {
+            "status": "loaded",
+            "bytes_sha256": hashlib.sha256(golden_bytes).hexdigest(),
+            "contract_sha256": hashlib.sha256(contract_bytes).hexdigest(),
+        }
     except ValueError as ex:
         msg = str(ex)
         if not msg.startswith("缺 golden:"):            # 文件在、但契约/执行有问题 → 不降级
@@ -2515,33 +2533,118 @@ def _dry_run(spec):
     for e in entries:                                    # 跑 _mk_id 校 id 唯一（撞则 raise）
         ids.append(_mk_id(op, e["dtype"], e["shape"], e["id_kind"], e["attr_idx"], seen))
     specials = {"empty", "scalar", "bndlo", "bndhi", "inf", "ninf", "nan"}
-    print(f"[dry-run] {op} target={case_target} emitted={meta['emitted']} pool_max={meta['pool_max']} "
-          f"forced_total(=强制下限S)={meta['forced_total']} forced_special={meta['forced_special']}")
-    print(f"  区间: case_target 建议落 [S={meta['forced_total']}, pool_max={meta['pool_max']}]"
+    ranks = _allowed_ranks(in_params)
+    eqn = None
+    if any(p.get("io") == "attr" and p.get("name") == "equal_nan" for p in spec["params"]):
+        eqn = sorted({str(e["attrs"].get("equal_nan")) for e in entries if "equal_nan" in e["attrs"]})
+    determinism = None
+    if ids:
+        cid = ids[0]
+        a = float(_case_rng(cid).random())
+        b = float(_case_rng(cid).random())
+        determinism = {"case_id": cid, "first_draw_a": a, "first_draw_b": b, "equal": a == b}
+    canonical_spec = content_address.canonical_json_bytes(spec)
+    logic_files = {}
+    logic_root = os.path.dirname(os.path.abspath(__file__))
+    for filename in _PLANNER_DEPENDENCIES:
+        with open(os.path.join(logic_root, filename), "rb") as source_fh:
+            logic_files[filename] = hashlib.sha256(source_fh.read()).hexdigest()
+    planner_sha256 = logic_files["gen_cases.py"]
+    ledger = {
+        "schema": "oprunway.gen_cases.dry_run_ledger",
+        "schema_version": 1,
+        "spec_binding": {
+            "op": op,
+            "sha256": hashlib.sha256(canonical_spec).hexdigest(),
+            "canonical_json": "oprunway.content_address.canonical_json_bytes/v1",
+        },
+        "preparation_inputs": preparation_inputs,
+        "planner_binding": {
+            "implementation": "gen_cases.py::_plan",
+            "gen_cases_py_sha256": planner_sha256,
+            "logic_files": logic_files,
+            "seed": SEED,
+            "default_case_target": _DEFAULT_CASE_TARGET,
+            "default_golden_cost_budget": _GOLDEN_COST_BUDGET,
+            "case_profiles": list(_CASE_PROFILES),
+            "operator_classes": list(_OPERATOR_CLASSES),
+        },
+        "planning": {
+            "case_target": case_target,
+            "runner_form": spec.get("runner_form", "cpp"),
+            "case_profile": meta["case_profile"],
+            "case_profile_declared": meta["case_profile_declared"],
+            "operator_class": meta["operator_class"],
+            "input_ranks": None if ranks is None else sorted(ranks),
+            "golden_out_shape": "loaded" if _dry_out_shape_fn is not None else "not_available",
+            "golden_cost_note": cost_why.strip(),
+        },
+        "golden_dependency": golden_dependency,
+        "summary": {
+            "emitted": meta["emitted"],
+            "pool_max": meta["pool_max"],
+            "forced_total": meta["forced_total"],
+            "forced_special": meta["forced_special"],
+            "shapes": sorted({_shape_tag(e["shape"]) for e in entries}),
+            "shape_classes": sorted({_shape_class(e["shape"]) for e in entries}),
+            "by_dtype": dict(collections.Counter(e["dtype"] for e in entries)),
+            "id_kinds": dict(collections.Counter(e["id_kind"] for e in entries)),
+            "special": sorted({e["id_kind"] for e in entries if e["id_kind"] in specials}),
+            "equal_nan_values_seen": eqn,
+        },
+        "coverage": {
+            "strength": meta["coverage_strength"],
+            "dropped_combo_classes": meta["dropped_combo_classes"],
+            "unpaired_combo_classes": meta["unpaired_combo_classes"],
+            "attr_axis_lengths": meta["attr_axis_lengths"],
+            "golden_cost": meta["golden_cost"],
+            "emits_nonfinite_specials": meta["emits_nonfinite_specials"],
+            "note_target_below_forced": meta.get("note_target_below_forced"),
+        },
+        "determinism": determinism,
+    }
+    # 账本本身也带内容摘要：复用校验不能只核 spec/planner/golden 依赖，却允许 coverage/summary
+    # 被截断或改写后仍命中。摘要覆盖除自身外的完整 payload，避免 mtime/路径充当身份。
+    ledger["ledger_digest"] = content_address.content_digest(
+        "oprunway/case-plan/v1", ledger)
+    return ledger
+
+
+def _render_dry_run_ledger(ledger):
+    """把结构化 dry-run 账本渲染成既有的人读文本；不重新规划、不改变任何用例策略。"""
+    op = ledger["spec_binding"]["op"]
+    planning = ledger["planning"]
+    summary = ledger["summary"]
+    coverage = ledger["coverage"]
+    target = planning["case_target"]
+    emitted = summary["emitted"]
+    pool_max = summary["pool_max"]
+    forced_total = summary["forced_total"]
+    print(f"[dry-run] {op} target={target} emitted={emitted} pool_max={pool_max} "
+          f"forced_total(=强制下限S)={forced_total} forced_special={summary['forced_special']}")
+    print(f"  区间: case_target 建议落 [S={forced_total}, pool_max={pool_max}]"
           f"（< S 则 emit 抬到 S；> pool_max 则 emit=pool_max、数量门软化 PASS+note）")
     # OC：算子类别 → 特殊值口径。未声明时明说「= 现行为」，别让人误以为已经按类别裁过。
-    print(f"  operator_class: {meta['operator_class'] or '未声明（缺省 = 现行为）'}"
+    print(f"  operator_class: {planning['operator_class'] or '未声明（缺省 = 现行为）'}"
           f"  → inf/-inf/nan 特殊场景: "
-          f"{'产' if meta['emits_nonfinite_specials'] else '**不产**（该类别按方法学不适用 NaN·Inf）'}")
+          f"{'产' if coverage['emits_nonfinite_specials'] else '**不产**（该类别按方法学不适用 NaN·Inf）'}")
     # CP：造例档位。未声明时明说「缺省 = legacy = 现行为」，别让人以为已经按参考仓口径造过例。
     print("  case_profile: "
-          + (f"{meta['case_profile']}（spec 显式声明）" if meta["case_profile_declared"]
+          + (f"{planning['case_profile']}（spec 显式声明）" if planning["case_profile_declared"]
              else "未声明（缺省 = legacy = 现行为）"))
-    _rk = _allowed_ranks(in_params)                      # C3：rank 约束（None=不限制）
-    print(f"  input_rank: {'不限制' if _rk is None else sorted(_rk)}  "
-          f"shapes: {sorted({_shape_tag(e['shape']) for e in entries})}")
-    print(f"  by_dtype : {dict(Counter(e['dtype'] for e in entries))}")
-    print(f"  id_kinds : {dict(Counter(e['id_kind'] for e in entries))}")
-    print(f"  special  : {sorted({e['id_kind'] for e in entries if e['id_kind'] in specials})}")
-    if op in ("IsClose", "Equal"):
-        eqn = sorted({str(e['attrs'].get('equal_nan')) for e in entries if 'equal_nan' in e['attrs']})
-        print(f"  equal_nan values seen: {eqn}")
-    print(f"  dropped_combo_classes: {len(meta['dropped_combo_classes'])} "
-          f"(first3={meta['dropped_combo_classes'][:3]})")
+    print(f"  input_rank: {'不限制' if planning['input_ranks'] is None else planning['input_ranks']}  "
+          f"shapes: {summary['shapes']}")
+    print(f"  by_dtype : {summary['by_dtype']}")
+    print(f"  id_kinds : {summary['id_kinds']}")
+    print(f"  special  : {summary['special']}")
+    if summary["equal_nan_values_seen"] is not None:
+        print(f"  equal_nan values seen: {summary['equal_nan_values_seen']}")
+    dropped = coverage["dropped_combo_classes"]
+    print(f"  dropped_combo_classes: {len(dropped)} (first3={dropped[:3]})")
     # 零配对告警：「attr 取值 × shape 结构类」从未同时出现。任务书点名的边界（如「归约轴维度为 1」）
     # 实跑 0 条时，以前**全程无告警**、只能事后人肉核 caseset；现在在计划期就报出来。
-    _up = meta["unpaired_combo_classes"]
-    print(f"  shape_classes: {sorted({_shape_class(e['shape']) for e in entries})}")
+    _up = coverage["unpaired_combo_classes"]
+    print(f"  shape_classes: {summary['shape_classes']}")
     if _up["attr_values_never_emitted"]:
         print(f"  ⚠ attr 取值零覆盖（spec 声明了但一条没生成）: {_up['attr_values_never_emitted']}")
     if _up["count"]:
@@ -2552,7 +2655,7 @@ def _dry_run(spec):
               "（如 [{'attr':'dim','lengths':[1]}] = 让 dim 指的轴长度取 1）")
     else:
         print("  unpaired_combo_classes（从未配对）: 0")
-    _ax = meta["attr_axis_lengths"]
+    _ax = coverage["attr_axis_lengths"]
     if _ax["declared"]:
         _na = sum(1 for it in _ax["items"] if it["status"] == "not_applicable")
         print(f"  attr_axis_lengths: 声明 {_ax['declared']} → 定向生成 {_ax['emitted']} 条"
@@ -2566,8 +2669,9 @@ def _dry_run(spec):
             elif it["status"] == "skipped":                # 到不了这（逐项判据已 fail-closed），留作诊断
                 print(f"      · ⚠ {it['attr']}={it['attr_value']!r}(a{it['attr_idx']}) "
                       f"轴长度={it['length']} → 未产出：{it['reason']}")
-    _gc = meta["golden_cost"]                            # G4 规模预算账本
-    print(f"  golden_cost: budget={_gc['budget']} model={_gc['model']}{cost_why}")
+    _gc = coverage["golden_cost"]                        # G4 规模预算账本
+    cost_note = (" " + planning["golden_cost_note"]) if planning["golden_cost_note"] else ""
+    print(f"  golden_cost: budget={_gc['budget']} model={_gc['model']}{cost_note}")
     if _gc["scaled_cases"]:
         print(f"    ⚠ 降规模(强制项，已记账) {len(_gc['scaled_cases'])} 条: "
               + "; ".join(f"{r['id_kind']} {r['requested_shape']}→{r['emitted_shape']}"
@@ -2576,22 +2680,105 @@ def _dry_run(spec):
         print(f"    ⚠ 网格剔除(超预算，已记账，**不计入已覆盖**) {_gc['skipped_shape_classes']} 类: "
               + "; ".join(f"{r['dtype']}×{r['shape']}(cost={r['cost']})"
                           for r in _gc["skipped_shapes"][:3]))
-    print(f"  coverage: {meta['coverage_strength']}")
-    if ids:                                              # 确定性自检：同 cid 两次 _case_rng 首 draw 一致
-        cid = ids[0]
-        a = float(_case_rng(cid).random()); b = float(_case_rng(cid).random())
-        print(f"  determinism(_case_rng[{cid}] first draw): {a} == {b} -> {a == b}")
-    if meta.get("note_target_below_forced"):
-        print(f"  note: {meta['note_target_below_forced']}")
+    print(f"  coverage: {coverage['strength']}")
+    det = ledger["determinism"]
+    if det:
+        print(f"  determinism(_case_rng[{det['case_id']}] first draw): "
+              f"{det['first_draw_a']} == {det['first_draw_b']} -> {det['equal']}")
+    if coverage["note_target_below_forced"]:
+        print(f"  note: {coverage['note_target_below_forced']}")
+
+
+def _write_json_atomic(path, payload):
+    """按内容寻址基础层的严格 JSON/原子写契约落 durable ledger。"""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    base = os.path.basename(path)
+    os.makedirs(directory, exist_ok=True)
+    content_address.atomic_write_json(directory, base, payload)
+
+
+def _dry_run(spec, preparation_inputs=None):
+    """兼容入口：构造 ledger 后按既有 stdout 语义渲染，并返回结构化账本。"""
+    ledger = _build_dry_run_ledger(spec, preparation_inputs=preparation_inputs)
+    _render_dry_run_ledger(ledger)
+    return ledger
 
 
 def main(argv):
+    dry_only_flags = {"--ledger-out", "--source-facts", "--correspondence"}
+    used_dry_only = sorted(dry_only_flags.intersection(argv))
+    if used_dry_only and "--dry-run" not in argv:
+        raise ValueError(
+            f"{', '.join(used_dry_only)} 仅与 --dry-run 一起使用；"
+            "正式 gen_cases 产物语义不变")
     if "--dry-run" in argv:                              # plan-only（无 torch/golden/npy），供测试与预探
-        rest = [a for a in argv if a != "--dry-run"]
+        rest, ledger_out, source_facts_path, correspondence_path, i = (
+            [], None, None, None, 0)
+        while i < len(argv):
+            arg = argv[i]
+            if arg == "--dry-run":
+                i += 1
+                continue
+            if arg == "--ledger-out":
+                if i + 1 >= len(argv):
+                    raise ValueError("--ledger-out 缺少 JSON 输出路径")
+                ledger_out = argv[i + 1]
+                i += 2
+                continue
+            if arg == "--source-facts":
+                if i + 1 >= len(argv):
+                    raise ValueError("--source-facts 缺少 JSON 路径")
+                source_facts_path = argv[i + 1]
+                i += 2
+                continue
+            if arg == "--correspondence":
+                if i + 1 >= len(argv):
+                    raise ValueError("--correspondence 缺少 JSON 路径")
+                correspondence_path = argv[i + 1]
+                i += 2
+                continue
+            rest.append(arg)
+            i += 1
+        if len(rest) != 1:
+            raise ValueError(
+                "dry-run 用法: gen_cases.py <spec.json> --dry-run "
+                "[--ledger-out <ledger.json>] "
+                "[--source-facts <source_facts.json> "
+                "--correspondence <correspondence.json>]")
+        if bool(source_facts_path) != bool(correspondence_path):
+            raise ValueError(
+                "--source-facts 与 --correspondence 必须同时提供，防止只绑定一半准备输入")
+        preparation_inputs = None
+        if source_facts_path:
+            source_root = os.path.dirname(os.path.abspath(source_facts_path))
+            source_name = os.path.basename(source_facts_path)
+            source_payload = content_address.read_artifact(
+                source_root, source_name, "oprunway/source-facts/v1")
+            source_digest = content_address.content_digest(
+                "oprunway/source-facts/v1", source_payload)
+            with open(correspondence_path, encoding="utf-8") as corr_fh:
+                correspondence = json.load(corr_fh)
+            correspondence_bytes = content_address.canonical_json_bytes(
+                correspondence)
+            if (not isinstance(correspondence, dict)
+                    or correspondence.get("status") != "confirmed"
+                    or correspondence.get("source_facts_digest") != source_digest):
+                raise ValueError(
+                    "correspondence 必须 confirmed 且绑定当前 source_facts digest")
+            preparation_inputs = {
+                "source_facts_digest": source_digest,
+                "correspondence_sha256": hashlib.sha256(
+                    correspondence_bytes).hexdigest(),
+            }
         spec = json.load(open(rest[0], encoding="utf-8"))
-        _dry_run(spec)
+        ledger = _dry_run(spec, preparation_inputs=preparation_inputs)
+        if ledger_out:
+            _write_json_atomic(ledger_out, ledger)
         return
-    spec_path, work_dir, out_path = argv[0], argv[1], argv[2]
+    if len(argv) != 3:
+        raise ValueError(
+            "正式用法: gen_cases.py <spec.json> <work_dir> <caseset.json>")
+    spec_path, work_dir, out_path = argv
     spec = json.load(open(spec_path, encoding="utf-8"))
     caseset = gen_cases(spec, work_dir)
     json.dump(caseset, open(out_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)

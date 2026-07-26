@@ -9,12 +9,17 @@ gitcode token 走环境：优先 $GITCODE_TOKEN，退回 $OPRUNWAY_GITCODE_TOKEN
   python3 fetch_source.py --taskdoc <path|url> [--pr <gitcode PR url>] --out <dir>
 产出:
   <out>/task_doc.md      任务书原文（本地读或链接取）
+  <out>/task_doc.snapshot.md 与原文逐字节相同的稳定引文锚（CP-A 即落，供 spec/golden 共用 SHA）
   <out>/pr_facts.json    PR 事实（给了 --pr 才有）：op / 目标仓·目录 / base·head / changed_files /
                          关键文件内容（op 自带 example、op_def）——供 ② 抽 spec、③ 锚定 runner
+  <out>/source_facts.json 内容寻址事实索引（给了 --pr 才有）：任务书字节、PR head、关键文件 ref/摘要、
+                          接口派生事实与完整性状态——供非真机断点复用，不含 token/关键文件正文
 说明：链接失败/无权限时不静默——task_doc 取不到直接报错；PR 链接**形态不认识→直接报错（fail-loud，属用户输入错）、不产空壳**；
       PR 链接认识但字段取不到（网络/权限）→记进 pr_facts.notes 继续（属环境问题，与「URL 写错」错误信息分开）。
 """
-import argparse, hashlib, json, os, re, sys, urllib.parse, urllib.request
+import argparse, hashlib, json, os, re, sys, tempfile, urllib.parse, urllib.request
+
+import content_address
 
 API = "https://api.gitcode.com/api/v5"
 _BLOB_RE = re.compile(r"^https?://gitcode\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/blob/(?P<ref>[^/]+)/(?P<path>.+)$")
@@ -73,8 +78,8 @@ def _repo_file(owner, repo, path, ref=None):
     return None
 
 
-def fetch_taskdoc(src, out_dir):
-    """任务书：本地路径直接读；http(s) 链接取（gitcode blob → contents API；其它 → 直接 GET）。"""
+def _taskdoc_bytes(src):
+    """读取任务书原始字节；本地文件绝不经过 universal-newline 文本层。"""
     if re.match(r"^https?://", src):
         m = _BLOB_RE.match(src)
         if m:  # gitcode blob 链接 → contents API（可带 token 取私有）
@@ -86,12 +91,66 @@ def fetch_taskdoc(src, out_dir):
             if st != 200 or not isinstance(body, str):
                 raise RuntimeError(f"取任务书失败 HTTP {st}：{src}")
             txt = body
+        return txt.encode("utf-8")
     else:
-        with open(src, encoding="utf-8") as f:
-            txt = f.read()
+        with open(src, "rb") as f:
+            raw = f.read()
+        # 保持旧入口对本地任务书的 UTF-8 要求，但验证与落盘分离，避免 CRLF 被文本层改写。
+        raw.decode("utf-8")
+        return raw
+
+
+def _assert_snapshot_compatible(raw, snapshot_path):
+    """写任何新 CP-A 工件前先核既有快照，避免任务书改版留下半更新目录。"""
+    if not snapshot_path or not os.path.exists(snapshot_path):
+        return
+    if os.path.islink(snapshot_path):
+        raise RuntimeError(f"任务书快照不得是符号链接：{snapshot_path}")
+    with open(snapshot_path, "rb") as src:
+        old = src.read()
+    old_digest = hashlib.sha256(old).hexdigest()
+    new_digest = hashlib.sha256(raw).hexdigest()
+    if old_digest != new_digest:
+        raise RuntimeError(
+            f"任务书快照已存在但内容与本次取到的原文不一致：{snapshot_path}\n"
+            f"  既有快照 sha256: {old_digest}\n"
+            f"  本次取到 sha256: {new_digest}\n"
+            "  → 为避免 task_doc/source_facts 与旧引文锚混成半更新目录，本次未写任何新任务书工件；"
+            "请另用新输出目录，或人工复核引用后显式移除旧快照再重跑。")
+
+
+def _atomic_write_bytes(path, raw):
+    parent = os.path.abspath(os.path.dirname(path) or ".")
+    os.makedirs(parent, exist_ok=True)
+    target = content_address.safe_path(parent, os.path.basename(path))
+    fd, tmp = tempfile.mkstemp(prefix=".oprunway-taskdoc-", dir=parent)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            fd = -1
+            out.write(raw)
+            out.flush()
+            os.fsync(out.fileno())
+        content_address.safe_path(parent, os.path.basename(path))
+        os.replace(tmp, target)
+        tmp = None
+    finally:
+        if fd != -1:
+            os.close(fd)
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+
+
+def fetch_taskdoc(src, out_dir, extra_snapshot_paths=()):
+    """任务书：取原始字节，先核所有既有快照，再原子写 task_doc.md。"""
+    raw = _taskdoc_bytes(src)
+    work_snapshot = os.path.join(out_dir, "task_doc.snapshot.md")
+    for snapshot_path in (work_snapshot, *tuple(extra_snapshot_paths)):
+        _assert_snapshot_compatible(raw, snapshot_path)
     dst = os.path.join(out_dir, "task_doc.md")
-    with open(dst, "w", encoding="utf-8") as f:
-        f.write(txt)
+    _atomic_write_bytes(dst, raw)
     return dst
 
 
@@ -349,6 +408,107 @@ def _dump_facts(facts, out_dir):
     return dst
 
 
+def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
+    """构造内容寻址的非真机事实索引；不做 NL 抽取、不确认 correspondence。
+
+    `completeness=blocked` 的索引只供诊断，编排层不得把它作为 cache hit 放行。
+    """
+    with open(taskdoc_path, "rb") as src:
+        task_raw = src.read()
+    facts = pr_facts if isinstance(pr_facts, dict) else {}
+    pr_url = facts.get("pr_url")
+    owner = repo = number = None
+    if pr_url:
+        owner, repo, number = _parse_pr_url(pr_url)
+    source_repo = facts.get("source_repo") or (
+        f"{owner}/{repo}" if owner and repo else None)
+    head_sha = facts.get("head_sha")
+    key_files = facts.get("key_files") if isinstance(facts.get("key_files"), dict) else {}
+    key_refs = facts.get("key_files_ref") if isinstance(facts.get("key_files_ref"), dict) else {}
+    key_index, reasons = [], []
+    for path in sorted(key_files):
+        content = key_files[path]
+        if not isinstance(content, str):
+            reasons.append(f"key_file_not_text:{path}")
+            continue
+        raw = content.encode("utf-8")
+        ref = key_refs.get(path)
+        if not head_sha or ref != head_sha:
+            reasons.append(f"key_file_ref_not_head:{path}")
+        key_index.append({
+            "path": path, "ref": ref,
+            "bytes_sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw),
+        })
+    if facts.get("blocked"):
+        reasons.append(str(facts["blocked"]))
+    if not (isinstance(head_sha, str) and re.fullmatch(r"[0-9a-fA-F]{40}", head_sha)):
+        reasons.append("missing_or_invalid_head_sha")
+    if not isinstance(pr_url, str):
+        reasons.append("missing_pr_url")
+    if not isinstance(source_repo, str):
+        reasons.append("missing_source_repo")
+    if not isinstance(facts.get("head_repo"), str):
+        reasons.append("missing_head_repo")
+    if not isinstance(facts.get("is_fork"), bool):
+        reasons.append("unknown_fork_status")
+    if not isinstance(facts.get("state"), str):
+        reasons.append("missing_pr_state")
+    if not facts.get("changed_files"):
+        reasons.append("missing_changed_files")
+    if not key_index:
+        reasons.append("missing_key_files")
+    with open(__file__, "rb") as src:
+        logic_sha = hashlib.sha256(src.read()).hexdigest()
+    payload = {
+        "contract_version": 1,
+        "taskdoc": {
+            # 本地绝对路径既不可移植、又会让同内容跨工作区无法命中；URL 可保留作来源定位，
+            # 本地文件只记受控标签，内容身份只认 bytes_sha256。
+            "source_locator": (source_locator if isinstance(source_locator, str)
+                               and source_locator.startswith(("http://", "https://"))
+                               else "<local-file>"),
+            "bytes_sha256": hashlib.sha256(task_raw).hexdigest(),
+            # CP-A 的 task_doc.snapshot.md 是逐字节复制，故同一摘要就是 spec/golden 的引文锚。
+            "snapshot_sha256": hashlib.sha256(task_raw).hexdigest(),
+            "size": len(task_raw),
+        },
+        "pr": {
+            "canonical_url": pr_url,
+            "source_repo": source_repo,
+            "number": int(number) if number is not None else None,
+            "head_sha": head_sha.lower() if isinstance(head_sha, str) else None,
+            "head_repo": facts.get("head_repo"),
+            "is_fork": facts.get("is_fork"),
+            "state": facts.get("state"),
+        },
+        "changed_files": sorted(
+            p for p in (facts.get("changed_files") or []) if isinstance(p, str)),
+        "key_files": key_index,
+        "derived": {
+            "op": facts.get("op"),
+            "target_dir": facts.get("target_dir"),
+            "aclnn_headers": sorted(
+                p for p in (facts.get("aclnn_headers") or []) if isinstance(p, str)),
+            "interface_kind": facts.get("interface_kind"),
+            "aclnn_entry": facts.get("aclnn_entry"),
+        },
+        "completeness": {
+            "status": "complete" if not reasons else "blocked",
+            "reasons": sorted(set(reasons)),
+        },
+        "producer": {"tool": "fetch_source.py", "logic_sha256": logic_sha},
+    }
+    content_address.canonical_json_bytes(payload)
+    return payload
+
+
+def write_source_facts(taskdoc_path, pr_facts, out_dir, source_locator=None):
+    """原子写 `source_facts.json` 内容寻址 envelope。"""
+    return content_address.write_artifact(
+        out_dir, "source_facts.json", "oprunway/source-facts/v1",
+        build_source_facts(taskdoc_path, pr_facts, source_locator=source_locator))
+
+
 def write_taskdoc_snapshot(taskdoc_path, snapshot_path):
     """把取到的任务书原文**逐字节原样**落成快照，返回 (sha256, path)。R12 / 批 3。
 
@@ -363,6 +523,8 @@ def write_taskdoc_snapshot(taskdoc_path, snapshot_path):
     ⚠ **但「不覆盖」不等于「不吭声」**：上游任务书若已改版，安静地留着旧快照、还打印旧 sha256，
     调用方会以为刷新过了——**那是比覆盖更坏的静默**（验收基于一份自己都不知道过期的引文锚）。
     故内容不一致时 **fail-loud 抛错**，把两个指纹与处置方式一并说清，由人决定要不要换锚。"""
+    if os.path.islink(snapshot_path):
+        raise RuntimeError(f"任务书快照不得是符号链接：{snapshot_path}")
     if os.path.exists(snapshot_path):
         with open(snapshot_path, "rb") as f:
             old = f.read()
@@ -379,10 +541,9 @@ def write_taskdoc_snapshot(taskdoc_path, snapshot_path):
                 f"  → 要换锚：先删掉这份快照重跑，**并逐个复核受影响 golden 的 cite 行号与 quote**"
                 f"（行号极可能已移位）。这是人为动作，不该由脚本替你做。")
         return old_d, snapshot_path
-    os.makedirs(os.path.dirname(snapshot_path) or ".", exist_ok=True)
-    with open(taskdoc_path, "rb") as src, open(snapshot_path, "wb") as dst:
+    with open(taskdoc_path, "rb") as src:
         raw = src.read()
-        dst.write(raw)                                  # 逐字节，不经文本层
+    _atomic_write_bytes(snapshot_path, raw)             # 逐字节 + 原子替换，不经文本层
     return hashlib.sha256(raw).hexdigest(), snapshot_path
 
 
@@ -400,11 +561,22 @@ def main(argv):
     # 这里只校形态（纯函数、不联网）；取不到 PR 的网络失败仍在 fetch_pr 内按环境问题处理。
     if a.pr:
         _parse_pr_url(a.pr)
+    import precision_policy
     os.makedirs(a.out, exist_ok=True)
-    td = fetch_taskdoc(a.taskdoc, a.out)
-    print(f"[fetch] 任务书 → {td}")
+    extra_snapshots = ()
     if a.snapshot_into:
-        import precision_policy                            # 只在需要时 import，保持纯 stdlib 主路
+        extra_snapshots = (
+            os.path.join(a.snapshot_into, precision_policy.TASKDOC_SNAPSHOT_NAME),)
+    td = fetch_taskdoc(
+        a.taskdoc, a.out, extra_snapshot_paths=extra_snapshots)
+    print(f"[fetch] 任务书 → {td}")
+    # CP-A 立即落工作区快照：spec 抽取前就能拿到 SHA，消除「spec 先留空 → gen_golden
+    # 后补快照 → 再派 refine_spec 回填」的必然返工。这里仍只复制字节，不做任何 NL/判定。
+    work_snapshot = os.path.join(a.out, precision_policy.TASKDOC_SNAPSHOT_NAME)
+    work_digest, work_snapshot = write_taskdoc_snapshot(td, work_snapshot)
+    print(f"[fetch] 工作区任务书快照 → {work_snapshot}")
+    print(f"        sha256 = {work_digest}")
+    if a.snapshot_into:
         sp = os.path.join(a.snapshot_into, precision_policy.TASKDOC_SNAPSHOT_NAME)
         digest, sp = write_taskdoc_snapshot(td, sp)
         print(f"[fetch] 任务书快照 → {sp}")
@@ -414,8 +586,13 @@ def main(argv):
     if a.pr:
         pf = fetch_pr(a.pr, a.out)
         facts = json.load(open(pf, encoding="utf-8"))
+        sf = write_source_facts(td, facts, a.out, source_locator=a.taskdoc)
         print(f"[fetch] PR → {pf}  op={facts.get('op')} 目录={facts.get('target_dir')} "
               f"改动{len(facts.get('changed_files', []))}文件 关键{len(facts.get('key_files', {}))}份")
+        source_payload = content_address.read_artifact(
+            a.out, "source_facts.json", "oprunway/source-facts/v1")
+        print(f"[fetch] 事实索引 → {sf} completeness="
+              f"{source_payload['completeness']['status']}")
         for n in facts.get("notes", []):
             print(f"  ⚠ {n}")
 

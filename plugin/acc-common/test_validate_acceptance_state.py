@@ -1022,10 +1022,7 @@ class Cases50NaTrivialGateTest(unittest.TestCase):
 
 
 class DefaultModeIsRealMachineTest(unittest.TestCase):
-    """U6a：`--mode` 默认已从 mock 翻为 new_example（真机通路）。钉死两点，防被悄悄改回危险的 mock 默认
-    （mock 的「NPU 输出」= golden.copy()、精度按构造必过 → 默认 mock = 默认产出伪造 acceptance.json）：
-    (1) run() 签名默认 == 'new_example'；
-    (2) 不带 --mode + 无真机 OPRUNWAY_* 配置 → fail-closed 非零退出，且**绝不**落伪造 acceptance.json。"""
+    """U6a：省略 mode 时必须由 runner_form 派生到真机通路，绝不能回落危险的 mock。"""
     def setUp(self):
         self.d = tempfile.mkdtemp()
         self.here = os.path.dirname(os.path.abspath(__file__))
@@ -1033,10 +1030,13 @@ class DefaultModeIsRealMachineTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.d, ignore_errors=True)
 
-    def test_run_signature_default_is_new_example(self):
+    def test_run_signature_default_defers_to_runner_form(self):
         import inspect
         import run_workflow as W
-        self.assertEqual(inspect.signature(W.run).parameters["mode"].default, "new_example")
+        self.assertIsNone(inspect.signature(W.run).parameters["mode"].default)
+        self.assertEqual(W._resolve_mode({}, None), "new_example")
+        self.assertEqual(
+            W._resolve_mode({"runner_form": "aclnn_py"}, None), "aclnn_py")
 
     def test_no_mode_without_realcfg_failclosed_no_forged_acceptance(self):
         # 清掉真机 OPRUNWAY_* 配置（其余 env 保留，与本用例无关）→ 不带 --mode 即走默认（应 = new_example）。

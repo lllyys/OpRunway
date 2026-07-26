@@ -30,7 +30,8 @@ PRIMARY_SKILLS = ["acceptance-workflow"]  # primary 只挂 workflow skill（原�
 SUBAGENTS = [
     {"name": "acc-spec-extractor", "dispatch": ["extract_spec", "refine_spec"]},
     {"name": "acc-runner-dev", "dispatch": ["gen_golden", "gen_runner", "verify_runner"]},
-    {"name": "acc-verify-rootcause", "dispatch": ["run_npu", "rootcause"]},
+    {"name": "acc-verify-rootcause",
+     "dispatch": ["verify_aclnn_harness", "run_npu", "rootcause"]},
 ]
 CHILDREN = [s["name"] for s in SUBAGENTS]          # 3 个 child subagent（派生）
 SUB_DISPATCH = {s["name"]: s["dispatch"] for s in SUBAGENTS}
