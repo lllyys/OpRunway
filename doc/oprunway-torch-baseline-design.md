@@ -1,27 +1,29 @@
 ---
 title: OpRunway torch-对标验收场景 · Vendoring 设计与实现蓝图
 created: 2026-07-24
-status: 架构已获用户批准（Option A）。**分维状态（2026-07-24 真机首跑后更新，以本行为准）**——
+status: 架构已获用户批准（Option A）。**分维状态（2026-07-26 性能复核后更新，以本行为准）**——
         **median(PR6429) 端到端验收已跑，最终裁决 = `FAIL(精度)`**（a3 真机 60 例，`fail=6` 全部且仅有
         NaN 输入场景；`gate.passed=true` → 是**成立的精度 FAIL、不是 BLOCKED**；产物 `reports/Median/`，
         报告 `reports/Median/验收报告-median-pr6429.md`）。accuracy 主链 + 编排接线：已在真机跑通并出裁决。
-        perf（torch_npu 基线采集）：**代码已接通但真机仍 BLOCKED**——一个耗时数都没产出过（精度 fail-fast，
-        且 taskType id→名未解出）。covered≠真机绿：本文正文多处写于首跑之前，**凡与 §9.8 / 最终裁决冲突，
-        一律以 §9.8 + `reports/Median/` 落盘产物为准**。
+        perf：custom/torch baseline 已按 cannbot 同口径完成 50-case 真机采集；48 例有有效双边 kernel-only
+        耗时，2 例因 torch_npu BF16 dim=1 基线报 CANN 161002 而 BLOCKED。移除 trivial 自动免测后重算：
+        达标35/50、真实评分48/50、blocked2、status=blocked。正文旧状态与此冲突时以 §9.9 为准。
 witness: median（PR6429）
 sources: 用户 2026-07-24 指定参考仓 gitcode Justbin/cannbot-ops-input；3 份调研 + 1 轮 Workflow 综合
 ---
 
 # OpRunway torch-对标模式 · Vendoring 蓝图（可执行）
 
-> 🔴 **全文级 SUPERSEDE 横幅（2026-07-24 真机首跑后加，覆盖下文所有「当前状态」类表述）**
+> 🔴 **全文级 SUPERSEDE 横幅（2026-07-26 更新，覆盖下文所有「当前状态」类表述）**
 > **median(PR6429) 的最终验收裁决是 `FAIL(精度)`**——a3 真机 60 例、`fail=6`（全部且仅有 NaN 输入场景）、
-> `gate.passed=true`（证据可信完整，是**成立的精度 FAIL**、不是 BLOCKED）；性能维**全 BLOCKED、零个耗时数**。
+> `gate.passed=true`（证据可信完整，是**成立的精度 FAIL**、不是 BLOCKED）。性能维后续已按 cannbot 同口径
+> 采到 48/50 个有效双边耗时，2 个 torch BF16 dim=1 基线 BLOCKED；详见 §9.9。
 > 逐字产物在 `reports/Median/`（`acceptance.json` / `verdict.json` / `perf_report.json` / `harness_trust_gate.json`），
 > 人读报告 `reports/Median/验收报告-median-pr6429.md`。
 > 本文 §1–§8 大多写于首跑**之前**，其中「未跑 / 未实现 / 均须真机验证 / 一条 case 都还没跑过」等状态描述
-> **已过时**；**凡与本横幅、§9.8 或 `reports/Median/` 落盘产物冲突，一律以后者为准**。
-> ⚠ 同时守住反向的诚实：**跑过 ≠ 跑通**——精度是 FAIL、性能一个数都没有，别把「已上真机」读成「已达标」。
+> **已过时**；**凡与本横幅、§9.8、§9.9 或 `reports/Median/` 落盘产物冲突，一律以后者为准**。
+> ⚠ 同时守住反向的诚实：**跑过 ≠ 跑通**——精度历史首跑是 FAIL；最新性能有真实数据，但整体仍 blocked，
+> 不能把「已采到耗时」读成「性能验收通过」。
 
 > **由来**：用户 2026-07-24 定新规则——「任务书对标 torch」场景下参考 `cannbot-ops-input` 仓的精度/性能 case 生成规则、
 > 测试方式方法、torch 封装算子方式，改造 OpRunway 并对 median 任务书 + PR6429 做端到端验收。架构经用户拍板走
@@ -661,3 +663,29 @@ msprof CLI 包住**纯 ctypes**（完全不 import torch）也采得到（19.78/
    ⚠ **同理绝不要覆盖 `ASCEND_OPP_PATH`**：曾 `export ASCEND_OPP_PATH="<install-path>"` 盖掉 CANN 自己的 opp 根 → 60/60 用例 `ACL 561103`（找不到 kernel）。
    对照证据：`ASCEND_OPP_PATH=CANN 真根 → 60/60 pass`；`=install-path → 0/60`。custom lib 的发现由 **`ASCEND_CUSTOM_OPP_PATH`** 负责，不需要动 `ASCEND_OPP_PATH`。
    median 顶层 CMakeLists 无 add_sources → `--experimental` 虽置 torch-ext 但对 median 空转、**不依赖 torch**；install_deps 的实际安装函数在 main 流程未被调用（只有前置检查门）。
+
+### 9.9 cannbot 同口径性能链真机闭环（2026-07-26，a3 容器）
+
+§9.7 A 的结论只适用于 `torch_npu._C._mstx` / `torch_npu.npu.mstx`：该 API 在 msprof CLI 下
+`rid=0`。按 cannbot 的真实实现直接 ctypes 加载 `libms_tools_ext.so`，调用
+`mstxRangeStartA(message, stream.npu_stream)` / `mstxRangeEnd`，真机得到 `range_id=1`；
+msprof 的 `msprof_tx_*.csv` 与 `task_time_*.csv` 能裁出有效 kernel-only 窗。因此 collector 已改为：
+
+- custom 与 torch baseline 均为 `msprof CLI + ctypes MSTX + CSV`；
+- 同为 warmup=5/repeat=20、`median_x_launches`、多 kernel 求和；
+- `PROFILER_TRACE_EX` 仅作为 msprof 控制 task 忽略，其他未知 task type 仍 fail-closed；
+- DB parser 只保留给历史/离线产物，live 路径显式钉 `route=csv`；
+- `numel<4096 → trivial-met` 从比较器、GPU baseline consumer 和验收门整体废止。
+
+真机 50-case 结果（复用同一冻结 caseset，custom/baseline 共 100 次 msprof side）：
+
+- custom：50/50 为 NPU、CSV 可解析；
+- torch baseline：48/50 为 NPU、CSV 可解析；
+- 2 个 blocked：`median_bfloat16_1_scalar_a0`、
+  `median_bfloat16_1x1x1_bndlo_a0`。两者均为 torch_npu/CANN 内置基线报 161002
+  （BF16 的 dim axis value 1 不支持），custom 侧成功；不是 DUT 缺陷，也不是 parser 失败；
+- 移除免测后重算：`perf_cases=50`、`cases_scored=48`、`达标=35`、`blocked=2`、
+  `status=blocked`、`trivial_rows=0`；
+- 原 `numel<4096` 的 24 个 case 中，22 个有真实 ratio，2 个就是上述明确 blocked；不再有自动通过。
+
+这证明 cannbot 的采集方法可以对标并已接入；但当前性能整体裁决仍是 `blocked`，不能表述为性能 PASS。

@@ -1,24 +1,22 @@
 """perf_msprof — kernel-only 性能采集（MSTX 测量窗 + 窗内 kernel 累加），**op-中立、字段驱动**。
 
-⚠ **本模块按 `doc/oprunway-torch-baseline-design.md` §9.7（2026-07-24 a3 容器实测）返工**——
-§9.7 推翻了原设计 3 条、补了 3 条防御，凡与设计 §3 组件⑤ 冲突**以 §9.7 为准**：
+⚠ **本模块先按 `doc/oprunway-torch-baseline-design.md` §9.7（2026-07-24）返工，又据
+2026-07-26 cannbot 精确对标真机探针更正采集入口**：
 
-* **A（采集入口）**：msprof CLI 下 **Python 侧根本打不出 MSTX**（`torch_npu.npu.mstx.range_start()`
-  被 `@_no_exception_func()` 吞异常、静默返回 rid=0；CANN 原生 `import mstx` 进程挂死）。
-  **唯一成立**：`torch_npu.profiler.profile(experimental_config=_ExperimentalConfig(mstx=True))`，
-  产物 `ascend_pytorch_profiler*.db` 的 `MSTX_EVENTS` 表配 `TASK`+`COMPUTE_TASK_INFO` 裁窗。
-  → **baseline（torch）侧只走 torch_npu.profiler**；custom（ctypes runner）侧仍走 msprof CLI +
-  CANN mstx C API（`libms_tools_ext.so`），**该侧 MSTX 尚未实测（§9.7「下一个待 de-risk」）**，
-  打不出即 fail-closed（rid=0 直接抛），绝不静默拿整进程当窗。
-  🔖 **这条「采集入口分裂」是与参考仓 cannbot-ops-input 的有意分歧**（2026-07-25 复核）：参考仓
-  `skills/operator-evaluation/scripts/perf_msprof.py` **两侧统一** ctypes-MSTX（:412-429/:481-498）+
-  msprof CLI（:624-627）+ CSV 解析，没有 torch_npu.profiler 这条路；我们被上述实测逼着把 baseline 侧
-  换掉。**不回退**（回退即重蹈静默失败）。代价由**参考仓没有的**双边采集配置一致性闸兜住
-  （:data:`COMPARED_COLLECTION_KEYS` / :data:`BLOCKED_INCOMPARABLE_COLLECTION_CONFIG`），
-  详见常量区 `COLLECTOR_*` 处的记账。
+* **A（采集入口·已更正）**：旧探针只证明 `torch_npu.npu.mstx.range_start()` 在 msprof CLI
+  下静默返回 `rid=0`，以及 CANN Python `mstx` 模块会挂；它**没有测试**参考仓实际使用的
+  `ctypes.CDLL("libms_tools_ext.so").mstxRangeStartA(...)`。2026-07-26 在同一 A3 /
+  CANN 9.0.1 / torch_npu 2.10 容器用 cannbot 同款 C API 真机复验：
+  `range_id=1`，`msprof_tx_*.csv` 与 `task_time_*.csv` 均产出，参考仓原始解析器得到
+  `144.481 us/call`、10 个 kernel、`parse_error=null`。
+  → **live custom 与 baseline 统一走 ctypes-MSTX + msprof CLI + CSV**；`measure_side`
+  显式钉 `ROUTE_CSV`，即使 PROF 目录同时带 db 也不再误选数值 `TASK.taskType`。
+  DB 解析保留用于历史工件/离线诊断，**不再是 live collector 主路**。
 * **B（kernel 白名单两套）**：CSV 路线（`task_time.kernel_type` / `op_summary.Task Type`）=
   :data:`CSV_DEVICE_KERNEL_TYPES`；**db 路线（`TASK.taskType`）是 `KERNEL_AIVEC`/`KERNEL_MIX_AIV`/…**
   （:data:`DB_DEVICE_KERNEL_TYPES` + `KERNEL_` 家族规则），用 CSV 那套**一个都匹配不上 → 静默得 0 us**。
+  CSV 窗内真机观察到的 `PROFILER_TRACE_EX` 是 msprof 自身控制任务，列入
+  :data:`CSV_CONTROL_TASK_TYPES` 后只留痕、不计时；其余未知类型仍 fail-closed。
   → 窗内出现**任何未分类的 taskType 一律 fail-closed**（:data:`ERR_UNKNOWN_TASK_TYPE`，并把观察到的
   类型直方图带进 detail），**绝不让空结果冒充「没有 kernel」**。
 * **B′（`TASK.taskType` 可能是数值枚举 id）**——2026-07-24 a3 真机 dogfood 实测补充：
@@ -56,8 +54,9 @@
 * **E（MSTX range 的 wall duration 绝不能当性能数字）**：实测某窗 wall=141ms 而窗内 kernel 累加仅 1.5ms
   （差 90 倍，全是 profiler 启动 + 首次 kernel 加载）。range **只作裁剪边界**；wall 只以
   `window_wall_us` 记进 detail 供人看，**任何计时数都不得由它派生**。
-* **F（CSV 时间戳两个坑）**：`Task Start Time(us)` 带**尾随 tab**、19 位十进制用 float 解析丢精度
-  → **优先 db 路线（`startNs` 整数纳秒，窗内比较全程整数）**、次选 csv。
+* **F（CSV 时间戳两个坑）**：`Task Start Time(us)` 带**尾随 tab**（解析器统一 strip）；
+  19 位十进制经 float 有亚微秒量级精度损失。live 路线仍按 cannbot 使用 CSV，但 MSTX range
+  在首个被测 task 前开启、末次同步后关闭，不以边界 wall duration 计时；缺窗/歧义仍 fail-closed。
 
 职责边界
 --------
@@ -126,12 +125,9 @@ from pathlib import Path
 
 # ── 常量（单一真源）────────────────────────────────────────────────────────────────
 
-#: 解析路线。**优先 db**（§9.7 F：`startNs` 整数纳秒，无 csv 的尾随 tab / float 丢精度问题）。
-#: 🔖 两条路线**不是冗余**，而是上面 §9.7 A 那个「采集入口分裂」的下游：baseline 侧
-#: （`torch_npu.profiler`）产 `ascend_pytorch_profiler*.db` → :data:`ROUTE_DB`；custom 侧
-#: （msprof CLI）产 CSV/PROF 目录 → :data:`ROUTE_CSV`（db 可得时同样优先 db）。
-#: 参考仓 cannbot-ops-input 只有 CSV 一条（它两侧都走 msprof CLI），**db 路线是我们这边多出来的**——
-#: 连带 §9.7 B/B′/B″/D 那堆 `TASK.taskType` 陷阱也都是我们独有的、参考仓里找不到对应处理。
+#: 解析路线。live collector 显式使用 :data:`ROUTE_CSV`（双侧统一 msprof CLI，2026-07-26
+#: 真机坐实）；:data:`ROUTE_DB` 仅保留给历史工件/离线诊断。未显式指定 route 的公共解析函数
+#: 仍保持「db 可得则优先」的向后兼容行为，live 调用点不得依赖该默认值。
 ROUTE_DB = "profiler_db"
 ROUTE_CSV = "msprof_csv"
 
@@ -212,6 +208,10 @@ DB_TASK_TYPE_ID_NAMES_PROVENANCE = (
 DEVICE_MEMCPY_TYPE = "MEMCPY_ASYNC"
 CSV_MEMCPY_TYPES = frozenset((DEVICE_MEMCPY_TYPE, "MEMSET"))
 DB_MEMCPY_TYPES = frozenset((DEVICE_MEMCPY_TYPE, "KERNEL_MEMCPY", "MEMSET_ASYNC", "MEMSET"))
+#: msprof CLI 自身的控制任务，不是算子计算、也不是数据搬运。2026-07-26 双边真机 CSV
+#: 的 MSTX 窗内各观察到 1 条 `PROFILER_TRACE_EX`；参考仓会因不在 accepted_types 中自然跳过。
+#: 我方不泛化成「跳过所有未知」，只允许这一个有真机证据的受控值。
+CSV_CONTROL_TASK_TYPES = frozenset(("PROFILER_TRACE_EX",))
 
 #: **受控枚举**（版本 :data:`TASK_TYPE_ENUM_VERSION`）：外部 override 的映射值只许落在这里面。
 #: 计算类只有 :data:`DB_DEVICE_KERNEL_TYPES` 那两个实测坐实的，搬运类是 :data:`DB_MEMCPY_TYPES`——
@@ -221,6 +221,7 @@ CONTROLLED_TASK_TYPE_NAMES = frozenset(DB_DEVICE_KERNEL_TYPES | DB_MEMCPY_TYPES)
 #: 类型分类结果。
 KIND_COMPUTE = "compute"
 KIND_MEMCPY = "memcpy"
+KIND_CONTROL = "control"
 KIND_UNKNOWN = "unknown"
 
 #: 本模块产出的计时口径（双边必须同为它，否则 perf_compare 判 BLOCKED_INCOMPARABLE_TIMING_SCOPE）。
@@ -229,21 +230,9 @@ TIMING_SCOPE = "kernel_only"
 DEFAULT_WARMUP = 5
 DEFAULT_REPEAT = 20
 
-# —— 采集配置（§9.7 C：`--ai-core` 必须显式关，且双边同配置）——
-#
-# 🔖 **两个 collector 常量并存 = 与参考仓的一处结构性分歧，这里把账记清楚**（2026-07-25 复核参考仓）：
-#   参考仓 cannbot-ops-input `skills/operator-evaluation/scripts/perf_msprof.py` **两侧统一一条通路**——
-#   baseline（frozen torch reference）与 custom 都是「ctypes 加载 `libms_tools_ext.so` 打 MSTX range
-#   （:412-429 / :481-498）＋ msprof CLI 拉起（:624-627）＋ 解析 CSV」，它没有 `torch_npu.profiler` 这条路。
-#   我们**只有 custom 侧**照此办理；**baseline 侧改走 `torch_npu.profiler` 的 db**，原因是真机 finding
-#   §9.7 A（`doc/oprunway-torch-baseline-design.md`）：msprof CLI 下 **Python 侧根本打不出 MSTX**——
-#   `torch_npu.npu.mstx.range_start()` 被 `@_no_exception_func()` 吞掉异常、**静默返回 rid=0**，
-#   CANN 原生 `import mstx` 则进程挂死。照参考仓那样做，拿到的不是错误而是**一个没有测量窗的空结果**。
-#   ⛔ **不回退**：回退 = 重蹈那个静默失败（且失败形态是「看着跑通了、数字却来自整进程」）。
-#   ⚖ 分歧的代价我们自己补了闸——**参考仓没有的**双边采集配置一致性校验：
-#   :data:`COMPARED_COLLECTION_KEYS` 逐键比 + 不一致即 :data:`BLOCKED_INCOMPARABLE_COLLECTION_CONFIG`
-#   （见 :func:`check_collection_config`），防两条不同通路的口径悄悄漂开（§9.7 C 实测：光 ai-core 开关
-#   不同就能差 2×）。注意 `collector` 本身**故意不入比对键**——两路数字已实测吻合，比的是配置不是路径。
+# —— 采集配置（`--ai-core` 必须显式关，且双边同配置）——
+# 2026-07-26 真机探针坐实参考仓路径：custom / baseline 都走 msprof CLI + ctypes MSTX + CSV。
+# `torch_npu_profiler` 常量仅用于识别历史工件，不再由 live collector 产生。
 COLLECTOR_MSPROF_CLI = "msprof_cli"
 COLLECTOR_TORCH_PROFILER = "torch_npu_profiler"
 #: `--ai-core=on`（msprof 默认）会让数字虚高 2.0~3.75×（§9.7 C 实测）→ 一律显式关。
@@ -932,7 +921,10 @@ def _window(range_name, device_id, *, route, start_ns=None, end_ns=None,
 
 
 def parse_measurement_window(prof_dir, range_name, route=None):
-    """解析 MSTX 测量窗 → `(window|None, err|None)`。**优先 db 路线**（§9.7 A/F）。
+    """解析 MSTX 测量窗 → `(window|None, err|None)`。
+
+    显式 `route` 严格服从；未指定时为历史调用保持 db 优先。live collector 必须传
+    :data:`ROUTE_CSV`，不得依赖默认选择。
 
     **缺 MSTX 证据一律 fail-closed**：没有 profiling 产物 / 没有 MSTX 表或 csv / 找不到该 range /
     找到多个不同的 range 都返回 err，**绝不靠 task 数反推窗口**（那是「没证据也给个数」，本仓最忌）。
@@ -1009,7 +1001,7 @@ def _in_window(row, window):
 # ── 类型分类（两套白名单，未知即 fail-closed）──────────────────────────────────────
 
 def classify_task_type(task_type, route):
-    """kernel/task 类型 → `compute` / `memcpy` / `unknown`。**两套枚举分路线**（§9.7 B）。
+    """kernel/task 类型 → `compute` / `memcpy` / `control` / `unknown`。
 
     未知类型一律 `unknown` → 上层 fail-closed，**绝不当成「没有 kernel」静默得 0 us**
     （原设计拿 CSV 那套白名单去比 db 的 `KERNEL_AIVEC`，一个都不中、静默 0，正是这条要堵的）。
@@ -1028,6 +1020,8 @@ def classify_task_type(task_type, route):
         return KIND_MEMCPY
     if text in CSV_DEVICE_KERNEL_TYPES:
         return KIND_COMPUTE
+    if text in CSV_CONTROL_TASK_TYPES:
+        return KIND_CONTROL
     return KIND_UNKNOWN
 
 
@@ -1146,10 +1140,12 @@ def parse_kernel_measurement(prof_dir, *, repeat, measurement_window, route=None
     empty["task_type_dict_sources"] = dict_sources
     empty["task_type_dict_provenance"] = dict_prov
 
-    compute, memcpy, unknown = [], [], []
+    compute, memcpy, control, unknown = [], [], [], []
     for row in in_window:
         kind = classify_task_type(row.get("type"), route)
-        (compute if kind == KIND_COMPUTE else memcpy if kind == KIND_MEMCPY else unknown).append(row)
+        (compute if kind == KIND_COMPUTE else
+         memcpy if kind == KIND_MEMCPY else
+         control if kind == KIND_CONTROL else unknown).append(row)
     if unknown:
         # §9.7 B：白名单没覆盖到的类型出现在窗里 = 口径缺口，**必须炸**，不许当 0 us 或「没 kernel」。
         return {**empty, "error": ERR_UNKNOWN_TASK_TYPE}
@@ -1185,7 +1181,8 @@ def count_tensor_arguments(case):
     return len(inputs) if isinstance(inputs, list) else 0
 
 
-def parse_host_transfer_evidence(prof_dir, case, *, repeat, materializations=2, db_path=None):
+def parse_host_transfer_evidence(prof_dir, case, *, repeat, materializations=2,
+                                 db_path=None, route=None):
     """找**每次调用都发生**的 host 搬运 → hybrid 判据。db 走 `CANN_API`，csv 走 `api_statistic`。
 
     张量参数按 `materializations` 次一次性物化计入配额（warmup 一次 + 测量前重新物化一次 = 2）；
@@ -1205,11 +1202,14 @@ def parse_host_transfer_evidence(prof_dir, case, *, repeat, materializations=2, 
                 "source": None,
                 "detected": False}
     total = None
-    db_path = db_path or find_profiler_db(prof_dir)
+    db_path = (db_path or find_profiler_db(prof_dir)) if route in (None, ROUTE_DB) else None
     if db_path is not None:
         total = count_db_api_calls(db_path, "aclrtMemcpy")
         if total is not None:
             evidence["source"] = ROUTE_DB
+    if route == ROUTE_DB and total is None:
+        evidence["note"] = "指定 db 路线但无 CANN_API 搬运证据 → hybrid 未判"
+        return evidence
     if total is None:
         rows = _read_rows(prof_dir, _API_STAT_CSV_GLOB)
         if rows is None:
@@ -1328,8 +1328,8 @@ def check_collection_config(custom_cfg, baseline_cfg):
     """双边采集配置是否可比 → `None`（可比）或 :data:`BLOCKED_INCOMPARABLE_COLLECTION_CONFIG`。
 
     比的是 :data:`COMPARED_COLLECTION_KEYS`（ai_core / level / warmup / repeat / scope / 口径）；
-    `collector` **不比**——§9.7 C 实测关掉 ai-core 后 msprof CLI 与 torch_npu profiler 三路吻合
-    （150~159 us/call），而 baseline 侧本就只能走 torch_npu.profiler（§9.7 A）。
+    `collector` 保持不入旧契约比对键以兼容历史工件；live collector 自 2026-07-26 起双边统一
+    `msprof_cli`，新产物不存在采集入口分裂。
     任一侧缺配置 → 不可比（fail-closed，缺证据不放行）。
     """
     if not isinstance(custom_cfg, dict) or not isinstance(baseline_cfg, dict):
@@ -1525,7 +1525,7 @@ def build_baseline_document(records, *, op=None, warmup=DEFAULT_WARMUP, repeat=D
         if behavior in TIMED_BEHAVIORS and baseline.get("us") is not None \
                 and baseline.get("scope") == TIMING_SCOPE:
             per_case.append({"case_id": cid, "us": float(baseline["us"]),
-                             "env": "torch_npu profiler(mstx)",
+                             "env": "torch_npu under msprof_cli(ctypes_mstx,csv)",
                              "execution_path": baseline.get("execution_path")})
         else:
             excluded.append({"case_id": cid, "behavior": behavior,
@@ -1536,7 +1536,7 @@ def build_baseline_document(records, *, op=None, warmup=DEFAULT_WARMUP, repeat=D
                          "reason": item.get("reason") or SKIPPED_ACCURACY_FAILED})
     return {"source": "torch_npu", "scope": TIMING_SCOPE, "op": op,
             "per_case": per_case, "excluded": excluded,
-            "collection": {"tool": COLLECTOR_TORCH_PROFILER,
+            "collection": {"tool": COLLECTOR_MSPROF_CLI,
                            "warmup": int(warmup), "repeat": int(repeat),
                            "ai_core": AI_CORE_PROFILING,
                            "profiler_level": PROFILER_LEVEL,
@@ -1764,12 +1764,10 @@ print(CFG["marker_devices"] + json.dumps(["npu:%d" % int(CFG["device"])]), flush
 '''
 
 
-_BASELINE_WRAPPER = r'''# OpRunway perf wrapper · baseline(torch_npu.profiler + MSTX) —— 由 perf_msprof 生成，勿手改
-# §9.7 A：msprof CLI 下 Python 侧 MSTX 静默失败（range_start 恒 0、异常被 @_no_exception_func 吞），
-#   CANN 原生 `import mstx` 进程挂死 → **基线侧唯一成立的采集入口是 torch_npu.profiler**
-#   （experimental_config=_ExperimentalConfig(mstx=True)，导出 db 取 MSTX_EVENTS/TASK/COMPUTE_TASK_INFO）。
-# §9.7 C：不开 ai_core detail（aic_metrics 保持默认 None）——开着能让数字虚高 2.0~3.75×。
-import json, sys
+_BASELINE_WRAPPER = r'''# OpRunway perf wrapper · baseline(msprof CLI + ctypes MSTX) —— 由 perf_msprof 生成，勿手改
+# 2026-07-26 A3 / CANN 9.0.1 真机坐实：torch_npu 的 MSTX Python 包装会返回 rid=0，
+# 但 cannbot 实际采用的 libms_tools_ext.so C API 在同一 msprof 进程中可产有效 device MSTX 窗。
+import ctypes, json, sys
 from pathlib import Path
 
 import numpy as np
@@ -1825,45 +1823,39 @@ def materialize():
 
 def invoke(args, kwargs):
     with torch.no_grad():
-        out = fn(*args, **kwargs)
-    torch.npu.synchronize()
-    return out
-
-prof_dir = CFG["prof_dir"]
-Path(prof_dir).mkdir(parents=True, exist_ok=True)
-exp_kwargs = {"mstx": True}
-if hasattr(torch_npu.profiler, "ExportType"):
-    exp_kwargs["export_type"] = torch_npu.profiler.ExportType.Db     # 产 ascend_pytorch_profiler*.db
-if hasattr(torch_npu.profiler, "ProfilerLevel"):
-    exp_kwargs["profiler_level"] = torch_npu.profiler.ProfilerLevel.Level0
-experimental = torch_npu.profiler._ExperimentalConfig(**exp_kwargs)
-activities = [torch_npu.profiler.ProfilerActivity.CPU, torch_npu.profiler.ProfilerActivity.NPU]
+        return fn(*args, **kwargs)
 
 last = None
-with torch_npu.profiler.profile(
-        activities=activities,
-        experimental_config=experimental,
-        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(prof_dir)):
-    print("%sWARMUP_START" % CFG["marker_phase"], flush=True)
-    args, kwargs = materialize()
-    for _ in range(max(0, int(CFG["warmup"]))):
-        last = invoke(args, kwargs)
-    print("%sWARMUP_DONE" % CFG["marker_phase"], flush=True)
+print("%sWARMUP_START" % CFG["marker_phase"], flush=True)
+args, kwargs = materialize()
+for _ in range(max(0, int(CFG["warmup"]))):
+    last = invoke(args, kwargs)
+torch.npu.synchronize()
+print("%sWARMUP_DONE" % CFG["marker_phase"], flush=True)
 
-    # 测量前**重新物化新鲜输入**：in-place / 有状态算子不得把 warmup 的改动带进被测窗。
-    args, kwargs = materialize()
+# 测量前**重新物化新鲜输入**：in-place / 有状态算子不得把 warmup 的改动带进被测窗。
+args, kwargs = materialize()
+torch.npu.synchronize()
+
+mstx = ctypes.CDLL("libms_tools_ext.so")
+mstx.mstxRangeStartA.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+mstx.mstxRangeStartA.restype = ctypes.c_uint64
+mstx.mstxRangeEnd.argtypes = [ctypes.c_uint64]
+mstx.mstxRangeEnd.restype = None
+stream_ptr = int(torch.npu.current_stream().npu_stream)
+range_id = mstx.mstxRangeStartA(
+    CFG["range_name"].encode("utf-8"), ctypes.c_void_p(stream_ptr))
+if not range_id:
+    # 缺窗即 fail-closed，绝不拿整进程 kernel 当测量窗。
+    raise RuntimeError("ctypes mstxRangeStartA returned 0 —— MSTX 未生效，测量窗不可信")
+print("%sMEASURE_START" % CFG["marker_phase"], flush=True)
+try:
+    for _ in range(max(1, int(CFG["repeat"]))):
+        last = invoke(args, kwargs)
     torch.npu.synchronize()
-    range_id = torch_npu.npu.mstx.range_start(CFG["range_name"], torch.npu.current_stream())
-    if not range_id:
-        # §9.7 A：mstx 的失败是**静默**的（rid=0）。缺窗即 fail-closed，绝不拿整进程 kernel 当测量窗。
-        raise RuntimeError("mstx.range_start returned 0 —— MSTX 未生效，测量窗不可信")
-    print("%sMEASURE_START" % CFG["marker_phase"], flush=True)
-    try:
-        for _ in range(max(1, int(CFG["repeat"]))):
-            last = invoke(args, kwargs)
-    finally:
-        torch_npu.npu.mstx.range_end(range_id)
-    print("%sMEASURE_DONE" % CFG["marker_phase"], flush=True)
+finally:
+    mstx.mstxRangeEnd(range_id)
+print("%sMEASURE_DONE" % CFG["marker_phase"], flush=True)
 
 def devices(value):
     if hasattr(value, "device"):
@@ -1874,7 +1866,6 @@ def devices(value):
         return [d for item in value.values() for d in devices(item)]
     return []
 
-print(CFG["marker_prof_dir"] + prof_dir, flush=True)
 print(CFG["marker_devices"] + json.dumps(sorted(set(devices(last)))), flush=True)
 '''
 
@@ -1893,18 +1884,11 @@ def _run_msprof(wrapper_path, cfg_path, out_dir):
     return (str(profs[-1]) if profs else str(out_dir)), proc.returncode, output, cmd
 
 
-def _run_torch_profiler(wrapper_path, cfg_path, out_dir):
-    """直接跑 wrapper（profiling 由 wrapper 内的 `torch_npu.profiler` 负责，**不套 msprof CLI**）。"""
-    os.makedirs(out_dir, exist_ok=True)
-    cmd = [sys.executable, str(wrapper_path), str(cfg_path)]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    output = (proc.stdout or "") + (proc.stderr or "")
-    return str(out_dir), proc.returncode, output, cmd
-
-
 def collector_for(side):
-    """side → 采集入口。baseline 侧**只能** torch_npu.profiler（§9.7 A）；custom 侧走 msprof CLI。"""
-    return COLLECTOR_MSPROF_CLI if side == "custom" else COLLECTOR_TORCH_PROFILER
+    """side → live 采集入口。双边统一 msprof CLI；未知 side fail-closed。"""
+    if side not in ("custom", "baseline"):
+        raise PerfCollectError(f"未知性能采集 side={side!r}")
+    return COLLECTOR_MSPROF_CLI
 
 
 def _keep_prof():
@@ -1939,27 +1923,32 @@ def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repea
     cfg_path = side_dir / "_cfg.json"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
 
-    if collector == COLLECTOR_MSPROF_CLI:
-        prof_dir, returncode, output, command = _run_msprof(wrapper_path, cfg_path, prof_root)
-    else:
-        prof_dir, returncode, output, command = _run_torch_profiler(wrapper_path, cfg_path,
-                                                                    prof_root)
+    if collector != COLLECTOR_MSPROF_CLI:
+        raise PerfCollectError(
+            f"live 性能采集只允许 {COLLECTOR_MSPROF_CLI!r}，得 collector={collector!r}")
+    prof_dir, returncode, output, command = _run_msprof(wrapper_path, cfg_path, prof_root)
     measurement = None
     host_transfer = None
     if prof_dir is not None:
-        window, window_err = parse_measurement_window(prof_dir, range_name)
+        # 2026-07-26 真机坐实 cannbot 同款 CSV 路线；显式钉 route，防 PROF 同时带 db 时
+        # 又优先选到数值 TASK.taskType，重现 unknown_task_type_in_window。
+        window, window_err = parse_measurement_window(
+            prof_dir, range_name, route=ROUTE_CSV)
         if window_err is not None:
             measurement = {"us": None, "kernel_name": None, "execution_path": None,
                            "breakdown": [], "device_memcpy_only_us": None,
-                           "route": None, "observed_task_types": {}, "window_wall_us": None,
+                           "route": ROUTE_CSV, "observed_task_types": {},
+                           "window_wall_us": None,
                            "unresolved_task_type_ids": [], "task_type_dict_sources": [],
                            "error": window_err}
         else:
             measurement = parse_kernel_measurement(prof_dir, repeat=repeat,
-                                                   measurement_window=window)
+                                                   measurement_window=window,
+                                                   route=ROUTE_CSV)
         if detect_hybrid:
             host_transfer = parse_host_transfer_evidence(
-                prof_dir, case, repeat=max(0, int(warmup)) + max(1, int(repeat)))
+                prof_dir, case, repeat=max(0, int(warmup)) + max(1, int(repeat)),
+                route=ROUTE_CSV)
     behavior, detail = classify_behavior(returncode=returncode, output=output,
                                          measurement=measurement, host_transfer=host_transfer,
                                          detect_hybrid=detect_hybrid)

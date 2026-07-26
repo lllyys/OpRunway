@@ -89,6 +89,37 @@ class TestMeasurementWindow(unittest.TestCase):
             self.assertEqual(m["error"], PM.ERR_WINDOW_REQUIRED)
             self.assertIsNone(m["us"])
 
+    def test_explicit_csv_route_ignores_numeric_task_type_db(self):
+        """live collector 钉 CSV：同目录即使有不可解的数值 taskType db，也必须读字符串 CSV。"""
+        with tempfile.TemporaryDirectory() as d:
+            _write_db(d, tasks=_numeric_tasks(15, count=3), mstx=[(0, 1_000_000, "R")])
+            _write_prof(
+                d,
+                task_time=(
+                    _kernel_rows("csv_kernel", "MIX_AIV", [4, 5, 6], start=100)
+                    + _kernel_rows("N/A", "PROFILER_TRACE_EX", [1], start=500)
+                ),
+                mstx=[{"message": "R", "Device_id": "0",
+                       "Device Start_time(us)": 0, "Device End_time(us)": 1000}],
+            )
+            win, err = PM.parse_measurement_window(d, "R", route=PM.ROUTE_CSV)
+            self.assertIsNone(err)
+            self.assertEqual(win["route"], PM.ROUTE_CSV)
+            m = PM.parse_kernel_measurement(
+                d, repeat=3, measurement_window=win, route=PM.ROUTE_CSV)
+            self.assertIsNone(m["error"], m)
+            self.assertEqual(m["us"], 5.0)
+            self.assertEqual(m["observed_task_types"],
+                             {"MIX_AIV": 3, "PROFILER_TRACE_EX": 1})
+
+    def test_csv_control_type_is_narrowly_allowlisted(self):
+        self.assertEqual(
+            PM.classify_task_type("PROFILER_TRACE_EX", PM.ROUTE_CSV),
+            PM.KIND_CONTROL)
+        self.assertEqual(
+            PM.classify_task_type("UNSEEN_PROFILER_CONTROL", PM.ROUTE_CSV),
+            PM.KIND_UNKNOWN)
+
 
 class TestKernelAggregation(unittest.TestCase):
     """中位数聚合 · 一次性 setup 剔除 · 多 kernel 求和 · memcpy 绝不计入。"""
@@ -645,7 +676,7 @@ class TestVerdictInputs(unittest.TestCase):
 
     def test_record_with_both_timed(self):
         # §9.7 C 采集配置闸：双边须同配置才算比值（缺配置 = 不可比）→ 显式给同一份指纹
-        coll = PM.collection_config(collector=PM.COLLECTOR_TORCH_PROFILER, warmup=5, repeat=20)
+        coll = PM.collection_config(collector=PM.COLLECTOR_MSPROF_CLI, warmup=5, repeat=20)
         rec = PM.build_perf_record(
             "c0",
             {"behavior": PM.BEHAVIOR_NPU, "us": 10.0, "scope": "kernel_only",
@@ -806,6 +837,64 @@ class TestRealGate(unittest.TestCase):
                 os.environ["OPRUNWAY_ACLNN_REAL"] = old
 
 
+class TestLiveCollectorAlignment(unittest.TestCase):
+    """2026-07-26 真机结论：双边统一 cannbot 同款 msprof CLI + ctypes MSTX + CSV。"""
+
+    def test_both_sides_use_msprof_cli(self):
+        self.assertEqual(PM.collector_for("custom"), PM.COLLECTOR_MSPROF_CLI)
+        self.assertEqual(PM.collector_for("baseline"), PM.COLLECTOR_MSPROF_CLI)
+        with self.assertRaises(PM.PerfCollectError):
+            PM.collector_for("other")
+
+    def test_baseline_wrapper_uses_ctypes_mstx_not_torch_profiler(self):
+        wrapper = PM._BASELINE_WRAPPER
+        self.assertIn('ctypes.CDLL("libms_tools_ext.so")', wrapper)
+        self.assertIn("mstx.mstxRangeStartA", wrapper)
+        self.assertIn("torch.npu.current_stream().npu_stream", wrapper)
+        self.assertNotIn("torch_npu.profiler.profile", wrapper)
+        self.assertNotIn("torch_npu.npu.mstx.range_start", wrapper)
+
+    def test_measure_side_pins_csv_route(self):
+        from unittest import mock
+
+        seen = {}
+
+        def fake_window(prof_dir, range_name, route=None):
+            seen["window_route"] = route
+            return ({"route": PM.ROUTE_CSV, "device_id": "0",
+                     "start_us": 0.0, "end_us": 100.0, "wall_us": 100.0,
+                     "db_path": None}, None)
+
+        def fake_measurement(prof_dir, *, repeat, measurement_window, route=None):
+            seen["measurement_route"] = route
+            return {"us": 5.0, "kernel_name": "k", "execution_path": PM.PATH_DEVICE_KERNEL,
+                    "breakdown": [], "device_memcpy_only_us": None, "route": route,
+                    "observed_task_types": {"AI_CORE": repeat}, "window_wall_us": 100.0,
+                    "unresolved_task_type_ids": [], "task_type_dict_sources": [],
+                    "task_type_dict_provenance": {}, "error": None}
+
+        old = os.environ.get("OPRUNWAY_ACLNN_REAL")
+        os.environ["OPRUNWAY_ACLNN_REAL"] = "1"
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                with mock.patch.object(
+                        PM, "_run_msprof", return_value=(d, 0, "", ["msprof"])), \
+                     mock.patch.object(PM, "parse_measurement_window", fake_window), \
+                     mock.patch.object(PM, "parse_kernel_measurement", fake_measurement):
+                    result = PM.measure_side(
+                        side="baseline", case={"id": "c0"}, caseset_path="caseset.json",
+                        work_dir=d, cfg_extra={}, warmup=1, repeat=3, device=0,
+                        scratch_dir=d, detect_hybrid=False)
+        finally:
+            os.environ.pop("OPRUNWAY_ACLNN_REAL", None)
+            if old is not None:
+                os.environ["OPRUNWAY_ACLNN_REAL"] = old
+        self.assertEqual(seen, {"window_route": PM.ROUTE_CSV,
+                                "measurement_route": PM.ROUTE_CSV})
+        self.assertEqual(result["behavior"], PM.BEHAVIOR_NPU)
+        self.assertEqual(result["collection"]["collector"], PM.COLLECTOR_MSPROF_CLI)
+
+
 class TestBaselineDocRoundTrip(unittest.TestCase):
     """`build_baseline_document` → `repo_adapter.parse_torch_npu_baseline` 端到端契约对齐。"""
 
@@ -826,7 +915,7 @@ class TestBaselineDocRoundTrip(unittest.TestCase):
         self.assertEqual(bl["scope"], "kernel_only")
         self.assertEqual(bl["source"], "torch_npu")
         self.assertEqual(bl["per_case"], [{"case_id": "c0", "us": 20.0,
-                                           "env": "torch_npu profiler(mstx)",
+                                           "env": "torch_npu under msprof_cli(ctypes_mstx,csv)",
                                            "execution_path": PM.PATH_DEVICE_KERNEL}])
 
     def test_empty_baseline_is_legal_and_blocks_downstream(self):

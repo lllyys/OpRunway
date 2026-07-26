@@ -670,33 +670,6 @@ def _perf_finite_pos(x):
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x > 0
 
 
-# §trivial-met 复核阈值：perf_compare 默认 perf_min_numel=4096；退化 case（numel<此）免测 perf。门据此复核
-# 「trivial 声明」防伪造（大 case 谎报 trivial 跳 perf）。默认 shape 阶梯里退化 case<256、大 shape≥65535，
-# 4096 落两者间的大间隙、无误伤；spec 若上调 perf_min_numel 超此，超出段的 trivial 会被门要求 scope（fail-closed 更严）。
-_GATE_TRIVIAL_MAX_NUMEL = 4096
-
-
-def _broadcast_shape(shapes):
-    """numpy 广播规则纯 py 实现：右对齐、每维 1 可广播到 N、冲突→None；维须非 bool 非负 int 否则 None。"""
-    out_rev, maxlen = [], max((len(s) for s in shapes), default=0)
-    for i in range(maxlen):
-        dim = 1
-        for s in shapes:
-            if i >= len(s):
-                continue
-            dd = s[len(s) - 1 - i]
-            if not isinstance(dd, int) or isinstance(dd, bool) or dd < 0:
-                return None
-            if dd == 1:
-                continue
-            if dim == 1:
-                dim = dd
-            elif dim != dd:
-                return None
-        out_rev.append(dim)
-    return list(reversed(out_rev))
-
-
 def _strict_empty_shape(shape):
     """严格真空判定（codex #4）：shape 须非空 list、每维**非 bool 非负 int**、且至少一维严格==整数 0。
     防伪造 shape:[false]/[0.0] 被 `0 in shape` 当作空 Tensor 蒙混（False==0、0.0==0）。"""
@@ -713,29 +686,6 @@ def _case_strict_empty(case):
     return isinstance(case, dict) and any(
         isinstance(it, dict) and _strict_empty_shape(it.get("shape"))
         for it in (case.get("inputs") or []))
-
-
-def _caseset_numels(d):
-    """{case_id: numel}（据全部输入 **broadcast 输出** numel，codex #1 防广播蒙混）；坏/不可广播 → None。
-    供 gate_task3 trivial 复核。"""
-    cs = _load(d, "caseset.json")
-    out = {}
-    if not (isinstance(cs, dict) and isinstance(cs.get("cases"), list)):
-        return out
-    for c in cs["cases"]:
-        if not (isinstance(c, dict) and c.get("id")):
-            continue
-        inp = c.get("inputs") or []
-        shapes = [it["shape"] for it in inp if isinstance(it, dict) and isinstance(it.get("shape"), list)]
-        n = None
-        if shapes and len(shapes) == len(inp):
-            bs = _broadcast_shape(shapes)
-            if bs is not None:
-                n = 1
-                for dd in bs:
-                    n *= dd
-        out[c["id"]] = n
-    return out
 
 
 def _pinned_file(d, rel):
@@ -1247,7 +1197,6 @@ def gate_task3(d, errs):
         errs.append(f"性能 timing_scope 不可比·NPU/基线口径不一致（不出结论）：{pr.get('notes')}")
     # blocked_wait_gpu_benchmark：正规挂起，不计完整性 error；NPU 侧完整性在下方 per_case 卡。
     per = pr.get("per_case") if isinstance(pr.get("per_case"), list) else []
-    numel_by_id = _caseset_numels(d)              # §trivial-met 复核用：据 caseset numel 防伪造 trivial
     for i, r in enumerate(per):
         if not isinstance(r, dict):
             errs.append(f"perf per_case[{i}] 非对象")
@@ -1256,14 +1205,9 @@ def gate_task3(d, errs):
         if not (isinstance(cid, str) and cid):  # gt3-6②：非空 list/dict 的 case_id 会让下游 Counter 崩
             errs.append(f"perf per_case[{i}] 缺/坏 case_id（{cid!r}）")
             continue
-        # §trivial-met（用户 2026-07-15，评审 #2）：perf_compare 标退化 case（numel<阈值）免测、无 scope。
-        #  门放行但**据 caseset numel 复核**——大 case 谎报 trivial 跳 perf → error（gate-must-check-effective-object）。
+        # trivial 自动免测已移除；任何旧产物或伪造行都不得再借该字段绕过真实性能 scope。
         if r.get("trivial") is True:
-            n = numel_by_id.get(cid)
-            if isinstance(n, int) and 0 < n < _GATE_TRIVIAL_MAX_NUMEL:
-                continue
-            errs.append(f"{cid}: 标 trivial 但 caseset numel={n}（须 0<numel<{_GATE_TRIVIAL_MAX_NUMEL}；"
-                        "疑伪造 trivial 跳 perf 完整性）")
+            errs.append(f"{cid}: trivial 自动免测已废止；性能用例须提供真实、同口径的 kernel_only 测量")
             continue
         bl = r.get("blocked")  # gt3-8：blocked 强制 bool（非 bool 记 error 再参与判定；仅 True 视为 blocked）
         if bl is not None and not isinstance(bl, bool):

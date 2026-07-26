@@ -1204,8 +1204,8 @@ def _apply_cost_budget(forced, grid, cost_fn, budget):
                          "该 case 只覆盖了降下来的这个规模，原目标规模**未跑**"}
         if "性能" in e["dims"]:
             rec["perf_note"] = (f"该 case 带「性能」维度：降规模后 numel={_numel(new_shp)}，性能结论只对这个"
-                                f"规模成立；numel 若落到下游 trivial 阈值以下，性能判定会退化成 trivial-met"
-                                f"（免测达标）——别读成「原规模已测且达标」")
+                                f"规模成立；下游仍须对该实际规模采集双边性能数据，"
+                                f"不得读成「原规模已测且达标」")
         e["shape"] = new_shp
         e["tags"] = list(e["tags"]) + ["降规模"]
         e["cost_scaled"] = rec
@@ -1557,13 +1557,13 @@ def _special_entries(op, dtn, arity, is_float, rep_attrs, ranks=None, allow_empt
         _es = (_empty_shape(ranks, empty_axis, empty_accepts) if empty_axis is not None
                else _fit_rank((0,), ranks))
         E.append((["功能"], _es, "empty", "empty"))
-    # 标量 Tensor [1]（numel=1，退化 perf → 下游 trivial-met）
+    # 标量 Tensor [1]：仍带性能维，须真实采集并比较。
     E.append((["功能", "精度", "性能"], _fit_rank((1,), ranks), "varied", "scalar"))
     # 边界：下=各维均 1；上=大 shape 某维取大
     E.append((["功能", "精度", "性能"], _fit_rank((1, 1, 1), ranks), "varied", "bndlo"))
     E.append((["功能", "精度", "性能"], _fit_rank(_LARGE_SHAPES[0], ranks), "varied", "bndhi"))
     # INF/-INF/NAN 遍历（仅浮点**且该算子类别适用**；每种值一条，shape 用中等 (16,)）——**带「性能」**
-    # （v2：非空皆带性能/同输入；numel=16<阈值 → perf_compare 判 trivial-met 免测，不假 fail）。
+    # （v2：非空皆带性能/同输入；小 numel 同样真实采集，不自动免测）。
     # OC：`emit_nonfinite=False` = spec 声明了 structural / integer_compute → 整段不产（见本函数 docstring）。
     if is_float and emit_nonfinite:
         for val_kind in ("inf", "ninf", "nan"):

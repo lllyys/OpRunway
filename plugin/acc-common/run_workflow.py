@@ -286,7 +286,7 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
             trust = verify_aclnn_harness.validate_receipt(
                 os.path.abspath(out_dir), "work/aclnn_harness_trust.json",
                 spec, caseset)
-        except (OSError, TypeError, ValueError) as ex:
+        except (OSError, RuntimeError, TypeError, ValueError) as ex:
             # `content_address.ContentAddressError` 是 ValueError 子类；保持这里不额外 import，
             # 同时让错误收敛成清晰的 CP-C blocker，而非进 adapter 后才跑出半轮真机产物。
             raise SystemExit(

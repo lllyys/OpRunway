@@ -3,7 +3,7 @@
 caseset 由 gen_cases 运行时产、baseline 程序化构造（防 fixture 漂移，codex M3）。
 跑: python3 -m unittest test_gpu_baseline -v   （在 acc-common/ 下）
 """
-import json, os, tempfile, unittest
+import json, os, shutil, tempfile, unittest
 import gen_cases
 import gpu_baseline as gb
 import _golden_fixture as _gf
@@ -24,12 +24,25 @@ def _entry(c, **over):
 
 
 class GpuBaselineTest(unittest.TestCase):
-    def setUp(self):
-        self.d = tempfile.mkdtemp()
+    @classmethod
+    def setUpClass(cls):
+        # caseset 只读且所有测试相同：生成一次即可。旧写法每个 test 重生成约 56MB，
+        # 既拖慢非真机阶段，也会在 setup 失败时遗留大量临时文件。
+        cls.cases_dir = tempfile.mkdtemp()
         with open(os.path.join(_HERE, "testdata", "gpu_demo.spec.json"), encoding="utf-8") as f:
             spec = json.load(f)
-        self.cs = gen_cases.gen_cases(spec, self.d)
-        self.pcs = [c for c in self.cs["cases"] if "性能" in c["dims"]]
+        cls.cs = gen_cases.gen_cases(spec, cls.cases_dir)
+        cls.pcs = [c for c in cls.cs["cases"] if "性能" in c["dims"]]
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.cases_dir, ignore_errors=True)
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
 
     def _write(self, cases, **top):
         p = os.path.join(self.d, "gpu.json")
@@ -118,8 +131,7 @@ class GpuBaselineTest(unittest.TestCase):
     # ---- CONFIRMED 真 bug 负例（gb-2/3/4/8/9），钉死防回归 ----
 
     def _synth_cs(self, n=2):
-        """程序化 n 个性能用例的 caseset（用于需 ≥2 用例的场景，如混合 scope）。
-        shape 取**非 trivial**（numel≥4096）——否则 §trivial-met 会把它们从 GPU 标杆 required 剔除、不参与 scope 校验。"""
+        """程序化 n 个性能用例的 caseset（用于需 ≥2 用例的场景，如混合 scope）。"""
         cases = [{"id": f"p{i}", "dims": ["性能"], "tags": [],
                   "inputs": [{"name": "self", "dtype": "float32", "shape": [8192 + i]}], "attrs": {}}
                  for i in range(n)]

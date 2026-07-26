@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """aclnn_py CP-C 真机 harness 信任门。
 
-本脚本不是算子验收裁决器。它从完整 caseset 中确定性选择一个最小见证集：
+本脚本不是算子验收裁决器。它从完整 caseset 中确定性选择一个小见证集：
 
 * 覆盖本轮全部输入 dtype；
 * 覆盖每个静态签名/slot 变体（参数顺序随之被真实调用）；
@@ -19,6 +19,8 @@ import hashlib
 import json
 import math
 import os
+import re
+import shlex
 import sys
 
 import aclnn_adapter
@@ -38,12 +40,14 @@ _LOGIC_FILES = (
     "precision_policy.py",
     "validator.py",
     "content_address.py",
+    "gen_cases.py",
     "aclnn_runtime/__init__.py",
     "aclnn_runtime/base.py",
     "aclnn_runtime/acl_consts.py",
     "aclnn_runtime/aclnn_driver.py",
     "aclnn_runtime/aclnn_runner.py",
 )
+_HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
 def _strict_json(path):
@@ -75,6 +79,102 @@ def _logic_hashes():
         rel: _file_sha(os.path.join(here, *rel.split("/")))
         for rel in _LOGIC_FILES
     }
+
+
+def _artifact_file(root, work_rel):
+    if not isinstance(work_rel, str) or not work_rel:
+        raise ValueError(f"case 数据路径须为 work/ 下非空相对路径，得 {work_rel!r}")
+    rel = "work/" + work_rel.replace("/", os.sep)
+    return content_address.safe_path(root, rel), rel.replace(os.sep, "/")
+
+
+def _selected_data_manifest(root, selected):
+    """绑定见证输入与 CPU golden 的真实字节，而不只绑定路径型 caseset。"""
+    records, seen = [], set()
+    for case in selected:
+        cid = case["id"]
+        for inp in case.get("inputs") or []:
+            path, rel = _artifact_file(root, inp.get("path"))
+            key = ("input", rel)
+            if key in seen:
+                raise ValueError(f"{cid}: 重复输入数据路径 {rel!r}")
+            seen.add(key)
+            records.append({
+                "kind": "input", "case_id": cid, "name": inp.get("name"),
+                "path": rel, "size": os.path.getsize(path),
+                "sha256": _file_sha(path),
+            })
+        expected = case.get("expected") or {}
+        outputs = expected.get("outputs")
+        if isinstance(outputs, list):
+            golden_items = [
+                (i, out.get("name"), out.get("golden_path"))
+                for i, out in enumerate(outputs)
+            ]
+        else:
+            golden_items = [(0, None, expected.get("golden_path"))]
+        for index, name, golden_rel in golden_items:
+            path, rel = _artifact_file(root, golden_rel)
+            key = ("golden", rel)
+            if key in seen:
+                raise ValueError(f"{cid}: 重复 golden 数据路径 {rel!r}")
+            seen.add(key)
+            records.append({
+                "kind": "golden", "case_id": cid, "index": index,
+                "name": name, "path": rel, "size": os.path.getsize(path),
+                "sha256": _file_sha(path),
+            })
+    return sorted(records, key=lambda item: (
+        item["case_id"], item["kind"], item.get("index", -1),
+        item.get("name") or "", item["path"]))
+
+
+def _golden_source_binding(spec):
+    path = os.path.join(repo_adapter.op_dir(spec["op"]), "golden.py")
+    return {"path_role": "OPRUNWAY_OPS_DIR/<op>/golden.py",
+            "sha256": _file_sha(path)}
+
+
+def _probe_runtime_environment(cfg):
+    """只读探测 CP-D 当前 toolkit/version；与 build 脚本共用 oprw_setenv 守卫。"""
+    script = aclnn_adapter._SH_GUARDS + (
+        "oprw_setenv " + shlex.quote(cfg["setenv"]) + "\n")
+    result = repo_adapter._shell(
+        cfg["host"], script, timeout=120, check=False, capture=True)
+    blob = (result.stdout or "") + (result.stderr or "")
+    match = re.search(r"OPRUNWAY_ACLNN_ENV toolkit=(\S+) tkver=(\S+)", blob)
+    if result.returncode != 0 or not match:
+        raise RuntimeError(
+            f"无法只读绑定当前 CANN toolkit 环境 rc={result.returncode}: "
+            f"{blob[-1000:]}")
+    return {"toolkit": match.group(1), "toolkit_version": match.group(2)}
+
+
+def _execution_binding(cfg, caseset):
+    public = {
+        key: cfg[key] for key in (
+            "target", "op_subdir", "vendor_name", "base_repo", "pr_ref",
+            "head_sha", "soc", "snake_op", "device")
+    }
+    public["build_args"] = aclnn_adapter._build_args(cfg)
+    public["symbols"] = list(aclnn_adapter._required_symbols(caseset))
+    public["reuse_build"] = bool(aclnn_adapter._reuse_build(cfg))
+    private_target = {
+        key: cfg.get(key) for key in (
+            "host", "rroot", "vendor_dir", "setenv", "ops_root", "op_dir",
+            "proxy")
+    }
+    return {
+        "config": public,
+        # 私有主机名/路径不落工件，只以域分离摘要绑定同一执行目标。
+        "target_digest": content_address.content_digest(
+            "oprunway/aclnn-execution-target/v1", private_target),
+        "runtime": _probe_runtime_environment(cfg),
+    }
+
+
+def _current_execution_binding(caseset):
+    return _execution_binding(aclnn_adapter._aclnn_cfg(), caseset)
 
 
 def _shape_numel(shape):
@@ -171,7 +271,7 @@ def _case_coverage(case, variants):
 
 
 def select_cases(caseset, preflight):
-    """返回最小确定性见证集及覆盖说明；不可覆盖时 fail-closed。"""
+    """返回确定性小见证集及覆盖说明；不可覆盖时 fail-closed。"""
     cases = caseset.get("cases")
     variants = preflight.get("variants")
     if not isinstance(cases, list) or not cases:
@@ -179,15 +279,23 @@ def select_cases(caseset, preflight):
     if not isinstance(variants, list) or not variants:
         raise ValueError("preflight.variants 须为非空 array")
 
-    required_dtypes = caseset.get("dtype_required")
-    if not isinstance(required_dtypes, list) or not required_dtypes:
-        required_dtypes = sorted({
-            inp.get("dtype")
-            for case in cases for inp in (case.get("inputs") or [])
-            if isinstance(inp, dict) and isinstance(inp.get("dtype"), str)
-        })
-    if not required_dtypes or any(not isinstance(x, str) or not x for x in required_dtypes):
-        raise ValueError("caseset.dtype_required 缺失/非法，无法证明每种 dtype 已见证")
+    # 见证的是**本轮实际要执行的输入 dtype**，不是任务书全集。dtype_required 可包含按
+    # `dtype_unsupported_by_op_def` 正式挂账的差额；把它硬塞进 harness 门会篡改既有
+    # passed_with_gaps 策略。直接从完整 caseset 实际输入派生，且与 dtype_tested 交叉核。
+    required_dtypes = sorted({
+        inp.get("dtype")
+        for case in cases for inp in (case.get("inputs") or [])
+        if isinstance(inp, dict) and isinstance(inp.get("dtype"), str)
+    })
+    if not required_dtypes:
+        raise ValueError("caseset 无实际输入 dtype，无法建立 harness 见证")
+    declared_tested = caseset.get("dtype_tested")
+    if isinstance(declared_tested, list):
+        bad = [x for x in declared_tested if not isinstance(x, str) or not x]
+        if bad or not set(declared_tested).issubset(set(required_dtypes)):
+            raise ValueError(
+                f"caseset.dtype_tested={declared_tested!r} 与实际输入 dtype "
+                f"{required_dtypes!r} 不一致")
 
     required = {f"dtype:{dtype}" for dtype in required_dtypes}
     required.update(f"variant:{i}" for i in range(len(variants)))
@@ -275,6 +383,8 @@ def _judge_evidence(selected, evidence):
                 "policy_kind": policy.get("kind"),
                 "result": verdict,
                 "detail": detail,
+                "golden_path": out.get("golden_path"),
+                "out_path": out.get("out_path"),
                 "golden_sha256": (out.get("provenance") or {}).get("golden_sha256"),
                 "out_sha256": (out.get("provenance") or {}).get("out_sha256"),
             })
@@ -282,7 +392,7 @@ def _judge_evidence(selected, evidence):
     return checks
 
 
-def _receipt_bindings(spec, caseset, preflight):
+def _receipt_bindings(root, spec, caseset, preflight, selected, execution):
     return {
         "spec_sha256": _sha(spec),
         "caseset_sha256": _sha(caseset),
@@ -290,7 +400,110 @@ def _receipt_bindings(spec, caseset, preflight):
             _PREFLIGHT_DOMAIN, preflight),
         "pr_head_sha": (preflight.get("bindings") or {}).get("pr_head_sha"),
         "logic_files": _logic_hashes(),
+        "golden_source": _golden_source_binding(spec),
+        "selected_data": _selected_data_manifest(root, selected),
+        "execution": execution,
     }
+
+
+def _expected_output_contracts(case):
+    expected = case.get("expected") or {}
+    outputs = expected.get("outputs")
+    if isinstance(outputs, list):
+        return [{
+            "index": index,
+            "name": out.get("name"),
+            "role": out.get("role"),
+            "policy_kind": (out.get("policy") or {}).get("kind"),
+            "golden_path": out.get("golden_path"),
+        } for index, out in enumerate(outputs)]
+    return [{
+        "index": 0,
+        "name": None,
+        "role": None,
+        "policy_kind": (expected.get("policy") or {}).get("kind"),
+        "golden_path": expected.get("golden_path"),
+    }]
+
+
+def _validate_build_provenance(provenance, execution, preflight):
+    if not isinstance(provenance, dict):
+        raise ValueError("harness trust receipt.build_provenance 缺失")
+    cfg = execution["config"]
+    runtime = execution["runtime"]
+    expected = {
+        "head_sha": cfg["head_sha"],
+        "pr_ref": cfg["pr_ref"],
+        "base_repo": cfg["base_repo"],
+        "op_subdir": cfg["op_subdir"],
+        "snake_op": cfg["snake_op"],
+        "soc": cfg["soc"],
+        "vendor_name": cfg["vendor_name"],
+        "build_args": cfg["build_args"],
+        "symbols": cfg["symbols"],
+        "toolkit": runtime["toolkit"],
+        "toolkit_version": runtime["toolkit_version"],
+    }
+    for key, value in expected.items():
+        if provenance.get(key) != value:
+            raise ValueError(
+                f"harness trust build_provenance.{key} 与当前执行环境不一致")
+    if provenance.get("head_sha") != (
+            (preflight.get("bindings") or {}).get("pr_head_sha")):
+        raise ValueError("harness trust build head 与 CP-C0 PR head 不一致")
+    for key in ("build_reused", "stamp_mismatch_rebuilt",
+                "so_digest_unavailable"):
+        if not isinstance(provenance.get(key), bool):
+            raise ValueError(
+                f"harness trust build_provenance.{key} 须为 bool")
+
+
+def _validate_checks(root, selected, checks):
+    selected_by_id = {case["id"]: case for case in selected}
+    if not isinstance(checks, list) or len(checks) != len(selected):
+        raise ValueError("harness trust receipt 对拍检查数量与见证集不一致")
+    seen = set()
+    for check in checks:
+        if not isinstance(check, dict):
+            raise ValueError("harness trust receipt.checks 元素须为 object")
+        cid = check.get("case_id")
+        if cid not in selected_by_id or cid in seen:
+            raise ValueError(
+                f"harness trust receipt check case 缺失/重复/越界: {cid!r}")
+        seen.add(cid)
+        if check.get("result") != "pass":
+            raise ValueError(f"{cid}: harness trust check 未通过")
+        actual_outputs = check.get("outputs")
+        expected_outputs = _expected_output_contracts(selected_by_id[cid])
+        if not isinstance(actual_outputs, list) or not actual_outputs:
+            raise ValueError(f"{cid}: harness trust check.outputs 须为非空 array")
+        if len(actual_outputs) != len(expected_outputs):
+            raise ValueError(f"{cid}: harness trust 输出数量与 caseset 不一致")
+        for actual, expected in zip(actual_outputs, expected_outputs):
+            if not isinstance(actual, dict):
+                raise ValueError(f"{cid}: harness trust output check 非 object")
+            for key in ("index", "name", "role", "policy_kind",
+                        "golden_path"):
+                if actual.get(key) != expected[key]:
+                    raise ValueError(
+                        f"{cid}: harness trust output.{key} 与 caseset 不一致")
+            if actual.get("result") != "pass":
+                raise ValueError(f"{cid}: harness trust output 未通过")
+            out_path = actual.get("out_path")
+            if not isinstance(out_path, str) or not out_path.startswith(
+                    "aclnn_trust_out/" + cid + "/"):
+                raise ValueError(f"{cid}: harness trust out_path 非见证输出目录")
+            for path_key, sha_key in (
+                    ("golden_path", "golden_sha256"),
+                    ("out_path", "out_sha256")):
+                path, _ = _artifact_file(root, actual.get(path_key))
+                claimed = actual.get(sha_key)
+                if not isinstance(claimed, str) or not _HEX64.fullmatch(claimed):
+                    raise ValueError(f"{cid}: {sha_key} 非小写 SHA256")
+                if _file_sha(path) != claimed:
+                    raise ValueError(f"{cid}: {path_key} 实际字节已漂移")
+    if seen != set(selected_by_id):
+        raise ValueError("harness trust receipt 对拍检查未覆盖完整见证集")
 
 
 def validate_receipt(root, receipt_rel, spec, caseset):
@@ -309,29 +522,19 @@ def validate_receipt(root, receipt_rel, spec, caseset):
     bindings = receipt.get("bindings")
     if not isinstance(bindings, dict):
         raise ValueError("harness trust receipt.bindings 缺失")
-    expected = {
-        "spec_sha256": _sha(spec),
-        "caseset_sha256": _sha(caseset),
-        "preflight_digest": content_address.content_digest(
-            _PREFLIGHT_DOMAIN, preflight),
-        "pr_head_sha": (preflight.get("bindings") or {}).get("pr_head_sha"),
-        "logic_files": _logic_hashes(),
-    }
+    selected, expected_coverage = select_cases(caseset, preflight)
+    execution = _current_execution_binding(caseset)
+    expected = _receipt_bindings(
+        root, spec, caseset, preflight, selected, execution)
     for key, value in expected.items():
         if bindings.get(key) != value:
             raise ValueError(f"harness trust receipt {key} 已漂移")
     coverage = receipt.get("coverage")
-    if not isinstance(coverage, dict):
-        raise ValueError("harness trust receipt.coverage 缺失")
-    selected = coverage.get("selected_case_ids")
-    if not isinstance(selected, list) or not selected:
-        raise ValueError("harness trust receipt 未记录非空见证集")
-    full_ids = {case.get("id") for case in caseset.get("cases") or []}
-    if any(cid not in full_ids for cid in selected):
-        raise ValueError("harness trust receipt 见证 case 不属于本轮 caseset")
-    checks = receipt.get("checks")
-    if not isinstance(checks, list) or {x.get("case_id") for x in checks} != set(selected):
-        raise ValueError("harness trust receipt 对拍检查与见证集不一致")
+    if coverage != expected_coverage:
+        raise ValueError("harness trust receipt.coverage 与确定性见证选择不一致")
+    _validate_build_provenance(
+        receipt.get("build_provenance"), execution, preflight)
+    _validate_checks(root, selected, receipt.get("checks"))
     return receipt
 
 
@@ -368,6 +571,11 @@ def run_gate(root, spec_rel, caseset_rel, preflight_rel, out_rel):
     })
 
     cfg = aclnn_adapter._aclnn_cfg()
+    execution = _execution_binding(cfg, caseset)
+    preflight_head = (preflight.get("bindings") or {}).get("pr_head_sha")
+    if cfg.get("head_sha") != preflight_head:
+        raise ValueError(
+            "真机配置 head_sha 与 CP-C0 已绑定的 PR head 不一致")
     proj = aclnn_adapter.find_aclnn_project(
         spec["op"], cfg["ops_root"], cfg["op_subdir"])
     out_dir = os.path.join(work, "aclnn_trust_out")
@@ -376,18 +584,20 @@ def run_gate(root, spec_rel, caseset_rel, preflight_rel, out_rel):
     evidence = repo_adapter.build_multi_output_evidence(
         witness, work, out_dir)
     checks = _judge_evidence(selected, evidence)
+    _validate_build_provenance(provenance, execution, preflight)
     payload = {
         "schema": _SCHEMA,
         "schema_version": 1,
         "status": _STATUS_TRUSTED,
         "scope": "harness-only",
         "acceptance_verdict": None,
-        "bindings": _receipt_bindings(spec, caseset, preflight),
+        "bindings": _receipt_bindings(
+            root, spec, caseset, preflight, selected, execution),
         "coverage": coverage,
         "checks": checks,
         "build_provenance": provenance,
         "note": (
-            "仅证明通用 aclnn_py harness 对当前 PR 签名、dtype 与 CPU golden 的最小见证；"
+            "仅证明通用 aclnn_py harness 对当前 PR 签名、dtype 与 CPU golden 的确定性小见证；"
             "不替代、不裁剪正式 Task2/Task3。"),
     }
     content_address.write_artifact(root, out_rel, _TRUST_DOMAIN, payload)

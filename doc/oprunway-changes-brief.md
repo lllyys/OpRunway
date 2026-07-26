@@ -4,12 +4,16 @@
 
 ## 2026-07-26（非真机流程性能优化）
 
+- **性能采集已按 cannbot 真机坐实并对齐**：参考仓两侧实际走 `msprof CLI + libms_tools_ext.so ctypes MSTX + task_time CSV`；A3 probe 得 `range_id=1` 和有效 kernel 窗。OpRunway custom/torch baseline 现统一该 collector，live 路径钉 CSV；DB parser 仅保留历史/离线兼容。新增对 msprof 控制 task `PROFILER_TRACE_EX` 的窄白名单，其他未知类型继续 fail-closed。
+- **50-case 真机性能数据已产出**：custom 50/50、torch baseline 48/50 有效，48 对均为 fair kernel-only；2 个 BF16 dim=1 case 是 torch_npu/CANN 内置基线报 161002，custom 成功，归为 baseline limitation 而非 DUT/parser。
+- **彻底移除旧 `numel<4096 → trivial-met` 自动免测**：`perf_compare.py`、`gpu_baseline.py`、`validate_acceptance_state.py` 与 agent/skill 口径同步；外部 GPU baseline 也必须覆盖全部性能 case。复用同一 50-case 真机证据重算为 `cases_scored=48`、`达标=35`、`blocked=2`、`status=blocked`、`trivial_rows=0`；原 24 个小 case 中 22 个真实评分、2 个明确 blocked。
+- **顺带压缩 GPU baseline 非真机回归**：测试 caseset 从每个 test 重生成一次改为类级只读共享，一轮只生成一次；回归结果 `test_perf_compare 59 passed`、`test_gpu_baseline 21 passed`、采集器+trivial 完整性门 `106 passed + 7 subtests`。
 - **完成 1.7 小时时间预算与实施设计**：Median 历史 CP-D 已占 91:03，故 CP-A/B/C 必须由 98:11 压到 10:57 内；方案只做 source facts、内容指纹、durable dry-run 账本、aclnn 静态 preflight 和编排去重，明确不改任何真机 case、阈值、warmup/repeat、timing scope 或裁决链。设计见 `doc/oprunway-nonreal-performance-plan.md`。
 - **先落地 CP-A/B 可验证复用，不碰真机策略**：`fetch_source.py` 新产内容寻址 `source_facts.json`；`gen_cases.py --dry-run --ledger-out` 新产绑定 canonical spec、规划器与 golden 摘要的 `case_plan.json`，默认人读 stdout 与正式 gen_cases 路径不变。
 - **新增 fail-closed 的非真机复用收据**：`validate_preparation_state.py` 逐项复核 source facts / correspondence / spec / planner / golden；输入正常漂移返回 `MISS`、篡改或坏 schema 返回 `BLOCKED`、全绑定才 `REUSABLE`，且固定 `acceptance_verdict=null`，绝不冒充真机验收 PASS。
 - **把 aclnn 重复读 header/spec 收敛为 CP-C0 静态脚本**：`preflight_aclnn.py` 据 PR-head header 逐变体对账 symbol、arity、参数顺序/名字/role/ctype；成功只产 `READY_WAIT_NPU_TRUST_GATE`，后续真实 build、DUT `.so` 定义方与 harness 真机信任门一项不减。
 - **消掉两处必然返工**：CP-A 取材时即落工作区 `task_doc.snapshot.md`，spec/golden 从一开始共用同一 SHA；spec dtype 不再写死 fp32/fp16，改按 `runner_form` 查询生成层与 runner 层的确定性能力交集，避免 aclnn_py 被旧 cpp 文案压缩覆盖后再 refine。
-- **纠正“靠 trivial/numel 跳过真机来提速”的错误方向**：本轮新增的真机过滤/跳过方案没有 canonical 依据，已全部回退；本次 E2E 的精度 60 例与既有 `dims=性能` 的 50 例均实际执行。⚠ 旧提交 `662c7ec` 仍在 `perf_compare` 保留 `numel<4096 → trivial-met` 判定豁免；它不是本轮优化、也没有被回退，且本次实测会把无有效耗时的 24 例显示为“达标”。报告只能称其为规则豁免，不得称真实性能 PASS；是否移除须另行处理，不能混进本轮非真机提速。
+- **纠正“靠 trivial/numel 跳过真机来提速”的错误方向**：本轮新增的真机过滤/跳过方案没有 canonical 依据，已全部回退；本次 E2E 的精度 60 例与既有 `dims=性能` 的 50 例均实际执行。该时点旧提交 `662c7ec` 仍保留 `numel<4096 → trivial-met`；同日后续已按用户确认将其从整套体系彻底移除，结果见本节顶部。
 - **干净 Median 非真机 dogfood 定位真实瓶颈**：CP-A 最新取材 6.56s、dry-run 0.20s、复用收据 0.05s、aclnn 静态预检 0.09s，但全链仍 23:29，时间几乎全耗在首次 spec/golden 的 NL 读规与重复澄清；计划保持 8 dtype、实际 60 case（强制下限高于 case_target），未为提速减测。
 - **把 CP-B 无界研究改成有界 dispatch**：六段派发新增“已确认约束”，用户拍板的 dtype/case 范围写入 `correspondence.confirmed_constraints` 并原样传递；facts 完整时禁重复联网/遍历无关目录，单个 CP-B NL dispatch 预算 300s，预算将尽把未知项落 gap/needs_user 交回 primary，不以继续研究拖延，也不放宽任何真机门。
 - **补齐复用依赖传播**：dry-run 新增成对 `--source-facts/--correspondence` 参数，把事实包摘要与整份用户确认摘要写进 `case_plan.json`；收据强制对账，任务书、PR head 或用户确认任一变化都会 MISS。任务书快照默认跟随 `--source` 同目录，消掉一次漏传路径导致的无意义 MISS。
@@ -17,6 +21,7 @@
 - **补齐 torch 对标场景的 agent/skill 所有权**：`acc-verify-rootcause` 新增单轮 `verify_aclnn_harness` dispatch，CP-C 产收据、CP-D `run_npu` 消费；`acceptance-workflow`、primary agent、command 和 frontmatter lint 同步，消掉“下游要求信任门已过、上游却无人负责”的循环前置。
 - **A3 完整非真机回归已绿**：最新隔离 v6 为 `1436 passed / 10 skipped / 452 subtests`（71.76s）；Median 最新 facts 仍绑定 PR head `0290d61…` 与同一任务书快照，准备收据为 `REUSABLE`，静态 preflight 为 `READY_WAIT_NPU_TRUST_GATE`，8 dtype 与正式 60 case 计划未缩减。
 - **固定快照 Median 完整 E2E 达到时间目标，但验收仍 BLOCKED**：全新 subagent session 固定使用 v6 plugin 快照，任务书 + PR6429 从 CP-A 跑到 CP-D 共 `2101s = 35:01`（CP-A 157s、CP-B 615s、CP-C 173s、CP-D 阶段 1156s），低于 1.7h；Task2 精度 `60/60 pass`。Task3 按既有维度选择执行 50/60 性能 case，但 custom/baseline 均未产有效 kernel 耗时，`cases_scored=0`：主因是 profiler DB 窗口内数值 taskType 15/17/19 无有据字典而 fail-closed，另 2 个 BF16 torch_npu baseline 调用失败；24 个“达标”全是旧 `trivial-met` 规则豁免、不可当性能 PASS，余 26 blocked。三级门 FAILED，最终 `BLOCKED_EVIDENCE_INCOMPLETE`、exit 1。原始证据在忽略目录 `reports/Median-e2e-optimized-20260726-v1/`。
+- **按 E2E 结果完成 skill/收据第二轮硬化（未改真机测试策略）**：harness trust 收据新增见证输入/golden/输出真实字节、golden 源码、PR/build/toolkit/SoC/符号与当前执行环境绑定，重封空 checks、数据篡改、环境漂移均拒；workflow/primary/rootcause/command 统一加入单时钟 E2E 账本及性能测量真实性规则（`trivial-met` 只称规则豁免，`cases_scored=0` 明确未验证，未知 taskType 走采集侧 BLOCKED、不猜字典/放宽 parser/跳 case）。A3 隔离目录全量非真机回归 `1443 passed / 10 skipped / 452 subtests`（71.95s），frontmatter PASS、manifest SYNCED。
 
 ## 2026-07-25（对齐 cannbot · 批 A 落地后被用户叫停）
 

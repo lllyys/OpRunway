@@ -44,10 +44,7 @@ _EXC = {"when_us_below": 10, "abs_gap_us_within": 3}
 
 
 class SmallShapeExceptionTest(unittest.TestCase):
-    """小shape 例外逻辑直测（该逻辑仍存于 perf_compare）。⚠ §1 覆盖-预算 pipeline 已不再产「小shape」标签用例，
-    且 trivial-met 会截住 numel<4096 的退化 case——故本类 fixture **刻意用 numel≥4096（[8192]）+ 小 us**
-    绕开 trivial-met、直测例外逻辑本身（例外由「小shape」tag 驱动、非实际 shape）。该 e2e 路径已被 trivial-met
-    取代，见 test_validate_acceptance_state.test_perf_trivial_met_small_shapes。"""
+    """小shape 例外逻辑直测（例外由「小shape」tag 与实测 us 驱动，不按 numel 自动免测）。"""
     def test_hit_exception(self):
         cs = _caseset([("s0", ["性能", "小shape"], [8192])])
         r = pc.perf_compare(_spec(1.0, _EXC), cs, _ev({"s0": (1.5, "kernel_only")}), _bl({"s0": 1.2}))
@@ -251,9 +248,8 @@ class GpuConsumerTest(unittest.TestCase):
         r = pc.perf_compare(spec, cs, ev, bl, expect_source="gpu_external")
         self.assertEqual(r["summary"]["status"], "ok")
         self.assertEqual(r["baseline_source"], "gpu_external")
-        # §trivial-met：退化 case（numel<4096）标 trivial、无 ratio；非退化 case 有 ratio。二者其一。
-        self.assertTrue(all("ratio" in row or row.get("trivial") for row in r["per_case"]))
-        self.assertTrue(any("ratio" in row for row in r["per_case"]), "应有非退化 case 真判 ratio")
+        self.assertTrue(all("ratio" in row for row in r["per_case"]),
+                        "所有性能 case（包括小 numel）都应以真实双边计时计算 ratio")
 
     def test_gpu_scope_mismatch_incomparable(self):
         spec, cs, wd = self._live_caseset()
@@ -409,23 +405,25 @@ class SharedConstantDriftTest(unittest.TestCase):
                          "_SCOPE_TRANSFER 的 key 集须与 _SCOPES 恰好一致")
 
 
-class TrivialMetTest(unittest.TestCase):
-    """§trivial-met（用户 2026-07-15，评审 #2）：退化 case（numel<4096）达标、免测、无需基线/scope/us；
-    perf 达标由代表性大 shape 主导。"""
-    def test_trivial_case_met_without_baseline(self):
-        cs = _caseset([("t0", ["性能", "常规"], [16])])       # numel 16 < 4096 → trivial
-        r = pc.perf_compare(_spec(1.0), cs, _ev({"t0": (1.5, "kernel_only")}), _bl({}))  # 基线无 t0
+class SmallCaseMeasuredTest(unittest.TestCase):
+    """小 numel 与大 shape 走同一真实性能判定；不存在自动免测。"""
+    def test_small_case_without_baseline_is_blocked(self):
+        cs = _caseset([("t0", ["性能", "常规"], [16])])
+        r = pc.perf_compare(_spec(1.0), cs, _ev({"t0": (1.5, "kernel_only")}), _bl({}))
         row = r["per_case"][0]
-        self.assertTrue(row["达标"])
-        self.assertTrue(row.get("trivial"))
-        self.assertEqual(r["summary"]["status"], "ok")
+        self.assertFalse(row["达标"])
+        self.assertTrue(row.get("blocked"))
+        self.assertNotIn("trivial", row)
+        self.assertEqual(r["summary"]["status"], "blocked")
 
-    def test_large_case_not_trivial(self):
-        cs = _caseset([("b0", ["性能", "大shape"], [128, 128])])  # numel 16384 ≥ 4096 → 真判
-        r = pc.perf_compare(_spec(1.0), cs, _ev({"b0": (1.0, "kernel_only")}), _bl({"b0": 2.0}))
+    def test_small_case_with_baseline_is_scored(self):
+        cs = _caseset([("t0", ["性能", "常规"], [1])])
+        r = pc.perf_compare(_spec(1.0), cs, _ev({"t0": (1.0, "kernel_only")}), _bl({"t0": 2.0}))
         row = r["per_case"][0]
         self.assertNotIn("trivial", row)
-        self.assertIn("ratio", row)
+        self.assertEqual(row["ratio"], 2.0)
+        self.assertTrue(row["达标"])
+        self.assertEqual(r["summary"]["cases_scored"], 1)
 
 
 class RunWorkflowNonAcceptanceSurfaceTest(unittest.TestCase):
@@ -490,12 +488,8 @@ class RunWorkflowNonAcceptanceSurfaceTest(unittest.TestCase):
             self.assertIn("NON-ACCEPTANCE (mock evidence)", note)
         self.assertEqual(W._DEV_GRADE, pc._DEV_GRADE)
 
-class ScaledCaseNotTrivialMetTest(unittest.TestCase):
-    """G4 连带闸：被 golden 规模预算**降过规模**的 case，不得走 trivial-met 冒充达标。
-
-    trivial-met 的正当性是「这个 case 本来就小、perf 没意义」；
-    降规模 case 是「它本来很大、我们没按目标规模跑」——**没测却算过**，两者性质完全不同。
-    不拦的话：G4 把大 shape 降到阈值以下 → 这里判达标 → 报告显示性能通过，而目标规模一次没跑。"""
+class ScaledCaseMeasuredTest(unittest.TestCase):
+    """移除 trivial 后，cost_scaled 不再触发额外免测或自动通过，仍按实际双边证据判定。"""
 
     @staticmethod
     def _cs(cid, shape, scaled):
@@ -506,20 +500,21 @@ class ScaledCaseNotTrivialMetTest(unittest.TestCase):
                 "from": [1024, 1024], "to": list(shape), "reason": "golden 规模预算"}
         return cs
 
-    def test_scaled_small_case_is_blocked_not_trivial_met(self):
+    def test_scaled_case_without_measurement_is_blocked(self):
         r = pc.perf_compare(_spec(1.0), self._cs("s0", [8, 8], True), _ev({}), _bl({}))
         row = next(x for x in r["per_case"] if x["case_id"] == "s0")
         self.assertFalse(row["达标"], row)
         self.assertTrue(row.get("blocked"), row)
         self.assertNotIn("trivial", row)
-        self.assertIn("cost_scaled", row)
 
-    def test_genuinely_small_case_still_trivial_met(self):
-        """对照：**没被降过规模**的小 case 仍走 trivial-met，证补的闸没矫枉过正。"""
-        r = pc.perf_compare(_spec(1.0), self._cs("s0", [8, 8], False), _ev({}), _bl({}))
+    def test_scaled_small_case_with_measurement_is_scored(self):
+        r = pc.perf_compare(
+            _spec(1.0), self._cs("s0", [8, 8], True),
+            _ev({"s0": (1.0, "kernel_only")}), _bl({"s0": 2.0}))
         row = next(x for x in r["per_case"] if x["case_id"] == "s0")
         self.assertTrue(row["达标"], row)
-        self.assertTrue(row.get("trivial"), row)
+        self.assertEqual(row["ratio"], 2.0)
+        self.assertNotIn("trivial", row)
 
 
 class PerfReportAggregateTest(unittest.TestCase):
@@ -533,7 +528,7 @@ class PerfReportAggregateTest(unittest.TestCase):
     `达标`/`status` 的，都是在守「只读增量」这条线。
     """
 
-    _BIG = [128, 128]        # numel 16384 ≥ 4096 → 不触发 trivial-met，走真判定
+    _BIG = [128, 128]
 
     @classmethod
     def _cs(cls, rows):
@@ -610,19 +605,20 @@ class PerfReportAggregateTest(unittest.TestCase):
         self.assertEqual(r["summary"]["cases_scored"], 2)
         self.assertEqual(r["summary"]["cases_above_threshold"], 1)
 
-    def test_trivial_and_missing_baseline_rows_stay_out_of_speedup_aggregate(self):
+    def test_small_measured_and_missing_baseline_rows_aggregate_correctly(self):
         """没有可比测量的行**不进** by_dtype/cases_scored（塞进 median 就是编数字）；
+        小 shape 只要双边量到就正常进入聚合；
         「量到了但根本没基线」的行走 custom_only_by_dtype——只报绝对时延、**不硬算 speedup**
         （cannbot `summarize_custom_only_latency` 同款纪律）。"""
-        cs = _caseset([("t0", ["性能", "常规"], [16]),            # trivial-met：numel 16 < 4096
+        cs = _caseset([("t0", ["性能", "常规"], [16]),            # 小 shape：仍须真实比较
                        ("m0", ["性能", "大shape"], [128, 128]),   # 有 npu 计时、无基线条目
-                       ("g0", ["性能", "大shape"], [128, 128])])  # 唯一真可比的一条
+                       ("g0", ["性能", "大shape"], [128, 128])])
         ev = _ev({"t0": (1.5, "kernel_only"), "m0": (4.0, "kernel_only"), "g0": (2.0, "kernel_only")})
-        r = pc.perf_compare(_spec(0.5), cs, ev, _bl({"g0": 4.0}))
+        r = pc.perf_compare(_spec(0.5), cs, ev, _bl({"t0": 3.0, "g0": 4.0}))
         self.assertEqual(r["summary"]["status"], "blocked")       # 裁决照旧（m0 缺基线）
-        self.assertEqual(r["summary"]["cases_scored"], 1)
-        self.assertEqual(r["by_dtype"], [{"dtype": "float32", "count": 1,
-                                          "npu_us": 2.0, "baseline_us": 4.0, "speedup": 2.0}])
+        self.assertEqual(r["summary"]["cases_scored"], 2)
+        self.assertEqual(r["by_dtype"], [{"dtype": "float32", "count": 2,
+                                          "npu_us": 1.75, "baseline_us": 3.5, "speedup": 2.0}])
         # 这一行**没有** speedup 键：无基线时不许推出加速比
         self.assertEqual(r["custom_only_by_dtype"],
                          [{"dtype": "float32", "count": 1, "npu_us": 4.0,

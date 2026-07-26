@@ -39,6 +39,7 @@ def _case(cid, dtype, nullable, size):
         "role": "value",
         "out_shape": [size],
         "policy": {"kind": "torch_allclose"},
+        "golden_path": f"{cid}/golden_0.npy",
     }]
     if not nullable:
         outputs.append({
@@ -46,10 +47,14 @@ def _case(cid, dtype, nullable, size):
             "role": "index",
             "out_shape": [size],
             "policy": {"kind": "exact"},
+            "golden_path": f"{cid}/golden_1.npy",
         })
     return {
         "id": cid,
-        "inputs": [{"name": "self", "dtype": dtype, "shape": [size]}],
+        "inputs": [{
+            "name": "self", "dtype": dtype, "shape": [size],
+            "path": f"{cid}/x1.npy",
+        }],
         "expected": {"outputs": outputs},
         "aclnn_call": {"symbol": "Reduce", "slots": slots},
     }
@@ -74,6 +79,51 @@ def _fixtures():
     return caseset, preflight
 
 
+def _execution_fixture():
+    return {
+        "config": {
+            "target": "remote",
+            "op_subdir": "experimental/reduce",
+            "vendor_name": "customize",
+            "base_repo": "https://example.invalid/ops.git",
+            "pr_ref": "a" * 40,
+            "head_sha": "a" * 40,
+            "soc": "ascend-test",
+            "snake_op": "reduce",
+            "device": 0,
+            "build_args": "--pkg --ops=reduce",
+            "symbols": ["Reduce"],
+            "reuse_build": True,
+        },
+        "target_digest": "b" * 64,
+        "runtime": {
+            "toolkit": "/opt/toolkit",
+            "toolkit_version": "test",
+        },
+    }
+
+
+def _build_provenance_fixture():
+    execution = _execution_fixture()
+    cfg = execution["config"]
+    return {
+        "head_sha": cfg["head_sha"],
+        "pr_ref": cfg["pr_ref"],
+        "base_repo": cfg["base_repo"],
+        "op_subdir": cfg["op_subdir"],
+        "snake_op": cfg["snake_op"],
+        "soc": cfg["soc"],
+        "vendor_name": cfg["vendor_name"],
+        "build_args": cfg["build_args"],
+        "symbols": cfg["symbols"],
+        "toolkit": execution["runtime"]["toolkit"],
+        "toolkit_version": execution["runtime"]["toolkit_version"],
+        "build_reused": True,
+        "stamp_mismatch_rebuilt": False,
+        "so_digest_unavailable": False,
+    }
+
+
 class SelectionTest(unittest.TestCase):
     def test_minimum_witness_covers_dtype_variants_attrs_and_multi_output(self):
         caseset, preflight = _fixtures()
@@ -88,10 +138,16 @@ class SelectionTest(unittest.TestCase):
         self.assertIn("dtype:float32", coverage["covered"])
         self.assertIn("dtype:float16", coverage["covered"])
 
-    def test_missing_required_dtype_fails_closed(self):
+    def test_dtype_required_gap_does_not_override_actual_cases(self):
         caseset, preflight = _fixtures()
         caseset["dtype_required"].append("int32")
-        with self.assertRaisesRegex(ValueError, "dtype:int32"):
+        _, coverage = H.select_cases(caseset, preflight)
+        self.assertNotIn("dtype:int32", coverage["required"])
+
+    def test_declared_tested_dtype_must_exist_in_actual_cases(self):
+        caseset, preflight = _fixtures()
+        caseset["dtype_tested"] = ["float32", "int32"]
+        with self.assertRaisesRegex(ValueError, "实际输入 dtype"):
             H.select_cases(caseset, preflight)
 
     def test_slot_order_must_bind_unique_preflight_variant(self):
@@ -109,44 +165,247 @@ class ReceiptTest(unittest.TestCase):
         self.spec = {"op": "Reduce", "runner_form": "aclnn_py"}
         self.caseset, self.preflight = _fixtures()
         selected, coverage = H.select_cases(self.caseset, self.preflight)
-        payload = {
+        self.selected = selected
+        os.makedirs(os.path.join(self.root, "work"))
+        self.ops_root = os.path.join(self.root, "ops")
+        os.makedirs(os.path.join(self.ops_root, "Reduce"))
+        with open(os.path.join(
+                self.ops_root, "Reduce", "golden.py"), "wb") as out:
+            out.write(b"# bound golden source\n")
+        for case in self.caseset["cases"]:
+            case_dir = os.path.join(self.root, "work", case["id"])
+            os.makedirs(case_dir)
+            with open(os.path.join(case_dir, "x1.npy"), "wb") as out:
+                out.write(("input:" + case["id"]).encode())
+            for expected in case["expected"]["outputs"]:
+                path = os.path.join(
+                    self.root, "work", expected["golden_path"])
+                with open(path, "wb") as out:
+                    out.write(("golden:" + expected["golden_path"]).encode())
+        self.execution = _execution_fixture()
+        self.build_provenance = _build_provenance_fixture()
+        checks = []
+        for case in selected:
+            outputs = []
+            for index, expected in enumerate(case["expected"]["outputs"]):
+                out_rel = (
+                    f"aclnn_trust_out/{case['id']}/out_{index}.bin")
+                out_path = os.path.join(self.root, "work", out_rel)
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                with open(out_path, "wb") as out:
+                    out.write(("out:" + out_rel).encode())
+                golden_path = os.path.join(
+                    self.root, "work", expected["golden_path"])
+                outputs.append({
+                    "index": index,
+                    "name": expected["name"],
+                    "role": expected["role"],
+                    "policy_kind": expected["policy"]["kind"],
+                    "result": "pass",
+                    "golden_path": expected["golden_path"],
+                    "out_path": out_rel,
+                    "golden_sha256": H._file_sha(golden_path),
+                    "out_sha256": H._file_sha(out_path),
+                })
+            checks.append({
+                "case_id": case["id"], "result": "pass",
+                "outputs": outputs,
+            })
+        with mock.patch.dict(
+                os.environ, {"OPRUNWAY_OPS_DIR": self.ops_root}):
+            bindings = H._receipt_bindings(
+                self.root, self.spec, self.caseset, self.preflight,
+                selected, self.execution)
+        self.payload = {
             "schema": H._SCHEMA,
             "schema_version": 1,
             "status": H._STATUS_TRUSTED,
             "scope": "harness-only",
             "acceptance_verdict": None,
-            "bindings": H._receipt_bindings(
-                self.spec, self.caseset, self.preflight),
+            "bindings": bindings,
             "coverage": coverage,
-            "checks": [
-                {"case_id": case["id"], "result": "pass", "outputs": []}
-                for case in selected
-            ],
+            "checks": checks,
+            "build_provenance": self.build_provenance,
         }
-        os.makedirs(os.path.join(self.root, "work"))
         content_address.write_artifact(
             self.root, "work/aclnn_preflight.json",
             H._PREFLIGHT_DOMAIN, self.preflight)
+        self._write_receipt()
+
+    def _write_receipt(self):
         content_address.write_artifact(
             self.root, "work/aclnn_harness_trust.json",
-            H._TRUST_DOMAIN, payload)
+            H._TRUST_DOMAIN, self.payload)
+
+    def _validate(self, caseset=None):
+        with mock.patch.dict(
+                os.environ, {"OPRUNWAY_OPS_DIR": self.ops_root}), \
+                mock.patch.object(
+                    H, "_current_execution_binding",
+                    return_value=self.execution):
+            return H.validate_receipt(
+                self.root, "work/aclnn_harness_trust.json",
+                self.spec, caseset or self.caseset)
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def test_valid_receipt_is_reusable_for_same_full_caseset(self):
-        receipt = H.validate_receipt(
-            self.root, "work/aclnn_harness_trust.json",
-            self.spec, self.caseset)
+        receipt = self._validate()
         self.assertEqual(receipt["status"], H._STATUS_TRUSTED)
 
     def test_caseset_drift_is_rejected(self):
         changed = json.loads(json.dumps(self.caseset))
         changed["cases"][0]["inputs"][0]["shape"] = [65]
         with self.assertRaisesRegex(ValueError, "caseset_sha256 已漂移"):
-            H.validate_receipt(
-                self.root, "work/aclnn_harness_trust.json",
-                self.spec, changed)
+            self._validate(changed)
+
+    def test_resealed_empty_output_checks_are_rejected(self):
+        self.payload["checks"][0]["outputs"] = []
+        self._write_receipt()
+        with self.assertRaisesRegex(ValueError, "非空 array"):
+            self._validate()
+
+    def test_selected_input_byte_drift_is_rejected(self):
+        case = self.selected[0]
+        path = os.path.join(self.root, "work", case["inputs"][0]["path"])
+        with open(path, "ab") as out:
+            out.write(b"tamper")
+        with self.assertRaisesRegex(ValueError, "selected_data 已漂移"):
+            self._validate()
+
+    def test_resealed_coverage_drift_is_rejected(self):
+        self.payload["coverage"]["selection_rule"] = "forged"
+        self._write_receipt()
+        with self.assertRaisesRegex(ValueError, "coverage"):
+            self._validate()
+
+    def test_current_execution_environment_drift_is_rejected(self):
+        changed = json.loads(json.dumps(self.execution))
+        changed["runtime"]["toolkit_version"] = "other"
+        with mock.patch.dict(
+                os.environ, {"OPRUNWAY_OPS_DIR": self.ops_root}), \
+                mock.patch.object(
+                    H, "_current_execution_binding", return_value=changed):
+            with self.assertRaisesRegex(ValueError, "execution 已漂移"):
+                H.validate_receipt(
+                    self.root, "work/aclnn_harness_trust.json",
+                    self.spec, self.caseset)
+
+    def test_resealed_output_bytes_drift_is_rejected(self):
+        out_rel = self.payload["checks"][0]["outputs"][0]["out_path"]
+        with open(os.path.join(self.root, "work", out_rel), "ab") as out:
+            out.write(b"tamper")
+        with self.assertRaisesRegex(ValueError, "实际字节已漂移"):
+            self._validate()
+
+
+class RunGateTest(unittest.TestCase):
+    def test_successful_gate_writes_a_revalidatable_receipt(self):
+        with tempfile.TemporaryDirectory() as root:
+            spec = {"op": "Reduce", "runner_form": "aclnn_py"}
+            caseset, preflight = _fixtures()
+            preflight["bindings"]["spec_sha256"] = H._sha(spec)
+            selected, _ = H.select_cases(caseset, preflight)
+            work = os.path.join(root, "work")
+            ops_root = os.path.join(root, "ops")
+            os.makedirs(os.path.join(ops_root, "Reduce"))
+            with open(os.path.join(
+                    ops_root, "Reduce", "golden.py"), "wb") as out:
+                out.write(b"# golden source\n")
+            with open(os.path.join(root, "spec.json"), "w",
+                      encoding="utf-8") as out:
+                json.dump(spec, out)
+            with open(os.path.join(root, "caseset.json"), "w",
+                      encoding="utf-8") as out:
+                json.dump(caseset, out)
+            content_address.write_artifact(
+                root, "work/aclnn_preflight.json",
+                H._PREFLIGHT_DOMAIN, preflight)
+
+            evidence = []
+            for case in selected:
+                case_dir = os.path.join(work, case["id"])
+                os.makedirs(case_dir)
+                with open(os.path.join(case_dir, "x1.npy"), "wb") as out:
+                    out.write(("input:" + case["id"]).encode())
+                output_evidence = []
+                for index, expected in enumerate(
+                        case["expected"]["outputs"]):
+                    golden_path = os.path.join(
+                        work, expected["golden_path"])
+                    with open(golden_path, "wb") as out:
+                        out.write(("golden:" + case["id"] +
+                                   f":{index}").encode())
+                    out_rel = (
+                        f"aclnn_trust_out/{case['id']}/out_{index}.bin")
+                    out_path = os.path.join(work, out_rel)
+                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                    with open(out_path, "wb") as out:
+                        out.write(("actual:" + case["id"] +
+                                   f":{index}").encode())
+                    policy = expected["policy"]
+                    metrics = (
+                        {"exact_mismatch": 0, "numel": 1}
+                        if policy["kind"] == "exact"
+                        else {"mismatch": 0, "numel": 1,
+                              "max_abs_err": 0.0, "max_rel_err": 0.0}
+                    )
+                    output_evidence.append({
+                        "name": expected["name"],
+                        "role": expected["role"],
+                        "policy": policy,
+                        "metrics": metrics,
+                        "golden_path": expected["golden_path"],
+                        "out_path": out_rel,
+                        "provenance": {
+                            "golden_sha256": H._file_sha(golden_path),
+                            "out_sha256": H._file_sha(out_path),
+                        },
+                    })
+                evidence.append({
+                    "case_id": case["id"],
+                    "status": "ok",
+                    "precision": {"outputs": output_evidence},
+                })
+
+            execution = _execution_fixture()
+            cfg = {
+                "head_sha": "a" * 40,
+                "ops_root": "/unused/ops",
+                "op_subdir": "experimental/reduce",
+            }
+            with mock.patch.dict(os.environ, {
+                    "OPRUNWAY_OPS_DIR": ops_root,
+                    "OPRUNWAY_ACLNN_REAL": "1",
+                    }), \
+                    mock.patch.object(
+                        H.aclnn_adapter, "_aclnn_cfg",
+                        return_value=cfg), \
+                    mock.patch.object(
+                        H, "_execution_binding",
+                        return_value=execution), \
+                    mock.patch.object(
+                        H.aclnn_adapter, "find_aclnn_project",
+                        return_value="/unused/project"), \
+                    mock.patch.object(
+                        H.aclnn_adapter, "_run_aclnn_real",
+                        return_value=_build_provenance_fixture()), \
+                    mock.patch.object(
+                        H.repo_adapter, "build_multi_output_evidence",
+                        return_value=evidence):
+                payload = H.run_gate(
+                    root, "spec.json", "caseset.json",
+                    "work/aclnn_preflight.json",
+                    "work/aclnn_harness_trust.json")
+                self.assertEqual(payload["status"], H._STATUS_TRUSTED)
+                with mock.patch.object(
+                        H, "_current_execution_binding",
+                        return_value=execution):
+                    reused = H.validate_receipt(
+                        root, "work/aclnn_harness_trust.json",
+                        spec, caseset)
+            self.assertEqual(reused["coverage"]["selected_count"], 2)
 
 
 class WorkflowHardGateTest(unittest.TestCase):

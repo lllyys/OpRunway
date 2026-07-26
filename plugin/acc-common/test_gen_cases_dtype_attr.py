@@ -1333,13 +1333,14 @@ class GoldenCostBudgetTest(_FakeOpCase):
             if "降规模" not in c.get("tags", []):
                 self.assertNotIn("cost_scaled", c["expected"], c["id"])
 
-    def test_perf_dim_scaled_case_warns_about_trivial_met(self):
-        """带「性能」维度的 case 被降规模后，账本要点破下游 trivial-met 的退化风险（别读成原规模已达标）。"""
+    def test_perf_dim_scaled_case_requires_real_measurement(self):
+        """带「性能」维度的 case 被降规模后，账本须声明只对实际规模采集，别读成原规模已达标。"""
         self.place("FakePdistPerf", _pairwise_body(_PAIR_BUDGET))
         cs = GC.gen_cases(_pair_spec("FakePdistPerf"), self.work())
         perf_recs = [r for r in cs["golden_cost"]["scaled_cases"] if "perf_note" in r]
         self.assertTrue(perf_recs, "带性能维度的降规模项应有 perf_note")
-        self.assertIn("trivial", perf_recs[0]["perf_note"])
+        self.assertIn("仍须", perf_recs[0]["perf_note"])
+        self.assertNotIn("免测", perf_recs[0]["perf_note"])
 
     def test_every_emitted_case_within_budget(self):
         """账本之外还要**真的**没有一条 case 超预算（否则 golden 仍会在生成期跑到天荒地老）。"""
