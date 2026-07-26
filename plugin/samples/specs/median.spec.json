@@ -28,12 +28,12 @@
     {"name": "values", "io": "out", "dtype": ["<from_input>"], "out_role": "value"},
     {"name": "indices", "io": "out", "dtype": ["int64"], "out_role": "index", "index_of": "values", "gather_from": "self"}
   ],
-  "_call_variants_note": "aclnn 调用变体表（字段驱动、gen_cases 逐 case 解析成 case.aclnn_call；driver 直接执行、不再自己推变体）。symbol = CamelCase 基名（真符号 = aclnn<symbol>GetWorkspaceSize / aclnn<symbol>）。dim=null 走全局 API aclnnMedian(self, out)——**它的签名里根本没有 dim/keepdim**，故 active_attrs 为空、只落地 values；dim 有值走 aclnnMedianDim(self, dim, keepdim, valuesOut, indicesOut)、双输出。绝不把 dim=null 兜成 dim=0（那既不是全局语义、又与单输出签名不符）。",
+  "_call_variants_note": "⚠ 2026-07-25 订正（原版路由错、被严格档逮出）：symbol 必须取自**PR 实际实现的符号**（PR 自带 op_api/aclnn_median.h / DUT `nm -D`），**不是任务书/参考实现的 API 表面**。PR6429 实测 = **单一统一符号 `aclnnMedian`**（真 header 签名 `aclnnMedian(self, int64 dim, bool keepDim, valuesOut, indicesOut, ws, exec)`，全局与按维**同一个符号**、靠 `indicesOut` 是否为空区分：null→全局拍平出标量 values；非 null→按维、出 values+indices）。DUT `.so` **不导出** `aclnnMedianDim`（那是 CANN 内置，见 task_pr_gaps api_surface_mismatch）。故两个变体都路由到 `Median`：global 用 out_null 落 indices（dim/keepdim 传默认值、PR 在 indices=null 时忽略），by-dim 走 indices 非空 + dim/keepdim。原版把 by-dim 错路由到 `MedianDim` → 第一次跑的 by-dim 用例其实验的是 CANN 内置、非 PR（严格档 is_dut 门已封死此假 DUT）。",
   "call_variants": [
     {"when": {"attr": "dim", "is_null": true},
      "symbol": "Median", "active_attrs": [], "active_outputs": ["values"]},
     {"when": {"attr": "dim", "is_null": false},
-     "symbol": "MedianDim", "active_attrs": ["dim", "keepdim"], "active_outputs": ["values", "indices"]}
+     "symbol": "Median", "active_attrs": ["dim", "keepdim"], "active_outputs": ["values", "indices"]}
   ],
   "attr_matrix": [
     {"dim": null, "keepdim": false},

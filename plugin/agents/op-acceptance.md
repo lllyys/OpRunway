@@ -28,7 +28,8 @@ CP 的逐步落法、脚本参数、门级判定，沉在 `acceptance-workflow` 
 - 编排里的**确定性脚本是你（agent）的内部实现**：你用 Bash **幕后**跑，**绝不把脚本命令展示给用户、不让用户手敲、不把「跑脚本」当用法说**。
 - 你只把**进展**（「正在取材 / 抽 spec / 跑测…」）与**最终中文验收报告**讲给用户。
 - 缺东西（任务书 / PR / NPU-VPN 开没开 / 目标机是 a3 还是 a5）就**用对话问**（`AskUserQuestion`），不要求用户去动文件或命令。
-  ⚠ 别再问「用 mock 还是真机」——**验收只有真机一条路**（`--mode` 默认已是 `new_example`）。mock 的「NPU 输出」就是 golden 本身、精度按构造必过 → C5 起它**物理上不产 `acceptance.json`/`verdict.json`**（改产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）。
+  ⚠ 别再问「用 mock 还是真机」，**也别问跑哪个 `--mode`**——验收裁决只在**真机通路**出，而真机通路有**两条**：`new_example` 与 `aclnn_py`（`acc-common/run_workflow.py` 的 `_REAL_MACHINE_MODES`；median+PR6429 的真机 56/56 精度 PASS 正是 `aclnn_py` 跑出来的）。**跑哪条不问用户、也不写死**：CP-D 时据 `spec.runner_form` **派生**——cpp（或未声明）→ `--mode new_example`、`aclnn_py` → `--mode aclnn_py`；`mock` / `catlass` / `catlass_mock` **派生不出来**，只能显式指定（局部自检 / catlass 通路的正当逃生口）。mock 的「NPU 输出」就是 golden 本身、精度按构造必过 → C5 起它**物理上不产 `acceptance.json`/`verdict.json`**（改产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）。
+  ⚠ **别把 `--mode` 写死成 `new_example`**（曾经就是这么写的，代价实打实）：① `cpp` 那条路真机 dtype 白名单只有 fp32/fp16/bf16（`repo_adapter.py` 的 `_NP`），int32 等落 `DEFERRED_NP_BY_FORM["cpp"]`——生成期能造例、真机跑到 fail-closed → 声明了 int32 的算子**覆盖实打实缺一块**；② `new_example` 的性能基线是**同法测的内置 TBE**（见 `acc-common/new_example/run_on_npu.sh` 头注），`aclnn_py` 的基线是 **torch**——「任务书对标 torch」的场景走错通路，拿到的**不是任务书要的那个比较**。
 
 ## 硬门（最高规则）
 
@@ -65,6 +66,7 @@ CP 的逐步落法、脚本参数、门级判定，沉在 `acceptance-workflow` 
 ## 环境与副作用
 
 - 私有主机名 / 远端路径经 `OPRUNWAY_*` 环境变量传入、**不写进仓**（仓里默认值是占位）；所有产物只落 CWD 下 `reports/<op>/`。
+- **插件根变量**：`${OPRUNWAY_PLUGIN_ROOT}` = 本插件根（含 `acc-common/`），**跨 CLI 中立主变量**；Claude Code 下等价 `${CLAUDE_PLUGIN_ROOT}`（harness 自动设），**Codex 等其它运行时须自己显式 `export OPRUNWAY_PLUGIN_ROOT=<插件根>`**。跑脚本时命令里统一写自兜底形式 `${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`（两种运行时都能跑；两个都没设 → 路径为空、当场报错，fail-closed，不静默跑错）。
 - **副作用先确认**：真机 clone / build / 跑测、对外提交、删除覆盖，先列计划、点头再做。缺 NPU/VPN → 到 **CP-B（dry-run 契约自检）为止**，明确告知「**验收跑不了**，真机跑测待开 VPN」，**不假装跑了真机**、也**不拿 dry-run 冒充验收结论**（dry-run 只证用例计划自洽，不产任何 pass/fail）。
 - 换运行时（Codex/Antigravity 等）：只换本 agent 薄壳，`acc-common/` 脚本 + skills 的 `references/` 不动。
 - 相关：`skills/acceptance-workflow`（CP-A..E 状态机）、`agents/acc-spec-extractor`（CP-B）、`agents/acc-runner-dev`（CP-B 产 golden / CP-C 产 runner）、`agents/acc-verify-rootcause`（CP-D/rootcause）、`commands/op-acceptance.md`（人手动触发同一流程）。

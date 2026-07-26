@@ -857,7 +857,13 @@ def _exec_script(cfg, paths):
     # `_render` 误认作占位符；缺省则用 shell 变量 `"$VC"`（与 --dut-vendor-root 同源，不新增占位符）。
     od, _why = _explicit_op_dir(cfg)
     od_arg = q(od) if od else '"$VC"'
+    # ⚠ 桥接护栏（op-中立）：远端 driver 整轮**硬超时**——单 case 的 native 调用（如 aclnn 首次使用
+    # BIGSORT 路径）若异常自旋卡死，会拖垮整个 `ssh bash -s` 阻塞本地编排（本 session 实测坐实）。
+    # `timeout -k 30 <N>`：先 SIGTERM，30s 后仍不退则 SIGKILL（native busy-poll 收不到 SIGTERM，靠 -k 兜底）；
+    # 超时 → 退 124 → 走下面 `||` 干净 fail-closed，不再无限挂。N 默认 600s、可经 env 覆盖。
+    # 这是**整轮**超时（粗粒度）；per-case 超时→errored 隔离的耐久修由监督式 worker 承（用户已批、verdict 后落）。
     tmpl = _ENV_PREAMBLE + (
+        'timeout -k 30 "${OPRUNWAY_ACLNN_DRIVER_TIMEOUT:-600}" '
         'python -m aclnn_runtime.aclnn_driver @@CASESET@@ @@ROUT@@ --work-dir @@RCASES@@ '
         '--device @@DEVICE@@ --op-dir ' + od_arg + ' --dut-vendor-root "$VC" '
         '&& echo OPRUNWAY_ACLNN_EXEC_DONE '
@@ -867,6 +873,63 @@ def _exec_script(cfg, paths):
             "@@CASESET@@": q(paths["rcases"] + "/caseset.json"), "@@ROUT@@": q(paths["rout"]),
             "@@RCASES@@": q(paths["rcases"]), "@@DEVICE@@": str(cfg["device"])}
     return _render(tmpl, repl)
+
+
+# ── 诊断日志：内联尾部 + 全文落盘（截断把真因吃掉过，见下）────────────────────────────
+
+#: 归因文本里**内联**保留的远端 stdout+stderr 尾部宽度。
+#: 原为 1500 / 2000——2026-07-25 median perf 定位实证：v4 那次 `rc=5` 的归因串里，
+#: 内联尾只剩 `OPRUNWAY_ACLNN_ENV …` + `OPRUNWAY_ACLNN_PERF_FAIL` 两行哨兵，
+#: python 侧的 traceback / 逐 case 明细全被吃掉，真因（谁挂了、为什么）无从判读。
+#: 8000 大致能容下一段完整 traceback + 若干行上下文。
+_DIAG_TAIL = 8000
+
+#: 落盘全文的最大字节数——远端 shell 偶尔会吐出几十 MB 的 profiling INFO 刷屏，
+#: 全量落盘会把 `work/` 撑爆。超过就只留**头尾各一半**并在中间标注截断处（真因通常在两头）。
+_DIAG_FULL_MAX = 4 * 1024 * 1024
+
+
+def _stash_diag(dirpath, label, blob):
+    """把一段远端 shell 的完整 stdout+stderr 落盘 → `(内联尾部, 全文路径 | None)`。
+
+    **为什么不是「只把 `[-2000:]` 放宽成 `[-8000:]`」**：这些串有两个去处——
+      ① `RuntimeError` 的文本（人在终端看，宽一点无害）；
+      ② `collect_perf` 的 `notes` → evidence envelope 的 `perf_collection.notes`
+         → **落进 `evidence.json` 这条证据链**（v4 那份已 118KB）。
+    只放宽内联 → 证据文件被 profiling 刷屏日志撑大、还是可能不够长；
+    只截断 → 真因被吃掉（v4 实证）。所以两头都要：
+    **内联给 `_DIAG_TAIL` 的尾部**（一眼能看见），**全文另落一个文件**（要深挖时按路径取）。
+
+    落盘是**尽力而为**：写不进去（目录不存在 / 只读 / 磁盘满）也绝不能盖掉本来要报的错，
+    故吞掉异常、只是返回 `path=None`——归因永远以内联尾部为准。
+    `label` 只用于文件名，故按 `[^A-Za-z0-9_.-]` 洗一遍，防止拼出目录穿越或怪路径。
+    """
+    text = blob or ""
+    tail = text[-_DIAG_TAIL:]
+    path = None
+    try:
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(label))[:64] or "diag"
+        path = os.path.join(dirpath, f"_aclnn_{safe}_full.log")
+        body = text
+        if len(body) > _DIAG_FULL_MAX:
+            half = _DIAG_FULL_MAX // 2
+            body = (body[:half]
+                    + f"\n\n… 【中段省略 {len(text) - _DIAG_FULL_MAX} 字符：全文超过 "
+                      f"{_DIAG_FULL_MAX} 字节上限，只留头尾各 {half}】…\n\n"
+                    + body[-half:])
+        os.makedirs(dirpath, exist_ok=True)
+        with open(path, "w", encoding="utf-8", errors="replace") as f:
+            f.write(body)
+    except OSError:
+        path = None
+    return tail, path
+
+
+def _diag_ref(path):
+    """全文日志路径 → 归因串里的一句指引；落盘失败则说明「只有内联尾部」，不装作有文件。"""
+    if path:
+        return f"（完整 stdout+stderr 见 {path}；下面只是末尾 {_DIAG_TAIL} 字符）"
+    return f"（全文落盘失败，下面只有末尾 {_DIAG_TAIL} 字符）"
 
 
 # ── perf：kernel-only msprof 采集（custom ctypes-aclnn vs torch_npu 基线）────────────
@@ -892,8 +955,13 @@ def _perf_script(cfg, paths):
     """
     import shlex
     q = shlex.quote
+    # ⚠ 桥接护栏（op-中立，同精度侧 `_exec_script`）：perf 采集也是「所有 case 同进程同 runner 同步
+    # native 调用」结构，同样有单 case 卡死拖垮整轮的风险，且本地侧 `RA._shell(..., timeout=7200)` 会
+    # 干等 2 小时。`timeout -k 30 <N>` 远端硬超时 → 退 124 → 走 `||` 干净 fail-closed。perf 每 case 有
+    # warmup×repeat（默认 5+20），比精度慢 → 默认窗更宽（1200s），可经 env 覆盖。per-case 隔离由监督式 worker 承。
     tmpl = _ENV_PREAMBLE + (
         'export OPRUNWAY_ACLNN_REAL=1\n'
+        'timeout -k 30 "${OPRUNWAY_ACLNN_PERF_TIMEOUT:-1200}" '
         'python -m aclnn_runtime.perf_msprof @@CASESET@@ @@PLAN@@ @@OUT@@ --work-dir @@RCASES@@ '
         '&& echo OPRUNWAY_ACLNN_PERF_DONE || { echo OPRUNWAY_ACLNN_PERF_FAIL; exit 5; }\n')
     repl = {"@@SETENV@@": q(cfg["setenv"]), "@@VENDOR_DIR@@": q(cfg["vendor_dir"]),
@@ -1011,9 +1079,16 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
     rp = RA._shell(host, script, timeout=7200, check=False, capture=True)
     blob = (rp.stdout or "") + (rp.stderr or "")
     if rp.returncode != 0 or "OPRUNWAY_ACLNN_PERF_DONE" not in blob:
-        notes.append(f"[aclnn_py] 真机性能采集失败 rc={rp.returncode}（精度证据不受影响；"
-                     f"性能一律 us=None → perf_compare 挂起，不冒充达标）。"
-                     f"{_op_dir_note(cfg, paths, plan)}\n{blob[-1500:]}")
+        # ⚠ `_perf_script` 用 `|| { echo …; exit 5; }` 把真实退出码**统一压成 5**——
+        #   rc=5 因此分不出「python 抛异常(1)」「远端硬超时被 kill(124)」「OOM(137)」。
+        #   下面的哨兵行 + 全文日志是唯一的判读依据，故一定要留全（2026-07-25 定位实证：
+        #   v4 那次内联只剩两行哨兵，判不出是超时还是崩，白烧一整轮）。
+        tail, full = _stash_diag(work, "perf", blob)
+        notes.append(f"[aclnn_py] 真机性能采集失败 rc={rp.returncode}"
+                     f"（⚠ rc 被采集脚本的 `|| exit 5` 压成 5，非真实退出码：124=远端硬超时"
+                     f" OPRUNWAY_ACLNN_PERF_TIMEOUT 到点被 kill、其余=python 侧失败；"
+                     f"精度证据不受影响；性能一律 us=None → perf_compare 挂起，不冒充达标）。"
+                     f"{_op_dir_note(cfg, paths, plan)}{_diag_ref(full)}\n{tail}")
         return {}, PM.build_baseline_document([], op=caseset.get("op"), skipped=skipped), notes
 
     # ④ 拉回采集结果 → 组 custom us map + torch_npu 基线文档。
@@ -1079,16 +1154,19 @@ def _run_aclnn_real(cfg, proj, caseset, work_dir, out_dir):
     rb = RA._shell(host, bscript, timeout=3600, check=False, capture=True)
     bblob = (rb.stdout or "") + (rb.stderr or "")
     if rb.returncode != 0 or "OPRUNWAY_ACLNN_BUILD_DONE" not in bblob:
+        btail, bfull = _stash_diag(work_dir, "build", bblob)
         raise RuntimeError(
             f"[aclnn_py] 真机 build/install 失败 rc={rb.returncode}"
             f"（本地已过形态核验的 DUT: {proj!r}；容器内按 PR-ref {cfg['pr_ref']!r} 重新取源 → {paths['checkout']!r}。"
-            f"哨兵可解耦 root-cause：GUARD/SETENV/FETCH/HEAD_MISMATCH/BUILD/RUNPKG/INSTALL/NOLIB/NOSYM）:\n{bblob[-2000:]}")
+            f"哨兵可解耦 root-cause：GUARD/SETENV/FETCH/HEAD_MISMATCH/BUILD/RUNPKG/INSTALL/NOLIB/NOSYM）"
+            f"{_diag_ref(bfull)}:\n{btail}")
     # 取源实得 commit 必须与期望 head SHA 一致——脚本内已比对并 fail-closed，此处再从输出取回、写进证据。
     got = re.search(r"OPRUNWAY_ACLNN_HEAD_SHA=([0-9a-fA-F]{40})", bblob)
     if not got or got.group(1).lower() != cfg["head_sha"]:
         raise RuntimeError(
             f"[aclnn_py] build 段未回报可核验的 head SHA（期望 {cfg['head_sha']}，得 "
-            f"{got.group(1) if got else None}）——不接受来路不明的 .so，fail-closed:\n{bblob[-1500:]}")
+            f"{got.group(1) if got else None}）——不接受来路不明的 .so，fail-closed"
+            f"{_diag_ref(_stash_diag(work_dir, 'build_head', bblob)[1])}:\n{bblob[-_DIAG_TAIL:]}")
     prov = {"head_sha": got.group(1).lower(), "pr_ref": cfg["pr_ref"], "base_repo": cfg["base_repo"],
             "op_subdir": cfg["op_subdir"], "snake_op": cfg["snake_op"], "soc": cfg["soc"],
             "vendor_name": cfg["vendor_name"], "build_args": _build_args(cfg), "symbols": list(symbols),
@@ -1104,7 +1182,9 @@ def _run_aclnn_real(cfg, proj, caseset, work_dir, out_dir):
     rr = RA._shell(host, _deploy_reset_script(cfg, paths), timeout=120, check=False, capture=True)
     rblob = (rr.stdout or "") + (rr.stderr or "")
     if rr.returncode != 0 or "OPRUNWAY_ACLNN_DEPLOY_RESET_DONE" not in rblob:
-        raise RuntimeError(f"[aclnn_py] 部署清目录失败/被守卫拦下 rc={rr.returncode}:\n{rblob[-1500:]}")
+        rtail, rfull = _stash_diag(work_dir, "deploy_reset", rblob)
+        raise RuntimeError(f"[aclnn_py] 部署清目录失败/被守卫拦下 rc={rr.returncode}"
+                           f"{_diag_ref(rfull)}:\n{rtail}")
     cs_local = os.path.join(work_dir, "_aclnn_caseset.json")
     with open(cs_local, "w", encoding="utf-8") as f:
         json.dump(caseset, f, ensure_ascii=False)
@@ -1130,8 +1210,12 @@ def _run_aclnn_real(cfg, proj, caseset, work_dir, out_dir):
     re_ = RA._shell(host, escript, timeout=2400, check=False, capture=True)
     eblob = (re_.stdout or "") + (re_.stderr or "")
     if re_.returncode != 0 or "OPRUNWAY_ACLNN_EXEC_DONE" not in eblob:
-        raise RuntimeError(f"[aclnn_py] 真机 exec 失败 rc={re_.returncode}。"
-                           f"{_op_dir_note(cfg, paths)}\n{eblob[-2000:]}")
+        # 同 perf 段：`|| exit 4` 把真实退出码压成 4（124=硬超时被 kill，其余=driver 侧失败）。
+        etail, efull = _stash_diag(work_dir, "exec", eblob)
+        raise RuntimeError(f"[aclnn_py] 真机 exec 失败 rc={re_.returncode}"
+                           f"（⚠ rc 被 exec 脚本的 `|| exit 4` 压成 4，非真实退出码："
+                           f"124=OPRUNWAY_ACLNN_DRIVER_TIMEOUT 到点被 kill）。"
+                           f"{_op_dir_note(cfg, paths)}{_diag_ref(efull)}\n{etail}")
 
     # 4) collect：拉回 out_manifest.json + 各 out_k.bin（据 manifest 逐个拉）。
     #    ⚠ manifest 来自**远端**（审计 High#4：它是不可信输入）——其 `path` 与 `case_id` 必须过与输入侧

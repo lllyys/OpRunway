@@ -19,8 +19,14 @@ v0 提供 mock_baseline；真机/外部给基线时替换。
 `evidence_grade="development"` + `acceptance_note="NON-ACCEPTANCE (mock evidence)…"`
 （字段名与措辞照 `catlass_adapter.run_catlass_mock` 的既有口径，不另发明），让「假基线的达标」
 在产物里一眼可辨、不可能被当成真达标。真基线（`_real_baseline.json`）/ 外部 GPU 标杆**一字不受影响**。
+
+报告三件套（M3，2026-07-25 加）：正常判定出口额外产 **只读聚合**——报告级 `by_dtype` /
+`overall_speedup` / `custom_only_by_dtype`，summary 级 `cases_above_threshold` / `cases_scored`。
+对标 cannbot `skills/operator-evaluation/scripts/performance.py`（逐块行号见 `_report_aggregate`）。
+**它们一个字节都不参与裁决**：`达标` / `blocked` / `status` / simulation 与本块无关，删掉这些字段
+报告的结论一模一样。加它们只为让人读报告时有 cannbot 同款的 dtype 汇总口径。
 """
-import argparse, json, math, re, sys
+import argparse, json, math, re, statistics, sys
 
 _US_RE = re.compile(r"<\s*(\d+(?:\.\d+)?)\s*us")
 _GAP_RE = re.compile(r"差\s*(\d+(?:\.\d+)?)\s*us")
@@ -260,6 +266,119 @@ def _case_numel(case):
     return n
 
 
+# ————————————————— M3 · cannbot 报告三件套（**纯只读聚合，不参与任何裁决**）—————————————————
+# provenance：对标 `repos/cannbot-ops-input/skills/operator-evaluation/scripts/performance.py`
+#   · by_dtype              ← performance.py:34-59  `summarize_latency`（每 dtype 一行，两侧各取 median）
+#   · overall_speedup       ← performance.py:98-112 `build_performance_report`（Σ(base·count)/Σ(npu·count)）
+#   · cases_above_threshold ← performance.py:80-95  `count_speedup_above`（**严格 `ratio > threshold`**）
+#   · custom_only_by_dtype  ← performance.py:62-77  `summarize_custom_only_latency`（无基线只报绝对时延）
+#
+# ⚠⚠ 两把尺子故意并存（蓝本 `doc/oprunway-cannbot-alignment-plan.md` L1 的裁决，别「顺手统一」）：
+#   - **硬门**（`perf_compare` 里的 `met = raw >= tgt`）用 `>=`，**一个字不动**——它是我们的验收判据，
+#     4 个 pin 算子的真机验收结论就挂在它上面；`>=` 对「恰好压线」更友好，是有意选的。
+#   - **本块的 `cases_above_threshold`** 用 cannbot 的**严格 `>`**——它是**展示口径**，为的是我们报告里
+#     那个数与 cannbot 报告里同名的数可以直接对照。
+#   于是「ratio 恰等于 target_ratio」的用例会出现 **达标=True 但不计入 cases_above_threshold** 的现象：
+#   这不是 bug，是两把尺子的定义差。测试 `PerfReportAggregateTest.test_ratio_equal_threshold_*` 钉死它。
+#
+# ⚠ 另一条纪律（承 pc-2 的血教训）：严格 `>` 比的是**重算的原始比** `base/npu`，
+#   **绝不用 `row["ratio"]`**——那是 `round(raw, 3)` 的展示值，拿它比阈值会重演 pc-2 那种
+#   「round 把数救活/误杀」的老 bug（raw=0.9504 → round 0.95 → 严格 `>` 反而漏计）。
+
+
+def _case_dtype(case):
+    """case 的 dtype 分组键 = `inputs[0].dtype`——沿用本仓既有口径（`gen_cases.py` 产 `dtype_tested`
+    用的就是 `c["inputs"][0]["dtype"]`），op-中立、**无算子名分支**（律令#0）。
+    取不到 → `"unknown"`：照 cannbot performance.py:42 的 `row.get("dtype", "unknown")` 兜底——
+    宁可归到 unknown 桶，也不能把这一行**从聚合里悄悄丢掉**（丢行 = 报告里的 count 对不上）。
+
+    ⚠ 与 `validator` 的精度 `by_dtype`（L3）**故意用不同的键**，别当成不一致去「统一」：
+      · 精度侧按**输出 dtype**（`derive_output_dtype`）——因为容差是按输出 dtype 定的，
+        IsClose 这种 float→bool 算子按输入归桶会回显一份根本没用上的 float 容差；
+      · 性能侧（这里）按**输入 dtype**——性能看的是喂进去的负载，且 cannbot performance.py
+        本身就是按 `case["dtype"]`（输入）归桶的。两边各自都对。"""
+    if not isinstance(case, dict):
+        return "unknown"
+    ins = case.get("inputs")
+    if not isinstance(ins, list) or not ins or not isinstance(ins[0], dict):
+        return "unknown"
+    dt = ins[0].get("dtype")
+    return dt if isinstance(dt, str) and dt else "unknown"
+
+
+def _median(values):
+    """与 cannbot `median_us`（performance.py:17-21）同函数同语义：`statistics.median`，
+    **偶数个样本取中间两数的平均**（不是取下中位）。
+    空集这里返回 None、cannbot 那边抛 ValueError——有意偏离：本块只是只读报告字段，
+    绝不允许「某个桶恰好空了」把整份 perf_report 炸掉。调用点已保证不传空集，这是第二道保险。"""
+    vals = [float(v) for v in values]
+    return float(statistics.median(vals)) if vals else None
+
+
+def _report_aggregate(rows, case_by_id, ev, bl, tgt):
+    """据**已判完**的 per_case rows 组装报告三件套。纯读：不看也不改任何 `达标`/`blocked`/`status`。
+
+    进聚合的只有「真量到且可比」的行 —— 即带 `ratio` 的行（两侧 us 都是有限正数、scope 已对齐）。
+    trivial-met / 缺证据缺基线 / scope 不可比 / 降规模挂起的行**一律不进**：它们压根没有可比测量，
+    硬塞进 median 就是编数字（承 CLAUDE.md「不凭空捏造」）。故 `cases_scored ≤ perf_cases`，
+    二者不等是正常的——cannbot 同理（`count_speedup_above` 对 `custom_us<=0` 的行既不计分子也不计分母）。
+
+    `custom_only_by_dtype`：**只有 npu 侧量到、根本没有基线条目**的行，只报绝对时延、
+    **不硬算 speedup**（cannbot 在 CPU-only 基线时就是这么干的）。判据是「`bl` 里没有这个 case_id」；
+    「有基线但 scope 不可比 / 基线数值非法」**不算**无基线，不进这个桶（否则 `no_npu_baseline` 这个
+    标签就是撒谎）。降规模（`cost_scaled`）的 blocked 行不做额外特判：它进这个桶也只会得到一个
+    绝对时延、拿不到任何 speedup，「没测却算过」的口子在裁决侧（那行 blocked）已经堵死。
+
+    返回 dict；`custom_only_by_dtype` **没有内容时不返回该键**（省得每份报告都挂一个空列表）。
+    """
+    by, custom_only = {}, {}
+    above = scored = 0
+    for r in rows:
+        cid = r.get("case_id")
+        dt = _case_dtype(case_by_id.get(cid))
+        if "ratio" in r:
+            npu, base = r.get("npu_us"), (r.get("baseline") or {}).get("us")
+            if not _finite_pos(npu) or not _finite_pos(base):
+                continue                    # 理论到不了（有 ratio 必两侧合法）；留作 fail-closed 兜底
+            raw = base / npu                # ⚠ 重算原始比，绝不用 round 过的 r["ratio"]（见上文纪律）
+            g = by.setdefault(dt, {"npu": [], "baseline": []})
+            g["npu"].append(float(npu))
+            g["baseline"].append(float(base))
+            scored += 1
+            if raw > tgt:                   # 严格 >：cannbot count_speedup_above 口径（与硬门 >= 并存）
+                above += 1
+            continue
+        if not r.get("blocked") or cid in bl:
+            continue                        # trivial-met / 有基线（只是不可比）→ 不属「无基线」桶
+        perf = (ev.get(cid) or {}).get("perf")
+        us = perf.get("us") if isinstance(perf, dict) else None
+        if _finite_pos(us):                 # 只在 npu 侧真量到有效数时才报绝对时延
+            custom_only.setdefault(dt, []).append(float(us))
+
+    by_dtype = []
+    for dt in sorted(by):                   # 按 dtype 名排序：与 cannbot 一致，且产物稳定可 diff
+        npu_med, base_med = _median(by[dt]["npu"]), _median(by[dt]["baseline"])
+        by_dtype.append({"dtype": dt, "count": len(by[dt]["npu"]),
+                         # 字段名用本仓既有词表：cannbot 的 custom_us ↔ 我们的 npu_us（同物异名）。
+                         # cannbot 的 baseline_device 审计字段我们不带：那是它「同一份报告里可能混
+                         # npu/cpu 基线」才需要的，我们的基线来源单一、已在报告级 baseline_source。
+                         "npu_us": npu_med, "baseline_us": base_med,
+                         # 不 round：本块是聚合口径的忠实移植，round 是 per-case `ratio` 的展示约定，
+                         # 别把它套过来（套了就看不出两处数的真实差异）。
+                         "speedup": (base_med / npu_med) if _finite_pos(npu_med) else None})
+    npu_total = sum(row["npu_us"] * row["count"] for row in by_dtype)
+    base_total = sum(row["baseline_us"] * row["count"] for row in by_dtype)
+    # 分母为 0（一行可比测量都没有）→ None，**绝不编造**一个 speedup（cannbot `speedup()` 同款守卫）。
+    out = {"by_dtype": by_dtype, "overall_speedup": (base_total / npu_total) if npu_total > 0 else None,
+           "cases_above_threshold": above, "cases_scored": scored}
+    if custom_only:
+        out["custom_only_by_dtype"] = [
+            {"dtype": dt, "count": len(vals), "npu_us": _median(vals),
+             # 照 cannbot 的 `comparison: no_npu_baseline` 标签：这一行**不是** speedup，别当加速比读。
+             "comparison": "no_npu_baseline"} for dt, vals in sorted(custom_only.items())]
+    return out
+
+
 def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline_blocked_status=None):
     # pc-7：入口轻量 schema 校验——坏输入收敛为结构化 invalid，绝不下标崩溃。
     # C5：**每一条 return 都过 `_mark_non_acceptance`**——mock 基线的报告无论走哪个出口（invalid / no_perf_cases /
@@ -421,6 +540,28 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
               "per_case": rows, "notes": notes,
               "summary": {"perf_cases": len(rows), "达标": passed, "blocked": blocked,
                           "status": status}}
+    # M3：cannbot 报告三件套——**只读展示、零裁决影响**（上面 passed/blocked/status 已经算完了，
+    # 这里只是把同一批 rows 再汇总一遍给人看）。只挂在**正常判定出口**：invalid / no_perf_cases /
+    # invalid_config / 缺基线挂起 这四个提前 return 一个字节都不加——那些报告按定义没有可比测量，
+    # 挂一堆空聚合只会让「没数据」看起来像「数据是 0」。故下游读这些键必须当**可选**。
+    # by_dtype/overall_speedup/custom_only_by_dtype 放报告级（= cannbot report 同层），
+    # 两个计数放 summary（蓝本 M3 指定，且 CLI 会打印 summary，两个 int 不会把那行撑爆）。
+    # ⚠ 消费 mock 基线时这几个数同样是编的——同一份 report 上已有 NON-ACCEPTANCE 戳（C5），
+    #   别把 overall_speedup 单独摘出去引用，摘出去就把戳丢了。
+    try:
+        agg = _report_aggregate(rows, case_by_id, ev, bl, tgt)
+    except Exception as exc:   # 只读报表塌了也绝不拖垮裁决（与 validator 的 L3 精度聚合同一条纪律）。
+        # 整块**不出**，而不是出一堆 0——0 会被读成「量到了，只是都为 0」，那是编数字。
+        agg = None
+        notes.append(f"报告聚合块（by_dtype/overall_speedup/cases_*）生成失败已跳过，"
+                     f"裁决不受影响（status/达标/blocked 均在此之前算完）：{exc!r}")
+    if agg is not None:
+        report["by_dtype"] = agg["by_dtype"]
+        report["overall_speedup"] = agg["overall_speedup"]
+        if "custom_only_by_dtype" in agg:
+            report["custom_only_by_dtype"] = agg["custom_only_by_dtype"]
+        report["summary"]["cases_above_threshold"] = agg["cases_above_threshold"]
+        report["summary"]["cases_scored"] = agg["cases_scored"]
     if risk_flags:
         report["summary"]["risk"] = sorted(risk_flags)
     if exc_rows:  # 唯一事实源：仅在有例外行时产 simulation

@@ -13,9 +13,10 @@ description: OpRunway 验收的代码产出 skill，两件事：(a) gen_golden�
 **输出**：**`<ops_root>/<op>/oprunway_<op.lower()>_runner.cpp`** + 构建路径配置
 （`ops_root` = `$OPRUNWAY_OPS_DIR`(绝对) 或 `${OPRUNWAY_WORK_DIR:-$CWD}/.oprunway/ops`）。
 ⚠ **落用户工作目录、不写插件安装目录**（升版即冲；工程约定要求产物落用户 CWD；`ops_root` 落插件目录内会被拒）。
-`${OPRUNWAY_PLUGIN_ROOT}/samples/runners/oprunway_*_runner.cpp` 是**只读参考样例 / 生成器骨架种子**（非引擎组件、非运行时回退靶）。`samples/` 随插件分发（在插件内，2026-07-22 由仓根迁入）；`${OPRUNWAY_PLUGIN_ROOT}` = 本插件根中立变量，Claude 下等价 `${CLAUDE_PLUGIN_ROOT}`。
+`${OPRUNWAY_PLUGIN_ROOT}/samples/runners/oprunway_*_runner.cpp` 是**只读参考样例 / 生成器骨架种子**（非引擎组件、非运行时回退靶）。`samples/` 随插件分发（在插件内，2026-07-22 由仓根迁入）；`${OPRUNWAY_PLUGIN_ROOT}` = 本插件根中立变量，Claude 下等价 `${CLAUDE_PLUGIN_ROOT}`（harness 自动设），**Codex 等非 Claude 运行时须显式 `export OPRUNWAY_PLUGIN_ROOT=<插件根绝对路径>`**；写进可执行命令时用自兜底形式 `${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`，两边都活。
 `repo_adapter.find_runner()` **只查用户目录**（`<ops_root>/<op>/`）——**引擎不回退插件样例，fallback 已退役 2026-07-20**：
-缺 runner 直接 **fail-closed** 报错，真机 `new_example` 模式 `runner_source` 恒 `user`、非 user 一律 `BLOCKED`。
+缺 runner 直接 **fail-closed** 报错，真机 `new_example` 模式（= `spec.runner_form` 为 `cpp`／未声明时**派生**出的那个 mode）`runner_source` 恒 `user`、非 user 一律 `BLOCKED`。
+⚠ **`spec.runner_form == "aclnn_py"` 不适用上面这条规则**：该形态**没有 per-op runner 源**（op 工程即 DUT，跑的是完全 op-中立的通用 ctypes runner），派生出的是 `--mode aclnn_py`，`find_runner()`/`runner_source` 那套无从谈起；它**照样产真机验收裁决**（`new_example` **不是**唯一的验收通路——`run_workflow.py` 的 `_REAL_MACHINE_MODES` 含 `new_example` 与 `aclnn_py` 两条，median+PR6429 的真机精度 PASS 即出自 `aclnn_py`）。其信任门改由 `acceptance-workflow` CP-C 的「`aclnn_py` harness 真机自检」接住——**「无源可自检」≠「免验证」**。
 runner 是引擎的**输出**、非组件；样例只供参照生成（照 §2 四槽拷），绝不作运行时兜底。
 **当前范围（诚实）**：代码闭环 = **ops-<族> 仓 · opp 安装型产物 · aclnn 两段式接口**（引擎目录/后缀已生成化、不再硬编码 experimental/math，2026-07-23 批 6b 调研更正；真闸=build.sh 家族命令+opp 布局+aclnn 链接）；catlass/双实现待扩（`doc/oprunway-batch6b-design.md`）。**runner 自检证据满足/不满足 纪律当前非代码强制 sidecar 硬门、待补**（`repo_adapter` 只查文件在不在，不识别 unverified；ref §4）。
 **核心纪律（Equal 教训固化）**：aclnn 入口/dtype/参数顺序**从算子自带 example 抠、不猜**；**runner 自检证据不满足则停在 CP-C、不上真机**（靠 agent/人自觉，直到 sidecar 门落地）；acceptance 裁决只逐字引用 validator.py / perf_compare.py / validate_acceptance_state.py 产物（ADR 0007）。

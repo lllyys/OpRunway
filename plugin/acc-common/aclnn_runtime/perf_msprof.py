@@ -10,6 +10,12 @@
   → **baseline（torch）侧只走 torch_npu.profiler**；custom（ctypes runner）侧仍走 msprof CLI +
   CANN mstx C API（`libms_tools_ext.so`），**该侧 MSTX 尚未实测（§9.7「下一个待 de-risk」）**，
   打不出即 fail-closed（rid=0 直接抛），绝不静默拿整进程当窗。
+  🔖 **这条「采集入口分裂」是与参考仓 cannbot-ops-input 的有意分歧**（2026-07-25 复核）：参考仓
+  `skills/operator-evaluation/scripts/perf_msprof.py` **两侧统一** ctypes-MSTX（:412-429/:481-498）+
+  msprof CLI（:624-627）+ CSV 解析，没有 torch_npu.profiler 这条路；我们被上述实测逼着把 baseline 侧
+  换掉。**不回退**（回退即重蹈静默失败）。代价由**参考仓没有的**双边采集配置一致性闸兜住
+  （:data:`COMPARED_COLLECTION_KEYS` / :data:`BLOCKED_INCOMPARABLE_COLLECTION_CONFIG`），
+  详见常量区 `COLLECTOR_*` 处的记账。
 * **B（kernel 白名单两套）**：CSV 路线（`task_time.kernel_type` / `op_summary.Task Type`）=
   :data:`CSV_DEVICE_KERNEL_TYPES`；**db 路线（`TASK.taskType`）是 `KERNEL_AIVEC`/`KERNEL_MIX_AIV`/…**
   （:data:`DB_DEVICE_KERNEL_TYPES` + `KERNEL_` 家族规则），用 CSV 那套**一个都匹配不上 → 静默得 0 us**。
@@ -121,6 +127,11 @@ from pathlib import Path
 # ── 常量（单一真源）────────────────────────────────────────────────────────────────
 
 #: 解析路线。**优先 db**（§9.7 F：`startNs` 整数纳秒，无 csv 的尾随 tab / float 丢精度问题）。
+#: 🔖 两条路线**不是冗余**，而是上面 §9.7 A 那个「采集入口分裂」的下游：baseline 侧
+#: （`torch_npu.profiler`）产 `ascend_pytorch_profiler*.db` → :data:`ROUTE_DB`；custom 侧
+#: （msprof CLI）产 CSV/PROF 目录 → :data:`ROUTE_CSV`（db 可得时同样优先 db）。
+#: 参考仓 cannbot-ops-input 只有 CSV 一条（它两侧都走 msprof CLI），**db 路线是我们这边多出来的**——
+#: 连带 §9.7 B/B′/B″/D 那堆 `TASK.taskType` 陷阱也都是我们独有的、参考仓里找不到对应处理。
 ROUTE_DB = "profiler_db"
 ROUTE_CSV = "msprof_csv"
 
@@ -219,6 +230,20 @@ DEFAULT_WARMUP = 5
 DEFAULT_REPEAT = 20
 
 # —— 采集配置（§9.7 C：`--ai-core` 必须显式关，且双边同配置）——
+#
+# 🔖 **两个 collector 常量并存 = 与参考仓的一处结构性分歧，这里把账记清楚**（2026-07-25 复核参考仓）：
+#   参考仓 cannbot-ops-input `skills/operator-evaluation/scripts/perf_msprof.py` **两侧统一一条通路**——
+#   baseline（frozen torch reference）与 custom 都是「ctypes 加载 `libms_tools_ext.so` 打 MSTX range
+#   （:412-429 / :481-498）＋ msprof CLI 拉起（:624-627）＋ 解析 CSV」，它没有 `torch_npu.profiler` 这条路。
+#   我们**只有 custom 侧**照此办理；**baseline 侧改走 `torch_npu.profiler` 的 db**，原因是真机 finding
+#   §9.7 A（`doc/oprunway-torch-baseline-design.md`）：msprof CLI 下 **Python 侧根本打不出 MSTX**——
+#   `torch_npu.npu.mstx.range_start()` 被 `@_no_exception_func()` 吞掉异常、**静默返回 rid=0**，
+#   CANN 原生 `import mstx` 则进程挂死。照参考仓那样做，拿到的不是错误而是**一个没有测量窗的空结果**。
+#   ⛔ **不回退**：回退 = 重蹈那个静默失败（且失败形态是「看着跑通了、数字却来自整进程」）。
+#   ⚖ 分歧的代价我们自己补了闸——**参考仓没有的**双边采集配置一致性校验：
+#   :data:`COMPARED_COLLECTION_KEYS` 逐键比 + 不一致即 :data:`BLOCKED_INCOMPARABLE_COLLECTION_CONFIG`
+#   （见 :func:`check_collection_config`），防两条不同通路的口径悄悄漂开（§9.7 C 实测：光 ai-core 开关
+#   不同就能差 2×）。注意 `collector` 本身**故意不入比对键**——两路数字已实测吻合，比的是配置不是路径。
 COLLECTOR_MSPROF_CLI = "msprof_cli"
 COLLECTOR_TORCH_PROFILER = "torch_npu_profiler"
 #: `--ai-core=on`（msprof 默认）会让数字虚高 2.0~3.75×（§9.7 C 实测）→ 一律显式关。
@@ -226,6 +251,16 @@ AI_CORE_PROFILING = "off"
 PROFILER_LEVEL = "Level0"
 KERNEL_ACCOUNTING = "median_x_launches"
 #: msprof CLI 固定参数。`--ai-core=off` 是 §9.7 C 的硬要求，**不得删**。
+#:
+#: 🔖 **这是对参考仓 msprof 命令的一处「有据偏离」，不是口径遗漏**（2026-07-25 读码复核）：
+#: 参考仓 cannbot-ops-input `skills/operator-evaluation/scripts/perf_msprof.py:624-627` 的命令是
+#: `msprof --output=… --task-time=on --ascendcl=on --msproftx=on <python> <wrapper>`——前三项与我们**逐字同**，
+#: 差别只在它**不显式关 ai-core**（它的做法是「不请求 `--aic-metrics`」，而 `--ai-core` 默认就是 on，
+#: 于是 AI Core 采样照样开着）。我们多带 `--ai-core=off`，依据是真机实测
+#: （`doc/oprunway-torch-baseline-design.md` §9.7 C，2026-07-24 a3 容器）：默认 on 让 Sort(MIX_AIV)
+#: 单 kernel 虚高 **3.75×**（192.46 → 51.29 us）、每次调用 kernel 总和虚高 **2.0×**（308.9 → 153.2 us）；
+#: 关掉后 msprof 与 torch_npu profiler 三路吻合（150~159 us/call）。
+#: ⛔ 别为「与参考仓逐字一致」把这个参数删掉——删了拿到的不是「更 faithful 的数」，是虚高数倍的假数。
 MSPROF_EXTRA_ARGS = ("--task-time=on", "--ascendcl=on", "--msproftx=on", "--ai-core=off")
 #: 采集配置里**必须双边一致**的键（`collector` 不比：§9.7 C 实测关掉 ai-core 后 msprof/torch 三路吻合）。
 COMPARED_COLLECTION_KEYS = ("ai_core", "profiler_level", "warmup", "repeat",

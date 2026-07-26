@@ -79,6 +79,17 @@ STANDARDS = (ASCENDOPTEST_DEFAULT, ECOSYSTEM_MERE_MARE, EXACT, BEHAVIORAL, TORCH
 # ---- policy.kind（≠ spec-level standard）：多输出 index 一致性判据 ----
 # 不入 STANDARDS——它不是 spec 声明的标准，而是 index 输出的**比对形态**（compare/policy.kind）：
 # 下标不逐位比（tie 上 NPU 与 golden 可合法给不同下标），改判 gather(self,idx_npu) allclose gather(self,idx_golden)。
+#
+# 🔖 **provenance：这条判据是 OpRunway 原创，参考仓 cannbot-ops-input 里没有任何出处**
+#    （2026-07-25 逐文件核实，别再去参考仓里找「我们抄歪了哪一行」——找不到，因为没有）：
+#      · `skills/operator-evaluation/scripts/accuracy_worker.py:73` 只 `np.asarray(result.outputs[0])`——
+#        **多输出算子的第 2 个输出根本不落盘**；
+#      · 同目录 `accuracy.py:92` 只读 `case["golden_files"][0]`——**只比第一个输出**。
+#      → 即：median 这类 (values, indices) 算子，参考仓**根本不比 indices**。
+#    它**潜在**的口径（假如哪天真去比）是：indices 是 int64 → 落 `accuracy.py:55` 的 `_EXACT_DTYPES`
+#    → 下标**逐位精确**。我们这条判据**比它更强也更对**：tie（并列中位数/最值）上允许两侧给出不同下标，
+#    但**要求下标处的值一致**——逐位精确会把合法的 tie 判成失败，而「完全不比」会把错下标放过去。
+#    ⛔ **刻意保留、不回退**（既不退回「不比」，也不退回「逐位精确」）；注释里也别写成 cannbot 口径。
 INDEX_VALUE_CONSISTENCY = "index_value_consistency"
 FROM_INPUT_SENTINEL = "<from_input>"  # 输出 dtype 随（某个）输入 dtype（如 median.values 随 self）
 
@@ -128,10 +139,22 @@ _MM_PROVENANCE = ("canon/architecture/ecosystem-precision-standard.md (proposed)
 #   一手出自 tilelang2ascend `verification_ascendc.py`。判据 |actual-golden| <= atol + rtol*|golden|。
 #   fp16/bf16/fp32 逐字抄参考表；fp64 为**外推**；整型/bool 输出走 exact（不入此表）。
 #   ⚠ 本表刻意存 **(rtol, atol)**，与参考仓 (atol, rtol) 顺序相反——下方逐条已按此顺序核对，勿对调。
-# ⚠ **complex64/complex128 已移出本表**（审计 finding #9）：`compute_metrics` 的 SUPPORTED_COMPUTE_DTYPES
-#   不含 complex（复数 allclose 未实现），留在表里等于「能生成一份永远算不出来的 policy」——声明与实现
-#   不一致比缺能力更坏。要支持复数须先实现按模长的 allclose 并同时入 SUPPORTED_COMPUTE_DTYPES。
-#   （`_AOT_TABLE` 里的 complex 条目是 AscendOpTest 的**逐字快照**、保留作 provenance；那条路径由
+#   ✅ **行号与值 2026-07-25 复核属实**：参考仓 47-54 行的四条浮点条目与本表一一对应
+#     （fp16 9e-2/2^-10、bf16 1e-1/2^-7、fp32 1e-3/2^-13、fp64 1e-6/2^-30），仅元组顺序相反。
+# ⚠ **complex64/complex128：本表比参考仓「少两条」是 OpRunway 的有意收窄，不是漏抄、更不是 bug。**
+#   参考仓 `accuracy.py:52-53` **有**这两条（complex64=(atol 1e-3, rtol 2**-13)、
+#   complex128=(atol 1e-6, rtol 2**-30)）；我们**移除**了 → 复数输出的算子在本仓 **fail-closed**
+#   （`threshold_for` → `_check_compute_supported` 当场抛，不产出 policy），而不是拿一份算不出来的
+#   容差假装支持。依据是审计 finding #9：`compute_metrics` 的 SUPPORTED_COMPUTE_DTYPES 不含 complex
+#   （复数 allclose 从没实现），留着条目等于「能生成一份永远算不出来的 policy」——**声明与实现不一致
+#   比缺能力更坏**（缺能力是明着挡住，不一致是等着在真机上假通过/假失败）。
+#   ⛔ **别为「对齐 cannbot」把这两条加回来**：单加容差表 = 只把 fail-closed 挪后、错得更隐蔽。
+#   要补齐复数支持必须**同时**改三处，缺一不可：
+#     ① 本表 `_TA_DTYPE_TOLS` 补 complex64/complex128；
+#     ② `compute_metrics` 的 TORCH_ALLCLOSE 分支实现复数比对（现在 `astype(np.float64)` 会**静默丢虚部**，
+#        这正是 finding #2 记的假通过温床——须改按模长/实虚分量的 allclose）；
+#     ③ `SUPPORTED_COMPUTE_DTYPES` 放行 complex（否则 ①② 做完仍在 `_check_compute_supported` 被挡）。
+#   （`_AOT_TABLE` 里的 complex 条目是 AscendOpTest 的**逐字快照**、保留作 provenance；那条路径同样由
 #    `threshold_for` 里的 `_check_compute_supported` 当场 fail-fast，不会产出不可执行 policy。）
 _TA_DTYPE_TOLS = {                 # dtype: (rtol, atol)
     "float16":    (2 ** -10, 9e-2),
@@ -213,6 +236,13 @@ def derive_output_dtype(spec, case_input_dtypes):
       · 否则歧义 → ValueError（保守拒绝，不猜）。
     多输入须同 dtype（elementwise 前提）；不一致 → ValueError。gen_cases 与 validator **共用本函数**，
     保证「造用例的 compare_dtype」与「裁决派生的 cdtype」同源、绝不漂移。
+
+    🔖 **与参考仓的有意偏离（别当 bug 去「对齐」）**：容差表的 dtype 键，我们取 **输出 dtype**（本函数），
+    参考仓 cannbot-ops-input `skills/operator-evaluation/scripts/accuracy.py:93` 取的是**输入** `case["dtype"]`
+    —— 它在 91-92 行明明算出了 `out_dtype` 并用它读 golden 二进制，第 93 行选容差时却又换回了输入 dtype
+    （2026-07-25 读码复核）。对同型 elementwise 两者等价，但**非同型算子会键错**：如 IsClose(float→bool)，
+    输出是 bool（该走 exact 逐位），按输入 float32 键就会拿到 (2**-13, 1e-3) 的浮点容差去判 bool——
+    松到把错的判成对的。**我们是修正了它的潜在瑕，不是抄漏**；⛔ 别为对齐而改回按输入 dtype 取键。
     """
     params = spec.get("params") if isinstance(spec, dict) else None
     if not isinstance(params, list) or not params:
@@ -370,6 +400,10 @@ def derive_output_contracts(spec, case_input_dtypes, spec_standard,
             raise ValueError(f"index 输出 {p.get('name')!r} 的 index_of={ref!r} 未指向任一 "
                              f"out_role=='value' 的具名输出（可引 {sorted(value_tol_by_name)}），fail-closed")
         rtol, atol = value_tol_by_name[ref]
+        # 🔖 index 判据的 provenance 见 `INDEX_VALUE_CONSISTENCY` 定义处：**OpRunway 原创、参考仓无此物**
+        # （参考仓 accuracy_worker.py:73 / accuracy.py:92 只处理第 0 个输出，index 压根不比）。
+        # 「容差从所引 value 输出抄过来」也是本仓自定的：index 本身没有 dtype 阈，它的对错只能用
+        # 「gather 回来的值是否在 value 的容差内」表达 —— 所以两者必须是同一组 (rtol, atol)，别各定一套。
         pol = {"kind": INDEX_VALUE_CONSISTENCY, "gather_from": p["gather_from"],
                "value_rtol": rtol, "value_atol": atol}
         contracts[i] = {"name": p.get("name"), "role": OUT_ROLE_INDEX, "dtype": _resolve_out_dtype(p),
@@ -1155,6 +1189,10 @@ def compute_metrics(out, golden, policy, gather_ctx=None):
 
     if kind == INDEX_VALUE_CONSISTENCY:
         # 下标不逐位比：gather(self, idx_actual) allclose gather(self, idx_golden)（tie 上下标可合法不同、值须一致）。
+        # 🔖 **本分支整段是 OpRunway 原创，参考仓 cannbot-ops-input 没有对应实现**（定义处 provenance 详述）：
+        #    参考仓 `accuracy_worker.py:73` 只存 `outputs[0]`、`accuracy.py:92` 只读 `golden_files[0]`，
+        #    index 输出从头到尾不进比对；其潜在口径（int64 → `_EXACT_DTYPES`）是**下标逐位精确**。
+        #    我们**故意比它强**：tie 上容忍下标不同、但要求值一致。读到这里别按「对齐参考仓」把它改回逐位比。
         if not isinstance(gather_ctx, dict) or "source" not in gather_ctx or "dim" not in gather_ctx:
             raise ValueError("index_value_consistency 需 gather_ctx={source, dim, keepdim}"
                              "（采集层据 policy.gather_from 重读输入 + 归约轴）")

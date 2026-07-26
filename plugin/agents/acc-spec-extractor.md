@@ -71,4 +71,10 @@ description: OpRunway 验收 ②（CP-B）的子 agent——把已取材的算�
 - **全程中文**；只据 `task_doc.md`/`pr_facts.json` 原文抽，不臆造；缺项落 `task_pr_gaps` 不静默。
 - **任务书是验收权威**；PR 仅用于补 example/目标目录（被测物锚点）——**dtype 全集只对照、不作来源**（PR 声明 < 任务书全集 → 记 gap），**不代表『验收过了』**。
 - 确定性活（取材/fetch）在 `fetch_source.py`（primary CP-A 跑），本 agent 只做 NL 抽取判断；换运行时只换本壳，`acc-spec` skill 的 `references/` + `fetch_source.py` 不动；此可移植性依赖 canon 项 `cross-cli-unified-form`（proposed·未 settle，载重前需核）。
-- 相关：`skills/acc-spec`（本 agent 承载的 skill）、CP-A primary `fetch_source.py`（取材）、CP-B primary `gen_cases.py --dry-run`（下游契约自检，**非裁决**）、CP-D 真机 `run_workflow.py --mode new_example`（唯一产验收裁决的通路）、`op-acceptance`（dispatch 本 agent 的 orchestrator）。
+- 相关：`skills/acc-spec`（本 agent 承载的 skill）、CP-A primary `fetch_source.py`（取材）、CP-B primary `gen_cases.py --dry-run`（下游契约自检，**非裁决**）、CP-D 真机 `run_workflow.py --mode <mode>`、`op-acceptance`（dispatch 本 agent 的 orchestrator）。
+  ⚠ `<mode>` **据 `spec.runner_form` 派生**（cpp（或未声明）→ `new_example`、`aclnn_py` → `aclnn_py`；`mock`/`catlass*` 派生不出、只能显式指定）。
+  **别把 `new_example` 当「唯一产验收裁决的通路」**——`run_workflow.py:37` 的 `_REAL_MACHINE_MODES` 是 `{new_example, aclnn_py}` **两条**，
+  median+PR6429 的真机 56/56 精度 PASS 正是 `aclnn_py` 跑出来的。
+  ⚠ **这条与本 agent 的职责直接相关**：`runner_form` 正是**本 agent 抽出来的字段**——抽错就把下游整条通路带偏
+  （cpp 通路真机 dtype 白名单只有 fp32/fp16/bf16，`int32` 落 `DEFERRED_NP_BY_FORM["cpp"]`、真机 fail-closed → 覆盖缺一块；
+  且 `new_example` 的性能基线是内置 TBE、`aclnn_py` 才是 torch，「任务书对标 torch」场景走错就比错了基线）。

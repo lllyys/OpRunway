@@ -7,7 +7,8 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 
 本 skill 是 `op-acceptance`（`mode:primary` orchestrator）的**唯一状态机脑子**：它规定验收怎么分段（CP-A..E）、每段派哪个 subagent、产哪个工件、哪级门在哪跑、失败怎么路由。**primary 首响应即加载本 skill，禁裸调 subagent。**
 
-设 `${CLAUDE_PLUGIN_ROOT}` = 本插件根（含 `acc-common/`、`skills/`、`agents/`）。全程中文。产物落用户 CWD 的 `reports/<op>/`。
+设 `${OPRUNWAY_PLUGIN_ROOT}` = 本插件根（含 `acc-common/`、`skills/`、`agents/`）——这是**本插件根的中立主变量**；Claude 下等价 `${CLAUDE_PLUGIN_ROOT}`（由 harness 自动设），**Codex 等非 Claude 运行时须显式 `export OPRUNWAY_PLUGIN_ROOT=<插件根绝对路径>`**。
+⚠ 因此本页**可执行命令**一律写成 `${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`（自兜底：主变量优先、缺了回落 Claude 别名），照抄即可跑、**不依赖谁记得先 export**；散文里提路径时只写中立主变量 `${OPRUNWAY_PLUGIN_ROOT}`。全程中文。产物落用户 CWD 的 `reports/<op>/`。
 
 **本 skill 只调三级验收门、不重实现判定**——判定脑子在确定性脚本链里（见 §0），编排层只搬工件、串流程、引用裁决。
 
@@ -37,7 +38,7 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 | `<op>.spec.json`（含 `task_pr_gaps`） | CP-B（`extract_spec`） | spec 已抽 | 缺 → 派 `extract_spec` |
 | 用例计划账本（stdout，**不落 durable 工件**） | CP-B（primary inline `gen_cases.py --dry-run`） | 用例计划自洽（预算区间 / dtype 分布 / 特殊场景覆盖 / id 唯一 / 种子确定） | dry-run 报错或账本异常 → 派 `refine_spec` 后重跑 dry-run |
 | `oprunway_<op>_runner.cpp`（自检证据满足） | CP-C（`gen_runner`→`verify_runner`） | runner 已锚定 example；由 acc-runner-dev 的 runner 自检证据满足/不满足纪律保证（当前**非代码强制 sidecar 硬门、待补**） | 自检证据不满足则停在 CP-C、不上真机 |
-| `evidence.json` / `verdict.json` / `baseline.json`（仅有基线时）/ `perf_report.json` / `acceptance.json`（真机裁决） | CP-D（`run_npu`→`run_workflow --mode new_example`） | 真机一次原子跑完、门已校 | `acceptance.json.overall` 非 PASS 且非门问题 → 派 `rootcause` |
+| `evidence.json` / `verdict.json` / `baseline.json`（仅有基线时）/ `perf_report.json` / `acceptance.json`（真机裁决） | CP-D（`run_npu`→`run_workflow --mode <mode>`；**`<mode>` 据 `spec.runner_form` 派生**：cpp（或未声明）→ `new_example`、`aclnn_py` → `aclnn_py`；`mock`/`catlass`/`catlass_mock` 派生不出、须显式指定。详见 §3 CP-D） | 真机一次原子跑完、门已校 | `acceptance.json.overall` 非 PASS 且非门问题 → 派 `rootcause` |
 | 中文验收报告 | CP-E（primary） | 报告已出 | — |
 
 > 多算子：一份任务书含 N 个算子 → CP-B 产 N 份 spec，每份独立走 CP-B..E，工件按 `reports/<op>/` 分目录。
@@ -50,7 +51,7 @@ primary 每次派 subagent，都按此五段给全，**不省略**（subagent �
 
 | 契约段 | 内容 |
 |---|---|
-| **工作区** | `reports/<op>/`（及 `work/` 子目录）绝对/相对路径；`${CLAUDE_PLUGIN_ROOT}` |
+| **工作区** | `reports/<op>/`（及 `work/` 子目录）绝对/相对路径；`${OPRUNWAY_PLUGIN_ROOT}`（中立主变量；Claude 下等价 `${CLAUDE_PLUGIN_ROOT}`，Codex 等运行时须显式 export 为插件根——**派 subagent 时把解析出的绝对路径给全，别只给变量名**） |
 | **dispatch_mode** | 本次的模式取值（见各 CP；这是**调度模式**，与 frontmatter 的 `mode:subagent` 不同名、不混用） |
 | **输入工件** | 该 mode 需读的已落盘工件（如 `task_doc.md`+`pr_facts.json` / `<op>.spec.json` / gate error 文本） |
 | **验收标准** | 本轮「算干完」的判据（如 spec 自检项全过、runner 逐元素等手算 golden、run_npu 出全套工件+门已校） |
@@ -68,12 +69,13 @@ primary 每次派 subagent，都按此五段给全，**不省略**（subagent �
 
 **目的**：取材 + 任务书↔PR 对应校验 + 环境/模式确认，识别并挡掉「未验收空任务 / 任务书↔PR 配错」。
 
-- **取材**（确定性脚本，primary 直接跑）：`python3 ${CLAUDE_PLUGIN_ROOT}/acc-common/fetch_source.py --taskdoc <路径|链接> --pr <PR链接> --out <work>` → `task_doc.md` + `pr_facts.json`。
+- **取材**（确定性脚本，primary 直接跑）：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/fetch_source.py --taskdoc <路径|链接> --pr <PR链接> --out <work>` → `task_doc.md` + `pr_facts.json`。
 - **对应校验**（落 `correspondence.json`，schema/枚举见 §4；canon verify-spec-pr-correspondence·proposed·未 settle，载重前需核）：靠三条证据合断——
   1. **改动落点目录**：`pr_facts.target_dir`（机器可比），对上任务书声明的算子目录；
   2. **issue / 追踪号**：**NL 读** `task_doc.md` 与 PR `title`（`pr_facts` **不抽 issue 号**，只能自然语言读），**非算子名字面匹配**；
   3. **用户确认**：证据摆给用户拍板。
-- **环境确认**（`AskUserQuestion` **必由 primary 做**）：NPU/VPN 开没开、**目标机按任务书 `适配硬件` × 算子 `op_def` 的 `AddConfig` 双源交叉核定**（a5 真 950 / a3 A2A3；两源不一致入 `task_pr_gaps`）。⚠ **不问 mock 还是真机**——`--mode` 默认已是 `new_example`，验收只认真机。
+- **环境确认**（`AskUserQuestion` **必由 primary 做**）：NPU/VPN 开没开、**目标机按任务书 `适配硬件` × 算子 `op_def` 的 `AddConfig` 双源交叉核定**（a5 真 950 / a3 A2A3；两源不一致入 `task_pr_gaps`）。⚠ **不问 mock 还是真机**——**验收只认真机**（这半句不变）；但 `--mode` **不是「默认写死 `new_example`」**：真源是 `spec.runner_form`（受控词表 `{cpp（缺省）, aclnn_py}`），**`<mode>` 据 `spec.runner_form` 派生**：cpp（或未声明）→ `--mode new_example`、`aclnn_py` → `--mode aclnn_py`；`mock`/`catlass`/`catlass_mock` **派生不出来**，只能显式指定（局部自检 / catlass 通路的正当逃生口，且 mock 不产验收裁决）。派生完整口径见 §3 CP-D。
+  ⚠ **别把 `new_example` 当「唯一产验收裁决的通路」**——`run_workflow.py` 的 `_REAL_MACHINE_MODES` 是 `{new_example, aclnn_py}` 两条，median+PR6429 的真机 56/56 精度 PASS 正是 `aclnn_py` 跑出来的。**照写死的 `new_example` 办事，代价有两笔**：① 覆盖缺口——cpp 通路的真机 dtype 白名单只有 fp32/fp16/bf16（`repo_adapter._NP`），像 median 声明的 `int32` 落在 `DEFERRED_NP_BY_FORM["cpp"]`（生成期造得出用例、**真机跑到 fail-closed**），走错通路就实打实少测一块；② 比错基线——`new_example` 的性能基线是**同法测的内置 TBE**（`acc-common/new_example/run_on_npu.sh` 头注），`aclnn_py` 的基线才是 **torch**，当前「任务书对标 torch」场景走错通路拿到的**不是任务书要的那个比较**。
 - **产出**：`correspondence.json`。`status=confirmed` → 进 CP-B；`mismatch`/`empty_task` → 出**程序结论（非 pass/fail）**并停跑；`needs_user_confirmation` → 摆证据、等用户拍板（**不自动 judge 空任务**——Equal #2890 配错作废血教训）。
 
 ### CP-B Task1 用例（dispatch + primary inline）
@@ -83,7 +85,7 @@ primary 每次派 subagent，都按此五段给全，**不省略**（subagent �
 - **dispatch** `acc-spec-extractor`，`dispatch_mode = extract_spec`：读 `task_doc.md`+`pr_facts.json` → `<op>.spec.json` + `task_pr_gaps`（缺项落 gaps 不臆造；多算子多 spec）。
 - **dispatch** `acc-runner-dev`，`dispatch_mode = gen_golden`：读 `task_doc.md`+`spec` → 任务书快照入库 + `<ops_root>/<op>/golden.py`（真值口径走 **R3 两档链**；**PR/仓内参考实现禁作 golden 源**；后端生成期定死）→ 自跑 `check_golden.py <Op>` 出档位账本。**必须在 dry-run 之前**——`gen_cases` 缺 golden.py 即 fail-closed。
   路由**按退出码、不按档位数字**：**0**（可走）→ 进 dry-run；**2**（`needs_human_review`——tier 3 必然如此，⚠ **tier 1 也可能**：`multistep + oracle_method` 判 `(tier 1, 需人核)`）→ 进 dry-run 但**报告里显式标「golden 需人核」**；**1**（blocked / 词表不合规 / 缺件 / 账本自相矛盾 / 参数错误）→ **停在 CP-B**，把 `blocked_reason` 摆给用户，**不自动回落第二档**（R4）。
-- **primary inline**（确定性脚本，无 NL 生成）：`python3 ${CLAUDE_PLUGIN_ROOT}/acc-common/gen_cases.py <spec> --dry-run`。plan-only，查这些：用例预算落不落 `[S=强制下限, pool_max]` 区间 · dtype 分布 · 特殊场景（empty/scalar/边界/inf/ninf/nan）覆盖 · 被丢组合类 · `case_id` 唯一（撞则 raise） · per-case 种子确定性。
+- **primary inline**（确定性脚本，无 NL 生成）：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/gen_cases.py <spec> --dry-run`。plan-only，查这些：用例预算落不落 `[S=强制下限, pool_max]` 区间 · dtype 分布 · 特殊场景（empty/scalar/边界/inf/ninf/nan）覆盖 · 被丢组合类 · `case_id` 唯一（撞则 raise） · per-case 种子确定性。
   ⚠ **能力边界（别当成旧 mock 自检的等价物）**：dry-run **不调 `golden_fn`、不落 `.npy`、不产任何裁决**；但它**会加载执行 `golden.py`**（取 `out_shape` 造规模预算）——所以对 golden 的覆盖是**半道**的：**缺文件 → 只记「未核」、不阻塞**；**文件在但坏了（语法错 / 顶层抛 / 必需导出不全）→ 当场抛、拦得住**。仍**验不了**：来源契约合不合规（那是 `check_golden.py` 的活）/ `oracle_source` 映射 / `validator` 判定链 / 三级门 / evidence 结构——**这些只有 CP-D 真机跑测才验得到**。（照本仓约定 golden.py 把 torch 延迟 import，故 dry-run 通常不拉 torch；某算子若在模块顶层 `import torch`，它会跟着 import。）CP-B 过了**不代表**用例链整体可用。
 - **产出**：`<op>.spec.json` + `<ops_root>/<op>/golden.py` + `<ops_root>/<op>/task_doc.snapshot.md`（三件均 subagent 产）+ dry-run 计划账本（stdout，**不落 durable 工件、不产裁决**）。`caseset.json` 由 CP-D 真机跑测时才落盘。
 - **路由**：dry-run 报错或账本异常（如预算区间不合理、重点 dtype 未覆盖、特殊场景缺失、id 撞）→ **dispatch** `acc-spec-extractor`，`dispatch_mode = refine_spec`（据报错文本修 spec）→ 重跑 dry-run。**契约自检没过先修 spec，别上真机。**
@@ -107,7 +109,7 @@ primary 每次派 subagent，都按此五段给全，**不省略**（subagent �
 
 **目的**：一次原子跑完 Task2 精度 + Task3 性能 + 三级门，落全套裁决工件。
 
-- **dispatch** `acc-verify-rootcause`，`dispatch_mode = run_npu`：`python3 ${CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <spec> --mode <mode> --out reports/<op>/`（`OPRUNWAY_*` 指真实机器/路径，不写进仓）。**`<mode>` 据 `spec.runner_form` 定**：cpp runner v1 → `--mode new_example`（`OPRUNWAY_*` 见 repo_adapter._ne_cfg）；`runner_form==aclnn_py`（torch 对标）→ `--mode aclnn_py`（`OPRUNWAY_ACLNN_OPS_DIR`（ops 仓 checkout 根）/`OPRUNWAY_ACLNN_OP_SUBDIR`/`OPRUNWAY_ACLNN_VENDOR_DIR`/`OPRUNWAY_ACLNN_VENDOR_NAME`/`OPRUNWAY_ACLNN_BASE_REPO`/`OPRUNWAY_ACLNN_PR_REF`/`OPRUNWAY_ACLNN_SOC` 等见 aclnn_adapter._aclnn_cfg，且须 `OPRUNWAY_ACLNN_REAL=1` + 人工确认 build install 写**用户态 vendor 目录**（`<vendor_dir>/vendors/<vendor_name>_nn`，⚠ `_nn` 后缀由 install 自动追加）、绝不写共享 opp）。
+- **dispatch** `acc-verify-rootcause`，`dispatch_mode = run_npu`：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <spec> --mode <mode> --out reports/<op>/`（`OPRUNWAY_*` 指真实机器/路径，不写进仓）。**`<mode>` 据 `spec.runner_form` 定**：cpp runner v1 → `--mode new_example`（`OPRUNWAY_*` 见 repo_adapter._ne_cfg）；`runner_form==aclnn_py`（torch 对标）→ `--mode aclnn_py`（`OPRUNWAY_ACLNN_OPS_DIR`（ops 仓 checkout 根）/`OPRUNWAY_ACLNN_OP_SUBDIR`/`OPRUNWAY_ACLNN_VENDOR_DIR`/`OPRUNWAY_ACLNN_VENDOR_NAME`/`OPRUNWAY_ACLNN_BASE_REPO`/`OPRUNWAY_ACLNN_PR_REF`/`OPRUNWAY_ACLNN_SOC` 等见 aclnn_adapter._aclnn_cfg，且须 `OPRUNWAY_ACLNN_REAL=1` + 人工确认 build install 写**用户态 vendor 目录**（`<vendor_dir>/vendors/<vendor_name>_nn`，⚠ `_nn` 后缀由 install 自动追加）、绝不写共享 opp）。
   ⚠ **`aclnn_py` 的 perf 通路：代码已接通、真机也跑过一次，但一个耗时数都没产出（仍 BLOCKED）**（2026-07-24 两次更正——① 此前本节写「采集端尚未接入 / `parse_torch_npu_baseline` 仅 schema 占位 / Task3 必须 pending」已被落地的 perf 代码推翻；② 随后写的「一次真机都没跑过」也已被 median 首跑推翻：跑是跑了、**结果是 BLOCKED**。勿再照任一旧文办事）。现状：
     - **已落地**：`aclnn_runtime/perf_msprof.py` 做 msprof kernel-only 采集（`--task-time/--ascendcl/--msproftx`，**MSTX range 圈测量窗、缺 MSTX 证据即 fail-closed**；只累加 device 计算 kernel，MEMCPY_ASYNC 不计入；warmup 5 / repeat 20 取中位数）；基线 = **同机 `torch_npu` 跑同一份 torch reference**，行为五分类（`npu`/`cpu_fallback`/`hybrid_host_device`/`execution_failed`/`no_device_kernel_observed`）**只有 `npu` 才计时**；`repo_adapter.parse_torch_npu_baseline` 已从占位改成**真消费口**（scope / us / 重复 case_id 全 fail-closed，非 npu 行为进 `excluded`）；**精度先筛**（只测已过精度的 case，其余记 `skipped_accuracy_failed`）；双边 `timing_scope` 校验 + speedup 由 `perf_compare` 出（源无关、判定逻辑一行未改）。
     - **未做 / 未成**：**整条 perf 通路至今没产出过任何有效耗时数**。2026-07-24 median(PR6429) 首跑真机实况：精度先 fail → perf fail-fast（`perf_report.summary.status="skipped_precision_gate"`）；**即便不 fail-fast 也拿不到数**——本机 CANN 的 profiler db 里 `TASK.taskType` 是数值枚举 id，而解析按字符串 `KERNEL_*` 匹配 → 双边 fail-closed（`_torch_npu_baseline.json` 基线 `per_case=0`）。`covered ≠ 真机绿`，**不得**表述成「性能已验证 / 已跑通 / 已达标」；也别反过来说「从没上过真机」。taskType 字典解码代码已补，**但尚未在同一份 CANN 产物上复跑验证**。

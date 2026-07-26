@@ -11,7 +11,7 @@
 
 | 段 | 内容 |
 |---|---|
-| **工作区** | `reports/<op>/`（及 `work/` 子目录）路径；`${OPRUNWAY_PLUGIN_ROOT}`（Claude 下 `${CLAUDE_PLUGIN_ROOT}`） |
+| **工作区** | `reports/<op>/`（及 `work/` 子目录）路径；`${OPRUNWAY_PLUGIN_ROOT}` = 本插件根中立变量——**Claude 下等价 `${CLAUDE_PLUGIN_ROOT}`**（harness 自动设），**Codex 等非 Claude 运行时须先显式 `export OPRUNWAY_PLUGIN_ROOT=<仓根>/plugin`**；写进要执行的命令时用自兜底写法 `${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`，两边都不用谁记得先 export |
 | **dispatch_mode** | 本次模式取值（下表；与 frontmatter 的 `mode:subagent` 不同名） |
 | **输入工件** | 该 mode 需读的已落盘工件 |
 | **验收标准** | 本轮「算干完」的判据 |
@@ -21,7 +21,7 @@
 
 ### 1a. `dispatch_mode = extract_spec`
 ```
-工作区: reports/<op>/  · ${OPRUNWAY_PLUGIN_ROOT}
+工作区: reports/<op>/  · ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}   # 插件根：Claude 走别名兜底；Codex 等先 export OPRUNWAY_PLUGIN_ROOT
 dispatch_mode: extract_spec
 输入工件: work/task_doc.md + work/pr_facts.json（①fetch_source 产）
 验收标准: 按 acc-spec references/taskdoc-to-spec.md 字段映射逐字段抽；verify_mode 合法；
@@ -67,7 +67,13 @@ dispatch_mode: verify_runner
 ```
 dispatch_mode: run_npu
 输入工件: <op>.spec.json + 自检满足的 runner
-验收标准: 真机 run_workflow.py --mode new_example（OPRUNWAY_* 指真实机器/路径，不写进仓）——
+验收标准: 真机 run_workflow.py --mode <mode>（OPRUNWAY_* 指真实机器/路径，不写进仓）——
+          <mode> 据 spec.runner_form 派生：cpp（缺省）→ new_example；aclnn_py → aclnn_py（且须 OPRUNWAY_ACLNN_REAL=1）；
+          mock / catlass / catlass_mock 派生不出、只能显式指定（非验收通路 / catlass 逃生口）。
+          ⚠ 两条真机通路都产验收裁决（run_workflow.py:37 _REAL_MACHINE_MODES={"new_example","aclnn_py"}）；
+            走错的代价：cpp 路真机 dtype 白名单只有 fp32/fp16/bf16（int32 等落 DEFERRED_NP_BY_FORM["cpp"]、真机 fail-closed）
+            → 覆盖缺一块；且性能基线对照物不同（new_example=内置 TBE、aclnn_py=同机 torch_npu），
+            「任务书对标 torch」场景走 new_example 比出来的不是任务书要的那个比较。
           Task2 真 NPU 精度 vs numpy golden + Task3 msprof kernel-only 性能 vs 基线 + 末尾统一校三级门，一次原子跑完。
 本次产出: evidence.json / verdict.json / baseline.json（有基线时）/ perf_report.json / acceptance.json；
           摘要回：acceptance.json.overall + 各维度通过数（逐字引用，不自判）。

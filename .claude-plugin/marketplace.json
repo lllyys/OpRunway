@@ -11,7 +11,7 @@
     {
       "name": "oprunway",
       "source": "./plugin",
-      "description": "NPU 算子验收 agent+skill 体系：任务书(md/链接)+PR → 编排 spec/runner 生成与验证、在已支持路径上真机跑测、出确定性裁决与报告；判定脚本按跨运行时复用设计（ADR 0007）。⚠ 早期阶段、能力有边界：用例生成内置 IsClose/Sign/Equal/Neg 四个 elementwise 算子（其余暂不支持），真机 runner 仅 float32/float16。"
+      "description": "NPU 算子验收 agent+skill 体系：任务书(md/链接)+PR → 编排 spec/runner 生成与验证、在已支持路径上真机跑测、出确定性裁决与报告；判定脚本按跨运行时复用设计（ADR 0007）。⚠ 早期阶段、能力有边界：用例生成已去引擎化（加算子 = 落一份 <ops_root>/<op>/golden.py，非改工具代码），样例 golden 现 8 份；经真 NPU 验收裁决的是 IsClose/Sign/Median(A3)、Elu/Silu(A5-950)。dtype 边界按 spec.runner_form 分派：cpp（--mode new_example）= fp32/fp16/bf16（int16/int32 属挂账集，真机 fail-closed）；aclnn_py（ctypes 两段式）= fp32/fp16/bf16/int64/int32/int16/int8/uint8/bool。catlass 通路与 bf16 精确表仍是引擎里的算子知识（已知例外）。"
     }
   ]
 }

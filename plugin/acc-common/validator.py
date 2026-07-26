@@ -32,6 +32,10 @@ ADR 0007：裁决只从这里出。ADR 0005：精度三层口径、放行只看 
    「算子实现了但跑挂了」**（该 dtype 若有真实用例在跑 → 拒绝挂账）。任一条不满足 → contract fail（不是忽略）。
 overall 优先级：`contract/fail > needs_review(uncertain) > passed_with_risk > passed_with_gaps > pass`。
 （注：`blocked` 由**门/编排层**裁定，validator **不产出** blocked——finding #11。）
+7) **只读报表 `accuracy_summary`**（L3，2026-07-25，对标 cannbot `accuracy.py:624-694`）：逐 dtype 的
+   passed/failed/errored 分桶 + 容差回显 + `overall_pass_rate`。**纯派生、零裁决权**——它读的是上面
+   已经判完的 per_case，不改任何一档结论；算它的时候出任何岔子都只影响这块报表（回落空块）。
+   口径、与 cannbot 的有意偏离、以及**当前分不出来的那一类**，逐条写在该节抬头。
 
 judge_* 入口做 metric **schema 校验**（计数=非负整数、numel=正整数、MERE/MARE=有限非负浮点）：
 非法/缺失/坏类型一律收敛到 fail（不进正常 pass、不抛异常崩溃，finding #8）。
@@ -687,6 +691,184 @@ def _dtype_gaps(spec, caseset, cases):
     return ok, probs
 
 
+# ================= 逐 dtype 精度聚合（L3 · 对标 cannbot，**纯只读派生**，2026-07-25）=========
+# 出处：参考仓 cannbot-ops-input `skills/operator-evaluation/scripts/accuracy.py:624-694` 的
+# `accuracy.by_dtype` + `overall_pass_rate`。对齐清单见 `doc/oprunway-cannbot-alignment-plan.md` L3。
+#
+# ⚠ **本节一行都不参与裁决**：只读已经成型的 `per_case` 行 + evidence 的执行信号，做一次统计聚合。
+#   三层口径（catlass_compare / standard_profile / acceptance_precision）、逐 case 的 risk/gaps、
+#   overall 的 PASS/FAIL 判定，全部不受影响；本节任何异常都被吞掉并回落空聚合（见 `_accuracy_summary`），
+#   宁可**不出这块报表**，也绝不让一块「好看的统计」把裁决拖崩或改写。
+#
+# 与 cannbot 的**有意偏离**（逐条列明，别当 bug 去「对齐」）：
+#   ① **dtype 键按「spec 派生的输出 dtype」**，cannbot 按输入 dtype（`accuracy.py:631` 的 `case["dtype"]`）。
+#      我们这是**有意的、更正确**的偏离：非同型算子（IsClose/Equal 这种 float→bool）按输入 dtype 归桶会
+#      把 bool 输出的用例记成 float 桶、还回显一份根本没用上的 float 容差。我方既定口径（同
+#      `precision_policy.derive_output_dtype` 的注释）是一切按**真实输出 dtype**，此处沿用、不回退。
+#   ② 我方多出 `uncertain` / `na` 两桶（cannbot 的数据集里每条都有数值判据，没有这两档）：
+#      `uncertain` = ecosystem_mere_mare 单标杆不过（NOT_SETTLED）；`na` = 合法地没有精度维
+#      （behavioral 算子 / 空 Tensor 功能用例 / 纯性能 case）。**单列**而不是塞进 passed 或 failed——
+#      塞哪边都是在编造一个我们没有的结论。
+#   ③ rtol/atol 只在口径确实是 allclose 类时回显，其余（exact / ascendoptest_default / mere_mare）回显
+#      null。cannbot 只有 allclose 一种口径，故它总有值；我们**不拿别的标准的阈值冒充 rtol/atol**。
+#
+# ⚠ **诚实边界（当前分不出来的一类）**：我方有一类 cannbot 根本没有的失败——**口径/身份契约不符**
+#   （三处 policy 不一致、compare_dtype 谎报、输出形状对不上、attr 伪造…）。它在已成型的 per_case 行上
+#   与「真跑了但数值错」**不可分辨**（都是 功能/精度 fail，且证据侧 status=ok、metrics 齐全）。本批
+#   把这类一并计入 `failed`（保守：都算没通过、都在分母里，绝不会抬高 pass_rate）。要真分开，必须在
+#   裁决路径上打分类标记——那就动了裁决，本批（零行为变更）明确不做，留待后续批次。
+_ACC_UNKNOWN_DTYPE = "unknown"      # dtype 派生不出来时的显式占位（**不猜**、不静默并进别的桶）
+_ACC_BUCKETS = ("passed", "failed", "errored", "uncertain", "na")
+
+
+def _empty_accuracy_summary():
+    """空聚合骨架——早退路径（spec 非对象 / caseset 结构性坏）与降级路径共用，保证 verdict 的
+    `accuracy_summary` **字段形状恒定**（下游读它时不用先判有没有）。"""
+    z = {k: 0 for k in _ACC_BUCKETS}
+    return {"total": 0, "executed": 0, **z, "overall_pass_rate": 0.0, "by_dtype": []}
+
+
+def _acc_tol_of(policy):
+    """从 canonical policy 取回显用 `(rtol, atol)`；非 allclose 类口径 → `(None, None)`。
+
+    对标 cannbot `accuracy.py:634` 的 `atol, rtol, _ = _tols(case["dtype"])`——它直接查 `_ALLCLOSE_TOLS`。
+    我方容差有多个来源（dtype 表 / 任务书 / torch 缺省，见 `precision_policy.threshold_for`），故
+    **从 canonical policy 里取已经算好的那份**，不在这里重算一遍容差（重算 = 多一条会漂移的口径）。"""
+    if not isinstance(policy, dict):
+        return (None, None)
+    if policy.get("kind") == precision_policy.TORCH_ALLCLOSE:
+        return (policy.get("rtol"), policy.get("atol"))
+    return (None, None)                 # exact / behavioral / ascendoptest_default / mere_mare：无 rtol/atol
+
+
+def _acc_dtype_and_tol(spec, spec_standard, tol_src, case):
+    """本 case 在聚合块里的 `(dtype 键, rtol, atol)`。派生**与裁决同源**（同一批 precision_policy 函数），
+    但**任何失败一律回落 `("unknown", None, None)`**——统计块绝不因为一条坏 case 抛异常拖垮裁决。
+
+    多输出算子（median 这种 values+indices）的归桶口径（cannbot 无此场景、我方自定，写明如下）：
+      · **按本 case 落地的 value-role 输出的 dtype 归桶**——index 输出的 dtype（int64）是「下标的类型」，
+        不是被判精度的数值类型，拿它归桶会凭空多出一个 int64 桶、还回显一份不存在的容差；
+      · 若一个 case 有多个 value 输出且 dtype 不同 → 键取它们**排序去重后用 `+` 连接**（如
+        `float16+float32`），**不静默取第一个**（cannbot 只比 `outputs[0]`，我方全部输出都比、
+        归桶也如实反映这一点）；容差同理，多个 value 输出容差不一致 → 回显 null 而非挑一个；
+      · 一条 case 只占**一格**（count 计 1）——我方 per_case 的精度是所有输出 AND 折叠后的**整案结论**
+        （比 cannbot 严：它只判 outputs[0]），故「passed」意味着该 case 的**每个**输出都过了。
+    """
+    unknown = (_ACC_UNKNOWN_DTYPE, None, None)
+    if not isinstance(case, dict) or spec_standard is None:
+        return unknown
+    try:
+        in_dts = _case_input_dtypes(case)
+        tol_tuple = _taskdoc_tol(spec) if tol_src == "taskdoc" else None
+        exp = case.get("expected") if isinstance(case.get("expected"), dict) else {}
+        if precision_policy.uses_output_contract(spec):
+            contracts = precision_policy.derive_output_contracts(
+                spec, in_dts, spec_standard, tol_src, tol_tuple)
+            active = precision_policy.active_output_names(
+                spec, case.get("attrs") or {}, case.get("id") or "case")
+            by_name = {ct["name"]: ct for ct in contracts}
+            vals = [by_name[n] for n in active
+                    if n in by_name and by_name[n]["role"] != precision_policy.OUT_ROLE_INDEX]
+            if not vals:
+                return unknown                        # 本 case 只落 index 输出？域外形态 → 不猜
+            key = "+".join(sorted({ct["dtype"] for ct in vals}))
+            tols = {_acc_tol_of(ct["policy"]) for ct in vals}
+            return (key, *(tols.pop() if len(tols) == 1 else (None, None)))
+        cdtype = precision_policy.derive_output_dtype(spec, in_dts)
+        # 有效标准与裁决同源（int→exact、bf16 靠 compare 收紧），保证回显的容差 == 真正判定用的那份。
+        eff = precision_policy.effective_standard(spec_standard, cdtype, exp.get("compare"))
+        return (cdtype, *_acc_tol_of(precision_policy.threshold_for(eff, cdtype, tol_src, tol_tuple)))
+    except Exception:                                 # 统计块**只读**：坏 case 归 unknown 桶，绝不外抛
+        return unknown
+
+
+def _acc_metrics_present(ev_prec):
+    """evidence 侧是否真拿到了**可比的误差数字**（多输出：逐输出都要有）。
+
+    缺 metrics ⇔ 「golden 没读成 / 误差没复算」——对标 cannbot `accuracy.py:656-659` 的
+    `golden_read_error` 归 errors 桶。"""
+    if not isinstance(ev_prec, dict):
+        return False
+    outs = ev_prec.get("outputs")
+    if isinstance(outs, list):                        # 多输出契约：以逐输出 metrics 为准（同裁决路径）
+        return bool(outs) and all(isinstance(o, dict) and isinstance(o.get("metrics"), dict) for o in outs)
+    return isinstance(ev_prec.get("metrics"), dict)
+
+
+def _acc_executed(e):
+    """该 case 是否「跑成了并产出可比结果」。对标 cannbot `accuracy.py:648`（`status != "ok"` → errored）
+    ＋ `:656-659`（golden 读不了 → errored）。evidence 缺 / status≠ok / metrics 缺 → 都不算 executed。"""
+    return (isinstance(e, dict) and e.get("status") == "ok"
+            and _acc_metrics_present(e.get("precision")))
+
+
+def _acc_classify(row, e):
+    """把一条**已裁决**的 per_case 行归进一个桶（只读 row/evidence 的既有字段，不重判、不改判）。
+
+    对标 cannbot `accuracy.py:624-626` 的两桶语义（failed=跑了但数值错 / errored=崩了或 golden 读不了）：
+      · `passed`    —— 精度=pass；
+      · `uncertain` —— 精度=uncertain（我方独有档，见本节抬头偏离②）；
+      · `na`        —— 合法地没有精度维：精度=na **且**本就不该裁精度（`_prec_expected` 由主循环按
+                       dims 标注）；「该裁精度却停在 na」不算 na（那是没判成，进 failed/errored）；
+      · `failed`    —— 跑成了、拿到可比数字，但没通过（含本节抬头说的「契约不符」那类，当前不可分辨）；
+      · `errored`   —— 压根没拿到可比结果：evidence 缺 / status≠ok（kernel 崩、调用错）/ metrics 缺。
+    ⚠ **功能维 fail 的 case 一律不得落进 passed/uncertain/na**（前置闸）。两个理由：
+      ① 与我方 overall 自洽——`_verdict` 把「功能 fail」直接计入 fails，报表却记成 passed 就是自相矛盾；
+      ② 与 cannbot 自洽——它在 `accuracy.py:648` 见到 `status != "ok"` 直接归 errors、**根本不比数值**，
+         我方却可能在功能已 fail 的行上照样算出一个「精度 pass」（如证据自报 status=error 却又带齐 metrics）。
+      这类行按证据侧信号落 failed / errored，不许拿一个孤立的精度数字冒充通过。
+    """
+    state = row.get("精度")
+    if row.get("功能") != "fail":                     # 前置闸：功能 fail 的行直接落到下方两桶
+        if state == "pass":
+            return "passed"
+        if state == "uncertain":
+            return "uncertain"
+        if state == "na" and not row.get("_prec_expected"):
+            return "na"
+    return "failed" if _acc_executed(e) else "errored"
+
+
+def _accuracy_summary(spec, spec_standard, tol_src, cases, ev_by_id, per):
+    """组装 `accuracy_summary`（逐 dtype 聚合 + 总体通过率）。对标 cannbot `accuracy.py:628-694`。
+
+    分母口径（**逐字照搬 cannbot `:667-688`**）：`total` = 全部被裁 case 数、`overall_pass_rate =
+    passed/total`——**errored 计入分母、不计入 executed**（`executed = passed + failed`，仅供参考）。
+    崩掉的 case 没产出正确结果，算子就是没过它，不许因为「它是崩的」把分母缩小。
+    我方多出的 `na` 也留在分母里（同 cannbot「分母=数据集全部 case」的口径），并**单列计数**供读者复算。
+
+    per-dtype 的 `rtol/atol` 取**该桶第一条 case** 的回显值（对标 cannbot `:635-636` 的 `setdefault`，
+    首例定值）——同一 dtype 同一 spec 下容差是确定的，除非个别 case 用 `compare=exact_equal` 收紧到 exact。
+    """
+    try:
+        valid = [c for c in cases if isinstance(c, dict) and c.get("id")]
+        # 主循环对每条**合法** case 恰好 append 一行，故按序 zip 即精确配对（比按 case_id 建映射更准：
+        # 重复 case_id 时映射会张冠李戴）。万一长度对不上（理论不会），降级成「全部归 unknown 桶」——
+        # 计数仍然对，只是分不出 dtype，绝不悄悄错位配对。
+        pairs = list(zip(valid, per)) if len(valid) == len(per) else [(None, r) for r in per]
+        buckets = {}
+        for c, row in pairs:
+            key, rtol, atol = _acc_dtype_and_tol(spec, spec_standard, tol_src, c)
+            b = buckets.get(key)
+            if b is None:                             # 首例定容差（cannbot accuracy.py:635-636 setdefault）
+                b = buckets[key] = {"count": 0, "rtol": rtol, "atol": atol,
+                                    **{k: 0 for k in _ACC_BUCKETS}}
+            b["count"] += 1
+            b[_acc_classify(row, ev_by_id.get(row.get("case_id")))] += 1
+        rows = [{"dtype": name, "count": b["count"],
+                 **{k: b[k] for k in _ACC_BUCKETS},
+                 "atol": b["atol"], "rtol": b["rtol"],
+                 "pass_rate": (b["passed"] / b["count"] if b["count"] else 0.0)}
+                for name, b in sorted(buckets.items())]      # cannbot accuracy.py:689-694 同样 sorted
+        agg = {k: sum(b[k] for b in buckets.values()) for k in _ACC_BUCKETS}
+        total = sum(b["count"] for b in buckets.values())
+        return {"total": total, "executed": agg["passed"] + agg["failed"], **agg,
+                "overall_pass_rate": (agg["passed"] / total if total else 0.0),
+                "by_dtype": rows}
+    except Exception:                                 # 只读报表塌了也绝不影响裁决：出空块、如实为 0
+        return _empty_accuracy_summary()
+
+
 # ------------------------------------------------------- 空 per_case 的骨架 ---
 def _empty_row(cid):
     return {"case_id": cid, "功能": "na", "精度": "na", "性能": "na",
@@ -696,7 +878,7 @@ def _empty_row(cid):
 
 
 def _verdict(op, vm, spec_standard, problems, per, gaps=None, scaled=None, golden_tiers=None,
-             golden_judged_from="caseset_self_declared"):
+             golden_judged_from="caseset_self_declared", accuracy_summary=None):
     fails = [p for p in per if p["功能"] == "fail" or p["精度"] == "fail"]
     # finding #9：standard 或 acceptance 任一 uncertain 都要计入 needs_review（不被 acceptance pass 吞）。
     unc_ids, seen = [], set()
@@ -750,6 +932,10 @@ def _verdict(op, vm, spec_standard, problems, per, gaps=None, scaled=None, golde
     return {"op": op, "verify_mode": vm, "standard": spec_standard,
             "contract_problems": problems, "per_case": per,
             "catlass_compare_na": catlass_na,
+            # L3（2026-07-25）：逐 dtype 精度聚合 + 总体通过率，**纯只读派生**、不参与上面任何判定。
+            # 早退路径（spec 坏 / caseset 结构性坏）拿不到聚合 → 出空块，保证字段形状恒定（下游不用判有无）。
+            "accuracy_summary": accuracy_summary if isinstance(accuracy_summary, dict)
+                                else _empty_accuracy_summary(),
             "overall": {"verdict": overall, "uncertain": unc_ids, "risk": risks,
                         # gap 原样带出处一起进产物——「有据可查」要能被下游报告/人工复核直接读到。
                         "gaps": gaps,
@@ -986,9 +1172,13 @@ def validate(spec, caseset, evidence):
                   for c in cases]
     _eff_tiers, _gp, _judged_from = _reconcile_golden("golden" in spec, spec.get("golden"), _raw_tiers)
     problems = problems + _gp
+    # L3 · 逐 dtype 精度聚合（只读）：**必须在 _verdict 之前算**——`_prec_expected` 这枚内部标记由
+    # `_verdict` 从行里剥除，分桶要用它区分「合法无精度维(na)」与「该裁精度却停在 na」。
+    _acc = _accuracy_summary(spec, spec_standard, tol_src, cases, ev_by_id, per)
     return _verdict(op, vm, spec_standard, problems, per, gaps,
                     scaled=_scaled if isinstance(_scaled, list) else None,
-                    golden_tiers=_eff_tiers, golden_judged_from=_judged_from)
+                    golden_tiers=_eff_tiers, golden_judged_from=_judged_from,
+                    accuracy_summary=_acc)
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")

@@ -29,7 +29,18 @@ agent 内部完成六步（取材 → 任务书→spec → 生成并验证 runne
 
 - **mock 端到端可用**（无需真机）；**真机跑测**需开 VPN + runner 验证。
 - runner 生成当前闭环 = ops-<族> 仓·aclnn 两段式·opp 安装型（含非 experimental 子树）（catlass/非 aclnn/双实现待扩，见 doc/oprunway-batch6b-design.md）；「验证-才-信」是**纪律**非代码硬门（sidecar 待补）。
-- 已端到端跑通管路的算子：IsClose / Sign / Equal / Neg。⚠ 其中经**真 NPU 验收裁决**的只有 IsClose / Sign；
+- **加算子不改工具代码**：用例生成已去引擎化（PR #7 runner / PR #8 golden），加算子 = 在 `<ops_root>/<op>/golden.py`
+  落一份 golden。⚠ 仅指 **elementwise 通路**；`catlass_adapter` 的内置 matmul golden 与 `gen_cases._BF16_EXACT_OPS`
+  仍是引擎里的算子知识（两处已知例外，如实记账）。样例 golden 现 8 份
+  （Equal / Im2col / IsClose / Median / Neg / Sign / UpsampleNearest3d / UpsampleNearestExact2d）。
+- **经真 NPU 验收裁决的算子**：IsClose / Sign（A3）· **Median（A3，PR6429，精度 56/56 PASS）** · Elu / Silu（A5-950，18/18 非空例）。
+  ⚠ **Median 的性能维仍 BLOCKED**（msprof 采集问题、非 PR 缺陷）——精度已出裁决、性能没有。
   mock 通路自 C5（2026-07-22）起**不产验收裁决**（只产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）。
+- **dtype 边界按通路分**（`repo_adapter.SUPPORTED_NP_BY_FORM`，按 `spec.runner_form` 分派）：
+  · `cpp`（= `--mode new_example`，编译 per-op C++ runner 跑）→ **float32 / float16 / bfloat16** 三种
+  （bf16 逻辑 = fp32-on-grid，2026-07-16 在真 a3 验收通过）；int16/int32 属 Track C **挂账集**
+  （`DEFERRED_NP_BY_FORM`）——生成期能造用例、**真机跑到仍 fail-closed**，spec 须以 `task_pr_gaps.dtype_deferred` 显式挂账。
+  · `aclnn_py`（= `--mode aclnn_py`，通用 ctypes 两段式调 `.so`）→ fp32 / fp16 / bf16 / int64 / int32 / int16 / int8 / uint8 / bool，**无挂账项**；
+  Median 的声明 dtype（fp32/fp16/bf16/int32）已全部真机跑过。
 
 > 设计/契约见 `../doc/oprunway-design.md`；改动流水见 `../doc/oprunway-changes-brief.md`；TODO 见 `../doc/oprunway-todo.md`。

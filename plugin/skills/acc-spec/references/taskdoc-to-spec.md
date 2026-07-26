@@ -341,6 +341,15 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 
 1. 在**递归发现的接口头**（`<op_subdir>` 下有界递归找到的 `aclnn_*.h`，剔 `*_impl.h`；**不得预设目录层级**，见 §1.3.1）里
    列出该算子**全部**两段式入口，记下每个入口的**形参顺序**。
+   > 🔴 **每个 `symbol` 必须是 PR 的被测 `.so` 真正导出的符号**（在**本 PR 自带的 header**里、且 build 后 `nm -D <libcust_opapi.so>` 里有）。
+   > **绝不能**从「任务书点名的 API」或「参考实现/master 的既有 API 表面」抄符号——**任务书说支持两个入口 ≠ PR 就实现了两个入口**。
+   > PR 常把多个语义**合并进一个符号**（靠某 attr / 某输出是否为空区分），或改名/加 `V2`/`V3` 后缀。
+   > **判错的代价是「验的不是 PR、是 CANN 内置同名实现」的假 PASS**——2026-07-25 median 血教训：任务书写「支持 aclnnMedian、aclnnMedianDim」、
+   > 参考实现（gather_v2）确有两个独立 API，acc-spec 便据此写了 `Median`(全局)+`MedianDim`(按维) 两个符号；
+   > 但 **PR6429 把两者统一进一个 5 参 `aclnnMedian`**（全局=`indicesOut` 空、按维=`indicesOut` 非空），`.so` **不导出 `aclnnMedianDim`**。
+   > 结果：`MedianDim` 变体在旧（宽松）档下**静默命中了 CANN 内置 `aclnnMedianDim`**、by-dim 用例其实没验 PR（严格档 `is_dut` 门已封死此路，build 时 `NOSYM` fail-closed）。
+   > **正解**：两个变体都路由到 PR 真有的那个 `Median`，用 `active_outputs`（index 落不落地=`out_null`）区分全局/按维；「PR 未单独提供 aclnnMedianDim」记进 `task_pr_gaps.api_surface_mismatch`（是 API 表面差异、非功能缺失）。
+   > 拿不到 PR 自带 header 或 build 产物来核符号 → **fail-closed 问用户**，别按任务书猜。
 2. 对每个入口写一条变体：
    - `symbol` = **CamelCase 基名**（去 `aclnn` 前缀、去 `GetWorkspaceSize` 后缀）。真符号由运行时拼成
      `aclnn<symbol>GetWorkspaceSize` / `aclnn<symbol>`。
@@ -579,7 +588,7 @@ exact 走 mismatch），再要求 spec/caseset/evidence 三处一致。所以 th
 
 | 缺什么 | 兜底 |
 |---|---|
-| **dtype 列表** | **⚠ 绝不来自被测 PR。来源优先级：任务书显式 dtype 表/规格 > 原 TBE 算子信息库（`opp/built-in/.../tbe/config/<soc>` ops-info，独立于被测 PR）> 问用户**。① 任务书有明确 dtype 表→用它（权威）。② 只写『支持所有类型』/缺→取原 TBE 信息库历史支持集作全集（独立源）。**⚠ 该独立源当前未接通**（`fetch_source` 不取该文件；且读法随运行环境变——skill 可能跑在服务器本地可直读 / 跑 Mac 需 ssh / 需 ssh 再进 docker，接通时须**探测环境、不写死 ssh**，列为 TODO）→ **接通前一律回退问用户、绝不回退读 PR**。③ **PR 的 `*_def.cpp` op_def 仅作对照**：读它只为与任务书全集比对（例 equal_def {FLOAT16,BF16,FLOAT,INT8,UINT8,INT32,UINT32}），PR 声明 < 任务书全集 → 记 `task_pr_gaps`（Fmod 式『PR 缩 dtype』缺口，**按 §1.2 写成结构化 `dtype_unsupported_by_op_def` 条目：带 `task_doc_ref` + `op_def_ref` + `op_def_dtypes`，有据可查**）；**绝不把 PR op_def 当全集权威**。④ 全新算子（`change.kind=new_op`，built-in 无条目）→ 直接问用户。⑤ **⚠ `params.dtype` 只填端到端 pipeline 支持子集 = float32/float16**（gen_cases 另可造 int32，但 new_example runner 跑不了 int32 → int32 属 Track C、**不进 `params.dtype`**、连全集一起记 gap）——**不支持的 dtype 不进 `params.dtype`（否则 gen_cases/runner 崩）**，任务全集与不支持项记 `task_pr_gaps`『任务需 {…}、pipeline 暂支持 {…}、余待扩』。⑥ add_dtype 的新 dtype：**支持才进 `params.dtype`**，否则只记 `change.dtypes_added` + gap（工具未支持前不宣称会真测）|
+| **dtype 列表** | **⚠ 绝不来自被测 PR。来源优先级：任务书显式 dtype 表/规格 > 原 TBE 算子信息库（`opp/built-in/.../tbe/config/<soc>` ops-info，独立于被测 PR）> 问用户**。① 任务书有明确 dtype 表→用它（权威）。② 只写『支持所有类型』/缺→取原 TBE 信息库历史支持集作全集（独立源）。**⚠ 该独立源当前未接通**（`fetch_source` 不取该文件；且读法随运行环境变——skill 可能跑在服务器本地可直读 / 跑 Mac 需 ssh / 需 ssh 再进 docker，接通时须**探测环境、不写死 ssh**，列为 TODO）→ **接通前一律回退问用户、绝不回退读 PR**。③ **PR 的 `*_def.cpp` op_def 仅作对照**：读它只为与任务书全集比对（例 equal_def {FLOAT16,BF16,FLOAT,INT8,UINT8,INT32,UINT32}），PR 声明 < 任务书全集 → 记 `task_pr_gaps`（Fmod 式『PR 缩 dtype』缺口，**按 §1.2 写成结构化 `dtype_unsupported_by_op_def` 条目：带 `task_doc_ref` + `op_def_ref` + `op_def_dtypes`，有据可查**）；**绝不把 PR op_def 当全集权威**。④ 全新算子（`change.kind=new_op`，built-in 无条目）→ 直接问用户。⑤ **⚠ `params.dtype` 只填端到端 pipeline 支持子集；而这个子集**按 `runner_form` 分、**不是全局常量**（真源 `repo_adapter.SUPPORTED_NP_BY_FORM` / `DEFERRED_NP_BY_FORM`，按**能力 / 形态**分、非按算子身份）：**·`runner_form=cpp`（缺省，下游派生 `--mode new_example`）→ float32/float16**（bf16 须逐算子确认真机 kernel，未证实一律 deferred）；`int16`/`int32` 属 Track C 挂账集（gen_cases 造得出、**真机跑到 fail-closed**）→ **不进 `params.dtype`**、连全集一起记 gap。**·`runner_form=aclnn_py`（下游派生 `--mode aclnn_py`）→ 白名单据 form 放开**（fp32/fp16/bf16/int64/int32/int16/int8/uint8/bool，**无挂账项**，见 §1.3.1）→ **int32 这类该进就进 `params.dtype`，别拿 cpp 的边界去砍**（median 声明的 int32 正是走 `aclnn_py` 在真机跑过的；照 cpp 口径砍 = 静默少测一块覆盖）——**不支持的 dtype 不进 `params.dtype`（否则 gen_cases/runner 崩）**，任务全集与不支持项记 `task_pr_gaps`『任务需 {…}、pipeline 暂支持 {…}、余待扩』。⑥ add_dtype 的新 dtype：**支持才进 `params.dtype`**，否则只记 `change.dtypes_added` + gap（工具未支持前不宣称会真测）|
 | threshold 数值 | 按 §3 主 dtype 惯例填 + 标 (推断)；或留空走 needs_review；per_dtype 复杂→问用户/查工具 |
 | verify_mode | 按 §2 决策树推断 |
 | **aclnn 入口/语义**（③ runner 锚定用）| **从 `pr_facts.key_files` 里算子自带 example(`test_aclnn_*.cpp`) 读真实调用的 aclnn 函数 + 输入 dtype**——runner 必须锚定它，别凭 header 猜（Equal 曾因猜错入口/dtype 翻车）|

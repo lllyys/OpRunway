@@ -12,9 +12,9 @@ tools: Bash, Read, Write, Edit, Skill
 
 **为什么两件事在同一个 agent**：`golden.py` 与 `runner.cpp` 都是**会被执行的代码**、同信任级（ADR 0011 决策 6），都靠「锚定权威来源、不猜」这条同款纪律守；`acc-spec-extractor` 产的是 JSON 数据、且带禁读纪律，不承担代码产出。
 
-**判定脑子不在这**：算子验收的 pass/fail 唯一归确定性脚本链（`validator.py` 精度 + `perf_compare.py` 性能 + `validate_acceptance_state.py` 三级门 → 门控后写 `acceptance.json`，ADR 0007；⚠ **仅真机验收通路**——mock 侧 C5 起只产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）。本 agent **不自行判算子 pass/fail**；`verify_runner` 判的是「runner 自身可信 / 未过」这道 **runner 自证门**（逐元素比手算 golden），与算子验收裁决是两回事，别混。
+**判定脑子不在这**：算子验收的 pass/fail 唯一归确定性脚本链（`validator.py` 精度 + `perf_compare.py` 性能 + `validate_acceptance_state.py` 三级门 → 门控后写 `acceptance.json`，ADR 0007；⚠ **仅真机验收通路**——`--mode new_example` / `--mode aclnn_py` **两条都是**，mock 侧 C5 起只产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）。本 agent **不自行判算子 pass/fail**；`verify_runner` 判的是「runner 自身可信 / 未过」这道 **runner 自证门**（逐元素比手算 golden），与算子验收裁决是两回事，别混。
 
-设 `${CLAUDE_PLUGIN_ROOT}` = 本插件根。全程中文。真机编译/跑测是副作用，先确认用户已开 NPU/VPN（ascend-a5 真 950 / a3 A2A3）。
+设 `${OPRUNWAY_PLUGIN_ROOT}` = 本插件根，**跨 CLI 中立主变量**；Claude Code 下等价 `${CLAUDE_PLUGIN_ROOT}`（harness 自动设），**Codex 等其它运行时须自己显式 `export OPRUNWAY_PLUGIN_ROOT=<插件根>`**。可执行命令里一律写自兜底形式 `${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`——两种运行时都能跑、不依赖谁先记得 export；两个都没设 → 路径为空、当场报错（fail-closed），不静默跑错。全程中文。真机编译/跑测是副作用，先确认用户已开 NPU/VPN（ascend-a5 真 950 / a3 A2A3）。
 
 ## Scope gate（先过，不硬塞）
 
@@ -59,8 +59,8 @@ scope gate 的**第一闸**改由 `pr_facts.interface_kind` 驱动——`fetch_s
 | dispatch_mode | 输入工件 | 干什么 | 本次产出 / 回摘要 |
 |---|---|---|---|
 | **gen_golden**（CP-B，不需 NPU）| `task_doc.md`（①fetch_source 产）+ `<op>.spec.json`（②acc-spec 产）| 先把**任务书全文快照**入库（`fetch_source.py --snapshot-into <ops_root>/<op>/`），再按 **R3 两档链**定真值口径 → 产 `<ops_root>/<op>/golden.py`（`golden_fn` + `GOLDEN_SOURCE` + `GOLDEN_PROVENANCE` + `GOLDEN_CONTRACT`，非 elementwise 再加 `out_shape`）→ 跑 `check_golden.py <Op>` 自检 | golden.py 路径 + **档位（tier 1..4）** + 是否要人核 + `blocked_reason` + 快照 sha256；摘要报「口径取自任务书哪句（逐字引文 + 行号）、后端选了谁、自检退出码」，**不宣称数值已验证** |
-| **gen_runner** | `<op>.spec.json`（②acc-spec 产）+ `pr_facts.json`（①fetch_source 产，含算子自带 `test_aclnn_*.cpp` + `*_def.cpp`）| **先过 scope gate**；据 spec + example **锚定生成** `oprunway_<op.lower()>_runner.cpp`（拷固定 I/O 骨架，只填四槽：A aclnn 头 / B 输入数+attr / C 输出 dtype / D aclnn 两段调用——**全从 example 抠**）；**选构建路径**（确定性，据 `target_dir` 定 build flags）| runner 文件路径 + 构建路径配置（`OPRUNWAY_OPS_REPO/SOC/VENDOR/OP` 等）+ 落差 gap；摘要报「填了哪四槽、来源 example、构建路径、有无 gap」，**不宣称已验证** |
-| **verify_runner** | 上一步的 runner + `spec`（dtype/verify_mode）+ 真机 NPU | **验证-才-信**（真机）：编出 runner → 造 1–2 个**手算 golden 的小 case** → 喂 **custom exe** 跑 → 检查 `rc==0` + `OPRUNWAY_DONE total=n ok=n fail=0` + `out.bin` 字节数 = **输出** numel×sizeof(输出元素)（非 elementwise 时**输出 numel ≠ 输入 numel**，按 `out_shape` 算）+ 值**逐元素等于手算 golden** | runner 自证结论 `verified` / `unverified` + 手算 case 证据；摘要报「小 case、期望 vs 实测、是否逐元素相等、结论」 |
+| **gen_runner**（⚠ **只对 `spec.runner_form == "cpp"`（或未声明）派发**；`aclnn_py` 形态无 per-op runner 源 → 根本不派本 mode）| `<op>.spec.json`（②acc-spec 产）+ `pr_facts.json`（①fetch_source 产，含算子自带 `test_aclnn_*.cpp` + `*_def.cpp`）| **先过 scope gate**；据 spec + example **锚定生成** `oprunway_<op.lower()>_runner.cpp`（拷固定 I/O 骨架，只填四槽：A aclnn 头 / B 输入数+attr / C 输出 dtype / D aclnn 两段调用——**全从 example 抠**）；**选构建路径**（确定性，据 `target_dir` 定 build flags）| runner 文件路径 + 构建路径配置（`OPRUNWAY_OPS_REPO/SOC/VENDOR/OP` 等）+ 落差 gap；摘要报「填了哪四槽、来源 example、构建路径、有无 gap」，**不宣称已验证** |
+| **verify_runner**（⚠ 同上，**只对 `cpp` 形态**；`aclnn_py` 无源可自检 → 跳过本 mode，改由 CP-C 的 **harness 真机信任门**接住，**不是免验证**）| 上一步的 runner + `spec`（dtype/verify_mode）+ 真机 NPU | **验证-才-信**（真机）：编出 runner → 造 1–2 个**手算 golden 的小 case** → 喂 **custom exe** 跑 → 检查 `rc==0` + `OPRUNWAY_DONE total=n ok=n fail=0` + `out.bin` 字节数 = **输出** numel×sizeof(输出元素)（非 elementwise 时**输出 numel ≠ 输入 numel**，按 `out_shape` 算）+ 值**逐元素等于手算 golden** | runner 自证结论 `verified` / `unverified` + 手算 case 证据；摘要报「小 case、期望 vs 实测、是否逐元素相等、结论」 |
 
 ### gen_golden 纪律（golden 来源契约）
 
@@ -104,5 +104,5 @@ scope gate 的**第一闸**改由 `pr_facts.interface_kind` 驱动——`fetch_s
 - skill：`skills/acc-runner/SKILL.md`（展开逻辑）+ `references/runner-skeleton.md`（契约 · 固定框架 · 四槽填法 · 构建路径 · 验证门 · 自检）+ `references/golden-authoring.md`（`gen_golden` 手册）。
 - 脚本：`acc-common/check_golden.py`（golden 来源契约自检，退出码 0/2/1）、`acc-common/fetch_source.py --snapshot-into`（任务书快照入库）。
 - 上游：`acc-spec-extractor:extract_spec`（产 spec）、`fetch_source.py`（产 task_doc.md + pr_facts）。
-- 下游：`gen_golden` → primary 在 CP-B 跑 `gen_cases.py --dry-run`；runner 验证通过 → 由 `acc-verify-rootcause:run_npu` 在 CP-D 走 `run_workflow.py --mode new_example`（Task2 精度 + Task3 性能 + 三级门一次成）。
+- 下游：`gen_golden` → primary 在 CP-B 跑 `gen_cases.py --dry-run`；CP-C 自证门过（`cpp` 形态 = runner 过 `verify_runner`；`aclnn_py` 形态 = harness 真机信任门过且留证）→ 由 `acc-verify-rootcause:run_npu` 在 CP-D 走 `run_workflow.py --mode <mode>`（`<mode>` 据 `spec.runner_form` 派生：cpp（或未声明）→ `new_example`、`aclnn_py` → `aclnn_py`；`mock` / `catlass` / `catlass_mock` 派生不出、须显式指定。Task2 精度 + Task3 性能 + 三级门一次成）。
 - 编排：`op-acceptance`（primary，`acceptance-workflow` skill 的 CP-C）。

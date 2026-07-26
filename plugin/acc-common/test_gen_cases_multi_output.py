@@ -471,7 +471,13 @@ class AclnnCallPerCaseTest(unittest.TestCase):
     非 active 的 out 写成 out_null。**绝不把 None 兜成标量默认值**；无匹配变体 → fail-closed。"""
 
     def test_real_median_spec_resolves_two_variants(self):
-        """真 median spec：dim=null → 全局符号 + 无标量槽 + 单输出；dim 有值 → by-dim 符号 + 双输出。"""
+        """真 median spec：dim=null → 无标量槽 + 单输出（indices 走 out_null）；dim 有值 → 双 attr 槽 + 双输出。
+
+        ⚠ 2026-07-25 订正：两个变体的 symbol **都是 `Median`**。PR6429 实测是「单符号 + 固定签名 +
+        NULL 输出区分全局/按维」——DUT `.so` 根本不导出 `aclnnMedianDim`（那是 CANN 内置）。
+        原版把 by-dim 断言成 `MedianDim`，会把「验的其实是内置、不是 PR」这条假 DUT 通道钉成期望值。
+        本用例现同时作该回归的 pin：**by-dim 绝不许再路由到 DUT 未导出的符号**。
+        （变体机制本身的通用性由 `test_gen_cases_attaches_per_case_call` 用假 spec 覆盖，此处只钉真 spec。）"""
         spec = json.load(open(_MEDIAN_SPEC))
         variants = GC._call_variants(spec)
         g = GC._select_call_variant(variants, {"dim": None, "keepdim": False}, "cid")
@@ -484,11 +490,11 @@ class AclnnCallPerCaseTest(unittest.TestCase):
             {"role": "out_null", "name": "indices"},
         ]})
         d = GC._select_call_variant(variants, {"dim": 1, "keepdim": False}, "cid")
-        self.assertEqual(d["symbol"], "MedianDim")
+        self.assertEqual(d["symbol"], "Median")          # 单符号：与全局变体同符号，靠 indices 是否为空区分
         call_d = GC._build_aclnn_call(spec, d, {"dim": 1, "keepdim": False},
                                       ["values", "indices"], "cid")
         # slots 顺序 = spec.params 顺序 = aclnn 签名顺序；每个 slot 带 name（供与 header 逐项对账）。
-        self.assertEqual(call_d, {"symbol": "MedianDim", "slots": [
+        self.assertEqual(call_d, {"symbol": "Median", "slots": [
             {"role": "in", "name": "self", "input_idx": 0},
             {"role": "attr", "name": "dim", "ctype": "int64", "value": 1},
             {"role": "attr", "name": "keepdim", "ctype": "bool", "value": False},

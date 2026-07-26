@@ -114,6 +114,24 @@ G4 · 归约/成对类算子的**生成期规模预算**（2026-07-22，落地�
     作配对键（`_unpaired_combo_classes`）——按 shape 结构类判会把 `shape=(4,1), dim=0`（归约轴其实长 4）
     误记成「已配上单位轴」（漏报），反向又会对该 rank 下已越界的轴值报出不可实现的缺口（误报）。
     普通非轴 attr 仍走 shape 结构类口径。
+
+造例档位 `spec.precision.case_profile` —— **能力档位开关**（字段驱动、op-中立；2026-07-25 引入，
+落地见各处 `CP:` 标记）：
+  · **为什么要它**：把本引擎的造例规则**忠实对齐**参考仓 `Justbin/cannbot-ops-input`（完整笛卡尔精度网格、
+    medium shape 档、normal 值域重采样、4-kind 非有限特殊值 …）会**改掉默认造例行为**——而 4 个已真机
+    验收的 elementwise 算子（IsClose/Sign/Equal/Neg）的 caseset 与全部 .npy 是**逐字节钉死**的
+    （sha256 实测，见 `test_gen_cases_dtype_attr.ExistingOpsByteIdenticalTest`）。所以**先立一道字段驱动的
+    档位开关**，后续所有对齐改动一律只在新档位下生效，老算子的字节纹丝不动。
+  · **受控词表**（两档，无第三种；实现见 `_case_profile` / `_case_profile_declared`）：
+      - `legacy` —— 现行造例规则；**整字段省略即此**，逐字节等于本字段引入前；
+      - `torch_parity` —— 忠实对齐参考仓的造例规则，**仅**用于「任务书对标 torch」场景（不碰 catlass 通路）。
+  · **律令 #0 合规**：这是按 **spec 声明的能力档位**分支，**不是按算子名**——换任意声明了 `torch_parity`
+    的域内算子，工具零改即用；代码里没有也不许有 `if op == "<算子名>"`。
+  · **本批（批 A）只立开关、不改行为**：`_plan` 读出档位放进 `meta`，caseset **只在 spec 显式声明时**多出
+    一个 `case_profile` 账本键；造例逻辑一行不改（对齐动作全部排在批 B）。故 `legacy` 与「未声明」产出的
+    `cases` 完全相同、只差这一个账本键——测试以此为 pin（`test_gen_cases_case_profile.py`）。
+  · 词表外取值 / 非字符串（含**显式 `null`**）→ fail-closed：档位猜错 = 整份用例集悄悄换一套规则，
+    比报错贵得多。
 """
 import collections, hashlib, importlib.util, json, math, os, sys
 import numpy as np
@@ -466,6 +484,59 @@ def _emits_nonfinite(op_class):
     `None`（未声明）→ **True**：向后兼容硬约束——现有 4 个算子（isclose/sign/equal/neg）都没声明，
     它们的 caseset 与 .npy 必须逐字节不变（已用 sha256 实测钉住，非推断）。"""
     return op_class is None or op_class in _NONFINITE_CLASSES
+
+
+# ================= CP: case_profile —— 造例规则的**能力档位**（受控词表）====================
+# 详见模块 docstring「造例档位 case_profile」一节（含引入动机与字节安全依据）。
+# ⚠ 这是**字段驱动**：引擎只读 spec 里这个词，**绝不按算子名分支**（律令 #0）。
+_CASE_PROFILES = ("legacy", "torch_parity")
+# 未声明时的缺省档 = 现行造例规则（向后兼容硬约束：老算子 caseset 逐字节不变）。
+_DEFAULT_CASE_PROFILE = "legacy"
+
+
+def _case_profile(spec):
+    """spec.`precision.case_profile` → 受控词表值；**整字段省略 → `"legacy"`**（= 现行为，向后兼容硬约束）。
+
+    **provenance（这条规则抄自哪、我们为何偏离）**：参考仓 `Justbin/cannbot-ops-input`（本项目 case 生成规则
+    要求参照的仓）**没有**这个字段——它整仓只跑一套造例规则，不需要向后兼容。**我们需要**：本引擎的造例
+    默认行为被 4 个已真机验收的 elementwise 算子（IsClose/Sign/Equal/Neg）**逐字节钉死**
+    （`test_gen_cases_dtype_attr.ExistingOpsByteIdenticalTest` 的 sha256 pin，实测非推断），
+    照搬参考仓规则会当场破 pin。故我们自造这道**能力档位开关**，把「忠实对齐」关进新档里：
+
+      · `legacy`       —— 现行造例规则（= 整字段省略时的缺省），逐字节等于本字段引入前；
+      · `torch_parity` —— **忠实对齐** `repos/cannbot-ops-input` 的造例规则（完整笛卡尔精度网格、
+                          medium shape 档、normal 值域重采样、4-kind 非有限特殊值…），
+                          **仅**用于「任务书对标 torch」场景，不影响 catlass 通路。
+
+    ⚠ **律令 #0 合规**：按「spec 声明的**能力档位**」分支，**不是按算子名**——换任意声明了 `torch_parity`
+      的域内算子，工具零改即用；per-op 的 spec 只是被通用引擎消费的**数据**。
+    ⚠ 词表外取值 / 非字符串（**含显式 `null`**：字段一旦出现就必须是词表内的字符串，同
+      `precision.tolerance_source` 的口径）→ fail-closed。档位猜错的代价是「整份用例集悄悄换了一套规则」，
+      远贵于报错；拿不准就**整字段省略**（= legacy = 现行为），别编词表外的值。"""
+    prec = spec.get("precision") or {}
+    if "case_profile" not in prec:                       # 整字段省略 = 未声明 → 现行为
+        return _DEFAULT_CASE_PROFILE
+    raw = prec["case_profile"]
+    if not isinstance(raw, str) or raw not in _CASE_PROFILES:
+        raise ValueError(
+            f"spec.precision.case_profile={raw!r} 不在受控词表 {list(_CASE_PROFILES)} 里 —— fail-closed，不猜。\n"
+            f"  · 'legacy'       —— 现行造例规则（= 整字段省略时的缺省；已验收算子的 caseset 逐字节不变靠它）；\n"
+            f"  · 'torch_parity' —— 忠实对齐参考仓 cannbot-ops-input 的造例规则，"
+            f"仅『任务书对标 torch』场景用。\n"
+            f"  字段一旦出现就必须是这两个字符串之一（写 null / \"\" / 数字一律拒，"
+            f"同 precision.tolerance_source 的口径）；拿不准就**整字段省略**。")
+    return raw
+
+
+def _case_profile_declared(spec):
+    """spec 是否**显式声明**了 `precision.case_profile`（不是「解析出来等于 legacy」）。
+
+    为什么单独要这个信号：`_case_profile` 给未声明的 spec 兜的是 `"legacy"`，光看返回值分不出
+    「没写」与「写了 legacy」。而 caseset 的账本键**只在写了的时候才落**——现有样例 spec 一个都没写，
+    产物里因此**不许**多出这个键（字节安全的关键，同 `operator_class` 的处理）。
+    顺手把词表校验过一遍：单独调用本函数时非法值同样当场炸，不留「只问声明与否就绕过校验」的口子。"""
+    _case_profile(spec)
+    return "case_profile" in (spec.get("precision") or {})
 
 
 # ============================ value_profile 受控数值生成（借参考仓 generate_array，op-中立）=========
@@ -1709,7 +1780,10 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
     强制项按它保 numel 调维。
     G4：`cost_fn`（`_make_cost_fn` 造，据 C1 的 out_shape 推）非空时行使 **golden 生成期规模预算**——
     强制项降规模、网格项剔除，全部记进 `meta["golden_cost"]`。`cost_fn=None`（如 dry-run 加载不到 golden.py）
-    → **完全不行使**，行为与 G4 之前逐字节一致，且账本里 model 标「未核」而非谎称已核。"""
+    → **完全不行使**，行为与 G4 之前逐字节一致，且账本里 model 标「未核」而非谎称已核。
+    CP：`spec.precision.case_profile` 在此**读一次**（词表外取值当场 fail-closed）并落进
+    `meta["case_profile"]` / `meta["case_profile_declared"]`。**本批只记账、不据它分任何支**——
+    对齐参考仓造例规则的改动排在批 B，届时一律 gate 在 `torch_parity`。"""
     arity = len(in_params)
     ranks = _allowed_ranks(in_params)                    # C3：None=不限制（现行为）
     reg_shapes, large_shapes = _shape_ladder(ranks)      # 过滤后无合法常规 shape → 已 fail-closed
@@ -1729,6 +1803,12 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
     # OC：算子类别 → 特殊值口径（受控词表；未声明=None=现行为）。词表外取值在此当场 fail-closed。
     op_class = _operator_class(spec)
     emit_nonfinite = _emits_nonfinite(op_class)
+    # CP：造例档位（受控词表；未声明 = legacy = 现行为）。本批**只读出来记账、不改任何造例逻辑**——
+    # 对齐参考仓造例规则的改动全部排在批 B，且一律 gate 在 `torch_parity` 分支，legacy 侧字节不动。
+    # 在这里读（而不是各处现用现读）是为了「一次解析、一处 fail-closed」：词表外取值在此当场炸，
+    # gen_cases 与 _dry_run 两条路径都经过 `_plan`，非法档位没有绕过口。
+    case_profile = _case_profile(spec)
+    case_profile_declared = _case_profile_declared(spec)
     forced, grid = [], []
     # ① §1.4 特殊场景（每 dtype 强制；id_kind 独立命名空间，评审 #8）
     for dtn in dtypes:
@@ -1863,6 +1943,11 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
         # 报告侧读这里就能如实说「结构类算子按方法学不喂 NaN·Inf」，不必事后人肉数 case。
         "operator_class": op_class,
         "emits_nonfinite_specials": emit_nonfinite,
+        # CP 账本：这批用例按哪个**造例档位**产的，以及 spec 有没有**显式**声明该档位。
+        # 两个字段缺一不可：`case_profile` 未声明时兜的是 "legacy"，靠它分不出「没写」与「写了 legacy」，
+        # 而 caseset 的账本键只在**写了**的时候才落（老算子产物不许多出一个键，字节安全硬约束）。
+        "case_profile": case_profile,
+        "case_profile_declared": case_profile_declared,
         "forced_total": len(forced),          # 强制下限 S = 特殊场景 + 白名单（emit 不会少于此；acc-spec 取此作 S）
         "dropped_combo_classes": (_dropped_classes(grid, entries)
                                   if emitted_from_grid < grid_avail else []),
@@ -2381,6 +2466,12 @@ def gen_cases(spec, work_dir):
             **({"operator_class": plan_meta["operator_class"],
                 "emits_nonfinite_specials": plan_meta["emits_nonfinite_specials"]}
                if plan_meta["operator_class"] is not None else {}),
+            # CP 账本：**仅在 spec 显式声明了 precision.case_profile 时才出现**（同 operator_class 的处理）——
+            # 未声明的算子 caseset 逐字节不变（向后兼容硬约束：现有样例 spec 一个都没声明，
+            # 多一个键就破 `ExistingOpsByteIdenticalTest` 的 sha256 pin）。
+            # 声明了就把「这批用例是按哪个造例档位产的」如实落进产物，报告侧不必回头猜。
+            **({"case_profile": plan_meta["case_profile"]}
+               if plan_meta["case_profile_declared"] else {}),
             "cases": cases}
     # ⚠ 原先这里挂一份 **op 级** `aclnn_call_template`，由 driver 自己按 case 兜变体（`dim=None`→`dim=0`）——
     # 已被 finding #3 判为不合规并**整体替换**：调用形态现在逐 case 解析、写在 `case["aclnn_call"]` 里。
@@ -2432,6 +2523,10 @@ def _dry_run(spec):
     print(f"  operator_class: {meta['operator_class'] or '未声明（缺省 = 现行为）'}"
           f"  → inf/-inf/nan 特殊场景: "
           f"{'产' if meta['emits_nonfinite_specials'] else '**不产**（该类别按方法学不适用 NaN·Inf）'}")
+    # CP：造例档位。未声明时明说「缺省 = legacy = 现行为」，别让人以为已经按参考仓口径造过例。
+    print("  case_profile: "
+          + (f"{meta['case_profile']}（spec 显式声明）" if meta["case_profile_declared"]
+             else "未声明（缺省 = legacy = 现行为）"))
     _rk = _allowed_ranks(in_params)                      # C3：rank 约束（None=不限制）
     print(f"  input_rank: {'不限制' if _rk is None else sorted(_rk)}  "
           f"shapes: {sorted({_shape_tag(e['shape']) for e in entries})}")

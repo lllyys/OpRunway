@@ -104,6 +104,40 @@ def _guess_op(paths):
     return None, None
 
 
+# aclnn 对外接口头：文件名形态 `aclnn_<...>.h`（**不预设它在算子目录下的哪一层**）。
+# `*_impl.h` 是内部实现头、不是对外两段式接口 → 剔除（与 `aclnn_adapter.find_aclnn_project` 同口径）。
+_ACLNN_HDR_RE = re.compile(r"(?:^|/)aclnn_[A-Za-z0-9_]+\.h$")
+
+
+def _aclnn_headers(paths, target_dir):
+    """改动文件里、**目标算子目录下**的 aclnn 接口头（剔 `*_impl.h`）→ **一等 key_file，不受任何截断**。
+
+    为什么必须一等（2026-07-24 median PR6429 dogfood 实测逼出的修）：`aclnn_*.h` 是 aclnn 路由的
+    **第一依据**——真符号名、形参顺序与类型、arity、几个输出，全在这份头里；acc-spec 的
+    `call_variants` / `params[].out_role` / runner 的 slots↔签名逐项对账都只认它。
+    旧实现把它混进「`_def.cpp` 或 `/op_host/` 下的文件」那一档、再 `[:4]` 截断 → 算子目录下
+    op_host 文件一多就把接口头**挤掉**（PR6429 的头正是 `<op_subdir>/op_host/op_api/aclnn_median.h`），
+    下游只能凭 example 的调用写法或算子名去猜符号——那正是「验的不是 PR、是 CANN 内置同名实现」的路。
+
+    口径（**通用、按结构判，不按算子身份**）：
+      · 只收 `target_dir`（= `_guess_op` 判出的算子目录）**之下**的路径——别把同 PR 里别的算子的头也收进来；
+      · **不预设目录层级**：`op_api/`、`op_host/op_api/`、`op_api/include/` 等落点都算数
+        （与 `aclnn_adapter.find_aclnn_project` 的有界递归口径一致；钉死一层会把真 PR 判成「非域内」）；
+      · 剔 `*_impl.h`（内部实现头）；
+      · **有意不设条数上限**：条数已被「文件名形态 × 单个算子目录」限死、天然只有一两份，
+        再加一道截断就是把刚修好的洞原样挖回来。
+    """
+    pref = target_dir.rstrip("/") + "/"
+    out = []
+    for p in paths:
+        s = str(p)
+        if not s.startswith(pref) or s.endswith("_impl.h"):
+            continue
+        if _ACLNN_HDR_RE.search(s) and s not in out:
+            out.append(s)
+    return out
+
+
 def _parse_pr_url(pr_url):
     """解析 gitcode PR 链接 → (owner, repo, num)。
 
@@ -264,15 +298,36 @@ def fetch_pr(pr_url, out_dir):
         return None, None
 
     key, key_ref = {}, {}
+    hdrs = []
     if target_dir:
-        want = ([p for p in paths if "/examples/" in p and p.endswith(".cpp")][:6]
+        # ⚠ 顺序即优先级，且 **aclnn 接口头不进任何截断档**（见 `_aclnn_headers` 的理由）。
+        # 后两档仍各自设上限（防某些 PR 改上百个文件时把请求数打爆）。
+        hdrs = _aclnn_headers(paths, target_dir)
+        want = (hdrs
+                + [p for p in paths if "/examples/" in p and p.endswith(".cpp")][:6]
                 + [p for p in paths if p.endswith("_def.cpp") or "/op_host/" in p][:4])
-        for rel in want:
+        for rel in dict.fromkeys(want):     # 去重保序：接口头也落在 `/op_host/` 档里，别重复请求
             c, r = _grab(rel)
             if c:
                 key[rel], key_ref[rel] = c, r
     facts["key_files"] = key
     facts["key_files_ref"] = key_ref  # 每个关键文件实际取自哪个 ref（供下游判新鲜度）
+    facts["aclnn_headers"] = [p for p in hdrs if p in key]   # 一等接口头：真取到的那些（供下游只认它）
+    # 一等接口头是否真取到 —— 下游（acc-spec 的 call_variants / out_role / runner arity）**只认它**，
+    # 取不到就必须知道「是没改动、还是没取到」，不能让下游拿 example 的调用写法反推签名当权威。
+    #
+    # ⚠ 判据必须用 **`_aclnn_headers` 的结果**，不能拿 `_ACLNN_HDR_RE` 去扫整个 `key_files`（那是 fail-open）：
+    # `key_files` 里还混着 `/op_host/` 那一档**不限目录、不剔 impl** 捞进来的文件，于是
+    #   · 同 PR 里**别的算子**的 `aclnn_other.h`、
+    #   · 本算子的内部实现头 `aclnn_median_impl.h`（它同样匹配 `aclnn_[A-Za-z0-9_]+\.h`）
+    # 都会把这条「第一依据缺席」的告警**压掉** —— 而这两者都给不出本算子的对外签名，
+    # 下游照样只能靠猜，却再也收不到警告。这正是本仓最忌的「假覆盖」。
+    if not facts["aclnn_headers"]:
+        facts["notes"].append(
+            "本 PR 的改动文件里没有取到 aclnn 接口头（`aclnn_*.h`，已剔 `*_impl.h`）→ "
+            "**aclnn 路由的第一依据缺席**：`call_variants` 的 symbol/形参顺序、多输出 out_role、runner arity "
+            "都不得据 example 或算子名反推。要么该 PR 本就没改接口头（去 base 仓同目录取），要么取材失败——"
+            "两种都须核实后再抽 spec。")
     # 批 6b B-core：据 key_files 机器判接口形态 + 抽真实 aclnn 入口（供 runner 锚定、scope gate 消费）。
     _ik, _entry, _ik_note = _detect_interface_kind(key)
     facts["interface_kind"], facts["aclnn_entry"] = _ik, _entry

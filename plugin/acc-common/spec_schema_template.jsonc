@@ -218,6 +218,22 @@
 //   "reference.path":       "<TBE 内置三件套路径 kernel/proto/config>"
 //   "change.dtypes_added":  ["<add_dtype 时新增类型>"]      // 非 add_dtype 就整字段省略
 //
+// ── precision 行内 · 造例档位 case_profile（受控词表；**整字段省略 = legacy = 现行为**）──────
+//   "case_profile": "legacy" | "torch_parity"      // 省略 = legacy；实现见 `gen_cases._case_profile`
+//     选**这份 spec 按哪套造例规则产用例**（gen_cases 据本字段分档，op-中立、**绝无按算子名分支**；
+//     换任意声明了 torch_parity 的域内算子，工具零改即用）：
+//       · legacy       —— 现行造例规则。**已真机验收的算子靠它逐字节不变**（caseset + 全部 .npy 有 sha256
+//                         pin），所以它既是缺省、也是拿不准时的正确选择。
+//       · torch_parity —— **忠实对齐**参考仓 `Justbin/cannbot-ops-input` 的造例规则（完整笛卡尔精度网格、
+//                         medium shape 档、normal 值域重采样、4-kind 非有限特殊值…）。**仅**用于
+//                         「任务书对标 torch」场景（`precision.standard == "torch_allclose"`），不碰 catlass 通路。
+//     ⚠ 翻档 = **换一整套用例**：case id 与 golden 字节全变 → 必须**重生成 golden + 真机重验**，绿了才算数。
+//       别为「看起来更全」顺手翻档，更别在还没重验的算子上翻。
+//     ⚠ 字段一旦出现就必须是这两个字符串之一（写 null / "" / 数字 → fail-closed，同 tolerance_source 口径）；
+//       不确定就**整字段省略**。
+//     ⚠ 声明与否会**如实落进 caseset**：声明了才多一个 `case_profile` 键（未声明的算子产物一个键都不多，
+//       这正是字节安全的做法）。报告侧据此说清「这批用例是按哪套规则产的」，不必回头猜。
+//
 // ── precision 行内 · torch 对标场景（standard=="torch_allclose"）专用 ────────────────────
 //   判据：|actual-golden| <= atol + rtol*|golden|，**容错率 = 0**（不是坏点占比门），equal_nan=true。
 //   "tolerance_source": "dtype_table | taskdoc | torch_default"   // **整字段省略 = 缺省走 dtype_table**
