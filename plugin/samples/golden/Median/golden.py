@@ -87,7 +87,7 @@ def _resolve_dim(dim, ndim, where):
 
 def out_shape(in_shapes, attrs):
     """契约 C1：声明输出形状（value/index 归约后同形，返回**一个**共用形状）。
-    `attrs.get("dim") is None` → 全局归约 = 标量 ()；否则归约掉 dim（keepdim=True 时该轴保留为长度 1）。
+    `attrs.get("dim") is None` → 全局归约 = 标量 ()；否则归约掉 dim（keepDim=True 时该轴保留为长度 1）。
 
     gen_cases 每条 case 都拿本函数返回值与 `golden_fn` 实测的**每个**输出形状对账，不一致即 fail-closed。"""
     if not in_shapes:
@@ -97,7 +97,7 @@ def out_shape(in_shapes, attrs):
     if dim is None:
         return ()                                        # 全局归约 → 标量
     d = _resolve_dim(dim, len(shp), "out_shape")
-    if attrs.get("keepdim"):
+    if attrs.get("keepDim"):
         return shp[:d] + (1,) + shp[d + 1:]
     return shp[:d] + shp[d + 1:]
 
@@ -112,5 +112,6 @@ def golden_fn(inputs, attrs):
     if dim is None:                                      # 全局归约：单输出（无 indices）
         return t.median(x).numpy()
     d = _resolve_dim(dim, x.dim(), "golden_fn")
-    r = t.median(x, dim=d, keepdim=bool(attrs.get("keepdim", False)))
-    return (r.values.numpy(), r.indices.numpy())         # 双输出：values + indices（下标 int64）
+    r = t.median(x, dim=d, keepdim=bool(attrs.get("keepDim", False)))
+    # PR/header 的 indicesOut 为 int32；Torch reference 返回 int64，按 ABI 明示窄化后再作语义比较。
+    return (r.values.numpy(), r.indices.to(t.int32).numpy())

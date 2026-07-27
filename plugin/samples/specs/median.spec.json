@@ -3,13 +3,13 @@
   "repo": "ops-nn",
   "hardware": ["Atlas A2", "Atlas A3"],
   "scenario": "torch_ref_aclnn",
-  "runner_form": "aclnn_py",
+  "runner_form": "cpp_extension",
   "reference": {"type": "torch", "ref": "torch.median（任务书指定真值口径）"},
   "change": {"kind": "new_op", "note": "aclnnMedian/aclnnMedianDim 统一实现（experimental/index/median），双输出 values+indices"},
   "params_source": "derived_from_taskdoc",
   "operator_class": "structural",
   "_operator_class_note": "median = 选值/规约取元素类（输出恒等于某个输入元素、不做浮点算术）→ structural。依据 = 参考仓 Justbin/cannbot-ops-input：design_contract.py:427 受控词表 {floating_compute,integer_compute,structural}、:512 只对 floating_compute 调 _validate_floating_rules（= 只有那一类强制 nan/pos_inf/neg_inf/mixed_inf）；其 ops-bench/ops-eval-dataset/designs/aclnnMedian/case_design.json 的 operator_class 正是 structural、全文零 nan 零 inf（对照 aclnnPdist=floating_compute 有 nan 2 处、inf 8 处）。⚠ 这条是本次判错的根因修正：先前无条件产 NaN/inf 用例，6 条 NaN 用例把合格的 PR6429 判成 FAIL(精度) —— 用超出验收口径的用例判挂合格 PR。",
-  "_scenario_note": "scenario=torch_ref_aclnn ⟺ 任务书声明对标 torch + PR 是 aclnn 两段式；编排层据此字段路由、不做 if-算子名分派。runner_form=aclnn_py：op工程即 DUT、无 per-op runner 源（ctypes-aclnn 通用 runner）。见 doc/oprunway-torch-baseline-design.md §2.1。",
+  "_scenario_note": "任务书指定 stock torch 真值；DUT 走官方 NpuExtension/EXEC_NPU_CMD_EXT 独立 torch.ops namespace，baseline 保持 stock torch，二者不共入口。",
   "golden": {
     "_note": "判据锚（硬约束 #5：判据只从 spec 派生）。与 golden.py 的 GOLDEN_CONTRACT 双源交叉核验；不一致即 fail-closed。任务书把真值口径本身指定为 torch.median → oracle_method → tier1（非 impl_reference）。",
     "source": "single_api",
@@ -22,35 +22,57 @@
     "taskdoc_snapshot": {"sha256": "5d24e7337d79fb5e0835df51e8fdb7d337c57e9b8a53fd6aba1296c466ef11cf"}
   },
   "params": [
-    {"name": "self", "io": "in", "dtype": ["float32", "float16", "bfloat16", "int32"], "rank": [1, 2, 3, 4]},
+    {"name": "self", "io": "in", "dtype": ["bfloat16", "float16", "float32", "int8", "int16", "int32", "int64", "uint8"], "rank": [1, 2, 3, 4, 5, 6, 7, 8]},
     {"name": "dim", "io": "attr", "dtype": ["int64"], "default": null},
-    {"name": "keepdim", "io": "attr", "dtype": ["bool"], "default": false},
-    {"name": "values", "io": "out", "dtype": ["<from_input>"], "out_role": "value"},
-    {"name": "indices", "io": "out", "dtype": ["int64"], "out_role": "index", "index_of": "values", "gather_from": "self"}
+    {"name": "keepDim", "io": "attr", "dtype": ["bool"], "default": false},
+    {"name": "valuesOut", "io": "out", "dtype": ["<from_input>"], "out_role": "value"},
+    {"name": "indicesOut", "io": "out", "dtype": ["int32"], "out_role": "index", "index_of": "valuesOut", "gather_from": "self"}
   ],
   "_call_variants_note": "⚠ 2026-07-25 订正（原版路由错、被严格档逮出）：symbol 必须取自**PR 实际实现的符号**（PR 自带 op_api/aclnn_median.h / DUT `nm -D`），**不是任务书/参考实现的 API 表面**。PR6429 实测 = **单一统一符号 `aclnnMedian`**（真 header 签名 `aclnnMedian(self, int64 dim, bool keepDim, valuesOut, indicesOut, ws, exec)`，全局与按维**同一个符号**、靠 `indicesOut` 是否为空区分：null→全局拍平出标量 values；非 null→按维、出 values+indices）。DUT `.so` **不导出** `aclnnMedianDim`（那是 CANN 内置，见 task_pr_gaps api_surface_mismatch）。故两个变体都路由到 `Median`：global 用 out_null 落 indices（dim/keepdim 传默认值、PR 在 indices=null 时忽略），by-dim 走 indices 非空 + dim/keepdim。原版把 by-dim 错路由到 `MedianDim` → 第一次跑的 by-dim 用例其实验的是 CANN 内置、非 PR（严格档 is_dut 门已封死此假 DUT）。",
   "call_variants": [
     {"when": {"attr": "dim", "is_null": true},
-     "symbol": "Median", "active_attrs": [], "active_outputs": ["values"]},
+     "symbol": "Median", "active_attrs": ["dim", "keepDim"],
+     "attrs": {"dim": 0, "keepDim": false},
+     "active_outputs": ["valuesOut"]},
     {"when": {"attr": "dim", "is_null": false},
-     "symbol": "Median", "active_attrs": ["dim", "keepdim"], "active_outputs": ["values", "indices"]}
+     "symbol": "Median", "active_attrs": ["dim", "keepDim"], "active_outputs": ["valuesOut", "indicesOut"]}
   ],
   "attr_matrix": [
-    {"dim": null, "keepdim": false},
-    {"dim": 0, "keepdim": false},
-    {"dim": 0, "keepdim": true},
-    {"dim": -1, "keepdim": false}
+    {"dim": null, "keepDim": false},
+    {"dim": 0, "keepDim": false},
+    {"dim": 0, "keepDim": true},
+    {"dim": -1, "keepDim": false}
   ],
   "generalize": true,
   "allow_empty_tensor": false,
-  "dtype_required": ["float32", "float16", "bfloat16", "int32"],
+  "dtype_required": ["bfloat16", "float16", "float32", "int8", "int16", "int32", "int64", "uint8"],
   "verify_mode": "numerical",
   "precision": {
     "oracle": "torch",
     "standard": "torch_allclose",
+    "case_profile": "torch_parity",
     "tolerance_source": "dtype_table",
-    "value_profiles": ["tie"],
-    "case_target": 56,
+    "case_target": 1344,
+    "torch_parity_matrix": {
+      "source": "repos/cannbot-ops-input/ops-bench/ops-eval-dataset/designs/aclnnMedian/case_design.json + 任务书 global 接口补面",
+      "source_sha256": "eb46197b0c1aaef197481cecba548409364adb79fdde811a07747f3071b5f3cb",
+      "ranks": [1, 2, 3, 4, 5, 6, 7, 8],
+      "shape_profiles": [
+        {"name": "small", "leading_dim": 31},
+        {"name": "medium", "leading_dim": 2047},
+        {"name": "large", "leading_dim": 262144}
+      ],
+      "attribute_profiles": [
+        {"name": "global", "attrs": {"dim": null, "keepDim": false}},
+        {"name": "attr_00", "attrs": {"dim": {"axis_class": "first_axis"}, "keepDim": false}},
+        {"name": "attr_01", "attrs": {"dim": {"axis_class": "first_axis"}, "keepDim": true}},
+        {"name": "attr_02", "attrs": {"dim": {"axis_class": "middle_axis"}, "keepDim": false}},
+        {"name": "attr_03", "attrs": {"dim": {"axis_class": "middle_axis"}, "keepDim": true}},
+        {"name": "attr_04", "attrs": {"dim": {"axis_class": "last_axis"}, "keepDim": false}},
+        {"name": "attr_05", "attrs": {"dim": {"axis_class": "last_axis"}, "keepDim": true}}
+      ],
+      "generator": {"kind": "uniform", "min": -5, "max": 5}
+    },
     "_tolerance_note": "torch_allclose 逐 dtype 容差走 dtype_table（precision_policy._TA_DTYPE_TOLS，adapt 自参考仓 accuracy.py→一手 tilelang2ascend verification_ascendc.py）。value 输出 fp→torch_allclose、int→exact；index 输出→index_value_consistency（gather 值一致，据 out_role 字段派生、op-中立）。",
     "_value_profiles_note": "tie（并列值·压 index_value_consistency）——借参考仓 case_generator.generate_array 的 tie 数值生成机制，op-中立、据 spec 计划驱动。⚠ 原先还有 'nan'（NaN 传播·equal_nan 判据），2026-07-24 去掉：operator_class=structural 这一类按参考仓方法学不适用 NaN/Inf（design_contract.py:512 只对 floating_compute 强制），留着会被 gen_cases fail-closed。tie 保留 —— 参考仓给结构/整型类列的特殊值正是「极值、0/1/-1、**重复**、负/越界索引、广播、规约轴、饱和」（SKILL.md:252），并列/重复值属这一档。"
   },
@@ -63,7 +85,8 @@
     "case_source": "precision_cases",
     "case_selection": {
       "min_total_input_elements": 2,
-      "include_precision_tags": ["value_profile"],
+      "include_precision_tags": ["torch_parity"],
+      "max_cases": 50,
       "_note": "cannbot Median 冻结性能集最小 numel=31，未把 numel=1 的精度边界当性能 case；A3 系统 torch.median 对单元素会零 kernel 或报 BF16 不支持，无法形成同口径 device-kernel 比值。故单元素仍做精度，只在生成阶段移出性能维；非退化小 shape 由 length=3 等精度 case 覆盖。另从同一精度 caseset 选入 value_profile 用例，使 small shape 同时覆盖全局与按维接口；不是另造性能输入。"
     },
     "shape_classification": {

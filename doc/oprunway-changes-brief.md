@@ -4,6 +4,10 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **Median tracked 见证迁移**：样例 spec 改为 cpp_extension，按 8 dtype×8 rank×3 shape×
+  （1 global+6 by-dim）形成 1344 条完整精度矩阵，并平衡选 50 条性能 case；ABI 名称和 indicesOut
+  int32 对齐 PR header，golden 将 Torch int64 indices 明示窄化为 int32。1152 是 cannbot 仅按维
+  overload 的数量，任务书 global 接口另补 192 条，不能漏测。
 - **torch 对标 agent/skill 路由改造**：spec extractor 对任务书指定 stock torch 真值的场景默认产
   `runner_form=cpp_extension` 与 cannbot 来源的 `torch_parity_matrix`；runner agent 只调用官方
   codegen，不手写 per-op runner。workflow 增加独立 CP-C build/load receipt 门，明确迁移后旧
