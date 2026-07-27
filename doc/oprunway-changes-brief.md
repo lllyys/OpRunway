@@ -4,6 +4,11 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **正式落盘中文 Markdown 验收报告**：真机 `acceptance.json` 生成后同步渲染 `验收报告.md`，
+  逐字展示 JSON 裁决、PR/ELF provenance、逐 dtype 精度汇总、失败 case、大小 shape 性能状态、
+  task↔PR 差额和人工复现入口；renderer 不重判，失败也不改 JSON 裁决。新增审核员
+  `review.sh list/show/run` 与带编号 `failed.tsv`，并把“原 FAIL 重放退出 1”翻译成稳定复现结果，
+  避免人工记长 case_id 和底层退出码语义。
 - **验收后列出全部 case 启动脚本**：`cpp_extension` Task2 完成后生成 `repro/index.tsv`、
   统一 `run_case.sh` 和每个 case 的独立薄脚本；脚本复用本轮冻结输入/ELF，PASS/FAIL 都可人工重放，
   且 `acceptance_verdict=null`、生成异常不改验收裁决；`show_case.sh` / 单脚本 `--describe`

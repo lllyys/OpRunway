@@ -36,11 +36,18 @@ class ReproArtifactsTest(unittest.TestCase):
                     self.assertIn("--describe", src.read())
             self.assertTrue(os.access(
                 os.path.join(root, "repro", "show_case.sh"), os.X_OK))
+            self.assertTrue(os.access(
+                os.path.join(root, "repro", "review.sh"), os.X_OK))
             with open(os.path.join(root, "repro", "index.tsv"),
                       encoding="utf-8") as src:
                 index = src.read()
             self.assertIn("case_a\tfloat16", index)
             self.assertIn("case_b\tfloat32", index)
+            with open(os.path.join(root, "repro", "failed.tsv"),
+                      encoding="utf-8") as src:
+                failed = src.read()
+            self.assertNotIn("\tcase_a\t", failed)
+            self.assertIn("1\tcase_b\tfloat32", failed)
 
     def test_rejects_unsafe_case_id(self):
         with tempfile.TemporaryDirectory() as root:

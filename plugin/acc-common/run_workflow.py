@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_cases, repo_adapter, validator, perf_compare  # noqa: E402
 import cpp_extension_adapter  # noqa: E402
 import repro_artifacts  # noqa: E402
+import render_acceptance_markdown  # noqa: E402
 import validate_acceptance_state as gate  # noqa: E402
 import verify_aclnn_harness  # noqa: E402
 
@@ -541,6 +542,18 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         if gpu_prov is not None:
             acc["gpu_baseline"] = gpu_prov
         final_file = _dump(acc, "acceptance.json")
+        try:
+            md_file = render_acceptance_markdown.write_report(out_dir)
+            print(f"[Markdown 报告] {md_file}")
+        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as ex:
+            _dump({
+                "schema": "oprunway.markdown_report_error",
+                "schema_version": 1,
+                "error": f"{type(ex).__name__}: {ex}",
+                "acceptance_verdict": None,
+                "note": "Markdown 渲染失败，不改变 JSON 验收裁决",
+            }, "markdown_report_error.json")
+            print(f"[Markdown 报告] 生成失败（不改变 JSON 裁决）：{type(ex).__name__}: {ex}")
     else:
         # C5 非验收产物：**字段名也换掉**，不只是加个注脚。`overall` / `state` / `precision_verdict` 是验收裁决
         # 的词汇，留着就还能被 `acc["state"] == "PASSED"` 这类代码顺手当裁决读；换成 pipeline_* 后，任何想拿它

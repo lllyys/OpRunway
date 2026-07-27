@@ -87,6 +87,77 @@ exec "$script_dir/run_case.sh" "$1" --describe
 """
 
 
+def _review_script():
+    return """#!/usr/bin/env bash
+set -euo pipefail
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+failed="$script_dir/failed.tsv"
+
+usage() {
+  cat <<'EOF'
+审核员快捷入口：
+  ./review.sh list              列出失败 case（带编号）
+  ./review.sh show <编号|case>  查看输入、golden、policy 和原 metrics（不跑 NPU）
+  ./review.sh run  <编号|case>  重放一个 case，并按原验收结果解释是否稳定复现
+  ./review.sh all               查看全部 case 索引
+EOF
+}
+
+resolve_case() {
+  local token="$1"
+  if [[ "$token" =~ ^[0-9]+$ ]]; then
+    awk -F '\t' -v n="$token" 'NR>1 && $1==n {print $2; exit}' "$failed"
+  else
+    printf '%s\n' "$token"
+  fi
+}
+
+cmd="${1:-list}"
+case "$cmd" in
+  list)
+    column -t -s $'\t' "$failed" 2>/dev/null || cat "$failed"
+    usage
+    ;;
+  all)
+    column -t -s $'\t' "$script_dir/index.tsv" 2>/dev/null || cat "$script_dir/index.tsv"
+    ;;
+  show)
+    [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+    case_id="$(resolve_case "$2")"
+    [[ -n "$case_id" ]] || { echo "找不到失败编号: $2" >&2; exit 2; }
+    exec "$script_dir/show_case.sh" "$case_id"
+    ;;
+  run)
+    [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+    case_id="$(resolve_case "$2")"
+    [[ -n "$case_id" ]] || { echo "找不到失败编号: $2" >&2; exit 2; }
+    original="$(awk -F '\t' -v id="$case_id" 'NR>1 && $1==id {print $5; exit}' "$script_dir/index.tsv")"
+    set +e
+    "$script_dir/run_case.sh" "$case_id"
+    rc=$?
+    set -e
+    if [[ "$original" == "fail" && $rc -eq 1 ]]; then
+      echo "复核结果：原 FAIL 已稳定复现（底层重放退出码 1）。"
+      exit 0
+    fi
+    if [[ "$original" == "pass" && $rc -eq 0 ]]; then
+      echo "复核结果：原 PASS 已稳定复现。"
+      exit 0
+    fi
+    echo "复核结果与原验收不一致：original=$original replay_rc=$rc，请人工调查。" >&2
+    exit 1
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
+"""
+
+
 def generate_cpp_extension(report_root, caseset, verdict):
     """为完整 caseset 生成逐 case 启动脚本和可审计索引。"""
     report_root = os.path.realpath(report_root)
@@ -106,7 +177,7 @@ def generate_cpp_extension(report_root, caseset, verdict):
     try:
         case_dir = os.path.join(stage, "cases")
         os.makedirs(case_dir)
-        rows, manifest_cases = [], []
+        rows, failed_rows, manifest_cases = [], [], []
         for case in cases:
             case_id = case.get("id")
             if (not isinstance(case_id, str) or not _CASE_ID.fullmatch(case_id)
@@ -128,6 +199,11 @@ def generate_cpp_extension(report_root, caseset, verdict):
                 case_id, str(dtype or ""), _json_compact(shapes),
                 _json_compact(item["attrs"]), precision, rel,
             ]))
+            if precision != "pass":
+                failed_rows.append("\t".join([
+                    str(len(failed_rows) + 1), case_id, str(dtype or ""),
+                    _json_compact(shapes), precision,
+                ]))
 
         manifest = {
             "schema": "oprunway.repro_manifest",
@@ -143,13 +219,19 @@ def generate_cpp_extension(report_root, caseset, verdict):
         _write(os.path.join(stage, "index.tsv"),
                "case_id\tdtype\tinput_shapes\tattrs\tprecision_result\tscript\n"
                + "\n".join(rows) + "\n")
+        _write(os.path.join(stage, "failed.tsv"),
+               "no\tcase_id\tdtype\tinput_shapes\tprecision_result\n"
+               + "\n".join(failed_rows) + "\n")
         _write(os.path.join(stage, "run_case.sh"), _run_case_script(), executable=True)
         _write(os.path.join(stage, "show_case.sh"), _show_case_script(), executable=True)
+        _write(os.path.join(stage, "review.sh"), _review_script(), executable=True)
         _write(os.path.join(stage, "README.md"), """# 人工复现入口
 
 本目录由验收 workflow 生成，不参与验收裁决。
 
 - `index.tsv`：全部 case、dtype、shape、属性、原精度结果与脚本路径；
+- `failed.tsv`：带短编号的失败 case 清单；
+- `review.sh list/show/run`：审核员快捷入口，负责解释重放结果；
 - `run_case.sh <case_id>`：统一入口；
 - `show_case.sh <case_id>`：展示 case 定义、输入/golden 摘要、调用槽、policy 与原结果；
 - `cases/<case_id>.sh`：逐 case 可执行入口。
