@@ -668,6 +668,114 @@ def gate_task1(d, errs):
         errs.append("evidence.json 解析失败（坏 JSON）")
 
 
+def _canonical_sha(value):
+    try:
+        raw = json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            allow_nan=False).encode()
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs):
+    """cpp_extension 的独立 build/load/ELF receipt 完整性门。
+
+    adapter 已做首轮验证；本门从落盘工件重新算摘要，并要求每条 evidence 绑定同一 receipt。
+    只核证据来源，不重判数值结果。
+    """
+    if envelope.get("runner_form") != "cpp_extension":
+        return
+    receipt = envelope.get("cpp_extension_receipt")
+    if not isinstance(receipt, dict):
+        errs.append("cpp_extension evidence 缺 cpp_extension_receipt")
+        return
+    if (receipt.get("schema") != "oprunway.cpp_extension_receipt"
+            or receipt.get("schema_version") != 1
+            or receipt.get("status") != "VERIFIED"):
+        errs.append("cpp_extension receipt schema/status 非 VERIFIED v1")
+        return
+    manifest_path = _pinned_product(d, "cpp_extension/extension_manifest.json")
+    plan_path = _pinned_product(d, "cpp_extension_invocation_plan.json")
+    snapshot_path = _pinned_product(d, "cpp_extension_caseset.json")
+    for label, path in (
+            ("manifest", manifest_path), ("invocation plan", plan_path),
+            ("caseset snapshot", snapshot_path)):
+        if path is None:
+            errs.append(f"cpp_extension {label} 缺失/逃逸/非普通文件")
+    if any(path is None for path in (manifest_path, plan_path, snapshot_path)):
+        return
+    try:
+        manifest = _load_json_file(manifest_path)
+        plan = _load_json_file(plan_path)
+        snapshot = _load_json_file(snapshot_path)
+    except (OSError, ValueError, TypeError) as ex:
+        errs.append(f"cpp_extension 绑定工件坏 JSON: {type(ex).__name__}: {ex}")
+        return
+    bindings = receipt.get("bindings")
+    if not isinstance(bindings, dict):
+        errs.append("cpp_extension receipt.bindings 缺失")
+        return
+    expected = {
+        "caseset_sha256": _canonical_sha(caseset),
+        "manifest_sha256": _canonical_sha(manifest),
+        "invocation_plan_sha256": _canonical_sha(plan),
+        "spec_sha256": manifest.get("spec_sha256"),
+    }
+    if _canonical_sha(snapshot) != expected["caseset_sha256"]:
+        errs.append("cpp_extension caseset snapshot 与正式 caseset 漂移")
+    for key, value in expected.items():
+        if not isinstance(value, str) or len(value) != 64:
+            errs.append(f"cpp_extension 无法派生 {key}")
+        elif bindings.get(key) != value:
+            errs.append(
+                f"cpp_extension receipt.bindings.{key} 与落盘工件摘要不符")
+    artifact = receipt.get("artifact")
+    artifact_path = (_pinned_product(d, artifact.get("path"))
+                     if isinstance(artifact, dict) else None)
+    if artifact_path is None:
+        errs.append("cpp_extension ELF 缺失/逃逸/非普通文件")
+    elif artifact.get("sha256") != _sha256(artifact_path):
+        errs.append("cpp_extension ELF sha256 与 receipt 不符")
+    load = receipt.get("load")
+    wanted = {row.get("entrypoint") for row in (manifest.get("variants") or [])
+              if isinstance(row, dict)}
+    if (not isinstance(load, dict) or load.get("success") is not True
+            or load.get("loader") != "torch.ops.load_library"
+            or load.get("namespace") != manifest.get("namespace")
+            or not isinstance(load.get("schemas"), dict)
+            or set(load["schemas"]) != wanted):
+        errs.append("cpp_extension load namespace/schema/loader receipt 与 manifest 不一致")
+    runtime = receipt.get("runtime")
+    if not isinstance(runtime, dict) or any(
+            not runtime.get(k) for k in
+            ("torch_version", "torch_npu_version", "cann_version", "soc")):
+        errs.append("cpp_extension runtime provenance 不完整")
+    vendor = receipt.get("vendor")
+    vendor_sha = vendor.get("library_sha256") if isinstance(vendor, dict) else None
+    symbols_owned = vendor.get("symbols_owned") if isinstance(vendor, dict) else None
+    if (not isinstance(vendor_sha, str) or len(vendor_sha) != 64
+            or any(ch not in "0123456789abcdef" for ch in vendor_sha)
+            or not isinstance(symbols_owned, list)
+            or not symbols_owned
+            or any(not isinstance(symbol, str) or not symbol
+                   for symbol in symbols_owned)):
+        errs.append("cpp_extension vendor library/symbol ownership provenance 不完整")
+    receipt_sha = _canonical_sha(receipt)
+    for row in ev_list:
+        if isinstance(row, dict) and row.get("cpp_extension_receipt_sha256") != receipt_sha:
+            errs.append(
+                f"{row.get('case_id')}: cpp_extension receipt digest 缺失或漂移")
+
+
+def _load_json_file(path):
+    with open(path, encoding="utf-8") as src:
+        return json.load(
+            src,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                ValueError(f"非法 JSON 常量 {token}")))
+
+
 def gate_task2(d, errs):
     """精度证据**完整性**门：全覆盖(防子集) + precision 必填 + 阈值三处一致(防放宽) + oracle_source 门校 + 无契约问题。
     注：精度 pass/fail 本身由 validator 判、**此门不重判**——合法的精度 fail 不该被门当 BLOCKED。
@@ -686,6 +794,7 @@ def gate_task2(d, errs):
     if not isinstance(ev_list, list) or not ev_list:
         errs.append("evidence.evidence 缺失/非列表/空（Task2 无证据可核）")
         return
+    _gate_cpp_extension_receipt(d, cs, ev, ev_list, errs)
     # ID 用 Counter 校验（重复不被 set 折叠）。
     cid_list = [c["id"] for c in cases if isinstance(c, dict) and c.get("id")]
     cid_dups = [k for k, v in Counter(cid_list).items() if v > 1]

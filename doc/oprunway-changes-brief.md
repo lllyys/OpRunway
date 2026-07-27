@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **cpp_extension 收据加入最终证据复核门**：验收状态门会从落盘 caseset、manifest、invocation
+  plan 和 ELF 独立重算摘要，核对 loader/namespace/schema、运行时与 vendor 符号 provenance，
+  并要求每条 evidence 绑定同一 receipt；布尔输出 readback 保留逻辑 dtype。
 - **官方 Extension 容器内 driver 落地**：通用 driver 执行 `setup.py build_ext --inplace`、精确加载唯一
   ELF、预加载指定 vendor library 并核符号、按 invocation plan 逐 case 调独立 torch.ops、落多输出
   manifest 和 build/load receipt；机器连接与容器进入仍由外层显式 argv 提供，仓内不含私有路径。

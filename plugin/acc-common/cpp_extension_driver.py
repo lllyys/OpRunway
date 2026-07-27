@@ -157,7 +157,9 @@ def _dump_output(torch, np, tensor, dtype, path):
         disk_dtype = "float32"
     elif dtype == "bool":
         arr = value.to(torch.uint8).numpy()
-        disk_dtype = "uint8"
+        # numpy bool 与 uint8 都是单字节；保留逻辑 dtype，避免证据层把
+        # 布尔 ABI 输出误判成整型输出。
+        disk_dtype = "bool"
     else:
         arr = value.numpy()
         disk_dtype = str(arr.dtype)
