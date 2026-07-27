@@ -2,6 +2,12 @@
 
 > 倒序：最新在上。每天一节，一条一句，大白话。`待决` 置顶。
 
+## 2026-07-27（Median 性能规则正式复跑）
+
+- **修复整轮性能采集被固定超时误杀**：`aclnn_py` 性能进程不再对任意 case 数固定使用 1200 秒，改为 `max(1200, 60 × 实际选中 case 数)`，50 case 默认 3000 秒；每完成一例立即 flush 进度，显式环境覆盖与 7200 秒外层总护栏保留。验收门同时消除双侧都缺值时误导性的 `None ≠ None` 诊断，真实证据完整性门不放宽。
+- **A3 以新 caseset 完成正式重跑**：CP-C 信任门以 8 个见证覆盖 8 dtype、两个 variant、标量属性和多输出；正式精度 60/60 PASS。50 个性能 case 全部完成 custom 采集，`torch_npu` baseline 48 个可评分、2 个 BF16 case 仍为 baseline limitation；48 对中 35 对达到任务书 `ratio >= 1.0`，确定性结论仍为 `BLOCKED`，不得写成性能通过。
+- **大小 shape 与报告字段得到真机产物验证**：性能 case 全部来自同一精度 caseset；A3 按输入物理字节 `<=262144` / `>262144` 分为 24 个 small、26 个 large。small 为 22 对可评分、19 对达标、2 blocked、聚合 speedup 7.5006；large 为 26 对可评分、16 对达标、聚合 speedup 0.3668；overall 为 48 对可评分、35 对达标、2 blocked、聚合 speedup 3.4268。
+
 ## 2026-07-26（非真机流程性能优化）
 
 - **性能规则闭环经 A3 容器回归**：A3 的 256 KiB 边界改由受控硬件 profile 校验，dry-run 同样 fail-closed 检查性能 case 策略；三级门新增 accuracy report 与逐 case/evidence 的独立对账，以及 perf report 的 NPU evidence、baseline.json、shape 汇总绑定。分三批覆盖全部 `acc-common` 单测，业务主批 400、性能/adapter 批 543、validator/门批 408，受环境影响的子集按正确 TMPDIR/工作目录补跑后全绿。

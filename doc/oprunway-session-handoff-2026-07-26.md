@@ -1,6 +1,6 @@
 # OpRunway 会话交接 · 2026-07-26
 
-> 本文是 2026-07-26 收尾时的最新入口。旧 `oprunway-session-handoff-2026-07-25.md` 是历史暂停点，包含已经被后续真机结果推翻的状态，不得作为当前事实源。
+> 本文是 2026-07-26 建立、2026-07-27 续写的最新入口。旧 `oprunway-session-handoff-2026-07-25.md` 是历史暂停点，包含已经被后续真机结果推翻的状态，不得作为当前事实源。
 
 ## 1 · 当前结论
 
@@ -12,12 +12,15 @@
   - CP-C：173 秒
   - CP-D：1156 秒
 - 非真机准备优化没有减少真机 case，没有修改精度/性能阈值、warmup/repeat、timing scope 或裁决链。
-- 性能维仍为 **BLOCKED**，但已经产出有效性能数据，不再是“零数据”：
+- 2026-07-27 已以带 256 KiB 分类的新 caseset 正式复跑；性能维仍为 **BLOCKED**：
   - custom：50/50 有效；
   - `torch_npu` baseline：48/50 有效；
   - 48 对均为同机同口径 kernel-only 数据；
   - 35 对达到 `ratio >= 1.0`；
   - 2 个 BF16、`dim=1` baseline case 报 161002，custom 成功，归为 baseline limitation，不归因 DUT。
+  - small：24 planned / 22 scored / 19 达标 / 2 blocked，聚合 speedup 7.5006；
+  - large：26 planned / 26 scored / 16 达标 / 0 blocked，聚合 speedup 0.3668；
+  - overall：50 planned / 48 scored / 35 达标 / 2 blocked，聚合 speedup 3.4268。
 
 ## 2 · 本轮完成的体系优化
 
@@ -28,10 +31,11 @@
 - 性能采集对齐 `msprof CLI + MSTX + task_time CSV`；custom 与 baseline 使用相同 kernel-only scope。
 - 彻底移除 `numel < 4096 → trivial-met` 自动免测规则。全部性能 case 都必须真实采集或明确 blocked。
 - GPU baseline 回归改为复用类级只读 caseset，减少非真机重复生成。
+- 性能整轮硬超时改为 `max(1200, 60 × 实际选中 case 数)`；50 case 真机使用 3000 秒并完成，逐 case 进度会 flush，避免再次只剩 `PERF_FAIL`。
 
 详细流水见 `doc/oprunway-changes-brief.md` 的 2026-07-26 小节。
 
-## 3 · 最高优先级开放项：性能 case 重生成与重跑
+## 3 · 最高优先级开放项：真实性能未达标与 cannbot 造例差距
 
 任务书要求：
 
@@ -43,7 +47,8 @@
 - 性能 case 从精度 caseset 选择，且只测精度已通过的 case；
 - A3 按输入物理载荷分类：`<= 256 KiB` 为小 shape，`> 256 KiB` 为大 shape；
 - 大小分类只用于分组统计，不恢复任何小 case 免测；
-- 已有 48 对 `torch_npu` ratio 是真实性能数据，但新标签进入 caseset 后仍须重新生成并按确定性链复核。
+- 新标签 caseset 已正式复跑；13 个可评分 case 低于 1.0，另有 2 个 baseline limitation，不能靠聚合 speedup、删 case 或改阈值写成通过。
+- 当前 `torch_parity` 只是受控档位与账本护栏，生成器源码明确说明对齐造例逻辑的“批 B”尚未实施；所以当前可以证明性能 case 来自精度 caseset、选择账本和大小分类完整，不能证明 shape/attr 网格与 cannbot 数据集逐例一致。
 
 该问题已同时记录在：
 
@@ -55,10 +60,9 @@
 1. 先读仓根 `AGENTS.md`、本文、`doc/oprunway-changes-brief.md` 顶部和 `doc/oprunway-todo.md` 的新 baseline TODO。
 2. 读 `doc/oprunway-real-machine-environment.md`，从被 `.gitignore` 忽略的 `.oprunway/real-machine.env` 取得实际连接/容器/路径，并先做只读环境探测。
 3. 运行 `git status --short --branch`，确认本轮文档更新是否已经 commit。
-4. 在远程 NPU 容器跑新增的性能 case 分类回归并重新生成 Median caseset。
-5. 检查所有性能 case 同时带精度维，且 256 KiB 边界按物理 dtype 字节数正确分类。
-6. 使用同一份精度 caseset 和 `torch_npu:torch.median` 重跑性能。
-7. 以 `perf_compare.py`、`validate_acceptance_state.py` 和 `acceptance.json` 的确定性裁决为准更新报告。
+4. 先按最新 `perf_collect.json` 把 13 个未达标 case 分成 fp 全局大 shape、int64 全局大 shape、fp 长度 3 的 global 小 shape三组；验收侧不替 DUT 优化，也不改阈值。
+5. 若用户决定继续完善 cannbot 造例对标，实现字段驱动的 `torch_parity` 批 B，并重新走 CP-B/C/D；不得把 `repos/cannbot-ops-input` 变成运行时依赖。
+6. 以 `perf_compare.py`、`validate_acceptance_state.py` 和 `acceptance.json` 的确定性裁决为准更新报告。
 
 ## 5 · Git 与工作区注意事项
 

@@ -944,8 +944,21 @@ BASELINE_FILES = {
     "aclnn_builtin": "_aclnn_builtin_baseline.json",
 }
 
+#: 性能采集是「全部 case × custom/baseline」的一次整轮进程。固定 1200s 在 50-case、
+#: warmup=5/repeat=20 的真实 A3 路径上会于末尾前杀掉整轮，导致已经完成的逐 case 结果也来不及落盘。
+#: 默认按 case 数扩展；仍由外层 7200s 总护栏和显式 OPRUNWAY_ACLNN_PERF_TIMEOUT 约束。
+_PERF_TIMEOUT_MIN_S = 1200
+_PERF_TIMEOUT_PER_CASE_S = 60
 
-def _perf_script(cfg, paths):
+
+def _default_perf_timeout_s(case_count):
+    """整轮默认硬超时：至少 20min，每个实际选中性能 case 预算 60s。"""
+    if not isinstance(case_count, int) or isinstance(case_count, bool) or case_count < 0:
+        raise ValueError(f"性能 case_count 须为非负整数，得 {case_count!r}")
+    return max(_PERF_TIMEOUT_MIN_S, case_count * _PERF_TIMEOUT_PER_CASE_S)
+
+
+def _perf_script(cfg, paths, default_timeout_s=_PERF_TIMEOUT_MIN_S):
     """组装容器内 **msprof 性能采集** 一段 shell（`python -m aclnn_runtime.perf_msprof`）。
 
     与 exec 共用运行时 env 前置段；另置 `OPRUNWAY_ACLNN_REAL=1`——采集模块自己有真机 gate
@@ -961,10 +974,15 @@ def _perf_script(cfg, paths):
     # ⚠ 桥接护栏（op-中立，同精度侧 `_exec_script`）：perf 采集也是「所有 case 同进程同 runner 同步
     # native 调用」结构，同样有单 case 卡死拖垮整轮的风险，且本地侧 `RA._shell(..., timeout=7200)` 会
     # 干等 2 小时。`timeout -k 30 <N>` 远端硬超时 → 退 124 → 走 `||` 干净 fail-closed。perf 每 case 有
-    # warmup×repeat（默认 5+20），比精度慢 → 默认窗更宽（1200s），可经 env 覆盖。per-case 隔离由监督式 worker 承。
+    # warmup×repeat（默认 5+20），比精度慢 → 默认窗据实际选中 case 数扩展，可经 env 覆盖。
+    # per-case 隔离由监督式 worker 承。
+    if (not isinstance(default_timeout_s, int) or isinstance(default_timeout_s, bool)
+            or default_timeout_s < _PERF_TIMEOUT_MIN_S):
+        raise ValueError(
+            f"default_timeout_s 须为 >= {_PERF_TIMEOUT_MIN_S} 的整数，得 {default_timeout_s!r}")
     tmpl = _ENV_PREAMBLE + (
         'export OPRUNWAY_ACLNN_REAL=1\n'
-        'timeout -k 30 "${OPRUNWAY_ACLNN_PERF_TIMEOUT:-1200}" '
+        'timeout -k 30 "${OPRUNWAY_ACLNN_PERF_TIMEOUT:-@@PERF_TIMEOUT@@}" '
         'python -m aclnn_runtime.perf_msprof @@CASESET@@ @@PLAN@@ @@OUT@@ --work-dir @@RCASES@@ '
         '&& echo OPRUNWAY_ACLNN_PERF_DONE || { echo OPRUNWAY_ACLNN_PERF_FAIL; exit 5; }\n')
     repl = {"@@SETENV@@": q(cfg["setenv"]), "@@VENDOR_DIR@@": q(cfg["vendor_dir"]),
@@ -972,7 +990,8 @@ def _perf_script(cfg, paths):
             "@@CASESET@@": q(paths["rcases"] + "/caseset.json"),
             "@@PLAN@@": q(paths["rcases"] + "/" + PERF_PLAN_FILE),
             "@@OUT@@": q(paths["rout"] + "/" + PERF_COLLECT_FILE),
-            "@@RCASES@@": q(paths["rcases"])}
+            "@@RCASES@@": q(paths["rcases"]),
+            "@@PERF_TIMEOUT@@": str(default_timeout_s)}
     return _render(tmpl, repl)
 
 
@@ -1085,7 +1104,8 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
     RA._copy_to(host, plan_local, paths["rcases"] + "/" + PERF_PLAN_FILE, timeout=120)
 
     # ③ 容器内采集（单独一段 shell：FAIL 先解耦 root-cause 再归因——采集失败 ≠ 精度通路失败）。
-    script = _perf_script(cfg, paths)
+    script = _perf_script(
+        cfg, paths, default_timeout_s=_default_perf_timeout_s(len(selected)))
     rp = RA._shell(host, script, timeout=7200, check=False, capture=True)
     blob = (rp.stdout or "") + (rp.stderr or "")
     if rp.returncode != 0 or "OPRUNWAY_ACLNN_PERF_DONE" not in blob:

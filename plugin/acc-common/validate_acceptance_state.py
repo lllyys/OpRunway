@@ -1369,13 +1369,20 @@ def _gate_perf_measurement_binding(cs, ev, pr, d, per, errs):
         if not isinstance(eperf, dict):
             continue
         npu = row.get("npu_us")
-        if not (_perf_finite_pos(npu) and _perf_finite_pos(eperf.get("us"))
-                and math.isclose(float(npu), float(eperf["us"]), rel_tol=1e-12, abs_tol=1e-12)):
-            errs.append(f"{cid}: perf_report.npu_us={npu!r} ≠ evidence.perf.us={eperf.get('us')!r}")
+        evidence_us = eperf.get("us")
+        # 双侧都缺值由「真实性/完整性」门统一报；这里仅查一侧有值或双侧有值却不一致，
+        # 避免 blocked 工件再附带误导性的 `None ≠ None`。
+        if _perf_finite_pos(npu) or _perf_finite_pos(evidence_us):
+            if not (_perf_finite_pos(npu) and _perf_finite_pos(evidence_us)
+                    and math.isclose(float(npu), float(evidence_us),
+                                     rel_tol=1e-12, abs_tol=1e-12)):
+                errs.append(
+                    f"{cid}: perf_report.npu_us={npu!r} ≠ evidence.perf.us={evidence_us!r}")
         row_scope = row.get("scope") if "scope" in row else row.get("npu_scope")
-        if row_scope != eperf.get("scope"):
+        evidence_scope = eperf.get("scope")
+        if (row_scope is not None or evidence_scope is not None) and row_scope != evidence_scope:
             errs.append(f"{cid}: perf_report NPU scope={row_scope!r} "
-                        f"≠ evidence.perf.scope={eperf.get('scope')!r}")
+                        f"≠ evidence.perf.scope={evidence_scope!r}")
     baseline = _load(d, "baseline.json")
     if not isinstance(baseline, dict):
         return
@@ -1394,11 +1401,13 @@ def _gate_perf_measurement_binding(cs, ev, pr, d, per, errs):
         if not isinstance(claimed, dict):
             errs.append(f"{cid}: baseline.json 有此 case，perf_report 缺 baseline")
             continue
-        if not (_perf_finite_pos(claimed.get("us")) and _perf_finite_pos(expected_base.get("us"))
-                and math.isclose(float(claimed["us"]), float(expected_base["us"]),
-                                 rel_tol=1e-12, abs_tol=1e-12)):
-            errs.append(f"{cid}: perf_report baseline.us={claimed.get('us')!r} "
-                        f"≠ baseline.json={expected_base.get('us')!r}")
+        claimed_us, expected_us = claimed.get("us"), expected_base.get("us")
+        if _perf_finite_pos(claimed_us) or _perf_finite_pos(expected_us):
+            if not (_perf_finite_pos(claimed_us) and _perf_finite_pos(expected_us)
+                    and math.isclose(float(claimed_us), float(expected_us),
+                                     rel_tol=1e-12, abs_tol=1e-12)):
+                errs.append(f"{cid}: perf_report baseline.us={claimed_us!r} "
+                            f"≠ baseline.json={expected_us!r}")
         if claimed.get("source") != baseline.get("source"):
             errs.append(f"{cid}: perf_report baseline.source={claimed.get('source')!r} "
                         f"≠ baseline.json.source={baseline.get('source')!r}")

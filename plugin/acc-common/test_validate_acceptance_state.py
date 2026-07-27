@@ -1160,6 +1160,27 @@ class GateTask3ShapeReportTest(unittest.TestCase):
         _w(self.d, "perf_report.json", self.report)
         self.assertTrue(any("baseline.json" in e for e in self._errs()))
 
+    def test_both_missing_measurements_do_not_emit_false_mismatch(self):
+        """空载荷仍由完整性门拦截，但绑定诊断不能谎报 `None ≠ None`。"""
+        with open(os.path.join(self.d, "caseset.json"), encoding="utf-8") as f:
+            cs = json.load(f)
+        ev = {"evidence": [
+            {"case_id": "s0", "perf": {"us": None, "scope": None}},
+            {"case_id": "b0", "perf": {"us": None, "scope": None}}]}
+        report = copy.deepcopy(self.report)
+        for row in report["per_case"]:
+            row["npu_us"] = None
+            row["scope"] = None
+            row["baseline"]["us"] = None
+        _w(self.d, "baseline.json", {
+            "source": "tbe", "scope": "kernel_only",
+            "per_case": [{"case_id": "s0", "us": None},
+                         {"case_id": "b0", "us": None}]})
+        errs = []
+        G._gate_perf_measurement_binding(
+            cs, ev, report, self.d, report["per_case"], errs)
+        self.assertEqual(errs, [])
+
     def test_missing_case_classification_is_rejected(self):
         cs = json.load(open(os.path.join(self.d, "caseset.json"), encoding="utf-8"))
         cs["cases"][1].pop("perf_shape_classification")

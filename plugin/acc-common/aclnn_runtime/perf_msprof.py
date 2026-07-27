@@ -2208,7 +2208,8 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
     aclnn_baseline = plan.get("aclnn_baseline")
     scratch = scratch_dir or tempfile.mkdtemp(prefix="oprunway-perf-")
     records = []
-    for cid in plan.get("cases") or []:
+    planned_cases = plan.get("cases") or []
+    for completed, cid in enumerate(planned_cases, start=1):
         case = by_id.get(cid)
         if case is None:
             raise PerfCollectError(f"plan 里的 case_id={cid!r} 不在 caseset 中——fail-closed")
@@ -2231,6 +2232,17 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
                                 detect_hybrid=(baseline_kind == "torch_npu"),
                                 baseline_kind=baseline_kind)
         records.append(build_perf_record(cid, custom, baseline))
+        # 整轮采集受硬超时保护；逐 case flush 进度后，即使整轮被杀，诊断日志也能指出
+        # 最后完成的 case，而不是只剩 PERF_FAIL 哨兵。这里只报行为/进度，不做性能裁决。
+        print(json.dumps({
+            "oprunway_perf_progress": {
+                "completed": completed,
+                "total": len(planned_cases),
+                "case_id": cid,
+                "custom_behavior": custom.get("behavior"),
+                "baseline_behavior": baseline.get("behavior"),
+            }
+        }, ensure_ascii=False), flush=True)
     doc = {"op": plan.get("op") or caseset.get("op"),
            "scope": TIMING_SCOPE, "warmup": warmup, "repeat": repeat, "device": device,
            "collection": {"custom": collection_config(collector=collector_for("custom"),

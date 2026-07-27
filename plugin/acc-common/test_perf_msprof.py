@@ -10,6 +10,8 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -1129,8 +1131,27 @@ class TestWiring(unittest.TestCase):
         self.assertIn('export ASCEND_CUSTOM_OPP_PATH="$VC:${ASCEND_CUSTOM_OPP_PATH:-}"', s)
         self.assertIn("export OPRUNWAY_ACLNN_REAL=1", s)
         self.assertIn("python -m aclnn_runtime.perf_msprof", s)
+        self.assertIn('${OPRUNWAY_ACLNN_PERF_TIMEOUT:-1200}', s)
         self.assertIn("OPRUNWAY_ACLNN_PERF_DONE", s)
         self.assertIn("OPRUNWAY_ACLNN_PERF_FAIL", s)
+
+    def test_perf_timeout_scales_with_selected_case_count(self):
+        """整轮固定 1200s 会杀掉大 case 集；默认预算必须据实际选中数扩展。"""
+        import aclnn_adapter as A
+        self.assertEqual(A._default_perf_timeout_s(0), 1200)
+        self.assertEqual(A._default_perf_timeout_s(20), 1200)
+        self.assertEqual(A._default_perf_timeout_s(50), 3000)
+        for bad in (True, -1, 1.5):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                A._default_perf_timeout_s(bad)
+
+        cfg = {"setenv": "/opt/set_env.sh", "vendor_dir": "/home/u/vend",
+               "vendor_name": "customize", "rroot": "/home/u/work", "device": "0",
+               "soc": "ascend910_93", "snake_op": "median", "host": None}
+        paths = {"rcases": "/home/u/work/aclnn_cases", "rout": "/home/u/work/aclnn_out"}
+        self.assertIn(
+            '${OPRUNWAY_ACLNN_PERF_TIMEOUT:-3000}',
+            A._perf_script(cfg, paths, default_timeout_s=3000))
 
 
 class TestCustomWrapperStrictAndClose(unittest.TestCase):
@@ -1203,6 +1224,18 @@ class TestCustomWrapperStrictAndClose(unittest.TestCase):
         sides = self._collect_with({"allow_builtin_symbols": True}, dut=None)
         self.assertIs(sides["custom"]["cfg_extra"]["strict_custom_vendor"], False)
         self.assertIsNone(sides["custom"]["cfg_extra"]["dut_lib"])   # 宽松档不要求 DUT
+
+    def test_collect_flushes_case_progress(self):
+        """整轮超时前也须留下已完成 case 的定位证据，不能只剩 PERF_FAIL。"""
+        output = StringIO()
+        with redirect_stdout(output):
+            self._collect_with({})
+        progress = json.loads(output.getvalue().strip())["oprunway_perf_progress"]
+        self.assertEqual(progress["completed"], 1)
+        self.assertEqual(progress["total"], 1)
+        self.assertEqual(progress["case_id"], "c0")
+        self.assertEqual(progress["custom_behavior"], PM.BEHAVIOR_NPU)
+        self.assertEqual(progress["baseline_behavior"], PM.BEHAVIOR_NPU)
 
 
 class TestPerfPlanDutDeclaration(unittest.TestCase):

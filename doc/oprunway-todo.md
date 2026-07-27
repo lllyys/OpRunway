@@ -600,9 +600,11 @@
 - [x] **A3 大小 shape 边界已落成通用数据契约**：按所有输入的物理载荷字节数求和，`<= 256 KiB`（262144 bytes，边界计入）为小 shape，`> 256 KiB` 为大 shape；原因是前者可一次搬入 UB。所有当前 A3 样例 spec 均显式声明该 profile；该标签只做分组统计，不恢复 `trivial-met`，不自动免测或放宽性能阈值。
 - [x] **通用能力保留但不误用**：`aclnn_builtin` 仍是其它任务可能使用的通用 baseline 能力；Median spec 已恢复 `torch_npu:torch.median`，无算子身份代码分支。
 - [x] **选例与报告账本已补齐代码契约并经 A3 容器回归**：caseset 记录性能 case 复用的精度 case_id、未选 precision case、逐 dtype 配额和 small/large 计数；精度报告按 dtype/overall 固定输出 `total/passed/failed/needs_review`（`na` 单列），性能报告按 small/large/overall 固定输出计划数、可评分数、达标数、blocked、双边中位耗时和 speedup。A3 的 256 KiB 边界走受控 hardware profile，dry-run 也执行同一 fail-closed 策略校验；三级门把汇总逐项绑定到 per-case/evidence/baseline，不重判阈值。全套 `acc-common` 测试已在 A3 容器分批跑绿。
-- [ ] **远程重生成并重新裁决**：新 shape 标签会改变 caseset 元数据，须在远程 NPU 环境重新生成并跑性能；已有 custom 50/50、baseline 48/50 数据可作历史证据，但 2 个 BF16、`dim=1` baseline case 的 161002 仍需按 baseline limitation 挂起，不归因 DUT。
+- [x] **远程重生成并重新裁决**：2026-07-27 已以重新生成的同一精度 caseset完成 A3 正式采集。精度 60/60 PASS；性能 custom 50/50、baseline 48/50，48 对中 35 对达到 `ratio >= 1.0`，2 个 BF16 baseline limitation；small 24（22 scored / 19 达标 / 2 blocked / speedup 7.5006），large 26（26 scored / 16 达标 / speedup 0.3668），overall 50（48 scored / 35 达标 / 2 blocked / speedup 3.4268）。确定性裁决仍为 `BLOCKED`，关闭的是“重生成并裁决”动作，不是性能条款。
+- [ ] **性能条款尚未通过**：13 个可评分 case 真实低于 `ratio=1.0`（3 个 fp 长度 3 的 global 小 shape、9 个 fp 1024×1024 global 大 shape、1 个 int64 1024×1024 global 大 shape）；另 2 个 BF16 baseline case 无可比 device kernel。不得靠删 case、改阈值或把聚合 speedup 当逐 case PASS 关闭。
+- [ ] **`torch_parity` 造例档位仍只是护栏**：`gen_cases.py` 当前明确记载“批 A 只记账、批 B 尚未改造例逻辑”；只读签名对账得到当前 50 个性能 case 与 cannbot Median 的 1152 个 accuracy / 50 个 performance 冻结 case 均为 0 个精确 `shape×dtype×dim×keepdim` 重合，而 cannbot 已发布的 50 个 performance case 自身是其 1152 个 accuracy case 的 50/50 子集。因此现行来源/身份/大小分类已闭环，但不能宣称 shape/attr 网格逐例完全对标。后续若实施批 B，须用字段驱动的通用 profile，不得读取 `repos/` 作为运行时依赖或按 Median 身份特判；也不得借“对标”删除任务书要求且 cannbot 未覆盖的 global 变体。
 
-> **关闭条件**：远程 NPU 环境相关回归通过，并以重新生成的同一精度 caseset 完成性能采集与确定性裁决。完成前 Median 性能仍 BLOCKED。
+> **关闭条件**：性能条款只在全部必测 case 有可比证据且确定性 `perf_compare.py` / 三级门通过时关闭；目前 Median 性能仍 `BLOCKED`。
 
 ### 裁决可信性（对抗式代码门的产物）
 - ✅ **假通过路径逐条堵死并钉负例**：validator 以 **spec 为权威**复算 canonical policy 做三处一致（`caseset`+`evidence` 同步放宽会被揪出）；judge 校验 metric（非负整数 / `numel>0` / 有限）；`gate_task3` 与 `caseset`/`evidence` 按 case 对齐（防「跑性能子集 + 伪造 summary」）；`repo_adapter` ssh/scp 注入防护；catlass 脚本 17 条对抗门。
