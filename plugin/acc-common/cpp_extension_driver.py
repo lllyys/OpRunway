@@ -167,6 +167,27 @@ def _dump_output(torch, np, tensor, dtype, path):
     return disk_dtype, list(arr.shape)
 
 
+def materialize_invocation(torch, np, work, case, row):
+    """按已冻结 invocation-plan 物化一次 Extension 调用；供精度与性能共用。"""
+    inputs = [_input_tensor(torch, np, work, item) for item in case["inputs"]]
+    output_contracts = _expected_outputs(case)
+    outputs = [_empty_output(torch, item) for item in output_contracts]
+    args = []
+    for slot in row["slots"]:
+        role = slot["role"]
+        if role == "in":
+            args.append(inputs[int(slot["input_idx"])])
+        elif role == "attr":
+            args.append(slot["value"])
+        elif role == "out":
+            args.append(outputs[int(slot["output_idx"])])
+        elif role == "out_null":
+            args.append(None)
+        else:
+            raise DriverError(f"{case['id']}: 未知 slot role={role!r}")
+    return args, outputs, output_contracts
+
+
 def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
     import numpy as np
     import torch
@@ -193,22 +214,8 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
         case = by_id.get(row["case_id"])
         if case is None:
             raise DriverError(f"plan case {row['case_id']!r} 不在 caseset")
-        inputs = [_input_tensor(torch, np, work, item) for item in case["inputs"]]
-        output_contracts = _expected_outputs(case)
-        outputs = [_empty_output(torch, item) for item in output_contracts]
-        args = []
-        for slot in row["slots"]:
-            role = slot["role"]
-            if role == "in":
-                args.append(inputs[int(slot["input_idx"])])
-            elif role == "attr":
-                args.append(slot["value"])
-            elif role == "out":
-                args.append(outputs[int(slot["output_idx"])])
-            elif role == "out_null":
-                args.append(None)
-            else:
-                raise DriverError(f"{case['id']}: 未知 slot role={role!r}")
+        args, outputs, output_contracts = materialize_invocation(
+            torch, np, work, case, row)
         result = getattr(namespace, row["entrypoint"])(*args)
         torch.npu.synchronize()
         returned = list(result)
@@ -299,12 +306,53 @@ def run(bundle, work):
     return receipt
 
 
+def run_perf_only(bundle, work):
+    """复用已验证 Extension ELF，走 perf_msprof 的统一双边 kernel-only 采集链。"""
+    del bundle  # bundle 已由第一阶段 build receipt 内容寻址；性能只加载精确 ELF。
+    work = os.path.realpath(work)
+    receipt = _load(os.path.join(work, "cpp_extension_receipt.json"))
+    plan = _load(os.path.join(work, "cpp_extension_perf_plan.json"))
+    caseset = _load(os.path.join(work, "cpp_extension_caseset.json"))
+    if (plan.get("caseset_sha256") != _canonical_sha(caseset)
+            or plan.get("cpp_extension_receipt_sha256") != _canonical_sha(receipt)):
+        raise DriverError("性能计划与本轮 caseset/build receipt 绑定漂移")
+    artifact = _safe(work, receipt["artifact"]["path"])
+    if _sha_file(artifact) != receipt["artifact"]["sha256"]:
+        raise DriverError("性能阶段 Extension ELF 与第一阶段 receipt 漂移")
+    cpp = plan.get("cpp_extension") or {}
+    vendor = cpp.get("vendor") or {}
+    vendor_path = vendor.get("library_path")
+    if (not isinstance(vendor_path, str) or not os.path.isfile(vendor_path)
+            or _sha_file(vendor_path) != vendor.get("library_sha256")):
+        raise DriverError("性能阶段 vendor library 缺失或与第一阶段 receipt 漂移")
+    if cpp.get("artifact") != receipt.get("artifact") \
+            or cpp.get("namespace") != receipt.get("load", {}).get("namespace"):
+        raise DriverError("性能计划的 Extension artifact/namespace 与 receipt 漂移")
+    invocation_path = _safe(work, cpp.get("invocation_plan"))
+    invocation = _load(invocation_path)
+    if (cpp.get("invocation_plan_sha256")
+            != receipt.get("bindings", {}).get("invocation_plan_sha256")
+            or _canonical_sha(invocation) != cpp.get("invocation_plan_sha256")):
+        raise DriverError("性能阶段 invocation plan 与第一阶段 receipt 漂移")
+    os.environ["OPRUNWAY_ACLNN_REAL"] = "1"
+    from aclnn_runtime import perf_msprof as PM
+    return PM.collect(
+        os.path.join(work, "cpp_extension_caseset.json"),
+        work,
+        plan,
+        os.path.join(work, "cpp_extension_perf_collect.json"),
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle", required=True)
     parser.add_argument("--work", required=True)
+    parser.add_argument("--perf-only", action="store_true")
     ns = parser.parse_args(argv)
-    print(json.dumps(run(ns.bundle, ns.work), ensure_ascii=False, indent=2))
+    result = (run_perf_only(ns.bundle, ns.work) if ns.perf_only
+              else run(ns.bundle, ns.work))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 

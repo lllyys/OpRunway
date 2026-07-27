@@ -27,6 +27,9 @@ class CppExtensionAdapterError(RuntimeError):
 _RECEIPT = "cpp_extension_receipt.json"
 _PLAN = "cpp_extension_invocation_plan.json"
 _CASESET = "cpp_extension_caseset.json"
+_PERF_TEMPLATE = "cpp_extension_perf_template.json"
+_PERF_PLAN = "cpp_extension_perf_plan.json"
+_PERF_COLLECT = "cpp_extension_perf_collect.json"
 _BUNDLE = "cpp_extension"
 _OUT = "cpp_extension_out"
 
@@ -136,6 +139,13 @@ def prepare(spec, caseset, work):
     if spec.get("runner_form") != "cpp_extension":
         raise CppExtensionAdapterError("prepare 仅接受 runner_form=cpp_extension")
     work = os.path.abspath(work)
+    for stale in (_PERF_PLAN, _PERF_COLLECT):
+        path = os.path.join(work, stale)
+        if os.path.lexists(path):
+            if os.path.islink(path) or not os.path.isfile(path):
+                raise CppExtensionAdapterError(
+                    f"拒绝清理非普通 cpp_extension 性能暂存物: {path}")
+            os.unlink(path)
     bundle = os.path.join(work, _BUNDLE)
     manifest = cpp_extension_codegen.generate(spec, bundle)
     plan = build_invocation_plan(caseset, manifest)
@@ -145,7 +155,90 @@ def prepare(spec, caseset, work):
     with open(os.path.join(work, _CASESET), "w", encoding="utf-8") as out:
         json.dump(caseset, out, ensure_ascii=False, indent=2)
         out.write("\n")
+    perf = spec.get("perf") or {}
+    perf_template = {
+        "schema": "oprunway.cpp_extension_perf_template",
+        "schema_version": 1,
+        "op": caseset.get("op"),
+        "baseline": perf.get("baseline"),
+        "torch_baseline": perf.get("torch_baseline"),
+        "aclnn_baseline": perf.get("aclnn_baseline"),
+        "warmup": perf.get("warmup", 5),
+        "repeat": perf.get("repeat", 20),
+        "side_timeout_s": perf.get("side_timeout_s", 120),
+    }
+    with open(os.path.join(work, _PERF_TEMPLATE), "w", encoding="utf-8") as out:
+        json.dump(perf_template, out, ensure_ascii=False, indent=2)
+        out.write("\n")
     return manifest, plan
+
+
+def _write_perf_plan(caseset, work, evidence, receipt):
+    """精度先筛后生成第二阶段性能计划；device 必须由真机调用方显式给出。"""
+    from aclnn_runtime import perf_msprof as PM
+
+    template = _strict_json(os.path.join(work, _PERF_TEMPLATE))
+    passed = PM.accuracy_pass_ids(evidence)
+    selected, skipped = PM.select_perf_cases(caseset, passed)
+    if not selected:
+        return None, skipped
+    raw_device = os.environ.get("OPRUNWAY_CPP_EXTENSION_DEVICE")
+    if raw_device is None:
+        raise CppExtensionAdapterError(
+            "cpp_extension 性能采集缺 OPRUNWAY_CPP_EXTENSION_DEVICE；多卡环境不猜 device")
+    try:
+        device = int(raw_device)
+    except ValueError as ex:
+        raise CppExtensionAdapterError(
+            "OPRUNWAY_CPP_EXTENSION_DEVICE 须为非负整数") from ex
+    if device < 0:
+        raise CppExtensionAdapterError(
+            "OPRUNWAY_CPP_EXTENSION_DEVICE 须为非负整数")
+    plan = {
+        **template,
+        "schema": "oprunway.cpp_extension_perf_plan",
+        "custom_kind": "cpp_extension",
+        "caseset_sha256": _canonical_sha(caseset),
+        "cpp_extension_receipt_sha256": _canonical_sha(receipt),
+        "device": device,
+        "cases": selected,
+        "skipped": skipped,
+        "cpp_extension": {
+            "artifact": receipt["artifact"],
+            "namespace": receipt["load"]["namespace"],
+            "invocation_plan": _PLAN,
+            "invocation_plan_sha256": receipt["bindings"]["invocation_plan_sha256"],
+            "vendor": {
+                "library_path": receipt["vendor"]["library_path"],
+                "library_sha256": receipt["vendor"]["library_sha256"],
+                "symbols_owned": receipt["vendor"]["symbols_owned"],
+            },
+        },
+    }
+    path = os.path.join(work, _PERF_PLAN)
+    with open(path, "w", encoding="utf-8") as out:
+        json.dump(plan, out, ensure_ascii=False, indent=2)
+        out.write("\n")
+    return plan, skipped
+
+
+def _validate_perf_collection(plan, document):
+    """拒绝 partial/stale/换 ELF 的性能采集结果。"""
+    checkpoint = document.get("collection_checkpoint")
+    records = document.get("records")
+    if (document.get("custom_kind") != "cpp_extension"
+            or document.get("baseline_source") != plan.get("baseline")
+            or document.get("custom_provenance") != plan.get("cpp_extension")
+            or not isinstance(checkpoint, dict)
+            or checkpoint.get("complete") is not True
+            or checkpoint.get("planned_case_ids") != plan.get("cases")
+            or not isinstance(records, list)):
+        raise CppExtensionAdapterError(
+            "cpp_extension perf_collect 非完整本轮双边采集或 provenance 漂移")
+    ids = [row.get("case_id") for row in records if isinstance(row, dict)]
+    if ids != plan.get("cases") or len(ids) != len(records):
+        raise CppExtensionAdapterError(
+            "cpp_extension perf_collect records 与性能计划 case 序列不一致")
 
 
 def _require_sha(label, value):
@@ -253,7 +346,8 @@ def run_cpp_extension(caseset, work, defect_cases=None):
     if not os.path.isfile(os.path.join(bundle, "extension_manifest.json")) \
             or not os.path.isfile(plan):
         raise CppExtensionAdapterError("缺 prepare() 生成的 bundle/invocation plan")
-    argv = _driver_argv() + ["--bundle", bundle, "--work", os.path.abspath(work)]
+    driver = _driver_argv()
+    argv = driver + ["--bundle", bundle, "--work", os.path.abspath(work)]
     result = subprocess.run(argv, check=False)
     if result.returncode != 0:
         raise CppExtensionAdapterError(
@@ -262,10 +356,42 @@ def run_cpp_extension(caseset, work, defect_cases=None):
     import repo_adapter as RA
     evidence = RA.build_multi_output_evidence(
         caseset, work, os.path.join(work, _OUT))
+    perf_plan, skipped = _write_perf_plan(caseset, work, evidence, receipt)
+    perf_collection = None
+    if perf_plan is not None:
+        perf_result = subprocess.run(
+            driver + ["--bundle", bundle, "--work", os.path.abspath(work),
+                      "--perf-only"],
+            check=False)
+        if perf_result.returncode != 0:
+            raise CppExtensionAdapterError(
+                f"CPP Extension kernel-only 性能 driver 失败 rc={perf_result.returncode}")
+        from aclnn_runtime import perf_msprof as PM
+        perf_collection = _strict_json(os.path.join(work, _PERF_COLLECT))
+        _validate_perf_collection(perf_plan, perf_collection)
+        records = perf_collection.get("records") or []
+        perf_by_case = PM.build_custom_perf_map(records, skipped=skipped)
+        evidence = RA.build_multi_output_evidence(
+            caseset, work, os.path.join(work, _OUT), perf_by_case=perf_by_case)
+        baseline = PM.build_baseline_document(
+            records, op=caseset.get("op"),
+            warmup=perf_plan["warmup"], repeat=perf_plan["repeat"],
+            skipped=skipped, source=perf_plan["baseline"])
+        baseline_file = {
+            "torch_npu": "_torch_npu_baseline.json",
+            "aclnn_builtin": "_aclnn_builtin_baseline.json",
+        }.get(perf_plan["baseline"])
+        if baseline_file is None:
+            raise CppExtensionAdapterError(
+                f"cpp_extension 不支持性能 baseline={perf_plan['baseline']!r}")
+        with open(os.path.join(work, baseline_file),
+                  "w", encoding="utf-8") as out:
+            json.dump(baseline, out, ensure_ascii=False, indent=2)
+            out.write("\n")
     digest = _canonical_sha(receipt)
     for row in evidence:
         row["cpp_extension_receipt_sha256"] = digest
-    return {
+    envelope = {
         "op": caseset["op"],
         "repo_mode": "cpp_extension",
         "runner_form": "cpp_extension",
@@ -275,6 +401,9 @@ def run_cpp_extension(caseset, work, defect_cases=None):
         "cpp_extension_receipt": receipt,
         "evidence": evidence,
     }
+    if perf_collection is not None:
+        envelope["perf_collection"] = perf_collection
+    return envelope
 
 
 CPP_EXTENSION_MODES = {"cpp_extension": run_cpp_extension}

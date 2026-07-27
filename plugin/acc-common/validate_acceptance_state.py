@@ -1822,6 +1822,7 @@ def gate_task3(d, errs):
     if not isinstance(pr, dict):
         errs.append("缺/坏 perf_report.json（Task3 未跑）")
         return
+    _gate_cpp_extension_perf_collection(d, errs)
     s = pr.get("summary")
     has_summary = isinstance(s, dict)
     if not has_summary:
@@ -1892,6 +1893,66 @@ def gate_task3(d, errs):
     if st == "exception":
         _gate_small_shape_exception(pr, d, errs)
     print(f"  性能 status={st}(perf_compare 判) | 达标 {s.get('达标')}/{s.get('perf_cases')}")
+
+
+def _gate_cpp_extension_perf_collection(d, errs):
+    """从 evidence envelope 独立核 cpp_extension 的性能采集与 build receipt 同源。"""
+    ev = _load(d, "evidence.json")
+    cs = _load(d, "caseset.json")
+    if not isinstance(ev, dict) or ev.get("runner_form") != "cpp_extension":
+        return
+    if not isinstance(cs, dict):
+        errs.append("cpp_extension 性能门缺 caseset")
+        return
+    receipt = ev.get("cpp_extension_receipt")
+    collect = ev.get("perf_collection")
+    if not isinstance(receipt, dict) or not isinstance(collect, dict):
+        errs.append("cpp_extension 性能门缺 build receipt/perf_collection")
+        return
+    provenance = collect.get("custom_provenance")
+    expected_provenance = {
+        "artifact": receipt.get("artifact"),
+        "namespace": (receipt.get("load") or {}).get("namespace"),
+        "invocation_plan": "cpp_extension_invocation_plan.json",
+        "invocation_plan_sha256": (
+            receipt.get("bindings") or {}).get("invocation_plan_sha256"),
+        "vendor": {
+            "library_path": (receipt.get("vendor") or {}).get("library_path"),
+            "library_sha256": (receipt.get("vendor") or {}).get("library_sha256"),
+            "symbols_owned": (receipt.get("vendor") or {}).get("symbols_owned"),
+        },
+    }
+    checkpoint = collect.get("collection_checkpoint")
+    perf_ids = [case.get("id") for case in (cs.get("cases") or [])
+                if isinstance(case, dict)
+                and "性能" in (case.get("dims") or [])]
+    records = collect.get("records")
+    record_ids = [row.get("case_id") for row in records
+                  if isinstance(row, dict)] if isinstance(records, list) else None
+    if (collect.get("custom_kind") != "cpp_extension"
+            or provenance != expected_provenance):
+        errs.append("cpp_extension perf_collection 的 ELF/vendor/namespace provenance 与 receipt 漂移")
+    if (not isinstance(checkpoint, dict)
+            or checkpoint.get("complete") is not True
+            or checkpoint.get("planned_case_ids") != perf_ids
+            or record_ids != perf_ids
+            or not isinstance(records, list)
+            or len(record_ids) != len(records)):
+        errs.append("cpp_extension perf_collection 非完整性能 caseset 或 case 顺序漂移")
+        return
+    ev_by_id = {row.get("case_id"): row for row in (ev.get("evidence") or [])
+                if isinstance(row, dict)}
+    for record in records:
+        cid = record["case_id"]
+        custom = record.get("custom") if isinstance(record.get("custom"), dict) else {}
+        evidence_perf = (ev_by_id.get(cid) or {}).get("perf")
+        if not isinstance(evidence_perf, dict):
+            errs.append(f"{cid}: cpp_extension evidence 缺 perf")
+            continue
+        if custom.get("us") != evidence_perf.get("us"):
+            errs.append(f"{cid}: cpp_extension evidence.perf.us 与原始采集记录漂移")
+        if evidence_perf.get("scope") != "kernel_only":
+            errs.append(f"{cid}: cpp_extension evidence.perf.scope 非 kernel_only")
 
 
 _GATES = {"task1": gate_task1, "task2": gate_task2, "task3": gate_task3}

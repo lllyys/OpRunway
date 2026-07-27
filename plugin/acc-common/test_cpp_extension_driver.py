@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """cpp_extension_driver 的纯静态 helper 测试；不 import torch、不 build。"""
 
+import json
 import os
 import tempfile
 import unittest
@@ -29,6 +30,26 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
         finally:
             if old is not None:
                 os.environ["OPRUNWAY_CPP_EXTENSION_VENDOR_LIBRARY"] = old
+
+    def test_perf_plan_must_bind_exact_caseset_and_receipt(self):
+        with tempfile.TemporaryDirectory() as td:
+            caseset = {"op": "X", "cases": []}
+            receipt = {
+                "artifact": {"path": "cpp_extension/x.so", "sha256": "0" * 64},
+                "load": {"namespace": "oprunway_x"},
+            }
+            plan = {
+                "caseset_sha256": "f" * 64,
+                "cpp_extension_receipt_sha256": D._canonical_sha(receipt),
+            }
+            for name, value in (
+                    ("cpp_extension_caseset.json", caseset),
+                    ("cpp_extension_receipt.json", receipt),
+                    ("cpp_extension_perf_plan.json", plan)):
+                with open(os.path.join(td, name), "w", encoding="utf-8") as dst:
+                    json.dump(value, dst)
+            with self.assertRaisesRegex(D.DriverError, "绑定漂移"):
+                D.run_perf_only(td, td)
 
 
 if __name__ == "__main__":

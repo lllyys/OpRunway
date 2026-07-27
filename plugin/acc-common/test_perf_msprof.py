@@ -955,6 +955,68 @@ class TestRealGate(unittest.TestCase):
                 os.environ["OPRUNWAY_ACLNN_REAL"] = old
 
 
+class TestCppExtensionCollectorRoute(unittest.TestCase):
+    def test_wrapper_uses_exact_elf_vendor_and_current_stream_mstx(self):
+        wrapper = PM._CPP_EXTENSION_WRAPPER
+        self.assertIn('torch.ops.load_library(artifact)', wrapper)
+        self.assertIn('ctypes.CDLL(vendor_path, mode=ctypes.RTLD_GLOBAL)', wrapper)
+        self.assertIn("D.materialize_invocation(", wrapper)
+        self.assertIn("torch.npu.current_stream().npu_stream", wrapper)
+        self.assertNotIn("time.perf_counter", wrapper)
+
+    def test_collect_routes_cpp_extension_without_aclnn_dut_resolution(self):
+        from unittest import mock
+
+        captured = []
+
+        def fake_measure_side(**kwargs):
+            captured.append(kwargs)
+            return {
+                "behavior": PM.BEHAVIOR_NPU,
+                "us": 1.0,
+                "scope": PM.TIMING_SCOPE,
+                "execution_path": PM.PATH_DEVICE_KERNEL,
+                "collection": PM.collection_config(
+                    collector=PM.COLLECTOR_MSPROF_CLI, warmup=1, repeat=2),
+            }
+
+        old = os.environ.get("OPRUNWAY_ACLNN_REAL")
+        os.environ["OPRUNWAY_ACLNN_REAL"] = "1"
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                caseset_path = os.path.join(root, "caseset.json")
+                with open(caseset_path, "w", encoding="utf-8") as out:
+                    json.dump({"op": "X", "cases": [{"id": "c0"}]}, out)
+                plan = {
+                    "op": "X",
+                    "custom_kind": "cpp_extension",
+                    "device": 0,
+                    "warmup": 1,
+                    "repeat": 2,
+                    "baseline": "torch_npu",
+                    "torch_baseline": {
+                        "api": "torch.x", "positional": [], "keyword": {}},
+                    "cpp_extension": {"artifact": {"path": "x.so"}},
+                    "cases": ["c0"],
+                }
+                with mock.patch.object(
+                        PM, "resolve_plan_dut_lib",
+                        side_effect=AssertionError("cpp_extension 不应解析 aclnn dut_lib")), \
+                     mock.patch.object(PM, "measure_side", fake_measure_side):
+                    doc = PM.collect(
+                        caseset_path, root, plan, os.path.join(root, "out.json"))
+        finally:
+            os.environ.pop("OPRUNWAY_ACLNN_REAL", None)
+            if old is not None:
+                os.environ["OPRUNWAY_ACLNN_REAL"] = old
+        custom = next(row for row in captured if row["side"] == "custom")
+        self.assertEqual(custom["custom_kind"], "cpp_extension")
+        self.assertEqual(
+            custom["cfg_extra"]["cpp_extension"], plan["cpp_extension"])
+        self.assertEqual(doc["custom_kind"], "cpp_extension")
+        self.assertEqual(doc["custom_provenance"], plan["cpp_extension"])
+
+
 class TestLiveCollectorAlignment(unittest.TestCase):
     """2026-07-26 真机结论：双边统一 cannbot 同款 msprof CLI + ctypes MSTX + CSV。"""
 
