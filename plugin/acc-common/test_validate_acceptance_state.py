@@ -189,6 +189,23 @@ class GatePerfCasePolicyTest(unittest.TestCase):
         G._gate_perf_case_policy(cs, cs["cases"], errs)
         self.assertTrue(any("include_precision_tags" in e for e in errs), errs)
 
+    def test_balanced_max_cases_exclusion_is_not_treated_as_degenerate(self):
+        cs = self._caseset()
+        cs["perf_case_policy"]["case_selection"] = {
+            "min_total_input_elements": 1,
+            "include_precision_tags": [],
+            "max_cases": 1,
+        }
+        cs["perf_case_policy"]["selection"]["excluded_degenerate_case_ids"] = []
+        cs["cases"][1]["perf_selection_exclusion"] = {
+            "reason": "balanced_max_cases_limit",
+            "max_cases": 1,
+            "balance_axes": ["dtype", "shape_class"],
+        }
+        errs = []
+        G._gate_perf_case_policy(cs, cs["cases"], errs)
+        self.assertEqual(errs, [])
+
     def test_a3_profile_cannot_be_redefined_by_caseset(self):
         cs = self._caseset()
         cs["perf_case_policy"]["shape_classification"]["small_max_bytes"] = 1048576

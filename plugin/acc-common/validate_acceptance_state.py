@@ -529,16 +529,32 @@ def _gate_perf_case_policy(cs, cases, errs):
                     for x in shape:
                         numel *= x
                     total_elements += numel
-                if (not new_selection_contract
-                        or exclusion.get("reason")
-                        != "degenerate_total_input_elements_below_minimum"
-                        or not valid_elements
-                        or total_elements >= min_total_elements
-                        or exclusion.get("total_input_elements") != total_elements
-                        or exclusion.get("min_total_input_elements") != min_total_elements):
-                    errs.append(f"{cid}: perf_selection_exclusion 与退化输入选择规则不一致")
+                reason = exclusion.get("reason")
+                if reason == "degenerate_total_input_elements_below_minimum":
+                    if (not new_selection_contract
+                            or not valid_elements
+                            or total_elements >= min_total_elements
+                            or exclusion.get("total_input_elements") != total_elements
+                            or exclusion.get("min_total_input_elements") != min_total_elements):
+                        errs.append(
+                            f"{cid}: perf_selection_exclusion 与退化输入选择规则不一致")
+                    else:
+                        excluded_degenerate_ids.append(cid)
+                elif reason == "balanced_max_cases_limit":
+                    max_cases = (
+                        selection_rule.get("max_cases")
+                        if new_selection_contract else None)
+                    if (not valid_elements
+                            or total_elements < min_total_elements
+                            or not _is_int(max_cases) or max_cases < 1
+                            or exclusion.get("max_cases") != max_cases
+                            or exclusion.get("balance_axes")
+                            != ["dtype", "shape_class"]):
+                        errs.append(
+                            f"{cid}: perf_selection_exclusion 与 max_cases 平衡选择规则不一致")
                 else:
-                    excluded_degenerate_ids.append(cid)
+                    errs.append(
+                        f"{cid}: perf_selection_exclusion.reason={reason!r} 非受控词")
         if "性能" not in dims:
             continue
         if "精度" not in dims:
