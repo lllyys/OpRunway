@@ -4,6 +4,8 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **首轮真实 FAIL 反哺归因 skill**：PR head 必须钉死到远端 ref 的精确 SHA，未发布后继提交不得代跑冒充；
+  index evidence 中 `invalid_index_count>0` 明确归为越界输出，不能误套 Torch 的合法 tie 下标差异。
 - **cpp_extension 正式通路与 DUT 来源闭环**：根仓规登记第三条真机 runner form；driver/adapter/
   三级门新增 vendor build receipt，强制机校完整 PR head、源码仓、构建命令与现场加载 ELF 摘要，
   不再只靠目录短 SHA 说明 exact-head 来源。
