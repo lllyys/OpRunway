@@ -423,6 +423,63 @@ def _attach_shape_report(report, caseset):
     return report
 
 
+def attach_skipped_shape_plan(report, caseset):
+    """精度门跳过 Task3 时保留生成期性能计划；实际采集数仍严格为零。
+
+    复用同一分类聚合器核对 case 元数据与 ``perf_case_policy.counts``，但不把计划行塞进
+    ``per_case``，避免下游误认成已采集性能证据。
+    """
+    planned_rows = [
+        {"case_id": c.get("id")}
+        for c in (caseset.get("cases") or [])
+        if isinstance(c, dict) and "性能" in (c.get("dims") or [])
+    ]
+    try:
+        agg = _shape_class_aggregate(planned_rows, caseset)
+    except Exception as exc:
+        report.setdefault("notes", []).append(
+            f"性能计划大小 shape 报告生成失败已跳过，裁决不受影响：{exc!r}")
+        return report
+    if agg is None:
+        report.setdefault("summary", {})["planned_cases"] = len(planned_rows)
+        return report
+
+    by_shape = []
+    for item in agg["by_shape_class"]:
+        planned = item["planned_cases"]
+        by_shape.append({
+            **item,
+            "cases": 0,
+            "planned_cases": planned,
+            "cases_scored": 0,
+            "达标": 0,
+            "blocked": 0,
+            "npu_us": None,
+            "baseline_us": None,
+            "speedup": None,
+        })
+    report["by_shape_class"] = by_shape
+    report["shape_overall"] = {
+        **agg["overall"],
+        "cases": 0,
+        "planned_cases": sum(x["planned_cases"] for x in by_shape),
+        "cases_scored": 0,
+        "达标": 0,
+        "blocked": 0,
+        "npu_us": None,
+        "baseline_us": None,
+        "speedup": None,
+    }
+    report["shape_report_complete"] = agg["complete"]
+    report.setdefault("summary", {})["planned_cases"] = report["shape_overall"]["planned_cases"]
+    report["summary"]["cases_scored"] = 0
+    if agg["problems"]:
+        report["shape_report_problems"] = agg["problems"]
+        report.setdefault("notes", []).append(
+            "性能计划大小 shape 报告契约不完整：" + "；".join(agg["problems"]))
+    return report
+
+
 def _attach_non_passing_cases(report, caseset, evidence, baseline):
     """把所有未通过性能 case 逐条挂到最终报告，且不改变既有裁决。
 

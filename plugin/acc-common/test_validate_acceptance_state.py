@@ -798,7 +798,19 @@ class RunWorkflowExitTest(unittest.TestCase):
         r = W.run(spec_path, mode="mock", out_dir=self.d, defect=[did])
         self.assertEqual(r["exit_code"], 1, r)
         with open(os.path.join(self.d, "perf_report.json"), encoding="utf-8") as f:
-            self.assertEqual(json.load(f)["summary"]["status"], "skipped_precision_gate")
+            perf = json.load(f)
+        self.assertEqual(perf["summary"]["status"], "skipped_precision_gate")
+        planned = [c for c in cs["cases"] if "性能" in c.get("dims", [])]
+        self.assertEqual(perf["summary"]["perf_cases"], 0)
+        self.assertEqual(perf["summary"]["cases_scored"], 0)
+        self.assertEqual(perf["summary"]["planned_cases"], len(planned))
+        self.assertEqual(perf["shape_overall"]["cases"], 0)
+        self.assertEqual(perf["shape_overall"]["planned_cases"], len(planned))
+        self.assertEqual(
+            {x["class"]: x["planned_cases"] for x in perf["by_shape_class"]},
+            (cs["perf_case_policy"]["counts"]),
+        )
+        self.assertTrue(perf["shape_report_complete"], perf.get("shape_report_problems"))
         # C5：mock 是**非验收通路**，物理上不产 acceptance.json，改产 dev_run_summary.json
         # （overall→pipeline_result、gate.errors→selfcheck.errors；state 键刻意不写）。
         with open(os.path.join(self.d, "dev_run_summary.json"), encoding="utf-8") as f:

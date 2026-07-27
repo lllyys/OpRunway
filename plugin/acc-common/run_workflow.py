@@ -364,7 +364,9 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     if not precision_ok:
         report = {"op": spec["op"], "baseline_source": None, "target_ratio": None, "per_case": [],
                   "notes": [f"精度未全过（{o['verdict']}）→ 跳过性能测试（fail-fast，精度已全跑再判）"],
-                  "summary": {"perf_cases": 0, "达标": 0, "blocked": 0, "status": "skipped_precision_gate"}}
+                  "summary": {"perf_cases": 0, "cases_scored": 0, "达标": 0, "blocked": 0,
+                              "status": "skipped_precision_gate"}}
+        report = perf_compare.attach_skipped_shape_plan(report, caseset)
         _dump(_stamp_dev(report, is_acceptance, grade), "perf_report.json")
         print(f"[Task3 perf_compare] 跳过（精度={o['verdict']} 未全过 → fail-fast）")
     else:

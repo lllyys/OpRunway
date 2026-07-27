@@ -4,6 +4,10 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **精度门跳过性能仍保留计划视图**：`perf_cases/cases_scored` 继续如实为 0，同时从同一
+  caseset 账本报告 `planned_cases` 与 small/large 数量，不再把“未采集”误呈现成“没有性能计划”。
+- **插件编排说明同步第三条真机通路**：登记 `cpp_extension` 的 form→mode 映射与
+  exact-head build/load/vendor receipt 门，删除“两条通路”和旧 Median PASS 数字造成的漂移。
 - **首轮真实 FAIL 反哺归因 skill**：PR head 必须钉死到远端 ref 的精确 SHA，未发布后继提交不得代跑冒充；
   index evidence 中 `invalid_index_count>0` 明确归为越界输出，不能误套 Torch 的合法 tie 下标差异。
 - **cpp_extension 正式通路与 DUT 来源闭环**：根仓规登记第三条真机 runner form；driver/adapter/
