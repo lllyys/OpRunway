@@ -4,6 +4,8 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **Median 见证回归守卫同步**：多输出测试改按真实 `keepDim/valuesOut/indicesOut` ABI、global 默认
+  attr slots 和 int32 indices 核对；端到端夹具把 1344 矩阵缩成结构等价的 7 条，而非绕回 legacy。
 - **Median tracked 见证迁移**：样例 spec 改为 cpp_extension，按 8 dtype×8 rank×3 shape×
   （1 global+6 by-dim）形成 1344 条完整精度矩阵，并平衡选 50 条性能 case；ABI 名称和 indicesOut
   int32 对齐 PR header，golden 将 Torch int64 indices 明示窄化为 int32。1152 是 cannbot 仅按维
