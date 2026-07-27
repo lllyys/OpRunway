@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **clean-finalizer 与真机来源词表统一**：最终干净 PASS 不再写死只认手写 `user` runner，而是复用
+  workflow 的 `runner_form → mode → runner_source` 受控映射；`cpp_extension` 仍须先过三级门中的
+  build/load/vendor receipt 复核，跨 form 来源继续拒绝。
 - **acc-spec 解耦 oracle 与验收精度标准**：任务书显式精度条款优先，Torch 功能真值不再自动覆盖
   AscendOpTest 默认阈值；Median spec 同步更正标准并结构化挂账独立 `aclnnMedianDim` API surface 缺口。
 - **多输出 index 判据接入 AscendOpTest value policy**：从 canonical AOT `tolerance` 派生

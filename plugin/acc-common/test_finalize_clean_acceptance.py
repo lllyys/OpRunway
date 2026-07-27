@@ -42,6 +42,19 @@ def test_build_clean_acceptance():
     assert acc["gate"] == {"passed": True, "errors": {}}
 
 
+def test_build_clean_acceptance_allows_receipt_gated_cpp_extension_source():
+    spec, evidence, verdict, perf = copy.deepcopy(_docs())
+    spec["runner_form"] = "cpp_extension"
+    evidence.update(
+        runner_form="cpp_extension",
+        runner_source="generated_official_cpp_extension",
+        repo_mode="cpp_extension",
+    )
+    acc = F.build_clean_acceptance(spec, evidence, verdict, perf, {})
+    assert acc["overall"] == "PASS"
+    assert acc["repo_mode"] == "cpp_extension"
+
+
 @pytest.mark.parametrize("mutator", [
     lambda s, e, v, p: e.update(runner_source="builtin"),
     lambda s, e, v, p: v["overall"].update(verdict="needs_review"),

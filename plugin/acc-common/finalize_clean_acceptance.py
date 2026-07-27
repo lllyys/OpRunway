@@ -34,12 +34,15 @@ def build_clean_acceptance(spec, evidence, verdict, perf_report, gate_errors):
         raise FinalizeError(f"验收门未过：{gate_errors}")
     if evidence.get("evidence_grade") != "acceptance_candidate":
         raise FinalizeError("evidence_grade 不是 acceptance_candidate")
-    if evidence.get("runner_source") != "user":
-        raise FinalizeError("runner_source 不是 user")
     runner_form = spec.get("runner_form") or "cpp"
     if evidence.get("runner_form") != runner_form:
         raise FinalizeError(
             f"evidence.runner_form={evidence.get('runner_form')!r} 与 spec={runner_form!r} 不一致")
+    mode = run_workflow._RUNNER_FORM_TO_MODE.get(runner_form)
+    if mode is None or not run_workflow._runner_source_allowed(
+            mode, evidence.get("runner_source")):
+        raise FinalizeError(
+            f"runner_source={evidence.get('runner_source')!r} 与 runner_form={runner_form!r} 不匹配")
 
     overall = verdict.get("overall")
     if not isinstance(overall, dict) or overall.get("verdict") != "pass":
