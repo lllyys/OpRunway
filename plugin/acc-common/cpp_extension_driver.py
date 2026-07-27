@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import re
 
 
 class DriverError(RuntimeError):
@@ -76,6 +77,44 @@ def _require_env_path(key):
     return os.path.realpath(value)
 
 
+def _vendor_build_provenance(vendor):
+    """读取并核验 DUT vendor ELF 的独立构建收据。
+
+    Extension 自身的 build/load 成功只证明调用桥可用，不能证明被加载的 vendor
+    ELF 来自任务 PR。生产者须在构建/安装 DUT 时落一份内容可校验的收据；这里把
+    完整 PR head、构建命令和最终 ELF 摘要重新对账后纳入 Extension receipt。
+    """
+    path = _require_env_path("OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT")
+    receipt = _load(path)
+    if (not isinstance(receipt, dict)
+            or receipt.get("schema") != "oprunway.vendor_build_receipt"
+            or receipt.get("schema_version") != 1
+            or receipt.get("status") != "VERIFIED"):
+        raise DriverError("vendor build receipt schema/status 非 VERIFIED v1")
+    source = receipt.get("source")
+    head = source.get("pr_head_sha") if isinstance(source, dict) else None
+    if (not isinstance(head, str)
+            or re.fullmatch(r"[0-9a-fA-F]{40}", head) is None
+            or not isinstance(source.get("repo"), str)
+            or not source["repo"].strip()):
+        raise DriverError("vendor build receipt 缺完整 PR head/source repo")
+    build = receipt.get("build")
+    if (not isinstance(build, dict)
+            or not isinstance(build.get("argv"), list)
+            or not build["argv"]
+            or any(not isinstance(x, str) or not x for x in build["argv"])
+            or not isinstance(build.get("cwd"), str)
+            or not build["cwd"]
+            or build.get("returncode") != 0):
+        raise DriverError("vendor build receipt 缺成功 build argv/cwd/returncode")
+    artifact = receipt.get("artifact")
+    if (not isinstance(artifact, dict)
+            or os.path.realpath(artifact.get("library_path", "")) != vendor
+            or artifact.get("library_sha256") != _sha_file(vendor)):
+        raise DriverError("vendor build receipt 的安装 ELF 路径/摘要与现场文件不一致")
+    return receipt
+
+
 def _build(bundle, manifest):
     argv = [sys.executable, "setup.py", "build_ext", "--inplace"]
     run = subprocess.run(argv, cwd=bundle, check=False)
@@ -91,6 +130,7 @@ def _build(bundle, manifest):
 
 def _bind_vendor(plan):
     vendor = _require_env_path("OPRUNWAY_CPP_EXTENSION_VENDOR_LIBRARY")
+    build_provenance = _vendor_build_provenance(vendor)
     symbols = sorted({"aclnn" + row["symbol"] for row in plan["cases"]})
     handle = ctypes.CDLL(vendor, mode=ctypes.RTLD_GLOBAL)
     missing = [symbol for symbol in symbols if not hasattr(handle, symbol)]
@@ -101,6 +141,8 @@ def _bind_vendor(plan):
         "library_sha256": _sha_file(vendor),
         "symbols_owned": symbols,
         "binding": "ctypes.CDLL(exact_path, RTLD_GLOBAL) before torch.ops.load_library",
+        "build_receipt": build_provenance,
+        "build_receipt_sha256": _canonical_sha(build_provenance),
     }
 
 

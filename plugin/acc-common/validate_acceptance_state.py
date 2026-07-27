@@ -777,6 +777,31 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs):
             or any(not isinstance(symbol, str) or not symbol
                    for symbol in symbols_owned)):
         errs.append("cpp_extension vendor library/symbol ownership provenance 不完整")
+    build_receipt = vendor.get("build_receipt") if isinstance(vendor, dict) else None
+    source = build_receipt.get("source") if isinstance(build_receipt, dict) else None
+    build = build_receipt.get("build") if isinstance(build_receipt, dict) else None
+    artifact_rec = (build_receipt.get("artifact")
+                    if isinstance(build_receipt, dict) else None)
+    head = source.get("pr_head_sha") if isinstance(source, dict) else None
+    build_digest = _canonical_sha(build_receipt)
+    if (not isinstance(build_receipt, dict)
+            or build_receipt.get("schema") != "oprunway.vendor_build_receipt"
+            or build_receipt.get("schema_version") != 1
+            or build_receipt.get("status") != "VERIFIED"
+            or not isinstance(head, str) or len(head) != 40
+            or any(ch not in "0123456789abcdefABCDEF" for ch in head)
+            or not isinstance(source.get("repo"), str) or not source["repo"].strip()
+            or not isinstance(build, dict)
+            or not isinstance(build.get("argv"), list) or not build["argv"]
+            or any(not isinstance(x, str) or not x for x in build["argv"])
+            or not isinstance(build.get("cwd"), str) or not build["cwd"]
+            or build.get("returncode") != 0
+            or not isinstance(artifact_rec, dict)
+            or artifact_rec.get("library_path") != vendor.get("library_path")
+            or artifact_rec.get("library_sha256") != vendor_sha
+            or vendor.get("build_receipt_sha256") != build_digest):
+        errs.append(
+            "cpp_extension vendor build receipt 未完整绑定 PR head→构建→安装 ELF")
     receipt_sha = _canonical_sha(receipt)
     for row in ev_list:
         if isinstance(row, dict) and row.get("cpp_extension_receipt_sha256") != receipt_sha:

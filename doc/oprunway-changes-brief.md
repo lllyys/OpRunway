@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **cpp_extension 正式通路与 DUT 来源闭环**：根仓规登记第三条真机 runner form；driver/adapter/
+  三级门新增 vendor build receipt，强制机校完整 PR head、源码仓、构建命令与现场加载 ELF 摘要，
+  不再只靠目录短 SHA 说明 exact-head 来源。
 - **clean-finalizer 与真机来源词表统一**：最终干净 PASS 不再写死只认手写 `user` runner，而是复用
   workflow 的 `runner_form → mode → runner_source` 受控映射；`cpp_extension` 仍须先过三级门中的
   build/load/vendor receipt 复核，跨 form 来源继续拒绝。

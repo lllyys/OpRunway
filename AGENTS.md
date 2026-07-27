@@ -78,14 +78,17 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 ## 4 · `--mode` 只由 `spec.runner_form` 派生
 
-`spec.runner_form` 是唯一真源，受控词表为 `{cpp, aclnn_py}`：
+`spec.runner_form` 是唯一真源，受控词表为 `{cpp, aclnn_py, cpp_extension}`：
 
 | `runner_form` | `--mode` | 执行形态 | 默认性能对照物 |
 |---|---|---|---|
 | `cpp` 或未声明 | `new_example` | 编译 per-op C++ runner | 同法测的内置 TBE |
 | `aclnn_py` | `aclnn_py` | 通用 ctypes 调标准 aclnn 两段式 `.so` | 逐字按任务书配置；可为同机 `torch_npu`，也可直接调用 CANN 内置 ACLNN |
+| `cpp_extension` | `cpp_extension` | 按官方 `NpuExtension` / `EXEC_NPU_CMD_EXT` 生成独立 `torch.ops` 调用桥；DUT 仍是指定 PR 构建的 vendor `.so` | 逐字按任务书配置；runner form 不决定 baseline |
 
-- 两条都是真机验收通路、都能产验收裁决；
+- 三条都是真机验收通路、都能产验收裁决；
+- `cpp_extension` 不重编 op-plugin，也不把 op-plugin 当 DUT；它只复用官方 C++ Extension 接入机制，
+  并须以独立构建收据机校绑定完整 PR head、构建命令和实际加载的 vendor ELF；
 - Median + PR6429 最新真机精度 60/60 PASS 正是 `aclnn_py` 跑出；
 - `mock`、`catlass`、`catlass_mock` 不能从 `runner_form` 派生，只能显式用于局部开发或对应通路；
 - mock 通路物理上不产 `acceptance.json` 或 `verdict.json`；

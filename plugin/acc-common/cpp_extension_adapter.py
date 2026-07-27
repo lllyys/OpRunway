@@ -272,6 +272,42 @@ def _require_sha(label, value):
         raise CppExtensionAdapterError(f"{label} 非十六进制 sha256") from ex
 
 
+def _validate_vendor_build_receipt(vendor):
+    build_receipt = vendor.get("build_receipt")
+    if (not isinstance(build_receipt, dict)
+            or build_receipt.get("schema") != "oprunway.vendor_build_receipt"
+            or build_receipt.get("schema_version") != 1
+            or build_receipt.get("status") != "VERIFIED"):
+        raise CppExtensionAdapterError(
+            "receipt.vendor.build_receipt schema/status 非 VERIFIED v1")
+    source = build_receipt.get("source")
+    head = source.get("pr_head_sha") if isinstance(source, dict) else None
+    if (not isinstance(head, str) or len(head) != 40
+            or any(ch not in "0123456789abcdefABCDEF" for ch in head)
+            or not isinstance(source.get("repo"), str) or not source["repo"].strip()):
+        raise CppExtensionAdapterError(
+            "receipt.vendor.build_receipt 缺完整 PR head/source repo")
+    build = build_receipt.get("build")
+    if (not isinstance(build, dict) or not isinstance(build.get("argv"), list)
+            or not build["argv"] or any(
+                not isinstance(x, str) or not x for x in build["argv"])
+            or not isinstance(build.get("cwd"), str) or not build["cwd"]
+            or build.get("returncode") != 0):
+        raise CppExtensionAdapterError(
+            "receipt.vendor.build_receipt 缺成功 build argv/cwd/returncode")
+    artifact = build_receipt.get("artifact")
+    if (not isinstance(artifact, dict)
+            or artifact.get("library_path") != vendor.get("library_path")
+            or artifact.get("library_sha256") != vendor.get("library_sha256")):
+        raise CppExtensionAdapterError(
+            "receipt.vendor.build_receipt 与 vendor ELF 绑定不一致")
+    expected = _canonical_sha(build_receipt)
+    _require_sha("receipt.vendor.build_receipt_sha256", expected)
+    if vendor.get("build_receipt_sha256") != expected:
+        raise CppExtensionAdapterError(
+            "receipt.vendor.build_receipt_sha256 漂移")
+
+
 def validate_receipt(work, caseset):
     """验证外部 driver 回传的 build/load receipt 与当前输入、源码、ELF 精确绑定。"""
     work = os.path.abspath(work)
@@ -338,6 +374,7 @@ def validate_receipt(work, caseset):
             or not vendor.get("library_sha256") or not vendor.get("symbols_owned"):
         raise CppExtensionAdapterError("receipt.vendor 缺库路径/摘要/符号归属")
     _require_sha("receipt.vendor.library_sha256", vendor["library_sha256"])
+    _validate_vendor_build_receipt(vendor)
     return receipt
 
 

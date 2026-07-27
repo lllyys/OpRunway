@@ -43,6 +43,26 @@ class CppExtensionReceiptGateTest(unittest.TestCase):
             os.path.join(work, "cpp_extension_invocation_plan.json"), plan)
         _write_json(os.path.join(work, "cpp_extension_caseset.json"), caseset)
 
+        vendor_sha = hashlib.sha256(b"vendor").hexdigest()
+        vendor_path = "/opt/vendor/lib.so"
+        build_receipt = {
+            "schema": "oprunway.vendor_build_receipt",
+            "schema_version": 1,
+            "status": "VERIFIED",
+            "source": {
+                "repo": "https://example.invalid/ops.git",
+                "pr_head_sha": "a" * 40,
+            },
+            "build": {
+                "argv": ["bash", "build.sh", "--ops=x"],
+                "cwd": "/work/ops",
+                "returncode": 0,
+            },
+            "artifact": {
+                "library_path": vendor_path,
+                "library_sha256": vendor_sha,
+            },
+        }
         receipt = {
             "schema": "oprunway.cpp_extension_receipt",
             "schema_version": 1,
@@ -70,8 +90,11 @@ class CppExtensionReceiptGateTest(unittest.TestCase):
                 "soc": "Ascend",
             },
             "vendor": {
-                "library_sha256": hashlib.sha256(b"vendor").hexdigest(),
+                "library_path": vendor_path,
+                "library_sha256": vendor_sha,
                 "symbols_owned": ["aclnnX"],
+                "build_receipt": build_receipt,
+                "build_receipt_sha256": G._canonical_sha(build_receipt),
             },
         }
         envelope = {
@@ -110,6 +133,18 @@ class CppExtensionReceiptGateTest(unittest.TestCase):
             G._gate_cpp_extension_receipt(
                 root, caseset, envelope, evidence, errors)
             self.assertTrue(any("receipt digest" in error for error in errors))
+
+    def test_rejects_missing_full_pr_head_build_binding(self):
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = self._fixture(root)
+            envelope["cpp_extension_receipt"]["vendor"]["build_receipt"][
+                "source"]["pr_head_sha"] = "a" * 7
+            evidence[0]["cpp_extension_receipt_sha256"] = G._canonical_sha(
+                envelope["cpp_extension_receipt"])
+            errors = []
+            G._gate_cpp_extension_receipt(
+                root, caseset, envelope, evidence, errors)
+            self.assertTrue(any("PR head→构建→安装 ELF" in e for e in errors))
 
 
 if __name__ == "__main__":

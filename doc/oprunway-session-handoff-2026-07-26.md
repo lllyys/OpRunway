@@ -84,7 +84,9 @@ OpRunway 通用侧本轮补齐：
 
 - 本轮只做本地检查点 commit，不 push、不 merge。
 - 工作树另有 bureau compile、图稿、旧 C++ Extension 实验等跨轮改动；选择性提交，禁止整树回退。
-- `cpp_extension_codegen.py`、witness 及相关 fixture 是被最终路线淘汰的实验，不纳入本轮验收提交。
+- `cpp_extension_codegen.py`、driver、adapter 与相关 fixture 已成为 Torch 对标任务的正式独立
+  `cpp_extension` 通路；它复用官方 op-plugin 示例机制，但不重编 op-plugin，DUT 是指定 PR
+  构建并由完整 PR head→构建→vendor ELF 收据绑定的用户态 OPP 库。
 - reports 是 ignored 真机产物；最终事实以远端隔离报告目录中的根 JSON 和本文数字为准。
 - 后续若要发布，按仓规对本次待发布代码走一次 audit→fix→verify、散文走独立 Codex 审，再由用户决定
   是否 push。
