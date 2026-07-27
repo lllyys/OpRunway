@@ -1115,6 +1115,18 @@ def _gather_along_dim(src, idx, dim, keepdim):
     return np.squeeze(gathered, axis=d)
 
 
+def _index_out_of_bounds_count(src, idx, dim):
+    """统计 actual index 越界元素；维度契约错误仍抛出，数值坏点交 judge 明确判 FAIL。"""
+    import numpy as np
+    src = np.asarray(src)
+    idx = np.asarray(idx)
+    d = dim if dim >= 0 else dim + src.ndim
+    if not (0 <= d < src.ndim):
+        raise ValueError(f"index_value_consistency dim={dim} 越界（源 ndim={src.ndim}）")
+    limit = int(src.shape[d])
+    return int(np.count_nonzero((idx < 0) | (idx >= limit)))
+
+
 def compute_metrics(out, golden, policy, gather_ctx=None):
     """采集层复算误差分布（numpy，惰性 import）——**只量误差、不判 pass/fail**（judge 在 validator）。
 
@@ -1217,8 +1229,15 @@ def compute_metrics(out, golden, policy, gather_ctx=None):
                              f"不做隐式归一）——fail-closed")
         rtol = _checked_tol(policy["value_rtol"], "policy.value_rtol")
         atol = _checked_tol(policy["value_atol"], "policy.value_atol")
-        ga = _gather_along_dim(src, ia, dim, keepdim).astype(np.float64)
+        # golden 是任务书授权 oracle 产物，非法仍属证据/契约错误并抛出；actual 是 DUT 数值输出，
+        # 越界须形成可落盘、可复算的明确 FAIL metrics，不能让整轮报告因 numpy gather 异常消失。
         gg = _gather_along_dim(src, ig, dim, keepdim).astype(np.float64)
+        invalid = _index_out_of_bounds_count(src, ia, dim)
+        if invalid:
+            return {"mismatch": int(ig.size), "numel": int(ig.size),
+                    "gathered_max_abs_err": 0.0,
+                    "invalid_index_count": invalid}
+        ga = _gather_along_dim(src, ia, dim, keepdim).astype(np.float64)
         # 与 value 路径**同一个实现**（finding #3）：inf 四象限一致、equal_nan 语义一致。
         close, diff = _allclose_close_mask(ga, gg, rtol, atol, True)
         finite = np.isfinite(diff)

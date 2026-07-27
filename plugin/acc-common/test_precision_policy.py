@@ -1159,15 +1159,16 @@ class IndexGuardTest(unittest.TestCase):
     def _run(self, a, g):
         return P.compute_metrics(a, g, self.POL, self.CTX)
 
-    def test_negative_index_rejected(self):
-        """⭐ 旧洞：actual index=-1 被 take_along_axis 回绕成最后一个元素 → mismatch=0 假通过。"""
-        with self.assertRaises(ValueError) as cm:
-            self._run(np.array([-1], np.int64), np.array([2], np.int64))
-        self.assertIn("越界", str(cm.exception))
+    def test_negative_index_is_explicit_failed_metric(self):
+        """⭐ actual index=-1 不回绕，也不炸掉整轮证据；落成明确非零 mismatch。"""
+        metrics = self._run(np.array([-1], np.int64), np.array([2], np.int64))
+        self.assertEqual(metrics["mismatch"], 1)
+        self.assertEqual(metrics["invalid_index_count"], 1)
 
-    def test_out_of_range_index_rejected(self):
-        with self.assertRaises(ValueError):
-            self._run(np.array([3], np.int64), np.array([0], np.int64))
+    def test_out_of_range_index_is_explicit_failed_metric(self):
+        metrics = self._run(np.array([3], np.int64), np.array([0], np.int64))
+        self.assertEqual(metrics["mismatch"], 1)
+        self.assertEqual(metrics["invalid_index_count"], 1)
 
     def test_float_index_rejected(self):
         """⭐ 旧洞：`[0.9]` 被 astype(intp) 静默截成 `[0]`。"""

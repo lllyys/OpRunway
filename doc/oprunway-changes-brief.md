@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **DUT 越界 index 改落明确 FAIL 证据**：`index_value_consistency` 对 oracle/维度契约错误继续
+  fail-closed；对 actual 的负数或正向越界不再让整轮 traceback，而是记录
+  `mismatch + invalid_index_count`，由同一 validator 判 FAIL、最终门独立复算。
 - **同符号多变体 Extension 绑定修正**：不再把 ACLNN symbol 唯一性误当 ABI 约束，改按
   `symbol + active_attrs + active_outputs` 唯一匹配 entrypoint；统一符号承载 global/by-dim
   等稳定接口形态可直接生成，歧义或零匹配仍 fail-closed。
