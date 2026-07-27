@@ -2,6 +2,8 @@
 """cpp_extension adapter 的纯确定性契约测试；不 build、不加载 torch/NPU。"""
 
 import copy
+import json
+import os
 import tempfile
 import unittest
 
@@ -91,6 +93,14 @@ class CppExtensionAdapterContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaisesRegex(A.CppExtensionAdapterError, "cpp_extension"):
                 A.prepare(bad, _caseset(), td)
+
+    def test_prepare_snapshots_exact_caseset_for_remote_driver(self):
+        with tempfile.TemporaryDirectory() as td:
+            A.prepare(_spec(), _caseset(), td)
+            path = os.path.join(td, "cpp_extension_caseset.json")
+            with open(path, encoding="utf-8") as src:
+                snapshot = json.load(src)
+        self.assertEqual(snapshot, _caseset())
 
     def test_real_mode_fails_before_driver_without_explicit_gate(self):
         with self.assertRaisesRegex(A.CppExtensionAdapterError, "真机路径未启用"):

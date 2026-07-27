@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **官方 Extension 容器内 driver 落地**：通用 driver 执行 `setup.py build_ext --inplace`、精确加载唯一
+  ELF、预加载指定 vendor library 并核符号、按 invocation plan 逐 case 调独立 torch.ops、落多输出
+  manifest 和 build/load receipt；机器连接与容器进入仍由外层显式 argv 提供，仓内不含私有路径。
 - **Median 见证回归守卫同步**：多输出测试改按真实 `keepDim/valuesOut/indicesOut` ABI、global 默认
   attr slots 和 int32 indices 核对；端到端夹具把 1344 矩阵缩成结构等价的 7 条，而非绕回 legacy。
 - **Median tracked 见证迁移**：样例 spec 改为 cpp_extension，按 8 dtype×8 rank×3 shape×

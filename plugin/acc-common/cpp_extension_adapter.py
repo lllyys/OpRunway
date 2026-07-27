@@ -26,6 +26,7 @@ class CppExtensionAdapterError(RuntimeError):
 
 _RECEIPT = "cpp_extension_receipt.json"
 _PLAN = "cpp_extension_invocation_plan.json"
+_CASESET = "cpp_extension_caseset.json"
 _BUNDLE = "cpp_extension"
 _OUT = "cpp_extension_out"
 
@@ -140,6 +141,9 @@ def prepare(spec, caseset, work):
     plan = build_invocation_plan(caseset, manifest)
     with open(os.path.join(work, _PLAN), "w", encoding="utf-8") as out:
         json.dump(plan, out, ensure_ascii=False, indent=2)
+        out.write("\n")
+    with open(os.path.join(work, _CASESET), "w", encoding="utf-8") as out:
+        json.dump(caseset, out, ensure_ascii=False, indent=2)
         out.write("\n")
     return manifest, plan
 
