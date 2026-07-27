@@ -38,8 +38,7 @@ def _precision_failure_detail(failed):
         "",
         f"- 失败总数：**{len(failed)}**",
         "- 返回主报告：[验收报告.md](验收报告.md)",
-        "- 快捷入口：`./repro/review.sh list`、`./repro/review.sh show <序号>`、"
-        "`./repro/review.sh run <序号>`",
+        "- 审核主入口：`./repro/audit_case.sh <序号>`（一次显示接入、输入、接口、差异和阈值）",
         "",
         "| 序号 | case_id | 判据 | 查看用例 | 重放复现 |",
         "|---:|---|---|---|---|",
@@ -48,7 +47,7 @@ def _precision_failure_detail(failed):
         case_id = row.get("case_id")
         lines.append(
             f"| {index} | `{_cell(case_id)}` | {_cell(row.get('判据'))} | "
-            f"`./repro/review.sh show {index}` | `./repro/review.sh run {index}` |")
+            f"`./repro/review.sh show {index}` | `./repro/audit_case.sh {index}` |")
     lines += [
         "",
         "也可按 case_id 操作：",
@@ -134,12 +133,10 @@ def render(report_root):
         "进入本报告目录后：",
         "",
         "```bash",
-        "./repro/review.sh list",
-        "./repro/review.sh show 1",
-        "./repro/review.sh run 1",
+        "./repro/audit_case.sh 1",
         "```",
         "",
-        "`show` 只读展示；`run` 会重放并把“原 FAIL 再次失败”解释为稳定复现，审核员无需记底层退出码语义。",
+        "`audit_case.sh` 直接完成单 case 重放，并按五段展示 Torch 接入、输入、接口、差异阈值和结论。",
         "",
         "## 被测物与运行环境",
         "",
@@ -181,8 +178,7 @@ def render(report_root):
             f"共 **{len(failed)}** 条，逐项判据和复现入口见 "
             "[精度失败明细.md](精度失败明细.md)。",
             "",
-            "快速复核：`./repro/review.sh list`、`./repro/review.sh show 1`、"
-            "`./repro/review.sh run 1`。",
+            "快速复核：`./repro/audit_case.sh 1`。",
         ]
     else:
         lines.append("无精度失败。")
@@ -242,6 +238,7 @@ def render(report_root):
         "- `repro/index.tsv`：全部 case 与启动脚本索引。",
         "- `repro/failed.tsv`：带编号的失败 case 清单。",
         "- `repro/review.sh`：审核员 list/show/run 快捷入口。",
+        "- `repro/audit_case.sh`：审核员单 case 直接复现主入口。",
         "- `repro/show_case.sh`：查看具体用例内容。",
         "- `repro/run_case.sh`：重放指定用例。",
         "",

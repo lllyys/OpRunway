@@ -109,16 +109,21 @@ def _attach_output_samples(np, work, output):
 
 
 def _print_human_summary(result):
-    print("单 case 精度复核结果")
+    print("单 case 精度审核复现")
     for case in result["results"]:
         failed = [row for row in case["outputs"] if row["state"] != "pass"]
         passed = [row.get("name") or row.get("role") for row in case["outputs"]
                   if row["state"] == "pass"]
         print(f"\ncase_id: {case['case_id']}")
+        integration = case.get("torch_integration") or {}
+        print("\n1. Torch 接入")
+        print(f"状态: {integration.get('status') or '—'}")
+        print(f"注册入口: {integration.get('entrypoint') or '—'}")
+        print(f"注册 schema: {integration.get('schema') or '—'}")
+        print(f"Extension ELF SHA256: {integration.get('artifact_sha256') or '—'}")
         call = case.get("call") or {}
-        print(f"Extension 入口: {call.get('extension') or '—'}")
-        print(f"DUT 接口: {call.get('dut_interface') or '—'}")
-        print("输入参数:")
+        print("\n2. 输入与调用参数")
+        print("输入:")
         for item in case.get("inputs") or []:
             print(
                 f"  - {item.get('name')}: dtype={item.get('dtype')}, "
@@ -149,6 +154,11 @@ def _print_human_summary(result):
                 f"  - {output.get('name')}: role={output.get('role')}, "
                 f"dtype={output.get('dtype')}, "
                 f"shape={json.dumps(output.get('shape'), ensure_ascii=False)}")
+        print("\n3. Golden 与本次测试接口")
+        print(f"Golden 接口: {case.get('golden_interface') or '—'}")
+        print(f"本次 Extension 接口: {call.get('extension') or '—'}")
+        print(f"本次 DUT 接口: {call.get('dut_interface') or '—'}")
+        print("\n4. 输出差异与阈值")
         if passed:
             print("通过输出: " + ", ".join(str(item) for item in passed))
         for output in failed:
@@ -164,7 +174,28 @@ def _print_human_summary(result):
                 "golden 前 "
                 f"{output.get('sample_limit', 8)} 项: "
                 f"{json.dumps(output.get('golden_sample'), ensure_ascii=False)}")
-    print(f"\n完整复核证据: {result['out_dir']}/repro_summary.json")
+            metrics, policy = output.get("metrics") or {}, output.get("policy") or {}
+            if policy.get("kind") == "index_value_consistency":
+                print(
+                    "阈值: mismatch 必须为 0；"
+                    f"value_rtol={policy.get('value_rtol')}, "
+                    f"value_atol={policy.get('value_atol')}")
+                print(
+                    f"差异: mismatch={metrics.get('mismatch')}/"
+                    f"numel={metrics.get('numel')}, "
+                    f"invalid_index_count={metrics.get('invalid_index_count')}")
+            else:
+                print(
+                    f"阈值: tolerance={policy.get('tolerance')}, "
+                    f"error_rate={policy.get('error_rate')}")
+                print(
+                    f"差异: bad_count={metrics.get('bad_count')}/"
+                    f"numel={metrics.get('numel')}, "
+                    f"max_abs_err={metrics.get('max_abs_err')}, "
+                    f"max_rel_err={metrics.get('max_rel_err')}")
+        print("\n5. 本次复现结论")
+        print("FAIL 已复现" if failed else "本次未复现原 FAIL")
+    print(f"完整机器证据: {result['out_dir']}/repro_summary.json")
 
 
 def select_representatives(caseset, evidence, verdict, max_cases=5):
@@ -300,6 +331,16 @@ def reproduce(report_root, case_ids, out_dir=None):
         summary.append({
             "case_id": row["case_id"],
             "reproduced_failure": any(x["state"] != "pass" for x in outputs),
+            "torch_integration": {
+                "status": "PASS（已注册、已实际调用并返回输出）",
+                "entrypoint": (
+                    f"torch.ops.{receipt['load']['namespace']}."
+                    f"{invocation_by_id[row['case_id']]['entrypoint']}"),
+                "schema": (
+                    receipt["load"].get("schemas", {}).get(
+                        invocation_by_id[row["case_id"]]["entrypoint"])),
+                "artifact_sha256": receipt["artifact"]["sha256"],
+            },
             "call": {
                 "extension": (
                     f"torch.ops.{receipt['load']['namespace']}."
@@ -317,6 +358,9 @@ def reproduce(report_root, case_ids, out_dir=None):
                 for item in case_by_id[row["case_id"]].get("inputs") or []
             ],
             "attrs": case_by_id[row["case_id"]].get("attrs") or {},
+            "golden_interface": (
+                case_by_id[row["case_id"]].get("expected", {}).get(
+                    "golden_source")),
             "output_contracts": [
                 {
                     "name": item.get("name"),

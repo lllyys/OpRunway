@@ -38,6 +38,15 @@ class ReproArtifactsTest(unittest.TestCase):
                 os.path.join(root, "repro", "show_case.sh"), os.X_OK))
             self.assertTrue(os.access(
                 os.path.join(root, "repro", "review.sh"), os.X_OK))
+            self.assertTrue(os.access(
+                os.path.join(root, "repro", "audit_case.sh"), os.X_OK))
+            with open(os.path.join(root, "repro", "audit_case.sh"),
+                      encoding="utf-8") as src:
+                audit_script = src.read()
+            self.assertIn("cpp_extension_repro.py", audit_script)
+            self.assertNotIn("run_case.sh", audit_script)
+            self.assertNotIn("review.sh", audit_script)
+            self.assertIn("--human-summary", audit_script)
             with open(os.path.join(root, "repro", "cases", "case_b.sh"),
                       encoding="utf-8") as src:
                 case_script = src.read()

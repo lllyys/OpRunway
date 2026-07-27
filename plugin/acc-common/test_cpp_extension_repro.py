@@ -40,6 +40,12 @@ class SelectRepresentativesTest(unittest.TestCase):
             "out_dir": "/tmp/repro",
             "results": [{
                 "case_id": "x",
+                "torch_integration": {
+                    "status": "PASS（已注册、已实际调用并返回输出）",
+                    "entrypoint": "torch.ops.ns.invoke_v1",
+                    "schema": "ns::invoke_v1(Tensor self) -> Tensor",
+                    "artifact_sha256": "abc",
+                },
                 "call": {
                     "extension": "torch.ops.ns.invoke_v1",
                     "dut_interface": "aclnnMedian",
@@ -54,6 +60,7 @@ class SelectRepresentativesTest(unittest.TestCase):
                     {"name": "self", "dtype": "float16", "shape": [16, 4]},
                 ],
                 "attrs": {"dim": 0, "keepDim": False},
+                "golden_interface": "torch torch.median",
                 "output_contracts": [
                     {"name": "index", "role": "index", "dtype": "int32",
                      "shape": [4]},
@@ -63,6 +70,16 @@ class SelectRepresentativesTest(unittest.TestCase):
                     {
                         "name": "index", "role": "index", "state": "fail",
                         "reason": "mismatch=1/numel=1",
+                        "policy": {
+                            "kind": "index_value_consistency",
+                            "value_rtol": 0.004,
+                            "value_atol": 0.004,
+                        },
+                        "metrics": {
+                            "mismatch": 1,
+                            "numel": 1,
+                            "invalid_index_count": 1,
+                        },
                         "actual_sample": [2147483647],
                         "golden_sample": [17],
                         "sample_limit": 8,
@@ -74,8 +91,16 @@ class SelectRepresentativesTest(unittest.TestCase):
         with mock.patch("sys.stdout", out):
             R._print_human_summary(result)
         text = out.getvalue()
-        self.assertIn("Extension 入口: torch.ops.ns.invoke_v1", text)
-        self.assertIn("DUT 接口: aclnnMedian", text)
+        self.assertIn("1. Torch 接入", text)
+        self.assertIn("已注册、已实际调用并返回输出", text)
+        self.assertIn("2. 输入与调用参数", text)
+        self.assertIn("3. Golden 与本次测试接口", text)
+        self.assertIn("Golden 接口: torch torch.median", text)
+        self.assertIn("4. 输出差异与阈值", text)
+        self.assertIn("mismatch 必须为 0", text)
+        self.assertIn("5. 本次复现结论", text)
+        self.assertIn("本次 Extension 接口: torch.ops.ns.invoke_v1", text)
+        self.assertIn("本次 DUT 接口: aclnnMedian", text)
         self.assertIn("self: dtype=float16, shape=[16, 4]", text)
         self.assertIn("dim=0, keepDim=false", text)
         self.assertIn("0. self (input[0])", text)

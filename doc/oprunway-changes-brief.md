@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **审核复现收敛为单入口**：新增 `repro/audit_case.sh <失败序号|case_id>`，直接调用复现器，
+  不再经过 review→run_case→per-case 多层包装；固定按 Torch 接入、输入/shape、golden与DUT接口、
+  输出差异/阈值、复现结论五段展示，旧入口只作兼容。
 - **人工重放直接展示完整调用与失败现象**：`review.sh run` 默认不再刷完整 JSON，而是先列
   Extension 入口、DUT ACLNN 接口、输入 dtype/shape、属性、参数槽顺序和输出契约，再列失败输出、
   原判据、actual/golden 前8项及完整证据路径；机器可读 `repro_summary.json` 仍照常落盘。

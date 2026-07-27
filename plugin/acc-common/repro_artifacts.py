@@ -189,6 +189,68 @@ esac
 """
 
 
+def _audit_case_script():
+    return """#!/usr/bin/env bash
+set -euo pipefail
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+report_root="$(cd "$script_dir/.." && pwd)"
+[[ $# -eq 1 ]] || { echo "用法: $0 <失败序号|case_id>" >&2; exit 2; }
+token="$1"
+if [[ "$token" =~ ^[0-9]+$ ]]; then
+  case_id="$(awk -F '\\t' -v n="$token" 'NR>1 && $1==n {print $2; exit}' "$script_dir/failed.tsv")"
+else
+  case_id="$token"
+fi
+[[ -n "$case_id" ]] || { echo "找不到失败编号: $token" >&2; exit 2; }
+[[ "$case_id" =~ ^[A-Za-z0-9_.-]+$ && "$case_id" != -* ]] || {
+  echo "非法 case_id: $case_id" >&2; exit 2;
+}
+
+if [[ -n "${OPRUNWAY_REPRO_ENV_FILE:-}" ]]; then
+  [[ -f "$OPRUNWAY_REPRO_ENV_FILE" ]] || {
+    echo "OPRUNWAY_REPRO_ENV_FILE 不存在: $OPRUNWAY_REPRO_ENV_FILE" >&2; exit 2;
+  }
+  source "$OPRUNWAY_REPRO_ENV_FILE"
+  if [[ -n "${OPRUNWAY_SETENV:-}" ]]; then
+    [[ -f "$OPRUNWAY_SETENV" ]] || {
+      echo "OPRUNWAY_SETENV 不存在: $OPRUNWAY_SETENV" >&2; exit 2;
+    }
+    source "$OPRUNWAY_SETENV"
+  fi
+fi
+
+plugin_root="${OPRUNWAY_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"
+if [[ -z "$plugin_root" ]]; then
+  probe="$report_root"
+  while [[ "$probe" != "/" ]]; do
+    if [[ -f "$probe/plugin/acc-common/cpp_extension_repro.py" ]]; then
+      plugin_root="$probe/plugin"
+      break
+    fi
+    probe="$(dirname "$probe")"
+  done
+fi
+[[ -n "$plugin_root" && -f "$plugin_root/acc-common/cpp_extension_repro.py" ]] || {
+  echo "无法定位 OpRunway plugin；请设置 OPRUNWAY_PLUGIN_ROOT。" >&2; exit 2;
+}
+
+set +e
+python3 "$plugin_root/acc-common/cpp_extension_repro.py" \
+  --report-root "$report_root" --case-id "$case_id" --human-summary
+rc=$?
+set -e
+if [[ $rc -eq 1 ]]; then
+  exit 0
+fi
+if [[ $rc -eq 0 ]]; then
+  echo "警告：本次未复现原 FAIL，请人工调查。" >&2
+  exit 1
+fi
+echo "复现未执行完成（rc=$rc），未形成精度结论。" >&2
+exit "$rc"
+"""
+
+
 def generate_cpp_extension(report_root, caseset, verdict):
     """为完整 caseset 生成逐 case 启动脚本和可审计索引。"""
     report_root = os.path.realpath(report_root)
@@ -256,13 +318,15 @@ def generate_cpp_extension(report_root, caseset, verdict):
         _write(os.path.join(stage, "run_case.sh"), _run_case_script(), executable=True)
         _write(os.path.join(stage, "show_case.sh"), _show_case_script(), executable=True)
         _write(os.path.join(stage, "review.sh"), _review_script(), executable=True)
+        _write(os.path.join(stage, "audit_case.sh"), _audit_case_script(), executable=True)
         _write(os.path.join(stage, "README.md"), """# 人工复现入口
 
 本目录由验收 workflow 生成，不参与验收裁决。
 
 - `index.tsv`：全部 case、dtype、shape、属性、原精度结果与脚本路径；
 - `failed.tsv`：带短编号的失败 case 清单；
-- `review.sh list/show/run`：审核员快捷入口，负责解释重放结果；
+- `audit_case.sh <失败序号|case_id>`：审核员主入口，一次显示接入、输入、接口、差异和结论；
+- `review.sh list/show/run`：兼容入口；
 - `run_case.sh <case_id>`：统一入口；
 - `show_case.sh <case_id>`：展示 case 定义、输入/golden 摘要、调用槽、policy 与原结果；
 - `cases/<case_id>.sh`：逐 case 可执行入口。

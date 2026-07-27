@@ -50,14 +50,14 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
             self.assertIn("| `float32` | 2 | 1 | 1 |", text)
             self.assertIn("[精度失败明细.md](精度失败明细.md)", text)
             self.assertNotIn("./repro/show_case.sh b", text)
-            self.assertIn("./repro/review.sh show 1", text)
+            self.assertIn("./repro/audit_case.sh 1", text)
             self.assertIn("性能未执行", text)
             detail = os.path.join(root, "精度失败明细.md")
             self.assertTrue(os.path.isfile(detail))
             with open(detail, encoding="utf-8") as src:
                 detail_text = src.read()
             self.assertIn("./repro/review.sh show 1", detail_text)
-            self.assertIn("./repro/review.sh run 1", detail_text)
+            self.assertIn("./repro/audit_case.sh 1", detail_text)
             self.assertIn("`b`", detail_text)
             self.assertFalse(os.path.exists(os.path.join(root, "性能失败明细.md")))
 
