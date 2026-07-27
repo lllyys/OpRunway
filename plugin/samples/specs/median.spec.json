@@ -49,9 +49,9 @@
   "verify_mode": "numerical",
   "precision": {
     "oracle": "torch",
-    "standard": "torch_allclose",
+    "standard": "ascendoptest_default",
+    "_standard_note": "任务书精度要求逐字点名 AscendOpTest 工具默认阈值；torch 仅是真值来源，不覆盖显式验收标准。",
     "case_profile": "torch_parity",
-    "tolerance_source": "dtype_table",
     "case_target": 1344,
     "torch_parity_matrix": {
       "source": "repos/cannbot-ops-input/ops-bench/ops-eval-dataset/designs/aclnnMedian/case_design.json + 任务书 global 接口补面",
@@ -106,5 +106,12 @@
     },
     "_baseline_note": "用户 2026-07-26 明确确认：Median 任务书所称 aclnnMedian/aclnnMedianDim 小算子拼接版本等价于 Torch 对应接口，因此性能 baseline 取同机 torch_npu 执行 torch.median；无需再追加等价性证明，也不改为直接测单个 ACLNN 接口。性能 case 只从同一份精度 caseset 中选择，精度未通过的 case 不进入性能比较。"
   },
-  "task_pr_gaps": []
+  "task_pr_gaps": [
+    {
+      "issue": "api_surface_mismatch",
+      "task_doc_ref": "task_doc.snapshot.md:19",
+      "pr_fact": "PR6429 的 op_api 仅导出统一 aclnnMedian；global/by-dim 由 indicesOut 是否为空区分，不单独导出 aclnnMedianDim。",
+      "impact": "本轮覆盖两类语义，但未证明任务书点名的 aclnnMedianDim 独立 API surface 已由该 PR 提供。"
+    }
+  ]
 }

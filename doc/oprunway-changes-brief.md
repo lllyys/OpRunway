@@ -4,6 +4,12 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **acc-spec 解耦 oracle 与验收精度标准**：任务书显式精度条款优先，Torch 功能真值不再自动覆盖
+  AscendOpTest 默认阈值；Median spec 同步更正标准并结构化挂账独立 `aclnnMedianDim` API surface 缺口。
+- **多输出 index 判据接入 AscendOpTest value policy**：从 canonical AOT `tolerance` 派生
+  index-value-consistency 的相对/绝对单点界，保持字段驱动，不按算子身份分支。
+- **性能待采集文案去除 runner 误标**：统一说明精度总门/真机采集/采集端状态，不再让
+  `cpp_extension` evidence 误写成 `aclnn_py`。
 - **正式 runner provenance 按 mode 绑定**：`new_example/aclnn_py` 继续只认 `user`；
   `cpp_extension` 只认经 Task2 receipt 门复核的 `generated_official_cpp_extension`，不再被旧
   new-example 词表误挡，也不能跨 mode 冒充来源。

@@ -110,7 +110,7 @@ opbase 精度标准 §1.1 说「用例数不设固定下限、覆盖优先」，
 | dtype 覆盖缺口 → `task_pr_gaps` | required 有、tested 无的 dtype | **两类挂账，按成因选**（§1.2 有对照表）：① **我们测不了** → `{"kind":"dtype_deferred","dtypes":["bfloat16","int32"],"reason":"…runner 未支持/Track C…"}`；② **算子 op_def 压根不支持**（C4）→ `{"kind":"dtype_unsupported_by_op_def","dtypes":[…],"task_doc_ref":…,"op_def_ref":…,"op_def_dtypes":[…]}`（四道硬校见 §1.2，缺一即 `overall=fail`）。**门据此放行**（显式挂账 ≠ 静默收窄）；两类记录都无 → 门 BLOCKED |
 | `verify_mode` | 见 §2 决策树 | exact / numerical / behavioral |
 | `precision.oracle` | 精度校验工具/真值来源 | 受控词表 `ascendoptest / mere_mare / atk_double / torch / scipy / std_exact / none`，**按任务书原文抽**（多数社区任务=ascendoptest；SPMV=生态标准 MERE·MARE + ATK 双标杆=`atk_double`；Sleep=none）——**勿一律填 ascendoptest**。⚠ 旧文写的 `dual_benchmark` 已统一为 `atk_double`（与 `precision_policy.select_standard` 识别的词一致）；`mere_mare` 与 `atk_double` **都**映射到 standard `ecosystem_mere_mare`（ATK 双标杆 fallback 本轮 out-of-scope、未实现）|
-| `precision.standard`（T5，待散文门）| 平台层标准，从 oracle+verify_mode 映射（见 §1.1 决策树）| 受控词表 `ascendoptest_default / ecosystem_mere_mare / exact / behavioral / torch_allclose`。缺省不填时 `precision_policy.select_standard` 会按 §1.1 兜底 |
+| `precision.standard`（T5，待散文门）| **先读任务书显式精度工具/标准；仅缺失时**才从 oracle+verify_mode 兜底（见 §1.1）| 受控词表 `ascendoptest_default / ecosystem_mere_mare / exact / behavioral / torch_allclose`。`oracle` 是真值来源，不得覆盖任务书点名的验收尺；缺省不填时 `precision_policy.select_standard` 才按 §1.1 兜底 |
 | `scenario`（§1.3）| 任务书『参考实现/功能对标』段是否把 **torch 指定为真值口径** × PR 是否**标准 aclnn 两段式**工程 | 受控值 `torch_ref_aclnn`；不属该场景 → **整字段省略**，别编新值 |
 | `runner_form`（§1.3）| 被测物形态（PR 工程结构，见 §1.3.1） | `cpp`（缺省，可省略）/ `aclnn_py`。`aclnn_py` ⇒ **必须**同时给 `call_variants`，否则 gen_cases fail-closed |
 | `call_variants`（§1.3.3）| **递归发现的接口头**的函数签名（`<op_subdir>` 下有界递归找到的 `aclnn_*.h`，剔 `*_impl.h`；**层级不预设**）+ 任务书的 attr 语义 | 变体对象数组；`when`/`symbol`/`active_outputs` 必填，`active_attrs`/`attrs` 选填。按 **attr 取值**分派，**绝不按算子名** |
@@ -131,13 +131,20 @@ opbase 精度标准 §1.1 说「用例数不设固定下限、覆盖优先」，
 
 ## 1.1 precision.standard 选择决策树（T5，与 `precision_policy.select_standard` 对齐）
 
-先定 `verify_mode`（§2），再定 `standard`：
+先定 `verify_mode`（§2），再定 `standard`。**第一优先级是任务书显式精度条款**：
+
+- 点名 AscendOpTest 默认阈值 → `ascendoptest_default`；
+- 点名生态 MERE/MARE/ATK → `ecosystem_mere_mare`；
+- 点名 torch allclose/rtol+atol → `torch_allclose`；
+- 明确逐位/零容差 → `exact`。
+
+只有任务书没有指定精度工具/标准时，才用以下 oracle 兜底：
 
 ```
 ① verify_mode=behavioral（无数值输出，Sleep 类）           → standard = behavioral（精度维度 na）
 ② verify_mode=exact（输出 bool / 逐位对齐，Equal/IsClose） → standard = exact（threshold=0）
 ③ verify_mode=numerical：
-   ├─ 任务书把 **torch 指定为真值口径**（oracle=torch）                    → standard = torch_allclose（§1.3.4）
+   ├─ 任务书只把 **torch 指定为真值口径**且未另写精度标准（oracle=torch）    → standard = torch_allclose（§1.3.4）
    ├─ 任务书引用「生态《算子开源精度标准》」/ oracle∈{mere_mare, atk_double}
    │  / 落在 experimental 目录（cann/opbase experimental_standard）        → standard = ecosystem_mere_mare
    └─ 否则（oracle=ascendoptest / 缺省）                                  → standard = ascendoptest_default
@@ -262,7 +269,7 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 
 | 判断 | 看哪儿 | 落到哪个字段 |
 |---|---|---|
-| 真值口径是不是 torch | **任务书**『参考实现 / 功能对标』段 | `precision.oracle=torch` → `precision.standard=torch_allclose` |
+| 真值口径是不是 torch | **任务书**『参考实现 / 功能对标』段 | `precision.oracle=torch`；`precision.standard` 仍先读独立精度条款，条款缺失才兜底 `torch_allclose` |
 | 被测物是不是 aclnn 两段式工程 | **PR** 工程结构（§1.3.1） | `runner_form=aclnn_py` |
 | 算子是不是多输出 | **aclnn header 签名** + 任务书输出描述 | `params[].out_role` 等（§1.3.2） |
 | 调用变体表（**`runner_form==aclnn_py` 一律必填**）| **接口头里有几个入口 + attr 怎么分派** | `call_variants`（§1.3.3） |

@@ -277,14 +277,18 @@ def derive_output_dtype(spec, case_input_dtypes):
 def _value_tol_of(policy):
     """从一个 value 输出的 canonical policy 取 (rtol, atol)，供 index 输出的 value_consistency 复用。
 
-    torch_allclose → (rtol, atol)；exact（int/bf16 逐位）→ (0.0, 0.0)。其余 kind fail-closed（域外、不硬塞）。"""
+    torch_allclose → (rtol, atol)；ascendoptest_default 的 canonical tolerance 同时作为
+    relative/absolute 单点界；exact（int/bf16 逐位）→ (0.0, 0.0)。其余 kind fail-closed。"""
     kind = policy.get("kind")
     if kind == TORCH_ALLCLOSE:
         return float(policy["rtol"]), float(policy["atol"])
+    if kind == ASCENDOPTEST_DEFAULT:
+        tolerance = float(policy["tolerance"])
+        return tolerance, tolerance
     if kind == EXACT:
         return 0.0, 0.0
     raise ValueError(f"index_value_consistency 无法从 value 输出 policy.kind={kind!r} 取容差"
-                     f"（仅 value 输出为 torch_allclose / exact 时可派生 index 判据）")
+                     f"（仅 value 输出为 torch_allclose / ascendoptest_default / exact 时可派生 index 判据）")
 
 
 def derive_output_contracts(spec, case_input_dtypes, spec_standard,

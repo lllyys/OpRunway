@@ -1159,6 +1159,15 @@ class IndexGuardTest(unittest.TestCase):
     def _run(self, a, g):
         return P.compute_metrics(a, g, self.POL, self.CTX)
 
+    def test_value_tolerance_derives_from_ascendoptest_policy(self):
+        self.assertEqual(
+            P._value_tol_of({
+                "kind": "ascendoptest_default",
+                "tolerance": 0.001,
+                "error_rate": 0.001,
+            }),
+            (0.001, 0.001))
+
     def test_negative_index_is_explicit_failed_metric(self):
         """⭐ actual index=-1 不回绕，也不炸掉整轮证据；落成明确非零 mismatch。"""
         metrics = self._run(np.array([-1], np.int64), np.array([2], np.int64))
@@ -1397,13 +1406,15 @@ class MultiOutputAcceptanceContractTest(unittest.TestCase):
         # index 的 acceptance 容差 == 所引 value 输出的 acceptance 容差（不是 standard 层的）
         self.assertAlmostEqual(accs[1]["policy"]["value_rtol"], accs[0]["policy"]["rtol"])
 
-    def test_unsupported_acceptance_kind_for_index_fail_closed(self):
-        """acceptance 底是 ascendoptest_default → index 取不出 (rtol,atol) → **拒**，绝不静默退回 standard。"""
+    def test_ascendoptest_acceptance_index_inherits_canonical_tolerance(self):
+        """AOT acceptance 的 index 值一致性复用 canonical tolerance，不退回 standard 层。"""
         spec = _median_spec()
         spec["precision"]["acceptance_policy"] = {"standard": "ascendoptest_default"}
         cts = P.derive_output_contracts(spec, [("self", "float32")], "torch_allclose", "dtype_table")
-        with self.assertRaises(ValueError):
-            P.derive_acceptance_contracts(spec, cts)
+        accs = P.derive_acceptance_contracts(spec, cts)
+        tolerance = accs[0]["policy"]["tolerance"]
+        self.assertEqual(accs[1]["policy"]["value_rtol"], tolerance)
+        self.assertEqual(accs[1]["policy"]["value_atol"], tolerance)
 
     def test_int_value_output_inherits_standard(self):
         """int32 → 有效标准 exact（阈值已是 0，没有可放宽的 acceptance）→ 该输出 acceptance 继承 standard。"""

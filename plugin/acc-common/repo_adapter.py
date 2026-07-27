@@ -283,7 +283,7 @@ def _read_out_bin(out_dir, produced_out):
     return arr.reshape(shp) if shp else arr
 
 
-_PERF_PENDING_NOTE = "aclnn_py perf 未采集（未设 OPRUNWAY_ACLNN_PERF=1 或采集端未接通）→ us=None"
+_PERF_PENDING_NOTE = "性能未采集（精度总门未过、未启用真机采集或采集端未接通）→ us=None"
 
 
 def _perf_entry(cid, perf_by_case):
