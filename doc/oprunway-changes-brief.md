@@ -4,6 +4,8 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **Extension 逐 case 原子留痕**：driver 在每次 NPU 调用前记录当前 case、每次成功后原子更新
+  输出 manifest；即使设备超时或进程异常，也能区分最后成功项与触发项，不再整轮只剩 rc=1。
 - **精度门跳过性能仍保留计划视图**：`perf_cases/cases_scored` 继续如实为 0，同时从同一
   caseset 账本报告 `planned_cases` 与 small/large 数量，不再把“未采集”误呈现成“没有性能计划”。
 - **插件编排说明同步第三条真机通路**：登记 `cpp_extension` 的 form→mode 映射与

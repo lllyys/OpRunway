@@ -60,6 +60,17 @@ def _load(path):
                 ValueError(f"非法 JSON 常量 {token}")))
 
 
+def _atomic_dump(path, value):
+    """同目录原子写 JSON；设备/进程异常时不留下半截证据。"""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as out:
+        json.dump(value, out, ensure_ascii=False, indent=2, allow_nan=False)
+        out.write("\n")
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(tmp, path)
+
+
 def _safe(root, rel):
     if not isinstance(rel, str) or not rel or os.path.isabs(rel):
         raise DriverError(f"非法相对路径 {rel!r}")
@@ -252,10 +263,22 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
         shutil.rmtree(out_root)
     os.makedirs(out_root)
     produced = []
+    progress_path = os.path.join(out_root, "progress.json")
+    manifest_path = os.path.join(out_root, "out_manifest.json")
+    total = len(plan["cases"])
+    _atomic_dump(progress_path, {
+        "schema_version": 1, "status": "running", "current_case_id": None,
+        "completed_cases": 0, "total_cases": total,
+    })
     for row in plan["cases"]:
         case = by_id.get(row["case_id"])
         if case is None:
             raise DriverError(f"plan case {row['case_id']!r} 不在 caseset")
+        _atomic_dump(progress_path, {
+            "schema_version": 1, "status": "running",
+            "current_case_id": case["id"],
+            "completed_cases": len(produced), "total_cases": total,
+        })
         args, outputs, output_contracts = materialize_invocation(
             torch, np, work, case, row)
         result = getattr(namespace, row["entrypoint"])(*args)
@@ -281,10 +304,21 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
                 "shape": shape,
             })
         produced.append({"case_id": case["id"], "outputs": out_rows})
-    with open(os.path.join(out_root, "out_manifest.json"), "w", encoding="utf-8") as out:
-        json.dump({"schema_version": 1, "produced": produced}, out,
-                  ensure_ascii=False, indent=2)
-        out.write("\n")
+        _atomic_dump(manifest_path, {
+            "schema_version": 1, "complete": False, "produced": produced})
+        _atomic_dump(progress_path, {
+            "schema_version": 1, "status": "running",
+            "current_case_id": None,
+            "last_completed_case_id": case["id"],
+            "completed_cases": len(produced), "total_cases": total,
+        })
+    _atomic_dump(manifest_path, {
+        "schema_version": 1, "complete": True, "produced": produced})
+    _atomic_dump(progress_path, {
+        "schema_version": 1, "status": "complete", "current_case_id": None,
+        "last_completed_case_id": produced[-1]["case_id"] if produced else None,
+        "completed_cases": len(produced), "total_cases": total,
+    })
     return torch, schemas
 
 
