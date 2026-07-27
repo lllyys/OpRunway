@@ -593,15 +593,16 @@
 7. **泛化到 catlass + 其余仓**：✅ catlass adapter 代码落地；⏳ 真机待 950；**其余 11 仓未做**。
 8. ✅ **发布形态定稿**：用户逐条拍板——插件继续作为主仓 `plugin/` 子目录（不拆独立 repo）、插件名维持 `oprunway`、skills 向 `awesome-ascend-skills` 的 external-sync **「很久以后」**、`init.sh` 跨 CLI 扇出保留。⏳ 待 `bureau:review` promote 成 `canonical`（当前 `proposed`）。
 
-### 🔴 Median 性能标杆与任务书不一致风险（2026-07-26 新增 TODO）
+### 🔴 Median 性能口径确认与大小 shape 分类（2026-07-26）
 
-- [ ] **核实任务书指定标杆与当前标杆是否为同一实现**：任务书要求“相比于 `aclnnMedian` / `aclnnMedianDim` 的小算子拼接版本性能不劣化”；当前 spec 使用的是同机 `torch_npu` 执行 `torch.median`。现阶段没有证据证明 `torch_npu` 最终调用的就是任务书点名的小算子拼接版本，二者不得默认视为等价。
-- [ ] **补齐可审计的调用链证据**：在远程 NPU 容器内，通过官方实现资料、动态调用链、导出符号和 profiler 证据确认 `torch_npu → CANN` 的实际落点，并把版本、SoC、torch_npu/CANN 版本及实现映射写入可校验 provenance；不得只凭 API 名相似作结论。
-- [ ] **若等价，固化映射契约**：把“为何等价、在哪些版本成立、如何检测漂移”落到通用、spec 驱动的 baseline 契约和校验门中，版本或实现漂移时 fail-closed。
-- [ ] **若不等价或无法证明，改接任务书指定标杆**：实现或调用任务书点名的 NPU 小算子拼接 baseline，并保持与 DUT 同机、同 case、同 warmup/repeat、同 `msprof` kernel-only timing scope；不得改用 CPU 性能耗时直接与 NPU kernel-only 相除，也不得写 Median 专属分支。
-- [ ] **用同一性能 caseset 重跑并重新裁决**：当前 50 个性能 case 必须全部进入采集；旧 `numel < 4096 → trivial-met` 规则不得恢复。两个 BF16、`dim=1` case 的 `161002` 在标杆归属解决前仍记作 baseline limitation，不归因 DUT。
+- [x] **标杆身份已确认**：用户明确说明，Median 任务书中的 `aclnnMedian` / `aclnnMedianDim` 小算子拼接版本等价于 Torch 对应接口。因此 baseline 为同机 `torch_npu` 执行 `torch.median`；不再做等价性证明，也不改为直接调用单个 ACLNN API。
+- [x] **性能 case 来源已确认为通用规则**：只从同一份精度 caseset 中选择；带性能维的 case 必须同时带精度维，且精度未通过的不进入性能比较。不是另造一套性能输入，也不要求每条精度 case 都必须带性能维。
+- [x] **A3 大小 shape 边界已落成通用数据契约**：按所有输入的物理载荷字节数求和，`<= 256 KiB`（262144 bytes，边界计入）为小 shape，`> 256 KiB` 为大 shape；原因是前者可一次搬入 UB。所有当前 A3 样例 spec 均显式声明该 profile；该标签只做分组统计，不恢复 `trivial-met`，不自动免测或放宽性能阈值。
+- [x] **通用能力保留但不误用**：`aclnn_builtin` 仍是其它任务可能使用的通用 baseline 能力；Median spec 已恢复 `torch_npu:torch.median`，无算子身份代码分支。
+- [x] **选例与报告账本已补齐代码契约并经 A3 容器回归**：caseset 记录性能 case 复用的精度 case_id、未选 precision case、逐 dtype 配额和 small/large 计数；精度报告按 dtype/overall 固定输出 `total/passed/failed/needs_review`（`na` 单列），性能报告按 small/large/overall 固定输出计划数、可评分数、达标数、blocked、双边中位耗时和 speedup。A3 的 256 KiB 边界走受控 hardware profile，dry-run 也执行同一 fail-closed 策略校验；三级门把汇总逐项绑定到 per-case/evidence/baseline，不重判阈值。全套 `acc-common` 测试已在 A3 容器分批跑绿。
+- [ ] **远程重生成并重新裁决**：新 shape 标签会改变 caseset 元数据，须在远程 NPU 环境重新生成并跑性能；已有 custom 50/50、baseline 48/50 数据可作历史证据，但 2 个 BF16、`dim=1` baseline case 的 161002 仍需按 baseline limitation 挂起，不归因 DUT。
 
-> **关闭条件**：只有任务书指定标杆与实际执行标杆的等价性得到可复核证据，或流水线已切换到任务书指定的小算子拼接 baseline，并完成同口径真机重跑，才能关闭本 TODO。在此之前，Median 的现有性能 ratio 不得用于宣称满足任务书性能条款。
+> **关闭条件**：远程 NPU 环境相关回归通过，并以重新生成的同一精度 caseset 完成性能采集与确定性裁决。完成前 Median 性能仍 BLOCKED。
 
 ### 裁决可信性（对抗式代码门的产物）
 - ✅ **假通过路径逐条堵死并钉负例**：validator 以 **spec 为权威**复算 canonical policy 做三处一致（`caseset`+`evidence` 同步放宽会被揪出）；judge 校验 metric（非负整数 / `numel>0` / 有限）；`gate_task3` 与 `caseset`/`evidence` 按 case 对齐（防「跑性能子集 + 伪造 summary」）；`repo_adapter` ssh/scp 注入防护；catlass 脚本 17 条对抗门。

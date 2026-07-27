@@ -31,34 +31,33 @@
 
 详细流水见 `doc/oprunway-changes-brief.md` 的 2026-07-26 小节。
 
-## 3 · 最高优先级开放项：性能标杆与任务书出入
+## 3 · 最高优先级开放项：性能 case 重生成与重跑
 
 任务书要求：
 
 > 相比于 aclnnMedian、aclnnMedianDim 的小算子拼接版本性能不劣化。
 
-当前 spec 配置的是同机 `torch_npu` 执行 `torch.median`。尚无可复核证据证明它最终调用的就是任务书点名的小算子拼接版本。因此：
+2026-07-26 用户进一步明确：这里的“小算子拼接版本”等价于 Torch 对应接口。因此 Median 性能 baseline
+恢复为同机 `torch_npu` 执行 `torch.median`；无需再证明等价，也不应改为直接测单个 ACLNN 接口。
 
-- 当前 48 对 ratio 是真实性能数据，但**不能据此宣称满足任务书性能条款**；
-- 不应改用 CPU 性能耗时与 NPU kernel-only 直接比较；
-- 下一步须在远程 NPU 容器中核实实际调用链、版本与实现落点；
-- 若等价，固化通用、spec 驱动的映射与漂移检测；
-- 若不等价或无法证明，接入任务书指定的 NPU 小算子拼接 baseline；
-- 使用相同的 50 个性能 case 重新采集和裁决，不恢复任何小 case 免测。
+- 性能 case 从精度 caseset 选择，且只测精度已通过的 case；
+- A3 按输入物理载荷分类：`<= 256 KiB` 为小 shape，`> 256 KiB` 为大 shape；
+- 大小分类只用于分组统计，不恢复任何小 case 免测；
+- 已有 48 对 `torch_npu` ratio 是真实性能数据，但新标签进入 caseset 后仍须重新生成并按确定性链复核。
 
 该问题已同时记录在：
 
-- `plugin/samples/specs/median.spec.json` 的结构化 `task_pr_gaps`；
-- `doc/oprunway-todo.md` 的“Median 性能标杆与任务书不一致风险”。
+- `plugin/samples/specs/median.spec.json` 的 `perf.torch_baseline` / `case_source` / `shape_classification`；
+- `doc/oprunway-todo.md` 的“Median 性能口径确认与大小 shape 分类”。
 
 ## 4 · 下一 session 建议顺序
 
 1. 先读仓根 `AGENTS.md`、本文、`doc/oprunway-changes-brief.md` 顶部和 `doc/oprunway-todo.md` 的新 baseline TODO。
 2. 读 `doc/oprunway-real-machine-environment.md`，从被 `.gitignore` 忽略的 `.oprunway/real-machine.env` 取得实际连接/容器/路径，并先做只读环境探测。
 3. 运行 `git status --short --branch`，确认本轮文档更新是否已经 commit。
-4. 核实 `torch_npu torch.median` 的真实 NPU 调用链，不从 API 名字推断实现等价。
-5. 根据核实结果更新通用 baseline 契约；不得写 Median 专属工具分支。
-6. 在远程 NPU 容器使用同一 50-case caseset 重跑性能。
+4. 在远程 NPU 容器跑新增的性能 case 分类回归并重新生成 Median caseset。
+5. 检查所有性能 case 同时带精度维，且 256 KiB 边界按物理 dtype 字节数正确分类。
+6. 使用同一份精度 caseset 和 `torch_npu:torch.median` 重跑性能。
 7. 以 `perf_compare.py`、`validate_acceptance_state.py` 和 `acceptance.json` 的确定性裁决为准更新报告。
 
 ## 5 · Git 与工作区注意事项

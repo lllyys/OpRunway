@@ -29,6 +29,9 @@
                 "threshold_source": "AscendOpTest 默认阈值（bool 输出 → 精确逐位）",
                 "case_target": 50},
   "perf": {"baseline": "tbe", "target_ratio": 0.95,
+           "case_source": "precision_cases",
+           "shape_classification": {"metric": "sum_input_bytes", "small_max_bytes": 262144,
+                                    "hardware": "Atlas A3"},
            "small_shape_exception": {"text": "<10us 差 3us→仿真图", "when_us_below": 10,
                                      "abs_gap_us_within": 3, "requires": "simulation_plot+analysis"}},
   "task_pr_gaps": [

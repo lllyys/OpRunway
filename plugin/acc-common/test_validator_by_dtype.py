@@ -173,6 +173,18 @@ class MixedDtypeBucketTest(unittest.TestCase):
         self.assertEqual(self.s["executed"], 4)
         self.assertEqual((self.s["passed"], self.s["failed"], self.s["errored"]), (3, 1, 0))
         self.assertEqual(self.s["overall_pass_rate"], 0.75)
+        self.assertEqual(
+            self.s["report"]["overall"],
+            {"total": 4, "passed": 3, "failed": 1, "needs_review": 0, "na": 0})
+
+    def test_report_view_is_stable_and_sorted_by_dtype(self):
+        """中文报告只消费固定四项，不必自行解释 failed/errored/uncertain 五桶。"""
+        rows = self.s["report"]["by_dtype"]
+        self.assertEqual([r["dtype"] for r in rows], ["float16", "float32", "int32"])
+        self.assertEqual(
+            next(r for r in rows if r["dtype"] == "float32"),
+            {"dtype": "float32", "total": 2, "passed": 1, "failed": 1,
+             "needs_review": 0, "na": 0})
 
     def test_bucket_counts_sum_to_count(self):
         """不变式：每桶 passed+failed+errored+uncertain+na == count；各桶 count 之和 == total。"""
@@ -223,6 +235,9 @@ class ErroredBucketTest(unittest.TestCase):
         self.assertEqual(s["executed"], 1)
         self.assertAlmostEqual(s["overall_pass_rate"], 1 / 3)
         self.assertAlmostEqual(b["pass_rate"], 1 / 3)
+        self.assertEqual(
+            s["report"]["overall"],
+            {"total": 3, "passed": 1, "failed": 2, "needs_review": 0, "na": 0})
 
     def test_missing_evidence_is_errored(self):
         """caseset 里有、evidence 里根本没有 → 这条压根没跑 → errored（不是 failed，也不许不计数）。"""
@@ -303,6 +318,18 @@ class NaBucketTest(unittest.TestCase):
         self.assertEqual((b["count"], b["passed"], b["na"], b["failed"], b["errored"]), (2, 1, 1, 0, 0))
         self.assertEqual((s["total"], s["executed"], s["na"]), (2, 1, 1))
         self.assertEqual(s["overall_pass_rate"], 0.5)
+        self.assertEqual(
+            s["report"]["overall"],
+            {"total": 1, "passed": 1, "failed": 0, "needs_review": 0, "na": 1})
+
+    def test_uncertain_maps_to_needs_review_without_becoming_failed(self):
+        rows = [{"dtype": "float32", "passed": 1, "failed": 0, "errored": 0,
+                 "uncertain": 2, "na": 1}]
+        got = V._accuracy_report_view(
+            rows, {"passed": 1, "failed": 0, "errored": 0, "uncertain": 2, "na": 1})
+        self.assertEqual(
+            got["overall"],
+            {"total": 3, "passed": 1, "failed": 0, "needs_review": 2, "na": 1})
 
 
 # ============================== ⑥ 只读性：新增块绝不影响裁决 + 字段形状恒定 ====

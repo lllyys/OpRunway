@@ -82,7 +82,7 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
 4. **Task3 blocked 路由**（如实透传，不自行 judge）：
    - `BLOCKED_WAIT_GPU_BENCHMARK` —— 任务书要求 GPU 基线但**缺外部 GPU 标杆数据**（GPU external 对比层 **consumer 侧已接入 pipeline**，缺的是外部提供的真实数据）。
    - `BLOCKED_INCOMPARABLE_TIMING_SCOPE` —— 计时**口径不可比**（如 kernel-only vs e2e 墙钟）。
-   - 基线来源按**任务书参考源**（proposed·未 settle，载重前需核），`spec.perf.baseline` 驱动。torch 对标类的同机 `torch_npu` 基线代码已接通，但 2026-07-26 Median E2E 实测 `cases_scored=0`：数值 taskType 15/17/19 未分类而 fail-closed，另 2 条 BF16 baseline 调用失败；未知枚举必须走采集侧 BLOCKED/rootcause，不能猜字典、放宽 parser 或跳 case。
+   - 基线来源与调用层级由**任务书事实 + 已记录的用户确认**落进 `spec.perf.baseline`。Median 已确认“小算子拼接等价于 Torch 对应接口”，故用同机 `torch_npu:torch.median`，不再重复证明，也不改为直调单个 ACLNN 接口。性能 case 从精度 caseset 选择，A3 按输入物理载荷 `<=256 KiB` / `>256 KiB` 分小/大 shape；分类不免测。任何缺数或 scope 不可比均走采集侧 BLOCKED/rootcause，不能猜、放宽 parser 或跳 case。
 5. **回报**：逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 的裁决字段 + 三级门 STATUS + 工件路径来源，并必须给出 `cases_scored`、有效 us/speedup 条数及“性能计划数/caseset 总数”。所有性能 case 都须真实采集，`cases_scored=0` 必须明确性能未验证，不能把“达标”计数改写成真实性能 PASS。**FAIL 时不自行 dispatch rootcause**（禁跨阶段）——由 orchestrator 决定是否再 dispatch 本子agent 的 `rootcause`。
 
 ## dispatch_mode: rootcause — FAIL 独立复现解耦（先解耦、再归因）

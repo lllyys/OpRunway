@@ -1049,8 +1049,13 @@ class PerfPlanDutDeclarationTest(unittest.TestCase):
         with _env(**_cfg_env(self.root, **env_over)):
             cfg = A._aclnn_cfg()
             paths = A._aclnn_paths(cfg)
+            effective_plan = {
+                "baseline": "torch_npu",
+                "torch_baseline": {"api": "torch.foo", "positional": [], "keyword": {}},
+            }
+            effective_plan.update(plan or {})
             A.collect_perf(cfg, paths, self.caseset, self.work, self.evidence,
-                           plan if plan is not None else {})
+                           effective_plan)
         self.assertEqual(1, len(self.plan_sent), "perf plan 未上送 → 后面全白验")
         return self.plan_sent[0], paths
 

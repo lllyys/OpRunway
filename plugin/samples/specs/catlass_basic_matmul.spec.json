@@ -33,7 +33,13 @@
     "baseline_source": "gpu_external",
     "baseline_source_note": "catlass 无 builtin-TBE 分母 → perf 分母走外部 GPU 标杆（Task 3 提供），ADR0006 默认；run_catlass 不写 _real_baseline",
     "target_ratio": 1.0,
-    "target_ratio_source": "占位默认（NPU↔GPU 不劣化）；真实目标待任务书"
+    "target_ratio_source": "占位默认（NPU↔GPU 不劣化）；真实目标待任务书",
+    "case_source": "precision_cases",
+    "shape_classification": {
+      "metric": "sum_input_bytes",
+      "small_max_bytes": 262144,
+      "hardware": "Atlas A3"
+    }
   },
   "cases": {
     "functional": [[16, 16, 16], [32, 64, 48]],

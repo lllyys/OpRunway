@@ -245,7 +245,7 @@ class PassedWithRiskE2ETest(unittest.TestCase):
         shutil.rmtree(self.d, ignore_errors=True)
 
     def test_run_workflow_exit_2(self):
-        spec = {"op": "Sign", "repo": "ops-math", "hardware": ["Atlas A2"],
+        spec = {"op": "Sign", "repo": "ops-math", "hardware": ["Atlas A3"],
                 "reference": {"type": "tbe", "ref": "内置 TBE Sign"},
                 "change": {"kind": "add_dtype"}, "params_source": "derived_from_reference",
                 "params": [{"name": "self", "io": "in", "dtype": ["float32"]},
@@ -254,7 +254,12 @@ class PassedWithRiskE2ETest(unittest.TestCase):
                 "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default",
                               "acceptance_policy": {"standard": "ascendoptest_default",
                                                     "error_rate": 0.1}},
-                "perf": {"baseline": "tbe", "target_ratio": 1.0}}
+                "perf": {"baseline": "tbe", "target_ratio": 1.0,
+                         "case_source": "precision_cases",
+                         "shape_classification": {
+                             "metric": "sum_input_bytes",
+                             "small_max_bytes": 262144,
+                             "hardware": "Atlas A3"}}}
         spec_path = os.path.join(self.d, "sign_risk.spec.json")
         with open(spec_path, "w", encoding="utf-8") as f:
             json.dump(spec, f, ensure_ascii=False)

@@ -58,24 +58,22 @@
     "baseline": "torch_npu",
     "target_ratio": 1.0,
     "_target_ratio_note": "⚠ 依据 = **任务书**（验收权威，硬约束 #1）。task_doc.snapshot.md:28 逐字：「相比于aclnnMedian、aclnnMedianDim的小算子拼接版本性能不劣化。」——『不劣化』即 ratio = baseline_us / npu_us ≥ **1.0**。此前写 0.6 是**抄自参考仓 cannbot-ops-input 的通用默认阈**（`performance.py:PERF_SPEEDUP_THRESHOLD = 0.6`，那是它自家「达到 torch 0.6× 即合格」的口径），与本任务书不符、会把「比基线慢 40%」判成达标 → 2026-07-24 更正为 1.0。",
-    "_baseline_gap_note": "⚠ 诚实边界（未消解，留给人核）：任务书点名的对照物是「aclnnMedian/aclnnMedianDim 的**小算子拼接版本**」，而本 spec 声明的 baseline 是 `torch_npu`（同机 torch.median）。二者是否等同**未经核实**——若 torch_npu 的 median 就是那份小算子拼接实现则等同，否则 ratio 的对照物与任务书条款不是同一个东西。上真机前须核；核不实则本条按 task_pr_gaps 记，不得当作已满足任务书性能条款。",
     "warmup": 5,
     "repeat": 20,
+    "case_source": "precision_cases",
+    "shape_classification": {
+      "metric": "sum_input_bytes",
+      "small_max_bytes": 262144,
+      "hardware": "Atlas A3",
+      "_note": "用户 2026-07-26 确认：A3 上输入 shape 的实际载荷不超过 256 KiB（含边界）时，可一次搬入 UB，归为小 shape；超过时归为大 shape。该标签只做分组统计，所有性能 case 仍须真实采集，不产生 trivial-met 或自动豁免。"
+    },
     "torch_baseline": {
       "api": "torch.median",
       "positional": ["self"],
       "keyword": {"dim": "dim", "keepdim": "keepdim"},
-      "_note": "torch_npu 基线的调用映射（**字段驱动、op-中立**）：键是该 case `aclnn_call.slots` 里的 **slot name**（与 aclnn 头签名同名），值是 torch 形参名。positional 缺任一 slot → fail-closed；keyword 里某 slot 在该 case 不存在（如全局 median 无 dim）→ 该 kwarg 自然缺席 → 调到的就是 torch 的全局 arity。**变体自动跟随 case，采集端无需也不得为此写任何算子分支**（律令#0）。"
+      "_note": "字段驱动映射：全局变体自然省略 dim/keepdim，按维变体传入对应关键字；采集端不含算子身份分支。"
     },
-    "_baseline_note": "torch-对标场景基线 = 同一台真机上 torch_npu 跑 torch.median 的 kernel-only 耗时（真机内基线，非 GPU 外部数据）。采集 = aclnn_runtime/perf_msprof.py（msprof --task-time + MSTX 测量窗，只累加 device 计算 kernel、MEMCPY_ASYNC 不计入）；perf_compare 源无关、只读 us+scope+ratio、逻辑零改。**未接通 / 无有效基线一律 BLOCKED，绝不冒充达标。**"
+    "_baseline_note": "用户 2026-07-26 明确确认：Median 任务书所称 aclnnMedian/aclnnMedianDim 小算子拼接版本等价于 Torch 对应接口，因此性能 baseline 取同机 torch_npu 执行 torch.median；无需再追加等价性证明，也不改为直接测单个 ACLNN 接口。性能 case 只从同一份精度 caseset 中选择，精度未通过的 case 不进入性能比较。"
   },
-  "task_pr_gaps": [
-    {
-      "kind": "perf_baseline_unverified",
-      "task_requirement": "相比于aclnnMedian、aclnnMedianDim的小算子拼接版本性能不劣化",
-      "configured_baseline": "torch_npu:torch.median",
-      "status": "needs_verification",
-      "reason": "任务书点名的是 NPU 小算子拼接版本；当前 spec 配置为同机 torch_npu 执行 torch.median。尚无可复核证据证明二者调用同一实现，因此现有 ratio 不得用于宣称满足任务书性能条款。须证明等价并固化版本/调用链 provenance，或切换到任务书指定 baseline 后用同一性能 caseset 重跑。"
-    }
-  ]
+  "task_pr_gaps": []
 }

@@ -18,7 +18,7 @@ OPRUNWAY_DONE 哨兵 / raw log hash / msprof 输出绑定（本轮不做）；�
 （task1/task3 为 stdlib；**task2 的 A 方案重算按需惰性 import numpy + precision_policy**——numpy 缺失即 FAILED、
 不静默 skip。validator.py 仍 stdlib-only、不受本门引入 numpy 影响。）
 """
-import argparse, hashlib, json, math, os, sys
+import argparse, hashlib, json, math, os, statistics, sys
 from collections import Counter
 
 # T6/T8 扩枚举：exception=小shape例外(合法放行需交叉校验)；
@@ -455,6 +455,105 @@ def _gate_task2_outputs(cid, exp, prec, errs):
             errs.append(f"{cid}: 输出#{k}({role}) evidence 缺 metrics（误差分布未复算·证据不完整）")
 
 
+_STORAGE_ITEMSIZE = {
+    "bool": 1, "int8": 1, "uint8": 1,
+    "float16": 2, "bfloat16": 2, "int16": 2, "uint16": 2,
+    "float32": 4, "int32": 4, "uint32": 4,
+    "float64": 8, "int64": 8, "uint64": 8, "complex64": 8,
+    "complex128": 16,
+}
+_PERF_SHAPE_PROFILES = {
+    "Atlas A3": {"metric": "sum_input_bytes", "small_max_bytes": 256 * 1024},
+}
+
+
+def _gate_perf_case_policy(cs, cases, errs):
+    """复核性能 case⊆精度 case、输入物理字节分类与选择账本；仅查契约，不判性能。"""
+    policy = cs.get("perf_case_policy")
+    if policy is None:
+        return                                      # legacy caseset 保持兼容
+    if not isinstance(policy, dict):
+        errs.append("caseset.perf_case_policy 非对象")
+        return
+    rule = policy.get("shape_classification")
+    limit = rule.get("small_max_bytes") if isinstance(rule, dict) else None
+    hardware = rule.get("hardware") if isinstance(rule, dict) else None
+    profile = _PERF_SHAPE_PROFILES.get(hardware)
+    if (policy.get("case_source") != "precision_cases"
+            or not isinstance(rule, dict) or rule.get("metric") != "sum_input_bytes"
+            or not _is_int(limit) or limit < 1
+            or profile is None
+            or limit != profile["small_max_bytes"]
+            or rule.get("metric") != profile["metric"]
+            or rule.get("boundary") != "small_if_input_bytes_lte_limit"):
+        errs.append("perf_case_policy 来源/分类规则非法")
+        return
+    actual_counts = {"small": 0, "large": 0}
+    selected_ids, excluded_ids, by_dtype = [], [], {}
+    for c in cases:
+        if not isinstance(c, dict):
+            continue
+        dims, cid = c.get("dims") or [], c.get("id")
+        if "精度" in dims and "性能" not in dims and isinstance(cid, str):
+            excluded_ids.append(cid)
+        if "性能" not in dims:
+            continue
+        if "精度" not in dims:
+            errs.append(f"{cid}: 性能 case 不是精度 case")
+        total, dtypes = 0, set()
+        inputs = c.get("inputs")
+        if not isinstance(inputs, list) or not inputs:
+            errs.append(f"{cid}: 性能 case 无 inputs，无法复核物理字节")
+            continue
+        valid = True
+        for inp in inputs:
+            shape = inp.get("shape") if isinstance(inp, dict) else None
+            dtype = inp.get("dtype") if isinstance(inp, dict) else None
+            storage = inp.get("storage_dtype") if isinstance(inp, dict) else None
+            storage = storage or ("uint16" if dtype == "bfloat16" else dtype)
+            if (not isinstance(shape, list)
+                    or any(not _is_int(x) or x < 0 for x in shape)
+                    or storage not in _STORAGE_ITEMSIZE):
+                errs.append(f"{cid}: input shape/storage dtype 非法，无法复核大小 shape")
+                valid = False
+                break
+            numel = 1
+            for x in shape:
+                numel *= x
+            total += numel * _STORAGE_ITEMSIZE[storage]
+            if isinstance(dtype, str):
+                dtypes.add(dtype)
+        if not valid:
+            continue
+        expected_cls = "small" if total <= limit else "large"
+        meta = c.get("perf_shape_classification")
+        if (not isinstance(meta, dict) or meta.get("class") != expected_cls
+                or meta.get("input_bytes") != total or meta.get("small_max_bytes") != limit
+                or meta.get("metric") != "sum_input_bytes"
+                or meta.get("hardware") != hardware
+                or meta.get("boundary") != "small_if_input_bytes_lte_limit"):
+            errs.append(f"{cid}: perf_shape_classification 与输入物理字节 {total} 不一致")
+            continue
+        actual_counts[expected_cls] += 1
+        selected_ids.append(cid)
+        key = "+".join(sorted(dtypes)) if dtypes else "unknown"
+        by_dtype[key] = by_dtype.get(key, 0) + 1
+    if policy.get("counts") != actual_counts:
+        errs.append(f"perf_case_policy.counts={policy.get('counts')!r} 与实际 {actual_counts!r} 不一致")
+    sel = policy.get("selection")
+    expected_selection = {
+        "identity_rule": "selected case_id is reused from the same precision caseset",
+        "selected_case_ids": selected_ids,
+        "excluded_precision_case_ids": excluded_ids,
+        "selected_by_dtype": dict(sorted(by_dtype.items())),
+        "selected_total": len(selected_ids),
+        "precision_total": sum(1 for c in cases
+                               if isinstance(c, dict) and "精度" in (c.get("dims") or [])),
+    }
+    if sel != expected_selection:
+        errs.append("perf_case_policy.selection 与 caseset 实际性能/精度 case 身份不一致")
+
+
 def gate_task1(d, errs):
     """用例集自洽 + （有 evidence 时）id 一一对应，专防跑子集。"""
     cs = _load(d, "caseset.json")
@@ -510,6 +609,7 @@ def gate_task1(d, errs):
     cov = Counter(_case_key(c, errs) for c in cases if isinstance(c, dict))
     print(f"  用例数={len(cases)} | (dtype,shape) 覆盖={dict(cov)}")
     _gate_dtype_coverage(cs, errs)   # Q7：任务书 dtype 全集 vs 实测覆盖（未声明→不阻塞）
+    _gate_perf_case_policy(cs, cases, errs)
     ev = _load(d, "evidence.json")  # 有 evidence（已跑）→ id 必须一一对应、不许子集
     if isinstance(ev, dict):
         eids = _ids_from_evidence(ev.get("evidence"), errs)
@@ -591,6 +691,7 @@ def gate_task2(d, errs):
                 errs.append(f"verdict.overall.counts.{k} 缺失或非整数: {counts.get(k)!r}")
         if _is_int(counts.get("contract_problems")) and counts["contract_problems"]:
             errs.append(f"契约问题 {counts['contract_problems']} 条（validator 标 evidence↔caseset 契约破损）")
+    _gate_accuracy_report(vd, cases, ev_list, errs)
     # precision 必填 + **口径三处一致（policy 化）**——防 adapter 偷偷放宽阈值/漏采精度假通过。
     # T5：由「标量 threshold 相等」升级为「tolerance_policy_id + 结构化 policy 一致」（保留 threshold digest）。
     exp_by_id = {c["id"]: (c.get("expected") or {})
@@ -663,6 +764,162 @@ def gate_task2(d, errs):
     _gate_precision_provenance(d, [e for e in ev_list if isinstance(e, dict) and e.get("case_id") not in na_ids],
                                exp_by_id, errs, case_by_id)  # 空 Tensor 功能用例无产物 provenance，过滤（validator→na）
     print(f"  精度裁决={ov.get('verdict')}(validator 判) | 证据覆盖={'一致' if cids == eids else '不一致'}")
+
+
+def _gate_accuracy_report(vd, cases, ev_list, errs):
+    """从 verdict.per_case + caseset + evidence 独立重建精度桶，再核固定报告视图。
+
+    这里不重判数值阈值，只绑定 validator 已给出的逐 case 结论与执行状态；避免同时篡改
+    ``accuracy_summary`` 旧五桶和 ``report`` 后仍可通过。
+    """
+    acc = vd.get("accuracy_summary")
+    if not isinstance(acc, dict):
+        errs.append("verdict 缺 accuracy_summary（精度按 dtype 报告不完整）")
+        return
+    report = acc.get("report")
+    if not isinstance(report, dict) or not isinstance(report.get("overall"), dict):
+        errs.append("accuracy_summary 缺 report.overall（总数/通过/失败/待复核）")
+        return
+
+    case_by_id = {c.get("id"): c for c in cases
+                  if isinstance(c, dict) and isinstance(c.get("id"), str)}
+    ev_by_id = {e.get("case_id"): e for e in ev_list
+                if isinstance(e, dict) and isinstance(e.get("case_id"), str)}
+    verdict_rows = vd.get("per_case")
+    if not isinstance(verdict_rows, list):
+        errs.append("verdict.per_case 缺失/非列表，无法独立重建精度汇总")
+        return
+
+    def metrics_present(precision):
+        if not isinstance(precision, dict):
+            return False
+        outputs = precision.get("outputs")
+        if isinstance(outputs, list):
+            return bool(outputs) and all(
+                isinstance(o, dict) and isinstance(o.get("metrics"), dict) for o in outputs)
+        return isinstance(precision.get("metrics"), dict)
+
+    def input_dtype_signature(case):
+        return tuple(sorted(
+            i.get("dtype") for i in (case.get("inputs") or [])
+            if isinstance(i, dict) and isinstance(i.get("dtype"), str)))
+
+    def explicit_compare_dtype(case):
+        exp = case.get("expected") if isinstance(case, dict) else None
+        if not isinstance(exp, dict):
+            return None
+        outputs = exp.get("outputs")
+        if isinstance(outputs, list):
+            dtypes = sorted({o.get("compare_dtype") for o in outputs
+                             if isinstance(o, dict) and o.get("role") != "index"
+                             and isinstance(o.get("compare_dtype"), str)})
+            return "+".join(dtypes) if dtypes else None
+        return exp.get("compare_dtype") if isinstance(exp.get("compare_dtype"), str) else None
+
+    # 空 Tensor 的 expected.compare_dtype 为 null；validator 对普通 dtype 仍可由同接口的
+    # 非空见证确定输出 dtype。这里从同一 caseset 的显式 compare_dtype 建确定性映射，不凭算子名猜。
+    dtype_hints = {}
+    for hint_case in cases:
+        if not isinstance(hint_case, dict):
+            continue
+        hint = explicit_compare_dtype(hint_case)
+        if hint is not None:
+            dtype_hints.setdefault(input_dtype_signature(hint_case), set()).add(hint)
+
+    def dtype_of(case):
+        exp = case.get("expected") if isinstance(case, dict) else None
+        if not isinstance(exp, dict):
+            return "unknown"
+        explicit = explicit_compare_dtype(case)
+        if explicit is not None:
+            return explicit
+        input_dtypes = input_dtype_signature(case)
+        # AscendOpTest 的 BF16 空 Tensor 无数值比较产物，validator 按 unknown 挂账。
+        if "bfloat16" in input_dtypes:
+            return "unknown"
+        hints = dtype_hints.get(input_dtypes, set())
+        if len(hints) == 1:
+            return next(iter(hints))
+        # legacy 单输出 caseset 可能尚未落 compare_dtype；仅在所有输入 dtype 唯一时作确定性回退。
+        unique_inputs = sorted(set(input_dtypes))
+        return unique_inputs[0] if len(unique_inputs) == 1 else "unknown"
+
+    buckets = {}
+    all_counts = {k: 0 for k in ("passed", "failed", "errored", "uncertain", "na")}
+    for row in verdict_rows:
+        if not isinstance(row, dict) or not isinstance(row.get("case_id"), str):
+            errs.append("verdict.per_case 含缺/坏 case_id，无法独立重建精度汇总")
+            continue
+        cid = row["case_id"]
+        case = case_by_id.get(cid)
+        ev = ev_by_id.get(cid)
+        if case is None:
+            errs.append(f"{cid}: verdict.per_case 在 caseset 中无对应 case")
+            continue
+        state = row.get("精度")
+        if row.get("功能") != "fail" and state == "pass":
+            bucket = "passed"
+        elif row.get("功能") != "fail" and state == "uncertain":
+            bucket = "uncertain"
+        else:
+            exp = case.get("expected") if isinstance(case.get("expected"), dict) else {}
+            precision_expected = (
+                exp.get("verify_mode") in ("exact", "numerical")
+                and "精度" in (case.get("dims") or []))
+            if row.get("功能") != "fail" and state == "na" and not precision_expected:
+                bucket = "na"
+            else:
+                executed = (isinstance(ev, dict) and ev.get("status") == "ok"
+                            and metrics_present(ev.get("precision")))
+                bucket = "failed" if executed else "errored"
+        dtype = dtype_of(case)
+        b = buckets.setdefault(dtype, {k: 0 for k in all_counts})
+        b[bucket] += 1
+        all_counts[bucket] += 1
+
+    derived_total = sum(all_counts.values())
+    if acc.get("total") != derived_total:
+        errs.append(f"accuracy_summary.total={acc.get('total')!r} 与 verdict.per_case 数 {derived_total} 不一致")
+    if acc.get("executed") != all_counts["passed"] + all_counts["failed"]:
+        errs.append("accuracy_summary.executed 与逐 case 执行桶不一致")
+    for key, value in all_counts.items():
+        if acc.get(key) != value:
+            errs.append(f"accuracy_summary.{key}={acc.get(key)!r} 与逐 case 派生 {value} 不一致")
+
+    def report_view(src):
+        return {"total": src["passed"] + src["failed"] + src["errored"] + src["uncertain"],
+                "passed": src["passed"], "failed": src["failed"] + src["errored"],
+                "needs_review": src["uncertain"], "na": src["na"]}
+
+    exp_overall = report_view(all_counts)
+    if report["overall"] != exp_overall:
+        errs.append(f"accuracy_summary.report.overall={report['overall']!r} "
+                    f"与逐 case 独立派生 {exp_overall!r} 不一致")
+    legacy_rows = acc.get("by_dtype")
+    report_rows = report.get("by_dtype")
+    if not isinstance(legacy_rows, list) or not isinstance(report_rows, list):
+        errs.append("accuracy_summary by_dtype/report.by_dtype 缺失或非列表")
+        return
+    legacy_by_dtype = {r.get("dtype"): r for r in legacy_rows
+                       if isinstance(r, dict) and isinstance(r.get("dtype"), str)}
+    exp_rows = []
+    for dtype, counts in sorted(buckets.items()):
+        legacy = legacy_by_dtype.get(dtype)
+        if legacy is None:
+            errs.append(f"accuracy_summary.by_dtype 缺 {dtype} 行")
+        else:
+            if legacy.get("count") != sum(counts.values()):
+                errs.append(f"accuracy_summary.by_dtype[{dtype}].count 与逐 case 派生不一致")
+            for key, value in counts.items():
+                if legacy.get(key) != value:
+                    errs.append(f"accuracy_summary.by_dtype[{dtype}].{key} "
+                                f"与逐 case 派生 {value} 不一致")
+        exp_rows.append({"dtype": dtype, **report_view(counts)})
+    extra = sorted(set(legacy_by_dtype) - set(buckets))
+    if extra:
+        errs.append(f"accuracy_summary.by_dtype 多出无逐 case 支撑的 dtype 行 {extra}")
+    if report_rows != exp_rows:
+        errs.append("accuracy_summary.report.by_dtype 与逐 case 独立派生不一致")
 
 
 def _perf_finite_pos(x):
@@ -1098,6 +1355,55 @@ def _perf_evidence_ids(ev_list):
     return ids
 
 
+def _gate_perf_measurement_binding(cs, ev, pr, d, per, errs):
+    """新 shape 报告契约下，把报告逐 case 数值锚回 evidence/baseline 独立产物。"""
+    if not isinstance(cs, dict) or not isinstance(cs.get("perf_case_policy"), dict):
+        return
+    ev_by_id = {e.get("case_id"): e for e in ev.get("evidence") or []
+                if isinstance(e, dict) and isinstance(e.get("case_id"), str)}
+    for row in per:
+        if not isinstance(row, dict) or not isinstance(row.get("case_id"), str):
+            continue
+        cid = row["case_id"]
+        eperf = (ev_by_id.get(cid) or {}).get("perf")
+        if not isinstance(eperf, dict):
+            continue
+        npu = row.get("npu_us")
+        if not (_perf_finite_pos(npu) and _perf_finite_pos(eperf.get("us"))
+                and math.isclose(float(npu), float(eperf["us"]), rel_tol=1e-12, abs_tol=1e-12)):
+            errs.append(f"{cid}: perf_report.npu_us={npu!r} ≠ evidence.perf.us={eperf.get('us')!r}")
+        row_scope = row.get("scope") if "scope" in row else row.get("npu_scope")
+        if row_scope != eperf.get("scope"):
+            errs.append(f"{cid}: perf_report NPU scope={row_scope!r} "
+                        f"≠ evidence.perf.scope={eperf.get('scope')!r}")
+    baseline = _load(d, "baseline.json")
+    if not isinstance(baseline, dict):
+        return
+    base_by_id = {b.get("case_id"): b for b in baseline.get("per_case") or []
+                  if isinstance(b, dict) and isinstance(b.get("case_id"), str)}
+    for row in per:
+        if not isinstance(row, dict) or not isinstance(row.get("case_id"), str):
+            continue
+        cid = row["case_id"]
+        expected_base = base_by_id.get(cid)
+        claimed = row.get("baseline")
+        if expected_base is None:
+            if isinstance(claimed, dict) and claimed.get("us") is not None:
+                errs.append(f"{cid}: baseline.json 无此 case，perf_report 却声明 baseline.us")
+            continue
+        if not isinstance(claimed, dict):
+            errs.append(f"{cid}: baseline.json 有此 case，perf_report 缺 baseline")
+            continue
+        if not (_perf_finite_pos(claimed.get("us")) and _perf_finite_pos(expected_base.get("us"))
+                and math.isclose(float(claimed["us"]), float(expected_base["us"]),
+                                 rel_tol=1e-12, abs_tol=1e-12)):
+            errs.append(f"{cid}: perf_report baseline.us={claimed.get('us')!r} "
+                        f"≠ baseline.json={expected_base.get('us')!r}")
+        if claimed.get("source") != baseline.get("source"):
+            errs.append(f"{cid}: perf_report baseline.source={claimed.get('source')!r} "
+                        f"≠ baseline.json.source={baseline.get('source')!r}")
+
+
 def _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs):
     """per_case 与 caseset/evidence **按 case 对齐**（补 T5 门延后 finding）——防「跑性能子集 + 伪造
     summary=ok」蒙混：① caseset(dims 含「性能」)↔perf per_case 用 Counter 全量比对（拒缺/多/重复）；
@@ -1134,6 +1440,7 @@ def _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs):
                 if ev_miss:
                     errs.append(f"⚠性能证据缺失/空壳：evidence 无真实 perf 载荷 {ev_miss}"
                                 "（性能用例未实跑/伪造 per_case/空壳证据）")
+                _gate_perf_measurement_binding(cs, ev, pr, d, per, errs)
             elif ev == "__BAD__":
                 errs.append("evidence.json 解析失败（无法核性能证据真实性）")
             elif ev is None:
@@ -1160,6 +1467,103 @@ def _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs):
                 errs.append(f"summary.{key}={claimed!r} 非整数计数（拒 bool/非法类型）")
             elif claimed != actual:
                 errs.append(f"summary.{key}={claimed!r} 与 per_case 行级实际 {actual} 不一致（伪造/漏计）")
+
+
+def _gate_shape_report(pr, d, per, errs):
+    """核大小 shape 报告覆盖与计数；只验派生完整性，不重判性能阈值。"""
+    cs = _load(d, "caseset.json")
+    if not isinstance(cs, dict) or not isinstance(cs.get("perf_case_policy"), dict):
+        return                                      # legacy caseset 没声明新契约，保持兼容
+    policy = cs["perf_case_policy"]
+    by_id = {c.get("id"): c for c in (cs.get("cases") or [])
+             if isinstance(c, dict) and isinstance(c.get("id"), str)}
+    expected_counts = (policy.get("counts") or {}) if isinstance(policy.get("counts"), dict) else {}
+    actual = {k: {"planned_cases": 0, "cases_scored": 0, "达标": 0, "blocked": 0,
+                  "npu_all": [], "baseline_all": [], "paired_npu": [], "paired_baseline": []}
+              for k in ("small", "large")}
+    for r in per:
+        if not isinstance(r, dict) or not isinstance(r.get("case_id"), str):
+            continue
+        meta = (by_id.get(r["case_id"]) or {}).get("perf_shape_classification")
+        cls = meta.get("class") if isinstance(meta, dict) else None
+        if cls not in actual:
+            errs.append(f"{r['case_id']}: 声明了 perf_case_policy 但缺/坏大小 shape 分类")
+            continue
+        a = actual[cls]
+        a["planned_cases"] += 1
+        npu = r.get("npu_us")
+        base = (r.get("baseline") or {}).get("us")
+        if _perf_finite_pos(npu):
+            a["npu_all"].append(float(npu))
+        if _perf_finite_pos(base):
+            a["baseline_all"].append(float(base))
+        scored = ("ratio" in r and _perf_finite_pos(npu) and _perf_finite_pos(base))
+        a["cases_scored"] += int(scored)
+        if scored:
+            a["paired_npu"].append(float(npu))
+            a["paired_baseline"].append(float(base))
+        a["达标"] += int(r.get("达标") is True)
+        a["blocked"] += int(r.get("blocked") is True)
+    for cls in ("small", "large"):
+        if expected_counts.get(cls) != actual[cls]["planned_cases"]:
+            errs.append(f"{cls}: perf_case_policy.counts={expected_counts.get(cls)!r} "
+                        f"与性能行实际 {actual[cls]['planned_cases']} 不一致")
+    if pr.get("shape_report_complete") is not True:
+        errs.append(f"大小 shape 报告不完整：{pr.get('shape_report_problems')}")
+    rows = pr.get("by_shape_class")
+    if not isinstance(rows, list):
+        errs.append("perf_report 缺 by_shape_class")
+        return
+    got = {r.get("class"): r for r in rows if isinstance(r, dict)}
+    count_keys = ("planned_cases", "cases_scored", "达标", "blocked")
+
+    def med(vals):
+        return float(statistics.median(vals)) if vals else None
+
+    def same_number(got_value, expected_value):
+        if expected_value is None:
+            return got_value is None
+        return (isinstance(got_value, (int, float)) and not isinstance(got_value, bool)
+                and math.isfinite(got_value)
+                and math.isclose(float(got_value), float(expected_value), rel_tol=1e-12, abs_tol=1e-12))
+
+    for cls in ("small", "large"):
+        row = got.get(cls)
+        if not isinstance(row, dict):
+            errs.append(f"by_shape_class 缺 {cls} 行")
+            continue
+        for key in count_keys:
+            value = actual[cls][key]
+            if row.get(key) != value:
+                errs.append(f"by_shape_class[{cls}].{key}={row.get(key)!r} 与行级实际 {value} 不一致")
+        if row.get("cases") != actual[cls]["planned_cases"]:
+            errs.append(f"by_shape_class[{cls}].cases 与 planned_cases 不一致")
+        exp_npu, exp_base = med(actual[cls]["npu_all"]), med(actual[cls]["baseline_all"])
+        pair_npu, pair_base = med(actual[cls]["paired_npu"]), med(actual[cls]["paired_baseline"])
+        exp_speedup = (pair_base / pair_npu) if pair_npu is not None else None
+        for key, value in (("npu_us", exp_npu), ("baseline_us", exp_base), ("speedup", exp_speedup)):
+            if not same_number(row.get(key), value):
+                errs.append(f"by_shape_class[{cls}].{key}={row.get(key)!r} 与行级派生 {value!r} 不一致")
+    overall = pr.get("shape_overall")
+    if not isinstance(overall, dict):
+        errs.append("perf_report 缺 shape_overall")
+        return
+    sums = {k: sum(actual[cls][k] for cls in ("small", "large")) for k in count_keys}
+    for key, value in sums.items():
+        if overall.get(key) != value:
+            errs.append(f"shape_overall.{key}={overall.get(key)!r} 与大小桶合计 {value} 不一致")
+    if overall.get("cases") != sums["planned_cases"]:
+        errs.append("shape_overall.cases 与 planned_cases 不一致")
+    all_npu = actual["small"]["npu_all"] + actual["large"]["npu_all"]
+    all_base = actual["small"]["baseline_all"] + actual["large"]["baseline_all"]
+    pair_npu = actual["small"]["paired_npu"] + actual["large"]["paired_npu"]
+    pair_base = actual["small"]["paired_baseline"] + actual["large"]["paired_baseline"]
+    pn, pb = med(pair_npu), med(pair_base)
+    exp_numbers = {"npu_us": med(all_npu), "baseline_us": med(all_base),
+                   "speedup": (pb / pn) if pn is not None else None}
+    for key, value in exp_numbers.items():
+        if not same_number(overall.get(key), value):
+            errs.append(f"shape_overall.{key}={overall.get(key)!r} 与行级派生 {value!r} 不一致")
 
 
 def gate_task3(d, errs):
@@ -1239,6 +1643,7 @@ def gate_task3(d, errs):
             errs.append(f"status=ok 但 summary.perf_cases={pc!r}（须为≥1 整数；0 性能用例应为 no_perf_cases）")
     # per_case 与 caseset/evidence 按 case 对齐（补 T5 门延后 finding）：防跑性能子集 + 伪造 summary=ok。
     _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs)
+    _gate_shape_report(pr, d, per, errs)
     if st == "exception":
         _gate_small_shape_exception(pr, d, errs)
     print(f"  性能 status={st}(perf_compare 判) | 达标 {s.get('达标')}/{s.get('perf_cases')}")

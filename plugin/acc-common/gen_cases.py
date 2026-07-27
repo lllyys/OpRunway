@@ -202,6 +202,137 @@ def _storage_name(dtn):
     return "uint16" if dtn == _BF16 else dtn
 
 
+_PERF_SHAPE_PROFILES = {
+    # 用户确认的 A3 通用规则：全部物理输入载荷 <= 256 KiB 可一次搬完 UB。
+    "Atlas A3": {"metric": "sum_input_bytes", "small_max_bytes": 256 * 1024},
+}
+
+
+def _perf_case_policy(spec):
+    """解析性能 case 来源与 shape 大小分类契约；未声明则保持历史行为。
+
+    ``case_source=precision_cases`` 只表示性能 case 必须从精度 caseset 中选，不表示每条精度 case
+    都必须测性能。``shape_classification`` 仅负责可审计分组，不参与免测、阈值放宽或 pass/fail。
+    """
+    perf = spec.get("perf")
+    if not isinstance(perf, dict):
+        return None
+    source = perf.get("case_source")
+    rule = perf.get("shape_classification")
+    if source is None or rule is None:
+        raise ValueError(
+            "spec 声明了 perf，就必须同时声明 perf.case_source='precision_cases' 与 "
+            "perf.shape_classification；性能 case⊆精度 case、按目标硬件 UB 单次承载边界分大小 shape "
+            "是通用规则，不能静默省略")
+    if source != "precision_cases":
+        raise ValueError(
+            f"perf.case_source 仅支持 'precision_cases'，得 {source!r}；"
+            "性能用例须从同一份精度 caseset 选取，不另造一套输入")
+    if not isinstance(rule, dict):
+        raise ValueError("perf.shape_classification 须为 object")
+    metric = rule.get("metric")
+    if metric != "sum_input_bytes":
+        raise ValueError(
+            f"perf.shape_classification.metric 仅支持 'sum_input_bytes'，得 {metric!r}")
+    limit = rule.get("small_max_bytes")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError(
+            f"perf.shape_classification.small_max_bytes 须为 ≥1 的整数，得 {limit!r}")
+    hardware = rule.get("hardware")
+    if not isinstance(hardware, str) or not hardware.strip():
+        raise ValueError("perf.shape_classification.hardware 须为非空字符串")
+    hardware = hardware.strip()
+    profile = _PERF_SHAPE_PROFILES.get(hardware)
+    if profile is None:
+        raise ValueError(
+            f"perf.shape_classification.hardware={hardware!r} 尚无受控大小 shape profile；"
+            "须先按目标硬件核定 UB 单次承载边界，不能由 spec 任意填写")
+    if metric != profile["metric"] or limit != profile["small_max_bytes"]:
+        raise ValueError(
+            f"{hardware} 大小 shape profile固定为 metric={profile['metric']!r}, "
+            f"small_max_bytes={profile['small_max_bytes']}，得 metric={metric!r}, "
+            f"small_max_bytes={limit!r}")
+    return {"case_source": source,
+            "shape_classification": {
+                "metric": metric,
+                "small_max_bytes": int(limit),
+                "boundary": "small_if_input_bytes_lte_limit",
+                "hardware": hardware,
+            }}
+
+
+def _classify_perf_cases(spec, cases):
+    """按 spec 给性能 case 打「小shape/大shape」标签并返回 caseset 级账本。
+
+    输入载荷按各 input 的**物理存储 dtype**计字节；bf16 因 ``storage_dtype=uint16`` 按 2 bytes
+    计算。边界是闭区间：恰好 ``small_max_bytes`` 仍属小 shape。分类不改变 ``dims``，更不会产生
+    ``trivial-met`` 或性能豁免。
+    """
+    policy = _perf_case_policy(spec)
+    if policy is None:
+        return None
+    rule = policy["shape_classification"]
+    limit = rule["small_max_bytes"]
+    counts = {"small": 0, "large": 0}
+    selected_ids, excluded_precision_ids = [], []
+    by_dtype = {}
+    for case in cases:
+        dims = case.get("dims") or []
+        if "性能" not in dims:
+            if "精度" in dims and isinstance(case.get("id"), str):
+                excluded_precision_ids.append(case["id"])
+            continue
+        cid = case.get("id")
+        if "精度" not in dims:
+            raise ValueError(
+                f"{cid}: perf.case_source='precision_cases'，但性能 case 的 dims 不含「精度」")
+        inputs = case.get("inputs")
+        if not isinstance(inputs, list) or not inputs:
+            raise ValueError(f"{cid}: 性能 case 缺 inputs，无法按输入载荷字节分类")
+        total = 0
+        for inp in inputs:
+            if not isinstance(inp, dict):
+                raise ValueError(f"{cid}: input 条目非 object，无法分类")
+            shape = inp.get("shape")
+            if (not isinstance(shape, list)
+                    or any(isinstance(d, bool) or not isinstance(d, int) or d < 0 for d in shape)):
+                raise ValueError(f"{cid}: input shape={shape!r} 非非负整数数组，无法分类")
+            logical_dtype = inp.get("dtype")
+            if not isinstance(logical_dtype, str):
+                raise ValueError(f"{cid}: input dtype={logical_dtype!r} 非字符串，无法分类")
+            storage_dtype = inp.get("storage_dtype") or _storage_name(logical_dtype)
+            try:
+                itemsize = int(np.dtype(storage_dtype).itemsize)
+            except TypeError as exc:
+                raise ValueError(
+                    f"{cid}: input storage dtype={storage_dtype!r} 无法换算字节数") from exc
+            total += _numel(shape) * itemsize
+        size_class = "small" if total <= limit else "large"
+        label = "小shape" if size_class == "small" else "大shape"
+        tags = [t for t in (case.get("tags") or []) if t not in ("小shape", "大shape")]
+        case["tags"] = tags + [label]
+        case["perf_shape_classification"] = {
+            "class": size_class,
+            "input_bytes": int(total),
+            **rule,
+        }
+        counts[size_class] += 1
+        selected_ids.append(cid)
+        dtypes = sorted({i.get("dtype") for i in inputs
+                         if isinstance(i, dict) and isinstance(i.get("dtype"), str)})
+        dtype_key = "+".join(dtypes) if dtypes else "unknown"
+        by_dtype[dtype_key] = by_dtype.get(dtype_key, 0) + 1
+    return {**policy, "counts": counts,
+            "selection": {
+                "identity_rule": "selected case_id is reused from the same precision caseset",
+                "selected_case_ids": selected_ids,
+                "excluded_precision_case_ids": excluded_precision_ids,
+                "selected_by_dtype": dict(sorted(by_dtype.items())),
+                "selected_total": len(selected_ids),
+                "precision_total": sum(1 for c in cases if "精度" in (c.get("dims") or [])),
+            }}
+
+
 def _assert_equal_nan_effective(golden_fn, inputs, attrs, cid):
     """finding #10：nanpair 用例断言 equal_nan **真起作用**——输入含 aligned-NaN 且翻转 equal_nan 后 golden 有别。
 
@@ -2447,6 +2578,7 @@ def gen_cases(spec, work_dir):
             legacy_case["aclnn_call"] = _build_aclnn_call(
                 spec, variant, attrs, _active_output_names(spec, variant, cid), cid)
         cases.append(legacy_case)
+    perf_case_policy = _classify_perf_cases(spec, cases)
     attr_order = [p["name"] for p in spec["params"] if p["io"] == "attr"]
     # Q7 dtype 覆盖门用：dtype_required=任务书权威全集（spec 透传，未声明则 None→门不阻塞）；
     # dtype_tested=实测子集，**从实际生成的 cases 归并**（非 in 参数并集——门也用真实 cases 对账，两侧口径一致、
@@ -2478,6 +2610,7 @@ def gen_cases(spec, work_dir):
             # 声明了就把「这批用例是按哪个造例档位产的」如实落进产物，报告侧不必回头猜。
             **({"case_profile": plan_meta["case_profile"]}
                if plan_meta["case_profile_declared"] else {}),
+            **({"perf_case_policy": perf_case_policy} if perf_case_policy is not None else {}),
             "cases": cases}
     # ⚠ 原先这里挂一份 **op 级** `aclnn_call_template`，由 driver 自己按 case 兜变体（`dim=None`→`dim=0`）——
     # 已被 finding #3 判为不合规并**整体替换**：调用形态现在逐 case 解析、写在 `case["aclnn_call"]` 里。
@@ -2493,6 +2626,7 @@ def _build_dry_run_ledger(spec, preparation_inputs=None):
     → 明说「未核」并照常出计划，**不阻塞**（那种 spec 到了 gen_cases 本来就会 fail-closed）。
     ⚠ 本仓 golden.py 约定 torch 延迟 import（见 `samples/golden/*/golden.py`），故此处仍不拉 torch；
     但若某算子在模块顶层 `import torch`，dry-run 会跟着 import ——这是加载用户代码的代价，如实记在这。"""
+    perf_case_policy = _perf_case_policy(spec)
     op = spec["op"]
     in_params = [p for p in spec["params"] if p["io"] == "in"]
     # 能力边界前置：三元算子 / dtype 双层能力门在 CP-B 就拦下，不拖到 CP-D（form 缺省 cpp）
@@ -2578,6 +2712,8 @@ def _build_dry_run_ledger(spec, preparation_inputs=None):
             "input_ranks": None if ranks is None else sorted(ranks),
             "golden_out_shape": "loaded" if _dry_out_shape_fn is not None else "not_available",
             "golden_cost_note": cost_why.strip(),
+            **({"perf_case_policy": perf_case_policy}
+               if perf_case_policy is not None else {}),
         },
         "golden_dependency": golden_dependency,
         "summary": {

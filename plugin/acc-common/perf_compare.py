@@ -328,6 +328,101 @@ def _report_aggregate(rows, case_by_id, ev, bl, tgt):
     return out
 
 
+def _shape_class_aggregate(rows, caseset):
+    """按 caseset 的大小 shape 元数据做只读汇总；不参与任何裁决。
+
+    新契约声明 ``perf_case_policy`` 后，每条性能行都必须有合法分类，且两桶计数要与生成期账本一致；
+    缺失时产 ``problems``，绝不静默少算。旧 caseset 未声明 policy 且没有分类元数据时返回 ``None``，
+    保持历史兼容。
+    """
+    case_by_id = {c.get("id"): c for c in (caseset.get("cases") or [])
+                  if isinstance(c, dict) and isinstance(c.get("id"), str)}
+    declared = isinstance(caseset.get("perf_case_policy"), dict)
+    has_meta = any(isinstance((case_by_id.get(r.get("case_id")) or {}).get(
+        "perf_shape_classification"), dict) for r in rows if isinstance(r, dict))
+    if not declared:
+        # legacy caseset 没有完整策略账本时不生成大小 shape 报告；即使零星 case 被手工塞了分类，
+        # 也不能据部分元数据产一个看似完整的视图。
+        return None
+    buckets = {}
+    problems = []
+    for row in rows:
+        cid = row.get("case_id")
+        meta = (case_by_id.get(cid) or {}).get("perf_shape_classification")
+        if not isinstance(meta, dict) or meta.get("class") not in ("small", "large"):
+            problems.append(f"{cid}: 缺/坏 perf_shape_classification")
+            continue
+        cls = meta["class"]
+        item = buckets.setdefault(
+            cls, {"rows": 0, "scored": 0, "met": 0, "blocked": 0,
+                  "npu_all": [], "baseline_all": [], "paired_npu": [], "paired_baseline": []})
+        item["rows"] += 1
+        item["met"] += int(bool(row.get("达标")))
+        item["blocked"] += int(bool(row.get("blocked")))
+        if _finite_pos(row.get("npu_us")):
+            item["npu_all"].append(float(row["npu_us"]))
+        base = (row.get("baseline") or {}).get("us")
+        if _finite_pos(base):
+            item["baseline_all"].append(float(base))
+        if "ratio" in row and _finite_pos(row.get("npu_us")):
+            if _finite_pos(base):
+                item["scored"] += 1
+                item["paired_npu"].append(float(row["npu_us"]))
+                item["paired_baseline"].append(float(base))
+    expected = ((caseset.get("perf_case_policy") or {}).get("counts") or {}) if declared else {}
+    out, all_npu, all_base, all_paired_npu, all_paired_base = [], [], [], [], []
+    for cls in ("small", "large"):
+        if cls not in buckets:
+            item = {"rows": 0, "scored": 0, "met": 0, "blocked": 0,
+                    "npu_all": [], "baseline_all": [], "paired_npu": [], "paired_baseline": []}
+        else:
+            item = buckets[cls]
+        if declared and expected.get(cls) != item["rows"]:
+            problems.append(
+                f"{cls}: 生成期账本={expected.get(cls)!r}，报告行={item['rows']}，大小 shape 计数不一致")
+        npu_med, base_med = _median(item["npu_all"]), _median(item["baseline_all"])
+        pair_npu_med, pair_base_med = _median(item["paired_npu"]), _median(item["paired_baseline"])
+        all_npu.extend(item["npu_all"])
+        all_base.extend(item["baseline_all"])
+        all_paired_npu.extend(item["paired_npu"])
+        all_paired_base.extend(item["paired_baseline"])
+        out.append({"class": cls, "cases": item["rows"], "planned_cases": item["rows"],
+                    "cases_scored": item["scored"],
+                    "达标": item["met"], "blocked": item["blocked"],
+                    "npu_us": npu_med, "baseline_us": base_med,
+                    "speedup": (pair_base_med / pair_npu_med)
+                    if _finite_pos(pair_npu_med) else None})
+    npu_med, base_med = _median(all_npu), _median(all_base)
+    pair_npu_med, pair_base_med = _median(all_paired_npu), _median(all_paired_base)
+    overall = {"class": "overall", "cases": sum(x["cases"] for x in out),
+               "planned_cases": sum(x["planned_cases"] for x in out),
+               "cases_scored": sum(x["cases_scored"] for x in out),
+               "达标": sum(x["达标"] for x in out), "blocked": sum(x["blocked"] for x in out),
+               "npu_us": npu_med, "baseline_us": base_med,
+               "speedup": (pair_base_med / pair_npu_med) if _finite_pos(pair_npu_med) else None}
+    return {"by_shape_class": out, "overall": overall,
+            "complete": not problems, "problems": problems}
+
+
+def _attach_shape_report(report, caseset):
+    """给已成型报告附加大小 shape 只读视图；异常只记 notes，不改 summary/status。"""
+    try:
+        agg = _shape_class_aggregate(report.get("per_case") or [], caseset)
+    except Exception as exc:
+        report.setdefault("notes", []).append(
+            f"大小 shape 报告生成失败已跳过，裁决不受影响：{exc!r}")
+        return report
+    if agg is None:
+        return report
+    report["by_shape_class"] = agg["by_shape_class"]
+    report["shape_overall"] = agg["overall"]
+    report["shape_report_complete"] = agg["complete"]
+    if agg["problems"]:
+        report["shape_report_problems"] = agg["problems"]
+        report.setdefault("notes", []).append("大小 shape 报告契约不完整：" + "；".join(agg["problems"]))
+    return report
+
+
 def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline_blocked_status=None):
     # pc-7：入口轻量 schema 校验——坏输入收敛为结构化 invalid，绝不下标崩溃。
     # C5：**每一条 return 都过 `_mark_non_acceptance`**——mock 基线的报告无论走哪个出口（invalid / no_perf_cases /
@@ -365,9 +460,11 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
         notes = [top_note]
         if exc_note:
             notes.append(exc_note)
-        return {"op": op, "baseline_source": src, "target_ratio": tgt,
-                "per_case": rows, "notes": notes,
-                "summary": {"perf_cases": len(rows), "达标": 0, "blocked": 0, "status": status}}
+        return _attach_shape_report(
+            {"op": op, "baseline_source": src, "target_ratio": tgt,
+             "per_case": rows, "notes": notes,
+             "summary": {"perf_cases": len(rows), "达标": 0, "blocked": 0, "status": status}},
+            caseset)
 
     src = baseline.get("source")
     if not perf_ids:
@@ -379,10 +476,12 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
         rows = [{"case_id": cid, "达标": False, "blocked": True, "note": tgt_err} for cid in perf_ids]
         notes = [tgt_err] + ([exc_note] if exc_note else [])
         return _mark_non_acceptance(
-            {"op": op, "baseline_source": src, "target_ratio": None,
-             "per_case": rows, "notes": notes,
-             "summary": {"perf_cases": len(rows), "达标": 0, "blocked": len(rows),
-                         "status": "invalid_config"}}, baseline)
+            _attach_shape_report(
+                {"op": op, "baseline_source": src, "target_ratio": None,
+                 "per_case": rows, "notes": notes,
+                 "summary": {"perf_cases": len(rows), "达标": 0, "blocked": len(rows),
+                             "status": "invalid_config"}},
+                caseset), baseline)
 
     ev_list, bl_list = evidence["evidence"], baseline["per_case"]
     notes = []
@@ -410,7 +509,13 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
         e, b = ev.get(cid), bl.get(cid)
         if not e or not b:
             miss = ("evidence " if not e else "") + ("baseline" if not b else "")
-            rows.append({"case_id": cid, "达标": False, "blocked": True, "note": f"缺 {miss.strip()}"})
+            eperf = e.get("perf") if isinstance(e, dict) else None
+            row = {"case_id": cid, "达标": False, "blocked": True,
+                   "note": f"缺 {miss.strip()}"}
+            if isinstance(eperf, dict):
+                row["npu_us"] = eperf.get("us")
+                row["npu_scope"] = eperf.get("scope")
+            rows.append(row)
             continue
         eperf = e.get("perf") if isinstance(e, dict) else None
         escope = eperf.get("scope") if isinstance(eperf, dict) else None
@@ -469,9 +574,10 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
               "per_case": rows, "notes": notes,
               "summary": {"perf_cases": len(rows), "达标": passed, "blocked": blocked,
                           "status": status}}
+    _attach_shape_report(report, caseset)
     # M3：cannbot 报告三件套——**只读展示、零裁决影响**（上面 passed/blocked/status 已经算完了，
-    # 这里只是把同一批 rows 再汇总一遍给人看）。只挂在**正常判定出口**：invalid / no_perf_cases /
-    # invalid_config / 缺基线挂起 这四个提前 return 一个字节都不加——那些报告按定义没有可比测量，
+    # 这里只是把同一批 rows 再汇总一遍给人看）。dtype 聚合只挂在正常判定出口；
+    # shape 报告在已有 case 行的早退路径也保留，用于如实展示 NPU 已采集值、baseline 缺失与 blocked，
     # 挂一堆空聚合只会让「没数据」看起来像「数据是 0」。故下游读这些键必须当**可选**。
     # by_dtype/overall_speedup/custom_only_by_dtype 放报告级（= cannbot report 同层），
     # 两个计数放 summary（蓝本 M3 指定，且 CLI 会打印 summary，两个 int 不会把那行撑爆）。

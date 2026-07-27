@@ -130,8 +130,29 @@ def _materialize(d, caseset):
     return {"op": "M", "runner_form": "aclnn_py", "evidence": ev}
 
 
-_VERDICT = {"op": "M", "overall": {"verdict": "pass",
-                                   "counts": {"fail": 0, "uncertain": 0, "contract_problems": 0}}}
+def _verdict(caseset):
+    """生成与 caseset 对齐的最小合法 validator 产物；报告从逐 case 结论派生。"""
+    ids = [c["id"] for c in caseset["cases"]]
+    n = len(ids)
+    return {
+        "op": "M",
+        "per_case": [{"case_id": cid, "功能": "pass", "精度": "pass"} for cid in ids],
+        "accuracy_summary": {
+            "total": n, "executed": n, "passed": n, "failed": 0, "errored": 0,
+            "uncertain": 0, "na": 0, "overall_pass_rate": 1.0,
+            "by_dtype": [{"dtype": "float32", "count": n, "passed": n, "failed": 0,
+                          "errored": 0, "uncertain": 0, "na": 0,
+                          "atol": 1e-5, "rtol": 1e-5, "pass_rate": 1.0}],
+            "report": {
+                "overall": {"total": n, "passed": n, "failed": 0,
+                            "needs_review": 0, "na": 0},
+                "by_dtype": [{"dtype": "float32", "total": n, "passed": n,
+                              "failed": 0, "needs_review": 0, "na": 0}],
+            },
+        },
+        "overall": {"verdict": "pass",
+                    "counts": {"fail": 0, "uncertain": 0, "contract_problems": 0}},
+    }
 
 
 class MultiOutputGateTest(unittest.TestCase):
@@ -144,7 +165,7 @@ class MultiOutputGateTest(unittest.TestCase):
     def _write(self, cs=None, ev=None):
         _w(self.d, "caseset.json", cs if cs is not None else self.cs)
         _w(self.d, "evidence.json", ev if ev is not None else self.ev)
-        _w(self.d, "verdict.json", _VERDICT)
+        _w(self.d, "verdict.json", _verdict(cs if cs is not None else self.cs))
 
     def _errs(self, stage, cs=None, ev=None):
         self._write(cs, ev)
@@ -317,7 +338,7 @@ class AdapterEvidenceFeedsGateTest(unittest.TestCase):
         self.assertEqual(envelope["evidence"][0]["precision"]["outputs"][1]["out_dtype"], "int64")
         _w(self.d, "caseset.json", caseset)
         _w(self.d, "evidence.json", envelope)
-        _w(self.d, "verdict.json", _VERDICT)
+        _w(self.d, "verdict.json", _verdict(caseset))
         for stage in ("task1", "task2"):
             errs = []
             G._GATES[stage](self.d, errs)

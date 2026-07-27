@@ -26,12 +26,21 @@
 | 重写类（参考内置 TBE） | TBE，任务书给定比例（无劣化 / ≥ 给定百分比） | 当前接入 aclnn 类算子 isclose/sign/equal/neg 均 `baseline=tbe`；catlass matmul 属对标类(synthetic demo、未定基线)——「均」仅限这批重写类 |
 | 移植类（对标 GPU 库 cuSPARSE/cuBLAS…） | GPU（A100，任务书给定比例区间） | GPU 标杆数据由外部 Task 3 给 |
 | 加 dtype 类 | 同 op 其他 dtype 不劣化 | 新 dtype 不劣于同宽既有 dtype |
-| 可选单标杆 | 昇腾小算子拼接（torch 链） | 与生态精度标准单标杆同源 |
+| ACLNN / 小算子拼接 | 按任务书事实或用户确认选 `aclnn_builtin` 或 `torch_npu` | 直接 ACLNN 才用前者；已确认等价于 Torch 接口则用后者，不重复证明 |
 
 > ⚠ canon 张力（待 review 裁）：`acceptance-contract-evidence-chain` 的 `perf_baseline_source` 当前默认 `gpu_external`，与「基线随任务书参考源」有张力；真机三算子任务书原文均写 TBE、GPU 非必需 → 建议 review 裁定这批社区任务 GPU 对比层为可选。本 skill 只陈述、**不单方改 canonical**。
 
 ## 3. 小 shape 例外门（T6 已实现，数据驱动）
 
+- **通用 case 来源与大小分类**：只要存在性能维，就必须用
+  `perf.case_source="precision_cases"` 声明性能 case 取自精度 caseset，并用
+  `perf.shape_classification={metric:"sum_input_bytes",small_max_bytes,hardware}` 按全部输入物理载荷之和
+  标记“小shape/大shape”。A3 的 `small_max_bytes=262144`，边界计入小 shape。该分类只服务分组统计；
+  没有任务书例外条款时，大小两类都正常测量和判定。
+- **选择账本**：caseset 至少记录精度/性能总数、入选与排除的 `case_id`、按 dtype 入选数；
+  验收门重算并核对，证明性能 case 的确取自精度 case。
+- **固定报告视图**：按 `small`、`large`、`overall` 输出计划数、实测数、达标数、blocked 数、
+  NPU/baseline 中位耗时和 speedup。任何声明了分类策略却缺少分类的 case 都不能静默跳过。
 - **触发**：`小shape` tag 的性能用例；阈值 `when_us_below` / `abs_gap_us_within` 取自 `spec.perf.small_shape_exception`（对象；legacy 字符串正则兜底），**零硬编码**。
 - **判定**：`max(NPU,基线) < when_us_below` 且 `|NPU−基线| ≤ abs_gap_us_within` → **达标保持 False** + `exception` 标 + `exception_detail`。
 - **仿真图**：`report['simulation']` 由 `perf_compare` **独家产**（唯一事实源）；`perf_sim_plot.py` 只据此渲染 SVG（阈值线/容差带数据驱动 + XML escape），**不二次推断**。`gate_task3` 强制「有图 + 例外行↔simulation 交叉一致 + SVG sha256 + 路径钉死」才放行；删图/篡改/对不上 → FAILED。

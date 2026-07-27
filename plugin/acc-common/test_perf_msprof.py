@@ -820,6 +820,45 @@ class TestTorchBaselinePlan(unittest.TestCase):
             PM.resolve_torch_baseline_plan(self.MAP, call)
 
 
+class TestAclnnBuiltinBaselinePlan(unittest.TestCase):
+    """任务书点名 ACLNN baseline 时直接按 spec 变体调用，不经 torch 等价性证明。"""
+
+    MAP = {"library": "cann_builtin_libopapi", "variants": [
+        {"when": {"attr": "dim", "is_null": True},
+         "symbol": "Median", "slots": ["self", "valuesOut"]},
+        {"when": {"attr": "dim", "is_null": False},
+         "symbol": "MedianDim",
+         "slots": ["self", "dim", "keepDim", "valuesOut", "indicesOut"]},
+    ]}
+    CALL = {"symbol": "Median", "slots": [
+        {"role": "in", "name": "self", "input_idx": 0},
+        {"role": "attr", "name": "dim", "ctype": "int64", "value": 0},
+        {"role": "attr", "name": "keepDim", "ctype": "bool", "value": False},
+        {"role": "out", "name": "valuesOut", "output_idx": 0},
+        {"role": "out_null", "name": "indicesOut"}]}
+
+    def test_global_maps_to_builtin_median_abi(self):
+        plan = PM.resolve_aclnn_baseline_plan(
+            self.MAP, self.CALL, {"id": "g", "attrs": {"dim": None}})
+        self.assertEqual(plan["symbol"], "Median")
+        self.assertEqual([s["name"] for s in plan["slots"]], ["self", "valuesOut"])
+
+    def test_dim_maps_to_builtin_median_dim_abi(self):
+        call = json.loads(json.dumps(self.CALL))
+        call["slots"][-1]["role"] = "out"
+        call["slots"][-1]["output_idx"] = 1
+        plan = PM.resolve_aclnn_baseline_plan(
+            self.MAP, call, {"id": "d", "attrs": {"dim": 0}})
+        self.assertEqual(plan["symbol"], "MedianDim")
+        self.assertEqual([s["name"] for s in plan["slots"]],
+                         ["self", "dim", "keepDim", "valuesOut", "indicesOut"])
+
+    def test_uncontrolled_library_rejected(self):
+        bad = dict(self.MAP, library="/tmp/libopapi.so")
+        with self.assertRaises(PM.PerfCollectError):
+            PM.resolve_aclnn_baseline_plan(bad, self.CALL, {"id": "g", "attrs": {"dim": None}})
+
+
 class TestRealGate(unittest.TestCase):
     """真机采集 gate：未显式开 OPRUNWAY_ACLNN_REAL=1 一律 fail-closed。"""
 
@@ -944,6 +983,31 @@ class TestBaselineDocRoundTrip(unittest.TestCase):
         self.assertEqual(report["summary"]["status"], "blocked")
         self.assertEqual(report["summary"]["达标"], 0)
 
+    def test_aclnn_builtin_round_trip_preserves_library_provenance(self):
+        import repo_adapter as RA
+        lib = "/opt/ascend/lib64/libopapi.so"
+        provenance = {"required_symbol_lib": {"path": lib, "sha256": "a" * 64},
+                      "symbols": [
+                          {"symbol": "aclnnMedian", "source": "required_symbol_lib",
+                           "defining_lib": lib},
+                          {"symbol": "aclnnMedianGetWorkspaceSize",
+                           "source": "required_symbol_lib", "defining_lib": lib}]}
+        rec = PM.build_perf_record(
+            "c0",
+            {"behavior": PM.BEHAVIOR_NPU, "us": 10.0, "scope": "kernel_only",
+             "execution_path": PM.PATH_DEVICE_KERNEL},
+            {"behavior": PM.BEHAVIOR_NPU, "us": 20.0, "scope": "kernel_only",
+             "execution_path": PM.PATH_DEVICE_KERNEL,
+             "runtime_provenance": provenance})
+        doc = PM.build_baseline_document([rec], op="Median", source="aclnn_builtin")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "_aclnn_builtin_baseline.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(doc, f)
+            baseline = RA.parse_aclnn_builtin_baseline(path)
+        self.assertEqual(baseline["source"], "aclnn_builtin")
+        self.assertEqual(baseline["per_case"][0]["runtime_provenance"], provenance)
+
 
 class TestParseBaselineFailClosed(unittest.TestCase):
     def _parse(self, doc):
@@ -956,16 +1020,17 @@ class TestParseBaselineFailClosed(unittest.TestCase):
 
     def test_wrong_scope_rejected(self):
         with self.assertRaises(ValueError):
-            self._parse({"scope": "host_e2e_with_h2d_d2h", "per_case": []})
+            self._parse({"source": "torch_npu",
+                         "scope": "host_e2e_with_h2d_d2h", "per_case": []})
 
     def test_duplicate_case_id_rejected(self):
         with self.assertRaises(ValueError):
-            self._parse({"scope": "kernel_only",
+            self._parse({"source": "torch_npu", "scope": "kernel_only",
                          "per_case": [{"case_id": "a", "us": 1.0},
                                       {"case_id": "a", "us": 2.0}]})
 
     def test_bad_us_dropped_with_note(self):
-        bl = self._parse({"scope": "kernel_only",
+        bl = self._parse({"source": "torch_npu", "scope": "kernel_only",
                           "per_case": [{"case_id": "a", "us": 0},
                                        {"case_id": "b", "us": -3},
                                        {"case_id": "c", "us": 5.0}]})
@@ -996,6 +1061,22 @@ class TestWiring(unittest.TestCase):
         self.assertEqual(plan["baseline"], "torch_npu")
         self.assertEqual((plan["warmup"], plan["repeat"]), (5, 20))
         self.assertEqual(plan["torch_baseline"]["api"], "torch.median")
+        self.assertNotIn("target_ratio", plan)
+
+    def test_emit_perf_plan_carries_direct_aclnn_baseline(self):
+        import run_workflow as RW
+        mapping = {"library": "cann_builtin_libopapi", "variants": [
+            {"when": {"attr": "dim", "is_null": True},
+             "symbol": "Median", "slots": ["self", "valuesOut"]}]}
+        spec = {"op": "Median", "perf": {"baseline": "aclnn_builtin",
+                                         "target_ratio": 1.0,
+                                         "aclnn_baseline": mapping}}
+        with tempfile.TemporaryDirectory() as work:
+            path = RW._emit_perf_plan(spec, work)
+            with open(path, encoding="utf-8") as f:
+                plan = json.load(f)
+        self.assertEqual(plan["baseline"], "aclnn_builtin")
+        self.assertEqual(plan["aclnn_baseline"], mapping)
         self.assertNotIn("target_ratio", plan)
 
     def test_perf_enabled_gate(self):
@@ -1099,7 +1180,9 @@ class TestCustomWrapperStrictAndClose(unittest.TestCase):
                 cs = os.path.join(d, "caseset.json")
                 with open(cs, "w", encoding="utf-8") as f:
                     json.dump({"op": "Foo", "cases": [{"id": "c0"}]}, f)
-                plan = {"op": "Foo", "device": 0, "cases": ["c0"]}
+                plan = {"op": "Foo", "device": 0, "baseline": "torch_npu",
+                        "torch_baseline": {"api": "torch.foo", "positional": [], "keyword": {}},
+                        "cases": ["c0"]}
                 if dut:
                     plan["dut_lib"] = dut
                 plan.update(plan_extra)
@@ -1204,8 +1287,11 @@ class TestSpecTargetRatio(unittest.TestCase):
             spec = json.load(f)
         self.assertEqual(spec["perf"]["target_ratio"], 1.0)
         self.assertIn("不劣化", spec["perf"]["_target_ratio_note"])
-        # 采集端要的映射也在 spec 里（缺了采集端 fail-closed）
+        self.assertEqual(spec["perf"]["baseline"], "torch_npu")
         self.assertEqual(spec["perf"]["torch_baseline"]["api"], "torch.median")
+        self.assertNotIn("aclnn_baseline", spec["perf"])
+        self.assertEqual(spec["perf"]["case_source"], "precision_cases")
+        self.assertEqual(spec["perf"]["shape_classification"]["small_max_bytes"], 262144)
 
     def test_target_ratio_reaches_perf_compare(self):
         """1.0 真的会把「比基线慢」判成不达标（不是写在注释里的口号）。"""

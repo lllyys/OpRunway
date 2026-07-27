@@ -64,9 +64,13 @@
                 "case_target":"<int 精度用例目标数，缺省 50；见下『case_target 交互』——AskUserQuestion 问用户>"},
   // T6/T8（待散文门）：perf.small_shape_exception 升为对象——机读阈值供 perf_compare 判小shape例外
   //   (<when_us_below 且 |差|≤abs_gap_us_within → 出仿真图挂人核)；legacy 纯字符串 perf_compare 正则兜底。
-  "perf": {"baseline":"<tbe|gpu_external|torch_npu>","target_ratio":"<任务书性能目标换算：无劣化→1.0，≥95%→0.95>",
+  "perf": {"baseline":"<tbe|gpu_external|torch_npu|aclnn_builtin>","target_ratio":"<任务书性能目标换算：无劣化→1.0，≥95%→0.95>",
            // §1.3.5：仅 baseline=="torch_npu" 用；缺 torch_baseline → 采集端 fail-closed
            "torch_baseline":{"api":"torch.<...>","positional":["<slot name>"],"keyword":{"<slot name>":"<torch 形参名>"}},
+           // §1.3.5：任务书点名可直接调用的 ACLNN / 小算子拼接基线时用
+           "aclnn_baseline":{"library":"cann_builtin_libopapi","variants":[
+             {"when":{"attr":"<attr>","is_null":true},"symbol":"<base name>","slots":["<slot name>"]}
+           ]},
            "warmup":"<可选 int，缺省 5>","repeat":"<可选 int，缺省 20>",
            "small_shape_exception":{"text":"<人读说明>","when_us_below":"<number>","abs_gap_us_within":"<number>"}},
   "task_pr_gaps": []
@@ -117,8 +121,10 @@ opbase 精度标准 §1.1 说「用例数不设固定下限、覆盖优先」，
 | `precision.acceptance_policy?`（T5，待散文门）| 任务书验收目标宽于平台底线时 | 可选 `{"standard":"...","error_rate":...}` 等覆盖；acceptance 过而 standard 不过 → PASSED_WITH_RISK 走人工 CP。**仅任务书明确放宽时才填**，勿臆造 |
 | `precision.threshold` | 见 §3 | 数字：exact→0；behavioral→省略；numerical→AscendOpTest 主 dtype 默认值 |
 | `precision.threshold_source` | 必填，记数字依据+推断链 | 自由文本 |
-| `perf.baseline` | 『性能要求-基线』 | tbe / self_fp16 / small_op_concat / gpu / theoretical / none / **torch_npu**（§1.3.5：同机 torch_npu 真机内基线；**声明它就必须给 `perf.torch_baseline` 映射**，否则采集端 fail-closed）|
+| `perf.baseline` | 『性能要求-基线』 | tbe / self_fp16 / small_op_concat / gpu / theoretical / none / **torch_npu** / **aclnn_builtin**。框架级 Torch 或已确认“小算子拼接等价于 Torch 接口”用 `torch_npu`；实际要求直接 ACLNN 才用 `aclnn_builtin` |
 | `perf.torch_baseline`（§1.3.5）| aclnn 签名的形参名（= slot name）↔ torch API 形参名 | `{api: "torch.*", positional: [slot…], keyword: {slot: torch形参}}`。`positional` 缺任一 slot → fail-closed；`keyword` 里某 slot 在该 case 不存在 → 该 kwarg 自然缺席（变体自动跟随）|
+| `perf.aclnn_baseline`（§1.3.5）| 任务书点名的 ACLNN API + case 调用形态 | `{library:"cann_builtin_libopapi", variants:[{when,symbol,slots}]}`；`symbol` 不带 `aclnn` 前缀，`slots` 从逐 case `aclnn_call.slots` 选择/重排；每个 case 须恰好匹配一条 |
+| `perf.case_source` / `perf.shape_classification` | 性能 case 来源与目标硬件大小分界；`perf` 存在时两者必填 | `case_source:"precision_cases"`；分类为 `{metric:"sum_input_bytes",small_max_bytes,hardware}`，边界计入小 shape。A3 为 262144 bytes。只打分组标签，不免测、不改裁决 |
 | `perf.target_ratio` | 『性能目标』换算 | ≥95%→0.95；**无劣化/持平→1.0**（『无劣化』=不得更慢=ratio≥1.0，literal 读法；勿误宽成 0.95）；10X→10.0；0.5倍A100→0.5；0.8倍H100→0.8；90%→0.9 |
 | `perf.small_shape_exception` | 小 shape 例外条款 | T6(待散文门)：产**对象** `{text(人读原文), when_us_below, abs_gap_us_within, requires}`——机读阈值供 perf_compare 判例外(<阈 且 差≤容差→出仿真图挂人核)；legacy 纯字符串 perf_compare 正则兜底解析。抽取脚本是否也产 object 见 follow-up |
 | `task_pr_gaps[]` | 由格式变体/缺口收敛 | 结构化缺口/矛盾/推断项 |
@@ -400,7 +406,11 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 → 声明 `nan`）。⚠ 声明了却产不出（dtype 集里一个浮点都没有、tie 的形状造不出并列）→ **fail-closed**：
 「声明覆盖却产零条」= 假覆盖。
 
-### 1.3.5 `perf.baseline = torch_npu` 与 `target_ratio`
+### 1.3.5 性能 baseline 调用契约与 `target_ratio`
+
+先逐字读任务书，并把用户对含混术语的明确确认作为事实写入 spec。实际要求直接 `aclnnXxx`
+才写 `baseline:"aclnn_builtin"`；若已确认“小算子拼接等价于 Torch 对应接口”，写
+`baseline:"torch_npu"`。不能只凭 API 名自行推断，也不重复证明用户已经确认的事实。
 
 **`baseline: "torch_npu"`** = 基线取「**同一台真机**上 `torch_npu` 跑对应 torch API 的 kernel-only 耗时」
 （真机内基线，**不是** GPU 外部数据）。采集走 `aclnn_runtime/perf_msprof.py`（msprof `--task-time` + MSTX
@@ -428,8 +438,9 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 『无劣化 / 持平』→ **1.0**（literal 读法，勿误宽成 0.95）；『≥95%』→ 0.95；『10X』→ 10.0。
 任务书没写性能目标 → 按 §4 省略整个 `perf` 字段并记 gap，**不要**填一个自己觉得合理的数。
 
-⚠ **对照物要与任务书条款是同一个东西**：任务书点名的基线若是「某某小算子拼接版本」/「内置 TBE」，
-而 spec 写 `torch_npu`，二者是否等同**未经核实就不能当已满足**——上真机前须核，核不实按 `task_pr_gaps` 记。
+⚠ **对照物要与任务书条款是同一个东西，并走最短证据链**：任务书语义明确就直接配置；语义含混就
+询问用户并记录答案。已确认等价于 Torch 接口时直接走 `torch_npu`，不再证明；未确认时才记
+`task_pr_gaps` 并挂起。
 
 ### 1.3.6 `allow_empty_tensor`
 
@@ -455,6 +466,8 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 - `perf.baseline=="torch_npu"` ⇒ `perf.torch_baseline` 齐全（`api` 以 `torch.` 开头、`positional` 里的
   slot 名都在 `params` 里）；`target_ratio` 有**任务书原文依据**（在 `_target_ratio_note` / `threshold_source`
   或 gap 里写清出处），**不是** 0.6 这类抄来的默认值。
+- `perf.baseline=="aclnn_builtin"` ⇒ `perf.aclnn_baseline.library=="cann_builtin_libopapi"`；
+  `variants` 对每个性能 case 恰好命中一条，`symbol/slots` 完整；真机产物须带实际库 sha256 与符号定义方。
 - `allow_empty_tensor` / `scenario` / `runner_form` 等**不属本场景就整字段省略**，别写空串或占位值。
 
 ## 1.4 `attr_axis_lengths` —— 任务书**点名的轴长度边界**怎么定向生成（可选，顶层）

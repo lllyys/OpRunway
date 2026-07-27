@@ -170,6 +170,12 @@
   "perf": {
     "baseline": "tbe",
     "target_ratio": 1.0,
+    "case_source": "precision_cases",
+    "shape_classification": {
+      "metric": "sum_input_bytes",
+      "small_max_bytes": 262144,
+      "hardware": "Atlas A3"
+    },
     "target_ratio_source": "任务书『性能要求』1 原文：「暂仅要求**所有核参与计算场景**下，bool类型输入性能不低于原 TBE 算子的float16类型，其他类型性能不低于原 TBE 算子」→『不低于』= 不劣化 = ratio ≥ 1.0（非 0.95）。⚠ 「所有核参与计算场景」这个前置限定当前 perf_compare 无对应字段表达，见 task_pr_gaps",
     "small_shape_exception": {
       "text": "任务书原文：「如小shape无法达标（10us以下场景相差3us），提供性能仿真图和分析结论证明Ascend C实现与TBE完全一致或优于TBE实现」",

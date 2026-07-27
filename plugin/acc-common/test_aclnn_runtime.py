@@ -1491,6 +1491,26 @@ def test_strict_mode_without_dut_declaration_fails_closed():
     assert R.AclnnRunner()._dut_lib is None          # 宽松档不受影响（跑内置算子的基线场景）
 
 
+def test_required_symbol_lib_is_mutually_exclusive_with_dut(tmp_path):
+    baseline = tmp_path / "libopapi.so"
+    baseline.write_bytes(b"x")
+    dut = tmp_path / "libcust_opapi.so"
+    dut.write_bytes(b"x")
+    with pytest.raises(AclnnRunnerError) as ei:
+        R.AclnnRunner(require_custom_vendor=True, dut_lib=str(dut),
+                      required_symbol_lib=str(baseline))
+    assert "互斥" in str(ei.value)
+
+
+def test_required_symbol_lib_appears_in_provenance(tmp_path):
+    baseline = tmp_path / "libopapi.so"
+    baseline.write_bytes(b"baseline")
+    runner = R.AclnnRunner(required_symbol_lib=str(baseline), hash_symbol_libs=True)
+    required = runner.runtime_provenance()["required_symbol_lib"]
+    assert required["path"] == str(baseline)
+    assert len(required["sha256"]) == 64
+
+
 def test_dut_vendor_root_derives_lib_path(tmp_path):
     """DUT 也可按 vendor **内容根**声明：DUT so = ``<root>/op_api/lib/libcust_opapi.so``。"""
     root = tmp_path / "vendors" / "x_nn"

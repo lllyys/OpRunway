@@ -25,5 +25,8 @@
     {"equal_nan": true},
     {"rtol": 0.01, "atol": 0.001}
   ],
-  "perf": {"baseline": "tbe", "target_ratio": 0.95}
+  "perf": {"baseline": "tbe", "target_ratio": 0.95,
+           "case_source": "precision_cases",
+           "shape_classification": {"metric": "sum_input_bytes", "small_max_bytes": 262144,
+                                    "hardware": "Atlas A3"}}
 }

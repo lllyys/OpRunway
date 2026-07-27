@@ -24,7 +24,23 @@ description: OpRunway 验收性能维的方法论薄壳——msprof kernel-only 
 - **重写类（参考内置 TBE）** → 基线 = TBE（`无劣化` / `≥ 任务书给定比例`；当前接入的 aclnn 类算子 isclose/sign/equal/neg 均 `perf.baseline=tbe`，catlass matmul 属对标类、为 synthetic demo 未定基线——**「均」仅限这批重写类算子，勿外推为全局**）；
 - **移植类（对标 GPU 库）** → 基线 = GPU（如 A100，任务书给定比例区间）；
 - **加 dtype 类** → 同 op 其他 dtype 不劣化；
-- **可选** → 昇腾小算子拼接（torch 小算子链，us = Σ 各小算子 kernel-only，非整条 e2e 墙钟）。
+- **任务书点名既有 ACLNN / 小算子拼接实现** → 先确认任务书实际指向的可执行对象。确实要求直接
+  ACLNN 接口时用 `aclnn_builtin`；若任务书事实或用户明确确认“小算子拼接等价于 Torch 对应接口”，
+  则用 `torch_npu` 执行该 Torch API。不能只凭名字猜等价，也不重复证明已确认事实。
+
+**最短证据链规则（用户 2026-07-26 明确裁定）**：任务书已经给出一个可直接执行、可同口径计时的
+性能对照物时，就直接测它；“直接”是指任务书实际定义的对照语义，不是拘泥于文字里出现的最低层 API 名。
+任务书含混时询问并把用户确认写入 spec，不自动增加“等价性证明”作为常规验收步骤。
+基线产物须记录实际库、版本文件指纹/sha256 和两段式符号定义方，证明“直接调的是谁”，而不是证明
+另一层包装“可能等价”。
+
+**通用性能 case 规则**：性能 case 必须从同一份精度 caseset 选择，不能另造一套输入；
+`perf.case_source="precision_cases"` 与 `perf.shape_classification` 在存在性能维时必填。大小 shape 按目标
+硬件 UB 单次承载边界、以全部输入物理载荷之和分类；A3 的边界为 256 KiB（含边界为小 shape）。
+分类只用于分组报告，不免测、不改变 `target_ratio`，也不恢复 `trivial-met`。
+caseset 还必须记录精度/性能总数、入选与排除 case_id、按 dtype 入选数，形成可机审选择账本。
+性能报告固定输出 `small`、`large`、`overall` 的计划数、实测数、达标数、blocked 数、
+NPU/baseline 中位耗时与 speedup；声明了分类策略却缺少分类时，证据门必须失败。
 
 **ratio = baseline_us / npu_us**（>1 表示 NPU 更快）；**达标 = ratio ≥ `spec.perf.target_ratio`**（由 perf_compare 算）。
 

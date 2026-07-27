@@ -132,7 +132,8 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   **不是** orchestrator 分阶段单独调度；门 `FAILED` → 总体 `BLOCKED`、不出 pass 裁决。「不推进下一 Task/停在当前阶段」是 **agent 编排纪律**。
 - **Task3 blocked 路由**：`BLOCKED_WAIT_GPU_BENCHMARK`（缺外部 GPU 标杆）/ `BLOCKED_INCOMPARABLE_TIMING_SCOPE`（口径不可比）；
   基线来源按任务书参考源（`spec.perf.baseline` 驱动，当前 aclnn 重写类 isclose/sign/equal/neg = `tbe`（`--mode new_example` 那条路，同法测的**内置 TBE**）；
-  **torch 对标类 `scenario == torch_ref_aclnn`（`runner_form == aclnn_py`）→ `torch_npu` 真机内基线**、无 GPU blocked 路由，采集端代码已接通、真机跑过但**零耗时数产出（仍 BLOCKED）**；
+  `runner_form == aclnn_py` **不决定 baseline**：实际对照物由任务书事实与用户确认共同落进 spec。框架级 Torch 或已确认“小算子拼接等价于 Torch 对应接口”走 `torch_npu`；任务书确实要求直接调用某 ACLNN 实现时才走 `aclnn_builtin`，从 CANN `libopapi.so` 直接调用并记录符号/库 provenance。不能只凭 API 名猜等价，也不重复证明用户已确认的事实；
+  所有 form 的性能 case 都必须来自同一份精度 caseset；A3 按全部输入物理载荷之和 `<=256 KiB` / `>256 KiB` 分小/大 shape，分类只分组、不免测；
   catlass matmul 属对标类·synthetic·未定基线；proposed·未 settle，载重前需核）；GPU external 对比层 **consumer 侧已接入 pipeline**（`run_workflow --gpu-baseline` → `gpu_baseline` 校验 → `perf_compare` 对比），但**真实 GPU 标杆数据待外部提供**，缺数据即走 `BLOCKED_WAIT_GPU_BENCHMARK`。
 
 ## 约束

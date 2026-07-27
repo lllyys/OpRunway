@@ -725,7 +725,34 @@ def _empty_accuracy_summary():
     """空聚合骨架——早退路径（spec 非对象 / caseset 结构性坏）与降级路径共用，保证 verdict 的
     `accuracy_summary` **字段形状恒定**（下游读它时不用先判有没有）。"""
     z = {k: 0 for k in _ACC_BUCKETS}
-    return {"total": 0, "executed": 0, **z, "overall_pass_rate": 0.0, "by_dtype": []}
+    return {"total": 0, "executed": 0, **z, "overall_pass_rate": 0.0, "by_dtype": [],
+            "report": {"overall": {"total": 0, "passed": 0, "failed": 0,
+                                    "needs_review": 0, "na": 0},
+                       "by_dtype": []}}
+
+
+def _accuracy_report_view(rows, agg):
+    """把既有五桶统计投影成报告固定四项，且不改变任何裁决。
+
+    ``failed`` 合并「已执行但数值/契约失败」与「执行/取证错误」；``needs_review`` 对应
+    ``uncertain``；合法不涉及精度的 ``na`` 单列且不进入 ``total``。这样逐 dtype 与总体都满足
+    ``total = passed + failed + needs_review``，中文报告无需自行解释或重算桶语义。
+    """
+    def one(src, dtype=None):
+        failed = int(src.get("failed", 0)) + int(src.get("errored", 0))
+        out = {
+            "total": int(src.get("passed", 0)) + failed + int(src.get("uncertain", 0)),
+            "passed": int(src.get("passed", 0)),
+            "failed": failed,
+            "needs_review": int(src.get("uncertain", 0)),
+            "na": int(src.get("na", 0)),
+        }
+        if dtype is not None:
+            out = {"dtype": dtype, **out}
+        return out
+
+    return {"overall": one(agg),
+            "by_dtype": [one(row, row.get("dtype", _ACC_UNKNOWN_DTYPE)) for row in rows]}
 
 
 def _acc_tol_of(policy):
@@ -864,7 +891,7 @@ def _accuracy_summary(spec, spec_standard, tol_src, cases, ev_by_id, per):
         total = sum(b["count"] for b in buckets.values())
         return {"total": total, "executed": agg["passed"] + agg["failed"], **agg,
                 "overall_pass_rate": (agg["passed"] / total if total else 0.0),
-                "by_dtype": rows}
+                "by_dtype": rows, "report": _accuracy_report_view(rows, agg)}
     except Exception:                                 # 只读报表塌了也绝不影响裁决：出空块、如实为 0
         return _empty_accuracy_summary()
 

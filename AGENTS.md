@@ -83,7 +83,7 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 | `runner_form` | `--mode` | 执行形态 | 默认性能对照物 |
 |---|---|---|---|
 | `cpp` 或未声明 | `new_example` | 编译 per-op C++ runner | 同法测的内置 TBE |
-| `aclnn_py` | `aclnn_py` | 通用 ctypes 调标准 aclnn 两段式 `.so` | spec 配置的同机 `torch_npu` reference |
+| `aclnn_py` | `aclnn_py` | 通用 ctypes 调标准 aclnn 两段式 `.so` | 逐字按任务书配置；可为同机 `torch_npu`，也可直接调用 CANN 内置 ACLNN |
 
 - 两条都是真机验收通路、都能产验收裁决；
 - Median + PR6429 最新真机精度 60/60 PASS 正是 `aclnn_py` 跑出；
@@ -258,9 +258,10 @@ OpRunway/
 ## 9 · 当前能力边界
 
 - 真 NPU 已坐实：IsClose、Sign；Median PR6429 精度 60/60 PASS；Elu/Silu 在 A5-950 有 18/18 非空例证据；
-- Median 性能仍 BLOCKED，但不是零数据：custom 50/50、`torch_npu` baseline 48/50 有效，48 对评分、35 对达到 `ratio >= 1.0`；
+- Median 性能数据不是零数据：custom 50/50、`torch_npu` baseline 48/50 有效，48 对评分、35 对达到 `ratio >= 1.0`；
 - 2 个 BF16、`dim=1` baseline case 报 161002、custom 成功，按 baseline limitation 挂起，不归因 DUT；
-- Median 任务书点名的小算子拼接 baseline 与当前 `torch_npu torch.median` 是否等价仍未核实；解决前不得宣称满足任务书性能条款；
+- 用户已确认 Median 任务书所称 `aclnnMedian` / `aclnnMedianDim` 小算子拼接版本等价于 Torch 对应接口，故性能 baseline 为同机 `torch_npu` 的 `torch.median`，无需另证等价、也不改为直调单个 ACLNN 接口；
+- **通用性能 case 规则**：性能 case 必须从同一份精度 caseset 选择；A3 按全部输入物理载荷之和 `<= 256 KiB` 为小 shape、`> 256 KiB` 为大 shape。硬件边界写入 spec，不按算子身份分支；大小分类只用于分组，所有性能 case 仍须真实采集；
 - `aclnn_py` perf collector 已真机产出同口径 kernel-only 数据，但“通路有数据”不等于“任务书条款通过”；
 - mock/catlass_mock 只产带 `evidence_grade="development"` 和 NON-ACCEPTANCE 标记的 `dev_run_summary.json` / `dev_precision_check.json`，不产 `acceptance.json` / `verdict.json`；
 - ops-<族>、标准 aclnn 两段式、用户态 opp 安装型是当前主要闭环；域外形态 fail-closed；

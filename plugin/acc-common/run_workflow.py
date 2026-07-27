@@ -56,6 +56,9 @@ _BLOCKED_WAIT_REAL_BASELINE_STATE = "BLOCKED_WAIT_REAL_BASELINE"
 _REAL_BASELINE_SOURCES = {
     # torch 对标场景：torch_npu 上同算子的 kernel-only 耗时（真机内基线、非 GPU 外部数据）。
     "torch_npu": ("_torch_npu_baseline.json", lambda p: repo_adapter.parse_torch_npu_baseline(p)),
+    # 任务书直接点名既有 ACLNN 实现：同机从 CANN 内置 libopapi.so 显式调用，不绕 torch 等价性证明。
+    "aclnn_builtin": ("_aclnn_builtin_baseline.json",
+                      lambda p: repo_adapter.parse_aclnn_builtin_baseline(p)),
 }
 
 
@@ -66,7 +69,7 @@ _REAL_BASELINE_SOURCES = {
 _PERF_PLAN_FILE = "_perf_plan.json"
 #: 采集计划里**可透传的字段白名单**——只搬 spec.perf 里与「怎么采」有关的项，
 #: 绝不把 `target_ratio` 这类**判据**字段带进采集端（判定归 perf_compare，采集端不许看见阈值）。
-_PERF_PLAN_KEYS = ("warmup", "repeat", "torch_baseline", "op_dir")
+_PERF_PLAN_KEYS = ("warmup", "repeat", "torch_baseline", "aclnn_baseline", "op_dir")
 
 
 def _emit_perf_plan(spec, work):
@@ -84,8 +87,9 @@ def _emit_perf_plan(spec, work):
     path = os.path.join(work, _PERF_PLAN_FILE)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(plan, f, ensure_ascii=False, indent=2)
+    config_key = "torch_baseline" if plan["baseline"] == "torch_npu" else "aclnn_baseline"
     print(f"[Task2 perf] 采集计划 → {_PERF_PLAN_FILE}（baseline={plan['baseline']}，"
-          f"torch_baseline={'有' if plan.get('torch_baseline') else '**缺**（采集端将 fail-closed）'}）")
+          f"{config_key}={'有' if plan.get(config_key) else '**缺**（采集端将 fail-closed）'}）")
     return path
 
 
@@ -256,6 +260,7 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     # 同理必清：本轮若性能没采成，留在 work 里的上一轮基线会被 `_real_baseline_or_blocked` 当成本轮真数读走
     # ——那正是「用旧数冒充这次达标」，比缺基线挂起坏得多。
     for stale in ("_real_baseline.json", "perf_result.txt", "_torch_npu_baseline.json",
+                  "_aclnn_builtin_baseline.json",
                   "perf_collect.json", "_perf_plan.json", "_aclnn_perf_plan_sent.json"):
         sp = os.path.join(work, stale)
         if os.path.exists(sp):

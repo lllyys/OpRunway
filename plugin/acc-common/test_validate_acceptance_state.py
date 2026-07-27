@@ -83,13 +83,40 @@ def _ev(d, ids, mutate=None, corrupt=None):
         prec = _prec_for(d, i, corrupt_out=corrupt.get(i, 0))
         if mutate:
             prec.update(mutate(i))
-        out.append({"case_id": i, "status": "pass", "precision": prec})
+        out.append({"case_id": i, "status": "ok", "precision": prec})
     return {"op": "X", "evidence": out}
 
 
 def _vd(v, fail=0, unc=0, cp=0):
+    passed = max(0, 2 - fail - unc)
+    states = ["pass"] * passed + ["fail"] * fail + ["uncertain"] * unc
+    states += ["na"] * (2 - len(states))
+    dtype_rows = []
+    for dtype, state in zip(("float32", "float16"), states):
+        counts = {"passed": int(state == "pass"), "failed": int(state == "fail"),
+                  "errored": 0, "uncertain": int(state == "uncertain"),
+                  "na": int(state == "na")}
+        dtype_rows.append({
+            "dtype": dtype, "count": 1, **counts, "atol": None, "rtol": None,
+            "pass_rate": float(counts["passed"])})
+    dtype_rows.sort(key=lambda row: row["dtype"])
     return {"op": "X", "overall": {"verdict": v,
-            "counts": {"fail": fail, "uncertain": unc, "contract_problems": cp}}}
+            "counts": {"fail": fail, "uncertain": unc, "contract_problems": cp}},
+            "per_case": [
+                {"case_id": cid, "功能": "pass", "精度": state}
+                for cid, state in zip(("x_000", "x_001"), states)],
+            "accuracy_summary": {
+                "total": 2, "executed": passed + fail, "passed": passed, "failed": fail,
+                "errored": 0, "uncertain": unc, "na": 0,
+                "overall_pass_rate": passed / 2, "by_dtype": dtype_rows,
+                "report": {"overall": {"total": 2, "passed": passed, "failed": fail,
+                                        "needs_review": unc, "na": 0},
+                           "by_dtype": [
+                               {"dtype": row["dtype"], "total": 1,
+                                "passed": row["passed"],
+                                "failed": row["failed"] + row["errored"],
+                                "needs_review": row["uncertain"], "na": row["na"]}
+                               for row in dtype_rows]}}}
 
 
 def _pr(status, scope="kernel_only", blocked=False):
@@ -111,6 +138,69 @@ def _perf_ev(ids):
     """性能用例 evidence（gate_task3 对齐只核 case_id 是否有真实证据）。"""
     return {"op": "X", "evidence": [
         {"case_id": i, "status": "ok", "perf": {"us": 1.5, "scope": "kernel_only"}} for i in ids]}
+
+
+class GatePerfCasePolicyTest(unittest.TestCase):
+    def _caseset(self):
+        cases = [
+            {"id": "p0", "dims": ["精度", "性能"],
+             "inputs": [{"name": "a", "shape": [65536], "dtype": "float32"}],
+             "perf_shape_classification": {
+                 "class": "small", "input_bytes": 262144, "metric": "sum_input_bytes",
+                 "small_max_bytes": 262144, "boundary": "small_if_input_bytes_lte_limit",
+                 "hardware": "Atlas A3"}},
+            {"id": "a0", "dims": ["精度"],
+             "inputs": [{"name": "a", "shape": [4], "dtype": "float32"}]}]
+        return {"cases": cases, "perf_case_policy": {
+            "case_source": "precision_cases",
+            "shape_classification": {"metric": "sum_input_bytes", "small_max_bytes": 262144,
+                                     "boundary": "small_if_input_bytes_lte_limit",
+                                     "hardware": "Atlas A3"},
+            "counts": {"small": 1, "large": 0},
+            "selection": {
+                "identity_rule": "selected case_id is reused from the same precision caseset",
+                "selected_case_ids": ["p0"], "excluded_precision_case_ids": ["a0"],
+                "selected_by_dtype": {"float32": 1}, "selected_total": 1, "precision_total": 2}}}
+
+    def test_policy_and_256kib_boundary_are_rechecked(self):
+        cs = self._caseset()
+        errs = []
+        G._gate_perf_case_policy(cs, cs["cases"], errs)
+        self.assertEqual(errs, [])
+
+    def test_tampered_classification_or_selection_is_rejected(self):
+        cs = self._caseset()
+        cs["cases"][0]["perf_shape_classification"]["class"] = "large"
+        cs["perf_case_policy"]["selection"]["selected_case_ids"] = []
+        errs = []
+        G._gate_perf_case_policy(cs, cs["cases"], errs)
+        self.assertTrue(any("物理字节" in e for e in errs))
+        self.assertTrue(any("selection" in e for e in errs))
+
+    def test_a3_profile_cannot_be_redefined_by_caseset(self):
+        cs = self._caseset()
+        cs["perf_case_policy"]["shape_classification"]["small_max_bytes"] = 1048576
+        errs = []
+        G._gate_perf_case_policy(cs, cs["cases"], errs)
+        self.assertTrue(any("分类规则非法" in e for e in errs), errs)
+
+    def test_gate_sums_multiple_physical_inputs(self):
+        cs = self._caseset()
+        case = cs["cases"][0]
+        case["inputs"] = [
+            {"name": "a", "shape": [32768], "dtype": "float32"},
+            {"name": "b", "shape": [65536], "dtype": "bfloat16",
+             "storage_dtype": "uint16"}]
+        case["perf_shape_classification"]["input_bytes"] = 262144
+        cs["perf_case_policy"]["selection"]["selected_by_dtype"] = {
+            "bfloat16+float32": 1}
+        errs = []
+        G._gate_perf_case_policy(cs, cs["cases"], errs)
+        self.assertEqual(errs, [])
+        case["inputs"][1]["shape"] = [65537]
+        errs = []
+        G._gate_perf_case_policy(cs, cs["cases"], errs)
+        self.assertTrue(any("物理字节" in e for e in errs), errs)
 
 
 class GateTest(unittest.TestCase):
@@ -229,6 +319,30 @@ class GateTest(unittest.TestCase):
         _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
         _w(self.d, "verdict.json", _vd("pass"))
         self.assertEqual(self._errs("task2"), [])
+
+    def test_task2_tampered_accuracy_report_is_rejected(self):
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        vd = _vd("pass")
+        vd["accuracy_summary"]["report"]["overall"]["passed"] = 1
+        _w(self.d, "verdict.json", vd)
+        self.assertTrue(any("report.overall" in e for e in self._errs("task2")))
+
+    def test_task2_synchronously_tampered_accuracy_buckets_and_report_are_rejected(self):
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        vd = _vd("pass")
+        vd["accuracy_summary"].update(
+            {"passed": 1, "failed": 1, "executed": 2, "overall_pass_rate": 0.5})
+        vd["accuracy_summary"]["by_dtype"][0].update(
+            {"passed": 0, "failed": 1, "pass_rate": 0.0})
+        vd["accuracy_summary"]["report"]["overall"].update(
+            {"passed": 1, "failed": 1})
+        vd["accuracy_summary"]["report"]["by_dtype"][0].update(
+            {"passed": 0, "failed": 1})
+        _w(self.d, "verdict.json", vd)
+        errs = self._errs("task2")
+        self.assertTrue(any("逐 case 派生" in e for e in errs), errs)
 
     def test_task2_subset_fails(self):
         """跑子集报 100%：caseset 2 例、evidence 只 1 例 → 必 FAIL。"""
@@ -961,6 +1075,97 @@ class GateTask3ConfirmedBypassTest(unittest.TestCase):
             "summary": {"status": "ok", "perf_cases": 1, "达标": 1, "blocked": 0}})
         self.assertEqual(self._errs(), [])
         self.assertEqual(self._cli().returncode, 0)
+
+
+class GateTask3ShapeReportTest(unittest.TestCase):
+    """声明新大小 shape 契约后，门须核两桶与总体计数，删/篡/漏分类均不能静默通过。"""
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        cases = []
+        for cid, cls, tag in (("s0", "small", "小shape"), ("b0", "large", "大shape")):
+            cases.append({
+                "id": cid, "dims": ["精度", "性能"], "tags": ["性能", tag],
+                "inputs": [{"name": "a", "shape": [16], "dtype": "float32"}],
+                "perf_shape_classification": {
+                    "class": cls, "input_bytes": 64, "metric": "sum_input_bytes",
+                    "small_max_bytes": 262144, "boundary": "small_if_input_bytes_lte_limit",
+                    "hardware": "Atlas A3"}})
+        _w(self.d, "caseset.json", {
+            "op": "X", "cases": cases,
+            "perf_case_policy": {
+                "case_source": "precision_cases",
+                "shape_classification": {"metric": "sum_input_bytes", "small_max_bytes": 262144,
+                                         "boundary": "small_if_input_bytes_lte_limit",
+                                         "hardware": "Atlas A3"},
+                "counts": {"small": 1, "large": 1}}})
+        _w(self.d, "evidence.json", {"op": "X", "evidence": [
+            {"case_id": "s0", "status": "ok",
+             "perf": {"us": 1.0, "scope": "kernel_only"}},
+            {"case_id": "b0", "status": "ok",
+             "perf": {"us": 2.0, "scope": "kernel_only"}}]})
+        _w(self.d, "baseline.json", {
+            "source": "tbe", "scope": "kernel_only",
+            "per_case": [{"case_id": "s0", "us": 1.0},
+                         {"case_id": "b0", "us": 2.0}]})
+        self.report = {
+            "op": "X",
+            "per_case": [
+                {"case_id": "s0", "scope": "kernel_only", "npu_us": 1.0,
+                 "baseline": {"source": "tbe", "us": 1.0},
+                 "ratio": 1.0, "blocked": False, "达标": True},
+                {"case_id": "b0", "scope": "kernel_only", "npu_us": 2.0,
+                 "baseline": {"source": "tbe", "us": 2.0},
+                 "ratio": 1.0, "blocked": False, "达标": True}],
+            "by_shape_class": [
+                {"class": "small", "cases": 1, "planned_cases": 1,
+                 "cases_scored": 1, "达标": 1, "blocked": 0,
+                 "npu_us": 1.0, "baseline_us": 1.0, "speedup": 1.0},
+                {"class": "large", "cases": 1, "planned_cases": 1,
+                 "cases_scored": 1, "达标": 1, "blocked": 0,
+                 "npu_us": 2.0, "baseline_us": 2.0, "speedup": 1.0}],
+            "shape_overall": {"class": "overall", "cases": 2, "planned_cases": 2,
+                              "cases_scored": 2, "达标": 2, "blocked": 0,
+                              "npu_us": 1.5, "baseline_us": 1.5, "speedup": 1.0},
+            "shape_report_complete": True,
+            "summary": {"status": "ok", "perf_cases": 2, "达标": 2, "blocked": 0}}
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _errs(self):
+        errs = []
+        G.gate_task3(self.d, errs)
+        return errs
+
+    def test_clean_shape_report_passes(self):
+        _w(self.d, "perf_report.json", self.report)
+        self.assertEqual(self._errs(), [])
+
+    def test_tampered_shape_overall_is_rejected(self):
+        self.report["shape_overall"]["planned_cases"] = 1
+        _w(self.d, "perf_report.json", self.report)
+        self.assertTrue(any("shape_overall.planned_cases" in e for e in self._errs()))
+
+    def test_synchronously_tampered_perf_rows_and_shape_summary_are_rejected(self):
+        self.report["per_case"][0]["npu_us"] = 9.0
+        self.report["by_shape_class"][0]["npu_us"] = 9.0
+        self.report["shape_overall"]["npu_us"] = 5.5
+        _w(self.d, "perf_report.json", self.report)
+        self.assertTrue(any("evidence.perf.us" in e for e in self._errs()))
+
+    def test_report_baseline_is_bound_to_baseline_artifact(self):
+        self.report["per_case"][0]["baseline"]["us"] = 9.0
+        self.report["by_shape_class"][0]["baseline_us"] = 9.0
+        self.report["shape_overall"]["baseline_us"] = 5.5
+        _w(self.d, "perf_report.json", self.report)
+        self.assertTrue(any("baseline.json" in e for e in self._errs()))
+
+    def test_missing_case_classification_is_rejected(self):
+        cs = json.load(open(os.path.join(self.d, "caseset.json"), encoding="utf-8"))
+        cs["cases"][1].pop("perf_shape_classification")
+        _w(self.d, "caseset.json", cs)
+        _w(self.d, "perf_report.json", self.report)
+        self.assertTrue(any("缺/坏大小 shape 分类" in e for e in self._errs()))
 
 
 class Cases50NaAndPerfGateTest(unittest.TestCase):

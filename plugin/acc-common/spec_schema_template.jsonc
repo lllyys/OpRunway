@@ -258,12 +258,19 @@
 //
 // ── 顶层 · perf（任务书性能栏为『无』时**整个 perf 字段省略**，勿写 {baseline:"none"}）────────────
 //   "perf": {
-//     "baseline": "<tbe | gpu_external | torch_npu>",
+//     "baseline": "<tbe | gpu_external | torch_npu | aclnn_builtin>",
 //     "target_ratio": <number>,
 //     "warmup": <int>,          // 可选，缺省 5
 //     "repeat": <int>,          // 可选，缺省 20
+//     "case_source": "precision_cases", // perf 存在时必填；每条性能 case 的 dims 必须同时含「精度」
+//     "shape_classification": {          // perf 存在时必填；只分类，不免测、不改 pass/fail
+//       "metric": "sum_input_bytes",
+//       "small_max_bytes": <正整数，边界计入小 shape>,
+//       "hardware": "<任务书目标硬件>"
+//     },
 //     "small_shape_exception": {"text": "<人读说明>", "when_us_below": <number>, "abs_gap_us_within": <number>},
-//     "torch_baseline": {"api": "<torch.xxx 点路径>", "positional": ["<slot name>"], "keyword": {"<slot name>": "<torch 形参名>"}}
+//     "torch_baseline": {"api": "<torch.xxx 点路径>", "positional": ["<slot name>"], "keyword": {"<slot name>": "<torch 形参名>"}},
+//     "aclnn_baseline": {"library": "cann_builtin_libopapi", "variants": [{"when": {…}, "symbol": "<基名>", "slots": ["<slot>"]}]}
 //   }
 //   ⚠ `target_ratio` **只从任务书原文换算**，绝不抄任何参考仓的通用默认值
 //     （参考仓 cannbot-ops-input `performance.py` 的 `PERF_SPEEDUP_THRESHOLD = 0.6` 是**它自家**口径，
@@ -281,8 +288,13 @@
 //                         该 kwarg **自然缺席** → 调到的就是 torch 侧对应 arity。**变体自动跟随 case，
 //                         采集端无需也不得为此写任何算子分支**（律令 #0）。
 //       · out / out_null slot 一律忽略（torch 侧输出是返回值）。
+//   ⚠ `case_source=="precision_cases"` 表示性能 case 从同一份精度 caseset 选择；不是另造性能输入，
+//     也不要求每条精度 case 都进入性能维。若同时声明 `shape_classification`，生成器按每个 input 的
+//     物理存储 dtype 计算 `sum_input_bytes`，`<=small_max_bytes` 打「小shape」，其余打「大shape」；
+//     分类只用于分组统计，绝不恢复 `trivial-met` 或自动性能豁免。
 //   ⚠ **对照物要与任务书条款同一个东西**：任务书点名的基线若是「某某拼接版本 / 内置 TBE」，而这里填 torch_npu，
-//     二者是否等同**须先核实**；核不实就按 `task_pr_gaps` 记，不得当作已满足任务书性能条款。
+//     二者是否等同须由任务书事实或用户明确确认；已确认则把确认写进 spec 注释/事实包，核不实才按
+//     `task_pr_gaps` 记。不得只凭 API 名相似自行推断。
 //
 // ── golden 行内 · 可选字段 ──────────────────────────────────────────────────────────
 //   "taskdoc_snapshot": {"sha256": "<任务书快照 sha256>"}   // **仅** authorization.kind ∈ {oracle_method, formula}

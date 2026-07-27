@@ -302,6 +302,7 @@ CPU_FALLBACK_MARKERS = ("npu_cpu_fallback", "fall back to run on the CPU")
 MARKER_OUTPUT_DEVICES = "__OPRUNWAY_PERF_OUTPUT_DEVICES__"
 MARKER_PHASE = "__OPRUNWAY_PERF_PHASE__"
 MARKER_PROF_DIR = "__OPRUNWAY_PERF_PROF_DIR__"
+MARKER_RUNTIME_PROVENANCE = "__OPRUNWAY_PERF_RUNTIME_PROVENANCE__"
 
 _MSTX_CSV_GLOB = "msprof_tx_*.csv"
 _TASK_TIME_CSV_GLOB = "task_time_*.csv"
@@ -1509,8 +1510,8 @@ def build_custom_perf_map(records, skipped=None):
 
 
 def build_baseline_document(records, *, op=None, warmup=DEFAULT_WARMUP, repeat=DEFAULT_REPEAT,
-                            skipped=None):
-    """records → `_torch_npu_baseline.json` 文档（`repo_adapter.parse_torch_npu_baseline` 的输入）。
+                            skipped=None, source="torch_npu"):
+    """records → 真实基线文档（`repo_adapter.parse_device_baseline` 的输入）。
 
     **只有 baseline 行为 = `npu` 的 case 进 `per_case`**；其余进 `excluded`（带行为原因），
     于是 perf_compare 那边自然「缺基线 → blocked」，**不会拿非 device 数据冒充基线**。
@@ -1524,9 +1525,12 @@ def build_baseline_document(records, *, op=None, warmup=DEFAULT_WARMUP, repeat=D
             continue
         if behavior in TIMED_BEHAVIORS and baseline.get("us") is not None \
                 and baseline.get("scope") == TIMING_SCOPE:
-            per_case.append({"case_id": cid, "us": float(baseline["us"]),
-                             "env": "torch_npu under msprof_cli(ctypes_mstx,csv)",
-                             "execution_path": baseline.get("execution_path")})
+            item = {"case_id": cid, "us": float(baseline["us"]),
+                    "env": f"{source} under msprof_cli(ctypes_mstx,csv)",
+                    "execution_path": baseline.get("execution_path")}
+            if baseline.get("runtime_provenance") is not None:
+                item["runtime_provenance"] = baseline["runtime_provenance"]
+            per_case.append(item)
         else:
             excluded.append({"case_id": cid, "behavior": behavior,
                              "reason": baseline.get("note") or "baseline 未产生可计时 device kernel"})
@@ -1534,7 +1538,7 @@ def build_baseline_document(records, *, op=None, warmup=DEFAULT_WARMUP, repeat=D
         excluded.append({"case_id": item.get("case_id"),
                          "behavior": None,
                          "reason": item.get("reason") or SKIPPED_ACCURACY_FAILED})
-    return {"source": "torch_npu", "scope": TIMING_SCOPE, "op": op,
+    return {"source": source, "scope": TIMING_SCOPE, "op": op,
             "per_case": per_case, "excluded": excluded,
             "collection": {"tool": COLLECTOR_MSPROF_CLI,
                            "warmup": int(warmup), "repeat": int(repeat),
@@ -1598,6 +1602,93 @@ def resolve_torch_baseline_plan(torch_baseline, call):
             continue                                    # 该变体没有这个属性 → torch 侧自然缺席
         keyword[str(kwarg)] = slot
     return {"api": api, "positional": positional, "keyword": keyword}
+
+
+def resolve_aclnn_baseline_plan(aclnn_baseline, call, case):
+    """把 spec 的内置 ACLNN baseline 变体解析成一次确定调用。
+
+    契约完全字段驱动，不按算子名分派::
+
+        {"library": "cann_builtin_libopapi",
+         "variants": [
+           {"when": {"attr": "dim", "is_null": true},
+            "symbol": "Median", "slots": ["self", "valuesOut"]},
+           {"when": {"attr": "dim", "is_null": false},
+            "symbol": "MedianDim",
+            "slots": ["self", "dim", "keepDim", "valuesOut", "indicesOut"]}
+         ]}
+
+    ``slots`` 从该 case 已解析的 ``aclnn_call.slots`` 按名字选择并重排，因而可以表达“DUT
+    统一接口、任务书基线是两个既有 ACLNN 接口”这类 ABI 差异。匹配必须恰好一条，缺/重名/多匹配
+    都 fail-closed；不做 torch 等价性推断。
+    """
+    if not isinstance(aclnn_baseline, dict):
+        raise PerfCollectError("spec 缺 perf.aclnn_baseline——任务书 ACLNN 基线须显式声明调用变体")
+    if aclnn_baseline.get("library") != "cann_builtin_libopapi":
+        raise PerfCollectError(
+            "perf.aclnn_baseline.library 当前只接受受控值 'cann_builtin_libopapi'，"
+            "由 ASCEND_TOOLKIT_HOME 解析本机 CANN libopapi.so；不接受任意路径")
+    variants = aclnn_baseline.get("variants")
+    if not isinstance(variants, list) or not variants:
+        raise PerfCollectError("perf.aclnn_baseline.variants 须为非空数组")
+    attrs = case.get("attrs") or {}
+
+    def matches(variant):
+        when = variant.get("when")
+        if not isinstance(when, dict) or not isinstance(when.get("attr"), str):
+            raise PerfCollectError("aclnn baseline variant.when 须声明 attr")
+        name = when["attr"]
+        if name not in attrs:
+            raise PerfCollectError(
+                f"{case.get('id')}: aclnn baseline variant.when 引用的 attr {name!r} 不在 case.attrs 中")
+        value = attrs.get(name)
+        if "is_null" in when:
+            flag = when["is_null"]
+            if not isinstance(flag, bool):
+                raise PerfCollectError("aclnn baseline variant.when.is_null 须为 JSON 布尔")
+            return (value is None) == flag
+        if "equals" in when:
+            return value == when["equals"]
+        raise PerfCollectError("aclnn baseline variant.when 只支持 is_null 或 equals")
+
+    if any(not isinstance(v, dict) for v in variants):
+        raise PerfCollectError("perf.aclnn_baseline.variants 每项都须为 object")
+    selected = [v for v in variants if matches(v)]
+    if len(selected) != 1:
+        raise PerfCollectError(
+            f"{case.get('id')}: aclnn baseline 变体须恰好匹配一条，实际 {len(selected)} 条")
+    variant = selected[0]
+    symbol = variant.get("symbol")
+    names = variant.get("slots")
+    if not isinstance(symbol, str) or not symbol or symbol.startswith("aclnn"):
+        raise PerfCollectError("aclnn baseline variant.symbol 须为不带 aclnn 前缀的非空基名")
+    if not isinstance(names, list) or not names or any(not isinstance(n, str) or not n for n in names):
+        raise PerfCollectError("aclnn baseline variant.slots 须为非空 slot-name 数组")
+    source_slots = call.get("slots") or []
+    by_name = {}
+    for slot in source_slots:
+        name = slot.get("name") if isinstance(slot, dict) else None
+        if not name:
+            raise PerfCollectError("aclnn_call.slots 存在缺 name 条目")
+        if name in by_name:
+            raise PerfCollectError(f"aclnn_call.slots 有重名 {name!r}，基线映射不唯一")
+        by_name[name] = slot
+    missing = [name for name in names if name not in by_name]
+    if missing:
+        raise PerfCollectError(f"aclnn baseline 要求的 slots {missing} 不在本 case aclnn_call 中")
+    return {"library": aclnn_baseline["library"], "symbol": symbol,
+            "slots": [by_name[name] for name in names]}
+
+
+def cann_builtin_libopapi():
+    """解析当前真机 CANN 的内置 libopapi.so；路径只来自 toolkit 环境，不进 spec。"""
+    cann = os.environ.get("ASCEND_TOOLKIT_HOME")
+    if not cann:
+        raise PerfCollectError("ASCEND_TOOLKIT_HOME 未设置，无法解析 CANN 内置 libopapi.so")
+    path = os.path.realpath(os.path.join(cann, "lib64", "libopapi.so"))
+    if not os.path.isfile(path):
+        raise PerfCollectError(f"CANN 内置 libopapi.so 不存在: {path}")
+    return path
 
 
 # ══ 以下为真机采集（gated：OPRUNWAY_ACLNN_REAL=1）══════════════════════════════════
@@ -1764,6 +1855,75 @@ print(CFG["marker_devices"] + json.dumps(["npu:%d" % int(CFG["device"])]), flush
 '''
 
 
+_ACLNN_BASELINE_WRAPPER = r'''# OpRunway perf wrapper · CANN 内置 ACLNN baseline —— 自动生成，勿手改
+import ctypes, json, sys
+from pathlib import Path
+
+CFG = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+sys.path.insert(0, CFG["runtime_root"])
+
+from aclnn_runtime import aclnn_driver as D
+from aclnn_runtime import perf_msprof as P
+from aclnn_runtime.aclnn_runner import AclnnRunner, AclnnSignature
+
+caseset = json.loads(Path(CFG["caseset"]).read_text(encoding="utf-8"))
+case = next(c for c in caseset["cases"] if c["id"] == CFG["case_id"])
+call = D._case_call(case)
+plan = P.resolve_aclnn_baseline_plan(CFG["aclnn_baseline"], call, case)
+required_lib = P.cann_builtin_libopapi()
+
+def materialize():
+    all_slots = D._build_slots(call, case, CFG["work_dir"])
+    by_name = {slot["name"]: slot for slot in all_slots}
+    slots = [by_name[spec["name"]] for spec in plan["slots"]]
+    params = []
+    for slot in slots:
+        role = "out" if slot["kind"] == "out_null" else slot["kind"]
+        params.append({"name": slot["name"], "role": role,
+                       "ctype": "tensor" if role in ("in", "out") else slot.get("ctype"),
+                       "const": True if role == "in" else False})
+    return slots, AclnnSignature(op_name=plan["symbol"], params=params)
+
+runner = AclnnRunner(device=int(CFG["device"]), required_symbol_lib=required_lib,
+                     hash_symbol_libs=True)
+try:
+    runner._ensure_init()
+
+    def invoke():
+        slots, signature = materialize()
+        runner.run(plan["symbol"], slots, signature=signature)
+
+    print("%sWARMUP_START" % CFG["marker_phase"], flush=True)
+    for _ in range(max(0, int(CFG["warmup"]))):
+        invoke()
+    print("%sWARMUP_DONE" % CFG["marker_phase"], flush=True)
+
+    mstx = ctypes.CDLL("libms_tools_ext.so")
+    mstx.mstxRangeStartA.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+    mstx.mstxRangeStartA.restype = ctypes.c_uint64
+    mstx.mstxRangeEnd.argtypes = [ctypes.c_uint64]
+    mstx.mstxRangeEnd.restype = None
+    range_id = mstx.mstxRangeStartA(
+        CFG["range_name"].encode("utf-8"),
+        ctypes.c_void_p(runner._stream.value if runner._stream else None))
+    if not range_id:
+        raise RuntimeError("ctypes mstxRangeStartA returned 0 —— MSTX 未生效，测量窗不可信")
+    print("%sMEASURE_START" % CFG["marker_phase"], flush=True)
+    try:
+        for _ in range(max(1, int(CFG["repeat"]))):
+            invoke()
+    finally:
+        mstx.mstxRangeEnd(range_id)
+    print("%sMEASURE_DONE" % CFG["marker_phase"], flush=True)
+finally:
+    runner.close(raise_on_error=True)
+
+print(CFG["marker_devices"] + json.dumps(["npu:%d" % int(CFG["device"])]), flush=True)
+print(CFG["marker_provenance"] + json.dumps(runner.runtime_provenance(), ensure_ascii=False),
+      flush=True)
+'''
+
+
 _BASELINE_WRAPPER = r'''# OpRunway perf wrapper · baseline(msprof CLI + ctypes MSTX) —— 由 perf_msprof 生成，勿手改
 # 2026-07-26 A3 / CANN 9.0.1 真机坐实：torch_npu 的 MSTX Python 包装会返回 rid=0，
 # 但 cannbot 实际采用的 libms_tools_ext.so C API 在同一 msprof 进程中可产有效 device MSTX 窗。
@@ -1896,8 +2056,20 @@ def _keep_prof():
     return os.environ.get("OPRUNWAY_PERF_KEEP_PROF") == "1"
 
 
+def _marker_json(output, marker):
+    """取 wrapper 输出的最后一条 JSON marker；畸形则返回 None（调用方 fail-closed 处理）。"""
+    found = None
+    for line in (output or "").splitlines():
+        if line.startswith(marker):
+            try:
+                found = json.loads(line[len(marker):])
+            except json.JSONDecodeError:
+                return None
+    return found
+
+
 def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repeat, device,
-                 scratch_dir, detect_hybrid, collector=None):
+                 scratch_dir, detect_hybrid, collector=None, baseline_kind="torch_npu"):
     """采集一侧（custom / baseline）一个 case → `{"behavior","us","scope","execution_path","collection",...}`。
 
     流程：生成 wrapper + cfg → 按 side 选采集入口跑 → 解析 MSTX 窗 → 窗内 kernel 聚合 → 五分类 → 清产物。
@@ -1907,7 +2079,14 @@ def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repea
     cid = case["id"]
     collector = collector or collector_for(side)
     range_name = range_name_for(cid, side)
-    template = _CUSTOM_WRAPPER if side == "custom" else _BASELINE_WRAPPER
+    if side == "custom":
+        template = _CUSTOM_WRAPPER
+    elif baseline_kind == "torch_npu":
+        template = _BASELINE_WRAPPER
+    elif baseline_kind == "aclnn_builtin":
+        template = _ACLNN_BASELINE_WRAPPER
+    else:
+        raise PerfCollectError(f"未知 baseline_kind={baseline_kind!r}——fail-closed")
     side_dir = Path(scratch_dir) / f"{side}-{cid}"
     side_dir.mkdir(parents=True, exist_ok=True)
     wrapper_path = side_dir / "_wrapper.py"
@@ -1918,7 +2097,8 @@ def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repea
            "range_name": range_name, "runtime_root": runtime_root(),
            "prof_dir": str(prof_root),
            "marker_phase": MARKER_PHASE, "marker_devices": MARKER_OUTPUT_DEVICES,
-           "marker_prof_dir": MARKER_PROF_DIR}
+           "marker_prof_dir": MARKER_PROF_DIR,
+           "marker_provenance": MARKER_RUNTIME_PROVENANCE}
     cfg.update(cfg_extra or {})
     cfg_path = side_dir / "_cfg.json"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
@@ -1960,14 +2140,26 @@ def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repea
         shutil.rmtree(prof_root, ignore_errors=True)     # 根盘仅剩 41G，别堆 profiling 产物
         detail["prof_dir_removed"] = True
     timed = behavior in TIMED_BEHAVIORS
-    return {"behavior": behavior,
-            "us": (measurement or {}).get("us") if timed else None,
-            "scope": TIMING_SCOPE if timed else None,
-            "execution_path": (measurement or {}).get("execution_path"),
-            "kernel_name": (measurement or {}).get("kernel_name"),
-            "breakdown": (measurement or {}).get("breakdown") or [],
-            "collection": collection_config(collector=collector, warmup=warmup, repeat=repeat),
-            "detail": detail}
+    result = {"behavior": behavior,
+              "us": (measurement or {}).get("us") if timed else None,
+              "scope": TIMING_SCOPE if timed else None,
+              "execution_path": (measurement or {}).get("execution_path"),
+              "kernel_name": (measurement or {}).get("kernel_name"),
+              "breakdown": (measurement or {}).get("breakdown") or [],
+              "collection": collection_config(collector=collector, warmup=warmup, repeat=repeat),
+              "detail": detail}
+    if side == "baseline" and baseline_kind == "aclnn_builtin":
+        provenance = _marker_json(output, MARKER_RUNTIME_PROVENANCE)
+        if provenance is None:
+            result["behavior"] = BEHAVIOR_FAILED
+            result["us"] = None
+            result["scope"] = None
+            result["detail"]["note"] = (
+                "CANN 内置 ACLNN baseline 缺 required_symbol_lib provenance marker——"
+                "无法证明直接调用任务书指定库，fail-closed")
+        else:
+            result["runtime_provenance"] = provenance
+    return result
 
 
 def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
@@ -1980,7 +2172,9 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
          "allow_builtin_symbols": false,          # 可选，缺省 false = 严格档（同精度通路口径）
          "dut_lib": "<.../op_api/lib/libcust_opapi.so>",   # 本次 DUT；严格档必给其一
          "dut_vendor_root": "<vendor 内容根>",     #   （或退 adapter 的 vendor_dir + vendor_name）
-         "torch_baseline": {"api","positional","keyword"},
+         "baseline": "torch_npu" | "aclnn_builtin",
+         "torch_baseline": {"api","positional","keyword"},       # baseline=torch_npu
+         "aclnn_baseline": {"library","variants"},               # baseline=aclnn_builtin
          "cases": ["<case id>", ...],             # 已过精度先筛的 case
          "skipped": [{"case_id","reason"}]}
 
@@ -2006,7 +2200,12 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
     # 严格档还得知道「本次该绑哪个 so」（runner 改动⑪）：DUT 从 plan 一路传到 wrapper 的 CFG，
     # 再进 AclnnRunner(dut_lib=...)。定不出即 fail-closed，绝不默默用宽松档。
     dut_lib = resolve_plan_dut_lib(plan, strict=strict_custom_vendor)
+    baseline_kind = plan.get("baseline")
+    if baseline_kind not in ("torch_npu", "aclnn_builtin"):
+        raise PerfCollectError(
+            f"perf plan baseline 须为 torch_npu 或 aclnn_builtin，得 {baseline_kind!r}")
     torch_baseline = plan.get("torch_baseline")
+    aclnn_baseline = plan.get("aclnn_baseline")
     scratch = scratch_dir or tempfile.mkdtemp(prefix="oprunway-perf-")
     records = []
     for cid in plan.get("cases") or []:
@@ -2019,12 +2218,18 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
                                          "strict_custom_vendor": strict_custom_vendor,
                                          "dut_lib": dut_lib},
                               warmup=warmup, repeat=repeat, device=device,
-                              scratch_dir=scratch, detect_hybrid=False)
+                              scratch_dir=scratch, detect_hybrid=False,
+                              baseline_kind=baseline_kind)
+        baseline_cfg = ({"torch_baseline": torch_baseline}
+                        if baseline_kind == "torch_npu"
+                        else {"aclnn_baseline": aclnn_baseline})
         baseline = measure_side(side="baseline", case=case, caseset_path=caseset_path,
                                 work_dir=work_dir,
-                                cfg_extra={"torch_baseline": torch_baseline},
+                                cfg_extra=baseline_cfg,
                                 warmup=warmup, repeat=repeat, device=device,
-                                scratch_dir=scratch, detect_hybrid=True)
+                                scratch_dir=scratch,
+                                detect_hybrid=(baseline_kind == "torch_npu"),
+                                baseline_kind=baseline_kind)
         records.append(build_perf_record(cid, custom, baseline))
     doc = {"op": plan.get("op") or caseset.get("op"),
            "scope": TIMING_SCOPE, "warmup": warmup, "repeat": repeat, "device": device,
@@ -2032,6 +2237,7 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
                                                       warmup=warmup, repeat=repeat),
                           "baseline": collection_config(collector=collector_for("baseline"),
                                                         warmup=warmup, repeat=repeat)},
+           "baseline_source": baseline_kind,
            "records": records, "skipped": plan.get("skipped") or []}
     Path(out_path).write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
     return doc
@@ -2039,9 +2245,9 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
 
 def main(argv=None):
     parser = __import__("argparse").ArgumentParser(
-        description="perf_msprof：容器内 kernel-only 性能采集（custom ctypes-aclnn vs torch_npu 基线）")
+        description="perf_msprof：容器内 kernel-only 性能采集（custom ctypes-aclnn vs spec 指定基线）")
     parser.add_argument("caseset", help="caseset.json 路径")
-    parser.add_argument("plan", help="perf_plan.json 路径（op/warmup/repeat/device/torch_baseline/cases）")
+    parser.add_argument("plan", help="perf_plan.json 路径（op/warmup/repeat/device/baseline/cases）")
     parser.add_argument("out", help="输出 perf_collect.json 路径")
     parser.add_argument("--work-dir", default=None, help="输入张量根目录（缺省 = caseset 所在目录）")
     args = parser.parse_args(argv)

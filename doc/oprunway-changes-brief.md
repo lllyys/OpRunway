@@ -4,6 +4,12 @@
 
 ## 2026-07-26（非真机流程性能优化）
 
+- **性能规则闭环经 A3 容器回归**：A3 的 256 KiB 边界改由受控硬件 profile 校验，dry-run 同样 fail-closed 检查性能 case 策略；三级门新增 accuracy report 与逐 case/evidence 的独立对账，以及 perf report 的 NPU evidence、baseline.json、shape 汇总绑定。分三批覆盖全部 `acc-common` 单测，业务主批 400、性能/adapter 批 543、validator/门批 408，受环境影响的子集按正确 TMPDIR/工作目录补跑后全绿。
+- **性能选例与报告契约补成可审计闭环**：`caseset.perf_case_policy.selection` 记录从同一精度 caseset 选中的/未选中的 case_id、dtype 配额与总数；性能报告固定输出 small/large/overall 的计划数、可评分数、达标数、blocked、双边中位耗时与 speedup，精度报告固定输出逐 dtype/overall 的 total/passed/failed/needs_review（na 单列）。三级门只做这些汇总与行级事实的完整性对账，不重判精度或性能。
+- **性能 baseline 与 case 规则再次校正并通用化**：用户明确确认 Median 的小算子拼接版本等价于 Torch 对应接口，故 Median 从临时 `aclnn_builtin` 恢复为同机 `torch_npu:torch.median`；同时确立通用规则——性能 case 必须取自精度 caseset，A3 按全部输入物理载荷之和 `<=256 KiB` / `>256 KiB` 标小/大 shape。生成器与 catlass builder 均 fail-closed 执行，所有 A3 样例 spec 已迁移，`perf_compare` 增加只读 `by_shape_class` 汇总；分类不免测、不改达标阈值。
+- **完成 bureau compile**：处理 10 份未编译 minutes（4 份实质记录、6 份机械 checkpoint），新建 9 个 dossier、更新 5 个；3 个实现事实页以制品 SHA-256 标为 `verified`，3 个历史表述因新证据改为 `contested`，未擅自提升任何页面为 canonical。press 检查为 0 dangling / 0 schema violation / 0 ledger drift；唯一 orphan 是无主张的上下文压缩 checkpoint。
+- **性能标杆改走任务书最短证据链**：用户明确裁定，任务书点名可直接调用的 ACLNN / 小算子拼接 baseline 时就直接测该对象，不再为每份新任务书增加 `torch_npu` 包装等价性证明；功能/精度 oracle 与性能 baseline 分开解释。该原则已同步到仓规、acc-perf/acc-spec/workflow/agent 指南和 bureau capture。
+- **【后被本节首条纠正】新增通用 `aclnn_builtin` 性能基线通路**：spec 用 `when/symbol/slots` 描述 ABI，采集器从当前 CANN `libopapi.so` 直接调用两段式接口并强制记录路径/size/mtime/sha256 与符号定义方 provenance；该通用能力仍保留，但把 Median 映射到它的决定已由用户澄清推翻，Median 当前应走 `torch_npu:torch.median`。
 - **仓规收敛为单一源**：保留并重构原 `AGENTS.md` 的架构、mode、能力边界和深挖入口，同时合入原 `CLAUDE.md` 中仍有效的泛化细则、方案/副作用门、远程 compute、文档落点、push 前审修、canon grounding、外部仓复用边界、发布形态与 `@BUREAU.md` 路由；已被后续实测推翻的旧机器/验收状态不迁移。`CLAUDE.md` 现只保留 `@AGENTS.md`，以后不再双写。
 - **真机环境入口收敛**：新增 `doc/oprunway-real-machine-environment.md` 记录 A2/A3 与 950 的最近验证能力、版本、探测命令和安全边界；实际 SSH alias、容器名及远端路径写入被 `.gitignore` 忽略的 `.oprunway/real-machine.env`，tracked 模板为 `.oprunway/real-machine.env.example`。`CLAUDE.md` / `AGENTS.md` 改为链接该入口，删除 CLAUDE 中已过时且互相矛盾的机器快照。
 - **完成换 session 前的口径收尾**：仓根/插件入口与 workflow skill 从旧“精度 56/56、性能零数据”更新为最新真机事实（精度 60/60；custom 50/50、baseline 48/50；48 对评分、35 对达标、2 对 baseline blocked）；Median spec 把“任务书小算子拼接标杆是否等同 `torch_npu torch.median`”从 `_note` 提升为结构化 `task_pr_gaps`，新增脱敏 handoff `doc/oprunway-session-handoff-2026-07-26.md`。等价性解决前不得宣称满足任务书性能条款。

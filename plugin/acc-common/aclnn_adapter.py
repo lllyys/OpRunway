@@ -938,8 +938,11 @@ def _diag_ref(path):
 PERF_PLAN_FILE = "_perf_plan.json"
 #: 采集端产物（容器内 perf_msprof 落 → 拉回 work/）。
 PERF_COLLECT_FILE = "perf_collect.json"
-#: 供 run_workflow 的 `_REAL_BASELINE_SOURCES["torch_npu"]` 消费的真基线文件名。
-TORCH_NPU_BASELINE_FILE = "_torch_npu_baseline.json"
+#: 供 run_workflow 的 `_REAL_BASELINE_SOURCES` 消费的真基线文件名（按 spec 字段分派）。
+BASELINE_FILES = {
+    "torch_npu": "_torch_npu_baseline.json",
+    "aclnn_builtin": "_aclnn_builtin_baseline.json",
+}
 
 
 def _perf_script(cfg, paths):
@@ -1032,6 +1035,10 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
 
     host = cfg["host"]
     notes = []
+    baseline_source = plan.get("baseline")
+    if baseline_source not in BASELINE_FILES:
+        raise ValueError(
+            f"perf plan baseline 须为 {sorted(BASELINE_FILES)}，得 {baseline_source!r}")
     # ① 精度先筛：只对**已过精度**的 case 测性能（算错的快不算快）。judge 复用 validator 那一套。
     try:
         pass_ids = PM.accuracy_pass_ids(evidence_list)
@@ -1041,10 +1048,12 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
     selected, skipped = PM.select_perf_cases(caseset, pass_ids)
     if not selected:
         notes.append("无可测性能的用例（无「性能」维用例，或全部未过精度先筛）")
-        return {}, PM.build_baseline_document([], op=caseset.get("op"), skipped=skipped), notes
+        return {}, PM.build_baseline_document(
+            [], op=caseset.get("op"), skipped=skipped, source=baseline_source), notes
 
     # ② 上送 plan（含 torch 基线调用映射；缺映射 → 采集端 fail-closed，不猜 torch 形参）。
     remote_plan = {"op": caseset.get("op"),
+                   "baseline": baseline_source,
                    "warmup": int(plan.get("warmup", PM.DEFAULT_WARMUP)),
                    "repeat": int(plan.get("repeat", PM.DEFAULT_REPEAT)),
                    "device": int(cfg["device"]),
@@ -1068,6 +1077,7 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
                    # 取值走 _plan_bool（只认真 bool）——**别退回 `bool(...)`**：那会把 "false"/"0" 判成开。
                    "allow_builtin_symbols": _plan_bool(plan, "allow_builtin_symbols"),
                    "torch_baseline": plan.get("torch_baseline"),
+                   "aclnn_baseline": plan.get("aclnn_baseline"),
                    "cases": selected, "skipped": skipped}
     plan_local = os.path.join(work, "_aclnn_perf_plan_sent.json")
     with open(plan_local, "w", encoding="utf-8") as f:
@@ -1089,7 +1099,8 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
                      f" OPRUNWAY_ACLNN_PERF_TIMEOUT 到点被 kill、其余=python 侧失败；"
                      f"精度证据不受影响；性能一律 us=None → perf_compare 挂起，不冒充达标）。"
                      f"{_op_dir_note(cfg, paths, plan)}{_diag_ref(full)}\n{tail}")
-        return {}, PM.build_baseline_document([], op=caseset.get("op"), skipped=skipped), notes
+        return {}, PM.build_baseline_document(
+            [], op=caseset.get("op"), skipped=skipped, source=baseline_source), notes
 
     # ④ 拉回采集结果 → 组 custom us map + torch_npu 基线文档。
     local_collect = os.path.join(work, PERF_COLLECT_FILE)
@@ -1101,7 +1112,8 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
     custom_map = PM.build_custom_perf_map(records, skipped=skipped)
     baseline = PM.build_baseline_document(records, op=caseset.get("op"),
                                           warmup=remote_plan["warmup"],
-                                          repeat=remote_plan["repeat"], skipped=skipped)
+                                          repeat=remote_plan["repeat"], skipped=skipped,
+                                          source=baseline_source)
     return custom_map, baseline, notes
 
 
@@ -1295,10 +1307,15 @@ def run_aclnn_py(caseset, work, defect_cases=None):
     # 把采到的 us 回填进已组好的 evidence（perf 与精度判定完全解耦，回填不影响任何精度字段）。
     for item in evidence:
         item["perf"] = RA._perf_entry(item.get("case_id"), custom_map)
-    with open(os.path.join(work, TORCH_NPU_BASELINE_FILE), "w", encoding="utf-8") as f:
+    baseline_source = plan.get("baseline")
+    baseline_file = BASELINE_FILES.get(baseline_source)
+    if baseline_file is None:
+        raise ValueError(
+            f"perf plan baseline 须为 {sorted(BASELINE_FILES)}，得 {baseline_source!r}")
+    with open(os.path.join(work, baseline_file), "w", encoding="utf-8") as f:
         json.dump(baseline_doc, f, ensure_ascii=False, indent=2)
     envelope["perf_collection"] = {
-        "collected": True, "baseline_file": TORCH_NPU_BASELINE_FILE,
+        "collected": True, "baseline_source": baseline_source, "baseline_file": baseline_file,
         "timed_cases": len(baseline_doc.get("per_case") or []),
         "excluded": baseline_doc.get("excluded") or [], "notes": notes}
     for n in notes:

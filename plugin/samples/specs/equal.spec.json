@@ -57,6 +57,12 @@
   },
   "perf": {
     "baseline": "tbe",
-    "target_ratio": 0.95
+    "target_ratio": 0.95,
+    "case_source": "precision_cases",
+    "shape_classification": {
+      "metric": "sum_input_bytes",
+      "small_max_bytes": 262144,
+      "hardware": "Atlas A3"
+    }
   }
 }
