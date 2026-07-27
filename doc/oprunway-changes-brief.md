@@ -4,8 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
-- **人工重放直接展示失败现象**：`review.sh run` 默认不再刷完整 JSON，而是列出失败输出、
-  原判据、actual/golden 前8项和完整证据路径；机器可读 `repro_summary.json` 仍照常落盘。
+- **人工重放直接展示完整调用与失败现象**：`review.sh run` 默认不再刷完整 JSON，而是先列
+  Extension 入口、DUT ACLNN 接口、输入 dtype/shape、属性、参数槽顺序和输出契约，再列失败输出、
+  原判据、actual/golden 前8项及完整证据路径；机器可读 `repro_summary.json` 仍照常落盘。
 - **复现器恢复正式 workflow 的 vendor 运行路径**：从已校验 receipt 的 exact vendor ELF
   确定性派生内容根与 `op_api/lib`，前置到 `ASCEND_CUSTOM_OPP_PATH` / `LD_LIBRARY_PATH`；
   同时支持 `OPRUNWAY_REPRO_ENV_FILE` → `OPRUNWAY_SETENV` 两层 CANN 初始化，既不写死私有路径，

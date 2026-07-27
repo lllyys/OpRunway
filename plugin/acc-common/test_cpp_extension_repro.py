@@ -40,6 +40,24 @@ class SelectRepresentativesTest(unittest.TestCase):
             "out_dir": "/tmp/repro",
             "results": [{
                 "case_id": "x",
+                "call": {
+                    "extension": "torch.ops.ns.invoke_v1",
+                    "dut_interface": "aclnnMedian",
+                    "slots": [
+                        {"role": "in", "name": "self", "input_idx": 0},
+                        {"role": "attr", "name": "dim", "ctype": "int64",
+                         "value": 0},
+                        {"role": "out", "name": "index", "output_idx": 0},
+                    ],
+                },
+                "inputs": [
+                    {"name": "self", "dtype": "float16", "shape": [16, 4]},
+                ],
+                "attrs": {"dim": 0, "keepDim": False},
+                "output_contracts": [
+                    {"name": "index", "role": "index", "dtype": "int32",
+                     "shape": [4]},
+                ],
                 "outputs": [
                     {"name": "value", "role": "value", "state": "pass"},
                     {
@@ -56,6 +74,13 @@ class SelectRepresentativesTest(unittest.TestCase):
         with mock.patch("sys.stdout", out):
             R._print_human_summary(result)
         text = out.getvalue()
+        self.assertIn("Extension 入口: torch.ops.ns.invoke_v1", text)
+        self.assertIn("DUT 接口: aclnnMedian", text)
+        self.assertIn("self: dtype=float16, shape=[16, 4]", text)
+        self.assertIn("dim=0, keepDim=false", text)
+        self.assertIn("0. self (input[0])", text)
+        self.assertIn("1. dim (int64=0)", text)
+        self.assertIn("index: role=index, dtype=int32, shape=[4]", text)
         self.assertIn("失败输出: index (role=index)", text)
         self.assertIn("失败判据: mismatch=1/numel=1", text)
         self.assertIn("actual 前 8 项: [2147483647]", text)

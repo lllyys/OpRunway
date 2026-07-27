@@ -115,6 +115,40 @@ def _print_human_summary(result):
         passed = [row.get("name") or row.get("role") for row in case["outputs"]
                   if row["state"] == "pass"]
         print(f"\ncase_id: {case['case_id']}")
+        call = case.get("call") or {}
+        print(f"Extension 入口: {call.get('extension') or '—'}")
+        print(f"DUT 接口: {call.get('dut_interface') or '—'}")
+        print("输入参数:")
+        for item in case.get("inputs") or []:
+            print(
+                f"  - {item.get('name')}: dtype={item.get('dtype')}, "
+                f"shape={json.dumps(item.get('shape'), ensure_ascii=False)}")
+        attrs = case.get("attrs") or {}
+        print(
+            "属性参数: "
+            + (", ".join(
+                f"{name}={json.dumps(value, ensure_ascii=False)}"
+                for name, value in attrs.items()) if attrs else "无"))
+        print("调用参数顺序:")
+        for index, slot in enumerate(call.get("slots") or []):
+            role, name = slot.get("role"), slot.get("name")
+            if role == "in":
+                detail = f"input[{slot.get('input_idx')}]"
+            elif role == "attr":
+                detail = (
+                    f"{slot.get('ctype') or 'attr'}="
+                    f"{json.dumps(slot.get('value'), ensure_ascii=False)}")
+            elif role == "out":
+                detail = f"output[{slot.get('output_idx')}]"
+            else:
+                detail = role or "?"
+            print(f"  {index}. {name} ({detail})")
+        print("输出契约:")
+        for output in case.get("output_contracts") or []:
+            print(
+                f"  - {output.get('name')}: role={output.get('role')}, "
+                f"dtype={output.get('dtype')}, "
+                f"shape={json.dumps(output.get('shape'), ensure_ascii=False)}")
         if passed:
             print("通过输出: " + ", ".join(str(item) for item in passed))
         for output in failed:
@@ -266,6 +300,34 @@ def reproduce(report_root, case_ids, out_dir=None):
         summary.append({
             "case_id": row["case_id"],
             "reproduced_failure": any(x["state"] != "pass" for x in outputs),
+            "call": {
+                "extension": (
+                    f"torch.ops.{receipt['load']['namespace']}."
+                    f"{invocation_by_id[row['case_id']]['entrypoint']}"),
+                "dut_interface": (
+                    "aclnn" + invocation_by_id[row["case_id"]]["symbol"]),
+                "slots": invocation_by_id[row["case_id"]]["slots"],
+            },
+            "inputs": [
+                {
+                    "name": item.get("name"),
+                    "dtype": item.get("dtype"),
+                    "shape": item.get("shape"),
+                }
+                for item in case_by_id[row["case_id"]].get("inputs") or []
+            ],
+            "attrs": case_by_id[row["case_id"]].get("attrs") or {},
+            "output_contracts": [
+                {
+                    "name": item.get("name"),
+                    "role": item.get("role"),
+                    "dtype": item.get("compare_dtype"),
+                    "shape": item.get("out_shape"),
+                }
+                for item in (
+                    case_by_id[row["case_id"]].get("expected", {}).get("outputs")
+                    or [])
+            ],
             "outputs": outputs,
         })
     result = {
