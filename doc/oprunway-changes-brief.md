@@ -4,6 +4,10 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **C++ Extension 独立真机 mode 接线**：新增逐 case invocation plan、显式外部 driver argv 和
+  build/load 内容寻址收据门；收据绑定 caseset、spec、生成源码、构建命令、torch/torch_npu/CANN/SoC、
+  Extension ELF、独立 namespace/schema、vendor 库及符号归属。SSH/container 入口不写死，缺显式配置
+  或任一绑定漂移均 fail-closed。
 - **独立 C++ Extension 通路开始落地**：按 Ascend/pytorch 所带 op-plugin 官方
   `cpp_extension_base` 样例新增字段驱动源码生成器，固定使用 `NpuExtension`、
   `npu_cpp_extension.h`、`EXEC_NPU_CMD_EXT` 与独立 `torch.ops` namespace；不复制会崩溃的旧

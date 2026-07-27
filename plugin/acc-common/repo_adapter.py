@@ -164,6 +164,9 @@ SUPPORTED_NP_BY_FORM = {
     "aclnn_py": {"float32": np.float32, "float16": np.float16, "bfloat16": np.float32,
                  "int64": np.int64, "int32": np.int32, "int16": np.int16,
                  "int8": np.int8, "uint8": np.uint8, "bool": np.bool_},
+    "cpp_extension": {"float32": np.float32, "float16": np.float16, "bfloat16": np.float32,
+                      "int64": np.int64, "int32": np.int32, "int16": np.int16,
+                      "int8": np.int8, "uint8": np.uint8, "bool": np.bool_},
 }
 
 # runner_form → **真机尚未实现、但生成期允许先造用例**的 dtype（Track C 挂账集；U3）。
@@ -178,6 +181,7 @@ SUPPORTED_NP_BY_FORM = {
 DEFERRED_NP_BY_FORM = {
     "cpp": frozenset({"int16", "int32"}),
     "aclnn_py": frozenset(),
+    "cpp_extension": frozenset(),
 }
 if set(DEFERRED_NP_BY_FORM) != set(SUPPORTED_NP_BY_FORM):
     # 两表 key 必须同步：新增 runner_form 只改一张表，另一张就会**静默**按缺省处理（挂账集空 / 未知 form）。
@@ -1341,6 +1345,15 @@ try:
     MODES.update(ACLNN_MODES)
 except Exception as _ex2:                   # 缺件不阻塞库用法（aclnn_py mode 届时不可用、其余照跑）
     _ACLNN_IMPORT_ERR = _ex2
+
+
+# --- 官方 torch_npu C++ Extension adapter：独立于 cpp/new_example 与 aclnn_py/ctypes ---
+_CPP_EXTENSION_IMPORT_ERR = None
+try:
+    from cpp_extension_adapter import CPP_EXTENSION_MODES  # noqa: E402
+    MODES.update(CPP_EXTENSION_MODES)
+except Exception as _ex3:
+    _CPP_EXTENSION_IMPORT_ERR = _ex3
 
 
 def main(argv):

@@ -2159,7 +2159,7 @@ def _uses_output_contract(spec):
     return precision_policy.uses_output_contract(spec)
 
 
-# ── aclnn 调用变体（仅 runner_form=="aclnn_py"；据 spec.call_variants **逐 case 解析**、op-中立）─────
+# ── ACLNN 调用变体（aclnn_py/cpp_extension 共用；据 spec.call_variants 逐 case 解析、op-中立）─────
 # 为什么不是「一份 op 级模板」（审计 finding #3）：同一个算子的不同 attr 取值可能对应**不同的 aclnn 符号**
 # 与**不同的实参表**（全局归约 vs 按维归约就是两个 API、两种输出 arity）。原先的 op 级模板让 driver 自己把
 # `dim=None` 兜成 `dim=0` —— 那既不是「全局」的语义，还可能与单输出签名对不上（越界写 / ABI 崩）。
@@ -2453,13 +2453,13 @@ def gen_cases(spec, work_dir):
     uses_multi = _uses_output_contract(spec)
     tol_src = _tolerance_source(spec)
     tol_tuple = _mo_taskdoc_tol(spec)
-    # aclnn 调用变体（finding #3）：`runner_form=="aclnn_py"` 的 caseset 每个 case 自带**完全解析好**的
+    # ACLNN 调用变体：ctypes 与官方 C++ Extension 两种执行形态共用逐 case 已解析调用契约。
     # `aclnn_call`，driver 不再自己推变体。变体表必填——没它就只能靠 driver 兜默认值，而兜出来的
     # `dim=0` 既不是全局语义、又可能与单输出签名不符（越界写 / ABI 崩）。
     variants = _call_variants(spec)
-    needs_aclnn_call = runner_form == "aclnn_py"
+    needs_aclnn_call = runner_form in ("aclnn_py", "cpp_extension")
     if needs_aclnn_call and not variants:
-        raise ValueError(f"{op}: runner_form=='aclnn_py' 但 spec 未声明 call_variants —— "
+        raise ValueError(f"{op}: runner_form={runner_form!r} 但 spec 未声明 call_variants —— "
                          f"aclnn 调用形态（符号/实参表/落地输出）必须由 spec 显式声明、逐 case 解析，"
                          f"不许下游兜默认值，fail-closed")
 

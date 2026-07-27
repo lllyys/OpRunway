@@ -3,8 +3,8 @@
 Task 1 gen_cases → Task 2 repo_adapter + validator → Task 3 perf_compare。
 stage 间只经 JSON/数据文件交接。CC/Codex/Antigravity 的薄壳只需换调用方式，核心不动。
 
-用法：python run_workflow.py <spec.json> [--mode new_example|aclnn_py|mock] [--out <dir>]
-省略 `--mode` 时据 `spec.runner_form` 唯一派生（cpp/缺省→new_example，aclnn_py→aclnn_py）；
+用法：python run_workflow.py <spec.json> [--mode new_example|aclnn_py|cpp_extension|mock] [--out <dir>]
+省略 `--mode` 时据 `spec.runner_form` 唯一派生；
 `mock` 仅本地用例链自检、精度按构造必过、非验收。
 
 ⚠ **验收裁决只有真机通路产得出来**（C5，用户 2026-07-22 拍板）。mock 的「NPU 输出」= `golden.copy()`
@@ -19,6 +19,7 @@ import argparse, json, os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_cases, repo_adapter, validator, perf_compare  # noqa: E402
+import cpp_extension_adapter  # noqa: E402
 import validate_acceptance_state as gate  # noqa: E402
 import verify_aclnn_harness  # noqa: E402
 
@@ -36,9 +37,13 @@ _DEV_FILES = (_DEV_SUMMARY_FILE, _DEV_VERDICT_FILE)
 # 可能产验收裁决的**真机通路**集合：new_example（cpp runner v1）+ aclnn_py（ctypes-aclnn runner form，
 # torch 对标 median 见证）。两者都产真 NPU 证据（evidence_grade=acceptance_candidate）。按**能力/形态**扩，
 # 非按算子身份——aclnn_py 无 per-op runner 源、op 工程即 DUT（蓝图 §6）。
-_REAL_MACHINE_MODES = frozenset({"new_example", "aclnn_py"})
+_REAL_MACHINE_MODES = frozenset({"new_example", "aclnn_py", "cpp_extension"})
 _REAL_MACHINE_MODE = "new_example"      # new_example 专属预检（_ne_cfg）用；aclnn_py 有自己的 _aclnn_cfg
-_RUNNER_FORM_TO_MODE = {"cpp": "new_example", "aclnn_py": "aclnn_py"}
+_RUNNER_FORM_TO_MODE = {
+    "cpp": "new_example",
+    "aclnn_py": "aclnn_py",
+    "cpp_extension": "cpp_extension",
+}
 
 # —— 验收通路的性能基线：**只认真数、禁 mock 兜底**（codex High#2）——————————————————————
 # 病历：aclnn_py 的 evidence `perf.us=None`（采集端第二里程碑未接）、也不产 `_real_baseline.json`，
@@ -283,6 +288,10 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     caseset = gen_cases.gen_cases(spec, work)
     _dump(caseset, "caseset.json")
     print(f"[Task1 gen_cases] {len(caseset['cases'])} 用例")
+    if mode == "cpp_extension":
+        cpp_extension_adapter.prepare(spec, caseset, work)
+        print("[CP-C0 cpp_extension] 已生成官方 Extension bundle 与逐 case invocation plan；"
+              "build/load/NPU 见证由显式外部 driver 回传收据后复核")
     # aclnn_py 无 per-op runner 源，因此 CP-C 由真机 harness 信任门接住。这里在正式 adapter
     # 启动前复核内容寻址收据与**本轮重新生成的完整 caseset**、当前 spec 及 harness 执行逻辑
     # 全部仍绑定；缺失/漂移一律停在 CP-C。收据只验证 harness，不改变或裁剪下方 Task2/Task3。

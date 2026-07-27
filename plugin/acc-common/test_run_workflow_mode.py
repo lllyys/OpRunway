@@ -13,12 +13,16 @@ class WorkflowModeResolutionTest(unittest.TestCase):
             W._resolve_mode({"runner_form": "cpp"}, None), "new_example")
         self.assertEqual(
             W._resolve_mode({"runner_form": "aclnn_py"}, None), "aclnn_py")
+        self.assertEqual(
+            W._resolve_mode({"runner_form": "cpp_extension"}, None), "cpp_extension")
 
     def test_explicit_real_machine_mismatch_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, "不匹配"):
             W._resolve_mode({"runner_form": "aclnn_py"}, "new_example")
         with self.assertRaisesRegex(SystemExit, "不匹配"):
             W._resolve_mode({"runner_form": "cpp"}, "aclnn_py")
+        with self.assertRaisesRegex(SystemExit, "不匹配"):
+            W._resolve_mode({"runner_form": "cpp_extension"}, "aclnn_py")
 
     def test_explicit_non_acceptance_escape_remains_available(self):
         self.assertEqual(
