@@ -127,9 +127,9 @@ G4 · 归约/成对类算子的**生成期规模预算**（2026-07-22，落地�
       - `torch_parity` —— 忠实对齐参考仓的造例规则，**仅**用于「任务书对标 torch」场景（不碰 catlass 通路）。
   · **律令 #0 合规**：这是按 **spec 声明的能力档位**分支，**不是按算子名**——换任意声明了 `torch_parity`
     的域内算子，工具零改即用；代码里没有也不许有 `if op == "<算子名>"`。
-  · **本批（批 A）只立开关、不改行为**：`_plan` 读出档位放进 `meta`，caseset **只在 spec 显式声明时**多出
-    一个 `case_profile` 账本键；造例逻辑一行不改（对齐动作全部排在批 B）。故 `legacy` 与「未声明」产出的
-    `cases` 完全相同、只差这一个账本键——测试以此为 pin（`test_gen_cases_case_profile.py`）。
+  · `torch_parity` 必须同时声明 `precision.torch_parity_matrix`，按 dtype×rank×shape profile×attribute
+    profile 生成完整笛卡尔；rank 动态轴 class 在逐 case 解析成 first/middle/last，且 `case_target`
+    必须精确等于完整矩阵大小，禁止静默抽样。`legacy` 与未声明仍保持逐字节兼容。
   · 词表外取值 / 非字符串（含**显式 `null`**）→ fail-closed：档位猜错 = 整份用例集悄悄换一套规则，
     比报错贵得多。
 """
@@ -721,6 +721,186 @@ def _case_profile_declared(spec):
     顺手把词表校验过一遍：单独调用本函数时非法值同样当场炸，不留「只问声明与否就绕过校验」的口子。"""
     _case_profile(spec)
     return "case_profile" in (spec.get("precision") or {})
+
+
+_TORCH_PARITY_AXIS_CLASSES = ("first_axis", "middle_axis", "last_axis")
+
+
+def _resolve_axis_class(value, rank, where):
+    """cannbot ``scalar_equivalence.values_by_rank`` 的紧凑等价表达。
+
+    first=0、middle=floor((rank-1)/2)、last=rank-1，与本地
+    ``case_design.json.coverage.attribute_domains.dim`` 的 rank1..8 表逐项相同。
+    普通标量原样返回，故非轴属性仍可与轴 class 组成显式 profile。
+    """
+    if not isinstance(value, dict) or "axis_class" not in value:
+        _check_attr_value(value, where)
+        return value
+    if set(value) != {"axis_class"} or value["axis_class"] not in _TORCH_PARITY_AXIS_CLASSES:
+        raise ValueError(
+            f"{where}.axis_class 须为 {list(_TORCH_PARITY_AXIS_CLASSES)}，得 {value!r}")
+    cls = value["axis_class"]
+    if cls == "first_axis":
+        return 0
+    if cls == "middle_axis":
+        return (rank - 1) // 2
+    return rank - 1
+
+
+def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost_fn):
+    """按 cannbot 冻结设计的轴模型生成完整笛卡尔矩阵。
+
+    配置位于 ``precision.torch_parity_matrix``，只在
+    ``case_profile=torch_parity`` 下消费：
+
+    * ``ranks``：完整 rank 轴；
+    * ``shape_profiles``：每档 ``leading_dim``，其余轴补 1；
+    * ``attribute_profiles``：显式属性 profile，轴属性可写
+      ``{"axis_class":"first_axis|middle_axis|last_axis"}``；
+    * ``generator``：当前只接受 cannbot Median 冻结设计使用的 uniform。
+
+    完整矩阵不受 1-wise/case_target 抽样；case_target 必须精确等于矩阵大小，
+    防止声明“1152 全覆盖”却静默只取 60 条。
+    """
+    cfg = (spec.get("precision") or {}).get("torch_parity_matrix")
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            "precision.case_profile='torch_parity' 时必须声明 "
+            "precision.torch_parity_matrix（不再沿用 legacy 造例规则）")
+    allowed = {"source", "source_sha256", "ranks", "shape_profiles",
+               "attribute_profiles", "generator"}
+    unknown = set(cfg) - allowed
+    if unknown:
+        raise ValueError(f"torch_parity_matrix 含未知字段 {sorted(unknown)}")
+    source, source_sha = cfg.get("source"), cfg.get("source_sha256")
+    if not isinstance(source, str) or not source:
+        raise ValueError("torch_parity_matrix.source 须为非空来源说明")
+    if not isinstance(source_sha, str) or len(source_sha) != 64:
+        raise ValueError("torch_parity_matrix.source_sha256 须为 64 位摘要")
+    try:
+        int(source_sha, 16)
+    except ValueError as ex:
+        raise ValueError("torch_parity_matrix.source_sha256 非十六进制摘要") from ex
+    ranks = cfg.get("ranks")
+    if not isinstance(ranks, list) or not ranks or len(ranks) != len(set(ranks)) \
+            or any(isinstance(r, bool) or not isinstance(r, int)
+                   or not (1 <= r <= _MAX_RANK) for r in ranks):
+        raise ValueError(f"torch_parity_matrix.ranks 须为 1..{_MAX_RANK} 的非空无重复整数列表")
+    declared_ranks = _allowed_ranks(in_params)
+    if declared_ranks is not None and set(ranks) != set(declared_ranks):
+        raise ValueError(
+            f"torch_parity_matrix.ranks={ranks} 与 in.rank={sorted(declared_ranks)} 不一致")
+    shapes = cfg.get("shape_profiles")
+    if not isinstance(shapes, list) or not shapes:
+        raise ValueError("torch_parity_matrix.shape_profiles 须为非空列表")
+    shape_rows, shape_names = [], set()
+    for i, row in enumerate(shapes):
+        if not isinstance(row, dict) or set(row) != {"name", "leading_dim"}:
+            raise ValueError(
+                f"shape_profiles[{i}] 须仅含 name/leading_dim")
+        name, leading = row["name"], row["leading_dim"]
+        if not isinstance(name, str) or not name or name in shape_names:
+            raise ValueError(f"shape_profiles[{i}].name 缺失或重复")
+        if isinstance(leading, bool) or not isinstance(leading, int) or leading < 1:
+            raise ValueError(f"shape_profiles[{i}].leading_dim 须为正整数")
+        shape_names.add(name)
+        shape_rows.append((name, leading))
+    profiles = cfg.get("attribute_profiles")
+    if not isinstance(profiles, list) or not profiles:
+        raise ValueError("torch_parity_matrix.attribute_profiles 须为非空列表")
+    attr_names = set(attrs_default)
+    normalized_profiles = []
+    profile_names = set()
+    for i, row in enumerate(profiles):
+        if not isinstance(row, dict) or set(row) != {"name", "attrs"}:
+            raise ValueError(f"attribute_profiles[{i}] 须仅含 name/attrs")
+        name, attrs = row["name"], row["attrs"]
+        if not isinstance(name, str) or not name or name in profile_names:
+            raise ValueError(f"attribute_profiles[{i}].name 缺失或重复")
+        if not isinstance(attrs, dict) or set(attrs) != attr_names:
+            raise ValueError(
+                f"attribute_profiles[{i}].attrs keys={sorted(attrs) if isinstance(attrs, dict) else attrs!r} "
+                f"须精确等于 attr 参数 {sorted(attr_names)}")
+        profile_names.add(name)
+        normalized_profiles.append((name, attrs))
+    generator = cfg.get("generator")
+    if not isinstance(generator, dict) or set(generator) != {"kind", "min", "max"} \
+            or generator.get("kind") != "uniform" \
+            or not all(isinstance(generator.get(k), (int, float))
+                       and not isinstance(generator.get(k), bool) for k in ("min", "max")) \
+            or generator["min"] >= generator["max"]:
+        raise ValueError(
+            "torch_parity_matrix.generator 当前须为 {kind:'uniform', min:<数>, max:<数>}")
+
+    expected = len(dtypes) * len(ranks) * len(shape_rows) * len(normalized_profiles)
+    if int(case_target) != expected:
+        raise ValueError(
+            f"torch_parity 完整矩阵大小={expected}，precision.case_target={case_target}；"
+            "两者必须相等，禁止静默抽样")
+    entries = []
+    for dtn in dtypes:
+        dk = _regular_data_kind(dtn, attrs_default, len(in_params))
+        for rank in ranks:
+            for shape_name, leading in shape_rows:
+                shape = (leading,) + (1,) * (rank - 1)
+                for attr_idx, (profile_name, raw_attrs) in enumerate(normalized_profiles):
+                    attrs = {
+                        key: _resolve_axis_class(
+                            value, rank,
+                            f"torch_parity_matrix.attribute_profiles[{attr_idx}].attrs.{key}")
+                        for key, value in raw_attrs.items()
+                    }
+                    if cost_fn is not None:
+                        cost = cost_fn(
+                            shape, attrs,
+                            f"torch_parity:{dtn}:rank{rank}:{shape_name}:{profile_name}")
+                        if cost > _cost_budget(spec):
+                            raise ValueError(
+                                f"torch_parity 冻结 shape {shape} 的 golden cost={cost} 超预算；"
+                                "完整矩阵禁止静默缩形/剔除")
+                    entries.append({
+                        "dims": ["功能", "精度", "性能"],
+                        "shape": shape,
+                        "dtype": dtn,
+                        "tags": ["torch_parity", shape_name, profile_name],
+                        "data_kind": f"{dk}:uniform",
+                        "id_kind": f"tp_r{rank}_{shape_name}_{profile_name}",
+                        "attrs": attrs,
+                        "attr_idx": attr_idx,
+                        "case_origin": (
+                            f"torch_parity:{dtn}:rank{rank}:{shape_name}:{profile_name}"),
+                        "rule_ref": (
+                            "cannbot case_design coverage.regular_axes × "
+                            "attribute_profile_matrix（完整笛卡尔）"),
+                    })
+    return entries, {
+        "pool_max": expected,
+        "requested_target": expected,
+        "emitted": expected,
+        "forced_special": 0,
+        "operator_class": _operator_class(spec),
+        "emits_nonfinite_specials": False,
+        "case_profile": "torch_parity",
+        "case_profile_declared": True,
+        "forced_total": expected,
+        "dropped_combo_classes": [],
+        "unpaired_combo_classes": [],
+        "attr_axis_lengths": {"declared": [], "emitted": 0, "items": [], "skipped": []},
+        "coverage_strength": (
+            "complete_cartesian：dtype×rank×shape_profile×attribute_profile 全覆盖"),
+        "golden_cost": ({
+            "budget": _cost_budget(spec), "model": _COST_MODEL,
+            "scaled_cases": [], "skipped_shapes": [], "skipped_shape_classes": 0,
+        } if cost_fn is not None else _empty_cost_ledger()),
+        "torch_parity_matrix": {
+            "source": cfg.get("source"),
+            "source_sha256": cfg.get("source_sha256"),
+            "ranks": list(ranks),
+            "shape_profiles": [dict(row) for row in shapes],
+            "attribute_profile_count": len(normalized_profiles),
+            "generator": dict(generator),
+        },
+    }
 
 
 # ============================ value_profile 受控数值生成（借参考仓 generate_array，op-中立）=========
@@ -1966,8 +2146,8 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
     强制项降规模、网格项剔除，全部记进 `meta["golden_cost"]`。`cost_fn=None`（如 dry-run 加载不到 golden.py）
     → **完全不行使**，行为与 G4 之前逐字节一致，且账本里 model 标「未核」而非谎称已核。
     CP：`spec.precision.case_profile` 在此**读一次**（词表外取值当场 fail-closed）并落进
-    `meta["case_profile"]` / `meta["case_profile_declared"]`。**本批只记账、不据它分任何支**——
-    对齐参考仓造例规则的改动排在批 B，届时一律 gate 在 `torch_parity`。"""
+    `meta["case_profile"]` / `meta["case_profile_declared"]`；`torch_parity` 进入完整矩阵，
+    `legacy` 保持原有 forced + 1-wise 行为。"""
     arity = len(in_params)
     ranks = _allowed_ranks(in_params)                    # C3：None=不限制（现行为）
     reg_shapes, large_shapes = _shape_ladder(ranks)      # 过滤后无合法常规 shape → 已 fail-closed
@@ -1987,12 +2167,15 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
     # OC：算子类别 → 特殊值口径（受控词表；未声明=None=现行为）。词表外取值在此当场 fail-closed。
     op_class = _operator_class(spec)
     emit_nonfinite = _emits_nonfinite(op_class)
-    # CP：造例档位（受控词表；未声明 = legacy = 现行为）。本批**只读出来记账、不改任何造例逻辑**——
-    # 对齐参考仓造例规则的改动全部排在批 B，且一律 gate 在 `torch_parity` 分支，legacy 侧字节不动。
+    # CP：造例档位（受控词表；未声明 = legacy = 现行为）。torch_parity 走完整矩阵，
+    # legacy 侧字节不动。
     # 在这里读（而不是各处现用现读）是为了「一次解析、一处 fail-closed」：词表外取值在此当场炸，
     # gen_cases 与 _dry_run 两条路径都经过 `_plan`，非法档位没有绕过口。
     case_profile = _case_profile(spec)
     case_profile_declared = _case_profile_declared(spec)
+    if case_profile == "torch_parity":
+        return _torch_parity_plan(
+            spec, in_params, dtypes, attrs_default, case_target, cost_fn)
     forced, grid = [], []
     # ① §1.4 特殊场景（每 dtype 强制；id_kind 独立命名空间，评审 #8）
     for dtn in dtypes:

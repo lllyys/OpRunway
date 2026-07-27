@@ -4,6 +4,10 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **torch_parity 从空开关升级为完整矩阵**：按 cannbot Median 冻结设计实现
+  dtype×rank×shape profile×attribute profile 全笛卡尔，shape 支持 31/2047/262144 加尾随 1，
+  first/middle/last 轴按 rank 动态解析；`case_target` 必须精确等于矩阵大小，禁止把 1152 全覆盖
+  静默抽成 60 条。legacy 用例生成保持原行为。
 - **C++ Extension 独立真机 mode 接线**：新增逐 case invocation plan、显式外部 driver argv 和
   build/load 内容寻址收据门；收据绑定 caseset、spec、生成源码、构建命令、torch/torch_npu/CANN/SoC、
   Extension ELF、独立 namespace/schema、vendor 库及符号归属。SSH/container 入口不写死，缺显式配置

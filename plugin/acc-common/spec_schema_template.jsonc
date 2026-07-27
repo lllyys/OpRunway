@@ -112,16 +112,19 @@
 //
 // ── 顶层 · 场景 / runner 形态（**编排层据字段路由，绝不 if-算子名**；缺省=常规 cpp 通路）─────────────
 //   "scenario":    "torch_ref_aclnn"        // 受控值只此一个，不属该场景→整字段省略、别编新值
-//   "runner_form": "aclnn_py"               // 缺省 cpp（= 省略即此）
+//   "runner_form": "aclnn_py" | "cpp_extension" // 缺省 cpp（= 省略即此）
 //   scenario   ：场景标识（⟺ 任务书把 **torch 指定为真值口径** × PR 是**标准 aclnn 两段式**工程）。
 //                它是给编排层/人读的路由标签（Layer 1 脚本目前不读它），真正驱动执行的是 runner_form。
 //   runner_form：runner 形态。`cpp`（缺省）= per-op `oprunway_<op>_runner.cpp`；
 //                `aclnn_py` = **无 per-op runner 源**、op 工程即 DUT，走 op-中立的 ctypes-aclnn runner
 //                （`aclnn_runtime`，从 aclnn header 推 arity）。
-//                ⚠ `runner_form=="aclnn_py"` **必须**同时声明 `call_variants`（gen_cases 当场 fail-closed）；
+//                `cpp_extension` = 按官方 NpuExtension/EXEC_NPU_CMD_EXT 生成独立 torch.ops namespace，
+//                由显式外部 driver build/load/执行并回传内容寻址收据；不复制旧 helper、不改 op-plugin。
+//                ⚠ `runner_form ∈ {"aclnn_py","cpp_extension"}` **必须**同时声明 `call_variants`
+//                （gen_cases 当场 fail-closed）；
 //                ⚠ 它还决定真机可收发 dtype 白名单（`repo_adapter.supported_np(runner_form)`：aclnn_py 放开 int/bf16）。
 //
-// ── 顶层 · aclnn 调用变体表（**仅 runner_form=="aclnn_py"，且此时必填**；实现见 ────────────────────
+// ── 顶层 · aclnn 调用变体表（runner_form 为 aclnn_py/cpp_extension 时必填；实现见 ─────────────────
 //    `precision_policy.call_variants` / `gen_cases._build_aclnn_call`）：
 //   ⚠ 触发条件是 **runner_form==aclnn_py**，不是「header 里有多个入口」——**单入口也必须写一条**
 //     （`when` 用 `{"always": true}`），多入口只是产多条。
@@ -133,6 +136,29 @@
 //   字段：
 //     `when`  （必填）匹配谓词，三选一：`{"always": true}` / `{"attr":"<attr名>","is_null":true|false}` /
 //             `{"attr":"<attr名>","equals":<值>}`。**不允许隐式全匹配**，要无条件就显式写 `always`。
+//
+// ── precision 行内 · torch_parity 完整矩阵（case_profile=="torch_parity" 时必填）────────────────
+//   "torch_parity_matrix": {
+//     "source": "<cannbot case_design 路径/ref>",
+//     "source_sha256": "<case_design.json sha256>",
+//     "ranks": [1,2,3,4,5,6,7,8],
+//     "shape_profiles": [
+//       {"name":"small","leading_dim":31},
+//       {"name":"medium","leading_dim":2047},
+//       {"name":"large","leading_dim":262144}
+//     ],
+//     "attribute_profiles": [
+//       {"name":"attr_00","attrs":{"dim":{"axis_class":"first_axis"},"keepDim":false}},
+//       {"name":"attr_01","attrs":{"dim":{"axis_class":"first_axis"},"keepDim":true}},
+//       {"name":"attr_02","attrs":{"dim":{"axis_class":"middle_axis"},"keepDim":false}},
+//       {"name":"attr_03","attrs":{"dim":{"axis_class":"middle_axis"},"keepDim":true}},
+//       {"name":"attr_04","attrs":{"dim":{"axis_class":"last_axis"},"keepDim":false}},
+//       {"name":"attr_05","attrs":{"dim":{"axis_class":"last_axis"},"keepDim":true}}
+//     ],
+//     "generator":{"kind":"uniform","min":-5,"max":5}
+//   }
+//   完整笛卡尔大小 = dtype×rank×shape_profile×attribute_profile，必须与 case_target 精确相等；
+//   不走 legacy 1-wise 抽样。axis_class 在每个 rank 下解析，禁止把 middle/last 静态写死。
 //             逐 case 按**声明顺序取首个匹配者**。
 //     `symbol`（必填）该变体调用的 aclnn 符号**基名**（CamelCase，去 aclnn 前缀；真符号 =
 //             `aclnn<symbol>GetWorkspaceSize` / `aclnn<symbol>`）。不同变体可以是不同 API。
