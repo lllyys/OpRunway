@@ -261,6 +261,12 @@ def _perf_case_policy(spec):
         raise ValueError(
             "perf.case_selection.min_total_input_elements 须为 ≥1 的整数，"
             f"得 {min_total_elements!r}")
+    max_cases = selection.get("max_cases")
+    if (max_cases is not None
+            and (isinstance(max_cases, bool) or not isinstance(max_cases, int)
+                 or max_cases < 1)):
+        raise ValueError(
+            f"perf.case_selection.max_cases 须为 ≥1 的整数或省略，得 {max_cases!r}")
     include_precision_tags_declared = "include_precision_tags" in selection
     include_precision_tags = selection.get("include_precision_tags") or []
     if (not isinstance(include_precision_tags, list)
@@ -276,6 +282,8 @@ def _perf_case_policy(spec):
         "min_total_input_elements": int(min_total_elements),
         "reason": "exclude_degenerate_inputs_without_comparable_device_kernel",
     }
+    if max_cases is not None:
+        selection_contract["max_cases"] = int(max_cases)
     if include_precision_tags_declared:
         selection_contract["include_precision_tags"] = include_precision_tags
     return {"case_source": source,
@@ -292,32 +300,16 @@ def _classify_perf_cases(spec, cases):
     """按 spec 给性能 case 打「小shape/大shape」标签并返回 caseset 级账本。
 
     输入载荷按各 input 的**物理存储 dtype**计字节；bf16 因 ``storage_dtype=uint16`` 按 2 bytes
-    计算。边界是闭区间：恰好 ``small_max_bytes`` 仍属小 shape。分类不改变 ``dims``，更不会产生
-    ``trivial-met`` 或性能豁免。
+    计算。边界是闭区间：恰好 ``small_max_bytes`` 仍属小 shape。若声明 ``max_cases``，
+    只会从相同精度 caseset 按 dtype×shape class 轮转选子集；不会产生 ``trivial-met`` 或性能豁免。
     """
     policy = _perf_case_policy(spec)
     if policy is None:
         return None
     rule = policy["shape_classification"]
     limit = rule["small_max_bytes"]
-    counts = {"small": 0, "large": 0}
-    selected_ids, excluded_precision_ids, excluded_degenerate_ids = [], [], []
-    by_dtype = {}
-    for case in cases:
-        dims = case.get("dims") or []
-        include_tags = policy["case_selection"].get("include_precision_tags", [])
-        if ("精度" in dims and "性能" not in dims and include_tags
-                and set(case.get("tags") or []).intersection(include_tags)):
-            dims = list(dims) + ["性能"]
-            case["dims"] = dims
-        if "性能" not in dims:
-            if "精度" in dims and isinstance(case.get("id"), str):
-                excluded_precision_ids.append(case["id"])
-            continue
+    def _load(case):
         cid = case.get("id")
-        if "精度" not in dims:
-            raise ValueError(
-                f"{cid}: perf.case_source='precision_cases'，但性能 case 的 dims 不含「精度」")
         inputs = case.get("inputs")
         if not isinstance(inputs, list) or not inputs:
             raise ValueError(f"{cid}: 性能 case 缺 inputs，无法按输入载荷字节分类")
@@ -342,18 +334,82 @@ def _classify_perf_cases(spec, cases):
             input_elements = _numel(shape)
             total_elements += input_elements
             total += input_elements * itemsize
-        min_total_elements = policy["case_selection"]["min_total_input_elements"]
+        dtypes = sorted({i.get("dtype") for i in inputs
+                         if isinstance(i, dict) and isinstance(i.get("dtype"), str)})
+        return int(total_elements), int(total), "+".join(dtypes) if dtypes else "unknown"
+
+    # 先列出全部候选并计算分类，再按 (dtype,size) 队列 round-robin 取 max_cases。
+    # 选择只读 case 字段，不另造输入；最终仍复用原 precision case_id。
+    include_tags = policy["case_selection"].get("include_precision_tags", [])
+    min_total_elements = policy["case_selection"]["min_total_input_elements"]
+    eligible, excluded_degenerate_ids = [], []
+    for case in cases:
+        dims = case.get("dims") or []
+        tagged = bool(include_tags and set(case.get("tags") or []).intersection(include_tags))
+        if "性能" not in dims and not tagged:
+            continue
+        cid = case.get("id")
+        if "精度" not in dims:
+            raise ValueError(
+                f"{cid}: perf.case_source='precision_cases'，但性能候选的 dims 不含「精度」")
+        total_elements, total, dtype_key = _load(case)
         if total_elements < min_total_elements:
-            case["dims"] = [dim for dim in dims if dim != "性能"]
             case["perf_selection_exclusion"] = {
                 "reason": "degenerate_total_input_elements_below_minimum",
                 "total_input_elements": int(total_elements),
                 "min_total_input_elements": int(min_total_elements),
             }
-            excluded_precision_ids.append(cid)
             excluded_degenerate_ids.append(cid)
             continue
         size_class = "small" if total <= limit else "large"
+        eligible.append((case, total, dtype_key, size_class))
+
+    max_cases = policy["case_selection"].get("max_cases")
+    selected_set = None
+    if max_cases is not None and len(eligible) > max_cases:
+        queues = {}
+        for row in eligible:
+            queues.setdefault((row[2], row[3]), []).append(row)
+        ordered = [queues[key] for key in sorted(queues)]
+        positions = [0] * len(ordered)
+        chosen = []
+        while len(chosen) < max_cases:
+            progressed = False
+            for qi, queue in enumerate(ordered):
+                if positions[qi] >= len(queue):
+                    continue
+                chosen.append(queue[positions[qi]])
+                positions[qi] += 1
+                progressed = True
+                if len(chosen) == max_cases:
+                    break
+            if not progressed:
+                break
+        selected_set = {row[0]["id"] for row in chosen}
+
+    counts = {"small": 0, "large": 0}
+    selected_ids, excluded_precision_ids = [], []
+    by_dtype = {}
+    eligible_by_id = {row[0]["id"]: row for row in eligible}
+    for case in cases:
+        cid = case.get("id")
+        row = eligible_by_id.get(cid)
+        if row is None or (selected_set is not None and cid not in selected_set):
+            if "性能" in (case.get("dims") or []):
+                case["dims"] = [dim for dim in case["dims"] if dim != "性能"]
+            if "精度" in (case.get("dims") or []) and isinstance(cid, str):
+                excluded_precision_ids.append(cid)
+            if row is not None:
+                case["perf_selection_exclusion"] = {
+                    "reason": "balanced_max_cases_limit",
+                    "max_cases": int(max_cases),
+                    "balance_axes": ["dtype", "shape_class"],
+                }
+            continue
+        _case, total, dtype_key, size_class = row
+        dims = list(case.get("dims") or [])
+        if "性能" not in dims:
+            case["dims"] = dims + ["性能"]
         label = "小shape" if size_class == "small" else "大shape"
         tags = [t for t in (case.get("tags") or []) if t not in ("小shape", "大shape")]
         case["tags"] = tags + [label]
@@ -364,9 +420,6 @@ def _classify_perf_cases(spec, cases):
         }
         counts[size_class] += 1
         selected_ids.append(cid)
-        dtypes = sorted({i.get("dtype") for i in inputs
-                         if isinstance(i, dict) and isinstance(i.get("dtype"), str)})
-        dtype_key = "+".join(dtypes) if dtypes else "unknown"
         by_dtype[dtype_key] = by_dtype.get(dtype_key, 0) + 1
     return {**policy, "counts": counts,
             "selection": {

@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **完整精度矩阵与性能子集解耦**：`perf.case_selection.max_cases` 可从同一精度 caseset 按
+  dtype×small/large 队列轮转选择固定数量，保留原 case_id；Median 可据 cannbot 口径从 1152 条精度
+  矩阵选 50 条性能用例，不再把“完整精度覆盖”误解成“1152 条全部采性能”。
 - **torch_parity 从空开关升级为完整矩阵**：按 cannbot Median 冻结设计实现
   dtype×rank×shape profile×attribute profile 全笛卡尔，shape 支持 31/2047/262144 加尾随 1，
   first/middle/last 轴按 rank 动态解析；`case_target` 必须精确等于矩阵大小，禁止把 1152 全覆盖

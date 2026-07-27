@@ -10,12 +10,15 @@ from unittest import mock
 import gen_cases as GC
 
 
-def _spec(limit=262144, min_total_input_elements=1, include_precision_tags=None):
+def _spec(limit=262144, min_total_input_elements=1, include_precision_tags=None,
+          max_cases=None):
     selection = {
         "min_total_input_elements": min_total_input_elements,
     }
     if include_precision_tags is not None:
         selection["include_precision_tags"] = include_precision_tags
+    if max_cases is not None:
+        selection["max_cases"] = max_cases
     return {"perf": {
         "case_source": "precision_cases",
         "case_selection": selection,
@@ -119,6 +122,29 @@ class PerfShapeClassificationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dims 不含「精度」"):
             GC._classify_perf_cases(_spec(), [_case("bad", [8], dims=["性能"])])
 
+    def test_max_cases_balances_dtype_and_shape_class(self):
+        cases = [
+            _case("f32_s0", [8], "float32"),
+            _case("f32_s1", [16], "float32"),
+            _case("f32_l0", [70000], "float32"),
+            _case("f16_s0", [8], "float16"),
+            _case("f16_l0", [140000], "float16"),
+            _case("f16_l1", [140001], "float16"),
+        ]
+        ledger = GC._classify_perf_cases(_spec(max_cases=4), cases)
+        self.assertEqual(ledger["selection"]["selected_total"], 4)
+        self.assertEqual(ledger["counts"], {"small": 2, "large": 2})
+        self.assertEqual(
+            ledger["selection"]["selected_by_dtype"],
+            {"float16": 2, "float32": 2})
+        self.assertEqual(
+            [c["id"] for c in cases if "性能" in c["dims"]],
+            ledger["selection"]["selected_case_ids"])
+        self.assertTrue(all(
+            c.get("perf_selection_exclusion", {}).get("reason")
+            == "balanced_max_cases_limit"
+            for c in cases if "性能" not in c["dims"]))
+
     def test_bad_policy_fails_closed(self):
         bad_values = [
             {"case_source": "separate_cases",
@@ -138,6 +164,10 @@ class PerfShapeClassificationTest(unittest.TestCase):
                                       "small_max_bytes": 262144, "hardware": "A3"}},
             {"case_source": "precision_cases",
              "case_selection": {"min_total_input_elements": 0},
+             "shape_classification": {"metric": "sum_input_bytes",
+                                      "small_max_bytes": 262144, "hardware": "Atlas A3"}},
+            {"case_source": "precision_cases",
+             "case_selection": {"max_cases": 0},
              "shape_classification": {"metric": "sum_input_bytes",
                                       "small_max_bytes": 262144, "hardware": "Atlas A3"}},
             {"case_source": "precision_cases",

@@ -291,7 +291,8 @@
 //     "case_source": "precision_cases", // perf 存在时必填；每条性能 case 的 dims 必须同时含「精度」
 //     "case_selection": {               // 可选；默认 min=1、标签选择为空
 //       "min_total_input_elements": <正整数>,
-//       "include_precision_tags": ["<精度 case tag>", ...]
+//       "include_precision_tags": ["<精度 case tag>", ...],
+//       "max_cases": <正整数>            // 可选；超出时按 dtype×small/large 队列轮转，仍复用精度 case_id
 //     },
 //     "shape_classification": {          // perf 存在时必填；只分类，不免测、不改 pass/fail
 //       "metric": "sum_input_bytes",
