@@ -4,6 +4,8 @@
 
 ## 2026-07-26（非真机流程性能优化）
 
+- **真机环境入口收敛**：新增 `doc/oprunway-real-machine-environment.md` 记录 A2/A3 与 950 的最近验证能力、版本、探测命令和安全边界；实际 SSH alias、容器名及远端路径写入被 `.gitignore` 忽略的 `.oprunway/real-machine.env`，tracked 模板为 `.oprunway/real-machine.env.example`。`CLAUDE.md` / `AGENTS.md` 改为链接该入口，删除 CLAUDE 中已过时且互相矛盾的机器快照。
+- **完成换 session 前的口径收尾**：仓根/插件入口与 workflow skill 从旧“精度 56/56、性能零数据”更新为最新真机事实（精度 60/60；custom 50/50、baseline 48/50；48 对评分、35 对达标、2 对 baseline blocked）；Median spec 把“任务书小算子拼接标杆是否等同 `torch_npu torch.median`”从 `_note` 提升为结构化 `task_pr_gaps`，新增脱敏 handoff `doc/oprunway-session-handoff-2026-07-26.md`。等价性解决前不得宣称满足任务书性能条款。
 - **性能采集已按 cannbot 真机坐实并对齐**：参考仓两侧实际走 `msprof CLI + libms_tools_ext.so ctypes MSTX + task_time CSV`；A3 probe 得 `range_id=1` 和有效 kernel 窗。OpRunway custom/torch baseline 现统一该 collector，live 路径钉 CSV；DB parser 仅保留历史/离线兼容。新增对 msprof 控制 task `PROFILER_TRACE_EX` 的窄白名单，其他未知类型继续 fail-closed。
 - **50-case 真机性能数据已产出**：custom 50/50、torch baseline 48/50 有效，48 对均为 fair kernel-only；2 个 BF16 dim=1 case 是 torch_npu/CANN 内置基线报 161002，custom 成功，归为 baseline limitation 而非 DUT/parser。
 - **彻底移除旧 `numel<4096 → trivial-met` 自动免测**：`perf_compare.py`、`gpu_baseline.py`、`validate_acceptance_state.py` 与 agent/skill 口径同步；外部 GPU baseline 也必须覆盖全部性能 case。复用同一 50-case 真机证据重算为 `cases_scored=48`、`达标=35`、`blocked=2`、`status=blocked`、`trivial_rows=0`；原 24 个小 case 中 22 个真实评分、2 个明确 blocked。

@@ -38,7 +38,7 @@ agents:
 | `aclnn_py` | `aclnn_py` | op 工程即 DUT、通用 ctypes 两段式 runner（**无 per-op runner 源**）；须 `OPRUNWAY_ACLNN_REAL=1` |
 
 `_REAL_MACHINE_MODES = {new_example, aclnn_py}`（`acc-common/run_workflow.py`）——**两条都是真机通路、两条都产验收裁决**
-（median + PR6429 的真机 56/56 精度 PASS 正是 `aclnn_py` 跑出来的）。`mock` / `catlass` / `catlass_mock`
+（median + PR6429 的最新真机 60/60 精度 PASS 正是 `aclnn_py` 跑出来的）。`mock` / `catlass` / `catlass_mock`
 **派生不出来**，只能显式指定（局部自检 / catlass 通路的正当逃生口），且不产 `acceptance.json`。
 
 > ⚠ **写死 `--mode new_example` 的代价是实打实的**（本节由此而来，别再改回去）：

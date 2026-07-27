@@ -141,7 +141,7 @@
 - [x] **真机 blocker 已解（2026-07-16）**：根因非环境坏、是 **run_on_npu.sh 每次 fresh 都重建 op**（对 isclose 的 experimental/op 名路径不适用 + `rm -rf $OPP` 毁 opp）→ 修「用户态 opp 已建则复用、只建 runner_exe」；另修 isclose runner 第二道解析处 dtype 关卡漏补 bf16。真机彻底解封（完整 3-dtype 50 用例 Task2 全 pass、三门 PASSED）。
 - [x] **✅ 真机 opp provenance 绑定已落地（2026-07-16 续，bf16 已转 tested）**：`run_on_npu.sh` 重写 provenance 机制——OPHASH 绑**真实 op 源** `$OPS/$OPRUNWAY_OP_SRC`（必填、相对仓、安全路径校验）；opp 落独立 stamp `.oprunway_opp_provenance`（`op_src|ophash|soc|vendor|build`）；顶层门：缺 opp→建、stamp 全字段符→复用、不符/缺失→**fail-closed 拒复用**（exit 4）除非 `OPRUNWAY_OPP_REBUILD=1` 授权从源重建；源不存在→exit 3；build 失败/无 .run→exit 5。`repo_adapter._ne_cfg` 加 `op_src`(必填+安全校验)/`opp_rebuild` 透传。**查修一个致命 bug**：脚本漏 `OP_SRC="$OPRUNWAY_OP_SRC"` 短名桥接→`$OP_SRC` 恒空→绑整仓 hash 且没走 `--experimental`（异源）；补一行后真机坐实。**a3 CANN 9.0.1 容器 provenance-clean 从 `experimental/math/is_close`(A2/A3 正源) 重建**：stamp ophash 与真源逐字节 sha256 一致、Task2 pass(27 用例含 9 bf16、0 fail)、三门 PASSED、fail-closed 三情形(exit3/4/复用不重建)实测过 → **isclose spec bf16 转 tested**。487 单测全绿。（int32 仍 Track C；msprof 跳 trivial 见下条。）
 - [x] **GPU 标杆 trivial 豁免**（fork finding #4/reviewer #2/codex #4，**已做**）：`gpu_baseline.parse_gpu_baseline` 改为只要求覆盖**非 trivial**（numel≥4096）性能 case、trivial 宽容忽略（不当 extra）；GPU 标杆逐 trivial case 给数不现实的问题消除。
-- [ ] **follow-up · 真机 msprof 跳 trivial**（真机跑观察）：`run_on_npu.sh` / `perfcases_list.txt` 现对**全部** perf 用例逐个 msprof（custom+TBE 各一），含 trivial 退化 case；50 用例真机跑 ~15-20min。perf_compare 已 trivial-met 免测，故 msprof 也应只测非 trivial 大 shape（perfcases_list 排除 trivial）→ 大幅提速。非阻塞。
+- [x] **取消 · 真机 msprof 跳 trivial**：旧提议建立在 `numel < 4096 → trivial-met` 自动免测规则上；该规则已于 2026-07-26 从 `perf_compare.py`、GPU baseline 和完整性门彻底移除。所有性能 case 必须真实采集，禁止通过跳过小 case 缩短真机时间。
 - **codex 源码门（一轮）修的 4 项**：广播 numel 蒙混 trivial（`_case_numel`/gate/gpu 改按全输入 broadcast 输出算）· inf/nan 补「性能」维（v2 非空皆带性能）· `perf_min_numel` 覆盖删→固定 4096（防 compare↔gate 阈值不一致+类型崩）· 「真空」严格判定（拒 `shape:[false]/[0.0]` 伪造，validator+gate_task1+gate_task2 三处共用、Task2 独立复核）。
 - [ ] **follow-up · equal_nan 有效性**（deviation #4）：§1 不产 nanpair、`_assert_equal_nan_effective` 不再触发；equal_nan T/F 结构覆盖 + NaN §1.4 覆盖但未**交集**证明（aligned-NaN 翻转）。minor。
 
@@ -592,6 +592,16 @@
 6. ✅ **GPU 标杆接入（Task 3）—— consumer 侧**：`gpu_baseline.py` + 最小字段契约（`gpu_baseline_contract.json`）+ 按 `case_id` 对齐 + NPU↔GPU 报告；缺标杆走 `BLOCKED_WAIT_GPU_BENCHMARK`（正规挂起，**非 fail**）。⏳ **真 GPU 基线数据待外部方提供**。
 7. **泛化到 catlass + 其余仓**：✅ catlass adapter 代码落地；⏳ 真机待 950；**其余 11 仓未做**。
 8. ✅ **发布形态定稿**：用户逐条拍板——插件继续作为主仓 `plugin/` 子目录（不拆独立 repo）、插件名维持 `oprunway`、skills 向 `awesome-ascend-skills` 的 external-sync **「很久以后」**、`init.sh` 跨 CLI 扇出保留。⏳ 待 `bureau:review` promote 成 `canonical`（当前 `proposed`）。
+
+### 🔴 Median 性能标杆与任务书不一致风险（2026-07-26 新增 TODO）
+
+- [ ] **核实任务书指定标杆与当前标杆是否为同一实现**：任务书要求“相比于 `aclnnMedian` / `aclnnMedianDim` 的小算子拼接版本性能不劣化”；当前 spec 使用的是同机 `torch_npu` 执行 `torch.median`。现阶段没有证据证明 `torch_npu` 最终调用的就是任务书点名的小算子拼接版本，二者不得默认视为等价。
+- [ ] **补齐可审计的调用链证据**：在远程 NPU 容器内，通过官方实现资料、动态调用链、导出符号和 profiler 证据确认 `torch_npu → CANN` 的实际落点，并把版本、SoC、torch_npu/CANN 版本及实现映射写入可校验 provenance；不得只凭 API 名相似作结论。
+- [ ] **若等价，固化映射契约**：把“为何等价、在哪些版本成立、如何检测漂移”落到通用、spec 驱动的 baseline 契约和校验门中，版本或实现漂移时 fail-closed。
+- [ ] **若不等价或无法证明，改接任务书指定标杆**：实现或调用任务书点名的 NPU 小算子拼接 baseline，并保持与 DUT 同机、同 case、同 warmup/repeat、同 `msprof` kernel-only timing scope；不得改用 CPU 性能耗时直接与 NPU kernel-only 相除，也不得写 Median 专属分支。
+- [ ] **用同一性能 caseset 重跑并重新裁决**：当前 50 个性能 case 必须全部进入采集；旧 `numel < 4096 → trivial-met` 规则不得恢复。两个 BF16、`dim=1` case 的 `161002` 在标杆归属解决前仍记作 baseline limitation，不归因 DUT。
+
+> **关闭条件**：只有任务书指定标杆与实际执行标杆的等价性得到可复核证据，或流水线已切换到任务书指定的小算子拼接 baseline，并完成同口径真机重跑，才能关闭本 TODO。在此之前，Median 的现有性能 ratio 不得用于宣称满足任务书性能条款。
 
 ### 裁决可信性（对抗式代码门的产物）
 - ✅ **假通过路径逐条堵死并钉负例**：validator 以 **spec 为权威**复算 canonical policy 做三处一致（`caseset`+`evidence` 同步放宽会被揪出）；judge 校验 metric（非负整数 / `numel>0` / 有限）；`gate_task3` 与 `caseset`/`evidence` 按 case 对齐（防「跑性能子集 + 伪造 summary」）；`repo_adapter` ssh/scp 注入防护；catlass 脚本 17 条对抗门。

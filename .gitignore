@@ -4,6 +4,10 @@
 # 任务书/规格素材（本地输入，不入库）
 /spec/
 
+# 真机本地配置：实际主机别名 / 容器名 / 远端路径不入库；只跟踪脱敏模板
+/.oprunway/*.env
+!/.oprunway/*.env.example
+
 # 生成物：bureau gazette / gazette 打包 / 验收跑测产物 / pycache
 /gazette/
 oprunway-canon-gazette.zip

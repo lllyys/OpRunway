@@ -69,5 +69,13 @@
     },
     "_baseline_note": "torch-对标场景基线 = 同一台真机上 torch_npu 跑 torch.median 的 kernel-only 耗时（真机内基线，非 GPU 外部数据）。采集 = aclnn_runtime/perf_msprof.py（msprof --task-time + MSTX 测量窗，只累加 device 计算 kernel、MEMCPY_ASYNC 不计入）；perf_compare 源无关、只读 us+scope+ratio、逻辑零改。**未接通 / 无有效基线一律 BLOCKED，绝不冒充达标。**"
   },
-  "task_pr_gaps": []
+  "task_pr_gaps": [
+    {
+      "kind": "perf_baseline_unverified",
+      "task_requirement": "相比于aclnnMedian、aclnnMedianDim的小算子拼接版本性能不劣化",
+      "configured_baseline": "torch_npu:torch.median",
+      "status": "needs_verification",
+      "reason": "任务书点名的是 NPU 小算子拼接版本；当前 spec 配置为同机 torch_npu 执行 torch.median。尚无可复核证据证明二者调用同一实现，因此现有 ratio 不得用于宣称满足任务书性能条款。须证明等价并固化版本/调用链 provenance，或切换到任务书指定 baseline 后用同一性能 caseset 重跑。"
+    }
+  ]
 }
