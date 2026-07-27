@@ -712,7 +712,10 @@ def threshold_for(standard, dtype, tolerance_source=None, taskdoc_tol=None):
     if standard == ASCENDOPTEST_DEFAULT:
         if dtype not in _AOT_TABLE:
             raise ValueError(f"ascendoptest_default 无 dtype={dtype!r} 阈值（表={list(_AOT_TABLE)}）")
-        _check_compute_supported(dtype)
+        # logical bf16 由 caseset/driver 以 uint16 输入、fp32 比较产物承载；policy 仍须使用
+        # AscendOpTest 的 bfloat16 行，不能因 numpy 无原生 bf16 dtype 而误拒。
+        if dtype != "bfloat16":
+            _check_compute_supported(dtype)
         tol, err, legacy = _AOT_TABLE[dtype]
         return {"kind": ASCENDOPTEST_DEFAULT, "tolerance": tol, "error_rate": err,
                 "eps": _AOT_EPS, "legacy": legacy, "not_settled": False}

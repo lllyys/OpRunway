@@ -8,6 +8,8 @@
   AscendOpTest 默认阈值；Median spec 同步更正标准并结构化挂账独立 `aclnnMedianDim` API surface 缺口。
 - **多输出 index 判据接入 AscendOpTest value policy**：从 canonical AOT `tolerance` 派生
   index-value-consistency 的相对/绝对单点界，保持字段驱动，不按算子身份分支。
+- **AscendOpTest logical BF16 接通既有存储 codec**：policy 取 AOT 的 bfloat16 阈值行，
+  实际比较仍使用 driver 展宽后的 fp32 产物，不再因 numpy 无原生 bf16 dtype 在生成期误拒。
 - **性能待采集文案去除 runner 误标**：统一说明精度总门/真机采集/采集端状态，不再让
   `cpp_extension` evidence 误写成 `aclnn_py`。
 - **正式 runner provenance 按 mode 绑定**：`new_example/aclnn_py` 继续只认 `user`；

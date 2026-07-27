@@ -74,6 +74,11 @@ class AscendOpTestDefaultTest(unittest.TestCase):
         out2 = np.array([np.inf, -np.inf, 5.0], dtype=np.float32)  # 第3位 nan vs 5.0 → 坏
         self.assertEqual(P.compute_metrics(out2, golden, pol)["bad_count"], 1)
 
+    def test_bfloat16_uses_logical_aot_row_with_fp32_storage_codec(self):
+        policy = P.threshold_for("ascendoptest_default", "bfloat16")
+        self.assertEqual(policy["tolerance"], 0.004)
+        self.assertEqual(policy["error_rate"], 0.004)
+
 
 class MereMareTest(unittest.TestCase):
     def test_mere_mean_mare_max_not_swapped(self):
