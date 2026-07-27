@@ -4,6 +4,11 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **独立 C++ Extension 通路开始落地**：按 Ascend/pytorch 所带 op-plugin 官方
+  `cpp_extension_base` 样例新增字段驱动源码生成器，固定使用 `NpuExtension`、
+  `npu_cpp_extension.h`、`EXEC_NPU_CMD_EXT` 与独立 `torch.ops` namespace；不复制会崩溃的旧
+  helper。该检查点先完成独立 runner form 的源码与静态 ABI 基础，不冒充
+  `cpp/new_example` 或 `aclnn_py`；真机 mode、收据和执行适配器后续独立接入。
 - **Median 最终验收 PASS（覆盖本节较早的 BLOCKED/C++ Extension 路线记录）**：最终源码精度
   60/60 PASS；从同一精度 caseset 选择的性能 40/40 获得同机同输入、同为 kernel-only 的有效双边数据，
   40/40 达到任务书 `ratio >= 1.0`，逐 case 最低 speedup 1.7459；Task 1/2/3 全通过并刷新根

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""aclnn_py 的纯静态 CP-C0 预检。
+"""ACLNN ABI 的纯静态 CP-C0 预检（aclnn_py / cpp_extension 共用）。
 
 只用 CP-A/B 已取到的 PR header 与 spec 做签名/slots 对账；不 clone、不 build、不加载
 `.so`、不访问 NPU。成功状态只能是 ``READY_WAIT_NPU_TRUST_GATE``，不能替代后续真机
@@ -117,10 +117,16 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
         result["bindings"]["spec_sha256"] = _sha(spec)
         result["bindings"]["pr_head_sha"] = pr_facts.get("head_sha")
 
-        if spec.get("runner_form", "cpp") != "aclnn_py":
+        runner_form = spec.get("runner_form", "cpp")
+        if runner_form not in ("aclnn_py", "cpp_extension"):
             result["status"] = "NOT_APPLICABLE"
             result["blocked_reasons"] = []
             return result
+        result["bindings"]["runner_form"] = runner_form
+        result["required_next_gate"] = (
+            "CPP_EXTENSION_BUILD_LOAD_AND_HARNESS_TRUST_GATE"
+            if runner_form == "cpp_extension"
+            else "NPU_BUILD_AND_HARNESS_TRUST_GATE")
 
         source_pr = source.get("pr")
         if not isinstance(source_pr, dict):
@@ -168,7 +174,8 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
 
         variants = precision_policy.call_variants(spec)
         if not variants:
-            raise ValueError("runner_form=aclnn_py 但 spec.call_variants 缺失")
+            raise ValueError(
+                f"runner_form={runner_form} 但 spec.call_variants 缺失")
         for index, variant in enumerate(variants):
             symbol = variant["symbol"]
             if symbol not in signatures:
@@ -203,7 +210,7 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="aclnn_py 静态签名预检；成功后仍必须过真机 trust gate")
+        description="ACLNN ABI 静态签名预检；成功后仍必须过对应真机 trust gate")
     ap.add_argument("--root", required=True, help="CP-A/B 工件根目录")
     ap.add_argument("--spec", required=True, help="root 内 spec 相对路径")
     ap.add_argument("--pr-facts", default="pr_facts.json",
