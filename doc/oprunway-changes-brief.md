@@ -4,6 +4,13 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **复现器恢复正式 workflow 的 vendor 运行路径**：从已校验 receipt 的 exact vendor ELF
+  确定性派生内容根与 `op_api/lib`，前置到 `ASCEND_CUSTOM_OPP_PATH` / `LD_LIBRARY_PATH`；
+  同时支持 `OPRUNWAY_REPRO_ENV_FILE` → `OPRUNWAY_SETENV` 两层 CANN 初始化，既不写死私有路径，
+  也不再因漏掉 OPP kernel 搜索路径得到 `executor is nullptr`。
+- **单 case 重放复刻正式 ELF 绑定顺序**：复现器先绑定并核验 exact vendor symbols，再 import
+  `torch_npu`，最后加载 Extension，同时在全部调用期间持有 vendor handle；避免系统 op-api
+  抢先占用同名 ACLNN symbol 后出现 `aclnnMedian executor is nullptr` 的 harness 假异常。
 - **复核入口免配置并区分启动错误**：报告仍在 OpRunway 工作树内时，逐 case 脚本自动向上定位
   `plugin/`，无需审核员先导出根变量；重放执行异常统一返回 rc=2，`review.sh` 明确报告“未执行完成”，
   不再把 ACLNN/环境异常当作精度 FAIL 稳定复现，也不再误称与原验收不一致。

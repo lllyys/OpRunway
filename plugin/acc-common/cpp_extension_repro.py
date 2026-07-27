@@ -49,6 +49,40 @@ def _failed_roles(evidence_row):
     return tuple(roles)
 
 
+def _bind_vendor_before_torch(ctypes_module, vendor, symbols):
+    """在 import torch/torch_npu 前绑定 exact vendor，与正式 driver 同序。"""
+    handle = ctypes_module.CDLL(vendor, mode=ctypes_module.RTLD_GLOBAL)
+    missing = [symbol for symbol in symbols if not hasattr(handle, symbol)]
+    if missing:
+        raise ReproError(f"指定 vendor library 缺 DUT symbols: {missing}")
+    return handle
+
+
+def _prepend_env_path(name, path):
+    current = [item for item in (os.environ.get(name) or "").split(":") if item]
+    os.environ[name] = ":".join(
+        [path] + [item for item in current if item != path])
+
+
+def _prepare_vendor_runtime_env(vendor):
+    """从 receipt 已校验的 exact vendor ELF 恢复正式 workflow 的 OPP/runtime 路径。"""
+    lib_dir = os.path.dirname(vendor)
+    op_api_dir = os.path.dirname(lib_dir)
+    vendor_root = os.path.dirname(op_api_dir)
+    if (os.path.basename(lib_dir) != "lib"
+            or os.path.basename(op_api_dir) != "op_api"):
+        raise ReproError(
+            f"vendor ELF 不符合 <vendor-root>/op_api/lib 结构: {vendor}")
+    _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", vendor_root)
+    _prepend_env_path("LD_LIBRARY_PATH", lib_dir)
+    toolkit = (os.environ.get("ASCEND_TOOLKIT_HOME") or "").strip()
+    if toolkit:
+        toolkit_lib = os.path.join(toolkit, "lib64")
+        if os.path.isdir(toolkit_lib):
+            _prepend_env_path("LD_LIBRARY_PATH", toolkit_lib)
+    return vendor_root
+
+
 def select_representatives(caseset, evidence, verdict, max_cases=5):
     """按 dtype × 失败输出组合稳定取首条，避免默认重放 58 个大 shape。"""
     case_by_id = {row["id"]: row for row in caseset["cases"]}
@@ -109,11 +143,16 @@ def reproduce(report_root, case_ids, out_dir=None):
     if _sha_file(vendor) != receipt["vendor"]["library_sha256"]:
         raise ReproError("vendor ELF 摘要漂移")
 
+    _prepare_vendor_runtime_env(vendor)
+    # 必须早于 import torch_npu：否则系统 op-api 可能先注册同名 aclnn symbol，
+    # Extension 随后绑定到错误实现。handle 还须持有到全部调用结束。
+    symbols = sorted({"aclnn" + row["symbol"] for row in plan["cases"]})
+    vendor_handle = _bind_vendor_before_torch(ctypes, vendor, symbols)
+
     import numpy as np
     import torch
     import torch_npu  # noqa: F401
 
-    ctypes.CDLL(vendor, mode=ctypes.RTLD_GLOBAL)
     torch.ops.load_library(artifact)
     namespace = getattr(torch.ops, receipt["load"]["namespace"])
     case_by_id = {row["id"]: row for row in caseset["cases"]}
@@ -192,6 +231,7 @@ def reproduce(report_root, case_ids, out_dir=None):
     }
     cpp_extension_driver._atomic_dump(
         os.path.join(out_dir, "repro_summary.json"), result)
+    del vendor_handle
     return result
 
 

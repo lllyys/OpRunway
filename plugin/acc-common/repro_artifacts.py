@@ -36,7 +36,18 @@ script_dir="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 report_root="$(cd "$script_dir/../.." && pwd)"
 if [[ -n "${{OPRUNWAY_REPRO_ENV_FILE:-}}" ]]; then
   # 环境文件由人工显式指定；生成器不猜私有机器路径。
+  if [[ ! -f "$OPRUNWAY_REPRO_ENV_FILE" ]]; then
+    echo "OPRUNWAY_REPRO_ENV_FILE 不存在: $OPRUNWAY_REPRO_ENV_FILE" >&2
+    exit 2
+  fi
   source "$OPRUNWAY_REPRO_ENV_FILE"
+  if [[ -n "${{OPRUNWAY_SETENV:-}}" ]]; then
+    if [[ ! -f "$OPRUNWAY_SETENV" ]]; then
+      echo "OPRUNWAY_SETENV 不存在: $OPRUNWAY_SETENV" >&2
+      exit 2
+    fi
+    source "$OPRUNWAY_SETENV"
+  fi
 fi
 plugin_root="${{OPRUNWAY_PLUGIN_ROOT:-${{CLAUDE_PLUGIN_ROOT:-}}}}"
 if [[ -z "$plugin_root" ]]; then
@@ -161,6 +172,7 @@ case "$cmd" in
     fi
     if [[ $rc -ne 0 && $rc -ne 1 ]]; then
       echo "复核未执行完成：启动或环境错误（replay_rc=$rc）；未与原验收结果比较，请先处理上方错误。" >&2
+      echo "若目标环境需初始化，请执行：OPRUNWAY_REPRO_ENV_FILE=<runtime-env绝对路径> ./repro/review.sh run $2" >&2
       exit "$rc"
     fi
     echo "复核结果与原验收不一致：original=$original replay_rc=$rc，请人工调查。" >&2
@@ -257,7 +269,12 @@ def generate_cpp_extension(report_root, caseset, verdict):
 
 报告位于 OpRunway 工作树内时会自动向上定位 `plugin/`，无需预先设置根变量。
 报告移出工作树后须设置 `OPRUNWAY_PLUGIN_ROOT`（或 `CLAUDE_PLUGIN_ROOT`）。
-如需加载目标机环境，可显式设置 `OPRUNWAY_REPRO_ENV_FILE`；生成器不会写入私有机器路径。
+如需加载目标机环境，可显式设置 `OPRUNWAY_REPRO_ENV_FILE`；脚本会继续加载其中声明的
+`OPRUNWAY_SETENV`。生成器不会把私有机器路径写入制品。
+
+```bash
+OPRUNWAY_REPRO_ENV_FILE=<runtime-env绝对路径> ./repro/review.sh run 1
+```
 复现命令返回 1 表示该 case 的失败得到复现，返回 0 表示本次未复现失败。
 每个逐 case 脚本也支持 `--describe`，只读展示、不执行 NPU。
 """)

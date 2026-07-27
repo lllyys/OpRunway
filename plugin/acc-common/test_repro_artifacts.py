@@ -44,10 +44,14 @@ class ReproArtifactsTest(unittest.TestCase):
             self.assertIn("$probe/plugin/acc-common/cpp_extension_repro.py",
                           case_script)
             self.assertIn("报告若已移出 OpRunway 仓", case_script)
+            self.assertIn('source "$OPRUNWAY_SETENV"', case_script)
+            self.assertIn("OPRUNWAY_REPRO_ENV_FILE 不存在", case_script)
             with open(os.path.join(root, "repro", "review.sh"),
                       encoding="utf-8") as src:
                 review_script = src.read()
             self.assertIn("复核未执行完成：启动或环境错误", review_script)
+            self.assertIn("OPRUNWAY_REPRO_ENV_FILE=<runtime-env绝对路径>",
+                          review_script)
             self.assertIn("rc -ne 0 && $rc -ne 1", review_script)
             with open(os.path.join(root, "repro", "index.tsv"),
                       encoding="utf-8") as src:

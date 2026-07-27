@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest import mock
 
@@ -5,6 +6,62 @@ import cpp_extension_repro as R
 
 
 class SelectRepresentativesTest(unittest.TestCase):
+    def test_prepares_exact_vendor_runtime_paths_without_duplicates(self):
+        vendor = "/work/vendor/vendors/customize_nn/op_api/lib/libcust_opapi.so"
+        with mock.patch.dict(os.environ, {
+                "ASCEND_CUSTOM_OPP_PATH": "/old",
+                "LD_LIBRARY_PATH": "/old/lib",
+                "ASCEND_TOOLKIT_HOME": "",
+        }, clear=False):
+            self.assertEqual(
+                R._prepare_vendor_runtime_env(vendor),
+                "/work/vendor/vendors/customize_nn",
+            )
+            self.assertEqual(
+                os.environ["ASCEND_CUSTOM_OPP_PATH"],
+                "/work/vendor/vendors/customize_nn:/old",
+            )
+            self.assertEqual(
+                os.environ["LD_LIBRARY_PATH"],
+                "/work/vendor/vendors/customize_nn/op_api/lib:/old/lib",
+            )
+            R._prepare_vendor_runtime_env(vendor)
+            self.assertEqual(
+                os.environ["ASCEND_CUSTOM_OPP_PATH"].count(
+                    "/work/vendor/vendors/customize_nn"), 1)
+
+    def test_rejects_vendor_outside_expected_layout(self):
+        with self.assertRaisesRegex(R.ReproError, "vendor-root"):
+            R._prepare_vendor_runtime_env("/tmp/libcust_opapi.so")
+
+    def test_vendor_handle_is_retained_and_symbols_are_resolved(self):
+        handle = object()
+
+        class FakeCtypes:
+            RTLD_GLOBAL = 123
+
+            @staticmethod
+            def CDLL(path, mode):
+                self.assertEqual((path, mode), ("/vendor.so", 123))
+                return type("Handle", (), {"aclnnMedian": object()})()
+
+        result = R._bind_vendor_before_torch(
+            FakeCtypes, "/vendor.so", ["aclnnMedian"])
+        self.assertTrue(hasattr(result, "aclnnMedian"))
+
+    def test_vendor_binding_rejects_missing_symbol(self):
+        class FakeCtypes:
+            RTLD_GLOBAL = 123
+
+            @staticmethod
+            def CDLL(_path, mode):
+                del mode
+                return object()
+
+        with self.assertRaisesRegex(R.ReproError, "缺 DUT symbols"):
+            R._bind_vendor_before_torch(
+                FakeCtypes, "/vendor.so", ["aclnnMedian"])
+
     def test_groups_by_dtype_and_failed_roles(self):
         caseset = {"cases": [
             {"id": "a", "inputs": [{"dtype": "float16"}]},
