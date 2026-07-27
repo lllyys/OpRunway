@@ -23,6 +23,79 @@ def _pct(value):
     return "—" if value is None else f"{float(value) * 100:.2f}%"
 
 
+def _atomic_write(path, text):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as out:
+        out.write(text)
+    os.replace(tmp, path)
+
+
+def _precision_failure_detail(failed):
+    lines = [
+        "# 精度失败明细",
+        "",
+        "> 本文件由 `verdict.json` 确定性渲染，只展示既有裁决，不重新判断 pass/fail。",
+        "",
+        f"- 失败总数：**{len(failed)}**",
+        "- 返回主报告：[验收报告.md](验收报告.md)",
+        "- 快捷入口：`./repro/review.sh list`、`./repro/review.sh show <序号>`、"
+        "`./repro/review.sh run <序号>`",
+        "",
+        "| 序号 | case_id | 判据 | 查看用例 | 重放复现 |",
+        "|---:|---|---|---|---|",
+    ]
+    for index, row in enumerate(failed, 1):
+        case_id = row.get("case_id")
+        lines.append(
+            f"| {index} | `{_cell(case_id)}` | {_cell(row.get('判据'))} | "
+            f"`./repro/review.sh show {index}` | `./repro/review.sh run {index}` |")
+    lines += [
+        "",
+        "也可按 case_id 操作：",
+        "",
+        "- `./repro/show_case.sh <case_id>`：查看冻结输入、golden、policy 和原始 metrics。",
+        "- `./repro/run_case.sh <case_id>`：在原验收环境重放。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _performance_failure_detail(non_passing):
+    lines = [
+        "# 性能失败明细",
+        "",
+        "> 本文件由 `perf_report.json` 确定性渲染；blocked、exception 等未通过状态按原字段展示，不自行归因为 DUT 失败。",
+        "",
+        f"- 未通过总数：**{len(non_passing)}**",
+        "- 返回主报告：[验收报告.md](验收报告.md)",
+        "",
+        "| 序号 | case_id | outcome | dtype | shape 类别 | NPU us | baseline us | speedup | 原因 |",
+        "|---:|---|---|---|---|---:|---:|---:|---|",
+    ]
+    for index, row in enumerate(non_passing, 1):
+        custom = row.get("custom") or {}
+        baseline = row.get("baseline") or {}
+        ratio = row.get("ratio", row.get("speedup"))
+        if ratio is None:
+            npu_us, baseline_us = custom.get("us"), baseline.get("us")
+            if isinstance(npu_us, (int, float)) and npu_us > 0 and isinstance(
+                    baseline_us, (int, float)) and baseline_us > 0:
+                ratio = baseline_us / npu_us
+        lines.append(
+            f"| {index} | `{_cell(row.get('case_id'))}` | `{_cell(row.get('outcome'))}` | "
+            f"`{_cell(row.get('dtype'))}` | `{_cell(row.get('shape_class'))}` | "
+            f"{_cell(custom.get('us', row.get('npu_us')))} | "
+            f"{_cell(baseline.get('us', row.get('baseline_us')))} | "
+            f"{_cell(ratio)} | {_cell(row.get('reason') or row.get('note'))} |")
+    lines += [
+        "",
+        "复核时以同目录的 `perf_report.json`、`evidence.json` 和原始 profiler 证据为准；"
+        "本文件不把缺 baseline、scope 不可比或环境异常静默改判为 DUT 失败。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def render(report_root):
     report_root = os.path.realpath(report_root)
     acceptance = _load(report_root, "acceptance.json")
@@ -102,21 +175,17 @@ def render(report_root):
         row for row in (verdict.get("per_case") or [])
         if row.get("精度") != "pass"
     ]
-    lines += [
-        "",
-        "## 精度失败明细",
-        "",
-        f"共 {len(failed)} 条。可先运行 `./repro/show_case.sh <case_id>` 查看冻结输入、"
-        "golden、policy 与原始 metrics，再运行 `./repro/run_case.sh <case_id>` 重放。",
-        "",
-        "| case_id | 判据 | 查看 | 重放 |",
-        "|---|---|---|---|",
-    ]
-    for row in failed:
-        case_id = row.get("case_id")
-        lines.append(
-            f"| `{_cell(case_id)}` | {_cell(row.get('判据'))} | "
-            f"`./repro/show_case.sh {case_id}` | `./repro/run_case.sh {case_id}` |")
+    lines += ["", "## 精度失败明细", ""]
+    if failed:
+        lines += [
+            f"共 **{len(failed)}** 条，逐项判据和复现入口见 "
+            "[精度失败明细.md](精度失败明细.md)。",
+            "",
+            "快速复核：`./repro/review.sh list`、`./repro/review.sh show 1`、"
+            "`./repro/review.sh run 1`。",
+        ]
+    else:
+        lines.append("无精度失败。")
 
     ps = perf.get("summary") or {}
     lines += [
@@ -139,6 +208,15 @@ def render(report_root):
             f"{_cell(row.get('baseline_us'))} | {_cell(row.get('speedup'))} |")
     if ps.get("status") == "skipped_precision_gate":
         lines += ["", "> 精度门未通过，性能未执行；本报告不提供虚构加速比。"]
+    perf_non_passing = perf.get("non_passing_cases") or []
+    if perf_non_passing:
+        lines += [
+            "",
+            f"性能未通过共 **{len(perf_non_passing)}** 条，逐项状态与原始原因见 "
+            "[性能失败明细.md](性能失败明细.md)。",
+        ]
+    elif ps.get("perf_cases", 0):
+        lines += ["", "无性能未通过 case。"]
 
     gaps = caseset.get("task_pr_gaps") or []
     lines += ["", "## 任务书与 PR 差额", ""]
@@ -156,8 +234,10 @@ def render(report_root):
         "",
         "- `acceptance.json`：最终确定性裁决。",
         "- `verdict.json`：逐 case 精度裁决与 dtype 汇总。",
+        "- `精度失败明细.md`：存在精度失败时生成的逐项复现索引。",
         "- `evidence.json`：逐 case 实测 metrics 和构建/加载收据。",
         "- `perf_report.json`：性能计划、采集和大小 shape 汇总。",
+        "- `性能失败明细.md`：存在性能未通过 case 时生成的逐项状态索引。",
         "- `caseset.json`：完整用例契约。",
         "- `repro/index.tsv`：全部 case 与启动脚本索引。",
         "- `repro/failed.tsv`：带编号的失败 case 清单。",
@@ -173,10 +253,27 @@ def write_report(report_root, filename="验收报告.md"):
     report_root = os.path.realpath(report_root)
     text = render(report_root)
     path = os.path.join(report_root, filename)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8", newline="\n") as out:
-        out.write(text)
-    os.replace(tmp, path)
+    _atomic_write(path, text)
+
+    verdict = _load(report_root, "verdict.json")
+    failed = [
+        row for row in (verdict.get("per_case") or [])
+        if row.get("精度") != "pass"
+    ]
+    precision_path = os.path.join(report_root, "精度失败明细.md")
+    if failed:
+        _atomic_write(precision_path, _precision_failure_detail(failed))
+    elif os.path.exists(precision_path):
+        os.unlink(precision_path)
+
+    perf = _load(report_root, "perf_report.json")
+    perf_non_passing = perf.get("non_passing_cases") or []
+    performance_path = os.path.join(report_root, "性能失败明细.md")
+    if perf_non_passing:
+        _atomic_write(
+            performance_path, _performance_failure_detail(perf_non_passing))
+    elif os.path.exists(performance_path):
+        os.unlink(performance_path)
     return path
 
 

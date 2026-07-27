@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **失败明细按验收维度拆分**：主报告只保留精度/性能失败数量、汇总和快捷复核入口；
+  有精度失败时另产 `精度失败明细.md`，有性能未通过 case 时另产 `性能失败明细.md`，
+  两者均从对应确定性 JSON 同步渲染，不把 blocked、异常或缺 baseline 擅自归因为 DUT 失败。
 - **正式落盘中文 Markdown 验收报告**：真机 `acceptance.json` 生成后同步渲染 `验收报告.md`，
   逐字展示 JSON 裁决、PR/ELF provenance、逐 dtype 精度汇总、失败 case、大小 shape 性能状态、
   task↔PR 差额和人工复现入口；renderer 不重判，失败也不改 JSON 裁决。新增审核员

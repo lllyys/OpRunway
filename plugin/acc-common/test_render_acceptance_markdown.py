@@ -34,6 +34,7 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
                                 "perf_cases": 0, "cases_scored": 0, "达标": 0},
                     "by_shape_class": [{"class": "small", "planned_cases": 1,
                                         "cases": 0, "cases_scored": 0, "达标": 0}],
+                    "non_passing_cases": [],
                 },
                 "evidence.json": {"cpp_extension_receipt": {}},
                 "caseset.json": {"op": "X", "task_pr_gaps": []},
@@ -47,6 +48,57 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
             self.assertIn("# X 算子验收报告", text)
             self.assertIn("`FAIL(精度)`", text)
             self.assertIn("| `float32` | 2 | 1 | 1 |", text)
-            self.assertIn("./repro/show_case.sh b", text)
+            self.assertIn("[精度失败明细.md](精度失败明细.md)", text)
+            self.assertNotIn("./repro/show_case.sh b", text)
             self.assertIn("./repro/review.sh show 1", text)
             self.assertIn("性能未执行", text)
+            detail = os.path.join(root, "精度失败明细.md")
+            self.assertTrue(os.path.isfile(detail))
+            with open(detail, encoding="utf-8") as src:
+                detail_text = src.read()
+            self.assertIn("./repro/review.sh show 1", detail_text)
+            self.assertIn("./repro/review.sh run 1", detail_text)
+            self.assertIn("`b`", detail_text)
+            self.assertFalse(os.path.exists(os.path.join(root, "性能失败明细.md")))
+
+    def test_splits_performance_non_passing_detail(self):
+        with tempfile.TemporaryDirectory() as root:
+            docs = {
+                "acceptance.json": {
+                    "op": "X", "overall": "FAIL(性能)", "state": "FAILED_PERFORMANCE",
+                    "precision_verdict": "pass", "perf_status": "failed",
+                    "repo_mode": "cpp_extension", "gate": {"passed": True},
+                },
+                "verdict.json": {
+                    "op": "X", "standard": "s",
+                    "accuracy_summary": {"total": 1, "passed": 1, "failed": 0,
+                                         "overall_pass_rate": 1.0, "by_dtype": []},
+                    "per_case": [{"case_id": "p0", "精度": "pass", "判据": "ok"}],
+                },
+                "perf_report.json": {
+                    "summary": {"status": "failed", "planned_cases": 1,
+                                "perf_cases": 1, "cases_scored": 1, "达标": 0},
+                    "by_shape_class": [],
+                    "non_passing_cases": [{
+                        "case_id": "p0", "outcome": "failed", "reason": "ratio below threshold",
+                        "dtype": "float16", "shape_class": "large",
+                        "custom": {"us": 4.0}, "baseline": {"us": 2.0},
+                    }],
+                },
+                "evidence.json": {"cpp_extension_receipt": {}},
+                "caseset.json": {"op": "X", "task_pr_gaps": []},
+            }
+            for name, value in docs.items():
+                with open(os.path.join(root, name), "w", encoding="utf-8") as out:
+                    json.dump(value, out)
+            path = R.write_report(root)
+            with open(path, encoding="utf-8") as src:
+                text = src.read()
+            self.assertIn("[性能失败明细.md](性能失败明细.md)", text)
+            self.assertNotIn("ratio below threshold", text)
+            detail = os.path.join(root, "性能失败明细.md")
+            with open(detail, encoding="utf-8") as src:
+                detail_text = src.read()
+            self.assertIn("ratio below threshold", detail_text)
+            self.assertIn("`p0`", detail_text)
+            self.assertFalse(os.path.exists(os.path.join(root, "精度失败明细.md")))
