@@ -34,14 +34,29 @@ def _case_script(case_id):
 set -euo pipefail
 script_dir="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 report_root="$(cd "$script_dir/../.." && pwd)"
-plugin_root="${{OPRUNWAY_PLUGIN_ROOT:-${{CLAUDE_PLUGIN_ROOT:-}}}}"
-if [[ -z "$plugin_root" ]]; then
-  echo "缺 OPRUNWAY_PLUGIN_ROOT（或 CLAUDE_PLUGIN_ROOT）" >&2
-  exit 2
-fi
 if [[ -n "${{OPRUNWAY_REPRO_ENV_FILE:-}}" ]]; then
   # 环境文件由人工显式指定；生成器不猜私有机器路径。
   source "$OPRUNWAY_REPRO_ENV_FILE"
+fi
+plugin_root="${{OPRUNWAY_PLUGIN_ROOT:-${{CLAUDE_PLUGIN_ROOT:-}}}}"
+if [[ -z "$plugin_root" ]]; then
+  # 报告仍位于 OpRunway 工作树中时自动向上寻找插件根，审核员无需先 export。
+  probe="$report_root"
+  while [[ "$probe" != "/" ]]; do
+    if [[ -f "$probe/plugin/acc-common/cpp_extension_repro.py" ]]; then
+      plugin_root="$probe/plugin"
+      break
+    fi
+    probe="$(dirname "$probe")"
+  done
+fi
+if [[ -z "$plugin_root" ]]; then
+  echo "无法自动定位 plugin；报告若已移出 OpRunway 仓，请设置 OPRUNWAY_PLUGIN_ROOT（或 CLAUDE_PLUGIN_ROOT）。" >&2
+  exit 2
+fi
+if [[ ! -f "$plugin_root/acc-common/cpp_extension_repro.py" ]]; then
+  echo "插件根无效，缺 $plugin_root/acc-common/cpp_extension_repro.py" >&2
+  exit 2
 fi
 if [[ "${{1:-}}" == "--describe" ]]; then
   exec python3 "$plugin_root/acc-common/repro_case_inspect.py" \\
@@ -144,6 +159,10 @@ case "$cmd" in
       echo "复核结果：原 PASS 已稳定复现。"
       exit 0
     fi
+    if [[ $rc -ne 0 && $rc -ne 1 ]]; then
+      echo "复核未执行完成：启动或环境错误（replay_rc=$rc）；未与原验收结果比较，请先处理上方错误。" >&2
+      exit "$rc"
+    fi
     echo "复核结果与原验收不一致：original=$original replay_rc=$rc，请人工调查。" >&2
     exit 1
     ;;
@@ -236,7 +255,8 @@ def generate_cpp_extension(report_root, caseset, verdict):
 - `show_case.sh <case_id>`：展示 case 定义、输入/golden 摘要、调用槽、policy 与原结果；
 - `cases/<case_id>.sh`：逐 case 可执行入口。
 
-运行环境须能访问本报告绑定的 Extension/vendor ELF，并设置 `OPRUNWAY_PLUGIN_ROOT`。
+报告位于 OpRunway 工作树内时会自动向上定位 `plugin/`，无需预先设置根变量。
+报告移出工作树后须设置 `OPRUNWAY_PLUGIN_ROOT`（或 `CLAUDE_PLUGIN_ROOT`）。
 如需加载目标机环境，可显式设置 `OPRUNWAY_REPRO_ENV_FILE`；生成器不会写入私有机器路径。
 复现命令返回 1 表示该 case 的失败得到复现，返回 0 表示本次未复现失败。
 每个逐 case 脚本也支持 `--describe`，只读展示、不执行 NPU。

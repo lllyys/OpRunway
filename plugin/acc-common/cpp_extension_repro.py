@@ -13,6 +13,7 @@ import ctypes
 import hashlib
 import json
 import os
+import sys
 import tempfile
 
 import cpp_extension_adapter
@@ -214,7 +215,14 @@ def main(argv=None):
     evidence = _load(os.path.join(report, "evidence.json"))
     verdict = _load(os.path.join(report, "verdict.json"))
     selected = _resolve_cases(args, caseset, evidence, verdict)
-    result = reproduce(report, selected, out_dir=args.out)
+    try:
+        result = reproduce(report, selected, out_dir=args.out)
+    except Exception as exc:
+        print(
+            f"重放执行异常（未形成精度复核结果）：{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 1 if result["reproduced_failures"] else 0
 

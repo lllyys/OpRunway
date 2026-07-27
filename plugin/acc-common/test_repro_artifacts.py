@@ -38,6 +38,17 @@ class ReproArtifactsTest(unittest.TestCase):
                 os.path.join(root, "repro", "show_case.sh"), os.X_OK))
             self.assertTrue(os.access(
                 os.path.join(root, "repro", "review.sh"), os.X_OK))
+            with open(os.path.join(root, "repro", "cases", "case_b.sh"),
+                      encoding="utf-8") as src:
+                case_script = src.read()
+            self.assertIn("$probe/plugin/acc-common/cpp_extension_repro.py",
+                          case_script)
+            self.assertIn("报告若已移出 OpRunway 仓", case_script)
+            with open(os.path.join(root, "repro", "review.sh"),
+                      encoding="utf-8") as src:
+                review_script = src.read()
+            self.assertIn("复核未执行完成：启动或环境错误", review_script)
+            self.assertIn("rc -ne 0 && $rc -ne 1", review_script)
             with open(os.path.join(root, "repro", "index.tsv"),
                       encoding="utf-8") as src:
                 index = src.read()

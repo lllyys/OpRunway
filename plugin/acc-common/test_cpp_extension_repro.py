@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import cpp_extension_repro as R
 
@@ -45,3 +46,16 @@ class SelectRepresentativesTest(unittest.TestCase):
                 {"evidence": []},
                 {"per_case": [{"case_id": "a", "精度": "fail"}]},
             )
+
+    @mock.patch.object(R, "_load")
+    @mock.patch.object(R, "_resolve_cases", return_value=["a"])
+    @mock.patch.object(R, "reproduce", side_effect=RuntimeError("executor is nullptr"))
+    def test_main_distinguishes_execution_error_from_precision_failure(
+            self, _reproduce, _resolve, load):
+        load.side_effect = [
+            {"cases": [{"id": "a"}]},
+            {"evidence": []},
+            {"per_case": [{"case_id": "a", "精度": "fail"}]},
+        ]
+        self.assertEqual(
+            R.main(["--report-root", "/tmp/report", "--case-id", "a"]), 2)
