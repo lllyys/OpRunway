@@ -74,9 +74,10 @@ description: OpRunway 验收 ②（CP-B）的子 agent——把已取材的算�
 - **任务书是验收权威**；PR 仅用于补 example/目标目录（被测物锚点）——**dtype 全集只对照、不作来源**（PR 声明 < 任务书全集 → 记 gap），**不代表『验收过了』**。
 - 确定性活（取材/fetch）在 `fetch_source.py`（primary CP-A 跑），本 agent 只做 NL 抽取判断；换运行时只换本壳，`acc-spec` skill 的 `references/` + `fetch_source.py` 不动；此可移植性依赖 canon 项 `cross-cli-unified-form`（proposed·未 settle，载重前需核）。
 - 相关：`skills/acc-spec`（本 agent 承载的 skill）、CP-A primary `fetch_source.py`（取材）、CP-B primary `gen_cases.py --dry-run`（下游契约自检，**非裁决**）、CP-D 真机 `run_workflow.py --mode <mode>`、`op-acceptance`（dispatch 本 agent 的 orchestrator）。
-  ⚠ `<mode>` **据 `spec.runner_form` 派生**（cpp（或未声明）→ `new_example`、`aclnn_py` → `aclnn_py`；`mock`/`catlass*` 派生不出、只能显式指定）。
+  ⚠ `<mode>` **据 `spec.runner_form` 派生**（cpp（或未声明）→ `new_example`、`aclnn_py` → `aclnn_py`、`cpp_extension` → `cpp_extension`；`mock`/`catlass*` 派生不出、只能显式指定）。
   **别把 `new_example` 当「唯一产验收裁决的通路」**——`run_workflow.py:37` 的 `_REAL_MACHINE_MODES` 是 `{new_example, aclnn_py}` **两条**，
   median+PR6429 的真机 56/56 精度 PASS 正是 `aclnn_py` 跑出来的。
   ⚠ **这条与本 agent 的职责直接相关**：`runner_form` 正是**本 agent 抽出来的字段**——抽错就把下游整条通路带偏
+  - 任务书把 stock `torch.*` 指定为功能真值时，默认抽成 `runner_form="cpp_extension"`；DUT 与 baseline 必须分属独立 namespace，禁止用 stock torch 调用冒充 DUT。同步生成 `torch_parity_matrix`：优先读取本地 cannbot 对应 case_design 的完整 coverage 轴和 SHA-256；无对应设计时按任务书/torch 签名提出矩阵并标推断、待用户确认，不能静默退回 legacy 60-case 抽样。
   （cpp 通路真机 dtype 白名单只有 fp32/fp16/bf16，`int32` 落 `DEFERRED_NP_BY_FORM["cpp"]`、真机 fail-closed → 覆盖缺一块；
   且 `new_example` 的性能基线是内置 TBE、`aclnn_py` 才是 torch，「任务书对标 torch」场景走错就比错了基线）。

@@ -4,6 +4,10 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **torch 对标 agent/skill 路由改造**：spec extractor 对任务书指定 stock torch 真值的场景默认产
+  `runner_form=cpp_extension` 与 cannbot 来源的 `torch_parity_matrix`；runner agent 只调用官方
+  codegen，不手写 per-op runner。workflow 增加独立 CP-C build/load receipt 门，明确迁移后旧
+  aclnn_py PASS 不可复用。
 - **完整精度矩阵与性能子集解耦**：`perf.case_selection.max_cases` 可从同一精度 caseset 按
   dtype×small/large 队列轮转选择固定数量，保留原 case_id；Median 可据 cannbot 口径从 1152 条精度
   矩阵选 50 条性能用例，不再把“完整精度覆盖”误解成“1152 条全部采性能”。
