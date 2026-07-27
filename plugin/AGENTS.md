@@ -25,7 +25,7 @@ agents:
 > **脚本是内部实现——用户全程只对话、不碰脚本、不被要求手敲命令**（proposed·未 settle，载重前需核）。
 
 **输入**：算子任务书（md 本地路径 **或** `http(s)` 链接）+ PR 链接。
-**产出**（**真机验收通路：`new_example` / `aclnn_py` / `cpp_extension`**）：`reports/<op>/` 下 `correspondence.json` / `caseset.json` / `evidence.json` / `verdict.json` / `baseline.json`（有基线时）/ `perf_report.json` / `acceptance.json` + 中文验收报告。
+**产出**（**真机验收通路：`new_example` / `aclnn_py` / `cpp_extension`**）：`reports/<op>/` 下 `correspondence.json` / `caseset.json` / `evidence.json` / `verdict.json` / `baseline.json`（有基线时）/ `perf_report.json` / `acceptance.json` + 中文验收报告；`cpp_extension` 另产与裁决解耦的 `repro/` 全量人工复现入口。
 ⚠ **非验收通路（mock / catlass_mock）产的是** `dev_run_summary.json` + `dev_precision_check.json`（带 `evidence_grade=development` + NON-ACCEPTANCE 戳），**物理上不产 `acceptance.json` / `verdict.json`**（C5，2026-07-22）。
 
 ## 跑测 mode 的唯一真源：`spec.runner_form`（别写死）
@@ -110,7 +110,9 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   FAIL → dispatch `rootcause`（先解耦「被测算子 vs harness」再归因）。
 - **CP-E 报告**（primary）：**逐字引用** `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + `task_pr_gaps` + 各维度；
   性能同时报告 `cases_scored`、有效 us/speedup 数和计划覆盖分母；所有性能 case 都须真实采集，`cases_scored=0` 明确性能未验证；
-  `needs_review` 不当 pass；门 `FAILED` → `BLOCKED`。
+  `needs_review` 不当 pass；门 `FAILED` → `BLOCKED`。`cpp_extension` 的 `repro/index.tsv` 列全 case 与原结果，
+  `show_case.sh` / 逐 case `--describe` 展示冻结输入摘要、attrs、调用槽、golden、policy 与原 metrics，
+  `run_case.sh` / `cases/*.sh` 负责重放；全部明确 `acceptance_verdict=null`，不得反向改写验收裁决。
 
 ### subagent 与 dispatch_mode 表
 

@@ -4,6 +4,10 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **验收后列出全部 case 启动脚本**：`cpp_extension` Task2 完成后生成 `repro/index.tsv`、
+  统一 `run_case.sh` 和每个 case 的独立薄脚本；脚本复用本轮冻结输入/ELF，PASS/FAIL 都可人工重放，
+  且 `acceptance_verdict=null`、生成异常不改验收裁决；`show_case.sh` / 单脚本 `--describe`
+  可直接查看输入首尾样本与范围、attrs、调用槽、golden、精度 policy 和原始 metrics，大张量不刷全量。
 - **Extension FAIL 快速人工复现**：新增通用 `cpp_extension_repro.py`，复核既有 receipt/ELF 后
   直接重放报告中的原始输入与 golden；默认按 dtype×失败输出组合取代表项，也可指定单 case 或全量失败，
   只产人工复现摘要、不改验收裁决。

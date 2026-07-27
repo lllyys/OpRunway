@@ -20,6 +20,7 @@ import argparse, json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_cases, repo_adapter, validator, perf_compare  # noqa: E402
 import cpp_extension_adapter  # noqa: E402
+import repro_artifacts  # noqa: E402
 import validate_acceptance_state as gate  # noqa: E402
 import verify_aclnn_harness  # noqa: E402
 
@@ -345,6 +346,22 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         _dump(verdict, _DEV_VERDICT_FILE)
     o = verdict["overall"]
     print(f"[Task2 run+validate] 裁决={o['verdict']} {o['counts']}")
+    # 人工复现制品与验收裁决物理/语义解耦：只消费已落盘 Task2 事实，生成失败不改写 verdict。
+    # 当前先接 cpp_extension backend；其它 runner form 待各自提供稳定的单 case replay 后再登记。
+    if mode == "cpp_extension":
+        try:
+            repro = repro_artifacts.generate_cpp_extension(out_dir, caseset, verdict)
+            print(f"[Task2 repro] 已生成 {repro['case_count']} 个逐 case 人工复现启动脚本")
+        except (OSError, RuntimeError, TypeError, ValueError) as ex:
+            _dump({
+                "schema": "oprunway.repro_generation_error",
+                "schema_version": 1,
+                "backend": "cpp_extension",
+                "error": f"{type(ex).__name__}: {ex}",
+                "acceptance_verdict": None,
+                "note": "复现制品生成失败，不改变验收裁决",
+            }, "repro_generation_error.json")
+            print(f"[Task2 repro] 生成失败（不改变验收裁决）：{type(ex).__name__}: {ex}")
     gpu_prov = None
     # §精度门前置 + fail-fast（用户 2026-07-15，评审 #4）：精度非全过（pass/passed_with_risk）→ **跳过 Task3 性能**、
     # 提前结束。**不 early-return**——照走下方统一 overall/门流程（gate/runner_source 优先级不变、prec==fail 自然
