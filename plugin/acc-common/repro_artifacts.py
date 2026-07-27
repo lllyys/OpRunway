@@ -159,7 +159,7 @@ case "$cmd" in
     [[ -n "$case_id" ]] || { echo "找不到失败编号: $2" >&2; exit 2; }
     original="$(awk -F '\t' -v id="$case_id" 'NR>1 && $1==id {print $5; exit}' "$script_dir/index.tsv")"
     set +e
-    "$script_dir/run_case.sh" "$case_id"
+    "$script_dir/run_case.sh" "$case_id" --human-summary
     rc=$?
     set -e
     if [[ "$original" == "fail" && $rc -eq 1 ]]; then

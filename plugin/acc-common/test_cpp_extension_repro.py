@@ -1,4 +1,5 @@
 import os
+import io
 import unittest
 from unittest import mock
 
@@ -33,6 +34,33 @@ class SelectRepresentativesTest(unittest.TestCase):
     def test_rejects_vendor_outside_expected_layout(self):
         with self.assertRaisesRegex(R.ReproError, "vendor-root"):
             R._prepare_vendor_runtime_env("/tmp/libcust_opapi.so")
+
+    def test_human_summary_exposes_actual_and_golden_failure(self):
+        result = {
+            "out_dir": "/tmp/repro",
+            "results": [{
+                "case_id": "x",
+                "outputs": [
+                    {"name": "value", "role": "value", "state": "pass"},
+                    {
+                        "name": "index", "role": "index", "state": "fail",
+                        "reason": "mismatch=1/numel=1",
+                        "actual_sample": [2147483647],
+                        "golden_sample": [17],
+                        "sample_limit": 8,
+                    },
+                ],
+            }],
+        }
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            R._print_human_summary(result)
+        text = out.getvalue()
+        self.assertIn("失败输出: index (role=index)", text)
+        self.assertIn("失败判据: mismatch=1/numel=1", text)
+        self.assertIn("actual 前 8 项: [2147483647]", text)
+        self.assertIn("golden 前 8 项: [17]", text)
+        self.assertIn("/tmp/repro/repro_summary.json", text)
 
     def test_vendor_handle_is_retained_and_symbols_are_resolved(self):
         handle = object()

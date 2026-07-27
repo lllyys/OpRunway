@@ -50,6 +50,7 @@ class ReproArtifactsTest(unittest.TestCase):
                       encoding="utf-8") as src:
                 review_script = src.read()
             self.assertIn("复核未执行完成：启动或环境错误", review_script)
+            self.assertIn('"$case_id" --human-summary', review_script)
             self.assertIn("OPRUNWAY_REPRO_ENV_FILE=<runtime-env绝对路径>",
                           review_script)
             self.assertIn("rc -ne 0 && $rc -ne 1", review_script)

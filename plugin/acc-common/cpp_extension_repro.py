@@ -12,6 +12,7 @@ import argparse
 import ctypes
 import hashlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -81,6 +82,55 @@ def _prepare_vendor_runtime_env(vendor):
         if os.path.isdir(toolkit_lib):
             _prepend_env_path("LD_LIBRARY_PATH", toolkit_lib)
     return vendor_root
+
+
+def _json_sample(np, array, limit=8):
+    values = np.asarray(array).reshape(-1)[:limit].tolist()
+    safe = []
+    for value in values:
+        if isinstance(value, float) and not math.isfinite(value):
+            safe.append(str(value))
+        else:
+            safe.append(value)
+    return safe
+
+
+def _attach_output_samples(np, work, output):
+    dtype = output.get("out_dtype")
+    disk_dtype = "uint8" if dtype == "bool" else dtype
+    actual = np.fromfile(
+        os.path.join(work, output["out_path"]), dtype=np.dtype(disk_dtype))
+    golden = np.load(os.path.join(work, output["golden_path"]))
+    return {
+        "actual_sample": _json_sample(np, actual),
+        "golden_sample": _json_sample(np, golden),
+        "sample_limit": 8,
+    }
+
+
+def _print_human_summary(result):
+    print("单 case 精度复核结果")
+    for case in result["results"]:
+        failed = [row for row in case["outputs"] if row["state"] != "pass"]
+        passed = [row.get("name") or row.get("role") for row in case["outputs"]
+                  if row["state"] == "pass"]
+        print(f"\ncase_id: {case['case_id']}")
+        if passed:
+            print("通过输出: " + ", ".join(str(item) for item in passed))
+        for output in failed:
+            print(
+                f"失败输出: {output.get('name') or '?'} "
+                f"(role={output.get('role') or '?'})")
+            print(f"失败判据: {output['reason']}")
+            print(
+                "actual 前 "
+                f"{output.get('sample_limit', 8)} 项: "
+                f"{json.dumps(output.get('actual_sample'), ensure_ascii=False)}")
+            print(
+                "golden 前 "
+                f"{output.get('sample_limit', 8)} 项: "
+                f"{json.dumps(output.get('golden_sample'), ensure_ascii=False)}")
+    print(f"\n完整复核证据: {result['out_dir']}/repro_summary.json")
 
 
 def select_representatives(caseset, evidence, verdict, max_cases=5):
@@ -211,6 +261,7 @@ def reproduce(report_root, case_ids, out_dir=None):
                 "metrics": output["metrics"], "policy": output["policy"],
                 "out_path": output["out_path"],
                 "golden_path": output["golden_path"],
+                **_attach_output_samples(np, work, output),
             })
         summary.append({
             "case_id": row["case_id"],
@@ -246,6 +297,9 @@ def main(argv=None):
     parser.add_argument("--max-cases", type=int, default=5,
                         help="默认代表集最大 case 数（默认 5）")
     parser.add_argument("--out", help="输出目录；默认在报告 work 下创建唯一临时目录")
+    parser.add_argument(
+        "--human-summary", action="store_true",
+        help="只在终端显示失败现象摘要；完整 JSON 仍写入 repro_summary.json")
     args = parser.parse_args(argv)
     if args.max_cases < 1:
         parser.error("--max-cases 必须 >= 1")
@@ -263,7 +317,10 @@ def main(argv=None):
             file=sys.stderr,
         )
         return 2
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if args.human_summary:
+        _print_human_summary(result)
+    else:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     return 1 if result["reproduced_failures"] else 0
 
 
