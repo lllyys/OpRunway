@@ -349,6 +349,16 @@ class RunnerSourceGateTest(unittest.TestCase):
             self.assertEqual(W._exit_code(bad), 1)
             self.assertEqual(W._canonical_state(bad, {"status": "ok"}), "BLOCKED_EVIDENCE_INCOMPLETE")
 
+    def test_runner_source_is_bound_to_real_machine_mode(self):
+        import run_workflow as W
+        self.assertTrue(W._runner_source_allowed("new_example", "user"))
+        self.assertTrue(W._runner_source_allowed("aclnn_py", "user"))
+        self.assertTrue(W._runner_source_allowed(
+            "cpp_extension", "generated_official_cpp_extension"))
+        self.assertFalse(W._runner_source_allowed("cpp_extension", "user"))
+        self.assertFalse(W._runner_source_allowed(
+            "new_example", "generated_official_cpp_extension"))
+
     def test_run_new_example_return_carries_runner_source(self):
         """契约：run_new_example 的返回字典带 runner_source（provenance 进 evidence，恒 user）。"""
         import inspect, repo_adapter as R

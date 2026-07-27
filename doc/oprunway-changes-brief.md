@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **正式 runner provenance 按 mode 绑定**：`new_example/aclnn_py` 继续只认 `user`；
+  `cpp_extension` 只认经 Task2 receipt 门复核的 `generated_official_cpp_extension`，不再被旧
+  new-example 词表误挡，也不能跨 mode 冒充来源。
 - **性能选择收据门区分排除原因**：Task1 复核分别校验退化输入排除与
   `balanced_max_cases_limit` 的上限/平衡轴，不再把正常 max-cases 未入选项误报成退化规则不一致。
 - **cpp_extension 性能采集前补齐精度总门**：不再因“部分性能 case 自身精度通过”就提前启动

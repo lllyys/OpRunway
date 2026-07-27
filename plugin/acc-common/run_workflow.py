@@ -194,6 +194,16 @@ def _exit_code(overall):
     return 1
 
 
+def _runner_source_allowed(mode, source):
+    """真机 mode 与 runner provenance 的受控对应；cpp_extension 另由收据门证明生成物。"""
+    expected = {
+        "new_example": "user",
+        "aclnn_py": "user",
+        "cpp_extension": "generated_official_cpp_extension",
+    }
+    return source == expected.get(mode)
+
+
 def _resolve_mode(spec, requested_mode):
     """据 runner_form 派生真机 mode，并拒绝显式走错真机通路。
 
@@ -441,8 +451,9 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     runner_source = evidence.get("runner_source")
     if not gate_passed:
         overall = "BLOCKED(验收门未过)" if is_acceptance else "BLOCKED(管路自检未过)"
-    elif mode in _REAL_MACHINE_MODES and runner_source != "user":
-        overall = f"BLOCKED(runner_source 非 user/缺失: {runner_source!r})"
+    elif mode in _REAL_MACHINE_MODES and not _runner_source_allowed(mode, runner_source):
+        overall = (
+            f"BLOCKED(runner_source 与 mode={mode!r} 不匹配/缺失: {runner_source!r})")
     elif prec == "blocked_golden_unauthorized":
         # 批 5：真值来路不明 → 无从得出结论。**不能报成 FAIL(精度)**——那会让人去查算子、查错方向。
         # 排在 fail 之前：来路不明的真值下，「精度 fail」这个结论本身就不成立。
