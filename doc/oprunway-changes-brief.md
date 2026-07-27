@@ -4,6 +4,7 @@
 
 ## 2026-07-26（非真机流程性能优化）
 
+- **仓规收敛为单一源**：保留并重构原 `AGENTS.md` 的架构、mode、能力边界和深挖入口，同时合入原 `CLAUDE.md` 中仍有效的泛化细则、方案/副作用门、远程 compute、文档落点、push 前审修、canon grounding、外部仓复用边界、发布形态与 `@BUREAU.md` 路由；已被后续实测推翻的旧机器/验收状态不迁移。`CLAUDE.md` 现只保留 `@AGENTS.md`，以后不再双写。
 - **真机环境入口收敛**：新增 `doc/oprunway-real-machine-environment.md` 记录 A2/A3 与 950 的最近验证能力、版本、探测命令和安全边界；实际 SSH alias、容器名及远端路径写入被 `.gitignore` 忽略的 `.oprunway/real-machine.env`，tracked 模板为 `.oprunway/real-machine.env.example`。`CLAUDE.md` / `AGENTS.md` 改为链接该入口，删除 CLAUDE 中已过时且互相矛盾的机器快照。
 - **完成换 session 前的口径收尾**：仓根/插件入口与 workflow skill 从旧“精度 56/56、性能零数据”更新为最新真机事实（精度 60/60；custom 50/50、baseline 48/50；48 对评分、35 对达标、2 对 baseline blocked）；Median spec 把“任务书小算子拼接标杆是否等同 `torch_npu torch.median`”从 `_note` 提升为结构化 `task_pr_gaps`，新增脱敏 handoff `doc/oprunway-session-handoff-2026-07-26.md`。等价性解决前不得宣称满足任务书性能条款。
 - **性能采集已按 cannbot 真机坐实并对齐**：参考仓两侧实际走 `msprof CLI + libms_tools_ext.so ctypes MSTX + task_time CSV`；A3 probe 得 `range_id=1` 和有效 kernel 窗。OpRunway custom/torch baseline 现统一该 collector，live 路径钉 CSV；DB parser 仅保留历史/离线兼容。新增对 msprof 控制 task `PROFILER_TRACE_EX` 的窄白名单，其他未知类型继续 fail-closed。
