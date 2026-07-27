@@ -154,7 +154,7 @@ class CppExtensionAdapterContractTest(unittest.TestCase):
             A.prepare(spec, caseset, td)
             with mock.patch(
                     "aclnn_runtime.perf_msprof.accuracy_pass_ids",
-                    return_value={"c1"}), mock.patch(
+                    return_value={"c0", "c1"}), mock.patch(
                     "aclnn_runtime.perf_msprof.select_perf_cases",
                     return_value=(["c1"], [{"case_id": "c0",
                                            "reason": "skipped_accuracy_failed"}])), \
@@ -171,6 +171,26 @@ class CppExtensionAdapterContractTest(unittest.TestCase):
         self.assertEqual(plan["cases"], ["c1"])
         self.assertEqual(skipped[0]["case_id"], "c0")
 
+    def test_partial_accuracy_never_starts_perf_plan(self):
+        spec = _spec()
+        caseset = _caseset()
+        for case in caseset["cases"]:
+            case["dims"] = ["功能", "精度", "性能"]
+        with tempfile.TemporaryDirectory() as td:
+            A.prepare(spec, caseset, td)
+            with mock.patch(
+                    "aclnn_runtime.perf_msprof.accuracy_pass_ids",
+                    return_value={"c0"}), mock.patch(
+                    "aclnn_runtime.perf_msprof.select_perf_cases") as select:
+                plan, skipped = A._write_perf_plan(
+                    caseset, td, [{"case_id": "c0"}],
+                    {"artifact": {}, "load": {}, "vendor": {}})
+        self.assertIsNone(plan)
+        self.assertEqual(
+            skipped,
+            [{"case_id": "c1", "reason": "skipped_precision_overall_gate"}])
+        select.assert_not_called()
+
     def test_perf_plan_never_guesses_device(self):
         spec = _spec()
         spec["perf"] = {"baseline": "torch_npu"}
@@ -178,7 +198,7 @@ class CppExtensionAdapterContractTest(unittest.TestCase):
             A.prepare(spec, _caseset(), td)
             with mock.patch(
                     "aclnn_runtime.perf_msprof.accuracy_pass_ids",
-                    return_value={"c0"}), mock.patch(
+                    return_value={"c0", "c1"}), mock.patch(
                     "aclnn_runtime.perf_msprof.select_perf_cases",
                     return_value=(["c0"], [])), mock.patch.dict(
                         os.environ, {}, clear=True):

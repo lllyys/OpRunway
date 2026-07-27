@@ -188,6 +188,19 @@ def _write_perf_plan(caseset, work, evidence, receipt):
 
     template = _strict_json(os.path.join(work, _PERF_TEMPLATE))
     passed = PM.accuracy_pass_ids(evidence)
+    precision_ids = {
+        case["id"] for case in caseset.get("cases") or []
+        if "精度" in (case.get("dims") or [])
+    }
+    if not precision_ids:
+        precision_ids = {case["id"] for case in caseset.get("cases") or []}
+    if passed != precision_ids:
+        # 与 run_workflow 的 Task2 总门同口径：任何应裁精度 case 未通过，都不得提前采性能。
+        # 性能 case 虽是 precision-pass 子集，但这个“子集”只在整份精度验收通过后做选择。
+        return None, [{
+            "case_id": cid,
+            "reason": "skipped_precision_overall_gate",
+        } for cid in sorted(precision_ids - passed)]
     selected, skipped = PM.select_perf_cases(caseset, passed)
     if not selected:
         return None, skipped

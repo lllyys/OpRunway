@@ -4,6 +4,8 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **cpp_extension 性能采集前补齐精度总门**：不再因“部分性能 case 自身精度通过”就提前启动
+  profiler；所有应裁精度 case 全过后才生成性能计划，与 workflow 的 Task2→Task3 总门保持一致。
 - **DUT 越界 index 改落明确 FAIL 证据**：`index_value_consistency` 对 oracle/维度契约错误继续
   fail-closed；对 actual 的负数或正向越界不再让整轮 traceback，而是记录
   `mismatch + invalid_index_count`，由同一 validator 判 FAIL、最终门独立复算。
