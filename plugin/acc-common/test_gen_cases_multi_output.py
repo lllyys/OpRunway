@@ -397,21 +397,21 @@ class MedianGoldenOutShapeTest(unittest.TestCase):
         spec.loader.exec_module(cls.mod)
 
     def test_global_scalar(self):
-        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": None, "keepdim": False}), ())
+        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": None, "keepDim": False}), ())
 
     def test_bydim_reduce(self):
-        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": 0, "keepdim": False}), (6,))
-        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": 1, "keepdim": False}), (4,))
+        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": 0, "keepDim": False}), (6,))
+        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": 1, "keepDim": False}), (4,))
 
     def test_keepdim(self):
-        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": 0, "keepdim": True}), (1, 6))
+        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": 0, "keepDim": True}), (1, 6))
 
     def test_negative_dim(self):
-        self.assertEqual(self.mod.out_shape([(2, 3, 4)], {"dim": -1, "keepdim": False}), (2, 3))
+        self.assertEqual(self.mod.out_shape([(2, 3, 4)], {"dim": -1, "keepDim": False}), (2, 3))
 
     def test_invalid_dim_fail_closed(self):
         with self.assertRaises(ValueError):
-            self.mod.out_shape([(4, 6)], {"dim": 5, "keepdim": False})
+            self.mod.out_shape([(4, 6)], {"dim": 5, "keepDim": False})
 
     def test_contract_block_verifies_tier1(self):
         """真任务书快照在算子目录 → GOLDEN_CONTRACT 授权可核、tier1。"""

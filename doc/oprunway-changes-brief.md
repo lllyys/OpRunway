@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **Median 真实 ABI 属性名回归断言同步**：补齐 sample fixtures 后 243 个测试通过，剩余 1 个失败
+  是真实 Median golden 测试仍传旧 `keepdim`，而 PR/spec ABI 字段为 `keepDim`；现统一真实见证断言，
+  fake 通用夹具的自有 lowercase 字段不改。
 - **Median 性能选择回归断言同步**：A3 容器首轮相关单测 150 通过，唯一真实失败是测试仍断言旧
   `value_profile` 标签；现改为与完整 cannbot 对标矩阵一致的 `torch_parity`。其余 93 个 error
   均由首轮限定 payload 未携其它算子 sample fixture 引起，补齐 fixture 后重跑，不冒充代码失败。
