@@ -114,6 +114,7 @@ import glob
 import json
 import os
 import re
+import signal
 import shutil
 import sqlite3
 import statistics
@@ -1481,6 +1482,32 @@ def build_perf_record(case_id, custom, baseline):
     return record
 
 
+def side_failure_reason(label, side):
+    """从采集侧结构化 detail 提炼失败原因；只做诊断转录，不做归因。"""
+    side = side if isinstance(side, dict) else {}
+    detail = side.get("detail") if isinstance(side.get("detail"), dict) else {}
+    parts = [f"{label} 侧未产生可计时的 device kernel（behavior={side.get('behavior')}）"]
+    if detail.get("returncode") not in (None, 0):
+        parts.append(f"returncode={detail['returncode']}")
+    if isinstance(detail.get("note"), str) and detail["note"].strip():
+        parts.append(detail["note"].strip())
+    if isinstance(detail.get("parse_error"), str) and detail["parse_error"].strip():
+        parts.append(f"parse_error={detail['parse_error'].strip()}")
+    tail = detail.get("output_tail")
+    if isinstance(tail, str):
+        signals = []
+        for line in tail.splitlines():
+            text = line.strip()
+            lowered = text.lower()
+            if text and any(token in lowered for token in (
+                    "error", "failed", "traceback", "runtimeerror", "acl", "timeout")):
+                signals.append(text)
+        if signals:
+            excerpt = " | ".join(signals[-3:])
+            parts.append(f"error_excerpt={excerpt[-800:]}")
+    return "；".join(parts)
+
+
 def build_custom_perf_map(records, skipped=None):
     """records → `{case_id: {"scope","us","note",...}}`，供 evidence `perf` 字段。
 
@@ -1498,7 +1525,7 @@ def build_custom_perf_map(records, skipped=None):
                  "behavior": custom.get("behavior"),
                  "execution_path": custom.get("execution_path")}
         if not timed:
-            entry["note"] = f"custom 侧未产生可计时的 device kernel（behavior={custom.get('behavior')}）"
+            entry["note"] = side_failure_reason("custom", custom)
         out[cid] = entry
     for item in skipped or []:
         cid = item.get("case_id")
@@ -1533,7 +1560,7 @@ def build_baseline_document(records, *, op=None, warmup=DEFAULT_WARMUP, repeat=D
             per_case.append(item)
         else:
             excluded.append({"case_id": cid, "behavior": behavior,
-                             "reason": baseline.get("note") or "baseline 未产生可计时 device kernel"})
+                             "reason": side_failure_reason("baseline", baseline)})
     for item in skipped or []:
         excluded.append({"case_id": item.get("case_id"),
                          "behavior": None,
@@ -1554,7 +1581,7 @@ def build_baseline_document(records, *, op=None, warmup=DEFAULT_WARMUP, repeat=D
 
 # ── baseline 侧 torch 调用计划（spec `perf.torch_baseline` 声明，slot-name 驱动）────────
 
-def resolve_torch_baseline_plan(torch_baseline, call):
+def resolve_torch_baseline_plan(torch_baseline, call, case=None):
     """据 spec `perf.torch_baseline` 把该 case **已解析好的** `aclnn_call.slots` 翻成 torch 调用计划。
 
     契约（字段驱动、op-中立）::
@@ -1565,8 +1592,10 @@ def resolve_torch_baseline_plan(torch_baseline, call):
 
     · `positional` 列的是 **slot name**（与 aclnn 头签名同名），按列出顺序作 torch 位置参数；
       **缺任一即 fail-closed**（不猜、不重排）。
-    · `keyword` 是 `slot name -> torch 形参名`；**该 case 没有这个 slot 就自然缺席**——
-      变体（如全局 median 无 `dim`）由此自动跟随，**不得为此写任何算子分支**。
+    · `keyword` 是 `slot name -> torch 形参名`；**该 case 没有这个 slot 就自然缺席**。
+    · `keyword_groups` 可声明一组 keyword 只在某个语义 attr 满足条件时整体出现。例如统一 ACLNN
+      ABI 即使全局变体仍携带 dim/keepDim 的占位 slot，也可按 case.attrs.dim==null 同时省略这组
+      torch kwarg。规则完全由 spec 字段驱动，不按算子身份分支。
     · out / out_null slot 一律忽略（torch 侧输出是返回值）。
 
     返回 `{"api", "positional": [slot...], "keyword": {torch_kwarg: slot}}`（slot 为原始 slot dict）。
@@ -1595,12 +1624,51 @@ def resolve_torch_baseline_plan(torch_baseline, call):
             raise PerfCollectError(
                 f"perf.torch_baseline.positional 要 slot {name!r}，但本 case 的 aclnn_call 没有它——fail-closed")
         positional.append(slot)
-    keyword = {}
+    keyword_by_slot = {}
     for name, kwarg in (torch_baseline.get("keyword") or {}).items():
         slot = by_name.get(name)
         if slot is None:
             continue                                    # 该变体没有这个属性 → torch 侧自然缺席
-        keyword[str(kwarg)] = slot
+        keyword_by_slot[name] = (str(kwarg), slot)
+
+    grouped = set()
+    attrs = (case or {}).get("attrs") if isinstance(case, dict) else None
+    groups = torch_baseline.get("keyword_groups") or []
+    if not isinstance(groups, list):
+        raise PerfCollectError("perf.torch_baseline.keyword_groups 须为数组")
+    for pos, group in enumerate(groups):
+        if not isinstance(group, dict):
+            raise PerfCollectError(f"perf.torch_baseline.keyword_groups[{pos}] 须为对象")
+        when = group.get("when")
+        members = group.get("slots")
+        if not isinstance(when, dict) or not isinstance(when.get("attr"), str) or not when["attr"]:
+            raise PerfCollectError(
+                f"perf.torch_baseline.keyword_groups[{pos}].when 须含非空 attr")
+        if not isinstance(when.get("is_null"), bool):
+            raise PerfCollectError(
+                f"perf.torch_baseline.keyword_groups[{pos}].when.is_null 须为 JSON 布尔")
+        if not isinstance(members, list) or not members or any(
+                not isinstance(name, str) or not name for name in members):
+            raise PerfCollectError(
+                f"perf.torch_baseline.keyword_groups[{pos}].slots 须为非空 slot-name 数组")
+        overlap = grouped.intersection(members)
+        if overlap:
+            raise PerfCollectError(
+                f"perf.torch_baseline.keyword_groups 的 slot 重复归组：{sorted(overlap)}")
+        unknown = [name for name in members if name not in (torch_baseline.get("keyword") or {})]
+        if unknown:
+            raise PerfCollectError(
+                f"perf.torch_baseline.keyword_groups[{pos}] 引用了 keyword 未声明的 slot：{unknown}")
+        if not isinstance(attrs, dict) or when["attr"] not in attrs:
+            raise PerfCollectError(
+                f"keyword_groups[{pos}] 要按 case.attrs.{when['attr']} 选变体，但该 case 缺此语义属性")
+        matched = (attrs[when["attr"]] is None) == when["is_null"]
+        grouped.update(members)
+        if not matched:
+            for name in members:
+                keyword_by_slot.pop(name, None)
+
+    keyword = {kwarg: slot for kwarg, slot in keyword_by_slot.values()}
     return {"api": api, "positional": positional, "keyword": keyword}
 
 
@@ -1943,7 +2011,7 @@ from aclnn_runtime import perf_msprof as P
 caseset = json.loads(Path(CFG["caseset"]).read_text(encoding="utf-8"))
 case = next(c for c in caseset["cases"] if c["id"] == CFG["case_id"])
 call = D._case_call(case)
-plan = P.resolve_torch_baseline_plan(CFG["torch_baseline"], call)
+plan = P.resolve_torch_baseline_plan(CFG["torch_baseline"], call, case)
 dev_index = int(CFG["device"])          # 多卡（实测 device_count=16）：device 由 plan 显式给，绝不假定 0
 torch.npu.set_device(dev_index)
 device = "npu:%d" % dev_index
@@ -2030,7 +2098,7 @@ print(CFG["marker_devices"] + json.dumps(sorted(set(devices(last)))), flush=True
 '''
 
 
-def _run_msprof(wrapper_path, cfg_path, out_dir):
+def _run_msprof(wrapper_path, cfg_path, out_dir, *, env=None, timeout_s=120):
     """跑一轮 msprof CLI（**必带 `--ai-core=off`**，§9.7 C）。返回 `(prof_dir|None, rc, output, cmd)`。
 
     ⚠ `--ai-core` 默认 on 会让 Sort(MIX_AIV) 虚高 3.75×、每次调用总和虚高 2.0×——这行参数不是可选项。
@@ -2038,10 +2106,67 @@ def _run_msprof(wrapper_path, cfg_path, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     cmd = ["msprof", f"--output={out_dir}", *MSPROF_EXTRA_ARGS,
            sys.executable, str(wrapper_path), str(cfg_path)]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    output = (proc.stdout or "") + (proc.stderr or "")
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        start_new_session=True)
+    timed_out = False
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            stdout, stderr = proc.communicate()
+    output = (stdout or "") + (stderr or "")
+    if timed_out:
+        output += f"\n[OPRUNWAY_SIDE_TIMEOUT] msprof side exceeded {timeout_s}s\n"
+        returncode = 124
+    else:
+        returncode = proc.returncode
     profs = sorted(Path(out_dir).glob("PROF_*"))
-    return (str(profs[-1]) if profs else str(out_dir)), proc.returncode, output, cmd
+    return (str(profs[-1]) if profs else str(out_dir)), returncode, output, cmd
+
+
+def baseline_env_without_dut(dut_vendor_root, env=None):
+    """返回精确移除本次 DUT vendor 路径后的 baseline 子进程环境与审计信息。
+
+    双边共享设备、输入和 profiler 口径，但 baseline 不能继承 custom OPP 覆盖层；否则系统
+    ``torch_npu`` / CANN 内置 ACLNN 可能解析到 DUT 的同名内部 op。这里只移除 vendor
+    ``set_env.bash`` 注入到 ``ASCEND_CUSTOM_OPP_PATH`` 与 ``LD_LIBRARY_PATH`` 的精确路径项，
+    其它系统或用户路径原样保留。缺绝对 vendor 根时 fail-closed。
+    """
+    if not isinstance(dut_vendor_root, str) or not dut_vendor_root.strip():
+        raise PerfCollectError("baseline 环境隔离缺 dut_vendor_root——无法精确移除 DUT OPP 路径")
+    root = os.path.normpath(dut_vendor_root.strip())
+    if not os.path.isabs(root):
+        raise PerfCollectError(f"dut_vendor_root 须为绝对路径，得 {dut_vendor_root!r}")
+    targets = {
+        "ASCEND_CUSTOM_OPP_PATH": {root},
+        "LD_LIBRARY_PATH": {os.path.normpath(os.path.join(root, "op_api", "lib"))},
+    }
+    clean = dict(os.environ if env is None else env)
+    audit = {"dut_vendor_root": root, "removed": {}}
+    for key, remove_set in targets.items():
+        raw = clean.get(key)
+        if raw is None:
+            audit["removed"][key] = []
+            continue
+        kept, removed = [], []
+        for entry in raw.split(os.pathsep):
+            normalized = os.path.normpath(entry) if entry else entry
+            if entry and normalized in remove_set:
+                removed.append(entry)
+            else:
+                kept.append(entry)
+        if kept:
+            clean[key] = os.pathsep.join(kept)
+        else:
+            clean.pop(key, None)
+        audit["removed"][key] = removed
+    return clean, audit
 
 
 def collector_for(side):
@@ -2069,7 +2194,8 @@ def _marker_json(output, marker):
 
 
 def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repeat, device,
-                 scratch_dir, detect_hybrid, collector=None, baseline_kind="torch_npu"):
+                 scratch_dir, detect_hybrid, collector=None, baseline_kind="torch_npu",
+                 side_timeout_s=120):
     """采集一侧（custom / baseline）一个 case → `{"behavior","us","scope","execution_path","collection",...}`。
 
     流程：生成 wrapper + cfg → 按 side 选采集入口跑 → 解析 MSTX 窗 → 窗内 kernel 聚合 → 五分类 → 清产物。
@@ -2106,7 +2232,13 @@ def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repea
     if collector != COLLECTOR_MSPROF_CLI:
         raise PerfCollectError(
             f"live 性能采集只允许 {COLLECTOR_MSPROF_CLI!r}，得 collector={collector!r}")
-    prof_dir, returncode, output, command = _run_msprof(wrapper_path, cfg_path, prof_root)
+    subprocess_env = None
+    environment_isolation = None
+    if side == "baseline" and cfg.get("exclude_dut_vendor_root") is not None:
+        subprocess_env, environment_isolation = baseline_env_without_dut(
+            cfg.get("exclude_dut_vendor_root"))
+    prof_dir, returncode, output, command = _run_msprof(
+        wrapper_path, cfg_path, prof_root, env=subprocess_env, timeout_s=side_timeout_s)
     measurement = None
     host_transfer = None
     if prof_dir is not None:
@@ -2136,6 +2268,8 @@ def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repea
     detail["prof_dir"] = prof_dir
     detail["collector"] = collector
     detail["output_tail"] = (output or "")[-1500:]
+    if environment_isolation is not None:
+        detail["environment_isolation"] = environment_isolation
     if not _keep_prof():
         shutil.rmtree(prof_root, ignore_errors=True)     # 根盘仅剩 41G，别堆 profiling 产物
         detail["prof_dir_removed"] = True
@@ -2160,6 +2294,42 @@ def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repea
         else:
             result["runtime_provenance"] = provenance
     return result
+
+
+def _collect_document(*, op, warmup, repeat, device, side_timeout_s, baseline_kind,
+                      records, skipped, planned_cases, complete):
+    return {
+        "op": op,
+        "scope": TIMING_SCOPE,
+        "warmup": warmup,
+        "repeat": repeat,
+        "device": device,
+        "side_timeout_s": side_timeout_s,
+        "collection": {
+            "custom": collection_config(
+                collector=collector_for("custom"), warmup=warmup, repeat=repeat),
+            "baseline": collection_config(
+                collector=collector_for("baseline"), warmup=warmup, repeat=repeat),
+        },
+        "baseline_source": baseline_kind,
+        "records": records,
+        "skipped": skipped,
+        "collection_checkpoint": {
+            "complete": bool(complete),
+            "completed": len(records),
+            "planned": len(planned_cases),
+            "planned_case_ids": list(planned_cases),
+        },
+    }
+
+
+def _write_collect_checkpoint(path, doc):
+    """每 case 原子落盘；进程被终止时也保留已完成记录，且不会留下半截 JSON。"""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, target)
 
 
 def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
@@ -2187,6 +2357,11 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
     by_id = {c["id"]: c for c in caseset.get("cases", []) if isinstance(c, dict) and c.get("id")}
     warmup = int(plan.get("warmup", DEFAULT_WARMUP))
     repeat = int(plan.get("repeat", DEFAULT_REPEAT))
+    side_timeout_s = plan.get("side_timeout_s", 120)
+    if (isinstance(side_timeout_s, bool) or not isinstance(side_timeout_s, int)
+            or side_timeout_s < 30 or side_timeout_s > 3600):
+        raise PerfCollectError(
+            f"perf plan 的 side_timeout_s 须为 30..3600 秒整数，得 {side_timeout_s!r}")
     if plan.get("device") is None:
         raise PerfCollectError(
             "perf plan 缺 device —— 容器内 device_count=16（§9.7），采集卡号不许默认/猜（fail-closed）")
@@ -2220,18 +2395,37 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
                                          "dut_lib": dut_lib},
                               warmup=warmup, repeat=repeat, device=device,
                               scratch_dir=scratch, detect_hybrid=False,
-                              baseline_kind=baseline_kind)
+                              baseline_kind=baseline_kind, side_timeout_s=side_timeout_s)
         baseline_cfg = ({"torch_baseline": torch_baseline}
                         if baseline_kind == "torch_npu"
                         else {"aclnn_baseline": aclnn_baseline})
+        if dut_lib is not None:
+            # libcust_opapi.so 固定在 <vendor-root>/op_api/lib/；由已唯一解析的 DUT so 反推，
+            # 不从可能受污染的进程环境猜 vendor 根。宽松档无 DUT 时没有 custom 路径需要移除。
+            baseline_cfg["exclude_dut_vendor_root"] = str(Path(dut_lib).resolve().parents[2])
         baseline = measure_side(side="baseline", case=case, caseset_path=caseset_path,
                                 work_dir=work_dir,
                                 cfg_extra=baseline_cfg,
                                 warmup=warmup, repeat=repeat, device=device,
                                 scratch_dir=scratch,
                                 detect_hybrid=(baseline_kind == "torch_npu"),
-                                baseline_kind=baseline_kind)
+                                baseline_kind=baseline_kind, side_timeout_s=side_timeout_s)
         records.append(build_perf_record(cid, custom, baseline))
+        _write_collect_checkpoint(
+            out_path,
+            _collect_document(
+                op=plan.get("op") or caseset.get("op"),
+                warmup=warmup,
+                repeat=repeat,
+                device=device,
+                side_timeout_s=side_timeout_s,
+                baseline_kind=baseline_kind,
+                records=records,
+                skipped=plan.get("skipped") or [],
+                planned_cases=planned_cases,
+                complete=False,
+            ),
+        )
         # 整轮采集受硬超时保护；逐 case flush 进度后，即使整轮被杀，诊断日志也能指出
         # 最后完成的 case，而不是只剩 PERF_FAIL 哨兵。这里只报行为/进度，不做性能裁决。
         print(json.dumps({
@@ -2243,15 +2437,19 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
                 "baseline_behavior": baseline.get("behavior"),
             }
         }, ensure_ascii=False), flush=True)
-    doc = {"op": plan.get("op") or caseset.get("op"),
-           "scope": TIMING_SCOPE, "warmup": warmup, "repeat": repeat, "device": device,
-           "collection": {"custom": collection_config(collector=collector_for("custom"),
-                                                      warmup=warmup, repeat=repeat),
-                          "baseline": collection_config(collector=collector_for("baseline"),
-                                                        warmup=warmup, repeat=repeat)},
-           "baseline_source": baseline_kind,
-           "records": records, "skipped": plan.get("skipped") or []}
-    Path(out_path).write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    doc = _collect_document(
+        op=plan.get("op") or caseset.get("op"),
+        warmup=warmup,
+        repeat=repeat,
+        device=device,
+        side_timeout_s=side_timeout_s,
+        baseline_kind=baseline_kind,
+        records=records,
+        skipped=plan.get("skipped") or [],
+        planned_cases=planned_cases,
+        complete=True,
+    )
+    _write_collect_checkpoint(out_path, doc)
     return doc
 
 

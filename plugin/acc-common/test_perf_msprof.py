@@ -780,6 +780,34 @@ class TestDocumentBuilders(unittest.TestCase):
         for entry in m.values():
             self.assertEqual(entry["scope"], "kernel_only")
 
+    def test_failure_reason_keeps_structured_error_and_relevant_output_excerpt(self):
+        failed = {
+            "behavior": PM.BEHAVIOR_FAILED, "us": None, "scope": None,
+            "execution_path": None,
+            "detail": {
+                "returncode": 124,
+                "note": "单侧采集超时",
+                "parse_error": "measurement_window_required",
+                "output_tail": "boilerplate\nRuntimeError: aclnnMedian failed ACL 161002\n"
+                               "[OPRUNWAY_SIDE_TIMEOUT] exceeded 120s\n",
+            },
+        }
+        reason = PM.side_failure_reason("baseline", failed)
+        self.assertIn("behavior=execution_failed", reason)
+        self.assertIn("returncode=124", reason)
+        self.assertIn("measurement_window_required", reason)
+        self.assertIn("161002", reason)
+        self.assertIn("SIDE_TIMEOUT", reason)
+
+        rec = PM.build_perf_record(
+            "bad",
+            {"behavior": PM.BEHAVIOR_NPU, "us": 5.0, "scope": "kernel_only",
+             "execution_path": PM.PATH_DEVICE_KERNEL},
+            failed)
+        baseline = PM.build_baseline_document([rec])
+        self.assertEqual(baseline["excluded"][0]["behavior"], PM.BEHAVIOR_FAILED)
+        self.assertIn("161002", baseline["excluded"][0]["reason"])
+
 
 class TestTorchBaselinePlan(unittest.TestCase):
     """baseline 侧 torch 调用：spec 声明的 slot-name 映射驱动，变体自动跟随 case。"""
@@ -808,6 +836,34 @@ class TestTorchBaselinePlan(unittest.TestCase):
         plan = PM.resolve_torch_baseline_plan(self.MAP, call)
         self.assertEqual(plan["keyword"], {})
 
+    def test_unified_abi_global_variant_drops_semantically_absent_keyword_group(self):
+        """统一 ABI 有 dim/keepDim 占位 slot 时，spec 可据语义 attr=null 整组省略 torch kwarg。"""
+        mapping = {**self.MAP, "keyword_groups": [
+            {"when": {"attr": "dim", "is_null": False}, "slots": ["dim", "keepdim"]},
+        ]}
+        call = {"symbol": "Median", "slots": [
+            {"role": "in", "name": "self", "input_idx": 0},
+            {"role": "attr", "name": "dim", "ctype": "int64", "value": 0},
+            {"role": "attr", "name": "keepdim", "ctype": "bool", "value": False},
+            {"role": "out", "name": "values", "output_idx": 0},
+            {"role": "out_null", "name": "indices"}]}
+        global_plan = PM.resolve_torch_baseline_plan(
+            mapping, call, {"attrs": {"dim": None, "keepdim": False}})
+        dim_plan = PM.resolve_torch_baseline_plan(
+            mapping, call, {"attrs": {"dim": 0, "keepdim": False}})
+        self.assertEqual(global_plan["keyword"], {})
+        self.assertEqual(sorted(dim_plan["keyword"]), ["dim", "keepdim"])
+
+    def test_keyword_group_requires_semantic_attr(self):
+        mapping = {**self.MAP, "keyword_groups": [
+            {"when": {"attr": "dim", "is_null": False}, "slots": ["dim"]},
+        ]}
+        call = {"slots": [
+            {"role": "in", "name": "self", "input_idx": 0},
+            {"role": "attr", "name": "dim", "value": 0}]}
+        with self.assertRaises(PM.PerfCollectError):
+            PM.resolve_torch_baseline_plan(mapping, call, {"attrs": {}})
+
     def test_missing_map_is_fail_closed(self):
         with self.assertRaises(PM.PerfCollectError):
             PM.resolve_torch_baseline_plan(None, {"slots": []})
@@ -820,6 +876,27 @@ class TestTorchBaselinePlan(unittest.TestCase):
         call = {"slots": [{"role": "attr", "name": "dim", "value": 0}]}
         with self.assertRaises(PM.PerfCollectError):
             PM.resolve_torch_baseline_plan(self.MAP, call)
+
+
+class TestBaselineEnvironmentIsolation(unittest.TestCase):
+    def test_removes_only_exact_dut_vendor_entries(self):
+        root = "/work/vendor/customize_nn"
+        env = {
+            "ASCEND_CUSTOM_OPP_PATH": f"/other/opp:{root}:/keep/opp",
+            "LD_LIBRARY_PATH": f"{root}/op_api/lib/:/system/lib:/similar/customize_nn/op_api/lib",
+            "PYTHONPATH": f"{root}:/keep/python",
+        }
+        clean, audit = PM.baseline_env_without_dut(root, env)
+        self.assertEqual(clean["ASCEND_CUSTOM_OPP_PATH"], "/other/opp:/keep/opp")
+        self.assertEqual(
+            clean["LD_LIBRARY_PATH"], "/system/lib:/similar/customize_nn/op_api/lib")
+        self.assertEqual(clean["PYTHONPATH"], env["PYTHONPATH"])
+        self.assertEqual(audit["removed"]["ASCEND_CUSTOM_OPP_PATH"], [root])
+        self.assertEqual(audit["removed"]["LD_LIBRARY_PATH"], [f"{root}/op_api/lib/"])
+
+    def test_requires_absolute_vendor_root(self):
+        with self.assertRaises(PM.PerfCollectError):
+            PM.baseline_env_without_dut("relative/vendor", {})
 
 
 class TestAclnnBuiltinBaselinePlan(unittest.TestCase):

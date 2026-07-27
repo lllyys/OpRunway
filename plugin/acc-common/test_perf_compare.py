@@ -770,16 +770,77 @@ class PerfReportAggregateTest(unittest.TestCase):
             for key in ("cases_above_threshold", "cases_scored"):
                 self.assertNotIn(key, r["summary"], f"{label}/{key}")
 
-    def test_summary_gains_exactly_two_keys_and_loses_none(self):
-        """字节安全线：summary **只许多这两个键**，既有四个键的名与值一个不动
-        （4 个 pin 算子 + Median 的真机结论挂在 perf_cases/达标/blocked/status 上）。"""
+    def test_summary_adds_aggregate_and_non_passing_counts_without_losing_canonical_keys(self):
+        """既有四个裁决键的名和值不动；展示层另带 scored 与未通过明细计数。"""
         cs = self._cs([("p", "float32")])
         r = pc.perf_compare(_spec(0.5), cs, _ev({"p": (1.0, "kernel_only")}), _bl({"p": 2.0}))
         self.assertEqual(set(r["summary"]),
                          {"perf_cases", "达标", "blocked", "status",
-                          "cases_above_threshold", "cases_scored"})
+                          "cases_above_threshold", "cases_scored",
+                          "non_passing", "failed", "exceptions"})
         self.assertEqual((r["summary"]["perf_cases"], r["summary"]["达标"],
                           r["summary"]["blocked"], r["summary"]["status"]), (1, 1, 0, "ok"))
+        self.assertEqual(r["non_passing_cases"], [])
+
+    def test_failed_case_is_explicit_with_dtype_shape_class_and_both_sides(self):
+        cs = self._cs([("slow", "bfloat16")])
+        cs["cases"][0]["perf_shape_classification"] = {
+            "class": "large", "input_bytes": 2 * 128 * 128,
+            "metric": "sum_input_bytes", "small_max_bytes": 262144,
+            "boundary": "small_if_input_bytes_lte_limit", "hardware": "Atlas A3"}
+        r = pc.perf_compare(
+            _spec(1.0), cs,
+            {"op": "Sign", "evidence": [{
+                "case_id": "slow",
+                "perf": {"us": 10.0, "scope": "kernel_only",
+                         "behavior": "npu", "execution_path": "device_kernel"},
+            }]},
+            _bl({"slow": 8.0}))
+        self.assertEqual(r["summary"]["status"], "fail")
+        self.assertEqual(
+            (r["summary"]["non_passing"], r["summary"]["failed"], r["summary"]["exceptions"]),
+            (1, 1, 0))
+        item = r["non_passing_cases"][0]
+        self.assertEqual(
+            (item["case_id"], item["dtype"], item["shape_class"], item["input_bytes"]),
+            ("slow", "bfloat16", "large", 32768))
+        self.assertEqual(item["inputs"], [{"name": "self", "shape": [128, 128]}])
+        self.assertEqual(item["outcome"], "failed")
+        self.assertEqual((item["custom"]["behavior"], item["custom"]["us"]), ("npu", 10.0))
+        self.assertEqual(item["baseline"]["us"], 8.0)
+        self.assertIn("target_ratio", item["reason"])
+
+    def test_baseline_execution_failure_reason_is_not_lost_as_plain_missing(self):
+        cs = self._cs([("unsupported", "bfloat16")])
+        ev = {"op": "Sign", "evidence": [{
+            "case_id": "unsupported",
+            "perf": {"us": 5.0, "scope": "kernel_only",
+                     "behavior": "npu", "execution_path": "device_kernel"},
+        }]}
+        baseline = _bl({})
+        baseline["excluded"] = [{
+            "case_id": "unsupported",
+            "behavior": "execution_failed",
+            "reason": "torch_npu returned ACL error 161002",
+        }]
+        r = pc.perf_compare(_spec(1.0), cs, ev, baseline)
+        self.assertEqual(r["summary"]["status"], "blocked")
+        item = r["non_passing_cases"][0]
+        self.assertEqual(item["outcome"], "blocked")
+        self.assertEqual(item["baseline"]["behavior"], "execution_failed")
+        self.assertIn("161002", item["baseline"]["reason"])
+
+    def test_waiting_baseline_cases_are_all_recorded_as_blocked(self):
+        cs = self._cs([("p0", "float16"), ("p1", "float32")])
+        ev = _ev({"p0": (1.0, "kernel_only"), "p1": (2.0, "kernel_only")})
+        r = pc.perf_compare(
+            _spec(1.0, baseline="gpu_external"), cs, ev, None,
+            expect_source="gpu_external")
+        self.assertEqual(r["summary"]["status"], "blocked_wait_gpu_benchmark")
+        self.assertEqual(r["summary"]["non_passing"], 2)
+        self.assertEqual(
+            {item["case_id"] for item in r["non_passing_cases"]}, {"p0", "p1"})
+        self.assertTrue(all(item["outcome"] == "blocked" for item in r["non_passing_cases"]))
 
     def test_aggregate_failure_degrades_without_touching_the_verdict(self):
         """只读报表塌了 → 整块不出 + notes 记一笔，**裁决一字不变**

@@ -1750,12 +1750,13 @@ def test_runtime_provenance_structure_and_sorted_symbols(tmp_path, monkeypatch):
     runner._resolve_symbol("aclnnFooGetWorkspaceSize")     # 故意后解析的排前面
     runner._resolve_symbol("aclnnFoo")
     prov = runner.runtime_provenance()
-    assert set(prov) == {"device", "strict_custom_vendor", "dut_lib", "stream_owned",
+    assert set(prov) == {"device", "strict_custom_vendor", "dut_lib", "required_symbol_lib", "stream_owned",
                          "device_owned", "custom_opapi_libs", "ignored_custom_opapi_libs",
                          "teardown", "symbols"}
     assert prov["device"] == 5
     assert prov["strict_custom_vendor"] is False
     assert prov["dut_lib"] is None                         # 宽松档没声明 DUT
+    assert prov["required_symbol_lib"] is None             # 也没声明显式 baseline 符号库
     assert prov["stream_owned"] is False                   # 还没建过 stream
     assert prov["device_owned"] is False                   # 也没建过 device 上下文
     assert prov["ignored_custom_opapi_libs"] == []

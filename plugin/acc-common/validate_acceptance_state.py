@@ -488,14 +488,57 @@ def _gate_perf_case_policy(cs, cases, errs):
             or rule.get("boundary") != "small_if_input_bytes_lte_limit"):
         errs.append("perf_case_policy 来源/分类规则非法")
         return
+    selection_rule = policy.get("case_selection")
+    new_selection_contract = isinstance(selection_rule, dict)
+    min_total_elements = (
+        selection_rule.get("min_total_input_elements") if new_selection_contract else 1)
+    if (not _is_int(min_total_elements) or min_total_elements < 1):
+        errs.append("perf_case_policy.case_selection.min_total_input_elements 非法")
+        return
+    include_precision_tags = (
+        selection_rule.get("include_precision_tags", []) if new_selection_contract else [])
+    if (not isinstance(include_precision_tags, list)
+            or any(not isinstance(tag, str) or not tag
+                   for tag in include_precision_tags)
+            or len(set(include_precision_tags)) != len(include_precision_tags)):
+        errs.append("perf_case_policy.case_selection.include_precision_tags 非法")
+        return
     actual_counts = {"small": 0, "large": 0}
-    selected_ids, excluded_ids, by_dtype = [], [], {}
+    selected_ids, excluded_ids, excluded_degenerate_ids, by_dtype = [], [], [], {}
     for c in cases:
         if not isinstance(c, dict):
             continue
         dims, cid = c.get("dims") or [], c.get("id")
         if "精度" in dims and "性能" not in dims and isinstance(cid, str):
             excluded_ids.append(cid)
+            exclusion = c.get("perf_selection_exclusion")
+            if (set(c.get("tags") or []).intersection(include_precision_tags)
+                    and not isinstance(exclusion, dict)):
+                errs.append(f"{cid}: 命中 include_precision_tags 却未进入性能维")
+            if isinstance(exclusion, dict):
+                inputs = c.get("inputs") if isinstance(c.get("inputs"), list) else []
+                total_elements = 0
+                valid_elements = bool(inputs)
+                for inp in inputs:
+                    shape = inp.get("shape") if isinstance(inp, dict) else None
+                    if (not isinstance(shape, list)
+                            or any(not _is_int(x) or x < 0 for x in shape)):
+                        valid_elements = False
+                        break
+                    numel = 1
+                    for x in shape:
+                        numel *= x
+                    total_elements += numel
+                if (not new_selection_contract
+                        or exclusion.get("reason")
+                        != "degenerate_total_input_elements_below_minimum"
+                        or not valid_elements
+                        or total_elements >= min_total_elements
+                        or exclusion.get("total_input_elements") != total_elements
+                        or exclusion.get("min_total_input_elements") != min_total_elements):
+                    errs.append(f"{cid}: perf_selection_exclusion 与退化输入选择规则不一致")
+                else:
+                    excluded_degenerate_ids.append(cid)
         if "性能" not in dims:
             continue
         if "精度" not in dims:
@@ -550,6 +593,9 @@ def _gate_perf_case_policy(cs, cases, errs):
         "precision_total": sum(1 for c in cases
                                if isinstance(c, dict) and "精度" in (c.get("dims") or [])),
     }
+    if new_selection_contract or (
+            isinstance(sel, dict) and "excluded_degenerate_case_ids" in sel):
+        expected_selection["excluded_degenerate_case_ids"] = excluded_degenerate_ids
     if sel != expected_selection:
         errs.append("perf_case_policy.selection 与 caseset 实际性能/精度 case 身份不一致")
 
@@ -1575,6 +1621,86 @@ def _gate_shape_report(pr, d, per, errs):
             errs.append(f"shape_overall.{key}={overall.get(key)!r} 与行级派生 {value!r} 不一致")
 
 
+def _gate_non_passing_report(pr, d, per, s, errs):
+    """核最终报告没有遗漏性能未通过 case；只验派生完整性，不重判 ratio。"""
+    expected_rows = [
+        row for row in per
+        if isinstance(row, dict) and row.get("达标") is not True
+        and isinstance(row.get("case_id"), str)
+    ]
+    details = pr.get("non_passing_cases")
+    if not expected_rows:
+        if details is not None and details != []:
+            errs.append("perf_report.non_passing_cases 在全部达标时须为空数组")
+        return
+    if not isinstance(details, list):
+        errs.append("perf_report 缺 non_passing_cases（性能失败/挂起用例未逐条记录）")
+        return
+    detail_ids = [item.get("case_id") for item in details if isinstance(item, dict)]
+    expected_ids = [row["case_id"] for row in expected_rows]
+    if len(details) != len(detail_ids) or len(set(detail_ids)) != len(detail_ids):
+        errs.append("perf_report.non_passing_cases 含非对象、坏 case_id 或重复 case_id")
+    if Counter(detail_ids) != Counter(expected_ids):
+        errs.append(
+            f"perf_report.non_passing_cases 与未通过 per_case 不一致："
+            f"报告={sorted(x for x in detail_ids if isinstance(x, str))}，"
+            f"应为={sorted(expected_ids)}"
+        )
+    cs = _load(d, "caseset.json") or {}
+    case_by_id = {
+        c.get("id"): c for c in (cs.get("cases") or [])
+        if isinstance(c, dict) and isinstance(c.get("id"), str)
+    }
+    row_by_id = {row["case_id"]: row for row in expected_rows}
+    status = str((s or {}).get("status") or "")
+    failed = exceptions = 0
+    for item in details:
+        if not isinstance(item, dict) or not isinstance(item.get("case_id"), str):
+            continue
+        cid = item["case_id"]
+        row = row_by_id.get(cid)
+        case = case_by_id.get(cid) or {}
+        if row is None:
+            continue
+        if row.get("blocked") or status.startswith("blocked"):
+            outcome = "blocked"
+        elif row.get("exception"):
+            outcome = "exception"
+            exceptions += 1
+        else:
+            outcome = "failed"
+            failed += 1
+        if item.get("outcome") != outcome:
+            errs.append(
+                f"{cid}: non_passing_cases.outcome={item.get('outcome')!r} "
+                f"与 per_case 派生 {outcome!r} 不一致")
+        if not isinstance(item.get("reason"), str) or not item["reason"].strip():
+            errs.append(f"{cid}: non_passing_cases 缺非空 reason")
+        inputs = case.get("inputs") if isinstance(case.get("inputs"), list) else []
+        expected_inputs = [
+            {"name": inp.get("name"), "shape": inp.get("shape")}
+            for inp in inputs if isinstance(inp, dict)
+        ]
+        if item.get("inputs") != expected_inputs:
+            errs.append(f"{cid}: non_passing_cases.inputs 与 caseset 输入 shape 不一致")
+        first = inputs[0] if inputs and isinstance(inputs[0], dict) else {}
+        dtype = first.get("dtype") if isinstance(first.get("dtype"), str) and first.get("dtype") else "unknown"
+        if item.get("dtype") != dtype:
+            errs.append(f"{cid}: non_passing_cases.dtype={item.get('dtype')!r} 与 caseset {dtype!r} 不一致")
+        meta = case.get("perf_shape_classification")
+        meta = meta if isinstance(meta, dict) else {}
+        if item.get("shape_class") != meta.get("class"):
+            errs.append(f"{cid}: non_passing_cases.shape_class 与 caseset 不一致")
+        if item.get("input_bytes") != meta.get("input_bytes"):
+            errs.append(f"{cid}: non_passing_cases.input_bytes 与 caseset 不一致")
+        if not isinstance(item.get("custom"), dict) or not isinstance(item.get("baseline"), dict):
+            errs.append(f"{cid}: non_passing_cases 缺 custom/baseline 明细")
+    for key, expected in (
+            ("non_passing", len(expected_rows)), ("failed", failed), ("exceptions", exceptions)):
+        if (s or {}).get(key) != expected:
+            errs.append(f"summary.{key}={(s or {}).get(key)!r} 与未通过明细派生 {expected} 不一致")
+
+
 def gate_task3(d, errs):
     """性能证据**完整性**门：summary 完整 + scope=kernel_only(防混 e2e，缺 scope 也不放过)
     + 非 blocked(可采集) + 有性能用例 + per_case 与 caseset/evidence 按 case 对齐(防跑子集/伪造 summary)。
@@ -1653,6 +1779,7 @@ def gate_task3(d, errs):
     # per_case 与 caseset/evidence 按 case 对齐（补 T5 门延后 finding）：防跑性能子集 + 伪造 summary=ok。
     _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs)
     _gate_shape_report(pr, d, per, errs)
+    _gate_non_passing_report(pr, d, per, s, errs)
     if st == "exception":
         _gate_small_shape_exception(pr, d, errs)
     print(f"  性能 status={st}(perf_compare 判) | 达标 {s.get('达标')}/{s.get('perf_cases')}")

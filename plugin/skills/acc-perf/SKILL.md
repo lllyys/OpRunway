@@ -35,12 +35,22 @@ description: OpRunway 验收性能维的方法论薄壳——msprof kernel-only 
 另一层包装“可能等价”。
 
 **通用性能 case 规则**：性能 case 必须从同一份精度 caseset 选择，不能另造一套输入；
+进入性能采集的 case 还必须已通过本轮确定性精度裁决，精度未通过或待复核的一律不得进入性能比较。
+因此同一 DUT、同一输入在性能阶段不应再出现功能/精度执行失败；若出现，须按 DUT 回归或 harness/
+采集异常解耦，不能当成正常性能结论。精度通过只证明结果正确，不保证 `ratio` 达标，也不保证
+baseline/profiler 证据一定可得；后两者仍分别按性能 FAIL 或 BLOCKED 处理。
 `perf.case_source="precision_cases"` 与 `perf.shape_classification` 在存在性能维时必填。大小 shape 按目标
 硬件 UB 单次承载边界、以全部输入物理载荷之和分类；A3 的边界为 256 KiB（含边界为小 shape）。
 分类只用于分组报告，不免测、不改变 `target_ratio`，也不恢复 `trivial-met`。
 caseset 还必须记录精度/性能总数、入选与排除 case_id、按 dtype 入选数，形成可机审选择账本。
+任务书要求的接口/属性 × small/large 覆盖若未被默认性能维覆盖，可用
+`perf.case_selection.include_precision_tags` 把带指定 tag 的既有精度 case 纳入性能维；
+只能复用同一 case 身份，不能借此另造输入或绕过精度 pass 前筛。
 性能报告固定输出 `small`、`large`、`overall` 的计划数、实测数、达标数、blocked 数、
 NPU/baseline 中位耗时与 speedup；声明了分类策略却缺少分类时，证据门必须失败。
+任何未通过性能 case（ratio 未达标、blocked、exception、等待/缺失 baseline）都必须在最终报告
+逐条保留，至少记录 case_id、dtype、输入 shape、大小分类、双边行为/耗时、失败或挂起原因；
+不得只报汇总、不得从分母或明细中静默删除。
 
 **ratio = baseline_us / npu_us**（>1 表示 NPU 更快）；**达标 = ratio ≥ `spec.perf.target_ratio`**（由 perf_compare 算）。
 

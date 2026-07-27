@@ -177,6 +177,18 @@ class GatePerfCasePolicyTest(unittest.TestCase):
         self.assertTrue(any("物理字节" in e for e in errs))
         self.assertTrue(any("selection" in e for e in errs))
 
+    def test_included_precision_tag_must_enter_performance_dimension(self):
+        cs = self._caseset()
+        cs["perf_case_policy"]["case_selection"] = {
+            "min_total_input_elements": 1,
+            "include_precision_tags": ["value_profile"],
+        }
+        cs["perf_case_policy"]["selection"]["excluded_degenerate_case_ids"] = []
+        cs["cases"][1]["tags"] = ["value_profile"]
+        errs = []
+        G._gate_perf_case_policy(cs, cs["cases"], errs)
+        self.assertTrue(any("include_precision_tags" in e for e in errs), errs)
+
     def test_a3_profile_cannot_be_redefined_by_caseset(self):
         cs = self._caseset()
         cs["perf_case_policy"]["shape_classification"]["small_max_bytes"] = 1048576
@@ -812,7 +824,16 @@ class GateTask3PerfPackageTest(unittest.TestCase):
              "exception": "small_shape",
              "exception_detail": {"npu_us": 1.5, "baseline_us": 1.2, "gap": 0.3, "within": 3,
                                   "when_us_below": 10, "conclusion": "c"}}],
-            "notes": [], "summary": {"perf_cases": 1, "达标": 0, "blocked": 0, "status": "exception"},
+            "non_passing_cases": [{
+                "case_id": "x0", "outcome": "exception", "reason": "small shape exception",
+                "dtype": "float32", "inputs": [{"name": "a", "shape": [1024, 1024]}],
+                "shape_class": None, "input_bytes": None,
+                "custom": {"behavior": None, "us": 1.5, "scope": "kernel_only", "note": None},
+                "baseline": {"behavior": None, "us": 1.2, "scope": "kernel_only", "reason": None},
+            }],
+            "notes": [], "summary": {"perf_cases": 1, "达标": 0, "blocked": 0,
+                                     "status": "exception", "non_passing": 1,
+                                     "failed": 0, "exceptions": 1},
             "simulation": sim,
             "simulation_plot": {"file": plot_file, "sha256": ("deadbeef" if tamper_sha else sha)}}
         return report
@@ -877,7 +898,17 @@ class GateTask3PerfPackageTest(unittest.TestCase):
     def test_wait_suspend_ok(self):
         _w(self.d, "perf_report.json", {"op": "X", "per_case": [
             {"case_id": "x0", "npu_us": 1.5, "npu_scope": "kernel_only", "达标": False, "blocked": False}],
-            "summary": {"status": "blocked_wait_gpu_benchmark", "perf_cases": 1, "达标": 0, "blocked": 0}})
+            "non_passing_cases": [{
+                "case_id": "x0", "outcome": "blocked", "reason": "等待 GPU baseline",
+                "dtype": "float32", "inputs": [{"name": "a", "shape": [1024, 1024]}],
+                "shape_class": None, "input_bytes": None,
+                "custom": {"behavior": None, "us": 1.5, "scope": "kernel_only", "note": None},
+                "baseline": {"behavior": None, "us": None, "scope": None,
+                             "reason": "等待 GPU baseline"},
+            }],
+            "summary": {"status": "blocked_wait_gpu_benchmark", "perf_cases": 1,
+                        "达标": 0, "blocked": 0, "non_passing": 1,
+                        "failed": 0, "exceptions": 0}})
         self.assertEqual(self._errs(), [])          # 正规挂起、非门 FAILED
 
     def test_wait_missing_npu_fails(self):
@@ -1075,6 +1106,33 @@ class GateTask3ConfirmedBypassTest(unittest.TestCase):
             "summary": {"status": "ok", "perf_cases": 1, "达标": 1, "blocked": 0}})
         self.assertEqual(self._errs(), [])
         self.assertEqual(self._cli().returncode, 0)
+
+    def test_non_passing_case_list_is_required_and_bound_to_case_context(self):
+        per = [{"case_id": "p0", "scope": "kernel_only", "npu_us": 2.0,
+                "baseline": {"source": "tbe", "us": 1.0},
+                "ratio": 0.5, "blocked": False, "达标": False}]
+        summary = {"status": "fail", "perf_cases": 1, "达标": 0, "blocked": 0,
+                   "non_passing": 1, "failed": 1, "exceptions": 0}
+        errs = []
+        G._gate_non_passing_report({"per_case": per}, self.d, per, summary, errs)
+        self.assertTrue(any("缺 non_passing_cases" in e for e in errs))
+
+        report = {"per_case": per, "non_passing_cases": [{
+            "case_id": "p0", "outcome": "failed",
+            "reason": "ratio=0.5 < target_ratio=1.0",
+            "dtype": "float32",
+            "inputs": [{"name": "a", "shape": [1024, 1024]}],
+            "shape_class": None, "input_bytes": None,
+            "custom": {"behavior": "npu", "us": 2.0, "scope": "kernel_only", "note": None},
+            "baseline": {"behavior": None, "us": 1.0, "scope": "kernel_only", "reason": None},
+        }]}
+        errs = []
+        G._gate_non_passing_report(report, self.d, per, summary, errs)
+        self.assertEqual(errs, [])
+        report["non_passing_cases"][0]["dtype"] = "float16"
+        errs = []
+        G._gate_non_passing_report(report, self.d, per, summary, errs)
+        self.assertTrue(any("dtype" in e and "不一致" in e for e in errs))
 
 
 class GateTask3ShapeReportTest(unittest.TestCase):

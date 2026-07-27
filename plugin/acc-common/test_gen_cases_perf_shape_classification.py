@@ -10,9 +10,15 @@ from unittest import mock
 import gen_cases as GC
 
 
-def _spec(limit=262144):
+def _spec(limit=262144, min_total_input_elements=1, include_precision_tags=None):
+    selection = {
+        "min_total_input_elements": min_total_input_elements,
+    }
+    if include_precision_tags is not None:
+        selection["include_precision_tags"] = include_precision_tags
     return {"perf": {
         "case_source": "precision_cases",
+        "case_selection": selection,
         "shape_classification": {
             "metric": "sum_input_bytes",
             "small_max_bytes": limit,
@@ -77,6 +83,38 @@ class PerfShapeClassificationTest(unittest.TestCase):
         self.assertEqual(ledger["selection"]["selected_case_ids"], [])
         self.assertEqual(ledger["selection"]["excluded_precision_case_ids"], ["precision_only"])
 
+    def test_selected_precision_tag_promotes_same_case_to_performance(self):
+        selected = _case("selected", [24], dims=["功能", "精度"])
+        selected["tags"] = ["value_profile"]
+        untouched = _case("untouched", [24], dims=["功能", "精度"])
+        ledger = GC._classify_perf_cases(
+            _spec(include_precision_tags=["value_profile"]), [selected, untouched])
+        self.assertEqual(selected["dims"], ["功能", "精度", "性能"])
+        self.assertEqual(
+            selected["perf_shape_classification"]["class"], "small")
+        self.assertEqual(untouched["dims"], ["功能", "精度"])
+        self.assertEqual(
+            ledger["selection"]["selected_case_ids"], ["selected"])
+        self.assertEqual(
+            ledger["case_selection"]["include_precision_tags"], ["value_profile"])
+
+    def test_degenerate_singleton_stays_precision_but_is_removed_from_perf(self):
+        singleton = _case("singleton", [1])
+        nontrivial = _case("nontrivial", [3])
+        ledger = GC._classify_perf_cases(
+            _spec(min_total_input_elements=2), [singleton, nontrivial])
+        self.assertEqual(singleton["dims"], ["功能", "精度"])
+        self.assertEqual(
+            singleton["perf_selection_exclusion"],
+            {
+                "reason": "degenerate_total_input_elements_below_minimum",
+                "total_input_elements": 1,
+                "min_total_input_elements": 2,
+            })
+        self.assertNotIn("perf_shape_classification", singleton)
+        self.assertEqual(ledger["selection"]["selected_case_ids"], ["nontrivial"])
+        self.assertEqual(ledger["selection"]["excluded_degenerate_case_ids"], ["singleton"])
+
     def test_perf_case_must_also_be_precision_case(self):
         with self.assertRaisesRegex(ValueError, "dims 不含「精度」"):
             GC._classify_perf_cases(_spec(), [_case("bad", [8], dims=["性能"])])
@@ -98,6 +136,14 @@ class PerfShapeClassificationTest(unittest.TestCase):
             {"case_source": "precision_cases",
              "shape_classification": {"metric": "sum_input_bytes",
                                       "small_max_bytes": 262144, "hardware": "A3"}},
+            {"case_source": "precision_cases",
+             "case_selection": {"min_total_input_elements": 0},
+             "shape_classification": {"metric": "sum_input_bytes",
+                                      "small_max_bytes": 262144, "hardware": "Atlas A3"}},
+            {"case_source": "precision_cases",
+             "case_selection": {"include_precision_tags": ["value_profile", ""]},
+             "shape_classification": {"metric": "sum_input_bytes",
+                                      "small_max_bytes": 262144, "hardware": "Atlas A3"}},
         ]
         for perf in bad_values:
             with self.subTest(perf=perf), self.assertRaises(ValueError):
@@ -152,6 +198,9 @@ class PerfShapeClassificationTest(unittest.TestCase):
         self.assertEqual(spec["perf"]["baseline"], "torch_npu")
         self.assertEqual(spec["perf"]["torch_baseline"]["api"], "torch.median")
         self.assertEqual(spec["perf"]["case_source"], "precision_cases")
+        self.assertEqual(spec["perf"]["case_selection"]["min_total_input_elements"], 2)
+        self.assertEqual(
+            spec["perf"]["case_selection"]["include_precision_tags"], ["value_profile"])
         rule = spec["perf"]["shape_classification"]
         self.assertEqual(rule["metric"], "sum_input_bytes")
         self.assertEqual(rule["small_max_bytes"], 262144)

@@ -252,7 +252,34 @@ def _perf_case_policy(spec):
             f"{hardware} 大小 shape profile固定为 metric={profile['metric']!r}, "
             f"small_max_bytes={profile['small_max_bytes']}，得 metric={metric!r}, "
             f"small_max_bytes={limit!r}")
+    selection = perf.get("case_selection") or {}
+    if not isinstance(selection, dict):
+        raise ValueError("perf.case_selection 须为 object")
+    min_total_elements = selection.get("min_total_input_elements", 1)
+    if (isinstance(min_total_elements, bool) or not isinstance(min_total_elements, int)
+            or min_total_elements < 1):
+        raise ValueError(
+            "perf.case_selection.min_total_input_elements 须为 ≥1 的整数，"
+            f"得 {min_total_elements!r}")
+    include_precision_tags_declared = "include_precision_tags" in selection
+    include_precision_tags = selection.get("include_precision_tags") or []
+    if (not isinstance(include_precision_tags, list)
+            or any(not isinstance(tag, str) or not tag.strip()
+                   for tag in include_precision_tags)):
+        raise ValueError(
+            "perf.case_selection.include_precision_tags 须为非空字符串数组")
+    include_precision_tags = [tag.strip() for tag in include_precision_tags]
+    if len(set(include_precision_tags)) != len(include_precision_tags):
+        raise ValueError(
+            "perf.case_selection.include_precision_tags 不得含重复项")
+    selection_contract = {
+        "min_total_input_elements": int(min_total_elements),
+        "reason": "exclude_degenerate_inputs_without_comparable_device_kernel",
+    }
+    if include_precision_tags_declared:
+        selection_contract["include_precision_tags"] = include_precision_tags
     return {"case_source": source,
+            "case_selection": selection_contract,
             "shape_classification": {
                 "metric": metric,
                 "small_max_bytes": int(limit),
@@ -274,10 +301,15 @@ def _classify_perf_cases(spec, cases):
     rule = policy["shape_classification"]
     limit = rule["small_max_bytes"]
     counts = {"small": 0, "large": 0}
-    selected_ids, excluded_precision_ids = [], []
+    selected_ids, excluded_precision_ids, excluded_degenerate_ids = [], [], []
     by_dtype = {}
     for case in cases:
         dims = case.get("dims") or []
+        include_tags = policy["case_selection"].get("include_precision_tags", [])
+        if ("精度" in dims and "性能" not in dims and include_tags
+                and set(case.get("tags") or []).intersection(include_tags)):
+            dims = list(dims) + ["性能"]
+            case["dims"] = dims
         if "性能" not in dims:
             if "精度" in dims and isinstance(case.get("id"), str):
                 excluded_precision_ids.append(case["id"])
@@ -290,6 +322,7 @@ def _classify_perf_cases(spec, cases):
         if not isinstance(inputs, list) or not inputs:
             raise ValueError(f"{cid}: 性能 case 缺 inputs，无法按输入载荷字节分类")
         total = 0
+        total_elements = 0
         for inp in inputs:
             if not isinstance(inp, dict):
                 raise ValueError(f"{cid}: input 条目非 object，无法分类")
@@ -306,7 +339,20 @@ def _classify_perf_cases(spec, cases):
             except TypeError as exc:
                 raise ValueError(
                     f"{cid}: input storage dtype={storage_dtype!r} 无法换算字节数") from exc
-            total += _numel(shape) * itemsize
+            input_elements = _numel(shape)
+            total_elements += input_elements
+            total += input_elements * itemsize
+        min_total_elements = policy["case_selection"]["min_total_input_elements"]
+        if total_elements < min_total_elements:
+            case["dims"] = [dim for dim in dims if dim != "性能"]
+            case["perf_selection_exclusion"] = {
+                "reason": "degenerate_total_input_elements_below_minimum",
+                "total_input_elements": int(total_elements),
+                "min_total_input_elements": int(min_total_elements),
+            }
+            excluded_precision_ids.append(cid)
+            excluded_degenerate_ids.append(cid)
+            continue
         size_class = "small" if total <= limit else "large"
         label = "小shape" if size_class == "small" else "大shape"
         tags = [t for t in (case.get("tags") or []) if t not in ("小shape", "大shape")]
@@ -327,6 +373,7 @@ def _classify_perf_cases(spec, cases):
                 "identity_rule": "selected case_id is reused from the same precision caseset",
                 "selected_case_ids": selected_ids,
                 "excluded_precision_case_ids": excluded_precision_ids,
+                "excluded_degenerate_case_ids": excluded_degenerate_ids,
                 "selected_by_dtype": dict(sorted(by_dtype.items())),
                 "selected_total": len(selected_ids),
                 "precision_total": sum(1 for c in cases if "精度" in (c.get("dims") or [])),

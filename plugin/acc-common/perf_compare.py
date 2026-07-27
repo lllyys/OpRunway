@@ -423,6 +423,101 @@ def _attach_shape_report(report, caseset):
     return report
 
 
+def _attach_non_passing_cases(report, caseset, evidence, baseline):
+    """把所有未通过性能 case 逐条挂到最终报告，且不改变既有裁决。
+
+    ``per_case`` 是确定性裁决明细，但早期仅含 case_id/数值/简短 note；baseline 采集失败的
+    原始行为保存在 ``baseline.excluded``，dtype、shape 与大小分类则在 caseset。这里把三处
+    已有事实做只读联结，生成面向人读报告的 ``non_passing_cases``：
+
+    * ratio 未达标、blocked、exception、等待外部 baseline 等所有非 PASS 行都必须出现；
+    * 每行带 dtype、输入 shape、small/large、双边行为/计时和原因；
+    * 不猜归因，不把 baseline limitation 写成 DUT defect；
+    * 本块不参与 ``达标`` / ``blocked`` / ``status`` 计算，生成失败也不能改写裁决。
+    """
+    rows = report.get("per_case")
+    if not isinstance(rows, list):
+        return report
+    case_by_id = {
+        c.get("id"): c for c in ((caseset or {}).get("cases") or [])
+        if isinstance(c, dict) and isinstance(c.get("id"), str)
+    }
+    ev_by_id = {
+        e.get("case_id"): e for e in ((evidence or {}).get("evidence") or [])
+        if isinstance(e, dict) and isinstance(e.get("case_id"), str)
+    }
+    baseline_doc = baseline if isinstance(baseline, dict) else {}
+    baseline_by_id = {
+        b.get("case_id"): b for b in (baseline_doc.get("per_case") or [])
+        if isinstance(b, dict) and isinstance(b.get("case_id"), str)
+    }
+    excluded_by_id = {
+        b.get("case_id"): b for b in (baseline_doc.get("excluded") or [])
+        if isinstance(b, dict) and isinstance(b.get("case_id"), str)
+    }
+    report_status = str((report.get("summary") or {}).get("status") or "")
+    failures = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("达标") is True:
+            continue
+        cid = row.get("case_id")
+        case = case_by_id.get(cid) or {}
+        inputs = case.get("inputs") if isinstance(case.get("inputs"), list) else []
+        shapes = [
+            {"name": inp.get("name"), "shape": inp.get("shape")}
+            for inp in inputs if isinstance(inp, dict)
+        ]
+        shape_meta = case.get("perf_shape_classification")
+        shape_meta = shape_meta if isinstance(shape_meta, dict) else {}
+        perf = (ev_by_id.get(cid) or {}).get("perf")
+        perf = perf if isinstance(perf, dict) else {}
+        excluded = excluded_by_id.get(cid) or {}
+        baseline_row = baseline_by_id.get(cid) or {}
+
+        if row.get("blocked") or report_status.startswith("blocked"):
+            outcome = "blocked"
+        elif row.get("exception"):
+            outcome = "exception"
+        else:
+            outcome = "failed"
+        reason = row.get("note")
+        if not reason and outcome == "failed":
+            reason = (
+                f"ratio={row.get('ratio')!r} < target_ratio={report.get('target_ratio')!r}"
+            )
+        item = {
+            "case_id": cid,
+            "outcome": outcome,
+            "reason": reason or "未达性能验收标准",
+            "dtype": _case_dtype(case),
+            "inputs": shapes,
+            "shape_class": shape_meta.get("class"),
+            "input_bytes": shape_meta.get("input_bytes"),
+            "ratio": row.get("ratio"),
+            "target_ratio": report.get("target_ratio"),
+            "custom": {
+                "behavior": perf.get("behavior"),
+                "us": row.get("npu_us", perf.get("us")),
+                "scope": row.get("npu_scope", perf.get("scope")),
+                "note": perf.get("note"),
+            },
+            "baseline": {
+                "behavior": excluded.get("behavior"),
+                "us": (row.get("baseline") or {}).get("us", baseline_row.get("us")),
+                "scope": baseline_doc.get("scope"),
+                "reason": excluded.get("reason"),
+            },
+        }
+        failures.append(item)
+    report["non_passing_cases"] = failures
+    summary = report.get("summary")
+    if isinstance(summary, dict):
+        summary["non_passing"] = len(failures)
+        summary["failed"] = sum(1 for item in failures if item["outcome"] == "failed")
+        summary["exceptions"] = sum(1 for item in failures if item["outcome"] == "exception")
+    return report
+
+
 def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline_blocked_status=None):
     # pc-7：入口轻量 schema 校验——坏输入收敛为结构化 invalid，绝不下标崩溃。
     # C5：**每一条 return 都过 `_mark_non_acceptance`**——mock 基线的报告无论走哪个出口（invalid / no_perf_cases /
@@ -460,11 +555,12 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
         notes = [top_note]
         if exc_note:
             notes.append(exc_note)
-        return _attach_shape_report(
+        report = _attach_shape_report(
             {"op": op, "baseline_source": src, "target_ratio": tgt,
              "per_case": rows, "notes": notes,
              "summary": {"perf_cases": len(rows), "达标": 0, "blocked": 0, "status": status}},
             caseset)
+        return _attach_non_passing_cases(report, caseset, evidence, baseline)
 
     src = baseline.get("source")
     if not perf_ids:
@@ -475,13 +571,14 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
     if tgt is None:
         rows = [{"case_id": cid, "达标": False, "blocked": True, "note": tgt_err} for cid in perf_ids]
         notes = [tgt_err] + ([exc_note] if exc_note else [])
+        report = _attach_shape_report(
+            {"op": op, "baseline_source": src, "target_ratio": None,
+             "per_case": rows, "notes": notes,
+             "summary": {"perf_cases": len(rows), "达标": 0, "blocked": len(rows),
+                         "status": "invalid_config"}},
+            caseset)
         return _mark_non_acceptance(
-            _attach_shape_report(
-                {"op": op, "baseline_source": src, "target_ratio": None,
-                 "per_case": rows, "notes": notes,
-                 "summary": {"perf_cases": len(rows), "达标": 0, "blocked": len(rows),
-                             "status": "invalid_config"}},
-                caseset), baseline)
+            _attach_non_passing_cases(report, caseset, evidence, baseline), baseline)
 
     ev_list, bl_list = evidence["evidence"], baseline["per_case"]
     notes = []
@@ -601,6 +698,7 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
         report["summary"]["risk"] = sorted(risk_flags)
     if exc_rows:  # 唯一事实源：仅在有例外行时产 simulation
         report["simulation"] = _build_simulation(exc, exc_rows, case_by_id, op)
+    _attach_non_passing_cases(report, caseset, evidence, baseline)
     # pc-1 + C5：summary.baseline_mock 标 + 报告级 NON-ACCEPTANCE 戳，统一由 _mark_non_acceptance 落。
     return _mark_non_acceptance(report, baseline)
 

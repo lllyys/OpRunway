@@ -34,13 +34,23 @@
 
 - **通用 case 来源与大小分类**：只要存在性能维，就必须用
   `perf.case_source="precision_cases"` 声明性能 case 取自精度 caseset，并用
+  本轮确定性精度裁决的 pass case_id 再筛一次；精度 fail/needs_review 不能进入性能比较。
+  精度已通过意味着 DUT 在相同输入上的功能/精度执行已成立，若性能采集阶段再执行失败，应按
+  DUT 回归或 harness/collector 异常解耦；它不意味着性能 ratio 必然达标，也不替代 baseline 证据门。
+  同时用
   `perf.shape_classification={metric:"sum_input_bytes",small_max_bytes,hardware}` 按全部输入物理载荷之和
   标记“小shape/大shape”。A3 的 `small_max_bytes=262144`，边界计入小 shape。该分类只服务分组统计；
   没有任务书例外条款时，大小两类都正常测量和判定。
 - **选择账本**：caseset 至少记录精度/性能总数、入选与排除的 `case_id`、按 dtype 入选数；
   验收门重算并核对，证明性能 case 的确取自精度 case。
+- **补齐交叉覆盖**：需要补齐任务书接口/属性 × small/large 时，可通过
+  `perf.case_selection.include_precision_tags` 选入匹配 tag 的既有精度 case；case_id、输入与 golden
+  保持同一份，仍须先通过精度裁决。
 - **固定报告视图**：按 `small`、`large`、`overall` 输出计划数、实测数、达标数、blocked 数、
   NPU/baseline 中位耗时和 speedup。任何声明了分类策略却缺少分类的 case 都不能静默跳过。
+- **失败明细不丢行**：所有 ratio 未达标、blocked、exception、等待/缺失 baseline 的 case 都须在最终
+  报告逐条记录 case_id、dtype、输入 shape、small/large、custom/baseline 行为与耗时、原因。
+  汇总不能替代明细，也不能通过少算分母制造“全部通过”。
 - **触发**：`小shape` tag 的性能用例；阈值 `when_us_below` / `abs_gap_us_within` 取自 `spec.perf.small_shape_exception`（对象；legacy 字符串正则兜底），**零硬编码**。
 - **判定**：`max(NPU,基线) < when_us_below` 且 `|NPU−基线| ≤ abs_gap_us_within` → **达标保持 False** + `exception` 标 + `exception_detail`。
 - **仿真图**：`report['simulation']` 由 `perf_compare` **独家产**（唯一事实源）；`perf_sim_plot.py` 只据此渲染 SVG（阈值线/容差带数据驱动 + XML escape），**不二次推断**。`gate_task3` 强制「有图 + 例外行↔simulation 交叉一致 + SVG sha256 + 路径钉死」才放行；删图/篡改/对不上 → FAILED。

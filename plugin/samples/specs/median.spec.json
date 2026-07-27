@@ -61,6 +61,11 @@
     "warmup": 5,
     "repeat": 20,
     "case_source": "precision_cases",
+    "case_selection": {
+      "min_total_input_elements": 2,
+      "include_precision_tags": ["value_profile"],
+      "_note": "cannbot Median 冻结性能集最小 numel=31，未把 numel=1 的精度边界当性能 case；A3 系统 torch.median 对单元素会零 kernel 或报 BF16 不支持，无法形成同口径 device-kernel 比值。故单元素仍做精度，只在生成阶段移出性能维；非退化小 shape 由 length=3 等精度 case 覆盖。另从同一精度 caseset 选入 value_profile 用例，使 small shape 同时覆盖全局与按维接口；不是另造性能输入。"
+    },
     "shape_classification": {
       "metric": "sum_input_bytes",
       "small_max_bytes": 262144,
@@ -70,8 +75,11 @@
     "torch_baseline": {
       "api": "torch.median",
       "positional": ["self"],
-      "keyword": {"dim": "dim", "keepdim": "keepdim"},
-      "_note": "字段驱动映射：全局变体自然省略 dim/keepdim，按维变体传入对应关键字；采集端不含算子身份分支。"
+      "keyword": {"dim": "dim", "keepDim": "keepdim"},
+      "keyword_groups": [
+        {"when": {"attr": "dim", "is_null": false}, "slots": ["dim", "keepDim"]}
+      ],
+      "_note": "字段驱动映射：统一 ACLNN ABI 的全局变体虽有 dim/keepDim 占位 slot，但 case.attrs.dim=null 时整组省略；按维变体才传入对应关键字。采集端不含算子身份分支。"
     },
     "_baseline_note": "用户 2026-07-26 明确确认：Median 任务书所称 aclnnMedian/aclnnMedianDim 小算子拼接版本等价于 Torch 对应接口，因此性能 baseline 取同机 torch_npu 执行 torch.median；无需再追加等价性证明，也不改为直接测单个 ACLNN 接口。性能 case 只从同一份精度 caseset 中选择，精度未通过的 case 不进入性能比较。"
   },
