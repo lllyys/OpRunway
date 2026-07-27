@@ -230,7 +230,7 @@ class PerfShapeClassificationTest(unittest.TestCase):
         self.assertEqual(spec["perf"]["case_source"], "precision_cases")
         self.assertEqual(spec["perf"]["case_selection"]["min_total_input_elements"], 2)
         self.assertEqual(
-            spec["perf"]["case_selection"]["include_precision_tags"], ["value_profile"])
+            spec["perf"]["case_selection"]["include_precision_tags"], ["torch_parity"])
         rule = spec["perf"]["shape_classification"]
         self.assertEqual(rule["metric"], "sum_input_bytes")
         self.assertEqual(rule["small_max_bytes"], 262144)

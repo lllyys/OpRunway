@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **Median 性能选择回归断言同步**：A3 容器首轮相关单测 150 通过，唯一真实失败是测试仍断言旧
+  `value_profile` 标签；现改为与完整 cannbot 对标矩阵一致的 `torch_parity`。其余 93 个 error
+  均由首轮限定 payload 未携其它算子 sample fixture 引起，补齐 fixture 后重跑，不冒充代码失败。
 - **官方 Extension 接通同口径性能链**：先跑全量精度并用 validator 同源规则筛 case，再仅对精度通过的
   性能子集复用精确 ELF/vendor receipt，custom 与 Torch baseline 双侧统一走 `msprof --ai-core=off`
   + ctypes MSTX + CSV 的 kernel-only 采集；性能 collect 的完整 case 序列和 provenance 独立复核。
