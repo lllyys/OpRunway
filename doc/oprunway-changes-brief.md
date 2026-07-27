@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **同符号多变体 Extension 绑定修正**：不再把 ACLNN symbol 唯一性误当 ABI 约束，改按
+  `symbol + active_attrs + active_outputs` 唯一匹配 entrypoint；统一符号承载 global/by-dim
+  等稳定接口形态可直接生成，歧义或零匹配仍 fail-closed。
 - **torch_parity dry-run 账本 schema 修正**：A3 实跑已确认 1344 条完整矩阵、每 dtype 168 条、
   零丢失，但 renderer 因该 profile 把 `unpaired_combo_classes` 写成空列表而崩；现统一为空对象
   `{count,classes,attr_values_never_emitted}` 并用真实 Median 1344 dry-run 回归钉住。

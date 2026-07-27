@@ -66,14 +66,14 @@ def _safe(root, rel):
     return path
 
 
-def _variant_map(manifest):
+def _variants_by_symbol(manifest):
     result = {}
     for row in manifest.get("variants") or []:
         symbol = row.get("symbol")
-        if not isinstance(symbol, str) or symbol in result:
+        if not isinstance(symbol, str) or not symbol:
             raise CppExtensionAdapterError(
-                f"extension manifest variant symbol 缺失或重复: {symbol!r}")
-        result[symbol] = row
+                f"extension manifest variant symbol 缺失: {symbol!r}")
+        result.setdefault(symbol, []).append(row)
     if not result:
         raise CppExtensionAdapterError("extension manifest 无 variants")
     return result
@@ -81,7 +81,7 @@ def _variant_map(manifest):
 
 def build_invocation_plan(caseset, manifest):
     """把 caseset.aclnn_call 绑定到生成 Extension 的 entrypoint；不重推变体。"""
-    variants = _variant_map(manifest)
+    variants = _variants_by_symbol(manifest)
     rows, seen = [], set()
     cases = caseset.get("cases")
     if not isinstance(cases, list) or not cases:
@@ -96,12 +96,13 @@ def build_invocation_plan(caseset, manifest):
             raise CppExtensionAdapterError(
                 f"{cid}: cpp_extension case 缺 aclnn_call")
         symbol, slots = call.get("symbol"), call.get("slots")
-        variant = variants.get(symbol)
-        if variant is None:
+        candidates = variants.get(symbol)
+        if candidates is None:
             raise CppExtensionAdapterError(
                 f"{cid}: aclnn_call.symbol={symbol!r} 未绑定生成 Extension variant")
         if not isinstance(slots, list) or not slots:
             raise CppExtensionAdapterError(f"{cid}: aclnn_call.slots 须为非空列表")
+        active_attrs = []
         active_outputs = []
         for index, slot in enumerate(slots):
             if not isinstance(slot, dict):
@@ -112,12 +113,20 @@ def build_invocation_plan(caseset, manifest):
                     f"{cid}: slots[{index}].role={role!r} 非受控词")
             if not isinstance(name, str) or not name:
                 raise CppExtensionAdapterError(f"{cid}: slots[{index}].name 缺失")
+            if role == "attr":
+                active_attrs.append(name)
             if role == "out":
                 active_outputs.append(name)
-        if active_outputs != variant.get("active_outputs"):
+        matches = [
+            row for row in candidates
+            if row.get("active_attrs") == active_attrs
+            and row.get("active_outputs") == active_outputs
+        ]
+        if len(matches) != 1:
             raise CppExtensionAdapterError(
-                f"{cid}: slots active outputs={active_outputs!r} 与 manifest "
-                f"{variant.get('active_outputs')!r} 不同")
+                f"{cid}: symbol={symbol!r}, active attrs={active_attrs!r}, "
+                f"active outputs={active_outputs!r} 匹配 Extension variant 数={len(matches)}")
+        variant = matches[0]
         rows.append({
             "case_id": cid,
             "symbol": symbol,

@@ -82,6 +82,18 @@ class CppExtensionAdapterContractTest(unittest.TestCase):
             ["invoke_v0", "invoke_v1"])
         self.assertEqual(plan["namespace"], manifest["namespace"])
 
+    def test_same_symbol_variants_bind_by_active_slot_contract(self):
+        spec = _spec()
+        spec["call_variants"][1]["symbol"] = "Witness"
+        caseset = _caseset()
+        caseset["cases"][1]["aclnn_call"]["symbol"] = "Witness"
+        with tempfile.TemporaryDirectory() as td:
+            manifest = C.generate(spec, td)
+        plan = A.build_invocation_plan(caseset, manifest)
+        self.assertEqual(
+            [row["entrypoint"] for row in plan["cases"]],
+            ["invoke_v0", "invoke_v1"])
+
     def test_unknown_symbol_fails_closed(self):
         bad = copy.deepcopy(_caseset())
         bad["cases"][0]["aclnn_call"]["symbol"] = "Other"
