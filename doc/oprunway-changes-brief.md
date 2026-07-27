@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **Extension FAIL 快速人工复现**：新增通用 `cpp_extension_repro.py`，复核既有 receipt/ELF 后
+  直接重放报告中的原始输入与 golden；默认按 dtype×失败输出组合取代表项，也可指定单 case 或全量失败，
+  只产人工复现摘要、不改验收裁决。
 - **Extension 逐 case 原子留痕**：driver 在每次 NPU 调用前记录当前 case、每次成功后原子更新
   输出 manifest；即使设备超时或进程异常，也能区分最后成功项与触发项，不再整轮只剩 rc=1。
 - **精度门跳过性能仍保留计划视图**：`perf_cases/cases_scored` 继续如实为 0，同时从同一
