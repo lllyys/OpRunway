@@ -4,6 +4,35 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **Median 最终验收 PASS（覆盖本节较早的 BLOCKED/C++ Extension 路线记录）**：最终源码精度
+  60/60 PASS；从同一精度 caseset 选择的性能 40/40 获得同机同输入、同为 kernel-only 的有效双边数据，
+  40/40 达到任务书 `ratio >= 1.0`，逐 case 最低 speedup 1.7459；Task 1/2/3 全通过并刷新根
+  `acceptance.json`。small 14/14、聚合 speedup 5.3846；large 26/26、8.4507；shape overall
+  40/40、3.4817。
+- **最终路线按任务书最短链执行**：用户已确认小算子拼接等价于 Torch 对应接口，因此 baseline 直接取
+  隔离 DUT OPP 环境后的同机 `torch_npu:torch.median`，DUT 保持独立 ACLNN 两段式调用与定义方
+  provenance；无需另建 C++ Extension 来重复证明等价。先前“回退源码优化、改做 Extension”的建议作废。
+- **第三个通用源码优化补齐最后两例劣化**：按 dtype、32B 对齐和每核实际行数派生 small-row K 值，
+  不含算子/case 身份特判；`float32[4,6], dim=-1` 从约 18 μs 降至约 2.5 μs。三个隔离源码提交
+  `4fbaa74f7`、`e215fa176`、`36e5211f8` 均经最终 60 例精度和 40 例性能复验，不应回退。
+- **clean-pass finalizer 与全量回归落地**：新增 fail-closed 的
+  `finalize_clean_acceptance.py`，只在精度、性能和三级证据均为 clean pass 时原子写根
+  `acceptance.json`。A3 全量回归 `1505 passed, 10 skipped, 474 subtests`；相关子集 319 passed。
+- **本用户空间安全清理**：仅删除容器 `/tmp` 下可确认属于旧 pytest/perf/msprof 的临时目录，
+  `/tmp` 从约 18G 降到首次清理后 322M、完成测试并最终清理后 23M；最近复核
+  `/home/liangyuansheng` 7.2G（其中 `/work/run` 6.5G）、根盘可用约 19G，未触碰其他用户目录。
+- **完成 compile 与换 session 交接**：Torch 对标路线已蒸馏为 proposed dossier；旧 Median
+  `aclnn_builtin` 路由和已废除的 `trivial-met` 规则已显式标为 contested，当前 handoff 同步记录远端
+  回退建议、本地选择性清理边界和下一轮 C++ Extension 测试设计顺序。
+- **旧性能优化结果降为历史诊断**：旧直接 ACLNN/不可辨 Torch 路由下的 34/40、48/50 等数据不再作为
+  最终验收证据，也不据此继续决定 Median 优化；本轮已提前结束，没有正在运行的 collector。
+- **Torch 对标默认走独立 C++ Extension**：以后 stock `torch.*` 对应接口保留为小算子拼接 baseline，DUT 通过独立 `torch.ops.<namespace>.*` 调 PR 的 ACLNN/Ascend C 算子，以入口隔离、符号定义方和 profiler kernel 区分两侧；只有任务书明确要求替换原生 dispatch 时才改走 `Ascend/pytorch` op-plugin。
+- **补充 Agent/Skill 关系图**：新增注册面、live 调度面、未接入 live 的方法论 skill 与 acc-common 确定性脚本层关系图，明确 primary 实际只加载 acceptance-workflow、两个产出型 subagent 各加载 acc-spec/acc-runner、真机与归因 subagent 无原子 skill。
+- **补齐验收流程可视化**：新增关键节点/约束图与 SOP 步骤图两份可编辑 draw.io 文档及 PNG 预览，覆盖 CP-A..E、primary/subagent 边界、cpp/aclnn_py 双信任门、确定性裁决链、BLOCKED/FAIL 路由和真机副作用确认。
+- **性能未通过用例成为最终报告硬字段**：`perf_report.json.non_passing_cases` 逐条联结 caseset、DUT evidence 与 baseline excluded，记录 case_id、dtype、输入 shape、small/large、双边行为/耗时及失败/挂起原因；ratio FAIL、BLOCKED、exception、等待 baseline 均不得只留在汇总或被静默删行，既有确定性裁决字段不变。
+- **Median 两个隔离源码检查点消除全部真实性能劣化**：global value-only 跳过 index 计算，INT64 单行大 shape 改为多核精确整数二分；A3 新包精度 60/60 PASS。严格合并同口径重采后，48 个可评分性能 case 全部 `ratio >= 1.0`；large 26/26 达标、聚合 speedup 1.2318，small 22/22 可评分项达标、聚合 speedup 7.2101，另 2 个 BF16 global 小 shape 因当前 torch_npu 2.10.0 + CANN 9.0.1 的 `aclnnMedian` 不产 executor 而继续 blocked。
+- **性能采集前置精度 pass 规则定稿**：性能 case 先从同一精度 caseset 选择，再只消费本轮确定性精度裁决已 pass 的 case；同一 DUT/输入在性能阶段若再次执行失败，必须按 DUT 回归或 harness/collector 异常解耦。精度 pass 只证明结果正确，不保证性能 ratio 达标或 baseline/profiler 必然产证，后两类仍分别按性能 FAIL 或 BLOCKED。
+- **torch baseline 变体绑定改为 spec 字段驱动**：新增 `keyword_groups`，可按 `case.attrs` 决定一组 torch keyword 是否整体出现，解决统一 ACLNN ABI 的全局变体仍携带 dim/keepDim 占位 slot 时误调按维接口的问题；无算子身份分支，缺属性或坏结构 fail-closed。新增严格重采合并器，只允许同口径、primary 子集的有效双边记录填补无效记录，禁止覆盖已有有效数据并记录输入哈希。
 - **修复整轮性能采集被固定超时误杀**：`aclnn_py` 性能进程不再对任意 case 数固定使用 1200 秒，改为 `max(1200, 60 × 实际选中 case 数)`，50 case 默认 3000 秒；每完成一例立即 flush 进度，显式环境覆盖与 7200 秒外层总护栏保留。验收门同时消除双侧都缺值时误导性的 `None ≠ None` 诊断，真实证据完整性门不放宽。
 - **A3 以新 caseset 完成正式重跑**：CP-C 信任门以 8 个见证覆盖 8 dtype、两个 variant、标量属性和多输出；正式精度 60/60 PASS。50 个性能 case 全部完成 custom 采集，`torch_npu` baseline 48 个可评分、2 个 BF16 case 仍为 baseline limitation；48 对中 35 对达到任务书 `ratio >= 1.0`，确定性结论仍为 `BLOCKED`，不得写成性能通过。
 - **大小 shape 与报告字段得到真机产物验证**：性能 case 全部来自同一精度 caseset；A3 按输入物理字节 `<=262144` / `>262144` 分为 24 个 small、26 个 large。small 为 22 对可评分、19 对达标、2 blocked、聚合 speedup 7.5006；large 为 26 对可评分、16 对达标、聚合 speedup 0.3668；overall 为 48 对可评分、35 对达标、2 blocked、聚合 speedup 3.4268。
@@ -528,3 +557,10 @@
 6. 调研 `awesome-ascend-skills`：只收 skills，有 external 自动同步机制；cannbot 就是「自维护仓 + external 同步」→ 定 OpRunway 走同款发布形态。
 7. 把全部相关仓 clone 进 `repos/`（共 12 个、~604M）：catlass + cannbot + 其余 10 个算子仓（asc-devkit/ops-sparse/ops-blas/ops-cv/catccos/shmem/oam-tools/amct/hixl/cann-recipes-infer，均 `--depth 1`）。
 8. 组件仍不建：等真实任务书 + catlass PR、敲定数据契约/口径后再实施。
+# 2026-07-27
+
+- msprof collector 新增单侧硬超时与逐 case 原子 checkpoint，异常 kernel/profiler 不再无限挂住，也不会因整轮中断丢掉已完成证据。
+- 性能 case 选择新增可审计 `min_total_input_elements`：退化单元素输入保留精度、生成时移出性能维；Median 据 cannbot 最小 numel=31 与 A3 reference 零-kernel/不支持证据取最小值 2。
+- 性能双边新增环境隔离：baseline 子进程精确移除本次 DUT vendor 的 OPP/动态库路径，防系统 torch_npu 基线被 custom 同名 op 覆盖。
+- Torch baseline 映射新增通用 `keyword_groups`：统一 ACLNN ABI 的可选属性占位槽可按 `case.attrs` 语义条件整组省略，避免把全局接口误测成按维接口。
+- 新增通用性能重采合并门：仅允许同口径、primary 子集、双边有效的 retry 记录补齐采集缺口，禁止覆盖既有有效数据，并记录输入哈希与替换 case。

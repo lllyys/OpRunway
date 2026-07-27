@@ -1,5 +1,23 @@
 # OpRunway 施工 TODO（离「通用算子验收工具」还差的）
 
+## ✅ Median 性能口径与 A3 验收已闭环（2026-07-27）
+
+- [x] 直接按任务书采用同机 `torch_npu:torch.median` 作为小算子拼接 baseline；用户已确认语义等价，
+  不再追加包装等价性证明。
+- [x] 性能 case 从同一份 60 例精度 caseset 选择；单元素退化点保留精度、以通用
+  `min_total_input_elements=2` 移出性能，最终性能 40 例。
+- [x] A3 按全部输入物理载荷 `<= 256 KiB` / `> 256 KiB` 分 small/large，分类仅用于统计、全部真实采集。
+- [x] 最终精度 60/60 PASS；性能 40/40 有效、40/40 达到 `ratio >= 1.0`；Task 1/2/3 全部通过，
+  `acceptance.json` 为 PASS。
+- [x] small 14/14、聚合 speedup 5.3846；large 26/26、8.4507；shape overall 40/40、3.4817；
+  逐 case 最低 speedup 1.7459。
+- [x] PR 隔离源码三个优化检查点保留；已用最终二进制完成全量精度和性能复验，不应按旧 C++ Extension
+  方案建议回退。
+- [x] A3 容器全量回归 1505 passed / 10 skipped / 474 subtests；本用户 `/tmp` 旧临时数据已清理，
+  未影响其他用户。
+
+> 后续只剩发布动作：选择性整理本轮 commit，push 前按仓规做统一审修；没有新的 Median 验收阻塞项。
+
 > **现状（2026-07-22 更新）**：Wave 1–3 经 **PR #3**、**PR #6**（V1/Q1 + Q9 + Q7 + cases50 + 真机 opp provenance 绑源 + IsClose bf16 转 tested）、**PR #7**（**runner 去引擎化**：runner 移出引擎作输出、`find_runner` fallback 退役 fail-closed）先后合入 main（PR #7 合入时 main = `b727d6f`，GitHub + GitCode 双镜像同 OID；**PR #8 合入后当前 main = `1d2bb3a`**，GitCode 镜像见下）。
 > **PR #8 已合入 main**（2026-07-22，merge commit `1d2bb3a`；分支 `feat/golden-out-of-engine`，8 commit / 25 文件）：**golden 去引擎化**——`gen_cases` 的 `GOLDEN` 硬表改 `load_golden(op)` 按算子加载器 + golden 来源契约扩六枚举 + ADR 0011（proposed）+ **来源契约批 1**（`0192e49`，见下「🔴 下一刀」）。⏳ **GitCode 镜像尚未同步**。
 > 编排升级 / 精度双标准 / 性能小 shape + GPU consumer / dtype 扩面 / catlass adapter / P2 原子化分发 **均已落地**，`acc-common` 的 unittest 覆盖：**合入前 main 486 个** · **现 main 523 个**（486 → 490 是 +4 golden 加载器的 fail-closed 真测、490 → 516 是 +26 批 1 的派生表穷举与授权核验测、516 → 523 是 +7 目录段软链洞的回归；三者均在 a3 容器全绿。含判定链、三级门、适配器与脚本、provenance 回归、对抗负例）。

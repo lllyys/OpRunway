@@ -1,81 +1,99 @@
 # OpRunway 会话交接 · 2026-07-26
 
-> 本文是 2026-07-26 建立、2026-07-27 续写的最新入口。旧 `oprunway-session-handoff-2026-07-25.md` 是历史暂停点，包含已经被后续真机结果推翻的状态，不得作为当前事实源。
+> 本文是 2026-07-26 建立、2026-07-27 续写的最新入口。旧
+> `oprunway-session-handoff-2026-07-25.md` 仅作历史材料，不得覆盖本文的最终真机事实。
 
-## 1 · 当前结论
+## 1 · Median 最终验收结论
 
-- GitHub PR #10「解决了 e2e 耗时问题」已合并，合并提交为 `f8dd1f8`。
-- Median + PR6429 最新精度结果为 **60/60 PASS**。
-- 固定快照完整 E2E 为 **2101 秒（35 分 01 秒）**：
-  - CP-A：157 秒
-  - CP-B：615 秒
-  - CP-C：173 秒
-  - CP-D：1156 秒
-- 非真机准备优化没有减少真机 case，没有修改精度/性能阈值、warmup/repeat、timing scope 或裁决链。
-- 2026-07-27 已以带 256 KiB 分类的新 caseset 正式复跑；性能维仍为 **BLOCKED**：
-  - custom：50/50 有效；
-  - `torch_npu` baseline：48/50 有效；
-  - 48 对均为同机同口径 kernel-only 数据；
-  - 35 对达到 `ratio >= 1.0`；
-  - 2 个 BF16、`dim=1` baseline case 报 161002，custom 成功，归为 baseline limitation，不归因 DUT。
-  - small：24 planned / 22 scored / 19 达标 / 2 blocked，聚合 speedup 7.5006；
-  - large：26 planned / 26 scored / 16 达标 / 0 blocked，聚合 speedup 0.3668；
-  - overall：50 planned / 48 scored / 35 达标 / 2 blocked，聚合 speedup 3.4268。
+- Median + PR6429 在 A3 的最终确定性裁决为 **PASS**。
+- 精度：60/60 PASS，8 类任务书 dtype 全覆盖；无 fail、uncertain、risk、gap 或契约问题。
+- 性能：从同一份精度 caseset 选择 40 例，40/40 获得同机、同输入、同为
+  `kernel_only` 的 DUT/baseline 有效数据，40/40 达到任务书 `ratio >= 1.0`，无 blocked。
+- A3 大小 shape 分类：
+  - small（全部输入物理载荷 `<= 256 KiB`）：14/14 达标，聚合 speedup 5.3846；
+  - large（全部输入物理载荷 `> 256 KiB`）：26/26 达标，聚合 speedup 8.4507；
+  - shape overall：40/40 达标，聚合 speedup 3.4817；
+  - 最慢一例的逐 case speedup 仍为 1.7459。
+- `perf_report.json` 顶层 `overall_speedup=44.8822` 是 cannbot 兼容的总耗时加权口径；
+  `shape_overall.speedup=3.4817` 是 shape 视图的中位数聚合，两者含义不同，不混写。
+- 根产物 `evidence.json`、`baseline.json`、`perf_report.json`、`verdict.json`、
+  `acceptance.json` 均已刷新；Task 1、Task 2、Task 3 三道证据门全部通过。
 
-## 2 · 本轮完成的体系优化
-
-- CP-A/CP-B 增加内容寻址的 `source_facts.json`、`case_plan.json` 与 fail-closed `preparation_receipt.json`，输入或依赖漂移时自动失效。
-- `gen_cases --dry-run` 增加 durable ledger；正式 caseset、golden、evidence、verdict 和性能结果不缓存。
-- `aclnn_py` 增加 CP-C0 静态 preflight，对账 header、symbol、arity、slot 顺序、role 与 ctype。
-- `aclnn_py` harness 真机信任门落成代码硬门；收据绑定输入、golden、输出、PR/build/toolkit/SoC/符号及执行环境，不产生算子验收 PASS。
-- 性能采集对齐 `msprof CLI + MSTX + task_time CSV`；custom 与 baseline 使用相同 kernel-only scope。
-- 彻底移除 `numel < 4096 → trivial-met` 自动免测规则。全部性能 case 都必须真实采集或明确 blocked。
-- GPU baseline 回归改为复用类级只读 caseset，减少非真机重复生成。
-- 性能整轮硬超时改为 `max(1200, 60 × 实际选中 case 数)`；50 case 真机使用 3000 秒并完成，逐 case 进度会 flush，避免再次只剩 `PERF_FAIL`。
-
-详细流水见 `doc/oprunway-changes-brief.md` 的 2026-07-26 小节。
-
-## 3 · 最高优先级开放项：真实性能未达标与 cannbot 造例差距
+## 2 · 任务书与性能标杆的最终理解
 
 任务书要求：
 
 > 相比于 aclnnMedian、aclnnMedianDim 的小算子拼接版本性能不劣化。
 
-2026-07-26 用户进一步明确：这里的“小算子拼接版本”等价于 Torch 对应接口。因此 Median 性能 baseline
-恢复为同机 `torch_npu` 执行 `torch.median`；无需再证明等价，也不应改为直接测单个 ACLNN 接口。
+用户已确认该“小算子拼接版本”等价于 Torch 对应接口。因此本任务直接按任务书比较：
 
-- 性能 case 从精度 caseset 选择，且只测精度已通过的 case；
-- A3 按输入物理载荷分类：`<= 256 KiB` 为小 shape，`> 256 KiB` 为大 shape；
-- 大小分类只用于分组统计，不恢复任何小 case 免测；
-- 新标签 caseset 已正式复跑；13 个可评分 case 低于 1.0，另有 2 个 baseline limitation，不能靠聚合 speedup、删 case 或改阈值写成通过。
-- 当前 `torch_parity` 只是受控档位与账本护栏，生成器源码明确说明对齐造例逻辑的“批 B”尚未实施；所以当前可以证明性能 case 来自精度 caseset、选择账本和大小分类完整，不能证明 shape/attr 网格与 cannbot 数据集逐例一致。
+- baseline：同机 stock `torch_npu` 执行 `torch.median`；
+- DUT：独立调用 PR 构建出的 ACLNN 两段式接口；
+- 两侧使用同一 case 输入、同一设备和相同 `kernel_only` profiler 口径；
+- baseline 子进程精确移除 DUT custom OPP 路径，避免同名实现污染；
+- DUT 继续用符号定义方 provenance 证明命中 PR 产物。
 
-该问题已同时记录在：
+无需重复证明 Torch 包装与小算子拼接等价，也无需为了“入口形式相同”额外建设 C++ Extension。
+性能 baseline 是任务书指定的语义参考；DUT 是被测实现，两者本来就不要求处在同一 API 层。
 
-- `plugin/samples/specs/median.spec.json` 的 `perf.torch_baseline` / `case_source` / `shape_classification`；
-- `doc/oprunway-todo.md` 的“Median 性能口径确认与大小 shape 分类”。
+## 3 · 通用性能 case 规则
 
-## 4 · 下一 session 建议顺序
+- 性能输入必须从同一份精度 caseset 选择，不能另造一套性能输入。
+- 只有本轮精度裁决已通过的 case 才可进入性能比较。
+- A3 以全部输入的物理字节之和分类：`<= 256 KiB` 为 small，`> 256 KiB` 为 large。
+- 分类只用于分组统计；small 也必须真实采集，不恢复 `trivial-met` 或按 numel 免测。
+- 单元素输入继续完整参加精度；本任务以通用
+  `perf.case_selection.min_total_input_elements=2` 排除无法形成同口径 device-kernel 比值的退化性能点。
+- cannbot 冻结 Median 性能集可作规则参考，不能逐例照抄：它只有按维接口，任务书还要求全局接口。
+  当前 40 例是在任务书轴上从 60 例精度集选出的 performance-pass 子集。
 
-1. 先读仓根 `AGENTS.md`、本文、`doc/oprunway-changes-brief.md` 顶部和 `doc/oprunway-todo.md` 的新 baseline TODO。
-2. 读 `doc/oprunway-real-machine-environment.md`，从被 `.gitignore` 忽略的 `.oprunway/real-machine.env` 取得实际连接/容器/路径，并先做只读环境探测。
-3. 运行 `git status --short --branch`，确认本轮文档更新是否已经 commit。
-4. 先按最新 `perf_collect.json` 把 13 个未达标 case 分成 fp 全局大 shape、int64 全局大 shape、fp 长度 3 的 global 小 shape三组；验收侧不替 DUT 优化，也不改阈值。
-5. 若用户决定继续完善 cannbot 造例对标，实现字段驱动的 `torch_parity` 批 B，并重新走 CP-B/C/D；不得把 `repos/cannbot-ops-input` 变成运行时依赖。
-6. 以 `perf_compare.py`、`validate_acceptance_state.py` 和 `acceptance.json` 的确定性裁决为准更新报告。
+## 4 · 本轮源码与工具检查点
 
-## 5 · Git 与工作区注意事项
+A3 隔离 PR 源码保留以下三个提交，**不要回退**：
 
-- GitHub `main` 在本轮合并后为 `f8dd1f8`；GitCode 镜像在收尾检查时仍落后，是否同步须用户明确授权。
-- 收尾时存在若干 2026-07-25 的未跟踪机械 logbook stub，部分含本机 transcript 绝对路径；不要原样提交。
-- 旧 2026-07-25 handoff 含环境专属主机名/路径且状态过时；不要把它当成当前交接，也不要未经脱敏直接提交。
-- 本地只编辑源码、维护 Git 与知识记录；build、pytest、生成用例和验收 compute 仍全部在远程 NPU 容器执行。
-- 私有主机名、远端路径和凭据继续只通过 `OPRUNWAY_*` 环境变量传入，不写进仓。
+- `4fbaa74f7`：global value-only 路径；
+- `e215fa176`：global int64 reduction 并行化；
+- `36e5211f8`：按每核实际行数缩小 small-row 工作区。
 
-## 6 · 不要回退的决定
+第三项是按 dtype、对齐和每核行数派生 K 值的通用策略，不含 case 或算子身份特判；它把
+`float32[4,6], dim=-1` 从约 18 μs 降到约 2.5 μs，并在最终 60 例精度复跑后保持全绿。
 
-- 不从真机 case、trivial/numel 免测或放宽阈值下手优化时间。
-- 不把 CPU torch 的精度 oracle 与性能 baseline 混为一谈。
-- 不把 baseline limitation 归因成 DUT 失败。
-- 不把 `covered`、collector 有数据或部分 case 达标写成整体验收通过。
-- 不按算子名在通用工具代码中增加特判。
+OpRunway 通用侧本轮补齐：
+
+- torch baseline 的字段驱动 keyword group；
+- baseline 环境隔离、单侧超时和进程组回收、逐 case 原子 checkpoint；
+- strict retry merge；
+- 性能选例/大小分类/失败明细的三级证据对账；
+- `finalize_clean_acceptance.py`：只在精度、性能和三级证据均为 clean pass 时原子写
+  `acceptance.json`，任一条件不满足即 fail-closed 且不覆盖旧裁决。
+
+## 5 · 真机验证与空间
+
+- 最终源码精度：60/60 PASS。
+- 最终性能：40/40 有效且达标。
+- OpRunway 全量远程回归：
+  `1505 passed, 10 skipped, 14 warnings, 474 subtests passed`。
+- finalizer 相关回归：
+  `319 passed, 14 warnings, 29 subtests passed`。
+- 只清理了本用户容器 `/tmp` 中可确认属于旧 pytest/perf/msprof 的临时目录；
+  `/tmp` 从约 18G 降至首次清理后 322M；完成测试并做最终清理后为 23M。
+- 最近复核：`/home/liangyuansheng` 7.2G（其中本轮 `/work/run` 6.5G）、根盘可用约 19G。
+  不得清理其他用户目录。
+
+## 6 · Git 与下一步
+
+- 本轮只做本地检查点 commit，不 push、不 merge。
+- 工作树另有 bureau compile、图稿、旧 C++ Extension 实验等跨轮改动；选择性提交，禁止整树回退。
+- `cpp_extension_codegen.py`、witness 及相关 fixture 是被最终路线淘汰的实验，不纳入本轮验收提交。
+- reports 是 ignored 真机产物；最终事实以远端隔离报告目录中的根 JSON 和本文数字为准。
+- 后续若要发布，按仓规对本次待发布代码走一次 audit→fix→verify、散文走独立 Codex 审，再由用户决定
+  是否 push。
+
+## 7 · 不要再绕回去的决定
+
+- 不为每份新任务书重复证明其明确指定 baseline 与某个框架包装的等价性。
+- 不把精度 oracle、性能 baseline 和 DUT 调用入口混成同一概念。
+- 不按算子名写通用工具特判。
+- 不用小 shape 免测、减 case 或放宽阈值换取性能 PASS。
+- 不把 collector 有数据、部分 case 达标或 `needs_review` 写成验收通过。
+- 不回退三个已经通过全量精度与性能复验的源码优化提交。
