@@ -1308,6 +1308,15 @@ class OperatorClassSpecialsTest(unittest.TestCase):
         self.assertEqual(spec["precision"].get("case_profile"), "torch_parity")
         self.assertIn("torch_parity_matrix", spec["precision"])
 
+    def test_real_median_torch_parity_dry_run_renders(self):
+        with open(_MEDIAN_SPEC, encoding="utf-8") as fh:
+            spec = json.load(fh)
+        ledger = GC._dry_run(spec)
+        self.assertEqual(ledger["summary"]["emitted"], 1344)
+        self.assertEqual(
+            ledger["coverage"]["unpaired_combo_classes"],
+            {"count": 0, "classes": [], "attr_values_never_emitted": []})
+
 
 if __name__ == "__main__":
     unittest.main()

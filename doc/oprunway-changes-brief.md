@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **torch_parity dry-run 账本 schema 修正**：A3 实跑已确认 1344 条完整矩阵、每 dtype 168 条、
+  零丢失，但 renderer 因该 profile 把 `unpaired_combo_classes` 写成空列表而崩；现统一为空对象
+  `{count,classes,attr_values_never_emitted}` 并用真实 Median 1344 dry-run 回归钉住。
 - **Median 真实 ABI 属性名回归断言同步**：补齐 sample fixtures 后 243 个测试通过，剩余 1 个失败
   是真实 Median golden 测试仍传旧 `keepdim`，而 PR/spec ABI 字段为 `keepDim`；现统一真实见证断言，
   fake 通用夹具的自有 lowercase 字段不改。

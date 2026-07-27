@@ -937,7 +937,11 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
         "case_profile_declared": True,
         "forced_total": expected,
         "dropped_combo_classes": [],
-        "unpaired_combo_classes": [],
+        "unpaired_combo_classes": {
+            "count": 0,
+            "classes": [],
+            "attr_values_never_emitted": [],
+        },
         "attr_axis_lengths": {"declared": [], "emitted": 0, "items": [], "skipped": []},
         "coverage_strength": (
             "complete_cartesian：dtype×rank×shape_profile×attribute_profile 全覆盖"),
