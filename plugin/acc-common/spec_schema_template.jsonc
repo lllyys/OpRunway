@@ -159,6 +159,8 @@
 //   }
 //   完整笛卡尔大小 = dtype×rank×shape_profile×attribute_profile，必须与 case_target 精确相等；
 //   不走 legacy 1-wise 抽样。axis_class 在每个 rank 下解析，禁止把 middle/last 静态写死。
+//   任务书要求、但本轮 PR-head ABI 无法执行的 overload 不得伪造成 profile/call_variant；
+//   写入 task_pr_gaps(kind=api_surface_unsupported_by_pr)，由后续验收报告功能缺口并阻止干净 PASS。
 //             逐 case 按**声明顺序取首个匹配者**。
 //     `symbol`（必填）该变体调用的 aclnn 符号**基名**（CamelCase，去 aclnn 前缀；真符号 =
 //             `aclnn<symbol>GetWorkspaceSize` / `aclnn<symbol>`）。不同变体可以是不同 API。

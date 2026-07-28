@@ -36,7 +36,7 @@ description: OpRunway 验收 ②（CP-B）的子 agent——把已取材的算�
 - **已确认约束优先**：dispatch 的“已确认约束”与 `correspondence.json.confirmed_constraints` 是 primary 记录的本轮用户选择；逐项原样消费，不重新推导、不再次提问，也不得用 PR 实现覆盖。两处不一致则立即回 `BLOCKED(dispatch_contract_conflict)`，不靠继续研究猜哪份对。
 - **执行边界**：只读点名输入与 acc-spec skill 路由到的相关章节，不遍历无关目录。单轮预算 300 秒；预算将尽仍缺权威事实时写结构化 gap/`needs_user` 并交还 primary，禁止用扩展联网或无界阅读拖延。
 - **干什么**：加载 `acc-spec` skill，按 `references/taskdoc-to-spec.md` 字段映射表逐字段抽，重点守住这几个最易错点（都在 ref 里）：
-  1. **dtype 全集 vs 子集**（⚠ 绝不来自被测 PR）：dtype 全集来源 = **任务书显式表/规格 > 原 TBE 算子信息库（独立源，非 PR）> 问用户**；**PR 的 `*_def.cpp` op_def 只作对照**——PR 声明 < 任务书全集 → 记 `task_pr_gaps`（Fmod 式缩 dtype），**绝不当全集权威**；全新算子无 built-in 条目 / 独立源暂未接通 → **问用户、不回退读 PR**。先据接口形态派生 `runner_form`，再以确定性能力源 `gen_cases.generatable_dtypes()`（生成层）× `repo_adapter.supported_np(runner_form)`（真机收发层）求当前可测子集，写入 `params.dtype`；**禁止再写死 float32/float16**。任务书全集中不在交集的 dtype 不静默丢弃，逐项落结构化 gap；`repo_adapter.deferred_np(form)` 只表示 Track-C 挂账，不能冒充已可真机验收。
+  1. **dtype 全集 vs 子集**：任务书显式枚举时逐字采用；任务书把范围定义为“所有进入 AICore 的数据类型”等实现域集合时，从本轮同一 PR head 的 `op_def` 与目标硬件配置枚举成员。不得复用旧 spec/报告，也不得因任务书未重复列举就回 `needs_user`。只有本轮任务书语义和本轮 PR/op_def 都无法确定集合时才问用户。再以确定性生成/runner 能力表求当前可测子集，写入 `params.dtype`，其余逐项挂账。
      **C4 · dtype 冲突以任务书为准**（用户 2026-07-22 拍板，详规 ref §1.2）：任务书要、**算子 `op_def` 压根不支持**的差额，写成结构化 gap `{kind:"dtype_unsupported_by_op_def", dtypes, task_doc_ref, op_def_ref, op_def_dtypes}`，裁决落 `passed_with_gaps`。「没实现」是**发现**、不是借口。⚠ 这是上面那条红线的**延伸不是例外**；⚠ 也**不是「宣称有 gap 就免检」的后门**——`validator` 四道硬校（有据 / 自洽 / **不得覆盖真失败**（该 dtype 有真实用例在跑 = 实现了但跑挂了，必须走精度裁决）/ 在 `dtype_required` 内），缺一即 `overall=fail`。与「我们暂时测不了」的 `dtype_deferred` **别混**。
   2. **verify_mode**：behavioral/exact/numerical 三值决策树（ref §2），靠输出 dtype + 运算性质推断，任务书从不直写。
   3. **precision.threshold**：必落数字（exact→0；numerical→主 dtype 默认值），标『(推断/待工具核实)』。
@@ -71,13 +71,14 @@ description: OpRunway 验收 ②（CP-B）的子 agent——把已取材的算�
 ## 约束（跨运行时可移植）
 
 - **全程中文**；只据 `task_doc.md`/`pr_facts.json` 原文抽，不臆造；缺项落 `task_pr_gaps` 不静默。
-- **任务书是验收权威**；PR 仅用于补 example/目标目录（被测物锚点）——**dtype 全集只对照、不作来源**（PR 声明 < 任务书全集 → 记 gap），**不代表『验收过了』**。
+- **任务书是验收权威**；PR 提供本轮 ABI、op_def 枚举、example 和目录等被测事实。任务书以
+  “所有进入 AICore 的类型”定义集合时，op_def 负责枚举成员；不得复用旧 spec/报告，也不代表验收通过。
 - 确定性活（取材/fetch）在 `fetch_source.py`（primary CP-A 跑），本 agent 只做 NL 抽取判断；换运行时只换本壳，`acc-spec` skill 的 `references/` + `fetch_source.py` 不动；此可移植性依赖 canon 项 `cross-cli-unified-form`（proposed·未 settle，载重前需核）。
 - 相关：`skills/acc-spec`（本 agent 承载的 skill）、CP-A primary `fetch_source.py`（取材）、CP-B primary `gen_cases.py --dry-run`（下游契约自检，**非裁决**）、CP-D 真机 `run_workflow.py --mode <mode>`、`op-acceptance`（dispatch 本 agent 的 orchestrator）。
   ⚠ `<mode>` **据 `spec.runner_form` 派生**（cpp（或未声明）→ `new_example`、`aclnn_py` → `aclnn_py`、`cpp_extension` → `cpp_extension`；`mock`/`catlass*` 派生不出、只能显式指定）。
   **别把 `new_example` 当「唯一产验收裁决的通路」**——`new_example`、`aclnn_py`、`cpp_extension`
   都是真机验收通路；具体形态只由 `runner_form` 派生，历史某次跑测结果不能替代本轮 form 与 provenance。
   ⚠ **这条与本 agent 的职责直接相关**：`runner_form` 正是**本 agent 抽出来的字段**——抽错就把下游整条通路带偏
-  - 任务书把 stock `torch.*` 指定为功能真值时，默认抽成 `runner_form="cpp_extension"`；DUT 与 baseline 必须分属独立 namespace，禁止用 stock torch 调用冒充 DUT。同步生成 `torch_parity_matrix`：优先读取本地 cannbot 对应 case_design 的完整 coverage 轴和 SHA-256；无对应设计时按任务书/torch 签名提出矩阵并标推断、待用户确认，不能静默退回 legacy 60-case 抽样。**还须逐项核对任务书点名的 Torch overload 与矩阵 profile**：参考设计缺某 overload 时必须补 profile，不能把参考设计当任务书上限；可选 attr 省略用 `null`，并与 `call_variants` 的 `when.is_null`、`active_attrs`、`active_outputs` 对账。摘要必须列出“要求的 overload → profile → call variant”映射和补齐后的笛卡尔乘积，任一 overload 无 profile 就回 `BLOCKED(torch_overload_uncovered)`，不得落一份自称完整的 spec。
+  - 任务书把 stock `torch.*` 指定为功能真值时，默认抽成 `runner_form="cpp_extension"`；DUT 与 baseline 必须分属独立 namespace。逐项核对任务书要求的 Torch overload 与本轮 PR-head ABI：可执行项生成 profile/call variant；任务书要求但 PR 无可执行 ABI 的项写 `api_surface_unsupported_by_pr` gap，摘要明确“要求但未实现”。不得伪造 profile，也不得因被测物缺功能把 CP-B 判成事实不足；该 gap 必须进入最终验收并阻止干净 PASS。
   （cpp 通路真机 dtype 白名单只有 fp32/fp16/bf16，`int32` 落 `DEFERRED_NP_BY_FORM["cpp"]`、真机 fail-closed → 覆盖缺一块；
   且 `new_example` 的性能基线是内置 TBE、`aclnn_py` 才是 torch，「任务书对标 torch」场景走错就比错了基线）。

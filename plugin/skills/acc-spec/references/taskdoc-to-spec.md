@@ -166,7 +166,8 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 **入 `task_pr_gaps`**、裁决落 `passed_with_gaps`。**「没实现」是发现、不是借口**
 （承 canon `task-spec-authoritative-over-pr`）。
 
-⚠ 这是既有红线的**延伸、不是例外**：「**绝不信 PR**、dtype 全集只来自任务书（或任务书引用的、独立于 PR 的权威源）」
+⚠ 这是既有红线的延伸：任务书明确枚举时不得由 PR 改写；任务书若以“所有进入 AICore 的类型”
+定义实现域集合，则同一 PR head 的 op_def 是集合成员的本轮枚举事实，不属于用 PR 覆盖任务书语义。
 **保持不变**（§1 dtype 行 + §4 例外段）。C4 只是规定了「任务书要、算子没做」这个差额**怎么落账**——
 仍然不允许拿 op_def 当全集权威、不允许因为 PR 没做就把需求缩掉。
 
@@ -621,11 +622,13 @@ exact 走 mismatch），再要求 spec/caseset/evidence 三处一致。所以 th
 
 优先级：**任务书原文 > PR 源码（`pr_facts.key_files`）> reference 反推(TBE 信息库/torch) > 惯例默认(标 (推断)) > 问用户**。
 
-> ⚠ **例外·验收标准类字段**（dtype 全集 / 精度阈值·oracle / 性能目标 / 硬件目标 / golden 口径）**不走此通用序**——它们的来源**恒为任务书**（或任务书引用的、独立于 PR 的权威源），**PR 只作对照查 gap、绝不当权威**；dtype 全集专门次序见下表 dtype 行。此通用序**仅用于被测物类字段**（aclnn 入口 / example / target_dir——PR 是被测物、取自 PR 合法）。**任务书指定的标准/方法若不在当前支持范围 → fail-closed 问用户，不静默降级。**
+> ⚠ **例外·验收标准类字段**（精度阈值·oracle / 性能目标 / 硬件目标 / golden 口径）来源恒为任务书
+> 或任务书引用的独立权威源。dtype 另按下表逐句判：任务书显式枚举时 PR 只作对照；任务书定义
+> “所有进入 AICore 的类型”等实现域集合时，本轮 op_def 负责枚举集合成员。
 
 | 缺什么 | 兜底 |
 |---|---|
-| **dtype 列表** | **⚠ 绝不来自被测 PR。来源优先级：任务书显式 dtype 表/规格 > 原 TBE 算子信息库（`opp/built-in/.../tbe/config/<soc>` ops-info，独立于被测 PR）> 问用户**。① 任务书有明确 dtype 表→用它（权威）。② 只写『支持所有类型』/缺→取原 TBE 信息库历史支持集作全集（独立源）。**⚠ 该独立源当前未接通**（`fetch_source` 不取该文件；且读法随运行环境变——skill 可能跑在服务器本地可直读 / 跑 Mac 需 ssh / 需 ssh 再进 docker，接通时须**探测环境、不写死 ssh**，列为 TODO）→ **接通前一律回退问用户、绝不回退读 PR**。③ **PR 的 `*_def.cpp` op_def 仅作对照**：读它只为与任务书全集比对（例 equal_def {FLOAT16,BF16,FLOAT,INT8,UINT8,INT32,UINT32}），PR 声明 < 任务书全集 → 记 `task_pr_gaps`（Fmod 式『PR 缩 dtype』缺口，**按 §1.2 写成结构化 `dtype_unsupported_by_op_def` 条目：带 `task_doc_ref` + `op_def_ref` + `op_def_dtypes`，有据可查**）；**绝不把 PR op_def 当全集权威**。④ 全新算子（`change.kind=new_op`，built-in 无条目）→ 直接问用户。⑤ **⚠ `params.dtype` 只填端到端 pipeline 支持子集；而这个子集**按 `runner_form` 分、**不是全局常量**（真源 `repo_adapter.SUPPORTED_NP_BY_FORM` / `DEFERRED_NP_BY_FORM`，按**能力 / 形态**分、非按算子身份）：**·`runner_form=cpp`（缺省，下游派生 `--mode new_example`）→ float32/float16**（bf16 须逐算子确认真机 kernel，未证实一律 deferred）；`int16`/`int32` 属 Track C 挂账集（gen_cases 造得出、**真机跑到 fail-closed**）→ **不进 `params.dtype`**、连全集一起记 gap。**·`runner_form=aclnn_py`（下游派生 `--mode aclnn_py`）→ 白名单据 form 放开**（fp32/fp16/bf16/int64/int32/int16/int8/uint8/bool，**无挂账项**，见 §1.3.1）→ **int32 这类该进就进 `params.dtype`，别拿 cpp 的边界去砍**（median 声明的 int32 正是走 `aclnn_py` 在真机跑过的；照 cpp 口径砍 = 静默少测一块覆盖）——**不支持的 dtype 不进 `params.dtype`（否则 gen_cases/runner 崩）**，任务全集与不支持项记 `task_pr_gaps`『任务需 {…}、pipeline 暂支持 {…}、余待扩』。⑥ add_dtype 的新 dtype：**支持才进 `params.dtype`**，否则只记 `change.dtypes_added` + gap（工具未支持前不宣称会真测）|
+| **dtype 列表** | ① 任务书显式 dtype 表 → 逐字采用。② 任务书写“所有进入 AICore 的数据类型”等实现域集合 → 从**本轮同一 PR head** 的 `op_def` 与目标硬件 `AddConfig` 枚举集合成员；任务书定义集合，op_def 提供成员，不读旧 spec/报告。③ 任务书仅写无绑定对象的“所有类型”或完全缺失 → 查任务书引用的独立 built-in/TBE 能力源；仍无事实才问用户。④ 任务书明确写窄时，PR 不得扩张；PR 声明更窄则记录结构化 dtype gap。⑤ `params.dtype` 取任务全集与当前 `runner_form` 确定性能力表的交集，其余逐项挂账。|
 | threshold 数值 | 按 §3 主 dtype 惯例填 + 标 (推断)；或留空走 needs_review；per_dtype 复杂→问用户/查工具 |
 | verify_mode | 按 §2 决策树推断 |
 | **aclnn 入口/语义**（③ runner 锚定用）| **从 `pr_facts.key_files` 里算子自带 example(`test_aclnn_*.cpp`) 读真实调用的 aclnn 函数 + 输入 dtype**——runner 必须锚定它，别凭 header 猜（Equal 曾因猜错入口/dtype 翻车）|
