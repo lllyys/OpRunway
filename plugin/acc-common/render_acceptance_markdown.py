@@ -82,7 +82,12 @@ def _precision_failure_detail(failed):
     return "\n".join(lines)
 
 
-def _performance_failure_detail(non_passing):
+def _performance_failure_detail(non_passing, caseset):
+    case_by_id = {
+        case.get("id"): case
+        for case in (caseset.get("cases") or [])
+        if isinstance(case, dict) and isinstance(case.get("id"), str)
+    }
     lines = [
         "# 性能失败明细",
         "",
@@ -91,26 +96,58 @@ def _performance_failure_detail(non_passing):
         f"- 未通过总数：**{len(non_passing)}**",
         "- 返回主报告：[验收报告.md](验收报告.md)",
         "",
-        "| 序号 | case_id | outcome | dtype | shape 类别 | NPU us | baseline us | speedup | 原因 |",
-        "|---:|---|---|---|---|---:|---:|---:|---|",
+        "| 序号 | case_id | outcome | dtype | 输入 shape | shape 类别 | NPU us | baseline us | speedup | 阈值 |",
+        "|---:|---|---|---|---|---|---:|---:|---:|---:|",
     ]
     for index, row in enumerate(non_passing, 1):
         custom = row.get("custom") or {}
         baseline = row.get("baseline") or {}
         ratio = row.get("ratio", row.get("speedup"))
-        if ratio is None:
-            npu_us, baseline_us = custom.get("us"), baseline.get("us")
-            if isinstance(npu_us, (int, float)) and npu_us > 0 and isinstance(
-                    baseline_us, (int, float)) and baseline_us > 0:
-                ratio = baseline_us / npu_us
+        shapes = [
+            inp.get("shape") for inp in (row.get("inputs") or [])
+            if isinstance(inp, dict)
+        ]
         lines.append(
             f"| {index} | `{_cell(row.get('case_id'))}` | `{_cell(row.get('outcome'))}` | "
-            f"`{_cell(row.get('dtype'))}` | `{_cell(row.get('shape_class'))}` | "
+            f"`{_cell(row.get('dtype'))}` | `{_cell(shapes)}` | "
+            f"`{_cell(row.get('shape_class'))}` | "
             f"{_cell(custom.get('us', row.get('npu_us')))} | "
             f"{_cell(baseline.get('us', row.get('baseline_us')))} | "
-            f"{_cell(ratio)} | {_cell(row.get('reason') or row.get('note'))} |")
+            f"{_cell(ratio)} | {_cell(row.get('target_ratio'))} |")
+    lines += ["", "## 逐 case 审核", ""]
+    for index, row in enumerate(non_passing, 1):
+        case_id = row.get("case_id")
+        case = case_by_id.get(case_id) or {}
+        custom = row.get("custom") or {}
+        baseline = row.get("baseline") or {}
+        call = case.get("aclnn_call") or case.get("invocation") or {}
+        symbol = call.get("symbol") if isinstance(call, dict) else None
+        repro = row.get("repro")
+        if isinstance(repro, dict):
+            repro = repro.get("command") or repro.get("script")
+        repro_text = (
+            f"`{_cell(repro)}`"
+            if isinstance(repro, str) and repro.strip()
+            else "**缺单 case 性能重放能力（本轮产物未记录可执行入口）**"
+        )
+        lines += [
+            f"### {index}. `{_cell(case_id)}`",
+            "",
+            f"- 结果类别：`{_cell(row.get('outcome'))}`",
+            f"- 输入：`{_cell(json.dumps(row.get('inputs') or [], ensure_ascii=False, sort_keys=True))}`",
+            f"- 属性：`{_cell(json.dumps(case.get('attrs') or {}, ensure_ascii=False, sort_keys=True))}`",
+            f"- DUT 接口：`{_cell(symbol or call or '未记录')}`",
+            f"- custom：behavior=`{_cell(custom.get('behavior'))}`，"
+            f"scope=`{_cell(custom.get('scope'))}`，us=`{_cell(custom.get('us'))}`",
+            f"- baseline：behavior=`{_cell(baseline.get('behavior'))}`，"
+            f"scope=`{_cell(baseline.get('scope'))}`，us=`{_cell(baseline.get('us'))}`",
+            f"- 实测 speedup：`{_cell(row.get('ratio', row.get('speedup')))}`；"
+            f"要求阈值：`{_cell(row.get('target_ratio'))}`",
+            f"- 确定性原因：{_cell(row.get('reason') or row.get('note'))}",
+            f"- 单 case 性能重放：{repro_text}",
+            "",
+        ]
     lines += [
-        "",
         "复核时以同目录的 `perf_report.json`、`evidence.json` 和原始 profiler 证据为准；"
         "本文件不把缺 baseline、scope 不可比或环境异常静默改判为 DUT 失败。",
         "",
@@ -289,7 +326,9 @@ def write_report(report_root, filename="验收报告.md"):
     performance_path = os.path.join(report_root, "性能失败明细.md")
     if perf_non_passing:
         _atomic_write(
-            performance_path, _performance_failure_detail(perf_non_passing))
+            performance_path,
+            _performance_failure_detail(
+                perf_non_passing, _load(report_root, "caseset.json")))
     elif os.path.exists(performance_path):
         os.unlink(performance_path)
     return path

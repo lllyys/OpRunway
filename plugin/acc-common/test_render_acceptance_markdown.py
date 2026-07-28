@@ -108,11 +108,22 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
                     "non_passing_cases": [{
                         "case_id": "p0", "outcome": "failed", "reason": "ratio below threshold",
                         "dtype": "float16", "shape_class": "large",
+                        "inputs": [{"name": "self", "shape": [128, 128]}],
+                        "ratio": 0.5, "target_ratio": 1.0,
                         "custom": {"us": 4.0}, "baseline": {"us": 2.0},
                     }],
                 },
                 "evidence.json": {"cpp_extension_receipt": {}},
-                "caseset.json": {"op": "X", "task_pr_gaps": []},
+                "caseset.json": {
+                    "op": "X", "task_pr_gaps": [],
+                    "cases": [{
+                        "id": "p0",
+                        "inputs": [{"name": "self", "shape": [128, 128],
+                                    "dtype": "float16"}],
+                        "attrs": {"dim": 0, "keepDim": False},
+                        "aclnn_call": {"symbol": "ExampleDim"},
+                    }],
+                },
             }
             for name, value in docs.items():
                 with open(os.path.join(root, name), "w", encoding="utf-8") as out:
@@ -127,4 +138,9 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
                 detail_text = src.read()
             self.assertIn("ratio below threshold", detail_text)
             self.assertIn("`p0`", detail_text)
+            self.assertIn("`[[128, 128]]`", detail_text)
+            self.assertIn('属性：`{"dim": 0, "keepDim": false}`', detail_text)
+            self.assertIn("DUT 接口：`ExampleDim`", detail_text)
+            self.assertIn("要求阈值：`1.0`", detail_text)
+            self.assertIn("缺单 case 性能重放能力", detail_text)
             self.assertFalse(os.path.exists(os.path.join(root, "精度失败明细.md")))

@@ -143,6 +143,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 - **primary 亲自**：**逐字引用** `acceptance.json`（门控后总体裁决）/ `verdict.json`（validator 精度裁决）/ `perf_report.json`（perf_compare 性能）的裁决**并标来源**，加 `spec.task_pr_gaps`（任务书↔PR 落差）+ 各维度（功能 / 精度 / 性能）通过数、失败用例+判据、性能达标比。
 - **固定汇总视图**：精度逐字展示 `verdict.json.accuracy_summary.report.by_dtype/overall` 的 `total/passed/failed/needs_review`（`na` 单列）；性能逐字展示 `perf_report.json.by_shape_class/shape_overall` 的 `planned_cases/cases_scored/达标/blocked/npu_us/baseline_us/speedup`。这些字段由确定性脚本生成并由三级门做完整性对账，primary 不自行重算。
+- **失败明细解耦**：存在性能未通过 case 时，必须生成独立 `性能失败明细.md`，主报告只放汇总和链接。明细逐项展示 `caseset.json` 的输入/shape/dtype/属性/调用接口，以及 `perf_report.json` 的 outcome、双边 behavior/scope/us、speedup、`target_ratio` 和原始 reason；同时给单 case 性能重放入口。runner 尚无该能力时如实标缺口，不用 JSON 查询冒充复现。
 - **测量真实性红线**：所有性能 case 都须真实采集并按同口径比较，不允许按 numel 自动免测；必须同时报告 `cases_scored` 和有效 `us/speedup` 条数。`cases_scored=0` 时无论 `达标` 计数为何，统一明确“未产出任何可评分性能数据，性能未验证”。性能计划数须写成 `<dims 含性能的 case>/<caseset 总数>`，功能/精度-only case 不冒充性能覆盖。
 - **红线**：数字全引真实产物，推断项标 `(推断)`；`needs_review` **不当 pass**；**验收门 `validate_acceptance_state.py` STATUS: FAILED → 不出 pass 裁决；报告如实呈现 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整）；只认任务书为验收权威，「PR 有测试」≠「验收过了」。
 

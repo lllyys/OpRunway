@@ -52,6 +52,18 @@ NPU/baseline 中位耗时与 speedup；声明了分类策略却缺少分类时�
 逐条保留，至少记录 case_id、dtype、输入 shape、大小分类、双边行为/耗时、失败或挂起原因；
 不得只报汇总、不得从分母或明细中静默删除。
 
+当存在任一未通过性能 case 时，CP-E 必须另产 `性能失败明细.md`，主报告只保留数量、分类汇总和链接，
+避免大量逐项记录淹没验收结论。该文件是审核入口，不是新的裁决层：
+
+- 逐 case 展示输入名、shape、dtype、属性和 DUT 调用接口，使审核员不必反查多层 JSON 才知道测了什么；
+- 并列展示 custom 与 baseline 的 behavior、`timing_scope`、实测 us、speedup、`target_ratio` 和
+  `perf_compare.py` 给出的原始原因；
+- 把 `failed`、`blocked`、`exception` 分开写，不能把 baseline/环境异常包装成 DUT 性能失败；
+- 给出单 case 的性能重放入口；若当前 runner 尚不能生成可执行重放脚本，须在明细中明确写
+  “缺单 case 性能重放能力”，不得用查看 JSON 的命令冒充复现；
+- 所有数字和状态只读 `perf_report.json`，输入、属性、接口只读同轮 `caseset.json`，skill 不自行计算、
+  补猜或改判。
+
 **ratio = baseline_us / npu_us**（>1 表示 NPU 更快）；**达标 = ratio ≥ `spec.perf.target_ratio`**（由 perf_compare 算）。
 
 ## 方法论三 · 小 shape 例外（数据驱动、绝不偷偷置达标 True）
