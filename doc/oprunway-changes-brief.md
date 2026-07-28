@@ -4,6 +4,11 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **Torch 对标矩阵补齐 overload 轴**：acc-spec agent/skill 不再把参考 case design 当任务书 API
+  上限；逐项建立 overload→attribute profile→call variant→active outputs 映射，可选 attr 的省略语义
+  用 `null` 表达，缺任一任务书点名 overload 即阻塞，完整笛卡尔积按补齐后的 profile 数重算。
+- **验收报告兼容两代 gap 契约**：Markdown renderer 同时展示历史自由文本、`issue/impact/pr_fact`
+  和 `kind/reason/dtypes` 结构化 gap，顶层误传单条也不再逐字符展开；只修展示，不重判既有 JSON 裁决。
 - **审核复现收敛为单入口**：新增 `repro/audit_case.sh <失败序号|case_id>`，直接调用复现器，
   不再经过 review→run_case→per-case 多层包装；固定按 Torch 接入、输入/shape、golden与DUT接口、
   输出差异/阈值、复现结论五段展示，旧入口只作兼容。

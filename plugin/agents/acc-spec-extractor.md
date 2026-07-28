@@ -75,9 +75,9 @@ description: OpRunway 验收 ②（CP-B）的子 agent——把已取材的算�
 - 确定性活（取材/fetch）在 `fetch_source.py`（primary CP-A 跑），本 agent 只做 NL 抽取判断；换运行时只换本壳，`acc-spec` skill 的 `references/` + `fetch_source.py` 不动；此可移植性依赖 canon 项 `cross-cli-unified-form`（proposed·未 settle，载重前需核）。
 - 相关：`skills/acc-spec`（本 agent 承载的 skill）、CP-A primary `fetch_source.py`（取材）、CP-B primary `gen_cases.py --dry-run`（下游契约自检，**非裁决**）、CP-D 真机 `run_workflow.py --mode <mode>`、`op-acceptance`（dispatch 本 agent 的 orchestrator）。
   ⚠ `<mode>` **据 `spec.runner_form` 派生**（cpp（或未声明）→ `new_example`、`aclnn_py` → `aclnn_py`、`cpp_extension` → `cpp_extension`；`mock`/`catlass*` 派生不出、只能显式指定）。
-  **别把 `new_example` 当「唯一产验收裁决的通路」**——`run_workflow.py:37` 的 `_REAL_MACHINE_MODES` 是 `{new_example, aclnn_py}` **两条**，
-  median+PR6429 的真机 56/56 精度 PASS 正是 `aclnn_py` 跑出来的。
+  **别把 `new_example` 当「唯一产验收裁决的通路」**——`new_example`、`aclnn_py`、`cpp_extension`
+  都是真机验收通路；具体形态只由 `runner_form` 派生，历史某次跑测结果不能替代本轮 form 与 provenance。
   ⚠ **这条与本 agent 的职责直接相关**：`runner_form` 正是**本 agent 抽出来的字段**——抽错就把下游整条通路带偏
-  - 任务书把 stock `torch.*` 指定为功能真值时，默认抽成 `runner_form="cpp_extension"`；DUT 与 baseline 必须分属独立 namespace，禁止用 stock torch 调用冒充 DUT。同步生成 `torch_parity_matrix`：优先读取本地 cannbot 对应 case_design 的完整 coverage 轴和 SHA-256；无对应设计时按任务书/torch 签名提出矩阵并标推断、待用户确认，不能静默退回 legacy 60-case 抽样。
+  - 任务书把 stock `torch.*` 指定为功能真值时，默认抽成 `runner_form="cpp_extension"`；DUT 与 baseline 必须分属独立 namespace，禁止用 stock torch 调用冒充 DUT。同步生成 `torch_parity_matrix`：优先读取本地 cannbot 对应 case_design 的完整 coverage 轴和 SHA-256；无对应设计时按任务书/torch 签名提出矩阵并标推断、待用户确认，不能静默退回 legacy 60-case 抽样。**还须逐项核对任务书点名的 Torch overload 与矩阵 profile**：参考设计缺某 overload 时必须补 profile，不能把参考设计当任务书上限；可选 attr 省略用 `null`，并与 `call_variants` 的 `when.is_null`、`active_attrs`、`active_outputs` 对账。摘要必须列出“要求的 overload → profile → call variant”映射和补齐后的笛卡尔乘积，任一 overload 无 profile 就回 `BLOCKED(torch_overload_uncovered)`，不得落一份自称完整的 spec。
   （cpp 通路真机 dtype 白名单只有 fp32/fp16/bf16，`int32` 落 `DEFERRED_NP_BY_FORM["cpp"]`、真机 fail-closed → 覆盖缺一块；
   且 `new_example` 的性能基线是内置 TBE、`aclnn_py` 才是 torch，「任务书对标 torch」场景走错就比错了基线）。

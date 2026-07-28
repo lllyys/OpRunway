@@ -7,6 +7,32 @@ import render_acceptance_markdown as R
 
 
 class RenderAcceptanceMarkdownTest(unittest.TestCase):
+    def test_renders_structured_and_legacy_text_gaps(self):
+        self.assertEqual(
+            R._gap_items("单条自由文本"),
+            ["单条自由文本"],
+        )
+        self.assertEqual(
+            R._gap_line("缺少无 dim 的全局 overload"),
+            "- 缺少无 dim 的全局 overload",
+        )
+        self.assertEqual(
+            R._gap_line({
+                "issue": "dtype_deferred",
+                "impact": "暂缓",
+                "pr_fact": "op_def 不支持",
+            }),
+            "- `dtype_deferred`：暂缓（PR 事实：op_def 不支持）",
+        )
+        self.assertEqual(
+            R._gap_line({
+                "kind": "dtype_deferred",
+                "dtypes": ["int32"],
+                "reason": "runner 未支持",
+            }),
+            '- `dtype_deferred`：runner 未支持；补充：{"dtypes": ["int32"]}',
+        )
+
     def test_renders_existing_verdict_without_rejudging(self):
         with tempfile.TemporaryDirectory() as root:
             docs = {

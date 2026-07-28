@@ -23,6 +23,29 @@ def _pct(value):
     return "—" if value is None else f"{float(value) * 100:.2f}%"
 
 
+def _gap_line(gap):
+    if not isinstance(gap, dict):
+        return f"- {_cell(gap)}"
+    title = gap.get("issue", gap.get("kind"))
+    detail = gap.get("impact", gap.get("reason"))
+    line = f"- `{_cell(title)}`：{_cell(detail)}"
+    if gap.get("pr_fact") is not None:
+        line += f"（PR 事实：{_cell(gap['pr_fact'])}）"
+    shown = {"issue", "kind", "impact", "reason", "pr_fact"}
+    extra = {key: value for key, value in gap.items()
+             if key not in shown and value is not None}
+    if extra:
+        line += "；补充：" + _cell(json.dumps(
+            extra, ensure_ascii=False, sort_keys=True))
+    return line
+
+
+def _gap_items(value):
+    if value is None or value == []:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
 def _atomic_write(path, text):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="\n") as out:
@@ -214,13 +237,11 @@ def render(report_root):
     elif ps.get("perf_cases", 0):
         lines += ["", "无性能未通过 case。"]
 
-    gaps = caseset.get("task_pr_gaps") or []
+    gaps = _gap_items(caseset.get("task_pr_gaps"))
     lines += ["", "## 任务书与 PR 差额", ""]
     if gaps:
         for gap in gaps:
-            lines.append(
-                f"- `{_cell(gap.get('issue'))}`：{_cell(gap.get('impact'))} "
-                f"（PR 事实：{_cell(gap.get('pr_fact'))}）")
+            lines.append(_gap_line(gap))
     else:
         lines.append("- 无已记录差额。")
 

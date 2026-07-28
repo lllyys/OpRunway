@@ -380,6 +380,23 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 3. attr 参数的 `dtype` 在本形态下必须**恰有一个候选**且 ∈ `{int64, bool, float32/float}`——标量 ABI 宽度
    必须确定，多候选 / 空 / 未知一律 fail-closed（拼错宽度 = 段错误）。
 
+#### Torch overload 覆盖与 `torch_parity_matrix`
+
+`case_design.json` 只提供可复用的覆盖轴，**不是任务书要求的 Torch API 表面上限**。抽 spec 时须先从任务书和
+Torch 签名列出必须对标的 overload，再逐个建立：
+
+`Torch overload → attribute_profile → call_variants 条目 → active_outputs`
+
+- 无可选 attr 的 overload 用对应 attr=`null` 表示“省略”，不得偷换成某个标量默认值；
+- 该 profile 必须由 `when.is_null=true` 的变体承接；签名中不存在的 attr 从 `active_attrs` 排除；
+- 仅返回 value 的 overload 只列 value `active_outputs`，其余输出走 `out_null`；
+- 带 attr 的 overload 由 `when.is_null=false`（或更窄的 `equals`）承接；
+- 同一 PR 符号承载多个 overload 是合法的，但每个语义仍须有独立 profile/variant 契约；
+- `case_target` 按补齐后的 `dtype × rank × shape_profile × attribute_profile` 重算。
+
+例如参考设计只有带 attr 的 6 个组合，而任务书还点名无 attr overload，则须新增 **1 个** null profile，
+不能继续沿用原矩阵大小并宣称“完整 Torch 对标”。这条规则按签名/字段生效，不得按算子名特判。
+
 结构示例（**纯占位、非任何真实算子**）：
 
 ```jsonc
