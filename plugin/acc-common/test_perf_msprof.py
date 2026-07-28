@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -90,6 +91,51 @@ class TestMeasurementWindow(unittest.TestCase):
             m = PM.parse_kernel_measurement(d, repeat=4, measurement_window=None)
             self.assertEqual(m["error"], PM.ERR_WINDOW_REQUIRED)
             self.assertIsNone(m["us"])
+
+    def test_retryable_evidence_failure_is_narrow(self):
+        missing = {"behavior": "execution_failed",
+                   "detail": {"returncode": 0, "parse_error": "mstx_range_not_found"}}
+        dut_failed = {"behavior": "execution_failed",
+                      "detail": {"returncode": 1, "parse_error": "mstx_range_not_found"}}
+        unknown = {"behavior": "execution_failed",
+                   "detail": {"returncode": 0, "parse_error": "unknown_task_type_in_window"}}
+        self.assertTrue(PM._retryable_evidence_failure(missing))
+        self.assertFalse(PM._retryable_evidence_failure(dut_failed))
+        self.assertFalse(PM._retryable_evidence_failure(unknown))
+
+    def test_measure_side_retries_in_fresh_attempt_directories(self):
+        calls = []
+        failed = {"behavior": "execution_failed", "us": None, "scope": None,
+                  "detail": {"returncode": 0, "parse_error": "no_mstx_csv"}}
+        passed = {"behavior": "npu", "us": 1.5, "scope": "kernel_only",
+                  "detail": {"returncode": 0}}
+
+        def fake_once(**kwargs):
+            calls.append(str(kwargs["scratch_dir"]))
+            return failed.copy() if len(calls) == 1 else passed.copy()
+
+        with mock.patch.object(PM, "_measure_side_once", side_effect=fake_once), \
+             mock.patch.dict(os.environ, {"OPRUNWAY_PERF_EVIDENCE_RETRIES": "1"}):
+            got = PM.measure_side(
+                side="custom", case={"id": "c0"}, caseset_path="cases.json",
+                work_dir="work", cfg_extra={}, warmup=5, repeat=20, device=0,
+                scratch_dir="/tmp/perf", detect_hybrid=False)
+        self.assertEqual(calls, ["/tmp/perf/attempt-1", "/tmp/perf/attempt-2"])
+        self.assertEqual(got["behavior"], "npu")
+        self.assertEqual(got["detail"]["attempt_count"], 2)
+        self.assertEqual(got["detail"]["attempts"][0]["parse_error"], "no_mstx_csv")
+
+    def test_measure_side_does_not_retry_execution_error(self):
+        failed = {"behavior": "execution_failed", "us": None, "scope": None,
+                  "detail": {"returncode": 9, "parse_error": None}}
+        with mock.patch.object(PM, "_measure_side_once", return_value=failed) as once, \
+             mock.patch.dict(os.environ, {"OPRUNWAY_PERF_EVIDENCE_RETRIES": "3"}):
+            got = PM.measure_side(
+                side="custom", case={"id": "c0"}, caseset_path="cases.json",
+                work_dir="work", cfg_extra={}, warmup=5, repeat=20, device=0,
+                scratch_dir="/tmp/perf", detect_hybrid=False)
+        self.assertEqual(once.call_count, 1)
+        self.assertEqual(got["detail"]["attempt_count"], 1)
 
     def test_explicit_csv_route_ignores_numeric_task_type_db(self):
         """live collector 钉 CSV：同目录即使有不可解的数值 taskType db，也必须读字符串 CSV。"""

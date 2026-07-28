@@ -2318,9 +2318,9 @@ def _marker_json(output, marker):
     return found
 
 
-def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repeat, device,
-                 scratch_dir, detect_hybrid, collector=None, baseline_kind="torch_npu",
-                 side_timeout_s=120, custom_kind="aclnn_py"):
+def _measure_side_once(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repeat, device,
+                       scratch_dir, detect_hybrid, collector=None, baseline_kind="torch_npu",
+                       side_timeout_s=120, custom_kind="aclnn_py"):
     """采集一侧（custom / baseline）一个 case → `{"behavior","us","scope","execution_path","collection",...}`。
 
     流程：生成 wrapper + cfg → 按 side 选采集入口跑 → 解析 MSTX 窗 → 窗内 kernel 聚合 → 五分类 → 清产物。
@@ -2425,6 +2425,78 @@ def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repea
         else:
             result["runtime_provenance"] = provenance
     return result
+
+
+_RETRYABLE_EVIDENCE_ERRORS = frozenset({
+    ERR_NO_PROF_DATA,
+    ERR_NO_MSTX_CSV,
+    ERR_MSTX_RANGE_NOT_FOUND,
+})
+
+
+def _retryable_evidence_failure(result):
+    """仅识别 profiler 证据缺失；DUT/基线执行错误和性能结果绝不重试。"""
+    return (
+        isinstance(result, dict)
+        and result.get("behavior") == BEHAVIOR_FAILED
+        and isinstance(result.get("detail"), dict)
+        and result["detail"].get("returncode") == 0
+        and result["detail"].get("parse_error") in _RETRYABLE_EVIDENCE_ERRORS
+    )
+
+
+def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repeat, device,
+                 scratch_dir, detect_hybrid, collector=None, baseline_kind="torch_npu",
+                 side_timeout_s=120, custom_kind="aclnn_py"):
+    """采集一侧，且只对 profiler 证据缺失做有界重试。
+
+    每次 attempt 使用独立目录；首次失败不会被吞掉，而是随最终结果保存在
+    ``detail.attempts``。环境变量 ``OPRUNWAY_PERF_EVIDENCE_RETRIES`` 表示首次采集后的
+    额外尝试数，默认 1，最大 3。非整数或越界值 fail-closed。
+    """
+    raw_retries = os.environ.get("OPRUNWAY_PERF_EVIDENCE_RETRIES", "1")
+    try:
+        retries = int(raw_retries)
+    except ValueError as exc:
+        raise PerfCollectError(
+            "OPRUNWAY_PERF_EVIDENCE_RETRIES 必须是 0..3 的整数") from exc
+    if retries < 0 or retries > 3:
+        raise PerfCollectError("OPRUNWAY_PERF_EVIDENCE_RETRIES 必须是 0..3 的整数")
+
+    attempts = []
+    selected = None
+    for index in range(retries + 1):
+        attempt_root = Path(scratch_dir) / f"attempt-{index + 1}"
+        result = _measure_side_once(
+            side=side, case=case, caseset_path=caseset_path, work_dir=work_dir,
+            cfg_extra=cfg_extra, warmup=warmup, repeat=repeat, device=device,
+            scratch_dir=attempt_root, detect_hybrid=detect_hybrid, collector=collector,
+            baseline_kind=baseline_kind, side_timeout_s=side_timeout_s,
+            custom_kind=custom_kind)
+        attempts.append({
+            "attempt": index + 1,
+            "behavior": result.get("behavior"),
+            "us": result.get("us"),
+            "scope": result.get("scope"),
+            "returncode": (result.get("detail") or {}).get("returncode"),
+            "parse_error": (result.get("detail") or {}).get("parse_error"),
+            "prof_dir": (result.get("detail") or {}).get("prof_dir"),
+            "prof_dir_removed": (result.get("detail") or {}).get("prof_dir_removed", False),
+            "command": (result.get("detail") or {}).get("command"),
+            "output_tail": (result.get("detail") or {}).get("output_tail"),
+        })
+        selected = result
+        if not _retryable_evidence_failure(result):
+            break
+
+    detail = selected.setdefault("detail", {})
+    detail["attempts"] = attempts
+    detail["attempt_count"] = len(attempts)
+    detail["selected_attempt"] = len(attempts)
+    detail["retry_policy"] = (
+        "profiler_evidence_missing_only; fresh_output_dir_per_attempt; "
+        "first_non_retryable_result_selected")
+    return selected
 
 
 def _collect_document(*, op, warmup, repeat, device, side_timeout_s, baseline_kind,

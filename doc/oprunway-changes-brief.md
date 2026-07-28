@@ -4,6 +4,7 @@
 
 ## 2026-07-28
 
+- 性能 collector 仅对 `returncode=0` 的 profiler/MSTX 证据缺失做有界重试；每次使用独立输出目录并保留逐 attempt 审计，DUT/基线执行错误和性能不达标不重试。
 - 性能验收存在未通过 case 时，固定生成独立 `性能失败明细.md`；明细直观展开输入、shape、属性、接口、双边耗时、speedup、阈值和确定性原因，并要求提供或明确挂账单 case 性能重放入口。
 - 修正 fresh spec 抽取：每轮只读本轮任务书与 PR；任务书以“所有进入 AICore 的类型”定义集合时由同轮 op_def 枚举成员；PR 缺任务书要求的 overload 记功能 gap，不再误报为任务书事实不足。
 - 新增远端只读保护根登记：真实路径仅存 ignored 的 `.oprunway/real-machine.env`，新 session 在 clone/build/跑测/清理前必须检查，禁止改动或复用保护现场。
