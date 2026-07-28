@@ -1683,7 +1683,8 @@ def resolve_aclnn_baseline_plan(aclnn_baseline, call, case):
             "symbol": "Median", "slots": ["self", "valuesOut"]},
            {"when": {"attr": "dim", "is_null": false},
             "symbol": "MedianDim",
-            "slots": ["self", "dim", "keepDim", "valuesOut", "indicesOut"]}
+            "slots": ["self", "dim", "keepDim", "valuesOut", "indicesOut"],
+            "output_dtypes": {"indicesOut": "int64"}}
          ]}
 
     ``slots`` 从该 case 已解析的 ``aclnn_call.slots`` 按名字选择并重排，因而可以表达“DUT
@@ -1728,10 +1729,17 @@ def resolve_aclnn_baseline_plan(aclnn_baseline, call, case):
     variant = selected[0]
     symbol = variant.get("symbol")
     names = variant.get("slots")
+    output_dtypes = variant.get("output_dtypes") or {}
     if not isinstance(symbol, str) or not symbol or symbol.startswith("aclnn"):
         raise PerfCollectError("aclnn baseline variant.symbol 须为不带 aclnn 前缀的非空基名")
     if not isinstance(names, list) or not names or any(not isinstance(n, str) or not n for n in names):
         raise PerfCollectError("aclnn baseline variant.slots 须为非空 slot-name 数组")
+    if not isinstance(output_dtypes, dict) or any(
+            not isinstance(name, str) or not name
+            or not isinstance(dtype, str) or not dtype
+            for name, dtype in output_dtypes.items()):
+        raise PerfCollectError(
+            "aclnn baseline variant.output_dtypes 须为 {output_slot: logical_dtype} 对象")
     source_slots = call.get("slots") or []
     by_name = {}
     for slot in source_slots:
@@ -1744,8 +1752,17 @@ def resolve_aclnn_baseline_plan(aclnn_baseline, call, case):
     missing = [name for name in names if name not in by_name]
     if missing:
         raise PerfCollectError(f"aclnn baseline 要求的 slots {missing} 不在本 case aclnn_call 中")
+    bad_overrides = [
+        name for name in output_dtypes
+        if name not in names or by_name[name].get("role") != "out"
+    ]
+    if bad_overrides:
+        raise PerfCollectError(
+            "aclnn baseline output_dtypes 只能覆盖本变体选中的非空 out slot，"
+            f"非法项={bad_overrides}")
     return {"library": aclnn_baseline["library"], "symbol": symbol,
-            "slots": [by_name[name] for name in names]}
+            "slots": [by_name[name] for name in names],
+            "output_dtypes": dict(output_dtypes)}
 
 
 def cann_builtin_libopapi():
@@ -2042,7 +2059,16 @@ required_lib = P.cann_builtin_libopapi()
 def materialize():
     all_slots = D._build_slots(call, case, CFG["work_dir"])
     by_name = {slot["name"]: slot for slot in all_slots}
-    slots = [by_name[spec["name"]] for spec in plan["slots"]]
+    slots = []
+    for spec in plan["slots"]:
+        slot = dict(by_name[spec["name"]])
+        if spec["name"] in plan["output_dtypes"]:
+            if slot["kind"] != "out":
+                raise RuntimeError(
+                    "baseline output dtype override 只能用于非空 out slot: %s"
+                    % spec["name"])
+            slot["dtype"] = plan["output_dtypes"][spec["name"]]
+        slots.append(slot)
     params = []
     for slot in slots:
         role = "out" if slot["kind"] == "out_null" else slot["kind"]

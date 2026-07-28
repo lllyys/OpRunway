@@ -907,7 +907,8 @@ class TestAclnnBuiltinBaselinePlan(unittest.TestCase):
          "symbol": "Median", "slots": ["self", "valuesOut"]},
         {"when": {"attr": "dim", "is_null": False},
          "symbol": "MedianDim",
-         "slots": ["self", "dim", "keepDim", "valuesOut", "indicesOut"]},
+         "slots": ["self", "dim", "keepDim", "valuesOut", "indicesOut"],
+         "output_dtypes": {"indicesOut": "int64"}},
     ]}
     CALL = {"symbol": "Median", "slots": [
         {"role": "in", "name": "self", "input_idx": 0},
@@ -931,6 +932,17 @@ class TestAclnnBuiltinBaselinePlan(unittest.TestCase):
         self.assertEqual(plan["symbol"], "MedianDim")
         self.assertEqual([s["name"] for s in plan["slots"]],
                          ["self", "dim", "keepDim", "valuesOut", "indicesOut"])
+        self.assertEqual(plan["output_dtypes"], {"indicesOut": "int64"})
+
+    def test_output_dtype_override_rejects_input_slot(self):
+        bad = json.loads(json.dumps(self.MAP))
+        bad["variants"][1]["output_dtypes"] = {"self": "float32"}
+        call = json.loads(json.dumps(self.CALL))
+        call["slots"][-1]["role"] = "out"
+        call["slots"][-1]["output_idx"] = 1
+        with self.assertRaisesRegex(PM.PerfCollectError, "只能覆盖"):
+            PM.resolve_aclnn_baseline_plan(
+                bad, call, {"id": "d", "attrs": {"dim": 0}})
 
     def test_uncontrolled_library_rejected(self):
         bad = dict(self.MAP, library="/tmp/libopapi.so")

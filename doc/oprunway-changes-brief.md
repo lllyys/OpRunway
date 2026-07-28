@@ -4,6 +4,9 @@
 
 ## 2026-07-27（Median 性能规则正式复跑）
 
+- **内置 ACLNN baseline 输出 ABI 与 DUT 解耦**：性能变体可用 `output_dtypes` 为自身输出单独声明
+  logical dtype；wrapper 复用同一输入但按 baseline ABI 重建输出，避免 DUT 的 index `int32`
+  被直接传给要求 `int64` 的内置接口。A3 baseline-only 复跑 50/50 均获得有效 kernel-only 数据。
 - **Torch 对标矩阵补齐 overload 轴**：acc-spec agent/skill 不再把参考 case design 当任务书 API
   上限；逐项建立 overload→attribute profile→call variant→active outputs 映射，可选 attr 的省略语义
   用 `null` 表达，缺任一任务书点名 overload 即阻塞，完整笛卡尔积按补齐后的 profile 数重算。
