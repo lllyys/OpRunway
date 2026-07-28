@@ -130,6 +130,10 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 - 本地不建 venv、不跑 pytest、不 import torch/numpy 做验收 compute；
 - 真机环境统一入口：`doc/oprunway-real-machine-environment.md`；
 - 实际连接元数据：本地忽略文件 `.oprunway/real-machine.env`；
+- 每次新 session 做任何远端 clone/build/跑测/清理前，必须读取
+  `.oprunway/real-machine.env` 的 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`。其中每个根及其全部子目录均为
+  **只读保留现场**：禁止写入、覆盖、移动、删除或作为新执行目录；只允许经用户明确要求的只读核验。
+  未设置表示当前未登记保护根，不得据此猜测或清理其它目录；
 - 机器 profile 只负责找到执行环境，不能替代任务书硬件核定和本轮 PR provenance。
 
 ### 5.4 零硬编码与本地配置

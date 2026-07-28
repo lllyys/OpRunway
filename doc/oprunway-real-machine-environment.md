@@ -18,6 +18,7 @@ set +a
 
 - `OPRUNWAY_MACHINE_*`：当前 A2/A3 真机的 SSH、容器与工作目录元数据，供外层编排使用。
 - `OPRUNWAY_A5_*`：950 真机的入口元数据。
+- `OPRUNWAY_MACHINE_PROTECTED_ROOTS`：逗号分隔的远端只读保护根。真实值只在 ignored env 中保存。
 
 它们不是 `run_workflow.py` 的完整运行配置。算子相关的 PR head、op 子目录、被测仓、vendor 名等必须每次从任务书、`pr_facts.json` 和 spec 重新派生，不能固化在机器 profile 中。
 
@@ -84,6 +85,7 @@ ssh "$OPRUNWAY_MACHINE_SSH_HOST" \
 3. runtime env、setenv、用户态 vendor 目录存在且不可被同组/其他用户写；
 4. NPU 当前是否空闲；
 5. PR head、op 子目录和 DUT build provenance 与本轮 `pr_facts.json` 一致。
+6. 展开 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`，确认本轮新工作根不等于其中任一根、也不位于其子目录。
 
 ## 5 · 进入容器后的流水线变量
 
@@ -108,6 +110,8 @@ ssh "$OPRUNWAY_MACHINE_SSH_HOST" \
 ## 6 · 副作用与安全边界
 
 - build、pytest、用例生成、验收和 profiler compute 全在远程 NPU 环境执行，本地只编辑、维护 Git 与知识记录。
+- `OPRUNWAY_MACHINE_PROTECTED_ROOTS` 中每个目录及其子目录均为只读保留现场；新 session 不得在其中
+  生成文件、覆盖、移动、删除或复用为工作目录。需要调查时默认只读，任何变更须由用户针对具体目录重新授权。
 - clone、checkout、build、真机跑测、删除/覆盖远端目录前仍须用户确认；本文件不构成长期授权。
 - `.oprunway/real-machine.env` 可以保存实际 alias/path，但不得保存凭据。
 - 需要新增机器时，先扩展 `.env.example` 的字段，再在本地忽略文件填实际值；不要把私有默认值写进 Python、shell、spec 或 tracked 文档。
