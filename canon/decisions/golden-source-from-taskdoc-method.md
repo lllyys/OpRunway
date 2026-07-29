@@ -1,7 +1,8 @@
 ---
 title: Golden and precision standard come only from the task-doc-specified method
-updated: 2026-07-15
-status: proposed
+updated: 2026-07-26
+status: contested
+contradicts: [[Golden source uses taskdoc method then CPU API fallback]]
 ---
 
 # Golden and precision standard come only from the task-doc-specified method
@@ -19,4 +20,8 @@ status: proposed
 
 **tier 说明**：留 `proposed`，待 `bureau:review`。
 
-**Sources.** [[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]
+**2026-07-22 冲突记录.** 用户后续裁定为“任务书指定方法优先；任务书未指定时回退 CPU 上现成
+torch/numpy API”的两档链，见 [[Golden source uses taskdoc method then CPU API fallback]]。本页原有
+“只能来自任务书指定方法”的单档说法与之冲突，compile 不静默覆盖，留 `contested` 待人门裁决。
+
+**Sources.** [[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]，[[session 8217ff1b-d287-4074-bfe1-a7d0bdb3809f · 2026-07-22]]

@@ -1,7 +1,8 @@
 ---
 title: Runner is an output of the engine not a component
-updated: 2026-07-20
-status: proposed
+updated: 2026-07-26
+status: contested
+contradicts: [[Golden decoupling retains known engine exceptions]]
 ---
 
 # Runner is an output of the engine not a component
@@ -27,4 +28,8 @@ runner」）、工程约定「产物落用户 CWD、不写插件安装目录」�
 numpy 参考）——同类问题、更根本；**golden 去引擎化（改加载器）尚未做**，须先走 ADR（golden 归属属推导非 canon）。
 故引擎当前**尚未完全 op-中立**：runner 已是输出、golden 仍内置。
 
-**Sources.** [[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]（2026-07-20：runner 去引擎化第一刀——runner 移出引擎作输出、fallback 退役 fail-closed）
+**2026-07-22 冲突记录.** runner 作为输出这一 claim 本身未被推翻；冲突在“与 golden 两刀齐后引擎即真
+op-neutral”的无限定外推。当前例外见 [[Golden decoupling retains known engine exceptions]]，故本页整体
+保持 contested，待 review 拆分或重写范围。
+
+**Sources.** [[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]（2026-07-20：runner 去引擎化第一刀——runner 移出引擎作输出、fallback 退役 fail-closed），[[session 8217ff1b-d287-4074-bfe1-a7d0bdb3809f · 2026-07-22]]

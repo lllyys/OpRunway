@@ -1,7 +1,8 @@
 ---
 title: ADR 0011 — Golden is decoupled from the engine and loaded per operator
-updated: 2026-07-20
-status: proposed
+updated: 2026-07-26
+status: contested
+contradicts: [[Golden source uses taskdoc method then CPU API fallback]], [[PR reference is not a golden source]], [[Golden decoupling retains known engine exceptions]]
 ---
 
 # ADR 0011 — Golden is decoupled from the engine and loaded per operator
@@ -29,4 +30,8 @@ oracle_source loader 接线 + acc-spec/acc-runner-dev 产 golden 纪律 + 安全
 
 **tier 说明**：留 `proposed`，待 `bureau:review`。
 
-**Sources.** [[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]（2026-07-20：golden 去引擎化 ADR 拍定）
+**2026-07-22 冲突记录.** 用户后续否定了 decision 3 中“PR 参考优先”的来源顺序，改定两档链并禁止
+PR reference 作 golden；仓内实现也仍保留 catlass golden 与 `_BF16_EXACT_OPS` 两处算子知识。compile
+保留原文并标 `contested`，不把后来的 claim 静默覆盖进旧 ADR。
+
+**Sources.** [[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]（2026-07-20：golden 去引擎化 ADR 拍定），[[session 8217ff1b-d287-4074-bfe1-a7d0bdb3809f · 2026-07-22]]

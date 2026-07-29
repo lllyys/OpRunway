@@ -8,6 +8,9 @@
 /.oprunway/*.env
 !/.oprunway/*.env.example
 
+# 本地工具配置：各人自己的 LOC 门限、抽取规则等，不入库
+/.claude/*.local.md
+
 # 生成物：bureau gazette / gazette 打包 / 验收跑测产物 / pycache
 /gazette/
 oprunway-canon-gazette.zip
