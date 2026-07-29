@@ -624,6 +624,124 @@ class PerfReportAggregateTest(unittest.TestCase):
                          [{"dtype": "float32", "count": 1, "npu_us": 4.0,
                            "comparison": "no_npu_baseline"}])
 
+    def test_size_classes_are_reported_without_changing_verdict(self):
+        cs = _caseset([("s0", ["性能", "小shape"], [16]),
+                       ("b0", ["性能", "大shape"], [128, 128])])
+        for case, cls, nbytes in zip(cs["cases"], ("small", "large"), (64, 65536)):
+            case["perf_shape_classification"] = {
+                "class": cls, "input_bytes": nbytes, "metric": "sum_input_bytes",
+                "small_max_bytes": 262144, "boundary": "small_if_input_bytes_lte_limit",
+                "hardware": "Atlas A3"}
+        cs["perf_case_policy"] = {
+            "case_source": "precision_cases",
+            "shape_classification": {"metric": "sum_input_bytes", "small_max_bytes": 262144,
+                                     "boundary": "small_if_input_bytes_lte_limit",
+                                     "hardware": "Atlas A3"},
+            "counts": {"small": 1, "large": 1}}
+        r = pc.perf_compare(
+            _spec(1.0), cs,
+            _ev({"s0": (2.0, "kernel_only"), "b0": (4.0, "kernel_only")}),
+            _bl({"s0": 2.0, "b0": 8.0}))
+        self.assertEqual(r["summary"]["status"], "ok")
+        self.assertEqual(r["summary"]["达标"], 2)
+        self.assertEqual(
+            r["by_shape_class"],
+            [{"class": "small", "cases": 1, "planned_cases": 1,
+              "cases_scored": 1, "达标": 1, "blocked": 0,
+              "npu_us": 2.0, "baseline_us": 2.0, "speedup": 1.0},
+             {"class": "large", "cases": 1, "planned_cases": 1,
+              "cases_scored": 1, "达标": 1, "blocked": 0,
+              "npu_us": 4.0, "baseline_us": 8.0, "speedup": 2.0}])
+        self.assertEqual(
+            r["shape_overall"],
+            {"class": "overall", "cases": 2, "planned_cases": 2, "cases_scored": 2,
+             "达标": 2, "blocked": 0, "npu_us": 3.0, "baseline_us": 5.0,
+             "speedup": 5.0 / 3.0})
+        self.assertTrue(r["shape_report_complete"])
+
+    def test_declared_shape_policy_never_silently_drops_unclassified_case(self):
+        cs = _caseset([("s0", ["性能", "小shape"], [16]),
+                       ("lost", ["性能"], [128, 128])])
+        cs["perf_case_policy"] = {
+            "case_source": "precision_cases",
+            "shape_classification": {"metric": "sum_input_bytes", "small_max_bytes": 262144,
+                                     "boundary": "small_if_input_bytes_lte_limit",
+                                     "hardware": "Atlas A3"},
+            "counts": {"small": 1, "large": 1}}
+        cs["cases"][0]["perf_shape_classification"] = {
+            "class": "small", "input_bytes": 64, "metric": "sum_input_bytes",
+            "small_max_bytes": 262144, "boundary": "small_if_input_bytes_lte_limit",
+            "hardware": "Atlas A3"}
+        r = pc.perf_compare(
+            _spec(1.0), cs,
+            _ev({"s0": (2.0, "kernel_only"), "lost": (4.0, "kernel_only")}),
+            _bl({"s0": 2.0, "lost": 4.0}))
+        self.assertEqual(r["summary"]["status"], "ok")  # 只读汇总不重判
+        self.assertFalse(r["shape_report_complete"])
+        self.assertTrue(any("lost" in x for x in r["shape_report_problems"]))
+        self.assertEqual(r["shape_overall"]["planned_cases"], 1)  # 漏行被显式报告，不冒充全量
+
+    def test_partial_manual_classification_without_policy_produces_no_shape_report(self):
+        cs = _caseset([("tagged", ["性能"], [16]), ("untagged", ["性能"], [32])])
+        cs["cases"][0]["perf_shape_classification"] = {
+            "class": "small", "input_bytes": 64, "metric": "sum_input_bytes",
+            "small_max_bytes": 262144, "boundary": "small_if_input_bytes_lte_limit",
+            "hardware": "Atlas A3"}
+        r = pc.perf_compare(
+            _spec(1.0), cs,
+            _ev({"tagged": (2.0, "kernel_only"), "untagged": (3.0, "kernel_only")}),
+            _bl({"tagged": 2.0, "untagged": 3.0}))
+        self.assertNotIn("by_shape_class", r)
+        self.assertNotIn("shape_overall", r)
+
+    def test_waiting_for_baseline_still_reports_known_shape_and_npu_time(self):
+        cs = _caseset([("s0", ["精度", "性能", "小shape"], [16])])
+        cs["cases"][0]["perf_shape_classification"] = {
+            "class": "small", "input_bytes": 64, "metric": "sum_input_bytes",
+            "small_max_bytes": 262144, "boundary": "small_if_input_bytes_lte_limit",
+            "hardware": "Atlas A3"}
+        cs["perf_case_policy"] = {
+            "case_source": "precision_cases",
+            "shape_classification": {"metric": "sum_input_bytes", "small_max_bytes": 262144,
+                                     "boundary": "small_if_input_bytes_lte_limit",
+                                     "hardware": "Atlas A3"},
+            "counts": {"small": 1, "large": 0}}
+        r = pc.perf_compare(
+            _spec(1.0, baseline="gpu_external"), cs,
+            _ev({"s0": (4.0, "kernel_only")}), None, expect_source="gpu_external")
+        self.assertEqual(r["summary"]["status"], "blocked_wait_gpu_benchmark")
+        self.assertEqual(r["shape_overall"]["planned_cases"], 1)
+        self.assertEqual(r["shape_overall"]["npu_us"], 4.0)
+        self.assertIsNone(r["shape_overall"]["baseline_us"])
+        self.assertIsNone(r["shape_overall"]["speedup"])
+
+    def test_partial_baseline_keeps_all_known_npu_times_in_shape_report(self):
+        cs = _caseset([("s0", ["精度", "性能"], [16]),
+                       ("s1", ["精度", "性能"], [32])])
+        for case, nbytes in zip(cs["cases"], (64, 128)):
+            case["perf_shape_classification"] = {
+                "class": "small", "input_bytes": nbytes, "metric": "sum_input_bytes",
+                "small_max_bytes": 262144, "boundary": "small_if_input_bytes_lte_limit",
+                "hardware": "Atlas A3"}
+        cs["perf_case_policy"] = {
+            "case_source": "precision_cases",
+            "shape_classification": {"metric": "sum_input_bytes", "small_max_bytes": 262144,
+                                     "boundary": "small_if_input_bytes_lte_limit",
+                                     "hardware": "Atlas A3"},
+            "counts": {"small": 2, "large": 0}}
+        r = pc.perf_compare(
+            _spec(1.0), cs,
+            _ev({"s0": (2.0, "kernel_only"), "s1": (10.0, "kernel_only")}),
+            _bl({"s0": 4.0}))
+        self.assertEqual(r["summary"]["status"], "blocked")
+        by_id = {row["case_id"]: row for row in r["per_case"]}
+        self.assertEqual(by_id["s1"]["npu_us"], 10.0)
+        self.assertEqual(by_id["s1"]["npu_scope"], "kernel_only")
+        self.assertEqual(r["shape_overall"]["npu_us"], 6.0)
+        self.assertEqual(r["shape_overall"]["baseline_us"], 4.0)
+        self.assertEqual(r["shape_overall"]["cases_scored"], 1)
+        self.assertEqual(r["shape_overall"]["blocked"], 1)
+
     def test_no_comparable_row_yields_empty_aggregate_not_fabricated_numbers(self):
         """一行可比测量都没有 → by_dtype 空、overall_speedup None（分母为 0 绝不编数）、计数为 0、不炸。
         另钉：有基线只是 scope 不可比 ≠ 无基线，不许混进 custom_only（那标签会撒谎）。"""
@@ -652,16 +770,77 @@ class PerfReportAggregateTest(unittest.TestCase):
             for key in ("cases_above_threshold", "cases_scored"):
                 self.assertNotIn(key, r["summary"], f"{label}/{key}")
 
-    def test_summary_gains_exactly_two_keys_and_loses_none(self):
-        """字节安全线：summary **只许多这两个键**，既有四个键的名与值一个不动
-        （4 个 pin 算子 + Median 的真机结论挂在 perf_cases/达标/blocked/status 上）。"""
+    def test_summary_adds_aggregate_and_non_passing_counts_without_losing_canonical_keys(self):
+        """既有四个裁决键的名和值不动；展示层另带 scored 与未通过明细计数。"""
         cs = self._cs([("p", "float32")])
         r = pc.perf_compare(_spec(0.5), cs, _ev({"p": (1.0, "kernel_only")}), _bl({"p": 2.0}))
         self.assertEqual(set(r["summary"]),
                          {"perf_cases", "达标", "blocked", "status",
-                          "cases_above_threshold", "cases_scored"})
+                          "cases_above_threshold", "cases_scored",
+                          "non_passing", "failed", "exceptions"})
         self.assertEqual((r["summary"]["perf_cases"], r["summary"]["达标"],
                           r["summary"]["blocked"], r["summary"]["status"]), (1, 1, 0, "ok"))
+        self.assertEqual(r["non_passing_cases"], [])
+
+    def test_failed_case_is_explicit_with_dtype_shape_class_and_both_sides(self):
+        cs = self._cs([("slow", "bfloat16")])
+        cs["cases"][0]["perf_shape_classification"] = {
+            "class": "large", "input_bytes": 2 * 128 * 128,
+            "metric": "sum_input_bytes", "small_max_bytes": 262144,
+            "boundary": "small_if_input_bytes_lte_limit", "hardware": "Atlas A3"}
+        r = pc.perf_compare(
+            _spec(1.0), cs,
+            {"op": "Sign", "evidence": [{
+                "case_id": "slow",
+                "perf": {"us": 10.0, "scope": "kernel_only",
+                         "behavior": "npu", "execution_path": "device_kernel"},
+            }]},
+            _bl({"slow": 8.0}))
+        self.assertEqual(r["summary"]["status"], "fail")
+        self.assertEqual(
+            (r["summary"]["non_passing"], r["summary"]["failed"], r["summary"]["exceptions"]),
+            (1, 1, 0))
+        item = r["non_passing_cases"][0]
+        self.assertEqual(
+            (item["case_id"], item["dtype"], item["shape_class"], item["input_bytes"]),
+            ("slow", "bfloat16", "large", 32768))
+        self.assertEqual(item["inputs"], [{"name": "self", "shape": [128, 128]}])
+        self.assertEqual(item["outcome"], "failed")
+        self.assertEqual((item["custom"]["behavior"], item["custom"]["us"]), ("npu", 10.0))
+        self.assertEqual(item["baseline"]["us"], 8.0)
+        self.assertIn("target_ratio", item["reason"])
+
+    def test_baseline_execution_failure_reason_is_not_lost_as_plain_missing(self):
+        cs = self._cs([("unsupported", "bfloat16")])
+        ev = {"op": "Sign", "evidence": [{
+            "case_id": "unsupported",
+            "perf": {"us": 5.0, "scope": "kernel_only",
+                     "behavior": "npu", "execution_path": "device_kernel"},
+        }]}
+        baseline = _bl({})
+        baseline["excluded"] = [{
+            "case_id": "unsupported",
+            "behavior": "execution_failed",
+            "reason": "torch_npu returned ACL error 161002",
+        }]
+        r = pc.perf_compare(_spec(1.0), cs, ev, baseline)
+        self.assertEqual(r["summary"]["status"], "blocked")
+        item = r["non_passing_cases"][0]
+        self.assertEqual(item["outcome"], "blocked")
+        self.assertEqual(item["baseline"]["behavior"], "execution_failed")
+        self.assertIn("161002", item["baseline"]["reason"])
+
+    def test_waiting_baseline_cases_are_all_recorded_as_blocked(self):
+        cs = self._cs([("p0", "float16"), ("p1", "float32")])
+        ev = _ev({"p0": (1.0, "kernel_only"), "p1": (2.0, "kernel_only")})
+        r = pc.perf_compare(
+            _spec(1.0, baseline="gpu_external"), cs, ev, None,
+            expect_source="gpu_external")
+        self.assertEqual(r["summary"]["status"], "blocked_wait_gpu_benchmark")
+        self.assertEqual(r["summary"]["non_passing"], 2)
+        self.assertEqual(
+            {item["case_id"] for item in r["non_passing_cases"]}, {"p0", "p1"})
+        self.assertTrue(all(item["outcome"] == "blocked" for item in r["non_passing_cases"]))
 
     def test_aggregate_failure_degrades_without_touching_the_verdict(self):
         """只读报表塌了 → 整块不出 + notes 记一笔，**裁决一字不变**

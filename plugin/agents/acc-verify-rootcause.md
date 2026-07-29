@@ -26,7 +26,7 @@ tools: Bash, Read, Write, Edit
 | dispatch_mode | 触发（何时被 dispatch） | 输入工件 | 本次动作 | 本次产出 | 验收标准（回给 orchestrator 才算成） |
 |---|---|---|---|---|---|
 | `verify_aclnn_harness` | CP-C0 已为 `READY_WAIT_NPU_TRUST_GATE`，且 `runner_form=aclnn_py` | spec + golden.py + `caseset.json` + `work/aclnn_preflight.json` + 真机环境变量 | 正式生成完整 caseset/golden；运行 `verify_aclnn_harness.py`，按能力确定性选小见证集，真机 build/exec/readback，与 CPU golden 对拍 | 内容寻址 `work/aclnn_harness_trust.json` | `status=TRUSTED_FOR_CP_D`；绑定 spec/完整 caseset/preflight、见证数据字节、golden 源码、PR/build/toolkit/SoC/符号与执行逻辑；`acceptance_verdict=null` |
-| `run_npu` | CP-D，CP-C 的自证门已过（`runner_form=cpp` → runner 过 `verify_runner`；`runner_form=aclnn_py` → harness 真机信任门过且留证）、用户确认已开 NPU/VPN | **按 `spec.runner_form` 分叉**：① `cpp`（或未声明）→ `<op>.spec.json` + 已验证的 `oprunway_<op>_runner.cpp` + `run_on_npu.sh`；② `aclnn_py` → `<op>.spec.json` + **op 工程本身（即 DUT）** + 通用 ctypes runner `acc-common/aclnn_runtime/`（⚠ **此形态无 `oprunway_<op>_runner.cpp`、无 `run_on_npu.sh`**——这两样根本不存在，别去找、别以为缺件） | 真机 `run_workflow.py --mode <mode>` **一次原子**跑 Task2 精度 + Task3 性能 + 三级门（`<mode>` 据 `spec.runner_form` 派生：cpp（或未声明）→ `new_example`、`aclnn_py` → `aclnn_py`；`mock` / `catlass` / `catlass_mock` 派生不出、须显式指定） | `evidence.json`、`verdict.json`、`baseline.json`（有基线时）、`perf_report.json`、`acceptance.json` | 工件落盘（`baseline.json` 仅有基线时产，余四份必落）；逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + 三级门 STATUS + 来源；门 FAILED / Task3 BLOCKED 如实暴露、不掩盖 |
+| `run_npu` | CP-D，CP-C 的自证门已过（`cpp` → runner 收据；`aclnn_py` → harness 收据；`cpp_extension` → build/load/vendor receipt）、用户确认已开 NPU/VPN | 按 `spec.runner_form` 分叉：`cpp` 用已验证 per-op runner；`aclnn_py` 用 DUT + 通用 ctypes runner；`cpp_extension` 用生成的官方 NpuExtension bundle、逐 case invocation plan 与精确 vendor | 真机 `run_workflow.py --mode <mode>` **一次原子**跑 Task2 精度 + Task3 性能 + 三级门（依次派生 `new_example` / `aclnn_py` / `cpp_extension`） | `evidence.json`、`verdict.json`、基线（有时）、`perf_report.json`、`acceptance.json` | 工件落盘；逐字引用确定性裁决和来源；门 FAILED / Task3 BLOCKED 如实暴露 |
 | `rootcause` | CP-D 出现**任何 FAIL**（精度/性能/门），由 orchestrator 再 dispatch | 失败的 `evidence.json`/`verdict.json` + `<op>.spec.json` + PR 改动落点 | 「**被测物自 build + 声明 dtype + 手算 golden**」独立复现，解耦 **op vs harness** 再归因 | `rootcause.md`（独立复现记录 + 归因证据 + 责任归属：op / harness / 环境） | 复现路径与观测数字全来自真实日志/采集；归因有实锤、非臆断；技术判定与官方口径分开、不外发、不替 PR 作者修到底 |
 
 ## dispatch_mode: verify_aclnn_harness — CP-C 真机自证
@@ -59,12 +59,14 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
 2. **一次原子执行**：
    `python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <op>.spec.json --mode <mode> --out reports/<op>/`
 
-   ⚠ **`<mode>` 不写死、不问用户——`spec.runner_form` 是唯一真源**（受控词表 `{cpp（缺省）, aclnn_py}`），据它**派生**：
+   ⚠ **`<mode>` 不写死、不问用户——`spec.runner_form` 是唯一真源**（受控词表
+   `{cpp（缺省）, aclnn_py, cpp_extension}`），据它**派生**：
 
    | `spec.runner_form` | `--mode` | 附加前置 |
    |---|---|---|
    | `cpp`（或未声明） | `new_example` | `OPRUNWAY_*` 见 `repo_adapter._ne_cfg`；真机 dtype 白名单 fp32/fp16/bf16 |
    | `aclnn_py` | `aclnn_py` | 须 `OPRUNWAY_ACLNN_REAL=1` + `OPRUNWAY_ACLNN_*` 见 `aclnn_adapter._aclnn_cfg`；build install 只写**用户态 vendor 目录**、绝不写共享 opp |
+   | `cpp_extension` | `cpp_extension` | 须 `OPRUNWAY_CPP_EXTENSION_REAL=1` + 显式 driver/device/vendor；只认绑定精确 spec/caseset/ELF/vendor/runtime 的 receipt |
 
    `mock` / `catlass` / `catlass_mock` **派生不出来**，只能由人显式指定（局部自检 / catlass 通路的正当逃生口），**且不产验收裁决**。
    **两条真机通路都产裁决**——`run_workflow.py` 里写着 `_REAL_MACHINE_MODES = frozenset({"new_example", "aclnn_py"})`；
@@ -82,7 +84,7 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
 4. **Task3 blocked 路由**（如实透传，不自行 judge）：
    - `BLOCKED_WAIT_GPU_BENCHMARK` —— 任务书要求 GPU 基线但**缺外部 GPU 标杆数据**（GPU external 对比层 **consumer 侧已接入 pipeline**，缺的是外部提供的真实数据）。
    - `BLOCKED_INCOMPARABLE_TIMING_SCOPE` —— 计时**口径不可比**（如 kernel-only vs e2e 墙钟）。
-   - 基线来源按**任务书参考源**（proposed·未 settle，载重前需核），`spec.perf.baseline` 驱动。torch 对标类的同机 `torch_npu` 基线代码已接通，但 2026-07-26 Median E2E 实测 `cases_scored=0`：数值 taskType 15/17/19 未分类而 fail-closed，另 2 条 BF16 baseline 调用失败；未知枚举必须走采集侧 BLOCKED/rootcause，不能猜字典、放宽 parser 或跳 case。
+   - 基线来源与调用层级由**任务书事实 + 已记录的用户确认**落进 `spec.perf.baseline`。Median 已确认“小算子拼接等价于 Torch 对应接口”，故用同机 `torch_npu:torch.median`，不再重复证明，也不改为直调单个 ACLNN 接口。性能 case 从精度 caseset 选择，A3 按输入物理载荷 `<=256 KiB` / `>256 KiB` 分小/大 shape；分类不免测。任何缺数或 scope 不可比均走采集侧 BLOCKED/rootcause，不能猜、放宽 parser 或跳 case。
 5. **回报**：逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 的裁决字段 + 三级门 STATUS + 工件路径来源，并必须给出 `cases_scored`、有效 us/speedup 条数及“性能计划数/caseset 总数”。所有性能 case 都须真实采集，`cases_scored=0` 必须明确性能未验证，不能把“达标”计数改写成真实性能 PASS。**FAIL 时不自行 dispatch rootcause**（禁跨阶段）——由 orchestrator 决定是否再 dispatch 本子agent 的 `rootcause`。
 
 ## dispatch_mode: rootcause — FAIL 独立复现解耦（先解耦、再归因）
@@ -98,6 +100,10 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
    - 只有 harness 错、被测物自 build 对 → **harness 侧**（runner/gen_cases/对比逻辑），修我这边、别赖算子。
    - 都对但门仍 FAIL → 查**环境/基线/口径**（如计时口径、基线来源、dtype 阈值）。
 3. **归因纪律**：
+   - PR ref 必须先解为精确 head SHA 并贯穿 build/receipt/report；同机存在的未发布后继修复只作诊断线索，
+     未获用户改变被测版本前不得替代当前 PR。
+   - index 输出先看 `invalid_index_count`：大于零是 actual 负数/越界，不属于 Torch 允许的 tie 位置差异；
+     只有下标在界内且 gather 后 value 一致，才可按 `index_value_consistency` 视为合法 tie。
    - **技术判定与官方口径分开**：我给的是「独立复现看到的技术事实 + 责任归属」，**不等于**对 PR/算子的官方结论；两者分栏写，不混同。
    - **不外发**：归因结论、对被测仓/PR 作者的任何对外动作（提 issue/comment/PR）**一律不由本子agent 发出**——只把证据与技术判定交回 orchestrator，由用户按 CLAUDE.md 副作用门定夺。
    - **不替 PR 作者修到底**：定位到 op 侧 bug 即止于「复现 + 定位 + 证据」，**不擅自改被测算子代码替作者修**（越权且污染归因）。

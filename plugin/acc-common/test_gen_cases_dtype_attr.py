@@ -245,7 +245,11 @@ class SemanticIdTest(unittest.TestCase):
                "params": [{"name": "self", "io": "in", "dtype": ["float32", "float16"]},
                           {"name": "out", "io": "out", "dtype": ["float32", "float16"]}],
                "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default"},
-               "perf": {"baseline": "tbe", "target_ratio": 0.95}}
+               "perf": {"baseline": "tbe", "target_ratio": 0.95,
+                        "case_source": "precision_cases",
+                        "shape_classification": {"metric": "sum_input_bytes",
+                                                 "small_max_bytes": 262144,
+                                                 "hardware": "Atlas A3"}}}
         d1, d2 = tempfile.mkdtemp(), tempfile.mkdtemp()
         try:
             c2 = {c["id"]: c for c in GC.gen_cases(two, d1)["cases"]}
@@ -841,7 +845,11 @@ def _fake_spec(op, *, dtypes=("float32",), attrs=None, attr_matrix=None, rank=No
     sp = {"op": op, "verify_mode": "numerical", "params_source": "fixture", "params": params,
           "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default",
                         "case_target": case_target},
-          "perf": {"baseline": "tbe", "target_ratio": 0.95}}
+          "perf": {"baseline": "tbe", "target_ratio": 0.95,
+                   "case_source": "precision_cases",
+                   "shape_classification": {"metric": "sum_input_bytes",
+                                            "small_max_bytes": 262144,
+                                            "hardware": "Atlas A3"}}}
     if attr_matrix is not None:
         sp["attr_matrix"] = attr_matrix
     return sp

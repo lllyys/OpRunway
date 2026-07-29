@@ -112,16 +112,19 @@
 //
 // ── 顶层 · 场景 / runner 形态（**编排层据字段路由，绝不 if-算子名**；缺省=常规 cpp 通路）─────────────
 //   "scenario":    "torch_ref_aclnn"        // 受控值只此一个，不属该场景→整字段省略、别编新值
-//   "runner_form": "aclnn_py"               // 缺省 cpp（= 省略即此）
+//   "runner_form": "aclnn_py" | "cpp_extension" // 缺省 cpp（= 省略即此）
 //   scenario   ：场景标识（⟺ 任务书把 **torch 指定为真值口径** × PR 是**标准 aclnn 两段式**工程）。
 //                它是给编排层/人读的路由标签（Layer 1 脚本目前不读它），真正驱动执行的是 runner_form。
 //   runner_form：runner 形态。`cpp`（缺省）= per-op `oprunway_<op>_runner.cpp`；
 //                `aclnn_py` = **无 per-op runner 源**、op 工程即 DUT，走 op-中立的 ctypes-aclnn runner
 //                （`aclnn_runtime`，从 aclnn header 推 arity）。
-//                ⚠ `runner_form=="aclnn_py"` **必须**同时声明 `call_variants`（gen_cases 当场 fail-closed）；
+//                `cpp_extension` = 按官方 NpuExtension/EXEC_NPU_CMD_EXT 生成独立 torch.ops namespace，
+//                由显式外部 driver build/load/执行并回传内容寻址收据；不复制旧 helper、不改 op-plugin。
+//                ⚠ `runner_form ∈ {"aclnn_py","cpp_extension"}` **必须**同时声明 `call_variants`
+//                （gen_cases 当场 fail-closed）；
 //                ⚠ 它还决定真机可收发 dtype 白名单（`repo_adapter.supported_np(runner_form)`：aclnn_py 放开 int/bf16）。
 //
-// ── 顶层 · aclnn 调用变体表（**仅 runner_form=="aclnn_py"，且此时必填**；实现见 ────────────────────
+// ── 顶层 · aclnn 调用变体表（runner_form 为 aclnn_py/cpp_extension 时必填；实现见 ─────────────────
 //    `precision_policy.call_variants` / `gen_cases._build_aclnn_call`）：
 //   ⚠ 触发条件是 **runner_form==aclnn_py**，不是「header 里有多个入口」——**单入口也必须写一条**
 //     （`when` 用 `{"always": true}`），多入口只是产多条。
@@ -133,6 +136,31 @@
 //   字段：
 //     `when`  （必填）匹配谓词，三选一：`{"always": true}` / `{"attr":"<attr名>","is_null":true|false}` /
 //             `{"attr":"<attr名>","equals":<值>}`。**不允许隐式全匹配**，要无条件就显式写 `always`。
+//
+// ── precision 行内 · torch_parity 完整矩阵（case_profile=="torch_parity" 时必填）────────────────
+//   "torch_parity_matrix": {
+//     "source": "<cannbot case_design 路径/ref>",
+//     "source_sha256": "<case_design.json sha256>",
+//     "ranks": [1,2,3,4,5,6,7,8],
+//     "shape_profiles": [
+//       {"name":"small","leading_dim":31},
+//       {"name":"medium","leading_dim":2047},
+//       {"name":"large","leading_dim":262144}
+//     ],
+//     "attribute_profiles": [
+//       {"name":"attr_00","attrs":{"dim":{"axis_class":"first_axis"},"keepDim":false}},
+//       {"name":"attr_01","attrs":{"dim":{"axis_class":"first_axis"},"keepDim":true}},
+//       {"name":"attr_02","attrs":{"dim":{"axis_class":"middle_axis"},"keepDim":false}},
+//       {"name":"attr_03","attrs":{"dim":{"axis_class":"middle_axis"},"keepDim":true}},
+//       {"name":"attr_04","attrs":{"dim":{"axis_class":"last_axis"},"keepDim":false}},
+//       {"name":"attr_05","attrs":{"dim":{"axis_class":"last_axis"},"keepDim":true}}
+//     ],
+//     "generator":{"kind":"uniform","min":-5,"max":5}
+//   }
+//   完整笛卡尔大小 = dtype×rank×shape_profile×attribute_profile，必须与 case_target 精确相等；
+//   不走 legacy 1-wise 抽样。axis_class 在每个 rank 下解析，禁止把 middle/last 静态写死。
+//   任务书要求、但本轮 PR-head ABI 无法执行的 overload 不得伪造成 profile/call_variant；
+//   写入 task_pr_gaps(kind=api_surface_unsupported_by_pr)，由后续验收报告功能缺口并阻止干净 PASS。
 //             逐 case 按**声明顺序取首个匹配者**。
 //     `symbol`（必填）该变体调用的 aclnn 符号**基名**（CamelCase，去 aclnn 前缀；真符号 =
 //             `aclnn<symbol>GetWorkspaceSize` / `aclnn<symbol>`）。不同变体可以是不同 API。
@@ -258,12 +286,29 @@
 //
 // ── 顶层 · perf（任务书性能栏为『无』时**整个 perf 字段省略**，勿写 {baseline:"none"}）────────────
 //   "perf": {
-//     "baseline": "<tbe | gpu_external | torch_npu>",
+//     "baseline": "<tbe | gpu_external | torch_npu | aclnn_builtin>",
 //     "target_ratio": <number>,
 //     "warmup": <int>,          // 可选，缺省 5
 //     "repeat": <int>,          // 可选，缺省 20
+//     "case_source": "precision_cases", // perf 存在时必填；每条性能 case 的 dims 必须同时含「精度」
+//     "case_selection": {               // 可选；默认 min=1、标签选择为空
+//       "min_total_input_elements": <正整数>,
+//       "include_precision_tags": ["<精度 case tag>", ...],
+//       "max_cases": <正整数>            // 可选；超出时按 dtype×small/large 队列轮转，仍复用精度 case_id
+//     },
+//     "shape_classification": {          // perf 存在时必填；只分类，不免测、不改 pass/fail
+//       "metric": "sum_input_bytes",
+//       "small_max_bytes": <正整数，边界计入小 shape>,
+//       "hardware": "<任务书目标硬件>"
+//     },
 //     "small_shape_exception": {"text": "<人读说明>", "when_us_below": <number>, "abs_gap_us_within": <number>},
-//     "torch_baseline": {"api": "<torch.xxx 点路径>", "positional": ["<slot name>"], "keyword": {"<slot name>": "<torch 形参名>"}}
+//     "torch_baseline": {
+//       "api": "<torch.xxx 点路径>",
+//       "positional": ["<slot name>"],
+//       "keyword": {"<slot name>": "<torch 形参名>"},
+//       "keyword_groups": [{"when": {"attr": "<语义 attr>", "is_null": <bool>}, "slots": ["<keyword slot name>"]}]
+//     },
+//     "aclnn_baseline": {"library": "cann_builtin_libopapi", "variants": [{"when": {…}, "symbol": "<基名>", "slots": ["<slot>"]}]}
 //   }
 //   ⚠ `target_ratio` **只从任务书原文换算**，绝不抄任何参考仓的通用默认值
 //     （参考仓 cannbot-ops-input `performance.py` 的 `PERF_SPEEDUP_THRESHOLD = 0.6` 是**它自家**口径，
@@ -274,15 +319,33 @@
 //     基线 = **同一台真机上** torch_npu 跑 torch API 的 kernel-only 耗时（真机内基线，非 GPU 外部数据；
 //     采集 = `aclnn_runtime/perf_msprof.py`，msprof --task-time + MSTX 测量窗）。实现见
 //     `perf_msprof.resolve_torch_baseline_plan`：
+//       · baseline 子进程从 ASCEND_CUSTOM_OPP_PATH / LD_LIBRARY_PATH 精确移除本次 DUT vendor 根，
+//         防系统 torch_npu 的同名内部 op 被 custom OPP 覆盖；设备、输入与采集参数不变。
 //       · `api`        —— `torch.` 开头的点路径；非 `torch.*` → fail-closed。
 //       · `positional` —— **slot name** 列表（slot name = 该 case `aclnn_call.slots` 里的名字 = aclnn 头签名形参名），
 //                         按列出顺序作 torch 位置实参。**本 case 缺任一即 fail-closed**（不猜、不重排）。
 //       · `keyword`    —— `{ "<slot name>": "<torch 形参名>" }`。某 slot 在该 case 不存在（如无该形参的变体）→
 //                         该 kwarg **自然缺席** → 调到的就是 torch 侧对应 arity。**变体自动跟随 case，
 //                         采集端无需也不得为此写任何算子分支**（律令 #0）。
+//       · `keyword_groups` —— 可选。统一 ACLNN ABI 若让不同语义变体都携带同一批占位 attr slot，用
+//                         `when.attr/is_null` 按 `case.attrs` 决定一组 keyword 是否整体出现；`slots`
+//                         必须都已在 `keyword` 声明，且不得跨组重复。缺语义 attr 或结构异常均 fail-closed。
 //       · out / out_null slot 一律忽略（torch 侧输出是返回值）。
+//   ⚠ `case_source=="precision_cases"` 表示性能 case 从同一份精度 caseset 选择；不是另造性能输入，
+//     且实际采集前必须再按本轮确定性精度 verdict 只保留 pass case；精度 fail/needs_review 不进入
+//     性能比较。精度 pass 只证明同一 DUT/输入的结果正确，不保证性能 ratio 达标或 baseline/profiler
+//     一定产证；性能阶段若再次执行失败须按 DUT 回归或 harness/collector 异常解耦。
+//     不要求每条精度 case 都进入性能维。若同时声明 `shape_classification`，生成器按每个 input 的
+//     物理存储 dtype 计算 `sum_input_bytes`，`<=small_max_bytes` 打「小shape」，其余打「大shape」；
+//     分类只用于分组统计，绝不恢复 `trivial-met` 或自动性能豁免。
+//     `case_selection.min_total_input_elements` 只允许在生成阶段把退化输入留在精度维、移出性能维；
+//     典型用途是总输入元素数=1、reference 不产生可比较 device kernel 的 case。排除项必须写入
+//     caseset.perf_case_policy.selection.excluded_degenerate_case_ids，不得采集后静默删 case。
+//     `include_precision_tags` 只把同一 caseset 中匹配 tag 的精度 case 加入性能维，不生成新输入；
+//     可用于补齐任务书要求的接口/属性 × small/large 覆盖。
 //   ⚠ **对照物要与任务书条款同一个东西**：任务书点名的基线若是「某某拼接版本 / 内置 TBE」，而这里填 torch_npu，
-//     二者是否等同**须先核实**；核不实就按 `task_pr_gaps` 记，不得当作已满足任务书性能条款。
+//     二者是否等同须由任务书事实或用户明确确认；已确认则把确认写进 spec 注释/事实包，核不实才按
+//     `task_pr_gaps` 记。不得只凭 API 名相似自行推断。
 //
 // ── golden 行内 · 可选字段 ──────────────────────────────────────────────────────────
 //   "taskdoc_snapshot": {"sha256": "<任务书快照 sha256>"}   // **仅** authorization.kind ∈ {oracle_method, formula}

@@ -3,8 +3,8 @@
 Task 1 gen_cases → Task 2 repo_adapter + validator → Task 3 perf_compare。
 stage 间只经 JSON/数据文件交接。CC/Codex/Antigravity 的薄壳只需换调用方式，核心不动。
 
-用法：python run_workflow.py <spec.json> [--mode new_example|aclnn_py|mock] [--out <dir>]
-省略 `--mode` 时据 `spec.runner_form` 唯一派生（cpp/缺省→new_example，aclnn_py→aclnn_py）；
+用法：python run_workflow.py <spec.json> [--mode new_example|aclnn_py|cpp_extension|mock] [--out <dir>]
+省略 `--mode` 时据 `spec.runner_form` 唯一派生；
 `mock` 仅本地用例链自检、精度按构造必过、非验收。
 
 ⚠ **验收裁决只有真机通路产得出来**（C5，用户 2026-07-22 拍板）。mock 的「NPU 输出」= `golden.copy()`
@@ -19,6 +19,9 @@ import argparse, json, os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_cases, repo_adapter, validator, perf_compare  # noqa: E402
+import cpp_extension_adapter  # noqa: E402
+import repro_artifacts  # noqa: E402
+import render_acceptance_markdown  # noqa: E402
 import validate_acceptance_state as gate  # noqa: E402
 import verify_aclnn_harness  # noqa: E402
 
@@ -36,9 +39,13 @@ _DEV_FILES = (_DEV_SUMMARY_FILE, _DEV_VERDICT_FILE)
 # 可能产验收裁决的**真机通路**集合：new_example（cpp runner v1）+ aclnn_py（ctypes-aclnn runner form，
 # torch 对标 median 见证）。两者都产真 NPU 证据（evidence_grade=acceptance_candidate）。按**能力/形态**扩，
 # 非按算子身份——aclnn_py 无 per-op runner 源、op 工程即 DUT（蓝图 §6）。
-_REAL_MACHINE_MODES = frozenset({"new_example", "aclnn_py"})
+_REAL_MACHINE_MODES = frozenset({"new_example", "aclnn_py", "cpp_extension"})
 _REAL_MACHINE_MODE = "new_example"      # new_example 专属预检（_ne_cfg）用；aclnn_py 有自己的 _aclnn_cfg
-_RUNNER_FORM_TO_MODE = {"cpp": "new_example", "aclnn_py": "aclnn_py"}
+_RUNNER_FORM_TO_MODE = {
+    "cpp": "new_example",
+    "aclnn_py": "aclnn_py",
+    "cpp_extension": "cpp_extension",
+}
 
 # —— 验收通路的性能基线：**只认真数、禁 mock 兜底**（codex High#2）——————————————————————
 # 病历：aclnn_py 的 evidence `perf.us=None`（采集端第二里程碑未接）、也不产 `_real_baseline.json`，
@@ -56,6 +63,9 @@ _BLOCKED_WAIT_REAL_BASELINE_STATE = "BLOCKED_WAIT_REAL_BASELINE"
 _REAL_BASELINE_SOURCES = {
     # torch 对标场景：torch_npu 上同算子的 kernel-only 耗时（真机内基线、非 GPU 外部数据）。
     "torch_npu": ("_torch_npu_baseline.json", lambda p: repo_adapter.parse_torch_npu_baseline(p)),
+    # 任务书直接点名既有 ACLNN 实现：同机从 CANN 内置 libopapi.so 显式调用，不绕 torch 等价性证明。
+    "aclnn_builtin": ("_aclnn_builtin_baseline.json",
+                      lambda p: repo_adapter.parse_aclnn_builtin_baseline(p)),
 }
 
 
@@ -66,7 +76,7 @@ _REAL_BASELINE_SOURCES = {
 _PERF_PLAN_FILE = "_perf_plan.json"
 #: 采集计划里**可透传的字段白名单**——只搬 spec.perf 里与「怎么采」有关的项，
 #: 绝不把 `target_ratio` 这类**判据**字段带进采集端（判定归 perf_compare，采集端不许看见阈值）。
-_PERF_PLAN_KEYS = ("warmup", "repeat", "torch_baseline", "op_dir")
+_PERF_PLAN_KEYS = ("warmup", "repeat", "torch_baseline", "aclnn_baseline", "op_dir")
 
 
 def _emit_perf_plan(spec, work):
@@ -84,8 +94,9 @@ def _emit_perf_plan(spec, work):
     path = os.path.join(work, _PERF_PLAN_FILE)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(plan, f, ensure_ascii=False, indent=2)
+    config_key = "torch_baseline" if plan["baseline"] == "torch_npu" else "aclnn_baseline"
     print(f"[Task2 perf] 采集计划 → {_PERF_PLAN_FILE}（baseline={plan['baseline']}，"
-          f"torch_baseline={'有' if plan.get('torch_baseline') else '**缺**（采集端将 fail-closed）'}）")
+          f"{config_key}={'有' if plan.get(config_key) else '**缺**（采集端将 fail-closed）'}）")
     return path
 
 
@@ -185,6 +196,16 @@ def _exit_code(overall):
     return 1
 
 
+def _runner_source_allowed(mode, source):
+    """真机 mode 与 runner provenance 的受控对应；cpp_extension 另由收据门证明生成物。"""
+    expected = {
+        "new_example": "user",
+        "aclnn_py": "user",
+        "cpp_extension": "generated_official_cpp_extension",
+    }
+    return source == expected.get(mode)
+
+
 def _resolve_mode(spec, requested_mode):
     """据 runner_form 派生真机 mode，并拒绝显式走错真机通路。
 
@@ -256,6 +277,7 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     # 同理必清：本轮若性能没采成，留在 work 里的上一轮基线会被 `_real_baseline_or_blocked` 当成本轮真数读走
     # ——那正是「用旧数冒充这次达标」，比缺基线挂起坏得多。
     for stale in ("_real_baseline.json", "perf_result.txt", "_torch_npu_baseline.json",
+                  "_aclnn_builtin_baseline.json",
                   "perf_collect.json", "_perf_plan.json", "_aclnn_perf_plan_sent.json"):
         sp = os.path.join(work, stale)
         if os.path.exists(sp):
@@ -278,6 +300,10 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     caseset = gen_cases.gen_cases(spec, work)
     _dump(caseset, "caseset.json")
     print(f"[Task1 gen_cases] {len(caseset['cases'])} 用例")
+    if mode == "cpp_extension":
+        cpp_extension_adapter.prepare(spec, caseset, work)
+        print("[CP-C0 cpp_extension] 已生成官方 Extension bundle 与逐 case invocation plan；"
+              "build/load/NPU 见证由显式外部 driver 回传收据后复核")
     # aclnn_py 无 per-op runner 源，因此 CP-C 由真机 harness 信任门接住。这里在正式 adapter
     # 启动前复核内容寻址收据与**本轮重新生成的完整 caseset**、当前 spec 及 harness 执行逻辑
     # 全部仍绑定；缺失/漂移一律停在 CP-C。收据只验证 harness，不改变或裁剪下方 Task2/Task3。
@@ -321,6 +347,22 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         _dump(verdict, _DEV_VERDICT_FILE)
     o = verdict["overall"]
     print(f"[Task2 run+validate] 裁决={o['verdict']} {o['counts']}")
+    # 人工复现制品与验收裁决物理/语义解耦：只消费已落盘 Task2 事实，生成失败不改写 verdict。
+    # 当前先接 cpp_extension backend；其它 runner form 待各自提供稳定的单 case replay 后再登记。
+    if mode == "cpp_extension":
+        try:
+            repro = repro_artifacts.generate_cpp_extension(out_dir, caseset, verdict)
+            print(f"[Task2 repro] 已生成 {repro['case_count']} 个逐 case 人工复现启动脚本")
+        except (OSError, RuntimeError, TypeError, ValueError) as ex:
+            _dump({
+                "schema": "oprunway.repro_generation_error",
+                "schema_version": 1,
+                "backend": "cpp_extension",
+                "error": f"{type(ex).__name__}: {ex}",
+                "acceptance_verdict": None,
+                "note": "复现制品生成失败，不改变验收裁决",
+            }, "repro_generation_error.json")
+            print(f"[Task2 repro] 生成失败（不改变验收裁决）：{type(ex).__name__}: {ex}")
     gpu_prov = None
     # §精度门前置 + fail-fast（用户 2026-07-15，评审 #4）：精度非全过（pass/passed_with_risk）→ **跳过 Task3 性能**、
     # 提前结束。**不 early-return**——照走下方统一 overall/门流程（gate/runner_source 优先级不变、prec==fail 自然
@@ -340,7 +382,9 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     if not precision_ok:
         report = {"op": spec["op"], "baseline_source": None, "target_ratio": None, "per_case": [],
                   "notes": [f"精度未全过（{o['verdict']}）→ 跳过性能测试（fail-fast，精度已全跑再判）"],
-                  "summary": {"perf_cases": 0, "达标": 0, "blocked": 0, "status": "skipped_precision_gate"}}
+                  "summary": {"perf_cases": 0, "cases_scored": 0, "达标": 0, "blocked": 0,
+                              "status": "skipped_precision_gate"}}
+        report = perf_compare.attach_skipped_shape_plan(report, caseset)
         _dump(_stamp_dev(report, is_acceptance, grade), "perf_report.json")
         print(f"[Task3 perf_compare] 跳过（精度={o['verdict']} 未全过 → fail-fast）")
     else:
@@ -427,8 +471,9 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     runner_source = evidence.get("runner_source")
     if not gate_passed:
         overall = "BLOCKED(验收门未过)" if is_acceptance else "BLOCKED(管路自检未过)"
-    elif mode in _REAL_MACHINE_MODES and runner_source != "user":
-        overall = f"BLOCKED(runner_source 非 user/缺失: {runner_source!r})"
+    elif mode in _REAL_MACHINE_MODES and not _runner_source_allowed(mode, runner_source):
+        overall = (
+            f"BLOCKED(runner_source 与 mode={mode!r} 不匹配/缺失: {runner_source!r})")
     elif prec == "blocked_golden_unauthorized":
         # 批 5：真值来路不明 → 无从得出结论。**不能报成 FAIL(精度)**——那会让人去查算子、查错方向。
         # 排在 fail 之前：来路不明的真值下，「精度 fail」这个结论本身就不成立。
@@ -497,6 +542,18 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         if gpu_prov is not None:
             acc["gpu_baseline"] = gpu_prov
         final_file = _dump(acc, "acceptance.json")
+        try:
+            md_file = render_acceptance_markdown.write_report(out_dir)
+            print(f"[Markdown 报告] {md_file}")
+        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as ex:
+            _dump({
+                "schema": "oprunway.markdown_report_error",
+                "schema_version": 1,
+                "error": f"{type(ex).__name__}: {ex}",
+                "acceptance_verdict": None,
+                "note": "Markdown 渲染失败，不改变 JSON 验收裁决",
+            }, "markdown_report_error.json")
+            print(f"[Markdown 报告] 生成失败（不改变 JSON 裁决）：{type(ex).__name__}: {ex}")
     else:
         # C5 非验收产物：**字段名也换掉**，不只是加个注脚。`overall` / `state` / `precision_verdict` 是验收裁决
         # 的词汇，留着就还能被 `acc["state"] == "PASSED"` 这类代码顺手当裁决读；换成 pipeline_* 后，任何想拿它

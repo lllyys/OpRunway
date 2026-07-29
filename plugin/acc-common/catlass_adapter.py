@@ -28,6 +28,7 @@ import argparse, hashlib, json, math, os, re, subprocess, sys, time
 import numpy as np
 
 import catlass_parse  # 解析层（stdlib）
+import gen_cases as casegen  # 复用通用「性能 case⊆精度 case + 按输入字节分大小 shape」契约
 import precision_policy  # 精度口径 SSOT（据 spec 派生 cdtype/standard/policy，与 validator 同源）
 
 _NP = {"float32": np.float32, "float16": np.float16}
@@ -221,7 +222,7 @@ def build_matmul_caseset(spec, work_dir):
     os.makedirs(work_dir, exist_ok=True)
 
     plan = [(["功能", "精度"], s, ["常规"]) for s in func_shapes]
-    plan += [(["性能"], s, ["性能", "大shape"]) for s in perf_shapes]
+    plan += [(["功能", "精度", "性能"], s, ["性能"]) for s in perf_shapes]
 
     cases = []
     for i, (dims, (m, n, k), tags) in enumerate(plan):
@@ -262,9 +263,11 @@ def build_matmul_caseset(spec, work_dir):
             "case_origin": "synthetic-demo（catlass 库 example，无真实 task_doc/PR）",
             "expected": expected,
         })
+    perf_case_policy = casegen._classify_perf_cases(spec, cases)
     return {"op": op, "spec_ref": spec.get("op"), "work_dir": work_dir, "attr_order": [],
             "harness_kind": "generated_harness",
             "provenance": spec.get("provenance", {"kind": "synthetic"}),
+            **({"perf_case_policy": perf_case_policy} if perf_case_policy is not None else {}),
             "cases": cases}
 
 

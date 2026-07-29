@@ -1,4 +1,4 @@
-"""CP · 造例档位 `spec.precision.case_profile` 的护栏单测（批 A：**零行为变更 + 字节安全**）。
+"""CP · 造例档位与 torch_parity 完整矩阵护栏单测。
 
 跑: cd plugin/acc-common && python3 -m unittest test_gen_cases_case_profile -v
    （纯 numpy 假/样例 golden，**不需 torch**、不需真机。）
@@ -15,7 +15,7 @@ caseset 与全部 .npy 被 sha256 逐字节钉死。故先立字段驱动的档�
   · **字节安全 pin**（本文件最要紧的一条）：拿真样例 spec `samples/specs/sign.spec.json` 实跑 gen_cases——
     未声明时 caseset **不含** `case_profile` 键；显式声明 legacy 时含该键且值为 "legacy"，
     且两者的 `cases` 列表与落盘 .npy 字节**完全相等**（证明只多了记账、没碰造例）；
-  · 批 A 的零行为变更证据：`torch_parity` 目前与 `legacy` 产同一批 plan entry（见该用例 docstring 的失效条件）；
+  · torch_parity：完整笛卡尔、动态轴 class、禁止 case_target 抽样、缺矩阵 fail-closed；
   · dry-run 回显 + 空模板 `spec_schema_template.jsonc` 已记载该字段（防实现与文档漂移）。
 """
 import contextlib, copy, hashlib, io, json, os, shutil, tempfile, unittest
@@ -48,6 +48,26 @@ def _with_profile(spec, profile):
     """返回一份**只**多了 `precision.case_profile` 的 spec 深拷贝（原 spec 不动，避免用例互相串味）。"""
     out = copy.deepcopy(spec)
     out.setdefault("precision", {})["case_profile"] = profile
+    return out
+
+
+def _with_parity_matrix(spec):
+    """最小的通用 torch_parity 矩阵夹具；结构与 cannbot coverage 轴模型一致。"""
+    out = _with_profile(spec, "torch_parity")
+    out["precision"]["torch_parity_matrix"] = {
+        "source": "test fixture",
+        "source_sha256": "0" * 64,
+        "ranks": [1, 2],
+        "shape_profiles": [
+            {"name": "small", "leading_dim": 31},
+            {"name": "medium", "leading_dim": 2047},
+            {"name": "large", "leading_dim": 262144},
+        ],
+        "attribute_profiles": [{"name": "attr_00", "attrs": {}}],
+        "generator": {"kind": "uniform", "min": -5, "max": 5},
+    }
+    # Sign 两个 dtype × 2 rank × 3 shape × 1 attr profile。
+    out["precision"]["case_target"] = 12
     return out
 
 
@@ -116,7 +136,7 @@ class CaseProfileVocabTest(unittest.TestCase):
 
 
 class CaseProfilePlanMetaTest(unittest.TestCase):
-    """`_plan` 入口读一次档位并记进 meta（本批只记账、不据它分支）。"""
+    """`_plan` 入口读档位；legacy 保持原行为，torch_parity 进入完整矩阵。"""
 
     def setUp(self):
         self.spec = _load_spec()
@@ -138,16 +158,35 @@ class CaseProfilePlanMetaTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             _plan_of(_with_profile(self.spec, "faithful"))
 
-    def test_batch_a_torch_parity_produces_same_entries_for_now(self):
-        """**批 A 的零行为变更证据**：现在 `torch_parity` 与 `legacy` 产的 plan entry 完全相同——
-        本批只立开关、造例逻辑一行没改。
+    def test_torch_parity_emits_complete_cartesian_matrix(self):
+        parity = _with_parity_matrix(self.spec)
+        entries, meta = _plan_of(parity, case_target=12)
+        self.assertEqual(len(entries), 12)
+        self.assertEqual(meta["pool_max"], 12)
+        self.assertIn("complete_cartesian", meta["coverage_strength"])
+        self.assertEqual(
+            {tuple(e["shape"]) for e in entries},
+            {(31,), (2047,), (262144,),
+             (31, 1), (2047, 1), (262144, 1)})
 
-        ⚠ 失效条件（有意为之，不是脆弱测试）：批 B 落地「忠实对齐参考仓造例规则」后，本条会**按预期变红**，
-        届时应把它改写成「torch_parity 产出对齐后的新网格」的正向 pin，而不是删掉了事。"""
-        legacy_entries, _ = _plan_of(_with_profile(self.spec, "legacy"))
-        parity_entries, _ = _plan_of(_with_profile(self.spec, "torch_parity"))
-        self.assertEqual(legacy_entries, parity_entries,
-                         "批 A 不该改造例逻辑：torch_parity 目前必须与 legacy 产同一批 entry")
+    def test_torch_parity_without_matrix_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "torch_parity_matrix"):
+            _plan_of(_with_profile(self.spec, "torch_parity"))
+
+    def test_torch_parity_refuses_sampling_complete_matrix(self):
+        parity = _with_parity_matrix(self.spec)
+        with self.assertRaisesRegex(ValueError, "必须相等"):
+            _plan_of(parity, case_target=11)
+
+    def test_axis_classes_resolve_by_rank(self):
+        attrs = [
+            {"name": "first", "attrs": {"dim": {"axis_class": "first_axis"}}},
+            {"name": "middle", "attrs": {"dim": {"axis_class": "middle_axis"}}},
+            {"name": "last", "attrs": {"dim": {"axis_class": "last_axis"}}},
+        ]
+        self.assertEqual(
+            [GC._resolve_axis_class(row["attrs"]["dim"], 8, "test") for row in attrs],
+            [0, 3, 7])
 
 
 class CaseProfileByteSafetyTest(unittest.TestCase):
@@ -232,7 +271,7 @@ class CaseProfileDryRunAndDocTest(unittest.TestCase):
         self.assertIn("case_profile: 未声明（缺省 = legacy = 现行为）", out)
 
     def test_dry_run_echoes_declared_profile(self):
-        out = self._dry_run_text(_with_profile(_load_spec(), "torch_parity"))
+        out = self._dry_run_text(_with_parity_matrix(_load_spec()))
         self.assertIn("case_profile: torch_parity（spec 显式声明）", out)
 
     def test_schema_template_documents_the_field(self):

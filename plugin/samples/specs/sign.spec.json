@@ -60,6 +60,12 @@
   "perf": {
     "baseline": "tbe",
     "target_ratio": 1.0,
+    "case_source": "precision_cases",
+    "shape_classification": {
+      "metric": "sum_input_bytes",
+      "small_max_bytes": 262144,
+      "hardware": "Atlas A3"
+    },
     "target_ratio_source": "任务书『相比原 TBE 性能无劣化』= 不劣化 = ratio ≥ 1.0（原写 0.95 偏松，2026-07-08 对齐任务书原文改正）",
     "small_shape_exception": {
       "text": "<10us 差 3us→仿真图",

@@ -35,6 +35,10 @@ def _read(name):
 def _demo_spec():
     return {"op": "CatlassBasicMatmul", "verify_mode": "numerical",
             "precision": {"threshold": 1e-3, "dtype": "float32"},
+            "perf": {"case_source": "precision_cases",
+                     "shape_classification": {"metric": "sum_input_bytes",
+                                              "small_max_bytes": 262144,
+                                              "hardware": "Atlas A3"}},
             "params": [{"name": "A", "io": "in", "dtype": ["float32"], "layout": "RowMajor"},
                        {"name": "B", "io": "in", "dtype": ["float32"], "layout": "RowMajor"},
                        {"name": "C", "io": "out", "dtype": ["float32"], "layout": "RowMajor"}],
@@ -334,6 +338,14 @@ class MockEndToEndTest(unittest.TestCase):
         for e in ev["evidence"]:
             has_us = e["perf"].get("us") is not None
             self.assertEqual(has_us, e["case_id"] in perf_ids)
+
+    def test_perf_cases_reuse_precision_inputs_and_are_size_classified(self):
+        perf_cases = [c for c in self.cs["cases"] if "性能" in c["dims"]]
+        self.assertTrue(perf_cases)
+        self.assertTrue(all("精度" in c["dims"] for c in perf_cases))
+        self.assertTrue(all(c["perf_shape_classification"]["class"] in ("small", "large")
+                            for c in perf_cases))
+        self.assertEqual(self.cs["perf_case_policy"]["case_source"], "precision_cases")
 
     def test_defect_injection_flips_fail(self):
         bad = self.cs["cases"][0]["id"]

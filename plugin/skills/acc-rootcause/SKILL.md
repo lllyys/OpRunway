@@ -28,6 +28,11 @@ description: OpRunway 验收里任何 FAIL 归因前的解耦纪律薄壳——�
 - **查已编 vendor 包制品**（op-info / kernel binary 是否真生成）：制品缺失即实锤。
 - **dtype 逐个做 op 级测**：分清整体不通还是某 dtype 路不通。
 - **被测物自 build + 声明支持的 dtype + 手算 golden 独立复现**：小用例逐元素比，坐实范围。
+- **先核 PR head，再看后继修复**：报告和 build 必须绑定远端 PR ref 当前解出的精确 SHA。机器上若有该 SHA
+  的未发布后继提交，只可用于说明“疑似已有修复方向”，不能替换被测版本，也不能把后继结果归给原 PR。
+- **index 输出按结构化证据分流**：对 `index_value_consistency`，合法 tie 是“actual/golden 下标可不同，
+  但 actual 下标在界内且 gather 后值一致”；`invalid_index_count>0` 是 DUT 越界输出的明确事实，不属于 tie
+  容忍范围。不得看到 index mismatch 就一律改成 exact，也不得看到重复值就一律豁免。
 
 ## 2. 下结论的红线
 

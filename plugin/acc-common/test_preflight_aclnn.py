@@ -132,6 +132,17 @@ class AclnnPreflightTest(unittest.TestCase):
         self.assertEqual(result["status"], "NOT_APPLICABLE")
         self.assertIsNone(result["acceptance_verdict"])
 
+    def test_cpp_extension_reuses_static_abi_gate_but_has_distinct_next_gate(self):
+        spec = _spec()
+        spec["runner_form"] = "cpp_extension"
+        self._write("spec.json", spec)
+        result = P.evaluate(self.root, "spec.json")
+        self.assertEqual(result["status"], "READY_WAIT_NPU_TRUST_GATE")
+        self.assertEqual(result["bindings"]["runner_form"], "cpp_extension")
+        self.assertEqual(
+            result["required_next_gate"],
+            "CPP_EXTENSION_BUILD_LOAD_AND_HARNESS_TRUST_GATE")
+
     def test_malformed_param_is_machine_blocked_not_traceback(self):
         spec = _spec()
         spec["params"][0] = "not-an-object"

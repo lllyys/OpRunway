@@ -101,6 +101,12 @@
   "perf": {
     "baseline": "tbe",
     "target_ratio": 0.95,
+    "case_source": "precision_cases",
+    "shape_classification": {
+      "metric": "sum_input_bytes",
+      "small_max_bytes": 262144,
+      "hardware": "Atlas A3"
+    },
     "target_ratio_source": "任务书性能要求『uint8性能对比fp16数据类型性能相比，劣化5%之内』→ 0.95",
     "small_shape_exception": {
       "text": "<10us 差 3us→仿真图",

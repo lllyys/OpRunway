@@ -304,7 +304,7 @@ class IndexGoldenDtypeTest(unittest.TestCase):
             self.assertEqual(m["numel"], int(np.asarray(arr).size), c["id"])
 
     def test_int64_indices_still_work(self):
-        """向后兼容：声明 int64（median.spec.json 现状）行为不变——golden 仍是 int64、判据照跑。"""
+        """向后兼容：任意 spec 声明 int64 时 golden 仍为 int64、判据照跑。"""
         _, cs, work = self._gen_idx("int64", "MedIdx64")
         for c in self._bydim(cs):
             idx = c["expected"]["outputs"][1]
@@ -397,21 +397,21 @@ class MedianGoldenOutShapeTest(unittest.TestCase):
         spec.loader.exec_module(cls.mod)
 
     def test_global_scalar(self):
-        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": None, "keepdim": False}), ())
+        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": None, "keepDim": False}), ())
 
     def test_bydim_reduce(self):
-        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": 0, "keepdim": False}), (6,))
-        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": 1, "keepdim": False}), (4,))
+        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": 0, "keepDim": False}), (6,))
+        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": 1, "keepDim": False}), (4,))
 
     def test_keepdim(self):
-        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": 0, "keepdim": True}), (1, 6))
+        self.assertEqual(self.mod.out_shape([(4, 6)], {"dim": 0, "keepDim": True}), (1, 6))
 
     def test_negative_dim(self):
-        self.assertEqual(self.mod.out_shape([(2, 3, 4)], {"dim": -1, "keepdim": False}), (2, 3))
+        self.assertEqual(self.mod.out_shape([(2, 3, 4)], {"dim": -1, "keepDim": False}), (2, 3))
 
     def test_invalid_dim_fail_closed(self):
         with self.assertRaises(ValueError):
-            self.mod.out_shape([(4, 6)], {"dim": 5, "keepdim": False})
+            self.mod.out_shape([(4, 6)], {"dim": 5, "keepDim": False})
 
     def test_contract_block_verifies_tier1(self):
         """真任务书快照在算子目录 → GOLDEN_CONTRACT 授权可核、tier1。"""
@@ -436,17 +436,17 @@ class MedianGoldenFnTorchTest(unittest.TestCase):
 
     def test_bydim_returns_tuple(self):
         x = np.arange(24, dtype=np.float32).reshape(4, 6)
-        r = self.mod.golden_fn([x], {"dim": 1, "keepdim": False})
+        r = self.mod.golden_fn([x], {"dim": 1, "keepDim": False})
         self.assertIsInstance(r, tuple)
         self.assertEqual(len(r), 2)
         vv, vi = r
         self.assertEqual(vv.shape, (4,))
         self.assertEqual(vi.shape, (4,))
-        self.assertEqual(vi.dtype, np.int64)
+        self.assertEqual(vi.dtype, np.int32)
 
     def test_global_returns_single(self):
         x = np.arange(24, dtype=np.float32).reshape(4, 6)
-        r = self.mod.golden_fn([x], {"dim": None, "keepdim": False})
+        r = self.mod.golden_fn([x], {"dim": None, "keepDim": False})
         self.assertNotIsInstance(r, tuple)
         self.assertEqual(np.asarray(r).shape, ())
 
@@ -454,7 +454,12 @@ class MedianGoldenFnTorchTest(unittest.TestCase):
         """真 median spec + 真 golden 全跑 → 全局单输出 + by-dim 双输出并存。"""
         _gf.place_golden(_gf.root(), "Median", body=None)   # 拷真 golden.py + 快照
         spec = json.load(open(_MEDIAN_SPEC))
-        spec["precision"]["case_target"] = 20               # 收敛测试规模
+        self_p = next(p for p in spec["params"] if p["name"] == "self")
+        self_p["dtype"], self_p["rank"] = ["float32"], [1]
+        matrix = spec["precision"]["torch_parity_matrix"]
+        matrix["ranks"] = [1]
+        matrix["shape_profiles"] = [{"name": "small", "leading_dim": 31}]
+        spec["precision"]["case_target"] = 7                # 1 dtype×1 rank×1 shape×7 attrs
         work = tempfile.mkdtemp(prefix="mo_realmed_")
         self.addCleanup(shutil.rmtree, work, ignore_errors=True)
         cs = GC.gen_cases(spec, work)
@@ -465,7 +470,7 @@ class MedianGoldenFnTorchTest(unittest.TestCase):
 
 
 class AclnnCallPerCaseTest(unittest.TestCase):
-    """runner_form=="aclnn_py" → **逐 case** 解析出 `aclnn_call`（审计 finding #3；op 级模板已废）。
+    """aclnn_py/cpp_extension → **逐 case** 解析 `aclnn_call`（op 级模板已废）。
 
     契约：case["aclnn_call"] = {"symbol", "slots":[{role,name,...}]}；attr slot 带已解析 value + ctype，
     非 active 的 out 写成 out_null。**绝不把 None 兜成标量默认值**；无匹配变体 → fail-closed。"""
@@ -480,26 +485,29 @@ class AclnnCallPerCaseTest(unittest.TestCase):
         （变体机制本身的通用性由 `test_gen_cases_attaches_per_case_call` 用假 spec 覆盖，此处只钉真 spec。）"""
         spec = json.load(open(_MEDIAN_SPEC))
         variants = GC._call_variants(spec)
-        g = GC._select_call_variant(variants, {"dim": None, "keepdim": False}, "cid")
+        g = GC._select_call_variant(variants, {"dim": None, "keepDim": False}, "cid")
         self.assertEqual(g["symbol"], "Median")
-        self.assertEqual(g["active_outputs"], ["values"])
-        call_g = GC._build_aclnn_call(spec, g, {"dim": None, "keepdim": False}, ["values"], "cid")
+        self.assertEqual(g["active_outputs"], ["valuesOut"])
+        call_g = GC._build_aclnn_call(
+            spec, g, {"dim": None, "keepDim": False}, ["valuesOut"], "cid")
         self.assertEqual(call_g, {"symbol": "Median", "slots": [
             {"role": "in", "name": "self", "input_idx": 0},
-            {"role": "out", "name": "values", "output_idx": 0},
-            {"role": "out_null", "name": "indices"},
+            {"role": "attr", "name": "dim", "ctype": "int64", "value": 0},
+            {"role": "attr", "name": "keepDim", "ctype": "bool", "value": False},
+            {"role": "out", "name": "valuesOut", "output_idx": 0},
+            {"role": "out_null", "name": "indicesOut"},
         ]})
-        d = GC._select_call_variant(variants, {"dim": 1, "keepdim": False}, "cid")
+        d = GC._select_call_variant(variants, {"dim": 1, "keepDim": False}, "cid")
         self.assertEqual(d["symbol"], "Median")          # 单符号：与全局变体同符号，靠 indices 是否为空区分
-        call_d = GC._build_aclnn_call(spec, d, {"dim": 1, "keepdim": False},
-                                      ["values", "indices"], "cid")
+        call_d = GC._build_aclnn_call(spec, d, {"dim": 1, "keepDim": False},
+                                      ["valuesOut", "indicesOut"], "cid")
         # slots 顺序 = spec.params 顺序 = aclnn 签名顺序；每个 slot 带 name（供与 header 逐项对账）。
         self.assertEqual(call_d, {"symbol": "Median", "slots": [
             {"role": "in", "name": "self", "input_idx": 0},
             {"role": "attr", "name": "dim", "ctype": "int64", "value": 1},
-            {"role": "attr", "name": "keepdim", "ctype": "bool", "value": False},
-            {"role": "out", "name": "values", "output_idx": 0},
-            {"role": "out", "name": "indices", "output_idx": 1},
+            {"role": "attr", "name": "keepDim", "ctype": "bool", "value": False},
+            {"role": "out", "name": "valuesOut", "output_idx": 0},
+            {"role": "out", "name": "indicesOut", "output_idx": 1},
         ]})
 
     def test_gen_cases_attaches_per_case_call(self):
@@ -1279,7 +1287,8 @@ class OperatorClassSpecialsTest(unittest.TestCase):
                                  f"{c['id']}: structural 算子输入含 NaN（超出验收口径 → 会误判合格 PR）")
                 self.assertTrue(bool(np.isfinite(x).all()),
                                 f"{c['id']}: structural 算子输入含 Inf（超出验收口径）")
-        self.assertTrue(any("vptie" in c["id"] for c in cs["cases"]), "tie 用例应保留")
+        self.assertTrue(any("vptie" in c["id"] for c in cs["cases"]),
+                        "legacy tie 用例应保留")
 
     def test_caseset_field_absent_when_class_undeclared(self):
         """未声明 → caseset **不出现** operator_class 键（现有算子 caseset 逐字节不变的前提）。"""
@@ -1296,8 +1305,17 @@ class OperatorClassSpecialsTest(unittest.TestCase):
         self.assertEqual(spec.get("operator_class"), "structural")
         self.assertNotIn("nan", spec["precision"].get("value_profiles", []),
                          "median 是 structural 类，nan profile 会 fail-closed")
-        self.assertIn("tie", spec["precision"].get("value_profiles", []),
-                      "tie 属结构类特殊值那一档（重复/并列），不该被一起砍掉")
+        self.assertEqual(spec["precision"].get("case_profile"), "torch_parity")
+        self.assertIn("torch_parity_matrix", spec["precision"])
+
+    def test_real_median_torch_parity_dry_run_renders(self):
+        with open(_MEDIAN_SPEC, encoding="utf-8") as fh:
+            spec = json.load(fh)
+        ledger = GC._dry_run(spec)
+        self.assertEqual(ledger["summary"]["emitted"], 1344)
+        self.assertEqual(
+            ledger["coverage"]["unpaired_combo_classes"],
+            {"count": 0, "classes": [], "attr_values_never_emitted": []})
 
 
 if __name__ == "__main__":

@@ -127,9 +127,9 @@ G4 · 归约/成对类算子的**生成期规模预算**（2026-07-22，落地�
       - `torch_parity` —— 忠实对齐参考仓的造例规则，**仅**用于「任务书对标 torch」场景（不碰 catlass 通路）。
   · **律令 #0 合规**：这是按 **spec 声明的能力档位**分支，**不是按算子名**——换任意声明了 `torch_parity`
     的域内算子，工具零改即用；代码里没有也不许有 `if op == "<算子名>"`。
-  · **本批（批 A）只立开关、不改行为**：`_plan` 读出档位放进 `meta`，caseset **只在 spec 显式声明时**多出
-    一个 `case_profile` 账本键；造例逻辑一行不改（对齐动作全部排在批 B）。故 `legacy` 与「未声明」产出的
-    `cases` 完全相同、只差这一个账本键——测试以此为 pin（`test_gen_cases_case_profile.py`）。
+  · `torch_parity` 必须同时声明 `precision.torch_parity_matrix`，按 dtype×rank×shape profile×attribute
+    profile 生成完整笛卡尔；rank 动态轴 class 在逐 case 解析成 first/middle/last，且 `case_target`
+    必须精确等于完整矩阵大小，禁止静默抽样。`legacy` 与未声明仍保持逐字节兼容。
   · 词表外取值 / 非字符串（含**显式 `null`**）→ fail-closed：档位猜错 = 整份用例集悄悄换一套规则，
     比报错贵得多。
 """
@@ -200,6 +200,237 @@ def _storage_np(dtn):
 def _storage_name(dtn):
     """物理 storage_dtype 名字（喂 kernel/落盘的字节 dtype）：bf16→uint16；余=逻辑名。"""
     return "uint16" if dtn == _BF16 else dtn
+
+
+_PERF_SHAPE_PROFILES = {
+    # 用户确认的 A3 通用规则：全部物理输入载荷 <= 256 KiB 可一次搬完 UB。
+    "Atlas A3": {"metric": "sum_input_bytes", "small_max_bytes": 256 * 1024},
+}
+
+
+def _perf_case_policy(spec):
+    """解析性能 case 来源与 shape 大小分类契约；未声明则保持历史行为。
+
+    ``case_source=precision_cases`` 只表示性能 case 必须从精度 caseset 中选，不表示每条精度 case
+    都必须测性能。``shape_classification`` 仅负责可审计分组，不参与免测、阈值放宽或 pass/fail。
+    """
+    perf = spec.get("perf")
+    if not isinstance(perf, dict):
+        return None
+    source = perf.get("case_source")
+    rule = perf.get("shape_classification")
+    if source is None or rule is None:
+        raise ValueError(
+            "spec 声明了 perf，就必须同时声明 perf.case_source='precision_cases' 与 "
+            "perf.shape_classification；性能 case⊆精度 case、按目标硬件 UB 单次承载边界分大小 shape "
+            "是通用规则，不能静默省略")
+    if source != "precision_cases":
+        raise ValueError(
+            f"perf.case_source 仅支持 'precision_cases'，得 {source!r}；"
+            "性能用例须从同一份精度 caseset 选取，不另造一套输入")
+    if not isinstance(rule, dict):
+        raise ValueError("perf.shape_classification 须为 object")
+    metric = rule.get("metric")
+    if metric != "sum_input_bytes":
+        raise ValueError(
+            f"perf.shape_classification.metric 仅支持 'sum_input_bytes'，得 {metric!r}")
+    limit = rule.get("small_max_bytes")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError(
+            f"perf.shape_classification.small_max_bytes 须为 ≥1 的整数，得 {limit!r}")
+    hardware = rule.get("hardware")
+    if not isinstance(hardware, str) or not hardware.strip():
+        raise ValueError("perf.shape_classification.hardware 须为非空字符串")
+    hardware = hardware.strip()
+    profile = _PERF_SHAPE_PROFILES.get(hardware)
+    if profile is None:
+        raise ValueError(
+            f"perf.shape_classification.hardware={hardware!r} 尚无受控大小 shape profile；"
+            "须先按目标硬件核定 UB 单次承载边界，不能由 spec 任意填写")
+    if metric != profile["metric"] or limit != profile["small_max_bytes"]:
+        raise ValueError(
+            f"{hardware} 大小 shape profile固定为 metric={profile['metric']!r}, "
+            f"small_max_bytes={profile['small_max_bytes']}，得 metric={metric!r}, "
+            f"small_max_bytes={limit!r}")
+    selection = perf.get("case_selection") or {}
+    if not isinstance(selection, dict):
+        raise ValueError("perf.case_selection 须为 object")
+    min_total_elements = selection.get("min_total_input_elements", 1)
+    if (isinstance(min_total_elements, bool) or not isinstance(min_total_elements, int)
+            or min_total_elements < 1):
+        raise ValueError(
+            "perf.case_selection.min_total_input_elements 须为 ≥1 的整数，"
+            f"得 {min_total_elements!r}")
+    max_cases = selection.get("max_cases")
+    if (max_cases is not None
+            and (isinstance(max_cases, bool) or not isinstance(max_cases, int)
+                 or max_cases < 1)):
+        raise ValueError(
+            f"perf.case_selection.max_cases 须为 ≥1 的整数或省略，得 {max_cases!r}")
+    include_precision_tags_declared = "include_precision_tags" in selection
+    include_precision_tags = selection.get("include_precision_tags") or []
+    if (not isinstance(include_precision_tags, list)
+            or any(not isinstance(tag, str) or not tag.strip()
+                   for tag in include_precision_tags)):
+        raise ValueError(
+            "perf.case_selection.include_precision_tags 须为非空字符串数组")
+    include_precision_tags = [tag.strip() for tag in include_precision_tags]
+    if len(set(include_precision_tags)) != len(include_precision_tags):
+        raise ValueError(
+            "perf.case_selection.include_precision_tags 不得含重复项")
+    selection_contract = {
+        "min_total_input_elements": int(min_total_elements),
+        "reason": "exclude_degenerate_inputs_without_comparable_device_kernel",
+    }
+    if max_cases is not None:
+        selection_contract["max_cases"] = int(max_cases)
+    if include_precision_tags_declared:
+        selection_contract["include_precision_tags"] = include_precision_tags
+    return {"case_source": source,
+            "case_selection": selection_contract,
+            "shape_classification": {
+                "metric": metric,
+                "small_max_bytes": int(limit),
+                "boundary": "small_if_input_bytes_lte_limit",
+                "hardware": hardware,
+            }}
+
+
+def _classify_perf_cases(spec, cases):
+    """按 spec 给性能 case 打「小shape/大shape」标签并返回 caseset 级账本。
+
+    输入载荷按各 input 的**物理存储 dtype**计字节；bf16 因 ``storage_dtype=uint16`` 按 2 bytes
+    计算。边界是闭区间：恰好 ``small_max_bytes`` 仍属小 shape。若声明 ``max_cases``，
+    只会从相同精度 caseset 按 dtype×shape class 轮转选子集；不会产生 ``trivial-met`` 或性能豁免。
+    """
+    policy = _perf_case_policy(spec)
+    if policy is None:
+        return None
+    rule = policy["shape_classification"]
+    limit = rule["small_max_bytes"]
+    def _load(case):
+        cid = case.get("id")
+        inputs = case.get("inputs")
+        if not isinstance(inputs, list) or not inputs:
+            raise ValueError(f"{cid}: 性能 case 缺 inputs，无法按输入载荷字节分类")
+        total = 0
+        total_elements = 0
+        for inp in inputs:
+            if not isinstance(inp, dict):
+                raise ValueError(f"{cid}: input 条目非 object，无法分类")
+            shape = inp.get("shape")
+            if (not isinstance(shape, list)
+                    or any(isinstance(d, bool) or not isinstance(d, int) or d < 0 for d in shape)):
+                raise ValueError(f"{cid}: input shape={shape!r} 非非负整数数组，无法分类")
+            logical_dtype = inp.get("dtype")
+            if not isinstance(logical_dtype, str):
+                raise ValueError(f"{cid}: input dtype={logical_dtype!r} 非字符串，无法分类")
+            storage_dtype = inp.get("storage_dtype") or _storage_name(logical_dtype)
+            try:
+                itemsize = int(np.dtype(storage_dtype).itemsize)
+            except TypeError as exc:
+                raise ValueError(
+                    f"{cid}: input storage dtype={storage_dtype!r} 无法换算字节数") from exc
+            input_elements = _numel(shape)
+            total_elements += input_elements
+            total += input_elements * itemsize
+        dtypes = sorted({i.get("dtype") for i in inputs
+                         if isinstance(i, dict) and isinstance(i.get("dtype"), str)})
+        return int(total_elements), int(total), "+".join(dtypes) if dtypes else "unknown"
+
+    # 先列出全部候选并计算分类，再按 (dtype,size) 队列 round-robin 取 max_cases。
+    # 选择只读 case 字段，不另造输入；最终仍复用原 precision case_id。
+    include_tags = policy["case_selection"].get("include_precision_tags", [])
+    min_total_elements = policy["case_selection"]["min_total_input_elements"]
+    eligible, excluded_degenerate_ids = [], []
+    for case in cases:
+        dims = case.get("dims") or []
+        tagged = bool(include_tags and set(case.get("tags") or []).intersection(include_tags))
+        if "性能" not in dims and not tagged:
+            continue
+        cid = case.get("id")
+        if "精度" not in dims:
+            raise ValueError(
+                f"{cid}: perf.case_source='precision_cases'，但性能候选的 dims 不含「精度」")
+        total_elements, total, dtype_key = _load(case)
+        if total_elements < min_total_elements:
+            case["perf_selection_exclusion"] = {
+                "reason": "degenerate_total_input_elements_below_minimum",
+                "total_input_elements": int(total_elements),
+                "min_total_input_elements": int(min_total_elements),
+            }
+            excluded_degenerate_ids.append(cid)
+            continue
+        size_class = "small" if total <= limit else "large"
+        eligible.append((case, total, dtype_key, size_class))
+
+    max_cases = policy["case_selection"].get("max_cases")
+    selected_set = None
+    if max_cases is not None and len(eligible) > max_cases:
+        queues = {}
+        for row in eligible:
+            queues.setdefault((row[2], row[3]), []).append(row)
+        ordered = [queues[key] for key in sorted(queues)]
+        positions = [0] * len(ordered)
+        chosen = []
+        while len(chosen) < max_cases:
+            progressed = False
+            for qi, queue in enumerate(ordered):
+                if positions[qi] >= len(queue):
+                    continue
+                chosen.append(queue[positions[qi]])
+                positions[qi] += 1
+                progressed = True
+                if len(chosen) == max_cases:
+                    break
+            if not progressed:
+                break
+        selected_set = {row[0]["id"] for row in chosen}
+
+    counts = {"small": 0, "large": 0}
+    selected_ids, excluded_precision_ids = [], []
+    by_dtype = {}
+    eligible_by_id = {row[0]["id"]: row for row in eligible}
+    for case in cases:
+        cid = case.get("id")
+        row = eligible_by_id.get(cid)
+        if row is None or (selected_set is not None and cid not in selected_set):
+            if "性能" in (case.get("dims") or []):
+                case["dims"] = [dim for dim in case["dims"] if dim != "性能"]
+            if "精度" in (case.get("dims") or []) and isinstance(cid, str):
+                excluded_precision_ids.append(cid)
+            if row is not None:
+                case["perf_selection_exclusion"] = {
+                    "reason": "balanced_max_cases_limit",
+                    "max_cases": int(max_cases),
+                    "balance_axes": ["dtype", "shape_class"],
+                }
+            continue
+        _case, total, dtype_key, size_class = row
+        dims = list(case.get("dims") or [])
+        if "性能" not in dims:
+            case["dims"] = dims + ["性能"]
+        label = "小shape" if size_class == "small" else "大shape"
+        tags = [t for t in (case.get("tags") or []) if t not in ("小shape", "大shape")]
+        case["tags"] = tags + [label]
+        case["perf_shape_classification"] = {
+            "class": size_class,
+            "input_bytes": int(total),
+            **rule,
+        }
+        counts[size_class] += 1
+        selected_ids.append(cid)
+        by_dtype[dtype_key] = by_dtype.get(dtype_key, 0) + 1
+    return {**policy, "counts": counts,
+            "selection": {
+                "identity_rule": "selected case_id is reused from the same precision caseset",
+                "selected_case_ids": selected_ids,
+                "excluded_precision_case_ids": excluded_precision_ids,
+                "excluded_degenerate_case_ids": excluded_degenerate_ids,
+                "selected_by_dtype": dict(sorted(by_dtype.items())),
+                "selected_total": len(selected_ids),
+                "precision_total": sum(1 for c in cases if "精度" in (c.get("dims") or [])),
+            }}
 
 
 def _assert_equal_nan_effective(golden_fn, inputs, attrs, cid):
@@ -543,6 +774,190 @@ def _case_profile_declared(spec):
     顺手把词表校验过一遍：单独调用本函数时非法值同样当场炸，不留「只问声明与否就绕过校验」的口子。"""
     _case_profile(spec)
     return "case_profile" in (spec.get("precision") or {})
+
+
+_TORCH_PARITY_AXIS_CLASSES = ("first_axis", "middle_axis", "last_axis")
+
+
+def _resolve_axis_class(value, rank, where):
+    """cannbot ``scalar_equivalence.values_by_rank`` 的紧凑等价表达。
+
+    first=0、middle=floor((rank-1)/2)、last=rank-1，与本地
+    ``case_design.json.coverage.attribute_domains.dim`` 的 rank1..8 表逐项相同。
+    普通标量原样返回，故非轴属性仍可与轴 class 组成显式 profile。
+    """
+    if not isinstance(value, dict) or "axis_class" not in value:
+        _check_attr_value(value, where)
+        return value
+    if set(value) != {"axis_class"} or value["axis_class"] not in _TORCH_PARITY_AXIS_CLASSES:
+        raise ValueError(
+            f"{where}.axis_class 须为 {list(_TORCH_PARITY_AXIS_CLASSES)}，得 {value!r}")
+    cls = value["axis_class"]
+    if cls == "first_axis":
+        return 0
+    if cls == "middle_axis":
+        return (rank - 1) // 2
+    return rank - 1
+
+
+def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost_fn):
+    """按 cannbot 冻结设计的轴模型生成完整笛卡尔矩阵。
+
+    配置位于 ``precision.torch_parity_matrix``，只在
+    ``case_profile=torch_parity`` 下消费：
+
+    * ``ranks``：完整 rank 轴；
+    * ``shape_profiles``：每档 ``leading_dim``，其余轴补 1；
+    * ``attribute_profiles``：显式属性 profile，轴属性可写
+      ``{"axis_class":"first_axis|middle_axis|last_axis"}``；
+    * ``generator``：当前只接受 cannbot Median 冻结设计使用的 uniform。
+
+    完整矩阵不受 1-wise/case_target 抽样；case_target 必须精确等于矩阵大小，
+    防止声明“1152 全覆盖”却静默只取 60 条。
+    """
+    cfg = (spec.get("precision") or {}).get("torch_parity_matrix")
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            "precision.case_profile='torch_parity' 时必须声明 "
+            "precision.torch_parity_matrix（不再沿用 legacy 造例规则）")
+    allowed = {"source", "source_sha256", "ranks", "shape_profiles",
+               "attribute_profiles", "generator"}
+    unknown = set(cfg) - allowed
+    if unknown:
+        raise ValueError(f"torch_parity_matrix 含未知字段 {sorted(unknown)}")
+    source, source_sha = cfg.get("source"), cfg.get("source_sha256")
+    if not isinstance(source, str) or not source:
+        raise ValueError("torch_parity_matrix.source 须为非空来源说明")
+    if not isinstance(source_sha, str) or len(source_sha) != 64:
+        raise ValueError("torch_parity_matrix.source_sha256 须为 64 位摘要")
+    try:
+        int(source_sha, 16)
+    except ValueError as ex:
+        raise ValueError("torch_parity_matrix.source_sha256 非十六进制摘要") from ex
+    ranks = cfg.get("ranks")
+    if not isinstance(ranks, list) or not ranks or len(ranks) != len(set(ranks)) \
+            or any(isinstance(r, bool) or not isinstance(r, int)
+                   or not (1 <= r <= _MAX_RANK) for r in ranks):
+        raise ValueError(f"torch_parity_matrix.ranks 须为 1..{_MAX_RANK} 的非空无重复整数列表")
+    declared_ranks = _allowed_ranks(in_params)
+    if declared_ranks is not None and set(ranks) != set(declared_ranks):
+        raise ValueError(
+            f"torch_parity_matrix.ranks={ranks} 与 in.rank={sorted(declared_ranks)} 不一致")
+    shapes = cfg.get("shape_profiles")
+    if not isinstance(shapes, list) or not shapes:
+        raise ValueError("torch_parity_matrix.shape_profiles 须为非空列表")
+    shape_rows, shape_names = [], set()
+    for i, row in enumerate(shapes):
+        if not isinstance(row, dict) or set(row) != {"name", "leading_dim"}:
+            raise ValueError(
+                f"shape_profiles[{i}] 须仅含 name/leading_dim")
+        name, leading = row["name"], row["leading_dim"]
+        if not isinstance(name, str) or not name or name in shape_names:
+            raise ValueError(f"shape_profiles[{i}].name 缺失或重复")
+        if isinstance(leading, bool) or not isinstance(leading, int) or leading < 1:
+            raise ValueError(f"shape_profiles[{i}].leading_dim 须为正整数")
+        shape_names.add(name)
+        shape_rows.append((name, leading))
+    profiles = cfg.get("attribute_profiles")
+    if not isinstance(profiles, list) or not profiles:
+        raise ValueError("torch_parity_matrix.attribute_profiles 须为非空列表")
+    attr_names = set(attrs_default)
+    normalized_profiles = []
+    profile_names = set()
+    for i, row in enumerate(profiles):
+        if not isinstance(row, dict) or set(row) != {"name", "attrs"}:
+            raise ValueError(f"attribute_profiles[{i}] 须仅含 name/attrs")
+        name, attrs = row["name"], row["attrs"]
+        if not isinstance(name, str) or not name or name in profile_names:
+            raise ValueError(f"attribute_profiles[{i}].name 缺失或重复")
+        if not isinstance(attrs, dict) or set(attrs) != attr_names:
+            raise ValueError(
+                f"attribute_profiles[{i}].attrs keys={sorted(attrs) if isinstance(attrs, dict) else attrs!r} "
+                f"须精确等于 attr 参数 {sorted(attr_names)}")
+        profile_names.add(name)
+        normalized_profiles.append((name, attrs))
+    generator = cfg.get("generator")
+    if not isinstance(generator, dict) or set(generator) != {"kind", "min", "max"} \
+            or generator.get("kind") != "uniform" \
+            or not all(isinstance(generator.get(k), (int, float))
+                       and not isinstance(generator.get(k), bool) for k in ("min", "max")) \
+            or generator["min"] >= generator["max"]:
+        raise ValueError(
+            "torch_parity_matrix.generator 当前须为 {kind:'uniform', min:<数>, max:<数>}")
+
+    expected = len(dtypes) * len(ranks) * len(shape_rows) * len(normalized_profiles)
+    if int(case_target) != expected:
+        raise ValueError(
+            f"torch_parity 完整矩阵大小={expected}，precision.case_target={case_target}；"
+            "两者必须相等，禁止静默抽样")
+    entries = []
+    for dtn in dtypes:
+        dk = _regular_data_kind(dtn, attrs_default, len(in_params))
+        for rank in ranks:
+            for shape_name, leading in shape_rows:
+                shape = (leading,) + (1,) * (rank - 1)
+                for attr_idx, (profile_name, raw_attrs) in enumerate(normalized_profiles):
+                    attrs = {
+                        key: _resolve_axis_class(
+                            value, rank,
+                            f"torch_parity_matrix.attribute_profiles[{attr_idx}].attrs.{key}")
+                        for key, value in raw_attrs.items()
+                    }
+                    if cost_fn is not None:
+                        cost = cost_fn(
+                            shape, attrs,
+                            f"torch_parity:{dtn}:rank{rank}:{shape_name}:{profile_name}")
+                        if cost > _cost_budget(spec):
+                            raise ValueError(
+                                f"torch_parity 冻结 shape {shape} 的 golden cost={cost} 超预算；"
+                                "完整矩阵禁止静默缩形/剔除")
+                    entries.append({
+                        "dims": ["功能", "精度", "性能"],
+                        "shape": shape,
+                        "dtype": dtn,
+                        "tags": ["torch_parity", shape_name, profile_name],
+                        "data_kind": f"{dk}:uniform",
+                        "id_kind": f"tp_r{rank}_{shape_name}_{profile_name}",
+                        "attrs": attrs,
+                        "attr_idx": attr_idx,
+                        "case_origin": (
+                            f"torch_parity:{dtn}:rank{rank}:{shape_name}:{profile_name}"),
+                        "rule_ref": (
+                            "cannbot case_design coverage.regular_axes × "
+                            "attribute_profile_matrix（完整笛卡尔）"),
+                    })
+    return entries, {
+        "pool_max": expected,
+        "requested_target": expected,
+        "emitted": expected,
+        "forced_special": 0,
+        "operator_class": _operator_class(spec),
+        "emits_nonfinite_specials": False,
+        "case_profile": "torch_parity",
+        "case_profile_declared": True,
+        "forced_total": expected,
+        "dropped_combo_classes": [],
+        "unpaired_combo_classes": {
+            "count": 0,
+            "classes": [],
+            "attr_values_never_emitted": [],
+        },
+        "attr_axis_lengths": {"declared": [], "emitted": 0, "items": [], "skipped": []},
+        "coverage_strength": (
+            "complete_cartesian：dtype×rank×shape_profile×attribute_profile 全覆盖"),
+        "golden_cost": ({
+            "budget": _cost_budget(spec), "model": _COST_MODEL,
+            "scaled_cases": [], "skipped_shapes": [], "skipped_shape_classes": 0,
+        } if cost_fn is not None else _empty_cost_ledger()),
+        "torch_parity_matrix": {
+            "source": cfg.get("source"),
+            "source_sha256": cfg.get("source_sha256"),
+            "ranks": list(ranks),
+            "shape_profiles": [dict(row) for row in shapes],
+            "attribute_profile_count": len(normalized_profiles),
+            "generator": dict(generator),
+        },
+    }
 
 
 # ============================ value_profile 受控数值生成（借参考仓 generate_array，op-中立）=========
@@ -1788,8 +2203,8 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
     强制项降规模、网格项剔除，全部记进 `meta["golden_cost"]`。`cost_fn=None`（如 dry-run 加载不到 golden.py）
     → **完全不行使**，行为与 G4 之前逐字节一致，且账本里 model 标「未核」而非谎称已核。
     CP：`spec.precision.case_profile` 在此**读一次**（词表外取值当场 fail-closed）并落进
-    `meta["case_profile"]` / `meta["case_profile_declared"]`。**本批只记账、不据它分任何支**——
-    对齐参考仓造例规则的改动排在批 B，届时一律 gate 在 `torch_parity`。"""
+    `meta["case_profile"]` / `meta["case_profile_declared"]`；`torch_parity` 进入完整矩阵，
+    `legacy` 保持原有 forced + 1-wise 行为。"""
     arity = len(in_params)
     ranks = _allowed_ranks(in_params)                    # C3：None=不限制（现行为）
     reg_shapes, large_shapes = _shape_ladder(ranks)      # 过滤后无合法常规 shape → 已 fail-closed
@@ -1809,12 +2224,15 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
     # OC：算子类别 → 特殊值口径（受控词表；未声明=None=现行为）。词表外取值在此当场 fail-closed。
     op_class = _operator_class(spec)
     emit_nonfinite = _emits_nonfinite(op_class)
-    # CP：造例档位（受控词表；未声明 = legacy = 现行为）。本批**只读出来记账、不改任何造例逻辑**——
-    # 对齐参考仓造例规则的改动全部排在批 B，且一律 gate 在 `torch_parity` 分支，legacy 侧字节不动。
+    # CP：造例档位（受控词表；未声明 = legacy = 现行为）。torch_parity 走完整矩阵，
+    # legacy 侧字节不动。
     # 在这里读（而不是各处现用现读）是为了「一次解析、一处 fail-closed」：词表外取值在此当场炸，
     # gen_cases 与 _dry_run 两条路径都经过 `_plan`，非法档位没有绕过口。
     case_profile = _case_profile(spec)
     case_profile_declared = _case_profile_declared(spec)
+    if case_profile == "torch_parity":
+        return _torch_parity_plan(
+            spec, in_params, dtypes, attrs_default, case_target, cost_fn)
     forced, grid = [], []
     # ① §1.4 特殊场景（每 dtype 强制；id_kind 独立命名空间，评审 #8）
     for dtn in dtypes:
@@ -1981,7 +2399,7 @@ def _uses_output_contract(spec):
     return precision_policy.uses_output_contract(spec)
 
 
-# ── aclnn 调用变体（仅 runner_form=="aclnn_py"；据 spec.call_variants **逐 case 解析**、op-中立）─────
+# ── ACLNN 调用变体（aclnn_py/cpp_extension 共用；据 spec.call_variants 逐 case 解析、op-中立）─────
 # 为什么不是「一份 op 级模板」（审计 finding #3）：同一个算子的不同 attr 取值可能对应**不同的 aclnn 符号**
 # 与**不同的实参表**（全局归约 vs 按维归约就是两个 API、两种输出 arity）。原先的 op 级模板让 driver 自己把
 # `dim=None` 兜成 `dim=0` —— 那既不是「全局」的语义，还可能与单输出签名对不上（越界写 / ABI 崩）。
@@ -2275,13 +2693,13 @@ def gen_cases(spec, work_dir):
     uses_multi = _uses_output_contract(spec)
     tol_src = _tolerance_source(spec)
     tol_tuple = _mo_taskdoc_tol(spec)
-    # aclnn 调用变体（finding #3）：`runner_form=="aclnn_py"` 的 caseset 每个 case 自带**完全解析好**的
+    # ACLNN 调用变体：ctypes 与官方 C++ Extension 两种执行形态共用逐 case 已解析调用契约。
     # `aclnn_call`，driver 不再自己推变体。变体表必填——没它就只能靠 driver 兜默认值，而兜出来的
     # `dim=0` 既不是全局语义、又可能与单输出签名不符（越界写 / ABI 崩）。
     variants = _call_variants(spec)
-    needs_aclnn_call = runner_form == "aclnn_py"
+    needs_aclnn_call = runner_form in ("aclnn_py", "cpp_extension")
     if needs_aclnn_call and not variants:
-        raise ValueError(f"{op}: runner_form=='aclnn_py' 但 spec 未声明 call_variants —— "
+        raise ValueError(f"{op}: runner_form={runner_form!r} 但 spec 未声明 call_variants —— "
                          f"aclnn 调用形态（符号/实参表/落地输出）必须由 spec 显式声明、逐 case 解析，"
                          f"不许下游兜默认值，fail-closed")
 
@@ -2447,6 +2865,7 @@ def gen_cases(spec, work_dir):
             legacy_case["aclnn_call"] = _build_aclnn_call(
                 spec, variant, attrs, _active_output_names(spec, variant, cid), cid)
         cases.append(legacy_case)
+    perf_case_policy = _classify_perf_cases(spec, cases)
     attr_order = [p["name"] for p in spec["params"] if p["io"] == "attr"]
     # Q7 dtype 覆盖门用：dtype_required=任务书权威全集（spec 透传，未声明则 None→门不阻塞）；
     # dtype_tested=实测子集，**从实际生成的 cases 归并**（非 in 参数并集——门也用真实 cases 对账，两侧口径一致、
@@ -2478,6 +2897,7 @@ def gen_cases(spec, work_dir):
             # 声明了就把「这批用例是按哪个造例档位产的」如实落进产物，报告侧不必回头猜。
             **({"case_profile": plan_meta["case_profile"]}
                if plan_meta["case_profile_declared"] else {}),
+            **({"perf_case_policy": perf_case_policy} if perf_case_policy is not None else {}),
             "cases": cases}
     # ⚠ 原先这里挂一份 **op 级** `aclnn_call_template`，由 driver 自己按 case 兜变体（`dim=None`→`dim=0`）——
     # 已被 finding #3 判为不合规并**整体替换**：调用形态现在逐 case 解析、写在 `case["aclnn_call"]` 里。
@@ -2493,6 +2913,7 @@ def _build_dry_run_ledger(spec, preparation_inputs=None):
     → 明说「未核」并照常出计划，**不阻塞**（那种 spec 到了 gen_cases 本来就会 fail-closed）。
     ⚠ 本仓 golden.py 约定 torch 延迟 import（见 `samples/golden/*/golden.py`），故此处仍不拉 torch；
     但若某算子在模块顶层 `import torch`，dry-run 会跟着 import ——这是加载用户代码的代价，如实记在这。"""
+    perf_case_policy = _perf_case_policy(spec)
     op = spec["op"]
     in_params = [p for p in spec["params"] if p["io"] == "in"]
     # 能力边界前置：三元算子 / dtype 双层能力门在 CP-B 就拦下，不拖到 CP-D（form 缺省 cpp）
@@ -2578,6 +2999,8 @@ def _build_dry_run_ledger(spec, preparation_inputs=None):
             "input_ranks": None if ranks is None else sorted(ranks),
             "golden_out_shape": "loaded" if _dry_out_shape_fn is not None else "not_available",
             "golden_cost_note": cost_why.strip(),
+            **({"perf_case_policy": perf_case_policy}
+               if perf_case_policy is not None else {}),
         },
         "golden_dependency": golden_dependency,
         "summary": {

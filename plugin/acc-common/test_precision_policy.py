@@ -74,6 +74,11 @@ class AscendOpTestDefaultTest(unittest.TestCase):
         out2 = np.array([np.inf, -np.inf, 5.0], dtype=np.float32)  # 第3位 nan vs 5.0 → 坏
         self.assertEqual(P.compute_metrics(out2, golden, pol)["bad_count"], 1)
 
+    def test_bfloat16_uses_logical_aot_row_with_fp32_storage_codec(self):
+        policy = P.threshold_for("ascendoptest_default", "bfloat16")
+        self.assertEqual(policy["tolerance"], 0.004)
+        self.assertEqual(policy["error_rate"], 0.004)
+
 
 class MereMareTest(unittest.TestCase):
     def test_mere_mean_mare_max_not_swapped(self):
@@ -245,7 +250,7 @@ class PassedWithRiskE2ETest(unittest.TestCase):
         shutil.rmtree(self.d, ignore_errors=True)
 
     def test_run_workflow_exit_2(self):
-        spec = {"op": "Sign", "repo": "ops-math", "hardware": ["Atlas A2"],
+        spec = {"op": "Sign", "repo": "ops-math", "hardware": ["Atlas A3"],
                 "reference": {"type": "tbe", "ref": "内置 TBE Sign"},
                 "change": {"kind": "add_dtype"}, "params_source": "derived_from_reference",
                 "params": [{"name": "self", "io": "in", "dtype": ["float32"]},
@@ -254,7 +259,12 @@ class PassedWithRiskE2ETest(unittest.TestCase):
                 "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default",
                               "acceptance_policy": {"standard": "ascendoptest_default",
                                                     "error_rate": 0.1}},
-                "perf": {"baseline": "tbe", "target_ratio": 1.0}}
+                "perf": {"baseline": "tbe", "target_ratio": 1.0,
+                         "case_source": "precision_cases",
+                         "shape_classification": {
+                             "metric": "sum_input_bytes",
+                             "small_max_bytes": 262144,
+                             "hardware": "Atlas A3"}}}
         spec_path = os.path.join(self.d, "sign_risk.spec.json")
         with open(spec_path, "w", encoding="utf-8") as f:
             json.dump(spec, f, ensure_ascii=False)
@@ -1154,15 +1164,25 @@ class IndexGuardTest(unittest.TestCase):
     def _run(self, a, g):
         return P.compute_metrics(a, g, self.POL, self.CTX)
 
-    def test_negative_index_rejected(self):
-        """⭐ 旧洞：actual index=-1 被 take_along_axis 回绕成最后一个元素 → mismatch=0 假通过。"""
-        with self.assertRaises(ValueError) as cm:
-            self._run(np.array([-1], np.int64), np.array([2], np.int64))
-        self.assertIn("越界", str(cm.exception))
+    def test_value_tolerance_derives_from_ascendoptest_policy(self):
+        self.assertEqual(
+            P._value_tol_of({
+                "kind": "ascendoptest_default",
+                "tolerance": 0.001,
+                "error_rate": 0.001,
+            }),
+            (0.001, 0.001))
 
-    def test_out_of_range_index_rejected(self):
-        with self.assertRaises(ValueError):
-            self._run(np.array([3], np.int64), np.array([0], np.int64))
+    def test_negative_index_is_explicit_failed_metric(self):
+        """⭐ actual index=-1 不回绕，也不炸掉整轮证据；落成明确非零 mismatch。"""
+        metrics = self._run(np.array([-1], np.int64), np.array([2], np.int64))
+        self.assertEqual(metrics["mismatch"], 1)
+        self.assertEqual(metrics["invalid_index_count"], 1)
+
+    def test_out_of_range_index_is_explicit_failed_metric(self):
+        metrics = self._run(np.array([3], np.int64), np.array([0], np.int64))
+        self.assertEqual(metrics["mismatch"], 1)
+        self.assertEqual(metrics["invalid_index_count"], 1)
 
     def test_float_index_rejected(self):
         """⭐ 旧洞：`[0.9]` 被 astype(intp) 静默截成 `[0]`。"""
@@ -1391,13 +1411,15 @@ class MultiOutputAcceptanceContractTest(unittest.TestCase):
         # index 的 acceptance 容差 == 所引 value 输出的 acceptance 容差（不是 standard 层的）
         self.assertAlmostEqual(accs[1]["policy"]["value_rtol"], accs[0]["policy"]["rtol"])
 
-    def test_unsupported_acceptance_kind_for_index_fail_closed(self):
-        """acceptance 底是 ascendoptest_default → index 取不出 (rtol,atol) → **拒**，绝不静默退回 standard。"""
+    def test_ascendoptest_acceptance_index_inherits_canonical_tolerance(self):
+        """AOT acceptance 的 index 值一致性复用 canonical tolerance，不退回 standard 层。"""
         spec = _median_spec()
         spec["precision"]["acceptance_policy"] = {"standard": "ascendoptest_default"}
         cts = P.derive_output_contracts(spec, [("self", "float32")], "torch_allclose", "dtype_table")
-        with self.assertRaises(ValueError):
-            P.derive_acceptance_contracts(spec, cts)
+        accs = P.derive_acceptance_contracts(spec, cts)
+        tolerance = accs[0]["policy"]["tolerance"]
+        self.assertEqual(accs[1]["policy"]["value_rtol"], tolerance)
+        self.assertEqual(accs[1]["policy"]["value_atol"], tolerance)
 
     def test_int_value_output_inherits_standard(self):
         """int32 → 有效标准 exact（阈值已是 0，没有可放宽的 acceptance）→ 该输出 acceptance 继承 standard。"""

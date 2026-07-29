@@ -938,11 +938,27 @@ def _diag_ref(path):
 PERF_PLAN_FILE = "_perf_plan.json"
 #: 采集端产物（容器内 perf_msprof 落 → 拉回 work/）。
 PERF_COLLECT_FILE = "perf_collect.json"
-#: 供 run_workflow 的 `_REAL_BASELINE_SOURCES["torch_npu"]` 消费的真基线文件名。
-TORCH_NPU_BASELINE_FILE = "_torch_npu_baseline.json"
+#: 供 run_workflow 的 `_REAL_BASELINE_SOURCES` 消费的真基线文件名（按 spec 字段分派）。
+BASELINE_FILES = {
+    "torch_npu": "_torch_npu_baseline.json",
+    "aclnn_builtin": "_aclnn_builtin_baseline.json",
+}
+
+#: 性能采集是「全部 case × custom/baseline」的一次整轮进程。固定 1200s 在 50-case、
+#: warmup=5/repeat=20 的真实 A3 路径上会于末尾前杀掉整轮，导致已经完成的逐 case 结果也来不及落盘。
+#: 默认按 case 数扩展；仍由外层 7200s 总护栏和显式 OPRUNWAY_ACLNN_PERF_TIMEOUT 约束。
+_PERF_TIMEOUT_MIN_S = 1200
+_PERF_TIMEOUT_PER_CASE_S = 60
 
 
-def _perf_script(cfg, paths):
+def _default_perf_timeout_s(case_count):
+    """整轮默认硬超时：至少 20min，每个实际选中性能 case 预算 60s。"""
+    if not isinstance(case_count, int) or isinstance(case_count, bool) or case_count < 0:
+        raise ValueError(f"性能 case_count 须为非负整数，得 {case_count!r}")
+    return max(_PERF_TIMEOUT_MIN_S, case_count * _PERF_TIMEOUT_PER_CASE_S)
+
+
+def _perf_script(cfg, paths, default_timeout_s=_PERF_TIMEOUT_MIN_S):
     """组装容器内 **msprof 性能采集** 一段 shell（`python -m aclnn_runtime.perf_msprof`）。
 
     与 exec 共用运行时 env 前置段；另置 `OPRUNWAY_ACLNN_REAL=1`——采集模块自己有真机 gate
@@ -958,10 +974,15 @@ def _perf_script(cfg, paths):
     # ⚠ 桥接护栏（op-中立，同精度侧 `_exec_script`）：perf 采集也是「所有 case 同进程同 runner 同步
     # native 调用」结构，同样有单 case 卡死拖垮整轮的风险，且本地侧 `RA._shell(..., timeout=7200)` 会
     # 干等 2 小时。`timeout -k 30 <N>` 远端硬超时 → 退 124 → 走 `||` 干净 fail-closed。perf 每 case 有
-    # warmup×repeat（默认 5+20），比精度慢 → 默认窗更宽（1200s），可经 env 覆盖。per-case 隔离由监督式 worker 承。
+    # warmup×repeat（默认 5+20），比精度慢 → 默认窗据实际选中 case 数扩展，可经 env 覆盖。
+    # per-case 隔离由监督式 worker 承。
+    if (not isinstance(default_timeout_s, int) or isinstance(default_timeout_s, bool)
+            or default_timeout_s < _PERF_TIMEOUT_MIN_S):
+        raise ValueError(
+            f"default_timeout_s 须为 >= {_PERF_TIMEOUT_MIN_S} 的整数，得 {default_timeout_s!r}")
     tmpl = _ENV_PREAMBLE + (
         'export OPRUNWAY_ACLNN_REAL=1\n'
-        'timeout -k 30 "${OPRUNWAY_ACLNN_PERF_TIMEOUT:-1200}" '
+        'timeout -k 30 "${OPRUNWAY_ACLNN_PERF_TIMEOUT:-@@PERF_TIMEOUT@@}" '
         'python -m aclnn_runtime.perf_msprof @@CASESET@@ @@PLAN@@ @@OUT@@ --work-dir @@RCASES@@ '
         '&& echo OPRUNWAY_ACLNN_PERF_DONE || { echo OPRUNWAY_ACLNN_PERF_FAIL; exit 5; }\n')
     repl = {"@@SETENV@@": q(cfg["setenv"]), "@@VENDOR_DIR@@": q(cfg["vendor_dir"]),
@@ -969,7 +990,8 @@ def _perf_script(cfg, paths):
             "@@CASESET@@": q(paths["rcases"] + "/caseset.json"),
             "@@PLAN@@": q(paths["rcases"] + "/" + PERF_PLAN_FILE),
             "@@OUT@@": q(paths["rout"] + "/" + PERF_COLLECT_FILE),
-            "@@RCASES@@": q(paths["rcases"])}
+            "@@RCASES@@": q(paths["rcases"]),
+            "@@PERF_TIMEOUT@@": str(default_timeout_s)}
     return _render(tmpl, repl)
 
 
@@ -1032,6 +1054,10 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
 
     host = cfg["host"]
     notes = []
+    baseline_source = plan.get("baseline")
+    if baseline_source not in BASELINE_FILES:
+        raise ValueError(
+            f"perf plan baseline 须为 {sorted(BASELINE_FILES)}，得 {baseline_source!r}")
     # ① 精度先筛：只对**已过精度**的 case 测性能（算错的快不算快）。judge 复用 validator 那一套。
     try:
         pass_ids = PM.accuracy_pass_ids(evidence_list)
@@ -1041,10 +1067,12 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
     selected, skipped = PM.select_perf_cases(caseset, pass_ids)
     if not selected:
         notes.append("无可测性能的用例（无「性能」维用例，或全部未过精度先筛）")
-        return {}, PM.build_baseline_document([], op=caseset.get("op"), skipped=skipped), notes
+        return {}, PM.build_baseline_document(
+            [], op=caseset.get("op"), skipped=skipped, source=baseline_source), notes
 
     # ② 上送 plan（含 torch 基线调用映射；缺映射 → 采集端 fail-closed，不猜 torch 形参）。
     remote_plan = {"op": caseset.get("op"),
+                   "baseline": baseline_source,
                    "warmup": int(plan.get("warmup", PM.DEFAULT_WARMUP)),
                    "repeat": int(plan.get("repeat", PM.DEFAULT_REPEAT)),
                    "device": int(cfg["device"]),
@@ -1068,6 +1096,7 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
                    # 取值走 _plan_bool（只认真 bool）——**别退回 `bool(...)`**：那会把 "false"/"0" 判成开。
                    "allow_builtin_symbols": _plan_bool(plan, "allow_builtin_symbols"),
                    "torch_baseline": plan.get("torch_baseline"),
+                   "aclnn_baseline": plan.get("aclnn_baseline"),
                    "cases": selected, "skipped": skipped}
     plan_local = os.path.join(work, "_aclnn_perf_plan_sent.json")
     with open(plan_local, "w", encoding="utf-8") as f:
@@ -1075,7 +1104,8 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
     RA._copy_to(host, plan_local, paths["rcases"] + "/" + PERF_PLAN_FILE, timeout=120)
 
     # ③ 容器内采集（单独一段 shell：FAIL 先解耦 root-cause 再归因——采集失败 ≠ 精度通路失败）。
-    script = _perf_script(cfg, paths)
+    script = _perf_script(
+        cfg, paths, default_timeout_s=_default_perf_timeout_s(len(selected)))
     rp = RA._shell(host, script, timeout=7200, check=False, capture=True)
     blob = (rp.stdout or "") + (rp.stderr or "")
     if rp.returncode != 0 or "OPRUNWAY_ACLNN_PERF_DONE" not in blob:
@@ -1089,7 +1119,8 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
                      f" OPRUNWAY_ACLNN_PERF_TIMEOUT 到点被 kill、其余=python 侧失败；"
                      f"精度证据不受影响；性能一律 us=None → perf_compare 挂起，不冒充达标）。"
                      f"{_op_dir_note(cfg, paths, plan)}{_diag_ref(full)}\n{tail}")
-        return {}, PM.build_baseline_document([], op=caseset.get("op"), skipped=skipped), notes
+        return {}, PM.build_baseline_document(
+            [], op=caseset.get("op"), skipped=skipped, source=baseline_source), notes
 
     # ④ 拉回采集结果 → 组 custom us map + torch_npu 基线文档。
     local_collect = os.path.join(work, PERF_COLLECT_FILE)
@@ -1101,7 +1132,8 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
     custom_map = PM.build_custom_perf_map(records, skipped=skipped)
     baseline = PM.build_baseline_document(records, op=caseset.get("op"),
                                           warmup=remote_plan["warmup"],
-                                          repeat=remote_plan["repeat"], skipped=skipped)
+                                          repeat=remote_plan["repeat"], skipped=skipped,
+                                          source=baseline_source)
     return custom_map, baseline, notes
 
 
@@ -1295,10 +1327,15 @@ def run_aclnn_py(caseset, work, defect_cases=None):
     # 把采到的 us 回填进已组好的 evidence（perf 与精度判定完全解耦，回填不影响任何精度字段）。
     for item in evidence:
         item["perf"] = RA._perf_entry(item.get("case_id"), custom_map)
-    with open(os.path.join(work, TORCH_NPU_BASELINE_FILE), "w", encoding="utf-8") as f:
+    baseline_source = plan.get("baseline")
+    baseline_file = BASELINE_FILES.get(baseline_source)
+    if baseline_file is None:
+        raise ValueError(
+            f"perf plan baseline 须为 {sorted(BASELINE_FILES)}，得 {baseline_source!r}")
+    with open(os.path.join(work, baseline_file), "w", encoding="utf-8") as f:
         json.dump(baseline_doc, f, ensure_ascii=False, indent=2)
     envelope["perf_collection"] = {
-        "collected": True, "baseline_file": TORCH_NPU_BASELINE_FILE,
+        "collected": True, "baseline_source": baseline_source, "baseline_file": baseline_file,
         "timed_cases": len(baseline_doc.get("per_case") or []),
         "excluded": baseline_doc.get("excluded") or [], "notes": notes}
     for n in notes:

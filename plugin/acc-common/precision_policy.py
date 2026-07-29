@@ -277,14 +277,18 @@ def derive_output_dtype(spec, case_input_dtypes):
 def _value_tol_of(policy):
     """从一个 value 输出的 canonical policy 取 (rtol, atol)，供 index 输出的 value_consistency 复用。
 
-    torch_allclose → (rtol, atol)；exact（int/bf16 逐位）→ (0.0, 0.0)。其余 kind fail-closed（域外、不硬塞）。"""
+    torch_allclose → (rtol, atol)；ascendoptest_default 的 canonical tolerance 同时作为
+    relative/absolute 单点界；exact（int/bf16 逐位）→ (0.0, 0.0)。其余 kind fail-closed。"""
     kind = policy.get("kind")
     if kind == TORCH_ALLCLOSE:
         return float(policy["rtol"]), float(policy["atol"])
+    if kind == ASCENDOPTEST_DEFAULT:
+        tolerance = float(policy["tolerance"])
+        return tolerance, tolerance
     if kind == EXACT:
         return 0.0, 0.0
     raise ValueError(f"index_value_consistency 无法从 value 输出 policy.kind={kind!r} 取容差"
-                     f"（仅 value 输出为 torch_allclose / exact 时可派生 index 判据）")
+                     f"（仅 value 输出为 torch_allclose / ascendoptest_default / exact 时可派生 index 判据）")
 
 
 def derive_output_contracts(spec, case_input_dtypes, spec_standard,
@@ -708,7 +712,10 @@ def threshold_for(standard, dtype, tolerance_source=None, taskdoc_tol=None):
     if standard == ASCENDOPTEST_DEFAULT:
         if dtype not in _AOT_TABLE:
             raise ValueError(f"ascendoptest_default 无 dtype={dtype!r} 阈值（表={list(_AOT_TABLE)}）")
-        _check_compute_supported(dtype)
+        # logical bf16 由 caseset/driver 以 uint16 输入、fp32 比较产物承载；policy 仍须使用
+        # AscendOpTest 的 bfloat16 行，不能因 numpy 无原生 bf16 dtype 而误拒。
+        if dtype != "bfloat16":
+            _check_compute_supported(dtype)
         tol, err, legacy = _AOT_TABLE[dtype]
         return {"kind": ASCENDOPTEST_DEFAULT, "tolerance": tol, "error_rate": err,
                 "eps": _AOT_EPS, "legacy": legacy, "not_settled": False}
@@ -1115,6 +1122,18 @@ def _gather_along_dim(src, idx, dim, keepdim):
     return np.squeeze(gathered, axis=d)
 
 
+def _index_out_of_bounds_count(src, idx, dim):
+    """统计 actual index 越界元素；维度契约错误仍抛出，数值坏点交 judge 明确判 FAIL。"""
+    import numpy as np
+    src = np.asarray(src)
+    idx = np.asarray(idx)
+    d = dim if dim >= 0 else dim + src.ndim
+    if not (0 <= d < src.ndim):
+        raise ValueError(f"index_value_consistency dim={dim} 越界（源 ndim={src.ndim}）")
+    limit = int(src.shape[d])
+    return int(np.count_nonzero((idx < 0) | (idx >= limit)))
+
+
 def compute_metrics(out, golden, policy, gather_ctx=None):
     """采集层复算误差分布（numpy，惰性 import）——**只量误差、不判 pass/fail**（judge 在 validator）。
 
@@ -1217,8 +1236,15 @@ def compute_metrics(out, golden, policy, gather_ctx=None):
                              f"不做隐式归一）——fail-closed")
         rtol = _checked_tol(policy["value_rtol"], "policy.value_rtol")
         atol = _checked_tol(policy["value_atol"], "policy.value_atol")
-        ga = _gather_along_dim(src, ia, dim, keepdim).astype(np.float64)
+        # golden 是任务书授权 oracle 产物，非法仍属证据/契约错误并抛出；actual 是 DUT 数值输出，
+        # 越界须形成可落盘、可复算的明确 FAIL metrics，不能让整轮报告因 numpy gather 异常消失。
         gg = _gather_along_dim(src, ig, dim, keepdim).astype(np.float64)
+        invalid = _index_out_of_bounds_count(src, ia, dim)
+        if invalid:
+            return {"mismatch": int(ig.size), "numel": int(ig.size),
+                    "gathered_max_abs_err": 0.0,
+                    "invalid_index_count": invalid}
+        ga = _gather_along_dim(src, ia, dim, keepdim).astype(np.float64)
         # 与 value 路径**同一个实现**（finding #3）：inf 四象限一致、equal_nan 语义一致。
         close, diff = _allclose_close_mask(ga, gg, rtol, atol, True)
         finite = np.isfinite(diff)

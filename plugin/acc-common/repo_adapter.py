@@ -164,6 +164,9 @@ SUPPORTED_NP_BY_FORM = {
     "aclnn_py": {"float32": np.float32, "float16": np.float16, "bfloat16": np.float32,
                  "int64": np.int64, "int32": np.int32, "int16": np.int16,
                  "int8": np.int8, "uint8": np.uint8, "bool": np.bool_},
+    "cpp_extension": {"float32": np.float32, "float16": np.float16, "bfloat16": np.float32,
+                      "int64": np.int64, "int32": np.int32, "int16": np.int16,
+                      "int8": np.int8, "uint8": np.uint8, "bool": np.bool_},
 }
 
 # runner_form → **真机尚未实现、但生成期允许先造用例**的 dtype（Track C 挂账集；U3）。
@@ -178,6 +181,7 @@ SUPPORTED_NP_BY_FORM = {
 DEFERRED_NP_BY_FORM = {
     "cpp": frozenset({"int16", "int32"}),
     "aclnn_py": frozenset(),
+    "cpp_extension": frozenset(),
 }
 if set(DEFERRED_NP_BY_FORM) != set(SUPPORTED_NP_BY_FORM):
     # 两表 key 必须同步：新增 runner_form 只改一张表，另一张就会**静默**按缺省处理（挂账集空 / 未知 form）。
@@ -279,7 +283,7 @@ def _read_out_bin(out_dir, produced_out):
     return arr.reshape(shp) if shp else arr
 
 
-_PERF_PENDING_NOTE = "aclnn_py perf 未采集（未设 OPRUNWAY_ACLNN_PERF=1 或采集端未接通）→ us=None"
+_PERF_PENDING_NOTE = "性能未采集（精度总门未过、未启用真机采集或采集端未接通）→ us=None"
 
 
 def _perf_entry(cid, perf_by_case):
@@ -444,8 +448,8 @@ def _finite_pos_us(x):
             and math.isfinite(x) and x > 0)
 
 
-def parse_torch_npu_baseline(path):
-    """解析 torch_npu 基线 JSON → perf_compare 可吃的 baseline（**源无关**，perf_compare 逻辑零改）。
+def parse_device_baseline(path, expected_source):
+    """解析同机 device 基线 JSON → perf_compare 可吃的 baseline（源无关、fail-closed）。
 
     蓝图 §2.5/§3 组件⑤：torch-对标场景的基线 = **同一台真机上 torch_npu 跑同一份 torch reference** 的
     kernel-only 耗时（真机内基线、非 GPU 外部数据）。文件由
@@ -463,13 +467,16 @@ def parse_torch_npu_baseline(path):
     with open(path, encoding="utf-8") as f:
         bl = json.load(f)
     if not isinstance(bl, dict):
-        raise ValueError(f"torch_npu 基线须为 JSON object，得 {type(bl).__name__}")
+        raise ValueError(f"{expected_source} 基线须为 JSON object，得 {type(bl).__name__}")
+    if bl.get("source") != expected_source:
+        raise ValueError(
+            f"基线 source={bl.get('source')!r} ≠ spec 期望 {expected_source!r}——拒（fail-closed）")
     if bl.get("scope") != "kernel_only":
-        raise ValueError(f"torch_npu 基线 scope 须为 kernel_only（得 {bl.get('scope')!r}）——"
+        raise ValueError(f"{expected_source} 基线 scope 须为 kernel_only（得 {bl.get('scope')!r}）——"
                          f"口径不一致的基线不可比，拒（fail-closed）")
     raw = bl.get("per_case")
     if not isinstance(raw, list):
-        raise ValueError("torch_npu 基线缺/坏 per_case（须 list）")
+        raise ValueError(f"{expected_source} 基线缺/坏 per_case（须 list）")
     per, notes, seen = [], [], set()
     for r in raw:
         if not isinstance(r, dict) or not isinstance(r.get("case_id"), str) or not r["case_id"]:
@@ -477,26 +484,59 @@ def parse_torch_npu_baseline(path):
             continue
         cid = r["case_id"]
         if cid in seen:
-            raise ValueError(f"torch_npu 基线有重复 case_id={cid!r}——拒（取哪一份不可知）")
+            raise ValueError(f"{expected_source} 基线有重复 case_id={cid!r}——拒（取哪一份不可知）")
         seen.add(cid)
         if not _finite_pos_us(r.get("us")):
             notes.append(f"{cid}: 基线 us={r.get('us')!r} 非有限正数 → 不计入基线")
             continue
-        item = {"case_id": cid, "us": float(r["us"]), "env": r.get("env") or "torch_npu msprof"}
+        item = {"case_id": cid, "us": float(r["us"]),
+                "env": r.get("env") or f"{expected_source} msprof"}
         if r.get("execution_path") is not None:
             item["execution_path"] = r["execution_path"]
+        provenance = r.get("runtime_provenance")
+        if expected_source == "aclnn_builtin":
+            if not isinstance(provenance, dict):
+                raise ValueError(f"{cid}: aclnn_builtin 基线缺 runtime_provenance——拒（fail-closed）")
+            required = provenance.get("required_symbol_lib")
+            symbols = provenance.get("symbols")
+            if (not isinstance(required, dict)
+                    or not isinstance(required.get("path"), str)
+                    or not isinstance(required.get("sha256"), str)
+                    or len(required["sha256"]) != 64):
+                raise ValueError(
+                    f"{cid}: aclnn_builtin 基线缺指定库 path/sha256 指纹——拒（fail-closed）")
+            if (not isinstance(symbols, list) or len(symbols) != 2
+                    or any(s.get("source") != "required_symbol_lib"
+                           or s.get("defining_lib") != required["path"] for s in symbols
+                           if isinstance(s, dict))
+                    or any(not isinstance(s, dict) for s in symbols)):
+                raise ValueError(
+                    f"{cid}: aclnn_builtin 两段式符号未完整证明由指定 libopapi.so 定义——"
+                    f"拒（fail-closed）")
+        if provenance is not None:
+            item["runtime_provenance"] = provenance
         per.append(item)
     for ex in bl.get("excluded") or []:
         if isinstance(ex, dict):
-            notes.append(f"{ex.get('case_id')}: 无有效 torch_npu 基线（behavior={ex.get('behavior')!r}，"
+            notes.append(f"{ex.get('case_id')}: 无有效 {expected_source} 基线（behavior={ex.get('behavior')!r}，"
                          f"{ex.get('reason')}）")
-    out = {"source": "torch_npu", "scope": "kernel_only", "per_case": per,
-           "baseline_source": "torch_npu"}
+    out = {"source": expected_source, "scope": "kernel_only", "per_case": per,
+           "baseline_source": expected_source}
     if bl.get("collection") is not None:
         out["collection"] = bl["collection"]
     if notes:
         out["notes"] = notes
     return out
+
+
+def parse_torch_npu_baseline(path):
+    """兼容入口：解析 torch_npu 同机基线。"""
+    return parse_device_baseline(path, "torch_npu")
+
+
+def parse_aclnn_builtin_baseline(path):
+    """解析任务书点名、由 CANN 内置 libopapi.so 直接执行的 ACLNN 基线。"""
+    return parse_device_baseline(path, "aclnn_builtin")
 
 
 # ── 输出形状：显式声明优先，缺省退回「输出 = 各输入广播结果」（契约 C1 的下游）────────────────────
@@ -1305,6 +1345,15 @@ try:
     MODES.update(ACLNN_MODES)
 except Exception as _ex2:                   # 缺件不阻塞库用法（aclnn_py mode 届时不可用、其余照跑）
     _ACLNN_IMPORT_ERR = _ex2
+
+
+# --- 官方 torch_npu C++ Extension adapter：独立于 cpp/new_example 与 aclnn_py/ctypes ---
+_CPP_EXTENSION_IMPORT_ERR = None
+try:
+    from cpp_extension_adapter import CPP_EXTENSION_MODES  # noqa: E402
+    MODES.update(CPP_EXTENSION_MODES)
+except Exception as _ex3:
+    _CPP_EXTENSION_IMPORT_ERR = _ex3
 
 
 def main(argv):

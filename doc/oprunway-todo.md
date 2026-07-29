@@ -1,5 +1,23 @@
 # OpRunway 施工 TODO（离「通用算子验收工具」还差的）
 
+## ✅ Median 性能口径与 A3 验收已闭环（2026-07-27）
+
+- [x] 直接按任务书采用同机 `torch_npu:torch.median` 作为小算子拼接 baseline；用户已确认语义等价，
+  不再追加包装等价性证明。
+- [x] 性能 case 从同一份 60 例精度 caseset 选择；单元素退化点保留精度、以通用
+  `min_total_input_elements=2` 移出性能，最终性能 40 例。
+- [x] A3 按全部输入物理载荷 `<= 256 KiB` / `> 256 KiB` 分 small/large，分类仅用于统计、全部真实采集。
+- [x] 最终精度 60/60 PASS；性能 40/40 有效、40/40 达到 `ratio >= 1.0`；Task 1/2/3 全部通过，
+  `acceptance.json` 为 PASS。
+- [x] small 14/14、聚合 speedup 5.3846；large 26/26、8.4507；shape overall 40/40、3.4817；
+  逐 case 最低 speedup 1.7459。
+- [x] PR 隔离源码三个优化检查点保留；已用最终二进制完成全量精度和性能复验，不应按旧 C++ Extension
+  方案建议回退。
+- [x] A3 容器全量回归 1505 passed / 10 skipped / 474 subtests；本用户 `/tmp` 旧临时数据已清理，
+  未影响其他用户。
+
+> 后续只剩发布动作：选择性整理本轮 commit，push 前按仓规做统一审修；没有新的 Median 验收阻塞项。
+
 > **现状（2026-07-22 更新）**：Wave 1–3 经 **PR #3**、**PR #6**（V1/Q1 + Q9 + Q7 + cases50 + 真机 opp provenance 绑源 + IsClose bf16 转 tested）、**PR #7**（**runner 去引擎化**：runner 移出引擎作输出、`find_runner` fallback 退役 fail-closed）先后合入 main（PR #7 合入时 main = `b727d6f`，GitHub + GitCode 双镜像同 OID；**PR #8 合入后当前 main = `1d2bb3a`**，GitCode 镜像见下）。
 > **PR #8 已合入 main**（2026-07-22，merge commit `1d2bb3a`；分支 `feat/golden-out-of-engine`，8 commit / 25 文件）：**golden 去引擎化**——`gen_cases` 的 `GOLDEN` 硬表改 `load_golden(op)` 按算子加载器 + golden 来源契约扩六枚举 + ADR 0011（proposed）+ **来源契约批 1**（`0192e49`，见下「🔴 下一刀」）。⏳ **GitCode 镜像尚未同步**。
 > 编排升级 / 精度双标准 / 性能小 shape + GPU consumer / dtype 扩面 / catlass adapter / P2 原子化分发 **均已落地**，`acc-common` 的 unittest 覆盖：**合入前 main 486 个** · **现 main 523 个**（486 → 490 是 +4 golden 加载器的 fail-closed 真测、490 → 516 是 +26 批 1 的派生表穷举与授权核验测、516 → 523 是 +7 目录段软链洞的回归；三者均在 a3 容器全绿。含判定链、三级门、适配器与脚本、provenance 回归、对抗负例）。
@@ -141,7 +159,7 @@
 - [x] **真机 blocker 已解（2026-07-16）**：根因非环境坏、是 **run_on_npu.sh 每次 fresh 都重建 op**（对 isclose 的 experimental/op 名路径不适用 + `rm -rf $OPP` 毁 opp）→ 修「用户态 opp 已建则复用、只建 runner_exe」；另修 isclose runner 第二道解析处 dtype 关卡漏补 bf16。真机彻底解封（完整 3-dtype 50 用例 Task2 全 pass、三门 PASSED）。
 - [x] **✅ 真机 opp provenance 绑定已落地（2026-07-16 续，bf16 已转 tested）**：`run_on_npu.sh` 重写 provenance 机制——OPHASH 绑**真实 op 源** `$OPS/$OPRUNWAY_OP_SRC`（必填、相对仓、安全路径校验）；opp 落独立 stamp `.oprunway_opp_provenance`（`op_src|ophash|soc|vendor|build`）；顶层门：缺 opp→建、stamp 全字段符→复用、不符/缺失→**fail-closed 拒复用**（exit 4）除非 `OPRUNWAY_OPP_REBUILD=1` 授权从源重建；源不存在→exit 3；build 失败/无 .run→exit 5。`repo_adapter._ne_cfg` 加 `op_src`(必填+安全校验)/`opp_rebuild` 透传。**查修一个致命 bug**：脚本漏 `OP_SRC="$OPRUNWAY_OP_SRC"` 短名桥接→`$OP_SRC` 恒空→绑整仓 hash 且没走 `--experimental`（异源）；补一行后真机坐实。**a3 CANN 9.0.1 容器 provenance-clean 从 `experimental/math/is_close`(A2/A3 正源) 重建**：stamp ophash 与真源逐字节 sha256 一致、Task2 pass(27 用例含 9 bf16、0 fail)、三门 PASSED、fail-closed 三情形(exit3/4/复用不重建)实测过 → **isclose spec bf16 转 tested**。487 单测全绿。（int32 仍 Track C；msprof 跳 trivial 见下条。）
 - [x] **GPU 标杆 trivial 豁免**（fork finding #4/reviewer #2/codex #4，**已做**）：`gpu_baseline.parse_gpu_baseline` 改为只要求覆盖**非 trivial**（numel≥4096）性能 case、trivial 宽容忽略（不当 extra）；GPU 标杆逐 trivial case 给数不现实的问题消除。
-- [ ] **follow-up · 真机 msprof 跳 trivial**（真机跑观察）：`run_on_npu.sh` / `perfcases_list.txt` 现对**全部** perf 用例逐个 msprof（custom+TBE 各一），含 trivial 退化 case；50 用例真机跑 ~15-20min。perf_compare 已 trivial-met 免测，故 msprof 也应只测非 trivial 大 shape（perfcases_list 排除 trivial）→ 大幅提速。非阻塞。
+- [x] **取消 · 真机 msprof 跳 trivial**：旧提议建立在 `numel < 4096 → trivial-met` 自动免测规则上；该规则已于 2026-07-26 从 `perf_compare.py`、GPU baseline 和完整性门彻底移除。所有性能 case 必须真实采集，禁止通过跳过小 case 缩短真机时间。
 - **codex 源码门（一轮）修的 4 项**：广播 numel 蒙混 trivial（`_case_numel`/gate/gpu 改按全输入 broadcast 输出算）· inf/nan 补「性能」维（v2 非空皆带性能）· `perf_min_numel` 覆盖删→固定 4096（防 compare↔gate 阈值不一致+类型崩）· 「真空」严格判定（拒 `shape:[false]/[0.0]` 伪造，validator+gate_task1+gate_task2 三处共用、Task2 独立复核）。
 - [ ] **follow-up · equal_nan 有效性**（deviation #4）：§1 不产 nanpair、`_assert_equal_nan_effective` 不再触发；equal_nan T/F 结构覆盖 + NaN §1.4 覆盖但未**交集**证明（aligned-NaN 翻转）。minor。
 
@@ -593,6 +611,19 @@
 7. **泛化到 catlass + 其余仓**：✅ catlass adapter 代码落地；⏳ 真机待 950；**其余 11 仓未做**。
 8. ✅ **发布形态定稿**：用户逐条拍板——插件继续作为主仓 `plugin/` 子目录（不拆独立 repo）、插件名维持 `oprunway`、skills 向 `awesome-ascend-skills` 的 external-sync **「很久以后」**、`init.sh` 跨 CLI 扇出保留。⏳ 待 `bureau:review` promote 成 `canonical`（当前 `proposed`）。
 
+### 🔴 Median 性能口径确认与大小 shape 分类（2026-07-26）
+
+- [x] **标杆身份已确认**：用户明确说明，Median 任务书中的 `aclnnMedian` / `aclnnMedianDim` 小算子拼接版本等价于 Torch 对应接口。因此 baseline 为同机 `torch_npu` 执行 `torch.median`；不再做等价性证明，也不改为直接调用单个 ACLNN API。
+- [x] **性能 case 来源已确认为通用规则**：只从同一份精度 caseset 中选择；带性能维的 case 必须同时带精度维，且精度未通过的不进入性能比较。不是另造一套性能输入，也不要求每条精度 case 都必须带性能维。
+- [x] **A3 大小 shape 边界已落成通用数据契约**：按所有输入的物理载荷字节数求和，`<= 256 KiB`（262144 bytes，边界计入）为小 shape，`> 256 KiB` 为大 shape；原因是前者可一次搬入 UB。所有当前 A3 样例 spec 均显式声明该 profile；该标签只做分组统计，不恢复 `trivial-met`，不自动免测或放宽性能阈值。
+- [x] **通用能力保留但不误用**：`aclnn_builtin` 仍是其它任务可能使用的通用 baseline 能力；Median spec 已恢复 `torch_npu:torch.median`，无算子身份代码分支。
+- [x] **选例与报告账本已补齐代码契约并经 A3 容器回归**：caseset 记录性能 case 复用的精度 case_id、未选 precision case、逐 dtype 配额和 small/large 计数；精度报告按 dtype/overall 固定输出 `total/passed/failed/needs_review`（`na` 单列），性能报告按 small/large/overall 固定输出计划数、可评分数、达标数、blocked、双边中位耗时和 speedup。A3 的 256 KiB 边界走受控 hardware profile，dry-run 也执行同一 fail-closed 策略校验；三级门把汇总逐项绑定到 per-case/evidence/baseline，不重判阈值。全套 `acc-common` 测试已在 A3 容器分批跑绿。
+- [x] **远程重生成并重新裁决**：2026-07-27 已以重新生成的同一精度 caseset完成 A3 正式采集。精度 60/60 PASS；性能 custom 50/50、baseline 48/50，48 对中 35 对达到 `ratio >= 1.0`，2 个 BF16 baseline limitation；small 24（22 scored / 19 达标 / 2 blocked / speedup 7.5006），large 26（26 scored / 16 达标 / speedup 0.3668），overall 50（48 scored / 35 达标 / 2 blocked / speedup 3.4268）。确定性裁决仍为 `BLOCKED`，关闭的是“重生成并裁决”动作，不是性能条款。
+- [ ] **性能条款尚未通过**：13 个可评分 case 真实低于 `ratio=1.0`（3 个 fp 长度 3 的 global 小 shape、9 个 fp 1024×1024 global 大 shape、1 个 int64 1024×1024 global 大 shape）；另 2 个 BF16 baseline case 无可比 device kernel。不得靠删 case、改阈值或把聚合 speedup 当逐 case PASS 关闭。
+- [ ] **`torch_parity` 造例档位仍只是护栏**：`gen_cases.py` 当前明确记载“批 A 只记账、批 B 尚未改造例逻辑”；只读签名对账得到当前 50 个性能 case 与 cannbot Median 的 1152 个 accuracy / 50 个 performance 冻结 case 均为 0 个精确 `shape×dtype×dim×keepdim` 重合，而 cannbot 已发布的 50 个 performance case 自身是其 1152 个 accuracy case 的 50/50 子集。因此现行来源/身份/大小分类已闭环，但不能宣称 shape/attr 网格逐例完全对标。后续若实施批 B，须用字段驱动的通用 profile，不得读取 `repos/` 作为运行时依赖或按 Median 身份特判；也不得借“对标”删除任务书要求且 cannbot 未覆盖的 global 变体。
+
+> **关闭条件**：性能条款只在全部必测 case 有可比证据且确定性 `perf_compare.py` / 三级门通过时关闭；目前 Median 性能仍 `BLOCKED`。
+
 ### 裁决可信性（对抗式代码门的产物）
 - ✅ **假通过路径逐条堵死并钉负例**：validator 以 **spec 为权威**复算 canonical policy 做三处一致（`caseset`+`evidence` 同步放宽会被揪出）；judge 校验 metric（非负整数 / `numel>0` / 有限）；`gate_task3` 与 `caseset`/`evidence` 按 case 对齐（防「跑性能子集 + 伪造 summary」）；`repo_adapter` ssh/scp 注入防护；catlass 脚本 17 条对抗门。
 - ✅ **evidence↔产物 provenance 绑定（方案 A）**：产物落盘 + evidence 记 `sha256` + 门内用 `precision_policy.compute_metrics` **重算比对**；numpy 缺失或产物缺失一律 `FAILED`，mock 不放宽。
@@ -610,7 +641,7 @@
    - **本会话新/改 6 页**（`opp-provenance-bound` / `case-generation-follows-opbase-section-1` / `precision-gate-precedes-performance-fail-fast` / `performance-reuses-precision-inputs-with-trivial-met` / `real-npu-runner` 更新 / `spec-examples-pollute`「已修复」）：待复核 promote。⚠ **`real-npu-runner` 页「标题 vs body」改名**在此步收口——body 已 fp32/fp16/bf16、标题仍「only fp32/fp16」+ supersede 横幅，人审时决定改名并修其它页对它的 `[[…]]` 入链。
    - **ADR 0011 golden 去引擎化**（`canon/decisions/0011-golden-decoupling.md`，`proposed`；**代码已随 PR #8 入 main，ADR 本身仍待 promote**）+ 连带被标 supersede 的 `golden-fixed-to-torch-cpu` 页（决策 4 把「恒 torch 单后端」放宽为「按算子 torch>numpy 定档」）。
    - ⚠ **`golden-source-from-taskdoc-method` 页记的是写窄了的旧律令**（「只能来自任务书指定方法」，**漏了第二档**）——用户 2026-07-22 重定为**两档链 + R2/R4/R5/R6**（见上「最高律令」段）。canon 页**不得手改**，须走一次 `capture → compile → review`；在此之前该页视为**待更正**，载重前以本 doc 为准。
-   - **ADR 0010 现为 `contested`，只欠人裁**（2026-07-22 实读 frontmatter 更正——此前记「stale / 待走 capture→compile→review」**是错的**，capture 与 compile 都已完成）：页上已并列两个 claim——**Claim A** 双触发点（2026-07-06 canonical：bureau 写入前审拟写文本 + md/代码生成后审产物）、**Claim B** 单触发点收敛到 commit 之前（2026-07-10 用户下令，未经 review），页首明写须经 `bureau:review` 由人裁决后才恢复单一 canonical 表述。**现行执行规则仍以 CLAUDE.md #5（= Claim B）为准。**⚠ 连带：CLAUDE.md #5 那句「ADR 0010 仍记旧触发点…待走 capture→compile→review」的注脚同样过时，但改 CLAUDE.md 须先经用户点头。
+   - **ADR 0010 现为 `contested`，只欠人裁**（2026-07-22 实读 frontmatter 更正——此前记「stale / 待走 capture→compile→review」**是错的**，capture 与 compile 都已完成）：页上已并列两个 claim——**Claim A** 双触发点（2026-07-06 canonical：bureau 写入前审拟写文本 + md/代码生成后审产物）、**Claim B** 单触发点收敛到 commit 之前（2026-07-10 用户下令，未经 review）。2026-07-24 用户又改定为“push 前统一审修、不逐 commit 审”；页首须经 `bureau:review` 才能恢复单一 canonical 表述。**现行执行规则以 `AGENTS.md` §5.7 为准。**
    - T9 发布形态决定（当前 `proposed`）、门职责扩展（「门内重算比对」属证据可信、非重判 verdict）。
    - **2 条 lint survivor**：ADR0002 `msTuner`→`msprof op`；5 页 `1.2×`→`target_ratio`。⚠ 护栏：ADR0006/0008 未同步 rename 前**不宜单独 promote**（否则固化 drift）。survivors **单靠 `bureau:note` 不进 review 视图**，需 `bureau:lint --apply`（改 canonical status、消耗性）或 `bureau:compile` 才可见——用户已选「先不跑、留 review 一次处置」。
 2. **T4 catlass 偏离 canonical 需人裁**：未走 canon `catlass-to-aclnn-bridge`【canonical】的路线 A/B，自选「注入其自带 example 树的 repo-native harness」第三路径。要么人门追认（改 canon），要么改回 A/B。

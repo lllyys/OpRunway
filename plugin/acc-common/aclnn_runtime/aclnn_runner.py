@@ -592,13 +592,17 @@ class AclnnRunner:
         两个都给必须指同一文件。**严格档下二者必须给其一**，否则构造即 fail-closed——
         「严格档却不知道该绑谁」等于允许环境里继承来的陈旧 so 代跑本次验收。
         宽松档下可选：给了就照样在 provenance 里标 ``is_dut``（只记录、不拦）。
+      · ``required_symbol_lib`` —— 性能 baseline 的显式来源库。给出后目标两段式符号只允许由该
+        文件定义，不回退全局命名空间、依赖树或 custom vendor；与 ``require_custom_vendor`` 互斥。
+        用于任务书点名可直接调用的既有 ACLNN 实现，证明“直接调的是哪个库”，不证明框架包装等价。
       · ``hash_symbol_libs`` —— provenance 里是否附 ``.so`` 的 sha256（大 so 要整读一遍，默认关；
         路径 + size + mtime 恒记）。
     """
 
     def __init__(self, device: int = 0, stream=None, *,
                  require_custom_vendor: bool = False, dut_lib: str | None = None,
-                 dut_vendor_root: str | None = None, hash_symbol_libs: bool = False):
+                 dut_vendor_root: str | None = None, required_symbol_lib: str | None = None,
+                 hash_symbol_libs: bool = False):
         self.device = device
         self._acl = None
         self._stream = None
@@ -609,6 +613,12 @@ class AclnnRunner:
         self._require_custom_vendor = bool(require_custom_vendor)
         self._hash_symbol_libs = bool(hash_symbol_libs)
         self._dut_lib = _resolve_dut_lib(dut_lib, dut_vendor_root)
+        self._required_symbol_lib = (os.path.abspath(required_symbol_lib)
+                                     if required_symbol_lib else None)
+        if self._require_custom_vendor and self._required_symbol_lib:
+            raise AclnnRunnerError(
+                "require_custom_vendor 与 required_symbol_lib 互斥：前者绑定本次 DUT，后者绑定任务书"
+                "指定的基线库；同一 runner 不能同时扮演 DUT 与 baseline——fail-closed")
         if self._require_custom_vendor and not self._dut_lib:
             raise AclnnRunnerError(
                 "require_custom_vendor=True（严格档）必须同时声明本次 DUT："
@@ -618,6 +628,7 @@ class AclnnRunner:
                 "安装产物同样算），证明不了它来自**本次 PR build 出来的**那个 → 本次漏导符号时"
                 "旧产物会代跑并报假 PASS。严格档不许「不知道该绑谁」。")
         self._custom_handles: list[tuple[str, object]] = []   # [(so 绝对路径, CDLL handle)]，顺序=解析优先级
+        self._required_symbol_handle = None                   # 显式基线库 handle；目标符号只从这里解析
         self._custom_lib_snapshot: list[dict] = []            # close() 前留下的 custom lib 指纹快照（洞 3）
         self._ignored_custom_libs: list[str] = []             # 严格档下环境探到但**不采信**的 custom so（诊断）
         self._teardown_errors: list[dict] = []                # 清理 API 的非零返回码 / 异常（audit#7，可审计）
@@ -794,6 +805,15 @@ class AclnnRunner:
             raise AclnnRunnerError("ASCEND_TOOLKIT_HOME is not set; source CANN set_env.sh first")
         for lib in ("libascendcl.so", "libnnopbase.so", "libopapi.so"):
             ctypes.CDLL(os.path.join(cann, "lib64", lib), mode=mode)
+        if self._required_symbol_lib:
+            if not os.path.isfile(self._required_symbol_lib):
+                raise AclnnRunnerError(
+                    f"任务书指定的基线符号库不存在: {self._required_symbol_lib}——fail-closed")
+            try:
+                self._required_symbol_handle = ctypes.CDLL(self._required_symbol_lib, mode=mode)
+            except OSError as exc:
+                raise AclnnRunnerError(
+                    f"加载任务书指定的基线符号库失败: {self._required_symbol_lib}: {exc}") from exc
         # custom vendor lib：
         #   · **严格档**（audit#1）——**只**加载调用方声明的那一个 DUT so。环境探测（ASCEND_CUSTOM_OPP_PATH /
         #     ASCEND_OPP_PATH / LD_LIBRARY_PATH）找出来的其它 custom so 可能是**上一次**（甚至别的 PR 的）
@@ -806,7 +826,10 @@ class AclnnRunner:
         self._custom_handles = []
         self._ignored_custom_libs = []
         env_found = _find_custom_opapi_libs()
-        if self._require_custom_vendor:
+        if self._required_symbol_lib:
+            to_load = []
+            self._ignored_custom_libs = env_found
+        elif self._require_custom_vendor:
             if not os.path.isfile(self._dut_lib):
                 raise AclnnRunnerError(
                     f"严格档声明的 DUT so 不存在: {self._dut_lib}——本次被测物没 build/install 出来？"
@@ -973,6 +996,23 @@ class AclnnRunner:
           · **宽松档**：维持原判据（属于已加载 custom vendor 集合即记 ``custom_vendor``），
             其余来源如实记 ``dependency_of_custom_vendor`` / ``custom_vendor_unverified`` / ``global``。
         """
+        if self._required_symbol_lib:
+            fn = getattr(self._required_symbol_handle, sym, None)
+            if fn is None:
+                raise AclnnRunnerError(
+                    f"{sym} 不在任务书指定的基线库 {self._required_symbol_lib} 中——"
+                    f"不回退全局/torch/其它 custom so，fail-closed")
+            defining = _dladdr_lib(_func_address(fn))
+            if not _same_file(defining, self._required_symbol_lib):
+                raise AclnnRunnerError(
+                    f"{sym} 经 {self._required_symbol_lib} 的 handle 命中，但实际定义方是 "
+                    f"{defining or '（dladdr 反查不出）'}；任务书基线必须直接来自指定库，"
+                    f"不接受依赖树代答——fail-closed")
+            self._record_symbol(
+                sym, fn, source="required_symbol_lib", defining_lib=defining,
+                resolved_via=self._required_symbol_lib, defining_lib_verified=True)
+            return fn
+
         strict = self._require_custom_vendor
         # 严格档：搜索面**收窄到 DUT 一个** handle；其余来源只允许出现在宽松档 / 诊断信息里。
         search = self._dut_handles() if strict else list(self._custom_handles)
@@ -1052,6 +1092,14 @@ class AclnnRunner:
         跨库拼出来的 executor / workspace 语义不保证兼容，且「一半是 DUT」根本不成其为验收证据。
         逐符号判据（``is_dut``）之外再卡这条**配对**约束，宁可 fail-closed。
         """
+        if self._required_symbol_lib:
+            a = (self._sym_provenance.get(ws_sym) or {}).get("defining_lib")
+            b = (self._sym_provenance.get(run_sym) or {}).get("defining_lib")
+            if _same_file(a, self._required_symbol_lib) and _same_file(b, self._required_symbol_lib):
+                return
+            raise AclnnRunnerError(
+                f"两段式基线符号未同出任务书指定库 {self._required_symbol_lib}；"
+                f"{ws_sym}={a or '（反查不出）'}，{run_sym}={b or '（反查不出）'}——fail-closed")
         if not self._require_custom_vendor:
             return                                   # 宽松档只记录，不拦（跑内置算子的基线场景）
         a = (self._sym_provenance.get(ws_sym) or {}).get("defining_lib")
@@ -1091,6 +1139,7 @@ class AclnnRunner:
             "device": self.device,
             "strict_custom_vendor": self._require_custom_vendor,
             "dut_lib": self._fingerprint(self._dut_lib),
+            "required_symbol_lib": self._fingerprint(self._required_symbol_lib),
             "stream_owned": self._owns_stream,
             "device_owned": self._owns_device,
             "custom_opapi_libs": libs,

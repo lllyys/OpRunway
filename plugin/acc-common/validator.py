@@ -607,6 +607,7 @@ def _out_shape_contract(c, exp, ev_prec):
 # 用户拍板：**任务书为准**——任务书声明的 dtype 全集是需求，算子 `op_def` 支持不了的差额入 `task_pr_gaps`、
 # 裁决落 `passed_with_gaps`。「没实现」是**发现**、不是借口（承 canon `task-spec-authoritative-over-pr`）。
 DTYPE_GAP_KIND = "dtype_unsupported_by_op_def"
+API_SURFACE_GAP_KIND = "api_surface_unsupported_by_pr"
 
 
 def _structured_dtype_gaps(container):
@@ -691,6 +692,38 @@ def _dtype_gaps(spec, caseset, cases):
     return ok, probs
 
 
+def _api_surface_gaps(spec, caseset):
+    """核对任务书要求、PR 未提供的 API surface 缺口。
+
+    这是被测物功能缺失，不是 CP-B 事实不足：允许其余可执行场景继续形成证据，
+    但最终 verdict 必须为 fail，不能用已执行子集的通过掩盖。
+    """
+    def selected(container):
+        raw = container.get("task_pr_gaps") if isinstance(container, dict) else None
+        if not isinstance(raw, list):
+            return []
+        return [
+            gap for gap in raw
+            if isinstance(gap, dict) and gap.get("kind") == API_SURFACE_GAP_KIND
+        ]
+
+    spec_gaps, case_gaps = selected(spec), selected(caseset)
+    if case_gaps != spec_gaps:
+        return [], [f"caseset 的 {API_SURFACE_GAP_KIND} 条目与 spec 不一致"]
+    ok, probs = [], []
+    for index, gap in enumerate(spec_gaps):
+        tag = f"task_pr_gaps[{index}]({API_SURFACE_GAP_KIND})"
+        missing = [
+            key for key in ("overload", "task_doc_ref", "pr_header_ref", "reason")
+            if not isinstance(gap.get(key), str) or not gap[key].strip()
+        ]
+        if missing:
+            probs.append(f"{tag}: 缺非空字段 {missing}")
+        else:
+            ok.append(gap)
+    return ok, probs
+
+
 # ================= 逐 dtype 精度聚合（L3 · 对标 cannbot，**纯只读派生**，2026-07-25）=========
 # 出处：参考仓 cannbot-ops-input `skills/operator-evaluation/scripts/accuracy.py:624-694` 的
 # `accuracy.by_dtype` + `overall_pass_rate`。对齐清单见 `doc/oprunway-cannbot-alignment-plan.md` L3。
@@ -725,7 +758,34 @@ def _empty_accuracy_summary():
     """空聚合骨架——早退路径（spec 非对象 / caseset 结构性坏）与降级路径共用，保证 verdict 的
     `accuracy_summary` **字段形状恒定**（下游读它时不用先判有没有）。"""
     z = {k: 0 for k in _ACC_BUCKETS}
-    return {"total": 0, "executed": 0, **z, "overall_pass_rate": 0.0, "by_dtype": []}
+    return {"total": 0, "executed": 0, **z, "overall_pass_rate": 0.0, "by_dtype": [],
+            "report": {"overall": {"total": 0, "passed": 0, "failed": 0,
+                                    "needs_review": 0, "na": 0},
+                       "by_dtype": []}}
+
+
+def _accuracy_report_view(rows, agg):
+    """把既有五桶统计投影成报告固定四项，且不改变任何裁决。
+
+    ``failed`` 合并「已执行但数值/契约失败」与「执行/取证错误」；``needs_review`` 对应
+    ``uncertain``；合法不涉及精度的 ``na`` 单列且不进入 ``total``。这样逐 dtype 与总体都满足
+    ``total = passed + failed + needs_review``，中文报告无需自行解释或重算桶语义。
+    """
+    def one(src, dtype=None):
+        failed = int(src.get("failed", 0)) + int(src.get("errored", 0))
+        out = {
+            "total": int(src.get("passed", 0)) + failed + int(src.get("uncertain", 0)),
+            "passed": int(src.get("passed", 0)),
+            "failed": failed,
+            "needs_review": int(src.get("uncertain", 0)),
+            "na": int(src.get("na", 0)),
+        }
+        if dtype is not None:
+            out = {"dtype": dtype, **out}
+        return out
+
+    return {"overall": one(agg),
+            "by_dtype": [one(row, row.get("dtype", _ACC_UNKNOWN_DTYPE)) for row in rows]}
 
 
 def _acc_tol_of(policy):
@@ -864,7 +924,7 @@ def _accuracy_summary(spec, spec_standard, tol_src, cases, ev_by_id, per):
         total = sum(b["count"] for b in buckets.values())
         return {"total": total, "executed": agg["passed"] + agg["failed"], **agg,
                 "overall_pass_rate": (agg["passed"] / total if total else 0.0),
-                "by_dtype": rows}
+                "by_dtype": rows, "report": _accuracy_report_view(rows, agg)}
     except Exception:                                 # 只读报表塌了也绝不影响裁决：出空块、如实为 0
         return _empty_accuracy_summary()
 
@@ -897,6 +957,10 @@ def _verdict(op, vm, spec_standard, problems, per, gaps=None, scaled=None, golde
     risks = [p["case_id"] for p in per if p.get("risk")]
     catlass_na = [p["case_id"] for p in per if p["catlass_compare_pass"] == "na"]
     gaps = list(gaps or [])
+    api_surface_missing = [
+        gap for gap in gaps
+        if isinstance(gap, dict) and gap.get("kind") == API_SURFACE_GAP_KIND
+    ]
     # 批 5：golden 授权核不实（tier 4 / blocked_reason）→ **BLOCKED，不是 fail 也不是 needs_review**。
     # 为什么单列一档：授权核不实意味着**这份真值本身来路不明**——那么基于它的每一条精度判定都
     # 不成立。这既不是「算子错了」（算子可能好好的），也不是「指标不确定」（指标算得好好的），
@@ -908,7 +972,7 @@ def _verdict(op, vm, spec_standard, problems, per, gaps=None, scaled=None, golde
                           if t.get("requires_human_review") and not t.get("blocked_reason")]
     if golden_blocked:
         overall = "blocked_golden_unauthorized"
-    elif problems or fails:
+    elif problems or fails or api_surface_missing:
         overall = "fail"
     elif unc_ids:
         overall = "needs_review"
@@ -997,6 +1061,9 @@ def validate(spec, caseset, evidence):
     # 校不过 → 进 contract problems（overall=fail），**不是**忽略该 gap：伪造的 gap 必须被拒得响亮。
     gaps, gap_problems = _dtype_gaps(spec, caseset, cases)
     problems.extend(gap_problems)
+    api_gaps, api_gap_problems = _api_surface_gaps(spec, caseset)
+    gaps.extend(api_gaps)
+    problems.extend(api_gap_problems)
 
     # finding #5：spec io=='attr' 名集——case.attrs 的 key 须 ⊆ 此集（防伪造 attr 冒充覆盖）。
     spec_params = spec.get("params") if isinstance(spec.get("params"), list) else []

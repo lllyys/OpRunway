@@ -2,8 +2,177 @@
 
 > 倒序：最新在上。每天一节，一条一句，大白话。`待决` 置顶。
 
+## 2026-07-28
+
+- 性能 collector 仅对 `returncode=0` 的 profiler/MSTX 证据缺失做有界重试；每次使用独立输出目录并保留逐 attempt 审计，DUT/基线执行错误和性能不达标不重试。
+- 性能验收存在未通过 case 时，固定生成独立 `性能失败明细.md`；明细直观展开输入、shape、属性、接口、双边耗时、speedup、阈值和确定性原因，并要求提供或明确挂账单 case 性能重放入口。
+- 修正 fresh spec 抽取：每轮只读本轮任务书与 PR；任务书以“所有进入 AICore 的类型”定义集合时由同轮 op_def 枚举成员；PR 缺任务书要求的 overload 记功能 gap，不再误报为任务书事实不足。
+- 新增远端只读保护根登记：真实路径仅存 ignored 的 `.oprunway/real-machine.env`，新 session 在 clone/build/跑测/清理前必须检查，禁止改动或复用保护现场。
+
+## 2026-07-27（Median 性能规则正式复跑）
+
+- **内置 ACLNN baseline 输出 ABI 与 DUT 解耦**：性能变体可用 `output_dtypes` 为自身输出单独声明
+  logical dtype；wrapper 复用同一输入但按 baseline ABI 重建输出，避免 DUT 的 index `int32`
+  被直接传给要求 `int64` 的内置接口。A3 baseline-only 复跑 50/50 均获得有效 kernel-only 数据。
+- **Torch 对标矩阵补齐 overload 轴**：acc-spec agent/skill 不再把参考 case design 当任务书 API
+  上限；逐项建立 overload→attribute profile→call variant→active outputs 映射，可选 attr 的省略语义
+  用 `null` 表达，缺任一任务书点名 overload 即阻塞，完整笛卡尔积按补齐后的 profile 数重算。
+- **验收报告兼容两代 gap 契约**：Markdown renderer 同时展示历史自由文本、`issue/impact/pr_fact`
+  和 `kind/reason/dtypes` 结构化 gap，顶层误传单条也不再逐字符展开；只修展示，不重判既有 JSON 裁决。
+- **审核复现收敛为单入口**：新增 `repro/audit_case.sh <失败序号|case_id>`，直接调用复现器，
+  不再经过 review→run_case→per-case 多层包装；固定按 Torch 接入、输入/shape、golden与DUT接口、
+  输出差异/阈值、复现结论五段展示，旧入口只作兼容。
+- **人工重放直接展示完整调用与失败现象**：`review.sh run` 默认不再刷完整 JSON，而是先列
+  Extension 入口、DUT ACLNN 接口、输入 dtype/shape、属性、参数槽顺序和输出契约，再列失败输出、
+  原判据、actual/golden 前8项及完整证据路径；机器可读 `repro_summary.json` 仍照常落盘。
+- **复现器恢复正式 workflow 的 vendor 运行路径**：从已校验 receipt 的 exact vendor ELF
+  确定性派生内容根与 `op_api/lib`，前置到 `ASCEND_CUSTOM_OPP_PATH` / `LD_LIBRARY_PATH`；
+  同时支持 `OPRUNWAY_REPRO_ENV_FILE` → `OPRUNWAY_SETENV` 两层 CANN 初始化，既不写死私有路径，
+  也不再因漏掉 OPP kernel 搜索路径得到 `executor is nullptr`。
+- **单 case 重放复刻正式 ELF 绑定顺序**：复现器先绑定并核验 exact vendor symbols，再 import
+  `torch_npu`，最后加载 Extension，同时在全部调用期间持有 vendor handle；避免系统 op-api
+  抢先占用同名 ACLNN symbol 后出现 `aclnnMedian executor is nullptr` 的 harness 假异常。
+- **复核入口免配置并区分启动错误**：报告仍在 OpRunway 工作树内时，逐 case 脚本自动向上定位
+  `plugin/`，无需审核员先导出根变量；重放执行异常统一返回 rc=2，`review.sh` 明确报告“未执行完成”，
+  不再把 ACLNN/环境异常当作精度 FAIL 稳定复现，也不再误称与原验收不一致。
+- **失败明细按验收维度拆分**：主报告只保留精度/性能失败数量、汇总和快捷复核入口；
+  有精度失败时另产 `精度失败明细.md`，有性能未通过 case 时另产 `性能失败明细.md`，
+  两者均从对应确定性 JSON 同步渲染，不把 blocked、异常或缺 baseline 擅自归因为 DUT 失败。
+- **正式落盘中文 Markdown 验收报告**：真机 `acceptance.json` 生成后同步渲染 `验收报告.md`，
+  逐字展示 JSON 裁决、PR/ELF provenance、逐 dtype 精度汇总、失败 case、大小 shape 性能状态、
+  task↔PR 差额和人工复现入口；renderer 不重判，失败也不改 JSON 裁决。新增审核员
+  `review.sh list/show/run` 与带编号 `failed.tsv`，并把“原 FAIL 重放退出 1”翻译成稳定复现结果，
+  避免人工记长 case_id 和底层退出码语义。
+- **验收后列出全部 case 启动脚本**：`cpp_extension` Task2 完成后生成 `repro/index.tsv`、
+  统一 `run_case.sh` 和每个 case 的独立薄脚本；脚本复用本轮冻结输入/ELF，PASS/FAIL 都可人工重放，
+  且 `acceptance_verdict=null`、生成异常不改验收裁决；`show_case.sh` / 单脚本 `--describe`
+  可直接查看输入首尾样本与范围、attrs、调用槽、golden、精度 policy 和原始 metrics，大张量不刷全量。
+- **Extension FAIL 快速人工复现**：新增通用 `cpp_extension_repro.py`，复核既有 receipt/ELF 后
+  直接重放报告中的原始输入与 golden；默认按 dtype×失败输出组合取代表项，也可指定单 case 或全量失败，
+  只产人工复现摘要、不改验收裁决。
+- **Extension 逐 case 原子留痕**：driver 在每次 NPU 调用前记录当前 case、每次成功后原子更新
+  输出 manifest；即使设备超时或进程异常，也能区分最后成功项与触发项，不再整轮只剩 rc=1。
+- **精度门跳过性能仍保留计划视图**：`perf_cases/cases_scored` 继续如实为 0，同时从同一
+  caseset 账本报告 `planned_cases` 与 small/large 数量，不再把“未采集”误呈现成“没有性能计划”。
+- **插件编排说明同步第三条真机通路**：登记 `cpp_extension` 的 form→mode 映射与
+  exact-head build/load/vendor receipt 门，删除“两条通路”和旧 Median PASS 数字造成的漂移。
+- **首轮真实 FAIL 反哺归因 skill**：PR head 必须钉死到远端 ref 的精确 SHA，未发布后继提交不得代跑冒充；
+  index evidence 中 `invalid_index_count>0` 明确归为越界输出，不能误套 Torch 的合法 tie 下标差异。
+- **cpp_extension 正式通路与 DUT 来源闭环**：根仓规登记第三条真机 runner form；driver/adapter/
+  三级门新增 vendor build receipt，强制机校完整 PR head、源码仓、构建命令与现场加载 ELF 摘要，
+  不再只靠目录短 SHA 说明 exact-head 来源。
+- **clean-finalizer 与真机来源词表统一**：最终干净 PASS 不再写死只认手写 `user` runner，而是复用
+  workflow 的 `runner_form → mode → runner_source` 受控映射；`cpp_extension` 仍须先过三级门中的
+  build/load/vendor receipt 复核，跨 form 来源继续拒绝。
+- **acc-spec 解耦 oracle 与验收精度标准**：任务书显式精度条款优先，Torch 功能真值不再自动覆盖
+  AscendOpTest 默认阈值；Median spec 同步更正标准并结构化挂账独立 `aclnnMedianDim` API surface 缺口。
+- **多输出 index 判据接入 AscendOpTest value policy**：从 canonical AOT `tolerance` 派生
+  index-value-consistency 的相对/绝对单点界，保持字段驱动，不按算子身份分支。
+- **AscendOpTest logical BF16 接通既有存储 codec**：policy 取 AOT 的 bfloat16 阈值行，
+  实际比较仍使用 driver 展宽后的 fp32 产物，不再因 numpy 无原生 bf16 dtype 在生成期误拒。
+- **性能待采集文案去除 runner 误标**：统一说明精度总门/真机采集/采集端状态，不再让
+  `cpp_extension` evidence 误写成 `aclnn_py`。
+- **正式 runner provenance 按 mode 绑定**：`new_example/aclnn_py` 继续只认 `user`；
+  `cpp_extension` 只认经 Task2 receipt 门复核的 `generated_official_cpp_extension`，不再被旧
+  new-example 词表误挡，也不能跨 mode 冒充来源。
+- **性能选择收据门区分排除原因**：Task1 复核分别校验退化输入排除与
+  `balanced_max_cases_limit` 的上限/平衡轴，不再把正常 max-cases 未入选项误报成退化规则不一致。
+- **cpp_extension 性能采集前补齐精度总门**：不再因“部分性能 case 自身精度通过”就提前启动
+  profiler；所有应裁精度 case 全过后才生成性能计划，与 workflow 的 Task2→Task3 总门保持一致。
+- **DUT 越界 index 改落明确 FAIL 证据**：`index_value_consistency` 对 oracle/维度契约错误继续
+  fail-closed；对 actual 的负数或正向越界不再让整轮 traceback，而是记录
+  `mismatch + invalid_index_count`，由同一 validator 判 FAIL、最终门独立复算。
+- **同符号多变体 Extension 绑定修正**：不再把 ACLNN symbol 唯一性误当 ABI 约束，改按
+  `symbol + active_attrs + active_outputs` 唯一匹配 entrypoint；统一符号承载 global/by-dim
+  等稳定接口形态可直接生成，歧义或零匹配仍 fail-closed。
+- **torch_parity dry-run 账本 schema 修正**：A3 实跑已确认 1344 条完整矩阵、每 dtype 168 条、
+  零丢失，但 renderer 因该 profile 把 `unpaired_combo_classes` 写成空列表而崩；现统一为空对象
+  `{count,classes,attr_values_never_emitted}` 并用真实 Median 1344 dry-run 回归钉住。
+- **Median 真实 ABI 属性名回归断言同步**：补齐 sample fixtures 后 243 个测试通过，剩余 1 个失败
+  是真实 Median golden 测试仍传旧 `keepdim`，而 PR/spec ABI 字段为 `keepDim`；现统一真实见证断言，
+  fake 通用夹具的自有 lowercase 字段不改。
+- **Median 性能选择回归断言同步**：A3 容器首轮相关单测 150 通过，唯一真实失败是测试仍断言旧
+  `value_profile` 标签；现改为与完整 cannbot 对标矩阵一致的 `torch_parity`。其余 93 个 error
+  均由首轮限定 payload 未携其它算子 sample fixture 引起，补齐 fixture 后重跑，不冒充代码失败。
+- **官方 Extension 接通同口径性能链**：先跑全量精度并用 validator 同源规则筛 case，再仅对精度通过的
+  性能子集复用精确 ELF/vendor receipt，custom 与 Torch baseline 双侧统一走 `msprof --ai-core=off`
+  + ctypes MSTX + CSV 的 kernel-only 采集；性能 collect 的完整 case 序列和 provenance 独立复核。
+- **cpp_extension 收据加入最终证据复核门**：验收状态门会从落盘 caseset、manifest、invocation
+  plan 和 ELF 独立重算摘要，核对 loader/namespace/schema、运行时与 vendor 符号 provenance，
+  并要求每条 evidence 绑定同一 receipt；布尔输出 readback 保留逻辑 dtype。
+- **官方 Extension 容器内 driver 落地**：通用 driver 执行 `setup.py build_ext --inplace`、精确加载唯一
+  ELF、预加载指定 vendor library 并核符号、按 invocation plan 逐 case 调独立 torch.ops、落多输出
+  manifest 和 build/load receipt；机器连接与容器进入仍由外层显式 argv 提供，仓内不含私有路径。
+- **Median 见证回归守卫同步**：多输出测试改按真实 `keepDim/valuesOut/indicesOut` ABI、global 默认
+  attr slots 和 int32 indices 核对；端到端夹具把 1344 矩阵缩成结构等价的 7 条，而非绕回 legacy。
+- **Median tracked 见证迁移**：样例 spec 改为 cpp_extension，按 8 dtype×8 rank×3 shape×
+  （1 global+6 by-dim）形成 1344 条完整精度矩阵，并平衡选 50 条性能 case；ABI 名称和 indicesOut
+  int32 对齐 PR header，golden 将 Torch int64 indices 明示窄化为 int32。1152 是 cannbot 仅按维
+  overload 的数量，任务书 global 接口另补 192 条，不能漏测。
+- **torch 对标 agent/skill 路由改造**：spec extractor 对任务书指定 stock torch 真值的场景默认产
+  `runner_form=cpp_extension` 与 cannbot 来源的 `torch_parity_matrix`；runner agent 只调用官方
+  codegen，不手写 per-op runner。workflow 增加独立 CP-C build/load receipt 门，明确迁移后旧
+  aclnn_py PASS 不可复用。
+- **完整精度矩阵与性能子集解耦**：`perf.case_selection.max_cases` 可从同一精度 caseset 按
+  dtype×small/large 队列轮转选择固定数量，保留原 case_id；Median 可据 cannbot 口径从 1152 条精度
+  矩阵选 50 条性能用例，不再把“完整精度覆盖”误解成“1152 条全部采性能”。
+- **torch_parity 从空开关升级为完整矩阵**：按 cannbot Median 冻结设计实现
+  dtype×rank×shape profile×attribute profile 全笛卡尔，shape 支持 31/2047/262144 加尾随 1，
+  first/middle/last 轴按 rank 动态解析；`case_target` 必须精确等于矩阵大小，禁止把 1152 全覆盖
+  静默抽成 60 条。legacy 用例生成保持原行为。
+- **C++ Extension 独立真机 mode 接线**：新增逐 case invocation plan、显式外部 driver argv 和
+  build/load 内容寻址收据门；收据绑定 caseset、spec、生成源码、构建命令、torch/torch_npu/CANN/SoC、
+  Extension ELF、独立 namespace/schema、vendor 库及符号归属。SSH/container 入口不写死，缺显式配置
+  或任一绑定漂移均 fail-closed。
+- **独立 C++ Extension 通路开始落地**：按 Ascend/pytorch 所带 op-plugin 官方
+  `cpp_extension_base` 样例新增字段驱动源码生成器，固定使用 `NpuExtension`、
+  `npu_cpp_extension.h`、`EXEC_NPU_CMD_EXT` 与独立 `torch.ops` namespace；不复制会崩溃的旧
+  helper。该检查点先完成独立 runner form 的源码与静态 ABI 基础，不冒充
+  `cpp/new_example` 或 `aclnn_py`；真机 mode、收据和执行适配器后续独立接入。
+- **Median 最终验收 PASS（覆盖本节较早的 BLOCKED/C++ Extension 路线记录）**：最终源码精度
+  60/60 PASS；从同一精度 caseset 选择的性能 40/40 获得同机同输入、同为 kernel-only 的有效双边数据，
+  40/40 达到任务书 `ratio >= 1.0`，逐 case 最低 speedup 1.7459；Task 1/2/3 全通过并刷新根
+  `acceptance.json`。small 14/14、聚合 speedup 5.3846；large 26/26、8.4507；shape overall
+  40/40、3.4817。
+- **最终路线按任务书最短链执行**：用户已确认小算子拼接等价于 Torch 对应接口，因此 baseline 直接取
+  隔离 DUT OPP 环境后的同机 `torch_npu:torch.median`，DUT 保持独立 ACLNN 两段式调用与定义方
+  provenance；无需另建 C++ Extension 来重复证明等价。先前“回退源码优化、改做 Extension”的建议作废。
+- **第三个通用源码优化补齐最后两例劣化**：按 dtype、32B 对齐和每核实际行数派生 small-row K 值，
+  不含算子/case 身份特判；`float32[4,6], dim=-1` 从约 18 μs 降至约 2.5 μs。三个隔离源码提交
+  `4fbaa74f7`、`e215fa176`、`36e5211f8` 均经最终 60 例精度和 40 例性能复验，不应回退。
+- **clean-pass finalizer 与全量回归落地**：新增 fail-closed 的
+  `finalize_clean_acceptance.py`，只在精度、性能和三级证据均为 clean pass 时原子写根
+  `acceptance.json`。A3 全量回归 `1505 passed, 10 skipped, 474 subtests`；相关子集 319 passed。
+- **本用户空间安全清理**：仅删除容器 `/tmp` 下可确认属于旧 pytest/perf/msprof 的临时目录，
+  `/tmp` 从约 18G 降到首次清理后 322M、完成测试并最终清理后 23M；最近复核
+  `/home/liangyuansheng` 7.2G（其中 `/work/run` 6.5G）、根盘可用约 19G，未触碰其他用户目录。
+- **完成 compile 与换 session 交接**：Torch 对标路线已蒸馏为 proposed dossier；旧 Median
+  `aclnn_builtin` 路由和已废除的 `trivial-met` 规则已显式标为 contested，当前 handoff 同步记录远端
+  回退建议、本地选择性清理边界和下一轮 C++ Extension 测试设计顺序。
+- **旧性能优化结果降为历史诊断**：旧直接 ACLNN/不可辨 Torch 路由下的 34/40、48/50 等数据不再作为
+  最终验收证据，也不据此继续决定 Median 优化；本轮已提前结束，没有正在运行的 collector。
+- **Torch 对标默认走独立 C++ Extension**：以后 stock `torch.*` 对应接口保留为小算子拼接 baseline，DUT 通过独立 `torch.ops.<namespace>.*` 调 PR 的 ACLNN/Ascend C 算子，以入口隔离、符号定义方和 profiler kernel 区分两侧；只有任务书明确要求替换原生 dispatch 时才改走 `Ascend/pytorch` op-plugin。
+- **补充 Agent/Skill 关系图**：新增注册面、live 调度面、未接入 live 的方法论 skill 与 acc-common 确定性脚本层关系图，明确 primary 实际只加载 acceptance-workflow、两个产出型 subagent 各加载 acc-spec/acc-runner、真机与归因 subagent 无原子 skill。
+- **补齐验收流程可视化**：新增关键节点/约束图与 SOP 步骤图两份可编辑 draw.io 文档及 PNG 预览，覆盖 CP-A..E、primary/subagent 边界、cpp/aclnn_py 双信任门、确定性裁决链、BLOCKED/FAIL 路由和真机副作用确认。
+- **性能未通过用例成为最终报告硬字段**：`perf_report.json.non_passing_cases` 逐条联结 caseset、DUT evidence 与 baseline excluded，记录 case_id、dtype、输入 shape、small/large、双边行为/耗时及失败/挂起原因；ratio FAIL、BLOCKED、exception、等待 baseline 均不得只留在汇总或被静默删行，既有确定性裁决字段不变。
+- **Median 两个隔离源码检查点消除全部真实性能劣化**：global value-only 跳过 index 计算，INT64 单行大 shape 改为多核精确整数二分；A3 新包精度 60/60 PASS。严格合并同口径重采后，48 个可评分性能 case 全部 `ratio >= 1.0`；large 26/26 达标、聚合 speedup 1.2318，small 22/22 可评分项达标、聚合 speedup 7.2101，另 2 个 BF16 global 小 shape 因当前 torch_npu 2.10.0 + CANN 9.0.1 的 `aclnnMedian` 不产 executor 而继续 blocked。
+- **性能采集前置精度 pass 规则定稿**：性能 case 先从同一精度 caseset 选择，再只消费本轮确定性精度裁决已 pass 的 case；同一 DUT/输入在性能阶段若再次执行失败，必须按 DUT 回归或 harness/collector 异常解耦。精度 pass 只证明结果正确，不保证性能 ratio 达标或 baseline/profiler 必然产证，后两类仍分别按性能 FAIL 或 BLOCKED。
+- **torch baseline 变体绑定改为 spec 字段驱动**：新增 `keyword_groups`，可按 `case.attrs` 决定一组 torch keyword 是否整体出现，解决统一 ACLNN ABI 的全局变体仍携带 dim/keepDim 占位 slot 时误调按维接口的问题；无算子身份分支，缺属性或坏结构 fail-closed。新增严格重采合并器，只允许同口径、primary 子集的有效双边记录填补无效记录，禁止覆盖已有有效数据并记录输入哈希。
+- **修复整轮性能采集被固定超时误杀**：`aclnn_py` 性能进程不再对任意 case 数固定使用 1200 秒，改为 `max(1200, 60 × 实际选中 case 数)`，50 case 默认 3000 秒；每完成一例立即 flush 进度，显式环境覆盖与 7200 秒外层总护栏保留。验收门同时消除双侧都缺值时误导性的 `None ≠ None` 诊断，真实证据完整性门不放宽。
+- **A3 以新 caseset 完成正式重跑**：CP-C 信任门以 8 个见证覆盖 8 dtype、两个 variant、标量属性和多输出；正式精度 60/60 PASS。50 个性能 case 全部完成 custom 采集，`torch_npu` baseline 48 个可评分、2 个 BF16 case 仍为 baseline limitation；48 对中 35 对达到任务书 `ratio >= 1.0`，确定性结论仍为 `BLOCKED`，不得写成性能通过。
+- **大小 shape 与报告字段得到真机产物验证**：性能 case 全部来自同一精度 caseset；A3 按输入物理字节 `<=262144` / `>262144` 分为 24 个 small、26 个 large。small 为 22 对可评分、19 对达标、2 blocked、聚合 speedup 7.5006；large 为 26 对可评分、16 对达标、聚合 speedup 0.3668；overall 为 48 对可评分、35 对达标、2 blocked、聚合 speedup 3.4268。
+
 ## 2026-07-26（非真机流程性能优化）
 
+- **性能规则闭环经 A3 容器回归**：A3 的 256 KiB 边界改由受控硬件 profile 校验，dry-run 同样 fail-closed 检查性能 case 策略；三级门新增 accuracy report 与逐 case/evidence 的独立对账，以及 perf report 的 NPU evidence、baseline.json、shape 汇总绑定。分三批覆盖全部 `acc-common` 单测，业务主批 400、性能/adapter 批 543、validator/门批 408，受环境影响的子集按正确 TMPDIR/工作目录补跑后全绿。
+- **性能选例与报告契约补成可审计闭环**：`caseset.perf_case_policy.selection` 记录从同一精度 caseset 选中的/未选中的 case_id、dtype 配额与总数；性能报告固定输出 small/large/overall 的计划数、可评分数、达标数、blocked、双边中位耗时与 speedup，精度报告固定输出逐 dtype/overall 的 total/passed/failed/needs_review（na 单列）。三级门只做这些汇总与行级事实的完整性对账，不重判精度或性能。
+- **性能 baseline 与 case 规则再次校正并通用化**：用户明确确认 Median 的小算子拼接版本等价于 Torch 对应接口，故 Median 从临时 `aclnn_builtin` 恢复为同机 `torch_npu:torch.median`；同时确立通用规则——性能 case 必须取自精度 caseset，A3 按全部输入物理载荷之和 `<=256 KiB` / `>256 KiB` 标小/大 shape。生成器与 catlass builder 均 fail-closed 执行，所有 A3 样例 spec 已迁移，`perf_compare` 增加只读 `by_shape_class` 汇总；分类不免测、不改达标阈值。
+- **完成 bureau compile**：处理 10 份未编译 minutes（4 份实质记录、6 份机械 checkpoint），新建 9 个 dossier、更新 5 个；3 个实现事实页以制品 SHA-256 标为 `verified`，3 个历史表述因新证据改为 `contested`，未擅自提升任何页面为 canonical。press 检查为 0 dangling / 0 schema violation / 0 ledger drift；唯一 orphan 是无主张的上下文压缩 checkpoint。
+- **性能标杆改走任务书最短证据链**：用户明确裁定，任务书点名可直接调用的 ACLNN / 小算子拼接 baseline 时就直接测该对象，不再为每份新任务书增加 `torch_npu` 包装等价性证明；功能/精度 oracle 与性能 baseline 分开解释。该原则已同步到仓规、acc-perf/acc-spec/workflow/agent 指南和 bureau capture。
+- **【后被本节首条纠正】新增通用 `aclnn_builtin` 性能基线通路**：spec 用 `when/symbol/slots` 描述 ABI，采集器从当前 CANN `libopapi.so` 直接调用两段式接口并强制记录路径/size/mtime/sha256 与符号定义方 provenance；该通用能力仍保留，但把 Median 映射到它的决定已由用户澄清推翻，Median 当前应走 `torch_npu:torch.median`。
+- **仓规收敛为单一源**：保留并重构原 `AGENTS.md` 的架构、mode、能力边界和深挖入口，同时合入原 `CLAUDE.md` 中仍有效的泛化细则、方案/副作用门、远程 compute、文档落点、push 前审修、canon grounding、外部仓复用边界、发布形态与 `@BUREAU.md` 路由；已被后续实测推翻的旧机器/验收状态不迁移。`CLAUDE.md` 现只保留 `@AGENTS.md`，以后不再双写。
+- **真机环境入口收敛**：新增 `doc/oprunway-real-machine-environment.md` 记录 A2/A3 与 950 的最近验证能力、版本、探测命令和安全边界；实际 SSH alias、容器名及远端路径写入被 `.gitignore` 忽略的 `.oprunway/real-machine.env`，tracked 模板为 `.oprunway/real-machine.env.example`。`CLAUDE.md` / `AGENTS.md` 改为链接该入口，删除 CLAUDE 中已过时且互相矛盾的机器快照。
+- **完成换 session 前的口径收尾**：仓根/插件入口与 workflow skill 从旧“精度 56/56、性能零数据”更新为最新真机事实（精度 60/60；custom 50/50、baseline 48/50；48 对评分、35 对达标、2 对 baseline blocked）；Median spec 把“任务书小算子拼接标杆是否等同 `torch_npu torch.median`”从 `_note` 提升为结构化 `task_pr_gaps`，新增脱敏 handoff `doc/oprunway-session-handoff-2026-07-26.md`。等价性解决前不得宣称满足任务书性能条款。
 - **性能采集已按 cannbot 真机坐实并对齐**：参考仓两侧实际走 `msprof CLI + libms_tools_ext.so ctypes MSTX + task_time CSV`；A3 probe 得 `range_id=1` 和有效 kernel 窗。OpRunway custom/torch baseline 现统一该 collector，live 路径钉 CSV；DB parser 仅保留历史/离线兼容。新增对 msprof 控制 task `PROFILER_TRACE_EX` 的窄白名单，其他未知类型继续 fail-closed。
 - **50-case 真机性能数据已产出**：custom 50/50、torch baseline 48/50 有效，48 对均为 fair kernel-only；2 个 BF16 dim=1 case 是 torch_npu/CANN 内置基线报 161002，custom 成功，归为 baseline limitation 而非 DUT/parser。
 - **彻底移除旧 `numel<4096 → trivial-met` 自动免测**：`perf_compare.py`、`gpu_baseline.py`、`validate_acceptance_state.py` 与 agent/skill 口径同步；外部 GPU baseline 也必须覆盖全部性能 case。复用同一 50-case 真机证据重算为 `cases_scored=48`、`达标=35`、`blocked=2`、`status=blocked`、`trivial_rows=0`；原 24 个小 case 中 22 个真实评分、2 个明确 blocked。
@@ -513,3 +682,10 @@
 6. 调研 `awesome-ascend-skills`：只收 skills，有 external 自动同步机制；cannbot 就是「自维护仓 + external 同步」→ 定 OpRunway 走同款发布形态。
 7. 把全部相关仓 clone 进 `repos/`（共 12 个、~604M）：catlass + cannbot + 其余 10 个算子仓（asc-devkit/ops-sparse/ops-blas/ops-cv/catccos/shmem/oam-tools/amct/hixl/cann-recipes-infer，均 `--depth 1`）。
 8. 组件仍不建：等真实任务书 + catlass PR、敲定数据契约/口径后再实施。
+# 2026-07-27
+
+- msprof collector 新增单侧硬超时与逐 case 原子 checkpoint，异常 kernel/profiler 不再无限挂住，也不会因整轮中断丢掉已完成证据。
+- 性能 case 选择新增可审计 `min_total_input_elements`：退化单元素输入保留精度、生成时移出性能维；Median 据 cannbot 最小 numel=31 与 A3 reference 零-kernel/不支持证据取最小值 2。
+- 性能双边新增环境隔离：baseline 子进程精确移除本次 DUT vendor 的 OPP/动态库路径，防系统 torch_npu 基线被 custom 同名 op 覆盖。
+- Torch baseline 映射新增通用 `keyword_groups`：统一 ACLNN ABI 的可选属性占位槽可按 `case.attrs` 语义条件整组省略，避免把全局接口误测成按维接口。
+- 新增通用性能重采合并门：仅允许同口径、primary 子集、双边有效的 retry 记录补齐采集缺口，禁止覆盖既有有效数据，并记录输入哈希与替换 case。

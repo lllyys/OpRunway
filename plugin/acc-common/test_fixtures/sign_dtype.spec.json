@@ -18,5 +18,8 @@
                 "policy": {"kind": "ascendoptest_default", "tolerance": 0.001, "error_rate": 0.001,
                            "eps": 1e-9, "legacy": 0.1, "not_settled": false},
                 "policy_note": "spec 级 policy 为 fp16 代表；per-case：fp32/fp16→ascendoptest(rel_err)、int/bf16→exact_equal(有效标准 EXACT)"},
-  "perf": {"baseline": "tbe", "target_ratio": 0.95}
+  "perf": {"baseline": "tbe", "target_ratio": 0.95,
+           "case_source": "precision_cases",
+           "shape_classification": {"metric": "sum_input_bytes", "small_max_bytes": 262144,
+                                    "hardware": "Atlas A3"}}
 }
