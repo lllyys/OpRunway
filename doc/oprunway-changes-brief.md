@@ -4,6 +4,7 @@
 
 ## 2026-07-28
 
+- `.gitignore` 增加 `/.claude/*.local.md`，避免个人本地工具配置进入版本库。
 - 提交本轮 bureau 编译出的 canon 架构、决策与日志记录；结论维持 proposed/verified/contested 现状，不提升为 canonical。
 - 性能 collector 仅对 `returncode=0` 的 profiler/MSTX 证据缺失做有界重试；每次使用独立输出目录并保留逐 attempt 审计，DUT/基线执行错误和性能不达标不重试。
 - 性能验收存在未通过 case 时，固定生成独立 `性能失败明细.md`；明细直观展开输入、shape、属性、接口、双边耗时、speedup、阈值和确定性原因，并要求提供或明确挂账单 case 性能重放入口。
