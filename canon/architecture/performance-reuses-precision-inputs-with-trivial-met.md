@@ -1,7 +1,8 @@
 ---
 title: Performance reuses precision inputs with a trivial-met exemption
-updated: 2026-07-16
-status: proposed
+updated: 2026-07-27
+status: contested
+contradicts: [[Performance cases are precision-pass subsets]]
 ---
 
 # Performance reuses precision inputs with a trivial-met exemption
@@ -19,3 +20,9 @@ numel），对这些标 **trivial-met**：达标免测、不失败——太小�
 真实对象复核」的实例。
 
 **Sources.** [[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]（2026-07-15：性能同输入 + trivial-met + 空 Tensor na 豁免）
+
+**后续冲突。** 复用精度输入仍成立，但 `trivial-met` 性能免测规则已被后续决定废除；当前规则见
+[[Performance cases are precision-pass subsets]]。本页保留旧主张及其 provenance，等待
+`bureau:review` 处理冲突。
+
+**Sources.** [[session perf-case-source-shape-rule-20260726 · 2026-07-26]]

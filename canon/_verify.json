@@ -128,5 +128,70 @@
         "claim": "_ne_cfg requires op_src with posixpath.normpath nested-path validation; opp_rebuild passthrough"
       }
     ]
+  },
+  "Direct ACLNN performance baseline": {
+    "verifiedAt": "2026-07-26",
+    "checks": [
+      {
+        "artifact": "plugin/acc-common/aclnn_runtime/aclnn_runner.py",
+        "hash": "61a9f09e3a3881148b8050ed29c56c107b0a9ad2138373916a92ca0e7ee37cce",
+        "claim": "baseline runner supports required_symbol_lib and requires both ACLNN symbols to be defined by the selected library"
+      },
+      {
+        "artifact": "plugin/acc-common/aclnn_runtime/perf_msprof.py",
+        "hash": "0f12394f4b7294d28d2ff5aa1a9b953718d1e56e745ff9533787e327adaedebc",
+        "claim": "kernel-only collector records required library and symbol provenance for ACLNN baseline runs"
+      },
+      {
+        "artifact": "plugin/acc-common/aclnn_adapter.py",
+        "hash": "d94ae03ea3309bfa28a3e1978d5ea76243bfafec938fab591d972d76e40e2b4b",
+        "claim": "generic ACLNN adapter accepts data-driven baseline variants and ABI slots"
+      },
+      {
+        "artifact": "plugin/acc-common/repo_adapter.py",
+        "hash": "43c304904552268ce2d9926d7e0c21c354c7e8dc50fb96a499e482840fd8a9e8",
+        "claim": "repository adapter wires aclnn_builtin baseline configuration without operator-identity branching"
+      },
+      {
+        "artifact": "plugin/acc-common/run_workflow.py",
+        "hash": "c4df405687ccb60f04d3b05dbddf7f3a252e3cea19a4a432764be4b4bc031a2f",
+        "claim": "workflow dispatch recognizes the aclnn_builtin performance baseline"
+      },
+      {
+        "artifact": "plugin/samples/specs/median.spec.json",
+        "hash": "69861143f11f6569c1d814388bfd08fbcbf9abcfe2351a7ac731c20667f58bfe",
+        "claim": "Median sample maps global and dim variants to aclnnMedian and aclnnMedianDim as taskbook-directed baselines"
+      }
+    ]
+  },
+  "Golden decoupling retains known engine exceptions": {
+    "verifiedAt": "2026-07-26",
+    "checks": [
+      {
+        "artifact": "plugin/acc-common/gen_cases.py",
+        "hash": "7f1253bb7eab6b37bbe94fc9f4da75ed6a0640cbafb3aa3b5a69fff17e1062d1",
+        "claim": "generator retains the operator-identity _BF16_EXACT_OPS exception"
+      },
+      {
+        "artifact": "plugin/acc-common/catlass_adapter.py",
+        "hash": "573f2fb931cd3f9a0594b24bc8c706f3bd41a2d144b4211e2fdbc179a14f8119",
+        "claim": "CATLASS adapter retains the built-in golden_catlass_matmul exception"
+      }
+    ]
+  },
+  "Contract IR v1 supports generated ACLNN bindings": {
+    "verifiedAt": "2026-07-26",
+    "checks": [
+      {
+        "artifact": "plugin/acc-common/contract_ir/contract_ir.schema.v1.json",
+        "hash": "66b3e94f6df784239040813469cc577bc3b44f4620a03c82cf5dcafecd7da660",
+        "claim": "versioned schema represents arguments, materialization, constraints, dtype selection, acceptance predicates, and reverse mapping"
+      },
+      {
+        "artifact": "plugin/acc-common/contract_ir/README.md",
+        "hash": "ac2f755bb9f55503fd25727714ce24622d0d81f7be1e9335cfc8716e8f8cad41",
+        "claim": "contract IR documentation describes the prober-to-normalized-IR-to-generated-binding path and structural witnesses"
+      }
+    ]
   }
 }

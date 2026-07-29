@@ -1,6 +1,6 @@
 ---
 title: Target hardware and dtype set are determined per operator from taskdoc and op_def
-updated: 2026-07-10
+updated: 2026-07-26
 status: proposed
 ---
 
@@ -23,4 +23,4 @@ Ascend 950 系 13 份 · 纯 Atlas 300V Pro 1 份（互斥分桶 38+13+1=52；�
 与 `repos/ops-math`，被 gitignore、不入库，核实**不可在库内复现**，故不升 verified。判定**规则本身**
 （双源交叉核验、不假定）是本页的 durable claim。
 
-**Sources.** [[session 0513d745-9176-41f0-8f4b-cb7a2d19ff86 · 2026-07-10]]
+**Sources.** [[session 0513d745-9176-41f0-8f4b-cb7a2d19ff86 · 2026-07-10]]，[[session 9f5c778e-cdf9-4c84-bb4f-f0ab8c49a99d · 2026-07-24]]（再次确认 a3/a5 只作机器能力池，逐算子仍须双源核定）
