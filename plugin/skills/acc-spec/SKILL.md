@@ -1,13 +1,30 @@
 ---
 name: acc-spec
-description: 把算子任务书（md 本地路径或链接）+ PR 链接，抽成中立的 <op>.spec.json（OpRunway 验收流水线 Layer 0 契约）。当你拿到「算子任务书 + 对应 PR」要开始 NPU 算子验收、或需要从任务书生成 spec 时用。一份任务书含多个算子时产出多份 spec。规则由真实社区任务书语料归纳、经三个已建 spec 验证。
+description: 把算子任务书（md 本地路径或链接）+ PR 链接，先按 18 项标准校验任务书输入是否足以充当验收依据，再抽成中立的 <op>.spec.json（OpRunway 验收流水线 Layer 0 契约）。当你拿到「算子任务书 + 对应 PR」要开始 NPU 算子验收、或需要从任务书生成 spec 时用。一份任务书含多个算子时产出多份 spec。规则由真实社区任务书语料归纳、经三个已建 spec 验证。
 ---
 
 # acc-spec — 任务书 + PR → spec.json
 
 **输入**：算子任务书（`md` 本地路径 **或** `http(s)` 链接）+ PR 链接。
-**输出**：一份或多份 `<op>.spec.json`（Layer 0 中立契约）+ 每份显式 `task_pr_gaps`。
+**输出**：`taskdoc_validation.json`（任务书输入校验）+ 一份或多份 `<op>.spec.json`（Layer 0 中立契约）+ 每份显式 `task_pr_gaps`。
 **边界**：这步只把「任务书/PR 里有什么、缺什么」**确定性**地落成 spec，**不做验收判定**（判定在 `validator.py`）。缺项落 gaps，**不臆造**。
+
+## 任务书输入校验门（取材之后、抽 spec 之前）
+
+抽 spec 之前先回答一个更前面的问题：**这份任务书够不够格当验收依据**。判法见
+`references/taskdoc-validation.md`（18 项逐项判据），受控清单在
+`acc-common/taskdoc_validation_contract.json`。
+
+- **只看任务书自己**，不读 PR/op_def/header——「PR 里写了」补不了任务书的缺，那是 `task_pr_gaps` 的分工。
+- 逐项判 `satisfied` / `ambiguous` / `missing` / `not_applicable`，落 `<workdir>/taskdoc_validation.json`。
+  判 `satisfied` **必须附任务书逐字原文**；凑不出原文就说明该项没明确，别摘一句沾边的凑数。
+- primary 随后 inline 跑
+  `python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/validate_taskdoc_input.py --root <workdir> --out taskdoc_validation_receipt.json`：
+  它复核 18 项是否逐项对齐、引用是否真出自任务书、条件项适用性是否自洽、决策是否绑定当前
+  source facts，并按契约**机械派生**阻断清单。`STATUS: NEEDS_USER` → primary 汇总问用户；
+  `BLOCKED` → 校验工件本身不可信，重做本步。
+- 这个门**不产验收裁决**（`acceptance_verdict` 恒 null），也不判任务书内容对不对，
+  只挡「输入不足以验收」。
 
 ## 步骤
 
@@ -66,4 +83,5 @@ description: 把算子任务书（md 本地路径或链接）+ PR 链接，抽�
 - **spec 的自检 ≠ 验收裁决**：本 skill 只产 spec 与 gaps，裁决唯一归确定性脚本链（`validator.py` + `perf_compare.py` + `validate_acceptance_state.py`，ADR 0007），引用时逐字标来源、不自行宣告。
   ⚠ **mock 不产验收裁决**（C5，用户 2026-07-22 拍板）：mock 的「NPU 输出」= `golden.copy()`、精度按构造必过、性能是编的假数，它**物理上不再写 `acceptance.json` / `verdict.json`**（改产标明 NON-ACCEPTANCE 的 `dev_run_summary.json`，evidence 带 `evidence_grade="development"` + `acceptance_note`）。CP-B 的契约自检走 **`gen_cases.py --dry-run`**（**plan-only**：不调 `golden_fn`、不落 `.npy`、不产任何裁决；会加载执行 `golden.py` 取 `out_shape`（缺文件只记「未核」，文件在但坏了则当场抛）），**别再说「跑 mock 看裁决」**。
 
-**详规见** `references/taskdoc-to-spec.md`（目标 schema · 字段映射 · **§1.2 dtype 冲突以任务书为准(C4)** · **§1.3 torch 对标 / 多输出 / aclnn_py 形态怎么填** · verify_mode 决策树 · threshold 兜底 · 多算子拆分 · GPU 移植特例 · 自检清单）。
+**详规见** `references/taskdoc-to-spec.md`（目标 schema · 字段映射 · **§1.2 dtype 冲突以任务书为准(C4)** · **§1.3 torch 对标 / 多输出 / aclnn_py 形态怎么填** · verify_mode 决策树 · threshold 兜底 · 多算子拆分 · GPU 移植特例 · 自检清单）
+与 `references/taskdoc-validation.md`（**抽 spec 之前**的 18 项任务书输入校验判法 · 状态词表 · 条件项适用性 · `taskdoc_validation.json` schema）。

@@ -18,7 +18,7 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 
 1. **判定唯一归确定性脚本链**：`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）→ 门控后由 `run_workflow.py` 写 `acceptance.json`。**编排层（primary）与 subagent 都不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**（ADR 0007）——这是「不得自行判定、只能引用」，**不是「绝不提 pass/fail」**：可以复述脚本判出的 pass/fail，但不能自己判。
 
-2. **primary 边界**：primary **可直接跑「无 NL 生成、无判定」的确定性脚本**——`fetch_source.py`（取材 + `source_facts.json`）、`gen_cases.py --dry-run --ledger-out <case_plan.json>`（契约自检 + durable 计划账本）、`validate_preparation_state.py`（只判非真机准备是否可复用）、`preflight_aclnn.py`（只做 PR header↔spec slots 静态对账）、`validate_acceptance_state.py`（复核门）、`check_manifest_sync.py`（漂移门），用 Bash 幕后跑。primary **不做 NL 生成的 durable 工件**（spec / runner 一律派 subagent），**不自行判 pass/fail**（归确定性脚本链），首响应先加载本 skill、**禁裸调 subagent**。
+2. **primary 边界**：primary **可直接跑「无 NL 生成、无判定」的确定性脚本**——`fetch_source.py`（取材 + `source_facts.json`）、`validate_taskdoc_input.py`（只复核任务书输入校验工件的结构与绑定、机械派生阻断清单）、`gen_cases.py --dry-run --ledger-out <case_plan.json>`（契约自检 + durable 计划账本）、`validate_preparation_state.py`（只判非真机准备是否可复用）、`preflight_aclnn.py`（只做 PR header↔spec slots 静态对账）、`validate_acceptance_state.py`（复核门）、`check_manifest_sync.py`（漂移门），用 Bash 幕后跑。primary **不做 NL 生成的 durable 工件**（spec / runner 一律派 subagent），**不自行判 pass/fail**（归确定性脚本链），首响应先加载本 skill、**禁裸调 subagent**。
 
 3. **subagent 边界**：每个 subagent **单轮、禁内部循环、禁跨阶段、不自行判定，只回结构化摘要给 orchestrator**。循环由 primary 控（如 dry-run 契约自检异常 → 再派 `refine_spec`），subagent 自己不多轮迭代。
 
@@ -36,6 +36,7 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 |---|---|---|---|
 | `source_facts.json` | CP-A | 任务书字节、PR head 与关键文件 ref/摘要已形成内容身份 | envelope 摘要有效且 `completeness.status=complete`；否则 MISS/BLOCKED |
 | `correspondence.json` | CP-A | 对应校验已落盘（读 `status` 定去留） | `status=confirmed` 且 `source_facts_digest` 等于当前事实包才进 CP-B；`mismatch/empty_task` 停 |
+| `taskdoc_validation.json` + `taskdoc_validation_receipt.json` | CP-B0（`validate_taskdoc` + primary inline `validate_taskdoc_input.py`） | 任务书输入是否足以充当验收依据已逐项判过并机械复核 | receipt `status ∈ {PASSED, PASSED_WITH_PENDING}` 且 `source_facts_digest` 等于当前事实包才进 `extract_spec`；`NEEDS_USER` 停下问用户；`BLOCKED` 重做 CP-B0 |
 | `<op>.spec.json`（含 `task_pr_gaps`） | CP-B（`extract_spec`） | spec 已抽 | 缺 → 派 `extract_spec` |
 | `case_plan.json` | CP-B（primary inline `gen_cases.py --dry-run --ledger-out`） | 用例计划及 spec/planner/golden 依赖已结构化落盘 | `validate_preparation_state.py` 返回 `REUSABLE` 才复用；MISS 重做 CP-A/B 对应缺口，BLOCKED 停止并报告损坏 |
 | `preparation_receipt.json` | CP-B（primary） | 上述非真机工件绑定已复核 | 只表示 `scope=non-real-machine-preparation-only`；`acceptance_verdict=null`，不得当验收 PASS |
@@ -89,9 +90,44 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 ### CP-B Task1 用例（dispatch + primary inline）
 
-**目的**：任务书→spec + golden，并用 `--dry-run` 做**用例计划的契约自检**（不产任何裁决）。
+**目的**：先校验任务书输入是否足以充当验收依据（CP-B0），再任务书→spec + golden，并用 `--dry-run` 做**用例计划的契约自检**（不产任何裁决）。
 
 - **先查热续跑，不先派 NL agent**：CP-A 已轻量刷新任务书/PR head 并得到当前 `source_facts` 后，若旧 spec/golden/case-plan/receipt 都存在，primary **先重跑** `validate_preparation_state.py`。结果 `REUSABLE` → 直接复用 CP-B 三件套、跳过 `extract_spec` / `gen_golden` / dry-run，进入 CP-C0；`MISS` → 只重做 checks 指向的最小缺口（source/correspondence 变化才重抽 spec，planner/golden 变化只重跑对应步骤）；`BLOCKED` → 停止并报告损坏。不得因为“可能有缓存”先照旧派完两次 NL 再查 receipt——那会让热续跑优化完全失效。
+- **CP-B0 任务书输入校验门（先于 `extract_spec`）**：
+  ⚠ **本门不随 `validate_preparation_state.py` 的 `REUSABLE` 跳过**——那份收据只复核它自己检查的
+  source/correspondence/spec/case-plan/golden 绑定，**既不读也不绑** `taskdoc_validation*`，
+  拿它替 CP-B0 背书就等于让本门接入之前产生的旧收据把新门整个绕过去。
+  **`validate_taskdoc_input.py` 每轮都重跑**（纯本地只读、毫秒级，digest 一致时直接返回 PASSED）；
+  真正被热续跑跳过的只有下面那次**贵的 NL dispatch**：`taskdoc_validation.json` 已存在且脚本判
+  `PASSED`/`PASSED_WITH_PENDING` 时不必重派 `validate_taskdoc`，digest 漂移时脚本自己会 BLOCKED。
+  抽 spec 之前先回答更前面的问题——**这份任务书够不够格当验收依据**。受控清单
+  `acc-common/taskdoc_validation_contract.json`（**18 项**：12 项无条件必须 + 2 项有性能要求时必须 +
+  3 项条件必须 + 1 项可选），逐项判法在 `skills/acc-spec/references/taskdoc-validation.md`。
+  1. **dispatch** `acc-spec-extractor`，`dispatch_mode = validate_taskdoc`：**只读 `task_doc.md` +
+     `source_facts.json`，禁读 `pr_facts.json`/op_def/header**——「PR 里写了」补不了任务书的缺，
+     那是 `task_pr_gaps` 的分工。产 `<work>/taskdoc_validation.json`，判 `satisfied` 必附任务书逐字原文。
+  2. **primary inline**（确定性脚本，无 NL 生成）：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/validate_taskdoc_input.py --root <work> --out taskdoc_validation_receipt.json`。
+     它只复核结构与绑定（18 项是否逐项对齐 · 引用是否真出自任务书 · 条件项适用性是否自洽 ·
+     决策是否绑定当前 `source_facts` digest），按契约 `on_unsatisfied` **机械派生**清单，
+     **不重判任务书内容对不对**，`acceptance_verdict` 恒 null。
+  3. **路由按 STATUS 分**：`PASSED` / `PASSED_WITH_PENDING` → 进 `extract_spec`（pending 项写进
+     CP-E 报告的「待确认项」，不阻断）；**`NEEDS_USER` → primary 用 `AskUserQuestion` 把
+     `blocking_items` 一次性汇总问用户**（不逐项连问）。**阻断项只有两条出路：补充事实
+     （`action="supplied"`）或停止验收**（出程序结论、去找任务书负责人）——**不能豁免**：
+     豁免掉 Golden 标杆、目标硬件或验收完成条件不会让这些事实凭空出现，只会让下游缺着必需
+     输入继续跑，脚本按契约 `resolution_actions_by_route` 当场拒。`waived` 只对
+     `pending_items` 这类不阻断的项开放。每条决策须自报 `resolved_status` 且与本轮实际状态
+     相符，旧轮决策搬不过来。用户选择原样追加进
+     `taskdoc_validation.json.decisions`（`source` 固定 `"user"`）后**重跑脚本**，
+     转 `PASSED` **或 `PASSED_WITH_PENDING`** 才继续（阻断项全决策完、但还留着未决的
+     `list_pending` 项时，脚本返回的就是后者——别把它当没过）；
+     `supplied` 项的 `confirmed_constraints_candidates` 一并写入
+     `correspondence.json.confirmed_constraints`，供后续 dispatch 原样传递、不再重复澄清。
+     `BLOCKED` → 校验工件本身不可信（引用编造 / 项数不齐 / 事实包漂移），重做 CP-B0，**不得跳过**。
+  ⚠ 决策绑 `source_facts_digest`：**任务书字节一变，本轮校验与用户决策整体失效**，须重做——
+  与 `correspondence.json` 同一套失效语义。
+  ⚠ 这个门**不产验收裁决**，只挡「输入不足以验收」；它也**判不出**任务书内容本身对不对——
+  判宽（模糊的判成明确）会静默生效，唯一护栏是 ref 的判法 + 强制逐字引用。
 - **dispatch** `acc-spec-extractor`，`dispatch_mode = extract_spec`：按六段契约读 `task_doc.md` + `task_doc.snapshot.md` + `pr_facts.json` + `source_facts.json` + `correspondence.json`（含 `confirmed_constraints`）→ `<op>.spec.json` + `task_pr_gaps`（缺项落 gaps 不臆造；多算子多 spec）。
 - **dispatch** `acc-runner-dev`，`dispatch_mode = gen_golden`：读 `task_doc.md`+`spec` → 任务书快照入库 + `<ops_root>/<op>/golden.py`（真值口径走 **R3 两档链**；**PR/仓内参考实现禁作 golden 源**；后端生成期定死）→ 自跑 `check_golden.py <Op>` 出档位账本。**必须在 dry-run 之前**——`gen_cases` 缺 golden.py 即 fail-closed。
   “任务书快照入库”必须实际落在授权核验生效路径 `<ops_root>/<op>/task_doc.snapshot.md`，内容逐字来自
@@ -104,7 +140,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   路由**按退出码、不按档位数字**：**0**（可走）→ 进 dry-run；**2**（`needs_human_review`——tier 3 必然如此，⚠ **tier 1 也可能**：`multistep + oracle_method` 判 `(tier 1, 需人核)`）→ 进 dry-run 但**报告里显式标「golden 需人核」**；**1**（blocked / 词表不合规 / 缺件 / 账本自相矛盾 / 参数错误）→ **停在 CP-B**，把 `blocked_reason` 摆给用户，**不自动回落第二档**（R4）。
 - **primary inline**（确定性脚本，无 NL 生成）：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/gen_cases.py <spec> --dry-run --ledger-out <work>/case_plan.json --source-facts <work>/source_facts.json --correspondence <work>/correspondence.json`。plan-only，查这些：用例预算落不落 `[S=强制下限, pool_max]` 区间 · dtype 分布 · 特殊场景（empty/scalar/边界/inf/ninf/nan）覆盖 · 被丢组合类 · `case_id` 唯一（撞则 raise） · per-case 种子确定性；并绑定 canonical spec、规划器源码、golden.py、source facts 与用户确认摘要。后两项必须成对提供；只绑定一半直接报错。
   ⚠ **能力边界（别当成旧 mock 自检的等价物）**：dry-run **不调 `golden_fn`、不落 `.npy`、不产任何裁决**；但它**会加载执行 `golden.py`**（取 `out_shape` 造规模预算）——所以对 golden 的覆盖是**半道**的：**缺文件 → 只记「未核」、不阻塞**；**文件在但坏了（语法错 / 顶层抛 / 必需导出不全）→ 当场抛、拦得住**。仍**验不了**：来源契约合不合规（那是 `check_golden.py` 的活）/ `oracle_source` 映射 / `validator` 判定链 / 三级门 / evidence 结构——**这些只有 CP-D 真机跑测才验得到**。（照本仓约定 golden.py 把 torch 延迟 import，故 dry-run 通常不拉 torch；某算子若在模块顶层 `import torch`，它会跟着 import。）CP-B 过了**不代表**用例链整体可用。
-- **产出**：`<op>.spec.json` + `<ops_root>/<op>/golden.py` + `<ops_root>/<op>/task_doc.snapshot.md`（三件均 subagent 产）+ `<work>/case_plan.json`。随后 primary 跑 `validate_preparation_state.py` 落 `preparation_receipt.json`；它只判非真机准备能否复用、**不产裁决**。`caseset.json` 仍由 CP-D 真机跑测时才落盘，绝不缓存复用。
+- **产出**：`<work>/taskdoc_validation.json`（subagent 产）+ `<work>/taskdoc_validation_receipt.json`（primary inline 产）+ `<op>.spec.json` + `<ops_root>/<op>/golden.py` + `<ops_root>/<op>/task_doc.snapshot.md`（三件均 subagent 产）+ `<work>/case_plan.json`。随后 primary 跑 `validate_preparation_state.py` 落 `preparation_receipt.json`；它只判非真机准备能否复用、**不产裁决**。`caseset.json` 仍由 CP-D 真机跑测时才落盘，绝不缓存复用。
 - **路由**：dry-run 报错或账本异常（如预算区间不合理、重点 dtype 未覆盖、特殊场景缺失、id 撞）→ **dispatch** `acc-spec-extractor`，`dispatch_mode = refine_spec`（据报错文本修 spec）→ 重跑 dry-run。**契约自检没过先修 spec，别上真机。**
   ⚠ **`golden.py` 缺文件这一种 dry-run 查不出**（只记「未核」照常出计划），会一路漏到 CP-D 才炸；且 `refine_spec`（改 spec）**变不出 `golden.py`**——**golden 侧的问题一律回 `acc-runner-dev:gen_golden`，不在 refine 循环里空转**。
 
@@ -183,6 +219,9 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 **目的**：把确定性产物裁决翻成中文验收报告，一个字不自己判。
 
 - **primary 亲自**：**逐字引用** `acceptance.json`（门控后总体裁决）/ `verdict.json`（validator 精度裁决）/ `perf_report.json`（perf_compare 性能）的裁决**并标来源**，加 `spec.task_pr_gaps`（任务书↔PR 落差）+ 各维度（功能 / 精度 / 性能）通过数、失败用例+判据、性能达标比。
+  **另列「任务书待确认项」**：逐字引用 `taskdoc_validation_receipt.json` 的 `pending_items`（未阻断但未说明的条款）
+  与 `decided_items`（用户补充或豁免的项及其理由）。这两类与 `task_pr_gaps` 分开呈现——前者是**任务书自身**的缺口，
+  后者是**任务书↔PR**的落差，混在一起会让读者以为缺口出在 PR。
 - **固定汇总视图**：精度逐字展示 `verdict.json.accuracy_summary.report.by_dtype/overall` 的 `total/passed/failed/needs_review`（`na` 单列）；性能逐字展示 `perf_report.json.by_shape_class/shape_overall` 的 `planned_cases/cases_scored/达标/blocked/npu_us/baseline_us/speedup`。这些字段由确定性脚本生成并由三级门做完整性对账，primary 不自行重算。
 - **失败明细解耦**：存在性能未通过 case 时，必须生成独立 `性能失败明细.md`，主报告只放汇总和链接。明细逐项展示 `caseset.json` 的输入/shape/dtype/属性/调用接口，以及 `perf_report.json` 的 outcome、双边 behavior/scope/us、speedup、`target_ratio` 和原始 reason；同时给单 case 性能重放入口。runner 尚无该能力时如实标缺口，不用 JSON 查询冒充复现。
 - **测量真实性红线**：所有性能 case 都须真实采集并按同口径比较，不允许按 numel 自动免测；必须同时报告 `cases_scored` 和有效 `us/speedup` 条数。`cases_scored=0` 时无论 `达标` 计数为何，统一明确“未产出任何可评分性能数据，性能未验证”。性能计划数须写成 `<dims 含性能的 case>/<caseset 总数>`，功能/精度-only case 不冒充性能覆盖。

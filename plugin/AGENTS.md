@@ -90,6 +90,14 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   校验靠 **改动落点目录 `pr_facts.target_dir`（机器可比）** + **issue/追踪号（NL 读 `task_doc`/PR title，非算子名字面匹配）** + **用户确认**。
   `correspondence.json` 的 `status ∈ {confirmed, mismatch, empty_task, needs_user_confirmation}`：
   `mismatch` / `empty_task` → 出**程序结论（非 pass/fail）**并停跑；`needs_user_confirmation` → primary **摆证据、由用户拍板**（不自动 judge 空任务）。
+- **CP-B0 任务书输入校验门**（先于 `extract_spec`）：dispatch `acc-spec-extractor:validate_taskdoc`（**只读任务书自己**）→
+  `taskdoc_validation.json`；primary inline `validate_taskdoc_input.py` 按
+  `taskdoc_validation_contract.json` 的 18 项复核结构与绑定并**机械派生**阻断清单，
+  `acceptance_verdict=null`。`PASSED`/`PASSED_WITH_PENDING` → 进 `extract_spec`；
+  `NEEDS_USER` → primary 汇总问用户（阻断项只能补充事实或停止验收，豁免只对不阻断的待确认项开放），决策写回 `decisions` 重跑脚本；
+  `BLOCKED` → 校验工件不可信，重做。决策绑 `source_facts_digest`，任务书字节一变即整体失效。
+  ⚠ 本门**不随 `validate_preparation_state.py` 的 `REUSABLE` 跳过**（那份收据不绑 `taskdoc_validation*`）：
+  脚本每轮都重跑，热续跑省掉的只有贵的 `validate_taskdoc` NL dispatch。
 - **CP-B Task1 用例**：dispatch `acc-spec-extractor:extract_spec` → `spec` + `task_pr_gaps`；primary inline
   `gen_cases.py <spec> --dry-run --ledger-out <case_plan.json> --source-facts <source_facts.json> --correspondence <correspondence.json>`（plan-only 契约自检 + 绑定 facts/用户确认的 durable 计划账本，**不产任何裁决**）与
   `validate_preparation_state.py`（只判 CP-A/B 准备工件能否复用，`acceptance_verdict=null`）——**CP-B 只关注 task1 用例计划自洽**；
@@ -137,7 +145,7 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   （三级完整性门）→ 门控后写 `acceptance.json`。**编排层与 subagent 不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**
   （ADR 0007）——不是「绝不提 pass/fail」。
 - **subagent**：**单轮、禁内部循环、禁跨阶段、只回结构化摘要给 orchestrator、不自行判定**。
-- **primary**：**可直接跑「无 NL 生成、无判定」的确定性脚本**（`fetch_source` / `gen_cases --dry-run --ledger-out` /
+- **primary**：**可直接跑「无 NL 生成、无判定」的确定性脚本**（`fetch_source` / `validate_taskdoc_input` / `gen_cases --dry-run --ledger-out` /
   `validate_preparation_state` / `preflight_aclnn` / `validate_acceptance_state` / `check_manifest_sync`）；**不做 NL 生成 durable 工件**（spec / **golden.py** / runner 一律派 subagent）；
   **不自行判 pass/fail**；**首响应先加载 `acceptance-workflow` skill、禁裸调 subagent**。
 - **三级门是 `run_workflow.py` 内部**（一次性串 Task1→2→3、末尾统一校门，是**批量驱动、非阶段间实时阻断**），
