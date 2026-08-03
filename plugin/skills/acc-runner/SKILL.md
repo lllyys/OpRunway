@@ -16,7 +16,7 @@ description: OpRunway 验收的代码产出 skill，两件事：(a) gen_golden�
 `${OPRUNWAY_PLUGIN_ROOT}/samples/runners/oprunway_*_runner.cpp` 是**只读参考样例 / 生成器骨架种子**（非引擎组件、非运行时回退靶）。`samples/` 随插件分发（在插件内，2026-07-22 由仓根迁入）；`${OPRUNWAY_PLUGIN_ROOT}` = 本插件根中立变量，Claude 下等价 `${CLAUDE_PLUGIN_ROOT}`（harness 自动设），**Codex 等非 Claude 运行时须显式 `export OPRUNWAY_PLUGIN_ROOT=<插件根绝对路径>`**；写进可执行命令时用自兜底形式 `${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`，两边都活。
 `repo_adapter.find_runner()` **只查用户目录**（`<ops_root>/<op>/`）——**引擎不回退插件样例，fallback 已退役 2026-07-20**：
 缺 runner 直接 **fail-closed** 报错，真机 `new_example` 模式（= `spec.runner_form` 为 `cpp`／未声明时**派生**出的那个 mode）`runner_source` 恒 `user`、非 user 一律 `BLOCKED`。
-⚠ **`spec.runner_form == "aclnn_py"` 不适用上面这条规则**：该形态**没有 per-op runner 源**（op 工程即 DUT，跑的是完全 op-中立的通用 ctypes runner），派生出的是 `--mode aclnn_py`，`find_runner()`/`runner_source` 那套无从谈起；它**照样产真机验收裁决**（`new_example` **不是**唯一的验收通路——`run_workflow.py` 的 `_REAL_MACHINE_MODES` 含 `new_example` 与 `aclnn_py` 两条，median+PR6429 的真机精度 PASS 即出自 `aclnn_py`）。其信任门改由 `acceptance-workflow` CP-C 的「`aclnn_py` harness 真机自检」接住——**「无源可自检」≠「免验证」**。
+⚠ **`spec.runner_form == "aclnn_py"` 不适用上面这条规则**：该形态**没有 per-op runner 源**（op 工程即 DUT，跑的是完全 op-中立的通用 ctypes runner），派生出的是 `--mode aclnn_py`，`find_runner()`/`runner_source` 那套无从谈起。当前共有 `new_example`、`aclnn_py`、`cpp_extension` 三条真机通路；本段只解释 aclnn_py，不排除 cpp_extension。其信任门改由 `acceptance-workflow` CP-C 的「`aclnn_py` harness 真机自检」接住——**「无源可自检」≠「免验证」**。
 ⚠ **`spec.runner_form == "cpp_extension"` 同样不生成手写 per-op runner**：由 `cpp_extension_codegen.py` 按 params/call_variants 生成官方 Extension bundle，`cpp_extension_adapter.py` 生成逐 case invocation plan。CP-C 必须核 build/load receipt（spec/caseset/source/setup/ELF/runtime/namespace/schema/vendor symbol ownership）；缺显式 driver 或任一绑定漂移均 fail-closed。不得把它别名成 cpp/new_example，也不得复用 aclnn_py ctypes 收据。性能必须在全量精度 readback 后用同一 validator 判定先筛 case，再以精确 ELF/vendor receipt 进入现有 `msprof --ai-core=off + ctypes MSTX + CSV` kernel-only 双边采集；禁止 wall time 或另造 Extension 专用性能口径。
 runner 是引擎的**输出**、非组件；样例只供参照生成（照 §2 四槽拷），绝不作运行时兜底。
 **当前范围（诚实）**：代码闭环 = **ops-<族> 仓 · opp 安装型产物 · aclnn 两段式接口**（引擎目录/后缀已生成化、不再硬编码 experimental/math，2026-07-23 批 6b 调研更正；真闸=build.sh 家族命令+opp 布局+aclnn 链接）；catlass/双实现待扩（`doc/oprunway-batch6b-design.md`）。**runner 自检证据满足/不满足 纪律当前非代码强制 sidecar 硬门、待补**（`repo_adapter` 只查文件在不在，不识别 unverified；ref §4）。
@@ -32,6 +32,17 @@ runner 是引擎的**输出**、非组件；样例只供参照生成（照 §2 �
      → ⛔ **BLOCKED、记 gap，不在 C1 覆盖范围内**。理由：`out_shape(in_shapes, attrs)` 只拿得到**形状与属性**、
      **拿不到输入的值**，表达不了这类算子。（与 `agents/acc-runner-dev.md` 的判据一致，别两处打架。）
    ⚠ 引擎侧消费落在 `gen_cases.py`（具名元组 `Golden(fn, source, provenance, out_shape, contract)` 加载 + 逐 case 与 `golden_fn` 实测形状对账 + 写 caseset `expected.out_shape` / `out_shape_source`）与 `repo_adapter.py`（据它造 manifest）——**非本 skill 所属文件、本轮同批落地**，**以引擎实际行为为准**（旧版引擎里导出也不生效），别据此宣称「非 elementwise 已通」。
+   ⚠ `gen_golden` 交付前必须在远端执行结构轴 shape smoke，逐输出对拍 `golden_fn` 实际 shape/dtype
+   与 `out_shape`/输出契约；矩阵按 rank 边界、轴位置/正负、keep 与 active output 等稳定能力派生，
+   不按算子身份特判。合法标量输出必须覆盖：`np.ascontiguousarray` 会把 0-D 提升为 `(1,)`，需要
+   C-order copy 时必须使用能保留 oracle rank 的写法。只 import/load 或 dry-run 不算 smoke。
+   多输出语义检查必须消费 golden 已返回的实际 shape；例如 keepDim=true 的 index 已含保留轴，
+   gather 检查不得再次扩轴。smoke harness 自身的 shape 变换也须与 spec 属性逐字一致，避免把
+   harness bug 误报成 golden bug。
+
+0a. **先落授权生效快照**：`gen_golden` 必须把当前 CP-A 任务书快照逐字写入
+    `<ops_root>/<op>/task_doc.snapshot.md`，并核其 SHA 与 source facts、`GOLDEN_CONTRACT` 一致。
+    `source/task_doc.snapshot.md` 不能替代这个运行时实际查找路径；缺件时不得交付 golden。
 
 1. **选构建路径**（确定性）：据 `pr_facts.target_dir` 判 experimental / 正式 / 双实现 / catlass，定 build.sh flags（见 `references/runner-skeleton.md` §3）。**未扩 adapter 前，双实现一律记 gap / 返回 BLOCKED（转 P3），不在本 skill 选择**（与 description「双实现当前不支持」一致）。
 

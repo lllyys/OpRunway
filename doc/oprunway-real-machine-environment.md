@@ -37,7 +37,7 @@ set +a
 | pytest | 9.1.1 |
 | jsonschema | 4.26.0 |
 | 性能采集 | `msprof CLI + libms_tools_ext.so ctypes MSTX + task_time CSV` 已真机产出 kernel-only 数据 |
-| Median 最新结果 | 精度 60/60 PASS；性能 custom 50/50、baseline 48/50 有效 |
+| Median 最新结果 | `cpp_extension` torch-parity 精度 1152 例：1101 PASS、51 FAIL；`gate.passed=true`，确定性裁决 `FAIL(精度)`；上一轮 1344-case 结果仅作历史记录 |
 
 注意：
 

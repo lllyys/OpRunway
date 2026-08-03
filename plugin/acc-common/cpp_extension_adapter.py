@@ -465,4 +465,50 @@ def run_cpp_extension(caseset, work, defect_cases=None):
     return envelope
 
 
+def run_cpp_extension_precision_only(caseset, work):
+    """执行 cpp_extension Task-2-only；明确不生成/执行任何性能计划。
+
+    CP-F 必须重新执行 DUT，但不得因精度通过而隐式进入原 adapter 的第二阶段性能采集。
+    build/load/vendor/调用收据仍完全复用正式 driver 与 ``validate_receipt``。
+    """
+    if os.environ.get("OPRUNWAY_CPP_EXTENSION_REAL") != "1":
+        raise CppExtensionAdapterError(
+            "真机路径未启用；须显式设 OPRUNWAY_CPP_EXTENSION_REAL=1")
+    root = os.path.abspath(work)
+    bundle = os.path.join(root, _BUNDLE)
+    plan = os.path.join(root, _PLAN)
+    if not os.path.isfile(os.path.join(bundle, "extension_manifest.json")) \
+            or not os.path.isfile(plan):
+        raise CppExtensionAdapterError("缺 prepare() 生成的 bundle/invocation plan")
+    for forbidden in (_PERF_PLAN, _PERF_COLLECT):
+        if os.path.lexists(os.path.join(root, forbidden)):
+            raise CppExtensionAdapterError(
+                f"Task-2-only work 不得含性能工件 {forbidden}")
+    driver = _driver_argv()
+    result = subprocess.run(
+        driver + ["--bundle", bundle, "--work", root], check=False)
+    if result.returncode != 0:
+        raise CppExtensionAdapterError(
+            f"CPP Extension 外部 driver 失败 rc={result.returncode}")
+    receipt = validate_receipt(root, caseset)
+    import repo_adapter as RA
+    evidence = RA.build_multi_output_evidence(
+        caseset, root, os.path.join(root, _OUT))
+    digest = _canonical_sha(receipt)
+    for row in evidence:
+        row["cpp_extension_receipt_sha256"] = digest
+    return {
+        "op": caseset["op"],
+        "repo_mode": "cpp_extension",
+        "runner_form": "cpp_extension",
+        "runner_source": "generated_official_cpp_extension",
+        "runner_path": receipt["artifact"]["path"],
+        "evidence_grade": "acceptance_candidate",
+        "task_scope": "task2_only",
+        "performance_collected": False,
+        "cpp_extension_receipt": receipt,
+        "evidence": evidence,
+    }
+
+
 CPP_EXTENSION_MODES = {"cpp_extension": run_cpp_extension}

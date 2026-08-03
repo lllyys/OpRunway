@@ -33,7 +33,9 @@ agent 内部完成六步（取材 → 任务书→spec → 生成并验证 runne
   落一份 golden。⚠ 仅指 **elementwise 通路**；`catlass_adapter` 的内置 matmul golden 与 `gen_cases._BF16_EXACT_OPS`
   仍是引擎里的算子知识（两处已知例外，如实记账）。样例 golden 现 8 份
   （Equal / Im2col / IsClose / Median / Neg / Sign / UpsampleNearest3d / UpsampleNearestExact2d）。
-- **经真 NPU 验收裁决的算子**：IsClose / Sign（A3）· **Median（A3，PR6429，精度 60/60 PASS）** · Elu / Silu（A5-950，18/18 非空例）。
+- **经真 NPU 验收裁决的算子**：IsClose / Sign（A3）· Median（A3，PR6429；当前已记录的
+  `cpp_extension` torch-parity 结果为 1152 例中 1101 PASS、51 FAIL，`gate.passed=true`，
+  确定性裁决 `FAIL(精度)`；上一轮 1344-case 结果已被取代）· Elu / Silu（A5-950，18/18 非空例）。
   ⚠ **Median 的性能维仍 BLOCKED，但已有真实性能数据**：custom 50/50、`torch_npu` baseline 48/50 有效，48 对实际评分、35 对达到 `ratio >= 1.0`；2 个 BF16、`dim=1` baseline case 报 161002，归为 baseline limitation。任务书指定的小算子拼接标杆是否等同当前 `torch_npu torch.median` 尚未核实，解决前不得宣称满足任务书性能条款。
   mock 通路自 C5（2026-07-22）起**不产验收裁决**（只产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）。
 - **dtype 边界按通路分**（`repo_adapter.SUPPORTED_NP_BY_FORM`，按 `spec.runner_form` 分派）：

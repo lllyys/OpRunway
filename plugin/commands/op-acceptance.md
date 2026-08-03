@@ -15,7 +15,7 @@ argument-hint: "<任务书 md路径或链接> <PR链接> [--mode new_example|acl
 `mock` / `catlass` / `catlass_mock` **派生不出来**，只能显式指定（局部自检 / catlass 通路的正当逃生口）。
 `run_workflow.py` 省略 `--mode` 时也会据 `spec.runner_form` 派生；显式传入另一条真机 mode 会 fail-closed。编排层仍须在摘要中写清派生结果，不能让 mode 来源隐形。
 
-⚠ **验收裁决只出自真机通路**——真机通路有**两条**（`run_workflow.py:37` `_REAL_MACHINE_MODES = {"new_example", "aclnn_py"}`），
+⚠ **验收裁决只出自真机通路**——真机通路有**三条**：`new_example`、`aclnn_py`、`cpp_extension`，
 不是一条。`mock` 通路仍在（供测试与本地演示），但它的「NPU 输出」就是 golden 本身、
 精度按构造必过 → C5（2026-07-22）起它**物理上不再产 `acceptance.json` / `verdict.json`**，
 改产 `dev_run_summary.json` + `dev_precision_check.json`（均带 `evidence_grade="development"` +
@@ -37,7 +37,7 @@ argument-hint: "<任务书 md路径或链接> <PR链接> [--mode new_example|acl
 三种情形（**前两条都是真机验收通路，按 `spec.runner_form` 派生、不由人挑**）：
 
 - **`runner_form: cpp`（或未声明）→ `--mode new_example`**（真机）：**先确认用户已开 NPU/VPN**；走全 CP-A..E；编译 per-op C++ runner 跑，性能基线 = **同法测的内置 TBE**（见 `acc-common/new_example/run_on_npu.sh` 头注）；`OPRUNWAY_*` 环境变量指真实机器/路径（不写进仓）。
-- **`runner_form: aclnn_py` → `--mode aclnn_py`**（真机，torch 对标场景）：无 per-op runner 源，op 工程即 DUT、通用 ctypes 两段式调 `.so`；性能基线 = **同机 `torch_npu` 跑同一份 torch reference**。**同样产验收裁决**——median+PR6429 的真机 56/56 精度 PASS 正是这条路跑出来的。
+- **`runner_form: aclnn_py` → `--mode aclnn_py`**：无 per-op runner 源，op 工程即 DUT、通用 ctypes 两段式调 `.so`；性能基线仍由任务书/spec 决定。它与另外两条 form 一样只能引用本轮确定性产物，历史小 caseset 结果不得冒充当前状态。
 - **`mock`（含 `catlass_mock`）**：派生不出、只能显式指定；本地演示与管路自检用。**不产验收裁决**（见上 C5），产物一律标 NON-ACCEPTANCE。
 
 > ⚠ **走错通路的代价（别再把 `new_example` 当成唯一真机路）**：

@@ -135,7 +135,9 @@ def golden_fn(inputs, attrs):
     """inputs: list[np.ndarray]（按 spec 里 io=="in" 的出现序）；attrs: dict → 返回 np.ndarray。"""
     t = _require_torch()
     x = t.from_numpy(np.ascontiguousarray(inputs[0]))
-    return np.ascontiguousarray(t.<api>(x, ...).numpy())
+    # API 可能返回合法 0-D 时，不能直接用 np.ascontiguousarray：它保证 ndim>=1，
+    # 会把标量错误提升成 shape=(1,)。
+    return np.asarray(t.<api>(x, ...).numpy()).copy(order="C")
 
 
 def out_shape(in_shapes, attrs):               # 仅非 elementwise 才导出；见 runner-skeleton §6.1
@@ -151,6 +153,14 @@ elementwise（输出同输入形状）→ **不导出** `out_shape`，缺省语�
 非 elementwise → 导出 `out_shape(in_shapes, attrs)`，写法 / 诚实边界 / 两个具体例子见
 **`runner-skeleton.md` §6.1**（不在本页重复）。要点只有两条：**只据任务书原文或算子
 `*_infershape.cpp` 的公式写，不猜；写不准就别导出**，把「输出形状规则未知」记进 `task_pr_gaps` 并停下。
+
+交付前必须在远端跑 executable shape smoke，不能只做模块 import/load：从 spec 的稳定能力轴选择
+最小见证，至少覆盖输出 rank 边界、首/中/末轴、受支持的负轴、keep 双值和全部 active outputs；
+逐输出断言 `golden_fn` 的实际 shape/dtype 与 `out_shape`/输出契约一致。支持标量输出时必须含 0-D
+见证。smoke 是 golden 契约门，不是 DUT 测试，不产验收裁决，也不得以 PR 实现为 oracle。
+多输出的值/索引一致性检查应直接按 golden 实际输出形状消费：keepDim=true 时 index 已保留归约轴，
+不得为了 gather 再次 `expand_dims`；keepDim=false 需要恢复轴时也必须只恢复一次。smoke harness
+的 shape 变换必须由同一 attrs 驱动，不能另猜。
 
 ### 空 Tensor / 非法输入：闸门必须在 `out_shape` 里，不能委托给 torch
 

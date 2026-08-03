@@ -2,10 +2,13 @@
 """校验非真机准备工件能否安全复用。
 
 本脚本只复核 CP-A/CP-B 的来源、对应关系、spec、golden 与 dry-run 计划绑定。
+任务书授权锚还须在 source facts、spec golden、GOLDEN_CONTRACT 与 golden 生效目录
+四处摘要一致；生效目录快照必须是普通非符号链接文件。
 它不读取 caseset/evidence/verdict，不运行 golden，不产生任何验收 PASS。
 """
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -199,6 +202,38 @@ def _file_sha256(path):
             f"无法读取依赖文件 {path!r}: {ex}") from ex
 
 
+def _golden_contract(path):
+    """静态读取 golden.py 的 GOLDEN_CONTRACT；不 import、不执行被验收代码。"""
+    if os.path.islink(path):
+        raise content_address.ContentAddressError(
+            f"golden.py 不得是符号链接: {path!r}")
+    try:
+        with open(path, "r", encoding="utf-8") as src:
+            tree = ast.parse(src.read(), filename=path)
+    except (OSError, UnicodeError, SyntaxError) as ex:
+        raise content_address.ContentAddressError(
+            f"无法静态读取 golden.py {path!r}: {ex}") from ex
+    values = []
+    for node in tree.body:
+        if (isinstance(node, (ast.Assign, ast.AnnAssign))
+                and ((isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name)
+                              and target.id == "GOLDEN_CONTRACT"
+                              for target in node.targets))
+                     or (isinstance(node, ast.AnnAssign)
+                         and isinstance(node.target, ast.Name)
+                         and node.target.id == "GOLDEN_CONTRACT"))):
+            try:
+                values.append(ast.literal_eval(node.value))
+            except (ValueError, TypeError) as ex:
+                raise content_address.ContentAddressError(
+                    "GOLDEN_CONTRACT 必须是可静态读取的字面量") from ex
+    if len(values) != 1 or not isinstance(values[0], dict):
+        raise content_address.ContentAddressError(
+            "golden.py 必须且只能定义一个 object 型 GOLDEN_CONTRACT")
+    return values[0]
+
+
 def _check(checks, name, status, reason):
     checks.append({"name": name, "status": status, "reason": reason})
 
@@ -217,8 +252,10 @@ def evaluate(root, spec_rel, case_plan_rel, golden_path=None,
     if taskdoc_snapshot_rel is None:
         taskdoc_snapshot_rel = os.path.join(
             os.path.dirname(os.fspath(source_rel)), "task_doc.snapshot.md")
+    snapshot_path = None
 
     try:
+        snapshot_path = content_address.safe_path(root, taskdoc_snapshot_rel)
         source_path = content_address.safe_path(root, source_rel)
         if not os.path.exists(source_path):
             source = None
@@ -262,8 +299,6 @@ def evaluate(root, spec_rel, case_plan_rel, golden_path=None,
                 raise content_address.ContentAddressError(
                     "source_facts.taskdoc 须为 JSON object")
             recorded_snapshot_sha = source_taskdoc.get("snapshot_sha256")
-            snapshot_path = content_address.safe_path(
-                root, taskdoc_snapshot_rel)
             if not (isinstance(recorded_snapshot_sha, str)
                     and len(recorded_snapshot_sha) == 64
                     and all(c in "0123456789abcdef"
@@ -351,7 +386,7 @@ def evaluate(root, spec_rel, case_plan_rel, golden_path=None,
                     .get("snapshot_sha256"))
                 if (not source_snapshot_sha
                         or spec_snapshot_sha != source_snapshot_sha):
-                    _check(checks, "spec_taskdoc_anchor", "MISS",
+                    _check(checks, "spec_taskdoc_anchor", "BLOCKED",
                            "spec golden 的任务书锚未绑定当前 source_facts 快照")
                 else:
                     _check(checks, "spec_taskdoc_anchor", "PASS",
@@ -434,12 +469,75 @@ def evaluate(root, spec_rel, case_plan_rel, golden_path=None,
             elif not os.path.exists(os.path.abspath(golden_path)):
                 _check(checks, "golden", "MISS", "golden.py 不存在")
             else:
-                current_golden_sha = _file_sha256(os.path.abspath(golden_path))
+                absolute_golden = os.path.abspath(golden_path)
+                current_golden_sha = _file_sha256(absolute_golden)
                 bindings["golden_sha256"] = current_golden_sha
                 if current_golden_sha != golden.get("bytes_sha256"):
                     _check(checks, "golden", "MISS", "golden.py 内容已变化")
                 else:
                     _check(checks, "golden", "PASS", "golden.py 摘要一致")
+                contract = _golden_contract(absolute_golden)
+                contract_sha = hashlib.sha256(
+                    content_address.canonical_json_bytes(contract)).hexdigest()
+                bindings["golden_contract_sha256"] = contract_sha
+                if contract_sha != golden.get("contract_sha256"):
+                    _check(checks, "golden_contract", "BLOCKED",
+                           "GOLDEN_CONTRACT 与 case plan 记录摘要冲突")
+                else:
+                    _check(checks, "golden_contract", "PASS",
+                           "GOLDEN_CONTRACT 摘要与 case plan 一致")
+
+                contract_snapshot = contract.get("taskdoc_snapshot")
+                contract_snapshot_sha = (
+                    contract_snapshot.get("sha256")
+                    if isinstance(contract_snapshot, dict) else None)
+                bindings["golden_contract_taskdoc_snapshot_sha256"] = (
+                    contract_snapshot_sha)
+                ops_snapshot = os.path.join(
+                    os.path.dirname(absolute_golden), "task_doc.snapshot.md")
+                bindings["source_taskdoc_snapshot_path"] = snapshot_path
+                bindings["ops_taskdoc_snapshot_path"] = ops_snapshot
+                if not os.path.lexists(ops_snapshot):
+                    _check(checks, "ops_taskdoc_snapshot", "MISS",
+                           "golden 生效目录缺 task_doc.snapshot.md，须重做 gen_golden")
+                elif os.path.islink(ops_snapshot):
+                    _check(checks, "ops_taskdoc_snapshot", "BLOCKED",
+                           "golden 生效目录 task_doc.snapshot.md 不得是符号链接")
+                elif not os.path.isfile(ops_snapshot):
+                    _check(checks, "ops_taskdoc_snapshot", "BLOCKED",
+                           "golden 生效目录 task_doc.snapshot.md 须为普通文件")
+                else:
+                    ops_snapshot_sha = _file_sha256(ops_snapshot)
+                    bindings["ops_taskdoc_snapshot_sha256"] = ops_snapshot_sha
+                    source_snapshot_sha = (
+                        ((source or {}).get("taskdoc") or {})
+                        .get("snapshot_sha256"))
+                    spec_snapshot_sha = None
+                    spec_golden = (
+                        spec.get("golden") if isinstance(spec, dict) else None)
+                    if isinstance(spec_golden, dict):
+                        spec_snapshot = spec_golden.get("taskdoc_snapshot")
+                        if isinstance(spec_snapshot, dict):
+                            spec_snapshot_sha = spec_snapshot.get("sha256")
+                    bindings["source_taskdoc_snapshot_sha256"] = (
+                        source_snapshot_sha)
+                    bindings["spec_taskdoc_snapshot_sha256"] = (
+                        spec_snapshot_sha)
+                    anchors = {
+                        "source_facts": source_snapshot_sha,
+                        "spec.golden": spec_snapshot_sha,
+                        "GOLDEN_CONTRACT": contract_snapshot_sha,
+                        "ops_snapshot": ops_snapshot_sha,
+                    }
+                    if (not all(_is_sha(value) for value in anchors.values())
+                            or len(set(anchors.values())) != 1):
+                        _check(
+                            checks, "ops_taskdoc_snapshot", "BLOCKED",
+                            f"任务书授权锚四方摘要缺失或冲突: {anchors}")
+                    else:
+                        _check(
+                            checks, "ops_taskdoc_snapshot", "PASS",
+                            "source/spec/GOLDEN_CONTRACT/生效目录快照四方摘要一致")
             bindings["case_plan_sha256"] = hashlib.sha256(
                 content_address.canonical_json_bytes(plan)).hexdigest()
     except content_address.ContentAddressError as ex:

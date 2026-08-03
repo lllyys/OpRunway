@@ -66,6 +66,8 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 **E2E 计时账本硬约束**：干净 session 开始时固定一份 plugin 快照，整轮不得吸收工作树后续改动；以 orchestrator 所在机的同一单调/epoch 时钟记录 `E2E start/end` 与 CP-A/B/C/D 边界，远端时钟只报子命令 duration、不得与本地绝对 epoch 混算。网络重连、NL dispatch 等编排开销必须留在 `E2E start→end` 总数中；首次 SSH 若在远端进程启动前失败，可确认无残留后重连，但不得把这段从总 E2E 隐去。CP-D 是原子命令，不为刷新状态而中断/重跑。
 
+**CP-D 连接恢复边界**：首次 SSH，或首次 clone 在尚未创建远端工作树、写入 Git 对象和启动远端进程前发生的纯连接/传输失败，可确认无残留后至多恢复一次，耗时仍计入 E2E。工作树已经创建，或出现 object-not-found、checkout/HEAD mismatch、build、driver、workflow 错误后，均属于本轮语义/执行失败；同一 subagent 不得换 ref、补 fetch、重建或重跑。由 primary 另派新的干净 CP-D subagent。
+
 ---
 
 ## 3. CP-A..E 状态机
@@ -92,6 +94,13 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 - **先查热续跑，不先派 NL agent**：CP-A 已轻量刷新任务书/PR head 并得到当前 `source_facts` 后，若旧 spec/golden/case-plan/receipt 都存在，primary **先重跑** `validate_preparation_state.py`。结果 `REUSABLE` → 直接复用 CP-B 三件套、跳过 `extract_spec` / `gen_golden` / dry-run，进入 CP-C0；`MISS` → 只重做 checks 指向的最小缺口（source/correspondence 变化才重抽 spec，planner/golden 变化只重跑对应步骤）；`BLOCKED` → 停止并报告损坏。不得因为“可能有缓存”先照旧派完两次 NL 再查 receipt——那会让热续跑优化完全失效。
 - **dispatch** `acc-spec-extractor`，`dispatch_mode = extract_spec`：按六段契约读 `task_doc.md` + `task_doc.snapshot.md` + `pr_facts.json` + `source_facts.json` + `correspondence.json`（含 `confirmed_constraints`）→ `<op>.spec.json` + `task_pr_gaps`（缺项落 gaps 不臆造；多算子多 spec）。
 - **dispatch** `acc-runner-dev`，`dispatch_mode = gen_golden`：读 `task_doc.md`+`spec` → 任务书快照入库 + `<ops_root>/<op>/golden.py`（真值口径走 **R3 两档链**；**PR/仓内参考实现禁作 golden 源**；后端生成期定死）→ 自跑 `check_golden.py <Op>` 出档位账本。**必须在 dry-run 之前**——`gen_cases` 缺 golden.py 即 fail-closed。
+  “任务书快照入库”必须实际落在授权核验生效路径 `<ops_root>/<op>/task_doc.snapshot.md`，内容逐字来自
+  当前 CP-A `task_doc.snapshot.md`，并先核 source-facts digest 与 golden contract 声明的 SHA。只在
+  `source/` 留一份同 SHA 文件、却漏掉 op 目录生效副本，仍须 BLOCKED，不能口头视为等价。
+  交付前还必须在远端执行 golden shape smoke：按 spec 的稳定能力轴选择能覆盖输出 rank 边界、first/middle/last dim、
+  正/负轴、keep 双值和全部 active outputs 的最小见证矩阵，逐输出对拍 `golden_fn` 实际 shape/dtype 与
+  `out_shape`/输出契约。存在合法 0-D 输出时必须显式覆盖；只通过 import/load 或 dry-run 不算 smoke 通过。
+  smoke 只验证 golden 契约，不产验收裁决，也不得用 PR 实现作 oracle。
   路由**按退出码、不按档位数字**：**0**（可走）→ 进 dry-run；**2**（`needs_human_review`——tier 3 必然如此，⚠ **tier 1 也可能**：`multistep + oracle_method` 判 `(tier 1, 需人核)`）→ 进 dry-run 但**报告里显式标「golden 需人核」**；**1**（blocked / 词表不合规 / 缺件 / 账本自相矛盾 / 参数错误）→ **停在 CP-B**，把 `blocked_reason` 摆给用户，**不自动回落第二档**（R4）。
 - **primary inline**（确定性脚本，无 NL 生成）：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/gen_cases.py <spec> --dry-run --ledger-out <work>/case_plan.json --source-facts <work>/source_facts.json --correspondence <work>/correspondence.json`。plan-only，查这些：用例预算落不落 `[S=强制下限, pool_max]` 区间 · dtype 分布 · 特殊场景（empty/scalar/边界/inf/ninf/nan）覆盖 · 被丢组合类 · `case_id` 唯一（撞则 raise） · per-case 种子确定性；并绑定 canonical spec、规划器源码、golden.py、source facts 与用户确认摘要。后两项必须成对提供；只绑定一半直接报错。
   ⚠ **能力边界（别当成旧 mock 自检的等价物）**：dry-run **不调 `golden_fn`、不落 `.npy`、不产任何裁决**；但它**会加载执行 `golden.py`**（取 `out_shape` 造规模预算）——所以对 golden 的覆盖是**半道**的：**缺文件 → 只记「未核」、不阻塞**；**文件在但坏了（语法错 / 顶层抛 / 必需导出不全）→ 当场抛、拦得住**。仍**验不了**：来源契约合不合规（那是 `check_golden.py` 的活）/ `oracle_source` 映射 / `validator` 判定链 / 三级门 / evidence 结构——**这些只有 CP-D 真机跑测才验得到**。（照本仓约定 golden.py 把 torch 延迟 import，故 dry-run 通常不拉 torch；某算子若在模块顶层 `import torch`，它会跟着 import。）CP-B 过了**不代表**用例链整体可用。
@@ -124,6 +133,38 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   - **PR 身份钉死**：build receipt 和最终报告必须记录本轮远端 PR ref 解出的**精确 head SHA**。本地工作树里
     即使存在该 head 的后继修复提交，也只能作为诊断线索；未经用户把被测版本改为该提交，禁止用后继 build
     替换指定 PR 的失败证据，更不能把后继 PASS 写成原 PR PASS。
+  - **源码身份前置门（build 前硬门）**：期望 SHA 只取当前 `source_facts.json` / `pr_facts.json`
+    绑定的 40 位 `head_sha`。先取得精确对象，再做 detached checkout，随后以 `git rev-parse HEAD`
+    逐字核对期望 SHA；状态只允许
+    `SOURCE_ACQUIRED → HEAD_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED` 顺序前进。精确 SHA
+    不可直接取得时，只能使用本轮 PR 元数据确定的 PR-head ref 或 head repo，且最终仍只认 SHA 等值；
+    候选须在执行前有限列明，不得失败后动态试探。禁止默认分支、base head、可移动分支或后继提交兜底。
+  - **shell fail-fast 与首失败终止**：所有 CP-D shell 入口必须具备等价于
+    `set -Eeuo pipefail` 的语义，并记录首个失败阶段、退出码和日志。源码对象未取得或 HEAD 未验证时
+    `build_started=false`；build 未验证时 `workflow_started=false`。任一前置失败立即产 blocked receipt，
+    禁止继续 build、driver 或 `run_workflow`；失败目录和制品不得被下一轮复用。
+  - **构建入口按实际调用形态核验**：若构建 argv 是 `bash build.sh ...`，前置门只要求
+    `build.sh` 是可读普通文件，不得额外要求 executable bit；只有 argv 直接执行 `./build.sh ...`
+    时才校 `-x`。前置门必须与最终 argv 使用同一调用形态，不能用更强但无关的权限假设把合法源码
+    挡在 build 启动前。
+  - **冻结包入口完整性**：远端执行入口脚本本身必须与 plugin、spec、golden、facts 一起进入冻结包，
+    并由同一 manifest 绑定摘要。准备阶段必须实际解包到空目录，先校 manifest，再对最终将执行的相对
+    路径做 `test -f`、`test -r` 与 `bash -n`；只校 payload 而漏掉入口脚本不得宣称快照可执行。
+    归档成员集合还必须严格等于“manifest 覆盖文件 + manifest 自身”的 allowlist；出现 `._*`、
+    `.DS_Store`、`__pycache__`、`.pyc` 或其它未登记成员即准备失败。macOS 打包须禁用 AppleDouble
+    元数据（如 `COPYFILE_DISABLE=1`）并以解包后的成员集合复核，不能只靠源目录 exclude。
+  - **收件后再清理（事务硬门）**：远端结果必须先复制到本地临时名；本地逐字核对远端记录的 size/SHA，
+    运行 `gzip -t`/归档完整性检查，解包到新目录并确认核心 JSON 可解析、摘要可复核后，才允许原子改名
+    为正式报告目录并删除远端执行根/中转包。清理包装须全程 fail-fast，禁止用 `tar | grep -q` 这类在
+    `pipefail` 下会因早关管道制造假失败的检查；任一收件验证失败必须保留远端原件等待恢复。
+  - **测试快照依赖闭包**：定向回归打包不能只列被测 `test_*.py`；须静态追踪其 import、`setUpModule`
+    fixture、samples/assets 相对路径，以及测试/代码按路径读取摘要的 producer logic 文件，并纳入同一
+    manifest。依赖闭包无法可靠证明时直接打包完整相关组件，不能反复猜最小集。测试框架在 0 tests
+    或统一 setUp 阶段因缺文件失败，只能算快照缺件，不能算代码回归通过或失败。
+  - **caseset 文件闭包**：重测或复跑冻结包必须从 `caseset.json` 逐项枚举
+    `.cases[].inputs[].path`、`.expected.golden_path` 与 `.expected.outputs[].golden_path`，
+    按实际引用路径构造 allowlist 并逐文件校摘要；不得按 `input_*.npy`、`golden_*.npy` 等文件名模式
+    猜测闭包。引用缺失、越界、符号链接或归档成员不等于 allowlist 均在准备门 fail-closed。
   - **cpp_extension 性能次序**：先完成全量 Extension 精度 readback，用 validator 同源规则筛出精度通过且来自同一 caseset 的性能 case；再显式给 `OPRUNWAY_CPP_EXTENSION_DEVICE`，复用第一阶段内容寻址 ELF/vendor receipt，custom 与任务书 baseline 双侧统一走 `msprof --ai-core=off + ctypes MSTX + CSV` 的 kernel-only 采集。性能 collect 必须完整覆盖计划 case 序列并回绑同一 Extension provenance；partial/stale/换 ELF 一律拒。
   ⚠ **`aclnn_py` 的 perf 通路：代码已接通、真机也跑过一次，但一个耗时数都没产出（仍 BLOCKED）**（2026-07-24 两次更正——① 此前本节写「采集端尚未接入 / `parse_torch_npu_baseline` 仅 schema 占位 / Task3 必须 pending」已被落地的 perf 代码推翻；② 随后写的「一次真机都没跑过」也已被 median 首跑推翻：跑是跑了、**结果是 BLOCKED**。勿再照任一旧文办事）。现状：
     - **已落地**：`aclnn_runtime/perf_msprof.py` 做 msprof kernel-only 采集（`--task-time/--ascendcl/--msproftx`，**MSTX range 圈测量窗、缺 MSTX 证据即 fail-closed**；只累加 device 计算 kernel，MEMCPY_ASYNC 不计入；warmup 5 / repeat 20 取中位数）；基线 = **同机 `torch_npu` 跑同一份 torch reference**，行为五分类（`npu`/`cpu_fallback`/`hybrid_host_device`/`execution_failed`/`no_device_kernel_observed`）**只有 `npu` 才计时**；`repo_adapter.parse_torch_npu_baseline` 已从占位改成**真消费口**（scope / us / 重复 case_id 全 fail-closed，非 npu 行为进 `excluded`）；**精度先筛**（只测已过精度的 case，其余记 `skipped_accuracy_failed`）；双边 `timing_scope` 校验 + speedup 由 `perf_compare` 出（源无关、判定逻辑一行未改）。
@@ -146,6 +187,56 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 - **失败明细解耦**：存在性能未通过 case 时，必须生成独立 `性能失败明细.md`，主报告只放汇总和链接。明细逐项展示 `caseset.json` 的输入/shape/dtype/属性/调用接口，以及 `perf_report.json` 的 outcome、双边 behavior/scope/us、speedup、`target_ratio` 和原始 reason；同时给单 case 性能重放入口。runner 尚无该能力时如实标缺口，不用 JSON 查询冒充复现。
 - **测量真实性红线**：所有性能 case 都须真实采集并按同口径比较，不允许按 numel 自动免测；必须同时报告 `cases_scored` 和有效 `us/speedup` 条数。`cases_scored=0` 时无论 `达标` 计数为何，统一明确“未产出任何可评分性能数据，性能未验证”。性能计划数须写成 `<dims 含性能的 case>/<caseset 总数>`，功能/精度-only case 不冒充性能覆盖。
 - **红线**：数字全引真实产物，推断项标 `(推断)`；`needs_review` **不当 pass**；**验收门 `validate_acceptance_state.py` STATUS: FAILED → 不出 pass 裁决；报告如实呈现 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整）；只认任务书为验收权威，「PR 有测试」≠「验收过了」。
+
+### CP-F 验收后人工精度复核与重测（append-only）
+
+**触发条件**：CP-E 已完成，人工针对首次精度失败或 `needs_review` case 明确发起重测。CP-F 不是
+首次 CP-A..E 的内部 stage，也不覆盖首次 `spec/caseset/evidence/verdict/perf_report/acceptance`。
+
+- **F0/F1 directive**：primary 把人工原文整理成结构化 directive，展示 case、动作和精度标准；
+  人工确认后才能进入准备。含糊指令、未知 policy 或越权 override 一律停。
+- **F2 准备**：幕后调用 `cp_f_prepare_attempt.py`；复核首次五类产物 hash、PR/build/runner 身份，
+  冻结原 case 与实际 input bytes，产 `reports/<op>/attempts/<NNNN>/`。这里只产
+  `preparation.json.acceptance_verdict=null`，不产重测裁决。
+  冻结包还必须包含 golden 授权链实际引用的任务书快照/来源文件；只有
+  `golden.py` 和 `.npy` 而缺少 contract 引用的 snapshot，只能得到
+  `blocked_golden_unauthorized`，不得说明新精度标准已对最终裁决生效。
+  同一 `directive_id` 在报告 scope 内受 allocation lock 幂等映射：内容全等返回原 prepared attempt，
+  异内容或半写现场拒绝；基础路径以 realpath/commonpath 校验并拒绝任一符号链接路径段。
+- **F3/F4 执行与裁决**：幕后调用 `cp_f_execute_attempt.py`；只跑 manifest 指定的原 case，
+  不调用 `gen_cases`、性能 collector 或 `perf_compare`。判定仍唯一归
+  `validator.py` + `validate_acceptance_state.gate_task2`。`same_policy_rerun` 使用原 spec；
+  `relaxed_rerun` 使用绑定原 spec + directive 的完整 `spec.relaxed.json`，只允许精度 acceptance
+  容差白名单字段变化。执行顺序必须先对未改写的原 case 校验
+  `case_digest` 及 input/golden bytes，通过后才派生重绑 policy 的 effective caseset；
+  不得用重绑后的 case 反向对比原 digest，也不得为避免该冲突而忽略 policy 字段。
+  进入 adapter 前须显式探测并绑定 `CANN_VERSION`、`ASCEND_TOOLKIT_VERSION`、
+  `OPRUNWAY_SOC`，三者均非空且与 spec/基础 receipt/实际 driver runtime 一致；少任一项属
+  执行封装的 provenance 不完整，必须在 NPU invoke 前 BLOCKED，不归因 CP-F 裁决。
+- **F5 报告**：attempt 内落 `retest_acceptance.json`、`attempt.receipt.json` 和
+  `精度重测报告.md`。receipt 只表示执行已结束，固定 `acceptance_verdict=null`，不代表 PASS。
+  relaxed 结果固定 `requires_human_cp=true`，由人工追加 disposition。
+  execute 使用独占 owner lock；失败保留无最终 receipt 的诊断现场，报告成功生成并校验后才最后原子提交
+  `attempt.receipt.json`，已有最终 receipt 的 attempt 永不可重跑。
+  `cp_f_execute_attempt.py` 必须由编排层显式传 `--attempts-root` 可信锚；入口先拒绝 symlink、非直接四位
+  子目录、已有 receipt/lock，再读取 manifest 对账，禁止从未验证 manifest 自举自己的可信根。
+  allocation/execute lock 都以“唯一临时普通文件 fsync → hard-link O_EXCL 发布”一次性公开完整 owner JSON，
+  崩溃只能留下无锁或完整锁。
+  崩溃遗留锁不得按 mtime 自动删除：只允许专用恢复入口核验受控 attempts containment、owner
+  pid/operation/digest、无 final receipt 后，将原锁原子改名为 `abandoned` 留证再释放。
+  跨 precision family 是人工明确的完整 policy replacement，不称作简单“放宽容差”；必须显式 standard
+  与目标 family 全部数值字段。
+  对 workflow 见证要分开两个结论：必需产物、final receipt 和 cleanup 齐全只证明
+  **机械闭环完成**；只有 golden 授权通过、relaxed spec/caseset/evidence 一致且
+  validator 实际使用新 acceptance 口径时，才可进一步声明 **新标准裁决生效已验证**。
+- **权威边界**：基础 `acceptance.json` 始终是首次验收权威；attempt 是追加证据。
+  `perf_source=inherited_from_base`、`performance_retested=false`，精度重测不得改变首次性能
+  PASS/FAIL/BLOCKED。
+- **当前执行边界**：`cpp` / `aclnn_py` 按 form 派生原 runner mode；`cpp_extension` 复用正式
+  codegen/adapter/driver 做 fresh Extension build/load/invoke，但走独立 Task-2-only 入口，物理上不生成或执行
+  perf plan/collector。F2 冻结首次 invocation plan 与 build/load/vendor receipt；F3 要求 fresh invocation
+  逐行全等、PR head/实际 vendor ELF/SoC/toolkit 与基础身份全等，任一漂移 fail-closed。Extension ELF 可 fresh
+  build，但必须由本轮完整 receipt 绑定。`replay_only` 只保留契约枚举，当前执行入口不接线，不得用重判冒充重测。
 
 ---
 

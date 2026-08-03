@@ -446,7 +446,8 @@ def resolve_acceptance(spec, standard, dtype):
         raise ValueError(f"spec.precision.acceptance_policy 须为对象，得 {type(ap).__name__}，fail-closed")
     ap_std = ap.get("standard", standard)
     pol = threshold_for(ap_std, dtype)
-    for k in ("tolerance", "error_rate", "threshold", "max_ratio", "eps"):
+    for k in ("tolerance", "error_rate", "threshold", "max_ratio", "eps",
+              "rtol", "atol"):
         if k in ap:
             pol[k] = _checked_tol(ap[k], f"acceptance_policy.{k}")
     return pol, tolerance_policy_id(ap_std, dtype)

@@ -33,6 +33,11 @@ description: OpRunway 验收里任何 FAIL 归因前的解耦纪律薄壳——�
 - **index 输出按结构化证据分流**：对 `index_value_consistency`，合法 tie 是“actual/golden 下标可不同，
   但 actual 下标在界内且 gather 后值一致”；`invalid_index_count>0` 是 DUT 越界输出的明确事实，不属于 tie
   容忍范围。不得看到 index mismatch 就一律改成 exact，也不得看到重复值就一律豁免。
+- **未初始化输出中的固定位型不是责任归属证据**：若 harness 用 `empty` 一类未初始化分配，重复出现全 0、
+  最大整数或其它 sentinel，只能确认“调用后读到了该异常值”，不能单凭位型断言 DUT 主动写入或未写回。
+  最小闭环须冻结原失败输入，在脱离原调用桥的 direct/自带 example 路径中把输出预填为可识别 sentinel，
+  调用后同步读回，并以 stock 实现跑同输入作语义对照。direct 仍异常且 stock 正常才可归 DUT；
+  direct 正常则转查原 harness。无需为归因重跑完整 caseset，也不得借机改变 case 或精度标准。
 
 ## 2. 下结论的红线
 

@@ -24,6 +24,7 @@ import repro_artifacts  # noqa: E402
 import render_acceptance_markdown  # noqa: E402
 import validate_acceptance_state as gate  # noqa: E402
 import verify_aclnn_harness  # noqa: E402
+import content_address  # noqa: E402
 
 # —— C5 · 验收 / 非验收两套产物的口径（唯一定义处）——————————————————————————
 _DEV_GRADE = "development"              # 照 catlass_adapter.run_catlass_mock
@@ -328,6 +329,19 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     # defect 只在测试夹具下非 None；平时**不传该 kwarg**，让 adapter 侧的签名怎么演化都不影响生产路径。
     evidence = (repo_adapter.MODES[mode](caseset, work, defect_cases=defect) if defect
                 else repo_adapter.MODES[mode](caseset, work))
+    if mode == "aclnn_py":
+        # CP-F 后验重测必须能从首次 evidence 绑定实际生效的 build + golden source。
+        # build provenance 来自 adapter 的真机已核事实；golden source 来自本轮刚通过的
+        # harness trust receipt。这里只补 envelope provenance，不参与本轮 pass/fail。
+        execution_provenance = evidence.get("execution_provenance")
+        golden_source = ((trust.get("bindings") or {}).get("golden_source")
+                         if isinstance(trust, dict) else None)
+        if isinstance(execution_provenance, dict) and isinstance(golden_source, dict):
+            execution_provenance["golden_source_sha256"] = golden_source.get("sha256")
+            execution_provenance["build_receipt_sha256"] = content_address.content_digest(
+                "oprunway/aclnn-build-provenance/v1",
+                {k: v for k, v in execution_provenance.items()
+                 if k != "build_receipt_sha256"})
     _dump(evidence, "evidence.json")
     # 证据等级：优先取 adapter **自报**的 evidence_grade（catlass_adapter 已有此字段）；缺失则按模式兜底。
     # 只降不升——adapter 说自己是 development，就按非验收办，绝不因为「模式看着像真机」把它抬回验收级。

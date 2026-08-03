@@ -1,9 +1,16 @@
 # OpRunway 会话交接 · 2026-07-26
 
+> **已被后续验收取代（2026-07-30 更新）**：本文记录的 Median 60/60 PASS
+> 是 legacy 60-case 历史 checkpoint，不再是当前结论。当前权威本地证据为
+> `cpp_extension` torch-parity 1152-case 验收：1101 PASS、51 FAIL，
+> `gate.passed=true`，确定性裁决 `FAIL(精度)`；上一轮 1344-case 结果同样已被取代。
+> 原两个 60/60 PASS 报告目录已删除。
+>
 > 本文是 2026-07-26 建立、2026-07-27 续写的最新入口。旧
-> `oprunway-session-handoff-2026-07-25.md` 仅作历史材料，不得覆盖本文的最终真机事实。
+> `oprunway-session-handoff-2026-07-25.md` 仅作历史材料；本文自身也仅作历史交接，
+> 不得覆盖上述后续 1152-case 真机事实。
 
-## 1 · Median 最终验收结论
+## 1 · Median 当时的验收结论（已过期）
 
 - Median + PR6429 在 A3 的最终确定性裁决为 **PASS**。
 - 精度：60/60 PASS，8 类任务书 dtype 全覆盖；无 fail、uncertain、risk、gap 或契约问题。

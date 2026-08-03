@@ -576,6 +576,7 @@ class BuildRecipeScriptTest(unittest.TestCase):
         self.assertIn('[ "$GOT_SO" = "so=$CUR_SO" ]', s)
         self.assertIn("OPRUNWAY_ACLNN_STAMP_MISMATCH", s)
         self.assertIn("OPRUNWAY_ACLNN_BUILD_SKIP", s)
+        self.assertEqual(s.count("OPRUNWAY_ACLNN_VENDOR_ELF_SHA256="), 2)
         with _env(**_cfg_env(self.root)):
             cfg = A._aclnn_cfg()
         for token in (f"repo={_BASE_REPO}", f"ref={_PR_SHA}", f"sha={_PR_SHA}",
