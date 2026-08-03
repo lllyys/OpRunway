@@ -6,16 +6,28 @@ gitcode token 走环境：优先 $GITCODE_TOKEN，退回 $OPRUNWAY_GITCODE_TOKEN
 公开内容无 token 也尽量 raw 取。**token 不落盘、不进输出。**
 
 用法:
-  python3 fetch_source.py --taskdoc <path|url> [--pr <gitcode PR url>] --out <dir>
+  python3 fetch_source.py --taskdoc <path|url> [--pr <gitcode PR url> | --pr-snapshot <dir>]
+                          [--target-dir <仓内相对目录>] --out <dir>
 产出:
   <out>/task_doc.md      任务书原文（本地读或链接取）
   <out>/task_doc.snapshot.md 与原文逐字节相同的稳定引文锚（CP-A 即落，供 spec/golden 共用 SHA）
-  <out>/pr_facts.json    PR 事实（给了 --pr 才有）：op / 目标仓·目录 / base·head / changed_files /
-                         关键文件内容（op 自带 example、op_def）——供 ② 抽 spec、③ 锚定 runner
-  <out>/source_facts.json 内容寻址事实索引（给了 --pr 才有）：任务书字节、PR head、关键文件 ref/摘要、
+  <out>/pr_facts.json    PR 事实（给了 --pr 或 --pr-snapshot 才有）：op / 目标仓·目录 / base·head /
+                         changed_files / 关键文件内容（op 自带 example、op_def）——供 ② 抽 spec、③ 锚定 runner
+  <out>/source_facts.json 内容寻址事实索引（同上）：任务书字节、PR head、关键文件 ref/摘要、
                           接口派生事实与完整性状态——供非真机断点复用，不含 token/关键文件正文
 说明：链接失败/无权限时不静默——task_doc 取不到直接报错；PR 链接**形态不认识→直接报错（fail-loud，属用户输入错）、不产空壳**；
       PR 链接认识但字段取不到（网络/权限）→记进 pr_facts.notes 继续（属环境问题，与「URL 写错」错误信息分开）。
+
+`--target-dir`：显式指定被测算子在仓内的相对目录，**逐字采用**、并以其末段作 op 名，绕过 `_guess_op` 的
+      路径探测（探测器要求算子目录之上至少还有一层，仓根一级布局如 ops-cv 的 `gaussian_blur/` 探不到）。
+      不给就完全按今天的行为走。
+
+`--pr-snapshot`：降级取材通路，输入是**本地一份没有 git 的目录快照**（与 `--pr` 互斥）。
+      产 `provenance_kind="local_snapshot"` + `head_sha=null`（**绝不合成 40 位 hex**）
+      + `snapshot_merkle_sha256`（对「排序后的相对路径 × 文件字节」求的确定性摘要）。
+      ⚠ merkle 只证「本地这份字节是什么」，**不证**它等于任何 PR head；`source_facts.completeness`
+      因此落第三档 `snapshot_only`（既非 complete 也非 blocked），下游各门仍只认 `complete`，
+      要不要放行这条降级路由由编排层/人另行决定，本脚本不替它松门。
 """
 import argparse, hashlib, json, os, re, sys, tempfile, urllib.parse, urllib.request
 
@@ -163,6 +175,67 @@ def _guess_op(paths):
     return None, None
 
 
+def _norm_target_dir(value):
+    """规范化 `--target-dir` 覆盖值 → (op, target_dir)；形态不合法 fail-loud。
+
+    ⚠ 这是**覆盖**不是**探测**：给了就逐字采用（末段即 op 名），不再跑 `_guess_op`。
+    `_guess_op` 的正则要求算子目录之上至少还有一层（`<族>/<op>/op_host/…`），仓根一级布局
+    （ops-cv 的 `gaussian_blur/op_host/…`）探不到 → 返回 (None, None) → key_files 全空 →
+    接口形态被误判成 `library_header` 并 BLOCKED。改正则会动到既有多层目录语义，故走覆盖口。
+    """
+    if value is None:
+        return None, None
+    rel = str(value).strip().strip("/")
+    parts = [seg for seg in rel.split("/") if seg]
+    if (not rel or "\x00" in rel or os.path.isabs(str(value).strip())
+            or len(parts) != len(rel.split("/")) or any(p in (".", "..") for p in parts)):
+        raise ValueError(
+            f"--target-dir 形态不合法：{value!r}\n"
+            "  期望：仓内**相对**目录，用 `/` 分段，不含空段 / `.` / `..`（例：gaussian_blur 或 image/resize）。")
+    return parts[-1], "/".join(parts)
+
+
+def _key_file_candidates(paths, target_dir):
+    """按同一优先级口径列出关键文件候选 → (一等接口头列表, 去重保序的候选列表)。
+
+    `--pr` 与 `--pr-snapshot` **共用这一份口径**，免得两条取材路各自漂移。
+    顺序即优先级；**aclnn 接口头不进任何截断档**（见 `_aclnn_headers` 的理由），
+    后两档仍各自设上限（防某些 PR 改上百个文件时把请求数打爆）。
+    """
+    hdrs = _aclnn_headers(paths, target_dir)
+    want = (hdrs
+            + [p for p in paths if "/examples/" in p and p.endswith(".cpp")][:6]
+            + [p for p in paths if p.endswith("_def.cpp") or "/op_host/" in p][:4])
+    return hdrs, list(dict.fromkeys(want))     # 去重保序：接口头也落在 `/op_host/` 档里，别重复请求
+
+
+def _apply_key_file_facts(facts, key, key_ref, hdrs):
+    """把关键文件与接口形态派生事实写进 facts —— `--pr` 与 `--pr-snapshot` 共用。"""
+    facts["key_files"] = key
+    facts["key_files_ref"] = key_ref  # 每个关键文件实际取自哪个 ref（供下游判新鲜度）
+    facts["aclnn_headers"] = [p for p in hdrs if p in key]   # 一等接口头：真取到的那些（供下游只认它）
+    # 一等接口头是否真取到 —— 下游（acc-spec 的 call_variants / out_role / runner arity）**只认它**，
+    # 取不到就必须知道「是没改动、还是没取到」，不能让下游拿 example 的调用写法反推签名当权威。
+    #
+    # ⚠ 判据必须用 **`_aclnn_headers` 的结果**，不能拿 `_ACLNN_HDR_RE` 去扫整个 `key_files`（那是 fail-open）：
+    # `key_files` 里还混着 `/op_host/` 那一档**不限目录、不剔 impl** 捞进来的文件，于是
+    #   · 同 PR 里**别的算子**的 `aclnn_other.h`、
+    #   · 本算子的内部实现头 `aclnn_median_impl.h`（它同样匹配 `aclnn_[A-Za-z0-9_]+\\.h`）
+    # 都会把这条「第一依据缺席」的告警**压掉** —— 而这两者都给不出本算子的对外签名，
+    # 下游照样只能靠猜，却再也收不到警告。这正是本仓最忌的「假覆盖」。
+    if not facts["aclnn_headers"]:
+        facts["notes"].append(
+            "本 PR 的改动文件里没有取到 aclnn 接口头（`aclnn_*.h`，已剔 `*_impl.h`）→ "
+            "**aclnn 路由的第一依据缺席**：`call_variants` 的 symbol/形参顺序、多输出 out_role、runner arity "
+            "都不得据 example 或算子名反推。要么该 PR 本就没改接口头（去 base 仓同目录取），要么取材失败——"
+            "两种都须核实后再抽 spec。")
+    # 批 6b B-core：据 key_files 机器判接口形态 + 抽真实 aclnn 入口（供 runner 锚定、scope gate 消费）。
+    _ik, _entry, _ik_note = _detect_interface_kind(key)
+    facts["interface_kind"], facts["aclnn_entry"] = _ik, _entry
+    facts["notes"].append(f"接口形态(批6b探测)：{_ik_note}")
+    return facts
+
+
 # aclnn 对外接口头：文件名形态 `aclnn_<...>.h`（**不预设它在算子目录下的哪一层**）。
 # `*_impl.h` 是内部实现头、不是对外两段式接口 → 剔除（与 `aclnn_adapter.find_aclnn_project` 同口径）。
 _ACLNN_HDR_RE = re.compile(r"(?:^|/)aclnn_[A-Za-z0-9_]+\.h$")
@@ -285,14 +358,18 @@ def _detect_interface_kind(key_files):
             "有 op_def 迹象但探不到确切的 aclnn 两段式配对 → fail-closed，BLOCKED，不猜")
 
 
-def fetch_pr(pr_url, out_dir):
+def fetch_pr(pr_url, out_dir, target_dir=None):
     """PR：解析 gitcode PR 链接 → API 取 元信息 + 改动文件 + 关键文件（example/op_def），写 pr_facts.json。
+
+    `target_dir` 非 None 时**逐字覆盖** `_guess_op` 的探测结果（op 取其末段）；为 None 时行为与既往逐字一致。
 
     两种失败严格区分：
       · URL 形态不认识 → `_parse_pr_url` 抛 ValueError（fail-loud，属用户输入错），**在任何网络调用之前**中止、不落 pr_facts.json；
       · URL 认识但网络/token 取不到字段 → 不抛，记进 facts["notes"] 继续（属环境问题，错误信息与「URL 写错」不同，别让用户误改 URL）。"""
     owner, repo, num = _parse_pr_url(pr_url)  # 形态错 → 抛出（fail-loud），不产空壳
-    facts = {"pr_url": pr_url, "notes": [], "source_repo": f"{owner}/{repo}"}
+    _ov_op, _ov_dir = _norm_target_dir(target_dir)   # 形态错也在网络之前抛
+    facts = {"pr_url": pr_url, "notes": [], "source_repo": f"{owner}/{repo}",
+             "provenance_kind": "gitcode_pr"}
     st, pr = _get(f"{API}/repos/{owner}/{repo}/pulls/{num}")
     if st == 200 and isinstance(pr, dict):
         facts["title"] = pr.get("title")
@@ -321,7 +398,11 @@ def fetch_pr(pr_url, out_dir):
     facts["changed_files"] = paths
     if not paths:
         facts["notes"].append("未取到改动文件列表（op/example 需人工或 --pr 换取）")
-    op, target_dir = _guess_op(paths)
+    if _ov_dir:
+        op, target_dir = _ov_op, _ov_dir
+        facts["notes"].append(f"target_dir 由 --target-dir 显式覆盖为 {target_dir}（未走 _guess_op 路径探测）")
+    else:
+        op, target_dir = _guess_op(paths)
     facts["op"], facts["target_dir"] = op, target_dir
     # 关键文件：op 自带 example（runner 锚定用）+ op_def（支持 dtype）
     # ⚠ **只按 head_sha 取，不再按分支名兜底**（U5，2026-07-22 实测后收紧）。
@@ -359,38 +440,12 @@ def fetch_pr(pr_url, out_dir):
     key, key_ref = {}, {}
     hdrs = []
     if target_dir:
-        # ⚠ 顺序即优先级，且 **aclnn 接口头不进任何截断档**（见 `_aclnn_headers` 的理由）。
-        # 后两档仍各自设上限（防某些 PR 改上百个文件时把请求数打爆）。
-        hdrs = _aclnn_headers(paths, target_dir)
-        want = (hdrs
-                + [p for p in paths if "/examples/" in p and p.endswith(".cpp")][:6]
-                + [p for p in paths if p.endswith("_def.cpp") or "/op_host/" in p][:4])
-        for rel in dict.fromkeys(want):     # 去重保序：接口头也落在 `/op_host/` 档里，别重复请求
+        hdrs, want = _key_file_candidates(paths, target_dir)
+        for rel in want:
             c, r = _grab(rel)
             if c:
                 key[rel], key_ref[rel] = c, r
-    facts["key_files"] = key
-    facts["key_files_ref"] = key_ref  # 每个关键文件实际取自哪个 ref（供下游判新鲜度）
-    facts["aclnn_headers"] = [p for p in hdrs if p in key]   # 一等接口头：真取到的那些（供下游只认它）
-    # 一等接口头是否真取到 —— 下游（acc-spec 的 call_variants / out_role / runner arity）**只认它**，
-    # 取不到就必须知道「是没改动、还是没取到」，不能让下游拿 example 的调用写法反推签名当权威。
-    #
-    # ⚠ 判据必须用 **`_aclnn_headers` 的结果**，不能拿 `_ACLNN_HDR_RE` 去扫整个 `key_files`（那是 fail-open）：
-    # `key_files` 里还混着 `/op_host/` 那一档**不限目录、不剔 impl** 捞进来的文件，于是
-    #   · 同 PR 里**别的算子**的 `aclnn_other.h`、
-    #   · 本算子的内部实现头 `aclnn_median_impl.h`（它同样匹配 `aclnn_[A-Za-z0-9_]+\.h`）
-    # 都会把这条「第一依据缺席」的告警**压掉** —— 而这两者都给不出本算子的对外签名，
-    # 下游照样只能靠猜，却再也收不到警告。这正是本仓最忌的「假覆盖」。
-    if not facts["aclnn_headers"]:
-        facts["notes"].append(
-            "本 PR 的改动文件里没有取到 aclnn 接口头（`aclnn_*.h`，已剔 `*_impl.h`）→ "
-            "**aclnn 路由的第一依据缺席**：`call_variants` 的 symbol/形参顺序、多输出 out_role、runner arity "
-            "都不得据 example 或算子名反推。要么该 PR 本就没改接口头（去 base 仓同目录取），要么取材失败——"
-            "两种都须核实后再抽 spec。")
-    # 批 6b B-core：据 key_files 机器判接口形态 + 抽真实 aclnn 入口（供 runner 锚定、scope gate 消费）。
-    _ik, _entry, _ik_note = _detect_interface_kind(key)
-    facts["interface_kind"], facts["aclnn_entry"] = _ik, _entry
-    facts["notes"].append(f"接口形态(批6b探测)：{_ik_note}")
+    _apply_key_file_facts(facts, key, key_ref, hdrs)
     # 现在只有 head_sha 一个 ref，取到的必定就是 head；stale 概念随兜底一并退役。
     # 保留一条正向记账：明确告知下游「这些文件确实钉在哪个 commit 上」。
     if key and head_sha:
@@ -408,10 +463,156 @@ def _dump_facts(facts, out_dir):
     return dst
 
 
+# 走目录快照时跳过的目录名：VCS 元数据 + 常见构建/缓存产物。
+# ⚠ 跳过项**必须记进 pr_facts**（`snapshot_skipped_dir_names`），否则 merkle 覆盖了什么就成了暗知识。
+_SNAPSHOT_SKIP_DIRS = frozenset({
+    ".git", ".gitcode", ".github", ".hg", ".svn",
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".cache",
+    "build", "output", "node_modules", ".idea", ".vscode",
+})
+
+
+def _walk_snapshot(root, scope_rel=""):
+    """列出快照目录下的**普通文件**相对路径（相对 root、`/` 分隔、已排序）。
+
+    · 不跟随符号链接（目录与文件都跳过 symlink）——快照要的是「这份目录里的字节」，不是它指向别处的字节；
+    · 按名跳过 `_SNAPSHOT_SKIP_DIRS`；
+    · `scope_rel` 非空时只走该子树，但相对路径仍**以 root 为基准**（下游 `_aclnn_headers` 等按仓内路径匹配）。
+    """
+    base = os.path.join(root, *scope_rel.split("/")) if scope_rel else root
+    out = []
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in _SNAPSHOT_SKIP_DIRS
+                             and not os.path.islink(os.path.join(dirpath, d)))
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full) or not os.path.isfile(full):
+                continue
+            out.append(os.path.relpath(full, root).replace(os.sep, "/"))
+    return sorted(out)
+
+
+def _snapshot_merkle(root, rel_paths):
+    """对「排序后的相对路径 × 文件字节」求确定性 sha256。
+
+    逐条先各自摘要再喂进总摘要，避免路径与内容拼接产生歧义（`a`+`bc` 与 `ab`+`c` 撞一起）。
+    ⚠ 这个摘要**只回答「本地这份字节是什么」**，不回答「它等于哪个 commit」——
+    绝不能被当成 head_sha 的替代品往下游 provenance 里塞。
+    """
+    h = hashlib.sha256()
+    for rel in rel_paths:
+        with open(os.path.join(root, *rel.split("/")), "rb") as f:
+            blob = f.read()
+        h.update(hashlib.sha256(rel.encode("utf-8")).digest())
+        h.update(hashlib.sha256(blob).digest())
+    return h.hexdigest()
+
+
+def _read_snapshot_text(root, rel):
+    """从快照里读一份关键文件的 UTF-8 文本；读不出（越界/二进制/IO 错）→ None，不抛。"""
+    try:
+        with open(content_address.safe_path(root, rel.replace("/", os.sep)), "rb") as f:
+            return f.read().decode("utf-8")
+    except (OSError, ValueError, UnicodeDecodeError, content_address.ContentAddressError):
+        return None
+
+
+def _assert_snapshot_dir(snapshot_dir):
+    """`--pr-snapshot` 的形态检查 → 规范化后的绝对路径；不合法 fail-loud。
+
+    单独抽出来是为了让 `main()` 能在**任何落盘之前**先校形态（与 `--pr` 的 URL 形态前置校验同口径），
+    不至于先写出半个 task_doc.md 再报「快照目录不存在」。
+    """
+    root = os.path.abspath(os.fspath(snapshot_dir))
+    if not os.path.isdir(root) or os.path.islink(root):
+        raise ValueError(f"--pr-snapshot 须指向一个已存在的真实目录（非符号链接）：{snapshot_dir!r}")
+    return root
+
+
+def scan_pr_snapshot(snapshot_dir, out_dir, target_dir=None):
+    """降级取材：把**本地一份没有 git 的目录快照**扫成 pr_facts.json（与 `--pr` 互斥）。
+
+    产出与 `--pr` 同形，差别只在 provenance 三项：
+      · `provenance_kind="local_snapshot"`；
+      · `head_sha=None` —— **绝不合成 40 位 hex**（AGENTS.md 5.8：不捏造）。没有 git 就是没有 head；
+      · `snapshot_merkle_sha256` —— 只证本地字节，**不证**它等于任何 PR head。
+
+    关键文件的挑选口径与 `--pr` **逐字相同**（`_key_file_candidates`），只是内容从磁盘读而不是走 API。
+    最终裁决层不得据此声称「已绑定 PR head」。
+    """
+    root = _assert_snapshot_dir(snapshot_dir)
+    _ov_op, _ov_dir = _norm_target_dir(target_dir)
+    if _ov_dir and not os.path.isdir(os.path.join(root, *_ov_dir.split("/"))):
+        raise ValueError(f"--target-dir 在快照里不存在：{_ov_dir}（快照根 {root}）")
+
+    paths = _walk_snapshot(root, _ov_dir or "")
+    if _ov_dir:
+        op, tdir = _ov_op, _ov_dir
+    else:
+        op, tdir = _guess_op(paths)
+
+    facts = {
+        "pr_url": None,
+        "notes": [],
+        "source_repo": None,
+        "provenance_kind": "local_snapshot",
+        "head_sha": None,                      # 没有 git 就是没有 head——不合成、不猜
+        "snapshot_merkle_sha256": _snapshot_merkle(root, paths),
+        "snapshot_scope": _ov_dir or "",
+        "snapshot_file_count": len(paths),
+        "snapshot_skipped_dir_names": sorted(_SNAPSHOT_SKIP_DIRS),
+        "changed_files": paths,
+        "op": op,
+        "target_dir": tdir,
+    }
+    facts["notes"].append(
+        "provenance=local_snapshot：输入是本地目录快照、无 git → **head_sha 为 null，未合成任何 commit id**。"
+        f"snapshot_merkle_sha256 覆盖 {len(paths)} 个文件"
+        f"（范围 {_ov_dir or '<快照根>'}，已跳过 {sorted(_SNAPSHOT_SKIP_DIRS)} 这些目录名），"
+        "**只证本地字节是什么，不证它等于任何 PR head**；下游不得据此声称已绑定 PR head。")
+    facts["notes"].append(
+        "changed_files 实为「该子树下的全部文件」，**不是 PR diff**——本通路拿不到 base，无法算真实改动集。")
+    if _ov_dir:
+        facts["notes"].append(f"target_dir 由 --target-dir 显式覆盖为 {tdir}（未走 _guess_op 路径探测）")
+
+    key, key_ref = {}, {}
+    hdrs = []
+    if tdir:
+        hdrs, want = _key_file_candidates(paths, tdir)
+        for rel in want:
+            c = _read_snapshot_text(root, rel)
+            if c is not None:
+                key[rel], key_ref[rel] = c, "local_snapshot"
+    _apply_key_file_facts(facts, key, key_ref, hdrs)
+    if not tdir:
+        facts["notes"].append(
+            "未能判出算子目录（`_guess_op` 对仓根一级布局探不到）→ 关键文件一份没取。请显式给 --target-dir。")
+    if not key:
+        facts["notes"].append("未取到 example/op_def 关键文件内容（runner 锚定需另取）")
+    return _dump_facts(facts, out_dir)
+
+
+# `provenance_kind="local_snapshot"` 下**必然**成立、且全部只源于「没有 PR / 没有 git」这一个事实的
+# reason。它们塞进 reasons 只会把真正的缺口淹掉，故在快照通路上折叠成单条
+# `pr_provenance_local_snapshot`。⚠ 折叠的是**表述**不是**门**：completeness 落第三档
+# `snapshot_only`，各门仍只认 `complete`，本函数一处门都不放松。
+_SNAPSHOT_PROVENANCE_REASONS = frozenset({
+    "missing_or_invalid_head_sha", "missing_pr_url", "missing_source_repo",
+    "missing_head_repo", "unknown_fork_status", "missing_pr_state",
+})
+_SNAPSHOT_PROVENANCE_REASON = "pr_provenance_local_snapshot"
+
+
 def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
     """构造内容寻址的非真机事实索引；不做 NL 抽取、不确认 correspondence。
 
-    `completeness=blocked` 的索引只供诊断，编排层不得把它作为 cache hit 放行。
+    `completeness` 三档：
+      · `complete`      —— 绑死 PR head，唯一被下游各门接受的一档；
+      · `snapshot_only` —— 输入是本地目录快照（`provenance_kind="local_snapshot"`），
+                           除「无 PR/无 head」这一族必然缺口外别无缺口。**既非 complete 也非 blocked**：
+                           事实是诚实可表达的，但**门没有放松**，要不要授权这条降级路由由编排层/人另行决定；
+      · `blocked`       —— 其余任何缺口；只供诊断，编排层不得把它作为 cache hit 放行。
     """
     with open(taskdoc_path, "rb") as src:
         task_raw = src.read()
@@ -457,6 +658,17 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
         reasons.append("missing_changed_files")
     if not key_index:
         reasons.append("missing_key_files")
+    provenance_kind = facts.get("provenance_kind") or "gitcode_pr"
+    if provenance_kind == "local_snapshot":
+        # key_file_ref_not_head:* 同属「没有 head 可绑」这一族必然缺口 → 一并折叠。
+        reasons = [r for r in reasons
+                   if r not in _SNAPSHOT_PROVENANCE_REASONS
+                   and not r.startswith("key_file_ref_not_head:")]
+        status = "blocked" if reasons else "snapshot_only"
+        reasons = sorted(set(reasons) | {_SNAPSHOT_PROVENANCE_REASON})
+    else:
+        status = "complete" if not reasons else "blocked"
+        reasons = sorted(set(reasons))
     with open(__file__, "rb") as src:
         logic_sha = hashlib.sha256(src.read()).hexdigest()
     payload = {
@@ -480,6 +692,12 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
             "head_repo": facts.get("head_repo"),
             "is_fork": facts.get("is_fork"),
             "state": facts.get("state"),
+            # provenance_kind ∈ {gitcode_pr, local_snapshot}；后者的 merkle **只证本地字节**，
+            # 不是 head_sha 的替代品，任何下游都不得据它声称「已绑定 PR head」。
+            "provenance_kind": provenance_kind,
+            "snapshot_merkle_sha256": (
+                facts.get("snapshot_merkle_sha256")
+                if isinstance(facts.get("snapshot_merkle_sha256"), str) else None),
         },
         "changed_files": sorted(
             p for p in (facts.get("changed_files") or []) if isinstance(p, str)),
@@ -492,10 +710,7 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
             "interface_kind": facts.get("interface_kind"),
             "aclnn_entry": facts.get("aclnn_entry"),
         },
-        "completeness": {
-            "status": "complete" if not reasons else "blocked",
-            "reasons": sorted(set(reasons)),
-        },
+        "completeness": {"status": status, "reasons": reasons},
         "producer": {"tool": "fetch_source.py", "logic_sha256": logic_sha},
     }
     content_address.canonical_json_bytes(payload)
@@ -550,7 +765,19 @@ def write_taskdoc_snapshot(taskdoc_path, snapshot_path):
 def main(argv):
     ap = argparse.ArgumentParser(description="① 取材：任务书(md/链接) + PR(链接) → 中立 JSON/文件")
     ap.add_argument("--taskdoc", required=True, help="任务书 md 本地路径 或 http(s) 链接")
-    ap.add_argument("--pr", default=None, help="gitcode PR 链接（可选）")
+    # `--pr` 与 `--pr-snapshot` 是两条**互斥**的取材通路：前者绑 PR head commit，后者只绑本地字节。
+    # 交给 argparse 互斥组而不是手写 if，是为了让「同时给两个」在参数解析期就被拒（退出码 2），
+    # 不至于走到「按哪个为准」这种要靠实现顺序才说得清的地方。
+    src = ap.add_mutually_exclusive_group()
+    src.add_argument("--pr", default=None, help="gitcode PR 链接（可选）")
+    src.add_argument("--pr-snapshot", default=None, metavar="DIR",
+                     help="降级取材：本地一份**没有 git** 的目录快照。产 provenance_kind=local_snapshot、"
+                          "head_sha=null（绝不合成 commit id）、snapshot_merkle_sha256；"
+                          "source_facts.completeness 落 snapshot_only，下游各门仍只认 complete")
+    ap.add_argument("--target-dir", default=None, metavar="REL_DIR",
+                    help="显式指定被测算子在仓内的相对目录（如 gaussian_blur 或 image/resize），"
+                         "**逐字采用**、末段即 op 名，绕过 _guess_op 的路径探测"
+                         "（探测器要求算子目录之上至少还有一层，仓根一级布局探不到）")
     ap.add_argument("--out", required=True, help="产出目录")
     ap.add_argument("--snapshot-into", default=None, metavar="DIR",
                     help="另把任务书原文逐字节落成 task_doc.snapshot.md 到该目录"
@@ -561,6 +788,13 @@ def main(argv):
     # 这里只校形态（纯函数、不联网）；取不到 PR 的网络失败仍在 fetch_pr 内按环境问题处理。
     if a.pr:
         _parse_pr_url(a.pr)
+    # 同理前置：`--target-dir` 形态（纯函数）与 `--pr-snapshot` 目录形态都不联网，先校完再落任何盘。
+    _norm_target_dir(a.target_dir)
+    if a.pr_snapshot:
+        _assert_snapshot_dir(a.pr_snapshot)
+    if a.target_dir and not (a.pr or a.pr_snapshot):
+        raise ValueError("--target-dir 只在给了 --pr 或 --pr-snapshot 时才有意义"
+                         "（它覆盖的是 pr_facts 里的算子目录探测结果）；单独给会被静默忽略，故直接拒。")
     import precision_policy
     os.makedirs(a.out, exist_ok=True)
     extra_snapshots = ()
@@ -583,12 +817,17 @@ def main(argv):
         print(f"        sha256 = {digest}")
         print(f"        ↑ 写进 golden.py 契约块的 taskdoc_snapshot.sha256；"
               f"引文 cite 用 {precision_policy.TASKDOC_SNAPSHOT_NAME}:<起>[-<止>]")
-    if a.pr:
-        pf = fetch_pr(a.pr, a.out)
+    if a.pr or a.pr_snapshot:
+        if a.pr:
+            pf = fetch_pr(a.pr, a.out, target_dir=a.target_dir)
+            _label = "PR"
+        else:
+            pf = scan_pr_snapshot(a.pr_snapshot, a.out, target_dir=a.target_dir)
+            _label = "本地快照(降级)"
         facts = json.load(open(pf, encoding="utf-8"))
         sf = write_source_facts(td, facts, a.out, source_locator=a.taskdoc)
-        print(f"[fetch] PR → {pf}  op={facts.get('op')} 目录={facts.get('target_dir')} "
-              f"改动{len(facts.get('changed_files', []))}文件 关键{len(facts.get('key_files', {}))}份")
+        print(f"[fetch] {_label} → {pf}  op={facts.get('op')} 目录={facts.get('target_dir')} "
+              f"文件{len(facts.get('changed_files', []))}个 关键{len(facts.get('key_files', {}))}份")
         source_payload = content_address.read_artifact(
             a.out, "source_facts.json", "oprunway/source-facts/v1")
         print(f"[fetch] 事实索引 → {sf} completeness="

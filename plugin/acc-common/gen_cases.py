@@ -2406,15 +2406,44 @@ def _uses_output_contract(spec):
 # 现在改成：**spec 声明式变体表 + gen_cases 逐 case 选中并完全解析**，写进该 case 的 `aclnn_call`；
 # driver 直接执行、不再推断。无匹配变体 → fail-closed，**绝不默认**。
 # 变体是**字段驱动**的（按 attr 取值判），不是按算子名分派——换任意声明了 call_variants 的算子零改即用。
-_ATTR_CTYPE_MAP = {"int64": "int64", "bool": "bool", "float32": "float", "float": "float"}
+#: **标量** attr 的 spec dtype → runner 的 ctype token。词表须与 `aclnn_runner._ATTR_CTYPES`
+#: （`{int64,bool,float32,float64}`）**逐字对齐**：runner 按这个 token 选 ctypes 类型拼 argtypes，
+#: 对不上就是 C ABI 宽度错位。`"double"` 是 spec 侧常见拼法（`isclose.spec.json` 的 rtol/atol 就写
+#: `["double"]`），在此归一到 `float64`，不新增第五个 token。
+#: ⚠ 旧表把 float32 映成 `"float"` —— 那是个**死 token**：runner 有专门的拒绝分支（C float/double 宽度
+#: 不同，须写 float32/float64），所以 aclnn_py 通路上任何浮点 attr 过去都必然 fail-closed。已删。
+_ATTR_CTYPE_MAP = {"int64": "int64", "bool": "bool", "float32": "float32",
+                   "float64": "float64", "double": "float64"}
+
+#: 数组型 attr 的 ctype token（与 runner 侧同名）。元素宽度由 ACL 的 `aclIntArray` 固定，
+#: **不由 spec dtype 派生**，故它不进 `_ATTR_CTYPE_MAP`（那张表是标量 C ABI 宽度表）。
+_ATTR_ARRAY_CTYPE = "int_array"
+
+#: “调用方没给值”的哨兵——`None` 是合法 attr 值（表示省略/缺省语义），不能拿它当“未传”。
+_UNSET = object()
 
 
-def _attr_ctype(p):
-    """attr 参数的 aclnn 标量 C 类型：int64→"int64"、bool→"bool"、float32/float→"float"。
+def _is_int_array(v):
+    """值结构判定：非空 `list[int]`（bool 元素拒，与 `_check_attr_value` 同口径）。"""
+    return (isinstance(v, list) and bool(v)
+            and all(isinstance(d, int) and not isinstance(d, bool) for d in v))
+
+
+def _attr_ctype(p, value=_UNSET):
+    """attr 参数的 aclnn ctype token：int64→"int64"、bool→"bool"、float32→"float32"、
+    float64/double→"float64"；**值是 `list[int]` → "int_array"**（`aclIntArray*` 形参）。
+
+    数组与标量的分流**只看值的结构**（op-中立：任何声明了 `list[int]` attr 的算子零改即用），
+    不看算子身份、也不新增 spec 字段。`value` 未传时退回看 `p["default"]` 的结构——
+    静态预检（`preflight_aclnn._abstract_slots`）只有 spec、没有 per-case 取值，靠这条得出同一答案。
 
     ⚠ dtype 候选必须**恰有一个**且在映射表内（审计 finding #5）：原先取 `dt[0]`，`["int64","int8"]` /
     `["float32","bogus"]` 都被静默收下 —— 而 attr 的 C 标量宽度拼错 = 远端 argtypes 错位 = 段错误。
-    多候选 / 空 / 未知一律 fail-closed（记 gap 交人裁，别静默挑一个）。"""
+    多候选 / 空 / 未知一律 fail-closed（记 gap 交人裁，别静默挑一个）。
+    数组分支不查这张表：`aclIntArray` 的元素宽度是 ACL 定死的，spec dtype 在那里不表示 C 宽度。"""
+    probe = p.get("default") if value is _UNSET else value
+    if _is_int_array(probe):
+        return _ATTR_ARRAY_CTYPE
     dt = p.get("dtype")
     if isinstance(dt, (list, tuple)):
         cands = list(dt)
@@ -2426,7 +2455,8 @@ def _attr_ctype(p):
     if dt not in _ATTR_CTYPE_MAP:
         raise ValueError(
             f"aclnn_call: attr {p.get('name')!r} 的 dtype {dt!r} 不支持标量映射"
-            f"（仅 {sorted(_ATTR_CTYPE_MAP)}），fail-closed（记 gap，别静默塞默认）")
+            f"（仅 {sorted(_ATTR_CTYPE_MAP)}；数组属性请给 list[int] 取值 → {_ATTR_ARRAY_CTYPE}），"
+            f"fail-closed（记 gap，别静默塞默认）")
     return _ATTR_CTYPE_MAP[dt]
 
 
@@ -2461,7 +2491,9 @@ def _build_aclnn_call(spec, variant, attrs, active_names, cid):
     slots 顺序 = spec.params 顺序 = aclnn 签名顺序（穿插的标量属性据此保位，ctypes runner 才拼得对 argtypes）。
     每个 slot 都带 `name`（供与 header 签名逐项对账）：
       · `{"role":"in","name":..,"input_idx":i}`      —— 第 i 个 case 输入；
-      · `{"role":"attr","name":..,"ctype":..,"value":..}` —— 已解析的标量实参（**None 一律 fail-closed**）；
+      · `{"role":"attr","name":..,"ctype":..,"value":..}` —— 已解析的实参（**None 一律 fail-closed**）；
+        ctype 由**值的结构**分流：标量 → `int64/bool/float32/float64`；非空 `list[int]` → `int_array`
+        （runner 侧建 `aclIntArray*`）。分流不看算子身份，只看这一个 case 里该 attr 的取值长什么样；
       · `{"role":"out","name":..,"output_idx":k}`    —— 对应 expected.outputs[k]；
       · `{"role":"out_null","name":..}`              —— 该变体不落地此输出 → 传 NULL、不回读。
     """
@@ -2484,7 +2516,11 @@ def _build_aclnn_call(spec, variant, attrs, active_names, cid):
                     f"**绝不静默转标量默认值**（那既不是该 case 的语义、又可能与签名不符）。"
                     f"请在 spec 的该变体里显式声明 attrs.{name}，或把它移出 active_attrs（换用无此形参的变体），"
                     f"fail-closed")
-            slots.append({"role": "attr", "name": name, "ctype": _attr_ctype(p), "value": value})
+            ctype = _attr_ctype(p, value)
+            # 数组值另拷一份：variant["attrs"] / case attrs 里的那个 list 会被多条 case 共享，
+            # 落进 caseset 的 slot 不该与它同一个对象（谁就地改一下就串到别的 case）。
+            slots.append({"role": "attr", "name": name, "ctype": ctype,
+                          "value": list(value) if isinstance(value, list) else value})
         elif io == "out":
             if name in out_pos:
                 slots.append({"role": "out", "name": name, "output_idx": out_pos[name]})

@@ -10,9 +10,13 @@
     且 notes 不把它说成「URL 格式错」（免得误导用户改 URL）
   - Gap-1: `aclnn_*.h` 接口头是**一等 key_file**——不受 `/op_host/` 档 `[:4]` 截断、优先取、
     剔 `*_impl.h`、层级不预设、只收目标算子目录下的、去重、缺席时 notes 点名
-不打真网络: URL 形态用例走纯函数 _parse_pr_url（解析在网络之前）; 网络分支用桩替掉 fetch_source._get。
+  - `--target-dir` 覆盖: 仓根一级布局（`<op>/op_host/…`，`_guess_op` 探不到）显式指定即可取到关键文件
+  - `--pr-snapshot` 降级取材: head_sha 恒为 None（**不合成 commit id**）、merkle 确定、
+    `source_facts.completeness == "snapshot_only"`（第三档，非 complete 亦非 blocked）
+不打真网络: URL 形态用例走纯函数 _parse_pr_url（解析在网络之前）; 网络分支用桩替掉 fetch_source._get；
+    快照用例全走本地临时目录，一次网络都不碰。
 """
-import os, json, tempfile, unittest
+import hashlib, os, json, tempfile, unittest
 import fetch_source as fs
 
 
@@ -670,6 +674,347 @@ class SourceFactsTest(unittest.TestCase):
             fs.write_source_facts(task, self._facts(), d)
             second = json.load(open(path, encoding="utf-8"))
             self.assertNotEqual(first["digest"], second["digest"])
+
+
+# ── S3c fixtures：仓根一级布局的最小算子子树（形状照 ops-cv 的 `gaussian_blur/`）────────────
+# ⚠ 这里只是**结构见证**，不是按算子身份特判：判定全走「路径形态 × 文件内容正则」，
+#   换任何仓根一级布局的算子，同一份代码路径逐字适用（AGENTS.md 5.1）。
+_ROOT_OP_DIR = "gaussian_blur"
+_ROOT_HDR = _ROOT_OP_DIR + "/op_api/aclnn_gaussian_blur.h"
+_ROOT_EXAMPLE = _ROOT_OP_DIR + "/examples/test_aclnn_gaussian_blur.cpp"
+_ROOT_DEF = _ROOT_OP_DIR + "/op_host/gaussian_blur_def.cpp"
+
+# stage2 是 10 参（非标准），stage1 的 dst 又写成 const —— 内容照抄 PR 的形态，
+# 好让 `_detect_interface_kind` 在真实（而非理想化）文本上被检验。
+_ROOT_HDR_SRC = (
+    "aclnnStatus aclnnGaussianBlurGetWorkspaceSize(\n"
+    "    const aclTensor* src, const aclIntArray* ksize, double sigmaX, double sigmaY,\n"
+    "    int64_t borderType, const aclTensor* dst, uint64_t* workspaceSize,\n"
+    "    aclOpExecutor** executor);\n"
+    "aclnnStatus aclnnGaussianBlur(\n"
+    "    void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,\n"
+    "    const aclTensor* src, const aclIntArray* ksize, double sigmaX, double sigmaY,\n"
+    "    int64_t borderType, aclTensor* dst, const aclrtStream stream);\n")
+_ROOT_EXAMPLE_SRC = (
+    "  auto ksize = aclCreateIntArray(ksizeData.data(), 2);\n"
+    "  aclnnGaussianBlurGetWorkspaceSize(src, ksize, 1.5, 1.5, 0, dst, &ws, &exe);\n"
+    "  aclnnGaussianBlur(wsAddr, ws, exe, src, ksize, 1.5, 1.5, 0, dst, stream);\n")
+_ROOT_DEF_SRC = 'this->AICore().AddConfig("ascend950");\n'
+_ROOT_SRC_BY_PATH = {_ROOT_HDR: _ROOT_HDR_SRC,
+                     _ROOT_EXAMPLE: _ROOT_EXAMPLE_SRC,
+                     _ROOT_DEF: _ROOT_DEF_SRC}
+
+
+class NormTargetDirTest(unittest.TestCase):
+    """`--target-dir` 是**覆盖**不是探测：合法形态逐字采用（末段即 op 名），非法形态 fail-loud。"""
+
+    def test_none_is_passthrough(self):
+        self.assertEqual(fs._norm_target_dir(None), (None, None))
+
+    def test_depth_one_is_accepted(self):
+        """核心：**深度 1**（仓根一级）必须被接受——`_guess_op` 恰恰是在这里探不到。"""
+        self.assertEqual(fs._norm_target_dir("gaussian_blur"), ("gaussian_blur", "gaussian_blur"))
+
+    def test_multi_level_and_slack_slashes(self):
+        self.assertEqual(fs._norm_target_dir("experimental/index/median"),
+                         ("median", "experimental/index/median"))
+        # 首尾空白与结尾斜杠是「手滑」，容忍；**开头的 `/` 不容忍**——那看着就是绝对路径，
+        # 而这个字段的契约是「仓内相对目录」。宁可 fail-loud 让人把话说清楚，
+        # 也不猜「他大概是想要相对路径吧」（下面 test_malformed_values_raise 也锁了 "/abs/path"）。
+        self.assertEqual(fs._norm_target_dir("  image/resize/  "), ("resize", "image/resize"))
+        with self.assertRaises(ValueError):
+            fs._norm_target_dir("  /image/resize/  ")
+
+    def test_malformed_values_raise(self):
+        for bad in ("", "   ", "/", "..", "a/../b", "a/./b", "a//b", "/abs/path", "a\x00b"):
+            with self.assertRaises(ValueError, msg=f"应拒: {bad!r}"):
+                fs._norm_target_dir(bad)
+
+    def test_error_message_is_actionable(self):
+        with self.assertRaises(ValueError) as cm:
+            fs._norm_target_dir("../escape")
+        self.assertIn("--target-dir", str(cm.exception))
+
+
+class TargetDirOverrideInFetchPrTest(unittest.TestCase):
+    """S3c(a)：仓根一级算子目录（`<op>/op_host/…`）——`_guess_op` 要求算子目录之上**还有一层**，
+    对这种布局返回 (None, None) → key_files 全空 → `_detect_interface_kind({})` 判 `library_header`
+    并 BLOCKED。`--target-dir` 覆盖口把它解开，且探测器一行未动（既有多层目录语义零回归）。
+
+    桩掉 `_get`/`_repo_file`，绝不打真网络。"""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self._get, self._file = fs._get, fs._repo_file
+        self.asked = []
+
+    def tearDown(self):
+        fs._get, fs._repo_file = self._get, self._file
+
+    def _facts(self, files, target_dir=None, num=1):
+        def g(url, params=None, timeout=30):
+            if url.endswith("/files"):
+                return 200, [{"filename": f} for f in files]
+            return 200, {"title": "t", "state": "opened", "base": {"ref": "master"},
+                         "head": {"ref": "feat", "sha": "c" * 40,
+                                  "repo": {"full_name": "cann/ops-cv"}}}
+        fs._get = g
+        fs._repo_file = lambda o, r, p, ref=None: (
+            (self.asked.append(p) or _ROOT_SRC_BY_PATH.get(p, f"// {p}")) if ref else None)
+        fs.fetch_pr(f"https://gitcode.com/cann/ops-cv/merge_requests/{num}", self.d,
+                    target_dir=target_dir)
+        with open(os.path.join(self.d, "pr_facts.json"), encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_root_level_layout_is_blocked_without_override(self):
+        """先钉住**病灶本身**：不给覆盖参数时，仓根一级布局依旧探不到、依旧 BLOCKED。
+
+        这条不是「期望行为」，是「本 slice 未改探测器」的证据——修的是入口不是探测器。"""
+        facts = self._facts([_ROOT_HDR, _ROOT_EXAMPLE, _ROOT_DEF])
+        self.assertIsNone(facts["op"])
+        self.assertIsNone(facts["target_dir"])
+        self.assertEqual(facts["key_files"], {})
+        self.assertEqual(facts["interface_kind"], "library_header")
+
+    def test_depth_one_override_recovers_op_and_key_files(self):
+        """给了 `--target-dir gaussian_blur`（深度 1）→ op/target_dir 逐字采用，关键文件全取到。"""
+        facts = self._facts([_ROOT_HDR, _ROOT_EXAMPLE, _ROOT_DEF], target_dir="gaussian_blur")
+        self.assertEqual(facts["op"], "gaussian_blur")
+        self.assertEqual(facts["target_dir"], "gaussian_blur")
+        self.assertIn(_ROOT_HDR, facts["key_files"])
+        self.assertIn(_ROOT_EXAMPLE, facts["key_files"])
+        self.assertEqual(facts["aclnn_headers"], [_ROOT_HDR],
+                         "仓根一级布局下接口头同样是一等 key_file")
+
+    def test_depth_one_override_fixes_interface_kind_and_entry(self):
+        """覆盖之后接口形态从误判的 `library_header` 变回 `aclnn_2stage`，入口名从 example 抽真名。"""
+        facts = self._facts([_ROOT_HDR, _ROOT_EXAMPLE, _ROOT_DEF], target_dir="gaussian_blur")
+        self.assertEqual(facts["interface_kind"], "aclnn_2stage")
+        self.assertEqual(facts["aclnn_entry"], "aclnnGaussianBlur")
+
+    def test_override_is_recorded_in_notes(self):
+        """覆盖了探测器就必须留痕——否则下游看不出 target_dir 是人给的还是探出来的。"""
+        facts = self._facts([_ROOT_HDR, _ROOT_DEF], target_dir="gaussian_blur")
+        self.assertTrue(any("--target-dir" in n for n in facts["notes"]), facts["notes"])
+
+    def test_override_wins_over_guessable_layout(self):
+        """多层布局本来探得到，但显式覆盖仍**逐字优先**（覆盖不是兜底）。"""
+        guessable = "experimental/index/median/op_host/median.cpp"
+        facts = self._facts([guessable, _ROOT_HDR], target_dir="gaussian_blur")
+        self.assertEqual(facts["target_dir"], "gaussian_blur")
+        self.assertEqual(facts["op"], "gaussian_blur")
+
+    def test_no_override_keeps_existing_multi_level_behaviour(self):
+        """零回归：不给覆盖参数时，既有多层目录语义逐字不变。"""
+        facts = self._facts(["experimental/index/median/op_host/median.cpp"])
+        self.assertEqual(facts["op"], "median")
+        self.assertEqual(facts["target_dir"], "experimental/index/median")
+
+    def test_malformed_override_raises_before_any_network(self):
+        """形态错要在**任何网络调用之前**抛（与 URL 形态校验同口径），且不落空壳 pr_facts。"""
+        called = {"n": 0}
+
+        def _boom(*a, **k):
+            called["n"] += 1
+            return 0, "should-not-be-reached"
+
+        fs._get = _boom
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ValueError):
+                fs.fetch_pr("https://gitcode.com/cann/ops-cv/merge_requests/1", d,
+                            target_dir="../escape")
+            self.assertFalse(os.path.exists(os.path.join(d, "pr_facts.json")))
+        self.assertEqual(called["n"], 0, "形态错应在任何网络调用之前 fail-loud")
+
+
+class PrSnapshotProvenanceTest(unittest.TestCase):
+    """S3c(b)：`--pr-snapshot` 降级取材——被测目录**没有 .git**，所以根本没有 head sha。
+
+    三条不可退让的性质：
+      ① `head_sha` 恒为 **None**，绝不合成 40 位 hex（AGENTS.md 5.8：不捏造）；
+      ② `snapshot_merkle_sha256` 只证「本地这份字节是什么」，**不证**它等于任何 PR head；
+      ③ `completeness` 落第三档 `snapshot_only`——事实诚实可表达，但**一处门都没放松**。
+    全程本地临时目录，不碰网络。"""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.root = os.path.join(self.d, "snapshot")
+        self.out = os.path.join(self.d, "out")
+        os.makedirs(self.out, exist_ok=True)
+        for rel, body in _ROOT_SRC_BY_PATH.items():
+            self._write(rel, body)
+        # 无 git、只有 .gitcode —— 正是本轮 DUT 的真实形态；连同常见构建产物一起应被跳过
+        self._write(".gitcode/ci.yml", "jobs: []\n")
+        self._write(".git/config", "[core]\n")
+        self._write(_ROOT_OP_DIR + "/build/gaussian_blur.o", "binary-ish\n")
+        self.task = os.path.join(self.d, "task_doc.md")
+        with open(self.task, "wb") as f:
+            f.write("任务书正文\n".encode("utf-8"))
+
+    def _write(self, rel, body):
+        full = os.path.join(self.root, *rel.split("/"))
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as f:
+            f.write(body)
+        return full
+
+    def _scan(self, target_dir="gaussian_blur", out=None):
+        path = fs.scan_pr_snapshot(self.root, out or self.out, target_dir=target_dir)
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+
+    # ── ① head_sha 必须是 null ───────────────────────────────────────────────
+    def test_head_sha_is_none_and_never_synthesized(self):
+        facts = self._scan()
+        self.assertIn("head_sha", facts, "字段必须在场（显式 null），不能整个缺席")
+        self.assertIsNone(facts["head_sha"], "没有 git 就是没有 head——绝不合成 commit id")
+        self.assertEqual(facts["provenance_kind"], "local_snapshot")
+        blob = json.dumps(facts, ensure_ascii=False)
+        import re as _re
+        for hit in _re.findall(r"\b[0-9a-f]{40}\b", blob):
+            self.fail(f"快照通路的 pr_facts 里出现了 40 位 hex（疑似合成 commit id）：{hit}")
+
+    def test_merkle_is_deterministic_and_content_sensitive(self):
+        """merkle 覆盖「排序后的相对路径 × 文件字节」：同内容同值，改一个字节就变。"""
+        first = self._scan()["snapshot_merkle_sha256"]
+        self.assertRegex(first, r"^[0-9a-f]{64}$")
+        self.assertEqual(self._scan()["snapshot_merkle_sha256"], first, "同一份字节应给同一摘要")
+        self._write(_ROOT_DEF, _ROOT_DEF_SRC + "// one more byte\n")
+        self.assertNotEqual(self._scan()["snapshot_merkle_sha256"], first,
+                            "内容变了摘要必须跟着变，否则它证明不了任何东西")
+
+    def test_merkle_is_not_passed_off_as_head_sha(self):
+        """merkle **不是** head_sha 的替代品：两个字段各归各位，不得互相顶替。"""
+        facts = self._scan()
+        payload = fs.build_source_facts(self.task, facts)
+        self.assertIsNone(payload["pr"]["head_sha"])
+        self.assertEqual(payload["pr"]["snapshot_merkle_sha256"],
+                         facts["snapshot_merkle_sha256"])
+        self.assertEqual(payload["pr"]["provenance_kind"], "local_snapshot")
+
+    # ── 目录遍历口径 ──────────────────────────────────────────────────────────
+    def test_vcs_and_build_dirs_are_skipped_and_disclosed(self):
+        facts = self._scan(target_dir=None)      # 不限范围 → 走整棵树，才看得到根级 .git/.gitcode
+        self.assertNotIn(".git/config", facts["changed_files"])
+        self.assertNotIn(".gitcode/ci.yml", facts["changed_files"])
+        self.assertNotIn(_ROOT_OP_DIR + "/build/gaussian_blur.o", facts["changed_files"])
+        self.assertIn(".git", facts["snapshot_skipped_dir_names"],
+                      "跳过了什么必须记进 pr_facts，否则 merkle 覆盖范围成了暗知识")
+
+    def test_scope_limits_walk_but_paths_stay_repo_relative(self):
+        facts = self._scan()
+        self.assertEqual(facts["snapshot_scope"], "gaussian_blur")
+        self.assertEqual(facts["changed_files"], sorted([_ROOT_HDR, _ROOT_EXAMPLE, _ROOT_DEF]),
+                         "范围内的普通文件全在，且路径以快照根为基准（下游按仓内路径匹配）")
+        self.assertEqual(facts["snapshot_file_count"], 3)
+
+    def test_changed_files_is_disclosed_as_not_a_diff(self):
+        """`changed_files` 在这条路上其实是「子树全部文件」，不是 PR diff——必须说清楚。"""
+        facts = self._scan()
+        self.assertTrue(any("不是 PR diff" in n for n in facts["notes"]), facts["notes"])
+
+    def test_key_files_and_interface_kind_match_the_pr_path(self):
+        """关键文件挑选口径与 `--pr` 逐字相同，只是内容从磁盘读。"""
+        facts = self._scan()
+        self.assertEqual(facts["op"], "gaussian_blur")
+        self.assertEqual(facts["aclnn_headers"], [_ROOT_HDR])
+        self.assertEqual(facts["key_files"][_ROOT_HDR], _ROOT_HDR_SRC)
+        self.assertEqual(facts["key_files_ref"][_ROOT_HDR], "local_snapshot")
+        self.assertEqual(facts["interface_kind"], "aclnn_2stage")
+        self.assertEqual(facts["aclnn_entry"], "aclnnGaussianBlur")
+
+    def test_missing_or_bad_snapshot_dir_fails_loud(self):
+        with self.assertRaises(ValueError):
+            fs.scan_pr_snapshot(os.path.join(self.d, "nope"), self.out)
+        with self.assertRaises(ValueError):
+            fs.scan_pr_snapshot(self.task, self.out)          # 是文件不是目录
+        with self.assertRaises(ValueError):
+            fs.scan_pr_snapshot(self.root, self.out, target_dir="not_here")
+
+    # ── ③ completeness 第三档 ────────────────────────────────────────────────
+    def test_completeness_is_snapshot_only_with_single_folded_reason(self):
+        payload = fs.build_source_facts(self.task, self._scan())
+        self.assertEqual(payload["completeness"]["status"], "snapshot_only",
+                         "既非 complete 也非 blocked——事实诚实可表达，门未放松")
+        self.assertEqual(payload["completeness"]["reasons"], ["pr_provenance_local_snapshot"],
+                         "「无 PR / 无 git」这一族必然缺口折叠成一条，别把真正的缺口淹掉")
+
+    def test_real_gaps_still_downgrade_snapshot_to_blocked(self):
+        """折叠的是**表述**不是**门**：除 provenance 之外还有缺口（这里是一个关键文件都没取到）
+        → 仍判 blocked，并且 provenance 那条也照样在。"""
+        facts = self._scan(target_dir=None)      # 仓根一级布局 + 不给覆盖 → _guess_op 探不到 → 无 key_files
+        self.assertIsNone(facts["target_dir"])
+        payload = fs.build_source_facts(self.task, facts)
+        self.assertEqual(payload["completeness"]["status"], "blocked")
+        self.assertIn("missing_key_files", payload["completeness"]["reasons"])
+        self.assertIn("pr_provenance_local_snapshot", payload["completeness"]["reasons"])
+
+    def test_gitcode_pr_path_completeness_semantics_unchanged(self):
+        """零回归：非快照通路（`provenance_kind` 缺省/`gitcode_pr`）仍只有 complete / blocked 两档。"""
+        sha = "a" * 40
+        good = {
+            "pr_url": "https://gitcode.com/cann/ops-nn/pull/6429",
+            "source_repo": "cann/ops-nn", "head_sha": sha,
+            "head_repo": "contributor/ops-nn", "is_fork": True, "state": "opened",
+            "changed_files": ["index/median/op_host/aclnn_median.h"],
+            "key_files": {"index/median/op_host/aclnn_median.h": "void aclnnMedian();"},
+            "key_files_ref": {"index/median/op_host/aclnn_median.h": sha},
+        }
+        payload = fs.build_source_facts(self.task, good)
+        self.assertEqual(payload["completeness"], {"status": "complete", "reasons": []})
+        self.assertEqual(payload["pr"]["provenance_kind"], "gitcode_pr")
+        payload = fs.build_source_facts(self.task, dict(good, head_sha=None))
+        self.assertEqual(payload["completeness"]["status"], "blocked")
+        self.assertNotIn("pr_provenance_local_snapshot", payload["completeness"]["reasons"])
+
+    # ── CLI 接线 ─────────────────────────────────────────────────────────────
+    def test_cli_snapshot_end_to_end(self):
+        import contextlib, io as _io
+        import content_address as ca
+        out = os.path.join(self.d, "cli-out")
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            fs.main(["--taskdoc", self.task, "--pr-snapshot", self.root,
+                     "--target-dir", "gaussian_blur", "--out", out])
+        text = buf.getvalue()
+        self.assertIn("completeness=snapshot_only", text, text)
+        with open(os.path.join(out, "pr_facts.json"), encoding="utf-8") as f:
+            facts = json.load(f)
+        self.assertIsNone(facts["head_sha"])
+        self.assertEqual(facts["target_dir"], "gaussian_blur")
+        payload = ca.read_artifact(out, "source_facts.json", "oprunway/source-facts/v1")
+        self.assertEqual(payload["completeness"]["status"], "snapshot_only")
+        self.assertEqual(payload["derived"]["op"], "gaussian_blur")
+        self.assertEqual(payload["derived"]["interface_kind"], "aclnn_2stage")
+        # 任务书那一半照旧：字节锚落在工作区
+        with open(os.path.join(out, "task_doc.snapshot.md"), "rb") as got, \
+                open(self.task, "rb") as want:
+            self.assertEqual(got.read(), want.read())
+        self.assertEqual(payload["taskdoc"]["bytes_sha256"],
+                         hashlib.sha256(open(self.task, "rb").read()).hexdigest())
+
+    def test_cli_rejects_pr_and_snapshot_together(self):
+        """两条取材通路互斥——argparse 层就拒（退出码 2），不留「按哪个为准」的模糊地带。"""
+        out = os.path.join(self.d, "cli-x")
+        with self.assertRaises(SystemExit):
+            fs.main(["--taskdoc", self.task, "--out", out,
+                     "--pr", "https://gitcode.com/cann/ops-cv/merge_requests/1",
+                     "--pr-snapshot", self.root])
+        self.assertFalse(os.path.exists(out), "参数解析期就该拒，不落任何产物")
+
+    def test_cli_rejects_lonely_target_dir(self):
+        """`--target-dir` 单给会被静默忽略 → 直接拒，别让用户以为设上了。"""
+        out = os.path.join(self.d, "cli-y")
+        with self.assertRaises(ValueError):
+            fs.main(["--taskdoc", self.task, "--out", out, "--target-dir", "gaussian_blur"])
+        self.assertFalse(os.path.exists(out))
+
+    def test_cli_bad_snapshot_dir_aborts_before_any_artifact(self):
+        out = os.path.join(self.d, "cli-z")
+        with self.assertRaises(ValueError):
+            fs.main(["--taskdoc", self.task, "--out", out,
+                     "--pr-snapshot", os.path.join(self.d, "nope")])
+        self.assertFalse(os.path.exists(out), "形态错应在建目录/写任务书之前 fail-loud")
 
 
 if __name__ == "__main__":

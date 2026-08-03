@@ -3,6 +3,11 @@
 覆盖：
   · parse_aclnn_signature —— 完整有序形参表（tensor-in/out + **穿插的标量属性** int64/bool/float32/float64/
     aclScalar）；aclTensorList 域外 fail-closed；末两框架参显式校验（截断头 fail-closed）；单输出向后兼容；
+  · 改动⑮ —— ``aclIntArray *`` → ctype=int_array（aclFloatArray / aclBoolArray / const char* / 多级指针
+    **仍 fail-closed**）；stage2 **只认两种结构**（standard 4 参 / extended「框架三参 + stage1 实参重复 +
+    stream」），第三种与「声明了未知 form」都 fail-closed，缺声明时保持旧的 4 参行为；输出方向
+    **stage2 在场时以 stage2 为准**（``const aclTensor* dst`` 不再被判成输入）、缺席才退回 const 启发式；
+    run() 侧 int_array 的建/传/销 + native 失败时同样回收；
   · contiguous_strides / acl_dtype 覆盖 int64/int32/int8/uint8/bf16；bf16 位窄化字节数 + round-trip；
   · _find_custom_opapi_libs **可选**（无 ASCEND_OPP_PATH / 无 lib → [] 不 raise，Bug#1）；
   · _resolve_symbol **custom vendor 优先**（Bug#A 假 PASS）+ handle 顺序即优先级 + 严格档
@@ -136,6 +141,111 @@ def test_parse_signature_tensorlist_fail_closed():
               "uint64_t *workspaceSize, aclOpExecutor **executor);")
     with pytest.raises(AclnnRunnerError):
         R.parse_aclnn_signature(header)
+
+
+# ── aclIntArray + stage2 结构 + 输出方向（改动⑮）────────────────────────────────
+#
+# 下面这份 header **逐字**取自被测 PR 的 `gaussian_blur/op_api/aclnn_gaussian_blur.h`
+# （去掉 doc 注释），三处偏离标准形态都在里面，都是真实 ABI、不是构造出来的样例：
+#   ① `aclIntArray*` 作形参；② stage2 是 **10 参**（重复接收全部 stage1 实参）；
+#   ③ `dst` 在 stage1 写成 `const aclTensor*`、在 stage2 写成 `aclTensor*`（DUT 自身接口不自洽）。
+_GB_HEADER = """
+ACLNN_API aclnnStatus aclnnGaussianBlurGetWorkspaceSize(const aclTensor* src, const aclIntArray* ksize, double sigmaX,
+                                                        double sigmaY, int64_t borderType, const aclTensor* dst,
+                                                        uint64_t* workspaceSize, aclOpExecutor** executor);
+
+ACLNN_API aclnnStatus aclnnGaussianBlur(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
+                                        const aclTensor* src, const aclIntArray* ksize, double sigmaX, double sigmaY,
+                                        int64_t borderType, aclTensor* dst, const aclrtStream stream);
+"""
+
+#: 只有 stage1 的同一份签名（把 stage2 声明整段切掉）——用来验「stage2 缺席时退回 const 启发式」。
+_GB_HEADER_STAGE1_ONLY = _GB_HEADER.split("ACLNN_API aclnnStatus aclnnGaussianBlur(")[0]
+
+
+def test_parse_signature_int_array_attr():
+    """``aclIntArray *`` **据 C 类型**归为 ctype=int_array 的属性（绝不按算子名）。"""
+    sig = R.parse_aclnn_signature(_GB_HEADER)
+    assert sig.op_name == "GaussianBlur"
+    assert [(p["role"], p["ctype"]) for p in sig.params] == [
+        ("in", "tensor"), ("attr", "int_array"), ("attr", "float64"),
+        ("attr", "float64"), ("attr", "int64"), ("out", "tensor")]
+    assert [p["name"] for p in sig.params] == [
+        "src", "ksize", "sigmaX", "sigmaY", "borderType", "dst"]
+    assert [p["ctype"] for p in sig.attr_params] == ["int_array", "float64", "float64", "int64"]
+
+
+@pytest.mark.parametrize("tok", [
+    "const aclFloatArray *sigmas",      # ops-cv 的 aclnnResize 用它 —— 本轮**不**放开
+    "const aclBoolArray *flags",
+    "const char *mode",                 # ops-cv 的 aclnnIou 用它 —— 本轮**不**放开
+    "aclIntArray **ksize",              # 多级指针不是已观察到的形态 → 不硬塞
+])
+def test_parse_signature_other_array_kinds_still_fail_closed(tok):
+    """只放开 ``aclIntArray *`` 一种；别的数组/字符串型形参仍是域外接口能力，fail-closed。"""
+    with pytest.raises(AclnnRunnerError):
+        R.parse_aclnn_signature(
+            f"aclnnStatus aclnnFooGetWorkspaceSize(const aclTensor *self, {tok}, "
+            "aclTensor *out, uint64_t *workspaceSize, aclOpExecutor **executor);")
+
+
+def test_parse_stage2_standard_shape():
+    """结构 A：``(workspace, workspaceSize, executor, stream)`` —— 绝大多数算子，含 median。"""
+    assert R.parse_aclnn_signature(_MEDIAN_HEADER).stage2_form == R.STAGE2_STANDARD
+
+
+def test_parse_stage2_absent_keeps_legacy_behaviour():
+    """header 里根本没有 stage2 声明 → ``None``；``run()`` 按旧的 4 参调（不因解析不到就判死既有通路）。"""
+    sig = R.parse_aclnn_signature(
+        "aclnnStatus aclnnFooGetWorkspaceSize(const aclTensor *self, aclTensor *out, "
+        "uint64_t *workspaceSize, aclOpExecutor **executor);")
+    assert sig.stage2_form is None
+
+
+def test_parse_stage2_extended_shape():
+    """结构 B：框架三参 + **stage1 实参原样重复** + stream（实测 aclnnGaussianBlur 的 10 参形态）。"""
+    assert R.parse_aclnn_signature(_GB_HEADER).stage2_form == R.STAGE2_EXTENDED
+
+
+@pytest.mark.parametrize("stage2", [
+    # ① 中段既不为空、又与 stage1 实参个数对不上
+    "aclnnStatus aclnnFoo(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, "
+    "int64_t extra, aclrtStream stream);",
+    # ② 中段个数对得上，但逐项对不上（名字/类型都不是 stage1 那两个）
+    "aclnnStatus aclnnFoo(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, "
+    "int64_t a, int64_t b, aclrtStream stream);",
+    # ③ 末位不是 stream
+    "aclnnStatus aclnnFoo(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor);",
+    # ④ 框架三参顺序/类型不对
+    "aclnnStatus aclnnFoo(uint64_t workspaceSize, void *workspace, aclOpExecutor *executor, "
+    "aclrtStream stream);",
+])
+def test_parse_stage2_third_shape_fail_closed(stage2):
+    """第三种结构一律 fail-closed：绝不猜、绝不退回 4 参调用（错 arity = 段错误或**静默错值**）。"""
+    stage1 = ("aclnnStatus aclnnFooGetWorkspaceSize(const aclTensor *self, aclTensor *out, "
+              "uint64_t *workspaceSize, aclOpExecutor **executor);\n")
+    with pytest.raises(AclnnRunnerError):
+        R.parse_aclnn_signature(stage1 + stage2)
+
+
+def test_stage2_is_the_authority_for_output_direction():
+    """B3：``dst`` 在 stage1 是 ``const aclTensor*``，按 const 启发式会判成输入 → 一个 D2H 都不做。
+
+    stage2 写的是非 const 的 ``aclTensor* dst`` —— **在场时以它为准**，方向白拿。
+    """
+    sig = R.parse_aclnn_signature(_GB_HEADER)
+    assert sig.num_outputs == 1 and sig.output_names == ["dst"]
+    assert sig.num_inputs == 1 and sig.input_names == ["src"]
+    assert sig.params[-1]["const"] is False
+    assert [p["io"] for p in sig.tensor_params] == ["in", "out"]
+
+
+def test_const_heuristic_is_the_fallback_when_stage2_absent():
+    """同一份 stage1、把 stage2 切掉 → 退回 const 启发式（照实反映 DUT 接口不自洽的后果，不猜方向）。"""
+    sig = R.parse_aclnn_signature(_GB_HEADER_STAGE1_ONLY)
+    assert sig.stage2_form is None
+    assert sig.num_outputs == 0                      # const dst 被判成输入 —— 这正是 B3 的现场
+    assert sig.input_names == ["src", "dst"]
 
 
 def test_parse_aclnn_op_from_header_dir(tmp_path):
@@ -353,15 +463,17 @@ def test_checked_nbytes_and_overflow():
 # ── run() argtypes 拼装（mock ctypes，多输出 arity）─────────────────────────────
 
 class _FakeFunc:
-    """记录 argtypes/restype 的假 ctypes 函数，调用恒返 0。"""
+    """记录 argtypes/restype 的假 ctypes 函数，调用恒返 0。``last_args`` 留给 stage2 arity 对账。"""
 
     def __init__(self):
         self.argtypes = None
         self.restype = None
         self.calls = 0
+        self.last_args = None
 
     def __call__(self, *args):
         self.calls += 1
+        self.last_args = args
         return 0
 
 
@@ -379,13 +491,14 @@ class _FakeAcl:
         return funcs[name]
 
 
-def _sig(op_name, *params):
+def _sig(op_name, *params, stage2_form=None):
     """手搓一份 AclnnSignature（无 header 的调用方就该这么显式构造——仍受 run() 全量校验）。"""
     return R.AclnnSignature(op_name=op_name, params=[
-        {"name": n, "role": r, "ctype": c} for n, r, c in params])
+        {"name": n, "role": r, "ctype": c} for n, r, c in params], stage2_form=stage2_form)
 
 
 _MEDIAN_SIG = R.parse_aclnn_signature(_MEDIAN_HEADER)
+_GB_SIG = R.parse_aclnn_signature(_GB_HEADER)
 _FOO_1IN_1OUT = _sig("Foo", ("self", "in", "tensor"), ("out", "out", "tensor"))
 
 
@@ -548,6 +661,141 @@ def test_run_scalar_attr_creates_and_destroys(monkeypatch):
                             ctypes.c_void_p, ctypes.c_void_p]
     assert created == [acl_consts.acl_dtype("float32")]
     assert destroyed == [0xABCD]
+
+
+# ── int_array 属性 + stage2 真派发（改动⑮）──────────────────────────────────────
+
+def _patch_int_array(monkeypatch, fake, handle=0xBEEF):
+    """给假 ACL 句柄装上 aclCreateIntArray / aclDestroyIntArray，记下建的内容与销的句柄。
+
+    ``created`` 每项 ``{"size": n, "values": [...]}`` —— 在**回调里**就把缓冲读出来
+    （run() 返回后那块 host 缓冲已可被 GC，事后再解引用是悬垂指针）。
+    """
+    created, destroyed = [], []
+
+    def create(ptr, size):
+        n = int(size.value)
+        arr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_int64))
+        created.append({"size": n, "values": [int(arr[i]) for i in range(n)]})
+        return handle
+
+    monkeypatch.setattr(fake, "aclCreateIntArray", create)
+    monkeypatch.setattr(fake, "aclDestroyIntArray", lambda h: destroyed.append(h) or 0)
+    return created, destroyed
+
+
+def _gb_slots(shape=(4, 4), ksize=(3, 3)):
+    """GaussianBlur 的有序 slots：in(src) + int_array(ksize) + 2×float64 + int64 + out(dst)。"""
+    return [
+        _in_slot(np.zeros(shape, np.float32), name="src"),
+        {"kind": "attr", "name": "ksize", "ctype": "int_array", "value": list(ksize)},
+        {"kind": "attr", "name": "sigmaX", "ctype": "float64", "value": 1.5},
+        {"kind": "attr", "name": "sigmaY", "ctype": "float64", "value": 0.0},
+        {"kind": "attr", "name": "borderType", "ctype": "int64", "value": 4},
+        _out_slot(list(shape), "float32", 0, name="dst"),
+    ]
+
+
+def test_run_int_array_attr_creates_and_destroys(monkeypatch):
+    """int_array 分支：``(c_int64 * n)`` 缓冲 → aclCreateIntArray → 按 c_void_p 传 → 末尾销毁。"""
+    runner, fake, made = _mock_runner(monkeypatch)
+    created, destroyed = _patch_int_array(monkeypatch, fake)
+    outs = runner.run("GaussianBlur", _gb_slots(), signature=_GB_SIG)
+    gws = fake._funcs["aclnnGaussianBlurGetWorkspaceSize"]
+    # argtypes 保序：[vp(src), vp(ksize 句柄), c_double, c_double, c_int64, vp(dst)] + [vp, vp]。
+    assert gws.argtypes == [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_double, ctypes.c_double,
+                            ctypes.c_int64, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    assert created == [{"size": 2, "values": [3, 3]}]     # 值原样进 int64 缓冲
+    assert destroyed == [0xBEEF]                          # 与 tensor/scalar 同一个 finally 里回收
+    assert len(made) == 2                                 # 只建 1 in + 1 out，int_array 不建 tensor
+    assert len(outs) == 1 and outs[0].shape == (4, 4)
+
+
+def test_run_int_array_attr_released_on_native_failure(monkeypatch):
+    """native 中途炸掉时 aclIntArray 也必须销（与 tensor/scalar 同一条清理路径）。"""
+    runner, fake, _ = _mock_runner(monkeypatch)
+    created, destroyed = _patch_int_array(monkeypatch, fake)
+
+    def boom(name, ret, ok=(0,)):
+        if name == "aclnnGaussianBlurGetWorkspaceSize":
+            raise AclnnRunnerError("injected")
+    monkeypatch.setattr(runner, "_ck", boom)
+    with pytest.raises(AclnnRunnerError):
+        runner.run("GaussianBlur", _gb_slots(), signature=_GB_SIG)
+    assert created and destroyed == [0xBEEF]
+
+
+@pytest.mark.parametrize("bad", [3, "3,3", None, 1.5])
+def test_run_int_array_rejects_non_sequence_value(monkeypatch, bad):
+    """int_array 的 value 必须是**已解析好的**整数序列；runner 不做宽松转换、不塞默认。"""
+    runner, fake, _ = _mock_runner(monkeypatch)
+    _patch_int_array(monkeypatch, fake)
+    slots = _gb_slots()
+    slots[1] = {"kind": "attr", "name": "ksize", "ctype": "int_array", "value": bad}
+    with pytest.raises(AclnnRunnerError):
+        runner.run("GaussianBlur", slots, signature=_GB_SIG)
+
+
+def test_run_int_array_null_handle_fail_closed(monkeypatch):
+    """aclCreateIntArray 返 NULL → fail-closed，绝不拿空句柄进 native。"""
+    runner, fake, _ = _mock_runner(monkeypatch)
+    _patch_int_array(monkeypatch, fake, handle=0)
+    with pytest.raises(AclnnRunnerError):
+        runner.run("GaussianBlur", _gb_slots(), signature=_GB_SIG)
+
+
+def test_run_stage2_standard_call_is_unchanged(monkeypatch):
+    """结构 A（median）：仍是 4 参 + 4 个 argtypes —— 既有热路径零回归。"""
+    runner, fake, _ = _mock_runner(monkeypatch)
+    runner.run("Median", _median_slots(), signature=_MEDIAN_SIG)
+    run_fn = fake._funcs["aclnnMedian"]
+    assert run_fn.argtypes == [ctypes.c_void_p, ctypes.c_uint64,
+                               ctypes.c_void_p, ctypes.c_void_p]
+    assert len(run_fn.last_args) == 4
+
+
+def test_run_manual_signature_without_stage2_uses_standard_call(monkeypatch):
+    """手工构造的签名（perf_msprof 的 baseline wrapper 那种）没有 stage2_form → 同样走 4 参旧路径。"""
+    assert _FOO_1IN_1OUT.stage2_form is None
+    runner, fake, _ = _mock_runner(monkeypatch)
+    runner.run("Foo", [_in_slot(np.zeros(2, np.float32)), _out_slot([2], "float32", 0)],
+               signature=_FOO_1IN_1OUT)
+    run_fn = fake._funcs["aclnnFoo"]
+    assert run_fn.argtypes == [ctypes.c_void_p, ctypes.c_uint64,
+                               ctypes.c_void_p, ctypes.c_void_p]
+    assert len(run_fn.last_args) == 4
+
+
+def test_run_stage2_extended_repeats_stage1_args(monkeypatch):
+    """结构 B（GaussianBlur）：10 参 —— 框架三参 + **本次已建好的 stage1 实参原样重复** + stream。
+
+    旧版写死 4 参 argtypes 去调这个 10 参函数：aarch64 上 stream 从垃圾寄存器取，
+    段错误或**静默错值**都可能，全链无静态门能拦（B2）。
+    """
+    runner, fake, _ = _mock_runner(monkeypatch)
+    _patch_int_array(monkeypatch, fake)
+    runner.run("GaussianBlur", _gb_slots(), signature=_GB_SIG)
+    gws = fake._funcs["aclnnGaussianBlurGetWorkspaceSize"]
+    run_fn = fake._funcs["aclnnGaussianBlur"]
+    assert run_fn.argtypes == ([ctypes.c_void_p, ctypes.c_uint64, ctypes.c_void_p]
+                               + gws.argtypes[:-2]          # stage1 的 6 个实参 ctype
+                               + [ctypes.c_void_p])         # stream
+    assert len(run_fn.last_args) == 10
+    # 中段 6 个实参是**同一批对象**（同一个 tensor / 同一个 aclIntArray 句柄），不是另建一份。
+    assert all(a is b for a, b in zip(run_fn.last_args[3:9], gws.last_args[:6]))
+    assert run_fn.last_args[-1] is runner._stream
+
+
+def test_run_unknown_stage2_form_fail_closed(monkeypatch):
+    """签名声明了第三种 stage2 结构 → run() fail-closed，绝不退回 4 参调用。"""
+    runner, fake, _ = _mock_runner(monkeypatch)
+    sig = _sig("Foo", ("self", "in", "tensor"), ("out", "out", "tensor"),
+               stage2_form="mystery_shape")
+    with pytest.raises(AclnnRunnerError) as ei:
+        runner.run("Foo", [_in_slot(np.zeros(2, np.float32)), _out_slot([2], "float32", 0)],
+                   signature=sig)
+    assert "stage2" in str(ei.value)
+    assert fake._funcs["aclnnFoo"].last_args is None       # 一次都没调进去
 
 
 def test_run_unknown_attr_ctype_raises(monkeypatch):

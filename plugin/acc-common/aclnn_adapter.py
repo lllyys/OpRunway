@@ -24,9 +24,18 @@ descriptor）工具零改即跑。
   `<op_subdir>/` 下**并没有** `op_api/`；旧判据钉死 `<op_subdir>/op_api/aclnn_*.h` → 真 PR 被误判「非域内」硬阻塞。
   故 `find_aclnn_project` 判据改为「ops 仓形态」（仓根 build.sh + op 子目录含 op_host/ + **在 op 子目录下有界递归**
   能找到 `aclnn_*.h`，不预设它在哪一层），`_run_aclnn_real`
-  的 build 按 §9.6 实测配方：取源(fetch PR head)→依赖门(pigz/dos2unix)→仓根 `build.sh --pkg --experimental
-  --ops=<snake> --soc=<soc> --vendor_name=<v> --no_force`→install(`.run --install-path=<用户目录>`)。
+  的 build 按 §9.6 实测配方：取源(fetch PR head)→依赖门(pigz/dos2unix)→仓根 `build.sh --pkg [--experimental]
+  --soc=<soc> --ops=<snake> --vendor_name=<v> [附加实参]`→install(`.run --install-path=<用户目录>`)。
   op 子路径 / soc / vendor / PR-ref 全从 cfg（`OPRUNWAY_ACLNN_*`，承 spec/pr_facts 字段）取，**绝无按算子名分支**。
+
+⚠ **仓形态差异经字段驱动，不按算子身份分支**（2026-08-03，ops-cv 首次接入时坐实）：
+  · `--experimental` **仅当 op 子路径以 `experimental/` 开头时**才发（与 `new_example/run_on_npu.sh:49`
+    的 `case $OP_SRC in experimental/*` 同一判据）。ops-cv 有的算子目录在**仓根一级**，其 `build.sh`
+    的 `--experimental` 会切到只挂 `experimental/*` 的 CMake 分支 → `check_compiled_ops` FATAL_ERROR。
+  · `--no_force` **不再是默认实参**：它不在 ops-cv `build.sh` 的 `SUPPORTED_LONG_OPTS` 里，会直接
+    `[ERROR] Invalid long option` 退 1。需要它的仓（如 ops-nn）经 `OPRUNWAY_ACLNN_BUILD_EXTRA_ARGS` 显式给。
+  · install 落地目录的 vendor 后缀经 `OPRUNWAY_ACLNN_VENDOR_SUFFIX` 给（缺省 `nn`，保持既有 ops-nn
+    通路逐字节不变）：ops-nn 装 `<v>_nn`、ops-cv 装 `<v>_cv`；写死 `_nn` 会让 ops-cv 报 NOLIB/NO_VENDOR。
 """
 
 from __future__ import annotations
@@ -43,8 +52,35 @@ _SUBDIR_RE = re.compile(r"^[A-Za-z0-9_./-]+$")            # op 子路径：拒 s
 _REF_RE = re.compile(r"(?:[0-9a-fA-F]{40}|refs/merge-requests/[1-9][0-9]*/head)")   # 用 fullmatch
 _HEX40_RE = re.compile(r"[0-9a-fA-F]{40}")                                          # 用 fullmatch
 _REPO_URL_RE = re.compile(r"^https?://[A-Za-z0-9._~/:@%-]+$")  # 取源 URL：仅 http(s) + 安全字符（拒 ?&;#|` 等）
+_HEX64_RE = re.compile(r"[0-9a-fA-F]{64}")                                          # 用 fullmatch
+
+#: 取源形态（改动⑯）。**这是 DUT 来源的形态字段，不是算子身份分支**（律令 5.1）。
+#:   `git_fetch`      —— 缺省。从 base 仓 fetch 指定 PR head，行为与本改动之前**逐字节一致**。
+#:   `local_snapshot` —— 源码树**已在目标机就位**（无 .git、无上游 PR 可绑）。跳过 fetch，
+#:                       改校「排序相对路径 + 文件内容」的确定性 merkle。
+#: 为什么需要第二种：`git_fetch` 强制 `PR_REF` 为 40 位 SHA 或 `refs/merge-requests/<N>/head`。
+#: 当被测代码只以快照形式给到、上游又客观不存在对应 PR 时（例如任务书写明代码在**私仓**），
+#: 这条路物理上走不通。此时**唯一诚实**的做法是承认「没有 head SHA」——
+#: 合成一个 40 位 hex 顶上去是律令 5.8 明令禁止的造假。
+_SOURCE_MODE_GIT = "git_fetch"
+_SOURCE_MODE_SNAPSHOT = "local_snapshot"
+_SOURCE_MODES = (_SOURCE_MODE_GIT, _SOURCE_MODE_SNAPSHOT)
 _SYMBOL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")        # aclnn 符号名（拼进远端 nm/grep 命令）；用 fullmatch
 _SEG_RE = re.compile(r"[A-Za-z0-9_.-]+")                  # caseset 相对路径的**每一段**；用 fullmatch
+
+#: install 落地目录 `vendors/<vendor_name>_<suffix>` 的**缺省**后缀。
+#: 缺省 `nn` = 既有 ops-nn 通路逐字节不变；换仓（如 ops-cv 的 `_cv`）由编排层经
+#: `OPRUNWAY_ACLNN_VENDOR_SUFFIX` 显式给。**这是仓形态字段，不是算子身份分支**（律令 5.1）。
+_DEFAULT_VENDOR_SUFFIX = "nn"
+
+#: 触发 `build.sh --experimental` 的 op 子路径前缀（与 `new_example/run_on_npu.sh:49` 的
+#: `case $OP_SRC in experimental/*` 同一判据——两条通路对「什么算 experimental 源」必须同口径）。
+_EXPERIMENTAL_PREFIX = "experimental/"
+
+#: `OPRUNWAY_ACLNN_BUILD_EXTRA_ARGS` 的**每个词**白名单：`--flag` 或 `--flag=value`；用 fullmatch。
+#: 这串会原样拼进容器内 `bash build.sh ...` 命令行（不 quote，须被 shell 词分割），故拒一切
+#: 空白外的 shell 元字符（`;`&`|`$`(`)`<`>`*`?`'`"`\`` 等）与前导单横杠短选项。
+_BUILD_ARG_RE = re.compile(r"--[A-Za-z0-9_][A-Za-z0-9_-]*(?:=[A-Za-z0-9_.,:/+-]*)?")
 
 
 # ── 相对路径守卫（caseset 输入 / 远端 manifest 输出；审计 High#4）────────────────────────
@@ -301,33 +337,56 @@ def _aclnn_cfg():
 
     op_subdir = _safe_op_subdir(_req(
         "OPRUNWAY_ACLNN_OP_SUBDIR", "op 子路径（相对 ops 仓根，如 experimental/index/median）——从 spec/pr_facts target_dir 取"))
-    pr_ref = _req("OPRUNWAY_ACLNN_PR_REF", "PR head 引用（40 位 SHA 或 refs/merge-requests/<PR>/head）")
-    # 审计 High#2：**只认** 40 位 SHA / refs/merge-requests/<N>/head 两种形态（fullmatch）。
-    # 旧正则把 `main` / 短 SHA / `refs/heads/*` 都放过 → 取到的根本不是被测 PR，验收证据却照产。
-    if not _REF_RE.fullmatch(pr_ref):
+    source_mode = (g("OPRUNWAY_ACLNN_SOURCE_MODE") or _SOURCE_MODE_GIT).strip()
+    if source_mode not in _SOURCE_MODES:
         raise ValueError(
-            f"OPRUNWAY_ACLNN_PR_REF={pr_ref!r} 非法——只接受 **40 位 commit SHA** 或 "
-            f"`refs/merge-requests/<N>/head`（拒分支名 / 短 SHA / refs/heads/*：那会让验收静默偏离指定 PR）")
-    # PR facts 的 head SHA（用于 fetch 后 `git rev-parse` 比对 + 绑进 build provenance）。
-    # ref 本身就是 SHA → 它即期望值；ref 是**可移动**的 merge-request ref → 必须显式给期望 SHA，
-    # 否则「取到的到底是不是被测 commit」无从核验（fail-closed，不静默接受漂移）。
-    head_sha = (g("OPRUNWAY_ACLNN_PR_HEAD_SHA") or "").strip()
-    if head_sha and not _HEX40_RE.fullmatch(head_sha):
-        raise ValueError(f"OPRUNWAY_ACLNN_PR_HEAD_SHA={head_sha!r} 非法（须 40 位 commit SHA）")
-    if _HEX40_RE.fullmatch(pr_ref):
-        if head_sha and head_sha.lower() != pr_ref.lower():
-            raise ValueError(f"OPRUNWAY_ACLNN_PR_HEAD_SHA={head_sha!r} 与 PR_REF={pr_ref!r} 不符（同一 commit 两个说法）")
-        head_sha = pr_ref
-    elif not head_sha:
-        raise ValueError(
-            "PR_REF 是可移动的 merge-request 引用 → 必须同时给 OPRUNWAY_ACLNN_PR_HEAD_SHA"
-            "（40 位 head commit SHA，从 pr_facts 取）：否则 fetch 到的 commit 无从核验，"
-            "验收可能实际跑在另一份代码上（fail-closed）")
-    head_sha = head_sha.lower()
-    base_repo = _req("OPRUNWAY_ACLNN_BASE_REPO",
-                     "取源 git 远端 URL（PR head 从 base 仓取，如 https://gitcode.com/cann/ops-nn.git）")
-    if not _REPO_URL_RE.match(base_repo):
-        raise ValueError(f"OPRUNWAY_ACLNN_BASE_REPO={base_repo!r} 非法（仅 http(s):// + 安全字符，拒 ?&;#|` 等注入面）")
+            f"OPRUNWAY_ACLNN_SOURCE_MODE={source_mode!r} 非法——受控词表 {list(_SOURCE_MODES)}。"
+            "不认的取源形态一律 fail-closed，绝不猜。")
+
+    # `git_fetch` 分支：与本改动之前**逐字节一致**，一个字都没动。
+    pr_ref = head_sha = base_repo = ""
+    snapshot_dir = snapshot_sha = ""
+    if source_mode == _SOURCE_MODE_GIT:
+        pr_ref = _req("OPRUNWAY_ACLNN_PR_REF", "PR head 引用（40 位 SHA 或 refs/merge-requests/<PR>/head）")
+        # 审计 High#2：**只认** 40 位 SHA / refs/merge-requests/<N>/head 两种形态（fullmatch）。
+        # 旧正则把 `main` / 短 SHA / `refs/heads/*` 都放过 → 取到的根本不是被测 PR，验收证据却照产。
+        if not _REF_RE.fullmatch(pr_ref):
+            raise ValueError(
+                f"OPRUNWAY_ACLNN_PR_REF={pr_ref!r} 非法——只接受 **40 位 commit SHA** 或 "
+                f"`refs/merge-requests/<N>/head`（拒分支名 / 短 SHA / refs/heads/*：那会让验收静默偏离指定 PR）")
+        # PR facts 的 head SHA（用于 fetch 后 `git rev-parse` 比对 + 绑进 build provenance）。
+        # ref 本身就是 SHA → 它即期望值；ref 是**可移动**的 merge-request ref → 必须显式给期望 SHA，
+        # 否则「取到的到底是不是被测 commit」无从核验（fail-closed，不静默接受漂移）。
+        head_sha = (g("OPRUNWAY_ACLNN_PR_HEAD_SHA") or "").strip()
+        if head_sha and not _HEX40_RE.fullmatch(head_sha):
+            raise ValueError(f"OPRUNWAY_ACLNN_PR_HEAD_SHA={head_sha!r} 非法（须 40 位 commit SHA）")
+        if _HEX40_RE.fullmatch(pr_ref):
+            if head_sha and head_sha.lower() != pr_ref.lower():
+                raise ValueError(f"OPRUNWAY_ACLNN_PR_HEAD_SHA={head_sha!r} 与 PR_REF={pr_ref!r} 不符（同一 commit 两个说法）")
+            head_sha = pr_ref
+        elif not head_sha:
+            raise ValueError(
+                "PR_REF 是可移动的 merge-request 引用 → 必须同时给 OPRUNWAY_ACLNN_PR_HEAD_SHA"
+                "（40 位 head commit SHA，从 pr_facts 取）：否则 fetch 到的 commit 无从核验，"
+                "验收可能实际跑在另一份代码上（fail-closed）")
+        head_sha = head_sha.lower()
+        base_repo = _req("OPRUNWAY_ACLNN_BASE_REPO",
+                         "取源 git 远端 URL（PR head 从 base 仓取，如 https://gitcode.com/cann/ops-nn.git）")
+        if not _REPO_URL_RE.match(base_repo):
+            raise ValueError(f"OPRUNWAY_ACLNN_BASE_REPO={base_repo!r} 非法（仅 http(s):// + 安全字符，拒 ?&;#|` 等注入面）")
+    else:
+        # `local_snapshot`：源已就位。**head_sha 保持空串并一路透传为 null**——
+        # 这里绝不合成任何 40 位 hex（律令 5.8）。merkle 只证「跑的就是这份字节」，
+        # **不证**它等于任何上游 commit；下游报告不得据此声称已绑定 PR head。
+        snapshot_dir = _req(
+            "OPRUNWAY_ACLNN_SNAPSHOT_DIR", "已在目标机就位的源码树绝对路径（local_snapshot 取源形态）")
+        snapshot_sha = _req(
+            "OPRUNWAY_ACLNN_SNAPSHOT_SHA256",
+            "该源码树的确定性 merkle（对『排序后的相对路径 + 文件内容』求 sha256）"
+        ).strip().lower()
+        if not _HEX64_RE.fullmatch(snapshot_sha):
+            raise ValueError(
+                f"OPRUNWAY_ACLNN_SNAPSHOT_SHA256={snapshot_sha!r} 非法（须 64 位 sha256 hex）")
     proxy = (g("OPRUNWAY_ACLNN_PROXY") or "").strip()          # 取源联网代理（可选；容器直连 gitcode 时留空）
     if proxy and not _REPO_URL_RE.match(proxy):
         raise ValueError(f"OPRUNWAY_ACLNN_PROXY={proxy!r} 非法（仅 http(s):// + 安全字符）")
@@ -339,10 +398,18 @@ def _aclnn_cfg():
            "vendor_dir": _req("OPRUNWAY_ACLNN_VENDOR_DIR",
                               "用户态 vendor 安装目录（install-path；隔离共享 opp/vendors，绝不写共享 CANN）"),
            "vendor_name": _req("OPRUNWAY_ACLNN_VENDOR_NAME",
-                               "build.sh --vendor_name 值（install 落地目录自动补 _nn 后缀，§9.6）"),
+                               "build.sh --vendor_name 值（install 落地目录自动补 _<vendor_suffix> 后缀，§9.6）"),
+           # install 落地目录的 vendor 后缀：`<vendor_dir>/vendors/<vendor_name>_<suffix>`。
+           # 由**仓形态**决定（ops-nn → nn、ops-cv → cv），**不按算子身份分支**；缺省 `nn` 让既有
+           # ops-nn 通路逐字节不变。校验在 `_aclnn_paths`（与 vendor_name 同一处，走 `RA._check_id`）。
+           "vendor_suffix": (g("OPRUNWAY_ACLNN_VENDOR_SUFFIX") or _DEFAULT_VENDOR_SUFFIX).strip(),
+           "source_mode": source_mode,                          # git_fetch | local_snapshot（改动⑯）
            "base_repo": base_repo,
            "pr_ref": pr_ref,
-           "head_sha": head_sha,                                # 期望的 PR head commit（provenance 锚）
+           "head_sha": head_sha,                                # 期望的 PR head commit（provenance 锚）；
+                                                                # local_snapshot 下恒为 ""（→ 产物里 null）
+           "snapshot_dir": snapshot_dir,                        # local_snapshot：已就位源码树
+           "snapshot_sha256": snapshot_sha,                     # local_snapshot：期望 merkle
            "proxy": proxy,
            "soc": (g("OPRUNWAY_ACLNN_SOC") or g("OPRUNWAY_SOC") or "ascend910_93").strip(),  # 昇腾通用约定
            "snake_op": (g("OPRUNWAY_ACLNN_SNAKE_OP") or "").strip(),   # 缺省从 op_subdir 末段派生
@@ -381,6 +448,14 @@ def _check_dedicated_root(label, val):
     return val
 
 
+def _vendor_suffix(cfg):
+    """本次 install 落地目录的 vendor 后缀（`vendors/<vendor_name>_<suffix>`）——**单一事实源**。
+
+    `_aclnn_paths` 的 `vc`、build 脚本与 `_ENV_PREAMBLE` 里的 `$VC` 必须同口径，故三处都从这里取。
+    cfg 里没有该键（手工构造的精简 cfg，如 perf 侧单测）→ 退回缺省 `nn`，与改动前完全一致。"""
+    return (cfg.get("vendor_suffix") or _DEFAULT_VENDOR_SUFFIX)
+
+
 def _aclnn_paths(cfg):
     """从 cfg 计算远端路径（checkout / vendor 内容根 / custom lib / 用例目录 / 输出目录）+ 安全校验。
 
@@ -390,10 +465,13 @@ def _aclnn_paths(cfg):
     「删除目标」与「vendor / setenv / checkout」两两不相交，任一相交即 fail-closed。"""
     import repo_adapter as RA
     rroot, vendor_dir, vn = cfg["rroot"], cfg["vendor_dir"], cfg["vendor_name"]
+    vsuf = _vendor_suffix(cfg)
     _check_dedicated_root("remote_dir", rroot)
     _check_dedicated_root("vendor_dir", vendor_dir)
     RA._check_remote_path("setenv", cfg["setenv"])
     RA._check_id("vendor_name", vn)
+    # 后缀与 vendor_name 同一套 ID 白名单：它同样原样拼进容器内 shell（拒 `/`、空白、shell 元字符）。
+    RA._check_id("vendor_suffix", vsuf)
     RA._check_id("snake_op", cfg["snake_op"])
     if not RA._SOC_RE.match(cfg["soc"]):
         raise ValueError(f"非法 soc: {cfg['soc']!r}")
@@ -401,7 +479,9 @@ def _aclnn_paths(cfg):
         raise ValueError(f"非法 device（须非负整数）: {cfg['device']!r}")
     checkout = rroot + "/aclnn_src"                             # 容器内 PR head 重取源落点（op-中立）
     RA._check_remote_path("checkout", checkout)
-    vc = vendor_dir + "/vendors/" + vn + "_nn"                  # install 落地目录（--vendor_name 自动补 _nn，§9.6）
+    # install 落地目录（`--vendor_name` 自动补 `_<vendor_suffix>` 后缀，§9.6）：
+    # ops-nn 是 `_nn`、ops-cv 是 `_cv` —— 后缀经 cfg 字段驱动，写死会让另一种仓形态报 NOLIB/NO_VENDOR。
+    vc = vendor_dir + "/vendors/" + vn + "_" + vsuf
     paths = {"checkout": checkout,
              "vc": vc,
              "lib": vc + "/op_api/lib/libcust_opapi.so",        # provenance 门 + ctypes 加载目标
@@ -563,11 +643,43 @@ oprw_setenv() {
 '''
 
 
+def _extra_build_args():
+    """`OPRUNWAY_ACLNN_BUILD_EXTRA_ARGS` → 附加实参词表（未设 → 空表）。
+
+    存在的意义是**仓形态差异不必改代码**：ops-nn 的 `--no_force` 已不是默认（ops-cv 的 `build.sh`
+    不认它、直接退 1），需要的一方经此显式给回；其它仓的专有开关同理。
+    每个词须是 `--flag` / `--flag=value`（`_BUILD_ARG_RE`）——它会**不加引号**拼进容器内命令行，
+    非法即 fail-closed，绝不把可疑串发到远端。附加实参也会经 `_build_args` 进 build provenance
+    指纹（`_prov_prefix`），故换实参 = 换指纹 = 强制重建，不会复用错产物。"""
+    raw = (os.environ.get("OPRUNWAY_ACLNN_BUILD_EXTRA_ARGS") or "").strip()
+    if not raw:
+        return []
+    toks = raw.split()
+    for t in toks:
+        if not _BUILD_ARG_RE.fullmatch(t):
+            raise ValueError(
+                f"OPRUNWAY_ACLNN_BUILD_EXTRA_ARGS 含非法实参 {t!r}——每个词须是 `--flag` 或 "
+                f"`--flag=value`（值仅 [A-Za-z0-9_.,:/+-]）；该串不加引号拼进远端 build.sh 命令行，"
+                f"故拒一切 shell 元字符与短选项（fail-closed）")
+    return toks
+
+
 def _build_args(cfg):
     """仓根 build.sh 的实参串（**单一事实源**：脚本与 provenance stamp 共用，杜绝两处漂移）。
-    值均已过白名单（soc/_SOC_RE、snake_op/vendor_name/_check_id），无 shell 元字符。"""
-    return (f"--pkg --experimental --soc={cfg['soc']} --ops={cfg['snake_op']} "
-            f"--vendor_name={cfg['vendor_name']} --no_force")
+    值均已过白名单（soc/_SOC_RE、snake_op/vendor_name/_check_id、附加实参/_BUILD_ARG_RE），无 shell 元字符。
+
+    `--experimental` 只对 `experimental/` 开头的 op 子路径发（`_EXPERIMENTAL_PREFIX`，与
+    `new_example/run_on_npu.sh:49` 同判据）：仓根一级的算子目录（ops-cv 形态）加了它会被 build.sh
+    切到只挂 `experimental/*` 的 CMake 分支 → `check_compiled_ops` FATAL_ERROR。
+    **判据是 op 子路径这个字段，不是算子身份**（律令 5.1）。"""
+    args = ["--pkg"]
+    if cfg["op_subdir"].startswith(_EXPERIMENTAL_PREFIX):
+        args.append("--experimental")
+    args += [f"--soc={cfg['soc']}", f"--ops={cfg['snake_op']}", f"--vendor_name={cfg['vendor_name']}"]
+    # 逐字去重：避免调用方把已派生出的开关（如 `--experimental`）在附加实参里再写一遍导致重复传参。
+    # 只做**整词**去重，不解析 `--k=v` 的冲突（那属调用方自己的配置错误，如实传下去、由 build.sh 报）。
+    args += [t for t in _extra_build_args() if t not in args]
+    return " ".join(args)
 
 
 def _prov_prefix(cfg, symbols):
@@ -576,7 +688,10 @@ def _prov_prefix(cfg, symbols):
     审计 High#1：旧幂等门只看 `libcust_opapi.so` **在不在**——不绑仓 / PR commit / op / SoC / 构建参数，
     于是「复用工作目录验收新 PR」会实际跑**上一个 PR 的 .so**，却照产 BUILD_DONE 与验收证据。
     对齐本项目 canon 已有的「opp provenance-bound + fail-closed 门」先例：指纹不符即清理重建。"""
-    return ("repo=" + cfg["base_repo"] + "|ref=" + cfg["pr_ref"] + "|sha=" + cfg["head_sha"]
+    # 改动⑯：取源形态与快照 merkle 一并进指纹——否则换一份快照会复用上一份的 .so。
+    return ("src=" + cfg.get("source_mode", _SOURCE_MODE_GIT)
+            + "|repo=" + cfg["base_repo"] + "|ref=" + cfg["pr_ref"] + "|sha=" + cfg["head_sha"]
+            + "|snap=" + (cfg.get("snapshot_sha256") or "")
             + "|subdir=" + cfg["op_subdir"] + "|op=" + cfg["snake_op"] + "|soc=" + cfg["soc"]
             + "|vendor=" + cfg["vendor_name"] + "|args=" + _build_args(cfg)
             + "|syms=" + ",".join(symbols) + "|")
@@ -589,6 +704,60 @@ def _reuse_build(cfg):
     if os.environ.get("OPRUNWAY_ACLNN_REBUILD") == "1":
         return False
     return os.environ.get("OPRUNWAY_ACLNN_REUSE_BUILD") == "1"
+
+
+def _source_block(cfg, proxy_prefix, q):
+    """取源那一段 shell（改动⑯）——按 `cfg["source_mode"]` 二选一，**已 cd 进 $CKO**。
+
+    `git_fetch`（缺省）生成的文本与本改动之前**逐字节一致**：ops-nn / Median 等既有通路零影响。
+
+    `local_snapshot` 用于「源码树已在目标机就位、且上游客观不存在可绑定 PR」的情形：
+    跳过 fetch，改校确定性 merkle。**它不产 head SHA**，回报的是
+    `OPRUNWAY_ACLNN_HEAD_SHA=null` + `OPRUNWAY_ACLNN_SNAPSHOT_SHA256=<merkle>`。
+    merkle 只证「跑的就是这份字节」，**不证**它等于任何上游 commit——
+    下游报告不得据此声称已绑定 PR head（律令 5.8）。
+
+    merkle 算法必须与 intake 侧（`fetch_source.py --pr-snapshot`）逐字节同口径：
+    对「排序后的相对路径 + 文件内容」求 sha256。
+    """
+    if cfg.get("source_mode", _SOURCE_MODE_GIT) == _SOURCE_MODE_GIT:
+        return (
+            '[ -d .git ] || git init -q\n'
+            'if git remote get-url origin >/dev/null 2>&1; then\n'
+            f'  git remote set-url origin {q(cfg["base_repo"])} '
+            '|| { echo OPRUNWAY_ACLNN_FETCH_FAIL; exit 3; }\n'
+            'else\n'
+            f'  git remote add origin {q(cfg["base_repo"])} '
+            '|| { echo OPRUNWAY_ACLNN_FETCH_FAIL; exit 3; }\n'
+            'fi\n'
+            f'{proxy_prefix}git fetch --depth 1 origin {q(cfg["pr_ref"])} '
+            '|| { echo OPRUNWAY_ACLNN_FETCH_FAIL; exit 3; }\n'
+            'git reset -q --hard FETCH_HEAD || { echo OPRUNWAY_ACLNN_FETCH_FAIL; exit 3; }\n'
+            'git clean -q -ffdx || { echo OPRUNWAY_ACLNN_FETCH_FAIL; exit 3; }\n'
+            'GOT_SHA=$(git rev-parse HEAD 2>/dev/null || true)\n'
+            f'if [ "$GOT_SHA" != {cfg["head_sha"]} ]; then\n'
+            f'  echo "OPRUNWAY_ACLNN_HEAD_MISMATCH got=$GOT_SHA want={cfg["head_sha"]}"; exit 3\n'
+            'fi\n'
+            'echo "OPRUNWAY_ACLNN_HEAD_SHA=$GOT_SHA"'
+        )
+    return (
+        f'SNAP={q(cfg["snapshot_dir"])}\n'
+        'oprw_guard_seg "$SNAP" snapshot\n'
+        '[ -d "$SNAP" ] || { echo OPRUNWAY_ACLNN_SNAPSHOT_MISSING; exit 3; }\n'
+        # 先算源目录的 merkle 再拷贝：先拷后算会把「拷贝过程中被改动」这种情况一起洗白。
+        'GOT_MERKLE=$(cd "$SNAP" && find . -type f -not -path "./.git/*" -print0 '
+        '| LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d" " -f1)\n'
+        f'if [ "$GOT_MERKLE" != {cfg["snapshot_sha256"]} ]; then\n'
+        f'  echo "OPRUNWAY_ACLNN_SNAPSHOT_MISMATCH got=$GOT_MERKLE want={cfg["snapshot_sha256"]}"; exit 3\n'
+        'fi\n'
+        'rm -rf -- "$CKO" && mkdir -p -- "$CKO" '
+        '|| { echo OPRUNWAY_ACLNN_SNAPSHOT_COPY_FAIL; exit 3; }\n'
+        'cp -a "$SNAP"/. "$CKO"/ || { echo OPRUNWAY_ACLNN_SNAPSHOT_COPY_FAIL; exit 3; }\n'
+        'cd "$CKO" || { echo OPRUNWAY_ACLNN_SNAPSHOT_COPY_FAIL; exit 3; }\n'
+        'echo "OPRUNWAY_ACLNN_SNAPSHOT_SHA256=$GOT_MERKLE"\n'
+        # 显式回报 null：下游用它区分「有 PR head 可绑」与「只有快照字节」，绝不留空让人误读。
+        'echo "OPRUNWAY_ACLNN_HEAD_SHA=null"'
+    )
 
 
 def _build_install_script(cfg, paths, symbols):
@@ -612,12 +781,13 @@ def _build_install_script(cfg, paths, symbols):
         if not _SYMBOL_RE.fullmatch(s):
             raise ValueError(f"非法 aclnn 符号名 {s!r}（须 C 标识符）")
     proxy_prefix = (f"http_proxy={q(cfg['proxy'])} https_proxy={q(cfg['proxy'])} " if cfg["proxy"] else "")
+    source_block = _source_block(cfg, proxy_prefix, q)
     tmpl = _SH_GUARDS + r'''oprw_setenv @@SETENV@@
 VROOT=@@VENDOR_DIR@@
 RROOT=@@RROOT@@
 oprw_guard_root "$VROOT" vendor_dir
 oprw_guard_root "$RROOT" remote_dir
-VC="$VROOT/vendors/@@VENDOR_NAME@@_nn"
+VC="$VROOT/vendors/@@VENDOR_NAME@@_@@VENDOR_SUFFIX@@"
 LIB="$VC/op_api/lib/libcust_opapi.so"
 STAMP="$VC/oprunway_build_provenance.txt"
 WANT=@@PROV_PREFIX@@"toolkit=$ASCEND_TOOLKIT_HOME|tkver=$OPRW_TKVER"
@@ -636,7 +806,7 @@ if [ @@REUSE@@ = 1 ] && [ -f "$LIB" ] && [ -f "$STAMP" ]; then
   CUR_SO=$(oprw_sha256 "$LIB")
   if [ "$GOT_PROV" = "prov=$WANT" ] && [ -n "$CUR_SO" ] && [ "$GOT_SO" = "so=$CUR_SO" ]; then
     oprw_check_syms "$LIB"
-    echo "OPRUNWAY_ACLNN_HEAD_SHA=@@HEAD_SHA@@"
+    echo "OPRUNWAY_ACLNN_HEAD_SHA=@@SOURCE_ID@@"
     echo "OPRUNWAY_ACLNN_VENDOR_ELF_SHA256=$CUR_SO"
     echo OPRUNWAY_ACLNN_BUILD_SKIP
     echo OPRUNWAY_ACLNN_BUILD_DONE
@@ -679,20 +849,7 @@ CKO=@@CHECKOUT@@
 oprw_guard_seg "$CKO" checkout
 mkdir -p -- "$CKO"
 cd "$CKO" || { echo OPRUNWAY_ACLNN_FETCH_FAIL; exit 3; }
-[ -d .git ] || git init -q
-if git remote get-url origin >/dev/null 2>&1; then
-  git remote set-url origin @@BASE_REPO@@ || { echo OPRUNWAY_ACLNN_FETCH_FAIL; exit 3; }
-else
-  git remote add origin @@BASE_REPO@@ || { echo OPRUNWAY_ACLNN_FETCH_FAIL; exit 3; }
-fi
-@@PROXY@@git fetch --depth 1 origin @@PR_REF@@ || { echo OPRUNWAY_ACLNN_FETCH_FAIL; exit 3; }
-git reset -q --hard FETCH_HEAD || { echo OPRUNWAY_ACLNN_FETCH_FAIL; exit 3; }
-git clean -q -ffdx || { echo OPRUNWAY_ACLNN_FETCH_FAIL; exit 3; }
-GOT_SHA=$(git rev-parse HEAD 2>/dev/null || true)
-if [ "$GOT_SHA" != @@HEAD_SHA@@ ]; then
-  echo "OPRUNWAY_ACLNN_HEAD_MISMATCH got=$GOT_SHA want=@@HEAD_SHA@@"; exit 3
-fi
-echo "OPRUNWAY_ACLNN_HEAD_SHA=$GOT_SHA"
+@@SOURCE_BLOCK@@
 [ -d "$CKO/@@OP_SUBDIR@@" ] || { echo "OPRUNWAY_ACLNN_NO_OP_SUBDIR @@OP_SUBDIR@@"; exit 3; }
 rm -rf -- build_out
 bash build.sh @@BUILD_ARGS@@ || { echo OPRUNWAY_ACLNN_BUILD_FAIL; exit 3; }
@@ -712,13 +869,18 @@ printf '%s\n%s\n' "prov=$WANT" "so=$CUR_SO" > "$STAMP" || { echo OPRUNWAY_ACLNN_
 echo "OPRUNWAY_ACLNN_VENDOR_ELF_SHA256=$CUR_SO"
 echo OPRUNWAY_ACLNN_BUILD_DONE
 '''
-    # vendor_name / soc / snake_op / op_subdir / head_sha / 符号 已过白名单（无 shell 元字符）→ 原样注入
-    # （它们要么处在 `_nn` 拼接上下文、要么须被 shell 词分割）；其余路径 / URL / ref 一律 shlex.quote。
+    # vendor_name / vendor_suffix / soc / snake_op / op_subdir / head_sha / 符号 已过白名单（无 shell
+    # 元字符）→ 原样注入（它们要么处在 `<name>_<suffix>` 拼接上下文、要么须被 shell 词分割）；
+    # 其余路径 / URL / ref 一律 shlex.quote。
     repl = {"@@SETENV@@": q(cfg["setenv"]), "@@VENDOR_DIR@@": q(cfg["vendor_dir"]),
-            "@@VENDOR_NAME@@": cfg["vendor_name"], "@@REUSE@@": "1" if _reuse_build(cfg) else "0",
+            "@@VENDOR_NAME@@": cfg["vendor_name"], "@@VENDOR_SUFFIX@@": _vendor_suffix(cfg),
+            "@@REUSE@@": "1" if _reuse_build(cfg) else "0",
             "@@RROOT@@": q(cfg["rroot"]), "@@CHECKOUT@@": q(paths["checkout"]),
-            "@@BASE_REPO@@": q(cfg["base_repo"]), "@@PROXY@@": proxy_prefix,
-            "@@PR_REF@@": q(cfg["pr_ref"]), "@@HEAD_SHA@@": cfg["head_sha"],
+            "@@SOURCE_BLOCK@@": source_block,
+            # 复用分支回报的「源身份」：git_fetch 是 head SHA，local_snapshot 恒是字面 null
+            # （复用路径不重新校 merkle，但 merkle 已进 prov 指纹 → 快照变了指纹就不匹配、不会走到这里）。
+            "@@SOURCE_ID@@": (cfg["head_sha"] if cfg.get("source_mode", _SOURCE_MODE_GIT)
+                              == _SOURCE_MODE_GIT else "null"),
             "@@OP_SUBDIR@@": cfg["op_subdir"], "@@BUILD_ARGS@@": _build_args(cfg),
             "@@PROV_PREFIX@@": q(_prov_prefix(cfg, symbols)), "@@SYMBOLS@@": " ".join(symbols)}
     return _render(tmpl, repl)
@@ -772,7 +934,7 @@ _RUNTIME_FILES = ("__init__.py", "base.py", "acl_consts.py", "aclnn_runner.py",
 _ENV_PREAMBLE = _SH_GUARDS + r'''oprw_setenv @@SETENV@@
 VROOT=@@VENDOR_DIR@@
 oprw_guard_root "$VROOT" vendor_dir
-VC="$VROOT/vendors/@@VENDOR_NAME@@_nn"
+VC="$VROOT/vendors/@@VENDOR_NAME@@_@@VENDOR_SUFFIX@@"
 oprw_guard_seg "$VC" vendor_content
 [ -d "$VC" ] || { echo "OPRUNWAY_ACLNN_NO_VENDOR $VC"; exit 2; }
 export ASCEND_CUSTOM_OPP_PATH="$VC:${ASCEND_CUSTOM_OPP_PATH:-}"
@@ -844,7 +1006,7 @@ def _exec_script(cfg, paths):
     ⚠ **DUT 必须显式声明**（runner 改动⑪的 host 侧对接）：driver 默认走严格档
     （`require_custom_vendor=True`），不给 `--dut-lib` / `--dut-vendor-root` 即构造期 fail-closed。
     这里传的是 `--dut-vendor-root "$VC"`——`$VC` 就是本段 env 前置里算出的 vendor **内容根**
-    （`_ENV_PREAMBLE` 的 `VC="$VROOT/vendors/<name>_nn"`，与 `ASCEND_CUSTOM_OPP_PATH` 首段同一个值），
+    （`_ENV_PREAMBLE` 的 `VC="$VROOT/vendors/<name>_<suffix>"`，与 `ASCEND_CUSTOM_OPP_PATH` 首段同一个值），
     故「精度跑的 so」= 「本次 build install 落地的 so」，环境里继承来的**上次**安装产物再也代跑不了。
     用内容根而非 `.so` 绝对路径：口径与 env 只此一处（`$VC`），不再拼第二套 `op_api/lib/...` 推导。
 
@@ -871,7 +1033,8 @@ def _exec_script(cfg, paths):
         '&& echo OPRUNWAY_ACLNN_EXEC_DONE '
         '|| { echo OPRUNWAY_ACLNN_EXEC_FAIL; exit 4; }\n')
     repl = {"@@SETENV@@": q(cfg["setenv"]), "@@VENDOR_DIR@@": q(cfg["vendor_dir"]),
-            "@@VENDOR_NAME@@": cfg["vendor_name"], "@@RROOT@@": q(cfg["rroot"]),
+            "@@VENDOR_NAME@@": cfg["vendor_name"], "@@VENDOR_SUFFIX@@": _vendor_suffix(cfg),
+            "@@RROOT@@": q(cfg["rroot"]),
             "@@CASESET@@": q(paths["rcases"] + "/caseset.json"), "@@ROUT@@": q(paths["rout"]),
             "@@RCASES@@": q(paths["rcases"]), "@@DEVICE@@": str(cfg["device"])}
     return _render(tmpl, repl)
@@ -988,7 +1151,8 @@ def _perf_script(cfg, paths, default_timeout_s=_PERF_TIMEOUT_MIN_S):
         'python -m aclnn_runtime.perf_msprof @@CASESET@@ @@PLAN@@ @@OUT@@ --work-dir @@RCASES@@ '
         '&& echo OPRUNWAY_ACLNN_PERF_DONE || { echo OPRUNWAY_ACLNN_PERF_FAIL; exit 5; }\n')
     repl = {"@@SETENV@@": q(cfg["setenv"]), "@@VENDOR_DIR@@": q(cfg["vendor_dir"]),
-            "@@VENDOR_NAME@@": cfg["vendor_name"], "@@RROOT@@": q(cfg["rroot"]),
+            "@@VENDOR_NAME@@": cfg["vendor_name"], "@@VENDOR_SUFFIX@@": _vendor_suffix(cfg),
+            "@@RROOT@@": q(cfg["rroot"]),
             "@@CASESET@@": q(paths["rcases"] + "/caseset.json"),
             "@@PLAN@@": q(paths["rcases"] + "/" + PERF_PLAN_FILE),
             "@@OUT@@": q(paths["rout"] + "/" + PERF_COLLECT_FILE),
@@ -1088,8 +1252,11 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
                    # `perf_msprof.resolve_plan_dut_lib` 只认 plan 显式给的字段、**绝不从容器 env 猜**
                    # （env 里可能继承着上次安装的陈旧 vendor —— 那正是「旧产物代跑报假 PASS」的入口）。
                    # 直接给**内容根** `paths["vc"]`（= `_ENV_PREAMBLE` 的 `$VC`，同一处算出，
-                   # 走解析链第②条，少一层推导）；`vendor_dir` + `vendor_name` 作同口径的第③条来源冗余，
-                   # 三者由同一个 cfg 派生、天然一致（`_aclnn_paths` 的 vc 与 resolve 的 ③ 是同一个公式）。
+                   # 走解析链第②条，少一层推导）；`vendor_dir` + `vendor_name` 作第③条来源冗余。
+                   # ⚠ 如实记（2026-08-03）：第③条在 `perf_msprof.resolve_plan_dut_lib` 里仍写死
+                   # `<vendor_dir>/vendors/<name>_nn`，**不认 `vendor_suffix`** → 非 `nn` 后缀时它与
+                   # ②不再同口径。本函数**恒**给 ②（`dut_vendor_root`），③ 只在 ①②都缺时才生效，
+                   # 故这条通路不受影响；但别据此声称「三者天然一致」。
                    "dut_vendor_root": paths["vc"],
                    "vendor_dir": cfg["vendor_dir"],
                    "vendor_name": cfg["vendor_name"],
@@ -1194,14 +1361,30 @@ def _run_aclnn_real(cfg, proj, caseset, work_dir, out_dir):
             f"（本地已过形态核验的 DUT: {proj!r}；容器内按 PR-ref {cfg['pr_ref']!r} 重新取源 → {paths['checkout']!r}。"
             f"哨兵可解耦 root-cause：GUARD/SETENV/FETCH/HEAD_MISMATCH/BUILD/RUNPKG/INSTALL/NOLIB/NOSYM）"
             f"{_diag_ref(bfull)}:\n{btail}")
-    # 取源实得 commit 必须与期望 head SHA 一致——脚本内已比对并 fail-closed，此处再从输出取回、写进证据。
-    got = re.search(r"OPRUNWAY_ACLNN_HEAD_SHA=([0-9a-fA-F]{40})", bblob)
-    if not got or got.group(1).lower() != cfg["head_sha"]:
-        raise RuntimeError(
-            f"[aclnn_py] build 段未回报可核验的 head SHA（期望 {cfg['head_sha']}，得 "
-            f"{got.group(1) if got else None}）——不接受来路不明的 .so，fail-closed"
-            f"{_diag_ref(_stash_diag(work_dir, 'build_head', bblob)[1])}:\n{bblob[-_DIAG_TAIL:]}")
-    prov = {"head_sha": got.group(1).lower(), "pr_ref": cfg["pr_ref"], "base_repo": cfg["base_repo"],
+    # 取源实得身份必须与期望一致——脚本内已比对并 fail-closed，此处再从输出取回、写进证据。
+    # 改动⑯：两种取源形态的「身份」不同，各自核各自的，**不互相顶替**。
+    if cfg.get("source_mode", _SOURCE_MODE_GIT) == _SOURCE_MODE_GIT:
+        got = re.search(r"OPRUNWAY_ACLNN_HEAD_SHA=([0-9a-fA-F]{40})", bblob)
+        if not got or got.group(1).lower() != cfg["head_sha"]:
+            raise RuntimeError(
+                f"[aclnn_py] build 段未回报可核验的 head SHA（期望 {cfg['head_sha']}，得 "
+                f"{got.group(1) if got else None}）——不接受来路不明的 .so，fail-closed"
+                f"{_diag_ref(_stash_diag(work_dir, 'build_head', bblob)[1])}:\n{bblob[-_DIAG_TAIL:]}")
+        source_id = {"head_sha": got.group(1).lower(), "provenance_kind": _SOURCE_MODE_GIT}
+    else:
+        # local_snapshot：核 merkle，`head_sha` 落 **None**（JSON null）。
+        # 绝不用 merkle 去填 head_sha 那个格子——那等于宣称「已绑定某个 commit」，是换概念（5.8）。
+        got = re.search(r"OPRUNWAY_ACLNN_SNAPSHOT_SHA256=([0-9a-fA-F]{64})", bblob)
+        if not got or got.group(1).lower() != cfg["snapshot_sha256"]:
+            raise RuntimeError(
+                f"[aclnn_py] build 段未回报可核验的快照 merkle（期望 {cfg['snapshot_sha256']}，得 "
+                f"{got.group(1) if got else None}）——不接受来路不明的 .so，fail-closed"
+                f"{_diag_ref(_stash_diag(work_dir, 'build_head', bblob)[1])}:\n{bblob[-_DIAG_TAIL:]}")
+        source_id = {"head_sha": None, "provenance_kind": _SOURCE_MODE_SNAPSHOT,
+                     "snapshot_sha256": got.group(1).lower(),
+                     "provenance_note": "本轮 DUT 来自本地快照：merkle 只证跑的就是这份字节，"
+                                        "**不证**它等于任何上游 commit；不得声称已绑定 PR head。"}
+    prov = {**source_id, "pr_ref": cfg["pr_ref"], "base_repo": cfg["base_repo"],
             "op_subdir": cfg["op_subdir"], "snake_op": cfg["snake_op"], "soc": cfg["soc"],
             "vendor_name": cfg["vendor_name"], "build_args": _build_args(cfg), "symbols": list(symbols),
             "build_reused": "OPRUNWAY_ACLNN_BUILD_SKIP" in bblob,

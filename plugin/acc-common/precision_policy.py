@@ -771,7 +771,8 @@ def oracle_source_from_golden(golden_source):
 # 用户 2026-07-22 裁定（R1–R12），本节是「档位怎么算」的**唯一**实现，别处只准调、不准复述判断逻辑：
 #   R2  PR 里的参考实现**一律禁止**作 golden 源 —— 落地方式是**值域里根本没有那个格子**
 #       （禁令会被绕过，缺值只能 fail-closed）。
-#   R3  golden 来源是**两档链**：① 任务书指定的测试方法 → ② CPU 上的 torch/numpy API。
+#   R3  golden 来源是**两档链**：① 任务书指定的测试方法 → ② CPU 上的现成库 API
+#       （原文举的是 torch/numpy；可跑方法族的**当前**权威集合以 `RUNNABLE_METHOD_KINDS` 为准）。
 #   R4  任务书**指定了、但本环境跑不起来**的方法（内置 TBE / cuSPARSE / OpenCV-GPU 等）
 #       → fail-closed 抛用户，**不自动回落**第二档。
 #   R5  第二档分两级：**现成 API 单调** → 不人核；**按公式自拼多步** → 必须人核。
@@ -792,8 +793,19 @@ PRODUCIBLE_ORACLE_SOURCES = ("torch_ref", "analytical_ref", "task_spec_expected"
 GOLDEN_SOURCE_KIND = ("single_api", "multistep", "external_method", "needs_user")
 
 # golden 的**方法族**，用来判「本环境跑不跑得起来」（R4）。
-GOLDEN_METHOD_KIND = ("torch_cpu", "numpy_cpu", "builtin_tbe", "gpu_lib", "other_external", "needs_user")
-RUNNABLE_METHOD_KINDS = frozenset({"torch_cpu", "numpy_cpu"})   # R3 第二档：CPU 上的 torch/numpy
+#
+# ⚠ `opencv_cpu` 与 `torch_cpu` / `numpy_cpu` **同族**、按同一条理由入 RUNNABLE：
+#   它们都是「装在本机、在 **CPU** 上现算得出真值的第三方库」。入族的判据是**这个能力**，
+#   不是某个算子（律令 5.1：绝不按算子身份特判）——任何任务书把某个 CPU 库指定为真值口径时都适用。
+#   加它的目的是让「诚实声明用 OpenCV CPU 算 golden」有格子可填；在此之前唯一「能跑」的写法是
+#   谎称 torch_cpu/numpy_cpu，那是被禁止的**静默换标杆**（5.8）。
+# ⛔ `gpu_lib`（含 OpenCV-CUDA / cuSPARSE 等）**刻意不进** RUNNABLE，别顺手加：
+#   R4 要求「任务书指定了、但本环境跑不起来」的方法一律 fail-closed 抛用户，**不自动回落**。
+#   「同一个库的 CPU 版能跑」不是放行 GPU 口径的理由——cv::GaussianBlur 的 CPU 与 CUDA 实现
+#   并非逐位一致，拿 CPU 结果冒充 GPU 标杆就是换标杆。要走 CPU 口径必须由人显式改声明。
+GOLDEN_METHOD_KIND = ("torch_cpu", "numpy_cpu", "opencv_cpu",
+                      "builtin_tbe", "gpu_lib", "other_external", "needs_user")
+RUNNABLE_METHOD_KINDS = frozenset({"torch_cpu", "numpy_cpu", "opencv_cpu"})   # R3 第二档：CPU 上跑得起来的现成库
 
 # 任务书对 golden 的**授权强度**。三者区别是本节最吃重的判断：
 #   oracle_method  —— 任务书就**真值口径/怎么测**作出了指定（如 IsClose「二进制比较改为逻辑值比较」）；

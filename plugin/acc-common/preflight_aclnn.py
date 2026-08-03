@@ -4,6 +4,20 @@
 只用 CP-A/B 已取到的 PR header 与 spec 做签名/slots 对账；不 clone、不 build、不加载
 `.so`、不访问 NPU。成功状态只能是 ``READY_WAIT_NPU_TRUST_GATE``，不能替代后续真机
 build、DUT 定义方核验或 harness trust gate。
+
+签名解析统一走 :func:`aclnn_runner.parse_aclnn_signature`，因此本门是 **stage2 感知**的
+（runner 改动⑮）。产物里逐签名/逐变体记两组来源，让两件本来不可见的事在产物里可审：
+
+1. ``stage2_dispatch_form`` / ``stage2_call_arity`` —— 执行段 ``aclnn<Op>`` 若是
+   「框架三参 + stage1 实参原样重复 + stream」形态（实测 ``aclnnGaussianBlur`` 为 10 参），
+   ``slot_contract`` 里的 N 项与真机 native 调用的实参个数**本来就不相等**。不记这两项，
+   读产物的人只能默认它是标准 4 参调用；
+2. 逐形参 ``direction_source`` —— ``dst`` 这类 stage1 写 ``const aclTensor *``、stage2 写
+   ``aclTensor *`` 的 DUT 上，「它是输出」这个结论**完全来自 stage2**。不落来源，产物里
+   就只剩一个凭空的 ``role="out"``（AGENTS.md 5.8：推断项须显式标注出处）。
+
+两组都只是**记录**：对账强度仍由 :meth:`AclnnRunner._validate_slots_against_signature`
+一处解释，本门不因 stage2 形态放宽任何一条逐项校验。
 """
 
 import argparse
@@ -16,6 +30,8 @@ import content_address
 import gen_cases
 import precision_policy
 from aclnn_runtime.aclnn_runner import (
+    STAGE2_EXTENDED,
+    STAGE2_STANDARD,
     AclnnRunner,
     AclnnRunnerError,
     parse_aclnn_signature,
@@ -44,6 +60,44 @@ def _sha(value):
 def _self_sha256():
     with open(__file__, "rb") as src:
         return hashlib.sha256(src.read()).hexdigest()
+
+
+def _stage2_record(signature):
+    """签名的 stage2 派发形态 + **真机 native 实参个数**（只记录，不参与任何判定）。
+
+    ``stage2_form`` 照抄解析结果（``None`` = header 里没有执行段声明）；``stage2_dispatch_form``
+    是 :meth:`AclnnRunner.run` 实际会走的分支（``None`` 按 :data:`STAGE2_STANDARD` 派发）；
+    ``stage2_call_arity`` = 那次 native 调用的实参个数：standard 恒 4；extended 是
+    「框架三参 + stage1 实参原样重复 + stream」= ``3 + len(params) + 1``。
+    """
+    form = getattr(signature, "stage2_form", None)
+    params = list(getattr(signature, "params", None) or ())
+    return {
+        "stage2_form": form,
+        "stage2_dispatch_form": form or STAGE2_STANDARD,
+        "stage2_call_arity": (
+            3 + len(params) + 1 if form == STAGE2_EXTENDED else 4),
+    }
+
+
+def _param_records(signature):
+    """签名形参表 → 产物记录，逐项补 ``direction_source``（in/out 这个结论**是从哪来的**）。
+
+    - ``stage2_param_qualifier``：extended 形态下，方向取自 stage2 那份重复实参的 const 限定符；
+    - ``stage1_const_heuristic``：stage2 缺席或为 standard，方向取自 stage1 的 ``const`` 启发式；
+    - ``not_applicable``：非张量形参（属性）没有方向可言。
+
+    按 ``ctype`` 分（通用类型判据），**绝不按算子身份**。
+    """
+    from_stage2 = getattr(signature, "stage2_form", None) == STAGE2_EXTENDED
+    records = []
+    for param in getattr(signature, "params", None) or ():
+        record = dict(param)
+        record["direction_source"] = (
+            ("stage2_param_qualifier" if from_stage2 else "stage1_const_heuristic")
+            if param.get("ctype") == "tensor" else "not_applicable")
+        records.append(record)
+    return records
 
 
 def _abstract_slots(spec, variant):
@@ -168,8 +222,9 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
             result["signatures"].append({
                 "symbol": signature.op_name,
                 "header": path,
-                "params": [dict(param) for param in signature.params],
+                "params": _param_records(signature),
                 "bytes_sha256": recorded["bytes_sha256"],
+                **_stage2_record(signature),
             })
 
         variants = precision_policy.call_variants(spec)
@@ -197,6 +252,9 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
                     **({"ctype": slot["ctype"]}
                        if slot["kind"] == "attr" else {}),
                 } for slot in slots],
+                # slot_contract 是 stage1 的 N 项；extended 形态下真机 stage2 还要把这 N 项
+                # 原样重复一遍（3 + N + 1 个实参）——记下来，别让读产物的人默认成 4 参。
+                **_stage2_record(signature),
                 "status": "STATIC_SIGNATURE_MATCH",
             })
         result["status"] = "READY_WAIT_NPU_TRUST_GATE"

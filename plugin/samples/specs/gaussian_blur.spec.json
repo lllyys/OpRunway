@@ -1,0 +1,76 @@
+{
+  "op": "GaussianBlur",
+  "repo": "ops-cv",
+  "hardware": ["Ascend 950PR"],
+  "_hardware_note": "任务书『适配硬件』= Ascend 950PR。⚠ 构建/跑测用的 soc 串**不在 spec 里**——它由编排层经环境变量 OPRUNWAY_SOC / OPRUNWAY_ACLNN_SOC 传给 aclnn_adapter（见 aclnn_adapter.py:414）。本轮须设 `ascend950`（**不是** `ascend950pr`），与 gaussian_blur/op_host/gaussian_blur_def.cpp 的 AddConfig 一致。spec 侧无字段承载 soc，故只在此记事。",
+  "_scenario_note": "**刻意不写 `scenario`**：受控值只有 torch_ref_aclnn，语义是「任务书把 torch 指定为真值口径」——本算子真值口径是 OpenCV CPU，不属该场景，故整字段省略（模板要求：不属该场景就整字段省略、别编新值）。执行形态由 runner_form 驱动，与本字段无关。",
+  "runner_form": "aclnn_py",
+  "reference": {
+    "type": "cpu",
+    "ref": "OpenCV CPU 的 cv2.GaussianBlur（任务书把 OpenCV 指定为对标基准）。DUT = PR 提供的 aclnn 两段式接口 aclnnGaussianBlurGetWorkspaceSize / aclnnGaussianBlur（gaussian_blur/op_api/aclnn_gaussian_blur.h）。⚠ stage2 是**非标准 10 参**形态（workspace, workspaceSize, executor, src, ksize, sigmaX, sigmaY, borderType, dst, stream），且 dst 在 stage1 声明为 const aclTensor*、stage2 为 aclTensor*（DUT 自身不一致）；runner 侧按 stage2 的限定符定输出方向。"
+  },
+  "change": {
+    "kind": "new_op",
+    "note": "ops-cv 仓根一级目录 gaussian_blur/ 新增算子（kernel + op_host + op_api + examples），本轮首次接入 OpRunway 验收流水线。"
+  },
+  "params_source": "task_doc_table",
+  "operator_class": "floating_compute",
+  "_operator_class_note": "高斯模糊 = 5x5 可分离卷积核上的加权求和，输出是**算出来的新数**（不是选值/搬运，也不是整型逻辑）→ floating_compute。⚠ 如实填写的代价是 gen_cases 会**强制**产 inf / -inf / nan 特殊场景用例；任务书的验收范围只到 CV_32F 有限值，这批用例的结果不具可比性，已逐条落 task_pr_gaps（不为了躲开特殊值而谎报 structural）。",
+  "golden": {
+    "_note": "判据锚（硬约束 #5：判据只从 spec 派生）。与 plugin/samples/golden/GaussianBlur/golden.py 的 GOLDEN_CONTRACT 是两个独立源，validator 逐字段对账，不一致即 fail-closed。四个字段与 golden.py 逐字一致：single_api / opencv_cpu / authorization.kind=none。",
+    "source": "single_api",
+    "method_kind": "opencv_cpu",
+    "authorization": {"kind": "none"},
+    "_authorization_note": "刻意**低报**为 none（→ derive_golden_tier 第 ⑦ 条 → tier 2、不需人核、不阻塞）。任务书确实点名 OpenCV，但 kind=oracle_method 要求 taskdoc_snapshot.sha256 + cite/quote 逐字可核，而本轮**没有** task_doc.snapshot.md 入库；填一个未经核实的 sha 违反 AGENTS.md 5.8，且会被 verify_authorization 判成 unverifiable_authorization → tier 4 blocked，整条链停住。快照入库后由人改判为 oracle_method 并重跑 check_golden。"
+  },
+  "params": [
+    {"name": "src", "io": "in", "dtype": ["float32"], "rank": [2, 3]},
+    {"name": "ksize", "io": "attr", "dtype": ["int64"], "default": [5, 5]},
+    {"name": "sigma_x", "io": "attr", "dtype": ["float64"], "default": 1.2},
+    {"name": "sigma_y", "io": "attr", "dtype": ["float64"], "default": 1.2},
+    {"name": "border_type", "io": "attr", "dtype": ["int64"], "default": 1},
+    {"name": "dst", "io": "out", "dtype": ["<from_input>"]}
+  ],
+  "_params_note": "attr 名取 op_host/gaussian_blur_def.cpp 的 op_def 名（ksize / sigma_x / sigma_y / border_type）；aclnn header 用 camelCase（sigmaX/sigmaY/borderType），golden.py 两种拼法都接。ksize 的 dtype 写 int64 只是元素宽度记号——真正的 ctype 由**取值结构**派生（list[int] → aclIntArray，gen_cases._attr_ctype），与 im2col 的 kernel_size 同法。sigma_x/sigma_y 用 float64 是因为 **aclnn 形参是 C `double`**（aclnn_gaussian_blur.h 两段签名皆然）。⚠ op_host/gaussian_blur_def.cpp:31-32 在 kernel IR 层把它们声明为 `.Float()`（32 位）——两层宽度不同。按 AGENTS.md 5.1「ABI 以 header/example 为事实源」，runner 走 aclnn 层的 double；kernel 层的窄化由 DUT 自己负责，不是本 spec 的口径。src rank 限 [2,3]：README 只支持 [H,W] 与 [H,W,C]。dst 无 out_role（单输出 legacy 通路），输出形状同输入 → golden.py 不导出 out_shape。",
+  "call_variants": [
+    {
+      "when": {"always": true},
+      "symbol": "GaussianBlur",
+      "active_attrs": ["ksize", "sigma_x", "sigma_y", "border_type"],
+      "active_outputs": ["dst"]
+    }
+  ],
+  "_call_variants_note": "PR 只导出一个符号 aclnnGaussianBlur（+ GetWorkspaceSize），无 attr 分派 → 单条 always 变体。symbol 取自 PR 实际 header，不是任务书 API 表面。",
+  "attr_matrix": [
+    {"ksize": [5, 5], "sigma_x": 1.2, "sigma_y": 1.2, "border_type": 1},
+    {"ksize": [3, 3], "sigma_x": 1.2, "sigma_y": 1.2, "border_type": 4}
+  ],
+  "_attr_matrix_note": "⚠ gen_cases 对 attr_matrix 取「每 attr 取值并集再全笛卡尔」（不是按行展开），故这两行实际展开成 ksize{[5,5],[3,3]} x border_type{1,4} = **4 组**（sigma 两列各只有一个值）。刻意只动两根轴、且把 sigma 钉死，避免笛卡尔爆炸。border_type 取值直接用 PR 自己的编码（op_host/gaussian_blur_utils.h:21-26 的 CONSTANT=0 / REPLICATE=1 / REFLECT=2 / REFLECT_101=4 / ISOLATED=16），与 cv2.BORDER_* 逐字节相同，故 golden 侧不需要映射表：1=BORDER_REPLICATE、4=BORDER_REFLECT_101，两者都在 PR 的受支持集内（同文件 :66-67）。",
+  "generalize": true,
+  "allow_empty_tensor": false,
+  "_allow_empty_tensor_note": "golden.py 的 _check_in_shape 对任一维为 0 直接 fail-closed（cv2 对空图无定义语义，不让 golden 替算子编造）。关掉后 gen_cases 不再强塞空 Tensor 用例。空 Tensor 覆盖 = 0 条，已在 task_pr_gaps 挂账。",
+  "dtype_required": ["float32"],
+  "dtype_tested": ["float32"],
+  "_dtype_note": "任务书本轮范围就是 CV_32F 单一 dtype（op_def 的 DataType 列表同为 fp32），required == tested，覆盖门无差额。",
+  "verify_mode": "numerical",
+  "precision": {
+    "oracle": "none",
+    "_oracle_note": "受控词表 {ascendoptest, mere_mare, atk_double, torch, scipy, std_exact, none} 里**没有** opencv 这一项，不自造第八个值。真值口径的权威声明在 golden.method_kind=opencv_cpu 与 golden.py 的 GOLDEN_SOURCE=\"external_ref cv2.GaussianBlur (OpenCV CPU 4.11.0)\"；oracle=none 表示「任务书未点名某个 oracle 工具」，并靠显式 precision.standard 定标准（select_standard 见到显式 standard 即返回，不走 oracle 映射）。",
+    "standard": "ascendoptest_default",
+    "tolerance_policy_id": "ascendoptest_default",
+    "threshold": 0.0001,
+    "threshold_source": "用户口头拍板「默认精度即可」→ 采用本流水线的**缺省**精度标准 ascendoptest_default。float32 阈值 0.0001 / 错误率 0.0001 取自 precision_policy._AOT_TABLE（AscendOpTest 逐字快照），**不是**从任务书原文抽的——任务书未给数值阈值，这一项按「工具默认」记，属推断口径 (推断)。",
+    "case_target": 24
+  },
+  "task_pr_gaps": [
+    "【定向用例 TC-03..TC-11 未覆盖】任务书列了 TC-01..TC-11 的定向测试点，本轮 caseset 只由通用正交网格（shape 阶梯 x attr 笛卡尔 x 强制特殊场景）铺出，**没有**任何一条 case 与 TC-03..TC-11 一一对应，spec 侧也没有字段可以声明「点名用例」。故本轮结论**不得**声称任务书定向用例已覆盖。",
+    "【in-place 语义：任务书要求、PR 明确拒绝】任务书要求支持原地（src 与 dst 同一块内存）。PR 的 aclnn 层显式调用 CheckInplaceUnsupported 把这条路封死。这是任务书 ↔ PR 的**功能缺口**，不是工具缺口；本轮 caseset 也无 in-place 用例（runner 恒分配独立 dst），缺口原样挂账、不得判 PASS。",
+    "【验收基准层级不一致】任务书把 **OpenCV C++ 层**（cv::GaussianBlur 接口面）指定为唯一验收基准，而本 PR 只交付 aclnn 接口 + kernel，没有 OpenCV C++ 适配层。本轮验的是 aclnn 层与 OpenCV CPU 数值的一致性，**不能**代替任务书要求的 C++ 接口层验收。",
+    "【inf / -inf / nan 用例超出任务书范围、且不可比】operator_class=floating_compute（如实填写）会让 gen_cases 强制产 inf/-inf/nan 特殊场景用例。任务书的验收范围只到 CV_32F 有限值域；且高斯是 5x5 **可分离**两趟加权求和，一个非有限值会沿行、列两趟污染整个邻域，NPU 与 OpenCV 的累加顺序/中间截断不同，结果**在语义上就不具可比性**。这批用例的裁决须在报告里**单列**，不得归因 DUT、也不得计入功能结论。",
+    "【OpenCV GPU 基准未验证】任务书主文写的是 OpenCV **GPU** 基准；本轮只跑通 OpenCV **CPU**（cv2.GaussianBlur，容器内 4.11.0）。CPU 与 GPU 不保证逐位一致，本轮**没有**任何 GPU 侧证据，报告不得声称已按任务书主文的 GPU 基准验收。",
+    "【空 Tensor 覆盖 = 0 条】已设 allow_empty_tensor:false（cv2 对空图无定义语义，golden 会 fail-closed）。任务书未明写是否支持空输入，本轮**未测**，属显式挂起、非静默收窄。",
+    "【DUT 自身 ABI 不一致 (推断)】aclnn_gaussian_blur.h 里 dst 在 stage1 是 `const aclTensor*`、在 stage2 是 `aclTensor*`。工具按 stage2 的非 const 判定 dst 为输出方向；这只是**从 header 读出来的方向标注**，不构成「dst 确实是被写的那块 buffer」的证明——须人核 PR:gaussian_blur/examples/test_aclnn_gaussian_blur.cpp:95-97 的 D2H 源。",
+    "【PR provenance 降级】本轮 DUT 来自本地快照目录（fetch_source --pr-snapshot），无 PR head_sha，completeness=snapshot_only。验收结论必须标明「未绑定 PR head」。",
+    "【无性能维】任务书性能条款本轮**不在范围内**，spec 整个 perf 字段省略 → 不产任何性能证据。报告不得给出性能结论。"
+  ]
+}

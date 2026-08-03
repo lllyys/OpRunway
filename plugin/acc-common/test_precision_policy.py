@@ -681,7 +681,11 @@ class GoldenTierDerivationTest(unittest.TestCase):
                 "authorization": {"kind": auth_kind, "cite": "", "quote": ""}}
 
     def test_exhaustive_cartesian_always_returns_valid_triple(self):
-        """4 source × 6 method_kind × 4 auth × 2 verified = 192 组，逐组必须有合法返回、无未定义态。"""
+        """4 source × 7 method_kind × 4 auth × 2 verified = 224 组，逐组必须有合法返回、无未定义态。
+
+        ⚠ 组合数**据词表现算**（不再写死 192）：加一个方法族就得改一个魔数，改魔数时很容易顺手把
+        「新词表项到底该落哪档」这件事跳过去。现算 + 下面那条独立期望矩阵才是真正的锁。
+        """
         n = 0
         for src in P.GOLDEN_SOURCE_KIND:
             for mk in P.GOLDEN_METHOD_KIND:
@@ -697,7 +701,9 @@ class GoldenTierDerivationTest(unittest.TestCase):
                             self.assertEqual(tier == 4, reason is not None)
                             # requires_human_review 的唯一算法，全组合恒成立
                             self.assertEqual(human, (tier >= 3 or src == "multistep"))
-        self.assertEqual(n, 192)
+        self.assertEqual(n, len(P.GOLDEN_SOURCE_KIND) * len(P.GOLDEN_METHOD_KIND)
+                         * len(P.AUTHORIZATION_KIND) * 2)
+        self.assertEqual(n, 224)   # 4 × 7 × 4 × 2 —— 词表真变了就该在这里被看见
 
     @staticmethod
     def _expected(src, mk, ak, verified):
@@ -707,7 +713,9 @@ class GoldenTierDerivationTest(unittest.TestCase):
         tier 4，测试照样绿——它只能证明「没有未定义态」，证明不了「派生得对」（codex 审出）。
         本矩阵与实现各写一遍、逐组比对，才抓得住规则被删 / 被前面的分支遮蔽 / 顺序写反。
         """
-        runnable = mk in ("torch_cpu", "numpy_cpu")
+        # ⚠ 这里**逐字重写**可跑方法族（不引用 P.RUNNABLE_METHOD_KINDS）——引用实现常量就成了
+        #   「拿实现证明实现」，把 gpu_lib 悄悄加进去这条测试也照样绿。
+        runnable = mk in ("torch_cpu", "numpy_cpu", "opencv_cpu")
         if src == "needs_user" or mk == "needs_user":
             tier, reason = 4, "needs_user"
         elif ak in ("oracle_method", "formula") and not verified:
@@ -791,6 +799,46 @@ class GoldenTierDerivationTest(unittest.TestCase):
             self.assertEqual(P.derive_golden_tier(g, True), (4, True, "method_unavailable"))
         # external_method 形态同样出局（走穷举兜底）
         self.assertEqual(P.derive_golden_tier(self._g("external_method", "gpu_lib", "oracle_method"), True)[0], 4)
+
+    def test_opencv_cpu_is_a_runnable_method_family(self):
+        """`opencv_cpu` 与 torch_cpu/numpy_cpu 同族：CPU 上跑得起来 → **不该**因方法族被挡在 tier 4。
+
+        它入族的判据是「装在本机、CPU 上现算得出真值的第三方库」这个**能力**，与是哪个算子无关
+        （律令 5.1）。在此之前，诚实声明「用 OpenCV CPU 算 golden」只能填 other_external → 必落
+        tier 4 `method_unavailable` → 整轮不产精度结论；唯一「能跑」的写法是谎称 torch/numpy，
+        那是被禁止的静默换标杆。
+        """
+        self.assertIn("opencv_cpu", P.GOLDEN_METHOD_KIND)
+        self.assertIn("opencv_cpu", P.RUNNABLE_METHOD_KINDS)
+        # 任务书指定了 OpenCV CPU 口径且授权核实 → 第一档
+        self.assertEqual(P.derive_golden_tier(self._g("single_api", "opencv_cpu", "oracle_method"), True),
+                         (1, False, None))
+        # 任务书没指定 → 回落现成 API 单调 → 第二档，且不人核（与 torch/numpy 同待遇）
+        for ak in ("none", "impl_reference"):
+            self.assertEqual(P.derive_golden_tier(self._g("single_api", "opencv_cpu", ak), True),
+                             (2, False, None))
+        # 但它**不能**绕过别的门：假授权照样 blocked、无授权自拼多步照样算捏造
+        self.assertEqual(P.derive_golden_tier(self._g("single_api", "opencv_cpu", "oracle_method"), False),
+                         (4, True, "unverifiable_authorization"))
+        self.assertEqual(P.derive_golden_tier(self._g("multistep", "opencv_cpu", "none"), True),
+                         (4, True, "unverifiable_authorization"))
+        # 词表本身合法 → validate_golden_contract 收得下（不必再谎称 torch_cpu）
+        self.assertTrue(P.validate_golden_contract(
+            {"source": "single_api", "method_kind": "opencv_cpu",
+             "authorization": {"kind": "none"}}))
+
+    def test_gpu_lib_stays_blocked_after_opencv_cpu_was_allowed(self):
+        """**刻意的**边界：放行 OpenCV **CPU** 不等于放行 OpenCV **CUDA**。
+
+        R4 说「任务书指定了但本环境跑不起来 → fail-closed 抛用户，不自动回落」。`gpu_lib` 必须
+        原地不动 —— 「同一个库的 CPU 版能跑」不是放行 GPU 口径的理由（CPU 与 CUDA 实现并非逐位
+        一致，拿 CPU 结果冒充 GPU 标杆就是换标杆）。要改口径必须由人显式改声明，不许工具代劳。
+        """
+        self.assertNotIn("gpu_lib", P.RUNNABLE_METHOD_KINDS)
+        self.assertNotIn("builtin_tbe", P.RUNNABLE_METHOD_KINDS)
+        self.assertNotIn("other_external", P.RUNNABLE_METHOD_KINDS)
+        self.assertEqual(P.derive_golden_tier(self._g("single_api", "gpu_lib", "oracle_method"), True),
+                         (4, True, "method_unavailable"))
 
     def test_rule_tier1_taskdoc_specified(self):
         """第一档：任务书就真值口径作出指定 + 本环境跑得起来。单 API 不人核、多步自拼仍人核。"""

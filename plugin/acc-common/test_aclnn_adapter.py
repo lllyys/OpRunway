@@ -538,10 +538,14 @@ class BuildRecipeScriptTest(unittest.TestCase):
         self.assertIn("OPRUNWAY_ACLNN_HEAD_MISMATCH", s)
         self.assertIn('echo "OPRUNWAY_ACLNN_HEAD_SHA=$GOT_SHA"', s)
 
-    def test_build_sh_six_flags_at_repo_root(self):
+    def test_build_sh_flags_at_repo_root(self):
+        """改动⑯前这里断言六个 flag（含 `--no_force`）。现在 `--no_force` 已不是默认实参：
+        它不在 ops-cv `build.sh` 的 `SUPPORTED_LONG_OPTS` 里，会直接 `Invalid long option` 退 1。
+        `--experimental` 仍在——本用例的 op 子路径就是 `experimental/index/median`，按前缀判据该发。"""
         s = self._script()
         self.assertIn("bash build.sh --pkg --experimental --soc=ascend910_93 "
-                      "--ops=median --vendor_name=customize --no_force", s)
+                      "--ops=median --vendor_name=customize", s)
+        self.assertNotIn("--no_force", s)
         # 构建参数**单一事实源**：脚本与 provenance stamp 共用 `_build_args`，杜绝两处漂移
         with _env(**_cfg_env(self.root)):
             self.assertIn(A._build_args(A._aclnn_cfg()), s)

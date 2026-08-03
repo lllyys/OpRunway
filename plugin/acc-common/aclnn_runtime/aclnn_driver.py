@@ -261,10 +261,13 @@ class _SignatureResolver:
                 continue
             self._cache[symbol] = sig
             return sig
+        # ⚠ 目标容器是 Python 3.11：f-string 的**表达式不得跨越隐式拼接的字面量**（PEP 701 是 3.12+）。
+        # 这里先把提示文本算成普通变量，再单点插值——别把列表推导/or 表达式拆到两行 f-string 里。
+        _dirs_hint = ([str(d) for d in self._dirs]
+                      or "（空：请给 --op-dir，或设 OPRUNWAY_ACLNN_OP_DIR / ASCEND_CUSTOM_OPP_PATH）")
         raise AclnnRunnerError(
             f"取不到 aclnn{symbol}GetWorkspaceSize 的头签名——fail-closed（runner 必须拿可信签名才调 native）。"
-            f"搜索目录 {[str(d) for d in self._dirs] or '（空：请给 --op-dir，或设 OPRUNWAY_ACLNN_OP_DIR / '
-            f'ASCEND_CUSTOM_OPP_PATH）'}；逐个失败原因: {errors}")
+            f"搜索目录 {_dirs_hint}；逐个失败原因: {errors}")
 
 
 def _slot_digest(s: dict) -> str:
@@ -297,6 +300,35 @@ def _slots_digest(slots) -> str:
         return f"<slots 摘要生成失败: {exc}>"
 
 
+def _signature_record(symbol: str, sig) -> dict:
+    """本次实际采信的头签名摘要（**纯元数据、不判定**）——进 manifest 作证据。
+
+    两项在报告里最载重、且在别处都看不见（runner 改动⑮）：
+      · ``stage2_dispatch_form`` / ``stage2_call_arity``：执行段是标准 4 参，还是
+        「框架三参 + stage1 实参原样重复 + stream」（extended，实测 ``aclnnGaussianBlur`` 10 参）；
+      · 逐形参 ``direction_source``：``in``/``out`` 这个结论取自 stage2 的 const 限定符，
+        还是 stage1 的 ``const`` 启发式。stage1 与 stage2 对 ``dst`` 写法不一致的 DUT 上，
+        「dst 是输出、所以做了 D2H」全靠 stage2；不记来源就成了产物里一个凭空的 role（5.8）。
+    ⚠ 这只是**工具从 header 读出来的方向**，不构成「dst 确实是被写的那块 buffer」的证明。
+    """
+    from .aclnn_runner import STAGE2_EXTENDED, STAGE2_STANDARD   # 纯常量，无 CANN 依赖
+    form = getattr(sig, "stage2_form", None)
+    params = list(getattr(sig, "params", None) or ())
+    from_stage2 = form == STAGE2_EXTENDED
+    return {
+        "symbol": symbol,
+        "stage2_form": form,
+        "stage2_dispatch_form": form or STAGE2_STANDARD,
+        "stage2_call_arity": 3 + len(params) + 1 if from_stage2 else 4,
+        "params": [{
+            "name": p.get("name"), "role": p.get("role"), "ctype": p.get("ctype"),
+            "direction_source": (
+                ("stage2_param_qualifier" if from_stage2 else "stage1_const_heuristic")
+                if p.get("ctype") == "tensor" else "not_applicable"),
+        } for p in params],
+    }
+
+
 def run_driver(caseset: dict, work_dir: str | Path, out_dir: str | Path, runner, *,
                signatures: dict | None = None, op_dir: str | Path | None = None) -> dict:
     """逐 case 跑 runner，落 out_k.bin，返回产物 manifest（**纯元数据、无判定**）。
@@ -309,6 +341,9 @@ def run_driver(caseset: dict, work_dir: str | Path, out_dir: str | Path, runner,
     ``runtime`` 字段（``dut_lib`` / ``symbols[*].is_dut`` / ``ignored_custom_opapi_libs`` /
     ``device_owned`` / ``teardown`` … 一个都不裁），这是「验的是被测物」的证据链；未实现的
     mock/旧 runner → ``runtime=None``，不影响跑测。
+    manifest 另记 ``signatures``（:func:`_signature_record`，逐 symbol 一条）：本次采信的
+    stage2 派发形态 + native 实参个数 + 逐形参的 ``direction_source``——「为什么这个张量被当成
+    输出、于是做了 D2H」在产物里得看得见（5.8），否则只剩一个凭空的 role。
     ⚠ 此刻 runner **还开着**，``teardown`` 恒 ``{"closed": false}``——close 之后的完整状态由
     :func:`refresh_manifest_runtime` 回写（CLI 路径已接）。
     """
@@ -318,6 +353,7 @@ def run_driver(caseset: dict, work_dir: str | Path, out_dir: str | Path, runner,
     resolver = _SignatureResolver(signatures=signatures, op_dir=op_dir)
     produced = []
     symbols: list[str] = []
+    sig_records: dict[str, dict] = {}
     for case in caseset["cases"]:
         cid = case["id"]
         call = _case_call(case)
@@ -326,6 +362,8 @@ def run_driver(caseset: dict, work_dir: str | Path, out_dir: str | Path, runner,
             symbols.append(symbol)
         slots = _build_slots(call, case, work_dir)
         sig = resolver.get(symbol)
+        if symbol not in sig_records:
+            sig_records[symbol] = _signature_record(symbol, sig)
         try:
             outs = runner.run(symbol, slots, signature=sig)
         except Exception as exc:                 # bug#11：原始异常不带 case 上下文 → 真机无从定位
@@ -352,6 +390,7 @@ def run_driver(caseset: dict, work_dir: str | Path, out_dir: str | Path, runner,
     runtime = prov_fn() if callable(prov_fn) else None
     manifest = {"op": op, "symbol": symbols[0] if len(symbols) == 1 else None,
                 "symbols": symbols, "out_dir": str(out_root), "produced": produced,
+                "signatures": [sig_records[s] for s in symbols if s in sig_records],
                 "runtime": runtime}
     _write_manifest(manifest)
     return manifest
