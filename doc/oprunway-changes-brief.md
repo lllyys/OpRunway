@@ -4,6 +4,16 @@
 
 ## 2026-08-03
 
+- GaussianBlur 验收通路按计划 v2 落地：aclnn_py 侧补齐 `aclIntArray` 参数、**stage2 真解析**
+  （此前把非 4 参 stage2 静默错调，属 5.8 最危险的一类）、输出方向改以 stage2 的 const 限定符为准；
+  新增 `local_snapshot` 取源形态（上游确无该 PR，`head_sha` 落 null，不合成 hex）；
+  vendor 后缀与 build flag 改为仓形态字段驱动。**Step 0 真机冒烟全通**——DUT 编得过、装进
+  `vendors/*_cv`、两个 aclnn 符号都在、example 真机跑出数值。单测 599 passed / 9 failed，
+  与未改动 HEAD 的 9 failed 完全同批 → 零回归。
+- 踩出一条**未声明的 Python ≥3.12 依赖**：`aclnn_driver.py:266` 用了 PEP 701 语法，
+  950 容器的 Python 3.11.15 直接 import 不了，而该缺陷**在未改动的 HEAD 上就存在**
+  （此前只在 Python 3.12.13 的 A2/A3 上跑过所以没暴露）。教训：本地 py_compile 过了不算数，
+  权威语法检查必须用目标环境的 python3。
 - 950 真机环境重探并**建好容器**，`doc/oprunway-real-machine-environment.md` §3 整节重写
   （旧的 2026-07-02 快照说「无 Docker 权限、host 执行」，现在 Docker 可用、改为容器执行）。
   新增三小节记坑：建容器时 `/dev/devmm_svm` 不存在、不加 `--privileged` 则 `npu-smi` 报 -8020；
