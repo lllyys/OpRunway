@@ -740,13 +740,41 @@ def _source_block(cfg, proxy_prefix, q):
             'fi\n'
             'echo "OPRUNWAY_ACLNN_HEAD_SHA=$GOT_SHA"'
         )
+    # ⚠ merkle 必须与 intake 侧 `fetch_source._walk_snapshot` / `_snapshot_merkle` **同口径**：
+    #   同一套跳过目录名、同样「不跟随 symlink」、同样「逐条 sha256(相对路径) + sha256(内容)
+    #   再喂总摘要」。用 shell 的 `sha256sum | sha256sum` 是**另一种**算法，两端永远对不上。
+    #   故这里内联一段 python3 复刻同一算法（容器里 python3 是流水线的既有依赖，非新增）。
+    # 跳过目录名从 intake 侧**惰性导入**，不复制一份：两端只要有一处漂了，merkle 就永远对不上，
+    # 而症状会表现成「快照没改却 SNAPSHOT_MISMATCH」，极难归因。惰性是为了不引入模块级依赖环。
+    from fetch_source import _SNAPSHOT_SKIP_DIRS
+    skip = sorted(_SNAPSHOT_SKIP_DIRS)
+    merkle_py = (
+        "import hashlib,os,sys\n"
+        f"SKIP={set(skip)!r}\n"
+        "root=sys.argv[1]\n"
+        "rels=[]\n"
+        "for dp,dns,fns in os.walk(root,followlinks=False):\n"
+        "    dns[:]=sorted(d for d in dns if d not in SKIP "
+        "and not os.path.islink(os.path.join(dp,d)))\n"
+        "    for n in fns:\n"
+        "        f=os.path.join(dp,n)\n"
+        "        if os.path.islink(f) or not os.path.isfile(f): continue\n"
+        "        rels.append(os.path.relpath(f,root).replace(os.sep,'/'))\n"
+        "h=hashlib.sha256()\n"
+        "for rel in sorted(rels):\n"
+        "    with open(os.path.join(root,*rel.split('/')),'rb') as fh: b=fh.read()\n"
+        "    h.update(hashlib.sha256(rel.encode('utf-8')).digest())\n"
+        "    h.update(hashlib.sha256(b).digest())\n"
+        "print(h.hexdigest())\n"
+    )
     return (
         f'SNAP={q(cfg["snapshot_dir"])}\n'
         'oprw_guard_seg "$SNAP" snapshot\n'
         '[ -d "$SNAP" ] || { echo OPRUNWAY_ACLNN_SNAPSHOT_MISSING; exit 3; }\n'
+        f'OPRW_MERKLE_PY={q(merkle_py)}\n'
         # 先算源目录的 merkle 再拷贝：先拷后算会把「拷贝过程中被改动」这种情况一起洗白。
-        'GOT_MERKLE=$(cd "$SNAP" && find . -type f -not -path "./.git/*" -print0 '
-        '| LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d" " -f1)\n'
+        'GOT_MERKLE=$(python3 -c "$OPRW_MERKLE_PY" "$SNAP") '
+        '|| { echo OPRUNWAY_ACLNN_SNAPSHOT_DIGEST_FAIL; exit 3; }\n'
         f'if [ "$GOT_MERKLE" != {cfg["snapshot_sha256"]} ]; then\n'
         f'  echo "OPRUNWAY_ACLNN_SNAPSHOT_MISMATCH got=$GOT_MERKLE want={cfg["snapshot_sha256"]}"; exit 3\n'
         'fi\n'
