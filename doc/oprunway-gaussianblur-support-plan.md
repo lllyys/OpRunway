@@ -282,3 +282,65 @@ Step 0  ────────────────────────
   只是把改动从 Python runtime 转移到一份算子专用 C++ 文件。
   唯一合规例外是造「按 header 自动生成 runner 的通用生成器」，
   而为一个首跑造生成器**是更严重的过度设计**。
+
+---
+
+## 8 · 实测记录（2026-08-03，950 容器）
+
+> 本节只记**真实跑出来的结果**。计划里的预判凡被实测推翻的，以本节为准。
+
+### 8.1 Step 0 零改动真机冒烟：**全通**
+
+按 Codex 审后提到最前面的这道门，四步逐个过：
+
+| 步 | 结果 |
+|---|---|
+| build | `build.sh --pkg --soc=ascend950 --ops=gaussian_blur --vendor_name=oprwgb` 编过，产**唯一**一个 `.run`（1.2 M） |
+| install | 落地 `vendors/oprwgb_cv/`，`libcust_opapi.so` 603 K |
+| 符号 | `nm -D` 见 `aclnnGaussianBlur` 与 `aclnnGaussianBlurGetWorkspaceSize`，均 `T`（已定义） |
+| 真机执行 | PR 自带 example 输出 `GaussianBlur succeeded, output[0]=0.484254`，`exit=0` |
+
+结论：**DUT 本身在 950 上是可 build / 可加载 / 可执行的**，后续框架改造有意义。
+
+### 8.2 计划里两条预判被真机坐实
+
+- **B9**：`no_force` 在 ops-cv `build.sh` 的 `SUPPORTED_LONG_OPTS` 里出现 **0 次** → `--no_force` 必然
+  `Invalid long option` 退 1。`CMakeLists.txt:138-149` 证实 `ENABLE_EXPERIMENTAL=ON` 只挂
+  `experimental/image|objdetect`，而 `add_subdirectory(gaussian_blur)` 在 **else 分支**——
+  带 `--experimental` 反而把被测算子排除掉。
+- **B8**：install 实际落 `vendors/oprwgb_**cv**/`，写死 `_nn` 必然 `NOLIB`。
+
+### 8.3 探针漏掉、实跑才暴露的两个硬阻塞
+
+| # | 问题 | 处理 |
+|---|---|---|
+| **S4** | `_aclnn_cfg` 对取源是**强制 git**：`PR_REF` 必须 40 位 SHA 或 `refs/merge-requests/<N>/head`，`BASE_REPO` 必须 http(s) git 远端，install 脚本里是 `git fetch --depth 1` + `rev-parse` 比对。而本轮 DUT 是无 `.git` 的快照，且**实测确认 `cann/ops-cv` 上游不存在该 PR**（扫 600 个 MR 无命中；任务书自己写明代码在**私仓**）。这不是"链接还没拿到"，是客观不存在 | 新增 `OPRUNWAY_ACLNN_SOURCE_MODE ∈ {git_fetch, local_snapshot}`，缺省 `git_fetch` 且逐字节不变。`local_snapshot` 跳过 fetch、改校确定性 merkle，`head_sha` 一路透传为 **null**——合成 40 位 hex 是 5.8 禁止的造假 |
+| **Py3.11** | `aclnn_driver.py:266` 的 f-string 表达式跨越了隐式拼接的字面量，那是 **PEP 701（Python 3.12+）语法**。容器是 3.11.15，该文件**在未改动的 HEAD 上就无法 import**。此前没暴露，是因为既往真机工作都在 Python 3.12.13 的 A2/A3 上 | 改成先算普通变量再单点插值。**工具链有一条未声明的 Python ≥3.12 依赖**，需要在 CI/门里补一道目标版本语法检查 |
+
+**一条流程教训**：本地 Python 3.14 上 `py_compile` 通过**不能代表目标环境通过**。
+凡要在容器里跑的代码，权威语法检查必须用容器的 python3 做。
+
+### 8.4 merkle 两端一致性（自己踩了自己设计的坑）
+
+`local_snapshot` 的取源段最初用 shell 的 `sha256sum | sha256sum`，而 intake 侧
+`fetch_source._snapshot_merkle` 是「逐条 `sha256(相对路径)` + `sha256(内容)` 再喂总摘要」——
+**两种算法，两端永远对不上**，症状会表现成「快照没改却 `SNAPSHOT_MISMATCH`」，极难归因。
+已改为在取源段内联同一段 Python，跳过目录名从 `fetch_source` **惰性导入**（不复制第二份）。
+真机实测两条代码路径对同一目录得同一摘要
+`203d4b77f3016f0513832cb87946dcddb48c43658ee6b2d48a247a92af25d049`（2565 个文件）。
+
+### 8.5 单测：零回归
+
+在同一容器内跑六个相关测试文件：
+
+| | passed | failed |
+|---|---|---|
+| 未改动的 HEAD（仅打上 Py3.11 语法修复） | 545 | 9 |
+| 本批改动后 | **599** | **9** |
+
+失败的是同一批 9 个，全部与容器内 root 身份下的 setenv 软链/权限守卫等环境因素有关，
+在未改动的 HEAD 上同样失败 → **本批改动零回归**，净增 54 项通过。
+
+> 期间发现两处 agent 写的测试与其自身实现打架（测试写了但按指令未执行）：
+> `test_build_sh_six_flags_at_repo_root` 仍断言已被移除的 `--no_force`；
+> `NormTargetDirTest` 期望绝对路径被接受、而实现对其 fail-loud。两处均以**实现为准**改测试。
