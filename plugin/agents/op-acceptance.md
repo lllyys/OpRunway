@@ -18,6 +18,9 @@ agents:
 
 本 agent 只做**调度 + CP-A..E 检查点状态机 + 工件门禁 + 对应校验前置 + 失败路由**；
 CP 的逐步落法、脚本参数、门级判定，沉在 `acceptance-workflow` skill 与 3 个 subagent，本文件不复述。
+CP-E 后的人工精度重测同样由本 primary 编排 CP-F F0..F5；F2 幕后调准备入口，
+F3/F4 只将已准备 attempt 以 `run_precision_retest` 派给 `acc-verify-rootcause`，不借用
+CP-D `run_npu` 重跑性能，不重新抽 spec/生成 case/golden。
 **判定脑子不在这**（在 `acc-common/validator.py` / `perf_compare.py` / `validate_acceptance_state.py`，ADR 0007）。
 **验收权威 = 任务书**；「PR 有测试」≠「验收过了」。全程中文；副作用先确认。
 

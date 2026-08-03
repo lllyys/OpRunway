@@ -637,6 +637,7 @@ if [ @@REUSE@@ = 1 ] && [ -f "$LIB" ] && [ -f "$STAMP" ]; then
   if [ "$GOT_PROV" = "prov=$WANT" ] && [ -n "$CUR_SO" ] && [ "$GOT_SO" = "so=$CUR_SO" ]; then
     oprw_check_syms "$LIB"
     echo "OPRUNWAY_ACLNN_HEAD_SHA=@@HEAD_SHA@@"
+    echo "OPRUNWAY_ACLNN_VENDOR_ELF_SHA256=$CUR_SO"
     echo OPRUNWAY_ACLNN_BUILD_SKIP
     echo OPRUNWAY_ACLNN_BUILD_DONE
     exit 0
@@ -708,6 +709,7 @@ oprw_check_syms "$LIB"
 CUR_SO=$(oprw_sha256 "$LIB")
 printf '%s\n%s\n' "prov=$WANT" "so=$CUR_SO" > "$STAMP" || { echo OPRUNWAY_ACLNN_STAMP_FAIL; exit 3; }
 [ -n "$CUR_SO" ] || echo OPRUNWAY_ACLNN_STAMP_PARTIAL
+echo "OPRUNWAY_ACLNN_VENDOR_ELF_SHA256=$CUR_SO"
 echo OPRUNWAY_ACLNN_BUILD_DONE
 '''
     # vendor_name / soc / snake_op / op_subdir / head_sha / 符号 已过白名单（无 shell 元字符）→ 原样注入
@@ -1205,6 +1207,10 @@ def _run_aclnn_real(cfg, proj, caseset, work_dir, out_dir):
             "build_reused": "OPRUNWAY_ACLNN_BUILD_SKIP" in bblob,
             "stamp_mismatch_rebuilt": "OPRUNWAY_ACLNN_STAMP_MISMATCH" in bblob,
             "so_digest_unavailable": "OPRUNWAY_ACLNN_STAMP_PARTIAL" in bblob}
+    so_digest = re.search(
+        r"OPRUNWAY_ACLNN_VENDOR_ELF_SHA256=([0-9a-fA-F]{64})", bblob)
+    if so_digest:
+        prov["vendor_elf_sha256"] = so_digest.group(1).lower()
     env_line = re.search(r"OPRUNWAY_ACLNN_ENV toolkit=(\S+) tkver=(\S+)", bblob)
     if env_line:
         prov["toolkit"], prov["toolkit_version"] = env_line.group(1), env_line.group(2)
@@ -1304,12 +1310,17 @@ def run_aclnn_py(caseset, work, defect_cases=None):
             " 编排（按 §9.6 实测配方）、evidence 组装管路（repo_adapter.build_multi_output_evidence 对拉回 out_k.bin 复算 metrics）。\n"
             "  真取源/build.sh install / ctypes 9.0.1 运行时 / 多输出 arity / bf16 窄化须真机（de-risk D0-D2 已坐实配方，端到端待接）。\n"
             "  确须真机跑请设 OPRUNWAY_ACLNN_REAL=1（并已人工确认 build install 写用户态 vendor 目录的副作用）。")
-    _run_aclnn_real(cfg, proj, caseset, work, out_dir)
+    build_provenance = _run_aclnn_real(cfg, proj, caseset, work, out_dir)
     # ① 先组精度 evidence（perf 未采 → us=None 占位）；精度先筛要用它的 policy+metrics。
     evidence = RA.build_multi_output_evidence(caseset, work, out_dir)
     envelope = {"op": op, "repo_mode": "aclnn_py", "evidence_grade": "acceptance_candidate",
                 "runner_source": "user", "runner_path": os.path.join(proj, "build.sh"),
-                "runner_form": "aclnn_py", "evidence": evidence}
+                "runner_form": "aclnn_py",
+                # CP-F / 后验复核必须从首次 evidence 读取实际生效的构建身份，不能让重测方
+                # 另填一份自报 identity。这里只搬 _run_aclnn_real 已核验并返回的事实，
+                # 不新增判断、不改变精度/性能裁决。
+                "execution_provenance": build_provenance,
+                "evidence": evidence}
 
     # ② 性能采集（kernel-only msprof + torch_npu 真机内基线）。**采不到就是 us=None**——
     #    下游 perf_compare 缺基线即挂起，绝不兜底、绝不冒充达标（承 run_workflow 的 High#2 纪律）。

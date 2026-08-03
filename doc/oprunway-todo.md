@@ -1,6 +1,12 @@
 # OpRunway 施工 TODO（离「通用算子验收工具」还差的）
 
-## ✅ Median 性能口径与 A3 验收已闭环（2026-07-27）
+> **Median 当前状态更正（2026-07-30）**：下面 60-case 闭环是历史 checkpoint，
+> 最新 `cpp_extension` torch-parity 真机验收为 1152 例中
+> 1101 PASS、51 FAIL，`gate.passed=true`，确定性裁决 `FAIL(精度)`；
+> 它也取代上一轮 1344-case 结果。
+> 因此 Median 验收未闭环，性能不得越过精度总门。
+
+## ⚠ Median 60-case 历史性能 checkpoint（已被后续验收取代，2026-07-27）
 
 - [x] 直接按任务书采用同机 `torch_npu:torch.median` 作为小算子拼接 baseline；用户已确认语义等价，
   不再追加包装等价性证明。
@@ -16,7 +22,7 @@
 - [x] A3 容器全量回归 1505 passed / 10 skipped / 474 subtests；本用户 `/tmp` 旧临时数据已清理，
   未影响其他用户。
 
-> 后续只剩发布动作：选择性整理本轮 commit，push 前按仓规做统一审修；没有新的 Median 验收阻塞项。
+> 上述“没有新的 Median 验收阻塞项”已经失效；最新一轮 51 个精度失败是明确阻塞项。
 
 > **现状（2026-07-22 更新）**：Wave 1–3 经 **PR #3**、**PR #6**（V1/Q1 + Q9 + Q7 + cases50 + 真机 opp provenance 绑源 + IsClose bf16 转 tested）、**PR #7**（**runner 去引擎化**：runner 移出引擎作输出、`find_runner` fallback 退役 fail-closed）先后合入 main（PR #7 合入时 main = `b727d6f`，GitHub + GitCode 双镜像同 OID；**PR #8 合入后当前 main = `1d2bb3a`**，GitCode 镜像见下）。
 > **PR #8 已合入 main**（2026-07-22，merge commit `1d2bb3a`；分支 `feat/golden-out-of-engine`，8 commit / 25 文件）：**golden 去引擎化**——`gen_cases` 的 `GOLDEN` 硬表改 `load_golden(op)` 按算子加载器 + golden 来源契约扩六枚举 + ADR 0011（proposed）+ **来源契约批 1**（`0192e49`，见下「🔴 下一刀」）。⏳ **GitCode 镜像尚未同步**。
@@ -618,7 +624,7 @@
 - [x] **A3 大小 shape 边界已落成通用数据契约**：按所有输入的物理载荷字节数求和，`<= 256 KiB`（262144 bytes，边界计入）为小 shape，`> 256 KiB` 为大 shape；原因是前者可一次搬入 UB。所有当前 A3 样例 spec 均显式声明该 profile；该标签只做分组统计，不恢复 `trivial-met`，不自动免测或放宽性能阈值。
 - [x] **通用能力保留但不误用**：`aclnn_builtin` 仍是其它任务可能使用的通用 baseline 能力；Median spec 已恢复 `torch_npu:torch.median`，无算子身份代码分支。
 - [x] **选例与报告账本已补齐代码契约并经 A3 容器回归**：caseset 记录性能 case 复用的精度 case_id、未选 precision case、逐 dtype 配额和 small/large 计数；精度报告按 dtype/overall 固定输出 `total/passed/failed/needs_review`（`na` 单列），性能报告按 small/large/overall 固定输出计划数、可评分数、达标数、blocked、双边中位耗时和 speedup。A3 的 256 KiB 边界走受控 hardware profile，dry-run 也执行同一 fail-closed 策略校验；三级门把汇总逐项绑定到 per-case/evidence/baseline，不重判阈值。全套 `acc-common` 测试已在 A3 容器分批跑绿。
-- [x] **远程重生成并重新裁决**：2026-07-27 已以重新生成的同一精度 caseset完成 A3 正式采集。精度 60/60 PASS；性能 custom 50/50、baseline 48/50，48 对中 35 对达到 `ratio >= 1.0`，2 个 BF16 baseline limitation；small 24（22 scored / 19 达标 / 2 blocked / speedup 7.5006），large 26（26 scored / 16 达标 / speedup 0.3668），overall 50（48 scored / 35 达标 / 2 blocked / speedup 3.4268）。确定性裁决仍为 `BLOCKED`，关闭的是“重生成并裁决”动作，不是性能条款。
+- [x] **历史远程重生成并重新裁决**：2026-07-27 legacy 60-case checkpoint 曾得到精度 60/60 PASS；该结论已被后续 `cpp_extension` torch-parity 1344-case 验收取代。当前 1286 PASS、58 FAIL，`gate.passed=true`，确定性裁决 `FAIL(精度)`；不得再用本条关闭当前精度或性能验收。
 - [ ] **性能条款尚未通过**：13 个可评分 case 真实低于 `ratio=1.0`（3 个 fp 长度 3 的 global 小 shape、9 个 fp 1024×1024 global 大 shape、1 个 int64 1024×1024 global 大 shape）；另 2 个 BF16 baseline case 无可比 device kernel。不得靠删 case、改阈值或把聚合 speedup 当逐 case PASS 关闭。
 - [ ] **`torch_parity` 造例档位仍只是护栏**：`gen_cases.py` 当前明确记载“批 A 只记账、批 B 尚未改造例逻辑”；只读签名对账得到当前 50 个性能 case 与 cannbot Median 的 1152 个 accuracy / 50 个 performance 冻结 case 均为 0 个精确 `shape×dtype×dim×keepdim` 重合，而 cannbot 已发布的 50 个 performance case 自身是其 1152 个 accuracy case 的 50/50 子集。因此现行来源/身份/大小分类已闭环，但不能宣称 shape/attr 网格逐例完全对标。后续若实施批 B，须用字段驱动的通用 profile，不得读取 `repos/` 作为运行时依赖或按 Median 身份特判；也不得借“对标”删除任务书要求且 cannbot 未覆盖的 global 变体。
 

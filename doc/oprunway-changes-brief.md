@@ -2,8 +2,77 @@
 
 > 倒序：最新在上。每天一节，一条一句，大白话。`待决` 置顶。
 
+## 2026-08-02
+
+- v10 已在 A3 跑通 1152-case CP-F 机械闭环：F2 和 execute 均成功、Task-2 gate 通过、
+  七类必需产物与 final receipt 齐全、性能未重测、基础 acceptance 不变；因测试冻结包
+  缺任务书 snapshot，裁决仍为 `blocked_golden_unauthorized`，尚未证明新标准对最终裁决生效。
+- CP-F 修正 relaxed rerun 的身份门顺序：先对未改写的原 case 与 input/golden 字节校验，
+  通过后才派生新 acceptance policy 的执行 caseset；同时为真机子 agent 登记独立
+  `run_precision_retest` 调度职责，明确 Task-2-only、不重跑性能。
+
+## 2026-07-31
+
+- 执行方向确认单 4.12 补充 `needs_review` 的典型场景，并与明确超差的 FAIL、证据条件不足的 BLOCKED 区分。
+- 执行方向确认单补充功能 gap 定义及 Median 无 `dim` overload 示例，明确它不同于精度/性能失败，未解决时必须停跑或禁止最终 PASS。
+- 执行方向确认单补充 DUT 定义，并以 Median 明确指定 PR 构建的 vendor `libcust_opapi.so` 是被测对象、独立 `torch.ops` Extension 只是测试桥。
+- 执行方向确认单补充 fresh build/内容寻址复用、用户态 vendor、共享 OPP、PR/ELF 来源绑定及环境漂移重验的简要解释。
+- 执行方向确认单补充三种 runner form 的实际调用差异，并明确 Median 的 cpp_extension 仅为测试桥、DUT 仍是指定 PR 构建的 vendor `.so`。
+- 执行方向确认单补充 MERE/MARE 的简要定义，并明确该口径仍未 settle、不是当前 Median 的实际精度标准。
+- 执行方向确认单补充 Median 重复值/tie 的简例，明确人工需确认“索引与 Torch 完全一致”还是“允许不同合法索引但回取值一致”。
+- 新增执行方向确认单设计评审稿：建议在 CP-B 的 spec 之后增加人工硬门，集中确认验收范围、DUT/接入形态、golden、精度与性能口径、用例预算、硬件、来源策略和失败路由；本轮仅出文档，尚未修改 workflow。
+
+## 2026-07-30
+
+- Median CP-F 冻结包改为从 caseset 的 input/golden 路径字段逐项枚举文件闭包，禁止按文件名模式猜测；
+  引用缺失、符号链接或归档成员偏离 allowlist 均在 F2 前 fail-closed。
+- CP-F 接通通用 `cpp_extension` Task-2-only 重测：复用正式 codegen/adapter/driver 做 fresh
+  build/load/invoke，同时以独立 precision-only 入口物理禁止性能采集；首次与本轮 invocation、
+  PR/build/vendor ELF、SoC/toolkit、Extension receipt 均内容绑定，attempt 另冻结逐 case golden bytes。
+  任何身份、调用序列、输入或 golden 漂移均 fail-closed，不覆盖首次验收产物。
+- CP-F 独立 review 后补齐 manifest/spec/namespace 双向回绑、真实路径防 symlink、directive 幂等分配锁、
+  execute owner 锁与唯一原子临时文件；报告成功生成后才提交最终 receipt。relaxed override 拒绝 no-op，
+  跨 family 要完整数值字段，同 family 接受人工明确的收紧或放宽。
+- CP-F 再收紧入口与崩溃恢复：execute 拒绝入口 symlink，幂等扫描拒绝
+  numeric symlink；锁记录 owner/operation/digest，遗留锁只可经显式死 owner 复核后原子标 abandoned，
+  禁止按 mtime 自动删除。跨 family 明确称人工完整 policy replacement。
+- CP-F execute 的 attempts 根改由 CLI 必填外部可信锚，attempt 只允许直接四位子目录；receipt/lock 拒绝
+  先于 manifest 读取。allocation/execute 锁统一为完整 owner 临时文件 fsync 后 hard-link O_EXCL 发布，
+  不再存在空锁或半 JSON 可见窗口。
+- Median v6 `cpp_extension` 完整真机 workflow 已事务式收回：本轮实际 1152 例、1101 PASS、51 FAIL，
+  `gate.passed=true`、确定性裁决 `FAIL(精度)`，性能按精度 fail-fast 未执行；51 例均含越界
+  `indicesOut=2147483647`。独立 direct ACLNN 最小补证将预填 sentinel 改成同一越界值，
+  exact DUT 符号绑定闭合，而 stock `torch_npu` 同输入返回有界 index 83630，技术归因闭环为 DUT
+  长轴浮点路径；补证产物事务收回后已清理精确远端根，保护根未触碰。
+- root-cause 通用纪律补上未初始化输出边界：固定全 0/最大整数等位型不能单独证明 DUT 写回行为；
+  必须冻结原失败输入，以预填 sentinel 的独立 direct/官方 example 调用和 stock 同输入对照闭环，
+  无需重跑完整 caseset，也不得改变 case 或精度标准。
+
+## 2026-07-29
+
+- golden 授权硬门远端回归已闭环：preparation 19/19、acceptance 185/185，check_golden contract/load、1152/1152 dry-run、四方任务书 SHA、REUSABLE preparation 与 16/16 shape smoke 全过；结果包按远端/本地 SHA+gzip+JSON 事务验证后刷新 ignored case_plan/preparation，随后才清理远端。
+- prep-refresh v2b 的 19 个 preparation 测试又因快照漏 `fetch_source.py`（测试按路径读取 producer logic SHA，非 import 依赖）统一 error；日志已事务式收回并清理。后续不再猜最小闭包，直接固定完整 plugin 组件；skill 将文件摘要依赖也纳入闭包。
+- golden 授权门首轮远端回归中 preparation 19/19 通过，但 acceptance 测试因最小包漏 `samples/golden/IsClose/golden.py` 在 setUpModule 阶段 0 tests 退出；不是代码回归结论。SSH 收件中断后日志未完整归档、远端已清，skill 增加测试 fixture/assets 依赖闭包要求，并再次强调失败时不得推进清理。
+- Median CP-D v5 实际生成/执行 1152 例，但因 `ops/Median/task_doc.snapshot.md` 缺失被确定性 validator 判 `blocked_golden_unauthorized`，另发现 `api_surface_unsupported_by_pr` gap 缺必需 `overload/reason`；Task3 被跳过、总体 BLOCKED。现补齐逐字任务书生效快照与 gap 字段，并把 op 目录快照纳入 gen_golden 硬交付。
+- Median CP-D v5 收件暴露“远端清理早于本地归档完整性验证”的证据保全缺口：本地 tar 在深层 Extension 中间输出处截断，所幸核心 acceptance/verdict/evidence/caseset JSON、日志和 build receipts 已完整解出并可解析；387 MiB 不完整中间目录已删除。skill 新增 size/SHA/归档/JSON 全部本地验证后才清远端的事务硬门。
+- Median 修复版 golden 远端结构 smoke 16/16 通过，正式 gen_cases 实际生成 1152 例并与本轮 case plan 完全一致，caseset SHA `641e86f8…d472a`；本轮仍未进入 DUT。打包门同时收紧为 archive 成员严格等于 manifest allowlist，拒绝 macOS `._*` 等未登记垃圾。
+- 首轮 Median golden shape smoke 因 harness 在 `keepDim=true` 的 indices 上重复 `expand_dims` 首错退出，尚未进入正式 gen_cases；日志已收回、远端已清理。skill 补充多输出 gather 必须直接遵循实际 keep 形状，避免 smoke 自身误报 golden。
+- Median CP-D v4 已通过 exact HEAD、build 与用户态安装，但 workflow 在 gen_cases 前门发现 golden 把合法 0-D 输出经 `np.ascontiguousarray` 提升成 `(1,)`；未进入 NPU、无 DUT 裁决。修复为保留 oracle rank 的 C-order copy，并把远端结构轴 golden shape smoke 加入 gen_golden 交付纪律。
+- Median CP-D v3 在远端阶段启动前因冻结包漏装 `remote-cpd.sh` 停止；payload manifest 自检虽过但未覆盖最终执行入口，未发生 fetch/build/NPU run，目录已清理。通用门新增“入口与 payload 同 manifest、空目录真实解包并按最终路径核验”。
+- Median CP-D v2 已精确取得并核验 PR head，但在 build 前被 harness 的 `test -x build.sh` 误拦：仓内脚本为合法 `0644`，实际 argv 是 `bash build.sh`；本轮未启动 build/workflow、收据已回收且远端目录已清理，通用入口门已改为按实际调用形态检查权限。
+- Median 新鲜 CP-D 首轮暴露源码身份门缺口：新 clone 不含 fork PR head，checkout 失败后 shell 仍在默认分支启动构建；现将执行固化为 `SOURCE_ACQUIRED → HEAD_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED`、fail-fast 与首错即停，并增加活跃验收入口文本一致性门，下一轮只使用预声明的精确 SHA 来源。
+- 删除两个已过期且宣称 Median 60/60 PASS 的 ignored 历史报告目录；仓规与当前态文档统一改记 `cpp_extension` torch-parity 1344-case 真机结果：1286 PASS、58 FAIL，证据门通过、确定性裁决 `FAIL(精度)`，旧 handoff/TODO 只保留带失效横幅的历史语境。
+- CP-F 收紧重测历史与放宽政策：已有完成收据的 attempt 禁止覆盖，人工 override 必须显式声明 standard 且只能使用该标准真实生效的阈值字段；远程隔离回归 `54 passed, 18 subtests passed`，扩展组另有 1 个既存 BF16 支持状态与旧测试断言冲突，两个本轮 `/tmp` 测试目录均已清理并核验不存在。
+- CP-F Task-2-only 代码闭环已接通：attempt 内复用原 adapter、validator 和 Task2 证据门，支持原标准/人工 relaxed 标准重测，绝不重造 case 或启动性能；执行完成追加无裁决权 receipt 与中文重测报告，远程精准回归 `161 passed, 14 subtests passed`。
+- CP-F 首批远程回归已过：在非保护的全新容器临时目录上传当前 acc-common + samples 快照，契约/准备门、aclnn provenance 与 workflow mode 定向测试共 `122 passed, 11 subtests passed`；首次上传夹具不全产生的 error 已与真实代码失败解耦，唯一异常包装缺陷修复后转绿。
+- CP-F 准备门接通首次事实对账：基础 spec/caseset/evidence/verdict/acceptance 限定在同一报告目录并逐文件复核 hash，指定 case 绑定原始输入字节；同时补回 aclnn_py 首次 evidence 遗失的 PR/build/SoC/toolkit/vendor ELF/golden source provenance，缺任一实际生效身份即阻塞重测。
+- 在新分支启动 CP-F 实施：先落纯 stdlib 的 directive/relaxed spec/attempt manifest/完成 receipt 契约和行为测试，严格限制精度 override，绑定基础产物与输入摘要，并拒绝门未过或 manifest 漂移时生成完成收据；尚未接入真机执行。
+- 记录 CP-F 验收后人工精度复核与重测设计：首次验收产物保持权威且不可覆盖，原 case/输入冻结，多轮 attempt 追加留证，支持原标准与人工放宽标准的真机重测，并以确定性裁决、漂移门、并发幂等和人工最终处置闭环。
+
 ## 2026-07-28
 
+- 新增 Torch 对标接入完整数据流图：按 CP-A..E 展开每个环节读取与创建的具体文件，明确 cpp_extension、同机 torch_npu 性能、精度 fail-fast、repro 旁路及批末三级门的位置。
+- 在 ignored `reports/` 生成 Median 工作流产物地图：按真实 CP-A..E、Task1..3 和远端执行根层级解释 fresh-v3 精度链与 assumed-pass v5 性能诊断，保留本地来源归档和哈希，并以 NON-ACCEPTANCE manifest 禁止跨运行拼成正式裁决。
 - `.gitignore` 增加 `/.claude/*.local.md`，避免个人本地工具配置进入版本库。
 - 提交本轮 bureau 编译出的 canon 架构、决策与日志记录；结论维持 proposed/verified/contested 现状，不提升为 canonical。
 - 性能 collector 仅对 `returncode=0` 的 profiler/MSTX 证据缺失做有界重试；每次使用独立输出目录并保留逐 attempt 审计，DUT/基线执行错误和性能不达标不重试。

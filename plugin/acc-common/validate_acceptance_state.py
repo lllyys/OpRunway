@@ -39,7 +39,10 @@ _PERF_WAIT_STATUS = {"blocked_wait_gpu_benchmark", "blocked_wait_real_baseline"}
 # 算子 op_def 压根不支持 → 带发现的通过；差额挂 task_pr_gaps，见 _check_unsupported_gap 的反后门硬校）。
 # 2026-07-23：passed_with_gaps 再添一类撑法——op_def 声明了、但目标硬件那支实现没有
 # （`dtype_unsupported_on_target_hw`，见 _check_target_hw_gap）；两类均为被测物侧发现、同进 unsupported 桶。
-_VERDICT_ENUM = {"pass", "fail", "needs_review", "passed_with_risk", "passed_with_gaps"}
+_VERDICT_ENUM = {
+    "pass", "fail", "needs_review", "passed_with_risk", "passed_with_gaps",
+    "blocked_golden_unauthorized",
+}
 # C4 结构化 gap 类型：任务书要求、算子 op_def 不声明支持的 dtype 差额（与既有 dtype_deferred 语义不同——
 # deferred = 我们这条 pipeline 暂未测；unsupported = PR/算子根本没实现，是对被测方的**发现**）。
 _DTYPE_GAP_KIND = "dtype_unsupported_by_op_def"

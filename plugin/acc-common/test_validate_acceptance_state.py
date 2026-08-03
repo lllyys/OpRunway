@@ -349,6 +349,24 @@ class GateTest(unittest.TestCase):
         _w(self.d, "verdict.json", _vd("pass"))
         self.assertEqual(self._errs("task2"), [])
 
+    def test_task2_golden_unauthorized_is_known_nonpass_state(self):
+        """真值未授权是确定性阻塞态，不应再被误报成 verdict 非法枚举。"""
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("blocked_golden_unauthorized"))
+        errs = self._errs("task2")
+        self.assertFalse(any("非法" in error and "verdict" in error
+                             for error in errs), errs)
+
+    def test_task2_golden_blocked_does_not_hide_contract_problem(self):
+        """接入阻塞枚举不改变独立契约失败门。"""
+        _w(self.d, "caseset.json", CASESET)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json",
+           _vd("blocked_golden_unauthorized", cp=1))
+        errs = self._errs("task2")
+        self.assertTrue(any("契约问题 1 条" in error for error in errs), errs)
+
     def test_task2_tampered_accuracy_report_is_rejected(self):
         _w(self.d, "caseset.json", CASESET)
         _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))

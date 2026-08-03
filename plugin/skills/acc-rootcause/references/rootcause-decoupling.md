@@ -41,6 +41,10 @@
 - **查 vendor 制品**：op-info / kernel binary 是否真生成；缺失即实锤（如 Equal `equal_def.cpp` 漏 `AddConfig("ascend910_93")` → build 静默丢 A3 kernel → 全 0，但 aclnn 却 ACL_SUCCESS）。
 - **dtype 逐个 op 级测**：整体不通 vs 某 dtype 路不通（如 Equal 补注册后 double 通、fp32/fp16 仍炸 → float 路没做完）。
 - **自 build + 声明 dtype + 手算 golden**：小用例逐元素独立复现，坐实是被测物还是我方问题。
+- **异常固定位型须脱桥复现**：原 harness 若以未初始化内存承接输出，固定的全 0、最大整数等位型只证明
+  实际读回异常，不能证明由谁写入。冻结一个原失败 case，在独立 direct/官方 example 调用中先把输出
+  预填为可识别 sentinel，再调用、同步并读回；同输入另跑 stock 实现。direct 异常且 stock 正常才归 DUT，
+  direct 正常则查原 harness。这个最小对照不重造 case、不放宽标准，也不要求重跑完整矩阵。
 
 ## 4. 归因红线（③④层）
 

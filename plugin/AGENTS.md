@@ -108,6 +108,15 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   `mock` / `catlass` / `catlass_mock` 派生不出、须显式指定，见上文「跑测 mode 的唯一真源」）
   （**Task2 精度 + Task3 性能 + 三级门 task1/2/3 一次成**）→ `evidence.json`/`verdict.json`/`baseline.json`（有基线时）/`perf_report.json`/`acceptance.json`；
   FAIL → dispatch `rootcause`（先解耦「被测算子 vs harness」再归因）。
+  启动 build 前必须按 `SOURCE_ACQUIRED → HEAD_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED`
+  四段门推进：精确取得当前 facts bundle 的 PR head、detached checkout、核
+  `git rev-parse HEAD == expected head`；shell 须具备 `set -Eeuo pipefail` 等价语义。任一阶段首失败
+  立即 blocked，禁止继续 build/workflow，同轮不得换 ref、补 fetch 或重跑；下一轮必须使用新的执行目录，
+  不复用失败 checkout/build 制品。
+  build 入口检查须与实际 argv 一致：`bash build.sh` 只要求脚本可读，直接执行 `./build.sh` 才要求
+  executable bit，禁止用无关的权限假设制造假 BLOCKED。
+  固定快照必须把远端执行入口与 payload 一起纳入同一摘要 manifest；上传前须在空目录真实解包并核
+  入口存在、可读且 `bash -n` 通过，禁止只校 payload 后漏传入口。
 - **CP-E 报告**（primary）：**逐字引用** `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + `task_pr_gaps` + 各维度；
   性能同时报告 `cases_scored`、有效 us/speedup 数和计划覆盖分母；所有性能 case 都须真实采集，`cases_scored=0` 明确性能未验证；
   `needs_review` 不当 pass；门 `FAILED` → `BLOCKED`。`cpp_extension` 的 `repro/index.tsv` 列全 case 与原结果，

@@ -89,7 +89,9 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 - 三条都是真机验收通路、都能产验收裁决；
 - `cpp_extension` 不重编 op-plugin，也不把 op-plugin 当 DUT；它只复用官方 C++ Extension 接入机制，
   并须以独立构建收据机校绑定完整 PR head、构建命令和实际加载的 vendor ELF；
-- Median + PR6429 最新真机精度 60/60 PASS 正是 `aclnn_py` 跑出；
+- Median + PR6429 当前真机精度基线为 `cpp_extension` 的 torch-parity 完整矩阵：
+  1152 例中 1101 PASS、51 FAIL，`gate.passed=true`，确定性裁决为 `FAIL(精度)`；
+  此结果取代上一轮 1344 例中 1286 PASS、58 FAIL 的历史 checkpoint；
 - `mock`、`catlass`、`catlass_mock` 不能从 `runner_form` 派生，只能显式用于局部开发或对应通路；
 - mock 通路物理上不产 `acceptance.json` 或 `verdict.json`；
 - argparse 的 `new_example` 默认值不是编排依据，编排层必须按 spec 派生；
@@ -264,7 +266,9 @@ OpRunway/
 
 ## 9 · 当前能力边界
 
-- 真 NPU 已坐实：IsClose、Sign；Median PR6429 精度 60/60 PASS；Elu/Silu 在 A5-950 有 18/18 非空例证据；
+- 真 NPU 已坐实：IsClose、Sign；Median PR6429 当前为 1152 例中 1101 PASS、51 FAIL，
+  `gate.passed=true`、确定性裁决 `FAIL(精度)`；上一轮 1344-case 结果仅作历史记录；
+  Elu/Silu 在 A5-950 有 18/18 非空例证据；
 - Median 性能数据不是零数据：custom 50/50、`torch_npu` baseline 48/50 有效，48 对评分、35 对达到 `ratio >= 1.0`；
 - 2 个 BF16、`dim=1` baseline case 报 161002、custom 成功，按 baseline limitation 挂起，不归因 DUT；
 - 用户已确认 Median 任务书所称 `aclnnMedian` / `aclnnMedianDim` 小算子拼接版本等价于 Torch 对应接口，故性能 baseline 为同机 `torch_npu` 的 `torch.median`，无需另证等价、也不改为直调单个 ACLNN 接口；

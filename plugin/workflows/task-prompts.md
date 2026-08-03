@@ -73,7 +73,7 @@ dispatch_mode: run_npu
 验收标准: 真机 run_workflow.py --mode <mode>（OPRUNWAY_* 指真实机器/路径，不写进仓）——
           <mode> 据 spec.runner_form 派生：cpp（缺省）→ new_example；aclnn_py → aclnn_py（且须 OPRUNWAY_ACLNN_REAL=1）；
           mock / catlass / catlass_mock 派生不出、只能显式指定（非验收通路 / catlass 逃生口）。
-          ⚠ 两条真机通路都产验收裁决（run_workflow.py:37 _REAL_MACHINE_MODES={"new_example","aclnn_py"}）；
+          ⚠ 三条真机通路 new_example/aclnn_py/cpp_extension 都可产验收裁决，mode 只从 spec.runner_form 派生；
             走错的代价：cpp 路真机 dtype 白名单只有 fp32/fp16/bf16（int32 等落 DEFERRED_NP_BY_FORM["cpp"]、真机 fail-closed）
             → 覆盖缺一块；且性能基线对照物不同（new_example=内置 TBE、aclnn_py=同机 torch_npu），
             「任务书对标 torch」场景走 new_example 比出来的不是任务书要的那个比较。

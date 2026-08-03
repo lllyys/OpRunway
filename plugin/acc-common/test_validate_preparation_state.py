@@ -16,20 +16,49 @@ class PreparationStateTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = self.tmp.name
-        self.spec = {"op": "AnyOp", "params": []}
+        self.snapshot_sha = hashlib.sha256(b"task document\n").hexdigest()
+        self.spec = {
+            "op": "FixtureOp",
+            "params": [],
+            "golden": {
+                "authorization": {"kind": "oracle_method"},
+                "taskdoc_snapshot": {"sha256": self.snapshot_sha},
+            },
+        }
         self.spec_sha = hashlib.sha256(
             content_address.canonical_json_bytes(self.spec)).hexdigest()
         with open(os.path.join(self.root, "spec.json"), "w", encoding="utf-8") as out:
             json.dump(self.spec, out)
         self.golden = os.path.join(self.root, "golden.py")
+        self.golden_contract = {
+            "source": "single_api",
+            "method_kind": "numpy_cpu",
+            "authorization": {
+                "kind": "oracle_method",
+                "cite": "task_doc.snapshot.md:1",
+                "quote": "task document",
+            },
+            "taskdoc_snapshot": {"sha256": self.snapshot_sha},
+        }
+        golden_bytes = (
+            "GOLDEN_CONTRACT = "
+            + repr(self.golden_contract)
+            + "\ndef golden_fn(x): return x\n"
+        ).encode()
         with open(self.golden, "wb") as out:
-            out.write(b"def golden_fn(x): return x\n")
-        self.golden_sha = hashlib.sha256(
-            b"def golden_fn(x): return x\n").hexdigest()
+            out.write(golden_bytes)
+        self.golden_sha = hashlib.sha256(golden_bytes).hexdigest()
+        self.golden_contract_sha = hashlib.sha256(
+            content_address.canonical_json_bytes(
+                self.golden_contract)).hexdigest()
+        os.makedirs(os.path.join(self.root, "work"))
+        self.source_snapshot = os.path.join(
+            self.root, "work", "task_doc.snapshot.md")
+        with open(self.source_snapshot, "wb") as out:
+            out.write(b"task document\n")
         self.snapshot = os.path.join(self.root, "task_doc.snapshot.md")
         with open(self.snapshot, "wb") as out:
             out.write(b"task document\n")
-        self.snapshot_sha = hashlib.sha256(b"task document\n").hexdigest()
         self.head_sha = "a" * 40
         self.key_sha = hashlib.sha256(b"header").hexdigest()
         source = {
@@ -73,7 +102,7 @@ class PreparationStateTest(unittest.TestCase):
             },
         }
         content_address.write_artifact(
-            self.root, "source_facts.json", VPS._SOURCE_DOMAIN, source)
+            self.root, "work/source_facts.json", VPS._SOURCE_DOMAIN, source)
         self.source_digest = content_address.content_digest(
             VPS._SOURCE_DOMAIN, source)
         self._write_json("correspondence.json", {
@@ -130,7 +159,7 @@ class PreparationStateTest(unittest.TestCase):
             "golden_dependency": {
                 "status": "loaded",
                 "bytes_sha256": self.golden_sha,
-                "contract_sha256": hashlib.sha256(b"null").hexdigest(),
+                "contract_sha256": self.golden_contract_sha,
             },
         }
         self.plan["ledger_digest"] = content_address.content_digest(
@@ -146,13 +175,50 @@ class PreparationStateTest(unittest.TestCase):
 
     def _evaluate(self):
         return VPS.evaluate(
-            self.root, "spec.json", "case_plan.json", golden_path=self.golden)
+            self.root, "spec.json", "case_plan.json", golden_path=self.golden,
+            source_rel="work/source_facts.json")
 
     def test_reusable_when_all_bindings_match(self):
         receipt = self._evaluate()
         self.assertEqual(receipt["status"], "REUSABLE")
         self.assertTrue(receipt["reusable"])
         self.assertIsNone(receipt["acceptance_verdict"])
+        self.assertEqual(
+            receipt["bindings"]["source_taskdoc_snapshot_sha256"],
+            self.snapshot_sha)
+        self.assertEqual(
+            receipt["bindings"]["ops_taskdoc_snapshot_sha256"],
+            self.snapshot_sha)
+        self.assertEqual(
+            receipt["bindings"]["golden_contract_taskdoc_snapshot_sha256"],
+            self.snapshot_sha)
+
+    def test_source_exists_but_effective_ops_snapshot_missing_is_miss(self):
+        os.remove(self.snapshot)
+        receipt = self._evaluate()
+        self.assertEqual(receipt["status"], "MISS")
+        self.assertIn("ops_taskdoc_snapshot", {
+            item["name"] for item in receipt["checks"]
+            if item["status"] == "MISS"})
+
+    def test_effective_ops_snapshot_sha_conflict_is_blocked(self):
+        with open(self.snapshot, "wb") as out:
+            out.write(b"different task document\n")
+        receipt = self._evaluate()
+        self.assertEqual(receipt["status"], "BLOCKED")
+        self.assertIn("四方摘要", " ".join(
+            item["reason"] for item in receipt["checks"]))
+
+    def test_effective_ops_snapshot_symlink_is_blocked(self):
+        outside = os.path.join(self.root, "outside.snapshot.md")
+        with open(outside, "wb") as out:
+            out.write(b"task document\n")
+        os.remove(self.snapshot)
+        os.symlink(outside, self.snapshot)
+        receipt = self._evaluate()
+        self.assertEqual(receipt["status"], "BLOCKED")
+        self.assertIn("符号链接", " ".join(
+            item["reason"] for item in receipt["checks"]))
 
     def test_source_change_requires_correspondence_reconfirmation(self):
         source = {
@@ -197,7 +263,7 @@ class PreparationStateTest(unittest.TestCase):
             },
         }
         content_address.write_artifact(
-            self.root, "source_facts.json", VPS._SOURCE_DOMAIN, source)
+            self.root, "work/source_facts.json", VPS._SOURCE_DOMAIN, source)
         receipt = self._evaluate()
         self.assertEqual(receipt["status"], "MISS")
         self.assertIn("correspondence", {
@@ -250,10 +316,10 @@ class PreparationStateTest(unittest.TestCase):
             if item["status"] == "MISS"})
 
     def test_tampered_source_is_blocked_not_cache_miss(self):
-        path = os.path.join(self.root, "source_facts.json")
+        path = os.path.join(self.root, "work", "source_facts.json")
         artifact = json.load(open(path, encoding="utf-8"))
         artifact["payload"]["tampered"] = True
-        self._write_json("source_facts.json", artifact)
+        self._write_json("work/source_facts.json", artifact)
         receipt = self._evaluate()
         self.assertEqual(receipt["status"], "BLOCKED")
         self.assertFalse(receipt["reusable"])
@@ -278,10 +344,10 @@ class PreparationStateTest(unittest.TestCase):
 
     def test_source_producer_logic_drift_is_miss(self):
         artifact = json.load(open(
-            os.path.join(self.root, "source_facts.json"), encoding="utf-8"))
+            os.path.join(self.root, "work", "source_facts.json"), encoding="utf-8"))
         artifact["payload"]["producer"]["logic_sha256"] = "0" * 64
         content_address.write_artifact(
-            self.root, "source_facts.json", VPS._SOURCE_DOMAIN,
+            self.root, "work/source_facts.json", VPS._SOURCE_DOMAIN,
             artifact["payload"])
         receipt = self._evaluate()
         self.assertEqual(receipt["status"], "MISS")
@@ -290,7 +356,7 @@ class PreparationStateTest(unittest.TestCase):
             if item["status"] == "MISS"})
 
     def test_taskdoc_snapshot_drift_is_miss(self):
-        with open(self.snapshot, "ab") as out:
+        with open(self.source_snapshot, "ab") as out:
             out.write(b"changed\n")
         receipt = self._evaluate()
         self.assertEqual(receipt["status"], "MISS")
@@ -299,13 +365,6 @@ class PreparationStateTest(unittest.TestCase):
             if item["status"] == "MISS"})
 
     def test_snapshot_default_follows_source_directory(self):
-        os.makedirs(os.path.join(self.root, "work"))
-        os.replace(
-            os.path.join(self.root, "source_facts.json"),
-            os.path.join(self.root, "work", "source_facts.json"))
-        os.replace(
-            os.path.join(self.root, "task_doc.snapshot.md"),
-            os.path.join(self.root, "work", "task_doc.snapshot.md"))
         receipt = VPS.evaluate(
             self.root, "spec.json", "case_plan.json",
             golden_path=self.golden, source_rel="work/source_facts.json")
@@ -325,10 +384,10 @@ class PreparationStateTest(unittest.TestCase):
             VPS._CASE_PLAN_DOMAIN, payload)
         self._write_json("case_plan.json", self.plan)
         receipt = self._evaluate()
-        self.assertEqual(receipt["status"], "MISS")
+        self.assertEqual(receipt["status"], "BLOCKED")
         self.assertIn("spec_taskdoc_anchor", {
             item["name"] for item in receipt["checks"]
-            if item["status"] == "MISS"})
+            if item["status"] == "BLOCKED"})
 
     def test_malformed_nested_spec_is_blocked_not_crash(self):
         self.spec["golden"] = []
@@ -364,10 +423,10 @@ class PreparationStateTest(unittest.TestCase):
 
     def test_incomplete_source_payload_is_blocked(self):
         artifact = json.load(open(
-            os.path.join(self.root, "source_facts.json"), encoding="utf-8"))
+            os.path.join(self.root, "work", "source_facts.json"), encoding="utf-8"))
         del artifact["payload"]["pr"]
         content_address.write_artifact(
-            self.root, "source_facts.json", VPS._SOURCE_DOMAIN,
+            self.root, "work/source_facts.json", VPS._SOURCE_DOMAIN,
             artifact["payload"])
         receipt = self._evaluate()
         self.assertEqual(receipt["status"], "BLOCKED")

@@ -18,6 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 import re
+import tempfile
 
 
 class DriverError(RuntimeError):
@@ -62,13 +63,25 @@ def _load(path):
 
 def _atomic_dump(path, value):
     """同目录原子写 JSON；设备/进程异常时不留下半截证据。"""
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as out:
-        json.dump(value, out, ensure_ascii=False, indent=2, allow_nan=False)
-        out.write("\n")
-        out.flush()
-        os.fsync(out.fileno())
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(
+        prefix=os.path.basename(path) + ".tmp.", dir=os.path.dirname(path))
+    try:
+        out = os.fdopen(fd, "w", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        os.unlink(tmp)
+        raise
+    try:
+        with out:
+            json.dump(value, out, ensure_ascii=False, indent=2, allow_nan=False)
+            out.write("\n")
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def _safe(root, rel):
@@ -375,10 +388,8 @@ def run(bundle, work):
         },
         "vendor": vendor,
     }
-    with open(os.path.join(work, "cpp_extension_receipt.json"),
-              "w", encoding="utf-8") as out:
-        json.dump(receipt, out, ensure_ascii=False, indent=2)
-        out.write("\n")
+    _atomic_dump(
+        os.path.join(work, "cpp_extension_receipt.json"), receipt)
     return receipt
 
 

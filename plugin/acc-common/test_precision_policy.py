@@ -1248,16 +1248,26 @@ class ToleranceFailClosedTest(unittest.TestCase):
 
         acceptance 允许**放宽**（由 risk/passed_with_risk 如实上报），但不许放宽成 inf/NaN/负数。"""
         base = {"verify_mode": "numerical", "precision": {"oracle": "ascendoptest"}}
-        for bad in (float("inf"), float("nan"), -1.0, True, "0.1", None):
-            spec = copy.deepcopy(base)
-            spec["precision"]["acceptance_policy"] = {"standard": "ascendoptest_default", "tolerance": bad}
-            with self.assertRaises(ValueError, msg=repr(bad)):
-                P.resolve_acceptance(spec, "ascendoptest_default", "float32")
+        for key in ("tolerance", "rtol", "atol"):
+            for bad in (float("inf"), float("nan"), -1.0, True, "0.1", None):
+                spec = copy.deepcopy(base)
+                spec["precision"]["acceptance_policy"] = {
+                    "standard": "ascendoptest_default", key: bad}
+                with self.assertRaises(ValueError, msg=f"{key}={bad!r}"):
+                    P.resolve_acceptance(
+                        spec, "ascendoptest_default", "float32")
         ok = copy.deepcopy(base)
         ok["precision"]["acceptance_policy"] = {"standard": "ascendoptest_default", "error_rate": 0.1}
         pol, tpid = P.resolve_acceptance(ok, "ascendoptest_default", "float32")
         self.assertEqual(pol["error_rate"], 0.1)
         self.assertEqual(tpid, "ascendoptest_default:float32")
+        torch = copy.deepcopy(base)
+        torch["precision"]["acceptance_policy"] = {
+            "standard": "torch_allclose", "rtol": 0.01, "atol": 0.02}
+        pol, tpid = P.resolve_acceptance(
+            torch, "torch_allclose", "float32")
+        self.assertEqual((pol["rtol"], pol["atol"]), (0.01, 0.02))
+        self.assertEqual(tpid, "torch_allclose:float32")
 
     def test_malformed_precision_block_is_fail_closed_not_crash(self):
         """`spec.precision` 是字符串时，旧写法 `(spec.get("precision") or {}).get(...)` 抛 AttributeError

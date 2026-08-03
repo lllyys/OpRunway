@@ -205,7 +205,10 @@ C) 容差/口径（precision_policy）：`TORCH_ALLCLOSE` 标准 + `_TA_DTYPE_TO
 - 字节安全:未声明的算子(含 4 个 pin 算子 + 当前 Median)走 legacy → 输出字节不变。
 - 备选:也可直接以 `precision_policy.select_standard(spec)==TORCH_ALLCLOSE`(即 `oracle==torch`)作触发信号,省一个字段;但 gen_cases 要多依赖一层 precision_policy 路由,显式字段更清晰、可独立于精度标准控制造例。**推荐显式字段**。
 
-**Median 的处理**:Median 现在 PASS,但它**尚未**声明 `torch_parity`。落地顺序应为——先实现护栏+parity 行为(此时 Median 仍走 legacy、PASS 不变),再单独把 `median.spec.json` 翻成 `case_profile:"torch_parity"`、**重生成 golden + 真机重验**。重验绿之前 Median 不翻档。这样任何一步都不破已通过通路。
+**Median 的处理（历史计划，现已执行并得到 FAIL）**：Median 已声明 `torch_parity`，并以
+`cpp_extension` 完成最新 1152-case 真机验收；结果为 1101 PASS、51 FAIL，
+`gate.passed=true`，确定性裁决 `FAIL(精度)`。上一轮 1344-case 与旧 legacy 60-case
+均不再是当前结论。
 
 ---
 

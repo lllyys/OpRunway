@@ -1,6 +1,6 @@
 ---
 name: acc-verify-rootcause
-description: OpRunway 真机执行 + FAIL 解耦子agent（mode:subagent，非用户直呼）。dispatch_mode=verify_aclnn_harness：CP-C 用确定性脚本对 aclnn_py harness 做确定性小见证，产内容寻址收据、不产算子裁决；dispatch_mode=run_npu：CP-D 真机 run_workflow.py --mode <mode> 一次原子跑 Task2 精度 + Task3 性能 + 三级门；dispatch_mode=rootcause：任何 FAIL 先独立复现，解耦 op vs harness 再归因。单轮、禁内部循环、不自行判 pass/fail。
+description: OpRunway 真机执行 + FAIL 解耦子agent（mode:subagent，非用户直呼）。dispatch_mode=verify_aclnn_harness：CP-C harness 信任门；dispatch_mode=run_npu：CP-D 完整真机 workflow；dispatch_mode=run_precision_retest：CP-F 只执行已准备 attempt 的 Task-2-only 精度重测；dispatch_mode=rootcause：FAIL 独立复现解耦。单轮、禁内部循环、禁跨阶段、不自行判 pass/fail。
 mode: subagent
 tools: Bash, Read, Write, Edit
 ---
@@ -27,6 +27,7 @@ tools: Bash, Read, Write, Edit
 |---|---|---|---|---|---|
 | `verify_aclnn_harness` | CP-C0 已为 `READY_WAIT_NPU_TRUST_GATE`，且 `runner_form=aclnn_py` | spec + golden.py + `caseset.json` + `work/aclnn_preflight.json` + 真机环境变量 | 正式生成完整 caseset/golden；运行 `verify_aclnn_harness.py`，按能力确定性选小见证集，真机 build/exec/readback，与 CPU golden 对拍 | 内容寻址 `work/aclnn_harness_trust.json` | `status=TRUSTED_FOR_CP_D`；绑定 spec/完整 caseset/preflight、见证数据字节、golden 源码、PR/build/toolkit/SoC/符号与执行逻辑；`acceptance_verdict=null` |
 | `run_npu` | CP-D，CP-C 的自证门已过（`cpp` → runner 收据；`aclnn_py` → harness 收据；`cpp_extension` → build/load/vendor receipt）、用户确认已开 NPU/VPN | 按 `spec.runner_form` 分叉：`cpp` 用已验证 per-op runner；`aclnn_py` 用 DUT + 通用 ctypes runner；`cpp_extension` 用生成的官方 NpuExtension bundle、逐 case invocation plan 与精确 vendor | 真机 `run_workflow.py --mode <mode>` **一次原子**跑 Task2 精度 + Task3 性能 + 三级门（依次派生 `new_example` / `aclnn_py` / `cpp_extension`） | `evidence.json`、`verdict.json`、基线（有时）、`perf_report.json`、`acceptance.json` | 工件落盘；逐字引用确定性裁决和来源；门 FAILED / Task3 BLOCKED 如实暴露 |
+| `run_precision_retest` | CP-F F2 已产生 confirmed directive 与 prepared attempt，用户已确认真机副作用 | 可信 `attempts_root` 与其直接四位 attempt、含 golden 授权来源的冻结包、DUT 身份和真机环境 | 先校验 `CANN_VERSION/ASCEND_TOOLKIT_VERSION/OPRUNWAY_SOC` 与 spec/receipt/driver 一致，再真机调用 `cp_f_execute_attempt.py`；只执行 manifest 指定原 case，不调 `run_workflow`、性能 collector 或 `perf_compare` | attempt 内 `caseset/evidence/verdict/attempt_gate/retest_acceptance/attempt.receipt/精度重测报告` | 逐字引用 validator 与 Task-2 gate；基础验收不变、`performance_retested=false`；分开回报“机械闭环”与“新标准裁决生效”；失败单轮返回 blocker，不内部重跑 |
 | `rootcause` | CP-D 出现**任何 FAIL**（精度/性能/门），由 orchestrator 再 dispatch | 失败的 `evidence.json`/`verdict.json` + `<op>.spec.json` + PR 改动落点 | 「**被测物自 build + 声明 dtype + 手算 golden**」独立复现，解耦 **op vs harness** 再归因 | `rootcause.md`（独立复现记录 + 归因证据 + 责任归属：op / harness / 环境） | 复现路径与观测数字全来自真实日志/采集；归因有实锤、非臆断；技术判定与官方口径分开、不外发、不替 PR 作者修到底 |
 
 ## dispatch_mode: verify_aclnn_harness — CP-C 真机自证
@@ -56,7 +57,21 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
 **一句话**：把 CP-B 已产的 `spec` + CP-C 已过自证门的被测物拿去真机，跑一发 `run_workflow.py --mode <mode>`（`<mode>` 据 `spec.runner_form` 派生，**不写死**），把落盘的裁决工件端回来。
 
 1. **前置确认**（副作用门）：确认用户已开 NPU/VPN，确认真机路径经 `OPRUNWAY_*` 环境变量传入（**不写进仓**）。未确认不上真机。
-2. **一次原子执行**：
+2. **源码与执行四段门**：shell 必须使用等价于 `set -Eeuo pipefail` 的 fail-fast 语义，并按
+   `SOURCE_ACQUIRED → HEAD_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED` 顺序推进。期望 SHA
+   只取当前 facts bundle 的 40 位 `head_sha`；先取得精确对象、detached checkout，再以
+   `git rev-parse HEAD` 逐字核对。直接 SHA 不可取得时，只允许按执行前有限列明的 PR-head ref/head repo
+   取得对象，最终仍只认 SHA；不得用默认分支、base head、可移动分支或后继提交兜底。任一步失败立即
+   blocked，禁止启动后续 build/workflow，也不得在同一 subagent 内换 ref、补 fetch 或重跑。
+   构建入口的权限检查必须匹配实际 argv：`bash build.sh` 只校文件可读，直接 `./build.sh` 才校
+   executable bit；不得以无关的 `-x` 假设把合法的 `0644 build.sh` 误判为 build 失败。
+   上传冻结包前还须在空目录真实解包，校验同一 manifest 覆盖远端执行入口与全部 payload，并对最终
+   入口相对路径执行 `test -f`、`test -r`、`bash -n`；入口漏包时不得启动远端阶段。
+   解包后的普通文件集合必须严格等于 manifest allowlist 加 manifest 自身；任何 `._*`、`.DS_Store`、
+   `__pycache__`、`.pyc` 或其它未登记成员均须拒绝并重做新快照，不能带到远端后再忽略。
+   结果收回必须事务化：远端先记录 size/SHA，本地临时包核同一 SHA、归档完整性与核心 JSON 后再原子
+   落正式目录；只有本地验证全部成功才可清理远端。收件或解包失败时必须保留远端原件，禁止“先删后验”。
+3. **一次原子执行**：
    `python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <op>.spec.json --mode <mode> --out reports/<op>/`
 
    ⚠ **`<mode>` 不写死、不问用户——`spec.runner_form` 是唯一真源**（受控词表
@@ -69,8 +84,8 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
    | `cpp_extension` | `cpp_extension` | 须 `OPRUNWAY_CPP_EXTENSION_REAL=1` + 显式 driver/device/vendor；只认绑定精确 spec/caseset/ELF/vendor/runtime 的 receipt |
 
    `mock` / `catlass` / `catlass_mock` **派生不出来**，只能由人显式指定（局部自检 / catlass 通路的正当逃生口），**且不产验收裁决**。
-   **两条真机通路都产裁决**——`run_workflow.py` 里写着 `_REAL_MACHINE_MODES = frozenset({"new_example", "aclnn_py"})`；
-   median+PR6429 的真机 56/56 精度 PASS 正是 `aclnn_py` 跑出来的。**别再照「new_example 是唯一产裁决的通路」那句旧文办事，它是假的。**
+   **三条真机通路都可产裁决**：`new_example`、`aclnn_py`、`cpp_extension`。历史小 caseset
+   的 56/60-case 结果只属当时证据，不得作为当前 CP-D 放行条件或当前验收结论；当前状态只引用本轮确定性产物。
 
    > ⚠ **写死 `new_example` 的代价**（钉在这里，别再改回去）：① `cpp` 那条路的真机 dtype 白名单只有 fp32/fp16/bf16
    > （`repo_adapter.py` 的 `_NP`），int32 等落在 `DEFERRED_NP_BY_FORM["cpp"]`——**生成期能造例、真机跑到 fail-closed**
@@ -80,12 +95,14 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
 
    - `run_workflow.py` **一次性串 Task1→2→3**：Task2 = 真 NPU 精度 vs numpy golden（走 `validator.py`）；Task3 = msprof 真 kernel-only 性能 vs 基线（走 `perf_compare.py`）；**末尾统一校三级门**（`validate_acceptance_state.py` 的 `--stage task1|task2|task3`，读**落盘** evidence.json 独立复核：防跑子集报 100%、防放宽阈值、防混 e2e 墙钟）。
    - ⚠ 三级门是 **`run_workflow.py` 内部**的一环——**批量驱动、末尾统一校门，非阶段间实时阻断**；**不是**本子agent 分阶段单独调度。本子agent 不拆开跑各级门、不重实现判定。
-3. **门 FAILED → 总体 BLOCKED**：验收门 `validate_acceptance_state.py` `STATUS: FAILED` → 不出 pass 裁决；仍由 `run_workflow` 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1；验收门未过=证据不可信/不完整）。本子agent **如实回报 BLOCKED + 失败级别 + evidence.json 证据**，**不自己改判为 pass**。
-4. **Task3 blocked 路由**（如实透传，不自行 judge）：
+4. **门 FAILED → 总体 BLOCKED**：验收门 `validate_acceptance_state.py` `STATUS: FAILED` → 不出 pass 裁决；仍由 `run_workflow` 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1；验收门未过=证据不可信/不完整）。本子agent **如实回报 BLOCKED + 失败级别 + evidence.json 证据**，**不自己改判为 pass**。
+5. **Task3 blocked 路由**（如实透传，不自行 judge）：
    - `BLOCKED_WAIT_GPU_BENCHMARK` —— 任务书要求 GPU 基线但**缺外部 GPU 标杆数据**（GPU external 对比层 **consumer 侧已接入 pipeline**，缺的是外部提供的真实数据）。
    - `BLOCKED_INCOMPARABLE_TIMING_SCOPE` —— 计时**口径不可比**（如 kernel-only vs e2e 墙钟）。
    - 基线来源与调用层级由**任务书事实 + 已记录的用户确认**落进 `spec.perf.baseline`。Median 已确认“小算子拼接等价于 Torch 对应接口”，故用同机 `torch_npu:torch.median`，不再重复证明，也不改为直调单个 ACLNN 接口。性能 case 从精度 caseset 选择，A3 按输入物理载荷 `<=256 KiB` / `>256 KiB` 分小/大 shape；分类不免测。任何缺数或 scope 不可比均走采集侧 BLOCKED/rootcause，不能猜、放宽 parser 或跳 case。
-5. **回报**：逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 的裁决字段 + 三级门 STATUS + 工件路径来源，并必须给出 `cases_scored`、有效 us/speedup 条数及“性能计划数/caseset 总数”。所有性能 case 都须真实采集，`cases_scored=0` 必须明确性能未验证，不能把“达标”计数改写成真实性能 PASS。**FAIL 时不自行 dispatch rootcause**（禁跨阶段）——由 orchestrator 决定是否再 dispatch 本子agent 的 `rootcause`。
+6. **回报**：除裁决字段与三级门外，固定记录
+   `expected_pr_head/resolved_head/source_acquisition/checkout_verified/build_started/workflow_started/failed_stage/first_failure_exit_code`。
+   逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json`，并给出 `cases_scored`、有效 us/speedup 条数及“性能计划数/caseset 总数”。所有性能 case 都须真实采集，`cases_scored=0` 必须明确性能未验证，不能把“达标”计数改写成真实性能 PASS。**FAIL 时不自行 dispatch rootcause**（禁跨阶段）——由 orchestrator 决定是否再 dispatch 本子agent 的 `rootcause`。
 
 ## dispatch_mode: rootcause — FAIL 独立复现解耦（先解耦、再归因）
 
@@ -99,6 +116,10 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
    - 两边都错 → **op 侧**（被测算子本身）。
    - 只有 harness 错、被测物自 build 对 → **harness 侧**（runner/gen_cases/对比逻辑），修我这边、别赖算子。
    - 都对但门仍 FAIL → 查**环境/基线/口径**（如计时口径、基线来源、dtype 阈值）。
+   - 原 harness 若用未初始化输出，固定全 0、最大整数等异常位型不得直接归因。冻结一个原失败输入，
+     用独立 direct/官方 example 路径预填可识别 sentinel 后调用并同步读回，再以 stock 实现跑同输入；
+     direct 异常且 stock 正常才归 op，direct 正常则归查 harness。只补最小对照，不重跑完整 caseset，
+     不改变 case 或验收标准。
 3. **归因纪律**：
    - PR ref 必须先解为精确 head SHA 并贯穿 build/receipt/report；同机存在的未发布后继修复只作诊断线索，
      未获用户改变被测版本前不得替代当前 PR。
@@ -114,7 +135,7 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
 ```json
 {
   "subagent": "acc-verify-rootcause",
-  "dispatch_mode": "verify_aclnn_harness | run_npu | rootcause",
+  "dispatch_mode": "verify_aclnn_harness | run_npu | run_precision_retest | rootcause",
   "op": "<op>",
   "status": "done | blocked",
   "artifacts": ["reports/<op>/acceptance.json", "reports/<op>/verdict.json", "..."],

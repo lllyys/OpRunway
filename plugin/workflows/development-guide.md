@@ -34,7 +34,7 @@
 - **CP-B Task1 用例**：dispatch `acc-spec-extractor` 产 spec；primary inline `gen_cases.py <spec> --dry-run --ledger-out <case_plan.json> --source-facts <source_facts.json> --correspondence <correspondence.json>` 做用例计划契约自检并把事实包/用户确认绑定进 durable 账本，再由 `validate_preparation_state.py` 复核非真机断点（C5 起不再跑 mock 出裁决）。
 - **CP-C runner**（需 NPU）：dispatch `acc-runner-dev`（先过 scope gate）→ runner 自检证据满足才允许上真机。
 - **CP-D 真机跑测**（一次原子）：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode <mode>`（**`<mode>` 据 `spec.runner_form` 定**：cpp runner v1 → `new_example`；`runner_form == "aclnn_py"`（torch 对标）→ `aclnn_py`，且须 `OPRUNWAY_ACLNN_REAL=1`），Task2+3+三级门一次成；FAIL → `rootcause`。
-  ⚠ **两条都是真机验收通路**（`run_workflow.py:37` `_REAL_MACHINE_MODES = {"new_example", "aclnn_py"}`）——别写成「`new_example` 是唯一产裁决的路」。走错的代价：`cpp` 那条路真机 dtype 白名单只有 fp32/fp16/bf16（`repo_adapter.py:19` `_NP`，int32 等落 `DEFERRED_NP_BY_FORM["cpp"]`、真机 fail-closed）→ 覆盖缺一块；且性能基线换了对照物（TBE vs torch），「任务书对标 torch」场景走错就没验到任务书那条款。
+  ⚠ **三条都是真机验收通路**：`new_example`、`aclnn_py`、`cpp_extension`——别写成 `new_example` 是唯一产裁决的路。mode 只从 `spec.runner_form` 派生；性能 baseline 仍由任务书/spec 决定，不能从 form 反推。
 - **CP-E 报告**（primary）：逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + `task_pr_gaps` + 各维度通过数。
 
 ## 3. 铁律（每步都受约束）

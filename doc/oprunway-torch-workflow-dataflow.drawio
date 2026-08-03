@@ -1,0 +1,163 @@
+<mxfile>
+  <diagram id="autolayout" name="Page-1">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="group_0" value="CP-A 取材与对应校验" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#6c8ebf;fontColor=#6c8ebf;verticalAlign=top;fontStyle=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="56" y="6" width="478" height="288" as="geometry" />
+        </mxCell>
+        <mxCell id="group_1" value="CP-B spec + torch golden + 用例计划" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#82b366;fontColor=#82b366;verticalAlign=top;fontStyle=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="6" y="306" width="568" height="628" as="geometry" />
+        </mxCell>
+        <mxCell id="group_2" value="CP-C0 静态预检与 CP-C 信任门" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#d79b00;fontColor=#d79b00;verticalAlign=top;fontStyle=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="16" y="946" width="548" height="328" as="geometry" />
+        </mxCell>
+        <mxCell id="group_3" value="CP-D Task1 正式用例与调用计划" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#d6b656;fontColor=#d6b656;verticalAlign=top;fontStyle=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="16" y="1446" width="548" height="303" as="geometry" />
+        </mxCell>
+        <mxCell id="group_4" value="CP-D Task2 NPU 精度" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#b85450;fontColor=#b85450;verticalAlign=top;fontStyle=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="16" y="1756" width="548" height="483" as="geometry" />
+        </mxCell>
+        <mxCell id="group_5" value="CP-D Task3 同机 torch_npu 性能" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#666666;fontColor=#666666;verticalAlign=top;fontStyle=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="6" y="2246" width="548" height="483" as="geometry" />
+        </mxCell>
+        <mxCell id="group_6" value="CP-D 原子真机执行" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#9673a6;fontColor=#9673a6;verticalAlign=top;fontStyle=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="16" y="1286" width="558" height="148" as="geometry" />
+        </mxCell>
+        <mxCell id="group_7" value="CP-D 批末三级证据门与总裁决" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#6c8ebf;fontColor=#6c8ebf;verticalAlign=top;fontStyle=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="156" y="2736" width="588" height="333" as="geometry" />
+        </mxCell>
+        <mxCell id="group_8" value="CP-E 中文报告与交付" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#82b366;fontColor=#82b366;verticalAlign=top;fontStyle=2;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="156" y="3076" width="588" height="328" as="geometry" />
+        </mxCell>
+        <mxCell id="a1" value="A1 取材：fetch_source.py&#10;读取：任务书路径/URL、PR URL&#10;创建：work/task_doc.md、task_doc.snapshot.md、pr_facts.json、source_facts.json" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="group_0">
+          <mxGeometry x="24" y="24" width="430" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="a2" value="A2 任务书 ↔ PR 对应校验&#10;读取：task_doc.md、pr_facts.json、source_facts.json、用户确认&#10;创建：work/correspondence.json（status=confirmed 才推进）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="group_0">
+          <mxGeometry x="24" y="174" width="430" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="b1" value="B1 抽 spec：acc-spec-extractor / extract_spec&#10;读取：task_doc.md + snapshot、pr_facts.json、source_facts.json、correspondence.json&#10;创建：ops/&lt;Op&gt;/&lt;Op&gt;.spec.json（runner_form、torch_parity、call_variants、case/perf 规则、task_pr_gaps）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="group_1">
+          <mxGeometry x="24" y="24" width="520" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="b2" value="B2 生成 torch golden：acc-runner-dev / gen_golden + check_golden.py&#10;读取：task_doc.md、&lt;Op&gt;.spec.json&#10;创建：ops/&lt;Op&gt;/golden.py、ops/&lt;Op&gt;/task_doc.snapshot.md、work/check_golden.json" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="group_1">
+          <mxGeometry x="24" y="184" width="520" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="b3" value="B3 用例计划：gen_cases.py --dry-run&#10;读取：spec、golden.py、source_facts.json、correspondence.json&#10;创建：work/case_plan.json；只规划 case_id/shape/dtype/场景/预算/种子，不生成 .npy、不裁决" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="group_1">
+          <mxGeometry x="24" y="334" width="520" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="b4" value="B4 非真机准备复用门：validate_preparation_state.py&#10;读取：source/correspondence/spec/golden/check_golden/case_plan&#10;创建：work/preparation_receipt.json（REUSABLE/MISS/BLOCKED；绝不是验收 PASS）" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="group_1">
+          <mxGeometry x="24" y="504" width="520" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="c1" value="C0 标准 ACLNN 静态预检：preflight_aclnn.py&#10;读取：spec.call_variants/slots + PR-head header 正文&#10;核对：symbol、arity、参数顺序/名字、role、ctype&#10;创建：work/aclnn_preflight.json" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="group_2">
+          <mxGeometry x="24" y="24" width="500" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="c2" value="C1 cpp_extension build/load + harness trust gate&#10;读取：spec、preflight、PR head、正式绑定用 caseset/plan、构建环境与实际加载 ELF&#10;创建：work/vendor_build_receipt.json、work/cpp_extension_receipt.json&#10;正式跑前按当前字节再次复核；漂移即 BLOCKED" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="group_2">
+          <mxGeometry x="24" y="184" width="500" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="d0" value="CP-D 入口：run_workflow.py --mode cpp_extension&#10;读取：spec + golden + preparation receipt + preflight + trust receipts&#10;一次性串 Task1 → Task2 →（精度允许时）Task3 → 批末三级门" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;" vertex="1" parent="group_6">
+          <mxGeometry x="24" y="24" width="510" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="d1" value="D1 正式实例化统一 caseset + torch golden&#10;读取：spec、golden.py；执行 golden_fn&#10;创建：根 caseset.json；work/&lt;case-id&gt;/input_*.npy、golden_*.npy" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="group_3">
+          <mxGeometry x="24" y="24" width="500" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="d2" value="D2 cpp_extension_adapter.prepare&#10;读取：同一 caseset.json、spec、receipt&#10;创建：work/cpp_extension_caseset.json、cpp_extension_invocation_plan.json、cpp_extension_perf_template.json、extension bundle" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="group_3">
+          <mxGeometry x="24" y="174" width="500" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="d3" value="D3 DUT 执行：独立 torch.ops bridge → 指定 PR 构建的 vendor .so&#10;读取：input_*.npy、invocation plan/bundle、build/load receipt&#10;创建：work/cpp_extension_out/&lt;case-id&gt;/out_*.bin + 执行元数据" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="group_4">
+          <mxGeometry x="24" y="24" width="500" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="d4" value="D4 组装证据 + validator.py 精度裁决&#10;读取：caseset、golden_*.npy、out_*.bin、spec 精度规则、receipts&#10;创建：根 evidence.json、verdict.json（逐 case 指标 + 精度总览）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="group_4">
+          <mxGeometry x="24" y="184" width="500" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="d5" value="D5 精度 fail-fast + 复现旁路&#10;读取：verdict.json、caseset、receipt&#10;创建：repro/index.tsv、failed.tsv、cases/*.sh、run/show/audit、repro_summary.json&#10;说明：repro 只供人工复现，不参与裁决；精度不允许则不跑 Task3" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="group_4">
+          <mxGeometry x="24" y="344" width="500" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="d6" value="D6 从同一精度 caseset 选性能 case&#10;读取：caseset、spec 性能规则、receipt&#10;创建：work/cpp_extension_perf_plan.json；固定 timing_scope=kernel-only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="group_5">
+          <mxGeometry x="24" y="24" width="500" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="d7" value="D7 同机同 case 采集&#10;DUT：custom torch.ops；Baseline：stock torch_npu torch op&#10;读取：perf plan、同一输入、receipts&#10;创建：work/cpp_extension_perf_collect.json、work/_torch_npu_baseline.json" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="group_5">
+          <mxGeometry x="24" y="184" width="500" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="d8" value="D8 规范化 baseline + perf_compare.py&#10;读取：evidence 中 DUT timing、_torch_npu_baseline.json、caseset、spec 阈值/分组&#10;创建：根 baseline.json、perf_report.json（逐 case ratio、分组摘要、状态）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="group_5">
+          <mxGeometry x="24" y="354" width="500" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="d9" value="D9 批末三级证据门：validate_acceptance_state.py&#10;Task1 读取 spec/case_plan/caseset；Task2 再读 evidence/verdict/receipts；Task3 再读 baseline/perf_report/perf collection&#10;注意：这是 run_workflow 批末统一复核，不是阶段间实时闸" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;" vertex="1" parent="group_7">
+          <mxGeometry x="24" y="24" width="540" height="125" as="geometry" />
+        </mxCell>
+        <mxCell id="d10" value="D10 run_workflow 写唯一总裁决&#10;读取：validator、perf_compare 与三级门的确定性结果&#10;创建：根 acceptance.json（PASS / FAIL / BLOCKED）&#10;agent 不得自行重判" style="shape=note;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="group_7">
+          <mxGeometry x="44" y="204" width="500" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="report_step" value="E1 中文报告渲染与交付&#10;读取：acceptance.json、verdict.json、evidence.json、perf_report.json（若执行）、caseset.json、spec.task_pr_gaps&#10;创建：中文验收报告.md；必要时性能失败明细.md&#10;报告只引用确定性结论，不重判" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="group_8">
+          <mxGeometry x="24" y="24" width="540" height="125" as="geometry" />
+        </mxCell>
+        <mxCell id="end" value="最终交付&#10;可追溯的 spec + torch golden + caseset&#10;+ NPU 精度 + 同机 torch_npu 性能 + 三级门 + 中文报告" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="group_8">
+          <mxGeometry x="64" y="214" width="460" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="e0" value="写出的事实包被读取" style="html=1;rounded=0;" edge="1" parent="1" source="a1" target="a2">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="120" /><mxPoint x="290" y="170" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e1" value="confirmed" style="html=1;rounded=0;" edge="1" parent="1" source="a2" target="b1">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="270" /><mxPoint x="290" y="320" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e2" value="spec + task_doc" style="html=1;rounded=0;" edge="1" parent="1" source="b1" target="b2">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="430" /><mxPoint x="290" y="480" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e3" value="spec + golden + facts" style="html=1;rounded=0;" edge="1" parent="1" source="b2" target="b3">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="590" /><mxPoint x="290" y="630" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e4" value="准备工件全集" style="html=1;rounded=0;" edge="1" parent="1" source="b3" target="b4">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="750" /><mxPoint x="290" y="790" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e5" value="REUSABLE" style="html=1;rounded=0;" edge="1" parent="1" source="b4" target="c1">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="910" /><mxPoint x="290" y="950" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e6" value="required_next_gate" style="html=1;rounded=0;" edge="1" parent="1" source="c1" target="c2">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="1080" /><mxPoint x="290" y="1120" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e7" value="TRUSTED / receipts" style="html=1;rounded=0;" edge="1" parent="1" source="c2" target="d0">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="1250" /><mxPoint x="290" y="1300" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e8" value="驱动 Task1" style="html=1;rounded=0;" edge="1" parent="1" source="d0" target="d1">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="1410" /><mxPoint x="290" y="1460" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e9" value="同一 caseset" style="html=1;rounded=0;" edge="1" parent="1" source="d1" target="d2">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="1560" /><mxPoint x="290" y="1610" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e10" value="invocation plan + bundle" style="html=1;rounded=0;" edge="1" parent="1" source="d2" target="d3">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="1730" /><mxPoint x="290" y="1770" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e11" value="逐 case 原始输出" style="html=1;rounded=0;" edge="1" parent="1" source="d3" target="d4">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="1890" /><mxPoint x="290" y="1930" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e12" value="verdict" style="html=1;rounded=0;" edge="1" parent="1" source="d4" target="d5">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="2040" /><mxPoint x="290" y="2090" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e13" value="精度允许：是" style="html=1;rounded=0;exitX=0.333333;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1" source="d5" target="d6">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="2220" /><mxPoint x="290" y="2260" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e14" value="精度不允许：跳过 Task3" style="html=1;rounded=0;exitX=0.666667;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1" source="d5" target="d9">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="540" y="2220" /><mxPoint x="540" y="2750" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e15" value="perf plan" style="html=1;rounded=0;" edge="1" parent="1" source="d6" target="d7">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="280" y="2370" /><mxPoint x="280" y="2420" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e16" value="DUT + baseline 原始时延" style="html=1;rounded=0;" edge="1" parent="1" source="d7" target="d8">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="280" y="2540" /><mxPoint x="280" y="2580" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e17" value="性能产物" style="html=1;rounded=0;" edge="1" parent="1" source="d8" target="d9">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="360" y="2700" /><mxPoint x="360" y="2750" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e18" value="三级门结果" style="html=1;rounded=0;" edge="1" parent="1" source="d9" target="d10">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="450" y="2880" /><mxPoint x="450" y="2930" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e19" value="唯一总裁决 + 证据" style="html=1;rounded=0;" edge="1" parent="1" source="d10" target="report_step">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="450" y="3050" /><mxPoint x="450" y="3090" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e20" value="交付" style="html=1;rounded=0;" edge="1" parent="1" source="report_step" target="end">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="450" y="3230" /><mxPoint x="450" y="3280" /></Array></mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
