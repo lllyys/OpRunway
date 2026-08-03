@@ -5,6 +5,12 @@
   "scope": "taskdoc-input-only",
   "acceptance_verdict": null,
   "min_quote_chars": 8,
+  "resolution_actions_by_route": {
+    "stop": ["supplied"],
+    "list_pending": ["supplied", "waived"],
+    "use_workflow_default": ["supplied", "waived"]
+  },
+  "resolution_actions_note": "阻断项只能靠 supplied（补齐事实）解除。豁免掉 Golden 标杆、目标硬件或验收完成条件不会让这些事实凭空出现，只会让下游在缺必需输入的情况下继续跑；用户若不打算补，正确出口是停止验收去找任务书负责人。",
   "items": [
     {
       "id": "operator_identity",
@@ -85,7 +91,8 @@
       "expects": "任务书指定的额外、替代或更严格精度要求，例如特定 dtype/输出的 tolerance、错误率、exact 或其他指标",
       "requirement": "optional",
       "on_unsatisfied": {"missing": "use_workflow_default", "ambiguous": "stop"},
-      "unsatisfied_note": "未声明时使用 workflow 标准；声明不清时停止确认，不得自行解释或放宽"
+      "unsatisfied_note": "未声明时使用 workflow 标准；声明不清时停止确认，不得自行解释或放宽",
+      "workflow_default_note": "「workflow 标准」指下游 precision_policy 按 golden dtype 派生的 per-case 结构化 policy，本门不在此处定值、也不复制阈值；报告须写明该项走的是默认口径而非任务书条款"
     },
     {
       "id": "performance_baseline",

@@ -32,7 +32,16 @@
 | `satisfied` | 任务书明确到能机械落地 | `quotes[]`（逐字原文，必填） |
 | `ambiguous` | 提了，但不足以机械判定；或前后矛盾 | `rationale`：**模糊在哪、两种读法各是什么** |
 | `missing` | 通读全文没有相关表述 | `rationale`：查了哪些章节、确认没有 |
-| `not_applicable` | 仅条件项可用，且该场景确实不存在 | `applicable=false` + `rationale`：**凭什么断定不存在** |
+| `not_applicable` | 仅条件项可用，且该场景确实不存在 | `applicable=false` + `rationale` + **`quotes[]`**（`conditional` 项必填） |
+
+⚠ **一条引用只能支撑一个项**。脚本按归一后的文本跨项去重，同一条原文出现在两个项里当场
+BLOCKED——否则从任务书里随便挑一句真原文就能把 18 项全标成 `satisfied`。不同项要引不同句；
+一句话里的不同片段可以分别引用。
+
+⚠ **`conditional` 项判 `not_applicable` 也要附原文**。「该场景不存在」是从任务书语义推出来的
+结论，必须锚在原文上（如「本算子为逐元素计算，不涉及并列值选择或索引输出」）；只写一句
+自由文本 rationale 说「我判断不会有」，脚本会 BLOCKED。两个性能项的不适用由顶层
+`perf_required` 的证据统一背书，不必逐项再引。
 
 `ambiguous` 的 `rationale` 要写成能直接拿去问用户的形式——它会原样进 `blocking_items`
 摆给用户。写「不够清楚」等于没写；写「只说『dtype 与输入一致』，但没说多输出时
@@ -167,6 +176,19 @@ dtype 允许两种明确形态：**逐字枚举**，或**给出可绑定的集�
   "decisions": []
 }
 ```
+
+`decisions` 由 primary 在问过用户后追加，每条形如：
+
+```json
+{"id": "target_hardware", "action": "supplied", "resolved_status": "missing",
+ "value": "<用户补充的事实>", "source": "user"}
+```
+
+- `resolved_status` 必须等于该项**当轮**的实际 status——否则上一轮的决策就能被搬到这一轮用。
+- **`stop` 路由的项只接受 `action="supplied"`**（补齐事实）。`waived` 只对
+  `list_pending` / `use_workflow_default` 的项开放：豁免掉 Golden 标杆、目标硬件或验收完成条件
+  不会让这些事实凭空出现，只会让下游缺着必需输入继续跑；用户若不打算补，正确出口是停止验收
+  去找任务书负责人。允许的动作由契约 `resolution_actions_by_route` 定，脚本据此校验。
 
 - `items` 必须**恰好 18 项**、id 与 `acc-common/taskdoc_validation_contract.json` 逐项对齐，
   不多不少不重复——脚本按契约核对，缺一个就是 BLOCKED。

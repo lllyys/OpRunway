@@ -94,8 +94,10 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   `taskdoc_validation.json`；primary inline `validate_taskdoc_input.py` 按
   `taskdoc_validation_contract.json` 的 18 项复核结构与绑定并**机械派生**阻断清单，
   `acceptance_verdict=null`。`PASSED`/`PASSED_WITH_PENDING` → 进 `extract_spec`；
-  `NEEDS_USER` → primary 汇总问用户（补充 / 豁免 / 停止验收），决策写回 `decisions` 重跑脚本；
+  `NEEDS_USER` → primary 汇总问用户（阻断项只能补充事实或停止验收，豁免只对不阻断的待确认项开放），决策写回 `decisions` 重跑脚本；
   `BLOCKED` → 校验工件不可信，重做。决策绑 `source_facts_digest`，任务书字节一变即整体失效。
+  ⚠ 本门**不随 `validate_preparation_state.py` 的 `REUSABLE` 跳过**（那份收据不绑 `taskdoc_validation*`）：
+  脚本每轮都重跑，热续跑省掉的只有贵的 `validate_taskdoc` NL dispatch。
 - **CP-B Task1 用例**：dispatch `acc-spec-extractor:extract_spec` → `spec` + `task_pr_gaps`；primary inline
   `gen_cases.py <spec> --dry-run --ledger-out <case_plan.json> --source-facts <source_facts.json> --correspondence <correspondence.json>`（plan-only 契约自检 + 绑定 facts/用户确认的 durable 计划账本，**不产任何裁决**）与
   `validate_preparation_state.py`（只判 CP-A/B 准备工件能否复用，`acceptance_verdict=null`）——**CP-B 只关注 task1 用例计划自洽**；

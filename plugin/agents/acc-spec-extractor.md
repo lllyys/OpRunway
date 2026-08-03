@@ -23,7 +23,7 @@ description: OpRunway 验收 ②（CP-B）的子 agent——先按 18 项标准�
 
 ## dispatch 契约
 
-每次由 orchestrator 传入：`workdir`（CP-A 取材工作区，含 `task_doc.md` / `task_doc.snapshot.md` / `pr_facts.json` / `source_facts.json` / `correspondence.json`）、`dispatch_mode`（`extract_spec` 或 `refine_spec`）、spec 落盘目录（默认 **`<ops_root>/<op>/`**，`ops_root` = `$OPRUNWAY_OPS_DIR`(绝对) 或 `${OPRUNWAY_WORK_DIR:-$CWD}/.oprunway/ops`；**落用户工作目录、不写插件安装目录**；真 spec 样例已迁出运行时路径到 `samples/specs/`，**产 spec 阶段禁读任何 `.spec.json`（含 `samples/`）、不得查阅同名算子样例**（软污染），结构只看空模板 `acc-common/spec_schema_template.jsonc`），以及 `refine_spec` 时附带的 **dry-run 契约自检**错误信息与待修 spec 路径。
+每次由 orchestrator 传入：`workdir`（CP-A 取材工作区，含 `task_doc.md` / `task_doc.snapshot.md` / `pr_facts.json` / `source_facts.json` / `correspondence.json`）、`dispatch_mode`（`validate_taskdoc` / `extract_spec` / `refine_spec`）、spec 落盘目录（默认 **`<ops_root>/<op>/`**，`ops_root` = `$OPRUNWAY_OPS_DIR`(绝对) 或 `${OPRUNWAY_WORK_DIR:-$CWD}/.oprunway/ops`；**落用户工作目录、不写插件安装目录**；真 spec 样例已迁出运行时路径到 `samples/specs/`，**产 spec 阶段禁读任何 `.spec.json`（含 `samples/`）、不得查阅同名算子样例**（软污染），结构只看空模板 `acc-common/spec_schema_template.jsonc`），以及 `refine_spec` 时附带的 **dry-run 契约自检**错误信息与待修 spec 路径。
 
 | dispatch_mode | 输入工件 | 产出工件 | 一句话职责 |
 |---|---|---|---|

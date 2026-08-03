@@ -12,7 +12,7 @@
     不含自己、不重复、无多缺）。
   - 3 个 subagent：frontmatter `mode: subagent` + 正文含其全部 `dispatch_mode` 取值
     （validate_taskdoc/extract_spec/refine_spec、gen_golden/gen_runner/verify_runner、
-    verify_aclnn_harness/run_npu/rootcause）+ 禁用短语存在
+    verify_aclnn_harness/run_npu/run_precision_retest/rootcause）+ 禁用短语存在
     （正文含「单轮」且含「不自行判定」或等价）。
   - `plugin/agents/*.md` 里**任何**文件 frontmatter 坏（未闭合 / 缺 frontmatter / 畸形行 / 不可读）→ 判 FAIL，
     不静默放过（契约外的多余 agent 也解析，只是不做结构字段校验）。
@@ -33,7 +33,8 @@ SUBAGENTS = [
      "dispatch": ["validate_taskdoc", "extract_spec", "refine_spec"]},
     {"name": "acc-runner-dev", "dispatch": ["gen_golden", "gen_runner", "verify_runner"]},
     {"name": "acc-verify-rootcause",
-     "dispatch": ["verify_aclnn_harness", "run_npu", "rootcause"]},
+     "dispatch": ["verify_aclnn_harness", "run_npu", "run_precision_retest",
+                  "rootcause"]},
 ]
 CHILDREN = [s["name"] for s in SUBAGENTS]          # 3 个 child subagent（派生）
 SUB_DISPATCH = {s["name"]: s["dispatch"] for s in SUBAGENTS}

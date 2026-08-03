@@ -93,7 +93,13 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 **目的**：先校验任务书输入是否足以充当验收依据（CP-B0），再任务书→spec + golden，并用 `--dry-run` 做**用例计划的契约自检**（不产任何裁决）。
 
 - **先查热续跑，不先派 NL agent**：CP-A 已轻量刷新任务书/PR head 并得到当前 `source_facts` 后，若旧 spec/golden/case-plan/receipt 都存在，primary **先重跑** `validate_preparation_state.py`。结果 `REUSABLE` → 直接复用 CP-B 三件套、跳过 `extract_spec` / `gen_golden` / dry-run，进入 CP-C0；`MISS` → 只重做 checks 指向的最小缺口（source/correspondence 变化才重抽 spec，planner/golden 变化只重跑对应步骤）；`BLOCKED` → 停止并报告损坏。不得因为“可能有缓存”先照旧派完两次 NL 再查 receipt——那会让热续跑优化完全失效。
-- **CP-B0 任务书输入校验门（先于 `extract_spec`，热续跑 `REUSABLE` 时随 CP-B 一并跳过）**：
+- **CP-B0 任务书输入校验门（先于 `extract_spec`）**：
+  ⚠ **本门不随 `validate_preparation_state.py` 的 `REUSABLE` 跳过**——那份收据只复核它自己检查的
+  source/correspondence/spec/case-plan/golden 绑定，**既不读也不绑** `taskdoc_validation*`，
+  拿它替 CP-B0 背书就等于让本门接入之前产生的旧收据把新门整个绕过去。
+  **`validate_taskdoc_input.py` 每轮都重跑**（纯本地只读、毫秒级，digest 一致时直接返回 PASSED）；
+  真正被热续跑跳过的只有下面那次**贵的 NL dispatch**：`taskdoc_validation.json` 已存在且脚本判
+  `PASSED`/`PASSED_WITH_PENDING` 时不必重派 `validate_taskdoc`，digest 漂移时脚本自己会 BLOCKED。
   抽 spec 之前先回答更前面的问题——**这份任务书够不够格当验收依据**。受控清单
   `acc-common/taskdoc_validation_contract.json`（**18 项**：12 项无条件必须 + 2 项有性能要求时必须 +
   3 项条件必须 + 1 项可选），逐项判法在 `skills/acc-spec/references/taskdoc-validation.md`。
@@ -106,10 +112,16 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
      **不重判任务书内容对不对**，`acceptance_verdict` 恒 null。
   3. **路由按 STATUS 分**：`PASSED` / `PASSED_WITH_PENDING` → 进 `extract_spec`（pending 项写进
      CP-E 报告的「待确认项」，不阻断）；**`NEEDS_USER` → primary 用 `AskUserQuestion` 把
-     `blocking_items` 一次性汇总问用户**（不逐项连问），每项三选一：**补充**（给出事实）/
-     **豁免**（给出理由）/ **停止验收**（出程序结论、去找任务书负责人）。用户选择原样追加进
+     `blocking_items` 一次性汇总问用户**（不逐项连问）。**阻断项只有两条出路：补充事实
+     （`action="supplied"`）或停止验收**（出程序结论、去找任务书负责人）——**不能豁免**：
+     豁免掉 Golden 标杆、目标硬件或验收完成条件不会让这些事实凭空出现，只会让下游缺着必需
+     输入继续跑，脚本按契约 `resolution_actions_by_route` 当场拒。`waived` 只对
+     `pending_items` 这类不阻断的项开放。每条决策须自报 `resolved_status` 且与本轮实际状态
+     相符，旧轮决策搬不过来。用户选择原样追加进
      `taskdoc_validation.json.decisions`（`source` 固定 `"user"`）后**重跑脚本**，
-     转 `PASSED` 才继续；`supplied` 项的 `confirmed_constraints_candidates` 一并写入
+     转 `PASSED` **或 `PASSED_WITH_PENDING`** 才继续（阻断项全决策完、但还留着未决的
+     `list_pending` 项时，脚本返回的就是后者——别把它当没过）；
+     `supplied` 项的 `confirmed_constraints_candidates` 一并写入
      `correspondence.json.confirmed_constraints`，供后续 dispatch 原样传递、不再重复澄清。
      `BLOCKED` → 校验工件本身不可信（引用编造 / 项数不齐 / 事实包漂移），重做 CP-B0，**不得跳过**。
   ⚠ 决策绑 `source_facts_digest`：**任务书字节一变，本轮校验与用户决策整体失效**，须重做——
