@@ -48,15 +48,74 @@ set +a
 
 ## 3 · 950 环境：最近一次验证状态
 
-最近完整验证日期：2026-07-02；开始新任务前必须重新探测。
+最近完整验证日期：**2026-08-03**（本轮重探，取代 2026-07-02 快照）；开始新任务前仍须重新探测。
 
 | 项 | 已验证事实 |
 |---|---|
-| 目标硬件 | 2× Ascend950PR，catlass arch 3510 |
-| CANN | 9.0.0 |
-| Python | 系统 Python 3.11 |
-| 执行形态 | host 用户态编译/运行；当时无 Docker 权限 |
-| 已验证样例 | catlass 950 basic matmul build/run，结果 Compare success |
+| 目标硬件 | **8× Ascend950PR**，本轮探测时全部 idle、无进程占用 |
+| 宿主 OS | openEuler 24.03 (LTS-SP3)，**x86_64** |
+| 执行形态 | **容器**（2026-07-02 记录的“host 用户态、无 Docker 权限”已失效） |
+| Docker | 18.09.0，storage driver overlay2；当前账号在 `docker` 组内，**无免密 sudo** |
+| 容器镜像 | `ascendhub/cann:9.0.0-950-ubuntu22.04-py3.11`（探测时已在本地，无需拉取） |
+| 容器 OS / Python | Ubuntu 22.04.5 / Python 3.11.15 |
+| CANN | 9.0.0（`V100R001C10SPC001B250`，arch x86_64） |
+| 驱动 / npu-smi | npu-smi 25.7.rc1 |
+| 编译工具链 | gcc/g++ 11.4.0、cmake 3.22.1、make 4.3、msprof 可用；**ninja 缺失** |
+| Python 包 | **numpy 1.26.4** · scipy 1.17.1 · torch 2.10.0+cpu · torch_npu 2.10.0 · **cv2 4.11.0** · pytest 9.1.1 · protobuf 3.20.0 |
+| NPU 可用性硬证据 | 容器内 `acl.init() -> 0`、`acl.rt.set_device(7) -> 0`；`torch.randn(3,4).npu()` 实算返回 `device='npu:0'` |
+
+### 3.1 建容器时的两个已知坑
+
+1. **`/dev/devmm_svm` 在本机不存在**，照抄别的容器的设备清单会导致
+   `error gathering device information ... no such file or directory`。实际存在的只有
+   `davinci0..7`、`davinci_manager`、`hisi_hdc`。
+2. **不加 `--privileged` 时容器内 `npu-smi` 报 `dcmi model initialized failed ... ret is -8020`**
+   （伴随 `DrvMngGetConsoleLogLevel failed. (ret=4)`）。补 `--privileged` 并挂
+   `/usr/local/Ascend/driver/tools` 后恢复正常。
+
+### 3.2 磁盘：只有一处能放大件
+
+| 分区 | 容量 | 探测时剩余 | 结论 |
+|---|---|---|---|
+| `/home` | 10 G | **396 K** | 已满，不可用 |
+| `/`（`/mnt/<user>` 落在这） | 70 G | 6.7 G | 太紧，撑不住算子 build |
+| Docker 数据卷 | 1.7 T | **1.3 T** | **唯一可放大件处**；工作区建在其下并挂进容器 |
+| `/tmp` | tmpfs 378 G | 376 G | 够大但 RAM 支撑、重启即失；宿主内存 754 G |
+
+工作区实际路径只记在 ignored env 的 `OPRUNWAY_A5_WORKDIR`。
+
+### 3.3 网络
+
+本机**无直连外网**，必须经反向隧道（本地代理端口 → 远端回环端口，见
+仓根 `CLAUDE.md` 的 `autossh` 写法）。容器以 `--network host` 启动，故容器内直接用
+远端回环地址即可，不必走 `docker0` 网关。
+
+隧道会静默失效：端口仍在监听、但转发不到任何地方，表现为 `curl` 超时返回 `000`。
+判据是**端到端实测**（如在容器内真的 `pip download` 一个包），不能只看端口是否 LISTEN。
+
+### 3.4 numpy 与 OpenCV 的版本耦合（golden 侧）
+
+三条互相咬合的约束，装包顺序错了会来回返工：
+
+1. **被测仓可能要求 `numpy<2.0`**（ops-cv 的 `requirements.txt` 即如此）。CANN 镜像自带的是
+   numpy 2.x，需显式降级。
+2. **`pip install opencv-python-headless` 默认给 5.0.x**。当任务书以 OpenCV 4.x 的
+   `modules/imgproc` 为对标参考时，装 5.0 属于无理由偏离验收基准，应显式约束到 `<5`。
+3. **较新的 cv2 4.x 轮子声明 `numpy>=2`**（实测 4.14.0.94 即是）。因此不能先装 cv2 再降 numpy，
+   要把两者放进同一条 `pip install` 让解析器回溯——在 `numpy==1.26.4` 下会落到 **cv2 4.11.0**。
+
+实测结论：cv2 **4.11.0 与 4.14.0 对 fp32 GaussianBlur 的输出逐位相同**，border 常量也一致，
+所以 4.x 内部的小版本差异对本类算子的真值不构成风险。
+
+已核实的 cv2 行为坑：**`cv2.GaussianBlur` 对 `[H,W,1]` 单通道输入会把最后一维 squeeze 掉**
+（`(256,128,1) -> (256,128)`），而 NPU 侧输出与输入严格同 shape。golden 必须显式补回该维，
+否则精度比对会因 shape 不匹配整条失败，且**只在 C=1 时触发**。
+
+另有一条 950 侧的 dtype 事实：`torch_npu` 会给出
+`Device do not support double dtype now, dtype cast replace with float` 警告——
+**float64 在该硬件上被静默降为 float32**。凡是用 torch 侧构造 fp64 中间量的做法都要挂账。
+
+---
 
 A2/A3 与 950 没有主备关系。目标机必须由任务书“适配硬件”与 op_def `AddConfig` 双源核定；不一致时写入 `task_pr_gaps` 并停止猜测。
 

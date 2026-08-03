@@ -4,6 +4,22 @@
 
 ## 2026-08-03
 
+- 950 真机环境重探并**建好容器**，`doc/oprunway-real-machine-environment.md` §3 整节重写
+  （旧的 2026-07-02 快照说「无 Docker 权限、host 执行」，现在 Docker 可用、改为容器执行）。
+  新增三小节记坑：建容器时 `/dev/devmm_svm` 不存在、不加 `--privileged` 则 `npu-smi` 报 -8020；
+  磁盘只有 Docker 数据卷能放大件（`/home` 已 100% 满）；隧道会「端口在监听但转发不通」，
+  只能靠端到端实测判定。装齐 torch 2.10.0+cpu / torch_npu 2.10.0 / cv2 4.11.0 / numpy 1.26.4，
+  `torch.randn(3,4).npu()` 与 `acl.rt.set_device` 均真机验证通过。
+- 记下两条会误判的 golden 侧事实：**`cv2.GaussianBlur` 对 `[H,W,1]` 会 squeeze 掉最后一维**
+  （只在 C=1 触发，NPU 侧输出恒与输入同 shape，golden 必须补回）；950 上 **float64 被静默降成 float32**。
+  另外 numpy/cv2 版本互相咬合——较新 cv2 4.x 声明 `numpy>=2`，要和 `numpy<2.0` 放同一条 pip 命令回溯。
+- GaussianBlur（ops-cv）验收支持**计划待批**，落 `doc/oprunway-gaussianblur-support-plan.md`：
+  11 条 blocking gap（最险的是 stage2 被写死 4 参、实际 10 参，属**静默错调**不是 fail-closed）、
+  10 条 degraded、runner form 选 `aclnn_py`（cpp 路撞 5.1 的 per-op runner 禁令）、
+  4 条待用户决策（PR 无 `.git` 拿不到 head sha、任务书要 OpenCV C++ 层但 PR 只交付 aclnn、
+  in-place 任务书要求而 PR 明确拒绝、950PR 的 UB 边界未知）。**尚未动代码。**
+- `AGENTS.md` 新增 **5.10 性能口径**：性能无要求、或要求与 GPU 比对时，一律只用 msprof 测实测性能，
+  不做 GPU 对比、不走 `BLOCKED_WAIT_GPU_BENCHMARK`；报告不得把「只测了实测」包装成「已达标 x 倍」。
 - 任务书输入校验标准接进 workflow：新增 **CP-B0 门**（抽 spec 之前），
   18 项受控清单落 `acc-common/taskdoc_validation_contract.json`，逐项判法落
   `skills/acc-spec/references/taskdoc-validation.md`，`acc-spec-extractor` 加
