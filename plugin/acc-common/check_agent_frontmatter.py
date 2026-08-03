@@ -10,8 +10,9 @@
   - `op-acceptance.md`（primary）：frontmatter `mode: primary` + `skills` **恰为** `[acceptance-workflow]`
     + `agents` **恰为** 3 个 child（`acc-spec-extractor` / `acc-runner-dev` / `acc-verify-rootcause`，
     不含自己、不重复、无多缺）。
-  - 3 个 subagent：frontmatter `mode: subagent` + 正文含其 `dispatch_mode` 两个取值
-    （extract_spec/refine_spec、gen_runner/verify_runner、run_npu/rootcause）+ 禁用短语存在
+  - 3 个 subagent：frontmatter `mode: subagent` + 正文含其全部 `dispatch_mode` 取值
+    （validate_taskdoc/extract_spec/refine_spec、gen_golden/gen_runner/verify_runner、
+    verify_aclnn_harness/run_npu/rootcause）+ 禁用短语存在
     （正文含「单轮」且含「不自行判定」或等价）。
   - `plugin/agents/*.md` 里**任何**文件 frontmatter 坏（未闭合 / 缺 frontmatter / 畸形行 / 不可读）→ 判 FAIL，
     不静默放过（契约外的多余 agent 也解析，只是不做结构字段校验）。
@@ -28,7 +29,8 @@ PRIMARY = "op-acceptance"                 # 薄编排器（mode: primary）
 PRIMARY_SKILLS = ["acceptance-workflow"]  # primary 只挂 workflow skill（原子 skill 下沉 subagent）
 # subagent 契约表（单一事实源：name + dispatch_mode 两取值；CHILDREN 由它派生，避免分离维护漂移）
 SUBAGENTS = [
-    {"name": "acc-spec-extractor", "dispatch": ["extract_spec", "refine_spec"]},
+    {"name": "acc-spec-extractor",
+     "dispatch": ["validate_taskdoc", "extract_spec", "refine_spec"]},
     {"name": "acc-runner-dev", "dispatch": ["gen_golden", "gen_runner", "verify_runner"]},
     {"name": "acc-verify-rootcause",
      "dispatch": ["verify_aclnn_harness", "run_npu", "rootcause"]},

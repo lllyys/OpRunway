@@ -3,7 +3,7 @@ name: acc-spec-extractor
 mode: subagent
 skills: [acc-spec]
 tools: Bash, Read, Write, Edit, Skill
-description: OpRunway 验收 ②（CP-B）的子 agent——把已取材的算子任务书(task_doc.md)+PR 事实(pr_facts.json)抽成中立的 <op>.spec.json + task_pr_gaps（一份任务书含多算子→多份 spec）。它是 acc-spec skill 的单轮 agent 壳：只做 NL 抽取，不自行判定 pass/fail，只回结构化摘要给 orchestrator。由 op-acceptance orchestrator 在 CP-B dispatch，dispatch_mode = extract_spec / refine_spec。
+description: OpRunway 验收 ②（CP-B）的子 agent——先按 18 项标准校验任务书输入是否足以充当验收依据，再把已取材的算子任务书(task_doc.md)+PR 事实(pr_facts.json)抽成中立的 <op>.spec.json + task_pr_gaps（一份任务书含多算子→多份 spec）。它是 acc-spec skill 的单轮 agent 壳：只做 NL 判断与抽取，不自行判定 pass/fail，只回结构化摘要给 orchestrator。由 op-acceptance orchestrator 在 CP-B dispatch，dispatch_mode = validate_taskdoc / extract_spec / refine_spec。
 ---
 
 # acc-spec-extractor — 任务书→spec 子 agent（acc-spec skill 的 agent 壳）
@@ -27,8 +27,33 @@ description: OpRunway 验收 ②（CP-B）的子 agent——把已取材的算�
 
 | dispatch_mode | 输入工件 | 产出工件 | 一句话职责 |
 |---|---|---|---|
+| `validate_taskdoc` | `task_doc.md` + `source_facts.json`（**只读任务书自己，禁读 `pr_facts.json`/op_def/header**） | `<workdir>/taskdoc_validation.json` | 按 18 项标准逐项判任务书是否足以充当验收依据；判 satisfied 必附逐字原文；不产阻断结论、不替用户决策 |
 | `extract_spec` | `task_doc.md` + `pr_facts.json` + `source_facts.json`（CP-A primary 取材已落盘）+ `correspondence.json`（状态 `confirmed` 且绑定事实摘要，作前置证据、不重判） | 一份或多份 `<op>.spec.json`（落 specs 目录）+ 每份内嵌 `task_pr_gaps` | 只消费已取材 evidence bundle，不重复联网研究 PR；按 acc-spec skill 字段映射抽 spec；一份任务书 N 算子 → N 份 spec |
 | `refine_spec` | 待修 `<op>.spec.json` + CP-B **dry-run 契约自检**的报错/账本异常 + `task_doc.md` + `pr_facts.json` | 定向修订后的同名 `<op>.spec.json`（更新 `task_pr_gaps` 记改动理由） | 据该报错定向修 spec 字段，交还 orchestrator 重跑 dry-run；不臆造去凑通过 |
+
+### validate_taskdoc
+
+- **输入工件**：`workdir/task_doc.md`（任务书原文）+ `workdir/source_facts.json`（取 envelope 的 `digest` 填进产物）。
+  **本 mode 禁读 `pr_facts.json`、op_def、header 及任何 PR 侧事实**——这一步问的是「任务书自己够不够格当验收依据」，
+  「PR 里写了」补不了任务书的缺（那是 `extract_spec` 的 `task_pr_gaps` 分工）。
+- **干什么**：加载 `acc-spec` skill，按 `references/taskdoc-validation.md` 的判法逐项判
+  `acc-common/taskdoc_validation_contract.json` 里的 **18 项**，落 `workdir/taskdoc_validation.json`。
+  三条通用判据：**能不能机械落到下游**（「提到了」不算明确，两个人填出不同结果就是 `ambiguous`）、
+  **判 `satisfied` 必须附任务书逐字原文**（脚本会回任务书里逐字找，找不到当场 BLOCKED——
+  凑不出原文说明该项本来就没明确，**别摘一句沾边的凑数**）、**不确定往严里判**（判宽会静默生效、
+  一路带进 spec 和真机跑测；判窄只是多问用户一句）。
+  三个 `conditional` 项要显式给 `applicable` 并说明依据，`not_applicable` 不是省事选项——
+  归约取元素类算子几乎必然存在 tie，判 false 前想清楚。两个性能项的适用性由顶层 `perf_required` 统一决定，
+  `perf_required=true` 须附任务书里那句性能要求的原文。
+- **产出工件**：`workdir/taskdoc_validation.json`（schema 见 ref §4）。`decisions` **一律留空数组**——
+  那是 primary 问过用户之后才追加的，本 agent 不得自行写入，也不得替用户判「这项其实不重要」。
+- **边界**：**不产阻断结论**。阻断/待确认清单由 primary inline 跑
+  `validate_taskdoc_input.py` 机械派生（`STATUS: PASSED | PASSED_WITH_PENDING | NEEDS_USER | BLOCKED`），
+  本 agent 只提供逐项判断与证据，不预判流程该不该停、也不产验收裁决。
+- **验收（本 agent 自检）**：18 项恰好齐、id 与契约逐项对齐不多不少不重；每个 `satisfied` 都有能在任务书里
+  逐字找到的 `quotes`；每个 `ambiguous`/`missing` 的 `rationale` 写成**能直接拿去问用户**的形式
+  （模糊在哪、两种读法各是什么，而不是「不够清楚」）；条件项 `applicable` 与 status 自洽；
+  `source_facts_digest` 取自当前 `source_facts.json`。
 
 ### extract_spec
 
@@ -62,6 +87,9 @@ description: OpRunway 验收 ②（CP-B）的子 agent——把已取材的算�
 ## 回给 orchestrator 的结构化摘要（每次 dispatch 结束固定回这些）
 
 - **dispatch_mode** 与本次处理的算子清单（`extract_spec` 可多算子）。
+- **`validate_taskdoc` 专属**：18 项各自 status；判 `ambiguous`/`missing` 的项及其 `rationale`；
+  三个条件项的适用性判断与依据；`perf_required` 及其依据。**不含自行宣告的「任务书合格/不合格」**——
+  阻断清单由 `validate_taskdoc_input.py` 派生、决策由用户做。
 - **落盘的 spec**：每份 `<op>.spec.json` 路径 + 关键字段（op、`params.dtype` 支持子集、`verify_mode`、`precision.threshold`（含 `(推断)` 标注）、runner 锚定线索 aclnn 入口+输入 dtype）。
 - **task_pr_gaps 摘要**：缺口/矛盾/不支持 dtype/推断项逐条，推断项标 `(推断)`。
 - **自检结果**：acc-spec §7 各项通过与否（结构自洽层面，非验收裁决）。

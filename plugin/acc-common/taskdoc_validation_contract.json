@@ -1,0 +1,159 @@
+{
+  "schema": "oprunway.taskdoc_validation_contract",
+  "schema_version": 1,
+  "source_doc": "doc/oprunway-task-document-validation-standard.md",
+  "scope": "taskdoc-input-only",
+  "acceptance_verdict": null,
+  "min_quote_chars": 8,
+  "items": [
+    {
+      "id": "operator_identity",
+      "title": "算子身份",
+      "expects": "算子名称、所属仓/模块、任务或需求编号",
+      "requirement": "must",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "停止，补齐唯一身份"
+    },
+    {
+      "id": "delivery_scope",
+      "title": "交付范围",
+      "expects": "本次新增、优化或修复什么；哪些内容明确不在范围内",
+      "requirement": "must",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "停止，确认范围边界"
+    },
+    {
+      "id": "api_and_overload",
+      "title": "API 与 overload",
+      "expects": "要交付的全部接口、调用形态及 overload，例如有 dim/无 dim",
+      "requirement": "must",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "停止，逐个确认"
+    },
+    {
+      "id": "input_contract",
+      "title": "输入契约",
+      "expects": "输入数量、含义、dtype、rank/shape 范围、layout/format 约束",
+      "requirement": "must",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "缺项停止；范围描述模糊时请求量化"
+    },
+    {
+      "id": "attribute_contract",
+      "title": "属性契约",
+      "expects": "属性类型、合法范围、默认值、nullable/optional 语义及属性组合限制",
+      "requirement": "must",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "停止；不得自行选择默认值"
+    },
+    {
+      "id": "output_contract",
+      "title": "输出契约",
+      "expects": "输出数量、dtype、shape 规则、多输出含义及 optional output 条件",
+      "requirement": "must",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "停止；不能只依据当前实现猜测"
+    },
+    {
+      "id": "functional_semantics",
+      "title": "功能语义",
+      "expects": "与哪个标准接口对齐；边界、异常和特殊值行为",
+      "requirement": "must",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "停止，要求给出明确参考或规则"
+    },
+    {
+      "id": "special_semantics",
+      "title": "特殊语义",
+      "expects": "tie/重复值、索引选择、NaN/Inf、正负零、空 tensor、标量、负轴等",
+      "requirement": "conditional",
+      "applicability_question": "任务书涉及的算子语义中是否真实存在这些场景",
+      "on_unsatisfied": {"missing": "list_pending", "ambiguous": "list_pending"},
+      "unsatisfied_note": "相关场景存在但未说明时，列为待确认项"
+    },
+    {
+      "id": "golden_reference",
+      "title": "Golden 标杆",
+      "expects": "真值来源、准确 API/overload、运行环境，以及组合实现是否允许",
+      "requirement": "must",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "停止；不得由 agent 自选近似参考"
+    },
+    {
+      "id": "extra_precision_requirement",
+      "title": "精度额外要求",
+      "expects": "任务书指定的额外、替代或更严格精度要求，例如特定 dtype/输出的 tolerance、错误率、exact 或其他指标",
+      "requirement": "optional",
+      "on_unsatisfied": {"missing": "use_workflow_default", "ambiguous": "stop"},
+      "unsatisfied_note": "未声明时使用 workflow 标准；声明不清时停止确认，不得自行解释或放宽"
+    },
+    {
+      "id": "performance_baseline",
+      "title": "性能 baseline",
+      "expects": "对照实现及准确 API、是否要求同机同卡，以及语义等价依据",
+      "requirement": "conditional_perf",
+      "applicability_question": "任务书是否提出性能要求",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "停止；runner form 不能代替 baseline 定义"
+    },
+    {
+      "id": "performance_metric_scope",
+      "title": "性能口径",
+      "expects": "kernel-only 或端到端、统计量、warmup/repeat、达标公式和阈值",
+      "requirement": "conditional_perf",
+      "applicability_question": "任务书是否提出性能要求",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "停止，补齐可机械判定的口径"
+    },
+    {
+      "id": "target_hardware",
+      "title": "目标硬件",
+      "expects": "SoC/产品型号、数量，以及功能、精度、性能分别在哪些硬件验收",
+      "requirement": "must",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "停止；不得从本机环境反推"
+    },
+    {
+      "id": "deliverable_and_dut",
+      "title": "交付物与 DUT",
+      "expects": "交付工程形态、实际被测构建物，以及测试桥/框架封装是否属于交付",
+      "requirement": "must",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "停止，避免测错对象或把测试桥当 DUT"
+    },
+    {
+      "id": "integration_form",
+      "title": "接入形态",
+      "expects": "kernel 直调、ACLNN、Torch 封装等必须交付的调用层级",
+      "requirement": "must",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "停止；不能仅凭可运行路径代替交付要求"
+    },
+    {
+      "id": "dependencies_and_prerequisites",
+      "title": "依赖与前置条件",
+      "expects": "必需 toolkit、外部库、参考数据、额外仓或授权环境",
+      "requirement": "conditional",
+      "applicability_question": "本轮交付是否依赖任务书之外的 toolkit、外部库、参考数据、额外仓或授权环境",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "缺少时标记阻塞，不进入跑测"
+    },
+    {
+      "id": "failure_and_exception_rules",
+      "title": "失败与例外规则",
+      "expects": "不支持项、允许挂起项、baseline limitation、已知限制如何处理",
+      "requirement": "conditional",
+      "applicability_question": "任务书是否存在不支持项、允许挂起项、baseline limitation 或已知限制",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "不明确时 fail-closed，提交人工确认"
+    },
+    {
+      "id": "acceptance_completion_criteria",
+      "title": "验收完成条件",
+      "expects": "什么情况下可 PASS；是否允许部分覆盖、风险通过或延期项",
+      "requirement": "must",
+      "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
+      "unsatisfied_note": "停止，避免把局部跑通当最终通过"
+    }
+  ]
+}

@@ -2,6 +2,20 @@
 
 > 倒序：最新在上。每天一节，一条一句，大白话。`待决` 置顶。
 
+## 2026-08-03
+
+- 任务书输入校验标准接进 workflow：新增 **CP-B0 门**（抽 spec 之前），
+  18 项受控清单落 `acc-common/taskdoc_validation_contract.json`，逐项判法落
+  `skills/acc-spec/references/taskdoc-validation.md`，`acc-spec-extractor` 加
+  `validate_taskdoc` dispatch mode（只读任务书自己、禁读 PR 侧事实）。
+- 新增确定性脚本 `validate_taskdoc_input.py`：只复核结构与绑定（18 项逐项对齐 ·
+  `satisfied` 必须附能在任务书里逐字找到的原文 · 条件项适用性自洽 · 决策绑
+  `source_facts_digest`），按契约机械派生阻断清单，不重判任务书内容、不产验收裁决。
+  12 项无条件必须 + 2 项性能项（有性能要求时）不满足即 `NEEDS_USER` 停下交用户决策
+  （补充 / 豁免 / 停止验收）；特殊语义只列待确认项不阻断。
+  单测 `test_validate_taskdoc_input.py` 37 例已在 a3 容器 `oprunway_prov`
+  （Python 3.12.13）跑过，全过。
+
 ## 2026-08-02
 
 - v10 已在 A3 跑通 1152-case CP-F 机械闭环：F2 和 execute 均成功、Task-2 gate 通过、
