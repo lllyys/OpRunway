@@ -732,7 +732,7 @@ class BuildRecipeScriptTest(unittest.TestCase):
     def test_exec_script_respects_explicit_op_dir(self):
         """显式给了就尊重（保留「`OPRUNWAY_ACLNN_OP_DIR` 指源码树 op 目录」的现有用法）——
         默认值只在缺省时生效，绝不覆盖调用方的显式选择。"""
-        explicit = "/tmp/oprunway_aclnn_rr/aclnn_src/" + _OP_SUBDIR
+        explicit = "/tmp/oprunway_aclnn_rr/dut_src/" + _OP_SUBDIR
         with _env(**_cfg_env(self.root, OPRUNWAY_ACLNN_OP_DIR=explicit)):
             cfg = A._aclnn_cfg()
             s = A._exec_script(cfg, A._aclnn_paths(cfg))
@@ -1089,7 +1089,7 @@ class PerfPlanDutDeclarationTest(unittest.TestCase):
 
     def test_remote_plan_op_dir_explicit_wins(self):
         """plan / env 显式给了就尊重，默认值只在缺省时生效（两条来源都验一遍）。"""
-        explicit = "/tmp/oprunway_aclnn_rr/aclnn_src/" + _OP_SUBDIR
+        explicit = "/tmp/oprunway_aclnn_rr/dut_src/" + _OP_SUBDIR
         sent, _ = self._collect(plan={"op_dir": explicit})
         self.assertEqual(explicit, sent["op_dir"])
         self.plan_sent.clear()

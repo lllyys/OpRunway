@@ -4,6 +4,27 @@
 
 ## 2026-08-03
 
+- GaussianBlur **首次真机全链跑通**（CP-A → CP-B0 → CP-C0 → 用例 → CP-C 真机信任门 → run_workflow
+  → 三级验收门）。终态 `BLOCKED_WAIT_REAL_BASELINE`：精度 24/24 全 pass（含 inf/-inf/nan 三条，
+  NPU 与 OpenCV CPU `bad_count=0`），task1/task2 门 PASSED，task3 因**本轮无性能基线**挂起。
+  实跑逼出 5 个工具链缺口，逐个修掉：
+  ① `snapshot_only` 这一档 intake 会产、但**没有任何门能消费**（各门只写死认 `complete`）→
+     新增 `source_provenance.py` 作档位的唯一解释处，降级路由须编排层显式授权
+     （`OPRUNWAY_ALLOW_DEGRADED_PROVENANCE=local_snapshot`），放行时把 `pr_head_unbound` 机读挂账；
+  ② snapshot 通路**没有可比的源身份**（无 head 可绑，整仓 merkle 与 intake 的子树 merkle 不同 scope）→
+     adapter build 段加算一份**同 scope 同算法**的算子子树 merkle，信任门拿它与 CP-C0 事实包逐字对账；
+  ③ **checkout 目录名 `aclnn_src` 会让 DUT 少编一个文件**：ops-cv 的 CMake 用
+     `list(FILTER <glob> EXCLUDE REGEX "aclnn_")` 过滤**绝对路径**，目录名撞上就把 `op_api/<op>.cpp`
+     一起滤掉，编译/安装全绿、dlopen 才报 `undefined symbol: l0op::GaussianBlur`。改名 `dut_src`；
+  ④ legacy 单输出通路的输出 dtype 若声明 `<from_input>`，`derive_output_dtype` 会把**哨兵原样当 dtype 返回**
+     （多输出通路一直解得对），到 `threshold_for` 才炸；
+  ⑤ 验收门复核 evidence↔产物时只会 `np.load`，而 aclnn_py 落的是 raw `.bin` → legacy 单输出 + aclnn_py
+     的组合在这道门上**恒 FAILED**。改为按 `.npy` 魔数判形态，raw 分支只认 caseset 的 canonical dtype/shape。
+  单测：1727 passed / 10 failed，与未改动 HEAD 的 10 failed 同批 → 零回归。
+- CP-B0 任务书门首次对 GaussianBlur 实跑，结论 `NEEDS_USER`：阻断 3 项
+  （`golden_reference` 任务书三处自相矛盾 CPU/GPU、`performance_baseline` 二选一且无准确 API、
+  `performance_metric_scope` 无 kernel-only/端到端与统计口径）、待确认 1 项（`special_semantics` 未规定 NaN/Inf）。
+  这是**任务书本身的缺口**，不是工具缺陷。
 - GaussianBlur 验收通路按计划 v2 落地：aclnn_py 侧补齐 `aclIntArray` 参数、**stage2 真解析**
   （此前把非 4 参 stage2 静默错调，属 5.8 最危险的一类）、输出方向改以 stage2 的 const 限定符为准；
   新增 `local_snapshot` 取源形态（上游确无该 PR，`head_sha` 落 null，不合成 hex）；

@@ -698,6 +698,11 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
             "snapshot_merkle_sha256": (
                 facts.get("snapshot_merkle_sha256")
                 if isinstance(facts.get("snapshot_merkle_sha256"), str) else None),
+            # merkle **没有 scope 就没有意义**：同一棵树按「整仓」和按「算子子树」摘出来是两个值，
+            # 下游若不知道摘的是哪一段，就无法拿真机 build 侧的同名字段跟它对账（对上了是巧合，
+            # 对不上也说不清是改了字节还是换了范围）。故与 merkle 成对落盘。
+            "snapshot_scope": (facts.get("snapshot_scope")
+                               if isinstance(facts.get("snapshot_scope"), str) else None),
         },
         "changed_files": sorted(
             p for p in (facts.get("changed_files") or []) if isinstance(p, str)),

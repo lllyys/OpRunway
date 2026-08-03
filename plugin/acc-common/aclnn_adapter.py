@@ -477,7 +477,14 @@ def _aclnn_paths(cfg):
         raise ValueError(f"非法 soc: {cfg['soc']!r}")
     if not str(cfg["device"]).isdigit():
         raise ValueError(f"非法 device（须非负整数）: {cfg['device']!r}")
-    checkout = rroot + "/aclnn_src"                             # 容器内 PR head 重取源落点（op-中立）
+    # 容器内取源落点（op-中立）。
+    # ⚠ 目录名**不得含 CANN 源码分类前缀**（`aclnn_` / `op_host` / `op_api` 这类）。
+    # 实测（ops-cv, 2026-08-03）：仓的 CMake 用 `list(FILTER <glob> EXCLUDE REGEX "aclnn_")`
+    # 从 `op_api/*.cpp` 里剔除 L2 接口文件，而 `file(GLOB)` 出来的是**绝对路径**——
+    # 只要 checkout 目录名里出现 `aclnn_`，整目录的 L0 源（如 `op_api/<op>.cpp`）会被一起过滤掉，
+    # 编译照样成功、`.so` 照样装上，直到 dlopen 才炸「undefined symbol: l0op::<Op>(...)」。
+    # 旧名 `aclnn_src` 正好踩中。改名只影响容器内落点，不改任何对外契约。
+    checkout = rroot + "/dut_src"
     RA._check_remote_path("checkout", checkout)
     # install 落地目录（`--vendor_name` 自动补 `_<vendor_suffix>` 后缀，§9.6）：
     # ops-nn 是 `_nn`、ops-cv 是 `_cv` —— 后缀经 cfg 字段驱动，写死会让另一种仓形态报 NOLIB/NO_VENDOR。
@@ -752,8 +759,13 @@ def _source_block(cfg, proxy_prefix, q):
         "import hashlib,os,sys\n"
         f"SKIP={set(skip)!r}\n"
         "root=sys.argv[1]\n"
+        # 第二个实参 = 子树范围（相对 root，`/` 分隔；空 = 整棵树）。**相对路径仍以 root 为基准**——
+        # 这一条必须与 intake 的 `_walk_snapshot(root, scope_rel)` 逐字一致，否则同一份字节
+        # 在两端会算出不同 merkle（intake 摘的是 `<scope>/a/b`，若这里摘 `a/b` 就永远对不上）。
+        "scope=sys.argv[2] if len(sys.argv)>2 else ''\n"
+        "base=os.path.join(root,*scope.split('/')) if scope else root\n"
         "rels=[]\n"
-        "for dp,dns,fns in os.walk(root,followlinks=False):\n"
+        "for dp,dns,fns in os.walk(base,followlinks=False):\n"
         "    dns[:]=sorted(d for d in dns if d not in SKIP "
         "and not os.path.islink(os.path.join(dp,d)))\n"
         "    for n in fns:\n"
@@ -778,11 +790,18 @@ def _source_block(cfg, proxy_prefix, q):
         f'if [ "$GOT_MERKLE" != {cfg["snapshot_sha256"]} ]; then\n'
         f'  echo "OPRUNWAY_ACLNN_SNAPSHOT_MISMATCH got=$GOT_MERKLE want={cfg["snapshot_sha256"]}"; exit 3\n'
         'fi\n'
+        # 再算一次**算子子树**的 merkle（同算法、同 root 基准、只换 scope）。整棵树的 merkle 只能证
+        # 「这台机上这个目录是什么」，而 intake 侧的事实包摘的是 `--target-dir` 那棵子树；没有这一个
+        # 同 scope 的值，CP-C0 与真机 build 之间就**没有任何可比的源身份**（snapshot 通路又没有 head
+        # 可绑），信任门只能空转。两侧 scope 是否对得上由门去判，这里只如实产数。
+        f'GOT_SUBTREE=$(python3 -c "$OPRW_MERKLE_PY" "$SNAP" {q(cfg["op_subdir"])}) '
+        '|| { echo OPRUNWAY_ACLNN_SNAPSHOT_DIGEST_FAIL; exit 3; }\n'
         'rm -rf -- "$CKO" && mkdir -p -- "$CKO" '
         '|| { echo OPRUNWAY_ACLNN_SNAPSHOT_COPY_FAIL; exit 3; }\n'
         'cp -a "$SNAP"/. "$CKO"/ || { echo OPRUNWAY_ACLNN_SNAPSHOT_COPY_FAIL; exit 3; }\n'
         'cd "$CKO" || { echo OPRUNWAY_ACLNN_SNAPSHOT_COPY_FAIL; exit 3; }\n'
         'echo "OPRUNWAY_ACLNN_SNAPSHOT_SHA256=$GOT_MERKLE"\n'
+        'echo "OPRUNWAY_ACLNN_SNAPSHOT_SUBTREE_SHA256=$GOT_SUBTREE"\n'
         # 显式回报 null：下游用它区分「有 PR head 可绑」与「只有快照字节」，绝不留空让人误读。
         'echo "OPRUNWAY_ACLNN_HEAD_SHA=null"'
     )
@@ -1408,8 +1427,19 @@ def _run_aclnn_real(cfg, proj, caseset, work_dir, out_dir):
                 f"[aclnn_py] build 段未回报可核验的快照 merkle（期望 {cfg['snapshot_sha256']}，得 "
                 f"{got.group(1) if got else None}）——不接受来路不明的 .so，fail-closed"
                 f"{_diag_ref(_stash_diag(work_dir, 'build_head', bblob)[1])}:\n{bblob[-_DIAG_TAIL:]}")
+        sub = re.search(
+            r"OPRUNWAY_ACLNN_SNAPSHOT_SUBTREE_SHA256=([0-9a-fA-F]{64})", bblob)
+        if not sub:
+            raise RuntimeError(
+                "[aclnn_py] build 段未回报算子子树 merkle——CP-C0 事实包与真机 build 之间"
+                "将没有任何可比的源身份（snapshot 通路无 head 可绑），fail-closed"
+                f"{_diag_ref(_stash_diag(work_dir, 'build_head', bblob)[1])}:\n{bblob[-_DIAG_TAIL:]}")
         source_id = {"head_sha": None, "provenance_kind": _SOURCE_MODE_SNAPSHOT,
                      "snapshot_sha256": got.group(1).lower(),
+                     # 与 intake `--target-dir` 同 scope、同算法的子树 merkle：信任门就靠它把
+                     # 「CP-A 读的字节」与「真机 build 的字节」对上。
+                     "snapshot_subtree_sha256": sub.group(1).lower(),
+                     "snapshot_subtree_scope": cfg["op_subdir"],
                      "provenance_note": "本轮 DUT 来自本地快照：merkle 只证跑的就是这份字节，"
                                         "**不证**它等于任何上游 commit；不得声称已绑定 PR head。"}
     prov = {**source_id, "pr_ref": cfg["pr_ref"], "base_repo": cfg["base_repo"],

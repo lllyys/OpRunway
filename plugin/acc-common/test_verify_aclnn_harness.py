@@ -63,7 +63,10 @@ def _case(cid, dtype, nullable, size):
 def _fixtures():
     preflight = {
         "status": "READY_WAIT_NPU_TRUST_GATE",
-        "bindings": {"spec_sha256": "unused", "pr_head_sha": "a" * 40},
+        # `provenance_kind` 是 CP-C0 起就必落的绑定项：源身份按取源形态各核各的，
+        # 少了它，真机侧无从判断该比 head SHA 还是比快照 merkle。这里固定 git 取源那一档。
+        "bindings": {"spec_sha256": "unused", "pr_head_sha": "a" * 40,
+                     "provenance_kind": "gitcode_pr"},
         "variants": [_variant(True), _variant(False)],
     }
     caseset = {
@@ -91,6 +94,10 @@ def _execution_fixture():
             "soc": "ascend-test",
             "snake_op": "reduce",
             "device": 0,
+            # 取源形态与快照 merkle 同属公开执行配置：源身份按形态各核各的，缺了它
+            # snapshot 通路会被当成 git 通路去比一个空 head。
+            "source_mode": "git_fetch",
+            "snapshot_sha256": "",
             "build_args": "--pkg --ops=reduce",
             "symbols": ["Reduce"],
             "reuse_build": True,
@@ -108,6 +115,7 @@ def _build_provenance_fixture():
     cfg = execution["config"]
     return {
         "head_sha": cfg["head_sha"],
+        "provenance_kind": cfg["source_mode"],
         "pr_ref": cfg["pr_ref"],
         "base_repo": cfg["base_repo"],
         "op_subdir": cfg["op_subdir"],

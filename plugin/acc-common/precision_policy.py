@@ -268,6 +268,11 @@ def derive_output_dtype(spec, case_input_dtypes):
     out_allowed = out_params[0].get("dtype") or []
     if in_dt in out_allowed:
         return in_dt                              # 同 dtype elementwise（Sign/Neg）
+    if FROM_INPUT_SENTINEL in out_allowed:
+        # `<from_input>` 是**占位符不是 dtype**：多输出通路的 `_resolve_out_dtype` 一直这么解，
+        # legacy 单输出通路以前漏了这一支，于是 `len(uniq)==1` 那条会把哨兵**原样当成 dtype 返回**，
+        # 一路带到 `threshold_for` 才炸（"无 dtype='<from_input>' 阈值"）。两条通路口径必须一致。
+        return in_dt
     uniq = set(out_allowed)
     if len(uniq) == 1:
         return next(iter(uniq))                   # 固定输出（bool：IsClose/Equal）

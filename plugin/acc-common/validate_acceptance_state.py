@@ -1260,7 +1260,15 @@ def _recompute_case(np, precision_policy, d, cid, exp, prec, errs):
     # 先校 sha256——产物字节被替换/篡改而 provenance 未同改 → 不符 → FAILED（堵「改 out.npy 字节」洞）。
     # pv-3：读 bytes 与 sha/load 共用同一份内存（_load_verified），杜绝二次 open 的 TOCTOU。
     golden = _load_verified(np, gt, prov["golden_sha256"], cid, "golden", errs)
-    out = _load_verified(np, ot, prov["out_sha256"], cid, "out", errs)
+    # out 产物有两种落盘形态，**按字节本身判**（`.npy` 有 magic），不按扩展名、更不按算子/通路身份：
+    #   · `.npy`（new_example 等 runner 直接 np.save）；
+    #   · raw 扁平 `.bin`（aclnn_py driver 的 dump）——legacy 单输出通路以前只会 np.load，
+    #     于是 aclnn_py + 单输出的组合在这道门上恒 FAILED（Cannot load file containing pickled data）。
+    # raw 形态的 dtype/shape **只从 caseset.expected 取**（spec 派生的 canonical 判据），
+    # 不取 evidence 自报——判据不得随被校验方的自报值漂移。
+    out = _load_verified_out(
+        np, ot, prov["out_sha256"], cid, "out", errs,
+        dtype_name=exp.get("compare_dtype"), shape=exp.get("out_shape"))
     if golden is None or out is None:
         return
     if not _is_int(prov["numel"]) or int(golden.size) != prov["numel"]:
@@ -1286,6 +1294,58 @@ def _recompute_case(np, precision_policy, d, cid, exp, prec, errs):
             errs.append(f"{cid}: 依 caseset acceptance_policy 重算失败（{type(ex).__name__}: {ex}）")
             return
         _metrics_match(racc, prec.get("acceptance_metrics"), cid, errs, tag="acceptance_metrics")
+
+
+#: `.npy` 的固定魔数（numpy format spec）。用它判落盘形态——比扩展名可靠，也不需要任何
+#: 「这条通路会产哪种文件」的先验知识。
+_NPY_MAGIC = b"\x93NUMPY"
+
+
+def _load_verified_out(np, path, want_sha, cid, kind, errs, dtype_name=None, shape=None):
+    """legacy 单输出 out 产物的形态自适应读回：`.npy` 走 np.load，raw 扁平字节走 frombuffer。
+
+    两条分支的 sha256 绑定与 TOCTOU 纪律完全相同（都是「一次性读入 bytes → 校 sha → 从同一份内存解释」）。
+    raw 分支的 dtype/shape 由调用方从 **caseset.expected**（canonical 判据）传入，并要求
+    `nbytes` 与 `numel(shape) * itemsize` 精确相等——多一字节少一字节都拒。
+    """
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as ex:
+        errs.append(f"{cid}: {kind} 产物读取失败（{type(ex).__name__}: {ex}）")
+        return None
+    if hashlib.sha256(data).hexdigest() != want_sha:
+        errs.append(f"{cid}: {kind} 产物 sha256 与 provenance 不符（产物被替换/篡改）")
+        return None
+    if data[:len(_NPY_MAGIC)] == _NPY_MAGIC:
+        import io
+        try:
+            return np.load(io.BytesIO(data), allow_pickle=False)
+        except Exception as ex:
+            errs.append(f"{cid}: {kind} 产物 np.load 失败（{type(ex).__name__}: {ex}）")
+            return None
+    if not isinstance(dtype_name, str) or not dtype_name:
+        errs.append(f"{cid}: {kind} 产物是 raw 字节，但 caseset.expected 缺 compare_dtype"
+                    "（无法按 canonical 口径读回·证据不完整）")
+        return None
+    if not _mo_shape_ok(shape):
+        errs.append(f"{cid}: {kind} 产物是 raw 字节，但 caseset.expected.out_shape 非法：{shape!r}")
+        return None
+    try:
+        dt = np.dtype(dtype_name)
+    except Exception as ex:
+        errs.append(f"{cid}: {kind} 产物 compare_dtype={dtype_name!r} 非法（{type(ex).__name__}: {ex}）")
+        return None
+    want_bytes = _mo_numel(shape) * dt.itemsize
+    if len(data) != want_bytes:
+        errs.append(f"{cid}: {kind} 产物字节数 {len(data)} ≠ caseset 口径应有的 {want_bytes}"
+                    f"（dtype={dtype_name} shape={shape}·磁盘字节与 canonical 判据不符）")
+        return None
+    try:
+        return np.frombuffer(data, dtype=dt).reshape(shape)
+    except Exception as ex:
+        errs.append(f"{cid}: {kind} 产物按 canonical dtype/shape 解释失败（{type(ex).__name__}: {ex}）")
+        return None
 
 
 def _load_verified_bin(np, path, want_sha, dtype_name, shape, cid, kind, errs):

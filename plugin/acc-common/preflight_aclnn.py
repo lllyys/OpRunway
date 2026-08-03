@@ -29,6 +29,7 @@ import sys
 import content_address
 import gen_cases
 import precision_policy
+import source_provenance
 from aclnn_runtime.aclnn_runner import (
     STAGE2_EXTENDED,
     STAGE2_STANDARD,
@@ -144,6 +145,9 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
         "acceptance_verdict": None,
         "required_next_gate": "NPU_BUILD_AND_HARNESS_TRUST_GATE",
         "bindings": {},
+        # 源 provenance 的机读降级挂账（`complete` 档为空表）。恒存在，
+        # 空表与「工具没记」是两回事。
+        "provenance_degradations": [],
         "signatures": [],
         "variants": [],
         "blocked_reasons": [],
@@ -157,10 +161,6 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
             root, source_rel, _SOURCE_DOMAIN)
         if not isinstance(source, dict):
             raise ValueError("source_facts payload 须为 JSON object")
-        source_completeness = source.get("completeness")
-        if (not isinstance(source_completeness, dict)
-                or source_completeness.get("status") != "complete"):
-            raise ValueError("source_facts completeness 不是 complete")
         source_digest = content_address.content_digest(_SOURCE_DOMAIN, source)
         result["bindings"]["source_facts_digest"] = source_digest
 
@@ -169,7 +169,12 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
         if not isinstance(spec, dict) or not isinstance(pr_facts, dict):
             raise ValueError("spec/pr_facts 须为 JSON object")
         result["bindings"]["spec_sha256"] = _sha(spec)
-        result["bindings"]["pr_head_sha"] = pr_facts.get("head_sha")
+        # 源身份绑定（含 completeness 档位）统一由 source_provenance 一处解释：
+        # `complete` 无条件、`snapshot_only` 需编排层显式授权且逐条硬校，
+        # 放行时把降级事实机读挂账进收据。
+        provenance_bindings, degradations = source_provenance.bind(source, pr_facts)
+        result["bindings"].update(provenance_bindings)
+        result["provenance_degradations"] = degradations
 
         runner_form = spec.get("runner_form", "cpp")
         if runner_form not in ("aclnn_py", "cpp_extension"):
@@ -181,13 +186,6 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
             "CPP_EXTENSION_BUILD_LOAD_AND_HARNESS_TRUST_GATE"
             if runner_form == "cpp_extension"
             else "NPU_BUILD_AND_HARNESS_TRUST_GATE")
-
-        source_pr = source.get("pr")
-        if not isinstance(source_pr, dict):
-            raise ValueError("source_facts.pr 须为 JSON object")
-        source_head = source_pr.get("head_sha")
-        if not source_head or pr_facts.get("head_sha") != source_head:
-            raise ValueError("pr_facts.head_sha 与 source_facts 绑定不一致")
 
         key_files = pr_facts.get("key_files")
         if not isinstance(key_files, dict):
