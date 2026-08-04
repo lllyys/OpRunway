@@ -1,9 +1,11 @@
 # GaussianBlur 验收支持计划（2026-08-03）
 
-> 状态：**v2（Codex 审后精简），待批**，尚未动任何代码。
+> 状态：**v2 已实施**。§0–§7 是实施前的计划原文（保留不改，便于对照）；§8 是真机实测记录。
+> ⚠ 计划里「尚未动代码」的表述指的是**写作当时**；实际改动与结果见 §8 及 `dev-doc/oprunway-changes-brief.md`。
 > 目标：**用最短路径拿到第一个端到端结果**。结果是 PASS、FAIL 还是明确的运行错误都算数；
 > 精度判错、覆盖不全、代码丑一律接受。唯一不可接受的是「改了一大堆、结果还是跑不起来」。
-> 硬约束只保留两条：AGENTS.md 5.1（不得按算子身份特判）与 5.8（不得捏造/谎报标杆）。
+> 本轮**特别强调**两条：AGENTS.md 5.1（不得按算子身份特判）与 5.8（不得捏造/谎报标杆）——
+> 但仓规其余各条（确定性裁决、真机执行、权限与副作用、来源绑定…）**一条都没放松**。
 > §2 的完整 gap 清单保留作台账，**但 §3 只实施其中一小部分**；被砍的见 §4。
 
 ---
@@ -77,7 +79,7 @@ P1 须同步写进 `AGENTS.md`（仓规源），本文件只作引用。
 | `mock` / `catlass*` | 不适用 | 物理上不产 `acceptance.json` / `verdict.json`，不是验收通路 |
 
 **回归风险控制**：stage2 **只支持已观察到的两种结构** —— 标准 4 参走与今天逐字节一致的旧路径，
-「框架三参 + 重复 stage1 实参 + stream」走新路径。不建通用 C ABI 解析器，Median 等既有热路径回归面收敛到零。
+「框架三参 + 重复 stage1 实参 + stream」走新路径。不建通用 C ABI 解析器，以**尽量缩小** Median 等既有调用的回归面；仍须回归测试验证，不预先断言为零。
 
 ---
 
@@ -123,7 +125,7 @@ P1 须同步写进 `AGENTS.md`（仓规源），本文件只作引用。
 - SoC：确定性层无 SoC 白名单，`_SOC_RE=^ascend[0-9a-z_]+$` 放行 `ascend950`，一路透传到 `build.sh --soc=`；op 侧 CMake 已 pin `COMPUTE_UNIT ascend950`。
 - 顶层 `hardware` / `repo` / `runner_form` 三字段可直接写（`hardware` 是自由文本数组）。
 - attr 作为 per-case 取值已完整支持：`params[].io=attr` + `default` + 顶层 `attr_matrix`，`_check_attr_value` 明确放行 `list[int]`（`im2col.spec.json:87-142` 已实证）。
-- `preflight_aclnn` 这道 CP-C0 静态门本身可用（核 completeness、核 head_sha、逐 header 核 `bytes_sha256`、按 `call_variants` 展开 slots 对账、成功只给 `READY_WAIT_NPU_TRUST_GATE` 不给裁决）；它今天挂掉纯粹是被下游 parse/`_classify` 拦住。
+- `preflight_aclnn` 这道 CP-C0 静态门本身可用（核 completeness、核 head_sha、逐 header 核 `bytes_sha256`、按 `call_variants` 展开 slots 对账、成功只给 `READY_WAIT_NPU_TRUST_GATE` 不给裁决）；计划阶段已确认 parse/`_classify` 会拦住它；实测后又发现取源强制 git 与 Python 3.11 语法两个硬阻塞，见 §8.3。
 - fp32 精度链除 golden 来源外无缺口：`threshold_for` 对 fp32 三种标准都有条目、`compute_metrics` 浮点分支齐备、输出形状 == 输入形状故 `golden.py` 不必导出 `out_shape`。
 - borderType 编码 PR 与 OpenCV **完全同值**（0/1/2/4，`PR:gaussian_blur_utils.h:21` + `PR:README.md:67`），golden 可把 `border_type` 直接透传 cv2，**无需映射表**。
 - 1024×1024 fp32 这条 shape 物理上可达（`_LARGE_SHAPES[0]`），性能轮不必新造 shape 阶梯。
@@ -157,7 +159,7 @@ P1 须同步写进 `AGENTS.md`（仓规源），本文件只作引用。
 |---|---|---|
 | **S1** | `plugin/acc-common/aclnn_runtime/aclnn_runner.py` | ① `aclIntArray*` 的建/传/销毁（**只这一种数组类型**）；② stage2 **只支持已观察到的两种结构** —— 标准 4 参、以及「框架三参 + 重复 stage1 实参 + stream」，不建通用 C ABI IR；③ 输出方向从 **stage2 的非 const `dst`** 直接得出（stage2 写的就是 `aclTensor* dst`，白拿）。<br>**不做**：通用参数种类表、`aclFloatArray`/`aclBoolArray`/`const char*`、可复用的 direction_overrides 机制 |
 | **S2** | `plugin/acc-common/gen_cases.py` + `precision_policy.py` | ① `double`/`float64` 映射对；② `list[int] → int_array` slot；③ `opencv_cpu` 进 `RUNNABLE_METHOD_KINDS`（**故意不放行 `gpu_lib`**）。<br>**不做**：perf shape profile、docstring 修复、`spec_schema_template.jsonc` 与 `golden-authoring.md` 的全量文档同步、`test_precision_policy.py` 的组合计数矩阵同步 |
-| **S3** | `plugin/acc-common/aclnn_adapter.py` + `fetch_source.py` | ① vendor 后缀改成**必填读 `OPRUNWAY_ACLNN_VENDOR_SUFFIX`**（不做 basename 正则推导、不折进缓存前缀）；② `--experimental` 仅对 `experimental/` 前缀的 op 加；③ 默认 `--no_force` 删掉；④ `fetch_source` 加一个 `--target-dir` **覆盖参数**（约 3 行，零回归面）—— 已核实 `target_dir` 今天只由 `_guess_op` 自动猜、**没有任何 CLI 覆盖口**，所以「显式指定绕过探测器」这条路今天并不存在；加覆盖参数比改正则安全得多。<br>**不做**：`_guess_op` 正则改写（会动到既有 median / im2col 的多层目录语义） |
+| **S3** | `plugin/acc-common/aclnn_adapter.py` + `fetch_source.py` | ① vendor 后缀改成**必填读 `OPRUNWAY_ACLNN_VENDOR_SUFFIX`**（不做 basename 正则推导、不折进缓存前缀）；② `--experimental` 仅对 `experimental/` 前缀的 op 加；③ 默认 `--no_force` 删掉；④ `fetch_source` 加一个 `--target-dir` **覆盖参数**（约 3 行，回归面极小）—— 已核实 `target_dir` 今天只由 `_guess_op` 自动猜、**没有任何 CLI 覆盖口**，所以「显式指定绕过探测器」这条路今天并不存在；加覆盖参数比改正则安全得多。<br>**不做**：`_guess_op` 正则改写（会动到既有 median / im2col 的多层目录语义） |
 
 ### Step 4 —— 一个 golden + 一个最小 spec
 
@@ -196,7 +198,7 @@ Step 0  ────────────────────────
 | 项 | 砍掉的理由 |
 |---|---|
 | **`perf.mode="measure_only"`（原 A6）** | 它不是一个性能开关，而是**新增一种跨模块状态语义**，横跨 `perf_compare` / `run_workflow` / `validate_acceptance_state` 三个文件。很可能出现三方对 `measured` 理解不一致，最后**精度已经能跑却被性能状态机卡死**。本轮改为 spec 整块省略 `perf`。<br>⚠ **遗留张力**：`AGENTS.md` 5.10（P1）已经写成仓规，但本轮不实现它 —— 任何声明了 `perf` 的 spec 仍走老的比值门。这条规则目前**只有文字、没有代码**，第二轮补 |
-| **`_guess_op` 正则改写（原 A4）** | `(g2, g1+g2)` 这种捕获组拼接容易改变既有多层目录语义，动到 median / im2col。已核实 `target_dir` **今天没有任何 CLI 覆盖口**，所以改为加一个 `--target-dir` 覆盖参数（约 3 行、零回归面），探测器不动 |
+| **`_guess_op` 正则改写（原 A4）** | `(g2, g1+g2)` 这种捕获组拼接容易改变既有多层目录语义，动到 median / im2col。已核实 `target_dir` **今天没有任何 CLI 覆盖口**，所以改为加一个 `--target-dir` 覆盖参数（约 3 行、回归面极小），探测器不动 |
 | **`prober.py` 诚实性修复（原 A8）** | 与当前运行链无关，不阻塞任何调用。值得以后修，今天不花这个时间 |
 | **`gen_cases.py:18` docstring 修复（原 D5 顺手项）** | 文档错误不阻塞任何调用 |
 | **`spec_schema_template.jsonc` / `golden-authoring.md` / `test_precision_policy.py` 全量同步（原 A3 的一半）** | `precision_policy` 有组合矩阵、授权等级、schema 和测试计数，全面同步很容易扩散。首跑只改实际运行门所需的枚举集合 |
@@ -245,7 +247,8 @@ Step 0  ────────────────────────
 `decisions[].action="supplied"` 解除 —— `performance_metric_scope`（全文无 kernel-only vs 端到端、无 warmup/repeat）、
 `dependencies_and_prerequisites`（A100 + 同版本 OpenCV「请开发者自行准备」）、`deliverable_and_dut` / `integration_form`（即 C1）、
 `acceptance_completion_criteria`（「性能验收取最优实现」不可机械判定）。这是**输入缺口不是工具缺陷**。
-其中 `performance_metric_scope` 与 `acceptance_completion_criteria` 两条按 P1 已自动消解。
+⚠ 其中 `performance_metric_scope` 与 `acceptance_completion_criteria` 两条，用户口径（P1）**只改变了取证方式，
+并不自动放行确定性输入门**——CP-B0 仍会判它们 missing/ambiguous，仍须由人以 `supplied` 决策解除。
 
 ---
 
@@ -314,7 +317,8 @@ Step 0  ────────────────────────
 
 | # | 问题 | 处理 |
 |---|---|---|
-| **S4** | `_aclnn_cfg` 对取源是**强制 git**：`PR_REF` 必须 40 位 SHA 或 `refs/merge-requests/<N>/head`，`BASE_REPO` 必须 http(s) git 远端，install 脚本里是 `git fetch --depth 1` + `rev-parse` 比对。而本轮 DUT 是无 `.git` 的快照，且**实测确认 `cann/ops-cv` 上游不存在该 PR**（扫 600 个 MR 无命中；任务书自己写明代码在**私仓**）。这不是"链接还没拿到"，是客观不存在 | 新增 `OPRUNWAY_ACLNN_SOURCE_MODE ∈ {git_fetch, local_snapshot}`，缺省 `git_fetch` 且逐字节不变。`local_snapshot` 跳过 fetch、改校确定性 merkle，`head_sha` 一路透传为 **null**——合成 40 位 hex 是 5.8 禁止的造假 |
+| **S4** | `_aclnn_cfg` 对取源是**强制 git**：`PR_REF` 必须 40 位 SHA 或 `refs/merge-requests/<N>/head`，`BASE_REPO` 必须 http(s) git 远端，install 脚本里是 `git fetch --depth 1` + `rev-parse` 比对。而本轮 DUT 是无 `.git` 的快照，且**在当前可访问的 `cann/ops-cv` 上游扫了 600 个 merge request 未检出对应 PR**；任务书写明代码在**私仓**。
+   所以只能说：**公开范围内取不到可核验的 PR URL 与 head SHA**——不能据此断言该 PR 客观不存在（私仓恰恰意味着可能存在但不可见） | 新增 `OPRUNWAY_ACLNN_SOURCE_MODE ∈ {git_fetch, local_snapshot}`，缺省 `git_fetch` 且逐字节不变。`local_snapshot` 跳过 fetch、改校确定性 merkle，`head_sha` 一路透传为 **null**——合成 40 位 hex 是 5.8 禁止的造假 |
 | **Py3.11** | `aclnn_driver.py:266` 的 f-string 表达式跨越了隐式拼接的字面量，那是 **PEP 701（Python 3.12+）语法**。容器是 3.11.15，该文件**在未改动的 HEAD 上就无法 import**。此前没暴露，是因为既往真机工作都在 Python 3.12.13 的 A2/A3 上 | 改成先算普通变量再单点插值。**工具链有一条未声明的 Python ≥3.12 依赖**，需要在 CI/门里补一道目标版本语法检查 |
 
 **一条流程教训**：本地 Python 3.14 上 `py_compile` 通过**不能代表目标环境通过**。
@@ -329,7 +333,7 @@ Step 0  ────────────────────────
 真机实测两条代码路径对同一目录得同一摘要
 `203d4b77f3016f0513832cb87946dcddb48c43658ee6b2d48a247a92af25d049`（2565 个文件）。
 
-### 8.5 单测：零回归
+### 8.5 单测：相关子集未新增失败
 
 在同一容器内跑六个相关测试文件：
 
@@ -339,7 +343,8 @@ Step 0  ────────────────────────
 | 本批改动后 | **599** | **9** |
 
 失败的是同一批 9 个，全部与容器内 root 身份下的 setenv 软链/权限守卫等环境因素有关，
-在未改动的 HEAD 上同样失败 → **本批改动零回归**，净增 54 项通过。
+在未改动的 HEAD 上同样失败 → **在这六个测试文件与该容器环境下，本批改动未新增失败**，净增 54 项通过。
+（只覆盖已执行的子集，不据此断言全仓零回归。）
 
 > 期间发现两处 agent 写的测试与其自身实现打架（测试写了但按指令未执行）：
 > `test_build_sh_six_flags_at_repo_root` 仍断言已被移除的 `--no_force`；

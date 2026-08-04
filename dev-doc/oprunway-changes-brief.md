@@ -42,7 +42,7 @@
      （多输出通路一直解得对），到 `threshold_for` 才炸；
   ⑤ 验收门复核 evidence↔产物时只会 `np.load`，而 aclnn_py 落的是 raw `.bin` → legacy 单输出 + aclnn_py
      的组合在这道门上**恒 FAILED**。改为按 `.npy` 魔数判形态，raw 分支只认 caseset 的 canonical dtype/shape。
-  单测：1727 passed / 10 failed，与未改动 HEAD 的 10 failed 同批 → 零回归。
+  单测：1727 passed / 10 failed，与未改动 HEAD 的失败集合相同 → 已执行的测试未发现新增失败。
 - CP-B0 任务书门首次对 GaussianBlur 实跑，结论 `NEEDS_USER`：阻断 3 项
   （`golden_reference` 任务书三处自相矛盾 CPU/GPU、`performance_baseline` 二选一且无准确 API、
   `performance_metric_scope` 无 kernel-only/端到端与统计口径）、待确认 1 项（`special_semantics` 未规定 NaN/Inf）。
@@ -63,7 +63,7 @@
   新增 `local_snapshot` 取源形态（上游确无该 PR，`head_sha` 落 null，不合成 hex）；
   vendor 后缀与 build flag 改为仓形态字段驱动。**Step 0 真机冒烟全通**——DUT 编得过、装进
   `vendors/*_cv`、两个 aclnn 符号都在、example 真机跑出数值。单测 599 passed / 9 failed，
-  与未改动 HEAD 的 9 failed 完全同批 → 零回归。
+  与未改动 HEAD 的失败集合完全相同 → **已执行的测试未发现新增失败**（非「全仓零回归」）。
 - 踩出一条**未声明的 Python ≥3.12 依赖**：`aclnn_driver.py:266` 用了 PEP 701 语法，
   950 容器的 Python 3.11.15 直接 import 不了，而该缺陷**在未改动的 HEAD 上就存在**
   （此前只在 Python 3.12.13 的 A2/A3 上跑过所以没暴露）。教训：本地 py_compile 过了不算数，

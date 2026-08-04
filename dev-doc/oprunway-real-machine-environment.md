@@ -86,8 +86,9 @@ set +a
 
 ### 3.3 网络
 
-本机**无直连外网**，必须经反向隧道（本地代理端口 → 远端回环端口，见
-仓根 `CLAUDE.md` 的 `autossh` 写法）。容器以 `--network host` 启动，故容器内直接用
+本机**无直连外网**，必须经反向隧道（本地代理端口 → 远端回环端口）。
+⚠ 仓根 `CLAUDE.md` 只有 `@AGENTS.md` 路由、**不含** `autossh` 写法；实际参数从
+`.oprunway/real-machine.env` 读取，隧道命令模板见工作区上层的 `CLAUDE.md`。容器以 `--network host` 启动，故容器内直接用
 远端回环地址即可，不必走 `docker0` 网关。
 
 隧道会静默失效：端口仍在监听、但转发不到任何地方，表现为 `curl` 超时返回 `000`。
@@ -104,8 +105,8 @@ set +a
 3. **较新的 cv2 4.x 轮子声明 `numpy>=2`**（实测 4.14.0.94 即是）。因此不能先装 cv2 再降 numpy，
    要把两者放进同一条 `pip install` 让解析器回溯——在 `numpy==1.26.4` 下会落到 **cv2 4.11.0**。
 
-实测结论：cv2 **4.11.0 与 4.14.0 对 fp32 GaussianBlur 的输出逐位相同**，border 常量也一致，
-所以 4.x 内部的小版本差异对本类算子的真值不构成风险。
+实测结论：在**本轮已测的** fp32 GaussianBlur 用例与 border 配置上，cv2 **4.11.0 与 4.14.0 输出逐位相同**。
+该结果只覆盖已测矩阵，**不能据此排除**其它 4.x 版本、dtype、shape、kernel、sigma 或 border 配置上的差异。
 
 已核实的 cv2 行为坑：**`cv2.GaussianBlur` 对 `[H,W,1]` 单通道输入会把最后一维 squeeze 掉**
 （`(256,128,1) -> (256,128)`），而 NPU 侧输出与输入严格同 shape。golden 必须显式补回该维，
@@ -113,7 +114,8 @@ set +a
 
 另有一条 950 侧的 dtype 事实：`torch_npu` 会给出
 `Device do not support double dtype now, dtype cast replace with float` 警告——
-**float64 在该硬件上被静默降为 float32**。凡是用 torch 侧构造 fp64 中间量的做法都要挂账。
+**float64 在该硬件上被降为 float32**（`torch_npu` 会打印上述警告，不是无声发生；
+但计算结果确实按 fp32 走，凡用 torch 侧构造 fp64 中间量的做法都要挂账）。凡是用 torch 侧构造 fp64 中间量的做法都要挂账。
 
 ---
 

@@ -20,6 +20,8 @@
 - Task 1：从任务书与 PR 生成覆盖功能、精度、性能的用例集；
 - Task 2：同一份用例在 NPU 上生成精度证据和性能数据；
 - Task 3：消费外部 GPU 数据，按同一 case 身份生成跨设备性能报告。
+  ⚠ **Task 3 是按需能力，不是每轮必做**：按 5.10，任务书即使写了「与 GPU 比对」也默认只做
+  NPU msprof 实测；**只有用户明确要求做 GPU 对比时**才走 Task 3。
 
 任务书是验收权威；PR 和 op_def 是被测事实与能力证据，不能反过来覆盖任务书。
 
@@ -207,7 +209,9 @@ push 前，对自上次 push 以来将要发布的全部改动统一做一轮审
   不必真的去对比 GPU、不必获取 GPU 标杆数据。
 
 理由：GPU 标杆（A100 / OpenCV CUDA / ATK 双标杆）要么拿不到环境，要么获取成本远高于它带来的验收价值；
-卡在等 GPU 数据上会把整条流水线阻塞住。NPU 侧 msprof kernel-only 数据本身就是可信、可复现的性能证据。
+卡在等 GPU 数据上会把整条流水线阻塞住。而 NPU 侧 msprof kernel-only 数据在**真机实跑、
+与 case 及本轮 provenance 绑定、采样与有效性检查都做过**的前提下，是可信、可复现的性能证据
+（这三个前提缺一条就不成立——「kernel-only」只说明计时范围，本身不构成可信性）。
 
 落地约束：
 
@@ -215,7 +219,10 @@ push 前，对自上次 push 以来将要发布的全部改动统一做一轮审
 - 性能维产出 = msprof 实测 kernel 耗时 + 分档说明，不是比值裁决；
 - 报告须如实写“按用户口径只做 NPU msprof 实测，未做 GPU 标杆对比”，
   **不得把它包装成“已达标 0.45×”**——没测的比值不能编（5.8）；
-- msprof 数据仍须真机真跑，不接受推算（5.3）。
+- msprof 数据仍须真机真跑，不接受推算（5.3）；
+- **任务书的 GPU 比值条款按「未验收」记账**，不是「已通过」也不是「不适用」：
+  该条进 `task_pr_gaps`，最终裁决**不得**因为 NPU 侧有实测数就宣称整体通过。
+  任务书仍是验收权威（5.8）——本节改的是「怎么取证」，不是「条款可以不算数」。
 
 ---
 
@@ -299,7 +306,8 @@ OpRunway/
 - `aclnn_py` perf collector 已真机产出同口径 kernel-only 数据，但“通路有数据”不等于“任务书条款通过”；
 - mock/catlass_mock 只产带 `evidence_grade="development"` 和 NON-ACCEPTANCE 标记的 `dev_run_summary.json` / `dev_precision_check.json`，不产 `acceptance.json` / `verdict.json`；
 - ops-<族>、标准 aclnn 两段式、用户态 opp 安装型是当前主要闭环；域外形态 fail-closed；
-- 外部 GPU consumer 已接入，真实 GPU 数据仍待提供，缺失时走 `BLOCKED_WAIT_GPU_BENCHMARK`。
+- 外部 GPU consumer 已接入，真实 GPU 数据仍待提供；**仅当用户明确要求做 GPU 对比**时，
+  缺数据才走 `BLOCKED_WAIT_GPU_BENCHMARK`——默认口径见 5.10，不因缺 GPU 数据挂起。
 
 ---
 

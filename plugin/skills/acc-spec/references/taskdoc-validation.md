@@ -111,8 +111,9 @@ index 输出是不是也跟着变，两种读法会产出不同 golden」才有�
 「PR 少交付了一整层」全流程无人发现，最后只能靠人手写进 `task_pr_gaps`，而人手写就会写错。
 
 **清单与标记的一致性也是机械校的**：某条交付件的引文里只出现「必选」类标记，
-却把 `requirement` 填成 `optional`（或反过来），当场 BLOCKED。一句话里必选可选都有
-（「A 必选、B 可选」）时不设约束，那种句子本来就得靠判断。
+却把 `requirement` 填成 `optional`（或反过来），当场 BLOCKED。
+一句话同时含必选与可选标记（如「A 必选、B 可选」）时，**必须拆成能分别支撑 A、B 的
+单一语义引文**——含 required 标记的引文不得支撑 `optional` 条目，否则同样 BLOCKED。
 
 #### 不是交付件的标记：显式豁免，不许静默跳过
 
@@ -125,8 +126,11 @@ index 输出是不是也跟着变，两种读法会产出不同 golden」才有�
  "rationale": "这处「可选」修饰的是调用流程里的一个中间步骤，不是交付件"}
 ```
 
-豁免会原样进收据摆给编排层与人复核。**它是留痕的判断，不是免检通道**——
-把每一处标记都豁免掉脚本挡不住，但会在收据里一条不落地摆出来。
+豁免会原样进收据摆给编排层与人复核。**它是留痕的判断，不是免检通道。**
+
+⚠ **含 required 类标记的豁免只留痕、不计入覆盖**：该处标记仍算 uncovered，
+收据记 `requires_user_confirmation=true` 并落到 `NEEDS_USER`，等用户显式确认。
+只有不含 required 标记的豁免才计入扫描覆盖——所以「把必选件全豁免掉」这条路走不通。
 
 ⚠ 词表按「交付件定性」收窄，刻意**不**收 `必须` / `须` 这类泛义务词（任务书里它们大量
 修饰行为要求，收进来只会把每份任务书逼成人工豁免堆）。任务书若用词表外的写法写
@@ -256,8 +260,10 @@ dtype 允许两种明确形态：**逐字枚举**，或**给出可绑定的集�
 
 - `items` 必须**恰好 18 项**、id 与 `acc-common/taskdoc_validation_contract.json` 逐项对齐，
   不多不少不重复——脚本按契约核对，缺一个就是 BLOCKED。
-- `deliverables` 必须**显式给出**（任务书通篇没有任何交付定性标记时才允许是空数组）；
-  `deliverable_scan_exemptions` 可缺省为空。
+- `deliverables` 必须**显式给出**，可以是空数组——但空清单能不能过取决于扫描覆盖：
+  受控词表**零命中**时必须另附绑定本轮任务书字节、`source="user"` 的
+  `deliverable_inventory_exhaustive`，否则清单判不完整、落 `NEEDS_USER`。
+  「一处没扫到」不等于「已穷尽」。`deliverable_scan_exemptions` 可缺省为空。
 - `source_facts_digest` 取 CP-A 已落盘的 `source_facts.json` envelope 的 `digest` 字段。
 - `decisions` **一律留空数组**：那是 primary 拿到阻断清单、问过用户之后才追加的，
   subagent 不得自行写入，也不得替用户判"这项其实不重要"。
