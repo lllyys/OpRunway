@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://oprunway/contract_ir/v1",
   "title": "OpRunway U7 通用算子接口契约 IR（版本化 Schema v1）",
-  "description": "op 无关的接口描述。探测器（只读 header×op_def×example×glue×doc×infershape）产出符合本 Schema 的实例；唯一 codegen 模板机械消费它 emit 每算子的类型化薄 binding。契约不含任何按算子名的分支——见 doc/oprunway-u7-generalization-design.md §3.5/§3.6。缺源/冲突/域外一律经每字段 provenance.state 走 fail-closed，绝不静默猜。",
+  "description": "op 无关的接口描述。探测器（只读 header×op_def×example×glue×doc×infershape）产出符合本 Schema 的实例；唯一 codegen 模板机械消费它 emit 每算子的类型化薄 binding。契约不含任何按算子名的分支——见 dev-doc/oprunway-u7-generalization-design.md §3.5/§3.6。缺源/冲突/域外一律经每字段 provenance.state 走 fail-closed，绝不静默猜。",
   "type": "object",
   "additionalProperties": false,
   "required": ["ir_version", "op", "aclnn_entry", "applicability", "abi_signature", "parameters", "outputs"],

@@ -131,7 +131,7 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 - build、pytest、用例生成、golden 生成、验收、profiler 全在远程 NPU 容器/目标环境执行；
 - 本地不建 venv、不跑 pytest、不 import torch/numpy 做验收 compute；
-- 真机环境统一入口：`doc/oprunway-real-machine-environment.md`；
+- 真机环境统一入口：`dev-doc/oprunway-real-machine-environment.md`；
 - 实际连接元数据：本地忽略文件 `.oprunway/real-machine.env`；
 - 每次新 session 做任何远端 clone/build/跑测/清理前，必须读取
   `.oprunway/real-machine.env` 的 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`。其中每个根及其全部子目录均为
@@ -158,10 +158,12 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 ### 5.6 文档落点与改动简表
 
-- 项目 Markdown、图、SVG 等文档统一放仓根 `doc/`；
+- 项目 Markdown、图、SVG 等**开发过程产物**统一放仓根 `dev-doc/`；
+  这里放的是设计稿、TODO、handoff、实测记录、环境说明——是**开发者写给自己和后来者看的**，
+  不是面向使用者的产品文档（那类若将来要有，另立目录，别混进来）；
 - 不写到工作区上层的 `markdown/`；
-- 每次落地后在 `doc/oprunway-changes-brief.md` 顶部追加一两句倒序摘要；
-- 当前交接以 `doc/oprunway-session-handoff-2026-07-26.md` 为准，旧 handoff 只作历史材料。
+- 每次落地后在 `dev-doc/oprunway-changes-brief.md` 顶部追加一两句倒序摘要；
+- 当前交接以 `dev-doc/oprunway-session-handoff-2026-07-26.md` 为准，旧 handoff 只作历史材料。
 
 ### 5.7 push 前审修门
 
@@ -226,7 +228,7 @@ OpRunway/
 ├── .oprunway/
 │   ├── real-machine.env.example      # tracked 脱敏模板
 │   └── real-machine.env              # ignored 本地真实值
-├── doc/                              # 设计、TODO、handoff、环境说明
+├── dev-doc/                          # 开发过程产物：设计、TODO、handoff、实测记录、环境说明
 ├── plugin/
 │   ├── acc-common/                   # Layer 0/1 契约与确定性脚本
 │   ├── agents/                       # Layer 2 agent 薄壳
@@ -274,11 +276,11 @@ OpRunway/
 | 目标 | 入口 |
 |---|---|
 | CP-A..E 状态机、硬门、subagent 契约 | `plugin/AGENTS.md` + `plugin/skills/acceptance-workflow/SKILL.md` |
-| 设计与数据契约 | `doc/oprunway-design.md` |
-| 最新交接 | `doc/oprunway-session-handoff-2026-07-26.md` |
-| 当前 TODO | `doc/oprunway-todo.md` |
-| 改动流水 | `doc/oprunway-changes-brief.md` |
-| 真机环境 | `doc/oprunway-real-machine-environment.md` + `.oprunway/real-machine.env` |
+| 设计与数据契约 | `dev-doc/oprunway-design.md` |
+| 最新交接 | `dev-doc/oprunway-session-handoff-2026-07-26.md` |
+| 当前 TODO | `dev-doc/oprunway-todo.md` |
+| 改动流水 | `dev-doc/oprunway-changes-brief.md` |
+| 真机环境 | `dev-doc/oprunway-real-machine-environment.md` + `.oprunway/real-machine.env` |
 | 已定决策 | `canon/decisions/`，先看 status/trust tier |
 | 人读蓝图/历史案例 | `plugin/workflows/`，冲突时以 acceptance-workflow skill 为准 |
 

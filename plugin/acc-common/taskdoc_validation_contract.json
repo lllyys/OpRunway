@@ -1,7 +1,7 @@
 {
   "schema": "oprunway.taskdoc_validation_contract",
   "schema_version": 1,
-  "source_doc": "doc/oprunway-task-document-validation-standard.md",
+  "source_doc": "dev-doc/oprunway-task-document-validation-standard.md",
   "scope": "taskdoc-input-only",
   "acceptance_verdict": null,
   "min_quote_chars": 8,

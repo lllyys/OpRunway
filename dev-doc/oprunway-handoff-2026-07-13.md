@@ -2,7 +2,7 @@
 
 > 起点：干净用户测 IsClose 插件 + 用户 11 问深挖，挖出多条设计/正确性问题。
 > 本文是给**新 session** 的接力棒——对话上下文已丢，只有本文 + 已 commit + 设计 md 留得住。
-> **先读**：`doc/oprunway-usertest-findings-design.md`（所有问题的定稿），再读本文的「在飞/待决/未 commit」。
+> **先读**：`dev-doc/oprunway-usertest-findings-design.md`（所有问题的定稿），再读本文的「在飞/待决/未 commit」。
 
 ---
 
@@ -12,7 +12,7 @@
 - **PR #6 OPEN**（https://github.com/lllyys/OpRunway/pull/6）：含 marketplace `57eedbb` + Q2/Q3 `0c182ea` 两 commit。**用户自己 merge**，不要替他合。merge 后同步 GitCode 镜像（`git push gitcode main`）。
 - **main 本地 = `57eedbb`**（marketplace，已 commit）；**origin/main = `4cef15f`**（marketplace 未推，随 PR #6 进）。
 - **未 commit（跟着分支走、没丢）**：
-  - `doc/oprunway-usertest-findings-design.md`（★ 所有问题定稿，未 commit）
+  - `dev-doc/oprunway-usertest-findings-design.md`（★ 所有问题定稿，未 commit）
   - `canon/logbook/2026/07/0513d745-*.md`（本会话 minute，多 checkpoint，含「绝不信 PR」capture）
   - 3 个 stub `26ae30a1 / 30c62b6e / ee2d28fe`（**用户明示不带**，永远别 commit）
 - **规则**：commit **绝不带** `Co-Authored-By: Claude` / `Claude-Session:` trailer（用户「never」，已入 CLAUDE.md + memory）。main 是保护分支→走 PR。

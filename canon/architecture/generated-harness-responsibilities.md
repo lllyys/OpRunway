@@ -15,6 +15,6 @@ reviewed: 2026-07-02
 4. **性能测量栈** — 两侧**同 `timing_scope`** 采集；基线参考实现按框架真实签名适配（如 `npu_grouped_matmul` 需 (G·M,K)+group_list、bias 独立 add、layer_norm normalized_shape=[K]/无 γβ）；warmup/iters/median 自实现；**比值判定归 validator**（[[ADR 0007 — Verdicts come from a deterministic validator]]，[[ADR 0006 — Compare performance at a matched timing scope]]）。**保证**：1.2× 可算、公平、可复现。
    - 端到端可行：AscendOpTest 内建 `msprof --application`（含 H2D/D2H）能采 e2e，只是自带 `get_prof.py` 只解析 kernel-only 的 OpBasicInfo.csv → device_e2e 由我们驱动 --application + 自解析 op_summary + 裁到算子窗口（避开 init/文件IO）。
 
-[[catlass to aclnn bridge for AscendOpTest]] 是本抽象的**具体实例**（catlass × AscendOpTest）。规则种子见 `doc/oprunway-task1-cases-critique.md`。
+[[catlass to aclnn bridge for AscendOpTest]] 是本抽象的**具体实例**（catlass × AscendOpTest）。规则种子见 `dev-doc/oprunway-task1-cases-critique.md`。
 
 **Sources.** [[session f0c36755-189d-4c2c-b321-c0d2ec5c4b1b · 2026-06-29]]

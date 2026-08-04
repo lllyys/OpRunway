@@ -19,6 +19,6 @@ acc-casegen 的**核心知识库**——让「生成用例」跨算子通用。�
 
 **③ 元规则（所有 case 共用）**：golden = 各原语 numpy 参考按公式拼、**默认 fp32 中间→降输出 dtype**（对齐 Ascend Cube fp32 累加），**但按算子实际累加 / 任务书参考精度调整**——敏感归约（方差/大 K/抵消）可能需 fp64、累加非 fp32 的算子按其实际精度；**动态/分组语义先从 host 接口锁定**（错则所有精度用例废）；每条 case 标注「走 [[AscendOpTest precision thresholds]] 的哪个 compare 分支 / 数据来源(框架 or 预置) / 任务书条款 / PR 改动」。
 
-是 [[OpRunway component breakdown]] 中 `acc-casegen` 的核心，产出吃 [[Acceptance contract and evidence chain]] 的契约。规则种子来自首个夹具的对抗评审（见 `doc/oprunway-task1-cases-critique.md`）。
+是 [[OpRunway component breakdown]] 中 `acc-casegen` 的核心，产出吃 [[Acceptance contract and evidence chain]] 的契约。规则种子来自首个夹具的对抗评审（见 `dev-doc/oprunway-task1-cases-critique.md`）。
 
 **Sources.** [[session f0c36755-189d-4c2c-b321-c0d2ec5c4b1b · 2026-06-29]]，[[session d31ea446-dec3-479f-a7b3-d6c1dec4f611 · 2026-07-02]]（golden「fp32 中间」软化为默认 + 按算子/任务书调整）

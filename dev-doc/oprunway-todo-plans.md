@@ -41,7 +41,7 @@
 
 【#3 medium · consistency —— 采纳】C1/C2 既定稿又留悬确属内部不自洽。已锁 C1（canonical 页 line18 硬性要求 SKILL.md + todo 把缺 SKILL.md 定为缺陷），把 open_decisions 里 C1/C2 岔口降为『已决记录 + C2 已否决理由』，files/steps/acceptance 全线只走 C1。
 
-【#4 medium · completeness —— 采纳】changes-brief 是新生成 md、规则#5 要求过审。已把 `doc/oprunway-changes-brief.md` 纳入同一次 codex 散文门（门 1 从四份→五份），并调 step 顺序：先写 brief（step6）再统一过审（step7）。
+【#4 medium · completeness —— 采纳】changes-brief 是新生成 md、规则#5 要求过审。已把 `dev-doc/oprunway-changes-brief.md` 纳入同一次 codex 散文门（门 1 从四份→五份），并调 step 顺序：先写 brief（step6）再统一过审（step7）。
 
 【#5 medium · completeness —— 采纳】grep 抓不到 body 级语义漂移。acceptance 已加：(a) 新增硬门节与 AGENTS.md:21-26 的文本 diff/语义逐点核对（非仅 grep）+ 显式核『无 run_workflow 阶段间阻断过度承诺』；(b) 全仓 `rg '验证-才-信'` stale-phrase 扫作验收项。
 
@@ -99,7 +99,7 @@
 | `plugin/skills/acc-runner/SKILL.md` | edit | (b) 改 line29「验证-才-信是硬门，不可跳过」→「验证-才-信是必守纪律（当前非代码硬门、sidecar 待补），不可跳过」，与 line10/24 及 runner-skeleton §4 一致；不引入 validate_acceptance_state.py（那是另一个门）。 |
 | `plugin/skills/acc-casegen/SKILL.md` | create | (c) frontmatter(name: acc-casegen + description 含「参考草案·未接入 live 流·勿自动触发」框定) + 展开算法 5 步 + 诚实边界（P2 规划原子 skill·未接入 live·**不落盘·不替代 gen_cases.py**·未列入 AGENTS.md skills）+ progressive disclosure 指向 `references/rule-catalog.md`；对齐 canonical 页。 |
 | `plugin/skills/acc-casegen/references/rule-catalog.md` | edit | (c) 修 line5 悬挂引用为可解析相对链接 `[../SKILL.md](../SKILL.md)`（现 SKILL.md 已建、链接可解析）；line3 种子/critique 链接不在本 todo 范围（无新悬挂则不动）。 |
-| `doc/oprunway-changes-brief.md` | edit | 规则#4：2026-07-09 节倒序追加一两句大白话，记四处漂移已修 + 以哪份为准。**本文件也纳入 codex 散文门**（codex #4）。 |
+| `dev-doc/oprunway-changes-brief.md` | edit | 规则#4：2026-07-09 节倒序追加一两句大白话，记四处漂移已修 + 以哪份为准。**本文件也纳入 codex 散文门**（codex #4）。 |
 
 ### steps
 1. **确认 grounding（已完成）**：已逐份 Read 六份 grounding + rule-catalog.md + runner-skeleton §4 + check_manifest_sync.py + run_workflow.py + plugin.json 位置，按 trust tier 定性；四处漂移事实与「以哪份为准」已锁定。**已实测确认**：run_workflow.py 是「三段全跑后统一校门」批量驱动（无阶段间阻断）；check_manifest_sync 只校验「声明→存在」；全仓仅 agent:30 与 acc-runner:29 两处 stale「验证-才-信硬门」。
@@ -107,14 +107,14 @@
 3. **改 (b) 两处 stale 措辞**：`plugin/agents/op-acceptance.md:30` 的「+ 验证-才-信硬门」与 `plugin/skills/acc-runner/SKILL.md:29` 的「验证-才-信是硬门」，均改「验证-才-信是必守纪律（当前非代码硬门、sidecar 待补），不可跳过」。保持二文件其余不动。**不误采 acceptance 门（validate_acceptance_state.py）去反说它已是硬门**。
 4. **起草 (c) `plugin/skills/acc-casegen/SKILL.md`（create）**：frontmatter `name: acc-casegen` + `description`（『把任务书算子拆原语→按 rule-catalog 拉必测 case 模式→实例化去重→出覆盖矩阵；**参考草案，尚未接入 live 流、勿自动触发**，仅在需理解/扩展用例展开规则时阅读』）。正文含：输入(spec/任务书公式)/输出（**说明性覆盖矩阵推理，不落盘 caseset.json**）、展开算法 5 步（拆原语→兜底 guard→查库叠三轴→实例化→去重+元规则+覆盖报告，摘自 rule-catalog §怎么用）、**诚实边界**一节（『本 skill 是落地设计 P2 规划的原子 skill；live 编排的用例生成走确定性 `gen_cases.py`——**本 skill 不落盘、不调用、不替代 gen_cases.py**；展开逻辑尚未接入 op-acceptance agent 流；故未列入 AGENTS.md skills 已接入清单』）、progressive disclosure『详规见 `references/rule-catalog.md`』、约束（全程中文/阈值口径不在此在 policy/no silent 漏项）。对齐 canonical 页对「展开逻辑=SKILL.md、目录=rule-catalog.md」的划分。
 5. **修 (c) rule-catalog.md 悬挂引用**：line5『…的展开逻辑在 acc-casegen 的 SKILL.md』→『…的展开逻辑见 [`../SKILL.md`](../SKILL.md)』（相对链接目标 = `skills/acc-casegen/SKILL.md`，已建、可解析）。核对 SKILL.md ↔ rule-catalog 互指一致（SKILL.md 摘算法要点、rule-catalog 存目录明细）。line3 不在范围、无新悬挂则不动。
-6. **写 (记) changes-brief（先写，再统一过审 — codex #4）**：在 `doc/oprunway-changes-brief.md` 2026-07-09 节顶部倒序加一条，记四处漂移已修 + 以哪份为准。**先写此条，好让它一并进 step7 的散文门**。
+6. **写 (记) changes-brief（先写，再统一过审 — codex #4）**：在 `dev-doc/oprunway-changes-brief.md` 2026-07-09 节顶部倒序加一条，记四处漂移已修 + 以哪份为准。**先写此条，好让它一并进 step7 的散文门**。
 7. **过 codex 散文门（gate·含 changes-brief）**：对**五份**改/建散文文件（agent / acc-runner SKILL / acc-casegen SKILL / rule-catalog / changes-brief）跑 `codex exec` 定制散文审（**非 cc-suite:audit-fix**——零代码改动），重点查：(a) 镜像是否真与 `plugin/AGENTS.md:21-26` 语义一致无新漂移、且未把 run_workflow 说成阶段间阻断；(b) 两处 stale 是否都清、且未把两个门混为一谈；(c) 是否有新过度声称（把 P2 未接入 skill 说成已在流水线）。按审出问题修产物，复述『发现了什么/改了什么/还有什么风险』。**命令与 fallback（codex #10）**：`codex exec` 依赖 CLI/账号/模型服务，非零风险——若 codex 不可用/超时，改人工逐份自检并在交付里显式标『codex 未成功、本次未经外审』，**不假装审过**。
 8. **机器回归 + 悬挂/孤儿 sanity（codex #9：不用 nlpm）**：跑 `python3 plugin/acc-common/check_manifest_sync.py` 期望 `STATUS: SYNCED`（新建 acc-casegen 未列入 AGENTS.md skills、只校验「声明→存在」故不受影响）；用 `rg`/`find` 做悬挂+孤儿核查——`ls plugin/skills/*/SKILL.md` 应三目录各有 SKILL.md（孤儿消）、`rg '验证-才-信' plugin` 复核每处与「硬门」共现的行要么是 acceptance 门文件 `validate_acceptance_state.py`、要么是负式（『非代码硬门』/『硬门待补』），无一行断言 runner 自验证「验证-才-信」是硬门。`validate_acceptance_state.py` 本 todo **N/A**（不产验收裁决）。
 9. **落 changes-brief 确认（gate #4）**：step6 已写；step7 已随散文门过审——此步确认 brief 条目最终措辞与实际改动一致。
 
 ### gates
 1. **codex 散文门（必过）**：**五份**散文文件（agent / acc-runner SKILL / acc-casegen SKILL / rule-catalog / **changes-brief**）走 `codex exec` 定制散文审→修产物→复述结论。**不走 cc-suite:audit-fix**（那是代码门，本 todo 零代码改动）。命令 `codex exec`；失败/超时 → 人工自检 + 显式标『未经外审』，不当零风险步骤（codex #10）。
-2. **changes-brief（规则#4，必做）**：`doc/oprunway-changes-brief.md` 倒序追加一两句，且纳入门 1。
+2. **changes-brief（规则#4，必做）**：`dev-doc/oprunway-changes-brief.md` 倒序追加一两句，且纳入门 1。
 3. **机器 sanity（非硬门）**：`check_manifest_sync.py` 期望 `STATUS: SYNCED`；`rg`/`find` 确认孤儿已消、无 runner-自验证「验证-才-信硬门」残留（**替代 nlpm:check**——CLAUDE.md 明说 nlpm 非本门 · codex #9）。
 4. **bureau 门：N/A**——不写/不改 canon（补 SKILL.md 让 canonical 页更贴现实，无需 bureau 写入）。
 5. **validate_acceptance_state.py：N/A**——本 todo 不产验收裁决。
@@ -127,7 +127,7 @@
 - **(a) 镜像对齐**：`grep -nE 'validate_acceptance_state|BLOCKED|硬门' plugin/agents/op-acceptance.md` 有命中；**且**新增「## 硬门」节与 `plugin/AGENTS.md:21-26` 逐点语义核对一致（三级门 / STATUS:FAILED→BLOCKED / 不出裁决 / 判定在 validator / 门只管证据完整）——做一次两节的文本 diff/语义比对，非仅 grep；**并确认无 run_workflow「阶段间实时阻断」这种代码里不存在的过度承诺**（run_workflow 只归得「统一校门→BLOCKED」）。
 - **(b) 两处 stale 清零**：`rg '验证-才-信' plugin` 全仓复核——`plugin/agents/op-acceptance.md` 与 `plugin/skills/acc-runner/SKILL.md` 不再出现断言式「验证-才-信（是）硬门」；每处「验证-才-信」与「硬门」共现的行，要么属 acceptance 门文件 `validate_acceptance_state.py`（另一个门）、要么为负式（『非代码硬门』/『硬门待补』）。全文无自相矛盾。
 - **(c) 孤儿消除 + 诚实边界**：`plugin/skills/acc-casegen/SKILL.md` 存在且 frontmatter 含合法 `name`/`description`；`ls plugin/skills/*/SKILL.md` 三个 skill 目录各有 SKILL.md（无孤儿）；`rule-catalog.md:5` 的 `../SKILL.md` 相对链接目标存在（可解析）；SKILL.md 含『P2/未接入 live 流/不落盘/不替代 gen_cases.py』诚实边界，description 带『勿自动触发』框定，且**未**被列入 `plugin/AGENTS.md` skills。
-- **全局**：五份散文文件过 codex 散文门（问题已修，或显式标『未经外审』）；`check_manifest_sync.py` 仍 `STATUS: SYNCED`；`doc/oprunway-changes-brief.md` 已追加对应条并随门过审。
+- **全局**：五份散文文件过 codex 散文门（问题已修，或显式标『未经外审』）；`check_manifest_sync.py` 仍 `STATUS: SYNCED`；`dev-doc/oprunway-changes-brief.md` 已追加对应条并随门过审。
 
 ### open_decisions
 1. **(a) 权威方向依赖 proposed 页（保留）**：『以 `plugin/AGENTS.md` 为准、补齐 agent 镜像』的 canon 依据 `cross-cli-unified-form-agents-md.md` 是 proposed（未 settle）；虽与 AGENTS.md 自述 + plugin 架构一致、风险低，仍请用户确认方向（而非反删 AGENTS.md 硬门去将就 agent）。
@@ -249,7 +249,7 @@
 | `plugin/.claude-plugin/plugin.json` | edit | agents 数组补为 4 路径，与 AGENTS.md frontmatter agents 按 stem 完全一致（check_manifest_sync 要求）。 |
 | `plugin/acc-common/check_agent_frontmatter.py` | create（推荐，待 open decision (a) 确认） | dev/CI meta-lint：校验 4 agent frontmatter 的 mode/dispatch_mode 表/禁用短语/primary skills-agents 列表。轻量机器门补 codex #12。 |
 | `plugin/commands/op-acceptance.md` | edit | 流程描述指向新 orchestrator（先 CP-A 对应校验/取材→再走 CP-B..E），提「对应不成立/未验收空任务→出程序结论不跑」。 |
-| `doc/oprunway-changes-brief.md` | edit | 倒序 append 一两句大白话（CLAUDE.md #4）。 |
+| `dev-doc/oprunway-changes-brief.md` | edit | 倒序 append 一两句大白话（CLAUDE.md #4）。 |
 
 ## Steps
 
@@ -261,7 +261,7 @@
 6. **（可选）加 `check_agent_frontmatter.py` + 轻改 command**：若 open decision (a) 采纳则写 lint 脚本；command 指向新 orchestrator + 提 CP-A 前置。
 7. **本地回归验证**：`python3 plugin/acc-common/test_validate_acceptance_state.py`（**测试套件全过，并记录实际用例数——当前 28**，解 codex #16）+ `python3 plugin/acc-common/run_workflow.py samples/specs/isclose.spec.json --mode mock --out <scratchpad>`（确认仍出 `acceptance.json` 且内嵌验收门 PASSED、pipeline 未被 .md 改动破坏）+ check_manifest_sync SYNCED +（若加）check_agent_frontmatter 通过 + 用 fixture task_doc/pr_facts 走一遍 CP-A 对应校验逻辑（issue 号/target_dir 比对 + 空任务识别 + `correspondence.json` 落盘）。
 8. **散文门 codex exec 审修**：对全部新增/改动 .md（orchestrator + 3 subagent + skill + AGENTS.md + command）跑 codex exec 定制审（散文，非 cc-suite 代码 9 维）；若加 check_agent_frontmatter.py 则走 `cc-suite:audit-fix` 代码门。审→修→复述「发现什么/改了什么/剩余风险」。
-9. **收尾落档**：`doc/oprunway-changes-brief.md` 倒序 append；（可选、若动 canon）bureau:note 捕获 P1 落地，note 文本先过 codex exec 审再写入。
+9. **收尾落档**：`dev-doc/oprunway-changes-brief.md` 倒序 append；（可选、若动 canon）bureau:note 捕获 P1 落地，note 文本先过 codex exec 审再写入。
 
 ## Gates
 
@@ -286,7 +286,7 @@
 3. `check_manifest_sync.py`→`STATUS: SYNCED`（AGENTS.md agents ↔ plugin.json agents ↔ agent 文件 三方一致；AGENTS.md skills ↔ skill 文件存在——**按脚本实际能力表述、不 overclaim skills 三方**）。
 4. 测试套件全过（记录实际用例数，当前 28）；`run_workflow.py isclose.spec.json --mode mock` 出 `acceptance.json` 且验收门 PASSED（回归未破）。
 5. （若采纳）`check_agent_frontmatter.py` 通过。
-6. 所有新增/改动 .md 过 codex exec 散文门审修并复述；`doc/oprunway-changes-brief.md` 倒序 append 一条。
+6. 所有新增/改动 .md 过 codex exec 散文门审修并复述；`dev-doc/oprunway-changes-brief.md` 倒序 append 一条。
 7. 判定唯一在确定性脚本链（validator + perf_compare + acceptance gate，ADR 0007）；编排层与 subagent **不新增任何自行宣告 pass/fail 的文本**，只逐字引用确定性产物裁决并标来源。
 
 ## Open Decisions
@@ -368,7 +368,7 @@
 - ADR 0007 `deterministic-validator`（**canonical**）：判定归 validator.py → 支撑 precision/perf skill 只做方法论。
 - `workflow-three-layer-architecture`、`cannbot-orchestration-and-cross-cli`、`cross-cli-unified-form-agents-md`（**均 proposed·未 settle**）：Layer2 薄壳可替换 / 原子 skill 库判据 / AGENTS.md 单一源 + 扇出——载重前标未 settle，经决策门确认。
 - 建各 SKILL.md `references/` 时须再逐个 Read 并按 tier 引：`ecosystem-precision-standard` / `ascendoptest-precision-thresholds` / ADR 0005（精度）、`perf-baseline-by-reference-source` / ADR 0006 / `task3-state-machine`（性能）、`root-cause-decoupling-before-attribution` / `verify-spec-pr-correspondence-before-acceptance`（root-cause，Equal 血教训）、`primitive-to-case-rule-library` / `generated-harness-responsibilities`（casegen）。
-- `doc/oprunway-agent-system-design.md`（**doc·非 canon 无 tier**）：P2 意图与 skill 全集参考，非权威。
+- `dev-doc/oprunway-agent-system-design.md`（**doc·非 canon 无 tier**）：P2 意图与 skill 全集参考，非权威。
 
 ## 3. P2 范围 vs 非范围（吸收 codex#2、#6 — 校正 skill 计数与运行路径）
 
@@ -407,7 +407,7 @@
 | `plugin/AGENTS.md` | edit | frontmatter `skills:` 由 `acc-spec/acc-runner` → 补齐 6（+ casegen/precision/perf/rootcause）。**只改这一处** |
 | `plugin/.claude-plugin/plugin.json` | **no-change** | plugin.json **无 skills 键**（只列 agents，本 todo agents 不变）→ 无需改；`check_manifest_sync` 只校验 agents 一致 + 各 skill SKILL.md 存在 |
 | `canon/architecture/oprunway-component-breakdown.md` | edit(**经 bureau，非手改**) | 走 pre-bureau 文本门 → note→compile（落 proposed 记 3-skill→4-atomic supersede）→ 留用户 review promote；禁 hand-edit cabinet |
-| `doc/oprunway-changes-brief.md` | edit | 倒序追加一两句（CLAUDE.md #4） |
+| `dev-doc/oprunway-changes-brief.md` | edit | 倒序追加一两句（CLAUDE.md #4） |
 
 ## 5. 步骤
 
@@ -419,7 +419,7 @@
 5. **单一源同步**：只改 `plugin/AGENTS.md` frontmatter `skills:` → 6；跑 `python3 acc-common/check_manifest_sync.py` 确认 STATUS: SYNCED（它校验 6 skill 各有 SKILL.md + plugin.json agents 一致；**不**校验 plugin.json skills/CLAUDE.md 派生——见 #7，不声称它校验那些）。
 6. **post-artifact 散文门**（吸收 #15）：4 SKILL.md + 3 references + `workflows/*.md` + `archive_ops` 卡片 → `codex exec` 定制审→修，复述发现/改动/风险。
 7. **代码门**（吸收 #5）：`init.sh` + 任何 helper → `cc-suite:audit-fix`（9 维审→修→验循环，**cc-suite 本地可用**）+ `bash -n`；**shellcheck 本地缺**→ 二选一：`brew install shellcheck`（需网络+用户确认）后再跑，或以 `bash -n` + cc-suite 的 shell 维度替代并在结论标「shellcheck 未跑」。不声称 shellcheck 已跑除非真装。
-8. **记账**：`doc/oprunway-changes-brief.md` 倒序追加一两句（原子化 6-skill + workflows 材料仓 + init.sh 扇出 + component-breakdown 经门 supersede + P2=库不接线）。
+8. **记账**：`dev-doc/oprunway-changes-brief.md` 倒序追加一两句（原子化 6-skill + workflows 材料仓 + init.sh 扇出 + component-breakdown 经门 supersede + P2=库不接线）。
 
 ## 6. 门（五道，含拆分的 bureau 双门；吸收 #15/#5/#7/#11/#12）
 
@@ -463,7 +463,7 @@
 5. `plugin/AGENTS.md` skills=6，`check_manifest_sync.py`→STATUS: SYNCED；**不声称**它校验了 plugin.json skills/CLAUDE.md 派生（#7）。
 6. component-breakdown supersede 以 bureau note/compile（proposed）记录、**非** hand-edit；canonical 晋级留用户 review。
 7. `archive_ops/README.md` 定义 **case.md 最小字段 schema**（`op` / `taskdoc` / `pr`(或 from-scratch 标记) / `verdict`(pass|precision-pass·perf-fail|…) / `evidence_path` / `real_machine`(a3/a5) / `caveat`）+ 入库校验清单（真机-verified 才收、verdict 如实标、symlink 可解析）。
-8. 五门（决策/pre-bureau 文本/post-artifact 散文/代码/同步）均过并复述结论；`doc/oprunway-changes-brief.md` 已倒序追加。
+8. 五门（决策/pre-bureau 文本/post-artifact 散文/代码/同步）均过并复述结论；`dev-doc/oprunway-changes-brief.md` 已倒序追加。
 
 ## 9. 开放决策（全部前置为开工门；吸收 #9）
 
@@ -546,7 +546,7 @@ minimal-first：先 CatlassBasicMatmul 单算子跑穿再谈融合/其它 exampl
 - `ADR0006` = **proposed**（timing policy、gpu_external 分母 → 载重前已标）。
 - `catlass-to-aclnn-bridge.md` = 主体 **canonical**，2026-07-08 補记 = **proposed**（只作背景）。
 - `engineering-paradigm-trichotomy.md` = **proposed**；`verify-spec-pr-correspondence` / `task-spec-authoritative` = **proposed**（2026-07-09，最高优先级、已据此加 provenance 边界）。
-- `doc/oprunway-agent-system-design.md` §5 P3 六子任务 = 设计提案（非 canon），当「计划意图」非事实。
+- `dev-doc/oprunway-agent-system-design.md` §5 P3 六子任务 = 设计提案（非 canon），当「计划意图」非事实。
 - **实地核验（本次 Read repos/catlass 得，记为 verified-by-inspection）**：`build.sh <target>` 只构建 examples 树内注册的 target；example 集**按 CATLASS_ARCH 索引**（2201→`00_basic_matmul` fp16/AtlasA2；3510→`43_ascend950_basic_matmul` **fp32**/Ascend950/TLA）；`validator.py` 现仅支持 exact / numerical(max_rel_err) 单阈值。
 
 ---
@@ -567,7 +567,7 @@ minimal-first：先 CatlassBasicMatmul 单算子跑穿再谈融合/其它 exampl
 13. `plugin/acc-common/validate_acceptance_state.py` — **edit**（补 codex #6）：task2/task3 门读到 `evidence_grade=development`（mock）时，允许 STATUS PASSED 以证明「管路/门接通」，但**在输出里显式标 `NON-ACCEPTANCE (mock evidence)`**，使 mock 的 PASSED 不可被误读为 NPU 裁决。
 14. `plugin/acc-common/test_catlass_adapter.py` — **create**：单测 + fixtures：arch 探测（拒非法/缺失、无默认落值）、msprof CSV 按列名解析（含坏 header/空行 fixture）、raw log→evidence 解析、外部 GPU 基线校验（scope 不符 blocked、缺用例 blocked）、matmul gen_cases/materialize 形状正确、`catlass_mock` 端到端跑穿 + `validate_acceptance_state` task1/2/3、defect 注入翻 FAIL、mock 产物带 `NON-ACCEPTANCE` 标记。
 15. `plugin/acc-common/catlass/artifact_manifest`（由 collect 阶段产出，补 codex #18）：run_catlass 的 collect_artifacts 落 `artifact_manifest.json`——catlass repo commit、build 命令、CANN/bisheng/msprof 版本、runner hash、raw log/profile CSV 的 hash、arch、harness 名。
-16. `doc/oprunway-changes-brief.md` — **edit**：倒序追加（大白话），**显式写「本地 catlass_mock 管路已过、真机 NPU evidence 未产出、demo spec 为 synthetic 无真实 task↔PR」**。
+16. `dev-doc/oprunway-changes-brief.md` — **edit**：倒序追加（大白话），**显式写「本地 catlass_mock 管路已过、真机 NPU evidence 未产出、demo spec 为 synthetic 无真实 task↔PR」**。
 
 ---
 
@@ -581,7 +581,7 @@ minimal-first：先 CatlassBasicMatmul 单算子跑穿再谈融合/其它 exampl
 7. **run_catlass / run_catlass_mock 组装 7 阶段 + 注册**：`run_catlass_mock`（本地：kernel out=golden、可注入 defect、perf=确定性 mock、`evidence_grade=development`）；`run_catlass`（真机：stage→build→run→pull→parse→collect，`evidence_grade=acceptance_candidate`，**catlass 无 builtin-TBE 故不写 `_real_baseline`**，perf 分母走 gpu_external）；两函数内部注释标 discover/build/materialize_case/run_correctness/run_perf/parse_results/collect_artifacts 七段；collect 落 `artifact_manifest.json`（补 codex #18）；MODES 注册 `catlass`/`catlass_mock`。
 8. **GPU/baseline schema 对齐 + workflow 入口**：`perf_compare.load_external_baseline()`（schema/scope/覆盖校验，补 codex #11/#19）；`run_workflow.py` 加 `--baseline`/env/spec 入口 + 优先级 + 复制进产物（补 codex #10）；写 sample GPU baseline fixture + 文档化契约。**真实 GPU 数字由外部(Task 3)提供，此处只定契约+校验**。
 9. **本地端到端 + 机器门 + mock 非验收标记 + 回归**：`run_workflow.py catlass_basic_matmul.spec.json --mode catlass_mock` 跑穿；`validate_acceptance_state` task1/2/3 全 PASSED **但带 `NON-ACCEPTANCE (mock evidence)`**（补 codex #6）；defect 注入验证门能挡；`test_catlass_adapter.py` + 既有 `test_validate_acceptance_state.py` 全绿；grep 确认 production 路径无默认硬编码 arch。
-10. **过门 + 简表 + 待真机**：代码全体过 `cc-suite:audit-fix`（复述发现/改动/风险）；spec/散文过 `codex exec` 审；`doc/oprunway-changes-brief.md` 倒序追加（含 mock/real 区分 + synthetic provenance，补 codex #21）；真机 build/run(ascend-a5 arch 3510) 与 generated_harness 首跑前**向用户人工确认**（高风险边界），待 VPN 开后接入。
+10. **过门 + 简表 + 待真机**：代码全体过 `cc-suite:audit-fix`（复述发现/改动/风险）；spec/散文过 `codex exec` 审；`dev-doc/oprunway-changes-brief.md` 倒序追加（含 mock/real 区分 + synthetic provenance，补 codex #21）；真机 build/run(ascend-a5 arch 3510) 与 generated_harness 首跑前**向用户人工确认**（高风险边界），待 VPN 开后接入。
 
 ---
 
@@ -592,7 +592,7 @@ minimal-first：先 CatlassBasicMatmul 单算子跑穿再谈融合/其它 exampl
 - **构建门（拆两层，补 codex #13）** → 静态 `verify_catlass_build.py`（Mac 可跑，真机 build 前必过）+ 运行后 `profile_hit_gate()`（真机 msprof 后解析真 CSV 断命中）。
 - **bureau 门** → 本 todo 不改 canon（是对已 settle canon 的实现）；真机跑后若浮出 durable 结论（basic_matmul layout 实测、msprof 实测符号名、路线取舍）→ `bureau:note→compile→review`，绝不手设 canonical。
 - **副作用门** → 真机 deploy/build/run、`stage_into_catlass.sh` 注入 catlass 工作副本、generated_harness 首跑前人工确认（CLAUDE.md #1/#3）。
-- **落点门** → doc 产出入 `doc/`、改动同步 changes-brief（CLAUDE.md #4）。
+- **落点门** → doc 产出入 `dev-doc/`、改动同步 changes-brief（CLAUDE.md #4）。
 - **provenance 门（新增，补 codex #4）** → demo spec 显式标 synthetic、acceptance 阻塞；真正 acceptance 级裁决须上游（acc-spec/fetch_source）先 verify 过 task↔PR 对应（`verify-spec-pr-correspondence`），adapter 不越俎代庖、只补 provenance 字段。
 
 ## blocked_deps
@@ -702,7 +702,7 @@ LOW：
 | `plugin/acc-common/specs/equal.spec.json` | **edit** | 同 isclose。 |
 | `plugin/acc-common/test_precision_policy.py` | **create** | 两标准判定单测（见 steps 8）。 |
 | acc-spec skill + 其 schema/docs（`plugin/skills/…`）| **edit（companion）** | 产 spec 时输出 `precision.standard`+`tolerance_policy_id`+`policy`（据任务书目录/引用选标准）；散文/skill 过 **codex exec** 审。 |
-| `doc/oprunway-changes-brief.md` | **edit** | 倒序追加一两句大白话。 |
+| `dev-doc/oprunway-changes-brief.md` | **edit** | 倒序追加一两句大白话。 |
 
 ### Steps
 1. **坐实常量（本地）**：Read `repos/AscendOpTest/compare/compare/accuracy_config.py`（**已确认**完整 15 个 dtype，`[tolerance,error_rate,legacy]`，`error_rate` 是**第 2 位**、逐 dtype 变：fp32=1e-4、fp16=1e-3、bf16=4e-3、uint8/uint32=0.01、int8/int16=1e-3、bool=0）+ `compare.py`（`compare_default`：`minimum=1e-9`、`maxmin=max(|expect|,|output|)+1e-9`、`|expect|≥1`→rtol/else atol/共用 tolerance、`bad>size*error_rate`才 fail、`inf→finfo.max`、`NaN==NaN` 过；bool 转 uint8 走 default）。把整表 + 掩码语义 + 内容 hash 抄进 SSOT 注释。全本地。
@@ -714,14 +714,14 @@ LOW：
 7. **改 4 份 spec + acc-spec companion**：sign/neg→ascendoptest_default、isclose/equal→exact；均标 threshold_source/provenance。acc-spec skill/schema/docs 产新字段（走 codex exec 散文审）。experimental(MERE/MARE) 无真 spec，仅单测覆盖判定逻辑。
 8. **单测 + 自测**：`test_precision_policy.py` 覆盖——AscendOpTest 逐 dtype tol+error_rate、坏点边界(**注入 `floor(n*error_rate)+1` 个坏点**、非单点)、`|expect|≥1` rel/`<1` abs、inf/NaN、denom `max(|e|,|o|)+1e-9`；MERE=平均/MARE=最大不对调 + 10× + Th 表 + denom `|g|+1e-7`；exact；PASSED_WITH_RISK 路径（造 acceptance_policy 宽于 standard 的 spec/evidence）；不支持 dtype fail-fast。再跑 `run_workflow` mock 对 sign/isclose/equal/neg 各一遍（含 `--defect`）验端到端。
 9. **回归机器门**：`python3 plugin/acc-common/test_validate_acceptance_state.py`（28 单测改后须全绿）+ 4 算子 mock run_workflow 后 `python3 plugin/acc-common/validate_acceptance_state.py --stage task1|task2|task3 --dir <out>` 须 STATUS: PASSED。门误挡→按「只管完整性不重判」最小修。
-10. **过门与落账**：代码全量 `cc-suite:audit-fix`（9 维审→修→验）；散文 `codex exec` 审；`doc/oprunway-changes-brief.md` 追加；可选 `bureau:note`。动 canon（改 ADR 0005 命名 / 提升 ecosystem）一律 capture→compile→review，**不手改 canonical**。
+10. **过门与落账**：代码全量 `cc-suite:audit-fix`（9 维审→修→验）；散文 `codex exec` 审；`dev-doc/oprunway-changes-brief.md` 追加；可选 `bureau:note`。动 canon（改 ADR 0005 命名 / 提升 ecosystem）一律 capture→compile→review，**不手改 canonical**。
 
 ### Gates（含可执行命令）
 - **代码门（必过）**：`precision_policy.py` + validator/gen_cases/repo_adapter/run_workflow/validate_acceptance_state 改动 + 两测试文件 → `cc-suite:audit-fix`（9 维审→修→验循环），复述『发现/改了/剩余风险』。不可用时 fallback：`codex exec` 逐文件审 + 人工核 9 维清单。
 - **散文门**：acc-spec skill/schema 文案 + 任何设计 md/bureau 拟写文本 → `codex exec` 定制审；changes-brief 一两句亦按 #5 先审后落。
 - **机器门（出裁决必跑）**：`cd plugin/acc-common && python3 test_validate_acceptance_state.py`（28 全绿）+ `python3 test_precision_policy.py`（全绿）+ `python3 run_workflow.py specs/<op>.spec.json --mode mock --out /tmp/run_<op>` 后 `python3 validate_acceptance_state.py --stage task1|task2|task3 --dir /tmp/run_<op>`（STATUS: PASSED）对 4 算子。
 - **bureau 门（仅动 canon 时）**：本 todo 默认**不写 canonical**——ecosystem/ADR 0008 维持 proposed；提升 ecosystem 或改 ADR 0005 命名须 capture→compile→review 人批，禁手改。可选 `bureau:note` 记进展（低权 logbook）。
-- **落点门（CLAUDE.md #4）**：所有 doc 产出入 `doc/`，改动同步 changes-brief。
+- **落点门（CLAUDE.md #4）**：所有 doc 产出入 `dev-doc/`，改动同步 changes-brief。
 
 ### Blocked / Deps
 - **本地能立刻做（不卡）**：`precision_policy.py` 三标准全实现（AscendOpTest 常量 + 掩码语义从**本地已 clone** 的 accuracy_config.py + compare.py 直接坐实；ecosystem Th 表来自 proposed 页、打 NOT_SETTLED）；gen_cases/repo_adapter/validator/run_workflow/gate 全改造 + mock/numpy 单测 + 4 算子 mock 端到端 + 机器门 28 单测回归——全本地闭环，无需 NPU/VPN。
@@ -765,7 +765,7 @@ LOW：
 
 【HIGH — 全部解决】
 - H1（small_shape_exception 同 key 不能既 string 又 object）：采纳。升级为**对象** {text, when_us_below, abs_gap_us_within, requires}——人读串放 text、机读阈值独立字段；parser 兼容 legacy 纯字符串（正则兜底）。彻底消歧。（Files#6/7、Steps2）
-- H2（漏改 doc/oprunway-spec-schema.md 致契约漂移）：采纳。新增 Files#8/#9 同步改 spec-schema.md（string?→object?）+ workflow-design.md + taskdoc-to-spec.md。（Steps3）
+- H2（漏改 dev-doc/oprunway-spec-schema.md 致契约漂移）：采纳。新增 Files#8/#9 同步改 spec-schema.md（string?→object?）+ workflow-design.md + taskdoc-to-spec.md。（Steps3）
 - H3（把「仿真图+分析」等同 PASSED_WITH_RISK 的「人工 CP 记录」，与 canon 不符）：采纳并改口径。仿真图+分析定位为「供人工 CP 的**证据**」；acceptance.json 落 state=PASSED_WITH_RISK 且 human_cp={status:"pending", evidence:[…]}——机器只产证据挂 pending、不伪造人工签字（Layer 1 确定性脚本无法内联 AskUserQuestion，真正 CP 留会话 agent 形态）。（Approach1、Files#4）
 - H4（核心前置仍列 Open Decisions 但 Steps 已按 default 实现，自相矛盾）：采纳。把这些从模糊 open **提升为「决策项 D1–D5：拟定 default + 依据，step1 用户一并拍板」**，Steps1/Gates 明确以其为实现前置；仅保留真正可延后的张力/漂移为 B 组真-open。ready_to_implement 据此诚实=blocked 于 step1。
 - H5（run_workflow 退出码用 startswith('PASS')，PASSED_WITH_RISK 会天然 exit0，与「非零」冲突）：采纳。改为**显式 state→exit 映射** {PASSED:0, PASSED_WITH_RISK:2, *:1}，替换 startswith；补 RunWorkflowExitTest 的 exit2 用例。（Files#4/#13）
@@ -862,10 +862,10 @@ LOW：
 
 7. **`plugin/acc-common/specs/isclose.spec.json`** · edit — 同 sign 升级为对象（保留 `text`）。
 
-8. **`doc/oprunway-spec-schema.md`** · edit（codex H2，防入口契约漂移）
+8. **`dev-doc/oprunway-spec-schema.md`** · edit（codex H2，防入口契约漂移）
    - `perf.small_shape_exception` 定义由 `"string?"` 改为 **`object?`** 并写明 `{text, when_us_below, abs_gap_us_within, requires}` 结构；同步更新 §2 三个真实例中的该字段写法（string→object），注明「legacy 纯字符串向后兼容、由 perf_compare 正则兜底解析」。
 
-9. **`doc/oprunway-workflow-design.md`** · edit（codex H2）
+9. **`dev-doc/oprunway-workflow-design.md`** · edit（codex H2）
    - 该文 L33 提及 `small_shape_exception` 处同步为结构化口径一行说明（与 schema 对齐）。
 
 10. **`plugin/skills/acc-spec/references/taskdoc-to-spec.md`** · edit
@@ -881,14 +881,14 @@ LOW：
     - gate_task3 例外：`status=exception`+完整 simulation+交叉一致+plot 文件在 dir 且 sha 对→PASSED；缺 plot / sha 不符 / simulation 与例外行对不上→FAILED(含『仿真图』字样)；plot 指向 `../` 或绝对路径外→FAILED(路径钉死)；例外行 `scope!=kernel_only`→FAILED。
     - **扩 `RunWorkflowExitTest`（codex M9）**：新增 `test_perf_slow_passed_with_risk`——subprocess 跑 `run_workflow.py ../../samples/specs/sign.spec.json --mode mock --perf-slow <小shape cid> --out D`，断言 **exit==2**、`acceptance.json` `state=="PASSED_WITH_RISK"`+`human_cp.status=="pending"`+`repo_mode=="mock"`、`D/perf_sim_sign.svg` 存在、`perf_report.json` `summary.status=="exception"`；再 subprocess 跑 gate `--stage task3 --dir D` 应 exit0；删 SVG 后再跑 gate → exit1（证不静默绕过）。
 
-14. **`doc/oprunway-changes-brief.md`** · edit — 按 CLAUDE.md#4 **倒序**追加一两句大白话：小 shape 例外通道落地（perf status exception→PASSED_WITH_RISK+human_cp pending、perf_compare 独家产 simulation、perf_sim_plot 只渲染、门强制有图+交叉一致+sha 才放行、阈值从 spec/任务书取、复用 canonical 状态不动 canon、mock 注入明标 demo 不作真实 CP 依据）。
+14. **`dev-doc/oprunway-changes-brief.md`** · edit — 按 CLAUDE.md#4 **倒序**追加一两句大白话：小 shape 例外通道落地（perf status exception→PASSED_WITH_RISK+human_cp pending、perf_compare 独家产 simulation、perf_sim_plot 只渲染、门强制有图+交叉一致+sha 才放行、阈值从 spec/任务书取、复用 canonical 状态不动 canon、mock 注入明标 demo 不作真实 CP 依据）。
 
 ## Steps
 
 0. **门禁工具 preflight（codex M7）**：动手前先探 `cc-suite:audit-fix` / `bureau:*` 是否可用；不可用则**降级**——代码审改走 `codex exec` 定制审、bureau 捕获标 blocked/deferred，并在交付说明里注明「未过 X 门、原因」。（本会话 skill 列表含 cc-suite/bureau，正常路可用；此为安全网。）
 1. **先抛方案经用户点头（CLAUDE.md#1）**：init 阶段动手前，把本 plan 关键取舍 **+ 决策项 D1–D5**（见 Open）向用户列清、拍板后再落地。不 push 任何远端（#2）。
 2. **spec 阈值结构化**：编辑 sign/isclose spec，`small_shape_exception` → 对象（`text`+机读阈值）。这是后续所有例外判定的唯一数值来源。
-3. **同步 schema/文档（H2）**：改 `doc/oprunway-spec-schema.md`（`string?`→`object?` + 示例）、`doc/oprunway-workflow-design.md`、`taskdoc-to-spec.md`——防入口契约漂移。
+3. **同步 schema/文档（H2）**：改 `dev-doc/oprunway-spec-schema.md`（`string?`→`object?` + 示例）、`dev-doc/oprunway-workflow-design.md`、`taskdoc-to-spec.md`——防入口契约漂移。
 4. **perf_compare 加解析器 + 数值校验**：`_parse_small_shape_exception`（dict→取字段；str→正则；无→None）；finite-正数校验；解析不出/非法落 note。
 5. **perf_compare 加例外判定 + 唯一 simulation**：谓词（小shape-tag ∧ max<阈 ∧ gap≤容差 ∧ 未达标）→行打 exception 标、`达标` 保持 False、记 exception_detail；status 优先级 blocked>fail>exception>ok；组装 `report['simulation']`（唯一事实源）。
 6. **mock_baseline 加注入 + 标注**：`slow_cases` 造「略慢小差」、env 标 `(inj-slow)`。
@@ -936,7 +936,7 @@ LOW：
 
 ### B. 真·open（本 todo 不解、不依赖）
 - **D6**：两 proposed 页（ADR0006 ↔ perf-baseline）关于 `perf_baseline_source`（gpu_external 默认 vs 从任务书推、GPU 对比层是否可选）的**张力**——留人工 bureau:review。本 todo 走 NPU-vs-TBE kernel_only 线，不依赖其裁决。
-- **D7**：`doc/oprunway-spec-schema.md` 既存漂移——schema 写 `perf.target`(string) 而实际 spec 用 `perf.target_ratio`(number)。**本 todo 未引入、不扩范围修**，记为观察，另立 follow-up。
+- **D7**：`dev-doc/oprunway-spec-schema.md` 既存漂移——schema 写 `perf.target`(string) 而实际 spec 用 `perf.target_ratio`(number)。**本 todo 未引入、不扩范围修**，记为观察，另立 follow-up。
 - **D8**：与其它 todo 的岔口（T3 canon 分解 / T9 发布形态 / T11 外发授权）本 todo 不触及。
 
 ---
@@ -961,7 +961,7 @@ LOW：
 
 【MEDIUM·全部解决】
 #7(attr 笛卡尔歧义)·采纳：attr_matrix 定义为显式 attr 字典列表，每项一条 case、代表 dtype/shape，期望数=len(attr_matrix) 写进单测。消歧义。
-#8(attr_matrix schema 文档)·采纳：files 加 doc/oprunway-spec-schema.md + acc-spec 抽取规则/自检/示例。
+#8(attr_matrix schema 文档)·采纳：files 加 dev-doc/oprunway-spec-schema.md + acc-spec 抽取规则/自检/示例。
 #9(mock 不走 bin 路径)·采纳：核 run_mock 只 golden.copy()、不物理化。抽 materialize_input/readback_output 纯函数 + 本地 round-trip 单测；acceptance#4 明确「bf16 收发靠 round-trip 单测证、非 mock」。
 #10(§0 三轴误引)·采纳：读 rule-catalog §0 证三轴=dtype/special_value/layout、非 attr。attr 展开改用独立显式列表算法、不引 §0。
 #11(inf_nan/§2.5 过宽)·采纳：§1.3 证 inf_nan mandatory_if=算子声明传播。加 per-op special-value 适用表(IsClose/Equal/Sign/Neg 各列生成哪些、为何)。
@@ -1030,11 +1030,11 @@ LOW：
 | `plugin/acc-common/validator.py` | edit | `_judge_precision` 认 per-case `expected.compare`（exact_equal→按 exact 判、rel_err→按 numerical 判）；threshold 三处一致校验兼容 compare=exact_equal（thr=0） |
 | `plugin/acc-common/test_fixtures/sign_int16_bf16.spec.json` 等 | create | **非权威 fixture spec**（显式标 `"_fixture": true`）声明 int16/bf16 + attr_matrix，供 Track A 本地 mock 端到端验证，**不碰权威 4 spec** |
 | `plugin/acc-common/test_gen_cases_dtype_attr.py` | create | 单测：bf16 round 正确性（tie/±0/subnormal/NaN/inf/字节序）；`materialize_input`/`readback_output` 各 dtype **round-trip**（codex#9，无需 NPU）；int/bf16 golden 合法；attr_matrix 产 `len(attr_matrix)` 条且 golden 用该 attrs；equal_nan=True 有 NaN case；语义 id 稳定+唯一；mock 端到端 caseset id==evidence id；机器门三级 PASSED；`--defect`→validator FAIL/exit1（门 PASSED）；子集/篡阈值/篡 scope→门 FAILED（codex#3）；坏/混/storage 不符 dtype 被拒 |
-| `doc/oprunway-spec-schema.md` | edit | 补 `attr_matrix`（列表语义·默认值·合法值类型·兼容策略）+ `storage_dtype`/per-case `compare`/`case_origin` 契约（codex#8） |
+| `dev-doc/oprunway-spec-schema.md` | edit | 补 `attr_matrix`（列表语义·默认值·合法值类型·兼容策略）+ `storage_dtype`/per-case `compare`/`case_origin` 契约（codex#8） |
 | `plugin/skills/acc-spec/…`（抽取规则+自检清单） | edit | acc-spec 增「何时/如何产 `attr_matrix`」抽取规则 + 自检项 + 示例（codex#8·spec 权威链完整） |
 | `plugin/acc-common/specs/sign.spec.json`（Track B·**gated**） | edit | 视用户批+任务书，把 int16 提进 `params[].dtype`（Sign 已 `change.dtypes_added:[int16]`）；**默认不动**，留 open_decision |
-| `doc/oprunway-changes-brief.md` | edit | 倒序追加一两句大白话（CLAUDE.md #4） |
-| `doc/oprunway-todo.md` | edit | 更新 P1-5 进度：Track A 本地完成 / Track B 挂用户批 / Track C（runner）挂真机+pr_facts；Neg int-min/uint8/int64 语义列 out-of-scope |
+| `dev-doc/oprunway-changes-brief.md` | edit | 倒序追加一两句大白话（CLAUDE.md #4） |
+| `dev-doc/oprunway-todo.md` | edit | 更新 P1-5 进度：Track A 本地完成 / Track B 挂用户批 / Track C（runner）挂真机+pr_facts；Neg int-min/uint8/int64 语义列 out-of-scope |
 
 > **删除原 plan 的 4 份 runner.cpp edit 条目**（codex#4/#15）：neg_runner 不存在、且按 acc-runner 纪律 runner dtype 须从 example 抠+真机验证，本轮不手写。runner dtype 扩面锚进 todo/gap。
 
@@ -1054,14 +1054,14 @@ LOW：
 9. **mock 端到端自测**：对 fixture spec 跑 `python run_workflow.py <fixture> --mode mock`——用例数增长、evidence 一一对应、门三级 PASSED、总体 PASS；`--defect`→`FAIL(精度)`+exit1（门 PASSED）；手工篡 evidence 成子集/篡阈值/篡 scope→门 FAILED+`BLOCKED`（codex#3）。
 10. **写 test_gen_cases_dtype_attr.py 全绿**（覆盖 acceptance 全部条目）。
 11. **过门与落文**：代码产物过 `cc-suite:audit-fix`（Skill 工具，9 维审→修→验）；散文（brief/todo/schema/acc-spec 文本 + 若写 bureau 拟入文本）过 `codex exec` CLI 定制审；doc brief 追加、todo P1-5 更新；契约扩展若定为 durable，走 `bureau:note`→`compile`→`review` 入 canon，绝不手设 canonical。
-12. **Track C 锚定（不实施）**：把 4 算子 runner 的 int/bf16 分支 + neg_runner 创建，写进 `doc/oprunway-todo.md` gap，注明「据 pr_facts 的 example/op_def 支持矩阵生成、真机验证」，本轮不写 C++。
+12. **Track C 锚定（不实施）**：把 4 算子 runner 的 int/bf16 分支 + neg_runner 创建，写进 `dev-doc/oprunway-todo.md` gap，注明「据 pr_facts 的 example/op_def 支持矩阵生成、真机验证」，本轮不写 C++。
 
 ## gates（门禁·codex#16 给可执行形态）
 - **代码门** → `cc-suite:audit-fix` skill（`Skill` 工具调用，9 维代码审→修→验循环）。作用于 gen_cases.py / repo_adapter.py / validator.py / test 脚本 / fixture spec 契约。**不可用时**：退回人工 9 维走查并显式标注「audit-fix 未跑、人工代替」。
 - **散文门** → `codex exec` CLI（Codex CLI；nlpm 1.1.1+ 已移除旧 MCP→一律 CLI）。作用于 brief/todo/spec-schema/acc-spec 文本。**不可用时**：标「codex 未审、人工代替」。
 - **机器门** → `python validate_acceptance_state.py --stage task1|task2|task3 --dir <out>`，三级门必须在**扩面后的 fixture caseset** 上 mock 端到端 PASSED（防跑子集/放宽阈值/混 e2e），经 run_workflow 硬 blocker 验证。**注**：此门 verified tier，本 todo 用单测实证其对扩面后 caseset 仍成立；且**门不重判 verdict**——defect 的合法精度 fail 归 validator。
 - **bureau 门**（仅当把 storage_dtype 契约 / bf16 表示 / dtype 范围决策写成 durable canon 时）→ 先 codex 审拟写文本，再 `bureau:note`→`compile`→`review`，绝不手设 canonical。
-- **CLAUDE.md #1/#4**：契约扩展 + 语义 id 迁移属设计变更，**先抛方案经用户点头才落地**；所有 doc 产出进 `doc/`、改动同步进 `doc/oprunway-changes-brief.md`。
+- **CLAUDE.md #1/#4**：契约扩展 + 语义 id 迁移属设计变更，**先抛方案经用户点头才落地**；所有 doc 产出进 `dev-doc/`、改动同步进 `dev-doc/oprunway-changes-brief.md`。
 
 ## blocked / deps（卡点）
 - **本地能立刻做（Track A，全绿）**：gen_cases 扩 dtype（int32/int16/bf16 位级）+ attr_matrix 显式展开 + per-op special-value + 语义 id + storage_dtype/compare 契约；repo_adapter mock 收发 + 纯函数 round-trip；validator per-case compare；fixture spec + 单测 + run_workflow mock 端到端 + 机器门实证——**全 numpy、无 NPU**（bf16 位级 helper，已实测本机无 ml_dtypes / numpy 无原生 bf16）。**前提**：契约扩展方案先过用户确认门。
@@ -1254,8 +1254,8 @@ L2(契约被外部方直接覆盖)：**吸收**。契约版本化（schema_versi
   输入、opt-in 触发、新 BLOCKED 状态与退出码。
 
 **doc + bureau 记账**
-- `doc/oprunway-changes-brief.md`（edit）：倒序追加一两句。
-- `doc/oprunway-todo.md`（edit）：P2-6 标 consumer 侧本地完成、真数据待外部；记 opt-in 取向 + 未决张力。
+- `dev-doc/oprunway-changes-brief.md`（edit）：倒序追加一两句。
+- `dev-doc/oprunway-todo.md`（edit）：P2-6 标 consumer 侧本地完成、真数据待外部；记 opt-in 取向 + 未决张力。
 - **bureau 重验（codex M8）**：改门后走 `bureau:note`→`bureau:compile`→`bureau:review` 更新
   `machine-verifiable-acceptance-gate` dossier（28 单测→新数、门语义扩展），**由 compile/verify 重算
   `_verify.json` 哈希**（禁手改）；未重验前该 verified claim 视为 stale。
@@ -1284,14 +1284,14 @@ L2(契约被外部方直接覆盖)：**吸收**。契约版本化（schema_versi
    `acceptance.overall_state=BLOCKED_WAIT_GPU_BENCHMARK`+exit 2、坏 scope→`BLOCKED_INCOMPARABLE_TIMING_SCOPE`+exit 3、
    sub-policy→`PASSED_WITH_RISK`+exit 4。**钉死 acceptance.json 绝不因缺 GPU 数据显示 PASS**（H4）。
 9. 过双门 + 记账 + bureau 重验：代码产物过 `cc-suite:audit-fix`（Skill 工具/`/cc-suite:audit-fix`，9 维审→修→验），
-   契约/doc 拟写文本过 `codex exec`；机器门重跑 task1/2/3 三级 + 全量单测；追加 `doc/oprunway-changes-brief.md`、
-   更 `doc/oprunway-todo.md`、同步 3 入口文档；`bureau:note` 捕获「consumer 侧已落地、
+   契约/doc 拟写文本过 `codex exec`；机器门重跑 task1/2/3 三级 + 全量单测；追加 `dev-doc/oprunway-changes-brief.md`、
+   更 `dev-doc/oprunway-todo.md`、同步 3 入口文档；`bureau:note` 捕获「consumer 侧已落地、
    perf_baseline_source-from-taskspec 张力仍 open」并走 `bureau:compile/review` 重验机器门 dossier（M8）。
 
 ## Gates（门）
 - **开工前门（CLAUDE.md #1）**：init 阶段，本 plan 需先经用户点头才动手。**尤其触及 P0 已 merge 代码**
   （run_workflow overall 词汇 / 退出码 / 机器门语义）→ 见 open_decisions，需显式 sign-off。
-- **散文/契约门（`codex exec`）**：`gpu_baseline_contract.json`、doc/入口文档、bureau 拟写文本 → **写入前**先审
+- **散文/契约门（`codex exec`）**：`gpu_baseline_contract.json`、dev-doc/入口文档、bureau 拟写文本 → **写入前**先审
   （M7 已把 step1 改为先审后落）。
 - **代码门（`cc-suite:audit-fix`）**：`gpu_baseline.py` / `perf_compare.py` / `validate_acceptance_state.py` /
   `run_workflow.py` / 两测试文件 → 9 维审-修-验，复述「发现/改了/剩余风险」。
@@ -1303,7 +1303,7 @@ L2(契约被外部方直接覆盖)：**吸收**。契约版本化（schema_versi
 - **bureau 门（M8）**：改门代码使 `machine-verifiable-acceptance-gate`(verified) claim stale → 走
   capture→compile→review 重验，`_verify.json` 哈希由 compile/verify 重算（禁手改）。canonical 状态机本身不改
   语义（只让代码 conform），不新增 canon；若后续裁「GPU 层可选」或引入 `perf_baseline_source` 字段 → 另起 bureau 写门。
-- **落点纪律（#4）**：所有 doc 入 `doc/`、改动同步简表。
+- **落点纪律（#4）**：所有 doc 入 `dev-doc/`、改动同步简表。
 
 ## Blocked / 依赖
 **现在本地能做**（无需真 NPU/GPU/VPN，mock 跑通）：全部 consumer 逻辑（契约+解析器+两 BLOCKED 态+全量枚举映射+
@@ -1435,15 +1435,15 @@ L2(契约被外部方直接覆盖)：**吸收**。契约版本化（schema_versi
 - design §10 已写「发布不早于接口稳定——等 schema/状态文件/证据 JSON/最小 catlass 端到端跑通再登记 external-sync；每份 SKILL.md 标 standalone 边界」——触发清单有据可依，本 todo 是**形式化 + 补证据 + 入 canon**。
 
 ## Files（动作 + 目的）
-- `doc/oprunway-publish-form-decision.md` — **create（用户拍板后才落盘）**：记 4 项**已定值** + 取舍留痕；决策前只在会话内呈现草稿。（散文→codex exec 门）
+- `dev-doc/oprunway-publish-form-decision.md` — **create（用户拍板后才落盘）**：记 4 项**已定值** + 取舍留痕；决策前只在会话内呈现草稿。（散文→codex exec 门）
 - `.claude-plugin/marketplace.json`（仓根，当前缺失）— **create**：列**单一** `oprunway` 插件（`name`=拍定名、`version` 对齐 plugin.json、`source` 指向子目录 `plugin/`、`category`=拍定、`author.name=lys`、`owner` 按拍定的默认发行源）。**不列 dependencies、不枚举 skills**（skills 自动发现）。（配置→cc-suite:audit-fix）
 - `plugin/.claude-plugin/plugin.json` — **edit（仅当用户改名/改版时）**：对齐 name/version。**不加 skills/commands 数组**（自动发现，且生态中无先例证明其为合法必填）。（配置→cc-suite:audit-fix）
 - `plugin/acc-common/check_manifest_sync.py` — **edit**：新增 marketplace.json 结构校验——`oprunway` 条目 `name`==plugin.json `name`、`version` 一致、`source.path` 解析到实际 plugin 目录、`category` 合法枚举内；保持 `STATUS: SYNCED/DRIFT`、只读、抗坏输入。**不做跨插件依赖闭包**（已无 dependencies）。（代码→cc-suite:audit-fix）
 - `plugin/acc-common/test_validate_acceptance_state.py` — **edit（就地扩，不新建文件）**：追加 marketplace 同步用例（SYNCED / name 不符 DRIFT / version 不符 DRIFT / source 路径不存在 DRIFT / 坏 JSON 不崩）。
-- `doc/oprunway-design.md` §10 — **edit**：从「倾向已定」改定稿——写死拍定的仓位置/命名/**单插件结构 + 理由** + **带证据的 external-sync 触发清单**；`/plugin install` 命令限定在「分发/安装」子节，「使用」子节仍只讲对话入口。（散文→codex exec 门）
+- `dev-doc/oprunway-design.md` §10 — **edit**：从「倾向已定」改定稿——写死拍定的仓位置/命名/**单插件结构 + 理由** + **带证据的 external-sync 触发清单**；`/plugin install` 命令限定在「分发/安装」子节，「使用」子节仍只讲对话入口。（散文→codex exec 门）
 - `README.md`（仓根）— **edit**：加「分发/安装」节（`/plugin marketplace add` + `/plugin install`），与「使用=对话入口」节分离，**不把 `python3 …` 脚本重新暴露成日常用法**（守 conversational-agent 口径）。（散文→codex exec 门）
-- `doc/oprunway-todo.md` — **edit**：更新 P2#8 状态（单插件本地可装态已达、external-sync 登记待触发 + 触发清单落地）。
-- `doc/oprunway-changes-brief.md` — **edit**：倒序追加一两句本次定稿（CLAUDE.md #4）。
+- `dev-doc/oprunway-todo.md` — **edit**：更新 P2#8 状态（单插件本地可装态已达、external-sync 登记待触发 + 触发清单落地）。
+- `dev-doc/oprunway-changes-brief.md` — **edit**：倒序追加一两句本次定稿（CLAUDE.md #4）。
 - `canon/` — **不手改 ADR0003**。走 bureau 门：`bureau:note` 捕获『4 项已定值 + external-sync 触发清单 + 单插件理由 + skill 分类分歧待收敛』→ `bureau:compile` 成 proposed（ADR0003 增补页或新页）→ 提请**人工 `bureau:review`** 提 canonical。logbook append-only，绝不 hand-edit cabinet、绝不自设 canonical。
 - **原 plan 中删除/下沉的动作**：不创建 `acc-casegen/SKILL.md`、不改 `acc-spec/acc-runner` SKILL.md 加 standalone 边界、不新建 `test_check_manifest_sync.py`——前两者下沉为 external-sync 触发前置（名单未定期做是白工/误导），后者并入现有测试文件。
 
@@ -1451,7 +1451,7 @@ L2(契约被外部方直接覆盖)：**吸收**。契约版本化（schema_versi
 1. **Schema 侦查 + 对账（无副作用，本会话已完成主体）**：确认单插件可行、生态无跨插件 dependencies、marketplace 合法字段集、仓根缺 marketplace.json、skill 名单三分歧、现有测试已覆盖 check_manifest_sync。实施期再补一处待验：仓根 marketplace 指向子目录 `plugin/` 的**本地 source 写法**（`git-subdir` 的 path，或本地相对 source）以官方 schema/实验确认。
 2. **起草决策简报（会话内草稿，不落盘）**：4 节——仓位置 / 插件名与结构（含单插件 vs 双插件的机制约束） / 是否即刻 external-sync / 触发清单——每节给「选项/取舍/推荐」。**过 codex exec 审散文**后呈用户。
 3. **用户拍板（硬 STOP 门 · CLAUDE.md #1）**：AskUserQuestion 逐项让用户定 4 项 + external-sync 对外授权意向。未拍不动任何制品。
-4. **落盘决策简报**：把拍定值写入 `doc/oprunway-publish-form-decision.md`（此步起才动制品）。
+4. **落盘决策简报**：把拍定值写入 `dev-doc/oprunway-publish-form-decision.md`（此步起才动制品）。
 5. **先扩校验器 + 补测（清单之前）**：改 `check_manifest_sync.py` 纳入 marketplace 结构校验；在 `test_validate_acceptance_state.py` 追加用例；跑到单测全绿。过 cc-suite:audit-fix。
 6. **写仓根 marketplace.json + 对齐 plugin.json**：按拍定命名写单插件条目；仅当改名/改版时同步 plugin.json；跑 `check_manifest_sync.py` 至 `STATUS: SYNCED`。过 cc-suite:audit-fix。
 7. **静态验收门（无副作用，主门）**：JSON 合法性 + 字段合法（据 step1 侦查）+ `check_manifest_sync` `STATUS: SYNCED` + 单测全绿。**此门是安装冒烟的前置**。
@@ -1462,7 +1462,7 @@ L2(契约被外部方直接覆盖)：**吸收**。契约版本化（schema_versi
 
 ## external-sync 触发清单（每项带可验证证据 · 提请用户确认收敛）
 > 全绿才登记。每项：`证据制品 → 检查命令/判据 → 谁可勾选`。
-1. **六类 JSON 契约字段稳定/文档化**（spec/caseset/evidence/verdict/baseline/perf_report）。证据=`doc/oprunway-workflow-design.md` 契约表 + 现存样例；判据=字段集有文档且一版内无破坏性改动；勾选=维护者。（注：当前是**契约样例**如 `specs/*.spec.json`，**非六份正式 JSON Schema 文件**；若要求 formal schema，另起子任务先建 schema + 校验器。）
+1. **六类 JSON 契约字段稳定/文档化**（spec/caseset/evidence/verdict/baseline/perf_report）。证据=`dev-doc/oprunway-workflow-design.md` 契约表 + 现存样例；判据=字段集有文档且一版内无破坏性改动；勾选=维护者。（注：当前是**契约样例**如 `specs/*.spec.json`，**非六份正式 JSON Schema 文件**；若要求 formal schema，另起子任务先建 schema + 校验器。）
 2. **状态文件格式冻结**：`validate_acceptance_state.py` 读的 `evidence/verdict` 结构冻结。证据=其单测全绿；判据=`test_validate_acceptance_state.py` pass；勾选=维护者。
 3. **≥1 个 catlass 算子真 950 端到端跑通**（T7·P3）。证据=`reports/<repo>/<op>/<pr>/verdict.json` overall=pass + 真机日志；判据=门 `STATUS: PASSED`；勾选=维护者据真机产物。
 4. **对话式 agent 形态落地**（P1·P2，含 `init.sh` 安装期扇出）。证据=`init.sh` + 各 CLI 注册薄壳；判据=至少 Claude Code + Codex 两运行时装后 `op-acceptance` 可见；勾选=维护者。
@@ -1482,7 +1482,7 @@ L2(契约被外部方直接覆盖)：**吸收**。契约版本化（schema_versi
 - **卡住**：① 4 项决策本质是**用户拍板**（CLAUDE.md #1），未拍不动制品——这是本 todo 的主 STOP；② external-sync 正式登记=动 `cann/awesome-ascend-skills`（非本用户仓）→ 需**用户对外授权** + 署名 lys（CLAUDE.md #2），本 todo 内不做；③ 触发清单里的前置本身卡在**其它 TODO**（catlass 真 950 端到端 T7/P3、对话式 agent + init.sh 扇出 P1/P2、六类 JSON 契约字段冻结、**skill 分类原子化收敛 P2#22**、skills standalone 含 acc-common 随行）——这些只 gate『登记时机』，**不 gate 本 todo 的『形态定稿 + 单插件可安装 + 触发点写死』**，后者现在即可完成；④ proposed 升 canonical 需**人工 review**，非本会话可自决。
 
 ## Acceptance
-1. 4 项待定（仓位置 / 插件名与结构 / 是否即刻 external-sync / 触发点）各有用户明确决策并留痕于 `doc/oprunway-publish-form-decision.md`。
+1. 4 项待定（仓位置 / 插件名与结构 / 是否即刻 external-sync / 触发点）各有用户明确决策并留痕于 `dev-doc/oprunway-publish-form-decision.md`。
 2. 仓根 `.claude-plugin/marketplace.json` 存在，列**单一** `oprunway` 插件；**静态门通过**（JSON 合法、字段合法、`check_manifest_sync` `STATUS: SYNCED`、现有+新增单测全绿）；**隔离**安装冒烟成功（临时 CLAUDE_CONFIG_DIR 下 `/plugin install oprunway` 成、`op-acceptance` 可见、已卸载清理）。
 3. `check_manifest_sync.py` 扩到校验 marketplace ↔ plugin.json（name/version/source/category）并 SYNCED；用例**就地加进** `test_validate_acceptance_state.py`（不新建孤立文件）。
 4. external-sync「接口稳定前不同步」固化为**每项带证据**的触发清单（≥6 点，见上），已 capture→compile 为 **proposed dossier（待人工 review 才 canonical）**，并写进 design §10。
@@ -1580,7 +1580,7 @@ L2(契约被外部方直接覆盖)：**吸收**。契约版本化（schema_versi
 | 路径 | action | 说明 |
 |---|---|---|
 | `canon/logbook/2026/07/<当前session>.md` | **bureau:note append**（非手工 create） | 【agent】把 review 议程 append 进当前会话 minute：列 4 张 Equal 页(待 promote，附路径+tier)、2 条 survivor(附落点页+tier+建议改法+『非功能 bug、只是化石』定性)、perf_baseline_source 张力需连带裁、ADR0006/0008 rename-before-promote 约束。低权威 capture、非事实。 |
-| `doc/oprunway-changes-brief.md` | edit（过散文门后） | 【agent】按 CLAUDE.md #4 追加一条(倒序、大白话)，并**显式衔接** 07-09 旧待办「canon 两决策页+一架构页待更正」→ 已由 compile 推进为 **4 页 proposed**（含新建 verify-spec-pr 页）+ review 队列；survivors 待人门/tool 车道处置。 |
+| `dev-doc/oprunway-changes-brief.md` | edit（过散文门后） | 【agent】按 CLAUDE.md #4 追加一条(倒序、大白话)，并**显式衔接** 07-09 旧待办「canon 两决策页+一架构页待更正」→ 已由 compile 推进为 **4 页 proposed**（含新建 verify-spec-pr 页）+ review 队列；survivors 待人门/tool 车道处置。 |
 | `canon/decisions/verify-spec-pr-correspondence-before-acceptance.md` | 人门 promote（bureau:review） | 【proposed→canonical 或 hold】内容已 compile 到位，仅状态促进，agent 不改 prose。 |
 | `canon/decisions/root-cause-decoupling-before-attribution.md` | 人门 promote（bureau:review） | 【proposed→canonical 或 hold】同上。 |
 | `canon/decisions/task-spec-authoritative-over-pr.md` | 人门 promote（bureau:review） | 【proposed→canonical 或 hold】同上。 |
@@ -1599,7 +1599,7 @@ L2(契约被外部方直接覆盖)：**吸收**。契约版本化（schema_versi
 3. **过散文门（codex exec）**：按 CLAUDE.md #5，用 `codex exec` 审+修 Step 2 议程文本**与** Step 5 changes-brief 草稿（一次 codex 调用覆盖两段散文，效率优先）。**约束**：只读/受控、文本经 stdin 传入、**禁止落盘、禁止新增任何 canon claim**；复核 diff 只改表述、不引入新事实。复述『发现了什么/改了什么/剩余风险』。修完再进 bureau 写。
 4. **bureau:note 落 review 议程**：把过审文本经 `bureau:note` capture 进当前 minute（logbook=低权威、非事实）。这是 agent 端对本 todo 的实体产出：把「4 页 proposed（已在 review 队列）+ 2 survivor（待经 lint/compile 才进队列）」整合成一份显式、可照做的人读议程/handoff。
 5. **（用户确认后）让 survivors 真进 review 视图**：因 `bureau:note` 不足以把 survivors 送进 review 视图，向用户提请二选一并经确认后由 agent 跑（tool 车道、非手编/非手升）：(a) `bureau:lint --apply`——结构车道把 ADR0002 标 `stale`、写 superseded/drift 边，使 survivors 在 review/结构健康视图可见；或 (b) `bureau:compile` 折出 proposed 修订。**默认不自动跑**（改 canonical 页 status 属消耗性变更，按 CLAUDE.md #3 先确认）；列 open_decisions #1。若用户选「留给 review 一次处置」，则 survivors 以 note+findings.md 形态交接，交付里显式标注「survivors 未进 review 视图、需 review 人主动查 findings.md」。
-6. **追加改动简表（含散文门）**：6a 起草 changes-brief 条（已并入 Step 3 codex 审）；6b 落盘 `doc/oprunway-changes-brief.md`（倒序、大白话），显式衔接 07-09 旧待办→4 页 proposed + review 队列。
+6. **追加改动简表（含散文门）**：6a 起草 changes-brief 条（已并入 Step 3 codex 审）；6b 落盘 `dev-doc/oprunway-changes-brief.md`（倒序、大白话），显式衔接 07-09 旧待办→4 页 proposed + review 队列。
 7. **交接人门 bureau:review**：向用户交出人门事项：①promote(或 hold) 4 张 Equal 页→canonical，perf-baseline 连带裁 perf_baseline_source 张力；②纠正 ADR0002(canonical) msTuner→msprof op（走 gate 的 compile/review，非手编）；③五页 1.2×→target_ratio 一致 rename，**ADR0006/0008 rename 未处理前不得 promote**。agent 不代做、不手升 canonical、不手编 cabinet prose。
 
 **每页最小 promote/hold checklist（给 review 人）**：
@@ -1631,7 +1631,7 @@ L2(契约被外部方直接覆盖)：**吸收**。契约版本化（schema_versi
 2. **核验**：bureau:status/inspect 显示 4 张 Equal 页 `proposed` 在库、`37223d6d` compiled、结构 0 dangling/0 contradiction；**完整关键词** grep 复核 cabinet（architecture+decisions）无未作废的残留 Equal 裁决。范围**仅限 cabinet pages**——logbook/changes-brief 按 append-only 保留历史错误叙述、只要求有作废标记即可（据 codex #6 澄清）。
 3. **capture**：当前 minute 里有一条经散文门的 `bureau:note`，显式列出『4 页待 promote + 2 survivor 待裁 + perf_baseline_source 张力 + rename-before-promote 约束』的完整路径/tier/建议改法（review 一看即可照做），并注明「survivors 进 review 视图需 lint --apply/compile」。
 4. **survivors 可见性**：明确记录 survivors 当前是否已进 review 视图——若用户批了 Step 5 则已进（ADR0002 stale/proposed 修订）；若未批则显式标注「未进视图、待人门一并处置」。
-5. **简表**：`doc/oprunway-changes-brief.md` 追加了对应一行，且衔接 07-09 旧待办（3 页待更正→4 页 proposed + review 队列）。
+5. **简表**：`dev-doc/oprunway-changes-brief.md` 追加了对应一行，且衔接 07-09 旧待办（3 页待更正→4 页 proposed + review 队列）。
 6. **交接**：清单明确区分 agent 已做（通读/核验/capture）vs 人门待做（promote 4 页 + 纠正 ADR0002 + 1.2×→target_ratio 5 页 + rename-before-promote 硬约束）。
 
 > 注：canonical 促进本身**不计入**本 todo 的 agent 完成条件——那是人门里程碑，另行追踪。
@@ -1691,7 +1691,7 @@ L2(契约被外部方直接覆盖)：**吸收**。契约版本化（schema_versi
 ### approach
 verify-first + 条件执行 + preflight 硬闸 + 台账对账。
 - **push 已完成**：`git ls-remote origin/gitcode refs/heads/main` 均 = `4dcd355` = 本地 HEAD，`git status` clean，无未推的 Equal 更正提交（`419b5d4` 等已在两远端）。故 T11a 的 push 侧实质已满足，退化为「核对 + 事后双远端复核」。
-- **PR#2 body 待在线核验**：更正内容的**权威源**是用户 2026-07-09 正式拍板（已固化在 `doc/oprunway-acceptance-evidence.md` 顶部作废横幅 + `doc/oprunway-changes-brief.md` 全局更正横幅，两 doc 已 commit+push）。`acceptance-evidence` 页脚已声明「本 doc 是 PR#2 的镜像说明」，故 body 只需与这份台账镜像一致，**不重推 Equal 归因**。先前会话据只读核查曾报「body 已含 2026-07-09 更正」，但**本轮网络 down 无法复验**——按 verify-first 纪律，未在线复核前一律按「待核」处理，不写「已完成」。
+- **PR#2 body 待在线核验**：更正内容的**权威源**是用户 2026-07-09 正式拍板（已固化在 `dev-doc/oprunway-acceptance-evidence.md` 顶部作废横幅 + `dev-doc/oprunway-changes-brief.md` 全局更正横幅，两 doc 已 commit+push）。`acceptance-evidence` 页脚已声明「本 doc 是 PR#2 的镜像说明」，故 body 只需与这份台账镜像一致，**不重推 Equal 归因**。先前会话据只读核查曾报「body 已含 2026-07-09 更正」，但**本轮网络 down 无法复验**——按 verify-first 纪律，未在线复核前一律按「待核」处理，不写「已完成」。
 - **更正若需落 body，用追加不用覆盖**（codex#9/#14）：先 `gh api` 导出现 body 存档 → 若缺更正，仅在 body **顶部追加**「⚠ 以下旧结论作废（Equal）」横幅、保留原描述 → 过散文门 → apply；已含则不动。
 - 对齐 CLAUDE.md #2/#3：即便本用户自己的仓，push/PR-edit 时机也须用户明示确认。
 
@@ -1706,9 +1706,9 @@ verify-first + 条件执行 + preflight 硬闸 + 台账对账。
 ### files
 | path | action | purpose |
 |---|---|---|
-| `doc/oprunway-changes-brief.md` | edit | **T11b 主改**：把 07-09 条尾 stale 注记里的「公开台账 push + PR#2 body 更正待批（外发）」替换为如实状态（push 已完成并核；PR#2 body 待网络恢复后在线复核）。**精确改法见 steps#4**（原地改现有 bullet 的该子句，不新增顶部 bullet 以免扰动全局更正横幅/倒序结构——吸收 codex#12）。散文→codex exec 门。 |
-| `doc/oprunway-todo.md` | edit（可选、轻） | 硬约束 #1（line 8-9）现注「上报取消」；如需补一句「push 台账已完成、PR#2 body 待复核」以免与 changes-brief 不一致。不新增 T11 独立条目。散文→codex exec 门。 |
-| `$SCRATCH/pr2-body-*.txt`（会话 scratchpad 绝对路径 / `mktemp`，**仓外**） | create（仅漂移分支用） | **非持久 doc 产物**、仅作 `gh pr edit --body-file` 的临时输入（吸收 codex#2/#15）：不落 `doc/`、不落仓内相对 `scratchpad/`，用后即删，收尾 `git status` 校验 untracked 干净。 |
+| `dev-doc/oprunway-changes-brief.md` | edit | **T11b 主改**：把 07-09 条尾 stale 注记里的「公开台账 push + PR#2 body 更正待批（外发）」替换为如实状态（push 已完成并核；PR#2 body 待网络恢复后在线复核）。**精确改法见 steps#4**（原地改现有 bullet 的该子句，不新增顶部 bullet 以免扰动全局更正横幅/倒序结构——吸收 codex#12）。散文→codex exec 门。 |
+| `dev-doc/oprunway-todo.md` | edit（可选、轻） | 硬约束 #1（line 8-9）现注「上报取消」；如需补一句「push 台账已完成、PR#2 body 待复核」以免与 changes-brief 不一致。不新增 T11 独立条目。散文→codex exec 门。 |
+| `$SCRATCH/pr2-body-*.txt`（会话 scratchpad 绝对路径 / `mktemp`，**仓外**） | create（仅漂移分支用） | **非持久 doc 产物**、仅作 `gh pr edit --body-file` 的临时输入（吸收 codex#2/#15）：不落 `dev-doc/`、不落仓内相对 `scratchpad/`，用后即删，收尾 `git status` 校验 untracked 干净。 |
 
 ### steps
 1. **执行环境 preflight（吸收 codex#3/#4/#5/#6）——最先跑、不过不进执行分支**：

@@ -21,7 +21,7 @@ T7 dtype/attr 扩面（据 codex 审终版）：
   · 每 case 带 `case_origin`/`rule_ref` 可追溯（codex#18）。
 
 ⚠ 真机（真 NPU）上 int/bf16 的数值校验本轮**不做**——runner.cpp 的新 dtype 分支属 Track C（挂真机+pr_facts），
-  见 doc/oprunway-todo.md gap。本文件仅证「流水线能造/收发 int/bf16 用例」，非「某算子在该 dtype 被验收」。
+  见 dev-doc/oprunway-todo.md gap。本文件仅证「流水线能造/收发 int/bf16 用例」，非「某算子在该 dtype 被验收」。
 
 U3 dtype 单一真源（2026-07-24）：dtype 支持不再由本文件独家说了算，拆成**两层、各自单一真源**——
   · 生成层 = 本文件 `_NATIVE` + bf16（能造输入 / 能算 golden / 能落盘读回；本轮补齐 int64/int8/uint8）；
@@ -1301,7 +1301,7 @@ def check_spec_capability(in_params, runner_form=None):
     为什么必须有：`_build_inputs` 的常规 `varied` / `pair*` 路径末尾写死 `return [x0, x1]`（二元构造），
     而 `empty` 与特殊值路径按 `arity` 产满——**arity≥3 时多出来的输入被无声丢掉，两边行为还不一致**。
     与其静默截断，不如明说不支持（本仓纪律：**fail-closed 优于静默降级**）。
-    支持多输入算子须先一般化 pair 构造，见 `doc/oprunway-todo.md` 的 U7b。"""
+    支持多输入算子须先一般化 pair 构造，见 `dev-doc/oprunway-todo.md` 的 U7b。"""
     arity = len(in_params)
     if arity > 2:
         raise ValueError(
@@ -1432,7 +1432,7 @@ def _mk_id(op, dtn, shp, id_kind, attr_idx, seen):
 
 
 # ============================== §1 覆盖-预算 生成（opbase 精度标准 §1，pin f69d4e…）=====
-# 决策 v2（doc/oprunway-cases50-design.md）：dtype 分层（key 重点 + 其他 1-2）× shape 阶梯(2^k/2^k-1)
+# 决策 v2（dev-doc/oprunway-cases50-design.md）：dtype 分层（key 重点 + 其他 1-2）× shape 阶梯(2^k/2^k-1)
 # × 值域(uniform+normal) × attr 正交笛卡尔；白名单强制必覆盖组合 + 1-wise 采样 + case_target 预算封顶；
 # §1.4 特殊场景（空→功能only / 标量 / 边界 / inf·nan）强制纳入、id_kind 独立命名空间；per-case 独立种子。
 # format 轴：elementwise 仅 ND（op_def/example 佐证）→ 退化为单值，不进正交网格。

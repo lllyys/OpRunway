@@ -726,7 +726,7 @@ def _api_surface_gaps(spec, caseset):
 
 # ================= 逐 dtype 精度聚合（L3 · 对标 cannbot，**纯只读派生**，2026-07-25）=========
 # 出处：参考仓 cannbot-ops-input `skills/operator-evaluation/scripts/accuracy.py:624-694` 的
-# `accuracy.by_dtype` + `overall_pass_rate`。对齐清单见 `doc/oprunway-cannbot-alignment-plan.md` L3。
+# `accuracy.by_dtype` + `overall_pass_rate`。对齐清单见 `dev-doc/oprunway-cannbot-alignment-plan.md` L3。
 #
 # ⚠ **本节一行都不参与裁决**：只读已经成型的 `per_case` 行 + evidence 的执行信号，做一次统计聚合。
 #   三层口径（catlass_compare / standard_profile / acceptance_precision）、逐 case 的 risk/gaps、

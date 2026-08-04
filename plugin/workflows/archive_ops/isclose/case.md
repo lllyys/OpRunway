@@ -6,7 +6,7 @@
 | `taskdoc` | **from-scratch example（无社区任务）** —— pipeline 首建于此算子 |
 | `pr` | **无（demo 算子）** —— 无对应社区任务 PR |
 | `verdict` | **`pass`**（精度 + 性能皆过） |
-| `evidence_path` | `doc/oprunway-acceptance-evidence.md`（已验证案例台账） |
+| `evidence_path` | `dev-doc/oprunway-acceptance-evidence.md`（已验证案例台账） |
 | `real_machine` | `a3`（真 Ascend910/A3 NPU 端到端） |
 | `caveat` | ⚠ **无社区任务 PR**——provenance 是 from-scratch example、非「验收了某社区交付」；作 pipeline 冒烟/回归锚点用，不代表验收了一个真实社区任务 |
 

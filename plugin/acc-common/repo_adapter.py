@@ -1077,7 +1077,7 @@ def run_new_example(caseset, work_dir, defect_cases=None):
         dtn = c["inputs"][0]["dtype"]
         if dtn not in _NP:  # T7：int16/int32/bfloat16 的 runner.cpp 分支属 **Track C**（挂真机+pr_facts）
             raise ValueError(f"{cid}: runner v1 仅支持 {sorted(_NP)}；dtype {dtn!r} 属 Track C——"
-                             f"runner.cpp 新 dtype 分支须从算子 example/op_def 抠+真机验证，见 doc/oprunway-todo.md gap")
+                             f"runner.cpp 新 dtype 分支须从算子 example/op_def 抠+真机验证，见 dev-doc/oprunway-todo.md gap")
         if any(inp["dtype"] != dtn for inp in c["inputs"]):  # runner v1 全输入同 dtype，拒静默强转
             raise ValueError(f"{cid}: 多输入 dtype 不一致 {[i['dtype'] for i in c['inputs']]}"
                              f"（runner v1 要求同 dtype；混合 dtype 需 per-input manifest）")

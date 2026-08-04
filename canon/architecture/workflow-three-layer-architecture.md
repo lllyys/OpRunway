@@ -14,6 +14,6 @@ status: proposed
 
 **铁律**：价值与难点全压进 Layer 0+1（100% 可移植，是资产）；换运行时只换 Layer 2。核心脑子沉到脚本——连 casegen 的 NL 复核也只产审阅意见、不改 caseset。codex 已核 **Layer 0/1 无 Claude-Code 依赖**。
 
-详见 `doc/oprunway-workflow-design.md`。吃 [[Repo adapter interface and modes]] 与 [[Acceptance contract and evidence chain]]。
+详见 `dev-doc/oprunway-workflow-design.md`。吃 [[Repo adapter interface and modes]] 与 [[Acceptance contract and evidence chain]]。
 
 **Sources.** [[session d31ea446-dec3-479f-a7b3-d6c1dec4f611 · 2026-07-02]]（2026-07-06 检查点）

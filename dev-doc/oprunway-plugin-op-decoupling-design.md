@@ -263,7 +263,7 @@ spec 加字段（**名字待定**）：
 | `repo_adapter.py` | golden 归属上移；`oracle_source` 透传；runner 查找路径；去 op 默认值 |
 | `catlass_adapter.py` | `oracle_source` 透传 |
 | `validate_acceptance_state.py` | 增 `oracle_source` 一致性校验（S3） |
-| spec schema | 增 `precision.output_exact_on_grid`；`doc/oprunway-spec-schema.md` 同步 |
+| spec schema | 增 `precision.output_exact_on_grid`；`dev-doc/oprunway-spec-schema.md` 同步 |
 | `acc-spec` / `acc-runner` / `acc-runner-dev` | 落点改用户 CWD；acc-spec 需产 `spec_clause_ref` 锚点 |
 | 单测 | 现有测试大量依赖 `GOLDEN["Sign"]` 等 → 改用 fixture golden，不依赖「内置算子」 |
 | canon | 本轮发现应走 `bureau:capture` → `compile`；D2 值得追加进 `gate-must-check-the-effective-object.md` 作第三例 |
@@ -286,7 +286,7 @@ spec 加字段（**名字待定**）：
 ## 六、这份方案没做的事
 
 - **没动一行代码。**
-- **没 commit。** 要 commit 需先过 CLAUDE.md #5 的 codex 散文门，并在 `doc/oprunway-changes-brief.md` 追一笔。
+- **没 commit。** 要 commit 需先过 CLAUDE.md #5 的 codex 散文门，并在 `dev-doc/oprunway-changes-brief.md` 追一笔。
 - **没做隔离环境测试。** 原计划（隔离 config dir + 隔离 CWD + 藏三份答案 + 真机跑 IsClose）
   **仍然可跑**，不必等 D1——IsClose 恰是内置 4 算子之一，其 golden 在 `GOLDEN` 字典里，
   `gen_cases` 不会崩；藏掉 spec / runner 后能真实测到 `acc-spec` 与 `acc-runner` 两环。

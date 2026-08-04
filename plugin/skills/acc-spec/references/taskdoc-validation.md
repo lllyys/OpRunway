@@ -1,6 +1,6 @@
 # 任务书输入校验判法（CP-B 第 0 步 · `dispatch_mode=validate_taskdoc`）
 
-本页是 `doc/oprunway-task-document-validation-standard.md` 那张 18 项表的**判法**：
+本页是 `dev-doc/oprunway-task-document-validation-standard.md` 那张 18 项表的**判法**：
 逐项怎么才算「任务书已明确」、怎么才算「模糊」。表定义**要什么**，本页定义**怎么判**，
 `acc-common/validate_taskdoc_input.py` 只做结构复核与机械路由，**判断本身在这里**。
 

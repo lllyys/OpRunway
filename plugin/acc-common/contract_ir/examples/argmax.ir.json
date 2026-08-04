@@ -117,7 +117,7 @@
             "taskbook"
           ],
           "cite": "aclnn_max_dim.cpp:34-46 三张 DTYPE_SUPPORT_*_LIST + CheckDtypeValid:62-74(IsRegBase→REGBASE; CheckSocVersionGe910B:50-53 DAV_2201||RegBase→GE910B; else 910); doc aclnnMaxDim.md:74,141-145; op_def:23-24 x DataType",
-          "conflict_resolution": "dtype 白名单按 SocVersion 分支(platform_predicate)，非参数驱动。三分支从 glue 全枚举=resolved；具体取哪支取决于 target_hardware（当前 contested，见 target_hardware.state）→ 该 selection 在目标裁定前 fail-close。⚠ 任务书:26,35 列 INT16、doc/glue/op_def 均无 INT16 → 记 task_pr_gap；op_def:23 亦无 BOOL 但 glue 支持 BOOL(会先 Cast→FLOAT:144)",
+          "conflict_resolution": "dtype 白名单按 SocVersion 分支(platform_predicate)，非参数驱动。三分支从 glue 全枚举=resolved；具体取哪支取决于 target_hardware（当前 contested，见 target_hardware.state）→ 该 selection 在目标裁定前 fail-close。⚠ 任务书:26,35 列 INT16、dev-doc/glue/op_def 均无 INT16 → 记 task_pr_gap；op_def:23 亦无 BOOL 但 glue 支持 BOOL(会先 Cast→FLOAT:144)",
           "state": "resolved",
           "fail_closed": false
         }

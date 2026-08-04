@@ -1,6 +1,6 @@
 """perf_msprof — kernel-only 性能采集（MSTX 测量窗 + 窗内 kernel 累加），**op-中立、字段驱动**。
 
-⚠ **本模块先按 `doc/oprunway-torch-baseline-design.md` §9.7（2026-07-24）返工，又据
+⚠ **本模块先按 `dev-doc/oprunway-torch-baseline-design.md` §9.7（2026-07-24）返工，又据
 2026-07-26 cannbot 精确对标真机探针更正采集入口**：
 
 * **A（采集入口·已更正）**：旧探针只证明 `torch_npu.npu.mstx.range_start()` 在 msprof CLI
@@ -247,7 +247,7 @@ KERNEL_ACCOUNTING = "median_x_launches"
 #: `msprof --output=… --task-time=on --ascendcl=on --msproftx=on <python> <wrapper>`——前三项与我们**逐字同**，
 #: 差别只在它**不显式关 ai-core**（它的做法是「不请求 `--aic-metrics`」，而 `--ai-core` 默认就是 on，
 #: 于是 AI Core 采样照样开着）。我们多带 `--ai-core=off`，依据是真机实测
-#: （`doc/oprunway-torch-baseline-design.md` §9.7 C，2026-07-24 a3 容器）：默认 on 让 Sort(MIX_AIV)
+#: （`dev-doc/oprunway-torch-baseline-design.md` §9.7 C，2026-07-24 a3 容器）：默认 on 让 Sort(MIX_AIV)
 #: 单 kernel 虚高 **3.75×**（192.46 → 51.29 us）、每次调用 kernel 总和虚高 **2.0×**（308.9 → 153.2 us）；
 #: 关掉后 msprof 与 torch_npu profiler 三路吻合（150~159 us/call）。
 #: ⛔ 别为「与参考仓逐字一致」把这个参数删掉——删了拿到的不是「更 faithful 的数」，是虚高数倍的假数。

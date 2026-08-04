@@ -453,7 +453,7 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     # C5：非验收通路降级为**管路自检**，且只跑 task1（+task3）。两条理由，缺一不可：
     #   ① task2 门读 `verdict.json`，而该文件在非验收通路上物理不产 → 这级本来就无从跑起；
     #   ② 让 mock 跑穿一道叫「验收门」的东西再打印 STATUS: PASSED，本身就是危害源
-    #      （doc/oprunway-todo-plans.md #6 记的正是「mock 跑穿门被误当 NPU evidence」这条风险）。
+    #      （dev-doc/oprunway-todo-plans.md #6 记的正是「mock 跑穿门被误当 NPU evidence」这条风险）。
     #   自检仍卡 caseset 自洽 / 跑子集 / perf 产物完整——CP-B 想要的那点自检价值一分没少。
     gate_stages = ["task1", "task2"] if is_acceptance else ["task1"]
     if precision_ok and (ps.get("perf_cases", 0) > 0 or spec.get("perf", {}).get("baseline")):

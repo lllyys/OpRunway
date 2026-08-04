@@ -5,8 +5,8 @@
 > **未经 `bureau:review` 人门 promote** → 按 BUREAU trust tier，**不是事实**，载重前须复核；本轮的重写同样**须走一次
 > `capture → compile → review`** 才进 canon（canon 页**绝不手改**）。
 > **代码落地状态**：引擎核心已实现（`bc8acb7` 硬表→加载器、`ae94703` 来源契约扩六枚举、`0192e49` 来源契约批 1 = 词表 + tier 派生表 + 授权核验器，**批 1 纯新增未接线**），
-> 均在分支 `feat/golden-out-of-engine`（**PR #8 未合**）；**批 2–7（接线 / 快照入库 / spec / 门 / agent 产出 / 报告与 canon 收口）全部未做**，清单见 `doc/oprunway-todo.md`「🔴 下一刀」。
-> **前身**：`doc/oprunway-plugin-op-decoupling-design.md`（D1 / S1–S3 + 开放问题 #5）。**承接** runner 去引擎化（PR #7）。
+> 均在分支 `feat/golden-out-of-engine`（**PR #8 未合**）；**批 2–7（接线 / 快照入库 / spec / 门 / agent 产出 / 报告与 canon 收口）全部未做**，清单见 `dev-doc/oprunway-todo.md`「🔴 下一刀」。
+> **前身**：`dev-doc/oprunway-plugin-op-decoupling-design.md`（D1 / S1–S3 + 开放问题 #5）。**承接** runner 去引擎化（PR #7）。
 
 ## 0 · 边界先钉（免和别的东西串）
 
@@ -144,7 +144,7 @@ golden 若是 `golden.py`（`golden_fn` 函数），加载 = **动态 import 执
 - [[Golden is fixed to torch on CPU for determinism]] 被决策 4 更新 → compile 时据新决策标 superseded、留 proposed 走人门 review。
 - **工作项（分批落，进度 2026-07-22）**：
   - ✅ `gen_cases` 表→加载器 + 落点契约（`<ops_root>/<op>/golden.py`）+ `GOLDEN_SOURCE`/`GOLDEN_PROVENANCE` 元数据 + 安全边界文档 + 单测改 fixture golden（`bc8acb7`）；来源契约扩六枚举（`ae94703`）；**来源契约批 1** = 词表 + tier 派生表 + 授权核验器（`0192e49`，**纯新增未接线**）。
-  - ⏳ **未做（批 2–7）**：两档链接线到 `load_golden` · 任务书全文快照入库（R12）· spec 侧承载 · 门侧消费 tier · **acc-spec / acc-runner-dev 产 golden 的纪律**（两档链 + R4/R5 人核）· 报告与 canon 收口。清单见 `doc/oprunway-todo.md`「🔴 下一刀」。
+  - ⏳ **未做（批 2–7）**：两档链接线到 `load_golden` · 任务书全文快照入库（R12）· spec 侧承载 · 门侧消费 tier · **acc-spec / acc-runner-dev 产 golden 的纪律**（两档链 + R4/R5 人核）· 报告与 canon 收口。清单见 `dev-doc/oprunway-todo.md`「🔴 下一刀」。
 - **不动**：精度标准（ascendoptest/opbase）、性能基线、runner（已去引擎化）。
 
 ## 5 · Alternatives（整体层面已否）
@@ -168,4 +168,4 @@ golden 若是 `golden.py`（`golden_fn` 函数），加载 = **动态 import 执
 **下一步（2026-07-22 刷新）**：
 - canon 侧 **ADR 0011 已 capture→compile 成页、但仍 `proposed`**（连同决策 4 对 `golden-fixed-to-torch` 的 superseded 标注）——**待 `bureau:review` 人门 promote**；
   **本轮对决策 3 的重写、以及「最高律令写窄了」的更正，都还没进 canon**，须**再走一次 `capture → compile → review`**（canon 页绝不手改）。
-- 代码侧：引擎核心 + 六枚举 + **来源契约批 1**（`0192e49`，未接线）已在分支 `feat/golden-out-of-engine`，**PR #8 未合**；**批 2–7 未做**（清单见 `doc/oprunway-todo.md`「🔴 下一刀」）。
+- 代码侧：引擎核心 + 六枚举 + **来源契约批 1**（`0192e49`，未接线）已在分支 `feat/golden-out-of-engine`，**PR #8 未合**；**批 2–7 未做**（清单见 `dev-doc/oprunway-todo.md`「🔴 下一刀」）。

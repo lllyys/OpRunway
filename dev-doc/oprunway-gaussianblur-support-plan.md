@@ -212,7 +212,7 @@ Step 0  ────────────────────────
 | **`aclFloatArray` / `aclBoolArray` / `const char*`** | 本轮只放开 `aclIntArray` 一种；ops-cv 的 `aclnnResize`（aclFloatArray）、`aclnnIou`（const char*）仍 fail-closed，作为通用化欠账 |
 | **ATK 双标杆** | 按 P3 不做。`compute_metrics` 结构上只吃两个数组，全仓无 RMSE。spec 的 oracle 写 `mere_mare` 而不是 `atk_double`，避免 `select_standard` 把 `atk_double` 静默映射成单标杆后账本自称走了双标杆 |
 | **GPU 真值 / GPU 性能标杆 / `gpu_baseline_request.json`** | 按 P1、P2 不做 |
-| **`contract_ir` 与 `cpp_extension` 两条旁路** | `contract_ir` 没接进任何验收流水线（`doc/oprunway-todo.md:101` 仍是 F3 待办）且 `CreateAclIntArrayFromCase` 只有声明无实现；`cpp_extension_codegen` 既无数组 attr 类型又用 `EXEC_NPU_CMD_EXT` 假设标准 stage2。两条都不投入 |
+| **`contract_ir` 与 `cpp_extension` 两条旁路** | `contract_ir` 没接进任何验收流水线（`dev-doc/oprunway-todo.md:101` 仍是 F3 待办）且 `CreateAclIntArrayFromCase` 只有声明无实现；`cpp_extension_codegen` 既无数组 attr 类型又用 `EXEC_NPU_CMD_EXT` 假设标准 stage2。两条都不投入 |
 | **OpenCV 版本/构建指纹的独立收据** | 只做 `golden.py` 内的最低版本断言 + `GOLDEN_SOURCE` 自由文本，不建机校收据 |
 | **`_PERF_SHAPE_PROFILES` 抽公共文件** | 两处重复表本轮不重构，只让 spec 能直供边界值绕过它 |
 

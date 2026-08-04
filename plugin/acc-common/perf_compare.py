@@ -223,7 +223,7 @@ def _no_perf_cases(spec, src, tgt, perf_spec, extra_notes=None):
 #   · cases_above_threshold ← performance.py:80-95  `count_speedup_above`（**严格 `ratio > threshold`**）
 #   · custom_only_by_dtype  ← performance.py:62-77  `summarize_custom_only_latency`（无基线只报绝对时延）
 #
-# ⚠⚠ 两把尺子故意并存（蓝本 `doc/oprunway-cannbot-alignment-plan.md` L1 的裁决，别「顺手统一」）：
+# ⚠⚠ 两把尺子故意并存（蓝本 `dev-doc/oprunway-cannbot-alignment-plan.md` L1 的裁决，别「顺手统一」）：
 #   - **硬门**（`perf_compare` 里的 `met = raw >= tgt`）用 `>=`，**一个字不动**——它是我们的验收判据，
 #     4 个 pin 算子的真机验收结论就挂在它上面；`>=` 对「恰好压线」更友好，是有意选的。
 #   - **本块的 `cases_above_threshold`** 用 cannbot 的**严格 `>`**——它是**展示口径**，为的是我们报告里

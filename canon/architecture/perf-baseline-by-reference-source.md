@@ -29,6 +29,6 @@ scope 计时的性能标杆时，直接调用并测量该对象；不先绕到�
 见 [[Torch reference acceptance uses an isolated C++ extension by default]]。这不把所有任务书 baseline
 强制改成 Torch，也不取消任务书明确点名直接 ACLNN 时的通用能力。
 
-依据 `doc/oprunway-spec-pr-analysis.md`。
+依据 `dev-doc/oprunway-spec-pr-analysis.md`。
 
 **Sources.** [[session d31ea446-dec3-479f-a7b3-d6c1dec4f611 · 2026-07-02]]（2026-07-06 检查点；2026-07-08 续：真机三算子任务书原文查证=TBE、GPU 非必需），[[session 37223d6d-c20e-48a9-84f5-99aeaddb7f51 · 2026-07-09]]（Equal 项作废：#2890 配错·任务未验收；Sign/Neg 与 TBE 口径仍留），[[session perf-baseline-direct-20260726 · 2026-07-26]]，[[session torch-cppextension-route-20260727 · 2026-07-27]]
