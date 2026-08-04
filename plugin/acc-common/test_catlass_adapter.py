@@ -373,7 +373,7 @@ class RealPathStubTest(unittest.TestCase):
             cs = A.build_matmul_caseset(_demo_spec(), d)
             with self.assertRaises(RuntimeError) as cm:
                 A.run_catlass(cs, d)
-            self.assertIn("待 ascend-a5", str(cm.exception))
+            self.assertIn("待 950 真机", str(cm.exception))
             # 但本地 materialize 已完成（manifest + A.bin 落盘）
             self.assertTrue(os.path.exists(os.path.join(d, "manifest.txt")))
         finally:

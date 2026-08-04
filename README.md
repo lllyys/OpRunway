@@ -19,7 +19,7 @@
 
 - **架构**：三层可移植设计。Layer 0 六份 JSON 契约 · Layer 1 确定性脚本（工具中立的「脑子」）· Layer 2 per-tool 薄壳（编排）。Stage 间只传 JSON。
 - **已真机验证**：两个结构不同的算子（IsClose 二元/bool、Sign 一元/数值）在真昇腾 NPU 上跑通且**裁决经核对正确**——精度 = 真 NPU 输出 vs numpy golden，性能 = msprof 真 kernel-only vs 真内置 TBE 基线，总体门同时卡精度+性能。
-  ⚠ **Equal 不计入有效结论**：它虽也在真机跑过，但事后确认**任务书↔PR 配错、且该 Equal 社区任务本身从未验收通过**，故其验收裁决已整体作废（见 [`dev-doc/oprunway-changes-brief.md`](dev-doc/oprunway-changes-brief.md) 顶部横幅）。Neg 仅接入 mock 级流水线；catlass（GEMM 系）当前实现为「注入其自带 example 树」的 repo-native harness（对应 canon 的「路线 C」更正仍待 compile→review，非既定 canonical），真机待 950（ascend-a5）+ VPN 验证。
+  ⚠ **Equal 不计入有效结论**：它虽也在真机跑过，但事后确认**任务书↔PR 配错、且该 Equal 社区任务本身从未验收通过**，故其验收裁决已整体作废（见 [`dev-doc/oprunway-changes-brief.md`](dev-doc/oprunway-changes-brief.md) 顶部横幅）。Neg 仅接入 mock 级流水线；catlass（GEMM 系）当前实现为「注入其自带 example 树」的 repo-native harness（对应 canon 的「路线 C」更正仍待 compile→review，非既定 canonical），真机待 950（950 真机）+ VPN 验证。
 - **裁决可信（确定性 + 对抗加固）**：pass/fail 只出自确定性脚本——`validator.py` 判精度、`perf_compare.py` 判性能，编排层与 subagent **只引用不自判**（ADR 0007）；**三级完整性门不重判 pass/fail**，只校验证据可信完整，门失败映射 `BLOCKED`。并对 evidence↔落盘产物做 sha256 绑定 + 门内重算比对，堵「伪造 metrics / 跑子集报 100% / 放宽阈值 / 混 e2e 墙钟」等假通过；`validator` 保持 stdlib-only。`acc-common` 由 **368 个 unittest 用例**覆盖——含判定链、三级门、适配器与脚本，以及对抗负例（谎报 dtype、伪造 summary、跑性能子集、越界产物路径等）。
 - **加一个算子**：对 `experimental/math/<op>` 的 aclnn 两段式算子，agent 可自动产 `spec`（acc-spec）+ `runner`（acc-runner）；**catlass / legacy / 非 math 族 / dtype 超范围会返回 `BLOCKED` 或转 P3，不硬塞**。`gen_cases` 的 golden 仍是一处手工注册（待自动化）；runner 自检目前是**纪律、非代码强制门**。用户侧无感——只需在会话里给任务书 + PR。
 
@@ -50,8 +50,8 @@
 
 | 机型 | catlass arch | 任务书份数 | 状态 |
 |---|---|---:|---|
-| **Atlas A2 / A3**（`ascend-a3`，`Ascend910_9382`） | `2201` | **38** | ✅ 环境已 de-risk；IsClose / Sign 真机跑通、裁决核对正确 |
-| **Ascend 950PR / 950DT**（`ascend-a5`，`Ascend950PR_9579`） | `3510` | 13 | ✅ 环境已 de-risk（catlass 编译 + `Compare success.`）；**尚无 aclnn 算子在此完成验收** |
+| **Atlas A2 / A3**（`A2A3 真机`，`Ascend910_9382`） | `2201` | **38** | ✅ 环境已 de-risk；IsClose / Sign 真机跑通、裁决核对正确 |
+| **Ascend 950PR / 950DT**（`950 真机`，`Ascend950PR_9579`） | `3510` | 13 | ✅ 环境已 de-risk（catlass 编译 + `Compare success.`）；**尚无 aclnn 算子在此完成验收** |
 | **Atlas 300V Pro** | — | 2 | ❌ **无硬件、无 de-risk** —— 撞上须先停 |
 
 互斥分桶 38 + 13 + 1 = 52；涉及 300V Pro 的共 2 份（1 份纯 300V Pro，1 份在 A2/A3 桶内兼列）。

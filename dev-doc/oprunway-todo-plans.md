@@ -143,7 +143,7 @@
 
 **可实施性**：no（严格说：待 CLAUDE.md #1 用户对方案点头才动手）。技术上本地部分**立即可做**：5 份 .md 编排制品 + AGENTS.md/plugin.json 手工同步 + command 轻改 +（可选）check_agent_frontmatter.py + 改动简表，并可本地完整验证 check_manifest_sync(SYNCED)/测试套件/run_workflow mock 端到端/fixture 演练 CP-A。卡点两处：① 落地前需用户批方案（#1 门）+ open decision (a)(b) 定夺；② 真机 CP-C/CP-D 端到端卡 NPU/VPN，只能设计+mock。
 
-**残余风险**：1) 真机端到端未验证：CP-C verify_runner 真机编译、CP-D run_npu 真机跑测 + FAIL 独立复现解耦，只能设计+mock，待开 NPU/VPN（ascend-a5 真 950 / a3 A2A3）——这是设计固有边界，非本次能消。2) CP-A 对应校验非全自动：issue 号靠 NL 读 + 用户确认（fetch_source 不抽），target_dir 可机器比对但下游判定仍需用户拍板；若坚持机器化需扩 Layer1（open c）。3) Task3 GPU external 对比层当前未接入 pipeline，移植类算子（需 GPU 基线）会走 BLOCKED_WAIT_GPU_BENCHMARK，本 todo 只写编排文本、不接数据。4) 结构合规机器门（check_agent_frontmatter）尚是 open decision，若不加则 subagent 单轮/禁循环/不判定合规回落到散文门，较脆。5) 三个 proposed canon 页（correspondence/conversational/cross-cli）仍未 settle，本 todo 载重它们时按 proposed 存疑处理；升 canonical 需 bureau 人门。
+**残余风险**：1) 真机端到端未验证：CP-C verify_runner 真机编译、CP-D run_npu 真机跑测 + FAIL 独立复现解耦，只能设计+mock，待开 NPU/VPN（950 真机 真 950 / a3 A2A3）——这是设计固有边界，非本次能消。2) CP-A 对应校验非全自动：issue 号靠 NL 读 + 用户确认（fetch_source 不抽），target_dir 可机器比对但下游判定仍需用户拍板；若坚持机器化需扩 Layer1（open c）。3) Task3 GPU external 对比层当前未接入 pipeline，移植类算子（需 GPU 基线）会走 BLOCKED_WAIT_GPU_BENCHMARK，本 todo 只写编排文本、不接数据。4) 结构合规机器门（check_agent_frontmatter）尚是 open decision，若不加则 subagent 单轮/禁循环/不判定合规回落到散文门，较脆。5) 三个 proposed canon 页（correspondence/conversational/cross-cli）仍未 settle，本 todo 载重它们时按 proposed 存疑处理；升 canonical 需 bureau 人门。
 
 **据 codex 修订**：逐条处理 16 条 codex findings（4 high 全解，无一驳回，部分选定分支并说明）：
 
@@ -274,7 +274,7 @@
 ## Blocked / 依赖
 
 - **本地能立刻做**：全部 5 份 .md 编排制品 + AGENTS.md/plugin.json 手工同步 + command 轻改 + （可选）check_agent_frontmatter.py + 改动简表；本地可完整验证 check_manifest_sync（SYNCED）、测试套件、run_workflow mock 端到端（spec→caseset→evidence→verdict→acceptance.json 门 PASSED）、以及 fixture 演练 CP-A 对应校验 + correspondence.json 落盘。
-- **卡真机 NPU/VPN**：acc-runner-dev 的 verify_runner 真机编译跑、acc-verify-rootcause 的 run_npu 真机跑测 + FAIL「被测物自 build + 声明 dtype + 手算 golden」独立复现解耦——只能设计 + mock，真机端到端待开 NPU/VPN（ascend-a5 真 950 / a3 A2A3）。
+- **卡真机 NPU/VPN**：acc-runner-dev 的 verify_runner 真机编译跑、acc-verify-rootcause 的 run_npu 真机跑测 + FAIL「被测物自 build + 声明 dtype + 手算 golden」独立复现解耦——只能设计 + mock，真机端到端待开 NPU/VPN（950 真机 真 950 / a3 A2A3）。
 - **卡 issue 号机器化**：`fetch_source.py` 当前 `pr_facts.json` **不抽 issue 号**（仅有 op/target_dir/changed_files/title）。默认走 **NL 读 task_doc/PR title + 用户确认**（保持纯 Layer2）；若要机器化抽取需扩 fetch_source（Layer1 小改，越出「纯 .md」范围）→ 见 open decision (c)。
 - **卡用户批**：落地前 CLAUDE.md #1 点头；3 个 proposed canon 页是否借本 todo settle/升 canonical（bureau review 是人门）。
 - **不涉及**：GPU 标杆外部数据/外发授权与本 todo 无关。
@@ -481,9 +481,9 @@
 
 **codex 总判**：codex_ran_ok=true（codex 真跑成、本 plan 已经外审），总判 VERDICT=major-gaps。4 条 codex-json 顶层 severity=high + tail 里合计 5 条 high（#1 consistency / #2 feasibility-build / #3 feasibility-msprof符号 / #4 completeness-task↔PR / #5 completeness-schema / #6 risk-mock误当evidence）——**全部已在终版解决或正确 scope**：#1 绑 generated_harness、#2 加 staging（已实地核验 build.sh 机制佐证 finding 成立）、#3 device-kernel extern C + 运行后命中门、#4 provenance 字段+synthetic 标注+上游 gate、#5 matmul 专属 schema+兼容性先定、#6 mock 打 development grade + NON-ACCEPTANCE 标记。**无 high 未解**。12 medium + 4 low 亦全部采纳落进 files/steps/gates。终版另附「实地核验」一节，把 codex 的 feasibility 猜测坐实为已验证事实（arch 索引 example 集、build.sh target 机制、validator 单阈值现状）。
 
-**可实施性**：no（分两层）。① 流程层：本 todo 处 init 阶段，按 CLAUDE.md #1「先抛方案经用户同意才落地」——终版需用户点头 + open_decisions 6 项（尤其 #1 mode 绑定、#2 staging 路径、#3 demo spec synthetic 定位、#4 ADR0005 暂缓）待拍板，未获准前不动手。② 能力层：一经批准，**本地可立即开工**全部脚手架（arch 探测/arch 索引 profile/matmul gen_cases+golden+materialize/双 runner 模板/CMake/staging 脚本/静态构建门/csv 解析+fixture/外部 baseline 校验+workflow 入口/catlass_mock 端到端跑穿三级门+单测），无需 NPU；**真机 NPU evidence + msprof 符号命中 + 真 GPU 基线 + 真正 acceptance 裁决**则硬阻塞于 ascend-a5(arch3510)+VPN+人工确认，以及换用真实 task↔PR-backed spec。
+**可实施性**：no（分两层）。① 流程层：本 todo 处 init 阶段，按 CLAUDE.md #1「先抛方案经用户同意才落地」——终版需用户点头 + open_decisions 6 项（尤其 #1 mode 绑定、#2 staging 路径、#3 demo spec synthetic 定位、#4 ADR0005 暂缓）待拍板，未获准前不动手。② 能力层：一经批准，**本地可立即开工**全部脚手架（arch 探测/arch 索引 profile/matmul gen_cases+golden+materialize/双 runner 模板/CMake/staging 脚本/静态构建门/csv 解析+fixture/外部 baseline 校验+workflow 入口/catlass_mock 端到端跑穿三级门+单测），无需 NPU；**真机 NPU evidence + msprof 符号命中 + 真 GPU 基线 + 真正 acceptance 裁决**则硬阻塞于 950 真机(arch3510)+VPN+人工确认，以及换用真实 task↔PR-backed spec。
 
-**残余风险**：1) **真机全部待验**：runner 能否在 bisheng/ccec + catlass 头下编成、`extern "C" __global__ __aicore__` 符号能否被 msprof `-k` 命中、Task Duration 实数、staging 注入 add_subdirectory 与 build.sh 的交互——Mac 上只能写+静态审，须 ascend-a5(3510)+VPN+人工确认才落实；`profile_hit_gate` 逻辑先备、真值未验。2) **acceptance 双阻塞**：demo spec 为 synthetic（无真实 task↔PR），且无真机 evidence → 本 todo 产出的一切「PASS」仅证明管路/门接通，非 NPU 验收；须后续换真实 task↔PR-backed spec + 真机 evidence 才有裁决意义。3) **精度口径未达 ADR0005 三层**：暂用 max_rel_err 单阈值，fp32 matmul 大 K 累积误差阈值需真机/任务书校准；三层扩展是 validator 级独立 todo。4) **GPU baseline 真数据缺位**：只定 schema+校验+fixture，真实 GPU 标杆由外部 Task 3 提供，未对真数据验。5) **staging 改 catlass 工作副本**：虽幂等+可回退+仅非提交 clone，仍是对第三方仓的 deploy 期改动，首跑须人工确认。6) **fp16(a2) 次要路径**阈值/ArchTag 差异未细化，聚焦主 fp32 路径。
+**残余风险**：1) **真机全部待验**：runner 能否在 bisheng/ccec + catlass 头下编成、`extern "C" __global__ __aicore__` 符号能否被 msprof `-k` 命中、Task Duration 实数、staging 注入 add_subdirectory 与 build.sh 的交互——Mac 上只能写+静态审，须 950 真机(3510)+VPN+人工确认才落实；`profile_hit_gate` 逻辑先备、真值未验。2) **acceptance 双阻塞**：demo spec 为 synthetic（无真实 task↔PR），且无真机 evidence → 本 todo 产出的一切「PASS」仅证明管路/门接通，非 NPU 验收；须后续换真实 task↔PR-backed spec + 真机 evidence 才有裁决意义。3) **精度口径未达 ADR0005 三层**：暂用 max_rel_err 单阈值，fp32 matmul 大 K 累积误差阈值需真机/任务书校准；三层扩展是 validator 级独立 todo。4) **GPU baseline 真数据缺位**：只定 schema+校验+fixture，真实 GPU 标杆由外部 Task 3 提供，未对真数据验。5) **staging 改 catlass 工作副本**：虽幂等+可回退+仅非提交 clone，仍是对第三方仓的 deploy 期改动，首跑须人工确认。6) **fp16(a2) 次要路径**阈值/ArchTag 差异未细化，聚焦主 fp32 路径。
 
 **据 codex 修订**：逐条处理 20 条 codex issue（4 high + 12 medium + 4 low，其中 5 条被 codex 标 high）：
 
@@ -498,7 +498,7 @@
 【MEDIUM，全部采纳】
 - #7（「零字面硬编码」不可执行）→ 采纳：acceptance 表述改为「production 路径无默认/兜底硬编码 arch；白名单枚举 + 测试 fixture 允许字面值」。
 - #8（arch 注入不足以切模板）→ 采纳：CATLASS_PROFILE 按 arch 索引，决定 example/源码/ArchTag/dtype/runner（已核验 3510→43 fp32/Ascend950、2201→00 fp16/AtlasA2）。
-- #9（CatlassBasicMatmul 指向不清）→ 采纳：pin 主目标 = ascend-a5 arch3510→`43_ascend950_basic_matmul` fp32 RowMajor；次 = a3 arch2201→`00_basic_matmul` fp16；repo commit 入 artifact_manifest。
+- #9（CatlassBasicMatmul 指向不清）→ 采纳：pin 主目标 = 950 真机 arch3510→`43_ascend950_basic_matmul` fp32 RowMajor；次 = a3 arch2201→`00_basic_matmul` fp16；repo commit 入 artifact_manifest。
 - #10（GPU baseline 无 workflow 入口）→ 采纳：run_workflow 加 `--baseline`/env/spec 入口 + 优先级 + 复制进 baseline.json。
 - #11（三套 baseline 语义混用）→ 采纳：spec 显式 `perf.baseline_source=gpu_external`；catlass 无 builtin-TBE 分母、故 run_catlass 不写 `_real_baseline`，perf 分母走外部 GPU（ADR0006 默认）。
 - #12（精度未覆盖 ADR0005 三层）→ 采纳但 scope：validator 现仅 max_rel_err 单阈值，三层/MERE/MARE/RMSE/NaN-Inf 是 validator 级扩展、超本 adapter 范围；本 todo 用现有 numerical 路径 + 文档化 fp32 阈值来源，三层扩展列独立 todo（open_decisions #4 待确认暂缓）。
@@ -522,7 +522,7 @@
 # T4-P3 · catlass 验收 adapter（终版）
 
 ## goal
-在 `acc-common` 里落成第一个 catlass repo-adapter，把 **CatlassBasicMatmul** 从「spec → NPU 精度+性能 evidence」打通。**明确定位**：这是 canon `repo-adapter.md` 三模式里的 **`generated_harness`**（我们自造 bin-IO 调用壳去包 catlass 自带 example 的 kernel），不是新造第 4 种模式；代码里以 `harness_kind="generated_harness"` 落字段承载。本 todo 只做 **OpRunway 自有流水线（repo-native，main() 全我们控）**，**不宣称 AscendOpTest bridge 就绪**（路线 A/B 留到真接框架时按 canon 重造）。本地先用 `catlass_mock` 端到端跑穿三级机器门以证明「管路接通」，真机 build/run/msprof 在 ascend-a5(arch 3510, fp32) 就绪后接入。catlass 机制仅作本仓执行后端、不升总规范（ADR0002）。
+在 `acc-common` 里落成第一个 catlass repo-adapter，把 **CatlassBasicMatmul** 从「spec → NPU 精度+性能 evidence」打通。**明确定位**：这是 canon `repo-adapter.md` 三模式里的 **`generated_harness`**（我们自造 bin-IO 调用壳去包 catlass 自带 example 的 kernel），不是新造第 4 种模式；代码里以 `harness_kind="generated_harness"` 落字段承载。本 todo 只做 **OpRunway 自有流水线（repo-native，main() 全我们控）**，**不宣称 AscendOpTest bridge 就绪**（路线 A/B 留到真接框架时按 canon 重造）。本地先用 `catlass_mock` 端到端跑穿三级机器门以证明「管路接通」，真机 build/run/msprof 在 950 真机(arch 3510, fp32) 就绪后接入。catlass 机制仅作本仓执行后端、不升总规范（ADR0002）。
 
 > ⚠ 重要边界（codex #4/#6）：`CatlassBasicMatmul` 是 **catlass 库自带 example**，不是有 task_doc+交付 PR 的社区算子任务。故本 todo 产出的 spec 是 **synthetic demo spec（无真实任务书↔PR 对应）**，只用来驱动/验证 adapter 管路，**不构成 acceptance 级裁决**。真正的验收裁决必须建立在「真机 NPU evidence + 有 verify 过的 task↔PR 对应的 spec」之上——这两个前提本 todo 都尚未满足，故 acceptance 结论一律 **BLOCKED-on-real-NPU / BLOCKED-on-real-provenance**。
 
@@ -557,7 +557,7 @@ minimal-first：先 CatlassBasicMatmul 单算子跑穿再谈融合/其它 exampl
 3. `plugin/acc-common/catlass/oprunway_catlass_basic_matmul_a2_runner.cpp` — **create**：arch 2201/fp16/AtlasA2 版（对齐 `00_basic_matmul`），de-risk/次要路径。
 4. `plugin/acc-common/catlass/CMakeLists.txt` — **create**：harness 子目录 CMake，仅一行 `catlass_example_add_executable(<harness> matmul <runner>.cpp)`（复用 examples 作用域已定义的 macro + include_directories + link_libraries + arch 编译选项）；`add_executable` 相关**单独成行**防符号解析漂移。**此文件是模板源**，deploy 时拷进 `repos/catlass/examples/<harness>/`。
 5. `plugin/acc-common/catlass/stage_into_catlass.sh` — **create**（新增，补 codex #2）：deploy 期把 `examples/<harness>/{runner.cpp,CMakeLists.txt}` 拷入 catlass 工作副本，并**幂等注入** `add_subdirectory(<harness>)`（带 sentinel 注释，可检测/可回退）到 `examples/CMakeLists.txt` 的 `foreach` 之后 —— 让 `build.sh <harness>` 能纳入构建。全程只改远端**非提交**的 catlass clone、cleanup 时移除注入块。
-6. `plugin/acc-common/catlass/run_on_catlass_npu.sh` — **create**：真机编排（ascend-a5）：`stage_into_catlass.sh` → `scripts/build.sh <harness> -DCATLASS_ARCH=$ARCH` → 正确性跑出 out.bin → 逐 perf 用例 msprof op 采 kernel-only（warmup≥10、iters≥30 或方差收敛、median + p90/min、计时前后同步、记 clock/power「若可得」+ CANN/bisheng/msprof 版本）→ 写 perf_result.txt。hash-stamp 防 stale exe；**路径经 `OPRUNWAY_REMOTE_DIR` + 白名单，rm 只在专属 run 子目录内**；profile 目录设 size budget、逐用例清理、单用例 timeout。
+6. `plugin/acc-common/catlass/run_on_catlass_npu.sh` — **create**：真机编排（950 真机）：`stage_into_catlass.sh` → `scripts/build.sh <harness> -DCATLASS_ARCH=$ARCH` → 正确性跑出 out.bin → 逐 perf 用例 msprof op 采 kernel-only（warmup≥10、iters≥30 或方差收敛、median + p90/min、计时前后同步、记 clock/power「若可得」+ CANN/bisheng/msprof 版本）→ 写 perf_result.txt。hash-stamp 防 stale exe；**路径经 `OPRUNWAY_REMOTE_DIR` + 白名单，rm 只在专属 run 子目录内**；profile 目录设 size budget、逐用例清理、单用例 timeout。
 7. `plugin/acc-common/catlass/verify_catlass_build.py` — **create**：**静态构建门**（Mac 可跑）——校验 `-DCATLASS_ARCH` 已注入且 ∈ 白名单、`add_subdirectory(<harness>)` 已注入、`add_executable` 单行、runner 含 `extern "C" __global__ __aicore__` 钉死符号声明、include 路径存在。**不**声称能证明 msprof 命中（那是运行后门）。
 8. `plugin/acc-common/catlass_parse.py` — **create**：`parse_raw_log()`（哨兵计数、逐 case ok/FAIL、抗缺行）+ `parse_msprof_csv()`（**按列名 `Task Duration(us)` 解析** OpBasicInfo.csv，不写死第 3 列；排序取 median，附 p90/min）+ `profile_hit_gate()`（**运行后 profile 命中门**：解析真实 CSV，断言存在被测 kernel 行；符号未预知时取 CSV 里的实测 kernel 名并回填记录）。全部 fixture 单测、不依赖真机。
 9. `plugin/acc-common/gen_cases.py` — **edit**：注册 `GOLDEN["CatlassBasicMatmul"]`（numpy fp32 `C=A.astype(f32)@B.astype(f32)`，golden_source 记「numpy f32 matmul，对齐 catlass `examples/common/golden/matmul.hpp` CPU f32 语义」）+ **matmul 专属 case-plan 分支**（A[m,k]/B[k,n]→C[m,n]，功能/精度小 shape + 性能大 shape，**shape 可配置**、非死钉 1024³）+ layout 元数据(全 RowMajor) + `case_origin`/provenance 字段。matmul 走独立 plan，不套用 elementwise broadcast。
@@ -581,7 +581,7 @@ minimal-first：先 CatlassBasicMatmul 单算子跑穿再谈融合/其它 exampl
 7. **run_catlass / run_catlass_mock 组装 7 阶段 + 注册**：`run_catlass_mock`（本地：kernel out=golden、可注入 defect、perf=确定性 mock、`evidence_grade=development`）；`run_catlass`（真机：stage→build→run→pull→parse→collect，`evidence_grade=acceptance_candidate`，**catlass 无 builtin-TBE 故不写 `_real_baseline`**，perf 分母走 gpu_external）；两函数内部注释标 discover/build/materialize_case/run_correctness/run_perf/parse_results/collect_artifacts 七段；collect 落 `artifact_manifest.json`（补 codex #18）；MODES 注册 `catlass`/`catlass_mock`。
 8. **GPU/baseline schema 对齐 + workflow 入口**：`perf_compare.load_external_baseline()`（schema/scope/覆盖校验，补 codex #11/#19）；`run_workflow.py` 加 `--baseline`/env/spec 入口 + 优先级 + 复制进产物（补 codex #10）；写 sample GPU baseline fixture + 文档化契约。**真实 GPU 数字由外部(Task 3)提供，此处只定契约+校验**。
 9. **本地端到端 + 机器门 + mock 非验收标记 + 回归**：`run_workflow.py catlass_basic_matmul.spec.json --mode catlass_mock` 跑穿；`validate_acceptance_state` task1/2/3 全 PASSED **但带 `NON-ACCEPTANCE (mock evidence)`**（补 codex #6）；defect 注入验证门能挡；`test_catlass_adapter.py` + 既有 `test_validate_acceptance_state.py` 全绿；grep 确认 production 路径无默认硬编码 arch。
-10. **过门 + 简表 + 待真机**：代码全体过 `cc-suite:audit-fix`（复述发现/改动/风险）；spec/散文过 `codex exec` 审；`dev-doc/oprunway-changes-brief.md` 倒序追加（含 mock/real 区分 + synthetic provenance，补 codex #21）；真机 build/run(ascend-a5 arch 3510) 与 generated_harness 首跑前**向用户人工确认**（高风险边界），待 VPN 开后接入。
+10. **过门 + 简表 + 待真机**：代码全体过 `cc-suite:audit-fix`（复述发现/改动/风险）；spec/散文过 `codex exec` 审；`dev-doc/oprunway-changes-brief.md` 倒序追加（含 mock/real 区分 + synthetic provenance，补 codex #21）；真机 build/run(950 真机 arch 3510) 与 generated_harness 首跑前**向用户人工确认**（高风险边界），待 VPN 开后接入。
 
 ---
 
@@ -597,7 +597,7 @@ minimal-first：先 CatlassBasicMatmul 单算子跑穿再谈融合/其它 exampl
 
 ## blocked_deps
 **本地现在能做到**：全部 adapter/parser/gen_cases/spec/双 runner cpp/CMake/staging 脚本/编排脚本/静态构建门/GPU 基线校验/workflow 入口代码可写全；`catlass_mock` 可本地端到端跑穿三级机器门（无 NPU）；所有 parser 用 fixture 单测；arch 探测/无默认硬编码/matmul 形状可静态验证。
-**卡真机的部分**：① runner cpp 需 bisheng/ccec + catlass 头文件才能 compile，Mac 只能写+审、不能编；② 真实 build+run 必须 ascend-a5 真 950(arch 3510, fp32) + 用户开 VPN，才产真 evidence/真 msprof；③ **msprof 实测符号名 / profile 命中 / Task Duration 实数**须真机验证（`profile_hit_gate` 逻辑先备）；④ GPU 标杆真实数字由外部提供，现只能定 schema+校验+fixture；⑤ 路线 A/B 真桥依赖真机+框架接入，本 todo 只保留 canon 设计、不落真桥；⑥ **acceptance 级裁决**双阻塞：既缺真机 NPU evidence，又缺 verify 过的真实 task↔PR spec（本 demo spec 为 synthetic）。
+**卡真机的部分**：① runner cpp 需 bisheng/ccec + catlass 头文件才能 compile，Mac 只能写+审、不能编；② 真实 build+run 必须 950 真机 真 950(arch 3510, fp32) + 用户开 VPN，才产真 evidence/真 msprof；③ **msprof 实测符号名 / profile 命中 / Task Duration 实数**须真机验证（`profile_hit_gate` 逻辑先备）；④ GPU 标杆真实数字由外部提供，现只能定 schema+校验+fixture；⑤ 路线 A/B 真桥依赖真机+框架接入，本 todo 只保留 canon 设计、不落真桥；⑥ **acceptance 级裁决**双阻塞：既缺真机 NPU evidence，又缺 verify 过的真实 task↔PR spec（本 demo spec 为 synthetic）。
 
 ## acceptance
 1. `repo_adapter.py` 出现 `catlass` + `catlass_mock` 两模式，函数内按 7 方法阶段分段，`harness_kind="generated_harness"` + `evidence_grade` 落字段，**CATLASS_PROFILE 按 arch 索引**（3510→43/fp32、2201→00/fp16），MODES 已注册。
@@ -608,7 +608,7 @@ minimal-first：先 CatlassBasicMatmul 单算子跑穿再谈融合/其它 exampl
 6. matmul gen_cases/materialize 形状正确（A[m,k]/B[k,n]→C[m,n]，非 broadcast），shape 可配置；spec provenance 标 synthetic + acceptance_blocked_reason。
 7. `stage_into_catlass.sh` 幂等注入可检测/可回退；`verify_catlass_build.py` 静态门通过；collect 落 `artifact_manifest.json`（commit/build cmd/版本/hash）。
 8. `test_catlass_adapter.py` 与既有测试全绿；全体代码过 `cc-suite:audit-fix`、散文过 `codex exec`；changes-brief 已追加且写清「mock 已过/真机未产/synthetic spec」。
-9. 真机 build/run 与 generated_harness 步骤已写全并**明确标注「待 ascend-a5+VPN+人工确认」**（诚实区分本地已达 vs 真机待验）；文档不宣称 AscendOpTest bridge 就绪。
+9. 真机 build/run 与 generated_harness 步骤已写全并**明确标注「待 950 真机+VPN+人工确认」**（诚实区分本地已达 vs 真机待验）；文档不宣称 AscendOpTest bridge 就绪。
 
 ## open_decisions
 1. **canon mode 绑定确认**：catlass adapter 归 canon `generated_harness`（已在代码 `harness_kind` + 本 doc 落定），请用户点头此 taxonomy 绑定（codex #1）。
@@ -616,7 +616,7 @@ minimal-first：先 CatlassBasicMatmul 单算子跑穿再谈融合/其它 exampl
 3. **demo spec 的 synthetic 定位**：`CatlassBasicMatmul` 无真实 task_doc↔PR，spec 标 synthetic、acceptance 阻塞、只验管路——请确认接受此定位（codex #4/#6）；若用户希望改用某个有真实 task↔PR 的 catlass 相关算子作首例，则先走上游 acc-spec verify 对应再回本 todo。
 4. **ADR0005 三层精度口径暂缓**：`validator.py` 现仅 max_rel_err 单阈值；MERE/MARE/RMSE/NaN-Inf/小值绝对误差/三层放行是 **validator 级扩展**，本 adapter todo 先用现有 numerical 路径 + 文档化 fp32 阈值来源，三层扩展列为独立 validator todo。需确认此暂缓（codex #12）。
 5. **7 方法是否现在抽 ABC**：推荐保持「每模式一函数、内部分段」以 minimal-first，正式接口化列后续。需确认暂缓（动接口即动架构）。
-6. **首建平台**：主目标 = ascend-a5 arch 3510/fp32；a2/2201/fp16 作 de-risk。真机可用时先跑哪条、以及路线 B(冒牌 exe) vs A(封 aclnn) 首建顺序，均阻塞于真机+人工确认，实施阶段再拍。
+6. **首建平台**：主目标 = 950 真机 arch 3510/fp32；a2/2201/fp16 作 de-risk。真机可用时先跑哪条、以及路线 B(冒牌 exe) vs A(封 aclnn) 首建顺序，均阻塞于真机+人工确认，实施阶段再拍。
    ⚠ **2026-07-10 更正**：此处「首建平台」仅 **catlass adapter** 语境，且 `CatlassBasicMatmul` 属 synthetic、**无真实 task_doc↔PR**（见本节 #3）——故不得称 a5 为「任务书目标平台」。真实社区任务书的目标硬件按各自 `适配硬件` 字段 + `op_def` 的 `AddConfig` 双源判定（实测：A2/A3 系 38 份 · 950 系 13 份 · 纯 300V Pro 1 份），详见 `CLAUDE.md` 远程 NPU 环境段。
 
 
@@ -752,7 +752,7 @@ LOW：
 
 **可实施性**：no —— 卡在 CLAUDE.md#1 的 step1 用户方案确认，尤其决策项 D1–D5（PASSED_WITH_RISK 退出码=2、「仿真图」口径、复用 canonical 状态、human_cp pending 语义、spec schema 升级范围）需先拍板；用户点头后，全部代码/单测/图/文档本地即可一次落地（不依赖真机/VPN/GPU）。真数据的 PASSED_WITH_RISK 与 ADR0006 warmup/iters 核验、GPU 双边同口径、真正人工 CP 记录另留 blocked（真机/外部/产品形态）。
 
-**残余风险**：1. 真机小 shape 真值未取——本地只 mock 注入演示（已明标 repo_mode=mock / env=(inj-slow)，禁作真实人工 CP 依据）；一条「真数据的 PASSED_WITH_RISK」要等 ascend-a5/a3 真机 msprof。
+**残余风险**：1. 真机小 shape 真值未取——本地只 mock 注入演示（已明标 repo_mode=mock / env=(inj-slow)，禁作真实人工 CP 依据）；一条「真数据的 PASSED_WITH_RISK」要等 950 / A2A3 真机 真机 msprof。
 2. ADR0006（proposed）的 warmup≥10/iters≥30/median 是否真满足，需真机核 msprof 计数，本地无法验证。
 3. 两 proposed 页 perf_baseline_source 张力未裁——不影响本 todo 走的 NPU-vs-TBE kernel_only 单边线；GPU 双边同口径闭环 blocked 于外部 GPU schema。
 4. gate 对 SVG 只验 sha256 + 交叉校验 simulation↔per_case，**不 re-render 比对几何**（避免 gate 耦合 renderer）——理论上 renderer 有 bug 画错但 simulation 数据对时 sha 仍过；靠 perf_sim_plot 单测覆盖 renderer 正确性兜底，接受此边界。
@@ -911,7 +911,7 @@ LOW：
 **本地现在能做完（无需真机）**：例外判定/解析器/数值校验、gen_cases 小 shape 用例、perf_sim_plot 的 SVG（阈值数据驱动+XML escape）、gate_task3 例外门+交叉校验+路径钉死+sha、run_workflow 接线（state→exit、stale 清图、human_cp pending）、mock_baseline 注入、全部单测、本地 e2e 演示、schema/文档同步、bureau 捕获文本。以上不依赖 NPU/VPN/GPU。
 
 **卡在真机/外部/用户**：
-- **真实小 shape us 数**（真 <10us、真差在容差内）需真机 msprof（ascend-a5 真950 / ascend-a3），本地只能 mock 注入演示逻辑；出一条「真数据的 PASSED_WITH_RISK」要等真机跑。
+- **真实小 shape us 数**（真 <10us、真差在容差内）需真机 msprof（950 真机 真950 / A2A3 真机），本地只能 mock 注入演示逻辑；出一条「真数据的 PASSED_WITH_RISK」要等真机跑。
 - **ADR0006（proposed）的 warmup≥10/iters≥30/median 实际是否满足**，需真机核 msprof 的 warmup/iters 计数与统计口径——本地无法验证。
 - **timing_scope 双边同口径的 GPU 侧尚未接**（属 P2、等外部 GPU 基线 schema），当前例外/对比只在 NPU-vs-内置TBE(kernel_only) 这一边成立。
 - **落地实施本身 blocked 于 step1 用户方案确认 + 决策项 D1–D5 拍板**（init 阶段规则）。

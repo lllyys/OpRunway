@@ -40,7 +40,7 @@
 
 ### A · 真缺陷：私有环境写死默认值（别人拿到插件跑不起来）
 
-- **Q2 机器连接**：`repo_adapter._ne_cfg()` 把 `host="ascend-a3"` 写死默认，无 `AskUserQuestion`、**无"目标机=本机、直接跑"分支**（现在强制 ssh+scp）。
+- **Q2 机器连接**：`repo_adapter._ne_cfg()` 把 `host="A2A3 真机"` 写死默认，无 `AskUserQuestion`、**无"目标机=本机、直接跑"分支**（现在强制 ssh+scp）。
   改：CP-D 前 `AskUserQuestion`「目标机=① 本机直连 ② ssh 远端」；默认值改"必须显式提供，否则报错"，不用私有主机名兜底。
 - **Q3 被测仓路径**：`ops: "/home/lys/ops-math"` 写死；**全仓无 git clone**。别人机器没这路径即失败。
   改：被测仓缺失时从 PR 的 gitcode URL 现场浅 clone 到工作目录；路径运行时探测/询问，不给私有默认。

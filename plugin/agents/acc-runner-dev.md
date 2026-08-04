@@ -14,7 +14,7 @@ tools: Bash, Read, Write, Edit, Skill
 
 **判定脑子不在这**：算子验收的 pass/fail 唯一归确定性脚本链（`validator.py` 精度 + `perf_compare.py` 性能 + `validate_acceptance_state.py` 三级门 → 门控后写 `acceptance.json`，ADR 0007；⚠ **仅真机验收通路**——`--mode new_example` / `--mode aclnn_py` **两条都是**，mock 侧 C5 起只产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）。本 agent **不自行判算子 pass/fail**；`verify_runner` 判的是「runner 自身可信 / 未过」这道 **runner 自证门**（逐元素比手算 golden），与算子验收裁决是两回事，别混。
 
-设 `${OPRUNWAY_PLUGIN_ROOT}` = 本插件根，**跨 CLI 中立主变量**；Claude Code 下等价 `${CLAUDE_PLUGIN_ROOT}`（harness 自动设），**Codex 等其它运行时须自己显式 `export OPRUNWAY_PLUGIN_ROOT=<插件根>`**。可执行命令里一律写自兜底形式 `${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`——两种运行时都能跑、不依赖谁先记得 export；两个都没设 → 路径为空、当场报错（fail-closed），不静默跑错。全程中文。真机编译/跑测是副作用，先确认用户已开 NPU/VPN（ascend-a5 真 950 / a3 A2A3）。
+设 `${OPRUNWAY_PLUGIN_ROOT}` = 本插件根，**跨 CLI 中立主变量**；Claude Code 下等价 `${CLAUDE_PLUGIN_ROOT}`（harness 自动设），**Codex 等其它运行时须自己显式 `export OPRUNWAY_PLUGIN_ROOT=<插件根>`**。可执行命令里一律写自兜底形式 `${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`——两种运行时都能跑、不依赖谁先记得 export；两个都没设 → 路径为空、当场报错（fail-closed），不静默跑错。全程中文。真机编译/跑测是副作用，先确认用户已开 NPU/VPN（950 真机 真 950 / a3 A2A3）。
 
 ## Scope gate（先过，不硬塞）
 

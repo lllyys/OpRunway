@@ -298,7 +298,7 @@
 
 #### 🟢 shape_transform 用真算子跑通了（2026-07-23）——**三个全通，且经 a3 真 torch 复跑**
 
-> **a3 `oprunway_prov`（真 torch 2.10.0+cpu）实跑**：Im2col 50 用例 `(2,2,2,2)→(2,8,9)` ·
+> **a3 专用容器（真 torch 2.10.0+cpu）实跑**：Im2col 50 用例 `(2,2,2,2)→(2,8,9)` ·
 > UpsampleNearestExact2d 18 · UpsampleNearest3d 20 `(2,3,2,4,4)→(2,3,4,6,8)`（**rank 5**）。
 > 三者 `out_shape_source` 均为 `golden.out_shape` —— **声明值驱动整条链、且与真 torch 实际产出
 > 的形状逐 case 对过账**（对不上引擎 fail-closed）。全量 686 测在 a3 亦全绿。
@@ -427,7 +427,7 @@
 - [x] **4.2 · C1–C5 已落地（2026-07-22）**：shape_transform 通路打通（`out_shape` 契约——**当时是 4 元组，2026-07-23 已扩为 5 字段具名元组** `Golden(fn, source, provenance, out_shape, contract)`，别读作现行契约 —— 加 attr `list[int]` +
   spec `rank` 约束）· dtype 挂账 `passed_with_gaps` 全链接线（validator → 门 → `run_workflow`，**exit 2 挂人工、绝不回 0**）·
   mock 物理上产不出 `acceptance.json`（改产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）· `--defect` 出 CLI。
-  验证：**a3 `oprunway_prov` 容器真 torch 2.10.0+cpu 跑 639 测全绿**（`OK (skipped=2)`，54.6s；
+  验证：**a3 专用容器 容器真 torch 2.10.0+cpu 跑 639 测全绿**（`OK (skipped=2)`，54.6s；
   传输逐文件 sha256 双侧一致 `6f0ac4a9…`）。本机：torch 替身 639 全绿 + 裸跑与基线零 diff + 两道门 PASS/SYNCED。
   ⚠ **本机「零新增红」不能当放行依据**——59 条恒红会掩盖结构性断裂（本轮就掩盖了 5 条：
   「文件不存在」「argparse 不认参数」这类，与数值无关）。**造 torch 替身重跑**才是本机唯一有效的自证手段。
@@ -654,7 +654,7 @@
 3. **「完工」标准未定**（够 demo / 够内部用 / 够对外发布）——定了才能倒推「到可用 v2 还差哪几步」。
 
 ### B. 外部资源阻塞
-4. **真机验证**：待 `ascend-a5`（真 950 / arch 3510）+ VPN。catlass 真机 build/run、Track C 的 int/bf16 runner、AscendOpTest bool cross-check 全挂在这。
+4. **真机验证**：待 `950 真机`（真 950 / arch 3510）+ VPN。catlass 真机 build/run、Track C 的 int/bf16 runner、AscendOpTest bool cross-check 全挂在这。
 5. **真 GPU 基线数据**：consumer 侧与最小字段契约已就绪，缺数据即走 `BLOCKED_WAIT_GPU_BENCHMARK`。
 
 ### C. 已收口（不再是待办）

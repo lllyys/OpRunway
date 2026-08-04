@@ -11,7 +11,7 @@ descriptor）工具零改即跑。
   `compute_metrics` 误差复算走 `repo_adapter.build_multi_output_evidence`（OpRunway 侧），pass/fail 归
   validator/perf_compare（ADR 0007）。本模块一律不算 metrics、不下结论。
 - **真机全部待验**（承 golden-branch-handoff「covered≠真机绿」）：build.sh install / ctypes 在 9.0.1
-  运行时 / 多输出 arity / bf16 窄化 —— 均须 a3 `oprunway_prov` 容器实证。real 通路默认 fail-closed，须显式
+  运行时 / 多输出 arity / bf16 窄化 —— 均须 a3 专用容器 容器实证。real 通路默认 fail-closed，须显式
   `OPRUNWAY_ACLNN_REAL=1` + 人工确认副作用（build install 写用户态 vendor 目录）才跑（同 catlass `OPRUNWAY_CATLASS_REAL`）。
 - **零硬编码 / 副作用隔离**：机器名 / 远端路径 / op 子路径 / soc / vendor / PR-head-sha 全经 `OPRUNWAY_*`
   传入（无私有默认，缺关键项 fail-closed）；install 落**用户态 vendor 目录**（`--install-path`），运行时
@@ -1628,7 +1628,7 @@ def run_aclnn_py(caseset, work, defect_cases=None):
     out_dir = os.path.join(work, "aclnn_out")
     if os.environ.get("OPRUNWAY_ACLNN_REAL") != "1":
         raise RuntimeError(
-            "aclnn_py 真机路径未启用——待 a3 `oprunway_prov` 容器（CANN 9.0.1 / torch_npu 2.10）+ 人工确认。\n"
+            "aclnn_py 真机路径未启用——待 a3 专用容器 容器（CANN 9.0.1 / torch_npu 2.10）+ 人工确认。\n"
             "  本地已完成：DUT 定位（find_aclnn_project ops 仓形态 + 软链守卫）、输入 dtype 白名单、build/install/exec/collect"
             " 编排（按 §9.6 实测配方）、evidence 组装管路（repo_adapter.build_multi_output_evidence 对拉回 out_k.bin 复算 metrics）。\n"
             "  真取源/build.sh install / ctypes 9.0.1 运行时 / 多输出 arity / bf16 窄化须真机（de-risk D0-D2 已坐实配方，端到端待接）。\n"

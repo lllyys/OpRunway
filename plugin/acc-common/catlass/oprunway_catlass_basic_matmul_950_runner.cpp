@@ -2,7 +2,7 @@
  * OpRunway · catlass generated_harness runner —— arch 3510 / fp32 / Ascend950 / TLA（主目标）。
  * 对齐 catlass example 43_ascend950_basic_matmul（basic_matmul_tla.cpp）。
  *
- * ⚠⚠ 模板·**待真机验证**（ascend-a5 arch 3510 + VPN + 人工确认）·**Mac 不可编译**（无 bisheng/ccec + catlass 头）。
+ * ⚠⚠ 模板·**待真机验证**（950 真机 arch 3510 + VPN + 人工确认）·**Mac 不可编译**（无 bisheng/ccec + catlass 头）。
  *     首跑 generated_harness 前须人工确认（CLAUDE.md #1/#3）。**不得假称已验证**。
  *
  * 职责（generated-harness-responsibilities.md 4 职责之 bin-IO shim / 性能测量栈）：
