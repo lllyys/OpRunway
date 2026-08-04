@@ -1702,12 +1702,16 @@ def resolve_aclnn_baseline_plan(aclnn_baseline, call, case):
         {"library": "cann_builtin_libopapi",
          "variants": [
            {"when": {"attr": "dim", "is_null": true},
-            "symbol": "Median", "slots": ["self", "valuesOut"]},
+            "symbol": "Median", "stage2_form": "standard",
+            "slots": ["self", "valuesOut"]},
            {"when": {"attr": "dim", "is_null": false},
-            "symbol": "MedianDim",
+            "symbol": "MedianDim", "stage2_form": "standard",
             "slots": ["self", "dim", "keepDim", "valuesOut", "indicesOut"],
             "output_dtypes": {"indicesOut": "int64"}}
          ]}
+
+    ``stage2_form`` 必填（``standard`` / ``extended``）：内置 ACLNN 没有可解析的 header，
+    执行段实参结构只能由任务书/spec 显式声明，工具不猜。
 
     ``slots`` 从该 case 已解析的 ``aclnn_call.slots`` 按名字选择并重排，因而可以表达“DUT
     统一接口、任务书基线是两个既有 ACLNN 接口”这类 ABI 差异。匹配必须恰好一条，缺/重名/多匹配
@@ -1752,6 +1756,16 @@ def resolve_aclnn_baseline_plan(aclnn_baseline, call, case):
     symbol = variant.get("symbol")
     names = variant.get("slots")
     output_dtypes = variant.get("output_dtypes") or {}
+    # audit C2：内置 ACLNN baseline **没有 header 可解析**，stage2 的实参结构只能由上游
+    # （任务书 → spec.perf.aclnn_baseline）显式带进 plan。缺它就只能靠 runner 兜底猜 4 参，
+    # 而那正是 GaussianBlur 那种 10 参 stage2 被静默错调的路径 —— 故此处**必填、受控**。
+    from .aclnn_runner import STAGE2_DISPATCHABLE     # 受控词表单一真源，别在这儿抄第二份
+    stage2_form = variant.get("stage2_form")
+    if stage2_form not in STAGE2_DISPATCHABLE:
+        raise PerfCollectError(
+            f"aclnn baseline variant.stage2_form={stage2_form!r} 缺失或非受控值，"
+            f"须显式属 {list(STAGE2_DISPATCHABLE)}——无 header 的调用方必须自报执行段实参结构，"
+            "工具绝不按 4 参猜（错 arity 的 native 调用 = 段错误或静默错值）")
     if not isinstance(symbol, str) or not symbol or symbol.startswith("aclnn"):
         raise PerfCollectError("aclnn baseline variant.symbol 须为不带 aclnn 前缀的非空基名")
     if not isinstance(names, list) or not names or any(not isinstance(n, str) or not n for n in names):
@@ -1784,7 +1798,8 @@ def resolve_aclnn_baseline_plan(aclnn_baseline, call, case):
             f"非法项={bad_overrides}")
     return {"library": aclnn_baseline["library"], "symbol": symbol,
             "slots": [by_name[name] for name in names],
-            "output_dtypes": dict(output_dtypes)}
+            "output_dtypes": dict(output_dtypes),
+            "stage2_form": stage2_form}
 
 
 def cann_builtin_libopapi():
@@ -2097,7 +2112,10 @@ def materialize():
         params.append({"name": slot["name"], "role": role,
                        "ctype": "tensor" if role in ("in", "out") else slot.get("ctype"),
                        "const": True if role == "in" else False})
-    return slots, AclnnSignature(op_name=plan["symbol"], params=params)
+    # stage2 形态由 plan 逐字带下来（spec 声明 → resolve_aclnn_baseline_plan 校过受控词表）。
+    # runner 已删掉「未声明就按 4 参调」的兜底，这里必须显式传，采集端与执行端用的是同一个值。
+    return slots, AclnnSignature(op_name=plan["symbol"], params=params,
+                                 stage2_form=plan["stage2_form"])
 
 runner = AclnnRunner(device=int(CFG["device"]), required_symbol_lib=required_lib,
                      hash_symbol_libs=True)

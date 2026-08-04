@@ -494,7 +494,24 @@ def _gate_perf_case_policy(cs, cases, errs):
     limit = rule.get("small_max_bytes") if isinstance(rule, dict) else None
     hardware = rule.get("hardware") if isinstance(rule, dict) else None
     limit_source = rule.get("source") if isinstance(rule, dict) else None
+    # ⚠ hardware 必须是非空字符串，**先于** profile 查表校。缺字段时 `hardware=None` →
+    # `_PERF_SHAPE_PROFILES.get(None)` 恒 None → 只要再声明 `source='spec_supplied'`，
+    # 任意正整数 small_max_bytes 都能过门：等于「硬件未知也能自定边界」，是 spec_supplied
+    # 这条授权分支上最直接的 fail-open。与 gen_cases._perf_case_policy 同一条硬校。
+    if not isinstance(hardware, str) or not hardware.strip():
+        errs.append(
+            f"perf_case_policy.shape_classification.hardware={hardware!r} 须为非空字符串——"
+            "大小 shape 边界必须绑定一个具名硬件，未知硬件不得自定边界")
+        return
+    if hardware != hardware.strip():
+        errs.append("perf_case_policy.shape_classification.hardware 含首尾空白（身份不稳定）")
+        return
     profile = _PERF_SHAPE_PROFILES.get(hardware)
+    # `spec_supplied` 是「本表没有该硬件时由 spec 直供并留痕」的授权，不是宽档开关：
+    # 授权必须**显式**（键在且逐字等于受控值），下面的受控词表检查已保证这点。
+    if limit_source is not None and not isinstance(limit_source, str):
+        errs.append("perf_case_policy.shape_classification.source 须为字符串")
+        return
     # 大小 shape 边界的来源（与 gen_cases._SHAPE_LIMIT_SOURCES 同一枚受控词表）：
     #   · 缺省/`hardware_profile` —— 必须命中本表且逐值相符（历史行为，一个字不放松）；
     #   · `spec_supplied`         —— 本表没有该硬件的受控 profile 时，由 spec 直供并在产物里留痕。
@@ -1324,6 +1341,14 @@ def _recompute_case(np, precision_policy, d, cid, exp, prec, errs):
 #: 「这条通路会产哪种文件」的先验知识。
 _NPY_MAGIC = b"\x93NUMPY"
 
+#: **逻辑 compare_dtype → raw 产物的物理落盘 dtype** 的稳定存储契约。
+#: numpy 没有 bfloat16；aclnn runtime 的 out-slot D2H 会把 bf16 的 2 字节位模式
+#: 按 `bf16_bytes_to_f32` **展宽成 fp32** 再落盘（`repo_adapter` 已注明「此处 dtype 可能与
+#: caseset 的 compare_dtype 不同，属正常」）。门若直接拿逻辑 `compare_dtype` 去解 raw 字节，
+#: bf16 case 会恒 `np.dtype('bfloat16')` 报错、字节数也按 2 字节算错 —— 判的不是产物，是自己算错的口径。
+#: ⚠ 这是**按 dtype 的稳定物理契约**，不是按算子/通路身份的特判；表外 dtype 逻辑==物理，一字不放松。
+_RAW_STORAGE_DTYPE = {"bfloat16": "float32"}
+
 
 def _load_verified_out(np, path, want_sha, cid, kind, errs, dtype_name=None, shape=None):
     """legacy 单输出 out 产物的形态自适应读回：`.npy` 走 np.load，raw 扁平字节走 frombuffer。
@@ -1355,15 +1380,19 @@ def _load_verified_out(np, path, want_sha, cid, kind, errs, dtype_name=None, sha
     if not _mo_shape_ok(shape):
         errs.append(f"{cid}: {kind} 产物是 raw 字节，但 caseset.expected.out_shape 非法：{shape!r}")
         return None
+    # 逻辑判据 dtype → 物理落盘 dtype（表外恒等）。映射本身必须可解析，否则 fail-closed。
+    storage_name = _RAW_STORAGE_DTYPE.get(dtype_name, dtype_name)
     try:
-        dt = np.dtype(dtype_name)
+        dt = np.dtype(storage_name)
     except Exception as ex:
-        errs.append(f"{cid}: {kind} 产物 compare_dtype={dtype_name!r} 非法（{type(ex).__name__}: {ex}）")
+        errs.append(f"{cid}: {kind} 产物 compare_dtype={dtype_name!r}（物理落盘 dtype "
+                    f"{storage_name!r}）非法（{type(ex).__name__}: {ex}）")
         return None
     want_bytes = _mo_numel(shape) * dt.itemsize
     if len(data) != want_bytes:
         errs.append(f"{cid}: {kind} 产物字节数 {len(data)} ≠ caseset 口径应有的 {want_bytes}"
-                    f"（dtype={dtype_name} shape={shape}·磁盘字节与 canonical 判据不符）")
+                    f"（compare_dtype={dtype_name} 物理落盘 dtype={storage_name} shape={shape}·"
+                    "磁盘字节与 canonical 判据不符）")
         return None
     try:
         return np.frombuffer(data, dtype=dt).reshape(shape)
@@ -1697,22 +1726,70 @@ def _gate_perf_measurement_binding(cs, ev, pr, d, per, errs):
 
 
 def _measure_only_mode(d, errs=None):
-    """本轮性能口径 —— **只从 caseset.json 这份 Task1 落盘产物读**，不信 perf_report 自报。
+    """本轮性能口径 —— **两份独立的、由 spec 派生的产物都说 measure_only 才算数**。
 
     理由：`perf_report` 是被门审查的对象；让它自报「我是 measure_only」就等于让被审对象自选
-    宽档。caseset 由 gate_task1 独立校过，是门这一侧唯一可信的口径来源。
-    解析不了 / mode 非法 → 一律按**严档** ratio_gated 处理（fail-closed 方向：宁可多要一份
-    baseline 证据，也不放行一个「没判过」的性能维）。
+    宽档。但只读 caseset 也不够——caseset 同样落在被验目录里，一份伪造的
+    `perf_case_policy.mode` 就能把整条性能维降到宽档。故本函数要求：
+
+      ① `caseset.perf_case_policy.mode == measure_only`（Task1 产物，gate_task1 校过）；
+      ② `work/_perf_plan.json.mode == measure_only`（Task2 采集计划，由 `run_workflow`
+         从**同一份 spec** 独立派生，且是真正驱动 msprof 采集的那份口径）；
+      ③ caseset 账本里带着由 spec 授权门校过的 `measure_only_authorization`
+         （§5.10 的任务书性能要求事实），否则宽档就没有任何任务书依据。
+
+    任一条不成立 → 按**严档** ratio_gated 处理（fail-closed 方向：宁可多要一份 baseline 证据，
+    也不放行一个「没判过」的性能维）。
     """
     cs = _load(d, "caseset.json")
     if not isinstance(cs, dict):
         return False
+    policy = cs.get("perf_case_policy")
+    if policy is None:
+        return False                        # legacy caseset 无账本 → 显式选缺省严档
     try:
-        return perf_mode.is_measure_only(perf_mode.policy_mode(cs.get("perf_case_policy")))
+        if not perf_mode.is_measure_only(perf_mode.policy_mode(policy)):
+            return False
     except ValueError as ex:
         if errs is not None:
             errs.append(f"caseset.perf_case_policy.mode 非法（按严档处理）：{ex}")
         return False
+    auth = policy.get("measure_only_authorization")
+    if not isinstance(auth, dict) or auth.get("taskdoc_requirement") not in (
+            perf_mode.MEASURE_ONLY_GROUNDS):
+        if errs is not None:
+            errs.append(
+                "caseset 声明 measure_only 却缺 perf_case_policy.measure_only_authorization "
+                "（§5.10 的任务书性能要求事实）——宽档无任务书依据，按严档处理")
+        return False
+    plan = _load_perf_plan(d)
+    if not isinstance(plan, dict):
+        if errs is not None:
+            errs.append(
+                "caseset 声明 measure_only 却缺/坏 work/_perf_plan.json——"
+                "采集计划是同一份 spec 独立派生的口径，缺它就只剩被验目录自报，按严档处理")
+        return False
+    if plan.get("mode") != perf_mode.MODE_MEASURE_ONLY:
+        if errs is not None:
+            errs.append(
+                f"work/_perf_plan.json.mode={plan.get('mode')!r} 与 caseset 账本口径不一致——"
+                "采集端与裁决端必须用同一个性能口径，按严档处理")
+        return False
+    return True
+
+
+def _load_perf_plan(d):
+    """读 `work/_perf_plan.json`（Task2 采集计划）；缺/坏 → None（调用方 fail-closed）。
+
+    `_pinned_product` 的根就是 `<d>/work`，故这里传相对 work 的名字。
+    """
+    path = _pinned_product(d, "_perf_plan.json")
+    if path is None:
+        return None
+    try:
+        return _load_json_file(path)
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def _gate_measure_only_report(pr, d, per, s, errs):

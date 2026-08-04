@@ -64,6 +64,13 @@
   },
   "perf": {
     "mode": "measure_only",
+    "measure_only_authorization": {
+      "taskdoc_requirement": "gpu_comparison",
+      "cite": "任务书 §6 性能标杆（无 task_doc.snapshot.md 入库，故未绑快照指纹）",
+      "quote": "OpenCV CUDA（A100）或 OCL GPU",
+      "taskdoc_snapshot_sha256": null,
+      "_note": "measure_only 是 AGENTS.md §5.10 授权的宽档，须逐条声明「任务书的性能要求属哪一类 + 引文位置 + 逐字原文」，不接受 spec 只写一句 mode 就放宽。⚠ quote 转录自 dev-doc/oprunway-gaussianblur-execution-plan.md:146 对任务书 §6 的引用，**本仓尚无 task_doc.snapshot.md**，故 taskdoc_snapshot_sha256 显式写 null（不填未经核实的 sha，AGENTS.md 5.8）——该 null 会原样进 caseset 账本与报告，「授权未绑快照」因此可见。快照入库后应改填真实 sha256 并逐字复核 cite/quote。"
+    },
     "_mode_note": "任务书把 OpenCV **GPU**（CUDA）指定为性能参考。按用户 2026-08-03 的全局口径（AGENTS.md §5.10）：要求与 GPU 比对的任务书**同样只用 msprof 采 NPU 实测性能**，不获取 GPU 标杆、不做比值裁决。故 mode=measure_only —— 本轮性能维只产 NPU kernel-only 实测耗时 + 分档说明，**不产任何达标结论**，报告不得声称已达到任务书的 GPU 比值要求。measure_only 下 baseline / target_ratio 必须缺席（声明了就是自相矛盾，工具 fail-closed）。",
     "warmup": 5,
     "repeat": 20,

@@ -950,9 +950,10 @@ class TestAclnnBuiltinBaselinePlan(unittest.TestCase):
 
     MAP = {"library": "cann_builtin_libopapi", "variants": [
         {"when": {"attr": "dim", "is_null": True},
-         "symbol": "Median", "slots": ["self", "valuesOut"]},
+         "symbol": "Median", "stage2_form": "standard",
+         "slots": ["self", "valuesOut"]},
         {"when": {"attr": "dim", "is_null": False},
-         "symbol": "MedianDim",
+         "symbol": "MedianDim", "stage2_form": "standard",
          "slots": ["self", "dim", "keepDim", "valuesOut", "indicesOut"],
          "output_dtypes": {"indicesOut": "int64"}},
     ]}
@@ -994,6 +995,25 @@ class TestAclnnBuiltinBaselinePlan(unittest.TestCase):
         bad = dict(self.MAP, library="/tmp/libopapi.so")
         with self.assertRaises(PM.PerfCollectError):
             PM.resolve_aclnn_baseline_plan(bad, self.CALL, {"id": "g", "attrs": {"dim": None}})
+
+    def test_plan_carries_stage2_form_for_the_runner(self):
+        """采集端拿到的 stage2 形态就是 plan 里那一个——runner 不再有「未声明按 4 参」的兜底。"""
+        plan = PM.resolve_aclnn_baseline_plan(
+            self.MAP, self.CALL, {"id": "g", "attrs": {"dim": None}})
+        self.assertEqual(plan["stage2_form"], "standard")
+
+    def test_missing_or_uncontrolled_stage2_form_fails_closed(self):
+        """★ 内置 ACLNN 没有 header 可解析：不声明 stage2 结构 → 必须停，绝不猜 4 参。"""
+        for value in (None, "", "absent", "STANDARD", 4, True):
+            with self.subTest(stage2_form=value):
+                bad = json.loads(json.dumps(self.MAP))
+                if value is None:
+                    bad["variants"][0].pop("stage2_form")
+                else:
+                    bad["variants"][0]["stage2_form"] = value
+                with self.assertRaisesRegex(PM.PerfCollectError, "stage2_form"):
+                    PM.resolve_aclnn_baseline_plan(
+                        bad, self.CALL, {"id": "g", "attrs": {"dim": None}})
 
 
 class TestRealGate(unittest.TestCase):

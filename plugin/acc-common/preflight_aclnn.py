@@ -66,18 +66,25 @@ def _self_sha256():
 def _stage2_record(signature):
     """签名的 stage2 派发形态 + **真机 native 实参个数**（只记录，不参与任何判定）。
 
-    ``stage2_form`` 照抄解析结果（``None`` = header 里没有执行段声明）；``stage2_dispatch_form``
-    是 :meth:`AclnnRunner.run` 实际会走的分支（``None`` 按 :data:`STAGE2_STANDARD` 派发）；
+    ``stage2_form`` 照抄解析结果（``absent`` = header 里没有执行段声明，``None`` = 调用方没声明）；
+    ``stage2_dispatch_form`` 是 :meth:`AclnnRunner.run` 实际会走的分支——**不可派发的形态记 ``None``**，
+    绝不写成 ``STAGE2_STANDARD``（那等于在收据里替 runner 编了一个它根本不会走的分支）；
     ``stage2_call_arity`` = 那次 native 调用的实参个数：standard 恒 4；extended 是
-    「框架三参 + stage1 实参原样重复 + stream」= ``3 + len(params) + 1``。
+    「框架三参 + stage1 实参原样重复 + stream」= ``3 + len(params) + 1``；不可派发时为 ``None``。
     """
     form = getattr(signature, "stage2_form", None)
     params = list(getattr(signature, "params", None) or ())
+    dispatch = form if form in (STAGE2_STANDARD, STAGE2_EXTENDED) else None
+    if dispatch == STAGE2_EXTENDED:
+        arity = 3 + len(params) + 1
+    elif dispatch == STAGE2_STANDARD:
+        arity = 4
+    else:
+        arity = None
     return {
         "stage2_form": form,
-        "stage2_dispatch_form": form or STAGE2_STANDARD,
-        "stage2_call_arity": (
-            3 + len(params) + 1 if form == STAGE2_EXTENDED else 4),
+        "stage2_dispatch_form": dispatch,
+        "stage2_call_arity": arity,
     }
 
 

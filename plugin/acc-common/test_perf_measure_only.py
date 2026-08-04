@@ -37,6 +37,23 @@ def _w(d, name, obj):
         json.dump(obj, f, ensure_ascii=False)
 
 
+#: `measure_only` 的任务书授权事实（§5.10）。宽档不再由 spec 自报一句 mode 就能开，
+#: 必须绑定「任务书性能要求属哪一类 + 引文锚 + 任务书快照指纹」。
+_AUTH = {
+    "taskdoc_requirement": "gpu_comparison",
+    "cite": "task_doc.snapshot.md:12-14",
+    "quote": "以 OpenCV CUDA A100 为参考",
+    "taskdoc_snapshot_sha256": "c" * 64,
+}
+
+
+def _plan(d, mode="measure_only"):
+    """落 Task2 采集计划——门要求它与 caseset 账本口径一致才认宽档。"""
+    work = os.path.join(d, "work")
+    os.makedirs(work, exist_ok=True)
+    _w(work, "_perf_plan.json", {"op": "X", "mode": mode})
+
+
 # ————————————————— 契约层：perf.mode 解析 —————————————————
 class PerfModeContractTest(unittest.TestCase):
     def test_absent_field_is_ratio_gated(self):
@@ -47,8 +64,10 @@ class PerfModeContractTest(unittest.TestCase):
                          PM.MODE_RATIO_GATED)
 
     def test_measure_only_is_recognized(self):
-        self.assertEqual(PM.resolve_spec_mode({"perf": {"mode": "measure_only"}}),
-                         PM.MODE_MEASURE_ONLY)
+        self.assertEqual(
+            PM.resolve_spec_mode({"perf": {"mode": "measure_only",
+                                           "measure_only_authorization": _AUTH}}),
+            PM.MODE_MEASURE_ONLY)
         self.assertTrue(PM.is_measure_only(PM.MODE_MEASURE_ONLY))
 
     def test_unknown_mode_fails_closed(self):
@@ -65,14 +84,83 @@ class PerfModeContractTest(unittest.TestCase):
                            ("torch_baseline", {"api": "torch.median"}),
                            ("aclnn_baseline", {"library": "cann_builtin_libopapi"})):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, "自相矛盾"):
-                PM.resolve_spec_mode({"perf": {"mode": "measure_only", key: value}})
+                PM.resolve_spec_mode({"perf": {"mode": "measure_only",
+                                               "measure_only_authorization": _AUTH,
+                                               key: value}})
 
     def test_policy_mode_reads_caseset_ledger(self):
-        self.assertEqual(PM.policy_mode(None), PM.MODE_RATIO_GATED)
         self.assertEqual(PM.policy_mode({}), PM.MODE_RATIO_GATED)
         self.assertEqual(PM.policy_mode({"mode": "measure_only"}), PM.MODE_MEASURE_ONLY)
         with self.assertRaises(ValueError):
             PM.policy_mode({"mode": "whatever"})
+
+    # —— fail-open 负例：宽档不得靠「字段没写 / 写坏了」被静默打开 ——
+
+    def test_policy_mode_rejects_non_dict_instead_of_defaulting(self):
+        """账本存在却是坏结构时静默退缺省档 = 把「产物坏了」吞掉；缺省档须由调用方显式选。"""
+        for bad in (None, "measure_only", [], 3):
+            with self.subTest(policy=bad), self.assertRaises(PM.PerfModeError):
+                PM.policy_mode(bad)
+
+    def test_explicit_bad_perf_object_is_not_silently_defaulted(self):
+        """`spec.perf` 显式存在但不是 object → 报错，不得当成「未声明 perf」降级成缺省档。"""
+        for bad in (None, "measure_only", [], 3, True):
+            with self.subTest(perf=bad), self.assertRaises(PM.PerfModeError):
+                PM.resolve_spec_mode({"perf": bad})
+
+    def test_measure_only_requires_taskdoc_authorization(self):
+        with self.assertRaisesRegex(ValueError, "measure_only_authorization"):
+            PM.resolve_spec_mode({"perf": {"mode": "measure_only"}})
+
+    def test_measure_only_authorization_must_be_well_formed(self):
+        bads = [
+            {},                                                  # 全缺
+            dict(_AUTH, taskdoc_requirement="ratio_required"),   # 词表外的任务书要求
+            dict(_AUTH, taskdoc_requirement=None),
+            dict(_AUTH, cite=""),
+            dict(_AUTH, quote="   "),
+            dict(_AUTH, taskdoc_snapshot_sha256="C" * 64),       # 非小写
+            dict(_AUTH, taskdoc_snapshot_sha256="c" * 63),
+            dict(_AUTH, taskdoc_snapshot_sha256=""),
+            dict(_AUTH, extra_field=1),                          # 未知字段
+        ]
+        for bad in bads:
+            with self.subTest(auth=bad), self.assertRaises(PM.PerfModeError):
+                PM.resolve_spec_mode({"perf": {"mode": "measure_only",
+                                               "measure_only_authorization": bad}})
+        for missing in ("taskdoc_requirement", "cite", "quote", "taskdoc_snapshot_sha256"):
+            auth = dict(_AUTH)
+            del auth[missing]
+            with self.subTest(missing=missing), self.assertRaises(PM.PerfModeError):
+                PM.resolve_spec_mode({"perf": {"mode": "measure_only",
+                                               "measure_only_authorization": auth}})
+
+    def test_measure_only_rejects_unknown_perf_fields(self):
+        """拼错的判据字段不在 denylist 里，旧实现会静默接受它、还照样声明「只测不比」。"""
+        for key in ("target_ration", "gpu_baseline", "speedup_target"):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "词表外字段"):
+                PM.resolve_spec_mode({"perf": {"mode": "measure_only",
+                                               "measure_only_authorization": _AUTH,
+                                               key: 1.0}})
+
+    def test_snapshot_digest_key_may_be_explicit_null_but_never_omitted(self):
+        """无快照可绑时**显式写 null**（5.8：不填未经核实的 sha）；省略该键则是「没人说过」→ 拒。"""
+        auth = dict(_AUTH, taskdoc_snapshot_sha256=None)
+        self.assertEqual(
+            PM.resolve_spec_mode({"perf": {"mode": "measure_only",
+                                           "measure_only_authorization": auth}}),
+            PM.MODE_MEASURE_ONLY)
+        del auth["taskdoc_snapshot_sha256"]
+        with self.assertRaises(PM.PerfModeError):
+            PM.resolve_spec_mode({"perf": {"mode": "measure_only",
+                                           "measure_only_authorization": auth}})
+
+    def test_measure_only_allows_collection_and_comment_fields(self):
+        spec = {"perf": {"mode": "measure_only", "measure_only_authorization": _AUTH,
+                         "warmup": 5, "repeat": 20, "case_source": "precision_cases",
+                         "case_selection": {}, "shape_classification": {},
+                         "_note": "注释键不参与任何判定"}}
+        self.assertEqual(PM.resolve_spec_mode(spec), PM.MODE_MEASURE_ONLY)
 
 
 # ————————————————— Task1：账本落 mode + 大小 shape 边界来源 —————————————————
@@ -82,6 +170,8 @@ def _policy_spec(mode=None, hardware="Atlas A3", limit=262144, source=None):
                                      "small_max_bytes": limit, "hardware": hardware}}
     if mode is not None:
         perf["mode"] = mode
+        if mode == "measure_only":
+            perf["measure_only_authorization"] = _AUTH
     if source is not None:
         perf["shape_classification"]["source"] = source
     return {"perf": perf}
@@ -127,7 +217,9 @@ class PerfCasePolicyLedgerTest(unittest.TestCase):
 
 # ————————————————— Task3：perf_compare 只测不比 —————————————————
 def _mo_spec():
-    return {"op": "X", "perf": {"mode": "measure_only", "case_source": "precision_cases",
+    return {"op": "X", "perf": {"mode": "measure_only",
+                                "measure_only_authorization": _AUTH,
+                                "case_source": "precision_cases",
                                 "shape_classification": {
                                     "metric": "sum_input_bytes", "small_max_bytes": 262144,
                                     "hardware": "Atlas A3"}}}
@@ -146,6 +238,7 @@ def _mo_caseset():
             "cases": [case("s0", "small", "小shape"), case("b0", "large", "大shape")],
             "perf_case_policy": {
                 "mode": "measure_only",
+                "measure_only_authorization": _AUTH,
                 "case_source": "precision_cases",
                 "shape_classification": {"metric": "sum_input_bytes", "small_max_bytes": 262144,
                                          "boundary": "small_if_input_bytes_lte_limit",
@@ -222,6 +315,7 @@ class FailClosedSelfProofTest(unittest.TestCase):
         self.cs = _mo_caseset()
         _w(self.d, "caseset.json", self.cs)
         _w(self.d, "evidence.json", _mo_evidence())
+        _plan(self.d)
         self.report = PC.perf_compare(_mo_spec(), self.cs, _mo_evidence(), None)
 
     def tearDown(self):
@@ -289,6 +383,27 @@ class FailClosedSelfProofTest(unittest.TestCase):
         errs = self._errs()
         self.assertTrue(any("不是 measure_only" in e for e in errs), errs)
 
+    def test_caseset_alone_cannot_open_the_lenient_tier(self):
+        """★ 只有被验目录里的 caseset 自称 measure_only、采集计划缺席 → 不得开宽档。"""
+        os.remove(os.path.join(self.d, "work", "_perf_plan.json"))
+        errs = self._errs()
+        self.assertTrue(any("_perf_plan.json" in e for e in errs), errs)
+        self.assertTrue(any("不是 measure_only" in e for e in errs), errs)
+
+    def test_collection_plan_must_agree_with_caseset_mode(self):
+        """★ 采集端按 ratio_gated 采、账本却自称 measure_only → 口径漂移，按严档处理。"""
+        _plan(self.d, mode="ratio_gated")
+        errs = self._errs()
+        self.assertTrue(any("_perf_plan.json.mode" in e for e in errs), errs)
+
+    def test_missing_taskdoc_authorization_falls_back_to_strict_tier(self):
+        """★ 账本自称 measure_only 却没有 §5.10 的任务书授权事实 → 宽档无依据，按严档处理。"""
+        cs = copy.deepcopy(self.cs)
+        cs["perf_case_policy"].pop("measure_only_authorization")
+        _w(self.d, "caseset.json", cs)
+        errs = self._errs()
+        self.assertTrue(any("measure_only_authorization" in e for e in errs), errs)
+
     def test_ratio_verdict_smuggled_into_measure_only_report_is_rejected(self):
         forged = copy.deepcopy(self.report)
         forged["target_ratio"] = 1.0
@@ -332,6 +447,7 @@ def _to_measure_only(spec):
     for key in ("baseline", "target_ratio", "small_shape_exception"):
         perf.pop(key, None)
     perf["mode"] = "measure_only"
+    perf["measure_only_authorization"] = _AUTH
 
 
 class MeasureOnlyWorkflowTest(unittest.TestCase):

@@ -14,20 +14,20 @@
 
 每一格都是真实产物，落在报告根 `reports/gb_run/`。
 
-| # | 阶段 | 脚本 | 吃什么 | 吐什么 | 实际结果 |
-|---|---|---|---|---|---|
-| 1 | **CP-A 取源** | `fetch_source.py` | 任务书 URL + PR 快照目录 | `pr_facts.json`<br>`source_facts.json`<br>`task_doc.snapshot.md` | `completeness=snapshot_only`<br>29 个文件（全在 `gaussian_blur/` 下） |
-| 2 | **CP-B0 任务书输入门** | `validate_taskdoc_input.py` | `task_doc.snapshot.md` | `taskdoc_validation.json`<br>`taskdoc_validation_receipt.json` | **`NEEDS_USER`（exit 2）**<br>18 项里 14 satisfied / 2 missing / 2 ambiguous |
-| 3 | **CP-B1 抽 spec** | *(本轮手写)* | 任务书 + PR 事实 | `gaussian_blur.spec.json` | 手写，未经 CP-B2 确认 |
-| 4 | **CP-B2 方向确认** | **不存在** | — | — | ⚠ **这个节点还没实现**，就是本文档 |
-| 5 | **真值** | `golden.py` | — | `<ops_root>/GaussianBlur/golden.py` | OpenCV CPU `cv2.GaussianBlur` 4.11.0 |
-| 6 | **CP-C0 静态接口门** | `preflight_aclnn.py` | `source_facts` + spec + header | `work/aclnn_preflight.json` | `READY_WAIT_NPU_TRUST_GATE`<br>**stage2 判为 `extended`（10 参）** |
-| 7 | **用例生成** | `gen_cases.py` | spec + golden | `caseset.json` | **24 例** |
-| 8 | **CP-C 真机信任门** | `verify_aclnn_harness.py` | caseset + spec + preflight | `work/aclnn_harness_trust.json` | `TRUSTED_FOR_CP_D`<br>见证 1/24 真机跑通并与 golden 对拍 pass |
-| 9 | **Task2 真机执行** | `run_workflow --mode aclnn_py` | caseset | `evidence.json` + 逐 case `work/<case_id>/` | 24 例全部真机执行 |
-| 10 | **精度裁决** | `validator.py` | caseset + evidence | `verdict.json` | **pass，24/24，fail 0** |
-| 11 | **Task3 性能** | `perf_compare.py` | perf 计划 | `perf_report.json` | **无基线 → 挂起** |
-| 12 | **证据完整性门** | `validate_acceptance_state.py` | 全部产物 | `acceptance.json` | task1 ✅ task2 ✅ **task3 ❌**<br>`BLOCKED(验收门未过)` / `BLOCKED_WAIT_REAL_BASELINE` |
+| #  | 阶段               | 脚本                             | 吃什么                            | 吐什么                                                              | 实际结果                                                                           |
+| -- | ---------------- | ------------------------------ | ------------------------------ | ---------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| 1  | **CP-A 取源**      | `fetch_source.py`              | 任务书 URL + PR 快照目录              | `pr_facts.json`<br>`source_facts.json`<br>`task_doc.snapshot.md` | `completeness=snapshot_only`<br>29 个文件（全在 `gaussian_blur/` 下）                  |
+| 2  | **CP-B0 任务书输入门** | `validate_taskdoc_input.py`    | `task_doc.snapshot.md`         | `taskdoc_validation.json`<br>`taskdoc_validation_receipt.json`   | **`NEEDS_USER`（exit 2）**<br>18 项里 14 satisfied / 2 missing / 2 ambiguous       |
+| 3  | **CP-B1 抽 spec** | *(本轮手写)*                       | 任务书 + PR 事实                    | `gaussian_blur.spec.json`                                        | 手写，未经 CP-B2 确认                                                                 |
+| 4  | **CP-B2 方向确认**   | **不存在**                        | —                              | —                                                                | ⚠ **这个节点还没实现**，就是本文档                                                           |
+| 5  | **真值**           | `golden.py`                    | —                              | `<ops_root>/GaussianBlur/golden.py`                              | OpenCV CPU `cv2.GaussianBlur` 4.11.0                                           |
+| 6  | **CP-C0 静态接口门**  | `preflight_aclnn.py`           | `source_facts` + spec + header | `work/aclnn_preflight.json`                                      | `READY_WAIT_NPU_TRUST_GATE`<br>**stage2 判为 `extended`（10 参）**                  |
+| 7  | **用例生成**         | `gen_cases.py`                 | spec + golden                  | `caseset.json`                                                   | **24 例**                                                                       |
+| 8  | **CP-C 真机信任门**   | `verify_aclnn_harness.py`      | caseset + spec + preflight     | `work/aclnn_harness_trust.json`                                  | `TRUSTED_FOR_CP_D`<br>见证 1/24 真机跑通并与 golden 对拍 pass                            |
+| 9  | **Task2 真机执行**   | `run_workflow --mode aclnn_py` | caseset                        | `evidence.json` + 逐 case `work/<case_id>/`                       | 24 例全部真机执行                                                                     |
+| 10 | **精度裁决**         | `validator.py`                 | caseset + evidence             | `verdict.json`                                                   | **pass，24/24，fail 0**                                                          |
+| 11 | **Task3 性能**     | `perf_compare.py`              | perf 计划                        | `perf_report.json`                                               | **无基线 → 挂起**                                                                   |
+| 12 | **证据完整性门**       | `validate_acceptance_state.py` | 全部产物                           | `acceptance.json`                                                | task1 ✅ task2 ✅ **task3 ❌**<br>`BLOCKED(验收门未过)` / `BLOCKED_WAIT_REAL_BASELINE` |
 
 ## 2 · 绑定链：凭什么说「跑的就是这份东西」
 
@@ -56,10 +56,10 @@ PR 快照 ─merkle─► source_facts (digest 5b04c0c9…)
 
 **两个 merkle 的区别要分清**（这轮踩过坑）：
 
-| | 值 | 范围 | 谁在用 |
-|---|---|---|---|
+|           | 值           | 范围                     | 谁在用                    |
+| --------- | ----------- | ---------------------- | ---------------------- |
 | 子树 merkle | `f536077e…` | `gaussian_blur/`，29 文件 | CP-A / CP-C0 / CP-C 对账 |
-| 整仓 merkle | `203d4b77…` | 整个仓，2565 文件 | 真机取源段校验快照未被改动 |
+| 整仓 merkle | `203d4b77…` | 整个仓，2565 文件            | 真机取源段校验快照未被改动          |
 
 scope 不同的两个摘要**不可比**，直接比必然对不上——所以 scope 本身也进了收据。
 
@@ -73,11 +73,11 @@ merkle 只证「跑的就是这份字节」，**不证**它等于任何上游 co
 
 ### 4.1 验收范围与缺口处理 ⚠ **待确认**
 
-- 验收 dtype：**只有 CV_32F**（任务书 §2.3 分级表只定义 L1 一档）。
+- 验收 dtype：**只有 CV\_32F**（任务书 §2.3 分级表只定义 L1 一档）。
 - **任务书自身不一致**：§2 参数表列了 `CV_8U/CV_16U/CV_16S/CV_32F/CV_64F` 五种 depth，
-  §2.3 只定义 L1，而 §8 又要求描述「CV_64F **L2** 策略」——**L2 被引用两次却从未定义**。
-- **交付件缺口**：§任务概述要求「基于 Ascend C Kernel + **OpenCV C++ 适配层**」实现，
-  §1 要求 OpenCV C++ 层接口「必选，逐字对齐」，§7 分层把它列为必选——**PR 未交付该层**。
+  §2.3 只定义 L1，而 §8 又要求描述「CV\_64F **L2** 策略」——**L2 被引用两次却从未定义**。
+- **交付件缺口**：§任务概述要求「基于 Ascend C Kernel + **OpenCV C\++ 适配层**」实现，
+  §1 要求 OpenCV C\++ 层接口「必选，逐字对齐」，§7 分层把它列为必选——**PR 未交付该层**。
   本轮验的是 aclnn 层对 OpenCV CPU **库**的数值一致性；
   「适配层接口逐字对齐」这一项**未验**。
 - 其它未覆盖：TC-03..TC-11 定向用例、in-place（PR 用 `CheckInplaceUnsupported` 显式拒绝）。
@@ -109,14 +109,14 @@ CP-B0 机读结论逐字如下：
 
 > 任务书对真值来源给出三处互相冲突的说法：§4 功能比对写「OpenCV CPU（同版本）」；
 > §6 真值生成方式写「以 OpenCV **GPU**（同版本、`cv::GaussianBlur`）为标杆」；
-> §6 精度策略表 CV_32F（L1）又写「对标 OpenCV CPU」。CPU 与 GPU 实现不保证逐位一致，
+> §6 精度策略表 CV\_32F（L1）又写「对标 OpenCV CPU」。CPU 与 GPU 实现不保证逐位一致，
 > 究竟以哪一个为精度真值直接决定裁决结果。
 
 **要你定**：CPU 还是 GPU。本轮按你「不考虑 GPU」的口径走了 CPU。
 
 ### 4.5 特殊语义 ⚠ **CP-B0 判 `missing`**
 
-任务书对 CV_32F 下的 NaN/Inf 行为**没有规定**。
+任务书对 CV\_32F 下的 NaN/Inf 行为**没有规定**。
 而 `operator_class=floating_compute`（如实填写）会**强制**铺出 inf/-inf/nan 三条 case。
 这三条本轮**都 pass**——但任务书既然没规定期望行为，这个 pass **不构成功能结论**。
 
@@ -125,11 +125,11 @@ NPU 与 OpenCV 的累加顺序/中间截断不同，结果在语义上本就不�
 
 ### 4.6 精度标准 ✅ 已确认（你口头拍板「默认即可」）
 
-| 项 | 值 |
-|---|---|
-| standard | `ascendoptest_default` |
-| fp32 阈值 / 错误率 | `1e-4` / `1e-4` |
-| 来源 | `precision_policy._AOT_TABLE` 的**工具缺省值**，**不是任务书给的** |
+| 项             | 值                                                    |
+| ------------- | ---------------------------------------------------- |
+| standard      | `ascendoptest_default`                               |
+| fp32 阈值 / 错误率 | `1e-4` / `1e-4`                                      |
+| 来源            | `precision_policy._AOT_TABLE` 的**工具缺省值**，**不是任务书给的** |
 
 任务书未给任何数值阈值——这一项按「工具默认」记，属**推断口径**。
 
@@ -159,13 +159,13 @@ Task3 走 `_real_baseline_or_blocked` → 挂起。**这是 task3 红的唯一�
 
 ### 4.10 目标硬件与环境 ✅ 已核（双源一致）
 
-| 项 | 值 |
-|---|---|
-| 硬件 | Ascend 950PR（任务书「适配硬件」↔ `op_def` 的 `AddConfig("ascend950")` 双源一致） |
-| SoC 串 | `ascend950`（**不是** `ascend950pr`） |
-| 环境 | CANN 9.0.0 · Ubuntu 22.04.5 · Python 3.11.15 · x86_64 |
-| 关键版本 | numpy 1.26.4 · cv2 4.11.0 · torch 2.10.0+cpu · torch_npu 2.10.0 |
-| device | 7（8 张卡跑测时全 idle） |
+| 项      | 值                                                                 |
+| ------ | ----------------------------------------------------------------- |
+| 硬件     | Ascend 950PR（任务书「适配硬件」↔ `op_def` 的 `AddConfig("ascend950")` 双源一致） |
+| SoC 串  | `ascend950`（**不是** `ascend950pr`）                                 |
+| 环境     | CANN 9.0.0 · Ubuntu 22.04.5 · Python 3.11.15 · x86\_64            |
+| 关键版本   | numpy 1.26.4 · cv2 4.11.0 · torch 2.10.0+cpu · torch\_npu 2.10.0  |
+| device | 7（8 张卡跑测时全 idle）                                                  |
 
 ### 4.11 构建、安装与来源策略 ⚠ 降级
 
@@ -201,24 +201,24 @@ needs_review ≠ PASS
 
 ## 5 · 需要你拍板的清单
 
-| # | 事项 | 为什么必须是你 |
-|---|---|---|
-| 1 | **真值到底是 OpenCV CPU 还是 GPU** | 任务书三处自相矛盾，CP-B0 判 `ambiguous`。按契约只能由你 `supplied` 补事实 |
-| 2 | **性能 baseline 用哪个、异机对比怎么成立** | 任务书「CUDA(A100) 或 OCL GPU」二选一、无准确 API |
-| 3 | **性能口径**（kernel-only? warmup/repeat? 统计量?） | 任务书只给了 `0.45×`，方法全缺 |
-| 4 | **交付件缺口怎么处理** | PR 未交付 OpenCV C++ 适配层（§任务概述/§1/§7 均标必选）。停跑，还是部分执行但不得 PASS |
-| 5 | **NaN/Inf 期望行为** | 任务书未规定，而工具会强制铺这三条 case |
+| # | 事项                                         | 为什么必须是你                                                    |
+| - | ------------------------------------------ | ---------------------------------------------------------- |
+| 1 | **真值到底是 OpenCV CPU 还是 GPU**                | 任务书三处自相矛盾，CP-B0 判 `ambiguous`。按契约只能由你 `supplied` 补事实       |
+| 2 | **性能 baseline 用哪个、异机对比怎么成立**               | 任务书「CUDA(A100) 或 OCL GPU」二选一、无准确 API                       |
+| 3 | **性能口径**（kernel-only? warmup/repeat? 统计量?） | 任务书只给了 `0.45×`，方法全缺                                        |
+| 4 | **交付件缺口怎么处理**                              | PR 未交付 OpenCV C\++ 适配层（§任务概述/§1/§7 均标必选）。停跑，还是部分执行但不得 PASS |
+| 5 | **NaN/Inf 期望行为**                           | 任务书未规定，而工具会强制铺这三条 case                                     |
 
 前三条 CP-B0 已机读判出并阻断（`NEEDS_USER`），后两条目前**只在 spec 的 `task_pr_gaps` 里、
 靠人手写**——这正是下一节要说的问题。
 
 ## 6 · 这一轮暴露的流程本身的问题
 
-| # | 问题 | 状态 |
-|---|---|---|
-| 1 | **CP-B2 方向确认节点不存在** | 本轮是「先跑完才看清方向」。本文档是事后手工补的 |
-| 2 | **CP-B0 的 `satisfied` 判据太松** | 机器只校「覆盖到该项 + 引文是真原文 + 没跟别项复用同一句」，**不要求把必选/可选交付件抽全**。本例中 `delivery_scope` 只摘到一句就判 satisfied，§任务概述/§1/§7 里三个「必选」一句没进来 |
-| 3 | **「任务书必选交付件 ↔ PR 实际交付物」无任何机器对账** | CP-B0 只读任务书（刻意设计），`fetch_source` 只读 PR，两者从不碰面。这个判断全靠 agent 手写 `task_pr_gaps`——手写就会错 |
-| 4 | **AGENTS.md 5.10 只有文字没有代码** | `perf.mode="measure_only"` 未实现，所以性能维只能挂起而不是「有实测数据的终态」 |
+| # | 问题                               | 状态                                                                                                                  |
+| - | -------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| 1 | **CP-B2 方向确认节点不存在**              | 本轮是「先跑完才看清方向」。本文档是事后手工补的                                                                                            |
+| 2 | **CP-B0 的 `satisfied` 判据太松**     | 机器只校「覆盖到该项 + 引文是真原文 + 没跟别项复用同一句」，**不要求把必选/可选交付件抽全**。本例中 `delivery_scope` 只摘到一句就判 satisfied，§任务概述/§1/§7 里三个「必选」一句没进来 |
+| 3 | **「任务书必选交付件 ↔ PR 实际交付物」无任何机器对账** | CP-B0 只读任务书（刻意设计），`fetch_source` 只读 PR，两者从不碰面。这个判断全靠 agent 手写 `task_pr_gaps`——手写就会错                                 |
+| 4 | **AGENTS.md 5.10 只有文字没有代码**      | `perf.mode="measure_only"` 未实现，所以性能维只能挂起而不是「有实测数据的终态」                                                               |
 
 第 2、3 条正在修（独立 worktree）。第 1、4 条待你定。

@@ -587,6 +587,107 @@ class TaskdocValidationTest(unittest.TestCase):
         self.assertEqual(receipt["status"], "BLOCKED")
         self.assertIn("rationale", receipt["errors"][0])
 
+    def test_exempting_a_required_marker_never_passes_on_free_text_alone(self):
+        """★ audit#53：一段自由文本 rationale 就把一处**必选**标记豁免掉 = 门交给被审查方。
+
+        必选标记的豁免**不计入覆盖**：该处仍留在 uncovered，于是 owner 判 satisfied 时照旧
+        结构性阻断（BLOCKED），owner 未判 satisfied 时落 complete=false → NEEDS_USER。
+        无论哪条路，都不会再出现「一句话豁免掉一处必选」这种静默放行。
+        """
+        exemption = [{"quote": {"text": "ACLNN 接口层必须交付"},
+                      "rationale": "我认为这不是交付件"}]
+        deliverables = [entry for entry in copy.deepcopy(_DELIVERABLES)
+                        if entry["id"] != "aclnn_layer"]
+        receipt = self._evaluate(self._payload(
+            deliverables=deliverables, deliverable_scan_exemptions=exemption))
+        self.assertEqual(receipt["status"], "BLOCKED")
+        self.assertIn("必须交付", receipt["errors"][0])
+
+        items = self._set_item(self._items(), "delivery_scope",
+                               status="ambiguous", rationale="范围没划清")
+        receipt = self._evaluate(self._payload(
+            items=items, deliverables=deliverables,
+            deliverable_scan_exemptions=exemption))
+        self.assertEqual(receipt["status"], "NEEDS_USER", receipt["errors"])
+        inventory = receipt["deliverable_inventory"]
+        self.assertFalse(inventory["complete"])
+        self.assertTrue(inventory["exemptions"][0]["requires_user_confirmation"])
+
+    def test_incomplete_inventory_can_never_reach_passed(self):
+        """★ audit#52：owner 判 ambiguous 再用一条 supplied 决策消化掉，以前能落成 PASSED。"""
+        items = self._set_item(self._items(), "delivery_scope",
+                               status="ambiguous",
+                               rationale="只写了要做什么，没划出范围边界")
+        payload = self._payload(
+            items=items, deliverables=[],
+            decisions=[{"id": "delivery_scope", "action": "supplied",
+                        "resolved_status": "ambiguous", "source": "user",
+                        "value": "本次交付范围以 PR 实际改动为准",
+                        "rationale": "由需求方口头确认"}])
+        receipt = self._evaluate(payload)
+        self.assertEqual(receipt["status"], "NEEDS_USER")
+        self.assertFalse(receipt["deliverable_inventory"]["complete"])
+        self.assertTrue(any(
+            item.get("status") == "deliverable_inventory_incomplete"
+            for item in receipt["blocking_items"]), receipt["blocking_items"])
+
+    def test_zero_marker_hits_is_pending_not_complete(self):
+        """★ audit#56：受控词表零命中 ≠ 清单已穷尽——须由人显式承认穷尽性。"""
+        self._write_taskdoc(_TASKDOC.replace(
+            "交付件清单：ACLNN 接口层必须交付；Torch 封装为可选交付项。\n", ""))
+        payload = self._payload(deliverables=[])
+        receipt = self._evaluate(payload)
+        self.assertEqual(receipt["status"], "NEEDS_USER")
+        inventory = receipt["deliverable_inventory"]
+        self.assertTrue(inventory["zero_marker_sites"])
+        self.assertFalse(inventory["complete"])
+
+    def test_zero_marker_hits_with_a_bound_user_ack_is_complete(self):
+        text = _TASKDOC.replace(
+            "交付件清单：ACLNN 接口层必须交付；Torch 封装为可选交付项。\n", "")
+        self._write_taskdoc(text)
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        payload = self._payload(
+            deliverables=[],
+            deliverable_inventory_exhaustive={
+                "taskdoc_bytes_sha256": digest, "source": "user",
+                "rationale": "逐段读过，任务书未用受控词表之外的写法声明交付义务"})
+        receipt = self._evaluate(payload)
+        self.assertEqual(receipt["status"], "PASSED", receipt["errors"])
+        self.assertTrue(receipt["deliverable_inventory"]["complete"])
+
+    def test_exhaustiveness_ack_bound_to_another_taskdoc_is_blocked(self):
+        text = _TASKDOC.replace(
+            "交付件清单：ACLNN 接口层必须交付；Torch 封装为可选交付项。\n", "")
+        self._write_taskdoc(text)
+        payload = self._payload(
+            deliverables=[],
+            deliverable_inventory_exhaustive={
+                "taskdoc_bytes_sha256": "1" * 64, "source": "user",
+                "rationale": "从上一份任务书搬过来的承认"})
+        receipt = self._evaluate(payload)
+        self.assertEqual(receipt["status"], "BLOCKED")
+        self.assertIn("deliverable_inventory_exhaustive", receipt["errors"][0])
+
+    def test_a_quote_appearing_twice_must_pin_its_occurrence(self):
+        """★ audit#55：同一句原文出现多次时，引一次就覆盖 N 处 = 不受限的多对多覆盖。"""
+        self._write_taskdoc(_TASKDOC + "ACLNN 接口层必须交付。\n")
+        receipt = self._evaluate(self._payload())
+        self.assertEqual(receipt["status"], "BLOCKED")
+        self.assertIn("occurrence", receipt["errors"][0])
+
+    def test_a_quote_with_both_modalities_cannot_downgrade_a_required_item(self):
+        """★ audit#54：一句「A 必选、B 可选」以前整段跳过一致性检查。"""
+        self._write_taskdoc(
+            _TASKDOC + "适配层必须交付，性能报告为可选交付项。\n")
+        deliverables = copy.deepcopy(_DELIVERABLES)
+        deliverables.append({
+            "id": "adapter_layer", "name": "适配层", "requirement": "optional",
+            "quotes": [{"text": "适配层必须交付，性能报告为可选交付项"}]})
+        receipt = self._evaluate(self._payload(deliverables=deliverables))
+        self.assertEqual(receipt["status"], "BLOCKED")
+        self.assertIn("required", receipt["errors"][0])
+
     def test_an_unexempted_extra_marker_blocks(self):
         self._write_taskdoc(_TASKDOC + "调用流程允许可选的预处理步骤。\n")
         receipt = self._evaluate(self._payload())

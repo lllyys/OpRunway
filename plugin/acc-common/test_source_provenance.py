@@ -21,11 +21,26 @@ def _complete_source(head="a" * 40, **extra):
     return {"completeness": {"status": SP.TIER_COMPLETE}, "pr": pr}
 
 
+def _complete_facts(head="a" * 40, **extra):
+    """`fetch_pr` 产的 pr_facts 形态（provenance_kind 恒在）。"""
+    facts = {"provenance_kind": SP.PROVENANCE_GIT_PR, "head_sha": head}
+    facts.update(extra)
+    return facts
+
+
 def _snapshot_source(merkle="b" * 64, scope="gaussian_blur", head=None, **extra):
     pr = {"provenance_kind": SP.PROVENANCE_LOCAL_SNAPSHOT, "head_sha": head,
           "snapshot_merkle_sha256": merkle, "snapshot_scope": scope}
     pr.update(extra)
     return {"completeness": {"status": SP.TIER_SNAPSHOT_ONLY}, "pr": pr}
+
+
+def _snapshot_facts(merkle="b" * 64, scope="gaussian_blur", head=None, **extra):
+    """`scan_pr_snapshot` 产的 pr_facts 形态（kind/head/merkle/scope 四项恒在）。"""
+    facts = {"provenance_kind": SP.PROVENANCE_LOCAL_SNAPSHOT, "head_sha": head,
+             "snapshot_merkle_sha256": merkle, "snapshot_scope": scope}
+    facts.update(extra)
+    return facts
 
 
 def _env(value=None):
@@ -35,7 +50,7 @@ def _env(value=None):
 
 class BindCompleteTest(unittest.TestCase):
     def test_happy_path_returns_head_and_no_degradation(self):
-        b, deg = SP.bind(_complete_source(), {"head_sha": "a" * 40}, getenv=_env())
+        b, deg = SP.bind(_complete_source(), _complete_facts(), getenv=_env())
         self.assertEqual(b["pr_head_sha"], "a" * 40)
         self.assertEqual(b["provenance_kind"], SP.PROVENANCE_GIT_PR)
         self.assertEqual(deg, [])
@@ -44,17 +59,63 @@ class BindCompleteTest(unittest.TestCase):
 
     def test_head_mismatch_between_two_fact_packs_is_rejected(self):
         with self.assertRaises(SP.ProvenanceError):
-            SP.bind(_complete_source(), {"head_sha": "c" * 40}, getenv=_env())
+            SP.bind(_complete_source(), _complete_facts(head="c" * 40), getenv=_env())
 
     def test_non_hex40_head_is_rejected(self):
         with self.assertRaises(SP.ProvenanceError):
-            SP.bind(_complete_source(head="not-a-sha"), {"head_sha": "not-a-sha"}, getenv=_env())
+            SP.bind(_complete_source(head="not-a-sha"), _complete_facts(head="not-a-sha"),
+                    getenv=_env())
 
     def test_complete_tier_never_needs_authorization(self):
         """降级开关不该反过来影响正常档——没设开关也必须照常放行。"""
-        b, deg = SP.bind(_complete_source(), {"head_sha": "a" * 40}, getenv=_env(None))
+        b, deg = SP.bind(_complete_source(), _complete_facts(), getenv=_env(None))
         self.assertEqual(deg, [])
         self.assertEqual(b["pr_head_sha"], "a" * 40)
+
+    # —— 以下是 fail-open 负例（审计 C4 / #38 / #39 / #40）——
+
+    def test_both_sides_missing_head_key_is_not_a_pass(self):
+        """`None == None` 曾让「两边都没写 head_sha」等价于「校验通过」。"""
+        src = _complete_source()
+        del src["pr"]["head_sha"]
+        facts = _complete_facts()
+        del facts["head_sha"]
+        with self.assertRaises(SP.ProvenanceError):
+            SP.bind(src, facts, getenv=_env())
+
+    def test_explicit_null_head_is_not_a_complete_binding(self):
+        with self.assertRaises(SP.ProvenanceError):
+            SP.bind(_complete_source(head=None), _complete_facts(head=None), getenv=_env())
+
+    def test_stringifiable_non_string_head_is_rejected(self):
+        """40 位十进制整数不是 commit SHA——旧实现 `str(source_head)` 会把它放过。"""
+        fake = int("1" * 40)
+        with self.assertRaises(SP.ProvenanceError):
+            SP.bind(_complete_source(head=fake), _complete_facts(head=fake), getenv=_env())
+
+    def test_missing_provenance_kind_is_not_defaulted_to_git_pr(self):
+        src = _complete_source()
+        del src["pr"]["provenance_kind"]
+        with self.assertRaises(SP.ProvenanceError):
+            SP.bind(src, _complete_facts(), getenv=_env())
+
+    def test_pr_facts_must_declare_the_same_provenance_kind(self):
+        facts = _complete_facts()
+        del facts["provenance_kind"]
+        with self.assertRaises(SP.ProvenanceError):        # 缺
+            SP.bind(_complete_source(), facts, getenv=_env())
+        with self.assertRaises(SP.ProvenanceError):        # 有但不同
+            SP.bind(_complete_source(),
+                    _complete_facts(provenance_kind=SP.PROVENANCE_LOCAL_SNAPSHOT),
+                    getenv=_env())
+
+    def test_tier_and_kind_must_agree(self):
+        """`complete` 档不接受 local_snapshot 形态，反之亦然。"""
+        src = _complete_source()
+        src["pr"]["provenance_kind"] = SP.PROVENANCE_LOCAL_SNAPSHOT
+        with self.assertRaises(SP.ProvenanceError):
+            SP.bind(src, _complete_facts(provenance_kind=SP.PROVENANCE_LOCAL_SNAPSHOT),
+                    getenv=_env())
 
 
 class BindSnapshotAuthorizationTest(unittest.TestCase):
@@ -62,8 +123,7 @@ class BindSnapshotAuthorizationTest(unittest.TestCase):
 
     def test_unauthorized_snapshot_is_rejected(self):
         with self.assertRaises(SP.ProvenanceError) as cm:
-            SP.bind(_snapshot_source(), {"head_sha": None, "snapshot_merkle_sha256": "b" * 64},
-                    getenv=_env(None))
+            SP.bind(_snapshot_source(), _snapshot_facts(), getenv=_env(None))
         self.assertIn(SP.AUTHORIZE_ENV, str(cm.exception))
 
     def test_truthy_value_is_not_authorization(self):
@@ -72,17 +132,14 @@ class BindSnapshotAuthorizationTest(unittest.TestCase):
         for truthy in ("1", "true", "TRUE", "yes", "on"):
             with self.subTest(value=truthy):
                 with self.assertRaises(SP.ProvenanceError):
-                    SP.bind(_snapshot_source(),
-                            {"head_sha": None, "snapshot_merkle_sha256": "b" * 64},
-                            getenv=_env(truthy))
+                    SP.bind(_snapshot_source(), _snapshot_facts(), getenv=_env(truthy))
 
     def test_authorizing_a_different_kind_does_not_unlock_this_one(self):
         with self.assertRaises(SP.ProvenanceError):
-            SP.bind(_snapshot_source(), {"head_sha": None, "snapshot_merkle_sha256": "b" * 64},
-                    getenv=_env("some_other_kind"))
+            SP.bind(_snapshot_source(), _snapshot_facts(), getenv=_env("some_other_kind"))
 
     def test_authorized_snapshot_passes_and_books_degradations(self):
-        b, deg = SP.bind(_snapshot_source(), {"head_sha": None, "snapshot_merkle_sha256": "b" * 64},
+        b, deg = SP.bind(_snapshot_source(), _snapshot_facts(),
                          getenv=_env(SP.PROVENANCE_LOCAL_SNAPSHOT))
         self.assertIsNone(b["pr_head_sha"])
         self.assertEqual(b["snapshot_merkle_sha256"], "b" * 64)
@@ -94,13 +151,23 @@ class BindSnapshotAuthorizationTest(unittest.TestCase):
         两侧任一处填了 40 位 hex 都必须当场报错——否则合成值会一路流进验收结论。"""
         fake = "d" * 40
         with self.assertRaises(SP.ProvenanceError):        # source 侧编
-            SP.bind(_snapshot_source(head=fake),
-                    {"head_sha": None, "snapshot_merkle_sha256": "b" * 64},
+            SP.bind(_snapshot_source(head=fake), _snapshot_facts(),
                     getenv=_env(SP.PROVENANCE_LOCAL_SNAPSHOT))
         with self.assertRaises(SP.ProvenanceError):        # pr_facts 侧编
-            SP.bind(_snapshot_source(),
-                    {"head_sha": fake, "snapshot_merkle_sha256": "b" * 64},
+            SP.bind(_snapshot_source(), _snapshot_facts(head=fake),
                     getenv=_env(SP.PROVENANCE_LOCAL_SNAPSHOT))
+
+    def test_missing_head_key_is_not_an_explicit_null(self):
+        """审计 C5：缺字段被当成显式 null，等于让「事实包没写」自动过门。"""
+        auth = _env(SP.PROVENANCE_LOCAL_SNAPSHOT)
+        src = _snapshot_source()
+        del src["pr"]["head_sha"]
+        with self.assertRaises(SP.ProvenanceError):
+            SP.bind(src, _snapshot_facts(), getenv=auth)
+        facts = _snapshot_facts()
+        del facts["head_sha"]
+        with self.assertRaises(SP.ProvenanceError):
+            SP.bind(_snapshot_source(), facts, getenv=auth)
 
 
 class BindSnapshotFactsTest(unittest.TestCase):
@@ -115,25 +182,41 @@ class BindSnapshotFactsTest(unittest.TestCase):
         for bad in (None, "", "xyz", "b" * 63, 12345):
             with self.subTest(merkle=bad):
                 with self.assertRaises(SP.ProvenanceError):
-                    SP.bind(_snapshot_source(merkle=bad),
-                            {"head_sha": None, "snapshot_merkle_sha256": bad}, getenv=self.AUTH)
+                    SP.bind(_snapshot_source(merkle=bad), _snapshot_facts(merkle=bad),
+                            getenv=self.AUTH)
 
     def test_merkle_must_agree_across_fact_packs(self):
         with self.assertRaises(SP.ProvenanceError):
-            SP.bind(_snapshot_source(merkle="b" * 64),
-                    {"head_sha": None, "snapshot_merkle_sha256": "e" * 64}, getenv=self.AUTH)
+            SP.bind(_snapshot_source(merkle="b" * 64), _snapshot_facts(merkle="e" * 64),
+                    getenv=self.AUTH)
+
+    def test_missing_merkle_key_is_rejected(self):
+        facts = _snapshot_facts()
+        del facts["snapshot_merkle_sha256"]
+        with self.assertRaises(SP.ProvenanceError):
+            SP.bind(_snapshot_source(), facts, getenv=self.AUTH)
 
     def test_missing_scope_is_rejected(self):
         src = _snapshot_source()
         del src["pr"]["snapshot_scope"]
         with self.assertRaises(SP.ProvenanceError):
-            SP.bind(src, {"head_sha": None, "snapshot_merkle_sha256": "b" * 64}, getenv=self.AUTH)
+            SP.bind(src, _snapshot_facts(), getenv=self.AUTH)
+
+    def test_scope_must_agree_across_fact_packs(self):
+        """两个 merkle 的覆盖范围对不上就不可比——只读 source 侧 scope 是漏了一半对账。"""
+        with self.assertRaises(SP.ProvenanceError):
+            SP.bind(_snapshot_source(scope="gaussian_blur"), _snapshot_facts(scope=""),
+                    getenv=self.AUTH)
+        facts = _snapshot_facts()
+        del facts["snapshot_scope"]
+        with self.assertRaises(SP.ProvenanceError):
+            SP.bind(_snapshot_source(), facts, getenv=self.AUTH)
 
     def test_blocked_tier_is_never_authorizable(self):
         src = _snapshot_source()
         src["completeness"]["status"] = "blocked"
         with self.assertRaises(SP.ProvenanceError):
-            SP.bind(src, {"head_sha": None, "snapshot_merkle_sha256": "b" * 64}, getenv=self.AUTH)
+            SP.bind(src, _snapshot_facts(), getenv=self.AUTH)
 
     def test_malformed_fact_packs_fail_closed(self):
         for src, facts in (("not-a-dict", {}), ({}, "not-a-dict"),
@@ -177,6 +260,36 @@ class ConfigAgainstPreflightTest(unittest.TestCase):
         SP.check_config_against_preflight(
             {"source_mode": "local_snapshot"},
             {"provenance_kind": SP.PROVENANCE_LOCAL_SNAPSHOT, "pr_head_sha": None})
+
+    # —— fail-open 负例（审计 #43）：畸形 bindings 不得靠缺键过门 ——
+
+    def test_git_path_rejects_bindings_without_pr_head_key(self):
+        with self.assertRaises(SP.ProvenanceError):
+            SP.check_config_against_preflight(
+                {"source_mode": "git_fetch", "head_sha": "a" * 40},
+                {"provenance_kind": SP.PROVENANCE_GIT_PR})
+
+    def test_git_path_rejects_two_missing_heads_comparing_equal(self):
+        """cfg 与 bindings 都没有 head 时，旧实现靠 `None == None` 判「一致」。"""
+        with self.assertRaises(SP.ProvenanceError):
+            SP.check_config_against_preflight(
+                {"source_mode": "git_fetch"}, {"provenance_kind": SP.PROVENANCE_GIT_PR})
+
+    def test_git_path_rejects_non_hex40_head(self):
+        with self.assertRaises(SP.ProvenanceError):
+            SP.check_config_against_preflight(
+                {"source_mode": "git_fetch", "head_sha": "HEAD"},
+                {"provenance_kind": SP.PROVENANCE_GIT_PR, "pr_head_sha": "HEAD"})
+
+    def test_snapshot_path_requires_explicit_null_pr_head(self):
+        with self.assertRaises(SP.ProvenanceError):
+            SP.check_config_against_preflight(
+                {"source_mode": "local_snapshot"},
+                {"provenance_kind": SP.PROVENANCE_LOCAL_SNAPSHOT})
+
+    def test_non_dict_bindings_fail_closed(self):
+        with self.assertRaises(SP.ProvenanceError):
+            SP.check_config_against_preflight({"source_mode": "local_snapshot"}, None)
 
 
 class BuildIdentityTest(unittest.TestCase):
@@ -244,6 +357,53 @@ class BuildIdentityTest(unittest.TestCase):
     def test_non_dict_provenance_fails_closed(self):
         with self.assertRaises(SP.ProvenanceError):
             SP.check_build_identity(None, self.SNAP_CFG, self.SNAP_BIND)
+
+    # —— fail-open 负例（审计 C1 对应的 #36 / #37）——
+
+    def test_git_all_three_heads_missing_is_not_a_match(self):
+        """三方都没有 head_sha 时，`None == None == None` 曾被判成「身份一致」。"""
+        with self.assertRaises(SP.ProvenanceError):
+            SP.check_build_identity({"provenance_kind": "git_fetch"},
+                                    {"source_mode": "git_fetch"},
+                                    {"provenance_kind": SP.PROVENANCE_GIT_PR})
+
+    def test_git_non_hex40_head_is_rejected_even_when_all_three_agree(self):
+        with self.assertRaises(SP.ProvenanceError):
+            SP.check_build_identity({"provenance_kind": "git_fetch", "head_sha": "HEAD"},
+                                    {"source_mode": "git_fetch", "head_sha": "HEAD"},
+                                    {"provenance_kind": SP.PROVENANCE_GIT_PR,
+                                     "pr_head_sha": "HEAD"})
+
+    def test_snapshot_missing_head_key_is_not_explicit_null(self):
+        p = self._snap_prov()
+        del p["head_sha"]
+        with self.assertRaises(SP.ProvenanceError):
+            SP.check_build_identity(p, self.SNAP_CFG, self.SNAP_BIND)
+
+    def test_snapshot_digests_must_be_present_and_hex64(self):
+        for key in ("snapshot_sha256", "snapshot_subtree_sha256"):
+            with self.subTest(missing=key):
+                p = self._snap_prov()
+                del p[key]
+                with self.assertRaises(SP.ProvenanceError):
+                    SP.check_build_identity(p, self.SNAP_CFG, self.SNAP_BIND)
+        # 两侧都缺 whole-tree 摘要 → 旧实现靠 None == None 放行
+        with self.assertRaises(SP.ProvenanceError):
+            SP.check_build_identity(self._snap_prov(snapshot_sha256=None),
+                                    {"source_mode": "local_snapshot", "snapshot_sha256": None},
+                                    self.SNAP_BIND)
+
+    def test_snapshot_bindings_missing_merkle_is_rejected(self):
+        bind = dict(self.SNAP_BIND)
+        del bind["snapshot_merkle_sha256"]
+        with self.assertRaises(SP.ProvenanceError):
+            SP.check_build_identity(self._snap_prov(), self.SNAP_CFG, bind)
+
+    def test_snapshot_bindings_missing_scope_is_rejected(self):
+        bind = dict(self.SNAP_BIND)
+        del bind["snapshot_scope"]
+        with self.assertRaises(SP.ProvenanceError):
+            SP.check_build_identity(self._snap_prov(), self.SNAP_CFG, bind)
 
 
 if __name__ == "__main__":

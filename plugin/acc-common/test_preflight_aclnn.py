@@ -61,14 +61,17 @@ class AclnnPreflightTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = self.tmp.name
         self._write("spec.json", _spec())
+        # provenance_kind 两侧都必须**显式**声明（`fetch_pr` / `scan_pr_snapshot` 本就恒写）：
+        # source_provenance.bind 不再默认成 gitcode_pr，也不再只读单侧。
         self._write("pr_facts.json", {
+            "provenance_kind": "gitcode_pr",
             "head_sha": _HEAD,
             "key_files": {_PATH: _HEADER},
         })
         raw = _HEADER.encode()
         source = {
             "contract_version": 1,
-            "pr": {"head_sha": _HEAD},
+            "pr": {"provenance_kind": "gitcode_pr", "head_sha": _HEAD},
             "key_files": [{
                 "path": _PATH,
                 "ref": _HEAD,

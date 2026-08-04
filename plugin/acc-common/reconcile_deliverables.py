@@ -38,9 +38,11 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 
 import content_address
+import source_provenance
 import validate_taskdoc_input as taskdoc
 
 
@@ -52,6 +54,14 @@ _DRY_RUN_ENV = "OPRUNWAY_DELIVERABLE_RECONCILE_DRY_RUN"
 _DISPOSITIONS = frozenset({"present", "absent", "uncertain"})
 # 太短的「符号」在几十 KB 的关键文件里必然命中，等于自动放行；逐字符号至少要有辨识度。
 _MIN_SYMBOL_CHARS = 3
+
+#: 允许进入交付件对账的任务书校验状态**白名单**（audit#31）。
+#: `NEEDS_USER` 表示清单还等着人补事实——此时对账出来的「必选件全有归宿」没有意义；
+#: 未知/新增状态同样拒，绝不「只拒已知的坏值」。
+_ACCEPTED_TASKDOC_STATUSES = frozenset({"PASSED", "PASSED_WITH_PENDING"})
+
+#: 合法 C/C++ 标识符——symbol 归宿必须是**完整标识符**，不是任意子串（audit#34）。
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 class ReconcileError(ValueError):
@@ -112,12 +122,67 @@ def _load_pr_facts(root, rel):
         raise ReconcileError("pr_facts.blocked 须为字符串或缺省")
     return {
         "sha256": digest,
+        "payload": payload,
         "pr_url": payload.get("pr_url"),
         "head_sha": payload.get("head_sha"),
         "changed_files": sorted(changed),
         "key_files": texts,
         "blocked": blocked,
     }
+
+
+def _bind_pr_facts_to_source(root, source_rel, pr_facts):
+    """把裸 `pr_facts.json` 钉到**内容寻址**的 `source_facts` 上（audit#32）。
+
+    对账的全部证据（`changed_files` / `key_files`）都来自 `pr_facts.json`——而它是一份
+    普通 JSON，不是内容寻址工件。以前这里**一条都不核**：谁往 `changed_files` 里多写一行、
+    往 `key_files` 里塞一段文本，就能给任意交付件造出「归宿」。
+
+    这里复用 `source_provenance.bind()`（provenance 档位的唯一解释处：`complete` 无条件、
+    `snapshot_only` 须编排层显式授权、其余全拒），再逐项核对改动集与关键文件字节摘要/ref。
+    返回 `(bindings, degradations)` 供收据留痕。
+    """
+    try:
+        source = content_address.read_artifact(root, source_rel, taskdoc._SOURCE_DOMAIN)
+    except content_address.ContentAddressError as ex:
+        raise ReconcileError(f"读不到内容寻址的 source_facts：{ex}") from ex
+    if not isinstance(source, dict):
+        raise ReconcileError("source_facts payload 须为 JSON object")
+    try:
+        bindings, degradations = source_provenance.bind(source, pr_facts["payload"])
+    except source_provenance.ProvenanceError as ex:
+        raise ReconcileError(f"pr_facts 与 source_facts 的源身份绑定不成立：{ex}") from ex
+
+    source_changed = source.get("changed_files")
+    if not isinstance(source_changed, list) or any(
+            not isinstance(p, str) for p in source_changed):
+        raise ReconcileError("source_facts.changed_files 缺失或非字符串数组")
+    if sorted(source_changed) != pr_facts["changed_files"]:
+        raise ReconcileError(
+            "pr_facts.changed_files 与内容寻址的 source_facts 不一致——"
+            "对账证据只认 CP-A 记过的那份改动集，裸 pr_facts 不得单方面增删")
+
+    index = source.get("key_files")
+    if not isinstance(index, list):
+        raise ReconcileError("source_facts.key_files 缺失或非数组")
+    recorded = {}
+    for item in index:
+        if (not isinstance(item, dict) or not isinstance(item.get("path"), str)
+                or not isinstance(item.get("bytes_sha256"), str)):
+            raise ReconcileError("source_facts.key_files 条目缺 path / bytes_sha256")
+        recorded[item["path"]] = item
+    extra = sorted(set(pr_facts["key_files"]) - set(recorded))
+    if extra:
+        raise ReconcileError(
+            f"pr_facts.key_files 多出 source_facts 未记录的文件 {extra}——"
+            "凭空多出的正文可以给任意符号造出「归宿」")
+    for path, text in pr_facts["key_files"].items():
+        want = recorded[path]
+        got = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if got != want["bytes_sha256"]:
+            raise ReconcileError(
+                f"pr_facts.key_files[{path!r}] 正文摘要与 source_facts 不符（正文被改过）")
+    return bindings, degradations
 
 
 def _load_mapping(root, rel, bindings, pr_sha256):
@@ -169,10 +234,13 @@ def _load_mapping(root, rel, bindings, pr_sha256):
         symbols = _str_list(entry.get("symbols"),
                             f"mappings[{entry_id}].symbols")
         rationale = entry.get("rationale")
-        if disposition == "present" and not (paths or symbols):
+        if disposition == "present" and not paths:
+            # audit#34：symbol-only 覆盖不再被接受。符号必须绑在**指认的文件**里，
+            # 否则「某个词在 PR 的某份关键文件里出现过」就成了交付证据。
             raise ReconcileError(
-                f"mappings[{entry_id}]: disposition=present 必须指认至少一条 "
-                "paths 或 symbols——「我看过了，有」不是归宿")
+                f"mappings[{entry_id}]: disposition=present 必须指认至少一条 paths"
+                "（symbols 只能作为已指认文件内的**附加**证据，不能单独成立）"
+                "——「我看过了，有」不是归宿")
         if disposition != "present" and not (isinstance(rationale, str)
                                              and rationale.strip()):
             raise ReconcileError(
@@ -184,6 +252,10 @@ def _load_mapping(root, rel, bindings, pr_sha256):
                     f"mappings[{entry_id}].symbols 的 {symbol!r} 过短"
                     f"（< {_MIN_SYMBOL_CHARS} 字符）：短串在关键文件里必然命中，"
                     "等于自动放行")
+            if not _IDENTIFIER_RE.match(symbol):
+                raise ReconcileError(
+                    f"mappings[{entry_id}].symbols 的 {symbol!r} 不是合法标识符——"
+                    "符号归宿只认完整标识符，任意子串会把注释/文案当成交付证据")
         out[entry_id] = {
             "id": entry_id,
             "disposition": disposition,
@@ -195,20 +267,37 @@ def _load_mapping(root, rel, bindings, pr_sha256):
 
 
 def _verify_path(path, changed_files):
-    """路径归宿只认逐字命中或逐字目录前缀，绝不做名字近似。"""
+    """路径归宿**只认逐字命中的具体文件**（audit#33）。
+
+    旧实现还接受「目录前缀命中任意一个改动文件」——于是 `ops-cv/`、甚至仓根这种宽泛祖先目录，
+    只要 PR 动了任何一个文件就算这件交付物「有归宿」。那不是归宿，是「PR 非空」。
+    需要指认一个目录级交付件时，请把该目录下的**具体文件**逐条列进 `paths`。
+    """
     if path in changed_files:
         return {"path": path, "match": "file", "changed_file": path}
-    prefix = path.rstrip("/") + "/"
-    hits = [p for p in changed_files if p.startswith(prefix)]
-    if hits:
-        return {"path": path, "match": "directory", "changed_file": hits[0],
-                "changed_file_count": len(hits)}
     return None
 
 
-def _verify_symbol(symbol, key_files):
+def _strip_c_like_literals(text):
+    """去掉 C/C++ 注释与字符串/字符字面量，避免注释或文案里的词冒充符号定义（audit#34）。"""
+    without_comments = re.sub(r"/\*.*?\*/|//[^\n]*", " ", text, flags=re.S)
+    return re.sub(r'"(?:\\.|[^"\\])*"' r"|'(?:\\.|[^'\\])*'", " ", without_comments)
+
+
+def _verify_symbol(symbol, key_files, allowed_files):
+    """符号归宿：必须**绑定到指认的文件**、是完整标识符、且按 token 边界命中（audit#34）。
+
+    旧实现是「长度 ≥3 的原始子串在任意 key_file 里出现即算数」——普通英文词、注释、
+    字符串文案都能当成交付证据。symbol-only 的指认（没有 paths）不再被接受：
+    一个孤立的词证明不了「这件交付物在这个 PR 里」。
+    """
+    if not _IDENTIFIER_RE.match(symbol):
+        return None
+    pattern = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(symbol) + r"(?![A-Za-z0-9_])")
     for source in sorted(key_files):
-        if symbol in key_files[source]:
+        if source not in allowed_files:
+            continue
+        if pattern.search(_strip_c_like_literals(key_files[source])):
             return {"symbol": symbol, "match": "key_file", "key_file": source}
     return None
 
@@ -244,8 +333,10 @@ def _reconcile_entry(entry, mapping, pr_facts):
     for path in declared["paths"]:
         hit = _verify_path(path, pr_facts["changed_files"])
         (evidence if hit else unverified).append(hit or {"path": path})
+    # 符号只在**本条指认的文件**里查（audit#34）：跨文件乱查等于「PR 里哪儿有这个词都算」。
+    allowed_files = set(declared["paths"])
     for symbol in declared["symbols"]:
-        hit = _verify_symbol(symbol, pr_facts["key_files"])
+        hit = _verify_symbol(symbol, pr_facts["key_files"], allowed_files)
         (evidence if hit else unverified).append(hit or {"symbol": symbol})
     if unverified:
         return None, dict(
@@ -277,29 +368,42 @@ def evaluate(root, validation_rel="taskdoc_validation.json",
         "optional_findings": [],
         "errors": [],
         "bindings": {},
+        # 源 provenance 的机读降级挂账（`complete` 档为空表）；恒存在，空表 ≠ 工具没记。
+        "provenance_degradations": [],
     }
     try:
         receipt = taskdoc.evaluate(root, validation_rel, taskdoc_rel=taskdoc_rel,
                                    source_rel=source_rel,
                                    contract_path=contract_path)
         result["taskdoc_validation_status"] = receipt["status"]
-        if receipt["status"] == "BLOCKED":
+        # audit#31：以前只拒 `BLOCKED`，于是 `NEEDS_USER`（还等着人补事实）与任何将来新增/
+        # 拼错的状态都会继续往下跑，甚至可能落成 `RECONCILED`。改成**白名单**：
+        # 只有明确通过的两个状态可以进对账，其余一律 fail-closed。
+        if receipt["status"] not in _ACCEPTED_TASKDOC_STATUSES:
             raise ReconcileError(
-                "任务书校验工件自身 BLOCKED，交付件清单不可信，无从对账："
-                + "；".join(receipt["errors"]))
+                f"任务书校验状态={receipt['status']!r} 不在可对账白名单 "
+                f"{sorted(_ACCEPTED_TASKDOC_STATUSES)}，交付件清单不可信，无从对账："
+                + "；".join(receipt["errors"] or ["（无 errors 明细）"]))
         result["op"] = receipt["op"]
         inventory = receipt["deliverable_inventory"] or {}
         result["inventory_complete"] = bool(inventory.get("complete"))
         pr_facts = _load_pr_facts(root, pr_facts_rel)
         mapping = _load_mapping(root, mapping_rel, receipt["bindings"],
                                 pr_facts["sha256"])
+        # audit#32：mapping 的轮次绑定先判（错轮的指认与源身份无关，报错要指得准），
+        # 再把裸 pr_facts 钉到内容寻址的 source_facts 上。
+        provenance_bindings, provenance_degradations = _bind_pr_facts_to_source(
+            root, source_rel, pr_facts)
+        result["provenance_degradations"] = provenance_degradations
         result["bindings"] = {
             "taskdoc_bytes_sha256": receipt["bindings"]["taskdoc_bytes_sha256"],
             "taskdoc_validation_digest": receipt["bindings"]["validation_digest"],
             "contract_digest": receipt["bindings"]["contract_digest"],
             "pr_facts_sha256": pr_facts["sha256"],
             "pr_url": pr_facts["pr_url"],
-            "pr_head_sha": pr_facts["head_sha"],
+            # PR head **只认 source_provenance 绑出来的那个**，不再抄 pr_facts 自报值。
+            "pr_head_sha": provenance_bindings["pr_head_sha"],
+            "provenance_kind": provenance_bindings["provenance_kind"],
         }
         known = {entry["id"] for entry in receipt["deliverables"]}
         unknown = sorted(set(mapping) - known)

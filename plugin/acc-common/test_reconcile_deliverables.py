@@ -21,6 +21,9 @@ import validate_taskdoc_input as VTI
 
 _PR_FACTS = {
     "pr_url": "https://gitcode.com/cann/ops-nn/merge_requests/1234",
+    # provenance_kind 两侧都必须显式在场（`fetch_pr` 本就恒写）：对账现在要把裸 pr_facts
+    # 钉到内容寻址的 source_facts 上，源身份由 source_provenance.bind 逐条硬校。
+    "provenance_kind": "gitcode_pr",
     "head_sha": "0" * 40,
     "source_repo": "cann/ops-nn",
     "changed_files": [
@@ -33,6 +36,22 @@ _PR_FACTS = {
             "aclnnStatus aclnnWitnessOpGetWorkspaceSize(const aclTensor *x);",
     },
 }
+
+
+def _source_payload(taskdoc_raw, facts=_PR_FACTS):
+    """与 `_PR_FACTS` 配套的**内容寻址** source_facts（CP-A 记过的那份事实）。"""
+    return {
+        "taskdoc": {"bytes_sha256": hashlib.sha256(taskdoc_raw).hexdigest()},
+        "pr": {"provenance_kind": facts["provenance_kind"],
+               "head_sha": facts["head_sha"]},
+        "changed_files": sorted(facts["changed_files"]),
+        "key_files": [
+            {"path": path, "ref": facts["head_sha"],
+             "bytes_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+             "size": len(body.encode("utf-8"))}
+            for path, body in sorted(facts["key_files"].items())],
+        "completeness": {"status": "complete", "reasons": []},
+    }
 
 
 class ReconcileDeliverablesTest(unittest.TestCase):
@@ -50,7 +69,7 @@ class ReconcileDeliverablesTest(unittest.TestCase):
         raw = text.encode("utf-8")
         with open(os.path.join(self.root, "task_doc.md"), "wb") as out:
             out.write(raw)
-        payload = {"taskdoc": {"bytes_sha256": hashlib.sha256(raw).hexdigest()}}
+        payload = _source_payload(raw)
         content_address.write_artifact(self.root, "source_facts.json",
                                        VTI._SOURCE_DOMAIN, payload)
         self.digest = content_address.content_digest(VTI._SOURCE_DOMAIN, payload)
@@ -162,20 +181,49 @@ class ReconcileDeliverablesTest(unittest.TestCase):
         self.assertEqual(result["status"], "RECONCILED", result["errors"])
         self.assertEqual(result["covered"][0]["evidence"][0]["match"], "file")
 
-    def test_directory_prefix_is_accepted_as_a_home(self):
+    def test_directory_prefix_is_no_longer_a_home(self):
+        """★ audit#33：目录前缀命中任意一个改动文件 ≠ 这件交付物有归宿。
+
+        旧口径下 `ops-cv/`（甚至仓根）只要 PR 动了任何文件就算「覆盖」——那证明的是
+        「PR 非空」，不是交付。现在只认逐字命中的具体文件。
+        """
         self._write_mapping(self._present(paths=["math/witness_op/op_host"]))
         result = self._evaluate()
-        self.assertEqual(result["status"], "RECONCILED", result["errors"])
-        self.assertEqual(result["covered"][0]["evidence"][0]["match"],
-                         "directory")
+        self.assertEqual(result["status"], "GAPS")
+        self.assertEqual(result["gaps"][0]["reason"], "evidence_not_found")
 
-    def test_verbatim_symbol_in_a_key_file_is_accepted(self):
+    def test_symbol_only_mapping_is_rejected(self):
+        """★ audit#34：symbol-only 覆盖不成立——符号必须绑在指认的文件里。"""
         self._write_mapping(self._present(
             symbols=["aclnnWitnessOpGetWorkspaceSize"]))
         result = self._evaluate()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("paths", result["errors"][0])
+
+    def test_verbatim_symbol_inside_the_declared_file_is_accepted(self):
+        path = "math/witness_op/op_host/op_api/aclnn_witness_op.h"
+        self._write_mapping(self._present(
+            paths=[path], symbols=["aclnnWitnessOpGetWorkspaceSize"]))
+        result = self._evaluate()
         self.assertEqual(result["status"], "RECONCILED", result["errors"])
-        self.assertEqual(result["covered"][0]["evidence"][0]["key_file"],
-                         "math/witness_op/op_host/op_api/aclnn_witness_op.h")
+        self.assertEqual(result["covered"][0]["evidence"][1]["key_file"], path)
+
+    def test_symbol_in_a_file_the_mapping_did_not_declare_is_not_evidence(self):
+        """符号只在**本条指认的文件**里查：跨文件乱查 = 「PR 里哪儿有这个词都算」。"""
+        self._write_mapping(self._present(
+            paths=["math/witness_op/op_kernel/witness_op.cpp"],
+            symbols=["aclnnWitnessOpGetWorkspaceSize"]))
+        result = self._evaluate()
+        self.assertEqual(result["status"], "GAPS")
+        self.assertEqual(result["gaps"][0]["reason"], "evidence_not_found")
+
+    def test_non_identifier_symbol_is_rejected(self):
+        self._write_mapping(self._present(
+            paths=["math/witness_op/op_kernel/witness_op.cpp"],
+            symbols=["aclnn Witness Op"]))
+        result = self._evaluate()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("合法标识符", result["errors"][0])
 
     def test_a_path_the_pr_does_not_contain_is_a_gap_not_a_pass(self):
         self._write_mapping(self._present(
@@ -186,7 +234,9 @@ class ReconcileDeliverablesTest(unittest.TestCase):
         self.assertIn("gaussian_blur_adapter.cpp", result["gaps"][0]["detail"])
 
     def test_a_symbol_absent_from_key_files_is_a_gap(self):
-        self._write_mapping(self._present(symbols=["aclnnSomethingElse"]))
+        self._write_mapping(self._present(
+            paths=["math/witness_op/op_host/op_api/aclnn_witness_op.h"],
+            symbols=["aclnnSomethingElse"]))
         result = self._evaluate()
         self.assertEqual(result["status"], "GAPS")
         self.assertEqual(result["gaps"][0]["reason"], "evidence_not_found")
@@ -234,8 +284,22 @@ class ReconcileDeliverablesTest(unittest.TestCase):
         self.assertEqual(result["status"], "BLOCKED")
         self.assertIn("rationale", result["errors"][0])
 
+    def test_taskdoc_status_outside_the_allow_list_is_blocked(self):
+        """★ audit#31：只拒 BLOCKED 会让 `NEEDS_USER`（还等着人补事实）和未知状态继续对账。"""
+        good = VTI.evaluate(self.root, self.validation)
+        for status in ("NEEDS_USER", "SOME_FUTURE_STATUS"):
+            with self.subTest(status=status):
+                receipt = copy.deepcopy(good)
+                receipt["status"] = status
+                with mock.patch.object(RD.taskdoc, "evaluate",
+                                       return_value=receipt):
+                    result = self._evaluate()
+                self.assertEqual(result["status"], "BLOCKED")
+                self.assertIn(status, result["errors"][0])
+
     def test_too_short_a_symbol_is_blocked(self):
-        self._write_mapping(self._present(symbols=["op"]))
+        self._write_mapping(self._present(
+            paths=["math/witness_op/op_kernel/witness_op.cpp"], symbols=["op"]))
         result = self._evaluate()
         self.assertEqual(result["status"], "BLOCKED")
         self.assertIn("过短", result["errors"][0])
@@ -252,9 +316,11 @@ class ReconcileDeliverablesTest(unittest.TestCase):
         self.validation = self._write_validation(
             self._validation_payload(items=items, deliverables=[]))
         result = self._evaluate()
-        self.assertEqual(result["status"], "GAPS")
-        self.assertFalse(result["inventory_complete"])
-        self.assertEqual(result["gaps"][0]["reason"], "inventory_incomplete")
+        # audit#52 之后，清单不完整在**任务书校验门**就落成 NEEDS_USER（不再有「清单不全
+        # 却 PASSED」的收据），于是对账在 audit#31 的状态白名单上直接 BLOCKED。
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["taskdoc_validation_status"], "NEEDS_USER")
+        self.assertIn("NEEDS_USER", result["errors"][0])
 
     def test_blocked_taskdoc_validation_blocks_the_reconciliation(self):
         self.validation = self._write_validation(
@@ -301,10 +367,40 @@ class ReconcileDeliverablesTest(unittest.TestCase):
     # --- PR side unusable -------------------------------------------------
 
     def test_empty_changed_files_never_reads_as_covered(self):
+        """★ audit#32：裸 pr_facts 单方面把改动集清空 → 与内容寻址的 source_facts 对不上 → BLOCKED。
+
+        改动前它只落成一条 `pr_evidence_unavailable` 的 gap；现在「pr_facts 说的和 CP-A 记的
+        不是一回事」本身就是硬错——否则谁改 pr_facts 谁就能改证据面。
+        """
         self._write_pr_facts(dict(_PR_FACTS, changed_files=[]))
         result = self._evaluate()
-        self.assertEqual(result["status"], "GAPS")
-        self.assertEqual(result["gaps"][0]["reason"], "pr_evidence_unavailable")
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("changed_files", result["errors"][0])
+
+    def test_forged_changed_file_is_blocked_not_covered(self):
+        """★ audit#32：往 pr_facts 里多写一行就能给交付件造归宿——现在钉死在 source_facts 上。"""
+        forged = dict(_PR_FACTS,
+                      changed_files=_PR_FACTS["changed_files"]
+                      + ["opencv/adapters/gaussian_blur_adapter.cpp"])
+        self._write_pr_facts(forged)
+        self._write_mapping(self._present(
+            paths=["opencv/adapters/gaussian_blur_adapter.cpp"]))
+        result = self._evaluate()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("changed_files", result["errors"][0])
+
+    def test_forged_key_file_body_is_blocked(self):
+        """★ audit#32：改 key_files 正文即可让任意符号「查有实据」——摘要对账把它挡下。"""
+        forged = copy.deepcopy(_PR_FACTS)
+        forged["key_files"]["math/witness_op/op_host/op_api/aclnn_witness_op.h"] += (
+            "\nvoid aclnnSomethingElse();")
+        self._write_pr_facts(forged)
+        self._write_mapping(self._present(
+            paths=["math/witness_op/op_host/op_api/aclnn_witness_op.h"],
+            symbols=["aclnnSomethingElse"]))
+        result = self._evaluate()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("摘要与 source_facts 不符", result["errors"][0])
 
     def test_pr_side_blocked_flag_is_propagated_as_a_gap(self):
         self._write_pr_facts(dict(_PR_FACTS, blocked="missing_head_sha"))

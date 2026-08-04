@@ -110,6 +110,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import operator
 import os
 import re
 from dataclasses import dataclass
@@ -150,13 +151,15 @@ class AclnnSignature:
     穿插的标量属性正是 median ``(self, int64 dim, bool keepDim, valuesOut, indicesOut)`` 需要承载的
     ——旧版只抓 aclTensor、把 dim/keepDim 连同其位置一起丢了，导致 run() 无处安放、段错误。
 
-    ``stage2_form`` = 执行段 ``aclnn<Op>`` 的**实参结构**（改动⑮），只有三种取值：
-      · :data:`STAGE2_STANDARD` —— ``(workspace, workspaceSize, executor, stream)``；
-      · :data:`STAGE2_EXTENDED` —— ``(workspace, workspaceSize, executor, <stage1 实参原样重复>, stream)``；
-      · ``None`` —— header 里**没有** stage2 声明，或调用方手工构造签名时没给 → :meth:`AclnnRunner.run`
-        按 :data:`STAGE2_STANDARD` 派发（= 本改动之前的行为，Median 等既有通路逐字节不变）。
-    **不存在第四种**：:func:`parse_aclnn_signature` 解析到不属于上面两种的 stage2 直接 fail-closed，
-    绝不猜、绝不退回 4 参调用（拿 4 参 argtypes 调 10 参函数在 aarch64 上就是静默内存 bug）。
+    ``stage2_form`` = 执行段 ``aclnn<Op>`` 的**实参结构**（改动⑮），四种取值、**两类语义**：
+      · :data:`STAGE2_STANDARD` —— ``(workspace, workspaceSize, executor, stream)``；可派发；
+      · :data:`STAGE2_EXTENDED` —— ``(workspace, workspaceSize, executor, <stage1 实参原样重复>, stream)``；可派发；
+      · :data:`STAGE2_ABSENT`   —— header 里**确实没写**执行段声明。这是一个已知事实，**不可派发**；
+      · ``None``                —— 调用方手工构造签名时**没有声明**。这是「没人说过」，**不可派发**。
+    后两者刻意**在类型上分开**：它们的排查方向完全不同（改头 vs 改调用方），而旧实现把两者
+    一起 ``or STAGE2_STANDARD`` 成 4 参调用——那是 GaussianBlur 那种 10 参 stage2 被静默错调的根因。
+    **不存在第五种**：:func:`parse_aclnn_signature` 解析到不属于上面两种可派发结构的 stage2 直接
+    fail-closed，绝不猜、绝不退回 4 参调用（拿 4 参 argtypes 调 10 参函数在 aarch64 上就是静默内存 bug）。
 
     用途 = **强制交叉校验**：``run()`` **必须**拿到本签名（audit#1：signature=None 兜底已删），据此校
     调用 slots 的 ``op_name`` / 参数总数 / 逐项 ``(name, role, ctype)`` 与签名一致，任一不符 fail-closed。
@@ -261,6 +264,14 @@ _EXEC_PARAM_RE = re.compile(r"^(?:const\s+)?aclOpExecutor\s*\*\s*\*\s*\w+$")
 # 一律不匹配 → 落到裸指针分支 fail-closed（不顺手把 aclFloatArray / aclBoolArray 一起放宽）。
 _INT_ARRAY_PARAM_RE = re.compile(r"^(?:const\s+)?aclIntArray\s*\*\s*\w+$")
 
+# audit#10：tensor / scalar 也必须**完整锚定**，不能只靠子串命中。
+# 旧写法 `if "aclTensor" in tok` 会把 `aclTensor **outs`（多级指针）、`aclTensor out`（裸值）、
+# `struct aclTensorMeta *m` 这类**未支持的 ABI** 一律当成普通指针形参放进 argtypes——
+# 于是 ctypes 按 `void*` 编组一个根本不是指针的东西，native 侧读到垃圾地址。
+# 词法上只接受 `(const) aclTensor *name` / `(const) aclScalar *name` 两种写法，其余 fail-closed。
+_TENSOR_PARAM_RE = re.compile(r"^(?:const\s+)?aclTensor\s*\*\s*\w+$")
+_SCALAR_PARAM_RE = re.compile(r"^(?:const\s+)?aclScalar\s*\*\s*\w+$")
+
 
 def _norm_ident(name) -> str:
     """标识符归一（小写 + 去非字母数字），供跨两段签名的**逐项同名**比对。"""
@@ -294,8 +305,16 @@ def _classify_param(raw: str) -> dict:
                 f"——域外接口能力，fail-closed")
         return {"name": name, "role": "attr", "ctype": "int_array"}
     if "aclScalar" in tok:
+        if not _SCALAR_PARAM_RE.match(tok):
+            raise AclnnRunnerError(
+                f"aclnn 形参 {tok!r} 含 aclScalar 但不是 `(const) aclScalar *<name>` 形态"
+                f"（裸值 / 多级指针 / 派生类型名均在此列）——域外接口能力，fail-closed")
         return {"name": name, "role": "attr", "ctype": "scalar"}
     if "aclTensor" in tok:
+        if not _TENSOR_PARAM_RE.match(tok):
+            raise AclnnRunnerError(
+                f"aclnn 形参 {tok!r} 含 aclTensor 但不是 `(const) aclTensor *<name>` 形态"
+                f"（裸值 / 多级指针 / 派生类型名均在此列）——域外接口能力，fail-closed")
         is_const = bool(re.search(r"\bconst\b", tok))
         return {"name": name, "role": "in" if is_const else "out",
                 "ctype": "tensor", "const": is_const}
@@ -322,6 +341,34 @@ STAGE2_STANDARD = "standard"
 #: ``(workspace, workspaceSize, executor, <stage1 实参原样重复>, stream)`` —— 本轮实测的
 #: ``aclnnGaussianBlur`` 形态（10 参）。**只有这两种**被支持，第三种一律 fail-closed。
 STAGE2_EXTENDED = "extended"
+#: header 里**确实没有**执行段声明 —— 一个**已知事实**，不是「不知道」。
+#: ⚠ 它与 ``stage2_form is None``（= 调用方压根没告诉我们）必须在**类型上分开**：
+#: 旧实现两者都是 ``None``，于是 ``or STAGE2_STANDARD`` 把「没人说过 arity」直接当成「4 参」，
+#: 而这正是本轮改动要消灭的那个洞（拿 4 参 argtypes 调 10 参 native 函数 = 段错误或静默错值）。
+#: 两者现在都**不可派发**：:meth:`AclnnRunner.run` 见到任一个都 fail-closed。
+STAGE2_ABSENT = "absent"
+#: 真正可以派发进 native 调用的两种 stage2 结构。
+STAGE2_DISPATCHABLE = (STAGE2_STANDARD, STAGE2_EXTENDED)
+
+def _strip_c_comments(text: str) -> str:
+    """去掉 C/C++ 注释，**但保留换行**（行数不变，便于人对照头文件定位）。
+
+    与 `fetch_source._detect_interface_kind` 同一条纪律：注释掉的声明/调用不算数。
+    """
+    def _blank(match):
+        return "".join(ch if ch == "\n" else " " for ch in match.group(0))
+    return re.sub(r"/\*.*?\*/|//[^\n]*", _blank, text, flags=re.S)
+
+
+def _stage2_decl_re(op_name: str):
+    """`aclnn<Op>` 的**函数声明**匹配器：要求前面紧跟 aclnn 系返回类型，且名字左侧无标识符字符。
+
+    只认 `[<宏> ]aclnnStatus aclnn<Op>(`。`MyaclnnMedian(`、`x = aclnnMedian(` 这类调用点
+    与包装名都匹配不上——签名只能从声明取，不能从调用点反推。
+    """
+    return re.compile(
+        r"(?<![A-Za-z0-9_])aclnnStatus\s+aclnn" + re.escape(op_name) + r"\s*\(")
+
 
 # stage2 的四个框架位。``aclrtStream`` 是 ``void*`` 的 typedef，按值传（可带 const 限定）。
 _S2_WORKSPACE_RE = re.compile(r"^(?:const\s+)?void\s*\*\s*\w+$")
@@ -330,29 +377,47 @@ _S2_EXECUTOR_RE = re.compile(r"^(?:const\s+)?aclOpExecutor\s*\*\s*\w+$")
 _S2_STREAM_RE = re.compile(r"^(?:const\s+)?aclrtStream\s+\w+$")
 
 
-def _parse_stage2(text: str, op_name: str, stage1_params: list[dict]) -> tuple[str | None, list[dict]]:
+def _parse_stage2(text: str, op_name: str, stage1_params: list[dict]) -> tuple[str, list[dict]]:
     """从**同一份 header 文本**解析执行段 ``aclnn<op_name>`` 的实参结构（改动⑮）。
 
-    返回 ``(form, middle_params)``：``form`` ∈ {:data:`STAGE2_STANDARD`, :data:`STAGE2_EXTENDED`, ``None``}；
-    ``middle_params`` 是 extended 形态下夹在框架三参与 stream 之间的那段（已按 :func:`_classify_param`
-    分类），standard / 未声明时为 ``[]``。
+    返回 ``(form, middle_params)``：``form`` ∈ {:data:`STAGE2_STANDARD`, :data:`STAGE2_EXTENDED`,
+    :data:`STAGE2_ABSENT`}；``middle_params`` 是 extended 形态下夹在框架三参与 stream 之间的那段
+    （已按 :func:`_classify_param` 分类），standard / 未声明时为 ``[]``。
 
-    · 文本里**根本没有** stage2 声明 → ``(None, [])``——保持本改动之前的行为（按 4 参调），
-      不因「解析不到」就把既有通路判死。
+    · 文本里**根本没有** stage2 声明 → ``(STAGE2_ABSENT, [])``。这是一个**明确的事实**
+      （「这份 header 没写执行段」），**不是** ``None``（「没人告诉我们 arity」）。
+      两者都不可派发，但错误信息完全不同，排查方向也完全不同。
     · 声明在、但**不属于已观察到的两种结构** → **fail-closed**。绝不猜：拿 4 参 argtypes 调一个
       10 参函数，在 aarch64 上 stream 会从垃圾寄存器取，段错误或**静默错值**都可能，且全链无门能拦。
     · extended 的判据是**逐项同 ctype 同名**（不比 role）：DUT 完全可能像 GaussianBlur 那样
       stage1 写 ``const aclTensor *dst``、stage2 写 ``aclTensor *dst`` —— 那个 const 差异正是
       :func:`parse_aclnn_signature` 要拿来定输出方向的信息，不能反过来当成「对不上」。
     """
-    match = re.search(rf"aclnn{re.escape(op_name)}\s*\(", text)
-    if match is None:
-        return None, []
-    close = text.find(")", match.end())
+    # audit#9：**先去注释再找声明**，且只认「返回类型 + 名字 + (」这种完整声明边界。
+    # 旧写法对原始文本做一次无边界 `re.search`，于是
+    #   · `// aclnnGaussianBlur(...)` 这类注释掉的调用、
+    #   · example 里的调用点、包装函数 `MyaclnnGaussianBlur(`、
+    #   · `#if 0` 里被禁用的旧声明，
+    # 都可能被当成「真声明」，而且**只取第一个**——多份冲突声明时静默择一。
+    stripped = _strip_c_comments(text)
+    decls = list(_stage2_decl_re(op_name).finditer(stripped))
+    if not decls:
+        return STAGE2_ABSENT, []
+    if len(decls) > 1:
+        raise AclnnRunnerError(
+            f"aclnn{op_name} 的执行段在同一份头里出现 {len(decls)} 份声明——"
+            f"无法确定该按哪一份定 arity，fail-closed（不静默取第一个）")
+    match = decls[0]
+    close = stripped.find(")", match.end())
     if close == -1:
         raise AclnnRunnerError(
             f"aclnn{op_name} 的执行段形参表没有闭合右括号（头文件被截断？）——fail-closed")
-    raw = [" ".join(t.split()) for t in text[match.end():close].split(",")]
+    tail = stripped[close + 1:].lstrip()
+    if not tail.startswith((";", "{")):
+        raise AclnnRunnerError(
+            f"aclnn{op_name} 的执行段形参表右括号后不是 `;`/`{{`——"
+            f"这不是一份函数声明/定义，fail-closed（不拿调用点当签名）")
+    raw = [" ".join(t.split()) for t in stripped[match.end():close].split(",")]
     shape = (f"实得 {len(raw)} 个形参 {raw!r}；本 runner 只支持两种 stage2 结构："
              f"standard=(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, "
              f"aclrtStream stream)；extended=框架三参 + stage1 实参原样重复 + stream")
@@ -1520,12 +1585,27 @@ class AclnnRunner:
                             raise AclnnRunnerError(
                                 f"属性 {slot.get('name')!r} 的 ctype=int_array，value 必须是整数序列"
                                 f"（list/tuple），得 {type(value).__name__}——fail-closed")
-                        try:
-                            values = [int(v) for v in value]
-                        except (TypeError, ValueError) as exc:
-                            raise AclnnRunnerError(
-                                f"属性 {slot.get('name')!r} 的 int_array 元素不是整数: {value!r}"
-                                f"——fail-closed") from exc
+                        # audit#11：`int(v)` 是**宽松转换**——`1.9`、`"3"`、`True` 全能过，
+                        # 而 ctypes 编组时超出 int64 的值还会静默回绕成完全不同的数。
+                        # 改用严格整数协议 + 显式 int64 值域检查，一条都不猜。
+                        values = []
+                        for element in value:
+                            if isinstance(element, bool):
+                                raise AclnnRunnerError(
+                                    f"属性 {slot.get('name')!r} 的 int_array 元素是 bool "
+                                    f"({element!r})——布尔不是整数尺寸，fail-closed")
+                            try:
+                                ivalue = operator.index(element)
+                            except TypeError as exc:
+                                raise AclnnRunnerError(
+                                    f"属性 {slot.get('name')!r} 的 int_array 元素不是整数: "
+                                    f"{element!r}（float / str 一律不作隐式转换）——fail-closed"
+                                ) from exc
+                            if not -(2 ** 63) <= ivalue < 2 ** 63:
+                                raise AclnnRunnerError(
+                                    f"属性 {slot.get('name')!r} 的 int_array 元素 {ivalue} "
+                                    f"超出 int64 值域——ctypes 会静默回绕成另一个数，fail-closed")
+                            values.append(ivalue)
                         buf = (ctypes.c_int64 * len(values))(*values)
                         ia = acl.aclCreateIntArray(ctypes.cast(buf, vp),
                                                    ctypes.c_uint64(len(values)))
@@ -1565,9 +1645,21 @@ class AclnnRunner:
             # argtypes 按 slots 真实顺序拼（张量→vp、标量→其 C 类型），末尾 &workspaceSize + &executor。
             gws.restype = ctypes.c_int
             gws.argtypes = argtypes + [vp, vp]
-            # stage2 按签名声明的实参结构派发（改动⑮）——不再写死 4 参。
-            stage2 = getattr(signature, "stage2_form", None) or STAGE2_STANDARD
+            # stage2 按签名声明的实参结构派发（改动⑮）——不再写死 4 参，**也不再有任何缺省**。
+            # ⚠ 旧写法 `... or STAGE2_STANDARD` 把「未设置」与「header 没写」一起当成 4 参：
+            #   那正是本轮改动要消灭的洞的原样复刻（GaussianBlur 的 10 参 stage2 会被静默错调）。
+            stage2 = getattr(signature, "stage2_form", None)
             run_fn.restype = ctypes.c_int
+            if stage2 is None:
+                raise AclnnRunnerError(
+                    f"aclnn{op_name}: signature.stage2_form **未设置**——手工构造签名的调用方"
+                    f"（无 header 的通路）必须显式声明 {STAGE2_STANDARD!r} 或 {STAGE2_EXTENDED!r}。"
+                    f"fail-closed：绝不按 4 参猜（错 arity 的 native 调用 = 段错误或静默错值）")
+            if stage2 == STAGE2_ABSENT:
+                raise AclnnRunnerError(
+                    f"aclnn{op_name}: header 里**没有执行段声明**（stage2 absent），"
+                    f"实参个数与结构无从确定——fail-closed。请提供声明了 aclnn{op_name}(...) 的头，"
+                    f"或由调用方显式构造 stage2_form（{STAGE2_STANDARD!r} / {STAGE2_EXTENDED!r}）")
             if stage2 == STAGE2_STANDARD:
                 run_fn.argtypes = [vp, ctypes.c_uint64, vp, vp]
             elif stage2 == STAGE2_EXTENDED:

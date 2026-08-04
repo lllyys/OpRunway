@@ -315,11 +315,15 @@ def _signature_record(symbol: str, sig) -> dict:
     form = getattr(sig, "stage2_form", None)
     params = list(getattr(sig, "params", None) or ())
     from_stage2 = form == STAGE2_EXTENDED
+    # 不可派发的形态（header 无声明 / 调用方未声明）在收据里记 None：
+    # 写成 STAGE2_STANDARD 等于替 runner 编一个它根本不会走的分支（run() 现在直接 fail-closed）。
+    dispatch = form if form in (STAGE2_STANDARD, STAGE2_EXTENDED) else None
     return {
         "symbol": symbol,
         "stage2_form": form,
-        "stage2_dispatch_form": form or STAGE2_STANDARD,
-        "stage2_call_arity": 3 + len(params) + 1 if from_stage2 else 4,
+        "stage2_dispatch_form": dispatch,
+        "stage2_call_arity": (3 + len(params) + 1 if from_stage2
+                              else (4 if dispatch == STAGE2_STANDARD else None)),
         "params": [{
             "name": p.get("name"), "role": p.get("role"), "ctype": p.get("ctype"),
             "direction_source": (

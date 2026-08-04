@@ -166,13 +166,42 @@ def fetch_taskdoc(src, out_dir, extra_snapshot_paths=()):
     return dst
 
 
+_OP_DIR_RE = re.compile(
+    r"((?:experimental/)?[a-z_]+/)([a-z0-9_]+)/(?:op_host|op_kernel|op_api|examples)/")
+
+
 def _guess_op(paths):
     """从改动文件路径猜算子 snake 名 + 目标目录（experimental/math/<op> 或 math/<op> 等）。"""
     for p in paths:
-        m = re.search(r"((?:experimental/)?[a-z_]+/)([a-z0-9_]+)/(?:op_host|op_kernel|op_api|examples)/", p)
+        m = _OP_DIR_RE.search(p)
         if m:
             return m.group(2), m.group(1) + m.group(2)
     return None, None
+
+
+def _guess_op_strict(paths, where):
+    """同一条探测规则，但**候选不唯一即 fail-loud**（audit#16）。
+
+    整仓快照里往往有好几个算子目录；`_guess_op` 取的是「排序后第一个命中的路径」，
+    于是被测算子由**文件名排序**决定——静默选错算子，而下游一路把它当成本轮 DUT。
+    探不到（0 个候选）仍返回 `(None, None)`：那是既有的「仓根一级布局探不到」情形，
+    调用方已有 note 与 blocked 路由；这里只堵「探到多个却擅自择一」。
+    """
+    cands = []
+    for p in paths:
+        m = _OP_DIR_RE.search(str(p))
+        if m:
+            entry = (m.group(2), m.group(1) + m.group(2))
+            if entry not in cands:
+                cands.append(entry)
+    if not cands:
+        return None, None
+    if len(cands) > 1:
+        raise ValueError(
+            f"{where} 里探到 {len(cands)} 个候选算子目录 "
+            f"{sorted(d for _, d in cands)}——无法确定本轮被测算子。"
+            "请显式给 --target-dir 指定（fail-loud：绝不按路径排序擅自择一）。")
+    return cands[0]
 
 
 def _norm_target_dir(value):
@@ -203,9 +232,14 @@ def _key_file_candidates(paths, target_dir):
     后两档仍各自设上限（防某些 PR 改上百个文件时把请求数打爆）。
     """
     hdrs = _aclnn_headers(paths, target_dir)
+    # audit#13：example 与 `_def.cpp`/`op_host` 两档以前从**整个 PR** 里挑，不限 `target_dir`。
+    # 同一个 PR 改了多个算子时，别的算子的 example / op_def 会被当成本算子的关键文件取回来，
+    # 下游据它反推签名、dtype、调用写法——验的就不是这个算子了。三档统一先按目标目录过滤。
+    pref = target_dir.rstrip("/") + "/"
+    scoped = [p for p in paths if str(p).startswith(pref)]
     want = (hdrs
-            + [p for p in paths if "/examples/" in p and p.endswith(".cpp")][:6]
-            + [p for p in paths if p.endswith("_def.cpp") or "/op_host/" in p][:4])
+            + [p for p in scoped if "/examples/" in p and p.endswith(".cpp")][:6]
+            + [p for p in scoped if p.endswith("_def.cpp") or "/op_host/" in p][:4])
     return hdrs, list(dict.fromkeys(want))     # 去重保序：接口头也落在 `/op_host/` 档里，别重复请求
 
 
@@ -441,6 +475,15 @@ def fetch_pr(pr_url, out_dir, target_dir=None):
     hdrs = []
     if target_dir:
         hdrs, want = _key_file_candidates(paths, target_dir)
+        if paths and not want:
+            # audit#13：关键文件三档现在都限定在 target_dir 之下。目标目录下一个改动文件都没有
+            # → 本 PR 根本没碰这个算子（或 target_dir 给错了）。给**机读**阻断状态，
+            # 别让下游拿着空 key_files 继续抽 spec（那就是「验的不是这个 PR」）。
+            facts.setdefault("blocked", "no_changed_files_under_target_dir")
+            facts["notes"].append(
+                f"target_dir={target_dir!r} 之下没有任何改动文件 → 关键文件为空。"
+                "已置 blocked='no_changed_files_under_target_dir'：请核对 --target-dir 是否指对算子目录，"
+                "或确认该 PR 是否真的改了这个算子。")
         for rel in want:
             c, r = _grab(rel)
             if c:
@@ -550,7 +593,8 @@ def scan_pr_snapshot(snapshot_dir, out_dir, target_dir=None):
     if _ov_dir:
         op, tdir = _ov_op, _ov_dir
     else:
-        op, tdir = _guess_op(paths)
+        # audit#16：整仓快照通常含多个算子目录，取排序后第一个 = 静默选错被测算子。
+        op, tdir = _guess_op_strict(paths, f"快照 {root}")
 
     facts = {
         "pr_url": None,
@@ -603,6 +647,55 @@ _SNAPSHOT_PROVENANCE_REASONS = frozenset({
 })
 _SNAPSHOT_PROVENANCE_REASON = "pr_provenance_local_snapshot"
 
+_HEX64_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _nonempty_str(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _pr_url_parses(value):
+    """PR URL 必须**能被重新解析**，不是「是个字符串」就算数（audit#18）。"""
+    try:
+        _parse_pr_url(value)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def _safe_rel_path(value):
+    """仓内相对路径的最小安全契约：非空字符串、非绝对路径、无 `..`/空段/NUL。"""
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    norm = value.replace("\\", "/")
+    if norm.startswith("/") or os.path.isabs(value):
+        return False
+    segs = norm.split("/")
+    return all(seg and seg not in (".", "..") for seg in segs)
+
+
+def _snapshot_contract_reasons(facts, key_refs):
+    """`provenance_kind="local_snapshot"` 这一档的**结构契约**（audit#17）。
+
+    折叠 reason（进而落到被授权放行的 `snapshot_only` 档）之前必须先证明这份事实包**真的**
+    是本档：没有 head、有合法 merkle、有字符串 scope、每个关键文件的 ref 都是 `local_snapshot`。
+    否则「自称快照」就成了一个把真实缺口一并折掉的口子。
+    """
+    out = []
+    if facts.get("head_sha") is not None or "head_sha" not in facts:
+        out.append("snapshot_contract_head_sha_must_be_explicit_null")
+    merkle = facts.get("snapshot_merkle_sha256")
+    if not isinstance(merkle, str) or not _HEX64_RE.fullmatch(merkle):
+        out.append("snapshot_contract_bad_merkle")
+    if not isinstance(facts.get("snapshot_scope"), str):
+        out.append("snapshot_contract_missing_scope")
+    if facts.get("pr_url") is not None:
+        out.append("snapshot_contract_pr_url_must_be_null")
+    bad_refs = sorted(p for p, r in (key_refs or {}).items() if r != "local_snapshot")
+    if bad_refs:
+        out.append("snapshot_contract_key_file_ref_not_snapshot")
+    return out
+
 
 def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
     """构造内容寻址的非真机事实索引；不做 NL 抽取、不确认 correspondence。
@@ -644,22 +737,40 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
         reasons.append(str(facts["blocked"]))
     if not (isinstance(head_sha, str) and re.fullmatch(r"[0-9a-fA-F]{40}", head_sha)):
         reasons.append("missing_or_invalid_head_sha")
-    if not isinstance(pr_url, str):
+    # audit#18：这几项以前只判 `isinstance(..., str)` / 真值性——空串、错容器类型都能过。
+    # completeness=complete 是下游各门**唯一无条件放行**的一档，它的判据必须是严格契约，
+    # 不能是「字段大致存在”。
+    if not _nonempty_str(pr_url) or not _pr_url_parses(pr_url):
         reasons.append("missing_pr_url")
-    if not isinstance(source_repo, str):
+    if not _nonempty_str(source_repo):
         reasons.append("missing_source_repo")
-    if not isinstance(facts.get("head_repo"), str):
+    if not _nonempty_str(facts.get("head_repo")):
         reasons.append("missing_head_repo")
     if not isinstance(facts.get("is_fork"), bool):
         reasons.append("unknown_fork_status")
-    if not isinstance(facts.get("state"), str):
+    if not _nonempty_str(facts.get("state")):
         reasons.append("missing_pr_state")
-    if not facts.get("changed_files"):
+    changed = facts.get("changed_files")
+    if (not isinstance(changed, list) or not changed
+            or any(not _safe_rel_path(p) for p in changed)):
         reasons.append("missing_changed_files")
     if not key_index:
         reasons.append("missing_key_files")
+    elif any(not _safe_rel_path(item["path"]) for item in key_index):
+        reasons.append("unsafe_key_file_path")
+    # audit#17：档位由调用方自报的 `provenance_kind` 选，构造侧从不校该档的结构契约——
+    # 一份声称 local_snapshot、却带着 head_sha / 没有 merkle 的 pr_facts 会走进折叠分支，
+    # 把真实缺口一并折掉，最后落成 `snapshot_only` 这个**被授权放行**的档。
     provenance_kind = facts.get("provenance_kind") or "gitcode_pr"
-    if provenance_kind == "local_snapshot":
+    may_fold = False
+    if provenance_kind not in ("gitcode_pr", "local_snapshot"):
+        # 词表外的档位**不产生任何放行路由**：如实记进 payload，但按 blocked 收敛。
+        reasons.append("unknown_provenance_kind")
+    elif provenance_kind == "local_snapshot":
+        contract = _snapshot_contract_reasons(facts, key_refs)
+        reasons += contract
+        may_fold = not contract         # 结构契约不成立 → 不许折叠、按 blocked 收敛
+    if may_fold:
         # key_file_ref_not_head:* 同属「没有 head 可绑」这一族必然缺口 → 一并折叠。
         reasons = [r for r in reasons
                    if r not in _SNAPSHOT_PROVENANCE_REASONS

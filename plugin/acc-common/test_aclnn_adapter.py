@@ -550,6 +550,46 @@ class BuildRecipeScriptTest(unittest.TestCase):
         with _env(**_cfg_env(self.root)):
             self.assertIn(A._build_args(A._aclnn_cfg()), s)
 
+    def test_extra_build_args_cannot_override_protected_keys(self):
+        """审计 High#3：附加实参重新声明 `--soc=` / `--ops=` / `--vendor_name=` 等受保护 key。
+
+        整词去重挡不住**换了值**的重声明（`--soc=ascend910_93` ≠ `--soc=ascend950`），
+        而 build.sh 通常取最后一个 → 真机 build 出的是另一套配置，provenance 指纹却没变。
+        """
+        with _env(**_cfg_env(self.root)):
+            cfg = A._aclnn_cfg()
+        for bad in ("--soc=ascend950", "--ops=other", "--vendor_name=evil",
+                    "--pkg", "--experimental"):
+            with self.subTest(arg=bad), _env(OPRUNWAY_ACLNN_BUILD_EXTRA_ARGS=bad):
+                with self.assertRaisesRegex(ValueError, "受保护实参"):
+                    A._build_args(cfg)
+
+    def test_extra_build_args_reject_duplicate_option_keys(self):
+        with _env(**_cfg_env(self.root)):
+            cfg = A._aclnn_cfg()
+        with _env(OPRUNWAY_ACLNN_BUILD_EXTRA_ARGS="--jobs=4 --jobs=8"):
+            with self.assertRaisesRegex(ValueError, "出现多次"):
+                A._build_args(cfg)
+
+    def test_extra_build_args_unprotected_key_still_passes_through(self):
+        with _env(**_cfg_env(self.root)):
+            cfg = A._aclnn_cfg()
+        with _env(OPRUNWAY_ACLNN_BUILD_EXTRA_ARGS="--jobs=4"):
+            self.assertTrue(A._build_args(cfg).endswith(" --jobs=4"))
+
+    def test_snapshot_copy_uses_the_digested_file_list_and_reverifies_cko(self):
+        """审计 C1 / High#2：构建树只装被摘要覆盖的普通文件，且复制后重算 `$CKO` 的两个摘要。"""
+        s = self._script(
+            symbols=["aclnnMedian"],
+            OPRUNWAY_ACLNN_SOURCE_MODE="local_snapshot",
+            OPRUNWAY_ACLNN_SNAPSHOT_DIR=self.root,
+            OPRUNWAY_ACLNN_SNAPSHOT_SHA256="b" * 64)
+        self.assertNotIn('cp -a "$SNAP"/.', s)          # 不再把未摘要的对象整棵搬进构建树
+        self.assertIn("symlink in snapshot", s)         # 复制脚本显式拒符号链接
+        self.assertIn('CKO_MERKLE=$(python3 -c "$OPRW_MERKLE_PY" "$CKO")', s)
+        self.assertIn("OPRUNWAY_ACLNN_SNAPSHOT_COPY_MISMATCH", s)
+        self.assertIn('echo "OPRUNWAY_ACLNN_SNAPSHOT_SHA256=$CKO_MERKLE"', s)
+
     def test_install_to_user_vendor_dir_never_shared_opp(self):
         s = self._script()
         self.assertIn("build_out/*.run", s)

@@ -81,6 +81,9 @@ _EXPERIMENTAL_PREFIX = "experimental/"
 #: 这串会原样拼进容器内 `bash build.sh ...` 命令行（不 quote，须被 shell 词分割），故拒一切
 #: 空白外的 shell 元字符（`;`&`|`$`(`)`<`>`*`?`'`"`\`` 等）与前导单横杠短选项。
 _BUILD_ARG_RE = re.compile(r"--[A-Za-z0-9_][A-Za-z0-9_-]*(?:=[A-Za-z0-9_.,:/+-]*)?")
+#: 由 spec / 事实包派生、且**进 provenance 指纹**的 build 实参 key。附加实参不得重新声明它们：
+#: 重新声明 = 真机 build 换了一套配置，而指纹与 stamp 仍写着派生值（审计 High#3）。
+_PROTECTED_BUILD_ARG_KEYS = frozenset({"pkg", "experimental", "soc", "ops", "vendor_name"})
 
 
 # ── 相对路径守卫（caseset 输入 / 远端 manifest 输出；审计 High#4）────────────────────────
@@ -683,9 +686,26 @@ def _build_args(cfg):
     if cfg["op_subdir"].startswith(_EXPERIMENTAL_PREFIX):
         args.append("--experimental")
     args += [f"--soc={cfg['soc']}", f"--ops={cfg['snake_op']}", f"--vendor_name={cfg['vendor_name']}"]
-    # 逐字去重：避免调用方把已派生出的开关（如 `--experimental`）在附加实参里再写一遍导致重复传参。
-    # 只做**整词**去重，不解析 `--k=v` 的冲突（那属调用方自己的配置错误，如实传下去、由 build.sh 报）。
-    args += [t for t in _extra_build_args() if t not in args]
+    # 审计 High#3：旧实现只做**整词**去重，于是附加实参可以重新声明一个**不同值**的
+    # `--soc=xxx` / `--ops=yyy` / `--vendor_name=zzz`——整词不同、去重不掉，而 build.sh 通常取
+    # 最后一个，于是真机 build 出来的根本不是本轮 cfg 派生的那套配置（SoC/算子/vendor 名全可被换掉），
+    # provenance stamp 里却仍写着派生值。改成**按 option key 保护**：受保护键一律不许在附加实参里出现，
+    # 同一个 key 也不许重复出现。
+    extra = _extra_build_args()
+    seen = set()
+    for token in extra:
+        key = token[2:].split("=", 1)[0]
+        if key in _PROTECTED_BUILD_ARG_KEYS:
+            raise ValueError(
+                f"OPRUNWAY_ACLNN_BUILD_EXTRA_ARGS 不得声明受保护实参 --{key}（实得 {token!r}）："
+                f"{sorted(_PROTECTED_BUILD_ARG_KEYS)} 由 spec/事实包派生并进 provenance 指纹，"
+                "在附加实参里重新声明等于把真机 build 换成另一套配置而指纹不变——fail-closed")
+        if key in seen:
+            raise ValueError(
+                f"OPRUNWAY_ACLNN_BUILD_EXTRA_ARGS 里 --{key} 出现多次——"
+                "取哪一个取决于 build.sh 的实现细节，不予放行（fail-closed）")
+        seen.add(key)
+    args += extra
     return " ".join(args)
 
 
@@ -755,8 +775,9 @@ def _source_block(cfg, proxy_prefix, q):
     # 而症状会表现成「快照没改却 SNAPSHOT_MISMATCH」，极难归因。惰性是为了不引入模块级依赖环。
     from fetch_source import _SNAPSHOT_SKIP_DIRS
     skip = sorted(_SNAPSHOT_SKIP_DIRS)
-    merkle_py = (
-        "import hashlib,os,sys\n"
+    # walk 那一段由 merkle 与 copy 两个脚本共用：**摘要覆盖的清单与实际复制的清单必须逐字同源**，
+    # 否则「摘了 A、建的是 B」这件事根本查不出来（审计 C1）。
+    walk_py = (
         f"SKIP={set(skip)!r}\n"
         "root=sys.argv[1]\n"
         # 第二个实参 = 子树范围（相对 root，`/` 分隔；空 = 整棵树）。**相对路径仍以 root 为基准**——
@@ -772,12 +793,33 @@ def _source_block(cfg, proxy_prefix, q):
         "        f=os.path.join(dp,n)\n"
         "        if os.path.islink(f) or not os.path.isfile(f): continue\n"
         "        rels.append(os.path.relpath(f,root).replace(os.sep,'/'))\n"
-        "h=hashlib.sha256()\n"
-        "for rel in sorted(rels):\n"
+        "rels.sort()\n"
+    )
+    merkle_py = (
+        "import hashlib,os,sys\n"
+        + walk_py
+        + "h=hashlib.sha256()\n"
+        "for rel in rels:\n"
         "    with open(os.path.join(root,*rel.split('/')),'rb') as fh: b=fh.read()\n"
         "    h.update(hashlib.sha256(rel.encode('utf-8')).digest())\n"
         "    h.update(hashlib.sha256(b).digest())\n"
         "print(h.hexdigest())\n"
+    )
+    # 审计 C1：旧实现摘要跳过 `_SNAPSHOT_SKIP_DIRS` 与全部符号链接，却用 `cp -a` 把**所有**东西
+    # （含未被摘要覆盖的符号链接与跳过目录）原样搬进真正参与构建的 `$CKO` —— 于是
+    # 「真机跑的是 CP-A 读过的那份字节」这句话，对构建树里相当一部分对象根本不成立。
+    # 改成**按摘要用的同一份文件清单逐个复制普通文件**：构建树 = 被摘要覆盖的字节，一个不多一个不少。
+    # 符号链接不复制（walk 已跳过；这里再显式拒一次，防将来 walk 口径变宽时静默带进构建树）。
+    copy_py = (
+        "import os,shutil,sys\n"
+        + walk_py
+        + "dst=sys.argv[3]\n"
+        "for rel in rels:\n"
+        "    src=os.path.join(root,*rel.split('/'))\n"
+        "    if os.path.islink(src): raise SystemExit('symlink in snapshot: '+rel)\n"
+        "    out=os.path.join(dst,*rel.split('/'))\n"
+        "    os.makedirs(os.path.dirname(out) or dst, exist_ok=True)\n"
+        "    shutil.copy2(src,out,follow_symlinks=False)\n"
     )
     return (
         f'SNAP={q(cfg["snapshot_dir"])}\n'
@@ -798,10 +840,25 @@ def _source_block(cfg, proxy_prefix, q):
         '|| { echo OPRUNWAY_ACLNN_SNAPSHOT_DIGEST_FAIL; exit 3; }\n'
         'rm -rf -- "$CKO" && mkdir -p -- "$CKO" '
         '|| { echo OPRUNWAY_ACLNN_SNAPSHOT_COPY_FAIL; exit 3; }\n'
-        'cp -a "$SNAP"/. "$CKO"/ || { echo OPRUNWAY_ACLNN_SNAPSHOT_COPY_FAIL; exit 3; }\n'
+        # 审计 C1：按**摘要用的同一份清单**复制普通文件（不再 `cp -a` 把未摘要的符号链接/跳过目录
+        # 一起搬进构建树）。第二个实参恒为空 scope：构建树要的是整棵树，子树摘要只是同一批字节的子集。
+        f'OPRW_COPY_PY={q(copy_py)}\n'
+        'python3 -c "$OPRW_COPY_PY" "$SNAP" "" "$CKO" '
+        '|| { echo OPRUNWAY_ACLNN_SNAPSHOT_COPY_FAIL; exit 3; }\n'
+        # 审计 High#2：复制之后对**真正参与构建的 $CKO** 重算同一算法的两个摘要，与源目录逐字比较。
+        # 只摘 `$SNAP` 证明不了「build 读到的字节 = 摘过的字节」——中间还隔着一次复制。
+        'CKO_MERKLE=$(python3 -c "$OPRW_MERKLE_PY" "$CKO") '
+        '|| { echo OPRUNWAY_ACLNN_SNAPSHOT_DIGEST_FAIL; exit 3; }\n'
+        f'CKO_SUBTREE=$(python3 -c "$OPRW_MERKLE_PY" "$CKO" {q(cfg["op_subdir"])}) '
+        '|| { echo OPRUNWAY_ACLNN_SNAPSHOT_DIGEST_FAIL; exit 3; }\n'
+        'if [ "$CKO_MERKLE" != "$GOT_MERKLE" ] || [ "$CKO_SUBTREE" != "$GOT_SUBTREE" ]; then\n'
+        '  echo "OPRUNWAY_ACLNN_SNAPSHOT_COPY_MISMATCH '
+        'tree=$CKO_MERKLE want=$GOT_MERKLE subtree=$CKO_SUBTREE want_subtree=$GOT_SUBTREE"; exit 3\n'
+        'fi\n'
         'cd "$CKO" || { echo OPRUNWAY_ACLNN_SNAPSHOT_COPY_FAIL; exit 3; }\n'
-        'echo "OPRUNWAY_ACLNN_SNAPSHOT_SHA256=$GOT_MERKLE"\n'
-        'echo "OPRUNWAY_ACLNN_SNAPSHOT_SUBTREE_SHA256=$GOT_SUBTREE"\n'
+        # 回报的两个摘要取自**构建树**（已与源目录逐字相等）——门核的就是真正被编译的那批字节。
+        'echo "OPRUNWAY_ACLNN_SNAPSHOT_SHA256=$CKO_MERKLE"\n'
+        'echo "OPRUNWAY_ACLNN_SNAPSHOT_SUBTREE_SHA256=$CKO_SUBTREE"\n'
         # 显式回报 null：下游用它区分「有 PR head 可绑」与「只有快照字节」，绝不留空让人误读。
         'echo "OPRUNWAY_ACLNN_HEAD_SHA=null"'
     )

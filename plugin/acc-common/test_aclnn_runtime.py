@@ -136,6 +136,26 @@ def test_parse_signature_raw_pointer_param_fail_closed():
             "aclTensor *out, uint64_t *workspaceSize, aclOpExecutor **executor);")
 
 
+@pytest.mark.parametrize("tok", [
+    "aclTensor **outs",                 # 多级指针：ctypes 会按 void* 编组一个二级指针
+    "aclTensor self",                   # 裸值：根本不是指针，编组出来是垃圾地址
+    "const aclTensorMeta *meta",        # 派生类型名：子串命中但不是 aclTensor
+    "aclScalar **alpha",
+    "aclScalar alpha",
+    "const aclScalarList *alphas",
+])
+def test_parse_signature_partial_tensor_scalar_spellings_fail_closed(tok):
+    """audit#10：tensor / scalar 只接受完整锚定的 `(const) acl{Tensor,Scalar} *<name>`。
+
+    旧实现只做子串判断（``if "aclTensor" in tok``），上面这些**未支持的 ABI**都会被当成
+    普通指针形参放进 argtypes —— native 侧读到的就不是我们以为的那块内存。
+    """
+    with pytest.raises(AclnnRunnerError):
+        R.parse_aclnn_signature(
+            f"aclnnStatus aclnnFooGetWorkspaceSize(const aclTensor *self, {tok}, "
+            "aclTensor *out, uint64_t *workspaceSize, aclOpExecutor **executor);")
+
+
 def test_parse_signature_tensorlist_fail_closed():
     header = ("aclnnStatus aclnnBarGetWorkspaceSize(const aclTensorList *tensors, aclTensor *out, "
               "uint64_t *workspaceSize, aclOpExecutor **executor);")
@@ -194,12 +214,49 @@ def test_parse_stage2_standard_shape():
     assert R.parse_aclnn_signature(_MEDIAN_HEADER).stage2_form == R.STAGE2_STANDARD
 
 
-def test_parse_stage2_absent_keeps_legacy_behaviour():
-    """header 里根本没有 stage2 声明 → ``None``；``run()`` 按旧的 4 参调（不因解析不到就判死既有通路）。"""
+def test_parse_stage2_absent_is_a_distinct_fact_not_none():
+    """header 里根本没有 stage2 声明 → :data:`STAGE2_ABSENT`（**不是** ``None``）。
+
+    两者必须在类型上分开：``absent`` = 「这份头没写执行段」，``None`` = 「调用方没告诉我们」。
+    旧实现两者都是 ``None``，于是 ``run()`` 的 ``or STAGE2_STANDARD`` 把它们一起当 4 参调。
+    """
     sig = R.parse_aclnn_signature(
         "aclnnStatus aclnnFooGetWorkspaceSize(const aclTensor *self, aclTensor *out, "
         "uint64_t *workspaceSize, aclOpExecutor **executor);")
-    assert sig.stage2_form is None
+    assert sig.stage2_form == R.STAGE2_ABSENT
+    assert sig.stage2_form is not None
+
+
+@pytest.mark.parametrize("stage2_text", [
+    # ① 注释掉的声明不算数
+    "// aclnnStatus aclnnFoo(void *workspace, uint64_t workspaceSize, "
+    "aclOpExecutor *executor, aclrtStream stream);",
+    "/* aclnnStatus aclnnFoo(void *workspace, uint64_t workspaceSize, "
+    "aclOpExecutor *executor, aclrtStream stream); */",
+    # ② 调用点不是声明
+    "void demo() { aclnnFoo(ws, wsSize, exe, stream); }",
+    # ③ 包装名不是本函数
+    "aclnnStatus MyaclnnFoo(void *workspace, uint64_t workspaceSize, "
+    "aclOpExecutor *executor, aclrtStream stream);",
+])
+def test_parse_stage2_only_counts_real_declarations(stage2_text):
+    """注释 / 调用点 / 包装名都不得被当成 stage2 声明——那样等于拿别的东西定 native arity。"""
+    stage1 = ("aclnnStatus aclnnFooGetWorkspaceSize(const aclTensor *self, aclTensor *out, "
+              "uint64_t *workspaceSize, aclOpExecutor **executor);\n")
+    assert R.parse_aclnn_signature(stage1 + stage2_text).stage2_form == R.STAGE2_ABSENT
+
+
+def test_parse_stage2_conflicting_declarations_fail_closed():
+    """同一份头里两份 stage2 声明 → 无从确定按哪份定 arity，fail-closed（不静默取第一个）。"""
+    stage1 = ("aclnnStatus aclnnFooGetWorkspaceSize(const aclTensor *self, aclTensor *out, "
+              "uint64_t *workspaceSize, aclOpExecutor **executor);\n")
+    two = ("aclnnStatus aclnnFoo(void *workspace, uint64_t workspaceSize, "
+           "aclOpExecutor *executor, aclrtStream stream);\n"
+           "aclnnStatus aclnnFoo(void *workspace, uint64_t workspaceSize, "
+           "aclOpExecutor *executor, const aclTensor *self, aclTensor *out, "
+           "aclrtStream stream);\n")
+    with pytest.raises(AclnnRunnerError):
+        R.parse_aclnn_signature(stage1 + two)
 
 
 def test_parse_stage2_extended_shape():
@@ -243,7 +300,7 @@ def test_stage2_is_the_authority_for_output_direction():
 def test_const_heuristic_is_the_fallback_when_stage2_absent():
     """同一份 stage1、把 stage2 切掉 → 退回 const 启发式（照实反映 DUT 接口不自洽的后果，不猜方向）。"""
     sig = R.parse_aclnn_signature(_GB_HEADER_STAGE1_ONLY)
-    assert sig.stage2_form is None
+    assert sig.stage2_form == R.STAGE2_ABSENT
     assert sig.num_outputs == 0                      # const dst 被判成输入 —— 这正是 B3 的现场
     assert sig.input_names == ["src", "dst"]
 
@@ -491,8 +548,12 @@ class _FakeAcl:
         return funcs[name]
 
 
-def _sig(op_name, *params, stage2_form=None):
-    """手搓一份 AclnnSignature（无 header 的调用方就该这么显式构造——仍受 run() 全量校验）。"""
+def _sig(op_name, *params, stage2_form=R.STAGE2_STANDARD):
+    """手搓一份 AclnnSignature（无 header 的调用方就该这么显式构造——仍受 run() 全量校验）。
+
+    ⚠ ``stage2_form`` 现在**没有可派发的缺省**：runner 见到 ``None`` 直接 fail-closed。
+    本 helper 显式默认 standard，正是「手工构造者必须自报执行段结构」这条规矩的落地。
+    """
     return R.AclnnSignature(op_name=op_name, params=[
         {"name": n, "role": r, "ctype": c} for n, r, c in params], stage2_form=stage2_form)
 
@@ -736,6 +797,25 @@ def test_run_int_array_rejects_non_sequence_value(monkeypatch, bad):
         runner.run("GaussianBlur", slots, signature=_GB_SIG)
 
 
+@pytest.mark.parametrize("bad", [
+    [3, 3.0],            # float：`int(3.0)` 曾静默通过
+    [3, 2.7],            # float 截断：静默变成另一个 kernel 参数
+    [3, "3"],            # str：`int("3")` 曾静默通过
+    [3, True],           # bool：不是整数尺寸
+    [3, 2 ** 63],        # 越界：ctypes 编组时静默回绕成负数
+    [-(2 ** 63) - 1, 3],
+])
+def test_run_int_array_rejects_loose_and_out_of_range_elements(monkeypatch, bad):
+    """audit#11：`int(v)` 是宽松转换。float/str/bool 与越界值都必须当场停，不进 ctypes。"""
+    runner, fake, _ = _mock_runner(monkeypatch)
+    _patch_int_array(monkeypatch, fake)
+    slots = _gb_slots()
+    slots[1] = {"kind": "attr", "name": "ksize", "ctype": "int_array", "value": bad}
+    with pytest.raises(AclnnRunnerError):
+        runner.run("GaussianBlur", slots, signature=_GB_SIG)
+    assert fake._funcs["aclnnGaussianBlur"].last_args is None
+
+
 def test_run_int_array_null_handle_fail_closed(monkeypatch):
     """aclCreateIntArray 返 NULL → fail-closed，绝不拿空句柄进 native。"""
     runner, fake, _ = _mock_runner(monkeypatch)
@@ -754,9 +834,9 @@ def test_run_stage2_standard_call_is_unchanged(monkeypatch):
     assert len(run_fn.last_args) == 4
 
 
-def test_run_manual_signature_without_stage2_uses_standard_call(monkeypatch):
-    """手工构造的签名（perf_msprof 的 baseline wrapper 那种）没有 stage2_form → 同样走 4 参旧路径。"""
-    assert _FOO_1IN_1OUT.stage2_form is None
+def test_run_manual_signature_with_explicit_standard_uses_4_arg_call(monkeypatch):
+    """手工构造的签名（perf_msprof 的 baseline wrapper 那种）**显式声明** standard → 4 参调用。"""
+    assert _FOO_1IN_1OUT.stage2_form == R.STAGE2_STANDARD
     runner, fake, _ = _mock_runner(monkeypatch)
     runner.run("Foo", [_in_slot(np.zeros(2, np.float32)), _out_slot([2], "float32", 0)],
                signature=_FOO_1IN_1OUT)
@@ -764,6 +844,26 @@ def test_run_manual_signature_without_stage2_uses_standard_call(monkeypatch):
     assert run_fn.argtypes == [ctypes.c_void_p, ctypes.c_uint64,
                                ctypes.c_void_p, ctypes.c_void_p]
     assert len(run_fn.last_args) == 4
+
+
+@pytest.mark.parametrize("form,needle", [(None, "未设置"), (R.STAGE2_ABSENT, "没有执行段声明")])
+def test_run_undispatchable_stage2_form_fail_closed(monkeypatch, form, needle):
+    """★ C2 的负例：``None``（没人声明）与 ``absent``（头里没写）都**不得**退回 4 参调用。
+
+    旧实现 ``stage2_form or STAGE2_STANDARD`` 把这两件事一起当成 standard——
+    GaussianBlur 那种 10 参 stage2 会被静默按 4 参调，且全链无门能拦。
+    """
+    runner, fake, _ = _mock_runner(monkeypatch)
+    sig = R.AclnnSignature(
+        op_name="Foo",
+        params=[{"name": "self", "role": "in", "ctype": "tensor"},
+                {"name": "out", "role": "out", "ctype": "tensor"}],
+        stage2_form=form)
+    with pytest.raises(AclnnRunnerError) as ei:
+        runner.run("Foo", [_in_slot(np.zeros(2, np.float32)), _out_slot([2], "float32", 0)],
+                   signature=sig)
+    assert needle in str(ei.value)
+    assert fake._funcs["aclnnFoo"].last_args is None       # 一次都没调进去
 
 
 def test_run_stage2_extended_repeats_stage1_args(monkeypatch):

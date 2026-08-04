@@ -327,6 +327,10 @@ def _perf_case_policy(spec):
               "shape_classification": shape_contract}
     if mode != perf_mode.DEFAULT_MODE:
         policy["mode"] = mode
+        # 宽档为什么被允许，与 mode 一起落进 Task1 账本：门读的是这份产物，
+        # 不读 spec，故授权事实必须随 mode 同行，否则门只能看见「谁自称 measure_only」。
+        if perf_mode.is_measure_only(mode):
+            policy["measure_only_authorization"] = perf_mode.measure_only_authorization(perf)
     return policy
 
 
