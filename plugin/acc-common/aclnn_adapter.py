@@ -1242,6 +1242,18 @@ def _plan_bool(plan, key, default=False):
     return v
 
 
+def _plan_measure_only(plan):
+    """perf plan 是否为 §5.10 的「只测不比」口径。缺省（无 `mode` 键）= 历史 ratio_gated。
+
+    受控词表与 `perf_mode.MODES` 同源；未知值 fail-closed，绝不当成宽档。
+    """
+    mode = (plan or {}).get("mode", "ratio_gated")
+    if mode not in ("ratio_gated", "measure_only"):
+        raise ValueError(
+            f"{PERF_PLAN_FILE} 的 mode 须为 ratio_gated 或 measure_only，得 {mode!r}")
+    return mode == "measure_only"
+
+
 def _perf_enabled(plan):
     """是否采性能：须有 plan、且真机 gate 已开、且未显式关（`OPRUNWAY_ACLNN_PERF=0`）。
 
@@ -1267,8 +1279,15 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
 
     host = cfg["host"]
     notes = []
+    # §5.10 只测不比：measure_only 下**没有基线侧**，返回的 baseline_doc 恒 None。
+    measure_only = _plan_measure_only(plan)
     baseline_source = plan.get("baseline")
-    if baseline_source not in BASELINE_FILES:
+    if measure_only:
+        if baseline_source is not None:
+            raise ValueError(
+                f"perf plan mode='measure_only' 却带 baseline={baseline_source!r}——"
+                "只测不比的口径下不采任何基线，fail-closed")
+    elif baseline_source not in BASELINE_FILES:
         raise ValueError(
             f"perf plan baseline 须为 {sorted(BASELINE_FILES)}，得 {baseline_source!r}")
     # ① 精度先筛：只对**已过精度**的 case 测性能（算错的快不算快）。judge 复用 validator 那一套。
@@ -1280,12 +1299,12 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
     selected, skipped = PM.select_perf_cases(caseset, pass_ids)
     if not selected:
         notes.append("无可测性能的用例（无「性能」维用例，或全部未过精度先筛）")
-        return {}, PM.build_baseline_document(
-            [], op=caseset.get("op"), skipped=skipped, source=baseline_source), notes
+        return {}, (None if measure_only else PM.build_baseline_document(
+            [], op=caseset.get("op"), skipped=skipped, source=baseline_source)), notes
 
     # ② 上送 plan（含 torch 基线调用映射；缺映射 → 采集端 fail-closed，不猜 torch 形参）。
     remote_plan = {"op": caseset.get("op"),
-                   "baseline": baseline_source,
+                   "mode": "measure_only" if measure_only else "ratio_gated",
                    "warmup": int(plan.get("warmup", PM.DEFAULT_WARMUP)),
                    "repeat": int(plan.get("repeat", PM.DEFAULT_REPEAT)),
                    "device": int(cfg["device"]),
@@ -1314,6 +1333,10 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
                    "torch_baseline": plan.get("torch_baseline"),
                    "aclnn_baseline": plan.get("aclnn_baseline"),
                    "cases": selected, "skipped": skipped}
+    if not measure_only:
+        # measure_only 的 plan **不带 baseline 键**：容器侧见到它即 fail-closed（防「口径说不比、
+        # 却偷偷采了一侧基线」）。
+        remote_plan["baseline"] = baseline_source
     plan_local = os.path.join(work, "_aclnn_perf_plan_sent.json")
     with open(plan_local, "w", encoding="utf-8") as f:
         json.dump(remote_plan, f, ensure_ascii=False)
@@ -1335,8 +1358,8 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
                      f" OPRUNWAY_ACLNN_PERF_TIMEOUT 到点被 kill、其余=python 侧失败；"
                      f"精度证据不受影响；性能一律 us=None → perf_compare 挂起，不冒充达标）。"
                      f"{_op_dir_note(cfg, paths, plan)}{_diag_ref(full)}\n{tail}")
-        return {}, PM.build_baseline_document(
-            [], op=caseset.get("op"), skipped=skipped, source=baseline_source), notes
+        return {}, (None if measure_only else PM.build_baseline_document(
+            [], op=caseset.get("op"), skipped=skipped, source=baseline_source)), notes
 
     # ④ 拉回采集结果 → 组 custom us map + torch_npu 基线文档。
     local_collect = os.path.join(work, PERF_COLLECT_FILE)
@@ -1346,6 +1369,8 @@ def collect_perf(cfg, paths, caseset, work, evidence_list, plan):
         doc = json.load(f)
     records = doc.get("records") or []
     custom_map = PM.build_custom_perf_map(records, skipped=skipped)
+    if measure_only:
+        return custom_map, None, notes            # 只测不比：一份基线文档都不组
     baseline = PM.build_baseline_document(records, op=caseset.get("op"),
                                           warmup=remote_plan["warmup"],
                                           repeat=remote_plan["repeat"], skipped=skipped,
@@ -1579,6 +1604,18 @@ def run_aclnn_py(caseset, work, defect_cases=None):
     # 把采到的 us 回填进已组好的 evidence（perf 与精度判定完全解耦，回填不影响任何精度字段）。
     for item in evidence:
         item["perf"] = RA._perf_entry(item.get("case_id"), custom_map)
+    if _plan_measure_only(plan):
+        # §5.10：**一个基线文件都不落**——落了就等于给下游一份可消费的对照物。
+        timed = sum(1 for e in evidence
+                    if isinstance((e.get("perf") or {}).get("us"), (int, float)))
+        envelope["perf_collection"] = {
+            "collected": True, "mode": "measure_only",
+            "baseline_source": None, "baseline_file": None,
+            "timed_cases": timed, "excluded": [], "notes": notes,
+            "note": "只测不比（AGENTS.md §5.10）：只采 NPU 侧 msprof kernel-only 实测，未采任何基线"}
+        for n in notes:
+            print(f"[aclnn_py perf] ⚠ {n}")
+        return envelope
     baseline_source = plan.get("baseline")
     baseline_file = BASELINE_FILES.get(baseline_source)
     if baseline_file is None:

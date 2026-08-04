@@ -8,6 +8,10 @@ blocked_incomparable_timing_scope、不出结论。ratio = baseline_us / npu_us�
   |NPU-基线| ≤ abs_gap_us_within，达标**保持 False** + 打 `exception` 标 + 记 exception_detail；
   status=exception → 编排层映射 PASSED_WITH_RISK（挂人核仿真图，绝不偷偷置 True）。
 
+`perf.mode=measure_only`（AGENTS.md §5.10，2026-08-03）：**只测不比**——逐 case 转录 NPU msprof
+  kernel-only 实测耗时 + 只读分档汇总，`summary.status="measured"`，**不产 ratio、不产
+  cases_above_threshold、不产任何达标结论**。缺一条实测即 `blocked`（"不做对比" ≠ "不做测量"）。
+
 GPU 标杆 consumer（T8）：`expect_source ∈ {gpu, gpu_external}` 且缺基线 → blocked_wait_gpu_benchmark
   （正规挂起、非 fail、baseline=None 不崩）；消费的基线带 policy_risk 且达标 → summary.risk。
 
@@ -26,7 +30,10 @@ v0 提供 mock_baseline；真机/外部给基线时替换。
 **它们一个字节都不参与裁决**：`达标` / `blocked` / `status` / simulation 与本块无关，删掉这些字段
 报告的结论一模一样。加它们只为让人读报告时有 cannbot 同款的 dtype 汇总口径。
 """
-import argparse, json, math, re, statistics, sys
+import argparse, json, math, os, re, statistics, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import perf_mode  # noqa: E402
 
 _US_RE = re.compile(r"<\s*(\d+(?:\.\d+)?)\s*us")
 _GAP_RE = re.compile(r"差\s*(\d+(?:\.\d+)?)\s*us")
@@ -575,6 +582,127 @@ def _attach_non_passing_cases(report, caseset, evidence, baseline):
     return report
 
 
+# ————————————————— measure_only · 只测不比（AGENTS.md §5.10）—————————————————
+# ⚠ 本块**不算 ratio、不比阈值、不出达标**。它唯一的产出是「每条性能 case 的 NPU kernel-only
+#   实测耗时」+ 只读分档汇总。缺一条实测即 `blocked`——`measure_only` 是「不做对比」，
+#   **不是**「不做测量」；让零 msprof 数据也能过门就等于把它做成了 fail-open 开关。
+#
+# 字段命名刻意**避开** ratio 通路的词表（`by_dtype` / `by_shape_class` / `达标` / `speedup`）：
+#   下游任何按老键名读报告的地方在 measure_only 报告上会**读不到东西**（→ 显式缺失），
+#   而不是读到一个 0 或 None 被误解成「测了、只是没达标」。
+
+
+def _measured_by_dtype(rows, case_by_id):
+    """按输入 dtype 汇总实测耗时中位数（只读展示，零裁决影响）。dtype 口径同 `_case_dtype`。"""
+    buckets = {}
+    for r in rows:
+        if r.get("blocked") or not _finite_pos(r.get("npu_us")):
+            continue
+        buckets.setdefault(_case_dtype(case_by_id.get(r.get("case_id"))), []).append(
+            float(r["npu_us"]))
+    return [{"dtype": dt, "count": len(vals), "npu_us": _median(vals),
+             # 照 cannbot `no_npu_baseline` 的标法：这一行是**绝对时延**，不是加速比。
+             "comparison": "no_baseline_measured_only"}
+            for dt, vals in sorted(buckets.items())]
+
+
+def _measured_shape_aggregate(rows, caseset):
+    """measure_only 的大小 shape 只读汇总；口径与生成期账本交叉对齐，不参与裁决。
+
+    与 `_shape_class_aggregate` 的区别：**只出实测字段**（cases / measured / npu_us），
+    绝不出 `达标` / `baseline_us` / `speedup`——没有对照物时那三个字段无从谈起，
+    填 0/None 会被读成「比过了只是没达标」。
+    """
+    case_by_id = {c.get("id"): c for c in (caseset.get("cases") or [])
+                  if isinstance(c, dict) and isinstance(c.get("id"), str)}
+    policy = caseset.get("perf_case_policy")
+    if not isinstance(policy, dict):
+        return None                                   # legacy caseset 无账本 → 不产半份视图
+    buckets, problems = {}, []
+    for row in rows:
+        cid = row.get("case_id")
+        meta = (case_by_id.get(cid) or {}).get("perf_shape_classification")
+        if not isinstance(meta, dict) or meta.get("class") not in ("small", "large"):
+            problems.append(f"{cid}: 缺/坏 perf_shape_classification")
+            continue
+        item = buckets.setdefault(meta["class"], {"cases": 0, "measured": 0, "us": []})
+        item["cases"] += 1
+        if not row.get("blocked") and _finite_pos(row.get("npu_us")):
+            item["measured"] += 1
+            item["us"].append(float(row["npu_us"]))
+    expected = (policy.get("counts") or {}) if isinstance(policy.get("counts"), dict) else {}
+    out, all_us = [], []
+    for cls in ("small", "large"):
+        item = buckets.get(cls) or {"cases": 0, "measured": 0, "us": []}
+        if expected.get(cls) != item["cases"]:
+            problems.append(
+                f"{cls}: 生成期账本={expected.get(cls)!r}，报告行={item['cases']}，大小 shape 计数不一致")
+        all_us.extend(item["us"])
+        out.append({"class": cls, "cases": item["cases"], "measured": item["measured"],
+                    "npu_us": _median(item["us"])})
+    overall = {"class": "overall", "cases": sum(x["cases"] for x in out),
+               "measured": sum(x["measured"] for x in out), "npu_us": _median(all_us)}
+    return {"by_shape_class": out, "overall": overall,
+            "complete": not problems, "problems": problems}
+
+
+def _measure_only_compare(spec, caseset, evidence, op, perf_ids, case_by_id):
+    """`perf.mode=measure_only` 的唯一出口：逐 case 转录 NPU 实测，**不做任何对比**。"""
+    perf_spec = spec.get("perf") or {}
+    notes = [perf_mode.MEASURE_ONLY_NOTE]
+    if not perf_ids:
+        report = _no_perf_cases(spec, None, None, perf_spec, notes)
+        report["perf_mode"] = perf_mode.MODE_MEASURE_ONLY
+        return report
+    ev_list = evidence["evidence"]
+    ev_ids = [e.get("case_id") for e in ev_list if isinstance(e, dict)]
+    dup = len(set(ev_ids)) != len(ev_ids)
+    if dup:
+        notes.append("evidence 有重复 case_id")
+    ev = {e.get("case_id"): e for e in ev_list if isinstance(e, dict) and e.get("case_id")}
+
+    rows, measured, blocked = [], 0, 0
+    for cid in perf_ids:
+        eperf = (ev.get(cid) or {}).get("perf")
+        us = eperf.get("us") if isinstance(eperf, dict) else None
+        scope = eperf.get("scope") if isinstance(eperf, dict) else None
+        row = {"case_id": cid, "npu_us": us, "scope": scope}
+        # ★ 红线：没有真实实测（us 非有限正数 / scope 缺失或非法）→ blocked。
+        #   status 因此落 `blocked`，验收门 gate_task3 见 blocked 即 FAILED。
+        if _finite_pos(us) and scope in _VALID_SCOPES:
+            row["blocked"] = False
+            measured += 1
+        else:
+            row["blocked"] = True
+            row["note"] = (f"measure_only 缺真实 NPU 实测：npu_us={us!r} scope={scope!r}"
+                           "（须有限正数 + 合法计时口径）——不得以「未做对比」为由免测")
+            blocked += 1
+        rows.append(row)
+
+    status = "blocked" if (blocked or dup) else perf_mode.STATUS_MEASURED
+    report = {"op": op, "perf_mode": perf_mode.MODE_MEASURE_ONLY,
+              "baseline_source": None, "target_ratio": None,
+              "per_case": rows, "notes": notes,
+              # 刻意**不出** `达标` / `cases_above_threshold` / `cases_scored`：
+              # 没有对照物就没有「达标」这件事，出一个 0 等于给出一个未做的裁决。
+              "summary": {"perf_cases": len(rows), "measured": measured,
+                          "blocked": blocked, "status": status}}
+    report["measured_by_dtype"] = _measured_by_dtype(rows, case_by_id)
+    try:
+        agg = _measured_shape_aggregate(rows, caseset)
+    except Exception as exc:   # 只读报表塌了也绝不拖垮裁决（同 ratio 通路的纪律）
+        agg = None
+        notes.append(f"measure_only 大小 shape 汇总生成失败已跳过，实测数据不受影响：{exc!r}")
+    if agg is not None:
+        report["measured_by_shape_class"] = agg["by_shape_class"]
+        report["measured_shape_overall"] = agg["overall"]
+        report["measured_shape_complete"] = agg["complete"]
+        if agg["problems"]:
+            report["measured_shape_problems"] = agg["problems"]
+            notes.append("measure_only 大小 shape 汇总契约不完整：" + "；".join(agg["problems"]))
+    return report
+
+
 def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline_blocked_status=None):
     # pc-7：入口轻量 schema 校验——坏输入收敛为结构化 invalid，绝不下标崩溃。
     # C5：**每一条 return 都过 `_mark_non_acceptance`**——mock 基线的报告无论走哪个出口（invalid / no_perf_cases /
@@ -588,6 +716,20 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
                        if isinstance(c, dict) and c.get("id") and "性能" in (c.get("dims") or [])})
     perf_spec = spec.get("perf") or {}
     case_by_id = {c["id"]: c for c in cases if isinstance(c, dict) and c.get("id")}
+    # AGENTS.md §5.10 · 只测不比：**在取基线之前**分流。放在这里而不是更靠后，是因为
+    # `baseline is None` 在下面的 ratio 通路里意味着「缺/废标杆 → 挂起」，而 measure_only
+    # 的 baseline 本来就该是 None——不分流会被误判成 blocked_wait_gpu_benchmark。
+    try:
+        mode = perf_mode.resolve_spec_mode(spec)
+    except ValueError as ex:
+        return _mark_non_acceptance(_invalid(op, [f"perf.mode 配置非法：{ex}"]), baseline)
+    if perf_mode.is_measure_only(mode):
+        if baseline is not None:
+            # 走到这里说明编排层给了一份 measure_only 不该有的基线 → 宁可停下也不「顺手忽略」。
+            return _mark_non_acceptance(
+                _invalid(op, ["perf.mode='measure_only' 却收到了性能基线——"
+                              "只测不比的口径下不得消费任何对照物，fail-closed"]), baseline)
+        return _measure_only_compare(spec, caseset, evidence, op, perf_ids, case_by_id)
     exc, exc_note = _parse_small_shape_exception(spec)
     # pc-3：target_ratio 严格化（非法/声明基线却缺 → invalid_config；绝不静默套 0.95 放行）。
     tgt, tgt_err = _resolve_target_ratio(perf_spec)
@@ -780,6 +922,9 @@ def main(argv):
     elif a.mock:
         baseline = mock_baseline(spec, evidence)
         print("[perf_compare] ⚠ 使用 mock 基线（--mock）——本地演示，产物不可当真通过验收")
+    elif perf_mode.resolve_spec_mode(spec) == perf_mode.MODE_MEASURE_ONLY:
+        baseline = None                  # §5.10 只测不比：本来就不该有基线，不打「挂起」误导语
+        print(f"[perf_compare] {perf_mode.MEASURE_ONLY_NOTE}")
     else:  # pc-1：默认不再静默 mock，缺基线 → None → 挂起（非 status=ok）
         baseline = None
         print("[perf_compare] ⚠ 未提供基线且未加 --mock → 挂起（不静默造 mock、不产假通过）")

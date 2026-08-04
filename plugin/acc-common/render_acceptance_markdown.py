@@ -8,6 +8,13 @@ import json
 import os
 
 
+#: §5.10 只测不比的口径声明——报告里必须**逐字**出现，不得包装成「已达标 N 倍」（律令 5.8）。
+_MEASURE_ONLY_STATEMENT = (
+    "本轮按 `perf.mode=measure_only` 口径，性能维**只做 NPU msprof kernel-only 实测，"
+    "未做任何标杆对比**（无 baseline、无 ratio、无阈值），因此不产任何性能达标结论。"
+    "下表全部为绝对 kernel 耗时，不是加速比。")
+
+
 def _load(root, name):
     with open(os.path.join(root, name), encoding="utf-8") as src:
         return json.load(src)
@@ -244,35 +251,64 @@ def render(report_root):
         lines.append("无精度失败。")
 
     ps = perf.get("summary") or {}
-    lines += [
-        "",
-        "## 性能汇总",
-        "",
-        f"- 状态：`{_cell(ps.get('status'))}`。",
-        f"- 计划 case：{ps.get('planned_cases', ps.get('perf_cases', 0))}；"
-        f"实际采集：{ps.get('perf_cases', 0)}；有效评分：{ps.get('cases_scored', 0)}；"
-        f"达标：{ps.get('达标', 0)}。",
-        "",
-        "| shape 类别 | 计划 | 实采 | 有效评分 | 达标 | NPU us | baseline us | speedup |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
-    ]
-    for row in perf.get("by_shape_class") or []:
-        lines.append(
-            f"| `{_cell(row.get('class'))}` | {row.get('planned_cases', 0)} | "
-            f"{row.get('cases', 0)} | {row.get('cases_scored', 0)} | "
-            f"{row.get('达标', 0)} | {_cell(row.get('npu_us'))} | "
-            f"{_cell(row.get('baseline_us'))} | {_cell(row.get('speedup'))} |")
-    if ps.get("status") == "skipped_precision_gate":
-        lines += ["", "> 精度门未通过，性能未执行；本报告不提供虚构加速比。"]
-    perf_non_passing = perf.get("non_passing_cases") or []
-    if perf_non_passing:
+    if perf.get("perf_mode") == "measure_only":
+        # §5.10 只测不比：**一个比值、一个「达标」字都不许出现**（律令 5.8：没测的比值不能编）。
         lines += [
             "",
-            f"性能未通过共 **{len(perf_non_passing)}** 条，逐项状态与原始原因见 "
-            "[性能失败明细.md](性能失败明细.md)。",
+            "## 性能汇总（只实测、未做标杆对比）",
+            "",
+            f"> {_MEASURE_ONLY_STATEMENT}",
+            "",
+            f"- 状态：`{_cell(ps.get('status'))}`。",
+            f"- 性能 case：{ps.get('perf_cases', 0)}；实测到 kernel 耗时：{ps.get('measured', 0)}；"
+            f"未采到：{ps.get('blocked', 0)}。",
+            "",
+            "| shape 类别 | case 数 | 实测数 | NPU kernel us（中位） |",
+            "|---|---:|---:|---:|",
         ]
-    elif ps.get("perf_cases", 0):
-        lines += ["", "无性能未通过 case。"]
+        for row in perf.get("measured_by_shape_class") or []:
+            lines.append(
+                f"| `{_cell(row.get('class'))}` | {row.get('cases', 0)} | "
+                f"{row.get('measured', 0)} | {_cell(row.get('npu_us'))} |")
+        by_dtype_rows = perf.get("measured_by_dtype") or []
+        if by_dtype_rows:
+            lines += ["", "| dtype | case 数 | NPU kernel us（中位） |", "|---|---:|---:|"]
+            for row in by_dtype_rows:
+                lines.append(f"| `{_cell(row.get('dtype'))}` | {row.get('count', 0)} | "
+                             f"{_cell(row.get('npu_us'))} |")
+        if ps.get("blocked", 0):
+            lines += ["", f"> ⚠ 有 **{ps.get('blocked')}** 条性能 case 没有采到真实 kernel 耗时，"
+                          "验收门据此 BLOCKED——`measure_only` 是「不做对比」，不是「不做测量」。"]
+    else:
+        lines += [
+            "",
+            "## 性能汇总",
+            "",
+            f"- 状态：`{_cell(ps.get('status'))}`。",
+            f"- 计划 case：{ps.get('planned_cases', ps.get('perf_cases', 0))}；"
+            f"实际采集：{ps.get('perf_cases', 0)}；有效评分：{ps.get('cases_scored', 0)}；"
+            f"达标：{ps.get('达标', 0)}。",
+            "",
+            "| shape 类别 | 计划 | 实采 | 有效评分 | 达标 | NPU us | baseline us | speedup |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        for row in perf.get("by_shape_class") or []:
+            lines.append(
+                f"| `{_cell(row.get('class'))}` | {row.get('planned_cases', 0)} | "
+                f"{row.get('cases', 0)} | {row.get('cases_scored', 0)} | "
+                f"{row.get('达标', 0)} | {_cell(row.get('npu_us'))} | "
+                f"{_cell(row.get('baseline_us'))} | {_cell(row.get('speedup'))} |")
+        if ps.get("status") == "skipped_precision_gate":
+            lines += ["", "> 精度门未通过，性能未执行；本报告不提供虚构加速比。"]
+        perf_non_passing = perf.get("non_passing_cases") or []
+        if perf_non_passing:
+            lines += [
+                "",
+                f"性能未通过共 **{len(perf_non_passing)}** 条，逐项状态与原始原因见 "
+                "[性能失败明细.md](性能失败明细.md)。",
+            ]
+        elif ps.get("perf_cases", 0):
+            lines += ["", "无性能未通过 case。"]
 
     gaps = _gap_items(caseset.get("task_pr_gaps"))
     lines += ["", "## 任务书与 PR 差额", ""]

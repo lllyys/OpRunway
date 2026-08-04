@@ -21,13 +21,20 @@ OPRUNWAY_DONE 哨兵 / raw log hash / msprof 输出绑定（本轮不做）；�
 import argparse, hashlib, json, math, os, statistics, sys
 from collections import Counter
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import perf_mode  # noqa: E402
+
 # T6/T8 扩枚举：exception=小shape例外(合法放行需交叉校验)；
 # blocked_wait_gpu_benchmark=缺外部 GPU 标杆正规挂起；blocked_incomparable_timing_scope=双边口径不可比。
 _PERF_STATUS = {"ok", "no_perf_cases", "blocked", "fail",
                 "exception", "blocked_wait_gpu_benchmark", "blocked_incomparable_timing_scope",
                 # High#2（2026-07-24）：验收通路缺**真实**基线（采集端未接通）→ 正规挂起。
                 # 它取代的是原来那条「静默 mock 兜底」的路——mock 基线在验收通路上等于冒充达标。
-                "blocked_wait_real_baseline"}
+                "blocked_wait_real_baseline",
+                # §5.10（2026-08-03）：measure_only —— 已实测、**未做比值裁决**。
+                # ⚠ 它**只**在 caseset 落盘的 perf_case_policy.mode=measure_only 时才合法
+                #   （见 gate_task3 的双向交叉核）；否则就是「伪造一个宽档 status 绕开达标核对」。
+                perf_mode.STATUS_MEASURED}
 # gt3-1：blocked 行仅在这几种「合法挂起/不可采集」态下才允许免 scope 证据校验；
 # status ∈ {ok, fail, exception} 下出现 blocked 行 = 口径矛盾（零证据放行洞），记 error。
 _BLOCKED_OK_STATUS = {"blocked", "blocked_incomparable_timing_scope", "blocked_wait_gpu_benchmark",
@@ -478,16 +485,32 @@ def _gate_perf_case_policy(cs, cases, errs):
     if not isinstance(policy, dict):
         errs.append("caseset.perf_case_policy 非对象")
         return
+    try:
+        perf_mode.policy_mode(policy)     # 未知 mode → fail-closed（不猜、不退默认）
+    except ValueError as ex:
+        errs.append(f"perf_case_policy.mode 非法：{ex}")
+        return
     rule = policy.get("shape_classification")
     limit = rule.get("small_max_bytes") if isinstance(rule, dict) else None
     hardware = rule.get("hardware") if isinstance(rule, dict) else None
+    limit_source = rule.get("source") if isinstance(rule, dict) else None
     profile = _PERF_SHAPE_PROFILES.get(hardware)
+    # 大小 shape 边界的来源（与 gen_cases._SHAPE_LIMIT_SOURCES 同一枚受控词表）：
+    #   · 缺省/`hardware_profile` —— 必须命中本表且逐值相符（历史行为，一个字不放松）；
+    #   · `spec_supplied`         —— 本表没有该硬件的受控 profile 时，由 spec 直供并在产物里留痕。
+    #     ⚠ 表里**有**该硬件时仍强制逐值相符：spec 改不动我们已核定的硬件事实。
+    #     ⚠ 这条只影响**分组**（大/小 shape 怎么归桶），不影响免测、阈值或任何 pass/fail。
+    spec_supplied = (limit_source == "spec_supplied")
+    if limit_source is not None and not spec_supplied and limit_source != "hardware_profile":
+        errs.append(f"perf_case_policy.shape_classification.source={limit_source!r} 非受控值")
+        return
     if (policy.get("case_source") != "precision_cases"
             or not isinstance(rule, dict) or rule.get("metric") != "sum_input_bytes"
             or not _is_int(limit) or limit < 1
-            or profile is None
-            or limit != profile["small_max_bytes"]
-            or rule.get("metric") != profile["metric"]
+            or (profile is None and not spec_supplied)
+            or (profile is not None
+                and (limit != profile["small_max_bytes"]
+                     or rule.get("metric") != profile["metric"]))
             or rule.get("boundary") != "small_if_input_bytes_lte_limit"):
         errs.append("perf_case_policy 来源/分类规则非法")
         return
@@ -593,6 +616,7 @@ def _gate_perf_case_policy(cs, cases, errs):
                 or meta.get("input_bytes") != total or meta.get("small_max_bytes") != limit
                 or meta.get("metric") != "sum_input_bytes"
                 or meta.get("hardware") != hardware
+                or meta.get("source") != limit_source
                 or meta.get("boundary") != "small_if_input_bytes_lte_limit"):
             errs.append(f"{cid}: perf_shape_classification 与输入物理字节 {total} 不一致")
             continue
@@ -1672,7 +1696,154 @@ def _gate_perf_measurement_binding(cs, ev, pr, d, per, errs):
                         f"≠ baseline.json.source={baseline.get('source')!r}")
 
 
-def _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs):
+def _measure_only_mode(d, errs=None):
+    """本轮性能口径 —— **只从 caseset.json 这份 Task1 落盘产物读**，不信 perf_report 自报。
+
+    理由：`perf_report` 是被门审查的对象；让它自报「我是 measure_only」就等于让被审对象自选
+    宽档。caseset 由 gate_task1 独立校过，是门这一侧唯一可信的口径来源。
+    解析不了 / mode 非法 → 一律按**严档** ratio_gated 处理（fail-closed 方向：宁可多要一份
+    baseline 证据，也不放行一个「没判过」的性能维）。
+    """
+    cs = _load(d, "caseset.json")
+    if not isinstance(cs, dict):
+        return False
+    try:
+        return perf_mode.is_measure_only(perf_mode.policy_mode(cs.get("perf_case_policy")))
+    except ValueError as ex:
+        if errs is not None:
+            errs.append(f"caseset.perf_case_policy.mode 非法（按严档处理）：{ex}")
+        return False
+
+
+def _gate_measure_only_report(pr, d, per, s, errs):
+    """`measure_only` 专用复核：**每条性能 case 都必须有真实 `npu_us`**，且报告不得夹带比值裁决。
+
+    ⚠ 本函数只放松「必须有 baseline_us / ratio / target_ratio」这几项，其它一条不放松：
+      · 逐 case 实测（有限正数 + kernel_only）—— 强制，缺一条即 BLOCKED；
+      · per_case ↔ caseset ↔ evidence 三方对齐（防跑子集/空壳）—— 由 `_gate_perf_case_alignment`
+        + `_gate_perf_measurement_binding` 照常执行；
+      · 大小 shape 分档计数 —— 与生成期账本逐桶复核。
+    `measure_only` 的含义是「不做对比」，不是「不做测量」。
+    """
+    if pr.get("perf_mode") != perf_mode.MODE_MEASURE_ONLY:
+        errs.append(f"caseset 口径为 measure_only，perf_report.perf_mode={pr.get('perf_mode')!r} "
+                    "不符（产物口径漂移）")
+    # 只测不比 → 报告里不得出现任何对照物/阈值/达标字段。出现即口径矛盾，不做「忽略多余字段」。
+    for key in ("target_ratio", "baseline_source"):
+        if pr.get(key) is not None:
+            errs.append(f"measure_only 报告不得声明 {key}={pr.get(key)!r}（只测不比却携带对照物/阈值）")
+    for key in ("by_dtype", "overall_speedup", "non_passing_cases", "by_shape_class",
+                "shape_overall", "simulation"):
+        if key in pr:
+            errs.append(f"measure_only 报告不得含比值通路字段 {key}（该口径下没有可比测量）")
+    for key in ("达标", "cases_above_threshold", "cases_scored"):
+        if key in (s or {}):
+            errs.append(f"measure_only summary 不得含 {key}（没有对照物就没有达标这件事）")
+    if os.path.exists(os.path.join(d, "baseline.json")):
+        errs.append("measure_only 却落了 baseline.json（本口径不消费任何对照物）")
+
+    measured = 0
+    for r in per:
+        if not isinstance(r, dict) or not isinstance(r.get("case_id"), str):
+            continue                       # 坏行已由 gate_task3 行循环记 error
+        cid = r["case_id"]
+        for key in ("ratio", "达标", "baseline", "exception"):
+            if key in r:
+                errs.append(f"{cid}: measure_only per_case 不得含 {key}（该口径不产比值裁决）")
+        if r.get("blocked") is True:
+            # 已由 status=blocked 在 gate_task3 报过「无法采集」；这里逐条点名，便于定位。
+            errs.append(f"{cid}: measure_only 性能 case 无真实 NPU 实测（blocked）——"
+                        "「不做对比」不等于「不做测量」")
+            continue
+        if not _perf_finite_pos(r.get("npu_us")):
+            errs.append(f"{cid}: measure_only 缺/坏 npu_us={r.get('npu_us')!r}（须有限正数实测）")
+            continue
+        if r.get("scope") != "kernel_only":
+            errs.append(f"{cid}: scope={r.get('scope')!r} ≠ kernel_only（性能须 msprof op kernel-only）")
+            continue
+        measured += 1
+    claimed = (s or {}).get("measured")
+    if not _is_int(claimed):
+        errs.append(f"measure_only summary.measured={claimed!r} 非整数计数")
+    elif claimed != measured:
+        errs.append(f"measure_only summary.measured={claimed!r} 与 per_case 行级实际 {measured} 不一致")
+    if per and measured != len(per):
+        errs.append(f"measure_only 要求**每条**性能 case 都有真实实测："
+                    f"{measured}/{len(per)} 条有效 → BLOCKED")
+
+
+def _gate_measured_shape_report(pr, d, per, errs):
+    """measure_only 的大小 shape 分档复核：只核实测口径，不核 speedup/达标（本口径没有这些）。"""
+    cs = _load(d, "caseset.json")
+    if not isinstance(cs, dict) or not isinstance(cs.get("perf_case_policy"), dict):
+        return                                          # legacy caseset 无账本，保持兼容
+    policy = cs["perf_case_policy"]
+    by_id = {c.get("id"): c for c in (cs.get("cases") or [])
+             if isinstance(c, dict) and isinstance(c.get("id"), str)}
+    expected_counts = (policy.get("counts") or {}) if isinstance(policy.get("counts"), dict) else {}
+    actual = {k: {"cases": 0, "measured": 0, "us": []} for k in ("small", "large")}
+    for r in per:
+        if not isinstance(r, dict) or not isinstance(r.get("case_id"), str):
+            continue
+        meta = (by_id.get(r["case_id"]) or {}).get("perf_shape_classification")
+        cls = meta.get("class") if isinstance(meta, dict) else None
+        if cls not in actual:
+            errs.append(f"{r['case_id']}: 声明了 perf_case_policy 但缺/坏大小 shape 分类")
+            continue
+        actual[cls]["cases"] += 1
+        if r.get("blocked") is not True and _perf_finite_pos(r.get("npu_us")):
+            actual[cls]["measured"] += 1
+            actual[cls]["us"].append(float(r["npu_us"]))
+    for cls in ("small", "large"):
+        if expected_counts.get(cls) != actual[cls]["cases"]:
+            errs.append(f"{cls}: perf_case_policy.counts={expected_counts.get(cls)!r} "
+                        f"与性能行实际 {actual[cls]['cases']} 不一致")
+    if pr.get("measured_shape_complete") is not True:
+        errs.append(f"measure_only 大小 shape 汇总不完整：{pr.get('measured_shape_problems')}")
+    rows = pr.get("measured_by_shape_class")
+    if not isinstance(rows, list):
+        errs.append("perf_report 缺 measured_by_shape_class")
+        return
+    got = {r.get("class"): r for r in rows if isinstance(r, dict)}
+
+    def med(vals):
+        return float(statistics.median(vals)) if vals else None
+
+    def same_number(got_value, expected_value):
+        if expected_value is None:
+            return got_value is None
+        return (isinstance(got_value, (int, float)) and not isinstance(got_value, bool)
+                and math.isfinite(got_value)
+                and math.isclose(float(got_value), float(expected_value),
+                                 rel_tol=1e-12, abs_tol=1e-12))
+
+    for cls in ("small", "large"):
+        row = got.get(cls)
+        if not isinstance(row, dict):
+            errs.append(f"measured_by_shape_class 缺 {cls} 行")
+            continue
+        for key in ("cases", "measured"):
+            if row.get(key) != actual[cls][key]:
+                errs.append(f"measured_by_shape_class[{cls}].{key}={row.get(key)!r} "
+                            f"与行级实际 {actual[cls][key]} 不一致")
+        if not same_number(row.get("npu_us"), med(actual[cls]["us"])):
+            errs.append(f"measured_by_shape_class[{cls}].npu_us={row.get('npu_us')!r} "
+                        f"与行级派生 {med(actual[cls]['us'])!r} 不一致")
+    overall = pr.get("measured_shape_overall")
+    if not isinstance(overall, dict):
+        errs.append("perf_report 缺 measured_shape_overall")
+        return
+    for key in ("cases", "measured"):
+        total = sum(actual[cls][key] for cls in ("small", "large"))
+        if overall.get(key) != total:
+            errs.append(f"measured_shape_overall.{key}={overall.get(key)!r} 与大小桶合计 {total} 不一致")
+    all_us = actual["small"]["us"] + actual["large"]["us"]
+    if not same_number(overall.get("npu_us"), med(all_us)):
+        errs.append(f"measured_shape_overall.npu_us={overall.get('npu_us')!r} "
+                    f"与行级派生 {med(all_us)!r} 不一致")
+
+
+def _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs, measure_only=False):
     """per_case 与 caseset/evidence **按 case 对齐**（补 T5 门延后 finding）——防「跑性能子集 + 伪造
     summary=ok」蒙混：① caseset(dims 含「性能」)↔perf per_case 用 Counter 全量比对（拒缺/多/重复）；
     ② 性能 case 必须真有 evidence（拒伪造 per_case 未实跑）；③ summary 的 perf_cases/达标/blocked
@@ -1691,7 +1862,8 @@ def _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs):
         perf_ids = _perf_ids_from_caseset(cs, errs)  # cs=None 时内部记 error 并返回 None
         if perf_ids is not None:
             # gt3-4 交叉：status=ok 但 caseset 无任何「性能」dim 用例 → 口径矛盾（应为 no_perf_cases）。
-            if st == "ok" and not perf_ids:
+            # measure_only 的 `measured` 同理：宣称「已实测」却一条性能用例都没有，是自相矛盾。
+            if st in ("ok", perf_mode.STATUS_MEASURED) and not perf_ids:
                 errs.append("status=ok 但 caseset 无「性能」dim 用例（0 性能用例应为 no_perf_cases·口径矛盾）")
             want, got = Counter(perf_ids), Counter(per_ids)
             miss = sorted((want - got).elements())
@@ -1729,7 +1901,11 @@ def _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs):
                 n_meet += 1
             if r.get("blocked") is True:
                 n_blocked += 1
-        for key, actual in (("perf_cases", len(per)), ("达标", n_meet), ("blocked", n_blocked)):
+        # measure_only 下 `达标` 这一项**不该存在**（由 _gate_measure_only_report 强制其缺席），
+        # 故这里只核 perf_cases / blocked——不是放松，是这份报告里根本没有那个量。
+        checks = (("perf_cases", len(per)), ("blocked", n_blocked)) if measure_only else (
+            ("perf_cases", len(per)), ("达标", n_meet), ("blocked", n_blocked))
+        for key, actual in checks:
             claimed = s.get(key)
             if not _is_int(claimed):
                 errs.append(f"summary.{key}={claimed!r} 非整数计数（拒 bool/非法类型）")
@@ -1921,18 +2097,35 @@ def gate_task3(d, errs):
     T6：status=exception → 强制有仿真图 + 交叉一致 + sha 校验（_gate_small_shape_exception）。
     T8：blocked_wait_gpu_benchmark=正规挂起(不计完整性 FAILED)但仍卡 NPU 侧完整性；
         blocked_incomparable_timing_scope=双边口径不可比→FAILED。安全护栏(codex H4)：门放行挂起
-        只代表 NPU 证据完整，整体绝不显 PASS——那由 run_workflow 映射为 BLOCKED_* + 非零退出。"""
+        只代表 NPU 证据完整，整体绝不显 PASS——那由 run_workflow 映射为 BLOCKED_* + 非零退出。
+    §5.10（measure_only）：口径从 **caseset.perf_case_policy.mode** 读（不信 perf_report 自报）。
+        该口径下**只**放松「必须有 baseline_us / ratio / target_ratio」这几项；
+        「每条性能 case 都必须有真实 npu_us + kernel_only」**仍然强制**，缺一条即 BLOCKED
+        ——`measure_only` 是「不做对比」，不是「不做测量」。"""
     pr = _load(d, "perf_report.json")
     if not isinstance(pr, dict):
         errs.append("缺/坏 perf_report.json（Task3 未跑）")
         return
     _gate_cpp_extension_perf_collection(d, errs)
+    # §5.10：口径只从 caseset（Task1 落盘、gate_task1 校过）读，**不信 perf_report 自报**。
+    measure_only = _measure_only_mode(d, errs)
     s = pr.get("summary")
     has_summary = isinstance(s, dict)
     if not has_summary:
         errs.append("perf_report 缺 summary（产物不完整）")
         s = {}
     st = s.get("status")
+    # `measured` 与 measure_only 口径**双向绑死**：
+    #   · 非 measure_only 的 caseset 上出现 `measured` = 拿宽档 status 绕开达标核对；
+    #   · measure_only 的 caseset 上出现 ratio 通路 status（ok/fail/exception/blocked_wait_*）
+    #     = 报告在做它不该做的比值裁决。两个方向都记 error。
+    if st == perf_mode.STATUS_MEASURED and not measure_only:
+        errs.append("perf status='measured' 但 caseset.perf_case_policy.mode 不是 measure_only"
+                    "（用只测不比的宽档 status 绕开达标核对）")
+    if measure_only and isinstance(st, str) and st not in (
+            perf_mode.STATUS_MEASURED, "blocked", "no_perf_cases"):
+        errs.append(f"caseset 口径为 measure_only，perf status={st!r} 属比值通路"
+                    "（该口径下不产任何比值裁决）")
     # gt3-6①：status 为 list/dict 时 `st not in _PERF_STATUS`（对 set 成员判定）会崩 unhashable →
     # 先 isinstance(str) 守卫，非字符串记 error 且不参与 set 判定。
     wait = isinstance(st, str) and st in _PERF_WAIT_STATUS
@@ -1984,19 +2177,27 @@ def gate_task3(d, errs):
         if r.get("scope") != "kernel_only":  # 缺 scope(None) 也判失败
             errs.append(f"{cid}: scope={r.get('scope')!r} ≠ kernel_only（性能须 msprof op kernel-only）")
     # gt3-4：status=ok 与 0 性能用例自相矛盾（应为 no_perf_cases）→ 强制 perf_cases≥1 且 per_case 非空。
-    if st == "ok":
+    # measure_only 的 `measured` 同一条纪律：宣称「已实测」就必须真有 ≥1 条性能行。
+    if st in ("ok", perf_mode.STATUS_MEASURED):
         if not per:
-            errs.append("status=ok 但 per_case 为空（0 性能证据自相矛盾，应为 no_perf_cases）")
+            errs.append(f"status={st} 但 per_case 为空（0 性能证据自相矛盾，应为 no_perf_cases）")
         pc = s.get("perf_cases")
         if not (_is_int(pc) and pc >= 1):
-            errs.append(f"status=ok 但 summary.perf_cases={pc!r}（须为≥1 整数；0 性能用例应为 no_perf_cases）")
+            errs.append(f"status={st} 但 summary.perf_cases={pc!r}（须为≥1 整数；0 性能用例应为 no_perf_cases）")
     # per_case 与 caseset/evidence 按 case 对齐（补 T5 门延后 finding）：防跑性能子集 + 伪造 summary=ok。
-    _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs)
-    _gate_shape_report(pr, d, per, errs)
-    _gate_non_passing_report(pr, d, per, s, errs)
-    if st == "exception":
-        _gate_small_shape_exception(pr, d, errs)
-    print(f"  性能 status={st}(perf_compare 判) | 达标 {s.get('达标')}/{s.get('perf_cases')}")
+    _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs, measure_only=measure_only)
+    if measure_only:
+        # 只换掉「比值口径」的两级复核，**逐 case 实测强制**与三方对齐一条不放松。
+        _gate_measure_only_report(pr, d, per, s, errs)
+        _gate_measured_shape_report(pr, d, per, errs)
+    else:
+        _gate_shape_report(pr, d, per, errs)
+        _gate_non_passing_report(pr, d, per, s, errs)
+        if st == "exception":
+            _gate_small_shape_exception(pr, d, errs)
+    tail = (f"实测 {s.get('measured')}/{s.get('perf_cases')}（measure_only：未做标杆对比、无达标结论）"
+            if measure_only else f"达标 {s.get('达标')}/{s.get('perf_cases')}")
+    print(f"  性能 status={st}(perf_compare 判) | {tail}")
 
 
 def _gate_cpp_extension_perf_collection(d, errs):

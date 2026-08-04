@@ -62,6 +62,25 @@
     "threshold_source": "用户口头拍板「默认精度即可」→ 采用本流水线的**缺省**精度标准 ascendoptest_default。float32 阈值 0.0001 / 错误率 0.0001 取自 precision_policy._AOT_TABLE（AscendOpTest 逐字快照），**不是**从任务书原文抽的——任务书未给数值阈值，这一项按「工具默认」记，属推断口径 (推断)。",
     "case_target": 24
   },
+  "perf": {
+    "mode": "measure_only",
+    "_mode_note": "任务书把 OpenCV **GPU**（CUDA）指定为性能参考。按用户 2026-08-03 的全局口径（AGENTS.md §5.10）：要求与 GPU 比对的任务书**同样只用 msprof 采 NPU 实测性能**，不获取 GPU 标杆、不做比值裁决。故 mode=measure_only —— 本轮性能维只产 NPU kernel-only 实测耗时 + 分档说明，**不产任何达标结论**，报告不得声称已达到任务书的 GPU 比值要求。measure_only 下 baseline / target_ratio 必须缺席（声明了就是自相矛盾，工具 fail-closed）。",
+    "warmup": 5,
+    "repeat": 20,
+    "case_source": "precision_cases",
+    "case_selection": {
+      "min_total_input_elements": 2,
+      "max_cases": 16,
+      "_note": "性能 case 只从同一份精度 caseset 选（不另造输入）。移出 numel=1 的退化用例：单元素图上 GaussianBlur 的 device kernel 时间被启动开销淹没，测出来的数不代表算子性能；它仍留在精度维。max_cases=16 按 dtype×大小 shape 轮转取子集，避免整轮 msprof 采集时间失控。"
+    },
+    "shape_classification": {
+      "metric": "sum_input_bytes",
+      "small_max_bytes": 262144,
+      "hardware": "Ascend 950PR",
+      "source": "spec_supplied",
+      "_note": "(推断) ⚠ 我们**没有** Ascend 950PR 的 UB 单次承载边界事实，因此代码里的受控 profile 表**不登记**该型号；这里由 spec 直供 256 KiB，沿用 A3 的同一条经验边界，并以 source=spec_supplied 在 caseset / perf_report 里留痕。该值**只用于把性能 case 分成大/小 shape 两桶做可审计展示**，不参与免测、阈值放宽或任何 pass/fail —— 即便边界取错，也只会让分组不准，不会改变任何裁决。核到真值后改这一处即可。"
+    }
+  },
   "task_pr_gaps": [
     "【定向用例 TC-03..TC-11 未覆盖】任务书列了 TC-01..TC-11 的定向测试点，本轮 caseset 只由通用正交网格（shape 阶梯 x attr 笛卡尔 x 强制特殊场景）铺出，**没有**任何一条 case 与 TC-03..TC-11 一一对应，spec 侧也没有字段可以声明「点名用例」。故本轮结论**不得**声称任务书定向用例已覆盖。",
     "【in-place 语义：任务书要求、PR 明确拒绝】任务书要求支持原地（src 与 dst 同一块内存）。PR 的 aclnn 层显式调用 CheckInplaceUnsupported 把这条路封死。这是任务书 ↔ PR 的**功能缺口**，不是工具缺口；本轮 caseset 也无 in-place 用例（runner 恒分配独立 dst），缺口原样挂账、不得判 PASS。",
@@ -71,6 +90,7 @@
     "【空 Tensor 覆盖 = 0 条】已设 allow_empty_tensor:false（cv2 对空图无定义语义，golden 会 fail-closed）。任务书未明写是否支持空输入，本轮**未测**，属显式挂起、非静默收窄。",
     "【DUT 自身 ABI 不一致 (推断)】aclnn_gaussian_blur.h 里 dst 在 stage1 是 `const aclTensor*`、在 stage2 是 `aclTensor*`。工具按 stage2 的非 const 判定 dst 为输出方向；这只是**从 header 读出来的方向标注**，不构成「dst 确实是被写的那块 buffer」的证明——须人核 PR:gaussian_blur/examples/test_aclnn_gaussian_blur.cpp:95-97 的 D2H 源。",
     "【PR provenance 降级】本轮 DUT 来自本地快照目录（fetch_source --pr-snapshot），无 PR head_sha，completeness=snapshot_only。验收结论必须标明「未绑定 PR head」。",
-    "【无性能维】任务书性能条款本轮**不在范围内**，spec 整个 perf 字段省略 → 不产任何性能证据。报告不得给出性能结论。"
+    "【性能只实测、未做任何标杆对比】任务书要求以 OpenCV **GPU**（CUDA）为性能参考。按用户 2026-08-03 的全局口径（AGENTS.md §5.10），本轮 perf.mode=measure_only：只用 msprof 采 NPU kernel-only 实测耗时，**没有**获取任何 GPU 标杆、**没有**算过任何比值。报告不得声称已满足任务书的 GPU 性能条款；性能维在本轮不贡献 pass/fail。",
+    "【大小 shape 边界为直供推断值 (推断)】perf.shape_classification.small_max_bytes=256 KiB 是从 Atlas A3 的 UB 单次承载经验沿用过来的，**不是** Ascend 950PR 的已核硬件事实（故以 source=spec_supplied 留痕）。它只影响性能 case 的大/小 shape 分组展示，不参与任何裁决；核到 950PR 真值后须回填。"
   ]
 }

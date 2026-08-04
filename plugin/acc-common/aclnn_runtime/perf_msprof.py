@@ -1435,6 +1435,28 @@ def select_perf_cases(caseset, accuracy_pass_ids=None):
 
 # ── 记录组装 → evidence perf / _torch_npu_baseline.json ────────────────────────────
 
+def build_measure_only_record(case_id, custom):
+    """`perf.mode=measure_only`（AGENTS.md §5.10）的单 case 记录：**只有 custom 一侧**。
+
+    与 `build_perf_record` 的区别只在「没有第二侧」：不比 scope、不比采集配置、不算 speedup、
+    不判 comparability —— 那四件事都需要对照物。custom 侧的行为分类与计时口径**完全同口径**，
+    未计时一律 `us=None` + 行为原因（下游 `build_custom_perf_map` 据此落 `us=None` →
+    perf_compare blocked → 验收门 BLOCKED）。
+    """
+    record = {"case_id": case_id,
+              "custom": dict(custom or {}),
+              "baseline": None,
+              "custom_timed": bool((custom or {}).get("behavior") in TIMED_BEHAVIORS),
+              "baseline_timed": None,
+              "speedup": None,
+              "comparability": None,
+              "timing_scope_status": None,
+              "collection_status": None,
+              "measure_only": True,
+              "note": "measure_only：只采 NPU 侧 kernel-only 实测，未采任何基线，故不算比值"}
+    return record
+
+
 def build_perf_record(case_id, custom, baseline):
     """把一个 case 的双边采集结果合成一条记录（**只描述、不裁决**）。
 
@@ -2501,7 +2523,7 @@ def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repea
 
 def _collect_document(*, op, warmup, repeat, device, side_timeout_s, baseline_kind,
                       custom_kind, custom_provenance,
-                      records, skipped, planned_cases, complete):
+                      records, skipped, planned_cases, complete, mode="ratio_gated"):
     return {
         "op": op,
         "scope": TIMING_SCOPE,
@@ -2509,11 +2531,13 @@ def _collect_document(*, op, warmup, repeat, device, side_timeout_s, baseline_ki
         "repeat": repeat,
         "device": device,
         "side_timeout_s": side_timeout_s,
+        # §5.10 measure_only：**没有基线侧**，故这里落 None 而不是一份「看起来采过基线」的配置。
+        "mode": mode,
         "collection": {
             "custom": collection_config(
                 collector=collector_for("custom"), warmup=warmup, repeat=repeat),
-            "baseline": collection_config(
-                collector=collector_for("baseline"), warmup=warmup, repeat=repeat),
+            "baseline": (None if mode == "measure_only" else collection_config(
+                collector=collector_for("baseline"), warmup=warmup, repeat=repeat)),
         },
         "baseline_source": baseline_kind,
         "custom_kind": custom_kind,
@@ -2548,7 +2572,8 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
          "allow_builtin_symbols": false,          # 可选，缺省 false = 严格档（同精度通路口径）
          "dut_lib": "<.../op_api/lib/libcust_opapi.so>",   # 本次 DUT；严格档必给其一
          "dut_vendor_root": "<vendor 内容根>",     #   （或退 adapter 的 vendor_dir + vendor_name）
-         "baseline": "torch_npu" | "aclnn_builtin",
+         "mode": "ratio_gated" | "measure_only",  # 可选，缺省 ratio_gated（历史行为）
+         "baseline": "torch_npu" | "aclnn_builtin",              # mode=measure_only 时**必须缺席**
          "torch_baseline": {"api","positional","keyword"},       # baseline=torch_npu
          "aclnn_baseline": {"library","variants"},               # baseline=aclnn_builtin
          "cases": ["<case id>", ...],             # 已过精度先筛的 case
@@ -2586,8 +2611,20 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
     # 再进 AclnnRunner(dut_lib=...)。定不出即 fail-closed，绝不默默用宽松档。
     dut_lib = (resolve_plan_dut_lib(plan, strict=strict_custom_vendor)
                if custom_kind == "aclnn_py" else None)
+    # §5.10 只测不比：`mode="measure_only"` 时**没有基线侧**——plan 里因此不该有 baseline。
+    # 缺省（字段不存在）仍是历史的 ratio_gated：必须显式给出受控 baseline，一个字不放松。
+    plan_mode = plan.get("mode", "ratio_gated")
+    if plan_mode not in ("ratio_gated", "measure_only"):
+        raise PerfCollectError(
+            f"perf plan mode 须为 ratio_gated 或 measure_only，得 {plan_mode!r}")
+    measure_only = (plan_mode == "measure_only")
     baseline_kind = plan.get("baseline")
-    if baseline_kind not in ("torch_npu", "aclnn_builtin"):
+    if measure_only:
+        if baseline_kind is not None:
+            raise PerfCollectError(
+                f"perf plan mode='measure_only' 却带 baseline={baseline_kind!r}——"
+                "只测不比的口径下不采任何基线，fail-closed")
+    elif baseline_kind not in ("torch_npu", "aclnn_builtin"):
         raise PerfCollectError(
             f"perf plan baseline 须为 torch_npu 或 aclnn_builtin，得 {baseline_kind!r}")
     torch_baseline = plan.get("torch_baseline")
@@ -2611,21 +2648,25 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
                               scratch_dir=scratch, detect_hybrid=False,
                               baseline_kind=baseline_kind, side_timeout_s=side_timeout_s,
                               custom_kind=custom_kind)
-        baseline_cfg = ({"torch_baseline": torch_baseline}
-                        if baseline_kind == "torch_npu"
-                        else {"aclnn_baseline": aclnn_baseline})
-        if dut_lib is not None:
-            # libcust_opapi.so 固定在 <vendor-root>/op_api/lib/；由已唯一解析的 DUT so 反推，
-            # 不从可能受污染的进程环境猜 vendor 根。宽松档无 DUT 时没有 custom 路径需要移除。
-            baseline_cfg["exclude_dut_vendor_root"] = str(Path(dut_lib).resolve().parents[2])
-        baseline = measure_side(side="baseline", case=case, caseset_path=caseset_path,
-                                work_dir=work_dir,
-                                cfg_extra=baseline_cfg,
-                                warmup=warmup, repeat=repeat, device=device,
-                                scratch_dir=scratch,
-                                detect_hybrid=(baseline_kind == "torch_npu"),
-                                baseline_kind=baseline_kind, side_timeout_s=side_timeout_s)
-        records.append(build_perf_record(cid, custom, baseline))
+        if measure_only:
+            baseline = None
+            records.append(build_measure_only_record(cid, custom))
+        else:
+            baseline_cfg = ({"torch_baseline": torch_baseline}
+                            if baseline_kind == "torch_npu"
+                            else {"aclnn_baseline": aclnn_baseline})
+            if dut_lib is not None:
+                # libcust_opapi.so 固定在 <vendor-root>/op_api/lib/；由已唯一解析的 DUT so 反推，
+                # 不从可能受污染的进程环境猜 vendor 根。宽松档无 DUT 时没有 custom 路径需要移除。
+                baseline_cfg["exclude_dut_vendor_root"] = str(Path(dut_lib).resolve().parents[2])
+            baseline = measure_side(side="baseline", case=case, caseset_path=caseset_path,
+                                    work_dir=work_dir,
+                                    cfg_extra=baseline_cfg,
+                                    warmup=warmup, repeat=repeat, device=device,
+                                    scratch_dir=scratch,
+                                    detect_hybrid=(baseline_kind == "torch_npu"),
+                                    baseline_kind=baseline_kind, side_timeout_s=side_timeout_s)
+            records.append(build_perf_record(cid, custom, baseline))
         _write_collect_checkpoint(
             out_path,
             _collect_document(
@@ -2642,6 +2683,7 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
                 skipped=plan.get("skipped") or [],
                 planned_cases=planned_cases,
                 complete=False,
+                mode=plan_mode,
             ),
         )
         # 整轮采集受硬超时保护；逐 case flush 进度后，即使整轮被杀，诊断日志也能指出
@@ -2652,7 +2694,7 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
                 "total": len(planned_cases),
                 "case_id": cid,
                 "custom_behavior": custom.get("behavior"),
-                "baseline_behavior": baseline.get("behavior"),
+                "baseline_behavior": (baseline or {}).get("behavior"),
             }
         }, ensure_ascii=False), flush=True)
     doc = _collect_document(
@@ -2669,6 +2711,7 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
         skipped=plan.get("skipped") or [],
         planned_cases=planned_cases,
         complete=True,
+        mode=plan_mode,
     )
     _write_collect_checkpoint(out_path, doc)
     return doc

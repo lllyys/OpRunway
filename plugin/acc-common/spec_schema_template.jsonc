@@ -286,8 +286,9 @@
 //
 // ── 顶层 · perf（任务书性能栏为『无』时**整个 perf 字段省略**，勿写 {baseline:"none"}）────────────
 //   "perf": {
-//     "baseline": "<tbe | gpu_external | torch_npu | aclnn_builtin>",
-//     "target_ratio": <number>,
+//     "mode": "<ratio_gated | measure_only>",  // 可选，缺省 ratio_gated（= 下面这套比值裁决）
+//     "baseline": "<tbe | gpu_external | torch_npu | aclnn_builtin>",  // mode=measure_only 时**必须缺席**
+//     "target_ratio": <number>,                                        // mode=measure_only 时**必须缺席**
 //     "warmup": <int>,          // 可选，缺省 5
 //     "repeat": <int>,          // 可选，缺省 20
 //     "case_source": "precision_cases", // perf 存在时必填；每条性能 case 的 dims 必须同时含「精度」
@@ -296,10 +297,11 @@
 //       "include_precision_tags": ["<精度 case tag>", ...],
 //       "max_cases": <正整数>            // 可选；超出时按 dtype×small/large 队列轮转，仍复用精度 case_id
 //     },
-//     "shape_classification": {          // perf 存在时必填；只分类，不免测、不改 pass/fail
+//     "shape_classification": {          // perf 存在时必填（measure_only 也必填）；只分类，不免测、不改 pass/fail
 //       "metric": "sum_input_bytes",
 //       "small_max_bytes": <正整数，边界计入小 shape>,
-//       "hardware": "<任务书目标硬件>"
+//       "hardware": "<任务书目标硬件>",
+//       "source": "<hardware_profile | spec_supplied>"  // 可选，缺省 hardware_profile
 //     },
 //     "small_shape_exception": {"text": "<人读说明>", "when_us_below": <number>, "abs_gap_us_within": <number>},
 //     "torch_baseline": {
@@ -310,6 +312,19 @@
 //     },
 //     "aclnn_baseline": {"library": "cann_builtin_libopapi", "variants": [{"when": {…}, "symbol": "<基名>", "slots": ["<slot>"]}]}
 //   }
+//   ⚠ `mode`（AGENTS.md §5.10，用户 2026-08-03 的全局口径）：
+//     · 任务书**对性能有明确的同机比值要求**（如「相比内置 TBE 不劣化」）→ `ratio_gated`（= 省略本字段）。
+//     · 任务书**对性能没要求**，或要求的是**与 GPU 比对**（A100 / OpenCV CUDA / ATK 双标杆之类）
+//       → `measure_only`：只用 msprof 采 NPU kernel-only 实测耗时，**不获取 GPU 标杆、不算任何比值**。
+//       此时 `baseline` / `target_ratio` / `small_shape_exception` / `torch_baseline` / `aclnn_baseline`
+//       **必须全部缺席**（声明了就是自相矛盾，工具 fail-closed 报错，不「忽略多余字段」）。
+//       报告须逐字写明「只做 NPU msprof 实测、未做任何标杆对比」，**不得**包装成「已达标 N 倍」。
+//     ⚠ `measure_only` 只免掉**对比**，不免掉**测量**：每条性能 case 仍须有真实 `npu_us`，
+//       缺一条验收门即 BLOCKED。
+//   ⚠ `shape_classification.source`：缺省 `hardware_profile` = 必须命中引擎内受控 profile 表且逐值相符。
+//     目标硬件在表里没有受控 UB 承载边界事实时（例如 Ascend 950PR），显式写 `spec_supplied` 由 spec 直供，
+//     产物里会留 `source=spec_supplied` 痕迹。表里**有**该硬件时仍强制逐值相符——spec 改不动已核定的事实。
+//     该值只影响大/小 shape **分组展示**，不参与免测、阈值或任何 pass/fail。
 //   ⚠ `target_ratio` **只从任务书原文换算**，绝不抄任何参考仓的通用默认值
 //     （参考仓 cannbot-ops-input `performance.py` 的 `PERF_SPEEDUP_THRESHOLD = 0.6` 是**它自家**口径，
 //      抄过来会把「比基线慢 40%」判成达标）。任务书是验收权威（硬约束 #1）：

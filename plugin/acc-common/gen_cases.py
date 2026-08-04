@@ -136,6 +136,7 @@ G4 · 归约/成对类算子的**生成期规模预算**（2026-07-22，落地�
 import collections, hashlib, importlib.util, json, math, os, sys
 import numpy as np
 import content_address
+import perf_mode
 import precision_policy
 
 SEED = 2026
@@ -204,8 +205,17 @@ def _storage_name(dtn):
 
 _PERF_SHAPE_PROFILES = {
     # 用户确认的 A3 通用规则：全部物理输入载荷 <= 256 KiB 可一次搬完 UB。
+    # ⚠ **这里只登记我们手上真有硬件事实的型号**。没有事实的型号（如 Ascend 950PR 的 UB 单次
+    #   承载边界）**绝不塞猜测值**——要用就由 spec 显式 `source="spec_supplied"` 直供并留痕。
     "Atlas A3": {"metric": "sum_input_bytes", "small_max_bytes": 256 * 1024},
 }
+#: `shape_classification.source` 受控词表。缺省 = `hardware_profile`（历史行为：必须命中上表且逐值相符）。
+#: `spec_supplied` = 该硬件我们没有受控 profile，边界由 spec 直供并在产物里留痕
+#: （门读同一枚标记才不会「生成侧过、门侧卡」）。**不是**绕过已知硬件事实的口子：
+#: 上表有该硬件时仍强制逐值相符，spec 改不动我们已核定的数。
+_SHAPE_LIMIT_SOURCE_PROFILE = "hardware_profile"
+_SHAPE_LIMIT_SOURCE_SPEC = "spec_supplied"
+_SHAPE_LIMIT_SOURCES = (_SHAPE_LIMIT_SOURCE_PROFILE, _SHAPE_LIMIT_SOURCE_SPEC)
 
 
 def _perf_case_policy(spec):
@@ -213,10 +223,15 @@ def _perf_case_policy(spec):
 
     ``case_source=precision_cases`` 只表示性能 case 必须从精度 caseset 中选，不表示每条精度 case
     都必须测性能。``shape_classification`` 仅负责可审计分组，不参与免测、阈值放宽或 pass/fail。
+
+    ``perf.mode``（见 ``perf_mode``）落进本账本，供验收门从 caseset 这份**已过 task1 门的产物**
+    独立读取口径，而不是信 perf_report 自报。缺省档 ``ratio_gated`` **不写任何新字段**——
+    既有 spec 产出的 caseset 一个字节都不变。
     """
     perf = spec.get("perf")
     if not isinstance(perf, dict):
         return None
+    mode = perf_mode.resolve_spec_mode(spec)
     source = perf.get("case_source")
     rule = perf.get("shape_classification")
     if source is None or rule is None:
@@ -242,12 +257,23 @@ def _perf_case_policy(spec):
     if not isinstance(hardware, str) or not hardware.strip():
         raise ValueError("perf.shape_classification.hardware 须为非空字符串")
     hardware = hardware.strip()
+    limit_source = rule.get("source")
+    if limit_source is None:
+        limit_source = _SHAPE_LIMIT_SOURCE_PROFILE
+    if limit_source not in _SHAPE_LIMIT_SOURCES:
+        raise ValueError(
+            f"perf.shape_classification.source={limit_source!r} 非受控值，"
+            f"须属 {list(_SHAPE_LIMIT_SOURCES)}（字段省略 = {_SHAPE_LIMIT_SOURCE_PROFILE}）")
     profile = _PERF_SHAPE_PROFILES.get(hardware)
-    if profile is None:
+    if profile is None and limit_source != _SHAPE_LIMIT_SOURCE_SPEC:
         raise ValueError(
             f"perf.shape_classification.hardware={hardware!r} 尚无受控大小 shape profile；"
-            "须先按目标硬件核定 UB 单次承载边界，不能由 spec 任意填写")
-    if metric != profile["metric"] or limit != profile["small_max_bytes"]:
+            "须先按目标硬件核定 UB 单次承载边界，不能由 spec 任意填写"
+            f"（确已按任务书/硬件手册核定过 → 显式声明 source='{_SHAPE_LIMIT_SOURCE_SPEC}' 直供并留痕）")
+    # 上表有该硬件时**无论 source 是什么都逐值相符**：spec 不得推翻我们已核定的硬件事实，
+    # `spec_supplied` 只解锁「表里没有的硬件」，不是宽档开关。
+    if profile is not None and (metric != profile["metric"]
+                                or limit != profile["small_max_bytes"]):
         raise ValueError(
             f"{hardware} 大小 shape profile固定为 metric={profile['metric']!r}, "
             f"small_max_bytes={profile['small_max_bytes']}，得 metric={metric!r}, "
@@ -286,14 +312,22 @@ def _perf_case_policy(spec):
         selection_contract["max_cases"] = int(max_cases)
     if include_precision_tags_declared:
         selection_contract["include_precision_tags"] = include_precision_tags
-    return {"case_source": source,
-            "case_selection": selection_contract,
-            "shape_classification": {
-                "metric": metric,
-                "small_max_bytes": int(limit),
-                "boundary": "small_if_input_bytes_lte_limit",
-                "hardware": hardware,
-            }}
+    shape_contract = {
+        "metric": metric,
+        "small_max_bytes": int(limit),
+        "boundary": "small_if_input_bytes_lte_limit",
+        "hardware": hardware,
+    }
+    # 只在**偏离历史默认**时才多写字段：缺省档（ratio_gated + hardware_profile）产出的 caseset
+    # 与改动前逐字节一致，既有 spec（ops-nn / Median / catlass …）零影响。
+    if limit_source == _SHAPE_LIMIT_SOURCE_SPEC:
+        shape_contract["source"] = limit_source
+    policy = {"case_source": source,
+              "case_selection": selection_contract,
+              "shape_classification": shape_contract}
+    if mode != perf_mode.DEFAULT_MODE:
+        policy["mode"] = mode
+    return policy
 
 
 def _classify_perf_cases(spec, cases):

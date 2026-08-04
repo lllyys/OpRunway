@@ -2,6 +2,28 @@
 
 > 倒序：最新在上。每天一节，一条一句，大白话。`待决` 置顶。
 
+## 2026-08-04
+
+- 落地 `spec.perf.mode = "measure_only"`（AGENTS.md §5.10 之前只有文字、没有代码）：
+  性能维多了「只测不比」这一档 —— 照常用 msprof 采**每一条**性能 case 的 NPU kernel-only 耗时，
+  但不采、不要、不等任何 baseline，不产 ratio、不产达标结论；性能维不贡献 pass/fail，
+  overall 由精度维定，新增机读终态 `PASSED_PRECISION_PERF_MEASURED_ONLY`。
+  口径解析集中在新模块 `perf_mode.py`（gen_cases / perf_compare / run_workflow / 验收门共用一份），
+  缺省（字段不存在）仍是 `ratio_gated`，既有 spec 产出的 caseset / acceptance.json 逐字节不变。
+- **最要紧的一条**：`measure_only` 是「不做对比」，**不是**「不做测量」。验收门只放松
+  「必须有 baseline_us / ratio / target_ratio」这三项，逐 case 实测（有限正数 + kernel_only）、
+  三方对齐、分档计数一条不放松；缺一条 msprof 数据即 BLOCKED。伪造一份「status=measured、
+  blocked=0」但 `npu_us` 全 null 的报告同样被挡（门从 caseset 读口径，不信 perf_report 自报）。
+- 顺手修掉 `_PERF_SHAPE_PROFILES` 只有 `Atlas A3` 一条、`Ascend 950PR` 连 dry-run 都产不出的硬阻塞：
+  新增 `shape_classification.source = "spec_supplied"`，让 spec 在**没有受控 profile 的硬件**上直供
+  大小 shape 边界并在产物里留痕；表里有该硬件时仍强制逐值相符（spec 改不动已核定的事实）。
+  **没往代码里塞任何 950PR 的 UB 猜测值** —— 那是我们手上没有的硬件事实。
+- GaussianBlur spec 改用 `measure_only`（任务书要的是 OpenCV **GPU** 比对，按 §5.10 只做 NPU 实测），
+  并把「只实测未对比」「边界是直供推断值」两条如实写进 `task_pr_gaps`。
+- 挂账（本轮**没修**）：「性能」dim 是写死在用例模板里的（`gen_cases.py` 两处 `["功能","精度","性能"]`），
+  与 spec 是否声明 `perf` 无关 → 终态 `PASS(无性能要求)` 对任何用标准模板的算子实际不可达。
+  改它会动到所有既有 caseset 的字节和一批测试，与本轮「既有通路零影响」冲突，故只挂账不动。
+
 ## 2026-08-03
 
 - GaussianBlur **首次真机全链跑通**（CP-A → CP-B0 → CP-C0 → 用例 → CP-C 真机信任门 → run_workflow

@@ -25,6 +25,7 @@ import render_acceptance_markdown  # noqa: E402
 import validate_acceptance_state as gate  # noqa: E402
 import verify_aclnn_harness  # noqa: E402
 import content_address  # noqa: E402
+import perf_mode  # noqa: E402
 
 # —— C5 · 验收 / 非验收两套产物的口径（唯一定义处）——————————————————————————
 _DEV_GRADE = "development"              # 照 catlass_adapter.run_catlass_mock
@@ -81,20 +82,31 @@ _PERF_PLAN_KEYS = ("warmup", "repeat", "torch_baseline", "aclnn_baseline", "op_d
 
 
 def _emit_perf_plan(spec, work):
-    """据 `spec.perf` 落 `work/_perf_plan.json`；spec 没声明可采集的基线 → 不落（= 本次不采性能）。
+    """据 `spec.perf` 落 `work/_perf_plan.json`；不需要采集端配合 → 不落（= 本次不采性能）。
 
-    触发条件 = `perf.baseline` 在真实基线取数登记表里**且**该来源需要采集端配合（当前 `torch_npu`）。
+    两个触发条件（互斥）：
+      · `ratio_gated` —— `perf.baseline` 在真实基线取数登记表里（当前 `torch_npu` / `aclnn_builtin`）；
+      · `measure_only` —— 只要声明了 `perf`（§5.10）。采集端据 `mode` 只跑 custom 侧 msprof，
+        **不采、不要、不等任何 baseline**；计划里因此**没有** `baseline` 键。
     ⚠ 这里**不**做「能不能采」的判断（那是采集端的事），也**不**写任何阈值——计划只回答「采什么、怎么采」。
     """
     perf = spec.get("perf") or {}
-    if perf.get("baseline") not in _REAL_BASELINE_SOURCES:
+    mode = perf_mode.resolve_spec_mode(spec)
+    measure_only = perf_mode.is_measure_only(mode)
+    if not measure_only and perf.get("baseline") not in _REAL_BASELINE_SOURCES:
         return None
     plan = {k: perf[k] for k in _PERF_PLAN_KEYS if perf.get(k) is not None}
-    plan["baseline"] = perf["baseline"]
+    plan["mode"] = mode
+    if not measure_only:
+        plan["baseline"] = perf["baseline"]
     plan["op"] = spec.get("op")
     path = os.path.join(work, _PERF_PLAN_FILE)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(plan, f, ensure_ascii=False, indent=2)
+    if measure_only:
+        print(f"[Task2 perf] 采集计划 → {_PERF_PLAN_FILE}（mode=measure_only：只采 NPU 侧 msprof "
+              f"kernel-only 实测，无基线侧）")
+        return path
     config_key = "torch_baseline" if plan["baseline"] == "torch_npu" else "aclnn_baseline"
     print(f"[Task2 perf] 采集计划 → {_PERF_PLAN_FILE}（baseline={plan['baseline']}，"
           f"{config_key}={'有' if plan.get(config_key) else '**缺**（采集端将 fail-closed）'}）")
@@ -144,9 +156,21 @@ def _stamp_dev(obj, is_acceptance, grade):
     return obj
 
 
+# —— §5.10 measure_only 的两个终态串（人读 overall）。**措辞红线**：不得出现任何会被读成
+#    「性能通过 / 已达标」的字样——它就是「测了，没判」。前缀 PASS 指的是**精度维**裁决，
+#    括号里逐字说明性能维只实测、未裁决。
+_MEASURED_ONLY_OVERALL = "PASS(性能仅实测未裁决)"
+_MEASURED_ONLY_STATE = "PASSED_PRECISION_PERF_MEASURED_ONLY"
+_MEASURE_INCOMPLETE_OVERALL = "BLOCKED(measure_only 性能实测未完成)"
+_MEASURE_INCOMPLETE_STATE = "BLOCKED_PERF_MEASUREMENT_INCOMPLETE"
+
 # T6/T8：人读 overall → 机读 canonical 状态（task3 状态机词汇）。
 _STATE_MAP = {
     "PASS": "PASSED", "PASS(无性能要求)": "PASSED",
+    # §5.10：精度维定裁决、性能维只实测未裁决。**刻意不复用 `PASSED`**——机读方必须能一眼
+    # 分出「性能比过阈值的通过」与「性能压根没判的通过」，否则这两件事在下游合流即失真。
+    _MEASURED_ONLY_OVERALL: _MEASURED_ONLY_STATE,
+    _MEASURE_INCOMPLETE_OVERALL: _MEASURE_INCOMPLETE_STATE,
     "FAIL(精度)": "FAILED_PRECISION", "NEEDS_REVIEW": "NEEDS_REVIEW",
     "PASSED_WITH_RISK": "PASSED_WITH_RISK",
     "PASSED_WITH_GAPS": "PASSED_WITH_GAPS",   # C4：精度全过但任务书要求的 dtype 有差额挂账
@@ -188,8 +212,8 @@ def _exit_code(overall):
       0 = 干净 PASS / PASS(无性能要求)；
       2 = PASSED_WITH_RISK（requires_human_cp、CI 挂起转人工、非自动合并/非自动失败）；
       1 = 其余（FAIL 精度 / 性能未达 / BLOCKED_* / NEEDS_REVIEW）。"""
-    if overall in ("PASS", "PASS(无性能要求)"):
-        return 0
+    if overall in ("PASS", "PASS(无性能要求)", _MEASURED_ONLY_OVERALL):
+        return 0                  # §5.10：性能维按任务书口径本就不产裁决，阻塞它没有依据
     if overall in ("PASSED_WITH_RISK", "PASSED_WITH_GAPS"):
         return 2       # 挂起转人工——非自动失败、非干净 PASS。
                        # PASSED_WITH_RISK=任务书宽于平台底线；PASSED_WITH_GAPS=任务书要求的 dtype 算子没实现（C4）。
@@ -243,6 +267,17 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     spec = json.load(open(spec_path, encoding="utf-8"))
     if not isinstance(spec, dict):
         raise SystemExit("spec 须为 JSON object")
+    # §5.10：性能口径在**跑任何东西之前**定死并 fail-closed 校验（measure_only 与
+    # baseline/target_ratio 互斥）。放这么早是为了「配置自相矛盾」停在零副作用处。
+    try:
+        perf_mode_name = perf_mode.resolve_spec_mode(spec)
+    except ValueError as ex:
+        raise SystemExit(f"spec.perf 配置非法：{ex}")
+    measure_only = perf_mode.is_measure_only(perf_mode_name)
+    if measure_only and gpu_baseline is not None:
+        raise SystemExit(
+            "perf.mode='measure_only' 与 --gpu-baseline 自相矛盾："
+            "只测不比的口径下不消费任何外部标杆。要做 GPU 对比请改回 ratio_gated。")
     mode = _resolve_mode(spec, mode)
     if mode not in repo_adapter.MODES:  # 先校验，避免 Task1 已跑再 KeyError、留半产物
         raise SystemExit(f"unknown mode {mode!r}, supported={list(repo_adapter.MODES)}")
@@ -399,6 +434,9 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
                   "summary": {"perf_cases": 0, "cases_scored": 0, "达标": 0, "blocked": 0,
                               "status": "skipped_precision_gate"}}
         report = perf_compare.attach_skipped_shape_plan(report, caseset)
+        if measure_only:      # 精度 fail-fast 时也如实标口径，免得这份报告被当成 ratio 通路读
+            report["perf_mode"] = perf_mode.MODE_MEASURE_ONLY
+            report["notes"].append(perf_mode.MEASURE_ONLY_NOTE)
         _dump(_stamp_dev(report, is_acceptance, grade), "perf_report.json")
         print(f"[Task3 perf_compare] 跳过（精度={o['verdict']} 未全过 → fail-fast）")
     else:
@@ -408,7 +446,12 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
                       or spec.get("perf", {}).get("baseline") in ("gpu", "gpu_external"))
         expect_source = "gpu_external" if expect_gpu else None
         baseline_blocked_status = None  # gb-9：标杆被判废时携专门挂起码（区分「口径不可比」vs「标杆无效」vs「缺标杆」）
-        if gpu_baseline is not None:  # T8：解析外部 GPU 标杆(consumer 侧)；hard error→baseline None→挂起(非 PASS)
+        if measure_only:
+            # §5.10 只测不比：**一条基线取数路径都不走**（不读 _real_baseline.json、不解析 GPU
+            # 标杆、不落 mock、更不进 _real_baseline_or_blocked）。baseline 恒 None 是这条路的
+            # **正常态**，不是「缺标杆」——所以必须排在下面所有取基线分支之前。
+            baseline = None       # gpu_baseline 冲突已在函数入口 fail-closed 拒过（零副作用处）
+        elif gpu_baseline is not None:  # T8：解析外部 GPU 标杆(consumer 侧)；hard error→baseline None→挂起(非 PASS)
             import gpu_baseline as gpubl
             baseline, parse_report = gpubl.parse_gpu_baseline(gpu_baseline, caseset)
             _dump(parse_report, "gpu_baseline_parse_report.json")
@@ -456,7 +499,10 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     #      （dev-doc/oprunway-todo-plans.md #6 记的正是「mock 跑穿门被误当 NPU evidence」这条风险）。
     #   自检仍卡 caseset 自洽 / 跑子集 / perf 产物完整——CP-B 想要的那点自检价值一分没少。
     gate_stages = ["task1", "task2"] if is_acceptance else ["task1"]
-    if precision_ok and (ps.get("perf_cases", 0) > 0 or spec.get("perf", {}).get("baseline")):
+    # measure_only 也必须挂 task3 门：万一它一条性能 case 都没产出，要的是门报 `no_perf_cases`
+    # 并 BLOCKED，而不是「没有性能用例 → 静默跳过门 → 干净 PASS」（那正是 fail-open）。
+    if precision_ok and (ps.get("perf_cases", 0) > 0 or spec.get("perf", {}).get("baseline")
+                         or measure_only):
         gate_stages.append("task3")
     gate_errs = {}
     for st in gate_stages:
@@ -473,6 +519,13 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     # 精度 verdict ∈ {pass, fail, needs_review, passed_with_risk}；放行只看 acceptance（ADR 0005）。
     perf_pass = (ps.get("status") == "ok" and ps.get("blocked", 0) == 0
                  and ps.get("perf_cases", 0) == ps.get("达标", 0))
+    # §5.10：measure_only 的「性能维完成」= 每条性能 case 都真有 msprof 实测，**与达标无关**
+    # （这里没有达标这件事）。它只表示「性能维不阻挡 overall」，绝不表示「性能通过」。
+    perf_measured_only = (measure_only
+                          and ps.get("status") == perf_mode.STATUS_MEASURED
+                          and ps.get("blocked", 0) == 0
+                          and ps.get("perf_cases", 0) > 0
+                          and ps.get("perf_cases", 0) == ps.get("measured", -1))
     ov = verdict["overall"]
     prec = ov["verdict"]
     requires_human_cp = False       # T6：PASSED_WITH_RISK 走人工 CP（挂起转人工，非自动合并/失败）
@@ -496,9 +549,12 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         overall = "FAIL(精度)"
     elif prec == "needs_review":
         overall = "NEEDS_REVIEW"
-    elif not perf_pass:                                  # 精度 pass/passed_with_risk，但性能有问题
+    elif not (perf_pass or perf_measured_only):          # 精度 pass/passed_with_risk，但性能有问题
         st = ps.get("status")
-        if st == "exception":                            # T6 小shape例外：门已过(有图+交叉一致)→放行需人核
+        if measure_only:
+            # §5.10：这条路上没有「未达成」这回事（没设过目标）。唯一的失败形态是**实测没采全**。
+            overall = _MEASURE_INCOMPLETE_OVERALL
+        elif st == "exception":                          # T6 小shape例外：门已过(有图+交叉一致)→放行需人核
             overall, requires_human_cp = "PASSED_WITH_RISK", True
         elif st == "blocked_wait_gpu_benchmark":         # T8 缺外部 GPU 标杆：正规挂起、非 fail
             overall = "BLOCKED_WAIT_GPU_BENCHMARK"
@@ -522,11 +578,16 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         overall, requires_human_cp = "PASSED_WITH_RISK", True
     elif prec == "passed_with_gaps":                     # dtype 挂账、性能达标 → 人工 CP（C4）
         overall, requires_human_cp = "PASSED_WITH_GAPS", True
+    elif perf_measured_only:      # §5.10：精度 pass，性能**只实测未裁决**——绝不落笼统的 "PASS"
+        overall = _MEASURED_ONLY_OVERALL
     else:                                                # prec == pass 且性能达标
         overall = "PASS"
     state = _canonical_state(overall, ps)   # T6/T8：机读 canonical 状态（人读串仍 overall）
     exit_code = _exit_code(overall)         # T5：退出码枚举 0 干净 / 2 PASSED_WITH_RISK / 1 其余
-    print(f"[总体] 精度={prec} · 风险 {ov['counts'].get('risk', 0)} · 性能达标 {ps.get('达标')}/{ps.get('perf_cases')}"
+    # 措辞红线（§5.10）：measure_only 下**一个「达标」字都不许打印**——那一栏根本没判过。
+    perf_line = (f"性能实测 {ps.get('measured')}/{ps.get('perf_cases')}（未做标杆对比）"
+                 if measure_only else f"性能达标 {ps.get('达标')}/{ps.get('perf_cases')}")
+    print(f"[总体] 精度={prec} · 风险 {ov['counts'].get('risk', 0)} · {perf_line}"
           f"({ps.get('status')}) · {gate_label}={'PASSED' if gate_passed else 'FAILED'} → {overall}"
           + (" · requires_human_cp（挂起转人工）" if requires_human_cp else ""))
 
@@ -551,6 +612,11 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
                "gate": {"passed": gate_passed, "errors": gate_errs},
                "precision_verdict": prec, "perf_status": ps.get("status"),
                "three_layer": three_layer}
+        if measure_only:
+            # 只在 measure_only 下多写这两项（ratio_gated 的 acceptance.json 逐字节不变）。
+            # 机读方据此知道「性能维本轮没有裁决」，而不是从 overall 字符串里猜。
+            acc["perf_mode"] = perf_mode.MODE_MEASURE_ONLY
+            acc["perf_note"] = perf_mode.MEASURE_ONLY_NOTE
         if human_cp is not None:
             acc["human_cp"] = human_cp
         if gpu_prov is not None:
@@ -580,6 +646,8 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
                "precision_check": prec,         # mock 下 out=golden.copy()，这个 "pass" 是构造出来的
                "perf_status": ps.get("status"),
                "requires_human_cp": requires_human_cp,
+               **({"perf_mode": perf_mode.MODE_MEASURE_ONLY,
+                   "perf_note": perf_mode.MEASURE_ONLY_NOTE} if measure_only else {}),
                "selfcheck": {"stages": gate_stages, "passed": gate_passed, "errors": gate_errs,
                              "note": "管路自检（caseset 自洽 / 防跑子集 / perf 产物完整），"
                                      "**非**验收门——验收门只对真机 evidence 有意义"},
