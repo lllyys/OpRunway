@@ -25,6 +25,17 @@
   （`golden_reference` 任务书三处自相矛盾 CPU/GPU、`performance_baseline` 二选一且无准确 API、
   `performance_metric_scope` 无 kernel-only/端到端与统计口径）、待确认 1 项（`special_semantics` 未规定 NaN/Inf）。
   这是**任务书本身的缺口**，不是工具缺陷。
+- 补上「必选交付件」这条一直没人守的缝（GaussianBlur 实测暴露）：`delivery_scope` 除引文外
+  还要产机器可读的 `deliverables` 清单（逐件 id/name/required|optional/引文）；脚本按契约受控
+  词表扫任务书，每一处标记都必须进清单或写进带 rationale 的显式豁免，漏一处就不得判 `satisfied`；
+  把必选写成可选也当场 BLOCKED。另加确定性对账脚本 `reconcile_deliverables.py`：清单 × `pr_facts`
+  逐条核必选件归宿，**不做模糊名字匹配**——归宿由人/编排层在 `deliverable_mapping.json` 里逐条指认，
+  脚本只验证（路径逐字命中改动文件或目录前缀、符号逐字出现在 key_files），认不出、验不上、没指认的
+  一律落成结构化缺口，绝不静默放行。真实素材复跑：漏掉「OpenCV C++ 适配层必选」当场 BLOCKED，
+  补齐清单后对账把「必选层 PR 没交付」落成 `missing_in_pr` 缺口。
+- `doc/` 改名 `dev-doc/`：这个目录放的是设计稿、TODO、handoff、实测记录，是开发过程产物，
+  不是面向使用者的产品文档。50 个文件 197 处引用同步更新；`canon/logbook/` 下 27 个文件
+  刻意不改（BUREAU.md 明令 append-only）。
 - GaussianBlur 验收通路按计划 v2 落地：aclnn_py 侧补齐 `aclIntArray` 参数、**stage2 真解析**
   （此前把非 4 参 stage2 静默错调，属 5.8 最危险的一类）、输出方向改以 stage2 的 const 限定符为准；
   新增 `local_snapshot` 取源形态（上游确无该 PR，`head_sha` 落 null，不合成 hex）；

@@ -65,7 +65,8 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 常用脚本：
 
 - `fetch_source.py`：任务书/PR → 中立事实包；
-- `validate_taskdoc_input.py`：任务书输入校验门（18 项，抽 spec 之前）；
+- `validate_taskdoc_input.py`：任务书输入校验门（18 项 + 交付件清单，抽 spec 之前）；
+- `reconcile_deliverables.py`：任务书必选交付件 ↔ PR 实际交付物对账（不做模糊名字匹配，认不出即落缺口）；
 - `gen_cases.py <spec> --dry-run`：plan-only 用例计划自检，不产裁决；
 - `check_golden.py`：golden 来源契约；
 - `preflight_aclnn.py`：`aclnn_py` 静态接口预检；

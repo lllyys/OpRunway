@@ -73,10 +73,65 @@ index 输出是不是也跟着变，两种读法会产出不同 golden」才有�
 明确 = 算子名 + 所属仓/模块 + 任务或需求编号三者齐全，且能唯一定位。
 典型不满足：只有算子名没有仓；编号写「见看板」；一份任务书里多个算子但没说各自编号。
 
-### 交付范围（must）
-明确 = 说清本次**新增/优化/修复什么**，且**哪些明确不在范围内**。
+### 交付范围（must · 唯一带机器可读清单的项）
+明确 = 说清本次**新增/优化/修复什么**、**哪些明确不在范围内**，
+**并把必选/可选交付件逐件落成 `deliverables` 清单**。
 「不在范围内」这半句常缺——只写了要做什么、没划边界，判 `ambiguous`：
 下游无法判断"没实现反向"是缺陷还是本来就不做。
+
+⚠ **「验收基准」和「交付件」是两回事，任务书常在同一句话里同时出现。**
+「以上游 X 的功能/精度/性能为唯一验收基准」说的是拿什么当**参照物比对**；
+「X 层为必选交付项」说的是 **PR 必须包含什么**。同一个名字可以既是基准又是交付件，
+也可以只是其中之一。判这项时两个问题分开答，别把基准当成交付件、也别因为它是基准
+就以为不用交付。
+
+#### `deliverables`：交付范围的机器可读半边
+
+`quotes[]` 回答「任务书怎么说」，`deliverables[]` 回答「于是本次必须交付哪几件、哪几件可选」。
+每条至少四个字段：
+
+```json
+{"id": "opencv_cpp_layer", "name": "OpenCV C++ 适配层 cv::GaussianBlur",
+ "requirement": "required",
+ "quotes": [{"text": "### 1. OpenCV C++ 层接口（**必选，逐字对齐**）"}]}
+```
+
+- `id`：`[A-Za-z0-9_.-]` 短标识，下游对账工件按它逐条指认归宿；
+- `name`：交付件名称或层级，写给人看；
+- `requirement`：受控词表 `required` / `optional`；
+- `quotes[]`：支撑该判定的任务书**逐字原文**，规则同 18 项的引文（须真出现、须够长）。
+  一条交付件可以引多句（分层图一句、章节标题一句、注意事项一句都算数）。
+
+**脚本会按契约的受控标记词表（`必选` / `必须交付` / `须交付` / `必交付` / `可选` / `选做`）
+扫一遍任务书原文，每一处出现都必须落在某条 `deliverables[].quotes` 或
+`deliverable_scan_exemptions[].quote` 的引文范围内。** `delivery_scope` 判 `satisfied`
+却还有没落进去的标记 → 当场 BLOCKED。这条挡的是实测过的一条路：摘一句
+「aclnn 为必选交付项」就把交付范围判过，而任务书另外三处「必选」（适配层、kernel、
+接口分层）一句没抽——于是下游拿不到任何可对账的必选交付件清单，
+「PR 少交付了一整层」全流程无人发现，最后只能靠人手写进 `task_pr_gaps`，而人手写就会写错。
+
+**清单与标记的一致性也是机械校的**：某条交付件的引文里只出现「必选」类标记，
+却把 `requirement` 填成 `optional`（或反过来），当场 BLOCKED。一句话里必选可选都有
+（「A 必选、B 可选」）时不设约束，那种句子本来就得靠判断。
+
+#### 不是交付件的标记：显式豁免，不许静默跳过
+
+有些「可选」修饰的不是交付件，是流程里的一步（如「GetWorkspaceSize →（可选 preprocess）
+→ 执行入口」）。这类写进 `deliverable_scan_exemptions`，**必须附 rationale 说清
+为什么它不是交付件**：
+
+```json
+{"quote": {"text": "GetWorkspaceSize →（可选 preprocess）→ aclnnGaussianBlur"},
+ "rationale": "这处「可选」修饰的是调用流程里的一个中间步骤，不是交付件"}
+```
+
+豁免会原样进收据摆给编排层与人复核。**它是留痕的判断，不是免检通道**——
+把每一处标记都豁免掉脚本挡不住，但会在收据里一条不落地摆出来。
+
+⚠ 词表按「交付件定性」收窄，刻意**不**收 `必须` / `须` 这类泛义务词（任务书里它们大量
+修饰行为要求，收进来只会把每份任务书逼成人工豁免堆）。任务书若用词表外的写法写
+「必须提供 X」，本门扫不到它——那不表示已覆盖，而是这道门对该写法没生效，
+清单仍须靠判断补全，确有普遍新写法时改契约词表（数据，不是代码）。
 
 ### API 与 overload（must）
 明确 = 逐个列出要交付的接口、调用形态、全部 overload（有 `dim`/无 `dim`、in-place 变体等）。
@@ -167,6 +222,15 @@ dtype 允许两种明确形态：**逐字枚举**，或**给出可绑定的集�
   "perf_required": true,
   "perf_evidence": [{"text": "<任务书里那句性能要求的逐字原文>"}],
   "perf_required_rationale": "<perf_required=false 时必填>",
+  "deliverables": [
+    {"id": "<短标识>", "name": "<交付件名称/层级>",
+     "requirement": "required",
+     "quotes": [{"text": "<支撑该判定的逐字原文>"}]}
+  ],
+  "deliverable_scan_exemptions": [
+    {"quote": {"text": "<那处标记的逐字原文>"},
+     "rationale": "<为什么这处标记不是交付件>"}
+  ],
   "items": [
     {"id": "operator_identity", "status": "satisfied",
      "quotes": [{"text": "<逐字原文>"}]},
@@ -192,10 +256,56 @@ dtype 允许两种明确形态：**逐字枚举**，或**给出可绑定的集�
 
 - `items` 必须**恰好 18 项**、id 与 `acc-common/taskdoc_validation_contract.json` 逐项对齐，
   不多不少不重复——脚本按契约核对，缺一个就是 BLOCKED。
+- `deliverables` 必须**显式给出**（任务书通篇没有任何交付定性标记时才允许是空数组）；
+  `deliverable_scan_exemptions` 可缺省为空。
 - `source_facts_digest` 取 CP-A 已落盘的 `source_facts.json` envelope 的 `digest` 字段。
 - `decisions` **一律留空数组**：那是 primary 拿到阻断清单、问过用户之后才追加的，
   subagent 不得自行写入，也不得替用户判"这项其实不重要"。
 
 回给 orchestrator 的结构化摘要固定含：18 项各自 status、判 `ambiguous`/`missing` 的项及
-`rationale`、条件项的适用性判断与依据、`perf_required` 及依据。**不含任何自行宣告的通过与否**——
-阻断/待确认清单由 `validate_taskdoc_input.py` 机械派生，本 agent 不预判、也不替用户决策。
+`rationale`、条件项的适用性判断与依据、`perf_required` 及依据、`deliverables` 里的
+必选/可选件各几条。**不含任何自行宣告的通过与否**——阻断/待确认清单由
+`validate_taskdoc_input.py` 机械派生，本 agent 不预判、也不替用户决策。
+
+---
+
+## 5 · 交付件 ↔ PR 对账（本步之后、`task_pr_gaps` 之前）
+
+CP-B0 只读任务书、`fetch_source` 只读 PR，两者在此之前从不碰面——「PR 少交付了一个必选层」
+于是全流程无人发现。`acc-common/reconcile_deliverables.py` 补的就是这次碰面：
+
+```bash
+python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/reconcile_deliverables.py \
+  --root <workdir> --out deliverable_reconciliation.json
+```
+
+它消费 CP-B0 的 `deliverables` 清单 + CP-A 的 `pr_facts.json`，产出机器可读的
+covered / gaps。**这是确定性对账，不是判定**（`acceptance_verdict` 恒 null）。
+
+**它不做模糊名字匹配。** 「OpenCV C++ 适配层」这类描述没法可靠地自动映射到文件，猜错的
+代价是「静默判成已覆盖」，比不判更坏。所以归宿要由编排层或人在 `<workdir>/deliverable_mapping.json`
+里**逐条指认**，脚本只负责**验证**：
+
+```json
+{"schema": "oprunway.deliverable_mapping", "schema_version": 1,
+ "taskdoc_bytes_sha256": "<收据 bindings 同名字段>",
+ "taskdoc_validation_digest": "<收据 bindings.validation_digest>",
+ "pr_facts_sha256": "<pr_facts.json 原始字节 sha256>",
+ "mappings": [
+   {"id": "aclnn_layer", "disposition": "present",
+    "paths": ["<PR 改动文件或目录>"], "symbols": ["<key_files 里逐字出现的符号>"]},
+   {"id": "opencv_cpp_layer", "disposition": "absent",
+    "rationale": "通读全部改动文件，没有任何该层的源文件或接入点"}]}
+```
+
+- `present` 必须给至少一条 `paths` 或 `symbols`；路径要逐字命中 `changed_files`
+  或作为目录前缀命中其下某个改动文件，符号要逐字出现在某个 `key_files` 正文里。
+  **验不上就是缺口，不是通过**（`key_files` 只是 PR 的部分文件，查不到只说明「没查到」，
+  不等于「PR 里没有」——所以交人复核）。
+- `absent` / `uncertain` 必须给 `rationale`，各自落成 `missing_in_pr` / `undetermined` 缺口。
+- 没写映射的必选件落 `unmapped` 缺口；三个绑定字段任一漂移即 BLOCKED（旧指认不得搬到新一轮）。
+- CP-B0 清单本身没覆盖全（`deliverable_inventory.complete=false`）时**绝不 RECONCILED**：
+  清单可能还漏着必选件，此时说「必选件全部有归宿」是假话。
+
+退出码：`0` RECONCILED / `2` GAPS（交编排层或用户）/ `1` BLOCKED（结构性错误，重做）。
+gaps 是 `spec.task_pr_gaps` 的**事实来源**——别再靠人凭印象手写那一段。
