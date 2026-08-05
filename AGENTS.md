@@ -166,7 +166,7 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
   不是面向使用者的产品文档（那类若将来要有，另立目录，别混进来）；
 - 不写到工作区上层的 `markdown/`；
 - 每次落地后在 `dev-doc/oprunway-changes-brief.md` 顶部追加一两句倒序摘要；
-- 当前交接以 `dev-doc/oprunway-session-handoff-2026-08-04.md` 为准，旧 handoff 只作历史材料。
+- 当前交接以 `dev-doc/oprunway-session-handoff-2026-08-05.md` 为准，旧 handoff 只作历史材料。
 
 ### 5.7 push 前审修门
 
@@ -322,7 +322,7 @@ OpRunway/
 |---|---|
 | CP-A..E 状态机、硬门、subagent 契约 | `plugin/AGENTS.md` + `plugin/skills/acceptance-workflow/SKILL.md` |
 | 设计与数据契约 | `dev-doc/oprunway-design.md` |
-| 最新交接 | `dev-doc/oprunway-session-handoff-2026-08-04.md` |
+| 最新交接 | `dev-doc/oprunway-session-handoff-2026-08-05.md` |
 | 当前 TODO | `dev-doc/oprunway-todo.md` |
 | 改动流水 | `dev-doc/oprunway-changes-brief.md` |
 | 真机环境 | `dev-doc/oprunway-real-machine-environment.md` + `.oprunway/real-machine.env` |
@@ -336,6 +336,19 @@ OpRunway/
 - 真 NPU 已坐实：IsClose、Sign；Median PR6429 当前为 1152 例中 1101 PASS、51 FAIL，
   `gate.passed=true`、确定性裁决 `FAIL(精度)`；上一轮 1344-case 结果仅作历史记录；
   Elu/Silu 在 A5-950 有 18/18 非空例证据；
+- **GaussianBlur（ops-cv，2026-08-05，干净现场端到端）**：`runner_form=cpp_extension`、
+  `declared_source_form=local_source`（本地代码，非 PR）、`precision.case_source=taskdoc`
+  （用任务书自带的 169 条自测用例与 OpenCV CPU golden）。终态
+  `BLOCKED_GOLDEN_UNAVAILABLE`、`gate.passed=true`、`gate.errors={}`；
+  169 例中 164 例可判且**数值失败 0**，5 例因通道数超 OpenCV `CV_CN_MAX` 算不出真值 →
+  记为**结论空白**（非算子失败）；性能 16 条真实 kernel-only `npu_us`（`measure_only`，无标杆对比）。
+  ⚠ 这条**不是** PASS，是「能判的部分没查出问题、有一部分判不了」；
+- **本地代码是一等输入形态**（5.11 之外的另一条 2026-08-05 口径）：`--pr-snapshot` 即声明
+  `local_source`，`completeness=complete`、**无需**任何降级授权环境变量；
+  「声称测 PR 却只拿到快照」仍是降级、仍要显式授权，**未声明按最严的 `git_pr` 对待**；
+- **任务书自带用例集/golden 通路已闭环**：`taskdoc_links.py`（链接取材）→ `taskdoc_caseset.py`
+  （识别 + 接口映射 IR + golden wrapper）→ `gen_cases --taskdoc-caseset`。
+  任务书给了 case 就用它的，**识别不到即 BLOCKED，绝不回退自生成**；
 - Median 性能数据不是零数据：custom 50/50、`torch_npu` baseline 48/50 有效，48 对评分、35 对达到 `ratio >= 1.0`；
 - 2 个 BF16、`dim=1` baseline case 报 161002、custom 成功，按 baseline limitation 挂起，不归因 DUT；
 - 用户已确认 Median 任务书所称 `aclnnMedian` / `aclnnMedianDim` 小算子拼接版本等价于 Torch 对应接口，故性能 baseline 为同机 `torch_npu` 的 `torch.median`，无需另证等价、也不改为直调单个 ACLNN 接口；

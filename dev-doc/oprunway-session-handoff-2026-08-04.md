@@ -1,7 +1,10 @@
 # OpRunway 交接 · 2026-08-04
 
-> 取代 `dev-doc/oprunway-session-handoff-2026-07-26.md` 作为当前交接。旧的只作历史材料。
-> 本文写给**下一个 session 的自己**：先读这份，再读 `AGENTS.md`，然后照 §3 开工。
+> ⚠ **已被 `dev-doc/oprunway-session-handoff-2026-08-05.md` 取代，本文只作历史材料。**
+> §3 记的「下一轮五项泛化目标」**已于 2026-08-05 全部落地**，别照本文开工。
+>
+> 取代 `dev-doc/oprunway-session-handoff-2026-07-26.md` 作为当时的交接。
+> 本文写给下一个 session 的自己：先读这份，再读 `AGENTS.md`，然后照 §3 开工。
 
 ---
 

@@ -4,6 +4,17 @@
 
 ## 2026-08-05
 
+- **workflow 文档补上本轮实现（W7，只改文档）**。`acceptance-workflow/SKILL.md` 补四块此前完全没有
+  文档的事实：① 本地代码是**一等输入形态**（`declared_source_form`，档位判据从「有没有 PR head」
+  换成「实得是否与声明一致」，`local_source` 无需授权）；② 任务书自带用例集新档（`taskdoc_links.py`
+  → `taskdoc_caseset.py` → `precision.case_source=taskdoc`，识别不到就 BLOCKED、不回退自生成）；
+  ③ `golden_unavailable` 一等状态与终态 `BLOCKED_GOLDEN_UNAVAILABLE`（并加一条报告红线：
+  「164/169 通过」要写成「169 条里 5 条无从判定」）；④ cpp_extension 的收据两段式、
+  `ASCEND_CUSTOM_OPP_PATH` 自设、stage2 分派、逐 case 失败不中断。另新增 §1.1
+  **`work = <--out>/work` 口径**——这条隐式约定此前一个字都没有，放错会静默走空。
+  `acc-spec/references/taskdoc-to-spec.md` 补 `precision.case_source` / `aclnn_tensor_format` /
+  `runner_form` 三值词表 + 新 §1.6；`acc-precision/SKILL.md` 补真值缺席两终态与 §5.11 解析规则。
+  交接换版到 `oprunway-session-handoff-2026-08-05.md`（旧的顶部加指针），`AGENTS.md` 两处指针同步。
 - **`golden_unavailable` 的判据被写成「dims 契约违约」，改成写真原因**。GaussianBlur 干净
   现场实测：任务书 169 条里那 5 条 C>512 的用例，OpenCV 算不出 golden，gen_cases 按设计给它们
   写 `dims=["功能"]`；而 validator 的 `_dims_contract` 在 numerical 下要求必含「精度」——工具

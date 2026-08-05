@@ -16,6 +16,18 @@ description: OpRunway 验收精度维的方法论薄壳——oracle 分层（谁
 - **真值 = 更高精度参考**：CPU/numpy 高精度参考，或昇腾小算子拼接（生态标准的「单标杆」也认这条）。golden 由 `expect_func` / numpy 参考产，输出 dtype 须与算子输出一致。
 - **中间精度按算子实际累加**：golden 默认 fp32 中间→降输出 dtype（对齐 Ascend Cube fp32 累加），**但按算子实际累加/任务书参考精度调整**（敏感归约/大 K/抵消可能需更高中间精度）——见 canon `Primitive-to-case rule library`（canonical）§③元规则。
 - **单标杆 vs 双标杆**：生态标准单标杆不满足时，本可退 ATK 双标杆（`cv_fused_double_benchmark`）；⚠ **ATK 双标杆 fallback 当前 precision_policy 未实现、out-of-scope**（见 §能力边界）。
+- **任务书写 GPU 真值口径 → 一律解析为同族 CPU**（AGENTS.md §5.11，用户 2026-08-05 定的全局解析规则）：
+  实现是 `precision_policy.resolve_gpu_oracle_to_cpu(method_kind) → (resolved_kind, record|None)`，
+  按**方法族**查受控映射表（数据不是代码分支），非 GPU 族原样返回、`record=None`，对既有口径零影响；
+  **同族没有 CPU 对应 → 仍 fail-closed，不硬凑**，解析后的 `method_kind` 还得落在
+  `RUNNABLE_METHOD_KINDS` 内（当前 `{torch_cpu, numpy_cpu, opencv_cpu}`；`gpu_lib` **仍不在**里面——
+  别把解析层读成「GPU 现在能跑了」）。
+  ⚠ **与 §5.10 是两件事，别照搬**：5.10（性能）是**取消比较**，条款按「未验收」进 `task_pr_gaps`；
+  5.11（精度真值）是**解析口径**，条款**已被满足**、**不产生** gap。
+  ⚠ **解析必须留痕**：报告据 `record`（`rule` / `declared_in_taskdoc` / `resolved_to` / `basis`）写成
+  「原文写 GPU、按 §5.11 解析为同族 CPU」，**不得**直接写成「任务书要求 CPU」把这一步抹掉（5.8）。
+  ⚠ **阈值不随口径搬家**：任务书阈值若按 NPU↔GPU 误差预算给出，套到 CPU↔NPU 未必成立
+  （同一库的 CPU 与 GPU 实现并非逐位一致）。阈值来源与真值口径不同源时报告须标明、由人确认。
 
 ## 方法论二 · dtype 分层度量（哪套标准）
 
@@ -29,6 +41,23 @@ description: OpRunway 验收精度维的方法论薄壳——oracle 分层（谁
 3. **catlass 内置阈值**只作仓内 smoke/回归，**不作最终放行**。
 
 任务书目标**宽于**平台底线（acceptance 过、standard 平台底线不过）→ 不自动放行，overall `passed_with_risk` + 人工 CP（ADR 0005 / `Task 3 acceptance state machine` canonical）。
+
+## 方法论三 · 真值缺席的两种形态（都不是 fail，也都不是 pass）
+
+「算不出结论」与「算出了坏结论」是两件事，`validator` 把它们分开落终态——**报告不得把任一种说成通过**：
+
+| verdict | 含义 | 谁来解 |
+|---|---|---|
+| `blocked_golden_unauthorized` | 真值**来路不明**：golden 授权链（引文出自任务书快照）核不实 | 人把授权补齐 |
+| `blocked_golden_unavailable` | **压根没有真值**：参考实现算不出来（见证：通道数超 OpenCV `CV_CN_MAX`） | 换参考实现，或由人裁定这批 case 不在验收范围 |
+
+`golden_unavailable` 的处置口径（脚本侧已定，本 skill 只描述、不重判）：这类 case 的身份**仍进 caseset**、
+**允许无 golden 文件**、仍进 evidence，**其余 case 继续跑**；validator 把它们**移出 `fails`**，
+单列 `overall.golden_unavailable` / `counts.golden_unavailable`。
+⚠ **真实失败优先**——与真实精度失败并存时 verdict 仍是 `fail`（查得出的缺陷比查不动的空白更该被看见），
+而这份名单照样原样进产物。
+⚠ **报告红线**：「164/169 通过」**不等于**精度通过。据这份名单写成「169 条里 5 条无从判定」，
+不得拿能判的那部分替整份用例集背书（AGENTS.md 5.8）。
 
 ## ⚠ 脚本能力边界（诚实标注 HEAD 现状——不声称脚本做不到的判定）
 
