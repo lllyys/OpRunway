@@ -184,5 +184,63 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
                 D.run_perf_only(td, td)
 
 
+class CustomOppBindingTest(unittest.TestCase):
+    """自定义算子符号来源必须由收据绑定，而不是由「谁 source 过 set_env.bash」决定。
+
+    这批守的是一个**可复现性**缺陷：改动前 driver 从不设 `ASCEND_CUSTOM_OPP_PATH`，
+    干净现场里 164 条 case 全部 `execution_failed`（`aclnnXxx ... not in libopapi.so`），
+    而同一份 codegen 产物在人手动 source 过 vendor set_env.bash 的现场里却「跑通了」。
+    成功依赖了一份没有被任何产物记录的环境状态 = 结果不可复现。
+    """
+
+    _ENV = "ASCEND_CUSTOM_OPP_PATH"
+
+    def _lib(self, root, pkg="oprunway_witness"):
+        """按 CANN 自定义算子包布局造一个见证 `.so`：<root>/vendors/<pkg>/op_api/lib/…"""
+        pkg_dir = os.path.join(root, "vendors", pkg)
+        lib_dir = os.path.join(pkg_dir, "op_api", "lib")
+        os.makedirs(lib_dir)
+        lib = os.path.join(lib_dir, "libcust_opapi.so")
+        with open(lib, "wb") as dst:
+            dst.write(b"vendor")
+        return os.path.realpath(pkg_dir), os.path.realpath(lib)
+
+    def test_binds_package_derived_from_receipt_bound_library(self):
+        with tempfile.TemporaryDirectory() as td:
+            pkg, lib = self._lib(td)
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop(self._ENV, None)
+                self.assertEqual(D.bind_custom_opp_path(lib), pkg)
+                self.assertEqual(os.environ[self._ENV], pkg)
+
+    def test_layout_mismatch_is_fail_closed(self):
+        """路径结构对不上不猜一个根出来——猜错就等于测在别的包上还说不出来。"""
+        with tempfile.TemporaryDirectory() as td:
+            stray = os.path.join(td, "lib.so")
+            with open(stray, "wb") as dst:
+                dst.write(b"vendor")
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop(self._ENV, None)
+                with self.assertRaises(D.DriverError):
+                    D.bind_custom_opp_path(stray)
+
+    def test_conflicting_preexisting_value_is_fail_closed(self):
+        """环境里已指着别的 vendor 包 → 拒，不覆盖也不追加（防跑在别人的符号上）。"""
+        with tempfile.TemporaryDirectory() as td:
+            _pkg, lib = self._lib(td)
+            other, _ = self._lib(td, pkg="stale_other")
+            with mock.patch.dict(os.environ, {self._ENV: other}):
+                with self.assertRaisesRegex(D.DriverError, "不一致"):
+                    D.bind_custom_opp_path(lib)
+
+    def test_already_bound_to_same_package_is_accepted(self):
+        """人先 source 过本轮 vendor 的 set_env.bash（值含尾随冒号）→ 同一个包，放行并归一化。"""
+        with tempfile.TemporaryDirectory() as td:
+            pkg, lib = self._lib(td)
+            with mock.patch.dict(os.environ, {self._ENV: pkg + os.pathsep}):
+                self.assertEqual(D.bind_custom_opp_path(lib), pkg)
+                self.assertEqual(os.environ[self._ENV], pkg)
+
+
 if __name__ == "__main__":
     unittest.main()

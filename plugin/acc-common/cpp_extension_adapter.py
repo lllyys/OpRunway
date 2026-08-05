@@ -482,7 +482,8 @@ def validate_receipt(work, caseset):
             raise CppExtensionAdapterError(f"生成源码 {key} 缺失或摘要漂移")
 
     runtime = receipt.get("runtime")
-    required_runtime = ("torch_version", "torch_npu_version", "cann_version", "soc")
+    required_runtime = ("torch_version", "torch_npu_version", "cann_version", "soc",
+                        "ascend_custom_opp_path")
     if not isinstance(runtime, dict) or any(not runtime.get(k) for k in required_runtime):
         raise CppExtensionAdapterError(
             f"receipt.runtime 须完整包含 {required_runtime}")
@@ -513,6 +514,16 @@ def validate_receipt(work, caseset):
             or not vendor.get("library_sha256") or not vendor.get("symbols_owned"):
         raise CppExtensionAdapterError("receipt.vendor 缺库路径/摘要/符号归属")
     _require_sha("receipt.vendor.library_sha256", vendor["library_sha256"])
+    # 符号来源包 ↔ vendor ELF 必须同源：按同一条布局规则从 library_path 重算，与 driver
+    # 实际设进环境的那个值逐字对账。对不上 = 收据说不清「本轮的 aclnnXxx 从哪来」。
+    try:
+        derived_opp = vendor_build_receipt.custom_opp_path(vendor["library_path"])
+    except vendor_build_receipt.VendorBuildReceiptError as ex:
+        raise CppExtensionAdapterError(f"receipt.vendor.library_path: {ex}") from ex
+    if runtime.get("ascend_custom_opp_path") != derived_opp:
+        raise CppExtensionAdapterError(
+            "receipt.runtime.ascend_custom_opp_path 与 vendor.library_path 反推的自定义算子包"
+            f"不一致：收据记 {runtime.get('ascend_custom_opp_path')!r}，重算 {derived_opp!r}")
     _validate_vendor_build_receipt(vendor)
     return receipt
 

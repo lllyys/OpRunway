@@ -476,6 +476,10 @@ _STORAGE_ITEMSIZE = {
 _PERF_SHAPE_PROFILES = {
     "Atlas A3": {"metric": "sum_input_bytes", "small_max_bytes": 256 * 1024},
 }
+# 与 gen_cases.py 的 `_CASE_SOURCE_TASKDOC` / 性能候选池标识逐字一致；
+# 两侧是独立源，对不上就该 fail-closed（这里只复算，不放行）。
+_CASE_SOURCE_TASKDOC = "taskdoc"
+_CANDIDATE_POOL_TASKDOC = "taskdoc_precision_cases"
 
 
 def _gate_perf_case_policy(cs, cases, errs):
@@ -657,8 +661,104 @@ def _gate_perf_case_policy(cs, cases, errs):
     if new_selection_contract or (
             isinstance(sel, dict) and "excluded_degenerate_case_ids" in sel):
         expected_selection["excluded_degenerate_case_ids"] = excluded_degenerate_ids
+    # CS：`case_source=taskdoc` 档的候选池账本。gen_cases 在该档**多写两个键**
+    # （gen_cases.py:497-500 的 candidate_pool / excluded_golden_unavailable_case_ids），
+    # 而本门此前把 expected_selection 建成闭集再整体 `!=` 比 —— 于是任何 taskdoc 档用例集
+    # 都必然在这里报「身份不一致」，哪怕逐个身份字段都逐字相同。那是**门自己落后于产物契约**，
+    # 不是用例集有问题。这里按 gen_cases 的同一条规则**复算**再对账，而不是把这两个键放行：
+    #   · 非 taskdoc 档凭空多写这两个键 → 仍然不一致 → fail-closed；
+    #   · taskdoc 档漏写、或 golden_unavailable 名单被改动/漏记 → 仍然不一致 → fail-closed。
+    # 顺序也按 caseset 的 cases 顺序复算，与生产侧 append 的顺序一致（不做集合化比较，
+    # 「账本顺序被重排」同样应该看得见）。
+    if cs.get("case_source") == _CASE_SOURCE_TASKDOC:
+        expected_selection["candidate_pool"] = _CANDIDATE_POOL_TASKDOC
+        expected_selection["excluded_golden_unavailable_case_ids"] = [
+            c.get("id") for c in cases
+            if isinstance(c, dict)
+            and (c.get("expected") or {}).get("golden_status") == _EV_GOLDEN_UNAVAILABLE
+        ]
     if sel != expected_selection:
         errs.append("perf_case_policy.selection 与 caseset 实际性能/精度 case 身份不一致")
+
+
+def _golden_unavailable_ledger(cs, errs):
+    """caseset 顶层 `golden_unavailable` 台账 → `{case_id: 逐字原因}`；结构坏返回 None。
+
+    这是 `golden_unavailable` 从「case 自报的一个字段」升格成**一等状态**的佐证面：
+    单条 case 说「我没有 golden」不作数，caseset 还必须在顶层台账里点它的名、并写下参考实现
+    算不出 golden 的**逐字原因**。两处由生产侧独立写出，门在这里对账。
+    台账缺席（非 taskdoc 档的用例集根本没有这一节）→ 空台账，此时任何自报 `golden_unavailable`
+    都会因为「台账里没这条」被拒。
+    """
+    raw = cs.get("golden_unavailable")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or not isinstance(raw.get("cases"), list):
+        errs.append("caseset.golden_unavailable 台账结构非法（须为 {count, cases[]}）")
+        return None
+    ledger = {}
+    for item in raw["cases"]:
+        if (not isinstance(item, dict)
+                or not isinstance(item.get("case_id"), str) or not item["case_id"]
+                or not isinstance(item.get("reason"), str) or not item["reason"].strip()):
+            errs.append(f"caseset.golden_unavailable.cases 记录不完整（须含 case_id + 非空 reason）：{item!r}")
+            return None
+        ledger[item["case_id"]] = item["reason"]
+    if raw.get("count") != len(raw["cases"]) or len(ledger) != len(raw["cases"]):
+        errs.append("caseset.golden_unavailable 台账的 count / 条目数 / case 身份唯一性不自洽")
+        return None
+    return ledger
+
+
+def _gate_golden_unavailable_case(cid, case, exp, ledger, vrows, errs):
+    """`golden_unavailable` 是**一等状态**，不是「伪造的 na」——但豁免必须带反查。
+
+    改动前 gate_task1 压根不认识这个状态：它按 legacy 单输出分支要求 `golden_path` 必填，
+    又把这条 case 合法的 `compare=na` 当成「伪造 na 跳精度门」。BLOCKED 这个**结论**碰巧
+    是对的，**理由**却是假的——门在指控一份合规产物造假，看报告的人会去查根本不存在的伪造。
+    准确性本身就是纪律（AGENTS.md 5.8）。
+
+    现在门认这个状态，但只在下列反查全成立时才豁免 `golden_path` / 精度口径完整性：
+
+      1. caseset 顶层 `golden_unavailable` 台账里点了这条 case 的名；
+      2. case 自带**非空逐字原因**，且与台账那句**逐字相同**（两处独立写，对不上即不可信）；
+      3. 有 verdict 时，这条 case 在 `verdict.per_case` 里存在、功能维 fail、精度维不为 pass。
+         （没有 verdict = 还没跑到裁决，Task2 的 `_gate_task2_unjudgeable` 会再核一遍。）
+
+    另加两条自洽：`golden_path` 必须确实没有（自称没真值却挂着真值文件 = 自相矛盾），
+    且这条 case **不得**留在精度维——没有 golden 就没有可判的精度，把它留在分母里只会让
+    「判不了」被平均成「还行」。任一不满足，仍按伪造拒。
+    """
+    if ledger is None:                      # 台账结构已坏，错误已记；不在这里重复报
+        return
+    if cid not in ledger:
+        errs.append(f"{cid}: 自称 expected.golden_status=golden_unavailable，但 caseset 顶层"
+                    "golden_unavailable 台账未点名这条 case——无佐证的一等状态不予豁免精度门")
+        return
+    reason = exp.get("golden_unavailable_reason")
+    if not isinstance(reason, str) or not reason.strip():
+        errs.append(f"{cid}: golden_unavailable 无逐字失败原因（说不出为什么算不出 golden，不予豁免）")
+    elif reason != ledger[cid]:
+        errs.append(f"{cid}: golden_unavailable 的失败原因与 caseset 台账记的不一致"
+                    f"（case={reason!r} 台账={ledger[cid]!r}）")
+    if exp.get("golden_path"):
+        errs.append(f"{cid}: 自称 golden_unavailable 却带 golden_path={exp.get('golden_path')!r}"
+                    "（既然有真值就该判精度，自相矛盾）")
+    if exp.get("compare") != "na":
+        errs.append(f"{cid}: golden_unavailable 的 expected.compare 须为 na，"
+                    f"得 {exp.get('compare')!r}（没有真值却声明了比较口径）")
+    if "精度" in (case.get("dims") or []):
+        errs.append(f"{cid}: golden_unavailable 却仍留在精度维——没有 golden 就判不了精度，"
+                    "留在精度分母里等于把「判不了」摊薄成通过")
+    if vrows is None:                       # 尚无 verdict（Task1 阶段）：该条由 gate_task2 复核
+        return
+    row = vrows.get(cid)
+    if row is None:
+        errs.append(f"{cid}: golden_unavailable 但 verdict.per_case 无此 case"
+                    "（算不出真值的 case 没进裁决 = 静默跳过）")
+    elif row.get("功能") != "fail" or row.get("精度") == "pass":
+        errs.append(f"{cid}: golden_unavailable，裁决却是 功能={row.get('功能')!r}/"
+                    f"精度={row.get('精度')!r}——没有可比结果的 case 不得记成通过")
 
 
 def gate_task1(d, errs):
@@ -671,6 +771,13 @@ def gate_task1(d, errs):
     if not isinstance(cases, list) or not cases:
         errs.append("caseset 无用例或 cases 非列表")
         return
+    gu_ledger = _golden_unavailable_ledger(cs, errs)   # 一等状态的佐证台账（结构坏 → None）
+    vd = _load(d, "verdict.json")                      # 还没跑到裁决就没有；有就必须对得上
+    if vd == "__BAD__":
+        errs.append("verdict.json 解析失败（坏 JSON）")
+    vrows = ({r.get("case_id"): r for r in (vd.get("per_case") or [])
+              if isinstance(r, dict)} if isinstance(vd, dict) else None)
+    gu_seen = set()
     ids = []
     for i, c in enumerate(cases):
         if not isinstance(c, dict):
@@ -688,6 +795,13 @@ def gate_task1(d, errs):
             # 多输出契约：口径/golden 逐输出落在 `expected.outputs[]`，顶层无 golden_path/threshold/policy。
             # 逐输出校完整性（结构不合法即 fail-closed），legacy 单输出分支**一行不走**（向后兼容硬约束）。
             _mo_caseset_outputs(cid, exp, errs)
+            if not c.get("dims"):
+                errs.append(f"{cid}: 无 dims（功能/精度/性能维度）")
+            continue
+        if exp.get("golden_status") == _EV_GOLDEN_UNAVAILABLE:
+            # 一等状态：无 golden、无精度口径**是合规形态**，但豁免须带反查（见函数 docstring）。
+            _gate_golden_unavailable_case(cid, c, exp, gu_ledger, vrows, errs)
+            gu_seen.add(cid)
             if not c.get("dims"):
                 errs.append(f"{cid}: 无 dims（功能/精度/性能维度）")
             continue
@@ -713,6 +827,13 @@ def gate_task1(d, errs):
     dup = [k for k, v in Counter(ids).items() if v > 1]
     if dup:
         errs.append(f"caseset 有重复 case_id: {dup}")
+    if gu_ledger:
+        # 反方向：台账点了名、cases[] 里却没有这条 / 没标这个状态 → 台账与用例对不上，
+        # 「有几条算不出 golden」这件事就成了两份互相矛盾的说法。
+        orphan = sorted(set(gu_ledger) - gu_seen)
+        if orphan:
+            errs.append(f"caseset.golden_unavailable 台账点名 {orphan}，但这些 case 在 cases[] 中"
+                        "不存在或未标 expected.golden_status=golden_unavailable")
     cov = Counter(_case_key(c, errs) for c in cases if isinstance(c, dict))
     print(f"  用例数={len(cases)} | (dtype,shape) 覆盖={dict(cov)}")
     _gate_dtype_coverage(cs, errs)   # Q7：任务书 dtype 全集 vs 实测覆盖（未声明→不阻塞）
@@ -855,9 +976,26 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs):
     runtime = receipt.get("runtime")
     if not isinstance(runtime, dict) or any(
             not runtime.get(k) for k in
-            ("torch_version", "torch_npu_version", "cann_version", "soc")):
+            ("torch_version", "torch_npu_version", "cann_version", "soc",
+             "ascend_custom_opp_path")):
         errs.append("cpp_extension runtime provenance 不完整")
     vendor = receipt.get("vendor")
+    # 符号来源包必须与本轮 vendor ELF 同源。driver 在任何算子调用前把
+    # `ASCEND_CUSTOM_OPP_PATH` 设成从 vendor `.so` 反推的那个包（不再依赖谁 source 过
+    # vendor 的 set_env.bash——那正是上一轮「跑通但复现不出来」的根因）；本门按同一条规则
+    # 从 `vendor.library_path` 重算，与收据记下的生效值逐字对账。对不上 = 说不清这一轮的
+    # aclnnXxx 由谁提供，fail-closed（AGENTS.md 5.8）。
+    if isinstance(runtime, dict) and isinstance(vendor, dict):
+        try:
+            derived_opp = vendor_build_receipt.custom_opp_path(vendor.get("library_path"))
+        except vendor_build_receipt.VendorBuildReceiptError as ex:
+            errs.append(f"cpp_extension vendor.library_path 反推自定义算子包失败：{ex}")
+        else:
+            if runtime.get("ascend_custom_opp_path") != derived_opp:
+                errs.append(
+                    "cpp_extension runtime.ascend_custom_opp_path 与 vendor.library_path 反推的"
+                    f"自定义算子包不一致：收据记 {runtime.get('ascend_custom_opp_path')!r}，"
+                    f"重算 {derived_opp!r}——本轮符号来源不可核")
     vendor_sha = vendor.get("library_sha256") if isinstance(vendor, dict) else None
     symbols_owned = vendor.get("symbols_owned") if isinstance(vendor, dict) else None
     if (not isinstance(vendor_sha, str) or len(vendor_sha) != 64

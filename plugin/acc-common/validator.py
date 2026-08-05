@@ -1114,12 +1114,23 @@ def validate(spec, caseset, evidence):
             row.update(功能="fail", 判据="evidence 缺此 case")
             per.append(row); continue
         # 证据自报「这条没有可比结果」（driver 逐 case 跑挂 = `execution_failed`；任务书用例算不出
-        # golden = `golden_unavailable`）→ 功能维直接 fail，**不再往下走口径校验**。
-        # 两个理由：① 归因要准——继续走下去会停在「精度口径不符/输出形状对账」之类的判据上，把
-        # 「压根没跑出来」写成「口径写错了」，那是错误归因（AGENTS.md 5.8）；② 这条分支只会让结论
-        # **更严**（恒 fail、恒进 errored 桶），不存在被拿来放松判定的用法。
+        # golden = `golden_unavailable`）→ 功能维直接 fail，不再往下走**口径**校验。
+        # 理由：归因要准——继续走下去会停在「精度口径不符/输出形状对账」之类的判据上，把
+        # 「压根没跑出来」写成「口径写错了」，那是错误归因（AGENTS.md 5.8）。
+        #
+        # ⚠ **但必须先过 dims 契约，不能直接短路**（2026-08-05 修，本文件的 fail-open 回归）：
+        #   `evidence.status` 是**被裁方自己写的**。若状态分支抢在 `_dims_contract` 前面 return，
+        #   伪造者只要把 status 写成任意非 ok 值，`dims=[]`（抹掉裁决维度）这类**契约伪造就再也不会被报出来**。
+        #   逐 case 结论确实仍是 fail，但 `contract_problems` 会因此掉数——而它正是
+        #   `blocked_golden_unauthorized` 之类结论的支点，等于给了一条「用坏状态压掉伪造发现」的路。
+        #   引入时的注释写「这条分支只会让结论更严、不存在放松用法」——对**档位**成立，对**检测**不成立。
+        #   实证：`test_dims_empty_numerical_caught`（dims=[] + status=bad）当场变绿，判据里 `dims` 消失。
         ev_status = e.get("status")
         if isinstance(ev_status, str) and ev_status not in _EXECUTED_EV_STATUSES:
+            dim_err = _dims_contract(dims, vm)
+            if dim_err:                                  # 伪造优先报，别被「没跑出来」盖过去
+                row.update(功能="fail", 判据=f"dims 契约{dim_err}")
+                per.append(row); continue
             detail = e.get("error") or e.get("golden_unavailable_reason") or e.get("note") or ""
             # 精度维**沿用既有口径**：该裁精度（dims 含「精度」）却没有可复算的误差 → fail；
             # 本就不裁精度的 case（如无 golden 的任务书用例，dims 只有「功能」）→ na。

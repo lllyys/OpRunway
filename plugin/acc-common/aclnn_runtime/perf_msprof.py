@@ -2011,6 +2011,10 @@ if (not isinstance(vendor_path, str) or not os.path.isabs(vendor_path)
         or not os.path.isfile(vendor_path)
         or sha256(vendor_path) != vendor.get("library_sha256")):
     raise RuntimeError("cpp_extension vendor library 缺失或摘要漂移")
+# 本 wrapper 是 msprof 拉起的**独立进程**：自定义算子符号的来源包必须由它自己按同一条规则
+# 从已绑定的 vendor `.so` 反推并设入环境（`D.bind_custom_opp_path`），不指望继承。
+# 没有它，torch_npu 只会去 CANN 内置 libopapi.so 找 aclnnXxx → 性能侧整轮采不到。
+D.bind_custom_opp_path(vendor_path)
 handle = ctypes.CDLL(vendor_path, mode=ctypes.RTLD_GLOBAL)
 missing = [name for name in (vendor.get("symbols_owned") or [])
            if not isinstance(name, str) or not hasattr(handle, name)]

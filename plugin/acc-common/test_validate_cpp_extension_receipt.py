@@ -51,7 +51,12 @@ class CppExtensionReceiptGateTest(unittest.TestCase):
         _write_json(os.path.join(work, "cpp_extension_caseset.json"), caseset)
 
         vendor_sha = hashlib.sha256(b"vendor").hexdigest()
-        vendor_path = "/opt/vendor/lib.so"
+        # 2026-08-05：vendor `.so` 必须坐在 CANN 自定义算子包的安装布局里
+        # （`<root>/vendors/<pkg>/op_api/lib/<lib>.so`）——门要从这条路径反推
+        # `ASCEND_CUSTOM_OPP_PATH`，也就是「本轮 aclnnXxx 由哪个包提供」。反推不出来 =
+        # 符号来源不可核，fail-closed。改动前这里写的 `/opt/vendor/lib.so` 不符合布局。
+        vendor_pkg = "/opt/vendor_root/vendors/oprunway_test"
+        vendor_path = vendor_pkg + "/op_api/lib/libcust_opapi.so"
         build_receipt = {
             "schema": "oprunway.vendor_build_receipt",
             "schema_version": 1,
@@ -95,6 +100,9 @@ class CppExtensionReceiptGateTest(unittest.TestCase):
                 "torch_npu_version": "2.x",
                 "cann_version": "8.x",
                 "soc": "Ascend",
+                # driver 在任何算子调用前实际设入进程环境的自定义算子包（不再依赖谁 source 过
+                # vendor 的 set_env.bash）。门按同一条布局规则从 vendor.library_path 重算对账。
+                "ascend_custom_opp_path": vendor_pkg,
             },
             "vendor": {
                 "library_path": vendor_path,
@@ -159,6 +167,47 @@ class CppExtensionReceiptGateTest(unittest.TestCase):
             self.assertTrue(errors, "截断的 7 位假 head 必须被拒，不得放行")
             self.assertTrue(any("源身份→构建→安装 ELF" in e for e in errors), errors)
             self.assertTrue(any("aaaaaaa" in e for e in errors), errors)
+
+    def test_rejects_symbol_source_drift_from_vendor_library(self):
+        """收据自报的符号来源包 ≠ 从 vendor ELF 反推的那个 → 拒。
+
+        守的是这一类假象：精度阶段实际把 `ASCEND_CUSTOM_OPP_PATH` 指向了**另一个** vendor
+        包（环境里继承来的上次安装），符号从那儿解析，报告写的却是本轮 PR 的身份。
+        """
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = self._fixture(root)
+            receipt = envelope["cpp_extension_receipt"]
+            receipt["runtime"]["ascend_custom_opp_path"] = "/opt/other_root/vendors/stale_pkg"
+            evidence[0]["cpp_extension_receipt_sha256"] = G._canonical_sha(receipt)
+            errors = []
+            G._gate_cpp_extension_receipt(
+                root, caseset, envelope, evidence, errors)
+            self.assertTrue(any("ascend_custom_opp_path" in e for e in errors), errors)
+
+    def test_rejects_missing_symbol_source(self):
+        """整个字段缺席 = 没人记「符号从哪来」。旧收据因此失效，这是有意的 fail-closed。"""
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = self._fixture(root)
+            receipt = envelope["cpp_extension_receipt"]
+            del receipt["runtime"]["ascend_custom_opp_path"]
+            evidence[0]["cpp_extension_receipt_sha256"] = G._canonical_sha(receipt)
+            errors = []
+            G._gate_cpp_extension_receipt(
+                root, caseset, envelope, evidence, errors)
+            self.assertTrue(any("runtime provenance 不完整" in e for e in errors), errors)
+
+    def test_rejects_vendor_library_outside_custom_opp_layout(self):
+        """vendor `.so` 不在自定义算子包布局里 → 反推不出来源包 → 拒，不猜一个根出来。"""
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = self._fixture(root)
+            receipt = envelope["cpp_extension_receipt"]
+            receipt["vendor"]["library_path"] = "/opt/vendor/lib.so"
+            receipt["runtime"]["ascend_custom_opp_path"] = "/opt/vendor"
+            evidence[0]["cpp_extension_receipt_sha256"] = G._canonical_sha(receipt)
+            errors = []
+            G._gate_cpp_extension_receipt(
+                root, caseset, envelope, evidence, errors)
+            self.assertTrue(any("反推自定义算子包失败" in e for e in errors), errors)
 
 
 if __name__ == "__main__":

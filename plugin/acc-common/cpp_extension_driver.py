@@ -140,15 +140,71 @@ def _build(bundle, manifest):
     return argv, os.path.realpath(candidates[0])
 
 
+#: 本轮自定义算子符号的来源包，落在 receipt 的 runtime provenance 里（与 `cann_version` /
+#: `soc` 同一层）。验收门用 `vendor_build_receipt.custom_opp_path` 从 `vendor.library_path`
+#: 重算并逐字对账 —— 「这一轮的 aclnnXxx 由哪个 vendor 提供」因此是**机器可核事实**，
+#: 而不是现场某个人记得自己 source 过什么。
+RUNTIME_CUSTOM_OPP_KEY = "ascend_custom_opp_path"
+
+
+def bind_custom_opp_path(library):
+    """在**任何算子调用之前**把本轮 DUT 的自定义算子包绑进进程环境；返回最终生效值。
+
+    torch_npu 运行时 getenv ``ASCEND_CUSTOM_OPP_PATH`` 去找 `libcust_opapi.so`。没有它，
+    `aclnnXxxGetWorkspaceSize` 只会在 CANN 内置 `libopapi.so` 里找不到，于是**每一条** case
+    都落成 `execution_failed`，报 ``not in libopapi.so, or libopapi.so not found``。
+
+    改动前 driver 从不设这个变量：能跑通全靠人**手动 source 过** vendor 的
+    `bin/set_env.bash`。那是一份没有被任何产物记录的环境状态 —— 于是「上一轮 164 条执行
+    通过」在干净现场一条都复现不出来，而两轮的 codegen 产物逐字节相同。可复现性缺陷不在
+    代码生成里，在这条隐式环境依赖里。现在它被收进 driver：值只从**已被 build receipt
+    绑定**的那个 vendor `.so` 反推（规则见 `vendor_build_receipt.custom_opp_path`），
+    与谁 source 过什么无关。
+
+    已有冲突值 = fail-closed，不是覆盖也不是追加：环境里若已指着**别的** vendor 包，
+    这一轮就可能跑在别人的符号上，而报告写的却是本轮 PR 的身份（AGENTS.md 5.8）。
+    路径列表按 `os.pathsep` 拆开、realpath 去重后必须恰好只剩本轮这一个包。
+
+    ⚠ 只管 ``ASCEND_CUSTOM_OPP_PATH``。`set_env.bash` 里另一条 ``LD_LIBRARY_PATH`` 由动态
+    加载器在 **exec 时**读取，进程内改已经晚了；而 DUT `.so` 本身是 driver 用绝对路径
+    `ctypes.CDLL(..., RTLD_GLOBAL)` 装进来的，不经过搜索路径。真机实测：只设本变量即可让
+    符号解析成功，故这里不假装能设 `LD_LIBRARY_PATH`。
+    """
+    try:
+        expected = vendor_build_receipt.custom_opp_path(library)
+    except vendor_build_receipt.VendorBuildReceiptError as ex:
+        # driver 对外只抛 DriverError（adapter 按它归因）；布局判据仍由那一处解释。
+        raise DriverError(str(ex)) from ex
+    seen, entries = set(), []
+    for item in (os.environ.get(vendor_build_receipt.CUSTOM_OPP_ENV) or "").split(os.pathsep):
+        item = item.strip()
+        if not item:
+            continue
+        real = os.path.realpath(item)
+        if real not in seen:
+            seen.add(real)
+            entries.append(real)
+    if entries and entries != [expected]:
+        raise DriverError(
+            f"{vendor_build_receipt.CUSTOM_OPP_ENV} 已指向 {entries!r}，与本轮收据绑定的 vendor 包 "
+            f"{expected!r} 不一致——本轮可能跑在别的 vendor 的符号上，fail-closed。"
+            "请在干净环境里跑（本 driver 自己会设这个变量），不要预先 source 其它 vendor 的 set_env.bash")
+    os.environ[vendor_build_receipt.CUSTOM_OPP_ENV] = expected
+    return expected
+
+
 def _bind_vendor(plan):
     vendor = _require_env_path("OPRUNWAY_CPP_EXTENSION_VENDOR_LIBRARY")
     build_provenance = _vendor_build_provenance(vendor)
+    # 顺序是判据的一部分：收据先核过这个 `.so` 的身份，才轮到从它反推符号来源包；
+    # 而绑定必须发生在 CDLL / torch.ops 调用**之前**。
+    custom_opp = bind_custom_opp_path(vendor)
     symbols = sorted({"aclnn" + row["symbol"] for row in plan["cases"]})
     handle = ctypes.CDLL(vendor, mode=ctypes.RTLD_GLOBAL)
     missing = [symbol for symbol in symbols if not hasattr(handle, symbol)]
     if missing:
         raise DriverError(f"指定 vendor library 缺 DUT symbols: {missing}")
-    return handle, {
+    return handle, custom_opp, {
         "library_path": vendor,
         "library_sha256": _sha_file(vendor),
         "symbols_owned": symbols,
@@ -397,7 +453,7 @@ def run(bundle, work):
     caseset = _load(os.path.join(work, "cpp_extension_caseset.json"))
     if plan.get("caseset_sha256") != _canonical_sha(caseset):
         raise DriverError("invocation plan 与 caseset 摘要不一致")
-    _handle, vendor = _bind_vendor(plan)
+    _handle, custom_opp, vendor = _bind_vendor(plan)
     build_argv, artifact = _build(bundle, manifest)
     torch, schemas, invocation = _invoke_all(
         bundle, work, manifest, plan, caseset, artifact)
@@ -416,6 +472,9 @@ def run(bundle, work):
         "cann_version": (os.environ.get("ASCEND_TOOLKIT_VERSION")
                          or os.environ.get("CANN_VERSION") or "unknown"),
         "soc": os.environ.get("OPRUNWAY_SOC") or "unknown",
+        # 本轮自定义算子符号的来源包（由 `_bind_vendor` 在任何算子调用前实际设入进程环境的值）。
+        # 它和 `vendor.library_path` 是同源的两面：门会用同一条规则重算并逐字对账。
+        RUNTIME_CUSTOM_OPP_KEY: custom_opp,
     }
     if "unknown" in runtime.values():
         raise DriverError(
@@ -468,6 +527,15 @@ def run_perf_only(bundle, work):
     if (not isinstance(vendor_path, str) or not os.path.isfile(vendor_path)
             or _sha_file(vendor_path) != vendor.get("library_sha256")):
         raise DriverError("性能阶段 vendor library 缺失或与第一阶段 receipt 漂移")
+    # 性能是**另一个进程**：精度阶段设进环境的 ASCEND_CUSTOM_OPP_PATH 不会自己跟过来。
+    # 这里按同一条规则重新绑定，并要求与精度阶段 receipt 记下的值逐字相同——两阶段测的
+    # 必须是同一个 vendor 包的符号，否则「精度验 A、性能测 B」这类假象没有任何门看得出来。
+    recorded = (receipt.get("runtime") or {}).get(RUNTIME_CUSTOM_OPP_KEY)
+    bound = bind_custom_opp_path(vendor_path)
+    if recorded != bound:
+        raise DriverError(
+            f"性能阶段自定义算子来源包与精度阶段 receipt 不一致："
+            f"receipt.runtime.{RUNTIME_CUSTOM_OPP_KEY}={recorded!r}，本阶段反推 {bound!r}")
     if cpp.get("artifact") != receipt.get("artifact") \
             or cpp.get("namespace") != receipt.get("load", {}).get("namespace"):
         raise DriverError("性能计划的 Extension artifact/namespace 与 receipt 漂移")

@@ -4,6 +4,23 @@
 
 ## 2026-08-05
 
+- **自定义算子符号来源改由收据绑定，跑测不再依赖「谁 source 过 set_env.bash」**。
+  干净现场实证：同一份逐字节相同的 codegen 产物，164 条 case 全部 `execution_failed`
+  （`aclnnGaussianBlur ... not in libopapi.so`）。根因不在代码生成，在一条**没被任何产物
+  记录**的环境依赖——torch_npu 运行时 getenv `ASCEND_CUSTOM_OPP_PATH` 找 `libcust_opapi.so`，
+  而 driver 从不设它，上一轮「跑通」全靠人手动 source vendor 的 `bin/set_env.bash`。
+  现在 driver 从**已被 build receipt 绑定**的 vendor `.so` 按目录结构反推该值
+  （`vendor_build_receipt.custom_opp_path`，判据只写一处，driver / 性能 wrapper /
+  离线 adapter / 验收门 / repro 共用），在任何算子调用前设入进程环境；环境里已有不同值 →
+  fail-closed（防跑在别的 vendor 符号上）；生效值落进 receipt 的
+  `runtime.ascend_custom_opp_path`，门再从 `vendor.library_path` 重算对账。
+  干净现场复跑：**不 source 任何东西，164/164 执行成功、0 失败**。
+- **gate_task1 认识 `golden_unavailable` 了**，两条假报错消失：不再把这 5 条合法一等状态
+  报成「无 golden_path」和「伪造 na 跳精度门」。豁免带反查（顶层台账点名 + 逐字原因两处
+  一致 + 有 verdict 时功能 fail 且精度非 pass + 不得留在精度维），任一不满足仍按伪造拒。
+  同时 `perf_case_policy.selection` 按 taskdoc 档新 schema 复算对账（认识
+  `candidate_pool` / `excluded_golden_unavailable_case_ids`，不是把校验删掉）。
+  **BLOCKED 的结论一点没变，变的是理由准确了。**
 - **GaussianBlur cpp_extension 首次跑出全套验收产物**（acceptance/verdict/evidence/perf_report）。
   之前是「第一条 case 被 DUT 拒 161002 → 整轮零产物」。修了四处 harness 缺陷：
   ① `cpp_extension_driver._invoke_all` 逐 case try/except，失败进 `out_manifest.failed[]`

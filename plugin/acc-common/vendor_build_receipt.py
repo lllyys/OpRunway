@@ -275,3 +275,56 @@ def summarize(receipt):
     刻意**不做**「跳过校验的快速读取」：摘要里每个字段都是判据，读它的地方就该确信它被校过。
     """
     return _validate_source(receipt)
+
+
+# ── 自定义算子包（custom opp vendor）的安装布局 ────────────────────────────────────
+#
+# 收据回答「这个 `.so` 从哪来」；下面这条规则回答紧挨着的第二个问题：**运行时到哪去找它**。
+# 两者必须同源——否则 receipt 绑的是 A 包、真机跑的却是 B 包的符号，而没有任何产物看得出来。
+# 故判据同样只写一处，driver / 性能 wrapper / 验收门共用。
+
+#: CANN 自定义算子包的固定目录结构：``<install_root>/vendors/<pkg>/op_api/lib/<lib>.so``。
+#: 这些是 **CANN 的安装约定**，不是某个算子或某个 vendor 的身份——换任何算子、任何 vendor
+#: 名，这条反推规则零改即用（AGENTS.md 5.1）。
+_VENDOR_LIB_DIR_TAIL = ("op_api", "lib")
+_VENDOR_PARENT_DIR_NAME = "vendors"
+
+#: torch_npu 运行时 **getenv** 这个变量去定位自定义算子的 `libcust_opapi.so`。不设它，
+#: `aclnnXxx` / `aclnnXxxGetWorkspaceSize` 只会在 CANN 内置 `libopapi.so` 里找，于是逐条
+#: 报 ``not in libopapi.so, or libopapi.so not found``。vendor 自带的 `bin/set_env.bash`
+#: 设的就是它（外加 `LD_LIBRARY_PATH`）。
+CUSTOM_OPP_ENV = "ASCEND_CUSTOM_OPP_PATH"
+
+
+def custom_opp_path(library_path):
+    """由 vendor `.so` 的**绝对路径**反推它所属自定义算子包的根。
+
+    返回值就是 :data:`CUSTOM_OPP_ENV` 该取的值——与 vendor 安装时自己生成的
+    `bin/set_env.bash` 里那一条逐字同义，但这里是从**已被 build receipt 绑定**的那个
+    `.so` 反推出来的，因此和「谁 source 过哪个脚本」无关。
+
+    纯字符串推导，不碰文件系统：真机 driver 传进来的已是 realpath，离线验收门传的是收据里
+    逐字记录的字符串，两侧必须算出同一个值才算对上账。
+
+    结构对不上一律 fail-closed —— 猜一个根出来，等于把「符号来自哪个 vendor」重新变成
+    不可核事实。
+    """
+    if not isinstance(library_path, str) or not library_path.strip():
+        raise VendorBuildReceiptError("vendor library_path 须为非空字符串，无法反推自定义算子包根")
+    path = os.path.normpath(library_path)
+    if not os.path.isabs(path):
+        raise VendorBuildReceiptError(
+            f"vendor library_path 须为绝对路径，得 {library_path!r}——相对路径标识不了一个 vendor 包")
+    lib_dir = os.path.dirname(path)
+    parent, lib_tail = os.path.split(lib_dir)
+    pkg, api_tail = os.path.split(parent)
+    if (api_tail, lib_tail) != _VENDOR_LIB_DIR_TAIL:
+        raise VendorBuildReceiptError(
+            f"vendor library_path 不符合自定义算子包布局 <root>/{_VENDOR_PARENT_DIR_NAME}/<pkg>/"
+            f"{'/'.join(_VENDOR_LIB_DIR_TAIL)}/<lib>.so：得 {library_path!r}")
+    vendors_dir, pkg_name = os.path.split(pkg)
+    if not pkg_name or os.path.basename(vendors_dir) != _VENDOR_PARENT_DIR_NAME:
+        raise VendorBuildReceiptError(
+            f"vendor 包根 {pkg!r} 的父目录不是 {_VENDOR_PARENT_DIR_NAME}/——"
+            f"这不是一个 CANN 自定义算子包的安装位置（fail-closed，不猜）")
+    return pkg
