@@ -104,7 +104,7 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 | `aclnn_py` | 只有历史 Median 60/60 | 那是**旧 caseset** 的结果；迁到 torch_parity + `cpp_extension` 后必须重跑，旧 PASS 不得沿用 |
 | `cpp`（`new_example`） | IsClose、Sign 已坐实 | dtype 闭环只到 fp32/fp16/bf16，覆盖不够 |
 
-⚠ **能力表不是准入表，别互相反推。** `repo_adapter.SUPPORTED_NP_BY_FORM` / `DEFERRED_NP_BY_FORM` 里
+**能力表不是准入表，别互相反推。** `repo_adapter.SUPPORTED_NP_BY_FORM` / `DEFERRED_NP_BY_FORM` 里
 `aclnn_py`、`cpp` 的条目**照旧保留、本轮没动**：那张表回答“这条通路支持哪些 dtype”，准入白名单回答
 “这条通路能不能出裁决”，两个问题不同。`cpp` 的 int 等未支持项仍落 `DEFERRED_NP_BY_FORM`，仍须显式挂账并 fail-closed。
 
@@ -127,7 +127,7 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 所以“加了 `--allow-experimental-form` 跑绿了”不能写成验收通过、不能进验收报告的裁决栏——
 这和 §5.8“covered 不等于验收通过”是同一条纪律。
 
-⚠ **收敛的代价要认账**：Roll 的 spec 写的是 `aclnn_py`，要继续做正式验收就得迁到 `cpp_extension`，
+**收敛的代价要认账**：Roll 的 spec 写的是 `aclnn_py`，要继续做正式验收就得迁到 `cpp_extension`，
 而后者需要 torch.ops 调用桥 + vendor ELF 构建收据，接入成本明显更高。这是已知账单，不是加个逃生阀就算解决。
 
 ### 4.4 其余仍然成立的约定
@@ -204,7 +204,8 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 - 项目 Markdown、图、SVG 等文档统一放仓根 `doc/`；
 - 不写到工作区上层的 `markdown/`；
 - 每次落地后在 `doc/oprunway-changes-brief.md` 顶部追加一两句倒序摘要；
-- 当前交接以 `doc/oprunway-session-handoff-2026-08-05.md` 为准，旧 handoff（2026-07-26 / 2026-07-13）只作历史材料。
+- 当前交接以 `doc/oprunway-session-handoff-2026-08-05-evening.md` 为准，
+  旧 handoff（2026-08-05 / 2026-07-26 / 2026-07-13）只作历史材料。
 
 ### 5.7 push 前审修门
 
@@ -299,7 +300,7 @@ OpRunway/
 |---|---|
 | CP-A..E 状态机、硬门、subagent 契约 | `plugin/AGENTS.md` + `plugin/skills/acceptance-workflow/SKILL.md` |
 | 设计与数据契约 | `doc/oprunway-design.md` |
-| 最新交接 | `doc/oprunway-session-handoff-2026-08-05.md` |
+| 最新交接 | `doc/oprunway-session-handoff-2026-08-05-evening.md` |
 | 当前 TODO | `doc/oprunway-todo.md` |
 | 改动流水 | `doc/oprunway-changes-brief.md` |
 | 真机环境 | `doc/oprunway-real-machine-environment.md` + `.oprunway/real-machine.env` |
@@ -311,7 +312,7 @@ OpRunway/
 
 ## 9 · 当前能力边界
 
-先看三条最容易踩的：正式验收只走 `cpp_extension`（§4）；本地 checkout 来源只验到 CP-A 取材、没跑过 NPU（§9.3）；
+先看三条最容易踩的：正式验收只走 `cpp_extension`（§4）；本地 checkout 来源**代码已通到三级门、但没跑过一次 NPU 验收**（§9.3）；
 `fetch_source.py` 一改，既有 preparation 收据全部变 `MISS`（§9.4）。
 
 ### 9.1 真机已坐实的
@@ -332,9 +333,13 @@ OpRunway/
 - `aclnn_py` perf collector 已真机产出同口径 kernel-only 数据——“通路有数据”既不等于“任务书条款通过”，现在也不等于“能出裁决”；
 - `aclnn_py` 的历史 Median 60/60 属于旧 caseset，不得沿用为 torch_parity 下的 PASS；
 - mock/catlass_mock 只产带 `evidence_grade="development"` 和 NON-ACCEPTANCE 标记的
-  `dev_run_summary.json` / `dev_precision_check.json`，不产 `acceptance.json` / `verdict.json`。
+  `dev_run_summary.json` / `dev_precision_check.json`，不产 `acceptance.json` / `verdict.json`；
+- ⚠ **CP-F 后验重测被连带收紧**：`precision_retest_runner` 派生 mode 时调的是
+  `run_workflow._resolve_mode(spec, None)`，**不传** `allow_experimental_form`，
+  所以 base spec 写 `cpp` / `aclnn_py` 的验收现在**一律拒绝复测**（报“无法从 base spec 派生 runner mode”）。
+  这是收敛的连带效果，**尚未确认是有意还是副作用**——要复测非准入通路的旧验收，先来定这条口径。
 
-### 9.3 被测来源：本地 checkout 已是一等通路（但只走到 CP-A）
+### 9.3 被测来源：本地 checkout 已是一等通路（代码全链路接通，但**没上过真机验收**）
 
 被测代码现在有两条**平级**来源通路，不是“主 + 降级”：
 
@@ -355,10 +360,11 @@ OpRunway/
 
 1. **`root_digest` 只覆盖 `op_subdir`**，不含仓级构建脚本、公共头文件。它证明的是
    “被测算子子树的字节是这一份”，**不是**“整个构建输入闭包是这一份”。
-2. **本地来源本轮只跑到 CP-A 取材**：没跑 NPU、没出精度裁决、没出性能裁决。
-   任何地方都不许写成“本地来源已完成验收”。
+2. **“代码接通”不等于“验收跑通”。** 主验收链（`cpp_extension`）的判别、绑定与三级门
+   已经全部接上，并有单测覆盖；但本地来源**一次 NPU 都没跑过**——没出过精度裁决、
+   没出过性能裁决。真机侧只验到 CP-A 取材（见下表）。任何地方都不许写成“本地来源已完成验收”。
 
-真机验证（a3，2026-08-05）——任务书为 `cann/cann-ops-competitions` 的 `median_task_doc.md`，
+真机验证（a3，2026-08-05）——**只覆盖 CP-A 取材这一段**，任务书为 `cann/cann-ops-competitions` 的 `median_task_doc.md`，
 被测是 `cann/ops-nn` MR 6429（head `0290d61ac066f9f4e620a3714f5941e82dc4e72a`），
 算子子目录 `experimental/index/median`：
 
@@ -381,19 +387,55 @@ OpRunway/
   下游若有“`reasons` 空即万事大吉”的假设，要同步改成也看 `warnings`；
 - `fetch_source` 在 `completeness=blocked` 时**非 0 退出（3）**；原先是落盘就返回 0。
 
-已接入的消费者：`validate_preparation_state`、`cpp_extension_adapter`、`cpp_extension_driver`、
-`validate_acceptance_state`。三级门里新增 build receipt ↔ source_facts 的来源锚对账，两步且顺序固定：
+**接入状态有三种，别把 ⛔ 读成 ✅。** 权威表在 `plugin/acc-common/dut_source.py` 模块头，以代码为准：
+
+| 消费者 | 状态 |
+|---|---|
+| `fetch_source`（产出方） | ✅ 已接 |
+| `validate_preparation_state` | ✅ 已接 |
+| `preflight_aclnn` | ✅ 已接（两条通路 signature 对账完全同形，只有锚不同） |
+| `cpp_extension_adapter` / `cpp_extension_driver` / `validate_acceptance_state` | ✅ 已接（vendor build receipt 绑定，**主验收链**） |
+| `render_acceptance_markdown` | ✅ 已接（按 kind 渲染「来源与 provenance」节，强度如实标注） |
+| `precision_retest_contract` / `precision_retest_runner` | ✅ 已接（CP-F 验收后复测） |
+| `verify_aclnn_harness` | ⛔ 判别式已接，但 `local_checkout` **显式 fail-closed** |
+
+⚠ 那个 ⛔ 是**结构性 fail-closed，不是待办**：`aclnn_adapter` 只能按 PR ref 在容器内重新取源 build，
+**构建端根本不存在可与 `local_root_digest` 对账的锚**；放它过去，收据看着齐全、绑定其实是空的。
+只要 `aclnn_adapter` 的取源方式不变，这道门就一直关着——**别当成“下一批补上就行”**。
+要走本地来源的完整验收，用已接通的 `cpp_extension` 主链（这也正是 §4 收敛后唯一准入的通路）。
+
+三级门里新增 build receipt ↔ source_facts 的来源锚对账，两步且顺序固定：
 先核两边 `dut_source` 一致，再核锚值相等。
 
 `source_facts.json` 缺席的处置**按通路分**，这条是实测逼出来的：真机验收报告目录
 （`reports/<Op>-spec-<x>/`）里**本来就没有** `source_facts.json`，取材的 `--out` 与验收产物目录不是同一个。
 所以本地通路找不到就 BLOCKED，PR 通路沿用旧行为；`validate_acceptance_state` 新增 `--source-facts` 可显式指路。
 
+⚠ **残留伪装面（如实记账，别当已封）**：`source_facts` 缺席 + 收据自称 `pull_request` 时，
+“`source_facts` 其实说的是 local”这种伪装查不出来——因为压根没有对照物。
+要彻底封死，得让编排层**每次都传 `--source-facts`**，让缺席本身成为非法。
+
 ### 9.4 本轮的连带账单
 
 ⚠ **既有 preparation 收据会从 `REUSABLE` 变 `MISS`。** 原因是 `producer.logic_sha256` 就是
 `fetch_source.py` 自身源码的哈希、且它在 payload 里——改了工具必然改 digest。
 **这是正确行为，不是复用坏了**：看到 MISS 别去“修”复用逻辑，重跑取材即可。
+
+⚠ **真机上留存的 aclnn harness 信任门收据会 revalidate 失败。** `verify_aclnn_harness._LOGIC_FILES`
+新增了 `dut_source.py`（判别式已成这道门的判定依赖，不纳入摘要就能被静默改），
+`bindings.logic_files` 因此整体变化。同样**是正确行为**：门的判定逻辑变了，旧收据不该继续算数。
+下一轮要走 `aclnn_py` 真机通路的话，先重跑这道门。
+
+⚠ **CP-F directive schema 是 breaking change，在途 attempt 全废。** 旧 `source_identity`
+只有 `{pr_head, build_receipt_sha256, runner_form}`，`pr_head` 被一条 `^[0-9a-f]{40,64}$` 校过——
+那个 40..64 的区间就是物理入口：填 64 位摘要能原样通过。现在 `pr_head` → `pr_head_sha`（恰 40 位）
+或 `local_root_digest`（恰 64 位），`repo` 两条通路都必填。**旧 directive 不能继续执行**，
+要重新起草 directive、重新跑 F2。
+
+CP-F 另新增 `directive.source_identity.repo` ↔ 首轮 build receipt `runner_binding.base_source_repo`
+的逐字对账（`repo` 原本“宣称有门其实没门”）。⚠ **只有 `cpp_extension` 通路有这个对照物**；
+`cpp` / `aclnn_py` 的首轮 `execution_provenance` 里根本没有仓名字段，那两条通路的 `repo` 目前只作人工记账。
+写法不一致（同一个仓写成 `ops-nn` 与 `cann/ops-nn`）会直接 BLOCK。
 
 Roll 的迁移成本：spec 现写 `aclnn_py`，通路收敛后必须迁到 `cpp_extension` 才能做正式验收，
 而后者要 torch.ops 桥 + vendor ELF 构建收据，接入成本更高（详见 §4.3）。

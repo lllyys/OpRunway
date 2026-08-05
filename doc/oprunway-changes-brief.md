@@ -2,6 +2,34 @@
 
 > 倒序：最新在上。每天一节，一条一句，大白话。`待决` 置顶。
 
+## 2026-08-05 · push 前统一审修门（final）
+
+对 `main`(`4d1544d`) 以来的全部改动做了一轮拆块 codex 审（4 块代码 + 3 块散文，
+整份大 diff 一次审必超时）。17 条代码 finding 落地、8 条核过判为不成立
+（其中 4 条「无测试」是拆块 prompt 没放测试文件的产物）。
+
+堵掉的主要几条：三级门以前**只对本地通路比锚值**，PR 通路只比 kind 就放行；
+`source_facts.json` 读进来**不复算内容寻址 digest**（手写一份最小 JSON 就能当本地来源的信任锚）；
+显式 `--source-facts` 指不到文件时静默退成「没找到」；
+`dut_source.validate_build_receipt_source` 的 `expected_kind` 有默认值（docstring 却写「不能省」）
+且两条通路的锚字段没有互斥；`changed_files="abc"` 会被按字符迭代成一份假清单；
+`git.dirty` 改成 `false` 就能让降级留痕整条消失；取材时逃逸软链/读失败被 `continue` 静默丢掉；
+渲染器不校 build receipt 是否 `VERIFIED` 就输出强度断言、且把「facts 残缺」读成「不是 git 仓」。
+
+散文侧修了 4 条「取材跑通写成验收跑通」和一批过期事实：`gate.passed=true` 被写成「唯一跑通完整验收」
+（那轮裁决其实是 `FAIL(精度)`）；1152 基线的失败数写成 58（实为 51，58 属旧 1344-case checkpoint）；
+Roll findings 文档自称「不含任何已实施的改动」而其中两项已在同一次 push 落地。
+
+verify 轮（codex 复核修复本身）又逮出 5 条：digest 自洽证明不了对照物合格
+（`completeness=blocked` 的真实取材产物 digest 完全正确，照样不该当信任锚）→ 改为复用
+`validate_preparation_state._validate_source_payload`；`--source-facts ""` 被 `bool()` 当成没指定；
+`git: null` 的修法只落到一道门、另一道漏了；`C`(copy) 的原文件没动却被记成脏。
+另驳回 1 条（要求放行本地通路的 `changed_files=[]`——那是改动前就有的 fail-closed，不在审修门里放宽）。
+
+回归：1774 → **1800 passed / 0 failed**（a3，Python 3.12.13）；
+全 `plugin/` 107 个 `.py` 过真 3.11.15 语法门。
+明细见 `.cc-suite/audits/audit-fix-20260805-final-push-gate.md`。
+
 ## 2026-08-05
 
 - **本地 checkout 成为一等被测来源通路**：`fetch_source` 加 `--local-repo/--op-subdir/--base-ref/--allow-dirty`，
@@ -21,6 +49,32 @@
 - aclnnRoll complex64 试跑问题定位完成，产 1 份问题清单 + 2 份实施方案（`roll-complex64-trial-findings`
   / `local-source-plan` / `workflow-governance-plan`），均过 codex audit-fix。
   交接入口见 `doc/oprunway-session-handoff-2026-08-05.md`。
+- **九个消费者全部接入 `dut_source` 判别式**：`fetch_source`（产出方）、`validate_preparation_state`、
+  `preflight_aclnn`、`cpp_extension_adapter` / `cpp_extension_driver` / `validate_acceptance_state`（主验收链）、
+  `render_acceptance_markdown`、`precision_retest_contract` / `precision_retest_runner`。
+  ⚠ **`aclnn_py` 的本地通路是结构性 fail-closed，不是待接**：`verify_aclnn_harness` 判别式已接，
+  但 `local_checkout` 显式拒——`aclnn_adapter` 只能按 PR ref 在容器内重新取源 build，
+  构建端根本没有可与 `local_root_digest` 对账的锚。别当成「下一批补上就行」。
+- **`runner_form` 准入收敛到 `cpp_extension`**：`run_workflow._ACCEPTANCE_RUNNER_FORMS = {cpp_extension}`，
+  门落**入口 + 出口两处**（`_resolve_mode` 拦正常路径，写 `acceptance.json` / `verdict.json` 前再校一次；
+  只拦入口拦不住，口径照抄 `catlass_mock` 后门的处置）。`--allow-experimental-form` **放行执行、不放行裁决**：
+  该路径物理上只产 `dev_run_summary.json` / `dev_precision_check.json`。
+  ⚠ Roll 的 spec 现写 `aclnn_py`，要继续做**正式**验收就得迁到 `cpp_extension`，
+  而后者要 torch.ops 桥 + vendor ELF 构建收据，接入成本明显更高——这是已知账单。
+- ⚠ **真机上留存的 aclnn 信任门收据会 revalidate 失败**：`verify_aclnn_harness._LOGIC_FILES`
+  加了 `dut_source.py`（判别式已成这道门的判定依赖），`bindings.logic_files` 整体变化。
+  和 preparation 收据变 MISS 同理，是正确行为；下一轮要走 `aclnn_py` 真机通路得先重跑这道门。
+- ⚠ **CP-F directive schema 是 breaking change，在途 attempt 全废**：`pr_head` → `pr_head_sha`（恰 40 位）
+  或 `local_root_digest`（恰 64 位），`repo` 变必填。旧的 `^[0-9a-f]{40,64}$` 区间正则就是物理入口——
+  往 `pr_head` 里填 64 位摘要能原样通过。旧 directive 不能继续执行，**要重新起草 directive、重跑 F2**。
+- CP-F 新增 `directive.source_identity.repo` ↔ 首轮 build receipt `runner_binding.base_source_repo`
+  逐字对账（原本「宣称有门其实没门」），不等即 BLOCK；仓名写法不一致（`ops-nn` vs `cann/ops-nn`）会挡住。
+  ⚠ 只有 `cpp_extension` 通路有这个对照物，`cpp` / `aclnn_py` 的 `repo` 目前只作人工记账。
+- 修掉 main 基线上原本就红的 5 个测试（3 个根因，都是「支持 logical bf16」那次半落地留下的）：
+  `validate_acceptance_state` 的 bf16 归桶特判是代码错（顺带消掉一处按 dtype 身份写死的分支）、
+  `test_gen_cases_case_profile` 的 torch_parity 夹具过时、两条 bf16 fail-fast 断言是漏删的。
+  第 3 条方向上是放宽，另补 `test_bfloat16_arrays_still_rejected_by_compute_metrics` 把兜底钉死。
+  现在 a3 容器（Python 3.12.13）全量 **1774 passed / 11 skipped / 0 failed**。
 
 ## 2026-08-03
 

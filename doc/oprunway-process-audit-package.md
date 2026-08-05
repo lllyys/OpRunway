@@ -8,9 +8,16 @@ Mac 上重放用例、重算精度或重新构建 DUT。为避免每次传输大
 - **过程审计包（默认）**：只收回报告、契约、计划、收据、manifest、进度、复现说明和文本脚本；
 - **完整证据包（按需）**：额外收回输入、golden、设备输出、ELF/扩展和构建中间产物。
 
-过程审计包可用于检查 checkpoint 推进、case 身份、provenance、执行计划、确定性裁决结果和
-失败复核过程；它不是完整验收现场，不能单独用于重新计算数值指标、逐字节验证 evidence，或证明
-二进制文件确由某次 NPU 调用产生。
+过程审计包可用于检查 checkpoint 推进、case 身份、执行计划、确定性裁决结果和失败复核过程；
+它不是完整验收现场，不能单独用于重新计算数值指标、逐字节验证 evidence，或证明二进制文件确由
+某次 NPU 调用产生。
+
+⚠ **provenance 是有条件的**：来源锚的对账需要 `source_facts.json` 与 vendor build receipt
+**成对**在手。取材的 `--out` 与验收报告目录往往不是同一个，本包的默认 allowlist 也覆盖不到
+取材目录，所以 `source_facts.json` 常常不在包里——`dut_source=local_checkout` 时缺了它，
+`local_root_digest` 根本没有对照物。
+**任一缺失即标 `PROVENANCE_INCOMPLETE`，不得据此复核来源或裁决。** 要审 provenance，
+收件时把本轮 `source_facts.json` 显式加进来（`validate_acceptance_state --source-facts` 也吃它）。
 
 ## 2. 默认复制内容
 
@@ -47,8 +54,8 @@ Mac 上重放用例、重算精度或重新构建 DUT。为避免每次传输大
 - `manual_failure_audit/**/*.sha256`
 - 人工复核使用的生成脚本
 
-`*.sha256` 即使引用未收回的二进制文件也应保留：它能说明现场曾绑定哪些文件和摘要，但不得据此
-声称本地已经完成内容校验。
+`*.sha256` 即使引用未收回的二进制文件也应保留：它保留的是**现场对文件名与摘要的声明**。
+它**不能单独证明**对应二进制曾经存在、曾被加载，或由某次 NPU 调用产生，本地也没有做过任何内容校验。
 
 ## 3. 默认排除内容
 

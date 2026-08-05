@@ -59,6 +59,33 @@ _HEX40 = re.compile(r"[0-9a-f]{40}")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
+def _require_bindings(preflight):
+    """取出 `preflight.bindings` 并把形态硬化在**任何**字段读取之前；判不出形态就停。
+
+    单独拆出来是因为 `bindings` 有两个触碰点：来源通路门（`_require_pull_request_path`）
+    与 `run_gate` 里更早的 spec 绑定核对。两处都必须走同一套形态判定，否则同一个畸形
+    payload 会按触碰顺序给出两种不同的失败形态。
+    """
+    # ⚠ 这两道检查现在是 preflight 的**第一次触碰**，形态要自己扛住：payload 不是 object
+    #   时 `.get` 会抛 AttributeError（不在调用方的收敛清单里），当场变成裸 traceback。
+    if not isinstance(preflight, dict):
+        raise ValueError("aclnn preflight payload 须为 JSON object")
+    bindings = preflight.get("bindings")
+    # ⚠ 这里**不能**简化成 `preflight.get("bindings") or {}`。`dut_source.of()` 的
+    #   「缺席即 pull_request」是给**旧收据**的向后兼容，前提是 payload 形态本身可信；
+    #   `or {}` 会把缺席 / None / `[]` / 字符串一律抹平成空 object，于是「这份 preflight
+    #   根本没有来源声明」和「它明确声明了 pull_request」在通路门里变成同一件事——
+    #   本地通路的 preflight 只要 bindings 丢了形态（写坏、被裁剪、schema 换代），
+    #   那道门就当场判它是 PR 通路**放行**，而通路门的全部意义就是拦住这一步。
+    #   今天不出事靠的是下游 40-hex 硬化与 `provenance.head_sha != None` 的**间接**兜底，
+    #   那是偶然的 fail-closed、不是设计。形态判不出来 = 来源判不出来 = 停。
+    #   注：空 object `{}` 仍然放行——它是合法 JSON object，正是上面那条向后兼容要接的形态。
+    if not isinstance(bindings, dict):
+        raise ValueError(
+            "aclnn_preflight.bindings 缺失或不是 JSON object，无法判定来源通路 —— fail-closed")
+    return bindings
+
+
 def _require_pull_request_path(preflight):
     """本轮 aclnn_py 真机 harness 信任门只接 `pull_request` 来源通路，其余一律 fail-closed。
 
@@ -73,23 +100,8 @@ def _require_pull_request_path(preflight):
     「PR head 引用必填」——本地通路会因此拿到一个**误导性**报错，把「这条通路没接」
     说成「少配了个环境变量」。所以两条入口都要在碰 `_aclnn_cfg()` 之前先 BLOCK。
     """
-    # ⚠ 这道门现在是 preflight 的**第一次触碰**，形态要自己扛住：payload 不是 object 时
-    #   `.get` 会抛 AttributeError（不在调用方的收敛清单里），当场变成裸 traceback。
-    if not isinstance(preflight, dict):
-        raise ValueError("aclnn preflight payload 须为 JSON object")
-    bindings = preflight.get("bindings")
-    # ⚠ 这里**不能**简化成 `preflight.get("bindings") or {}`。`dut_source.of()` 的
-    #   「缺席即 pull_request」是给**旧收据**的向后兼容，前提是 payload 形态本身可信；
-    #   `or {}` 会把缺席 / None / `[]` / 字符串一律抹平成空 object，于是「这份 preflight
-    #   根本没有来源声明」和「它明确声明了 pull_request」在这道门里变成同一件事——
-    #   本地通路的 preflight 只要 bindings 丢了形态（写坏、被裁剪、schema 换代），
-    #   这道门就当场判它是 PR 通路**放行**，而本函数的全部意义就是拦住这一步。
-    #   今天不出事靠的是下游 40-hex 硬化与 `provenance.head_sha != None` 的**间接**兜底，
-    #   那是偶然的 fail-closed、不是这道门的设计。形态判不出来 = 来源判不出来 = 停。
-    #   注：空 object `{}` 仍然放行——它是合法 JSON object，正是上面那条向后兼容要接的形态。
-    if not isinstance(bindings, dict):
-        raise ValueError(
-            "aclnn_preflight.bindings 缺失或不是 JSON object，无法判定来源通路 —— fail-closed")
+    # 形态先硬化（含「空 object 仍按 pull_request 向后兼容」的边界），再判来源。
+    bindings = _require_bindings(preflight)
     kind = dut_source.of(bindings, where="aclnn_preflight.bindings")
     if kind != dut_source.PULL_REQUEST:
         raise ValueError(
@@ -612,7 +624,11 @@ def run_gate(root, spec_rel, caseset_rel, preflight_rel, out_rel):
     if preflight.get("status") != "READY_WAIT_NPU_TRUST_GATE":
         raise ValueError(
             f"aclnn preflight 未就绪: {preflight.get('status')!r}")
-    if (preflight.get("bindings") or {}).get("spec_sha256") != _sha(spec):
+    # ⚠ 这是本函数里对 `bindings` 的**第一次**触碰，排在通路门之前，所以形态要在这里就硬化：
+    #   `or {}` 下 None/`[]` 会报「与当前 spec 不绑定」（fail-closed，但把「形态判不出来」
+    #   说成「绑错了 spec」），非空字符串 / 非空 list 则直接让 `.get` 抛 AttributeError——
+    #   裸 traceback，不在调用方的收敛清单里。走同一套显式形态校验，报同一个错。
+    if _require_bindings(preflight).get("spec_sha256") != _sha(spec):
         raise ValueError("aclnn preflight 与当前 spec 不绑定")
     if os.environ.get("OPRUNWAY_ACLNN_REAL") != "1":
         raise ValueError("真机 harness 信任门须显式设置 OPRUNWAY_ACLNN_REAL=1")

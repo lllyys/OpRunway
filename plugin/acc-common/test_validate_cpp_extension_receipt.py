@@ -15,6 +15,49 @@ def _write_json(path, value):
         json.dump(value, dst, ensure_ascii=False, sort_keys=True)
 
 
+def source_facts_payload(dut_source="local_checkout", root_digest="c" * 64,
+                         head_sha="a" * 40, git=None, completeness=None,
+                         op_subdir="op"):
+    """一份**过完整契约**的 `source_facts` payload（供本文件与渲染器单测共用）。
+
+    ⚠ 不能只塞一个 `root_digest`：三级门复用 `validate_preparation_state._validate_source_payload`
+    校这份对照物——digest 自洽只证明 payload 没被改过，证明不了它是一份完整、未降级的取材产物。
+    最小 payload 也能自洽（`make_artifact` 谁都能调），所以契约那一层必须真的过。
+    """
+    import fetch_source
+    anchor = root_digest if dut_source == "local_checkout" else head_sha
+    payload = {
+        "contract_version": 1,
+        "taskdoc": {"bytes_sha256": "1" * 64, "snapshot_sha256": "1" * 64,
+                    "size": 12, "source_locator": "task.md"},
+        "changed_files": ["op/x.h"],
+        "key_files": [{"path": "op/x.h", "ref": anchor,
+                       "bytes_sha256": "2" * 64, "size": 9}],
+        "derived": {"op": "X", "target_dir": "op", "aclnn_headers": ["op/x.h"]},
+        "completeness": (completeness if completeness is not None
+                         else {"status": "complete", "reasons": []}),
+        "producer": {"tool": "fetch_source.py", "logic_sha256": "3" * 64},
+    }
+    if dut_source == "local_checkout":
+        payload["dut_source"] = dut_source
+        payload["local_checkout"] = {
+            "root_digest": root_digest, "op_subdir": op_subdir,
+            "digest_policy": fetch_source.digest_policy()}
+        if git is not None:
+            payload["local_checkout"]["git"] = git
+            # 降级留痕由**载重事实派生**，与真 producer 同一条规则：夹具少写这条，
+            # 契约校验会以「降级没留痕」拒掉，用例就测不到它想测的分支。
+            if git.get("dirty") and completeness is None:
+                payload["completeness"]["warnings"] = [
+                    fetch_source.WARN_DIRTY_WORKTREE_ALLOWED]
+    else:
+        # PR 通路的 payload **不写** `dut_source` 键（缺席即 pull_request，与产物形态一致）。
+        payload["pr"] = {"canonical_url": "https://gitcode.com/o/r/pull/1",
+                         "source_repo": "o/r", "number": 1, "head_sha": head_sha,
+                         "head_repo": "o/r", "is_fork": False, "state": "open"}
+    return payload
+
+
 class CppExtensionReceiptGateTest(unittest.TestCase):
     def _fixture(self, root):
         work = os.path.join(root, "work")
@@ -170,14 +213,22 @@ class LocalCheckoutSourceBindingTest(unittest.TestCase):
             envelope["cpp_extension_receipt"])
 
     @staticmethod
-    def _write_source_facts(root, *, dut_source="local_checkout", root_digest=DIGEST):
-        payload = {"dut_source": dut_source}
-        if dut_source == "local_checkout":
-            payload["local_checkout"] = {"root_digest": root_digest, "op_subdir": "op"}
-        else:
-            payload["pr"] = {"head_sha": "a" * 40}
-        _write_json(os.path.join(root, "source_facts.json"),
-                    {"domain": "oprunway/source-facts/v1", "payload": payload})
+    def _facts_payload(dut_source="local_checkout", root_digest=DIGEST, head_sha="a" * 40):
+        return source_facts_payload(
+            dut_source=dut_source, root_digest=root_digest, head_sha=head_sha)
+
+    @classmethod
+    def _write_source_facts(cls, root, *, sub=None, **kw):
+        """⚠ 必须写**真** content_address envelope（digest 由 payload 算出）+ **完整契约 payload**。
+
+        手拼 `{"domain":…, "payload":…}` 或只塞一个 root_digest 的最小 payload，
+        都会被 `_find_source_facts` 判 `__BAD__`——那样这些用例名义上在测「锚对不对得上」，
+        实际全落在「对照物不可信」那条分支上。
+        """
+        import content_address
+        parts = [root] + ([sub] if sub else []) + ["source_facts.json"]
+        _write_json(os.path.join(*parts), content_address.make_artifact(
+            "oprunway/source-facts/v1", cls._facts_payload(**kw)))
 
     def _run(self, root, caseset, envelope, evidence):
         errors = []
@@ -230,11 +281,56 @@ class LocalCheckoutSourceBindingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
             self._relocalize(envelope, evidence)
-            _write_json(os.path.join(root, "work", "source_facts.json"),
-                        {"domain": "oprunway/source-facts/v1",
-                         "payload": {"dut_source": "local_checkout",
-                                     "local_checkout": {"root_digest": self.DIGEST,
-                                                        "op_subdir": "op"}}})
+            self._write_source_facts(root, sub="work")
+            self.assertEqual([], self._run(root, caseset, envelope, evidence))
+
+    def test_tampered_source_facts_envelope_is_blocked(self):
+        """⭐ 对照物本身必须可信：payload 改了、digest 没改 → 不是「锚对不上」，是整份不可信。
+
+        不复算 digest 的话，手写一份「只有一个与恶意收据同值的 root_digest」的最小 JSON
+        就能当本地来源的信任锚——本地锚的全部可信度就来自这条对账。
+        """
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
+            self._relocalize(envelope, evidence)
+            self._write_source_facts(root, root_digest="d" * 64)
+            path = os.path.join(root, "source_facts.json")
+            with open(path, encoding="utf-8") as src:
+                doc = json.load(src)
+            doc["payload"]["local_checkout"]["root_digest"] = self.DIGEST   # 改成对上
+            _write_json(path, doc)                                          # digest 不动
+            errors = self._run(root, caseset, envelope, evidence)
+            self.assertTrue(any("不可读" in e or "不可信" in e for e in errors), errors)
+
+    def test_explicit_source_facts_path_that_does_not_exist_is_blocked(self):
+        """⭐ 显式指路指空 ≠ 自动发现落空：一个 typo 不能把整条对账悄悄关掉。"""
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
+            errors = []
+            G._gate_cpp_extension_receipt(
+                root, caseset, envelope, evidence, errors,
+                source_facts_path=os.path.join(root, "nope", "source_facts.json"))
+            self.assertTrue(errors, "显式 --source-facts 指不到文件必须阻断")
+
+    def test_pull_request_anchor_must_match_source_facts_too(self):
+        """⭐ 拿得到对照物时，PR 通路的锚也要核——不能只有本地通路被查。
+
+        `preflight_aclnn` 那条 head 校验比的是 `pr_facts ↔ source_facts`，
+        **不是** `build receipt ↔ source_facts`：build 出来的 `.so` 对应哪个 commit，
+        在这条改动之前没人核过。
+        """
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
+            self._write_source_facts(root, dut_source="pull_request", head_sha="b" * 40)
+            errors = self._run(root, caseset, envelope, evidence)
+            self.assertTrue(any("不相等" in e for e in errors), errors)
+
+    def test_pull_request_anchor_matching_source_facts_passes(self):
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
+            head = envelope["cpp_extension_receipt"]["vendor"]["build_receipt"][
+                "source"]["pr_head_sha"]
+            self._write_source_facts(root, dut_source="pull_request", head_sha=head.lower())
             self.assertEqual([], self._run(root, caseset, envelope, evidence))
 
 

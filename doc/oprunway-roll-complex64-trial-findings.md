@@ -4,14 +4,30 @@
 **来源**：远端 `/mnt/docker/libotao2/OpRunway-main` 上的 aclnnRoll complex64 验收试跑
 **会话**：`53dc004f-91fe-4069-8f31-258cd8b23cc0`（2026-08-05 02:44 → 06:09）
 **产物**：`reports/aclnnRoll-{out,source,cp-a}/`、`aclnnRoll.spec.json`、`aclnnRoll-acceptance-report.md`
-**本文用途**：交给后续 session 做修复。**本文只描述问题，不含任何已实施的改动。**
+**本文用途**：交给后续 session 做修复。写成时**不含任何已实施的改动**。
 **审修**：已过一轮 `codex exec -m gpt-5.6-sol` 对抗审（16 条 finding，逐条回仓核实后修正；
-其中 1 条 Critical 推翻了初稿的一处修法建议，见 §2 C3）。
+其中 1 条 Critical 推翻了初稿的一处修法建议，见 §2 C3）。该轮对抗审只反映**成文当时**的仓状态。
 
 ---
 
 > **📍 本文是问题清单（诊断），不是实施方案。**
-> 要动手请从交接入口进：`doc/oprunway-session-handoff-2026-08-05.md`
+> 要动手请从交接入口进：`doc/oprunway-session-handoff-2026-08-05-evening.md`
+
+---
+
+## 实施状态（成文之后的变化，动手前先读这一节）
+
+本文写于实施之前，随后**同一次 push 里已经落地了其中两项**。
+下面这些段落描述的仍是「成文当时」的状态，读的时候要按这张表打折：
+
+| 本文段落 | 成文时的说法 | 当前实际 |
+|---|---|---|
+| §2 B2「本地仓作为 DUT 没有一等公民通路」 | 现象 + 待修 | **代码已落地**：`fetch_source.py --local-repo/--op-subdir`、`dut_source` 判别式、`cpp_extension` 主链与三级门全部接通，并有单测。**但一次 NPU 验收都没跑过**——「代码接通」不等于「验收跑通」 |
+| §6「runner_form 准入收敛」建议 (b) 白名单门 | 待探索方案 | **已落地**：`run_workflow._ACCEPTANCE_RUNNER_FORMS = {"cpp_extension"}`，入口 + 写裁决前双门，逃生阀 `--allow-experimental-form` 只产 `evidence_grade="development"` 的非验收产物；`AGENTS.md` §4/§9 已同步 |
+| §5「代码仓本地路径 ❌ 不支持」那张表 | ❌ 不支持 | ✅ 已支持（同 B2；dirty 默认拒，`--allow-dirty` 显式降级并记账） |
+| §6「仓规现在写着三条都能产验收裁决」 | 与仓规有张力、需改仓规 | 张力已消：仓规已改成只有 `cpp_extension` 准入 |
+
+其余各项仍未实施。**动手前逐项以 `AGENTS.md` 和现行代码复核**，别照着旧建议重做一遍。
 
 ---
 
@@ -269,7 +285,7 @@ gen_cases 拿这组全 None 去调 golden。
 
 ---
 
-#### B2 · 本地仓作为 DUT 没有一等公民通路 【必修·架构级】
+#### B2 · 本地仓作为 DUT 没有一等公民通路 【必修·架构级】【✅ 代码已落地，但**未经真机验收**——见文首「实施状态」】
 
 **现象**：`fetch_source.py` 只接受 `--pr <gitcode 链接>`。用户给本地目录时无路可走。
 
@@ -628,7 +644,7 @@ if not isinstance(g, dict):
 | 项 | 状态 |
 |---|---|
 | 任务书本地路径 | ✅ **已支持**——`fetch_source.py --taskdoc <本地 md>`，Roll 这次就是这么用的（日志 179） |
-| 代码仓本地路径 | ❌ **不支持**——即 §2 B2，`fetch_source.py` 只有 `--pr <gitcode 链接>` |
+| 代码仓本地路径 | ✅ **已支持**（成文后落地）——`fetch_source.py --local-repo <仓根> --op-subdir <算子子目录>`；dirty 默认拒、`--allow-dirty` 显式降级并记账。⚠ 代码链接通 ≠ 已验收：本地来源一次 NPU 都没跑过 |
 
 **B2 已列的**：来源联合 schema、`--local-repo`、消费者同步、dirty 规则、双向测试。
 
@@ -717,7 +733,8 @@ _U3_BASELINE_NUMPY = "2.4"
 ⚠ **两个档的强弱正好互补**：legacy 轴多但抽样、rank 上不去；torch_parity 不抽样、rank 到 8，
 但 shape 退化、值域单一、无特殊场景。**任何一个单独都覆盖不全。**
 
-**这个轴集缺口有实证代价**：Median 1152 基线的 58 条失败**全部**落在 `[262144,1,1,...]`
+**这个轴集缺口有实证代价**：Median 1152 基线的 **51** 条失败**全部**落在 `[262144,1,1,...]`
+（58 属上一轮 1344-case checkpoint，别与 1152 基线混写）
 —— 正是因为 shape 轴退化成「首轴长 + 其余全 1」，**真实多维 shape 一条没测**。
 `doc/oprunway-execution-direction-review-checklist.md` §6 自己也标了两个待确认项：
 「shape 主要为 `[N,1,1,...]` | **是否补真实多维 shape**」「输入值域 uniform `[-5,5]` | **是否补 tie、极值、NaN/Inf**」。
@@ -875,14 +892,15 @@ _RUNNER_FORM_TO_MODE = {
 }
 ```
 
-三条都是 `AGENTS.md` §4 认定的真机验收通路。
+三条都有执行映射，但**只有 `cpp_extension` 准入正式验收**（成文后已收敛，见文首「实施状态」）；
+`cpp` / `aclnn_py` 需 `--allow-experimental-form`，且只产 `evidence_grade="development"` 的非验收产物。
 
 **支持这个决定的证据**（真机成熟度确实不齐）：
 
 | 通路 | 真机坐实情况（`AGENTS.md` §9） |
 |---|---|
 | `cpp_extension` | Median PR6429 **1152 例**完整矩阵，`gate.passed=true`，确定性裁决 `FAIL(精度)` ← 唯一跑通完整验收的 |
-| `aclnn_py` | Median 历史 60/60 与本次 56 例，`AGENTS.md` 明写「历史 Median 60/60 来自 aclnn_py，**只证明旧 caseset**；迁移到 torch_parity + cpp_extension 后必须重跑，不得沿用旧 PASS」 |
+| `aclnn_py` | 只有旧 caseset 的历史结果（Median 60/60；另有 08-03 手工构造 `pr_facts` 那次的 56 例，**都不是本次 Roll**——本次 Roll 只生成 50 例、Task2 一例未跑）。`AGENTS.md` 明写「历史 Median 60/60 来自 aclnn_py，**只证明旧 caseset**；迁移到 torch_parity + cpp_extension 后必须重跑，不得沿用旧 PASS」 |
 | `cpp` (`new_example`) | IsClose / Sign 坐实，但 dtype 闭环只到 fp32/fp16/bf16，int 走 `DEFERRED_NP_BY_FORM` |
 
 而且 `torch_parity` 完整矩阵目前**只在 `cpp_extension` 上验证过**——
@@ -901,8 +919,8 @@ _RUNNER_FORM_TO_MODE = {
    且该通路**不产 `acceptance.json`**（比照 mock 通路的处理：产带
    `evidence_grade="development"` + NON-ACCEPTANCE 标记的产物）。
    完全删掉会让 `aclnn_py` 的现有能力无法回归验证，将来想恢复得从头再来。
-3. **⚠ 与 `AGENTS.md` §4 的张力必须显式处理**。仓规现在写着「三条都是真机验收通路、
-   都能产验收裁决」。堵死两条 = **改仓规**，不能只改代码——
+3. **与 `AGENTS.md` §4 的张力**（✅ 已处理）。成文时仓规写着「三条都是真机验收通路、
+   都能产验收裁决」；现在 §4/§9 已改成只有 `cpp_extension` 准入。堵死两条 = **改仓规**，不能只改代码——
    否则下一个 session 读 `AGENTS.md` 会以为 `aclnn_py` 可用，撞上门再来问为什么。
    建议：`AGENTS.md` §4 的表加一列「当前是否用于正式验收」，
    并把理由（真机成熟度）写清楚，而不是只写「禁用」。
@@ -956,7 +974,9 @@ _RUNNER_FORM_TO_MODE = {
 
 ---
 
-**本文档不包含任何已实施的改动。** 后续 session 修复时请按 §4 的优先级推进，
+**本文档最初记录的是未实施的建议；截至本次 push，其中一部分已经落地**（见文首「实施状态」）。
+后续 session 动手前必须先按 `AGENTS.md` 与现行代码逐项复核状态，不要照着旧建议重做一遍。
+其余未实施项请按 §4 的优先级推进，
 §6 的六项目标按 §6.x 的建议顺序推进；每项落地后在
 `doc/oprunway-changes-brief.md` 顶部追加一行倒序摘要。
 

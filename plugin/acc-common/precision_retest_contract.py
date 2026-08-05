@@ -522,7 +522,9 @@ def materialize_attempt(directive, reports_dir, execution_identity):
     # `validate_directive` 已经跑过同一个 helper，故这里不可能抛。
     directive_kind, directive_anchor_field, directive_anchor_value = (
         dut_source.validate_build_receipt_source(
-            d["source_identity"], where="directive.source_identity"))
+            d["source_identity"],
+            expected_kind=dut_source.NO_EXPECTED_KIND,   # directive 自己就是被比对的那一侧
+            where="directive.source_identity"))
     anchor_provenance_key = _provenance_anchor_key(
         directive_anchor_field, "directive.source_identity")
     runner_binding = None
@@ -684,7 +686,9 @@ def validate_directive(directive, *, require_confirmed=False):
         # 下面「只有 relaxed_rerun 可带 precision_override」那道校验悄悄改判。
         source_kind, anchor_field, _anchor_value = (
             dut_source.validate_build_receipt_source(
-                source, where="directive.source_identity"))
+                source,
+                expected_kind=dut_source.NO_EXPECTED_KIND,   # 此处只校 directive 自身形态
+                where="directive.source_identity"))
     except dut_source.DutSourceError as ex:
         raise RetestContractError(f"source_identity 来源锚不合法：{ex}") from ex
     # `repo` 是本批新增的必填，旧 directive 因此失效（见模块 docstring）。

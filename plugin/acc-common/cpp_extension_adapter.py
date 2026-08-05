@@ -288,7 +288,9 @@ def _validate_vendor_build_receipt(vendor):
     # （validate_acceptance_state）里做，见 dut_source.validate_build_receipt_source 的 ⚠。
     try:
         dut_source.validate_build_receipt_source(
-            build_receipt.get("source"), where="receipt.vendor.build_receipt.source")
+            build_receipt.get("source"),
+            expected_kind=dut_source.NO_EXPECTED_KIND,   # adapter 手上没有 source_facts
+            where="receipt.vendor.build_receipt.source")
     except dut_source.DutSourceError as ex:
         raise CppExtensionAdapterError(
             f"receipt.vendor.build_receipt 的来源锚不完整：{ex}") from ex

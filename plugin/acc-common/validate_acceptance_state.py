@@ -21,7 +21,11 @@ OPRUNWAY_DONE 哨兵 / raw log hash / msprof 输出绑定（本轮不做）；�
 import argparse, hashlib, json, math, os, statistics, sys
 from collections import Counter
 
+import content_address
 import dut_source
+
+# `source_facts.json` 的内容寻址 domain（与 `fetch_source.write_source_facts` 同一个真源）。
+_SOURCE_FACTS_DOMAIN = "oprunway/source-facts/v1"
 
 # T6/T8 扩枚举：exception=小shape例外(合法放行需交叉校验)；
 # blocked_wait_gpu_benchmark=缺外部 GPU 标杆正规挂起；blocked_incomparable_timing_scope=双边口径不可比。
@@ -813,26 +817,68 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
 
 
 def _find_source_facts(d, source_facts_path=None):
-    """定位 `source_facts.json`：显式路径 → `<d>/` → `<d>/work/`。找不到返回 None。
+    """定位并**验摘要**读出 `source_facts.json`：显式路径 → `<d>/` → `<d>/work/`。
+
+    三态返回：payload dict / `None`（自动发现时没找到）/ `"__BAD__"`（找到但不可信）。
 
     ⚠ 实测：真机 cpp_extension 验收的报告目录（`reports/<Op>-spec-<x>/`）里**没有**
     `source_facts.json`——取材的 `--out` 与验收产物目录不是同一个。所以这里必须能被
     显式指路，且「找不到」的处置要按通路分（见 `_gate_build_receipt_source_binding`）。
+
+    ⚠ **显式路径不存在 ≠ 没找到**。自动发现落空是常态（上面那条实测），可以按通路分处置；
+    但调用方明确把 `--source-facts` 指过来，说明它认定有这份对照物——路径打错却退成
+    「没找到」，等于一个 typo 就把整条对账悄悄关掉。所以显式路径缺席一律 `"__BAD__"`。
+
+    ⚠ **必须验内容寻址 envelope**。`fetch_source.write_source_facts` 落的是
+    `{schema_version, domain, digest, payload}` 信封，`digest` 由 payload 算出。
+    只 `json.load` 取 `payload` 而不复算 digest，等于「随手编一份最小 JSON
+    （只写一个与恶意收据同值的 `local_checkout.root_digest`）就能当本地来源的信任锚」。
+    没有 envelope 形态（`digest`/`payload` 缺失）同样拒：那不是 fetch_source 的产物。
+
+    ⚠ **但 digest 自洽远远不够，还必须过完整契约**。digest 是可以自己重算的——
+    用 `content_address.make_artifact` 包一个只含「与收据同值的 root_digest」的最小 payload，
+    照样 digest 自洽。更要命的是 `completeness.status="blocked"` 的真实取材产物：
+    它是 fetch_source 亲手产的、digest 完全正确，但仓规写死了「blocked 的事实索引只供诊断」。
+    拿它当本地来源的信任锚，正是「不完整证据被静默升级为可裁决」。
+    所以这里**复用** `validate_preparation_state._validate_source_payload`——
+    它已经在校 taskdoc/key_files 锚/两条通路必填集/`completeness=complete 且 reasons=[]`/
+    warnings 与载重事实一致/`producer.tool`。另写一份判据只会分叉。
+
+    ⚠ `source_facts_path` 判「是否显式指定」用 `is not None` 而**不是** `bool()`：
+    空字符串（空环境变量展开出来的常见形态）在 `bool()` 下会被当成「没显式指定」，
+    于是悄悄退回自动发现，用户明确要求的那条对账就此关掉。空串按显式处理 → `__BAD__`。
     """
-    for path in ([source_facts_path] if source_facts_path else
+    explicit = source_facts_path is not None
+    for path in ([source_facts_path] if explicit else
                  [os.path.join(d, "source_facts.json"),
                   os.path.join(d, "work", "source_facts.json")]):
-        if path and os.path.isfile(path):
-            try:
-                with open(path, encoding="utf-8") as src:
-                    doc = json.load(src)
-            except (OSError, ValueError):
-                return "__BAD__"
-            if isinstance(doc, dict):
-                payload = doc.get("payload")
-                return payload if isinstance(payload, dict) else doc
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as src:
+                doc = json.load(src)
+        except (OSError, ValueError):
             return "__BAD__"
-    return None
+        if not isinstance(doc, dict):
+            return "__BAD__"
+        payload = doc.get("payload")
+        if not isinstance(payload, dict) or not isinstance(doc.get("digest"), str):
+            return "__BAD__"
+        try:
+            actual = content_address.content_digest(_SOURCE_FACTS_DOMAIN, payload)
+        except content_address.ContentAddressError:
+            return "__BAD__"
+        if (doc.get("domain") != _SOURCE_FACTS_DOMAIN
+                or doc.get("schema_version") != 1
+                or doc["digest"] != actual):
+            return "__BAD__"
+        import validate_preparation_state       # 惰性：只有走到这里才需要，避免顶层多一条依赖
+        try:
+            validate_preparation_state._validate_source_payload(payload)
+        except content_address.ContentAddressError:
+            return "__BAD__"
+        return payload
+    return "__BAD__" if explicit else None
 
 
 def _gate_build_receipt_source_binding(d, source, errs, source_facts_path=None):
@@ -844,9 +890,15 @@ def _gate_build_receipt_source_binding(d, source, errs, source_facts_path=None):
     两步，顺序不能颠倒（`dut_source.validate_build_receipt_source` 的 ⚠ 讲了为什么）：
 
       第 0 步：`receipt.source.dut_source == source_facts.dut_source`，不等即 BLOCKED；
-      第 1 步：按通路分支核锚值相等 ——
-               `pull_request`   → 沿用既有 PR head 形态校验（锚值绑定在别处，本批不改）；
+      第 1 步：**两条通路都**核锚值相等 ——
+               `pull_request`   → `pr_head_sha == source_facts.pr.head_sha`；
                `local_checkout` → `local_root_digest == source_facts.local_checkout.root_digest`。
+
+    ⚠ **PR 通路的锚值以前不在这里比**（只比了 kind），这是一处不对称：本地通路
+    「摘要对不上就 BLOCKED」，PR 通路却允许收据填一个与 `source_facts` **不同**的 head。
+    `preflight_aclnn` 里那条 head 校验比的是 `pr_facts ↔ source_facts`，**不是**
+    `build receipt ↔ source_facts`——build 出来的 `.so` 对应哪个 commit，之前没人核。
+    对照物既然已经读进来了，两条通路就按同一口径核，不留「按通路给不同待遇」的面。
 
     **`source_facts` 找不到时的处置按通路分**（这条边界是实测逼出来的，不是保守起见）：
 
@@ -855,15 +907,18 @@ def _gate_build_receipt_source_binding(d, source, errs, source_facts_path=None):
     | `local_checkout` | **BLOCKED** | 本地锚的**全部**可信度就来自这条等值校验。没有对照物就等于没绑定，而这是新通路、没有历史包袱 |
     | `pull_request` | 沿用旧行为（不阻断） | 实测真机报告目录里本来就没有 `source_facts.json`（取材 `--out` 与验收产物目录不同），硬要求会把现有 PR 通路整条打断 |
 
-    ⚠ 残留面（如实记账，别当已封）：`source_facts` 缺席 + 收据声明 `pull_request` 时，
-    「source_facts 其实说的是 local」这种伪装查不出来。要彻底封死，得让编排层
+    ⚠ 残留面（如实记账，别当已封）：`source_facts` **自动发现**落空 + 收据声明 `pull_request`
+    时，「source_facts 其实说的是 local」这种伪装查不出来。要彻底封死，得让编排层
     **总是**把 `--source-facts` 指给本门；在那之前这里只能做到「拿得到就一定核」。
+    注：显式给了 `--source-facts` 却指不到文件**不属于**这条残留面——那按 `__BAD__` 阻断。
     """
     # ① 先无条件校收据自身的来源锚形态（PR → 40 位 pr_head_sha / 本地 → 64 位 local_root_digest）。
     #    这一步**与 source_facts 在不在无关**——收据自己就该是完整的。
     try:
         kind, anchor_field, anchor_value = dut_source.validate_build_receipt_source(
-            source, where="vendor build receipt.source")
+            source,
+            expected_kind=dut_source.NO_EXPECTED_KIND,   # ② 才拿得到对照物，这一步只校形态
+            where="vendor build receipt.source")
     except dut_source.DutSourceError as ex:
         errs.append(
             f"cpp_extension vendor build receipt 未完整绑定 被测来源→构建→安装 ELF："
@@ -886,17 +941,17 @@ def _gate_build_receipt_source_binding(d, source, errs, source_facts_path=None):
         want_kind = dut_source.of(facts, where="source_facts")
         kind, anchor_field, anchor_value = dut_source.validate_build_receipt_source(
             source, expected_kind=want_kind, where="vendor build receipt.source")
+        # 锚一律经 `identity()` 取，不按字段名去 facts 里翻——本地事实里合法地存在
+        # `local_checkout.git.head_sha`，它是信息字段、不是锚。
+        _fkind, facts_anchor_field, facts_anchor_value = dut_source.identity(
+            facts, where="source_facts")
     except dut_source.DutSourceError as ex:
         errs.append(f"cpp_extension vendor build receipt 与 source_facts 来源不一致：{ex}")
         return
-    if kind != dut_source.LOCAL_CHECKOUT:
-        return                                   # PR 通路的 head 绑定沿用既有校验，一行不改
-    facts_digest = (facts.get("local_checkout") or {}).get("root_digest")
-    if not isinstance(facts_digest, str) or facts_digest.lower() != anchor_value:
+    if (facts_anchor_field, facts_anchor_value) != (anchor_field, anchor_value):
         errs.append(
             f"cpp_extension vendor build receipt 的 {anchor_field}={anchor_value[:12]}… 与 "
-            f"source_facts.local_checkout.root_digest="
-            f"{(facts_digest or '（缺失）')[:12]}… 不相等——"
+            f"source_facts 的 {facts_anchor_field}={str(facts_anchor_value)[:12]}… 不相等——"
             f"vendor .so 与被测源码之间没有机器可核的对应关系，BLOCKED")
 
 

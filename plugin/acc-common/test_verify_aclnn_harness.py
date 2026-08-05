@@ -413,6 +413,9 @@ _LOCAL_BINDINGS = {
     "local_root_digest": "c" * 64,
 }
 
+# `bindings` 整个 key 缺席（区别于「值是 None」）的哨兵。
+_ABSENT = object()
+
 
 def _write_gate_root(root, bindings):
     """铺一个「刚够走到通路门」的根目录：spec/caseset/preflight 齐，work/ 空着即可。
@@ -422,8 +425,15 @@ def _write_gate_root(root, bindings):
     """
     spec = {"op": "Reduce", "runner_form": "aclnn_py"}
     caseset, preflight = _fixtures()
-    preflight["bindings"] = dict(bindings)
-    preflight["bindings"]["spec_sha256"] = H._sha(spec)
+    if bindings is _ABSENT:
+        preflight.pop("bindings", None)
+    elif isinstance(bindings, dict):
+        preflight["bindings"] = dict(bindings)
+        preflight["bindings"]["spec_sha256"] = H._sha(spec)
+    else:
+        # 形态见证专用：畸形 bindings 原样落盘（spec_sha256 无处可挂），
+        # 用来证明门在读任何字段之前就已经把形态判掉了。
+        preflight["bindings"] = bindings
     os.makedirs(os.path.join(root, "work"), exist_ok=True)
     with open(os.path.join(root, "spec.json"), "w", encoding="utf-8") as out:
         json.dump(spec, out)
@@ -501,6 +511,91 @@ class SourcePathGateTest(unittest.TestCase):
             H._validate_build_provenance(
                 _build_provenance_fixture(), _execution_fixture(),
                 {"bindings": {"dut_source": "local"}})   # 拼错
+
+    def test_malformed_bindings_is_fail_closed(self):
+        """`bindings` 形态不对 = 来源判不出来，不许 `or {}` 抹平成「缺席即 PR」。
+
+        `dut_source.of()` 的「缺席即 pull_request」只为**旧收据的空 object** 而设；
+        把 None / list / 字符串一并抹成 `{}`，等于让「根本没有来源声明」冒充
+        「明确声明 pull_request」——本地通路的 preflight 只要 bindings 丢了形态，
+        这道门就会当场放行。
+        """
+        for label, preflight in (
+                ("缺席", {}),
+                ("None", {"bindings": None}),
+                ("list", {"bindings": []}),
+                ("字符串", {"bindings": "pull_request"}),
+        ):
+            with self.subTest(label):
+                with self.assertRaisesRegex(
+                        ValueError, "bindings 缺失或不是 JSON object"):
+                    H._validate_build_provenance(
+                        _build_provenance_fixture(), _execution_fixture(),
+                        preflight)
+
+    def test_empty_bindings_object_still_reads_as_pull_request(self):
+        """空 object 是**合法**形态，必须继续走向后兼容的「缺席即 pull_request」。
+
+        钉住这条边界，免得下一轮把「形态硬化」顺手收紧成「bindings 必须非空」——
+        那会让本门接入之前产出的旧 PR 通路收据一夜之间全部失效。
+        """
+        self.assertEqual(
+            H._require_pull_request_path({"bindings": {}}), "pull_request")
+
+    def test_validate_receipt_blocks_malformed_bindings_before_real_machine_config(self):
+        """CP-D 复核入口是 `bindings` 的第一次触碰——门必须赶在读真机配置之前打响。"""
+        with tempfile.TemporaryDirectory() as root:
+            spec = {"op": "Reduce", "runner_form": "aclnn_py"}
+            caseset, preflight = _fixtures()
+            preflight["bindings"] = None
+            os.makedirs(os.path.join(root, "work"), exist_ok=True)
+            content_address.write_artifact(
+                root, "work/aclnn_preflight.json", H._PREFLIGHT_DOMAIN, preflight)
+            content_address.write_artifact(
+                root, "work/aclnn_harness_trust.json", H._TRUST_DOMAIN, {
+                    "schema": H._SCHEMA, "schema_version": 1,
+                    "status": H._STATUS_TRUSTED, "scope": "harness-only",
+                    "acceptance_verdict": None, "bindings": {},
+                    "coverage": {}, "checks": [], "build_provenance": {},
+                })
+            with mock.patch.object(
+                    H.aclnn_adapter, "_aclnn_cfg",
+                    side_effect=AssertionError("bindings 畸形时不得走到 _aclnn_cfg()")):
+                with self.assertRaisesRegex(
+                        ValueError, "bindings 缺失或不是 JSON object"):
+                    H.validate_receipt(
+                        root, "work/aclnn_harness_trust.json", spec, caseset)
+
+    def test_run_gate_blocks_malformed_bindings_at_the_spec_binding_check(self):
+        """`run_gate` 的 spec 绑定核对排在通路门**之前**，是 `bindings` 最早的触碰点。
+
+        它必须走同一套显式形态校验：`or {}` 之下 None / `[]` 会报「与当前 spec 不绑定」
+        （fail-closed，但把「形态判不出来」说成「绑错了 spec」），非空字符串 / 非空 list
+        则让 `.get` 直接抛 AttributeError——裸 traceback，不在调用方的收敛清单里。
+        断言收在 ValueError 上，AttributeError 逃逸时本用例即红。
+        """
+        for label, bindings in (
+                ("缺席", _ABSENT),
+                ("None", None),
+                ("空 list", []),
+                ("非空 list", ["pull_request"]),
+                ("字符串", "pull_request"),
+        ):
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as root:
+                    _write_gate_root(root, bindings)
+                    with mock.patch.dict(
+                            os.environ, {"OPRUNWAY_ACLNN_REAL": "1"}), \
+                            mock.patch.object(
+                                H.aclnn_adapter, "_aclnn_cfg",
+                                side_effect=AssertionError(
+                                    "bindings 畸形时不得走到 _aclnn_cfg()")):
+                        with self.assertRaisesRegex(
+                                ValueError, "bindings 缺失或不是 JSON object"):
+                            H.run_gate(
+                                root, "spec.json", "caseset.json",
+                                "work/aclnn_preflight.json",
+                                "work/aclnn_harness_trust.json")
 
     def test_preflight_without_40hex_pr_head_is_blocked(self):
         """CP-C0 没绑定合法 PR head 就没有可交叉核的锚——不能靠 cfg 形态偶然兜住。"""

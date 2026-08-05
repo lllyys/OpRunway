@@ -121,7 +121,9 @@ def _vendor_build_provenance(vendor):
     # driver 侧独立再校一遍，不依赖 adapter 已经校过——两处都是信任边界。
     try:
         dut_source.validate_build_receipt_source(
-            receipt.get("source"), where="vendor build receipt.source")
+            receipt.get("source"),
+            expected_kind=dut_source.NO_EXPECTED_KIND,   # driver 手上没有 source_facts
+            where="vendor build receipt.source")
     except dut_source.DutSourceError as ex:
         raise DriverError(f"vendor build receipt 的来源锚不完整：{ex}") from ex
     build = receipt.get("build")

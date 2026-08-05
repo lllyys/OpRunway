@@ -3,17 +3,26 @@ import os
 import tempfile
 import unittest
 
+import content_address
 import render_acceptance_markdown as R
 
 PR_HEAD = "a" * 40
 LOCAL_DIGEST = "b" * 64
 OTHER_DIGEST = "c" * 64
 LOCAL_GIT_HEAD = "d" * 40
+_FACTS_DOMAIN = "oprunway/source-facts/v1"
 
 
-def _receipt(source):
-    """最小 cpp_extension 收据：本节只读 `vendor.build_receipt.source`。"""
-    return {"vendor": {"build_receipt": {"source": source}}}
+def _receipt(source, **build_receipt_overrides):
+    """最小 cpp_extension 收据。
+
+    默认带 `VERIFIED v1` 的收据壳：provenance 节的强度断言以「收据已核验」为前提，
+    没有这三个字段它连锚都不看（见 `_provenance_section` 的分支 ②）。
+    """
+    br = {"schema": "oprunway.vendor_build_receipt", "schema_version": 1,
+          "status": "VERIFIED", "source": source}
+    br.update(build_receipt_overrides)
+    return {"vendor": {"build_receipt": br}}
 
 
 def _docs(receipt):
@@ -41,28 +50,34 @@ def _docs(receipt):
 
 
 def _write_docs(root, docs, source_facts=None, source_facts_raw=None):
-    """落盘产物；`source_facts` 按 content_address envelope 写（外层带 `payload`），
-    因为 `_find_source_facts` 会优先解包 `payload`——夹具形状必须与真产物一致。"""
+    """落盘产物；`source_facts` 按**真** content_address envelope 写。
+
+    ⚠ 夹具必须走 `make_artifact` 而不是手拼 `{"payload": …}`：`_find_source_facts` 会复算
+    digest，手拼信封没有 digest 就会被判 `__BAD__`——那样这些用例测的其实是「读不出」分支，
+    看着绿、覆盖的却不是它们声称覆盖的路径。
+    """
     for name, value in docs.items():
         with open(os.path.join(root, name), "w", encoding="utf-8") as out:
             json.dump(value, out)
     path = os.path.join(root, "source_facts.json")
     if source_facts is not None:
         with open(path, "w", encoding="utf-8") as out:
-            json.dump({"payload": source_facts}, out)
+            json.dump(content_address.make_artifact(_FACTS_DOMAIN, source_facts), out)
     elif source_facts_raw is not None:
         with open(path, "w", encoding="utf-8") as out:
             out.write(source_facts_raw)
 
 
-def _local_facts(root_digest=LOCAL_DIGEST, git=None, op_subdir="ops/x"):
-    facts = {
-        "dut_source": "local_checkout",
-        "local_checkout": {"root_digest": root_digest, "op_subdir": op_subdir},
-    }
-    if git is not None:
-        facts["local_checkout"]["git"] = git
-    return facts
+def _local_facts(root_digest=LOCAL_DIGEST, git=None, op_subdir="ops/x",
+                 completeness=None):
+    """⚠ 用共享的**完整契约** payload：渲染器复用三级门的 `_find_source_facts`，
+    而那道门会拿 `validate_preparation_state._validate_source_payload` 校这份对照物。
+    只塞一个 `root_digest` 的最小 payload 会被判 `__BAD__`，用例就测不到它想测的分支。
+    """
+    from test_validate_cpp_extension_receipt import source_facts_payload
+    return source_facts_payload(
+        dut_source="local_checkout", root_digest=root_digest,
+        git=git, completeness=completeness, op_subdir=op_subdir)
 
 
 class RenderAcceptanceMarkdownTest(unittest.TestCase):
@@ -303,3 +318,123 @@ class ProvenanceSectionTest(unittest.TestCase):
         self.assertNotIn("clean", text.replace(R.PROV_DIRTY_UNKNOWN, ""))
         for caveat in R.PROV_LOCAL_CAVEATS:
             self.assertIn(caveat, text)
+
+    def test_tampered_source_facts_envelope_is_not_trusted(self):
+        """⭐ payload 被改、digest 没跟着改 → 整份不可信，退「未知」而不是照采信。
+
+        对照物的可信度是本地锚的全部依据；不复算 digest 的话，随手编一份最小 JSON
+        就能给一份可能 dirty 的 checkout 发 clean 证明。
+        """
+        with tempfile.TemporaryDirectory() as root:
+            _write_docs(root, _docs(_receipt(
+                {"dut_source": "local_checkout", "repo": "cann/ops-nn",
+                 "local_root_digest": LOCAL_DIGEST})),
+                source_facts=_local_facts(git={
+                    "head_sha": LOCAL_GIT_HEAD, "dirty": True,
+                    "dirty_files": ["a.cpp"], "dirty_files_in_op_subdir": ["a.cpp"]}))
+            path = os.path.join(root, "source_facts.json")
+            with open(path, encoding="utf-8") as src:
+                doc = json.load(src)
+            doc["payload"]["local_checkout"]["git"]["dirty"] = False   # 洗白，digest 不动
+            doc["payload"]["local_checkout"]["git"]["dirty_files"] = []
+            with open(path, "w", encoding="utf-8") as out:
+                json.dump(doc, out)
+            text = R.render(root)
+        self.assertIn(R.PROV_DIRTY_UNKNOWN, text)
+        self.assertNotIn(R.PROV_DIRTY_CLEAN, text)
+
+    def test_complete_facts_without_git_key_render_not_a_git_repo(self):
+        text = self._render(
+            _receipt({"dut_source": "local_checkout", "repo": "cann/ops-nn",
+                      "local_root_digest": LOCAL_DIGEST}),
+            source_facts=_local_facts())
+        self.assertIn(R.PROV_DIRTY_NOT_GIT, text)
+
+
+    def test_clean_worktree_still_renders_clean(self):
+        """收紧不能误伤正例：dirty=false + 空清单 = 真的干净。"""
+        text = self._render(
+            _receipt({"dut_source": "local_checkout", "repo": "cann/ops-nn",
+                      "local_root_digest": LOCAL_DIGEST}),
+            source_facts=_local_facts(git={
+                "head_sha": LOCAL_GIT_HEAD, "dirty": False,
+                "dirty_files": [], "dirty_files_in_op_subdir": []}))
+        self.assertIn(R.PROV_DIRTY_CLEAN, text)
+
+    def test_unverified_build_receipt_makes_no_provenance_claim(self):
+        """⭐ 锚形态合法 ≠ 收据可信：没 VERIFIED 就不能出「可证明验的就是…」这类强度断言。"""
+        for label, override in (
+                ("status 非 VERIFIED", {"status": "PENDING"}),
+                ("schema 不对", {"schema": "something.else"}),
+                ("schema_version 不对", {"schema_version": 2}),
+        ):
+            with self.subTest(label):
+                text = self._render(_receipt(
+                    {"repo": "cann/ops-nn", "pr_head_sha": PR_HEAD}, **override))
+                self.assertIn("本节不作任何 provenance 断言", text)
+                self.assertNotIn(f"| PR head | `{PR_HEAD}` |", text)
+                self.assertNotIn(PR_HEAD, text)
+                self.assertIn("## 精度汇总", text)      # 报告本体照出
+
+
+class LocalRowsSecondLineOfDefenceTest(unittest.TestCase):
+    """`_local_rows` 自己那层形态判定——**第二道防线**，所以只能直调来见证。
+
+    这些畸形 payload 走不到渲染层：`_find_source_facts` 已经拿
+    `validate_preparation_state._validate_source_payload` 把它们判成 `__BAD__` 了
+    （contract 那层同样校 `completeness`、`dirty ↔ dirty_files`）。
+    早一层拦住是好事，但**不能因此把渲染层这几条删掉**：渲染层的职责是
+    「拿到什么都不许说成 clean」，它不该依赖上游一定筛干净。
+    这里直调 `_local_rows` 就是为了让第二道防线有独立见证，不被第一道遮住。
+    """
+
+    IDENT = ("local_checkout", "local_root_digest", LOCAL_DIGEST)
+
+    def _rows(self, **kw):
+        return "\n".join(R._local_rows(_local_facts(**kw), self.IDENT))
+
+    def test_incomplete_source_facts_is_unknown_not_non_git(self):
+        """⭐ 残缺事实包里 `git` 键缺席，含义是「不知道」，不是「不是 git 仓」。"""
+        text = self._rows(completeness={
+            "status": "blocked", "reasons": ["dirty_worktree_not_allowed"]})
+        self.assertIn(R.PROV_DIRTY_INCOMPLETE, text)
+        self.assertNotIn(R.PROV_DIRTY_NOT_GIT, text)
+        self.assertNotIn(R.PROV_DIRTY_CLEAN, text)
+
+    def test_dirty_true_with_empty_list_never_renders_zero_changes(self):
+        """⭐ 「有 0 项未提交改动」读起来像没事，实则自相矛盾——只能退「未知」。"""
+        text = self._rows(git={"dirty": True, "dirty_files": [],
+                               "dirty_files_in_op_subdir": []})
+        self.assertIn(R.PROV_DIRTY_MALFORMED, text)
+        self.assertNotIn("0 项未提交改动", text)
+        self.assertNotIn(R.PROV_DIRTY_CLEAN, text)
+
+    def test_dirty_false_with_nonempty_list_is_not_clean(self):
+        text = self._rows(git={"dirty": False, "dirty_files": ["a.cpp"],
+                               "dirty_files_in_op_subdir": []})
+        self.assertIn(R.PROV_DIRTY_MALFORMED, text)
+        self.assertNotIn(R.PROV_DIRTY_CLEAN, text)
+
+    def test_non_string_dirty_entry_is_not_counted(self):
+        """⭐ `dirty_files=[null]` 被 `len()` 数成 1 → 「有 1 项未提交改动」，数字是编的。"""
+        text = self._rows(git={"dirty": True, "dirty_files": [None],
+                               "dirty_files_in_op_subdir": []})
+        self.assertIn(R.PROV_DIRTY_MALFORMED, text)
+        self.assertNotIn("1 项未提交改动", text)
+
+    def test_in_op_subdir_must_be_a_subset(self):
+        """子树清单不是总清单的子集时，「被测子树内 N 项」可以大于总数——拒绝给结论。"""
+        text = self._rows(git={"dirty": True, "dirty_files": ["a.cpp"],
+                               "dirty_files_in_op_subdir": ["a.cpp", "b.cpp"]})
+        self.assertIn(R.PROV_DIRTY_MALFORMED, text)
+
+    def test_git_null_is_malformed_not_non_git(self):
+        facts = _local_facts()
+        facts["local_checkout"]["git"] = None
+        text = "\n".join(R._local_rows(facts, self.IDENT))
+        self.assertIn(R.PROV_DIRTY_MALFORMED, text)
+        self.assertNotIn(R.PROV_DIRTY_NOT_GIT, text)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -113,7 +113,16 @@ def identity(payload, *, where="payload"):
     return kind, "local_root_digest", value.lower()
 
 
-def validate_build_receipt_source(source, *, expected_kind=None, where="build_receipt.source"):
+# `expected_kind` 的「我确实没有对照物」哨兵。**不用 `None` 当默认值**：默认值会让
+# 「忘了传」与「确认过没有对照物」在调用点长得一模一样，而前者正是本模块要堵的绕过路径。
+NO_EXPECTED_KIND = "__no_expected_kind__"
+
+# 两条通路各自的**锚字段名**（build receipt `source` 里的扁平键）。
+# 与 `FACTS_KEY`（payload 里的事实**块**键名）不是一回事，别混用。
+ANCHOR_FIELD = {PULL_REQUEST: "pr_head_sha", LOCAL_CHECKOUT: "local_root_digest"}
+
+
+def validate_build_receipt_source(source, *, expected_kind, where="build_receipt.source"):
     """校验 `vendor_build_receipt.source` 并返回 `(kind, anchor_field, anchor_value)`。
 
     `vendor_build_receipt` 由**外部构建驱动**产出（本仓只消费），它回答的是
@@ -128,17 +137,25 @@ def validate_build_receipt_source(source, *, expected_kind=None, where="build_re
     }
     ```
 
-    ⚠ **`expected_kind` 这道前置校验不能省**（否则整套设计被绕过）。绕过路径是：
+    ⚠ **`expected_kind` 是必填关键字，没有默认值**（有默认值整套设计就被绕过）。绕过路径是：
     `source_facts` 声明 `local_checkout`，而 `vendor_build_receipt` 声明 `pull_request`
     并填一个**任意 40 位 hex** 当 `pr_head_sha` → 校验走进 PR 分支 →
     `local_root_digest` 那条等值校验**根本不会执行** → vendor `.so` 与被测源码的绑定完全失效。
     所以调用方必须把 `source_facts` 那边的 `dut_source` 传进来做一致性前置校验，
     **先确认两边说的是同一条通路，再按通路分支**。
+
+    手上确实没有对照物时（如 adapter/driver 只拿得到收据本身，对账在三级门做），
+    显式传 `expected_kind=dut_source.NO_EXPECTED_KIND`。它与「忘了传」必须在调用点长得不一样：
+    前者是一句写下来的声明，后者是省略——用 `None` 当默认值会把两者抹平成同一种写法。
+
+    ⚠ **两条通路的锚字段互斥**：声明 `pull_request` 却同时带 `local_root_digest`（反之亦然）
+    一律拒。锚都齐了的话，任何一个**按字段名直取**而不用本函数返回值的下游，
+    都能自选一套来源身份——那正是判别式要消灭的分叉。
     """
     if not isinstance(source, dict):
         raise DutSourceError(f"{where} 缺失或不是 JSON object")
     kind = of(source, where=where)
-    if expected_kind is not None:
+    if expected_kind != NO_EXPECTED_KIND:
         if expected_kind not in ALL:
             raise DutSourceError(f"expected_kind={expected_kind!r} 不在受控词表 {list(ALL)}")
         if kind != expected_kind:
@@ -149,15 +166,17 @@ def validate_build_receipt_source(source, *, expected_kind=None, where="build_re
     repo = source.get("repo")
     if not isinstance(repo, str) or not repo.strip():
         raise DutSourceError(f"{where}.repo 必填（两条通路都要）")
-    if kind == PULL_REQUEST:
-        value = source.get("pr_head_sha")
-        if not _is_hex(value, 40):
-            raise DutSourceError(f"{where}.pr_head_sha 不是 40 位 hex：{value!r}")
-        return kind, "pr_head_sha", value.lower()
-    value = source.get("local_root_digest")
-    if not _is_hex(value, 64):
-        raise DutSourceError(f"{where}.local_root_digest 不是 64 位 hex：{value!r}")
-    return kind, "local_root_digest", value.lower()
+    other = ANCHOR_FIELD[PULL_REQUEST if kind == LOCAL_CHECKOUT else LOCAL_CHECKOUT]
+    if other in source:
+        raise DutSourceError(
+            f"{where}.dut_source={kind} 却同时带着另一条通路的锚 {other!r}——"
+            f"两套锚齐备时，任何按字段名直取的下游都能自选来源身份，拒绝")
+    field = ANCHOR_FIELD[kind]
+    value = source.get(field)
+    if not _is_hex(value, 40 if kind == PULL_REQUEST else 64):
+        raise DutSourceError(
+            f"{where}.{field} 不是 {40 if kind == PULL_REQUEST else 64} 位 hex：{value!r}")
+    return kind, field, value.lower()
 
 
 def _is_hex(value, length):

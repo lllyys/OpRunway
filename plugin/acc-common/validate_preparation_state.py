@@ -99,13 +99,34 @@ def _validate_source_payload(source):
                 f"  收据里：{local.get('digest_policy')!r}\n"
                 f"  支持的：{fetch_source.digest_policy()!r}\n"
                 f"  → 排除规则不同则 root_digest 不可比，而外表看不出来；fail-closed。")
-        git = local.get("git")
-        if git is not None:                          # 非 git 仓 → 整键缺席是合法的
+        # 「非 git 仓」的唯一合法表示是**整键缺席**（`fetch_source` 就是这么写的）。
+        # ⚠ `git: null` 不算：`is not None` 会让它与缺席同义，于是一份被裁剪/写坏的收据
+        # 只要把 git 置空就能免掉下面全部 dirty 一致性校验，还顺带免掉 warnings 反向核对。
+        if "git" in local:
+            git = local["git"]
             if (not isinstance(git, dict)
                     or not isinstance(git.get("dirty"), bool)
-                    or not isinstance(git.get("dirty_files"), list)):
+                    or not isinstance(git.get("dirty_files"), list)
+                    or any(not isinstance(p, str) or not p
+                           for p in git["dirty_files"])):
                 raise content_address.ContentAddressError(
-                    "source_facts.local_checkout.git 契约不完整（dirty/dirty_files 必填）")
+                    "source_facts.local_checkout.git 契约不完整"
+                    "（dirty 须 bool、dirty_files 须非空字符串数组；"
+                    "非 git 仓请让 git 整键缺席，不要写 null）")
+            # ⚠ `dirty` 与清单必须互相蕴含：`dirty=false` 配非空清单会让降级 warning
+            # 整条消失（`warnings` 是按 `git.dirty` 派生的），`dirty=true` 配空清单则是
+            # 「说脏却举不出一份脏文件」——两种都是自相矛盾的收据，不猜哪半是真的。
+            if bool(git["dirty"]) != bool(git["dirty_files"]):
+                raise content_address.ContentAddressError(
+                    f"source_facts.local_checkout.git 自相矛盾："
+                    f"dirty={git['dirty']!r} 但 dirty_files 有 {len(git['dirty_files'])} 项")
+            in_op = git.get("dirty_files_in_op_subdir")
+            if in_op is not None and (
+                    not isinstance(in_op, list)
+                    or not set(in_op).issubset(set(git["dirty_files"]))):
+                raise content_address.ContentAddressError(
+                    "source_facts.local_checkout.git.dirty_files_in_op_subdir "
+                    "须为 dirty_files 的子集")
         anchor = local["root_digest"]
         anchor_desc = "本地子树摘要 root_digest"
     else:

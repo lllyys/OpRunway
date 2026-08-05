@@ -530,7 +530,15 @@ def compute_root_digest(repo_root, op_subdir,
     · **摘要范围只有 `op_subdir`**：仓级构建脚本、公共头文件、生成器都不在内。
       因此 `root_digest` 相同**不等于**构建出的 vendor `.so` 相同——它证明的是
       「被测算子子树的字节是这一份」，不是「整个构建输入闭包是这一份」。
-      报告里必须按这个强度如实陈述（见 `render_acceptance_markdown` 的 provenance 节）。
+      报告里必须按这个强度如实陈述（见 `render_acceptance_markdown` 的 provenance 节）;
+    · **被排除的路径段本身**：`DEFAULT_DIGEST_EXCLUDE_DIRS` 里的 `build` / `build_out`
+      按「任一路径段等名」剔除，剔的是**约定俗成的构建产物目录**——但这只是约定，
+      工具没有、也无法证明这些目录里不含参与构建的源文件。所以子树内任何
+      `**/build/**`、`**/build_out/**` 的改动**不会**改变 `root_digest`。
+      这条排除是有意的（in-tree build 会让摘要随每次构建漂移，取材↔构建间的重算校验
+      会永远失败），代价就是这块盲区。它**机器可核地**落在收据的
+      `local_checkout.digest_policy.excluded_segment_names` 里，校验端逐字对账；
+      把被测源码放进这类目录的仓，不适用本摘要。
     """
     _, base = resolve_op_subdir(repo_root, op_subdir)
     entries = []                                    # [(rel_bytes, kind, exec_bit, payload_digest)]
@@ -655,7 +663,17 @@ def _porcelain_z_records(out):
     ⚠ 为什么必须用 `-z` 而不是按行切：非 `-z` 输出会对含空格/引号/非 ASCII 的路径做 C-quoting，
     `line[3:].strip().strip('"')` 既反解不了转义、又会把路径首尾的真实空格吃掉 —— 记错的是
     「哪些文件脏」，而这份清单是要写进收据当证据的。`-z` 用 NUL 分隔、路径原样不转义。
-    重命名/复制（R/C）在 `-z` 下**多占一个字段**（先新名、再原名），必须显式跳过原名字段。
+    重命名/复制（R/C）在 `-z` 下**多占一个字段**（先新名、再原名）。
+
+    ⚠ **R 与 C 的原名处置不同，别一视同仁**：
+      · `R`（rename）——原名那份**真的没了**，两个名字都算脏。只记新名的话，
+        把文件从被测子树挪出去会让 `dirty_files_in_op_subdir` 变 0，
+        收据于是宣称「被测子树内没有未提交改动」，而子树里实际少了一个文件；
+      · `C`（copy）——原文件**一个字节都没动**，脏的只有新拷出来的那份。
+        把原名也记成脏会**虚构**一条脏文件（原文件在子树内、拷贝在子树外时，
+        凭空把 provenance 说弱了）。所以 C 只消费原名字段用于推进索引，不记账。
+
+    ⚠ R/C 的原名字段缺席（输出被截断）→ 抛错，不当成「刚好没有原名」。
     """
     fields = out.split(b"\x00")
     records, i = [], 0
@@ -667,9 +685,13 @@ def _porcelain_z_records(out):
         if len(item) < 4:                           # 形如 "XY path"，短于此说明输出被截断了
             raise GitProbeError(f"git status --porcelain -z 输出异常字段：{item!r}")
         xy = item[:2].decode("ascii", "replace")
-        path = os.fsdecode(item[3:])
-        records.append((xy, path))
-        if "R" in xy or "C" in xy:                  # 下一字段是原名，跳过
+        records.append((xy, os.fsdecode(item[3:])))
+        if "R" in xy or "C" in xy:                  # 下一字段是原名
+            if i >= len(fields) or not fields[i]:
+                raise GitProbeError(
+                    f"git status --porcelain -z 的 {xy!r} 记录缺少原名字段（输出被截断）")
+            if "R" in xy:                           # 只有 rename 的原名是「真的变了」
+                records.append((xy, os.fsdecode(fields[i])))
             i += 1
     return records
 
@@ -779,15 +801,26 @@ def _local_key_files(repo_root, op_subdir):
         if not rel.startswith(prefix):              # 双保险：候选已限定在子树内，这里再核一次
             continue
         full = os.path.join(repo_root, rel)
-        # ⚠ 逃逸软链必须拒：`open()` 会跟随软链读到子树外的内容，而那份内容不在 root_digest 里。
+        # ⚠ 逃逸软链必须拒——而「拒」是**抛错**，不是 `continue`。
+        #   静默跳过时这份关键文件只是从 key_files 里消失：`root_digest` 照算、
+        #   `completeness` 照样 complete，一份少了接口头的事实包看上去完全正常。
+        #   缺 `aclnn_*.h` 直接动摇 aclnn 路由的第一依据（symbol / 形参顺序 / out_role），
+        #   这正是「证据不完整被静默升级为可裁决」。
         real = os.path.realpath(full)
         if real != base and not real.startswith(base + os.sep):
-            continue
+            raise RuntimeError(
+                f"关键文件 {rel} 是逃逸软链，指向被测子树之外（{real}）。\n"
+                f"  → 它的内容不在 root_digest 覆盖范围内，收进 key_files 等于用一份"
+                f"没被锚定的字节去派生接口事实；跳过它则会产出一份「看起来完整、"
+                f"实则少了接口头」的事实包。两者都不可接受，已中止。")
         try:
             with open(full, "rb") as fh:
                 key[rel] = fh.read().decode("utf-8", "replace")
-        except OSError:
-            continue                                # 读不到就是没有，不猜
+        except OSError as exc:
+            raise RuntimeError(
+                f"关键文件 {rel} 读取失败（{exc}）。\n"
+                f"  → 不静默跳过：跳过后 completeness 仍会是 complete，"
+                f"而事实包已经少了一份 header/example/op_def。请修复后重跑。") from exc
     return key, hdrs
 
 
@@ -854,6 +887,9 @@ def fetch_local(repo_root, op_subdir, out_dir, base_ref=None, allow_dirty=False)
     # ⚠ TOCTOU：摘要遍历 → git 探测 → 关键文件读取是三趟独立 I/O。目录若在中途被改，
     #   会拼出一个**从未真实存在过**的混合快照，而 key_files 的 ref 仍标着第一趟算的
     #   root_digest。这里重算一次并要求逐字相同——变了就停，不猜哪一半是真的。
+    #   ⚠ 这道复算能逮住的是**改了没改回去**（编辑器保存、并发 build、rsync 落盘到一半），
+    #   即取材期间的意外漂移。它**逮不住**「改完再原样改回来」：两次摘要相同，
+    #   中间读到的却是替换版。要挡住那种情形得先做只读快照再取材，本批没做，如实挂账。
     recheck = compute_root_digest(repo_root, op_subdir)
     if recheck != root_digest:
         raise RuntimeError(
@@ -893,6 +929,24 @@ def fetch_local(repo_root, op_subdir, out_dir, base_ref=None, allow_dirty=False)
     if not key:
         facts["notes"].append("未取到 example/op_def 关键文件内容（runner 锚定需另取）")
     return _dump_facts(facts, out_dir)
+
+
+def _is_str_list(value):
+    """`list[str]` 且每项非空；**允许空表**。
+
+    ⚠ 单独一个 helper 是为了不再出现 `if not value:` 这种「非空即可」的判据：
+    字符串也非空，而字符串在下游生成式里会被**按字符迭代**成一份假清单。
+    """
+    return isinstance(value, list) and all(isinstance(p, str) and p for p in value)
+
+
+def _is_path_list(value):
+    """`_is_str_list` + **非空**——「必须有内容」的清单（如 PR 通路的 changed_files）。
+
+    ⚠ 与 `_is_str_list` 分开，别合并：`dirty_files == []` 是干净 worktree 的**正确**表示，
+    拿「非空」去要求它会把每一次干净取材都判成畸形收据。
+    """
+    return bool(value) and _is_str_list(value)
 
 
 def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
@@ -966,12 +1020,31 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
         if changed_files == "unavailable":
             # ⚠ 非阻塞：本地没给 base-ref 时算不出改动清单，属信息缺失、不是取材失败。
             warnings.append(WARN_CHANGED_FILES_UNAVAILABLE)
-        elif not changed_files:
+        elif not _is_path_list(changed_files):
+            # ⚠ 只认 `list[str]` 与哨兵串 `"unavailable"` 两种形态。放任其它类型的话，
+            #   `changed_files="abc"` 这种既非空、又不是 `"unavailable"` 的值会一路通过，
+            #   到下面 payload 那句生成式里被**按字符迭代**成 `["a","b","c"]`——
+            #   一份凭空捏出来的改动清单，形态上还完全合法。
             reasons.append("missing_changed_files")
-        git = local.get("git") if isinstance(local.get("git"), dict) else None
-        if git and git.get("dirty") and not facts.get("blocked"):
-            # dirty 但没被阻断 = 走了 --allow-dirty → 必须留下降级留痕。
-            warnings.append(WARN_DIRTY_WORKTREE_ALLOWED)
+        # ⚠ 判据是 `"git" in local` 而**不是** `local.get("git") is not None`：
+        #   「非 git 仓」的唯一合法表示是整键缺席（`fetch_local` 就是这么写的）。
+        #   `git: null` 在 `is not None` 下会被当成缺席，于是下面全部一致性校验整段跳过——
+        #   一份写坏/被裁剪的收据只要把 git 置空就能免检。与 `validate_preparation_state`
+        #   同一口径，两处必须一致，否则同一份收据在两道门里含义不同。
+        if "git" in local:
+            git = local["git"]
+            dirty = git.get("dirty") if isinstance(git, dict) else None
+            dirty_files = git.get("dirty_files") if isinstance(git, dict) else None
+            if (not isinstance(git, dict) or not isinstance(dirty, bool)
+                    or not _is_str_list(dirty_files)):
+                reasons.append("malformed_local_git_facts")
+            elif dirty != bool(dirty_files):
+                # ⚠ 「说干净却列着脏文件」是本地通路最省事的一条降级洗白路：warnings 按
+                #   `git.dirty` 派生，把它改成 false 就能让 dirty_worktree_allowed 整条消失。
+                reasons.append("inconsistent_dirty_flag")
+            elif dirty and not facts.get("blocked"):
+                # dirty 但没被阻断 = 走了 --allow-dirty → 必须留下降级留痕。
+                warnings.append(WARN_DIRTY_WORKTREE_ALLOWED)
     else:
         if not (isinstance(head_sha, str) and re.fullmatch(r"[0-9a-fA-F]{40}", head_sha)):
             reasons.append("missing_or_invalid_head_sha")
@@ -985,7 +1058,7 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
             reasons.append("unknown_fork_status")
         if not isinstance(facts.get("state"), str):
             reasons.append("missing_pr_state")
-        if not changed_files:
+        if not _is_path_list(changed_files):        # PR 通路只认非空 list[str]（无哨兵）
             reasons.append("missing_changed_files")
     # 两条通路共有：关键文件是 slot 对账的依据，缺了谁都不能往下走。
     if not key_index:

@@ -1056,6 +1056,107 @@ class LocalCheckoutFetchTest(unittest.TestCase):
         self.assertEqual(payload["completeness"]["status"], "blocked")
         self.assertIn("declared_warnings_mismatch", payload["completeness"]["reasons"])
 
+    def _local_facts(self, **over):
+        facts = {
+            "dut_source": "local_checkout",
+            "changed_files": ["op/x.h"],
+            "local_checkout": {"root_digest": "a" * 64, "op_subdir": "op",
+                               "digest_policy": fs.digest_policy()},
+            "key_files": {"op/x.h": "void x();"},
+            "key_files_ref": {"op/x.h": "a" * 64},
+            "op": "x", "target_dir": "op", "aclnn_headers": ["op/x.h"],
+        }
+        facts.update(over)
+        return facts
+
+    def test_changed_files_string_is_not_iterated_into_a_fake_list(self):
+        """⭐ `changed_files="abc"` 既非空、又不是哨兵——放行的话下游生成式会把它
+
+        按字符迭代成 `["a","b","c"]`：一份凭空捏出来、形态还完全合法的改动清单。
+        """
+        payload = fs.build_source_facts(self.task, self._local_facts(changed_files="abc"))
+        self.assertEqual(payload["completeness"]["status"], "blocked")
+        self.assertIn("missing_changed_files", payload["completeness"]["reasons"])
+
+    def test_dirty_false_with_nonempty_list_blocks_instead_of_dropping_the_warning(self):
+        """⭐ warnings 是按 `git.dirty` 派生的：改成 false 就能让降级留痕整条消失。"""
+        facts = self._local_facts()
+        facts["local_checkout"]["git"] = {
+            "head_sha": "b" * 40, "remote_url": None, "base_ref": "master",
+            "dirty": False, "dirty_files": ["op/x.h"], "dirty_files_in_op_subdir": [],
+        }
+        payload = fs.build_source_facts(self.task, facts)
+        self.assertEqual(payload["completeness"]["status"], "blocked")
+        self.assertIn("inconsistent_dirty_flag", payload["completeness"]["reasons"])
+        self.assertNotIn("warnings", payload["completeness"])
+
+    def test_malformed_git_dirty_files_blocks(self):
+        facts = self._local_facts()
+        facts["local_checkout"]["git"] = {
+            "dirty": True, "dirty_files": "op/x.h", "dirty_files_in_op_subdir": []}
+        payload = fs.build_source_facts(self.task, facts)
+        self.assertIn("malformed_local_git_facts", payload["completeness"]["reasons"])
+
+    def test_clean_worktree_with_empty_dirty_list_is_still_complete(self):
+        """收紧不能误伤正例：`dirty_files == []` 正是干净 worktree 的正确表示。"""
+        facts = self._local_facts()
+        facts["local_checkout"]["git"] = {
+            "head_sha": "b" * 40, "remote_url": None, "base_ref": "master",
+            "dirty": False, "dirty_files": [], "dirty_files_in_op_subdir": []}
+        payload = fs.build_source_facts(self.task, facts)
+        self.assertEqual(payload["completeness"]["status"], "complete")
+
+
+    # ---- 关键文件取不到时**不许静默跳过** -------------------------------------
+    # 跳过后 completeness 仍是 complete，而事实包已经少了一份 header/example/op_def；
+    # `aclnn_*.h` 缺席直接动摇 aclnn 路由的第一依据（symbol / 形参顺序 / out_role）。
+    # 这正是「证据不完整被静默升级为可裁决」。
+
+    def test_escaping_symlink_key_file_aborts_instead_of_being_dropped(self):
+        outside = os.path.join(self.d, "outside_aclnn_evil.h")
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write("aclnnStatus aclnnEvilGetWorkspaceSize();\n")
+        link = os.path.join(self.repo, self.OP_SUBDIR, "op_host/op_api/aclnn_evil.h")
+        os.symlink(outside, link)
+        with self.assertRaisesRegex(RuntimeError, "逃逸软链"):
+            fs.fetch_local(self.repo, self.OP_SUBDIR, self.out)
+
+    def test_rename_out_of_subtree_records_both_names(self):
+        """⭐ 只记新名的话，把文件挪出被测子树会让 `dirty_files_in_op_subdir` 变成 0——
+
+        收据于是宣称「被测子树内没有未提交改动」，而子树里实际少了一个文件。
+        """
+        self._init_git()
+        moved = os.path.join(self.d, "ops", "moved_def.cpp")
+        self._git("mv", f"{self.OP_SUBDIR}/op_host/roll_def.cpp", "moved_def.cpp")
+        self.assertTrue(os.path.exists(moved))
+        git = fs.probe_local_git(self.repo, self.OP_SUBDIR)
+        self.assertTrue(git["dirty"])
+        self.assertIn(f"{self.OP_SUBDIR}/op_host/roll_def.cpp", git["dirty_files"])
+        self.assertEqual([f"{self.OP_SUBDIR}/op_host/roll_def.cpp"],
+                         git["dirty_files_in_op_subdir"])
+
+
+class DutSourceApiTest(unittest.TestCase):
+    """判别式自身的两条硬边界。"""
+
+    def test_expected_kind_has_no_default(self):
+        """⭐ 「忘了传」与「确认过没有对照物」必须在调用点长得不一样。
+
+        有默认值的话，一个漏传就让「收据自称 PR + 任意 40 位 hex」走进 PR 分支，
+        本地锚的等值校验整条不执行。
+        """
+        import dut_source as ds
+        with self.assertRaises(TypeError):
+            ds.validate_build_receipt_source({"repo": "r", "pr_head_sha": "a" * 40})
+
+    def test_both_anchors_present_is_rejected(self):
+        import dut_source as ds
+        with self.assertRaisesRegex(ds.DutSourceError, "另一条通路的锚"):
+            ds.validate_build_receipt_source(
+                {"repo": "r", "pr_head_sha": "a" * 40, "local_root_digest": "b" * 64},
+                expected_kind=ds.NO_EXPECTED_KIND)
+
 
 class PullRequestPayloadUnchangedTest(unittest.TestCase):
     """⭐ 安全绳：PR 通路 payload **去掉 `producer` 后**与改动前逐字节相同。

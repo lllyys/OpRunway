@@ -243,7 +243,9 @@ def _validate_cpp_extension_fresh_receipt(
     try:
         directive_kind, _anchor_field, directive_anchor = (
             dut_source.validate_build_receipt_source(
-                directive["source_identity"], where="directive.source_identity"))
+                directive["source_identity"],
+                expected_kind=dut_source.NO_EXPECTED_KIND,   # directive 是对照物本身
+                where="directive.source_identity"))
     except (dut_source.DutSourceError, KeyError, TypeError) as ex:
         raise RetestExecutionError(
             f"directive.source_identity 来源锚不可信：{ex}") from ex

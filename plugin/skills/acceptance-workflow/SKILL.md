@@ -89,6 +89,10 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   - **`completeness=blocked` 不得复用，而且脚本会告诉你**：`fetch_source` 在 `completeness != complete` 时**非 0 退出（3）**——落盘 ≠ 成功，blocked 的事实索引只供诊断，不得据它抽 spec / 产 runner / 跑验收。
   - **本地通路的两条口径别读错**：① 不给 `--base-ref` 时 `changed_files` 记字符串 `"unavailable"`（**不是 `[]`**——「算不出来」与「确实没改」必须分得开），只落 `completeness.warnings=[changed_files_unavailable]`，不阻断；② worktree dirty **默认 fail-closed**（`completeness=blocked`），`--allow-dirty` 是逃生阀、不是常规选项：走了它会记 `dirty_worktree_allowed` 警告并全量记账 dirty 文件清单，CP-E 报告须如实标出这次来源降级。
   - ⚠ 本地锚 `local_checkout.root_digest` 只能证明「验的就是这份字节」，**不能**证明它等于线上任何 PR；强度差异必须在报告里如实标注，不得写成等价的 PR provenance。
+  - ⚠ **本地通路做不了下面对应校验的第 2 条**：那条要读 PR `title` 拿 issue/追踪号，而本地来源根本没有 PR。
+    所以本地通路的对应校验只剩「改动落点目录」+「用户确认」两条腿，**用户确认这条因此变成载重项**，
+    不是走过场。只有 `pr_facts.target_dir` 对上任务书目录、用户又明确认下「这份 checkout 就是任务书要验的东西」，
+    才算过；两者缺一即 BLOCKED。**绝不能**拿用户自己给的 `--op-subdir` 反过来当对应证据——那是自证。
 - **对应校验**（落 `correspondence.json`，schema/枚举见 §4；canon verify-spec-pr-correspondence·proposed·未 settle，载重前需核）：靠三条证据合断——
   1. **改动落点目录**：`pr_facts.target_dir`（机器可比），对上任务书声明的算子目录；
   2. **issue / 追踪号**：**NL 读** `task_doc.md` 与 PR `title`（`pr_facts` **不抽 issue 号**，只能自然语言读），**非算子名字面匹配**；
@@ -251,7 +255,11 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   BLOCK**（`aclnn_adapter` 只能按 PR ref 在容器内重新取源 build，构建端没有可与
   `local_root_digest` 对账的锚），F3 走到 `precision_retest_runner` 调
   `verify_aclnn_harness.validate_receipt` 时才会拿到「尚未接入 dut_source=local_checkout」，
-  前面的准备、冻结全部白跑。本地来源要复测 `aclnn_py`，只能先回到 PR 通路取材。
+  前面的准备、冻结全部白跑。
+  ⚠ **不要把「换回 PR 通路取材」当成本地 `aclnn_py` 的复测办法**：CP-F 复测的前提是
+  **同一份 DUT、同一份 caseset**。换来源 = 换 DUT 身份，那是**另一次完整验收**，
+  不是同一个 attempt 的延续，也不得用它的结果去覆盖本地来源那轮的裁决。
+  本地来源要出正式裁决（首轮或复测），走已接通的 `cpp_extension` 主链。
 - **F2 准备**：幕后调用 `cp_f_prepare_attempt.py`；复核首次五类产物 hash、来源锚（PR head 或
   本地 root_digest）/build/runner 身份，
   冻结原 case 与实际 input bytes，产 `reports/<op>/attempts/<NNNN>/`。这里只产

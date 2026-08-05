@@ -267,15 +267,27 @@ def _assert_acceptance_form_allowed(spec, mode):
 
     ⚠ 只拦入口是拦不住的，仓里已有先例——`repo_adapter.py` 的注释明写
     「`repo_adapter.py cs wd acceptance.json catlass_mock` 是绕开 catlass CLI 那两道守卫的
-    现成后门」，所以那边**也是在出口再校一次**。本门照抄这个口径：
-    绕过 `_resolve_mode`（直接 `--mode aclnn_py`、或绕开 run_workflow 直调子脚本）的路径，
-    到写 `acceptance.json` / `verdict.json` 这一步仍会被逮住。
+    现成后门」，所以那边**也是在出口再校一次**。本门照抄这个口径。
 
-    这里之所以能同时看 spec 与 mode：出口处两者都在手上，交叉校验比只看一个更难伪造。
+    **本门的实际覆盖范围**（别读大了）：一切经 `run()` 写验收产物的路径，
+    含直接 `--mode aclnn_py`、以及绕开 CLI 直接调 `run(...)` 的进程内调用。
+    **不覆盖**手写/外部工具伪造的 `acceptance.json`——那不是本门的对象，
+    由三级门 `validate_acceptance_state` 按证据完整性另行把关。
+
+    交叉校验**同时看 spec 与 mode**：出口处两者都在手上。只看 `runner_form` 是不够的——
+    `_acceptance_capable()` 认的是 mode，将来若有非 `_REAL_MACHINE_MODES` 的 mode 被判成
+    可产裁决，一个 `runner_form=cpp_extension` 的 spec 就能替另一种执行形态出裁决。
+    所以这里要求二者**互相蕴含**：form 准入 ∧ mode 正是该 form 派生出的那一个。
     """
     runner_form = spec.get("runner_form", "cpp")
     if runner_form in _ACCEPTANCE_RUNNER_FORMS:
-        return
+        expected = _RUNNER_FORM_TO_MODE.get(runner_form)
+        if mode == expected:
+            return
+        raise SystemExit(
+            f"[出口门] 拒绝写验收产物：runner_form={runner_form!r} 派生的验收 mode 是 "
+            f"{expected!r}，实际 mode={mode!r}。执行形态与 spec 声明不一致时产出的裁决，"
+            f"说不清验的到底是哪条通路。")
     raise SystemExit(
         f"[出口门] 拒绝为 runner_form={runner_form!r}（mode={mode!r}）写验收产物。\n"
         + _experimental_form_message(runner_form))

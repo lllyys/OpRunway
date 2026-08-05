@@ -135,7 +135,10 @@ class DirectiveTest(unittest.TestCase):
         for mutate, pattern in (
                 (lambda s: s.pop("repo"), "repo"),
                 (lambda s: s.pop("pr_head_sha"), "40 位 hex"),
-                (lambda s: s.update(local_root_digest="c" * 64), "键须严格等于"),
+                # PR directive 又塞一个本地锚 → 由 `dut_source` 的**互斥**校验先拦下，
+                # 报的是「同时带着另一条通路的锚」而不是键集不等：两套锚齐备时，
+                # 任何按字段名直取的下游都能自选来源身份，这比键集多一项更该先说。
+                (lambda s: s.update(local_root_digest="c" * 64), "另一条通路的锚"),
                 (lambda s: s.update(dut_source="made_up"), "受控词表"),
         ):
             with self.subTest(pattern=pattern):

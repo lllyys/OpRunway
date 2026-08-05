@@ -99,13 +99,15 @@ _RUNNER_FORM_TO_MODE = {
 }
 ```
 
-三条都是 `AGENTS.md` §4 认定的真机验收通路，且都能产 `acceptance.json`。
+三条都是 `AGENTS.md` §4 认定的真机通路。**注：这是本方案成文当时的状态**——
+同一次 push 已把正式验收准入收敛到 `cpp_extension`，`cpp` / `aclnn_py` 需 `--allow-experimental-form`
+且只产 `evidence_grade="development"` 的非验收产物。
 
 **支持收敛的证据**（真机成熟度确实不齐，`AGENTS.md` §9）：
 
 | 通路 | 坐实情况 |
 |---|---|
-| `cpp_extension` | Median PR6429 **1152 例**完整 torch-parity 矩阵，`gate.passed=true` ← **唯一跑通完整验收的** |
+| `cpp_extension` | Median PR6429 **1152 例**完整 torch-parity 矩阵，证据完整性门 `gate.passed=true` ← **唯一跑完完整矩阵、且证据门通过的通路**。⚠ `gate.passed=true` 只说明证据完整，**不是验收通过**：那一轮的确定性裁决是 `FAIL(精度)`（1101 PASS / 51 FAIL） |
 | `aclnn_py` | 仓规原话：「历史 Median 60/60 来自 aclnn_py，**只证明旧 caseset**；迁移到 torch_parity + cpp_extension 后必须重跑，不得沿用旧 PASS」 |
 | `cpp`（`new_example`） | IsClose / Sign 坐实，但 dtype 闭环只到 fp32/fp16/bf16，int 落 `DEFERRED_NP_BY_FORM` |
 
@@ -539,7 +541,7 @@ python3 -m pytest plugin/acc-common/test_cpp_extension_adapter.py \
 | git head | `d93dc7d…`（worktree clean） |
 | base ref | `master` |
 | changed_files | 12 个文件 |
-| vendor 绑定 | build receipt 的 local_root_digest 与源码子树摘要**一致** |
+| vendor 子树绑定 | build receipt 的 local_root_digest 与被测 `op_subdir` 子树摘要**一致**（⚠ 只覆盖该子树：仓级构建脚本、公共头文件、代码生成器都不在内，**不证明**整个构建输入闭包一致） |
 | ⚠ provenance 强度 | 本地 checkout **无法证明**其对应任何具体 PR；任务书快照证明的是「验收依据了这份字节」，**不证明**它等于 gitcode 上的原文 |
 ```
 

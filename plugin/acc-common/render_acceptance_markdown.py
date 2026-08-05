@@ -38,6 +38,15 @@ def _n(value):
     return len(value) if isinstance(value, list) else "?"
 
 
+def _is_path_list(value):
+    """`list[str]` 且每项非空；允许空表（空表 = 确实没有脏文件）。
+
+    ⚠ 判到**元素**一级：只判「是个 list」的话，`[null]` 会被 `len()` 数成 1，
+    渲染出「有 1 项未提交改动」——那 1 项根本不是路径，数字是编出来的。
+    """
+    return isinstance(value, list) and all(isinstance(p, str) and p for p in value)
+
+
 def _gap_line(gap):
     if not isinstance(gap, dict):
         return f"- {_cell(gap)}"
@@ -110,7 +119,15 @@ PROV_DIRTY_DIRTY = (
 PROV_DIRTY_NOT_GIT = (
     "不适用——source_facts 记录本地目录不是 git 仓，provenance 只靠 root_digest")
 PROV_DIRTY_MALFORMED = (
-    "**未知**——source_facts 里的 `git.dirty` 不是布尔值；**不得据此认定 worktree clean**")
+    "**未知**——source_facts 里的 `git.dirty` 与 `git.dirty_files` 形态不合法或互相矛盾；"
+    "**不得据此认定 worktree clean**")
+PROV_DIRTY_INCOMPLETE = (
+    "**未知**——source_facts 的 `completeness` 不是 `complete`，残缺事实不能推出结论；"
+    "**不得据此认定 worktree clean**")
+PROV_RECEIPT_UNVERIFIED = (
+    "⚠ vendor build receipt 不是 `oprunway.vendor_build_receipt` v1 / `status=VERIFIED`"
+    "（实得 schema={schema}、schema_version={version}、status={status}）"
+    "——本节不作任何 provenance 断言。")
 PROV_GIT_HEAD_ROW = "| git head（**信息字段，非 provenance 锚**） | `{sha}` |"
 
 
@@ -131,8 +148,9 @@ def _local_rows(facts, receipt_identity):
     `validate_acceptance_state` 的三级门，本渲染器不重判、只如实标注强度。
     """
     if not isinstance(facts, dict):
-        # `gate._find_source_facts` 三态：dict / None（没找到）/ "__BAD__"（找到但读不出）。
-        # 后两态在本节里**同权**——都是「拿不到可对账的对照物」，强度一样，都退「未知」。
+        # `gate._find_source_facts` 三态：dict / None（自动发现没找到）/ "__BAD__"
+        # （找到但摘要不可信/读不出/显式路径指空）。后两态在本节里**同权**——
+        # 都是「拿不到可对账的对照物」，强度一样，都退「未知」。
         return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_UNKNOWN)]
     try:
         if dut_source.identity(facts, where="source_facts") != receipt_identity:
@@ -140,19 +158,40 @@ def _local_rows(facts, receipt_identity):
     except dut_source.DutSourceError:
         # 锚读不出来 == 对不上：处置相同，整份忽略，不降格采信。
         return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_IGNORED)]
+    # ⚠ 只有 `completeness=complete` 的事实包才有资格给出**肯定式**陈述。
+    #   下面「git 键缺席 → 不是 git 仓」是一条**由缺席推出结论**的断言，只有在事实包
+    #   本身完整时才成立；一份被裁剪 / blocked 的 facts 缺 git 键，含义是「不知道」，
+    #   照旧渲染成「不适用——不是 git 仓」就是把残缺读成了结论。
+    completeness = facts.get("completeness")
+    if not isinstance(completeness, dict) or completeness.get("status") != "complete":
+        return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_INCOMPLETE)]
     local = facts.get(dut_source.FACTS_KEY[dut_source.LOCAL_CHECKOUT])
     git = local.get("git") if isinstance(local, dict) else None
-    if not isinstance(git, dict):
+    if git is None and isinstance(local, dict) and "git" not in local:
         return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_NOT_GIT)]
-    dirty = git.get("dirty")
-    if dirty is True:
+    if not isinstance(git, dict):
+        # `git: null` / 非 object：不是「没有 git」，是「这份收据形态不对」。
+        return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_MALFORMED)]
+    dirty, files = git.get("dirty"), git.get("dirty_files")
+    in_op = git.get("dirty_files_in_op_subdir")
+    # ⚠ 形态判到**元素**一级，别停在「是个 list」：`dirty_files=[null]` 会渲染成
+    #   「有 1 项未提交改动」，而那 1 项根本不是路径——数字是编出来的。
+    #   子树清单还必须是总清单的子集，否则「被测子树内 N 项」可以大于总数。
+    listed = files if _is_path_list(files) else None
+    if listed is not None and not (
+            _is_path_list(in_op) and set(in_op).issubset(set(listed))):
+        listed = None
+    if dirty is True and listed:
         rows = [PROV_DIRTY_ROW.format(value=PROV_DIRTY_DIRTY.format(
-            n=_n(git.get("dirty_files")), n_op=_n(git.get("dirty_files_in_op_subdir"))))]
-    elif dirty is False:
+            n=_n(files), n_op=_n(in_op)))]
+    elif dirty is False and listed == []:
         rows = [PROV_DIRTY_ROW.format(value=PROV_DIRTY_CLEAN)]
     else:
         # `is True` / `is False` 而不是真值判断：缺字段、None、字符串 "false" 都不是
         # 「干净」的证据，只能是未知。
+        # ⚠ `dirty` 与清单**必须互相印证**才给结论：`dirty=true` 配空清单会渲染成
+        #   「有 0 项未提交改动」——一句自相矛盾、却读起来像「其实没什么事」的话；
+        #   `dirty=false` 配非空清单则是把脏说成干净。两种都退「未知」。
         rows = [PROV_DIRTY_ROW.format(value=PROV_DIRTY_MALFORMED)]
     head = git.get("head_sha")
     if isinstance(head, str) and head:
@@ -163,7 +202,7 @@ def _local_rows(facts, receipt_identity):
     return rows
 
 
-def _provenance_section(receipt, source, facts):
+def _provenance_section(receipt, build_receipt, source, facts):
     """渲染「## 来源与 provenance」节；返回行列表（含节标题与结尾空行）。
 
     为什么单独成节、而不是继续在「被测物与运行环境」表里占两行：两条来源通路的
@@ -179,19 +218,34 @@ def _provenance_section(receipt, source, facts):
          `build_receipt.get("source") or {}` 会把「压根没收据」和「有收据但 source 坏了」
          抹平成同一个 `{}`。后者本该走 ② 报「来源锚不合法」，被抹平后就成了看起来无害的
          「本轮没有收据」——一条来源不可信的证据链就此静默降级为「正常的无收据通路」。
-      ② 来源锚不合法 → 渲染 ⚠ 并 return。**异常必须在这里 catch 掉、不能外抛**：
+      ② 收据自身没通过 `VERIFIED v1` → 渲染 ⚠ 并 return。
+         ⚠ **锚形态合法 ≠ 收据可信**。本节输出的是「可证明验的就是这个 PR 的这个 commit」
+         这类**强度断言**，而它的全部依据是「有一份已核验的构建收据说 `.so` 来自这份源码」。
+         收据若 schema 不对、或 `status != VERIFIED`（构建根本没核过），这句断言就没有出处——
+         照渲染等于替一份未核验的收据背书。首轮把关在 `cpp_extension_adapter` /
+         `cpp_extension_driver`，本节独立再校一次，理由与那两处「两处都是信任边界」相同。
+      ③ 来源锚不合法 → 渲染 ⚠ 并 return。**异常必须在这里 catch 掉、不能外抛**：
          外抛虽被 `run_workflow` 的 except 兜住不崩，但整份 `验收报告.md` 就不产了，
          审核员连「锚不合法」这条最该看见的话都看不到（只剩一个 JSON 错误文件）。
-      ③ 锚合法 → 按 kind 渲染；本地通路额外挂事实行与两条 caveat。
+      ④ 锚合法 → 按 kind 渲染；本地通路额外挂事实行与两条 caveat。
 
     `facts` 只透传给 `_local_rows`，本函数不按字段名读它——读法只有一处，判别式只有一份。
     """
     lines = [PROV_HEADING, ""]
     if not receipt:
         return lines + [PROV_NO_RECEIPT, ""]
+    br = build_receipt if isinstance(build_receipt, dict) else {}
+    if (br.get("schema") != "oprunway.vendor_build_receipt"
+            or br.get("schema_version") != 1
+            or br.get("status") != "VERIFIED"):
+        return lines + [PROV_RECEIPT_UNVERIFIED.format(
+            schema=_cell(br.get("schema")), version=_cell(br.get("schema_version")),
+            status=_cell(br.get("status"))), ""]
     try:
         kind, anchor_field, anchor_value = dut_source.validate_build_receipt_source(
-            source, where="vendor build receipt.source")
+            source,
+            expected_kind=dut_source.NO_EXPECTED_KIND,   # 渲染器不做来源对账，只如实标强度
+            where="vendor build receipt.source")
     except dut_source.DutSourceError as ex:
         return lines + [PROV_BAD_ANCHOR.format(ex=_cell(ex)), ""]
     if kind not in PROV_KIND_LABEL:
@@ -377,7 +431,7 @@ def render(report_root, source_facts_path=None):
     # 来源与 provenance 排在「被测物与运行环境」**之前**：先说清「验的是哪份源码、这个
     # 结论能替它担保到什么程度」，再列 ELF/SoC/CANN 这些运行环境事实。
     # `source` 从这里起只作为本节的入参，本文件别处不再按字段名直取它。
-    lines += _provenance_section(receipt, source, facts)
+    lines += _provenance_section(receipt, build_receipt, source, facts)
     lines += [
         "## 被测物与运行环境",
         "",
