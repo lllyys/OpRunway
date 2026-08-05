@@ -144,7 +144,98 @@ class CppExtensionReceiptGateTest(unittest.TestCase):
             errors = []
             G._gate_cpp_extension_receipt(
                 root, caseset, envelope, evidence, errors)
-            self.assertTrue(any("PR head→构建→安装 ELF" in e for e in errors))
+            self.assertTrue(any("被测来源→构建→安装 ELF" in e for e in errors))
+
+
+class LocalCheckoutSourceBindingTest(unittest.TestCase):
+    """本地来源通路的**信任基石**：build receipt 的 local_root_digest ↔ source_facts 的 root_digest。
+
+    它替代了 PR 通路「build 产物对应哪个 PR head」的绑定。少了这条等值校验，
+    vendor `.so` 与被测源码之间就没有机器可核的对应关系。
+    """
+
+    DIGEST = "c" * 64
+
+    def _relocalize(self, envelope, evidence, *, root_digest=DIGEST):
+        """把 fixture 的 build receipt 从 PR 形态改成本地形态，并重算受影响的摘要。"""
+        vendor = envelope["cpp_extension_receipt"]["vendor"]
+        br = vendor["build_receipt"]
+        br["source"] = {
+            "dut_source": "local_checkout",
+            "repo": "/local/ops-nn",
+            "local_root_digest": root_digest,
+        }
+        vendor["build_receipt_sha256"] = G._canonical_sha(br)
+        evidence[0]["cpp_extension_receipt_sha256"] = G._canonical_sha(
+            envelope["cpp_extension_receipt"])
+
+    @staticmethod
+    def _write_source_facts(root, *, dut_source="local_checkout", root_digest=DIGEST):
+        payload = {"dut_source": dut_source}
+        if dut_source == "local_checkout":
+            payload["local_checkout"] = {"root_digest": root_digest, "op_subdir": "op"}
+        else:
+            payload["pr"] = {"head_sha": "a" * 40}
+        _write_json(os.path.join(root, "source_facts.json"),
+                    {"domain": "oprunway/source-facts/v1", "payload": payload})
+
+    def _run(self, root, caseset, envelope, evidence):
+        errors = []
+        G._gate_cpp_extension_receipt(root, caseset, envelope, evidence, errors)
+        return errors
+
+    def test_matching_local_digest_passes(self):
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
+            self._relocalize(envelope, evidence)
+            self._write_source_facts(root)
+            self.assertEqual([], self._run(root, caseset, envelope, evidence))
+
+    def test_digest_mismatch_is_blocked(self):
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
+            self._relocalize(envelope, evidence)
+            self._write_source_facts(root, root_digest="d" * 64)   # 与收据不等
+            errors = self._run(root, caseset, envelope, evidence)
+            self.assertTrue(any("不相等" in e for e in errors), errors)
+
+    def test_local_receipt_without_source_facts_is_blocked(self):
+        """⭐ 本地锚的可信度**全部**来自等值校验——没有对照物就等于没绑定。"""
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
+            self._relocalize(envelope, evidence)
+            errors = self._run(root, caseset, envelope, evidence)
+            self.assertTrue(any("找不到 source_facts.json" in e for e in errors), errors)
+
+    def test_receipt_cannot_disguise_local_source_as_pull_request(self):
+        """⭐ 绕过路径：source_facts 说 local，收据说 PR + 随便填 40 位 hex。
+
+        若不先核「两边 dut_source 一致」，校验就会走进 PR 分支，
+        local_root_digest 那条等值校验**根本不会执行** → 绑定完全失效。
+        """
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
+            # 收据保持 PR 形态（fixture 默认就是），source_facts 声明 local
+            self._write_source_facts(root)
+            errors = self._run(root, caseset, envelope, evidence)
+            self.assertTrue(any("来源不一致" in e for e in errors), errors)
+
+    def test_pull_request_receipt_without_source_facts_keeps_legacy_behaviour(self):
+        """PR 通路不能被这条新校验打断——实测真机报告目录里本来就没有 source_facts.json。"""
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
+            self.assertEqual([], self._run(root, caseset, envelope, evidence))
+
+    def test_source_facts_under_work_dir_is_found(self):
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
+            self._relocalize(envelope, evidence)
+            _write_json(os.path.join(root, "work", "source_facts.json"),
+                        {"domain": "oprunway/source-facts/v1",
+                         "payload": {"dut_source": "local_checkout",
+                                     "local_checkout": {"root_digest": self.DIGEST,
+                                                        "op_subdir": "op"}}})
+            self.assertEqual([], self._run(root, caseset, envelope, evidence))
 
 
 if __name__ == "__main__":

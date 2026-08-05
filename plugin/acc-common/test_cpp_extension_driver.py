@@ -88,7 +88,7 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
                     os.environ,
                     {"OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT":
                      receipt_path}):
-                with self.assertRaisesRegex(D.DriverError, "完整 PR head"):
+                with self.assertRaisesRegex(D.DriverError, "来源锚不完整"):
                     D._vendor_build_provenance(vendor)
 
     def test_perf_plan_must_bind_exact_caseset_and_receipt(self):

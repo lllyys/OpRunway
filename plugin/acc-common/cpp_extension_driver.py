@@ -20,6 +20,8 @@ from pathlib import Path
 import re
 import tempfile
 
+import dut_source
+
 
 class DriverError(RuntimeError):
     pass
@@ -115,13 +117,13 @@ def _vendor_build_provenance(vendor):
             or receipt.get("schema_version") != 1
             or receipt.get("status") != "VERIFIED"):
         raise DriverError("vendor build receipt schema/status 非 VERIFIED v1")
-    source = receipt.get("source")
-    head = source.get("pr_head_sha") if isinstance(source, dict) else None
-    if (not isinstance(head, str)
-            or re.fullmatch(r"[0-9a-fA-F]{40}", head) is None
-            or not isinstance(source.get("repo"), str)
-            or not source["repo"].strip()):
-        raise DriverError("vendor build receipt 缺完整 PR head/source repo")
+    # 来源锚按 `dut_source` 分支（PR → pr_head_sha / 本地 → local_root_digest）。
+    # driver 侧独立再校一遍，不依赖 adapter 已经校过——两处都是信任边界。
+    try:
+        dut_source.validate_build_receipt_source(
+            receipt.get("source"), where="vendor build receipt.source")
+    except dut_source.DutSourceError as ex:
+        raise DriverError(f"vendor build receipt 的来源锚不完整：{ex}") from ex
     build = receipt.get("build")
     if (not isinstance(build, dict)
             or not isinstance(build.get("argv"), list)

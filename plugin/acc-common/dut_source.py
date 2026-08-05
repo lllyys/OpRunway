@@ -107,6 +107,53 @@ def identity(payload, *, where="payload"):
     return kind, "local_root_digest", value.lower()
 
 
+def validate_build_receipt_source(source, *, expected_kind=None, where="build_receipt.source"):
+    """校验 `vendor_build_receipt.source` 并返回 `(kind, anchor_field, anchor_value)`。
+
+    `vendor_build_receipt` 由**外部构建驱动**产出（本仓只消费），它回答的是
+    「这个 vendor `.so` 是从哪份源码构建出来的」。两条来源通路各有自己的锚：
+
+    ```jsonc
+    "source": {
+      "dut_source": "local_checkout",   // 缺省 "pull_request"
+      "repo": "<必填，两条通路都要>",
+      "pr_head_sha": "…40 位…",         // pull_request 时必填
+      "local_root_digest": "…64 位…"    // local_checkout 时必填
+    }
+    ```
+
+    ⚠ **`expected_kind` 这道前置校验不能省**（否则整套设计被绕过）。绕过路径是：
+    `source_facts` 声明 `local_checkout`，而 `vendor_build_receipt` 声明 `pull_request`
+    并填一个**任意 40 位 hex** 当 `pr_head_sha` → 校验走进 PR 分支 →
+    `local_root_digest` 那条等值校验**根本不会执行** → vendor `.so` 与被测源码的绑定完全失效。
+    所以调用方必须把 `source_facts` 那边的 `dut_source` 传进来做一致性前置校验，
+    **先确认两边说的是同一条通路，再按通路分支**。
+    """
+    if not isinstance(source, dict):
+        raise DutSourceError(f"{where} 缺失或不是 JSON object")
+    kind = of(source, where=where)
+    if expected_kind is not None:
+        if expected_kind not in ALL:
+            raise DutSourceError(f"expected_kind={expected_kind!r} 不在受控词表 {list(ALL)}")
+        if kind != expected_kind:
+            raise DutSourceError(
+                f"{where}.dut_source={kind} 与 source_facts 的 {expected_kind} 不一致——"
+                f"两边必须先说同一条来源通路再分支校验，否则填一个任意 40 位 hex 当 pr_head_sha "
+                f"就能让本地锚的等值校验整条跳过（vendor .so 与被测源码的绑定就此失效）")
+    repo = source.get("repo")
+    if not isinstance(repo, str) or not repo.strip():
+        raise DutSourceError(f"{where}.repo 必填（两条通路都要）")
+    if kind == PULL_REQUEST:
+        value = source.get("pr_head_sha")
+        if not _is_hex(value, 40):
+            raise DutSourceError(f"{where}.pr_head_sha 不是 40 位 hex：{value!r}")
+        return kind, "pr_head_sha", value.lower()
+    value = source.get("local_root_digest")
+    if not _is_hex(value, 64):
+        raise DutSourceError(f"{where}.local_root_digest 不是 64 位 hex：{value!r}")
+    return kind, "local_root_digest", value.lower()
+
+
 def _is_hex(value, length):
     return (isinstance(value, str) and len(value) == length
             and all(c in "0123456789abcdefABCDEF" for c in value))

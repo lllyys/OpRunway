@@ -18,6 +18,7 @@ from pathlib import Path
 
 import content_address
 import cpp_extension_codegen
+import dut_source
 
 
 class CppExtensionAdapterError(RuntimeError):
@@ -280,13 +281,17 @@ def _validate_vendor_build_receipt(vendor):
             or build_receipt.get("status") != "VERIFIED"):
         raise CppExtensionAdapterError(
             "receipt.vendor.build_receipt schema/status 非 VERIFIED v1")
-    source = build_receipt.get("source")
-    head = source.get("pr_head_sha") if isinstance(source, dict) else None
-    if (not isinstance(head, str) or len(head) != 40
-            or any(ch not in "0123456789abcdefABCDEF" for ch in head)
-            or not isinstance(source.get("repo"), str) or not source["repo"].strip()):
+    # 来源锚按 `dut_source` 分支：PR 通路核 40 位 pr_head_sha，本地通路核 64 位
+    # local_root_digest。两条通路的必填集不同，但**都必须有锚**——缺锚就没有
+    # 「vendor .so ↔ 被测源码」的机器可核对应关系。
+    # ⚠ 这里只校收据自身；与 source_facts 的 dut_source 一致性前置校验在三级门
+    # （validate_acceptance_state）里做，见 dut_source.validate_build_receipt_source 的 ⚠。
+    try:
+        dut_source.validate_build_receipt_source(
+            build_receipt.get("source"), where="receipt.vendor.build_receipt.source")
+    except dut_source.DutSourceError as ex:
         raise CppExtensionAdapterError(
-            "receipt.vendor.build_receipt 缺完整 PR head/source repo")
+            f"receipt.vendor.build_receipt 的来源锚不完整：{ex}") from ex
     build = build_receipt.get("build")
     if (not isinstance(build, dict) or not isinstance(build.get("argv"), list)
             or not build["argv"] or any(

@@ -21,6 +21,8 @@ OPRUNWAY_DONE 哨兵 / raw log hash / msprof 输出绑定（本轮不做）；�
 import argparse, hashlib, json, math, os, statistics, sys
 from collections import Counter
 
+import dut_source
+
 # T6/T8 扩枚举：exception=小shape例外(合法放行需交叉校验)；
 # blocked_wait_gpu_benchmark=缺外部 GPU 标杆正规挂起；blocked_incomparable_timing_scope=双边口径不可比。
 _PERF_STATUS = {"ok", "no_perf_cases", "blocked", "fail",
@@ -619,7 +621,7 @@ def _gate_perf_case_policy(cs, cases, errs):
         errs.append("perf_case_policy.selection 与 caseset 实际性能/精度 case 身份不一致")
 
 
-def gate_task1(d, errs):
+def gate_task1(d, errs, source_facts_path=None):
     """用例集自洽 + （有 evidence 时）id 一一对应，专防跑子集。"""
     cs = _load(d, "caseset.json")
     if not isinstance(cs, dict):
@@ -697,7 +699,7 @@ def _canonical_sha(value):
     return hashlib.sha256(raw).hexdigest()
 
 
-def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs):
+def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_facts_path=None):
     """cpp_extension 的独立 build/load/ELF receipt 完整性门。
 
     adapter 已做首轮验证；本门从落盘工件重新算摘要，并要求每条 evidence 绑定同一 receipt。
@@ -785,15 +787,11 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs):
     build = build_receipt.get("build") if isinstance(build_receipt, dict) else None
     artifact_rec = (build_receipt.get("artifact")
                     if isinstance(build_receipt, dict) else None)
-    head = source.get("pr_head_sha") if isinstance(source, dict) else None
     build_digest = _canonical_sha(build_receipt)
     if (not isinstance(build_receipt, dict)
             or build_receipt.get("schema") != "oprunway.vendor_build_receipt"
             or build_receipt.get("schema_version") != 1
             or build_receipt.get("status") != "VERIFIED"
-            or not isinstance(head, str) or len(head) != 40
-            or any(ch not in "0123456789abcdefABCDEF" for ch in head)
-            or not isinstance(source.get("repo"), str) or not source["repo"].strip()
             or not isinstance(build, dict)
             or not isinstance(build.get("argv"), list) or not build["argv"]
             or any(not isinstance(x, str) or not x for x in build["argv"])
@@ -804,12 +802,102 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs):
             or artifact_rec.get("library_sha256") != vendor_sha
             or vendor.get("build_receipt_sha256") != build_digest):
         errs.append(
-            "cpp_extension vendor build receipt 未完整绑定 PR head→构建→安装 ELF")
+            "cpp_extension vendor build receipt 未完整绑定 被测来源→构建→安装 ELF")
+    else:
+        _gate_build_receipt_source_binding(d, source, errs, source_facts_path=source_facts_path)
     receipt_sha = _canonical_sha(receipt)
     for row in ev_list:
         if isinstance(row, dict) and row.get("cpp_extension_receipt_sha256") != receipt_sha:
             errs.append(
                 f"{row.get('case_id')}: cpp_extension receipt digest 缺失或漂移")
+
+
+def _find_source_facts(d, source_facts_path=None):
+    """定位 `source_facts.json`：显式路径 → `<d>/` → `<d>/work/`。找不到返回 None。
+
+    ⚠ 实测：真机 cpp_extension 验收的报告目录（`reports/<Op>-spec-<x>/`）里**没有**
+    `source_facts.json`——取材的 `--out` 与验收产物目录不是同一个。所以这里必须能被
+    显式指路，且「找不到」的处置要按通路分（见 `_gate_build_receipt_source_binding`）。
+    """
+    for path in ([source_facts_path] if source_facts_path else
+                 [os.path.join(d, "source_facts.json"),
+                  os.path.join(d, "work", "source_facts.json")]):
+        if path and os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as src:
+                    doc = json.load(src)
+            except (OSError, ValueError):
+                return "__BAD__"
+            if isinstance(doc, dict):
+                payload = doc.get("payload")
+                return payload if isinstance(payload, dict) else doc
+            return "__BAD__"
+    return None
+
+
+def _gate_build_receipt_source_binding(d, source, errs, source_facts_path=None):
+    """三级门：vendor build receipt 的来源锚 ↔ `source_facts` 的来源锚**必须一一对上**。
+
+    这是本地来源通路的**信任基石**——它替代了 PR 通路「build 产物对应哪个 PR head」的绑定。
+    少了它，vendor `.so` 与被测源码就失去机器可核的对应关系。
+
+    两步，顺序不能颠倒（`dut_source.validate_build_receipt_source` 的 ⚠ 讲了为什么）：
+
+      第 0 步：`receipt.source.dut_source == source_facts.dut_source`，不等即 BLOCKED；
+      第 1 步：按通路分支核锚值相等 ——
+               `pull_request`   → 沿用既有 PR head 形态校验（锚值绑定在别处，本批不改）；
+               `local_checkout` → `local_root_digest == source_facts.local_checkout.root_digest`。
+
+    **`source_facts` 找不到时的处置按通路分**（这条边界是实测逼出来的，不是保守起见）：
+
+    | 收据声明 | 找不到 source_facts | 理由 |
+    |---|---|---|
+    | `local_checkout` | **BLOCKED** | 本地锚的**全部**可信度就来自这条等值校验。没有对照物就等于没绑定，而这是新通路、没有历史包袱 |
+    | `pull_request` | 沿用旧行为（不阻断） | 实测真机报告目录里本来就没有 `source_facts.json`（取材 `--out` 与验收产物目录不同），硬要求会把现有 PR 通路整条打断 |
+
+    ⚠ 残留面（如实记账，别当已封）：`source_facts` 缺席 + 收据声明 `pull_request` 时，
+    「source_facts 其实说的是 local」这种伪装查不出来。要彻底封死，得让编排层
+    **总是**把 `--source-facts` 指给本门；在那之前这里只能做到「拿得到就一定核」。
+    """
+    # ① 先无条件校收据自身的来源锚形态（PR → 40 位 pr_head_sha / 本地 → 64 位 local_root_digest）。
+    #    这一步**与 source_facts 在不在无关**——收据自己就该是完整的。
+    try:
+        kind, anchor_field, anchor_value = dut_source.validate_build_receipt_source(
+            source, where="vendor build receipt.source")
+    except dut_source.DutSourceError as ex:
+        errs.append(
+            f"cpp_extension vendor build receipt 未完整绑定 被测来源→构建→安装 ELF："
+            f"来源锚不完整（{ex}）")
+        return
+    # ② 再与 source_facts 交叉对账（拿得到就一定核）。
+    facts = _find_source_facts(d, source_facts_path)
+    if facts == "__BAD__":
+        errs.append("source_facts.json 存在但不可读/不是 JSON object，无法与 build receipt 对账")
+        return
+    if facts is None:
+        if kind == dut_source.LOCAL_CHECKOUT:
+            errs.append(
+                "cpp_extension vendor build receipt 声明 dut_source=local_checkout，"
+                "但找不到 source_facts.json 与之对账（找过 <报告目录>/ 与 <报告目录>/work/，"
+                "也可用 --source-facts 指路）。本地锚的可信度全部来自这条等值校验，"
+                "没有对照物即无绑定 → BLOCKED")
+        return
+    try:
+        want_kind = dut_source.of(facts, where="source_facts")
+        kind, anchor_field, anchor_value = dut_source.validate_build_receipt_source(
+            source, expected_kind=want_kind, where="vendor build receipt.source")
+    except dut_source.DutSourceError as ex:
+        errs.append(f"cpp_extension vendor build receipt 与 source_facts 来源不一致：{ex}")
+        return
+    if kind != dut_source.LOCAL_CHECKOUT:
+        return                                   # PR 通路的 head 绑定沿用既有校验，一行不改
+    facts_digest = (facts.get("local_checkout") or {}).get("root_digest")
+    if not isinstance(facts_digest, str) or facts_digest.lower() != anchor_value:
+        errs.append(
+            f"cpp_extension vendor build receipt 的 {anchor_field}={anchor_value[:12]}… 与 "
+            f"source_facts.local_checkout.root_digest="
+            f"{(facts_digest or '（缺失）')[:12]}… 不相等——"
+            f"vendor .so 与被测源码之间没有机器可核的对应关系，BLOCKED")
 
 
 def _load_json_file(path):
@@ -820,7 +908,7 @@ def _load_json_file(path):
                 ValueError(f"非法 JSON 常量 {token}")))
 
 
-def gate_task2(d, errs):
+def gate_task2(d, errs, source_facts_path=None):
     """精度证据**完整性**门：全覆盖(防子集) + precision 必填 + 阈值三处一致(防放宽) + oracle_source 门校 + 无契约问题。
     注：精度 pass/fail 本身由 validator 判、**此门不重判**——合法的精度 fail 不该被门当 BLOCKED。
     Q9 oracle_source 门校（gate-must-check-the-effective-object）：evidence.precision.oracle_source 须 ∈ 六枚举
@@ -838,7 +926,7 @@ def gate_task2(d, errs):
     if not isinstance(ev_list, list) or not ev_list:
         errs.append("evidence.evidence 缺失/非列表/空（Task2 无证据可核）")
         return
-    _gate_cpp_extension_receipt(d, cs, ev, ev_list, errs)
+    _gate_cpp_extension_receipt(d, cs, ev, ev_list, errs, source_facts_path=source_facts_path)
     # ID 用 Counter 校验（重复不被 set 折叠）。
     cid_list = [c["id"] for c in cases if isinstance(c, dict) and c.get("id")]
     cid_dups = [k for k, v in Counter(cid_list).items() if v > 1]
@@ -1854,7 +1942,7 @@ def _gate_non_passing_report(pr, d, per, s, errs):
             errs.append(f"summary.{key}={(s or {}).get(key)!r} 与未通过明细派生 {expected} 不一致")
 
 
-def gate_task3(d, errs):
+def gate_task3(d, errs, source_facts_path=None):
     """性能证据**完整性**门：summary 完整 + scope=kernel_only(防混 e2e，缺 scope 也不放过)
     + 非 blocked(可采集) + 有性能用例 + per_case 与 caseset/evidence 按 case 对齐(防跑子集/伪造 summary)。
     注：达标/未达标由 perf_compare 判、**此门不重判**。
@@ -2006,10 +2094,15 @@ def main(argv):
     ap = argparse.ArgumentParser(description="机器可校验验收门（三级，读 reports 产物 JSON）")
     ap.add_argument("--stage", required=True, choices=list(_GATES))
     ap.add_argument("--dir", required=True, help="run_workflow 的 --out 产物目录")
+    ap.add_argument("--source-facts", default=None, metavar="PATH",
+                    help="fetch_source 产的 source_facts.json 路径。"
+                         "不给则依次找 <--dir>/source_facts.json 与 <--dir>/work/source_facts.json。"
+                         "本地来源通路（dut_source=local_checkout）**必须**能找到它——"
+                         "vendor build receipt 与被测源码的绑定就靠这份对照物")
     a = ap.parse_args(argv)
     print(f"=== 验收门 stage={a.stage} dir={a.dir} ===")
     errs = []
-    _GATES[a.stage](a.dir, errs)
+    _GATES[a.stage](a.dir, errs, source_facts_path=a.source_facts)
     for e in errs:
         print(f"  ✗ {e}")
     passed = not errs
