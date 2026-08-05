@@ -2,8 +2,15 @@
 
 > 倒序：最新在上。每天一节，一条一句，大白话。`待决` 置顶。
 
+## 2026-08-05
+
+- aclnnRoll complex64 试跑问题定位完成，产 1 份问题清单 + 2 份实施方案（`roll-complex64-trial-findings`
+  / `local-source-plan` / `workflow-governance-plan`），均过 codex audit-fix。**本轮只产文档、未改 plugin 代码。**
+  交接入口见 `doc/oprunway-session-handoff-2026-08-05.md`。
+
 ## 2026-08-03
 
+- 新增远端过程审计包复制规则：默认仅收回裁决链、计划、收据、manifest、复现与人工复核等轻量文本/结构化产物，排除 `.npy/.bin/.so/.o` 和构建缓存；数值重算、失败复现或 ELF 核验时再按 manifest 升级收回最小二进制闭包。
 - 任务书输入校验标准接进 workflow：新增 **CP-B0 门**（抽 spec 之前），
   18 项受控清单落 `acc-common/taskdoc_validation_contract.json`，逐项判法落
   `skills/acc-spec/references/taskdoc-validation.md`，`acc-spec-extractor` 加
@@ -31,6 +38,7 @@
 
 ## 2026-08-02
 
+- 新增独立的任务书输入校验参考表，不改现有 workflow、checkpoint、schema 或裁决逻辑；明确任务书先定义开发与验收要求，开发者据此提交 PR，workflow 再以任务书为权威判断 PR 是否符合；本表不检查 PR 或后续用例设计，精度仅检查额外要求。（次日已接入 CP-B0，见 08-03 节）
 - v10 已在 A3 跑通 1152-case CP-F 机械闭环：F2 和 execute 均成功、Task-2 gate 通过、
   七类必需产物与 final receipt 齐全、性能未重测、基础 acceptance 不变；因测试冻结包
   缺任务书 snapshot，裁决仍为 `blocked_golden_unauthorized`，尚未证明新标准对最终裁决生效。
