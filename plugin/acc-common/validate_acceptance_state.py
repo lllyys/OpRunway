@@ -47,9 +47,14 @@ _PERF_WAIT_STATUS = {"blocked_wait_gpu_benchmark", "blocked_wait_real_baseline"}
 # 算子 op_def 压根不支持 → 带发现的通过；差额挂 task_pr_gaps，见 _check_unsupported_gap 的反后门硬校）。
 # 2026-07-23：passed_with_gaps 再添一类撑法——op_def 声明了、但目标硬件那支实现没有
 # （`dtype_unsupported_on_target_hw`，见 _check_target_hw_gap）；两类均为被测物侧发现、同进 unsupported 桶。
+# 2026-08-05 加 blocked_golden_unavailable：参考实现**算不出真值**的 case（如通道数超 OpenCV
+# CV_CN_MAX）→ 结论空白，既非算子失败也非通过。与 blocked_golden_unauthorized 分开——那是
+# 「真值来路不明」（要人补授权），这是「压根没有真值」（要换参考实现或由人裁定不在验收范围）。
+# ⚠ 加进本词表**不放松任何门**：它不在 `_PASS_LIKE` 之类的放行集里，overall 仍落 BLOCKED_*；
+#   词表缺它反而会让门把一个合法终态报成「verdict 非法」，把真实结论盖成证据破损（实测踩过）。
 _VERDICT_ENUM = {
     "pass", "fail", "needs_review", "passed_with_risk", "passed_with_gaps",
-    "blocked_golden_unauthorized",
+    "blocked_golden_unauthorized", "blocked_golden_unavailable",
 }
 # C4 结构化 gap 类型：任务书要求、算子 op_def 不声明支持的 dtype 差额（与既有 dtype_deferred 语义不同——
 # deferred = 我们这条 pipeline 暂未测；unsupported = PR/算子根本没实现，是对被测方的**发现**）。

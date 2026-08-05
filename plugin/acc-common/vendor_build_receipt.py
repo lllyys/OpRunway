@@ -267,6 +267,10 @@ def _validate_source(receipt):
                 f"实得 head={head!r} repo={repo!r}）")
         degradations = _validate_degradations(receipt, accepted)
         return {
+            # 声明形态进摘要（2026-08-05）：报告第一层就要能分出「本轮本来就是本地代码」
+            # 与「本来要测 PR、只拿到快照」——前者 degradations 为空是**正常**，后者才是降级。
+            # 漏了它，evidence 里 declared_source_form 恒 null，两种情形在产物上长得一样。
+            DECLARED_FORM_KEY: form,
             "provenance_kind": kind,
             "pr_head_sha": head,
             "repo": repo,
@@ -300,6 +304,10 @@ def _validate_source(receipt):
         "vendor build receipt.source.snapshot_subtree_sha256（算子子树 merkle）")
     degradations = _validate_degradations(receipt, accepted)
     return {
+        # 声明形态进摘要（2026-08-05）：报告第一层就要能分出「本轮本来就是本地代码」
+        # 与「本来要测 PR、只拿到快照」——前者 degradations 为空是**正常**，后者才是降级。
+        # 漏了它，evidence 里 declared_source_form 恒 null，两种情形在产物上长得一样。
+        DECLARED_FORM_KEY: form,
         "provenance_kind": kind,
         "pr_head_sha": None,
         "repo": repo,
