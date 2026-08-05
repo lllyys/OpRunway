@@ -40,7 +40,7 @@
 | 项 | 说明 |
 |---|---|
 | **本地来源没跑过真机验收** | 只到 CP-A 取材 + 单测。**没跑 NPU、没出精度裁决、没出性能裁决。** 任何地方不许写成「本地来源已完成验收」 |
-| **产 `vendor_build_receipt` 的外部构建驱动没改** | 本仓只有消费方（三处读 + 两个测试夹具），**产出方不在本仓、文件名未知**。它不按 `dut_source` 分支写 `local_root_digest`，本地来源就永远过不了三级门。**这是本地来源真机跑通的唯一硬卡点** |
+| **`vendor_build_receipt` 压根没有产出方** | 本仓只有消费方（三处读 + 两个测试夹具）。⚠ **2026-08-05 在 a3 上实跑 `grep -rl 'oprunway.vendor_build_receipt'` 核过：真机上也没有产出方**——`/work/run` 与保护根里全部命中都是 plugin 自己的消费代码、收据本身和日志。Median PR6429 那份 `/tmp/oprunway-cppext-49e898f/vendor-build-receipt.json`（2026-07-27 11:03，743 字节）是**人手写的**，从来没有生成脚本。所以下一步不是「去找产出方」而是「得写一个」。**这是本地来源真机跑通的唯一硬卡点** |
 | **`aclnn_py` + `local_checkout` 结构性 fail-closed** | `verify_aclnn_harness` 判别式已接但显式拒 `local_checkout`：`aclnn_adapter` 只能按 PR ref 在容器内重新取源 build，**构建端根本不存在可与 `local_root_digest` 对账的锚**。放它过去，收据看着齐全、绑定其实是空的。只要 `aclnn_adapter` 的取源方式不变，这道门就一直关着——**不是排期问题，别当成「下一批补上」** |
 | **`root_digest` 只覆盖 `op_subdir`** | 不含仓级构建脚本、公共头文件。它证明「被测算子子树的字节是这一份」，**不证明**「整个构建输入闭包是这一份」 |
 | **三级门的残留伪装面** | `source_facts` 缺席 + 收据自称 `pull_request` 时，「`source_facts` 其实说的是 local」查不出来（没有对照物）。PR 通路沿用旧行为是**实测逼出来的**：真机报告目录里本来就没有 `source_facts.json`。要彻底封死，得让**编排层每次都传 `--source-facts`**，让缺席本身成为非法 |
@@ -51,11 +51,28 @@
 
 ## 4 · 下一步从哪开始（按序）
 
-1. **定位并改外部构建驱动，让它按 `dut_source` 分支写 `local_root_digest`。**
+1. **写一个 `vendor_build_receipt` 产出方（构建后自动落收据）。**
    这是本地来源真机跑通的唯一硬卡点，其余都排在它后面。
-   定位方法（照 local-source-plan Step 4）：真机上
-   `grep -rl 'oprunway.vendor_build_receipt' <真机工作区>` 找写入方；
-   **找不到就停下来问用户，不要自己新写一个产出方**——会和真机现有那份冲突。
+
+   ⚠ **别再照 local-source-plan Step 4 去「找写入方」了**——那条已在 2026-08-05 实跑核过：
+   真机上不存在任何产出方，Median 那份收据是人手写的。所以这一步是**新建**，不是修改。
+   要写的东西很薄：build 完之后把 `source` / `build` / `artifact` 三段落成 JSON，
+   其中 `artifact.library_sha256` 必须**现算**安装后那个 ELF 的摘要（不能抄构建目录里的中间产物）。
+
+   `source` 段按 `dut_source` 分支——这正是本地来源接不上的那一处：
+
+   ```jsonc
+   "source": {
+     "dut_source": "local_checkout",   // 缺省 "pull_request"，PR 通路不写这个键
+     "repo": "<必填，两条通路都要>",
+     "local_root_digest": "…64 位…"    // local 时必填；PR 时改填 pr_head_sha（40 位）
+   }
+   ```
+
+   `local_root_digest` 的值直接取 `fetch_source` 产的
+   `source_facts.payload.local_checkout.root_digest`——三级门就是拿这两个值做等值校验的，
+   对不上即 BLOCKED。⚠ 别自己重算一遍：重算意味着两处各有一份摘要实现，迟早分叉。
+
    改完在本仓两个测试夹具（`test_cpp_extension_driver.py` / `test_validate_cpp_extension_receipt.py`）
    里同步加 local 形态样例，作为契约的机器化定义。
 2. **重新起草 CP-F directive、重跑 F2。** schema 是 breaking（`pr_head` → `pr_head_sha` / `local_root_digest`，
