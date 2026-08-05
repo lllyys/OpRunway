@@ -150,11 +150,26 @@ class FailFastAndRoutingTest(unittest.TestCase):
         with self.assertRaises(ValueError):                     # 完全未知 dtype
             P.threshold_for("ascendoptest_default", "float8")
 
-    def test_bfloat16_arrays_still_rejected_by_compute_metrics(self):
-        """⭐ 锁住上面那条注释：阈值可取 ≠ 数组可判。bf16 的数值兜底必须还在。"""
+    def test_unsupported_dtype_arrays_rejected_on_both_sides_of_compute_metrics(self):
+        """⭐ 锁住上面那条注释：阈值可取 ≠ 数组可判，且 out/golden **两侧**都得校。
+
+        bf16 用 numpy 造不出数组（无原生 dtype），所以这里用同样不在
+        `SUPPORTED_COMPUTE_DTYPES` 里、但**造得出来**的 complex64 作见证，
+        证明双侧校验真的会开火——旧洞正是「只校 golden 侧」，
+        out=complex64 时 `astype(float64)` 静默丢虚部 → bad_count=0 假通过。
+        bf16 本身再单独钉常量与 helper 两条（它只能走这条路被挡）。
+        """
         self.assertNotIn("bfloat16", P.SUPPORTED_COMPUTE_DTYPES)
         with self.assertRaises(ValueError):
             P._check_compute_supported("bfloat16")
+
+        pol = P.threshold_for("ascendoptest_default", "float32")
+        good = np.array([1.0, 2.0], dtype=np.float32)
+        bad = np.array([1.0, 2.0], dtype=np.complex64)
+        with self.assertRaises(ValueError):                 # out 侧
+            P.compute_metrics(bad, good, pol)
+        with self.assertRaises(ValueError):                 # golden 侧
+            P.compute_metrics(good, bad, pol)
 
     def test_select_standard_backward_compat(self):
         self.assertEqual(P.select_standard({"verify_mode": "exact",

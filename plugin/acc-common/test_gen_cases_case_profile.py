@@ -151,11 +151,15 @@ class CaseProfilePlanMetaTest(unittest.TestCase):
         # fail-closed（见同文件 test_torch_parity_without_matrix_fails_closed）。原来这里用
         # `_with_profile(spec, "torch_parity")` 只塞档位不塞矩阵，与那条用例对同一份输入的期望
         # **互相矛盾**——是本用例没跟上改动，不是代码错。两档各用其合法 spec。
+        # ⚠ 两档的 case_target 必然不同（torch_parity 的矩阵大小锁死 12，legacy 无此约束），
+        #   所以先断言「条数 == 该档的 target」把 target 这个变量摘干净，
+        #   再断言档位元数据——某一档挂了能一眼看出是 target 还是 profile 的锅。
         for profile, spec, target in (
                 ("legacy", _with_profile(self.spec, "legacy"), 20),
                 ("torch_parity", _with_parity_matrix(self.spec), 12)):
             with self.subTest(profile=profile):
-                _entries, meta = _plan_of(spec, case_target=target)
+                entries, meta = _plan_of(spec, case_target=target)
+                self.assertEqual(len(entries), target, "该档的 case_target 先不成立，档位断言无意义")
                 self.assertEqual(meta["case_profile"], profile)
                 self.assertTrue(meta["case_profile_declared"])
 

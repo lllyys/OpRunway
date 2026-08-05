@@ -1060,8 +1060,21 @@ def effective_standard(spec_standard, cdtype, compare=None):
     compare!='exact_equal'，则回落 spec 标准、按 AOT 的 bfloat16 行（0.004）判。
     **这里没有 fail-fast**——原注释说「下游 threshold_for 会 fail-fast」，自 9b07e91
     支持 logical bf16 起就不成立了，别再照着它推断安全性。
-    真正拦住 bf16 的是 `compute_metrics`：它对 out/golden **双侧**做 `_check_compute_supported`，
-    而 `SUPPORTED_COMPUTE_DTYPES` 不含 bfloat16 —— 即「阈值取得到」不等于「bf16 数组判得过」。
+
+    那 bf16 的安全性现在靠什么？两条，都要成立才算数：
+
+    1. **阈值本身是 bf16 档**（0.004），不是拿 fp32 的紧阈值去judge一个 bf16 精度的产物——
+       所以「回落 spec 标准」不等于放宽到 fp32 口径；
+    2. **数组一侧仍 fail-closed**：`compute_metrics` 对 out/golden **双侧**做
+       `_check_compute_supported`，而 `SUPPORTED_COMPUTE_DTYPES` 不含 bfloat16。
+       这条之所以是**全覆盖**的：全仓 `metrics` 只有 `compute_metrics` 一个生产者
+       （`repo_adapter` / `catlass_adapter` 采集，`validate_acceptance_state` 独立重算），
+       各 judge（含 `judge_exact`、index 判据）只**读** metrics dict、不自己碰数组。
+       即「阈值取得到」不等于「dtype 名为 bfloat16 的数组判得过」。
+
+    ⚠ 逻辑 bf16 的实际比较产物是 **fp32**（输入以 uint16 承载），所以它走的是 fp32 数组 + bf16 阈值。
+    上面第 2 条挡的是「真有一个 `dtype.name == 'bfloat16'` 的数组混进数值口径」，
+    别把这两件事混为一谈。
     """
     if spec_standard in (EXACT, BEHAVIORAL):
         return spec_standard
