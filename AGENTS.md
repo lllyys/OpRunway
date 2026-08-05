@@ -206,7 +206,9 @@ push 前，对自上次 push 以来将要发布的全部改动统一做一轮审
 
 - 任务书**对性能没有要求** → 只用 msprof 采 NPU 实测性能即可；
 - 任务书要求的是**与 GPU 比对**（如“以 OpenCV CUDA A100 为参考，ratio ≥ 0.45×”）→ **同样只用 msprof 测实测性能**，
-  不必真的去对比 GPU、不必获取 GPU 标杆数据。
+  不必真的去对比 GPU、不必获取 GPU 标杆数据；
+- 本轮改动属**对原算子新增 dtype 支持 / 扩展 shape·rank / 开发新算子**三类之一（用户 2026-08-05 明示）
+  → **同样只用 msprof 测实测性能**，不做任何同机比值对比。
 
 理由：GPU 标杆（A100 / OpenCV CUDA / ATK 双标杆）要么拿不到环境，要么获取成本远高于它带来的验收价值；
 卡在等 GPU 数据上会把整条流水线阻塞住。而 NPU 侧 msprof kernel-only 数据在**真机实跑、
@@ -217,6 +219,12 @@ push 前，对自上次 push 以来将要发布的全部改动统一做一轮审
 
 - 不因缺 GPU 数据把结论落到 `BLOCKED_WAIT_GPU_BENCHMARK`；该终态只在用户明确要求做 GPU 对比时才用；
 - 性能维产出 = msprof 实测 kernel 耗时 + 分档说明，不是比值裁决；
+- 三种情形（`no_perf_requirement` / `gpu_comparison` / `change_class_no_perf_comparison`）**授权强度相同**：
+  都须在 spec 的 `perf.measure_only_authorization` 里给出 ground + cite + quote + `taskdoc_snapshot_sha256`，
+  缺一 fail-closed（受控词表见 `plugin/acc-common/perf_mode.py`）；
+- 走**改动类别**这一条时，任务书**若另写了比值 / 绝对门限 / 吞吐条款，该条款照旧强制进 `task_pr_gaps`
+  标「未验收」**，本轮仍只产 msprof 绝对耗时，禁止取 baseline、禁止算 ratio、禁止任何达标宣称
+  ——与上面 GPU 条款的处置逐字同形；改的是取证方式，不是条款可以不算数；
 - 报告须如实写“按用户口径只做 NPU msprof 实测，未做 GPU 标杆对比”，
   **不得把它包装成“已达标 0.45×”**——没测的比值不能编（5.8）；
 - msprof 数据仍须真机真跑，不接受推算（5.3）；

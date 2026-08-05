@@ -23,6 +23,7 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import perf_mode  # noqa: E402
+import vendor_build_receipt  # noqa: E402
 
 # T6/T8 扩枚举：exception=小shape例外(合法放行需交叉校验)；
 # blocked_wait_gpu_benchmark=缺外部 GPU 标杆正规挂起；blocked_incomparable_timing_scope=双边口径不可比。
@@ -738,6 +739,50 @@ def _canonical_sha(value):
     return hashlib.sha256(raw).hexdigest()
 
 
+#: codegen 落的机读挂账：本轮 stage2 实参结构**没有任何 header 级证据**。
+#: 逐字对应 `cpp_extension_codegen.DEGRADATION_STAGE2_UNVERIFIED`（那里是定义处）。
+_STAGE2_UNVERIFIED = "stage2_form_unverified"
+_STAGE2_DISPATCHABLE_FORMS = ("standard", "extended")
+
+
+def _gate_cpp_extension_stage2_evidence(manifest, errs):
+    """stage2 实参结构必须有据：**没核过就不能出验收裁决**。
+
+    codegen 允许在「预检产物与 spec 都没说」时退回历史缺省（标准 4 参宏）——那是为了让
+    开发/冒烟通路不至于一改就断。但验收侧不能跟着放松：拿 4 参 argtypes 调一个 extended
+    形态的 native 函数，在 aarch64 上是段错误或**静默错值**，且下游没有任何一道门看得出来。
+    所以「这次按几参调的」必须来自 PR head header（CP-C0 预检）或 spec 的显式声明，
+    否则本门记 error → BLOCKED（AGENTS.md 5.8：没核过的事不得升级成通过）。
+
+    修法只有两条，都不是放松判据：
+      · 把本轮 CP-C0 预检工件放到 work/aclnn_preflight.json（推荐：形态直接来自 PR header）；
+      · 或在 spec 的 call_variants[i] 里显式写 stage2_form（须与 header 一致，冲突时以 header 为准）。
+    """
+    degradations = manifest.get("degradations")
+    if degradations is None:
+        # 旧 manifest（本字段之前生成的）没有这个键，它同样意味着「没人核过 stage2 形态」。
+        errs.append(
+            "cpp_extension manifest 无 degradations 台账——无法确认 stage2 实参结构有据，"
+            "请用当前 codegen 重新 prepare")
+        return
+    if not isinstance(degradations, list):
+        errs.append("cpp_extension manifest.degradations 非列表（台账坏）")
+        return
+    if _STAGE2_UNVERIFIED in degradations:
+        errs.append(
+            "cpp_extension stage2 实参结构未经 header 核验（manifest 挂账 "
+            f"{_STAGE2_UNVERIFIED}）——验收不接受「猜成标准 4 参」。请提供 CP-C0 预检工件"
+            "（work/aclnn_preflight.json）或在 spec.call_variants[i].stage2_form 显式声明")
+    for row in manifest.get("variants") or []:
+        if not isinstance(row, dict):
+            errs.append("cpp_extension manifest.variants 项非 object")
+            continue
+        if row.get("stage2_form") not in _STAGE2_DISPATCHABLE_FORMS:
+            errs.append(
+                f"cpp_extension variant {row.get('entrypoint')!r} 的 "
+                f"stage2_form={row.get('stage2_form')!r} 非可派发形态")
+
+
 def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs):
     """cpp_extension 的独立 build/load/ELF receipt 完整性门。
 
@@ -772,6 +817,7 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs):
     except (OSError, ValueError, TypeError) as ex:
         errs.append(f"cpp_extension 绑定工件坏 JSON: {type(ex).__name__}: {ex}")
         return
+    _gate_cpp_extension_stage2_evidence(manifest, errs)
     bindings = receipt.get("bindings")
     if not isinstance(bindings, dict):
         errs.append("cpp_extension receipt.bindings 缺失")
@@ -821,31 +867,29 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs):
             or any(not isinstance(symbol, str) or not symbol
                    for symbol in symbols_owned)):
         errs.append("cpp_extension vendor library/symbol ownership provenance 不完整")
-    build_receipt = vendor.get("build_receipt") if isinstance(vendor, dict) else None
-    source = build_receipt.get("source") if isinstance(build_receipt, dict) else None
-    build = build_receipt.get("build") if isinstance(build_receipt, dict) else None
-    artifact_rec = (build_receipt.get("artifact")
-                    if isinstance(build_receipt, dict) else None)
-    head = source.get("pr_head_sha") if isinstance(source, dict) else None
+    # vendor 构建收据：判据由 `vendor_build_receipt` 一处解释（driver / adapter / 本门共用）。
+    # 按 `source.provenance_kind` 分流——`gitcode_pr` 与改动前逐字同一套（40 位 head + 非空 repo）；
+    # `local_snapshot` 改绑「仓根 + 算子子目录 scope + 整树/子树 merkle + 构建 argv + ELF sha」
+    # 并强制显式 `degradations: ["pr_head_unbound"]`。合成 head 冒充绑定的收据一律当场拒。
+    vendor_map = vendor if isinstance(vendor, dict) else {}
+    build_receipt = vendor_map.get("build_receipt")
     build_digest = _canonical_sha(build_receipt)
-    if (not isinstance(build_receipt, dict)
-            or build_receipt.get("schema") != "oprunway.vendor_build_receipt"
-            or build_receipt.get("schema_version") != 1
-            or build_receipt.get("status") != "VERIFIED"
-            or not isinstance(head, str) or len(head) != 40
-            or any(ch not in "0123456789abcdefABCDEF" for ch in head)
-            or not isinstance(source.get("repo"), str) or not source["repo"].strip()
-            or not isinstance(build, dict)
-            or not isinstance(build.get("argv"), list) or not build["argv"]
-            or any(not isinstance(x, str) or not x for x in build["argv"])
-            or not isinstance(build.get("cwd"), str) or not build["cwd"]
-            or build.get("returncode") != 0
-            or not isinstance(artifact_rec, dict)
-            or artifact_rec.get("library_path") != vendor.get("library_path")
-            or artifact_rec.get("library_sha256") != vendor_sha
-            or vendor.get("build_receipt_sha256") != build_digest):
+    try:
+        summary = vendor_build_receipt.validate(
+            build_receipt,
+            library_path=vendor_map.get("library_path"),
+            library_sha256=vendor_sha)
+        if vendor_map.get("build_receipt_sha256") != build_digest:
+            raise vendor_build_receipt.VendorBuildReceiptError(
+                "build_receipt_sha256 与收据内容不符（漂移）")
+        recorded = vendor_map.get("source_provenance")
+        if recorded is not None and recorded != summary:
+            raise vendor_build_receipt.VendorBuildReceiptError(
+                "vendor.source_provenance 与 build_receipt 重算的源身份不一致")
+    except vendor_build_receipt.VendorBuildReceiptError as ex:
         errs.append(
-            "cpp_extension vendor build receipt 未完整绑定 PR head→构建→安装 ELF")
+            "cpp_extension vendor build receipt 未完整绑定 源身份→构建→安装 ELF："
+            f"{ex}")
     receipt_sha = _canonical_sha(receipt)
     for row in ev_list:
         if isinstance(row, dict) and row.get("cpp_extension_receipt_sha256") != receipt_sha:
@@ -2277,6 +2321,64 @@ def gate_task3(d, errs):
     print(f"  性能 status={st}(perf_compare 判) | {tail}")
 
 
+def _cpp_extension_perf_subset_ok(cs, collect, planned, perf_ids, errs):
+    """性能采集只覆盖了性能 case 的**子集**时，判断这个子集是否合法并被完整挂账。
+
+    合法的唯一情形是 `measure_only`（AGENTS.md §5.10）：该口径不产比值、不产达标结论，
+    性能维只回答「这颗 kernel 实测多少微秒」。若沿用「整份精度通过才采性能」的总门，
+    精度一 fail 就等于零 msprof 数据，而绝对耗时恰恰是本档唯一产出。故允许子集，
+    但**分母一条不许丢**：落选的每条性能 case 都必须在 `skipped` 里写明真实原因。
+
+    口径同样要**两份独立产物都说了才算**（与 `_measure_only_mode` 同一条纪律）：
+      ① `caseset.perf_case_policy.mode`（Task1 账本，gate_task1 校过）；
+      ② `perf_collect.mode`（真正驱动 msprof 那一轮采集的口径，由采集端写）。
+    任一条不是 measure_only 一律按严档判「跑子集」，fail-closed。
+
+    ⚠ 子集合法**只**意味着「性能证据可以少于全部性能 case」；它不放松任何精度结论——
+    精度 fail 仍由 validator 判成 FAIL（5.8：有实测耗时 ≠ 验收通过）。
+    """
+    policy = cs.get("perf_case_policy")
+    ledger_measure_only = False
+    if isinstance(policy, dict):
+        try:
+            ledger_measure_only = perf_mode.is_measure_only(perf_mode.policy_mode(policy))
+        except ValueError as ex:
+            errs.append(f"caseset.perf_case_policy.mode 非法（按严档处理）：{ex}")
+            ledger_measure_only = False
+    collect_measure_only = collect.get("mode") == perf_mode.MODE_MEASURE_ONLY
+    if not (ledger_measure_only and collect_measure_only):
+        errs.append(
+            "cpp_extension perf_collection 非完整性能 caseset 或 case 顺序漂移"
+            f"（planned={planned!r} ≠ caseset 性能 case {perf_ids!r}；"
+            f"caseset 口径 measure_only={ledger_measure_only}、"
+            f"采集口径 measure_only={collect_measure_only}——两份都说 measure_only 才允许子集）")
+        return False
+    # 子集必须是**保序**子序列：换序 = 计划与采集不是同一份排期，同样不可信。
+    if [cid for cid in perf_ids if cid in set(planned)] != planned:
+        errs.append(
+            "cpp_extension measure_only 性能子集与 caseset 性能 case 顺序不一致（或含 caseset 外的 id）")
+        return False
+    skipped = collect.get("skipped")
+    if not isinstance(skipped, list):
+        errs.append("cpp_extension measure_only 性能子集缺 skipped 挂账（分母不完整）")
+        return False
+    reasons = {}
+    for item in skipped:
+        if (not isinstance(item, dict) or not isinstance(item.get("case_id"), str)
+                or not isinstance(item.get("reason"), str) or not item["reason"].strip()):
+            errs.append(f"cpp_extension perf_collection.skipped 记录不完整：{item!r}")
+            return False
+        reasons[item["case_id"]] = item["reason"]
+    missing = [cid for cid in perf_ids if cid not in set(planned)]
+    unaccounted = [cid for cid in missing if cid not in reasons]
+    if unaccounted:
+        errs.append(
+            f"cpp_extension measure_only 性能子集漏挂账 {unaccounted}"
+            "（性能 case 既没采、也没写为什么没采）")
+        return False
+    return True
+
+
 def _gate_cpp_extension_perf_collection(d, errs):
     """从 evidence envelope 独立核 cpp_extension 的性能采集与 build receipt 同源。"""
     ev = _load(d, "evidence.json")
@@ -2314,13 +2416,16 @@ def _gate_cpp_extension_perf_collection(d, errs):
     if (collect.get("custom_kind") != "cpp_extension"
             or provenance != expected_provenance):
         errs.append("cpp_extension perf_collection 的 ELF/vendor/namespace provenance 与 receipt 漂移")
+    planned = checkpoint.get("planned_case_ids") if isinstance(checkpoint, dict) else None
     if (not isinstance(checkpoint, dict)
             or checkpoint.get("complete") is not True
-            or checkpoint.get("planned_case_ids") != perf_ids
-            or record_ids != perf_ids
             or not isinstance(records, list)
+            or record_ids != planned
             or len(record_ids) != len(records)):
-        errs.append("cpp_extension perf_collection 非完整性能 caseset 或 case 顺序漂移")
+        errs.append("cpp_extension perf_collection 非完整本轮采集或 case 顺序漂移")
+        return
+    if planned != perf_ids and not _cpp_extension_perf_subset_ok(
+            cs, collect, planned, perf_ids, errs):
         return
     ev_by_id = {row.get("case_id"): row for row in (ev.get("evidence") or [])
                 if isinstance(row, dict)}

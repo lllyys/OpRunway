@@ -252,8 +252,12 @@ def _resolve_mode(spec, requested_mode):
     return requested_mode
 
 
-def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=None, gpu_baseline=None):
+def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=None, gpu_baseline=None,
+        taskdoc_caseset=None):
     """跑一遍 Task1→2→3。
+
+    `taskdoc_caseset` = 规范化任务书用例集（`taskdoc_caseset.json`）的路径，只在 spec 声明
+    `precision.case_source='taskdoc'` 时需要；两向不匹配由 `gen_cases` fail-closed（编排层不做第二套判定）。
 
     ⚠ `defect` / `perf_slow` 是**测试专用夹具**（在 mock 里造坏点 / 造略慢基线，用来证明「validator 真会 fail、
     门不是假门」），**两个都不在 CLI 上暴露**（C5 拿掉 `--defect`；`--perf-slow` 同批理由、2026-07-22 补下架）
@@ -333,9 +337,15 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         if os.path.exists(sp):
             os.remove(sp)
     # Task 1
-    caseset = gen_cases.gen_cases(spec, work)
+    caseset = gen_cases.gen_cases(spec, work, taskdoc_caseset=taskdoc_caseset)
     _dump(caseset, "caseset.json")
     print(f"[Task1 gen_cases] {len(caseset['cases'])} 用例")
+    _gu = (caseset.get("golden_unavailable") or {}).get("count", 0)
+    if _gu:
+        # 一等状态就要一等的可见度：无 golden 的 case 数必须**在编排层日志里出现**，
+        # 不能只躺在 caseset 里等人翻。它们不进精度分母、也不进性能候选池，由门判 BLOCKED。
+        print(f"[Task1 gen_cases] ⚠ golden_unavailable {_gu} 条（任务书用例，参考实现算不出 golden）"
+              f"——已退出精度维与性能候选池，身份与输入仍保留，须按 BLOCKED 记账、不得当通过")
     if mode == "cpp_extension":
         cpp_extension_adapter.prepare(spec, caseset, work)
         print("[CP-C0 cpp_extension] 已生成官方 Extension bundle 与逐 case invocation plan；"
@@ -419,6 +429,16 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     # passed_with_gaps（C4：任务书要求的 dtype 算子 op_def 不支持、差额挂 task_pr_gaps）**精度本身是全过的**，
     # 必须与 pass 同样继续跑 Task3——漏掉它会静默跳过性能、且归因错成「无性能用例」。
     precision_ok = o["verdict"] in ("pass", "passed_with_risk", "passed_with_gaps")
+    # §5.10 · 第二层性能总门的 measure_only 分流（C3/C4）。
+    # 病灶：上面这道 fail-fast 是为 **ratio_gated** 设计的——精度没全过时，比值裁决确实没有意义
+    # （拿判错的输出去比耗时，比出来的「达标」是假的）。但 `measure_only` **本来就不产比值裁决**，
+    # 它要的只是「这批 case 在真机上跑出来的 kernel 耗时」；一条 golden 算不出来或一条 DUT 精度失败，
+    # 就把**整轮已经采到的 msprof 数据全部丢掉、产一份零数据 perf_report**，那不是严谨，是把
+    # 已有的真实证据扔了（实测：taskdoc 169 条里只要有 1 条挂，性能维就归零）。
+    # 分流后：`measure_only` 继续消费已采到的实测数据，**精度分母原样保留**——
+    # 性能维在这一档本就不贡献 pass/fail，下面 overall 仍会按 `prec == "fail"` 落 FAIL(精度)，
+    # 性能数据只是被如实记下来，绝不据此宣称精度或任务书整体通过。`ratio_gated` 行为逐字不变。
+    perf_skipped_by_precision = (not precision_ok) and not measure_only
     # 批 5：`blocked_golden_unauthorized` **不在放行集**——真值来路不明时，连性能对比都没有意义
     #（拿一份不知对不对的 golden 判过的「精度通过」去支撑「性能达标」，是把无效结论往下传）。
     # 批 5：golden 授权核不实 → 直接 BLOCKED，且**排在所有别的判定之前**。
@@ -428,15 +448,12 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         _why = "; ".join(f"tier{t.get('tier')}:{t.get('blocked_reason')}" for t in _gb) or "?"
         print(f"[Task2] golden 授权核不实 → BLOCKED（{_why}）——"
               f"真值来路不明，基于它的精度判定不成立；跳过 Task3。")
-    if not precision_ok:
+    if perf_skipped_by_precision:
         report = {"op": spec["op"], "baseline_source": None, "target_ratio": None, "per_case": [],
                   "notes": [f"精度未全过（{o['verdict']}）→ 跳过性能测试（fail-fast，精度已全跑再判）"],
                   "summary": {"perf_cases": 0, "cases_scored": 0, "达标": 0, "blocked": 0,
                               "status": "skipped_precision_gate"}}
         report = perf_compare.attach_skipped_shape_plan(report, caseset)
-        if measure_only:      # 精度 fail-fast 时也如实标口径，免得这份报告被当成 ratio 通路读
-            report["perf_mode"] = perf_mode.MODE_MEASURE_ONLY
-            report["notes"].append(perf_mode.MEASURE_ONLY_NOTE)
         _dump(_stamp_dev(report, is_acceptance, grade), "perf_report.json")
         print(f"[Task3 perf_compare] 跳过（精度={o['verdict']} 未全过 → fail-fast）")
     else:
@@ -478,6 +495,18 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
             _dump(baseline, "baseline.json")
         report = perf_compare.perf_compare(spec, caseset, evidence, baseline, expect_source=expect_source,
                                            baseline_blocked_status=baseline_blocked_status)
+        if not precision_ok:
+            # §5.10 分流留痕（机读 + 人读各一份）：这份实测数据是在**精度未全过**的前提下采到的。
+            # 措辞红线同 §5.10：只说「测了什么」，一个字都不许读成「精度或条款通过」。
+            report["precision_gate"] = {
+                "precision_verdict": o["verdict"],
+                "decoupled_by": "perf.mode=measure_only",
+                "note": "性能维在 measure_only 下不产裁决，故与精度裁决解耦；精度分母仍以 verdict.json 为准",
+            }
+            report.setdefault("notes", []).append(
+                f"⚠ 精度维未全过（{o['verdict']}）。按 §5.10 measure_only 口径，性能维只实测不裁决、"
+                "与精度裁决解耦，故本轮**继续**记录已采到的 NPU kernel-only 实测耗时；"
+                "这**不表示**精度通过、更不表示任务书性能条款通过，失败明细见 verdict.json。")
         if report["summary"].get("status") == "exception":  # T6：例外态渲染仿真图，门循环前落盘+记 sha
             import perf_sim_plot
             svg_name = f"perf_sim_{spec['op'].lower()}.svg"
@@ -501,6 +530,9 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     gate_stages = ["task1", "task2"] if is_acceptance else ["task1"]
     # measure_only 也必须挂 task3 门：万一它一条性能 case 都没产出，要的是门报 `no_perf_cases`
     # 并 BLOCKED，而不是「没有性能用例 → 静默跳过门 → 干净 PASS」（那正是 fail-open）。
+    # ⚠ 条件仍是 `precision_ok`，**故意不因 measure_only 分流而放开**：精度没过时 overall 已经是
+    #   FAIL(精度)，此时再挂 task3 门只会让「性能产物不完整」把结论改写成 BLOCKED(验收门未过)，
+    #   把真正该被看见的精度失败盖掉。分流拿到的性能数据照样落盘可读，只是这一轮不参与门。
     if precision_ok and (ps.get("perf_cases", 0) > 0 or spec.get("perf", {}).get("baseline")
                          or measure_only):
         gate_stages.append("task3")
@@ -688,8 +720,12 @@ def main():
                          "两者都是真机验收通路。mock 仅本地用例链自检、精度按构造必过、**非验收**")
     ap.add_argument("--out", default="reports/_run")
     ap.add_argument("--gpu-baseline", default=None, help="外部 GPU 标杆 JSON（Task3 consumer 侧对比）")
+    ap.add_argument("--taskdoc-caseset", default=None,
+                    help="规范化任务书用例集 taskdoc_caseset.json；"
+                         "仅 spec.precision.case_source='taskdoc' 时需要（两向不匹配由 gen_cases fail-closed）")
     a = ap.parse_args()
-    result = run(a.spec, a.mode, a.out, gpu_baseline=a.gpu_baseline)
+    result = run(a.spec, a.mode, a.out, gpu_baseline=a.gpu_baseline,
+                 taskdoc_caseset=a.taskdoc_caseset)
     # CLI 退出码：0 干净 PASS / 2 PASSED_WITH_RISK(挂起转人工) / 1 其余（门未过/精度fail/性能未达/BLOCKED/needs_review）
     sys.exit(result["exit_code"])
 

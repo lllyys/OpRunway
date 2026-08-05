@@ -30,7 +30,14 @@ class CppExtensionReceiptGateTest(unittest.TestCase):
             "schema_version": 1,
             "namespace": "oprunway_test",
             "spec_sha256": "1" * 64,
-            "variants": [{"entrypoint": "invoke_v0"}],
+            # stage2_form 是 2026-08-05 新增的必填项：形态必须**可派发**，不许由 codegen 默认猜
+            # 「标准 4 参」——GaussianBlur 的 extended 10 参 stage2 正是被那个默认猜法坑到的。
+            "variants": [{"entrypoint": "invoke_v0", "stage2_form": "standard"}],
+            # 2026-08-05：stage2 形态证据台账。空列表 = 无降级 = 形态已由 header/预检核过。
+            # 缺这个键**不是**「没降级」而是「没人核过」，门会据此拒（见
+            # validate_acceptance_state._gate_cpp_extension_stage2_evidence）——旧 manifest 因此失效，
+            # 这是有意的 fail-closed 方向，不是回归。
+            "degradations": [],
         }
         plan = {
             "schema": "oprunway.cpp_extension_invocation_plan",
@@ -144,7 +151,14 @@ class CppExtensionReceiptGateTest(unittest.TestCase):
             errors = []
             G._gate_cpp_extension_receipt(
                 root, caseset, envelope, evidence, errors)
-            self.assertTrue(any("PR head→构建→安装 ELF" in e for e in errors))
+            # 2026-08-05：receipt 按 source 分流后，文案由「PR head→构建→安装 ELF」泛化成
+            # 「源身份→构建→安装 ELF」（同一条链现在还要覆盖 local_snapshot 档）。
+            # ⚠ 断言只跟着改文案是不够的——**这条守的是 fail-open**，所以同时钉死三件事：
+            #   ① 确实被拒（errors 非空）；② 拒的理由确实是源身份绑定；
+            #   ③ 错误里逐字点出那个截断的假 head，防止「因为别的原因恰好也报错」而假绿。
+            self.assertTrue(errors, "截断的 7 位假 head 必须被拒，不得放行")
+            self.assertTrue(any("源身份→构建→安装 ELF" in e for e in errors), errors)
+            self.assertTrue(any("aaaaaaa" in e for e in errors), errors)
 
 
 if __name__ == "__main__":

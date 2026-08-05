@@ -17,8 +17,9 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-import re
 import tempfile
+
+import vendor_build_receipt
 
 
 class DriverError(RuntimeError):
@@ -106,36 +107,23 @@ def _vendor_build_provenance(vendor):
 
     Extension 自身的 build/load 成功只证明调用桥可用，不能证明被加载的 vendor
     ELF 来自任务 PR。生产者须在构建/安装 DUT 时落一份内容可校验的收据；这里把
-    完整 PR head、构建命令和最终 ELF 摘要重新对账后纳入 Extension receipt。
+    源身份、构建命令和最终 ELF 摘要重新对账后纳入 Extension receipt。
+
+    ⚠ 逐条校验**不在本文件里写第二遍**：三处消费方（本 driver、离线 adapter、验收门）
+    共用 :mod:`vendor_build_receipt`。改动前那三份手抄件里，每一份都无条件要求 40 位
+    PR head —— 于是「无 `.git` 的本地快照」这条通路要么恒 BLOCKED、要么只能靠捏造
+    head 过门。分流规则与词表映射见该模块 docstring。
     """
     path = _require_env_path("OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT")
     receipt = _load(path)
-    if (not isinstance(receipt, dict)
-            or receipt.get("schema") != "oprunway.vendor_build_receipt"
-            or receipt.get("schema_version") != 1
-            or receipt.get("status") != "VERIFIED"):
-        raise DriverError("vendor build receipt schema/status 非 VERIFIED v1")
-    source = receipt.get("source")
-    head = source.get("pr_head_sha") if isinstance(source, dict) else None
-    if (not isinstance(head, str)
-            or re.fullmatch(r"[0-9a-fA-F]{40}", head) is None
-            or not isinstance(source.get("repo"), str)
-            or not source["repo"].strip()):
-        raise DriverError("vendor build receipt 缺完整 PR head/source repo")
-    build = receipt.get("build")
-    if (not isinstance(build, dict)
-            or not isinstance(build.get("argv"), list)
-            or not build["argv"]
-            or any(not isinstance(x, str) or not x for x in build["argv"])
-            or not isinstance(build.get("cwd"), str)
-            or not build["cwd"]
-            or build.get("returncode") != 0):
-        raise DriverError("vendor build receipt 缺成功 build argv/cwd/returncode")
-    artifact = receipt.get("artifact")
-    if (not isinstance(artifact, dict)
-            or os.path.realpath(artifact.get("library_path", "")) != vendor
-            or artifact.get("library_sha256") != _sha_file(vendor)):
-        raise DriverError("vendor build receipt 的安装 ELF 路径/摘要与现场文件不一致")
+    try:
+        vendor_build_receipt.validate(
+            receipt, library_path=vendor, library_sha256=_sha_file(vendor),
+            # 真机侧拿到的是 realpath 后的绝对路径，故按 realpath 比对；
+            # 离线复核方比的是收据里逐字记录的字符串（不碰文件系统）。
+            normalize_path=True)
+    except vendor_build_receipt.VendorBuildReceiptError as ex:
+        raise DriverError(str(ex)) from ex
     return receipt
 
 
@@ -167,6 +155,11 @@ def _bind_vendor(plan):
         "binding": "ctypes.CDLL(exact_path, RTLD_GLOBAL) before torch.ops.load_library",
         "build_receipt": build_provenance,
         "build_receipt_sha256": _canonical_sha(build_provenance),
+        # 源身份摘要（含 `degradations` 机读挂账）。它是 build_receipt 的**派生视图**，
+        # 不是新事实：离线复核方会用同一个函数重算并逐字比对，谁改一处都对不上。
+        # 落这一份的理由是可见性：`pr_head_unbound` 这类降级必须在报告的第一层就看得见，
+        # 而不是埋在嵌套收据里等人自己翻（AGENTS.md 5.8）。
+        "source_provenance": vendor_build_receipt.summarize(build_provenance),
     }
 
 

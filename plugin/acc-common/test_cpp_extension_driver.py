@@ -91,6 +91,78 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
                 with self.assertRaisesRegex(D.DriverError, "完整 PR head"):
                     D._vendor_build_provenance(vendor)
 
+    def _write_receipt(self, td, receipt):
+        path = os.path.join(td, "receipt.json")
+        with open(path, "w", encoding="utf-8") as dst:
+            json.dump(receipt, dst)
+        return path
+
+    def _local_snapshot_receipt(self, vendor):
+        """无 `.git` 的本地快照：没有 PR head 可绑，改绑仓根 + 子目录 scope + 两个 merkle。"""
+        return {
+            "schema": "oprunway.vendor_build_receipt",
+            "schema_version": 2,
+            "status": "VERIFIED",
+            "degradations": ["pr_head_unbound"],
+            "source": {
+                "provenance_kind": "local_snapshot",
+                "repo": "repos/ops-witness-local-snapshot",
+                "pr_head_sha": None,
+                "snapshot_subtree_scope": "witness_op",
+                "snapshot_sha256": "c" * 64,
+                "snapshot_subtree_sha256": "d" * 64,
+            },
+            "build": {"argv": ["bash", "build.sh"], "cwd": "/w", "returncode": 0},
+            "artifact": {
+                "library_path": vendor,
+                "library_sha256": D._sha_file(vendor),
+            },
+        }
+
+    def test_local_snapshot_receipt_is_accepted_with_explicit_degradation(self):
+        with tempfile.TemporaryDirectory() as td:
+            vendor = os.path.join(td, "lib.so")
+            with open(vendor, "wb") as dst:
+                dst.write(b"vendor")
+            receipt = self._local_snapshot_receipt(vendor)
+            path = self._write_receipt(td, receipt)
+            with mock.patch.dict(
+                    os.environ,
+                    {"OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT": path}):
+                self.assertEqual(D._vendor_build_provenance(vendor), receipt)
+        summary = D.vendor_build_receipt.summarize(receipt)
+        self.assertIsNone(summary["pr_head_sha"])
+        self.assertEqual(summary["provenance_kind"], "local_snapshot")
+        self.assertEqual(summary["degradations"], ["pr_head_unbound"])
+
+    def test_local_snapshot_may_not_fabricate_a_pr_head(self):
+        with tempfile.TemporaryDirectory() as td:
+            vendor = os.path.join(td, "lib.so")
+            with open(vendor, "wb") as dst:
+                dst.write(b"vendor")
+            receipt = self._local_snapshot_receipt(vendor)
+            receipt["source"]["pr_head_sha"] = "e" * 40
+            path = self._write_receipt(td, receipt)
+            with mock.patch.dict(
+                    os.environ,
+                    {"OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT": path}):
+                with self.assertRaisesRegex(D.DriverError, "捏造 PR head"):
+                    D._vendor_build_provenance(vendor)
+
+    def test_local_snapshot_must_account_the_degradation(self):
+        with tempfile.TemporaryDirectory() as td:
+            vendor = os.path.join(td, "lib.so")
+            with open(vendor, "wb") as dst:
+                dst.write(b"vendor")
+            receipt = self._local_snapshot_receipt(vendor)
+            del receipt["degradations"]
+            path = self._write_receipt(td, receipt)
+            with mock.patch.dict(
+                    os.environ,
+                    {"OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT": path}):
+                with self.assertRaisesRegex(D.DriverError, "degradations"):
+                    D._vendor_build_provenance(vendor)
+
     def test_perf_plan_must_bind_exact_caseset_and_receipt(self):
         with tempfile.TemporaryDirectory() as td:
             caseset = {"op": "X", "cases": []}

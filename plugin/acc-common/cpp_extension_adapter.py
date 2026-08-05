@@ -18,6 +18,8 @@ from pathlib import Path
 
 import content_address
 import cpp_extension_codegen
+import perf_mode
+import vendor_build_receipt
 
 
 class CppExtensionAdapterError(RuntimeError):
@@ -143,11 +145,42 @@ def build_invocation_plan(caseset, manifest):
     }
 
 
-def prepare(spec, caseset, work):
-    """生成 Extension bundle 与逐 case 调用计划；纯本地确定性准备，不 build。"""
+_PREFLIGHT = "aclnn_preflight.json"
+#: CP-C0 预检工件的内容寻址 domain。**定义处是 `preflight_aclnn._PREFLIGHT_DOMAIN`**；
+#: 这里逐字重述而不 import，是因为 `preflight_aclnn` 顶层 import `gen_cases`（进而 numpy），
+#: 而本模块要保持在纯 stdlib 的本地准备层。改域名时两处必须同改。
+_PREFLIGHT_DOMAIN = "oprunway/aclnn-preflight/v1"
+
+
+def _load_preflight(work):
+    """work 里若躺着本轮 CP-C0 预检工件就读出来（供 codegen 定 stage2 形态）。
+
+    做成「在场即用、缺席即退回 spec 自报/历史缺省并挂账」：`prepare()` 的三个调用方
+    （run_workflow / precision_retest_runner / 单测）都不归本 lane 改，不能改签名硬要求。
+    但**在场时一条都不放松**：必须是 `content_address` 的可校验 envelope（domain + digest 都核），
+    坏文件绝不当成「没有预检」静默跳过——那正好把 fail-closed 变成 fail-open。
+    形态本身的 fail-closed 在 codegen（状态、spec 摘要绑定、不可派发形态）。
+    """
+    path = os.path.join(work, _PREFLIGHT)
+    if not os.path.isfile(path) or os.path.islink(path):
+        return None
+    try:
+        return content_address.read_artifact(work, _PREFLIGHT, _PREFLIGHT_DOMAIN)
+    except content_address.ContentAddressError as ex:
+        raise CppExtensionAdapterError(
+            f"{_PREFLIGHT} 在场却不是可校验的 CP-C0 预检工件：{ex}") from ex
+
+
+def prepare(spec, caseset, work, preflight=None):
+    """生成 Extension bundle 与逐 case 调用计划；纯本地确定性准备，不 build。
+
+    `preflight` 未显式传入时，回落读 `<work>/aclnn_preflight.json`（若在）。
+    """
     if spec.get("runner_form") != "cpp_extension":
         raise CppExtensionAdapterError("prepare 仅接受 runner_form=cpp_extension")
     work = os.path.abspath(work)
+    if preflight is None:
+        preflight = _load_preflight(work)
     for stale in (_PERF_PLAN, _PERF_COLLECT):
         path = os.path.join(work, stale)
         if os.path.lexists(path):
@@ -156,7 +189,10 @@ def prepare(spec, caseset, work):
                     f"拒绝清理非普通 cpp_extension 性能暂存物: {path}")
             os.unlink(path)
     bundle = os.path.join(work, _BUNDLE)
-    manifest = cpp_extension_codegen.generate(spec, bundle)
+    try:
+        manifest = cpp_extension_codegen.generate(spec, bundle, preflight)
+    except cpp_extension_codegen.CppExtensionCodegenError as ex:
+        raise CppExtensionAdapterError(f"Extension codegen 失败：{ex}") from ex
     plan = build_invocation_plan(caseset, manifest)
     with open(os.path.join(work, _PLAN), "w", encoding="utf-8") as out:
         json.dump(plan, out, ensure_ascii=False, indent=2)
@@ -165,28 +201,96 @@ def prepare(spec, caseset, work):
         json.dump(caseset, out, ensure_ascii=False, indent=2)
         out.write("\n")
     perf = spec.get("perf") or {}
+    # 性能口径由 `perf_mode` 一处解释（AGENTS.md §5.10）：字段缺席 = 历史严档 ratio_gated；
+    # measure_only 须带任务书授权，且 spec 里不得再出现任何对照物/阈值字段（那由 resolve 校）。
+    try:
+        mode = perf_mode.resolve_spec_mode(spec)
+    except perf_mode.PerfModeError as ex:
+        raise CppExtensionAdapterError(f"spec.perf 口径非法：{ex}") from ex
     perf_template = {
         "schema": "oprunway.cpp_extension_perf_template",
         "schema_version": 1,
         "op": caseset.get("op"),
-        "baseline": perf.get("baseline"),
-        "torch_baseline": perf.get("torch_baseline"),
-        "aclnn_baseline": perf.get("aclnn_baseline"),
+        "mode": mode,
         "warmup": perf.get("warmup", 5),
         "repeat": perf.get("repeat", 20),
         "side_timeout_s": perf.get("side_timeout_s", 120),
     }
+    if not perf_mode.is_measure_only(mode):
+        # 只测不比的档**不写任何对照物槽**：写成 `null` 也会让读计划的人以为「采过基线、没采到」，
+        # 而且 `perf_msprof.collect` 对 measure_only 明确要求 baseline 缺席（fail-closed）。
+        perf_template.update({
+            "baseline": perf.get("baseline"),
+            "torch_baseline": perf.get("torch_baseline"),
+            "aclnn_baseline": perf.get("aclnn_baseline"),
+        })
+    else:
+        perf_template["measure_only_authorization"] = (
+            perf_mode.measure_only_authorization(perf))
     with open(os.path.join(work, _PERF_TEMPLATE), "w", encoding="utf-8") as out:
         json.dump(perf_template, out, ensure_ascii=False, indent=2)
         out.write("\n")
     return manifest, plan
 
 
+#: 严档（ratio_gated）下「整份精度未通过 → 一条性能都不采」的挂账理由。
+SKIPPED_PRECISION_OVERALL_GATE = "skipped_precision_overall_gate"
+#: measure_only 下「这条 case 的精度**根本判不了**」（没执行成功 / 无 policy+metrics）的挂账理由。
+#: 与 `perf_msprof.SKIPPED_ACCURACY_FAILED`（判过、没过）是两件事，不得混成同一个词。
+SKIPPED_PRECISION_NOT_EVALUABLE = "skipped_precision_not_evaluable"
+
+
+def _precision_evaluable_ids(evidence):
+    """evidence 里**精度可判**的 case（有 policy + metrics 的完整精度块）。
+
+    ⚠ 这不是第二套裁决：pass/fail 的唯一权威仍是 `perf_msprof.accuracy_pass_ids`
+    （它内部调 `validator._judge_by_policy`）。本函数只回答「这条 case 到底有没有可判的精度块」，
+    用来把 skipped 的**理由**写准——「算错了」和「压根没跑出来」在报告里必须分得开（AGENTS.md 5.8）。
+    结构判据与 `accuracy_pass_ids` 保持一致：多输出看 `precision.outputs`，
+    单输出旧证据回落到 `precision` 顶层。
+    """
+    ids = set()
+    for item in evidence or []:
+        if not isinstance(item, dict):
+            continue
+        cid = item.get("case_id")
+        prec = item.get("precision")
+        if not cid or not isinstance(prec, dict):
+            continue
+        outputs = prec.get("outputs")
+        if not isinstance(outputs, list) or not outputs:
+            outputs = [prec] if prec.get("policy") is not None else []
+        if not outputs:
+            continue
+        if all(isinstance(out, dict) and out.get("policy") is not None
+               and out.get("metrics") is not None for out in outputs):
+            ids.add(cid)
+    return ids
+
+
 def _write_perf_plan(caseset, work, evidence, receipt):
-    """精度先筛后生成第二阶段性能计划；device 必须由真机调用方显式给出。"""
+    """精度先筛后生成第二阶段性能计划；device 必须由真机调用方显式给出。
+
+    两档口径**分开处理**（AGENTS.md §5.10）：
+
+    · ``ratio_gated``（缺省、历史行为，**逐字不变**）：任何应裁精度 case 未通过 →
+      一条性能都不采。理由是比值裁决要拿这批数去和标杆比，算错的快不算快。
+    · ``measure_only``：口径本身不产任何达标结论，性能维只是「这颗 kernel 实测多少微秒」。
+      此时若沿用总门，精度一 fail 就等于 msprof 零数据 —— 而「只输出绝对耗时」恰恰是本档
+      唯一的产出。故改为从**已成功执行且精度可判为 pass** 的 case 里选性能子集继续采，
+      **分母一条不丢**：每条落选的性能 case 都进 `skipped` 并写明真实原因。
+      这不放松任何结论：性能计划里显式带着 `precision_gate` 台账，且本档不产比值、
+      不贡献 pass/fail，最终裁决仍由 validator 按精度出（这里出的一定还是 FAIL）。
+    """
     from aclnn_runtime import perf_msprof as PM
 
     template = _strict_json(os.path.join(work, _PERF_TEMPLATE))
+    try:
+        # 计划口径只认 prepare() 落盘的模板（它由 spec 经 perf_mode 校过），不看运行期环境。
+        mode = perf_mode.normalize(template.get("mode", perf_mode.DEFAULT_MODE))
+    except perf_mode.PerfModeError as ex:
+        raise CppExtensionAdapterError(f"cpp_extension 性能模板口径非法：{ex}") from ex
+    measure_only = perf_mode.is_measure_only(mode)
     passed = PM.accuracy_pass_ids(evidence)
     precision_ids = {
         case["id"] for case in caseset.get("cases") or []
@@ -194,14 +298,23 @@ def _write_perf_plan(caseset, work, evidence, receipt):
     }
     if not precision_ids:
         precision_ids = {case["id"] for case in caseset.get("cases") or []}
-    if passed != precision_ids:
+    not_passed = sorted(precision_ids - passed)
+    if not_passed and not measure_only:
         # 与 run_workflow 的 Task2 总门同口径：任何应裁精度 case 未通过，都不得提前采性能。
         # 性能 case 虽是 precision-pass 子集，但这个“子集”只在整份精度验收通过后做选择。
         return None, [{
             "case_id": cid,
-            "reason": "skipped_precision_overall_gate",
-        } for cid in sorted(precision_ids - passed)]
+            "reason": SKIPPED_PRECISION_OVERALL_GATE,
+        } for cid in not_passed]
     selected, skipped = PM.select_perf_cases(caseset, passed)
+    if measure_only:
+        # `select_perf_cases` 对所有未 pass 的 case 一律记 `skipped_accuracy_failed`；
+        # 其中「精度块根本不存在」的那些其实是**没跑出来/判不了**，理由要改写准。
+        evaluable = _precision_evaluable_ids(evidence)
+        for item in skipped:
+            if (item.get("reason") == PM.SKIPPED_ACCURACY_FAILED
+                    and item.get("case_id") not in evaluable):
+                item["reason"] = SKIPPED_PRECISION_NOT_EVALUABLE
     if not selected:
         return None, skipped
     raw_device = os.environ.get("OPRUNWAY_CPP_EXTENSION_DEVICE")
@@ -225,6 +338,18 @@ def _write_perf_plan(caseset, work, evidence, receipt):
         "device": device,
         "cases": selected,
         "skipped": skipped,
+        # 精度台账：**分母完整落盘**，让「本轮为什么只采了这些 case」成为机读事实。
+        # `gate_passed=False` 时下游必须继续把整体判成精度 FAIL —— 有实测耗时 ≠ 验收通过。
+        "precision_gate": {
+            "mode": mode,
+            "gate_passed": not not_passed,
+            "precision_case_total": len(precision_ids),
+            "precision_passed_count": len(passed & precision_ids),
+            "precision_not_passed": not_passed,
+            "note": ("measure_only：只测不比，性能子集仅取精度已 pass 的 case；"
+                     "本子集**不表示**精度或整体通过（AGENTS.md 5.8/5.10）")
+            if measure_only else "ratio_gated：整份精度通过才进入性能采集",
+        },
         "cpp_extension": {
             "artifact": receipt["artifact"],
             "namespace": receipt["load"]["namespace"],
@@ -273,39 +398,33 @@ def _require_sha(label, value):
 
 
 def _validate_vendor_build_receipt(vendor):
+    """离线复核 vendor 构建收据；逐条判据由 :mod:`vendor_build_receipt` 一处解释。
+
+    改动前这里是三份手抄件之一，且无条件要求 40 位 PR head——本地快照通路因此无解。
+    现按 `source.provenance_kind` 分流（`gitcode_pr` 行为逐字不变；`local_snapshot` 改绑
+    仓根 + 子目录 scope + 两个 merkle + 显式 `degradations`），映射表见该模块。
+    """
     build_receipt = vendor.get("build_receipt")
-    if (not isinstance(build_receipt, dict)
-            or build_receipt.get("schema") != "oprunway.vendor_build_receipt"
-            or build_receipt.get("schema_version") != 1
-            or build_receipt.get("status") != "VERIFIED"):
-        raise CppExtensionAdapterError(
-            "receipt.vendor.build_receipt schema/status 非 VERIFIED v1")
-    source = build_receipt.get("source")
-    head = source.get("pr_head_sha") if isinstance(source, dict) else None
-    if (not isinstance(head, str) or len(head) != 40
-            or any(ch not in "0123456789abcdefABCDEF" for ch in head)
-            or not isinstance(source.get("repo"), str) or not source["repo"].strip()):
-        raise CppExtensionAdapterError(
-            "receipt.vendor.build_receipt 缺完整 PR head/source repo")
-    build = build_receipt.get("build")
-    if (not isinstance(build, dict) or not isinstance(build.get("argv"), list)
-            or not build["argv"] or any(
-                not isinstance(x, str) or not x for x in build["argv"])
-            or not isinstance(build.get("cwd"), str) or not build["cwd"]
-            or build.get("returncode") != 0):
-        raise CppExtensionAdapterError(
-            "receipt.vendor.build_receipt 缺成功 build argv/cwd/returncode")
-    artifact = build_receipt.get("artifact")
-    if (not isinstance(artifact, dict)
-            or artifact.get("library_path") != vendor.get("library_path")
-            or artifact.get("library_sha256") != vendor.get("library_sha256")):
-        raise CppExtensionAdapterError(
-            "receipt.vendor.build_receipt 与 vendor ELF 绑定不一致")
+    try:
+        summary = vendor_build_receipt.validate(
+            build_receipt,
+            library_path=vendor.get("library_path"),
+            library_sha256=vendor.get("library_sha256"))
+    except vendor_build_receipt.VendorBuildReceiptError as ex:
+        raise CppExtensionAdapterError(f"receipt.vendor.build_receipt: {ex}") from ex
     expected = _canonical_sha(build_receipt)
     _require_sha("receipt.vendor.build_receipt_sha256", expected)
     if vendor.get("build_receipt_sha256") != expected:
         raise CppExtensionAdapterError(
             "receipt.vendor.build_receipt_sha256 漂移")
+    # driver 落的源身份摘要是派生视图：**在场就必须与重算结果逐字相同**。
+    # 允许缺席只为兼容更早 driver 落的收据——事实本身（head / merkle / degradations）
+    # 已在上面直接从 build_receipt 校过，缺这份视图不会少判任何一条。
+    recorded = vendor.get("source_provenance")
+    if recorded is not None and recorded != summary:
+        raise CppExtensionAdapterError(
+            "receipt.vendor.source_provenance 与 build_receipt 重算的源身份不一致")
+    return summary
 
 
 def validate_receipt(work, caseset):
@@ -378,6 +497,17 @@ def validate_receipt(work, caseset):
     return receipt
 
 
+def source_provenance_summary(receipt):
+    """从已校过的 receipt 取本轮 DUT 的源身份摘要（含机读降级挂账）；供 envelope/报告直读。"""
+    vendor = receipt.get("vendor") if isinstance(receipt, dict) else None
+    if not isinstance(vendor, dict):
+        raise CppExtensionAdapterError("receipt.vendor 缺失，无法取源身份摘要")
+    try:
+        return vendor_build_receipt.summarize(vendor.get("build_receipt"))
+    except vendor_build_receipt.VendorBuildReceiptError as ex:
+        raise CppExtensionAdapterError(f"receipt.vendor.build_receipt: {ex}") from ex
+
+
 def _driver_argv():
     raw = os.environ.get("OPRUNWAY_CPP_EXTENSION_DRIVER_JSON")
     if not raw:
@@ -432,21 +562,22 @@ def run_cpp_extension(caseset, work, defect_cases=None):
         perf_by_case = PM.build_custom_perf_map(records, skipped=skipped)
         evidence = RA.build_multi_output_evidence(
             caseset, work, os.path.join(work, _OUT), perf_by_case=perf_by_case)
-        baseline = PM.build_baseline_document(
-            records, op=caseset.get("op"),
-            warmup=perf_plan["warmup"], repeat=perf_plan["repeat"],
-            skipped=skipped, source=perf_plan["baseline"])
-        baseline_file = {
-            "torch_npu": "_torch_npu_baseline.json",
-            "aclnn_builtin": "_aclnn_builtin_baseline.json",
-        }.get(perf_plan["baseline"])
-        if baseline_file is None:
-            raise CppExtensionAdapterError(
-                f"cpp_extension 不支持性能 baseline={perf_plan['baseline']!r}")
-        with open(os.path.join(work, baseline_file),
-                  "w", encoding="utf-8") as out:
-            json.dump(baseline, out, ensure_ascii=False, indent=2)
-            out.write("\n")
+        if not perf_mode.is_measure_only(perf_plan.get("mode", perf_mode.DEFAULT_MODE)):
+            baseline = PM.build_baseline_document(
+                records, op=caseset.get("op"),
+                warmup=perf_plan["warmup"], repeat=perf_plan["repeat"],
+                skipped=skipped, source=perf_plan["baseline"])
+            baseline_file = {
+                "torch_npu": "_torch_npu_baseline.json",
+                "aclnn_builtin": "_aclnn_builtin_baseline.json",
+            }.get(perf_plan["baseline"])
+            if baseline_file is None:
+                raise CppExtensionAdapterError(
+                    f"cpp_extension 不支持性能 baseline={perf_plan['baseline']!r}")
+            with open(os.path.join(work, baseline_file),
+                      "w", encoding="utf-8") as out:
+                json.dump(baseline, out, ensure_ascii=False, indent=2)
+                out.write("\n")
     digest = _canonical_sha(receipt)
     for row in evidence:
         row["cpp_extension_receipt_sha256"] = digest
@@ -457,11 +588,22 @@ def run_cpp_extension(caseset, work, defect_cases=None):
         "runner_source": "generated_official_cpp_extension",
         "runner_path": receipt["artifact"]["path"],
         "evidence_grade": "acceptance_candidate",
+        # 源身份摘要提到 envelope 第一层：`local_snapshot` 档的 `pr_head_unbound`
+        # 必须在报告里一眼可见，而不是埋在 receipt.vendor.build_receipt 里（5.8）。
+        "source_provenance": source_provenance_summary(receipt),
         "cpp_extension_receipt": receipt,
         "evidence": evidence,
     }
     if perf_collection is not None:
         envelope["perf_collection"] = perf_collection
+        # 性能采集的口径与分母台账原样带走：measure_only 下性能子集可能小于全部性能 case，
+        # 「为什么少」必须在证据里查得到，且不得被读成「精度通过」。
+        envelope["perf_selection"] = {
+            "mode": perf_plan.get("mode", perf_mode.DEFAULT_MODE),
+            "precision_gate": perf_plan.get("precision_gate"),
+            "selected": list(perf_plan.get("cases") or []),
+            "skipped": list(skipped or []),
+        }
     return envelope
 
 
@@ -506,6 +648,7 @@ def run_cpp_extension_precision_only(caseset, work):
         "evidence_grade": "acceptance_candidate",
         "task_scope": "task2_only",
         "performance_collected": False,
+        "source_provenance": source_provenance_summary(receipt),
         "cpp_extension_receipt": receipt,
         "evidence": evidence,
     }

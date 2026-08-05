@@ -15,13 +15,13 @@ GaussianBlur 的验收流水线**已经真机跑通一遍**（精度 24/24 pass�
 
 ## 1 · 当前状态（事实，非计划）
 
-| 项 | 值 |
-|---|---|
-| 分支 | `worktree-oprunway18`，已 push 到 `origin`（GitHub），**未 merge** |
-| HEAD | `4238e64`，自 `4d1544d`(origin/main) 起 **12 个 commit** |
-| 工作区 | 干净，只有 4 个未跟踪的 bureau logbook 条目 |
-| 单测 | 容器内 **1903 passed / 10 failed**；那 10 条在未改动 HEAD 上同样失败（root 身份下的 setenv 软链守卫 5 条 + bf16/dtype 4 条 + 1 条 `SUBFAILED(torch_parity)`），**与本轮改动无关** |
-| 审修门 | 代码审（58 条 → 修 34）+ 散文审（36 条 → 修完 fact 与要害 contradiction）**都已过**，见 `.cc-suite/audits/` |
+| 项    | 值                                                                                                                                             |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| 分支   | `worktree-oprunway18`，已 push 到 `origin`（GitHub），**未 merge**                                                                                   |
+| HEAD | `4238e64`，自 `4d1544d`(origin/main) 起 **12 个 commit**                                                                                          |
+| 工作区  | 干净，只有 4 个未跟踪的 bureau logbook 条目                                                                                                               |
+| 单测   | 容器内 **1903 passed / 10 failed**；那 10 条在未改动 HEAD 上同样失败（root 身份下的 setenv 软链守卫 5 条 + bf16/dtype 4 条 + 1 条 `SUBFAILED(torch_parity)`），**与本轮改动无关** |
+| 审修门  | 代码审（58 条 → 修 34）+ 散文审（36 条 → 修完 fact 与要害 contradiction）**都已过**，见 `.cc-suite/audits/`                                                          |
 
 ### 1.1 真机环境（已就绪，别重建）
 
@@ -52,19 +52,19 @@ overall           = BLOCKED(验收门未过)
 
 按「被真实报错逼出来」而非「设计出来」排序：
 
-| 能力 | 一句话 |
-|---|---|
-| `aclIntArray*` 参数 | 工具链此前对**任何数组型参数**都 fail-closed |
-| **stage2 真解析** | 旧实现把 argtypes 写死 4 参且不看 stage2——非标准形态是**静默错调**，不是报错 |
-| 输出方向以 stage2 为准 | `const aclTensor* dst` 按 const 判会当成输入 → 零输出 |
-| attr `float64` | aclnn_py 上**任何浮点 attr** 过去都走不通 |
-| `opencv_cpu` 真值方法族 | 此前任何 CPU 第三方库真值都必然 tier4 blocked |
-| `local_snapshot` 取源形态 | 无 `.git` 的快照，`head_sha` 落 **null**，绝不合成 hex |
-| vendor 后缀 / build flag | 仓形态字段驱动（ops-cv 装 `_cv`；`--no_force` 会让 build.sh 退 1） |
-| `--target-dir` / `--pr-snapshot` | 仓根一级算子目录探不到；无 git 快照产不出事实包 |
-| `.npy` 魔数判形态 | **「legacy 单输出 + aclnn_py」这个组合在验收门上曾恒 FAILED** |
-| `perf.mode="measure_only"` | 只测不比；口径只从 caseset 读、不信 perf_report 自报 |
-| 交付件清单结构化 + 对账 | `delivery_scope` 产机器可读清单；`reconcile_deliverables.py` 逐条核归宿 |
+| 能力                               | 一句话                                                        |
+| -------------------------------- | ---------------------------------------------------------- |
+| `aclIntArray*` 参数                | 工具链此前对**任何数组型参数**都 fail-closed                             |
+| **stage2 真解析**                   | 旧实现把 argtypes 写死 4 参且不看 stage2——非标准形态是**静默错调**，不是报错        |
+| 输出方向以 stage2 为准                  | `const aclTensor* dst` 按 const 判会当成输入 → 零输出                |
+| attr `float64`                   | aclnn\_py 上**任何浮点 attr** 过去都走不通                            |
+| `opencv_cpu` 真值方法族               | 此前任何 CPU 第三方库真值都必然 tier4 blocked                           |
+| `local_snapshot` 取源形态            | 无 `.git` 的快照，`head_sha` 落 **null**，绝不合成 hex                |
+| vendor 后缀 / build flag           | 仓形态字段驱动（ops-cv 装 `_cv`；`--no_force` 会让 build.sh 退 1）       |
+| `--target-dir` / `--pr-snapshot` | 仓根一级算子目录探不到；无 git 快照产不出事实包                                 |
+| `.npy` 魔数判形态                     | **「legacy 单输出 + aclnn\_py」这个组合在验收门上曾恒 FAILED**             |
+| `perf.mode="measure_only"`       | 只测不比；口径只从 caseset 读、不信 perf\_report 自报                     |
+| 交付件清单结构化 + 对账                    | `delivery_scope` 产机器可读清单；`reconcile_deliverables.py` 逐条核归宿 |
 
 ---
 
@@ -112,7 +112,7 @@ org/cann/discussions/39
 
 > ⚠ **这条改变了方向，务必想清楚再动手。**
 > 上一轮 GaussianBlur 选的是 `runner_form = aclnn_py`（ctypes 直调），
-> 而「torch 封装接入」在本仓对应的是 **`cpp_extension`**（独立 `torch.ops` C++ Extension 调用桥，
+> 而「torch 封装接入」在本仓对应的是 **`cpp_extension`**（独立 `torch.ops` C\++ Extension 调用桥，
 > DUT 仍是 PR 构建的 vendor `.so`，extension 只是测试桥——见 `AGENTS.md` §4）。
 > 需要先判断：是把这四类场景的 `runner_form` 定为 `cpp_extension`，还是别的含义。
 > **拿不准就先问用户**，别自己决定——这会推翻上一轮的选型理由。
@@ -134,7 +134,7 @@ org/cann/discussions/39
 `golden.method_kind` / `golden.py` 的 `GOLDEN_SOURCE` 逐字对账，不一致 fail-closed。
 
 **已有的地基**：`precision_policy.verify_authorization` 已经能核「授权引文出自任务书快照」，
-但它只证引文来源，**不证「这句该算 oracle_method 还是 impl_reference」**（模块自己写明的诚实边界）。
+但它只证引文来源，**不证「这句该算 oracle\_method 还是 impl\_reference」**（模块自己写明的诚实边界）。
 
 ### 3.4 任务书提供精度 case 时，用它的
 
@@ -144,6 +144,7 @@ org/cann/discussions/39
 ——**相对链接**，要靠 3.1 的能力解析并拉取。
 
 要做的：
+
 - caseset 来源增加「任务书提供」这一档，与「自行生成」互斥且可机读区分；
 - 任务书 case 须落成内容寻址产物、绑任务书字节，报告里如实标明 case 来源；
 - 两档在 `coverage_strength` 上的表述必须不同——**用了任务书的 case 就不能再声称
@@ -188,26 +189,26 @@ org/cann/discussions/39
 
 ## 5 · 悬而未决
 
-| # | 事项 | 说明 |
-|---|---|---|
-| 1 | **3.2 的「torch 封装」到底指什么** | 若指 `cpp_extension`，会推翻上一轮 `aclnn_py` 的选型。**建议先问用户** |
-| 2 | `reconcile_deliverables` 没接进硬门 | 现在是「文档要求跑、没有机器门逼你跑」。升硬门要改状态机，按 5.2 需先给方案 |
-| 3 | 4 条审计 finding 只做到 partial | 共同原因：报告目录里**没有内容寻址的 spec 工件**，做不到「与经摘要绑定的 spec 原值交叉核验」。要补得先让 spec 进产物链 |
-| 4 | `PASS(无性能要求)` 终态不可达 | 「性能」dim 写死在 `gen_cases` 用例模板里（`:915` / `:1976`），与 spec 是否声明 `perf` 无关 → `perf_cases` 恒 > 0。修它要动模板 + 一批断言 `dims` 的测试 |
-| 5 | 审计 Medium/Low 24 条未修 | 按 5.7 一轮即停，留在 `.cc-suite/audits/audit-fix-20260804-002313-findings.md` |
-| 6 | gitcode 镜像落后 | `gitcode/main` 停在 `a400878`，落后 `origin/main`。本轮只 push 了 origin |
-| 7 | CP-B0 对本份任务书判 `NEEDS_USER` | 3 项阻断（真值口径三处矛盾、性能基线二选一无准确 API、性能口径缺 kernel-only/warmup/repeat）按契约**只能由人 `supplied` 补事实** |
+| # | 事项                             | 说明                                                                                                                  |
+| - | ------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| 1 | **3.2 的「torch 封装」到底指什么**       | 若指 `cpp_extension`，会推翻上一轮 `aclnn_py` 的选型。**建议先问用户**                                                                 |
+| 2 | `reconcile_deliverables` 没接进硬门 | 现在是「文档要求跑、没有机器门逼你跑」。升硬门要改状态机，按 5.2 需先给方案                                                                            |
+| 3 | 4 条审计 finding 只做到 partial      | 共同原因：报告目录里**没有内容寻址的 spec 工件**，做不到「与经摘要绑定的 spec 原值交叉核验」。要补得先让 spec 进产物链                                              |
+| 4 | `PASS(无性能要求)` 终态不可达            | 「性能」dim 写死在 `gen_cases` 用例模板里（`:915` / `:1976`），与 spec 是否声明 `perf` 无关 → `perf_cases` 恒 > 0。修它要动模板 + 一批断言 `dims` 的测试 |
+| 5 | 审计 Medium/Low 24 条未修           | 按 5.7 一轮即停，留在 `.cc-suite/audits/audit-fix-20260804-002313-findings.md`                                              |
+| 6 | gitcode 镜像落后                   | `gitcode/main` 停在 `a400878`，落后 `origin/main`。本轮只 push 了 origin                                                      |
+| 7 | CP-B0 对本份任务书判 `NEEDS_USER`     | 3 项阻断（真值口径三处矛盾、性能基线二选一无准确 API、性能口径缺 kernel-only/warmup/repeat）按契约**只能由人 `supplied` 补事实**                            |
 
 ---
 
 ## 6 · 任务书 ↔ PR 的实质冲突（工具侧不消解，原样进报告）
 
-1. 任务书 §任务概述 / §1 / §7 都把 **OpenCV C++ 适配层**标为必选交付件，**PR 未交付**；
+1. 任务书 §任务概述 / §1 / §7 都把 **OpenCV C\++ 适配层**标为必选交付件，**PR 未交付**；
 2. 任务书 §3.3 要求 in-place，PR 的 `op_api/aclnn_gaussian_blur.cpp:205` 用
    `CheckInplaceUnsupported` **明确拒绝**；
 3. DUT 自身 ABI 不自洽：`dst` 在 stage1 是 `const aclTensor*`、stage2 是 `aclTensor*`；
 4. 任务书 §6 主口径写 OpenCV **GPU** 真值，§4 与 §6 表格又写 CPU；
 5. 任务书定义了 L1（CV_32F）一档，却在 §8 两次引用**从未定义的 L2**（CV_64F）。
 
-⚠ 「以 OpenCV C++ 层为唯一验收基准」那句是在指定**参照物**，不是要求 PR 携带——
+⚠ 「以 OpenCV C\++ 层为唯一验收基准」那句是在指定**参照物**，不是要求 PR 携带——
 这一点上一轮我读错过一次，措辞已按「交付件缺口」而非「基准搞错」修正。

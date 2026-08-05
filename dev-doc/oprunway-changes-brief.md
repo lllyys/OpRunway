@@ -2,6 +2,22 @@
 
 > 倒序：最新在上。每天一节，一条一句，大白话。`待决` 置顶。
 
+## 2026-08-05
+
+- **下一轮计划落进仓里**：`dev-doc/oprunway-taskdoc-caseset-absorption-plan.md`（v3）。
+  规划期把任务书引用的链接全部实探了一遍，挖出一件之前完全没看见的事——
+  **任务书自己就发了 169 条自测用例和一份 OpenCV CPU 的 golden**
+  （`self_test_case/<op>/` 下 `<op>_cases.json` + `<op>_golden.py` + `<op>_prototype.json`，
+  同级 17 个算子共用这套结构）。上一轮我们自造了 24 条用例、自写了 cv2 golden，
+  等于绕过了验收权威。计划主线就是把这条口径缺陷补上并做成结构驱动的通用能力。
+- 计划过了两轮独立拷问：`reason-grill` 五面（7 MAJOR + 4 MINOR）+ `cc-suite:audit-fix`
+  9 维（43 条：6 Critical / 29 High / 7 Medium / 1 Low；verify 后 38 fixed / 5 partial）。
+  审计**推翻了 v2 的 6 处事实断言**（其中一处是我拿一组 dtype 测试冒充 caseset 记账的依据），
+  记录在计划 §0 与 `.cc-suite/audits/audit-fix-20260805-051500-findings.md`。
+- **尚未实施任何工作项**；计划里列了 5 件须先拍板的事（W5 要不要加第三个 measure_only 授权情形、
+  W8 的 PR head provenance、任务书 case 缺的 `border_type` 默认值、6.76 GiB 用例数据的磁盘出路、
+  `perf_mode.py` 那 3 处改动的去留）。
+
 ## 2026-08-04
 
 - 落地 `spec.perf.mode = "measure_only"`（AGENTS.md §5.10 之前只有文字、没有代码）：

@@ -236,5 +236,124 @@ class CppExtensionAdapterContractTest(unittest.TestCase):
         with self.assertRaisesRegex(A.CppExtensionAdapterError, "真机路径未启用"):
             A.run_cpp_extension(_caseset(), "/tmp/not-used")
 
+
+def _measure_only_spec():
+    """§5.10 只测不比：spec.perf 里不得有任何对照物/阈值字段，须带任务书授权。"""
+    spec = _spec()
+    spec["perf"] = {
+        "mode": "measure_only",
+        "warmup": 3,
+        "repeat": 7,
+        "measure_only_authorization": {
+            "taskdoc_requirement": "gpu_comparison",
+            "cite": "任务书 §6",
+            "quote": "以 GPU 为参考，ratio ≥ 0.45×",
+            "taskdoc_snapshot_sha256": None,
+        },
+    }
+    return spec
+
+
+def _perf_receipt():
+    return {
+        "artifact": {"path": "cpp_extension/x.so", "sha256": "1" * 64},
+        "load": {"namespace": "oprunway_test"},
+        "bindings": {"invocation_plan_sha256": "3" * 64},
+        "vendor": {
+            "library_path": "/opt/vendor/lib.so",
+            "library_sha256": "2" * 64,
+            "symbols_owned": ["aclnnWitness"],
+        },
+    }
+
+
+class CppExtensionMeasureOnlyPerfGateTest(unittest.TestCase):
+    """`measure_only` 下精度部分失败仍要采到实测；`ratio_gated` 行为逐字不变。"""
+
+    def _caseset_with_perf_dims(self):
+        caseset = _caseset()
+        for case in caseset["cases"]:
+            case["dims"] = ["功能", "精度", "性能"]
+        return caseset
+
+    def test_measure_only_collects_the_passing_subset_and_keeps_the_denominator(self):
+        caseset = self._caseset_with_perf_dims()
+        # c0 精度可判但没过；c1 过了。分母（两条精度 case）必须原样落盘。
+        evidence = [
+            {"case_id": "c0", "precision": {"policy": {}, "metrics": {}}},
+            {"case_id": "c1", "precision": {"policy": {}, "metrics": {}}},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            A.prepare(_measure_only_spec(), caseset, td)
+            with mock.patch(
+                    "aclnn_runtime.perf_msprof.accuracy_pass_ids",
+                    return_value={"c1"}), mock.patch.dict(
+                        os.environ, {"OPRUNWAY_CPP_EXTENSION_DEVICE": "0"}):
+                plan, skipped = A._write_perf_plan(
+                    caseset, td, evidence, _perf_receipt())
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["cases"], ["c1"])
+        self.assertEqual(plan["mode"], "measure_only")
+        self.assertNotIn("baseline", plan)
+        gate = plan["precision_gate"]
+        self.assertFalse(gate["gate_passed"])
+        self.assertEqual(gate["precision_case_total"], 2)
+        self.assertEqual(gate["precision_not_passed"], ["c0"])
+        self.assertEqual(
+            skipped, [{"case_id": "c0", "reason": "skipped_accuracy_failed"}])
+
+    def test_measure_only_distinguishes_unjudgeable_from_failed(self):
+        """没跑出来（无精度块）和算错了是两回事，skipped 理由不许混成一个词。"""
+        caseset = self._caseset_with_perf_dims()
+        evidence = [{"case_id": "c1", "precision": {"policy": {}, "metrics": {}}}]
+        with tempfile.TemporaryDirectory() as td:
+            A.prepare(_measure_only_spec(), caseset, td)
+            with mock.patch(
+                    "aclnn_runtime.perf_msprof.accuracy_pass_ids",
+                    return_value={"c1"}), mock.patch.dict(
+                        os.environ, {"OPRUNWAY_CPP_EXTENSION_DEVICE": "0"}):
+                _plan, skipped = A._write_perf_plan(
+                    caseset, td, evidence, _perf_receipt())
+        self.assertEqual(
+            skipped,
+            [{"case_id": "c0", "reason": A.SKIPPED_PRECISION_NOT_EVALUABLE}])
+
+    def test_ratio_gated_still_refuses_to_collect_on_partial_accuracy(self):
+        caseset = self._caseset_with_perf_dims()
+        with tempfile.TemporaryDirectory() as td:
+            A.prepare(_spec(), caseset, td)
+            with mock.patch(
+                    "aclnn_runtime.perf_msprof.accuracy_pass_ids",
+                    return_value={"c0"}), mock.patch(
+                    "aclnn_runtime.perf_msprof.select_perf_cases") as select:
+                plan, skipped = A._write_perf_plan(
+                    caseset, td, [{"case_id": "c0"}], _perf_receipt())
+        self.assertIsNone(plan)
+        self.assertEqual(
+            skipped,
+            [{"case_id": "c1", "reason": A.SKIPPED_PRECISION_OVERALL_GATE}])
+        select.assert_not_called()
+
+    def test_measure_only_template_carries_no_baseline_slot(self):
+        with tempfile.TemporaryDirectory() as td:
+            A.prepare(_measure_only_spec(), _caseset(), td)
+            with open(os.path.join(td, "cpp_extension_perf_template.json"),
+                      encoding="utf-8") as src:
+                template = json.load(src)
+        self.assertEqual(template["mode"], "measure_only")
+        for forbidden in ("baseline", "torch_baseline", "aclnn_baseline"):
+            self.assertNotIn(forbidden, template)
+        self.assertEqual(
+            template["measure_only_authorization"]["taskdoc_requirement"],
+            "gpu_comparison")
+
+    def test_measure_only_without_taskdoc_authorization_fails_closed(self):
+        spec = _measure_only_spec()
+        del spec["perf"]["measure_only_authorization"]
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaisesRegex(A.CppExtensionAdapterError, "口径非法"):
+                A.prepare(spec, _caseset(), td)
+
+
 if __name__ == "__main__":
     unittest.main()

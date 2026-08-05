@@ -539,5 +539,100 @@ class RatioGatedUnaffectedTest(unittest.TestCase):
         self.assertNotIn("source", cs["perf_case_policy"]["shape_classification"])
 
 
+# ————————————————— §5.10 第三个 ground：改动类别 → 口径派生 —————————————————
+class ChangeClassDerivationTest(unittest.TestCase):
+    """`derive_mode` 的**两支分别判、再取并集**（用户 2026-08-05 口径）。
+
+    这组用例要钉死的核心事实是：四类场景**不同源**——前三类是 `change.kind` 的值（结构字段），
+    第四类是任务书条款。写成「四类 change.kind」会把第四类判丢，写成「四类任务书条款」会把
+    前三类判丢；两支必须各自成立、各自可被单独触发。
+    """
+
+    def _spec(self, kind=None, perf=None):
+        spec = {"op": "X"}
+        if kind is not None:
+            spec["change"] = {"kind": kind, "note": "fixture"}
+        if perf is not None:
+            spec["perf"] = perf
+        return spec
+
+    def _auth(self, ground):
+        return dict(_AUTH, taskdoc_requirement=ground)
+
+    def test_change_kind_vocabulary_is_enforced(self):
+        self.assertIsNone(PM.normalize_change_kind({}))          # 整字段省略 = 未声明，不兜默认
+        self.assertEqual(PM.normalize_change_kind(self._spec("extend_shape")), "extend_shape")
+        with self.assertRaises(PM.PerfModeError):                # 词表外
+            PM.normalize_change_kind(self._spec("extend_shapes"))
+        with self.assertRaises(PM.PerfModeError):                # change 在、kind 缺
+            PM.normalize_change_kind({"change": {"note": "只写了 note"}})
+
+    def test_branch_change_class_alone_derives_measure_only(self):
+        """支线①单独成立：任务书**没有**任何性能条款信号，只因改动属那三类。"""
+        for kind in PM.NO_PERF_COMPARISON_CHANGE_KINDS:
+            with self.subTest(kind=kind):
+                spec = self._spec(kind, {
+                    "mode": "measure_only",
+                    "measure_only_authorization": self._auth(
+                        PM.GROUND_CHANGE_CLASS_NO_PERF_COMPARISON),
+                    "case_source": "precision_cases"})
+                out = PM.derive_mode(spec)
+                self.assertEqual(out["mode"], PM.MODE_MEASURE_ONLY)
+                self.assertEqual(out["grounds"],
+                                 [PM.GROUND_CHANGE_CLASS_NO_PERF_COMPARISON])
+                self.assertEqual(out["change_class"]["kind"], kind)
+                self.assertIsNone(out["taskdoc_clause"]["ground"])
+
+    def test_branch_taskdoc_clause_alone_derives_measure_only(self):
+        """支线②单独成立：改动类别**不属**那三类，纯靠任务书的 GPU 条款。"""
+        spec = self._spec("bugfix", {"mode": "measure_only",
+                                     "measure_only_authorization": self._auth("gpu_comparison")})
+        out = PM.derive_mode(spec)
+        self.assertEqual(out["mode"], PM.MODE_MEASURE_ONLY)
+        self.assertEqual(out["grounds"], [PM.GROUND_GPU_COMPARISON])
+        self.assertIsNone(out["change_class"]["ground"])
+        self.assertEqual(out["taskdoc_clause"]["ground"], PM.GROUND_GPU_COMPARISON)
+
+    def test_ratio_gated_gpu_baseline_is_a_taskdoc_clause_signal(self):
+        """`perf.baseline=gpu_external` 是 ratio_gated 形态下的任务书条款结构信号。
+
+        它派生出 measure_only 却缺授权 → **必须报错**，而不是静默把一份写着 target_ratio 的
+        spec 降成宽档（那道阈值根本没生效，报告读者却无从知道）。"""
+        spec = self._spec("bugfix", {"baseline": "gpu_external", "target_ratio": 0.45})
+        with self.assertRaises(PM.PerfModeError):
+            PM.derive_mode(spec)
+
+    def test_no_signal_stays_ratio_gated(self):
+        out = PM.derive_mode(self._spec("bugfix", {"baseline": "tbe", "target_ratio": 1.0}))
+        self.assertEqual(out["mode"], PM.MODE_RATIO_GATED)
+        self.assertEqual(out["grounds"], [])
+
+    def test_measure_only_without_authorization_fails_closed(self):
+        """`new_op` + 任务书逐字比值条款（median 那种形态）→ 派生出宽档但没授权 → 报错。"""
+        spec = self._spec("new_op", {"baseline": "torch_npu", "target_ratio": 1.0})
+        with self.assertRaises(PM.PerfModeError):
+            PM.derive_mode(spec)
+
+    def test_declared_ground_must_be_supported_by_this_spec(self):
+        """声称「改动属那三类」却填了个 `bugfix` → 授权引的理由本 spec 不支持，拒。"""
+        spec = self._spec("bugfix", {
+            "mode": "measure_only",
+            "measure_only_authorization": self._auth(
+                PM.GROUND_CHANGE_CLASS_NO_PERF_COMPARISON)})
+        with self.assertRaises(PM.PerfModeError):
+            PM.derive_mode(spec)
+        # 同一道交叉核也长在真正的门上（`resolve_spec_mode`），不只在派生这一侧。
+        with self.assertRaises(PM.PerfModeError):
+            PM.resolve_spec_mode(spec)
+
+    def test_runner_form_derivation_follows_the_same_three_kinds(self):
+        for kind in PM.NO_PERF_COMPARISON_CHANGE_KINDS:
+            with self.subTest(kind=kind):
+                self.assertEqual(PM.derive_runner_form(self._spec(kind)),
+                                 PM.RUNNER_FORM_CPP_EXTENSION)
+        self.assertIsNone(PM.derive_runner_form(self._spec("bugfix")))
+        self.assertIsNone(PM.derive_runner_form({}))             # 未声明 → 本规则不出结论
+
+
 if __name__ == "__main__":
     unittest.main()

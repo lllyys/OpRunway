@@ -2180,5 +2180,102 @@ class PassedWithGapsWiringTest(unittest.TestCase):
             self.assertIn(f'"{v}"', line, f"precision_ok 白名单漏了 {v}：{line.strip()}")
 
 
+class CppExtensionStage2EvidenceGateTest(unittest.TestCase):
+    """stage2 实参结构没核过 → 不许出验收裁决（错 arity 的 native 调用无门可拦）。"""
+
+    def test_unverified_stage2_blocks_acceptance(self):
+        errs = []
+        G._gate_cpp_extension_stage2_evidence(
+            {"degradations": ["stage2_form_unverified"],
+             "variants": [{"entrypoint": "invoke_v0", "stage2_form": "standard"}]},
+            errs)
+        self.assertTrue(any("stage2_form_unverified" in e for e in errs), errs)
+
+    def test_header_backed_stage2_passes(self):
+        for form in ("standard", "extended"):
+            errs = []
+            G._gate_cpp_extension_stage2_evidence(
+                {"degradations": [],
+                 "variants": [{"entrypoint": "invoke_v0", "stage2_form": form}]},
+                errs)
+            self.assertEqual(errs, [], form)
+
+    def test_legacy_manifest_without_ledger_is_blocked_not_waved_through(self):
+        errs = []
+        G._gate_cpp_extension_stage2_evidence({"variants": []}, errs)
+        self.assertTrue(any("degradations 台账" in e for e in errs), errs)
+
+    def test_non_dispatchable_form_is_blocked(self):
+        errs = []
+        G._gate_cpp_extension_stage2_evidence(
+            {"degradations": [],
+             "variants": [{"entrypoint": "invoke_v0", "stage2_form": "absent"}]},
+            errs)
+        self.assertTrue(any("非可派发形态" in e for e in errs), errs)
+
+
+class CppExtensionMeasureOnlyPerfSubsetGateTest(unittest.TestCase):
+    """cpp_extension 性能采集只覆盖子集：只有 measure_only（且两份产物都这么说）才合法。"""
+
+    _PERF_IDS = ["c0", "c1", "c2"]
+
+    def _caseset(self, mode):
+        policy = {"mode": mode} if mode else {}
+        return {"perf_case_policy": policy}
+
+    def _collect(self, mode, planned, skipped):
+        return {"mode": mode, "skipped": skipped}
+
+    def test_ratio_gated_subset_is_still_a_running_subset(self):
+        errs = []
+        ok = G._cpp_extension_perf_subset_ok(
+            self._caseset(None), self._collect("ratio_gated", ["c0"], []),
+            ["c0"], self._PERF_IDS, errs)
+        self.assertFalse(ok)
+        self.assertTrue(any("非完整性能 caseset" in e for e in errs))
+
+    def test_measure_only_subset_needs_both_products_to_say_so(self):
+        errs = []
+        self.assertFalse(G._cpp_extension_perf_subset_ok(
+            self._caseset("measure_only"),
+            self._collect("ratio_gated", ["c0"], []),
+            ["c0"], self._PERF_IDS, errs))
+        errs2 = []
+        self.assertFalse(G._cpp_extension_perf_subset_ok(
+            self._caseset(None),
+            self._collect("measure_only", ["c0"], []),
+            ["c0"], self._PERF_IDS, errs2))
+
+    def test_measure_only_subset_must_account_every_missing_case(self):
+        errs = []
+        self.assertFalse(G._cpp_extension_perf_subset_ok(
+            self._caseset("measure_only"),
+            self._collect("measure_only", ["c0"],
+                          [{"case_id": "c1", "reason": "skipped_accuracy_failed"}]),
+            ["c0"], self._PERF_IDS, errs))
+        self.assertTrue(any("漏挂账" in e for e in errs), errs)
+
+    def test_measure_only_subset_ok_when_fully_accounted(self):
+        errs = []
+        self.assertTrue(G._cpp_extension_perf_subset_ok(
+            self._caseset("measure_only"),
+            self._collect("measure_only", ["c0"], [
+                {"case_id": "c1", "reason": "skipped_accuracy_failed"},
+                {"case_id": "c2", "reason": "skipped_precision_not_evaluable"},
+            ]),
+            ["c0"], self._PERF_IDS, errs))
+        self.assertEqual(errs, [])
+
+    def test_measure_only_subset_must_keep_caseset_order(self):
+        errs = []
+        self.assertFalse(G._cpp_extension_perf_subset_ok(
+            self._caseset("measure_only"),
+            self._collect("measure_only", ["c2", "c0"], [
+                {"case_id": "c1", "reason": "skipped_accuracy_failed"},
+            ]),
+            ["c2", "c0"], self._PERF_IDS, errs))
+        self.assertTrue(any("顺序" in e for e in errs), errs)
+
+
 if __name__ == "__main__":
     unittest.main()
