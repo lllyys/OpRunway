@@ -1,6 +1,27 @@
 # OpRunway 改动简表
 
-> 倒序：最新在上。每天一节，一条一句，大白话。`待决` 置顶。
+> 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
+
+## 2026-08-05 · vendor build receipt 产出方（`make_vendor_build_receipt.py`）落地 + 对抗审修
+
+新增收据产出方（真机上以前**没有产出方**，Median PR6429 那份收据是人手写的，
+`build.returncode: 0` 只是一句自报）。一轮 codex 对抗审 10 条 finding 逐条自核后全部落地，
+其中最贵的一条：`--library` 与 build 之间**没有任何因果绑定**——`-- /usr/bin/true` 配一个
+预先存在的 CANN 内置 `.so` 就能产出一份三处消费者全过的收据，等于模块自己声称要堵的洞没堵上。
+现在构建前后各取一次 `(mtime_ns, size, sha256)`，三项全同即 fail-closed。
+
+另外堵掉：产出方的 `source_facts` 收货标准**比三级门松**（只核 envelope 自洽，而内容寻址摘要
+不具备真实性，谁都能给任意 payload 重算一个），现改为调三级门同一个 `_validate_source_payload`；
+docstring 里「构建后漂移由下游接住」**是错的**（编排只在 CP-A 取材跑一次 `fetch_source`，
+那个救援从不发生），改为构建后自己再核一次；带凭据的 remote URL 会一路进收据→终端→人读验收报告
+（撞 §2），改为 fail-closed 且**报错不回显原值**；`--repo` 无条件覆盖派生值（CP-F 那道逐字比对的门
+比的就不再是事实），改为冲突需 `--allow-repo-override` 并记 `source.repo_source` 强度；
+一批该 fail-closed 的错误以裸 `RuntimeError` 穿过 `except ReceiptError` 喷 traceback（`ReceiptError`
+是它的子类，接不住父类）；`--out` 可写性/同名不前置（build 跑完几十分钟才发现落点写不了，
+而本脚本又没有「只记录不执行」模式）；`--library` 相对路径按调用方 cwd 解析而非 `--build-cwd`。
+
+⚠ **产出方还没接进编排**：`SKILL.md` / `plugin/AGENTS.md` 里没有一句说要产这份收据，
+下一轮上真机的人照样会手写一份。代码层面的洞补上了，流程层面还没有。
 
 ## 2026-08-05 · push 前统一审修门（final）
 
