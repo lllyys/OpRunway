@@ -36,7 +36,7 @@ agents:
 |---|---|---|
 | `cpp`（或未声明） | `new_example` | 编译 per-op C++ runner 上真机；真机 dtype 白名单 fp32/fp16/bf16 |
 | `aclnn_py` | `aclnn_py` | op 工程即 DUT、通用 ctypes 两段式 runner（**无 per-op runner 源**）；须 `OPRUNWAY_ACLNN_REAL=1` |
-| `cpp_extension` | `cpp_extension` | 隔离构建官方 PyTorch `NpuExtension`，以 build/load/vendor receipt 绑定 exact PR head 与现场 ELF |
+| `cpp_extension` | `cpp_extension` | 隔离构建官方 PyTorch `NpuExtension`，以 build/load/vendor receipt 绑定被测来源锚（PR 通路是 exact PR head，本地 checkout 通路是子树 `root_digest`）与现场 ELF |
 
 `_REAL_MACHINE_MODES = {new_example, aclnn_py, cpp_extension}`（`acc-common/run_workflow.py`）——三者都是真机通路，
 但只有各自来源/构建/加载收据通过三级门后才能产验收裁决。`mock` / `catlass` / `catlass_mock`
@@ -111,6 +111,12 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   `verify_aclnn_harness.py` 从完整 caseset 确定性选择小见证集（每种实际输入 dtype + 每个签名/slot 变体；本接口存在时覆盖标量 attr / 多输出），
   真机逐输出与 CPU torch golden 对拍并落内容寻址 `work/aclnn_harness_trust.json`。`run_workflow` 会在正式 adapter 前硬复核
   收据与当前 spec/完整 caseset、见证数据字节、golden 源码、PR/build/toolkit/SoC/符号及执行逻辑的绑定；未过、未留证或漂移一律停在 CP-C（详见 `skills/acceptance-workflow` CP-C）。
+  ⚠ **`spec.runner_form == "cpp_extension"` 的信任门是 vendor 构建收据**：DUT **不是** Extension 调用桥本身，而是被测来源
+  构建出的那个 vendor `.so`——Extension 自己 build/load 成功，**一个字都没说被加载的 `.so` 是哪来的**。所以真机上构建 vendor 时
+  必须跑 `make_vendor_build_receipt.py` 产 `vendor_build_receipt`（真跑 build、`build.returncode` 实测、`--library` 须被这次
+  build 改写过、本地通路另核构建前后两次「构建树 ↔ 指纹树」），**不许人手写**——手写的 `returncode: 0` 是自报，而这份收据
+  存在的全部意义就是机器可核。产不出来就停在 CP-C，不带着说不清来源的 ELF 上真机；产出后经
+  `OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT` 传给 CP-D 的 driver（详见 `skills/acceptance-workflow` CP-C）。
 - **CP-D 真机跑测（一次原子）**：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode <mode>`
   （`<mode>` **据 `spec.runner_form` 派生**：cpp（或未声明）→ `new_example`、`aclnn_py` → `aclnn_py`（须 `OPRUNWAY_ACLNN_REAL=1`）、`cpp_extension` → `cpp_extension`；
   `mock` / `catlass` / `catlass_mock` 派生不出、须显式指定，见上文「跑测 mode 的唯一真源」）

@@ -72,6 +72,7 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 - `check_golden.py`：golden 来源契约；
 - `preflight_aclnn.py`：`aclnn_py` 静态接口预检；
 - `verify_aclnn_harness.py`：真机 harness 信任门；
+- `make_vendor_build_receipt.py`：`cpp_extension` 的 vendor `.so` 出身证明（`vendor_build_receipt`）**产出方**；**真跑 build**、`build.returncode` 是实测值，**没有「只记录不执行」模式**；`--library` 须被这次 build 改写过，本地通路另核构建前后两次「构建树 ↔ 指纹树」；
 - `validate_preparation_state.py`：非真机复用收据；
 - `validate_acceptance_state.py`：验收证据复核门；含 build receipt ↔ source_facts 的来源锚对账（`--source-facts` 可显式指路）。
 
