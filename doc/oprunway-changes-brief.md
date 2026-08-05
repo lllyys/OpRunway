@@ -4,8 +4,22 @@
 
 ## 2026-08-05
 
+- **本地 checkout 成为一等被测来源通路**：`fetch_source` 加 `--local-repo/--op-subdir/--base-ref/--allow-dirty`，
+  与 `--pr` 互斥；新增 `dut_source.py` 判别式（受控词表 + 读侧唯一入口，缺省 `pull_request` 兼容老收据）。
+  本地锚是子树 Merkle 摘要 `root_digest`，**不塞进 `payload.pr`**——两个来源键互斥出现，混装即拒。
+  真机见证：Median + PR6429，只给本地路径不带 PR id，一次跑到 `completeness=complete`；
+  与在线通路取到的被测事实（任务书字节 / derived / 23 个 changed_files / 6 份 key_files 摘要）**逐字相同**，
+  只有 provenance 锚不同。记录见 `doc/oprunway-local-source-realmachine-validation.md`。
+- ⚠ **既有 preparation 收据会从 `REUSABLE` 变 `MISS`**：`producer.logic_sha256` 是 `fetch_source.py`
+  自身源码的哈希、且在 payload 里，改工具必然改 digest。这是**正确行为**（工具逻辑变了旧收据不该继续复用），
+  不是复用坏了；下一轮要重新准备一次。PR 通路的**业务字段**逐字节未变（去掉 `producer` 后与基线相同，有回归测试锁死）。
+- 修两个脚本 bug：`precision_policy.derive_output_dtype` 漏解析 `<from_input>` 哨兵（把哨兵字面量当 dtype
+  返回，一路漏到 `threshold_for` 才炸）；`aclnn_driver` 的 f-string 替换字段跨行（PEP 701，真机 3.11 环境 SyntaxError）。
+  两处都补了回归，并在 a5 真 3.11 解释器上过了全 `plugin/` 的只读语法门。
+- ⚠ **`fetch_source` 在 `completeness=blocked` 时改为非 0 退出（3）**：原先落盘就返回 0，
+  只看退出码的调用方会当成取材成功照常往下走。
 - aclnnRoll complex64 试跑问题定位完成，产 1 份问题清单 + 2 份实施方案（`roll-complex64-trial-findings`
-  / `local-source-plan` / `workflow-governance-plan`），均过 codex audit-fix。**本轮只产文档、未改 plugin 代码。**
+  / `local-source-plan` / `workflow-governance-plan`），均过 codex audit-fix。
   交接入口见 `doc/oprunway-session-handoff-2026-08-05.md`。
 
 ## 2026-08-03
