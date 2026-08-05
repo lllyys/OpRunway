@@ -1302,15 +1302,29 @@ class FromInputSentinelSingleOutputTest(unittest.TestCase):
     单输出那份只有「in_dt ∈ allowed」和「去重后单值」两条规则，于是
     `dtype: ["<from_input>"]` 命中「单值」→ 返回字符串 `"<from_input>"` 本身，
     一路漏到 `threshold_for` 才炸成「ascendoptest_default 无 dtype='<from_input>' 阈值」。
-    现在两条路径共用 `resolve_out_dtype_from_allowed`，此处锁死不许再分叉。
+    现在哨兵解析共用 `resolve_out_dtype_from_allowed`，此处锁死不许再分叉。
+
+    ⚠ 本类同时锁住**两条路径有意保留的差异**：`allow_input_membership` 单输出 True、
+    多输出 False。共用函数不等于两条路径规则全同——见该函数 docstring 的 ⚠。
     """
 
     @staticmethod
-    def _single_out_spec(out_dtype):
+    def _single_out_spec(out_dtype, in_dtype=("float32", "float16")):
         return {"op": "OneOut", "verify_mode": "numerical",
                 "precision": {"oracle": "torch", "standard": "torch_allclose"},
-                "params": [{"name": "self", "io": "in", "dtype": ["float32", "float16"]},
+                "params": [{"name": "self", "io": "in", "dtype": list(in_dtype)},
                            {"name": "out", "io": "out", "out_role": "value", "dtype": out_dtype}]}
+
+    @staticmethod
+    def _multi_out_spec(values_dtype, in_dtype=("float32", "float16")):
+        """真·多输出形状（values + index），照 median.spec.json 的写法。"""
+        return {"op": "MultiOut", "verify_mode": "numerical",
+                "precision": {"oracle": "torch", "standard": "torch_allclose"},
+                "params": [{"name": "self", "io": "in", "dtype": list(in_dtype)},
+                           {"name": "values", "io": "out", "out_role": "value",
+                            "dtype": values_dtype},
+                           {"name": "indices", "io": "out", "out_role": "index",
+                            "index_of": "values", "gather_from": "self", "dtype": ["int32"]}]}
 
     def test_sentinel_resolves_to_input_dtype(self):
         for in_dt in ("float32", "float16"):
@@ -1323,12 +1337,21 @@ class FromInputSentinelSingleOutputTest(unittest.TestCase):
         cdtype = P.derive_output_dtype(self._single_out_spec(["<from_input>"]), [("self", "float32")])
         self.assertIsInstance(P.threshold_for("ascendoptest_default", cdtype), dict)
 
-    def test_single_and_multi_output_paths_agree(self):
-        """同一份 spec，单输出路径与多输出契约路径派生的 dtype 必须逐字相同（同源不漂移）。"""
-        spec = self._single_out_spec(["<from_input>"])
-        single = P.derive_output_dtype(spec, [("self", "float16")])
-        multi = P.derive_output_contracts(spec, [("self", "float16")], "torch_allclose")
-        self.assertEqual(single, multi[0]["dtype"])
+    def test_sentinel_agrees_across_single_and_real_multi_output_specs(self):
+        """哨兵在单输出与**真多输出**（values+indices）形状上派生同一 dtype。
+
+        ⚠ 不能拿同一份**单输出** spec 喂两个 API 冒充「两条路径一致」——那样多输出侧
+        走的仍是单输出形状，index 那一趟根本没跑到。
+        """
+        for in_dt in ("float32", "float16"):
+            single = P.derive_output_dtype(self._single_out_spec(["<from_input>"]),
+                                           [("self", in_dt)])
+            multi = P.derive_output_contracts(self._multi_out_spec(["<from_input>"]),
+                                              [("self", in_dt)], "torch_allclose")
+            self.assertEqual(single, in_dt)
+            self.assertEqual(multi[0]["dtype"], in_dt)      # values 随输入
+            self.assertEqual(multi[1]["dtype"], "int32")    # indices 固定
+            self.assertNotIn(P.FROM_INPUT_SENTINEL, [c["dtype"] for c in multi])
 
     def test_fixed_and_elementwise_rules_unchanged(self):
         self.assertEqual(P.derive_output_dtype(self._single_out_spec(["bool"]),
@@ -1340,6 +1363,67 @@ class FromInputSentinelSingleOutputTest(unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             P.derive_output_dtype(self._single_out_spec(["int64", "bool"]), [("self", "float32")])
         self.assertIn("歧义", str(cm.exception))
+
+    def test_multi_output_does_not_gain_input_membership_rule(self):
+        """⭐ 多输出**不得**因为共用而学会「in_dt ∈ allowed 就猜 in_dt」。
+
+        `values.dtype = ["float32","float16"]`（多个具体 dtype、没写 <from_input>）
+        在多输出路径上历来是歧义拒绝。把单输出的 membership 规则顺手带进来，
+        等于把「没表达随输入语义」的声明静默猜成 in_dt —— fail-open。
+        同一份允许集在**单输出**上仍按历来口径接受（Sign/Neg 的 spec 就这么写）。
+        """
+        with self.assertRaises(ValueError) as cm:
+            P.derive_output_contracts(self._multi_out_spec(["float32", "float16"]),
+                                      [("self", "float32")], "torch_allclose")
+        self.assertIn("歧义", str(cm.exception))
+        self.assertEqual(P.derive_output_dtype(self._single_out_spec(["float32", "float16"]),
+                                               [("self", "float32")]), "float32")
+
+    def test_sentinel_mixed_with_concrete_dtype_is_fail_closed(self):
+        """`["<from_input>","bool"]` 同时说「随输入」和「固定 bool」——矛盾即拒，不猜。
+
+        只有当具体项与 in_dt 一致（两种说法同解）时才接受。
+        """
+        for spec_of in (self._single_out_spec, self._multi_out_spec):
+            with self.assertRaises(ValueError, msg=spec_of.__name__) as cm:
+                spec = spec_of(["<from_input>", "bool"])
+                if spec_of is self._single_out_spec:
+                    P.derive_output_dtype(spec, [("self", "float32")])
+                else:
+                    P.derive_output_contracts(spec, [("self", "float32")], "torch_allclose")
+            self.assertIn("互相矛盾", str(cm.exception))
+
+    def test_sentinel_mixed_with_matching_concrete_dtype_resolves(self):
+        """两种说法同解时才接受——单输出、多输出两条路径都要成立。
+
+        `["<from_input>","bool"]` 配 in=bool 是 finding 点名的那个正例：哨兵解出 bool、
+        具体项也是 bool，并集唯一 → 接受（与 in=float32 时的拒绝互为对照）。
+        """
+        self.assertEqual(
+            P.derive_output_dtype(self._single_out_spec(["<from_input>", "float32"]),
+                                  [("self", "float32")]), "float32")
+        self.assertEqual(
+            P.derive_output_dtype(self._single_out_spec(["<from_input>", "bool"],
+                                                        in_dtype=("bool", "float32")),
+                                  [("self", "bool")]), "bool")
+        cts = P.derive_output_contracts(
+            self._multi_out_spec(["<from_input>", "float32"]),
+            [("self", "float32")], "torch_allclose")
+        self.assertEqual(cts[0]["dtype"], "float32")
+        self.assertEqual(cts[1]["dtype"], "int32")
+
+    def test_sentinel_never_leaks_as_a_dtype_from_either_path(self):
+        """兜底断言：任何一条路径都不许把哨兵字面量当 dtype 返回（旧洞的直接锁）。"""
+        for in_dt in ("float32", "float16"):
+            self.assertNotEqual(
+                P.derive_output_dtype(self._single_out_spec(["<from_input>"]), [("self", in_dt)]),
+                P.FROM_INPUT_SENTINEL)
+            cts = P.derive_output_contracts(self._multi_out_spec(["<from_input>"]),
+                                            [("self", in_dt)], "torch_allclose")
+            for c in cts:
+                self.assertNotEqual(c["dtype"], P.FROM_INPUT_SENTINEL)
+                self.assertIsInstance(P.threshold_for("ascendoptest_default", c["dtype"])
+                                      if c["role"] == "value" else {}, dict)
 
 
 class GatherFromAnchorTest(unittest.TestCase):

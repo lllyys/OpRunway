@@ -222,7 +222,7 @@ def compare_dtype(case_or_golden):
     raise ValueError("compare_dtype 仅接受 numpy 数组（真实 golden）；据 spec 派生请用 derive_output_dtype")
 
 
-def resolve_out_dtype_from_allowed(allowed, in_dt, out_name=None):
+def resolve_out_dtype_from_allowed(allowed, in_dt, out_name=None, *, allow_input_membership):
     """据 spec out-param 的 `dtype` 允许集派生该输出的实际 dtype——单输出/多输出**共用的唯一实现**。
 
     ⚠ **为什么必须共用**：这段判断曾在两处各写一份——`derive_output_dtype`（单输出裁决 cdtype）
@@ -230,25 +230,49 @@ def resolve_out_dtype_from_allowed(allowed, in_dt, out_name=None):
     `allowed == ["<from_input>"]` 时 `in_dt not in allowed`，却因「去重后单值」被当成固定输出 dtype
     返回了哨兵**字面量**，一路漏到 `threshold_for` 才炸成
     「ascendoptest_default 无 dtype='<from_input>' 阈值」——错误现场离根因十万八千里。
-    两条路径对同一份 spec 必须派生出同一个 dtype，所以判断只留这一份。
+    哨兵解析必须两条路径同源，所以判断只留这一份。
 
     规则（按序，前者优先）：
-      ① allowed 含 `<from_input>` → 取输入 dtype（median.values 随 self）；
-      ② `in_dt ∈ allowed` → 同 dtype elementwise（Sign/Neg）；
+      ① allowed 含 `<from_input>` → 哨兵解析成 `in_dt`，与集合里的具体项**求并**：
+         并集唯一才返回（`["<from_input>"]` → in_dt；`["<from_input>","bool"]` 且 in=bool → bool），
+         否则歧义拒绝（`["<from_input>","bool"]` 且 in=float32 → 「随输入」与「固定 bool」互相矛盾）；
+      ② `in_dt ∈ allowed` **且** `allow_input_membership` → 同 dtype elementwise（Sign/Neg）；
       ③ allowed 去重后为单值 → 固定输出 dtype（bool：IsClose/Equal）；
       ④ 否则歧义 → ValueError（保守拒绝，**不猜**）。
+
+    ⚠ `allow_input_membership` 是**必填关键字**，因为两条路径在这条规则上**本来就不同**，
+    这份差异是有意保留、不是遗漏：
+
+      · 单输出（`derive_output_dtype`）传 `True`。仓内 Sign/Neg 的 spec 就写成
+        `out.dtype = ["float32","float16"]`（见 `plugin/samples/specs/{sign,neg}.spec.json`），
+        靠这条规则挑出 in_dt；去掉它这些 spec 全部派生失败。
+      · 多输出（`derive_output_contracts`）传 `False`，保持它历来的严格口径：想要「随输入」
+        必须**显式写 `<from_input>`**（median.valuesOut 正是这么写的）。
+        放开这条规则等于把「允许集有多个具体 dtype」这种**没表达随输入语义**的声明
+        静默猜成 in_dt —— 本仓纪律是 fail-closed 优于静默兜底，宁可让 spec 作者写清楚。
+
+    统一成「都放开」会放宽多输出、统一成「都收紧」会打断 Sign/Neg，所以**不统一**，
+    只把差异抬到参数上、由调用方显式声明。
     """
-    allowed = list(allowed or [])
-    if FROM_INPUT_SENTINEL in allowed:
-        return in_dt                                  # ① 随输入（median.values 随 self）
-    if in_dt in allowed:
+    uniq = list(dict.fromkeys(allowed or []))
+    where = f"输出 {out_name!r} 的" if out_name else ""
+    if FROM_INPUT_SENTINEL in uniq:
+        # ① 哨兵 = 「随输入」。集合里若还有具体项，只有当它们都等于 in_dt 时两种说法才不矛盾。
+        resolved = list(dict.fromkeys(in_dt if d == FROM_INPUT_SENTINEL else d for d in uniq))
+        if len(resolved) == 1:
+            return resolved[0]
+        raise ValueError(f"无法据 spec 派生{where}输出 dtype：out集={uniq} 同时声明了 "
+                         f"{FROM_INPUT_SENTINEL}（随输入={in_dt}）与具体 dtype "
+                         f"{[d for d in uniq if d != FROM_INPUT_SENTINEL]}，两种说法互相矛盾"
+                         f"（歧义保守拒绝，不猜）")
+    if allow_input_membership and in_dt in uniq:
         return in_dt                                  # ② 同 dtype elementwise（Sign/Neg）
-    uniq = list(dict.fromkeys(allowed))
     if len(uniq) == 1:
         return uniq[0]                                # ③ 固定输出（bool：IsClose/Equal）
-    where = f"输出 {out_name!r} 的" if out_name else ""
-    raise ValueError(f"无法据 spec 派生{where}输出 dtype：in={in_dt} out集={allowed}"
-                     f"（须 <from_input>、含 in dtype、或单值；歧义保守拒绝）")
+    hint = (f"须 {FROM_INPUT_SENTINEL}、含 in dtype、或单值" if allow_input_membership
+            else f"须 {FROM_INPUT_SENTINEL} 或单值")
+    raise ValueError(f"无法据 spec 派生{where}输出 dtype：in={in_dt} out集={uniq}"
+                     f"（{hint}；歧义保守拒绝）")
 
 
 def derive_output_dtype(spec, case_input_dtypes):
@@ -294,10 +318,12 @@ def derive_output_dtype(spec, case_input_dtypes):
     in_dt = in_dts[0]
     if any(d != in_dt for d in in_dts):
         raise ValueError(f"case 多输入 dtype 不一致 {in_dts}（elementwise 需同 dtype）")
-    # 派生规则与多输出契约**同源**（见 resolve_out_dtype_from_allowed 的 ⚠：曾各写一份，
-    # 单输出那份漏了 <from_input> 哨兵）。
+    # 哨兵解析与多输出契约**同源**（见 resolve_out_dtype_from_allowed 的 ⚠：曾各写一份，
+    # 单输出那份漏了 <from_input>）。`allow_input_membership=True` 是单输出的历来口径——
+    # Sign/Neg 的 spec 把 out.dtype 写成 ["float32","float16"]，靠它挑出 in_dt。
     return resolve_out_dtype_from_allowed(out_params[0].get("dtype"), in_dt,
-                                          out_params[0].get("name"))
+                                          out_params[0].get("name"),
+                                          allow_input_membership=True)
 
 
 def _value_tol_of(policy):
@@ -397,8 +423,11 @@ def derive_output_contracts(spec, case_input_dtypes, spec_standard,
         raise ValueError(f"case 多输入 dtype 不一致 {in_dts}（reduce/elementwise 需同 dtype）")
 
     def _resolve_out_dtype(p):
-        # 与单输出路径 derive_output_dtype **同源**（律令：判断只留一份，见该函数的 ⚠）。
-        return resolve_out_dtype_from_allowed(p.get("dtype"), in_dt, p.get("name"))
+        # 哨兵解析与单输出路径 derive_output_dtype **同源**（见该函数的 ⚠）。
+        # `allow_input_membership=False` 保持多输出历来的严格口径：想「随输入」必须显式写
+        # <from_input>（median.valuesOut 即如此），不把「多个具体 dtype」猜成 in_dt。
+        return resolve_out_dtype_from_allowed(p.get("dtype"), in_dt, p.get("name"),
+                                              allow_input_membership=False)
 
     contracts = [None] * len(out_params)
     value_tol_by_name, value_std_by_name = {}, {}
