@@ -7,21 +7,22 @@
 
 ## 1 · 这个仓是什么
 
-**OpRunway = NPU（昇腾）算子验收工作区**：输入是“算子任务书 + PR 链接”，输出是机器可校验的验收裁决和中文验收报告。
+**OpRunway = NPU（昇腾）算子验收工作区**：输入是“算子任务书 + 被测来源”，输出是机器可校验的验收裁决和中文验收报告。
+被测来源有两条平级通路：在线 PR 链接，或本地已 clone 的 checkout（见 §9.3）。
 
 ```
-任务书 + PR ──① 用例生成（ST）──▶ 测试用例集 ──② NPU 跑测──▶ NPU 精度 + 性能
-                                      │
-                                      └──③ 同一份用例喂外部 GPU 标杆──▶ NPU↔GPU 性能报告
+任务书 + 被测来源 ──① 用例生成（ST）──▶ 测试用例集 ──② NPU 跑测──▶ NPU 精度 + 性能
+                                            │
+                                            └──③ 同一份用例喂外部 GPU 标杆──▶ NPU↔GPU 性能报告
 ```
 
 用例集是整条流水线的脊柱：
 
-- Task 1：从任务书与 PR 生成覆盖功能、精度、性能的用例集；
+- Task 1：从任务书与被测来源（PR 或本地 checkout）生成覆盖功能、精度、性能的用例集；
 - Task 2：同一份用例在 NPU 上生成精度证据和性能数据；
 - Task 3：消费外部 GPU 数据，按同一 case 身份生成跨设备性能报告。
 
-任务书是验收权威；PR 和 op_def 是被测事实与能力证据，不能反过来覆盖任务书。
+任务书是验收权威；被测来源（PR 或本地 checkout）和 op_def 是被测事实与能力证据，不能反过来覆盖任务书。
 
 ---
 
@@ -51,7 +52,7 @@ export OPRUNWAY_PLUGIN_ROOT="$(git rev-parse --show-toplevel)/plugin"
 - `validator.py`：精度裁决；
 - `perf_compare.py`：性能裁决；
 - `validate_acceptance_state.py`：三级证据完整性门；
-- `run_workflow.py`：门控后写 `acceptance.json`。
+- `run_workflow.py`：门控后写 `acceptance.json`；并对 `spec.runner_form` 做验收准入（§4，入口 + 出口两道门）。
 
 任何 agent 或编排层都不得自行重判 pass/fail，只能逐字引用确定性产物并标明来源。
 
@@ -64,14 +65,15 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 常用脚本：
 
-- `fetch_source.py`：任务书/PR → 中立事实包；
+- `fetch_source.py`：任务书 + 被测来源（`--pr` 或 `--local-repo --op-subdir`）→ 中立事实包；`completeness=blocked` 时非 0 退出（3）；
+- `dut_source.py`：被测来源判别式（`{pull_request, local_checkout}`）与 provenance 锚的**读侧唯一入口**；词表和“缺省即 `pull_request`”的兜底只留这一份实现；
 - `validate_taskdoc_input.py`：任务书输入校验门（18 项，抽 spec 之前）；
 - `gen_cases.py <spec> --dry-run`：plan-only 用例计划自检，不产裁决；
 - `check_golden.py`：golden 来源契约；
 - `preflight_aclnn.py`：`aclnn_py` 静态接口预检；
 - `verify_aclnn_harness.py`：真机 harness 信任门；
 - `validate_preparation_state.py`：非真机复用收据；
-- `validate_acceptance_state.py`：验收证据复核门。
+- `validate_acceptance_state.py`：验收证据复核门；含 build receipt ↔ source_facts 的来源锚对账（`--source-facts` 可显式指路）。
 
 跑测信号按“退出码 → 强失败信号 → 强成功信号 → 待复核”分层读取；`UNCERTAIN`、`needs_review` 和证据不完整都不能静默升级为 pass。
 
@@ -79,15 +81,57 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 ## 4 · `--mode` 只由 `spec.runner_form` 派生
 
+⚠ **当前只有 `cpp_extension` 能产验收裁决。** `cpp` / `aclnn_py` 的 spec 会在入口和出口两处被拦：
+不加逃生阀直接报错，加了也只出开发级证据。这是按真机成熟度有意收敛，不是 bug。
+
 `spec.runner_form` 是唯一真源，受控词表为 `{cpp, aclnn_py, cpp_extension}`：
 
-| `runner_form` | `--mode` | 执行形态 | 默认性能对照物 |
-|---|---|---|---|
-| `cpp` 或未声明 | `new_example` | 编译 per-op C++ runner | 同法测的内置 TBE |
-| `aclnn_py` | `aclnn_py` | 通用 ctypes 调标准 aclnn 两段式 `.so` | 逐字按任务书配置；可为同机 `torch_npu`，也可直接调用 CANN 内置 ACLNN |
-| `cpp_extension` | `cpp_extension` | 按官方 `NpuExtension` / `EXEC_NPU_CMD_EXT` 生成独立 `torch.ops` 调用桥；DUT 仍是指定 PR 构建的 vendor `.so` | 逐字按任务书配置；runner form 不决定 baseline |
+| `runner_form` | `--mode` | 当前能否产验收裁决 | 执行形态 | 默认性能对照物 |
+|---|---|---|---|---|
+| `cpp` 或未声明 | `new_example` | ❌ 不能。要跑须加 `--allow-experimental-form`，且只产开发级产物 | 编译 per-op C++ runner | 同法测的内置 TBE |
+| `aclnn_py` | `aclnn_py` | ❌ 不能。同上 | 通用 ctypes 调标准 aclnn 两段式 `.so` | 逐字按任务书配置；可为同机 `torch_npu`，也可直接调用 CANN 内置 ACLNN |
+| `cpp_extension` | `cpp_extension` | ✅ 能，当前**唯一**准入形态 | 按官方 `NpuExtension` / `EXEC_NPU_CMD_EXT` 生成独立 `torch.ops` 调用桥；DUT 仍是指定 PR 构建的 vendor `.so` | 逐字按任务书配置；runner form 不决定 baseline |
 
-- 三条都是真机验收通路、都能产验收裁决；
+准入白名单在代码里就一行：`run_workflow._ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})`。
+
+### 4.1 为什么只准入 `cpp_extension`
+
+理由是**真机成熟度**，不是形态优劣：
+
+| 通路 | 真机走到哪一步 | 结论 |
+|---|---|---|
+| `cpp_extension` | Median PR6429 跑通完整 torch_parity 矩阵：1152 例、`gate.passed=true` | 当前唯一有完整矩阵背书的通路 |
+| `aclnn_py` | 只有历史 Median 60/60 | 那是**旧 caseset** 的结果；迁到 torch_parity + `cpp_extension` 后必须重跑，旧 PASS 不得沿用 |
+| `cpp`（`new_example`） | IsClose、Sign 已坐实 | dtype 闭环只到 fp32/fp16/bf16，覆盖不够 |
+
+⚠ **能力表不是准入表，别互相反推。** `repo_adapter.SUPPORTED_NP_BY_FORM` / `DEFERRED_NP_BY_FORM` 里
+`aclnn_py`、`cpp` 的条目**照旧保留、本轮没动**：那张表回答“这条通路支持哪些 dtype”，准入白名单回答
+“这条通路能不能出裁决”，两个问题不同。`cpp` 的 int 等未支持项仍落 `DEFERRED_NP_BY_FORM`，仍须显式挂账并 fail-closed。
+
+### 4.2 门落在哪两处
+
+| 位置 | 函数 | 说明 |
+|---|---|---|
+| ① 入口门 | `_resolve_mode` | 正常调用路径在这里被拦。只对真机通路生效；显式 `mock` / `catlass_mock` 逃生口不受影响（它们本来就不产验收产物） |
+| ② 出口门 | `_assert_acceptance_form_allowed` | 写 `acceptance.json` / `verdict.json` **之前**再校一次 |
+
+为什么要两道：口径照抄 `repo_adapter` 对 `catlass_mock` 后门的处置——**只拦入口拦不住**。
+下一个人看到出口门别当冗余删掉。
+
+### 4.3 逃生阀 `--allow-experimental-form` 怎么用
+
+| 它放行什么 | 它不放行什么 |
+|---|---|
+| 让 `cpp` / `aclnn_py` 在真机上**跑起来**：修通路、复现问题、局部开发验证 | **产验收裁决**。该路径物理上只产 `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"` + NON-ACCEPTANCE 标记），不写 `acceptance.json` / `verdict.json` |
+
+所以“加了 `--allow-experimental-form` 跑绿了”不能写成验收通过、不能进验收报告的裁决栏——
+这和 §5.8“covered 不等于验收通过”是同一条纪律。
+
+⚠ **收敛的代价要认账**：Roll 的 spec 写的是 `aclnn_py`，要继续做正式验收就得迁到 `cpp_extension`，
+而后者需要 torch.ops 调用桥 + vendor ELF 构建收据，接入成本明显更高。这是已知账单，不是加个逃生阀就算解决。
+
+### 4.4 其余仍然成立的约定
+
 - `cpp_extension` 不重编 op-plugin，也不把 op-plugin 当 DUT；它只复用官方 C++ Extension 接入机制，
   并须以独立构建收据机校绑定完整 PR head、构建命令和实际加载的 vendor ELF；
 - Median + PR6429 当前真机精度基线为 `cpp_extension` 的 torch-parity 完整矩阵：
@@ -96,7 +140,6 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 - `mock`、`catlass`、`catlass_mock` 不能从 `runner_form` 派生，只能显式用于局部开发或对应通路；
 - mock 通路物理上不产 `acceptance.json` 或 `verdict.json`；
 - argparse 的 `new_example` 默认值不是编排依据，编排层必须按 spec 派生；
-- `cpp` 当前真机 dtype 闭环主要是 fp32/fp16/bf16；能力表以 `repo_adapter.SUPPORTED_NP_BY_FORM` 为准，int 等未支持项落 `DEFERRED_NP_BY_FORM`，必须显式挂账并 fail-closed；
 - runner form 只决定执行形态，**不能反推任务书指定的实际性能标杆**；每份任务书的 baseline 仍须单独核实。
 
 ---
@@ -260,6 +303,7 @@ OpRunway/
 | 当前 TODO | `doc/oprunway-todo.md` |
 | 改动流水 | `doc/oprunway-changes-brief.md` |
 | 真机环境 | `doc/oprunway-real-machine-environment.md` + `.oprunway/real-machine.env` |
+| 本地来源通路真机验证 | `doc/oprunway-local-source-realmachine-validation.md` |
 | 已定决策 | `canon/decisions/`，先看 status/trust tier |
 | 人读蓝图/历史案例 | `plugin/workflows/`，冲突时以 acceptance-workflow skill 为准 |
 
@@ -267,15 +311,95 @@ OpRunway/
 
 ## 9 · 当前能力边界
 
+先看三条最容易踩的：正式验收只走 `cpp_extension`（§4）；本地 checkout 来源只验到 CP-A 取材、没跑过 NPU（§9.3）；
+`fetch_source.py` 一改，既有 preparation 收据全部变 `MISS`（§9.4）。
+
+### 9.1 真机已坐实的
+
 - 真 NPU 已坐实：IsClose、Sign；Median PR6429 当前为 1152 例中 1101 PASS、51 FAIL，
   `gate.passed=true`、确定性裁决 `FAIL(精度)`；上一轮 1344-case 结果仅作历史记录；
   Elu/Silu 在 A5-950 有 18/18 非空例证据；
 - Median 性能数据不是零数据：custom 50/50、`torch_npu` baseline 48/50 有效，48 对评分、35 对达到 `ratio >= 1.0`；
 - 2 个 BF16、`dim=1` baseline case 报 161002、custom 成功，按 baseline limitation 挂起，不归因 DUT；
 - 用户已确认 Median 任务书所称 `aclnnMedian` / `aclnnMedianDim` 小算子拼接版本等价于 Torch 对应接口，故性能 baseline 为同机 `torch_npu` 的 `torch.median`，无需另证等价、也不改为直调单个 ACLNN 接口；
-- **通用性能 case 规则**：性能 case 必须从同一份精度 caseset 选择；A3 按全部输入物理载荷之和 `<= 256 KiB` 为小 shape、`> 256 KiB` 为大 shape。硬件边界写入 spec，不按算子身份分支；大小分类只用于分组，所有性能 case 仍须真实采集；
-- `aclnn_py` perf collector 已真机产出同口径 kernel-only 数据，但“通路有数据”不等于“任务书条款通过”；
-- mock/catlass_mock 只产带 `evidence_grade="development"` 和 NON-ACCEPTANCE 标记的 `dev_run_summary.json` / `dev_precision_check.json`，不产 `acceptance.json` / `verdict.json`；
+- **通用性能 case 规则**：性能 case 必须从同一份精度 caseset 选择；A3 按全部输入物理载荷之和 `<= 256 KiB` 为小 shape、`> 256 KiB` 为大 shape。硬件边界写入 spec，不按算子身份分支；大小分类只用于分组，所有性能 case 仍须真实采集。
+
+### 9.2 验收通路已收敛到 `cpp_extension`
+
+规则和理由见 §4，这里只记边界后果：
+
+- `cpp`、`aclnn_py` 仍能在真机上跑（须 `--allow-experimental-form`），但**不产验收裁决**；
+- `aclnn_py` perf collector 已真机产出同口径 kernel-only 数据——“通路有数据”既不等于“任务书条款通过”，现在也不等于“能出裁决”；
+- `aclnn_py` 的历史 Median 60/60 属于旧 caseset，不得沿用为 torch_parity 下的 PASS；
+- mock/catlass_mock 只产带 `evidence_grade="development"` 和 NON-ACCEPTANCE 标记的
+  `dev_run_summary.json` / `dev_precision_check.json`，不产 `acceptance.json` / `verdict.json`。
+
+### 9.3 被测来源：本地 checkout 已是一等通路（但只走到 CP-A）
+
+被测代码现在有两条**平级**来源通路，不是“主 + 降级”：
+
+| `dut_source` | 怎么取 | provenance 锚 | 这个锚证明什么 |
+|---|---|---|---|
+| `pull_request`（缺省） | `fetch_source.py --pr <PR 链接>` | `pr.head_sha` | 被测的是这个 PR 的这个 commit |
+| `local_checkout` | `fetch_source.py --local-repo <仓根> --op-subdir <算子子目录> [--base-ref <ref>] [--allow-dirty]` | `local_checkout.root_digest`（被测子树 Merkle 摘要，64 位 sha） | 被测算子子树的字节是这一份 |
+
+- `--pr` 与 `--local-repo` 互斥；任务书本来就同时收本地路径和 http(s) 链接，所以四种组合都成立；
+- 判别式受控词表 `{pull_request, local_checkout}`，读侧唯一入口是 `plugin/acc-common/dut_source.py`。
+  **缺省是 `pull_request`，且 PR 通路不写这个键**——老收据不会一夜失效，PR 通路的业务字段一个没动；
+- 两条通路的来源键（`head_sha` / `local_checkout.root_digest`）**互斥出现**，混装即拒，
+  堵的是“本地 provenance 伪装成 PR provenance”；
+- 摘要算法是 `oprunway.local_subtree_merkle` v1；排除规则以**结构化 + 版本化**的 `digest_policy`
+  写进收据，校验端逐字核对，不接受任意排除策略。
+
+⚠ **两条硬限制，别含糊过去：**
+
+1. **`root_digest` 只覆盖 `op_subdir`**，不含仓级构建脚本、公共头文件。它证明的是
+   “被测算子子树的字节是这一份”，**不是**“整个构建输入闭包是这一份”。
+2. **本地来源本轮只跑到 CP-A 取材**：没跑 NPU、没出精度裁决、没出性能裁决。
+   任何地方都不许写成“本地来源已完成验收”。
+
+真机验证（a3，2026-08-05）——任务书为 `cann/cann-ops-competitions` 的 `median_task_doc.md`，
+被测是 `cann/ops-nn` MR 6429（head `0290d61ac066f9f4e620a3714f5941e82dc4e72a`），
+算子子目录 `experimental/index/median`：
+
+| 项 | 结果 |
+|---|---|
+| 输入 | 只给本地文件路径 + 本地目录，**不带任何 PR id** |
+| 结果 | 一次跑到 `completeness=complete`、`reasons=[]` |
+| 与在线 PR 通路比对 | 任务书字节（`5d24e733…`，4379 字节）、`derived`（op=median / target_dir / interface_kind=aclnn_2stage / aclnn_entry=aclnnMedian / aclnn_headers）、`changed_files`（23 个）、`key_files`（6 份，路径集合与逐份摘要都同）**逐字相同** |
+| 唯一有意差异 | `taskdoc.source_locator`：本地记 `<local-file>`、在线记 URL |
+| 锚 | 本地 `root_digest=c8867ce09f6e…`、在线 `head_sha=0290d61ac066…`，不同且互不伪装 |
+| 记录 | `doc/oprunway-local-source-realmachine-validation.md` |
+
+降级与记账口径：
+
+- `changed_files` 算不出来时记字符串 `"unavailable"`，**不是 `[]`**——后者语义是“确实没有改动”，两件事必须分得开；
+- dirty worktree 默认 fail-closed；`--allow-dirty` 是逃生阀，全量记账 dirty 清单并在
+  `completeness.warnings` 落 `dirty_worktree_allowed`；
+- `completeness` 新增平级 `warnings`（**仅非空时写入**），`status` 仍只看 `reasons`。
+  warnings 是受控词表且与载重事实**双向一致**：少写 = 降级没留痕，多写 = 编造降级，两边都拒。
+  下游若有“`reasons` 空即万事大吉”的假设，要同步改成也看 `warnings`；
+- `fetch_source` 在 `completeness=blocked` 时**非 0 退出（3）**；原先是落盘就返回 0。
+
+已接入的消费者：`validate_preparation_state`、`cpp_extension_adapter`、`cpp_extension_driver`、
+`validate_acceptance_state`。三级门里新增 build receipt ↔ source_facts 的来源锚对账，两步且顺序固定：
+先核两边 `dut_source` 一致，再核锚值相等。
+
+`source_facts.json` 缺席的处置**按通路分**，这条是实测逼出来的：真机验收报告目录
+（`reports/<Op>-spec-<x>/`）里**本来就没有** `source_facts.json`，取材的 `--out` 与验收产物目录不是同一个。
+所以本地通路找不到就 BLOCKED，PR 通路沿用旧行为；`validate_acceptance_state` 新增 `--source-facts` 可显式指路。
+
+### 9.4 本轮的连带账单
+
+⚠ **既有 preparation 收据会从 `REUSABLE` 变 `MISS`。** 原因是 `producer.logic_sha256` 就是
+`fetch_source.py` 自身源码的哈希、且它在 payload 里——改了工具必然改 digest。
+**这是正确行为，不是复用坏了**：看到 MISS 别去“修”复用逻辑，重跑取材即可。
+
+Roll 的迁移成本：spec 现写 `aclnn_py`，通路收敛后必须迁到 `cpp_extension` 才能做正式验收，
+而后者要 torch.ops 桥 + vendor ELF 构建收据，接入成本更高（详见 §4.3）。
+
+### 9.5 仓形态与外部依赖
+
 - ops-<族>、标准 aclnn 两段式、用户态 opp 安装型是当前主要闭环；域外形态 fail-closed；
 - 外部 GPU consumer 已接入，真实 GPU 数据仍待提供，缺失时走 `BLOCKED_WAIT_GPU_BENCHMARK`。
 

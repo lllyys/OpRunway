@@ -24,6 +24,8 @@ aclnnStatus aclnnReduce(void *workspace, uint64_t workspaceSize,
                         aclOpExecutor *executor, aclrtStream stream);
 """
 _HEAD = "a" * 40
+_ROOT_DIGEST = "b" * 64
+_OP_SUBDIR = "experimental/index/reduce"
 _PATH = "experimental/index/reduce/op_host/op_api/aclnn_reduce.h"
 
 
@@ -150,6 +152,143 @@ class AclnnPreflightTest(unittest.TestCase):
         result = P.evaluate(self.root, "spec.json")
         self.assertEqual(result["status"], "BLOCKED")
         self.assertIn("spec.params[0]", result["blocked_reasons"][0])
+
+    def test_pull_request_bindings_carry_no_dut_source_key(self):
+        """PR 通路回归钉：payload 形状与接入判别式之前逐字一致。
+
+        `dut_source` 键只在本地分支写。这条钉住的是「PR 通路 payload 不变」这个承诺——
+        它一旦被写成无条件赋值，所有既有 PR 收据的绑定摘要会集体漂移。
+        """
+        result = P.evaluate(self.root, "spec.json")
+        self.assertEqual(result["status"], "READY_WAIT_NPU_TRUST_GATE")
+        self.assertNotIn("dut_source", result["bindings"])
+        self.assertNotIn("local_root_digest", result["bindings"])
+        self.assertEqual(result["bindings"]["pr_head_sha"], _HEAD)
+
+
+class LocalCheckoutTest(unittest.TestCase):
+    """本地来源通路：锚是 root_digest，绝不与 PR 锚互相伪装。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+        self._write("spec.json", _spec())
+        self._write("pr_facts.json", self._local_pr_facts())
+        self._write_source(self._local_source())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, rel, value):
+        with open(os.path.join(self.root, rel), "w", encoding="utf-8") as out:
+            json.dump(value, out)
+
+    def _write_source(self, value):
+        content_address.write_artifact(
+            self.root, "source_facts.json", P._SOURCE_DOMAIN, value)
+
+    @staticmethod
+    def _local_pr_facts():
+        return {
+            "dut_source": "local_checkout",
+            "local_checkout": {
+                "op_subdir": _OP_SUBDIR,
+                "root_digest": _ROOT_DIGEST,
+                # ⚠ 故意保留：`git.head_sha` 是合法的信息字段，不是锚。
+                # 下面 test_missing_root_digest_never_falls_back_to_git_head
+                # 就是靠它证明没有「哪个字段有值用哪个」的兜底。
+                "git": {"head_sha": _HEAD, "dirty": False, "dirty_files": []},
+            },
+            "key_files": {_PATH: _HEADER},
+        }
+
+    @staticmethod
+    def _local_source():
+        raw = _HEADER.encode()
+        return {
+            "contract_version": 1,
+            "dut_source": "local_checkout",
+            "local_checkout": {
+                "op_subdir": _OP_SUBDIR,
+                "root_digest": _ROOT_DIGEST,
+            },
+            "key_files": [{
+                "path": _PATH,
+                "ref": _ROOT_DIGEST,
+                "bytes_sha256": hashlib.sha256(raw).hexdigest(),
+                "size": len(raw),
+            }],
+            "derived": {
+                "aclnn_headers": [_PATH],
+                "interface_kind": "aclnn_2stage",
+            },
+            "completeness": {"status": "complete", "reasons": []},
+        }
+
+    def test_local_checkout_binds_root_digest_and_never_pr_head(self):
+        result = P.evaluate(self.root, "spec.json")
+        self.assertEqual(result["status"], "READY_WAIT_NPU_TRUST_GATE")
+        self.assertEqual(result["bindings"]["dut_source"], "local_checkout")
+        self.assertEqual(
+            result["bindings"]["local_root_digest"], _ROOT_DIGEST)
+        # 64 位摘要绝不能借 PR 的键名出场——下游是按键名认通路的。
+        self.assertNotIn("pr_head_sha", result["bindings"])
+
+    def test_root_digest_mismatch_between_pr_facts_and_source_is_blocked(self):
+        source = self._local_source()
+        source["local_checkout"]["root_digest"] = "c" * 64
+        self._write_source(source)
+        result = P.evaluate(self.root, "spec.json")
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("local_root_digest", result["blocked_reasons"][0])
+
+    def test_local_pr_facts_against_pr_source_is_blocked_on_dut_source(self):
+        source = self._local_source()
+        source.pop("dut_source")
+        source.pop("local_checkout")
+        source["pr"] = {"head_sha": _HEAD}
+        self._write_source(source)
+        result = P.evaluate(self.root, "spec.json")
+        self.assertEqual(result["status"], "BLOCKED")
+        reason = result["blocked_reasons"][0]
+        self.assertIn("dut_source", reason)
+        self.assertIn("不一致", reason)
+
+    def test_pr_pr_facts_against_local_source_is_blocked_on_dut_source(self):
+        self._write("pr_facts.json", {
+            "head_sha": _HEAD, "key_files": {_PATH: _HEADER}})
+        result = P.evaluate(self.root, "spec.json")
+        self.assertEqual(result["status"], "BLOCKED")
+        reason = result["blocked_reasons"][0]
+        self.assertIn("dut_source", reason)
+        self.assertIn("不一致", reason)
+
+    def test_missing_root_digest_never_falls_back_to_git_head(self):
+        facts = self._local_pr_facts()
+        facts["local_checkout"].pop("root_digest")
+        self._write("pr_facts.json", facts)
+        result = P.evaluate(self.root, "spec.json")
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("root_digest", result["blocked_reasons"][0])
+        # 缺锚就是缺锚：既不许退回 git.head_sha，也不许留半截绑定。
+        self.assertNotIn("pr_head_sha", result["bindings"])
+        self.assertNotIn("local_root_digest", result["bindings"])
+
+    def test_misspelled_dut_source_is_blocked_not_defaulted(self):
+        facts = self._local_pr_facts()
+        facts["dut_source"] = "local"           # 拼错，不在受控词表
+        self._write("pr_facts.json", facts)
+        result = P.evaluate(self.root, "spec.json")
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("受控词表", result["blocked_reasons"][0])
+
+    def test_source_facts_mixing_pr_and_local_facts_is_blocked(self):
+        source = self._local_source()
+        source["pr"] = {"head_sha": _HEAD}      # 两条通路的事实混装
+        self._write_source(source)
+        result = P.evaluate(self.root, "spec.json")
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("混装", result["blocked_reasons"][0])
 
 
 if __name__ == "__main__":

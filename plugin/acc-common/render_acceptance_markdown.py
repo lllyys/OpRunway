@@ -7,6 +7,13 @@ import argparse
 import json
 import os
 
+import dut_source
+# 只为复用 `_find_source_facts`（来源对照物的发现规则）。两处各写一份查找规则的话，
+# 报告说的 facts 和三级门校的 facts 可能根本不是同一份文件。
+# 无循环导入：`validate_acceptance_state` 不 import 本模块；它的 numpy 是惰性 import，
+# 本模块（stdlib-only 的纯渲染器）不会因此被拖上 numpy 依赖。
+import validate_acceptance_state as gate
+
 
 def _load(root, name):
     with open(os.path.join(root, name), encoding="utf-8") as src:
@@ -21,6 +28,14 @@ def _cell(value):
 
 def _pct(value):
     return "—" if value is None else f"{float(value) * 100:.2f}%"
+
+
+def _n(value):
+    """列表长度；不是 list 就渲染 `?`。
+
+    ⚠ **不能退成 0**：把「收据没记清单」渲染成「0 项未提交改动」，就是凭空把 dirty 说小了。
+    """
+    return len(value) if isinstance(value, list) else "?"
 
 
 def _gap_line(gap):
@@ -44,6 +59,161 @@ def _gap_items(value):
     if value is None or value == []:
         return []
     return value if isinstance(value, list) else [value]
+
+
+# ---- 「来源与 provenance」节的措辞 -----------------------------------------------
+# **全部落常量，不在 f-string 里就地手写**。理由不是洁癖：这一节的每句话都是对外的
+# **provenance 强度声明**，措辞被顺手改软（「无法证明」→「未验证」、「未知」→「clean」）
+# 等于悄悄抬高报告的可信度，而这种改动在 diff 里长得跟润色一模一样。集中成常量后，
+# 测试可以直接引用常量断言，措辞一漂移就当场红。
+PROV_HEADING = "## 来源与 provenance"
+PROV_NO_RECEIPT = (
+    "本轮 runner mode 的证据里没有 vendor build receipt，"
+    "本报告不对被测来源作任何 provenance 断言。")
+PROV_BAD_ANCHOR = (
+    "⚠ vendor build receipt 的来源锚不合法：{ex}——本节不作任何 provenance 断言。")
+PROV_UNKNOWN_KIND = (
+    "⚠ vendor build receipt 声明的来源通路 `{kind}` 本渲染器尚无对应的强度陈述"
+    "——本节不作任何 provenance 断言。")
+# kind → 人话标签。**这不是 kind→锚字段名 的映射**（那个只有 `dut_source` 说了算），
+# 只是把已判定的 kind 翻译成带强度说明的一句话。
+PROV_KIND_LABEL = {
+    dut_source.PULL_REQUEST:
+        "线上 PR（`pull_request`）——可证明「验的就是这个 PR 的这个 commit」",
+    dut_source.LOCAL_CHECKOUT:
+        "本地 checkout（`local_checkout`）——只能证明「验的就是这份字节」",
+}
+# 锚**字段名** → 表头文案。键取自 `dut_source` 的返回值，本文件不自己决定哪个通路用哪个锚。
+PROV_ANCHOR_LABEL = {
+    "pr_head_sha": "PR head",
+    "local_root_digest": "子树摘要 root_digest",
+}
+# 本地通路的两条 caveat：**只依赖 kind**，与 source_facts 在不在无关。
+# 它们陈述的是 root_digest 这个锚**本身**的能力边界，不是某一轮取材的结果，
+# 所以对照物缺席时也一个字都不能少。
+PROV_LOCAL_CAVEATS = (
+    "- ⚠ 本地 checkout **无法证明**它对应任何具体 PR：`root_digest` 锚定的是"
+    "「验的就是这份字节」，不是「验的就是线上某个 PR 的某个 commit」。",
+    "- ⚠ 子树摘要只覆盖 `op_subdir`，仓级构建脚本、公共头文件、代码生成器都不在内——"
+    "`root_digest` 相同**不等于** vendor `.so` 相同。",
+)
+PROV_DIRTY_ROW = "| worktree 干净度 | {value} |"
+PROV_DIRTY_UNKNOWN = (
+    "**未知**——报告目录内没有可对账的 source_facts.json；**不得据此认定 worktree clean**")
+PROV_DIRTY_IGNORED = (
+    "**未知**——⚠ 报告目录内的 source_facts.json 与本轮收据的来源锚不一致，已忽略；"
+    "**不得据此认定 worktree clean**")
+PROV_DIRTY_CLEAN = "clean——source_facts 记录 worktree 无未提交改动"
+PROV_DIRTY_DIRTY = (
+    "**dirty**——worktree 有 {n} 项未提交改动（被测子树内 {n_op} 项）；"
+    "git head 不代表被测字节，provenance 只靠 root_digest")
+PROV_DIRTY_NOT_GIT = (
+    "不适用——source_facts 记录本地目录不是 git 仓，provenance 只靠 root_digest")
+PROV_DIRTY_MALFORMED = (
+    "**未知**——source_facts 里的 `git.dirty` 不是布尔值；**不得据此认定 worktree clean**")
+PROV_GIT_HEAD_ROW = "| git head（**信息字段，非 provenance 锚**） | `{sha}` |"
+
+
+def _local_rows(facts, receipt_identity):
+    """本地通路的**事实行**（worktree 干净度、git head 信息字段）；返回表格行列表。
+
+    与 caveat 的分工不能混：`PROV_LOCAL_CAVEATS` 只依赖 kind、恒成立；本函数产出的行依赖
+    `source_facts` 这份**外部对照物**。对照物缺席只该让事实行退成「未知」，
+    绝不该顺手把 caveat 也一起吞掉。
+
+    采信 `source_facts` 的**唯一**前提：它的来源三元组与本轮收据的来源三元组逐字全等。
+    不全等（摘要对不上、两条通路的事实键混装、锚形态不合法）一律**整份忽略**，
+    绝不「挑能用的字段凑一凑」——一份来源对不上的 facts，它里面的 dirty/head_sha 描述的是
+    **另一份 checkout**，拿来填这张表就是把无关事实冒充本轮 provenance。
+
+    ⚠ 最贵的一条：**「没有对照物」= 未知，不是 clean**。把「查不到脏」渲染成「干净」，
+    等于凭空给一份可能 dirty 的 checkout 发 provenance 合格证。真正的阻断在
+    `validate_acceptance_state` 的三级门，本渲染器不重判、只如实标注强度。
+    """
+    if not isinstance(facts, dict):
+        # `gate._find_source_facts` 三态：dict / None（没找到）/ "__BAD__"（找到但读不出）。
+        # 后两态在本节里**同权**——都是「拿不到可对账的对照物」，强度一样，都退「未知」。
+        return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_UNKNOWN)]
+    try:
+        if dut_source.identity(facts, where="source_facts") != receipt_identity:
+            return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_IGNORED)]
+    except dut_source.DutSourceError:
+        # 锚读不出来 == 对不上：处置相同，整份忽略，不降格采信。
+        return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_IGNORED)]
+    local = facts.get(dut_source.FACTS_KEY[dut_source.LOCAL_CHECKOUT])
+    git = local.get("git") if isinstance(local, dict) else None
+    if not isinstance(git, dict):
+        return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_NOT_GIT)]
+    dirty = git.get("dirty")
+    if dirty is True:
+        rows = [PROV_DIRTY_ROW.format(value=PROV_DIRTY_DIRTY.format(
+            n=_n(git.get("dirty_files")), n_op=_n(git.get("dirty_files_in_op_subdir"))))]
+    elif dirty is False:
+        rows = [PROV_DIRTY_ROW.format(value=PROV_DIRTY_CLEAN)]
+    else:
+        # `is True` / `is False` 而不是真值判断：缺字段、None、字符串 "false" 都不是
+        # 「干净」的证据，只能是未知。
+        rows = [PROV_DIRTY_ROW.format(value=PROV_DIRTY_MALFORMED)]
+    head = git.get("head_sha")
+    if isinstance(head, str) and head:
+        # ⚠ 这里直取 `git.head_sha` 是**信息字段**（这份 checkout 当时停在哪个 commit），
+        # 不是锚——锚永远由 `dut_source.identity` 给。worktree 可能 dirty，它与被测字节
+        # 没有绑定关系，所以必须**原地**标注，不能让审核员把它当 PR head 读。
+        rows.append(PROV_GIT_HEAD_ROW.format(sha=_cell(head)))
+    return rows
+
+
+def _provenance_section(receipt, source, facts):
+    """渲染「## 来源与 provenance」节；返回行列表（含节标题与结尾空行）。
+
+    为什么单独成节、而不是继续在「被测物与运行环境」表里占两行：两条来源通路的
+    provenance **强度不等**（PR head 能证明「验的就是这个 PR 的这个 commit」，
+    本地 root_digest 只能证明「验的就是这份字节」），强度差异得成段说清；
+    而且本地通路根本没有 PR head，硬渲染那一行只会渲染出一个「—」，
+    看上去像「这次没记」而不是「这条通路压根不存在这个锚」。
+
+    三条分支，顺序不能换：
+
+      ① `receipt` 为空（`aclnn_py` / `cpp` / 压根没收据）→ 只声明「不作任何断言」并 return。
+         ⚠ **必须先判 `receipt` 真假，不能只看 `source` 空不空**：调用点的
+         `build_receipt.get("source") or {}` 会把「压根没收据」和「有收据但 source 坏了」
+         抹平成同一个 `{}`。后者本该走 ② 报「来源锚不合法」，被抹平后就成了看起来无害的
+         「本轮没有收据」——一条来源不可信的证据链就此静默降级为「正常的无收据通路」。
+      ② 来源锚不合法 → 渲染 ⚠ 并 return。**异常必须在这里 catch 掉、不能外抛**：
+         外抛虽被 `run_workflow` 的 except 兜住不崩，但整份 `验收报告.md` 就不产了，
+         审核员连「锚不合法」这条最该看见的话都看不到（只剩一个 JSON 错误文件）。
+      ③ 锚合法 → 按 kind 渲染；本地通路额外挂事实行与两条 caveat。
+
+    `facts` 只透传给 `_local_rows`，本函数不按字段名读它——读法只有一处，判别式只有一份。
+    """
+    lines = [PROV_HEADING, ""]
+    if not receipt:
+        return lines + [PROV_NO_RECEIPT, ""]
+    try:
+        kind, anchor_field, anchor_value = dut_source.validate_build_receipt_source(
+            source, where="vendor build receipt.source")
+    except dut_source.DutSourceError as ex:
+        return lines + [PROV_BAD_ANCHOR.format(ex=_cell(ex)), ""]
+    if kind not in PROV_KIND_LABEL:
+        # 受控词表扩了而本节没跟上 → 宁可什么都不断言：让一条未知强度的来源借着
+        # 「渲染成功」看起来和 PR 通路一样硬，比少渲染一节贵得多。
+        return lines + [PROV_UNKNOWN_KIND.format(kind=_cell(kind)), ""]
+    lines += [
+        "| 项目 | 值 |",
+        "|---|---|",
+        f"| 被测来源 | {PROV_KIND_LABEL[kind]} |",
+        # `repo` 已由 `validate_build_receipt_source` 校过必填非空；这里只取值展示，
+        # 不参与任何来源判别。
+        f"| 源码仓 | `{_cell(source.get('repo'))}` |",
+        # 锚字段名与锚值都来自 `dut_source`，本文件不自选字段、不做 `a or b` 兜底。
+        f"| {PROV_ANCHOR_LABEL.get(anchor_field, anchor_field)} | `{_cell(anchor_value)}` |",
+    ]
+    if kind == dut_source.LOCAL_CHECKOUT:
+        lines += _local_rows(facts, (kind, anchor_field, anchor_value))
+        lines.append("")
+        lines += list(PROV_LOCAL_CAVEATS)
+    lines.append("")
+    return lines
 
 
 def _atomic_write(path, text):
@@ -155,7 +325,7 @@ def _performance_failure_detail(non_passing, caseset):
     return "\n".join(lines)
 
 
-def render(report_root):
+def render(report_root, source_facts_path=None):
     report_root = os.path.realpath(report_root)
     acceptance = _load(report_root, "acceptance.json")
     verdict = _load(report_root, "verdict.json")
@@ -171,6 +341,11 @@ def render(report_root):
     vendor = receipt.get("vendor") or {}
     build_receipt = vendor.get("build_receipt") or {}
     source = build_receipt.get("source") or {}
+    # 来源对照物：**复用**三级门的发现规则（显式路径 → `<报告目录>/` → `<报告目录>/work/`），
+    # 不在这里另写一份——两处规则一旦分叉，报告陈述的 facts 就不是门校过的那一份了。
+    # 返回三态：dict / None（没找到）/ "__BAD__"（找到但读不出）。
+    # ⚠ 后两态在本渲染器里**同权**，都当「未知」，绝不当 clean（见 `_local_rows`）。
+    facts = gate._find_source_facts(report_root, source_facts_path)
 
     lines = [
         f"# {op} 算子验收报告",
@@ -198,12 +373,16 @@ def render(report_root):
         "",
         "`audit_case.sh` 直接完成单 case 重放，并按五段展示 Torch 接入、输入、接口、差异阈值和结论。",
         "",
+    ]
+    # 来源与 provenance 排在「被测物与运行环境」**之前**：先说清「验的是哪份源码、这个
+    # 结论能替它担保到什么程度」，再列 ELF/SoC/CANN 这些运行环境事实。
+    # `source` 从这里起只作为本节的入参，本文件别处不再按字段名直取它。
+    lines += _provenance_section(receipt, source, facts)
+    lines += [
         "## 被测物与运行环境",
         "",
         "| 项目 | 值 |",
         "|---|---|",
-        f"| 源码仓 | `{_cell(source.get('repo'))}` |",
-        f"| PR head | `{_cell(source.get('pr_head_sha'))}` |",
         f"| vendor ELF SHA256 | `{_cell(vendor.get('library_sha256'))}` |",
         f"| Extension ELF SHA256 | `{_cell((receipt.get('artifact') or {}).get('sha256'))}` |",
         f"| SoC | `{_cell(runtime.get('soc'))}` |",
@@ -304,9 +483,9 @@ def render(report_root):
     return "\n".join(lines)
 
 
-def write_report(report_root, filename="验收报告.md"):
+def write_report(report_root, filename="验收报告.md", source_facts_path=None):
     report_root = os.path.realpath(report_root)
-    text = render(report_root)
+    text = render(report_root, source_facts_path=source_facts_path)
     path = os.path.join(report_root, filename)
     _atomic_write(path, text)
 
@@ -338,8 +517,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="从确定性验收 JSON 渲染中文 Markdown 报告")
     parser.add_argument("report_root")
     parser.add_argument("--filename", default="验收报告.md")
+    # 与 `validate_acceptance_state --source-facts` 同名同义：同一份对照物，
+    # 门和报告必须能被指到同一个文件上，否则「门校过」与「报告写的」可以是两份东西。
+    parser.add_argument("--source-facts", default=None, metavar="PATH",
+                        help="显式指定 source_facts.json；不给则在报告目录与其 work/ 下自动发现")
     args = parser.parse_args(argv)
-    print(write_report(args.report_root, args.filename))
+    print(write_report(args.report_root, args.filename, args.source_facts))
     return 0
 
 

@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """ACLNN ABI 的纯静态 CP-C0 预检（aclnn_py / cpp_extension 共用）。
 
-只用 CP-A/B 已取到的 PR header 与 spec 做签名/slots 对账；不 clone、不 build、不加载
+只用 CP-A/B 已取到的接口头与 spec 做签名/slots 对账；不 clone、不 build、不加载
 `.so`、不访问 NPU。成功状态只能是 ``READY_WAIT_NPU_TRUST_GATE``，不能替代后续真机
 build、DUT 定义方核验或 harness trust gate。
+
+来源通路由 `dut_source` 判别式区分（`pull_request` / `local_checkout`），两条通路的
+signature 对账逻辑完全同形，只有 provenance 锚不同：PR 通路锚 `pr.head_sha`，本地通路
+锚 `local_checkout.root_digest`。锚一律经 `dut_source.identity()` 取，本模块不自建
+「kind → 锚字段名」的映射。
 """
 
 import argparse
@@ -13,6 +18,7 @@ import os
 import sys
 
 import content_address
+import dut_source
 import gen_cases
 import precision_policy
 from aclnn_runtime.aclnn_runner import (
@@ -115,7 +121,25 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
         if not isinstance(spec, dict) or not isinstance(pr_facts, dict):
             raise ValueError("spec/pr_facts 须为 JSON object")
         result["bindings"]["spec_sha256"] = _sha(spec)
-        result["bindings"]["pr_head_sha"] = pr_facts.get("head_sha")
+        # 先由判别式定通路，再按通路写 provenance 锚。
+        # ⚠ PR 分支**逐字**保持改动前的写法（同一键名、同一取值、同一写入时机）→ PR 通路的
+        #   payload 字节不变；`dut_source` 键**只在本地分支写**，与 `fetch_source` 的形态一致
+        #   （PR 通路的 payload 里没有这个键，`test_fetch_source` 已把它钉成不变量）。
+        # ⚠ 这段不能挪到下面 runner_form 早退之后：`cpp` 的 NOT_APPLICABLE payload 历来就带
+        #   来源绑定键，挪走会让它凭空少一个键。
+        kind = dut_source.of(pr_facts, where="pr_facts")
+        if kind == dut_source.PULL_REQUEST:
+            result["bindings"]["pr_head_sha"] = pr_facts.get("head_sha")
+        else:
+            # ⚠ 本地锚只能经 `identity()` 取，不许自己按字段名去翻：本地事实里合法地存在
+            #   `local_checkout.git.head_sha`，它是「这份 checkout 当时停在哪个 commit」的
+            #   信息字段，**不是锚**（worktree 可能 dirty）。任何「哪个字段有值用哪个」的
+            #   兜底都会把它当成 PR provenance 用。
+            # ⚠ 同理，64 位 root_digest 绝不能写进 `pr_head_sha`：下游是按键名认通路的。
+            _, anchor_field, anchor_value = dut_source.identity(
+                pr_facts, where="pr_facts")
+            result["bindings"]["dut_source"] = kind
+            result["bindings"][anchor_field] = anchor_value
 
         runner_form = spec.get("runner_form", "cpp")
         if runner_form not in ("aclnn_py", "cpp_extension"):
@@ -128,13 +152,27 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
             if runner_form == "cpp_extension"
             else "NPU_BUILD_AND_HARNESS_TRUST_GATE")
 
-        source_pr = source.get("pr")
-        if not isinstance(source_pr, dict):
-            raise ValueError("source_facts.pr 须为 JSON object")
-        source_head = source_pr.get("head_sha")
-        if not source_head or pr_facts.get("head_sha") != source_head:
-            raise ValueError("pr_facts.head_sha 与 source_facts 绑定不一致")
+        # ⚠ 两步不能合并、更不能倒过来：**先确认两边说的是同一条来源通路，再按通路核锚**。
+        #   若先各自取锚再比值，一份「pr_facts 说本地、source_facts 说 PR」的混装事实只会
+        #   报「锚对不上」，把**来源身份被伪装**说成了普通的锚漂移；反过来若两边恰好各自
+        #   自洽而通路不同，等值校验会整条走进不该走的分支。
+        src_kind, anchor_field, anchor_value = dut_source.identity(
+            source, where="source_facts")
+        if src_kind != kind:
+            raise ValueError(
+                f"pr_facts.dut_source={kind} 与 source_facts.dut_source={src_kind} 不一致"
+                f"——两边必须先说同一条来源通路，再按通路核锚")
+        # PR 通路仍逐字比 `pr_facts.head_sha`（与改动前同一字段、同一语义）；本地通路比的是
+        # 上面已由 `identity()` 归一化写进 bindings 的 root_digest，不重新翻 payload。
+        claimed = (pr_facts.get("head_sha") if kind == dut_source.PULL_REQUEST
+                   else result["bindings"][anchor_field])
+        if claimed != anchor_value:
+            raise ValueError(f"pr_facts 的 {anchor_field} 与 source_facts 绑定不一致")
 
+        # ⚠ 以下 key_files / aclnn_headers 对账**与来源通路无关**：它只消费
+        #   `pr_facts.key_files` 的正文与 `source_facts.key_files[].bytes_sha256`，
+        #   两条通路同形。别顺手把 `recorded["ref"]` 拉进来对账——PR 通路的 ref 是
+        #   head_sha、本地通路是 root_digest，一加进来这段就按通路分叉了。
         key_files = pr_facts.get("key_files")
         if not isinstance(key_files, dict):
             raise ValueError("pr_facts.key_files 缺失或非 object")

@@ -13,6 +13,7 @@ import shutil
 
 import content_address
 import cpp_extension_adapter
+import dut_source
 import precision_policy
 import precision_retest_contract as contract
 import repo_adapter
@@ -236,16 +237,35 @@ def _validate_cpp_extension_fresh_receipt(
     source = build_receipt.get("source") if isinstance(build_receipt, dict) else None
     runtime = receipt.get("runtime")
     identity = manifest.get("execution_identity")
+    # fresh 收据是真机本轮刚产的，是整条链上**最有条件伪装**的一份：所以来源校验必须带
+    # `expected_kind`。少了它，收据只要改口说 `pull_request` 并填一个任意 40 位 hex，
+    # 本地锚的等值校验整条就不会执行。校验只此一处，锚字段名从返回值取，不按字面拼 key。
+    try:
+        directive_kind, _anchor_field, directive_anchor = (
+            dut_source.validate_build_receipt_source(
+                directive["source_identity"], where="directive.source_identity"))
+    except (dut_source.DutSourceError, KeyError, TypeError) as ex:
+        raise RetestExecutionError(
+            f"directive.source_identity 来源锚不可信：{ex}") from ex
+    try:
+        fresh_kind, fresh_anchor_field, fresh_anchor = (
+            dut_source.validate_build_receipt_source(
+                source, expected_kind=directive_kind,
+                where="fresh cpp_extension vendor build_receipt.source"))
+    except dut_source.DutSourceError as ex:
+        raise RetestExecutionError(
+            f"fresh cpp_extension vendor build receipt 来源锚不可信：{ex}") from ex
     expected = {
-        "pr_head": directive["source_identity"]["pr_head"],
+        "source_anchor": directive_anchor,
         "vendor_elf": identity.get("vendor_elf_sha256")
             if isinstance(identity, dict) else None,
         "soc": identity.get("soc") if isinstance(identity, dict) else None,
         "toolkit": identity.get("toolkit") if isinstance(identity, dict) else None,
     }
     actual = {
-        "pr_head": source.get("pr_head_sha")
-            if isinstance(source, dict) else None,
+        # 已按通路核过长度的锚值，不是裸 `.get`：收据是 local 时裸 get 拿到 None、
+        # 是「64 位假 pr_head_sha」时裸 get 会原样收下。
+        "source_anchor": fresh_anchor,
         "vendor_elf": vendor.get("library_sha256")
             if isinstance(vendor, dict) else None,
         "soc": runtime.get("soc") if isinstance(runtime, dict) else None,
@@ -257,8 +277,20 @@ def _validate_cpp_extension_fresh_receipt(
             raise RetestExecutionError(
                 f"fresh cpp_extension {field} 身份漂移："
                 f"actual={actual[field]!r} expected={wanted!r}")
-    if binding.get("base_pr_head") != expected["pr_head"] \
-            or binding.get("base_vendor_elf_sha256") != expected["vendor_elf"] \
+    # 整块比三元组，**不只比锚值**：同一段 hex 在两条通路里含义完全不同（线上 commit
+    # vs 本地子树摘要），只比值等于没比通路。旧 manifest 只有 `base_pr_head`、没有
+    # `base_source_identity` → 这里直接不相等 → 拒执行；刻意不留旧键兼容兜底，
+    # 那正是本批刚堵掉的「有值就用」。
+    fresh_identity = {
+        "dut_source": fresh_kind,
+        "anchor_field": fresh_anchor_field,
+        "anchor_value": fresh_anchor,
+    }
+    if binding.get("base_source_identity") != fresh_identity:
+        raise RetestExecutionError(
+            f"cpp_extension 基础 receipt 来源身份与本轮漂移："
+            f"base={binding.get('base_source_identity')!r} fresh={fresh_identity!r}")
+    if binding.get("base_vendor_elf_sha256") != expected["vendor_elf"] \
             or binding.get("base_soc") != expected["soc"] \
             or binding.get("base_toolkit") != expected["toolkit"] \
             or binding.get("base_build_receipt_sha256") \
@@ -322,6 +354,56 @@ def _run_cpp_extension_task2_only(
 
 def _write_json(root, name, value):
     return content_address.atomic_write_json(root, name, value)
+
+
+def _frozen_source_facts_path(attempt, manifest, directive):
+    """复核 F2 冻进 attempt 的 `source_facts.json`，返回给三级门的路径。
+
+    没有这条线，本地来源通路的 CP-F 执行是**结构性**必 BLOCKED：
+    `gate_task2` → `_gate_build_receipt_source_binding` 在 `local_checkout` 且找不到
+    `source_facts.json` 时按设计阻断，而 attempt 目录只复制 case 输入与 golden，
+    这份文件永远不会出现。F2 冻结 + 这里指路，才让本地锚有对照物可核。
+
+    manifest 缺 `source_facts` 时按 directive 声明的通路分：PR 返回 `None`，门沿用既有
+    PR 行为一个字节不变；本地则当场拒。**不能**只依赖「F2 已经 fail-closed 过」——
+    directive.json 与 attempt.manifest.json 都是自洽 envelope，手搓一对声明
+    `local_checkout` 却不带 `source_facts` 的工件，就绕过了 F2 那道门。
+
+    只比 sha256，不在这里重判来源：manifest 是内容寻址 envelope 且已在
+    `_read_envelope` 校过摘要，manifest 里的 sha256 又绑死了这份文件的内容，
+    来源三元组在 F2 已对着 directive 核过。执行侧再判一次只会多出第二处判别逻辑。
+    """
+    try:
+        kind = dut_source.of(
+            directive.get("source_identity"), where="directive.source_identity")
+    except dut_source.DutSourceError as ex:
+        raise RetestExecutionError(
+            f"directive.source_identity 来源判别式不合法：{ex}") from ex
+    recorded = manifest.get("source_facts")
+    if recorded is None:
+        if kind == dut_source.LOCAL_CHECKOUT:
+            raise RetestExecutionError(
+                f"dut_source={kind} 的 attempt 必须带 F2 冻结的 source_facts.json，"
+                f"manifest 里却没有——本地锚没有对照物即无绑定，拒绝执行")
+        return None
+    if not isinstance(recorded, dict):
+        raise RetestExecutionError("manifest.source_facts 非法")
+    try:
+        path = content_address.safe_path(
+            attempt, recorded.get("attempt_relpath"))
+    except content_address.ContentAddressError as ex:
+        raise RetestExecutionError(
+            f"manifest.source_facts.attempt_relpath 非法: {ex}") from ex
+    try:
+        actual = contract.sha256_file(path)
+    except contract.RetestContractError as ex:
+        raise RetestExecutionError(
+            f"attempt 冻结的 source_facts.json 缺失或不可读: {ex}") from ex
+    if actual != recorded.get("sha256"):
+        raise RetestExecutionError(
+            f"attempt 冻结的 source_facts.json 字节漂移："
+            f"actual={actual} manifest={recorded.get('sha256')!r}")
+    return path
 
 
 def rebind_acceptance_policy(caseset, relaxed_spec):
@@ -426,6 +508,8 @@ def _execute_precision_attempt_locked(attempt_dir):
     if base != directive["base_artifacts"]:
         raise RetestExecutionError(
             "manifest.base_artifacts 与 confirmed directive 不一致")
+    # 冻结事实的复核放在 NPU invoke 之前：来源对照物已被换过的 attempt 不值得再跑一遍。
+    source_facts_path = _frozen_source_facts_path(attempt, manifest, directive)
     base_reports = os.path.dirname(base["caseset"]["path"])
     artifact_scope = manifest.get("base_artifact_scope")
     if not isinstance(artifact_scope, str) or not os.path.isabs(artifact_scope):
@@ -470,7 +554,8 @@ def _execute_precision_attempt_locked(attempt_dir):
     _write_json(attempt, "evidence.json", evidence)
     _write_json(attempt, "verdict.json", verdict)
     errors = []
-    validate_acceptance_state.gate_task2(attempt, errors)
+    validate_acceptance_state.gate_task2(
+        attempt, errors, source_facts_path=source_facts_path)
     gate = {"passed": not errors, "errors": {"task2": errors} if errors else {}}
     _write_json(attempt, "attempt_gate.json", gate)
     result = {

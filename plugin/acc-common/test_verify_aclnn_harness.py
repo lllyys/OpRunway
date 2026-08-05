@@ -408,6 +408,121 @@ class RunGateTest(unittest.TestCase):
             self.assertEqual(reused["coverage"]["selected_count"], 2)
 
 
+_LOCAL_BINDINGS = {
+    "dut_source": "local_checkout",
+    "local_root_digest": "c" * 64,
+}
+
+
+def _write_gate_root(root, bindings):
+    """铺一个「刚够走到通路门」的根目录：spec/caseset/preflight 齐，work/ 空着即可。
+
+    刻意只铺到这一步——通路门必须在任何真机配置读取、任何数据落盘之前触发，
+    所以这些测试不需要 golden/输出字节也应当能把门打响。
+    """
+    spec = {"op": "Reduce", "runner_form": "aclnn_py"}
+    caseset, preflight = _fixtures()
+    preflight["bindings"] = dict(bindings)
+    preflight["bindings"]["spec_sha256"] = H._sha(spec)
+    os.makedirs(os.path.join(root, "work"), exist_ok=True)
+    with open(os.path.join(root, "spec.json"), "w", encoding="utf-8") as out:
+        json.dump(spec, out)
+    with open(os.path.join(root, "caseset.json"), "w", encoding="utf-8") as out:
+        json.dump(caseset, out)
+    content_address.write_artifact(
+        root, "work/aclnn_preflight.json", H._PREFLIGHT_DOMAIN, preflight)
+    return spec, caseset
+
+
+class SourcePathGateTest(unittest.TestCase):
+    """`local_checkout` 在本门是**显式挂账的 BLOCK**，不是「大概能跑」。
+
+    `aclnn_adapter` 只能按 PR ref 在容器内重新取源 build，构建端没有可与
+    `local_checkout.root_digest` 对账的锚——放行等于让 vendor `.so` 与被测字节
+    失去机器可核的对应关系。
+    """
+
+    def test_dut_source_logic_is_bound_by_the_receipt(self):
+        # 判别式是本门的判定依赖；不进 logic_files 就意味着「把 of() 改成未知取值
+        # 缺省 pull_request」之后，旧收据照样 revalidate 通过。
+        self.assertIn("dut_source.py", H._LOGIC_FILES)
+        self.assertIn("dut_source.py", H._logic_hashes())
+
+    def test_run_gate_blocks_local_before_touching_real_machine_config(self):
+        with tempfile.TemporaryDirectory() as root:
+            _write_gate_root(root, _LOCAL_BINDINGS)
+            with mock.patch.dict(
+                    os.environ, {"OPRUNWAY_ACLNN_REAL": "1"}), \
+                    mock.patch.object(
+                        H.aclnn_adapter, "_aclnn_cfg",
+                        side_effect=AssertionError(
+                            "本地通路不得走到 _aclnn_cfg()")):
+                with self.assertRaisesRegex(
+                        ValueError, "尚未接入 dut_source=local_checkout"):
+                    H.run_gate(
+                        root, "spec.json", "caseset.json",
+                        "work/aclnn_preflight.json",
+                        "work/aclnn_harness_trust.json")
+
+    def test_validate_receipt_blocks_local_before_touching_real_machine_config(self):
+        with tempfile.TemporaryDirectory() as root:
+            spec, caseset = _write_gate_root(root, _LOCAL_BINDINGS)
+            content_address.write_artifact(
+                root, "work/aclnn_harness_trust.json", H._TRUST_DOMAIN, {
+                    "schema": H._SCHEMA,
+                    "schema_version": 1,
+                    "status": H._STATUS_TRUSTED,
+                    "scope": "harness-only",
+                    "acceptance_verdict": None,
+                    "bindings": {},
+                    "coverage": {},
+                    "checks": [],
+                    "build_provenance": {},
+                })
+            with mock.patch.object(
+                    H.aclnn_adapter, "_aclnn_cfg",
+                    side_effect=AssertionError("本地通路不得走到 _aclnn_cfg()")):
+                with self.assertRaisesRegex(
+                        ValueError, "尚未接入 dut_source=local_checkout"):
+                    H.validate_receipt(
+                        root, "work/aclnn_harness_trust.json", spec, caseset)
+
+    def test_build_provenance_is_itself_path_gated(self):
+        # run_gate 与 validate_receipt 的共同必经点也要挡，否则两处入口门只要
+        # 有人挪动顺序就整条失效。
+        with self.assertRaisesRegex(
+                ValueError, "尚未接入 dut_source=local_checkout"):
+            H._validate_build_provenance(
+                _build_provenance_fixture(), _execution_fixture(),
+                {"bindings": dict(_LOCAL_BINDINGS)})
+
+    def test_unknown_dut_source_value_is_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "受控词表"):
+            H._validate_build_provenance(
+                _build_provenance_fixture(), _execution_fixture(),
+                {"bindings": {"dut_source": "local"}})   # 拼错
+
+    def test_preflight_without_40hex_pr_head_is_blocked(self):
+        """CP-C0 没绑定合法 PR head 就没有可交叉核的锚——不能靠 cfg 形态偶然兜住。"""
+        with tempfile.TemporaryDirectory() as root:
+            _write_gate_root(root, {"pr_head_sha": None})
+            cfg = {"head_sha": None, "ops_root": "/unused/ops",
+                   "op_subdir": "experimental/reduce"}
+            with mock.patch.dict(
+                    os.environ, {"OPRUNWAY_ACLNN_REAL": "1"}), \
+                    mock.patch.object(
+                        H.aclnn_adapter, "_aclnn_cfg", return_value=cfg), \
+                    mock.patch.object(
+                        H, "_execution_binding",
+                        return_value=_execution_fixture()):
+                with self.assertRaisesRegex(
+                        ValueError, "未绑定 40 位 PR head"):
+                    H.run_gate(
+                        root, "spec.json", "caseset.json",
+                        "work/aclnn_preflight.json",
+                        "work/aclnn_harness_trust.json")
+
+
 class WorkflowHardGateTest(unittest.TestCase):
     def test_aclnn_py_cannot_enter_adapter_without_trust_receipt(self):
         caseset, _ = _fixtures()
@@ -424,8 +539,17 @@ class WorkflowHardGateTest(unittest.TestCase):
                             "adapter 不应在信任门前启动"))},
                         clear=False):
                 with self.assertRaisesRegex(SystemExit, "CP-C harness 真机信任门"):
+                    # allow_experimental_form=True：aclnn_py 已被验收准入白名单
+                    # （run_workflow._ACCEPTANCE_RUNNER_FORMS）挡在正式验收外，而本用例证的是
+                    # **CP-C harness 信任门**——没有收据就进不了 adapter。那道门只长在 aclnn_py 上，
+                    # 把夹具换成 cpp_extension 等于换掉被测对象（它走的是构建收据门，不是这道）。
+                    # 不关掉准入门，run() 会先被准入门 SystemExit——同是 SystemExit，
+                    # 断言的正则却再也打不到信任门，用例静默变成"测准入门"。
+                    # ⚠ 这不是给准入门放水：准入门本身由
+                    #   test_run_workflow_mode.py::AcceptanceFormGateTest 专测（含出口门）。
                     run_workflow.run(
-                        spec_path, mode="aclnn_py", out_dir=out_dir)
+                        spec_path, mode="aclnn_py", out_dir=out_dir,
+                        allow_experimental_form=True)
 
 
 if __name__ == "__main__":

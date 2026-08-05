@@ -48,6 +48,20 @@ _RUNNER_FORM_TO_MODE = {
     "cpp_extension": "cpp_extension",
 }
 
+# —— 正式验收当前只走 cpp_extension ————————————————————————————————————————
+# 它是**唯一跑通完整 torch_parity 矩阵**的通路（AGENTS.md §9：Median PR6429 1152 例、
+# `gate.passed=true`）。另两条的真机成熟度未达同等水平：
+#   · `aclnn_py`  —— 历史 Median 60/60 只证明**旧 caseset**；迁到 torch_parity + cpp_extension 后
+#                    必须重跑，不得沿用旧 PASS；
+#   · `cpp`（new_example）—— IsClose / Sign 坐实，但 dtype 闭环只到 fp32/fp16/bf16，
+#                    int 等落 `DEFERRED_NP_BY_FORM`。
+#
+# ⚠ **保留映射 + 显式白名单门**，而不是直接从 `_RUNNER_FORM_TO_MODE` 里删两项：
+#   删了报错会变成 KeyError，不说人话；白名单门能讲清「为什么堵、怎么绕」。
+# ⚠ **能力表不动**：`repo_adapter.SUPPORTED_NP_BY_FORM` / `DEFERRED_NP_BY_FORM` 的
+#   `aclnn_py` / `cpp` 条目是**能力表**不是准入表，删了将来想恢复要重新考证 dtype 支持面。
+_ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})
+
 # —— 验收通路的性能基线：**只认真数、禁 mock 兜底**（codex High#2）——————————————————————
 # 病历：aclnn_py 的 evidence `perf.us=None`（采集端第二里程碑未接）、也不产 `_real_baseline.json`，
 # 于是原来的 `else:` 一路落进 `perf_compare.mock_baseline()`——**mock 基线混进验收通路**。
@@ -207,10 +221,21 @@ def _runner_source_allowed(mode, source):
     return source == expected.get(mode)
 
 
-def _resolve_mode(spec, requested_mode):
-    """据 runner_form 派生真机 mode，并拒绝显式走错真机通路。
+def _experimental_form_message(runner_form):
+    return (
+        f"runner_form={runner_form!r} 当前不用于正式验收。\n"
+        f"原因：只有 cpp_extension 跑通过完整 torch_parity 矩阵（Median PR6429 1152 例，"
+        f"gate.passed=true），cpp / aclnn_py 的真机成熟度未达同等水平（见 AGENTS.md §9）。\n"
+        f"如需局部开发验证：加 --allow-experimental-form。该模式下**不产** "
+        f"acceptance.json / verdict.json，只产带 evidence_grade=\"development\" 的非验收产物"
+        f"（{_DEV_SUMMARY_FILE} / {_DEV_VERDICT_FILE}）。")
 
-    mock/catlass 等显式逃生口保持原语义；这里只阻断会改变 DUT form/性能基线的两条真机通路错配。
+
+def _resolve_mode(spec, requested_mode, allow_experimental_form=False):
+    """据 runner_form 派生真机 mode，并拒绝显式走错真机通路 / 用未准入的通路出裁决。
+
+    mock/catlass 等显式逃生口保持原语义；这里只阻断会改变 DUT form/性能基线的两条真机通路错配，
+    外加**准入白名单**（`_ACCEPTANCE_RUNNER_FORMS`）。
     """
     runner_form = spec.get("runner_form", "cpp")
     expected = _RUNNER_FORM_TO_MODE.get(runner_form)
@@ -218,17 +243,46 @@ def _resolve_mode(spec, requested_mode):
         raise SystemExit(
             f"spec.runner_form={runner_form!r} 不受支持，"
             f"supported={sorted(_RUNNER_FORM_TO_MODE)}")
-    if requested_mode is None:
-        return expected
-    if requested_mode in _REAL_MACHINE_MODES and requested_mode != expected:
+    # 「走错真机通路」先判：它是**输入错**，比准入问题更贴近用户当下打错的那个字。
+    if (requested_mode is not None and requested_mode in _REAL_MACHINE_MODES
+            and requested_mode != expected):
         raise SystemExit(
             f"真机 mode 与 spec.runner_form 不匹配：runner_form={runner_form!r} "
             f"必须使用 mode={expected!r}，实际请求 {requested_mode!r}。"
             "拒绝走错 DUT/基线路径。")
-    return requested_mode
+    effective = expected if requested_mode is None else requested_mode
+    # ① 入口门：正常调用路径在这里拦住。
+    # ⚠ **只对真机通路生效**：显式请求 mock / catlass_mock 时不拦——那些 mode 物理上就不产
+    #   acceptance.json / verdict.json，用它们做本地用例链自检与 runner_form 准入无关。
+    #   门放在 `effective` 判定之后正是为此：早一步拦就把 mock 逃生口一起堵死了。
+    if (effective in _REAL_MACHINE_MODES
+            and runner_form not in _ACCEPTANCE_RUNNER_FORMS
+            and not allow_experimental_form):
+        raise SystemExit(_experimental_form_message(runner_form))
+    return effective
 
 
-def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=None, gpu_baseline=None):
+def _assert_acceptance_form_allowed(spec, mode):
+    """② 出口门：**写验收产物之前**再校一次。
+
+    ⚠ 只拦入口是拦不住的，仓里已有先例——`repo_adapter.py` 的注释明写
+    「`repo_adapter.py cs wd acceptance.json catlass_mock` 是绕开 catlass CLI 那两道守卫的
+    现成后门」，所以那边**也是在出口再校一次**。本门照抄这个口径：
+    绕过 `_resolve_mode`（直接 `--mode aclnn_py`、或绕开 run_workflow 直调子脚本）的路径，
+    到写 `acceptance.json` / `verdict.json` 这一步仍会被逮住。
+
+    这里之所以能同时看 spec 与 mode：出口处两者都在手上，交叉校验比只看一个更难伪造。
+    """
+    runner_form = spec.get("runner_form", "cpp")
+    if runner_form in _ACCEPTANCE_RUNNER_FORMS:
+        return
+    raise SystemExit(
+        f"[出口门] 拒绝为 runner_form={runner_form!r}（mode={mode!r}）写验收产物。\n"
+        + _experimental_form_message(runner_form))
+
+
+def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=None,
+        gpu_baseline=None, allow_experimental_form=False):
     """跑一遍 Task1→2→3。
 
     ⚠ `defect` / `perf_slow` 是**测试专用夹具**（在 mock 里造坏点 / 造略慢基线，用来证明「validator 真会 fail、
@@ -243,7 +297,7 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     spec = json.load(open(spec_path, encoding="utf-8"))
     if not isinstance(spec, dict):
         raise SystemExit("spec 须为 JSON object")
-    mode = _resolve_mode(spec, mode)
+    mode = _resolve_mode(spec, mode, allow_experimental_form=allow_experimental_form)
     if mode not in repo_adapter.MODES:  # 先校验，避免 Task1 已跑再 KeyError、留半产物
         raise SystemExit(f"unknown mode {mode!r}, supported={list(repo_adapter.MODES)}")
     if (defect or perf_slow) and _acceptance_capable(mode):
@@ -270,8 +324,16 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         json.dump(obj, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         return p
 
-    is_acceptance = _acceptance_capable(mode)
+    # 未准入的 runner_form 即使是真机通路，也**物理上不产验收裁决**——比照 mock 通路的口径，
+    # 只产 dev_run_summary.json / dev_precision_check.json（`evidence_grade="development"`）。
+    # 逃生阀之所以不做成「照产 acceptance.json 但打个标」：下游是**按文件名**读裁决的，
+    # 同名同形的产物迟早会被当成验收结论用掉。
+    is_experimental_form = spec.get("runner_form", "cpp") not in _ACCEPTANCE_RUNNER_FORMS
+    is_acceptance = _acceptance_capable(mode) and not is_experimental_form
     print(f"=== OpRunway workflow · {spec['op']} · mode={mode} ===")
+    if is_experimental_form:
+        print(f"=== ⚠ runner_form={spec.get('runner_form', 'cpp')!r} 非验收准入通路"
+              f"（--allow-experimental-form）：本次不产 acceptance.json / verdict.json ===")
     if not is_acceptance:
         print(f"=== ⚠ {_NON_ACCEPTANCE_NOTE} ===")
     # 清上轮残留，防 stale 真基线被复用。`_torch_npu_baseline.json` / `perf_collect.json` / `_perf_plan.json`
@@ -353,6 +415,7 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         grade = _ACCEPTANCE_GRADE if is_acceptance else _DEV_GRADE
     verdict = validator.validate(spec, caseset, evidence)
     if is_acceptance:
+        _assert_acceptance_form_allowed(spec, mode)     # ② 出口门，见该函数的 ⚠
         _dump(verdict, "verdict.json")
     else:   # 非验收通路：精度判定照跑（管路自检要它），但**不写 verdict.json**——mock 下 out=golden.copy()，
             # 那份「pass」是构造出来的，落成验收裁决文件名就是伪证。
@@ -555,6 +618,7 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
             acc["human_cp"] = human_cp
         if gpu_prov is not None:
             acc["gpu_baseline"] = gpu_prov
+        _assert_acceptance_form_allowed(spec, mode)     # ② 出口门（acceptance.json 侧），见该函数的 ⚠
         final_file = _dump(acc, "acceptance.json")
         try:
             md_file = render_acceptance_markdown.write_report(out_dir)
@@ -611,17 +675,24 @@ def main():
     # 输出/退出码/`baseline.json` 被人截图或抄进报告的那条路（本仓最不能容忍的「看起来对」）。
     # ⚠ 别因为「加回去方便调试/演示」就恢复它们：调试与演示请走进程内 API。
     ap = argparse.ArgumentParser(
-        description="OpRunway Task1→2→3 编排。验收裁决可由真机通路 "
-                    "new_example 或 aclnn_py 产出；mock 等非验收通路改产 dev_run_summary.json / "
-                    "dev_precision_check.json（均标 NON-ACCEPTANCE）。")
+        description="OpRunway Task1→2→3 编排。**正式验收裁决当前只由 cpp_extension 产出**"
+                    "（唯一跑通完整 torch_parity 矩阵的通路）；cpp / aclnn_py 需 "
+                    "--allow-experimental-form 才能跑，且只产 dev_run_summary.json / "
+                    "dev_precision_check.json（均标 NON-ACCEPTANCE）。mock 等通路同理。")
     ap.add_argument("spec")
     ap.add_argument("--mode", default=None, choices=list(repo_adapter.MODES),
-                    help="省略时据 spec.runner_form 派生：cpp→new_example、aclnn_py→aclnn_py；"
-                         "两者都是真机验收通路。mock 仅本地用例链自检、精度按构造必过、**非验收**")
+                    help="省略时据 spec.runner_form 派生：cpp→new_example、aclnn_py→aclnn_py、"
+                         "cpp_extension→cpp_extension。三条都是真机通路，但**只有 cpp_extension "
+                         "准入正式验收**。mock 仅本地用例链自检、精度按构造必过、**非验收**")
     ap.add_argument("--out", default="reports/_run")
     ap.add_argument("--gpu-baseline", default=None, help="外部 GPU 标杆 JSON（Task3 consumer 侧对比）")
+    ap.add_argument("--allow-experimental-form", action="store_true",
+                    help="允许用非准入的 runner_form（cpp / aclnn_py）跑局部开发验证。"
+                         "该路径**物理上不产** acceptance.json / verdict.json，"
+                         "只产带 evidence_grade=\"development\" 的非验收产物")
     a = ap.parse_args()
-    result = run(a.spec, a.mode, a.out, gpu_baseline=a.gpu_baseline)
+    result = run(a.spec, a.mode, a.out, gpu_baseline=a.gpu_baseline,
+                 allow_experimental_form=a.allow_experimental_form)
     # CLI 退出码：0 干净 PASS / 2 PASSED_WITH_RISK(挂起转人工) / 1 其余（门未过/精度fail/性能未达/BLOCKED/needs_review）
     sys.exit(result["exit_code"])
 

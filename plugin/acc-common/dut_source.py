@@ -4,18 +4,24 @@
 兜底规则各写一份的话，只要有一处忘了 fail-closed，伪造一个未知取值就能绕过整条来源绑定链。
 判别式只留一份实现。
 
-**当前接入状态**（别把「计划接入」读成「已经接入」）：
+**当前接入状态**。状态有**三种**，别把 ⛔ 读成 ✅，也别把它读成「排期没排上」：
 
 | 消费者 | 状态 |
 |---|---|
 | `fetch_source`（产） | ✅ 已接 |
 | `validate_preparation_state` | ✅ 已接 |
-| `preflight_aclnn` / `verify_aclnn_harness` | ⬜ 待接（`aclnn_py` 侧静态对账） |
-| `cpp_extension_adapter` / `cpp_extension_driver` / `validate_acceptance_state` | ⬜ 待接（vendor build receipt 绑定，**主验收链**） |
-| `render_acceptance_markdown` | ⬜ 待接（provenance 强度如实标注） |
-| `precision_retest_contract` / `precision_retest_runner` | ⬜ 待接（CP-F 验收后复测） |
+| `preflight_aclnn` | ✅ 已接（两条通路的 signature 对账完全同形，只有锚不同；本地通路写 `local_root_digest`） |
+| `verify_aclnn_harness` | ⛔ 判别式已接，但 `local_checkout` **显式 fail-closed**（理由见下） |
+| `cpp_extension_adapter` / `cpp_extension_driver` / `validate_acceptance_state` | ✅ 已接（vendor build receipt 绑定，**主验收链**） |
+| `render_acceptance_markdown` | ✅ 已接（按 kind 渲染，provenance 强度如实标注） |
+| `precision_retest_contract` / `precision_retest_runner` | ✅ 已接（CP-F 验收后复测） |
 
-⚠ 待接的没接完之前，本地来源**尚未**穿过完整 CP-C → 裁决链，不得对外宣称一等通路可用。
+⚠ `verify_aclnn_harness` 那个 ⛔ 是**如实挂账**，不是待办：`aclnn_adapter` 只能按 PR ref 在
+容器内重新取源 build，**构建端根本不存在可与 `local_root_digest` 对账的锚**。放它过去，
+收据看着齐全、绑定其实是空的。所以 `aclnn_py` 的本地通路在这道门上是**结构性**
+fail-closed——只要 `aclnn_adapter` 的取源方式不变，它就一直关着，不该被后续 session
+当成「下一批补上就行」。真要走本地来源的完整验收，用已接通的 `cpp_extension` 主链
+（`spec.runner_form = "cpp_extension"`）。
 
 纯 stdlib、无任何 agent/CLI 依赖，可被 Layer 1 任意脚本 import。
 

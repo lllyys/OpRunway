@@ -79,7 +79,16 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 **目的**：取材 + 任务书↔PR 对应校验 + 环境/模式确认，识别并挡掉「未验收空任务 / 任务书↔PR 配错」。
 
-- **取材**（确定性脚本，primary 直接跑）：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/fetch_source.py --taskdoc <路径|链接> --pr <PR链接> --out <work>` → `task_doc.md` + 逐字节 `task_doc.snapshot.md` + `pr_facts.json` + 内容寻址的 `source_facts.json`。快照在 CP-A/spec 之前即落，spec 与 golden 共用同一 SHA，不再后补回填；PR head、关键文件 ref 或任务书字节变化即新身份，`completeness=blocked` 不得复用。
+- **取材**（确定性脚本，primary 直接跑）。任务书一侧两条路本来就同一个参数：`--taskdoc` 收**本地路径或链接**。被测代码一侧有**两条平级通路**（不是「主 + 降级」），按用户给的是 PR 链接还是本地仓根二选一，`--pr` 与 `--local-repo` **互斥**：
+  - **在线 PR**（`dut_source=pull_request`，缺省）：
+    `python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/fetch_source.py --taskdoc <路径|链接> --pr <PR链接> --out <work>`
+  - **本地 checkout**（`dut_source=local_checkout`）：
+    `python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/fetch_source.py --taskdoc <路径|链接> --local-repo <仓根> --op-subdir <算子子目录> [--base-ref <ref>] [--allow-dirty] --out <work>`
+  - **用哪条的判据**：用户给的是 gitcode PR 链接 → `--pr`；用户给的是已 clone 到本地/远端的仓目录（无在线 PR、或 PR 尚未提交）→ `--local-repo` + `--op-subdir`（必须同时给，`root_digest` 按它算）。**两条都不给直接非 0 退出（2）**，别只产任务书就往下走。
+  - 产出两条通路一致：`task_doc.md` + 逐字节 `task_doc.snapshot.md` + `pr_facts.json` + 内容寻址的 `source_facts.json`。快照在 CP-A/spec 之前即落，spec 与 golden 共用同一 SHA，不再后补回填；PR head、本地 `root_digest`、关键文件 ref 或任务书字节变化即新身份。
+  - **`completeness=blocked` 不得复用，而且脚本会告诉你**：`fetch_source` 在 `completeness != complete` 时**非 0 退出（3）**——落盘 ≠ 成功，blocked 的事实索引只供诊断，不得据它抽 spec / 产 runner / 跑验收。
+  - **本地通路的两条口径别读错**：① 不给 `--base-ref` 时 `changed_files` 记字符串 `"unavailable"`（**不是 `[]`**——「算不出来」与「确实没改」必须分得开），只落 `completeness.warnings=[changed_files_unavailable]`，不阻断；② worktree dirty **默认 fail-closed**（`completeness=blocked`），`--allow-dirty` 是逃生阀、不是常规选项：走了它会记 `dirty_worktree_allowed` 警告并全量记账 dirty 文件清单，CP-E 报告须如实标出这次来源降级。
+  - ⚠ 本地锚 `local_checkout.root_digest` 只能证明「验的就是这份字节」，**不能**证明它等于线上任何 PR；强度差异必须在报告里如实标注，不得写成等价的 PR provenance。
 - **对应校验**（落 `correspondence.json`，schema/枚举见 §4；canon verify-spec-pr-correspondence·proposed·未 settle，载重前需核）：靠三条证据合断——
   1. **改动落点目录**：`pr_facts.target_dir`（机器可比），对上任务书声明的算子目录；
   2. **issue / 追踪号**：**NL 读** `task_doc.md` 与 PR `title`（`pr_facts` **不抽 issue 号**，只能自然语言读），**非算子名字面匹配**；
@@ -234,7 +243,17 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 - **F0/F1 directive**：primary 把人工原文整理成结构化 directive，展示 case、动作和精度标准；
   人工确认后才能进入准备。含糊指令、未知 policy 或越权 override 一律停。
-- **F2 准备**：幕后调用 `cp_f_prepare_attempt.py`；复核首次五类产物 hash、PR/build/runner 身份，
+  `source_identity` 按 `dut_source` 分支填来源锚：`pull_request`（缺省）填 40 位 `pr_head_sha`，
+  `local_checkout` 填 64 位 `local_root_digest`；两条通路都必填 `repo`、`build_receipt_sha256`
+  和 `runner_form`。锚填错通路或长度不符一律拒，不存在「哪个字段有值用哪个」的兜底。
+  ⚠ **本地来源当前只有 `cpp_extension` 通路走得通**：`runner_form=aclnn_py` + `dut_source=local_checkout`
+  的 directive **不要起草**——`verify_aclnn_harness` 的 harness 信任门对本地来源是**显式挂账的
+  BLOCK**（`aclnn_adapter` 只能按 PR ref 在容器内重新取源 build，构建端没有可与
+  `local_root_digest` 对账的锚），F3 走到 `precision_retest_runner` 调
+  `verify_aclnn_harness.validate_receipt` 时才会拿到「尚未接入 dut_source=local_checkout」，
+  前面的准备、冻结全部白跑。本地来源要复测 `aclnn_py`，只能先回到 PR 通路取材。
+- **F2 准备**：幕后调用 `cp_f_prepare_attempt.py`；复核首次五类产物 hash、来源锚（PR head 或
+  本地 root_digest）/build/runner 身份，
   冻结原 case 与实际 input bytes，产 `reports/<op>/attempts/<NNNN>/`。这里只产
   `preparation.json.acceptance_verdict=null`，不产重测裁决。
   冻结包还必须包含 golden 授权链实际引用的任务书快照/来源文件；只有
@@ -273,8 +292,10 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   PASS/FAIL/BLOCKED。
 - **当前执行边界**：`cpp` / `aclnn_py` 按 form 派生原 runner mode；`cpp_extension` 复用正式
   codegen/adapter/driver 做 fresh Extension build/load/invoke，但走独立 Task-2-only 入口，物理上不生成或执行
-  perf plan/collector。F2 冻结首次 invocation plan 与 build/load/vendor receipt；F3 要求 fresh invocation
-  逐行全等、PR head/实际 vendor ELF/SoC/toolkit 与基础身份全等，任一漂移 fail-closed。Extension ELF 可 fresh
+  perf plan/collector。F2 冻结首次 invocation plan 与 build/load/vendor receipt，本地来源通路另须
+  冻结首轮 `source_facts.json`（否则 F3 三级门拿不到本地锚的对照物）；F3 要求 fresh invocation
+  逐行全等、来源锚（PR head 或本地 root_digest，含通路本身）/实际 vendor ELF/SoC/toolkit
+  与基础身份全等，任一漂移 fail-closed。Extension ELF 可 fresh
   build，但必须由本轮完整 receipt 绑定。`replay_only` 只保留契约枚举，当前执行入口不接线，不得用重判冒充重测。
 
 ---

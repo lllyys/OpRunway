@@ -2,6 +2,23 @@
 
 本模块只负责 directive、relaxed spec、attempt 身份和原子工件；不执行 NPU、
 不计算精度 metrics，也不产 pass/fail。裁决继续由 validator.py 与验收门负责。
+
+⚠ **directive schema 是 breaking change，在途 attempt 必然失效，这是有意的 fail-closed。**
+旧 `source_identity` 长这样：`{"pr_head", "build_receipt_sha256", "runner_form"}`，
+`pr_head` 只被一条 `^[0-9a-f]{40,64}$` 正则校过。那条 40..64 的区间就是物理入口：
+往 `pr_head` 里填一个 64 位摘要能原样通过校验，而 `_cpp_extension_base_binding` 当时
+对基础收据的 `source.pr_head_sha` **一个字节都不校**——CP-F 复测链比它要复测的验收链还松。
+现在来源判别一律走 `dut_source`：`pull_request` 恰 40 位 `pr_head_sha`、
+`local_checkout` 恰 64 位 `local_root_digest`，`repo` 两条通路都必填。
+所以旧 directive **不能**继续执行：它既没有 `repo`，也无法区分手里那串 hex 到底是线上
+commit 还是本地子树摘要。重新起草 directive、重新 F2，比放行一份来源不可信的在途 attempt
+便宜得多。
+
+`repo` 的**实际校验范围**（别当成全通路都有的门）：`cpp_extension` 通路在
+`materialize_attempt` 里核 `directive.source_identity.repo` 与首轮 build receipt 的
+`runner_binding.base_source_repo` 逐字相等，不等即 BLOCKED；`cpp` / `aclnn_py` 通路的首轮
+`execution_provenance` 里**根本没有仓名字段**，没有对照物可比，那两条通路的 `repo` 目前
+只作人工可读记账。
 """
 
 import copy
@@ -14,6 +31,7 @@ import re
 import tempfile
 
 import content_address
+import dut_source
 import precision_policy
 
 
@@ -24,7 +42,6 @@ BASE_ARTIFACTS = (
     "spec", "caseset", "evidence", "verdict", "acceptance",
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
 _DIRECTIVE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _UTC_TIME_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
@@ -40,6 +57,16 @@ _OVERRIDE_KEYS_BY_STANDARD = {
     precision_policy.TORCH_ALLCLOSE:
         frozenset({"standard", "rtol", "atol"}),
 }
+# 锚字段名 → 首轮 `evidence.execution_provenance` 里承载它的**历史**键名。
+# 这张表只做「改名」这一件事，**不重判来源**——来源判别只有 `dut_source` 一处。
+# PR 通路刻意沿用历史键 `head_sha`：aclnn_py/cpp 两条通路的既有 evidence 都是这么写的，
+# 改名会让所有历史产物一夜之间对不上，而那与本批要堵的来源伪装毫无关系。
+_PROVENANCE_ANCHOR_KEY = {
+    "pr_head_sha": "head_sha",
+    "local_root_digest": "local_root_digest",
+}
+# F2 冻进 attempt 的首轮来源事实副本；名字与 fetch_source 产物一致，便于门直接消费。
+_SOURCE_FACTS_NAME = "source_facts.json"
 _RELAXED_SPEC_DOMAIN = "oprunway/precision-retest-relaxed-spec/v1"
 _DIRECTIVE_DOMAIN = "oprunway/precision-retest-directive/v1"
 _MANIFEST_DOMAIN = "oprunway/precision-retest-manifest/v1"
@@ -48,6 +75,27 @@ _RECEIPT_DOMAIN = "oprunway/precision-retest-receipt/v1"
 
 class RetestContractError(ValueError):
     """CP-F 输入或工件不满足严格契约。"""
+
+
+def _provenance_anchor_key(anchor_field, where):
+    """锚字段名 → 首轮 `execution_provenance` 里承载它的键名；未登记即 fail-closed。
+
+    ⚠ **不能写成裸下标 `_PROVENANCE_ANCHOR_KEY[anchor_field]`**。`dut_source` 是受控词表，
+    哪天加进第三种来源通路（新的锚字段名）而这张表没跟着改，裸下标抛的是 `KeyError`；
+    而 `cp_f_prepare_attempt.py` 只收 `(OSError, RetestContractError)`，`KeyError` 会穿过去
+    变成裸 traceback——调用方拿不到约定的 `[CP-F prepare] BLOCKED: …` 单行机读契约，
+    自动化那侧只看见一个非零退出码和一堆栈。转成 `RetestContractError` 才回到契约内。
+
+    也不写 `.get(anchor_field, "head_sha")` 一类默认值：猜错键名会拿**另一条通路**的
+    provenance 值去做等值校验，那正是本模块要堵的来源伪装。
+    """
+    try:
+        return _PROVENANCE_ANCHOR_KEY[anchor_field]
+    except KeyError as ex:
+        raise RetestContractError(
+            f"{where}: 来源锚字段 {anchor_field!r} 在 _PROVENANCE_ANCHOR_KEY 里没有登记对应的 "
+            f"execution_provenance 键名（dut_source 扩了受控词表而 CP-F 未跟进）"
+            f"——fail-closed，不猜键名") from ex
 
 
 def _require_object(value, where):
@@ -262,8 +310,15 @@ def publish_owner_lock(lock_path, owner):
             os.unlink(tmp)
 
 
-def _cpp_extension_base_binding(evidence, caseset, reports_dir, case_ids):
-    """从首次 cpp_extension 证据冻结可执行身份；不依赖已清理的远端绝对路径。"""
+def _cpp_extension_base_binding(evidence, caseset, reports_dir, case_ids,
+                                expected_kind):
+    """从首次 cpp_extension 证据冻结可执行身份；不依赖已清理的远端绝对路径。
+
+    `expected_kind` 是 directive 声明的来源通路，**不是形式主义参数**：不传它，
+    「directive 说 `local_checkout`、基础收据说 `pull_request` 并填一个任意 40 位 hex」
+    这条路就会走进 PR 分支，本地锚的等值校验**整条不执行**——vendor `.so` 与被测源码
+    之间的机器可核对应关系就此消失。所以两边必须先确认说的是同一条通路，再按通路分支。
+    """
     receipt = evidence.get("cpp_extension_receipt")
     if (not isinstance(receipt, dict)
             or receipt.get("schema") != "oprunway.cpp_extension_receipt"
@@ -321,9 +376,17 @@ def _cpp_extension_base_binding(evidence, caseset, reports_dir, case_ids):
             or not isinstance(source, dict) or not isinstance(runtime, dict)):
         raise RetestContractError(
             "drift_blocked:base_cpp_extension_provenance_incomplete")
+    # 基础收据的来源锚校验**只此一处**，且必带 expected_kind（理由见函数 docstring）。
+    # `repo` 的非空校验也由这里统一强制，本函数不再自己判一次。
+    try:
+        kind, anchor_field, anchor_value = dut_source.validate_build_receipt_source(
+            source, expected_kind=expected_kind,
+            where="base cpp_extension vendor build_receipt.source")
+    except dut_source.DutSourceError as ex:
+        raise RetestContractError(
+            f"drift_blocked:base_vendor_build_source_anchor_invalid：{ex}") from ex
     build = build_receipt.get("build")
-    if (not isinstance(source.get("repo"), str) or not source["repo"]
-            or not isinstance(build, dict)
+    if (not isinstance(build, dict)
             or not isinstance(build.get("argv"), list) or not build["argv"]
             or any(not isinstance(x, str) or not x for x in build["argv"])):
         raise RetestContractError(
@@ -355,7 +418,13 @@ def _cpp_extension_base_binding(evidence, caseset, reports_dir, case_ids):
         "base_namespace": extension_manifest.get("namespace"),
         "base_invocation_plan_sha256": expected["invocation_plan_sha256"],
         "base_spec_sha256": bindings.get("spec_sha256"),
-        "base_pr_head": source.get("pr_head_sha"),
+        # 整块记三元组，**不**另留一个「有值就用」的 base_pr_head 旧键：那等于把刚堵掉的
+        # `.get(...) or .get(...)` 兜底放回来，同一段 hex 在两条通路里含义完全不同。
+        "base_source_identity": {
+            "dut_source": kind,
+            "anchor_field": anchor_field,
+            "anchor_value": anchor_value,
+        },
         "base_build_receipt_sha256": vendor.get("build_receipt_sha256"),
         "base_vendor_build_argv": copy.deepcopy(
             build["argv"]),
@@ -365,6 +434,54 @@ def _cpp_extension_base_binding(evidence, caseset, reports_dir, case_ids):
         "base_toolkit": runtime.get("cann_version"),
         "selected_invocations": [copy.deepcopy(by_id[cid]) for cid in case_ids],
     }
+
+
+def _freeze_source_facts(base_reports_dir, kind, anchor_field, anchor_value):
+    """定位首轮 `source_facts.json` 并核锚；返回 ``(doc, base_path)``，PR 缺席时 ``(None, None)``。
+
+    **为什么非冻不可**：`validate_acceptance_state.gate_task2` →
+    `_gate_build_receipt_source_binding` 在 `local_checkout` 且找不到 `source_facts.json`
+    时按设计 BLOCKED，而 attempt 目录原本只复制 case 输入与 golden，**永远**不会有这份文件。
+    也就是说本地通路的 CP-F 执行必 BLOCKED——不是偶发，是结构性缺口。所以 F2 就把首轮
+    这份事实一并冻进 attempt，F3 再把冻结副本指给门。
+
+    **缺席的处置按通路分**，与三级门保持同一条边界：
+
+    | 通路 | 找不到 | 理由 |
+    |---|---|---|
+    | `local_checkout` | **BLOCKED** | 本地锚的全部可信度就来自它与 build receipt 的等值校验；没有对照物等于没绑定，而这是新通路、没有历史包袱 |
+    | `pull_request` | 允许缺席 | 实测真机报告目录里本来就没有这份文件（取材 `--out` 与验收产物目录不同），硬要求会把现有 PR 通路整条打断 |
+
+    读锚一律走 `dut_source.identity`：**不许**手翻 `local_checkout.root_digest`，更不能碰
+    `local_checkout.git.head_sha`——后者只是「这份 checkout 当时停在哪个 commit」的信息字段，
+    worktree 可能 dirty，它与被测字节没有绑定关系。
+    """
+    root = os.path.realpath(os.fspath(base_reports_dir))
+    for candidate in (os.path.join(root, _SOURCE_FACTS_NAME),
+                      os.path.join(root, "work", _SOURCE_FACTS_NAME)):
+        if os.path.islink(candidate) or not os.path.isfile(candidate):
+            continue
+        doc = load_strict_json(candidate, "base source_facts")
+        payload = doc.get("payload")
+        facts = payload if isinstance(payload, dict) else doc
+        try:
+            identity_triple = dut_source.identity(
+                facts, where="base source_facts")
+        except dut_source.DutSourceError as ex:
+            raise RetestContractError(
+                f"drift_blocked:base_source_facts_anchor_invalid：{ex}") from ex
+        if identity_triple != (kind, anchor_field, anchor_value):
+            raise RetestContractError(
+                f"drift_blocked:base_source_facts_anchor_mismatch "
+                f"facts={identity_triple!r} "
+                f"directive={(kind, anchor_field, anchor_value)!r}")
+        return doc, candidate
+    if kind == dut_source.LOCAL_CHECKOUT:
+        raise RetestContractError(
+            f"drift_blocked:base_source_facts_missing；dut_source={kind} 的 attempt 必须"
+            f"冻结首轮 source_facts.json（找过 <报告目录>/ 与 <报告目录>/work/），"
+            f"否则 F3 的 gate_task2 拿不到本地锚的对照物，必然 BLOCKED")
+    return None, None
 
 
 def materialize_attempt(directive, reports_dir, execution_identity):
@@ -400,20 +517,52 @@ def materialize_attempt(directive, reports_dir, execution_identity):
             raise RetestContractError(f"execution_identity.{key} 须为非空字符串")
     for key in ("vendor_elf_sha256", "golden_source_sha256"):
         _require_sha256(identity.get(key), f"execution_identity.{key}")
+    # directive 的来源三元组：kind 决定基础收据按哪条通路核，anchor_field 决定与首轮
+    # evidence 对账时读哪个 provenance 键。判别只在这一处做，下面全部复用这三个值。
+    # `validate_directive` 已经跑过同一个 helper，故这里不可能抛。
+    directive_kind, directive_anchor_field, directive_anchor_value = (
+        dut_source.validate_build_receipt_source(
+            d["source_identity"], where="directive.source_identity"))
+    anchor_provenance_key = _provenance_anchor_key(
+        directive_anchor_field, "directive.source_identity")
     runner_binding = None
     base_provenance = evidence.get("execution_provenance")
     if runner_form == "cpp_extension":
         runner_binding = _cpp_extension_base_binding(
-            evidence, caseset, prepared["base_reports_dir"], d["case_ids"])
+            evidence, caseset, prepared["base_reports_dir"], d["case_ids"],
+            expected_kind=directive_kind)
         if runner_binding.get("base_spec_sha256") != _canonical_sha(spec):
             raise RetestContractError(
                 "drift_blocked:base_cpp_extension_spec_sha256_mismatch")
+        # 人工确认的仓名 ↔ 首轮 build receipt 自报的仓名，逐字对账。
+        # **锚相等不蕴含仓相同**：`local_root_digest` 只覆盖 `op_subdir` 子树，fork、vendored
+        # 目录、同一份代码换个仓名重开都能让两个不同的仓在该子树上字节全等；PR 通路的
+        # head_sha 同样可以出现在 fork 里。所以 directive 里那句人工确认的 `repo` 必须真的
+        # 参与校验，否则它只是一行没人核的自述——而模块 docstring 曾据此宣称有门。
+        # ⚠ 只有 cpp_extension 有 `base_source_repo` 这个对照物；`cpp`/`aclnn_py` 的首轮
+        #   `execution_provenance` 里没有仓名字段，那两条通路这里**没有**可比的东西，
+        #   不许拿 `spec` 或本轮环境凑一个出来冒充首轮事实。
+        directive_repo = d["source_identity"]["repo"]
+        if directive_repo != runner_binding.get("base_source_repo"):
+            raise RetestContractError(
+                f"drift_blocked:base_source_repo_mismatch "
+                f"directive={directive_repo!r} "
+                f"base={runner_binding.get('base_source_repo')!r}")
         golden_source_path = os.path.join(
             os.path.dirname(prepared["base_artifacts"]["spec"]["path"]),
             "golden.py")
         golden_source_sha256 = sha256_file(golden_source_path)
+        base_anchor = runner_binding["base_source_identity"]
         base_provenance = {
-            "head_sha": runner_binding["base_pr_head"],
+            # 键名按通路取（`_provenance_anchor_key`），值取基础收据自己的锚。
+            # expected_kind 已保证两边同通路，故这里的键与 anchor_provenance_key 必然一致。
+            # ⚠ 明知必然相等仍**独立算一次**，不复用上面那个变量：这一格的语义是「基础收据
+            #   自报的锚该落在哪个键」，复用会让它悄悄改成「directive 说该落在哪个键」——
+            #   将来 expected_kind 那道前置校验若被削弱，这里就成了无声的自证。
+            _provenance_anchor_key(
+                base_anchor["anchor_field"],
+                "base cpp_extension vendor build_receipt.source"):
+                base_anchor["anchor_value"],
             "soc": runner_binding["base_soc"],
             "toolkit_version": runner_binding["base_toolkit"],
             "build_receipt_sha256":
@@ -427,9 +576,20 @@ def materialize_attempt(directive, reports_dir, execution_identity):
     elif not isinstance(base_provenance, dict):
         raise RetestContractError(
             "drift_blocked:base_execution_provenance_missing；首次 evidence 未保存实际 "
-            "PR/build/SoC/toolkit 身份，不能用本轮自报 identity 代替")
+            "来源锚/build/SoC/toolkit 身份，不能用本轮自报 identity 代替")
+    elif anchor_provenance_key not in base_provenance:
+        # aclnn_py / cpp 通路的 fail-closed：首轮 `execution_provenance` 里只有
+        # `head_sha`——那是 aclnn_adapter 按 **PR ref** 取源核出来的线上 commit，
+        # 对本地 checkout 通路毫无意义。缺本通路的锚就是没有可对账的首轮事实，
+        # 必须显式 BLOCKED；**绝不**回退去读 head_sha 充数（那正是来源伪装的入口）。
+        # 单靠下面的等值循环也会拒，但报出来是 `_mismatch`，读的人容易误以为
+        # 「把 head_sha 抄过去就好了」——所以这里单独给出正确归因。
+        raise RetestContractError(
+            f"drift_blocked:base_execution_provenance_anchor_missing："
+            f"dut_source={directive_kind} 需要 execution_provenance.{anchor_provenance_key}，"
+            f"首次 evidence 实有键 {sorted(base_provenance)}")
     expected_provenance = {
-        "head_sha": d["source_identity"]["pr_head"],
+        anchor_provenance_key: directive_anchor_value,
         "soc": identity["soc"],
         "toolkit_version": identity["toolkit"],
         "build_receipt_sha256": d["source_identity"]["build_receipt_sha256"],
@@ -447,15 +607,24 @@ def materialize_attempt(directive, reports_dir, execution_identity):
             raise RetestContractError(
                 f"drift_blocked:{field}_mismatch base={actual!r} "
                 f"expected={identity[field]!r}")
+    source_facts_doc, source_facts_path = _freeze_source_facts(
+        prepared["base_reports_dir"], directive_kind,
+        directive_anchor_field, directive_anchor_value)
     manifest = build_attempt_manifest(
         d, prepared["case_bindings"], identity, runner_binding,
-        os.path.realpath(os.fspath(reports_dir)))
+        os.path.realpath(os.fspath(reports_dir)),
+        source_facts=(None if source_facts_doc is None else {
+            "base_path": source_facts_path,
+            "attempt_relpath": _SOURCE_FACTS_NAME,
+            "sha256": _canonical_sha(source_facts_doc),
+        }))
     relaxed = (derive_relaxed_spec(spec, d)
                if d["attempt_kind"] == "relaxed_rerun" else None)
     attempts_root = os.path.join(prepared["base_reports_dir"], "attempts")
     directive_artifact = make_directive_artifact(d)
     number, attempt_dir, reused = _allocate_idempotent_attempt(
-        attempts_root, directive_artifact, manifest, relaxed)
+        attempts_root, directive_artifact, manifest, relaxed,
+        source_facts_doc=source_facts_doc)
     if reused:
         return {"attempt": number, "attempt_dir": attempt_dir,
                 "manifest": manifest, "relaxed_spec": relaxed,
@@ -507,14 +676,25 @@ def validate_directive(directive, *, require_confirmed=False):
             raise RetestContractError(f"base_artifacts.{name} 须仅含 path/sha256")
         _require_sha256(item.get("sha256"), f"base_artifacts.{name}.sha256")
     source = _require_object(d.get("source_identity"), "source_identity")
-    required_source = {"pr_head", "build_receipt_sha256", "runner_form"}
-    if set(source) != required_source:
+    # 来源锚的判别与长度校验**只此一处**，且只能由 `dut_source` 出：
+    # PR 恰 40 位 `pr_head_sha`、本地恰 64 位 `local_root_digest`。旧的 40..64 区间正则
+    # 已删——它让「叫 pr_head 却装 64 位摘要」原样通过，是本批要堵的那个洞。
+    try:
+        # 变量刻意叫 source_kind：本函数里 `kind` 已经是 attempt_kind，重名会把
+        # 下面「只有 relaxed_rerun 可带 precision_override」那道校验悄悄改判。
+        source_kind, anchor_field, _anchor_value = (
+            dut_source.validate_build_receipt_source(
+                source, where="directive.source_identity"))
+    except dut_source.DutSourceError as ex:
+        raise RetestContractError(f"source_identity 来源锚不合法：{ex}") from ex
+    # `repo` 是本批新增的必填，旧 directive 因此失效（见模块 docstring）。
+    # ⚠ 本函数只校它非空——**对账不在这里**：`cpp_extension` 通路由 `materialize_attempt`
+    # 与 `runner_binding.base_source_repo` 逐字比；`cpp`/`aclnn_py` 没有可比的对照物。
+    required_source = {"repo", "build_receipt_sha256", "runner_form", anchor_field}
+    if set(source) - {"dut_source"} != required_source:
         raise RetestContractError(
-            f"source_identity 键须严格等于 {sorted(required_source)}")
-    if (not isinstance(source.get("pr_head"), str)
-            or _GIT_COMMIT_RE.fullmatch(source["pr_head"]) is None):
-        raise RetestContractError(
-            "source_identity.pr_head 须为 40..64 位小写十六进制完整提交 ID")
+            f"source_identity(dut_source={source_kind}) 键须严格等于 "
+            f"{sorted(required_source)}（另可选 dut_source），实得 {sorted(source)}")
     _require_sha256(source.get("build_receipt_sha256"),
                     "source_identity.build_receipt_sha256")
     if source.get("runner_form") not in ("cpp", "aclnn_py", "cpp_extension"):
@@ -637,8 +817,13 @@ def allocate_attempt(attempts_root):
 
 
 def _allocate_idempotent_attempt(attempts_root, directive_artifact,
-                                 manifest_artifact, relaxed_artifact):
-    """受目录锁保护地按 directive_id 幂等分配；同 ID 异内容拒绝。"""
+                                 manifest_artifact, relaxed_artifact,
+                                 source_facts_doc=None):
+    """受目录锁保护地按 directive_id 幂等分配；同 ID 异内容拒绝。
+
+    `source_facts_doc` 与 relaxed spec 同等对待：它是准备完成的一部分，必须在占号后、
+    `preparation.json` 之前一起落盘；复用时缺文件或内容不等一律按「未完成准备现场」拒。
+    """
     root = os.path.abspath(os.fspath(attempts_root))
     os.makedirs(root, exist_ok=True)
     lock = os.path.join(root, ".allocation.lock")
@@ -685,11 +870,16 @@ def _allocate_idempotent_attempt(attempts_root, directive_artifact,
                     f"directive_id={wanted!r} 已绑定不同内容，拒绝复用")
             prep = os.path.join(path, "preparation.json")
             relaxed_path = os.path.join(path, "spec.relaxed.json")
+            facts_path = os.path.join(path, _SOURCE_FACTS_NAME)
             if not os.path.isfile(prep) or (
                     relaxed_artifact is not None
                     and (not os.path.isfile(relaxed_path)
                          or load_strict_json(relaxed_path, "existing relaxed spec")
-                         != relaxed_artifact)):
+                         != relaxed_artifact)) or (
+                    source_facts_doc is not None
+                    and (not os.path.isfile(facts_path)
+                         or load_strict_json(facts_path, "existing source_facts")
+                         != source_facts_doc)):
                 raise RetestContractError(
                     f"directive_id={wanted!r} 命中未完成准备现场 {name}")
             return name, path, True
@@ -701,6 +891,9 @@ def _allocate_idempotent_attempt(attempts_root, directive_artifact,
         if relaxed_artifact is not None:
             content_address.atomic_write_json(
                 path, "spec.relaxed.json", relaxed_artifact)
+        if source_facts_doc is not None:
+            content_address.atomic_write_json(
+                path, _SOURCE_FACTS_NAME, source_facts_doc)
         content_address.atomic_write_json(
             path, "preparation.json", {
                 "schema_version": SCHEMA_VERSION,
@@ -756,8 +949,14 @@ def recover_stale_lock(lock_path, attempts_root, expected_digest, operation):
 
 
 def build_attempt_manifest(directive, case_bindings, execution_identity,
-                           runner_binding=None, base_artifact_scope=None):
-    """构造冻结 manifest；不读取/猜测 case，调用方必须传入已核验绑定。"""
+                           runner_binding=None, base_artifact_scope=None,
+                           source_facts=None):
+    """构造冻结 manifest；不读取/猜测 case，调用方必须传入已核验绑定。
+
+    `source_facts` 只记「从哪来 + 冻结副本叫什么 + 内容 sha256」。sha256 进了 manifest
+    payload，而 manifest 自身是内容寻址 envelope，所以 F3 只需比对文件摘要即可确认这份
+    事实没被换过——不必也不应在执行侧再判一次来源。
+    """
     d = validate_directive(directive, require_confirmed=True)
     bindings = _require_object(case_bindings, "case_bindings")
     if set(bindings) != set(d["case_ids"]):
@@ -804,6 +1003,18 @@ def build_attempt_manifest(directive, case_bindings, execution_identity,
             raise RetestContractError(
                 "base_artifact_scope 须为存在的绝对目录")
         payload["base_artifact_scope"] = scope
+    if source_facts is not None:
+        facts = _require_object(source_facts, "source_facts")
+        if set(facts) != {"base_path", "attempt_relpath", "sha256"}:
+            raise RetestContractError(
+                "source_facts 键须严格等于 ['attempt_relpath', 'base_path', 'sha256']")
+        if facts["attempt_relpath"] != _SOURCE_FACTS_NAME:
+            raise RetestContractError(
+                f"source_facts.attempt_relpath 须为 {_SOURCE_FACTS_NAME!r}")
+        if not isinstance(facts["base_path"], str) or not os.path.isabs(facts["base_path"]):
+            raise RetestContractError("source_facts.base_path 须为绝对路径")
+        _require_sha256(facts["sha256"], "source_facts.sha256")
+        payload["source_facts"] = copy.deepcopy(facts)
     return content_address.make_artifact(_MANIFEST_DOMAIN, payload)
 
 

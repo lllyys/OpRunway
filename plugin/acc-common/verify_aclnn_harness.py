@@ -11,6 +11,9 @@
 成功只产 ``TRUSTED_FOR_CP_D`` 的内容寻址收据；正式 Task2/Task3 的用例、精度
 标准与性能采集策略均不在这里修改。CP-D 会重新生成完整 caseset，并在启动
 adapter 前复核这份收据与当前 spec/caseset/执行逻辑仍完全绑定。
+
+**来源通路**：本门目前只接 ``dut_source == "pull_request"``，``local_checkout``
+显式 fail-closed（见 ``_require_pull_request_path``）。
 """
 
 import argparse
@@ -25,6 +28,7 @@ import sys
 
 import aclnn_adapter
 import content_address
+import dut_source
 import repo_adapter
 import validator
 
@@ -40,6 +44,10 @@ _LOGIC_FILES = (
     "precision_policy.py",
     "validator.py",
     "content_address.py",
+    # ⚠ 判别式现在是本信任门的判定依赖（见 `_require_pull_request_path`），必须列进来：
+    #   漏了它，`bindings.logic_files` 就覆盖不到判别逻辑——有人把 `dut_source.of()` 改成
+    #   「未知取值缺省 pull_request」，旧收据照样 revalidate 通过，等于开一个新的 fail-open 面。
+    "dut_source.py",
     "gen_cases.py",
     "aclnn_runtime/__init__.py",
     "aclnn_runtime/base.py",
@@ -47,7 +55,48 @@ _LOGIC_FILES = (
     "aclnn_runtime/aclnn_driver.py",
     "aclnn_runtime/aclnn_runner.py",
 )
+_HEX40 = re.compile(r"[0-9a-f]{40}")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def _require_pull_request_path(preflight):
+    """本轮 aclnn_py 真机 harness 信任门只接 `pull_request` 来源通路，其余一律 fail-closed。
+
+    **为什么是显式 BLOCK 而不是接通**：`aclnn_adapter` 只能按 PR ref 在容器内重新取源
+    build，构建端根本没有可与 `local_checkout.root_digest` 对账的锚。放它过去，vendor `.so`
+    与被测字节之间就没有机器可核的对应关系了——收据看着齐全，绑定其实是空的。
+    这是**如实挂账**：通路没接就说没接。
+
+    **为什么要在三处各调一次**（不能只留一处）：`_validate_build_provenance` 是
+    `run_gate` 与 `validate_receipt` 的共同必经点，是兜底；但两条入口都会**更早**碰到
+    `aclnn_adapter._aclnn_cfg()`，那里在缺 `OPRUNWAY_ACLNN_PR_REF` 时抛的是
+    「PR head 引用必填」——本地通路会因此拿到一个**误导性**报错，把「这条通路没接」
+    说成「少配了个环境变量」。所以两条入口都要在碰 `_aclnn_cfg()` 之前先 BLOCK。
+    """
+    # ⚠ 这道门现在是 preflight 的**第一次触碰**，形态要自己扛住：payload 不是 object 时
+    #   `.get` 会抛 AttributeError（不在调用方的收敛清单里），当场变成裸 traceback。
+    if not isinstance(preflight, dict):
+        raise ValueError("aclnn preflight payload 须为 JSON object")
+    bindings = preflight.get("bindings")
+    # ⚠ 这里**不能**简化成 `preflight.get("bindings") or {}`。`dut_source.of()` 的
+    #   「缺席即 pull_request」是给**旧收据**的向后兼容，前提是 payload 形态本身可信；
+    #   `or {}` 会把缺席 / None / `[]` / 字符串一律抹平成空 object，于是「这份 preflight
+    #   根本没有来源声明」和「它明确声明了 pull_request」在这道门里变成同一件事——
+    #   本地通路的 preflight 只要 bindings 丢了形态（写坏、被裁剪、schema 换代），
+    #   这道门就当场判它是 PR 通路**放行**，而本函数的全部意义就是拦住这一步。
+    #   今天不出事靠的是下游 40-hex 硬化与 `provenance.head_sha != None` 的**间接**兜底，
+    #   那是偶然的 fail-closed、不是这道门的设计。形态判不出来 = 来源判不出来 = 停。
+    #   注：空 object `{}` 仍然放行——它是合法 JSON object，正是上面那条向后兼容要接的形态。
+    if not isinstance(bindings, dict):
+        raise ValueError(
+            "aclnn_preflight.bindings 缺失或不是 JSON object，无法判定来源通路 —— fail-closed")
+    kind = dut_source.of(bindings, where="aclnn_preflight.bindings")
+    if kind != dut_source.PULL_REQUEST:
+        raise ValueError(
+            f"aclnn_py 真机 harness 信任门尚未接入 dut_source={kind}："
+            f"aclnn_adapter 只能按 PR ref 在容器内重新取源 build，"
+            f"构建端没有可与 local_checkout.root_digest 对账的锚 → fail-closed")
+    return kind
 
 
 def _strict_json(path):
@@ -398,6 +447,8 @@ def _receipt_bindings(root, spec, caseset, preflight, selected, execution):
         "caseset_sha256": _sha(caseset),
         "preflight_digest": content_address.content_digest(
             _PREFLIGHT_DOMAIN, preflight),
+        # 此处只可能是 PR 锚：本地通路已在 `run_gate` / `validate_receipt` /
+        # `_validate_build_provenance` 三处前置 BLOCK，走不到这里。
         "pr_head_sha": (preflight.get("bindings") or {}).get("pr_head_sha"),
         "logic_files": _logic_hashes(),
         "golden_source": _golden_source_binding(spec),
@@ -427,6 +478,9 @@ def _expected_output_contracts(case):
 
 
 def _validate_build_provenance(provenance, execution, preflight):
+    # 通路门（兜底的那一处）：本函数是 run_gate 与 validate_receipt 的**共同**必经点，
+    # 下面整段构建对账都以「锚 = PR head」为前提，非 PR 通路一个字段都对不上。
+    _require_pull_request_path(preflight)
     if not isinstance(provenance, dict):
         raise ValueError("harness trust receipt.build_provenance 缺失")
     cfg = execution["config"]
@@ -519,6 +573,10 @@ def validate_receipt(root, receipt_rel, spec, caseset):
         raise ValueError(f"harness trust status 非可信: {receipt.get('status')!r}")
     if receipt.get("acceptance_verdict") is not None:
         raise ValueError("harness trust receipt 不得携带算子验收裁决")
+    # 通路门（入口处）：必须赶在 `_current_execution_binding` 之前——它会调
+    # `aclnn_adapter._aclnn_cfg()`，本地通路会先撞上「PR head 引用必填」这个误导性报错，
+    # 而 `_validate_build_provenance` 里的同一道门要到本函数最后才触发。
+    _require_pull_request_path(preflight)
     bindings = receipt.get("bindings")
     if not isinstance(bindings, dict):
         raise ValueError("harness trust receipt.bindings 缺失")
@@ -570,9 +628,17 @@ def run_gate(root, spec_rel, caseset_rel, preflight_rel, out_rel):
         inp["dtype"] for case in selected for inp in case.get("inputs") or []
     })
 
+    # 通路门（入口处）：必须赶在 `_aclnn_cfg()` 之前，理由同 `validate_receipt`。
+    _require_pull_request_path(preflight)
     cfg = aclnn_adapter._aclnn_cfg()
     execution = _execution_binding(cfg, caseset)
     preflight_head = (preflight.get("bindings") or {}).get("pr_head_sha")
+    # ⚠ 形态先硬化再交叉核：下面那条等值比较本身不挑形态，缺席/畸形时它只是「两边一样地
+    #   畸形」就放行了。今天没出事纯粹是靠 `cfg.head_sha` 必是 40-hex 间接兜住——那是偶然的
+    #   fail-closed，不是设计。CP-C0 没绑定合法 PR head 就没有可交叉核的锚，直接停。
+    if not isinstance(preflight_head, str) or not _HEX40.fullmatch(preflight_head):
+        raise ValueError(
+            f"CP-C0 preflight 未绑定 40 位 PR head，无法交叉核：{preflight_head!r}")
     if cfg.get("head_sha") != preflight_head:
         raise ValueError(
             "真机配置 head_sha 与 CP-C0 已绑定的 PR head 不一致")

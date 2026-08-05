@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+import unittest.mock
 
 import precision_retest_contract as R
 
@@ -26,8 +27,10 @@ def _directive(kind="same_policy_rerun", status="confirmed"):
         "attempt_kind": kind,
         "case_ids": ["case-1", "case-2"],
         "base_artifacts": base,
+        # PR 通路刻意省掉 `dut_source` 键：顺带见证「缺席即 pull_request」的向后兼容。
         "source_identity": {
-            "pr_head": "d" * 40,
+            "repo": "repo",
+            "pr_head_sha": "d" * 40,
             "build_receipt_sha256": SHA_B,
             "runner_form": "aclnn_py",
         },
@@ -119,6 +122,42 @@ class DirectiveTest(unittest.TestCase):
         value = _directive()
         value["silent_bypass"] = True
         with self.assertRaises(R.RetestContractError):
+            R.validate_directive(value)
+
+    def test_pr_head_sha_must_be_exactly_40_hex_not_a_digest(self):
+        """实测复现过的洞：旧 `^[0-9a-f]{40,64}$` 让 64 位摘要冒充 PR head 直接过。"""
+        value = _directive()
+        value["source_identity"]["pr_head_sha"] = "b" * 64
+        with self.assertRaisesRegex(R.RetestContractError, "40 位 hex"):
+            R.validate_directive(value)
+
+    def test_source_identity_requires_repo_and_matching_anchor_field(self):
+        for mutate, pattern in (
+                (lambda s: s.pop("repo"), "repo"),
+                (lambda s: s.pop("pr_head_sha"), "40 位 hex"),
+                (lambda s: s.update(local_root_digest="c" * 64), "键须严格等于"),
+                (lambda s: s.update(dut_source="made_up"), "受控词表"),
+        ):
+            with self.subTest(pattern=pattern):
+                value = _directive()
+                mutate(value["source_identity"])
+                with self.assertRaisesRegex(R.RetestContractError, pattern):
+                    R.validate_directive(value)
+
+    def test_local_checkout_directive_needs_64_hex_root_digest(self):
+        value = _directive()
+        value["source_identity"] = {
+            "dut_source": "local_checkout",
+            "repo": "repo",
+            "local_root_digest": "e" * 64,
+            "build_receipt_sha256": SHA_B,
+            "runner_form": "cpp_extension",
+        }
+        self.assertEqual(
+            R.validate_directive(value)["source_identity"]["local_root_digest"],
+            "e" * 64)
+        value["source_identity"]["local_root_digest"] = "e" * 40
+        with self.assertRaisesRegex(R.RetestContractError, "64 位 hex"):
             R.validate_directive(value)
 
 
@@ -517,6 +556,265 @@ class ArtifactAndAttemptTest(unittest.TestCase):
                     "path": path, "sha256": R.sha256_file(path)}
             with self.assertRaisesRegex(
                     R.RetestContractError, "base_execution_provenance_missing"):
+                R.materialize_attempt(directive, root, {
+                    "soc": "A3", "toolkit": "8.3",
+                    "vendor_elf_sha256": SHA_A,
+                    "golden_source_sha256": SHA_B,
+                })
+
+
+class ProvenanceAnchorKeyTest(unittest.TestCase):
+    """锚字段名 → provenance 键名的查表：登记项照常返回，未登记项 fail-closed。
+
+    `materialize_attempt` 里有两处查表。第二处（基础收据自报的锚）在当前代码里**构造上
+    不可达**——`expected_kind` 已保证基础收据与 directive 同通路、锚字段名必然相同，所以
+    第一处会先拦下。正因为不可达，它只能在这里直接见证；不能因此把它写回裸下标。
+    """
+
+    def test_registered_fields_map_to_first_round_keys(self):
+        self.assertEqual(
+            R._provenance_anchor_key("pr_head_sha", "where"), "head_sha")
+        self.assertEqual(
+            R._provenance_anchor_key("local_root_digest", "where"),
+            "local_root_digest")
+
+    def test_unregistered_field_raises_contract_error(self):
+        with self.assertRaisesRegex(R.RetestContractError, "没有登记"):
+            R._provenance_anchor_key(
+                "future_anchor", "base cpp_extension vendor build_receipt.source")
+
+
+ROOT_DIGEST = "7" * 64
+ELF_SHA = "e" * 64
+
+
+class LocalCheckoutMaterializeTest(unittest.TestCase):
+    """本地来源通路的 CP-F 冻结：锚是 `local_root_digest`，不是任何 40 位 hex。"""
+
+    def _build(self, root, *, receipt_source=None, facts_digest=ROOT_DIGEST,
+               write_source_facts=True):
+        work = os.path.join(root, "work")
+        for cid in ("case-1", "case-2"):
+            os.makedirs(os.path.join(work, cid))
+            with open(os.path.join(work, cid, "x.npy"), "wb") as out:
+                out.write(cid.encode())
+            with open(os.path.join(work, cid, "g.npy"), "wb") as out:
+                out.write(("golden-" + cid).encode())
+        golden_py = os.path.join(root, "golden.py")
+        with open(golden_py, "w", encoding="utf-8") as out:
+            out.write("# authorized golden\n")
+        spec = {"op": "AnyOp", "runner_form": "cpp_extension",
+                "precision": {"standard": "ascendoptest_default"}}
+        caseset = {"op": "AnyOp", "cases": [{
+            "id": cid,
+            "inputs": [{"name": "x", "path": f"{cid}/x.npy",
+                        "shape": [1], "dtype": "float32"}],
+            "expected": {"golden_path": f"{cid}/g.npy"},
+        } for cid in ("case-1", "case-2")]}
+        ext_manifest = {"namespace": "oprunway_test",
+                        "spec_sha256": R._canonical_sha(spec)}
+        plan = {
+            "caseset_sha256": R._canonical_sha(caseset),
+            "manifest_sha256": R._canonical_sha(ext_manifest),
+            "namespace": "oprunway_test",
+            "cases": [{"case_id": cid, "entrypoint": "invoke_v0"}
+                      for cid in ("case-1", "case-2")],
+        }
+        build_receipt = {
+            "source": receipt_source if receipt_source is not None else {
+                "dut_source": "local_checkout",
+                "repo": "repo",
+                "local_root_digest": ROOT_DIGEST,
+            },
+            "build": {"argv": ["bash", "build.sh"]},
+        }
+        receipt = {
+            "schema": "oprunway.cpp_extension_receipt",
+            "schema_version": 1,
+            "status": "VERIFIED",
+            "bindings": {
+                "caseset_sha256": R._canonical_sha(caseset),
+                "manifest_sha256": R._canonical_sha(ext_manifest),
+                "invocation_plan_sha256": R._canonical_sha(plan),
+                "spec_sha256": R._canonical_sha(spec),
+            },
+            "vendor": {
+                "library_sha256": ELF_SHA,
+                "build_receipt": build_receipt,
+                "build_receipt_sha256": R._canonical_sha(build_receipt),
+            },
+            "runtime": {"soc": "A3", "cann_version": "8.3"},
+        }
+        evidence = {
+            "op": "AnyOp",
+            "cpp_extension_receipt": receipt,
+            "evidence": [{"case_id": cid,
+                          "cpp_extension_receipt_sha256": R._canonical_sha(receipt)}
+                         for cid in ("case-1", "case-2")],
+        }
+        os.makedirs(os.path.join(work, "cpp_extension"))
+        for relative, document in (
+                ("cpp_extension_receipt.json", receipt),
+                ("cpp_extension_invocation_plan.json", plan),
+                (os.path.join("cpp_extension", "extension_manifest.json"),
+                 ext_manifest)):
+            with open(os.path.join(work, relative), "w", encoding="utf-8") as out:
+                json.dump(document, out)
+        if write_source_facts:
+            R.content_address.atomic_write_json(
+                root, "source_facts.json",
+                R.content_address.make_artifact(
+                    "oprunway/source-facts/v1",
+                    {"dut_source": "local_checkout",
+                     "local_checkout": {"root_digest": facts_digest}}))
+        directive = _directive()
+        directive["source_identity"] = {
+            "dut_source": "local_checkout",
+            "repo": "repo",
+            "local_root_digest": ROOT_DIGEST,
+            "build_receipt_sha256": R._canonical_sha(build_receipt),
+            "runner_form": "cpp_extension",
+        }
+        documents = {
+            "spec": spec, "caseset": caseset, "evidence": evidence,
+            "verdict": {"overall": {"verdict": "fail"}},
+            "acceptance": {"overall": "FAIL"},
+        }
+        for name, document in documents.items():
+            path = os.path.join(root, f"{name}.json")
+            with open(path, "w", encoding="utf-8") as out:
+                json.dump(document, out)
+            directive["base_artifacts"][name] = {
+                "path": path, "sha256": R.sha256_file(path)}
+        identity = {
+            "soc": "A3", "toolkit": "8.3",
+            "vendor_elf_sha256": ELF_SHA,
+            "golden_source_sha256": R.sha256_file(golden_py),
+        }
+        return directive, identity
+
+    def test_local_anchor_binds_and_freezes_source_facts(self):
+        with tempfile.TemporaryDirectory() as root:
+            directive, identity = self._build(root)
+            result = R.materialize_attempt(directive, root, identity)
+            binding = result["manifest"]["payload"]["runner_binding"]
+            self.assertEqual(binding["base_source_identity"], {
+                "dut_source": "local_checkout",
+                "anchor_field": "local_root_digest",
+                "anchor_value": ROOT_DIGEST,
+            })
+            self.assertNotIn("base_pr_head", binding)
+            frozen = os.path.join(result["attempt_dir"], "source_facts.json")
+            self.assertTrue(os.path.isfile(frozen))
+            self.assertEqual(
+                result["manifest"]["payload"]["source_facts"]["sha256"],
+                R.sha256_file(frozen))
+
+    def test_receipt_claiming_pull_request_with_any_40_hex_is_blocked(self):
+        """directive 说 local、基础收据改口说 PR + 任意 40 位 hex → 本地锚校验会整条跳过。"""
+        with tempfile.TemporaryDirectory() as root:
+            directive, identity = self._build(root, receipt_source={
+                "repo": "repo", "pr_head_sha": "a" * 40})
+            with self.assertRaisesRegex(
+                    R.RetestContractError,
+                    "base_vendor_build_source_anchor_invalid"):
+                R.materialize_attempt(directive, root, identity)
+
+    def test_source_repo_mismatch_is_blocked(self):
+        """人工确认的 `repo` 必须真参与对账——锚相等**不蕴含**仓相同。
+
+        `local_root_digest` 只覆盖 `op_subdir` 子树：fork、vendored 目录、换个仓名重开的
+        同一份代码，都能让两个不同的仓在该子树上字节全等。所以 directive 的 `repo` 与首轮
+        build receipt 的 `repo` 不等时必须 BLOCKED，否则模块 docstring 宣称的那道门不存在。
+        """
+        with tempfile.TemporaryDirectory() as root:
+            directive, identity = self._build(root, receipt_source={
+                "dut_source": "local_checkout", "repo": "some/other-repo",
+                "local_root_digest": ROOT_DIGEST})
+            with self.assertRaisesRegex(
+                    R.RetestContractError, "base_source_repo_mismatch"):
+                R.materialize_attempt(directive, root, identity)
+
+    def test_unregistered_anchor_key_blocks_within_contract_not_keyerror(self):
+        """受控词表扩了而 `_PROVENANCE_ANCHOR_KEY` 没跟上时，必须仍落在契约内的异常上。
+
+        `cp_f_prepare_attempt.py` 只 `except (OSError, RetestContractError)`；裸下标抛的
+        `KeyError` 会穿过去变成裸 traceback，调用方就拿不到约定的
+        `[CP-F prepare] BLOCKED: …` 单行机读输出。
+        """
+        with tempfile.TemporaryDirectory() as root:
+            directive, identity = self._build(root)
+            with unittest.mock.patch.dict(
+                    R._PROVENANCE_ANCHOR_KEY, {}, clear=True):
+                with self.assertRaises(R.RetestContractError) as caught:
+                    R.materialize_attempt(directive, root, identity)
+        self.assertIn("没有登记", str(caught.exception))
+        # 逐字复刻 cp_f_prepare_attempt.py 的 except 元组：这条断言才是「机读契约没破」
+        # 的实质见证，只断言异常类型不足以说明入口脚本收得住。
+        self.assertIsInstance(caught.exception, (OSError, R.RetestContractError))
+
+    def test_local_root_digest_mismatch_is_blocked(self):
+        with tempfile.TemporaryDirectory() as root:
+            directive, identity = self._build(root, receipt_source={
+                "dut_source": "local_checkout", "repo": "repo",
+                "local_root_digest": "9" * 64})
+            with self.assertRaisesRegex(
+                    R.RetestContractError, "local_root_digest_mismatch"):
+                R.materialize_attempt(directive, root, identity)
+
+    def test_missing_or_drifted_source_facts_is_blocked(self):
+        with tempfile.TemporaryDirectory() as root:
+            directive, identity = self._build(root, write_source_facts=False)
+            with self.assertRaisesRegex(
+                    R.RetestContractError, "base_source_facts_missing"):
+                R.materialize_attempt(directive, root, identity)
+        with tempfile.TemporaryDirectory() as root:
+            directive, identity = self._build(root, facts_digest="8" * 64)
+            with self.assertRaisesRegex(
+                    R.RetestContractError, "base_source_facts_anchor_mismatch"):
+                R.materialize_attempt(directive, root, identity)
+
+    def test_local_aclnn_py_refuses_to_fall_back_to_head_sha(self):
+        """本地通路下 `execution_provenance.head_sha` 是 PR-ref 取源的产物，与本地字节无关。"""
+        with tempfile.TemporaryDirectory() as root:
+            work = os.path.join(root, "work")
+            for cid in ("case-1", "case-2"):
+                os.makedirs(os.path.join(work, cid))
+                with open(os.path.join(work, cid, "x.npy"), "wb") as out:
+                    out.write(cid.encode())
+                with open(os.path.join(work, cid, "g.npy"), "wb") as out:
+                    out.write(("golden-" + cid).encode())
+            documents = {
+                "spec": {"op": "AnyOp", "runner_form": "aclnn_py"},
+                "caseset": {"op": "AnyOp", "cases": [{
+                    "id": cid,
+                    "inputs": [{"name": "x", "path": f"{cid}/x.npy"}],
+                    "expected": {"golden_path": f"{cid}/g.npy"},
+                } for cid in ("case-1", "case-2")]},
+                "evidence": {"op": "AnyOp", "execution_provenance": {
+                    "head_sha": "d" * 40, "soc": "A3", "toolkit_version": "8.3",
+                    "build_receipt_sha256": SHA_B,
+                    "vendor_elf_sha256": SHA_A,
+                    "golden_source_sha256": SHA_B,
+                }},
+                "verdict": {"overall": {"verdict": "fail"}},
+                "acceptance": {"overall": "FAIL"},
+            }
+            directive = _directive()
+            directive["source_identity"] = {
+                "dut_source": "local_checkout", "repo": "repo",
+                "local_root_digest": ROOT_DIGEST,
+                "build_receipt_sha256": SHA_B, "runner_form": "aclnn_py",
+            }
+            for name, document in documents.items():
+                path = os.path.join(root, f"{name}.json")
+                with open(path, "w", encoding="utf-8") as out:
+                    json.dump(document, out)
+                directive["base_artifacts"][name] = {
+                    "path": path, "sha256": R.sha256_file(path)}
+            with self.assertRaisesRegex(
+                    R.RetestContractError,
+                    "base_execution_provenance_anchor_missing"):
                 R.materialize_attempt(directive, root, {
                     "soc": "A3", "toolkit": "8.3",
                     "vendor_elf_sha256": SHA_A,

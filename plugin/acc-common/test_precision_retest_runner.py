@@ -35,10 +35,20 @@ class SelectedCasesetTest(unittest.TestCase):
                     R.selected_caseset(base, selected)
 
     def test_runner_uses_workflow_runner_form_mapping(self):
+        # runner 不自建 kind→mode 字典，一律借 run_workflow._resolve_mode 派生。
+        # cpp_extension 是当前唯一验收准入通路，runner 也正是这样**不带任何旁路**调它的。
         self.assertEqual(R.run_workflow._resolve_mode(
-            {"runner_form": "cpp"}, None), "new_example")
+            {"runner_form": "cpp_extension"}, None), "cpp_extension")
+        # cpp / aclnn_py 现被验收准入白名单（run_workflow._ACCEPTANCE_RUNNER_FORMS）挡下。
+        # 本用例测的是**映射复用**、不是准入，故显式 allow_experimental_form=True 关掉准入门，
+        # 断言才落回 runner_form→mode 这张表上；换成 cpp_extension 夹具则这两行什么都不再覆盖。
+        # ⚠ 该旁路只存在于断言里：runner 自身（precision_retest_runner 的 execute 路径）调
+        #   _resolve_mode 时**不带**这个 flag，所以这两种 form 的 base spec 在 CP-F 重测中
+        #   仍会被准入门 fail-closed 拦住——本用例不改变、也不放宽那条业务行为。
         self.assertEqual(R.run_workflow._resolve_mode(
-            {"runner_form": "aclnn_py"}, None), "aclnn_py")
+            {"runner_form": "cpp"}, None, allow_experimental_form=True), "new_example")
+        self.assertEqual(R.run_workflow._resolve_mode(
+            {"runner_form": "aclnn_py"}, None, allow_experimental_form=True), "aclnn_py")
 
 
 class AttemptImmutabilityTest(unittest.TestCase):
@@ -291,7 +301,7 @@ class RelaxedPolicyRebindTest(unittest.TestCase):
 
 
 class CppExtensionRetestBindingTest(unittest.TestCase):
-    def _fixture(self):
+    def _fixture(self, *, local=False):
         invocations = [{
             "case_id": "c", "symbol": "Any", "entrypoint": "invoke_v0",
             "slots": [{"role": "in", "name": "x"},
@@ -303,6 +313,15 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
         }
         generated_manifest_sha = R.cpp_extension_adapter._canonical_sha(
             generated_manifest)
+        # 两条来源通路共用同一份 fixture：锚字段名和锚长度都由 `dut_source` 决定，
+        # 测试不按字面拼 key，也不复用同一段 hex 冒充另一条通路。
+        anchor_field = "local_root_digest" if local else "pr_head_sha"
+        anchor_value = ("7" * 64) if local else ("c" * 40)
+        source_identity = {
+            "dut_source": "local_checkout" if local else "pull_request",
+            "anchor_field": anchor_field,
+            "anchor_value": anchor_value,
+        }
         manifest = {
             "runner_binding": {
                 "schema": "oprunway.precision_retest.cpp_extension_binding",
@@ -312,7 +331,7 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
                 "base_manifest_sha256": generated_manifest_sha,
                 "base_spec_sha256": "2" * 64,
                 "base_namespace": "oprunway_test",
-                "base_pr_head": "c" * 40,
+                "base_source_identity": source_identity,
                 "base_build_receipt_sha256": "d" * 64,
                 "base_vendor_build_argv": ["bash", "build.sh", "-f", "x"],
                 "base_source_repo": "repo",
@@ -328,12 +347,17 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
         }
         directive = {
             "source_identity": {
-                "pr_head": "c" * 40,
+                "repo": "repo",
+                anchor_field: anchor_value,
                 "build_receipt_sha256": "d" * 64,
             },
         }
+        if local:
+            directive["source_identity"]["dut_source"] = "local_checkout"
         build_receipt = {
-            "source": {"pr_head_sha": "c" * 40, "repo": "repo"},
+            "source": dict(
+                {"repo": "repo", anchor_field: anchor_value},
+                **({"dut_source": "local_checkout"} if local else {})),
             "build": {"argv": ["bash", "build.sh", "-f", "x"]},
         }
         receipt = {
@@ -383,6 +407,42 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
             R._validate_cpp_extension_fresh_receipt(
                 receipt, manifest, directive, plan, generated)
 
+    def test_local_source_anchor_round_trips(self):
+        manifest, directive, plan, receipt, generated = self._fixture(local=True)
+        got = R._validate_cpp_extension_fresh_receipt(
+            receipt, manifest, directive, plan, generated)
+        self.assertEqual(got["fresh_extension_elf_sha256"], "1" * 64)
+
+    def test_fresh_receipt_claiming_other_channel_is_blocked(self):
+        """fresh 收据改口说 PR + 任意 40 位 hex → 本地锚等值校验会整条跳过，必须先拒。"""
+        manifest, directive, plan, receipt, generated = self._fixture(local=True)
+        receipt["vendor"]["build_receipt"]["source"] = {
+            "repo": "repo", "pr_head_sha": "a" * 40}
+        with self.assertRaisesRegex(
+                R.RetestExecutionError, "来源锚不可信"):
+            R._validate_cpp_extension_fresh_receipt(
+                receipt, manifest, directive, plan, generated)
+
+    def test_legacy_manifest_without_source_identity_is_refused(self):
+        """旧 manifest 只有 base_pr_head：刻意不留兼容兜底，直接拒执行。"""
+        manifest, directive, plan, receipt, generated = self._fixture()
+        binding = manifest["runner_binding"]
+        binding["base_pr_head"] = binding.pop("base_source_identity")["anchor_value"]
+        with self.assertRaisesRegex(
+                R.RetestExecutionError, "来源身份与本轮漂移"):
+            R._validate_cpp_extension_fresh_receipt(
+                receipt, manifest, directive, plan, generated)
+
+    def test_same_anchor_value_across_channels_is_still_blocked(self):
+        """同一段 hex 在两条通路里含义完全不同：只比锚值不比通路等于没比。"""
+        manifest, directive, plan, receipt, generated = self._fixture(local=True)
+        manifest["runner_binding"]["base_source_identity"]["dut_source"] = (
+            "pull_request")
+        with self.assertRaisesRegex(
+                R.RetestExecutionError, "来源身份与本轮漂移"):
+            R._validate_cpp_extension_fresh_receipt(
+                receipt, manifest, directive, plan, generated)
+
     def test_manifest_namespace_drift_is_blocked(self):
         manifest, directive, plan, receipt, generated = self._fixture()
         generated["namespace"] = "drifted"
@@ -414,6 +474,73 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
         precision_only.assert_called_once()
         full.assert_not_called()
         self.assertFalse(got.get("performance_collected", False))
+
+
+class FrozenSourceFactsTest(unittest.TestCase):
+    """F2 冻的 `source_facts.json` 是本地通路三级门唯一的对照物，必须先复核再喂门。"""
+
+    def _write(self, attempt, payload):
+        return R.content_address.atomic_write_json(
+            attempt, "source_facts.json", payload)
+
+    def _directive(self, *, local):
+        anchor = ({"dut_source": "local_checkout", "local_root_digest": "7" * 64}
+                  if local else {"pr_head_sha": "c" * 40})
+        return {"source_identity": dict(
+            anchor, repo="repo", build_receipt_sha256="d" * 64,
+            runner_form="cpp_extension")}
+
+    def _manifest(self, sha256):
+        return {"source_facts": {
+            "base_path": "/base/source_facts.json",
+            "attempt_relpath": "source_facts.json",
+            "sha256": sha256,
+        }}
+
+    def test_pull_request_attempt_without_frozen_facts_keeps_old_behaviour(self):
+        with tempfile.TemporaryDirectory() as attempt:
+            self.assertIsNone(R._frozen_source_facts_path(
+                attempt, {}, self._directive(local=False)))
+
+    def test_local_attempt_without_frozen_facts_is_refused(self):
+        """手搓一对自洽 envelope 就能绕过 F2 那道门，所以执行侧必须自己再拒一次。"""
+        with tempfile.TemporaryDirectory() as attempt:
+            with self.assertRaisesRegex(
+                    R.RetestExecutionError, "必须带 F2 冻结的 source_facts.json"):
+                R._frozen_source_facts_path(
+                    attempt, {}, self._directive(local=True))
+
+    def test_frozen_facts_path_is_returned_after_sha_check(self):
+        with tempfile.TemporaryDirectory() as attempt:
+            path = self._write(attempt, {
+                "dut_source": "local_checkout",
+                "local_checkout": {"root_digest": "7" * 64}})
+            self.assertEqual(
+                R._frozen_source_facts_path(
+                    attempt, self._manifest(C.sha256_file(path)),
+                    self._directive(local=True)),
+                path)
+
+    def test_tampered_frozen_facts_is_refused(self):
+        with tempfile.TemporaryDirectory() as attempt:
+            path = self._write(attempt, {
+                "dut_source": "local_checkout",
+                "local_checkout": {"root_digest": "7" * 64}})
+            recorded = C.sha256_file(path)
+            self._write(attempt, {
+                "dut_source": "local_checkout",
+                "local_checkout": {"root_digest": "8" * 64}})
+            with self.assertRaisesRegex(R.RetestExecutionError, "字节漂移"):
+                R._frozen_source_facts_path(
+                    attempt, self._manifest(recorded),
+                    self._directive(local=True))
+
+    def test_missing_frozen_facts_is_refused(self):
+        with tempfile.TemporaryDirectory() as attempt:
+            with self.assertRaisesRegex(R.RetestExecutionError, "缺失或不可读"):
+                R._frozen_source_facts_path(
+                    attempt, self._manifest("7" * 64),
+                    self._directive(local=True))
 
 
 if __name__ == "__main__":

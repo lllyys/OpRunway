@@ -1364,9 +1364,20 @@ class DefaultModeIsRealMachineTest(unittest.TestCase):
         import inspect
         import run_workflow as W
         self.assertIsNone(inspect.signature(W.run).parameters["mode"].default)
-        self.assertEqual(W._resolve_mode({}, None), "new_example")
+        # 验收准入通路（cpp_extension）无需任何旁路即可派生——这是本用例的主线场景。
         self.assertEqual(
-            W._resolve_mode({"runner_form": "aclnn_py"}, None), "aclnn_py")
+            W._resolve_mode({"runner_form": "cpp_extension"}, None), "cpp_extension")
+        # cpp / aclnn_py 现被验收准入白名单（run_workflow._ACCEPTANCE_RUNNER_FORMS）挡在正式验收外。
+        # 但本用例测的是**派生表**、不是准入：省 mode 时这两种 form 也必须各自落到自己的真机 mode。
+        # 故显式 allow_experimental_form=True 关掉准入门，让断言仍打在 runner_form→mode 映射上。
+        # ⚠ 这里**不能**改用 mock 夹具来"绕过"准入门：回落 mock 正是本用例要证伪的那个危险行为
+        #   （mock 的 NPU 输出 = golden.copy()、精度按构造必过），换成 mock 等于把被测对象换掉。
+        # ⚠ 也不是给准入门放水：准入门本身由 test_run_workflow_mode.py::AcceptanceFormGateTest 专测。
+        self.assertEqual(
+            W._resolve_mode({}, None, allow_experimental_form=True), "new_example")
+        self.assertEqual(
+            W._resolve_mode({"runner_form": "aclnn_py"}, None,
+                            allow_experimental_form=True), "aclnn_py")
 
     def test_no_mode_without_realcfg_failclosed_no_forged_acceptance(self):
         # 清掉真机 OPRUNWAY_* 配置（其余 env 保留，与本用例无关）→ 不带 --mode 即走默认（应 = new_example）。
@@ -1374,8 +1385,15 @@ class DefaultModeIsRealMachineTest(unittest.TestCase):
                if k not in ("OPRUNWAY_REMOTE_DIR", "OPRUNWAY_OPS_REPO", "OPRUNWAY_OPP",
                             "OPRUNWAY_OP_SRC", "OPRUNWAY_TARGET", "OPRUNWAY_SSH_HOST")}
         spec = os.path.join(self.here, "..", "samples", "specs", "isclose.spec.json")
+        # --allow-experimental-form：isclose 样例未声明 runner_form → 视作 cpp，已被验收准入白名单挡下。
+        # 本用例要测的却是**缺真机配置时的 fail-closed**，而那条路（run_workflow 里的 _ne_cfg 预检 +
+        # "--mode mock" 指路）只长在 new_example 分支上。不关掉准入门就会先被准入门非零退出——
+        # 退出码看着一样、断言 1/2 照过，测到的却不是同一件事（准入门提示里根本没有 "--mode mock"，
+        # 断言 3 会真实报错；即便将来提示措辞变了，这里也已经不是在测缺配置那条路了）。
+        # ⚠ 同理**不能**把 spec 换成 cpp_extension 绕门：那条通路没有 _ne_cfg 预检，三条断言全落空。
         r = subprocess.run(
-            [sys.executable, os.path.join(self.here, "run_workflow.py"), spec, "--out", self.d],
+            [sys.executable, os.path.join(self.here, "run_workflow.py"), spec, "--out", self.d,
+             "--allow-experimental-form"],
             capture_output=True, text=True, env=env)                          # 关键：不带 --mode
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)             # fail-closed（非零退出）
         self.assertFalse(os.path.exists(os.path.join(self.d, "acceptance.json")),
