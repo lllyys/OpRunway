@@ -12,7 +12,7 @@
     剔 `*_impl.h`、层级不预设、只收目标算子目录下的、去重、缺席时 notes 点名
 不打真网络: URL 形态用例走纯函数 _parse_pr_url（解析在网络之前）; 网络分支用桩替掉 fetch_source._get。
 """
-import os, json, tempfile, unittest
+import os, json, shutil, tempfile, unittest
 import fetch_source as fs
 
 
@@ -670,6 +670,313 @@ class SourceFactsTest(unittest.TestCase):
             fs.write_source_facts(task, self._facts(), d)
             second = json.load(open(path, encoding="utf-8"))
             self.assertNotEqual(first["digest"], second["digest"])
+
+
+class RootDigestTest(unittest.TestCase):
+    """`compute_root_digest` —— 本地通路的 provenance 锚，确定性与三个已知坑。"""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.repo = os.path.join(self.d, "repo")
+        os.makedirs(os.path.join(self.repo, "op/sub"), exist_ok=True)
+        self._write("op/a.cpp", b"int a;")
+        self._write("op/sub/b.h", b"void b();")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _write(self, rel, data):
+        full = os.path.join(self.repo, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "wb") as fh:
+            fh.write(data)
+        return full
+
+    def _digest(self):
+        return fs.compute_root_digest(self.repo, "op")
+
+    def test_deterministic_across_runs(self):
+        self.assertEqual(self._digest(), self._digest())
+        self.assertRegex(self._digest(), r"^[0-9a-f]{64}$")
+
+    def test_content_change_changes_digest(self):
+        before = self._digest()
+        self._write("op/a.cpp", b"int a; // changed")
+        self.assertNotEqual(before, self._digest())
+
+    def test_excluded_dirs_do_not_affect_digest(self):
+        """`.git/` `__pycache__/` `build/` `*.pyc` 的变动不得进摘要——否则本地跑一次编译就换个身份。"""
+        before = self._digest()
+        self._write("op/.git/HEAD", b"ref: refs/heads/x")
+        self._write("op/__pycache__/x.cpython-311.pyc", b"\x00\x01")
+        self._write("op/sub/__pycache__/deep.pyc", b"\x00\x02")   # 嵌套层也要排除，不只首段
+        self._write("op/build/out.o", b"obj")
+        self._write("op/stale.pyc", b"\x00\x03")
+        self.assertEqual(before, self._digest())
+
+    def test_empty_directory_is_counted(self):
+        """⭐ 删掉目录里最后一个文件，摘要必须变——空目录不计入就查不出这种删除。"""
+        os.makedirs(os.path.join(self.repo, "op/empty"), exist_ok=True)
+        with_empty = self._digest()
+        os.rmdir(os.path.join(self.repo, "op/empty"))
+        self.assertNotEqual(with_empty, self._digest())
+
+        os.remove(os.path.join(self.repo, "op/sub/b.h"))          # sub/ 变空目录
+        self.assertNotEqual(with_empty, self._digest())
+
+    def test_symlink_and_regular_file_do_not_collide(self):
+        """⭐ 把文件换成指向别处的软链，摘要必须变——kind 前缀区分 f/l 就是为这个。"""
+        target = os.path.join(self.repo, "op/link_me")
+        with open(target, "wb") as fh:
+            fh.write(b"payload")
+        as_file = self._digest()
+        os.remove(target)
+        os.symlink("payload", target)                             # 内容相同的软链（目标名恰好也是 payload）
+        self.assertNotEqual(as_file, self._digest())
+
+    def test_op_subdir_escape_rejected(self):
+        with self.assertRaises(RuntimeError):
+            fs.compute_root_digest(self.repo, "../")
+
+    def test_missing_op_subdir_rejected(self):
+        with self.assertRaises(RuntimeError):
+            fs.compute_root_digest(self.repo, "no_such_dir")
+
+
+@unittest.skipUnless(shutil.which("git"), "需要 git 可执行文件")
+class LocalCheckoutFetchTest(unittest.TestCase):
+    """`--local-repo` 全链路：产物形态、completeness 分支、dirty 门、互斥校验。"""
+
+    OP_SUBDIR = "experimental/math/roll"
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.repo = os.path.join(self.d, "ops")
+        self.out = os.path.join(self.d, "out")
+        os.makedirs(self.out, exist_ok=True)
+        self._write(f"{self.OP_SUBDIR}/op_host/op_api/aclnn_roll.h",
+                    "aclnnStatus aclnnRollGetWorkspaceSize(const aclTensor*, aclTensor*,"
+                    " uint64_t*, aclOpExecutor**);\n")
+        self._write(f"{self.OP_SUBDIR}/examples/test_aclnn_roll.cpp",
+                    "int main(){ aclnnRollGetWorkspaceSize(x, y, &ws, &exe);"
+                    " aclnnRoll(ws, exe, stream); }\n")
+        self._write(f"{self.OP_SUBDIR}/op_host/roll_def.cpp", "// op def\n")
+        self.task = os.path.join(self.d, "task.md")
+        with open(self.task, "wb") as fh:
+            fh.write("# Roll 任务书\n".encode())
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _write(self, rel, text):
+        full = os.path.join(self.repo, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _git(self, *args):
+        import subprocess
+        return subprocess.run(("git", "-C", self.repo) + args,
+                              capture_output=True, text=True, check=True)
+
+    def _init_git(self, base_branch="master"):
+        self._git("init", "-q", "-b", base_branch)
+        self._git("config", "user.email", "t@example.invalid")
+        self._git("config", "user.name", "t")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "base")
+
+    def _payload(self):
+        import content_address as ca
+        return ca.read_artifact(self.out, "source_facts.json", "oprunway/source-facts/v1")
+
+    def test_clean_git_repo_with_base_ref_is_complete(self):
+        self._init_git()
+        self._git("checkout", "-q", "-b", "feature")
+        self._write(f"{self.OP_SUBDIR}/op_host/roll_def.cpp", "// op def v2\n")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "change")
+        rc = fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                      "--op-subdir", self.OP_SUBDIR, "--base-ref", "master",
+                      "--out", self.out])
+        self.assertEqual(rc, 0)
+        for name in ("task_doc.md", "task_doc.snapshot.md", "pr_facts.json", "source_facts.json"):
+            self.assertTrue(os.path.exists(os.path.join(self.out, name)), name)
+        p = self._payload()
+        self.assertEqual(p["completeness"]["status"], "complete")
+        self.assertEqual(p["completeness"]["reasons"], [])
+        self.assertNotIn("warnings", p["completeness"])
+        self.assertEqual(p["dut_source"], "local_checkout")
+        self.assertNotIn("pr", p, "本地事实不得伪装成 PR 事实")
+        self.assertRegex(p["local_checkout"]["root_digest"], r"^[0-9a-f]{64}$")
+        self.assertTrue(p["local_checkout"]["digest_excludes"])
+        self.assertEqual(p["local_checkout"]["op_subdir"], self.OP_SUBDIR)
+        self.assertFalse(p["local_checkout"]["git"]["dirty"])
+        self.assertEqual(p["changed_files"], [f"{self.OP_SUBDIR}/op_host/roll_def.cpp"])
+        # 关键文件锚 = root_digest（不是 head_sha，也不是 None）
+        self.assertEqual({k["ref"] for k in p["key_files"]},
+                         {p["local_checkout"]["root_digest"]})
+
+    def test_non_git_directory_still_complete_without_git_key(self):
+        rc = fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                      "--op-subdir", self.OP_SUBDIR, "--out", self.out])
+        self.assertEqual(rc, 0)
+        p = self._payload()
+        self.assertEqual(p["completeness"]["status"], "complete")
+        self.assertNotIn("git", p["local_checkout"], "非 git 仓不得写空壳 git 键")
+
+    def test_missing_base_ref_marks_unavailable_not_empty_list(self):
+        """⭐ `[]` 的语义是「没有改动」，会让下游以为 PR 什么都没改——必须是 'unavailable'。"""
+        self._init_git()
+        rc = fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                      "--op-subdir", self.OP_SUBDIR, "--out", self.out])
+        self.assertEqual(rc, 0)
+        p = self._payload()
+        self.assertEqual(p["changed_files"], "unavailable")
+        self.assertNotEqual(p["changed_files"], [])
+        self.assertEqual(p["completeness"]["status"], "complete")     # 非阻塞
+        self.assertEqual(p["completeness"]["warnings"], ["changed_files_unavailable"])
+
+    def test_dirty_worktree_blocked_without_allow_dirty(self):
+        self._init_git()
+        self._write(f"{self.OP_SUBDIR}/op_host/roll_def.cpp", "// uncommitted\n")
+        rc = fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                      "--op-subdir", self.OP_SUBDIR, "--out", self.out])
+        self.assertEqual(rc, 0)                       # 取材照样落盘供诊断，门在 completeness
+        p = self._payload()
+        self.assertEqual(p["completeness"]["status"], "blocked")
+        self.assertIn("dirty_worktree_not_allowed", p["completeness"]["reasons"])
+
+    def test_dirty_worktree_allowed_with_full_accounting(self):
+        self._init_git()
+        self._write(f"{self.OP_SUBDIR}/op_host/roll_def.cpp", "// uncommitted\n")
+        rc = fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                      "--op-subdir", self.OP_SUBDIR, "--allow-dirty", "--out", self.out])
+        self.assertEqual(rc, 0)
+        p = self._payload()
+        self.assertEqual(p["completeness"]["status"], "complete")
+        git = p["local_checkout"]["git"]
+        self.assertTrue(git["dirty"])
+        self.assertIn(f"{self.OP_SUBDIR}/op_host/roll_def.cpp", git["dirty_files"])
+        self.assertIn(f"{self.OP_SUBDIR}/op_host/roll_def.cpp", git["dirty_files_in_op_subdir"])
+
+    def test_pr_and_local_repo_are_mutually_exclusive_and_leave_no_artifacts(self):
+        with self.assertRaises(SystemExit):
+            fs.main(["--taskdoc", self.task,
+                     "--pr", "https://gitcode.com/cann/ops-nn/pull/6429",
+                     "--local-repo", self.repo, "--op-subdir", self.OP_SUBDIR,
+                     "--out", os.path.join(self.d, "out2")])
+        self.assertFalse(os.path.exists(os.path.join(self.d, "out2")))
+
+    def test_local_repo_without_op_subdir_rejected(self):
+        with self.assertRaises(SystemExit):
+            fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                     "--out", os.path.join(self.d, "out3")])
+        self.assertFalse(os.path.exists(os.path.join(self.d, "out3")))
+
+    def test_neither_source_warns_and_exits_nonzero_without_source_facts(self):
+        out = os.path.join(self.d, "out4")
+        rc = fs.main(["--taskdoc", self.task, "--out", out])
+        self.assertEqual(rc, 2)
+        self.assertTrue(os.path.exists(os.path.join(out, "task_doc.md")))
+        self.assertFalse(os.path.exists(os.path.join(out, "source_facts.json")))
+        self.assertFalse(os.path.exists(os.path.join(out, "pr_facts.json")))
+
+    def test_local_payload_passes_preparation_state_validator(self):
+        """Step 1 的另一半：`validate_preparation_state` 必须认本地形态。"""
+        import validate_preparation_state as vps
+        self._init_git()
+        fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                 "--op-subdir", self.OP_SUBDIR, "--allow-dirty", "--out", self.out])
+        vps._validate_source_payload(self._payload())          # 不抛即通过
+
+    def test_validator_rejects_mixed_source_facts(self):
+        """收据同时带 `pr` 与 `local_checkout` → 来源身份不可信，拒。"""
+        import validate_preparation_state as vps
+        self._init_git()
+        fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                 "--op-subdir", self.OP_SUBDIR, "--out", self.out])
+        p = self._payload()
+        p["pr"] = {"canonical_url": "https://gitcode.com/o/r/pull/1", "head_sha": "a" * 40}
+        with self.assertRaises(Exception) as cm:
+            vps._validate_source_payload(p)
+        self.assertIn("混装", str(cm.exception))
+
+
+class PullRequestPayloadUnchangedTest(unittest.TestCase):
+    """⭐ 安全绳：PR 通路 payload **去掉 `producer` 后**与改动前逐字节相同。
+
+    ⚠ 不能断言整个 digest 不变——`producer.logic_sha256` 是 `fetch_source.py` **自身源码**
+    的哈希，改一个字节它必然变（这是有意的 provenance 设计，不是 bug）。
+    因此安全绳只锁业务字段：去掉 `producer` 之后的 canonical JSON 必须逐字节相同。
+    这里把「改动前」的期望值写死成字面量，避免拿改动后的代码自己证明自己。
+    """
+
+    EXPECTED_WITHOUT_PRODUCER = {
+        "changed_files": ["index/median/op_host/aclnn_median.h"],
+        "completeness": {"reasons": [], "status": "complete"},
+        "contract_version": 1,
+        "derived": {
+            "aclnn_entry": "aclnnMedian",
+            "aclnn_headers": ["index/median/op_host/aclnn_median.h"],
+            "interface_kind": "aclnn_2stage",
+            "op": "median",
+            "target_dir": "index/median",
+        },
+        "key_files": [{
+            "bytes_sha256": "0d1d2d40a6bd7ea08f8ee0dbf3b0d4b6b64f1de8ca4d0b31de4a25a83e42e4bd",
+            "path": "index/median/op_host/aclnn_median.h",
+            "ref": "a" * 40,
+            "size": 19,
+        }],
+        "pr": {
+            "canonical_url": "https://gitcode.com/cann/ops-nn/pull/6429",
+            "head_repo": "contributor/ops-nn",
+            "head_sha": "a" * 40,
+            "is_fork": True,
+            "number": 6429,
+            "source_repo": "cann/ops-nn",
+            "state": "opened",
+        },
+        "taskdoc": {
+            "bytes_sha256": "f1b6f2e0a0b9d6c9b8a9e1a4c0e8a1b9f2c3d4e5f60718293a4b5c6d7e8f9012",
+            "size": 9,
+            "snapshot_sha256": "f1b6f2e0a0b9d6c9b8a9e1a4c0e8a1b9f2c3d4e5f60718293a4b5c6d7e8f9012",
+            "source_locator": "<local-file>",
+        },
+    }
+
+    def test_pr_payload_business_fields_are_byte_identical(self):
+        import content_address as ca
+        sha = "a" * 40
+        facts = {
+            "pr_url": "https://gitcode.com/cann/ops-nn/pull/6429",
+            "source_repo": "cann/ops-nn", "head_sha": sha,
+            "head_repo": "contributor/ops-nn", "is_fork": True, "state": "opened",
+            "changed_files": ["index/median/op_host/aclnn_median.h"],
+            "key_files": {"index/median/op_host/aclnn_median.h": "void aclnnMedian();"},
+            "key_files_ref": {"index/median/op_host/aclnn_median.h": sha},
+            "aclnn_headers": ["index/median/op_host/aclnn_median.h"],
+            "op": "median", "target_dir": "index/median",
+            "interface_kind": "aclnn_2stage", "aclnn_entry": "aclnnMedian",
+        }
+        with tempfile.TemporaryDirectory() as d:
+            task = os.path.join(d, "task_doc.md")
+            with open(task, "wb") as out:
+                out.write("任务书".encode())                       # 9 字节 UTF-8
+            payload = fs.build_source_facts(task, facts)
+        self.assertNotIn("dut_source", payload, "PR 通路不得写 dut_source 键（业务字段必须不变）")
+        self.assertNotIn("local_checkout", payload)
+        self.assertNotIn("warnings", payload["completeness"], "warnings 恒空时必须整键省略")
+        expected = dict(self.EXPECTED_WITHOUT_PRODUCER)
+        # 任务书摘要与 key_file 摘要随夹具算，不写死具体值（写死了改夹具就得改两处）
+        expected["taskdoc"] = dict(expected["taskdoc"])
+        expected["taskdoc"]["bytes_sha256"] = payload["taskdoc"]["bytes_sha256"]
+        expected["taskdoc"]["snapshot_sha256"] = payload["taskdoc"]["snapshot_sha256"]
+        expected["key_files"] = [dict(expected["key_files"][0])]
+        expected["key_files"][0]["bytes_sha256"] = payload["key_files"][0]["bytes_sha256"]
+        actual = {k: v for k, v in payload.items() if k != "producer"}
+        self.assertEqual(ca.canonical_json_bytes(actual), ca.canonical_json_bytes(expected))
 
 
 if __name__ == "__main__":

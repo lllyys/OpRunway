@@ -15,8 +15,12 @@ import os
 import sys
 
 import content_address
+import dut_source
 
 
+_DUT_SOURCE_PR = dut_source.PULL_REQUEST
+_DUT_SOURCE_LOCAL = dut_source.LOCAL_CHECKOUT
+_DUT_SOURCES = dut_source.ALL
 _SOURCE_DOMAIN = "oprunway/source-facts/v1"
 _RECEIPT_DOMAIN = "oprunway/preparation-receipt/v1"
 _LEDGER_SCHEMA = "oprunway.gen_cases.dry_run_ledger"
@@ -34,14 +38,27 @@ def _is_sha(value, length=64):
 
 
 def _validate_source_payload(source):
-    """校验 source facts 的载重字段；摘要自洽不等于 producer 输出完整。"""
+    """校验 source facts 的载重字段；摘要自洽不等于 producer 输出完整。
+
+    按 `dut_source` 判别式分支（缺省 `pull_request`，老收据不带这个键仍走 PR 分支）：
+
+      · `pull_request`  ：`pr` 必填集**一行不改**，关键文件锚 = `pr.head_sha`；
+      · `local_checkout`：`local_checkout.root_digest` 必填（64 位 sha）、`op_subdir` 非空 str，
+        关键文件锚 = `root_digest`；**不接受 `pr` 键**（本地事实不许伪装成 PR 事实）。
+    """
     if not isinstance(source, dict):
         raise content_address.ContentAddressError(
             "source_facts payload 须为 JSON object")
+    try:
+        # 判别式 + 「两条通路的事实键互斥」一并在这里收（未知取值、混装收据都当场拒）。
+        kind = dut_source.assert_facts_key_exclusive(source, where="source_facts")
+    except dut_source.DutSourceError as exc:
+        raise content_address.ContentAddressError(str(exc)) from exc
+    is_local = kind == _DUT_SOURCE_LOCAL
     required = {
-        "contract_version", "taskdoc", "pr", "changed_files", "key_files",
+        "contract_version", "taskdoc", "changed_files", "key_files",
         "derived", "completeness", "producer",
-    }
+    } | {dut_source.FACTS_KEY[kind]}
     missing = sorted(required.difference(source))
     if missing:
         raise content_address.ContentAddressError(
@@ -61,27 +78,59 @@ def _validate_source_payload(source):
             or not isinstance(taskdoc.get("source_locator"), str)):
         raise content_address.ContentAddressError(
             "source_facts.taskdoc 的 bytes/snapshot/size/source_locator 契约不完整")
-    pr = source["pr"]
-    if not isinstance(pr, dict):
-        raise content_address.ContentAddressError(
-            "source_facts.pr 须为 JSON object")
-    if (not isinstance(pr.get("canonical_url"), str)
-            or not isinstance(pr.get("source_repo"), str)
-            or not isinstance(pr.get("number"), int)
-            or isinstance(pr.get("number"), bool)
-            or pr["number"] <= 0
-            or not _is_sha(pr.get("head_sha"), length=40)
-            or not isinstance(pr.get("head_repo"), str)
-            or not isinstance(pr.get("is_fork"), bool)
-            or not isinstance(pr.get("state"), str)):
-        raise content_address.ContentAddressError(
-            "source_facts.pr 的 URL/repo/number/head/fork/state 契约不完整")
+    if is_local:
+        local = source["local_checkout"]
+        if not isinstance(local, dict):
+            raise content_address.ContentAddressError(
+                "source_facts.local_checkout 须为 JSON object")
+        if (not _is_sha(local.get("root_digest"))
+                or not isinstance(local.get("op_subdir"), str)
+                or not local.get("op_subdir")
+                or not isinstance(local.get("digest_excludes"), list)
+                or not local["digest_excludes"]
+                or any(not isinstance(x, str) or not x for x in local["digest_excludes"])):
+            raise content_address.ContentAddressError(
+                "source_facts.local_checkout 的 root_digest/op_subdir/digest_excludes 契约不完整"
+                "（root_digest 须 64 位小写 sha；digest_excludes 必须记账，否则换套排除规则算出的"
+                "摘要不可比而外表看不出来）")
+        git = local.get("git")
+        if git is not None:                          # 非 git 仓 → 整键缺席是合法的
+            if (not isinstance(git, dict)
+                    or not isinstance(git.get("dirty"), bool)
+                    or not isinstance(git.get("dirty_files"), list)):
+                raise content_address.ContentAddressError(
+                    "source_facts.local_checkout.git 契约不完整（dirty/dirty_files 必填）")
+        anchor = local["root_digest"]
+        anchor_desc = "本地子树摘要 root_digest"
+    else:
+        pr = source["pr"]
+        if not isinstance(pr, dict):
+            raise content_address.ContentAddressError(
+                "source_facts.pr 须为 JSON object")
+        if (not isinstance(pr.get("canonical_url"), str)
+                or not isinstance(pr.get("source_repo"), str)
+                or not isinstance(pr.get("number"), int)
+                or isinstance(pr.get("number"), bool)
+                or pr["number"] <= 0
+                or not _is_sha(pr.get("head_sha"), length=40)
+                or not isinstance(pr.get("head_repo"), str)
+                or not isinstance(pr.get("is_fork"), bool)
+                or not isinstance(pr.get("state"), str)):
+            raise content_address.ContentAddressError(
+                "source_facts.pr 的 URL/repo/number/head/fork/state 契约不完整")
+        anchor = pr["head_sha"]
+        anchor_desc = "PR head"
     changed_files = source["changed_files"]
-    if (not isinstance(changed_files, list) or not changed_files
+    # ⚠ 本地通路允许 `"unavailable"`（没给 --base-ref 时算不出改动清单）——它与「确实没改」
+    # 是两回事，绝不能退化成空数组。PR 通路仍必须是非空数组。
+    if is_local and changed_files == "unavailable":
+        pass
+    elif (not isinstance(changed_files, list) or not changed_files
             or any(not isinstance(path, str) or not path
                    for path in changed_files)):
         raise content_address.ContentAddressError(
-            "source_facts.changed_files 须为非空字符串数组")
+            "source_facts.changed_files 须为非空字符串数组"
+            + ("（本地通路亦可为 'unavailable'）" if is_local else ""))
     key_files = source["key_files"]
     if not isinstance(key_files, list) or not key_files:
         raise content_address.ContentAddressError(
@@ -89,13 +138,13 @@ def _validate_source_payload(source):
     for index, item in enumerate(key_files):
         if (not isinstance(item, dict)
                 or not isinstance(item.get("path"), str)
-                or item.get("ref") != pr["head_sha"]
+                or item.get("ref") != anchor
                 or not _is_sha(item.get("bytes_sha256"))
                 or not isinstance(item.get("size"), int)
                 or isinstance(item.get("size"), bool)
                 or item["size"] < 0):
             raise content_address.ContentAddressError(
-                f"source_facts.key_files[{index}] 契约不完整或未绑定 PR head")
+                f"source_facts.key_files[{index}] 契约不完整或未绑定{anchor_desc}")
     derived = source["derived"]
     if (not isinstance(derived, dict)
             or not isinstance(derived.get("op"), str)
@@ -111,6 +160,15 @@ def _validate_source_payload(source):
             or completeness.get("reasons") != []):
         raise content_address.ContentAddressError(
             "source_facts.completeness 必须是 complete 且 reasons 为空")
+    # `warnings` 是非阻塞留痕（如本地通路的 changed_files_unavailable），**仅在非空时出现**。
+    # 不参与 status 判定，但形态要校——空数组或非字符串项说明 producer 写歪了。
+    if "warnings" in completeness:
+        warnings = completeness["warnings"]
+        if (not isinstance(warnings, list) or not warnings
+                or any(not isinstance(w, str) or not w for w in warnings)):
+            raise content_address.ContentAddressError(
+                "source_facts.completeness.warnings 若出现则须为非空字符串数组"
+                "（空数组请整键省略——恒为空的键会改动 PR 通路的业务字段）")
     producer = source["producer"]
     if (not isinstance(producer, dict)
             or producer.get("tool") != "fetch_source.py"
