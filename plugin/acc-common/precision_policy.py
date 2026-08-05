@@ -806,11 +806,46 @@ GOLDEN_SOURCE_KIND = ("single_api", "multistep", "external_method", "needs_user"
 #   谎称 torch_cpu/numpy_cpu，那是被禁止的**静默换标杆**（5.8）。
 # ⛔ `gpu_lib`（含 OpenCV-CUDA / cuSPARSE 等）**刻意不进** RUNNABLE，别顺手加：
 #   R4 要求「任务书指定了、但本环境跑不起来」的方法一律 fail-closed 抛用户，**不自动回落**。
-#   「同一个库的 CPU 版能跑」不是放行 GPU 口径的理由——cv::GaussianBlur 的 CPU 与 CUDA 实现
-#   并非逐位一致，拿 CPU 结果冒充 GPU 标杆就是换标杆。要走 CPU 口径必须由人显式改声明。
+#   「同一个库的 CPU 版能跑」不是放行 GPU 口径的理由——拿 CPU 结果**冒充** GPU 标杆就是换标杆。
+#   ⚠ 这条与下面的 §5.11 解析层**不矛盾**：那一层不是「回落」，是把任务书的 GPU 写法**读成** CPU
+#     并留下解析记录；解析后的 method_kind 仍须落在 RUNNABLE 里、仍走同一套判档。
+#     「冒充」被禁的是**不留痕地换**，不是「按仓规明示的读法解析后如实记账」。
 GOLDEN_METHOD_KIND = ("torch_cpu", "numpy_cpu", "opencv_cpu",
                       "builtin_tbe", "gpu_lib", "other_external", "needs_user")
 RUNNABLE_METHOD_KINDS = frozenset({"torch_cpu", "numpy_cpu", "opencv_cpu"})   # R3 第二档：CPU 上跑得起来的现成库
+
+# ---- §5.11 · 任务书写 GPU 一律解析为同族 CPU（用户 2026-08-05 全局解析规则）----
+#
+# 这是**解析口径**，不是降级取证：任务书里「以 OpenCV GPU 为标杆」这类写法，按仓规就该读成
+# 同族的 CPU 实现。故它**不产生**「GPU 口径未验收」的 gap（那是把解析规则误当成降级）。
+#
+# ⚠ 与 5.10 性质不同：5.10 是**取消比较**（性能不取标杆、不算比值），条款按未验收记账；
+#    5.11 是**解析**（真值口径按同族 CPU 读），条款视为已被满足。两者别互相照搬。
+#
+# 映射按**方法族**组织、是数据不是代码分支（5.1）：换任何算子、任何任务书零改即用。
+# 同族无 CPU 对应 → 返回 None，调用方照旧 fail-closed，**不硬凑**。
+_GPU_TO_CPU_SAME_FAMILY = {
+    # 任务书把 OpenCV 的 GPU/CUDA 实现写成真值口径 → 读作同库的 CPU 实现。
+    "gpu_lib": "opencv_cpu",
+}
+
+
+def resolve_gpu_oracle_to_cpu(method_kind):
+    """§5.11 解析：GPU 族真值口径 → 同族 CPU。返回 `(resolved_kind, record|None)`。
+
+    `record` 不是装饰品：报告必须据它写「任务书写的是 X，按 §5.11 解析为 Y」，
+    **不得**直接写成「任务书要求 Y」把解析这一步抹掉（5.8：事实与推断分开）。
+    非 GPU 族原样返回、`record=None`——本函数对既有口径**零影响**。
+    """
+    if method_kind not in _GPU_TO_CPU_SAME_FAMILY:
+        return method_kind, None
+    resolved = _GPU_TO_CPU_SAME_FAMILY[method_kind]
+    return resolved, {
+        "rule": "agents_md_5_11",
+        "declared_in_taskdoc": method_kind,
+        "resolved_to": resolved,
+        "basis": "同族 CPU 实现；仓规 §5.11 规定任务书的 GPU 真值口径统一按此解析",
+    }
 
 # 任务书对 golden 的**授权强度**。三者区别是本节最吃重的判断：
 #   oracle_method  —— 任务书就**真值口径/怎么测**作出了指定（如 IsClose「二进制比较改为逻辑值比较」）；

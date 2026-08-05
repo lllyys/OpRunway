@@ -1568,3 +1568,37 @@ class MultiOutputAcceptanceContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GpuOracleResolutionTest(unittest.TestCase):
+    """§5.11：任务书写 GPU 真值口径 → 统一解析为同族 CPU（用户 2026-08-05 全局解析规则）。
+
+    ⚠ 它是**解析**不是降级：条款视为已被满足，**不产生**「GPU 口径未验收」的 gap。
+    与 §5.10（性能取消比较、条款按未验收记账）性质不同，别互相照搬。
+    """
+
+    def test_gpu_lib_resolves_to_same_family_cpu_with_record(self):
+        resolved, rec = P.resolve_gpu_oracle_to_cpu("gpu_lib")
+        self.assertEqual(resolved, "opencv_cpu")
+        # 解析后必须落在「本环境跑得起来」的族里，否则等于换了个跑不动的口径
+        self.assertIn(resolved, P.RUNNABLE_METHOD_KINDS)
+        # 解析记录不是装饰品：报告要据它写「原文写 X、按 §5.11 解析为 Y」，不许把这一步抹掉
+        self.assertEqual(rec["rule"], "agents_md_5_11")
+        self.assertEqual(rec["declared_in_taskdoc"], "gpu_lib")
+        self.assertEqual(rec["resolved_to"], "opencv_cpu")
+
+    def test_non_gpu_kinds_pass_through_untouched(self):
+        """非 GPU 族原样返回且无记录——本解析层对既有口径必须**零影响**。"""
+        for kind in ("torch_cpu", "numpy_cpu", "opencv_cpu", "builtin_tbe",
+                     "other_external", "needs_user"):
+            with self.subTest(kind=kind):
+                resolved, rec = P.resolve_gpu_oracle_to_cpu(kind)
+                self.assertEqual(resolved, kind)
+                self.assertIsNone(rec)
+
+    def test_gpu_lib_still_not_runnable_by_itself(self):
+        """未经解析的 `gpu_lib` **仍不在** RUNNABLE——防止有人把解析层读成「GPU 现在能跑了」。
+
+        R4 的 fail-closed 一条没松：跑得起来的永远只有 CPU 那几族。
+        """
+        self.assertNotIn("gpu_lib", P.RUNNABLE_METHOD_KINDS)
