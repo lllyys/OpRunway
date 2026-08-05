@@ -29,9 +29,11 @@
   写死成 ``int (*)(void *, uint64_t, aclOpExecutor *, const aclrtStream)`` 并按 4 参调用
   （`op_plugin/utils/op_api_common.cpp`）。拿 4 参 argtypes 去调 10 参 native 函数 =
   段错误或**静默错值**，全链无门能拦。故 extended 由本模块生成**手写两段式派发**，
-  但仍全程复用官方 helper（``GetApiFunc`` / ``ConvertTypes`` / ``ConvertToOpApiFunc`` /
-  ``call`` / ``RunAclCall`` / ``ReleaseConvertTypes``），只在执行段换成由实参元组推出的
-  精确函数指针类型。
+  骨架逐句照抄 ``EXEC_NPU_CMD_V1_EXT``、全程复用官方 helper（``GetApiFunc`` /
+  ``InitExecCommonCtx`` / ``GetAclStream`` / ``SetExecConfig`` / ``ConvertTypes`` /
+  ``ConvertToOpApiFunc`` / ``call`` / ``InitExecSubTheadCtx`` / ``ReleaseConvertTypes`` /
+  ``UnInitExecCommonCtx`` / ``RunAclCall``），只把执行段那一行 ``ExecuteApiFunc``（固定 4 参）
+  换成由实参元组推出的精确函数指针调用，并自备 workspace buffer。
 
 任何第三种取值（含 ``absent``、``null``、未知串）一律 fail-closed —— 绝不「猜成 4 参」。
 """
@@ -335,7 +337,7 @@ def _render_standard_body(variant, call_args):
     return f"    EXEC_NPU_CMD_EXT(aclnn{variant['symbol']}, {call_args});"
 
 
-def _render_extended_body(variant, call_args, arg_count):
+def _render_extended_body(variant, call_args, arg_count, first_input):
     """extended stage2：按官方 helper 手写两段式派发。
 
     为什么不能用 ``EXEC_NPU_CMD_EXT``：宏的执行段最终落到 op-plugin 的 ``ExecuteApiFunc()``，
@@ -343,12 +345,25 @@ def _render_extended_body(variant, call_args, arg_count):
     并按 4 参调用。extended 形态的 native 函数要收 ``3 + N + 1`` 个实参，错 arity 调用在
     aarch64 上会从垃圾寄存器取 stream —— 段错误或**静默错值**，全链无门能拦。
 
-    这里逐项复用官方 helper，只把执行段换成由**实参元组**推出的精确函数指针类型：
-      · ``GetApiFunc``          —— 与宏同一套符号解析 + static 缓存；
-      · ``ConvertTypes``        —— 与宏同一套 at::Tensor/IntArrayRef → aclTensor*/aclIntArray* 转换；
-      · ``ConvertToOpApiFunc``  —— 由元组元素类型生成函数指针 typedef（宏自己也用它做 stage1）；
-      · ``call`` / ``RunAclCall`` / ``ReleaseConvertTypes`` / ``*ExecCommonCtx`` —— 生命周期与
-        任务队列语义与 ``EXEC_NPU_CMD_V1_EXT`` 逐句对齐。
+    生成的骨架**逐句对齐** ``op_api_common_base.h`` 的 ``EXEC_NPU_CMD_V1_EXT``（步骤 1→8），
+    只把第 7 步里那一行 ``ExecuteApiFunc(...)`` 换成由**实参元组**推出的精确函数指针调用：
+
+    ====  官方 V1_EXT 步骤                       本模块生成的对应物
+    1     ``GetApiFunc``                         同（含 static 函数指针缓存）
+    2     ``InitExecCommonCtx()``                同
+    3     ``GetAclStream()``                     同
+    4     ``hit_cache_ext``                      **刻意跳过**，见下方偏离①
+    5     ``SetExecConfig()``                    同（这才是「确定性算法」的落点）
+    6     ``ConvertTypes`` → ``call(stage1)``    同，另加 ``TORCH_CHECK`` 兜住非零返回
+    7     ``ExecuteApiFunc(4 参)``               **换成** ``call(op_api_func, exec_params)``
+    8     ``RunAclCall``                         同
+    ====
+
+    workspace 也得自己来：官方 4 参路径靠 ``ExecuteApiFunc`` 在 .so 内部申请，
+    ``OpPreparation::unsafe_empty_workspace`` 又**没有**从 ``libtorch_npu.so`` 导出（实测
+    ``nm -D`` 查无此符号），扩展里链不到。故这里用 ``at::empty`` 在与首个输入同一台设备上要
+    一块 byte buffer；该张量**按值捕获**进 ``acl_call``，生命周期覆盖到执行段跑完
+    （``RunAclCall`` 可能把 lambda 丢到下发线程）。``workspace_size == 0`` 时传 ``nullptr``。
 
     两处**刻意的偏离**，都不是遗漏：
       1. 不走 ``hit_cache_ext``：aclnn 执行缓存的重放路径（``ExecuteCachedOp``）同样把 phase-2
@@ -362,13 +377,13 @@ def _render_extended_body(variant, call_args, arg_count):
     symbol = f"aclnn{variant['symbol']}"
     return f"""    // stage2 = extended（框架三参 + stage1 实参原样重复 + stream，共 {variant['stage2_call_arity']} 参）。
     // 官方 EXEC_NPU_CMD_EXT 的执行段固定按 4 参调 phase-2，对这条 ABI 会静默错调，故手写派发。
+    // 骨架逐句对齐 op_api_common_base.h 的 EXEC_NPU_CMD_V1_EXT，只换掉执行段那一行。
     static void *op_api_addr = nullptr;
     static void *get_workspace_size_addr = nullptr;
     GetApiFunc("{symbol}", "{symbol}GetWorkspaceSize", op_api_addr, get_workspace_size_addr);
     InitExecCommonCtx();
     auto acl_stream = GetAclStream();
-    auto snapshot = c10_npu::CaptureDeterministicSnapshot();
-    at_npu::native::ApplyDeterministicSnapshot(snapshot, true);
+    SetExecConfig();  // 官方步骤 5：确定性算法等执行配置的唯一落点。
     uint64_t workspace_size = 0;
     uint64_t *workspace_size_addr = &workspace_size;
     aclOpExecutor *executor = nullptr;
@@ -377,23 +392,34 @@ def _render_extended_body(variant, call_args, arg_count):
     auto get_workspace_size_func = ConvertToOpApiFunc(converted_params, get_workspace_size_addr);
     auto workspace_status = call(get_workspace_size_func, converted_params);
     TORCH_CHECK(workspace_status == 0, "{symbol}GetWorkspaceSize failed, ret=", workspace_status);
-    void *workspace_addr = GetWorkSpaceAddr(workspace_size);
+    // workspace 自申请：官方 4 参路径由 .so 内部的 ExecuteApiFunc 代劳，而
+    // OpPreparation::unsafe_empty_workspace 未从 libtorch_npu.so 导出，扩展里链不到。
+    // 张量按值捕获进 acl_call，生命周期覆盖到执行段跑完。
+    at::Tensor workspace_tensor;
+    void *workspace_addr = nullptr;
+    if (workspace_size != 0) {{
+        workspace_tensor = at::empty({{static_cast<int64_t>(workspace_size)}},
+                                     {first_input}.options().dtype(at::kByte));
+        workspace_addr = workspace_tensor.data_ptr();
+    }}
     // 执行段实参 = 框架三参 + **本次已转换好的 stage1 实参原样重复** + stream。
-    // 复用 converted_params 的前 {arg_count} 项，绝不二次 ConvertTypes（那会再造一批 acl 对象）。
+    // 复用 converted_params 的前 {arg_count} 项，绝不二次 ConvertTypes（那会再造一批 acl 对象）；
+    // 末两项 workspace_size_addr / executor_addr 是 stage1 专有出参，不进 stage2。
     auto exec_params = std::make_tuple(
         workspace_addr, workspace_size, executor,
         {picks},
         acl_stream);
     auto op_api_func = ConvertToOpApiFunc(exec_params, op_api_addr);
-    auto acl_call = [exec_params, converted_params, op_api_func, acl_stream]() -> int {{
+    auto acl_call = [exec_params, converted_params, workspace_tensor, op_api_func,
+                     acl_stream]() -> int {{
+        (void)workspace_tensor;  // 捕获只为续命：buffer 必须活过下面这次执行。
         InitExecSubTheadCtx(acl_stream);
         auto api_ret = call(op_api_func, exec_params);
         ReleaseConvertTypes(converted_params);
-        ReleaseExecCommonCtx();
+        UnInitExecCommonCtx();
         return api_ret;
     }};
-    RunAclCall("{symbol}", acl_call);
-    UnInitExecCommonCtx();"""
+    RunAclCall("{symbol}", acl_call);"""
 
 
 def _render_cpp(namespace, params, variants):
@@ -410,7 +436,7 @@ def _render_cpp(namespace, params, variants):
         if v["stage2_form"] == STAGE2_STANDARD:
             body = _render_standard_body(v, call_args)
         elif v["stage2_form"] == STAGE2_EXTENDED:
-            body = _render_extended_body(v, call_args, len(variant_params))
+            body = _render_extended_body(v, call_args, len(variant_params), first_input)
         else:
             # `_resolve_stage2` 已把词表外的值拦死；这里是最后一道，防将来有人扩词表却忘了改这。
             raise CppExtensionCodegenError(
@@ -517,15 +543,18 @@ def generate(spec, out_dir, preflight=None):
             "loader": "torch.ops.load_library",
             # extended stage2 走不了官方宏（宏的执行段固定 4 参），改按官方 helper 手写两段式。
             # 逐变体实际走哪条见 `variants[].dispatch`。
+            # 逐个都是 op_api_common_base.h 里**已声明且从 libtorch_npu.so 导出**的符号
+            # （2026-08-05 于真机容器 torch_npu 2.10.0 用 nm -D 逐条核过）。
             "extended_stage2_helpers": [
-                "GetApiFunc", "ConvertTypes", "ConvertToOpApiFunc", "call",
-                "GetWorkSpaceAddr", "RunAclCall", "InitExecSubTheadCtx",
-                "ReleaseConvertTypes", "InitExecCommonCtx", "UnInitExecCommonCtx",
-                "ReleaseExecCommonCtx",
+                "GetApiFunc", "InitExecCommonCtx", "GetAclStream", "SetExecConfig",
+                "ConvertTypes", "ConvertToOpApiFunc", "call", "InitExecSubTheadCtx",
+                "ReleaseConvertTypes", "UnInitExecCommonCtx", "RunAclCall",
             ],
             "extended_stage2_deviations": [
                 "no_hit_cache_ext:执行缓存的重放路径同样固定 4 参，命中即绕回错 arity 调用",
                 "v1_semantics_only:不实现 task_queue_enable==2 的 V2 分支（ExecuteApiFuncV2 同样固定 arity）",
+                "self_allocated_workspace:OpPreparation::unsafe_empty_workspace 未从 libtorch_npu.so"
+                " 导出，改用 at::empty 按首个输入的 device 申请 byte buffer，按值捕获续命至执行结束",
             ],
         },
         # 机读降级挂账（恒存在；空表 = 工具记过、没有降级）。

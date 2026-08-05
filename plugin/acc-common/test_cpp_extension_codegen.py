@@ -168,9 +168,26 @@ class CppExtensionStage2DispatchTest(unittest.TestCase):
         self.assertNotIn("EXEC_NPU_CMD_EXT(", cpp)
         # 执行段实参必须**复用**已转换的 stage1 实参，且个数与 arity 对得上
         self.assertEqual(cpp.count("std::get<"), 4)
-        for helper in ("GetApiFunc(", "ConvertTypes(", "ConvertToOpApiFunc(",
-                       "GetWorkSpaceAddr(", "RunAclCall(", "ReleaseConvertTypes("):
+        # 只许出现**实装 libtorch_npu.so 真导出**的 helper（官方 EXEC_NPU_CMD_V1_EXT 同一套）
+        for helper in ("GetApiFunc(", "InitExecCommonCtx()", "GetAclStream()",
+                       "SetExecConfig()", "ConvertTypes(", "ConvertToOpApiFunc(",
+                       "InitExecSubTheadCtx(", "ReleaseConvertTypes(",
+                       "UnInitExecCommonCtx()", "RunAclCall("):
             self.assertIn(helper, cpp)
+        self.assertEqual(manifest["official_pattern"]["extended_stage2_helpers"],
+                         ["GetApiFunc", "InitExecCommonCtx", "GetAclStream", "SetExecConfig",
+                          "ConvertTypes", "ConvertToOpApiFunc", "call", "InitExecSubTheadCtx",
+                          "ReleaseConvertTypes", "UnInitExecCommonCtx", "RunAclCall"])
+        # workspace 自申请：官方 unsafe_empty_workspace 未导出，扩展里链不到
+        self.assertIn("at::Tensor workspace_tensor;", cpp)
+        self.assertIn("workspace_tensor.data_ptr()", cpp)
+        self.assertIn("src.options().dtype(at::kByte)", cpp)   # buffer 落在首个输入的设备上
+        self.assertIn("workspace_tensor, op_api_func", cpp)    # 按值捕获续命到执行结束
+        # 真机实测不存在的符号一个都不许再冒出来（2026-08-05 编译报错的四个）
+        for phantom in ("CaptureDeterministicSnapshot", "ApplyDeterministicSnapshot",
+                        "GetWorkSpaceAddr", "ReleaseExecCommonCtx"):
+            self.assertNotIn(phantom, cpp)
+            self.assertNotIn(phantom, json.dumps(manifest, ensure_ascii=False))
 
     def test_preflight_must_bind_the_same_spec(self):
         spec = _array_attr_spec()
