@@ -734,6 +734,53 @@ class RootDigestTest(unittest.TestCase):
         os.symlink("payload", target)                             # 内容相同的软链（目标名恰好也是 payload）
         self.assertNotEqual(as_file, self._digest())
 
+    def test_directory_symlink_is_counted(self):
+        """⭐ 目录软链必须进摘要。
+
+        `os.walk` 会把目录软链放进 `dirnames`、又因 `followlinks=False` 不递归进去，
+        于是整条**完全不进摘要**——加一个、删一个都查不出来。这里锁死它。
+        """
+        before = self._digest()
+        os.symlink("sub", os.path.join(self.repo, "op/sub_link"))
+        after_add = self._digest()
+        self.assertNotEqual(before, after_add, "加目录软链后摘要没变（漏计）")
+        os.remove(os.path.join(self.repo, "op/sub_link"))
+        os.symlink("elsewhere", os.path.join(self.repo, "op/sub_link"))
+        self.assertNotEqual(after_add, self._digest(), "改目录软链目标后摘要没变")
+
+    def test_executable_bit_change_changes_digest(self):
+        """⭐ build 脚本 644→755 会改构建行为，摘要必须跟着变。"""
+        script = self._write("op/build.sh", b"#!/bin/sh\necho hi\n")
+        os.chmod(script, 0o644)
+        before = self._digest()
+        os.chmod(script, 0o755)
+        self.assertNotEqual(before, self._digest())
+
+    def test_unreadable_directory_is_not_silently_skipped(self):
+        """⭐ 遍历出错不许吞：少读一棵子树照样算得出 digest = 一份假摘要。"""
+        if os.geteuid() == 0:
+            self.skipTest("root 无视目录权限位，构造不出不可读目录")
+        blocked = os.path.join(self.repo, "op/locked")
+        os.makedirs(blocked, exist_ok=True)
+        self._write("op/locked/inner.cpp", b"x")
+        os.chmod(blocked, 0o000)
+        try:
+            with self.assertRaises(RuntimeError):
+                self._digest()
+        finally:
+            os.chmod(blocked, 0o755)
+
+    def test_non_regular_entry_rejected(self):
+        """FIFO 的被测语义未定义 → fail-closed，不静默跳过（跳过 = 摘要少覆盖一块）。"""
+        fifo = os.path.join(self.repo, "op/pipe")
+        try:
+            os.mkfifo(fifo)
+        except (AttributeError, OSError):
+            self.skipTest("本平台不支持 mkfifo")
+        with self.assertRaises(RuntimeError) as cm:
+            self._digest()
+        self.assertIn("fail-closed", str(cm.exception))
+
     def test_op_subdir_escape_rejected(self):
         with self.assertRaises(RuntimeError):
             fs.compute_root_digest(self.repo, "../")
@@ -741,6 +788,14 @@ class RootDigestTest(unittest.TestCase):
     def test_missing_op_subdir_rejected(self):
         with self.assertRaises(RuntimeError):
             fs.compute_root_digest(self.repo, "no_such_dir")
+
+    def test_digest_policy_is_structured_and_versioned(self):
+        """收据里的排除规则必须是结构化 + 版本化的，不是看起来像 glob 的字符串。"""
+        pol = fs.digest_policy()
+        self.assertEqual(pol["algorithm"], fs.DIGEST_ALGORITHM)
+        self.assertIsInstance(pol["algorithm_version"], int)
+        self.assertIn("__pycache__", pol["excluded_segment_names"])
+        self.assertIn(".pyc", pol["excluded_basename_suffixes"])
 
 
 @unittest.skipUnless(shutil.which("git"), "需要 git 可执行文件")
@@ -809,7 +864,7 @@ class LocalCheckoutFetchTest(unittest.TestCase):
         self.assertEqual(p["dut_source"], "local_checkout")
         self.assertNotIn("pr", p, "本地事实不得伪装成 PR 事实")
         self.assertRegex(p["local_checkout"]["root_digest"], r"^[0-9a-f]{64}$")
-        self.assertTrue(p["local_checkout"]["digest_excludes"])
+        self.assertEqual(p["local_checkout"]["digest_policy"], fs.digest_policy())
         self.assertEqual(p["local_checkout"]["op_subdir"], self.OP_SUBDIR)
         self.assertFalse(p["local_checkout"]["git"]["dirty"])
         self.assertEqual(p["changed_files"], [f"{self.OP_SUBDIR}/op_host/roll_def.cpp"])
@@ -842,12 +897,13 @@ class LocalCheckoutFetchTest(unittest.TestCase):
         self._write(f"{self.OP_SUBDIR}/op_host/roll_def.cpp", "// uncommitted\n")
         rc = fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
                       "--op-subdir", self.OP_SUBDIR, "--out", self.out])
-        self.assertEqual(rc, 0)                       # 取材照样落盘供诊断，门在 completeness
+        # ⭐ 落盘 ≠ 成功：blocked 必须非 0 退出，否则只看退出码的 shell 调用方会照常往下走。
+        self.assertEqual(rc, 3)
         p = self._payload()
         self.assertEqual(p["completeness"]["status"], "blocked")
         self.assertIn("dirty_worktree_not_allowed", p["completeness"]["reasons"])
 
-    def test_dirty_worktree_allowed_with_full_accounting(self):
+    def test_dirty_worktree_allowed_with_full_accounting_and_warning(self):
         self._init_git()
         self._write(f"{self.OP_SUBDIR}/op_host/roll_def.cpp", "// uncommitted\n")
         rc = fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
@@ -855,10 +911,53 @@ class LocalCheckoutFetchTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         p = self._payload()
         self.assertEqual(p["completeness"]["status"], "complete")
+        # ⭐ 降级必须留痕：dirty 放行却没有 warning，就是以干净 pass 混过去
+        self.assertIn(fs.WARN_DIRTY_WORKTREE_ALLOWED, p["completeness"]["warnings"])
         git = p["local_checkout"]["git"]
         self.assertTrue(git["dirty"])
         self.assertIn(f"{self.OP_SUBDIR}/op_host/roll_def.cpp", git["dirty_files"])
         self.assertIn(f"{self.OP_SUBDIR}/op_host/roll_def.cpp", git["dirty_files_in_op_subdir"])
+
+    def test_dirty_path_with_space_and_unicode_is_recorded_intact(self):
+        """porcelain 解析：带空格/非 ASCII 的路径不能被 C-quoting 或 strip 记错。"""
+        self._init_git()
+        weird = f"{self.OP_SUBDIR}/op_host/a b 中文.cpp"
+        self._write(weird, "// x\n")
+        rc = fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                      "--op-subdir", self.OP_SUBDIR, "--allow-dirty", "--out", self.out])
+        self.assertEqual(rc, 0)
+        git = self._payload()["local_checkout"]["git"]
+        self.assertIn(weird, git["dirty_files"])
+        self.assertIn(weird, git["dirty_files_in_op_subdir"])
+
+    def test_key_files_are_independent_of_base_ref(self):
+        """⭐ 给不给 --base-ref 不得改变关键文件集合——取证方式不该改变被测语义。"""
+        self._init_git()
+        self._git("checkout", "-q", "-b", "feature")
+        self._write(f"{self.OP_SUBDIR}/op_host/roll_def.cpp", "// v2\n")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "c")
+        fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                 "--op-subdir", self.OP_SUBDIR, "--base-ref", "master", "--out", self.out])
+        with_base = {k["path"] for k in self._payload()["key_files"]}
+        out2 = os.path.join(self.d, "out_nb")
+        fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                 "--op-subdir", self.OP_SUBDIR, "--out", out2])
+        import content_address as ca
+        without_base = {k["path"] for k in
+                        ca.read_artifact(out2, "source_facts.json",
+                                         "oprunway/source-facts/v1")["key_files"]}
+        self.assertEqual(with_base, without_base)
+
+    def test_key_files_never_escape_the_digested_subtree(self):
+        """⭐ 关键文件的 ref 记的是只覆盖 op_subdir 的 root_digest，所以候选必须锁在子树内。"""
+        self._write("other_op/examples/test_aclnn_other.cpp", "int main(){}\n")
+        fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                 "--op-subdir", self.OP_SUBDIR, "--out", self.out])
+        p = self._payload()
+        for item in p["key_files"]:
+            self.assertTrue(item["path"].startswith(self.OP_SUBDIR + "/"),
+                            f"关键文件 {item['path']} 在 root_digest 覆盖范围之外")
 
     def test_pr_and_local_repo_are_mutually_exclusive_and_leave_no_artifacts(self):
         with self.assertRaises(SystemExit):
@@ -901,6 +1000,61 @@ class LocalCheckoutFetchTest(unittest.TestCase):
         with self.assertRaises(Exception) as cm:
             vps._validate_source_payload(p)
         self.assertIn("混装", str(cm.exception))
+
+    def test_validator_rejects_weakened_digest_policy(self):
+        """⭐ 伪造/弱化排除规则的摘要外表与正常摘要毫无区别——校验端必须逐字核策略。"""
+        import validate_preparation_state as vps
+        self._init_git()
+        fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                 "--op-subdir", self.OP_SUBDIR, "--out", self.out])
+        p = self._payload()
+        p["local_checkout"]["digest_policy"] = dict(p["local_checkout"]["digest_policy"])
+        p["local_checkout"]["digest_policy"]["excluded_segment_names"] = ["op_host"]  # 把源码排掉
+        with self.assertRaises(Exception) as cm:
+            vps._validate_source_payload(p)
+        self.assertIn("digest_policy", str(cm.exception))
+
+    def test_validator_rejects_blocking_reason_smuggled_into_warnings(self):
+        """⭐ 把阻塞原因写成 warning + reasons=[] 就能干净过门——受控词表必须堵死。"""
+        import validate_preparation_state as vps
+        self._init_git()
+        fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                 "--op-subdir", self.OP_SUBDIR, "--out", self.out])
+        p = self._payload()
+        p["completeness"]["warnings"] = list(p["completeness"].get("warnings", [])) + \
+            ["dirty_worktree_not_allowed"]
+        with self.assertRaises(Exception) as cm:
+            vps._validate_source_payload(p)
+        self.assertIn("词表外", str(cm.exception))
+
+    def test_validator_rejects_missing_degradation_warning(self):
+        """⭐ 反向：降级发生了却把 warning 抹掉 → 报告里就看不出 provenance 弱在哪。"""
+        import validate_preparation_state as vps
+        self._init_git()
+        self._write(f"{self.OP_SUBDIR}/op_host/roll_def.cpp", "// uncommitted\n")
+        fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                 "--op-subdir", self.OP_SUBDIR, "--allow-dirty", "--out", self.out])
+        p = self._payload()
+        del p["completeness"]["warnings"]
+        with self.assertRaises(Exception) as cm:
+            vps._validate_source_payload(p)
+        self.assertIn("降级必须留痕", str(cm.exception))
+
+    def test_producer_declared_warnings_must_match_derived(self):
+        """producer 自报的 warnings 与从事实重新派生的必须一致（自报不算数）。"""
+        facts = {
+            "dut_source": "local_checkout",
+            "warnings": ["changed_files_unavailable", "dirty_worktree_allowed"],  # 多报一条
+            "changed_files": "unavailable",
+            "local_checkout": {"root_digest": "a" * 64, "op_subdir": "op",
+                               "digest_policy": fs.digest_policy()},
+            "key_files": {"op/x.h": "void x();"},
+            "key_files_ref": {"op/x.h": "a" * 64},
+            "op": "x", "target_dir": "op", "aclnn_headers": ["op/x.h"],
+        }
+        payload = fs.build_source_facts(self.task, facts)
+        self.assertEqual(payload["completeness"]["status"], "blocked")
+        self.assertIn("declared_warnings_mismatch", payload["completeness"]["reasons"])
 
 
 class PullRequestPayloadUnchangedTest(unittest.TestCase):

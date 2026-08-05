@@ -1,11 +1,21 @@
 """被测对象（DUT）来源判别式 —— Layer 0 受控词表 + 读侧唯一入口。
 
-**为什么单独一个模块**：`dut_source` 要被至少 9 处消费（`fetch_source` 产、
-`validate_preparation_state` / `preflight_aclnn` / `verify_aclnn_harness` /
-`cpp_extension_adapter` / `cpp_extension_driver` / `validate_acceptance_state` /
-`render_acceptance_markdown` / `precision_retest_contract` / `precision_retest_runner` 读）。
-词表和「缺省即 `pull_request`」的兜底规则各写一份的话，只要有一处忘了 fail-closed，
-伪造一个未知取值就能绕过整条来源绑定链。判别式只留一份实现。
+**为什么单独一个模块**：`dut_source` 判别式要被多处消费，词表和「缺省即 `pull_request`」的
+兜底规则各写一份的话，只要有一处忘了 fail-closed，伪造一个未知取值就能绕过整条来源绑定链。
+判别式只留一份实现。
+
+**当前接入状态**（别把「计划接入」读成「已经接入」）：
+
+| 消费者 | 状态 |
+|---|---|
+| `fetch_source`（产） | ✅ 已接 |
+| `validate_preparation_state` | ✅ 已接 |
+| `preflight_aclnn` / `verify_aclnn_harness` | ⬜ 待接（`aclnn_py` 侧静态对账） |
+| `cpp_extension_adapter` / `cpp_extension_driver` / `validate_acceptance_state` | ⬜ 待接（vendor build receipt 绑定，**主验收链**） |
+| `render_acceptance_markdown` | ⬜ 待接（provenance 强度如实标注） |
+| `precision_retest_contract` / `precision_retest_runner` | ⬜ 待接（CP-F 验收后复测） |
+
+⚠ 待接的没接完之前，本地来源**尚未**穿过完整 CP-C → 裁决链，不得对外宣称一等通路可用。
 
 纯 stdlib、无任何 agent/CLI 依赖，可被 Layer 1 任意脚本 import。
 
@@ -75,6 +85,12 @@ def identity(payload, *, where="payload"):
     锚缺失/形态不对 → `DutSourceError`。**不返回 None、不给空串兜底**：
     锚是「被测字节 ↔ 构建产物」绑定的唯一依据，缺了它整条信任链就断了，
     静默放行等于让 vendor `.so` 与被测源码失去机器可核的对应关系。
+
+    ⚠ **所有下游读锚必须走这个函数**，不许自己按字段名去 payload 里翻 `head_sha`。
+    本地收据里合法地存在 `local_checkout.git.head_sha`——它是**信息字段**（这份 checkout
+    当时停在哪个 commit），**不是锚**：worktree 可能 dirty，它与被测字节没有绑定关系。
+    任何「递归找 head_sha」或「哪个字段有值用哪个」的兜底写法，都会把这个信息字段
+    当成 PR provenance 使用。
     """
     kind = assert_facts_key_exclusive(payload, where=where)
     facts = payload.get(FACTS_KEY[kind])

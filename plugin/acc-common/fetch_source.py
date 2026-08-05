@@ -44,16 +44,36 @@ DUT_SOURCE_PR = dut_source.PULL_REQUEST
 DUT_SOURCE_LOCAL = dut_source.LOCAL_CHECKOUT
 DUT_SOURCES = dut_source.ALL
 
-# `root_digest` 的排除清单。**必须原样写进收据**（`local_checkout.digest_excludes`）：
-# 换一套排除规则算出的 digest 不可比，而外表看不出来。
-# 匹配语义（实现口径，比方案初稿的「首段」更严）：
-#   · 目录项 —— 相对路径的**任一路径段**等于该名字即排除（`__pycache__` 到处都有，
-#     只排首段等于没排；只放宽不收紧的偏差在本仓一律按 fail-open 处理）；
-#   · 后缀项 —— basename 以该后缀结尾即排除。
+# ---- root_digest 的算法标识与排除规则 -------------------------------------------
+# ⚠ 收据里记的**不是**一串看起来像 glob 的字符串（`"build/"` / `"*.pyc"` 那种写法会让读收据的人
+# 以为是 glob 或前缀匹配，而实现是「任一路径段等名」——写法与语义不一致本身就是缺陷）。
+# 改为**结构化 + 版本化**规则，校验端按受控值逐字核对，不接受任意排除策略：
+#   · `excluded_segment_names` —— 相对路径的**任一路径段**等于该名字即排除
+#     （`__pycache__` 每层都有，只排首段等于没排）；
+#   · `excluded_basename_suffixes` —— basename 以该后缀结尾即排除。
+DIGEST_ALGORITHM = "oprunway.local_subtree_merkle"
+DIGEST_ALGORITHM_VERSION = 1
 DEFAULT_DIGEST_EXCLUDE_DIRS = (".git", "__pycache__", "build", "build_out")
 DEFAULT_DIGEST_EXCLUDE_SUFFIXES = (".pyc",)
-DEFAULT_DIGEST_EXCLUDES = tuple(f"{d}/" for d in DEFAULT_DIGEST_EXCLUDE_DIRS) + \
-    tuple(f"*{s}" for s in DEFAULT_DIGEST_EXCLUDE_SUFFIXES)
+
+
+def digest_policy(exclude_dirs=DEFAULT_DIGEST_EXCLUDE_DIRS,
+                  exclude_suffixes=DEFAULT_DIGEST_EXCLUDE_SUFFIXES):
+    """收据里那份**机器可核**的摘要策略。校验端按它逐字核对，不认「非空即可」。"""
+    return {
+        "algorithm": DIGEST_ALGORITHM,
+        "algorithm_version": DIGEST_ALGORITHM_VERSION,
+        "excluded_segment_names": sorted(exclude_dirs),
+        "excluded_basename_suffixes": sorted(exclude_suffixes),
+    }
+
+
+# ---- completeness.warnings 受控词表 ---------------------------------------------
+# ⚠ 必须是受控词表 + 事实一致性规则，不能「是字符串就收下」：否则把任意**阻塞**原因写成
+# warning，再配上 `status=complete, reasons=[]`，就能让一份降级的来源以干净 pass 通过准备门。
+WARN_CHANGED_FILES_UNAVAILABLE = "changed_files_unavailable"
+WARN_DIRTY_WORKTREE_ALLOWED = "dirty_worktree_allowed"
+SOURCE_WARNINGS = (WARN_CHANGED_FILES_UNAVAILABLE, WARN_DIRTY_WORKTREE_ALLOWED)
 
 API = "https://api.gitcode.com/api/v5"
 _BLOB_RE = re.compile(r"^https?://gitcode\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/blob/(?P<ref>[^/]+)/(?P<path>.+)$")
@@ -454,6 +474,17 @@ def _is_excluded(rel_parts, exclude_dirs=DEFAULT_DIGEST_EXCLUDE_DIRS,
     return bool(rel_parts) and rel_parts[-1].endswith(tuple(exclude_suffixes))
 
 
+def resolve_op_subdir(repo_root, op_subdir):
+    """把 `<repo_root>/<op_subdir>` 解析成真实路径并校验它没越出仓根；返回 `(root, base)`。"""
+    root = os.path.realpath(repo_root)
+    base = os.path.realpath(os.path.join(root, op_subdir))
+    if base != root and not base.startswith(root + os.sep):
+        raise RuntimeError(f"--op-subdir 越出了 --local-repo：{op_subdir!r} 解析到 {base}（仓根 {root}）")
+    if not os.path.isdir(base):
+        raise RuntimeError(f"被测子目录不存在或不是目录：{os.path.join(repo_root, op_subdir)}")
+    return root, base
+
+
 def compute_root_digest(repo_root, op_subdir,
                         exclude_dirs=DEFAULT_DIGEST_EXCLUDE_DIRS,
                         exclude_suffixes=DEFAULT_DIGEST_EXCLUDE_SUFFIXES):
@@ -463,67 +494,97 @@ def compute_root_digest(repo_root, op_subdir,
     但被测的**字节**总是确定的。vendor build receipt 靠等值校验绑到这个值上，
     「build 出来的 `.so` 到底对应哪份源码」才有机器可核的答案。
 
-    算法（**实现时逐字照此，改一个字节跨机就不可复现**）：
+    算法 `oprunway.local_subtree_merkle` v1（**逐字照此，改一处跨机就不可比**）：
 
-      遍历 op_subdir（不越出），收集三类条目：
-        · 常规文件 → kind=b"f"，payload = 文件字节
-        · 符号链接 → kind=b"l"，payload = os.readlink() 的目标（**不跟随**）
-        · 空目录   → kind=b"d"，payload = b""
-      排序：按 os.fsencode(rel_path) 的**字节序**升序
+      用 `os.scandir` + `lstat` **显式分类**每个条目（不跟随任何软链）：
+        · 常规文件   → kind=b"f"，payload = 文件字节；mode 只取**可执行位**
+        · 软链       → kind=b"l"，payload = `os.readlink()` 的目标字节（文件软链、**目录软链**都算）
+        · 空目录     → kind=b"d"，payload = b""
+        · 其它类型（FIFO / socket / 设备节点）→ **直接拒**，不猜语义
+      排序：按 `os.fsencode(rel_path)` 的**字节序**升序
       逐条按长度分帧拼接：
-        frame = kind + len(path_bytes).to_bytes(8,"big") + path_bytes
-                     + len(digest).to_bytes(8,"big")     + sha256(payload).digest()
+        frame = kind + exec_bit(1 字节) + len(path_bytes).to_bytes(8,"big") + path_bytes
+                     + len(digest).to_bytes(8,"big") + sha256(payload).digest()
       root_digest = sha256(所有 frame 顺序拼接).hexdigest()
 
-    ⚠ 三个坑，每个都对应上面一处刻意的设计，别「简化」掉：
+    ⚠ 几个坑，每个都对应上面一处刻意的设计，别「简化」掉：
 
-    | 坑 | 后果 | 本算法的处理 |
+    | 坑 | 后果 | 处理 |
     |---|---|---|
     | 空目录被忽略 | 删掉目录里最后一个文件 → digest 不变 | 空目录以 `kind=b"d"` 计入 |
-    | 符号链接与同内容常规文件碰撞 | 把文件换成指向别处的软链 → digest 不变 | `kind` 前缀区分 `b"f"` / `b"l"` |
-    | 非 UTF-8 / Unicode 规范化不同的文件名 | macOS(NFD) 与 Linux(NFC) 上算出不同值 | 用 `os.fsencode` 原始字节，不做 str 编码 |
+    | 软链与同内容常规文件碰撞 | 把文件换成指向别处的软链 → digest 不变 | `kind` 区分 `b"f"` / `b"l"` |
+    | **目录软链漏计** | `os.walk` 把它放进 `dirnames` 又不递归 → 加删这类软链 digest 不变 | 自己 scandir + lstat，软链一律记 `b"l"` |
+    | 可执行位变化 | build 脚本 644→755 会改构建行为却不改 digest | exec 位入帧 |
+    | 遍历出错被静默吞掉 | 少读一棵子树 → digest 照样算得出来 | `scandir`/`lstat` 的 OSError 一律抛，不吞 |
+    | 路径含 `\\0` / `\\n` | 用分隔符拼接会产生歧义 | 长度分帧 |
 
-    长度分帧而非分隔符：路径里含 `\\0` 或 `\\n` 时分隔符会产生歧义（两份不同的树算出同一值）。
+    ⚠ **本算法明确不覆盖的东西**（别以为它覆盖了）：
+
+    · **硬链接拓扑**：两个硬链到同一 inode 的文件与两份同内容的独立文件算出同一值。
+      被测语义上等价，故不建模；
+    · **文件名的 Unicode 规范化**：`os.fsencode` 保留文件系统**呈现的**名字字节，
+      它解决的是「非 UTF-8 文件名不被有损转码」，**并不**把 macOS 的 NFD 与 Linux 的 NFC
+      统一。同一份代码在 macOS 与 Linux 上 checkout 后，若含非 ASCII 文件名，
+      算出的 digest 可能不同。当前用法（同一台真机内取材 → 构建 → 校验）不受影响，
+      跨机比对前必须先确认这一点；
+    · **摘要范围只有 `op_subdir`**：仓级构建脚本、公共头文件、生成器都不在内。
+      因此 `root_digest` 相同**不等于**构建出的 vendor `.so` 相同——它证明的是
+      「被测算子子树的字节是这一份」，不是「整个构建输入闭包是这一份」。
+      报告里必须按这个强度如实陈述（见 `render_acceptance_markdown` 的 provenance 节）。
     """
-    root = os.path.realpath(repo_root)
-    base = os.path.realpath(os.path.join(root, op_subdir))
-    if not os.path.isdir(base):
-        raise RuntimeError(f"被测子目录不存在或不是目录：{os.path.join(repo_root, op_subdir)}")
-    if base != root and not base.startswith(root + os.sep):
-        raise RuntimeError(f"--op-subdir 越出了 --local-repo：{op_subdir!r} 解析到 {base}（仓根 {root}）")
+    _, base = resolve_op_subdir(repo_root, op_subdir)
+    entries = []                                    # [(rel_bytes, kind, exec_bit, payload_digest)]
 
-    entries = []                                    # [(rel_bytes, kind, payload_digest)]
-    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
-        rel_dir = os.path.relpath(dirpath, base)
-        dir_parts = () if rel_dir == "." else tuple(rel_dir.split(os.sep))
-        # 就地裁剪 dirnames，既跳过排除目录、又不去读它们（省 I/O，也避免符号链接环）
-        dirnames[:] = sorted(d for d in dirnames
-                             if not _is_excluded(dir_parts + (d,), exclude_dirs, exclude_suffixes))
-        kept_files = []
-        for name in filenames:
-            parts = dir_parts + (name,)
+    def _walk(dir_path, dir_parts):
+        try:
+            with os.scandir(dir_path) as it:
+                children = list(it)
+        except OSError as exc:                      # ⚠ 不吞：少读一棵子树照样能算出 digest = 假摘要
+            raise RuntimeError(f"读取目录失败，无法计算子树摘要：{dir_path}（{exc}）") from exc
+        kept = 0
+        for child in children:
+            parts = dir_parts + (child.name,)
             if _is_excluded(parts, exclude_dirs, exclude_suffixes):
                 continue
-            kept_files.append(name)
-            full = os.path.join(dirpath, name)
+            kept += 1
             rel_b = os.fsencode(os.path.join(*parts))
-            if os.path.islink(full):
-                entries.append((rel_b, b"l", hashlib.sha256(os.fsencode(os.readlink(full))).digest()))
-            else:
+            try:
+                st = child.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(f"lstat 失败，无法计算子树摘要：{child.path}（{exc}）") from exc
+            if child.is_symlink():
+                # 目录软链也走这里——`os.walk` 会把它当目录放进 dirnames 又不递归，于是整条不进摘要。
+                entries.append((rel_b, b"l", b"\x00",
+                                hashlib.sha256(os.fsencode(os.readlink(child.path))).digest()))
+            elif child.is_dir(follow_symlinks=False):
+                _walk(child.path, parts)
+            elif child.is_file(follow_symlinks=False):
                 h = hashlib.sha256()
-                with open(full, "rb") as fh:
-                    for chunk in iter(lambda: fh.read(1 << 20), b""):
-                        h.update(chunk)
-                entries.append((rel_b, b"f", h.digest()))
+                try:
+                    with open(child.path, "rb") as fh:
+                        for chunk in iter(lambda: fh.read(1 << 20), b""):
+                            h.update(chunk)
+                except OSError as exc:
+                    raise RuntimeError(f"读文件失败，无法计算子树摘要：{child.path}（{exc}）") from exc
+                entries.append((rel_b, b"f", b"\x01" if st.st_mode & 0o111 else b"\x00", h.digest()))
+            else:
+                raise RuntimeError(
+                    f"被测子树里有既非常规文件、也非目录/软链的条目：{child.path}"
+                    f"（mode={st.st_mode:#o}）。FIFO/socket/设备节点的被测语义未定义，"
+                    f"fail-closed —— 不猜、也不静默跳过（跳过就等于摘要少覆盖一块）。")
         # 空目录必须计入：否则「删掉目录里最后一个文件」digest 不变。
-        # 判据用**裁剪后**的 dirnames/kept_files —— 只剩排除项的目录，对被测字节而言就是空的。
-        if dir_parts and not dirnames and not kept_files:
-            entries.append((os.fsencode(os.path.join(*dir_parts)), b"d", hashlib.sha256(b"").digest()))
+        # ⚠ 判据是**排除后**还剩几个条目：只剩 `__pycache__/` 的目录，对被测字节而言就是空的，
+        #   与真空目录同表示是**有意的等价类**（两者都不贡献被测字节），不是碰撞缺陷。
+        if dir_parts and kept == 0:
+            entries.append((os.fsencode(os.path.join(*dir_parts)), b"d", b"\x00",
+                            hashlib.sha256(b"").digest()))
 
+    _walk(base, ())
     entries.sort(key=lambda e: e[0])                # 字节序，不是 str 序
     h = hashlib.sha256()
-    for rel_b, kind, payload_digest in entries:
+    for rel_b, kind, exec_bit, payload_digest in entries:
         h.update(kind)
+        h.update(exec_bit)
         h.update(len(rel_b).to_bytes(8, "big"))
         h.update(rel_b)
         h.update(len(payload_digest).to_bytes(8, "big"))
@@ -531,21 +592,86 @@ def compute_root_digest(repo_root, op_subdir,
     return h.hexdigest()
 
 
-def _git(repo_root, *args, check=True):
-    """在 repo_root 跑一条只读 git 命令，返回 stdout 文本；失败按 check 决定抛错还是返回 None。"""
+class GitProbeError(RuntimeError):
+    """git 探测**失败**（≠「这不是 git 仓」）。两者必须分开，见 `probe_local_git` 的 ⚠。"""
+
+
+def _git(repo_root, *args, binary=False, allow_fail=False):
+    """在 repo_root 跑一条只读 git 命令。
+
+    ⚠ **没有「失败就当空输出」这一档**。原先 `git status` 失败折叠成 `""` 会被读成
+    「工作区干净」——那是**直接绕过 dirty fail-closed 门**：git 缺失、safe.directory 拒绝、
+    仓损坏、超时，任何一种都能把一份 dirty 的 checkout 洗成 clean。
+    `allow_fail=True` 只给「这条信息可有可无」的探测用（如 remote.origin.url 没配），
+    它返回 None 而不是空串，调用方必须显式处理。
+    """
     try:
         p = subprocess.run(("git", "-C", repo_root) + args,
-                           capture_output=True, text=True, timeout=120)
+                           capture_output=True, text=not binary, timeout=120)
     except (OSError, subprocess.SubprocessError) as exc:
-        if check:
-            raise RuntimeError(f"git {' '.join(args)} 执行失败：{exc}") from exc
-        return None
+        if allow_fail:
+            return None
+        raise GitProbeError(f"git {' '.join(args)} 执行失败：{exc}") from exc
     if p.returncode != 0:
-        if check:
-            raise RuntimeError(f"git {' '.join(args)} 失败（exit {p.returncode}）："
-                               f"{(p.stderr or '').strip()[:400]}")
-        return None
+        if allow_fail:
+            return None
+        stderr = p.stderr if isinstance(p.stderr, str) else (p.stderr or b"").decode("utf-8", "replace")
+        raise GitProbeError(f"git {' '.join(args)} 失败（exit {p.returncode}）：{stderr.strip()[:400]}")
     return p.stdout
+
+
+def _is_git_worktree(repo_root):
+    """区分「这不是 git 仓」与「git 探测失败」——前者合法，后者必须阻断。
+
+    判据：`git rev-parse --is-inside-work-tree` 输出 `true`。
+    · 非 git 目录 → git 以非 0 退出、stderr 说 `not a git repository` → 返回 False；
+    · git 不存在 / safe.directory 拒绝 / 仓损坏 → **抛 GitProbeError**，绝不当成「非 git 仓」
+      放行（那会让 dirty 门整个消失）。
+    """
+    try:
+        p = subprocess.run(("git", "-C", repo_root, "rev-parse", "--is-inside-work-tree"),
+                           capture_output=True, text=True, timeout=120)
+    except FileNotFoundError as exc:
+        raise GitProbeError(
+            f"找不到 git 可执行文件，无法判定 {repo_root} 是否 git 仓。"
+            f"本地通路的 dirty 门依赖它——探不到就不能放行（fail-closed）。") from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GitProbeError(f"git rev-parse 执行失败：{exc}") from exc
+    if p.returncode == 0:
+        return (p.stdout or "").strip() == "true"
+    stderr = (p.stderr or "").lower()
+    if "not a git repository" in stderr or "不是 git 仓库" in stderr:
+        return False
+    raise GitProbeError(
+        f"git rev-parse 在 {repo_root} 上失败（exit {p.returncode}），但错误不是"
+        f"「not a git repository」：{(p.stderr or '').strip()[:400]}\n"
+        f"  → 不把它当成「非 git 仓」放行：那样 dirty 门会被静默跳过。"
+        f"常见原因是 safe.directory 拒绝或仓损坏，请先修复再重跑。")
+
+
+def _porcelain_z_records(out):
+    """解析 `git status --porcelain=v1 -z` 的字节输出 → `[(xy, path), ...]`。
+
+    ⚠ 为什么必须用 `-z` 而不是按行切：非 `-z` 输出会对含空格/引号/非 ASCII 的路径做 C-quoting，
+    `line[3:].strip().strip('"')` 既反解不了转义、又会把路径首尾的真实空格吃掉 —— 记错的是
+    「哪些文件脏」，而这份清单是要写进收据当证据的。`-z` 用 NUL 分隔、路径原样不转义。
+    重命名/复制（R/C）在 `-z` 下**多占一个字段**（先新名、再原名），必须显式跳过原名字段。
+    """
+    fields = out.split(b"\x00")
+    records, i = [], 0
+    while i < len(fields):
+        item = fields[i]
+        i += 1
+        if not item:
+            continue
+        if len(item) < 4:                           # 形如 "XY path"，短于此说明输出被截断了
+            raise GitProbeError(f"git status --porcelain -z 输出异常字段：{item!r}")
+        xy = item[:2].decode("ascii", "replace")
+        path = os.fsdecode(item[3:])
+        records.append((xy, path))
+        if "R" in xy or "C" in xy:                  # 下一字段是原名，跳过
+            i += 1
+    return records
 
 
 def probe_local_git(repo_root, op_subdir=None):
@@ -553,27 +679,22 @@ def probe_local_git(repo_root, op_subdir=None):
 
     返回 `{head_sha, remote_url, base_ref, dirty, dirty_files, dirty_files_in_op_subdir}`。
 
+    ⚠ **「不是 git 仓」与「探测失败」必须分开**：前者返回 None（合法，走纯 root_digest 锚定），
+    后者抛 `GitProbeError`。把探测失败当成「非 git 仓」就等于把 dirty fail-closed 门整个删掉。
+
     ⚠ `dirty` 取**整仓**口径而非只看 op_subdir：head_sha 是拿来描述整个 checkout 的，
     仓里任何一处未提交改动都让「这份 checkout == 这个 commit」不成立。
     但报错要能定位，所以另记 `dirty_files_in_op_subdir`——被测子树内的脏文件才直接动摇
     「head_sha ↔ 被测字节」的对应，子树外的属于「checkout 不干净」。两者都进收据。
     """
-    if _git(repo_root, "rev-parse", "--is-inside-work-tree", check=False) is None:
+    if not _is_git_worktree(repo_root):
         return None
-    head = (_git(repo_root, "rev-parse", "HEAD", check=False) or "").strip()
-    remote = _git(repo_root, "config", "--get", "remote.origin.url", check=False)
-    base_ref = _git(repo_root, "rev-parse", "--abbrev-ref", "HEAD", check=False)
-    # --porcelain 的机器可读格式：前两列是状态、其后是路径（重命名带 " -> "）
-    status = _git(repo_root, "status", "--porcelain", "--untracked-files=all", check=False) or ""
-    dirty_files = []
-    for line in status.splitlines():
-        if len(line) < 4:
-            continue
-        path = line[3:]
-        if " -> " in path:                          # 重命名：记新路径
-            path = path.split(" -> ", 1)[1]
-        dirty_files.append(path.strip().strip('"'))
-    dirty_files.sort()
+    head = (_git(repo_root, "rev-parse", "HEAD") or "").strip()
+    remote = _git(repo_root, "config", "--get", "remote.origin.url", allow_fail=True)
+    base_ref = _git(repo_root, "rev-parse", "--abbrev-ref", "HEAD", allow_fail=True)
+    status = _git(repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                  binary=True)
+    dirty_files = sorted({path for _xy, path in _porcelain_z_records(status)})
     in_op = []
     if op_subdir:
         pref = op_subdir.strip("/") + "/"
@@ -589,73 +710,109 @@ def probe_local_git(repo_root, op_subdir=None):
 
 
 def _local_changed_files(repo_root, base_ref):
-    """`git diff --name-only <base>...HEAD`；没给 base_ref 或不是 git 仓 → `"unavailable"`。
+    """`git diff --name-only <merge-base> HEAD`；没给 base_ref 或不是 git 仓 → `"unavailable"`。
 
     ⚠ **绝不返回 `[]`**：空数组的语义是「这次什么都没改」，下游会据此认为 PR/改动为空。
-    「算不出来」与「确实没改」必须分得开——前者是字符串 `"unavailable"`（见 §2.4）。
+    「算不出来」与「确实没改」必须分得开——前者是字符串 `"unavailable"`。
+
+    ⚠ 两处刻意的写法：
+      · **先把 base 与 HEAD 解析成定死的 commit sha、再显式取 merge-base**，而不是直接写
+        `<base>...HEAD` 的三点糖。base 若是会移动的符号 ref（分支、`origin/master`），
+        三点糖每次跑的对照点可能不同；无共同祖先时三点糖直接失败，而这里能给出可操作的错误。
+      · `-z` + `os.fsdecode` 解析：非 `-z` 输出会对含空格/非 ASCII 的路径做 C-quoting，
+        按行 split 会记错文件名。
     """
     if not base_ref:
         return "unavailable"
-    out = _git(repo_root, "diff", "--name-only", f"{base_ref}...HEAD", check=False)
-    if out is None:
+    base_sha = _git(repo_root, "rev-parse", "--verify", f"{base_ref}^{{commit}}", allow_fail=True)
+    if base_sha is None:
         raise RuntimeError(
-            f"--base-ref {base_ref!r} 在本地仓里解析不了（git diff {base_ref}...HEAD 失败）。\n"
+            f"--base-ref {base_ref!r} 在本地仓里解析不到 commit。\n"
             f"  请确认该 ref 已 fetch 到本地（如 `git fetch origin {base_ref}`），"
             f"或改用真实存在的 ref；也可以不给 --base-ref —— 那样 changed_files 记 'unavailable'。")
-    return sorted({line.strip() for line in out.splitlines() if line.strip()})
+    merge_base = _git(repo_root, "merge-base", base_sha.strip(), "HEAD", allow_fail=True)
+    if merge_base is None:
+        raise RuntimeError(
+            f"--base-ref {base_ref!r}（{base_sha.strip()[:12]}）与 HEAD **没有共同祖先**，"
+            f"算不出改动清单。\n  这通常说明给错了 base（或仓是浅克隆、历史被截断）。"
+            f"不给 --base-ref 可以继续，changed_files 记 'unavailable'。")
+    out = _git(repo_root, "diff", "--name-only", "-z", merge_base.strip(), "HEAD", binary=True)
+    return sorted({os.fsdecode(p) for p in out.split(b"\x00") if p})
 
 
-def _local_key_files(repo_root, op_subdir, changed_files):
+def _local_key_files(repo_root, op_subdir):
     """按与 PR 通路**同一套结构规则**从本地磁盘挑关键文件并读内容。
 
-    规则完全复用 PR 通路（`_aclnn_headers` + examples/*.cpp + `_def.cpp`/`op_host`），
-    差别只在「内容从盘上读」而非「API 取」。候选路径来源：
-      · 有 changed_files（给了 --base-ref）→ 与 PR 通路口径一致，只看改动文件；
-      · 没有 → 退回遍历 op_subdir 全量文件（本地通路特有：没有 base 就没有「改了哪些」的概念，
-        此时把整个被测子树当候选，仍按同一套结构规则筛）。
+    筛选规则复用 PR 通路（`_aclnn_headers` + examples/*.cpp + `_def.cpp`/`op_host`），
+    差别只在「内容从盘上读」而非「API 取」。
+
+    ⚠ **候选集固定为 `op_subdir` 子树全量，与 `changed_files` 无关**，两个理由：
+
+    1. **锚覆盖**：本地通路每份关键文件的 `ref` 记的是 `root_digest`，而 `root_digest`
+       只覆盖 `op_subdir`。若候选取自整仓 changed_files，子树外的文件也会被标上这个 ref ——
+       **它根本没被这个锚覆盖**，却能通过准备门。那是 fail-open。
+    2. **派生稳定**：若候选随 changed_files 变，同一份 checkout 给不给 `--base-ref`
+       会挑出不同的 header/example/op_def，进而派生出不同的 `interface_kind` / `aclnn_entry` /
+       spec。取证方式不该改变被测语义。
+
+    ⚠ 与 PR 通路的**已知口径差异**（有意保留，不是遗漏）：PR 通路只能看到改动文件
+    （API 只给这个），所以未改动的接口头它取不到；本地通路看得到整棵子树。
+    差异方向是「本地更全」，落到下游是 `aclnn_headers` 更可能非空 —— 属收紧不属放宽。
     """
-    base = os.path.join(repo_root, op_subdir)
-    if isinstance(changed_files, list) and changed_files:
-        candidates = list(changed_files)
-    else:
-        candidates = []
-        for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
-            rel_dir = os.path.relpath(dirpath, repo_root)
-            parts = () if rel_dir == "." else tuple(rel_dir.split(os.sep))
-            dirnames[:] = sorted(d for d in dirnames if not _is_excluded(parts + (d,)))
-            for name in sorted(filenames):
-                if not _is_excluded(parts + (name,)):
-                    candidates.append("/".join(parts + (name,)))
+    _, base = resolve_op_subdir(repo_root, op_subdir)
+    op_subdir = op_subdir.strip("/")
+    candidates = []
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, repo_root)
+        parts = () if rel_dir == "." else tuple(rel_dir.split(os.sep))
+        dirnames[:] = sorted(d for d in dirnames if not _is_excluded(parts + (d,)))
+        for name in sorted(filenames):
+            if not _is_excluded(parts + (name,)):
+                candidates.append("/".join(parts + (name,)))
     hdrs = _aclnn_headers(candidates, op_subdir)
     want = (hdrs
             + [p for p in candidates if "/examples/" in p and p.endswith(".cpp")][:6]
             + [p for p in candidates if p.endswith("_def.cpp") or "/op_host/" in p][:4])
+    prefix = op_subdir + "/"
     key = {}
     for rel in dict.fromkeys(want):
+        if not rel.startswith(prefix):              # 双保险：候选已限定在子树内，这里再核一次
+            continue
         full = os.path.join(repo_root, rel)
+        # ⚠ 逃逸软链必须拒：`open()` 会跟随软链读到子树外的内容，而那份内容不在 root_digest 里。
+        real = os.path.realpath(full)
+        if real != base and not real.startswith(base + os.sep):
+            continue
         try:
             with open(full, "rb") as fh:
                 key[rel] = fh.read().decode("utf-8", "replace")
         except OSError:
-            continue                                # 改动文件可能是删除项：读不到就是没有，不猜
+            continue                                # 读不到就是没有，不猜
     return key, hdrs
 
 
 def fetch_local(repo_root, op_subdir, out_dir, base_ref=None, allow_dirty=False):
     """本地来源：读盘取事实 → 写 `pr_facts.json`（与 PR 通路同名同形，靠 `dut_source` 判别）。
 
-    dirty 处置（§2.5）：非 git 仓允许（只靠 root_digest）；git 仓 clean 允许；
+    dirty 处置：非 git 仓允许（只靠 root_digest）；git 仓 clean 允许；
     git 仓 dirty 且无 `--allow-dirty` → **不在这里抛错**，而是置 `blocked`，
     让 `build_source_facts` 落进 `completeness.reasons` —— 与 PR 通路
     `blocked='missing_head_sha'` 的处置**同形**：取材照样落盘供诊断，门在完整性判定处收。
+
+    ⚠ 「门在别处收」只有配上**调用方一定会走完整性判定**才成立。所以：
+      · `main()` 在 `completeness.status == "blocked"` 时**非 0 退出**（不能落盘就算成功）；
+      · `facts["warnings"]` 把降级事实（dirty 放行、changed_files 算不出）显式记账，
+        由 `build_source_facts` 交叉核对后写进 `completeness.warnings`——
+        少写一条就等于让降级悄悄以干净 `complete` 通过。
     """
     op_subdir = op_subdir.strip("/")
     facts = {
         "dut_source": DUT_SOURCE_LOCAL,
         "notes": [],
+        "warnings": [],
         "local_checkout": {
             "op_subdir": op_subdir,
-            "digest_excludes": list(DEFAULT_DIGEST_EXCLUDES),
+            "digest_policy": digest_policy(),
         },
     }
     root_digest = compute_root_digest(repo_root, op_subdir)
@@ -677,6 +834,7 @@ def fetch_local(repo_root, op_subdir, out_dir, base_ref=None, allow_dirty=False)
                 f"已置 blocked='dirty_worktree_not_allowed'。要在开发期强行继续，"
                 f"加 --allow-dirty（收据会全量记账 dirty 文件清单，报告顶部会标注）。")
         elif git["dirty"]:
+            facts["warnings"].append(WARN_DIRTY_WORKTREE_ALLOWED)
             facts["notes"].append(
                 f"⚠ --allow-dirty：worktree 有 {len(git['dirty_files'])} 项未提交改动"
                 f"（被测子树内 {len(git['dirty_files_in_op_subdir'])} 项），"
@@ -687,11 +845,22 @@ def fetch_local(repo_root, op_subdir, out_dir, base_ref=None, allow_dirty=False)
     changed = _local_changed_files(repo_root, base_ref) if git is not None else "unavailable"
     facts["changed_files"] = changed
     if changed == "unavailable":
+        facts["warnings"].append(WARN_CHANGED_FILES_UNAVAILABLE)
         facts["notes"].append(
             "未给 --base-ref（或非 git 仓）→ changed_files 记 'unavailable'。"
             "⚠ 这不是「没有改动」：算不出来与确实没改必须分得开。")
 
-    key, hdrs = _local_key_files(repo_root, op_subdir, changed)
+    key, hdrs = _local_key_files(repo_root, op_subdir)
+    # ⚠ TOCTOU：摘要遍历 → git 探测 → 关键文件读取是三趟独立 I/O。目录若在中途被改，
+    #   会拼出一个**从未真实存在过**的混合快照，而 key_files 的 ref 仍标着第一趟算的
+    #   root_digest。这里重算一次并要求逐字相同——变了就停，不猜哪一半是真的。
+    recheck = compute_root_digest(repo_root, op_subdir)
+    if recheck != root_digest:
+        raise RuntimeError(
+            f"取材期间被测子树发生了改动：开始时 root_digest={root_digest[:12]}…，"
+            f"读完关键文件后重算={recheck[:12]}…。\n"
+            f"  → 这会拼出一份从未真实存在过的「混合快照」，而关键文件的 ref 仍标着旧摘要。"
+            f"已中止，未产出事实索引。请等目录稳定（或先停掉正在写它的进程）再重跑。")
     facts["key_files"] = key
     # 本地通路没有「ref」概念，锚就是 root_digest：每份关键文件都取自这一份子树快照。
     facts["key_files_ref"] = {p: root_digest for p in key}
@@ -713,9 +882,14 @@ def fetch_local(repo_root, op_subdir, out_dir, base_ref=None, allow_dirty=False)
     _ik, _entry, _ik_note = _detect_interface_kind(key)
     facts["interface_kind"], facts["aclnn_entry"] = _ik, _entry
     facts["notes"].append(f"接口形态(批6b探测)：{_ik_note}")
+    pol = facts["local_checkout"]["digest_policy"]
     facts["notes"].append(
-        f"被测来源 = 本地 checkout，子树摘要 root_digest={root_digest[:12]}…（排除 "
-        f"{', '.join(DEFAULT_DIGEST_EXCLUDES)}）。⚠ 本地 checkout **无法证明**它对应任何具体 PR。")
+        f"被测来源 = 本地 checkout，子树摘要 root_digest={root_digest[:12]}…"
+        f"（算法 {pol['algorithm']} v{pol['algorithm_version']}，排除路径段 "
+        f"{pol['excluded_segment_names']} 与后缀 {pol['excluded_basename_suffixes']}）。\n"
+        f"    ⚠ 摘要只覆盖 op_subdir，**不含**仓级构建脚本/公共头文件——它证明的是"
+        f"「被测算子子树的字节是这一份」，不是「整个构建输入闭包是这一份」。\n"
+        f"    ⚠ 本地 checkout **无法证明**它对应任何具体 PR。")
     if not key:
         facts["notes"].append("未取到 example/op_def 关键文件内容（runner 锚定需另取）")
     return _dump_facts(facts, out_dir)
@@ -785,11 +959,19 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
             reasons.append("missing_root_digest")
         if not isinstance(local.get("op_subdir"), str) or not local.get("op_subdir"):
             reasons.append("missing_op_subdir")
+        if local.get("digest_policy") != digest_policy():
+            # 摘要策略必须逐字是本工具当前支持的那一份：策略不同则 digest 不可比，
+            # 而外表看不出来。未知/弱化的排除策略一律 fail-closed。
+            reasons.append("unsupported_digest_policy")
         if changed_files == "unavailable":
             # ⚠ 非阻塞：本地没给 base-ref 时算不出改动清单，属信息缺失、不是取材失败。
-            warnings.append("changed_files_unavailable")
+            warnings.append(WARN_CHANGED_FILES_UNAVAILABLE)
         elif not changed_files:
             reasons.append("missing_changed_files")
+        git = local.get("git") if isinstance(local.get("git"), dict) else None
+        if git and git.get("dirty") and not facts.get("blocked"):
+            # dirty 但没被阻断 = 走了 --allow-dirty → 必须留下降级留痕。
+            warnings.append(WARN_DIRTY_WORKTREE_ALLOWED)
     else:
         if not (isinstance(head_sha, str) and re.fullmatch(r"[0-9a-fA-F]{40}", head_sha)):
             reasons.append("missing_or_invalid_head_sha")
@@ -808,6 +990,20 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
     # 两条通路共有：关键文件是 slot 对账的依据，缺了谁都不能往下走。
     if not key_index:
         reasons.append("missing_key_files")
+    # ⚠ producer 自报的 warnings 与这里**从载重事实重新派生**的必须一致：
+    #   · 多报（塞了词表外的串，或把阻塞原因伪装成 warning）→ 阻断；
+    #   · 少报（降级发生了却没记）→ 阻断。
+    #   只信 producer 自报等于让它自己给自己发合格证。
+    declared = facts.get("warnings")
+    if declared is not None:
+        if not isinstance(declared, list) or any(not isinstance(w, str) for w in declared):
+            reasons.append("malformed_declared_warnings")
+        else:
+            unknown = sorted(set(declared) - set(SOURCE_WARNINGS))
+            if unknown:
+                reasons.append("unknown_declared_warnings:" + ",".join(unknown))
+            elif sorted(set(declared)) != sorted(set(warnings)):
+                reasons.append("declared_warnings_mismatch")
     with open(__file__, "rb") as src:
         logic_sha = hashlib.sha256(src.read()).hexdigest()
     completeness = {
@@ -849,7 +1045,8 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
         payload["local_checkout"] = {
             "root_digest": root_digest,
             "op_subdir": local.get("op_subdir"),
-            "digest_excludes": list(local.get("digest_excludes") or DEFAULT_DIGEST_EXCLUDES),
+            # 结构化 + 版本化：校验端按受控值逐字核对，不接受任意排除策略（见 digest_policy）
+            "digest_policy": local.get("digest_policy") or digest_policy(),
         }
         if git is not None:                         # 非 git 仓 → 整键缺席，不写空壳
             payload["local_checkout"]["git"] = {
@@ -1014,6 +1211,14 @@ def main(argv):
         print(f"        warnings={source_payload['completeness']['warnings']}（非阻塞，但须留痕）")
     for n in facts.get("notes", []):
         print(f"  ⚠ {n}")
+    if source_payload["completeness"]["status"] != "complete":
+        # ⚠ 落盘 ≠ 成功。blocked 的事实索引只供诊断，编排层不得据它往下走。
+        # shell 调用方只看得到退出码，这里返回 0 等于告诉它「取材成功」——那是 fail-open。
+        print(f"[fetch] ✗ completeness=blocked reasons="
+              f"{source_payload['completeness']['reasons']}", file=sys.stderr)
+        print("        事实索引只可用于诊断，**不得**据它抽 spec / 产 runner / 跑验收。",
+              file=sys.stderr)
+        return 3
     return 0
 
 

@@ -16,6 +16,7 @@ import sys
 
 import content_address
 import dut_source
+import fetch_source            # 摘要策略与 warnings 受控词表的**唯一真源**（不在此另抄一份）
 
 
 _DUT_SOURCE_PR = dut_source.PULL_REQUEST
@@ -85,14 +86,19 @@ def _validate_source_payload(source):
                 "source_facts.local_checkout 须为 JSON object")
         if (not _is_sha(local.get("root_digest"))
                 or not isinstance(local.get("op_subdir"), str)
-                or not local.get("op_subdir")
-                or not isinstance(local.get("digest_excludes"), list)
-                or not local["digest_excludes"]
-                or any(not isinstance(x, str) or not x for x in local["digest_excludes"])):
+                or not local.get("op_subdir")):
             raise content_address.ContentAddressError(
-                "source_facts.local_checkout 的 root_digest/op_subdir/digest_excludes 契约不完整"
-                "（root_digest 须 64 位小写 sha；digest_excludes 必须记账，否则换套排除规则算出的"
-                "摘要不可比而外表看不出来）")
+                "source_facts.local_checkout 的 root_digest/op_subdir 契约不完整"
+                "（root_digest 须 64 位小写 sha）")
+        # ⚠ 摘要策略必须**逐字**等于本工具当前支持的那一份，不能「是个非空列表就收下」：
+        # 一份声明了弱化/伪造排除规则的本地摘要，外表与正常摘要毫无区别，却覆盖不到它
+        # 声称覆盖的字节。未知算法/版本/规则一律 fail-closed。
+        if local.get("digest_policy") != fetch_source.digest_policy():
+            raise content_address.ContentAddressError(
+                f"source_facts.local_checkout.digest_policy 不是本工具支持的策略：\n"
+                f"  收据里：{local.get('digest_policy')!r}\n"
+                f"  支持的：{fetch_source.digest_policy()!r}\n"
+                f"  → 排除规则不同则 root_digest 不可比，而外表看不出来；fail-closed。")
         git = local.get("git")
         if git is not None:                          # 非 git 仓 → 整键缺席是合法的
             if (not isinstance(git, dict)
@@ -161,7 +167,8 @@ def _validate_source_payload(source):
         raise content_address.ContentAddressError(
             "source_facts.completeness 必须是 complete 且 reasons 为空")
     # `warnings` 是非阻塞留痕（如本地通路的 changed_files_unavailable），**仅在非空时出现**。
-    # 不参与 status 判定，但形态要校——空数组或非字符串项说明 producer 写歪了。
+    # ⚠ 必须是**受控词表**且与载重事实**对得上**，不能「是字符串就收下」：否则把任意阻塞原因
+    # 写成 warning、再配 `status=complete, reasons=[]`，就能让降级的来源以干净 pass 过门。
     if "warnings" in completeness:
         warnings = completeness["warnings"]
         if (not isinstance(warnings, list) or not warnings
@@ -169,6 +176,36 @@ def _validate_source_payload(source):
             raise content_address.ContentAddressError(
                 "source_facts.completeness.warnings 若出现则须为非空字符串数组"
                 "（空数组请整键省略——恒为空的键会改动 PR 通路的业务字段）")
+        unknown = sorted(set(warnings) - set(fetch_source.SOURCE_WARNINGS))
+        if unknown:
+            raise content_address.ContentAddressError(
+                f"source_facts.completeness.warnings 含词表外取值 {unknown}"
+                f"（受控词表 {list(fetch_source.SOURCE_WARNINGS)}）——"
+                f"任意字符串都能进 warnings 就等于给阻塞原因开了后门")
+        # 逐条核「这条 warning 对应的降级事实是否真的存在」——反向的多写同样要拒。
+        expected = set()
+        if is_local:
+            if source["changed_files"] == "unavailable":
+                expected.add(fetch_source.WARN_CHANGED_FILES_UNAVAILABLE)
+            git = source["local_checkout"].get("git")
+            if isinstance(git, dict) and git.get("dirty"):
+                expected.add(fetch_source.WARN_DIRTY_WORKTREE_ALLOWED)
+        if set(warnings) != expected:
+            raise content_address.ContentAddressError(
+                f"source_facts.completeness.warnings={sorted(set(warnings))} 与载重事实派生的 "
+                f"{sorted(expected)} 不一致（少写 = 降级没留痕；多写 = 编造降级）")
+    elif is_local:
+        # 反向：降级发生了却整键缺席，同样是「没留痕」。
+        missing = set()
+        if source["changed_files"] == "unavailable":
+            missing.add(fetch_source.WARN_CHANGED_FILES_UNAVAILABLE)
+        git = source["local_checkout"].get("git")
+        if isinstance(git, dict) and git.get("dirty"):
+            missing.add(fetch_source.WARN_DIRTY_WORKTREE_ALLOWED)
+        if missing:
+            raise content_address.ContentAddressError(
+                f"source_facts 发生了来源降级但 completeness.warnings 整键缺席：应含 "
+                f"{sorted(missing)}（降级必须留痕，否则报告里看不出 provenance 弱在哪）")
     producer = source["producer"]
     if (not isinstance(producer, dict)
             or producer.get("tool") != "fetch_source.py"
