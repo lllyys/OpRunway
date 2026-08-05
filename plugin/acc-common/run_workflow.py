@@ -175,6 +175,10 @@ _STATE_MAP = {
     "PASSED_WITH_RISK": "PASSED_WITH_RISK",
     "PASSED_WITH_GAPS": "PASSED_WITH_GAPS",   # C4：精度全过但任务书要求的 dtype 有差额挂账
     "BLOCKED_GOLDEN_UNAUTHORIZED": "BLOCKED_GOLDEN_UNAUTHORIZED",  # 批 5：golden 授权核不实
+    # 参考实现算不出真值（如通道数超 OpenCV CV_CN_MAX）→ 这批 case 的结论是**空白**。
+    # 与 UNAUTHORIZED 分开：那是「真值来路不明」，这是「压根没有真值」，成因与处置都不同
+    #（前者要人把授权补齐，后者要换参考实现或由人裁定这批 case 不在验收范围内）。
+    "BLOCKED_GOLDEN_UNAVAILABLE": "BLOCKED_GOLDEN_UNAVAILABLE",
 
     "BLOCKED_WAIT_GPU_BENCHMARK": "BLOCKED_WAIT_GPU_BENCHMARK",
     # High#2：验收通路缺真实基线（采集端未接通）→ 正规挂起，**不是** fail、更**不是** pass。
@@ -579,6 +583,11 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         overall = "BLOCKED_GOLDEN_UNAUTHORIZED"
     elif prec == "fail":
         overall = "FAIL(精度)"
+    elif prec == "blocked_golden_unavailable":
+        # 参考实现算不出真值的 case 存在、且**没有**任何真实精度失败 → 结论是**空白**，不是通过。
+        # 排在 fail 之后：真查出来的缺陷优先报（两者并存时仍报 FAIL(精度)，名单照样进产物）。
+        # ⚠ 也**不能**报成 pass：那等于拿「能判的那部分全过」替整份用例集背书。
+        overall = "BLOCKED_GOLDEN_UNAVAILABLE"
     elif prec == "needs_review":
         overall = "NEEDS_REVIEW"
     elif not (perf_pass or perf_measured_only):          # 精度 pass/passed_with_risk，但性能有问题

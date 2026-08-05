@@ -4,6 +4,18 @@
 
 ## 2026-08-05
 
+- **`golden_unavailable` 的判据被写成「dims 契约违约」，改成写真原因**。GaussianBlur 干净
+  现场实测：任务书 169 条里那 5 条 C>512 的用例，OpenCV 算不出 golden，gen_cases 按设计给它们
+  写 `dims=["功能"]`；而 validator 的 `_dims_contract` 在 numerical 下要求必含「精度」——工具
+  自己产的合法 caseset 被自己报成契约违约，OpenCV 的真实报错一个字都进不了裁决。现在按
+  **caseset 的 `golden_unavailable` 名册**（确定性产物侧的事实，不是被裁方自报的
+  `evidence.status`）豁免这一条，判据改写「未产出可比结果（evidence.status=…）：<真实报错>」、
+  精度维记 `na`。**档位一个没动**（仍 功能=fail、counts 逐字相同），改的只是归因准不准；
+  反伪造性质与 2026-08-05 上一次那处修复同源，另加一条「名册缺席就不给豁免」的用例钉住。
+- **`vendor_build_receipt.py emit --build-argv` 的文档写法根本跑不通**。真实构建实参几乎全以
+  `-` 开头（`--pkg` / `-j16`），分开写会被 argparse 当成另一个选项、当场
+  `expected one argument`；原用例只喂了 `bash` / `build.sh` 这种不带 `-` 的实参，于是从没测到。
+  help 补上「必须写 `--build-argv=--pkg` 等号形式」，用例补一条带 `-` 实参的往返。
 - **自定义算子符号来源改由收据绑定，跑测不再依赖「谁 source 过 set_env.bash」**。
   干净现场实证：同一份逐字节相同的 codegen 产物，164 条 case 全部 `execution_failed`
   （`aclnnGaussianBlur ... not in libopapi.so`）。根因不在代码生成，在一条**没被任何产物

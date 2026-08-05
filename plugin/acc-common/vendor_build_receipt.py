@@ -676,7 +676,10 @@ def main(argv=None):
     e.add_argument("--build-cwd", required=True, help="构建命令的工作目录")
     e.add_argument("--returncode", type=int, required=True, help="构建命令退出码（须为 0）")
     e.add_argument("--build-argv", action="append", default=[], metavar="ARG",
-                   help="构建命令的**单个**实参，按顺序重复给（不做任何 shell 切分）")
+                   help="构建命令的**单个**实参，按顺序重复给（不做任何 shell 切分）。"
+                        "⚠ 实参以 `-` 开头时**必须**写 `--build-argv=--pkg` 这种等号形式："
+                        "分开写会被 argparse 当成另一个选项、当场报 `expected one argument`。"
+                        "而真实构建命令的实参几乎全是 `--xxx` / `-jN`，故等号形式基本是常态。")
     e.add_argument("--out", required=True, help="收据落盘路径")
 
     args = ap.parse_args(argv)

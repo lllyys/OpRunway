@@ -186,6 +186,28 @@ class ProduceReceiptTest(_Fixture):
         V.validate(receipt, library_path=os.path.realpath(self.elf),
                    library_sha256=V._sha256_file(self.elf), normalize_path=True)
 
+    def test_cli_build_argv_accepts_dash_leading_args(self):
+        """构建实参以 `-` 开头（真实 build 命令的常态）必须能原样进收据。
+
+        回归点（2026-08-05 GaussianBlur 干净现场实测）：本用例原先只喂 `bash` / `build.sh`
+        这种不带 `-` 的实参，于是「`--build-argv --pkg` 分开写会被 argparse 当成另一个选项、
+        当场 `expected one argument`」这条从没被测到——而真实构建命令**每一个**实参都长这样。
+        等号形式是这条 CLI 的正确用法，用例把它钉住。
+        """
+        digest_path = os.path.join(self.d, "prebuild2.json")
+        receipt_path = os.path.join(self.d, "receipt2.json")
+        argv = ["bash", "build.sh", "--pkg", "--soc=ascend950", "-j16"]
+        V.main(["snapshot-digest", "--source-root", self.root,
+                "--subtree-scope", _OP, "--out", digest_path])
+        V.main(["emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
+                "--snapshot-digest", digest_path, "--library", self.elf,
+                "--build-cwd", self.root, "--returncode", "0"]
+               + [f"--build-argv={a}" for a in argv]
+               + ["--out", receipt_path])
+        with open(receipt_path, encoding="utf-8") as src:
+            receipt = json.load(src)
+        self.assertEqual(receipt["build"]["argv"], argv)
+
 
 class DegradationVocabularyTest(_Fixture):
     """校验侧：声明形态与降级挂账必须**成对**；老收据按最严一档兼容。"""

@@ -623,6 +623,84 @@ class EffectiveStandardSecurityTest(unittest.TestCase):
         self.assertEqual(vd["overall"]["verdict"], "fail")
         self.assertIn("dims", vd["per_case"][0]["判据"])
 
+    def test_golden_unavailable_reports_real_reason_not_dims_contract(self):
+        """`golden_unavailable`（caseset 名册在案 + dims=["功能"]）→ 判据必须写**真原因**，不是「dims 契约」。
+
+        回归点（2026-08-05 GaussianBlur 干净现场实测）：gen_cases 对算不出 golden 的任务书用例
+        逐字写 `dims=["功能"]`，而 `_dims_contract` 在 numerical 下要求必含「精度」——两处打架，
+        于是工具自己产的合法 caseset 被报成「dims 契约违约」，参考实现的真实报错一个字都进不了裁决。
+        档位不变（仍 功能=fail），改的是归因准不准。
+        """
+        spec, cs, ev = _honest_triple("float32")
+        cid = cs["cases"][0]["id"]
+        cs["cases"][0]["dims"] = ["功能"]
+        cs["golden_unavailable"] = {
+            "count": 1,
+            "cases": [{"case_id": cid, "reason": "OpenCV: CV_CN_MAX 超限"}],
+        }
+        ev["evidence"][0]["status"] = "golden_unavailable"
+        ev["evidence"][0]["golden_unavailable_reason"] = "OpenCV: CV_CN_MAX 超限"
+        vd = V.validate(spec, cs, ev)
+        row = vd["per_case"][0]
+        self.assertEqual(row["功能"], "fail")           # 档位不放松
+        self.assertEqual(row["精度"], "na")             # 无 golden → 不判精度
+        self.assertNotIn("dims 契约", row["判据"])
+        self.assertIn("golden_unavailable", row["判据"])
+        self.assertIn("CV_CN_MAX", row["判据"])
+
+    def test_golden_unavailable_alone_blocks_not_fails(self):
+        """只有「算不出真值」、没有真实精度失败 → `blocked_golden_unavailable`，**不是 fail、更不是 pass**。
+
+        回归点（2026-08-05 GaussianBlur 干净现场实测）：169 条里 5 条因 OpenCV `CV_CN_MAX` 算不出
+        golden，终态却落成 `FAIL(精度)`——而 164 条可判用例里 DUT 数值失败为 **0**。
+        把参考实现的能力边界算成被测算子的精度失败，是 AGENTS.md 5.8 禁止的错误归因。
+        判据同 validator 对 golden tier 4 的既有处理：没有真值就**无从得出结论**，
+        混进 fail 会把人引去查算子（查错方向）。
+        ⚠ 也不能落 pass：那等于拿「能判的那部分全过」替整份用例集背书。
+        """
+        spec, cs, ev = _honest_triple("float32")
+        cid = cs["cases"][0]["id"]
+        cs["cases"][0]["dims"] = ["功能"]
+        cs["golden_unavailable"] = {
+            "count": 1, "cases": [{"case_id": cid, "reason": "OpenCV: CV_CN_MAX 超限"}]}
+        ev["evidence"][0]["status"] = "golden_unavailable"
+        ev["evidence"][0]["golden_unavailable_reason"] = "OpenCV: CV_CN_MAX 超限"
+        vd = V.validate(spec, cs, ev)
+        o = vd["overall"]
+        self.assertEqual(o["verdict"], "blocked_golden_unavailable")
+        self.assertEqual(o["counts"]["fail"], 0)           # 算子不背这口锅
+        self.assertEqual(o["counts"]["golden_unavailable"], 1)
+        self.assertEqual(o["golden_unavailable"], [cid])   # 名单原样进产物，不被吞掉
+        self.assertNotIn(o["verdict"], ("pass", "passed_with_gaps", "passed_with_risk"))
+
+    def test_real_failure_outranks_golden_unavailable(self):
+        """真实精度失败与 golden_unavailable 并存 → 仍报 fail（查得出的缺陷优先），名单照样带出。"""
+        spec, cs, ev = _honest_triple("float32", {"bad_count": 999, "numel": 1000})
+        gu = copy.deepcopy(cs["cases"][0]); gu["id"] = cs["cases"][0]["id"] + "_gu"
+        gu["dims"] = ["功能"]
+        cs["cases"].append(gu)
+        cs["golden_unavailable"] = {
+            "count": 1, "cases": [{"case_id": gu["id"], "reason": "OpenCV: CV_CN_MAX 超限"}]}
+        gu_ev = copy.deepcopy(ev["evidence"][0]); gu_ev["case_id"] = gu["id"]
+        gu_ev["status"] = "golden_unavailable"; gu_ev["golden_unavailable_reason"] = "OpenCV: CV_CN_MAX 超限"
+        ev["evidence"].append(gu_ev)
+        o = V.validate(spec, cs, ev)["overall"]
+        self.assertEqual(o["verdict"], "fail")             # 真缺陷优先报
+        self.assertEqual(o["counts"]["golden_unavailable"], 1)
+        self.assertIn(gu["id"], o["golden_unavailable"])   # 空白不被 fail 盖掉
+
+    def test_golden_unavailable_exemption_needs_caseset_ledger(self):
+        """豁免只认 caseset 名册：evidence 自报 `golden_unavailable`、名册里却没有 → 仍报 dims 契约。
+
+        反伪造性质与 `test_dims_empty_numerical_caught` 同：被裁方改自己的 status 拿不到豁免。
+        """
+        spec, cs, ev = _honest_triple("float32")
+        cs["cases"][0]["dims"] = ["功能"]              # 名册缺席（未写 caseset.golden_unavailable）
+        ev["evidence"][0]["status"] = "golden_unavailable"
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail")
+        self.assertIn("dims 契约", vd["per_case"][0]["判据"])
+
     def test_dims_unknown_token_caught(self):
         """dims 含受控词表外 token → contract fail（防伪造维度）。"""
         spec, cs, ev = _honest_triple("float32")
