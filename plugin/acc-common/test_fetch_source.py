@@ -11,8 +11,10 @@
   - Gap-1: `aclnn_*.h` 接口头是**一等 key_file**——不受 `/op_host/` 档 `[:4]` 截断、优先取、
     剔 `*_impl.h`、层级不预设、只收目标算子目录下的、去重、缺席时 notes 点名
   - `--target-dir` 覆盖: 仓根一级布局（`<op>/op_host/…`，`_guess_op` 探不到）显式指定即可取到关键文件
-  - `--pr-snapshot` 降级取材: head_sha 恒为 None（**不合成 commit id**）、merkle 确定、
-    `source_facts.completeness == "snapshot_only"`（第三档，非 complete 亦非 blocked）
+  - `--pr-snapshot` 本地源码取材（**一等输入形态**）: 入口即声明 `declared_source_form=local_source`、
+    head_sha 恒为 None（**不合成 commit id**）、merkle 确定、结构齐备时 completeness 正常落
+    `complete`（无需任何环境变量授权），中性形态事实落 `completeness.form_facts`；
+    未声明形态的老事实包 + 本地快照仍落降级档 `snapshot_only`
 不打真网络: URL 形态用例走纯函数 _parse_pr_url（解析在网络之前）; 网络分支用桩替掉 fetch_source._get；
     快照用例全走本地临时目录，一次网络都不碰。
 """
@@ -630,7 +632,8 @@ class SourceFactsTest(unittest.TestCase):
             with open(task, "wb") as out:
                 out.write("任务书".encode())
             payload = fs.build_source_facts(task, self._facts())
-        self.assertEqual(payload["completeness"], {"status": "complete", "reasons": []})
+        self.assertEqual(payload["completeness"],
+                         {"status": "complete", "reasons": [], "form_facts": []})
         self.assertEqual(payload["pr"]["head_sha"], "a" * 40)
         self.assertRegex(payload["taskdoc"]["bytes_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(payload["taskdoc"]["snapshot_sha256"],
@@ -828,12 +831,14 @@ class TargetDirOverrideInFetchPrTest(unittest.TestCase):
 
 
 class PrSnapshotProvenanceTest(unittest.TestCase):
-    """S3c(b)：`--pr-snapshot` 降级取材——被测目录**没有 .git**，所以根本没有 head sha。
+    """S3c(b)：`--pr-snapshot` 本地源码取材——被测目录**没有 .git**，所以根本没有 head sha。
 
-    三条不可退让的性质：
+    四条不可退让的性质：
       ① `head_sha` 恒为 **None**，绝不合成 40 位 hex（AGENTS.md 5.8：不捏造）；
       ② `snapshot_merkle_sha256` 只证「本地这份字节是什么」，**不证**它等于任何 PR head；
-      ③ `completeness` 落第三档 `snapshot_only`——事实诚实可表达，但**一处门都没放松**。
+      ③ 入口即声明 `declared_source_form="local_source"`（不是推断的）；
+      ④ 声明即所得 → `completeness` 正常落 `complete`，`head_sha=null` 是这条形态的**正确值**；
+         「没有上游 commit」落 `completeness.form_facts`（中性事实），不进 `reasons`（缺口）。
     全程本地临时目录，不碰网络。"""
 
     def setUp(self):
@@ -931,23 +936,77 @@ class PrSnapshotProvenanceTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             fs.scan_pr_snapshot(self.root, self.out, target_dir="not_here")
 
-    # ── ③ completeness 第三档 ────────────────────────────────────────────────
-    def test_completeness_is_snapshot_only_with_single_folded_reason(self):
+    # ── ③④ 声明形态与档位 ───────────────────────────────────────────────────
+    def test_declared_source_form_is_set_at_the_entry_point(self):
+        """声明形态是**入口写的一等事实**，不是从 provenance_kind 反推的。"""
+        facts = self._scan()
+        self.assertEqual(facts["declared_source_form"], "local_source")
+        payload = fs.build_source_facts(self.task, facts)
+        self.assertEqual(payload["declared_source_form"], "local_source")
+
+    def test_local_source_completeness_is_complete_without_any_env(self):
+        """本地源码是一等输入形态：声明即所得 → 正常放行，不需要任何降级授权。"""
         payload = fs.build_source_facts(self.task, self._scan())
-        self.assertEqual(payload["completeness"]["status"], "snapshot_only",
-                         "既非 complete 也非 blocked——事实诚实可表达，门未放松")
+        self.assertEqual(payload["completeness"]["status"], "complete",
+                         "本地代码验收是常规工作方式，不该每次都要人为解一道锁")
+        self.assertEqual(payload["completeness"]["reasons"], [],
+                         "没有上游 commit 不是缺口——它是这条形态本来的样子")
+        self.assertEqual(payload["completeness"]["form_facts"],
+                         ["local_source_has_no_upstream_commit",
+                          "local_source_file_set_is_subtree_not_pr_diff"],
+                         "中性事实必须原样带着：报告据此不得声称已绑定 PR head")
+
+    def test_undeclared_snapshot_still_falls_to_the_degraded_tier(self):
+        """老事实包（没有 `declared_source_form`）+ 本地快照 = **本该绑却没绑** → 仍是降级档。
+
+        这一条守的是「重构不得把老口径静默放松」：不声明形态就按最严的 `git_pr` 对待。
+        """
+        facts = self._scan()
+        del facts["declared_source_form"]
+        payload = fs.build_source_facts(self.task, facts)
+        self.assertEqual(payload["completeness"]["status"], "snapshot_only")
         self.assertEqual(payload["completeness"]["reasons"], ["pr_provenance_local_snapshot"],
                          "「无 PR / 无 git」这一族必然缺口折叠成一条，别把真正的缺口淹掉")
+        self.assertEqual(payload["completeness"]["form_facts"], [])
+
+    def test_declaring_local_source_over_a_real_pr_is_blocked(self):
+        """声明本地源码、实得却带着上游 commit → 声明与实得不是同一件事，fail-closed。"""
+        sha = "a" * 40
+        payload = fs.build_source_facts(self.task, {
+            "declared_source_form": "local_source",
+            "pr_url": "https://gitcode.com/cann/ops-nn/pull/6429",
+            "source_repo": "cann/ops-nn", "head_sha": sha,
+            "head_repo": "cann/ops-nn", "is_fork": False, "state": "opened",
+            "changed_files": ["a/b.h"], "key_files": {"a/b.h": "x"},
+            "key_files_ref": {"a/b.h": sha},
+        })
+        self.assertEqual(payload["completeness"]["status"], "blocked")
+        self.assertIn("declared_local_source_but_got_upstream_commit",
+                      payload["completeness"]["reasons"])
+
+    def test_out_of_vocabulary_declared_form_is_blocked(self):
+        facts = dict(self._scan(), declared_source_form="snapshot_only")
+        payload = fs.build_source_facts(self.task, facts)
+        self.assertEqual(payload["completeness"]["status"], "blocked")
+        self.assertIn("unknown_declared_source_form", payload["completeness"]["reasons"])
+        self.assertIsNone(payload["declared_source_form"], "词表外的值不得被当成声明落盘")
 
     def test_real_gaps_still_downgrade_snapshot_to_blocked(self):
         """折叠的是**表述**不是**门**：除 provenance 之外还有缺口（这里是一个关键文件都没取到）
-        → 仍判 blocked，并且 provenance 那条也照样在。"""
+        → 仍判 blocked，声明形态是 local_source 也救不了它。"""
         facts = self._scan(target_dir=None)      # 仓根一级布局 + 不给覆盖 → _guess_op 探不到 → 无 key_files
         self.assertIsNone(facts["target_dir"])
         payload = fs.build_source_facts(self.task, facts)
         self.assertEqual(payload["completeness"]["status"], "blocked")
         self.assertIn("missing_key_files", payload["completeness"]["reasons"])
-        self.assertIn("pr_provenance_local_snapshot", payload["completeness"]["reasons"])
+
+    def test_broken_snapshot_contract_is_blocked_not_folded(self):
+        """自称本地源码、却带着 head_sha → 结构契约不成立 → 不许折叠，按 blocked 收敛。"""
+        facts = dict(self._scan(), head_sha="a" * 40)
+        payload = fs.build_source_facts(self.task, facts)
+        self.assertEqual(payload["completeness"]["status"], "blocked")
+        self.assertIn("snapshot_contract_head_sha_must_be_explicit_null",
+                      payload["completeness"]["reasons"])
 
     def test_gitcode_pr_path_completeness_semantics_unchanged(self):
         """零回归：非快照通路（`provenance_kind` 缺省/`gitcode_pr`）仍只有 complete / blocked 两档。"""
@@ -961,7 +1020,8 @@ class PrSnapshotProvenanceTest(unittest.TestCase):
             "key_files_ref": {"index/median/op_host/aclnn_median.h": sha},
         }
         payload = fs.build_source_facts(self.task, good)
-        self.assertEqual(payload["completeness"], {"status": "complete", "reasons": []})
+        self.assertEqual(payload["completeness"],
+                         {"status": "complete", "reasons": [], "form_facts": []})
         self.assertEqual(payload["pr"]["provenance_kind"], "gitcode_pr")
         payload = fs.build_source_facts(self.task, dict(good, head_sha=None))
         self.assertEqual(payload["completeness"]["status"], "blocked")
@@ -977,13 +1037,15 @@ class PrSnapshotProvenanceTest(unittest.TestCase):
             fs.main(["--taskdoc", self.task, "--pr-snapshot", self.root,
                      "--target-dir", "gaussian_blur", "--out", out])
         text = buf.getvalue()
-        self.assertIn("completeness=snapshot_only", text, text)
+        self.assertIn("声明形态=local_source", text, text)
+        self.assertIn("completeness=complete", text, text)
         with open(os.path.join(out, "pr_facts.json"), encoding="utf-8") as f:
             facts = json.load(f)
         self.assertIsNone(facts["head_sha"])
+        self.assertEqual(facts["declared_source_form"], "local_source")
         self.assertEqual(facts["target_dir"], "gaussian_blur")
         payload = ca.read_artifact(out, "source_facts.json", "oprunway/source-facts/v1")
-        self.assertEqual(payload["completeness"]["status"], "snapshot_only")
+        self.assertEqual(payload["completeness"]["status"], "complete")
         self.assertEqual(payload["derived"]["op"], "gaussian_blur")
         self.assertEqual(payload["derived"]["interface_kind"], "aclnn_2stage")
         # 任务书那一半照旧：字节锚落在工作区

@@ -11,6 +11,7 @@
 用法:
     python3 check_golden.py <Op>              # 契约层
     python3 check_golden.py <Op> --load       # 额外真跑 gen_cases.load_golden
+    python3 check_golden.py <Op> --spec s.json  # 额外与 spec.golden 判据锚逐字段对账
 
 ⚠ **两种模式都会 import 执行整个 `golden.py`**（不执行就拿不到 `GOLDEN_CONTRACT`），
    它的**所有顶层依赖都会被 import**。照手册 §3 骨架把 torch 延迟到 `_require_torch()` 里，
@@ -52,6 +53,29 @@ _A = precision_policy.verify_authorization
 _D = precision_policy.derive_golden_tier
 
 _REQUIRED = ("golden_fn", "GOLDEN_SOURCE", "GOLDEN_PROVENANCE")
+
+# `validator._reconcile_golden` 拿 spec.golden 当判据锚，逐字段核 caseset 里每条 case 的
+# golden_tier。这四项就是它对的那四项——名字与语义必须与那边保持一致。
+_ANCHOR_FIELDS = ("source", "method_kind", "authorization_kind", "snapshot_sha")
+
+
+def _norm_sha(value):
+    """快照指纹的规范化口径：`strip().lower()`，与 `verify_authorization` / `validator._norm_sha` 同。"""
+    return value.strip().lower() if isinstance(value, str) else None
+
+
+def _anchor(g):
+    """从一份 golden 契约块（spec.golden 或 GOLDEN_CONTRACT）取判据锚四元组。非 dict → 全 None。"""
+    if not isinstance(g, dict):
+        return {k: None for k in _ANCHOR_FIELDS}
+    auth = g.get("authorization")
+    snap = g.get("taskdoc_snapshot")
+    return {
+        "source": g.get("source"),
+        "method_kind": g.get("method_kind"),
+        "authorization_kind": auth.get("kind") if isinstance(auth, dict) else None,
+        "snapshot_sha": _norm_sha(snap.get("sha256")) if isinstance(snap, dict) else None,
+    }
 
 
 def _load_module(op):
@@ -105,14 +129,56 @@ def _check_exports(mod):
     return ex, None
 
 
-def check(op, do_load=False):
+def _spec_anchor_check(spec_path, contract):
+    """`spec.golden` ↔ `GOLDEN_CONTRACT` 判据锚四字段对账，返回 `(账本 dict|None, error|None)`。
+
+    **为什么值得单开一层**：这两份是**两个独立源**（spec 由人按任务书写、GOLDEN_CONTRACT 由
+    gen_golden / taskdoc_caseset 从被指定的 golden 派生），validator 在验收时逐字段核，任何一项
+    不符就给每条 case 记一条 problem、强制 `blocked_golden_unauthorized`。那道核在**真机跑完之后**，
+    一次不一致的代价是一整轮跑测——而判据在这里早就齐了。
+
+    ⚠ 本层只对账、**不改判**：它不重算 tier，也不因为 spec 写得好看就抬档。
+    ⚠ `spec` 没有 `golden` 键 = legacy 通路（validator 走 caseset 自声明档），不是错，如实记 skipped。
+    """
+    with open(spec_path, encoding="utf-8") as fh:
+        spec = json.load(fh)
+    if not isinstance(spec, dict):
+        return None, f"spec 须为 JSON object，得 {type(spec).__name__}"
+    if "golden" not in spec:
+        return {"status": "skipped", "reason": "spec 无 golden 键（legacy 通路：判据锚在 caseset 侧）",
+                "spec_path": os.path.abspath(spec_path)}, None
+    sg = spec.get("golden")
+    if not isinstance(sg, dict):
+        return None, f"spec.golden 须为 object，得 {type(sg).__name__}——fail-closed"
+    try:
+        _V(sg, where="spec.golden")              # 与 GOLDEN_CONTRACT 同一套词表，同样 fail-closed
+    except ValueError as ex:
+        return None, f"spec.golden 词表不合规: {ex}"
+    a_spec, a_contract = _anchor(sg), _anchor(contract)
+    diff = {k: {"spec": a_spec[k], "golden_contract": a_contract[k]}
+            for k in _ANCHOR_FIELDS if a_spec[k] != a_contract[k]}
+    ledger = {"status": "match" if not diff else "mismatch", "spec_path": os.path.abspath(spec_path),
+              "spec": a_spec, "golden_contract": a_contract, "diff": diff}
+    if diff:
+        return ledger, (f"spec.golden 与 GOLDEN_CONTRACT 判据锚不符 {diff}——"
+                        f"validator 会按 spec 权威逐条判 blocked（硬约束 #5）；"
+                        f"改的应是写错的那一侧，不是绕过这道对账")
+    return ledger, None
+
+
+def check(op, do_load=False, spec_path=None):
     """返回账本 dict。**不抛**——异常一律转成账本里的 error 字段，好让调用方拿到完整上下文。
 
     ⚠ 「不抛」是硬承诺：每一层都各自兜住，且兜的是 `Exception` 全域（不只 `ValueError`）。
-    只兜 `ValueError` 时，一个不可读的快照（`PermissionError`）就会把栈丢给调用方、账本全丢。"""
+    只兜 `ValueError` 时，一个不可读的快照（`PermissionError`）就会把栈丢给调用方、账本全丢。
+
+    `spec_path` 给了就多做一层**判据锚对账**（第四层，见 `_spec_anchor_check`）：spec.golden 与
+    GOLDEN_CONTRACT 是两个独立源，validator 在验收时会逐字段核，不一致即每条 case 一条 problem、
+    强制 blocked。那道核发生在真机跑完之后；这里提前对，代价是一次本地调用。"""
     out = {"op": op, "contract_ok": False, "tier": None, "needs_human_review": None,
            "blocked_reason": None, "authorized": None, "authorization_reason": None,
-           "exports": {}, "golden_path": None, "taskdoc_snapshot": None, "error": None}
+           "exports": {}, "golden_path": None, "taskdoc_snapshot": None,
+           "taskdoc_snapshot_sha256": None, "spec_anchor": None, "error": None}
     try:
         mod, path = _load_module(op)
     except Exception as ex:                      # noqa: BLE001 — 账本化，见 docstring
@@ -160,6 +226,10 @@ def check(op, do_load=False):
         if os.path.islink(snap):
             out["error"] = f"[授权] 任务书快照是符号链接，拒绝（防换锚）: {snap!r}"
             return out
+        # 落盘快照的**实际**指纹：`verify_authorization` 只答「对不对得上」，不告诉你「实际是多少」。
+        # 而 spec.golden / perf 授权都要填这串——账本给出来，人就不必再去手算一遍（也就不会填错）。
+        if os.path.isfile(snap):
+            out["taskdoc_snapshot_sha256"] = repo_adapter.taskdoc_snapshot_digest(op)[0]
         ok, why = _A(contract, snap)
     except Exception as ex:                      # noqa: BLE001
         out["error"] = f"[授权] 核实异常 {type(ex).__name__}: {ex}"
@@ -173,6 +243,17 @@ def check(op, do_load=False):
         out["error"] = f"[判档] 派生异常 {type(ex).__name__}: {ex}"
         return out
     out["tier"], out["needs_human_review"], out["blocked_reason"] = tier, bool(need_human), blocked
+
+    # ── 第四层（可选）：与 spec.golden 判据锚对账 ────────────────────────────
+    if spec_path:
+        try:
+            out["spec_anchor"], err = _spec_anchor_check(spec_path, contract)
+        except Exception as ex:                  # noqa: BLE001 — 同上，一律账本化
+            out["error"] = f"[判据锚] 对账异常 {type(ex).__name__}: {ex}"
+            return out
+        if err:
+            out["error"] = f"[判据锚] {err}"
+            return out
 
     if do_load:
         # 引擎真加载一遍（会 import torch 等重依赖）。本机缺 torch 时这里红属正常，如实记。
@@ -231,8 +312,11 @@ def main(argv=None):
     ap.add_argument("op", help="算子名（目录名，如 IsClose）")
     ap.add_argument("--load", action="store_true",
                     help="额外真跑 gen_cases.load_golden（会 import torch）")
+    ap.add_argument("--spec", default=None, metavar="PATH",
+                    help="额外与 spec.golden 判据锚逐字段对账（validator 验收时会核同样四项，"
+                         "提前对可省一整轮真机跑测）")
     a = ap.parse_args(argv)
-    ledger = check(a.op, do_load=a.load)
+    ledger = check(a.op, do_load=a.load, spec_path=a.spec)
     print(json.dumps(ledger, ensure_ascii=False, indent=2))
     return _exit_code(ledger)
 

@@ -40,6 +40,23 @@ def golden_fn(inputs, attrs):
     return inputs[0]
 '''
 
+# `taskdoc_caseset.render_golden_wrapper` 产的包装层形态（判据锚对账测试用）：
+# 契约里**有**任务书快照指纹，授权则由 spec 那侧声明。
+_WRAPPER_LIKE_GOLDEN = '''\
+GOLDEN_SOURCE = "task_spec_expected x.py:golden"
+GOLDEN_PROVENANCE = "任务书自带 golden 的包装层（本测试的最小复刻）"
+GOLDEN_CONTRACT = {
+    "source": "single_api", "method_kind": "opencv_cpu", "method": "cv2.GaussianBlur",
+    "authorization": {"kind": "none"},
+    "taskdoc_snapshot": {"sha256": "__SHA__"},
+}
+def golden_fn(inputs, attrs):
+    return inputs[0]
+'''
+
+#: 「这个键根本不写」的哨兵——与「写了但值是 None」是两回事，测试要分得开。
+_DROP = object()
+
 
 class CheckGoldenExitCodeTest(unittest.TestCase):
     """三态退出码 + 每态的账本关键字段。用真样例（IsClose 带真快照）+ 最小合成件。"""
@@ -294,14 +311,149 @@ class FailOpenRegressionTest(unittest.TestCase):
         self.assertIn("符号链接", led["error"])
 
 
+class SpecAnchorReconcileTest(unittest.TestCase):
+    """`--spec` 判据锚对账（第四层）：把 validator 那道**跑完真机才触发**的核提前到本地。
+
+    2026-08-05 的真实教训：GaussianBlur 一轮真机跑完，唯一阻断是
+    `spec.golden.snapshot_sha=None ≠ caseset 声明的 4c4d5314…` —— 169 条 case 各记一条
+    problem、强制 `blocked_golden_unauthorized`。判据两侧当时都在本地躺着，
+    一次本地对账就能拦住，代价却是一整轮跑测。"""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="oprunway_anchor_")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self._old = os.environ.get("OPRUNWAY_OPS_DIR")
+        os.environ["OPRUNWAY_OPS_DIR"] = self.root
+        self.addCleanup(lambda: os.environ.__setitem__("OPRUNWAY_OPS_DIR", self._old)
+                        if self._old is not None else os.environ.pop("OPRUNWAY_OPS_DIR", None))
+        # 复刻 taskdoc_caseset.py 产的包装层形态：契约带真快照指纹、授权低报为 none。
+        d = os.path.join(self.root, "TaskdocWrapper")
+        os.makedirs(d)
+        snap = os.path.join(d, "task_doc.snapshot.md")
+        with io.open(snap, "w", encoding="utf-8", newline="") as fh:
+            fh.write("| **CV_32F（L1）** | 对标 OpenCV CPU |\n")
+        with io.open(snap, "rb") as fh:
+            self.sha = hashlib.sha256(fh.read()).hexdigest()
+        with io.open(os.path.join(d, "golden.py"), "w", encoding="utf-8") as fh:
+            fh.write(_WRAPPER_LIKE_GOLDEN.replace("__SHA__", self.sha))
+
+    def _spec(self, **override):
+        golden = {"source": "single_api", "method_kind": "opencv_cpu",
+                  "authorization": {"kind": "none"},
+                  "taskdoc_snapshot": {"sha256": self.sha}}
+        golden.update(override)
+        golden = {k: v for k, v in golden.items() if v is not _DROP}
+        p = os.path.join(self.root, "spec.json")
+        with io.open(p, "w", encoding="utf-8") as fh:
+            json.dump({"op": "TaskdocWrapper", "golden": golden}, fh, ensure_ascii=False)
+        return p
+
+    def _run(self, *argv):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = check_golden.main(list(argv))
+        return rc, json.loads(buf.getvalue())
+
+    def test_matching_anchor_stays_green(self):
+        """spec 与 GOLDEN_CONTRACT 四字段一致 → 对账 match，退出码与不带 --spec 时一样。"""
+        rc, led = self._run("TaskdocWrapper", "--spec", self._spec())
+        self.assertEqual(rc, 0, led)
+        self.assertEqual(led["spec_anchor"]["status"], "match", led["spec_anchor"])
+        self.assertEqual(led["spec_anchor"]["diff"], {})
+
+    def test_missing_snapshot_sha_in_spec_is_caught(self):
+        """**GaussianBlur 那个假阻断的最小复现**：契约带真 sha、spec 整个 taskdoc_snapshot 都没写。
+
+        两侧的 `authorization.kind` 都是 none，所以词表层一路放行（它对 none 不要求快照），
+        差异只在 `snapshot_sha`：None ≠ 真 sha。validator 那边表现为「169 条 case 条条 blocked」，
+        病因却只有这一处——必须指名报出来，不能只报一句「授权核不过」。"""
+        rc, led = self._run("TaskdocWrapper", "--spec", self._spec(taskdoc_snapshot=_DROP))
+        self.assertEqual(rc, 1, led)
+        self.assertEqual(led["spec_anchor"]["status"], "mismatch")
+        self.assertIn("snapshot_sha", led["spec_anchor"]["diff"])
+        self.assertIsNone(led["spec_anchor"]["diff"]["snapshot_sha"]["spec"])
+        self.assertEqual(led["spec_anchor"]["diff"]["snapshot_sha"]["golden_contract"], self.sha)
+        self.assertIn("判据锚", led["error"])
+
+    def test_one_sided_authorization_upgrade_is_caught(self):
+        """spec 抬档成 oracle_method、包装层还停在 none → 锚不符，exit 1。
+
+        这正是「改了 spec 却忘了重产 golden」的形状：两侧对**同一份任务书**给出不同的授权判断，
+        本身就是必须由人裁的分歧，不许静默取其一。"""
+        rc, led = self._run("TaskdocWrapper", "--spec", self._spec(
+            authorization={"kind": "oracle_method", "cite": "task_doc.snapshot.md:1",
+                           "quote": "对标 OpenCV CPU"}))
+        self.assertEqual(rc, 1, led)
+        self.assertIn("authorization_kind", led["spec_anchor"]["diff"])
+
+    def test_spec_without_golden_key_is_skipped_not_failed(self):
+        """spec 没有 golden 键 = legacy 通路（判据锚在 caseset 侧），是合法形态、不是错。"""
+        p = os.path.join(self.root, "legacy.json")
+        with io.open(p, "w", encoding="utf-8") as fh:
+            json.dump({"op": "TaskdocWrapper"}, fh)
+        rc, led = self._run("TaskdocWrapper", "--spec", p)
+        self.assertEqual(rc, 0, led)
+        self.assertEqual(led["spec_anchor"]["status"], "skipped")
+
+    def test_spec_vocab_error_fails_closed(self):
+        """spec.golden 词表拼错 → fail-closed（与 GOLDEN_CONTRACT 同一套词表、同样待遇）。"""
+        rc, led = self._run("TaskdocWrapper", "--spec", self._spec(source="single-api"))
+        self.assertEqual(rc, 1, led)
+        self.assertIn("词表", led["error"])
+
+    def test_no_spec_flag_keeps_ledger_field_none(self):
+        """不带 `--spec` → 该字段留 None，**不能**假装对过账（那才是 fail-open）。"""
+        rc, led = self._run("TaskdocWrapper")
+        self.assertEqual(rc, 0, led)
+        self.assertIsNone(led["spec_anchor"])
+
+    def test_oracle_method_both_sides_reaches_tier1(self):
+        """两侧同为 oracle_method、引文逐字出自快照 → 对账 match 且判档 tier 1。
+
+        这是本轮 GaussianBlur 想要的终态形状：抬档**不是**靠放松对账，而是靠锚真的可核。"""
+        d = os.path.join(self.root, "TaskdocWrapper")
+        with io.open(os.path.join(d, "golden.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        with io.open(os.path.join(d, "golden.py"), "w", encoding="utf-8") as fh:
+            fh.write(src.replace(
+                '"authorization": {"kind": "none"},',
+                '"authorization": {"kind": "oracle_method", "cite": "task_doc.snapshot.md:1",\n'
+                '                      "quote": "对标 OpenCV CPU"},'))
+        rc, led = self._run("TaskdocWrapper", "--spec", self._spec(
+            authorization={"kind": "oracle_method", "cite": "task_doc.snapshot.md:1",
+                           "quote": "对标 OpenCV CPU"}))
+        self.assertEqual(rc, 0, led)
+        self.assertEqual(led["spec_anchor"]["status"], "match")
+        self.assertTrue(led["authorized"])
+        self.assertEqual(led["tier"], 1)
+        self.assertIsNone(led["blocked_reason"])
+
+
 class CheckGoldenLedgerTest(unittest.TestCase):
     """账本里几个供编排/报告消费的字段，别悄悄改名。"""
 
     def test_ledger_keys_stable(self):
         led = check_golden.check("NeverExisted")
-        for k in ("op", "contract_ok", "tier", "needs_human_review",
-                  "blocked_reason", "authorized", "authorization_reason", "error"):
+        for k in ("op", "contract_ok", "tier", "needs_human_review", "blocked_reason",
+                  "authorized", "authorization_reason", "taskdoc_snapshot_sha256",
+                  "spec_anchor", "error"):
             self.assertIn(k, led, f"账本缺字段 {k}——编排/报告在读它")
+
+    def test_snapshot_digest_reported(self):
+        """账本要报**落盘快照的实际 sha256**：spec.golden / perf 授权都得填这串，
+        自己算一遍就有填错的机会。缺快照时留 None，不编。"""
+        root = tempfile.mkdtemp(prefix="oprunway_digest_")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        old = os.environ.get("OPRUNWAY_OPS_DIR")
+        os.environ["OPRUNWAY_OPS_DIR"] = root
+        self.addCleanup(lambda: os.environ.__setitem__("OPRUNWAY_OPS_DIR", old)
+                        if old is not None else os.environ.pop("OPRUNWAY_OPS_DIR", None))
+        d = os.path.join(root, "IsClose")
+        shutil.copytree(os.path.join(_SAMPLES, "IsClose"), d,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        with io.open(os.path.join(d, "task_doc.snapshot.md"), "rb") as fh:
+            expect = hashlib.sha256(fh.read()).hexdigest()
+        self.assertEqual(check_golden.check("IsClose")["taskdoc_snapshot_sha256"], expect)
 
     def test_check_never_raises(self):
         """`check()` 一律账本化，不抛——调用方要拿到完整上下文，不是一个栈。"""

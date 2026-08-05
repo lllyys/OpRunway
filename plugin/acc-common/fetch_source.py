@@ -22,16 +22,23 @@ gitcode token 走环境：优先 $GITCODE_TOKEN，退回 $OPRUNWAY_GITCODE_TOKEN
       路径探测（探测器要求算子目录之上至少还有一层，仓根一级布局如 ops-cv 的 `gaussian_blur/` 探不到）。
       不给就完全按今天的行为走。
 
-`--pr-snapshot`：降级取材通路，输入是**本地一份没有 git 的目录快照**（与 `--pr` 互斥）。
-      产 `provenance_kind="local_snapshot"` + `head_sha=null`（**绝不合成 40 位 hex**）
-      + `snapshot_merkle_sha256`（对「排序后的相对路径 × 文件字节」求的确定性摘要）。
-      ⚠ merkle 只证「本地这份字节是什么」，**不证**它等于任何 PR head；`source_facts.completeness`
-      因此落第三档 `snapshot_only`（既非 complete 也非 blocked），下游各门仍只认 `complete`，
-      要不要放行这条降级路由由编排层/人另行决定，本脚本不替它松门。
+`--pr-snapshot`：**本地源码**取材通路，输入是本地一份没有 git 的目录快照（与 `--pr` 互斥）。
+      这是**一等输入形态，不是降级**——很多轮验收的被测对象本来就是一份本地代码而非 PR。
+      产 `declared_source_form="local_source"` + `provenance_kind="local_snapshot"` +
+      `head_sha=null`（**绝不合成 40 位 hex**）+ `snapshot_merkle_sha256`
+      （对「排序后的相对路径 × 文件字节」求的确定性摘要）。
+      ⚠ merkle 只证「本地这份字节是什么」，**不证**它等于任何 PR head：`head_sha=null` 是这条
+      形态的**正确值**，不是缺陷；下游报告不得据此声称已绑定 PR head，也不得把它呈现成异常。
+
+**声明的输入形态**（`declared_source_form` ∈ `{git_pr, local_source}`）是入口就定的一等事实：
+      给 `--pr` 即声明 `git_pr`，给 `--pr-snapshot` 即声明 `local_source`；它不是推断出来的。
+      `source_facts.completeness` 的档位判据随之改成「**实得形态是否与声明的形态一致**」
+      （详见 `source_provenance` 的模块 docstring），而不是「有没有拿到 PR head」。
 """
 import argparse, hashlib, json, os, re, sys, tempfile, urllib.parse, urllib.request
 
 import content_address
+import source_provenance
 
 API = "https://api.gitcode.com/api/v5"
 _BLOB_RE = re.compile(r"^https?://gitcode\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/blob/(?P<ref>[^/]+)/(?P<path>.+)$")
@@ -402,7 +409,10 @@ def fetch_pr(pr_url, out_dir, target_dir=None):
       · URL 认识但网络/token 取不到字段 → 不抛，记进 facts["notes"] 继续（属环境问题，错误信息与「URL 写错」不同，别让用户误改 URL）。"""
     owner, repo, num = _parse_pr_url(pr_url)  # 形态错 → 抛出（fail-loud），不产空壳
     _ov_op, _ov_dir = _norm_target_dir(target_dir)   # 形态错也在网络之前抛
+    # `declared_source_form` 是**入口就定**的一等事实：走的是 `--pr`，那本轮声明要测的就是 PR。
+    # 它不是从 provenance_kind 反推的——档位判据要比的正是「声明」与「实得」这两件事。
     facts = {"pr_url": pr_url, "notes": [], "source_repo": f"{owner}/{repo}",
+             "declared_source_form": source_provenance.FORM_GIT_PR,
              "provenance_kind": "gitcode_pr"}
     st, pr = _get(f"{API}/repos/{owner}/{repo}/pulls/{num}")
     if st == 200 and isinstance(pr, dict):
@@ -574,11 +584,16 @@ def _assert_snapshot_dir(snapshot_dir):
 
 
 def scan_pr_snapshot(snapshot_dir, out_dir, target_dir=None):
-    """降级取材：把**本地一份没有 git 的目录快照**扫成 pr_facts.json（与 `--pr` 互斥）。
+    """**本地源码**取材：把本地一份没有 git 的目录快照扫成 pr_facts.json（与 `--pr` 互斥）。
 
-    产出与 `--pr` 同形，差别只在 provenance 三项：
+    这是一等输入形态，**不是降级路由**：走这条路即声明 `declared_source_form="local_source"`，
+    下游按「声明什么就该实得什么」判档，无需任何环境变量授权。
+
+    产出与 `--pr` 同形，差别只在 provenance 四项：
+      · `declared_source_form="local_source"` —— 入口声明，非推断；
       · `provenance_kind="local_snapshot"`；
-      · `head_sha=None` —— **绝不合成 40 位 hex**（AGENTS.md 5.8：不捏造）。没有 git 就是没有 head；
+      · `head_sha=None` —— 本形态的**正确值**。没有 git 就是没有 head，
+        **绝不合成 40 位 hex**（AGENTS.md 5.8：不捏造）；
       · `snapshot_merkle_sha256` —— 只证本地字节，**不证**它等于任何 PR head。
 
     关键文件的挑选口径与 `--pr` **逐字相同**（`_key_file_candidates`），只是内容从磁盘读而不是走 API。
@@ -600,6 +615,7 @@ def scan_pr_snapshot(snapshot_dir, out_dir, target_dir=None):
         "pr_url": None,
         "notes": [],
         "source_repo": None,
+        "declared_source_form": source_provenance.FORM_LOCAL_SOURCE,
         "provenance_kind": "local_snapshot",
         "head_sha": None,                      # 没有 git 就是没有 head——不合成、不猜
         "snapshot_merkle_sha256": _snapshot_merkle(root, paths),
@@ -611,12 +627,15 @@ def scan_pr_snapshot(snapshot_dir, out_dir, target_dir=None):
         "target_dir": tdir,
     }
     facts["notes"].append(
-        "provenance=local_snapshot：输入是本地目录快照、无 git → **head_sha 为 null，未合成任何 commit id**。"
+        "declared_source_form=local_source（本地源码，**一等输入形态、非降级**）："
+        "输入是本地目录快照、无 git → **head_sha 为 null，未合成任何 commit id**；"
+        "在这条形态里 null 是正确值，不是缺陷。"
         f"snapshot_merkle_sha256 覆盖 {len(paths)} 个文件"
         f"（范围 {_ov_dir or '<快照根>'}，已跳过 {sorted(_SNAPSHOT_SKIP_DIRS)} 这些目录名），"
         "**只证本地字节是什么，不证它等于任何 PR head**；下游不得据此声称已绑定 PR head。")
     facts["notes"].append(
-        "changed_files 实为「该子树下的全部文件」，**不是 PR diff**——本通路拿不到 base，无法算真实改动集。")
+        "changed_files 实为「该子树下的全部文件」，**不是 PR diff**——本形态没有 base，无法算真实改动集"
+        "（中性事实，非降级）。")
     if _ov_dir:
         facts["notes"].append(f"target_dir 由 --target-dir 显式覆盖为 {tdir}（未走 _guess_op 路径探测）")
 
@@ -637,14 +656,15 @@ def scan_pr_snapshot(snapshot_dir, out_dir, target_dir=None):
     return _dump_facts(facts, out_dir)
 
 
-# `provenance_kind="local_snapshot"` 下**必然**成立、且全部只源于「没有 PR / 没有 git」这一个事实的
-# reason。它们塞进 reasons 只会把真正的缺口淹掉，故在快照通路上折叠成单条
-# `pr_provenance_local_snapshot`。⚠ 折叠的是**表述**不是**门**：completeness 落第三档
-# `snapshot_only`，各门仍只认 `complete`，本函数一处门都不放松。
+# `provenance_kind="local_snapshot"` 下**必然**成立、且全部只源于「输入没有 git / 没有 PR」
+# 这一个事实的 reason。它们逐条塞进 reasons 只会把真正的缺口淹掉，故在这条通路上一并折叠。
+# ⚠ 折叠的是**表述**不是**门**：结构契约（`_snapshot_contract_reasons`）不成立就不许折叠。
 _SNAPSHOT_PROVENANCE_REASONS = frozenset({
     "missing_or_invalid_head_sha", "missing_pr_url", "missing_source_repo",
     "missing_head_repo", "unknown_fork_status", "missing_pr_state",
 })
+#: 折叠后留下的那一条。**只在降级路由上算「缺口」**（声明要测 PR、却只拿到本地字节）；
+#: 声明 `local_source` 时它不是缺口，中性事实改落 `completeness.form_facts`。
 _SNAPSHOT_PROVENANCE_REASON = "pr_provenance_local_snapshot"
 
 _HEX64_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -677,9 +697,12 @@ def _safe_rel_path(value):
 def _snapshot_contract_reasons(facts, key_refs):
     """`provenance_kind="local_snapshot"` 这一档的**结构契约**（audit#17）。
 
-    折叠 reason（进而落到被授权放行的 `snapshot_only` 档）之前必须先证明这份事实包**真的**
-    是本档：没有 head、有合法 merkle、有字符串 scope、每个关键文件的 ref 都是 `local_snapshot`。
+    折叠 reason（进而落到某个**被放行**的档）之前必须先证明这份事实包**真的**是本形态：
+    没有 head、有合法 merkle、有字符串 scope、每个关键文件的 ref 都是 `local_snapshot`。
     否则「自称快照」就成了一个把真实缺口一并折掉的口子。
+
+    ⚠ 本次重构把 `local_source` 提成一等形态、去掉了它的授权要求，这份结构契约因此**更吃紧**：
+    它是「声明即所得」这句话在构造侧唯一的证明手段，一条都不能松。
     """
     out = []
     if facts.get("head_sha") is not None or "head_sha" not in facts:
@@ -700,12 +723,20 @@ def _snapshot_contract_reasons(facts, key_refs):
 def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
     """构造内容寻址的非真机事实索引；不做 NL 抽取、不确认 correspondence。
 
-    `completeness` 三档：
-      · `complete`      —— 绑死 PR head，唯一被下游各门接受的一档；
-      · `snapshot_only` —— 输入是本地目录快照（`provenance_kind="local_snapshot"`），
-                           除「无 PR/无 head」这一族必然缺口外别无缺口。**既非 complete 也非 blocked**：
-                           事实是诚实可表达的，但**门没有放松**，要不要授权这条降级路由由编排层/人另行决定；
-      · `blocked`       —— 其余任何缺口；只供诊断，编排层不得把它作为 cache hit 放行。
+    `completeness.status` 三档，判据是「**实得形态是否与声明的输入形态一致**」，
+    不再是「有没有拿到 PR head」：
+
+      · `complete`      —— 声明什么就实得什么，且没有别的缺口。**两条输入形态都能落这一档**：
+                           `git_pr` 要绑死 PR head；`local_source` 要有齐备的快照结构契约
+                           （显式 null head + hex64 merkle + scope），此时 `head_sha=null`
+                           是正确值而非缺陷；
+      · `snapshot_only` —— **本该绑却没绑**：声明 `git_pr`（或老事实包未声明，按 `git_pr` 处理）
+                           却只实得 `local_snapshot`。这才是降级，下游门仍要显式授权；
+      · `blocked`       —— 其余任何缺口（含声明 `local_source` 却带着上游 commit）；
+                           只供诊断，编排层不得把它作为 cache hit 放行。
+
+    `completeness.form_facts` 是**中性形态事实**（如「本地源码没有上游 commit」），
+    与 `reasons`（缺口）分开记：读产物的人据此分得清「正常的本地验收」和「出了问题」。
     """
     with open(taskdoc_path, "rb") as src:
         task_raw = src.read()
@@ -760,8 +791,18 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
         reasons.append("unsafe_key_file_path")
     # audit#17：档位由调用方自报的 `provenance_kind` 选，构造侧从不校该档的结构契约——
     # 一份声称 local_snapshot、却带着 head_sha / 没有 merkle 的 pr_facts 会走进折叠分支，
-    # 把真实缺口一并折掉，最后落成 `snapshot_only` 这个**被授权放行**的档。
+    # 把真实缺口一并折掉，最后落成一个**被放行**的档。
     provenance_kind = facts.get("provenance_kind") or "gitcode_pr"
+    # 声明的输入形态：**入口写的**，不是这里推断的。老事实包没有这一项 → 按最严的
+    # `git_pr` 处理（于是老的本地快照仍落降级档、仍要授权，与改动前逐字同规矩）。
+    declared = facts.get("declared_source_form")
+    if declared is not None and declared not in source_provenance.DECLARED_SOURCE_FORMS:
+        reasons.append("unknown_declared_source_form")
+        declared = None                 # 词表外不产生任何放行路由
+        may_fold_form = False
+    else:
+        may_fold_form = True
+    effective_form = declared or source_provenance.FORM_GIT_PR
     may_fold = False
     if provenance_kind not in ("gitcode_pr", "local_snapshot"):
         # 词表外的档位**不产生任何放行路由**：如实记进 payload，但按 blocked 收敛。
@@ -769,14 +810,26 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
     elif provenance_kind == "local_snapshot":
         contract = _snapshot_contract_reasons(facts, key_refs)
         reasons += contract
-        may_fold = not contract         # 结构契约不成立 → 不许折叠、按 blocked 收敛
+        may_fold = may_fold_form and not contract   # 结构契约不成立 → 不许折叠
+    elif effective_form == source_provenance.FORM_LOCAL_SOURCE:
+        # 声明「本地源码」却实得一个绑定上游 commit 的取材结果：声明与实得不是同一件事。
+        reasons.append("declared_local_source_but_got_upstream_commit")
+    form_facts = []
     if may_fold:
-        # key_file_ref_not_head:* 同属「没有 head 可绑」这一族必然缺口 → 一并折叠。
+        # key_file_ref_not_head:* 同属「没有 head 可绑」这一族必然事实 → 一并折叠。
         reasons = [r for r in reasons
                    if r not in _SNAPSHOT_PROVENANCE_REASONS
                    and not r.startswith("key_file_ref_not_head:")]
-        status = "blocked" if reasons else "snapshot_only"
-        reasons = sorted(set(reasons) | {_SNAPSHOT_PROVENANCE_REASON})
+        if effective_form == source_provenance.FORM_LOCAL_SOURCE:
+            # 声明即所得 —— 正常放行。「没有上游 commit」在这一档是中性事实，不是缺口，
+            # 故不进 reasons（否则 reasons 非空会让下游把正常的本地验收当成异常）。
+            status = "blocked" if reasons else "complete"
+            form_facts = list(source_provenance.LOCAL_SOURCE_FORM_FACTS)
+            reasons = sorted(set(reasons))
+        else:
+            # 本该绑 PR head 却只拿到本地字节 = 降级，一个字不放松。
+            status = "blocked" if reasons else "snapshot_only"
+            reasons = sorted(set(reasons) | {_SNAPSHOT_PROVENANCE_REASON})
     else:
         status = "complete" if not reasons else "blocked"
         reasons = sorted(set(reasons))
@@ -784,6 +837,9 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
         logic_sha = hashlib.sha256(src.read()).hexdigest()
     payload = {
         "contract_version": 1,
+        # 一等字段：本轮**声明**要测哪种输入形态（`--pr` → git_pr、`--pr-snapshot` → local_source）。
+        # 老事实包没有它 → null，下游按 `git_pr` 这一最严档对待。
+        "declared_source_form": declared,
         "taskdoc": {
             # 本地绝对路径既不可移植、又会让同内容跨工作区无法命中；URL 可保留作来源定位，
             # 本地文件只记受控标签，内容身份只认 bytes_sha256。
@@ -826,7 +882,10 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
             "interface_kind": facts.get("interface_kind"),
             "aclnn_entry": facts.get("aclnn_entry"),
         },
-        "completeness": {"status": status, "reasons": reasons},
+        # reasons = **缺口**；form_facts = 该输入形态本来就成立的**中性事实**。
+        # 两者分开记，报告才分得清「正常的本地源码验收」与「本该绑 PR head 却没绑」。
+        "completeness": {"status": status, "reasons": reasons,
+                         "form_facts": form_facts},
         "producer": {"tool": "fetch_source.py", "logic_sha256": logic_sha},
     }
     content_address.canonical_json_bytes(payload)
@@ -885,11 +944,14 @@ def main(argv):
     # 交给 argparse 互斥组而不是手写 if，是为了让「同时给两个」在参数解析期就被拒（退出码 2），
     # 不至于走到「按哪个为准」这种要靠实现顺序才说得清的地方。
     src = ap.add_mutually_exclusive_group()
-    src.add_argument("--pr", default=None, help="gitcode PR 链接（可选）")
+    src.add_argument("--pr", default=None,
+                     help="gitcode PR 链接（可选）；给了即声明 declared_source_form=git_pr")
     src.add_argument("--pr-snapshot", default=None, metavar="DIR",
-                     help="降级取材：本地一份**没有 git** 的目录快照。产 provenance_kind=local_snapshot、"
-                          "head_sha=null（绝不合成 commit id）、snapshot_merkle_sha256；"
-                          "source_facts.completeness 落 snapshot_only，下游各门仍只认 complete")
+                     help="本地源码取材（**一等输入形态，非降级**）：本地一份**没有 git** 的目录快照。"
+                          "给了即声明 declared_source_form=local_source，产 "
+                          "provenance_kind=local_snapshot、head_sha=null（绝不合成 commit id）、"
+                          "snapshot_merkle_sha256；结构齐备时 completeness 正常落 complete，"
+                          "无需任何环境变量授权")
     ap.add_argument("--target-dir", default=None, metavar="REL_DIR",
                     help="显式指定被测算子在仓内的相对目录（如 gaussian_blur 或 image/resize），"
                          "**逐字采用**、末段即 op 名，绕过 _guess_op 的路径探测"
@@ -939,15 +1001,18 @@ def main(argv):
             _label = "PR"
         else:
             pf = scan_pr_snapshot(a.pr_snapshot, a.out, target_dir=a.target_dir)
-            _label = "本地快照(降级)"
+            _label = "本地源码"
         facts = json.load(open(pf, encoding="utf-8"))
         sf = write_source_facts(td, facts, a.out, source_locator=a.taskdoc)
         print(f"[fetch] {_label} → {pf}  op={facts.get('op')} 目录={facts.get('target_dir')} "
               f"文件{len(facts.get('changed_files', []))}个 关键{len(facts.get('key_files', {}))}份")
         source_payload = content_address.read_artifact(
             a.out, "source_facts.json", "oprunway/source-facts/v1")
-        print(f"[fetch] 事实索引 → {sf} completeness="
+        print(f"[fetch] 事实索引 → {sf} 声明形态="
+              f"{source_payload.get('declared_source_form')} completeness="
               f"{source_payload['completeness']['status']}")
+        for fact in source_payload["completeness"].get("form_facts") or []:
+            print(f"  · 形态事实（非降级）：{fact}")
         for n in facts.get("notes", []):
             print(f"  ⚠ {n}")
 

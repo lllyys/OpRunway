@@ -138,8 +138,9 @@ def _bind_pr_facts_to_source(root, source_rel, pr_facts):
     普通 JSON，不是内容寻址工件。以前这里**一条都不核**：谁往 `changed_files` 里多写一行、
     往 `key_files` 里塞一段文本，就能给任意交付件造出「归宿」。
 
-    这里复用 `source_provenance.bind()`（provenance 档位的唯一解释处：`complete` 无条件、
-    `snapshot_only` 须编排层显式授权、其余全拒），再逐项核对改动集与关键文件字节摘要/ref。
+    这里复用 `source_provenance.bind()`（provenance 的唯一解释处：判据是「实得形态是否与
+    声明的输入形态一致」——`git_pr`/`local_source` 如愿实得都无条件放行，只有「声明要测 PR
+    却只拿到本地快照」才要显式授权，其余全拒），再逐项核对改动集与关键文件字节摘要/ref。
     返回 `(bindings, degradations)` 供收据留痕。
     """
     try:
@@ -368,8 +369,11 @@ def evaluate(root, validation_rel="taskdoc_validation.json",
         "optional_findings": [],
         "errors": [],
         "bindings": {},
-        # 源 provenance 的机读降级挂账（`complete` 档为空表）；恒存在，空表 ≠ 工具没记。
+        # 源 provenance 的机读**降级**挂账（正常通路为空表）；恒存在，空表 ≠ 工具没记。
         "provenance_degradations": [],
+        # 源 provenance 的机读**中性形态事实**（如本地源码没有上游 commit）。它不是降级，
+        # 但报告必须原样带着——尤其不得据此声称「已绑定 PR head」。
+        "provenance_form_facts": [],
     }
     try:
         receipt = taskdoc.evaluate(root, validation_rel, taskdoc_rel=taskdoc_rel,
@@ -395,6 +399,8 @@ def evaluate(root, validation_rel="taskdoc_validation.json",
         provenance_bindings, provenance_degradations = _bind_pr_facts_to_source(
             root, source_rel, pr_facts)
         result["provenance_degradations"] = provenance_degradations
+        result["provenance_form_facts"] = source_provenance.form_facts(
+            provenance_bindings)
         result["bindings"] = {
             "taskdoc_bytes_sha256": receipt["bindings"]["taskdoc_bytes_sha256"],
             "taskdoc_validation_digest": receipt["bindings"]["validation_digest"],
@@ -402,8 +408,12 @@ def evaluate(root, validation_rel="taskdoc_validation.json",
             "pr_facts_sha256": pr_facts["sha256"],
             "pr_url": pr_facts["pr_url"],
             # PR head **只认 source_provenance 绑出来的那个**，不再抄 pr_facts 自报值。
+            # 本地源码形态下它是 null，且那是正确值——读产物的人据 declared_source_form
+            # 区分「本来就没有上游 commit」与「本该绑却没绑」。
             "pr_head_sha": provenance_bindings["pr_head_sha"],
             "provenance_kind": provenance_bindings["provenance_kind"],
+            source_provenance.DECLARED_FORM_KEY: provenance_bindings[
+                source_provenance.DECLARED_FORM_KEY],
         }
         known = {entry["id"] for entry in receipt["deliverables"]}
         unknown = sorted(set(mapping) - known)

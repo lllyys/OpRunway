@@ -604,9 +604,13 @@ def run_gate(root, spec_rel, caseset_rel, preflight_rel, out_rel):
         "coverage": coverage,
         "checks": checks,
         "build_provenance": provenance,
-        # 源 provenance 的机读降级挂账（如 pr_head_unbound）。收据带着它往下走，
-        # 下游报告不得声称已绑定 PR head。
+        # 源 provenance 的机读**降级**挂账（如 `pr_head_unbound` = 本该绑 PR head 却只拿到
+        # 一份本地快照）。收据带着它往下走。
         "provenance_degradations": degradations,
+        # 机读**中性形态事实**：本地源码本来就没有上游 commit，这不是降级。两者分开记，
+        # 下游报告既不得据此声称已绑定 PR head，也不得把正常的本地源码验收写成异常。
+        "provenance_form_facts": source_provenance.form_facts(
+            preflight.get("bindings") or {}),
         "note": (
             "仅证明通用 aclnn_py harness 对当前 PR 签名、dtype 与 CPU golden 的确定性小见证；"
             "不替代、不裁剪正式 Task2/Task3。"),

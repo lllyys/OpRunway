@@ -152,9 +152,12 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
         "acceptance_verdict": None,
         "required_next_gate": "NPU_BUILD_AND_HARNESS_TRUST_GATE",
         "bindings": {},
-        # 源 provenance 的机读降级挂账（`complete` 档为空表）。恒存在，
-        # 空表与「工具没记」是两回事。
+        # 源 provenance 的机读**降级**挂账。只装「本该做到却没做到」的事（如声明要测 PR
+        # 却只拿到一份本地快照）；正常通路恒为空表。空表与「工具没记」是两回事，故恒存在。
         "provenance_degradations": [],
+        # 源 provenance 的机读**中性形态事实**。如「本地源码没有上游 commit」——它不是降级，
+        # 是这条输入形态本来的样子。与上一项分开记，报告才不会把正常的本地源码验收读成异常。
+        "provenance_form_facts": [],
         "signatures": [],
         "variants": [],
         "blocked_reasons": [],
@@ -176,12 +179,14 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
         if not isinstance(spec, dict) or not isinstance(pr_facts, dict):
             raise ValueError("spec/pr_facts 须为 JSON object")
         result["bindings"]["spec_sha256"] = _sha(spec)
-        # 源身份绑定（含 completeness 档位）统一由 source_provenance 一处解释：
-        # `complete` 无条件、`snapshot_only` 需编排层显式授权且逐条硬校，
-        # 放行时把降级事实机读挂账进收据。
+        # 源身份绑定（含档位）统一由 source_provenance 一处解释：判据是「**实得形态是否与
+        # 声明的输入形态一致**」——`git_pr`/`local_source` 两条声明如愿实得时都无条件放行；
+        # 只有「声明要测 PR 却只拿到本地快照」才要编排层显式授权，并把降级机读挂账进收据。
         provenance_bindings, degradations = source_provenance.bind(source, pr_facts)
         result["bindings"].update(provenance_bindings)
         result["provenance_degradations"] = degradations
+        result["provenance_form_facts"] = source_provenance.form_facts(
+            provenance_bindings)
 
         runner_form = spec.get("runner_form", "cpp")
         if runner_form not in ("aclnn_py", "cpp_extension"):

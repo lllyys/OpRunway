@@ -170,6 +170,21 @@ DISTRIBUTION_BY_FAMILY = {
 # err_threshold 的口径声明（AscendOpTest 的 `[rtol, atol]` 两元组）。
 THRESHOLD_SCHEMA = {"name": "ascendoptest.err_threshold", "order": ["rtol", "atol"], "version": 1}
 
+# ── golden 授权锚（与 precision_policy 的三层对齐） ─────────────────────────────
+# 任务书**全文快照**的落盘名。授权锚（`GOLDEN_CONTRACT.authorization.cite`）按
+# `task_doc.snapshot.md:<起>[-<止>]` 指行，`precision_policy.verify_authorization` 读**与 golden.py
+# 同目录**的这份文件逐字比对——所以本模块产包装层时必须把它一并落在旁边，
+# 否则包装层被搬到 `<ops_root>/<op>/` 后授权恒核不过，档位掉到 tier 4 blocked。
+# ⚠ 下面三个常量是 `precision_policy.TASKDOC_SNAPSHOT_NAME` / `AUTHORIZATION_KIND` 的**本地镜像**：
+#   本模块刻意不 import 那支（同 REFERENCE_APIS 的 method_kind 那条注释：避免 Layer 1 之间
+#   产生不必要的耦合），代价是对齐靠人维护——故另有一条测试逐项盯着两边不许漂
+#   （`test_taskdoc_caseset_golden_anchor.py::test_local_mirrors_match_precision_policy`）。
+TASKDOC_SNAPSHOT_NAME = "task_doc.snapshot.md"
+AUTHORIZATION_KINDS = ("oracle_method", "formula", "impl_reference", "none")
+# 声称「任务书就真值口径/公式作了指定」的两档 → 必须留下可机核的锚（cite + quote + 快照文件）。
+# 另两档（impl_reference / none）本就不构成授权，`verify_authorization` 直接放行、无需锚。
+ANCHORED_AUTHORIZATION_KINDS = ("oracle_method", "formula")
+
 _EXPECT_FUNC_RE = re.compile(r"^(?P<file>[A-Za-z_][A-Za-z0-9_]*\.py):(?P<func>[A-Za-z_][A-Za-z0-9_]*)$")
 
 
@@ -1326,26 +1341,127 @@ def golden_fn(inputs, attrs):
 '''
 
 
-def render_golden_wrapper(caseset, out_path, authorization=None):
-    """产一份 `golden.py` 文本（并把冻结原件原名写到同目录），满足 `gen_cases.load_golden` 的硬要求。
+def _read_taskdoc_snapshot(path, expected_sha256):
+    """读任务书全文快照并核指纹，返回**原始字节**（不解码、不规范化）。
+
+    ⚠ 必须逐字节：`verify_authorization` 按**行号 + 逐字子串**核引文，改一个字节行号就可能移位，
+    而那时报出来的是「引文与出处对不上」——看起来像 agent 编造引文，真正的病因却查不出来
+    （同 `fetch_source.write_taskdoc_snapshot` 的理由）。
+    """
+    if os.path.islink(path):
+        raise CasesetError("任务书快照不得是符号链接（防换锚）: " + repr(path))
+    if not os.path.isfile(path):
+        raise CasesetError("任务书快照不存在: " + repr(path))
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as ex:
+        raise CasesetError("任务书快照读取失败 " + repr(path) + ": " + str(ex)) from ex
+    actual = hashlib.sha256(raw).hexdigest()
+    if actual != expected_sha256:
+        raise CasesetError(
+            "任务书快照指纹与本轮用例集不符（快照 " + actual + " ≠ taskdoc_links 记录的 "
+            + str(expected_sha256) + "）——快照与用例集来自**两份不同的任务书**，"
+            "引文锚会指到错误的行；请用与 taskdoc_links 同一次取材的快照。")
+    return raw
+
+
+def resolve_taskdoc_snapshot(explicit_path, work_dir):
+    """定位任务书全文快照：显式给的优先，否则找 `<work_dir>/task_doc.snapshot.md`；都没有 → None。
+
+    显式给了却不存在 = 配置错，当场抛（不悄悄退回探测）。返回 None 只表示「本轮没有快照可落」，
+    授权是否因此不成立由 `render_golden_wrapper` 按 `authorization.kind` 判。
+    """
+    if explicit_path:
+        path = os.path.abspath(explicit_path)
+        if not os.path.isfile(path):
+            raise CasesetError("--taskdoc-snapshot 指定的文件不存在: " + repr(path))
+        return path
+    guess = os.path.join(os.path.abspath(work_dir), TASKDOC_SNAPSHOT_NAME)
+    return guess if os.path.isfile(guess) else None
+
+
+def cross_check_spec_golden(spec, caseset):
+    """`spec.golden` ↔ **从任务书 golden 源码派生**的契约，逐字段对账；不符即 fail-closed。
+
+    为什么必须在**产包装层时**就对账：`validator._reconcile_golden` 会拿 `spec.golden` 当判据锚，
+    与 caseset 里每条 case 的 `golden_tier` 逐字段核（source / method_kind / authorization_kind /
+    snapshot_sha）。任何一项不一致 → 每条 case 各记一条 problem → 强制 blocked。
+    那道对账发生在**真机跑完之后**，代价是一整轮跑测；而这里的判据在生成期就全都有了。
+
+    ⚠ 对账的是「两个独立源」：`source` / `method_kind` 由 `_derive_golden_method_kind` 从任务书
+    自带 golden 的 **AST** 派生，`spec.golden` 由人按任务书写——两边同意才算数。
+    `authorization` 不在此列：它是「任务书这句话算不算真值口径指定」的 NL 判断，机器派生不出来，
+    故以 spec 为唯一真源、原样写进包装层，其真伪另由 `verify_authorization` 读快照逐字核。
+    """
+    spec_golden = spec.get("golden") if isinstance(spec, dict) else None
+    if spec_golden is None:                      # legacy：spec 没有判据锚 → validator 走 caseset 自声明档
+        return None
+    if not isinstance(spec_golden, dict):
+        raise CasesetError("spec.golden 须为 object，得 " + type(spec_golden).__name__)
+    derived = caseset["golden_contract_derived"]
+    for field in ("source", "method_kind"):
+        if spec_golden.get(field) != derived[field]:
+            raise CasesetError(
+                "spec.golden." + field + "=" + repr(spec_golden.get(field))
+                + " ≠ 从任务书自带 golden 派生的 " + repr(derived[field])
+                + "——两个独立源必须一致，否则 validator 的判据锚对账会把每条 case 判成 blocked。"
+                " 请核任务书 golden 的实际实现后改 spec（不是改这里）。")
+    snapshot = spec_golden.get("taskdoc_snapshot")
+    declared = snapshot.get("sha256") if isinstance(snapshot, dict) else None
+    declared = declared.strip().lower() if isinstance(declared, str) else None
+    if declared != caseset["taskdoc_sha256"]:
+        raise CasesetError(
+            "spec.golden.taskdoc_snapshot.sha256=" + repr(declared) + " ≠ 本轮任务书 sha256 "
+            + repr(caseset["taskdoc_sha256"]) + "——包装层的 GOLDEN_CONTRACT 逐字记录后者，"
+            "两者不等即 validator 对账不过。请把本轮任务书快照指纹填进 spec.golden。")
+    return spec_golden.get("authorization")
+
+
+def render_golden_wrapper(caseset, out_path, authorization=None, taskdoc_snapshot=None):
+    """产一份 `golden.py` 文本（并把冻结原件、任务书快照写到同目录），满足 `gen_cases.load_golden` 的硬要求。
 
     `gen_cases.load_golden` 强制导出 `golden_fn` + `GOLDEN_SOURCE` + `GOLDEN_PROVENANCE`
     （见 `gen_cases.py` 的属性检查），另可选 `GOLDEN_CONTRACT`——三者都在这里产。
 
-    `authorization` 缺省 `{"kind": "none"}`，这是**有意低报**：任务书自带 golden 在语义上确实是
-    「任务书指定了真值口径」，但 `oracle_method` 要求 `task_doc.snapshot.md:<行号>` 的逐字引文锚 +
-    快照指纹才可机器复核；本模块产的是**用例集**、不负责把任务书全文快照入库，
-    填一个核不了的授权只会被 `verify_authorization` 判成 unverifiable → tier 4 blocked。
-    低报的代价是 tier 2（不人核、不阻塞），比虚报安全（AGENTS.md 5.8）。快照入库后由**人**改判。
+    `authorization` 逐字取自 `spec.golden.authorization`（缺省 `{"kind": "none"}`）：
+    「任务书这句话算不算真值口径指定」是 NL 判断，机器派生不出来，故由 spec 声明、这里原样落，
+    真伪另由 `precision_policy.verify_authorization` 读快照逐字核（它才是那道闸）。
+
+    `taskdoc_snapshot` 是任务书全文快照的**来源路径**；给了就按内容寻址复核指纹后落到包装层同目录。
+    ⚠ 声称 `oracle_method` / `formula` 却没有快照 → 当场 fail-closed：包装层被搬到 `<ops_root>/<op>/`
+    后 `verify_authorization` 读不到锚会恒返 False，`derive_golden_tier` 规则② 判 tier 4 blocked——
+    与其把这条错留到真机跑完再炸，不如在生成期就拦住。
     """
     golden = caseset["golden_original"]
     derived = caseset["golden_contract_derived"]
+    auth = dict(authorization or {"kind": "none"})
+    kind = auth.get("kind")
+    if kind not in AUTHORIZATION_KINDS:
+        raise CasesetError("golden authorization.kind=" + repr(kind) + " 不在受控词表 "
+                           + repr(AUTHORIZATION_KINDS))
+    snapshot_bytes = None
+    if taskdoc_snapshot:
+        snapshot_bytes = _read_taskdoc_snapshot(taskdoc_snapshot, caseset["taskdoc_sha256"])
+    if kind in ANCHORED_AUTHORIZATION_KINDS:
+        for key in ("cite", "quote"):
+            if not str(auth.get(key) or "").strip():
+                raise CasesetError(
+                    "golden authorization.kind=" + repr(kind) + " 声称任务书作了指定，但 " + key
+                    + " 为空——引文锚不全则授权无从核实；若任务书其实只是「参考谁的实现」，"
+                      "kind 应为 impl_reference（它不构成 golden 授权）。")
+        if snapshot_bytes is None:
+            raise CasesetError(
+                "golden authorization.kind=" + repr(kind) + " 声称任务书作了指定，但没有任务书全文快照可落"
+                "——引文锚（" + TASKDOC_SNAPSHOT_NAME + ":<行号>）必须能被 verify_authorization 逐字复核，"
+                "缺快照即授权核不过、档位掉 tier 4。请用 --taskdoc-snapshot 指向 CP-A 落的快照"
+                "（fetch_source.py 写在其 --out 目录下）。")
     contract = {
         "source": derived["source"],
         "method_kind": derived["method_kind"],
         "method": (caseset["mapping_ir"]["golden_contract_derivation"]["reference_api_calls"] or
                    [caseset["expect_func"]])[0],
-        "authorization": dict(authorization or {"kind": "none"}),
+        "authorization": auth,
         "taskdoc_snapshot": {"sha256": caseset["taskdoc_sha256"]},
     }
     provenance = (
@@ -1377,7 +1493,15 @@ def render_golden_wrapper(caseset, out_path, authorization=None):
         dst.write(golden["text"])
     with open(out_path, "w", encoding="utf-8", newline="") as dst:
         dst.write(text)
-    return {"wrapper": os.path.abspath(out_path), "original": original_path}
+    # 授权锚：与包装层同目录、原名、**原字节**（`verify_authorization` 按行号逐字核，见上）。
+    # 落在这里而不是工作区，是为了让锚随 golden 一起被搬到 `<ops_root>/<op>/`、随算子一起被复核。
+    snapshot_path = None
+    if snapshot_bytes is not None:
+        snapshot_path = content_address.safe_path(out_dir, TASKDOC_SNAPSHOT_NAME)
+        with open(snapshot_path, "wb") as dst:
+            dst.write(snapshot_bytes)
+    return {"wrapper": os.path.abspath(out_path), "original": original_path,
+            "taskdoc_snapshot": snapshot_path}
 
 
 # ================================================================================
@@ -1392,11 +1516,16 @@ def _load_json_file(path, where):
     return _json_loads_strict(raw.decode("utf-8"), where)
 
 
-def build(links_path, spec_path, out_dir):
-    """全流程：读 links 产物 → discover → build_mapping_ir → normalize → 写产物 + golden 包装层。"""
+def build(links_path, spec_path, out_dir, taskdoc_snapshot=None):
+    """全流程：读 links 产物 → discover → build_mapping_ir → normalize → 写产物 + golden 包装层。
+
+    `taskdoc_snapshot`：任务书全文快照路径（缺省找 `<links 所在目录>/task_doc.snapshot.md`）。
+    它是 golden 授权锚的载体，随包装层落到同目录，见 `render_golden_wrapper`。
+    """
     links_json = _load_json_file(links_path, "taskdoc_links.json")
     spec = _load_json_file(spec_path, "spec.json")
     work_dir = os.path.dirname(os.path.abspath(links_path))
+    snapshot = resolve_taskdoc_snapshot(taskdoc_snapshot, work_dir)
     discovery = discover(links_json, work_dir, target_op=spec.get("op"))
     if discovery["outcome"] != "recognized":
         return discovery, None, None
@@ -1409,9 +1538,12 @@ def build(links_path, spec_path, out_dir):
             raise
         return {"outcome": ex.outcome, "reason": str(ex),
                 "warnings": discovery.get("warnings") or []}, None, None
+    # 判据锚对账在**写产物之前**：不一致就别产一份注定被 validator 判 blocked 的 golden。
+    authorization = cross_check_spec_golden(spec, caseset)
     os.makedirs(out_dir, exist_ok=True)
     artifact_path = content_address.atomic_write_json(out_dir, "taskdoc_caseset.json", caseset)
-    golden_paths = render_golden_wrapper(caseset, os.path.join(out_dir, "golden", "golden.py"))
+    golden_paths = render_golden_wrapper(caseset, os.path.join(out_dir, "golden", "golden.py"),
+                                         authorization=authorization, taskdoc_snapshot=snapshot)
     return {"outcome": "recognized", "warnings": caseset["warnings"]}, caseset, {
         "caseset": artifact_path, **golden_paths}
 
@@ -1422,9 +1554,14 @@ def main(argv=None):
     parser.add_argument("--links", required=True, help="taskdoc_links.py 产出的 taskdoc_links.json")
     parser.add_argument("--spec", required=True, help="本仓 spec.json")
     parser.add_argument("--out", required=True, help="产物目录")
+    parser.add_argument("--taskdoc-snapshot", default=None, metavar="PATH",
+                        help="任务书全文快照（CP-A 的 fetch_source.py 落在其 --out 目录下的 "
+                             + TASKDOC_SNAPSHOT_NAME + "）。它是 golden 授权锚的载体，"
+                             "会按指纹复核后随包装层落到同目录；省略则找 --links 所在目录")
     args = parser.parse_args(argv)
     try:
-        result, caseset, paths = build(args.links, args.spec, args.out)
+        result, caseset, paths = build(args.links, args.spec, args.out,
+                                       taskdoc_snapshot=args.taskdoc_snapshot)
     except (CasesetError, content_address.ContentAddressError, OSError, UnicodeError) as ex:
         outcome = getattr(ex, "outcome", None)
         sys.stderr.write("[taskdoc_caseset] 失败: " + str(ex) + "\n")
@@ -1439,6 +1576,15 @@ def main(argv=None):
                      + paths["caseset"] + "\n")
     sys.stderr.write("[taskdoc_caseset] golden 包装层 " + paths["wrapper"]
                      + "（冻结原件 " + paths["original"] + "）\n")
+    # 「锚落没落」必须显式可见：没落时后续任何 oracle_method/formula 声明都核不过，
+    # 而那道失败要到 gen_cases 派档时才现形——这里先把话说在前面。
+    if paths.get("taskdoc_snapshot"):
+        sys.stderr.write("[taskdoc_caseset] 任务书授权锚 " + paths["taskdoc_snapshot"]
+                         + "（sha256 " + caseset["taskdoc_sha256"] + "）\n")
+    else:
+        sys.stderr.write("[taskdoc_caseset] 告警: 未落 " + TASKDOC_SNAPSHOT_NAME
+                         + "——授权锚不可机核，golden 只能按 impl_reference/none 档走"
+                           "（用 --taskdoc-snapshot 指向 CP-A 的快照即可补上）\n")
     return 0
 
 
