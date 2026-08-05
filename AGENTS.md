@@ -166,7 +166,7 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
   不是面向使用者的产品文档（那类若将来要有，另立目录，别混进来）；
 - 不写到工作区上层的 `markdown/`；
 - 每次落地后在 `dev-doc/oprunway-changes-brief.md` 顶部追加一两句倒序摘要；
-- 当前交接以 `dev-doc/oprunway-session-handoff-2026-07-26.md` 为准，旧 handoff 只作历史材料。
+- 当前交接以 `dev-doc/oprunway-session-handoff-2026-08-04.md` 为准，旧 handoff 只作历史材料。
 
 ### 5.7 push 前审修门
 
@@ -285,7 +285,7 @@ OpRunway/
 |---|---|
 | CP-A..E 状态机、硬门、subagent 契约 | `plugin/AGENTS.md` + `plugin/skills/acceptance-workflow/SKILL.md` |
 | 设计与数据契约 | `dev-doc/oprunway-design.md` |
-| 最新交接 | `dev-doc/oprunway-session-handoff-2026-07-26.md` |
+| 最新交接 | `dev-doc/oprunway-session-handoff-2026-08-04.md` |
 | 当前 TODO | `dev-doc/oprunway-todo.md` |
 | 改动流水 | `dev-doc/oprunway-changes-brief.md` |
 | 真机环境 | `dev-doc/oprunway-real-machine-environment.md` + `.oprunway/real-machine.env` |

@@ -24,6 +24,14 @@
   与 spec 是否声明 `perf` 无关 → 终态 `PASS(无性能要求)` 对任何用标准模板的算子实际不可达。
   改它会动到所有既有 caseset 的字节和一批测试，与本轮「既有通路零影响」冲突，故只挂账不动。
 
+## 2026-08-04
+
+- 交接换版：`dev-doc/oprunway-session-handoff-2026-08-04.md` 取代 07-26 那份，`AGENTS.md` 两处指针同步。
+  记下下一轮的五项泛化目标（gitcode 链接内容读取 / 四类「无性能对比」场景归并且用 torch 封装接入 /
+  用任务书指明的 golden 接口 / 任务书给了精度 case 就用它的 / 据此改造 workflow），
+  以及 8 条实测踩过的坑与 7 项悬而未决。⚠ 其中「torch 封装接入」若指 `cpp_extension`，
+  会推翻上一轮 GaussianBlur 选 `aclnn_py` 的理由——**开工前须先与用户确认**。
+
 ## 2026-08-03
 
 - GaussianBlur **首次真机全链跑通**（CP-A → CP-B0 → CP-C0 → 用例 → CP-C 真机信任门 → run_workflow
