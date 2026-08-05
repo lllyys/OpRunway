@@ -1121,9 +1121,11 @@ def _gate_accuracy_report(vd, cases, ev_list, errs):
         if explicit is not None:
             return explicit
         input_dtypes = input_dtype_signature(case)
-        # AscendOpTest 的 BF16 空 Tensor 无数值比较产物，validator 按 unknown 挂账。
-        if "bfloat16" in input_dtypes:
-            return "unknown"
+        # ⛔ 这里曾写死「输入含 bfloat16 → 归 unknown 桶」，理由是「validator 按 unknown 挂账」。
+        # 那条镜像自 9b07e91（支持 logical bf16）起就失效了：`precision_policy` 给 bf16 放行了
+        # `_check_compute_supported`，validator 不再走 except 回落 unknown，而是如实归进 bfloat16 桶。
+        # 门还按旧假设派生 → 两边 by_dtype 对不上 → task2 凭空报错（main 基线上两条红测的根因）。
+        # 删掉后落到下面的通用回退，与 validator 同源；顺带消掉一处按 dtype 身份写死的分支（§5.1）。
         hints = dtype_hints.get(input_dtypes, set())
         if len(hints) == 1:
             return next(iter(hints))

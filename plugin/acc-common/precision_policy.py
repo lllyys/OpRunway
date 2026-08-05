@@ -1057,7 +1057,11 @@ def effective_standard(spec_standard, cdtype, compare=None):
     - 其余 → 沿用 spec 标准（fp32/fp16 数值不变，**向后兼容**）。
 
     ⚠ bf16 走此路时 cdtype 记逻辑名 'bfloat16'（非整数）→ 只能靠 compare=='exact_equal' 收紧；若误标
-    compare!='exact_equal'，下游 threshold_for(spec_standard,'bfloat16') 会 fail-fast，不会静默放行。
+    compare!='exact_equal'，则回落 spec 标准、按 AOT 的 bfloat16 行（0.004）判。
+    **这里没有 fail-fast**——原注释说「下游 threshold_for 会 fail-fast」，自 9b07e91
+    支持 logical bf16 起就不成立了，别再照着它推断安全性。
+    真正拦住 bf16 的是 `compute_metrics`：它对 out/golden **双侧**做 `_check_compute_supported`，
+    而 `SUPPORTED_COMPUTE_DTYPES` 不含 bfloat16 —— 即「阈值取得到」不等于「bf16 数组判得过」。
     """
     if spec_standard in (EXACT, BEHAVIORAL):
         return spec_standard

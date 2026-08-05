@@ -147,9 +147,15 @@ class CaseProfilePlanMetaTest(unittest.TestCase):
         self.assertFalse(meta["case_profile_declared"])
 
     def test_meta_reports_declared_profile(self):
-        for profile in ("legacy", "torch_parity"):
+        # ⚠ torch_parity 自「批 B」起**必须**带 `precision.torch_parity_matrix`，缺矩阵当场
+        # fail-closed（见同文件 test_torch_parity_without_matrix_fails_closed）。原来这里用
+        # `_with_profile(spec, "torch_parity")` 只塞档位不塞矩阵，与那条用例对同一份输入的期望
+        # **互相矛盾**——是本用例没跟上改动，不是代码错。两档各用其合法 spec。
+        for profile, spec, target in (
+                ("legacy", _with_profile(self.spec, "legacy"), 20),
+                ("torch_parity", _with_parity_matrix(self.spec), 12)):
             with self.subTest(profile=profile):
-                _entries, meta = _plan_of(_with_profile(self.spec, profile))
+                _entries, meta = _plan_of(spec, case_target=target)
                 self.assertEqual(meta["case_profile"], profile)
                 self.assertTrue(meta["case_profile_declared"])
 

@@ -136,14 +136,25 @@ class ExactTest(unittest.TestCase):
 
 class FailFastAndRoutingTest(unittest.TestCase):
     def test_unsupported_dtype_fail_fast(self):
-        for std, dt in (("ascendoptest_default", "bfloat16"),   # 在表内但不可复算
-                        ("ascendoptest_default", "complex64"),
+        # ⚠ `ascendoptest_default × bfloat16` **不在**本清单里：9b07e91 起它是**受支持**的
+        #   （逻辑 bf16 以 uint16 输入 / fp32 比较产物承载，policy 仍取 AOT 的 bfloat16 行）。
+        #   正向覆盖见 test_bfloat16_uses_logical_aot_row_with_fp32_storage_codec。
+        #   真正的兜底不在这里，而在 `compute_metrics`：它对 out/golden **双侧**做
+        #   `_check_compute_supported`，而 `SUPPORTED_COMPUTE_DTYPES` 至今不含 bfloat16 ——
+        #   放宽的是「能不能取到阈值」，不是「能不能用 bf16 数组判过」。
+        for std, dt in (("ascendoptest_default", "complex64"),
                         ("ecosystem_mere_mare", "fp8_e4m3"),
                         ("ecosystem_mere_mare", "bfloat16")):
             with self.assertRaises(ValueError, msg=f"{std}:{dt}"):
                 P.threshold_for(std, dt)
         with self.assertRaises(ValueError):                     # 完全未知 dtype
             P.threshold_for("ascendoptest_default", "float8")
+
+    def test_bfloat16_arrays_still_rejected_by_compute_metrics(self):
+        """⭐ 锁住上面那条注释：阈值可取 ≠ 数组可判。bf16 的数值兜底必须还在。"""
+        self.assertNotIn("bfloat16", P.SUPPORTED_COMPUTE_DTYPES)
+        with self.assertRaises(ValueError):
+            P._check_compute_supported("bfloat16")
 
     def test_select_standard_backward_compat(self):
         self.assertEqual(P.select_standard({"verify_mode": "exact",

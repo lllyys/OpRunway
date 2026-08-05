@@ -341,11 +341,15 @@ class EffectiveStandardTest(unittest.TestCase):
 
     def test_bf16_needs_exact_equal_else_spec(self):
         self.assertEqual(P.effective_standard("ascendoptest_default", "bfloat16", "exact_equal"), P.EXACT)
-        # 误标非 exact_equal → 回落 spec 标准 → 下游 threshold_for(ascendoptest,bfloat16) fail-fast
+        # 误标非 exact_equal → 回落 spec 标准。⚠ 这里**不再** fail-fast：9b07e91 起
+        # ascendoptest_default × bfloat16 取 AOT 的 bfloat16 行（逻辑 bf16 以 fp32 比较产物承载）。
+        # 真正拦住 bf16 数组的是 compute_metrics 的双侧 _check_compute_supported，见
+        # test_precision_policy.FailFastAndRoutingTest.test_bfloat16_arrays_still_rejected_by_compute_metrics。
         self.assertEqual(P.effective_standard("ascendoptest_default", "bfloat16", "rel_err"),
                          "ascendoptest_default")
-        with self.assertRaises(ValueError):
-            P.threshold_for("ascendoptest_default", "bfloat16")
+        pol = P.threshold_for("ascendoptest_default", "bfloat16")
+        self.assertEqual(pol["tolerance"], 0.004)
+        self.assertEqual(pol["error_rate"], 0.004)
 
     def test_fp_unchanged_backward_compat(self):
         self.assertEqual(P.effective_standard("ascendoptest_default", "float32", "rel_err"),
