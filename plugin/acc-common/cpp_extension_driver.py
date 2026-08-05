@@ -192,7 +192,11 @@ def _expected_outputs(case):
         "name": "out",
         "role": "value",
         "compare_dtype": expected.get("compare_dtype") or case["inputs"][0]["dtype"],
-        "out_shape": expected.get("out_shape") or [],
+        # ⚠ 刻意**不写** `or []`：`[]` 是「声明为标量输出」（rank-0 归约），`None`/缺键是
+        # 「压根没人声明过输出形状」。旧写法把两者折成同一个值，于是形状未知的 case 被静默
+        # 分配成 0-d dst，真机侧报的是「src and dst must have the same shape」——一条本该
+        # 停在本地的 harness 缺陷，被写成了 DUT 的拒绝理由。缺声明由 `_empty_output` fail-closed。
+        "out_shape": expected.get("out_shape"),
     }]
 
 
@@ -202,6 +206,10 @@ def _empty_output(torch, output):
     if torch_name is None:
         raise DriverError(f"输出 {output.get('name')}: 不支持 dtype={dtype_name!r}")
     shape = output.get("out_shape")
+    if shape is None:
+        raise DriverError(
+            f"输出 {output.get('name')}: caseset 未声明 out_shape，无法分配 dst——"
+            "不按输入形状或任何算子语义猜（猜错会让真机把 harness 的错报成 DUT 的拒绝）")
     if not isinstance(shape, list) or any(
             isinstance(x, bool) or not isinstance(x, int) or x < 0 for x in shape):
         raise DriverError(f"输出 {output.get('name')}: out_shape 非非负整数数组")
@@ -247,7 +255,34 @@ def materialize_invocation(torch, np, work, case, row):
     return args, outputs, output_contracts
 
 
+#: 逐 case 失败的受控归类（进 `out_manifest.failed[].error_kind`）。按**失败发生在哪一步**分，
+#: 不按猜测的成因分：三者对下游都是「这条 case 没有可比结果」，但归因写死在事实上。
+FAILED_MATERIALIZE = "input_materialization_failed"   # 输入落盘字节 → NPU 张量这一步就没成
+FAILED_EXECUTE = "execution_failed"                   # 真正调 DUT entrypoint（含同步、返回元数）失败
+FAILED_READBACK = "output_readback_failed"            # 调用成功但输出读回/落盘失败
+_FAILED_KIND_BY_PHASE = {
+    "materialize": FAILED_MATERIALIZE,
+    "execute": FAILED_EXECUTE,
+    "readback": FAILED_READBACK,
+}
+
+
 def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
+    """逐 case 执行整份 invocation plan；**单条失败不中断整轮**。
+
+    改动前这里是一句裸调用：第一条 case 抛异常就把整个 driver 带走，于是 169 条里第 1 条被
+    DUT 拒（`aclnnXxxGetWorkspaceSize` 返回非零 → TORCH_CHECK 抛 RuntimeError）就等于**一件
+    产物都不产**——既拿不到其余 168 条的精度证据，也没有任何机读事实说明第 1 条为什么挂。
+    这与 `golden_unavailable` 的一等状态设计（保留身份、其余继续、由门判 BLOCKED）自相矛盾。
+
+    现在：每条 case 单独 try/except，失败的进 `out_manifest.failed[]`（case 身份 + **逐字**
+    错误原文 + 按阶段归类），`progress.json` 同步计数，然后**继续跑下一条**，最后仍写
+    `complete: True`（= 这一轮把 plan 走完了，不是「采了个子集」）。
+
+    ⚠ 这不放松任何判定：`failed` 里的 case 在 evidence 侧是 `status=execution_failed`（无
+    metrics）、在 validator 侧功能维恒 fail、在验收门里必须被反向核到确实落成失败。「跳过了」
+    绝不等于「通过了」（AGENTS.md 5.8）。
+    """
     import numpy as np
     import torch
     import torch_npu  # noqa: F401
@@ -269,63 +304,88 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
         shutil.rmtree(out_root)
     os.makedirs(out_root)
     produced = []
+    failed = []
     progress_path = os.path.join(out_root, "progress.json")
     manifest_path = os.path.join(out_root, "out_manifest.json")
     total = len(plan["cases"])
-    _atomic_dump(progress_path, {
-        "schema_version": 1, "status": "running", "current_case_id": None,
-        "completed_cases": 0, "total_cases": total,
-    })
+    last_case = [None]
+
+    def _progress(status, current=None):
+        _atomic_dump(progress_path, {
+            "schema_version": 1, "status": status, "current_case_id": current,
+            "last_attempted_case_id": last_case[0],
+            "completed_cases": len(produced), "failed_cases": len(failed),
+            "attempted_cases": len(produced) + len(failed), "total_cases": total,
+        })
+
+    def _snapshot(complete):
+        _atomic_dump(manifest_path, {
+            "schema_version": 1, "complete": complete,
+            "produced": produced, "failed": failed})
+
+    _progress("running")
     for row in plan["cases"]:
         case = by_id.get(row["case_id"])
         if case is None:
+            # plan↔caseset 对不上是**整轮**的绑定破损，不是某条 case 跑挂了：照旧当场炸。
             raise DriverError(f"plan case {row['case_id']!r} 不在 caseset")
-        _atomic_dump(progress_path, {
-            "schema_version": 1, "status": "running",
-            "current_case_id": case["id"],
-            "completed_cases": len(produced), "total_cases": total,
-        })
-        args, outputs, output_contracts = materialize_invocation(
-            torch, np, work, case, row)
-        result = getattr(namespace, row["entrypoint"])(*args)
-        torch.npu.synchronize()
-        returned = list(result)
-        if len(returned) != len(outputs):
-            raise DriverError(
-                f"{case['id']}: Extension 返回 {len(returned)} 输出，期望 {len(outputs)}")
+        _progress("running", current=case["id"])
         cdir = os.path.join(out_root, case["id"])
-        os.makedirs(cdir)
-        out_rows = []
-        for index, (tensor, contract) in enumerate(zip(returned, output_contracts)):
-            rel = f"{case['id']}/out_{index}.bin"
-            dtype, shape = _dump_output(
-                torch, np, tensor, contract["compare_dtype"],
-                os.path.join(out_root, rel))
-            out_rows.append({
-                "index": index,
-                "name": contract.get("name"),
-                "role": contract.get("role"),
-                "path": rel,
-                "dtype": dtype,
-                "shape": shape,
+        phase = "materialize"
+        try:
+            args, outputs, output_contracts = materialize_invocation(
+                torch, np, work, case, row)
+            phase = "execute"
+            result = getattr(namespace, row["entrypoint"])(*args)
+            torch.npu.synchronize()
+            returned = list(result)
+            if len(returned) != len(outputs):
+                raise DriverError(
+                    f"{case['id']}: Extension 返回 {len(returned)} 输出，期望 {len(outputs)}")
+            phase = "readback"
+            os.makedirs(cdir)
+            out_rows = []
+            for index, (tensor, contract) in enumerate(zip(returned, output_contracts)):
+                rel = f"{case['id']}/out_{index}.bin"
+                dtype, shape = _dump_output(
+                    torch, np, tensor, contract["compare_dtype"],
+                    os.path.join(out_root, rel))
+                out_rows.append({
+                    "index": index,
+                    "name": contract.get("name"),
+                    "role": contract.get("role"),
+                    "path": rel,
+                    "dtype": dtype,
+                    "shape": shape,
+                })
+        except Exception as ex:  # noqa: BLE001 —— 单条 case 的任何失败都只归这条，不带走整轮
+            if os.path.isdir(cdir):
+                # 半截产物必须清掉：下游按 manifest 读字节，留一堆残缺 out_k.bin 只会制造
+                # 「看起来有产物」的假象。
+                shutil.rmtree(cdir, ignore_errors=True)
+            failed.append({
+                "case_id": case["id"],
+                "entrypoint": row["entrypoint"],
+                "phase": phase,
+                "error_kind": _FAILED_KIND_BY_PHASE[phase],
+                "error_type": type(ex).__name__,
+                # **逐字原文**：不截断、不改写、不翻译。归因要拿得出原话（AGENTS.md 5.8）。
+                "error": str(ex),
             })
+            last_case[0] = case["id"]
+            _snapshot(False)
+            _progress("running")
+            continue
         produced.append({"case_id": case["id"], "outputs": out_rows})
-        _atomic_dump(manifest_path, {
-            "schema_version": 1, "complete": False, "produced": produced})
-        _atomic_dump(progress_path, {
-            "schema_version": 1, "status": "running",
-            "current_case_id": None,
-            "last_completed_case_id": case["id"],
-            "completed_cases": len(produced), "total_cases": total,
-        })
-    _atomic_dump(manifest_path, {
-        "schema_version": 1, "complete": True, "produced": produced})
-    _atomic_dump(progress_path, {
-        "schema_version": 1, "status": "complete", "current_case_id": None,
-        "last_completed_case_id": produced[-1]["case_id"] if produced else None,
-        "completed_cases": len(produced), "total_cases": total,
-    })
-    return torch, schemas
+        last_case[0] = case["id"]
+        _snapshot(False)
+        _progress("running")
+    _snapshot(True)
+    _progress("complete")
+    return torch, schemas, {
+        "planned": total, "produced": len(produced), "failed": len(failed),
+        "failed_case_ids": [row["case_id"] for row in failed],
+    }
 
 
 def run(bundle, work):
@@ -339,7 +399,7 @@ def run(bundle, work):
         raise DriverError("invocation plan 与 caseset 摘要不一致")
     _handle, vendor = _bind_vendor(plan)
     build_argv, artifact = _build(bundle, manifest)
-    torch, schemas = _invoke_all(
+    torch, schemas, invocation = _invoke_all(
         bundle, work, manifest, plan, caseset, artifact)
 
     artifact_rel = os.path.relpath(artifact, work).replace(os.sep, "/")
@@ -371,6 +431,9 @@ def run(bundle, work):
             "spec_sha256": manifest["spec_sha256"],
         },
         "runtime": runtime,
+        # 本轮逐 case 执行的分母台账：`failed > 0` 时 receipt 自己就说得出「哪些没跑成」，
+        # 不必翻 out_manifest 才知道这一轮不是满堂彩（AGENTS.md 5.8）。
+        "invocation": invocation,
         "build": {"argv": build_argv, "returncode": 0},
         "artifact": {"path": artifact_rel, "sha256": _sha_file(artifact)},
         "load": {

@@ -4,6 +4,23 @@
 
 ## 2026-08-05
 
+- **GaussianBlur cpp_extension 首次跑出全套验收产物**（acceptance/verdict/evidence/perf_report）。
+  之前是「第一条 case 被 DUT 拒 161002 → 整轮零产物」。修了四处 harness 缺陷：
+  ① `cpp_extension_driver._invoke_all` 逐 case try/except，失败进 `out_manifest.failed[]`
+  （身份 + 逐字原文 + 按阶段归类）、`progress.json` 计数、继续跑下一条，最后仍写 `complete: True`；
+  ② 下游认这条状态：`repo_adapter` 产 `status=execution_failed` / `golden_unavailable` 的证据行，
+  validator 见非 `ok` 状态直接功能 fail（精度维沿用旧口径：该裁的 fail、不该裁的 na），
+  验收门豁免它们的精度证据完整性但**反向核**每条都确实落成失败——跳过 ≠ 通过；
+  ③ **161002 的真凶是调用桥**：op-plugin 的 `ConvertType(at::Tensor)` 按 rank 贴 ACL 格式
+  （3→NCL），而本算子只收公共 ND。新增 `spec.aclnn_tensor_format`（缺省=历史行为），
+  codegen 在 extended 派发下生成自己的 ND 转换器。改完 73 条 rank-3 用例全部跑通；
+  ④ 无 golden 的 case 不再进执行计划——没有 `out_shape` 就分配不出 `dst`，硬跑只会把
+  harness 的错记成 DUT 的拒绝。
+- 本轮结论（**不是通过**）：164 条执行、164 条精度 pass、5 条 `golden_unavailable` 记 BLOCKED，
+  16 条真实 msprof kernel-only 实测（未做 GPU 标杆对比，§5.10）；
+  `overall = BLOCKED(验收门未过)`，卡在两处**与本次改动无关**的既有缺口：
+  `spec.golden.snapshot_sha` 缺失导致 169 条 golden 锚不符 + golden tier 4 未授权，
+  以及 gate_task1 还不认 `golden_unavailable`（把它误报成「伪造 na 跳精度门」）。
 - **下一轮计划落进仓里**：`dev-doc/oprunway-taskdoc-caseset-absorption-plan.md`（v3）。
   规划期把任务书引用的链接全部实探了一遍，挖出一件之前完全没看见的事——
   **任务书自己就发了 169 条自测用例和一份 OpenCV CPU 的 golden**

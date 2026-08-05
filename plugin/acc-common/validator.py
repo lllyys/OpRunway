@@ -855,6 +855,11 @@ def _acc_metrics_present(ev_prec):
     return isinstance(ev_prec.get("metrics"), dict)
 
 
+#: evidence 侧表示「这条 case 真跑到了」的状态集。其余任何状态（`execution_failed` /
+#: `golden_unavailable` / 未知自报值）都当作「没有可比结果」→ 功能维 fail、精度归 errored 桶。
+_EXECUTED_EV_STATUSES = ("ok", "skipped_empty")
+
+
 def _acc_executed(e):
     """该 case 是否「跑成了并产出可比结果」。对标 cannbot `accuracy.py:648`（`status != "ok"` → errored）
     ＋ `:656-659`（golden 读不了 → errored）。evidence 缺 / status≠ok / metrics 缺 → 都不算 executed。"""
@@ -1107,6 +1112,21 @@ def validate(spec, caseset, evidence):
         e = ev_by_id.get(cid)
         if e is None:
             row.update(功能="fail", 判据="evidence 缺此 case")
+            per.append(row); continue
+        # 证据自报「这条没有可比结果」（driver 逐 case 跑挂 = `execution_failed`；任务书用例算不出
+        # golden = `golden_unavailable`）→ 功能维直接 fail，**不再往下走口径校验**。
+        # 两个理由：① 归因要准——继续走下去会停在「精度口径不符/输出形状对账」之类的判据上，把
+        # 「压根没跑出来」写成「口径写错了」，那是错误归因（AGENTS.md 5.8）；② 这条分支只会让结论
+        # **更严**（恒 fail、恒进 errored 桶），不存在被拿来放松判定的用法。
+        ev_status = e.get("status")
+        if isinstance(ev_status, str) and ev_status not in _EXECUTED_EV_STATUSES:
+            detail = e.get("error") or e.get("golden_unavailable_reason") or e.get("note") or ""
+            # 精度维**沿用既有口径**：该裁精度（dims 含「精度」）却没有可复算的误差 → fail；
+            # 本就不裁精度的 case（如无 golden 的任务书用例，dims 只有「功能」）→ na。
+            # 这条分支只改「判据写得准不准」，不改任何一条 case 的结论档位。
+            row.update(功能="fail",
+                       精度=("fail" if "精度" in dims else "na"),
+                       判据=f"未产出可比结果（evidence.status={ev_status}）：{detail}".strip("："))
             per.append(row); continue
         ev_prec = e.get("precision") or {}
         # §1.4 空 Tensor 功能用例（Layer A：expected.compare=na、dims=["功能"]）→ 判 na、不判精度。

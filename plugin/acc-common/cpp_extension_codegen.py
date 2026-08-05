@@ -95,6 +95,23 @@ DISPATCH_EXTENDED = "generated_extended_two_stage"
 #: 「本次 stage2 形态没有任何 header 级证据」的机读挂账。
 DEGRADATION_STAGE2_UNVERIFIED = "stage2_form_unverified"
 
+# ── 张量 ACL 存储格式（`spec.aclnn_tensor_format`）───────────────────────────────
+#: op-plugin 的 `ConvertType(const at::Tensor&)` **按 rank 猜 ACL 存储格式**：3→`ACL_FORMAT_NCL`、
+#: 4→`ACL_FORMAT_NCHW`、5→`ACL_FORMAT_NCDHW`、其余→`ACL_FORMAT_ND`。这是 op-plugin 自家算子的约定，
+#: 不是 aclnn 两段式的通用契约：接口若按 `GetStorageFormat() == FORMAT_ND` 校格式，一条 rank-3 的
+#: 普通 ND 图像张量就会被 L2 侧当场拒成 `ACLNN_ERR_PARAM_INVALID`（161002），而 Python 侧
+#: `torch_npu.get_npu_format` 明明报 ND —— 该格式是**转换那一步**贴上去的，不是张量本来的属性。
+#: 故这里把它变成一条**显式声明**：ABI 事实源（header/docs/example）说要 ND 就写 `nd`，
+#: 没人核过就沿用历史默认并如实记在 manifest 里，谁都不猜（AGENTS.md 5.1）。
+TENSOR_FORMAT_TORCH_NPU_DEFAULT = "torch_npu_rank_default"
+TENSOR_FORMAT_ND = "nd"
+TENSOR_FORMATS = (TENSOR_FORMAT_TORCH_NPU_DEFAULT, TENSOR_FORMAT_ND)
+TENSOR_FORMAT_SOURCE_SPEC = "spec_declared"
+TENSOR_FORMAT_SOURCE_DEFAULT = "default_unverified"
+
+#: 生成 ND 转换器时用的函数名（只在 `nd` 档出现在生成源码里）。
+_ND_CONVERTER = "OprunwayConvertNdTensor"
+
 #: preflight 产物里表示「静态签名对账通过」的唯一状态。
 _PREFLIGHT_READY = "READY_WAIT_NPU_TRUST_GATE"
 
@@ -224,6 +241,22 @@ def _resolve_stage2(variant, index, symbol, preflight_table):
     return STAGE2_STANDARD, STAGE2_SOURCE_DEFAULT
 
 
+def _resolve_tensor_format(spec):
+    """定出本次生成用哪种 ACL 存储格式 → `(format, source)`；词表外一律 fail-closed。
+
+    缺席即历史默认（op-plugin 按 rank 猜），并记 `default_unverified` —— 与改动前**逐字节相同**
+    的那条路径，只是「这次没人核过张量格式」变成 manifest 里可读的事实，而不是静默假设。
+    """
+    declared = spec.get("aclnn_tensor_format")
+    if declared is None:
+        return TENSOR_FORMAT_TORCH_NPU_DEFAULT, TENSOR_FORMAT_SOURCE_DEFAULT
+    if declared not in TENSOR_FORMATS:
+        raise CppExtensionCodegenError(
+            f"spec.aclnn_tensor_format={declared!r} 非受控值，须属 {list(TENSOR_FORMATS)}"
+            "（fail-closed，不缺省）")
+    return declared, TENSOR_FORMAT_SOURCE_SPEC
+
+
 def _contract(spec, preflight_table=None):
     if spec.get("runner_form") != "cpp_extension":
         raise CppExtensionCodegenError(
@@ -337,7 +370,55 @@ def _render_standard_body(variant, call_args):
     return f"    EXEC_NPU_CMD_EXT(aclnn{variant['symbol']}, {call_args});"
 
 
-def _render_extended_body(variant, call_args, arg_count, first_input):
+def _render_nd_converter():
+    """生成「按公共 ND 格式建 aclTensor」的转换器。
+
+    逐句对齐 op-plugin 的 `ConvertType(const at::Tensor&)`（storage 维度按 `nbytes/itemsize` 拉平、
+    view 形状/步长/偏移原样传、dtype 走官方 `ConvertType(at::ScalarType)`），**只换 format 一项**。
+    可选输出（未激活的 out 槽）保持官方语义：未给值即 `nullptr`。
+    """
+    return f"""namespace {{
+
+// OpRunway 生成：按 spec 声明的 ACL 存储格式（ND）建 aclTensor。
+// op-plugin 的 ConvertType(at::Tensor) 按 **rank** 贴格式（3→NCL / 4→NCHW / 5→NCDHW），
+// 而本接口的 ABI 事实源要求公共 ND；rank-3 张量会因此被 L2 侧判 ACLNN_ERR_PARAM_INVALID。
+// 除 format 外的每个字段都与官方转换逐句一致，不改语义。
+inline aclTensor *{_ND_CONVERTER}(const at::Tensor &at_tensor)
+{{
+    static const auto aclCreateTensorFunc = GET_OP_API_FUNC(aclCreateTensor);
+    TORCH_CHECK(aclCreateTensorFunc != nullptr, "aclCreateTensor 未从 CANN 动态库解析到");
+    TORCH_CHECK(at_tensor.defined(), "ND 张量转换收到未定义的 at::Tensor");
+    const auto itemsize = at_tensor.itemsize();
+    TORCH_CHECK(itemsize > 0, "ND 张量转换收到 itemsize=0 的 at::Tensor");
+    const int64_t storage_dims[1] = {{
+        static_cast<int64_t>(at_tensor.storage().nbytes() / itemsize)}};
+    return aclCreateTensorFunc(
+        at_tensor.sizes().data(), at_tensor.sizes().size(),
+        ConvertType(at_tensor.scalar_type()),
+        at_tensor.strides().data(), at_tensor.storage_offset(), ACL_FORMAT_ND,
+        storage_dims, 1, const_cast<void *>(at_tensor.storage().data()));
+}}
+
+inline aclTensor *{_ND_CONVERTER}(const c10::optional<at::Tensor> &opt_tensor)
+{{
+    if (!opt_tensor.has_value() || !opt_tensor.value().defined()) {{
+        return nullptr;
+    }}
+    return {_ND_CONVERTER}(opt_tensor.value());
+}}
+
+}}  // namespace"""
+
+
+def _convert_expr(param, tensor_format):
+    """该实参在 stage1 转换里的表达式：张量按声明格式走，其余一律官方 `ConvertType`。"""
+    if param["io"] in ("in", "out") and tensor_format == TENSOR_FORMAT_ND:
+        return f"{_ND_CONVERTER}({param['name']})"
+    return f"ConvertType({param['name']})"
+
+
+def _render_extended_body(variant, call_args, arg_count, first_input,
+                          variant_params=None, tensor_format=TENSOR_FORMAT_TORCH_NPU_DEFAULT):
     """extended stage2：按官方 helper 手写两段式派发。
 
     为什么不能用 ``EXEC_NPU_CMD_EXT``：宏的执行段最终落到 op-plugin 的 ``ExecuteApiFunc()``，
@@ -375,6 +456,19 @@ def _render_extended_body(variant, call_args, arg_count, first_input):
     picks = ",\n        ".join(
         f"std::get<{i}>(converted_params)" for i in range(arg_count))
     symbol = f"aclnn{variant['symbol']}"
+    if tensor_format == TENSOR_FORMAT_ND:
+        # 逐槽显式转换：张量走生成的 ND 转换器，其余原样交给官方 ConvertType。
+        # 元组布局与 `ConvertTypes(...)` 逐项相同（含末两项 stage1 专有出参），故下面
+        # picks / ReleaseConvertTypes 一个字都不用改。
+        exprs = ",\n        ".join(
+            _convert_expr(p, tensor_format) for p in (variant_params or []))
+        convert_line = (f"""auto converted_params = std::make_tuple(
+        {exprs},
+        workspace_size_addr, executor_addr);""")
+    else:
+        convert_line = (
+            f"auto converted_params = ConvertTypes({call_args}, "
+            f"workspace_size_addr, executor_addr);")
     return f"""    // stage2 = extended（框架三参 + stage1 实参原样重复 + stream，共 {variant['stage2_call_arity']} 参）。
     // 官方 EXEC_NPU_CMD_EXT 的执行段固定按 4 参调 phase-2，对这条 ABI 会静默错调，故手写派发。
     // 骨架逐句对齐 op_api_common_base.h 的 EXEC_NPU_CMD_V1_EXT，只换掉执行段那一行。
@@ -388,7 +482,7 @@ def _render_extended_body(variant, call_args, arg_count, first_input):
     uint64_t *workspace_size_addr = &workspace_size;
     aclOpExecutor *executor = nullptr;
     aclOpExecutor **executor_addr = &executor;
-    auto converted_params = ConvertTypes({call_args}, workspace_size_addr, executor_addr);
+    {convert_line}
     auto get_workspace_size_func = ConvertToOpApiFunc(converted_params, get_workspace_size_addr);
     auto workspace_status = call(get_workspace_size_func, converted_params);
     TORCH_CHECK(workspace_status == 0, "{symbol}GetWorkspaceSize failed, ret=", workspace_status);
@@ -422,7 +516,8 @@ def _render_extended_body(variant, call_args, arg_count, first_input):
     RunAclCall("{symbol}", acl_call);"""
 
 
-def _render_cpp(namespace, params, variants):
+def _render_cpp(namespace, params, variants,
+                tensor_format=TENSOR_FORMAT_TORCH_NPU_DEFAULT):
     functions = []
     schemas = []
     impls = []
@@ -434,9 +529,19 @@ def _render_cpp(namespace, params, variants):
         call_args = ", ".join(p["name"] for p in variant_params)
         returned = ", ".join(v["active_outputs"])
         if v["stage2_form"] == STAGE2_STANDARD:
+            if tensor_format != TENSOR_FORMAT_TORCH_NPU_DEFAULT:
+                # 官方 EXEC_NPU_CMD_EXT 宏内部自己调 ConvertTypes，插不进别的张量格式；
+                # 而那条路径是「与改动前逐字节相同」的红线，不为此改写。声明了非默认格式却
+                # 落在 standard 派发上 → fail-closed，绝不悄悄按 rank 猜格式跑过去。
+                raise CppExtensionCodegenError(
+                    f"call_variants[{v['index']}] 的 stage2 形态是 {STAGE2_STANDARD}（走官方宏），"
+                    f"无法施加 spec.aclnn_tensor_format={tensor_format!r}——"
+                    "该格式当前只在手写 extended 派发下实现，fail-closed")
             body = _render_standard_body(v, call_args)
         elif v["stage2_form"] == STAGE2_EXTENDED:
-            body = _render_extended_body(v, call_args, len(variant_params), first_input)
+            body = _render_extended_body(v, call_args, len(variant_params), first_input,
+                                         variant_params=variant_params,
+                                         tensor_format=tensor_format)
         else:
             # `_resolve_stage2` 已把词表外的值拦死；这里是最后一道，防将来有人扩词表却忘了改这。
             raise CppExtensionCodegenError(
@@ -451,6 +556,7 @@ def _render_cpp(namespace, params, variants):
         schema_args = ", ".join(_schema_arg(p, active) for p in variant_params)
         schemas.append(f'    m.def("{v["entrypoint"]}({schema_args}) -> Tensor[]");')
         impls.append(f'    m.impl("{v["entrypoint"]}", &{v["entrypoint"]});')
+    prelude = ([_render_nd_converter()] if tensor_format == TENSOR_FORMAT_ND else [])
     return f"""// Generated by OpRunway. Do not hand-edit.
 #include <tuple>
 #include <vector>
@@ -458,7 +564,7 @@ def _render_cpp(namespace, params, variants):
 #include <torch/extension.h>
 #include "npu_cpp_extension.h"
 
-{os.linesep.join(functions)}
+{os.linesep.join(prelude + functions)}
 
 TORCH_LIBRARY({namespace}, m)
 {{
@@ -516,13 +622,14 @@ def generate(spec, out_dir, preflight=None):
     preflight_table = (None if preflight is None
                        else _preflight_stage2_by_symbol(preflight, digest))
     params, variants = _contract(spec, preflight_table)
+    tensor_format, tensor_format_source = _resolve_tensor_format(spec)
     namespace = f"oprunway_{digest[:16]}"
     module_name = f"{namespace}_lib"
     out = Path(out_dir)
     csrc = out / "csrc"
     csrc.mkdir(parents=True, exist_ok=True)
 
-    cpp = _render_cpp(namespace, params, variants)
+    cpp = _render_cpp(namespace, params, variants, tensor_format)
     setup = _render_setup(module_name)
     (csrc / "oprunway_extension.cpp").write_text(cpp, encoding="utf-8")
     (out / "setup.py").write_text(setup, encoding="utf-8")
@@ -533,6 +640,10 @@ def generate(spec, out_dir, preflight=None):
         "spec_sha256": digest,
         "namespace": namespace,
         "module_name": module_name,
+        # 本次张量按哪种 ACL 存储格式建：`torch_npu_rank_default` = op-plugin 按 rank 猜
+        # （历史行为）；`nd` = 按 spec 声明的公共 ND。来源一并落盘，别让读收据的人以为「默认就对」。
+        "tensor_acl_format": tensor_format,
+        "tensor_acl_format_source": tensor_format_source,
         "official_pattern": {
             "source": "Ascend/op-plugin examples/cpp_extension_base",
             "ascend_pytorch_master_commit": "c255c0003f1ddff0e34190e417dc29b1c6f566a3",

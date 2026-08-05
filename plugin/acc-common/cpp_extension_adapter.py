@@ -81,10 +81,22 @@ def _variants_by_symbol(manifest):
     return result
 
 
+#: caseset 里「无 golden」的一等状态标记（定义处 `gen_cases.GOLDEN_UNAVAILABLE`）。
+GOLDEN_UNAVAILABLE = "golden_unavailable"
+
+
 def build_invocation_plan(caseset, manifest):
-    """把 caseset.aclnn_call 绑定到生成 Extension 的 entrypoint；不重推变体。"""
+    """把 caseset.aclnn_call 绑定到生成 Extension 的 entrypoint；不重推变体。
+
+    `golden_unavailable` 的 case **不进执行计划**，并落进 `excluded` 台账。理由是形状：
+    没有 golden 就没有 `expected.out_shape`，driver 也就无从分配 `dst`——真按 0-d 分配下去，
+    真机报回来的是「src and dst must have the same shape」，一条纯 harness 的错会被记成
+    DUT 的拒绝理由（AGENTS.md 5.8 的反面教材）。这些 case 的身份、输入字节、调用契约仍在
+    caseset 里完整保留，evidence 侧记 `golden_unavailable`、验收门按 BLOCKED 记账，
+    **不因为没执行就变成通过**。
+    """
     variants = _variants_by_symbol(manifest)
-    rows, seen = [], set()
+    rows, seen, excluded = [], set(), []
     cases = caseset.get("cases")
     if not isinstance(cases, list) or not cases:
         raise CppExtensionAdapterError("caseset.cases 须为非空列表")
@@ -93,6 +105,9 @@ def build_invocation_plan(caseset, manifest):
         if not isinstance(cid, str) or not cid or cid in seen:
             raise CppExtensionAdapterError(f"case id 缺失或重复: {cid!r}")
         seen.add(cid)
+        if (case.get("expected") or {}).get("golden_status") == GOLDEN_UNAVAILABLE:
+            excluded.append({"case_id": cid, "reason": GOLDEN_UNAVAILABLE})
+            continue
         call = case.get("aclnn_call")
         if not isinstance(call, dict):
             raise CppExtensionAdapterError(
@@ -135,6 +150,9 @@ def build_invocation_plan(caseset, manifest):
             "entrypoint": variant["entrypoint"],
             "slots": slots,
         })
+    if not rows:
+        raise CppExtensionAdapterError(
+            "invocation plan 无任何可执行 case（全部被排除）——没有可跑的 DUT 调用，拒")
     return {
         "schema": "oprunway.cpp_extension_invocation_plan",
         "schema_version": 1,
@@ -142,6 +160,8 @@ def build_invocation_plan(caseset, manifest):
         "manifest_sha256": _canonical_sha(manifest),
         "namespace": manifest["namespace"],
         "cases": rows,
+        # 分母台账：谁没进执行计划、为什么。空表 = 一条都没排除。
+        "excluded": excluded,
     }
 
 

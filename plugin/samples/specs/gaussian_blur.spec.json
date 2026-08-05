@@ -6,6 +6,8 @@
   "_scenario_note": "**刻意不写 `scenario`**：受控值只有 torch_ref_aclnn，语义是「任务书把 torch 指定为真值口径」——本算子真值口径是 OpenCV CPU，不属该场景，故整字段省略（模板要求：不属该场景就整字段省略、别编新值）。执行形态由 runner_form 驱动，与本字段无关。",
   "runner_form": "cpp_extension",
   "_runner_form_note": "由 change.kind=new_op 确定性派生（perf_mode.derive_runner_form，用户 2026-08-05 口径：新增 dtype / 扩 shape·rank / 新算子三类改动明确用 torch 封装接入 = 官方 C++ Extension 的 torch.ops 桥）。⚠ **不存在 aclnn_py 退路**（用户 2026-08-05 封死）：接口预检只决定「支持 or BLOCKED」，打不通就如实报阻断点，绝不静默改选 aclnn_py——换通路会同时换掉 DUT 形态与性能对照物。DUT 仍是本 PR 构建的 vendor .so，不重编 op-plugin、不把 op-plugin 当 DUT。",
+  "aclnn_tensor_format": "nd",
+  "_aclnn_tensor_format_note": "被测接口只收公共 ND 格式的张量，三源一致：① op_api/aclnn_gaussian_blur.cpp:81-82 `OP_CHECK(srcFormat == op::Format::FORMAT_ND, OP_LOGE(ACLNN_ERR_PARAM_INVALID, \"GaussianBlur only supports ND public format.\"), return false);`；② docs/aclnnGaussianBlur.md 参数表 src/dst 的「数据格式」列写 ND，约束节写「仅支持 FLOAT32、ND 格式」；③ examples/test_aclnn_gaussian_blur.cpp 按 ACL_FORMAT_ND 建 aclTensor。⚠ 不声明这一项会**真机 161002**：op-plugin 的 ConvertType(at::Tensor) 按 rank 贴 ACL 存储格式（3→ACL_FORMAT_NCL），于是 [H,W,C] 的 rank-3 图像张量被 L2 侧 CheckFormatValid 当场拒——2026-08-05 真机 plog 逐字：`[aclnn_gaussian_blur.cpp:82][NNOP][CheckFormatValid] errno[161002] GaussianBlur only supports ND public format.`，同一条 harness 下 rank-2 用例正常通过。这是**调用桥**贴错格式，不是 DUT 的限制。",
   "reference": {
     "type": "cpu",
     "ref": "OpenCV CPU 的 cv2.GaussianBlur（任务书把 OpenCV 指定为对标基准）。DUT = PR 提供的 aclnn 两段式接口 aclnnGaussianBlurGetWorkspaceSize / aclnnGaussianBlur（gaussian_blur/op_api/aclnn_gaussian_blur.h）。⚠ stage2 是**非标准 10 参**形态（workspace, workspaceSize, executor, src, ksize, sigmaX, sigmaY, borderType, dst, stream），且 dst 在 stage1 声明为 const aclTensor*、stage2 为 aclTensor*（DUT 自身不一致）；runner 侧按 stage2 的限定符定输出方向。"

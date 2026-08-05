@@ -905,6 +905,57 @@ def _load_json_file(path):
                 ValueError(f"非法 JSON 常量 {token}")))
 
 
+#: evidence 侧「这条 case 没有可比结果」的两种一等状态（定义处：`repo_adapter.EV_STATUS_*`）。
+#: 它们**豁免的只是精度证据完整性**（本来就没有 metrics 可校），**不豁免结论**——
+#: 每一条都必须在 verdict 里落成失败，否则就是「跳过即通过」的 fail-open。
+_EV_EXECUTION_FAILED = "execution_failed"
+_EV_GOLDEN_UNAVAILABLE = "golden_unavailable"
+_EV_UNJUDGEABLE_STATUSES = (_EV_EXECUTION_FAILED, _EV_GOLDEN_UNAVAILABLE)
+
+
+def _gate_task2_unjudgeable(cases, ev_list, vd, errs):
+    """挑出「无精度证据可校」的 case 并**反向核**它们确实被判成了失败；返回豁免 id 集。
+
+    豁免精度证据完整性是必要的（没跑出来就没有 metrics / threshold / policy 可比），但豁免必须
+    带三道反向核，否则这个口子就是「自报一个状态即可跳过精度门」：
+
+      1. `execution_failed` 必须带**非空逐字错误原文**——说不出原话的失败不算证据；
+      2. `golden_unavailable` 必须在 **caseset** 侧也确实标了 `expected.golden_status`——
+         不许拿「没有真值」的名义给一条本该判精度的 case 开豁免；
+      3. 每一条都必须在 `verdict.per_case` 里存在、且功能维为 fail、精度维不为 pass。
+
+    任何一条不满足即记 error（门 FAILED → 编排层落 BLOCKED）。
+    """
+    exp_by_id = {c["id"]: (c.get("expected") or {})
+                 for c in cases if isinstance(c, dict) and c.get("id")}
+    rows = {r.get("case_id"): r for r in (vd.get("per_case") or [])
+            if isinstance(r, dict) and isinstance(r.get("case_id"), str)}
+    ids = set()
+    for e in ev_list:
+        if not isinstance(e, dict):
+            continue
+        cid, st = e.get("case_id"), e.get("status")
+        if not isinstance(cid, str) or not cid or st not in _EV_UNJUDGEABLE_STATUSES:
+            continue
+        ids.add(cid)
+        if st == _EV_EXECUTION_FAILED and not (
+                isinstance(e.get("error"), str) and e["error"].strip()):
+            errs.append(f"{cid}: evidence.status=execution_failed 却无逐字错误原文"
+                        "（说不出原话的失败不算证据，不予豁免精度证据完整性）")
+        if st == _EV_GOLDEN_UNAVAILABLE and exp_by_id.get(cid, {}).get(
+                "golden_status") != _EV_GOLDEN_UNAVAILABLE:
+            errs.append(f"{cid}: evidence 自称 golden_unavailable，但 caseset.expected.golden_status "
+                        "未如此标记——拿「没有真值」的名义跳过精度证据，拒")
+        row = rows.get(cid)
+        if row is None:
+            errs.append(f"{cid}: evidence.status={st!r} 但 verdict.per_case 无此 case"
+                        "（没有可比结果的 case 没进裁决 = 静默跳过）")
+        elif row.get("功能") != "fail" or row.get("精度") == "pass":
+            errs.append(f"{cid}: evidence.status={st!r}，裁决却是 功能={row.get('功能')!r}/"
+                        f"精度={row.get('精度')!r}——没有可比结果的 case 不得记成通过")
+    return ids
+
+
 def gate_task2(d, errs):
     """精度证据**完整性**门：全覆盖(防子集) + precision 必填 + 阈值三处一致(防放宽) + oracle_source 门校 + 无契约问题。
     注：精度 pass/fail 本身由 validator 判、**此门不重判**——合法的精度 fail 不该被门当 BLOCKED。
@@ -988,6 +1039,10 @@ def gate_task2(d, errs):
     na_ids = {c["id"] for c in cases if isinstance(c, dict) and c.get("id")
               and isinstance(c.get("expected"), dict) and c["expected"].get("compare") == "na"
               and _case_strict_empty(c)}
+    # 跑挂 / 无 golden 的 case：同样无精度证据可校，但豁免只给「证据完整性」这一项——
+    # 结论侧由 `_gate_task2_unjudgeable` 逐条反向核（必须在 verdict 里落成失败）。
+    unjudgeable_ids = _gate_task2_unjudgeable(cases, ev_list, vd, errs)
+    skip_precision_ids = na_ids | unjudgeable_ids
     # Q9 oracle_source 门校用 precision_policy（纯 stdlib：ORACLE_SOURCES + oracle_source_from_golden，不拉 numpy）。
     # import 失败（几乎不会）→ 记 error、oracle 校跳过（但门 FAILED），不静默放过。
     try:
@@ -999,8 +1054,8 @@ def gate_task2(d, errs):
         if not isinstance(e, dict) or not e.get("case_id"):
             continue
         cid = e["case_id"]
-        if cid in na_ids:
-            continue                                  # 空 Tensor 功能用例：无精度证据可校（validator→na）
+        if cid in skip_precision_ids:
+            continue                                  # 无精度证据可校：空 Tensor 功能用例 / 跑挂 / 无 golden
         prec = e.get("precision")
         if not isinstance(prec, dict):
             errs.append(f"{cid}: evidence 缺 precision（证据不完整、不可信）")
@@ -1045,8 +1100,9 @@ def gate_task2(d, errs):
     # === A 方案：evidence.precision.metrics ↔ 磁盘产物 provenance 绑定（重算比对）===
     # 上文只校「阈值/口径三处一致」（防放宽），却全信 evidence 自报的 metrics **数值**；此段按 provenance 读产物、
     # 先校 sha、再依 caseset policy 重算 metrics 并逐字段比对，堵「伪造 bad_count=0 直接 pass」的自报数字洞。
-    _gate_precision_provenance(d, [e for e in ev_list if isinstance(e, dict) and e.get("case_id") not in na_ids],
-                               exp_by_id, errs, case_by_id)  # 空 Tensor 功能用例无产物 provenance，过滤（validator→na）
+    _gate_precision_provenance(d, [e for e in ev_list if isinstance(e, dict)
+                                   and e.get("case_id") not in skip_precision_ids],
+                               exp_by_id, errs, case_by_id)  # 无产物/无真值的 case 无 provenance 可核，过滤
     print(f"  精度裁决={ov.get('verdict')}(validator 判) | 证据覆盖={'一致' if cids == eids else '不一致'}")
 
 
