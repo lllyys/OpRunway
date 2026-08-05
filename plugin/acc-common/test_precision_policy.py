@@ -1295,6 +1295,53 @@ class ComplexPolicyConsistencyTest(unittest.TestCase):
             self.assertNotIn(dt, P.SUPPORTED_COMPUTE_DTYPES)
 
 
+class FromInputSentinelSingleOutputTest(unittest.TestCase):
+    """⭐ 回归：单输出路径必须解析 `<from_input>` 哨兵——曾把哨兵**字面量**当 dtype 返回。
+
+    旧洞：`derive_output_dtype` 与 `derive_output_contracts` 各写一份 dtype 派生。
+    单输出那份只有「in_dt ∈ allowed」和「去重后单值」两条规则，于是
+    `dtype: ["<from_input>"]` 命中「单值」→ 返回字符串 `"<from_input>"` 本身，
+    一路漏到 `threshold_for` 才炸成「ascendoptest_default 无 dtype='<from_input>' 阈值」。
+    现在两条路径共用 `resolve_out_dtype_from_allowed`，此处锁死不许再分叉。
+    """
+
+    @staticmethod
+    def _single_out_spec(out_dtype):
+        return {"op": "OneOut", "verify_mode": "numerical",
+                "precision": {"oracle": "torch", "standard": "torch_allclose"},
+                "params": [{"name": "self", "io": "in", "dtype": ["float32", "float16"]},
+                           {"name": "out", "io": "out", "out_role": "value", "dtype": out_dtype}]}
+
+    def test_sentinel_resolves_to_input_dtype(self):
+        for in_dt in ("float32", "float16"):
+            got = P.derive_output_dtype(self._single_out_spec(["<from_input>"]), [("self", in_dt)])
+            self.assertEqual(got, in_dt)
+            self.assertNotEqual(got, P.FROM_INPUT_SENTINEL)
+
+    def test_sentinel_result_is_a_real_threshold_key(self):
+        """哨兵解析后必须是**能查到阈值**的真 dtype——这正是旧洞暴露的那一炸。"""
+        cdtype = P.derive_output_dtype(self._single_out_spec(["<from_input>"]), [("self", "float32")])
+        self.assertIsInstance(P.threshold_for("ascendoptest_default", cdtype), dict)
+
+    def test_single_and_multi_output_paths_agree(self):
+        """同一份 spec，单输出路径与多输出契约路径派生的 dtype 必须逐字相同（同源不漂移）。"""
+        spec = self._single_out_spec(["<from_input>"])
+        single = P.derive_output_dtype(spec, [("self", "float16")])
+        multi = P.derive_output_contracts(spec, [("self", "float16")], "torch_allclose")
+        self.assertEqual(single, multi[0]["dtype"])
+
+    def test_fixed_and_elementwise_rules_unchanged(self):
+        self.assertEqual(P.derive_output_dtype(self._single_out_spec(["bool"]),
+                                               [("self", "float32")]), "bool")
+        self.assertEqual(P.derive_output_dtype(self._single_out_spec(["float32", "float16"]),
+                                               [("self", "float32")]), "float32")
+
+    def test_ambiguous_allowed_set_still_rejected(self):
+        with self.assertRaises(ValueError) as cm:
+            P.derive_output_dtype(self._single_out_spec(["int64", "bool"]), [("self", "float32")])
+        self.assertIn("歧义", str(cm.exception))
+
+
 class GatherFromAnchorTest(unittest.TestCase):
     """finding #7：gather 源由 spec 的必填 `gather_from` 锚定，不随 case.inputs 顺序漂移。"""
 

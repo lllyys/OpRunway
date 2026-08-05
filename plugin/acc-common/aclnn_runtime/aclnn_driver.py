@@ -261,10 +261,14 @@ class _SignatureResolver:
                 continue
             self._cache[symbol] = sig
             return sig
+        # ⚠ 这里**不要**把表达式写进 f-string 的替换字段里跨行：替换字段跨行是 PEP 701，
+        # Python 3.12+ 才支持，而真机是 3.11.6 → SyntaxError（且本地 `ast.parse(feature_version=(3,11))`
+        # 查不出来，必须用真 3.11 解释器编译才暴露）。先算好局部变量再插值。
+        dirs_hint = ([str(d) for d in self._dirs]
+                     or "（空：请给 --op-dir，或设 OPRUNWAY_ACLNN_OP_DIR / ASCEND_CUSTOM_OPP_PATH）")
         raise AclnnRunnerError(
             f"取不到 aclnn{symbol}GetWorkspaceSize 的头签名——fail-closed（runner 必须拿可信签名才调 native）。"
-            f"搜索目录 {[str(d) for d in self._dirs] or '（空：请给 --op-dir，或设 OPRUNWAY_ACLNN_OP_DIR / '
-            f'ASCEND_CUSTOM_OPP_PATH）'}；逐个失败原因: {errors}")
+            f"搜索目录 {dirs_hint}；逐个失败原因: {errors}")
 
 
 def _slot_digest(s: dict) -> str:

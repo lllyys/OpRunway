@@ -222,6 +222,35 @@ def compare_dtype(case_or_golden):
     raise ValueError("compare_dtype 仅接受 numpy 数组（真实 golden）；据 spec 派生请用 derive_output_dtype")
 
 
+def resolve_out_dtype_from_allowed(allowed, in_dt, out_name=None):
+    """据 spec out-param 的 `dtype` 允许集派生该输出的实际 dtype——单输出/多输出**共用的唯一实现**。
+
+    ⚠ **为什么必须共用**：这段判断曾在两处各写一份——`derive_output_dtype`（单输出裁决 cdtype）
+    与 `derive_output_contracts`（多输出契约）。单输出那份**漏了 `<from_input>` 哨兵**：
+    `allowed == ["<from_input>"]` 时 `in_dt not in allowed`，却因「去重后单值」被当成固定输出 dtype
+    返回了哨兵**字面量**，一路漏到 `threshold_for` 才炸成
+    「ascendoptest_default 无 dtype='<from_input>' 阈值」——错误现场离根因十万八千里。
+    两条路径对同一份 spec 必须派生出同一个 dtype，所以判断只留这一份。
+
+    规则（按序，前者优先）：
+      ① allowed 含 `<from_input>` → 取输入 dtype（median.values 随 self）；
+      ② `in_dt ∈ allowed` → 同 dtype elementwise（Sign/Neg）；
+      ③ allowed 去重后为单值 → 固定输出 dtype（bool：IsClose/Equal）；
+      ④ 否则歧义 → ValueError（保守拒绝，**不猜**）。
+    """
+    allowed = list(allowed or [])
+    if FROM_INPUT_SENTINEL in allowed:
+        return in_dt                                  # ① 随输入（median.values 随 self）
+    if in_dt in allowed:
+        return in_dt                                  # ② 同 dtype elementwise（Sign/Neg）
+    uniq = list(dict.fromkeys(allowed))
+    if len(uniq) == 1:
+        return uniq[0]                                # ③ 固定输出（bool：IsClose/Equal）
+    where = f"输出 {out_name!r} 的" if out_name else ""
+    raise ValueError(f"无法据 spec 派生{where}输出 dtype：in={in_dt} out集={allowed}"
+                     f"（须 <from_input>、含 in dtype、或单值；歧义保守拒绝）")
+
+
 def derive_output_dtype(spec, case_input_dtypes):
     """**据 spec IO 矩阵**（非 caseset 自声明）派生该 case 的输出/比对 dtype——裁决层 cdtype 的**唯一合法来源**。
 
@@ -265,13 +294,10 @@ def derive_output_dtype(spec, case_input_dtypes):
     in_dt = in_dts[0]
     if any(d != in_dt for d in in_dts):
         raise ValueError(f"case 多输入 dtype 不一致 {in_dts}（elementwise 需同 dtype）")
-    out_allowed = out_params[0].get("dtype") or []
-    if in_dt in out_allowed:
-        return in_dt                              # 同 dtype elementwise（Sign/Neg）
-    uniq = set(out_allowed)
-    if len(uniq) == 1:
-        return next(iter(uniq))                   # 固定输出（bool：IsClose/Equal）
-    raise ValueError(f"无法据 spec 派生输出 dtype：in={in_dt} out集={out_allowed}（歧义，保守拒绝）")
+    # 派生规则与多输出契约**同源**（见 resolve_out_dtype_from_allowed 的 ⚠：曾各写一份，
+    # 单输出那份漏了 <from_input> 哨兵）。
+    return resolve_out_dtype_from_allowed(out_params[0].get("dtype"), in_dt,
+                                          out_params[0].get("name"))
 
 
 def _value_tol_of(policy):
@@ -371,14 +397,8 @@ def derive_output_contracts(spec, case_input_dtypes, spec_standard,
         raise ValueError(f"case 多输入 dtype 不一致 {in_dts}（reduce/elementwise 需同 dtype）")
 
     def _resolve_out_dtype(p):
-        allowed = p.get("dtype") or []
-        if FROM_INPUT_SENTINEL in allowed:
-            return in_dt
-        uniq = list(dict.fromkeys(allowed))
-        if len(uniq) == 1:
-            return uniq[0]
-        raise ValueError(f"输出 {p.get('name')!r} dtype 无法据 spec 派生 allowed={allowed}"
-                         f"（须 <from_input> 或单值）")
+        # 与单输出路径 derive_output_dtype **同源**（律令：判断只留一份，见该函数的 ⚠）。
+        return resolve_out_dtype_from_allowed(p.get("dtype"), in_dt, p.get("name"))
 
     contracts = [None] * len(out_params)
     value_tol_by_name, value_std_by_name = {}, {}
