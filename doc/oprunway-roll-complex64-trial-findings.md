@@ -644,7 +644,7 @@ if not isinstance(g, dict):
 | 项 | 状态 |
 |---|---|
 | 任务书本地路径 | ✅ **已支持**——`fetch_source.py --taskdoc <本地 md>`，Roll 这次就是这么用的（日志 179） |
-| 代码仓本地路径 | ✅ **已支持**（成文后落地）——`fetch_source.py --local-repo <仓根> --op-subdir <算子子目录>`；dirty 默认拒、`--allow-dirty` 显式降级并记账。⚠ 代码链接通 ≠ 已验收：本地来源一次 NPU 都没跑过 |
+| 代码仓本地路径 | ✅ **已支持**（成文后落地）——`fetch_source.py --local-repo <仓根> --op-subdir <算子子目录>`；dirty 默认拒、`--allow-dirty` 显式降级并记账。2026-08-05 已在 a3 跑通一次 `cpp_extension` 端到端真机验收并出裁决（`FAIL(精度)`）。⚠ **性能维仍未见证**（那轮精度 fail → Task3 fail-fast 跳过），且 `aclnn_py` + 本地仍是结构性 fail-closed |
 
 **B2 已列的**：来源联合 schema、`--local-repo`、消费者同步、dirty 规则、双向测试。
 

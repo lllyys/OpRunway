@@ -2,6 +2,35 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-05 · 本地来源首次跑通真机 NPU 验收（裁决 `FAIL(精度)`）+ CP-F 口径定案
+
+- **本地 checkout 一路跑到裁决**（a3 容器 `oprunway_prov`，CANN 9.0.1 / `ascend910_93` / torch_npu 2.10.0）：
+  输入只有本地任务书文件 + 本地 checkout + 算子子目录，**不带任何 PR id**，走 `cpp_extension` 主链
+  完成 CP-A 取材 → 构建 → 收据 → NPU 跑测 → 三级门 → 裁决 → 报告。
+  构建产物 `libcust_opapi.so`（`sha256=35ba85e0d719…`）；`acceptance.json` 为
+  `state=FAILED_PRECISION` / **`overall=FAIL(精度)`**，Task1 生成 1344 例、Task2 `fail` 58 例；
+  验收门 task1/task2 `PASSED`、`gate.errors={}`；三级门带 `--source-facts` 复核 `PASSED`。
+  收据里 `source.dut_source=local_checkout`、`local_root_digest=c8867ce09f6e…`，与取材侧 `root_digest`
+  同值——三级门那道等值校验在真机上真的对上了。报告「来源与 provenance」节按 kind 如实渲染，
+  强度、`root_digest`、worktree `clean`、git head（标为信息字段非锚）和两条 ⚠ 都在。
+  记录见 `doc/oprunway-local-source-realmachine-validation.md`（已扩写成完整两段记录）。
+- ⚠ **通路走通 ≠ 精度达标**：本次裁决就是 `FAIL(精度)`。
+- ⚠ **性能维没跑到**：精度 fail → Task3 按既有 fail-fast 跳过（`perf_status=skipped_precision_gate`），
+  「本地来源能出**性能**裁决」仍未见证。
+- ⚠ **本次 1344 例 / 58 fail 与 `AGENTS.md` §4.4 的「1152 例、51 FAIL」不是同一个 caseset**
+  （本次用 `plugin/samples/specs/median.spec.json`，torch_parity 矩阵规模与真机那次的 per-run spec 不同）。
+  **不许写成「复现了基线」，也不许拿本次数字去改 §4.4。**
+- 顺带：`make_vendor_build_receipt.py`（见下一节）**首次真机实战**，四道校验全绿；
+  构建前后 `op_subdir` 摘要都是 `c8867ce09f6e…`（ops-nn 产物落仓根 `build_out/`），
+  所以那两道「构建树 ↔ 指纹树」门没误伤。⚠ 这不是通用保证，换个把产物写进算子目录的仓形态就会变。
+  ⚠ 产出方仍是**手工调用**，没接进编排。
+- **CP-F 对非准入通路的口径定案：不允许复测**（此前是「待确认是有意还是副作用」）。
+  理由不是「准入」而是**产物形态**——`--allow-experimental-form` 的全部安全性建立在
+  「物理上不产 `verdict.json`」上，而 CP-F 就是要写 `verdict.json`，放进来等于换个门绕过准入。
+  被拒表示「复测能力不覆盖该通路」，**不表示基础验收失效或被重新裁决**。
+  落点：`AGENTS.md` §9.2、`precision_retest_runner` 错误文案与注释、
+  新增 `test_precision_retest_runner.test_cpf_only_supports_cpp_extension`。
+
 ## 2026-08-05 · vendor build receipt 产出方（`make_vendor_build_receipt.py`）落地 + 对抗审修
 
 新增收据产出方（真机上以前**没有产出方**，Median PR6429 那份收据是人手写的，

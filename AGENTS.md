@@ -312,7 +312,7 @@ OpRunway/
 
 ## 9 · 当前能力边界
 
-先看三条最容易踩的：正式验收只走 `cpp_extension`（§4）；本地 checkout 来源**代码已通到三级门、但没跑过一次 NPU 验收**（§9.3）；
+先看三条最容易踩的：正式验收只走 `cpp_extension`（§4）；本地 checkout 来源**已跑通真机验收并出裁决，但性能维仍未见证**（§9.3）；
 `fetch_source.py` 一改，既有 preparation 收据全部变 `MISS`（§9.4）。
 
 ### 9.1 真机已坐实的
@@ -334,12 +334,22 @@ OpRunway/
 - `aclnn_py` 的历史 Median 60/60 属于旧 caseset，不得沿用为 torch_parity 下的 PASS；
 - mock/catlass_mock 只产带 `evidence_grade="development"` 和 NON-ACCEPTANCE 标记的
   `dev_run_summary.json` / `dev_precision_check.json`，不产 `acceptance.json` / `verdict.json`；
-- ⚠ **CP-F 后验重测被连带收紧**：`precision_retest_runner` 派生 mode 时调的是
-  `run_workflow._resolve_mode(spec, None)`，**不传** `allow_experimental_form`，
-  所以 base spec 写 `cpp` / `aclnn_py` 的验收现在**一律拒绝复测**（报“无法从 base spec 派生 runner mode”）。
-  这是收敛的连带效果，**尚未确认是有意还是副作用**——要复测非准入通路的旧验收，先来定这条口径。
+- **CP-F 后验精度复测只接受 `base spec.runner_form == "cpp_extension"`**（2026-08-05 定论，
+  不再是“待确认的副作用”）。`cpp` / `aclnn_py` 的历史验收产物**仍保持原裁决与历史效力**，
+  但不支持创建或执行 CP-F 复测 attempt。被拒表示“当前复测能力不覆盖该通路”，
+  **不表示基础验收失效、失败或被重新裁决**。
 
-### 9.3 被测来源：本地 checkout 已是一等通路（代码全链路接通，但**没上过真机验收**）
+  ⚠ **CP-F 没有逃生阀，`--allow-experimental-form` 不适用于它、也不得用于绕过。**
+  理由是那个逃生阀的全部安全性建立在“该路径**物理上不产** `acceptance.json` / `verdict.json`”上，
+  而 **CP-F 就是要写 `verdict.json`**（`precision_retest_runner` 落 attempt 产物），
+  报告还直接展示“validator 精度裁决”——放非准入通路进来，产出的东西长得就是一份验收裁决，
+  等于换个门绕过准入。
+
+  出路（真需要复测非准入通路时）：用 `cpp_extension` 重做一次完整 CP-A..E 验收当新基线，
+  再对它做 CP-F。⚠ 那是**新验收**，不能称作旧通路的漂移复测。
+  编排层在 F0/F1 就不该起草这类 directive，别拖到 F3 才失败、白做冻结。
+
+### 9.3 被测来源：本地 checkout 已是一等通路（**已跑通真机验收并出裁决**）
 
 被测代码现在有两条**平级**来源通路，不是“主 + 降级”：
 
@@ -360,22 +370,43 @@ OpRunway/
 
 1. **`root_digest` 只覆盖 `op_subdir`**，不含仓级构建脚本、公共头文件。它证明的是
    “被测算子子树的字节是这一份”，**不是**“整个构建输入闭包是这一份”。
-2. **“代码接通”不等于“验收跑通”。** 主验收链（`cpp_extension`）的判别、绑定与三级门
-   已经全部接上，并有单测覆盖；但本地来源**一次 NPU 都没跑过**——没出过精度裁决、
-   没出过性能裁决。真机侧只验到 CP-A 取材（见下表）。任何地方都不许写成“本地来源已完成验收”。
+2. **性能维尚未跑到。** 本轮真机验收精度判 `fail`，Task3 按既有 fail-fast 跳过性能采集
+   （`skipped_precision_gate`）。所以“本地来源能出**性能**裁决”这件事仍未见证。
 
-真机验证（a3，2026-08-05）——**只覆盖 CP-A 取材这一段**，任务书为 `cann/cann-ops-competitions` 的 `median_task_doc.md`，
-被测是 `cann/ops-nn` MR 6429（head `0290d61ac066f9f4e620a3714f5941e82dc4e72a`），
-算子子目录 `experimental/index/median`：
+真机验证（a3 容器 `oprunway_prov`，2026-08-05；CANN 9.0.1、SoC `ascend910_93`、torch_npu 2.10.0）——
+任务书为 `cann/cann-ops-competitions` 的 `median_task_doc.md`，被测是 `cann/ops-nn` MR 6429
+（head `0290d61ac066f9f4e620a3714f5941e82dc4e72a`），算子子目录 `experimental/index/median`。
+两段都**只给本地路径、不带任何 PR id**。完整记录见 `doc/oprunway-local-source-realmachine-validation.md`。
+
+**① 取材段**（本地 vs 在线两条通路对比）：
 
 | 项 | 结果 |
 |---|---|
-| 输入 | 只给本地文件路径 + 本地目录，**不带任何 PR id** |
 | 结果 | 一次跑到 `completeness=complete`、`reasons=[]` |
 | 与在线 PR 通路比对 | 任务书字节（`5d24e733…`，4379 字节）、`derived`（op=median / target_dir / interface_kind=aclnn_2stage / aclnn_entry=aclnnMedian / aclnn_headers）、`changed_files`（23 个）、`key_files`（6 份，路径集合与逐份摘要都同）**逐字相同** |
 | 唯一有意差异 | `taskdoc.source_locator`：本地记 `<local-file>`、在线记 URL |
 | 锚 | 本地 `root_digest=c8867ce09f6e…`、在线 `head_sha=0290d61ac066…`，不同且互不伪装 |
-| 记录 | `doc/oprunway-local-source-realmachine-validation.md` |
+
+**② 验收段**（同日续跑，`cpp_extension` 主链，构建 → 收据 → NPU 跑测 → 三级门 → 裁决 → 报告）：
+
+| 项 | 结果 |
+|---|---|
+| 构建 | 从本地 checkout 全量 `build.sh --experimental --ops=median --soc=ascend910_93 --vendor_name=customize --pkg` + `.run --install-path`，成功；产物 `libcust_opapi.so`，`sha256=35ba85e0d719…` |
+| 收据 | `make_vendor_build_receipt.py` 产出，四道校验全绿；`source.dut_source=local_checkout`、`local_root_digest=c8867ce09f6e…`（与取材侧 `root_digest` 同值，三级门等值校验对上了） |
+| 裁决 | `op=Median`、`repo_mode=cpp_extension`、`state=FAILED_PRECISION`、**`overall=FAIL(精度)`** |
+| Task1 / Task2 | 生成 1344 例；Task2 `裁决=fail`，`{total:1344, fail:58, uncertain:0, risk:0, gaps:0, scaled:0, golden_blocked:0, contract_problems:0}` |
+| 验收门 | task1/task2 → **STATUS: PASSED**，`gate.errors={}`。⚠ 这说的是**证据完整、判定链自洽**，不是算子过了 |
+| Task3 性能 | **跳过**，`perf_status=skipped_precision_gate`（精度 fail → 既有 fail-fast） |
+| 三级门 | 带 `--source-facts` 复核 → **STATUS: PASSED** |
+| 报告 | `验收报告.md` 的「来源与 provenance」节按 `local_checkout` 如实渲染：强度声明、`root_digest`、worktree `clean`、git head（**标注为信息字段、非 provenance 锚**），并带两条 ⚠（无法证明对应任何具体 PR / 摘要只覆盖 `op_subdir`） |
+
+⚠ **本次 1344 例 / 58 fail 与 §4.4 的「1152 例、51 FAIL」不是同一个 caseset**：本次用
+`plugin/samples/specs/median.spec.json`，其 torch_parity 矩阵规模与真机那次的 per-run spec 不同。
+**不许写成「复现了基线」，也不许拿本次数字去改 §4.4 的基线记录。** 本次的价值是通路走通，不是刷新精度基线。
+
+⚠ 收据对 `--library` 的绑定只到「该文件在构建窗口内被改写」（构建前后 `(mtime_ns, size, sha256)`
+三项全同即 fail-closed），**不证明它由那条 argv 产出**——一次 `touch` 就能骗过。
+另外产出方**还没接进编排**（`SKILL.md` / `plugin/AGENTS.md` 里没写要产这份收据），本次是手工调用。
 
 降级与记账口径：
 
@@ -402,7 +433,8 @@ OpRunway/
 ⚠ 那个 ⛔ 是**结构性 fail-closed，不是待办**：`aclnn_adapter` 只能按 PR ref 在容器内重新取源 build，
 **构建端根本不存在可与 `local_root_digest` 对账的锚**；放它过去，收据看着齐全、绑定其实是空的。
 只要 `aclnn_adapter` 的取源方式不变，这道门就一直关着——**别当成“下一批补上就行”**。
-要走本地来源的完整验收，用已接通的 `cpp_extension` 主链（这也正是 §4 收敛后唯一准入的通路）。
+要走本地来源的完整验收，用已接通的 `cpp_extension` 主链（这也正是 §4 收敛后唯一准入的通路，
+且是上面「验收段」实测跑通的那条）。
 
 三级门里新增 build receipt ↔ source_facts 的来源锚对账，两步且顺序固定：
 先核两边 `dut_source` 一致，再核锚值相等。

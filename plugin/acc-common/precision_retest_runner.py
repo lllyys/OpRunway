@@ -537,10 +537,31 @@ def _execute_precision_attempt_locked(attempt_dir):
     subset, copied = prepare_execution_caseset(
         base_caseset, manifest, effective_spec, directive["attempt_kind"],
         base_work, attempt_work)
+    # ⚠ **刻意不传 `allow_experimental_form`** —— CP-F 只支持 `cpp_extension`，这是**定论**，
+    # 不是收敛的副作用（2026-08-05 决策，见 AGENTS.md §9.2）。
+    #
+    # 为什么 CP-F 不能像 `run_workflow` 那样给个逃生阀：`--allow-experimental-form` 的全部安全性
+    # 建立在「该路径**物理上不产** `acceptance.json` / `verdict.json`」之上。而 CP-F **就是要写
+    # `verdict.json`**（本文件 `_write_json(attempt, "verdict.json", verdict)`），报告还直接
+    # 展示「validator 精度裁决」。把非准入通路放进来，产出的东西长得就是一份验收裁决——
+    # 那正是准入门要防的那件事，只是换了个门进来。
+    #
+    # 现实存量也支持这个决定：仓内唯一坐实的完整验收基线（Median PR6429）本来就是
+    # `cpp_extension`；`aclnn_py` 的历史 60/60 属旧 caseset、仓规明写不得沿用。
+    #
+    # 出路（真需要时）：拿 `cpp_extension` 重做一次完整 CP-A..E 验收当新基线再复测——
+    # 但那是**新验收**，不能称作旧通路的漂移复测。
     try:
         mode = run_workflow._resolve_mode(spec, None)
     except SystemExit as ex:
-        raise RetestExecutionError(f"无法从 base spec 派生 runner mode: {ex}") from ex
+        raise RetestExecutionError(
+            f"CP-F 后验精度复测**只支持 runner_form=cpp_extension**，"
+            f"base spec 的 runner_form={spec.get('runner_form', 'cpp')!r} 不受支持。\n"
+            f"  这不表示基础验收失效或被重新裁决——它仍保持原裁决与历史效力，"
+            f"只是当前复测能力不覆盖该通路。\n"
+            f"  ⚠ 没有逃生阀：`--allow-experimental-form` 不适用于 CP-F，"
+            f"也不得用于绕过（理由见本函数上方注释）。\n"
+            f"  派生失败原文：{ex}") from ex
     if mode == "aclnn_py":
         verify_aclnn_harness.validate_receipt(
             base_reports, "work/aclnn_harness_trust.json", spec, base_caseset)

@@ -1,7 +1,9 @@
 """CP-F Task-2-only runner 的纯文件/契约测试；不启动真实 NPU adapter。"""
 
+import ast
 import copy
 import hashlib
+import inspect
 import os
 import tempfile
 import unittest
@@ -49,6 +51,51 @@ class SelectedCasesetTest(unittest.TestCase):
             {"runner_form": "cpp"}, None, allow_experimental_form=True), "new_example")
         self.assertEqual(R.run_workflow._resolve_mode(
             {"runner_form": "aclnn_py"}, None, allow_experimental_form=True), "aclnn_py")
+
+    def test_cpf_calls_resolve_mode_without_any_escape_hatch(self):
+        """⭐ CP-F 只支持 `cpp_extension` 是**定论**，不是收敛的副作用（2026-08-05 决策）。
+
+        为什么 CP-F 不能有 `--allow-experimental-form` 那种逃生阀：那个逃生阀的全部安全性
+        建立在「该路径物理上不产 `acceptance.json` / `verdict.json`」上，而 **CP-F 就是要写
+        `verdict.json`**（`_write_json(attempt, "verdict.json", …)`），报告还直接展示
+        「validator 精度裁决」。放非准入通路进来，产出的东西长得就是一份验收裁决——
+        准入门要防的正是这个，只是换了个门进来。
+
+        ⚠ **这条必须断言调用点本身，不能断言 `_resolve_mode` 的行为。**
+        初版写成 `assertRaises(SystemExit, R.run_workflow._resolve_mode(...))` 是错的：
+        那是直接调被调方，压根不经过 runner 的调用点，所以**调用点加不加旁路它都绿**
+        （实测：把调用点改成 `allow_experimental_form=True` 后全套 1827 例无一变红）。
+        而且它还是 `test_run_workflow_mode.AcceptanceFormGateTest` 的严格弱化重复
+        ——那边断言更多。净新增覆盖为零，等于「宣称有门其实没门」。
+
+        改用 AST 断言调用点：`precision_retest_runner.py` 里那处 `_resolve_mode` 调用
+        必须**恰好两个位置实参、零关键字实参**。走 `ast` 而非裸字符串匹配，
+        换行/格式化不会让它假红（仓内 `test_aclnn_adapter` 等 5 个文件有同类先例）。
+        """
+        tree = ast.parse(inspect.getsource(R))
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_resolve_mode"
+        ]
+        self.assertEqual(len(calls), 1, "生产代码里 _resolve_mode 的调用点数量变了，先确认改动意图")
+        call = calls[0]
+        self.assertEqual(
+            [kw.arg for kw in call.keywords], [],
+            "CP-F 的 _resolve_mode 调用点出现了关键字实参——若是 allow_experimental_form，"
+            "那就是给 CP-F 开了逃生阀，与 2026-08-05 定论冲突（理由见本用例 docstring）")
+        self.assertEqual(len(call.args), 2, "调用点的位置实参应为 (spec, None)")
+
+    def test_cpf_rejection_message_states_the_rule_not_a_workaround(self):
+        """错误文案是**承诺**不是注释：被拒时要讲清「不支持」且「没有逃生阀」。
+
+        反面是原来那句笼统的「无法从 base spec 派生 runner mode」——它既不说明是 CP-F
+        的规则，又容易让人去找 `--allow-experimental-form` 试试。
+        """
+        source = inspect.getsource(R._execute_precision_attempt_locked)
+        for phrase in ("只支持", "cpp_extension", "没有逃生阀", "不表示基础验收失效"):
+            self.assertIn(phrase, source, f"CP-F 拒绝文案缺少关键表述：{phrase!r}")
 
 
 class AttemptImmutabilityTest(unittest.TestCase):
