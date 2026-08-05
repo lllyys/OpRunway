@@ -139,6 +139,41 @@ import content_address
 import precision_policy
 
 SEED = 2026
+
+# ============ 随机流版本钉（B-1）：`SEED` 不是数据身份的全部 ====================
+# `_case_rng` 把 `SEED ^ hash(case_id)` 喂给 `np.random.default_rng`，于是「同一 case_id 产同一
+# 字节」这条设计**只在同一条 numpy 随机流下成立**。numpy 对 `Generator` 的承诺与 `RandomState`
+# 不同：NEP 19 明确保留在 feature release 里改流的权利，所以升级 numpy 就可能让**同一份 spec、
+# 同一个 case_id** 落出不同的 `.npy` 字节，而 spec / planner / golden 的摘要一个都不会变。
+#
+# 仓内已有实证：`test_gen_cases_dtype_attr` 的 caseset 字节 pin 就是按 numpy 版本分基线存的
+# （见该文件的 `_U3_CASESET_BASELINES`）——那份 pin 之所以要分版本，正是因为流会漂。
+#
+# 所以 `SEED` 之外还须把**产数据的那条流是哪一条**记进计划账本，让复用侧能当场失配。
+# 记两个字段而不是一个：`numpy_version` 是诚实的全量版本（诊断用，别拿它做判定，补丁版
+# 通常不改流、精确相等会造成大量无谓 MISS）；`numpy_stream_pin` 是**判定值**。
+_NUMPY_STREAM_PIN_GRANULARITY = "major_minor"
+
+
+def numpy_stream_pin(version):
+    """把完整 numpy 版本号收敛成随机流比对用的 `主.次` 两段 pin。
+
+    口径与仓内既有 pin 一致（`test_gen_cases_dtype_attr` 用 `startswith(pin + ".")` 判定），
+    不引入第二套标准。解析不出两段数字 → 抛错，**绝不回退成整串或空串**：一个含糊的 pin
+    会让「版本不同」和「版本存疑」长得一模一样，而后者本该 fail-closed。"""
+    parts = str(version).split(".")
+    if len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
+        raise ValueError(
+            f"无法从 numpy 版本 {version!r} 解析出 主.次 两段随机流 pin；"
+            f"随机流身份不明时不得放行复用")
+    return f"{parts[0]}.{parts[1]}"
+
+
+def current_numpy_stream_pin():
+    """本进程正在用的那条 numpy 随机流的 pin（复用门的**唯一真源**，勿在别处另抄一份）。"""
+    return numpy_stream_pin(np.__version__)
+
+
 _BF16 = "bfloat16"
 # 原生 numpy dtype（bf16 不在此——它逻辑 fp32、物理 uint16，特判）。
 # 这张表 = **生成层**的 dtype 能力真源（能造输入 / 能算 golden / 能落盘读回），
@@ -2985,6 +3020,12 @@ def _build_dry_run_ledger(spec, preparation_inputs=None):
             "gen_cases_py_sha256": planner_sha256,
             "logic_files": logic_files,
             "seed": SEED,
+            # ⚠ `seed` 只钉住种子，钉不住流本身——同一 seed 在不同 numpy 大版本下可能产不同字节。
+            # 判定看 `numpy_stream_pin`；`numpy_version` 是全量版本，只作诊断（理由见
+            # 模块上方 `numpy_stream_pin` 的注释）。
+            "numpy_version": np.__version__,
+            "numpy_stream_pin": current_numpy_stream_pin(),
+            "numpy_stream_pin_granularity": _NUMPY_STREAM_PIN_GRANULARITY,
             "default_case_target": _DEFAULT_CASE_TARGET,
             "default_golden_cost_budget": _GOLDEN_COST_BUDGET,
             "case_profiles": list(_CASE_PROFILES),

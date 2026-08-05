@@ -240,7 +240,9 @@ class ProvenanceSectionTest(unittest.TestCase):
         text = self._render(_receipt({"repo": "cann/ops-nn", "pr_head_sha": PR_HEAD}))
         self.assertIn(R.PROV_HEADING, text)
         self.assertIn(f"| PR head | `{PR_HEAD}` |", text)
-        self.assertIn("| 源码仓 | `cann/ops-nn` |", text)
+        # 这份收据没有 `repo_source`（老收据形态）→ 源码仓那一行必须标「强度未知」。
+        self.assertIn(R.PROV_REPO_ROW.format(
+            repo="cann/ops-nn", strength=R.PROV_REPO_SOURCE_ABSENT), text)
         # provenance 节排在运行环境之前，且那两行确实从旧表里迁走了。
         self.assertLess(text.index(R.PROV_HEADING), text.index("## 被测物与运行环境"))
         env = text.split("## 被测物与运行环境", 1)[1]
@@ -375,6 +377,119 @@ class ProvenanceSectionTest(unittest.TestCase):
                 self.assertNotIn(f"| PR head | `{PR_HEAD}` |", text)
                 self.assertNotIn(PR_HEAD, text)
                 self.assertIn("## 精度汇总", text)      # 报告本体照出
+
+
+class RepoSourceStrengthTest(unittest.TestCase):
+    """「源码仓」一行必须同时呈现**强度**：事实派生 / 操作者自报 / 强度未知。
+
+    实测逮到的 fail-open：两轮真机跑出的报告里，`https://gitcode.com/cann/ops-nn.git`
+    （`repo_source=local_checkout.git.remote_url`，事实派生）与 `cann/ops-nn`
+    （去 git 那轮，`repo_source=operator`，树里根本没有仓名证据）**同权并列**，
+    审核员读不出后者只是一句自报。收据记得很老实，是渲染层把强度吞了。
+    """
+
+    def _render(self, source):
+        with tempfile.TemporaryDirectory() as root:
+            _write_docs(root, _docs(_receipt(source)))
+            return R.render(root)
+
+    def _repo_line(self, text):
+        """取「源码仓」那一行；断言它**存在且唯一**——强度被拆到别处也算吞掉了。"""
+        rows = [line for line in text.splitlines() if line.startswith("| 源码仓 |")]
+        self.assertEqual(len(rows), 1, text)
+        return rows[0]
+
+    # 三种已知取值各一 -------------------------------------------------------------
+    def test_pr_derived_repo_says_where_it_came_from(self):
+        row = self._repo_line(self._render(
+            {"repo": "cann/ops-nn", "repo_source": "pr.source_repo",
+             "pr_head_sha": PR_HEAD}))
+        self.assertEqual(row, R.PROV_REPO_ROW.format(
+            repo="cann/ops-nn", strength=R.PROV_REPO_SOURCE_LABEL["pr.source_repo"]))
+        self.assertIn("事实派生", row)
+        self.assertIn("`pr.source_repo`", row)
+
+    def test_local_remote_url_derived_repo_says_where_it_came_from(self):
+        row = self._repo_line(self._render(
+            {"dut_source": "local_checkout",
+             "repo": "https://gitcode.com/cann/ops-nn.git",
+             "repo_source": "local_checkout.git.remote_url",
+             "local_root_digest": LOCAL_DIGEST}))
+        self.assertEqual(row, R.PROV_REPO_ROW.format(
+            repo="https://gitcode.com/cann/ops-nn.git",
+            strength=R.PROV_REPO_SOURCE_LABEL["local_checkout.git.remote_url"]))
+        self.assertIn("事实派生", row)
+        self.assertIn("`local_checkout.git.remote_url`", row)
+
+    def test_operator_reported_repo_is_marked_as_self_reported(self):
+        """⭐ 去 git 那轮的真实形态：树里没有仓名证据，仓名是构建时手给的。"""
+        row = self._repo_line(self._render(
+            {"dut_source": "local_checkout", "repo": "cann/ops-nn",
+             "repo_source": "operator", "local_root_digest": LOCAL_DIGEST}))
+        self.assertEqual(row, R.PROV_REPO_ROW.format(
+            repo="cann/ops-nn", strength=R.PROV_REPO_SOURCE_LABEL["operator"]))
+        self.assertIn("操作者自报", row)
+        self.assertIn("无机器可核依据", row)
+        # 自报绝不能读起来像派生。
+        self.assertNotIn("事实派生", row)
+
+    # 缺席与未知 -------------------------------------------------------------------
+    def test_absent_repo_source_is_unknown_strength_not_derived(self):
+        """⭐ 老收据没有这个键：缺席 = 不知道，不是「大概是派生的」，也不是 operator。"""
+        row = self._repo_line(self._render(
+            {"dut_source": "local_checkout", "repo": "cann/ops-nn",
+             "local_root_digest": LOCAL_DIGEST}))
+        self.assertEqual(row, R.PROV_REPO_ROW.format(
+            repo="cann/ops-nn", strength=R.PROV_REPO_SOURCE_ABSENT))
+        self.assertIn("强度未知", row)
+        self.assertNotIn("事实派生", row.replace("缺席不等于事实派生", ""))
+        self.assertNotIn("操作者自报", row)
+
+    def test_unknown_repo_source_value_fails_closed_to_unknown(self):
+        """⭐ 词表外取值不猜属于哪一种——静默归类等于凭空给它发一张强度证明。"""
+        row = self._repo_line(self._render(
+            {"repo": "cann/ops-nn", "repo_source": "probably_the_pr_i_guess",
+             "pr_head_sha": PR_HEAD}))
+        self.assertEqual(row, R.PROV_REPO_ROW.format(
+            repo="cann/ops-nn", strength=R.PROV_REPO_SOURCE_UNKNOWN.format(
+                value='"probably_the_pr_i_guess"')))
+        self.assertIn("强度未知", row)
+        self.assertNotIn("事实派生", row)
+        self.assertNotIn("操作者自报", row)
+
+    def test_null_repo_source_is_unknown_and_distinguishable_from_absent(self):
+        """`repo_source: null` 是「记了个空」，与「没这个键」不同形，但同样退未知。"""
+        row = self._repo_line(self._render(
+            {"repo": "cann/ops-nn", "repo_source": None, "pr_head_sha": PR_HEAD}))
+        self.assertEqual(row, R.PROV_REPO_ROW.format(
+            repo="cann/ops-nn",
+            strength=R.PROV_REPO_SOURCE_UNKNOWN.format(value="null")))
+        self.assertNotEqual(R.PROV_REPO_SOURCE_UNKNOWN.format(value="null"),
+                            R.PROV_REPO_SOURCE_ABSENT)
+
+    def test_derived_origin_from_the_other_path_fails_closed(self):
+        """⭐ PR 通路声称派生自本地 git remote——`derive_repo` 派生不出这种组合，
+        只可能来自手改收据；「事实派生」四个字没有出处，退未知。"""
+        row = self._repo_line(self._render(
+            {"repo": "cann/ops-nn", "repo_source": "local_checkout.git.remote_url",
+             "pr_head_sha": PR_HEAD}))
+        self.assertEqual(row, R.PROV_REPO_ROW.format(
+            repo="cann/ops-nn", strength=R.PROV_REPO_SOURCE_MISMATCH.format(
+                value='"local_checkout.git.remote_url"', kind="pull_request")))
+        self.assertNotIn("事实派生", row)
+
+    def test_no_repo_row_at_all_when_receipt_is_unverified(self):
+        """收据不可信时整节都不作断言——那种情况下连源码仓一行都不该出现。
+
+        没有这条，「渲染源码仓但不渲染强度」可以靠删掉整行伪装成通过。
+        """
+        with tempfile.TemporaryDirectory() as root:
+            _write_docs(root, _docs(_receipt(
+                {"repo": "cann/ops-nn", "repo_source": "pr.source_repo",
+                 "pr_head_sha": PR_HEAD}, status="PENDING")))
+            text = R.render(root)
+        self.assertNotIn("| 源码仓 |", text)
+        self.assertIn("本节不作任何 provenance 断言", text)
 
 
 class LocalRowsSecondLineOfDefenceTest(unittest.TestCase):

@@ -97,6 +97,42 @@ PROV_ANCHOR_LABEL = {
     "pr_head_sha": "PR head",
     "local_root_digest": "子树摘要 root_digest",
 }
+# ---- 「源码仓」一行的强度标注 ----------------------------------------------------
+# 收据里的 `source.repo_source` 记的是 repo 这一项**怎么来的**：从 source_facts 事实派生，
+# 还是操作者构建时手给的一句话。只渲染 `repo`、不渲染强度，两者在报告里就长得一模一样——
+# 真机两轮跑出来的 `https://gitcode.com/cann/ops-nn.git`（事实派生）与 `cann/ops-nn`
+# （去 git 那轮，树里根本没有仓名证据、`repo_source="operator"`）同权并列，审核员读不出
+# 后者只是自报。收据记得很老实，是渲染层把强度吞了，方向上是 fail-open。
+#
+# 取值的真源是产出方 `make_vendor_build_receipt`（`derive_repo` 的 origin 与 `main` 里的
+# `"operator"`）。本文件只按字面消费、不改产出方。⚠ 产出方若改了字面量而这张表没跟上，
+# 命中的是「未知取值」分支 → 退「强度未知」：宁可少说一句，也不替一个不认识的取值背书。
+PROV_REPO_SOURCE_LABEL = {
+    "pr.source_repo": "**事实派生**——取自 source_facts 的 `pr.source_repo`",
+    "local_checkout.git.remote_url":
+        "**事实派生**——取自 source_facts 的 `local_checkout.git.remote_url`",
+    "operator": "⚠ **操作者自报**——构建时由操作者给定，未从 source_facts 派生，无机器可核依据",
+}
+PROV_REPO_SOURCE_OPERATOR = "operator"
+# kind → 该通路**唯一可能**的事实派生来源。
+# ⚠ 这不是「kind → 锚字段名」映射（那个只有 `dut_source.ANCHOR_FIELD` 说了算，本文件不得
+#   自建）；它回答的是另一个问题：repo 这一项在该通路上只可能从哪儿派生出来。产出方
+#   `derive_repo` 按 kind 二选一，所以配错的组合（PR 通路却声称派生自本地 git remote）
+#   只可能来自手改收据——那种收据的「事实派生」四个字没有出处，退「强度未知」。
+PROV_REPO_SOURCE_DERIVED_BY_KIND = {
+    dut_source.PULL_REQUEST: "pr.source_repo",
+    dut_source.LOCAL_CHECKOUT: "local_checkout.git.remote_url",
+}
+PROV_REPO_ROW = "| 源码仓 | `{repo}`（{strength}） |"
+PROV_REPO_SOURCE_ABSENT = (
+    "⚠ **强度未知**——本收据没记 `repo_source`（本轮之前产的收据都没有这个键）；"
+    "**缺席不等于事实派生**，这个仓名怎么来的无从查证")
+PROV_REPO_SOURCE_UNKNOWN = (
+    "⚠ **强度未知**——`repo_source={value}` 不在本渲染器已知的取值内；"
+    "不猜它属于哪一种，这个仓名怎么来的无从查证")
+PROV_REPO_SOURCE_MISMATCH = (
+    "⚠ **强度未知**——`repo_source={value}` 与本轮来源通路 `{kind}` 对不上"
+    "（该通路派生不出这个来源），这个仓名怎么来的无从查证")
 # 本地通路的两条 caveat：**只依赖 kind**，与 source_facts 在不在无关。
 # 它们陈述的是 root_digest 这个锚**本身**的能力边界，不是某一轮取材的结果，
 # 所以对照物缺席时也一个字都不能少。
@@ -129,6 +165,36 @@ PROV_RECEIPT_UNVERIFIED = (
     "（实得 schema={schema}、schema_version={version}、status={status}）"
     "——本节不作任何 provenance 断言。")
 PROV_GIT_HEAD_ROW = "| git head（**信息字段，非 provenance 锚**） | `{sha}` |"
+
+
+def _repo_source_strength(source, kind):
+    """「源码仓」一行的强度陈述：三种已知取值各自成句，其余一律退「强度未知」。
+
+    ⚠ **缺席不是事实派生**。`repo_source` 是后加的键，本轮之前产的收据一个都没有。
+    把缺席补成「大概是派生的」，等于把未知洗成已知——这一节最贵的 fail-open 就是这个。
+    反过来把缺席一律当 `operator` 也不行：那是替收据编一条它没说过的事实。缺席只能说
+    「不知道这个仓名怎么来的」，让审核员自己去查收据。
+
+    ⚠ 未知取值同样不许静默归类。`repo` 已被 `validate_build_receipt_source` 校过必填非空，
+    但那道校验管的是**有没有值**，管不了**这个值有多硬**；强度只能由 `repo_source` 说，
+    它说不清就如实写「未知」。
+
+    读 `source.repo_source` 不走 `dut_source`：判别式只管来源通路与 provenance 锚，
+    这个键是产出方对 repo 一项的记账，不属于判别式的管辖范围。
+    """
+    if "repo_source" not in source:
+        return PROV_REPO_SOURCE_ABSENT
+    value = source["repo_source"]
+    # 原样回显（带引号/`null`/数字都能看出来），避免「空串」与「没这个键」在报告里同形。
+    shown = _cell(json.dumps(value, ensure_ascii=False, default=str))
+    if value == PROV_REPO_SOURCE_OPERATOR:
+        # 操作者自报与通路无关：两条通路都可以 `--repo` 手给。
+        return PROV_REPO_SOURCE_LABEL[value]
+    if value == PROV_REPO_SOURCE_DERIVED_BY_KIND.get(kind):
+        return PROV_REPO_SOURCE_LABEL[value]
+    if value in PROV_REPO_SOURCE_LABEL:
+        return PROV_REPO_SOURCE_MISMATCH.format(value=shown, kind=_cell(kind))
+    return PROV_REPO_SOURCE_UNKNOWN.format(value=shown)
 
 
 def _local_rows(facts, receipt_identity):
@@ -257,8 +323,10 @@ def _provenance_section(receipt, build_receipt, source, facts):
         "|---|---|",
         f"| 被测来源 | {PROV_KIND_LABEL[kind]} |",
         # `repo` 已由 `validate_build_receipt_source` 校过必填非空；这里只取值展示，
-        # 不参与任何来源判别。
-        f"| 源码仓 | `{_cell(source.get('repo'))}` |",
+        # 不参与任何来源判别。⚠ 值和**强度**必须同一行给：分成两行（或只给值）就等于
+        # 让「事实派生」和「操作者手敲」在报告里同权，读的人分不出哪个有出处。
+        PROV_REPO_ROW.format(repo=_cell(source.get("repo")),
+                             strength=_repo_source_strength(source, kind)),
         # 锚字段名与锚值都来自 `dut_source`，本文件不自选字段、不做 `a or b` 兜底。
         f"| {PROV_ANCHOR_LABEL.get(anchor_field, anchor_field)} | `{_cell(anchor_value)}` |",
     ]

@@ -5,6 +5,10 @@
 任务书授权锚还须在 source facts、spec golden、GOLDEN_CONTRACT 与 golden 生效目录
 四处摘要一致；生效目录快照必须是普通非符号链接文件。
 它不读取 caseset/evidence/verdict，不运行 golden，不产生任何验收 PASS。
+
+⚠ 「逻辑摘要一致」不蕴含「用例数据字节一致」：`gen_cases` 的随机流由 numpy 提供，
+换 numpy 大版本就可能让同一 case_id 落出不同 `.npy`，而 spec/planner/golden 的摘要
+全都不动。故另有 `case_data_stream` 一项，按 `主.次` pin 对账随机流身份。
 """
 
 import argparse
@@ -354,6 +358,20 @@ def _check(checks, name, status, reason):
     checks.append({"name": name, "status": status, "reason": reason})
 
 
+def _current_numpy_stream_pin():
+    """当前进程的 numpy 随机流 pin；取不到就说取不到（**不返回占位值**）。
+
+    刻意走 `gen_cases` 的函数而不是在这里另写一行 `split(".")[:2]`：pin 口径一旦有两份实现，
+    两边迟早漂，而漂的表现是「门看着在跑、其实永远相等」。同 `fetch_source.digest_policy()`
+    在本文件里的用法——判定依赖只认产出方那一份真源。
+
+    ⚠ 本函数是**懒导入**：`gen_cases` 会拉起 numpy，而本脚本其余部分是纯静态校验、
+    不该为此在 import 期就绑上 numpy。
+    """
+    import gen_cases                                   # 懒导入：见上方注释
+    return gen_cases.current_numpy_stream_pin()
+
+
 def evaluate(root, spec_rel, case_plan_rel, golden_path=None,
              source_rel="source_facts.json",
              correspondence_rel="correspondence.json",
@@ -575,6 +593,36 @@ def evaluate(root, spec_rel, case_plan_rel, golden_path=None,
                        "gen_cases.py 或其规划依赖逻辑已变化")
             else:
                 _check(checks, "case_planner", "PASS", "规划逻辑摘要一致")
+
+            # ⚠ 规划逻辑摘要相等**不蕴含**用例数据字节相等：`gen_cases` 一个字节没改，只要
+            # numpy 换了大版本，`_case_rng` 那条随机流就可能整体漂，于是同一 spec、同一 case_id
+            # 落出不同的 `.npy`——而 spec / planner / golden 的摘要一个都不会动。所以随机流身份
+            # 要单独对账，判定用 `主.次` pin（补丁版通常不改流，精确相等只会造成无谓 MISS）。
+            recorded_pin = planner_binding.get("numpy_stream_pin")
+            try:
+                current_pin = _current_numpy_stream_pin()
+            except (ImportError, ValueError) as ex:
+                # 取不到当前流身份 = **无从核对**，不是「核过了没问题」。既不能判 PASS，也不宜
+                # 判 MISS（MISS 的语义是「重做准备即可」，而重做同样要 numpy），故 BLOCKED。
+                current_pin = None
+                _check(checks, "case_data_stream", "BLOCKED",
+                       f"无法确定当前 numpy 随机流 pin：{ex}")
+            if current_pin is None:
+                pass                                   # 上面已记 BLOCKED，不再重复判定
+            elif not isinstance(recorded_pin, str) or not recorded_pin:
+                # 老账本没有这个键 = 产它的那次没记随机流身份 → 无从证明数据可复现，重做准备。
+                # 这是**正常漂移**（同 `case_planner` 的 MISS 口径），不是账本损坏。
+                _check(checks, "case_data_stream", "MISS",
+                       "case plan 未记录 numpy 随机流 pin，无法证明用例数据可复现")
+            elif recorded_pin != current_pin:
+                _check(checks, "case_data_stream", "MISS",
+                       f"numpy 随机流已变（账本 {recorded_pin} → 当前 {current_pin}）："
+                       f"同一 case_id 会产出不同字节，请对齐 numpy 版本或重新生成并重新确认")
+            else:
+                _check(checks, "case_data_stream", "PASS",
+                       f"numpy 随机流 pin 一致（{current_pin}）")
+            if current_pin is not None:
+                bindings["numpy_stream_pin"] = current_pin
 
             golden = plan.get("golden_dependency")
             if not isinstance(golden, dict) or golden.get("status") != "loaded":

@@ -2002,9 +2002,13 @@ class DtypeSingleSourceTest(unittest.TestCase):
 # 本机无 torch（samples/golden/* 的 golden.py 一律 torch 后端、缺则 fail-closed），故这里用**确定性
 # numpy 假 golden** 驱动同一批真 spec 走完整生成路径，对 caseset.json + 全部落盘 .npy 取 sha256 钉住。
 # 它证的是「gen_cases 的生成行为没被 U3 改动碰到」——不是「golden 数值正确」（那是别的测试的事）。
-# ⚠ 摘要与 numpy 的随机流绑定：numpy 大版本变了摘要可能整体漂 → 版本不符时 **skip 并说明**，
-#   不假装通过、也不误报回归。重取摘要：改 `_U3_BASELINE_NUMPY` 与下表，并在 PR 里说明为何变。
-_U3_BASELINE_NUMPY = "2.4"
+# ⚠ 摘要与 numpy 的随机流绑定：numpy 大版本变了摘要会**整体漂**（不是理论风险——见下方
+#   `_U3_CASESET_BASELINES` 里两条基线，6 份摘要**逐份不同**，实测于 numpy 2.4.x 与 1.26.4）。
+#   原先只存一条 2.4 基线、其余版本一律 skip；结果是**所有 compute 所在的那台真机（numpy 1.26.4）
+#   上这张网整个是暗的**——字节回归在最该看住的地方从来没跑过。
+#   改法：按 `主.次` pin 存**多条基线**，命中哪条跑哪条；只有词表外的版本才 skip。
+#   新增一条基线：在目标机上跑一次本文件的 `test_caseset_digests_pinned`，把它报出的实际摘要
+#   补进下表并在 PR 里说明该版本从哪来——**绝不允许**拿新版本的摘要去覆盖旧版本那条。
 _U3_FAKE_GOLDEN = {
     "IsClose": ("def golden_fn(inputs, attrs):\n"
                 "    a, b = inputs\n"
@@ -2015,15 +2019,30 @@ _U3_FAKE_GOLDEN = {
     "Equal": "def golden_fn(inputs, attrs):\n    return inputs[0] == inputs[1]\n",
     "Neg": "def golden_fn(inputs, attrs):\n    return np.negative(inputs[0])\n",
 }
-_U3_CASESET_DIGEST = {
-    "../samples/specs/equal.spec.json": "08041f0e2e7b840f117d0f28ee4b748782a27d9b74427e1ec9608554e04c4b52",
-    "../samples/specs/isclose.spec.json": "7a4390ecf21c383504f79f375a98a4f0b3ec24793092169f6f514b624eb2fd92",
-    "../samples/specs/neg.spec.json": "e538781640a6e81ad217c2831dafc2c2635104cd5f32a1facd9152d75983210c",
-    "../samples/specs/sign.spec.json": "c8f1bc8964fa8d242eb4112e0f94a55b73f0134e884d5ba134570755727d9a7e",
-    "test_fixtures/isclose_attr.spec.json":
-        "7bce89043c6170fc5fc7c98480357f31ee080148826a8f57b2ef9706b887486e",
-    "test_fixtures/sign_dtype.spec.json":
-        "7e01b619718bb691cd9abf9d02759a93653c7b660183362de429311028c9d701",
+# pin（`gen_cases.numpy_stream_pin` 的 `主.次` 口径）→ 该随机流下的 caseset 字节基线。
+_U3_CASESET_BASELINES = {
+    "2.4": {
+        "../samples/specs/equal.spec.json": "08041f0e2e7b840f117d0f28ee4b748782a27d9b74427e1ec9608554e04c4b52",
+        "../samples/specs/isclose.spec.json": "7a4390ecf21c383504f79f375a98a4f0b3ec24793092169f6f514b624eb2fd92",
+        "../samples/specs/neg.spec.json": "e538781640a6e81ad217c2831dafc2c2635104cd5f32a1facd9152d75983210c",
+        "../samples/specs/sign.spec.json": "c8f1bc8964fa8d242eb4112e0f94a55b73f0134e884d5ba134570755727d9a7e",
+        "test_fixtures/isclose_attr.spec.json":
+            "7bce89043c6170fc5fc7c98480357f31ee080148826a8f57b2ef9706b887486e",
+        "test_fixtures/sign_dtype.spec.json":
+            "7e01b619718bb691cd9abf9d02759a93653c7b660183362de429311028c9d701",
+    },
+    # 实测于验收真机（`numpy 1.26.4`，2026-08-05）：与 2.4 那条**逐份不同**，
+    # 这就是「随机流跨版本会漂」的实证，不是推断。
+    "1.26": {
+        "../samples/specs/equal.spec.json": "4566e041bc1dbf21fd464dc8a6c28793362d7f262a561c09c1e33def7cf00bc2",
+        "../samples/specs/isclose.spec.json": "ea2c9dad4b1241df18a71b3a003b8ffe6c69971d73a5f525763cc1d790a8b297",
+        "../samples/specs/neg.spec.json": "8c4dd1d24b27163b605762f36a5c90249f9b540244f9e23d8a4b9b2774ee0fd6",
+        "../samples/specs/sign.spec.json": "cbe4c66bccd7c3d061f1c96f1e9ba9abba0d3916bd778f0a71916e5b826c0151",
+        "test_fixtures/isclose_attr.spec.json":
+            "45ff8366941a290b13506500e22e4001878b38a649b760933b42afa4bb1a2018",
+        "test_fixtures/sign_dtype.spec.json":
+            "8d7f3621e2d54e1f5c6b00bf72cd25378d02e8d7ef52214af8ce60a6551d014b",
+    },
 }
 
 
@@ -2031,9 +2050,12 @@ class ExistingOpsByteIdenticalTest(unittest.TestCase):
     """现有 4 算子（+2 个 test fixture spec，覆盖 int16/int32 与 attr 矩阵）caseset 逐字节不变。"""
 
     def setUp(self):
-        if not np.__version__.startswith(_U3_BASELINE_NUMPY + "."):
-            self.skipTest(f"caseset 摘要基线取自 numpy {_U3_BASELINE_NUMPY}.x，本机 {np.__version__} "
-                          f"—— 随机流可能不同，跳过而非误报回归")
+        pin = GC.numpy_stream_pin(np.__version__)
+        self.baseline = _U3_CASESET_BASELINES.get(pin)
+        if self.baseline is None:
+            self.skipTest(
+                f"本机 numpy {np.__version__}（pin {pin}）在 _U3_CASESET_BASELINES 里没有基线 —— "
+                f"随机流未知，跳过而非误报回归；已存基线：{sorted(_U3_CASESET_BASELINES)}")
         self.root = os.path.realpath(tempfile.mkdtemp(prefix="u3_bytes_root_"))
         for op, body in _U3_FAKE_GOLDEN.items():
             _place_golden(self.root, op, body=body)
@@ -2067,8 +2089,16 @@ class ExistingOpsByteIdenticalTest(unittest.TestCase):
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
+    def test_baselines_cover_same_spec_set(self):
+        """各 numpy 基线必须覆盖**同一组** spec —— 否则换台机器就等于悄悄少测几份。"""
+        key_sets = {pin: frozenset(table)
+                    for pin, table in _U3_CASESET_BASELINES.items()}
+        self.assertEqual(
+            len(set(key_sets.values())), 1,
+            f"_U3_CASESET_BASELINES 各版本的 spec 集合不一致：{key_sets}")
+
     def test_caseset_digests_pinned(self):
-        for rel, want in sorted(_U3_CASESET_DIGEST.items()):
+        for rel, want in sorted(self.baseline.items()):
             self.assertEqual(self._digest(rel), want,
                              f"{rel} 的 caseset/产物字节变了 —— 现有算子的用例集必须逐字节不变"
                              f"（向后兼容硬约束）。若确属有意变更，须单独说明并重取基线摘要。")

@@ -52,6 +52,27 @@ class DryRunLedgerTest(unittest.TestCase):
         )
         self.assertTrue(first["determinism"]["equal"])
 
+    def test_ledger_pins_numpy_random_stream_identity(self):
+        """B-1：账本必须钉住「数据是哪条随机流产的」——`seed` 钉不住这件事。"""
+        import numpy as np
+        binding = self._build_without_golden(_spec())["planner_binding"]
+        self.assertEqual(binding["numpy_version"], np.__version__)
+        self.assertEqual(binding["numpy_stream_pin"],
+                         GC.numpy_stream_pin(np.__version__))
+        self.assertEqual(binding["numpy_stream_pin_granularity"], "major_minor")
+        # pin 必须真的是**收敛过的两段**，不是把全量版本原样抄一遍充数。
+        self.assertRegex(binding["numpy_stream_pin"], r"^\d+\.\d+$")
+
+    def test_numpy_stream_pin_is_major_minor_and_fails_closed(self):
+        self.assertEqual(GC.numpy_stream_pin("2.4.6"), "2.4")
+        self.assertEqual(GC.numpy_stream_pin("1.26.4"), "1.26")
+        self.assertEqual(GC.numpy_stream_pin("2.4"), "2.4")
+        # 解析不出两段数字 → 抛错。若退回「原样返回」或「空串」，两台机器的
+        # 未知版本会互相相等，复用门就永远放行。
+        for bad in ("", "2", "2.x", "dev", "2..1", None):
+            with self.assertRaises(ValueError):
+                GC.numpy_stream_pin(bad)
+
     def test_renderer_keeps_default_stdout_shape(self):
         ledger = self._build_without_golden(_spec())
         buf = io.StringIO()

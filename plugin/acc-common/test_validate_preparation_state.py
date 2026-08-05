@@ -128,6 +128,7 @@ class PreparationStateTest(unittest.TestCase):
             "planner_binding": {
                 "gen_cases_py_sha256": planner_sha,
                 "logic_files": planner_logic,
+                "numpy_stream_pin": VPS._current_numpy_stream_pin(),
             },
             "preparation_inputs": {
                 "source_facts_digest": self.source_digest,
@@ -314,6 +315,70 @@ class PreparationStateTest(unittest.TestCase):
         self.assertIn("case_planner", {
             item["name"] for item in receipt["checks"]
             if item["status"] == "MISS"})
+
+    def _rewrite_plan(self):
+        """改完 plan 载重后重算 ledger_digest 并落盘（不然会先被篡改门拦下）。"""
+        payload = dict(self.plan)
+        payload.pop("ledger_digest", None)
+        self.plan["ledger_digest"] = content_address.content_digest(
+            VPS._CASE_PLAN_DOMAIN, payload)
+        self._write_json("case_plan.json", self.plan)
+
+    def _stream_check(self, receipt):
+        return next(item for item in receipt["checks"]
+                    if item["name"] == "case_data_stream")
+
+    def test_numpy_stream_drift_is_miss(self):
+        """B-1：gen_cases 一个字节没改，但 numpy 换了大版本 → 同一 case_id 会产不同 .npy。
+        逻辑摘要那几项全 PASS，所以必须由独立一项把它逮住。"""
+        self.plan["planner_binding"]["numpy_stream_pin"] = "0.1"
+        self._rewrite_plan()
+        receipt = self._evaluate()
+        self.assertEqual(receipt["status"], "MISS")
+        check = self._stream_check(receipt)
+        self.assertEqual(check["status"], "MISS")
+        self.assertIn("0.1", check["reason"])
+        # 反证：这一轮不能是被别的检查项顺带拦住的——规划逻辑侧仍旧全绿。
+        self.assertEqual(
+            "PASS",
+            next(item["status"] for item in receipt["checks"]
+                 if item["name"] == "case_planner"))
+
+    def test_missing_numpy_stream_pin_is_miss_not_reusable(self):
+        """老账本没记随机流身份 → 无从证明数据可复现，不许当 REUSABLE 放行。"""
+        self.plan["planner_binding"].pop("numpy_stream_pin")
+        self._rewrite_plan()
+        receipt = self._evaluate()
+        self.assertEqual(receipt["status"], "MISS")
+        check = self._stream_check(receipt)
+        self.assertEqual(check["status"], "MISS")
+        # ⚠ 「没记」与「记了但不符」的处置不同（前者重做取材，后者对齐 numpy 版本），
+        # 所以 reason 必须分得开——只断言 MISS 的话，把缺键悄悄并进「不符」分支也测不出来。
+        self.assertIn("未记录", check["reason"])
+
+    def test_blank_numpy_stream_pin_is_miss(self):
+        """空串不是「记了」：否则一份被裁剪的账本能靠空串跟另一份空串对上。"""
+        self.plan["planner_binding"]["numpy_stream_pin"] = ""
+        self._rewrite_plan()
+        receipt = self._evaluate()
+        self.assertEqual(receipt["status"], "MISS")
+        check = self._stream_check(receipt)
+        self.assertEqual(check["status"], "MISS")
+        self.assertIn("未记录", check["reason"])
+
+    def test_unknown_current_numpy_stream_is_blocked_not_crash(self):
+        """核不了 ≠ 核过了。当前流身份取不到时判 BLOCKED，且不许抛出去。"""
+        with mock.patch.object(VPS, "_current_numpy_stream_pin",
+                               side_effect=ValueError("版本号解析不出两段")):
+            receipt = self._evaluate()
+        self.assertEqual(receipt["status"], "BLOCKED")
+        self.assertEqual(self._stream_check(receipt)["status"], "BLOCKED")
+        self.assertNotIn("numpy_stream_pin", receipt["bindings"])
+
+    def test_reusable_receipt_records_numpy_stream_pin(self):
+        receipt = self._evaluate()
+        self.assertEqual(receipt["status"], "REUSABLE")
+        self.assertRegex(receipt["bindings"]["numpy_stream_pin"], r"^\d+\.\d+$")
 
     def test_tampered_source_is_blocked_not_cache_miss(self):
         path = os.path.join(self.root, "work", "source_facts.json")
