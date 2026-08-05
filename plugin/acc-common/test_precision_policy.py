@@ -781,7 +781,13 @@ class GoldenTierDerivationTest(unittest.TestCase):
                             self.assertEqual(human, (tier >= 3 or src == "multistep"))
         self.assertEqual(n, len(P.GOLDEN_SOURCE_KIND) * len(P.GOLDEN_METHOD_KIND)
                          * len(P.AUTHORIZATION_KIND) * 2)
-        self.assertEqual(n, 224)   # 4 × 7 × 4 × 2 —— 词表真变了就该在这里被看见
+        # 2026-08-05：GOLDEN_METHOD_KIND 增 `opencv_cuda`（§5.11 要能定位到**具体库**，
+        # 泛泛的 `gpu_lib` 解析不了）→ 7 变 8，组合数 224 → 256。
+        # ⚠ 这条断言本就是**故意**钉死总数的（「词表真变了就该在这里被看见」），它正常起作用了；
+        #   跟着改数字之前先确认上面那圈不变量对新值仍成立——本次已确认：
+        #   `opencv_cuda` 不在 RUNNABLE_METHOD_KINDS，故恒走规则③ tier 4 method_unavailable，
+        #   **没有**因为新增词表值而意外多出一条「跑得起来」的口径。
+        self.assertEqual(n, 256)   # 4 × 8 × 4 × 2
 
     @staticmethod
     def _expected(src, mk, ak, verified):
@@ -1577,15 +1583,30 @@ class GpuOracleResolutionTest(unittest.TestCase):
     与 §5.10（性能取消比较、条款按未验收记账）性质不同，别互相照搬。
     """
 
-    def test_gpu_lib_resolves_to_same_family_cpu_with_record(self):
-        resolved, rec = P.resolve_gpu_oracle_to_cpu("gpu_lib")
+    def test_specific_gpu_library_resolves_to_same_library_cpu(self):
+        """能定位到**具体库**的 GPU 声明 → 同一个库的 CPU 实现，并留解析记录。"""
+        resolved, rec = P.resolve_gpu_oracle_to_cpu("opencv_cuda")
         self.assertEqual(resolved, "opencv_cpu")
         # 解析后必须落在「本环境跑得起来」的族里，否则等于换了个跑不动的口径
         self.assertIn(resolved, P.RUNNABLE_METHOD_KINDS)
         # 解析记录不是装饰品：报告要据它写「原文写 X、按 §5.11 解析为 Y」，不许把这一步抹掉
         self.assertEqual(rec["rule"], "agents_md_5_11")
-        self.assertEqual(rec["declared_in_taskdoc"], "gpu_lib")
+        self.assertEqual(rec["declared_in_taskdoc"], "opencv_cuda")
         self.assertEqual(rec["resolved_to"], "opencv_cpu")
+        self.assertTrue(rec["resolvable"])
+
+    def test_coarse_gpu_kind_is_unresolvable_not_guessed(self):
+        """粗粒度 `gpu_lib` **解析不出** → 返回 None 让调用方 fail-closed，**绝不猜一个 CPU 库**。
+
+        回归点（2026-08-05 审修门 Critical）：初版把整个 `gpu_lib` 族无条件映射成 `opencv_cpu`，
+        于是「任务书点名 cuSPARSE」会被悄悄换成 OpenCV CPU——那不是「同族」，是换了个不相干的实现，
+        而且正好绕过 §5.11 自己写的「同族无 CPU 对应则 fail-closed」。
+        """
+        resolved, rec = P.resolve_gpu_oracle_to_cpu("gpu_lib")
+        self.assertIsNone(resolved)                      # 不给任何可用口径
+        self.assertFalse(rec["resolvable"])              # 且把「为什么解析不了」说清楚
+        self.assertIsNone(rec["resolved_to"])
+        self.assertIn("gpu_lib", rec["basis"])
 
     def test_non_gpu_kinds_pass_through_untouched(self):
         """非 GPU 族原样返回且无记录——本解析层对既有口径必须**零影响**。"""

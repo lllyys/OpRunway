@@ -253,8 +253,12 @@ push 前，对自上次 push 以来将要发布的全部改动统一做一轮审
 
 落地约束：
 
-- 同族映射是**数据**（受控表，如 OpenCV-CUDA → OpenCV-CPU），按**方法族**判，
-  绝不按算子身份分支（5.1）；**同族无 CPU 对应 → 仍 fail-closed**，不硬凑；
+- 映射是**数据**（受控表，如 `opencv_cuda` → `opencv_cpu`），按**具体库**判，
+  绝不按算子身份分支（5.1）；**该库无 CPU 对应 → 仍 fail-closed**，不硬凑；
+- ⚠ **粗粒度声明解析不了，也不许猜**：`gpu_lib` 这类兜底值底下同时装着 OpenCV-CUDA、cuSPARSE、
+  cuDNN……把整族映射到某一个 CPU 库，等于把「任务书点名 cuSPARSE」悄悄换成 OpenCV CPU，
+  那不是「同族」而是换了个不相干的实现。任务书写得太泛时如实落 `gpu_lib` 并 **fail-closed**，
+  要人把真值口径细化到具体库后重判；
 - 解析后的 `method_kind` 必须落在 `precision_policy.RUNNABLE_METHOD_KINDS` 内，否则照旧 fail-closed；
 - ⚠ **阈值不随口径自动搬家**：任务书阈值若是按 NPU↔GPU 误差预算给的，套到 CPU↔NPU 上未必成立
   （同一库的 CPU 与 GPU 实现并非逐位一致）。阈值来源与真值口径**不同源**时，

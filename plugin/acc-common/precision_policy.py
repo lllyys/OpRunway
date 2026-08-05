@@ -810,8 +810,11 @@ GOLDEN_SOURCE_KIND = ("single_api", "multistep", "external_method", "needs_user"
 #   ⚠ 这条与下面的 §5.11 解析层**不矛盾**：那一层不是「回落」，是把任务书的 GPU 写法**读成** CPU
 #     并留下解析记录；解析后的 method_kind 仍须落在 RUNNABLE 里、仍走同一套判档。
 #     「冒充」被禁的是**不留痕地换**，不是「按仓规明示的读法解析后如实记账」。
+#: ⚠ `opencv_cuda`（2026-08-05 加）是**能定位到具体库**的 GPU 声明，供 §5.11 解析用；
+#: `gpu_lib` 保留作粗粒度兜底值——它**解析不了**（见 _UNRESOLVABLE_GPU_KINDS），
+#: 任务书写得太泛时如实落它并 fail-closed，不许拿它当「随便挑个 CPU 库」的入口。
 GOLDEN_METHOD_KIND = ("torch_cpu", "numpy_cpu", "opencv_cpu",
-                      "builtin_tbe", "gpu_lib", "other_external", "needs_user")
+                      "builtin_tbe", "gpu_lib", "opencv_cuda", "other_external", "needs_user")
 RUNNABLE_METHOD_KINDS = frozenset({"torch_cpu", "numpy_cpu", "opencv_cpu"})   # R3 第二档：CPU 上跑得起来的现成库
 
 # ---- §5.11 · 任务书写 GPU 一律解析为同族 CPU（用户 2026-08-05 全局解析规则）----
@@ -822,30 +825,54 @@ RUNNABLE_METHOD_KINDS = frozenset({"torch_cpu", "numpy_cpu", "opencv_cpu"})   # 
 # ⚠ 与 5.10 性质不同：5.10 是**取消比较**（性能不取标杆、不算比值），条款按未验收记账；
 #    5.11 是**解析**（真值口径按同族 CPU 读），条款视为已被满足。两者别互相照搬。
 #
-# 映射按**方法族**组织、是数据不是代码分支（5.1）：换任何算子、任何任务书零改即用。
-# 同族无 CPU 对应 → 返回 None，调用方照旧 fail-closed，**不硬凑**。
-_GPU_TO_CPU_SAME_FAMILY = {
-    # 任务书把 OpenCV 的 GPU/CUDA 实现写成真值口径 → 读作同库的 CPU 实现。
-    "gpu_lib": "opencv_cpu",
+# 映射按**具体库**组织、是数据不是代码分支（5.1）：换任何算子、任何任务书零改即用。
+# ⚠ **键必须是能定位到具体库的标识，不能是 `gpu_lib` 这种粗粒度族**（2026-08-05 审修门 Critical）：
+#   `gpu_lib` 底下同时装着 OpenCV-CUDA、cuSPARSE、cuDNN……把它整族映射到 `opencv_cpu`，
+#   等于把「任务书点名 cuSPARSE」悄悄换成 OpenCV CPU —— 那不是「同族」，是**换了个不相干的实现**，
+#   而且正好绕过 §5.11 自己写的「同族无 CPU 对应则 fail-closed」。
+#   故本表只收**有明确同库 CPU 对应**的项；定位不到具体库的声明一律解析不出、由调用方 fail-closed。
+_GPU_TO_CPU_SAME_LIBRARY = {
+    # 任务书把 OpenCV 的 GPU/CUDA 实现写成真值口径 → 读作**同一个库**的 CPU 实现。
+    "opencv_cuda": "opencv_cpu",
 }
+
+#: 粗粒度、**定位不到具体库**的 GPU 声明。解析不了它——不是「暂不支持」的托词，
+#: 而是「不知道该换成哪个 CPU 实现」这件事本身。返回 `(None, record)` 让调用方 fail-closed。
+_UNRESOLVABLE_GPU_KINDS = frozenset({"gpu_lib"})
 
 
 def resolve_gpu_oracle_to_cpu(method_kind):
-    """§5.11 解析：GPU 族真值口径 → 同族 CPU。返回 `(resolved_kind, record|None)`。
+    """§5.11 解析：GPU 真值口径 → **同一个库**的 CPU 实现。返回 `(resolved_kind|None, record|None)`。
+
+    三种出口，别混：
+      · 非 GPU 声明 → `(method_kind, None)`，对既有口径**零影响**；
+      · 能定位到具体库且该库有 CPU 对应 → `(cpu_kind, record)`；
+      · **定位不到具体库**（如泛泛的 `gpu_lib`）或该库无 CPU 对应 → `(None, record)`，
+        调用方必须 fail-closed。⚠ 绝不退回「猜一个最常见的 CPU 库」——那是换标杆。
 
     `record` 不是装饰品：报告必须据它写「任务书写的是 X，按 §5.11 解析为 Y」，
     **不得**直接写成「任务书要求 Y」把解析这一步抹掉（5.8：事实与推断分开）。
-    非 GPU 族原样返回、`record=None`——本函数对既有口径**零影响**。
     """
-    if method_kind not in _GPU_TO_CPU_SAME_FAMILY:
-        return method_kind, None
-    resolved = _GPU_TO_CPU_SAME_FAMILY[method_kind]
-    return resolved, {
-        "rule": "agents_md_5_11",
-        "declared_in_taskdoc": method_kind,
-        "resolved_to": resolved,
-        "basis": "同族 CPU 实现；仓规 §5.11 规定任务书的 GPU 真值口径统一按此解析",
-    }
+    if method_kind in _GPU_TO_CPU_SAME_LIBRARY:
+        resolved = _GPU_TO_CPU_SAME_LIBRARY[method_kind]
+        return resolved, {
+            "rule": "agents_md_5_11",
+            "declared_in_taskdoc": method_kind,
+            "resolved_to": resolved,
+            "resolvable": True,
+            "basis": "同一库的 CPU 实现；仓规 §5.11 规定任务书的 GPU 真值口径统一按此解析",
+        }
+    if method_kind in _UNRESOLVABLE_GPU_KINDS:
+        return None, {
+            "rule": "agents_md_5_11",
+            "declared_in_taskdoc": method_kind,
+            "resolved_to": None,
+            "resolvable": False,
+            "basis": (f"{method_kind!r} 是粗粒度族、定位不到具体库（OpenCV-CUDA / cuSPARSE / cuDNN… 都在里面），"
+                      "无从确定该换成哪个 CPU 实现 → fail-closed。请把任务书的真值口径细化到具体库"
+                      f"（受控值见 {sorted(_GPU_TO_CPU_SAME_LIBRARY)}）后重判。"),
+        }
+    return method_kind, None
 
 # 任务书对 golden 的**授权强度**。三者区别是本节最吃重的判断：
 #   oracle_method  —— 任务书就**真值口径/怎么测**作出了指定（如 IsClose「二进制比较改为逻辑值比较」）；
