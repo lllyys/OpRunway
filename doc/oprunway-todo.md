@@ -1,9 +1,14 @@
 # OpRunway 施工 TODO（离「通用算子验收工具」还差的）
 
-> **Median 当前状态更正（2026-07-30）**：下面 60-case 闭环是历史 checkpoint，
-> 最新 `cpp_extension` torch-parity 真机验收为 1152 例中
-> 1101 PASS、51 FAIL，`gate.passed=true`，确定性裁决 `FAIL(精度)`；
-> 它也取代上一轮 1344-case 结果。
+> **Median 当前状态更正（2026-07-30 起，2026-08-05 按 `AGENTS.md` §4.5 再订正）**：
+> 下面 60-case 闭环是历史 checkpoint，已被 `cpp_extension` torch-parity 真机验收取代。
+> ⚠ **取代它的不是一个数，是并列的两个 caseset——「不存在单一的『Median 精度基线数字』」**
+> （`AGENTS.md` §4.5 定案）：
+> ①「仅按维」1152 例 / 1101 PASS / 51 FAIL（真机当轮 per-run spec，未入仓）；
+> ②「按维 + global」1344 例 / 1286 PASS / 58 FAIL（仓内 `plugin/samples/specs/median.spec.json`）。
+> 两者只差 `attribute_profiles` 一档（② 多一档 global overload），**彼此不可比、谁也不作废谁**；
+> 引用时必须点名走的是哪一份 spec。⚠ 只按 ① 准备验收会漏掉任务书要求的 global 变体覆盖。
+> 两组的 `gate.passed` 都是 `true`、确定性裁决都是 `FAIL(精度)`——
 > 因此 Median 验收未闭环，性能不得越过精度总门。
 
 ## ⚠ Median 60-case 历史性能 checkpoint（已被后续验收取代，2026-07-27）
@@ -221,16 +226,22 @@
   **但 `gen_cases --dry-run` 已经能做**（plan-only、不算 golden、不 import torch），Pdist 首跑里验收 agent 取证用的正是它。
 - (b) **伪造 `acceptance.json` 裁决**（拿 golden 冒充 NPU 输出）—— 这个是有害的，就是要删的那部分。
 
-- [ ] **U6a · 默认值翻过来**：`--mode` 默认改 `new_example`（真机）；没 NPU **fail-closed 说清楚跑不了**，不再静默退到 mock。
-- [ ] **U6b · CP-B 的自检改用 `--dry-run`**，不再产 mock 裁决；`acceptance-workflow` / `op-acceptance` 两处散文同步改写。
-- [ ] **U6c · 删 mock 通路**。⚠ **连带面已估（别低估）**：`repo_adapter.MODES`（`:646`）· `run_mock`/`_inject_defect`/`_mock_us`（`:146-198`）·
+- [x] **U6a · 默认值翻过来** ✅ 已落地，且**后来被更彻底的做法取代**：`--mode` 的 argparse 默认值现在是
+  `None`（`run_workflow.py:825`），据 `spec.runner_form` 派生；缺省 form 已是 `cpp_extension`。
+  「默认改 `new_example`」这个当时的写法已不再准确，别照它去改回来。
+- [x] **U6b · CP-B 的自检改用 `--dry-run`** ✅ 已落地：`acceptance-workflow/SKILL.md` 的 CP-B 现在跑
+  `gen_cases.py --dry-run --ledger-out`，不再产 mock 裁决；两处散文已同步。
+- [ ] ~~**U6c · 删 mock 通路**~~ ⛔ **已被同日 C5 决定取代，不再是待办**：mock 本体保留（那 89 处测试引用是合理的），
+  改为**物理上不产** `acceptance.json` / `verdict.json`，只产 `dev_run_summary.json` / `dev_precision_check.json`
+  （`run_workflow.py:36` `_DEV_SUMMARY_FILE`、`:436` `is_acceptance`）。危害（伪造裁决）已消除，通路本身不删。
+  下面的连带面盘点保留作历史记录，**不再是行动清单**。⚠ **连带面已估（别低估）**：`repo_adapter.MODES`（`:646`）· `run_mock`/`_inject_defect`/`_mock_us`（`:146-198`）·
   `perf_compare.mock_baseline`（`:73`、`:398` 有调用点）· `catlass_adapter.run_catlass_mock`（`:452`）+ `CATLASS_MODES` ·
   **8 个测试文件共 89 处 mock 引用**（`test_runner_lookup` 25 · `test_gen_cases_dtype_attr` 16 · `test_ne_transport` 15 ·
   `test_catlass_adapter` 13 · `test_perf_compare` 10 · 余 3 个合计 10）。**删之前先想清楚这些测试改测什么**——
   它们现在靠 mock 当「可确定性复现的假 NPU」，删干净会连带失去一批不依赖真机的回归能力。
-- [ ] **U6d · `--defect` 注入机制何去何从**：现在它靠 mock 造坏点来证明 validator 真会 fail（防「门是假的」）。
-  删 mock 后这条自证路径没了，需要替代（候选：留一条**明确非验收、不产 `acceptance.json`** 的测试专用夹具，
-  与验收通路彻底隔离）。**这条须用户拍板**，别默默删掉。
+- [x] **U6d · `--defect` 注入机制何去何从** ✅ **用户已拍板并落地**（拍板四条第 3 条）：保住自证能力，
+  但移出 CLI 入口 —— `defect` / `perf_slow` 现在只是函数参数级的测试夹具，且 `run_workflow.py:416`/`:425`
+  两处硬拒「作用于验收通路」。候选方案里那条「明确非验收、不产 `acceptance.json`」正是最终采用的形态。
 
 #### 🔑 用户 2026-07-22 拍板的四条（本轮据此施工，**别再重开讨论**）
 
@@ -298,7 +309,7 @@
 
 #### 🟢 shape_transform 用真算子跑通了（2026-07-23）——**三个全通，且经 a3 真 torch 复跑**
 
-> **a3 `oprunway_prov`（真 torch 2.10.0+cpu）实跑**：Im2col 50 用例 `(2,2,2,2)→(2,8,9)` ·
+> **a3 目标容器（真 torch 2.10.0+cpu）实跑**：Im2col 50 用例 `(2,2,2,2)→(2,8,9)` ·
 > UpsampleNearestExact2d 18 · UpsampleNearest3d 20 `(2,3,2,4,4)→(2,3,4,6,8)`（**rank 5**）。
 > 三者 `out_shape_source` 均为 `golden.out_shape` —— **声明值驱动整条链、且与真 torch 实际产出
 > 的形状逐 case 对过账**（对不上引擎 fail-closed）。全量 686 测在 a3 亦全绿。
@@ -427,7 +438,7 @@
 - [x] **4.2 · C1–C5 已落地（2026-07-22）**：shape_transform 通路打通（`out_shape` 契约——**当时是 4 元组，2026-07-23 已扩为 5 字段具名元组** `Golden(fn, source, provenance, out_shape, contract)`，别读作现行契约 —— 加 attr `list[int]` +
   spec `rank` 约束）· dtype 挂账 `passed_with_gaps` 全链接线（validator → 门 → `run_workflow`，**exit 2 挂人工、绝不回 0**）·
   mock 物理上产不出 `acceptance.json`（改产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）· `--defect` 出 CLI。
-  验证：**a3 `oprunway_prov` 容器真 torch 2.10.0+cpu 跑 639 测全绿**（`OK (skipped=2)`，54.6s；
+  验证：**a3 目标容器真 torch 2.10.0+cpu 跑 639 测全绿**（`OK (skipped=2)`，54.6s；
   传输逐文件 sha256 双侧一致 `6f0ac4a9…`）。本机：torch 替身 639 全绿 + 裸跑与基线零 diff + 两道门 PASS/SYNCED。
   ⚠ **本机「零新增红」不能当放行依据**——59 条恒红会掩盖结构性断裂（本轮就掩盖了 5 条：
   「文件不存在」「argparse 不认参数」这类，与数值无关）。**造 torch 替身重跑**才是本机唯一有效的自证手段。
@@ -624,7 +635,7 @@
 - [x] **A3 大小 shape 边界已落成通用数据契约**：按所有输入的物理载荷字节数求和，`<= 256 KiB`（262144 bytes，边界计入）为小 shape，`> 256 KiB` 为大 shape；原因是前者可一次搬入 UB。所有当前 A3 样例 spec 均显式声明该 profile；该标签只做分组统计，不恢复 `trivial-met`，不自动免测或放宽性能阈值。
 - [x] **通用能力保留但不误用**：`aclnn_builtin` 仍是其它任务可能使用的通用 baseline 能力；Median spec 已恢复 `torch_npu:torch.median`，无算子身份代码分支。
 - [x] **选例与报告账本已补齐代码契约并经 A3 容器回归**：caseset 记录性能 case 复用的精度 case_id、未选 precision case、逐 dtype 配额和 small/large 计数；精度报告按 dtype/overall 固定输出 `total/passed/failed/needs_review`（`na` 单列），性能报告按 small/large/overall 固定输出计划数、可评分数、达标数、blocked、双边中位耗时和 speedup。A3 的 256 KiB 边界走受控 hardware profile，dry-run 也执行同一 fail-closed 策略校验；三级门把汇总逐项绑定到 per-case/evidence/baseline，不重判阈值。全套 `acc-common` 测试已在 A3 容器分批跑绿。
-- [x] **历史远程重生成并重新裁决**：2026-07-27 legacy 60-case checkpoint 曾得到精度 60/60 PASS；该结论已被后续 `cpp_extension` torch-parity 1344-case 验收取代。当前 1286 PASS、58 FAIL，`gate.passed=true`，确定性裁决 `FAIL(精度)`；不得再用本条关闭当前精度或性能验收。
+- [x] **历史远程重生成并重新裁决**：2026-07-27 legacy 60-case checkpoint 曾得到精度 60/60 PASS；该结论已被后续 `cpp_extension` torch-parity 验收取代。⚠ **本行原写的「1286 PASS、58 FAIL」没有错，错的是把它当成「当前」唯一那组**：它是 ②「按维 + global」1344-case（仓内 `median.spec.json`）的结果，与 ①「仅按维」1152-case 的 1101/51 **并列存在、不可比**，见本文件开头与 `AGENTS.md` §4.5。两组的确定性裁决都是 `FAIL(精度)`。不得再用本条关闭当前精度或性能验收。
 - [ ] **性能条款尚未通过**：13 个可评分 case 真实低于 `ratio=1.0`（3 个 fp 长度 3 的 global 小 shape、9 个 fp 1024×1024 global 大 shape、1 个 int64 1024×1024 global 大 shape）；另 2 个 BF16 baseline case 无可比 device kernel。不得靠删 case、改阈值或把聚合 speedup 当逐 case PASS 关闭。
 - [ ] **`torch_parity` 造例档位仍只是护栏**：`gen_cases.py` 当前明确记载“批 A 只记账、批 B 尚未改造例逻辑”；只读签名对账得到当前 50 个性能 case 与 cannbot Median 的 1152 个 accuracy / 50 个 performance 冻结 case 均为 0 个精确 `shape×dtype×dim×keepdim` 重合，而 cannbot 已发布的 50 个 performance case 自身是其 1152 个 accuracy case 的 50/50 子集。因此现行来源/身份/大小分类已闭环，但不能宣称 shape/attr 网格逐例完全对标。后续若实施批 B，须用字段驱动的通用 profile，不得读取 `repos/` 作为运行时依赖或按 Median 身份特判；也不得借“对标”删除任务书要求且 cannbot 未覆盖的 global 变体。
 
@@ -654,7 +665,7 @@
 3. **「完工」标准未定**（够 demo / 够内部用 / 够对外发布）——定了才能倒推「到可用 v2 还差哪几步」。
 
 ### B. 外部资源阻塞
-4. **真机验证**：待 `ascend-a5`（真 950 / arch 3510）+ VPN。catlass 真机 build/run、Track C 的 int/bf16 runner、AscendOpTest bool cross-check 全挂在这。
+4. **真机验证**：待 a5 目标机（真 950 / arch 3510）+ VPN。catlass 真机 build/run、Track C 的 int/bf16 runner、AscendOpTest bool cross-check 全挂在这。
 5. **真 GPU 基线数据**：consumer 侧与最小字段契约已就绪，缺数据即走 `BLOCKED_WAIT_GPU_BENCHMARK`。
 
 ### C. 已收口（不再是待办）

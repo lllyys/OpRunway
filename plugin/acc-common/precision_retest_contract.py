@@ -38,6 +38,12 @@ import precision_policy
 SCHEMA_VERSION = 1
 ATTEMPT_KINDS = frozenset({"same_policy_rerun", "relaxed_rerun", "replay_only"})
 DIRECTIVE_STATUSES = frozenset({"drafted", "confirmed", "expired", "revoked"})
+#: 首轮验收必须冻结的五类基础工件。**五个的绝对路径都必须落在 `--reports-dir` 之内**
+#: （`verify_base_artifacts` 的 containment 校验，是安全边界、不许放宽）。
+#: ⚠ `spec` 指的是 **`<报告目录>/spec.json`——CP-E staging 出来的那份副本**，不是
+#: `plugin/samples/specs/` 或 `<ops_root>/<op>/` 里的原件：原件落在报告目录之外，
+#: 填进来必被 containment 拒。golden 授权链同理锚在 `dirname(spec)/golden.py`。
+#: 两份副本由 `run_workflow`（验收通路）自动落盘，见 `run_workflow._STAGED_FILES`。
 BASE_ARTIFACTS = (
     "spec", "caseset", "evidence", "verdict", "acceptance",
 )
@@ -555,9 +561,32 @@ def materialize_attempt(directive, reports_dir, execution_identity):
                 f"drift_blocked:base_source_repo_mismatch "
                 f"directive={directive_repo!r} "
                 f"base={runner_binding.get('base_source_repo')!r}")
+        # golden 授权链锚在**基础 spec 的同目录**：`<报告目录>/golden.py`。
+        # 这条锚从 2026-08-05 起天然成立——`run_workflow` 在验收通路上把 `spec.json` 与
+        # `golden.py` 原件按字节 staging 进 `--out`（见 `run_workflow._STAGED_FILES`），
+        # 验收产物目录因此自带 CP-F 要的全部输入，不再需要跑 CP-F 前手工搬文件。
+        # ⚠ 缺文件时必须给**可执行的归因**：裸调 `sha256_file` 只会报一句「待绑定工件须为普通
+        #   文件且非符号链接」，读的人会以为是权限或软链问题，实际是「这轮验收产物根本不带
+        #   自证材料」。归因错 = 下一步动作也错（去手工拷一份，而不是重跑首轮验收）。
+        # ⚠⚠ **这一格 provenance 的绑定强度弱于 spec / source_facts，如实记账**（既有问题，
+        #   staging 只是让它变得可达）：`golden.py` **不在** `BASE_ARTIFACTS` 里，首轮 cpp_extension
+        #   receipt / evidence 也**没有**记过它的摘要——下面这行是**现场**算出来的。所以首轮跑完后
+        #   有人改写 `<报告目录>/golden.py`，只要本轮 `execution_identity.golden_source_sha256`
+        #   报同一个新值，这里就照过。影响面别说大也别说小：被冻结复测的 golden **值**（`.npy`）
+        #   由 `build_case_bindings` 逐字节哈希、`caseset` 又被 receipt 的 `caseset_sha256` 绑住，
+        #   **裁决用的真值动不了**；失真的只是「这些真值是哪份源码算的」这一格。
+        #   要真绑住须把 golden 摘要写进首轮真机工件（receipt.bindings），另立批次。
         golden_source_path = os.path.join(
             os.path.dirname(prepared["base_artifacts"]["spec"]["path"]),
             "golden.py")
+        if os.path.islink(golden_source_path) or not os.path.isfile(golden_source_path):
+            raise RetestContractError(
+                f"drift_blocked:base_golden_source_missing：golden 授权链锚定在基础 spec 同目录的 "
+                f"{golden_source_path!r}，但它不存在或不是普通文件。"
+                f"CP-E 会在验收 `--out` 里 staging `spec.json` 与 `golden.py`；该目录缺这两件，"
+                f"说明基础验收不是由本编排产出（或产物被搬动过）。"
+                f"⚠ 别手工拷一份凑数——那样 spec/golden 与首轮裁决就不再保证同源；"
+                f"要复测请用 `cpp_extension` 重跑一轮完整验收当新基线。")
         golden_source_sha256 = sha256_file(golden_source_path)
         base_anchor = runner_binding["base_source_identity"]
         base_provenance = {

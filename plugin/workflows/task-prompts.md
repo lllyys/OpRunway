@@ -74,7 +74,10 @@ dispatch_mode: verify_runner
 dispatch_mode: run_npu
 输入工件: <op>.spec.json + 本轮 CP-C 自证门已满足的证据（cpp_extension（缺省·验收路径）= build/load/vendor receipt；
           cpp = 自检满足的 runner；aclnn_py = harness 真机信任门收据）
-验收标准: 真机 run_workflow.py --mode <mode>（OPRUNWAY_* 指真实机器/路径，不写进仓）——
+验收标准: 真机 run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json
+          （OPRUNWAY_* 指真实机器/路径，不写进仓）——
+          --source-facts 在验收通路上必给、缺席直接拒跑；路径是 CP-A fetch_source.py --out 产的那份，
+          与 --out 报告目录不是同一个。非验收通路（mock、加了 --allow-experimental-form 的 cpp/aclnn_py）不强制。
           <mode> 据 spec.runner_form 派生（受控词表 {cpp, aclnn_py, cpp_extension}，缺省 = cpp_extension）：
           cpp_extension → cpp_extension（须 OPRUNWAY_CPP_EXTENSION_REAL=1 且过 build/load/vendor receipt 门）；
           cpp → new_example；aclnn_py → aclnn_py（且须 OPRUNWAY_ACLNN_REAL=1）；

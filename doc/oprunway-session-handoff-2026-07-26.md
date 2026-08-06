@@ -84,7 +84,7 @@ OpRunway 通用侧本轮补齐：
   `319 passed, 14 warnings, 29 subtests passed`。
 - 只清理了本用户容器 `/tmp` 中可确认属于旧 pytest/perf/msprof 的临时目录；
   `/tmp` 从约 18G 降至首次清理后 322M；完成测试并做最终清理后为 23M。
-- 最近复核：`/home/liangyuansheng` 7.2G（其中本轮 `/work/run` 6.5G）、根盘可用约 19G。
+- 最近复核：我方远端工作根 7.2G（其中本轮 `/work/run` 6.5G）、根盘可用约 19G。
   不得清理其他用户目录。
 
 ## 6 · Git 与下一步

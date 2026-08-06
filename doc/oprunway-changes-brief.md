@@ -2,6 +2,86 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-06 · 收据侧凭据判别式去分叉 + `--repo` 凭据门前置到 build 之前
+
+- `make_vendor_build_receipt.py` 里那份私有 `_url_has_userinfo` **删掉**，统一调
+  `dut_source.url_has_userinfo`。它只按 `/` 切 authority，于是 `https://host?a=b@c` 这种
+  **根本不含凭据**的 remote 在收据链上被判「带凭据」、在取材链和读侧却被判干净——
+  同一份事实包两条链两个结论。⚠ 顺带的窄变化如实记账：那份实现判过头，会连带拦下 query 里含
+  字面 `@` 的 token；统一后本模块放行它。**这不是把洞开大**——取材侧和读侧本来就放行，
+  那个 token 早已原样落进 `source_facts.json`，产出方多拦一道并不构成 containment。
+- 显式 `--repo` 带凭据的校验**前置到参数校验期**（原先要等 build 跑完、收据组装完才在
+  `self_check` 里被拒）。凭据没进有效收据 ≠ 门在对的位置——旧位置意味着 vendor build 已真跑过、
+  `.so` 已被改写。`--allow-repo-override` 放行的是「与派生值不一致」、不是「带凭据」，绕不过这道门。
+  冲突报错里两个值再过一遍 `redact_url_userinfo`（可达路径上是恒等变换，纯防御）。
+- 原来那条「同一份规则」测试是**假门**：只 `assertIs` 钉 `fetch_source` 的两个别名，
+  完全看不见「某个下游自己写了一份」。改成把同一组 URL 跑过**每一个**下游入口
+  （判别式本体 / 取材侧扣留行为 / 收据产出方 / 收据读侧），并补一条走完整 `main()` 的见证——
+  只在派生值预过滤那一处换回 fork，前者仍绿、后者会红。
+
+## 2026-08-06 · 仓内正式验收调用路径补 `--source-facts` + 漂移门接上电
+
+- `run_workflow.py` 已把 `--source-facts` 定为验收通路必填（缺席即拒跑），但仓内**文档里的命令模板全没跟上**：
+  照 `acc-verify-rootcause.md` 起的正式验收会在 staging 前就退出，Task1 / NPU / CP-E 产物一个都不生成。
+  **代码里的门是真的，仓内正式调用路径已经不可用。** 现在 8 处调用模板全补齐并统一口径
+  （照 `acceptance-workflow/SKILL.md` 那份写，不另发明），同时写清路径来自 CP-A 取材的 `--out`、
+  **与报告目录不是同一个**；非验收通路（`mock`、`--allow-experimental-form` 的 `cpp`/`aclnn_py`）明确不受强制。
+- `acc-verify-rootcause.md` 的 `run_npu` dispatch 表补上「事实包路径是必需输入、由 orchestrator 交下来、
+  拿不到就 BLOCKED 别自己猜」——之前 subagent 根本不知道要带这个。
+- 仓根 `AGENTS.md` §9.3 那条「残留伪装面、要彻底封死得让编排层每次都传」改成现状：**已封**。
+- `check_acceptance_entrypoints.py` 扩了一条「CP-D 调用模板必带 `--source-facts`」的机械门，并把仓根
+  `AGENTS.md` 纳入守护范围（多行 bash 块按续行折叠后再判）。⚠ 更要紧的是：这个门此前**只在 tmpdir
+  合成文本上跑过、对真仓文件一次都没跑过**——等于没接电，所以这次漂移全程零告警。现补
+  `RealRepoGateTest` 直接拿真文件跑，漂移在 pytest 里就红。
+
+## 2026-08-06 · 「就地跑」执行形态真机见证 + CP-A 环境变量清单纠错
+
+- 在 a3 目标容器里把「就地跑」形态**整条链跑通到裁决**（Median + ops-nn MR6429，本地 checkout 来源，
+  `cpp_extension`）：脚本内部无 `ssh` / `docker exec`，无 `.oprunway/real-machine.env` 照样跑，
+  `overall=FAIL(精度)`（1344 例 58 fail，与既有记录一致）。**见证的是形态能走通，不是精度达标。**
+- 顺手做了 A/B 对照：`OPRUNWAY_TARGET=local` 与三个连接变量全 unset，**裁决逐字相同**——
+  坐实 `cpp_extension` 主链**根本不读** `OPRUNWAY_TARGET` / `OPRUNWAY_SSH_HOST` / `OPRUNWAY_REMOTE_DIR`。
+- 据此改了 `skills/acceptance-workflow/SKILL.md` 的 **CP-A 就地跑段（只这一段）**：那份清单不是写错、是
+  **写串了作用域**（那三个变量只服务 `new_example` / `aclnn_py`，而这两条通路产不出裁决），
+  同时漏掉 6 个真正 fail-closed 的必需项，现按 runner form 拆开补齐。
+- 见证记录落 `doc/oprunway-local-source-realmachine-validation.md` **新增 §8**（不动 §1–7）。
+
+## 2026-08-06 · tracked 文件脱敏 + 方案 Step 状态回填 + ⚠ 降噪
+
+- **私有值清出 tracked 文件**（既有泄漏，非本轮引入）：`doc/` 的 8 份 md 里把真实 SSH alias、
+  容器名（含他人的）、真实远端绝对路径和隧道端口，替换成「a3/a5 目标机」「a3 目标容器」
+  「远端工作根」这类泛化说法，真实值只留 ignored 的 `.oprunway/real-machine.env`。
+  **技术事实一个没删**——CANN 9.0.1 / `ascend910_93` / torch_npu 2.10.0、容量数字、测试计数照旧。
+  ⚠ **别在本简表或任何 tracked 文件里复述被替换掉的原值**，那等于把刚清掉的东西又写回来。
+  ⚠ **仓里还有别处没清**：`AGENTS.md`、`README.md`、`canon/logbook/`（append-only、按 BUREAU 规矩不重写）、
+  `plugin/acc-common/*.py`、`plugin/agents/`、`plugin/samples/` 都还有同类值，不在本轮负责面内。
+  ⚠ **扫的时候别只扫 `/home/` 和 `/root/`**：本轮 codex 复核逮出漏网的 `/mnt/...` 形态远端路径，
+  第一遍正则就是因为只列了两种前缀而漏掉的。
+- **`doc/oprunway-local-source-plan.md` 补上 Step 0-7 的完成状态**，逐条按现在的代码核过，不凭记忆：
+  §3 顶部加了一张回填表。三处订正值得单独记——① Step 4 原写「本仓不产 vendor build receipt、
+  找不到写入方就停下来问、别自己新写」，真机上核过**写入方就是不存在**，产出方最终由本仓新建为
+  `make_vendor_build_receipt.py`，那句指示**作废**；② Step 3 的 `verify_aclnn_harness` 不是漏做，
+  是对 `local_checkout` **结构性 fail-closed**（构建端没有可对账的锚）；③ 原稿挂账的
+  「产出方未接编排 / `--source-facts` 未强制」两条**已经不是缺口**（SKILL.md CP-C 明写要跑产出方，
+  `run_workflow` 验收通路缺 `--source-facts` 即拒跑），别照旧稿去重复补。
+  文末「本方案未实施」改为已实施，并列出做完之后仍未覆盖的三件。
+  ⚠ **回填时逮出一个真假门，Step 4/7 因此标 ⚠ 不标 ✅**：`cpp_extension_adapter.py` /
+  `cpp_extension_driver.py` 的来源锚校验**在 local 通路上零测试覆盖**（只有三级门那处有直测），
+  把这两处改回 PR-only，本地来源测试照样全绿，要到真机 CP-D 才炸。补法写在 Step 4。
+- **`doc/oprunway-todo.md` 回填 U6a/U6b/U6d 已落地、U6c 已被 C5 取代**（mock 本体保留、
+  改为物理上不产 `acceptance.json`）；并把文件开头与正文的 Median 精度基线口径对齐到
+  `AGENTS.md` §4.5——⚠ **1152 与 1344 是并列的两个 caseset、不存在单一「当前基线」**，
+  本轮起草时一度写成「1152 取代 1344」，是 codex 复核逮回来的：只按 1152 准备验收会漏掉
+  任务书要求的 global overload 覆盖。
+- **⚠ 降噪**：近几轮 ⚠ 加得太密，密到没有警示作用。本轮只摘掉「标了也没人会踩坑」的那种——
+  标题里的、讲背景讲道理的、说「已核实不冲突」的安心话、拿 ⚠ 当交叉引用路标的。
+  **正文一个字没动，凡「订正 / 未见证 / 未过审 / 别这么改 / 字段名容易写错」一律留着。**
+  ⚠ **净数只在两份里降下来了，别把本条读成「全仓 ⚠ 变少了」**：
+  `roll-complex64-trial-findings` 31→24、`plugin/AGENTS.md` 24→20；
+  而 `local-source-plan` 29→33、`todo.md` 75→78、本简表 66→76 是**净涨**——
+  因为同一轮补进去的假门告警、并列基线的引用纪律、脱敏遗漏这些是真会踩坑的，该标就得标。
+  降噪是「让标记有分量」，不是「把数字压下去」。
+
 ## 2026-08-06 · 解阻塞：env 文件不再是开工前置 + 抽 spec 产得出 `cpp_extension`
 
 外部使用者被两件事挡住，都不是判定逻辑的问题，是**文档把话说死了**。
@@ -63,7 +143,7 @@
 
 ## 2026-08-05 · 本地来源首次跑通真机 NPU 验收（裁决 `FAIL(精度)`）+ CP-F 口径定案
 
-- **本地 checkout 一路跑到裁决**（a3 容器 `oprunway_prov`，CANN 9.0.1 / `ascend910_93` / torch_npu 2.10.0）：
+- **本地 checkout 一路跑到裁决**（a3 目标容器，CANN 9.0.1 / `ascend910_93` / torch_npu 2.10.0）：
   输入只有本地任务书文件 + 本地 checkout + 算子子目录，**不带任何 PR id**，走 `cpp_extension` 主链
   完成 CP-A 取材 → 构建 → 收据 → NPU 跑测 → 三级门 → 裁决 → 报告。
   构建产物 `libcust_opapi.so`（`sha256=35ba85e0d719…`）；`acceptance.json` 为
@@ -199,7 +279,7 @@ verify 轮（codex 复核修复本身）又逮出 5 条：digest 自洽证明不
   条件项里的「依赖与前置条件」「失败与例外规则」（适用时）不满足，以及可选项「精度额外要求」
   声明不清时，都走 `stop` → `NEEDS_USER` 停下交用户决策（阻断项只能补充事实或停止验收，豁免只对不阻断的待确认项开放）。
   只有「特殊语义」不满足走 `list_pending`，列待确认项不阻断。
-  单测 `test_validate_taskdoc_input.py` 54 例已在 a3 容器 `oprunway_prov`
+  单测 `test_validate_taskdoc_input.py` 54 例已在 a3 目标容器
   （Python 3.12.13）跑过，全过。
 - push 前审修门（散文 3 条 + 代码 30 条）修掉 5 个真 fail-open：任务书原始字节未与
   `source_facts.taskdoc.bytes_sha256` 对账（换任务书留旧事实包即可复用上轮决策）、
@@ -428,7 +508,7 @@ verify 轮（codex 复核修复本身）又逮出 5 条：digest 自洽证明不
   `acceptance.json`。A3 全量回归 `1505 passed, 10 skipped, 474 subtests`；相关子集 319 passed。
 - **本用户空间安全清理**：仅删除容器 `/tmp` 下可确认属于旧 pytest/perf/msprof 的临时目录，
   `/tmp` 从约 18G 降到首次清理后 322M、完成测试并最终清理后 23M；最近复核
-  `/home/liangyuansheng` 7.2G（其中 `/work/run` 6.5G）、根盘可用约 19G，未触碰其他用户目录。
+  我方远端工作根 7.2G（其中 `/work/run` 6.5G）、根盘可用约 19G，未触碰其他用户目录。
 - **完成 compile 与换 session 交接**：Torch 对标路线已蒸馏为 proposed dossier；旧 Median
   `aclnn_builtin` 路由和已废除的 `trivial-met` 规则已显式标为 contested，当前 handoff 同步记录远端
   回退建议、本地选择性清理边界和下一轮 C++ Extension 测试设计顺序。
@@ -477,7 +557,7 @@ verify 轮（codex 复核修复本身）又逮出 5 条：digest 自洽证明不
 
 ## 2026-07-25（对齐 cannbot · 批 A 落地后被用户叫停）
 
-- **容器 pytest 环境终于定下来了**（上一轮卡死在这）：a3 容器 `oprunway_prov` 的 `python3` 就是对的那个（3.12.13，自带 numpy/torch/**torch_npu 2.10.0**），只是缺 pytest + jsonschema，`pip install` 装上即可，**不用 conda**。改前绿基线 `1316 passed / 10 skipped / 425 subtests / 0 failed`。
+- **容器 pytest 环境终于定下来了**（上一轮卡死在这）：a3 目标容器的 `python3` 就是对的那个（3.12.13，自带 numpy/torch/**torch_npu 2.10.0**），只是缺 pytest + jsonschema，`pip install` 装上即可，**不用 conda**。改前绿基线 `1316 passed / 10 skipped / 425 subtests / 0 failed`。
 - **逮出一个陈旧测试**：`test_real_median_spec_resolves_two_variants` 还断言 by-dim 路由到 `MedianDim`，而真机坐实的修正是「双变体统一走 `aclnnMedian`」（DUT `.so` 压根不导出 `aclnnMedianDim`，那是 CANN 内置）。改了断言，并把「by-dim 绝不许再路由到 DUT 未导出的符号」钉成回归 pin——原来的写法等于把「验的其实是内置、不是 PR」这条假 DUT 通道钉成了期望值。
 - **建了字节 pin 工具**：遍历 `samples/specs` 下每一份 spec 跑 gen_cases，落 caseset / 逐 case / 落盘文件的 sha256。改 gen_cases 前后各跑一次一比，「legacy 分支字节没变」就有机器证据、不靠肉眼。**无算子名分支**（有什么 spec 跑什么）。基线在容器 `/work/run/pin/pin_before.json`。
 - **批 A 落地（护栏 + 只读报告增强 + provenance 修正），容器全绿 `1372 passed`（+56 新测试）**：① `gen_cases` 加 `spec.precision.case_profile` 受控词表 {legacy 缺省, torch_parity}——后续所有对齐 cannbot 的造例改动都只在 `torch_parity` 下生效，**按能力档位分支、不按算子名**（律令#0），且未声明时 caseset 里连这个 key 都不出现、字节不变；② `perf_compare` 补 cannbot 的报告三件套（by_dtype median 汇总 / overall_speedup 加权 / cases_above_threshold 用严格 `>`），**纯增只读字段、硬门一字未动**；③ `validator` 补 by_dtype 精度聚合块；④ `precision_policy` / `perf_msprof` 把几处 provenance 注释改准——`index_value_consistency` 是我们原创（cannbot 根本不比 indices）、容差按输出 dtype 是**有意改对了 cannbot 的潜在瑕**、`--ai-core=off` 是真机实测逼出的有据偏离，都标清楚了，免得下一个人当 bug 去「对齐」而制造回归。**⚠ 诚实口径：批 A 未经对抗审查、也还没跑字节 pin 比对，不算收工。**
@@ -506,9 +586,9 @@ verify 轮（codex 复核修复本身）又逮出 5 条：digest 自洽证明不
 - **性能通路补上同一道门**：perf wrapper 原来是裸 `AclnnRunner(device=...)`（宽松档）且从不 close ——「精度验 custom vendor、性能测 CANN 内置同名实现」是同一个假 PASS 缺口的性能版本。现改为默认严格档（开关 = perf plan 的 `allow_builtin_symbols`，与 driver 的 `--allow-builtin-symbols` 同语义）并走 `with`（跑完销毁自建 stream）。另修 `close()` 后 `runtime_provenance()` 的 `custom_opapi_libs` 变空（证据丢半条）——close 前留指纹快照。
 - **修 aclnn scope gate 钉死一层的目录形态断言**（dogfood CP-C 硬阻塞）：旧判据要求 `<op_subdir>/op_api/aclnn_*.h`，但 PR6429 真实布局是 `<op_subdir>/op_host/op_api/aclnn_median.h`（`experimental/index/median/` 下压根没有 `op_api/`）→ 真 PR 被判「非域内」跑不动。改成**在 `<op_subdir>` 下有界递归**（深度≤3、目录数≤256、全程不跟随软链）找 `aclnn_*.h`（剔 `*_impl.h`），各种落点都认、不预设层级；找不到才 fail-closed，且报错里列出**实际扫过的目录 / 扫到的 .h / 跳过的软链**（原来只说「缺签名件」，用户猜不到头该放哪）。同步订正三处 md（acc-runner-dev / op-acceptance / acceptance-workflow）+ 设计文档 §4/§9.4 里被我写错的同一条路径。
 - 用户定新规则：「任务书对标 torch」场景参考 gitcode `Justbin/cannbot-ops-input` 仓的 case 生成/测试/torch 封装法，改造 OpRunway + 对 median(PR6429) 端到端验收。见证=median（双输出、reduce、tie、int dtype）。
-- 三份调研到位：参考仓（六轴 case-gen + 逐 dtype allclose 判据 + **ctypes-aclnn Python runner**）、median 任务书+PR6429（对标 torch.median、双输出、A2/A3→a3、PR open 未合）、a3 环境（torch_npu 在容器 `oprunway_prov` 现成、根盘曾 100% 满）。
+- 三份调研到位：参考仓（六轴 case-gen + 逐 dtype allclose 判据 + **ctypes-aclnn Python runner**）、median 任务书+PR6429（对标 torch.median、双输出、A2/A3→a3、PR open 未合）、a3 环境（torch_npu 在目标容器现成、根盘曾 100% 满）。
 - 架构经用户拍板 Option A（adapt/vendor 参考仓进 OpRunway）；出 `doc/oprunway-torch-baseline-design.md` 可执行蓝图：新增面仅 4 块（ctypes-aclnn runner / torch_allclose 标准 / torch golden / 多输出契约），判定仍归确定性脚本链。
-- a3 磁盘排查：根盘 3.5T 满非我方所致（大头别人退出容器 `cyj` 765GB 等）；只清我方 `oprunway_prov` 容器 `/tmp` 旧残渣 36GB → 根盘腾到 44G 可用。
+- a3 磁盘排查：根盘 3.5T 满非我方所致（大头别人退出的容器 765GB 等）；只清我方 a3 目标容器 `/tmp` 旧残渣 36GB → 根盘腾到 44G 可用。
 - torch-对标 **accuracy 主链 + 编排接线离线实现完成**（Workflow fanout；⚠ **括号里「perf 维未实现 / 第二里程碑」是写作当时状态、已被同日下方「perf 通路按参考仓设计接通」条纠正**——采集端代码后来落地了，但**真机仍 BLOCKED、零耗时数**）：新增 `acc-common/aclnn_runtime/`（ctypes-aclnn Python runner：base/acl_consts/aclnn_runner/aclnn_driver）+ `aclnn_adapter.py`（新 MODES `aclnn_py`）；就地扩 precision_policy（`torch_allclose` 标准 + `index_value_consistency`）/validator（多输出逐输出折叠）/gen_cases（多输出契约 `expected.outputs[]` + value_profile nan/tie + `aclnn_call_template`）/repo_adapter/run_workflow；新增 samples/golden/Median + samples/specs/median.spec.json。**全量单测 905 passed / 零回归 / 无按算子名分支**。
 - a3 真机 de-risk（只读+build，未跑完整验收）：**D0** 内置 aclnnAbs ctypes 冒烟绿（证实 BF16=27）；**D1** 内置 aclnnMedianDim 多输出/index/bf16 机制绿，逮出 runner 两处（custom lib 无条件要求 + 标量 attr 接线缺）——**代码已修并过离线单测，但修后的 D1 真机复跑尚未做**；**D2** PR6429 自定义 Median 在 9.0.1 一次 build 通过、`libcust_opapi.so` 导出 `aclnnMedian` 可 ctypes 加载（仅验符号，**未跑过一条 case**）。配方见设计文档 §9.6。
 - **perf 通路按参考仓设计接通**（此前被误降级为「第二里程碑」，用户已纠正）：新增 `acc-common/aclnn_runtime/perf_msprof.py`——msprof kernel-only 采集（`--task-time/--ascendcl/--msproftx`），**MSTX range 圈测量窗、缺 MSTX 证据即 fail-closed**；只累加 device 计算 kernel（AI_CORE/AI_VECTOR_CORE/MIX*/AI_CPU），**MEMCPY_ASYNC 一律不计入**（纯 device-copy 单独记 `device_memcpy_only`、不产 us）；warmup 5 / repeat 20，warmup 后**重新物化新鲜输入**，每 kernel 取中位数 × 每次调用启动数、多 kernel 求和、一次性 setup kernel 剔除。
@@ -705,7 +785,7 @@ verify 轮（codex 复核修复本身）又逮出 5 条：digest 自洽证明不
   - ⚠ **抓到一条诚实性缺口，形状很典型**：`Im2col/golden.py` 的 `GOLDEN_PROVENANCE` 白纸黑字写「**本文件不为 numel=0 编造输出**」，实测 `out_shape([(1,1,0)],…)` 却返回 `(4,2)` —— **声明写了、代码没做**，fail-closed 其实被委托给了 torch（换个替身结论就变，且 dry-run 阶段根本不 import torch、走不到那层）。同批的 `UpsampleNearestExact2d:107` 却有这道闸：**三份 golden，两份防了、一份没防**。根因是**三个新算子零测试覆盖**（`grep -l 'Im2col\|Upsample' test_*.py` 零命中）。已补 0 维闸 + 新建 `test_samples_golden_contract.py`（5 测，含「provenance 声称 ↔ 实际行为」的对账）。
   - **又一条静默错过路径（codex 抓的）**：G4 的降规模留痕**没有任何门去消费** —— 一个被降到 trivial 阈值以下的性能用例，下游会判「trivial-met 免测达标」。但 trivial-met 的正当性是「这 case 本来就小、perf 没意义」，而降规模 case 是「它本来很大、我们没按目标规模跑」——**没测却算过**。已改成 blocked 并带上原规模。
   - 另修：一条**撒谎的测试**（docstring 声称覆盖「无 golden.py 时坏预算也拦」，实际那条路从未被行使）· im2col 补记 rank 覆盖窟窿（4 维入只有 2/50、空 Tensor 0 覆盖）· `gen_cases` docstring 还写着「4 份样例都不导出 out_shape」（现已 7 份、3 份导出）· `samples/specs/README.md` 补上新增三份的索引与禁读纪律。
-  - **验证**：a3 `oprunway_prov` 容器 **真 torch 2.10.0+cpu 跑 686 测全绿**（传输逐文件 sha256 双侧一致）；本机 torch 替身同样全绿、裸跑与基线零 diff、两道门 PASS/SYNCED。
+  - **验证**：a3 目标容器 **真 torch 2.10.0+cpu 跑 686 测全绿**（传输逐文件 sha256 双侧一致）；本机 torch 替身同样全绿、裸跑与基线零 diff、两道门 PASS/SYNCED。
   - ⭐ **三个真算子在 a3 的真 torch 下也全跑通了**（不再只是「和自造替身一致」）：Im2col 50 用例 `(2,2,2,2)→(2,8,9)` · Upsample2d 18 用例 · Upsample3d 20 用例 `(2,3,2,4,4)→(2,3,4,6,8)`（rank 5）。三者 `out_shape_source` 均为 `golden.out_shape` —— 即**声明值驱动整条链，且与真 torch 实际产出的形状逐 case 对过账**（对不上引擎会 fail-closed）。
   - ⚠ 仍未证的：**golden 的数值本身**只证了「真 torch 跑得出来、形状对得上」，**没有跟另一个独立实现逐位比对过数值**；且**真机 NPU 一次没跑**（`--mode new_example` 还卡在 `verify_mode=exact⇒bool` 那条已记账的引擎缺口上）。精度/性能验收结论不能由这些推出。
 
@@ -728,7 +808,7 @@ verify 轮（codex 复核修复本身）又逮出 5 条：digest 自洽证明不
   - **U3**：`samples/` `git mv` 进 `plugin/`（13 文件保历史），随插件分发。施工 agent 漏报 8 处测试引用，主控补齐——**本机只暴露 2 条新红，另约 9 条被 torch 红掩盖**，这正是「本机对账不能当验收依据」的活教材。
   - **U6a/U6b**：`--mode` 默认 `mock`→`new_example`，并在 `makedirs`/`json.load` **之前**加 fail-closed 预检（缺 `OPRUNWAY_*` 直接退出、不落半产物）；CP-B 自检从「跑 mock 出伪造裁决」改成 `gen_cases --dry-run`，并在散文里**逐字写明 dry-run 的能力边界**（不算 golden、不 import torch → 验不了 golden.py/来源契约/validator 链/三级门，缺 golden 会漏到 CP-D 才炸）。
   - **U8（施工中新发现的 bug）**：`_build_inputs` 常规路径末尾写死 `return [x0, x1]`，而 empty/特殊值路径按 arity 产满 → **arity≥3 时无声丢输入**。改成 spec 级共享预检 `check_spec_capability()`，`gen_cases()` 与 `_dry_run()` 共用，**CP-B 就拦得住**、且先于 `load_golden`。
-  - **a3 真验**：`oprunway_prov` 容器（torch 2.10.0+cpu）**537 测全绿**。传输逐文件 sha256 对齐、跑完复算未变。最硬的是**反事实对照**——塞个假 torch 重跑得 59 红，与本机 Mac 分毫不差，同时钉死「本机 59 红全因缺 torch」和「真 torch 下绿是真绿、不是路径被绕过」。
+  - **a3 真验**：a3 目标容器（torch 2.10.0+cpu）**537 测全绿**。传输逐文件 sha256 对齐、跑完复算未变。最硬的是**反事实对照**——塞个假 torch 重跑得 59 红，与本机 Mac 分毫不差，同时钉死「本机 59 红全因缺 torch」和「真 torch 下绿是真绿、不是路径被绕过」。
   - **分类学**：`doc/oprunway-op-shape-taxonomy.md`，41 份任务书 = **44 个算子行全部在表**。**elementwise 只占 34%**（上一轮残缺样本报的 52% 已作废）；张量列表 8、index_scatter 5、other 5、reduction 4、shape_transform 3、generator 2、sparse_linalg 1、fused_comm 1。核实度 verified 31 / 单源非官方 10 / inferred 3，逐条标注。
   - **诚实边界**：a3 那次跑的快照**不含**最后 3 个编排 md 的改动（它们本就没有测试覆盖）；容器内是 root，2 条 EACCES fail-closed 测试被 skip、等于**没验**；**真机跑测通路本轮没端到端跑**，精度/性能验收结论不能由这 537 绿推出。
 
@@ -791,7 +871,7 @@ verify 轮（codex 复核修复本身）又逮出 5 条：digest 自洽证明不
 - **canon compile（`f27572c`）**：2 minute→10 dossier（4 verified+6 proposed）+ gate 页第三例。全 proposed/verified、**未过 bureau:review 人门**。
 - **规则：commit / 对外产出不带 AI 署名 trailer**（用户「never」）——入 CLAUDE.md #2 + memory。历史 10 个带 trailer 的 commit 按用户决定不动。
 
-- **硬件口径更正：「任务书目标算子是 950」只对 13/52 成立** —— 全扫 52 份社区任务书的 `适配硬件` 字段（52/52 均有），**任务书侧统计**为 A2/A3 系 38 份 · 950 系 13 份 · 纯 Atlas 300V Pro 1 份（互斥分桶，38+13+1=52；涉及 300V Pro 的共 2 份）。连带：`ascend-a3` 此前被写成「备用 / 只能 de-risk」，实为 A2/A3 系任务书的目标机；IsClose 即其一（任务书 `Atlas A2/A3` ↔ `op_def` `AddConfig("ascend910b")`+`("ascend910_93")`，双源一致，**a5 不在其声明平台内，能否运行未验证（推断）**）。
+- **硬件口径更正：「任务书目标算子是 950」只对 13/52 成立** —— 全扫 52 份社区任务书的 `适配硬件` 字段（52/52 均有），**任务书侧统计**为 A2/A3 系 38 份 · 950 系 13 份 · 纯 Atlas 300V Pro 1 份（互斥分桶，38+13+1=52；涉及 300V Pro 的共 2 份）。连带：a3 目标机此前被写成「备用 / 只能 de-risk」，实为 A2/A3 系任务书的目标机；IsClose 即其一（任务书 `Atlas A2/A3` ↔ `op_def` `AddConfig("ascend910b")`+`("ascend910_93")`，双源一致，**a5 不在其声明平台内，能否运行未验证（推断）**）。
   - `CLAUDE.md` 新增硬规则：**目标硬件不假定，按任务书 `适配硬件` ＋ 算子 `op_def` 的 `AddConfig()` 双源交叉核验，不一致入 `task_pr_gaps`**。⚠ 双源核验须**逐算子**做，目前**仅 IsClose 已核**；38/13/1 是任务书字段统计，不是 52 项双源实测。
   - **300V Pro 本仓无硬件、无 de-risk 记录**，那 2 份任务书须先停下确认平台（此前完全没纳入考虑）。
   - `doc/oprunway-todo-plans.md:619` 同一错话的另一处实例一并改：它在 catlass 语境里称 a5 为「任务书目标平台」，而同节 #3 已写明 `CatlassBasicMatmul` 是 synthetic、无真实 task_doc↔PR。
@@ -842,7 +922,7 @@ verify 轮（codex 复核修复本身）又逮出 5 条：digest 自洽证明不
 - **P1 编排升级落地（Wave 1）**：`op-acceptance` 胖 agent 改薄成 `mode:primary` 编排器（只调度 + CP-A..E 状态机 + 工件门 + 任务书↔PR 对应校验前置），新建 3 个单轮 subagent（`acc-spec-extractor` / `acc-runner-dev` / `acc-verify-rootcause`，带 `dispatch_mode`、禁内部循环、不自行判 pass/fail 只逐字引用产物）+ `acceptance-workflow` skill（承载 CP 状态机 + `correspondence.json` 识别并跳过未验收空任务）+ `check_agent_frontmatter.py` 机器 lint；`AGENTS.md`/`plugin.json` 同步到 4 agent / 3 skill。判定仍唯一归确定性脚本链（validator + perf_compare + 三级门 → `acceptance.json`，ADR 0007），编排层只引用不自判。机器门全绿（check_manifest_sync=SYNCED / frontmatter PASS / 单测 / mock=PASS，pipeline 未破）。
 - **T1 修 4 处一致性漂移**（codex 散文门追加发现「原以为 3 处、实为 4 处」）：op-acceptance 补「## 硬门」节镜像 `AGENTS.md`、`acc-runner` SKILL 与 op-acceptance 里「验证-才-信」从「硬门」改回「纪律（sidecar 门待补）」、`acc-casegen` 补诚实 `SKILL.md`（P2 规划·未接入 live·不落盘·不替代 gen_cases.py）、rule-catalog 悬挂链接改可解析。
 - **P1 双门过审**：`check_agent_frontmatter.py` 走 codex 代码门（审出 1 HIGH——`agents` 用 set 判、重复/顺序漂移仍 PASS + 6 条，已修并复验：重复 child 现判 FAIL）；10 份 .md 走 codex 散文门（3 组约 22 findings，含 1 HIGH——command CP-A 让 primary「亲自 NL 读、落 durable `correspondence.json`」越界，改为 primary 只跑确定性 fetch_source、NL 字段标 source/tier、status 靠机器比对 + 用户确认；全部逐条修 + 复验反模式清零）。
-- **P3 catlass 验收 adapter 落地（generated_harness）——本地管路已过、真机 evidence 未产、demo spec 为 synthetic 无真实 task↔PR**：新建 `catlass_adapter.py`（arch 运行时探测·无默认不猜 3510、CATLASS_PROFILE 按 arch 索引 3510→fp32/43·2201→fp16/00、build.sh+-DCATLASS_ARCH 拼装、matmul golden 对齐 catlass f32 累加、materialize 守 layout 字节契约 X_logical/X_bin 分两份、repo-adapter 7 方法、`catlass_mock` 端到端 evidence_grade=development 标 `NON-ACCEPTANCE`、`run_catlass` 真机留桩 OPRUNWAY_CATLASS_REAL 门、外部 GPU 基线校验 scope/覆盖 blocked、artifact_manifest）+ `catlass_parse.py`（raw log→信号、msprof 按列名解析拒非 kernel-only、profile 命中门）+ `catlass/`（双 arch runner.cpp 模板·extern C 钉死符号、CMake、staging 幂等注入、run_on_npu 编排、静态构建门 verify_catlass_build）+ spec(synthetic+acceptance_blocked) + 44 单测全绿 + repo_adapter 极小加法注册。**真机全部待验**：runner 编成/msprof 符号命中/Task Duration 实数须 ascend-a5(arch3510)+VPN+人工确认，本轮**未跑真机、不作 NPU 验收裁决**。
+- **P3 catlass 验收 adapter 落地（generated_harness）——本地管路已过、真机 evidence 未产、demo spec 为 synthetic 无真实 task↔PR**：新建 `catlass_adapter.py`（arch 运行时探测·无默认不猜 3510、CATLASS_PROFILE 按 arch 索引 3510→fp32/43·2201→fp16/00、build.sh+-DCATLASS_ARCH 拼装、matmul golden 对齐 catlass f32 累加、materialize 守 layout 字节契约 X_logical/X_bin 分两份、repo-adapter 7 方法、`catlass_mock` 端到端 evidence_grade=development 标 `NON-ACCEPTANCE`、`run_catlass` 真机留桩 OPRUNWAY_CATLASS_REAL 门、外部 GPU 基线校验 scope/覆盖 blocked、artifact_manifest）+ `catlass_parse.py`（raw log→信号、msprof 按列名解析拒非 kernel-only、profile 命中门）+ `catlass/`（双 arch runner.cpp 模板·extern C 钉死符号、CMake、staging 幂等注入、run_on_npu 编排、静态构建门 verify_catlass_build）+ spec(synthetic+acceptance_blocked) + 44 单测全绿 + repo_adapter 极小加法注册。**真机全部待验**：runner 编成/msprof 符号命中/Task Duration 实数须 a5 目标机(arch3510)+VPN+人工确认，本轮**未跑真机、不作 NPU 验收裁决**。
 - **CLAUDE.md 加最高优先级规则 #6「开工前必须通读 canon」**：动 durable 工作前先通读 `canon/`（architecture dossier + decisions ADR + lint/findings），按 trust tier 读（只 `canonical` 当事实）；与 `bureau:query` 并用不互斥、canon 变大再退回「overview + query 优先」。（用户要求）
 - **Equal 再翻案·结论作废——「任务书↔PR 对应配错 + 空任务」**：正式确认 ① **PR #2890 不是本社区 Equal 任务的交付 PR**（我们误配）；② **Equal 社区任务至今未验收通过、无已验收对应 PR**。故下方 2026-07-08 那条「Equal A3 未达标·真阳性」**整体作废**（系拿误配 PR 去对不相干任务书判的）。**删** `doc/equal-a3-defect-report.md`；**改**台账（Equal 行→无有效 PR/无结论）+ TODO（Equal 硬约束整块换）+ 对应表（Equal→误配、未找到 +1=8）。**立新头号硬约束**（比「解耦」更上游）：验收前先验证「任务书↔PR 对应」本身——配错或对应「未验收空任务」→ 下游一切裁决作废。**待办**：canon 更正 compile 半程已入库（4 页 proposed，见上方 07-09 顶部 capture 条）；公开台账 push=已完成（origin/main + gitcode/main 均 @4dcd355=当次核验时本地 HEAD；后续本地工作区另有未提交改动）；PR#2 body 状态待在线复核（隧道 down、gh token 失效，未确认是否已含更正）；上报取消（无缺陷可报）。lint（bureau:lint）另跑完，2 survivor（ADR 0002 msTuner→msprof op superseded、1.2×→target_ratio drift，与上版一致），已写 `canon/lint/findings.md`。
 
@@ -862,7 +942,7 @@ verify 轮（codex 复核修复本身）又逮出 5 条：digest 自洽证明不
 - **记 TODO**：`doc/oprunway-todo.md` 落地——主干完工+真机验证过，但离「通用算子验收工具」还差 9 个洞（**P0**：任务书→spec 自动化、per-op runner 锚定+构建路径选择+root-cause 入 harness）+ 3 条用血的教训钉住的硬约束（FAIL 先解耦 root-cause / 平台·spec 从任务书推别猜 / 合入用 gitcode 查证）。
 - **三算子真机验证泛化——每个门都真在判、三种不同裁决**：把 workflow 从 IsClose 单例泛化到 op 驱动（`gen_cases` 按 spec 的 arity/attr/verify_mode 分发 + `GOLDEN[op]` 注册；`repo_adapter` 输入按序 `x{j}.bin`、manifest 按 `attr_order`、out 按 golden dtype、runner 按 `oprunway_{op}_runner.cpp` 选、snake 名 `_snake()` 派生；`run_on_npu.sh` 用 `OPRUNWAY_RUNNER/OPNAME` 参数化）。**加一个算子 = spec + golden + runner 三文件**。三算子真 A3 跑通，出**三种互不相同的诚实裁决**：**IsClose**(二元/bool/3attr) 精度 pass + perf custom 15.7<TBE 22.7us **快** → **PASS**；**Sign**(一元/数值/无attr) 精度 pass(max_rel_err 0) + perf custom 9.7>TBE 6.3us **慢** → **性能未达成**；**Equal**(二元/bool/无attr) 出 **精度 fail** → **FAIL(精度)**（根因已在内部定位并记录，细节暂不公开）。**门是真在判不是盖章**（性能门抓偏慢的 Sign、IsClose 两门皆过、Equal 检出输出≠golden）。<br>**教训（最该记）**：任何 FAIL 必须先用「被测物自己的 build + 声明支持的 dtype + 手算 golden」解耦 root-cause、确认是「被测物 vs 我的 harness」再归因，不能在质疑下来回改口；平台/spec/构建路径从任务书推别猜；合入状态用 gitcode 查证。**门的机制没问题**（precision 门确实检出输出≠golden，问题只在归因）。**IsClose/Sign 可信**。
 - **workflow 真机端到端跑通（new_example）**：写 `repo_adapter.run_new_example`（npy→bin+manifest → tar-over-scp 部署 a3 → `build.sh --run_example` 真 NPU 跑 → 拉回 out.bin → 采集 evidence；广播用 materialize 规避改 runner；golden 不出本机）+ codex 写的参数化 aclnn runner（`oprunway_isclose_runner.cpp`，读 `OPRUNWAY_CASES`/manifest 循环 case）。`run_workflow --mode new_example` 在真 A3 NPU 跑 IsClose **6 用例、裁决 = pass**（功能/精度 mismatch=0，含广播/float16）。全程用户态、不碰共享 opp。**codex 审出 2 Critical**（远端失败/旧 out.bin 被判**假通过**）+ 多 High（注入/未校验），我修全：哨兵 `OPRUNWAY_DONE` 判成败、tar 排除 out.bin、shlex+白名单防注入、输入/golden/字节校验、拒空 Tensor——codex 复核全 FIXED。**perf 也做成真的了（msprof 闭环）**：`build.sh --pkg` 建持久 custom op 包 → 装用户态 opp → 编**双 exe**（custom 链 `libcust_opapi` + 内置 TBE 链系统 `libopapi`）→ **`msprof op` 取真 kernel-only `Task Duration(us)`**，**内置 TBE 同法 msprof 作真基线**。远端编排落 `new_example/run_on_npu.sh`。实测 **custom 16.5us vs TBE 23.1us、ratio 1.40 达标**（Ascend C 比 TBE 快 40%）。**Task 3 出真性能裁决（非 blocked/mock）。整个 workflow 真机端到端·精度+性能全真。** 曾试的 aclrt event 计时被 codex 判非 kernel-only（op-call 口径、50-80ms 不随规模变）已弃用。**codex 审出假通过风险、我修全**：stale exe（改 hash-stamp `md5(runner)+SOC+vendor` 判脏重建）、内置 TBE 基线被 custom 用户态库污染（改用干净 `SYS_LD`）、stale perf_result/_real_baseline（拉前删本地 + run_workflow 每轮清）、perf 解析用 `math.isfinite`、总体口径同时 gate 精度+性能（防只看退出码假通过）。⚠ 记：msprof 拒写组/他人可写目录（输出目录 chmod 700）；`set -u` 会被 vendor set_env.bash 的未绑定变量搞崩（用 set -e）；`rm -rf` .run 装的只读目录前先 `chmod -R u+w`。
-- **真机跑通 is_close（A3 真 NPU）**：a3 起 autossh 隧道 → clone ops-math → `build.sh --experimental --ops=is_close --soc=ascend910_93` 编成 → `--run_example is_close eager` 在真 NPU 跑出 `[1,0,1,0]`、exit 0。全程 `/home/lys` 用户态；**共享 `opp/vendors` 未污染**（虽 777 可写，build.sh 自设本地 `ASCEND_CUSTOM_OPP_PATH`）。⚠ 记：a3 共享 opp 是 777、务必用户态。下一步：参数化 example 读/写 bin（route-B 套路）+ 接 `repo_adapter.new_example`。
+- **真机跑通 is_close（A3 真 NPU）**：a3 起 autossh 隧道 → clone ops-math → `build.sh --experimental --ops=is_close --soc=ascend910_93` 编成 → `--run_example is_close eager` 在真 NPU 跑出 `[1,0,1,0]`、exit 0。全程在远端工作根下的用户态；**共享 `opp/vendors` 未污染**（虽 777 可写，build.sh 自设本地 `ASCEND_CUSTOM_OPP_PATH`）。⚠ 记：a3 共享 opp 是 777、务必用户态。下一步：参数化 example 读/写 bin（route-B 套路）+ 接 `repo_adapter.new_example`。
 - **workflow v0 建成 + 跑通 + 过代码门**：`plugin/acc-common/` 建三层——Layer 0 契约（`specs/isclose.spec.json`）+ Layer 1 确定性脚本（`gen_cases`/`repo_adapter`/`validator`/`perf_compare`）+ 驱动 `run_workflow`；Layer 2 入口 `README` + `commands/op-acceptance`。**端到端跑通 IsClose**（mock NPU + 真 numpy golden），能抓 defect（→ 裁决 fail）。`cc-suite:audit-fix` 代码门审出 **15 处**（含 **Critical 假通过漏洞**：validator 不校验 caseset↔evidence、阈值不以 spec 为准、perf 缺项静默跳过），**2 轮修全、codex 复核通过**。`new_example` 真机跑测留桩（待上 NPU + VPN）。
 
 ## 2026-07-06

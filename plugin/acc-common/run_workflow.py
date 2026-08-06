@@ -4,8 +4,12 @@ Task 1 gen_cases → Task 2 repo_adapter + validator → Task 3 perf_compare。
 stage 间只经 JSON/数据文件交接。CC/Codex/Antigravity 的薄壳只需换调用方式，核心不动。
 
 用法：python run_workflow.py <spec.json> [--mode new_example|aclnn_py|cpp_extension|mock] [--out <dir>]
+              [--source-facts <source_facts.json>]
 省略 `--mode` 时据 `spec.runner_form` 唯一派生；
 `mock` 仅本地用例链自检、精度按构造必过、非验收。
+`--source-facts` 在**验收通路上必给**（缺席即拒跑）：它是三级门与 vendor build receipt 对账的
+来源对照物，且会连同 `spec.json` / `golden.py` 一起 staging 进 `--out`，让验收产物目录自带
+「这一轮到底验的是什么」——CP-F 因此不再需要手工 staging（详见 `_STAGED_FILES` 上方的病历）。
 
 ⚠ **验收裁决只有真机通路产得出来**（C5，用户 2026-07-22 拍板）。mock 的「NPU 输出」= `golden.copy()`
 （精度按构造必过）、性能是 `_mock_us(numel)` 编的假数 + `perf_compare.mock_baseline` 的假基线——它跑出来的
@@ -15,7 +19,7 @@ stage 间只经 JSON/数据文件交接。CC/Codex/Antigravity 的薄壳只需�
 （字段名与措辞照 `catlass_adapter.run_catlass_mock` 的既有口径，不另发明）。
 mock 通路本体**保留**（测试与本地演示照用），拔掉的只是「产验收裁决」这条出口。
 """
-import argparse, json, os, sys
+import argparse, glob, json, os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_cases, repo_adapter, validator, perf_compare  # noqa: E402
@@ -23,6 +27,7 @@ import cpp_extension_adapter  # noqa: E402
 import repro_artifacts  # noqa: E402
 import render_acceptance_markdown  # noqa: E402
 import validate_acceptance_state as gate  # noqa: E402
+import dut_source  # noqa: E402
 import verify_aclnn_harness  # noqa: E402
 import content_address  # noqa: E402
 
@@ -37,6 +42,38 @@ _DEV_SUMMARY_FILE = "dev_run_summary.json"     # ← 取代 acceptance.json
 _DEV_VERDICT_FILE = "dev_precision_check.json"  # ← 取代 verdict.json
 _ACCEPTANCE_FILES = ("acceptance.json", "verdict.json")
 _DEV_FILES = (_DEV_SUMMARY_FILE, _DEV_VERDICT_FILE)
+#: 人读交付物：`render_acceptance_markdown.write_report` 落进报告目录的三份 Markdown。
+#: ⚠ 那边是**字面量**、没有可 import 的常量，这里只能照抄——`test_run_workflow_source_staging`
+#:   里有一条**漂移哨**直接从那个模块的落点反查这份清单，改了名而这里没同步会红。
+_REPORT_MD_FILES = ("验收报告.md", "精度失败明细.md", "性能失败明细.md")
+#: 「本轮结论」的**全部消费面**：精度裁决 + 性能裁决 + 非验收那一套同位产物 + 人读报告 + 小 shape 仿真图。
+#: 见 `_invalidate_stale_results`——它们在 `run()` 的**第一行**被作废，早于任何可能早退的校验。
+#: ⚠ **两套产物一起清、不按 is_acceptance 二选一**：`is_acceptance` 在下游还会被 adapter 自报的
+#:   evidence_grade 降级（见「只降不升」那处），按降级前的值二选一时，上一轮真机的
+#:   acceptance.json 会与本轮 dev_* 并存——正是这套机制要堵的洞。
+_RESULT_FILES = _ACCEPTANCE_FILES + _DEV_FILES + ("perf_report.json",) + _REPORT_MD_FILES
+#: 同上，只是要按通配清（T6 小 shape 仿真图，防 stale SVG 让「有图」门误过；codex H7）。
+_RESULT_GLOBS = ("perf_sim_*.svg",)
+
+# —— CP-E 自证材料 staging：验收产物目录必须自带「这一轮到底验的是什么」——————————————————
+# 病历（两条，同一个根因）：
+#   ① **CP-F 跑不起来**。`precision_retest_contract` 要求 `base_artifacts.spec` 落在报告目录**之内**，
+#      并把 golden 授权链锚成 `dirname(spec)/golden.py`。真机布局里 spec 在 `plugin/samples/specs/`、
+#      golden 在 `<ops_root>/<op>/`，两头都不满足 → 每次跑 CP-F 都得先手工 staging。
+#   ② **三级门缺对照物**。`validate_acceptance_state._gate_build_receipt_source_binding` 在
+#      找不到 `source_facts.json` 时，PR 通路沿用旧行为不阻断——「收据自称 pull_request，而
+#      source_facts 其实说的是 local」这种伪装**查不出来**，因为压根没有对照物。
+# 两条是同一件事的两面：**验收产物目录没有自带足够的自证材料**。所以一次补齐、只用一套机制——
+# 验收通路开跑前把三份**输入原件**按字节复制进 `--out`，并把 `source_facts` 的落点**显式**指给三级门。
+#
+# ⚠ 只对**验收通路**做（`is_acceptance`）。非验收通路物理上不产 acceptance.json，CP-F 也无从消费；
+#   给它 staging 只会在 dev 目录里留下一份长得像验收输入的东西。按能力分流，非按算子/仓形态。
+_STAGED_SPEC_FILE = "spec.json"
+_STAGED_GOLDEN_FILE = "golden.py"
+_STAGED_SOURCE_FACTS_FILE = "source_facts.json"
+#: 三份 staging 产物的**统一清单**：开跑时先整体清掉上轮残留，再按本轮重新落。
+#: ⚠ 清理与落盘必须共用这一份清单——漏清一项，下一轮就可能拿上一轮的 spec/golden 去配本轮的 caseset。
+_STAGED_FILES = (_STAGED_SPEC_FILE, _STAGED_GOLDEN_FILE, _STAGED_SOURCE_FACTS_FILE)
 # 可能产验收裁决的**真机通路**集合：new_example（cpp runner v1）+ aclnn_py（ctypes-aclnn runner form，
 # torch 对标 median 见证）。两者都产真 NPU 证据（evidence_grade=acceptance_candidate）。按**能力/形态**扩，
 # 非按算子身份——aclnn_py 无 per-op runner 源、op 工程即 DUT（蓝图 §6）。
@@ -314,15 +351,232 @@ def _assert_acceptance_form_allowed(spec, mode):
         + _experimental_form_message(runner_form))
 
 
+def _read_regular_file(src, what):
+    """按字节读出 `src`；不是普通文件即 fail-closed。"""
+    if not os.path.isfile(src):
+        raise SystemExit(f"[CP-E staging] {what} 不存在或不是普通文件：{src!r}")
+    try:
+        with open(src, "rb") as fh:
+            return fh.read()
+    except OSError as ex:
+        raise SystemExit(f"[CP-E staging] 读取 {what} 失败：{src!r}：{ex}")
+
+
+def _read_acceptance_inputs(spec_path, spec, source_facts_path):
+    """校验并**读出**本轮验收三份输入原件的字节，返回 `{staged 文件名: bytes}`。
+
+    落哪三份、为什么是这三份，见 `_STAGED_FILES` 上方那段病历。这里只讲落地口径：
+
+    | 原件 | 从哪来 | 谁消费 staged 副本 |
+    |---|---|---|
+    | `spec.json` | 本次 `run_workflow <spec>` 的实参 | CP-F `base_artifacts.spec`（须落报告目录内） |
+    | `golden.py` | `<ops_root>/<op>/golden.py`（`gen_cases.load_golden` 同一处） | CP-F 的 golden 授权链锚 `dirname(spec)/golden.py` |
+    | `source_facts.json` | 调用方 `--source-facts` | 三级门 `_gate_build_receipt_source_binding` 的来源对照物 |
+
+    ⚠ **先读进内存、后写盘，不是直接 `copyfile`**。两个理由，都是实打实会踩的：
+      ① 清残留与落副本是**同一批文件名**。若边删边拷，`--source-facts <out>/source_facts.json`
+         （复跑时最自然的写法，指的正是上一轮 staging 出来的那份）会在删完之后再也读不到，
+         报出来的还是一句「指不到文件」，把一次正常复跑变成假 BLOCKED；
+      ② 三份原件全部读通过才动 `--out`，避免「spec 拷好了、golden 缺失」这种半 staging 现场。
+
+    ⚠ **`source_facts` 先验后拷，不是拷了算数**。校验直接复用三级门用的那一份
+    `dut_source.find_source_facts`（它连 envelope digest、`completeness=complete`、
+    两条通路必填集一起校）——**另写一份判据必然分叉**，那时门与 staging 会对同一份文件给出两种结论。
+    先验的收益是把「source_facts 不可信」这类失败挪到**跑 NPU 之前**，而不是等一整轮真机跑完才在门上炸。
+
+    ⚠ **staging 不产生新的信任**：三份都是原件的字节副本，能被篡改的面与原件相同。它们各自仍要过
+    下游的对账（spec ↔ cpp_extension receipt 的 `spec_sha256`、source_facts ↔ build receipt 来源锚）。
+    别把「报告目录里有这份文件」当成「这份文件已被核过」。
+
+    ⚠⚠ **`golden.py` 这一份的绑定强度明显弱于另外两份，如实记账，别读成已封**
+    （2026-08-05 审修门 High；**问题本身是既有的**，staging 只是把它从「CP-F 压根跑不起来」
+    变成「CP-F 跑得起来，但这一格 provenance 不可信」）：
+
+    | 副本 | 被什么绑住 |
+    |---|---|
+    | `spec.json` | 首轮 cpp_extension receipt 的 `bindings.spec_sha256`（真机产、逐条 evidence 引其摘要）→ 换了必被 CP-F 的 `base_cpp_extension_spec_sha256_mismatch` 抓到 |
+    | `source_facts.json` | 首轮 vendor build receipt 的来源锚 → 换了必被三级门抓到 |
+    | `golden.py` | **只被本轮的两件事约束**：① staging 与 Task1 之间没被换（`_assert_staged_golden_matches_task1`）；② 它就是本轮算出 golden `.npy` 的那份源码。**首轮验收产物里没有任何字段记过它的摘要**（cpp_extension receipt / evidence 都没有这个字段） |
+
+    所以：**首轮跑完之后**有人改写 `<报告目录>/golden.py`，CP-F 的
+    `execution_provenance.golden_source_sha256` 会跟着变，而没有对照物能说它变了。
+    真实影响面要说清楚——被冻结用于复测的 golden **值**（`caseset` 里那些 `.npy`）由
+    `build_case_bindings` 逐字节哈希、`caseset` 本身又被 receipt 的 `caseset_sha256` 绑住，
+    **裁决用的真值动不了**；失真的是「这些真值是哪份源码算的」这一格 provenance。
+    要真绑住，得把 golden 摘要写进**首轮真机工件**（cpp_extension receipt 的 `bindings`），
+    再由三级门核「实际消费的 golden 字节 == 记录摘要」——那是真机工件 schema 变更，
+    另立批次并需用户确认，不在本批范围内。
+    """
+    op = spec.get("op")
+    if not isinstance(op, str) or not op:
+        raise SystemExit("[CP-E staging] spec.op 缺失或非非空字符串，无法定位 golden.py")
+    # 与三级门同一份判据（见 docstring）：UNTRUSTED 覆盖「显式路径指不到」「envelope 不自洽」
+    # 「completeness 非 complete」等全部情形，一律拒。
+    # 第一个实参传 `None`：显式路径下门根本不看它，写个假目录只会让读的人以为这里有自动发现。
+    if (dut_source.find_source_facts(None, source_facts_path)
+            == dut_source.SOURCE_FACTS_UNTRUSTED):
+        raise SystemExit(
+            f"[CP-E staging] --source-facts 指向的文件不是可信的 source_facts.json："
+            f"{source_facts_path!r}\n"
+            f"  → 它必须是 fetch_source.py 落的内容寻址 envelope，且 "
+            f"completeness.status=complete、reasons=[]。\n"
+            f"  → blocked/半成品的取材事实只供诊断，不能当验收的来源锚（fail-closed）。")
+    try:
+        golden_src = os.path.join(repo_adapter.op_dir(op), "golden.py")
+    except ValueError as ex:
+        raise SystemExit(f"[CP-E staging] 无法定位 <ops_root>/{op}/：{ex}")
+    if os.path.islink(golden_src):
+        # 与 `gen_cases.load_golden` 同一条守卫（防换靶），口径别在两处分叉。
+        raise SystemExit(f"[CP-E staging] golden.py 是符号链接，拒绝（防换靶）：{golden_src!r}")
+    # spec 的**读后复核**（口径照抄下方 `_assert_staged_golden_matches_task1`，2026-08-06 审修门 Medium）：
+    # `run()` 先 `json.load` 解析出 `spec` 驱动整轮执行，这里再按字节读一次落副本——两次之间被改写的话，
+    # 报告目录里那份 `spec.json` 与**实际驱动本轮执行的**不是同一份，而 CP-F 的 `base_artifacts.spec`
+    # 正是锚在这份副本上。golden 那一格已经这么封了，spec 这一格漏着没道理。
+    # ⚠ 比的是**解析结果**而非字节：纯格式化（缩进/键序）不该把一次正常跑判死；真正要挡的是内容变了。
+    spec_bytes = _read_regular_file(spec_path, "spec")
+    try:
+        restaged = json.loads(spec_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError) as ex:
+        raise SystemExit(
+            f"[CP-E staging] spec 在解析与 staging 之间变得不可解析：{spec_path!r}：{ex}")
+    if restaged != spec:
+        raise SystemExit(
+            f"[CP-E staging] spec 在解析与 staging 之间被改写：{spec_path!r}\n"
+            f"  → 报告目录里那份副本与实际驱动本轮执行的不是同一份，"
+            f"CP-F 的 base spec 锚就落在这份副本上 —— fail-closed，不产任何产物。")
+    return {
+        _STAGED_SPEC_FILE: spec_bytes,
+        _STAGED_GOLDEN_FILE: _read_regular_file(golden_src, "golden.py"),
+        _STAGED_SOURCE_FACTS_FILE: _read_regular_file(
+            source_facts_path, "source_facts.json"),
+    }
+
+
+def _write_staged_inputs(out_dir, payloads):
+    """把 `_read_acceptance_inputs` 读出的字节落进 `--out`，返回 staged `source_facts.json` 路径。
+
+    键集合必须**恰好**是 `_STAGED_FILES`：少一项就是「清了却没重落」，那份残缺的自证材料
+    比没有更坏（CP-F 会拿到一个看着齐全其实缺件的目录）。
+    """
+    if set(payloads) != set(_STAGED_FILES):
+        raise SystemExit(
+            f"[CP-E staging] 内部错误：待落盘副本键集合 {sorted(payloads)} "
+            f"≠ {sorted(_STAGED_FILES)}")
+    for name in _STAGED_FILES:
+        path = os.path.join(out_dir, name)
+        # ⚠ `O_NOFOLLOW`：落点那一层若是软链一律 fail-closed，绝不跟着写出 `--out`。
+        # 上游的清残留已用 `lexists` 挡掉悬空软链，但那是**检查**、这是**打开**，中间存在换靶窗口；
+        # 只有在 open 这一步拒绝解引用才真的关上。`O_EXCL` 不用——清残留后正常路径本就不存在，
+        # 但一次失败重跑留下的半成品不该让整条链卡死，允许覆盖普通文件。
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags, 0o644)
+        except OSError as ex:
+            raise SystemExit(
+                f"[CP-E staging] 打开 {name} 失败（落点是软链则拒绝跟随）：{path!r}：{ex}")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(payloads[name])
+        except OSError as ex:
+            raise SystemExit(f"[CP-E staging] 写入 {name} 失败：{path!r}：{ex}")
+    print(f"[CP-E staging] 已把 {', '.join(_STAGED_FILES)} 落进 {out_dir}/"
+          f"（CP-F 的 base spec/golden 锚 + 三级门的来源对照物）")
+    return os.path.join(out_dir, _STAGED_SOURCE_FACTS_FILE)
+
+
+def _assert_staged_golden_matches_task1(spec, payloads):
+    """Task1 跑完后复核：`<ops_root>/<op>/golden.py` 与 staging 时读到的字节仍逐字相同。
+
+    ⚠ **为什么非做不可**：staging 读一次、`gen_cases.load_golden` 又从**原路径**读一次。
+    两次之间被换掉的话，报告目录里那份 `golden.py` 是 A、真正算出 golden `.npy` 的是 B——
+    而 CP-F 会拿 A 去填 `golden_source_sha256`，三级门也不会发现。这不是理论洞：
+    `gen_cases.load_golden` 自己的 docstring 就记着同一类 TOCTOU。
+    这里做的是**读后复核**（不是消灭窗口）：窗口从「整轮 staging→Task1」收缩到
+    「本函数读盘的一瞬」，且换过靶必被抓到，除非攻击者再换回来。
+
+    非验收通路（`payloads is None`）跳过：那条路不 staging，也没有 CP-F 会去读的副本。
+    """
+    if payloads is None:
+        return
+    golden_src = os.path.join(repo_adapter.op_dir(spec["op"]), "golden.py")
+    if (os.path.islink(golden_src)
+            or _read_regular_file(golden_src, "golden.py") != payloads[_STAGED_GOLDEN_FILE]):
+        raise SystemExit(
+            f"[CP-E staging] golden.py 在 staging 与 Task1 之间被改写：{golden_src!r}\n"
+            f"  → 报告目录里那份副本与实际算出 golden 的源码不是同一份，"
+            f"整轮证据的 golden 来源说不清 —— fail-closed，不产任何产物。")
+
+
+def _invalidate_stale_results(out_dir):
+    """**任何校验之前**先让 `--out` 里上一轮的结论不可消费。返回被清掉的文件名（已排序）。
+
+    ⚠ 病历（2026-08-06 审修门 High · **产物层 fail-open**）：清残留原先在 `run()` 中段，而
+    `--source-facts` 必填门、`_read_acceptance_inputs` 的可信性校验都在它**之前**早退。于是
+    「`--out` 里有上一轮的 PASS → 换 spec / 换 DUT 重跑，但漏传或传错 `--source-facts`」时，
+    新进程非零退出，**上一轮的 `acceptance.json` / `验收报告.md` 原封不动躺在那儿**。
+    本仓下游（三级门、CP-F、渲染器、以及人）**就是按文件名**读裁决的 —— 旧 PASS 会被当成这次的结果。
+    这与 `_ACCEPTANCE_FILES` / `_DEV_FILES` 被刻意拆成两条产物路径是**同一个病**：
+    同名同形的产物迟早会被当成验收结论用掉。
+
+    **为什么放在第一行、而不是去穷举「所有可能早退的点」**：穷举不了（今天是 `--source-facts`，
+    明天新加一道参数门就又漏一处），能穷举得了也脆。本函数只**删除**、不产生任何新事实，
+    失败方向是「少一份裁决」而非「多一份假裁决」，所以可以无条件前置——`run()` 一旦被调用，
+    `--out` 里上一轮的结论就**必定**作废，不管本轮是跑成、跑挂，还是在参数校验就被拒。
+
+    **为什么不是「事务目录 + 成功后原子发布」**（审修门给的另一个方向）：`--out` 在本仓**不是**
+    单进程独占的输出坑。cpp_extension 真机通路的外部 driver 会在两次编排之间往同一个报告目录/
+    `work/` 回写收据；`--source-facts <out>/source_facts.json`（复跑时最自然的写法）更是把它
+    当**输入**读。改成「跑完才发布」会把这两条既有通路一起弄断，代价远大于收益。
+
+    ⚠ **不清 `caseset.json` / `evidence.json` 这类证据件**：它们单独存在推不出任何裁决
+    （三级门 task2 读 `verdict.json`、CP-F 的 `BASE_ARTIFACTS` 要求五件齐全、渲染器读
+    `acceptance.json`），清掉反而毁了早退现场的诊断价值。不变式是
+    **「没有裁决件、没有人读报告 = 没有可消费的结论」**。
+    ⚠ **也不清 `_STAGED_FILES`**：那三份是**输入**副本，清早了会把「复跑时 `--source-facts`
+    指向上一轮的副本」变成假 BLOCKED。它们的清理点在读完原件之后，见 `run()` 里那段。
+    """
+    victims = [n for n in _RESULT_FILES if os.path.lexists(os.path.join(out_dir, n))]
+    for pattern in _RESULT_GLOBS:
+        victims += [os.path.basename(p)
+                    for p in glob.glob(os.path.join(out_dir, pattern))]
+    removed = []
+    for name in victims:
+        path = os.path.join(out_dir, name)
+        try:
+            # 软链只删链接本身、不碰目标——正是要的（同下方清 staging 残留的口径）。
+            os.remove(path)
+        except OSError as ex:
+            raise SystemExit(
+                f"[产物隔离] 清不掉上一轮的结论产物：{path!r}：{ex}\n"
+                f"  → 清不掉就不开跑：留着它 = 本轮一旦中途拒跑，旧裁决会被下游当成这次的结果。")
+        removed.append(name)
+    if removed:
+        print(f"[产物隔离] 已作废 {out_dir}/ 里上一轮的结论产物："
+              f"{', '.join(sorted(removed))}（本轮无论跑成还是拒跑，都不会留下可被误读成"
+              f"本次结果的旧裁决）")
+    return sorted(removed)
+
+
 def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=None,
-        gpu_baseline=None, allow_experimental_form=False):
+        gpu_baseline=None, allow_experimental_form=False, source_facts=None):
     """跑一遍 Task1→2→3。
 
     ⚠ `defect` / `perf_slow` 是**测试专用夹具**（在 mock 里造坏点 / 造略慢基线，用来证明「validator 真会 fail、
     门不是假门」），**两个都不在 CLI 上暴露**（C5 拿掉 `--defect`；`--perf-slow` 同批理由、2026-07-22 补下架）
     ——只有 `test_*.py` 以 `import run_workflow` 的方式进程内调用得到。它们只对非验收通路有意义；
     若作用于验收通路，本函数直接 fail-closed 拒跑。
+
+    ⚠ `source_facts` 在**验收通路上是必填**（缺席即拒跑，见下面那道门）。这不是多要一个可选参数，
+    而是让三级门 `_gate_build_receipt_source_binding` 的最后一处残留伪装面（自动发现落空 +
+    收据自称 `pull_request` → 无对照物可查）**在编排层被封死**：编排每次都显式指路，
+    「缺席」本身就成了非法。非验收通路不要求它（那条路物理上不产验收裁决，也没有来源锚要对账）。
     """
+    # ★ **第一件事**：让 `--out` 里上一轮的结论立刻不可消费（详见 `_invalidate_stale_results`）。
+    # 位置就是要在**所有**可能早退的校验之前——下面的 `--source-facts` 必填门、staging 的可信性
+    # 校验、`_resolve_mode` 的准入门都会 raise SystemExit，早退时留着旧 PASS 就是产物层 fail-open。
+    # ⚠ 它只删不建：`out_dir` 不存在时是纯 no-op，「必填门在 makedirs 之前拒、不留半个产物目录」
+    #   这条既有不变式一个字没松。
+    _invalidate_stale_results(out_dir)
     # 显式真机 mode + 注入夹具可在读取 spec 前拒绝，保留既有 fail-closed/无副作用顺序。
     if (defect or perf_slow) and mode is not None and _acceptance_capable(mode):
         raise SystemExit(
@@ -337,6 +591,30 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         # fail-closed：注入夹具 + 验收通路 = 「往验收证据里掺人造数据」。真机 adapter 现在只是忽略它们，
         # 但「被忽略」不是保证——这里直接拒跑，别指望下游的沉默。
         raise SystemExit(f"defect / perf_slow 是测试专用注入夹具，禁止作用于验收通路 mode={mode!r}——拒绝执行。")
+    # 未准入的 runner_form 即使是真机通路，也**物理上不产验收裁决**——比照 mock 通路的口径，
+    # 只产 dev_run_summary.json / dev_precision_check.json（`evidence_grade="development"`）。
+    # 逃生阀之所以不做成「照产 acceptance.json 但打个标」：下游是**按文件名**读裁决的，
+    # 同名同形的产物迟早会被当成验收结论用掉。
+    # ⚠ 这两行**刻意提前到任何副作用之前**（原先在 makedirs 之后）：下面那道 `--source-facts`
+    #   必填门是纯参数校验，必须在 `os.makedirs` / staging / Task1 之前拒，不留半个产物目录。
+    is_experimental_form = _spec_runner_form(spec) not in _ACCEPTANCE_RUNNER_FORMS
+    is_acceptance = _acceptance_capable(mode) and not is_experimental_form
+    # ★ 验收通路：`source_facts` 必填。**不给缺省、不自动去猜路径**——「自动发现」正是要被消灭的
+    #   那个状态：门找不到时 PR 通路沿用旧行为不阻断，于是「收据自称 PR、事实其实是 local」无从查证。
+    #   编排每次都显式指路后，「没有对照物」这件事在验收通路上不再可能悄悄发生。
+    if is_acceptance and source_facts is None:
+        raise SystemExit(
+            "[验收通路] 必须显式提供 --source-facts <fetch_source 产的 source_facts.json>。\n"
+            "  原因：三级门要拿它与 vendor build receipt 的来源锚逐字对账。缺对照物时 PR 通路\n"
+            "        会沿用旧行为放过，「收据自称 pull_request、事实其实是 local_checkout」这类\n"
+            "        伪装就查不出来 —— 所以缺席一律拒跑，不是可选参数。\n"
+            "  · 取材那一步（fetch_source.py --out <取材目录>）产的就是它；\n"
+            "  · 本次会把它按字节 staging 进 --out，CP-F 与事后单独复跑三级门都直接消费该副本；\n"
+            "  · 只想本地自检用例链（非验收）→ 显式加 --mode mock。")
+    # CP-E 自证材料：**先读进内存再说**，落盘在下面清完残留之后（理由见 `_read_acceptance_inputs`）。
+    # 放在 `os.makedirs` 之前 = 三份原件有任何问题都不留下半个产物目录。
+    staged_payloads = (_read_acceptance_inputs(spec_path, spec, source_facts)
+                       if is_acceptance else None)
     # U6a：默认已从 mock 翻为 new_example（真机通路）。mock 的「NPU 输出」= golden.copy()、精度按构造必过，
     # 默认指向它 = 默认产出一份与真验收同名同形的**伪造** acceptance.json（危险的默认）。翻真机后，缺真机
     # OPRUNWAY_* 配置时**在跑 Task1 之前**就 fail-closed 停下——绝不落半产物、绝不出「看起来对」的裁决，
@@ -357,12 +635,6 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         json.dump(obj, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         return p
 
-    # 未准入的 runner_form 即使是真机通路，也**物理上不产验收裁决**——比照 mock 通路的口径，
-    # 只产 dev_run_summary.json / dev_precision_check.json（`evidence_grade="development"`）。
-    # 逃生阀之所以不做成「照产 acceptance.json 但打个标」：下游是**按文件名**读裁决的，
-    # 同名同形的产物迟早会被当成验收结论用掉。
-    is_experimental_form = _spec_runner_form(spec) not in _ACCEPTANCE_RUNNER_FORMS
-    is_acceptance = _acceptance_capable(mode) and not is_experimental_form
     print(f"=== OpRunway workflow · {spec['op']} · mode={mode} ===")
     if is_experimental_form:
         print(f"=== ⚠ runner_form={_spec_runner_form(spec)!r} 非验收准入通路"
@@ -378,22 +650,30 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         sp = os.path.join(work, stale)
         if os.path.exists(sp):
             os.remove(sp)
-    import glob  # T6：清上轮小shape仿真图，防 stale SVG 让「有图」门误过（codex H7）
-    for old in glob.glob(os.path.join(out_dir, "perf_sim_*.svg")):
-        os.remove(old)
-    # C5：清掉**另一套**产物的上轮残留。同一个 out_dir 先跑真机、再跑 mock（或反过来）时，上轮的
-    # acceptance.json / verdict.json 会原封不动躺在那儿，而下游（agent / 报告）是按文件名去读裁决的
-    # → 「这次跑的是 mock，却读到上次真机的 acceptance.json」。宁可删掉重跑，也不留一份来源不明的裁决。
-    # ⚠ **两套一起清，别按当前 is_acceptance 二选一**：is_acceptance 在下面还会被 adapter 自报的
-    # evidence_grade **降级**（:169 那处「只降不升」）。按降级前的值二选一，降级发生时上一轮真机的
-    # acceptance.json / verdict.json 会原样留下、与本轮 dev_* 并存——正是这段注释自己要堵的那个洞。
-    # （现实暂不可达：run_new_example 恒报 acceptance_candidate。但这是潜伏洞，一行修掉不留。）
-    for stale in _ACCEPTANCE_FILES + _DEV_FILES:
+    # 上轮 staging 副本的清理点。**结论产物（`_RESULT_FILES`）不在这里**——它们已在 `run()` 第一行
+    # 被 `_invalidate_stale_results` 作废，因为那几件是「早退时也必须已经不可消费」的东西。
+    # ⚠ 这三份不能跟着提前清：`--source-facts <out>/source_facts.json`（复跑时最自然的写法）指的正是
+    # 上一轮 staging 出来的那份，提前清掉会把一次正常复跑变成「指不到文件」的假 BLOCKED。
+    # 所以顺序恒为 **先把三份原件读进内存（上面 `_read_acceptance_inputs`）→ 再清 → 再落副本**。
+    # ⚠ **无条件清**（不按 is_acceptance 二选一）：同一个 out_dir 上一轮跑的是验收、这一轮跑 mock
+    # （或换了另一份 spec / 另一份 golden）时，上轮 staging 的 spec.json / golden.py /
+    # source_facts.json 会原样躺着，而 CP-F 与事后单独复跑的三级门**就是按文件名**去读它们的
+    # → 「拿上一轮的 spec/golden/来源事实，去配这一轮的 caseset 与裁决」。同 acceptance.json 那条理由。
+    # ⚠ 判存用 `lexists` 而**不是** `exists`（2026-08-05 审修门 Medium）：`exists` 对**悬空软链**
+    # 返回 False，于是那条软链留了下来；下一步 `open(path, "w"/"wb")` 会**跟着它写到 `--out` 之外**。
+    # 预置一条 `<out>/golden.py -> /任意/尚不存在的路径` 就能把本轮的自证材料（或裁决）写出报告目录。
+    # `os.remove` 删的是链接本身，不碰目标——这正是要的。
+    for stale in _STAGED_FILES:
         sp = os.path.join(out_dir, stale)
-        if os.path.exists(sp):
+        if os.path.lexists(sp):
             os.remove(sp)
+    # CP-E 自证材料落盘（只验收通路；消费方见 `_read_acceptance_inputs`）。
+    # 位置刻意在**清残留之后、Task1 之前**：清在前才不会把本轮刚落的副本删掉。
+    staged_source_facts = (_write_staged_inputs(out_dir, staged_payloads)
+                           if staged_payloads is not None else None)
     # Task 1
     caseset = gen_cases.gen_cases(spec, work)
+    _assert_staged_golden_matches_task1(spec, staged_payloads)
     _dump(caseset, "caseset.json")
     print(f"[Task1 gen_cases] {len(caseset['cases'])} 用例")
     if mode == "cpp_extension":
@@ -557,7 +837,11 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     gate_errs = {}
     for st in gate_stages:
         es = []
-        gate._GATES[st](out_dir, es)
+        # ★ **每次都显式传 `source_facts_path`**，不让门退回自动发现。
+        # 验收通路上它必然是本轮 staging 出来的那份副本（`None` 只可能出现在非验收通路，
+        # 而那条路只跑 task1/task3，两级门都不消费来源锚）。显式指路后，「找不到对照物」
+        # 在验收通路上不再是一个可达状态——这正是要封掉的那处残留伪装面。
+        gate._GATES[st](out_dir, es, source_facts_path=staged_source_facts)
         if es:
             gate_errs[st] = es
     gate_passed = not gate_errs
@@ -719,6 +1003,12 @@ def main():
                          "派生 —— 缺省跟着唯一准入形态走）。三条都是真机通路，但**只有 "
                          "cpp_extension 准入正式验收**。mock 仅本地用例链自检、精度按构造必过、**非验收**")
     ap.add_argument("--out", default="reports/_run")
+    ap.add_argument("--source-facts", default=None, metavar="PATH",
+                    help="fetch_source.py 产的 source_facts.json。**验收通路必给、缺席即拒跑**："
+                         "三级门要拿它与 vendor build receipt 的来源锚逐字对账，没有对照物时"
+                         "「收据自称 pull_request、事实其实是 local_checkout」查不出来。"
+                         "本次会把它按字节 staging 进 --out（连同 spec.json / golden.py），"
+                         "CP-F 与事后单独复跑三级门都直接消费该副本。非验收通路（mock 等）不需要")
     ap.add_argument("--gpu-baseline", default=None, help="外部 GPU 标杆 JSON（Task3 consumer 侧对比）")
     ap.add_argument("--allow-experimental-form", action="store_true",
                     help="允许用非准入的 runner_form（cpp / aclnn_py）跑局部开发验证。"
@@ -726,7 +1016,8 @@ def main():
                          "只产带 evidence_grade=\"development\" 的非验收产物")
     a = ap.parse_args()
     result = run(a.spec, a.mode, a.out, gpu_baseline=a.gpu_baseline,
-                 allow_experimental_form=a.allow_experimental_form)
+                 allow_experimental_form=a.allow_experimental_form,
+                 source_facts=a.source_facts)
     # CLI 退出码：0 干净 PASS / 2 PASSED_WITH_RISK(挂起转人工) / 1 其余（门未过/精度fail/性能未达/BLOCKED/needs_review）
     sys.exit(result["exit_code"])
 

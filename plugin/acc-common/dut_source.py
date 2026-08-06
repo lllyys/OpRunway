@@ -23,7 +23,25 @@ fail-closed——只要 `aclnn_adapter` 的取源方式不变，它就一直关�
 当成「下一批补上就行」。真要走本地来源的完整验收，用已接通的 `cpp_extension` 主链
 （`spec.runner_form = "cpp_extension"`）。
 
-纯 stdlib、无任何 agent/CLI 依赖，可被 Layer 1 任意脚本 import。
+纯 stdlib（只再依赖同为 Layer 0 的 `content_address` 与 `dut_source_kind`）、
+无任何 agent/CLI 依赖，可被 Layer 1 任意脚本 import。
+
+**判别式内核在 `dut_source_kind.py`**，本模块把它原样再导出，所以**读侧唯一入口仍是这里**，
+既有消费者一个字都不用改。拆的理由与硬约束写在那边的模块文档里，一句话版本：
+`verify_aclnn_harness._LOGIC_FILES` 对判定依赖逐字节哈希，而那道门只依赖「判别式」这一小块；
+本文件其余三类职责（URL 凭据策略、build receipt 锚校验、`source_facts.json` 查找）
+改一个字就作废真机 harness 收据，是纯粹的过度绑定。
+
+⚠ **拆分只挪了位置，没有放松任何绑定**：harness 门若哪天开始依赖本文件里的东西
+（`identity` / `validate_build_receipt_source` / `url_has_userinfo` / `find_source_facts`），
+`dut_source.py` **必须**同步进 `_LOGIC_FILES`，否则就是「判定依赖脱离哈希覆盖」。
+`test_verify_aclnn_harness.LogicBindingCoverageTest` 用机械检查钉着这条，不靠人记。
+
+**本模块也是「来源对照物 `source_facts.json` 怎么找、找到算不算数」的唯一实现**
+（`find_source_facts`）。它原先是 `validate_acceptance_state._find_source_facts`，被
+`render_acceptance_markdown` 跨模块引用一个**私有**名——复用方向是对的（两处各写一份
+查找规则的话，报告陈述的 facts 就可能不是门校过的那一份），但私有名跨模块用，将来
+改名会**静默炸 import**。既然来源判别本来就归本模块，规则也下沉到这里。
 
 两条来源通路是**平级**的，不是「主 + 降级」：
 
@@ -36,32 +54,77 @@ fail-closed——只要 `aclnn_adapter` 的取源方式不变，它就一直关�
 本模块只负责判别，不负责粉饰。
 """
 
-PULL_REQUEST = "pull_request"
-LOCAL_CHECKOUT = "local_checkout"
-ALL = (PULL_REQUEST, LOCAL_CHECKOUT)
+import json
+import os
+import re
+
+import content_address
+# 判别式内核（受控词表 + `of`）原样再导出——读侧唯一入口仍是本模块，消费者不用改 import。
+# ⚠ 再导出必须是 `from … import`（同一个对象），不能在这里重新定义一遍同名的类/常量：
+#   那会造出两个 `DutSourceError`，`except dut_source.DutSourceError` 从此漏捕内核抛的异常。
+from dut_source_kind import (  # noqa: F401  （对外再导出，本模块内部也确实在用）
+    ALL,
+    DutSourceError,
+    LOCAL_CHECKOUT,
+    PULL_REQUEST,
+    of,
+)
+
+# ---- 来源 URL 的凭据判别（唯一实现）----------------------------------------------
+# 为什么放在判别式模块：`source.repo` 是**来源身份**的一部分，两条通路都必填，而它的取值
+# 可能是 `git config --get remote.origin.url` 的原值。`https://<user>:<token>@host/…`
+# 一旦进了收据，就会被渲染进人读的验收报告，撞仓规 §2。
+# 判别规则只留一份实现：产出侧（`fetch_source` 落 source_facts 前扣留）与读侧
+# （本模块校收据）各写一套的话，两边迟早对同一个 URL 给出不同答案。
+_URL_AUTHORITY_END_RE = re.compile(r"[/?#]")
+
+
+def _split_url_authority(url):
+    """`scheme://authority<rest>` → `(scheme, authority, rest)`；不是 `://` 形态返回 None。"""
+    if not isinstance(url, str) or "://" not in url:
+        return None
+    scheme, rest = url.split("://", 1)
+    m = _URL_AUTHORITY_END_RE.search(rest)
+    return (scheme, rest, "") if m is None else (scheme, rest[:m.start()], rest[m.start():])
+
+
+def url_has_userinfo(url):
+    """`scheme://userinfo@host/…` 形态即判「带用户凭据」。
+
+    ⚠ 只认 `://` 形式：scp 式 `git@host:path` 的 `@` 前面是用户名、不含任何密钥，
+    拦它会把合法的 SSH remote 全部误伤。而 `https://user:pw@host/…`（密码）与
+    `https://<token>@host/…`（PAT，连冒号都没有）都落在 `://` 形式里，一并拦下。
+
+    ⚠ authority 的终止符取 `/` `?` `#` 里**最先出现**的那个，不能只切 `/`。只切 `/` 会把
+    query 吞进 authority：`https://host?a=b@c` 这种**根本不含凭据**的 URL 会被判成带凭据
+    （query 里的 `@`），于是一个合法 remote 被白白扣留、脱敏后还被截成 `https://***@c`。
+    判过头与判不到同样是坏门。
+    """
+    parts = _split_url_authority(url)
+    return bool(parts) and "@" in parts[1]
+
+
+def redact_url_userinfo(url):
+    """把 `scheme://userinfo@host/…` 脱敏成 `scheme://***@host/…`；不带 userinfo 的原样返回。
+
+    ⚠ **只用于人读文本与旁路记账字段**：脱敏会改字节，而 CP-F 对 `repo` 是逐字比对，
+    把脱敏值当载重字段用等于换个方式制造 BLOCK。
+
+    ⚠ userinfo 里若含未转义的 `@`（不合规但确实存在），按 WHATWG URL 的口径以**最后一个**
+    `@` 分隔——即 `@` 之前的字节**全部丢弃**。宁可多丢，也不能漏出半截 token。
+    """
+    parts = _split_url_authority(url)
+    if not parts or "@" not in parts[1]:
+        return url
+    scheme, authority, rest = parts
+    return f"{scheme}://***@{authority.rsplit('@', 1)[1]}{rest}"
 
 # payload 里承载各自事实的键；两者**互斥出现**。
 FACTS_KEY = {PULL_REQUEST: "pr", LOCAL_CHECKOUT: "local_checkout"}
 
 
-class DutSourceError(ValueError):
-    """来源判别式不合法（未知取值、两条通路的事实混装、锚缺失）。"""
-
-
-def of(payload, *, where="payload"):
-    """读出并校验 `payload.dut_source`；缺省 `pull_request`，未知取值 fail-closed。
-
-    ⚠ **缺省不能省**：改动之前产出的收据里根本没有这个键，把「缺席」当成非法会让
-    所有既有 PR 通路收据一夜之间失效。缺席 == `pull_request` 是有意的向后兼容。
-    但**取值写错**（拼错、伪造）与缺席是两回事，必须当场拒。
-    """
-    if not isinstance(payload, dict):
-        raise DutSourceError(f"{where} 须为 JSON object 才能读 dut_source")
-    value = payload.get("dut_source", PULL_REQUEST)
-    if value not in ALL:
-        raise DutSourceError(
-            f"{where}.dut_source={value!r} 不在受控词表 {list(ALL)}（未知来源一律 fail-closed，不猜）")
-    return value
+# `DutSourceError`、`PULL_REQUEST` / `LOCAL_CHECKOUT` / `ALL`、`of()` 的**定义**在
+# `dut_source_kind.py`（见文件头 import 与那边的模块文档），此处只再导出。
 
 
 def assert_facts_key_exclusive(payload, *, where="payload"):
@@ -166,6 +229,18 @@ def validate_build_receipt_source(source, *, expected_kind, where="build_receipt
     repo = source.get("repo")
     if not isinstance(repo, str) or not repo.strip():
         raise DutSourceError(f"{where}.repo 必填（两条通路都要）")
+    # ⚠ `repo` 带用户凭据一律拒，**四处消费者一起拒**（adapter / 三级门 / CP-F / 渲染器都调本函数，
+    #   产出方 `make_vendor_build_receipt.self_check` 也调，且它在 `atomic_write` 之前）。
+    #   只在产出方拦是不够的：老收据、外部构建驱动产的收据、手改的收据都从读侧进来，
+    #   而渲染器会把 `repo` 原样印进**人读的验收报告**——那才是凭据真正泄漏出去的那一步。
+    # ⚠ **刻意不回显原值**：报错会进终端与 CI 日志，回显就是再泄漏一次。
+    if url_has_userinfo(repo):
+        raise DutSourceError(
+            f"{where}.repo 是一个**带用户凭据**的 URL（`scheme://…@host/…`），拒绝采信。\n"
+            f"  它会被渲染进人读验收报告的「源码仓」一行，撞仓规 §2（token/密码/私钥不得写进任何产物）。\n"
+            f"  此处刻意不回显原值——回显就是再泄漏一次。\n"
+            f"  → 重产收据时用 `--repo` 显式给一个不含凭据的仓名（如 `cann/ops-nn`），"
+            f"并把本机 git remote 里的凭据挪进 credential helper。")
     other = ANCHOR_FIELD[PULL_REQUEST if kind == LOCAL_CHECKOUT else LOCAL_CHECKOUT]
     if other in source:
         raise DutSourceError(
@@ -182,3 +257,84 @@ def validate_build_receipt_source(source, *, expected_kind, where="build_receipt
 def _is_hex(value, length):
     return (isinstance(value, str) and len(value) == length
             and all(c in "0123456789abcdefABCDEF" for c in value))
+
+
+# ---- 来源对照物 `source_facts.json` 的发现规则（唯一实现）--------------------------
+# `source_facts.json` 的内容寻址 domain（与 `fetch_source.write_source_facts` 同一个真源）。
+SOURCE_FACTS_DOMAIN = "oprunway/source-facts/v1"
+# 「找到了，但这份东西不可信」的哨兵。⚠ 与 `None`（自动发现没找到）**必须分开**：
+# 前者说明有人放了一份对不上的对照物，后者只是没有对照物，两者的处置不同
+# （见 `validate_acceptance_state._gate_build_receipt_source_binding` 的按通路分表）。
+SOURCE_FACTS_UNTRUSTED = "__BAD__"
+
+
+def find_source_facts(report_root, source_facts_path=None):
+    """定位并**验摘要**读出 `source_facts.json`：显式路径 → `<d>/` → `<d>/work/`。
+
+    三态返回：payload dict / `None`（自动发现时没找到）/ `SOURCE_FACTS_UNTRUSTED`（找到但不可信）。
+
+    ⚠ **这条规则只能有一份实现**。三级门用它做 build receipt ↔ source_facts 的锚对账，
+    渲染器用它决定报告里「worktree 干净度」那一行怎么写。两处各写一份的话，报告陈述的
+    facts 就可能不是门校过的那一份文件——报告说 clean、门校的是另一份，谁也发现不了。
+
+    ⚠ 实测：真机 cpp_extension 验收的报告目录（`reports/<Op>-spec-<x>/`）里**没有**
+    `source_facts.json`——取材的 `--out` 与验收产物目录不是同一个。所以这里必须能被
+    显式指路，且「找不到」的处置要按通路分（见 `_gate_build_receipt_source_binding`）。
+
+    ⚠ **显式路径不存在 ≠ 没找到**。自动发现落空是常态（上面那条实测），可以按通路分处置；
+    但调用方明确把 `--source-facts` 指过来，说明它认定有这份对照物——路径打错却退成
+    「没找到」，等于一个 typo 就把整条对账悄悄关掉。所以显式路径缺席一律 UNTRUSTED。
+
+    ⚠ **必须验内容寻址 envelope**。`fetch_source.write_source_facts` 落的是
+    `{schema_version, domain, digest, payload}` 信封，`digest` 由 payload 算出。
+    只 `json.load` 取 `payload` 而不复算 digest，等于「随手编一份最小 JSON
+    （只写一个与恶意收据同值的 `local_checkout.root_digest`）就能当本地来源的信任锚」。
+    没有 envelope 形态（`digest`/`payload` 缺失）同样拒：那不是 fetch_source 的产物。
+
+    ⚠ **但 digest 自洽远远不够，还必须过完整契约**。digest 是可以自己重算的——
+    用 `content_address.make_artifact` 包一个只含「与收据同值的 root_digest」的最小 payload，
+    照样 digest 自洽。更要命的是 `completeness.status="blocked"` 的真实取材产物：
+    它是 fetch_source 亲手产的、digest 完全正确，但仓规写死了「blocked 的事实索引只供诊断」。
+    拿它当本地来源的信任锚，正是「不完整证据被静默升级为可裁决」。
+    所以这里**复用** `validate_preparation_state._validate_source_payload`——
+    它已经在校 taskdoc/key_files 锚/两条通路必填集/`completeness=complete 且 reasons=[]`/
+    warnings 与载重事实一致/`producer.tool`。另写一份判据只会分叉。
+
+    ⚠ `source_facts_path` 判「是否显式指定」用 `is not None` 而**不是** `bool()`：
+    空字符串（空环境变量展开出来的常见形态）在 `bool()` 下会被当成「没显式指定」，
+    于是悄悄退回自动发现，用户明确要求的那条对账就此关掉。空串按显式处理 → UNTRUSTED。
+
+    ⚠ 惰性 import `validate_preparation_state`：它顶层 import `fetch_source`，而
+    `fetch_source` 顶层 import 本模块——放到模块顶层就是循环导入。
+    """
+    explicit = source_facts_path is not None
+    for path in ([source_facts_path] if explicit else
+                 [os.path.join(report_root, "source_facts.json"),
+                  os.path.join(report_root, "work", "source_facts.json")]):
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as src:
+                doc = json.load(src)
+        except (OSError, ValueError):
+            return SOURCE_FACTS_UNTRUSTED
+        if not isinstance(doc, dict):
+            return SOURCE_FACTS_UNTRUSTED
+        payload = doc.get("payload")
+        if not isinstance(payload, dict) or not isinstance(doc.get("digest"), str):
+            return SOURCE_FACTS_UNTRUSTED
+        try:
+            actual = content_address.content_digest(SOURCE_FACTS_DOMAIN, payload)
+        except content_address.ContentAddressError:
+            return SOURCE_FACTS_UNTRUSTED
+        if (doc.get("domain") != SOURCE_FACTS_DOMAIN
+                or doc.get("schema_version") != 1
+                or doc["digest"] != actual):
+            return SOURCE_FACTS_UNTRUSTED
+        import validate_preparation_state
+        try:
+            validate_preparation_state._validate_source_payload(payload)
+        except content_address.ContentAddressError:
+            return SOURCE_FACTS_UNTRUSTED
+        return payload
+    return SOURCE_FACTS_UNTRUSTED if explicit else None

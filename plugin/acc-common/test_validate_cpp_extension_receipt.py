@@ -222,7 +222,7 @@ class LocalCheckoutSourceBindingTest(unittest.TestCase):
         """⚠ 必须写**真** content_address envelope（digest 由 payload 算出）+ **完整契约 payload**。
 
         手拼 `{"domain":…, "payload":…}` 或只塞一个 root_digest 的最小 payload，
-        都会被 `_find_source_facts` 判 `__BAD__`——那样这些用例名义上在测「锚对不对得上」，
+        都会被 `dut_source.find_source_facts` 判 UNTRUSTED——那样这些用例名义上在测「锚对不对得上」，
         实际全落在「对照物不可信」那条分支上。
         """
         import content_address

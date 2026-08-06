@@ -8,7 +8,7 @@
 
 - **输入**：算子任务书（md 本地路径或链接）+ PR 链接。
 - **输出**：`reports/<op>/` 下 `correspondence.json` / `<op>.spec.json` / `caseset.json` / `evidence.json` / `verdict.json` / `baseline.json`（**仅有基线时**——缺 GPU 标杆挂起时不产）/ `perf_report.json` / `acceptance.json` + 中文验收报告。
-- **产物只落用户 CWD 的 `reports/`**；私有主机名/远端路径走 `OPRUNWAY_*` 环境变量、**不入仓**；副作用（clone/build/真机跑测/对外动作）先列计划、点头再做。
+- **产物只落用户 CWD 的 `reports/`**；私有主机名 / 目标机路径（远程连时即远端路径）走 `OPRUNWAY_*` 环境变量、**不入仓**；副作用（clone/build/真机跑测/对外动作）先列计划、点头再做。
 
 ## 1. 六步验收流水线（对齐 AGENTS.md 硬门 + design §2）
 
@@ -22,18 +22,18 @@
 | ② 任务书 → spec | 抽 `<op>.spec.json` + `task_pr_gaps` | `acc-spec` skill（NL）+ `fetch_source.py`（取材） | 缺项落 gaps 不臆造；dtype 只填支持子集、余入 gaps |
 | ③ spec → 用例集 | 产覆盖「功能/精度/性能」的 caseset | `acc-casegen`（展开规则）+ `gen_cases.py`（确定性落盘，仅注册算子） | 无原语匹配 → `UNCOVERED_PRIMITIVE`，禁静默归并 |
 | ④ 调用侧锚定 + 自检 | 产被测调用侧代码，验证-才-信（`cpp_extension`（缺省·验收路径）= codegen 官方 Extension bundle + build/load/vendor 收据；`cpp` = 手写 per-op runner；`aclnn_py` = 无 per-op 源、走 harness 信任门） | `acc-runner`（NL 锚定 example）+ `run_on_npu.sh` | aclnn 入口/dtype/顺序**抠 example 不猜**；自检不满足停在此、不上真机 |
-| ⑤ 真机跑测 | Task2 精度 vs golden + Task3 性能 vs 基线 | `repo_adapter` / `run_workflow.py --mode <mode>`（`<mode>` 据 `spec.runner_form` 派生，受控词表 `{cpp, aclnn_py, cpp_extension}`、**缺省 = `cpp_extension`**：`cpp_extension`→`cpp_extension`（✅ **当前唯一能产验收裁决**）、`cpp`→`new_example`、`aclnn_py`→`aclnn_py`（后两条要跑须加 `--allow-experimental-form`、**只产开发级产物**）；`mock`/`catlass*` 派生不出、须显式指定）；方法论 `acc-precision` / `acc-perf` | 精度=真 NPU vs numpy golden；性能=msprof kernel-only vs 基线（**基线逐字按任务书/spec 定，runner form 不决定 baseline**；`new_example` 的缺省对照物才是同法测的内置 TBE）；`OPRUNWAY_*` 指真机 |
+| ⑤ 真机跑测 | Task2 精度 vs golden + Task3 性能 vs 基线 | `repo_adapter` / `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`（⚠ `--source-facts` 验收通路必给、缺席拒跑，非验收通路不强制；`<mode>` 据 `spec.runner_form` 派生，受控词表 `{cpp, aclnn_py, cpp_extension}`、**缺省 = `cpp_extension`**：`cpp_extension`→`cpp_extension`（✅ **当前唯一能产验收裁决**）、`cpp`→`new_example`、`aclnn_py`→`aclnn_py`（后两条要跑须加 `--allow-experimental-form`、**只产开发级产物**）；`mock`/`catlass*` 派生不出、须显式指定）；方法论 `acc-precision` / `acc-perf` | 精度=真 NPU vs numpy golden；性能=msprof kernel-only vs 基线（**基线逐字按任务书/spec 定，runner form 不决定 baseline**；`new_example` 的缺省对照物才是同法测的内置 TBE）；`OPRUNWAY_*` 指真机 |
 | ⑥ 门 + 裁决 + 报告 | 三级完整性门 → 裁决 → 中文报告 | `validate_acceptance_state.py` + `validator.py` + `perf_compare.py`；FAIL→`acc-rootcause` | 门 FAILED → `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**——仅准入的 `cpp_extension` 通路**；非验收通路（mock，以及 `--allow-experimental-form` 下的 `cpp`/`aclnn_py`）产 `dev_run_summary.json.pipeline_result`、不跑验收门。报告逐字引用产物、`needs_review` 不当 pass |
 
 ## 2. CP-A..E 检查点（对话暂停点 + 工件门）
 
 蓝图层面的 CP 语义（权威状态机在 `skills/acceptance-workflow/SKILL.md`，此处只作导航）：
 
-- **CP-A 前置**（primary 亲自）：取材 + 对应校验（落 `correspondence.json`）+ 环境确认（NPU/VPN 开没开、目标机按任务书 `适配硬件` × op_def `AddConfig` 双源定）。`status=confirmed` 才进 CP-B；`mismatch`/`empty_task` → 出程序结论、停跑。
+- **CP-A 前置**（primary 亲自）：取材 + 对应校验（落 `correspondence.json`）+ 环境确认（**执行形态：就地跑还是远程连** / NPU 通不通 / 目标机按任务书 `适配硬件` × op_def `AddConfig` 双源定）。⚠ 两种执行形态平级：就地跑（会话本身已在目标机或其 NPU 容器里）设 `OPRUNWAY_TARGET=local`、`OPRUNWAY_SSH_HOST` 免填、`.oprunway/real-machine.env` **不需要存在**；远程连才从该文件取 SSH alias / 容器名 / 远端工作根。**不得**以缺该文件为由拒绝启动验收；它**存在时**必须读 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`（只读保留现场，未登记 ≠ 可随意清理）。⚠ `OPRUNWAY_TARGET` 只管 `repo_adapter` / `aclnn_adapter` 的传输层，**不是验收通路的形态门**——`cpp_extension` 的传输就是 `OPRUNWAY_CPP_EXTENSION_DRIVER_JSON` 那串 argv 本身，声明就地跑时须由编排层自己核它不带 `ssh` / `docker exec -H` 等跨机前缀。详见仓根 `AGENTS.md` §5.3 与 `skills/acceptance-workflow/SKILL.md` CP-A（权威在那两处）。`status=confirmed` 才进 CP-B；`mismatch`/`empty_task` → 出程序结论、停跑。
   ⚠ **别问「mock 还是真机」、也别问「走哪条 runner form」**（对齐 `acceptance-workflow/SKILL.md` §0.5）：验收统一按 `cpp_extension` 走——`--mode` 据 `spec.runner_form` 派生（受控词表 `{cpp, aclnn_py, cpp_extension}`，**缺省 = `cpp_extension`**），不是让用户挑的选项；`mock`/`catlass*` 派生不出、只能显式指定，且不产验收裁决。spec 若写着 `cpp` / `aclnn_py`，正确处置是**迁到 `cpp_extension`**（需 torch.ops 调用桥 + vendor ELF 构建收据，接入成本更高，这是已知账单），**不是**回头问用户要不要换条路。
 - **CP-B Task1 用例**：dispatch `acc-spec-extractor` 产 spec；primary inline `gen_cases.py <spec> --dry-run --ledger-out <case_plan.json> --source-facts <source_facts.json> --correspondence <correspondence.json>` 做用例计划契约自检并把事实包/用户确认绑定进 durable 账本，再由 `validate_preparation_state.py` 复核非真机断点（C5 起不再跑 mock 出裁决）。
 - **CP-C runner**（需 NPU）：dispatch `acc-runner-dev`（先过 scope gate）→ 自证门满足才允许上真机。`cpp_extension`（验收路径）核的是 build/load/vendor receipt 齐备且绑定来源锚；`cpp` 核的是 runner `verify_runner`；`aclnn_py` 核的是 harness 真机信任门。
-- **CP-D 真机跑测**（一次原子）：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode <mode>`（**`<mode>` 据 `spec.runner_form` 定**：`cpp_extension`（缺省）→ `cpp_extension`，须 `OPRUNWAY_CPP_EXTENSION_REAL=1` 且过 build/load/vendor receipt 门；`cpp` runner v1 → `new_example`；`runner_form == "aclnn_py"`（torch 对标）→ `aclnn_py`，且须 `OPRUNWAY_ACLNN_REAL=1`），Task2+3+三级门一次成；FAIL → `rootcause`。
+- **CP-D 真机跑测**（一次原子）：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`（⚠ `--source-facts` 验收通路必给、缺席直接拒跑，路径是 CP-A 取材 `--out` 那份、与报告目录不同；非验收通路不强制。**`<mode>` 据 `spec.runner_form` 定**：`cpp_extension`（缺省）→ `cpp_extension`，须 `OPRUNWAY_CPP_EXTENSION_REAL=1` 且过 build/load/vendor receipt 门；`cpp` runner v1 → `new_example`；`runner_form == "aclnn_py"`（torch 对标）→ `aclnn_py`，且须 `OPRUNWAY_ACLNN_REAL=1`），Task2+3+三级门一次成；FAIL → `rootcause`。
   ⚠ **验收裁决当前只出自 `cpp_extension`**（`run_workflow._ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})`，入口门 `_resolve_mode` + 出口门 `_assert_acceptance_form_allowed` 两道；理由见仓根 `AGENTS.md` §4）。**别把「能跑」读成「能出裁决」**：`new_example` / `aclnn_py` 仍跑得起来（须 `--allow-experimental-form`），但物理上只产 `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"` + NON-ACCEPTANCE 标记），**不写** `acceptance.json` / `verdict.json`——「加了逃生阀跑绿了」不得写成验收通过、不得进报告的裁决栏。mode 只从 `spec.runner_form` 派生；性能 baseline 仍由任务书/spec 决定，不能从 form 反推。
 - **CP-E 报告**（primary）：逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + `task_pr_gaps` + 各维度通过数。
 
@@ -41,7 +41,7 @@
 
 1. **判定唯一归确定性脚本链**，编排层/skill 只引用不自判（ADR 0007）。
 2. **验收权威 = 任务书**；「PR 有测试」≠「验收过了」。
-3. **缺 NPU/VPN → 最多走到非真机准备阶段**（`cpp_extension` / `cpp` 到 CP-B 的准备收据，`aclnn_py` 再到 CP-C0 静态 preflight），明确告知「真机待开 VPN」、不假装真机；dry-run/preflight 都不产验收裁决。
+3. **够不着 NPU → 最多走到非真机准备阶段**（远程连时 VPN / 跳板没通，或就地跑但本机无可用设备；`cpp_extension` / `cpp` 到 CP-B 的准备收据，`aclnn_py` 再到 CP-C0 静态 preflight），明确告知「真机跑测待环境就绪」、不假装真机；dry-run/preflight 都不产验收裁决。⚠ 「够不着 NPU」指**设备真的不可达**，**不是**「读不到 `.oprunway/real-machine.env`」——缺那个文件不构成阻塞。
 4. **零硬编码**：仓名/路径/SOC/阈值不写死，运行时探测或问用户；`OPRUNWAY_*` 不入仓。
 5. **FAIL 先解耦再归因**：先验对应（①）、再解耦「被测物 vs harness」（`acc-rootcause`），别凭 signature 猜、别来回改口。
 

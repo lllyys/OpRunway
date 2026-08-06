@@ -75,6 +75,80 @@ WARN_CHANGED_FILES_UNAVAILABLE = "changed_files_unavailable"
 WARN_DIRTY_WORKTREE_ALLOWED = "dirty_worktree_allowed"
 SOURCE_WARNINGS = (WARN_CHANGED_FILES_UNAVAILABLE, WARN_DIRTY_WORKTREE_ALLOWED)
 
+# ---- 凭据扣留（credential withholding）------------------------------------------
+# 本模块是**唯一**把外部 URL 写进落盘产物的地方，所以凭据泄漏的源头也只能在这里堵。
+# 两个入口都能带 `scheme://<user>:<token>@host/…`：
+#   ① `git config --get remote.origin.url` → `local_checkout.git.remote_url`
+#      → `make_vendor_build_receipt.derive_repo` → 收据 `source.repo`
+#      → `render_acceptance_markdown` 的「源码仓」一行 → **人读的验收报告**；
+#   ② `--taskdoc <链接>` → `taskdoc.source_locator`。
+# 两条都落盘（`pr_facts.json` / `source_facts.json`），直接撞仓规 §2
+# 「token、密码、私钥连本地 ignored 文件都不得写」。
+#
+# **处置是「扣留 + 记账」，不是「脱敏后照用」**，理由分两条：
+#   · `remote_url` 是 `repo` 的派生源，而 CP-F 拿 `directive.source_identity.repo` 与首轮
+#     `runner_binding.base_source_repo` 做**逐字**比对。就地改写会产出一个「看着像仓名、
+#     实则谁也对不上」的值，等于换个方式制造 BLOCK；所以这里把它整个**置 None**
+#     （= 派生不出仓名，`make_vendor_build_receipt` 会要求显式 `--repo`，fail-closed），
+#     另用 `remote_url_withheld` / `remote_url_redacted` 两个**旁路字段**如实记账。
+#     ⚠ 这两个字段是诊断用的，**不是仓名**：任何下游拿 `remote_url_redacted` 去当 repo，
+#       都会撞上那条逐字比对。
+#   · `taskdoc.source_locator` 反过来——它**没有**任何逐字比对的下游，任务书身份只认
+#     `bytes_sha256`，所以写脱敏形态即可，另加 `source_locator_withheld` 说明它被动过。
+#
+# ⚠ 已知残留面（如实记账，别当已封）：本轮只堵 **userinfo** 形态。
+#   query 串里的凭据（`?private_token=…`、`?access_token=…`）**没堵**——要判它就得靠
+#   参数名关键词猜，猜漏与误杀都会让这道门变成「看着有、实际拦不住」的假门。
+#   真要堵，得改成「只保留 origin+path、整段丢弃 query」这类结构性规则，那会改动所有
+#   http 任务书链接的落盘字节，属另一次改动。
+REMOTE_URL_WITHHELD_CREDENTIALS = "credentials_in_url"
+TASKDOC_LOCATOR_WITHHELD_CREDENTIALS = "credentials_in_url"
+# ⚠ 判别与脱敏的实现**只有一份**，在 `dut_source`（读侧也要用同一份：那边校收据的
+#   `source.repo` 带不带凭据）。这里刻意不再抄一份 —— 两份实现迟早对同一个 URL 给出
+#   不同答案，那时「产出侧扣了、读侧没拦」或反过来，门就成了摆设。
+url_has_userinfo = dut_source.url_has_userinfo
+redact_url_userinfo = dut_source.redact_url_userinfo
+
+
+def remote_url_record(remote_url, prior_redacted=None):
+    """→ 写进 `git` 记录的 `remote_url*` 字段集合。**幂等**，是落盘前的最后一道口。
+
+    正常情形只产一个键 `{"remote_url": <值或 None>}`——PR 通路与不带凭据的本地通路
+    落盘字节因此一个都没变。带凭据时改产三个键：值置 `None` + 两个旁路记账字段。
+
+    `prior_redacted` 让**上游已扣留过**的记录能原样往下传（`probe_local_git` 扣、
+    `build_source_facts` 再落一次盘）。⚠ 传下来的脱敏值仍要**再脱敏一次**：上游若把原值
+    塞进了这个字段（手拼 facts、老版本 producer），这里是它落进 `source_facts.json` 前
+    的最后一道口，不能只信上游自称已脱敏。
+    """
+    value = remote_url.strip() if isinstance(remote_url, str) else None
+    value = value or None
+    if value is not None and url_has_userinfo(value):
+        return {"remote_url": None,
+                "remote_url_withheld": REMOTE_URL_WITHHELD_CREDENTIALS,
+                "remote_url_redacted": redact_url_userinfo(value)}
+    if value is None and isinstance(prior_redacted, str) and prior_redacted.strip():
+        return {"remote_url": None,
+                "remote_url_withheld": REMOTE_URL_WITHHELD_CREDENTIALS,
+                "remote_url_redacted": redact_url_userinfo(prior_redacted.strip())}
+    return {"remote_url": value}
+
+
+def taskdoc_locator_record(source_locator):
+    """→ 写进 `taskdoc` 的 `source_locator*` 字段集合。
+
+    本地路径既不可移植、又会让同内容跨工作区无法命中，故只记受控标签 `<local-file>`；
+    http(s) 链接保留作来源定位——**除非它带 userinfo**，那时记脱敏形态并另立
+    `source_locator_withheld` 说明它被动过（不加这个键，读者会以为 URL 里真写着 `***`）。
+    """
+    if not (isinstance(source_locator, str)
+            and source_locator.startswith(("http://", "https://"))):
+        return {"source_locator": "<local-file>"}
+    if url_has_userinfo(source_locator):
+        return {"source_locator": redact_url_userinfo(source_locator),
+                "source_locator_withheld": TASKDOC_LOCATOR_WITHHELD_CREDENTIALS}
+    return {"source_locator": source_locator}
+
 API = "https://api.gitcode.com/api/v5"
 _BLOB_RE = re.compile(r"^https?://gitcode\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/blob/(?P<ref>[^/]+)/(?P<path>.+)$")
 # PR 链接三段抽取：容错 GitHub 风格单数 /pull/N、复数 /pulls/N、GitCode 原生 /merge_requests/N，
@@ -133,17 +207,22 @@ def _repo_file(owner, repo, path, ref=None):
 
 
 def _taskdoc_bytes(src):
-    """读取任务书原始字节；本地文件绝不经过 universal-newline 文本层。"""
+    """读取任务书原始字节；本地文件绝不经过 universal-newline 文本层。
+
+    ⚠ 报错里回显的链接**必须先脱敏**：`--taskdoc https://<user>:<token>@host/x.md` 取失败时，
+    原样回显等于把 token 打进终端与 CI 日志——而日志常被整段粘进复盘记录。
+    """
     if re.match(r"^https?://", src):
+        shown = redact_url_userinfo(src)
         m = _BLOB_RE.match(src)
         if m:  # gitcode blob 链接 → contents API（可带 token 取私有）
             txt = _repo_file(m["owner"], m["repo"], m["path"], m["ref"])
             if txt is None:
-                raise RuntimeError(f"取任务书失败（gitcode blob）：{src}")
+                raise RuntimeError(f"取任务书失败（gitcode blob）：{shown}")
         else:  # 其它链接（含 raw）直接 GET
             st, body = _get(src)
             if st != 200 or not isinstance(body, str):
-                raise RuntimeError(f"取任务书失败 HTTP {st}：{src}")
+                raise RuntimeError(f"取任务书失败 HTTP {st}：{shown}")
             txt = body
         return txt.encode("utf-8")
     else:
@@ -699,7 +778,14 @@ def _porcelain_z_records(out):
 def probe_local_git(repo_root, op_subdir=None):
     """探本地目录的 git 事实；**不是 git 仓就返回 None**（合法情形，只靠 root_digest 锚定）。
 
-    返回 `{head_sha, remote_url, base_ref, dirty, dirty_files, dirty_files_in_op_subdir}`。
+    返回 `{head_sha, remote_url, base_ref, dirty, dirty_files, dirty_files_in_op_subdir}`；
+    remote 带凭据时另有 `remote_url_withheld` / `remote_url_redacted`（见 `remote_url_record`）。
+
+    ⚠ **`remote.origin.url` 的原值不落任何产物**：它可能是
+    `https://<user>:<token>@host/…`，而本函数的返回值会写进 `pr_facts.json` 与
+    `source_facts.json`，再一路进 vendor build receipt 和人读验收报告。扣留后
+    `remote_url` 为 None → 仓名派生不出来 → `make_vendor_build_receipt` 要求显式 `--repo`
+    （fail-closed，且报告会如实标成「操作者自报」），比留一个带 token 的「事实派生」值正确。
 
     ⚠ **「不是 git 仓」与「探测失败」必须分开**：前者返回 None（合法，走纯 root_digest 锚定），
     后者抛 `GitProbeError`。把探测失败当成「非 git 仓」就等于把 dirty fail-closed 门整个删掉。
@@ -721,14 +807,15 @@ def probe_local_git(repo_root, op_subdir=None):
     if op_subdir:
         pref = op_subdir.strip("/") + "/"
         in_op = [p for p in dirty_files if p == op_subdir.strip("/") or p.startswith(pref)]
-    return {
+    out = {
         "head_sha": head or None,
-        "remote_url": (remote or "").strip() or None,
         "base_ref": (base_ref or "").strip() or None,
         "dirty": bool(dirty_files),
         "dirty_files": dirty_files,
         "dirty_files_in_op_subdir": in_op,
     }
+    out.update(remote_url_record(remote))
+    return out
 
 
 def _local_changed_files(repo_root, base_ref):
@@ -853,11 +940,21 @@ def fetch_local(repo_root, op_subdir, out_dir, base_ref=None, allow_dirty=False)
     git = probe_local_git(repo_root, op_subdir)
     if git is not None:
         facts["local_checkout"]["git"] = {
-            "head_sha": git["head_sha"], "remote_url": git["remote_url"],
+            "head_sha": git["head_sha"],
             "base_ref": base_ref or git["base_ref"], "dirty": git["dirty"],
             "dirty_files": git["dirty_files"],
             "dirty_files_in_op_subdir": git["dirty_files_in_op_subdir"],
+            # ⚠ 整包 splat，不逐键点名：扣留时是三个键、正常时只有一个。逐键点名会在
+            #   「正常」那支凭空写出 `remote_url_withheld: None`，把「没扣留」记成「扣了但没说为什么」。
+            **remote_url_record(git.get("remote_url"), git.get("remote_url_redacted")),
         }
+        if facts["local_checkout"]["git"].get("remote_url_withheld"):
+            facts["notes"].append(
+                f"⚠ `remote.origin.url` 带用户凭据（`scheme://…@host/…`），**未写进任何产物**；"
+                f"脱敏形态 {facts['local_checkout']['git']['remote_url_redacted']}。"
+                f"→ 仓名派生不出来，产 vendor build receipt 时须显式给 `--repo`"
+                f"（报告会如实标成「操作者自报」）。建议顺手把本机 git config 里的凭据挪进"
+                f"credential helper，别留在 remote URL 里。")
         if git["dirty"] and not allow_dirty:
             facts["blocked"] = "dirty_worktree_not_allowed"
             facts["notes"].append(
@@ -1088,11 +1185,8 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
     payload = {
         "contract_version": 1,
         "taskdoc": {
-            # 本地绝对路径既不可移植、又会让同内容跨工作区无法命中；URL 可保留作来源定位，
-            # 本地文件只记受控标签，内容身份只认 bytes_sha256。
-            "source_locator": (source_locator if isinstance(source_locator, str)
-                               and source_locator.startswith(("http://", "https://"))
-                               else "<local-file>"),
+            # 受控标签 / 原链接 / 脱敏链接三选一，规则与理由见 `taskdoc_locator_record`。
+            **taskdoc_locator_record(source_locator),
             "bytes_sha256": hashlib.sha256(task_raw).hexdigest(),
             # CP-A 的 task_doc.snapshot.md 是逐字节复制，故同一摘要就是 spec/golden 的引文锚。
             "snapshot_sha256": hashlib.sha256(task_raw).hexdigest(),
@@ -1124,7 +1218,10 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
         if git is not None:                         # 非 git 仓 → 整键缺席，不写空壳
             payload["local_checkout"]["git"] = {
                 "head_sha": git.get("head_sha"),
-                "remote_url": git.get("remote_url"),
+                # ⚠ 这里**再扣一次**，不是重复劳动：`build_source_facts` 是公开 API，
+                #   `pr_facts` 可以由手拼字典或老版本 producer 提供，只在 `probe_local_git`
+                #   扣留就等于「门只装在自家门口」。落盘前的最后一道口必须自己判。
+                **remote_url_record(git.get("remote_url"), git.get("remote_url_redacted")),
                 "base_ref": git.get("base_ref"),
                 "dirty": bool(git.get("dirty")),
                 "dirty_files": sorted(p for p in (git.get("dirty_files") or [])

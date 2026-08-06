@@ -765,6 +765,21 @@ class LocalCheckoutMaterializeTest(unittest.TestCase):
                     R.RetestContractError, "local_root_digest_mismatch"):
                 R.materialize_attempt(directive, root, identity)
 
+    def test_missing_base_golden_source_is_blocked_with_an_actionable_reason(self):
+        """base spec 同目录没有 `golden.py` → 必须报 `base_golden_source_missing`。
+
+        ⭐ 归因错就等于下一步动作错。裸调 `sha256_file` 只会报「待绑定工件须为普通文件且非
+        符号链接」，读的人会去查权限/软链；真实原因是**这轮验收产物根本不带自证材料**
+        （2026-08-05 起由 `run_workflow` 在验收 `--out` 里 staging `spec.json` / `golden.py`，
+        老产物没有）。正确动作是重跑一轮完整验收，不是手工拷一份 golden 凑数。
+        """
+        with tempfile.TemporaryDirectory() as root:
+            directive, identity = self._build(root)
+            os.remove(os.path.join(root, "golden.py"))
+            with self.assertRaisesRegex(
+                    R.RetestContractError, "base_golden_source_missing"):
+                R.materialize_attempt(directive, root, identity)
+
     def test_missing_or_drifted_source_facts_is_blocked(self):
         with tempfile.TemporaryDirectory() as root:
             directive, identity = self._build(root, write_source_facts=False)

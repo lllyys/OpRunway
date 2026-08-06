@@ -60,7 +60,7 @@ plugin/acc-common/aclnn_runtime/aclnn_driver.py:266-267
 
 | 项 | 状态 |
 |---|---|
-| 远端 `/mnt/docker/libotao2/OpRunway-main` 上 3 处 infra 修改**未回流本仓** | `repo_adapter` 加 complex64、`precision_policy` 修 `<from_input>`、`aclnn_driver` 修 f-string。**后两处就是 §3 的两个 bug** |
+| 远端 `<远端工作根>/OpRunway-main` 上 3 处 infra 修改**未回流本仓** | `repo_adapter` 加 complex64、`precision_policy` 修 `<from_input>`、`aclnn_driver` 修 f-string。**后两处就是 §3 的两个 bug** |
 | findings 的 **§6**（8 项目标现状核对）**未过 codex 审** | 文内已标注；引用的 file:line 经本 session 自查，设计判断未经独立检验 |
 | `governance-plan` 批次 C（轴集） | 只出设计说明交评审，**不动 `gen_cases` 代码** |
 | 产 `vendor_build_receipt` 的外部驱动 | 全仓只有消费方、无产出方；**文件名未知**，见 local-source-plan Step 4 的定位方法 |

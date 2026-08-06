@@ -450,38 +450,184 @@ class LocalCheckoutReceiptTest(_Base):
         self.assertEqual(r["source"]["repo"], "cann/ops-nn")
         self.assertEqual(r["source"]["repo_source"], "operator")
 
-    def test_credential_bearing_remote_url_is_refused_without_echoing_it(self):
-        """⭐ 带凭据的 remote URL 不许进收据，**报错也不许回显它**。
+    TOKEN = "s3cr3t-token-do-not-leak"
 
-        `fetch_source.probe_local_git` 记的是 `git config --get remote.origin.url` 原值、
-        全程无脱敏，所以 `https://user:token@host/…` 会一路进 source_facts → 收据
-        `source.repo` → 终端 → `render_acceptance_markdown` 的「源码仓」一行 →
-        人读的验收报告 .md。撞仓规 §2。
-        """
-        token = "s3cr3t-token-do-not-leak"
+    def _fetch_with_credential_remote(self):
+        """把 origin 换成带凭据的 URL 再取材一次，返回那份 source_facts 的路径。"""
         self._git("remote", "set-url", "origin",
-                  f"https://bot:{token}@gitcode.com/cann/ops-nn.git")
-        leaky_out = os.path.join(self.d, "facts_leaky")
+                  f"https://bot:{self.TOKEN}@gitcode.com/cann/ops-nn.git")
+        out = os.path.join(self.d, "facts_cred")
         rc = self._quiet_fetch(["--taskdoc", self.task, "--local-repo", self.repo,
                                 "--op-subdir", self.OP_SUBDIR, "--base-ref", "master",
-                                "--out", leaky_out])
+                                "--out", out])
         self.assertEqual(rc, 0)
-        facts = os.path.join(leaky_out, "source_facts.json")
+        return out, os.path.join(out, "source_facts.json")
 
-        with self.assertRaises(mk.ReceiptError) as cm:
+    def test_credential_bearing_remote_url_never_reaches_source_facts(self):
+        """⭐ 源头就堵死：带凭据的 remote 一个字节都不进 source_facts，收据自然也拿不到。
+
+        源头没堵时，`https://user:token@host/…` 会一路进 source_facts → 收据 `source.repo`
+        → 终端 → `render_acceptance_markdown` 的「源码仓」一行 → 人读的验收报告 .md。
+        撞仓规 §2。现在 `fetch_source` 扣留它 → 派生不出仓名 → 本脚本要求显式 `--repo`
+        （fail-closed，且收据会如实记 `repo_source="operator"`）。
+        """
+        out, facts = self._fetch_with_credential_remote()
+        with open(facts, "rb") as fh:
+            self.assertNotIn(self.TOKEN.encode(), fh.read(), "凭据落进了 source_facts")
+
+        with self.assertRaises(SystemExit):
             self._run(self._argv(_ok_build(self.lib), source_facts=facts))
-        msg = str(cm.exception)
-        self.assertIn("凭据", msg)
-        self.assertNotIn(token, msg, "报错把凭据原样打了出来——报错本身成了第二处泄漏点")
+        self.assertIn("派生不出仓名", self.log)
+        self.assertNotIn(self.TOKEN, self.log)
         self.assertFalse(os.path.exists(self.receipt_path))
 
-        # 给了不含凭据的 --repo 就能继续（凭据只是不许进收据，不是不许构建）
+        # 给了不含凭据的 --repo 就能继续（凭据只是不许进产物，不是不许构建）
         rc, _ = self._run(self._argv(_ok_build(self.lib), source_facts=facts,
                                      extra=["--repo", "cann/ops-nn"]))
         self.assertEqual(rc, 0)
         r = self._receipt()
         self.assertEqual(r["source"]["repo"], "cann/ops-nn")
-        self.assertNotIn(token, json.dumps(r, ensure_ascii=False), "凭据落进了收据")
+        self.assertEqual(r["source"]["repo_source"], "operator",
+                         "派生不出来时必须记成操作者自报，不能冒充事实派生")
+        self.assertNotIn(self.TOKEN, json.dumps(r, ensure_ascii=False), "凭据落进了收据")
+
+    def test_legacy_source_facts_with_a_credential_is_still_refused(self):
+        """⭐ 源头堵上之后，本脚本这道门**不是**冗余：老产物里的凭据只能在这里拦。
+
+        `producer.logic_sha256` 变了不会让老 `source_facts.json` 消失——它们仍躺在
+        既有 reports 目录里，仍能被 `--source-facts` 指过来。这里手工重封一份「上一版
+        producer 会产出的」payload（remote_url 是原值、没有扣留字段），核这道门还在。
+        没有这条用例，源头一堵，`assert_repo_has_no_credentials` 就成了没人测的死代码。
+        """
+        cred = f"https://bot:{self.TOKEN}@gitcode.com/cann/ops-nn.git"
+        payload = json.loads(json.dumps(self.payload))       # 深拷贝，别改到夹具
+        git = payload["local_checkout"]["git"]
+        git.pop("remote_url_withheld", None)
+        git.pop("remote_url_redacted", None)
+        git["remote_url"] = cred
+        legacy = os.path.join(self.d, "facts_legacy")
+        os.makedirs(legacy, exist_ok=True)
+        ca.write_artifact(legacy, "source_facts.json", _DOMAIN, payload)
+        facts = os.path.join(legacy, "source_facts.json")
+
+        with self.assertRaises(mk.ReceiptError) as cm:
+            self._run(self._argv(_ok_build(self.lib), source_facts=facts))
+        msg = str(cm.exception)
+        self.assertIn("凭据", msg)
+        # 派生值这一侧的专属提示（另一侧是 `--repo`，说的是别的话）：hint 分派塌成一份
+        # 的话，用户会被指去做一件与病因无关的事。
+        self.assertIn("git config --get remote.origin.url", msg, "hint 没按来源分派")
+        self.assertNotIn(self.TOKEN, msg, "报错把凭据原样打了出来——报错本身成了第二处泄漏点")
+        self.assertFalse(os.path.exists(self.receipt_path))
+
+    def test_credential_bearing_repo_flag_is_refused_before_any_build(self):
+        """⭐ 显式 `--repo` 带凭据 → **build 之前**就拒，`--allow-repo-override` 也绕不过。
+
+        凭据扣留之后，显式 `--repo` 就成了正常补充路径。这道门以前只在 `self_check`
+        （build 跑完、收据都组装好了）才开火：vendor build 真跑过、`.so` 被改写、
+        几十分钟没了，才告诉操作者「repo 里不能带凭据」。
+        **凭据没进有效收据 ≠ 门在对的位置**——纪律落在了有副作用之后。
+
+        断言 **build 没被调用**是这条用例的核心：只断言最终报错，证明不了 build 没跑。
+        这里用两条独立证据钉住——marker 文件没出现，且 vendor `.so` 字节没被改写。
+
+        两个 `extra` 各堵一条路：
+        · 不加逃生阀：旧代码会先撞「与派生值不一致」，而那条报错把 `--repo` **原样**
+          打进终端与 CI 日志——凭据泄漏点从收据挪到了日志，等于没修；
+        · 加逃生阀：`--allow-repo-override` 放行的是「与派生值不一致」、不是「带凭据」，
+          旧代码在这条路上会一路跑完 build 才在自检里被拒。
+        """
+        cred = f"https://bot:{self.TOKEN}@gitcode.com/cann/ops-nn.git"
+        marker = os.path.join(self.repo, "BUILD_MUST_NOT_RUN")
+        lib_before = _sha_file(self.lib)
+        for extra in (["--repo", cred], ["--repo", cred, "--allow-repo-override"]):
+            with self.subTest(extra=extra):
+                with self.assertRaises(mk.ReceiptError) as cm:
+                    self._run(self._argv(_ok_build(self.lib, "BUILD_MUST_NOT_RUN"), extra=extra))
+                msg = str(cm.exception)
+                self.assertIn("凭据", msg)
+                self.assertIn("--repo", msg, "没指明是哪个输入带了凭据")
+                # `--repo` 专属提示：默认那份说的是「用 --repo 换一个」，而这里问题**就出在**
+                # `--repo` 上，照抄默认提示等于叫人去做他已经做过的事。钉住 hint 分派。
+                self.assertIn("shell history", msg, "hint 没按来源分派，回退成了派生值那份")
+                self.assertNotIn(self.TOKEN, msg, "报错把凭据原样打了出来——报错成了泄漏点")
+                self.assertNotIn(self.TOKEN, self.log, "凭据进了终端/CI 日志")
+                self.assertFalse(os.path.exists(marker),
+                                 "build 真跑过了——这道门落在了副作用之后")
+                self.assertEqual(lib_before, _sha_file(self.lib),
+                                 "vendor .so 已被这次 build 改写，门却还没开火")
+                self.assertFalse(os.path.exists(self.receipt_path))
+
+        # ⭐ 「build 之前」还不够——门必须在**任何 fingerprint 之前**。这里给一个必然在
+        #   「构建树 ↔ 指纹树」那一步炸掉的 --build-cwd：门若被挪到树指纹之后，
+        #   先报的会是「重算被测子树摘要失败」，凭据错误被一个无关诊断盖住。
+        empty = os.path.join(self.d, "empty-tree-for-ordering")
+        os.makedirs(empty, exist_ok=True)
+        with self.assertRaises(mk.ReceiptError) as cm:
+            self._run(self._argv(_ok_build(self.lib), build_cwd=empty,
+                                 extra=["--repo", cred, "--allow-repo-override"]))
+        self.assertIn("凭据", str(cm.exception))
+        self.assertNotIn("重算被测子树摘要失败", str(cm.exception),
+                         "凭据门被挪到了树指纹之后")
+        self.assertNotIn(self.TOKEN, self.log)
+
+    def test_userinfo_predicate_is_not_forked_inside_this_module(self):
+        """⭐ 凭据判别式**不许**在本模块自建第二份——曾经就有一份，只按 `/` 切 authority。
+
+        分叉的可观测后果：`https://host?a=b@c` 这种 query 里带 `@`、**根本不含凭据**的
+        remote，取材侧（`fetch_source`）与读侧（`dut_source.validate_build_receipt_source`）
+        判它干净、照常放行，本模块却判它「带凭据」并拒绝写进收据——
+        **同一份事实包在两条链上得到不同结论**。
+
+        这里同时钉两侧：不含凭据的一组必须全放行，含凭据的一组必须全拒。
+        跨模块的完整对齐表在 `test_fetch_source.DutSourceApiTest`。
+        """
+        for url in ("https://host?a=b@c", "https://host#a@b",
+                    "git@gitcode.com:cann/ops-nn.git", "cann/ops-nn",
+                    "https://gitcode.com/cann/ops-nn.git"):
+            with self.subTest(url=url):
+                mk.assert_repo_has_no_credentials(url, "origin")     # 不抛即通过
+                self.assertEqual(
+                    (ds.PULL_REQUEST, "pr_head_sha", "a" * 40),
+                    ds.validate_build_receipt_source(
+                        {"repo": url, "pr_head_sha": "a" * 40},
+                        expected_kind=ds.NO_EXPECTED_KIND),
+                    "读侧放行、产出侧拒绝 —— 判别式分叉了")
+        for url in (f"https://bot:{self.TOKEN}@gitcode.com/x.git",
+                    f"https://{self.TOKEN}@host?x=1"):
+            with self.subTest(url=url):
+                with self.assertRaises(mk.ReceiptError):
+                    mk.assert_repo_has_no_credentials(url, "origin")
+
+    def test_query_at_sign_remote_survives_the_whole_main_path(self):
+        """⭐ 分叉的**主流程**见证：`https://host?a=b@c` 不含凭据，必须一路走进收据。
+
+        上一条只调 `assert_repo_has_no_credentials`，盯不住 `main()` 里派生值那道预过滤
+        （`if derived_repo and dut_source.url_has_userinfo(derived_repo)`）。**只在那一处**
+        换回「只按 `/` 切 authority」的实现，上一条照样全绿，而这里 query 里的 `@` 会被
+        当成 userinfo：一个合法 remote 被判「带凭据」→ 派生值被置 None →
+        没给 `--repo` 就直接 `派生不出仓名` 退出。取材侧判它干净、收据侧判它脏，
+        同一份事实包在两条链上得到不同结论——正是 finding 要堵的那件事。
+
+        `repo_source` 是这里最灵的探针：预过滤一误伤，强度就从「事实派生」掉成
+        「派生不出、只能靠 --repo」，而 CP-F 拿这个值做逐字比对。
+        """
+        remote = "https://host?a=b@c"
+        self._git("remote", "set-url", "origin", remote)
+        out = os.path.join(self.d, "facts_query_at")
+        self.assertEqual(0, self._quiet_fetch(
+            ["--taskdoc", self.task, "--local-repo", self.repo, "--op-subdir", self.OP_SUBDIR,
+             "--base-ref", "master", "--out", out]))
+        self.assertEqual(remote, self._payload_at(out)["local_checkout"]["git"]["remote_url"],
+                         "取材侧就把它扣留了，这条见证跑不成（判别式在取材侧也分叉了）")
+
+        rc, _ = self._run(self._argv(
+            _ok_build(self.lib), source_facts=os.path.join(out, "source_facts.json")))
+        self.assertEqual(rc, 0, "合法 remote 在收据链上被当成凭据挡掉了")
+        r = self._receipt()
+        self.assertEqual(remote, r["source"]["repo"])
+        self.assertEqual("local_checkout.git.remote_url", r["source"]["repo_source"],
+                         "派生值被预过滤误伤 → provenance 强度被无声降级")
 
     def test_ssh_style_remote_url_is_not_mistaken_for_a_credential(self):
         """`git@host:path` 的 `@` 前面是用户名、不含密钥——拦它会误伤全部 SSH remote。"""
@@ -578,8 +724,7 @@ class LocalCheckoutReceiptTest(_Base):
         self.assertFalse(os.path.exists(self.receipt_path))
 
         # 反证：同一份伪造 payload 在三级门那边也是被拒的（两边判据确实是同一个）
-        import validate_acceptance_state as vas
-        self.assertEqual("__BAD__", vas._find_source_facts(
+        self.assertEqual(ds.SOURCE_FACTS_UNTRUSTED, ds.find_source_facts(
             forged_out, os.path.join(forged_out, "source_facts.json")))
 
     def test_refuses_to_record_without_executing(self):

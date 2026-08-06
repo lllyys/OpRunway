@@ -101,10 +101,32 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 - **环境确认**（`AskUserQuestion` **必由 primary 做**）：NPU 通不通（远程连时另含 VPN 开没开）、目标机按任务书硬件 × op_def 双源核定。验收只认真机；`spec.runner_form` 受控词表为 `{cpp, aclnn_py, cpp_extension}`，依次派生 `{new_example, aclnn_py, cpp_extension}`。mock/catlass 只能显式指定且不产真机裁决。
   ⚠ **执行形态先问清，两种都是一等通路，别把其中一种当通用前置**：
   - **就地跑**（当前会话本身已在目标机或其 NPU 容器里）：**不需要** `.oprunway/real-machine.env`——没有 SSH alias /
-    容器名 / 远端工作目录这一层。设 `OPRUNWAY_TARGET=local`（此时 `OPRUNWAY_SSH_HOST` **免填**，传输层走本机
-    `bash`/`cp`、不碰 ssh/scp）；`OPRUNWAY_REMOTE_DIR` **仍要给**——它是「工作根目录」，名字里的 `REMOTE` 是历史
-    遗留、不代表必须远端；`cpp_extension` 的 `OPRUNWAY_CPP_EXTENSION_DRIVER_JSON` 照给，只是 argv 里不带
-    `ssh` / `docker exec` 前缀（adapter 不内置 SSH/容器名，只执行编排层给的这串 argv）。
+    容器名 / 远端工作目录这一层。
+    ⚠ **`OPRUNWAY_TARGET` / `OPRUNWAY_SSH_HOST` / `OPRUNWAY_REMOTE_DIR` 这三个是 `new_example` / `aclnn_py`
+    专属的传输层配置，别当成通用清单**：三条 runner form 的主链里读它们的只有 `repo_adapter._ne_cfg`
+    与 `aclnn_adapter._aclnn_cfg`（catlass 的 `run_on_catlass_npu.sh` 另有自己的 `OPRUNWAY_REMOTE_DIR`，
+    但 catlass 不从 `runner_form` 派生），**当前唯一验收准入形态 `cpp_extension` 的主链一个都不读**
+    （2026-08-06 a3 真机实测：
+    `SSH_HOST`/`REMOTE_DIR` 两个都不给照样一路跑到 `acceptance.json`，`TARGET` 设 `local` 与不设产物字节级相同；
+    见 `doc/oprunway-local-source-realmachine-validation.md` §8）。
+    ⚠⚠ **这条与执行形态无关：下面「远程连」那一条里的 `OPRUNWAY_TARGET=remote` / `OPRUNWAY_SSH_HOST`
+    同样只对 `new_example` / `aclnn_py` 有意义。`cpp_extension` 要跨机/跨容器执行，唯一入口是把
+    `ssh` / `docker exec` 前缀写进 `OPRUNWAY_CPP_EXTENSION_DRIVER_JSON` 的 argv**——
+    设了 `OPRUNWAY_SSH_HOST` 也**不会**让 driver 连出去（会在本机静默跑完，是个假的「已接远端」），
+    缺了它也**不该**判 BLOCKED（那是假门）。跨机时另须确保 driver 进程那侧拿得到下面列的 vendor / SoC / toolkit 环境。
+    - 走 `cpp` / `aclnn_py`（须 `--allow-experimental-form`，只出开发级证据）时：设 `OPRUNWAY_TARGET=local`
+      （此时 `OPRUNWAY_SSH_HOST` **免填**，传输层走本机 `bash`/`cp`、不碰 ssh/scp）；`OPRUNWAY_REMOTE_DIR`
+      **仍要给**——它是「工作根目录」，名字里的 `REMOTE` 是历史遗留、不代表必须远端。
+    - 走 `cpp_extension`（正式验收）时，就地跑真正必需的是这几项（真机实测 fail-closed，缺一即拒）：
+      `OPRUNWAY_CPP_EXTENSION_REAL=1`、`OPRUNWAY_CPP_EXTENSION_DRIVER_JSON`、
+      `OPRUNWAY_CPP_EXTENSION_VENDOR_LIBRARY`、`OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT`、
+      `OPRUNWAY_SOC`、`ASCEND_TOOLKIT_VERSION`（或 `CANN_VERSION`），外加 golden 根可寻址
+      （默认 `<CWD>/.oprunway/ops`，否则用 `OPRUNWAY_OPS_DIR` 覆盖）。
+      `OPRUNWAY_CPP_EXTENSION_DEVICE` 只在**精度全过、真要采性能**时才被读到（`cpp_extension_adapter`
+      在精度未全过时提前返回），但它没有默认值、缺了就 fail-closed，**照给**。
+    - ⚠ `OPRUNWAY_CPP_EXTENSION_*` 这一族**只属于 `cpp_extension`**，`cpp` / `aclnn_py` 用不上。
+      就地跑时 `OPRUNWAY_CPP_EXTENSION_DRIVER_JSON` 的 argv 里**不带** `ssh` / `docker exec` 前缀
+      （adapter 不内置 SSH/容器名，只执行编排层给的这串 argv）——远程连时前缀就加在这里，见上面那条 ⚠⚠。
   - **远程连**（开发机 → 目标机）：SSH alias / 容器名 / 远端工作根来自 `.oprunway/real-machine.env`；
     `OPRUNWAY_TARGET=remote`（缺省）时 `OPRUNWAY_SSH_HOST` 必填。
   - 其余变量（PR head / op 子目录 / 被测仓 / vendor 名 / SoC / setenv…）**与形态无关**，两种形态都照旧每轮从任务书、
@@ -233,7 +255,9 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 **目的**：一次原子跑完 Task2 精度 + Task3 性能 + 三级门，落全套裁决工件。
 
-- **dispatch** `acc-verify-rootcause`，`dispatch_mode = run_npu`：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <spec> --mode <mode> --out reports/<op>/`（`OPRUNWAY_*` 指真实机器/路径，不写进仓）。**`<mode>` 据 `spec.runner_form` 定**：cpp runner v1 → `--mode new_example`（`OPRUNWAY_*` 见 repo_adapter._ne_cfg）；`runner_form==aclnn_py`（torch 对标）→ `--mode aclnn_py`（`OPRUNWAY_ACLNN_OPS_DIR`（ops 仓 checkout 根）/`OPRUNWAY_ACLNN_OP_SUBDIR`/`OPRUNWAY_ACLNN_VENDOR_DIR`/`OPRUNWAY_ACLNN_VENDOR_NAME`/`OPRUNWAY_ACLNN_BASE_REPO`/`OPRUNWAY_ACLNN_PR_REF`/`OPRUNWAY_ACLNN_SOC` 等见 aclnn_adapter._aclnn_cfg，且须 `OPRUNWAY_ACLNN_REAL=1` + 人工确认 build install 写**用户态 vendor 目录**（`<vendor_dir>/vendors/<vendor_name>_nn`，⚠ `_nn` 后缀由 install 自动追加）、绝不写共享 opp）。
+- **dispatch** `acc-verify-rootcause`，`dispatch_mode = run_npu`：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <spec> --mode <mode> --out reports/<op>/ --source-facts <CP-A 取材目录>/source_facts.json`（`OPRUNWAY_*` 指真实机器/路径，不写进仓）。
+  - **⚠ `--source-facts` 在验收通路上必给，缺席直接拒跑**（不是可选参数）。三级门要拿它与 vendor build receipt 的来源锚逐字对账；没有对照物时 PR 通路会沿用旧行为放过，「收据自称 `pull_request`、事实其实是 `local_checkout`」这类伪装就查不出来。传的就是 CP-A `fetch_source.py --out` 产的那份 `source_facts.json`（`completeness.status` 必须是 `complete`；`blocked`/半成品只供诊断，会被 fail-closed 拒）。
+  - **CP-E 自证材料 staging（自动，无需手工搬文件）**：验收通路开跑前，`run_workflow` 会把三份**输入原件**按字节复制进 `--out`——`spec.json`（本次实参那份 spec）、`golden.py`（`<ops_root>/<op>/golden.py`）、`source_facts.json`（上一条那份）。作用是让验收产物目录**自带「这一轮到底验的是什么」**：CP-F 的 `base_artifacts.spec` 与 golden 授权链锚 `dirname(spec)/golden.py` 因此天然落在报告目录内（不再需要跑 CP-F 前手工 staging），三级门也每次拿到显式对照物。⚠ 每轮开跑会先清掉上一轮这三份副本再重落——**别往 `reports/<op>/` 里手放同名文件**，会被清掉，而且手放的副本与本轮裁决不同源。⚠ staging **不产生新的信任**：三份都只是原件的字节副本，各自仍要过下游对账（spec ↔ cpp_extension receipt 的 `spec_sha256`、source_facts ↔ build receipt 来源锚）。⚠⚠ **`golden.py` 那一份的绑定明显更弱，如实记账**（既有问题，staging 只是让它变得可达）：首轮验收产物里**没有任何字段记过它的摘要**，CP-F 是**现场**算的。首轮跑完后有人改写 `<报告目录>/golden.py`，`golden_source_sha256` 会跟着变而无对照物可查。影响面说清楚——被冻结复测的 golden **值**（`.npy`）由 CP-F 逐字节哈希、`caseset` 又被 receipt 的 `caseset_sha256` 绑住，**裁决用的真值动不了**；失真的只是「这些真值是哪份源码算的」这一格 provenance。要真绑住须把 golden 摘要写进首轮真机工件（receipt.bindings），属真机 schema 变更、另立批次。**`<mode>` 据 `spec.runner_form` 定**：cpp runner v1 → `--mode new_example`（`OPRUNWAY_*` 见 repo_adapter._ne_cfg）；`runner_form==aclnn_py`（torch 对标）→ `--mode aclnn_py`（`OPRUNWAY_ACLNN_OPS_DIR`（ops 仓 checkout 根）/`OPRUNWAY_ACLNN_OP_SUBDIR`/`OPRUNWAY_ACLNN_VENDOR_DIR`/`OPRUNWAY_ACLNN_VENDOR_NAME`/`OPRUNWAY_ACLNN_BASE_REPO`/`OPRUNWAY_ACLNN_PR_REF`/`OPRUNWAY_ACLNN_SOC` 等见 aclnn_adapter._aclnn_cfg，且须 `OPRUNWAY_ACLNN_REAL=1` + 人工确认 build install 写**用户态 vendor 目录**（`<vendor_dir>/vendors/<vendor_name>_nn`，⚠ `_nn` 后缀由 install 自动追加）、绝不写共享 opp）。
   - **新增 form 优先规则**：`runner_form==cpp_extension` 时，上句旧 aclnn_py 描述不适用，须走 `--mode cpp_extension`，显式设置 `OPRUNWAY_CPP_EXTENSION_REAL=1` 与 `OPRUNWAY_CPP_EXTENSION_DRIVER_JSON`；driver argv 只进本地机器 profile，不写 tracked 文件。
     另须把 CP-C 产的 vendor 收据传进来：`OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT=<vendor-build-receipt.json>` 与
     `OPRUNWAY_CPP_EXTENSION_VENDOR_LIBRARY=<收据 artifact.library_path>`（两者都要**绝对路径**；`make_vendor_build_receipt.py`
@@ -284,8 +308,8 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
     - **最新状态（2026-07-26）**：用户已确认 Median 任务书里的 `aclnnMedian` / `aclnnMedianDim` 小算子拼接版本等价于 Torch 对应接口，故 spec 基线为同机 `torch_npu:torch.median`，无需再证明等价、也不改为直调单个 ACLNN。已有 custom 50/50、baseline 48/50 有效数据；2 个 BF16 case 基线失败，性能整体仍 BLOCKED。
     - **执行口径**：有 spec 指定来源的有效真实基线、且双边 scope 同为 `kernel_only` 时，才引用 `perf_report.json` 裁决；无有效基线 / provenance 缺失 / 缺 MSTX / scope 不可比 → BLOCKED，绝不自己算比值。功能/精度 oracle 与性能 baseline 分开解释。
     - **最短证据链**：任务书已明确或用户已确认实际对照语义时，直接按该事实配置 baseline，不另造证明层。性能 case 通用地从精度 caseset 选择；A3 按全部输入物理载荷之和 `<=256 KiB` 为小 shape、其余为大 shape，分类不免测。Median 的 `target_ratio=1.0` 仍逐字来自“不劣化”，非参考仓默认 0.6。
-- **run_workflow 内部一次成**（不是 orchestrator 分三段调度）：Task2 真 NPU 精度 vs numpy golden（`validator.py`）+ Task3 msprof 真 kernel-only 性能 vs 基线（`perf_compare.py`）+ **末尾统一校三级门**（`validate_acceptance_state` task1/task2/task3，读落盘 evidence 独立复核：防跑子集报 100%、防放宽阈值、防混 e2e 墙钟）。**验收门 `validate_acceptance_state.py` STATUS: FAILED → 不出 pass 裁决；仍由 `run_workflow` 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整；见 §5）。
-- **产出**：`evidence.json` / `verdict.json` / `baseline.json`（仅有基线时）/ `perf_report.json` / `acceptance.json`。
+- **run_workflow 内部一次成**（不是 orchestrator 分三段调度）：Task2 真 NPU 精度 vs numpy golden（`validator.py`）+ Task3 msprof 真 kernel-only 性能 vs 基线（`perf_compare.py`）+ **末尾统一校三级门**（`validate_acceptance_state` task1/task2/task3，读落盘 evidence 独立复核：防跑子集报 100%、防放宽阈值、防混 e2e 墙钟；三级都由编排层**显式**传 staging 出来的 `source_facts.json`，不走自动发现）。**验收门 `validate_acceptance_state.py` STATUS: FAILED → 不出 pass 裁决；仍由 `run_workflow` 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整；见 §5）。
+- **产出**：`evidence.json` / `verdict.json` / `baseline.json`（仅有基线时）/ `perf_report.json` / `acceptance.json`，外加 staging 的输入原件副本 `spec.json` / `golden.py` / `source_facts.json`（后三者是**输入**不是裁决，CP-F 与事后复跑三级门直接消费）。
 - **路由**：任何 FAIL → **dispatch** `acc-verify-rootcause`，`dispatch_mode = rootcause`：先「被测物自 build + 声明支持的 dtype + 手算 golden」**独立复现，解耦『被测算子 vs 我的 harness』再归因**——技术判定与官方口径分开、不外发、不臆断、不来回改口（Equal 血教训）。Task3 缺外部 GPU 标杆 / 口径不可比 → 走 §6 的 BLOCKED 路由，不出 pass。
   - 多输出 index 场景先读 evidence 的结构化 metrics：`index_value_consistency` 已允许 tie 时不同合法位置；
     `invalid_index_count>0` 表示 DUT 给出负数/越界下标，不得再以“重复中位数、设备可选不同位置”为由放宽。
@@ -328,6 +352,15 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   本地 root_digest）/build/runner 身份，
   冻结原 case 与实际 input bytes，产 `reports/<op>/attempts/<NNNN>/`。这里只产
   `preparation.json.acceptance_verdict=null`，不产重测裁决。
+  `--reports-dir` 传首次验收的 `--out` 即可：CP-D/CP-E 已把 `spec.json` / `golden.py` /
+  `source_facts.json` staging 进去，`base_artifacts.spec` 与 golden 授权链锚
+  `dirname(spec)/golden.py` 天然落在报告目录内。
+  ⚠ **`--reports-dir` 的实义是「受信容纳根」，不是「就是那个报告目录」**：它只用来校
+  `base_artifacts` 五个绝对路径逐个落在其内（containment，安全边界，**不许为了省事放宽**）；
+  真正的报告目录由 `caseset.json` 所在目录派生，attempt 也落在那里。
+  ⚠ 老验收产物（2026-08-05 staging 落地之前跑的）目录里**没有** `spec.json` / `golden.py`，
+  F2 会报 `drift_blocked:base_golden_source_missing`。**不要手工拷一份凑数**——那样 spec/golden
+  与首轮裁决不再保证同源；要复测就用 `cpp_extension` 重跑一轮完整验收当新基线。
   冻结包还必须包含 golden 授权链实际引用的任务书快照/来源文件；只有
   `golden.py` 和 `.npy` 而缺少 contract 引用的 snapshot，只能得到
   `blocked_golden_unauthorized`，不得说明新精度标准已对最终裁决生效。

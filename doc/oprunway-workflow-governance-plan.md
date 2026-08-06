@@ -25,6 +25,281 @@
 ---
 
 > **📍 交接入口：`doc/oprunway-session-handoff-2026-08-05.md`**（实施顺序、已知坑、待办都在那）
+> ⚠ 该 handoff 已被 `doc/oprunway-session-handoff-2026-08-05-evening.md` 接替（仓根 `AGENTS.md` §5.6），
+> 上面这行只作历史指路。
+
+---
+
+## 分批判定（2026-08-05）
+
+> **本节是复核结论，不是方案修订。** 下面每条都**读了现在的代码**核过、给了 `file:line`；
+> 原方案正文（§0 起）一字未改，仍作历史材料保留。
+> ⚠ 判定与正文冲突时**以本节为准**——正文写于本轮之前，那之后本地来源成了一等通路、
+> `runner_form` 收敛到 `cpp_extension`、`vendor_build_receipt` 产出方落地、CP-F 跑通、CP-B0 任务书输入校验门落地。
+>
+> ⚠ **本节的 `file:line` 是 2026-08-05 复核当时的快照，且当时 `plugin/` 有并行改动在途。**
+> 实测撞上过：复核开始时 `run_workflow.py` 是 735 行、`source_facts` 零命中；复核过程中被另一路两次改动
+> （735 → 888 → 945 行），并加上了验收通路的 `--source-facts` 必填门（下文 A-① / D0 两节已按新事实重写）。
+> **实施前请按关键词重新 grep 一遍，不要直接信这里的行号**；本节对 `run_workflow.py` 已尽量改用**符号名**而非行号定位。
+
+### 判定总表
+
+| 批次 | 目标 | 判定 | 一句话 |
+|---|---|---|---|
+| **A-① 确认门** | 5 | ⬜ **仍成立且该做**（前提有变，实现路线要改写） | 一行代码都没有；CP-B0 已把同构机制做出来了，照抄即可。⚠ 但方案里那道门**自身设计就漏**（`--required-items` 可选 → 空集恒真；且「人确认」身份不可证），见下文 Critical 表第 4、5 条 |
+| **A-② 执行路径** | 6 | ⬜ **仍成立且该做** | 一行代码都没有；现有 renderer 结构上覆盖不到「没走完」的形态 |
+| **A-③ 耗时 + 偏离监控** | 7 | ⬜ **仍成立且该做**，但**证人已失效** | 耗时打点仍是零；A.5 的实证证人 `preflight_aclnn` 已不在准入通路上 |
+| **B-1 numpy 流钉账本** | 3（一半） | ✅ **已落地**，且实现**有意否掉**了方案的「主.次」建议 | 反例推翻了方案的粒度建议，别按方案回改 |
+| **B-2 用例数据固化复用** | 3（另一半） | ⬜ **仍成立且该做** | `case_data_digest` / `case_data_manifest` 全仓 0 命中 |
+| **C 轴集** | 4 | ⬜ **仍成立且该做，优先级应上调** | 退化的 shape 轴现在压在**唯一准入通路**上 |
+| **D0 spec 来源门** | 1（前置） | ⬜ **仍成立且该做，全批最高价值**（⚠ 根因须重述） | 来源门**已有**（`--source-facts` 必填），但它锚 ELF 出身；`spec_origin` 收据仍 0 命中，spec 本身无来源绑定 |
+| **D 样例隔离** | 1 | ⚠ **前提已变**：依赖清单漂了，**且方案「有 D0 就可推后 D」的推理本判定推翻** | 方案记 12 个测试，实测触及 `samples/` 的已有 15 个、其中真正依赖 `samples/specs/` 的是 11 个；D0 顶不了样例物理隔离 |
+
+---
+
+### A-① 确认门（目标 5 · 方案 §A.4）→ ⬜ 仍成立且该做
+
+**没做的证据**：
+
+- `grep -rn "execution_plan_confirmation\|render_execution_plan\|required_confirm_items" plugin/` → **0 命中**；
+  `plugin/acc-common/` 下既无 `render_execution_plan.py` 也无 `validate_execution_plan_confirmation.py`；
+- `run_workflow.py` 里 `execution_plan_confirmation` / `case_plan` / `preparation_receipt` 均 **0 命中**
+  —— 方案 §A.4「硬门落点」要的入口门①（进 Task1 正式生成前）、出口门②（写 `acceptance.json` 前）**两处都不存在**。
+
+⚠ **别把「来源门」误当成「用例计划确认门」**：`run_workflow.py` 现在**已有**一道来源必填门——
+验收通路上 `--source-facts` 缺席即拒跑（`if is_acceptance and source_facts is None`），
+三份输入原件按字节 staging 进 `--out`（`_read_acceptance_inputs`），
+且每一级门都显式传该副本、不许退回自动发现（`gate._GATES[st](..., source_facts_path=staged_source_facts)`）。
+但它锚的是**被测 ELF 的出身**（build receipt ↔ `source_facts`），**不管**「这份用例计划人看过没有」。
+A.4 要的那道门与它**不重叠**，别因为「已经有 `--source-facts` 门了」就以为 A.4 已被覆盖。
+
+**⚠ 前提变了（是加分，不是取消）**：CP-B0 已落地，它就是 A.4 想要的那套机制的**现成同构件**：
+
+| A.4 要的 | CP-B0 里已有的 | 位置 |
+|---|---|---|
+| 内容寻址确认收据 + domain | `_RECEIPT_DOMAIN = "oprunway/taskdoc-validation-receipt/v1"` | `validate_taskdoc_input.py:41` |
+| ⚠#1「绑定值由校验方**当场重算**，不读自报」 | `evaluate()` 自己 `_load_taskdoc` 算 `taskdoc_bytes_sha256`、自己算 `validation_digest` / `contract_digest` | `validate_taskdoc_input.py:438-446` |
+| ⚠#2「受控词表不许被放宽」 | `contract_path` 只供进程内调用、CLI 不暴露，原话「否则一份放宽的契约就能把整道门降级成 PASSED」 | `validate_taskdoc_input.py:413-414` |
+| 「人确认 → 写回 decisions → 重跑脚本 → fail-closed」闭环 | `decisions`（`source: "user"`）+ `NEEDS_USER` 状态机 | `plugin/AGENTS.md` CP-B0 节 |
+
+⇒ **估工从「从零造两套脚本 + 收据 schema」降为「照 CP-B0 复制一套、把绑定对象从任务书换成 `case_plan`」。**
+
+**⚠ 本轮新发现（比原方案记的更严重）**：**CP-B0 自己也只在 NL 编排层被调用**——
+`grep -c "taskdoc_validation" plugin/acc-common/run_workflow.py` → **0**。
+也就是说 A.4 想堵的那条绕过路径（绕开编排层直接调 `run_workflow.py`）**现在同样绕过 CP-B0**：
+跳过 `validate_taskdoc_input.py`，直接拿一份 spec 开跑，`acceptance.json` 照样写得出来。
+
+⚠ **但别把这条当成「A.4 顺手就修了」**：方案 §A.4 的判据只消费 confirmation / case_plan / spec / source_facts，
+**一个字都没提 `taskdoc_validation_receipt.json`**。照方案原样实现，CP-B0 的执行层缺口**还在**。
+正确处置是：**A.4 落地时一并给 CP-B0 建门**——判据里显式读 `work/taskdoc_validation_receipt.json`，
+当场复核它的 `status ∈ {PASSED, PASSED_WITH_PENDING}` 与四个绑定（`taskdoc_bytes_sha256` /
+`source_facts_digest` / `validation_digest` / `contract_digest`）对上**当前**文件。
+不加这一步，CP-B0 就仍然只是编排层纪律——而本方案 §0 的全部教训就是「纪律会被绕过」。
+
+**估工**：中。2 个新脚本 + 2 处门 + 方案 A.8 已列全的 16 条测试（其中负路 9 条是重点）。
+
+### A-② 执行路径文档（目标 6 · 方案 §A.7）→ ⬜ 仍成立且该做
+
+**没做的证据**：`plugin/acc-common/` 下无 `render_execution_path.py`；只有 `render_acceptance_markdown.py`，
+而它按设计只在 `acceptance.json` 之后调用——**结构上覆盖不到「流程没走完」的形态**，而那正是 A.7 的全部价值所在。
+它还依赖 A.3b 的 `run_state.json`（`grep -rn "run_state" plugin/` → 0 命中）。
+
+**估工**：渲染器本身小，但地基（A.3b）不小，合并计入 A-③。
+
+### A-③ 耗时 + 偏离监控（目标 7 · 方案 §A.3b / §A.5 / §A.6）→ ⬜ 仍成立，但**证人已失效**
+
+**没做的证据**（复核方案 A.1 那张「零」，本轮仍是零）：
+
+- `grep -n "perf_counter\|monotonic()" plugin/acc-common/*.py | grep -v test_` → **0 命中**；
+- `gate_attempts` / `run_state` 全仓 **0 命中**。
+
+**⚠ 前提变了一半——故障模式还在，证人换了**：A.5② 的实证依据是「`preflight_aclnn` 连挂 4 次无人管」，
+而 `preflight_aclnn` **只服务 `aclnn_py`**，该形态自 §4 收敛后已产不出验收裁决
+（`run_workflow._ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})`）。
+`run_workflow.py` 里那道 `verify_aclnn_harness.validate_receipt` 的 CP-C 信任门也**只在 `mode == "aclnn_py"` 时才跑**
+（`run_workflow.py:548` 起的 `if mode == "aclnn_py"` 分支），**同样不在准入通路上**。
+
+准入通路（`cpp_extension`）上会被反复重试的确定性环节是另一组：
+`make_vendor_build_receipt.py`（真跑 build，产不出即停 CP-C）→
+`cpp_extension_adapter._validate_vendor_build_receipt`（`cpp_extension_adapter.py:281` 起）→
+三级门里的 build receipt / 来源锚对账（`validate_acceptance_state.py:789` 起）。它们**同样**可以被连试 N 次然后放弃转去写报告。
+
+⇒ **阈值机制照做，但「受监控的确定性脚本清单」必须按上面这组重列。**
+⚠ 照方案原文去数 `preflight_aclnn` / `verify_aclnn_harness` 的话，
+`cpp_extension` 的 build-receipt 连续失败**一次都不会进计数**——阈值门形同虚设，正是本仓最贵的那类假门。
+
+**估工**：中偏重。A.3b 的 `run_state` schema + 原子写 + `self_digest` + 出口门 + `prior_runs` 归档，
+是 A 批三件产物里最重的地基；A-① / A-② 都压在它上面。
+
+### B-1 numpy 随机流钉账本（目标 3 一半）→ ✅ 已落地
+
+| 项 | 位置 |
+|---|---|
+| 产：`case_plan.planner_binding` 落 `numpy_version` / `numpy_stream_pin` / `numpy_stream_pin_granularity` | `gen_cases.py:3065-3067` |
+| 消费：复用侧对账 | `validate_preparation_state.py:618-653` |
+
+**实现比方案更细**：方案原文只说「不符 → fail-closed 报错」，实现**把三种「对不上」分开判**——
+取不到当前 pin → `BLOCKED`；账本**没有**该键 → `MISS`（老工件正常过期）；有键但**形态非法** → `BLOCKED`（账本不可信，重跑救不了）；
+值不等 → `MISS`。这比方案原文更符合仓规的 fail-closed 分层，**别按方案回改成一锅炖**。
+
+**⚠ 实现有意否掉了方案 B.2 那张表的「建议采用主.次」**：`gen_cases.py:157-166` 记了反例——
+numpy **1.18.4** 在补丁版里改过 `Generator.integers` 的取值，而 1.18.3/1.18.4 的「主.次」pin 都是 `1.18`，
+**该粒度探测不到已经真实发生过的流变更**。故 `_NUMPY_STREAM_PIN_GRANULARITY = "exact"`（`gen_cases.py:166`）。
+**方案里的「建议」已被推翻，看到不一致别去「修正」实现。**
+
+**⬜ 残留小缺口（低优先）**：方案 B-1 还要求 `caseset.json` **顶层**加 `numpy_version`，实测 `gen_cases.py:2945` 起的
+caseset dict **没有**该字段。判定：**不构成 fail-open**（复用门读的是 `case_plan`，不读 caseset），
+只是直接消费 `caseset.json` 的人少一条诊断线索。可顺手补，也可不补——补的话属 caseset 字节变更，要同步重取字节 pin 基线。
+
+### B-2 用例数据固化复用（目标 3 另一半）→ ⬜ 仍成立且该做
+
+**没做的证据**：`grep -rn "case_data_digest\|case_data_manifest" plugin/` → **0 命中**。
+方案要的骨架（`validate_preparation_state.evaluate → REUSABLE | MISS | BLOCKED`）确实还在，`.npy` 那一层没接上去。
+
+**估工**：中。方案 §6 说它依赖 A（固化复用的对象是「已确认过的 caseset」）——这条依赖**仍然成立**。
+
+### C 轴集（目标 4）→ ⬜ 仍成立且该做，**优先级应上调**
+
+**没做的证据**：`doc/oprunway-case-axis-design.md` 不存在。
+
+**现状按代码复核（不是凭方案文字）——方案 C.1 那张表逐条仍然成立**：
+
+| 方案 C.1 的说法 | 现在的代码 | 结论 |
+|---|---|---|
+| torch_parity 的 shape 「退化成 `(leading,)+(1,)*(rank-1)`」 | `gen_cases.py:949` 逐字就是这一行；`shape_profiles` 只让人配一个 `leading_dim` 正整数（`:902` 强制 `set(row) == {"name","leading_dim"}`） | ✅ 仍成立 |
+| torch_parity 值域「只有 uniform」 | `gen_cases.py:931-937` 硬限 `kind == "uniform"` | ✅ 仍成立 |
+| legacy 有 11 常规 shape + 2 大 shape + 2 值域 | `_REG_SHAPES`（11 条，`:1507`）、`_LARGE_SHAPES`（2 条，`:1516`）、`_VALUE_REGIMES`（2 项，`:1520`） | ✅ 仍成立 |
+| 完整矩阵「宁可 raise 也不静默缩形」 | `gen_cases.py:939-943`（`case_target` 必须精确等于矩阵大小）、`:961-964`（超预算 raise） | ✅ 仍成立 |
+
+**⚠ 优先级要上调，理由是前提变了**：方案写作时 torch_parity 只是「两个档之一」；§4 收敛后
+`cpp_extension` 是**唯一准入形态**，而「任务书对标 torch」的场景走的正是 torch_parity。
+**这条退化的 shape 轴现在压在唯一能出裁决的通路上。**
+
+佐证要如实说，别越界：仓根 `AGENTS.md` §4.5 并列的两个 caseset **共用同一组三档 shape 轴**
+（`31 / 2047 / 262144` 加尾随 1）；其中 **1152 caseset 已证 51 条失败全部落在 `[262144,1,1,...]`**（本方案 §C.1）。
+⚠ **1344 caseset 的逐 case 失败分布本仓没有证据**——不得写成「两组失败都集中在长轴」。
+轴集设计**不得**据此认定长轴以外已排除，否则会把一个未知分布当成已排除，反而做出覆盖盲点。
+
+**⚠ 依赖关系要澄清**：方案 §6 写「C 依赖 A」，理由是「轴集决定权要交给确认单承载」。
+那条只约束**决策怎么落地**，不约束**设计说明什么时候写**——C.3 的交付物是一份交人评审的 doc，**可以先于 A 起草**。
+
+**估工**：设计说明 0.5–1 天，**不动 `gen_cases` 代码**（方案 §5 的边界，本判定维持）。
+
+**给下一个 lane 的起草提纲（省掉重新盘点的功夫）**：
+
+1. **轴清单与各自当前规模**：dtype 8 · rank 1–8 ·
+   shape（legacy 是 **11 基础阶梯 `_REG_SHAPES` + 2 大 shape `_LARGE_SHAPES`**，
+   ⚠ **另有 2 条按 rank 条件加入的 `_EXT_RANK_SHAPES`**（`gen_cases.py:1515`，5 维一大一小，
+   由 `_shape_ladder()` 在 rank 约束点名基础阶梯覆盖不到的 rank 时才补）——所以**没有「固定 13 条」这回事**；
+   torch_parity 则只有 3 条且退化）· 值域 regime（legacy 2 / torch_parity 1）·
+   特殊场景（legacy 7 类 / torch_parity 0）· attr（spec 驱动）；
+2. **统一后规模粗算**：方案 §C.2 估 `8 dtype × 8 rank × 13 shape × 2 regime × 7 attr ≈ 11648`，
+   相对现状 torch_parity 的 `8×8×3×7 = 1344` 约 **8.7 倍**（数字与方案一致，已复核）。
+   ⚠ **这个数只作量级参考**：它按「13 条固定 shape」算，而实际 shape 集合是 rank 条件相关的
+   （见上条），准确规模要在**rank 过滤规则与 `_EXT_RANK_SHAPES` 补入规则定下来之后**才算得准；
+3. **逐轴给「必须全交叉 / 边际覆盖 / 按 `operator_class` 收窄」三选一并论证**——
+   方案 C.2 的四个问题原样保留，**不预设结论**；
+4. **golden 成本估算**：`_cost_budget` 是硬约束，现行答案是 raise（`:961-964`），
+   「无遗漏」与「算得完」冲突时的裁法要人拍板；
+5. **收窄要能被看见**：`operator_class` 的合法收窄（structural 类不产 NaN/Inf）必须在确认单上讲清楚，
+   否则人看到「没有 NaN 用例」会误判成漏测——这条把 C 和 A-① 接起来。
+
+### D0 spec 来源门（目标 1 前置）→ ⬜ 仍成立且该做，**全批最高价值**
+
+**没做的证据**：`grep -rn "spec_origin\|spec-origin" plugin/` → **0 命中**。
+
+**⚠ 根因要按现在的代码重述，方案原文那句已不准确**：`run_workflow.py` 现在**已经会问来源了**——
+验收通路强制 `--source-facts`、并把它交给三级门与 vendor build receipt 逐字对账（见 A-① 节引的行号）。
+所以缺口**不是**「流程不问来源」，而是：
+
+> 现有来源门锚的是 **被测 ELF 的出身**（build receipt ↔ `source_facts`），
+> **完全不管「这份 `spec.json` 是照哪一份任务书 / 哪一份被测事实抽出来的」**。
+> `run_workflow.py` 里 `correspondence` / `preparation_receipt` / `spec_origin` 均 **0 命中**。
+
+⇒ **手写一份 spec + 一份合法 `source_facts` + 对应的 vendor receipt，当前仍能开跑。**
+实施时**别再建一道读 `source_facts` 的门**（那已经有了），要建的是 **spec ↔ `source_facts` / 任务书快照的绑定**，
+并复用现有的读取与校验入口。
+
+### D 样例隔离（目标 1）→ ⚠ 前提已变（依赖清单漂了 **且不能靠 D0 顶替**）
+
+方案 §D.1 自带告诫「实施前必须重跑这个 grep」。**本轮重跑了**：
+
+⚠ **数量还在涨，且方案那个笼统计数没法用来估代价**——`samples/` 下三个子目录被不同测试依赖，
+D.3 三条路只动 `samples/specs/`，所以要**按子目录分类**，不能只数一个总数。本轮实测（`plugin/acc-common/` 下）：
+
+| 依赖的子目录 | 触及的测试数 | 与 D.3 的关系 |
+|---|---|---|
+| `samples/specs/` | **11**（`test_catlass_adapter` / `test_gen_cases_case_profile` / `test_gen_cases_dry_run_ledger` / `test_gen_cases_dtype_attr` / `test_gen_cases_multi_output` / `test_gen_cases_perf_shape_classification` / `test_ne_transport` / `test_perf_msprof` / `test_run_workflow_mode` / `test_spec_isolation` / `test_validate_acceptance_state`） | ← **D.3 三条路真正要改的就是这 11 个** |
+| `samples/golden/` | **7** | D.3 三条路都不动它 |
+| `samples/runners/` | **1**（`test_runner_lookup.py:140`，断言错误文案里必须出现 `samples/runners`） | 与 D.3 无关 |
+| 合计触及 `samples/` | **15** | 方案 §D.1 记的是 **12**；方案原式 `grep -rln '"samples"'` 现在也已是 **14** |
+
+⚠ **纠正一处本判定初稿的错误**：初稿说 `test_runner_lookup.py`「走 D.3 的 A/C 路都会撞上」——**不成立**。
+它引的是 `samples/runners`，而 D.3 三条路操作的是 `samples/specs`，两者是不同子目录，
+只迁 `samples/specs` 时 `test_runner_lookup.py` 照样绿。
+⇒ **D.3 的代价按「11 个 specs 依赖方」重算**（方案写 12，实为 11 个真正相关 + 若干无关计数）；
+`test_gen_cases_multi_output.py` 的动态 `f"{path}.spec.json"` 仍是最容易断的那处，方案 §D.1 的这条提醒有效。
+
+`test_spec_isolation.py` 那条「专门为防误删而写」的断言仍在（`:36-42`，`assertTrue(os.path.isdir(samples))`
++ `assertTrue(glob(*.spec.json))`），方案 §D.1 的描述准确。
+
+**⚠ 方案 §D.2 / §6 那条「有了 D0，D 就降为顺手清掉诱饵」的推理不成立，本判定推翻它。**
+理由：按 §D0 的设计，`spec_origin_receipt.json` 是**由产 spec 的那个 `acc-spec-extractor` 自己产的**
+（§D0 原文 `producer: {tool: "acc-spec-extractor", dispatch_mode: "extract_spec"}`）。
+那么只要 extractor **误把 `samples/specs/*.spec.json` 抄了一份当输出**——不需要任何恶意——
+它会顺手给这份副本产一张**完全合法**的收据：spec sha256 对、任务书快照 sha256 对、`source_facts_digest` 对。
+D0 的入口门、出口门和 §D0 列的 4 条测试**全会绿**。这正是本仓定义的**假门**（删掉真正的抽取逻辑，门测试照样绿）。
+
+⇒ 两条结论：
+
+1. **D 的优先级不得从 D0 推导**。样例的**物理隔离**是与 D0 正交的独立措施，D0 顶不了它；
+2. D0 的测试要补一条负路：**「extractor 交回一份样例副本、且自带合法收据 → 仍须被拒」**。
+   拒法只能靠 spec 内容/来源本身（如 fixture 内容 hash 命中即拒，即方案 D.3 的 A 路，或 D.3 的 B 路标记位），
+   **不能靠收据在不在**。
+
+---
+
+### 当初 11 条审修意见里 3 条 Critical 的现状（逐条自核）+ 本轮新发现 2 条
+
+⚠ **这是设计草案的审计意见，不是待办清单。照单改等于让审计意见替代设计决策——下面只给「还成不成立 + 建议改法」，不代表本节授权修改。**
+
+其余 8 条已在原方案正文里以「codex 审出」显式吸收（§A.3b 的账本合并与换目录处置、§A.4 的两条 ⚠、
+§A.6 的不进 payload、§B.2 的锁到哪一级、§D.1 的漏 5 个、§6 的伪串行、§D0 认领 D5）。
+**这 3 条 Critical 是只被记下、没被改掉的**；第 4、5 两条是本轮复核时新逮到的，性质相同（门看着有、实际拦不住）：
+
+| # | 意见 | 现状 | 能构造出的失败场景 | 建议改法 |
+|---|---|---|---|---|
+| 1 | `run_id` 未纳入 `source_facts_digest` | **成立，但原始表述把场景说宽了**（本轮自核收窄）。§A.3b 定义 `run_id = sha256(spec_sha256 + case_plan_digest + out_dir_realpath)`；字段表对 `run_binding.source_facts_digest` **只校 64 位 hex 形态** | ⚠ **「合规换来源」这条路走不通**：`case_plan` 已绑 `preparation_inputs.source_facts_digest`（`gen_cases.py:3274-3275`）且该字段进 `ledger_digest`，来源一变、正常重跑 `gen_cases` 后 `case_plan_digest` 就变，`run_id` 本来就会变；`validate_preparation_state.py:561-574` 也会判 `MISS`。**真正可构造的是绕过准备态复核**：拿 PR-A 的**旧** `case_plan` 配 PR-B 的 `source_facts`（`run_workflow.py` 里 `preparation_receipt` 0 命中，没有任何东西强制它 `REUSABLE`）→ `run_id` 不变 → 归档不触发 → A 的 `cp_states` / `gate_attempts` 被当作本轮状态，执行路径文档把 A 的耗时和产物写成 B 的 | **修在配对那一层，不是修 `run_id`**：A.4 的确认门须交叉核 `case_plan.preparation_inputs.source_facts_digest == 当场重算的当前 `source_facts` digest`（或硬要求当前 `validate_preparation_state` 为 `REUSABLE`）。把来源摘要加进 `run_id` 只能重置状态、**挡不住错误配对进入执行**，只算防御加固 |
+| 2 | D0 出口门未校来源摘要 | **仍成立，可直接构造** | 同一份任务书快照 + 同一份 spec 字节，被测来源换成另一个 PR / 另一份本地 checkout → 旧收据原样复用通过。spec 来源门对「这份 spec 是照哪一份被测事实抽的」**毫无约束** | 判据补第三条：`source_facts_digest == 当场重算的 source_facts digest` |
+| 3 | 「手写 spec 必被拒」不成立 | **仍成立，可直接构造**；⚠ 但本轮自核认为**「只降宣称、机制照做」不够**（原判定写轻了，此处修正） | `spec_origin_receipt.json` 是**无密钥**的内容寻址 JSON，payload 每一项都是任何拿得到这些文件的人当场可算的 → 能手写 spec 的人就能手写配套收据。**更要命的是不需要恶意**：收据由产 spec 的同一个 NL extractor 产出，extractor 误抄一份 `samples/specs/*.spec.json` 也会顺手配一张完全合法的收据（详见上文 D 节） | ①（必须）改宣称：§D0 的「都没有这份收据 → 被拒」改成「**随手 `cp` / 顺手手写的 spec 会因缺收据被拒；刻意伪造、以及 producer 自己抄错，都拦不住**——本门是**完整性绑定**，不是**来源证明**」，§7 验收标准 #9 同步改成「**无收据**的手写 spec 被拒」；②（必须）**不得**据此推后批次 D，样例物理隔离作为独立硬措施保留；③（可选，成本高）若真要证明执行来源，收据得由 NL producer **之外**的确定性包装器产出，绑输入、输出与 dispatch 证据。⚠ 口径照抄 §A.3b 对 `self_digest` 的诚实边界，方案里已有先例 |
+| **4** | **本轮新发现**：A.4 的确认门自身可 fail-open | §A.4 的 CLI 把 `[--required-items <rel.json>]` 写成**可选**，判定顺序 ④ 只做 `set(confirmed_items) ⊇ set(required_confirm_items)` 的**集合包含**判断，且没有一条要求核 `required_confirm_items.case_plan_digest` 等于当前 plan | 省掉 `--required-items`，或塞一份 `items: []` 的旧文件 → ④ 对空集**恒真** → dtype 缺口、`dropped_combo_classes` 一项没被确认也能进 Task1，出口门同样放行。**门看着有、实际拦不住** | `--required-items` 改**必填**，缺失即退 2；`items` 为空亦拒；须核其 `case_plan_digest == 当场重算值`；最好由校验方**从当前 case plan 独立派生**必确认项，而不是读渲染器给的清单。A.8 负路补三条：**缺 required-items / 空 items / 拿旧 plan 的 required-items** |
+| **5** | **本轮新发现**：A.4 的「人确认」身份**不可证**（与第 3 条同源，方案只对 D0 认了、对 A.4 没认） | §A.4 判定顺序 ⑤ 只要求 `confirmed_by` 非空且不等于自动填充占位符。确认收据同样**无密钥**、envelope digest 人人可重算 | 编排层自己写 `confirmed_by: "lys"`、把 `required_confirm_items` 全勾上、重算 digest → 入口门与出口门都判 `CONFIRMED`，**而用户从未看过那份确认单**。目标 5 想要的「停下来让人确认」在机器层面根本没发生 | 二选一，**必须选一个**：①（强）确认绑定一个自动化进程造不出的外部凭据（运行时用户交互事件 / 签名令牌），两道门都校它；②（诚实降级）承认它只是**内容完整性收据**，在方案里写明「本门能保证『确认单与当前 case_plan/spec/source_facts 一致』，**不能保证『人真的看过』**」，并把目标 5 的验收标准相应改写。⚠ 现状是**既没做 ① 又宣称成人确认门**，这正是本仓定义的假门。⚠ 同一结构性限制也适用于已落地的 CP-B0 `decisions`（`source: "user"` 是自报字段）——**这里只作如实记账，不构成对 CP-B0 的改动要求** |
+
+---
+
+### 本轮能不能做掉（逐个评估）
+
+| ⬜ 批次 | 本轮能做吗 | 为什么 | 估工 |
+|---|---|---|---|
+| A-① / A-② / A-③ | ❌ **不能** | 全部要改 `plugin/acc-common/`（新脚本 + `run_workflow.py` 两处门 + 测试），而**本 lane 的文件范围只有仓根 `AGENTS.md` 与两份 doc**，`plugin/` 由并行 lane 持有，同轮动会撞车 | A.3b 地基 ~1.5 天；A-① ~1 天；A-② ~0.5 天 |
+| B-2 | ❌ **不能** | 同上（改 `gen_cases.py` + `validate_preparation_state.py`），且方案 §6 的「依赖 A」仍成立，A 没落地就做会返工 | ~1 天，须在 A 之后 |
+| C | ❌ **本轮不落地**（但已把成本降到最低） | 交付物是**新建** `doc/oprunway-case-axis-design.md`，同样不在本 lane 认领的三份文件里；新增一份要交人评审的设计文档应单独立项。**已把起草提纲与规模估算写进上面的 C 节**，下一个 lane 可直接照着写 | 起草 0.5–1 天，不动代码 |
+| D0 | ❌ **不能** | 改 `run_workflow.py` + 新脚本 + 测试 | ~1 天（可复用 A-① 的收据校验代码；⚠ 落地时必须同时修掉上表第 2、3 条） |
+| D | ❌ **不能**（文件范围），⚠ **但不得再当「可整批推后」** | 依赖清单要按子目录重算（触及 `samples/` 的 15 个测试里，真正依赖 `samples/specs/` 的是 11 个），否则动手会连带拆掉回归 pin。⚠ 方案 §6「有了 D0，D 降为顺手清掉诱饵」的理由**已被本判定推翻**（见上文 D 节）：D0 的收据由产 spec 的同一个 NL producer 出，producer 抄错样例时收据照样合法 ⇒ D 是与 D0 正交的独立措施 | 走 B 路（标记位）~0.5 天；走 A/C 路 ≥2 天且要重取字节 pin |
+
+**推荐下一轮顺序**（在原方案 §6 基础上按本次判定微调）：
+
+```
+A-③ 地基（run_state）──► A-① 确认门 ──► A-② 执行路径
+                              └────────► D0（复用收据校验代码，同时修掉 3 条 Critical 的 #2 #3）──► D
+C 设计说明   ← 可即刻起草，不必等 A（见上文 C 节的依赖澄清）
+B-2          ← 依赖 A
+B-1          ← ✅ 已完成，无需排期
+```
+
+---
+
+> 以下为**原方案正文**（写于本轮之前，一字未改，作历史材料）。与上面「分批判定」冲突时以判定为准。
 
 ---
 

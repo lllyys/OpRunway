@@ -60,8 +60,17 @@ export OPRUNWAY_PLUGIN_ROOT="$(git rev-parse --show-toplevel)/plugin"
 
 ```bash
 python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py" \
-  <spec.json> --mode <mode> --out <报告目录>
+  <spec.json> --mode <mode> --out <报告目录> \
+  --source-facts <CP-A 取材目录>/source_facts.json
 ```
+
+⚠ **`--source-facts` 在验收通路上必给，缺席直接拒跑**（不是可选参数）：三级门要拿它与 vendor build receipt
+的来源锚逐字对账，缺对照物时「收据自称 `pull_request`、事实其实是 `local_checkout`」这类伪装查不出来。
+它拒在 `os.makedirs` / staging / Task1 **之前**，不留半个产物目录。
+路径就是 **CP-A 取材那一步 `fetch_source.py --out <取材目录>` 产的那份**（`completeness.status` 须为 `complete`），
+**与 `--out <报告目录>` 不是同一个目录**——报告目录里那份是本轮 staging 出来的副本，是产物不是输入。
+非验收通路（`mock`、加了 `--allow-experimental-form` 的 `cpp` / `aclnn_py`）**不受此强制**：那条路
+物理上不产验收裁决，也没有来源锚要对账。
 
 常用脚本：
 
@@ -116,7 +125,7 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 | 通路 | 真机走到哪一步 | 结论 |
 |---|---|---|
-| `cpp_extension` | Median PR6429 跑通完整 torch_parity 矩阵：1152 例、`gate.passed=true` | 当前唯一有完整矩阵背书的通路 |
+| `cpp_extension` | Median 已跑通完整 torch_parity 矩阵，`gate.passed=true`。⚠ 这里有**两个不可比、来源身份也不同**的 caseset（PR 通路 1152 / 本地通路 1344），并列记在 **§4.5**，引用必须点名 spec 与来源 | 当前唯一有完整矩阵背书的通路 |
 | `aclnn_py` | 只有历史 Median 60/60 | 那是**旧 caseset** 的结果；迁到 torch_parity + `cpp_extension` 后必须重跑，旧 PASS 不得沿用 |
 | `cpp`（`new_example`） | IsClose、Sign 已坐实 | dtype 闭环只到 fp32/fp16/bf16，覆盖不够 |
 
@@ -150,14 +159,65 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 - `cpp_extension` 不重编 op-plugin，也不把 op-plugin 当 DUT；它只复用官方 C++ Extension 接入机制，
   并须以独立构建收据机校绑定完整 PR head、构建命令和实际加载的 vendor ELF；
-- Median + PR6429 当前真机精度基线为 `cpp_extension` 的 torch-parity 完整矩阵：
-  1152 例中 1101 PASS、51 FAIL，`gate.passed=true`，确定性裁决为 `FAIL(精度)`；
-  此结果取代上一轮 1344 例中 1286 PASS、58 FAIL 的历史 checkpoint；
+- Median + PR6429 的 `cpp_extension` torch-parity 真机精度结果**并列记两个 caseset**（1152 与 1344），
+  **不存在单一的「Median 精度基线数字」**；两组数各自的 spec 出处、矩阵构成与引用纪律见 **§4.5**；
 - `mock`、`catlass`、`catlass_mock` 不能从 `runner_form` 派生，只能显式用于局部开发或对应通路；
 - mock 通路物理上不产 `acceptance.json` 或 `verdict.json`；
 - `run_workflow --mode` 的 argparse 默认值是 `None` = **不指定，按 spec 派生**；
   编排层**不得**自己显式传 `new_example`（spec 是 `cpp_extension` 时会当场撞 mode 不匹配门）；
 - runner form 只决定执行形态，**不能反推任务书指定的实际性能标杆**；每份任务书的 baseline 仍须单独核实。
+
+### 4.5 Median 精度基线：两个 caseset 并列记，不挑「正统」（2026-08-05 口径定案）
+
+`cpp_extension` 通路的 Median 真机精度结果长期有**两组数**在混引。它们**不是同一个 caseset、彼此不可比**。
+
+| caseset | spec 出处 | 矩阵构成（仓内可证部分） | 例数 | PASS | FAIL | `gate.passed` | 确定性裁决 | 本仓留档的来源锚 |
+|---|---|---|---|---|---|---|---|---|
+| **①「仅按维」** | 真机当轮 per-run spec，**未入仓** | `8 dtype × 8 rank × 3 规模 × 6 属性`（cannbot 仅按维 overload） | **1152** | 1101 | **51** | `true` | `FAIL(精度)` | PR 通路（`local_checkout` 2026-08-05 才落地，此前只此一路），本仓一贯记为 `cann/ops-nn` PR6429 |
+| **②「按维 + global」** | 仓内 tracked 样例 `plugin/samples/specs/median.spec.json` | `8 dtype × 8 rank × 3 shape × 7 attr`（1 global + 6 by-dim） | **1344** | 1286 | **58** | `true` | `FAIL(精度)` | ⚠ **本仓留档的那次是 `local_checkout`**，锚是 `root_digest=c8867ce09f6e…`；**不是 PR 锚**（见 §9.3） |
+
+⚠ **两条 caseset 的来源身份不同，别合并成一句「PR6429 的结果」**：② 本仓留档的那一轮走的是本地 checkout 通路，
+它的 `local_checkout.git.head_sha` **恰好**等于 MR 6429 的 head，但那是**信息字段、不是 provenance 锚**
+（`doc/oprunway-local-source-realmachine-validation.md` §4 已明确记这一点）。
+更早一轮出现过**同规模**的 1344 例 / 58 fail，但**本仓没有留下那一轮的 `dut_source` 与来源锚**——
+所以它只能作「同规模的另一次记录」并存，**不得**被当作 ② 的 PR 侧背书。
+
+**证据分层，别把推断说成已证**：
+
+| 说法 | 证据强度 |
+|---|---|
+| ② 是 `8×8×3×7 = 1344 = case_target`，dtype 8 种、rank 1..8、shape `31/2047/262144` 加尾随 1 | ✅ **机器可复算**（直接读 `plugin/samples/specs/median.spec.json`） |
+| ① 是 `8 dtype × 8 rank × 3 规模 × 6 属性 = 1152` | ✅ 有留档（`doc/oprunway-execution-direction-review-checklist.md`），但只留了**计数结构** |
+| ② 相对 ① 多出来的正是 `global`（无 `dim`）那一档、共 192 条 | ⚠ **设计记录级**：`doc/oprunway-changes-brief.md`「1152 是 cannbot 仅按维 overload 的数量，任务书 global 接口另补 192 条，不能漏测」 |
+| 「两者**只**差这一档，其余轴逐字段完全相同」 | ❌ **不可证**。① 的 per-run spec **未入仓**，仓内没有它的 dtype 清单、shape 数值、attr 逐档内容，**无法机校**。不得写成已证事实 |
+
+- ① 的 51 条失败**全部**含越界 `indicesOut=2147483647`，技术归因已闭环到 DUT 长轴浮点路径
+  （补证记录见 `doc/oprunway-changes-brief.md`）；⚠ ② 的 58 条**逐 case 分布本仓无记录**，别照抄这条归因；
+- ② 在本仓有**多次留档、全部走本地 checkout 通路**：`doc/oprunway-local-source-realmachine-validation.md`
+  §6（2026-08-05 端到端验收）与 §8（2026-08-06「就地跑」形态的 A/B 两跑）。
+  ⚠ 强度分层：§8 的 A/B **两份 `verdict.json` 字节级相同**（实测）；§6 那次与 §8 之间**只核到汇总计数相同
+  （1344 例 / 58 fail），没做逐 case 对照**——别把它写成「三次逐 case 一致」。
+
+**为什么并列，不挑一个当正统**：
+
+| 走向 | 代价 |
+|---|---|
+| 只留 1152 | 下一个人跑仓内样例 spec 必然撞见 1344，每次都要重新困惑一遍 |
+| 只留 1344 | 抹掉真机那次 per-run spec 的历史证据 |
+| **并列（本仓采用）** | 不丢任何事实，也不必在两份不可比的数字之间硬挑一个 |
+
+⚠ **引用纪律（违反即失真）**：
+
+- 引任何一组数**必须同时点名它对应的 spec**。只写「Median 精度基线是 XXXX 例」一律视为失真表述；
+- ② **不是** ① 的「复现」。例数、失败数都不同，**任何「复现了基线」一类措辞都是错的**；
+- 算术上 `1344 − 1152 = 192 = 8×8×3`（恰是新增的 `global` attr profile 那一档）、`58 − 51 = 7`。
+  ⚠ **这只是算术相符，不是逐 case 对照结论**——本仓**没有**把两份逐 case 比对过的证据，
+  **不得**据此宣称「① 的 51 条在 ② 里原样重现」或「② 只是多挂了 7 条」；
+- 任务书要求的无 `dim`（global）接口**只在 ② 里被覆盖**：`doc/oprunway-changes-brief.md` 原话是
+  「1152 是 cannbot 仅按维 overload 的数量，任务书 global 接口另补 192 条，不能漏测」。
+  所以论**任务书覆盖面** ② 更全，论**真机 per-run provenance** ① 是当时实跑的那份——两件事分开说，别互相顶替；
+- 两组数的**确定性裁决同为 `FAIL(精度)`**，`gate.passed=true` 只说明证据完整、判定链自洽，
+  **不是算子通过**。所以「换个 caseset 就能翻案」不成立，不要拿 caseset 之争当结论之争。
 
 ---
 
@@ -347,8 +407,9 @@ OpRunway/
 
 ### 9.1 真机已坐实的
 
-- 真 NPU 已坐实：IsClose、Sign；Median PR6429 当前为 1152 例中 1101 PASS、51 FAIL，
-  `gate.passed=true`、确定性裁决 `FAIL(精度)`；上一轮 1344-case 结果仅作历史记录；
+- 真 NPU 已坐实：IsClose、Sign；Median 的 `cpp_extension` 精度结果是**两个不可比的 caseset 并列**——
+  PR 通路 per-run spec 的 1152 例（1101 PASS / 51 FAIL）与本地通路仓内样例 spec 的 1344 例（1286 PASS / 58 FAIL），
+  两者均 `gate.passed=true`、确定性裁决同为 `FAIL(精度)`；**引用必须点名 spec 与来源身份**，完整口径与纪律见 §4.5；
   Elu/Silu 在 A5-950 有 18/18 非空例证据；
 - Median 性能数据不是零数据：custom 50/50、`torch_npu` baseline 48/50 有效，48 对评分、35 对达到 `ratio >= 1.0`；
 - 2 个 BF16、`dim=1` baseline case 报 161002、custom 成功，按 baseline limitation 挂起，不归因 DUT；
@@ -430,13 +491,15 @@ OpRunway/
 | 三级门 | 带 `--source-facts` 复核 → **STATUS: PASSED** |
 | 报告 | `验收报告.md` 的「来源与 provenance」节按 `local_checkout` 如实渲染：强度声明、`root_digest`、worktree `clean`、git head（**标注为信息字段、非 provenance 锚**），并带两条 ⚠（无法证明对应任何具体 PR / 摘要只覆盖 `op_subdir`） |
 
-⚠ **本次 1344 例 / 58 fail 与 §4.4 的「1152 例、51 FAIL」不是同一个 caseset**：本次用
-`plugin/samples/specs/median.spec.json`，其 torch_parity 矩阵规模与真机那次的 per-run spec 不同。
-**不许写成「复现了基线」，也不许拿本次数字去改 §4.4 的基线记录。** 本次的价值是通路走通，不是刷新精度基线。
+⚠ **本次 1344 例 / 58 fail 与 1152 例 / 51 FAIL 不是同一个 caseset**：本次用仓内样例
+`plugin/samples/specs/median.spec.json`（= §4.5 的 caseset ②），其 torch_parity 矩阵比真机那次的
+per-run spec（caseset ①）多一档 `global` attr profile。**不许写成「复现了基线」。**
+两组数按 §4.5 **并列记录**，本次的价值是通路走通，不是刷新精度基线。
 
 ⚠ 收据对 `--library` 的绑定只到「该文件在构建窗口内被改写」（构建前后 `(mtime_ns, size, sha256)`
 三项全同即 fail-closed），**不证明它由那条 argv 产出**——一次 `touch` 就能骗过。
-另外产出方**还没接进编排**（`SKILL.md` / `plugin/AGENTS.md` 里没写要产这份收据），本次是手工调用。
+（⚠ 本次真机跑测时产出方尚未接进编排、是手工调用；此后已补进
+`skills/acceptance-workflow/SKILL.md` 的 CP-C 与 `plugin/AGENTS.md`，编排层现在要求产这份收据。）
 
 降级与记账口径：
 
@@ -469,13 +532,22 @@ OpRunway/
 三级门里新增 build receipt ↔ source_facts 的来源锚对账，两步且顺序固定：
 先核两边 `dut_source` 一致，再核锚值相等。
 
-`source_facts.json` 缺席的处置**按通路分**，这条是实测逼出来的：真机验收报告目录
+`source_facts.json` 缺席时**本门自己**的处置按通路分，这条是实测逼出来的：历史真机验收报告目录
 （`reports/<Op>-spec-<x>/`）里**本来就没有** `source_facts.json`，取材的 `--out` 与验收产物目录不是同一个。
-所以本地通路找不到就 BLOCKED，PR 通路沿用旧行为；`validate_acceptance_state` 新增 `--source-facts` 可显式指路。
+所以本地通路找不到就 BLOCKED，PR 通路沿用旧行为；`validate_acceptance_state` 的 `--source-facts` 可显式指路。
 
-⚠ **残留伪装面（如实记账，别当已封）**：`source_facts` 缺席 + 收据自称 `pull_request` 时，
-“`source_facts` 其实说的是 local”这种伪装查不出来——因为压根没有对照物。
-要彻底封死，得让编排层**每次都传 `--source-facts`**，让缺席本身成为非法。
+✅ **那条伪装面已由编排层封死（2026-08-05）**，不再是待办：`run_workflow` 在**验收通路**上把
+`--source-facts` 定为**必填**（缺席即拒跑，且拒在 `os.makedirs` / staging / Task1 **之前**，不留半个产物目录），
+把它按字节 staging 进 `--out`，并**每次都显式**把这份 staging 副本指给 task1/task2/task3 三级门，不走自动发现。
+于是正常验收链上「没有对照物」不再是一个可达状态——**缺席本身成了非法**。CP-F 同理
+（`precision_retest_runner` 显式传冻结副本）。⚠ 连带后果：报告目录里现在**会**有一份 staging 的
+`source_facts.json`，上一段那句「报告目录里本来就没有」只对**封死之前**的老产物成立。
+
+⚠ **剩余面，如实记账**：**手工单独跑 `validate_acceptance_state` CLI 且不给 `--source-facts`** 时，
+PR 通路照旧不阻断（就是上一段那条按通路分的处置）。要判断一份产物是不是走了封死后的编排链，
+看它 `--out` 里有没有那份 staging 的 `source_facts.json`；没有就说明它是老产物或手工拼的，
+**别当成「门放行了」**。显式给了 `--source-facts` 却指不到文件**不属于**这条剩余面——那按
+`dut_source.SOURCE_FACTS_UNTRUSTED` 阻断。
 
 ### 9.4 本轮的连带账单
 

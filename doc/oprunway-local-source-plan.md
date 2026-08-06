@@ -50,7 +50,7 @@ fetch_source.py
 
 **手工补也补不齐**——这就是 Roll 那次第 722/739/745 行三轮尝试全挂的原因。
 
-### 1.3 ⚠ `pr_head_sha` 的硬校点比想象中多：**9 处，横跨 6 个模块**
+### 1.3 `pr_head_sha` 的硬校点比想象中多：**9 处，横跨 6 个模块**
 
 **实施前必须全部盘到**，漏一处就白改：
 
@@ -74,7 +74,7 @@ fetch_source.py
 `status` 须 `VERIFIED`），由**外部构建驱动产出**、不是本仓脚本生成——
 所以本地来源的支持必须延伸到这份收据的契约（§2.8）。
 
-⚠ 现在的错误信息是「vendor build receipt 缺完整 **PR head**/source repo」，
+现在的错误信息是「vendor build receipt 缺完整 **PR head**/source repo」，
 本地 checkout 天然给不出 PR head。
 
 **不受影响、不要动的**（已逐个核实）：
@@ -107,7 +107,7 @@ _RUNNER_FORM_TO_MODE = {
 
 | 通路 | 坐实情况 |
 |---|---|
-| `cpp_extension` | Median PR6429 **1152 例**完整 torch-parity 矩阵，证据完整性门 `gate.passed=true` ← **唯一跑完完整矩阵、且证据门通过的通路**。⚠ `gate.passed=true` 只说明证据完整，**不是验收通过**：那一轮的确定性裁决是 `FAIL(精度)`（1101 PASS / 51 FAIL） |
+| `cpp_extension` | Median PR6429 完整 torch-parity 矩阵，证据完整性门 `gate.passed=true` ← **唯一跑完完整矩阵、且证据门通过的通路**。⚠ `gate.passed=true` 只说明证据完整，**不是验收通过**：确定性裁决是 `FAIL(精度)`。⚠ **成文时这里写的「1152 例」被后来的口径订正了**：真机结果是**并列的两个 caseset**——1152（真机当轮 per-run spec，未入仓，1101 PASS / 51 FAIL）与 1344（仓内 `plugin/samples/specs/median.spec.json`，多一档 global overload，1286 PASS / 58 FAIL），**不存在单一基线**，引用必须点名 spec（仓根 `AGENTS.md` §4.5） |
 | `aclnn_py` | 仓规原话：「历史 Median 60/60 来自 aclnn_py，**只证明旧 caseset**；迁移到 torch_parity + cpp_extension 后必须重跑，不得沿用旧 PASS」 |
 | `cpp`（`new_example`） | IsClose / Sign 坐实，但 dtype 闭环只到 fp32/fp16/bf16，int 落 `DEFERRED_NP_BY_FORM` |
 
@@ -223,7 +223,7 @@ root_digest = sha256(所有 frame 顺序拼接).hexdigest()
 排除（按相对路径的**首段或后缀**匹配）：.git/  __pycache__/  *.pyc  build/  build_out/
 ```
 
-⚠ 三个坑，实现时逐条对照：
+三个坑，实现时逐条对照：
 
 | 坑 | 后果 | 本算法的处理 |
 |---|---|---|
@@ -256,7 +256,7 @@ root_digest = sha256(所有 frame 顺序拼接).hexdigest()
 
 ### 2.6 `completeness` 按 `dut_source` 分支 —— 且必须拆出 `warnings`
 
-**⚠ 初稿这里自相矛盾，已订正。** 现有实现（`fetch_source.py:496`）：
+**初稿这里自相矛盾，已订正。** 现有实现（`fetch_source.py:496`）：
 
 ```python
 "status": "complete" if not reasons else "blocked",
@@ -275,7 +275,7 @@ root_digest = sha256(所有 frame 顺序拼接).hexdigest()
 }
 ```
 
-⚠ 这会改 PR 通路的 payload 结构（多一个恒为 `[]` 的键）。两个选择：
+这会改 PR 通路的 payload 结构（多一个恒为 `[]` 的键）。两个选择：
 
 - **(A) 推荐**：`warnings` 只在**非空时**才写入 → PR 通路 payload 业务字段不变
 - (B) 无条件写 `"warnings": []` → 结构更整齐，但 PR 通路业务字段也变了，
@@ -319,7 +319,7 @@ root_digest = sha256(所有 frame 顺序拼接).hexdigest()
 `key_files` / `aclnn_headers` / `interface_kind` / `aclnn_entry` 的探测逻辑
 **完全复用现有实现**（`_detect_interface_kind` 等），只是内容从本地目录读而非 API 取。
 
-### 2.8 ⚠ `vendor_build_receipt` 的本地来源（**cpp_extension 专属，最容易漏**）
+### 2.8 `vendor_build_receipt` 的本地来源（**cpp_extension 专属，最容易漏**）
 
 `cpp_extension` 通路额外依赖 `vendor_build_receipt`（`schema: oprunway.vendor_build_receipt` v1），
 三处硬校 `source.pr_head_sha` 为 40 位 hex（§1.3 的 #4/#5/#6）。
@@ -406,7 +406,7 @@ runner_form='aclnn_py' 当前不用于正式验收。
 ⚠ **`repo_adapter.SUPPORTED_NP_BY_FORM` / `DEFERRED_NP_BY_FORM` 的 `aclnn_py` 条目保留不动**——
 它们是**能力表**，不是准入表。删了将来恢复要重新考证 dtype 支持面。
 
-### 2.10 ⚠ 仓规同步（不可省）
+### 2.10 仓规同步（不可省）
 
 `AGENTS.md` §4 现在写着「三条都是真机验收通路、都能产验收裁决」。
 **堵死两条 = 改仓规**，只改代码不改文档，下一个 session 读 `AGENTS.md`
@@ -421,7 +421,24 @@ runner_form='aclnn_py' 当前不用于正式验收。
 
 每步独立可提交、可回滚。**按序做，不要并行。**
 
-### Step 0 · 冻结基线（先做，别跳）
+> **完成状态回填（2026-08-05 核对当时的代码与产物，不凭记忆）**
+>
+> | Step | 状态 | 落点（核对依据） |
+> |---|---|---|
+> | 0 冻结基线 | ✅ | 四组测试文件都在；安全绳落成 `test_fetch_source.py:1162` 的「payload 去 `producer` 后逐字节相同」 |
+> | 1 schema 与判别式 | ✅ | 判别式读侧唯一入口 `dut_source.py`；`validate_preparation_state.py` 已按 `dut_source` 分支 |
+> | 2 `--local-repo` | ✅ | `fetch_source.py`：`compute_root_digest:602` / `probe_local_git:813` / `fetch_local:949`（方案里叫 `build_local_facts`，实际落成此名） |
+> | 3 `aclnn_py` 侧 | ⚠ **一半有意不做** | `preflight_aclnn.py` ✅ 已接；`verify_aclnn_harness.py` 对 `local_checkout` **显式 fail-closed**（`:105-108`），见下 Step 3 的订正 |
+> | 4 `cpp_extension` 侧 | ⚠ **代码通了，验证只到 1/3** | adapter / driver / 三级门 `_gate_build_receipt_source_binding`（`validate_acceptance_state.py:884`）三处代码都接了，但**只有三级门有 local 直测**；产出方见下 Step 4 的订正 |
+> | 4b CP-F 复测 | ✅ | `precision_retest_contract.py` / `precision_retest_runner.py` 都按 `dut_source` 分支；directive schema 是 breaking change，在途 attempt 全废 |
+> | 5 报告如实标注 | ✅ | `render_acceptance_markdown.py` 的 `PROV_HEADING = "## 来源与 provenance"` 与按 kind 分支的措辞表 |
+> | 6 通路收敛 | ✅ | `run_workflow.py:63` `_ACCEPTANCE_RUNNER_FORMS`、入口门 `_resolve_mode` + 出口门 `_assert_acceptance_form_allowed`、`--allow-experimental-form` |
+> | 7 测试 | ⚠ **7.4 未满足，其余 ✅** | `test_fetch_source.py` 正/负路 + 确定性都有；本地来源另已跑通真机端到端，见 `doc/oprunway-local-source-realmachine-validation.md`。**7.4 要求 adapter / driver / 三级门三处全链路都测到，实际只测到三级门** |
+>
+> 方案成文时未预见、实施时另行定下的两处：① 缺省 `runner_form` 一并改成 `cpp_extension`
+> （方案只写了白名单，没写缺省）；② `plugin/samples/specs/` 按 §4 边界未动，9 份里仍是 8 份 `cpp` + 1 份 `cpp_extension`。
+
+### Step 0 · 冻结基线（先做，别跳）  ✅ 已完成
 
 ```bash
 python3 -m pytest plugin/acc-common/test_gen_cases_dtype_attr.py -k ExistingOpsByteIdentical -q
@@ -436,7 +453,7 @@ python3 -m pytest plugin/acc-common/test_cpp_extension_adapter.py \
 
 另存一份 PR 通路的 `source_facts.json`（拿现成报告目录里的即可）作为 Step 6.10 的字节对照基准。
 
-### Step 1 · schema 与判别式（纯读侧，行为不变）
+### Step 1 · schema 与判别式（纯读侧，行为不变）  ✅ 已完成
 
 - `fetch_source.py`：`build_source_facts` 增加 `dut_source` 参数（默认 `"pull_request"`），
   PR 分支下**不写入该键**（保字节不变）
@@ -447,7 +464,11 @@ python3 -m pytest plugin/acc-common/test_cpp_extension_adapter.py \
 
 **验**：Step 0 全绿（PR 通路零变化）。
 
-### Step 2 · `fetch_source.py` 加 `--local-repo`
+### Step 2 · `fetch_source.py` 加 `--local-repo`  ✅ 已完成
+
+> 落地时函数名与本节略有出入：`build_local_facts` 实际叫 `fetch_local`（`fetch_source.py:949`），
+> `compute_root_digest` / `probe_local_git` 同名。排除规则没停在一份清单上，
+> 而是落成结构化 + 版本化的 `digest_policy`（`fetch_source.py:60`），校验端逐字核对。
 
 **新增参数**：
 
@@ -477,10 +498,19 @@ python3 -m pytest plugin/acc-common/test_cpp_extension_adapter.py \
 退出码非 0
 ```
 
-### Step 3 · `aclnn_py` 侧消费者（§1.3 的 #1/#2/#3）
+### Step 3 · `aclnn_py` 侧消费者（§1.3 的 #1/#2/#3）  ⚠ 一半做了、一半**有意不做**
 
 即使 `aclnn_py` 要被堵（Step 6），这三处**仍要改**——
 `--allow-experimental-form` 通路还要能跑，且 `preflight_aclnn` 是通用静态对账。
+
+> **实施订正（2026-08-05）**：`preflight_aclnn.py` 按本节改了，两条通路 signature 对账完全同形、只有锚不同。
+> **但 `verify_aclnn_harness.py` 没有按本节分支，而是对 `local_checkout` 显式 fail-closed**（`:105-108`）。
+>
+> 这不是漏做：`aclnn_adapter` 只能按 PR ref 在容器内重新取源 build，**构建端根本不存在
+> 可与 `local_root_digest` 对账的锚**。放它过去，收据看着齐全、绑定其实是空的。
+> 只要 `aclnn_adapter` 的取源方式不变，这道门就一直关着——**别当成「下一批补上就行」**。
+> 连带：`_LOGIC_FILES` 新增了 `dut_source.py`，真机上留存的旧 harness 信任门收据会 revalidate 失败，
+> 这同样是正确行为（门的判定逻辑变了，旧收据不该继续算数）。
 
 | 位置 | 改法 |
 |---|---|
@@ -490,9 +520,35 @@ python3 -m pytest plugin/acc-common/test_cpp_extension_adapter.py \
 
 ⚠ **`preflight_aclnn.py:142-160` 的 `key_files` 对账逻辑不要动**——两条通路同形，原样复用。
 
-### Step 4 · `cpp_extension` 侧消费者（§1.3 的 #4/#5/#6，**主战场**）
+### Step 4 · `cpp_extension` 侧消费者（§1.3 的 #4/#5/#6，**主战场**）  ⚠ 代码已通、验证只到 1/3
 
 这是目标 2 收敛后**唯一还活着**的通路，必须打通。
+
+> **⛔ 下表末行「本仓不产这份收据 / 先 grep 找写入方 / 找不到就停下来问、别自己新写」这条指示已作废。**
+> 真机上实跑核过：写入方**就是不存在**。产出方最终由本仓新建，即
+> `plugin/acc-common/make_vendor_build_receipt.py` —— 它**真跑 build**、`build.returncode` 是实测值，
+> **没有「只记录不执行」模式**；`--library` 须被这次 build 改写过，本地通路另核构建前后两次「构建树 ↔ 指纹树」。
+> 下面那段「不要自己新写一个产出方」的原话保留，只作当时信息缺口的记录，**不再是行动指示**。
+>
+> **✅ 已落地**：`cpp_extension_adapter.py` / `cpp_extension_driver.py` / 三级门
+> `validate_acceptance_state._gate_build_receipt_source_binding`（`:884`）三处都按 `dut_source` 分支，
+> 且三级门里的锚对账两步顺序固定（先核 kind 一致、再核锚值相等）。
+>
+> **⛔ 仍缺的，是一处货真价实的假门**：本节 ③ 要求在**两个**测试夹具里加 local 形态样例，
+> 实际只有 `test_validate_cpp_extension_receipt.py` 加了（它 import 的是 `validate_acceptance_state`，
+> 按文件名不好找）；`test_cpp_extension_driver.py` 与 `test_cpp_extension_adapter.py` 至今
+> **零 `local_checkout` 夹具**，driver 侧只测了 PR 形态的 `rejects_short_head`。
+>
+> ⚠ **后果具体是这样**：把 `cpp_extension_adapter.py` 或 `cpp_extension_driver.py` 的来源锚校验
+> 改回 PR-only，本地来源的测试**照样全绿**，一直要到真机 CP-D 才炸。三处「独立再校一遍」的
+> 信任边界，现在只有三级门那一处在 local 通路上真被测到。
+> **补法**：adapter 与 driver 各加 local 收据正例 + 三条负例（缺锚 / 锚长度错 / 混装另一通路的锚）。
+> 绿了再把 Step 4 与 Step 7 改标 ✅——在那之前它们是 ⚠。
+>
+> **另一处如实记账**：收据对 `--library` 的绑定只到「该文件在构建窗口内被改写」，
+> **不证明它由那条 argv 产出**——一次 `touch` 就能骗过。
+> （产出方**已**接进编排：`plugin/skills/acceptance-workflow/SKILL.md` 的 CP-C 明写要跑
+> `make_vendor_build_receipt.py`；真机那次的「手工调用」是当时状态，现已不是。）
 
 | 位置 | 改法 |
 |---|---|
@@ -511,9 +567,20 @@ python3 -m pytest plugin/acc-common/test_cpp_extension_adapter.py \
 不等即 BLOCKED。建议落在 `validate_acceptance_state`（三级门），
 与现有 PR head 的绑定校验同层。
 
-### Step 4b · CP-F 精度复测通路（§1.3 的 #8/#9）
+### Step 4b · CP-F 精度复测通路（§1.3 的 #8/#9）  ✅ 已完成（本批做了，无需挂账）
 
 主验收链之外，但**不修就没法复测**。
+
+> **实施结果**：本节的字段改名建议采纳了——`source_identity` 的 `pr_head` 拆成
+> `pr_head_sha`（恰 40 位）或 `local_root_digest`（恰 64 位），`repo` 两条通路都必填。
+> 旧 schema 的 `^[0-9a-f]{40,64}$` 那个 40..64 区间就是「叫 pr_head 装 digest」的物理入口，已封。
+> ⚠ **这是 breaking change：旧 directive 不能继续执行**，要重新起草、重新跑 F2。
+> 另新增 `source_identity.repo` ↔ 首轮 build receipt `runner_binding.base_source_repo` 的逐字对账
+> （`repo` 原本「宣称有门其实没门」）；只有 `cpp_extension` 通路有这个对照物。
+>
+> 另一条本节没预见的定论：**CP-F 只接受 base spec 的 `runner_form == "cpp_extension"`**，
+> 且 **`--allow-experimental-form` 不适用于 CP-F、也不得用于绕过**——那个逃生阀的全部安全性
+> 建立在「该路径物理上不产 `acceptance.json` / `verdict.json`」上，而 CP-F 就是要写 `verdict.json`。
 
 | 位置 | 改法 |
 |---|---|
@@ -521,12 +588,12 @@ python3 -m pytest plugin/acc-common/test_cpp_extension_adapter.py \
 | `precision_retest_contract.py:416 / 432` | `base_provenance` / `expected_provenance` 的 `head_sha` 同样分支；漂移比对逻辑本身不变 |
 | `precision_retest_runner.py:247` | `actual.pr_head` 同样分支 |
 
-⚠ **若本批决定先不做 Step 4b**，必须在方案 §4「不做什么」显式挂账，
+**若本批决定先不做 Step 4b**，必须在方案 §4「不做什么」显式挂账，
 并在 `AGENTS.md` §9 记一条「本地来源暂不支持 CP-F 复测」——不能让人以为已覆盖。
 
 ---
 
-### Step 5 · provenance 降级在报告里如实标注
+### Step 5 · provenance 降级在报告里如实标注  ✅ 已完成
 
 `render_acceptance_markdown.py:206` 现在硬渲染 `| PR head | ... |`。
 改为按 `dut_source` 渲染整节（**确定性渲染，禁止手写**）：
@@ -547,7 +614,13 @@ python3 -m pytest plugin/acc-common/test_cpp_extension_adapter.py \
 
 dirty 时额外一行：`⚠ worktree dirty，被测字节与 git head 不符；dirty 文件 N 个（清单见收据）`。
 
-### Step 6 · 通路收敛到 `cpp_extension`
+### Step 6 · 通路收敛到 `cpp_extension`  ✅ 已完成
+
+> 落地时比本节多做了一件：**缺省 `runner_form` 一并改成 `cpp_extension`**（真源是
+> `repo_adapter.DEFAULT_RUNNER_FORM`），所以 spec 未声明 form 时直接落在准入形态上。
+> `--mode` 的 argparse 默认值随之改为 `None`（据 spec 派生），不再是任何具体 mode。
+> 第 3 点的影响面盘点结果：`plugin/samples/specs/` 九份里 8 份 `cpp` + 1 份 `cpp_extension`，
+> 按 §4 边界本批未动。
 
 1. `run_workflow.py` 加 `_ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})` 与白名单门（§2.9）
 2. 加 `--allow-experimental-form`，该路径**不产** `acceptance.json` / `verdict.json`。
@@ -573,12 +646,24 @@ dirty 时额外一行：`⚠ worktree dirty，被测字节与 git head 不符；
 收敛后它必须改成 `cpp_extension`，而 `cpp_extension` 需要 `torch.ops` 桥 + vendor ELF 收据，
 **接入成本高于 `aclnn_py`**。别做完门才发现 Roll 反而跑不了了。
 
-⚠ **与 §4「不动 `plugin/samples/`」不冲突**（已核实）：`aclnnRoll.spec.json`
+**与 §4「不动 `plugin/samples/`」不冲突**（已核实）：`aclnnRoll.spec.json`
 **不在** `plugin/samples/specs/` 下（那里只有 catlass_basic_matmul / equal / im2col /
 isclose / median / neg / sign / upsample_nearest_3d / upsample_nearest_exact2d 九份），
 它是远端报告目录里的 per-run 产物。**本批只动那份 per-run 副本，不碰 `plugin/samples/`。**
 
-### Step 7 · 测试
+### Step 7 · 测试  ⚠ 7.4 未满足，其余已完成
+
+> 正路 / 负路 / 确定性三组都在 `test_fetch_source.py`（互斥、dirty 两态、
+> `changed_files == "unavailable"` 而非 `[]`、排除目录不影响 digest、可执行位变更改 digest、
+> `digest_policy` 结构化版本化、dirty 文件名含空格与 Unicode 原样记录 等）；
+> 7.10 的信任基石落在 `test_validate_cpp_extension_receipt.py`（它 import 的是
+> `validate_acceptance_state`，按文件名不好找）；7.14 的安全绳在 `test_fetch_source.py:1162`。
+> ⚠ **7.4「adapter / driver / 三级门三处都过」没做到**：只有三级门有 local 直测，
+> adapter 与 driver 的 local 分支零覆盖 —— 这是假门，补法见 Step 4 的 ⛔ 段。
+> 本地来源另已跑通真机端到端（取材段 + 验收段），记录见
+> `doc/oprunway-local-source-realmachine-validation.md`。
+> ⚠ 真机那轮**精度判 fail → Task3 按既有 fail-fast 跳过**（`perf_status=skipped_precision_gate`），
+> 所以「本地来源能出**性能**裁决」仍未见证。
 
 **正路**：
 1. `--local-repo` + git 仓 + clean + 给 `base-ref`，逐条断言（对应验收标准 1/2/3）：
@@ -681,6 +766,22 @@ python3 plugin/acc-common/fetch_source.py \
 
 ---
 
-**本方案未实施。** 按 §3 的 Step 顺序推进，每步跑完对应测试再进下一步；
-全部落地后在 `doc/oprunway-changes-brief.md` 顶部追加一行倒序摘要，
-并同步 `AGENTS.md` §4 / §9（§2.10）。
+~~**本方案未实施。**~~ **已实施完毕（2026-08-05）**，Step 0-7 的逐条状态见 §3 顶部回填表；
+`doc/oprunway-changes-brief.md` 顶部摘要与 `AGENTS.md` §4 / §9（§2.10）已同步。
+
+**做完之后仍然没覆盖的三件**（别读成「全绿」）：
+
+1. **性能维未见证** —— 真机那轮精度 fail，Task3 走 fail-fast 跳过采集；
+2. **`verify_aclnn_harness` 对 `local_checkout` 结构性 fail-closed** —— 见 Step 3 的订正，不是待办；
+3. **adapter / driver 的 local 分支零测试** —— 见 Step 4 的 ⛔ 段。改回 PR-only 校验测试照样绿，
+   这是本方案落地后**唯一还站着的假门**，补齐前 Step 4 / Step 7 标 ⚠ 而非 ✅。
+
+**已经不再是缺口的两件**（原稿在这里挂过账，后续已封，别照旧稿去「补」）：
+
+- 产出方 `make_vendor_build_receipt.py` **已接进编排** —— `plugin/skills/acceptance-workflow/SKILL.md`
+  的 CP-C 明写要跑它，产物 `vendor-build-receipt.json` 由 CP-D 经
+  `OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT` 消费；
+- **`--source-facts` 在验收通路上已是必填**（`run_workflow.py` 缺席即拒跑，且开跑前先按三级门自己的
+  `_find_source_facts` 验一遍再落副本）。所以「`source_facts` 缺席 + 收据自称 `pull_request`」那条
+  伪装面，在**走 `run_workflow` 的验收路径上已经封住**；剩下的只是单独手工调
+  `validate_acceptance_state.py` 且不传该参数时，PR 通路仍保留的兼容回退。

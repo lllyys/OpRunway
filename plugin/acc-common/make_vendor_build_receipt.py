@@ -204,18 +204,6 @@ def load_source_facts(path):
     return payload
 
 
-def _url_has_userinfo(value):
-    """`scheme://userinfo@host/…` 形态即判「带用户凭据」。
-
-    只认 `://` 形式：scp 式 `git@host:path` 的 `@` 前面是用户名、不含任何密钥，
-    拦它会把合法的 SSH remote 全部误伤。而 `https://user:pw@host/…`（密码）与
-    `https://<token>@host/…`（PAT，连冒号都没有）都落在 `://` 形式里，一并拦下。
-    """
-    if not isinstance(value, str) or "://" not in value:
-        return False
-    return "@" in value.split("://", 1)[1].split("/", 1)[0]
-
-
 def derive_repo(payload, kind):
     """从 source_facts 派生仓名，返回 `(repo, repo_source)`；派生不出返回 `(None, None)`。
 
@@ -244,8 +232,19 @@ def derive_repo(payload, kind):
     return repo.strip(), origin
 
 
-def assert_repo_has_no_credentials(repo, origin):
-    """派生出的仓名要真被写进收据之前，先确认它不带用户凭据。
+_DERIVED_REPO_HINT = (
+    "  → 用 --repo 显式给一个不含凭据的仓名（如 `cann/ops-nn`）。\n"
+    "  → 源头在 `git config --get remote.origin.url`，那份 source_facts.json 里\n"
+    "    也留着同一个值，请一并处置。")
+
+_REPO_FLAG_HINT = (
+    "  → 换一个不含凭据的 --repo（如 `cann/ops-nn`），把凭据挪进 git credential helper。\n"
+    "  → 命令行本身也会进 shell history 与 CI 日志，别把 token 写在 argv 里。")
+
+
+def assert_repo_has_no_credentials(repo, origin, *, hint=_DERIVED_REPO_HINT):
+    """仓名要真被写进收据之前，先确认它不带用户凭据。两个来源都过这一道：
+    `source_facts` 派生值，以及操作者显式给的 `--repo`。
 
     ⚠ `fetch_source.probe_local_git` 取的是 `git config --get remote.origin.url` 的
     **原值、全程无脱敏**，所以 `https://user:token@gitcode.com/…` 会一路进
@@ -253,19 +252,36 @@ def assert_repo_has_no_credentials(repo, origin):
     `render_acceptance_markdown` 的「源码仓」一行 → **人读的验收报告 .md**。
     这直接撞仓规 §2「token、密码、私钥连本地 ignored 文件都不得写」。
 
+    ⚠ **它只堵 userinfo 形态，query 串里的凭据（`?access_token=…`）没堵**——与
+    `fetch_source` 里那段记账（`REMOTE_URL_WITHHELD_CREDENTIALS` 上方）是同一条边界：
+    要判 query 就得靠参数名关键词猜，猜漏与误杀都会让这道门变成「看着有、实际拦不住」的
+    假门；真要堵得改成「只保留 origin+path、整段丢弃 query」的结构性规则，那会改动所有
+    http 链接的落盘字节，属另一次改动。**别把本函数读成「repo 里绝不含任何凭据」的保证。**
+
+    ⚠ **判别式不在这里自建第二份**：只调 `dut_source.url_has_userinfo`。
+    曾经这里有一份私有实现，只按 `/` 切 authority，于是 `https://host?a=b@c` 这种
+    **根本不含凭据**的 remote 在产出侧被判「带凭据」、在取材侧和读侧却被判干净——
+    同一份事实包在两条链上得到不同结论。判别规则只留一份，别再抄回来。
+
+    ⚠ **统一判别式带来一处窄行为变化，如实记账**：那份私有实现判过头，会**顺带**拦下
+    query 里含字面 `@` 的 token（`?access_token=a@b`）；统一之后 `?` 正确终止 authority，
+    这类 URL 在本模块放行。**这不是把洞开大**——取材侧（`fetch_source.remote_url_record`）
+    和读侧（`dut_source.validate_build_receipt_source`）本来就用统一规则放行它，
+    那个 token 早已原样落进 `source_facts.json`；产出方多拦一道只是把一份**已经泄漏**的值
+    少抄一层，不构成 containment。用一处分叉换这点偶然保护不划算，故接受。
+    真要堵 query 凭据得走结构性规则（整段丢弃 query），见 `fetch_source` 里那段记账。
+
     ⚠ **不做脱敏后照用**：脱敏会改字节，而 CP-F 对 `repo` 是逐字比对，
     等于换个方式制造 BLOCK。要继续就显式给一个干净的 `--repo`。
     """
-    if not _url_has_userinfo(repo):
+    if not dut_source.url_has_userinfo(repo):
         return
     # ⚠ **刻意不回显原值**：把带凭据的 URL 打进报错信息，报错本身就成了第二处泄漏点。
     raise ReceiptError(
         f"{origin} 是一个**带用户凭据**的 URL（`scheme://…@host/…`），拒绝写进收据。\n"
         f"  收据的 source.repo 会落盘、会被打印、还会渲进人读验收报告的「源码仓」一行；\n"
         f"  把 token/密码带进去违反仓规 §2。此处刻意不回显原值——回显就是再泄漏一次。\n"
-        f"  → 用 --repo 显式给一个不含凭据的仓名（如 `cann/ops-nn`）。\n"
-        f"  → 源头在 `git config --get remote.origin.url`，那份 source_facts.json 里\n"
-        f"    也留着同一个值，请一并处置。")
+        f"{hint}")
 
 
 def assert_build_tree_matches_fingerprint(payload, kind, build_cwd, *, stage="构建前"):
@@ -508,6 +524,16 @@ def main(argv):
         #   运气不好就 hash 到调用方 cwd 下的同名文件——静默错绑。与
         #   `cpp_extension_driver._require_env_path` 同一口径：要绝对路径。
         ap.error(f"--library 须是绝对路径（相对路径按调用方 cwd 解析、不是 --build-cwd）：{a.library}")
+    if a.repo:
+        # ⚠ 这道门**必须落在 build 之前**。凭据扣留之后，显式 `--repo` 成了正常补充路径，
+        #   而它带凭据以前只在 `self_check`（build 跑完、收据都组装好了）才被
+        #   `dut_source.validate_build_receipt_source` 拒——那时 vendor build 已经真跑过、
+        #   `.so` 已经被改写。「凭据不得进 repo」这条纪律落在**有副作用之后**，
+        #   等于用几十分钟真机构建换一句本可以在参数校验期就说出口的话。
+        #   凭据没进有效收据 ≠ 门在正确的位置。
+        # ⚠ 它也是 `--allow-repo-override` 唯一拦不住的东西：那个逃生阀放行的是
+        #   「与派生值不一致」，不是「带凭据」，所以这道门必须在它之前、无条件生效。
+        assert_repo_has_no_credentials(a.repo, "--repo", hint=_REPO_FLAG_HINT)
     assert_out_is_writable(a.out, ap, conflicts=(("--library", a.library),
                                                  ("--source-facts", a.source_facts)))
 
@@ -518,7 +544,7 @@ def main(argv):
         raise ReceiptError(f"source_facts 的来源判别式不合法：{exc}") from exc
 
     derived_repo, derived_origin = derive_repo(payload, kind)
-    if derived_repo and _url_has_userinfo(derived_repo):
+    if derived_repo and dut_source.url_has_userinfo(derived_repo):
         if not a.repo:
             assert_repo_has_no_credentials(derived_repo, derived_origin)   # 必抛
         # 给了 --repo：派生值只是**用不上**，不该连 build 都不让跑。它也不参与下面的
@@ -528,10 +554,14 @@ def main(argv):
         if derived_repo and derived_repo != a.repo and not a.allow_repo_override:
             # ⚠ `--repo` 无条件优先 = 把「事实派生」无声换成「操作者自报」，而 CP-F 拿这个值
             #   与首轮 runner_binding.base_source_repo 做逐字比对——那道门比的就不再是事实。
+            # ⚠ 两个值都过一遍 `redact_url_userinfo` 再打印：可达路径上它是**恒等变换**
+            #   （`a.repo` 在参数校验期已被 `assert_repo_has_no_credentials` 拦过，
+            #   `derived_repo` 带凭据时在上面已被置 None），留着是因为这条报错要打进终端
+            #   与 CI 日志——真有一天上面哪道门被挪走或放宽，泄漏点不该顺势开在这里。
             raise ReceiptError(
                 f"--repo 与 source_facts 派生出的仓名不一致：\n"
-                f"  --repo（操作者自报）      = {a.repo!r}\n"
-                f"  {derived_origin}（事实派生）= {derived_repo!r}\n"
+                f"  --repo（操作者自报）      = {dut_source.redact_url_userinfo(a.repo)!r}\n"
+                f"  {derived_origin}（事实派生）= {dut_source.redact_url_userinfo(derived_repo)!r}\n"
                 f"  → 默认不许静默替换。确实要换（本地通路派生出的是带 host/.git 后缀的\n"
                 f"    remote URL，而 CP-F directive 那边通常写 `owner/repo`），\n"
                 f"    显式加 --allow-repo-override，收据会记 repo_source=\"operator\"。")

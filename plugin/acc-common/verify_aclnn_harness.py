@@ -28,7 +28,13 @@ import sys
 
 import aclnn_adapter
 import content_address
-import dut_source
+# ⚠ 只 import 判别式**内核**，不 import 聚合模块 `dut_source`：本门在来源这块的判定依赖
+#   就是 `of()` + `PULL_REQUEST` 两个名字，而 `_LOGIC_FILES` 是逐字节哈希。多绑一个
+#   `dut_source.py`，「改一个 URL 脱敏边界 / 调一下 source_facts 搜索顺序」就会作废
+#   真机 harness 收据、白跑一次昂贵的 NPU 见证。绑定面 = 判定面，不多不少。
+#   ⚠ 反过来也成立：哪天本门真要用 `dut_source` 里的东西，就**必须**同时把
+#   `dut_source.py` 加进 `_LOGIC_FILES`——`LogicBindingCoverageTest` 会当场变红。
+import dut_source_kind
 import repo_adapter
 import validator
 
@@ -44,10 +50,14 @@ _LOGIC_FILES = (
     "precision_policy.py",
     "validator.py",
     "content_address.py",
-    # ⚠ 判别式现在是本信任门的判定依赖（见 `_require_pull_request_path`），必须列进来：
-    #   漏了它，`bindings.logic_files` 就覆盖不到判别逻辑——有人把 `dut_source.of()` 改成
+    # ⚠ 判别式是本信任门的判定依赖（见 `_require_pull_request_path`），必须列进来：
+    #   漏了它，`bindings.logic_files` 就覆盖不到判别逻辑——有人把 `of()` 改成
     #   「未知取值缺省 pull_request」，旧收据照样 revalidate 通过，等于开一个新的 fail-open 面。
-    "dut_source.py",
+    # ⚠ 这里绑的是**内核** `dut_source_kind.py`（受控词表 + `of`），不是聚合模块
+    #   `dut_source.py`。后者还装着 URL 凭据策略 / build receipt 锚校验 /
+    #   `source_facts.json` 查找三类与本门判定**无关**的职责，绑它 = 那三类改动一动
+    #   就作废真机收据。内核零 import，逐字节哈希它 == 覆盖它的全部判定语义。
+    "dut_source_kind.py",
     "gen_cases.py",
     "aclnn_runtime/__init__.py",
     "aclnn_runtime/base.py",
@@ -71,7 +81,7 @@ def _require_bindings(preflight):
     if not isinstance(preflight, dict):
         raise ValueError("aclnn preflight payload 须为 JSON object")
     bindings = preflight.get("bindings")
-    # ⚠ 这里**不能**简化成 `preflight.get("bindings") or {}`。`dut_source.of()` 的
+    # ⚠ 这里**不能**简化成 `preflight.get("bindings") or {}`。`dut_source_kind.of()` 的
     #   「缺席即 pull_request」是给**旧收据**的向后兼容，前提是 payload 形态本身可信；
     #   `or {}` 会把缺席 / None / `[]` / 字符串一律抹平成空 object，于是「这份 preflight
     #   根本没有来源声明」和「它明确声明了 pull_request」在通路门里变成同一件事——
@@ -102,8 +112,8 @@ def _require_pull_request_path(preflight):
     """
     # 形态先硬化（含「空 object 仍按 pull_request 向后兼容」的边界），再判来源。
     bindings = _require_bindings(preflight)
-    kind = dut_source.of(bindings, where="aclnn_preflight.bindings")
-    if kind != dut_source.PULL_REQUEST:
+    kind = dut_source_kind.of(bindings, where="aclnn_preflight.bindings")
+    if kind != dut_source_kind.PULL_REQUEST:
         raise ValueError(
             f"aclnn_py 真机 harness 信任门尚未接入 dut_source={kind}："
             f"aclnn_adapter 只能按 PR ref 在容器内重新取源 build，"

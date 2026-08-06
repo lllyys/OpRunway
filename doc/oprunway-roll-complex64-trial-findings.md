@@ -1,7 +1,7 @@
 # aclnnRoll complex64 试跑暴露的问题清单
 
 **日期**：2026-08-05
-**来源**：远端 `/mnt/docker/libotao2/OpRunway-main` 上的 aclnnRoll complex64 验收试跑
+**来源**：远端 `<远端工作根>/OpRunway-main` 上的 aclnnRoll complex64 验收试跑
 **会话**：`53dc004f-91fe-4069-8f31-258cd8b23cc0`（2026-08-05 02:44 → 06:09）
 **产物**：`reports/aclnnRoll-{out,source,cp-a}/`、`aclnnRoll.spec.json`、`aclnnRoll-acceptance-report.md`
 **本文用途**：交给后续 session 做修复。写成时**不含任何已实施的改动**。
@@ -50,8 +50,8 @@ CP-C 三道门全部以它为前置，缺了 Task2 永远起不来。
 
 | 时间 | prompt |
 |---|---|
-| 02:44:47 | 帮我验收这个算子：任务书 `https://gitcode.com/.../aclnnRoll_task_doc.md`，`/mnt/docker/libotao2/ops-math` |
-| 02:49:33 | 任务书可以用这个 `/mnt/docker/libotao2/cann-ops-competitions/.../aclnnRoll_task_doc.md`，PR 可以用 `/mnt/docker/libotao2/ops-math`，当前真机为 950 |
+| 02:44:47 | 帮我验收这个算子：任务书 `https://gitcode.com/.../aclnnRoll_task_doc.md`，`<远端工作根>/ops-math` |
+| 02:49:33 | 任务书可以用这个 `<远端工作根>/cann-ops-competitions/.../aclnnRoll_task_doc.md`，PR 可以用 `<远端工作根>/ops-math`，当前真机为 950 |
 | 06:09:35 | 为什么只生成了 50 条用例 |
 
 **用户没有任何一句授权停在 Task1**，也明确给了执行环境（950 真机）。
@@ -233,7 +233,7 @@ f-string 的**替换表达式跨了行**。这是 PEP 701 特性，**Python 3.12
 
 `uint32` 同理（任务书 dtype 表也含 uint32），优先级低于 complex64。
 
-⚠ 这条属于**通用能力扩展**（按 dtype 能力分，不按算子身份），符合律令 #0，不是特判。
+这条属于**通用能力扩展**（按 dtype 能力分，不按算子身份），符合律令 #0，不是特判。
 
 ---
 
@@ -293,8 +293,8 @@ gen_cases 拿这组全 None 去调 golden。
 
 | 会话 | 用户给的 | 结果 |
 |---|---|---|
-| Median `189d72da`（08-03） | 本地目录 `/root/libotao/ops-nn` | 手工用 `content_address` 构造出完整 `pr_facts.json`（含 head_sha、changed_files、key_files）→ 打通，跑完 56 例 |
-| Roll `53dc004f`（08-05） | 本地目录 `/mnt/docker/libotao2/ops-math` | 手工补三轮补不齐 `completeness` → 放弃 |
+| Median `189d72da`（08-03） | 本地目录 `<远端本地仓根>/ops-nn` | 手工用 `content_address` 构造出完整 `pr_facts.json`（含 head_sha、changed_files、key_files）→ 打通，跑完 56 例 |
+| Roll `53dc004f`（08-05） | 本地目录 `<远端工作根>/ops-math` | 手工补三轮补不齐 `completeness` → 放弃 |
 
 同一个坎，一次翻过去一次绕开了。**能不能过取决于 agent 当场的耐心，这本身就是缺陷。**
 
@@ -351,7 +351,7 @@ gen_cases 拿这组全 None 去调 golden。
 
 ### C 类 · 编排层：既有约束被绕过
 
-⚠ **这三条的共同点：仓里的规则都已经写好了，问题是没有硬门去执行。**
+**这三条的共同点：仓里的规则都已经写好了，问题是没有硬门去执行。**
 修复方向是「把纪律变成工件硬门」，**不是**再补一句话——重复加一句不能解释也不能防止复发。
 
 #### C1 · CP-C BLOCKED 后自行降级出结论 【必修·最贵】
@@ -722,7 +722,7 @@ _U3_BASELINE_NUMPY = "2.4"
 | 轴 | legacy 档 | torch_parity 档 |
 |---|---|---|
 | dtype | ✅ | ✅ |
-| rank | ⚠ 实际到 **5**：`_REG_SHAPES` 只到 4 维，`_EXT_RANK_SHAPES:1452` 补 2 条 5 维、且**只在 spec rank 约束点名时进池**（注释原话「没有实际算子要求 6~8 维」） | ✅ **1–8**（由 `torch_parity_matrix.ranks` 声明） |
+| rank | 实际到 **5**：`_REG_SHAPES` 只到 4 维，`_EXT_RANK_SHAPES:1452` 补 2 条 5 维、且**只在 spec rank 约束点名时进池**（注释原话「没有实际算子要求 6~8 维」） | ✅ **1–8**（由 `torch_parity_matrix.ranks` 声明） |
 | **shape 形态** | ✅ **11 种**真实 shape（`_REG_SHAPES:1444-1445`：`3`/`4`/`7`/`16`/`255`/`4x4`/`7x8`/`16x15`/`2x3x4`/`3x3x3`/`2x2x2x2`）+ **2 种**大 shape（`_LARGE_SHAPES:1453`：`1024x1024`/`65535`） | ❌ **退化**：只有 `(leading,) + (1,)*(rank-1)` |
 | **值域 regime** | ✅ uniform + normal（`_VALUE_REGIMES:1457`） | ❌ 只有 uniform（`generator.kind` 受控词表当前只收 `uniform`，`:880-886`） |
 | **特殊场景** | ✅ 空 / 标量`[1]` / 边界下(全1) / 边界上(大) / inf / -inf / nan（`_special_entries:1948`；后三条按 `operator_class` 收窄） | ❌ 无 |
@@ -730,7 +730,7 @@ _U3_BASELINE_NUMPY = "2.4"
 | attr 组合 | ✅ | ✅ |
 | **是否抽样** | ❌ 1-wise 抽样封顶 | ✅ 完整 |
 
-⚠ **两个档的强弱正好互补**：legacy 轴多但抽样、rank 上不去；torch_parity 不抽样、rank 到 8，
+**两个档的强弱正好互补**：legacy 轴多但抽样、rank 上不去；torch_parity 不抽样、rank 到 8，
 但 shape 退化、值域单一、无特殊场景。**任何一个单独都覆盖不全。**
 
 **这个轴集缺口有实证代价**：Median 1152 基线的 **51** 条失败**全部**落在 `[262144,1,1,...]`
@@ -804,7 +804,7 @@ unpaired_combo_classes（某 attr × 某 shape 类从未同时出现）
 `grep -rn "execution_plan_confirmation\|execution.plan" plugin/` → **0 命中**。
 它设计的两件产物都不存在：`ops/<Op>/<Op>.execution-plan.md`、`work/execution_plan_confirmation.json`。
 
-**⚠ 这里有个时序差异要先澄清**：
+**这里有个时序差异要先澄清**：
 
 | | checklist 的设计 | 用户目标 6 的说法 |
 |---|---|---|
@@ -818,7 +818,7 @@ unpaired_combo_classes（某 attr × 某 shape 类从未同时出现）
   哪些 CP 跑了、哪些跳了、哪些门过了/挂了、实际用例数与覆盖、
   以及**与事前确认单的逐项差异**
 
-⚠ **「事后对账」正好能拦住这次 Roll 的问题**：
+**「事后对账」正好能拦住这次 Roll 的问题**：
 事前计划里 complex64 在 `dtype_required` 内，事后实际 `dtype_tested` 没有它
 → 对账表会直接显示「计划覆盖 complex64 / 实际未覆盖 / 原因：生成层不支持」，
 **这一行放在报告顶部，就不会出现「✅ PASS 自测覆盖」那种表述**。
@@ -957,7 +957,7 @@ _RUNNER_FORM_TO_MODE = {
                               spec 必须从 aclnn_py 迁到 cpp_extension（成本更高）
 ```
 
-⚠ **目标 5/6/7 本质是同一套东西的三个时点**：事前定方案、运行期守方案、事后对账。
+**目标 5/6/7 本质是同一套东西的三个时点**：事前定方案、运行期守方案、事后对账。
 **不要分三批做**，否则收据格式会漂成三套。
 
 **建议的落地顺序**：

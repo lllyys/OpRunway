@@ -26,7 +26,7 @@ tools: Bash, Read, Write, Edit
 | dispatch_mode | 触发（何时被 dispatch） | 输入工件 | 本次动作 | 本次产出 | 验收标准（回给 orchestrator 才算成） |
 |---|---|---|---|---|---|
 | `verify_aclnn_harness`（⛔ **非准入形态专用**：`aclnn_py` 产不出验收裁决，本 mode 只服务 `--allow-experimental-form` 的开发级路径） | CP-C0 已为 `READY_WAIT_NPU_TRUST_GATE`，且 `runner_form=aclnn_py` | spec + golden.py + `caseset.json` + `work/aclnn_preflight.json` + 真机环境变量 | 正式生成完整 caseset/golden；运行 `verify_aclnn_harness.py`，按能力确定性选小见证集，真机 build/exec/readback，与 CPU golden 对拍 | 内容寻址 `work/aclnn_harness_trust.json` | `status=TRUSTED_FOR_CP_D`；绑定 spec/完整 caseset/preflight、见证数据字节、golden 源码、PR/build/toolkit/SoC/符号与执行逻辑；`acceptance_verdict=null` |
-| `run_npu` | CP-D，CP-C 的自证门已过（`cpp_extension` → build/load/vendor receipt，**验收路径**；`cpp` → runner 收据、`aclnn_py` → harness 收据，仅开发级路径）、用户确认已开 NPU/VPN | 按 `spec.runner_form` 分叉：`cpp_extension` 用生成的官方 NpuExtension bundle、逐 case invocation plan 与精确 vendor；`cpp` 用已验证 per-op runner；`aclnn_py` 用 DUT + 通用 ctypes runner | 真机 `run_workflow.py --mode <mode>` **一次原子**跑 Task2 精度 + Task3 性能 + 门（派生 `cpp_extension` / `new_example` / `aclnn_py`；后两者须 `--allow-experimental-form`，**不产验收裁决**） | **按路径分，别混列**（详见下节「产出按路径分叉」）。**验收路径**（`cpp_extension`）：`caseset.json`、`evidence.json`、`verdict.json`、`baseline.json`（有基线时）、`perf_report.json`、`acceptance.json` + Markdown 验收报告。**开发级路径**（`cpp` / `aclnn_py` + `--allow-experimental-form`）：`caseset.json`、`evidence.json`、`dev_precision_check.json`、`perf_report.json`（带 NON-ACCEPTANCE 戳）、`dev_run_summary.json`；**物理上不产** `verdict.json` / `acceptance.json`，也不产 Markdown 验收报告 | 工件落盘。**验收路径**：逐字引用 `acceptance.json` / `verdict.json` 的确定性裁决和来源；门 FAILED / Task3 BLOCKED 如实暴露。**开发级路径**：只回报 `dev_run_summary.json` / `dev_precision_check.json` 的事实（`is_acceptance=false`、`selfcheck` 是管路自检非验收门），**不进入裁决引用流程**、`verdict_quoted` 留 null；⚠ 不得等待或索要 `verdict.json` / `acceptance.json`（**不是缺件，是这条路压根不写**） |
+| `run_npu` | CP-D，CP-C 的自证门已过（`cpp_extension` → build/load/vendor receipt，**验收路径**；`cpp` → runner 收据、`aclnn_py` → harness 收据，仅开发级路径）、用户已确认执行形态（就地跑 / 远程连）与 NPU 可达 | `<op>.spec.json` + ⚠ **CP-A 事实包 `<CP-A 取材目录>/source_facts.json`（验收路径上是必需输入，不是可选）**——orchestrator 必须把这个路径随 dispatch 一起交下来，本子agent 原样传给 `--source-facts`；拿不到就当场 BLOCKED 回报，**不自己去猜路径、不去别处翻**。再按 `spec.runner_form` 分叉：`cpp_extension` 用生成的官方 NpuExtension bundle、逐 case invocation plan 与精确 vendor；`cpp` 用已验证 per-op runner；`aclnn_py` 用 DUT + 通用 ctypes runner | 真机 `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json` **一次原子**跑 Task2 精度 + Task3 性能 + 门（派生 `cpp_extension` / `new_example` / `aclnn_py`；后两者须 `--allow-experimental-form`，**不产验收裁决**、也**不受 `--source-facts` 强制**） | **按路径分，别混列**（详见下节「产出按路径分叉」）。**验收路径**（`cpp_extension`）：`caseset.json`、`evidence.json`、`verdict.json`、`baseline.json`（有基线时）、`perf_report.json`、`acceptance.json` + Markdown 验收报告。**开发级路径**（`cpp` / `aclnn_py` + `--allow-experimental-form`）：`caseset.json`、`evidence.json`、`dev_precision_check.json`、`perf_report.json`（带 NON-ACCEPTANCE 戳）、`dev_run_summary.json`；**物理上不产** `verdict.json` / `acceptance.json`，也不产 Markdown 验收报告 | 工件落盘。**验收路径**：逐字引用 `acceptance.json` / `verdict.json` 的确定性裁决和来源；门 FAILED / Task3 BLOCKED 如实暴露。**开发级路径**：只回报 `dev_run_summary.json` / `dev_precision_check.json` 的事实（`is_acceptance=false`、`selfcheck` 是管路自检非验收门），**不进入裁决引用流程**、`verdict_quoted` 留 null；⚠ 不得等待或索要 `verdict.json` / `acceptance.json`（**不是缺件，是这条路压根不写**） |
 | `run_precision_retest` | CP-F F2 已产生 confirmed directive 与 prepared attempt，用户已确认真机副作用；⚠ **只接受 base `spec.runner_form == "cpp_extension"`**（CP-F 要写 `verdict.json`，**没有逃生阀**，`--allow-experimental-form` 不适用也不得用于绕过；`cpp` / `aclnn_py` 的历史验收产物仍保持原裁决与历史效力，只是不支持创建或执行 CP-F attempt） | 可信 `attempts_root` 与其直接四位 attempt、含 golden 授权来源的冻结包、DUT 身份和真机环境 | 先校验 `CANN_VERSION/ASCEND_TOOLKIT_VERSION/OPRUNWAY_SOC` 与 spec/receipt/driver 一致，再真机调用 `cp_f_execute_attempt.py`；只执行 manifest 指定原 case，不调 `run_workflow`、性能 collector 或 `perf_compare` | attempt 内 `caseset/evidence/verdict/attempt_gate/retest_acceptance/attempt.receipt/精度重测报告` | 逐字引用 validator 与 Task-2 gate；基础验收不变、`performance_retested=false`；分开回报“机械闭环”与“新标准裁决生效”；失败单轮返回 blocker，不内部重跑 |
 | `rootcause` | CP-D 出现**任何 FAIL**（精度/性能/门），由 orchestrator 再 dispatch | 失败的 `evidence.json` + 精度判定产物（**验收路径**读 `verdict.json`；**开发级路径**读 `dev_precision_check.json`，那条路没有 `verdict.json`）+ `<op>.spec.json` + PR 改动落点 | 「**被测物自 build + 声明 dtype + 手算 golden**」独立复现，解耦 **op vs harness** 再归因 | `rootcause.md`（独立复现记录 + 归因证据 + 责任归属：op / harness / 环境） | 复现路径与观测数字全来自真实日志/采集；归因有实锤、非臆断；技术判定与官方口径分开、不外发、不替 PR 作者修到底 |
 
@@ -57,9 +57,13 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
 
 ## dispatch_mode: run_npu — 真机跑测（一次原子，CP-D）
 
-**一句话**：把 CP-B 已产的 `spec` + CP-C 已过自证门的被测物拿去真机，跑一发 `run_workflow.py --mode <mode>`（`<mode>` 据 `spec.runner_form` 派生，**不写死**），把落盘的裁决工件端回来。
+**一句话**：把 CP-B 已产的 `spec` + CP-A 产的 `source_facts.json` + CP-C 已过自证门的被测物拿去真机，跑一发 `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`（`<mode>` 据 `spec.runner_form` 派生，**不写死**），把落盘的裁决工件端回来。
 
-1. **前置确认**（副作用门）：确认用户已开 NPU/VPN，确认真机路径经 `OPRUNWAY_*` 环境变量传入（**不写进仓**）。未确认不上真机。
+1. **前置确认**（副作用门）：确认**执行形态**与 **NPU 可达**，确认真机路径经 `OPRUNWAY_*` 环境变量传入（**不写进仓**）。未确认不上真机。
+   - **就地跑**（会话本身已在目标机或其 NPU 容器里）：`OPRUNWAY_TARGET=local`，`OPRUNWAY_SSH_HOST` **免填**，`repo_adapter` / `aclnn_adapter` 的传输层走本机 `bash`/`cp`、不碰 ssh/scp；`.oprunway/real-machine.env` **不需要存在**。
+     ⚠ **验收通路 `cpp_extension` 不吃 `OPRUNWAY_TARGET`**：它的传输就是 `OPRUNWAY_CPP_EXTENSION_DRIVER_JSON` 那串 argv 本身（adapter 只执行编排层给的 argv，既不读该变量、也不把传输模式绑进收据）。声明就地跑时**必须逐字核这串 argv 不带 `ssh` / `docker exec -H` 等跨机前缀**，否则会静默跑到另一台机器、且那台机器的保护根本轮未加载——这是**编排层的检查义务，不是脚本已有的门**。
+   - **远程连**（开发机 → 目标机）：`OPRUNWAY_TARGET=remote`（缺省）时 `OPRUNWAY_SSH_HOST` 必填；SSH alias / 容器名 / 远端工作根来自 `.oprunway/real-machine.env`，另需确认 VPN / 跳板通不通。
+   - ⚠ **该文件缺席不构成阻塞**（它只是远程连形态的连接元数据），**不得**据此拒绝上真机；但它**存在时**必须读 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`，那些根及其子目录是只读保留现场，未登记 ≠ 可随意清理（`AGENTS.md` §5.3）。
 2. **源码与执行四段门**：shell 必须使用等价于 `set -Eeuo pipefail` 的 fail-fast 语义，并按
    `SOURCE_ACQUIRED → HEAD_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED` 顺序推进。期望 SHA
    只取当前 facts bundle 的 40 位 `head_sha`；先取得精确对象、detached checkout，再以
@@ -68,14 +72,29 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
    blocked，禁止启动后续 build/workflow，也不得在同一 subagent 内换 ref、补 fetch 或重跑。
    构建入口的权限检查必须匹配实际 argv：`bash build.sh` 只校文件可读，直接 `./build.sh` 才校
    executable bit；不得以无关的 `-x` 假设把合法的 `0644 build.sh` 误判为 build 失败。
-   上传冻结包前还须在空目录真实解包，校验同一 manifest 覆盖远端执行入口与全部 payload，并对最终
-   入口相对路径执行 `test -f`、`test -r`、`bash -n`；入口漏包时不得启动远端阶段。
+   投放冻结包前还须在空目录真实解包，校验同一 manifest 覆盖目标侧执行入口与全部 payload，并对最终
+   入口相对路径执行 `test -f`、`test -r`、`bash -n`；入口漏包时不得启动目标侧执行阶段。
    解包后的普通文件集合必须严格等于 manifest allowlist 加 manifest 自身；任何 `._*`、`.DS_Store`、
-   `__pycache__`、`.pyc` 或其它未登记成员均须拒绝并重做新快照，不能带到远端后再忽略。
-   结果收回必须事务化：远端先记录 size/SHA，本地临时包核同一 SHA、归档完整性与核心 JSON 后再原子
-   落正式目录；只有本地验证全部成功才可清理远端。收件或解包失败时必须保留远端原件，禁止“先删后验”。
+   `__pycache__`、`.pyc` 或其它未登记成员均须拒绝并重做新快照，不能投放后再忽略。
+   结果收回必须事务化：目标侧先记录 size/SHA，收件侧临时包核同一 SHA、归档完整性与核心 JSON 后再原子
+   落正式目录；只有收件侧验证全部成功才可清理目标侧原件。收件或解包失败时必须保留目标侧原件，禁止“先删后验”。
+   ⚠ **这套校验与形态无关**：远程连时「投放/收回」是 scp 上传与回传，就地跑时是同机 `cp` 到执行目录、
+   收件侧就是本机——**同机不等于免检**，manifest allowlist、入口 `test -f/-r`+`bash -n`、SHA 对账与
+   先验后删一条都不放宽。
 3. **一次原子执行**：
-   `python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <op>.spec.json --mode <mode> --out reports/<op>/`
+   `python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <op>.spec.json --mode <mode> --out reports/<op>/ --source-facts <CP-A 取材目录>/source_facts.json`
+
+   ⚠ **`--source-facts` 在验收通路上必给，缺席直接拒跑**（不是可选参数；`run_workflow.py` 在
+   `os.makedirs` / staging / Task1 之前就拒，**连半个产物目录都不留**——所以「先跑起来再说」拿不到任何工件）。
+   三级门要拿它与 vendor build receipt 的来源锚逐字对账；没有对照物时 PR 通路会沿用旧行为放过，
+   「收据自称 `pull_request`、事实其实是 `local_checkout`」这类伪装就查不出来。
+   **路径从哪来**：就是 CP-A 取材那一步 `fetch_source.py --out <取材目录>` 产的那份 `source_facts.json`，
+   由 orchestrator 随 dispatch 交下来（`completeness.status` 必须是 `complete`；`blocked`/半成品只供诊断，
+   会被 fail-closed 拒）。⚠ **它与 `--out reports/<op>/` 不是同一个目录**——取材目录在前、验收产物目录在后；
+   本子agent 自己拿不到该路径时**当场 BLOCKED 回报**，不猜、不拿 `reports/<op>/` 里的副本顶上去
+   （那份是本次 staging 出来的产物，拿它当输入等于自己给自己作证）。
+   ⚠ **非验收通路不受此强制**：`mock` 与加了 `--allow-experimental-form` 的 `cpp` / `aclnn_py`
+   物理上不产验收裁决、也没有来源锚要对账，`run_workflow.py` 对它们不要求 `--source-facts`。
 
    ⚠ **`<mode>` 不写死、不问用户——`spec.runner_form` 是唯一真源**（受控词表
    `{cpp, aclnn_py, cpp_extension}`，**缺省 = `cpp_extension`**），据它**派生**：

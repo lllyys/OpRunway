@@ -52,8 +52,8 @@ def _docs(receipt):
 def _write_docs(root, docs, source_facts=None, source_facts_raw=None):
     """落盘产物；`source_facts` 按**真** content_address envelope 写。
 
-    ⚠ 夹具必须走 `make_artifact` 而不是手拼 `{"payload": …}`：`_find_source_facts` 会复算
-    digest，手拼信封没有 digest 就会被判 `__BAD__`——那样这些用例测的其实是「读不出」分支，
+    ⚠ 夹具必须走 `make_artifact` 而不是手拼 `{"payload": …}`：`dut_source.find_source_facts`
+    会复算 digest，手拼信封没有 digest 就会被判 UNTRUSTED——那样这些用例测的其实是「读不出」分支，
     看着绿、覆盖的却不是它们声称覆盖的路径。
     """
     for name, value in docs.items():
@@ -70,9 +70,9 @@ def _write_docs(root, docs, source_facts=None, source_facts_raw=None):
 
 def _local_facts(root_digest=LOCAL_DIGEST, git=None, op_subdir="ops/x",
                  completeness=None):
-    """⚠ 用共享的**完整契约** payload：渲染器复用三级门的 `_find_source_facts`，
-    而那道门会拿 `validate_preparation_state._validate_source_payload` 校这份对照物。
-    只塞一个 `root_digest` 的最小 payload 会被判 `__BAD__`，用例就测不到它想测的分支。
+    """⚠ 用共享的**完整契约** payload：渲染器与三级门共用 `dut_source.find_source_facts`，
+    而它会拿 `validate_preparation_state._validate_source_payload` 校这份对照物。
+    只塞一个 `root_digest` 的最小 payload 会被判 UNTRUSTED，用例就测不到它想测的分支。
     """
     from test_validate_cpp_extension_receipt import source_facts_payload
     return source_facts_payload(
@@ -299,6 +299,27 @@ class ProvenanceSectionTest(unittest.TestCase):
         self.assertNotIn(R.PROV_DIRTY_CLEAN, text)
         self.assertIn(f"| 子树摘要 root_digest | `{LOCAL_DIGEST}` |", text)
 
+    def test_legacy_receipt_carrying_a_credential_repo_never_reaches_the_report(self):
+        """⭐ 报告是凭据真正**泄漏出去**的那一步——它是给人看、会被转发的 .md。
+
+        源头（`fetch_source` 扣留 remote_url）堵住的是新产的 source_facts；已经躺在
+        既有 reports 目录里的老收据、外部构建驱动产的收据、手改的收据，全都从**读侧**
+        进来。渲染器共用 `dut_source.validate_build_receipt_source`，那道门拦下即整节
+        退成「来源锚不合法」，一个 token 字节都不进 .md。
+        """
+        token = "gk_LEAKED_TOKEN_9f3a"
+        text = self._render(_receipt({
+            "dut_source": "local_checkout",
+            "repo": f"https://bot:{token}@gitcode.com/cann/ops-nn.git",
+            "repo_source": "local_checkout.git.remote_url",
+            "local_root_digest": LOCAL_DIGEST}))
+        self.assertNotIn(token, text, "凭据被渲染进了人读的验收报告")
+        self.assertIn("来源锚不合法", text)
+        self.assertNotIn("| 源码仓 |", text)
+        self.assertNotIn(LOCAL_DIGEST, text, "校验没过就不该有任何 provenance 断言")
+        # 报告本体照出：异常被 catch 在节内，不能把整份 `验收报告.md` 拖没。
+        self.assertIn("## 精度汇总", text)
+
     def test_malformed_receipt_source_still_renders_report_without_anchor(self):
         # `repo` 缺失 → `validate_build_receipt_source` 抛错；锚值虽在收据里，但校验没过，
         # 一个字都不该被当成 provenance 渲染出去。
@@ -495,8 +516,8 @@ class RepoSourceStrengthTest(unittest.TestCase):
 class LocalRowsSecondLineOfDefenceTest(unittest.TestCase):
     """`_local_rows` 自己那层形态判定——**第二道防线**，所以只能直调来见证。
 
-    这些畸形 payload 走不到渲染层：`_find_source_facts` 已经拿
-    `validate_preparation_state._validate_source_payload` 把它们判成 `__BAD__` 了
+    这些畸形 payload 走不到渲染层：`dut_source.find_source_facts` 已经拿
+    `validate_preparation_state._validate_source_payload` 把它们判成 UNTRUSTED 了
     （contract 那层同样校 `completeness`、`dirty ↔ dirty_files`）。
     早一层拦住是好事，但**不能因此把渲染层这几条删掉**：渲染层的职责是
     「拿到什么都不许说成 clean」，它不该依赖上游一定筛干净。
@@ -592,6 +613,48 @@ class CodeCellInjectionTest(unittest.TestCase):
         """⭐ 钉住调用点：`源码仓` 行必须走 `_code_cell`，不是自己包一对反引号。"""
         self.assertNotIn("`{repo}`", R.PROV_REPO_ROW)
         self.assertIn("{repo}", R.PROV_REPO_ROW)
+
+
+class SourceFactsDiscoveryIsSharedTest(unittest.TestCase):
+    """⭐ 钉住「渲染器和三级门用的是**同一份**来源对照物发现规则」。
+
+    只把 `_find_source_facts` 改名成公开名是不够的：这条纪律要防的是**将来**有人在
+    某一侧另写一份查找规则（或多加一档 fallback 路径）。那时报告陈述的 facts 就不是
+    门校过的那一份文件——报告说 clean、门校的是另一份，两边都「自洽」，谁也发现不了。
+
+    做法：把 `dut_source.find_source_facts` 换成桩，看两侧是否都观察得到。
+    任一侧改成自建实现、或改成 `from dut_source import find_source_facts`
+    （import 时就绑死了函数对象、换桩换不掉），本用例即红。
+    """
+
+    def test_both_the_gate_and_the_renderer_go_through_dut_source(self):
+        import dut_source
+        import validate_acceptance_state as vas
+        source = {"dut_source": "local_checkout", "repo": "cann/ops-nn",
+                  "local_root_digest": LOCAL_DIGEST}
+        calls = []
+        original = dut_source.find_source_facts
+
+        def stub(report_root, source_facts_path=None):
+            calls.append((report_root, source_facts_path))
+            return dut_source.SOURCE_FACTS_UNTRUSTED
+
+        dut_source.find_source_facts = stub
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                _write_docs(root, _docs(_receipt(source)))
+                text = R.render(root)
+                self.assertEqual(1, len(calls), "渲染器没走 dut_source.find_source_facts")
+
+                errs = []
+                vas._gate_build_receipt_source_binding(root, source, errs)
+                self.assertEqual(2, len(calls), "三级门没走 dut_source.find_source_facts")
+        finally:
+            dut_source.find_source_facts = original
+
+        # 桩返回 UNTRUSTED：两侧都必须按「拿不到可对账的对照物」处置，不能当 clean。
+        self.assertIn(R.PROV_DIRTY_UNKNOWN, text)
+        self.assertTrue(errs, "对照物不可信时三级门必须记 error，不能静默放行")
 
 
 if __name__ == "__main__":

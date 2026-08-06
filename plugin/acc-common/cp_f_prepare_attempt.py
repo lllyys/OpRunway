@@ -19,7 +19,13 @@ def main(argv=None):
     parser.add_argument("--directive", required=True,
                         help="已由人工确认的 directive JSON")
     parser.add_argument("--reports-dir", required=True,
-                        help="首次验收 reports/<op> 目录")
+                        help="首次验收产物的**受信容纳根**——不是「就是那个报告目录」。"
+                             "它只做一件事：directive.base_artifacts 里的五个绝对路径"
+                             "必须逐个落在它之内（containment 校验，安全边界）；"
+                             "真正的报告目录由 caseset.json 所在目录派生，attempt 也落在那里。"
+                             "CP-E 已把 spec.json / golden.py / source_facts.json staging 进"
+                             "验收 `--out`，所以直接把那个 `--out` 传进来即可，"
+                             "无需再手工搬 spec 与 golden。")
     parser.add_argument("--execution-identity", required=True,
                         help="本轮 SoC/toolkit/vendor ELF/golden source 身份 JSON")
     args = parser.parse_args(argv)

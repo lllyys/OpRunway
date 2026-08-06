@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """aclnn_py harness 信任门的纯确定性单测；不 build、不访问 NPU。"""
 
+import ast
 import json
 import os
 import tempfile
@@ -452,12 +453,6 @@ class SourcePathGateTest(unittest.TestCase):
     失去机器可核的对应关系。
     """
 
-    def test_dut_source_logic_is_bound_by_the_receipt(self):
-        # 判别式是本门的判定依赖；不进 logic_files 就意味着「把 of() 改成未知取值
-        # 缺省 pull_request」之后，旧收据照样 revalidate 通过。
-        self.assertIn("dut_source.py", H._LOGIC_FILES)
-        self.assertIn("dut_source.py", H._logic_hashes())
-
     def test_run_gate_blocks_local_before_touching_real_machine_config(self):
         with tempfile.TemporaryDirectory() as root:
             _write_gate_root(root, _LOCAL_BINDINGS)
@@ -645,6 +640,283 @@ class WorkflowHardGateTest(unittest.TestCase):
                     run_workflow.run(
                         spec_path, mode="aclnn_py", out_dir=out_dir,
                         allow_experimental_form=True)
+
+
+_ACC_COMMON = os.path.dirname(os.path.abspath(H.__file__))
+
+
+def _source_of(rel):
+    with open(os.path.join(_ACC_COMMON, *rel.split("/")), encoding="utf-8") as src:
+        return src.read()
+
+
+def _first_party_rel(module_name):
+    """本仓模块名 → `_LOGIC_FILES` 里那种相对路径；不是本仓模块（stdlib/三方）返回 None。"""
+    parts = module_name.split(".")
+    for candidate in (parts + ["__init__.py"], parts[:-1] + [parts[-1] + ".py"]):
+        rel = "/".join(candidate)
+        if os.path.isfile(os.path.join(_ACC_COMMON, *candidate)):
+            return rel
+    return None
+
+
+def _direct_imports(rel):
+    """AST 取某文件**直接** import（含函数体内惰性 import）的本仓模块 → 相对路径集合。
+
+    ⚠ `from <包> import <子模块>` 必须把**子模块**也解析出来：只解析 `<包>` 会落到
+    `<包>/__init__.py`，而真正执行判定的那份 `<包>/<子模块>.py` 就漏出哈希覆盖了。
+    """
+    found = set()
+    for node in ast.walk(ast.parse(_source_of(rel))):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names = [node.module] + [f"{node.module}.{a.name}" for a in node.names]
+        else:
+            continue
+        for name in names:
+            target = _first_party_rel(name)
+            if target is not None:
+                found.add(target)
+    return found
+
+
+def _relative_imports(rel):
+    """某文件里的相对 import（`from . import x`）源文；acc-common 是扁平布局，本不该有。
+
+    单列出来是因为 `_direct_imports` **解析不了**它们：静默跳过 = 一条依赖悄悄不进哈希覆盖。
+    """
+    lines = _source_of(rel).splitlines()
+    return [lines[node.lineno - 1].strip()
+            for node in ast.walk(ast.parse(_source_of(rel)))
+            if isinstance(node, ast.ImportFrom) and node.level]
+
+
+def _module_level_bindings(rel):
+    """某文件里**自己定义**的模块级名字 → 绑定次数（def/class/赋值）；**不含** import 进来的。
+
+    「不含 import」是关键：一个从别处再导出的名字，其判定逻辑住在**另一个**文件里，
+    哈希本文件覆盖不到它。
+    「计次数」也是关键：`def of(): …` 后面再跟一个 `from 别处 import of`，只看「有没有
+    同名 def」会把它记成本地定义，而模块最终导出的其实是别处那个。
+    """
+    counts = {}
+
+    def bump(name):
+        counts[name] = counts.get(name, 0) + 1
+
+    def bump_target(target):
+        """解构也要计数：`of, _ = (…)` 一样是一次模块级绑定。"""
+        if isinstance(target, ast.Name):
+            bump(target.id)
+        elif isinstance(target, ast.Starred):
+            bump_target(target.value)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for item in target.elts:
+                bump_target(item)
+
+    for node in ast.parse(_source_of(rel)).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bump(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                bump_target(target)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            bump(node.target.id)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                bump(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bump(alias.asname or alias.name)
+    return counts
+
+
+def _attrs_read_off(rel, alias):
+    """AST 取某文件里 `alias.<attr>` 形态读到的全部属性名。"""
+    return {
+        node.attr for node in ast.walk(ast.parse(_source_of(rel)))
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+        and node.value.id == alias
+    }
+
+
+def _bare_module_references(rel, alias):
+    """某文件里**不是** `alias.<attr>` 形态的 `alias` 裸引用（起别名、传参、下标…）。
+
+    为什么单挑这一种：`ds = dut_source_kind` 之后写 `ds.identity(...)`，是一句人畜无害的
+    「图省事起个短名」，却让 `_attrs_read_off` 一个字都读不到——绑定面扫描当场失明，
+    判定依赖悄悄长出去也不会有人知道。这是**会被无意写出来**的形态，值得单独拦。
+    """
+    tree = ast.parse(_source_of(rel))
+    as_attr_value = {
+        id(node.value) for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+    }
+    return [f"line {node.lineno}" for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id == alias
+            and id(node) not in as_attr_value]
+
+
+# 能绕过**静态**依赖扫描的装载/取名手段。三道 AST 检查全部建立在「读代码就能看全依赖」
+# 之上，这些一出现，那个前提就没了：`importlib.import_module("dut_source")` 让被扫的文件
+# 里连 `import dut_source` 都不存在，`getattr(dut_source_kind, "identity")` 让属性扫描
+# 看不见那次读取。本门与内核都不需要它们（实测零处使用），所以直接禁掉是免费的。
+_DYNAMIC_LOADERS = ("__import__", "eval", "exec", "getattr", "importlib")
+
+
+def _dynamic_loader_calls(rel):
+    """AST 取某文件里用到的动态装载/动态取名手段（含 `importlib.*` 属性调用）。"""
+    found = set()
+    for node in ast.walk(ast.parse(_source_of(rel))):
+        name = None
+        if isinstance(node, ast.Name):
+            name = node.id
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            name = node.value.id
+        if name in _DYNAMIC_LOADERS:
+            found.add(name)
+    return found
+
+
+def _import_statements(rel):
+    """某文件里的**全部** import 语句源文（stdlib / 三方 / 本仓一律计入）。"""
+    tree = ast.parse(_source_of(rel))
+    lines = _source_of(rel).splitlines()
+    return [lines[node.lineno - 1].strip() for node in ast.walk(tree)
+            if isinstance(node, (ast.Import, ast.ImportFrom))]
+
+
+class LogicBindingCoverageTest(unittest.TestCase):
+    """`_LOGIC_FILES` 必须覆盖本门的**全部**判定依赖——这几道检查是机械的，不靠人记。
+
+    背景：本门的来源判别依赖已从聚合模块 `dut_source.py` 收窄到内核 `dut_source_kind.py`
+    （前者还装着 URL 凭据策略 / build receipt 锚校验 / `source_facts.json` 查找三类与本门
+    判定无关的职责，绑它 = 那三类一动就作废昂贵的真机收据）。收窄的**代价**是可能欠绑定：
+    以后有人让本门用上 `dut_source` 里的东西却忘了同步 `_LOGIC_FILES`，判定依赖就脱离了
+    哈希覆盖 —— 那是真 fail-open。下面几道检查专堵这个：
+
+    ① 本门**直接 import** 的本仓模块，必须全在 `_LOGIC_FILES` 里；
+    ② 本门从 `dut_source_kind` 读到的名字，必须**恰好**是钉住的那一小组，且每个都**唯一
+       定义在** `dut_source_kind.py` 自己文件里（不是从某个没被哈希的模块再导出的）；
+    ③ 内核**一个 import 都不许有**（stdlib / 三方也不行）；
+    ④ 本门与内核都不许用动态装载/动态取名、也不许给内核模块起别名（否则 ①②③ 的静态
+       扫描直接被架空）。
+
+    ⚠ **这几道检查挡的是「无意」与「顺手」，不是「蓄意」**。真正的哈希覆盖保证来自 ③：
+    内核零 import ⇒ 它导出的任何东西都只由本文件字节决定 ⇒ 逐字节哈希它 == 覆盖它的
+    全部判定语义。②里那条「绑定次数恰好 1」是**多一道保险**，不是保证的来源——即便有人
+    在内核里用 `if True: of = …` 这种花样重绑，那份改动**照样在被哈希的文件里**，旧收据
+    照样失效；语义走样另有 `SourcePathGateTest` 的行为测试兜。
+    同理，`vars(__builtins__)["__import__"]` 这类刻意隐藏依赖的写法能绕过 ④ 的黑名单——
+    但同一个人也能直接改 `_LOGIC_FILES` 或删掉本测试类。**没有任何自检能防住蓄意拆自己的门**，
+    那一层由 push 前审修门（人）负责。把 ④ 换成「正向 AST 白名单」并不改变这个边界，
+    却会把 `_require_pull_request_path` 的实现形态钉死，正当重构一改就红。故不采纳。
+
+    ⚠ ① 只查**直接** import，**不查传递闭包**——这是如实挂账的既有张力，不是本轮遗漏：
+    `_LOGIC_FILES` 从设计上就是「判定依赖的**策展**清单」而非 import 闭包。实测本门的
+    一方传递闭包是 14 个模块（经 `repo_adapter → cpp_extension_adapter` 还会拉进
+    `dut_source` / `fetch_source` / `catlass_adapter` / `validate_preparation_state`），
+    而 `_LOGIC_FILES` 只列 8 个模块 + 5 份 `aclnn_runtime/`。改成「闭包 ⊆ `_LOGIC_FILES`」
+    会让**未改动的现有代码当场变红**，且要把清单撑到 14 个模块——那正好是本轮要削减的
+    过度绑定，方向相反。残留缺口如实记：**已哈希模块再去调一个未哈希 helper**，本检查
+    抓不到。要封它得先重画 `_LOGIC_FILES` 的语义（策展清单 → 闭包），属于另一个议题。
+    查直接 import 抓的是「**本门自己**开始调新东西了」这一步，也就是本轮收窄真正引入的
+    那个风险面；它严格优于收窄前的状态（那时一道机械检查都没有）。
+    """
+
+    _SELF = "verify_aclnn_harness.py"
+    _KERNEL = "dut_source_kind.py"
+    # 本门从内核读到的名字，**钉死**。这不是为了防 fail-open（内核里的东西都被哈希），
+    # 而是「绑定面变了就得有人重新审一遍」的强制触发点：多读一个名字 = 本门的判定依赖
+    # 变了，必须当场复核 `_LOGIC_FILES` 是否仍然覆盖得住，而不是悄悄长出去。
+    _KERNEL_SURFACE = {"of", "PULL_REQUEST"}
+
+    def test_every_first_party_module_the_gate_imports_is_hashed(self):
+        # 相对 import 先拦：`_direct_imports` 解析不了它们，静默跳过 = 依赖悄悄逃出覆盖。
+        self.assertEqual(
+            [], _relative_imports(self._SELF),
+            "本门出现了相对 import —— acc-common 是扁平布局，本检查解析不了它，"
+            "放过去等于一条依赖不进哈希覆盖。请改成绝对 import。")
+        missing = sorted(_direct_imports(self._SELF) - set(H._LOGIC_FILES))
+        self.assertEqual(
+            [], missing,
+            f"本门直接 import 了 {missing}，但它们不在 _LOGIC_FILES 里 —— "
+            f"这些模块的逻辑改了，旧 harness 收据照样 revalidate 通过（fail-open）。"
+            f"要么把它们加进 _LOGIC_FILES，要么别在本门里用。")
+
+    def test_the_source_discriminator_is_defined_inside_a_hashed_file(self):
+        self.assertIn(self._KERNEL, H._LOGIC_FILES)
+        self.assertIn(self._KERNEL, H._logic_hashes())
+        used = _attrs_read_off(self._SELF, "dut_source_kind")
+        # 少 = 本门没在判别来源通路（假门，`local_checkout` 静默放行）；
+        # 多 = 判定依赖悄悄长出去了，必须有人重新审绑定面。两个方向都拦。
+        self.assertEqual(
+            self._KERNEL_SURFACE, used,
+            f"本门读到的内核名字变成 {sorted(used)}（钉住的是 "
+            f"{sorted(self._KERNEL_SURFACE)}）—— 少了 = 来源通路门形同虚设；"
+            f"多了 = 判定面扩张，请重新审定 _LOGIC_FILES 覆盖是否仍然足够，再更新本 pin。")
+        bindings = _module_level_bindings(self._KERNEL)
+        bad = sorted(n for n in used if bindings.get(n) != 1)
+        self.assertEqual(
+            [], bad,
+            f"本门读的 {bad} 在 {self._KERNEL} 里不是**唯一的本地定义**（缺失、或被后面的 "
+            f"import/赋值覆盖）—— 真正导出的对象可能来自别的文件，哈希 {self._KERNEL} "
+            f"覆盖不到，等于绕开绑定。")
+
+    def test_the_discriminator_kernel_imports_nothing_at_all(self):
+        """内核零 import 是「哈希这一个文件 == 覆盖全部判定语义」的前提；破了就得重算绑定面。
+
+        ⚠ 这里**不能**只查本仓模块。`from some_pkg import normalize_kind` 之后让 `of()`
+        调它，来源归类逻辑就住进了一个既不在 `_LOGIC_FILES`、版本也不被任何收据钉住的
+        三方包里——升个级就能悄悄改判定，旧收据照样 revalidate 通过。stdlib 同理
+        （行为随解释器版本走）。所以是**一个 import 都不许有**。
+        """
+        self.assertEqual(
+            [], _import_statements(self._KERNEL),
+            f"{self._KERNEL} 出现了 import —— 内核的判定语义不再由本文件字节唯一决定。"
+            f"要么把新依赖一起纳入 _LOGIC_FILES 并重算绑定面，要么别在内核里引入依赖。")
+
+    def test_neither_the_gate_nor_the_kernel_can_dodge_the_static_scan(self):
+        """动态装载/动态取名会架空上面三道静态检查，本门与内核一律禁用。"""
+        for rel in (self._SELF, self._KERNEL):
+            found = sorted(_dynamic_loader_calls(rel))
+            self.assertEqual(
+                [], found,
+                f"{rel} 用了 {found} —— 静态 AST 扫描看不见这样引入的依赖/属性读取："
+                f"`importlib.import_module(\"dut_source\")` 能让依赖扫描完全落空，"
+                f"`getattr(dut_source_kind, …)` 能让绑定面扫描漏读。请改回静态写法。")
+
+    def test_the_gate_never_aliases_the_kernel_module(self):
+        """内核模块只准以 `dut_source_kind.<attr>` 出现；起了别名，绑定面扫描就失明。"""
+        bare = _bare_module_references(self._SELF, "dut_source_kind")
+        self.assertEqual(
+            [], bare,
+            f"本门在 {bare} 把 `dut_source_kind` 当值用了（起别名 / 传参 / 下标）——"
+            f"之后经别名读到的属性，`_attrs_read_off` 一个都看不见，钉住的绑定面形同虚设。"
+            f"请一律直接写 `dut_source_kind.<名字>`。")
+
+
+class ReexportIdentityTest(unittest.TestCase):
+    """聚合模块 `dut_source` 必须**再导出**内核对象，而不是复制一份同名的。
+
+    复制一份的后果很隐蔽：`dut_source.DutSourceError` 与 `dut_source_kind.DutSourceError`
+    成为两个不同的类，既有 10+ 处 `except dut_source.DutSourceError` 从此漏捕内核抛的异常，
+    fail-closed 的门变成裸 traceback（甚至被更外层的宽 except 吞掉）。
+    """
+
+    def test_dut_source_reexports_the_very_same_objects(self):
+        import dut_source
+        import dut_source_kind
+        for name in ("DutSourceError", "PULL_REQUEST", "LOCAL_CHECKOUT", "ALL", "of"):
+            self.assertIs(
+                getattr(dut_source, name), getattr(dut_source_kind, name),
+                f"dut_source.{name} 与内核不是同一个对象")
+
+    def test_the_kernel_error_is_caught_through_the_aggregate_name(self):
+        import dut_source
+        with self.assertRaises(dut_source.DutSourceError):
+            dut_source.of({"dut_source": "made_up"}, where="t")
 
 
 if __name__ == "__main__":

@@ -7,12 +7,12 @@ import argparse
 import json
 import os
 
+# 来源判别 + 来源对照物（`source_facts.json`）的发现规则都在这里，本文件一条都不自建。
+# ⚠ 发现规则曾是 `validate_acceptance_state._find_source_facts`，由本模块跨模块引用那个
+#   **私有**名。复用方向是对的（两处各写一份查找规则的话，报告说的 facts 和三级门校的
+#   facts 可能根本不是同一份文件），但私有名跨模块用，将来改名会**静默炸 import**，
+#   所以规则下沉到了 `dut_source`。本模块因此也不再依赖三级门那个重模块。
 import dut_source
-# 只为复用 `_find_source_facts`（来源对照物的发现规则）。两处各写一份查找规则的话，
-# 报告说的 facts 和三级门校的 facts 可能根本不是同一份文件。
-# 无循环导入：`validate_acceptance_state` 不 import 本模块；它的 numpy 是惰性 import，
-# 本模块（stdlib-only 的纯渲染器）不会因此被拖上 numpy 依赖。
-import validate_acceptance_state as gate
 
 
 def _load(root, name):
@@ -243,7 +243,7 @@ def _local_rows(facts, receipt_identity):
     `validate_acceptance_state` 的三级门，本渲染器不重判、只如实标注强度。
     """
     if not isinstance(facts, dict):
-        # `gate._find_source_facts` 三态：dict / None（自动发现没找到）/ "__BAD__"
+        # `dut_source.find_source_facts` 三态：dict / None（自动发现没找到）/ UNTRUSTED
         # （找到但摘要不可信/读不出/显式路径指空）。后两态在本节里**同权**——
         # 都是「拿不到可对账的对照物」，强度一样，都退「未知」。
         return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_UNKNOWN)]
@@ -492,11 +492,11 @@ def render(report_root, source_facts_path=None):
     vendor = receipt.get("vendor") or {}
     build_receipt = vendor.get("build_receipt") or {}
     source = build_receipt.get("source") or {}
-    # 来源对照物：**复用**三级门的发现规则（显式路径 → `<报告目录>/` → `<报告目录>/work/`），
+    # 来源对照物：与三级门**调同一个函数**（显式路径 → `<报告目录>/` → `<报告目录>/work/`），
     # 不在这里另写一份——两处规则一旦分叉，报告陈述的 facts 就不是门校过的那一份了。
-    # 返回三态：dict / None（没找到）/ "__BAD__"（找到但读不出）。
+    # 返回三态：dict / None（没找到）/ `SOURCE_FACTS_UNTRUSTED`（找到但读不出/不可信）。
     # ⚠ 后两态在本渲染器里**同权**，都当「未知」，绝不当 clean（见 `_local_rows`）。
-    facts = gate._find_source_facts(report_root, source_facts_path)
+    facts = dut_source.find_source_facts(report_root, source_facts_path)
 
     lines = [
         f"# {op} 算子验收报告",

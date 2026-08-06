@@ -1137,6 +1137,271 @@ class LocalCheckoutFetchTest(unittest.TestCase):
                          git["dirty_files_in_op_subdir"])
 
 
+class CredentialWithholdingTest(unittest.TestCase):
+    """⭐ 凭据**一个字节都不落盘**——本仓的泄漏源头就在这条链上。
+
+    `git config --get remote.origin.url` 原样收下的话，
+    `https://<user>:<token>@host/…` 会一路进 `pr_facts.json` / `source_facts.json`
+    → `make_vendor_build_receipt.derive_repo` → 收据 `source.repo`
+    → `render_acceptance_markdown` 的「源码仓」一行 → **人读的验收报告**。
+    撞仓规 §2「token、密码、私钥连本地 ignored 文件都不得写」。
+
+    每条用例都直接断言「**这串 token 不在产物字节里**」，而不是只看某个字段等于什么——
+    换个字段藏原值同样是泄漏。
+    """
+
+    TOKEN = "gk_LEAKED_TOKEN_9f3a"
+    CRED_URL = f"https://lys:{TOKEN}@gitcode.com/cann/ops-nn.git"
+    REDACTED = "https://***@gitcode.com/cann/ops-nn.git"
+
+    # ---- 判别式本身：不能误伤，也不能漏 ------------------------------------------
+    def test_ssh_scp_style_remote_is_not_mistaken_for_a_credential(self):
+        """`git@host:path` 的 `@` 前面只是用户名——拦它会把合法 SSH remote 全部误伤。"""
+        self.assertFalse(fs.url_has_userinfo("git@gitcode.com:cann/ops-nn.git"))
+        self.assertEqual("git@gitcode.com:cann/ops-nn.git",
+                         fs.redact_url_userinfo("git@gitcode.com:cann/ops-nn.git"))
+
+    def test_plain_https_remote_is_untouched(self):
+        self.assertFalse(fs.url_has_userinfo("https://gitcode.com/cann/ops-nn.git"))
+        self.assertEqual({"remote_url": "https://gitcode.com/cann/ops-nn.git"},
+                         fs.remote_url_record("https://gitcode.com/cann/ops-nn.git"))
+
+    def test_token_only_userinfo_without_colon_is_caught(self):
+        """PAT 形态连冒号都没有（`https://<token>@host/…`），漏了它等于门白装。"""
+        self.assertTrue(fs.url_has_userinfo(f"https://{self.TOKEN}@gitcode.com/x.git"))
+        self.assertEqual("https://***@gitcode.com/x.git",
+                         fs.redact_url_userinfo(f"https://{self.TOKEN}@gitcode.com/x.git"))
+
+    def test_authority_terminator_is_the_first_of_slash_query_hash(self):
+        """⭐ 只按 `/` 切 authority 时，`…@host?x=1` 会把 query 当成 host 的一部分脱敏错。"""
+        self.assertEqual("https://***@host?x=1",
+                         fs.redact_url_userinfo(f"https://u:{self.TOKEN}@host?x=1"))
+        self.assertEqual("https://***@host#f",
+                         fs.redact_url_userinfo(f"https://u:{self.TOKEN}@host#f"))
+
+    def test_at_sign_in_query_or_fragment_is_not_mistaken_for_userinfo(self):
+        """⭐ 反向误伤：`?`/`#` 不算 authority 终止符的话，`https://host?a=b@c` 里
+        query 的 `@` 会被当成 userinfo —— 一个**根本不含凭据**的 URL 被判「带凭据」、
+        直接扣留（remote_url 置 None、仓名派生不出来），脱敏后还被截成 `https://***@c`。
+        判过头与判不到同样是坏门，这条钉的是过头那一侧。
+        """
+        for url in ("https://host?a=b@c", "https://host#a@b"):
+            self.assertFalse(fs.url_has_userinfo(url), url)
+            self.assertEqual(url, fs.redact_url_userinfo(url))
+            self.assertEqual({"remote_url": url}, fs.remote_url_record(url))
+            self.assertEqual({"source_locator": url}, fs.taskdoc_locator_record(url))
+
+    def test_unescaped_at_in_userinfo_drops_everything_before_the_last_at(self):
+        """userinfo 里含未转义 `@` 时按最后一个 `@` 分隔——宁可多丢，不许漏出半截 token。"""
+        out = fs.redact_url_userinfo(f"https://u:{self.TOKEN}@evil@gitcode.com/x.git")
+        self.assertEqual("https://***@gitcode.com/x.git", out)
+        self.assertNotIn(self.TOKEN, out)
+
+    # ---- 记录构造：扣留 + 记账，且幂等 -------------------------------------------
+    def test_credential_url_is_withheld_not_rewritten_in_place(self):
+        """⭐ 就地改写会产出一个「看着像仓名、逐字比对谁也对不上」的值（CP-F 逐字比对 repo）。
+
+        所以 `remote_url` 必须**置 None**（派生不出仓名 → 下游要求显式 --repo，fail-closed），
+        脱敏值只进旁路记账字段。
+        """
+        rec = fs.remote_url_record(self.CRED_URL)
+        self.assertIsNone(rec["remote_url"])
+        self.assertEqual(fs.REMOTE_URL_WITHHELD_CREDENTIALS, rec["remote_url_withheld"])
+        self.assertEqual(self.REDACTED, rec["remote_url_redacted"])
+        self.assertNotIn(self.TOKEN, json.dumps(rec))
+
+    def test_prior_redacted_carrying_is_redacted_again(self):
+        """⭐ 上游若把**原值**塞进 `remote_url_redacted`，落盘前这道口必须再脱一次。
+
+        只信上游自称「已脱敏」，等于把最后一道口让给了调用方。
+        """
+        rec = fs.remote_url_record(None, prior_redacted=self.CRED_URL)
+        self.assertIsNone(rec["remote_url"])
+        self.assertEqual(self.REDACTED, rec["remote_url_redacted"])
+        self.assertNotIn(self.TOKEN, json.dumps(rec))
+
+    def test_record_is_idempotent(self):
+        once = fs.remote_url_record(self.CRED_URL)
+        twice = fs.remote_url_record(once["remote_url"],
+                                     prior_redacted=once["remote_url_redacted"])
+        self.assertEqual(once, twice)
+
+    def test_no_withheld_keys_when_nothing_was_withheld(self):
+        """「没扣留」与「扣了但没说为什么」必须分得开——正常情形只产一个键。"""
+        self.assertEqual({"remote_url": None}, fs.remote_url_record(None))
+        self.assertEqual({"remote_url": None}, fs.remote_url_record("   "))
+
+    # ---- 任务书链接：另一条同类泄漏面 ---------------------------------------------
+    def test_taskdoc_locator_with_credentials_is_redacted_and_flagged(self):
+        rec = fs.taskdoc_locator_record(f"https://u:{self.TOKEN}@host/task.md")
+        self.assertEqual("https://***@host/task.md", rec["source_locator"])
+        self.assertEqual(fs.TASKDOC_LOCATOR_WITHHELD_CREDENTIALS,
+                         rec["source_locator_withheld"])
+        self.assertNotIn(self.TOKEN, json.dumps(rec))
+
+    def test_plain_taskdoc_locator_keeps_the_url_verbatim_and_adds_no_key(self):
+        """不带凭据的链接**逐字保留**，且不多写键——否则所有既有 http 任务书的落盘字节都变了。"""
+        self.assertEqual({"source_locator": "https://host/task.md"},
+                         fs.taskdoc_locator_record("https://host/task.md"))
+        self.assertEqual({"source_locator": "<local-file>"},
+                         fs.taskdoc_locator_record("/abs/path/task.md"))
+
+    def test_taskdoc_fetch_failure_does_not_echo_the_token(self):
+        """⭐ 报错里原样回显 = 把 token 打进终端与 CI 日志，而日志常被整段粘进复盘记录。"""
+        url = f"https://u:{self.TOKEN}@example.invalid/task.md"
+        orig = fs._get
+        fs._get = lambda *a, **k: (404, "not found")
+        try:
+            with self.assertRaises(RuntimeError) as cm:
+                fs._taskdoc_bytes(url)
+        finally:
+            fs._get = orig
+        self.assertNotIn(self.TOKEN, str(cm.exception))
+        self.assertIn("***@example.invalid", str(cm.exception))
+
+
+class CredentialWithholdingOnDiskTest(unittest.TestCase):
+    """同一条纪律，落到**真实产物字节**上核。
+
+    ⚠ 刻意**不继承** `LocalCheckoutFetchTest`：继承会把它那一整批用例在本类里再跑一遍，
+    数量翻倍却没多测一个分支。夹具只抄这里用得到的几行。
+    """
+
+    TOKEN = CredentialWithholdingTest.TOKEN
+    CRED_URL = CredentialWithholdingTest.CRED_URL
+    OP_SUBDIR = "experimental/math/roll"
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.repo = os.path.join(self.d, "ops")
+        self.out = os.path.join(self.d, "out")
+        os.makedirs(self.out, exist_ok=True)
+        self._write(f"{self.OP_SUBDIR}/op_host/op_api/aclnn_roll.h",
+                    "aclnnStatus aclnnRollGetWorkspaceSize(const aclTensor*, aclTensor*,"
+                    " uint64_t*, aclOpExecutor**);\n")
+        self._write(f"{self.OP_SUBDIR}/examples/test_aclnn_roll.cpp",
+                    "int main(){ aclnnRollGetWorkspaceSize(x, y, &ws, &exe);"
+                    " aclnnRoll(ws, exe, stream); }\n")
+        self._write(f"{self.OP_SUBDIR}/op_host/roll_def.cpp", "// op def\n")
+        self.task = os.path.join(self.d, "task.md")
+        with open(self.task, "wb") as fh:
+            fh.write("# Roll 任务书\n".encode())
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _write(self, rel, text):
+        full = os.path.join(self.repo, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _git(self, *args):
+        import subprocess
+        return subprocess.run(("git", "-C", self.repo) + args,
+                              capture_output=True, text=True, check=True)
+
+    def _init_git(self):
+        self._git("init", "-q", "-b", "master")
+        self._git("config", "user.email", "t@example.invalid")
+        self._git("config", "user.name", "t")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "base")
+
+    def _payload(self):
+        import content_address as ca
+        return ca.read_artifact(self.out, "source_facts.json", "oprunway/source-facts/v1")
+
+    def test_credential_remote_never_reaches_any_artifact(self):
+        self._init_git()
+        self._git("remote", "add", "origin", self.CRED_URL)
+        rc = fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                      "--op-subdir", self.OP_SUBDIR, "--out", self.out])
+        self.assertEqual(rc, 0)
+        for name in ("pr_facts.json", "source_facts.json"):
+            with open(os.path.join(self.out, name), "rb") as fh:
+                raw = fh.read()
+            self.assertNotIn(self.TOKEN.encode(), raw, f"{name} 里出现了 token 字节")
+        p = self._payload()
+        git = p["local_checkout"]["git"]
+        self.assertIsNone(git["remote_url"])
+        self.assertEqual(fs.REMOTE_URL_WITHHELD_CREDENTIALS, git["remote_url_withheld"])
+        self.assertEqual(CredentialWithholdingTest.REDACTED, git["remote_url_redacted"])
+        # 扣留不阻断取材：provenance 锚是 root_digest，remote_url 只是信息字段。
+        self.assertEqual("complete", p["completeness"]["status"])
+        # 但必须留痕给操作者看（脱敏形态，不含 token）。
+        with open(os.path.join(self.out, "pr_facts.json"), encoding="utf-8") as fh:
+            notes = json.load(fh)["notes"]
+        self.assertTrue(any("带用户凭据" in n for n in notes), notes)
+
+    def test_clean_remote_is_recorded_verbatim(self):
+        """收紧不能误伤正例：不带凭据的 remote 逐字进产物，且不写扣留字段。"""
+        self._init_git()
+        self._git("remote", "add", "origin", "https://gitcode.com/cann/ops-nn.git")
+        rc = fs.main(["--taskdoc", self.task, "--local-repo", self.repo,
+                      "--op-subdir", self.OP_SUBDIR, "--out", self.out])
+        self.assertEqual(rc, 0)
+        git = self._payload()["local_checkout"]["git"]
+        self.assertEqual("https://gitcode.com/cann/ops-nn.git", git["remote_url"])
+        self.assertNotIn("remote_url_withheld", git)
+        self.assertNotIn("remote_url_redacted", git)
+
+    def test_taskdoc_locator_withholding_is_wired_into_the_payload_path(self):
+        """⭐ 假门防线：只单测 `taskdoc_locator_record` 的话，把 `build_source_facts` 改回
+
+        原来那句「startswith(http) 就原样写」，单测照绿，而 token 照进 `source_facts.json`。
+        所以必须从 payload 这一头核一次。
+        """
+        facts = {
+            "dut_source": "local_checkout",
+            "changed_files": ["op/x.h"],
+            "local_checkout": {"root_digest": "a" * 64, "op_subdir": "op",
+                               "digest_policy": fs.digest_policy()},
+            "key_files": {"op/x.h": "void x();"},
+            "key_files_ref": {"op/x.h": "a" * 64},
+            "op": "x", "target_dir": "op", "aclnn_headers": ["op/x.h"],
+        }
+        payload = fs.build_source_facts(
+            self.task, facts,
+            source_locator=f"https://bot:{self.TOKEN}@gitcode.com/cann/x/raw/master/task.md")
+        self.assertNotIn(self.TOKEN, json.dumps(payload, ensure_ascii=False))
+        self.assertEqual("https://***@gitcode.com/cann/x/raw/master/task.md",
+                         payload["taskdoc"]["source_locator"])
+        self.assertEqual(fs.TASKDOC_LOCATOR_WITHHELD_CREDENTIALS,
+                         payload["taskdoc"]["source_locator_withheld"])
+        # 不带凭据的链接仍逐字保留、且不多写键（否则既有 http 任务书的落盘字节都变了）
+        clean = fs.build_source_facts(self.task, facts,
+                                      source_locator="https://gitcode.com/x/task.md")
+        self.assertEqual("https://gitcode.com/x/task.md", clean["taskdoc"]["source_locator"])
+        self.assertNotIn("source_locator_withheld", clean["taskdoc"])
+
+    def test_build_source_facts_withholds_even_when_producer_did_not(self):
+        """⭐ `build_source_facts` 是公开 API：手拼 facts / 老版本 producer 都能喂进原值。
+
+        只在 `probe_local_git` 扣留，等于门只装在自家门口。
+        """
+        facts = {
+            "dut_source": "local_checkout",
+            "changed_files": ["op/x.h"],
+            "local_checkout": {
+                "root_digest": "a" * 64, "op_subdir": "op",
+                "digest_policy": fs.digest_policy(),
+                "git": {"head_sha": "b" * 40, "remote_url": self.CRED_URL,
+                        "base_ref": "master", "dirty": False, "dirty_files": [],
+                        "dirty_files_in_op_subdir": []},
+            },
+            "key_files": {"op/x.h": "void x();"},
+            "key_files_ref": {"op/x.h": "a" * 64},
+            "op": "x", "target_dir": "op", "aclnn_headers": ["op/x.h"],
+        }
+        payload = fs.build_source_facts(self.task, facts)
+        self.assertNotIn(self.TOKEN, json.dumps(payload, ensure_ascii=False))
+        git = payload["local_checkout"]["git"]
+        self.assertIsNone(git["remote_url"])
+        self.assertEqual(fs.REMOTE_URL_WITHHELD_CREDENTIALS, git["remote_url_withheld"])
+        self.assertEqual("complete", payload["completeness"]["status"])
+
+
 class DutSourceApiTest(unittest.TestCase):
     """判别式自身的两条硬边界。"""
 
@@ -1156,6 +1421,102 @@ class DutSourceApiTest(unittest.TestCase):
             ds.validate_build_receipt_source(
                 {"repo": "r", "pr_head_sha": "a" * 40, "local_root_digest": "b" * 64},
                 expected_kind=ds.NO_EXPECTED_KIND)
+
+    def test_credential_bearing_repo_is_rejected_on_the_read_side(self):
+        """⭐ 只在产出侧扣留是不够的：老收据、外部构建驱动产的收据、手改的收据都从**读侧**进来。
+
+        本函数是 adapter / 三级门 / CP-F / 渲染器**共用**的那道门，也是产出方
+        `make_vendor_build_receipt.self_check` 在 `atomic_write` **之前**调的那一道。
+        它不拦，`render_acceptance_markdown` 就会把 token 原样印进人读的验收报告。
+        """
+        import dut_source as ds
+        token = "gk_LEAKED_TOKEN_9f3a"
+        with self.assertRaises(ds.DutSourceError) as cm:
+            ds.validate_build_receipt_source(
+                {"repo": f"https://bot:{token}@gitcode.com/cann/ops-nn.git",
+                 "pr_head_sha": "a" * 40},
+                expected_kind=ds.NO_EXPECTED_KIND)
+        self.assertIn("凭据", str(cm.exception))
+        self.assertNotIn(token, str(cm.exception),
+                         "报错把凭据原样打了出来——报错本身成了第二处泄漏点")
+
+    def test_ssh_and_plain_repo_values_still_pass(self):
+        """收紧不能误伤正例：scp 式 SSH remote 与普通 owner/repo 照常放行。"""
+        import dut_source as ds
+        for repo in ("git@gitcode.com:cann/ops-nn.git", "cann/ops-nn",
+                     "https://gitcode.com/cann/ops-nn.git"):
+            self.assertEqual(
+                (ds.PULL_REQUEST, "pr_head_sha", "a" * 40),
+                ds.validate_build_receipt_source(
+                    {"repo": repo, "pr_head_sha": "a" * 40},
+                    expected_kind=ds.NO_EXPECTED_KIND), repo)
+
+    TOKEN = "gk_LEAKED_TOKEN_9f3a"
+
+    # 同一组 URL 必须在**每一个**消费入口得到同一个答案。
+    # ⭐ `https://host?a=b@c` / `https://host#a@b` 正是两份实现真正分叉的地方：只按 `/`
+    #   切 authority 的实现会把 query/fragment 里的 `@` 当成 userinfo，于是一个**根本
+    #   不含凭据**的 remote 被判「带凭据」。`make_vendor_build_receipt` 曾私藏过这样一份。
+    # ⚠ `https://host/repo?notify=a@b` 两份实现都判 False（`/` 先出现），
+    #   它钉的是「别为了修分叉而把这一类反过来判错」，不是分叉见证。
+    URL_TABLE = (
+        ("git@gitcode.com:cann/ops-nn.git", False),
+        ("cann/ops-nn", False),
+        ("https://gitcode.com/cann/ops-nn.git", False),
+        ("https://host?a=b@c", False),
+        ("https://host#a@b", False),
+        ("https://host/repo?notify=a@b", False),
+        (f"https://bot:{TOKEN}@gitcode.com/cann/ops-nn.git", True),
+        (f"https://{TOKEN}@gitcode.com/x.git", True),
+        (f"https://u:{TOKEN}@host?x=1", True),
+        (f"https://u:{TOKEN}@host#f", True),
+    )
+
+    @staticmethod
+    def _raises(exc_type, fn, *args, **kwargs):
+        try:
+            fn(*args, **kwargs)
+        except exc_type:
+            return True
+        return False
+
+    def test_url_predicate_has_exactly_one_implementation(self):
+        """⭐ 取材侧（扣留）、收据产出方、收据读侧必须用**同一份**判别规则。
+
+        各写一份的话，两边迟早对同一个 URL 给出不同答案——那时「产出侧扣了、读侧没拦」
+        或反过来，门就成了摆设。
+
+        ⚠ **只钉 `fetch_source` 那两个别名是假门**：`assertIs` 看得见「同名同对象」，
+        看不见「某个下游根本没用这两个名字，而是自己写了一份」。
+        `make_vendor_build_receipt` 就曾私藏第二份实现（只按 `/` 切 authority），
+        identity 断言一路全绿，而同一份事实包在取材链上判「干净」、在收据链上判「带凭据」。
+
+        所以这里把同一组 URL 真的跑过**每一个**下游入口，谁分叉谁红。
+        新增消费者时把它的入口加进这个循环，别只加一条 `assertIs`。
+        """
+        import dut_source as ds
+        import make_vendor_build_receipt as mk
+
+        self.assertIs(fs.url_has_userinfo, ds.url_has_userinfo)
+        self.assertIs(fs.redact_url_userinfo, ds.redact_url_userinfo)
+
+        for url, has_cred in self.URL_TABLE:
+            with self.subTest(url=url):
+                self.assertEqual(has_cred, ds.url_has_userinfo(url), "判别式本体")
+                self.assertEqual(has_cred, fs.url_has_userinfo(url), "取材侧别名")
+                # 取材侧的实际行为：落 source_facts 前扣不扣留
+                self.assertEqual(has_cred, "remote_url_withheld" in fs.remote_url_record(url),
+                                 "取材侧扣留行为与判别式不一致")
+                # 收据产出方（`make_vendor_build_receipt` 的 --repo 门与派生值门共用它）
+                self.assertEqual(has_cred, self._raises(
+                    mk.ReceiptError, mk.assert_repo_has_no_credentials, url, "origin"),
+                    "收据产出方与判别式不一致")
+                # 收据读侧：adapter / 三级门 / CP-F / 渲染器共用的那一道
+                self.assertEqual(has_cred, self._raises(
+                    ds.DutSourceError, ds.validate_build_receipt_source,
+                    {"repo": url, "pr_head_sha": "a" * 40},
+                    expected_kind=ds.NO_EXPECTED_KIND),
+                    "收据读侧与判别式不一致")
 
 
 class PullRequestPayloadUnchangedTest(unittest.TestCase):
