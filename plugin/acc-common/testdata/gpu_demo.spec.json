@@ -1,5 +1,6 @@
 {
   "op": "Sign",
+  "runner_form": "cpp",
   "repo": "testdata-only",
   "hardware": ["Ascend 950PR"],
   "reference": {"type": "gpu", "ref": "合成 spec：仅供 T8 GPU consumer 端到端自测，非真算子在册"},

@@ -21,6 +21,7 @@ import content_address
 import dut_source
 import gen_cases
 import precision_policy
+import repo_adapter
 from aclnn_runtime.aclnn_runner import (
     AclnnRunner,
     AclnnRunnerError,
@@ -141,11 +142,27 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
             result["bindings"]["dut_source"] = kind
             result["bindings"][anchor_field] = anchor_value
 
-        runner_form = spec.get("runner_form", "cpp")
-        if runner_form not in ("aclnn_py", "cpp_extension"):
+        # 缺省口径经全仓唯一真源（P5）；本模块曾写死 `"cpp"` → spec 省略该键时这里判 NOT_APPLICABLE、
+        # run_workflow 却按 cpp_extension 去跑，等于**静默跳过**了本应做的 ABI 预检。
+        runner_form = repo_adapter.spec_runner_form(spec)
+        # ⚠ 早退**只认精确的 `"cpp"`**，不许写成「不是那两支就早退」（2026-08-05 审修门 High#2）。
+        #   原写法是 `if runner_form not in ("aclnn_py", "cpp_extension"): NOT_APPLICABLE`——
+        #   `null` / `""` / `0` / `"opaque"` 这些**写坏的 spec** 会一并落进 NOT_APPLICABLE，
+        #   而 CLI 对该状态返回 0：一份根本没声明合法形态的 spec，收到的是「这道门不适用」。
+        #   门看着有、其实拦不住，正是本仓最贵的那类缺陷。
+        #   NOT_APPLICABLE 的语义必须窄到「**已知**不需要 ACLNN ABI 预检的那一支」：只有 `cpp`
+        #   （per-op C++ runner，不走标准 aclnn 两段式）符合。
+        if runner_form == "cpp":
             result["status"] = "NOT_APPLICABLE"
             result["blocked_reasons"] = []
             return result
+        if runner_form not in ("aclnn_py", "cpp_extension"):
+            # 词表外一律 BLOCKED（本 except 收敛 ValueError → status 保持 BLOCKED、CLI 退 2）。
+            # 受控词表以 `repo_adapter` 的能力表 key 为准，本模块不自建第二份。
+            raise ValueError(
+                f"spec.runner_form={runner_form!r} 不在受控词表 "
+                f"{sorted(repo_adapter.SUPPORTED_NP_BY_FORM)} 内——"
+                f"写坏的 spec 不得被判成「不需要本预检」，fail-closed")
         result["bindings"]["runner_form"] = runner_form
         result["required_next_gate"] = (
             "CPP_EXTENSION_BUILD_LOAD_AND_HARNESS_TRUST_GATE"

@@ -188,20 +188,104 @@ if set(DEFERRED_NP_BY_FORM) != set(SUPPORTED_NP_BY_FORM):
     raise RuntimeError(f"runner_form 表不同步：SUPPORTED={sorted(SUPPORTED_NP_BY_FORM)} "
                        f"DEFERRED={sorted(DEFERRED_NP_BY_FORM)}——请同时维护，fail-closed")
 
+# —— `spec.runner_form` 缺省口径：**全仓唯一真源** ————————————————————————————————
+# 病历（P5）：`run_workflow` 把缺省从 `cpp` 改成 `cpp_extension`，但 `gen_cases` / `repo_adapter` /
+# `preflight_aclnn` / `finalize_clean_acceptance` / `precision_retest_*` 各自还写着自己那份 `"cpp"`
+# 字面量 → **同一份省略了 `runner_form` 的 spec 在不同模块被当成两种形态**：run_workflow 派生
+# `--mode cpp_extension`，gen_cases 却按 `cpp` 的 dtype 表规划、且不产 `aclnn_call`。
+#
+# 为什么真源落这里（而不是 run_workflow 或新开一个模块）：
+#   1. 本模块已经是 `runner_form` **受控词表的持有者**——两张能力表的 key 就是词表本身，
+#      缺省值属于同一份知识，散到别处必然再漂一次；
+#   2. `repo_adapter.py` 已在 `gen_cases._PLANNER_DEPENDENCIES` 与
+#      `verify_aclnn_harness._LOGIC_FILES` 里被逐字节哈希 → 改缺省会**自动**让规划账本与
+#      harness 收据的 `logic_files` 变化、旧收据失效。放进任何未被这些清单覆盖的新模块，
+#      缺省值就成了一条不被摘要覆盖的判定依赖（= 可被静默改）；
+#   3. Layer 1、无框架依赖，读侧全都已经（直接或惰性）import 得到它。
+#
+# ⚠ **缺省必须落在 `run_workflow._ACCEPTANCE_RUNNER_FORMS` 内**：缺省 `cpp` 的年代，「spec 漏写
+#   字段」派生出 `new_example`，一步就撞准入门。该不变式的断言留在 run_workflow（准入集在那边）。
+# ⚠ 只有**键缺席**才吃缺省（`.get(k, DEFAULT)`，不写 `or`）：显式 null / `""` 是一份写坏的 spec，
+#   应照旧在受控词表处报「不受支持」，不能被 `or` 悄悄兜成准入形态。
+DEFAULT_RUNNER_FORM = "cpp_extension"
+if DEFAULT_RUNNER_FORM not in SUPPORTED_NP_BY_FORM:
+    raise RuntimeError(f"DEFAULT_RUNNER_FORM={DEFAULT_RUNNER_FORM!r} 不在受控词表 "
+                       f"{sorted(SUPPORTED_NP_BY_FORM)} 内，fail-closed")
 
-def supported_np(runner_form):
-    """按 runner_form 取真机可收发 dtype 白名单（缺省 cpp）。未知 form → fail-closed（不静默兜 cpp）。"""
-    form = runner_form or "cpp"
+
+class _UnspecifiedRunnerForm:
+    """「调用方**没提供**这个形参」的哨兵类型——**它不是一种 runner_form**。
+
+    存在的唯一理由见 `UNSPECIFIED_RUNNER_FORM`。单独开个类而不用 `object()`，是为了让
+    `repr` 在报错里说人话（`<runner_form 未提供>`），而不是一串 `<object at 0x…>`。"""
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return "<runner_form 未提供>"
+
+
+#: 「形参未提供」的哨兵。**别再用 `None` 兼职表达这件事**（P5-b，2026-08-05 审修门 High#1）：
+#:
+#: 病历：`spec_runner_form({"runner_form": None})` 按契约原样返回 `None`（显式 null = 一份写坏的
+#: spec，应当 fail-closed）；可它一进 `resolve_runner_form(None)` 就被当成「调用方未指定」，
+#: 兜成了 `DEFAULT_RUNNER_FORM`。于是 `gen_cases` 里出现**同一个值被读成两种意思**：
+#:   · dtype 能力门问的是 `resolve_runner_form(None)` → `cpp_extension` → **放行** int64；
+#:   · `needs_aclnn_call` 比的是原始 `None` → 不在 `("aclnn_py", "cpp_extension")` 里 → **不要求**
+#:     `call_variants`。
+#: 净效果：一份显式 `runner_form: null` 的 spec 过了 cpp_extension 的 dtype 门，却产出**没有
+#: `aclnn_call`** 的 caseset，dry-run 账本还会如实记下 `planning.runner_form=null`。那是 fail-open。
+#:
+#: 修法：把「未提供」搬到一个**不可能出现在 JSON 里**的哨兵上。`None` 由此降级为一个普通的
+#: 非法值，跟 `""` / `0` / `"opaque"` 一样一路走到受控词表处 fail-closed。
+#: ⚠ 别把它写进任何产物或 spec：它只活在 Python 形参默认值这一层。
+UNSPECIFIED_RUNNER_FORM = _UnspecifiedRunnerForm()
+
+
+def spec_runner_form(spec):
+    """读 `spec.runner_form`（**全仓唯一缺省口径**）；键缺席 → `DEFAULT_RUNNER_FORM`。
+
+    ⚠ 一切「spec 没写 runner_form 时算哪种形态」的判断都必须过这里，不许再写 `spec.get(k, "cpp")`
+    或 `spec.get(k) or "cpp"`：那正是 P5 的病根。显式 null / `""` / `0` **原样返回**，交给下游受控
+    词表 fail-closed——本函数不做任何值域兜底。
+
+    ⚠ 「原样返回」这条只有在下游**真的**把它当非法值时才成立。`None` 曾经在
+    `resolve_runner_form` 那里被当成「未指定」兜回缺省，`spec.get(k, DEFAULT)` 的严谨就被白白
+    抵消了（P5-b）。现在「未指定」由 `UNSPECIFIED_RUNNER_FORM` 表达，本函数的返回值不管是什么，
+    都不会再被误读成「调用方没给」。"""
+    if not isinstance(spec, dict):
+        raise ValueError(f"spec 须为 object，得 {type(spec).__name__}")
+    return spec.get("runner_form", DEFAULT_RUNNER_FORM)
+
+
+def resolve_runner_form(runner_form=UNSPECIFIED_RUNNER_FORM):
+    """形参归一：**省略实参**（= `UNSPECIFIED_RUNNER_FORM`）吃同一份缺省；其余一律原样返回。
+
+    与 `spec_runner_form`（键缺席）是同一条纪律的两个入口，缺省值共用一个常量。
+    ⚠ **`None` 不再吃缺省**（P5-b）：它是一个普通的非法 form，与 `""` / `0` / `"opaque"` 同等
+    待遇，原样送进受控词表 fail-closed。「没给形参」与「给了个坏值」必须分得开——混在一起就是
+    fail-open：一份 `runner_form: null` 的 spec 会被兜成当前唯一准入形态。
+    ⚠ 调用方**必须调这里**，别在自己那边再写一份 `DEFAULT_RUNNER_FORM if x is <未给> else x`：
+    那样缺省又变成两处，改一处测不出来。"""
+    return (DEFAULT_RUNNER_FORM if runner_form is UNSPECIFIED_RUNNER_FORM
+            else runner_form)
+
+
+def supported_np(runner_form=UNSPECIFIED_RUNNER_FORM):
+    """按 runner_form 取真机可收发 dtype 白名单（**省略实参** → `DEFAULT_RUNNER_FORM`）。
+    未知 form → fail-closed（不静默兜任何一支）。⚠ `supported_np(None)` 属未知 form，当场炸。"""
+    form = resolve_runner_form(runner_form)
     if form not in SUPPORTED_NP_BY_FORM:
         raise ValueError(f"未知 runner_form={form!r}（可选 {sorted(SUPPORTED_NP_BY_FORM)}）")
     return SUPPORTED_NP_BY_FORM[form]
 
 
-def deferred_np(runner_form):
+def deferred_np(runner_form=UNSPECIFIED_RUNNER_FORM):
     """按 runner_form 取 **Track C 挂账** dtype 集（真机未实现、生成期放行）。未知 form → fail-closed。
 
-    只被**生成期**能力门（`gen_cases.check_spec_capability`）消费；真机侧一律只认 `supported_np`。"""
-    form = runner_form or "cpp"
+    只被**生成期**能力门（`gen_cases.check_spec_capability`）消费；真机侧一律只认 `supported_np`。
+    ⚠ 同 `supported_np`：**省略实参**才吃缺省，`None` 是未知 form。"""
+    form = resolve_runner_form(runner_form)
     if form not in DEFERRED_NP_BY_FORM:
         raise ValueError(f"未知 runner_form={form!r}（可选 {sorted(DEFERRED_NP_BY_FORM)}）")
     return DEFERRED_NP_BY_FORM[form]

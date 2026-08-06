@@ -2,6 +2,65 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-06 · 解阻塞：env 文件不再是开工前置 + 抽 spec 产得出 `cpp_extension`
+
+外部使用者被两件事挡住，都不是判定逻辑的问题，是**文档把话说死了**。
+
+- **`.oprunway/real-machine.env` 从「跑验收的通用硬前置」降级为「远程连形态的连接元数据」。**
+  病历：编排 agent 在起验收前停下来拒绝干活，理由是「按 §5.3 任何远端 clone/build/跑测前
+  必须读取该文件；它不存在 → 拿不到 SSH alias、容器名、远端工作目录 → 无法连接真机」。
+  但对方**本来就在目标机上跑**，压根没有「连过去」这一步。现在「远程连」和「就地跑」
+  在 `AGENTS.md` §5.3、`doc/oprunway-real-machine-environment.md` §1、
+  `plugin/skills/acceptance-workflow/SKILL.md` CP-A、`plugin/AGENTS.md` 四处都写成**平级一等形态**，
+  就地跑那条路要哪些环境变量（`OPRUNWAY_TARGET=local`、`OPRUNWAY_REMOTE_DIR` 仍要给、
+  argv 不带 `ssh`/`docker exec` 前缀）按代码实读写死。
+  ⚠ **保护根语义一个字没松**：文件**存在时**仍必须读 `OPRUNWAY_MACHINE_PROTECTED_ROOTS` 并遵守只读；
+  改的只是「文件缺席」——从阻塞降成「未登记保护根」，而**未登记 ≠ 已授权清理**。
+  顺带挖出同样会卡住就地跑的一句：§5.2 原写「本地只做编辑、Git、只读探测」，
+  就地跑时本机就是目标机，这句会让 session 拒绝 build，已加豁免。
+- **抽 spec 那层结构上产不出 `cpp_extension`，所以 Roll 被判成 `aclnn_py` 是必然的。**
+  `plugin/skills/acc-spec/references/taskdoc-to-spec.md` 是通路收敛之前写的：词表是
+  `<可选：cpp（缺省）| aclnn_py>`（**连 `cpp_extension` 都没有**），且写着
+  「被测物是 aclnn 两段式工程 → `runner_form=aclnn_py`」。
+  病根是**两个正交判断被混成一个**——那两条通路调的是同一个 vendor `.so` 里的同一批两段式符号，
+  差别只在调用桥（ctypes 直调 vs 官方 `NpuExtension`/`EXEC_NPU_CMD_EXT` 生成独立 `torch.ops`），
+  所以「工程是两段式」**不蕴含** `runner_form`。现已拆成「判域内/域外」与「用哪座调用桥」两步。
+- **`runner_form` 缺省从 `cpp` 改为 `cpp_extension`**（`run_workflow._DEFAULT_RUNNER_FORM`，
+  带一句 `assert 缺省 ∈ _ACCEPTANCE_RUNNER_FORMS` 钉住不变式）。缺省 `cpp` 意味着
+  「spec 漏写字段」必然撞准入门，而它想要的正是当前唯一准入的那条通路。
+  ⚠ 三处判定必须同源，`run()` 里决定产不产验收产物那处（`:355`）也一起改了——
+  只改入口/出口门会裂出「入口派生准入 mode、`run()` 却当实验形态只产 dev_* 产物」。
+- **Layer 2 薄壳里已为假的陈述逐句改对**（`plugin/commands/`、`plugin/agents/`、
+  `plugin/workflows/`、`plugin/skills/acc-runner/` 共 9 个文件）。最主要的是
+  「**三条真机通路都可产裁决**」——收敛后只有 `cpp_extension` 能产。编排 agent 读的就是这些，
+  所以它把 aclnn_py 摆出来让用户选，是照文档办事。
+  ⚠ `cpp`/`aclnn_py` 的机制描述**一句没删**，只加准入状态标注：它们仍能跑（须
+  `--allow-experimental-form`），只是产不出裁决——「能跑」和「能出裁决」要分开读。
+- **审修门逮住本轮自己引入的新 fail-open**（codex 代码审 7 条 + 散文审 4 条，全部成立、全部已修）：
+  - 🔴 `None` **兼职**了两件事——「形参没给」和「spec 里显式写了 null」。
+    `spec_runner_form({"runner_form": null})` 正确返回 `None`，但 `resolve_runner_form(None)`
+    又把它洗成 `cpp_extension`，而 `needs_aclnn_call` 比的仍是原始 `None` → **过了 dtype 能力门、
+    却不要求 `call_variants`**，正式 `gen_cases` 能产出没有 `aclnn_call` 的 caseset。
+    特意守的「`.get` 不用 `or`」那条纪律被从侧面绕过去了。
+    修法用 `repo_adapter.UNSPECIFIED_RUNNER_FORM` 哨兵——「没给形参」改由**省略实参**表达，
+    `None` 降级成普通非法值，与 `""` / `0` / `"opaque"` 同等待遇。
+  - 🔴 `preflight_aclnn` 对**任何**不等于 `aclnn_py`/`cpp_extension` 的值都返回 `NOT_APPLICABLE`
+    且 CLI 退 0——等于把写坏的 spec 当成「不需要这道门」。早退窄到精确 `"cpp"`，其余一律 `BLOCKED`（退 2）。
+  - 🔴 **我自己写的 cpp_extension 形态门测试是假门**：捕获任意 `Exception`、只断言错误消息不含某句话。
+    实测 mutation 之后 adapter 抛的是「**只**接受 runner_form=cpp_extension」、旧断言查的是
+    「**仅**接受 runner_form=cpp_extension」——**差一个字就漏过去**，测试照样绿。
+    改成用省略该键的最小合法 spec 断言**成功**产出 manifest。
+  - 「全仓仅一份缺省」的静态门原本是正则，漏得过单引号、多行、经中间变量的写法，且只扫
+    `acc-common/*.py` 一层。改 AST 检查并扩到插件树递归；另加一条「门自称能抓的 9 种写法逐个正向验证 +
+    6 种合法写法零误报」——没有它，「offenders 为空」可以靠一个什么都不匹配的检查器维持。
+  - `spec_schema_template.jsonc` 教人「省略字段表示 cpp」，是这一整轮病根的**模板级版本**；
+    连同 `archive_ops/` 两份历史 spec 一起补显式 `"runner_form": "cpp"`。
+- ⚠ **「就地跑」端到端未见证**：环境变量清单是按代码实读写的，但一次都没真机跑过。
+- ⚠ **规划账本与 preparation 收据会再失效一轮**：`repo_adapter.py` / `gen_cases.py` 都在
+  `_PLANNER_DEPENDENCIES` 的逐字节哈希里，本轮两者都改了。**这是正确行为**，别去「修」复用逻辑。
+- 门：a3 全量 **1865 passed / 12 skipped / 0 failed**（本轮起点 1850）；
+  a5 真 Python 3.11.15 语法门 109 个 `.py` 全过；两道漂移门 SYNCED。
+
 ## 2026-08-05 · 本地来源首次跑通真机 NPU 验收（裁决 `FAIL(精度)`）+ CP-F 口径定案
 
 - **本地 checkout 一路跑到裁决**（a3 容器 `oprunway_prov`，CANN 9.0.1 / `ascend910_93` / torch_npu 2.10.0）：

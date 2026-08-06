@@ -10,6 +10,7 @@ import json
 import os
 import tempfile
 
+import repo_adapter
 import run_workflow
 import validate_acceptance_state as gate
 
@@ -34,7 +35,9 @@ def build_clean_acceptance(spec, evidence, verdict, perf_report, gate_errors):
         raise FinalizeError(f"验收门未过：{gate_errors}")
     if evidence.get("evidence_grade") != "acceptance_candidate":
         raise FinalizeError("evidence_grade 不是 acceptance_candidate")
-    runner_form = spec.get("runner_form") or "cpp"
+    # 缺省口径经全仓唯一真源（P5）。曾写 `or "cpp"`：spec 省略该键时这里算出 `cpp`、
+    # 而 evidence 侧是真机实际跑出来的 `cpp_extension` → 一致性检查在**缺省值分裂**上误报。
+    runner_form = repo_adapter.spec_runner_form(spec)
     if evidence.get("runner_form") != runner_form:
         raise FinalizeError(
             f"evidence.runner_form={evidence.get('runner_form')!r} 与 spec={runner_form!r} 不一致")

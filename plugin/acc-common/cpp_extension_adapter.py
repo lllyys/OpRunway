@@ -146,8 +146,13 @@ def build_invocation_plan(caseset, manifest):
 
 def prepare(spec, caseset, work):
     """生成 Extension bundle 与逐 case 调用计划；纯本地确定性准备，不 build。"""
-    if spec.get("runner_form") != "cpp_extension":
-        raise CppExtensionAdapterError("prepare 仅接受 runner_form=cpp_extension")
+    # 同 `cpp_extension_codegen._contract`：经全仓唯一缺省真源判形态（P5）。只有**键缺席**吃缺省，
+    # 显式声明成别的形态照旧当场拒——这里放的是「上游已按 cpp_extension 规划好」的那一种 spec。
+    import repo_adapter                      # 惰性：repo_adapter 顶层 import 本模块的兄弟模块，避免环
+    runner_form = repo_adapter.spec_runner_form(spec)
+    if runner_form != "cpp_extension":
+        raise CppExtensionAdapterError(
+            f"prepare 仅接受 runner_form=cpp_extension，得 {runner_form!r}")
     work = os.path.abspath(work)
     for stale in (_PERF_PLAN, _PERF_COLLECT):
         path = os.path.join(work, stale)

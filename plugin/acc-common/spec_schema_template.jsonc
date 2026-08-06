@@ -6,14 +6,24 @@
 // ⚠ **怎么用这份模板**（2026-07-24 订正，dogfood 血教训）：
 //   · **JSON 主体只留「每份 spec 都必须有」的字段**——照抄下来把占位值换成真值即可跑。
 //   · **可选字段一律只在文件末尾的《可选字段目录》里给注释示例，主体不留占位键**。
-//     理由：可选字段的语义是「不属该场景就**整字段省略**」；若把 `"runner_form": "<可选·cpp | aclnn_py>"`
+//     理由：可选字段的语义是「不属该场景就**整字段省略**」；若把 `"scenario": "<可选·torch_ref_aclnn>"`
 //     这种占位串真留在 JSON 里，复制走没删就是**一份写坏的 spec**——引擎当场 fail-closed，
 //     而报错指向的是模板、不是算子。要用哪个可选字段，就从目录里把那一行**照结构抄进主体**、填真值。
-//   · 末尾另附两份**最小合法骨架**（cpp 缺省通路 / aclnn_py torch-对标通路），照着抄即可跑。
+//   · ⚠ **`runner_form` 不是可选字段**（2026-08-05 起）：它是执行形态声明，**每份 spec 都显式写**，
+//     所以它**留在 JSON 主体**；《可选字段目录》里那条只集中说明三种取值的口径，不代表它可省。
+//     省略虽然有缺省兜底（键缺席 → `cpp_extension`），但缺省兜住 ≠ 可以不写：
+//     执行身份要在 spec 里一眼可读、可审。**省略再也不表达 `cpp`**——要 `cpp` 就显式写 `"cpp"`。
+//   · 末尾另附三份**最小合法骨架**（cpp_extension 验收准入 / aclnn_py 开发级 / cpp 开发级），照着抄即可跑。
+//     ⚠ **正式验收抄 ①**：`cpp_extension` 是当前唯一能产验收裁决的形态，②③ 只出开发级证据。
 //   · 占位串的形状（`"<…>"`）只是给人看的口径说明，**不是**合法取值：主体里每个占位串都必须被替换。
 {
   "op": "<PascalCase 算子名，去 aclnn 前缀>",
   "repo": "<顶层仓名：ops-math / ops-nn / ops-transformer / catlass>",
+  // ── runner_form · 执行形态（**每份 spec 必填，别省**；口径与三种取值见《可选字段目录》「runner 形态」条）──
+  //   正式验收恒填 `cpp_extension`（当前唯一能产验收裁决的形态）；填 `aclnn_py` / `cpp` 只出开发级证据。
+  //   ⚠ 填 `cpp_extension` 或 `aclnn_py` ⇒ **必须**同时从目录把 `call_variants` 抄进主体，否则 gen_cases fail-closed。
+  //   ⚠ 键缺席才吃缺省（缺省 = `cpp_extension`）；这里的占位串**不是**合法取值，必须替换成上述三者之一。
+  "runner_form": "<cpp_extension（正式验收唯一准入） | aclnn_py（开发级） | cpp（开发级）>",
   "hardware": ["<从任务书『适配硬件』抽，如 Atlas A2 / Atlas A3 / Ascend 950PR>"],
   "reference": {
     "type": "<tbe | torch | numpy | gpu | cpu | builtin>",
@@ -110,24 +120,38 @@
 // 《可选字段目录》——**要用才抄进上面的 JSON 主体，不用就一个都别出现**
 // ════════════════════════════════════════════════════════════════════════════════
 //
-// ── 顶层 · 场景 / runner 形态（**编排层据字段路由，绝不 if-算子名**；缺省=常规 cpp 通路）─────────────
+// ── 顶层 · 场景（**编排层据字段路由，绝不 if-算子名**）──────────────────────────────────────────
 //   "scenario":    "torch_ref_aclnn"        // 受控值只此一个，不属该场景→整字段省略、别编新值
-//   "runner_form": "aclnn_py" | "cpp_extension" // 缺省 cpp（= 省略即此）
-//   scenario   ：场景标识（⟺ 任务书把 **torch 指定为真值口径** × PR 是**标准 aclnn 两段式**工程）。
+//   scenario   ：场景标识（⟺ 任务书把 **torch 指定为真值口径** × 被测来源是**标准 aclnn 两段式**工程）。
 //                它是给编排层/人读的路由标签（Layer 1 脚本目前不读它），真正驱动执行的是 runner_form。
-//   runner_form：runner 形态。`cpp`（缺省）= per-op `oprunway_<op>_runner.cpp`；
-//                `aclnn_py` = **无 per-op runner 源**、op 工程即 DUT，走 op-中立的 ctypes-aclnn runner
-//                （`aclnn_runtime`，从 aclnn header 推 arity）。
-//                `cpp_extension` = 按官方 NpuExtension/EXEC_NPU_CMD_EXT 生成独立 torch.ops namespace，
+//
+// ── 顶层 · runner 形态 `runner_form`（⚠ **不是可选字段，每份 spec 都显式写**；列这儿只为集中说明）──
+//   受控词表 `{cpp_extension, aclnn_py, cpp}`。**缺省 = `cpp_extension`**（键缺席即此）；缺省值的唯一
+//   真源是 `repo_adapter.DEFAULT_RUNNER_FORM`，读侧统一 `repo_adapter.spec_runner_form(spec)`。
+//   ⚠ **省略再也不表达 `cpp`**——`cpp` / `aclnn_py` 现在只能显式声明。
+//   ⚠ 只有**键缺席**吃缺省：显式写 `null` / `""` / `0` 是一份写坏的 spec，照旧在受控词表处 fail-closed。
+//   ⚠ 缺省能兜住 ≠ 可以省着不写：执行身份要在 spec 里一眼可读、可审（同 taskdoc-to-spec.md §1.3.7 自检）。
+//   各形态：
+//     `cpp_extension` = 按官方 NpuExtension/EXEC_NPU_CMD_EXT 生成独立 torch.ops namespace，
 //                由显式外部 driver build/load/执行并回传内容寻址收据；不复制旧 helper、不改 op-plugin。
-//                ⚠ `runner_form ∈ {"aclnn_py","cpp_extension"}` **必须**同时声明 `call_variants`
-//                （gen_cases 当场 fail-closed）；
-//                ⚠ 它还决定真机可收发 dtype 白名单（`repo_adapter.supported_np(runner_form)`：aclnn_py 放开 int/bf16）。
+//                ✅ **当前唯一能产验收裁决的形态**（准入白名单 `run_workflow._ACCEPTANCE_RUNNER_FORMS`）。
+//     `aclnn_py` = **无 per-op runner 源**、op 工程即 DUT，走 op-中立的 ctypes-aclnn runner
+//                （`aclnn_runtime`，从 aclnn header 推 arity）。
+//                ⛔ 产不出裁决：要跑须 `--allow-experimental-form`，且**物理上只产**
+//                `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"`）。
+//     `cpp`      = per-op `oprunway_<op>_runner.cpp`。⛔ 同上，只出开发级证据。
+//   ⚠ `runner_form ∈ {"cpp_extension","aclnn_py"}` **必须**同时声明 `call_variants`（gen_cases 当场
+//     fail-closed；`cpp_extension` 另有 `cpp_extension_codegen` 的「非空列表」硬校）。
+//   ⚠ 它还决定真机可收发 dtype 白名单（`repo_adapter.supported_np(runner_form)`：
+//     `cpp_extension` 与 `aclnn_py` 同集、放开 int/bf16；`cpp` 只到 fp32/fp16/bf16，int 走 Track C 挂账）。
+//   ⚠ runner form **只决定执行形态**，不反推任务书指定的性能标杆——baseline 仍逐字按任务书核。
 //
 // ── 顶层 · aclnn 调用变体表（runner_form 为 aclnn_py/cpp_extension 时必填；实现见 ─────────────────
 //    `precision_policy.call_variants` / `gen_cases._build_aclnn_call`）：
-//   ⚠ 触发条件是 **runner_form==aclnn_py**，不是「header 里有多个入口」——**单入口也必须写一条**
-//     （`when` 用 `{"always": true}`），多入口只是产多条。
+//   ⚠ 触发条件是 **runner_form ∈ {cpp_extension, aclnn_py}**，不是「header 里有多个入口」——
+//     **单入口也必须写一条**（`when` 用 `{"always": true}`），多入口只是产多条。
+//     ⚠ 因为缺省已是 `cpp_extension`：一份**省略 `runner_form`** 的 spec 同样落进这个触发条件，
+//       不给 `call_variants` 就是 gen_cases 当场 fail-closed（这正是「省略不再表达 cpp」的连带后果）。
 //   为什么要它：同一个算子的**不同 attr 取值**可能对应**不同的 aclnn 符号**与**不同的输出 arity**
 //   （典型：某属性为 null 时走「无该形参的 API、只出 1 个输出」，有值时走「多一个形参的 API、出 2 个输出」）。
 //   没有变体表，driver 只能自己把 null 兜成某个默认值——那既不是该 case 的语义、又可能与签名不符（越界写/ABI 崩）。
@@ -353,9 +377,15 @@
 //
 // ════════════════════════════════════════════════════════════════════════════════
 // 《最小合法骨架》——照抄哪一份看 runner_form；抄完把 `<…>` 全部替换成真值
+//   ⚠ **正式验收抄 ①**：`cpp_extension` 是当前唯一能产验收裁决的形态。②③ 只出**开发级**证据——
+//     要跑得加 `--allow-experimental-form`，且那条路径**物理上产不出** acceptance.json / verdict.json。
+//     「加了逃生阀跑绿了」**不是**验收通过，不得写进报告的裁决栏。
+//   ⚠ 三份**都显式写** `runner_form`。省略虽有缺省兜底（键缺席 → `cpp_extension`），
+//     但省略**再也不表达 `cpp`**——要 `cpp` 就照 ③ 显式写出来。
 // ════════════════════════════════════════════════════════════════════════════════
 //
-// ① cpp 缺省通路（per-op runner，不写任何 §1.3 字段）：
+// ⓪ 基座 —— 所有形态共有的必填字段。**单独抄它不构成一份完整 spec**，须再叠 ①/②/③ 之一。
+//    ⚠ `runner_form` **有意不在 ⓪ 里**：它的值由 ①/②/③ 各自给出，叠的时候别漏。
 //   {
 //     "op": "<Op>", "repo": "<repo>", "hardware": ["<适配硬件>"],
 //     "reference": {"type": "<tbe|torch|numpy|gpu|cpu|builtin>", "ref": "<定位+语义改造点>"},
@@ -376,12 +406,13 @@
 //                "authorization": {"kind": "<kind>"}}
 //   }
 //
-// ② aclnn_py（torch 对标通路）—— 在 ① 之上**必加** runner_form + call_variants；
+// ① cpp_extension（**唯一验收准入**）—— 在 ⓪ 之上**必加** runner_form + call_variants；
 //    多输出算子再逐 out 加 out_role/index_of/gather_from；perf 走 torch_npu 时必加 torch_baseline：
 //   {
-//     …① 的全部必填字段…,
-//     "scenario": "torch_ref_aclnn",            // ①②同时成立才写；只成立②则省略
-//     "runner_form": "aclnn_py",
+//     …⓪ 的全部必填字段…,
+//     "scenario": "torch_ref_aclnn",            // 仅「任务书立 torch 为真值口径」×「被测物是标准 aclnn
+//                                               // 两段式」**同时**成立才写；只成立后者则整字段省略
+//     "runner_form": "cpp_extension",
 //     "params": [
 //       {"name": "<in>", "io": "in", "dtype": ["float32", "float16"]},
 //       {"name": "<attr>", "io": "attr", "dtype": ["int64"], "default": 0},
@@ -397,3 +428,24 @@
 //     "perf": {"baseline": "torch_npu", "target_ratio": <按任务书原文换算>,
 //              "torch_baseline": {"api": "torch.<api>", "positional": ["<in>"], "keyword": {"<attr>": "<torch 形参名>"}}}
 //   }
+//   ⚠ 它另需**独立构建收据**把被测来源锚（PR head / 本地子树摘要）、构建命令与实际加载的 vendor ELF
+//     绑起来（三级门 `validate_acceptance_state` 会对账）——接入成本比 ②③ 高，这是已知账单。
+//
+// ② aclnn_py（**开发级，非验收准入**）—— 与 ① **逐字同形**，只把 runner_form 的值换成 `"aclnn_py"`：
+//    两形态共用同一份逐 case 调用契约 `aclnn_call`，`call_variants` 的抽法完全一样。
+//   {
+//     …① 的全部字段…,
+//     "runner_form": "aclnn_py"
+//   }
+//   ⚠ 已有 spec 写着 `aclnn_py`（如 Roll）→ 要做正式验收就是**迁到 ①**，不是放宽准入门。
+//     旧 `aclnn_py` 跑出来的 PASS 属于旧 caseset，不得沿用。
+//
+// ③ cpp（**开发级，非验收准入**；历史 per-op runner 通路）—— 在 ⓪ 之上**只加一行**，
+//    不写 call_variants / scenario / out_role 等 §1.3 字段：
+//   {
+//     …⓪ 的全部必填字段…,
+//     "runner_form": "cpp"                      // ⚠ **必须显式写**：省略现在解析为 cpp_extension，
+//                                               //    随后因缺 call_variants 被 gen_cases fail-closed
+//   }
+//   ⚠ dtype 只到 fp32/fp16/bf16（`repo_adapter.supported_np("cpp")`）；int16/int32 属 Track C 挂账集
+//     （生成期放行、真机跑到仍 fail-closed），须在 `task_pr_gaps` 以 `dtype_deferred` 显式挂账。

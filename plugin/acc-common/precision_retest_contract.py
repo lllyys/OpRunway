@@ -500,7 +500,12 @@ def materialize_attempt(directive, reports_dir, execution_identity):
     if not isinstance(op, str) or not op or caseset.get("op") != op:
         raise RetestContractError(
             f"base spec/caseset op 不一致: spec={op!r}, caseset={caseset.get('op')!r}")
-    runner_form = spec.get("runner_form") or "cpp"
+    # 惰性 import：本模块是确定性契约层，不该在模块顶层拖进 numpy（repo_adapter 会）。
+    # 缺省口径必须与 run_workflow / gen_cases 同源（P5）——曾写 `or "cpp"`：base spec 省略该键时
+    # 这里算 `cpp`、`precision_retest_runner._resolve_mode` 却算 `cpp_extension`，
+    # F2 与 F3 对同一份 spec 判成两种形态。
+    import repo_adapter
+    runner_form = repo_adapter.spec_runner_form(spec)
     if runner_form != d["source_identity"]["runner_form"]:
         raise RetestContractError(
             f"drift_blocked:runner_form_mismatch directive="

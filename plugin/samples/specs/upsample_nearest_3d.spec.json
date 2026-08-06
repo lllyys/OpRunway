@@ -1,6 +1,7 @@
 {
   "op": "UpsampleNearest3d",
   "repo": "ops-cv",
+  "runner_form": "cpp",
   "hardware": [
     "Atlas A2",
     "Atlas A3"

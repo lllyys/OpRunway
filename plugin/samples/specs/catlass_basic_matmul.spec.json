@@ -1,6 +1,7 @@
 {
   "op": "CatlassBasicMatmul",
   "repo": "catlass",
+  "runner_form": "cpp",
   "harness_kind": "generated_harness",
   "hardware": ["Ascend950PR/DT (arch 3510)", "Atlas A2/A3 (arch 2201)"],
   "arch": "runtime-detected",

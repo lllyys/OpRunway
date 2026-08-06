@@ -1373,8 +1373,13 @@ class DefaultModeIsRealMachineTest(unittest.TestCase):
         # ⚠ 这里**不能**改用 mock 夹具来"绕过"准入门：回落 mock 正是本用例要证伪的那个危险行为
         #   （mock 的 NPU 输出 = golden.copy()、精度按构造必过），换成 mock 等于把被测对象换掉。
         # ⚠ 也不是给准入门放水：准入门本身由 test_run_workflow_mode.py::AcceptanceFormGateTest 专测。
+        # ⚠ 这里写**显式** runner_form=cpp：spec 省略该键时缺省已是 cpp_extension
+        #   （run_workflow._DEFAULT_RUNNER_FORM，缺省跟着唯一准入形态走），
+        #   拿 `{}` 断言 new_example 就变成在测缺省值而不是测派生表了。
+        #   缺省值本身由 test_run_workflow_mode.py 专测。
         self.assertEqual(
-            W._resolve_mode({}, None, allow_experimental_form=True), "new_example")
+            W._resolve_mode({"runner_form": "cpp"}, None,
+                            allow_experimental_form=True), "new_example")
         self.assertEqual(
             W._resolve_mode({"runner_form": "aclnn_py"}, None,
                             allow_experimental_form=True), "aclnn_py")
@@ -1384,8 +1389,19 @@ class DefaultModeIsRealMachineTest(unittest.TestCase):
         env = {k: v for k, v in os.environ.items()
                if k not in ("OPRUNWAY_REMOTE_DIR", "OPRUNWAY_OPS_REPO", "OPRUNWAY_OPP",
                             "OPRUNWAY_OP_SRC", "OPRUNWAY_TARGET", "OPRUNWAY_SSH_HOST")}
-        spec = os.path.join(self.here, "..", "samples", "specs", "isclose.spec.json")
-        # --allow-experimental-form：isclose 样例未声明 runner_form → 视作 cpp，已被验收准入白名单挡下。
+        # spec 显式声明 runner_form=cpp（照抄 isclose 样例、只加这一个键）。
+        # ⚠ 为什么不能直接用样例文件：样例**未声明** runner_form，而缺省已翻成 cpp_extension
+        #   （run_workflow._DEFAULT_RUNNER_FORM），派生出的就不再是 new_example 了。
+        #   本用例要测的是「省 --mode 时按 runner_form 派生到真机通路、缺配置即 fail-closed」，
+        #   派生源必须是 spec 里那个字段本身，故显式写出来。
+        with open(os.path.join(self.here, "..", "samples", "specs", "isclose.spec.json"),
+                  encoding="utf-8") as f:
+            spec_obj = json.load(f)
+        spec_obj["runner_form"] = "cpp"
+        spec = os.path.join(self.d, "isclose_cpp.spec.json")
+        with open(spec, "w", encoding="utf-8") as f:
+            json.dump(spec_obj, f, ensure_ascii=False)
+        # --allow-experimental-form：runner_form=cpp 已被验收准入白名单挡下。
         # 本用例要测的却是**缺真机配置时的 fail-closed**，而那条路（run_workflow 里的 _ne_cfg 预检 +
         # "--mode mock" 指路）只长在 new_example 分支上。不关掉准入门就会先被准入门非零退出——
         # 退出码看着一样、断言 1/2 照过，测到的却不是同一件事（准入门提示里根本没有 "--mode mock"，

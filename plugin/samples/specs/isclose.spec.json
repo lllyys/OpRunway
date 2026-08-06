@@ -1,6 +1,7 @@
 {
   "op": "IsClose",
   "repo": "ops-math",
+  "runner_form": "cpp",
   "hardware": ["Atlas A2", "Atlas A3"],
   "reference": {"type": "tbe", "ref": "内置 aclnnIsClose TBE"},
   "change": {"kind": "semantic", "note": "二进制比较→逻辑值比较（对齐 CPU）"},

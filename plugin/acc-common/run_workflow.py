@@ -62,6 +62,27 @@ _RUNNER_FORM_TO_MODE = {
 #   `aclnn_py` / `cpp` 条目是**能力表**不是准入表，删了将来想恢复要重新考证 dtype 支持面。
 _ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})
 
+# spec 省略 `runner_form` 时本模块认哪一种形态。**缺省必须落在准入集内**：缺省 `cpp` 的年代，
+# 「spec 没写 runner_form」会派生出 `new_example`，正好撞上上面那道准入门——抽 spec 那层
+# 一旦漏写字段，编排就在准入门前停摆，而它想要的其实就是当前唯一准入的那条通路。
+# ⚠ 只有**键缺席**才吃缺省（统一走 `.get(k, _DEFAULT_RUNNER_FORM)`，不写 `or`）：
+#   显式写成 null / "" 是一份写坏的 spec，应当照旧在 `_RUNNER_FORM_TO_MODE` 那里报「不受支持」，
+#   不能被 `or` 悄悄兜成准入形态。
+# ⚠ **值本身不在这里定义**（P5）：本模块只是缺省的**消费方**之一，之前在这里写死字面量，导致
+#   gen_cases / repo_adapter / preflight_aclnn / finalize / CP-F 各自还留着 `"cpp"`——同一份 spec
+#   被当成两种形态。真源现在唯一落在 `repo_adapter.DEFAULT_RUNNER_FORM`（选址理由见那边注释）。
+#   下面这个别名只为让「缺省 ∈ 准入集」这条不变式与准入集**待在同一屏**，不是第二份定义。
+_DEFAULT_RUNNER_FORM = repo_adapter.DEFAULT_RUNNER_FORM
+assert _DEFAULT_RUNNER_FORM in _ACCEPTANCE_RUNNER_FORMS, (
+    "缺省 runner_form 必须在准入集内，否则「spec 漏写字段」= 必然撞准入门")
+
+
+def _spec_runner_form(spec):
+    """读 spec 的 runner_form（唯一缺省口径）。本模块内三处判定必须同源，散开写必然漂移。
+
+    ⚠ 委托给 `repo_adapter.spec_runner_form`：全仓（不只本模块）必须同源。"""
+    return repo_adapter.spec_runner_form(spec)
+
 # —— 验收通路的性能基线：**只认真数、禁 mock 兜底**（codex High#2）——————————————————————
 # 病历：aclnn_py 的 evidence `perf.us=None`（采集端第二里程碑未接）、也不产 `_real_baseline.json`，
 # 于是原来的 `else:` 一路落进 `perf_compare.mock_baseline()`——**mock 基线混进验收通路**。
@@ -237,7 +258,7 @@ def _resolve_mode(spec, requested_mode, allow_experimental_form=False):
     mock/catlass 等显式逃生口保持原语义；这里只阻断会改变 DUT form/性能基线的两条真机通路错配，
     外加**准入白名单**（`_ACCEPTANCE_RUNNER_FORMS`）。
     """
-    runner_form = spec.get("runner_form", "cpp")
+    runner_form = _spec_runner_form(spec)
     expected = _RUNNER_FORM_TO_MODE.get(runner_form)
     if expected is None:
         raise SystemExit(
@@ -279,7 +300,7 @@ def _assert_acceptance_form_allowed(spec, mode):
     可产裁决，一个 `runner_form=cpp_extension` 的 spec 就能替另一种执行形态出裁决。
     所以这里要求二者**互相蕴含**：form 准入 ∧ mode 正是该 form 派生出的那一个。
     """
-    runner_form = spec.get("runner_form", "cpp")
+    runner_form = _spec_runner_form(spec)
     if runner_form in _ACCEPTANCE_RUNNER_FORMS:
         expected = _RUNNER_FORM_TO_MODE.get(runner_form)
         if mode == expected:
@@ -340,11 +361,11 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     # 只产 dev_run_summary.json / dev_precision_check.json（`evidence_grade="development"`）。
     # 逃生阀之所以不做成「照产 acceptance.json 但打个标」：下游是**按文件名**读裁决的，
     # 同名同形的产物迟早会被当成验收结论用掉。
-    is_experimental_form = spec.get("runner_form", "cpp") not in _ACCEPTANCE_RUNNER_FORMS
+    is_experimental_form = _spec_runner_form(spec) not in _ACCEPTANCE_RUNNER_FORMS
     is_acceptance = _acceptance_capable(mode) and not is_experimental_form
     print(f"=== OpRunway workflow · {spec['op']} · mode={mode} ===")
     if is_experimental_form:
-        print(f"=== ⚠ runner_form={spec.get('runner_form', 'cpp')!r} 非验收准入通路"
+        print(f"=== ⚠ runner_form={_spec_runner_form(spec)!r} 非验收准入通路"
               f"（--allow-experimental-form）：本次不产 acceptance.json / verdict.json ===")
     if not is_acceptance:
         print(f"=== ⚠ {_NON_ACCEPTANCE_NOTE} ===")
@@ -694,8 +715,9 @@ def main():
     ap.add_argument("spec")
     ap.add_argument("--mode", default=None, choices=list(repo_adapter.MODES),
                     help="省略时据 spec.runner_form 派生：cpp→new_example、aclnn_py→aclnn_py、"
-                         "cpp_extension→cpp_extension。三条都是真机通路，但**只有 cpp_extension "
-                         "准入正式验收**。mock 仅本地用例链自检、精度按构造必过、**非验收**")
+                         "cpp_extension→cpp_extension（spec 未写 runner_form 时按 cpp_extension "
+                         "派生 —— 缺省跟着唯一准入形态走）。三条都是真机通路，但**只有 "
+                         "cpp_extension 准入正式验收**。mock 仅本地用例链自检、精度按构造必过、**非验收**")
     ap.add_argument("--out", default="reports/_run")
     ap.add_argument("--gpu-baseline", default=None, help="外部 GPU 标杆 JSON（Task3 consumer 侧对比）")
     ap.add_argument("--allow-experimental-form", action="store_true",

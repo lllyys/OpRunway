@@ -556,7 +556,8 @@ def _execute_precision_attempt_locked(attempt_dir):
     except SystemExit as ex:
         raise RetestExecutionError(
             f"CP-F 后验精度复测**只支持 runner_form=cpp_extension**，"
-            f"base spec 的 runner_form={spec.get('runner_form', 'cpp')!r} 不受支持。\n"
+            f"base spec 的 runner_form="
+            f"{repo_adapter.spec_runner_form(spec)!r} 不受支持。\n"
             f"  这不表示基础验收失效或被重新裁决——它仍保持原裁决与历史效力，"
             f"只是当前复测能力不覆盖该通路。\n"
             f"  ⚠ 没有逃生阀：`--allow-experimental-form` 不适用于 CP-F，"

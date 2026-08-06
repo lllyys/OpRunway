@@ -18,10 +18,12 @@
   "op": "<PascalCase 算子名>",         // 去 aclnn 前缀
   "repo": "<顶层仓名>",                // ops-math / ops-nn / catlass …
   "hardware": ["<从任务书『适配硬件』抽>"],
-  // §1.3（torch 对标 / 多输出 / aclnn_py）新增的可选字段：不属该场景就**整字段省略**（缺省 = 现行 cpp 通路，零变更）
+  // §1.3（torch 对标 / 多输出 / aclnn 两段式被测物）用到的字段。
+  // ⚠ `runner_form` **别当可选字段省略**：当前只有 `cpp_extension` 能产验收裁决，正式验收一律显式写它（§1.3.1）。
+  //   省略确实有缺省兜底（键缺席 → `cpp_extension`），但**省略再也不表达 `cpp`**——要 `cpp` / `aclnn_py` 只能显式写。
   "scenario": "<可选：torch_ref_aclnn>",      // 场景标识（编排层路由标签）
-  "runner_form": "<可选：cpp（缺省）| aclnn_py>",  // runner 形态；aclnn_py ⇒ 必须同时声明 call_variants
-  "call_variants": "<仅 aclnn_py：变体对象数组，见 §1.3.3>",
+  "runner_form": "cpp_extension",            // 受控词表 {cpp_extension（唯一验收准入）| aclnn_py | cpp}
+  "call_variants": "<cpp_extension / aclnn_py 两种形态**均必填**：变体对象数组，见 §1.3.3>",
   "allow_empty_tensor": "<可选 bool，缺省 true；任务书明写不支持空 Tensor→false>",
   // §1.4 可选：任务书点名「某 attr 所指的轴长度 = L」这类边界 → **定向生成**，别指望正交网格撞上
   "attr_axis_lengths": [{"attr":"<已声明的 attr 名>","lengths":[1]}],   // 不需要就整字段省略
@@ -112,8 +114,8 @@ opbase 精度标准 §1.1 说「用例数不设固定下限、覆盖优先」，
 | `precision.oracle` | 精度校验工具/真值来源 | 受控词表 `ascendoptest / mere_mare / atk_double / torch / scipy / std_exact / none`，**按任务书原文抽**（多数社区任务=ascendoptest；SPMV=生态标准 MERE·MARE + ATK 双标杆=`atk_double`；Sleep=none）——**勿一律填 ascendoptest**。⚠ 旧文写的 `dual_benchmark` 已统一为 `atk_double`（与 `precision_policy.select_standard` 识别的词一致）；`mere_mare` 与 `atk_double` **都**映射到 standard `ecosystem_mere_mare`（ATK 双标杆 fallback 本轮 out-of-scope、未实现）|
 | `precision.standard`（T5，待散文门）| **先读任务书显式精度工具/标准；仅缺失时**才从 oracle+verify_mode 兜底（见 §1.1）| 受控词表 `ascendoptest_default / ecosystem_mere_mare / exact / behavioral / torch_allclose`。`oracle` 是真值来源，不得覆盖任务书点名的验收尺；缺省不填时 `precision_policy.select_standard` 才按 §1.1 兜底 |
 | `scenario`（§1.3）| 任务书『参考实现/功能对标』段是否把 **torch 指定为真值口径** × PR 是否**标准 aclnn 两段式**工程 | 受控值 `torch_ref_aclnn`；不属该场景 → **整字段省略**，别编新值 |
-| `runner_form`（§1.3）| 被测物形态（PR 工程结构，见 §1.3.1） | `cpp`（缺省，可省略）/ `aclnn_py`。`aclnn_py` ⇒ **必须**同时给 `call_variants`，否则 gen_cases fail-closed |
-| `call_variants`（§1.3.3）| **递归发现的接口头**的函数签名（`<op_subdir>` 下有界递归找到的 `aclnn_*.h`，剔 `*_impl.h`；**层级不预设**）+ 任务书的 attr 语义 | 变体对象数组；`when`/`symbol`/`active_outputs` 必填，`active_attrs`/`attrs` 选填。按 **attr 取值**分派，**绝不按算子名** |
+| `runner_form`（§1.3）| **执行形态 = 用哪座调用桥去调被测物**（见 §1.3.1）。⚠ 它**不是**「被测物工程结构」的同义词——被测物是不是 aclnn 两段式，判的是**域内/域外**，不是这个字段 | 受控词表 `cpp_extension` / `aclnn_py` / `cpp`。**正式验收一律 `cpp_extension`**：它是当前**唯一**能产验收裁决的形态（准入白名单 `run_workflow._ACCEPTANCE_RUNNER_FORMS`），另两个只能加 `--allow-experimental-form` 跑出开发级证据、**产不出** `acceptance.json` / `verdict.json`。⚠ **缺省 = `cpp_extension`**（键缺席即此，唯一真源 `repo_adapter.DEFAULT_RUNNER_FORM`，`run_workflow` / `gen_cases` / `cpp_extension_codegen` / `cpp_extension_adapter.prepare` 全部同源）——所以**省略再也不表达 `cpp`**，`cpp` / `aclnn_py` 只能显式声明。⚠ **缺省兜得住 ≠ 可以省着不写**：正式验收的 spec 一律显式写 `"runner_form": "cpp_extension"`，执行身份要在 spec 里一眼可读、可审。⚠ 只有**键缺席**吃缺省：显式写 `null` / `""` 是一份写坏的 spec，照旧在受控词表处 fail-closed。`cpp_extension` / `aclnn_py` ⇒ **都必须**同时给 `call_variants`，否则 gen_cases fail-closed |
+| `call_variants`（§1.3.3）| **递归发现的接口头**的函数签名（`<op_subdir>` 下有界递归找到的 `aclnn_*.h`，剔 `*_impl.h`；**层级不预设**）+ 任务书的 attr 语义 | 变体对象数组；`when`/`symbol`/`active_outputs` 必填，`active_attrs`/`attrs` 选填。按 **attr 取值**分派，**绝不按算子名**。`runner_form ∈ {cpp_extension, aclnn_py}` **一律必填**（两种形态共用同一份逐 case 调用契约 `aclnn_call`）|
 | `params[].out_role` / `index_of` / `gather_from`（§1.3.2）| aclnn 签名的输出形参 + 任务书对各输出的语义描述 | `out_role ∈ {value, index}`（多输出时**每个** out 必填）；`index_of` 指本 spec 某 `value` 输出名；`gather_from` 指本 spec 某 `in` 参数名。二者仅 `index` 有、且**必填** |
 | `allow_empty_tensor`（§1.3.6）| 任务书『不支持空 Tensor』类明写约束 | 真 bool，缺省 `true`。`"false"`/`0` **fail-closed 拒收** |
 | `attr_axis_lengths`（§1.4，可选）| 任务书**点名**的轴长度边界（典型句式「归约维/dim 所指轴上维度为 1 时…」）| `[{"attr":"<已声明 attr 名>","lengths":[<正整数>…]}]`。**声明了却一条都产不出 → fail-closed**（假覆盖）。不需要就整字段省略 |
@@ -255,34 +257,48 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 ⚠ 早前一版记「`precision_ok` 不认 `passed_with_gaps`、会跳过 Task3」——那是 C4 接线前的实况、现已过时。
 一律**逐字引用确定性产物的实际字段并标来源**（ADR 0007），不自行宣告裁决。
 
-## 1.3 torch 对标 / 多输出 / aclnn_py 形态怎么填
+## 1.3 torch 对标 / 多输出 / aclnn 两段式被测物怎么填
 
-> 这一节回答的是「**任务书说对标 torch、PR 是个标准 aclnn 两段式工程、算子还有多个输出**」这条通路上，
-> 那些**只有这条通路才用得到**的字段该怎么从任务书 × PR 抽出来。
+> 这一节回答的是「**任务书说对标 torch、被测物是个标准 aclnn 两段式工程、算子还有多个输出**」这条通路上，
+> 那些**只有这条通路才用得到**的字段该怎么从任务书 × 被测来源抽出来。
 > 权威依据（反推自实现，别凭记忆改）：`precision_policy.call_variants` / `active_output_names` /
 > `derive_output_contracts` / `_torch_allclose_tol`、`gen_cases._build_aclnn_call` / `_value_profiles` /
-> `_allow_empty_tensor`、`aclnn_runtime/perf_msprof.resolve_torch_baseline_plan`。
-> **不属这条通路的算子：以下字段一个都不要写**（全部可省略，省略 = 现行 cpp 通路、行为零变更）。
+> `_allow_empty_tensor`、`cpp_extension_codegen` / `cpp_extension_adapter`、
+> `aclnn_runtime/perf_msprof.resolve_torch_baseline_plan`、准入白名单 `run_workflow._ACCEPTANCE_RUNNER_FORMS`。
+> **不属这条通路的算子：以下字段一个都不要写**（`scenario` / `out_role` / `tolerance_source` 等全部可省略）。
 
 ### 1.3.0 四件事**各自独立**触发，别打包
 
-很容易误以为「torch 对标 ⇒ 多输出 ⇒ aclnn_py」是一套。**不是**，是四个正交的判断，各自看各自的依据：
+很容易误以为「torch 对标 ⇒ 多输出 ⇒ 某个 runner_form」是一套。**不是**，是四个正交的判断，各自看各自的依据：
 
 | 判断 | 看哪儿 | 落到哪个字段 |
 |---|---|---|
 | 真值口径是不是 torch | **任务书**『参考实现 / 功能对标』段 | `precision.oracle=torch`；`precision.standard` 仍先读独立精度条款，条款缺失才兜底 `torch_allclose` |
-| 被测物是不是 aclnn 两段式工程 | **PR** 工程结构（§1.3.1） | `runner_form=aclnn_py` |
+| 被测物是不是 aclnn 两段式工程 | **被测来源**（PR 或本地 checkout）的工程结构（§1.3.1 ②） | **只判「域内/域外」**：域内才继续往下抽，域外 fail-closed 记 gap。⚠ **它不决定 `runner_form`** |
+| 用哪座**调用桥**去调它 | 验收准入（§1.3.1 ③），不看工程结构 | `runner_form`：**正式验收恒为 `cpp_extension`** |
 | 算子是不是多输出 | **aclnn header 签名** + 任务书输出描述 | `params[].out_role` 等（§1.3.2） |
-| 调用变体表（**`runner_form==aclnn_py` 一律必填**）| **接口头里有几个入口 + attr 怎么分派** | `call_variants`（§1.3.3） |
+| 调用变体表（`runner_form ∈ {cpp_extension, aclnn_py}` **一律必填**）| **接口头里有几个入口 + attr 怎么分派** | `call_variants`（§1.3.3） |
 
-⚠ **`call_variants` 的触发条件是 `runner_form == "aclnn_py"`，不是「header 里有多个入口」**——
-**aclnn_py 一律必填**（缺了 `gen_cases` 当场 fail-closed）。入口个数只决定**产几条 variant**：
+🔴 **「被测物是 aclnn 两段式」不蕴含 `runner_form=aclnn_py`。** 这条旧文写反过，是 Roll 被判成
+`aclnn_py`、卡在准入门前的直接原因，**下一个人别再照原样判**：
+
+- `aclnn_py` 与 `cpp_extension` **调的是同一个东西** —— 被测来源构建出的那个 vendor `.so` 里的
+  标准 aclnn 两段式符号。两者的差别只在**调用桥**：
+  `aclnn_py` 用通用 ctypes 直接调；`cpp_extension` 按官方 `NpuExtension` / `EXEC_NPU_CMD_EXT`
+  生成独立 `torch.ops` 调用桥再调（**不重编 op-plugin、不把 op-plugin 当 DUT**）。
+- 所以「工程结构是 aclnn 两段式」证明的是**这个算子在域内、能被两条桥中任意一条调到**，
+  它**不指定**用哪座桥。用哪座桥由**验收准入**定，而准入当前只有一个答案。
+- `runner_form` 也**不反推性能标杆**：baseline 仍逐字按任务书核（§1.3.5）。
+
+⚠ **`call_variants` 的触发条件是 `runner_form ∈ {cpp_extension, aclnn_py}`，不是「header 里有多个入口」**——
+这两种形态**一律必填**（缺了 `gen_cases` 当场 fail-closed；`cpp_extension_codegen` 另有一道
+「非空列表」硬校）。入口个数只决定**产几条 variant**：
 多入口产多条；**单入口也必须有一条**（`when` 写 `{"always": true}`，`active_attrs` / `active_outputs` 照签名填）。
 
 `scenario=torch_ref_aclnn` 是**前两条同时成立**时才写的**合并标签**（编排层路由用）；单独成立时只写各自的字段、
-**不要**写 `scenario`。单输出的 aclnn_py 算子完全合法（照样要 `call_variants`，只是 `active_outputs` 只有一个名）。
+**不要**写 `scenario`。单输出算子完全合法（照样要 `call_variants`，只是 `active_outputs` 只有一个名）。
 
-### 1.3.1 怎么判 `scenario == torch_ref_aclnn` / `runner_form == aclnn_py`
+### 1.3.1 怎么判 `scenario == torch_ref_aclnn` / `runner_form` 填什么
 
 **① 真值口径侧（任务书，权威）**：任务书『参考实现』/『功能对标』段把 **torch 的某个 API 指定为功能与真值的对标物**
 （典型句式：「参考 `torch.<api>` 功能，在昇腾 NPU 上基于 Ascend C 实现功能一致的算子」）。
@@ -291,7 +307,8 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 `impl_reference`——两者判别见 SKILL 的 golden 判据锚要点）。
 ⚠ 任务书只说「对齐/参考某实现」而没把 torch 立为真值口径 → **不是**本场景，别硬套。
 
-**② 被测物侧（PR 工程结构，`pr_facts.json` 的改动文件 + `key_files`）**：
+**② 被测物侧（被测来源的工程结构，`pr_facts.json` 的改动文件 + `key_files`；本地 checkout 同形）**
+——这一步判的是**域内/域外**，**不是** `runner_form`：
 - **仓根**有 `build.sh`，算子目录（`<op_subdir>`）下有 `op_host/`，且**在 `<op_subdir>` 下有界递归**（深度 ≤3、不跟随软链）能找到 `aclnn_*.h`（剔 `*_impl.h`）；
   ⚠ **接口头落在哪一层不得预设**——2026-07-24 dogfood 实测：PR6429 的头在 `<op_subdir>/op_host/op_api/aclnn_median.h`，
   `<op_subdir>/` 下**并没有** `op_api/`。旧文写的「算子目录下直接有 `op_api/aclnn_*.h`」是错的，**钉死一层会把真 PR 判成「非域内」**；
@@ -300,16 +317,33 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 - **无 opaque descriptor**（不是「先 create 一个不透明句柄再多次调用」那种有状态 API）。
 - ⚠ **不要求** per-op `build.sh`、**不要求** `op_graph/`（2026-07-24 实测：ops-nn 实验算子二者皆无）。
 
-两者都成立 → `scenario: "torch_ref_aclnn"` + `runner_form: "aclnn_py"`。
-只有 ② 成立（真值口径不是 torch）→ 只写 `runner_form: "aclnn_py"`，`scenario` 省略。
-**②不成立**（缺件 / 非标准两段式 / 有 opaque descriptor）→ **别写 `aclnn_py`**：这属于「不支持的接口能力」，
+两者都成立 → `scenario: "torch_ref_aclnn"`；只有 ② 成立（真值口径不是 torch）→ `scenario` 省略。
+**②不成立**（缺件 / 非标准两段式 / 有 opaque descriptor）→ 这属于「不支持的接口能力」，
 按域外 fail-closed 记 `task_pr_gaps` 并停下问用户，绝不硬塞（律令 #0）。
 
-`runner_form=aclnn_py` 的两个连带后果，落 spec 前须知：
-- **必须**同时声明 `call_variants`（否则 `gen_cases` 当场 fail-closed）；
-- 真机可收发 dtype 白名单据 form 放开（`repo_adapter.supported_np("aclnn_py")` 含 int / bf16）——
-  即 §4 那条「fp32/fp16 才进 `params.dtype`」的 cpp-runner 限制**不适用**本形态；但**能不能进 `params.dtype`
-  仍要逐 dtype 核「算子在目标硬件那支真支持」**，不是形态放开就随便填。
+**③ `runner_form` 侧（验收准入，与 ①② 都无关）**：**② 成立（域内）就写 `runner_form: "cpp_extension"`。**
+
+理由不是「哪种形态更好」，而是**真机成熟度**：`cpp_extension` 是唯一跑通过完整 torch_parity 矩阵的通路
+（Median PR6429 1152 例、`gate.passed=true`），所以准入白名单
+`run_workflow._ACCEPTANCE_RUNNER_FORMS` 里当前**只有它一个**。落 spec 前须知：
+
+| 写成 | 后果 |
+|---|---|
+| `cpp_extension` | ✅ 正常出验收裁决（`acceptance.json` / `verdict.json`）|
+| `aclnn_py` / `cpp` | ⛔ 入口门直接拦下；加 `--allow-experimental-form` 只能**跑起来**，物理上只产 `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"` + NON-ACCEPTANCE 标记）。「加了逃生阀跑绿了」**不是**验收通过，不得进报告裁决栏 |
+| 整字段省略（键缺席）| 全仓一致解析为 **`cpp_extension`**（缺省唯一真源 `repo_adapter.DEFAULT_RUNNER_FORM`；`run_workflow` 派 mode、`gen_cases` 校 dtype 与 `aclnn_call`、`cpp_extension_codegen` / `cpp_extension_adapter.prepare` 全走同一个读侧入口 `repo_adapter.spec_runner_form`，不会两处打架）。⚠ **但别这么写**：缺省兜住的是「漏写」这类事故，不是可以不声明执行身份的许可——正式验收一律显式写。⚠ 也**别再用省略表达 `cpp`**：那个语义已经没有了 |
+| 显式 `null` / `""` | ⛔ 不是「没写」，是一份写坏的 spec。读侧一律 `.get(k, DEFAULT)`（**不用 `or` 兜**），所以这些值原样送进受控词表 → fail-closed 报「不受支持的 runner_form」 |
+
+`runner_form=cpp_extension` 的三个连带后果：
+- **必须**同时声明 `call_variants`（`gen_cases` 与 `cpp_extension_codegen` 各有一道 fail-closed）；
+- 真机可收发 dtype 白名单据 form 放开（`repo_adapter.supported_np("cpp_extension")` 含 int / bf16，
+  与 `aclnn_py` 同集）——即 §4 那条「fp32/fp16 才进 `params.dtype`」的 cpp-runner 限制**不适用**本形态；
+  但**能不能进 `params.dtype` 仍要逐 dtype 核「算子在目标硬件那支真支持」**，不是形态放开就随便填；
+- 它需要**独立构建收据**把 PR head / 本地子树摘要、构建命令与实际加载的 vendor ELF 绑起来
+  （三级门 `validate_acceptance_state` 会对账）——接入成本比 `aclnn_py` 高，这是已知账单，不是可以绕的理由。
+
+⚠ 已有 spec 写着 `aclnn_py`（如 Roll）→ 要做正式验收就得迁到 `cpp_extension`，
+**不是**把准入门放宽。旧 `aclnn_py` 跑出来的 PASS 属于旧 caseset，不得沿用。
 
 ### 1.3.2 从 aclnn 签名派生 `out_role` / `index_of` / `gather_from`
 
@@ -344,7 +378,10 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 
 ### 1.3.3 从 aclnn header 派生 `call_variants`
 
-**什么时候写**：**`runner_form == "aclnn_py"` 一律必填**（不填 `gen_cases` 当场 fail-closed）。
+**什么时候写**：**`runner_form ∈ {cpp_extension, aclnn_py}` 一律必填**（不填 `gen_cases` 当场 fail-closed；
+`cpp_extension` 另有 `cpp_extension_codegen` 的「非空列表」硬校）。两种形态共用同一份逐 case 的
+`aclnn_call` 契约（`gen_cases` 里那句 `needs_aclnn_call = runner_form in ("aclnn_py", "cpp_extension")`），
+抽法完全一样。
 「header 里有多个入口」**不是触发条件**、只影响变体条数：单入口写一条 `{"when": {"always": true}, …}` 即可。
 
 **为什么需要**：同一个算子的不同 attr 取值可能对应**不同的 aclnn 符号**与**不同的输出 arity**——header 里
@@ -478,7 +515,9 @@ Torch 签名列出必须对标的 overload，再逐个建立：
 
 ### 1.3.7 本节自检（并入 §7）
 
-- `runner_form=="aclnn_py"` ⇒ `call_variants` 非空；每条 `when` 是三种谓词之一；`attr_matrix` 的**每一行**
+- **`runner_form` 已显式写出**，且正式验收写的是 `cpp_extension`（唯一准入形态，§1.3.1 ③）；
+  写 `aclnn_py` / `cpp` 只在「明知这轮只做开发级验证」时才允许，且必须在 `task_pr_gaps` 记明「非验收通路」。
+- `runner_form ∈ {cpp_extension, aclnn_py}` ⇒ `call_variants` 非空；每条 `when` 是三种谓词之一；`attr_matrix` 的**每一行**
   都能匹配到至少一条变体（无匹配 → 运行时 fail-closed）。
 - `call_variants[].active_attrs` / `active_outputs` 分别是 spec attr / out 顺序的**子序列**且不重名；
   引用的名字都在 `params` 里存在。
@@ -493,7 +532,8 @@ Torch 签名列出必须对标的 overload，再逐个建立：
   或 gap 里写清出处），**不是** 0.6 这类抄来的默认值。
 - `perf.baseline=="aclnn_builtin"` ⇒ `perf.aclnn_baseline.library=="cann_builtin_libopapi"`；
   `variants` 对每个性能 case 恰好命中一条，`symbol/slots` 完整；真机产物须带实际库 sha256 与符号定义方。
-- `allow_empty_tensor` / `scenario` / `runner_form` 等**不属本场景就整字段省略**，别写空串或占位值。
+- `allow_empty_tensor` / `scenario` 等**不属本场景就整字段省略**，别写空串或占位值。
+  ⚠ **`runner_form` 不在这条里**：它是执行形态声明、不是场景标签，正式验收必须显式写 `cpp_extension`。
 
 ## 1.4 `attr_axis_lengths` —— 任务书**点名的轴长度边界**怎么定向生成（可选，顶层）
 
@@ -679,9 +719,11 @@ C4 的 `dtype_unsupported_by_op_def`、`dtype_unsupported_on_target_hw`，见 §
   **必须**声明该字段（否则该边界大概率零覆盖，而 `gaps=0` 的裁决会掩盖它）；写了则 `attr` 引用**已声明的 attr 名**、
   `lengths` 是**非空正整数列表**（0 走 `allow_empty_tensor`/`empty_axis`）；**声明了却产不出 → gen_cases fail-closed**，
   撞上要回去核 attr/rank，**不许删字段绕过**。任务书没点名就整字段省略。
-- **§1.3 · torch 对标 / 多输出 / aclnn_py 形态**：若写了 `scenario` / `runner_form` / `call_variants` /
+- **§1.3 · torch 对标 / 多输出 / aclnn 两段式被测物**：若写了 `scenario` / `runner_form` / `call_variants` /
   `out_role` / `tolerance_source` / `value_profiles` / `perf.torch_baseline` / `allow_empty_tensor` 中任一项，
-  逐条过 **§1.3.7 自检清单**；不属该场景则这些字段**一个都不该出现**。
+  逐条过 **§1.3.7 自检清单**；不属该场景则除 `runner_form` 外这些字段**一个都不该出现**。
+  ⚠ **`runner_form` 是例外**：被测物在域内就必须显式写，正式验收恒为 `cpp_extension`（§1.3.1 ③）——
+  它是当前唯一能产验收裁决的形态，写成 `aclnn_py` / `cpp` 或省着不写都会让编排在准入门前停摆。
 - **C1 · 输出形状**：spec 里**没有**输出形状字段（别自造 `out_shape`/`output_shape`/`shape_formula`）；
   非 elementwise 算子的输出形状由 per-op `golden.py` 的可选 `out_shape(in_shapes, attrs)` 定
   （详见 `skills/acc-runner/references/runner-skeleton.md` §6）。抽 spec 时只需在 `task_pr_gaps` 记「该算子非 elementwise、

@@ -77,9 +77,15 @@ def _attr_type(param):
 
 
 def _contract(spec):
-    if spec.get("runner_form") != "cpp_extension":
+    # 形态断言经全仓唯一缺省真源（P5）。**这不是把门放宽**：`spec_runner_form` 只在**键缺席**时
+    # 吃缺省，显式写成 `cpp` / `aclnn_py` / null / `""` 一律照旧当场拒。键缺席的 spec 现在全仓
+    # 一致地解析为 `cpp_extension`（run_workflow 据此派 mode、gen_cases 据此要 `call_variants`），
+    # 这里若继续读原始键，就成了「上游按 cpp_extension 规划完、到 codegen 才说不是它」的分裂。
+    import repo_adapter                      # 惰性：本模块是纯 codegen，不在顶层拖 numpy
+    runner_form = repo_adapter.spec_runner_form(spec)
+    if runner_form != "cpp_extension":
         raise CppExtensionCodegenError(
-            f"cpp_extension_codegen 只接受 runner_form='cpp_extension'，得 {spec.get('runner_form')!r}")
+            f"cpp_extension_codegen 只接受 runner_form='cpp_extension'，得 {runner_form!r}")
     params = spec.get("params")
     variants = spec.get("call_variants")
     if not isinstance(params, list) or not params:

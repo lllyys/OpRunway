@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """aclnn 静态 CP-C0 预检单测；不加载 ACL、不访问 NPU。"""
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import tempfile
@@ -9,6 +11,12 @@ import unittest
 
 import content_address
 import preflight_aclnn as P
+
+
+def _cli_rc(root, spec_rel="spec.json"):
+    """跑一遍 CLI 取退出码（吞掉它打到 stdout 的 payload，别弄脏测试输出）。"""
+    with contextlib.redirect_stdout(io.StringIO()):
+        return P.main(["--root", root, "--spec", spec_rel])
 
 
 _HEADER = """
@@ -133,6 +141,36 @@ class AclnnPreflightTest(unittest.TestCase):
         result = P.evaluate(self.root, "spec.json")
         self.assertEqual(result["status"], "NOT_APPLICABLE")
         self.assertIsNone(result["acceptance_verdict"])
+        self.assertEqual(_cli_rc(self.root), 0)       # CLI 对该状态返回 0
+
+    def test_illegal_form_is_blocked_not_not_applicable(self):
+        """⭐ 写坏的 `runner_form` **不得**被判成「这道门不适用」（2026-08-05 审修门 High#2）。
+
+        原写法是「不是 aclnn_py / cpp_extension 就 NOT_APPLICABLE」，于是 `null` / `""` / `0` /
+        `"opaque"` 一并落进 NOT_APPLICABLE，而 CLI 对该状态返回 0——一份根本没声明合法形态的
+        spec 拿到的是「不需要 ABI 预检」的绿灯。门看着有、实际拦不住。
+        """
+        for bad in (None, "", 0, "opaque"):
+            with self.subTest(bad=bad):
+                spec = _spec()
+                spec["runner_form"] = bad
+                self._write("spec.json", spec)
+                result = P.evaluate(self.root, "spec.json")
+                self.assertEqual(result["status"], "BLOCKED")
+                self.assertIsNone(result["acceptance_verdict"])
+                self.assertTrue(result["blocked_reasons"])
+                self.assertIn("受控词表", result["blocked_reasons"][0])
+                # CLI 必须以非 0 退出，否则编排层照样往下走
+                self.assertEqual(_cli_rc(self.root), 2)
+
+    def test_missing_form_key_falls_back_to_the_single_source_default(self):
+        """键缺席 → 全仓唯一缺省（`cpp_extension`），照常做 ABI 预检、不早退。"""
+        spec = _spec()
+        spec.pop("runner_form")
+        self._write("spec.json", spec)
+        result = P.evaluate(self.root, "spec.json")
+        self.assertEqual(result["status"], "READY_WAIT_NPU_TRUST_GATE")
+        self.assertEqual(result["bindings"]["runner_form"], "cpp_extension")
 
     def test_cpp_extension_reuses_static_abi_gate_but_has_distinct_next_gate(self):
         spec = _spec()

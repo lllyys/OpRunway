@@ -1,6 +1,7 @@
 {
   "op": "Sign",
   "repo": "ops-math",
+  "runner_form": "cpp",
   "hardware": ["Atlas A2", "Atlas A3"],
   "reference": {"type": "tbe", "ref": "内置 TBE Sign", "path": "opp/built-in/... kernel/proto/config"},
   "change": {"kind": "add_dtype", "dtypes_added": ["int16"], "note": "与 TBE 全对齐所有 dtype + 加 int16"},

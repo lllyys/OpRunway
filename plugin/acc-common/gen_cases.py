@@ -29,8 +29,11 @@ U3 dtype 单一真源（2026-07-24）：dtype 支持不再由本文件独家说�
     （Track-C 挂账：生成期放行、真机跑到仍 fail-closed）。
   `check_spec_capability` **两层都问**，缺哪层就在报错里点名哪层、并列出两侧各自的支持集。
   修的是这个真 bug：aclnn_py runner 早已支持 int64/int8/uint8，生成端却自带旧硬表挡掉 →
-  任务书 8 类 dtype 的覆盖被**工具**压到 4/8（不是被算子）。缺省 `runner_form=cpp` 口径不变，
-  现有算子 caseset 逐字节不变（测试以 sha256 钉住）。
+  任务书 8 类 dtype 的覆盖被**工具**压到 4/8（不是被算子）。现有算子 caseset 逐字节不变（sha256 钉住）。
+  ⚠ **`runner_form` 缺省不在本文件定义**（P5，2026-08-05）：一律经 `repo_adapter.spec_runner_form`
+  / `repo_adapter.DEFAULT_RUNNER_FORM` 取。本文件曾各写一份 `"cpp"` 字面量，而 run_workflow 的缺省
+  已是 `cpp_extension` → 同一份省略该键的 spec 在两处被当成两种形态。样例 spec 现已**显式声明**
+  `runner_form`，不再依赖缺省。
 
 shape_transform 形态扩面（2026-07-22 用户拍板的契约 C1/C2/C3，落地见下面各处 `C1:` / `C2:` / `C3:` 标记）：
   · **C1 · 输出形状交给 per-op golden.py**：`<ops_root>/<op>/golden.py` **可选**导出
@@ -1338,13 +1341,21 @@ def _dtype_layer_error(dtn, form, gen_ok, run_ok, runner_set, deferred_set):
     return "\n".join(lines)
 
 
-def check_spec_capability(in_params, runner_form=None):
+def check_spec_capability(in_params, runner_form):
     """引擎**能力边界**的 spec 级预检——`gen_cases()` 与 `_dry_run()` 共用，故 CP-B 契约自检就能拦住。
 
     ⚠ dtype 白名单**不再自带一份硬表**（U3）：真机侧一律问 `repo_adapter.supported_np(runner_form)`
     （+ `deferred_np` 的 Track-C 挂账集），生成侧问本模块的 `_NATIVE`——**两处口径不一致**曾把任务书
     8 类 dtype 压到 4/8（int64/int8/uint8 被生成端挡掉，覆盖率是被工具而非算子限住的）。
-    `runner_form` 缺省 `cpp` = 现有 4 个算子的口径，行为逐字节不变。
+
+    ⚠ `runner_form` 是**必填形参，本层不存在「未指定」这一档**（P5-b，2026-08-05）。缺省口径只在
+    读 spec 的那一步（`repo_adapter.spec_runner_form`）生效，读出来是什么就原样传进来。
+    历史病灶：这里曾有个 `runner_form=None` 默认值，而 `spec.runner_form` **显式写成 null** 时
+    `spec_runner_form` 返回的正是 `None`——两种意思撞成同一个值，于是一份写坏的 spec 被
+    `resolve_runner_form(None)` 兜成当前唯一准入形态，过了 dtype 门，却因为调用方那边比的是原始
+    `None` 而**不要求** `call_variants`，产出没有 `aclnn_call` 的 caseset。把默认值删掉，
+    `None` / `""` / `0` 就一路走到 `supported_np` 的受控词表处 fail-closed。
+    真需要「按缺省形态问一问」的调用方，显式传 `repo_adapter.DEFAULT_RUNNER_FORM`。
 
     为什么必须有：`_build_inputs` 的常规 `varied` / `pair*` 路径末尾写死 `return [x0, x1]`（二元构造），
     而 `empty` 与特殊值路径按 `arity` 产满——**arity≥3 时多出来的输入被无声丢掉，两边行为还不一致**。
@@ -1372,8 +1383,11 @@ def check_spec_capability(in_params, runner_form=None):
         raise ValueError(f"spec dtype 集含重复项 {dup}（会致 case_id 碰撞/伪造覆盖，fail-fast）")
     # dtype 白名单（fail-fast，不静默）——**双层单一真源**：生成层 `_NATIVE`+bf16 × 真机层 repo_adapter。
     import repo_adapter                                # 延迟 import：repo_adapter 顶层已 import gen_cases
-    form = runner_form or "cpp"
-    runner_set = repo_adapter.supported_np(form)       # 未知 form 在此 fail-closed（不兜 cpp）
+    # ⚠ 这里**不再做任何归一**（P5-b）：形参必填，`None` 与 `""`、`0`、`"opaque"` 一样是非法 form，
+    #   全部交给下面的受控词表当场炸。缺省只在 `spec_runner_form` 那一步吃，本层再兜一次就是
+    #   把「spec 写坏了」洗成「调用方没给」。
+    form = runner_form
+    runner_set = repo_adapter.supported_np(form)       # 未知 form 在此 fail-closed（不兜任何一支）
     deferred_set = repo_adapter.deferred_np(form)
     gen_set = set(_NATIVE) | {_BF16}
     for dtn in dtypes:
@@ -1383,11 +1397,12 @@ def check_spec_capability(in_params, runner_form=None):
             raise ValueError(_dtype_layer_error(dtn, form, gen_ok, run_ok, runner_set, deferred_set))
 
 
-def _build_inputs(rng, in_params, shp, dtn, attrs, data_kind, runner_form=None):
+def _build_inputs(rng, in_params, shp, dtn, attrs, data_kind, runner_form):
     """造该 case 的**逻辑**输入数组列表（compute dtype；bf16=fp32-on-grid）。物理化在保存步单独做。
     data_kind 形如 base 或 base:regime（regime∈{uniform,normal}，仅 varied/pair 系用）；
     特殊 base：empty(§1.4 空)/inf/ninf/nan(§1.4 特殊值)。
-    `runner_form` 只为把兜底预检校在**同一层口径**上——不传就按 cpp 校，aclnn_py 的 int64 会在这被误拒。"""
+    `runner_form` **必填**（同 `check_spec_capability`，P5-b）：兜底预检必须校在与上游**同一层
+    口径**上，且这一层不得再有「未指定」——那个默认值曾让显式 `null` 与「没传」撞成同一个值。"""
     arity = len(in_params)
     base = data_kind.split(":")[0]
     regime = data_kind.split(":")[1] if ":" in data_kind else "uniform"
@@ -2713,7 +2728,10 @@ def gen_cases(spec, work_dir):
     # 的 _BF16_EXACT_OPS 是两处已知例外，仍是引擎里的算子知识。
     # golden_source 来自加载的 GOLDEN_SOURCE 元数据（决策 5），下游门继续校 oracle_source==映射(golden_source)。
     in_params = [p for p in spec["params"] if p["io"] == "in"]
-    runner_form = spec.get("runner_form")                # dtype 能力门按 form 分派（缺省 cpp）；U3
+    import repo_adapter                                  # 延迟 import：repo_adapter 顶层已 import gen_cases
+    # dtype 能力门 + `aclnn_call` 需求都按 form 分派（U3）。⚠ 缺省口径**必须**与 run_workflow 的
+    # mode 派生同源，否则同一份省略了该键的 spec 会被规划成 cpp、却被派去跑 cpp_extension（P5）。
+    runner_form = repo_adapter.spec_runner_form(spec)
     check_spec_capability(in_params, runner_form)        # 能力边界前置：先于 load_golden，别为不支持的算子白加载 golden
     # C1：load_golden 返回具名元组，`.out_shape` 是**可选**的（未导出=None → 缺省同形语义）。
     _g = load_golden(op)                             # 具名元组：按名取，别再位置解包
@@ -2745,6 +2763,10 @@ def gen_cases(spec, work_dir):
     # `aclnn_call`，driver 不再自己推变体。变体表必填——没它就只能靠 driver 兜默认值，而兜出来的
     # `dim=0` 既不是全局语义、又可能与单输出签名不符（越界写 / ABI 崩）。
     variants = _call_variants(spec)
+    # ⚠ 这是个**成员测试**：它对任何词表外的值都安静答 False（= 不要求 `call_variants`）。
+    #   之所以安全，全靠上面的 `check_spec_capability(in_params, runner_form)` 已经把
+    #   `runner_form` 钉死在受控词表内——`None` / `""` / `0` / `"opaque"` 到不了这一行。
+    #   那道门一旦被绕过或放宽，这里就会退化成 fail-open（P5-b 的原始现场）：别把它挪到门前面。
     needs_aclnn_call = runner_form in ("aclnn_py", "cpp_extension")
     if needs_aclnn_call and not variants:
         raise ValueError(f"{op}: runner_form={runner_form!r} 但 spec 未声明 call_variants —— "
@@ -2964,8 +2986,12 @@ def _build_dry_run_ledger(spec, preparation_inputs=None):
     perf_case_policy = _perf_case_policy(spec)
     op = spec["op"]
     in_params = [p for p in spec["params"] if p["io"] == "in"]
-    # 能力边界前置：三元算子 / dtype 双层能力门在 CP-B 就拦下，不拖到 CP-D（form 缺省 cpp）
-    check_spec_capability(in_params, spec.get("runner_form"))
+    import repo_adapter                                 # 延迟 import：repo_adapter 顶层已 import gen_cases
+    # 能力边界前置：三元算子 / dtype 双层能力门在 CP-B 就拦下，不拖到 CP-D。
+    # form 走全仓唯一缺省真源——dry-run 是 CP-B 契约自检，口径与 gen_cases/run_workflow 必须一致，
+    # 否则「CP-B 按 cpp 自检过了、CP-D 按 cpp_extension 跑」就是一份骗人的自检（P5）。
+    dry_runner_form = repo_adapter.spec_runner_form(spec)
+    check_spec_capability(in_params, dry_runner_form)
     attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
@@ -3046,7 +3072,10 @@ def _build_dry_run_ledger(spec, preparation_inputs=None):
         },
         "planning": {
             "case_target": case_target,
-            "runner_form": spec.get("runner_form", "cpp"),
+            # ⚠ 落账的是**已解析**的 form，不是原始键：账本要如实说「这批用例按哪种形态规划的」。
+            #   写 `spec.get(k, "cpp")` 会在 spec 省略该键时记下 `cpp`、而 run_workflow 实际按
+            #   `cpp_extension` 去跑——一份被下游哈希绑定的产物里躺着假记录（P5）。
+            "runner_form": dry_runner_form,
             "case_profile": meta["case_profile"],
             "case_profile_declared": meta["case_profile_declared"],
             "operator_class": meta["operator_class"],

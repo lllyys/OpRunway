@@ -24,7 +24,7 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 
 4. **三级门在 `run_workflow.py` 内部**：`run_workflow.py` **一次性串 Task1→2→3**，末尾**统一校门**（`validate_acceptance_state` 的 task1/task2/task3 三级，读**落盘** evidence 独立复核）——是**批量驱动、非阶段间实时阻断**，**不是** orchestrator 分阶段单独调度的 stage。验收门 `validate_acceptance_state.py` STATUS: FAILED → **不出 pass 裁决；仍由 `run_workflow` 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整）。「不推进下一 Task / 停在当前阶段」是 **agent 编排纪律**，不是脚本里的实时闸。
 
-5. **对外单一对话入口、脚本幕后**（canon conversational-agent-sole-delivery-form·proposed·未 settle，载重前需核）：用户全程只用自然语言（给「任务书 + PR」）；`python3 …` 是 primary 的内部实现，Bash 幕后跑，**不展示脚本命令、不让用户手敲**。缺东西（任务书 / PR / NPU-VPN 开没开 / 目标机是 a3 还是 a5）用对话问。⚠ **别问「mock 还是真机」——验收只有真机一条路**。`OPRUNWAY_*`（真实机器名 / 远端路径 / token）**走环境变量、不写进仓**。**副作用先确认**（真机 clone / build / 跑测、对外动作先列计划点头再做）。
+5. **对外单一对话入口、脚本幕后**（canon conversational-agent-sole-delivery-form·proposed·未 settle，载重前需核）：用户全程只用自然语言（给「任务书 + PR」）；`python3 …` 是 primary 的内部实现，Bash 幕后跑，**不展示脚本命令、不让用户手敲**。缺东西（任务书 / 被测来源 / **执行形态是就地跑还是远程连** / NPU 通不通 / 目标机是哪台）用对话问。⚠ **别问「mock 还是真机」——验收只有真机一条路**。`OPRUNWAY_*`（真实机器名 / 远端路径 / token）**走环境变量、不写进仓**。**副作用先确认**（真机 clone / build / 跑测、对外动作先列计划点头再做）。
 
 ---
 
@@ -98,7 +98,22 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   1. **改动落点目录**：`pr_facts.target_dir`（机器可比），对上任务书声明的算子目录；
   2. **issue / 追踪号**：**NL 读** `task_doc.md` 与 PR `title`（`pr_facts` **不抽 issue 号**，只能自然语言读），**非算子名字面匹配**；
   3. **用户确认**：证据摆给用户拍板。
-- **环境确认**（`AskUserQuestion` **必由 primary 做**）：NPU/VPN 开没开、目标机按任务书硬件 × op_def 双源核定。验收只认真机；`spec.runner_form` 受控词表为 `{cpp, aclnn_py, cpp_extension}`，依次派生 `{new_example, aclnn_py, cpp_extension}`。mock/catlass 只能显式指定且不产真机裁决。
+- **环境确认**（`AskUserQuestion` **必由 primary 做**）：NPU 通不通（远程连时另含 VPN 开没开）、目标机按任务书硬件 × op_def 双源核定。验收只认真机；`spec.runner_form` 受控词表为 `{cpp, aclnn_py, cpp_extension}`，依次派生 `{new_example, aclnn_py, cpp_extension}`。mock/catlass 只能显式指定且不产真机裁决。
+  ⚠ **执行形态先问清，两种都是一等通路，别把其中一种当通用前置**：
+  - **就地跑**（当前会话本身已在目标机或其 NPU 容器里）：**不需要** `.oprunway/real-machine.env`——没有 SSH alias /
+    容器名 / 远端工作目录这一层。设 `OPRUNWAY_TARGET=local`（此时 `OPRUNWAY_SSH_HOST` **免填**，传输层走本机
+    `bash`/`cp`、不碰 ssh/scp）；`OPRUNWAY_REMOTE_DIR` **仍要给**——它是「工作根目录」，名字里的 `REMOTE` 是历史
+    遗留、不代表必须远端；`cpp_extension` 的 `OPRUNWAY_CPP_EXTENSION_DRIVER_JSON` 照给，只是 argv 里不带
+    `ssh` / `docker exec` 前缀（adapter 不内置 SSH/容器名，只执行编排层给的这串 argv）。
+  - **远程连**（开发机 → 目标机）：SSH alias / 容器名 / 远端工作根来自 `.oprunway/real-machine.env`；
+    `OPRUNWAY_TARGET=remote`（缺省）时 `OPRUNWAY_SSH_HOST` 必填。
+  - 其余变量（PR head / op 子目录 / 被测仓 / vendor 名 / SoC / setenv…）**与形态无关**，两种形态都照旧每轮从任务书、
+    `source_facts.json`、spec 派生，不得因机器 profile 里有就复用旧值。
+  - ⚠ **`.oprunway/real-machine.env` 不存在不构成阻塞**：它只是「远程连」形态的连接元数据，**不是**跑验收的通用前置。
+    **不得**因为「读不到该文件 / 拿不到 SSH alias、容器名、远端工作目录」就停下拒绝启动验收
+    （AGENTS.md §5.3、`doc/oprunway-real-machine-environment.md` §1）。⚠ 但保护根语义一个字不松：该文件**存在时**
+    必须读它的 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`，那些根及其子目录是只读保留现场（禁写/禁覆盖/禁删/禁当执行目录）；
+    **未登记 ≠ 可随意清理**——删除/覆盖照旧逐次征得用户确认。
   ⚠ **三种 form 都派生得出 mode，但当前只有 `cpp_extension` 能产验收裁决**（准入白名单
   `run_workflow._ACCEPTANCE_RUNNER_FORMS`，`_resolve_mode` 入口 + 写 `acceptance.json`/`verdict.json` 之前的出口门，两处都拦）。
   `cpp` / `aclnn_py` 的 spec 不加 `--allow-experimental-form` 直接报错；加了也只出

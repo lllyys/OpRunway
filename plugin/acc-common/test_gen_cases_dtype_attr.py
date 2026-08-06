@@ -241,7 +241,8 @@ class SemanticIdTest(unittest.TestCase):
         """§1 per-case 独立种子（评审 #7）：同 case_id 在不同 dtype 集下**数据字节一致**（数据只依赖稳定 id、
         与 dtype 集/target/采样解耦）。注：§1 覆盖-预算下**哪些 id 被 emit** 随预算采样变，故不再断言「id 集
         ⊆ 扩面后集」；新不变式是「同 id → 同数据」。"""
-        two = {"op": "Sign", "verify_mode": "numerical", "params_source": "fixture",
+        two = {"op": "Sign", "runner_form": "cpp",
+               "verify_mode": "numerical", "params_source": "fixture",
                "params": [{"name": "self", "io": "in", "dtype": ["float32", "float16"]},
                           {"name": "out", "io": "out", "dtype": ["float32", "float16"]}],
                "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default"},
@@ -478,11 +479,14 @@ class DtypeRejectTest(unittest.TestCase):
         而 empty / 特殊值路径按 arity 产满——两边行为不一致，arity≥3 会无声截断。
         本测试钉住「宁可报错也不静默降级」这条纪律。支持多输入须先一般化（TODO U7b）。"""
         in_params = [{"name": n, "io": "in", "dtype": ["float32"]} for n in ("a", "b", "c")]
+        # ⚠ `runner_form` 自 P5-b 起是**必填**（本层不再有「未指定」这一档，理由见
+        #   `check_spec_capability` 的 docstring）；本用例问的是 arity，与形态无关，故显式传缺省形态。
+        form = RA.DEFAULT_RUNNER_FORM
         with self.assertRaises(ValueError) as cm:
-            GC._build_inputs(GC._case_rng("x"), in_params, [4], "float32", {}, "varied")
+            GC._build_inputs(GC._case_rng("x"), in_params, [4], "float32", {}, "varied", form)
         self.assertIn("3 元输入", str(cm.exception))       # 报清楚是几元、别只说「不支持」
         # 对照：二元仍正常产 2 个（证不是把整条路堵死）
-        two = GC._build_inputs(GC._case_rng("x"), in_params[:2], [4], "float32", {}, "varied")
+        two = GC._build_inputs(GC._case_rng("x"), in_params[:2], [4], "float32", {}, "varied", form)
         self.assertEqual(len(two), 2)
 
     def test_empty_dtype_set_fails_closed_in_both_paths(self):
@@ -550,7 +554,7 @@ class SubprocessE2ETest(unittest.TestCase):
 
 # ============================================ 对抗式负例（gen_cases / repo_adapter）===
 def _isclose_bf16_nan_spec():
-    return {"op": "IsClose", "verify_mode": "exact",
+    return {"op": "IsClose", "runner_form": "cpp", "verify_mode": "exact",
             "params": [{"name": "self", "io": "in", "dtype": ["bfloat16", "float32"]},
                        {"name": "other", "io": "in", "dtype": ["bfloat16", "float32"]},
                        {"name": "rtol", "io": "attr", "dtype": ["double"], "default": 1e-05},
@@ -728,7 +732,7 @@ class GoldenTorchPreferredTest(unittest.TestCase):
     def test_caseset_records_torch_source(self):
         """caseset.expected.golden_source 恒 "torch ..."、映到 torch_ref。"""
         self._need_torch()
-        sp = {"op": "Sign", "verify_mode": "numerical",
+        sp = {"op": "Sign", "runner_form": "cpp", "verify_mode": "numerical",
               "params": [{"name": "self", "io": "in", "dtype": ["float32"]},
                          {"name": "out", "io": "out", "dtype": ["float32"]}],
               "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default"}}
@@ -835,7 +839,11 @@ class LoadGoldenTest(unittest.TestCase):
 # ==================================================================================================
 def _fake_spec(op, *, dtypes=("float32",), attrs=None, attr_matrix=None, rank=None, case_target=1,
                arity=1):
-    """造一份最小可跑 spec（零真实算子数值；只为驱动 gen_cases）。case_target=1 → 只出强制项，跑得快。"""
+    """造一份最小可跑 spec（零真实算子数值；只为驱动 gen_cases）。case_target=1 → 只出强制项，跑得快。
+
+    ⚠ **显式**声明 `runner_form: "cpp"`：P5 起「省略该键」全仓统一解析为 `cpp_extension`，
+    而那条通路要求 spec 必带 `call_variants`。夹具想测的是 cpp 通路的造例行为，就该自己说出来，
+    不借缺省表达——借缺省的写法正是这轮要消灭的东西。"""
     names = ["self", "other"][:arity]
     ins = []
     for n in names:
@@ -846,7 +854,8 @@ def _fake_spec(op, *, dtypes=("float32",), attrs=None, attr_matrix=None, rank=No
     params = ins + [{"name": k, "io": "attr", "dtype": ["listInt"], "default": v}
                     for k, v in (attrs or {}).items()]
     params.append({"name": "out", "io": "out", "dtype": list(dtypes)})
-    sp = {"op": op, "verify_mode": "numerical", "params_source": "fixture", "params": params,
+    sp = {"op": op, "runner_form": "cpp",
+          "verify_mode": "numerical", "params_source": "fixture", "params": params,
           "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default",
                         "case_target": case_target},
           "perf": {"baseline": "tbe", "target_ratio": 0.95,
@@ -1895,15 +1904,17 @@ class GoldenContractTierTest(_FakeOpCase):
 # 但 `gen_cases.check_spec_capability` 自带另一份硬表 `{fp16,fp32,int16,int32}+bf16`，把任务书 8 类
 # dtype 压到 4/8 —— **覆盖率被工具而非算子限住**。现在两层各自单一真源、门同时问两层，缺哪层报哪层。
 def _u3_spec(op, dtypes, *, runner_form=None, arity=1):
-    """最小可跑 spec（U3 用）：可指定 runner_form + 是否带 aclnn 调用变体。"""
+    """最小可跑 spec（U3 用）：可指定 runner_form + 是否带 aclnn 调用变体。
+
+    ⚠ `runner_form=None` 表示「本用例不关心形态」→ 夹具落 `"cpp"`，**不是**省略该键。
+    P5 起省略等于 `cpp_extension`（须带 `call_variants`），夹具借省略表达「cpp」会当场炸。"""
     names = ["self", "other"][:arity]
     params = [{"name": n, "io": "in", "dtype": list(dtypes)} for n in names]
     params.append({"name": "out", "io": "out", "dtype": list(dtypes)})
-    sp = {"op": op, "verify_mode": "numerical", "params_source": "fixture", "params": params,
+    sp = {"op": op, "runner_form": runner_form or "cpp",
+          "verify_mode": "numerical", "params_source": "fixture", "params": params,
           "allow_empty_tensor": False,
           "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default", "case_target": 6}}
-    if runner_form:
-        sp["runner_form"] = runner_form
     if runner_form == "aclnn_py":                            # aclnn_py 必须显式声明调用变体（不许兜默认）
         sp["call_variants"] = [{"when": {"always": True}, "symbol": op,
                                 "active_attrs": [], "active_outputs": ["out"]}]
@@ -1923,9 +1934,12 @@ class DtypeSingleSourceTest(unittest.TestCase):
 
     def test_cpp_still_rejects_int64_and_names_both_layers(self):
         """cpp（runner v1）仍拒 int64/int8/uint8——真机收发不了；报错**两层支持集都点名**，别让人猜。"""
+        # ⚠ 这里必须**显式**传 `"cpp"`：P5 起 `None`（= 未指定）吃的是全仓唯一缺省
+        #   `repo_adapter.DEFAULT_RUNNER_FORM`，不再等于 cpp。本用例问的是「cpp 这一支怎么判」，
+        #   与缺省是谁无关，故不该借缺省表达。
         for dt in ("int64", "int8", "uint8"):
             with self.assertRaises(ValueError, msg=dt) as cm:
-                GC.check_spec_capability(self._in(dt), None)     # None → 缺省 cpp
+                GC.check_spec_capability(self._in(dt), "cpp")
             msg = str(cm.exception)
             self.assertIn(dt, msg)
             self.assertIn("生成层", msg)                          # 两层各自的支持集都写出来了
@@ -1938,7 +1952,7 @@ class DtypeSingleSourceTest(unittest.TestCase):
         """向后兼容：int16/int32 在 cpp 下**仍放行**（T7 起就能造用例，真机分支属 Track C、spec 以
         dtype_deferred 挂账）。把它们一起拒掉会当场废掉两个既有 test fixture spec。"""
         for dt in ("int16", "int32", "float32", "float16", "bfloat16"):
-            GC.check_spec_capability(self._in(dt), None)
+            GC.check_spec_capability(self._in(dt), "cpp")        # 同上：显式问 cpp 这一支
 
     def test_bool_rejected_points_at_generation_layer(self):
         """反向缺口：aclnn_py runner 收得了 bool，但 gen_cases 造不出 → fail-closed，且报错点名**生成层**。"""

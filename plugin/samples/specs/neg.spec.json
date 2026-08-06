@@ -1,6 +1,7 @@
 {
   "op": "Neg",
   "repo": "ops-math",
+  "runner_form": "cpp",
   "hardware": [
     "Atlas A2",
     "Atlas A3"

@@ -276,7 +276,8 @@ class PassedWithRiskE2ETest(unittest.TestCase):
         shutil.rmtree(self.d, ignore_errors=True)
 
     def test_run_workflow_exit_2(self):
-        spec = {"op": "Sign", "repo": "ops-math", "hardware": ["Atlas A3"],
+        spec = {"op": "Sign", "repo": "ops-math", "runner_form": "cpp",
+                "hardware": ["Atlas A3"],
                 "reference": {"type": "tbe", "ref": "内置 TBE Sign"},
                 "change": {"kind": "add_dtype"}, "params_source": "derived_from_reference",
                 "params": [{"name": "self", "io": "in", "dtype": ["float32"]},

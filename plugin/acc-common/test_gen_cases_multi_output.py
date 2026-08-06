@@ -100,7 +100,8 @@ def _fake_median_spec(op="MedMulti", dtypes=("float32", "int32"),
     if value_profiles:
         prec["value_profiles"] = list(value_profiles)
     spec = {
-        "op": op, "repo": "t", "verify_mode": "numerical", "generalize": True,
+        "op": op, "repo": "t", "runner_form": "cpp",
+        "verify_mode": "numerical", "generalize": True,
         "allow_empty_tensor": False, "attr_matrix": matrix, "precision": prec,
         "params": [
             {"name": "self", "io": "in", "dtype": list(dtypes), "rank": list(ranks)},
@@ -363,7 +364,8 @@ class SingleOutputBackwardCompatTest(unittest.TestCase):
     """单输出向后兼容硬约束：假单输出算子走 legacy expected（无 outputs 字段）；4 算子 dry-run 无回归。"""
 
     def test_single_output_op_stays_legacy(self):
-        spec = {"op": "FakeNeg", "repo": "t", "verify_mode": "exact", "generalize": True,
+        spec = {"op": "FakeNeg", "repo": "t", "runner_form": "cpp",
+                "verify_mode": "exact", "generalize": True,
                 "precision": {"oracle": "ascendoptest", "case_target": 8},
                 "params": [{"name": "self", "io": "in", "dtype": ["float32"]},
                            {"name": "y", "io": "out", "dtype": ["float32"]}]}
@@ -712,7 +714,8 @@ class OutRoleVocabTest(unittest.TestCase):
 
     def test_trigger_gate_uses_key_presence(self):
         """单输出算子声明 `out_role: ""` → **不得**退回 legacy（真值判断会放它过去）。"""
-        single = {"op": "RoleEmpty", "repo": "t", "verify_mode": "exact", "generalize": True,
+        single = {"op": "RoleEmpty", "repo": "t", "runner_form": "cpp",
+                  "verify_mode": "exact", "generalize": True,
                   "precision": {"oracle": "ascendoptest", "case_target": 4},
                   "params": [{"name": "self", "io": "in", "dtype": ["float32"]},
                              {"name": "y", "io": "out", "dtype": ["float32"], "out_role": ""}]}

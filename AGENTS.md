@@ -89,11 +89,26 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 | `runner_form` | `--mode` | 当前能否产验收裁决 | 执行形态 | 默认性能对照物 |
 |---|---|---|---|---|
-| `cpp` 或未声明 | `new_example` | ❌ 不能。要跑须加 `--allow-experimental-form`，且只产开发级产物 | 编译 per-op C++ runner | 同法测的内置 TBE |
+| `cpp` | `new_example` | ❌ 不能。要跑须加 `--allow-experimental-form`，且只产开发级产物 | 编译 per-op C++ runner | 同法测的内置 TBE |
 | `aclnn_py` | `aclnn_py` | ❌ 不能。同上 | 通用 ctypes 调标准 aclnn 两段式 `.so` | 逐字按任务书配置；可为同机 `torch_npu`，也可直接调用 CANN 内置 ACLNN |
-| `cpp_extension` | `cpp_extension` | ✅ 能，当前**唯一**准入形态 | 按官方 `NpuExtension` / `EXEC_NPU_CMD_EXT` 生成独立 `torch.ops` 调用桥；DUT 仍是指定 PR 构建的 vendor `.so` | 逐字按任务书配置；runner form 不决定 baseline |
+| `cpp_extension`（**= 缺省，整字段省略即此**） | `cpp_extension` | ✅ 能，当前**唯一**准入形态 | 按官方 `NpuExtension` / `EXEC_NPU_CMD_EXT` 生成独立 `torch.ops` 调用桥；DUT 仍是被测来源构建的 vendor `.so` | 逐字按任务书配置；runner form 不决定 baseline |
 
 准入白名单在代码里就一行：`run_workflow._ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})`。
+
+**缺省 = `cpp_extension`，`cpp` 必须显式写。** 缺省值的唯一真源是
+`repo_adapter.DEFAULT_RUNNER_FORM`，读侧统一走 `repo_adapter.spec_runner_form(spec)` /
+`resolve_runner_form(form_or_None)`——`run_workflow`、`gen_cases`、`cpp_extension_codegen`、
+`cpp_extension_adapter.prepare` 等全部同源，**不许再各写一份 `spec.get("runner_form", "cpp")`**。
+为什么缺省跟着准入走：缺省若是 `cpp`，「spec 漏写这个字段」派生出的就是 `new_example`，一步撞上准入门；
+而漏写时想要的恰恰是当前唯一准入的那条通路。这条不变式在 `run_workflow` 里有断言守着。
+
+⚠ **只有键缺席才吃缺省。** 显式写成 `null` / `""` / `0` 不是「没写」，那是一份写坏的 spec，
+照旧在受控词表处 fail-closed 报「不受支持」——读侧一律 `.get(k, DEFAULT)`，**不许用 `or` 兜**，
+`or` 会把「写坏的 form」和「没写 form」混为一谈。
+
+⚠ **缺省能兜住，不等于可以省着不写。** 正式验收的 spec **一律显式写 `"runner_form": "cpp_extension"`**：
+执行身份要在 spec 里一眼可读、可审，别让下一个人去翻代码才知道这份 spec 按哪种形态跑。
+同理，`cpp` / `aclnn_py` 现在**只能显式声明**，省略已不再表达它们。
 
 ### 4.1 为什么只准入 `cpp_extension`
 
@@ -140,7 +155,8 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
   此结果取代上一轮 1344 例中 1286 PASS、58 FAIL 的历史 checkpoint；
 - `mock`、`catlass`、`catlass_mock` 不能从 `runner_form` 派生，只能显式用于局部开发或对应通路；
 - mock 通路物理上不产 `acceptance.json` 或 `verdict.json`；
-- argparse 的 `new_example` 默认值不是编排依据，编排层必须按 spec 派生；
+- `run_workflow --mode` 的 argparse 默认值是 `None` = **不指定，按 spec 派生**；
+  编排层**不得**自己显式传 `new_example`（spec 是 `cpp_extension` 时会当场撞 mode 不匹配门）；
 - runner form 只决定执行形态，**不能反推任务书指定的实际性能标杆**；每份任务书的 baseline 仍须单独核实。
 
 ---
@@ -169,18 +185,30 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 - clone、checkout、build、真机跑测、删除/覆盖、改远端环境、对外发布前先确认；
 - 支持的脚本优先提供 `*_DRY_RUN=1` 或等价 dry-run；
 - 用户授权某项动作不自动扩张到其它仓、其它远端或其它副作用；
-- 本地只做编辑、Git、只读探测和知识记录。
+- 没有 NPU 的开发机上只做编辑、Git、只读探测和知识记录（「就地跑」形态下本机就是目标机，compute 本来就在本机做，不受此限；见 §5.3）。
 
-### 5.3 一切 compute 在远程 NPU 环境
+### 5.3 一切 compute 在 NPU 目标环境（远程连 / 就地跑都是一等形态）
 
-- build、pytest、用例生成、golden 生成、验收、profiler 全在远程 NPU 容器/目标环境执行；
-- 本地不建 venv、不跑 pytest、不 import torch/numpy 做验收 compute；
-- 真机环境统一入口：`doc/oprunway-real-machine-environment.md`；
-- 实际连接元数据：本地忽略文件 `.oprunway/real-machine.env`；
-- 每次新 session 做任何远端 clone/build/跑测/清理前，必须读取
-  `.oprunway/real-machine.env` 的 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`。其中每个根及其全部子目录均为
+- build、pytest、用例生成、golden 生成、验收、profiler 全在 NPU 容器/目标环境执行；
+- **没有 NPU 的开发机上**不建 venv、不跑 pytest、不 import torch/numpy 做验收 compute；
+- 真机环境统一入口：`doc/oprunway-real-machine-environment.md`。
+
+**先认清自己在哪种执行形态**，两种都是一等通路，不是「主 + 降级」：
+
+| 形态 | 说明 | 要 `.oprunway/real-machine.env` 吗 |
+|---|---|---|
+| **远程连**：开发机 → 目标机 | 得先 SSH 进目标机/容器才够得着环境 | **要**——SSH alias、容器名、远端工作目录都在里面 |
+| **就地跑**：会话本身就在目标机（或其容器）里 | 环境就在本机，没有「连过去」这一步 | **不要**——压根没有连接元数据可言 |
+
+- ⚠ **`.oprunway/real-machine.env` 是「远程连」这一种形态的连接元数据，不是跑验收的通用硬前置。**
+  **文件不存在不构成阻塞**：就地跑时本来就用不到它，编排层**不得**以「缺 `.oprunway/real-machine.env` /
+  拿不到 SSH alias、容器名、远端工作目录」为由拒绝启动验收。两种形态各自要哪些环境变量，
+  见 `doc/oprunway-real-machine-environment.md` §1；
+- **保护根语义不随形态放松**：该文件**存在时**，每次新 session 做任何 clone/build/跑测/清理前**必须读取**其
+  `OPRUNWAY_MACHINE_PROTECTED_ROOTS`。其中每个根及其全部子目录均为
   **只读保留现场**：禁止写入、覆盖、移动、删除或作为新执行目录；只允许经用户明确要求的只读核验。
-  未设置表示当前未登记保护根，不得据此猜测或清理其它目录；
+  **文件不存在、或存在但未设该变量**，都只表示**当前未登记保护根**——不构成阻塞，但同样**不得**据此
+  推断任何目录可以随意写入或清理（未登记 ≠ 已授权；删除/覆盖仍按 §5.2 逐次征得用户确认）；
 - 机器 profile 只负责找到执行环境，不能替代任务书硬件核定和本轮 PR provenance。
 
 ### 5.4 零硬编码与本地配置
@@ -189,7 +217,8 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 - 运行时探测、从 spec/pr_facts 派生或询问用户；
 - 不碰 `~/.config`、不改 shell rc；
 - 验收产物只落用户 CWD 的 `reports/`；
-- `.oprunway/real-machine.env` 是机器连接元数据的唯一仓内本地例外，必须保持 ignored。
+- `.oprunway/real-machine.env` 是机器连接元数据的唯一仓内本地例外，必须保持 ignored；
+  它只服务「远程连」形态，就地跑时不需要它存在（§5.3）。
 
 ### 5.5 Git、发布与署名
 
@@ -304,7 +333,7 @@ OpRunway/
 | 最新交接 | `doc/oprunway-session-handoff-2026-08-05-evening.md` |
 | 当前 TODO | `doc/oprunway-todo.md` |
 | 改动流水 | `doc/oprunway-changes-brief.md` |
-| 真机环境 | `doc/oprunway-real-machine-environment.md` + `.oprunway/real-machine.env` |
+| 真机环境 | `doc/oprunway-real-machine-environment.md`（「远程连」另需 `.oprunway/real-machine.env`；「就地跑」不需要，§5.3）|
 | 本地来源通路真机验证 | `doc/oprunway-local-source-realmachine-validation.md` |
 | 已定决策 | `canon/decisions/`，先看 status/trust tier |
 | 人读蓝图/历史案例 | `plugin/workflows/`，冲突时以 acceptance-workflow skill 为准 |
