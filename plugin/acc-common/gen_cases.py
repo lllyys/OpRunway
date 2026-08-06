@@ -120,19 +120,21 @@ G4 · 归约/成对类算子的**生成期规模预算**（2026-07-22，落地�
 
 造例档位 `spec.precision.case_profile` —— **能力档位开关**（字段驱动、op-中立；2026-07-25 引入，
 落地见各处 `CP:` 标记）：
-  · **为什么要它**：把本引擎的造例规则**忠实对齐**参考仓 `Justbin/cannbot-ops-input`（完整笛卡尔精度网格、
+  · **为什么要它**：把本引擎的造例规则对齐参考仓 `Justbin/cannbot-ops-input`（完整笛卡尔精度网格、
     medium shape 档、normal 值域重采样、4-kind 非有限特殊值 …）会**改掉默认造例行为**——而 4 个已真机
     验收的 elementwise 算子（IsClose/Sign/Equal/Neg）的 caseset 与全部 .npy 是**逐字节钉死**的
     （sha256 实测，见 `test_gen_cases_dtype_attr.ExistingOpsByteIdenticalTest`）。所以**先立一道字段驱动的
     档位开关**，后续所有对齐改动一律只在新档位下生效，老算子的字节纹丝不动。
   · **受控词表**（两档，无第三种；实现见 `_case_profile` / `_case_profile_declared`）：
       - `legacy` —— 现行造例规则；**整字段省略即此**，逐字节等于本字段引入前；
-      - `torch_parity` —— 忠实对齐参考仓的造例规则，**仅**用于「任务书对标 torch」场景（不碰 catlass 通路）。
+      - `torch_parity` —— 对齐参考仓的完整笛卡尔轴模型；带轴选择器时按本仓实测结论去掉被选轴的
+        长度-1 退化，属于有意偏离。**仅**用于「任务书对标 torch」场景（不碰 catlass 通路）。
   · **律令 #0 合规**：这是按 **spec 声明的能力档位**分支，**不是按算子名**——换任意声明了 `torch_parity`
     的域内算子，工具零改即用；代码里没有也不许有 `if op == "<算子名>"`。
   · `torch_parity` 必须同时声明 `precision.torch_parity_matrix`，按 dtype×rank×shape profile×attribute
-    profile 生成完整笛卡尔；rank 动态轴 class 在逐 case 解析成 first/middle/last。`legacy` 与未声明
-    仍保持逐字节兼容。
+    profile 生成完整笛卡尔；rank 动态轴 class 在逐 case 解析成 first/middle/last。带轴选择器的接口
+    按已有 `axis_class` 能力信号把 shape 中**实际会被选择的轴**从 1 提到 2，保留首位长轴同时补出
+    `长归约 × batch>1`；无轴选择器的纯 elementwise 仍沿参考布局。`legacy` 与未声明仍保持逐字节兼容。
   · **三重记账**（`_torch_parity_plan`，2026-08-06）：`矩阵大小 − |有证据的排除| == case_target == 实产数`，
     任一处漂移当场炸。排除项写 `torch_parity_matrix.excluded`，每条**必须**带 `reason` + `evidence`
     （缩水必须留痕，沿用 `golden_cost.skipped_shapes` / `dropped_combo_classes` 的既有形状）。
@@ -1412,6 +1414,10 @@ def _taskdoc_golden_or_unavailable(golden_fn, inputs, attrs, cid):
 
 
 _TORCH_PARITY_AXIS_CLASSES = ("first_axis", "middle_axis", "last_axis")
+_TORCH_PARITY_SHAPE_LAYOUTS = (
+    "reference_leading_unit_padding",
+    "axis_selector_selected_axes_nontrivial",
+)
 
 
 def _resolve_axis_class(value, rank, where):
@@ -1433,6 +1439,50 @@ def _resolve_axis_class(value, rank, where):
     if cls == "middle_axis":
         return (rank - 1) // 2
     return rank - 1
+
+
+def _torch_parity_shape_layout(profiles):
+    """据 attribute profile 的**接口能力信号**派生 shape 布局（不看算子身份）。
+
+    `axis_class` 是 torch_parity 已有的轴选择器声明：出现它说明实际被测语义会沿某根轴归约/排序/
+    索引，`(L,1,…,1)` 会把 middle/last 大量退化成长度 1；因此保留首位长轴，并只把 profiles
+    **实际会选择的轴**提到至少 2。没有该信号时按参考仓原布局补 1，避免给纯 elementwise 平白
+    放大 numel、改输入字节。
+
+    返回值来自受控词表 `_TORCH_PARITY_SHAPE_LAYOUTS`，不得让任意 spec 字符串直接穿透到产物账本。
+    """
+    selected_classes = set()
+    for profile_idx, (_profile_name, attrs) in enumerate(profiles):
+        for key, value in attrs.items():
+            if isinstance(value, dict) and "axis_class" in value:
+                # 在派生布局时就过现成的受控词表校验；不能让拼错的 axis_class 先影响布局、
+                # 再拖到生成循环中才报错。
+                _resolve_axis_class(
+                    value, 1,
+                    f"torch_parity_matrix.attribute_profiles[{profile_idx}].attrs.{key}")
+                selected_classes.add(value["axis_class"])
+    ordered_classes = tuple(cls for cls in _TORCH_PARITY_AXIS_CLASSES if cls in selected_classes)
+    layout = _TORCH_PARITY_SHAPE_LAYOUTS[1 if ordered_classes else 0]
+    return layout, ordered_classes
+
+
+def _torch_parity_shape(leading, rank, layout, selected_classes):
+    """实例化受控 torch_parity 布局；未知布局属于内部判据漂移，fail-closed。"""
+    if layout == "reference_leading_unit_padding":
+        if selected_classes:
+            raise ValueError("reference_leading_unit_padding 不得携带 axis_class（内部布局判据漂移）")
+        return (leading,) + (1,) * (rank - 1)
+    if layout != "axis_selector_selected_axes_nontrivial":
+        raise ValueError(
+            f"torch_parity shape layout={layout!r} 不在受控词表 {list(_TORCH_PARITY_SHAPE_LAYOUTS)}")
+    if not selected_classes:
+        raise ValueError("axis_selector_selected_axes_nontrivial 缺 axis_class（内部布局判据漂移）")
+    shape = [1] * rank
+    shape[0] = leading
+    for cls in selected_classes:
+        axis = _resolve_axis_class({"axis_class": cls}, rank, "torch_parity 内部 shape layout")
+        shape[axis] = max(shape[axis], 2)
+    return tuple(shape)
 
 
 # ====== TP · 本档「声明了却没有任何代码消费」的 legacy 造例键 —— 声明即 fail-closed ==========
@@ -1577,7 +1627,8 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
     ``case_profile=torch_parity`` 下消费：
 
     * ``ranks``：完整 rank 轴；
-    * ``shape_profiles``：每档 ``leading_dim``，其余轴补 1；
+    * ``shape_profiles``：每档 ``leading_dim``；无轴选择器时其余轴按参考布局补 1，存在
+      ``axis_class`` 轴选择器时把 profiles 实际选择的轴提到至少 2，保留首轴长归约；
     * ``attribute_profiles``：显式属性 profile，轴属性可写
       ``{"axis_class":"first_axis|middle_axis|last_axis"}``；
     * ``generator``：当前只接受 cannbot Median 冻结设计使用的 uniform；
@@ -1674,6 +1725,14 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
         raise ValueError(
             "torch_parity_matrix.generator 当前须为 {kind:'uniform', min:<数>, max:<数>}")
 
+    shape_layout, selected_axis_classes = _torch_parity_shape_layout(normalized_profiles)
+    if shape_layout == "axis_selector_selected_axes_nontrivial":
+        unit_profiles = [name for name, leading in shape_rows if leading < 2]
+        if unit_profiles:
+            raise ValueError(
+                "torch_parity 带 axis_class 轴选择器时 shape_profiles[].leading_dim 须为 ≥2，"
+                f"否则首轴仍是平凡归约；违规 profile={unit_profiles}")
+
     # 三重记账第一、二重（**在原处改**，不另立一套判据：另写一份的后果是两处判据必然漂移，
     # 而漂移方向一定是宽的那边赢）。`axes` 只从矩阵自身派生，故轴仍是**列取值、不列基数**。
     axes = (("dtype", list(dtypes)),
@@ -1699,7 +1758,7 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
         dk = _regular_data_kind(dtn, attrs_default, len(in_params))
         for rank in ranks:
             for shape_name, leading in shape_rows:
-                shape = (leading,) + (1,) * (rank - 1)
+                shape = _torch_parity_shape(leading, rank, shape_layout, selected_axis_classes)
                 for attr_idx, (profile_name, raw_attrs) in enumerate(normalized_profiles):
                     if (dtn, rank, shape_name, profile_name) in excluded_combos:
                         continue                 # 已带 reason+evidence 记账，见 case_matrix_ledger
@@ -1730,7 +1789,8 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
                             f"torch_parity:{dtn}:rank{rank}:{shape_name}:{profile_name}"),
                         "rule_ref": (
                             "cannbot case_design coverage.regular_axes × "
-                            "attribute_profile_matrix（完整笛卡尔）"),
+                            "attribute_profile_matrix（完整笛卡尔）；"
+                            f"shape_layout={shape_layout}（按 axis_class 接口能力派生）"),
                     })
     # 三重记账第三重：**实产数**。前两重（矩阵大小、case_target）是账面对账面，
     # 这一重才把「循环真的产了几条」接进来。今天它靠「完整笛卡尔不采样」隐式成立，
@@ -1768,6 +1828,12 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
             + f"：dtype×rank×shape_profile×attribute_profile 完整笛卡尔 {full_cartesian} 组合"
             + (f" − 有证据的排除 {len(excluded_combos)} 组合" if excluded_combos else "")
             + f" → 实产 {len(entries)} 例、无抽样（矩阵大小 == case_target == 实产数，三重逐字相等）；"
+            + f"shape_layout={shape_layout}（"
+              + (f"检测到 axis_class={list(selected_axis_classes)}，保留首轴长归约，"
+                 "并把这些 class 在各 rank 的实际落点提到至少 2（未被选择的轴仍可为 1）"
+                 if shape_layout == "axis_selector_selected_axes_nontrivial" else
+                 "未检测到 axis_class，shape=(L,1,…,1)，沿参考仓 elementwise 布局")
+              + "）；"
             + (f"其中 {duplicate_cases} 例与同批另一例的 (dtype, 实际 shape, **解析后** attrs) 完全相同"
                f"（低 rank 下 axis_class 塌缩，如 rank1 的 first/middle/last 同为轴 0），"
                f"故**不同覆盖组合数 = {distinct_combinations}**——"
@@ -1783,6 +1849,8 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
             "source_sha256": cfg.get("source_sha256"),
             "ranks": list(ranks),
             "shape_profiles": [dict(row) for row in shapes],
+            "shape_layout": shape_layout,
+            "selected_axis_classes": list(selected_axis_classes),
             "attribute_profile_count": len(normalized_profiles),
             "generator": dict(generator),
         },

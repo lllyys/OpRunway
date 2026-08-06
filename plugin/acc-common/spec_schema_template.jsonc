@@ -238,13 +238,25 @@
 //     `attr_axis_lengths`（会在完整笛卡尔外追加用例，破坏上面的三重记账）、
 //     `allow_empty_tensor` / `empty_axis`、`precision.value_profiles`（本档 `forced_special=0`，
 //     一条特殊场景都不产）。要表达**算子事实**（如「本算子不支持空 Tensor」）请写 `_` 前缀的纯注释键。
-//   ⚠ 两条已定的轴集口径（有明文依据，别在轴集里开第二个口）：
+//   ⚠ **轴集契约**（有明文与实测依据，别在轴集里开第二个口）：
+//     · **通用交叉判据**：只有当两条轴**共同决定被测实现的分支或切分决策**时才必须交叉；
+//       只改变数值量级、不改变控制流的轴，边际覆盖就够。实测正例：`dtype` 类 × 归约长度共同圈定
+//       90 个 cell，58 条 fail 全在区内、区外 0；任一单轴都圈不出，且合法 1-wise 边际覆盖集可对该真实缺陷
+//       **100% 漏报**。实测反例：`keepDim` 在 fail 区内为 72.7% vs 81.8%，**无可测效应**；它只改
+//       输出 shape，不改切分决策（数字来源：`dev-doc/oprunway-case-axis-design.md` §12.2/§12.6/§12.8）。
+//       这是接口能力级规则：只据 spec 已有的轴选择器 / rank / attr /
+//       `call_variants` / `operator_class` 等字段判，**绝不按算子名分支**。
 //     · **特殊场景独立叠加、绝不与常规网格交叉**——参考仓 `design_contract.py` 明文，理由逐字是
 //       避免组合爆炸；本仓 legacy 同样只把特殊场景配第一组 attr。代价要认：「空 Tensor × 按维归约」
-//       这类组合因此永远测不到，这是**已知且被参考仓接受**的取舍。
+//       这类组合因此永远测不到，这是**已知且被参考仓接受**的取舍。⚠ 本条只定「不进笛卡尔」；
+//       `torch_parity` 现在一条特殊场景都不产，与 legacy「边界一律保留」有张力，究竟保持为零还是独立叠加边界集
+//       **待用户拍板**，本契约不替人定。
 //     · **输出个数不是自由轴**，它是 attr 轴的确定性函数（`gen_cases._select_call_variant` 从 attrs
 //       选调用变体，输出集随之定死）。当轴放进笛卡尔 = 重复计数，还会造出「attr 为 null 却要求
 //       index 输出」这种不存在的组合。
+//     · 🔴 **值域 regime 轴暂不引入**：现 `torch_parity` 只有 `uniform` 一档，结构上测不了
+//       regime 与 dtype 或其它轴的交互，故「加了有没有用」至今**零实测支撑**。引入前必须先有能对照
+//       至少两档 regime 的可测矩阵；否则只是让对应用例数翻倍，覆盖收益未知。
 //   任务书要求、但本轮 PR-head ABI 无法执行的 overload 不得伪造成 profile/call_variant；
 //   写入 task_pr_gaps(kind=api_surface_unsupported_by_pr)，由后续验收报告功能缺口并阻止干净 PASS。
 //             逐 case 按**声明顺序取首个匹配者**。
@@ -346,8 +358,8 @@
 //     换任意声明了 torch_parity 的域内算子，工具零改即用）：
 //       · legacy       —— 现行造例规则。**已真机验收的算子靠它逐字节不变**（caseset + 全部 .npy 有 sha256
 //                         pin），所以它既是缺省、也是拿不准时的正确选择。
-//       · torch_parity —— **忠实对齐**参考仓 `Justbin/cannbot-ops-input` 的造例规则（完整笛卡尔精度网格、
-//                         medium shape 档、normal 值域重采样、4-kind 非有限特殊值…）。**仅**用于
+//       · torch_parity —— 对齐参考仓的完整笛卡尔精度网格与 medium shape 档；值域当前只有
+//                         `uniform` 一档，regime 轴按上述契约暂不引入；特殊场景当前为零且去留待用户拍板。**仅**用于
 //                         「任务书对标 torch」场景（`precision.standard == "torch_allclose"`），不碰 catlass 通路。
 //     ⚠ 翻档 = **换一整套用例**：case id 与 golden 字节全变 → 必须**重生成 golden + 真机重验**，绿了才算数。
 //       别为「看起来更全」顺手翻档，更别在还没重验的算子上翻。

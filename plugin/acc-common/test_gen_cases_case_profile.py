@@ -25,7 +25,7 @@ caseset 与全部 .npy 被 sha256 逐字节钉死。故先立字段驱动的档�
     重复覆盖组合按实数落账（median 实测 1344 例 / 1200 个不同组合 / 144 条重复）；
   · dry-run 回显 + 空模板 `spec_schema_template.jsonc` 已记载该字段（防实现与文档漂移）。
 """
-import contextlib, copy, hashlib, io, json, os, shutil, tempfile, unittest
+import contextlib, copy, hashlib, io, json, math, os, shutil, tempfile, unittest
 from unittest import mock
 
 import gen_cases as GC
@@ -112,6 +112,15 @@ def _tree_digest(work):
             with open(p, "rb") as fh:
                 files.append(f"{os.path.relpath(p, work)} {hashlib.sha256(fh.read()).hexdigest()}")
     return hashlib.sha256("\n".join(sorted(files)).encode()).hexdigest()
+
+
+def _reduction_geometry(entry):
+    """从实产 entry 独立复算 ``(归约长度, batch)``，不复用生产侧 shape 判据。"""
+    shape = tuple(entry["shape"])
+    numel = math.prod(shape)
+    dim = entry["attrs"].get("dim")
+    reduction = numel if dim is None else shape[dim]
+    return reduction, numel // reduction
 
 
 class CaseProfileVocabTest(unittest.TestCase):
@@ -220,6 +229,87 @@ class CaseProfilePlanMetaTest(unittest.TestCase):
         self.assertEqual(
             [GC._resolve_axis_class(row["attrs"]["dim"], 8, "test") for row in attrs],
             [0, 3, 7])
+
+
+class TorchParityShapeLayoutTest(unittest.TestCase):
+    """决定①：带轴选择器的 torch_parity shape 去退化，同时保住长归约轴与新增 batch>1 cell。"""
+
+    def test_derived_layout_vocabulary_is_closed(self):
+        """派生账本值也用受控词表；内部拼错不能静默退回任一布局。"""
+        self.assertEqual(
+            GC._TORCH_PARITY_SHAPE_LAYOUTS,
+            ("reference_leading_unit_padding", "axis_selector_selected_axes_nontrivial"))
+        with self.assertRaisesRegex(ValueError, "受控词表"):
+            GC._torch_parity_shape(31, 2, "balanced", ())
+
+    def test_axis_selector_uses_long_first_nontrivial_layout(self):
+        """Median 的轴类 profile 是接口能力见证；保留 L 长轴，实际会选的轴不得退化为 1。"""
+        entries, meta = _plan_of(_load_median(), case_target=1344)
+        actual = {tuple(e["shape"]) for e in entries}
+        expected = set()
+        for leading in (31, 2047, 262144):
+            for rank in range(1, 9):
+                shape = [1] * rank
+                shape[0] = leading
+                for axis in {0, (rank - 1) // 2, rank - 1}:
+                    shape[axis] = max(shape[axis], 2)
+                expected.add(tuple(shape))
+        self.assertEqual(actual, expected)
+        self.assertEqual(meta["torch_parity_matrix"]["shape_layout"],
+                         "axis_selector_selected_axes_nontrivial")
+        self.assertEqual(meta["torch_parity_matrix"]["selected_axis_classes"],
+                         ["first_axis", "middle_axis", "last_axis"])
+
+    def test_existing_caseset_recalculation_keeps_and_adds_required_cells(self):
+        """动手前硬门固化成回归：已知 fail 区非空，且旧矩阵取不到的 batch>1 长归约真正出现。
+
+        数字来自仓内 Median 1344 组合的逐 case 算术，不重判任何历史 pass/fail：
+        ``reduction = numel``（global）或 ``shape[dim]``，``batch = numel/reduction``。
+        """
+        entries, _meta = _plan_of(_load_median(), case_target=1344)
+        float_dtypes = {"bfloat16", "float16", "float32"}
+        trivial = known_region = new_region_float = new_region_all = max_numel = 0
+        for entry in entries:
+            max_numel = max(max_numel, math.prod(entry["shape"]))
+            reduction, batch = _reduction_geometry(entry)
+            trivial += reduction == 1
+            if entry["dtype"] in float_dtypes and reduction > 24576 and batch == 1:
+                known_region += 1
+            if reduction > 24576 and batch > 1:
+                new_region_all += 1
+                if entry["dtype"] in float_dtypes:
+                    new_region_float += 1
+        self.assertEqual(trivial, 0)
+        self.assertEqual(known_region, 42)
+        self.assertEqual(new_region_float, 48)
+        self.assertEqual(new_region_all, 128)
+        self.assertEqual(max_numel, 1048576)
+
+    def test_no_axis_selector_keeps_reference_layout(self):
+        """纯 elementwise 的退化布局没有覆盖代价，不得被本轮顺带改字节。"""
+        entries, meta = _plan_of(_with_parity_matrix(_load_spec()), case_target=12)
+        self.assertEqual(
+            {tuple(e["shape"]) for e in entries},
+            {(31,), (2047,), (262144,),
+             (31, 1), (2047, 1), (262144, 1)})
+        self.assertEqual(meta["torch_parity_matrix"]["shape_layout"],
+                         "reference_leading_unit_padding")
+        self.assertEqual(meta["torch_parity_matrix"]["selected_axis_classes"], [])
+
+    def test_layout_is_deterministic(self):
+        """同一份 spec 重算两次，shape 序列与派生布局账本须逐项相同。"""
+        left_entries, left_meta = _plan_of(_load_median(), case_target=1344)
+        right_entries, right_meta = _plan_of(_load_median(), case_target=1344)
+        self.assertEqual([e["shape"] for e in left_entries], [e["shape"] for e in right_entries])
+        self.assertEqual(left_meta["torch_parity_matrix"]["shape_layout"],
+                         right_meta["torch_parity_matrix"]["shape_layout"])
+
+    def test_axis_selector_rejects_unit_leading_dim(self):
+        """长轴本身若是 1，补 2 也救不回 first-axis 平凡归约；轴选择器档须 fail-closed。"""
+        spec = _load_median()
+        spec["precision"]["torch_parity_matrix"]["shape_profiles"][0]["leading_dim"] = 1
+        with self.assertRaisesRegex(ValueError, r"leading_dim.*≥2"):
+            _plan_of(spec, case_target=1344)
 
 
 class TorchParityUnconsumedKeysTest(unittest.TestCase):
