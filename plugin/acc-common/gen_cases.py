@@ -131,8 +131,17 @@ G4 · 归约/成对类算子的**生成期规模预算**（2026-07-22，落地�
   · **律令 #0 合规**：这是按 **spec 声明的能力档位**分支，**不是按算子名**——换任意声明了 `torch_parity`
     的域内算子，工具零改即用；代码里没有也不许有 `if op == "<算子名>"`。
   · `torch_parity` 必须同时声明 `precision.torch_parity_matrix`，按 dtype×rank×shape profile×attribute
-    profile 生成完整笛卡尔；rank 动态轴 class 在逐 case 解析成 first/middle/last，且 `case_target`
-    必须精确等于完整矩阵大小，禁止静默抽样。`legacy` 与未声明仍保持逐字节兼容。
+    profile 生成完整笛卡尔；rank 动态轴 class 在逐 case 解析成 first/middle/last。`legacy` 与未声明
+    仍保持逐字节兼容。
+  · **三重记账**（`_torch_parity_plan`，2026-08-06）：`矩阵大小 − |有证据的排除| == case_target == 实产数`，
+    任一处漂移当场炸。排除项写 `torch_parity_matrix.excluded`，每条**必须**带 `reason` + `evidence`
+    （缩水必须留痕，沿用 `golden_cost.skipped_shapes` / `dropped_combo_classes` 的既有形状）。
+    ⚠ `case_target` 仍**必填、无缺省**——这里加的是「它必须与矩阵对得上」的第二重约束，
+    不是把缺省值加回来。账本落在 caseset / dry-run 的 `case_matrix_ledger`。
+  · **本档拒收 legacy 造例键**（`_TORCH_PARITY_UNCONSUMED_KEYS`，2026-08-06）：`attr_matrix` /
+    `attr_axis_lengths` / `allow_empty_tensor` / `empty_axis` / `precision.value_profiles` 在本档
+    **一行代码都不消费**，声明即 fail-closed。理由与「为什么是拒绝而不是接上消费」见该表上方长注释；
+    要表达算子事实请用 `_` 前缀的纯注释键。
   · 词表外取值 / 非字符串（含**显式 `null`**）→ fail-closed：档位猜错 = 整份用例集悄悄换一套规则，
     比报错贵得多。
 
@@ -153,7 +162,7 @@ G4 · 归约/成对类算子的**生成期规模预算**（2026-07-22，落地�
     该 case 身份仍写进 caseset、允许无 golden 文件、标明原因，**其余 case 照常生成**。
     它退出精度维（无 golden 即无从判精度）、也不进性能候选池，但**在账本里可见**，由门判 BLOCKED。
 """
-import collections, hashlib, importlib.util, json, math, os, re, sys
+import collections, hashlib, importlib.util, itertools, json, math, os, re, sys
 import numpy as np
 import content_address
 import perf_mode
@@ -1426,6 +1435,141 @@ def _resolve_axis_class(value, rank, where):
     return rank - 1
 
 
+# ====== TP · 本档「声明了却没有任何代码消费」的 legacy 造例键 —— 声明即 fail-closed ==========
+# `_plan` 在 `case_profile == "torch_parity"` 时**提前返回**（见该函数 `CP:` 分支），于是 legacy 那一整套
+# 造例规则（特殊场景叠加 / value_profile / 轴长度定向生成 / attr 正交网格）在本档**一行都不执行**。
+# 这些键写在 spec 里因此完全没有作用——可它们读起来恰恰像「我已经声明了所以已经覆盖了」。
+# 这是**结构性 fail-open**，与 `operator_class` 那处 fail-closed 防的是同一件事，故：**本档写了就当场炸**。
+#
+# ⚠ 为什么一律选「拒绝」而不是「接上消费」（这条理由别下次顺手改掉）：这些键要真被消费，
+#   **无一例外都得改变本档用例集的构成**——
+#     · `value_profiles` / `allow_empty_tensor` / `empty_axis` → 等于让本档开始产特殊场景；
+#     · `attr_axis_lengths` → 等于在完整笛卡尔之外定向追加用例，`矩阵大小 == case_target == 实产数`
+#       这条三重记账当场破；
+#     · `attr_matrix` → 它与 `torch_parity_matrix.attribute_profiles` 是**同一条 attr 轴的两处声明**
+#       （median 实测 4 组 vs 7 组、互不核对，已经漂了）。两者语义并不同构：前者是「每 attr 的取值集
+#       再笛卡尔展开」，后者是「带 `axis_class` 符号的显式 profile 列表」——要「加一道交叉核对门」
+#       就得先发明一套两边的对应关系，那既比删掉重复声明更弱、又是新的可漂移判据。
+#       **一条轴只留一处声明**才是治本。
+#   而「本档产不产特殊场景」「轴取值怎么定」正是用例轴集设计说明里**待人拍板**的决定。所以：
+#   拒绝 = 只封掉当下确实存在的 fail-open，不预判任何决定；消费 = 替人拍板。
+# ⚠ 维护约定：哪天本档真的开始消费其中某个键，**把它从本表删掉是那次改动的一部分**——
+#   留在表里就变成「已经消费了却还在拒收」的反向坑。`test_gen_cases_case_profile` 对本表逐项立了 pin。
+_TORCH_PARITY_UNCONSUMED_KEYS = (
+    ("spec", "attr_matrix",
+     "attr 轴在本档由 precision.torch_parity_matrix.attribute_profiles 唯一声明"),
+    ("spec", "attr_axis_lengths",
+     "本档不做轴长度定向生成（那会在完整笛卡尔之外追加用例，破坏「矩阵大小==case_target==实产数」）"),
+    ("spec", "allow_empty_tensor",
+     "本档一条特殊场景都不产（forced_special=0），空 Tensor 用例的开关无处可用"),
+    ("spec", "empty_axis",
+     "同 allow_empty_tensor：本档不产空 Tensor 用例，放 0 的轴号没有消费方"),
+    ("precision", "value_profiles",
+     "本档不产 nan/tie 等 value_profile 强制项（generator 受控词表只有 uniform 一档）"),
+)
+
+
+def _reject_unconsumed_legacy_keys(spec):
+    """torch_parity 档：legacy 造例键**声明即拒**（理由见 `_TORCH_PARITY_UNCONSUMED_KEYS` 上方长注释）。
+
+    一次报全部命中项，不是撞一个报一个——spec 作者一趟就能改干净。
+    """
+    precision = spec.get("precision") or {}
+    hits = []
+    for where, key, why in _TORCH_PARITY_UNCONSUMED_KEYS:
+        holder = precision if where == "precision" else spec
+        if isinstance(holder, dict) and key in holder:
+            hits.append(f"  · {'precision.' if where == 'precision' else ''}{key}：{why}")
+    if hits:
+        raise ValueError(
+            "precision.case_profile='torch_parity' 下，这些 legacy 造例键**没有任何代码消费**——"
+            "写了不会产任何用例，却读起来像「声明即覆盖」→ fail-closed，请从 spec 里删掉：\n"
+            + "\n".join(hits)
+            + "\n  ⚠ 若你要表达的是**算子事实**（如「本算子不支持空 Tensor」），请写成 `_` 前缀的纯注释键"
+              "（本仓惯例：`_` 开头 = 无消费方的说明），别用一个看起来像门的键去表达。")
+
+
+# ====== TP · 三重记账：矩阵大小 − 有证据的排除 == case_target == 实产数 ==========================
+# 轴名受控词表。`excluded` 里出现词表外的轴名 = 排除了一条根本不存在的轴，当场炸。
+_TORCH_PARITY_AXIS_NAMES = ("dtype", "rank", "shape_profile", "attribute_profile")
+
+
+def _torch_parity_excluded(cfg, axes):
+    """`torch_parity_matrix.excluded` → `(被排除的完整组合集, 逐条账本)`；键缺席 = 无排除。
+
+    形式（每条排除**必须**带 `reason` + `evidence`，沿用 `golden_cost.skipped_shapes` /
+    `dropped_combo_classes` 已有的「缩水必须留痕」形状）：
+
+        "excluded": [{"combo": {"dtype": "int8", "attribute_profile": "attr_03"},
+                      "reason": "…", "evidence": "…"}]
+
+    `combo` 是**部分赋值**：只写要钉死的轴，其余轴全展开。四条轴的取值来自矩阵本身
+    （`axes` = [(轴名, 取值列表)]），所以「排除了一个不存在的取值」当场就能逮住。
+
+    ⚠ 这里刻意**不引入**一份独立的 `case_matrix.axes` 声明：那会让同一条轴在 spec 里出现两处
+    （正是 `attr_matrix` 已经踩过的坑）。轴的唯一声明仍是 `torch_parity_matrix` 自己，
+    而它本来就是**列取值、不是列基数**——`ranks` / `shape_profiles` / `attribute_profiles` 逐项可读，
+    dtype 轴逐项来自 `params[in].dtype`。
+    """
+    if "excluded" not in cfg:
+        return frozenset(), []
+    raw = cfg["excluded"]
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(
+            "torch_parity_matrix.excluded 出现即须为**非空**列表；"
+            "空列表是「有排除账本」的假象，要没有排除就整个键别写")
+    axis_map = dict(axes)
+    combos, rows = set(), []
+    for i, item in enumerate(raw):
+        where = f"torch_parity_matrix.excluded[{i}]"
+        if not isinstance(item, dict) or set(item) != {"combo", "reason", "evidence"}:
+            raise ValueError(f"{where} 须恰含 combo/reason/evidence 三个键（缩水必须带理由 + 证据）")
+        for key in ("reason", "evidence"):
+            if not isinstance(item[key], str) or not item[key].strip():
+                raise ValueError(f"{where}.{key} 须为非空字符串——没有理由/证据的排除就是静默缩水")
+        combo = item["combo"]
+        if not isinstance(combo, dict) or not combo:
+            raise ValueError(f"{where}.combo 须为非空字典（部分赋值：只写要钉死的轴）")
+        unknown = set(combo) - set(_TORCH_PARITY_AXIS_NAMES)
+        if unknown:
+            raise ValueError(
+                f"{where}.combo 含未知轴名 {sorted(unknown)}，受控词表 {list(_TORCH_PARITY_AXIS_NAMES)}")
+        for name, value in combo.items():
+            if value not in axis_map[name]:
+                raise ValueError(
+                    f"{where}.combo.{name}={value!r} 不在本矩阵的 {name} 取值 {axis_map[name]} 里——"
+                    "排除一个根本不在矩阵里的取值，记账必然对不上")
+        # 部分赋值 → 完整组合：钉死的轴取那一个值，其余轴全展开（轴序 = `axes` 的声明序）。
+        expanded = set(itertools.product(*[
+            [combo[name]] if name in combo else values for name, values in axes]))
+        overlap = combos & expanded
+        if overlap:
+            raise ValueError(
+                f"{where}.combo 与前面的排除项重叠（{len(overlap)} 个组合，如 {sorted(overlap)[0]}）——"
+                "重叠会让排除数被重复计一次，三重记账当场失真；请合并或改窄")
+        combos |= expanded
+        rows.append({"combo": dict(combo), "reason": item["reason"], "evidence": item["evidence"],
+                     "combos_excluded": len(expanded)})
+    return frozenset(combos), rows
+
+
+def _torch_parity_combination_stats(entries):
+    """实产用例的**覆盖组合**统计：`(不同组合数, 重复条数)`。
+
+    组合身份 = `(dtype, 实际 shape, **解析后**的 attrs)`。⚠ 刻意**不含** profile 名：
+    `_mk_id` / `_entry_key` 的去重键里带 `id_kind`（profile 名在里面），那是**文件名唯一性**保证，
+    不是**覆盖唯一性**保证——低 rank 下 `axis_class` 会塌缩（rank1 时 first=middle=last=0），
+    6 个 by-dim profile 解析后只剩 2 个不同 attrs，profile 名不同所以一条都不会被那两处逮到。
+    这里数的就是它们：这些 case 的输入字节确实不同（种子吃 `case_id`），是**同一覆盖组合的额外随机样本**，
+    有价值，但**不能按「不同组合」计数**。
+    """
+    keys = {(e["dtype"], tuple(e["shape"]),
+             tuple(sorted(((k, _attr_hashable(v)) for k, v in e["attrs"].items()),
+                          key=lambda kv: kv[0])))
+            for e in entries}
+    return len(keys), len(entries) - len(keys)
+
+
 def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost_fn):
     """按 cannbot 冻结设计的轴模型生成完整笛卡尔矩阵。
 
@@ -1436,18 +1580,37 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
     * ``shape_profiles``：每档 ``leading_dim``，其余轴补 1；
     * ``attribute_profiles``：显式属性 profile，轴属性可写
       ``{"axis_class":"first_axis|middle_axis|last_axis"}``；
-    * ``generator``：当前只接受 cannbot Median 冻结设计使用的 uniform。
+    * ``generator``：当前只接受 cannbot Median 冻结设计使用的 uniform；
+    * ``excluded``（选填）：**有证据的排除项**，每条带 ``reason`` + ``evidence``（见
+      ``_torch_parity_excluded``）。
 
-    完整矩阵不受 1-wise/case_target 抽样；case_target 必须精确等于矩阵大小，
-    防止声明“1152 全覆盖”却静默只取 60 条。
+    完整矩阵不受 1-wise/case_target 抽样。**三重记账**（任一处漂移当场炸）：
+
+        ∏|轴取值| − |excluded 展开后的组合| == precision.case_target == 实际 emitted
+
+    第一重防「声明 1152 全覆盖却静默只取 60 条」；第三重防「有了排除项之后，实产数与账面数
+    靠『完整笛卡尔不采样』这个实现细节隐式对齐」——那条隐式保证一旦有排除就断了。
+
+    ⚠ 本档**不进笛卡尔**的两样东西（已有明文依据，不是省事）：
+
+    * **特殊场景独立叠加、绝不与常规网格交叉**——参考仓 ``design_contract.py`` 明文，
+      理由逐字就是避免组合爆炸；本仓 legacy 也是这么做的（特殊场景只配 ``attr_combos[0]``，
+      见 ``_plan`` 的 ①）。代价要认：「空 Tensor × 按维归约」这类组合因此永远测不到。
+      （⚠ 本档当前 ``forced_special=0``、一条特殊场景都不产，那是**另一个问题**、待拍板，
+      与「不进笛卡尔」这条无关，别混成一件事。）
+    * **输出个数不是自由轴**，它是 attr 轴的**确定性函数**——``_select_call_variant(variants, attrs, cid)``
+      从 attrs 选调用变体，输出集随之定死。当轴放进笛卡尔 = 重复计数，还会造出
+      「dim=null 且要求 indices 输出」这种不存在的组合。``_build_multi_output_case`` 那处
+      「声明输出数与 golden 实际返回数必须恰好相等」的门是同一口径，别在轴集里开第二个口。
     """
+    _reject_unconsumed_legacy_keys(spec)
     cfg = (spec.get("precision") or {}).get("torch_parity_matrix")
     if not isinstance(cfg, dict):
         raise ValueError(
             "precision.case_profile='torch_parity' 时必须声明 "
             "precision.torch_parity_matrix（不再沿用 legacy 造例规则）")
     allowed = {"source", "source_sha256", "ranks", "shape_profiles",
-               "attribute_profiles", "generator"}
+               "attribute_profiles", "generator", "excluded"}
     unknown = set(cfg) - allowed
     if unknown:
         raise ValueError(f"torch_parity_matrix 含未知字段 {sorted(unknown)}")
@@ -1511,11 +1674,26 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
         raise ValueError(
             "torch_parity_matrix.generator 当前须为 {kind:'uniform', min:<数>, max:<数>}")
 
-    expected = len(dtypes) * len(ranks) * len(shape_rows) * len(normalized_profiles)
+    # 三重记账第一、二重（**在原处改**，不另立一套判据：另写一份的后果是两处判据必然漂移，
+    # 而漂移方向一定是宽的那边赢）。`axes` 只从矩阵自身派生，故轴仍是**列取值、不列基数**。
+    axes = (("dtype", list(dtypes)),
+            ("rank", list(ranks)),
+            ("shape_profile", [name for name, _ in shape_rows]),
+            ("attribute_profile", [name for name, _ in normalized_profiles]))
+    full_cartesian = 1
+    for _name, _values in axes:
+        full_cartesian *= len(_values)
+    excluded_combos, excluded_rows = _torch_parity_excluded(cfg, axes)
+    expected = full_cartesian - len(excluded_combos)
+    if expected < 1:
+        raise ValueError(
+            f"torch_parity_matrix.excluded 排掉了全部 {full_cartesian} 个组合，一条用例都不剩——"
+            "零用例空跑不能冒充验收")
     if int(case_target) != expected:
         raise ValueError(
-            f"torch_parity 完整矩阵大小={expected}，precision.case_target={case_target}；"
-            "两者必须相等，禁止静默抽样")
+            f"torch_parity 完整矩阵大小={full_cartesian}"
+            + (f" − 有证据的排除 {len(excluded_combos)} = {expected}" if excluded_combos else "")
+            + f"，precision.case_target={case_target}；两者必须相等，禁止静默抽样")
     entries = []
     for dtn in dtypes:
         dk = _regular_data_kind(dtn, attrs_default, len(in_params))
@@ -1523,6 +1701,8 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
             for shape_name, leading in shape_rows:
                 shape = (leading,) + (1,) * (rank - 1)
                 for attr_idx, (profile_name, raw_attrs) in enumerate(normalized_profiles):
+                    if (dtn, rank, shape_name, profile_name) in excluded_combos:
+                        continue                 # 已带 reason+evidence 记账，见 case_matrix_ledger
                     attrs = {
                         key: _resolve_axis_class(
                             value, rank,
@@ -1552,6 +1732,15 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
                             "cannbot case_design coverage.regular_axes × "
                             "attribute_profile_matrix（完整笛卡尔）"),
                     })
+    # 三重记账第三重：**实产数**。前两重（矩阵大小、case_target）是账面对账面，
+    # 这一重才把「循环真的产了几条」接进来。今天它靠「完整笛卡尔不采样」隐式成立，
+    # 一旦有 excluded / 循环被改动，隐式保证就断了——所以显式立一道，别指望下一个人记得。
+    if len(entries) != expected:
+        raise ValueError(
+            f"torch_parity 实产 {len(entries)} 条 ≠ 账面 {expected} 条"
+            f"（完整笛卡尔 {full_cartesian} − 有证据的排除 {len(excluded_combos)}）；"
+            "生成循环与记账已经漂了，绝不放行")
+    distinct_combinations, duplicate_cases = _torch_parity_combination_stats(entries)
     return entries, {
         "pool_max": expected,
         "requested_target": expected,
@@ -1569,8 +1758,22 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
             "attr_values_never_emitted": [],
         },
         "attr_axis_lengths": {"declared": [], "emitted": 0, "items": [], "skipped": []},
+        # ⚠ 措辞**如实**，别再写「N 个组合全覆盖」：报告是逐字引这句话的。
+        #   原文「complete_cartesian：… 全覆盖」是**过强**的表述——实测 median 1344 例里有 144 例
+        #   与同批另一例的 (dtype, 实际 shape, 解析后 attrs) 完全相同（低 rank 下 axis_class 塌缩），
+        #   所以那不是 1344 个不同组合。本轮**不删重复**（删了 `矩阵大小 == case_target` 当场破，
+        #   属待拍板项），只把话说对，并把重复条数落进 `case_matrix_ledger` 让报告能引。
         "coverage_strength": (
-            "complete_cartesian：dtype×rank×shape_profile×attribute_profile 全覆盖"),
+            ("complete_cartesian" if not excluded_combos else "cartesian_minus_excluded")
+            + f"：dtype×rank×shape_profile×attribute_profile 完整笛卡尔 {full_cartesian} 组合"
+            + (f" − 有证据的排除 {len(excluded_combos)} 组合" if excluded_combos else "")
+            + f" → 实产 {len(entries)} 例、无抽样（矩阵大小 == case_target == 实产数，三重逐字相等）；"
+            + (f"其中 {duplicate_cases} 例与同批另一例的 (dtype, 实际 shape, **解析后** attrs) 完全相同"
+               f"（低 rank 下 axis_class 塌缩，如 rank1 的 first/middle/last 同为轴 0），"
+               f"故**不同覆盖组合数 = {distinct_combinations}**——"
+               f"报告只能按这个数说覆盖，不得把 {len(entries)} 当成不同组合数"
+               if duplicate_cases else
+               f"{len(entries)} 例互不相同，不同覆盖组合数 = {distinct_combinations}")),
         "golden_cost": ({
             "budget": _cost_budget(spec), "model": _COST_MODEL,
             "scaled_cases": [], "skipped_shapes": [], "skipped_shape_classes": 0,
@@ -1582,6 +1785,25 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
             "shape_profiles": [dict(row) for row in shapes],
             "attribute_profile_count": len(normalized_profiles),
             "generator": dict(generator),
+        },
+        # 三重记账 + 覆盖组合的**机器可读账本**（报告/门读这里，不必回头人肉转述）。
+        # 只在 torch_parity 档出现 → legacy 侧 caseset 字节纹丝不动。
+        "case_matrix_ledger": {
+            "axes": [{"name": name, "values": list(values)} for name, values in axes],
+            "full_cartesian": full_cartesian,
+            "excluded": excluded_rows,
+            "excluded_total": len(excluded_combos),
+            "expected": expected,
+            "case_target": int(case_target),
+            "emitted": len(entries),
+            "distinct_combinations": distinct_combinations,
+            "duplicate_cases": duplicate_cases,
+            "note": (
+                "三重记账：full_cartesian − excluded_total == expected == case_target == emitted，"
+                "任一处漂移 gen_cases 当场 fail-closed。"
+                "duplicate_cases = 与同批另一例 (dtype, 实际 shape, 解析后 attrs) 完全相同的条数"
+                "（输入字节仍不同——种子吃 case_id，故它们是同一覆盖组合的额外随机样本，"
+                "有价值但不得按『不同组合』计数）；distinct_combinations 才是不同覆盖组合数。"),
         },
     }
 
@@ -3703,6 +3925,11 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
             "emitted": plan_meta["emitted"],
             "coverage_strength": plan_meta["coverage_strength"],
             "dropped_combo_classes": plan_meta["dropped_combo_classes"],
+            # TP 三重记账账本：**仅 torch_parity 档产**（同 operator_class / case_profile 的处理——
+            # 其它档一个键都不多，`ExistingOpsByteIdenticalTest` 的 sha256 pin 不破）。
+            # 报告要说「这批用例是怎么算出来的、排除了什么、其中多少是重复组合」，读这里就够。
+            **({"case_matrix_ledger": plan_meta["case_matrix_ledger"]}
+               if "case_matrix_ledger" in plan_meta else {}),
             # G4 覆盖账本：预算 + cost 模型（含其诚实边界）+ 被降规模的强制项 + 被剔除的超预算 shape。
             # 报告侧读这里就能说清「大 shape 是降规模后覆盖的 / 哪些规模根本没跑」，不靠猜。
             "golden_cost": plan_meta["golden_cost"],
@@ -3899,6 +4126,9 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
         "coverage": {
             "strength": meta["coverage_strength"],
             "dropped_combo_classes": meta["dropped_combo_classes"],
+            # TP：只在 torch_parity 档出现（其它档 dry-run 账本一个键都不多，ledger_digest 不变）。
+            **({"case_matrix_ledger": meta["case_matrix_ledger"]}
+               if "case_matrix_ledger" in meta else {}),
             "unpaired_combo_classes": meta["unpaired_combo_classes"],
             "attr_axis_lengths": meta["attr_axis_lengths"],
             "golden_cost": meta["golden_cost"],
@@ -3998,6 +4228,21 @@ def _render_dry_run_ledger(ledger):
         print(f"    ⚠ 网格剔除(超预算，已记账，**不计入已覆盖**) {_gc['skipped_shape_classes']} 类: "
               + "; ".join(f"{r['dtype']}×{r['shape']}(cost={r['cost']})"
                           for r in _gc["skipped_shapes"][:3]))
+    # TP 三重记账（只有 torch_parity 档有）：把「这个四位数是怎么算出来的」直接打出来，
+    # 别让人回头自己乘一遍。排除项逐条列 reason + evidence——缩水必须看得见。
+    _cm = coverage.get("case_matrix_ledger")
+    if _cm:
+        print(f"  case_matrix: 完整笛卡尔 {_cm['full_cartesian']} − 有证据的排除 {_cm['excluded_total']}"
+              f" = {_cm['expected']} == case_target {_cm['case_target']} == 实产 {_cm['emitted']}"
+              f"（三重相等，任一处漂移 fail-closed）")
+        print("    轴取值: " + "; ".join(f"{ax['name']}={ax['values']}" for ax in _cm["axes"]))
+        print(f"    不同覆盖组合 {_cm['distinct_combinations']}，"
+              f"其中重复组合的额外样本 {_cm['duplicate_cases']} 例"
+              + ("（低 rank 下 axis_class 塌缩；输入字节仍不同，但不算新覆盖）"
+                 if _cm["duplicate_cases"] else ""))
+        for row in _cm["excluded"]:
+            print(f"    · 排除 {row['combo']} → {row['combos_excluded']} 个组合"
+                  f"；reason={row['reason']}；evidence={row['evidence']}")
     print(f"  coverage: {coverage['strength']}")
     det = ledger["determinism"]
     if det:

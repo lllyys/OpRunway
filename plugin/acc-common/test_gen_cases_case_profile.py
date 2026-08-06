@@ -16,9 +16,17 @@ caseset 与全部 .npy 被 sha256 逐字节钉死。故先立字段驱动的档�
     未声明时 caseset **不含** `case_profile` 键；显式声明 legacy 时含该键且值为 "legacy"，
     且两者的 `cases` 列表与落盘 .npy 字节**完全相等**（证明只多了记账、没碰造例）；
   · torch_parity：完整笛卡尔、动态轴 class、禁止 case_target 抽样、缺矩阵 fail-closed；
+  · **torch_parity 拒收 legacy 造例键**（`TorchParityUnconsumedKeysTest`）：`attr_matrix` /
+    `attr_axis_lengths` / `allow_empty_tensor` / `empty_axis` / `precision.value_profiles`
+    在本档一行都不消费，声明即 fail-closed；legacy 侧照旧消费（两侧都立了见证）；
+  · **三重记账**（`TorchParityCaseTargetAccountingTest`）：`矩阵大小 − |有证据的排除| ==
+    case_target == 实产数`，`excluded` 的受控词表 / reason+evidence / 重叠 / 排空全部 fail-closed；
+  · **coverage_strength 如实措辞**（`TorchParityCoverageStrengthTest`）：不许再写「全覆盖」，
+    重复覆盖组合按实数落账（median 实测 1344 例 / 1200 个不同组合 / 144 条重复）；
   · dry-run 回显 + 空模板 `spec_schema_template.jsonc` 已记载该字段（防实现与文档漂移）。
 """
 import contextlib, copy, hashlib, io, json, os, shutil, tempfile, unittest
+from unittest import mock
 
 import gen_cases as GC
 import _golden_fixture as _gf
@@ -27,6 +35,9 @@ import _spec_fixture as SF
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # 用**真样例 spec**做字节安全 pin（任务要求：别自己编算子）。Sign 的 golden 由共享 fixture 装进临时 ops_root。
 _SIGN_SPEC = os.path.join(_HERE, "..", "samples", "specs", "sign.spec.json")
+# Median 是仓内唯一的真 torch_parity 样例，且它的 attr 轴带 `axis_class`——低 rank 下轴类塌缩、
+# 因而是「重复覆盖组合」这条记账**唯一有真数据**的见证（`_plan` 不需要 golden，故这里能直接跑）。
+_MEDIAN_SPEC = os.path.join(_HERE, "..", "samples", "specs", "median.spec.json")
 _SCHEMA_TMPL = os.path.join(_HERE, "spec_schema_template.jsonc")
 
 
@@ -48,6 +59,12 @@ def _load_spec(path=_SIGN_SPEC):
     「声明 legacy 前后 caseset 是否逐字节相同」，两侧同预算即可，预算取多少不影响该断言。
     """
     return SF.load(path)
+
+
+def _load_median():
+    """真 median spec 深拷贝（它自带 `case_target: 1344`，不需要测试侧夹具预算）。"""
+    with open(_MEDIAN_SPEC, encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 def _with_profile(spec, profile):
@@ -205,6 +222,269 @@ class CaseProfilePlanMetaTest(unittest.TestCase):
             [0, 3, 7])
 
 
+class TorchParityUnconsumedKeysTest(unittest.TestCase):
+    """§5.1 · `torch_parity` 档「声明了却没人消费」的 legacy 造例键 —— **声明即 fail-closed**。
+
+    为什么这组用例值钱：这些键写在 spec 里**一条用例都不会产**，读起来却像「我已经声明了所以已经覆盖了」。
+    今天不出事只是因为 median 恰好不依赖它们；这正是本仓最忌的形状（账面声明覆盖、实际零覆盖）。
+    """
+
+    def setUp(self):
+        self.spec = _load_spec()
+
+    def test_key_table_is_pinned(self):
+        """表漂移守卫：本档哪天真的开始消费某个键（如拍板要保留边界叠加），
+        **把它从表里删掉是那次改动的一部分**——这条断言逼那次改动的人显式改一行，别留反向坑。"""
+        self.assertEqual(
+            [(where, key) for where, key, _why in GC._TORCH_PARITY_UNCONSUMED_KEYS],
+            [("spec", "attr_matrix"), ("spec", "attr_axis_lengths"),
+             ("spec", "allow_empty_tensor"), ("spec", "empty_axis"),
+             ("precision", "value_profiles")])
+        for _where, _key, why in GC._TORCH_PARITY_UNCONSUMED_KEYS:
+            self.assertTrue(why.strip(), "每个键都得说清『本档为什么不消费它』")
+
+    def test_each_key_fails_closed_under_torch_parity(self):
+        """逐个键：写进 torch_parity spec → 当场 ValueError，且报错点名该键。
+
+        ⚠ 用**真 median spec**（仓内唯一真 torch_parity 样例）而非 Sign 夹具：这五个键的取值要写得
+        「合法且真实」才有意义——写个语法就不合法的值，炸的可能是别的门，证不出本门存在。
+        `attr_matrix` 这条尤其：它的类型闸在 `_plan` 里比本门更早，喂非法 attr 名会被那道闸先炸掉。
+        这里给的正是 median.spec.json 2026-08-06 之前真写着的那 4 组。
+        """
+        cases = {
+            "attr_matrix": ("spec", [{"dim": None, "keepDim": False}, {"dim": 0, "keepDim": True}]),
+            "attr_axis_lengths": ("spec", [{"attr": "dim", "lengths": [1]}]),
+            "allow_empty_tensor": ("spec", False),
+            "empty_axis": ("spec", 0),
+            "value_profiles": ("precision", ["tie"]),
+        }
+        for key, (where, value) in cases.items():
+            with self.subTest(key=key):
+                parity = _load_median()
+                (parity["precision"] if where == "precision" else parity)[key] = value
+                with self.assertRaises(ValueError) as cm:
+                    _plan_of(parity, case_target=1344)
+                msg = str(cm.exception)
+                self.assertIn(key, msg)
+                self.assertIn("没有任何代码消费", msg)
+
+    def test_reports_every_hit_at_once(self):
+        """一次报全部命中项，不是撞一个报一个——spec 作者一趟改干净。"""
+        parity = _load_median()
+        parity["attr_matrix"] = [{"dim": None, "keepDim": False}]
+        parity["allow_empty_tensor"] = False
+        parity["precision"]["value_profiles"] = ["tie"]
+        with self.assertRaises(ValueError) as cm:
+            _plan_of(parity, case_target=1344)
+        msg = str(cm.exception)
+        for key in ("attr_matrix", "allow_empty_tensor", "value_profiles"):
+            self.assertIn(key, msg)
+        self.assertIn("`_` 前缀", msg, "报错要给出替代写法（`_` 前缀的纯注释键）")
+
+    def test_legacy_still_consumes_them(self):
+        """**只封 torch_parity 这一档**：legacy 侧照旧接受并消费，字节安全那条护栏不受影响。
+
+        用 `allow_empty_tensor` 作见证（Sign 无 attr，`attr_matrix` 在这份 spec 上没法立见证）：
+        legacy 下它是真被读的——`false` 会把空 Tensor 特殊场景整条关掉，用例数因此变少。
+        """
+        legacy_on = _plan_of(_with_profile(self.spec, "legacy"), case_target=20)[0]
+        off = _with_profile(self.spec, "legacy")
+        off["allow_empty_tensor"] = False
+        legacy_off = _plan_of(off, case_target=20)[0]
+        self.assertTrue(any(e["id_kind"] == "empty" for e in legacy_on),
+                        "legacy 缺省本应铺空 Tensor 特殊场景，否则本见证是空转")
+        self.assertFalse(any(e["id_kind"] == "empty" for e in legacy_off),
+                         "legacy 下 allow_empty_tensor=false 必须真把空用例关掉（= 该键真被消费）")
+
+    def test_median_sample_spec_carries_none_of_them(self):
+        """真样例 spec 得是干净的——否则它一跑就炸，等于把这道门自己证伪。"""
+        spec = _load_median()
+        for where, key, _why in GC._TORCH_PARITY_UNCONSUMED_KEYS:
+            holder = spec.get("precision", {}) if where == "precision" else spec
+            self.assertNotIn(key, holder, f"median.spec.json 仍带本档不消费的 {key}")
+
+    def test_schema_template_documents_the_rejection(self):
+        """空模板必须写清（acc-spec 产 spec 只看模板；模板不写就等着 extractor 一遍遍写进去再被拒）。"""
+        with open(_SCHEMA_TMPL, encoding="utf-8") as fh:
+            tmpl = fh.read()
+        for _where, key, _why in GC._TORCH_PARITY_UNCONSUMED_KEYS:
+            self.assertIn(key, tmpl)
+        self.assertIn("仅 legacy 档可写", tmpl)
+
+
+class TorchParityCaseTargetAccountingTest(unittest.TestCase):
+    """§6.3 · 三重记账：`矩阵大小 − |有证据的排除| == case_target == 实产数`。
+
+    ⚠ 这**不是**把 case_target 的缺省值加回来：它仍必填、仍无缺省（`_require_case_target`），
+    这里加的是「它必须与矩阵对得上」的第二重、以及「账面必须等于实产」的第三重。
+    """
+
+    def setUp(self):
+        self.spec = _load_spec()
+
+    def _excluded(self, spec, rows):
+        spec["precision"]["torch_parity_matrix"]["excluded"] = rows
+        return spec
+
+    def test_ledger_reports_all_three_numbers_when_nothing_excluded(self):
+        entries, meta = _plan_of(_with_parity_matrix(self.spec), case_target=12)
+        led = meta["case_matrix_ledger"]
+        self.assertEqual(led["full_cartesian"], 12)
+        self.assertEqual(led["excluded_total"], 0)
+        self.assertEqual(led["excluded"], [])
+        self.assertEqual((led["expected"], led["case_target"], led["emitted"]), (12, 12, 12))
+        self.assertEqual(led["emitted"], len(entries))
+        # 轴是**列取值**不是列基数：`8` 说不出哪 8 个 dtype 被测了。
+        self.assertEqual([ax["name"] for ax in led["axes"]],
+                         ["dtype", "rank", "shape_profile", "attribute_profile"])
+        self.assertEqual([ax["values"] for ax in led["axes"]][1], [1, 2])
+
+    def test_excluded_shrinks_matrix_and_case_target_follows(self):
+        """有证据的排除 → 等式右边变成 `∏ − |excluded|`，`case_target` 必须跟着改。"""
+        spec = self._excluded(_with_parity_matrix(self.spec), [
+            {"combo": {"shape_profile": "large"},
+             "reason": "测试夹具：假装该规模档超出本轮 golden 预算",
+             "evidence": "test fixture, not a real acceptance claim"},
+        ])
+        spec["precision"]["case_target"] = 8            # 12 − (2 dtype × 2 rank × 1 shape × 1 attr)=4
+        entries, meta = _plan_of(spec, case_target=8)
+        self.assertEqual(len(entries), 8)
+        self.assertNotIn((262144,), {tuple(e["shape"]) for e in entries})
+        led = meta["case_matrix_ledger"]
+        self.assertEqual((led["full_cartesian"], led["excluded_total"], led["expected"]), (12, 4, 8))
+        self.assertEqual(led["excluded"][0]["combos_excluded"], 4)
+
+    def test_old_case_target_now_fails_closed(self):
+        """排除项落地后还照抄旧的 `∏`（12）→ 当场炸。等式右边变了，账面数必须跟着变。"""
+        spec = self._excluded(_with_parity_matrix(self.spec), [
+            {"combo": {"shape_profile": "large"}, "reason": "r", "evidence": "e"}])
+        with self.assertRaisesRegex(ValueError, "必须相等"):
+            _plan_of(spec, case_target=12)
+
+    def test_excluded_schema_fail_closed(self):
+        """受控词表 + 缩水必须留痕：轴名、取值、reason/evidence、重叠、空表一律炸。"""
+        bad_rows = {
+            "空表": [],
+            "非列表": {},
+            "缺 evidence": [{"combo": {"rank": 1}, "reason": "r"}],
+            "空 reason": [{"combo": {"rank": 1}, "reason": "  ", "evidence": "e"}],
+            "空 combo": [{"combo": {}, "reason": "r", "evidence": "e"}],
+            "未知轴名": [{"combo": {"layout": "nchw"}, "reason": "r", "evidence": "e"}],
+            "取值不在矩阵里": [{"combo": {"rank": 7}, "reason": "r", "evidence": "e"}],
+            "shape 档名不存在": [{"combo": {"shape_profile": "huge"}, "reason": "r", "evidence": "e"}],
+        }
+        for label, rows in bad_rows.items():
+            with self.subTest(case=label):
+                spec = self._excluded(_with_parity_matrix(self.spec), rows)
+                with self.assertRaises(ValueError):
+                    _plan_of(spec, case_target=12)
+
+    def test_overlapping_exclusions_fail_closed(self):
+        """两条排除项相交 → 当场炸，**且必须点名「重叠」**。
+
+        ⚠ 这条一定要按 union 后的 `case_target` 来测（12 − |{rank1} ∪ {large}| = 12 − 8 = 4），
+        否则测不到重叠检测本身：`combos` 是 set，重叠会被 `|=` 悄悄吞掉，`expected` 照样算对，
+        于是 `case_target` 那道门会替它炸——**测试绿了，检测其实没了**（实测：把重叠检测删掉，
+        用 case_target=12 的写法照样全绿）。真正被伪造的是**账本**：
+        `excluded` 逐条的 `combos_excluded` 之和 = 6+4 = 10，而实际只排除了 8 个组合。
+        """
+        spec = self._excluded(_with_parity_matrix(self.spec), [
+            {"combo": {"rank": 1}, "reason": "r", "evidence": "e"},
+            {"combo": {"shape_profile": "large"}, "reason": "r", "evidence": "e"}])
+        with self.assertRaisesRegex(ValueError, "重叠"):
+            _plan_of(spec, case_target=4)
+
+    def test_multiple_disjoint_exclusions_keep_the_books_consistent(self):
+        """互不相交的多条排除：逐条 `combos_excluded` 之和必须等于 `excluded_total`（账本自洽）。"""
+        spec = self._excluded(_with_parity_matrix(self.spec), [
+            {"combo": {"rank": 1, "shape_profile": "large"}, "reason": "r1", "evidence": "e1"},
+            {"combo": {"rank": 2, "shape_profile": "large"}, "reason": "r2", "evidence": "e2"}])
+        entries, meta = _plan_of(spec, case_target=8)
+        led = meta["case_matrix_ledger"]
+        self.assertEqual(sum(r["combos_excluded"] for r in led["excluded"]), led["excluded_total"])
+        self.assertEqual((led["excluded_total"], led["expected"], len(entries)), (4, 8, 8))
+        self.assertEqual([r["reason"] for r in led["excluded"]], ["r1", "r2"])
+
+    def test_excluding_everything_fails_closed(self):
+        """把整个矩阵逐 dtype 排空 → 零用例空跑不能冒充验收。"""
+        spec = _with_parity_matrix(self.spec)
+        dtypes = next(p for p in spec["params"] if p["name"] == "self")["dtype"]
+        self._excluded(spec, [{"combo": {"dtype": d}, "reason": "r", "evidence": "e"}
+                              for d in dtypes])
+        with self.assertRaisesRegex(ValueError, "一条用例都不剩"):
+            _plan_of(spec, case_target=12)
+
+    def test_unknown_matrix_key_still_fails_closed(self):
+        """`excluded` 进白名单了，别顺手把别的错别字也放进来。"""
+        spec = _with_parity_matrix(self.spec)
+        spec["precision"]["torch_parity_matrix"]["exclude"] = []    # 少个 d
+        with self.assertRaisesRegex(ValueError, "未知字段"):
+            _plan_of(spec, case_target=12)
+
+    def test_emitted_must_equal_the_books(self):
+        """第三重（**实产数**）真的是一道门，不是注释。
+
+        造法：把 `_torch_parity_excluded` 换成返回一个**匹配不到任何真实组合**的幽灵排除项——
+        账面因此记 `12 − 1 = 11`，而生成循环一条都跳不过、照产 12。这正是第三重要逮的那种漂移
+        （账面与实产靠「完整笛卡尔不采样」隐式对齐，一旦有排除项那条隐式保证就断了）。
+        ⚠ 没有这道门时本用例会静静地通过、产出一份 emitted=12 却自称 11 的 caseset。"""
+        phantom = frozenset({("no_such_dtype", 1, "small", "attr_00")})
+
+        def ghost(_cfg, _axes):
+            return phantom, [{"combo": {"dtype": "no_such_dtype"}, "reason": "r",
+                              "evidence": "e", "combos_excluded": 1}]
+
+        with mock.patch.object(GC, "_torch_parity_excluded", ghost):
+            with self.assertRaisesRegex(ValueError, "实产"):
+                _plan_of(_with_parity_matrix(self.spec), case_target=11)
+
+
+class TorchParityCoverageStrengthTest(unittest.TestCase):
+    """§7.4 · `coverage_strength` 必须如实：完整笛卡尔 ≠ N 个**不同**覆盖组合。
+
+    报告是**逐字引**这句话的，所以这句话本身就是账。
+    """
+
+    def test_no_overclaim_wording(self):
+        _entries, meta = _plan_of(_with_parity_matrix(_load_spec()), case_target=12)
+        strength = meta["coverage_strength"]
+        self.assertIn("complete_cartesian", strength)
+        self.assertNotIn("全覆盖", strength, "「全覆盖」是过强表述——低 rank 下会有重复覆盖组合")
+        self.assertIn("12", strength)
+
+    def test_wording_switches_when_excluded(self):
+        spec = _with_parity_matrix(_load_spec())
+        spec["precision"]["torch_parity_matrix"]["excluded"] = [
+            {"combo": {"shape_profile": "large"}, "reason": "r", "evidence": "e"}]
+        _entries, meta = _plan_of(spec, case_target=8)
+        strength = meta["coverage_strength"]
+        self.assertIn("cartesian_minus_excluded", strength)
+        self.assertNotIn("complete_cartesian", strength, "有排除还叫 complete_cartesian 就是假话")
+
+    def test_median_duplicate_combinations_are_accounted(self):
+        """真样例实数：1344 例里 144 例是**同一 (dtype, 实际 shape, 解析后 attrs) 组合的额外样本**。
+
+        算术（逐 rank 解 `_resolve_axis_class`）：rank1 first=middle=last=0 → 6 个 by-dim profile
+        只剩 2 个不同 → 4 条重复；rank2 first=middle=0 → 再 2 条；rank≥3 起互不相同。
+        每个 (dtype, 规模档) 单元格 6 条 × 8 dtype × 3 档 = 144，故不同组合数 = 1200。
+        ⚠ 本轮**不删**这 144 条（删了三重记账的等式当场破，属待拍板项），只如实记账。"""
+        entries, meta = _plan_of(_load_median(), case_target=1344)
+        self.assertEqual(len(entries), 1344)
+        led = meta["case_matrix_ledger"]
+        self.assertEqual(led["full_cartesian"], 1344)
+        self.assertEqual(led["distinct_combinations"], 1200)
+        self.assertEqual(led["duplicate_cases"], 144)
+        strength = meta["coverage_strength"]
+        self.assertIn("1200", strength)
+        self.assertIn("144", strength)
+        self.assertNotIn("全覆盖", strength)
+
+    def test_ledger_only_exists_on_torch_parity(self):
+        """账本只在本档出现 → legacy 侧 caseset / dry-run 一个键都不多（字节 pin 不破）。"""
+        _entries, legacy_meta = _plan_of(_load_spec(), case_target=20)
+        self.assertNotIn("case_matrix_ledger", legacy_meta)
+
+
 class CaseProfileByteSafetyTest(unittest.TestCase):
     """**字节安全 pin**：真样例 spec 实跑 gen_cases，证「声明 legacy 只多一个账本键、别的一字不改」。
 
@@ -225,8 +505,11 @@ class CaseProfileByteSafetyTest(unittest.TestCase):
             os.environ["OPRUNWAY_OPS_DIR"] = cls.ops_root
             cls.work_plain = tempfile.mkdtemp(prefix="cp_plain_")
             cls.work_legacy = tempfile.mkdtemp(prefix="cp_legacy_")
+            cls.work_parity = tempfile.mkdtemp(prefix="cp_parity_")
             cls.cs_plain = GC.gen_cases(spec, cls.work_plain)                   # 未声明（= 现有 8 份 spec 的形态）
             cls.cs_legacy = GC.gen_cases(_with_profile(spec, "legacy"), cls.work_legacy)
+            # 三重记账账本得真的落到 **caseset**（报告读的是产物，不是 `_plan` 的返回值）。
+            cls.cs_parity = GC.gen_cases(_with_parity_matrix(spec), cls.work_parity)
         except BaseException:
             cls.tearDownClass()      # setUpClass 抛异常时 unittest **不会**调 tearDownClass，得自己收尾还原 env
             raise
@@ -239,7 +522,7 @@ class CaseProfileByteSafetyTest(unittest.TestCase):
             else:
                 os.environ["OPRUNWAY_OPS_DIR"] = cls.old_ops_dir
             cls.old_ops_dir = "__unset__"
-        for attr in ("ops_root", "work_plain", "work_legacy"):
+        for attr in ("ops_root", "work_plain", "work_legacy", "work_parity"):
             d = getattr(cls, attr, None)
             if d:
                 shutil.rmtree(d, ignore_errors=True)
@@ -267,6 +550,17 @@ class CaseProfileByteSafetyTest(unittest.TestCase):
                          {k: v for k, v in self.cs_legacy.items() if k not in drop})
         self.assertEqual(set(self.cs_legacy) - set(self.cs_plain), {"case_profile"})
         self.assertEqual(set(self.cs_plain) - set(self.cs_legacy), set())
+
+    def test_case_matrix_ledger_lands_in_the_caseset(self):
+        """账本必须落进 **caseset**（报告与门读产物，不读 `_plan` 的返回值）；
+        非 torch_parity 档一个键都不多——`ExistingOpsByteIdenticalTest` 的 sha256 pin 靠这条。"""
+        self.assertNotIn("case_matrix_ledger", self.cs_plain)
+        self.assertNotIn("case_matrix_ledger", self.cs_legacy)
+        led = self.cs_parity["case_matrix_ledger"]
+        self.assertEqual((led["full_cartesian"], led["excluded_total"]), (12, 0))
+        self.assertEqual({led["expected"], led["case_target"], led["emitted"],
+                          len(self.cs_parity["cases"])}, {12})
+        self.assertIn("complete_cartesian", self.cs_parity["coverage_strength"])
 
     def test_on_disk_bytes_identical(self):
         """落盘产物（x*.npy / golden.npy）字节全等——per-case 种子只吃 case_id，声明档位不该扰动数据。"""

@@ -109,8 +109,11 @@
     //   `--dry-run` 两条路都当场 fail-fast。删缺省的理由是实测——extractor 照散文的「建议 50」自己填了
     //   50、全程 0 次被审视，792 个候选组合就这么留了 50 条；缺省值让「这个算子该造多少条、依据是什么」
     //   永远不必回答。**别把默认值加回来**，也别在别处兜一个。
-    "case_target": "<int，精度用例目标数，**必填无缺省**；须 ≥1（0/负/非整→gen_cases fail-fast，堵零用例空跑冒充验收）。**按覆盖矩阵算、不是拍一个数**：case_profile==torch_parity 时须精确等于 dtype×rank×shape_profile×attribute_profile；其它档按覆盖轴推算并在 case_target_source 写清算法。gen_cases 按 opbase §1 覆盖-预算铺到此数（覆盖驱动、封顶；< forced_total(=强制下限 S) 抬到 S、> pool_max 封顶且数量门软化 PASS+note）>",
-    "case_target_source": "<可选但强烈建议：上面那个数是怎么来的（矩阵怎么乘 / 沿用了哪份既有事实）。给不出依据就停下问用户，别随手填一个数>"
+    "case_target": "<int，精度用例目标数，**必填无缺省**；须 ≥1（0/负/非整→gen_cases fail-fast，堵零用例空跑冒充验收）。**按覆盖矩阵算、不是拍一个数**：case_profile==torch_parity 时须精确等于 dtype×rank×shape_profile×attribute_profile **减去 torch_parity_matrix.excluded 展开后的组合数**，且还要等于实际生成条数（三重记账，见下文 torch_parity 节）；其它档按覆盖轴推算并在 case_target_source 写清算法。gen_cases 按 opbase §1 覆盖-预算铺到此数（覆盖驱动、封顶；< forced_total(=强制下限 S) 抬到 S、> pool_max 封顶且数量门软化 PASS+note）>",
+    // ⚠ `case_target_source` 是**纯散文、无消费方**：写错不会有任何门报错，别把它当一道门。
+    //   `torch_parity` 档真正可机核的是三重记账（矩阵 − excluded == case_target == 实产数）+
+    //   caseset 里的 `case_matrix_ledger`；legacy 档这段话则是这个数的**唯一**出处，更要写实。
+    "case_target_source": "<可选但强烈建议（**纯注释、无消费方**）：上面那个数是怎么来的（矩阵怎么乘 / 减掉了哪些有证据的排除 / 沿用了哪份既有事实）。给不出依据就停下问用户，别随手填一个数>"
   },
   "task_pr_gaps": ["<所有缺口/矛盾/推断，推断项标 (推断)；无则空数组>"],
   // 批 4 · golden 判据锚（**判据只从 spec 派生**，硬约束 #5）。可选但**正式验收强烈建议写**，故留在主体：
@@ -203,10 +206,45 @@
 //       {"name":"attr_04","attrs":{"dim":{"axis_class":"last_axis"},"keepDim":false}},
 //       {"name":"attr_05","attrs":{"dim":{"axis_class":"last_axis"},"keepDim":true}}
 //     ],
-//     "generator":{"kind":"uniform","min":-5,"max":5}
+//     "generator":{"kind":"uniform","min":-5,"max":5},
+//     // 选填 · **有证据的排除项**（不写整个键就省略；写了必须非空）：
+//     "excluded": [
+//       {"combo": {"dtype":"<该矩阵里的某个 dtype>", "attribute_profile":"<某个 profile 名>"},
+//        "reason": "<为什么这组不测>", "evidence": "<出处：任务书行号 / op_def / PR 事实 / 参考仓设计>"}
+//     ]
 //   }
-//   完整笛卡尔大小 = dtype×rank×shape_profile×attribute_profile，必须与 case_target 精确相等；
+//   ⚠ **三重记账**（`gen_cases._torch_parity_plan`，任一处漂移当场 fail-closed）：
+//       ∏|轴取值| − |excluded 展开后的组合| == precision.case_target == 实际生成条数
+//     · 第一重防「声明 1152 全覆盖却静默只取 60 条」；第三重防「有排除项之后账面数与实产数
+//       只靠『完整笛卡尔不采样』这个实现细节隐式对齐」——那条隐式保证一有排除就断。
+//     · `case_target` 仍**必填、无缺省**：这里加的是「它必须与矩阵对得上」的第二重约束，
+//       **不是**把缺省值加回来。
+//     · 轴是**列取值、不是列基数**：`8` 说不出哪 8 个 dtype 被测了，`ranks`/`shape_profiles`/
+//       `attribute_profiles` 逐项摊开才可读可审；dtype 轴逐项来自 `params[io=="in"].dtype`。
+//       **不要另起一份 `case_matrix.axes`**——那会让同一条轴在 spec 里出现两处（`attr_matrix` 已经踩过）。
+//   `excluded` 硬校（全部 fail-closed）：`combo` 非空、轴名只能是
+//     `{dtype, rank, shape_profile, attribute_profile}`、取值必须真在该矩阵里、`reason`/`evidence`
+//     必须非空、多条之间**不许重叠**（重叠会把排除数重复计一次，记账失真）。缩水必须留痕，
+//     形状沿用 `golden_cost.skipped_shapes` / `dropped_combo_classes`。
+//   账本落 caseset 与 dry-run 的 `case_matrix_ledger`（含轴取值、排除逐条、三个数、
+//     以及 `distinct_combinations` / `duplicate_cases`）。
+//   ⚠ 「完整笛卡尔」≠「N 个不同覆盖组合」：低 rank 下 `axis_class` 会塌缩（rank1 的
+//     first/middle/last 同为轴 0），解析后 attrs 相同的 case 会重复出现（median 实测 1344 例里 144 例）。
+//     它们的输入字节仍不同（种子吃 case_id）→ 是**同一覆盖组合的额外随机样本**，有价值，
+//     但**报告不得按「不同组合」计数**。`coverage_strength` 已按实数如实措辞，逐字引它即可。
 //   不走 legacy 1-wise 抽样。axis_class 在每个 rank 下解析，禁止把 middle/last 静态写死。
+//   ⚠ **本档拒收这些 legacy 造例键**（`gen_cases._TORCH_PARITY_UNCONSUMED_KEYS`，声明即 fail-closed）：
+//     `attr_matrix`（attr 轴在本档由 `attribute_profiles` 唯一声明，两处声明必然漂）、
+//     `attr_axis_lengths`（会在完整笛卡尔外追加用例，破坏上面的三重记账）、
+//     `allow_empty_tensor` / `empty_axis`、`precision.value_profiles`（本档 `forced_special=0`，
+//     一条特殊场景都不产）。要表达**算子事实**（如「本算子不支持空 Tensor」）请写 `_` 前缀的纯注释键。
+//   ⚠ 两条已定的轴集口径（有明文依据，别在轴集里开第二个口）：
+//     · **特殊场景独立叠加、绝不与常规网格交叉**——参考仓 `design_contract.py` 明文，理由逐字是
+//       避免组合爆炸；本仓 legacy 同样只把特殊场景配第一组 attr。代价要认：「空 Tensor × 按维归约」
+//       这类组合因此永远测不到，这是**已知且被参考仓接受**的取舍。
+//     · **输出个数不是自由轴**，它是 attr 轴的确定性函数（`gen_cases._select_call_variant` 从 attrs
+//       选调用变体，输出集随之定死）。当轴放进笛卡尔 = 重复计数，还会造出「attr 为 null 却要求
+//       index 输出」这种不存在的组合。
 //   任务书要求、但本轮 PR-head ABI 无法执行的 overload 不得伪造成 profile/call_variant；
 //   写入 task_pr_gaps(kind=api_surface_unsupported_by_pr)，由后续验收报告功能缺口并阻止干净 PASS。
 //             逐 case 按**声明顺序取首个匹配者**。
@@ -233,6 +271,9 @@
 //   "attr_matrix": [{"<attr名>": <取值>}, {"<attr名>": <取值>}]
 //   逐行给「一组 attr 取值」，gen_cases 按行铺覆盖。取值类型限制同 params 的 `default`
 //   （bool / int / float / str 标量，或 list[int]；不支持嵌套/浮点数组/bool 数组/空数组）。
+//   ⚠ **仅 `case_profile` 为 legacy（含省略）时可写**：`torch_parity` 档 attr 轴由
+//     `torch_parity_matrix.attribute_profiles` 唯一声明，这里再写一份 = 同一条轴两处声明、
+//     必然漂（median 实测曾是 4 组 vs 7 组）→ 该档声明即 fail-closed。
 //
 // ── 顶层 · 轴维度约束（**定向生成**任务书点名的「某 attr 所指轴长度 = L」；实现见 ──────────────────
 //    `gen_cases._attr_axis_lengths`）：
@@ -251,10 +292,15 @@
 //     · **声明了却一条都产不出 → 当场 fail-closed**（「声明覆盖却产零条」= 假覆盖，本仓最忌）。
 //       撞上一般是：attr 的取值不是轴下标 / 轴下标越界 / in 参数的 `rank` 约束把 shape 掐死了 → 回去核，别删字段绕。
 //   dry-run 账本会打印 `attr_axis_lengths: 声明 N → 定向生成 M 条`，M=0 即上面的 fail-closed。
+//   ⚠ **仅 legacy 档可写**：`torch_parity` 档不做定向生成（那会在完整笛卡尔之外追加用例，
+//     破坏「矩阵大小 == case_target == 实产数」的三重记账）→ 该档声明即 fail-closed。
 //
 // ── 顶层 · 空 Tensor 开关 ───────────────────────────────────────────────────────────
 //   "allow_empty_tensor": false          // **只接受真布尔**，`"false"`/`0` 一律 fail-closed 拒收
 //   "empty_axis": <非负 int>             // 允许空 Tensor、但 0 只能落在某一特定轴时声明轴号
+//   ⚠ **两个键都仅 legacy 档可写**：`torch_parity` 档 `forced_special=0`、一条特殊场景都不产，
+//     开关没有消费方 → 该档声明即 fail-closed。算子不支持空 Tensor 这个**事实**照旧要记，
+//     写成 `_` 前缀的纯注释键 + `task_pr_gaps` 里的依据原句即可。
 //   缺省（两者都不写）= 现行为：铺空 Tensor 用例、0 落最后一维。
 //   opbase §1.4 把「空 Tensor」当普适特殊场景强制铺，但**任务书白纸黑字写「不支持空 Tensor」**的算子
 //   （实测 Upsample 系 / im2col 的部分形态）没有第三条路——要么 golden 替算子**编造**它并不支持的语义、
@@ -309,6 +355,9 @@
 //       不确定就**整字段省略**。
 //     ⚠ 声明与否会**如实落进 caseset**：声明了才多一个 `case_profile` 键（未声明的算子产物一个键都不多，
 //       这正是字节安全的做法）。报告侧据此说清「这批用例是按哪套规则产的」，不必回头猜。
+//     ⚠ 选了 `torch_parity` 就**不许再写这些 legacy 造例键**：`attr_matrix` / `attr_axis_lengths` /
+//       `allow_empty_tensor` / `empty_axis` / `precision.value_profiles`（本档一行都不消费，
+//       声明即 fail-closed，一次报全部命中项）。理由与替代写法见下文 torch_parity_matrix 节。
 //
 // ── precision 行内 · 用例来源 case_source（受控词表；**整字段省略 = generated = 现行为**）──────
 //   "case_source": "generated" | "taskdoc"        // 省略 = generated；实现见 `gen_cases._case_source`
@@ -352,6 +401,8 @@
 //     ⚠ **`"nan"` 只允许配 `operator_class: "floating_compute"`**（或未声明该字段的 legacy spec）：
 //       structural / integer_compute 再写 `"nan"` → **fail-closed**（两处自相矛盾，引擎不静默丢 profile）。
 //       `"tie"` 三档通吃——重复 / 并列本就属结构 / 整型类特殊值那一档。
+//     ⚠ **仅 legacy 档可写**：`torch_parity` 档不产任何 value_profile 强制项（`generator` 受控词表
+//       只有 uniform 一档）→ 该档声明即 fail-closed，绝不静默忽略。
 //   "acceptance_policy": {…}                                     // 仅任务书验收目标明确宽于平台底线时才写
 //
 // ── 顶层 · perf（任务书性能栏为『无』时**整个 perf 字段省略**，勿写 {baseline:"none"}）────────────

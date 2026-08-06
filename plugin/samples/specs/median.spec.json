@@ -37,14 +37,9 @@
     {"when": {"attr": "dim", "is_null": false},
      "symbol": "Median", "active_attrs": ["dim", "keepDim"], "active_outputs": ["valuesOut", "indicesOut"]}
   ],
-  "attr_matrix": [
-    {"dim": null, "keepDim": false},
-    {"dim": 0, "keepDim": false},
-    {"dim": 0, "keepDim": true},
-    {"dim": -1, "keepDim": false}
-  ],
+  "_attr_matrix_removed_note": "2026-08-06 删除。原来这里有 4 组 attr combo（dim=null / 0 / 0+keepDim / -1），而同一条 attr 轴在 `precision.torch_parity_matrix.attribute_profiles` 里另有 7 组声明——**同一条轴两处声明、数目对不上（4 vs 7）、没有任何门交叉核对**，且本 spec 是 `case_profile=\"torch_parity\"`，该档 `_plan` 提前返回、`attr_matrix` **一行代码都不消费**。留着它的唯一效果是让人以为「attr 覆盖已经在这儿声明过了」。gen_cases 现在对本档的 `attr_matrix` 声明即 fail-closed（`_TORCH_PARITY_UNCONSUMED_KEYS`）。⚠ 不是「删掉了 attr 覆盖」——本算子的 attr 轴一直、且只由 `attribute_profiles` 那 7 组决定。",
   "generalize": true,
-  "allow_empty_tensor": false,
+  "_allow_empty_tensor_removed_note": "2026-08-06 删除（原值 false）。同上：`torch_parity` 档 `forced_special=0`、一条特殊场景都不产，这个开关在本档没有任何消费方，写了只会看起来像一道门。**算子事实照旧成立**：Median 不支持空 Tensor（`samples/golden/Median/golden.py` 对空输入直接 fail-closed），本注释就是它的落点。⚠ 若将来 `torch_parity` 拍板要叠加边界特殊场景，这个键会重新有消费方——那时把它从 `gen_cases._TORCH_PARITY_UNCONSUMED_KEYS` 里删掉、并把 `\"allow_empty_tensor\": false` 写回来，是那次改动的一部分。",
   "dtype_required": ["bfloat16", "float16", "float32", "int8", "int16", "int32", "int64", "uint8"],
   "verify_mode": "numerical",
   "precision": {
@@ -53,7 +48,7 @@
     "_standard_note": "任务书精度要求逐字点名 AscendOpTest 工具默认阈值；torch 仅是真值来源，不覆盖显式验收标准。",
     "case_profile": "torch_parity",
     "case_target": 1344,
-    "case_target_source": "机器可复算，非拍脑袋：`case_profile=\"torch_parity\"` 要求 case_target **精确等于**完整笛卡尔矩阵大小，`gen_cases._torch_parity_plan` 逐字核对、对不上当场 fail-closed。1344 = params 里输入 dtype 8 种（bfloat16/float16/float32/int8/int16/int32/int64/uint8）× `torch_parity_matrix.ranks` 8 档（1..8）× `shape_profiles` 3 档（leading_dim 31/2047/262144）× `attribute_profiles` 7 档（global + first/middle/last 轴 × keepDim 二值）。矩阵本身的出处见同级 `torch_parity_matrix.source` / `source_sha256`。⚠ 这个数**不是**真机那轮的 1152——那是 per-run spec（少一档 global overload），见仓根 AGENTS.md §4.4 与 §9.3 的两处告诫，别互相当基线。",
+    "case_target_source": "⚠ 本字段是**纯散文、无消费方**（写错不会有任何门报错）——真正可机核的是下面这套三重记账，别把这段话当门。1344 = params 里输入 dtype 8 种（bfloat16/float16/float32/int8/int16/int32/int64/uint8）× `torch_parity_matrix.ranks` 8 档（1..8）× `shape_profiles` 3 档（leading_dim 31/2047/262144）× `attribute_profiles` 7 档（global + first/middle/last 轴 × keepDim 二值），本 spec 无 `torch_parity_matrix.excluded`（无排除项）。机器侧：`gen_cases._torch_parity_plan` 核 `矩阵大小 − |excluded| == case_target == 实产数` 三者逐字相等，任一处漂移当场 fail-closed，账本落 caseset 的 `case_matrix_ledger`。矩阵本身的出处见同级 `torch_parity_matrix.source` / `source_sha256`。⚠ 这个数**不是**真机那轮的 1152——那是 per-run spec（少一档 global overload），见仓根 AGENTS.md §4.4 与 §9.3 的两处告诫，别互相当基线。⚠ 1344 也**不是** 1344 个不同覆盖组合：低 rank 下 axis_class 塌缩（rank1 的 first/middle/last 同为轴 0、rank2 的 first=middle=0），144 例与同批另一例的 (dtype, 实际 shape, 解析后 attrs) 完全相同 → **不同组合数 = 1200**。本轮**不删**这 144 例（删了上面那条等式当场破，属待拍板项），只如实记账。",
     "torch_parity_matrix": {
       "source": "repos/cannbot-ops-input/ops-bench/ops-eval-dataset/designs/aclnnMedian/case_design.json + 任务书 global 接口补面",
       "source_sha256": "eb46197b0c1aaef197481cecba548409364adb79fdde811a07747f3071b5f3cb",
