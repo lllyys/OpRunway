@@ -19,8 +19,11 @@ caseset 与全部 .npy 被 sha256 逐字节钉死。故先立字段驱动的档�
   · **torch_parity 拒收 legacy 造例键**（`TorchParityUnconsumedKeysTest`）：`attr_matrix` /
     `attr_axis_lengths` / `allow_empty_tensor` / `empty_axis` / `precision.value_profiles`
     在本档一行都不消费，声明即 fail-closed；legacy 侧照旧消费（两侧都立了见证）；
+  · **决定② · 特殊场景政策**（`TorchParitySpecialScenarioPolicyTest`）：三类受控
+    `operator_class` 均不新增空/标量/上下边界，`forced_special=0`，且「有意不产」的
+    reason + evidence 与 `case_target` 口径逐字落账；
   · **三重记账**（`TorchParityCaseTargetAccountingTest`）：`矩阵大小 − |有证据的排除| ==
-    case_target == 实产数`，`excluded` 的受控词表 / reason+evidence / 重叠 / 排空全部 fail-closed；
+    case_target == 常规矩阵实产数`，`excluded` 的受控词表 / reason+evidence / 重叠 / 排空全部 fail-closed；
   · **coverage_strength 如实措辞**（`TorchParityCoverageStrengthTest`）：不许再写「全覆盖」，
     重复覆盖组合按实数落账（median 实测 1344 例 / 1200 个不同组合 / 144 条重复）；
   · dry-run 回显 + 空模板 `spec_schema_template.jsonc` 已记载该字段（防实现与文档漂移）。
@@ -402,8 +405,51 @@ class TorchParityUnconsumedKeysTest(unittest.TestCase):
         self.assertIn("仅 legacy 档可写", tmpl)
 
 
+class TorchParitySpecialScenarioPolicyTest(unittest.TestCase):
+    """决定②：特殊场景仍不进 ``torch_parity``，并把「有意不产」落成机器可读账本。
+
+    §12 对空 / 标量 / 上下边界没有任何实测输入；按与值域 regime 相同的证据门槛，
+    不能只因 legacy 有这四档就把它们接进新档。参考仓对 structural 的 ``special=0``
+    是正证据，但也不能反向外推成其它类别应新增场景，故三类受控值统一保持 0。
+    """
+
+    def test_all_operator_classes_omit_specials_with_reason_and_evidence(self):
+        for operator_class in GC._OPERATOR_CLASSES:
+            with self.subTest(operator_class=operator_class):
+                spec = _with_parity_matrix(_load_spec())
+                spec["operator_class"] = operator_class
+                entries, meta = _plan_of(spec, case_target=12)
+
+                self.assertEqual(len(entries), 12)
+                self.assertFalse(
+                    any(e["case_origin"].startswith("special:") for e in entries),
+                    "torch_parity 决定②没有特殊场景；不能把 legacy forced 项悄悄接进来")
+                self.assertEqual(meta["forced_special"], 0)
+                policy = meta["special_scenario_policy"]
+                self.assertEqual(policy["policy"], "omit_until_measured_evidence")
+                self.assertEqual(policy["operator_class"], operator_class)
+                self.assertEqual(policy["emitted"], 0)
+                self.assertTrue(policy["reason"].strip())
+                self.assertGreaterEqual(len(policy["evidence"]), 2)
+                self.assertTrue(all(isinstance(row, str) and row.strip()
+                                    for row in policy["evidence"]))
+                self.assertEqual(
+                    policy["case_target_relationship"],
+                    "outside_cartesian_not_counted_in_case_target")
+
+    def test_median_keeps_1344_regular_cases_and_zero_specials(self):
+        entries, meta = _plan_of(_load_median(), case_target=1344)
+        ledger = meta["case_matrix_ledger"]
+        self.assertEqual(len(entries), 1344)
+        self.assertEqual(
+            (ledger["expected"], ledger["case_target"], ledger["regular_emitted"]),
+            (1344, 1344, 1344))
+        self.assertEqual(ledger["special_emitted"], 0)
+        self.assertEqual(ledger["total_emitted"], 1344)
+
+
 class TorchParityCaseTargetAccountingTest(unittest.TestCase):
-    """§6.3 · 三重记账：`矩阵大小 − |有证据的排除| == case_target == 实产数`。
+    """§6.3 · 三重记账：`矩阵大小 − |有证据的排除| == case_target == 常规矩阵实产数`。
 
     ⚠ 这**不是**把 case_target 的缺省值加回来：它仍必填、仍无缺省（`_require_case_target`），
     这里加的是「它必须与矩阵对得上」的第二重、以及「账面必须等于实产」的第三重。

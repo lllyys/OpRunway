@@ -198,6 +198,16 @@
 //       {"name":"medium","leading_dim":2047},
 //       {"name":"large","leading_dim":262144}
 //     ],
+//     // ⚠ 当前 shape 档**只有规模值可配，布局值尚无 spec 配置口**：不要自行给上述行加 `layout` / `dims` 等键，
+//     //   `gen_cases._torch_parity_plan` 会按未知字段 fail-closed。布局由 `attribute_profiles` 的接口能力信号派生：
+//     //   · 未出现 `axis_class` → `(L,1,…,1)`（elementwise 等无轴选择器接口保持参考布局）；
+//     //   · 出现 `axis_class` → 首轴保留 `L=leading_dim`，并把实际可能被选中的轴提升到至少 2。
+//     //   Median 这类同时含 first/middle/last 的矩阵，其 rank 1..8 默认依次为
+//     //   `(L)`、`(L,2)`、`(L,2,2)`、`(L,2,1,2)`、`(L,1,2,1,2)`、
+//     //   `(L,1,2,1,1,2)`、`(L,1,1,2,1,1,2)`、`(L,1,1,2,1,1,1,2)`。
+//     //   可配置化**待接**：接入时须同时修改 `gen_cases._torch_parity_plan` 的 shape_profiles 严格校验、
+//     //   `gen_cases._torch_parity_shape_layout` / `_torch_parity_shape` 的消费与受控词表，并把实得布局落入
+//     //   caseset/dry-run 账本；在这些门齐备前，schema 不声明一个“写了却没人消费”的假字段。
 //     "attribute_profiles": [
 //       {"name":"attr_00","attrs":{"dim":{"axis_class":"first_axis"},"keepDim":false}},
 //       {"name":"attr_01","attrs":{"dim":{"axis_class":"first_axis"},"keepDim":true}},

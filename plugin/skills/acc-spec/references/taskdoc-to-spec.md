@@ -26,7 +26,7 @@
   "call_variants": "<cpp_extension / aclnn_py 两种形态**均必填**：变体对象数组，见 §1.3.3>",
   // §1.6 仅 cpp_extension：张量 ACL 存储格式（受控两值）。**整字段省略 = torch_npu_rank_default = 现行为**
   "aclnn_tensor_format": "<可选：torch_npu_rank_default（缺省）| nd>",
-  "allow_empty_tensor": "<可选 bool，缺省 true；任务书明写不支持空 Tensor→false>",
+  "allow_empty_tensor": "<仅 legacy 档可选 bool，缺省 true；torch_parity 决定②不产特殊场景、声明即拒>",
   // §1.4 可选：任务书点名「某 attr 所指的轴长度 = L」这类边界 → **定向生成**，别指望正交网格撞上
   "attr_axis_lengths": [{"attr":"<已声明的 attr 名>","lengths":[1]}],   // 不需要就整字段省略
   "reference": {"type":"<tbe|torch|numpy|gpu|cpu|builtin>","ref":"...","path":"opp/built-in/..."},
@@ -103,11 +103,15 @@
 
 **现在怎么定这个数**：**按覆盖矩阵算，不是拍一个数**。
 
-- `case_profile == "torch_parity"`：`case_target` **必须精确等于**完整笛卡尔矩阵大小
-  `dtype × rank × shape_profile × attribute_profile`（见 §1.3『Torch overload 覆盖与 `torch_parity_matrix`』）。
+- `case_profile == "torch_parity"`：`case_target` **必须精确等于常规完整笛卡尔矩阵大小**
+  `dtype × rank × shape_profile × attribute_profile`（再减去有 `reason + evidence` 的 `excluded`；
+  见 §1.3『Torch overload 覆盖与 `torch_parity_matrix`』）。特殊场景按 §1.3 的结构约束本来就不进
+  笛卡尔、也不计入 `case_target`；决定②进一步明确本档当前三类 `operator_class` 均产 0 条，故
+  `total_emitted == regular_emitted == case_target`。账本分别写 `regular_emitted / special_emitted /
+  total_emitted`，不得把独立叠加的概念偷塞进矩阵乘法。
   不相等 `gen_cases` 直接报错，这条已经是硬校。
-  ⚠ 这四条是**当前矩阵已有的自由轴**，不表示看到任何字段都要再加一维：特殊场景、输出个数和值域 regime
-  的取舍，以及新增轴是否必须交叉，统一按 §1.3「轴集契约」判断。
+  ⚠ 这四条是**当前矩阵已有的自由轴**，不表示看到任何字段都要再加一维：特殊场景已决定不产、
+  输出个数不是自由轴、值域 regime 暂不引入；新增轴是否必须交叉统一按 §1.3「轴集契约」判断。
 - `precision.case_source == "taskdoc"`：`case_target` **照样必填**，且**必须精确等于**规范化后的
   任务书用例条数——这一档你不推算这个数，它被用例集锁死（`_taskdoc_plan` 逐字核对，对不上当场报
   「任务书用例集有 N 条、`precision.case_target=…`——两者必须相等」）。⚠ **别读成「这一档不用写」**：
@@ -144,9 +148,9 @@ attr 笛卡尔、§1.4 特殊场景、白名单必覆盖 + 1-wise 采样）铺�
 | `change.kind` | 『任务概述』定性词 | 受控**八值**：rewrite_tbe / add_dtype / **extend_shape** / align_dtype / semantic / new_op / gpu_port / bugfix（复合取主 kind，余入 note；唯一真源 `perf_mode.CHANGE_KINDS`，词表外 fail-closed）。⚠ `extend_shape`（扩展 shape·rank）**别再硬塞进 `semantic`**——`add_dtype` / `extend_shape` / `new_op` 三类是 §4.1 `change_class_no_perf_comparison` 授权的机器判据，塞错就派生不出来。⚠ 整字段省略 = **未声明**，不兜任何默认 |
 | `change.dtypes_added` | add_dtype 新增类型 | 如 `["int16"]`、`["bf16"]` |
 | `params_source` | 有无完整参数表 | 有表→`task_doc_table`；只写『原算子所有类型』→`derived_from_reference` |
-| `operator_class`（§1.5）| 任务书的**算子功能/公式**段 + 参考 API 语义（这算子到底在算什么） | 受控词表 `floating_compute / structural / integer_compute`，**三选一、无第四种**。决定 gen_cases 产不产 `inf/-inf/nan` 特殊场景、`value_profiles` 能不能含 `"nan"`。**每份新 spec 都判**；整字段省略 = legacy 向后兼容出口（照产 NaN·Inf），别当缺省答案用。词表外取值 → fail-closed |
+| `operator_class`（§1.5）| 任务书的**算子功能/公式**段 + 参考 API 语义（这算子到底在算什么） | 受控词表 `floating_compute / structural / integer_compute`，**三选一、无第四种**。legacy 档据它决定产不产 `inf/-inf/nan` 特殊场景、`value_profiles` 能不能含 `"nan"`；`torch_parity` 决定②则对三类统一保持特殊场景 0 条，字段仍须照实填写并落账，**不得**据类别自行加例。**每份新 spec 都判**；整字段省略 = legacy 向后兼容出口（照产 NaN·Inf），别当缺省答案用。词表外取值 → fail-closed |
 | `params[]` | 参数说明表 | 每参 `{name,io:in\|out\|attr,dtype:[],default?,noncontiguous?,rank?}`；Tensor→in/out，标量/属性→attr。**attr 值类型（C2）**：`int \| float \| bool \| str \| list[int]`——数组属性（`output_size`/`kernel_size`/`stride`/`padding`/`ksize`）照原样写成 `[a,b]`，别拍平成字符串、别只取首元素。**in 的 `rank`（C3）**见下一行 |
-| `params[].rank`（C3，可选）| 任务书参数表『维度(shape)』栏 / 算子 README / `*_infershape.cpp` 的 rank 校验 | int（`2`）或 int 列表（`[3,4]`）。**只声明确凿的 rank**，任务书没写死就**别填**（不写=不限制=现行为，不臆造）。例（依据 `dev-doc/oprunway-op-shape-taxonomy.md`，相关行标 `verified`）：Pdist=2、im2col=[3,4]、UpsampleNearestExact1d=3、UpsampleNearest3d=5、bincount=1。⚠ **它只收窄「造哪些 shape」，收不掉「造哪些场景」**：`gen_cases._special_entries` 的空 Tensor / 标量 / 边界 / inf-nan 是**强制必覆盖**项，rank 约束下走 `_fit_rank` **保 numel 调维**（如空 `(0,)` 在 rank=2 时被调成合法 2 维的空 shape），**不会被过滤掉**。任务书明写「不支持空 Tensor」时**照记 `task_pr_gaps`**（当前 spec 没有关掉空 Tensor 用例的字段），别假定填了 rank 就自动干净 |
+| `params[].rank`（C3，可选）| 任务书参数表『维度(shape)』栏 / 算子 README / `*_infershape.cpp` 的 rank 校验 | int（`2`）或 int 列表（`[3,4]`）。**只声明确凿的 rank**，任务书没写死就**别填**（不写=不限制=现行为，不臆造）。例（依据 `dev-doc/oprunway-op-shape-taxonomy.md`，相关行标 `verified`）：Pdist=2、im2col=[3,4]、UpsampleNearestExact1d=3、UpsampleNearest3d=5、bincount=1。⚠ legacy 档中它只收窄「造哪些 shape」，收不掉特殊场景：`gen_cases._special_entries` 的空 Tensor / 标量 / 边界 / inf-nan 是强制项，rank 约束下走 `_fit_rank` 保 numel 调维。`torch_parity` 决定②则一条特殊场景都不产，不能拿 rank 声明反推已经覆盖。任务书明写「不支持空 Tensor」时照记 `task_pr_gaps`；在 `torch_parity` 下不得声明 `allow_empty_tensor` 冒充消费方 |
 | `generalize` | 测试标准是否要泛化数据 | 默认 true；无张量IO(Sleep)/融合无泛化要求→false |
 | `dtype_required`（Q7 dtype 覆盖门）| 任务书**权威 dtype 全集**（来源优先级同下 dtype 行：任务书显式表 > 原 TBE 信息库 > 问用户）| list of dtype。任务书只写『支持所有类型』且信息库未接通/全集未知 → **填 `"needs_user"`**（不谎报覆盖、也不臆造全集）；legacy 未迁 → **整字段省略**（门判『未声明→覆盖门未行使』、不阻塞）。**IsClose 已核**：op_def 正源={float32,float16,bfloat16,int32} |
 | `dtype_tested`（Q7 dtype 覆盖门）| 当前 pipeline **实测子集**（通常 float32/float16）| list。**gen_cases 据实际生成的 cases 归并并写入 caseset**（门也用真实 cases 对账，口径一致、消除「并集过报」）；spec 侧此字段作声明/文档，**须与真实一致否则门抓「自报不符」→ BLOCKED** |
@@ -159,7 +163,7 @@ attr 笛卡尔、§1.4 特殊场景、白名单必覆盖 + 1-wise 采样）铺�
 | `aclnn_tensor_format`（§1.6，可选，**仅 `runner_form=cpp_extension`**）| **ABI 事实源**（接口 header / docs / example）对张量存储格式的要求；任务书与 op_def 只作交叉 | 受控两值。整字段省略 = `torch_npu_rank_default` = op-plugin 按 rank 猜格式（3→NCL、4→NCHW、5→NCDHW、其余→ND），产物逐字节不变、manifest 记 `default_unverified`。接口按 `GetStorageFormat()==FORMAT_ND` 校格式（症状：rank-3 张量被 L2 拒成 `ACLNN_ERR_PARAM_INVALID` 161002）时才写 `nd`。⚠ `nd` 当前只在手写 `extended` stage2 下实现，落在走官方宏的 `standard` 形态上 → fail-closed。**没核过就别写，沿用缺省并挂账** |
 | `call_variants`（§1.3.3）| **递归发现的接口头**的函数签名（`<op_subdir>` 下有界递归找到的 `aclnn_*.h`，剔 `*_impl.h`；**层级不预设**）+ 任务书的 attr 语义 | 变体对象数组；`when`/`symbol`/`active_outputs` 必填，`active_attrs`/`attrs` 选填。按 **attr 取值**分派，**绝不按算子名**。`runner_form ∈ {cpp_extension, aclnn_py}` **一律必填**（两种形态共用同一份逐 case 调用契约 `aclnn_call`）|
 | `params[].out_role` / `index_of` / `gather_from`（§1.3.2）| aclnn 签名的输出形参 + 任务书对各输出的语义描述 | `out_role ∈ {value, index}`（多输出时**每个** out 必填）；`index_of` 指本 spec 某 `value` 输出名；`gather_from` 指本 spec 某 `in` 参数名。二者仅 `index` 有、且**必填** |
-| `allow_empty_tensor`（§1.3.6）| 任务书『不支持空 Tensor』类明写约束 | 真 bool，缺省 `true`。`"false"`/`0` **fail-closed 拒收** |
+| `allow_empty_tensor`（§1.3.6）| 任务书『不支持空 Tensor』类明写约束 | **仅 legacy 档可写**：真 bool，缺省 `true`，`"false"`/`0` fail-closed。`torch_parity` 决定②不产特殊场景，本键无消费方，声明即 fail-closed；算子事实照记 `task_pr_gaps` 或 `_` 前缀注释，不能用一个无效开关冒充已覆盖 |
 | `attr_axis_lengths`（§1.4，可选）| 任务书**点名**的轴长度边界（典型句式「归约维/dim 所指轴上维度为 1 时…」）| `[{"attr":"<已声明 attr 名>","lengths":[<正整数>…]}]`。**声明了却一条都产不出 → fail-closed**（假覆盖）。不需要就整字段省略 |
 | `precision.tolerance_policy_id`（T5，待散文门）| **口径 id（分两层，别混）**：`spec.precision.tolerance_policy_id`=**spec 级摘要/向后兼容**（exact→`exact`、ascendoptest→`ascendoptest_default`、mere_mare/atk_double→`ecosystem_mere_mare`，**无 dtype 后缀**）；`caseset.expected.tolerance_policy_id`=**门控用、格式 `standard:dtype`**（如 `ascendoptest_default:float32`，per-case 由 `gen_cases` 按 golden dtype 生成，exact/behavioral 无 dtype 后缀）。validator/gate 的三处一致比的是**caseset 级**那份 | 
 | `precision.acceptance_policy?`（T5，待散文门）| 任务书验收目标宽于平台底线时 | 可选 `{"standard":"...","error_rate":...}` 等覆盖；acceptance 过而 standard 不过 → PASSED_WITH_RISK 走人工 CP。**仅任务书明确放宽时才填**，勿臆造 |
@@ -549,11 +553,14 @@ Torch 签名列出必须对标的 overload，再逐个建立：
 
 当前轴集另有三条边界：
 
-1. **特殊场景不进笛卡尔，只独立叠加。** 参考仓 `design_contract.py` 明文如此规定，理由逐字就是
-   **避免组合爆炸**；代价也须记账：「空 Tensor × 按维归约」这类组合因此永远测不到。
-   ⚠ 本条只确定「不进笛卡尔」。`torch_parity` 当前一条特殊场景都不产，这与本仓 legacy
-   「边界一律保留」存在张力；究竟保持为零，还是在常规网格外独立叠加边界集，**待用户拍板**，
-   抽 spec 时不得替人定，也不得把任一方案写成既定规则。
+1. **特殊场景不进笛卡尔；决定②已定本档当前产 0 条。** 参考仓 `design_contract.py` 明文规定
+   特殊场景若存在只能独立叠加，理由逐字是**避免组合爆炸**；这条结构约束不因数量为 0 而失效。
+   取舍按用户既定的「最遵守原计划 + 实施时间最短」执行：参考仓明确给 structural `special=0`，
+   而本仓 §12 对空 / 标量 / 上下边界没有任何实测输入；这与值域 regime 同属「收益零实测支撑」，
+   因此不把 legacy 四类 forced 项接入 `torch_parity`，也不把 structural 的明文结论外推成其它类别
+   应新增场景。三类受控 `operator_class` 均为 0；`gen_cases` 在 `special_scenario_policy` 中写
+   `reason + evidence + emitted=0`。抽 spec 时不得声明 `allow_empty_tensor / empty_axis`，它们在本档
+   没有消费方、会 fail-closed；算子事实改用 `task_pr_gaps` 或 `_` 前缀说明。
 2. **多输出不是自由轴。** 输出集是 attr 轴的确定性函数：`_select_call_variant` 据 attrs 选变体，
    `active_outputs` 随之确定。再加一条“输出个数”轴只会重复计数，并造出 attr 与输出 arity 不可能同时成立的组合。
 3. 🔴 **值域 regime 轴暂不引入。** 现 `torch_parity` 只有 `uniform` 一档，结构上没有第二档可比，
@@ -633,12 +640,17 @@ Torch 签名列出必须对标的 overload，再逐个建立：
 
 ### 1.3.6 `allow_empty_tensor`
 
-顶层可选 bool，**缺省 `true` = 现行为**（opbase §1.4 把空 Tensor 当普适特殊场景强制铺）。
+**本字段仅在 legacy 档有消费方。** 顶层可选 bool，**缺省 `true` = legacy 现行为**
+（opbase §1.4 把空 Tensor 当普适特殊场景强制铺）。
 任务书**明写**「不支持空 Tensor」（Upsample 系、im2col 的部分形态、以及很多归约类）→ 写 `false`。
 理由：强塞一条算子语义上不存在的用例，只有两个出口——要么 golden **替算子编造**它并不支持的语义，
 要么整链 fail-closed 卡死。写 `false` 是**算子的显式声明**，不是默认放松，仍要在 `task_pr_gaps` 记依据原句。
 ⚠ **只接受真布尔**：`"false"` / `0` 会被真值性判断误读成「允许」，引擎 fail-closed 拒收。
 （相关可选字段 `empty_axis`：允许空 Tensor、但 0 只能落在某一特定轴时声明轴号；两者都不写 = 老行为。）
+
+`case_profile="torch_parity"` 下决定②已定特殊场景为 0 条，`allow_empty_tensor / empty_axis`
+没有任何代码消费，声明即 fail-closed。任务书里的空 Tensor 支持事实仍须落 `task_pr_gaps` 或 `_` 前缀注释；
+这只是如实记录，不得写成“本轮已覆盖空 Tensor”。
 
 ### 1.3.7 本节自检（并入 §7）
 
@@ -659,7 +671,8 @@ Torch 签名列出必须对标的 overload，再逐个建立：
   或 gap 里写清出处），**不是** 0.6 这类抄来的默认值。
 - `perf.baseline=="aclnn_builtin"` ⇒ `perf.aclnn_baseline.library=="cann_builtin_libopapi"`；
   `variants` 对每个性能 case 恰好命中一条，`symbol/slots` 完整；真机产物须带实际库 sha256 与符号定义方。
-- `allow_empty_tensor` / `scenario` 等**不属本场景就整字段省略**，别写空串或占位值。
+- `allow_empty_tensor` / `scenario` 等**不属本场景就整字段省略**，别写空串或占位值；
+  `torch_parity` 下前者必须省略（决定②为 0 条，声明会被无消费方门拒绝）。
   ⚠ **`runner_form` 不在这条里**：它是执行形态声明、不是场景标签，正式验收必须显式写 `cpp_extension`。
 
 ## 1.4 `attr_axis_lengths` —— 任务书**点名的轴长度边界**怎么定向生成（可选，顶层）
@@ -894,8 +907,8 @@ N 个算子 → N 个 `<op>.spec.json`。**共享字段抽一次复用**(hardwar
   `precision.case_target_source`）。⚠ **拿不准就停下问用户，不许随手填一个数**——「缺省 50」正是因为
   没人回答过这个问题才被删掉的（见上文『`case_target` 怎么定』）。
 - **§1.3 · 轴集契约**：新增交叉只由「共同决定实现分支 / 切分」的接口能力证据触发，绝不按算子名；
-  特殊场景不进笛卡尔（是否在 `torch_parity` 独立叠加仍待用户拍板）；输出个数不作自由轴；
-  值域 regime 暂不引入，直到先有能实测其交互收益的多档矩阵。
+  特殊场景不进笛卡尔且决定②已定 `torch_parity` 当前为 0 条（与值域 regime 同按零实测不扩面）；
+  输出个数不作自由轴；值域 regime 暂不引入，直到先有能实测其交互收益的多档矩阵。
 - 多算子每份 spec 的 op 唯一、gaps 独立。
 - **C2 · attr 值类型**：每个 attr 的 `default`（及 `attr_matrix` 里的取值）∈ `bool/int/float/str` 标量 **或 `list[int]`**。
   ⚠ **数组只支持 `list[int]`**：嵌套数组、浮点数组、`list` 里混 `bool`（`[True]` 与 `[1]` 在 JSON 里都长成 `[true]`/`[1]`、语义会串）**引擎一律 fail-closed 拒**；空数组也拒（manifest 会错位）。真需要别的形态 → 记 gap、停下问，别硬塞。

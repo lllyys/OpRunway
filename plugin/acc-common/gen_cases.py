@@ -135,11 +135,18 @@ G4 · 归约/成对类算子的**生成期规模预算**（2026-07-22，落地�
     profile 生成完整笛卡尔；rank 动态轴 class 在逐 case 解析成 first/middle/last。带轴选择器的接口
     按已有 `axis_class` 能力信号把 shape 中**实际会被选择的轴**从 1 提到 2，保留首位长轴同时补出
     `长归约 × batch>1`；无轴选择器的纯 elementwise 仍沿参考布局。`legacy` 与未声明仍保持逐字节兼容。
-  · **三重记账**（`_torch_parity_plan`，2026-08-06）：`矩阵大小 − |有证据的排除| == case_target == 实产数`，
+  · **三重记账**（`_torch_parity_plan`，2026-08-06）：
+    `矩阵大小 − |有证据的排除| == case_target == 常规矩阵实产数`，
     任一处漂移当场炸。排除项写 `torch_parity_matrix.excluded`，每条**必须**带 `reason` + `evidence`
     （缩水必须留痕，沿用 `golden_cost.skipped_shapes` / `dropped_combo_classes` 的既有形状）。
     ⚠ `case_target` 仍**必填、无缺省**——这里加的是「它必须与矩阵对得上」的第二重约束，
     不是把缺省值加回来。账本落在 caseset / dry-run 的 `case_matrix_ledger`。
+  · **特殊场景决定②**（2026-08-06）：三类受控 `operator_class` 在本档均保持
+    `forced_special=0`。参考仓只明确证明 structural 的 `special=0`；本仓现有矩阵对空 / 标量 /
+    上下边界的收益也没有实测输入，故按与「值域 regime 暂不引入」相同的证据门槛，不把 legacy
+    的四类 forced 项接入本档，也不把 structural 的明文结论反向外推成其它类别应新增场景。
+    这是一项**有意不产**的政策，不是遗漏：reason + evidence + 与 `case_target` 的关系落在
+    `special_scenario_policy`；未来若有实测支持，特殊场景仍只能独立叠加、不进笛卡尔。
   · **本档拒收 legacy 造例键**（`_TORCH_PARITY_UNCONSUMED_KEYS`，2026-08-06）：`attr_matrix` /
     `attr_axis_lengths` / `allow_empty_tensor` / `empty_axis` / `precision.value_profiles` 在本档
     **一行代码都不消费**，声明即 fail-closed。理由与「为什么是拒绝而不是接上消费」见该表上方长注释；
@@ -1491,7 +1498,8 @@ def _torch_parity_shape(leading, rank, layout, selected_classes):
 # 这些键写在 spec 里因此完全没有作用——可它们读起来恰恰像「我已经声明了所以已经覆盖了」。
 # 这是**结构性 fail-open**，与 `operator_class` 那处 fail-closed 防的是同一件事，故：**本档写了就当场炸**。
 #
-# ⚠ 为什么一律选「拒绝」而不是「接上消费」（这条理由别下次顺手改掉）：这些键要真被消费，
+# ⚠ 为什么一律选「拒绝」而不是「接上消费」（这条理由别下次顺手改掉）：决定②已明确
+#   `torch_parity` **不新增特殊场景**；这些键要真被消费，
 #   **无一例外都得改变本档用例集的构成**——
 #     · `value_profiles` / `allow_empty_tensor` / `empty_axis` → 等于让本档开始产特殊场景；
 #     · `attr_axis_lengths` → 等于在完整笛卡尔之外定向追加用例，`矩阵大小 == case_target == 实产数`
@@ -1501,8 +1509,7 @@ def _torch_parity_shape(leading, rank, layout, selected_classes):
 #       再笛卡尔展开」，后者是「带 `axis_class` 符号的显式 profile 列表」——要「加一道交叉核对门」
 #       就得先发明一套两边的对应关系，那既比删掉重复声明更弱、又是新的可漂移判据。
 #       **一条轴只留一处声明**才是治本。
-#   而「本档产不产特殊场景」「轴取值怎么定」正是用例轴集设计说明里**待人拍板**的决定。所以：
-#   拒绝 = 只封掉当下确实存在的 fail-open，不预判任何决定；消费 = 替人拍板。
+#   拒绝 = 落实决定②并封掉当下确实存在的 fail-open；消费 = 重新打开已定政策。
 # ⚠ 维护约定：哪天本档真的开始消费其中某个键，**把它从本表删掉是那次改动的一部分**——
 #   留在表里就变成「已经消费了却还在拒收」的反向坑。`test_gen_cases_case_profile` 对本表逐项立了 pin。
 _TORCH_PARITY_UNCONSUMED_KEYS = (
@@ -1539,7 +1546,40 @@ def _reject_unconsumed_legacy_keys(spec):
               "（本仓惯例：`_` 开头 = 无消费方的说明），别用一个看起来像门的键去表达。")
 
 
-# ====== TP · 三重记账：矩阵大小 − 有证据的排除 == case_target == 实产数 ==========================
+# ====== TP · 决定②：特殊场景有意不产（reason + evidence 落账）=============================
+def _torch_parity_special_scenario_policy(operator_class):
+    """返回 ``torch_parity`` 的特殊场景政策账本；不生成 case。
+
+    ``operator_class`` 已由 :func:`_operator_class` 校过受控词表；这里仍留一道直接调用守卫，
+    防未来调用方绕过唯一解析口。整字段省略的 ``None`` 只为历史/测试夹具兼容，新 spec 仍按
+    acc-spec 规则必须显式判类。
+
+    ``case_target`` 只数常规矩阵：特殊场景由 §7.1 明定为独立叠加、不是矩阵轴。今天 emitted=0，
+    所以总实产恰好仍等于 case_target；若未来证据足以重开，必须把特殊场景单独记账，不能把它偷塞
+    进矩阵乘法，也不能放宽常规矩阵的三重等式。
+    """
+    if operator_class is not None and operator_class not in _OPERATOR_CLASSES:
+        raise ValueError(
+            f"torch_parity special policy 收到未知 operator_class={operator_class!r}；"
+            f"须属 {list(_OPERATOR_CLASSES)} 或为历史未声明 None")
+    return {
+        "policy": "omit_until_measured_evidence",
+        "operator_class": operator_class,
+        "emitted": 0,
+        "reason": (
+            "空/标量/上下边界在现有 torch_parity 矩阵中没有实测收益证据；"
+            "按与值域 regime 相同的证据门槛，本档不新增特殊场景"),
+        "evidence": [
+            ("dev-doc/oprunway-case-axis-design.md §12.15：决定②的现有实测输入为零，"
+             "本轮矩阵未生成空/标量/上下边界，故没有数据可量化其收益"),
+            ("参考仓 design_contract.py 明文支持 structural special=0；"
+             "没有证据把该结论外推成其它 operator_class 应新增场景"),
+        ],
+        "case_target_relationship": "outside_cartesian_not_counted_in_case_target",
+    }
+
+
+# ====== TP · 三重记账：矩阵大小 − 有证据的排除 == case_target == 常规矩阵实产数 ==================
 # 轴名受控词表。`excluded` 里出现词表外的轴名 = 排除了一条根本不存在的轴，当场炸。
 _TORCH_PARITY_AXIS_NAMES = ("dtype", "rank", "shape_profile", "attribute_profile")
 
@@ -1637,9 +1677,10 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
 
     完整矩阵不受 1-wise/case_target 抽样。**三重记账**（任一处漂移当场炸）：
 
-        ∏|轴取值| − |excluded 展开后的组合| == precision.case_target == 实际 emitted
+        ∏|轴取值| − |excluded 展开后的组合| == precision.case_target == regular_emitted
 
-    第一重防「声明 1152 全覆盖却静默只取 60 条」；第三重防「有了排除项之后，实产数与账面数
+    特殊场景不计入这条等式，单独以 ``special_emitted`` 记账。第一重防「声明 1152 全覆盖却
+    静默只取 60 条」；第三重防「有了排除项之后，常规矩阵实产数与账面数
     靠『完整笛卡尔不采样』这个实现细节隐式对齐」——那条隐式保证一旦有排除就断了。
 
     ⚠ 本档**不进笛卡尔**的两样东西（已有明文依据，不是省事）：
@@ -1647,8 +1688,9 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
     * **特殊场景独立叠加、绝不与常规网格交叉**——参考仓 ``design_contract.py`` 明文，
       理由逐字就是避免组合爆炸；本仓 legacy 也是这么做的（特殊场景只配 ``attr_combos[0]``，
       见 ``_plan`` 的 ①）。代价要认：「空 Tensor × 按维归约」这类组合因此永远测不到。
-      （⚠ 本档当前 ``forced_special=0``、一条特殊场景都不产，那是**另一个问题**、待拍板，
-      与「不进笛卡尔」这条无关，别混成一件事。）
+      决定②已按「原计划忠实度 + 最短实施」收敛为本档 ``forced_special=0``：现有实测没有
+      空/标量/上下边界的收益输入，与值域 regime 同样不在零证据下扩面。reason + evidence 见
+      ``special_scenario_policy``。这不改变「未来若重开也只能独立叠加」的结构约束。
     * **输出个数不是自由轴**，它是 attr 轴的**确定性函数**——``_select_call_variant(variants, attrs, cid)``
       从 attrs 选调用变体，输出集随之定死。当轴放进笛卡尔 = 重复计数，还会造出
       「dim=null 且要求 indices 输出」这种不存在的组合。``_build_multi_output_case`` 那处
@@ -1725,6 +1767,9 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
         raise ValueError(
             "torch_parity_matrix.generator 当前须为 {kind:'uniform', min:<数>, max:<数>}")
 
+    operator_class = _operator_class(spec)
+    special_policy = _torch_parity_special_scenario_policy(operator_class)
+
     shape_layout, selected_axis_classes = _torch_parity_shape_layout(normalized_profiles)
     if shape_layout == "axis_selector_selected_axes_nontrivial":
         unit_profiles = [name for name, leading in shape_rows if leading < 2]
@@ -1795,22 +1840,34 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
     # 三重记账第三重：**实产数**。前两重（矩阵大小、case_target）是账面对账面，
     # 这一重才把「循环真的产了几条」接进来。今天它靠「完整笛卡尔不采样」隐式成立，
     # 一旦有 excluded / 循环被改动，隐式保证就断了——所以显式立一道，别指望下一个人记得。
-    if len(entries) != expected:
+    regular_entries = entries
+    special_entries = []                    # 决定②：有意不产；未来重开也须保持独立列表、不得混进矩阵
+    regular_emitted = len(regular_entries)
+    special_emitted = len(special_entries)
+    if special_emitted != special_policy["emitted"]:
         raise ValueError(
-            f"torch_parity 实产 {len(entries)} 条 ≠ 账面 {expected} 条"
+            f"torch_parity 特殊场景实产 {special_emitted} 条 ≠ 政策账本 {special_policy['emitted']} 条；"
+            "特殊场景政策与生成逻辑已经漂了，绝不放行")
+    entries = regular_entries + special_entries
+    total_emitted = len(entries)
+    if regular_emitted != expected:
+        raise ValueError(
+            f"torch_parity 常规矩阵实产 {regular_emitted} 条 ≠ 账面 {expected} 条"
             f"（完整笛卡尔 {full_cartesian} − 有证据的排除 {len(excluded_combos)}）；"
             "生成循环与记账已经漂了，绝不放行")
-    distinct_combinations, duplicate_cases = _torch_parity_combination_stats(entries)
+    # 覆盖组合统计只属于常规矩阵；特殊场景是独立叠加，未来即使重开也不能混入这份矩阵账。
+    distinct_combinations, duplicate_cases = _torch_parity_combination_stats(regular_entries)
     return entries, {
         "pool_max": expected,
         "requested_target": expected,
-        "emitted": expected,
-        "forced_special": 0,
-        "operator_class": _operator_class(spec),
+        "emitted": total_emitted,
+        "forced_special": special_emitted,
+        "special_scenario_policy": special_policy,
+        "operator_class": operator_class,
         "emits_nonfinite_specials": False,
         "case_profile": "torch_parity",
         "case_profile_declared": True,
-        "forced_total": expected,
+        "forced_total": total_emitted,
         "dropped_combo_classes": [],
         "unpaired_combo_classes": {
             "count": 0,
@@ -1827,7 +1884,9 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
             ("complete_cartesian" if not excluded_combos else "cartesian_minus_excluded")
             + f"：dtype×rank×shape_profile×attribute_profile 完整笛卡尔 {full_cartesian} 组合"
             + (f" − 有证据的排除 {len(excluded_combos)} 组合" if excluded_combos else "")
-            + f" → 实产 {len(entries)} 例、无抽样（矩阵大小 == case_target == 实产数，三重逐字相等）；"
+            + f" → 常规矩阵实产 {regular_emitted} 例、无抽样"
+              "（矩阵大小 == case_target == 常规矩阵实产数，三重逐字相等）；"
+            + "特殊场景独立于笛卡尔且不计入 case_target，本档决定②有意不产（0 例）；"
             + f"shape_layout={shape_layout}（"
               + (f"检测到 axis_class={list(selected_axis_classes)}，保留首轴长归约，"
                  "并把这些 class 在各 rank 的实际落点提到至少 2（未被选择的轴仍可为 1）"
@@ -1837,9 +1896,9 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
             + (f"其中 {duplicate_cases} 例与同批另一例的 (dtype, 实际 shape, **解析后** attrs) 完全相同"
                f"（低 rank 下 axis_class 塌缩，如 rank1 的 first/middle/last 同为轴 0），"
                f"故**不同覆盖组合数 = {distinct_combinations}**——"
-               f"报告只能按这个数说覆盖，不得把 {len(entries)} 当成不同组合数"
+               f"报告只能按这个数说覆盖，不得把 {regular_emitted} 当成不同组合数"
                if duplicate_cases else
-               f"{len(entries)} 例互不相同，不同覆盖组合数 = {distinct_combinations}")),
+               f"{regular_emitted} 例互不相同，不同覆盖组合数 = {distinct_combinations}")),
         "golden_cost": ({
             "budget": _cost_budget(spec), "model": _COST_MODEL,
             "scaled_cases": [], "skipped_shapes": [], "skipped_shape_classes": 0,
@@ -1863,11 +1922,17 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
             "excluded_total": len(excluded_combos),
             "expected": expected,
             "case_target": int(case_target),
-            "emitted": len(entries),
+            # `emitted` 保留给既有消费者，值明确等于**常规矩阵**实产；special 独立列账。
+            "emitted": regular_emitted,
+            "regular_emitted": regular_emitted,
+            "special_emitted": special_emitted,
+            "total_emitted": total_emitted,
             "distinct_combinations": distinct_combinations,
             "duplicate_cases": duplicate_cases,
             "note": (
-                "三重记账：full_cartesian − excluded_total == expected == case_target == emitted，"
+                "三重记账：full_cartesian − excluded_total == expected == case_target == "
+                "regular_emitted（兼容键 emitted 同值）；特殊场景不进笛卡尔且不计入 case_target，"
+                "另以 special_emitted 记账，total_emitted = regular_emitted + special_emitted。"
                 "任一处漂移 gen_cases 当场 fail-closed。"
                 "duplicate_cases = 与同批另一例 (dtype, 实际 shape, 解析后 attrs) 完全相同的条数"
                 "（输入字节仍不同——种子吃 case_id，故它们是同一覆盖组合的额外随机样本，"
