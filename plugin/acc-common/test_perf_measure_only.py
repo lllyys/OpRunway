@@ -12,6 +12,7 @@
 跑: python3 -m unittest test_perf_measure_only -v   （在 acc-common/ 下）
 """
 import copy
+import hashlib
 import json
 import os
 import shutil
@@ -45,6 +46,19 @@ _AUTH = {
     "cite": "task_doc.snapshot.md:12-14",
     "quote": "以 OpenCV CUDA A100 为参考",
     "taskdoc_snapshot_sha256": "c" * 64,
+}
+
+# 三级门的正例不能再靠上面那份纯 schema 夹具（其 sha 是占位值）。门会现场读取
+# `<ops_root>/<op>/task_doc.snapshot.md`，故这里绑定 _golden_fixture 安装的 IsClose 真实快照。
+_ISCLOSE_SNAPSHOT = os.path.join(
+    _SPECS, "..", "golden", "IsClose", "task_doc.snapshot.md")
+with open(_ISCLOSE_SNAPSHOT, "rb") as _fh:
+    _ISCLOSE_SNAPSHOT_SHA256 = hashlib.sha256(_fh.read()).hexdigest()
+_BOUND_AUTH = {
+    "taskdoc_requirement": "change_class_no_perf_comparison",
+    "cite": "task_doc.snapshot.md:1",
+    "quote": "aclnnIsClose算子开发任务书",
+    "taskdoc_snapshot_sha256": _ISCLOSE_SNAPSHOT_SHA256,
 }
 
 
@@ -144,17 +158,35 @@ class PerfModeContractTest(unittest.TestCase):
                                                "measure_only_authorization": _AUTH,
                                                key: 1.0}})
 
-    def test_snapshot_digest_key_may_be_explicit_null_but_never_omitted(self):
-        """无快照可绑时**显式写 null**（5.8：不填未经核实的 sha）；省略该键则是「没人说过」→ 拒。"""
+    def test_snapshot_digest_is_mandatory_and_legacy_null_is_distinguishable(self):
+        """老产物的显式 null 与缺键都拒；错误须能区分，便于明确要求重生成。"""
         auth = dict(_AUTH, taskdoc_snapshot_sha256=None)
-        self.assertEqual(
-            PM.resolve_spec_mode({"perf": {"mode": "measure_only",
-                                           "measure_only_authorization": auth}}),
-            PM.MODE_MEASURE_ONLY)
-        del auth["taskdoc_snapshot_sha256"]
-        with self.assertRaises(PM.PerfModeError):
+        with self.assertRaisesRegex(PM.PerfModeError, "null.*旧产物"):
             PM.resolve_spec_mode({"perf": {"mode": "measure_only",
                                            "measure_only_authorization": auth}})
+        del auth["taskdoc_snapshot_sha256"]
+        with self.assertRaisesRegex(PM.PerfModeError, "缺必填字段"):
+            PM.resolve_spec_mode({"perf": {"mode": "measure_only",
+                                           "measure_only_authorization": auth}})
+
+    def test_authorization_verifier_recomputes_snapshot_and_checks_cited_quote(self):
+        ok, reason = PM.verify_measure_only_authorization(_BOUND_AUTH, _ISCLOSE_SNAPSHOT)
+        self.assertTrue(ok, reason)
+
+        bad_digest = dict(_BOUND_AUTH, taskdoc_snapshot_sha256="0" * 64)
+        ok, reason = PM.verify_measure_only_authorization(bad_digest, _ISCLOSE_SNAPSHOT)
+        self.assertFalse(ok)
+        self.assertIn("指纹不符", reason)
+
+        bad_quote = dict(_BOUND_AUTH, quote="任务书从未写过这句话")
+        ok, reason = PM.verify_measure_only_authorization(bad_quote, _ISCLOSE_SNAPSHOT)
+        self.assertFalse(ok)
+        self.assertIn("逐字子串", reason)
+
+        wrong_line = dict(_BOUND_AUTH, cite="task_doc.snapshot.md:2")
+        ok, reason = PM.verify_measure_only_authorization(wrong_line, _ISCLOSE_SNAPSHOT)
+        self.assertFalse(ok)
+        self.assertIn("逐字子串", reason)
 
     def test_measure_only_allows_collection_and_comment_fields(self):
         spec = {"perf": {"mode": "measure_only", "measure_only_authorization": _AUTH,
@@ -218,8 +250,9 @@ class PerfCasePolicyLedgerTest(unittest.TestCase):
 
 # ————————————————— Task3：perf_compare 只测不比 —————————————————
 def _mo_spec():
-    return {"op": "X", "perf": {"mode": "measure_only",
-                                "measure_only_authorization": _AUTH,
+    return {"op": "IsClose", "change": {"kind": "new_op", "note": "fixture"},
+            "perf": {"mode": "measure_only",
+                                "measure_only_authorization": _BOUND_AUTH,
                                 "case_source": "precision_cases",
                                 "shape_classification": {
                                     "metric": "sum_input_bytes", "small_max_bytes": 262144,
@@ -235,11 +268,11 @@ def _mo_caseset():
                     "small_max_bytes": 262144,
                     "boundary": "small_if_input_bytes_lte_limit",
                     "hardware": "Atlas A3"}}
-    return {"op": "X",
+    return {"op": "IsClose",
             "cases": [case("s0", "small", "小shape"), case("b0", "large", "大shape")],
             "perf_case_policy": {
                 "mode": "measure_only",
-                "measure_only_authorization": _AUTH,
+                "measure_only_authorization": _BOUND_AUTH,
                 "case_source": "precision_cases",
                 "shape_classification": {"metric": "sum_input_bytes", "small_max_bytes": 262144,
                                          "boundary": "small_if_input_bytes_lte_limit",
@@ -248,7 +281,7 @@ def _mo_caseset():
 
 
 def _mo_evidence(s0_us=1.0, b0_us=3.0, scope="kernel_only"):
-    return {"op": "X", "evidence": [
+    return {"op": "IsClose", "evidence": [
         {"case_id": "s0", "perf": {"us": s0_us, "scope": scope}},
         {"case_id": "b0", "perf": {"us": b0_us, "scope": scope}}]}
 
@@ -405,6 +438,29 @@ class FailClosedSelfProofTest(unittest.TestCase):
         errs = self._errs()
         self.assertTrue(any("measure_only_authorization" in e for e in errs), errs)
 
+    def test_null_taskdoc_anchor_is_rejected_as_legacy_unbound_artifact(self):
+        cs = copy.deepcopy(self.cs)
+        cs["perf_case_policy"]["measure_only_authorization"][
+            "taskdoc_snapshot_sha256"] = None
+        _w(self.d, "caseset.json", cs)
+        errs = self._errs()
+        self.assertTrue(any("旧产物" in e and "null" in e for e in errs), errs)
+
+    def test_forged_taskdoc_digest_cannot_open_measure_only(self):
+        cs = copy.deepcopy(self.cs)
+        cs["perf_case_policy"]["measure_only_authorization"][
+            "taskdoc_snapshot_sha256"] = "0" * 64
+        _w(self.d, "caseset.json", cs)
+        errs = self._errs()
+        self.assertTrue(any("指纹不符" in e for e in errs), errs)
+
+    def test_quote_must_be_in_the_cited_snapshot_lines(self):
+        cs = copy.deepcopy(self.cs)
+        cs["perf_case_policy"]["measure_only_authorization"]["quote"] = "伪造引文"
+        _w(self.d, "caseset.json", cs)
+        errs = self._errs()
+        self.assertTrue(any("逐字子串" in e for e in errs), errs)
+
     def test_ratio_verdict_smuggled_into_measure_only_report_is_rejected(self):
         forged = copy.deepcopy(self.report)
         forged["target_ratio"] = 1.0
@@ -450,7 +506,9 @@ def _to_measure_only(spec):
     for key in ("baseline", "target_ratio", "small_shape_exception"):
         perf.pop(key, None)
     perf["mode"] = "measure_only"
-    perf["measure_only_authorization"] = _AUTH
+    # 夹具把本轮声明成 new_op，走 §5.10 的改动类别分支；授权锚绑定 IsClose 的真实快照。
+    spec["change"] = {"kind": "new_op", "note": "measure_only workflow fixture"}
+    perf["measure_only_authorization"] = _BOUND_AUTH
 
 
 class MeasureOnlyWorkflowTest(unittest.TestCase):

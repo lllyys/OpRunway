@@ -2,6 +2,50 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-06 · F7 恢复 legacy 字节门并解释 IsClose 唯一漂移
+
+- Git/a3 二分定位首个漂移为 `12fdc0c`：IsClose 的 `dtype_deferred` gap 新增
+  `capability_source="runner"` 与 `runner_form="cpp"`，供三级门按活能力表核验；50 个 case、case_id
+  与全部 `.npy` 字节未变，故定性为必要契约补强并只重取 numpy 1.26.4 的 IsClose 摘要。
+- 其余 5 份 legacy 摘要不变；补齐精确 numpy pin 后，当前环境无基线会由独立元测试直接失败，
+  不再让关键门以 skip 冒充全绿。a3 mutation 删除两字段时字节门明确红，恢复后全量 2533 passed。
+
+## 2026-08-06 · F2 spec 变更门堵单删收据重置，并降格到可证明范围
+
+- `--init` 现在只接受全新/空报告根，并写独立初始化标记；单删收据或目录已有任意工件时都拒绝清零。
+  门的阻断标签、注释与 CLI 统一只称“内容完整性 + 有人显式声明”，不再声称用户已确认。
+- **静态门边界如实挂账**：`confirmed_by` 无签名/外部审批 ID，`previous_spec_sha256` 与同目录产物也在
+  同一可写信任域，不能证明真人身份或不可伪造的跨轮历史；要补这两项必须接外部签名/append-only 审计锚。
+
+## 2026-08-06 · F3 dtype 双删改由 staged spec 独立兜底
+
+- 三级门不再只信 caseset 自报：正式 CP-E 目录以 `<out>/spec.json` 为 dtype 权威，逐项核
+  `dtype_required` 与三类结构化 dtype gap 透传，并直接用 spec 全集对真实 cases 算覆盖；Task2 另把
+  staged spec 摘要接回 cpp_extension receipt。`required + deferred` 同时从 caseset 删除会在 Task1、
+  Task2 各自 fail-closed，正式目录连 staged spec 整体缺失/未决也不再退回 legacy 宽容。
+- **静态门边界如实挂账**：它只证 `spec ↔ caseset ↔ actual cases`，不证 spec 抽取忠实覆盖任务书；
+  后者需可复算的 taskdoc→spec 派生收据。CP-F attempt 当前只冻 `base_spec_sha256`、不冻 spec 字节，
+  因而暂时 fail-closed（不改基础裁决）；恢复须把 base spec 字节纳入 attempt manifest 后显式交门。
+  拥有全目录写权限者一致重写全部收据链也需外部锚/签名才能识别。
+
+## 2026-08-06 · F1 measure_only 授权锚改成现场可核的实门
+
+- `taskdoc_snapshot_sha256` 现在必须是非空真实摘要；三级门按 caseset 的 `op` 定位任务书快照，现场重算
+  sha256，并校 `quote` 是 `cite` 行区间的逐字子串。缺键与旧产物的显式 `null` 都 fail-closed，且报错可区分。
+- **静态门边界如实挂账**：本门只证“这句引文确实来自这份任务书快照”，不能理解自然语言并证明引文语义
+  必然支持所选 ground；该项仍须由 spec 抽取/人审负责，未用关键词猜测伪装成语义门。
+
+## 2026-08-06 · F5 退役 runner form 从活跃 spec 指引退出
+
+- `acc-spec-extractor`、spec 字段手册与空模板现在只允许新一轮显式生成 `runner_form="cpp_extension"`；
+  `cpp` / `aclnn_py` 的能力与骨架保留在带「不得 dispatch · 不要照做」横幅的历史区，接口迁不动就
+  `BLOCKED` 挂账，不再以“开发级验证”为由生成一份没有入口的 spec。插件 README 同步移除
+  `aclnn_py` 现行 preflight/通路介绍，并把旧 dtype 能力表降为历史。
+- **静态门边界如实挂账**：`check_acceptance_entrypoints.py` 只能机械证明其 `ENTRYPOINTS` 中出现的退役
+  派生/调用未逃出合规历史区，不能理解任意自然语言是否仍在暗示旧 form；`plugin/README.md` 当前也不在
+  `ENTRYPOINTS`。本轮按分工不改 `acc-common/*.py`，所以 README 与语义一致性仍靠显式历史横幅、grep 和审阅；
+  若要升级为机器保证，后续须把 README 纳入受检集合，并新增针对“新 spec 只能生成 cpp_extension”的语义夹具。
+
 ## 2026-08-06 · torch_parity shape 档有派生默认，配置口不做假字段
 
 - 回填 `dev-doc/oprunway-case-axis-design.md` §13：按 `axis_class` 接口能力去退化的布局已成为工程默认，

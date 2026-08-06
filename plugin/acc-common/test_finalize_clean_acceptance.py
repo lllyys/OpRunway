@@ -10,6 +10,7 @@ import contextlib
 import copy
 import json
 import os
+import re
 import tempfile
 import unittest
 from unittest import mock
@@ -155,6 +156,8 @@ class _Bed:
         with open(self.spec_path, "rb") as fh:
             spec_bytes = fh.read()
         os.makedirs(self.out, exist_ok=True)
+        # spec 变更基线是报告根的**第一份**状态；先伪造验收工件再 init 会把已有历史洗成首次。
+        SCG.init_receipt(self.spec_path, self.out, _REASON, _BY)
         # CP-E staging 副本：与原件**逐字节**相同（run_workflow 就是这么落的）。
         with open(os.path.join(self.out, W._STAGED_SPEC_FILE), "wb") as fh:
             fh.write(spec_bytes)
@@ -165,7 +168,6 @@ class _Bed:
             os.path.join(root, "fetch", "source_facts.json"),
             content_address.make_artifact(
                 "oprunway/source-facts/v1", source_facts_payload()))
-        SCG.init_receipt(self.spec_path, self.out, _REASON, _BY)
 
     def seed_previous_pass(self):
         for name, text in _PREVIOUS_VERDICTS.items():
@@ -243,7 +245,7 @@ class FinalizeDirectoryTest(unittest.TestCase):
         """
         return (
             ("没有 spec 变更收据", lambda b: os.remove(SCG.receipt_path(b.out)),
-             r"BLOCKED\(spec 变更未确认\)", None),
+             re.escape(SCG.BLOCKED_LABEL), None),
             ("spec 原件改过但收据没更新",
              lambda b: _write_json(b.spec_path, {"op": _OP, "runner_form": "cpp_extension",
                                                  "dtype": ["float32"]}),
@@ -286,7 +288,7 @@ class FinalizeDirectoryTest(unittest.TestCase):
 
     # —— Critical ②：spec 变更门在这条旁路上也是**两处、缺一不可** ————————————
     def test_the_spec_receipt_is_checked_before_the_evidence_is_even_read(self):
-        """⭐ 入口门：spec 没被署名确认过，就**一步都别往下走**。
+        """⭐ 入口门：spec 没有完整收据与显式声明，就**一步都别往下走**。
 
         断言打在「三级门一次都没被调用」上，而不只是「抛了异常」：出口门也会拦同一件事，
         只断言异常的话，把入口门整个删掉照样绿——那正是「只拦出口」的假安全感。
@@ -294,15 +296,15 @@ class FinalizeDirectoryTest(unittest.TestCase):
         with self._bed() as bed:
             os.remove(SCG.receipt_path(bed.out))
             with _stub_gates() as seen:
-                with self.assertRaisesRegex(F.FinalizeError, r"BLOCKED\(spec 变更未确认\)"):
+                with self.assertRaisesRegex(F.FinalizeError, re.escape(SCG.BLOCKED_LABEL)):
                     bed.run()
-            self.assertEqual(seen, [], "spec 未确认就不该再去跑三级门")
+            self.assertEqual(seen, [], "spec 内容完整性/显式声明未过就不该再去跑三级门")
 
     def test_the_spec_receipt_is_rechecked_before_the_verdict_is_written(self):
         """⭐ 出口门：入口过了之后 spec 原件仍可能被换掉——写盘前必须再校一次。
 
         夹具在三级门执行期间改写 spec 原件（模拟「入口之后被换」）。只有入口门的话，
-        这一轮会带着一份**没人确认过的 spec** 写出 PASS。
+        这一轮会带着一份**未作显式声明的 spec** 写出 PASS。
         """
         with self._bed() as bed:
             def _swap(d, errs, source_facts_path=None):
@@ -311,7 +313,7 @@ class FinalizeDirectoryTest(unittest.TestCase):
 
             with mock.patch.dict(F.gate._GATES,
                                  {s: _swap for s in ("task1", "task2", "task3")}):
-                with self.assertRaisesRegex(F.FinalizeError, r"BLOCKED\(spec 变更未确认\)"):
+                with self.assertRaisesRegex(F.FinalizeError, re.escape(SCG.BLOCKED_LABEL)):
                     bed.run()
             self.assertFalse(os.path.lexists(bed.path("acceptance.json")),
                              "入口之后被换掉的 spec 不得留下一份裁决")

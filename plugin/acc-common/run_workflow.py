@@ -819,12 +819,12 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
 
     ⚠ 验收通路另受 **spec 变更门**（`spec_change_gate`）约束：`<out>/work/spec_change_receipt.json`
     必须存在、其 `spec_sha256` 与**当场重算的 `spec_path` 字节**一致、且带非空非占位的
-    `change_reason` / `confirmed_by`，否则 `BLOCKED(spec 变更未确认)`。落点见 `_SPEC_GATE_ENTRY`
+    `change_reason` / `confirmed_by`，否则 `BLOCKED(spec 内容完整性或显式声明未通过)`。落点见 `_SPEC_GATE_ENTRY`
     上方那段。⚠ 它证的是「spec 内容完整 + 有人显式署名声明过」，**不是**「用户确认过」。
 
     ⚠ 门之外还有一条**本轮身份**约束：进 Task1 之前把 spec 字节冻结成进程内的
     `entry_spec_sha256`，此后**原件、收据、`<out>/spec.json` 副本三者都必须仍等于它**
-    （否则 `BLOCKED(spec 变更未确认)` 或 `BLOCKED(staged spec 已偏离本轮入口)`）。
+    （否则 `BLOCKED(spec 内容完整性或显式声明未通过)` 或 `BLOCKED(staged spec 已偏离本轮入口)`）。
     只校「当前 spec 与当前收据匹配」是不够的——把两者**一起**改到新 spec，那句话仍然成立，
     而这一轮就同时长出两套身份。为什么锚只活在内存里、跨进程为什么仍成立，
     见 `_SPEC_ROUND_ANCHOR_NOTE` 上方那段。
@@ -1384,7 +1384,7 @@ def main():
                     "不是换 mode 再试。mock 仅本地用例链自检、非验收。"
                     "⚠ 验收通路还须先用 spec_change_gate.py 建立 spec 变更收据"
                     "（<out>/work/spec_change_receipt.json），否则进 Task1 之前即 "
-                    "BLOCKED(spec 变更未确认)。")
+                    "BLOCKED(spec 内容完整性或显式声明未通过)。")
     ap.add_argument("spec")
     ap.add_argument("--mode", default=None, choices=list(repo_adapter.MODES),
                     help="省略时据 spec.runner_form 派生，而**唯一派得出的真机 mode 是 "

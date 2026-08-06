@@ -406,6 +406,112 @@ class GateTest(unittest.TestCase):
         _w(self.d, "caseset.json", cs)
         self.assertTrue(any("不符" in e for e in self._errs("task1")))
 
+    def _write_staged_dtype_contract(self, required, gaps):
+        """CP-E 的 staged spec：dtype 标准来自这里，caseset 只是待核对的派生产物。"""
+        _w(self.d, "spec.json", {
+            "op": "X", "runner_form": "cpp_extension",
+            "dtype_required": list(required), "task_pr_gaps": gaps,
+        })
+
+    def test_task1_staged_spec_blocks_double_deleted_required_and_deferred(self):
+        """F3 红钉：从 caseset 同时删 required dtype 与对应 deferred，仍须被 staged spec 抓住。
+
+        旧门只看 caseset 自报；双删后它眼里只剩已测 fp32/fp16，因而会假绿。这里把 spec 中
+        未测 dtype 与结构化挂账都保留，模拟 CP-E 的独立权威副本。
+        """
+        missing = "complex128"
+        gap = {"kind": "dtype_deferred", "dtypes": [missing],
+               "capability_source": "generation", "reason": "生成层暂不支持"}
+        self._write_staged_dtype_contract(["float32", "float16", missing], [gap])
+        cs = json.loads(json.dumps(CASESET))
+        cs["dtype_required"] = ["float32", "float16"]       # 与 deferred 一起被删
+        cs["dtype_tested"] = ["float32", "float16"]
+        cs["task_pr_gaps"] = []
+        _w(self.d, "caseset.json", cs)
+        errs = self._errs("task1")
+        self.assertTrue(any("staged spec" in e and "dtype_required" in e for e in errs), errs)
+        self.assertTrue(any("dtype 覆盖不足" in e and missing in e for e in errs), errs)
+
+    def test_task2_staged_spec_blocks_double_delete_even_when_run_alone(self):
+        """Task2 不能借「Task1 应该跑过」免责；单独复核正式报告目录也要抓住同一双删。"""
+        missing = "complex128"
+        gap = {"kind": "dtype_deferred", "dtypes": [missing],
+               "capability_source": "generation", "reason": "生成层暂不支持"}
+        self._write_staged_dtype_contract(["float32", "float16", missing], [gap])
+        cs = json.loads(json.dumps(CASESET))
+        cs["dtype_required"] = ["float32", "float16"]
+        cs["dtype_tested"] = ["float32", "float16"]
+        cs["task_pr_gaps"] = []
+        _w(self.d, "caseset.json", cs)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd("pass"))
+        errs = self._errs("task2")
+        self.assertTrue(any("staged spec" in e and "dtype_required" in e for e in errs), errs)
+        self.assertTrue(any("dtype 覆盖不足" in e and missing in e for e in errs), errs)
+
+    def test_task1_matching_staged_dtype_contract_passes(self):
+        """反向钉：spec/caseset/真实 cases 三者一致时，新门不制造假阻塞。"""
+        self._write_staged_dtype_contract(["float32", "float16"], [])
+        cs = json.loads(json.dumps(CASESET))
+        cs["dtype_required"] = ["float32", "float16"]
+        cs["dtype_tested"] = ["float32", "float16"]
+        cs["task_pr_gaps"] = []
+        _w(self.d, "caseset.json", cs)
+        self.assertEqual(self._errs("task1"), [])
+
+    def test_task1_unresolved_staged_dtype_authority_is_not_a_clean_pass(self):
+        """静态证不了就显式 BLOCK：正式 staged spec 的 needs_user 不能沿 legacy 分支假绿。"""
+        _w(self.d, "spec.json", {
+            "op": "X", "runner_form": "cpp_extension",
+            "dtype_required": "needs_user", "task_pr_gaps": [],
+        })
+        cs = json.loads(json.dumps(CASESET))
+        cs["dtype_required"] = "needs_user"
+        cs["dtype_tested"] = ["float32", "float16"]
+        cs["task_pr_gaps"] = []
+        _w(self.d, "caseset.json", cs)
+        errs = self._errs("task1")
+        self.assertTrue(any("静态门无法证明覆盖完整" in e for e in errs), errs)
+
+    def test_task1_formal_run_cannot_delete_the_staged_spec_it_needs_as_authority(self):
+        """有 source-facts 即正式 CP-E 首轮；spec 文件整体被删不能退回 legacy 宽容。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs["dtype_required"] = ["float32", "float16"]
+        cs["dtype_tested"] = ["float32", "float16"]
+        cs["task_pr_gaps"] = []
+        _w(self.d, "caseset.json", cs)
+        errs = []
+        G.gate_task1(self.d, errs, source_facts_path="cp-a/source_facts.json")
+        self.assertTrue(any("缺 CP-E staged spec.json" in e for e in errs), errs)
+
+    def test_task2_cpp_extension_cannot_delete_staged_spec_and_fall_back_to_legacy(self):
+        """独立 Task2 CLI 也要 fail-closed；不能只靠 run_workflow 的最终出口门兜底。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs["dtype_required"] = ["float32", "float16"]
+        cs["dtype_tested"] = ["float32", "float16"]
+        cs["task_pr_gaps"] = []
+        _w(self.d, "caseset.json", cs)
+        ev = _ev(self.d, ["x_000", "x_001"])
+        ev["runner_form"] = "cpp_extension"
+        ev["precision_retest_execution"] = {}  # 自报 CP-F 也不得成为 spec 缺席豁免牌
+        _w(self.d, "evidence.json", ev)
+        _w(self.d, "verdict.json", _vd("pass"))
+        errs = self._errs("task2")
+        self.assertTrue(any("缺 CP-E staged spec.json" in e for e in errs), errs)
+
+    def test_cpp_extension_receipt_binds_the_staged_spec_actually_read_by_gate(self):
+        """receipt 不能只做 manifest 自报↔receipt 自报的同源比较；须接到 staged spec 实体。"""
+        from test_validate_cpp_extension_receipt import CppExtensionReceiptGateTest
+        caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(self.d)
+        _w(self.d, "spec.json", {
+            "op": "X", "runner_form": "cpp_extension",
+            "dtype_required": ["float32"], "task_pr_gaps": [],
+        })
+        errs = []
+        G._gate_cpp_extension_receipt(self.d, caseset, envelope, evidence, errs)
+        self.assertTrue(any("manifest.spec_sha256" in e and "staged spec.json" in e
+                            for e in errs), errs)
+
     # --- task2 (核心：防跑子集) ---
     def test_task2_full_ok(self):
         _w(self.d, "caseset.json", CASESET)

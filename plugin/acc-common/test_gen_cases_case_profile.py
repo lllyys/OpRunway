@@ -26,6 +26,10 @@ caseset 与全部 .npy 被 sha256 逐字节钉死。故先立字段驱动的档�
     case_target == 常规矩阵实产数`，`excluded` 的受控词表 / reason+evidence / 重叠 / 排空全部 fail-closed；
   · **coverage_strength 如实措辞**（`TorchParityCoverageStrengthTest`）：不许再写「全覆盖」，
     重复覆盖组合按实数落账（median 实测 1344 例 / 1200 个不同组合 / 144 条重复）；
+  · **聚合几何账本，不冒充历史缺陷门**（`TorchParityShapeLayoutTest`）：当前布局的
+    reduction/batch 分类计数可复算，但相同计数可以由另一组精确 shape 取得；因此这些断言只证
+    聚合几何性质，**不证**历史失败输入仍在、也不证历史缺陷会复现。缺陷触发性显式挂账为：
+    只能把当前 caseset 放到目标 NPU 真机重跑，并读取确定性 verdict 后确认；
   · dry-run 回显 + 空模板 `spec_schema_template.jsonc` 已记载该字段（防实现与文档漂移）。
 """
 import contextlib, copy, hashlib, io, json, math, os, shutil, tempfile, unittest
@@ -124,6 +128,23 @@ def _reduction_geometry(entry):
     dim = entry["attrs"].get("dim")
     reduction = numel if dim is None else shape[dim]
     return reduction, numel // reduction
+
+
+def _aggregate_reduction_buckets(entries):
+    """独立统计 shape 的聚合几何桶；这里只描述输入结构，不推断任何设备缺陷是否触发。"""
+    float_dtypes = {"bfloat16", "float16", "float32"}
+    counts = {"trivial": 0, "long_batch1_float": 0,
+              "long_batch_gt1_float": 0, "long_batch_gt1_all": 0}
+    for entry in entries:
+        reduction, batch = _reduction_geometry(entry)
+        counts["trivial"] += reduction == 1
+        if entry["dtype"] in float_dtypes and reduction > 24576 and batch == 1:
+            counts["long_batch1_float"] += 1
+        if reduction > 24576 and batch > 1:
+            counts["long_batch_gt1_all"] += 1
+            if entry["dtype"] in float_dtypes:
+                counts["long_batch_gt1_float"] += 1
+    return counts
 
 
 class CaseProfileVocabTest(unittest.TestCase):
@@ -235,7 +256,7 @@ class CaseProfilePlanMetaTest(unittest.TestCase):
 
 
 class TorchParityShapeLayoutTest(unittest.TestCase):
-    """决定①：带轴选择器的 torch_parity shape 去退化，同时保住长归约轴与新增 batch>1 cell。"""
+    """决定①：带轴选择器的 shape 去退化；静态测试只核布局与聚合几何，不核缺陷触发性。"""
 
     def test_derived_layout_vocabulary_is_closed(self):
         """派生账本值也用受控词表；内部拼错不能静默退回任一布局。"""
@@ -263,30 +284,40 @@ class TorchParityShapeLayoutTest(unittest.TestCase):
         self.assertEqual(meta["torch_parity_matrix"]["selected_axis_classes"],
                          ["first_axis", "middle_axis", "last_axis"])
 
-    def test_existing_caseset_recalculation_keeps_and_adds_required_cells(self):
-        """动手前硬门固化成回归：已知 fail 区非空，且旧矩阵取不到的 batch>1 长归约真正出现。
+    def test_current_layout_aggregate_reduction_geometry_is_pinned(self):
+        """固定当前 1344 组合的聚合几何账本，并确认新增 batch>1 长归约 cell 确实出现。
 
-        数字来自仓内 Median 1344 组合的逐 case 算术，不重判任何历史 pass/fail：
-        ``reduction = numel``（global）或 ``shape[dim]``，``batch = numel/reduction``。
+        这些数字只由当前 spec 的 shape/dtype/attrs 静态复算：``reduction = numel``（global）
+        或 ``shape[dim]``，``batch = numel/reduction``。它们不是历史失败 case 的身份清单，
+        也不能证明设备上的缺陷触发条件仍成立；下一条反例会把这条边界变成可执行事实。
         """
         entries, _meta = _plan_of(_load_median(), case_target=1344)
-        float_dtypes = {"bfloat16", "float16", "float32"}
-        trivial = known_region = new_region_float = new_region_all = max_numel = 0
-        for entry in entries:
-            max_numel = max(max_numel, math.prod(entry["shape"]))
-            reduction, batch = _reduction_geometry(entry)
-            trivial += reduction == 1
-            if entry["dtype"] in float_dtypes and reduction > 24576 and batch == 1:
-                known_region += 1
-            if reduction > 24576 and batch > 1:
-                new_region_all += 1
-                if entry["dtype"] in float_dtypes:
-                    new_region_float += 1
-        self.assertEqual(trivial, 0)
-        self.assertEqual(known_region, 42)
-        self.assertEqual(new_region_float, 48)
-        self.assertEqual(new_region_all, 128)
-        self.assertEqual(max_numel, 1048576)
+        self.assertEqual(
+            _aggregate_reduction_buckets(entries),
+            {"trivial": 0, "long_batch1_float": 42,
+             "long_batch_gt1_float": 48, "long_batch_gt1_all": 128})
+        self.assertEqual(max(math.prod(entry["shape"]) for entry in entries), 1048576)
+
+    def test_same_aggregate_geometry_can_come_from_different_exact_inputs(self):
+        """可执行反例：聚合桶计数相同，不代表历史失败输入或缺陷触发性被保留。
+
+        把 large 的 ``leading_dim`` 从 262144 换成仍落在 ``>24576`` 桶内的 131072，四个聚合
+        计数逐字相同，但精确 shape 集已经不同。因此本组静态测试**有意不宣称**「历史 58 条不会
+        被测没」。这部分只能靠当前 caseset 在目标 NPU 真机重跑，再读取确定性 verdict 确认。
+        """
+        original, _ = _plan_of(_load_median(), case_target=1344)
+        alternative_spec = _load_median()
+        alternative_spec["precision"]["torch_parity_matrix"]["shape_profiles"][2][
+            "leading_dim"] = 131072
+        alternative, _ = _plan_of(alternative_spec, case_target=1344)
+
+        original_shapes = {tuple(entry["shape"]) for entry in original}
+        alternative_shapes = {tuple(entry["shape"]) for entry in alternative}
+        self.assertNotEqual(original_shapes, alternative_shapes)
+        self.assertEqual(
+            _aggregate_reduction_buckets(original),
+            _aggregate_reduction_buckets(alternative),
+            "同一聚合计数可由不同精确输入取得；它不能升级成历史缺陷复现门")
 
     def test_no_axis_selector_keeps_reference_layout(self):
         """纯 elementwise 的退化布局没有覆盖代价，不得被本轮顺带改字节。"""

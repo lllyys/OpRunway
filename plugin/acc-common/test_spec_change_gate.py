@@ -30,6 +30,7 @@ import ast
 import inspect
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -163,21 +164,41 @@ class ReceiptLifecycleTest(unittest.TestCase):
                     self.assertFalse(os.path.exists(SCG.receipt_path(out_dir)),
                                      "被拒的写入不得留下半份收据")
 
-    def test_reinit_after_a_manual_delete_is_the_known_way_around_the_history(self):
-        """如实记账：删掉收据再 `--init` 就能把历史清零——本门拦不住，别声称它拦得住。
-
-        钉住它是为了让「已知破绽」有一处**可执行**的说明，而不是只写在注释里。
-        """
+    def test_reinit_after_a_manual_receipt_delete_is_refused(self):
+        """⭐ 只删收据不等于全新目录：独立历史锚必须让 `--init` fail-closed。"""
         with tempfile.TemporaryDirectory() as root:
             spec_path = _spec_file(root)
             out_dir = os.path.join(root, "reports")
             SCG.init_receipt(spec_path, out_dir, _REASON, _BY)
             _spec_file(root, _narrowed_spec())
             os.remove(SCG.receipt_path(out_dir))
-            SCG.init_receipt(spec_path, out_dir, "重新起个头", _BY)
-            self.assertIsNone(_read_receipt(out_dir)["previous_spec_sha256"])
-            self.assertEqual(SCG.check(spec_path, out_dir), [],
-                             "这条路确实过得去——所以文档里不许把本门说成防篡改")
+            with self.assertRaisesRegex(SystemExit, r"已有历史.*换一个 --out"):
+                SCG.init_receipt(spec_path, out_dir, "重新起个头", _BY)
+            self.assertFalse(os.path.exists(SCG.receipt_path(out_dir)),
+                             "拒绝重置时不得暗中重建收据")
+
+    def test_init_refuses_a_report_root_with_existing_artifacts(self):
+        """没有收据也不等于没有历史；未来新增产物名也必须被目录事实兜住。"""
+        with tempfile.TemporaryDirectory() as root:
+            spec_path = _spec_file(root)
+            out_dir = os.path.join(root, "reports")
+            old = os.path.join(out_dir, "work", "future_artifact.bin")
+            os.makedirs(os.path.dirname(old), exist_ok=True)
+            with open(old, "wb") as fh:
+                fh.write(b"history")
+            with self.assertRaisesRegex(SystemExit, r"已有历史.*future_artifact\.bin"):
+                SCG.init_receipt(spec_path, out_dir, _REASON, _BY)
+            self.assertEqual(open(old, "rb").read(), b"history")
+            self.assertFalse(os.path.exists(SCG.receipt_path(out_dir)))
+
+    def test_init_accepts_a_precreated_but_empty_report_root(self):
+        """预建空目录没有历史；不能把正常的 mkdir 当成旧验收。"""
+        with tempfile.TemporaryDirectory() as root:
+            spec_path = _spec_file(root)
+            out_dir = os.path.join(root, "reports")
+            os.makedirs(os.path.join(out_dir, "work"))
+            SCG.init_receipt(spec_path, out_dir, _REASON, _BY)
+            self.assertEqual(SCG.check(spec_path, out_dir), [])
 
 
 class GateCriteriaTest(unittest.TestCase):
@@ -471,6 +492,11 @@ class HonestScopeTest(unittest.TestCase):
             self.assertIn("不证", msg)
             self.assertIn("用户确认过", msg)
 
+    def test_blocked_label_names_the_actual_gate(self):
+        self.assertIn("内容完整性", SCG.BLOCKED_LABEL)
+        self.assertIn("显式声明", SCG.BLOCKED_LABEL)
+        self.assertNotIn("确认", SCG.BLOCKED_LABEL)
+
     def test_cli_success_line_does_not_claim_user_confirmation(self):
         """放行时打印的那句话也不许升格——人读报告常常只抄这一行。"""
         with tempfile.TemporaryDirectory() as root:
@@ -485,7 +511,7 @@ class HonestScopeTest(unittest.TestCase):
 
     def test_run_workflow_documents_the_gate_without_overstating_it(self):
         doc = W.run.__doc__
-        self.assertIn("spec 变更未确认", doc)
+        self.assertIn("内容完整", doc.split("spec 变更门", 1)[1])
         self.assertIn("不是", doc.split("spec 变更门", 1)[1])
 
 
@@ -558,7 +584,7 @@ class RunWorkflowEntryGateTest(unittest.TestCase):
             out_dir = os.path.join(root, "reports", "widget")
             with mock.patch.object(W.gen_cases, "gen_cases",
                                    side_effect=_Sentinel("不该走到 Task1")):
-                with self.assertRaisesRegex(SystemExit, r"spec 变更未确认"):
+                with self.assertRaisesRegex(SystemExit, re.escape(SCG.BLOCKED_LABEL)):
                     W.run(spec_path, mode="cpp_extension", out_dir=out_dir,
                           source_facts=facts)
             self.assertFalse(os.path.exists(out_dir),
@@ -599,7 +625,7 @@ class RunWorkflowEntryGateTest(unittest.TestCase):
 
             _spec_file(root, _narrowed_spec())         # 缩范围，且**不**更新收据
             with STG.AcceptanceRunTest()._stubbed([]):
-                with self.assertRaisesRegex(SystemExit, r"spec 变更未确认"):
+                with self.assertRaisesRegex(SystemExit, re.escape(SCG.BLOCKED_LABEL)):
                     W.run(spec_path, mode="cpp_extension", out_dir=out_dir,
                           source_facts=facts)
             self.assertEqual(SCG.spec_digest(staged), _read_receipt(out_dir)["spec_sha256"],
@@ -652,7 +678,7 @@ class RunWorkflowExitGateTest(unittest.TestCase):
             with STG.AcceptanceRunTest()._stubbed([]), \
                     mock.patch.object(W.gen_cases, "gen_cases",
                                       side_effect=_swap_then_gen):
-                with self.assertRaisesRegex(SystemExit, r"spec 变更未确认"):
+                with self.assertRaisesRegex(SystemExit, re.escape(SCG.BLOCKED_LABEL)):
                     W.run(spec_path, mode="cpp_extension", out_dir=out_dir,
                           source_facts=facts)
             for name in W._ACCEPTANCE_FILES:
@@ -719,7 +745,7 @@ class RoundIdentityTest(unittest.TestCase):
             with STG.AcceptanceRunTest()._stubbed([]), \
                     mock.patch.object(W.gen_cases, "gen_cases",
                                       side_effect=_swap_both_then_gen):
-                with self.assertRaisesRegex(SystemExit, r"spec 变更未确认"):
+                with self.assertRaisesRegex(SystemExit, re.escape(SCG.BLOCKED_LABEL)):
                     W.run(spec_path, mode="cpp_extension", out_dir=out_dir,
                           source_facts=facts)
             self._assert_no_acceptance_artifacts(out_dir)
@@ -774,22 +800,13 @@ class RoundIdentityTest(unittest.TestCase):
             with STG.AcceptanceRunTest()._stubbed([]), \
                     mock.patch.object(W.gen_cases, "gen_cases",
                                       side_effect=_repoint_receipt_then_gen):
-                with self.assertRaisesRegex(SystemExit, r"spec 变更未确认"):
+                with self.assertRaisesRegex(SystemExit, re.escape(SCG.BLOCKED_LABEL)):
                     W.run(spec_path, mode="cpp_extension", out_dir=out_dir,
                           source_facts=facts)
             self._assert_no_acceptance_artifacts(out_dir)
 
     def test_deleting_the_receipt_and_re_initing_mid_run_is_refused(self):
-        """⭐ 「删收据重 `--init`」这条**跨轮拦不住**的路，在**一轮之内**被锚关上了。
-
-        `ReceiptLifecycleTest.test_reinit_after_a_manual_delete_is_the_known_way_around_the_history`
-        如实记着：删掉收据再 `--init`，变更历史一笔勾销，收据机制本身查不出来。
-        但那条路要在**本轮**生效，`--init` 写下的必然是**换进来那份** spec 的摘要——
-        与入口冻结的对不上，⑤/⑥ 照样响。
-
-        ⚠ 别把这条读成「删收据重 init 的洞补上了」：跨轮那一格**依旧开着**（模块文档里那句
-          话一个字不用改）。这里只多说一句更窄的话：**一轮之内**换不了身份。
-        """
+        """⭐ 中途只删收据再 init，先被报告根历史门拒绝，根本到不了出口锚。"""
         with tempfile.TemporaryDirectory() as root, STG._env(root):
             spec_path, out_dir, facts = self._round(root)
 
@@ -802,13 +819,12 @@ class RoundIdentityTest(unittest.TestCase):
             with STG.AcceptanceRunTest()._stubbed([]), \
                     mock.patch.object(W.gen_cases, "gen_cases",
                                       side_effect=_reinit_then_gen):
-                with self.assertRaisesRegex(SystemExit, r"spec 变更未确认"):
+                with self.assertRaisesRegex(SystemExit, r"已有历史"):
                     W.run(spec_path, mode="cpp_extension", out_dir=out_dir,
                           source_facts=facts)
             self._assert_no_acceptance_artifacts(out_dir)
-            # 反证：收据这会儿是一份**全新、合规、对得上当前 spec** 的基线。
-            self.assertEqual(SCG.check(spec_path, out_dir), [])
-            self.assertIsNone(_read_receipt(out_dir)["previous_spec_sha256"])
+            self.assertFalse(os.path.exists(SCG.receipt_path(out_dir)),
+                             "历史目录上的重 init 被拒后不得长出新基线")
 
     def test_rewriting_the_staged_copy_mid_run_is_refused(self):
         """⭐ 第三格：原件与收据都不动，只把 `<out>/spec.json` 换掉。

@@ -654,8 +654,9 @@ Torch 签名列出必须对标的 overload，再逐个建立：
 
 ### 1.3.7 本节自检（并入 §7）
 
-- **`runner_form` 已显式写出**，且正式验收写的是 `cpp_extension`（唯一准入形态，§1.3.1 ③）；
-  写 `aclnn_py` / `cpp` 只在「明知这轮只做开发级验证」时才允许，且必须在 `task_pr_gaps` 记明「非验收通路」。
+- **`runner_form` 已显式写成 `cpp_extension`**（当前唯一准入形态，§1.3.1 ③）；新一轮抽取不得写
+  `aclnn_py` / `cpp`。已有旧 spec 写着退役值时，先迁移到 `cpp_extension`；若接口能力不支持迁移，
+  回 `BLOCKED` 并挂明确缺口，不得以“只做开发级验证”为由继续生成一份没有下游入口的 spec。
 - `runner_form ∈ {cpp_extension, aclnn_py}` ⇒ `call_variants` 非空；每条 `when` 是三种谓词之一；`attr_matrix` 的**每一行**
   都能匹配到至少一条变体（无匹配 → 运行时 fail-closed）。
 - `call_variants[].active_attrs` / `active_outputs` 分别是 spec attr / out 顺序的**子序列**且不重名；

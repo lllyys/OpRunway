@@ -80,7 +80,7 @@ def _write_source_facts(path, **kw):
 
 
 def _confirm_spec(spec_path, out_dir):
-    """满足 **spec 变更门**：给 `out_dir` 落一份对得上**当前** spec 的确认收据。
+    """满足 **spec 变更门**：给 `out_dir` 落一份对得上**当前** spec 的显式声明收据。
 
     ⚠ 这不是给门放水：收据里那串摘要是拿这份 spec 当场算出来的，四条判据一条没绕。
       本文件测的是 staging 与来源锚，变更门本身在 `test_spec_change_gate.py` 专测
@@ -357,11 +357,14 @@ class AcceptanceRunTest(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as root, _env(root):
             out_dir = os.path.join(root, "reports", "widget")
-            os.makedirs(out_dir)
+            # init 只接受无历史报告根；本用例要测的是 **init 之后、staging 之前**被塞进的软链。
+            spec_path = _confirm_spec(_write_spec(root), out_dir)
             outside = os.path.join(root, "escaped.py")
             os.symlink(outside, os.path.join(out_dir, "golden.py"))   # 目标尚不存在
             facts = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
-            self._run(root, source_facts=facts, out_dir=out_dir)
+            with self._stubbed([]):
+                W.run(spec_path, mode="cpp_extension",
+                      out_dir=out_dir, source_facts=facts)
             self.assertFalse(os.path.exists(outside), "绝不能写出报告目录")
             staged = os.path.join(out_dir, "golden.py")
             self.assertFalse(os.path.islink(staged))

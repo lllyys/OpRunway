@@ -1001,7 +1001,8 @@ class NoTargetIsFailClosedTest(unittest.TestCase):
                 "taskdoc_requirement": "no_perf_requirement",
                 "cite": "任务书 §3 性能要求",
                 "quote": "性能要求：无",
-                "taskdoc_snapshot_sha256": None}}}
+                # 本文件只测报告形态；现场快照核验由 acceptance gate 专测。
+                "taskdoc_snapshot_sha256": "a" * 64}}}
         r = pc.perf_compare(spec, cs, _ev({"p": (1.25, "kernel_only")}), None)
         self.assertEqual(r["summary"]["status"], "measured")
         self.assertEqual(r["summary"]["measured"], 1)
@@ -1091,7 +1092,8 @@ class MeasureOnlyZeroCaseExitTest(unittest.TestCase):
 
     _AUTH = {"taskdoc_requirement": "no_perf_requirement",
              "cite": "任务书 §3 性能要求", "quote": "性能要求：无",
-             "taskdoc_snapshot_sha256": None}
+             # 本文件只测零 case 出口；现场快照核验由 acceptance gate 专测。
+             "taskdoc_snapshot_sha256": "a" * 64}
 
     def _spec_mo(self):
         return {"op": "Sign", "perf": {"mode": "measure_only",

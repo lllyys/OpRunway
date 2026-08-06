@@ -32,8 +32,9 @@ dtype 从任务书要求的 8 种砍到 3 种。**每一道门都工作正常**�
 | spec 改过之后 | `--update --reason … --by …` | 旧 `spec_sha256` → `previous_spec_sha256`，新摘要 → `spec_sha256` |
 | 只想看过不过 | `--check` | 不写盘 |
 
-`--init` 在收据已存在时**拒绝执行**：否则「改完 spec 再 init 一次」就能把
-`previous_spec_sha256` 抹回 `null`，变更历史一笔勾销。
+`--init` 只接受**全新或仅含空目录**的报告根，并另写一份与收据分离的初始化历史标记。
+收据被单独删除后，标记仍在，重跑 `--init` 会拒绝；旧报告根里已有任何落盘文件也会拒绝。
+这堵的是「删一张收据就能把历史清零」的实现洞，不把普通可写文件冒充成不可伪造审计日志。
 
 ---
 
@@ -51,7 +52,7 @@ dtype 从任务书要求的 8 种砍到 3 种。**每一道门都工作正常**�
 5. **当场重算得到的 spec 摘要** == 本轮入口冻结的摘要；
 6. **收据自报的 `spec_sha256`** == 本轮入口冻结的摘要。
 
-任一不过 → `BLOCKED(spec 变更未确认)`。
+任一不过 → `BLOCKED(spec 内容完整性或显式声明未通过)`。
 
 ⚠ 判据 ② 重算的是**调用方传进来的那份 spec 原件**，绝不是 `<报告根>/spec.json` 那份
 staging 副本。理由是硬的：staging 副本由 `run_workflow` 自己在**本轮**（或**上一轮**）写出，
@@ -72,7 +73,7 @@ staging 副本。理由是硬的：staging 副本由 `run_workflow` 自己在**�
 | 运行中 | 换成 B（较宽），**同时** `--update` 把收据也改成 B | B | —— |
 | 出口 | B | B | ✅ 当前值互相匹配 → 放行，**正常写出 verdict / acceptance** |
 
-于是一轮里长出**两套身份**：报告目录里 staged 的是 A，而原件与收据一起声称「B 已确认」；
+于是一轮里长出**两套身份**：报告目录里 staged 的是 A，而原件与收据一起声称「B 已声明」；
 实际驱动执行的是 A。这不是「门漏了一个分支」——两道门问的都是**「此刻这两个值一致吗」**，
 而**没有任何东西问「这一轮到底按哪份 spec 跑的」**。
 
@@ -98,15 +99,21 @@ staging 副本。理由是硬的：staging 副本由 `run_workflow` 自己在**�
 **它证的**：
 
 - **内容完整性** —— 收据里那串摘要与「当场重算的 spec 字节」一致，即「这份收据说的就是这份 spec」；
-- **有人显式声明过** —— 收据里有一条非空、非占位符的变更理由和确认人署名。
+- **有人显式声明过** —— 收据里有一条非空、非占位符的变更理由和声明署名。
 
 **它不证**：
 
 - ❌ **「用户确认过」**。收据无密钥、无签名、无第二方见证 —— **编排层自己填一个像人名的
   字符串就能过**，本门查不出来。这是已知破绽，本批不解决；
 - ❌ **「这次变更是合理的」**。`change_reason` 只校非空 + 非占位词，不理解内容；
-- ❌ **「spec 从没被改过」**。`previous_spec_sha256` 是**自报**字段，本门不据它判定；
-  能删收据重 `--init` 的人也能把它写成任何值。
+- ❌ **「spec 从没被改过」**。`previous_spec_sha256` 是**自报**字段，本门不据它判定。
+  报告目录里的 staged spec 在首次 `--update` 时可能尚不存在，此后又会被新一轮覆盖；它与收据、
+  初始化标记也都处在同一个可写信任域，拿其中任何一份给另一份背书仍是同一方自证。
+  所以这里没有伪造一条「历史摘要已交叉证明」的假门：要证明跨轮历史，须由 agent 写不到的外部
+  审批 ID / 签名或 append-only 审计系统提供锚。
+  ✅ 本门能堵住的窄问题是：只删 `spec_change_receipt.json` 后，独立初始化标记还在，`--init`
+  拒绝清零；没有标记的旧目录只要已有任何落盘文件也拒绝。若同一写入者把收据、标记和全部产物
+  一并删除或篡改，静态文件门仍无法还原历史——这部分明确留账，不声称已证。
   ⚠ 判据 ⑤/⑥ 证的是**更窄也更硬**的一句：「**本轮**从入口到写产物，spec 身份一个字节没动」。
   它不管上一轮、也不管以后；跨轮的历史仍然只有那个自报字段，仍然不作数。
 
@@ -130,11 +137,15 @@ SCHEMA_VERSION = 1
 #: 它是本轮的**输入侧凭证**，不是结论产物。跟着结论一起被作废的话，每次复跑都得重 `--init`，
 #: 而 `previous_spec_sha256` 记的变更历史会在第一次复跑时全部蒸发——那正好毁掉本门唯一的价值。
 RECEIPT_PARTS = ("work", "spec_change_receipt.json")
-#: 拒绝时统一打这个标签（编排层与人读报告按它检索）。
-BLOCKED_LABEL = "BLOCKED(spec 变更未确认)"
+#: 与收据分离的初始化历史标记。它只用于判定「这个报告根曾经 init 过」，不参与签名或身份认证。
+#: ⚠ 普通可写文件不是不可伪造来源；它堵的是**只删收据**这条低成本重置路，不证明跨轮历史真实。
+INIT_MARKER_PARTS = ("work", "spec_change_init_marker.json")
+INIT_MARKER_SCHEMA = "oprunway.spec_change_init_marker"
+#: 拒绝时统一打这个标签（编排层与人读报告按它检索）。措辞只说实际判据，不冒充用户确认门。
+BLOCKED_LABEL = "BLOCKED(spec 内容完整性或显式声明未通过)"
 #: 判据 ⑤ 的编号。⚠ `blocked_message` 靠它分辨该给哪条「怎么办」：
 #: **只有 ⑤（spec 原件已偏离入口）成立时，`--update` 才是有害建议**——那时候更新收据
-#: 等于给「运行中被换进来的那份 spec」补一张签名，而这一轮实际跑的是入口那份，
+#: 等于给「运行中被换进来的那份 spec」补一张署名收据，而这一轮实际跑的是入口那份，
 #: 正是本 finding 的绕法。其余情形（含 ⑥ 单独成立：收据没指着我们正在跑的这份 spec）
 #: `--update` 记的仍是**当前正在跑的**那份，是正当出路，照给 ①–④ 那套指引。
 #: ⚠ 尤其入口门：那里 `expected == actual`，收据过期时只会响 ②+⑥，
@@ -176,6 +187,11 @@ _PLACEHOLDER_TOKENS = frozenset({
 def receipt_path(out_dir):
     """收据的绝对/相对落点（跟随传进来的 `out_dir` 形态，不做 abspath）。"""
     return os.path.join(out_dir, *RECEIPT_PARTS)
+
+
+def init_marker_path(out_dir):
+    """初始化历史标记的落点；与收据分开，单删收据后仍能阻止重 `--init`。"""
+    return os.path.join(out_dir, *INIT_MARKER_PARTS)
 
 
 def bytes_digest(data):
@@ -241,6 +257,29 @@ def _load_receipt(path):
     if not isinstance(payload, dict):
         return None, ["① 收据不是 JSON object"]
     return payload, []
+
+
+def _existing_files(out_dir):
+    """列出报告根中已有的文件/软链；空目录不算历史。
+
+    不按当前产物名列白名单：未来新增的工件同样说明这不是全新报告根。软链即使指向目录也算
+    一个既有条目，不跟随。读取失败时抛给调用方 fail-closed，绝不把「看不见」当成「没有」。
+    """
+    if not os.path.lexists(out_dir):
+        return []
+    if os.path.islink(out_dir) or not os.path.isdir(out_dir):
+        return [os.path.basename(out_dir) or out_dir]
+    found = []
+    pending = [out_dir]
+    while pending:
+        parent = pending.pop()
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(entry.path)
+                else:
+                    found.append(os.path.relpath(entry.path, out_dir))
+    return sorted(found)
 
 
 # ── 判据 ────────────────────────────────────────────────────────────────────
@@ -345,10 +384,10 @@ def blocked_message(spec_path, out_dir, stage, problems):
             "  怎么办（`spec_change_gate.py` 在本目录）：",
             "    · 首次建立基线：",
             "        python3 spec_change_gate.py --spec <spec.json> --out <报告根> --init \\",
-            "            --reason \"<为什么是这份 spec>\" --by \"<确认人>\"",
+            "            --reason \"<为什么是这份 spec>\" --by \"<声明署名>\"",
             "    · spec 确实改过了：",
             "        python3 spec_change_gate.py --spec <spec.json> --out <报告根> --update \\",
-            "            --reason \"<改了什么、为什么改>\" --by \"<确认人>\"",
+            "            --reason \"<改了什么、为什么改>\" --by \"<声明署名>\"",
         ]
     lines += [
         "  ⚠ 这道门要挡的是「跑不通就改 spec 缩范围」：改窄 dtype、砍用例数、换 runner_form"
@@ -360,7 +399,7 @@ def blocked_message(spec_path, out_dir, stage, problems):
 
 
 def assert_confirmed(spec_path, out_dir, stage, *, expected_sha256):
-    """判据全过才返回；否则 `SystemExit(BLOCKED(spec 变更未确认) …)`。
+    """判据全过才返回；否则 `SystemExit(BLOCKED(spec 内容完整性或显式声明未通过) …)`。
 
     `stage` 只进人读消息（"进 Task1 之前" / "写验收产物之前"），不参与判定。
 
@@ -383,7 +422,7 @@ def _reject_bad_declaration(reason, by):
         raise SystemExit(
             "拒绝写收据——变更声明不合格：\n"
             + "\n".join(f"  · {p}" for p in problems)
-            + "\n  · `--by` 要写**具体是谁**拍的板，`--reason` 要写改了什么、为什么改。\n"
+            + "\n  · `--by` 要写**具体是谁作出声明**，`--reason` 要写改了什么、为什么改。\n"
               "  ⚠ 本工具不校验你写的是不是真人；它只拒绝明显的敷衍占位。")
 
 
@@ -402,11 +441,35 @@ def _write_receipt(out_dir, payload):
     return path
 
 
+def _write_init_marker(out_dir, initial_spec_sha256):
+    """以 `O_EXCL` 首次写历史标记；它是防误重置哨兵，不是签名或审批凭据。"""
+    path = init_marker_path(out_dir)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o644)
+    except OSError as ex:
+        raise SystemExit(f"初始化历史标记落盘失败（已存在、是软链或不可写？）：{path}（{ex}）")
+    payload = {
+        "schema": INIT_MARKER_SCHEMA,
+        "schema_version": 1,
+        "initial_spec_sha256": initial_spec_sha256,
+        "scope": "detect_prior_init_only_not_user_confirmation_or_tamper_proof",
+    }
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    return path
+
+
 def init_receipt(spec_path, out_dir, reason, by):
     """首次建立基线：`previous_spec_sha256 = null`。
 
-    ⚠ 收据已存在时**拒绝**：否则「改完 spec 再 init 一次」= 把 `previous_spec_sha256`
-    抹回 null，变更历史一笔勾销。要记一次变更请用 `--update`。
+    ⚠ 只接受全新/空报告根，并另写独立初始化标记：否则删掉收据再来一次就能把
+    `previous_spec_sha256` 抹回 null。要记一次变更请用 `--update`。
+
+    这只证明「目录里还留着一次 init 的文件事实」，不证明是谁 init、历史是否被同一写入者整体
+    篡改；后者需要本进程写不到的外部锚，见模块文档「这道门证到哪一步」。
     """
     path = receipt_path(out_dir)
     if os.path.lexists(path):
@@ -417,8 +480,24 @@ def init_receipt(spec_path, out_dir, reason, by):
             "  · spec 改过了 → 改用 --update --reason … --by …；\n"
             "  · 真要另起一轮 → 换一个 --out 报告根。")
     _reject_bad_declaration(reason, by)
+    try:
+        existing = _existing_files(out_dir)
+    except OSError as ex:
+        raise SystemExit(
+            f"拒绝 --init：报告根无法完整检查，不能证明它没有已有历史：{out_dir}（{ex}）")
+    if existing:
+        shown = ", ".join(existing[:8])
+        if len(existing) > 8:
+            shown += f", …（共 {len(existing)} 项）"
+        raise SystemExit(
+            f"拒绝 --init：报告根已有历史（既有文件：{shown}）；"
+            "不得用新基线覆盖旧状态，请核实原收据或换一个 --out 报告根。")
+    current = spec_digest(spec_path)
+    # 先写与收据分离的哨兵，再写收据。第二步若异常，宁可留下一个需人工核实的 fail-closed 标记，
+    # 也不能回到「重试 init 就像从未发生过」的 fail-open 状态。
+    _write_init_marker(out_dir, current)
     payload = {"schema": SCHEMA, "schema_version": SCHEMA_VERSION,
-               "spec_sha256": spec_digest(spec_path),
+               "spec_sha256": current,
                "previous_spec_sha256": None,
                "change_reason": reason, "confirmed_by": by}
     _write_receipt(out_dir, payload)
@@ -478,7 +557,8 @@ def main(argv=None):
                              "可言，拿不到本轮入口摘要，因此**不**校判据 ⑤/⑥。"
                              "那两条只在 run_workflow 的三处门里成立")
     parser.add_argument("--reason", default=None, help="变更理由（--init/--update 必给，非空非占位符）")
-    parser.add_argument("--by", default=None, help="确认人（--init/--update 必给，非空非占位符）")
+    parser.add_argument("--by", default=None,
+                        help="声明署名（字段名保留为 confirmed_by；必给、非空非占位符，不代表身份已核验）")
     args = parser.parse_args(argv)
 
     if args.init or args.update:
