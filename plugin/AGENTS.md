@@ -26,7 +26,8 @@ agents:
 
 **输入**：算子任务书（md 本地路径 **或** `http(s)` 链接）+ PR 链接。
 **产出**（**验收裁决当前只出自 `--mode cpp_extension`**，见下节与仓根 `AGENTS.md` §4）：`reports/<op>/` 下 `correspondence.json` / `caseset.json` / `evidence.json` / `verdict.json` / `baseline.json`（有基线时）/ `perf_report.json` / `acceptance.json` + 中文验收报告；`cpp_extension` 另产与裁决解耦的 `repro/` 全量人工复现入口。
-⚠ **非准入通路（`cpp` / `aclnn_py`，要跑须加 `--allow-experimental-form`）与非验收通路（mock / catlass_mock）产的都是** `dev_run_summary.json` + `dev_precision_check.json`（带 `evidence_grade=development` + NON-ACCEPTANCE 戳），**物理上不产 `acceptance.json` / `verdict.json`**（mock 侧口径自 C5，2026-07-22）。
+⚠ **非验收通路（显式 `--mode mock` / `catlass*`）产的都是** `dev_run_summary.json` + `dev_precision_check.json`（带 `evidence_grade=development` + NON-ACCEPTANCE 戳），**物理上不产 `acceptance.json` / `verdict.json`**（mock 侧口径自 C5，2026-07-22）。
+⚠ **`cpp` / `aclnn_py` 已于 2026-08-06 停止准入，连真机入口都没有了**：spec 写它们即拒跑，出路是迁到 `cpp_extension`（不是换 `--mode` 再试）。
 
 ## 跑测 mode 的唯一真源：`spec.runner_form`（别写死、别问用户）
 
@@ -36,27 +37,36 @@ agents:
 | `spec.runner_form` | `run_workflow.py --mode` | 能否产验收裁决 | 说明 |
 |---|---|---|---|
 | `cpp_extension`（**或未声明**） | `cpp_extension` | ✅ **当前唯一准入形态** | 隔离构建官方 PyTorch `NpuExtension`，以 build/load/vendor receipt 绑定被测来源锚（PR 通路是 exact PR head，本地 checkout 通路是子树 `root_digest`）与现场 ELF；须 `OPRUNWAY_CPP_EXTENSION_REAL=1` |
-| `cpp` | `new_example` | ❌ 要跑须加 `--allow-experimental-form`，且只产开发级产物 | 编译 per-op C++ runner 上真机；真机 dtype 白名单 fp32/fp16/bf16 |
-| `aclnn_py` | `aclnn_py` | ❌ 同上 | op 工程即 DUT、通用 ctypes 两段式 runner（**无 per-op runner 源**）；须 `OPRUNWAY_ACLNN_REAL=1` |
+| `cpp` | （无）| ⛔ **停止准入（2026-08-06）**：派生表无条目，省 `--mode` 派不出、显式 `--mode new_example` 也拒 | 曾为「编译 per-op C++ runner 上真机；真机 dtype 白名单 fp32/fp16/bf16」 |
+| `aclnn_py` | （无）| ⛔ **停止准入（2026-08-06）**：同上 | 曾为「op 工程即 DUT、通用 ctypes 两段式 runner（**无 per-op runner 源**）」 |
 
-`_REAL_MACHINE_MODES = {new_example, aclnn_py, cpp_extension}`（`acc-common/run_workflow.py`）——三者都**在真机上跑得起来**，
-但**准入白名单只有一条**：`_ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})`。
-⚠ **「能跑」≠「能出裁决」，这两件事必须分开读、分开写。** 准入之外，`cpp_extension` 自己的来源/构建/加载收据仍须通过三级门才产裁决。
+`_REAL_MACHINE_MODES = {new_example, aclnn_py, cpp_extension}`（`acc-common/run_workflow.py`）——那是「哪些 mode 在真机上跑」的表，
+**不是**准入表，而且**必须保留全部三项**：入口门正是靠「显式请求的 mode ∈ 本表」把 `--mode new_example` 这类绕行认出来并拒掉。
+派生表与准入表现在逐字同集，且有 `assert` 钉着：
+
+```python
+_ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})
+_RUNNER_FORM_TO_MODE = {"cpp_extension": "cpp_extension"}
+```
+
+⚠ **「能跑」≠「能出裁决」，这两件事仍要分开读**：`cpp_extension` 自己的来源/构建/加载收据仍须通过三级门才产裁决。
 `mock` / `catlass` / `catlass_mock` **派生不出来**，只能显式指定（局部自检 / catlass 通路的正当逃生口），且不产 `acceptance.json`。
 
 准入门落在**两处、缺一不可**：① 入口门 `_resolve_mode`（正常调用路径在这里被拦；**只对真机通路生效**，显式 `mock` /
 `catlass_mock` 逃生口不受影响——它们本来就不产验收产物）；② 出口门 `_assert_acceptance_form_allowed`（写
 `acceptance.json` / `verdict.json` **之前**再校一次）。口径照抄 `repo_adapter` 对 `catlass_mock` 后门的处置——
-**只拦入口拦不住**；下一个人看到出口门别当冗余删掉。
+**只拦入口拦不住**；下一个人看到出口门别当冗余删掉。第三处同口径的门在
+`finalize_clean_acceptance.build_clean_acceptance`（那是跳过状态机直接拼裁决的近路）。
 
-> ⚠ **`--allow-experimental-form` 放行的是「跑起来」，不是「出裁决」**：`cpp` / `aclnn_py` 加了它才能在真机上跑
-> （修通路、复现问题、局部开发验证），但该路径**物理上只产** `dev_run_summary.json` / `dev_precision_check.json`
-> （`evidence_grade="development"` + NON-ACCEPTANCE 标记），**不写** `acceptance.json` / `verdict.json`。
-> 所以「加了逃生阀跑绿了」**不得**写成验收通过、**不得**进验收报告的裁决栏。
+> ⚠ **逃生阀 `--allow-experimental-form` 已删除（2026-08-06），别加回来。** 它原先放行「跑起来」、不放行「出裁决」；
+> 删它的实测理由是 aclnnRoll 试跑：编排层采信一句未经验证的论断把 `runner_form` 改成 `cpp`，之后整轮
+> **物理上不可能产出裁决**却跑满 1h47m 才 BLOCKED。**能跑起来的死路就会有人走进去。**
 >
-> **spec 写着 `cpp` / `aclnn_py` 又要做正式验收时，正确处置是把 spec 迁到 `cpp_extension`——不是问用户走哪条 form。**
+> **spec 写着 `cpp` / `aclnn_py` 时，唯一正确处置是把 spec 迁到 `cpp_extension`——不是问用户走哪条 form、更不是换个 `--mode` 再试。**
 > 迁移要补 torch.ops 调用桥 + vendor ELF 构建收据，接入成本明显更高；这是已知账单，不是加个逃生阀就算解决。
 > 编排层在 CP-A/CP-B 就该定下来，别按旧 form 一路派生到 CP-D 才被门拦、白做整条前置。
+>
+> ⚠ **历史产物不改判**：`cpp` / `aclnn_py` 已产出的验收产物保持原裁决与历史效力。停止准入 = 不支持新建。
 
 > **收敛理由是真机成熟度，不是形态优劣**（详见仓根 `AGENTS.md` §4.1）：
 > ① `cpp_extension` 跑通过完整 torch_parity 矩阵（Median PR6429），是唯一有完整矩阵背书的通路。
@@ -131,19 +141,23 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
 - **CP-B Task1 用例**：dispatch `acc-spec-extractor:extract_spec` → `spec` + `task_pr_gaps`；primary inline
   `gen_cases.py <spec> --dry-run --ledger-out <case_plan.json> --source-facts <source_facts.json> --correspondence <correspondence.json>`（plan-only 契约自检 + 绑定 facts/用户确认的 durable 计划账本，**不产任何裁决**）与
   `validate_preparation_state.py`（只判 CP-A/B 准备工件能否复用，`acceptance_verdict=null`）——**CP-B 只关注 task1 用例计划自洽**；
-  `preflight_aclnn.py`（**仅 `aclnn_py` 形态**；⛔ 该形态非准入、产不出验收裁决，本步只服务开发级路径——只做 aclnn PR-head header↔spec slots 静态对账，成功也只是 `READY_WAIT_NPU_TRUST_GATE`，不替代真机 build/harness 门）；
+  `preflight_aclnn.py`（⚠ **`aclnn_py` 与 `cpp_extension` 两种形态都要跑**——旧文案写「仅 `aclnn_py` 形态」与代码不符，
+  实际早退的只有**精确的 `"cpp"`**（落 `NOT_APPLICABLE`），词表外的值 fail-closed；
+  两种形态都走 aclnn 两段式 header↔spec slots 静态对账，成功也只是 `READY_WAIT_NPU_TRUST_GATE`，不替代真机 build/harness 门。
+  ⛔ 其中 `aclnn_py` 已停止准入，那一支现在没有下游可去）；
   dry-run 报错或覆盖账本异常 → dispatch `refine_spec`。⚠ C5（2026-07-22）起 **mock 通路物理上不产 `acceptance.json`**，
   改产 `dev_run_summary.json`；本文件别处提到的「门控后写 acceptance.json」**只适用准入通路 `cpp_extension`（`--mode cpp_extension`）**——
-  `cpp` / `aclnn_py` 即使加 `--allow-experimental-form` 跑起来，产的也同样只有 `dev_run_summary.json` / `dev_precision_check.json`。
+  `cpp` / `aclnn_py` 现在连跑都跑不起来（2026-08-06 停止准入），更谈不上产验收产物。
   ⚠ **CP-B 是把 form 定死的地方**：正式验收下 `spec.runner_form` 必须是 `cpp_extension`（未声明即缺省为它，合规）。
   `extract_spec` 产出或复用的 spec 若写着 `cpp` / `aclnn_py`，**先 dispatch `refine_spec` 迁到 `cpp_extension`**
   （迁移账单：torch.ops 调用桥 + vendor ELF 构建收据），**不得**带着旧 form 进 CP-C/CP-D，**也不得**拿这件事去问用户走哪条 form。
 - **CP-C runner**（真机路径、需 NPU）：**按 form 分流；准入路径是 `cpp_extension`**（缺省 form）——走下文「vendor 构建收据」那道信任门，
   由 `acc-runner-dev` 生成官方 `NpuExtension` bundle、真机 build/load/执行交显式 driver 并回传内容寻址收据。
-  以下 `cpp` / `aclnn_py` 两条分流的机制描述**仍然有效**，但**只服务开发级路径**（须 `--allow-experimental-form`，**产不出验收裁决**）：
+  以下 `cpp` / `aclnn_py` 两条分流的机制描述**作为历史记录保留**（解释旧产物是怎么来的），
+  但 2026-08-06 起这两条形态已停止准入、`run_workflow` 连入口都不再给，**编排层不会再走到它们**：
   `cpp` 才 dispatch `acc-runner-dev:gen_runner`（**先过 scope gate**）→ `verify_runner`；
   未满足则停在 CP-C、不上正式跑测；acceptance 裁决只逐字引用 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py` 产物（ADR 0007）。
-  ⚠ **`spec.runner_form == "aclnn_py"` 例外**（⛔ 非准入形态，本段机制只服务开发级路径）：此形态**无 per-op runner 源**（op 工程即 DUT）→ **不派 `gen_runner`、跳过 per-op `verify_runner`**；
+  ⚠ **`spec.runner_form == "aclnn_py"` 例外**（⛔ 已停止准入，本段机制仅作历史保留）：此形态**无 per-op runner 源**（op 工程即 DUT）→ **不派 `gen_runner`、跳过 per-op `verify_runner`**；
   但**不等于免验证**——dispatch `acc-verify-rootcause:verify_aclnn_harness`，由
   `verify_aclnn_harness.py` 从完整 caseset 确定性选择小见证集（每种实际输入 dtype + 每个签名/slot 变体；本接口存在时覆盖标量 attr / 多输出），
   真机逐输出与 CPU torch golden 对拍并落内容寻址 `work/aclnn_harness_trust.json`。`run_workflow` 会在正式 adapter 前硬复核
@@ -161,10 +175,10 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   ⚠ **`--source-facts` 在验收通路上必给、缺席直接拒跑**（在 `os.makedirs` / staging / Task1 之前就拒，不留半个产物目录）：三级门要拿它与
   vendor build receipt 的来源锚逐字对账，缺对照物时「收据自称 `pull_request`、事实其实是 `local_checkout`」查不出来。
   路径就是 **CP-A `fetch_source.py --out <取材目录>` 产的那份**，由编排层随 dispatch 交给 subagent，**与 `--out reports/<op>/` 不是同一个目录**
-  （`completeness.status` 须为 `complete`）。非验收通路（`mock`、加了 `--allow-experimental-form` 的 `cpp` / `aclnn_py`）**不受此强制**。
-  （`<mode>` **据 `spec.runner_form` 派生**：`cpp_extension`（**或未声明**）→ `cpp_extension`（须 `OPRUNWAY_CPP_EXTENSION_REAL=1` + 过 build/load/vendor receipt 门，
-  ✅ **当前唯一能产验收裁决的通路**）、`cpp` → `new_example`、`aclnn_py` → `aclnn_py`（须 `OPRUNWAY_ACLNN_REAL=1`）——
-  后两条❌ **要跑须加 `--allow-experimental-form`，且只产 `dev_run_summary.json` / `dev_precision_check.json`，不写 `acceptance.json` / `verdict.json`**；
+  （`completeness.status` 须为 `complete`）。非验收通路（显式 `--mode mock` / `catlass*`）**不受此强制**。
+  （`<mode>` **据 `spec.runner_form` 派生，而唯一派得出的就是** `cpp_extension`（**未声明时也是它**）→ `cpp_extension`
+  （须 `OPRUNWAY_CPP_EXTENSION_REAL=1` + 过 build/load/vendor receipt 门，✅ **当前唯一能产验收裁决的通路**）；
+  `cpp` / `aclnn_py` ⛔ **已停止准入、派不出 mode，显式指定同样被拒**；
   `mock` / `catlass` / `catlass_mock` 派生不出、须显式指定，见上文「跑测 mode 的唯一真源」）
   （**Task2 精度 + Task3 性能 + 三级门 task1/2/3 一次成**）→ `evidence.json`/`verdict.json`/`baseline.json`（有基线时）/`perf_report.json`/`acceptance.json`；
   FAIL → dispatch `rootcause`（先解耦「被测算子 vs harness」再归因）。
@@ -191,8 +205,8 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
 | subagent | mode | skill | dispatch_mode | 职责（单轮、禁内部循环、不自行判定、只回结构化摘要） |
 |---|---|---|---|---|
 | `acc-spec-extractor` | subagent | `acc-spec` | `extract_spec` / `refine_spec` | `extract_spec`：`task_doc`+`pr_facts` → `<op>.spec.json` + `task_pr_gaps`（多算子多 spec）；`refine_spec`：mock 门失败据 gate error 修 spec |
-| `acc-runner-dev` | subagent | `acc-runner` | `gen_golden` / `gen_runner` / `verify_runner` | **`gen_golden`：据任务书产 `<ops_root>/<op>/golden.py`（真值口径按两档链定、`GOLDEN_CONTRACT` 带引文锚；⚠ **PR/仓里的参考实现一律禁止作 golden 源**）——批 6 补上的「产出者」，此前 golden.py 全仓无人产**；`gen_runner`：据 spec + 算子自带 example 生成 `oprunway_<op>_runner.cpp` + 选构建路径（**锚定 example 不猜**，含 **scope gate**：ops-<族> 仓·aclnn 两段式·opp 安装型（含非 experimental 子树）；catlass（换构建体系）/ 非 aclnn 接口 / 双实现 / 未支持 dtype → BLOCKED/转 P3、不硬塞；⚠ **只对显式 `spec.runner_form == "cpp"` 派发**——`cpp_extension`（含未声明的缺省）走 `cpp_extension_codegen.py` 的官方 `NpuExtension` bundle、`aclnn_py` 无 per-op runner 源，两者都不派本 mode；⛔ 且 `cpp` 非准入形态，本 mode 的产物**进不了验收裁决**，只服务 `--allow-experimental-form` 的开发级路径）；`verify_runner`：验证-才-信，手算 golden 小用例逐元素比，未过不上真机（⚠ 同为**只对显式 `cpp`** 的开发级路径；`aclnn_py` 形态无源可自检 → 跳过本 mode，改走 CP-C 的 harness 真机信任门，非免验证） |
-| `acc-verify-rootcause` | subagent | （无 atomic skill） | `verify_aclnn_harness` / `run_npu` / `rootcause` | `verify_aclnn_harness`：仅 `aclnn_py`（⛔ 非准入形态，本 mode 只服务开发级路径）的 CP-C 真机 harness 确定性小见证，产内容寻址收据、不产 acceptance 裁决；`run_npu`：真机 `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`（⚠ `--source-facts` 验收通路必给、缺席拒跑，路径由编排层随 dispatch 交下来；非验收通路不强制。`<mode>` **据 `spec.runner_form` 派生**，受控词表 `{cpp, aclnn_py, cpp_extension}`、**缺省 `cpp_extension`**：`cpp_extension`（或未声明）→ `cpp_extension`（✅ **唯一产验收裁决的通路**）、`cpp` → `new_example`、`aclnn_py` → `aclnn_py`（❌ 后两条须 `--allow-experimental-form`，只产开发级产物）；`mock`/`catlass*` 派生不出、须显式指定），一次原子跑 Task2+3+三级门；`rootcause`：任何 FAIL 先「被测物自 build + 声明 dtype + 手算 golden」独立复现，解耦 op vs harness 再归因（不外发、不替 PR 作者修到底） |
+| `acc-runner-dev` | subagent | `acc-runner` | `gen_golden` / `gen_runner` / `verify_runner` | **`gen_golden`：据任务书产 `<ops_root>/<op>/golden.py`（真值口径按两档链定、`GOLDEN_CONTRACT` 带引文锚；⚠ **PR/仓里的参考实现一律禁止作 golden 源**）——批 6 补上的「产出者」，此前 golden.py 全仓无人产**；`gen_runner`：据 spec + 算子自带 example 生成 `oprunway_<op>_runner.cpp` + 选构建路径（**锚定 example 不猜**，含 **scope gate**：ops-<族> 仓·aclnn 两段式·opp 安装型（含非 experimental 子树）；catlass（换构建体系）/ 非 aclnn 接口 / 双实现 / 未支持 dtype → BLOCKED/转 P3、不硬塞；⚠ **只对显式 `spec.runner_form == "cpp"` 派发**——`cpp_extension`（含未声明的缺省）走 `cpp_extension_codegen.py` 的官方 `NpuExtension` bundle、`aclnn_py` 无 per-op runner 源，两者都不派本 mode；⛔ 且 `cpp` 已停止准入（2026-08-06），`run_workflow` 连入口都不给，本 mode 实际已无下游，机制描述仅作历史保留）；`verify_runner`：验证-才-信，手算 golden 小用例逐元素比，未过不上真机（⚠ 同为**只对显式 `cpp`** 的历史路径；`aclnn_py` 形态无源可自检 → 跳过本 mode，改走 CP-C 的 harness 真机信任门，非免验证） |
+| `acc-verify-rootcause` | subagent | （无 atomic skill） | `verify_aclnn_harness` / `run_npu` / `rootcause` | `verify_aclnn_harness`：仅 `aclnn_py`（⛔ 已停止准入，本 mode 已无下游、仅作历史保留）的 CP-C 真机 harness 确定性小见证，产内容寻址收据、不产 acceptance 裁决；`run_npu`：真机 `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`（⚠ `--source-facts` 验收通路必给、缺席拒跑，路径由编排层随 dispatch 交下来；非验收通路不强制。`<mode>` **据 `spec.runner_form` 派生**，受控词表仍是 `{cpp, aclnn_py, cpp_extension}`（词表 ≠ 准入表）、**缺省 `cpp_extension`**：`cpp_extension`（或未声明）→ `cpp_extension`（✅ **唯一产验收裁决、也是唯一派得出 mode 的通路**）；`cpp` / `aclnn_py` ⛔ 已停止准入，派不出 mode、显式指定也被拒；`mock`/`catlass*` 派生不出、须显式指定），一次原子跑 Task2+3+三级门；`rootcause`：任何 FAIL 先「被测物自 build + 声明 dtype + 手算 golden」独立复现，解耦 op vs harness 再归因（不外发、不替 PR 作者修到底） |
 
 ### 编排硬约束（措辞与 3 subagent / SKILL 一致）
 
@@ -206,7 +220,7 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
 - **三级门是 `run_workflow.py` 内部**（一次性串 Task1→2→3、末尾统一校门，是**批量驱动、非阶段间实时阻断**），
   **不是** orchestrator 分阶段单独调度；门 `FAILED` → 总体 `BLOCKED`、不出 pass 裁决。「不推进下一 Task/停在当前阶段」是 **agent 编排纪律**。
 - **Task3 blocked 路由**：`BLOCKED_WAIT_GPU_BENCHMARK`（缺外部 GPU 标杆）/ `BLOCKED_INCOMPARABLE_TIMING_SCOPE`（口径不可比）；
-  基线来源按任务书参考源（`spec.perf.baseline` 驱动，当前 aclnn 重写类 isclose/sign/equal/neg = `tbe`（`--mode new_example` 那条路，同法测的**内置 TBE**；⛔ 该 mode 属非准入的开发级路径，其数据不进验收裁决）；
+  基线来源按任务书参考源（`spec.perf.baseline` 驱动，当前 aclnn 重写类 isclose/sign/equal/neg = `tbe`（`--mode new_example` 那条路，同法测的**内置 TBE**；⛔ 该 mode 已停止准入、无真机入口，其历史数据不进验收裁决）；
   **runner form 一律不决定 baseline**（`aclnn_py`、`cpp_extension` 都不）：实际对照物由任务书事实与用户确认共同落进 spec。框架级 Torch 或已确认“小算子拼接等价于 Torch 对应接口”走 `torch_npu`；任务书确实要求直接调用某 ACLNN 实现时才走 `aclnn_builtin`，从 CANN `libopapi.so` 直接调用并记录符号/库 provenance。不能只凭 API 名猜等价，也不重复证明用户已确认的事实；
   所有 form 的性能 case 都必须来自同一份精度 caseset；A3 按全部输入物理载荷之和 `<=256 KiB` / `>256 KiB` 分小/大 shape，分类只分组、不免测；
   catlass matmul 属对标类·synthetic·未定基线；proposed·未 settle，载重前需核）；GPU external 对比层 **consumer 侧已接入 pipeline**（`run_workflow --gpu-baseline` → `gpu_baseline` 校验 → `perf_compare` 对比），但**真实 GPU 标杆数据待外部提供**，缺数据即走 `BLOCKED_WAIT_GPU_BENCHMARK`。
@@ -214,7 +228,7 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
 ## 约束
 
 - **验收权威 = 任务书**；「PR 有测试」≠「验收过了」。
-- **通路准入 = `cpp_extension` 一条**（缺省 form）；**「能跑」≠「能出裁决」**——`--allow-experimental-form` 跑出来的绿不得写进裁决栏，spec 写旧 form 时先迁不问。
+- **通路准入 = `cpp_extension` 一条**（缺省 form），且 2026-08-06 起 `cpp` / `aclnn_py` **连入口都没有了**（逃生阀已删）；spec 写旧 form 时**先迁不问**——不是问用户走哪条 form，也不是换个 `--mode` 再试。
 - 够不着 NPU（远程连时的 VPN 没开、或就地跑但目标机上无可用设备）→ `cpp_extension`（缺省，验收通路）与 `cpp` 都停在 CP-B 的可验证准备收据（vendor 构建收据须真机才产得出），`aclnn_py` 额外跑到 CP-C0 的 `READY_WAIT_NPU_TRUST_GATE`；明确告知「真机跑测待环境就绪」，不启动 mock、不假装真机、不拿 dry-run/preflight 冒充裁决。
 - 私有主机名 / 远端路径走 `OPRUNWAY_*` 环境变量、**不入仓**；产物只落 `reports/`；**副作用先确认**（对外单一对话入口、脚本幕后）。
 - **就地跑 / 远程连都是一等执行形态**：`OPRUNWAY_TARGET=local` 时无 ssh/scp、`OPRUNWAY_SSH_HOST` 免填，`.oprunway/real-machine.env` 也不需要存在；它只服务远程连（详见 CP-A 前置那条）。

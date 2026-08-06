@@ -9,6 +9,7 @@ import precision_policy
 import validate_acceptance_state as G
 import validator as V              # C1 输出形状对账 / C4 dtype 冲突裁决在 validator，与本门配套钉死
 import _golden_fixture as _gf
+import _spec_fixture as SF         # 样例/夹具 spec 已无 case_target（2026-08-06 删历史沿用值）→ 测试侧注预算
 setUpModule = _gf.install        # golden 去引擎化：gen_cases/run_workflow 需 <ops_root>/<op>/golden.py（ADR 0011）
 tearDownModule = _gf.uninstall
 
@@ -333,12 +334,18 @@ class GateTest(unittest.TestCase):
         self.assertTrue(any("dtype 覆盖不足" in e for e in self._errs("task1")))
 
     def test_task1_dtype_uncovered_with_gap_ok(self):
-        """缺的 dtype 均有 task_pr_gaps.dtype_deferred 显式挂账 → 非静默收窄 → 门放行。"""
+        """缺的 dtype 均有 task_pr_gaps.dtype_deferred 显式挂账（且**声明了能力来源**、与活表不矛盾）
+        → 非静默收窄 → 门放行。bfloat16 走 compute 层（metrics 复算不了）、int32 走 cpp 的真机表
+        （Track C，runner.cpp 无 int 分支）——两条缺口成因不同，刻意各挂各的来源。"""
         cs = json.loads(json.dumps(CASESET))
         cs["dtype_required"] = ["float32", "float16", "bfloat16", "int32"]
         cs["dtype_tested"] = ["float32", "float16"]
-        cs["task_pr_gaps"] = [{"kind": "dtype_deferred", "dtypes": ["bfloat16", "int32"],
-                               "reason": "runner 未支持·Track C"}]
+        cs["task_pr_gaps"] = [
+            {"kind": "dtype_deferred", "dtypes": ["bfloat16"], "capability_source": "compute",
+             "reason": "compute_metrics 不支持 bf16 复算"},
+            {"kind": "dtype_deferred", "dtypes": ["int32"], "capability_source": "runner",
+             "runner_form": "cpp", "reason": "runner.cpp 无 int 分支·Track C"},
+        ]
         _w(self.d, "caseset.json", cs)
         self.assertEqual(self._errs("task1"), [])
 
@@ -347,7 +354,8 @@ class GateTest(unittest.TestCase):
         cs = json.loads(json.dumps(CASESET))
         cs["dtype_required"] = ["float32", "float16", "bfloat16", "int32"]
         cs["dtype_tested"] = ["float32", "float16"]
-        cs["task_pr_gaps"] = [{"kind": "dtype_deferred", "dtypes": ["bfloat16"]}]  # 漏 int32
+        cs["task_pr_gaps"] = [{"kind": "dtype_deferred", "dtypes": ["bfloat16"],   # 漏 int32
+                               "capability_source": "compute"}]
         _w(self.d, "caseset.json", cs)
         errs = self._errs("task1")
         self.assertTrue(any("dtype 覆盖不足" in e and "int32" in e for e in errs))
@@ -832,14 +840,22 @@ class RunWorkflowExitTest(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
         self.here = os.path.dirname(os.path.abspath(__file__))
+        # ⚠ 样例 `isclose.spec.json` 已于 2026-08-06 删掉历史沿用的 `case_target: 50`（缺省值的
+        #   化石、无覆盖矩阵依据），对 gen_cases 不可跑。本类要把 spec **路径**交给子进程，
+        #   故物化一份注了夹具预算的副本；预算是测试值，本类测的是退出码不是用例数。
+        #   ⚠ 副本落**独立**目录：`self.d` 是 `--out`，run_workflow 会在里面清残留/落产物。
+        self.specdir = tempfile.mkdtemp()
+        self.spec_path = SF.materialize(
+            os.path.join(self.here, "..", "samples", "specs", "isclose.spec.json"), self.specdir)
 
     def tearDown(self):
         shutil.rmtree(self.d, ignore_errors=True)
+        shutil.rmtree(self.specdir, ignore_errors=True)
 
     def _run(self, *extra):
         return subprocess.run(
             [sys.executable, os.path.join(self.here, "run_workflow.py"),
-             os.path.join(self.here, "..", "samples", "specs", "isclose.spec.json"),
+             self.spec_path,
              "--mode", "mock", "--out", self.d, *extra],
             capture_output=True, text=True)
 
@@ -849,7 +865,7 @@ class RunWorkflowExitTest(unittest.TestCase):
     def test_defect_exit_nonzero(self):
         # §1 覆盖-预算重写后 case id 变——从生成的 caseset 取真实 fp32 精度 case id 注缺陷（稳健、不硬编码）。
         import gen_cases
-        spec_path = os.path.join(self.here, "..", "samples", "specs", "isclose.spec.json")
+        spec_path = self.spec_path
         cs = gen_cases.gen_cases(json.load(open(spec_path, encoding="utf-8")),
                                  os.path.join(self.d, "gen"))
         did = next(c["id"] for c in cs["cases"]
@@ -863,7 +879,7 @@ class RunWorkflowExitTest(unittest.TestCase):
     def test_failfast_skips_perf(self):
         # §精度门前置 + fail-fast（用户 2026-07-15）：任一精度挂 → 跳过 Task3 性能 → FAIL(精度)、exit 1、task3 门未跑。
         import gen_cases
-        spec_path = os.path.join(self.here, "..", "samples", "specs", "isclose.spec.json")
+        spec_path = self.spec_path
         cs = gen_cases.gen_cases(json.load(open(spec_path, encoding="utf-8")),
                                  os.path.join(self.d, "gen"))
         did = next(c["id"] for c in cs["cases"]
@@ -1031,15 +1047,22 @@ class RunWorkflowPerfPackageTest(unittest.TestCase):
     """端到端子进程：小shape例外→exit2+PASSED_WITH_RISK；缺 GPU 标杆→BLOCKED_WAIT(非 fail)。"""
     def setUp(self):
         self.d = tempfile.mkdtemp()
+        self.specdir = tempfile.mkdtemp()          # 独立于 `--out`，见 `_run`
         self.here = os.path.dirname(os.path.abspath(__file__))
 
     def tearDown(self):
         shutil.rmtree(self.d, ignore_errors=True)
+        shutil.rmtree(self.specdir, ignore_errors=True)
 
     def _run(self, spec, *extra):
+        # ⚠ 不直接喂仓内 spec 路径：`sign.spec.json` / `gpu_demo.spec.json` 已于 2026-08-06 删掉
+        #   历史沿用的 `case_target: 50`（缺省值的化石、无覆盖矩阵依据），对 gen_cases 不可跑。
+        #   这里物化一份注了**夹具预算**的副本再交给子进程——预算是测试值，本类测的是
+        #   性能包与退出码，不是用例数。
+        staged = SF.materialize(os.path.join(self.here, spec), self.specdir)
         return subprocess.run(
             [sys.executable, os.path.join(self.here, "run_workflow.py"),
-             os.path.join(self.here, spec), "--mode", "mock", "--out", self.d, *extra],
+             staged, "--mode", "mock", "--out", self.d, *extra],
             capture_output=True, text=True)
 
     def _gate(self, stage):
@@ -1565,53 +1588,45 @@ class DefaultModeIsRealMachineTest(unittest.TestCase):
         # 验收准入通路（cpp_extension）无需任何旁路即可派生——这是本用例的主线场景。
         self.assertEqual(
             W._resolve_mode({"runner_form": "cpp_extension"}, None), "cpp_extension")
-        # cpp / aclnn_py 现被验收准入白名单（run_workflow._ACCEPTANCE_RUNNER_FORMS）挡在正式验收外。
-        # 但本用例测的是**派生表**、不是准入：省 mode 时这两种 form 也必须各自落到自己的真机 mode。
-        # 故显式 allow_experimental_form=True 关掉准入门，让断言仍打在 runner_form→mode 映射上。
-        # ⚠ 这里**不能**改用 mock 夹具来"绕过"准入门：回落 mock 正是本用例要证伪的那个危险行为
-        #   （mock 的 NPU 输出 = golden.copy()、精度按构造必过），换成 mock 等于把被测对象换掉。
-        # ⚠ 也不是给准入门放水：准入门本身由 test_run_workflow_mode.py::AcceptanceFormGateTest 专测。
-        # ⚠ 这里写**显式** runner_form=cpp：spec 省略该键时缺省已是 cpp_extension
-        #   （run_workflow._DEFAULT_RUNNER_FORM，缺省跟着唯一准入形态走），
-        #   拿 `{}` 断言 new_example 就变成在测缺省值而不是测派生表了。
-        #   缺省值本身由 test_run_workflow_mode.py 专测。
-        self.assertEqual(
-            W._resolve_mode({"runner_form": "cpp"}, None,
-                            allow_experimental_form=True), "new_example")
-        self.assertEqual(
-            W._resolve_mode({"runner_form": "aclnn_py"}, None,
-                            allow_experimental_form=True), "aclnn_py")
+        # 通路收敛（2026-08-06）后**只剩这一条派生**：cpp / aclnn_py 连映射都没有了，
+        # 省 mode 时当场拒。
+        # ⚠ 本用例的正题是「省 mode 时**绝不回落 mock**」——所以这里断言的是「拒」，
+        #   而不是「派生到某个别的真机 mode」：拒和回落 mock 是相反方向，混不了。
+        #   退役门本身由 test_run_workflow_mode.py::RetiredRunnerFormTest 专测。
+        for retired in ("cpp", "aclnn_py"):
+            with self.subTest(retired=retired):
+                with self.assertRaises(SystemExit) as cm:
+                    W._resolve_mode({"runner_form": retired}, None)
+                self.assertNotIn("mock", str(cm.exception).split("--mode mock")[0],
+                                 "拒的理由里不该出现「回落 mock」这种意思")
 
     def test_no_mode_without_realcfg_failclosed_no_forged_acceptance(self):
-        # 清掉真机 OPRUNWAY_* 配置（其余 env 保留，与本用例无关）→ 不带 --mode 即走默认（应 = new_example）。
+        """省 `--mode` 且拿不到真机通路时：非零退出、不落 acceptance.json、指路 `--mode mock`。
+
+        ⚠ **夹具 2026-08-06 换过一次，要证的那件事没变。** 原来走的是
+        `runner_form=cpp` + `--allow-experimental-form` → 派生 `new_example` → `_ne_cfg` 预检
+        缺配置 → 非零退出。通路收敛后 `cpp` 已停止准入、逃生阀也删了，那条路整条不存在；
+        现在由**更早**的退役门兜住同一件事（省 mode ≠ 悄悄回落 mock）。三条断言逐条仍成立，
+        且第三条仍是真断言——退役门的错误信息里就带着「只想本地自检 → 显式加 --mode mock」。
+        """
+        # 清掉真机 OPRUNWAY_* 配置（其余 env 保留，与本用例无关）→ 不带 --mode 即按 spec 派生。
         env = {k: v for k, v in os.environ.items()
                if k not in ("OPRUNWAY_REMOTE_DIR", "OPRUNWAY_OPS_REPO", "OPRUNWAY_OPP",
                             "OPRUNWAY_OP_SRC", "OPRUNWAY_TARGET", "OPRUNWAY_SSH_HOST")}
         # spec 显式声明 runner_form=cpp（照抄 isclose 样例、只加这一个键）。
-        # ⚠ 为什么不能直接用样例文件：样例**未声明** runner_form，而缺省已翻成 cpp_extension
-        #   （run_workflow._DEFAULT_RUNNER_FORM），派生出的就不再是 new_example 了。
-        #   本用例要测的是「省 --mode 时按 runner_form 派生到真机通路、缺配置即 fail-closed」，
-        #   派生源必须是 spec 里那个字段本身，故显式写出来。
-        with open(os.path.join(self.here, "..", "samples", "specs", "isclose.spec.json"),
-                  encoding="utf-8") as f:
-            spec_obj = json.load(f)
-        spec_obj["runner_form"] = "cpp"
-        spec = os.path.join(self.d, "isclose_cpp.spec.json")
-        with open(spec, "w", encoding="utf-8") as f:
-            json.dump(spec_obj, f, ensure_ascii=False)
-        # --allow-experimental-form：runner_form=cpp 已被验收准入白名单挡下。
-        # 本用例要测的却是**缺真机配置时的 fail-closed**，而那条路（run_workflow 里的 _ne_cfg 预检 +
-        # "--mode mock" 指路）只长在 new_example 分支上。不关掉准入门就会先被准入门非零退出——
-        # 退出码看着一样、断言 1/2 照过，测到的却不是同一件事（准入门提示里根本没有 "--mode mock"，
-        # 断言 3 会真实报错；即便将来提示措辞变了，这里也已经不是在测缺配置那条路了）。
-        # ⚠ 同理**不能**把 spec 换成 cpp_extension 绕门：那条通路没有 _ne_cfg 预检，三条断言全落空。
+        # ⚠ 为什么不能直接用样例文件：样例**未声明** runner_form，而缺省是 cpp_extension
+        #   （run_workflow._DEFAULT_RUNNER_FORM），走的就不是本用例要测的那条路了。
+        # ⚠ 经 `_spec_fixture.materialize` 落盘：样例已于 2026-08-06 删掉历史沿用的
+        #   `case_target: 50`（缺省值的化石、无覆盖矩阵依据），副本里那个预算是**夹具值**。
+        spec = SF.materialize(
+            os.path.join(self.here, "..", "samples", "specs", "isclose.spec.json"),
+            self.d, name="isclose_cpp.spec.json", runner_form="cpp")
         r = subprocess.run(
-            [sys.executable, os.path.join(self.here, "run_workflow.py"), spec, "--out", self.d,
-             "--allow-experimental-form"],
+            [sys.executable, os.path.join(self.here, "run_workflow.py"), spec, "--out", self.d],
             capture_output=True, text=True, env=env)                          # 关键：不带 --mode
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)             # fail-closed（非零退出）
         self.assertFalse(os.path.exists(os.path.join(self.d, "acceptance.json")),
-                         "默认走真机、缺配置时绝不产出伪造 acceptance.json")   # 不落半产物
+                         "拿不到真机通路时绝不产出伪造 acceptance.json")       # 不落半产物
         self.assertIn("--mode mock", r.stdout + r.stderr)                     # 指路提示存在（要本地自检加 mock）
 
 
@@ -2379,9 +2394,43 @@ class GateTargetHwGapTest(unittest.TestCase):
             self.assertTrue(any("dtypes" in e for e in errs), (bad_dtypes, errs))
 
 
-def _defgap(dtypes=("complex64",), reason="gen_cases 生成层无该 dtype 分支"):
-    """`dtype_deferred` 结构化条目——「我们这条 pipeline 测不了」的自认能力缺口。"""
-    return {"kind": "dtype_deferred", "dtypes": list(dtypes), "reason": reason}
+def _defgap(dtypes=("complex64",), reason="gen_cases 生成层无该 dtype 分支", **extra):
+    """`dtype_deferred` 结构化条目——「我们这条 pipeline 测不了」的自认能力缺口。
+
+    ⚠ 默认**不带** `capability_source`：`gate_task2` 的终态映射（步骤 5）压根不看这个字段，
+      本 helper 的默认形态刻意保持那一步的原样。要过 `gate_task1` 的覆盖门（步骤 9 的能力来源
+      硬校）请显式传 `capability_source=...`。"""
+    return {"kind": "dtype_deferred", "dtypes": list(dtypes), "reason": reason, **extra}
+
+
+# ---- 能力来源硬校的测试素材：**从活表现算**，绝不在测试里抄一份 dtype 清单 -------------------
+# 步骤 8 正在往这三张表里加 dtype（complex64 / uint32 …）。测试若写死「complex64 一定不被支持」，
+# 表一扩它就红——红的还不是被测逻辑。故一律 `_absent_from` / `sorted(表)[0]` 现算。
+_DTYPE_PROBES = ("complex64", "complex128", "float8_e4m3", "float8_e5m2",
+                 "uint32", "uint64", "float64", "int128")
+
+
+def _cap_sets():
+    """三张活表的当前支持集（+ runner 层用哪一支 form）——与门读的是同一份真源。"""
+    import gen_cases, repo_adapter
+    form = sorted(repo_adapter.SUPPORTED_NP_BY_FORM)[0]
+    return {
+        "generation": (set(gen_cases.generatable_dtypes()), None),
+        "runner": (set(repo_adapter.supported_np(form)), form),
+        "compute": (set(precision_policy.SUPPORTED_COMPUTE_DTYPES), None),
+    }
+
+
+def _absent_from(layer):
+    """现算一个**确实不在该层能力表里**的 dtype 名；表把候选全吃了就返回 None（调用方 skip）。"""
+    supported, _ = _cap_sets()[layer]
+    return next((dt for dt in _DTYPE_PROBES if dt not in supported), None)
+
+
+def _present_in(layer):
+    """现算一个**该层能力表确实支持**的 dtype 名（用来伪造「自报不支持、表里其实支持」）。"""
+    supported, _ = _cap_sets()[layer]
+    return sorted(supported)[0]
 
 
 class GateDeferredDtypeTerminalStateTest(unittest.TestCase):
@@ -2529,12 +2578,215 @@ class GateDeferredDtypeTerminalStateTest(unittest.TestCase):
                             for e in self._errs("task1")))
         self.assertEqual(self._run_task2(cs, "pass"), [])
 
-    # --- 边界钉：本步**只改终态**，覆盖门的放行逻辑原样不动（步骤 9 才动它）---
-    def test_task1_coverage_gate_release_logic_untouched(self):
-        """同一份 caseset 走 task1：覆盖门仍认 `dtype_deferred` 为已挂账、仍放行。
-        若哪天这条变红，说明有人把「放行逻辑」和「终态映射」两步搅在了一起。"""
-        _w(self.d, "caseset.json", self._cs([_defgap()]))
+    # --- 边界钉：终态映射与覆盖门放行逻辑是两回事，别搅在一起 ---
+    def test_task1_coverage_gate_still_releases_a_well_formed_gap(self):
+        """同一份 caseset 走 task1：挂账**写全了**（带能力来源、与活表不矛盾）时，覆盖门仍认它
+        为已挂账、仍放行 —— 终态映射那一步没有把覆盖门的放行语义顺手改掉。
+
+        ⚠ dtype 从**活表现算**（步骤 8 在扩表），别写死某个具体 dtype 名。"""
+        dt = _absent_from("generation")
+        if dt is None:
+            self.skipTest(f"生成层能力表已覆盖全部候选 {_DTYPE_PROBES}——无从构造真实缺口")
+        gap = _defgap(dtypes=[dt], capability_source="generation")
+        _w(self.d, "caseset.json", self._cs([gap], required=("float32", "float16", dt)))
         self.assertEqual(self._errs("task1"), [])
+
+
+class DeferredGapCapabilitySourceTest(unittest.TestCase):
+    """`dtype_deferred` 的**能力来源硬校**（`_check_deferred_gap`，喂 task1 的 Q7 覆盖门）。
+
+    **堵的是什么**：此前只要 `kind` 对、`dtypes` 是个 list，覆盖门就认账放行。于是任务书要的任何
+    dtype，写一行 `{"kind":"dtype_deferred","dtypes":["<不想测的>"]}` 就能从覆盖门溜过去——
+    dtype 矩阵一旦按笛卡尔铺开，这条通道就是成规模的假覆盖。现在挂 deferred 必须**指名是哪张
+    能力表不支持**，门拿**活表**逐条对：自报不支持、表里其实支持 → 拒该 gap（→ 覆盖不足 → BLOCKED）。
+
+    ⚠ 本类**一律从活表现算 dtype**（`_absent_from` / `_present_in`），不写死 complex64 之类的名字：
+      能力表正在被扩（步骤 8），写死就等于给测试埋一颗随扩表爆的雷，而且爆的不是被测逻辑。
+    ⚠ 与 `GateDeferredDtypeTerminalStateTest` 分工：那边管 gate_task2 的**终态**能不能是干净 pass，
+      这边管 gate_task1 的**覆盖门放行**。两处判据各判各的，mutation 校验要分得开。"""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _errs(self, gaps, required, evidence=None):
+        cs = json.loads(json.dumps(CASESET))          # 真实用例 dtype = {float32, float16}
+        cs["dtype_required"] = list(required)
+        cs["dtype_tested"] = ["float32", "float16"]
+        cs["task_pr_gaps"] = gaps
+        _w(self.d, "caseset.json", cs)
+        if evidence is not None:
+            _w(self.d, "evidence.json", evidence)
+        errs = []
+        G._GATES["task1"](self.d, errs)
+        return errs
+
+    def _gap_for(self, layer, dt, **over):
+        """按层构一条**写全了的**合法挂账（runner 层自动带上该层对应的 form）。"""
+        g = {"kind": "dtype_deferred", "dtypes": [dt], "capability_source": layer,
+             "reason": "见证用"}
+        form = _cap_sets()[layer][1]
+        if form is not None:
+            g["runner_form"] = form
+        g.update(over)
+        return g
+
+    # ---- ① 三层各自：来源写对、与活表不矛盾 → 覆盖门认账放行 ----
+    def test_each_capability_layer_accounts_a_real_gap(self):
+        for layer in ("generation", "runner", "compute"):
+            with self.subTest(layer=layer):
+                dt = _absent_from(layer)
+                if dt is None:
+                    self.skipTest(f"{layer} 层能力表已覆盖全部候选 {_DTYPE_PROBES}")
+                errs = self._errs([self._gap_for(layer, dt)],
+                                  ["float32", "float16", dt])
+                self.assertEqual(errs, [], (layer, dt, errs))
+
+    # ---- ② 🔴 核心：自报不支持、活表里其实支持 → 拒该 gap → 覆盖不足 → BLOCKED ----
+    def test_claiming_a_dtype_the_table_actually_supports_is_rejected(self):
+        """伪造 deferred 的最直接形态：随手挑一个 dtype 说「我们测不了」，可那张表明明支持它。
+        这是本步的红线——放过它，笛卡尔扩张出来的新 dtype 缺了照样挂 deferred 免检。"""
+        for layer in ("generation", "runner", "compute"):
+            with self.subTest(layer=layer):
+                dt = _present_in(layer)               # 该层**确实支持**的 dtype
+                errs = self._errs([self._gap_for(layer, dt)],
+                                  ["float32", "float16", dt])
+                self.assertTrue(any("其实**支持**" in e or "当前**支持**" in e for e in errs),
+                                (layer, dt, errs))
+                self.assertTrue(any("dtype 覆盖不足" in e and dt in e for e in errs),
+                                (layer, dt, errs))
+
+    # ---- ③ 不声明能力来源 = 无对照物 → 拒 ----
+    def test_missing_capability_source_is_rejected(self):
+        """挂账不指名是哪张表不支持 → 门没有对照物 → 「宣称有缺口就免检」，拒。"""
+        dt = _absent_from("generation") or "complex64"
+        errs = self._errs([{"kind": "dtype_deferred", "dtypes": [dt], "reason": "测不了"}],
+                          ["float32", "float16", dt])
+        self.assertTrue(any("capability_source" in e for e in errs), errs)
+        self.assertTrue(any("dtype 覆盖不足" in e and dt in e for e in errs), errs)
+
+    def test_unknown_capability_source_is_rejected(self):
+        """来源不在受控词表内（打错字 / 自造一层）→ 同样无从核 → 拒，且不许崩。"""
+        dt = _absent_from("generation") or "complex64"
+        for bad in ("gen", "GENERATION", "", None, 0, ["generation"], {"layer": "runner"}):
+            with self.subTest(bad=bad):
+                gap = {"kind": "dtype_deferred", "dtypes": [dt], "capability_source": bad}
+                errs = self._errs([gap], ["float32", "float16", dt])
+                self.assertTrue(any("capability_source" in e for e in errs), (bad, errs))
+
+    # ---- ④ runner 层的 form 必须指名，且不许张冠李戴 ----
+    def test_runner_source_without_runner_form_is_rejected(self):
+        """真机能力表**逐 runner_form 各一份**，不指明哪一支就无从核 → 拒。"""
+        dt = _absent_from("runner")
+        if dt is None:
+            self.skipTest("runner 层能力表已覆盖全部候选")
+        gap = {"kind": "dtype_deferred", "dtypes": [dt], "capability_source": "runner"}
+        errs = self._errs([gap], ["float32", "float16", dt])
+        self.assertTrue(any("runner_form" in e for e in errs), errs)
+
+    def test_unknown_runner_form_is_rejected(self):
+        dt = _absent_from("runner")
+        if dt is None:
+            self.skipTest("runner 层能力表已覆盖全部候选")
+        gap = self._gap_for("runner", dt, runner_form="no_such_form")
+        errs = self._errs([gap], ["float32", "float16", dt])
+        self.assertTrue(any("受控词表" in e for e in errs), errs)
+
+    def test_runner_form_on_a_non_runner_source_is_rejected(self):
+        """非 runner 来源却带 runner_form → 两处口径打架，挂账写错，拒。"""
+        dt = _absent_from("compute")
+        if dt is None:
+            self.skipTest("compute 层能力表已覆盖全部候选")
+        gap = self._gap_for("compute", dt, runner_form="cpp")
+        errs = self._errs([gap], ["float32", "float16", dt])
+        self.assertTrue(any("不读真机表" in e for e in errs), errs)
+
+    def test_runner_form_must_match_the_form_actually_run(self):
+        """有权威对照物时不许张冠李戴：evidence envelope 记着本轮实跑那一支，挂账却自报另一支
+        （挑一张更弱的表来给缺口撑腰）→ 拒。"""
+        import repo_adapter
+        forms = sorted(repo_adapter.SUPPORTED_NP_BY_FORM)
+        if len(forms) < 2:
+            self.skipTest("只有一种 runner_form，构造不出张冠李戴")
+        claimed, ran = forms[0], forms[1]
+        dt = _absent_from("runner")
+        if dt is None:
+            self.skipTest("runner 层能力表已覆盖全部候选")
+        ev = _ev(self.d, ["x_000", "x_001"])
+        ev["runner_form"] = ran
+        gap = self._gap_for("runner", dt, runner_form=claimed)
+        errs = self._errs([gap], ["float32", "float16", dt], evidence=ev)
+        self.assertTrue(any("实跑 evidence 记的是" in e for e in errs), errs)
+
+    def test_runner_form_matching_the_envelope_is_accepted(self):
+        """反向不误伤：自报与实跑同一支 → 认账放行。"""
+        import repo_adapter
+        form = sorted(repo_adapter.SUPPORTED_NP_BY_FORM)[0]
+        dt = next((x for x in _DTYPE_PROBES
+                   if x not in set(repo_adapter.supported_np(form))), None)
+        if dt is None:
+            self.skipTest("runner 层能力表已覆盖全部候选")
+        ev = _ev(self.d, ["x_000", "x_001"])
+        ev["runner_form"] = form
+        gap = {"kind": "dtype_deferred", "dtypes": [dt],
+               "capability_source": "runner", "runner_form": form}
+        self.assertEqual(self._errs([gap], ["float32", "float16", dt], evidence=ev), [])
+
+    # ---- ⑤ 结构读不出 → 拒（覆盖门侧也要拒，不只终态那一步）----
+    def test_malformed_dtypes_rejected_not_crash(self):
+        for bad in ("complex64", [1, 2], ["complex64", 1], [], [""], None, {"nope": 1}):
+            with self.subTest(bad=bad):
+                gap = {"kind": "dtype_deferred", "dtypes": bad,
+                       "capability_source": "generation"}
+                errs = self._errs([gap], ["float32", "float16", "complex64"])
+                self.assertTrue(any("dtypes 须为非空 dtype 字符串列表" in e for e in errs),
+                                (bad, errs))
+
+    # ---- ⑥ 反向不误伤：Track-C（用例造得出、真机跑不了）挂账仍然成立 ----
+    def test_track_c_gap_survives_even_though_cases_exist(self):
+        """Track-C 的语义就是「生成期放行、真机跑到仍拒」——此时 caseset 里**有**该 dtype 的真实
+        用例，deferred 挂账**仍然成立**。若哪天有人给本硬校加一条「有用例在跑就不算缺口」，
+        这条会红：那会把 `repo_adapter.DEFERRED_NP_BY_FORM` 整条通路判死。"""
+        import repo_adapter
+        pair = next(((f, sorted(s)[0]) for f, s in repo_adapter.DEFERRED_NP_BY_FORM.items() if s),
+                    None)
+        if pair is None:
+            self.skipTest("当前没有任何 Track-C 挂账 dtype")
+        form, dt = pair
+        self.assertNotIn(dt, set(repo_adapter.supported_np(form)))   # Track C 的定义：真机表里没有
+        cs = json.loads(json.dumps(CASESET))
+        cs["cases"][1]["inputs"][0]["dtype"] = dt                    # 该 dtype **有真实用例**
+        cs["dtype_required"] = ["float32", dt]
+        cs["dtype_tested"] = ["float32", dt]
+        cs["task_pr_gaps"] = [{"kind": "dtype_deferred", "dtypes": [dt],
+                               "capability_source": "runner", "runner_form": form}]
+        _w(self.d, "caseset.json", cs)
+        errs = []
+        G._GATES["task1"](self.d, errs)
+        # ⚠ 断言必须是「**一条 error 都没有**」，不能只筛含某关键词的那几条：mutation 校验实测过——
+        #   给硬校加一条「有用例在跑就不算缺口」并配一句措辞不同的 error，按关键词筛就会**假绿**。
+        self.assertEqual(errs, [], (form, dt, errs))
+
+    # ---- ⑦ 泛化钉：门读的是**活表**，不是抄进门里的一份 dtype 清单 ----
+    def test_gate_reads_the_live_table_not_a_copy(self):
+        """给活表临时加一个 dtype，同一条挂账立刻从「成立」变成「与表矛盾」。
+        这条钉死的是**读表不抄表**：若有人把三张表的内容复制进 `validate_acceptance_state`，
+        表扩了门却不跟着变严，扩张出来的新 dtype 就又能挂 deferred 免检。"""
+        import gen_cases
+        dt = _absent_from("generation")
+        if dt is None:
+            self.skipTest("生成层能力表已覆盖全部候选")
+        gap = self._gap_for("generation", dt)
+        self.assertEqual(self._errs([gap], ["float32", "float16", dt]), [])   # 表里没有 → 成立
+        _native = gen_cases._NATIVE
+        gen_cases._NATIVE = dict(_native, **{dt: np.float32})                 # 表扩了
+        try:
+            errs = self._errs([gap], ["float32", "float16", dt])
+        finally:
+            gen_cases._NATIVE = _native
+        self.assertTrue(any(dt in e and "支持" in e for e in errs), (dt, errs))
 
 
 class PassedWithGapsWiringTest(unittest.TestCase):

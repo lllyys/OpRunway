@@ -123,6 +123,36 @@ class SnapshotDigestTest(_Fixture):
         with self.assertRaises(V.VendorBuildReceiptError):
             V.take_snapshot_digest(self.root, "not_here")
 
+    def test_the_digest_books_how_many_symlinks_it_could_not_cover(self):
+        """⭐ 软链**整棵不入 merkle**：一份「源文件被换成指向仓外的软链」的构建树，
+        与一份干净的树可以摘出同一个 merkle。计数是收据里唯一看得见这块不覆盖的地方。
+
+        ⚠ 它**不是门**（没有任何一处拿它做判定），只是不让这块缺口继续只活在 docstring 里。
+        """
+        clean = V.take_snapshot_digest(self.root, _OP)
+        self.assertEqual(0, clean["skipped_symlink_count"])
+        self.assertEqual(0, clean["subtree_skipped_symlink_count"])
+        os.symlink("/etc/hosts",
+                   os.path.join(self.root, _OP, "op_host", "smuggled.h"))
+        dirty = V.take_snapshot_digest(self.root, _OP)
+        self.assertEqual(dirty["snapshot_subtree_sha256"],
+                         clean["snapshot_subtree_sha256"],
+                         "软链不入摘要是既有算法定义（值保持）——正因如此才必须记账")
+        self.assertEqual(1, dirty["subtree_skipped_symlink_count"])
+        self.assertEqual(1, dirty["skipped_symlink_count"])
+        receipt = self._produce(digest=dirty)
+        booked = receipt["build"]["source_snapshot_digest"]
+        self.assertEqual(1, booked["subtree_skipped_symlink_count"])
+        self.assertEqual(1, booked["skipped_symlink_count"])
+
+    def test_a_scope_that_escapes_the_tree_through_a_symlink_is_refused(self):
+        """构建端与取材端必须对「软链 scope」给同一个答案：都拒。"""
+        outside = os.path.join(self.d, "outside")
+        os.makedirs(outside, exist_ok=True)
+        os.symlink(outside, os.path.join(self.root, "escaped"))
+        with self.assertRaises(V.VendorBuildReceiptError):
+            V.take_snapshot_digest(self.root, "escaped")
+
     def test_algorithm_drift_invalidates_a_digest(self):
         digest = V.take_snapshot_digest(self.root, _OP)
         digest["algorithm"]["logic_sha256"] = "0" * 64
@@ -229,6 +259,55 @@ class ReturncodeSourceValidationTest(_Fixture):
         receipt = self._produce()
         self.assertEqual(V.summarize(receipt), self._validated(receipt))
 
+    def test_a_declared_receipt_yields_no_source_identity_by_any_route(self):
+        """⭐ 「`declared` 的收据不得用于验收裁决」这句话的**机械**证明。
+
+        三处消费方（`cpp_extension_driver._vendor_build_provenance`、
+        `cpp_extension_adapter`、`validate_acceptance_state._gate_cpp_extension_receipt`）
+        取源身份**只有这两个入口**，`render_acceptance_markdown` 也走 `summarize`。
+        两个入口都抛 ⇒ 自报退出码的收据在任何一条路径上都产不出
+        `vendor.source_provenance`，也就无从进入裁决链。这条不靠人记。
+        """
+        receipt = self._produce()
+        receipt["build"][V.RETURNCODE_SOURCE_KEY] = V.RETURNCODE_SOURCE_DECLARED
+        for entry in (V.summarize, self._validated):
+            with self.assertRaises(V.VendorBuildReceiptError):
+                entry(receipt)
+        # 同一份收据换成实测值就两个入口都过 —— 证明上面那两次拒绝确实是**这一个字段**
+        # 挡下来的，不是被别处的形态问题顺手拦掉的（否则这条用例会变成一个假门）。
+        receipt["build"][V.RETURNCODE_SOURCE_KEY] = V.RETURNCODE_SOURCE_MEASURED
+        self.assertEqual(V.summarize(receipt), self._validated(receipt))
+
+    def test_the_producer_can_only_ever_emit_measured(self):
+        """产出侧闭环：`produce_receipt` 落的永远是 `measured`，不存在产自报值的分支。"""
+        snapshot = self._produce()
+        pr_route = V.produce_receipt(
+            declared_source_form=V.FORM_GIT_PR, build_result=self._run(),
+            repo="cann/ops-cv", pr_head_sha="a" * 40)
+        for receipt in (snapshot, pr_route):
+            self.assertEqual(receipt["build"][V.RETURNCODE_SOURCE_KEY],
+                             V.RETURNCODE_SOURCE_MEASURED)
+
+    def test_a_legacy_receipt_is_distinguishable_as_a_whole_artifact(self):
+        """⚠ **残留缺口，如实钉住**：老收据（键缺席）**仍能过验收门**，只是摘要不同。
+
+        为什么这仍然要紧：`vendor.source_provenance` 就是这份摘要，它会被 driver 落进
+        `cpp_extension_receipt.json`、并被三级门重算比对——所以「没人证过这次 build
+        跑过」这件事**在产物里是机读可见的**，不是全无痕迹。
+        ⚠ 但它**不是门**：一份手写的、没有 `returncode_source` 键的收据照样能撑起一次
+        `STATUS: PASSED`，且 `验收报告.md` 当前**不渲染**这个字段。要彻底封死得让
+        `validate` 拒掉 `unproven_legacy`（会作废真机上留存的手拼收据），那是一次
+        有意的口径变更，不该由本用例偷偷替人做掉。
+        """
+        measured = self._produce()
+        legacy = json.loads(json.dumps(measured))
+        del legacy["build"][V.RETURNCODE_SOURCE_KEY]
+        self.assertNotEqual(V.summarize(measured), V.summarize(legacy),
+                            "两份摘要长一样 = 同名同形的产物迟早被当真裁决读走")
+        # 兼容放行是当前有意的口径；此处如实钉住，改口径时这条会红，逼人当场表态。
+        self.assertEqual(V.summarize(legacy)["build_returncode_source"],
+                         V.RETURNCODE_SOURCE_UNPROVEN_LEGACY)
+
 
 class ProduceReceiptTest(_Fixture):
     def test_local_source_receipt_passes_validate_with_no_degradation(self):
@@ -246,23 +325,30 @@ class ProduceReceiptTest(_Fixture):
 
         这正是人手拼收据时踩过的坑：事后再摘，摘到的是「源码 + 产物」，
         与 CP-A 记的那份字节永远对不上。
+
+        产物落在**被测子树之外**：那是构建的常态，整树 `matches_pre_build=False` 是预期
+        结果、不是告警。落进子树里是完全另一回事（收据声称的那份字节就此不存在），见
+        `BuildTreeReconciliationTest.test_build_that_rewrites_the_subject_subtree_is_rejected`。
         """
         digest = V.take_snapshot_digest(self.root, _OP)
         result = self._run()
-        # 模拟 build 的副产物：往被摘的子树里写一个文件（`_walk_snapshot` 只按名跳过
-        # build/output，生成物落在别处照样会改 merkle）。
-        with open(os.path.join(self.root, _OP, "generated_tiling.h"), "w",
+        # 模拟 build 的副产物：`_walk_snapshot` 只按名跳过 build/output，
+        # 生成物落在别处照样会改**整树** merkle。
+        with open(os.path.join(self.root, "other_op", "generated_tiling.h"), "w",
                   encoding="utf-8") as out:
             out.write("// build 产物\n")
         receipt = V.produce_receipt(declared_source_form=V.FORM_LOCAL_SOURCE,
                                     build_result=result, snapshot_digest=digest)
         self.assertEqual(receipt["source"]["snapshot_subtree_sha256"],
                          digest["snapshot_subtree_sha256"])
+        self.assertEqual(receipt["source"]["snapshot_sha256"],
+                         digest["snapshot_sha256"], "整树 merkle 同样取自 build 前")
         state = receipt["build"]["tree_state_at_emit"]
         self.assertFalse(state["matches_pre_build"],
                          "build 动过树是常态——记下来才看得出摘要取自 build 前")
-        self.assertNotEqual(state["snapshot_subtree_sha256"],
-                            receipt["source"]["snapshot_subtree_sha256"])
+        self.assertNotEqual(state["snapshot_sha256"],
+                            receipt["source"]["snapshot_sha256"],
+                            "产出时刻重算的整树值必须与 build 前那个不同，否则这一条什么都没测")
 
     def test_production_path_never_digests_the_tree_itself(self):
         """结构性杜绝错法：不给 build 前摘要就产不出收据，没有「现场自己摘一遍」的口子。"""
@@ -418,6 +504,250 @@ class DegradationVocabularyTest(_Fixture):
         receipt["source"]["pr_head_sha"] = "e" * 40
         with self.assertRaisesRegex(V.VendorBuildReceiptError, "捏造 PR head"):
             self._validated(receipt)
+
+
+# ── 合并中丢掉的三道收据门（2026-08-06 补回）────────────────────────────────────
+#
+# main 的 `vendor_build_receipt.py` 覆盖了已删除的 `make_vendor_build_receipt.py` 的绝大部分，
+# 但三道校验没跟过来。下面三个类逐条钉住它们，且**每一条都锚在「拦得早不早」上**——
+# 这三道门的价值有一半在时机：拦在 build 之前，一次几十分钟的构建才不会白跑。
+
+_TOKEN = "gk_LEAKED_TOKEN_9f3a"
+_CRED_REPO = f"https://bot:{_TOKEN}@gitcode.com/cann/ops-nn.git"
+
+
+class RepoCredentialGateTest(_Fixture):
+    """① `source.repo` 带用户凭据一律拒，且**报错不回显原值**。
+
+    `repo` 会落盘进收据、被 CLI 打印，并由 `render_acceptance_markdown` 渲进人读验收报告的
+    「源码仓」一行——报告是会被转发的 .md，那才是凭据真正泄漏出去的那一步（仓规 §2）。
+    """
+
+    def test_validate_rejects_a_credential_repo_without_echoing_it(self):
+        """⭐ 门在 `validate`：driver / adapter / 三级门 / 产出方自检共用的那一条。"""
+        receipt = self._produce()
+        receipt["source"]["repo"] = _CRED_REPO
+        with self.assertRaises(V.VendorBuildReceiptError) as caught:
+            self._validated(receipt)
+        message = str(caught.exception)
+        self.assertIn("凭据", message)
+        # ⭐ 报错会进终端、CI 日志和 issue：回显原值就是**再泄漏一次**。
+        self.assertNotIn(_TOKEN, message)
+        self.assertNotIn(_CRED_REPO, message)
+        self.assertNotIn("bot", message)
+
+    def test_the_producer_refuses_to_emit_a_credential_repo(self):
+        """产出侧同样拒——`produce_receipt` 自过一遍 `validate`，产不出这份收据。"""
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "凭据"):
+            self._produce(repo=_CRED_REPO)
+
+    def test_cli_rejects_a_credential_repo_before_running_the_build(self):
+        """⭐ 时机：必须在 build **之前**拒。跑完几十分钟再说「仓名不能用」是纯浪费。"""
+        digest_path = os.path.join(self.d, "cred-digest.json")
+        receipt_path = os.path.join(self.d, "cred-receipt.json")
+        V.main(["snapshot-digest", "--source-root", self.root,
+                "--subtree-scope", _OP, "--out", digest_path])
+        argv = self._argv()
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "凭据"):
+            V.main(["emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
+                    "--snapshot-digest", digest_path, "--library", self.elf,
+                    "--build-cwd", self.root, "--repo", _CRED_REPO]
+                   + [f"--build-argv={a}" for a in argv]
+                   + ["--out", receipt_path])
+        self.assertFalse(os.path.isfile(self.sentinel),
+                         "⭐ build 跑起来了 = 这道门又退回到写盘那一刻才判")
+        self.assertFalse(os.path.exists(receipt_path))
+
+    def test_ssh_style_remote_is_not_mistaken_for_a_credential(self):
+        """判过头与判不到同样是坏门：`git@host:path` 的 `@` 前面是用户名、不含任何密钥。"""
+        receipt = self._produce(repo="git@gitcode.com:cann/ops-nn.git")
+        self.assertEqual(self._validated(receipt)["repo"],
+                         "git@gitcode.com:cann/ops-nn.git")
+
+    def test_summarize_deliberately_stays_open_so_the_renderer_can_refuse_precisely(self):
+        """⚠ 这条**不是**放松门，是钉住一个刻意的分工——别顺手「统一」进 `_validate_source`。
+
+        `summarize` 是**解释**函数：`render_acceptance_markdown` 得先拿到摘要，才能对带凭据
+        的 repo 印出专门的「拒绝渲染」整节退化（比一句通用的解析失败信息有用得多，那边有
+        `test_credential_repo_never_reaches_the_report` 钉着）。把凭据门挪进 `_validate_source`
+        会让渲染器那条路径变成死代码。真正的门在 `validate`，上面那几条已经钉住。
+        """
+        receipt = self._produce()
+        receipt["source"]["repo"] = _CRED_REPO
+        self.assertEqual(V.summarize(receipt)["repo"], _CRED_REPO)
+        with self.assertRaises(V.VendorBuildReceiptError):
+            self._validated(receipt)
+
+
+class BuildTreeReconciliationTest(_Fixture):
+    """② 构建树 ↔ 指纹树对账，**构建前后各一次**（两次判的不是同一件事）。"""
+
+    def _digest(self):
+        path = os.path.join(self.d, "tree-digest.json")
+        V.main(["snapshot-digest", "--source-root", self.root,
+                "--subtree-scope", _OP, "--out", path])
+        return path
+
+    def _emit(self, digest_path, *, build_cwd=None, out=None, argv=None):
+        return V.main(
+            ["emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
+             "--snapshot-digest", digest_path, "--library", self.elf,
+             "--build-cwd", build_cwd or self.root]
+            + [f"--build-argv={a}" for a in (argv or self._argv())]
+            + ["--out", out or os.path.join(self.d, "tree-receipt.json")])
+
+    # —— 构建前：在 A 目录摘树、在 B 目录 build ——————————————————————
+    def test_building_outside_the_fingerprinted_tree_is_rejected(self):
+        """⭐ 收据会声称「构建自 merkle=X 的那份源码」，而 X 与本次构建的输入毫无关系。"""
+        elsewhere = os.path.join(self.d, "elsewhere")
+        os.makedirs(elsewhere)
+        digest = V.take_snapshot_digest(self.root, _OP)
+        result = V.run_build(self._argv(), elsewhere, self.elf)
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "不在被摘过指纹"):
+            V.produce_receipt(declared_source_form=V.FORM_LOCAL_SOURCE,
+                              build_result=result, snapshot_digest=digest)
+
+    def test_cli_rejects_a_foreign_build_cwd_before_running_the_build(self):
+        elsewhere = os.path.join(self.d, "elsewhere")
+        os.makedirs(elsewhere)
+        digest_path = self._digest()
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "不在被摘过指纹"):
+            self._emit(digest_path, build_cwd=elsewhere)
+        self.assertFalse(os.path.isfile(self.sentinel), "⭐ 必须在 build 之前拒")
+
+    def test_a_subdirectory_of_the_fingerprinted_tree_is_allowed(self):
+        """判过头也是坏门：从子目录发起构建，读的仍是这棵树的字节，合法。"""
+        digest_path = self._digest()
+        self._emit(digest_path, build_cwd=os.path.join(self.root, _OP))
+        self.assertTrue(os.path.isfile(self.sentinel))
+
+    def test_tree_changed_between_digest_and_build_is_caught_before_the_build(self):
+        """⭐ 摘完指纹之后有人动了树：build 还没跑，此刻本该一个字节没变。"""
+        digest_path = self._digest()
+        with open(os.path.join(self.root, _OP, "op_host", "sneaked_in.cpp"), "w",
+                  encoding="utf-8") as out:
+            out.write("// 取材之后被塞进来的\n")
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "构建前对账"):
+            self._emit(digest_path)
+        self.assertFalse(os.path.isfile(self.sentinel),
+                         "⭐ 对账跑在 build 之后 = 一次几十分钟的构建白跑")
+
+    def test_pre_build_reconciliation_also_covers_the_whole_tree(self):
+        """build 之前整树同样硬校：只看子树就等于允许「摘完之后往树里塞点别的」。"""
+        digest_path = self._digest()
+        with open(os.path.join(self.root, "other_op", "sneaked_in.cpp"), "w",
+                  encoding="utf-8") as out:
+            out.write("// 子树之外，但 build 之前它同样不该出现\n")
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "构建前对账"):
+            self._emit(digest_path)
+        self.assertFalse(os.path.isfile(self.sentinel))
+
+    # —— 构建后：这次 build 把被测子树改掉了 ————————————————————————
+    def test_build_that_rewrites_the_subject_subtree_is_rejected(self):
+        """⭐⭐ **这道门不在这里做就没人做。**
+
+        编排只在 CP-A 取材跑一次 `fetch_source`，三级门读的是同一份落盘的
+        `source_facts.json`——拿旧锚比旧锚永远相等，「下游会发现」的救援从不发生。
+        build 若把 `op_subdir` 改掉，收据声称的那份字节此刻已不存在，谁也复现不了。
+        """
+        digest = V.take_snapshot_digest(self.root, _OP)
+        result = self._run()
+        with open(os.path.join(self.root, _OP, "generated_tiling.h"), "w",
+                  encoding="utf-8") as out:
+            out.write("// build 把生成物写进了被测子树\n")
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "把被测子树改掉"):
+            V.produce_receipt(declared_source_form=V.FORM_LOCAL_SOURCE,
+                              build_result=result, snapshot_digest=digest)
+
+    def test_post_build_gate_leaves_a_machine_readable_marker(self):
+        """键**在场**才表示这份收据由带这道门的版本产出；缺席只说明是老收据。"""
+        receipt = self._produce()
+        state = receipt["build"]["tree_state_at_emit"]
+        self.assertIs(state[V.SUBTREE_GATE_KEY], True)
+        self.assertTrue(state["matches_pre_build"], "本例 build 没碰源码树")
+
+    def test_pr_route_has_no_tree_reconciliation_and_says_so(self):
+        """⚠ 如实钉住残留面：PR 通路压根没有 `source_root` 这个对照物，两次对账都做不了。"""
+        elsewhere = os.path.join(self.d, "elsewhere")
+        os.makedirs(elsewhere)
+        receipt = V.produce_receipt(
+            declared_source_form=V.FORM_GIT_PR,
+            build_result=V.run_build(self._argv(), elsewhere, self.elf),
+            repo="cann/ops-cv", pr_head_sha="a" * 40)
+        self.assertNotIn("tree_state_at_emit", receipt["build"],
+                         "PR 通路没有树对账可言，别渲染出一个看着像核过的字段")
+
+    def test_digest_written_into_the_source_tree_is_refused(self):
+        """凭据写进刚被摘过的那棵树 = 当场自我作废；症状要到 emit 才炸，且看着毫无道理。"""
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "--source-root 之内"):
+            V.main(["snapshot-digest", "--source-root", self.root,
+                    "--subtree-scope", _OP,
+                    "--out", os.path.join(self.root, "digest.json")])
+
+
+class OutPathGuardTest(_Fixture):
+    """③ `--out` 的写前保护：`emit` 没有「只记录不执行」模式，写盘却在最后一步。"""
+
+    def _digest(self):
+        path = os.path.join(self.d, "out-digest.json")
+        V.main(["snapshot-digest", "--source-root", self.root,
+                "--subtree-scope", _OP, "--out", path])
+        return path
+
+    def _emit(self, digest_path, out):
+        return V.main(
+            ["emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
+             "--snapshot-digest", digest_path, "--library", self.elf,
+             "--build-cwd", self.root]
+            + [f"--build-argv={a}" for a in self._argv()] + ["--out", out])
+
+    def test_out_colliding_with_the_library_never_clobbers_the_dut(self):
+        """⭐ `--out == --library` 会把被测 ELF **原子替换成一份 JSON**——这一轮就没有 DUT 了。"""
+        digest_path = self._digest()
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, r"--library"):
+            self._emit(digest_path, out=self.elf)
+        self.assertFalse(os.path.isfile(self.sentinel), "⭐ 必须在 build 之前拒")
+        with open(self.elf, "rb") as src:
+            self.assertEqual(src.read(), b"vendor-elf-before-any-build",
+                             "被测 ELF 被动过 = 这道门根本没起作用")
+
+    def test_out_colliding_with_the_snapshot_digest_is_rejected(self):
+        """对照凭据被覆盖，构建前后两次树对账就都没了。"""
+        digest_path = self._digest()
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, r"--snapshot-digest"):
+            self._emit(digest_path, out=digest_path)
+        self.assertFalse(os.path.isfile(self.sentinel))
+
+    def test_unwritable_out_location_is_caught_before_the_build(self):
+        """⭐ 落点根本落不下去（父路径是个普通文件）→ 必须在 build 之前报。
+
+        刻意不用 `chmod 0500` 造不可写目录：容器里以 root 跑时权限位形同虚设，
+        那样的用例会假绿。父路径是文件这条与 uid 无关。
+        """
+        digest_path = self._digest()
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "写不进去"):
+            self._emit(digest_path, out=os.path.join(self.elf, "receipt.json"))
+        self.assertFalse(os.path.isfile(self.sentinel),
+                         "⭐ 拦在 build 之后 = 一次几十分钟的构建白跑")
+
+    def test_probe_and_temp_files_are_cleaned_up(self):
+        """探测文件与原子写的临时文件都不许留在落点目录里。"""
+        digest_path = self._digest()
+        out = os.path.join(self.d, "nested", "receipt.json")
+        self._emit(digest_path, out=out)
+        self.assertTrue(os.path.isfile(out), "落点父目录不存在时应被创建")
+        leftovers = [n for n in os.listdir(os.path.dirname(out))
+                     if n.startswith(V._TMP_PREFIX) or n.startswith(V._PROBE_PREFIX)]
+        self.assertEqual(leftovers, [])
+
+    def test_a_failed_write_leaves_no_half_receipt(self):
+        """半截收据比没有更坏——它看着像一份真的。"""
+        out = os.path.join(self.d, "half.json")
+        with self.assertRaises(V.VendorBuildReceiptError):
+            V.atomic_write(out, {"nan": float("nan")})   # allow_nan=False → 写不出去
+        self.assertFalse(os.path.exists(out))
+        self.assertEqual([n for n in os.listdir(self.d)
+                          if n.startswith(V._TMP_PREFIX)], [])
 
 
 if __name__ == "__main__":

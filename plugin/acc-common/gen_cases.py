@@ -215,9 +215,21 @@ _BF16 = "bfloat16"
 # 两层都过才允许进用例生成（`check_spec_capability`），缺哪层报错里点名哪层（U3）。
 # U3 扩：int64（aclnn indices 与整型算子必需）+ int8/uint8（op_def 常见整型档）。
 # 无符号 dtype 的输入构造见 `_make_varied`（没有负数分支，按有无符号位分、与算子身份无关）。
+# 2026-08-06 扩：uint32 + complex64（真机收发已实测，见 `repo_adapter.SUPPORTED_NP_BY_FORM` 的 provenance 注）。
+#   · `uint32` 零特判入表：`is_integer_dtype("uint32")` 本就为真 → `_make_varied` 走整型分支、
+#     `np.iinfo` 给 `min=0` → 自动走无符号锚点 (0,1,3)；比对侧 §1.1「int→exact」照旧。
+#   · `complex64` 需要显式分支（`_make_varied` / `_make_pairhalf`），且**几处刻意不支持**（见下）。
+# ⚠ **复数在生成层是「窄口径支持」，不是全能力支持**，收窄是声明式的、不是漏了：
+#     · §1.4 非有限特殊值（inf/-inf/nan）**不铺复数**——「复数的 inf」到底是 `inf+0j` / `0+infj` /
+#       `inf+infj` 没有任何权威出处，随手挑一个就是臆造覆盖（`_special_entries` 的 `is_float` 已按
+#       此排除复数）；
+#     · `value_profile`（nan/tie）、`pairfar`（rtol 跨界）、`nanpair` 对复数一律 fail-closed
+#       （见各自函数）——它们的语义都建立在实数序/实数容差上，复数没有天然的序。
+#   要放开其中任何一条，先给出口径出处，别为了「矩阵好看」补一个猜出来的实现。
 _NATIVE = {"float32": np.float32, "float16": np.float16,
            "int64": np.int64, "int32": np.int32, "int16": np.int16,
-           "int8": np.int8, "uint8": np.uint8}
+           "int8": np.int8, "uint8": np.uint8, "uint32": np.uint32,
+           "complex64": np.complex64}
 # Sign/Neg：输出在 bf16 网格上**精确可表示**（sign∈{-1,0,1}、neg 精确取负）→ bf16/fp16 走 exact_equal。
 # genuinely-lossy 数值算子（bf16 阈值须来自 policy/ascendoptest）本轮无、留 gap。
 # bf16 数值输出**逐位可达**的算子（纯搬运/纯符号类：输出恒等于某个输入元素、不做算术）。
@@ -710,6 +722,17 @@ def _make_varied(rng, shape, dtn, regime="uniform"):
     codex#14）；bf16：fp32 造后 round 到 bf16 网格（返回 fp32-on-grid 逻辑值）。
     regime（§1.2 值域）：uniform=均匀[-5,5]；normal=正态(μ,σ) 后 clip 到 [-5,5]。int dtype 忽略 regime。"""
     cdt = _compute_np(dtn)
+    if precision_policy.is_complex_dtype(dtn):
+        # 复数：实部、虚部**各自**按同一 regime 独立造，绝不用「实部造完 astype(complex)」——
+        # 那样虚部恒 0，一条复数用例连虚部通路都没碰过，账面上却是「complex64 已覆盖」。
+        # 锚点同样钉三位，但实/虚**错开**取值，让 (负,零)/(零,正)/(正,负) 三种分量符号组合都出现：
+        # 复数没有序、造不出「负数分支」，能钉的就是分量符号组合。op-中立、与算子身份无关。
+        re = _make_varied(rng, shape, "float32", regime)
+        im = _make_varied(rng, shape, "float32", regime)
+        f_im = im.reshape(-1)
+        if f_im.size >= 3:
+            f_im[0], f_im[1], f_im[2] = np.float32(0.0), np.float32(3.0), np.float32(-2.0)
+        return (re + 1j * im).astype(cdt)
     if precision_policy.is_integer_dtype(dtn):
         info = np.iinfo(cdt)
         lo = max(-100, int(info.min) + 1)               # 排除 dtype-min（避免取负溢出未定义）
@@ -735,6 +758,17 @@ def _make_varied(rng, shape, dtn, regime="uniform"):
 
 def _make_pairfar(rng, shape, dtn, ref, attrs):
     """浮点 IsClose 第二输入：前半 near(→True)、后半 far(→False)，跨 tol 边界。"""
+    if precision_policy.is_complex_dtype(dtn):
+        # ⚠ 旧理由（「本仓两个精度标准各选一头：torch=模长、AscendOpTest=分量各判」）**已失效**：
+        #   2026-08-06 起本仓比对口径统一为「实虚分量各按 float32 判」，不再分档。
+        # 但 fail-closed **照旧成立**，理由换成更根本的一条：这里造的是**被测算子自己**
+        # （IsClose 一类）的 near/far 边界，`attrs` 里的 atol/rtol 是**算子属性**、不是我们的比对容差。
+        # 复数上「差得远不远」按模长还是按分量，取决于该算子的语义（torch.isclose 对复数就是按模长），
+        # 而任务书没给出处 —— 造数时选边即臆造该算子的语义。别拿比对口径的统一去推它。
+        raise ValueError(
+            f"pairfar（跨容差边界的第二输入）对复数 dtype={dtn!r} 无口径：复数没有天然的序，"
+            f"「near/far」按模长还是按实虚分量取决于**被测算子**的 close 语义（任务书未给出处），"
+            f"造数时选边即臆造 —— fail-closed，不猜。需要复数的二元 close 类用例请先定该算子的口径。")
     cdt = _compute_np(dtn)
     atol, rtol = float(attrs.get("atol", 0.0)), float(attrs.get("rtol", 0.0))
     near = (ref * (1.0 + rng.uniform(-rtol, rtol, size=shape))
@@ -749,6 +783,14 @@ def _make_pairfar(rng, shape, dtn, ref, attrs):
 
 def _make_pairhalf(shape, dtn, ref):
     """exact-equal 类(Equal, float)第二输入：前半严格相等(→True)、后半+1(→False)。"""
+    if precision_policy.is_complex_dtype(dtn):
+        # 复数可支持：「相等 / 不相等」不需要序，+1+1j 后两分量都变 → 必不等。
+        # ⚠ 不能落到下面的实数分支：那里 `np.asarray(ref, dtype=np.float32)` 会**静默丢虚部**，
+        #   造出来的 b 与 a 的虚部凭空归零，golden 还是「对」的 —— 典型的假覆盖。
+        cdt = _compute_np(dtn)
+        x = np.asarray(ref, dtype=cdt).copy().reshape(-1)
+        x[x.size // 2:] = x[x.size // 2:] + cdt(1 + 1j)
+        return x.reshape(shape)
     cdt = _compute_np(dtn)
     x = np.asarray(ref, dtype=np.float32).copy().reshape(-1)
     x[x.size // 2:] = x[x.size // 2:] + np.float32(1.0)
@@ -772,6 +814,12 @@ def _make_pairint(shape, dtn, ref):
 def _make_nanpair(rng, shape, dtn, attrs):
     """浮点 IsClose 的 equal_nan/NaN 数据（rule-catalog §1.3）：四段 = 对齐NaN / near相等 / 错位NaN / far；
     equal_nan=True → [T,T,F,F]、=False → [F,T,F,F]，两分支都含 True/False。返回 (a, b)。"""
+    if precision_policy.is_complex_dtype(dtn):
+        # 「一个复数 NaN」是 `nan+0j` / `0+nanj` / `nan+nanj`？三种在 numpy 的 `isnan(complex)` 下
+        # 全判 True，但喂给 kernel 是三份不同的字节。没有出处就不挑，同 §1.4 特殊值那条收窄。
+        raise ValueError(
+            f"nan_pair 数据对复数 dtype={dtn!r} 无口径：复数 NaN 有 nan+0j / 0+nanj / nan+nanj 三种"
+            f"字节形态，选哪一种都是臆造（isnan 对三者都为 True，看不出差别）—— fail-closed，不猜。")
     n = int(np.prod(shape)) if shape else 0
     a = rng.uniform(-3.0, 3.0, size=n).astype(np.float32)
     b = a.copy()
@@ -791,6 +839,13 @@ def _make_nanpair(rng, shape, dtn, attrs):
 def _build_value_special(rng, arity, shp, dtn, kind):
     """§1.4 INF/-INF/NAN 特殊值输入（仅浮点）：前 1/4 位放特殊值（二元对齐）、其余常规均匀。
     对齐放置使 IsClose(inf,inf)=True / (nan,nan,equal_nan)=按 flag，golden 天然含混合。"""
+    if precision_policy.is_complex_dtype(dtn):
+        # 到不了这里（`_special_entries` 的 `is_float` 已排除复数），留这道门是防「哪天 is_float 的
+        # 算法改了」把复数悄悄放进来：`np.float32(inf).astype(complex64)` = `inf+0j`，那是**挑了一种**
+        # 复数 inf 形态，且虚部恒 0 —— 一份看着有覆盖、实则从未压过虚部通路的特殊值用例。
+        raise ValueError(
+            f"§1.4 非有限特殊值（{kind}）对复数 dtype={dtn!r} 无口径：inf+0j / 0+infj / inf+infj "
+            f"没有权威出处，挑一种即臆造覆盖 —— fail-closed，不猜。")
     cdt = _compute_np(dtn)
     val = {"inf": np.inf, "ninf": -np.inf, "nan": np.nan}[kind]
     n = _numel(shp)
@@ -1565,6 +1620,14 @@ def _make_value_profile(rng, shape, dtn, profile):
       · tie：小值集循环填充 → 大量重复值/并列（median 偶数长度取 lower-middle、index 可合法分歧 → 压 index_value_consistency）。
     bf16 造后 round 到 bf16 网格（返回 fp32-on-grid 逻辑值，同 _make_varied）。"""
     cdt = _compute_np(dtn)
+    if precision_policy.is_complex_dtype(dtn):
+        # 正常路径到不了这里（`_pick_vp_dtype` 只从 `_VP_DTYPE_PREF` 的实数浮点里挑代表 dtype）；
+        # 这道门是防绕过。nan profile 的理由同 `_make_nanpair`（复数 NaN 有三种字节形态）；
+        # tie profile 的理由是并列判据建立在**序**上（`_assert_tie_per_axis` 用 `np.sort`，
+        # numpy 对复数按「先实部后虚部」的字典序排——那是 numpy 的实现约定，不是任何精度标准的口径）。
+        raise ValueError(
+            f"value_profile={profile!r} 对复数 dtype={dtn!r} 无口径（NaN 字节形态三选一无出处；"
+            f"tie 依赖的序在复数上只有 numpy 的字典序约定，非标准口径）—— fail-closed，不猜。")
     if profile == "nan":
         if precision_policy.is_integer_dtype(dtn):
             raise ValueError(f"value_profile=nan 不适用于整数 dtype {dtn!r}（整型无 NaN）")
@@ -2853,7 +2916,12 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
     forced, grid = [], []
     # ① §1.4 特殊场景（每 dtype 强制；id_kind 独立命名空间，评审 #8）
     for dtn in dtypes:
-        is_float = not precision_policy.is_integer_dtype(dtn)
+        # `is_float` 在 `_special_entries` 里的语义是「这个 dtype 该不该铺 inf/-inf/nan」，
+        # 判据必须是**实数浮点**：复数既非整型（不会被原来那半个条件挡住）、又没有权威的
+        # 非有限字节形态（`inf+0j` / `0+infj` / `inf+infj` 三选一无出处），故显式排除。
+        # 这是**声明式收窄**，不是漏——`_build_value_special` 那边还有一道同理由的 fail-closed。
+        is_float = not (precision_policy.is_integer_dtype(dtn)
+                        or precision_policy.is_complex_dtype(dtn))
         for dims, shp, dk, ik in _special_entries(op, dtn, arity, is_float, attr_combos[0], ranks,
                                                   allow_empty=_allow_empty_tensor(spec),
                                                   empty_axis=_empty_axis(spec),

@@ -21,8 +21,7 @@
   "precision": {"oracle": "ascendoptest", "standard": "exact", "tolerance_policy_id": "exact",
                 "threshold": 0, "policy": {"kind": "exact", "max_mismatch": 0, "not_settled": false},
                 "threshold_source": "bool 输出 → 精确逐位",
-                "case_target": 50,
-                "case_target_source": "fixture：此前无此键、一直吃 gen_cases 的缺省 50；2026-08-06 缺省被删，写回它一直在用的那个数（`ExistingOpsByteIdenticalTest` 按 50 pin 了 caseset 字节，改数即破 pin）"},
+                "_case_target_note": "本夹具**有意不写 `precision.case_target`**：它此前一直吃 gen_cases 的缺省 50，2026-08-06 缺省被删后曾把 50 写回本文件，同日判定那等于把「没人定过用例数」换个地方藏起来，遂删除。用例预算改由**测试侧**提供（`_spec_fixture.FIXTURE_CASE_TARGET`，见该模块 docstring）——那是夹具值，不是任何算子的用例数依据。⚠ 别把它写回本文件：tracked spec 里出现一个没依据的数，下一个人就会当它是合理默认值。"},
   "attr_matrix": [
     {"equal_nan": false},
     {"equal_nan": true},

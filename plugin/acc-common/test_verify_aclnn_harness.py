@@ -730,18 +730,20 @@ class WorkflowHardGateTest(unittest.TestCase):
                         {"aclnn_py": mock.Mock(side_effect=AssertionError(
                             "adapter 不应在信任门前启动"))},
                         clear=False):
-                with self.assertRaisesRegex(SystemExit, "CP-C harness 真机信任门"):
-                    # allow_experimental_form=True：aclnn_py 已被验收准入白名单
-                    # （run_workflow._ACCEPTANCE_RUNNER_FORMS）挡在正式验收外，而本用例证的是
-                    # **CP-C harness 信任门**——没有收据就进不了 adapter。那道门只长在 aclnn_py 上，
-                    # 把夹具换成 cpp_extension 等于换掉被测对象（它走的是构建收据门，不是这道）。
-                    # 不关掉准入门，run() 会先被准入门 SystemExit——同是 SystemExit，
-                    # 断言的正则却再也打不到信任门，用例静默变成"测准入门"。
-                    # ⚠ 这不是给准入门放水：准入门本身由
-                    #   test_run_workflow_mode.py::AcceptanceFormGateTest 专测（含出口门）。
-                    run_workflow.run(
-                        spec_path, mode="aclnn_py", out_dir=out_dir,
-                        allow_experimental_form=True)
+                # ⚠ 夹具说明（2026-08-06 通路收敛后必需）：`aclnn_py` 已从
+                #   `run_workflow._RUNNER_FORM_TO_MODE` 移除，正常路径进不到 adapter 前那一段。
+                #   本用例证的却是 **CP-C harness 信任门**——没有收据就进不了 adapter，
+                #   那道门只长在 `aclnn_py` 上，把夹具换成 cpp_extension 等于换掉被测对象
+                #   （它走的是构建收据门，不是这道）。所以这里把**派生表**临时接回一条，
+                #   让执行走到信任门那一步。
+                #   ⚠ **刻意不动 `_ACCEPTANCE_RUNNER_FORMS`**：准入集原样保持，因此这一轮
+                #     `is_acceptance` 仍是 False、出口门仍会拦——本夹具不放宽任何验收门，
+                #     只是把「跑到信任门」这段路借回来。准入/退役门本身由
+                #     test_run_workflow_mode.py 的 AcceptanceFormGateTest / RetiredRunnerFormTest 专测。
+                with mock.patch.dict(run_workflow._RUNNER_FORM_TO_MODE,
+                                     {"aclnn_py": "aclnn_py"}, clear=False):
+                    with self.assertRaisesRegex(SystemExit, "CP-C harness 真机信任门"):
+                        run_workflow.run(spec_path, mode="aclnn_py", out_dir=out_dir)
 
 
 _ACC_COMMON = os.path.dirname(os.path.abspath(H.__file__))

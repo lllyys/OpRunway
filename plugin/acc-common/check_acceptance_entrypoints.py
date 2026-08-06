@@ -2,6 +2,14 @@
 
 只读、stdlib、fail-closed。它不解析 Markdown 语义，只守最容易造成错误执行或错误宣称的
 少量硬约束；历史记录允许保留，但不得在活跃入口里重新宣称旧 Median PASS。
+
+当前守四类：
+  ① 「两条真机通路」这类口径回退；
+  ② 活跃入口里重新宣称旧 Median PASS；
+  ③ `run_workflow.py` 调用模板漏 `--source-facts`（验收通路上缺席即拒跑）；
+  ④ **已退役 runner form / mode 的派生关系与调用**（`cpp` / `aclnn_py` → `--mode new_example`
+     / `--mode aclnn_py`，以及已删除的逃生阀 `--allow-experimental-form`）。
+③④ 的共同点是：文本照抄下去**做得下去、跑不起来**——代价是整轮昂贵准备白做。
 """
 import argparse
 import os
@@ -13,12 +21,22 @@ ENTRYPOINTS = (
     "AGENTS.md",
     "agents/op-acceptance.md",
     "agents/acc-verify-rootcause.md",
+    "agents/acc-runner-dev.md",
+    "agents/acc-spec-extractor.md",
     "commands/op-acceptance.md",
     "skills/acceptance-workflow/SKILL.md",
     "skills/acc-runner/SKILL.md",
+    "skills/acc-spec/SKILL.md",
+    "acc-common/spec_schema_template.jsonc",
     "workflows/development-guide.md",
     "workflows/task-prompts.md",
 )
+# ⚠ 后 4 项是 2026-08-06 补进来的，理由是**它们同样会让 agent 去生成或执行一条通路**：
+#   `acc-spec/SKILL.md` + `acc-spec-extractor.md` + `spec_schema_template.jsonc` 决定
+#   `spec.runner_form` 抽成什么值，`acc-runner-dev.md` 决定 CP-C 派哪个 dispatch_mode。
+#   本门原先只守「跑」那一端，抽 spec 那端漏在外面：spec skill 指示可选 `aclnn_py`、workflow
+#   照着往下派、最后在 `_resolve_mode` 被拒——昂贵准备全白做。**产 form 的地方和用 form 的地方
+#   必须同门守**，只守一端等于没守。
 
 # 仓根 `AGENTS.md`（**唯一仓规源**）不在 plugin 树内，但它带着 `run_workflow.py` 主入口命令块，
 # 与上面那批同属「照着抄就会去执行」的文本，必须同门守。相对**仓根**解析（= `dirname(plugin_root)`）。
@@ -62,11 +80,130 @@ _OUT_FLAG = re.compile(r"--out(?=$|[\s=`'\"，。）)])")
 _MODE_PLACEHOLDER = re.compile(r"--mode\s+<")
 # 明确跑非验收通路的完整命令：`run_workflow` 对 mock / catlass* 不要求 `--source-facts`
 # （那条路物理上不产 acceptance.json / verdict.json，也没有来源锚要对账）。
-# ⚠ **刻意不拿 `--allow-experimental-form` 当豁免依据**：解释「非验收通路不受此强制」的散文里
-#   就带着这个词，拿它豁免等于给自己开后门——在真模板旁边写一句说明，本门就对整行闭嘴了。
-#   代价是：真要在这批文件里写一条 `--allow-experimental-form` 的开发级完整命令，本门会**过严**地
-#   也要求它带 `--source-facts`。宁可过严（吵一句）也不留后门（静默放行），要改就连测试一起改。
+# ⚠ **豁免只认「显式写死跑 mock / catlass*」这一种形式**，不认任何散文里的说明词。
+#   历史上这里另有一句：刻意不拿 `--allow-experimental-form` 当豁免依据——解释「非验收通路不受
+#   此强制」的散文里就带着那个词，拿它豁免等于给自己开后门（在真模板旁边写一句说明，本门就对
+#   整行闭嘴了）。那个 flag 已于 2026-08-06 随通路收敛删除，但这条判据的**取舍照旧成立**：
+#   宁可过严（吵一句）也不留后门（静默放行）。下一个逃生阀若以别的名字回来，同样不得当豁免依据。
 _NON_ACCEPTANCE_MODE = re.compile(r"--mode\s+(?:mock|catlass_mock|catlass)\b")
+
+# ── 已退役 runner form / mode 不得在活跃编排文本里被派生或调用 ────────────────────
+# 2026-08-06 通路收敛后，`_RUNNER_FORM_TO_MODE` 只剩 `cpp_extension` 一条，逃生阀
+# `--allow-experimental-form` 一并删除。但**代码收敛不会自动收敛 NL 文本**：仓内当时仍写着
+# 「`cpp` → `--mode new_example`、`aclnn_py` → `--mode aclnn_py`」「跑不了就加 `--allow-experimental-form`」，
+# 而 agent 是**照着这些活跃指令**去抽 spec、配环境、跑 CP-C 的——一路做完昂贵准备，最后在
+# `_resolve_mode` 撞门。这正是本轮要消灭的那条「准备得下去、最后跑不了」的死路，所以在这里机械守住。
+#
+# 守的是**派生关系与调用**，不是「提到这两个词」：能力表、受控词表、历史归因照旧要写得出来。
+_RETIRED_FORM = r"(?<![\w-])(?:cpp|aclnn_py)(?![\w-])"        # `cpp_extension` 被 lookahead 排除
+_RETIRED_MODE = r"(?<![\w-])(?:new_example|aclnn_py)(?![\w-])"
+
+# ① 箭头式派生：`cpp` → `--mode new_example` / `aclnn_py→aclnn_py`（含裸箭头与反引号包裹）。
+#    箭头左边留 24 字的缓冲，因为真实写法常带补语——「cpp runner v1 → `--mode new_example`」、
+#    「`runner_form==aclnn_py`（torch 对标）→ `--mode aclnn_py`」。缓冲里禁 `|` 与换行：
+#    表格单元格与跨行不得被串成一条派生（那会把「| `cpp` | （无）|」误判）。
+_RETIRED_ARROW = re.compile(
+    _RETIRED_FORM + r"[^|\n]{0,24}?(?:→|⇒|->|=>)\s*`?(?:--mode[= ]\s*)?`?" + _RETIRED_MODE)
+# ② 列举式派生：「依次派生 `{new_example, aclnn_py, cpp_extension}`」。三个判据缺一不可：
+#    · 只认 `new_example`——它**只可能是 mode**；`aclnn_py` 同时是 form 名，受控词表
+#      `{cpp, aclnn_py, cpp_extension}` 合法且到处都在写，拿它当判据必然误报；
+#    · 必须是**集合字面量**（紧跟 `{`/`(`/`[` 一类），否则「派生表**无条目**…显式 `--mode new_example` 也拒」
+#      这种**否定句**会被判成派生；
+#    · `派生` 与集合之间只给 20 字，隔太远就不是同一件事了。
+#    ⚠ 反过来，`_REAL_MACHINE_MODES = {new_example, aclnn_py, cpp_extension}` 这类**代码常量引用**
+#      同行不带 `派生`，照旧写得出来——那张表必须保留全部三项（入口门靠它认出绕行）。
+_RETIRED_DERIVE_LIST = re.compile(
+    r"派生[^。\n]{0,20}?[{（(\[][^}）)\]\n]*?(?<![\w-])new_example(?![\w-])")
+# ③ 表格式派生：`| aclnn_py | aclnn_py |` —— 第二格**整格**就是退役 mode 才算。
+#    停止准入后这一格该写成「（无）」，写着 mode 就是还在告诉 agent 有入口。
+_RETIRED_TABLE_ROW = re.compile(
+    r"\|\s*`?" + _RETIRED_FORM + r"`?[^|]*\|\s*`?" + _RETIRED_MODE + r"`?\s*\|")
+# ④ 直接调用退役 mode / 逃生阀
+_RETIRED_MODE_FLAG = re.compile(r"--mode[= ]\s*`?" + _RETIRED_MODE)
+_EXPERIMENTAL_FLAG = re.compile(r"--allow[-_]experimental[-_]form(?![\w-])")
+
+# ①②③ 无条件拒（那三种写法只可能是在教人怎么派生），④ 分两档：
+#   · 落在 `run_workflow.py` 调用段里 = 可照抄执行的命令 → **无条件拒**，措辞救不了它；
+#   · 散文里点名 → 须同逻辑行带退役声明，否则拒。
+# ⚠ 这里的关键词豁免是**有意的次优解**，如实记账：它防的是「文本还在教人跑退役通路」，
+#   防不住「写句『已拒』再照贴命令」。所以调用段那一档不给任何豁免——真正能被照抄执行的
+#   那种写法必须硬拒。下一个人要加固，方向是收紧词表或改用下面的历史区，不是把这两档合并放宽。
+_RETIRED_STATEMENT_MARKERS = (
+    "⛔", "拒", "停止准入", "已删", "删除", "删掉", "无真机入口", "退役", "历史保留", "历史留档")
+_FLAG_REMOVED_MARKERS = ("已删", "删除", "删掉", "退役", "别加回", "不得加回", "历史保留", "历史留档")
+
+# ── 历史区：退役机制的描述留着（有参考价值），但要让 agent 一眼看出「不要照做」──────
+# 区块内豁免上面的退役规则；代价是必须挂横幅，且**未闭合的区块一律不豁免**（fail-closed）。
+# ⚠ `--source-facts` 那道门**不随历史区豁免**：区块里别放完整的 `run_workflow.py` 调用模板，
+#   要讲机制就用散文讲。理由是历史区一旦能藏可照抄的命令，它就成了绕开主门的新入口。
+_REGION_BEGIN = "<!-- oprunway:retired-begin -->"
+_REGION_END = "<!-- oprunway:retired-end -->"
+_REGION_BANNER = "⛔ 历史留档 · 不得 dispatch · 不要照做"
+
+
+def _retired_region_lines(rel, text, errors):
+    """返回落在历史区内的行号集合；区块本身不合法时记 error 且**不给豁免**。"""
+    inside = set()
+    lines = text.splitlines()
+    open_at = None
+    for lineno, line in enumerate(lines, 1):
+        has_begin = _REGION_BEGIN in line
+        has_end = _REGION_END in line
+        if has_begin and has_end:
+            errors.append(f"{rel}:{lineno}: 历史区起止标记写在同一行（区块边界必须自明）")
+            continue
+        if has_begin:
+            if open_at is not None:
+                errors.append(f"{rel}:{lineno}: 历史区未闭合就再次开启（上一处起于第 {open_at} 行）")
+            open_at = lineno
+            continue
+        if has_end:
+            if open_at is None:
+                errors.append(f"{rel}:{lineno}: 历史区收尾标记没有对应的开启标记")
+                continue
+            body = "\n".join(lines[open_at:lineno - 1])
+            if _REGION_BANNER not in body:
+                errors.append(f"{rel}:{open_at}: 历史区缺横幅 {_REGION_BANNER!r}（没横幅就不算历史区）")
+            else:
+                inside.update(range(open_at, lineno + 1))
+            open_at = None
+    if open_at is not None:
+        errors.append(
+            f"{rel}:{open_at}: 历史区开启后没有闭合"
+            f"（fail-closed：未闭合区块不豁免任何规则，否则开一个标记就能让整个文件免检）")
+    return inside
+
+
+def _check_retired_dispatch(rel, text, errors):
+    inside = _retired_region_lines(rel, text, errors)
+    for lineno, line in _logical_lines(text):
+        if lineno in inside:
+            continue
+        for pattern, what in (
+            (_RETIRED_ARROW, "退役 runner form → 退役 --mode 的派生关系"),
+            (_RETIRED_DERIVE_LIST, "把退役 mode 列进 `--mode` 派生集合"),
+            (_RETIRED_TABLE_ROW, "派生表里仍给退役 form 配了一个 --mode（该格应为「（无）」）"),
+        ):
+            if pattern.search(line):
+                errors.append(
+                    f"{rel}:{lineno}: 活跃文本仍写{what}"
+                    f"（`cpp` / `aclnn_py` 2026-08-06 停止准入，`_RUNNER_FORM_TO_MODE` 只剩 `cpp_extension`；"
+                    f"要留机制描述就整段挪进历史区 {_REGION_BEGIN}…{_REGION_END}）")
+        segments = _invocation_segments(line)
+        for pattern, markers, what in (
+            (_RETIRED_MODE_FLAG, _RETIRED_STATEMENT_MARKERS, "退役 mode 的 `--mode` 调用"),
+            (_EXPERIMENTAL_FLAG, _FLAG_REMOVED_MARKERS, "已删除的逃生阀 `--allow-experimental-form`"),
+        ):
+            if not pattern.search(line):
+                continue
+            if any(pattern.search(seg) for seg in segments):
+                errors.append(
+                    f"{rel}:{lineno}: `run_workflow.py` 调用段里出现{what}"
+                    f"（可照抄执行的命令一律拒，措辞不豁免）")
+            elif not any(m in line for m in markers):
+                errors.append(
+                    f"{rel}:{lineno}: 活跃文本仍指示{what}"
+                    f"（要么写明它已停止准入/已删除，要么整段挪进历史区 {_REGION_BEGIN}…{_REGION_END}）")
 
 
 def _invocation_segments(line):
@@ -154,6 +291,7 @@ def collect(plugin_root, repo_root=None):
             if _STALE_PASS.search(line) and not any(x in line for x in _HISTORICAL_MARKERS):
                 errors.append(f"{rel}:{lineno}: 活跃文本仍宣称旧 Median PASS")
         _check_source_facts_flag(rel, text, errors)
+        _check_retired_dispatch(rel, text, errors)
 
     for rel in SOURCE_GATE_FILES:
         text = texts.get(rel, "")

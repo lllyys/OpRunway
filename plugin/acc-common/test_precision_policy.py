@@ -142,7 +142,11 @@ class FailFastAndRoutingTest(unittest.TestCase):
         #   真正的兜底不在这里，而在 `compute_metrics`：它对 out/golden **双侧**做
         #   `_check_compute_supported`，而 `SUPPORTED_COMPUTE_DTYPES` 至今不含 bfloat16 ——
         #   放宽的是「能不能取到阈值」，不是「能不能用 bf16 数组判过」。
-        for std, dt in (("ascendoptest_default", "complex64"),
+        # ⚠ `ascendoptest_default × complex64` **也不在**本清单里了（2026-08-06）：它现在受支持
+        #   （实部/虚部各按 float32 判 + 真机收发实测），正向覆盖见
+        #   test_dtype_capability_closure.py。仍不支持的复数见证换成 complex128。
+        for std, dt in (("ascendoptest_default", "complex128"),
+                        ("ecosystem_mere_mare", "complex64"),   # 复数在生态标准下始终无 Th
                         ("ecosystem_mere_mare", "fp8_e4m3"),
                         ("ecosystem_mere_mare", "bfloat16")):
             with self.assertRaises(ValueError, msg=f"{std}:{dt}"):
@@ -154,10 +158,14 @@ class FailFastAndRoutingTest(unittest.TestCase):
         """⭐ 锁住上面那条注释：阈值可取 ≠ 数组可判，且 out/golden **两侧**都得校。
 
         bf16 用 numpy 造不出数组（无原生 dtype），所以这里用同样不在
-        `SUPPORTED_COMPUTE_DTYPES` 里、但**造得出来**的 complex64 作见证，
+        `SUPPORTED_COMPUTE_DTYPES` 里、但**造得出来**的复数作见证，
         证明双侧校验真的会开火——旧洞正是「只校 golden 侧」，
-        out=complex64 时 `astype(float64)` 静默丢虚部 → bad_count=0 假通过。
+        out=复数时 `astype(float64)` 静默丢虚部 → bad_count=0 假通过。
         bf16 本身再单独钉常量与 helper 两条（它只能走这条路被挡）。
+
+        ⚠ 见证 dtype 2026-08-06 从 complex64 换成 complex128：complex64 已进
+        `SUPPORTED_COMPUTE_DTYPES`（有了真实现），拿它当「不支持」见证就名不副实了。
+        换成 complex128 后本条测的还是同一件事——**双侧**都校、且不因为一侧合法就放过另一侧。
         """
         self.assertNotIn("bfloat16", P.SUPPORTED_COMPUTE_DTYPES)
         with self.assertRaises(ValueError):
@@ -165,7 +173,7 @@ class FailFastAndRoutingTest(unittest.TestCase):
 
         pol = P.threshold_for("ascendoptest_default", "float32")
         good = np.array([1.0, 2.0], dtype=np.float32)
-        bad = np.array([1.0, 2.0], dtype=np.complex64)
+        bad = np.array([1.0, 2.0], dtype=np.complex128)
         with self.assertRaises(ValueError):                 # out 侧
             P.compute_metrics(bad, good, pol)
         with self.assertRaises(ValueError):                 # golden 侧
@@ -329,9 +337,12 @@ class ComputeMetricsGuardTest(unittest.TestCase):
             P.compute_metrics(np.ones(4, np.float32), np.ones(5, np.float32), pol)
 
     def test_complex_dtype_fail_fast(self):
-        """complex 若静默 astype(float64) 会丢虚部返 0 误差假通过 → 必 fail-fast。"""
+        """未受支持的复数若静默 astype(float64) 会丢虚部返 0 误差假通过 → 必 fail-fast。
+
+        ⚠ 见证换成 complex128（2026-08-06）：complex64 现在**有**真实现（AOT 分量各判），
+        再拿它当见证就测不到「未支持复数被挡住」这件事了。"""
         pol = P.threshold_for("ascendoptest_default", "float32")
-        c = np.array([1 + 2j, 3 + 4j], dtype=np.complex64)
+        c = np.array([1 + 2j, 3 + 4j], dtype=np.complex128)
         with self.assertRaises(ValueError):
             P.compute_metrics(c, c, pol)
 
@@ -1442,19 +1453,51 @@ class ToleranceFailClosedTest(unittest.TestCase):
 
 
 class ComplexPolicyConsistencyTest(unittest.TestCase):
-    """finding #9：不留「能生成、算不出来」的 policy——complex 要么实现、要么不出 policy。"""
+    """finding #9 的不变式：不留「能生成、算不出来」的 policy——complex 要么实现、要么不出 policy。
 
-    def test_complex_not_in_torch_allclose_table(self):
-        for dt in ("complex64", "complex128"):
-            with self.assertRaises(ValueError, msg=dt):
-                P.threshold_for("torch_allclose", dt)
+    ⚠ 2026-08-06 起 complex64 走的是「实现了」那一侧、complex128 仍走「不出 policy」那一侧。
+    本类因此**双向**钉：能出 policy 的必须真能算，不能算的必须一条 policy 都出不来。
+    """
 
-    def test_complex_ascendoptest_fails_fast_not_produce_dead_policy(self):
-        """`_AOT_TABLE` 保留 complex 快照作 provenance，但 threshold_for 当场 fail-fast，不产出死 policy。"""
-        for dt in ("complex64", "complex128"):
-            with self.assertRaises(ValueError, msg=dt):
-                P.threshold_for("ascendoptest_default", dt)
-            self.assertNotIn(dt, P.SUPPORTED_COMPUTE_DTYPES)
+    def test_complex128_not_in_torch_allclose_table(self):
+        with self.assertRaises(ValueError):
+            P.threshold_for("torch_allclose", "complex128")
+
+    def test_complex128_ascendoptest_fails_fast_not_produce_dead_policy(self):
+        """`_AOT_TABLE` 保留 complex128 快照作 provenance，但 threshold_for 当场 fail-fast，不产死 policy。"""
+        with self.assertRaises(ValueError):
+            P.threshold_for("ascendoptest_default", "complex128")
+        self.assertNotIn("complex128", P.SUPPORTED_COMPUTE_DTYPES)
+
+    def test_complex64_policy_and_implementation_agree(self):
+        """complex64 两条标准都**既出 policy 又算得出来**——不许出现「有阈值没实现」的老病。"""
+        arr = np.array([1 + 2j, -3 + 0.5j], dtype=np.complex64)
+        for std in ("ascendoptest_default", "torch_allclose"):
+            pol = P.threshold_for(std, "complex64")
+            self.assertEqual(pol["kind"], std)
+            m = P.compute_metrics(arr, arr, pol)          # 自比：任何口径下都必须零误差
+            self.assertEqual(m.get("bad_count", m.get("mismatch")), 0, std)
+
+    def test_complex64_policy_is_literally_the_float32_policy(self):
+        """⭐ 「complex64 沿用 float32」的**容差侧**落点：两者的 policy dict 必须**逐字相同**。
+
+        用户 2026-08-06 定：复数不再维护自己的容差。以前 `_TA_DTYPE_TOLS` 挂过一条标着
+        「外推」的 `complex64`，值恰好等于 float32——数值一样但来源是两处，哪天有人只改一处
+        就分叉了。现在复数经 `component_dtype` 折算查 float32 那一行，本条把它钉死。"""
+        for std in ("ascendoptest_default", "torch_allclose", P.EXACT):
+            self.assertEqual(P.threshold_for(std, "complex64"),
+                             P.threshold_for(std, "float32"), std)
+        self.assertNotIn("complex64", P._TA_DTYPE_TOLS)   # 表里不许再有复数专属行
+
+    def test_component_dtype_is_controlled_not_string_guess(self):
+        """折算表是**受控表**，不是 `name.replace('complex','float')` 这类字符串猜。
+
+        `complex128` 刻意不在表里 → 原样返回 → 在容差表/支持集处被当场拒。要是这里聪明地
+        给它折成 float64，它就能凭 float64 那一行拿到容差，变回 finding #9 的死 policy。"""
+        self.assertEqual(P.component_dtype("complex64"), "float32")
+        self.assertEqual(P.component_dtype("complex128"), "complex128")
+        self.assertEqual(P.component_dtype("float32"), "float32")
+        self.assertEqual(P.component_dtype("int64"), "int64")
 
 
 class FromInputSentinelSingleOutputTest(unittest.TestCase):

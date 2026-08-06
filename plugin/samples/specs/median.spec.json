@@ -53,6 +53,7 @@
     "_standard_note": "任务书精度要求逐字点名 AscendOpTest 工具默认阈值；torch 仅是真值来源，不覆盖显式验收标准。",
     "case_profile": "torch_parity",
     "case_target": 1344,
+    "case_target_source": "机器可复算，非拍脑袋：`case_profile=\"torch_parity\"` 要求 case_target **精确等于**完整笛卡尔矩阵大小，`gen_cases._torch_parity_plan` 逐字核对、对不上当场 fail-closed。1344 = params 里输入 dtype 8 种（bfloat16/float16/float32/int8/int16/int32/int64/uint8）× `torch_parity_matrix.ranks` 8 档（1..8）× `shape_profiles` 3 档（leading_dim 31/2047/262144）× `attribute_profiles` 7 档（global + first/middle/last 轴 × keepDim 二值）。矩阵本身的出处见同级 `torch_parity_matrix.source` / `source_sha256`。⚠ 这个数**不是**真机那轮的 1152——那是 per-run spec（少一档 global overload），见仓根 AGENTS.md §4.4 与 §9.3 的两处告诫，别互相当基线。",
     "torch_parity_matrix": {
       "source": "repos/cannbot-ops-input/ops-bench/ops-eval-dataset/designs/aclnnMedian/case_design.json + 任务书 global 接口补面",
       "source_sha256": "eb46197b0c1aaef197481cecba548409364adb79fdde811a07747f3071b5f3cb",

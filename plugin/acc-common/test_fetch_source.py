@@ -1272,6 +1272,47 @@ class SnapshotWalkFailClosedTest(unittest.TestCase):
         self.assertEqual(["op/a.h"], fs._walk_snapshot(self.root),
                          "软链不计入、空目录不计入、build/ 按名跳过——三条都是既有语义")
 
+    def test_skipped_symlinks_are_handed_back_instead_of_vanishing(self):
+        """⭐ 跳过**不改**（值保持），但「跳了哪些」必须回报——静默跳过才是那个洞。
+
+        文件软链与目录软链都要记：后者藏的是**一整棵**子树，一条记录顶一片不覆盖。
+        `.git` 这类按名跳过的不算软链账，免得两本账互相污染。
+        """
+        os.symlink("/etc/hosts", os.path.join(self.root, "op", "link.h"))
+        os.symlink("/etc", os.path.join(self.root, "op", "linkdir"))
+        os.symlink("/etc", os.path.join(self.root, ".git"))     # 按名跳过，不进软链账
+        files, symlinks = fs._scan_snapshot(self.root)
+        self.assertEqual(["op/a.h"], files, "文件表必须与硬化前逐字相同（值保持）")
+        self.assertEqual(["op/link.h", "op/linkdir"], symlinks)
+        self.assertEqual(files, fs._walk_snapshot(self.root),
+                         "_walk_snapshot 只是 _scan_snapshot 的文件那一半")
+
+    def test_scope_that_escapes_through_a_symlink_is_rejected(self):
+        """⭐ `followlinks=False` **管不住顶层**：base 是软链时 `os.walk` 照样跟过去。
+
+        于是仓外的字节会被摘成「这段子树的字节」，而 `relpath` 算出来的路径看着还是仓内的
+        （`op/...`）——一个没有任何外部症状的假摘要。中间某一层是软链同样成立，故判据写成
+        「realpath 后位置没有移动」，不是只看最后一段。
+        """
+        outside = os.path.join(self.d, "outside")
+        os.makedirs(os.path.join(outside, "inner"))
+        for rel in ("evil.h", os.path.join("inner", "evil2.h")):
+            with open(os.path.join(outside, rel), "w", encoding="utf-8") as fh:
+                fh.write("evil\n")
+        os.symlink(outside, os.path.join(self.root, "escaped"))
+        for scope in ("escaped", "escaped/inner"):
+            with self.subTest(scope=scope):
+                with self.assertRaises(RuntimeError) as cm:
+                    fs._scan_snapshot(self.root, scope)
+                self.assertIn("经软链逃到了别处", str(cm.exception))
+
+    def test_a_real_in_tree_scope_still_walks_and_keeps_its_value(self):
+        """逃逸检查**只拦逃逸**：正常子树 scope 的结果一个字节不变（否则就是误伤）。"""
+        self.assertEqual(["op/a.h"], fs._walk_snapshot(self.root, "op"))
+        self.assertEqual(fs._snapshot_merkle(self.root, ["op/a.h"]),
+                         fs._snapshot_merkle(self.root,
+                                             fs._walk_snapshot(self.root, "op")))
+
 
 class SnapshotDigestPolicyTest(unittest.TestCase):
     """摘要策略必须**机器可核**：随 payload 落盘 + 校验端逐字对账。
@@ -1306,16 +1347,27 @@ class SnapshotDigestPolicyTest(unittest.TestCase):
         self.assertEqual(policy["algorithm"], "oprunway.snapshot_merkle")
         self.assertEqual(policy["algorithm_version"], 1)
         self.assertEqual(policy["skipped_dir_names"], sorted(fs._SNAPSHOT_SKIP_DIRS))
+        # ⭐ 软链**整棵不入摘要**是本算法最大的一处不覆盖，此前只写在 docstring 里 =
+        #   产物侧的暗知识。它必须是受控策略字段，下游才拿得到对照物。
+        self.assertIs(policy["excludes_symlinks"], True)
         payload = fs.build_source_facts(self.task, facts)
         self.assertEqual(payload["pr"]["snapshot_digest_policy"], policy,
                          "策略必须随 payload 落盘，否则下游没有对照物")
 
     def test_unsupported_or_missing_policy_is_blocked_not_folded(self):
         """未知/弱化/缺席的排除策略一律 fail-closed：策略不同则 merkle 不可比，而外表看不出来。"""
+        def _drop_symlink_clause(f):
+            weakened = dict(fs.snapshot_digest_policy())
+            weakened.pop("excludes_symlinks")
+            f["snapshot_digest_policy"] = weakened
+
         for mutate in (lambda f: f.pop("snapshot_digest_policy"),
                        lambda f: f.__setitem__("snapshot_digest_policy",
                                                dict(fs.snapshot_digest_policy(),
                                                     skipped_dir_names=[])),
+                       # 老事实包（没有软链条款）同样落 blocked：重跑取材即可，
+                       # 而不是让一份「披露不完整」的策略继续冒充当前策略。
+                       _drop_symlink_clause,
                        lambda f: f.__setitem__("snapshot_digest_policy",
                                                dict(fs.snapshot_digest_policy(),
                                                     algorithm_version=2))):
@@ -1369,6 +1421,93 @@ class SnapshotDigestPolicyTest(unittest.TestCase):
         finally:
             fs._read_snapshot_text = orig
         self.assertIn("取材期间快照目录发生了改动", str(cm.exception))
+
+    def test_a_symlink_appearing_mid_intake_is_rejected_too(self):
+        """⭐ 软链**不进 merkle**，所以窗口里新增一条软链时 merkle 纹丝不动。
+
+        只重算 merkle 的话，这一类改动恰恰是查不出来的那一类——必须连软链台账一起重校。
+        """
+        orig = fs._read_snapshot_text
+        state = {"done": False}
+
+        def _sneaky(root, rel):
+            out = orig(root, rel)
+            if not state["done"]:
+                state["done"] = True
+                os.symlink("/etc/hosts",
+                           os.path.join(self.root, _ROOT_OP_DIR, "sneaky.h"))
+            return out
+
+        fs._read_snapshot_text = _sneaky
+        try:
+            with self.assertRaises(RuntimeError) as cm:
+                fs.scan_pr_snapshot(self.root, self.out, target_dir=_ROOT_OP_DIR)
+        finally:
+            fs._read_snapshot_text = orig
+        self.assertIn("软链台账", str(cm.exception))
+
+
+class SnapshotSymlinkLedgerTest(unittest.TestCase):
+    """⭐ 软链跳过**不改**（改了就作废现场全部 merkle），但必须**留痕**。
+
+    此前一棵有 100 条软链的树与一棵一条都没有的树，在事实包里长得一模一样：
+    编译器会跟随软链读到别处的字节，而那些字节完全不在 `snapshot_merkle_sha256` 覆盖内，
+    产物里却没有任何信号。这一族用例钉的就是「跳过可以，静默不行」。
+    """
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.root = os.path.join(self.d, "snapshot")
+        self.out = os.path.join(self.d, "out")
+        os.makedirs(self.out, exist_ok=True)
+        for rel, body in _ROOT_SRC_BY_PATH.items():
+            full = os.path.join(self.root, *rel.split("/"))
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w", encoding="utf-8") as f:
+                f.write(body)
+
+    def _facts(self):
+        path = fs.scan_pr_snapshot(self.root, self.out, target_dir=_ROOT_OP_DIR)
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_a_clean_tree_books_an_empty_ledger_not_a_missing_key(self):
+        """空表 ≠ 键缺席：读的人要分得清「确实没有」与「工具没记」。"""
+        facts = self._facts()
+        self.assertIn("snapshot_skipped_symlinks", facts)
+        self.assertEqual([], facts["snapshot_skipped_symlinks"])
+        self.assertEqual(0, facts["snapshot_skipped_symlink_count"])
+        self.assertFalse([n for n in facts["notes"] if "软链" in n],
+                         "干净树不该多出一条噪音 note")
+
+    def test_a_swapped_out_source_file_leaves_a_trace(self):
+        """⭐ 把源文件换成指向仓外的软链：merkle **不变**，台账是唯一的信号。"""
+        clean = self._facts()
+        target = os.path.join(self.root, *_ROOT_DEF.split("/"))
+        os.remove(target)
+        os.symlink("/etc/hosts", target)
+        dirty = self._facts()
+        self.assertEqual([_ROOT_DEF], dirty["snapshot_skipped_symlinks"])
+        self.assertEqual(1, dirty["snapshot_skipped_symlink_count"])
+        self.assertNotEqual(clean["snapshot_merkle_sha256"],
+                            dirty["snapshot_merkle_sha256"],
+                            "这里 merkle 变了只是因为原文件被删掉了——别据此以为 merkle "
+                            "能看见软链：下一条用例证的正是它看不见")
+        self.assertTrue([n for n in dirty["notes"] if "软链" in n],
+                        "非空台账必须在 notes 里点名，否则要翻 JSON 才发现")
+
+    def test_an_added_symlink_is_invisible_to_the_merkle_and_only_the_ledger_shows_it(self):
+        """⭐ 新增一条软链：merkle 一个 bit 都不变，台账是唯一看得见它的地方。"""
+        clean = self._facts()
+        os.symlink("/etc/hosts",
+                   os.path.join(self.root, _ROOT_OP_DIR, "smuggled.h"))
+        dirty = self._facts()
+        self.assertEqual(clean["snapshot_merkle_sha256"],
+                         dirty["snapshot_merkle_sha256"],
+                         "软链不入摘要是既有算法定义（值保持），故这里必须相等")
+        self.assertEqual([], clean["snapshot_skipped_symlinks"])
+        self.assertEqual([_ROOT_OP_DIR + "/smuggled.h"],
+                         dirty["snapshot_skipped_symlinks"])
 
 
 class MainExitCodeTest(unittest.TestCase):

@@ -23,5 +23,32 @@
 
 ⚠ **禁读纪律对新增的这三份同样适用**——本表只是索引，不是「可以读」的许可。
 
+## ⚠ `runner_form`：这批样例里只有两份还能跑验收
+
+2026-08-06 起，**验收裁决只由 `runner_form: "cpp_extension"` 产出**；`cpp` / `aclnn_py` 已停止准入，
+`run_workflow.py` 连真机入口都不再给它们（详见仓根 `AGENTS.md` §4）。落到本目录：
+
+| `runner_form` | 文件 | 现在能做什么 |
+|---|---|---|
+| `cpp_extension` | `median.spec.json` · `gaussian_blur.spec.json` | ✅ 可跑正式验收 |
+| `cpp` | `isclose` · `sign` · `equal` · `neg` · `im2col` · `upsample_nearest_3d` · `upsample_nearest_exact2d` · `catlass_basic_matmul` | ⛔ 不产验收裁决。仍是合法的**结构参考**与测试夹具；`--mode mock` / `--mode catlass` 等显式非验收通路照跑 |
+
+**为什么不把它们统一改成 `cpp_extension`**（2026-08-06 评估，结论：不改）：
+
+1. **改了就是假话。** 这几份是 `cpp`（new_example）通路的历史见证——IsClose / Sign 就是在那条路上
+   真机坐实的。把字段改写成 `cpp_extension` 等于声称它们在一条从未跑过的通路上验过。
+   仓规 §5.8：不捏造。历史产物与历史声明**不改判**。
+2. **改了它们会当场坏掉。** `cpp_extension` 形态要求 spec 声明 `call_variants`（aclnn 符号 +
+   active attrs/outputs），本目录只有上面那两份有。给其余八份补 `call_variants` 需要**发明** ABI 事实
+   ——没有任务书、没有 PR facts 可依。
+3. **改了会破字节 pin。** `equal` / `isclose` / `neg` / `sign` 四份被
+   `plugin/acc-common/test_gen_cases_dtype_attr.ExistingOpsByteIdenticalTest` 按 caseset sha256 钉住
+   （两条 numpy 基线，其中 1.26 那条实测于验收真机）。`runner_form` 决定 gen_cases 查哪张 dtype 能力表，
+   改了必然改摘要。
+
+⚠ 所以看到 `"runner_form": "cpp"` 时的正确读法是「**这是历史形态的参考样例**」，
+**不是**「这条通路还可选」。真要拿某个样例走正式验收，须重新按 `cpp_extension` 抽一份 spec
+（含 `call_variants`），那是**新验收**，不是旧样例换个字段。
+
 > 单元测试也从这里读真样例（真 op 名 → GOLDEN 可解析、真内容 → 断言稳定），
 > 但**测试消费 ≠ acc-spec 产 spec 时可查阅**：禁读纪律只约束「产 spec」阶段。

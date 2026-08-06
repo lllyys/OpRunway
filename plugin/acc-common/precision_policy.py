@@ -59,6 +59,33 @@ error_rate 是**第 2 位**、逐 dtype 变；第 3 位 legacy=0.1 代码不读�
 --------------------------------------------------------------------------------
 标准三 · exact —— bool / 逐位精确（threshold=0，mismatch<=0 才过）
 --------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+复数（complex64）· **口径单一：实部/虚部各按 float32 判，两者都过才算过**
+--------------------------------------------------------------------------------
+决策（用户 2026-08-06）：「complex64 的标准就沿用 float32 的，虚部和实部都沿用 float32 的标准」。
+
+落法只有一句话：**复数不再引入任何自己的规则。** 分量 dtype 由受控表
+`_COMPLEX_COMPONENT_DTYPE`（complex64 → float32）给出，然后：
+  - 容差：直接取该分量 dtype 的那一行（`_TA_DTYPE_TOLS` / `_AOT_TABLE`），**不再维护复数专属容差**；
+  - 判据：直接调各 policy 自己的**实数实现**（`_allclose_close_mask` / `_aot_valid_float`），
+    实部一次、虚部一次，`valid = valid_real & valid_imag`；
+  - 于是「不同 policy 下复数算法不同」这件事不再存在：某个 policy 的 float32 规则是什么，
+    它的复数规则就是什么（逐分量跑两遍）。
+
+🔴 **已知且有意保留的差异：`torch_allclose` 这一档会与 torch 本身不一致。**
+`torch.isclose` 在复数上判的是**模长**（`|o-g| <= atol + rtol*|g|`，模长），不是分量各判。
+上一轮真机实测（a3 容器 `oprunway_prov`，torch 2.10.0）已证两者可区分：
+  · 判别构造：`o=0` vs `g=0.8+0.8j`、rtol=0/atol=1 —— 模长 1.131 > 1 → torch 判 **not close**；
+    分量各判 0.8 <= 1、0.8 <= 1 → 判 **close**；
+  · 24576 对（8×8 值网格 × 6 组 (rtol, atol, equal_nan)）的差分实测里，**16 处**两者不一致。
+这是**本仓有意选择的口径**、不是实现 bug：拿 torch 对拍出现分歧时先看这一条，别当缺陷去"修"回模长。
+（同一条差异在 `_allclose_close_complex` 的 docstring、`compute_metrics` 的复数小节、
+ 以及 `dev-doc/oprunway-changes-brief.md` 对应条目各记了一份。）
+
+⛔ `complex128` 仍整体 fail-closed（不在 `SUPPORTED_COMPUTE_DTYPES`、不在 `_COMPLEX_COMPONENT_DTYPE`）——
+缺的是真机实证不是实现，别顺手放开。`ecosystem_mere_mare` × 复数、`index_value_consistency` × 复数
+同样保持 fail-closed（前者 Th 表无 complex 行且标准本身未 settle，后者下游会丢虚部）。
 """
 
 # 顶层只允许 **stdlib**——本模块的不变量是「`import precision_policy` 不拉 numpy」
@@ -141,21 +168,11 @@ _MM_PROVENANCE = ("canon/architecture/ecosystem-precision-standard.md (proposed)
 #   ⚠ 本表刻意存 **(rtol, atol)**，与参考仓 (atol, rtol) 顺序相反——下方逐条已按此顺序核对，勿对调。
 #   ✅ **行号与值 2026-07-25 复核属实**：参考仓 47-54 行的四条浮点条目与本表一一对应
 #     （fp16 9e-2/2^-10、bf16 1e-1/2^-7、fp32 1e-3/2^-13、fp64 1e-6/2^-30），仅元组顺序相反。
-# ⚠ **complex64/complex128：本表比参考仓「少两条」是 OpRunway 的有意收窄，不是漏抄、更不是 bug。**
-#   参考仓 `accuracy.py:52-53` **有**这两条（complex64=(atol 1e-3, rtol 2**-13)、
-#   complex128=(atol 1e-6, rtol 2**-30)）；我们**移除**了 → 复数输出的算子在本仓 **fail-closed**
-#   （`threshold_for` → `_check_compute_supported` 当场抛，不产出 policy），而不是拿一份算不出来的
-#   容差假装支持。依据是审计 finding #9：`compute_metrics` 的 SUPPORTED_COMPUTE_DTYPES 不含 complex
-#   （复数 allclose 从没实现），留着条目等于「能生成一份永远算不出来的 policy」——**声明与实现不一致
-#   比缺能力更坏**（缺能力是明着挡住，不一致是等着在真机上假通过/假失败）。
-#   ⛔ **别为「对齐 cannbot」把这两条加回来**：单加容差表 = 只把 fail-closed 挪后、错得更隐蔽。
-#   要补齐复数支持必须**同时**改三处，缺一不可：
-#     ① 本表 `_TA_DTYPE_TOLS` 补 complex64/complex128；
-#     ② `compute_metrics` 的 TORCH_ALLCLOSE 分支实现复数比对（现在 `astype(np.float64)` 会**静默丢虚部**，
-#        这正是 finding #2 记的假通过温床——须改按模长/实虚分量的 allclose）；
-#     ③ `SUPPORTED_COMPUTE_DTYPES` 放行 complex（否则 ①② 做完仍在 `_check_compute_supported` 被挡）。
-#   （`_AOT_TABLE` 里的 complex 条目是 AscendOpTest 的**逐字快照**、保留作 provenance；那条路径同样由
-#    `threshold_for` 里的 `_check_compute_supported` 当场 fail-fast，不会产出不可执行 policy。）
+# ⚠ **本表没有、也不该有 complex 行**（2026-08-06 起是「沿用 float32」的结构性落点，不是遗漏）：
+#   复数的容差**不单独维护**，一律经 `_COMPLEX_COMPONENT_DTYPE` 折算到分量 dtype 再查本表
+#   （complex64 → float32 那一行）。历史上这里挂过一条 `complex64=(2**-13, 1e-3)`，注释还老实
+#   标着「外推、非权威常量」——两个数与 float32 行逐字相同，维护两份只会给「哪天它们不一样了」
+#   留口子。删掉那条不改任何数值，只是把「同档」从巧合变成规则。见 `_torch_allclose_tol`。
 _TA_DTYPE_TOLS = {                 # dtype: (rtol, atol)
     "float16":    (2 ** -10, 9e-2),
     "bfloat16":   (2 ** -7,  1e-1),
@@ -165,11 +182,41 @@ _TA_DTYPE_TOLS = {                 # dtype: (rtol, atol)
 _TA_TORCH_DEFAULT = (1e-5, 1e-8)   # torch.allclose 缺省 (rtol=1e-5, atol=1e-8)
 TOLERANCE_SOURCES = ("dtype_table", "taskdoc", "torch_default")  # rtol/atol 权威来源（spec.precision.tolerance_source）
 
-# ---- 可复算 dtype 支持矩阵（float64 直算，覆盖精度维极小用例；bf16/fp8/complex 未支持→fail-fast） ----
+# ---- 可复算 dtype 支持矩阵（float64 直算，覆盖精度维极小用例；bf16/fp8/complex128 未支持→fail-fast） ----
 SUPPORTED_COMPUTE_DTYPES = frozenset({
     "float16", "float32", "float64", "float",
     "int8", "int16", "int32", "int64", "uint8", "uint32", "bool",
+    "complex64",
 })
+
+# ---- 复数 dtype 受控集 ----
+# ⚠ 「在 `SUPPORTED_COMPUTE_DTYPES` 里」≠「每个 policy.kind 都能判它」：复数只有
+#   **exact / ascendoptest_default / torch_allclose** 三条分支有明确口径（口径本身统一，见下面的
+#   `_COMPLEX_COMPONENT_DTYPE`），`ecosystem_mere_mare` 与 `index_value_consistency` 对复数一律 fail-closed。
+#   这个集合就是那几处判据的读侧真源，别在别处再写一份 `"complex" in name` 的字符串判断。
+COMPLEX_DTYPES = frozenset({"complex64", "complex128"})
+
+# ---- 复数 → 分量 dtype（受控表；「沿用 float32」这条决策的**唯一**落点） ----
+# 用户 2026-08-06：「complex64 的标准就沿用 float32 的，虚部和实部都沿用 float32 的标准」。
+# 于是复数在本模块里**没有任何自己的常量、也没有任何自己的判据**——两件事都经这张表折算：
+#   · 容差：`_torch_allclose_tol` / `threshold_for(ASCENDOPTEST_DEFAULT, …)` 查表前先折算 dtype；
+#   · 判据：`_allclose_close_complex` / `_aot_metrics_complex` 对实部、虚部**各调一次实数实现**。
+# 想改复数口径？改的应该是对应实数 dtype 的规则；在这里给复数开小灶就是把刚统一掉的分档又搬回来。
+#
+# ⛔ **`complex128` 刻意不在表里。** 它的分量确实是 float64，但它在 `SUPPORTED_COMPUTE_DTYPES`
+#   之外（缺真机收发实证，不是缺实现）；一旦写进本表，`threshold_for("torch_allclose", "complex128")`
+#   就能凭 float64 那一行拿到容差、变成一份「能生成、真机收不了」的死 policy —— 正是 finding #9
+#   那个病。要放开它得先补真机实测并走 SUPPORTED_COMPUTE_DTYPES / 生成层 / 收发层，不是加这一行。
+_COMPLEX_COMPONENT_DTYPE = {"complex64": "float32"}
+
+
+def component_dtype(name):
+    """复数 dtype → 其实部/虚部的实数 dtype 名；非复数（或未放行的复数）**原样返回**。
+
+    「原样返回」是刻意的 fail-closed：`complex128` 折算不出分量 dtype，于是它照旧以
+    `"complex128"` 这个名字去查容差表 / 支持集，并在那里被当场拒——不会因为本函数
+    悄悄给它一个 float64 的容差而混进来。"""
+    return _COMPLEX_COMPONENT_DTYPE.get(name, name)
 
 
 # ================================================================= 路由 =====
@@ -725,6 +772,10 @@ def _torch_allclose_tol(dtype, tolerance_source=None, taskdoc_tol=None):
     · torch_default → torch.allclose 缺省 (1e-5, 1e-8)；
     · taskdoc → 从 spec 派生，须由调用方传入 `taskdoc_tol=(rtol, atol)`（缺则 fail-closed）。
 
+    ⚠ 复数走 `component_dtype` 折算后再查表（complex64 → float32 那一行）——「沿用 float32」
+    这条决策在容差侧就落在这一句上，本表里因此**没有** complex 行。`taskdoc` / `torch_default`
+    两源与 dtype 无关，复数下自然照旧（任务书写死的容差本来就该原样生效）。
+
     ⚠ finding #5：**只有 `None` 才落缺省源**。旧写法 `tolerance_source or "dtype_table"` 把显式写坏的
     `""` / `False` / `0` 也当「没写」→ 一份坏 spec 悄悄拿到了 dtype_table 的容差。字段一旦出现就必须是
     `TOLERANCE_SOURCES` 里的受控字符串。
@@ -741,10 +792,12 @@ def _torch_allclose_tol(dtype, tolerance_source=None, taskdoc_tol=None):
         return (_checked_tol(taskdoc_tol[0], "taskdoc rtol"),
                 _checked_tol(taskdoc_tol[1], "taskdoc atol"))
     if src == "dtype_table":
-        if dtype not in _TA_DTYPE_TOLS:
-            raise ValueError(f"torch_allclose dtype_table 无 dtype={dtype!r} 容差（表={list(_TA_DTYPE_TOLS)}；"
-                             "整型/bool 输出应走 exact，不进本表）")
-        return _TA_DTYPE_TOLS[dtype]
+        key = component_dtype(dtype)      # 复数 → 分量 dtype（complex64→float32）；其余原样
+        if key not in _TA_DTYPE_TOLS:
+            raise ValueError(f"torch_allclose dtype_table 无 dtype={dtype!r} 容差（查表键={key!r}，"
+                             f"表={list(_TA_DTYPE_TOLS)}；整型/bool 输出应走 exact，不进本表；"
+                             "复数按分量 dtype 折算，未放行的复数在此拒）")
+        return _TA_DTYPE_TOLS[key]
     raise ValueError(f"未知 tolerance_source={tolerance_source!r}（仅 {TOLERANCE_SOURCES}）")
 
 
@@ -761,13 +814,20 @@ def threshold_for(standard, dtype, tolerance_source=None, taskdoc_tol=None):
         # equal_nan=True：torch.allclose(..., equal_nan=True) 语义——both-NaN 视为相等（NaN 传播 case 需要）。
         return {"kind": TORCH_ALLCLOSE, "rtol": rtol, "atol": atol, "equal_nan": True, "not_settled": False}
     if standard == ASCENDOPTEST_DEFAULT:
-        if dtype not in _AOT_TABLE:
-            raise ValueError(f"ascendoptest_default 无 dtype={dtype!r} 阈值（表={list(_AOT_TABLE)}）")
+        # 复数取**分量 dtype 的那一行**（complex64 → float32），不取 `_AOT_TABLE` 里的 complex 行。
+        # 那两行的数值本来就一样，但来源不同才是重点：float32 行是「复数沿用 float32」这条决策的
+        # 唯一出处；`_AOT_TABLE["complex64"]` 只是 AscendOpTest 的逐字快照（连同 complex128 一起
+        # 保留作 provenance，见文件头），**不再**被判据读。
+        key = component_dtype(dtype)
+        if key not in _AOT_TABLE:
+            raise ValueError(f"ascendoptest_default 无 dtype={dtype!r} 阈值（查表键={key!r}，"
+                             f"表={list(_AOT_TABLE)}）")
         # logical bf16 由 caseset/driver 以 uint16 输入、fp32 比较产物承载；policy 仍须使用
         # AscendOpTest 的 bfloat16 行，不能因 numpy 无原生 bf16 dtype 而误拒。
+        # ⚠ 支持集校的是**原 dtype 名**、不是折算后的键——否则 complex128 会借 float64 混进来。
         if dtype != "bfloat16":
             _check_compute_supported(dtype)
-        tol, err, legacy = _AOT_TABLE[dtype]
+        tol, err, legacy = _AOT_TABLE[key]
         return {"kind": ASCENDOPTEST_DEFAULT, "tolerance": tol, "error_rate": err,
                 "eps": _AOT_EPS, "legacy": legacy, "not_settled": False}
     if standard == ECOSYSTEM_MERE_MARE:
@@ -1121,6 +1181,14 @@ def is_integer_dtype(name):
     return name in _INTEGER_DTYPES
 
 
+def is_complex_dtype(name):
+    """按 dtype 名判复数（受控集 `COMPLEX_DTYPES`）——生成层/判据层共用的读侧唯一入口。
+
+    ⚠ 别用 `name.startswith("complex")` 之类的字符串猜：受控集才有「哪些复数 dtype 已核实」这层
+    含义（complex128 至今不在 `SUPPORTED_COMPUTE_DTYPES` 里，但它**是**复数，两件事各归各的表）。"""
+    return name in COMPLEX_DTYPES
+
+
 def effective_standard(spec_standard, cdtype, compare=None):
     """per-case **有效标准**（T7；rule-catalog §1.1 + canonical harness 职责）——只会**收紧**、绝不放宽。
 
@@ -1209,15 +1277,132 @@ def _allclose_close_mask(a, g, rtol, atol, equal_nan):
     返回 `(close, diff)`；`diff` 在 inf/NaN 位可能是 inf/NaN，诊断 max 只取有限位（调用方已如此）。
     """
     import numpy as np
+    # errstate 覆盖**整个**判定：`|inf - inf|` 与 `rtol=0 时的 0 * inf` 都算 invalid，
+    # 但两者算出的 NaN 都落在 `fin`（两侧有限）为 False 的位置，结果不受影响——只是噪声。
+    # ⚠ 只关警告、不改值；`fin & (...)` 那一层才是把 inf 位真正排掉的东西，别删。
     with np.errstate(invalid="ignore"):
         diff = np.abs(a - g)
-    fin = np.isfinite(a) & np.isfinite(g)
-    close = fin & (diff <= (atol + rtol * np.abs(g)))
+        fin = np.isfinite(a) & np.isfinite(g)
+        close = fin & (diff <= (atol + rtol * np.abs(g)))
     both_inf_same = np.isinf(a) & np.isinf(g) & (np.signbit(a) == np.signbit(g))
     close = close | both_inf_same
     if equal_nan:
         close = close | (np.isnan(a) & np.isnan(g))
     return close, diff
+
+
+def _complex_components(arr):
+    """复数数组 → `((实部, 虚部))`，两个**原生分量 dtype**（complex64 的分量即 float32）的实数数组。
+
+    刻意不在这里升 float64：升精度是各实数判据自己的事（`_allclose_close_mask` 的调用方 /
+    `_aot_valid_float` 内部），而 `_replace_inf` 要按**原生 dtype** 取 finfo —— 提前升成 float64
+    会把 float32 的 ±inf 换成 float64 的 max，与 float32 路径不再是同一件事。"""
+    import numpy as np
+    a = np.asarray(arr)
+    return (np.ascontiguousarray(a.real), np.ascontiguousarray(a.imag))
+
+
+def _allclose_close_complex(a, g, rtol, atol, equal_nan):
+    """复数版 torch_allclose —— **实部、虚部各按实数（float32）判据判一次，两者都过才算过**。
+
+    实现上**不新写判据**：对两个分量各调一次 `_allclose_close_mask`（同实数路径那一份，
+    含 inf 四象限与 equal_nan 语义），再 `close = close_real & close_imag`。
+    容差也不是复数专属的——`_torch_allclose_tol` 已按 `component_dtype` 折算到 float32 那一行。
+
+    口径依据：用户 2026-08-06 决策「complex64 的标准就沿用 float32 的，虚部和实部都沿用 float32 的
+    标准」。复数在本档里因此没有任何自己的规则。
+
+    🔴 **已知差异（有意保留，别抹平）：这与 `torch.isclose` 本身不同。**
+    torch 在复数上判的是**模长**（`|o-g| <= atol + rtol*|g|`，`abs` 取 hypot(实,虚)），不是分量各判。
+    上一轮真机实测（a3 容器 `oprunway_prov`，torch 2.10.0 / torch_npu 2.10.0）已证两者**可区分**：
+      · 判别构造：`o=0` vs `g=0.8+0.8j`、rtol=0/atol=1 —— 模长 1.131 > 1 → torch 判 not close；
+        本实现分量各判（0.8<=1 且 0.8<=1）判 close；
+      · 8×8=64 个 complex64 值两两配对 × 6 组 (rtol, atol, equal_nan) 共 24576 对的差分实测里，
+        **16 处**两者不一致。
+    ⚠ 所以拿 torch 对拍复数出现分歧时，**先看这一条**：那是本仓选定的口径，不是 bug。
+      别为了「对齐 torch」把这里改回模长——那等于把用户刚统一掉的分档又搬回来。
+      （同一条差异另记在模块 docstring 的复数小节、`compute_metrics` 的复数小节，
+       以及 `dev-doc/oprunway-changes-brief.md` 对应条目。）
+
+    返回 `(close, diff, rel)`：`diff` / `rel` 是两分量的**逐元素较大者**（metrics 契约只有一个
+    标量位；`rel` 的分母是**该分量**的 `|g|`，与分量各判同源），诊断 max 只取有限位（调用方已如此）。
+    """
+    import numpy as np
+    close = diff = rel = None
+    for ap, gp in zip(_complex_components(a), _complex_components(g)):
+        ap64 = ap.astype(np.float64)
+        gp64 = gp.astype(np.float64)
+        c, d = _allclose_close_mask(ap64, gp64, rtol, atol, equal_nan)
+        fin = np.isfinite(d)
+        den = np.abs(gp64)
+        r = np.divide(d, den, out=np.zeros_like(d), where=fin & (den > 0))
+        close = c if close is None else (close & c)
+        diff = d if diff is None else np.maximum(diff, d)
+        rel = r if rel is None else np.maximum(rel, r)
+    return close, diff, rel
+
+
+def _aot_valid_float(o, g, tol, eps):
+    """AscendOpTest `compare_default` 的**浮点判据**（float32/float16/float64 走这一份）。
+
+    单独抽出来只有一个目的：**复数的实部/虚部各调它一次**，从而「复数沿用 float32」是
+    结构上的同一份代码，而不是两处写得碰巧一样。改这里 = 同时改实数与复数，这是要的效果。
+
+    逐条（复刻 compare.py，勿凭记忆改）：
+      · `±inf → ±finfo.max`（`_replace_inf`，按**原生 dtype** 取 finfo；complex64 的分量是 float32，
+        于是换的是 float32 的 max —— 与真跑 float32 完全一致）；
+      · 之后升 float64 精算（本模块显式偏离：参考实现停在原 dtype，float64 只会更严、方向 fail-closed）；
+      · `|g| >= 1` 用相对误差 `diff/(max(|g|,|o|)+eps) <= tol`，否则用绝对误差 `diff <= tol`
+        —— 是 `where(...)` 的**二选一**，不是 `rel_ok or atol_ok`（两者只在一小段值域上不同）；
+      · both-NaN 视为通过。
+    返回 `(valid, diff, rel, both_nan)`。"""
+    import numpy as np
+    o64 = _replace_inf(np.asarray(o)).astype(np.float64)
+    g64 = _replace_inf(np.asarray(g)).astype(np.float64)
+    diff = np.abs(o64 - g64)
+    atol_ok = diff <= tol
+    maxmin = np.maximum(np.abs(g64), np.abs(o64)) + eps
+    rel = diff / maxmin
+    rtol_ok = rel <= tol
+    valid = np.where(np.abs(g64) >= 1, rtol_ok, atol_ok)
+    both_nan = np.isnan(o64) & np.isnan(g64)
+    return (valid | both_nan), diff, rel, both_nan
+
+
+def _aot_metrics_complex(o, g, tol, eps):
+    """复数版 ascendoptest_default —— **实部、虚部各按 float32 判据判一次，两者都过才算过**。
+
+    实现上**不新写判据**：两个分量各调一次 `_aot_valid_float`（float32 走的同一份），
+    `valid = valid_real & valid_imag`。容差也不是复数专属的——`threshold_for` 已按
+    `component_dtype` 取 `_AOT_TABLE["float32"]` 那一行。
+
+    口径依据：用户 2026-08-06 决策「complex64 的标准就沿用 float32 的，虚部和实部都沿用 float32 的
+    标准」。⚠ **与 AscendOpTest 的 `compare_complex` 有两处有意偏离**（`repos/AscendOpTest/compare/
+    compare/compare.py` 第 40-105 行，sha256 = be009ab5824d13dddbc1bfeec12f40e2959611f6bbf7bcb7560d1e035b015b33，
+    与模块 docstring 锚同一枚），两处都**更严**、方向在 fail-closed 一侧：
+      1. **both-NaN 逐分量取**。参考实现取 `isnan(o) & isnan(g)` 于**复数整体**（任一分量 NaN 即 True）
+         再 OR 进两个分量，于是 `nan+1j` vs `nan+2j` 的虚部差异会被实部的 NaN 一起放过。
+         「沿用 float32」意味着虚部那一次判定就是一次**独立的 float32 判定**，NaN 放行支自然也独立。
+      2. **做 `_replace_inf`**。参考实现的 `replace_inf` 对复数是空操作（`issubdtype(complex64,
+         floating)` 为 False）；这里换成对**分量**做，而分量是 float32 → 与 float32 路径同一件事。
+         （`np.isposinf` 对复数会直接 TypeError，所以「整体做 inf 替换」那条路本来也走不通。）
+    ⚠ 别以「对齐参考仓」为由把这两处改回去——那正是被统一掉的复数专属规则。
+
+    诊断量：`diff` / `rel` 取两分量的逐元素较大者；`nan_pair_count` 数的是
+    **至少一个分量命中 both-NaN 放行支**的元素数（复数只有一个标量位可放）。"""
+    import numpy as np
+    valid = diff = rel = nan_pair = None
+    for op, gp in zip(_complex_components(o), _complex_components(g)):
+        v, d, r, bn = _aot_valid_float(op, gp, tol, eps)
+        valid = v if valid is None else (valid & v)
+        diff = d if diff is None else np.maximum(diff, d)
+        rel = r if rel is None else np.maximum(rel, r)
+        nan_pair = bn if nan_pair is None else (nan_pair | bn)
+    finite = np.isfinite(diff)
+    return {"bad_count": int(np.count_nonzero(~valid)), "numel": int(np.asarray(g).size),
+            "max_abs_err": float(diff[finite].max()) if finite.any() else 0.0,
+            "max_rel_err": float(rel[finite].max()) if finite.any() else 0.0,
+            "nan_pair_count": int(np.count_nonzero(nan_pair))}
 
 
 def _check_index_array(arr, side):
@@ -1287,9 +1472,25 @@ def compute_metrics(out, golden, policy, gather_ctx=None):
     dtype 校验（finding #2 + pv-4）：**out 与 golden 双侧 dtype 都校验**（旧洞：只校 golden 侧 →
     out=complex64 时 `_replace_inf(o).astype(float64)` 静默丢虚部返 bad_count=0；out=uint8 与 golden=bool
     跨型 `!=` 值相等返 exact_mismatch=0，都是假通过温床）。
-      · 数值口径（会 astype float64）：两侧都须 ∈ SUPPORTED_COMPUTE_DTYPES 且 **out.dtype == golden.dtype**，
-        任一侧 complex/bf16/fp8 或两侧不一致 → `ValueError` fail-fast。
+      · 数值口径：两侧都须 ∈ SUPPORTED_COMPUTE_DTYPES 且 **out.dtype == golden.dtype**，
+        任一侧 bf16/fp8/complex128 或两侧不一致 → `ValueError` fail-fast。
       · exact 口径：要求 **out.dtype == golden.dtype**（逐位比按同一 dtype），拒 uint8 与 bool 等跨型相等。
+
+    **复数（complex64）· 口径单一：实部/虚部各按 float32 判，两者都过才算过**
+    （用户 2026-08-06：「complex64 的标准就沿用 float32 的，虚部和实部都沿用 float32 的标准」）：
+      - `exact`                 → 逐分量 NaN 容忍相等（就是 float32 exact 各跑一遍）；
+      - `ascendoptest_default`  → `_aot_metrics_complex`：两分量各调一次 `_aot_valid_float`；
+      - `torch_allclose`        → `_allclose_close_complex`：两分量各调一次 `_allclose_close_mask`；
+      - `ecosystem_mere_mare` / `index_value_consistency` → **fail-closed**（前者 Th 表无 complex 行、
+        标准本身未 settle；后者复数 + 下标一致性判据无口径也无见证）。
+      容差同样不分复数：`threshold_for` / `_torch_allclose_tol` 都按 `component_dtype` 折算到
+      float32 那一行。**复数不再有任何自己的常量或判据**——「不同 policy 下复数算法不同」这件事
+      已经没有了；某个 policy 的 float32 规则是什么，它的复数规则就是那个规则跑两遍。
+      🔴 代价如实记账：`torch_allclose` 这一档因此**与 torch 本身不一致**（torch.isclose 对复数用
+        **模长**）。判别构造 `o=0` vs `g=0.8+0.8j`、rtol=0/atol=1：torch not close、本实现 close；
+        24576 对差分实测里 16 处不一致。**这是有意选择，不是 bug**，详见 `_allclose_close_complex`。
+      ⚠ `complex128` 仍整体 fail-closed（不在 SUPPORTED_COMPUTE_DTYPES、也不在
+        `_COMPLEX_COMPONENT_DTYPE`）——原因是缺真机实证，不是缺实现。
     （合法产物两侧本就同 dtype——采集层 out=golden.copy()（mock）或 bool→astype(bool)/numerical 同 _NP[dtn]
     （真机），四算子实测 on-disk 组合恒为 fp32/fp32·fp16/fp16·bool/bool，无 uint8↔bool，故严等不误伤。）
 
@@ -1313,6 +1514,15 @@ def compute_metrics(out, golden, policy, gather_ctx=None):
         if o.dtype != g.dtype:
             raise ValueError(f"exact 口径 out/golden dtype 不一致：out={o.dtype.name} golden={g.dtype.name}"
                              "（拒跨型逐位比，如 uint8 与 bool 会值相等假通过）——fail-fast，不静默")
+        if np.issubdtype(o.dtype, np.complexfloating):
+            # 复数 exact：**逐分量**做 NaN 容忍的相等——即下面那条实数 exact 判据各跑一遍
+            # （`o != g` 且非 both-NaN），与本模块「复数沿用实数标准、分量各判」一致。两点别简化：
+            #   · 必须容忍 NaN——`NaN != NaN` 恒 True，会把「原样搬运了一个 NaN」记成失配（假 FAIL）；
+            #   · 必须**逐分量**——`nan+1j` vs `nan+2j` 在这里仍算失配。exact 的判据是「逐位一致」，
+            #     不该因为实部同为 NaN 就把虚部的真实差异一起放过。
+            eq_r = (o.real == g.real) | (np.isnan(o.real) & np.isnan(g.real))
+            eq_i = (o.imag == g.imag) | (np.isnan(o.imag) & np.isnan(g.imag))
+            return {"exact_mismatch": int(np.count_nonzero(~(eq_r & eq_i))), "numel": int(g.size)}
         mism = (o != g)
         # §1.4 NaN 特殊场景（如 bf16/int Neg 的 torch.neg(NaN)=NaN 输出）：NaN!=NaN=True 会误计 mismatch。
         # 对齐 both_nan 视为通过（同数值口径 L422-423 与 compare.py）。仅浮点有 NaN；bool/int 无、不受影响。
@@ -1326,7 +1536,9 @@ def compute_metrics(out, golden, policy, gather_ctx=None):
     if kind == TORCH_ALLCLOSE:
         # |o-g| <= atol + rtol*|g|；容错率=0（judge 判 mismatch==0）。equal_nan=True 时 both-NaN 视为通过。
         # 双侧 dtype 严校（承 finding #2/pv-4）：bf16 以 storage fp32 落盘比对，故 on-disk 恒 fp32/fp16/int，
-        # 两侧须同 dtype 且受支持——complex/真 bf16 数组在此 fail-fast（median 见证集不触发）。
+        # 两侧须同 dtype 且受支持——真 bf16 / complex128 数组在此 fail-fast（median 见证集不触发）。
+        # ⚠ complex64 自 2026-08-06 起**不再**在这里被挡：它有实现（见下面的复数分支——
+        #   实部/虚部各按 float32 判一次）。
         _check_compute_supported(o.dtype.name)
         _check_compute_supported(g.dtype.name)
         if o.dtype != g.dtype:
@@ -1337,14 +1549,20 @@ def compute_metrics(out, golden, policy, gather_ctx=None):
         equal_nan = bool(policy.get("equal_nan", True))
         # ⚠ **不做 _replace_inf**（finding #3）：inf 由 `_allclose_close_mask` 显式按四象限判，
         #   把 ±inf 换成 ±finfo.max 会让「有限最大值 vs 无穷大」被判相等。
-        o64 = o.astype(np.float64)
-        g64 = g.astype(np.float64)
-        close, diff = _allclose_close_mask(o64, g64, rtol, atol, equal_nan)
+        if np.issubdtype(o.dtype, np.complexfloating):
+            # 复数：实部、虚部**各调一次上面那份实数掩码**，两者都 close 才算 close
+            # （`_allclose_close_complex`）。诊断量取两分量的逐元素较大者，分母是该分量的 |g|。
+            close, diff, rel = _allclose_close_complex(o, g, rtol, atol, equal_nan)
+        else:
+            o64 = o.astype(np.float64)
+            g64 = g.astype(np.float64)
+            close, diff = _allclose_close_mask(o64, g64, rtol, atol, equal_nan)
+            finite = np.isfinite(diff)
+            denom = np.abs(g64)
+            # 诊断量只在**有限 diff 且分母>0** 的位置算（inf/NaN 位算出来是 inf/nan，既无意义又会刷 RuntimeWarning）。
+            rel = np.divide(diff, denom, out=np.zeros_like(diff), where=finite & (denom > 0))
         finite = np.isfinite(diff)
-        denom = np.abs(g64)
-        # 诊断量只在**有限 diff 且分母>0** 的位置算（inf/NaN 位算出来是 inf/nan，既无意义又会刷 RuntimeWarning）。
-        rel = np.divide(diff, denom, out=np.zeros_like(diff), where=finite & (denom > 0))
-        return {"mismatch": int(np.count_nonzero(~close)), "numel": int(g64.size),
+        return {"mismatch": int(np.count_nonzero(~close)), "numel": int(g.size),
                 "max_abs_err": float(diff[finite].max()) if finite.any() else 0.0,
                 "max_rel_err": float(rel[finite].max()) if finite.any() else 0.0}
 
@@ -1358,6 +1576,14 @@ def compute_metrics(out, golden, policy, gather_ctx=None):
             raise ValueError("index_value_consistency 需 gather_ctx={source, dim, keepdim}"
                              "（采集层据 policy.gather_from 重读输入 + 归约轴）")
         src = np.asarray(gather_ctx["source"])
+        if np.issubdtype(src.dtype, np.complexfloating):
+            # gather 回来的值下面要 `astype(np.float64)` 才能进 allclose —— 对复数那是**静默丢虚部**
+            # （同 finding #2 的病根）。复数 + index 输出这个组合本仓至今没有任何见证，也没有
+            # 「tie 上下标可不同、值须一致」在复数上该怎么判的口径（模长相等？分量相等？没定）。
+            # 要支持就得先定口径 + 出见证，不能靠这条通道悄悄放进来。
+            raise ValueError(
+                f"index_value_consistency 的 gather 源 dtype={src.dtype.name!r} 是复数——本判据对复数"
+                f"尚无口径（下游 astype(float64) 会静默丢虚部），fail-closed，不静默")
         dim = gather_ctx["dim"]
         keepdim = bool(gather_ctx.get("keepdim", False))
         ia = np.asarray(out)                              # 用未 flatten 的原下标数组（gather 需保形）
@@ -1409,6 +1635,11 @@ def compute_metrics(out, golden, policy, gather_ctx=None):
     if kind == ASCENDOPTEST_DEFAULT:
         tol = float(policy["tolerance"])
         eps = float(policy.get("eps", _AOT_EPS))
+        if np.issubdtype(g.dtype, np.complexfloating):
+            # 复数：实部、虚部**各按下面那条浮点判据判一次**（`_aot_metrics_complex` 调的就是
+            # 同一个 `_aot_valid_float`）。**不落到下面的浮点分支**——那条会 `astype(np.float64)`
+            # 静默丢虚部（finding #2 的原病）。
+            return _aot_metrics_complex(o, g, tol, eps)
         if np.issubdtype(g.dtype, np.integer):
             # finding #3 取舍：**整数按原 dtype 复刻**（与 compare.py `np.abs(output-expect)` 语义一致，
             # 保留原整型减法/取绝对值的**溢出回绕**；int8 127-(-128) 回绕，abs(-128) 亦回绕）。
@@ -1426,27 +1657,29 @@ def compute_metrics(out, golden, policy, gather_ctx=None):
                     "max_abs_err": float(diff.max()) if diff.size else 0.0,
                     "max_rel_err": float(rel.max()) if rel.size else 0.0,
                     "nan_pair_count": 0}      # 整数无 NaN
-        # 浮点：float64 精算 + inf/nan 复刻
-        o64 = _replace_inf(o).astype(np.float64)
-        g64 = _replace_inf(g).astype(np.float64)
-        diff = np.abs(o64 - g64)
-        atol_ok = diff <= tol
-        maxmin = np.maximum(np.abs(g64), np.abs(o64)) + eps
-        rel = diff / maxmin
-        rtol_ok = rel <= tol
-        valid = np.where(np.abs(g64) >= 1, rtol_ok, atol_ok)
-        both_nan = np.isnan(o64) & np.isnan(g64)
-        valid = valid | both_nan                          # NaN==NaN 视为通过（同 compare.py）
-        bad_count = int(np.count_nonzero(~valid))
+        # 浮点：float64 精算 + inf/nan 复刻。判据抽在 `_aot_valid_float` 里——**复数的两个分量
+        # 各调的就是这同一份**，「复数沿用 float32」因此是同一段代码而非两处碰巧写得一样。
+        valid, diff, rel, both_nan = _aot_valid_float(o, g, tol, eps)
         # finding #5：both-NaN（及单侧 NaN 造成的 nan diff）会把 max_abs/max_rel 污染成 nan → 只在**有限**
         #   位置取诊断 max（inf 已被 _replace_inf 换掉，故非有限 = NaN 位置）；both_nan 计数显式返回。
         finite = np.isfinite(diff)
-        return {"bad_count": bad_count, "numel": int(g64.size),
+        return {"bad_count": int(np.count_nonzero(~valid)), "numel": int(g.size),
                 "max_abs_err": float(diff[finite].max()) if finite.any() else 0.0,
                 "max_rel_err": float(rel[finite].max()) if finite.any() else 0.0,
                 "nan_pair_count": int(np.count_nonzero(both_nan))}
 
     if kind == ECOSYSTEM_MERE_MARE:
+        if np.issubdtype(g.dtype, np.complexfloating):
+            # 生态标准对复数**没有口径**：它自己是 proposed / NOT_SETTLED，且 `_MM_TH_EXP` 里
+            # 根本没有 complex 行——拿 fp32 的 Th 套复数是臆造。`threshold_for` 已经在取阈值那步
+            # 拦过一次，这里是第二道（防手搓 policy 直接调进来）。
+            # ⚠ 「复数沿用 float32」那条决策**不适用于本档**：它统一的是复数与实数的关系，
+            #   前提是该 policy 的实数规则本身成立；而本标准自己 status=proposed / NOT_SETTLED，
+            #   `_MM_TH_EXP` 也没有 complex 行 —— 沿用一份未 settle 的规则不叫沿用，叫扩散。
+            #   复数请走 ascendoptest_default 或 torch_allclose（两档都是分量各按 float32 判）。
+            raise ValueError(
+                f"ecosystem_mere_mare 对复数 dtype={g.dtype.name!r} 无口径（Th 表 {list(_MM_TH_EXP)} "
+                f"无 complex 行，且该标准本身 status={_MM_STATUS}/NOT_SETTLED）——fail-closed，不静默")
         eps = float(policy.get("eps", _MM_EPS))
         o64 = o.astype(np.float64)
         g64 = g.astype(np.float64)

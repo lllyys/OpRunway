@@ -157,9 +157,13 @@
 //                ✅ **当前唯一能产验收裁决的形态**（准入白名单 `run_workflow._ACCEPTANCE_RUNNER_FORMS`）。
 //     `aclnn_py` = **无 per-op runner 源**、op 工程即 DUT，走 op-中立的 ctypes-aclnn runner
 //                （`aclnn_runtime`，从 aclnn header 推 arity）。
-//                ⛔ 产不出裁决：要跑须 `--allow-experimental-form`，且**物理上只产**
-//                `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"`）。
-//     `cpp`      = per-op `oprunway_<op>_runner.cpp`。⛔ 同上，只出开发级证据。
+//                ⛔ **停止准入（2026-08-06）**：不只是产不出裁决，**连跑都跑不起来**——派生表
+//                `run_workflow._RUNNER_FORM_TO_MODE` 里没有它的条目，显式指定真机 mode 也被拒，
+//                逃生阀已随通路收敛删除。抽成这个值 = 交出一份开跑即被拒的 spec。
+//     `cpp`      = per-op `oprunway_<op>_runner.cpp`。⛔ 同上，已停止准入。
+//   ⚠ 两者仍在**受控词表**里只是为了读得懂旧 spec（词表 ≠ 准入表）；正式验收一律写 `cpp_extension`。
+//     已有 spec 写着它们 → 迁到 `cpp_extension`（补 torch.ops 调用桥 + vendor ELF 构建收据），
+//     **不是**换个 mode 再试、更不是把准入门放宽。
 //   ⚠ `runner_form ∈ {"cpp_extension","aclnn_py"}` **必须**同时声明 `call_variants`（gen_cases 当场
 //     fail-closed；`cpp_extension` 另有 `cpp_extension_codegen` 的「非空列表」硬校）。
 //   ⚠ 它还决定真机可收发 dtype 白名单（`repo_adapter.supported_np(runner_form)`：
@@ -456,11 +460,11 @@
 //
 // ════════════════════════════════════════════════════════════════════════════════
 // 《最小合法骨架》——照抄哪一份看 runner_form；抄完把 `<…>` 全部替换成真值
-//   ⚠ **正式验收抄 ①**：`cpp_extension` 是当前唯一能产验收裁决的形态。②③ 只出**开发级**证据——
-//     要跑得加 `--allow-experimental-form`，且那条路径**物理上产不出** acceptance.json / verdict.json。
-//     「加了逃生阀跑绿了」**不是**验收通过，不得写进报告的裁决栏。
+//   ⚠ **正式验收只有 ① 可抄**：`cpp_extension` 是当前唯一能产验收裁决、也是唯一派得出 mode 的形态。
+//     ⛔ ②③ 自 2026-08-06 **停止准入**——`run_workflow` 派不出 mode、显式指定真机 mode 也被拒、
+//     逃生阀已删除，**照它们抄出来的 spec 开跑即被拒**。留在下面只为读得懂历史 spec，不是备选项。
 //   ⚠ 三份**都显式写** `runner_form`。省略虽有缺省兜底（键缺席 → `cpp_extension`），
-//     但省略**再也不表达 `cpp`**——要 `cpp` 就照 ③ 显式写出来。
+//     但省略**再也不表达 `cpp`**——它是一份历史值，不是「抄 ③ 就能跑」的意思。
 // ════════════════════════════════════════════════════════════════════════════════
 //
 // ⓪ 基座 —— 所有形态共有的必填字段。**单独抄它不构成一份完整 spec**，须再叠 ①/②/③ 之一。
@@ -512,7 +516,14 @@
 //   ⚠ 它另需**独立构建收据**把被测来源锚（PR head / 本地子树摘要）、构建命令与实际加载的 vendor ELF
 //     绑起来（三级门 `validate_acceptance_state` 会对账）——接入成本比 ②③ 高，这是已知账单。
 //
-// ② aclnn_py（**开发级，非验收准入**）—— 与 ① **逐字同形**，只把 runner_form 的值换成 `"aclnn_py"`：
+// <!-- oprunway:retired-begin -->
+// ⛔ 历史留档 · 不得 dispatch · 不要照做 —— ②③ 两份骨架自 2026-08-06 停止准入：
+//    照抄产出的 spec 在 `_resolve_mode` 当场被拒，跑不出任何产物。
+//    留着只为读得懂历史 spec 与解释历史产物，**不是「跑不通就换一份抄」的备选**。
+//    当年它们分别派生 `--mode aclnn_py` 与 `--mode new_example`，逃生阀 `--allow-experimental-form`
+//    只放行「跑起来」、不放行「产裁决」；两行派生与那个 flag 现在都已删除。
+//
+// ② aclnn_py（⛔ **已停止准入**）—— 与 ① **逐字同形**，只把 runner_form 的值换成 `"aclnn_py"`：
 //    两形态共用同一份逐 case 调用契约 `aclnn_call`，`call_variants` 的抽法完全一样。
 //   {
 //     …① 的全部字段…,
@@ -521,7 +532,7 @@
 //   ⚠ 已有 spec 写着 `aclnn_py`（如 Roll）→ 要做正式验收就是**迁到 ①**，不是放宽准入门。
 //     旧 `aclnn_py` 跑出来的 PASS 属于旧 caseset，不得沿用。
 //
-// ③ cpp（**开发级，非验收准入**；历史 per-op runner 通路）—— 在 ⓪ 之上**只加一行**，
+// ③ cpp（⛔ **已停止准入**；历史 per-op runner 通路）—— 在 ⓪ 之上**只加一行**，
 //    不写 call_variants / scenario / out_role 等 §1.3 字段：
 //   {
 //     …⓪ 的全部必填字段…,
@@ -530,3 +541,4 @@
 //   }
 //   ⚠ dtype 只到 fp32/fp16/bf16（`repo_adapter.supported_np("cpp")`）；int16/int32 属 Track C 挂账集
 //     （生成期放行、真机跑到仍 fail-closed），须在 `task_pr_gaps` 以 `dtype_deferred` 显式挂账。
+// <!-- oprunway:retired-end -->

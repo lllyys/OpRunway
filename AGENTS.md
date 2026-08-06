@@ -71,7 +71,7 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 它拒在 `os.makedirs` / staging / Task1 **之前**，不留半个产物目录。
 路径就是 **CP-A 取材那一步 `fetch_source.py --out <取材目录>` 产的那份**（`completeness.status` 须为 `complete`），
 **与 `--out <报告目录>` 不是同一个目录**——报告目录里那份是本轮 staging 出来的副本，是产物不是输入。
-非验收通路（`mock`、加了 `--allow-experimental-form` 的 `cpp` / `aclnn_py`）**不受此强制**：那条路
+非验收通路（显式 `--mode mock` / `catlass*`）**不受此强制**：那条路
 物理上不产验收裁决，也没有来源锚要对账。
 
 常用脚本：
@@ -105,18 +105,28 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 ## 4 · `--mode` 只由 `spec.runner_form` 派生
 
-⚠ **当前只有 `cpp_extension` 能产验收裁决。** `cpp` / `aclnn_py` 的 spec 会在入口和出口两处被拦：
-不加逃生阀直接报错，加了也只出开发级证据。这是按真机成熟度有意收敛，不是 bug。
+⚠ **只有 `cpp_extension` 能跑。** 2026-08-06 起 `cpp` / `aclnn_py` 已**停止准入**：它们不但产不出验收裁决，
+**连真机入口都没有了**——`run_workflow` 的派生表里没有它们的条目，逃生阀 `--allow-experimental-form` 也已删除。
+写这两种 form 的 spec 会当场拒跑，出路只有一条：**迁到 `cpp_extension`**。这是按真机成熟度有意收敛，不是 bug。
 
-`spec.runner_form` 是唯一真源，受控词表为 `{cpp, aclnn_py, cpp_extension}`：
+`spec.runner_form` 是唯一真源，受控词表仍为 `{cpp, aclnn_py, cpp_extension}`（词表 ≠ 准入表）：
 
-| `runner_form` | `--mode` | 当前能否产验收裁决 | 执行形态 | 默认性能对照物 |
+| `runner_form` | `--mode` | 现在能做什么 | 执行形态 | 默认性能对照物 |
 |---|---|---|---|---|
-| `cpp` | `new_example` | ❌ 不能。要跑须加 `--allow-experimental-form`，且只产开发级产物 | 编译 per-op C++ runner | 同法测的内置 TBE |
-| `aclnn_py` | `aclnn_py` | ❌ 不能。同上 | 通用 ctypes 调标准 aclnn 两段式 `.so` | 逐字按任务书配置；可为同机 `torch_npu`，也可直接调用 CANN 内置 ACLNN |
-| `cpp_extension`（**= 缺省，整字段省略即此**） | `cpp_extension` | ✅ 能，当前**唯一**准入形态 | 按官方 `NpuExtension` / `EXEC_NPU_CMD_EXT` 生成独立 `torch.ops` 调用桥；DUT 仍是被测来源构建的 vendor `.so` | 逐字按任务书配置；runner form 不决定 baseline |
+| `cpp` | （无）| ⛔ **停止准入**：省 `--mode` 派不出 mode，显式 `--mode new_example` 同样被拒 | 编译 per-op C++ runner | 同法测的内置 TBE |
+| `aclnn_py` | （无）| ⛔ **停止准入**：同上 | 通用 ctypes 调标准 aclnn 两段式 `.so` | 逐字按任务书配置；可为同机 `torch_npu`，也可直接调用 CANN 内置 ACLNN |
+| `cpp_extension`（**= 缺省，整字段省略即此**） | `cpp_extension` | ✅ 能产验收裁决，当前**唯一**准入形态 | 按官方 `NpuExtension` / `EXEC_NPU_CMD_EXT` 生成独立 `torch.ops` 调用桥；DUT 仍是被测来源构建的 vendor `.so` | 逐字按任务书配置；runner form 不决定 baseline |
 
-准入白名单在代码里就一行：`run_workflow._ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})`。
+代码里就两行，且被一句 `assert` 钉成同一个集合：
+
+```python
+_ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})
+_RUNNER_FORM_TO_MODE = {"cpp_extension": "cpp_extension"}
+```
+
+⚠ **历史产物不改判。** `cpp` / `aclnn_py` 已产出的验收产物**保持原裁决与历史效力**；停止准入说的是
+「不支持新建」，不是「当时那次不算数」。样例 spec 里仍有 `"runner_form": "cpp"` 的文件，
+那是历史形态的**参考样例**（见 `plugin/samples/specs/README.md`），不是「这条通路还可选」。
 
 **缺省 = `cpp_extension`，`cpp` 必须显式写。** 缺省值的唯一真源是
 `repo_adapter.DEFAULT_RUNNER_FORM`，读侧统一走 `repo_adapter.spec_runner_form(spec)` /
@@ -151,23 +161,31 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 | 位置 | 函数 | 说明 |
 |---|---|---|
-| ① 入口门 | `_resolve_mode` | 正常调用路径在这里被拦。只对真机通路生效；显式 `mock` / `catlass_mock` 逃生口不受影响（它们本来就不产验收产物） |
+| ① 入口门 | `_resolve_mode` | 正常调用路径在这里被拦。**派生表里没有条目 = 没有入口**；显式 `--mode new_example` / `aclnn_py` 也走这道门，一样拒。显式 `mock` / `catlass*` 逃生口不受影响（它们本来就不产验收产物） |
 | ② 出口门 | `_assert_acceptance_form_allowed` | 写 `acceptance.json` / `verdict.json` **之前**再校一次 |
 
-为什么要两道：口径照抄 `repo_adapter` 对 `catlass_mock` 后门的处置——**只拦入口拦不住**。
-下一个人看到出口门别当冗余删掉。
+为什么删了入口还要留出口：口径照抄 `repo_adapter` 对 `catlass_mock` 后门的处置——**只拦入口拦不住**
+（绕开 `_resolve_mode` 直接把 mode 递进来就绕过去了）。下一个人看到出口门别当冗余删掉。
 
-### 4.3 逃生阀 `--allow-experimental-form` 怎么用
+另有第三处同口径的门：`finalize_clean_acceptance.build_clean_acceptance`。它是「跳过状态机直接拼裁决」
+的近路，因此也读同一张派生表，退役形态在那里同样被拒。
 
-| 它放行什么 | 它不放行什么 |
+### 4.3 逃生阀已删除（别加回来）
+
+原先有个 `--allow-experimental-form`：放行「跑起来」、不放行「产裁决」。**2026-08-06 连同映射一起删掉了。**
+
+删的理由是 aclnnRoll 试跑（2026-08-06）的实测账：编排层采信一句**未经验证**的论断，把 `runner_form`
+从 `cpp_extension` 改成 `cpp`，此后整轮**物理上不可能产出裁决**，却一路跑到 1h47m 才以 BLOCKED 收场。
+门当时全都工作正常、也没出假 PASS——塌的是「留了一条跑得起来的死路」。**能跑起来的死路就会有人走进去**，
+所以现在把死路封在第一步：代价只是一条错误信息。
+
+| 想干什么 | 现在怎么做 |
 |---|---|
-| 让 `cpp` / `aclnn_py` 在真机上**跑起来**：修通路、复现问题、局部开发验证 | **产验收裁决**。该路径物理上只产 `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"` + NON-ACCEPTANCE 标记），不写 `acceptance.json` / `verdict.json` |
+| 出验收裁决 | 把 spec 迁到 `runner_form: "cpp_extension"`。⚠ 需要 torch.ops 调用桥 + vendor ELF 构建收据，接入成本明显更高——**这是已知账单**，不是加个逃生阀就算解决 |
+| 本地自检用例链（非验收） | 显式 `--mode mock`：物理上不产 `acceptance.json` / `verdict.json`，只产 `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"` + NON-ACCEPTANCE 标记） |
+| 「换个 `--mode` 再试」 | ⛔ 不通，也不该通。那些真机 mode 同样被入口门拒 |
 
-所以“加了 `--allow-experimental-form` 跑绿了”不能写成验收通过、不能进验收报告的裁决栏——
-这和 §5.8“covered 不等于验收通过”是同一条纪律。
-
-**收敛的代价要认账**：Roll 的 spec 写的是 `aclnn_py`，要继续做正式验收就得迁到 `cpp_extension`，
-而后者需要 torch.ops 调用桥 + vendor ELF 构建收据，接入成本明显更高。这是已知账单，不是加个逃生阀就算解决。
+所以“跑绿了”从来不能写成验收通过、不能进验收报告的裁决栏——这和 §5.8“covered 不等于验收通过”是同一条纪律。
 
 ### 4.4 其余仍然成立的约定
 
@@ -177,6 +195,9 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
   **不存在单一的「Median 精度基线数字」**；两组数各自的 spec 出处、矩阵构成与引用纪律见 **§4.5**；
 - `mock`、`catlass`、`catlass_mock` 不能从 `runner_form` 派生，只能显式用于局部开发或对应通路；
 - mock 通路物理上不产 `acceptance.json` 或 `verdict.json`；
+- `repo_adapter.MODES` 是 **adapter 执行器注册表**，不是准入表：`mock` / `new_example` / `aclnn_py` /
+  `catlass*` 的条目**照旧保留**（本轮评估过，结论是不删）。门守在 `runner_form` 那一层，
+  不靠「把执行器藏起来」；往 `MODES` 里加一个 mode 也**不等于**它能出裁决；
 - `run_workflow --mode` 的 argparse 默认值是 `None` = **不指定，按 spec 派生**；
   编排层**不得**自己显式传 `new_example`（spec 是 `cpp_extension` 时会当场撞 mode 不匹配门）；
 - runner form 只决定执行形态，**不能反推任务书指定的实际性能标杆**；每份任务书的 baseline 仍须单独核实。
@@ -526,8 +547,12 @@ OpRunway/
 
 规则和理由见 §4，这里只记边界后果：
 
-- `cpp`、`aclnn_py` 仍能在真机上跑（须 `--allow-experimental-form`），但**不产验收裁决**；
-- `aclnn_py` perf collector 已真机产出同口径 kernel-only 数据——“通路有数据”既不等于“任务书条款通过”，现在也不等于“能出裁决”；
+- `cpp`、`aclnn_py` **连真机入口都没有了**（2026-08-06 起：派生表无条目、逃生阀已删）。
+  spec 写它们即拒跑，出路是迁到 `cpp_extension`，**不是换个 `--mode` 再试**；
+- 已产出的 `cpp` / `aclnn_py` 验收产物**保持原裁决与历史效力**——停止准入 = 不支持新建，不是追溯否定；
+- `aclnn_py` perf collector 已真机产出同口径 kernel-only 数据——“通路有数据”既不等于“任务书条款通过”，现在连“跑得起来”都不再成立；
+- 能力表（`repo_adapter.SUPPORTED_NP_BY_FORM` / `DEFERRED_NP_BY_FORM`）与执行器注册表
+  （`repo_adapter.MODES`）里这两种形态的条目**全部原样保留**：它们回答的是别的问题（见 §4.1 / §4.4）；
 - `aclnn_py` 的历史 Median 60/60 属于旧 caseset，不得沿用为 torch_parity 下的 PASS；
 - mock/catlass_mock 只产带 `evidence_grade="development"` 和 NON-ACCEPTANCE 标记的
   `dev_run_summary.json` / `dev_precision_check.json`，不产 `acceptance.json` / `verdict.json`；
@@ -536,11 +561,12 @@ OpRunway/
   但不支持创建或执行 CP-F 复测 attempt。被拒表示“当前复测能力不覆盖该通路”，
   **不表示基础验收失效、失败或被重新裁决**。
 
-  ⚠ **CP-F 没有逃生阀，`--allow-experimental-form` 不适用于它、也不得用于绕过。**
-  理由是那个逃生阀的全部安全性建立在“该路径**物理上不产** `acceptance.json` / `verdict.json`”上，
-  而 **CP-F 就是要写 `verdict.json`**（`precision_retest_runner` 落 attempt 产物），
-  报告还直接展示“validator 精度裁决”——放非准入通路进来，产出的东西长得就是一份验收裁决，
-  等于换个门绕过准入。
+  ⚠ **CP-F 没有逃生阀，也不得以任何旁路绕过。**（收敛后 `run_workflow` 侧那个
+  `--allow-experimental-form` 本身已删；这条规矩比它活得久，别以为逃生阀没了就不必写。）
+  当年不给 CP-F 开逃生阀的理由是：逃生阀的全部安全性建立在“该路径**物理上不产**
+  `acceptance.json` / `verdict.json`”上，而 **CP-F 就是要写 `verdict.json`**
+  （`precision_retest_runner` 落 attempt 产物），报告还直接展示“validator 精度裁决”——
+  放非准入通路进来，产出的东西长得就是一份验收裁决，等于换个门绕过准入。
 
   出路（真需要复测非准入通路时）：用 `cpp_extension` 重做一次完整 CP-A..E 验收当新基线，
   再对它做 CP-F。⚠ 那是**新验收**，不能称作旧通路的漂移复测。
@@ -721,10 +747,11 @@ CP-F 的 `directive.source_identity.repo` ↔ 首轮 build receipt `runner_bindi
 两条出路二选一：补这份 reference（教它写 `mode=measure_only` + 授权四件套），
 或靠性能口径解析处的 fail-closed 把这类 spec 拦成 BLOCKED、逼人手工补授权。**别两个都不做。**
 
-⚠ **张力，显式挂着不静默压平**：§4 把验收准入收敛到 `cpp_extension`（`aclnn_py` 不产裁决），
-而同期 `aclnn_py` 的 ops-cv / 仓根一级算子 / 非标准 stage2 通路刚被打通。
-样例上不冲突（GaussianBlur 的 spec 写的是 `cpp_extension`），但**若有 `aclnn_py` 的 spec 期望出正式裁决，
-准入门会当场拒它**。这需要用户拍板，本轮不自行改任何一侧。
+⚠ **张力，显式挂着不静默压平**（2026-08-06 更新：**张力变大了，不是变小了**）：§4 已把 `cpp` / `aclnn_py`
+**停止准入**——不只是「不产裁决」，而是连真机入口都删了。而同期 `aclnn_py` 的 ops-cv / 仓根一级算子 /
+非标准 stage2 通路刚被打通。样例上不冲突（GaussianBlur 的 spec 写的是 `cpp_extension`），
+但**任何 `aclnn_py` 的 spec 现在会在 `_resolve_mode` 当场拒跑**，连开发级 dev 产物都跑不出来
+（要跑只剩显式 `--mode mock`，那是构造必过的假数，证不了 aclnn 通路）。这需要用户拍板，本轮不自行改任何一侧。
 连带的 Roll 迁移成本照旧：其 spec 现写 `aclnn_py`，要做正式验收就得迁到 `cpp_extension`，
 而后者要 torch.ops 桥 + vendor ELF 构建收据，接入成本更高（详见 §4.3）。
 

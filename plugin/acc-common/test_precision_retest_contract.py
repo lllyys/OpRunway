@@ -13,6 +13,41 @@ import precision_retest_contract as R
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
+#: 两条通路各自的锚 —— 长度与形态都由 `source_provenance` 词表决定，测试不复用同一段 hex
+#: 冒充另一条通路（那正是 `_source_identity_record` 整块比要挡的东西）。
+PR_HEAD = "d" * 40
+SUBTREE_MERKLE = "7" * 64
+WHOLE_MERKLE = "6" * 64
+#: 子树 merkle 的覆盖范围。**空串也是合法显式值**（= 仓根），所以这里刻意用一个非空值，
+#: 免得「忘了传 scope」和「scope 就是仓根」在断言里长得一样。
+SCOPE = "experimental/index/median"
+
+
+def _vendor_build_receipt(*, local, repo="repo", anchor=None, scope=None):
+    """一份能过 `vendor_build_receipt.summarize()` 的收据。
+
+    CP-F 迁到 `source_provenance` 之后**不再自己解释** `receipt["source"]` 的原始字段，
+    只消费归一化摘要——所以测试 fixture 必须是一份**完整合法**的 vendor build receipt
+    （信封 + 版本/`provenance_kind` 成对 + 按通路分流的锚 + build argv/cwd/实测 returncode），
+    不能再像旧 `dut_source` 时代那样只拼一个 `{"source": …, "build": …}` 的残片。
+    """
+    build = {"argv": ["bash", "build.sh"], "cwd": "/src",
+             "returncode": 0, "returncode_source": "measured"}
+    if not local:
+        # schema_version=1（历史档）：语义恒为绑了 PR head 的 gitcode PR。
+        return {"schema": "oprunway.vendor_build_receipt", "schema_version": 1,
+                "status": "VERIFIED",
+                "source": {"repo": repo, "pr_head_sha": anchor or PR_HEAD},
+                "build": build}
+    return {"schema": "oprunway.vendor_build_receipt", "schema_version": 2,
+            "status": "VERIFIED",
+            "source": {"provenance_kind": "local_snapshot",
+                       "declared_source_form": "local_source",
+                       "pr_head_sha": None, "repo": repo,
+                       "snapshot_subtree_scope": SCOPE if scope is None else scope,
+                       "snapshot_sha256": WHOLE_MERKLE,
+                       "snapshot_subtree_sha256": anchor or SUBTREE_MERKLE},
+            "build": build, "degradations": []}
 
 
 def _directive(kind="same_policy_rerun", status="confirmed"):
@@ -27,10 +62,12 @@ def _directive(kind="same_policy_rerun", status="confirmed"):
         "attempt_kind": kind,
         "case_ids": ["case-1", "case-2"],
         "base_artifacts": base,
-        # PR 通路刻意省掉 `dut_source` 键：顺带见证「缺席即 pull_request」的向后兼容。
+        # PR 通路刻意省掉 `provenance_kind` 键：顺带见证「缺席即 gitcode_pr」这条默认。
+        # 它不是兜底猜测——本地 directive 漏写该键会带着 snapshot 锚撞进 PR 档，
+        # 被 `validate_directive` 的键集严格相等校验当场拒（见下面那条本地用例）。
         "source_identity": {
             "repo": "repo",
-            "pr_head_sha": "d" * 40,
+            "pr_head_sha": PR_HEAD,
             "build_receipt_sha256": SHA_B,
             "runner_form": "aclnn_py",
         },
@@ -135,11 +172,17 @@ class DirectiveTest(unittest.TestCase):
         for mutate, pattern in (
                 (lambda s: s.pop("repo"), "repo"),
                 (lambda s: s.pop("pr_head_sha"), "40 位 hex"),
-                # PR directive 又塞一个本地锚 → 由 `dut_source` 的**互斥**校验先拦下，
-                # 报的是「同时带着另一条通路的锚」而不是键集不等：两套锚齐备时，
-                # 任何按字段名直取的下游都能自选来源身份，这比键集多一项更该先说。
-                (lambda s: s.update(local_root_digest="c" * 64), "另一条通路的锚"),
-                (lambda s: s.update(dut_source="made_up"), "受控词表"),
+                # PR directive 又塞一个本地锚 → 由**互斥**校验先拦下，报的是「同时带着
+                # 另一条通路的锚」而不是键集不等：两套锚齐备时，任何按字段名直取的下游
+                # 都能自选来源身份，这比键集多一项更该先说。
+                (lambda s: s.update(snapshot_subtree_sha256="c" * 64), "另一条通路的锚"),
+                (lambda s: s.update(provenance_kind="made_up"), "受控词表"),
+                # PR 档没有「范围」这个概念；带了它就是混装本地快照的字段。
+                (lambda s: s.update(snapshot_subtree_scope="x"), "不得带"),
+                # `repo` 会被逐字带进 manifest 与人读报告，带凭据即撞仓规 §2。
+                # 产出方 `vendor_build_receipt.py` **不做**这道检查，读侧必须拦。
+                (lambda s: s.update(repo="https://u:tok@gitcode.com/x.git"),
+                 "用户凭据"),
         ):
             with self.subTest(pattern=pattern):
                 value = _directive()
@@ -147,20 +190,67 @@ class DirectiveTest(unittest.TestCase):
                 with self.assertRaisesRegex(R.RetestContractError, pattern):
                     R.validate_directive(value)
 
-    def test_local_checkout_directive_needs_64_hex_root_digest(self):
+    def test_credential_bearing_repo_is_refused_without_echoing_the_token(self):
+        """⭐ 报错本身不得再泄漏一次：终端与 CI 日志都会留存。"""
+        value = _directive()
+        value["source_identity"]["repo"] = "https://u:s3cr3t-token@gitcode.com/x.git"
+        with self.assertRaises(R.RetestContractError) as caught:
+            R.validate_directive(value)
+        self.assertNotIn("s3cr3t-token", str(caught.exception))
+
+    def test_local_snapshot_directive_needs_64_hex_subtree_merkle_plus_scope(self):
+        """本地档的锚是**子树 merkle + 覆盖范围**，两样缺一不可。
+
+        ⭐ scope 是本轮从 `dut_source` 迁到 `source_provenance` 时新增的**载重**字段，
+        不是记账字段：同一棵树按「整仓」和按「算子子树」摘出来是两个值，范围对不上的两个
+        merkle 不可比（对上了是巧合，对不上也说不清是改了字节还是换了范围）。
+        旧 `local_root_digest` 压根没有这一维，所以「只改名字」会留下一道假门。
+        """
         value = _directive()
         value["source_identity"] = {
-            "dut_source": "local_checkout",
+            "provenance_kind": "local_snapshot",
             "repo": "repo",
-            "local_root_digest": "e" * 64,
+            "snapshot_subtree_sha256": SUBTREE_MERKLE,
+            "snapshot_subtree_scope": SCOPE,
             "build_receipt_sha256": SHA_B,
             "runner_form": "cpp_extension",
         }
+        checked = R.validate_directive(value)["source_identity"]
+        self.assertEqual(checked["snapshot_subtree_sha256"], SUBTREE_MERKLE)
+        self.assertEqual(checked["snapshot_subtree_scope"], SCOPE)
+        # 空串 = 仓根，属合法显式值。
+        value["source_identity"]["snapshot_subtree_scope"] = ""
         self.assertEqual(
-            R.validate_directive(value)["source_identity"]["local_root_digest"],
-            "e" * 64)
-        value["source_identity"]["local_root_digest"] = "e" * 40
-        with self.assertRaisesRegex(R.RetestContractError, "64 位 hex"):
+            R.validate_directive(value)["source_identity"]["snapshot_subtree_scope"],
+            "")
+        # 少了 scope → 当场拒，且报因是「没有范围就无法对账」而**不是**「默认整仓」。
+        # 归因要能直接指向下一步动作：补 scope，不是去查字节。
+        value["source_identity"].pop("snapshot_subtree_scope")
+        with self.assertRaisesRegex(R.RetestContractError, "须为字符串"):
+            R.validate_directive(value)
+        # 键集校验也确实把 scope 列进必填集（换一条路径见证同一件事：
+        # 多写一个未知键同样拒，免得「键集里到底有没有 scope」只靠上面那条间接推断）。
+        value["source_identity"]["snapshot_subtree_scope"] = SCOPE
+        value["source_identity"]["silent_extra"] = "x"
+        with self.assertRaisesRegex(R.RetestContractError, "键须严格等于"):
+            R.validate_directive(value)
+        value["source_identity"].pop("silent_extra")
+        # 40 位 commit SHA 不是本地快照锚 —— 长度判据跟着新锚走。
+        value["source_identity"]["snapshot_subtree_sha256"] = "e" * 40
+        with self.assertRaisesRegex(R.RetestContractError, "64 位小写 hex"):
+            R.validate_directive(value)
+
+    def test_local_directive_forgetting_provenance_kind_is_refused(self):
+        """「缺席即 gitcode_pr」这条默认**不构成放行路径**：漏写就撞键集校验。"""
+        value = _directive()
+        value["source_identity"] = {
+            "repo": "repo",
+            "snapshot_subtree_sha256": SUBTREE_MERKLE,
+            "snapshot_subtree_scope": SCOPE,
+            "build_receipt_sha256": SHA_B,
+            "runner_form": "cpp_extension",
+        }
+        with self.assertRaises(R.RetestContractError):
             R.validate_directive(value)
 
 
@@ -578,8 +668,11 @@ class ProvenanceAnchorKeyTest(unittest.TestCase):
         self.assertEqual(
             R._provenance_anchor_key("pr_head_sha", "where"), "head_sha")
         self.assertEqual(
-            R._provenance_anchor_key("local_root_digest", "where"),
-            "local_root_digest")
+            R._provenance_anchor_key("snapshot_subtree_sha256", "where"),
+            "snapshot_subtree_sha256")
+        # 受控词表与这张表必须逐字同集：漏登记一条就是「新通路悄悄拿旧键去对账」。
+        self.assertEqual(
+            set(R.SOURCE_ANCHOR_FIELD.values()), set(R._PROVENANCE_ANCHOR_KEY))
 
     def test_unregistered_field_raises_contract_error(self):
         with self.assertRaisesRegex(R.RetestContractError, "没有登记"):
@@ -587,14 +680,20 @@ class ProvenanceAnchorKeyTest(unittest.TestCase):
                 "future_anchor", "base cpp_extension vendor build_receipt.source")
 
 
-ROOT_DIGEST = "7" * 64
 ELF_SHA = "e" * 64
 
 
-class LocalCheckoutMaterializeTest(unittest.TestCase):
-    """本地来源通路的 CP-F 冻结：锚是 `local_root_digest`，不是任何 40 位 hex。"""
+class LocalSnapshotMaterializeTest(unittest.TestCase):
+    """本地来源通路的 CP-F 冻结：锚是 `snapshot_subtree_sha256` **加 scope**，不是任何 40 位 hex。
 
-    def _build(self, root, *, receipt_source=None, facts_digest=ROOT_DIGEST,
+    ⚠ 本类原名 `LocalCheckoutMaterializeTest`，钉的是已被合并裁定删除的
+      `dut_source` / `local_root_digest` 那套判别式。逐条改写到 `source_provenance`
+      的等价断言上（**一条都没丢**），并补了 ours 没有的 `snapshot_subtree_scope`
+      （范围）维——旧锚只有一个子树摘要、没有范围，所以只改名字会留下一道假门。
+    """
+
+    def _build(self, root, *, build_receipt=None, facts_digest=SUBTREE_MERKLE,
+               facts_scope=SCOPE, directive_scope=SCOPE,
                write_source_facts=True):
         work = os.path.join(root, "work")
         for cid in ("case-1", "case-2"):
@@ -623,14 +722,8 @@ class LocalCheckoutMaterializeTest(unittest.TestCase):
             "cases": [{"case_id": cid, "entrypoint": "invoke_v0"}
                       for cid in ("case-1", "case-2")],
         }
-        build_receipt = {
-            "source": receipt_source if receipt_source is not None else {
-                "dut_source": "local_checkout",
-                "repo": "repo",
-                "local_root_digest": ROOT_DIGEST,
-            },
-            "build": {"argv": ["bash", "build.sh"]},
-        }
+        if build_receipt is None:
+            build_receipt = _vendor_build_receipt(local=True)
         receipt = {
             "schema": "oprunway.cpp_extension_receipt",
             "schema_version": 1,
@@ -664,17 +757,23 @@ class LocalCheckoutMaterializeTest(unittest.TestCase):
             with open(os.path.join(work, relative), "w", encoding="utf-8") as out:
                 json.dump(document, out)
         if write_source_facts:
+            # intake 侧的字段名与收据侧**不同名**（intake 只产一个 merkle，范围由
+            # `--target-dir` 决定；收据产整树 + 子树两个），别按同名比。
             R.content_address.atomic_write_json(
                 root, "source_facts.json",
                 R.content_address.make_artifact(
                     "oprunway/source-facts/v1",
-                    {"dut_source": "local_checkout",
-                     "local_checkout": {"root_digest": facts_digest}}))
+                    {"declared_source_form": "local_source",
+                     "pr": {"provenance_kind": "local_snapshot",
+                            "head_sha": None,
+                            "snapshot_merkle_sha256": facts_digest,
+                            "snapshot_scope": facts_scope}}))
         directive = _directive()
         directive["source_identity"] = {
-            "dut_source": "local_checkout",
+            "provenance_kind": "local_snapshot",
             "repo": "repo",
-            "local_root_digest": ROOT_DIGEST,
+            "snapshot_subtree_sha256": SUBTREE_MERKLE,
+            "snapshot_subtree_scope": directive_scope,
             "build_receipt_sha256": R._canonical_sha(build_receipt),
             "runner_form": "cpp_extension",
         }
@@ -702,9 +801,10 @@ class LocalCheckoutMaterializeTest(unittest.TestCase):
             result = R.materialize_attempt(directive, root, identity)
             binding = result["manifest"]["payload"]["runner_binding"]
             self.assertEqual(binding["base_source_identity"], {
-                "dut_source": "local_checkout",
-                "anchor_field": "local_root_digest",
-                "anchor_value": ROOT_DIGEST,
+                "provenance_kind": "local_snapshot",
+                "anchor_field": "snapshot_subtree_sha256",
+                "anchor_value": SUBTREE_MERKLE,
+                "snapshot_subtree_scope": SCOPE,
             })
             self.assertNotIn("base_pr_head", binding)
             frozen = os.path.join(result["attempt_dir"], "source_facts.json")
@@ -716,8 +816,9 @@ class LocalCheckoutMaterializeTest(unittest.TestCase):
     def test_receipt_claiming_pull_request_with_any_40_hex_is_blocked(self):
         """directive 说 local、基础收据改口说 PR + 任意 40 位 hex → 本地锚校验会整条跳过。"""
         with tempfile.TemporaryDirectory() as root:
-            directive, identity = self._build(root, receipt_source={
-                "repo": "repo", "pr_head_sha": "a" * 40})
+            directive, identity = self._build(
+                root, build_receipt=_vendor_build_receipt(
+                    local=False, anchor="a" * 40))
             with self.assertRaisesRegex(
                     R.RetestContractError,
                     "base_vendor_build_source_anchor_invalid"):
@@ -726,16 +827,29 @@ class LocalCheckoutMaterializeTest(unittest.TestCase):
     def test_source_repo_mismatch_is_blocked(self):
         """人工确认的 `repo` 必须真参与对账——锚相等**不蕴含**仓相同。
 
-        `local_root_digest` 只覆盖 `op_subdir` 子树：fork、vendored 目录、换个仓名重开的
+        `snapshot_subtree_sha256` 只覆盖算子子树：fork、vendored 目录、换个仓名重开的
         同一份代码，都能让两个不同的仓在该子树上字节全等。所以 directive 的 `repo` 与首轮
         build receipt 的 `repo` 不等时必须 BLOCKED，否则模块 docstring 宣称的那道门不存在。
         """
         with tempfile.TemporaryDirectory() as root:
-            directive, identity = self._build(root, receipt_source={
-                "dut_source": "local_checkout", "repo": "some/other-repo",
-                "local_root_digest": ROOT_DIGEST})
+            directive, identity = self._build(
+                root, build_receipt=_vendor_build_receipt(
+                    local=True, repo="some/other-repo"))
             with self.assertRaisesRegex(
                     R.RetestContractError, "base_source_repo_mismatch"):
+                R.materialize_attempt(directive, root, identity)
+
+    def test_receipt_scope_drift_is_blocked_even_when_the_merkle_matches(self):
+        """⭐ 只比 merkle 值等于没比：范围不同的两个 merkle 本来就不可比。
+
+        这一维在旧 `dut_source` 的 `local_root_digest` 下**根本不存在**，是本轮迁移新增的
+        载重校验。收据宣称摘的是整仓、directive 说的是算子子树，两个值即便碰巧相等也不成立。
+        """
+        with tempfile.TemporaryDirectory() as root:
+            directive, identity = self._build(
+                root, build_receipt=_vendor_build_receipt(local=True, scope=""))
+            with self.assertRaisesRegex(
+                    R.RetestContractError, "base_source_identity_mismatch"):
                 R.materialize_attempt(directive, root, identity)
 
     def test_unregistered_anchor_key_blocks_within_contract_not_keyerror(self):
@@ -756,13 +870,13 @@ class LocalCheckoutMaterializeTest(unittest.TestCase):
         # 的实质见证，只断言异常类型不足以说明入口脚本收得住。
         self.assertIsInstance(caught.exception, (OSError, R.RetestContractError))
 
-    def test_local_root_digest_mismatch_is_blocked(self):
+    def test_subtree_merkle_mismatch_is_blocked(self):
         with tempfile.TemporaryDirectory() as root:
-            directive, identity = self._build(root, receipt_source={
-                "dut_source": "local_checkout", "repo": "repo",
-                "local_root_digest": "9" * 64})
+            directive, identity = self._build(
+                root, build_receipt=_vendor_build_receipt(
+                    local=True, anchor="9" * 64))
             with self.assertRaisesRegex(
-                    R.RetestContractError, "local_root_digest_mismatch"):
+                    R.RetestContractError, "base_source_identity_mismatch"):
                 R.materialize_attempt(directive, root, identity)
 
     def test_missing_base_golden_source_is_blocked_with_an_actionable_reason(self):
@@ -790,6 +904,35 @@ class LocalCheckoutMaterializeTest(unittest.TestCase):
             directive, identity = self._build(root, facts_digest="8" * 64)
             with self.assertRaisesRegex(
                     R.RetestContractError, "base_source_facts_anchor_mismatch"):
+                R.materialize_attempt(directive, root, identity)
+
+    def test_source_facts_scope_mismatch_is_blocked_before_the_merkle(self):
+        """⭐ scope 先于 merkle 比：范围对不上时两个 merkle 不可比，报因必须是 scope。
+
+        归因错就等于下一步动作错——报 `anchor_mismatch` 会让人去查字节，真实原因是
+        `fetch_source --target-dir` 与收据的 `--subtree-scope` 指的不是同一段子树。
+        """
+        with tempfile.TemporaryDirectory() as root:
+            directive, identity = self._build(root, facts_scope="other/dir")
+            with self.assertRaisesRegex(
+                    R.RetestContractError, "base_source_facts_scope_mismatch"):
+                R.materialize_attempt(directive, root, identity)
+
+    def test_source_facts_claiming_the_other_channel_is_named_as_impersonation(self):
+        """收据说本地、事实包说 PR → 必须报「来源身份被伪装」，不是普通的锚漂移。"""
+        with tempfile.TemporaryDirectory() as root:
+            directive, identity = self._build(root, write_source_facts=False)
+            R.content_address.atomic_write_json(
+                root, "source_facts.json",
+                R.content_address.make_artifact(
+                    "oprunway/source-facts/v1",
+                    {"pr": {"provenance_kind": "gitcode_pr",
+                            "head_sha": PR_HEAD,
+                            "snapshot_merkle_sha256": None,
+                            "snapshot_scope": None}}))
+            with self.assertRaisesRegex(
+                    R.RetestContractError,
+                    "base_source_facts_provenance_kind_mismatch"):
                 R.materialize_attempt(directive, root, identity)
 
     def test_local_aclnn_py_refuses_to_fall_back_to_head_sha(self):
@@ -820,8 +963,9 @@ class LocalCheckoutMaterializeTest(unittest.TestCase):
             }
             directive = _directive()
             directive["source_identity"] = {
-                "dut_source": "local_checkout", "repo": "repo",
-                "local_root_digest": ROOT_DIGEST,
+                "provenance_kind": "local_snapshot", "repo": "repo",
+                "snapshot_subtree_sha256": SUBTREE_MERKLE,
+                "snapshot_subtree_scope": SCOPE,
                 "build_receipt_sha256": SHA_B, "runner_form": "aclnn_py",
             }
             for name, document in documents.items():

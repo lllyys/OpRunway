@@ -15,8 +15,10 @@ OPRUNWAY_DONE 哨兵 / raw log hash / msprof 输出绑定（本轮不做）；�
 
 用法: python3 validate_acceptance_state.py --stage task1|task2|task3 --dir <reports 产物目录>
 只读、零硬编码。打印累积 error（非 fail-fast）+ 末行 `STATUS: PASSED|FAILED`，exit 0/1。
-（task1/task3 为 stdlib；**task2 的 A 方案重算按需惰性 import numpy + precision_policy**——numpy 缺失即 FAILED、
-不静默 skip。validator.py 仍 stdlib-only、不受本门引入 numpy 影响。）
+（task3 为 stdlib；**task2 的 A 方案重算按需惰性 import numpy + precision_policy**——numpy 缺失即 FAILED、
+不静默 skip。**task1 只在 caseset 带 `dtype_deferred` 挂账时**惰性 import `gen_cases` / `repo_adapter`
+读能力表做交叉核验（这两个模块拉 numpy）——读不出即 FAILED，绝不「读不出就当挂账有效」。
+validator.py 仍 stdlib-only、不受本门引入 numpy 影响。）
 """
 import argparse, hashlib, json, math, os, statistics, sys
 from collections import Counter
@@ -72,6 +74,117 @@ _TARGET_HW_GAP_KIND = "dtype_unsupported_on_target_hw"
 #   （终态不得为干净 pass，见 `_deferred_untested`）。别把 `dtype_deferred` 加进本集来「顺手实现」
 #   那条约束——加进来会连带把它当成 passed_with_gaps 的合法撑腰（方向①），语义就串了。
 _FINDING_GAP_KINDS = {_DTYPE_GAP_KIND, _TARGET_HW_GAP_KIND}
+# 第四类结构化 gap（既有）：`dtype_deferred` = 「**我们这条 pipeline** 测不了任务书要的这个 dtype」。
+# 它**不是**被测物侧发现（不进 `_FINDING_GAP_KINDS`、撑不起 passed_with_gaps），但同样被 Q7 覆盖门
+# 认作「已挂账」而放行 —— 所以它必须有和另外两类同等强度的反后门硬校，见 `_check_deferred_gap`。
+_DEFERRED_GAP_KIND = "dtype_deferred"
+
+# ══ `dtype_deferred` 的「能力来源」受控词表 ══════════════════════════════════════════════════
+# 自认能力缺口这句话必须**指名道姓说是哪张能力表不支持**，门才有对照物。不指名就只剩一句自报，
+# 「宣称有缺口」= 免检 —— 而这条免检通道正是 dtype 矩阵一扩张就会被大规模滥用的那个口子。
+# 三张表各管一层、语义不同、不可互相替代（与 `gen_cases.check_spec_capability` 的分层报错同源）：
+_CAP_GENERATION = "generation"   # gen_cases._NATIVE(+bfloat16)：造得出输入 / 算得出 golden / 落盘读得回
+_CAP_RUNNER = "runner"           # repo_adapter.SUPPORTED_NP_BY_FORM[runner_form]：真机现在就能收发
+_CAP_COMPUTE = "compute"         # precision_policy.SUPPORTED_COMPUTE_DTYPES：误差 metrics 复算得出来
+_CAP_SOURCES = (_CAP_GENERATION, _CAP_RUNNER, _CAP_COMPUTE)
+
+
+def _capability_supported(src, form, tag, errs):
+    """按声明的能力来源读**活表**的当前支持集 → `(dtype 名集合, 人读表名)`；读不出 → None（已记 error）。
+
+    ⚠ **每次都现读活表，绝不在本模块抄一份 dtype 清单**。抄一份就等于开了第四张表：别处给
+      `_NATIVE` / `SUPPORTED_NP_BY_FORM` / `SUPPORTED_COMPUTE_DTYPES` 补了 dtype 的那一天，
+      副本原地变成 fail-open 的旧快照 —— 而「自报不支持、表里其实支持」正是本硬校要抓的东西。
+      表变了本门自动跟着变严，这才是泛化写法。
+    ⚠ 读表要 import `gen_cases` / `repo_adapter`（两者拉 numpy）。这是**有意的**：门宁可因为
+      「能力表读不出」判 FAILED，也不接受「读不出就当挂账有效」。故 import 失败一律记 error。
+    """
+    try:
+        if src == _CAP_GENERATION:
+            import gen_cases
+            return set(gen_cases.generatable_dtypes()), "gen_cases._NATIVE(+bfloat16)"
+        if src == _CAP_RUNNER:
+            import repo_adapter
+            if form not in repo_adapter.SUPPORTED_NP_BY_FORM:
+                errs.append(f"{tag}: runner_form={form!r} 不在受控词表 "
+                            f"{sorted(repo_adapter.SUPPORTED_NP_BY_FORM)} 内 —— 真机能力表**逐 "
+                            "runner_form 各一份**，指不出是哪一支就无从交叉核验，拒该 gap")
+                return None
+            return (set(repo_adapter.supported_np(form)),
+                    f"repo_adapter.SUPPORTED_NP_BY_FORM[{form!r}]")
+        import precision_policy
+        return (set(precision_policy.SUPPORTED_COMPUTE_DTYPES),
+                "precision_policy.SUPPORTED_COMPUTE_DTYPES")
+    except Exception as ex:
+        errs.append(f"{tag}: 能力表 {src!r} 读不出（{type(ex).__name__}: {ex}）"
+                    "—— 无法交叉核验该挂账，fail-closed 拒该 gap")
+        return None
+
+
+def _check_deferred_gap(g, i, run_form, errs):
+    """`dtype_deferred` 单条挂账的「能力来源有据 + 与活表交叉核验」硬校；合法 → 返回其 dtypes，否则 []。
+
+    拒 = 该 gap **不计入已挂账集** → 对应 dtype 在 Q7 覆盖门那里仍按「静默收窄」判 → BLOCKED。
+
+    ⚠ **这条堵的是一整条免检通道**：`dtype_deferred` 此前只要 `kind` 对、`dtypes` 是个 list，
+      覆盖门就认账放行。于是任务书要的任何 dtype，只要写一行 `{"kind":"dtype_deferred",
+      "dtypes":["<不想测的>"]}` 就能从覆盖门溜过去 —— dtype 矩阵一扩张（笛卡尔铺开），
+      这条通道就是成规模的假覆盖。四道硬校缺一即拒：
+      ① **读得出**——`dtypes` 须为非空 dtype 字符串列表；读不出就不知道被 defer 掉的是什么。
+      ② **有来源**——`capability_source` ∈ `_CAP_SOURCES`，指名是**哪张能力表**不支持。
+      ③ **来源可定位**——`capability_source == "runner"` 时须带 `runner_form`（真机表逐形态各一份）；
+         其余来源**不得**带 `runner_form`（两处口径打架 = 挂账写错）。有权威对照物（本轮实跑
+         evidence envelope 记的 `runner_form`）时还须逐字相符 —— 否则「挑一支更弱的 runner 表
+         来给缺口撑腰」就是现成的绕法。
+      ④ **与表不矛盾**——自报不支持的 dtype 若在那张表的**当前**支持集里 → 伪造 deferred，拒。
+
+    ⚠ **不扣 `dtype_required`、也不扣实测集 `actual`**，与另两类 gap 的硬校刻意不同：
+      · 不扣 `dtype_required`：理由同 `_deferred_untested` 的 docstring —— 那个字段就在同一份
+        caseset 里，拿它去缩范围等于把「改自己一个字段」做成免检开关。
+      · 不扣 `actual`：Track-C（`repo_adapter.DEFERRED_NP_BY_FORM`）下**用例造得出、真机跑不了**
+        是合法形态（`cpp` 的 int16/int32 即此例），此时 caseset 里有该 dtype 的真实用例，
+        deferred 挂账**仍然成立**。按「有用例在跑就不算缺口」去拒，会把 Track-C 整条判死。
+    """
+    tag = f"task_pr_gaps[{i}]({_DEFERRED_GAP_KIND})"
+    dts = g.get("dtypes")
+    if not (isinstance(dts, list) and dts and all(isinstance(x, str) and x for x in dts)):
+        errs.append(f"{tag}: dtypes 须为非空 dtype 字符串列表（{dts!r}）"
+                    "—— 门读不出被 defer 掉的是哪些 dtype，挂账不成立")
+        return []
+    src = g.get("capability_source")
+    if src not in _CAP_SOURCES:
+        errs.append(
+            f"{tag}: capability_source={src!r} 缺失/非法（须属 {list(_CAP_SOURCES)}——"
+            f"{_CAP_GENERATION}=gen_cases 造不出输入/golden；{_CAP_RUNNER}=该 runner_form 的真机表"
+            f"收发不了（须另带 runner_form）；{_CAP_COMPUTE}=metrics 复算不了）。"
+            "挂 deferred 必须指名是**哪张能力表**不支持，门才有对照物；不指名 = 「宣称有缺口就免检」"
+            "，fail-closed 拒该 gap")
+        return []
+    bad = False
+    form = g.get("runner_form")
+    if src == _CAP_RUNNER:
+        if not (isinstance(form, str) and form):
+            errs.append(f"{tag}: capability_source={_CAP_RUNNER!r} 须带 runner_form（现 {form!r}）"
+                        "—— 真机能力表逐 runner_form 各一份，不指明哪一支就无从交叉核验")
+            return []
+        if run_form is not None and form != run_form:
+            errs.append(f"{tag}: 挂账自报 runner_form={form!r}，本轮实跑 evidence 记的是 {run_form!r}"
+                        "—— 拿另一支 runner 的能力表来给缺口撑腰（挑最弱那张表即可免检），拒")
+            bad = True
+    elif form is not None:
+        errs.append(f"{tag}: capability_source={src!r} 不读真机表，却带了 runner_form={form!r}"
+                    "（两处口径打架·挂账写错）")
+        bad = True
+    sup = _capability_supported(src, form, tag, errs)
+    if sup is None:
+        return []
+    supported, table = sup
+    contra = sorted(set(dts) & supported)
+    if contra:
+        errs.append(f"{tag}: {contra} 自报「{src} 层不支持」，但 {table} 当前**支持**它们"
+                    "—— 自报的能力缺口与能力表矛盾（伪造 deferred·免检通道），拒该 gap")
+        bad = True
+    return [] if bad else dts
 
 
 def _is_int(x):
@@ -251,10 +364,10 @@ def _check_target_hw_gap(g, i, required, actual, errs):
     return [] if bad else dts
 
 
-def _collect_dtype_gaps(cs, actual, required, errs):
+def _collect_dtype_gaps(cs, actual, required, errs, run_form=None):
     """归并 `task_pr_gaps` 里各类「已挂账」dtype，返回 (deferred 集, unsupported 集)。
 
-    · `dtype_deferred`——我们这条 pipeline 暂未测（既有语义/字段要求**原样不动**）；
+    · `dtype_deferred`——我们这条 pipeline 暂未测，逐条硬校（能力来源 + 与活表交叉核验，见上）；
     · `dtype_unsupported_by_op_def`（C4）——任务书要求但算子 op_def 根本不声明支持，逐条硬校（见上）；
     · `dtype_unsupported_on_target_hw`——op_def 声明了、但目标硬件那支 aclnn 实现没有，逐条硬校（见上）。
     后两类同属**被测物侧发现类**（`_FINDING_GAP_KINDS`）→ 并进 **unsupported 桶**（覆盖门认作已挂账、
@@ -267,10 +380,8 @@ def _collect_dtype_gaps(cs, actual, required, errs):
         if not isinstance(g, dict):
             continue                                  # 历史自由文本条目：原样忽略、不报错
         kind = g.get("kind")
-        if kind == "dtype_deferred":
-            dts = g.get("dtypes")
-            if isinstance(dts, list):
-                deferred.update(x for x in dts if isinstance(x, str))
+        if kind == _DEFERRED_GAP_KIND:
+            deferred.update(_check_deferred_gap(g, i, run_form, errs))
         elif kind == _DTYPE_GAP_KIND:
             unsupported.update(_check_unsupported_gap(g, i, required, actual, errs))
         elif kind == _TARGET_HW_GAP_KIND:
@@ -292,7 +403,7 @@ def _deferred_untested(cs, actual):
     · **扣 `actual`**——挂了 deferred、该 dtype 其实有真实用例在跑（陈旧条目）→ 不是缺口，不误伤。
     · **读不懂即拒**，两层都管：
       ① **条目层**——`dtypes` 不是「非空的非空字符串列表」时，门根本不知道被 defer 掉的是什么，
-        这种条目在 `_collect_dtype_gaps` 里会被**静默丢弃**（`isinstance(x, str)` 过滤），于是
+        这种条目**进不了挂账集**（归并侧 `_check_deferred_gap` 判它不成立、返回 `[]`），于是
         `"dtypes": "complex64"`（漏了方括号）这类写法能让整条挂账凭空蒸发。
       ② **容器层**——`task_pr_gaps` 本身不是 list 时（`"task_pr_gaps": {"kind":"dtype_deferred",…}`，
         漏了**外层**方括号），归并侧的 `isinstance(..., list)` 守卫会把**整份挂账**当 `[]`，于是
@@ -300,7 +411,10 @@ def _deferred_untested(cs, actual):
         配上「不声明 `dtype_required`」（覆盖门此时按 legacy 宽容放行），caseset 里明明白白写着
         deferred、终态却干净 pass。`gen_cases` 对 `spec["task_pr_gaps"]` 是**裸透传**
         （`spec.get("task_pr_gaps", [])`，无类型校验），手写 spec 一个手滑即可达。
-      判据在这里比 `_collect_dtype_gaps` **更严**是有意的：那边的宽松读法喂的是覆盖门，本步不改覆盖门语义。
+      **两处判据刻意各判各的、不共用一份实现**：本判据只回答「终态能不能是干净 pass」，喂的是
+      `gate_task2`（那里归并侧的 `errs` 是被丢弃的 `probe`）；`_check_deferred_gap` 回答「这条挂账
+      能不能让覆盖门放行」，喂的是 `gate_task1`。合并成一份会让「终态映射」与「覆盖门放行」互相
+      牵连——步骤 5 与步骤 9 的 mutation 校验就分不开了。
     · 非 dict 的历史自由文本条目原样跳过（与 `_collect_dtype_gaps` 同）——它压根不进挂账集，
       required 侧覆盖门本来就会判「静默收窄」BLOCKED，不需要本判据再管。
 
@@ -321,7 +435,7 @@ def _deferred_untested(cs, actual):
         # 缺席（None）**不在此列**：那是「这份 caseset 没有任何挂账」的正常形态，不是读不出。
         return [], [f"task_pr_gaps 整体={type(raw).__name__}（须为 list，现被归并侧整份丢弃）"]
     for i, g in enumerate(raw or []):
-        if not isinstance(g, dict) or g.get("kind") != "dtype_deferred":
+        if not isinstance(g, dict) or g.get("kind") != _DEFERRED_GAP_KIND:
             continue
         dts = g.get("dtypes")
         if not (isinstance(dts, list) and dts and all(isinstance(x, str) and x for x in dts)):
@@ -331,15 +445,23 @@ def _deferred_untested(cs, actual):
     return sorted(pending), malformed
 
 
-def _gate_dtype_coverage(cs, errs):
+def _gate_dtype_coverage(cs, errs, run_form=None):
     """Q7 dtype 覆盖门（gate-must-check-the-effective-object）：任务书要求的 dtype 全集 `dtype_required`
     若未被实测集 `dtype_tested` 覆盖、且 `task_pr_gaps` 无对应挂账记录 → **静默收窄=证据不完整**
-    → error（走 BLOCKED）。挂账有三类：`dtype_deferred`（我们暂未测）、C4 的
-    `dtype_unsupported_by_op_def`（算子 op_def 根本不声明支持）、`dtype_unsupported_on_target_hw`
-    （op_def 声明了、目标硬件那支实现没有）——后两类均落 passed_with_gaps。防误伤/防阻塞：
+    → error（走 BLOCKED）。挂账有三类，**三类都逐条硬校、不合规即不算挂账**：`dtype_deferred`
+    （我们暂未测·须声明能力来源并与活表交叉核验）、C4 的 `dtype_unsupported_by_op_def`
+    （算子 op_def 根本不声明支持）、`dtype_unsupported_on_target_hw`（op_def 声明了、目标硬件那支
+    实现没有）——后两类均落 passed_with_gaps。防误伤/防阻塞：
       · `dtype_required` **未声明**（legacy 未迁）→ 不 BLOCK，仅提示「覆盖门未行使」（避免一刀切炸掉现有 spec）。
       · `dtype_required` == `"needs_user"`（全集未知·信息库未接通）→ 不 BLOCK，提示「不谎报覆盖」。
-    读的是 caseset 顶层的 dtype_required/dtype_tested/task_pr_gaps（gen_cases 从 spec 透传/派生）。"""
+    读的是 caseset 顶层的 dtype_required/dtype_tested/task_pr_gaps（gen_cases 从 spec 透传/派生）。
+
+    `run_form`：本轮实跑的 runner_form（由调用方从 evidence envelope 取；取不到传 None）——
+    只用来核 `dtype_deferred` 自报的 `runner_form` 是不是本轮那一支。
+    ⚠ **剩余面（如实记账）**：evidence 缺席或 envelope 不记 `runner_form` 时（CP-B 阶段本来就还没跑，
+      非 `cpp_extension` 通路的 envelope 也不写这个键）传 None，此对账**不行使**——此时「自报一支更弱
+      的 runner 表」仍是可行绕法。要封死得让编排层把权威 `spec.runner_form` 一路带到门这里，
+      那是独立一道 caseset↔spec 透传门（同 `_deferred_untested` docstring 记的那条缺口），本步不半做。"""
     actual = _actual_dtypes(cs, errs)
     # 自报 dtype_tested 若声明 → **恒**与真实用例 dtype 集对账（不因 dtype_required 缺失而跳过——否则删 required 即同时绕过对账）。
     tested = cs.get("dtype_tested")
@@ -353,7 +475,7 @@ def _gate_dtype_coverage(cs, errs):
     required = req if isinstance(req, list) and all(isinstance(x, str) for x in req) else None
     # gap 归并+硬校**先于**下面所有 early return——不因 dtype_required 未声明/needs_user/类型非法而跳过，
     # 否则「删掉 dtype_required」即可连带绕过 C4 的伪造 gap 校验（同 codex#2 对 dtype_tested 的教训）。
-    deferred, unsupported = _collect_dtype_gaps(cs, actual, required, errs)
+    deferred, unsupported = _collect_dtype_gaps(cs, actual, required, errs, run_form=run_form)
     # 覆盖门：仅 dtype_required 声明为 list 时行使；未声明(legacy)/needs_user(全集未知) → 不 BLOCK（migration 宽容·见 doc TODO）。
     if req in (None, [], ""):
         print("  dtype_required 未声明 → dtype 覆盖门未行使（不阻塞·避免误伤 legacy spec）")
@@ -899,9 +1021,14 @@ def gate_task1(d, errs, source_facts_path=None):
                         "不存在或未标 expected.golden_status=golden_unavailable")
     cov = Counter(_case_key(c, errs) for c in cases if isinstance(c, dict))
     print(f"  用例数={len(cases)} | (dtype,shape) 覆盖={dict(cov)}")
-    _gate_dtype_coverage(cs, errs)   # Q7：任务书 dtype 全集 vs 实测覆盖（未声明→不阻塞）
-    _gate_perf_case_policy(cs, cases, errs)
     ev = _load(d, "evidence.json")  # 有 evidence（已跑）→ id 必须一一对应、不许子集
+    # 挂账自报的 runner_form 有**权威对照物**时就绑上：envelope 记的是本轮实跑的那一支。
+    # 取不到（CP-B 还没跑 / envelope 不写这个键）→ None → 该项对账不行使（剩余面见 _gate_dtype_coverage）。
+    _run_form = ev.get("runner_form") if isinstance(ev, dict) else None
+    if not (isinstance(_run_form, str) and _run_form):
+        _run_form = None
+    _gate_dtype_coverage(cs, errs, run_form=_run_form)   # Q7：任务书 dtype 全集 vs 实测覆盖（未声明→不阻塞）
+    _gate_perf_case_policy(cs, cases, errs)
     if isinstance(ev, dict):
         eids = _ids_from_evidence(ev.get("evidence"), errs)
         miss, extra = set(ids) - set(eids), set(eids) - set(ids)
@@ -1366,9 +1493,10 @@ def gate_task2(d, errs, source_facts_path=None):
     #        「我们这条 pipeline 测不了任务书要的东西」不是可放行状态 → fail-closed 判 FAILED。
     #        合法终态：`needs_review`（首选·交人核）/ `fail` / `passed_with_risk`；`passed_with_gaps`
     #        只在**另有**结构合法 finding gap 撑着时才合法（方向① 仍管着，deferred 撑不起它）。
-    #    ⚠ 本步**只改终态映射**：`_gate_dtype_coverage` 的放行逻辑（`accounted = deferred | unsupported`）
-    #        与 `_collect_dtype_gaps` 的读法**原样不动**；deferred 自身的「能力来源」硬校
-    #        （自报不支持、能力表里其实支持 → 拒该 gap）是另一步的事，别在这里顺手做。
+    #    ⚠ 本判据**只管终态映射**：`_gate_dtype_coverage` 的放行逻辑（`accounted = deferred | unsupported`）
+    #        不在这里改。deferred 自身的「能力来源」硬校（须声明是哪张能力表不支持、与活表交叉核验、
+    #        自报不支持而表里其实支持即拒该 gap）落在归并侧的 `_check_deferred_gap`，喂的是 task1 覆盖门；
+    #        两处各判各的，别合并——合并会让两步的 mutation 校验互相牵连。
     _pending_deferred, _bad_deferred = _deferred_untested(cs, _actual_dt)
     if _verdict == "pass" and _pending_deferred:
         errs.append(f"任务书要求的 dtype {_pending_deferred} 因 dtype_deferred 挂账「一条用例都没测」，"

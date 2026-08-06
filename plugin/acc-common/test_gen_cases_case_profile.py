@@ -22,6 +22,7 @@ import contextlib, copy, hashlib, io, json, os, shutil, tempfile, unittest
 
 import gen_cases as GC
 import _golden_fixture as _gf
+import _spec_fixture as SF
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # 用**真样例 spec**做字节安全 pin（任务要求：别自己编算子）。Sign 的 golden 由共享 fixture 装进临时 ops_root。
@@ -40,8 +41,13 @@ def tearDownModule():
 
 
 def _load_spec(path=_SIGN_SPEC):
-    with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+    """读样例 spec，并补上**测试侧**用例预算（`_spec_fixture`，仅当 spec 未声明时）。
+
+    ⚠ `sign.spec.json` 已于 2026-08-06 删掉历史沿用的 `case_target: 50`（缺省值的化石、无覆盖矩阵
+    依据，见该文件的 `_case_target_note`），对 gen_cases 而言不可跑。本文件的字节安全 pin 比的是
+    「声明 legacy 前后 caseset 是否逐字节相同」，两侧同预算即可，预算取多少不影响该断言。
+    """
+    return SF.load(path)
 
 
 def _with_profile(spec, profile):

@@ -41,7 +41,9 @@ agent 内部完成六步（取材 → 任务书→spec → 生成并验证 runne
 - **dtype 边界按通路分**（`repo_adapter.SUPPORTED_NP_BY_FORM`，按 `spec.runner_form` 分派）：
   · `cpp`（= `--mode new_example`，编译 per-op C++ runner 跑）→ **float32 / float16 / bfloat16** 三种
   （bf16 逻辑 = fp32-on-grid，2026-07-16 在真 a3 验收通过）；int16/int32 属 Track C **挂账集**
-  （`DEFERRED_NP_BY_FORM`）——生成期能造用例、**真机跑到仍 fail-closed**，spec 须以 `task_pr_gaps.dtype_deferred` 显式挂账。
+  （`DEFERRED_NP_BY_FORM`）——生成期能造用例、**真机跑到仍 fail-closed**，spec 须以 `task_pr_gaps.dtype_deferred` 显式挂账
+  （该条目须带 `capability_source: "runner"` + `runner_form`，门会拿活表交叉核验；⚠ 挂账只表示缺口被如实记下，
+  **不表示该 dtype 免检**，见 `skills/acc-spec/references/taskdoc-to-spec.md` §1.2a）。
   · `aclnn_py`（= `--mode aclnn_py`，通用 ctypes 两段式调 `.so`）→ fp32 / fp16 / bf16 / int64 / int32 / int16 / int8 / uint8 / bool，**无挂账项**；
   Median 的声明 dtype（fp32/fp16/bf16/int32）已全部真机跑过。
 

@@ -210,9 +210,10 @@ class GpuConsumerTest(unittest.TestCase):
         self.d = tempfile.mkdtemp()
 
     def _live_caseset(self, spec_path="testdata/gpu_demo.spec.json"):
-        import json
-        with open(spec_path, encoding="utf-8") as f:
-            spec = json.load(f)
+        # ⚠ 经 `_spec_fixture` 读：`gpu_demo.spec.json` 已于 2026-08-06 删掉历史沿用的
+        #   `case_target: 50`（gen_cases 缺省值的化石），预算由测试侧注入（夹具值、非依据）。
+        import _spec_fixture
+        spec = _spec_fixture.load(spec_path)
         wd = tempfile.mkdtemp()
         return spec, gen_cases.gen_cases(spec, wd), wd
 

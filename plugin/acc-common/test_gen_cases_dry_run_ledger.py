@@ -13,6 +13,7 @@ from unittest import mock
 
 import gen_cases as GC
 import content_address
+import _spec_fixture as SF
 
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -20,8 +21,12 @@ _SIGN_SPEC = os.path.join(_HERE, "..", "samples", "specs", "sign.spec.json")
 
 
 def _spec():
-    with open(_SIGN_SPEC, encoding="utf-8") as fh:
-        return json.load(fh)
+    """读 `sign.spec.json`，并补上**测试侧**用例预算（`_spec_fixture`，仅当 spec 未声明时）。
+
+    ⚠ 该样例已于 2026-08-06 删掉历史沿用的 `case_target: 50`（缺省值的化石、无覆盖矩阵依据），
+    对 gen_cases 而言不可跑；账本测试关心的是账本结构与确定性，预算取多少不影响这些断言。
+    """
+    return SF.load(_SIGN_SPEC)
 
 
 class DryRunLedgerTest(unittest.TestCase):
@@ -45,10 +50,10 @@ class DryRunLedgerTest(unittest.TestCase):
         self.assertRegex(first["ledger_digest"], r"^[0-9a-f]{64}$")
         self.assertEqual(first["golden_dependency"]["status"], "missing")
         changed = copy.deepcopy(spec)
-        # ⚠ 直接下标、**不许** `.get("case_target", 50)`：`sign.spec.json` 现在必带这个键
-        #   （2026-08-06 删缺省后 `_build_without_golden` 缺它就先炸了）。留个 50 兜底看着无害，
-        #   实则是把「样例 spec 掉了这个键」从当场 KeyError 降级成「悄悄拿 50 去扰动」——
-        #   本轮删的正是这种「别处再兜一个缺省」。
+        # ⚠ 直接下标、**不许** `.get("case_target", 50)`：`_spec()` 已保证这个键在（要么样例
+        #   自己声明了，要么 `_spec_fixture` 注了夹具预算）。留个 50 兜底看着无害，实则是把
+        #   「注入这一步坏了」从当场 KeyError 降级成「悄悄拿 50 去扰动」——本轮删的正是这种
+        #   「别处再兜一个缺省」。
         changed["precision"]["case_target"] = changed["precision"]["case_target"] + 1
         self.assertNotEqual(
             first["spec_binding"]["sha256"],

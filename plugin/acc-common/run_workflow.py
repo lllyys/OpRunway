@@ -3,7 +3,7 @@
 Task 1 gen_cases → Task 2 repo_adapter + validator → Task 3 perf_compare。
 stage 间只经 JSON/数据文件交接。CC/Codex/Antigravity 的薄壳只需换调用方式，核心不动。
 
-用法：python run_workflow.py <spec.json> [--mode new_example|aclnn_py|cpp_extension|mock] [--out <dir>]
+用法：python run_workflow.py <spec.json> [--mode cpp_extension|mock] [--out <dir>]
               [--source-facts <source_facts.json>]
 验收通路开跑前须先建立 spec 变更收据（`spec_change_gate.py --spec … --out … --init --reason … --by …`），
 之后每次改 spec 都要 `--update`；否则本模块在进 Task1 之前与写验收产物之前两处都会拒（§spec 变更门）。
@@ -40,9 +40,11 @@ import perf_mode  # noqa: E402
 _DEV_GRADE = "development"              # 照 catlass_adapter.run_catlass_mock
 _ACCEPTANCE_GRADE = "acceptance_candidate"   # 照 catlass_adapter.run_catlass 的真机等级
 # —— 非验收产物的注脚：**按真实原因取串** ——————————————————————————————————————
-# 病历（2026-08-06，aclnnRoll 试跑）：原先一句 mock 措辞套所有非验收产物，于是
-# `--allow-experimental-form` 下那一轮**真机**跑被标成「NPU 输出 = golden.copy()、性能是编的假数」
+# 病历（2026-08-06，aclnnRoll 试跑）：原先一句 mock 措辞套所有非验收产物，于是当时那条
+# 「非准入 runner_form 逃生阀」下的一轮**真机**跑被标成「NPU 输出 = golden.copy()、性能是编的假数」
 # ——一句凭空的假话。读报告的人会以为这轮压根没上过真机，从而错判失败归因。
+# （那个逃生阀已随通路收敛删除，见 `_RUNNER_FORM_TO_MODE` 上方；但「按真实原因取串」这条纪律
+#  与逃生阀无关，`catlass` 等真机非验收 mode 照样吃它。）
 # **措辞错方向与判定错方向一样贵**：本仓不许把假数说成真机数据，同样不许把真机数据说成假数。
 _NOTE_MOCK = (
     "NON-ACCEPTANCE (mock evidence)：mock 的「NPU 输出」= golden.copy()（精度按构造必过）、"
@@ -79,6 +81,15 @@ _REPORT_MD_FILES = ("验收报告.md", "精度失败明细.md", "性能失败明
 _RESULT_FILES = _ACCEPTANCE_FILES + _DEV_FILES + ("perf_report.json",) + _REPORT_MD_FILES
 #: 同上，只是要按通配清（T6 小 shape 仿真图，防 stale SVG 让「有图」门误过；codex H7）。
 _RESULT_GLOBS = ("perf_sim_*.svg",)
+#: **只清最终裁决**的最小集合：根裁决 + 非验收那一套同位裁决 + 它们的人读渲染。
+#: 供 `finalize_clean_acceptance` 那条「跳过状态机直接拼裁决」的旁路复用——它同样必须在读任何
+#: 东西之前把上一轮的旧裁决作废（同一个产物层 fail-open，换了个入口而已）。
+#: ⚠ **它不能直接用 `_RESULT_FILES`**：`verdict.json` / `perf_report.json` 是那条旁路的**输入**，
+#:   跟着清掉的话，本来能 finalize 的目录会被自己清成「缺件」。所以这里是 `_RESULT_FILES` 的
+#:   真子集（有断言钉着），差集恰好是那两份输入。
+#: ⚠ 同理**不含** `_RESULT_GLOBS`：`perf_sim_*.svg` 渲染的正是仍被留作输入的 `perf_report.json`，
+#:   清了等于把有效渲染删掉，而它并不是一份「裁决」。
+_FINAL_VERDICT_FILES = ("acceptance.json",) + _DEV_FILES + _REPORT_MD_FILES
 
 # —— CP-E 自证材料 staging：验收产物目录必须自带「这一轮到底验的是什么」——————————————————
 # 病历（两条，同一个根因）：
@@ -114,22 +125,52 @@ _STAGED_FILES = (_STAGED_SPEC_FILE, _STAGED_GOLDEN_FILE, _STAGED_SOURCE_FACTS_FI
 #   ① 入口门跑在 staging **之前**，那时目录里躺的是**上一轮**的副本——校它等于换了 spec 也照过；
 #   ② 出口门时副本虽是本轮的，但它由本函数自己写出，拿来当被校对象是自己给自己作证。
 #
-# ⚠ 只对**验收通路**生效（`is_acceptance`）。mock / `--allow-experimental-form` 下的
-#   cpp / aclnn_py 物理上不产 acceptance.json，改 spec 缩范围在那条路上不产生假验收结论。
+# ⚠ 只对**验收通路**生效（`is_acceptance`）。mock / catlass* 物理上不产 acceptance.json，
+#   改 spec 缩范围在那条路上不产生假验收结论。
 _SPEC_GATE_ENTRY = "① 入口门（进 Task1 之前）"
 _SPEC_GATE_EXIT = "② 出口门（写验收产物之前）"
-# 可能产验收裁决的**真机通路**集合：new_example（cpp runner v1）+ aclnn_py（ctypes-aclnn runner form，
-# torch 对标 median 见证）。两者都产真 NPU 证据（evidence_grade=acceptance_candidate）。按**能力/形态**扩，
-# 非按算子身份——aclnn_py 无 per-op runner 源、op 工程即 DUT（蓝图 §6）。
+
+# —— 本轮 spec 身份的**不可变锚** `entry_spec_sha256`（2026-08-06 审修门 High）———————————
+# 病历：上面那两道门**各自都成立、合起来仍不成立**。它们问的都是「此刻这两个值一致吗」：
+#   入口读取并 staging 了较窄的 spec A（收据也记 A，✅ 放行）；运行期间把原件换成较宽的 B，
+#   **同时**用 `spec_change_gate --update` 把收据也更新为 B；出口两次仍然只看到「当前 B 与
+#   当前收据匹配」（✅ 放行），于是**正常写出**一份实际按 A 执行的 verdict / acceptance。
+#   报告目录里 staged 的是 A，而原件与收据一起声称「B 已确认」——**同一轮长出两套身份**。
+# 缺的不是某个分支，是**没有任何东西锚「这一轮到底按哪份 spec 跑的」**。本变量就是那个锚：
+#   · 在**入口**从「已经读进内存、且已复核过就是驱动本轮执行的那份」的 spec 字节算出；
+#   · 入口门、两处出口门、以及 staged 副本，**全部**必须等于它（`spec_change_gate` 判据 ⑤/⑥
+#     + `_assert_staged_spec_matches_entry`）。
+#
+# 🔴 **它为什么只活在内存里、不落盘**（这条被问过，答案是硬的）：
+#   本门的威胁模型是「**能改盘上文件的那只手**」——它既能换 spec，也能跑 `--update` 改收据，
+#   自然也能改任何我们写下去的 `entry_spec_sha256.json`。落盘的锚会被同一只手一起改掉，
+#   **加了等于没加**，还多一份看着像证据的东西（本仓最不能容忍的「假门」）。
+#   进程内的局部变量是这只手**唯一够不着**的地方，所以锚就该待在那儿。
+# 🔴 **跨进程 / 跨阶段还成立吗**：成立，因为**根本不存在跨进程的一轮**。入口门与两处出口门
+#   都在**同一次 `run()` 调用**里，锚的生命周期 ⊇ 这一轮的全部门。cpp_extension 真机通路那个
+#   外部 driver 跑在**两次 `run_workflow` 调用之间**，而每次调用都从自己实际读到的字节重新
+#   冻结一次锚、并在自己这一轮内写完全部产物——所以每一轮各自封闭，没有需要跨进程传递锚的缝。
+#   ⚠ 本锚**不承诺**「这个报告目录从头到尾只见过一份 spec」（跨轮的话）。那是另一件事，
+#   且**做不到**：跨轮必然要落盘，落盘就回到上一段那个死结。别把它读大了。
+#
+# ⚠ 落盘的**只有被检查方**、不是锚：`<out>/spec.json` 是从入口那串字节写出去的副本，
+#   两处出口都拿它与内存里的锚重新对一次（`_assert_staged_spec_matches_entry`）。
+#   锚在内存、被检查方在盘上——方向反过来（锚在盘上）才是上面说的那个死结。
+_SPEC_ROUND_ANCHOR_NOTE = (
+    "entry_spec_sha256：本轮 spec 身份的不可变锚，只活在 run() 的进程内存里")
+# **真机通路**集合：在真 NPU 上跑、产真测量值（evidence_grade=acceptance_candidate）的那些 mode。
+# ⚠ 这是「上没上真机」的表，**不是**「能不能出裁决」的表——后者是 `_ACCEPTANCE_RUNNER_FORMS`。
+#   通路收敛后 new_example / aclnn_py 已无 spec 派得到（见 `_RUNNER_FORM_TO_MODE`），但**必须留在
+#   本表里**：`_resolve_mode` 正是靠「显式请求的 mode ∈ 本表」把 `--mode new_example` 这类
+#   显式绕行认出来并拒掉。从本表删掉它们 = 那条绕行悄悄变成一次静默的开发级跑，反而放松了门。
 _REAL_MACHINE_MODES = frozenset({"new_example", "aclnn_py", "cpp_extension"})
 _REAL_MACHINE_MODE = "new_example"      # new_example 专属预检（_ne_cfg）用；aclnn_py 有自己的 _aclnn_cfg
-_RUNNER_FORM_TO_MODE = {
-    "cpp": "new_example",
-    "aclnn_py": "aclnn_py",
-    "cpp_extension": "cpp_extension",
-}
+#: `runner_form` 的**受控词表**——真源是 `repo_adapter` 的能力表 key（那边已是词表持有者）。
+#: 在这里**不另抄一份字面量**：抄一份就等于多一处会漂的词表。
+#: ⚠ 它回答的是「这个值是不是一种已知形态」，**不回答**「能不能跑、能不能出裁决」。
+_KNOWN_RUNNER_FORMS = frozenset(repo_adapter.SUPPORTED_NP_BY_FORM)
 
-# —— 正式验收当前只走 cpp_extension ————————————————————————————————————————
+# —— 正式验收只走 cpp_extension（2026-08-06 起：**其它形态连真机入口都不再有**）——————————
 # 它是**唯一跑通完整 torch_parity 矩阵**的通路（AGENTS.md §9：Median PR6429 1152 例、
 # `gate.passed=true`）。另两条的真机成熟度未达同等水平：
 #   · `aclnn_py`  —— 历史 Median 60/60 只证明**旧 caseset**；迁到 torch_parity + cpp_extension 后
@@ -137,11 +178,32 @@ _RUNNER_FORM_TO_MODE = {
 #   · `cpp`（new_example）—— IsClose / Sign 坐实，但 dtype 闭环只到 fp32/fp16/bf16，
 #                    int 等落 `DEFERRED_NP_BY_FORM`。
 #
-# ⚠ **保留映射 + 显式白名单门**，而不是直接从 `_RUNNER_FORM_TO_MODE` 里删两项：
-#   删了报错会变成 KeyError，不说人话；白名单门能讲清「为什么堵、怎么绕」。
+# 上一轮的做法是「保留全部映射 + 白名单门 + `--allow-experimental-form` 逃生阀」：非准入形态仍能
+# 跑起来，只是产不出裁决。**本轮把逃生阀连同映射一起删掉**，理由是 aclnnRoll 试跑（2026-08-06）
+# 的实测：编排层采信一句未经验证的论断，把 `runner_form` 从 `cpp_extension` 改成 `cpp`，此后整轮
+# **物理上不可能产出裁决**，却一路跑到 1h47m 才以 BLOCKED 收场。留着「跑得起来的死路」，代价就是
+# 有人会走进去；把死路封在第一步，代价只是一条错误信息。
+#
+# ⚠ 删映射项之后**必须自己给人话**：`.get()` 拿不到映射时若直接往下走就是 KeyError / 栈追踪。
+#   出路只有一条 —— **迁到 `cpp_extension`**，不是「换个 mode 再试」（见 `_retired_form_message`）。
 # ⚠ **能力表不动**：`repo_adapter.SUPPORTED_NP_BY_FORM` / `DEFERRED_NP_BY_FORM` 的
-#   `aclnn_py` / `cpp` 条目是**能力表**不是准入表，删了将来想恢复要重新考证 dtype 支持面。
+#   `aclnn_py` / `cpp` 条目是**能力表**不是准入表——那张表回答「这条通路支持哪些 dtype」，
+#   本节回答「能不能出裁决」，两个问题不同。删了将来想恢复要重新考证 dtype 支持面。
+# ⚠ **历史产物不改判**：`cpp` / `aclnn_py` 已产出的验收产物保持原裁决与历史效力，
+#   本节只说「不再支持新建」。
 _ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})
+#: 唯一的 `runner_form` → 真机 mode 派生表。**停止准入的形态在这里没有条目 = 没有真机入口。**
+_RUNNER_FORM_TO_MODE = {
+    "cpp_extension": "cpp_extension",
+}
+#: 词表里已知、但**已停止准入**的形态。只用于把错误信息说清楚（「这是退役形态」 vs
+#: 「这个值我压根不认识」），不构成任何入口。
+_RETIRED_RUNNER_FORMS = frozenset(_KNOWN_RUNNER_FORMS) - _ACCEPTANCE_RUNNER_FORMS
+assert set(_RUNNER_FORM_TO_MODE) == set(_ACCEPTANCE_RUNNER_FORMS), (
+    "派生表与准入集必须逐字同集：有映射无准入 = 跑得起来却写不出裁决（上一轮那条死路）；"
+    "有准入无映射 = 准入了却派不出 mode。两处只改一处必然出其中一种。")
+assert _ACCEPTANCE_RUNNER_FORMS <= _KNOWN_RUNNER_FORMS, (
+    "准入形态必须落在受控词表内，否则查能力表当场 fail-closed")
 
 # spec 省略 `runner_form` 时本模块认哪一种形态。**缺省必须落在准入集内**：缺省 `cpp` 的年代，
 # 「spec 没写 runner_form」会派生出 `new_example`，正好撞上上面那道准入门——抽 spec 那层
@@ -257,7 +319,7 @@ def _acceptance_capable(mode):
     return mode in _REAL_MACHINE_MODES
 
 
-def _non_acceptance_note(mode, is_experimental_form):
+def _non_acceptance_note(mode, is_non_admitted_form):
     """非验收产物的注脚，**按真实原因取串**（三个串的病历见它们的定义处）。
 
     | 情形 | 取哪一串 | 它声称了什么 |
@@ -268,10 +330,13 @@ def _non_acceptance_note(mode, is_experimental_form):
 
     ⚠ 顺序不能反：mock 家族即使同时是非准入 form，也必须落 `_NOTE_MOCK`——
     「数据是编的」是更强、更要紧的那句话，不能被「form 不准入」盖过去。
+
+    ⚠ 通路收敛（2026-08-06）后 `_NOTE_FORM` 的可达面变窄了，但**没有消失**：退役形态的 spec
+    仍可显式走 `--mode catlass`（真机、非验收），那正是「数据是真的、form 不出裁决」这一格。
     """
     if mode in _MOCK_MODES:
         return _NOTE_MOCK
-    if is_experimental_form:
+    if is_non_admitted_form:
         return _NOTE_FORM
     return _NOTE_OTHER
 
@@ -373,44 +438,66 @@ def _runner_source_allowed(mode, source):
     return source == expected.get(mode)
 
 
-def _experimental_form_message(runner_form):
+def _retired_form_message(runner_form):
+    """停止准入的形态被要求上真机时的**人话**错误信息。
+
+    ⚠ 它必须给出**出路**，而且出路只有一条：把 spec 迁到 `cpp_extension`。
+    刻意**不写**「换个 mode 再试」——`--mode new_example` / `--mode aclnn_py` 在本轮之后一样被拒，
+    引人去试等于把人推进另一条死路（那正是 aclnnRoll 试跑烧掉 1h47m 的走法）。
+    """
+    known = "、".join(sorted(_RETIRED_RUNNER_FORMS)) or "（无）"
+    # 「没有任何准入形态派得到」的那些真机 mode——用**集合运算**算出来，别写死字面量：
+    # 这样以后准入集一变，这句提示自动跟着对。
+    dead_modes = sorted(_REAL_MACHINE_MODES - set(_RUNNER_FORM_TO_MODE.values()))
     return (
-        f"runner_form={runner_form!r} 当前不用于正式验收。\n"
+        f"spec.runner_form={runner_form!r} 已停止准入，**不再有真机入口**"
+        f"（已停止准入的形态：{known}）。\n"
         f"原因：只有 cpp_extension 跑通过完整 torch_parity 矩阵（Median PR6429 1152 例，"
-        f"gate.passed=true），cpp / aclnn_py 的真机成熟度未达同等水平（见 AGENTS.md §9）。\n"
-        f"如需局部开发验证：加 --allow-experimental-form。该模式下**不产** "
-        f"acceptance.json / verdict.json，只产带 evidence_grade=\"development\" 的非验收产物"
-        f"（{_DEV_SUMMARY_FILE} / {_DEV_VERDICT_FILE}）。")
+        f"gate.passed=true），cpp / aclnn_py 的真机成熟度未达同等水平（见 AGENTS.md §4/§9）。\n"
+        f"出路只有一条：**把 spec 迁到 runner_form=\"cpp_extension\"**（需要 torch.ops 调用桥 + "
+        f"vendor ELF 构建收据，接入成本更高，这是已知账单）。\n"
+        f"⚠ 不要改用 --mode {dead_modes} 之类再试："
+        f"那些真机 mode 同样被本门拒，换 mode 绕不出去，也不该绕。\n"
+        f"⚠ 只想本地自检用例链（非验收）→ 显式加 --mode mock；那条路物理上不产 "
+        f"acceptance.json / verdict.json，只产 {_DEV_SUMMARY_FILE} / {_DEV_VERDICT_FILE}。\n"
+        f"⚠ 已有的 {runner_form!r} 历史验收产物**保持原裁决与历史效力**——本门说的是"
+        f"「不支持新建」，不是「当时那次不算数」。")
 
 
-def _resolve_mode(spec, requested_mode, allow_experimental_form=False):
-    """据 runner_form 派生真机 mode，并拒绝显式走错真机通路 / 用未准入的通路出裁决。
+def _resolve_mode(spec, requested_mode):
+    """据 runner_form 派生真机 mode，并拒绝显式走错真机通路 / 让已停止准入的形态上真机。
 
-    mock/catlass 等显式逃生口保持原语义；这里只阻断会改变 DUT form/性能基线的两条真机通路错配，
-    外加**准入白名单**（`_ACCEPTANCE_RUNNER_FORMS`）。
+    ① **入口门**：正常调用路径在这里被拦。停止准入的形态在 `_RUNNER_FORM_TO_MODE` 里没有条目，
+    所以「派不出 mode」本身就是门——但**必须自己把人话说出来**，否则退化成 KeyError/栈追踪。
+
+    ⚠ mock / catlass 等**显式**逃生口保持原语义（本轮不动）：那些 mode 物理上就不产
+    `acceptance.json` / `verdict.json`，拿它们做本地用例链自检与 runner_form 准入无关。
+    门只落在真机通路上，正是为了不把 mock 逃生口一起堵死。
     """
     runner_form = _spec_runner_form(spec)
-    expected = _RUNNER_FORM_TO_MODE.get(runner_form)
-    if expected is None:
+    if runner_form not in _KNOWN_RUNNER_FORMS:
+        # 「我不认识这个值」（拼错 / 显式 null / 域外形态）——与「认识但已退役」分开说，
+        # 两者该做的事完全不同：前者改字，后者迁通路。
         raise SystemExit(
             f"spec.runner_form={runner_form!r} 不受支持，"
-            f"supported={sorted(_RUNNER_FORM_TO_MODE)}")
+            f"受控词表={sorted(_KNOWN_RUNNER_FORMS)}（其中可用于正式验收的只有 "
+            f"{sorted(_ACCEPTANCE_RUNNER_FORMS)}）")
+    expected = _RUNNER_FORM_TO_MODE.get(runner_form)   # 停止准入的形态：None = 没有真机入口
     # 「走错真机通路」先判：它是**输入错**，比准入问题更贴近用户当下打错的那个字。
-    if (requested_mode is not None and requested_mode in _REAL_MACHINE_MODES
-            and requested_mode != expected):
+    # ⚠ 只在**存在**期望 mode 时才谈得上「不匹配」；退役形态没有期望 mode，那种情形属于下面那道门。
+    if (expected is not None and requested_mode is not None
+            and requested_mode in _REAL_MACHINE_MODES and requested_mode != expected):
         raise SystemExit(
             f"真机 mode 与 spec.runner_form 不匹配：runner_form={runner_form!r} "
             f"必须使用 mode={expected!r}，实际请求 {requested_mode!r}。"
             "拒绝走错 DUT/基线路径。")
     effective = expected if requested_mode is None else requested_mode
-    # ① 入口门：正常调用路径在这里拦住。
-    # ⚠ **只对真机通路生效**：显式请求 mock / catlass_mock 时不拦——那些 mode 物理上就不产
-    #   acceptance.json / verdict.json，用它们做本地用例链自检与 runner_form 准入无关。
-    #   门放在 `effective` 判定之后正是为此：早一步拦就把 mock 逃生口一起堵死了。
-    if (effective in _REAL_MACHINE_MODES
-            and runner_form not in _ACCEPTANCE_RUNNER_FORMS
-            and not allow_experimental_form):
-        raise SystemExit(_experimental_form_message(runner_form))
+    # ① 入口门本体。两种命中方式：
+    #   · 省略 `--mode` → `effective is None`（派生不出来，因为退役形态没有映射）；
+    #   · 显式请求任一真机 mode → `effective in _REAL_MACHINE_MODES`。
+    # 两者都只在 `expected is None`（即 runner_form 已停止准入）时触发。
+    if (effective is None or effective in _REAL_MACHINE_MODES) and expected is None:
+        raise SystemExit(_retired_form_message(runner_form))
     return effective
 
 
@@ -430,6 +517,10 @@ def _assert_acceptance_form_allowed(spec, mode):
     `_acceptance_capable()` 认的是 mode，将来若有非 `_REAL_MACHINE_MODES` 的 mode 被判成
     可产裁决，一个 `runner_form=cpp_extension` 的 spec 就能替另一种执行形态出裁决。
     所以这里要求二者**互相蕴含**：form 准入 ∧ mode 正是该 form 派生出的那一个。
+
+    ⚠ 通路收敛后入口门已经拦得更早（退役形态连 mode 都派不出），本门看起来像冗余——**别删**。
+    它守的是「绕开 `_resolve_mode` 直接把 mode 递进来」那条路，与 `repo_adapter` 对
+    `catlass_mock` 后门的处置同一口径：只拦入口是拦不住的。
     """
     runner_form = _spec_runner_form(spec)
     if runner_form in _ACCEPTANCE_RUNNER_FORMS:
@@ -440,9 +531,13 @@ def _assert_acceptance_form_allowed(spec, mode):
             f"[出口门] 拒绝写验收产物：runner_form={runner_form!r} 派生的验收 mode 是 "
             f"{expected!r}，实际 mode={mode!r}。执行形态与 spec 声明不一致时产出的裁决，"
             f"说不清验的到底是哪条通路。")
+    if runner_form not in _KNOWN_RUNNER_FORMS:
+        raise SystemExit(
+            f"[出口门] 拒绝为 runner_form={runner_form!r}（mode={mode!r}）写验收产物："
+            f"该值不在受控词表 {sorted(_KNOWN_RUNNER_FORMS)} 内。")
     raise SystemExit(
         f"[出口门] 拒绝为 runner_form={runner_form!r}（mode={mode!r}）写验收产物。\n"
-        + _experimental_form_message(runner_form))
+        + _retired_form_message(runner_form))
 
 
 def _read_regular_file(src, what):
@@ -601,6 +696,43 @@ def _assert_staged_golden_matches_task1(spec, payloads):
             f"整轮证据的 golden 来源说不清 —— fail-closed，不产任何产物。")
 
 
+#: `_assert_staged_spec_matches_entry` 拒绝时的标签（人读报告与编排层按它检索）。
+_STAGED_SPEC_DRIFT_LABEL = "BLOCKED(staged spec 已偏离本轮入口)"
+
+
+def _assert_staged_spec_matches_entry(out_dir, entry_spec_sha256):
+    """出口门的第三格：`<out>/spec.json` 副本必须仍是**本轮入口**那串字节。
+
+    前两格（`spec_change_gate` 判据 ⑤/⑥）盯的是**原件**与**收据**，这一格盯的是**副本**。
+    三格都对齐到同一个内存里的锚 `entry_spec_sha256`，这一轮才只有**一套** spec 身份。
+
+    ⚠ **为什么副本这一格不能省**：报告目录里那份 `spec.json` 才是下游真正消费的东西——
+    CP-F 的 `base_artifacts.spec` 锚在它上面，事后单独复跑三级门读的也是它。落盘之后
+    到写 `acceptance.json` 之间，没有任何东西再看过它一眼；把它换掉，产物目录里的
+    「这一轮验的是什么」就与实际执行的对不上，而原件与收据可以一个字没动、两道门全绿。
+    这与 `_assert_staged_golden_matches_task1` 是同一类**读后复核**，同一个理由。
+
+    ⚠ 锚恒为**内存里**的 `entry_spec_sha256`，绝不是「拿副本跟原件比」：原件在运行期间
+    可以被换（那正是判据 ⑤ 在管的事），拿一个可变的东西当基准等于没有基准。
+    """
+    staged = os.path.join(out_dir, _STAGED_SPEC_FILE)
+    if os.path.islink(staged):
+        # 与 staging 侧 `O_NOFOLLOW` 同一条口径：被校对象是软链就拒绝跟随，绝不去读别处的文件。
+        raise SystemExit(
+            f"{_STAGED_SPEC_DRIFT_LABEL}：{staged!r} 是符号链接（拒绝跟随）。\n"
+            f"  → 下游（CP-F 的 base spec 锚、事后复跑的三级门）就是按这个文件名读"
+            f"「本轮验的是什么」—— fail-closed，不写验收产物。")
+    actual = spec_change_gate.bytes_digest(_read_regular_file(staged, "staged spec.json"))
+    if actual != entry_spec_sha256:
+        raise SystemExit(
+            f"{_STAGED_SPEC_DRIFT_LABEL}：{staged!r} 在 staging 之后被改写。\n"
+            f"     本轮入口读到的  {entry_spec_sha256}\n"
+            f"     副本现在是      {actual}\n"
+            f"  → 报告目录里那份「本轮验的是什么」与实际驱动执行的不是同一份"
+            f"（CP-F 的 base spec 锚就落在这份副本上）—— fail-closed，不写验收产物。\n"
+            f"  ⚠ 要按新 spec 出裁决请整轮重跑，别在本轮里改副本。")
+
+
 def _invalidate_stale_results(out_dir):
     """**任何校验之前**先让 `--out` 里上一轮的结论不可消费。返回被清掉的文件名（已排序）。
 
@@ -629,8 +761,25 @@ def _invalidate_stale_results(out_dir):
     ⚠ **也不清 `_STAGED_FILES`**：那三份是**输入**副本，清早了会把「复跑时 `--source-facts`
     指向上一轮的副本」变成假 BLOCKED。它们的清理点在读完原件之后，见 `run()` 里那段。
     """
-    victims = [n for n in _RESULT_FILES if os.path.lexists(os.path.join(out_dir, n))]
-    for pattern in _RESULT_GLOBS:
+    return invalidate_results(out_dir, _RESULT_FILES, _RESULT_GLOBS)
+
+
+def invalidate_results(out_dir, names, globs=(), error_cls=SystemExit):
+    """把 `out_dir` 下 `names`/`globs` 命中的**结论产物**不可逆地删掉；删不掉即抛 `error_cls`。
+
+    这是 `_invalidate_stale_results`（主入口，清 `_RESULT_FILES`）与
+    `finalize_clean_acceptance.finalize_directory`（旁路，只清 `_FINAL_VERDICT_FILES`）**共用**的
+    原语。抽出来的理由不是省几行：两处堵的是**同一个产物层 fail-open**，各写一份必然分叉——
+    分叉的那一天，其中一处会漏掉某个新产物名，而它长得完全像「已经清过了」。
+
+    ⚠ **清单不共用、只共用动作**：旁路的输入正是主入口眼里的结论产物
+    （`verdict.json` / `perf_report.json`），照搬 `_RESULT_FILES` 会把它自己的输入清掉。
+
+    `error_cls` 只换异常类型、不换语义：调用方各自有自己的拒绝通道
+    （主入口 `SystemExit`、旁路 `FinalizeError`），消息一字不变。
+    """
+    victims = [n for n in names if os.path.lexists(os.path.join(out_dir, n))]
+    for pattern in globs:
         victims += [os.path.basename(p)
                     for p in glob.glob(os.path.join(out_dir, pattern))]
     removed = []
@@ -640,7 +789,7 @@ def _invalidate_stale_results(out_dir):
             # 软链只删链接本身、不碰目标——正是要的（同下方清 staging 残留的口径）。
             os.remove(path)
         except OSError as ex:
-            raise SystemExit(
+            raise error_cls(
                 f"[产物隔离] 清不掉上一轮的结论产物：{path!r}：{ex}\n"
                 f"  → 清不掉就不开跑：留着它 = 本轮一旦中途拒跑，旧裁决会被下游当成这次的结果。")
         removed.append(name)
@@ -652,8 +801,7 @@ def _invalidate_stale_results(out_dir):
 
 
 def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=None,
-        gpu_baseline=None, allow_experimental_form=False, source_facts=None,
-        taskdoc_caseset=None):
+        gpu_baseline=None, source_facts=None, taskdoc_caseset=None):
     """跑一遍 Task1→2→3。
 
     `taskdoc_caseset` = 规范化任务书用例集（`taskdoc_caseset.json`）的路径，只在 spec 声明
@@ -673,6 +821,13 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     必须存在、其 `spec_sha256` 与**当场重算的 `spec_path` 字节**一致、且带非空非占位的
     `change_reason` / `confirmed_by`，否则 `BLOCKED(spec 变更未确认)`。落点见 `_SPEC_GATE_ENTRY`
     上方那段。⚠ 它证的是「spec 内容完整 + 有人显式署名声明过」，**不是**「用户确认过」。
+
+    ⚠ 门之外还有一条**本轮身份**约束：进 Task1 之前把 spec 字节冻结成进程内的
+    `entry_spec_sha256`，此后**原件、收据、`<out>/spec.json` 副本三者都必须仍等于它**
+    （否则 `BLOCKED(spec 变更未确认)` 或 `BLOCKED(staged spec 已偏离本轮入口)`）。
+    只校「当前 spec 与当前收据匹配」是不够的——把两者**一起**改到新 spec，那句话仍然成立，
+    而这一轮就同时长出两套身份。为什么锚只活在内存里、跨进程为什么仍成立，
+    见 `_SPEC_ROUND_ANCHOR_NOTE` 上方那段。
     """
     # ★ **第一件事**：让 `--out` 里上一轮的结论立刻不可消费（详见 `_invalidate_stale_results`）。
     # 位置就是要在**所有**可能早退的校验之前——下面的 `--source-facts` 必填门、staging 的可信性
@@ -701,21 +856,25 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         raise SystemExit(
             "perf.mode='measure_only' 与 --gpu-baseline 自相矛盾："
             "只测不比的口径下不消费任何外部标杆。要做 GPU 对比请改回 ratio_gated。")
-    mode = _resolve_mode(spec, mode, allow_experimental_form=allow_experimental_form)
+    mode = _resolve_mode(spec, mode)
     if mode not in repo_adapter.MODES:  # 先校验，避免 Task1 已跑再 KeyError、留半产物
         raise SystemExit(f"unknown mode {mode!r}, supported={list(repo_adapter.MODES)}")
     if (defect or perf_slow) and _acceptance_capable(mode):
         # fail-closed：注入夹具 + 验收通路 = 「往验收证据里掺人造数据」。真机 adapter 现在只是忽略它们，
         # 但「被忽略」不是保证——这里直接拒跑，别指望下游的沉默。
         raise SystemExit(f"defect / perf_slow 是测试专用注入夹具，禁止作用于验收通路 mode={mode!r}——拒绝执行。")
-    # 未准入的 runner_form 即使是真机通路，也**物理上不产验收裁决**——比照 mock 通路的口径，
+    # 未准入的 runner_form 即使跑起来了，也**物理上不产验收裁决**——比照 mock 通路的口径，
     # 只产 dev_run_summary.json / dev_precision_check.json（`evidence_grade="development"`）。
-    # 逃生阀之所以不做成「照产 acceptance.json 但打个标」：下游是**按文件名**读裁决的，
+    # 之所以不做成「照产 acceptance.json 但打个标」：下游是**按文件名**读裁决的，
     # 同名同形的产物迟早会被当成验收结论用掉。
+    # ⚠ 通路收敛（2026-08-06）后 `_resolve_mode` 已保证「真机 mode ⇒ form 准入」，所以这个
+    #   合取项对真机通路是**恒真**的——**别当冗余删掉**。它此刻仍在干活的那一格是
+    #   `--mode mock` / `--mode catlass*` 配一份退役形态的 spec：`_NOTE_FORM` 的取串、以及
+    #   「adapter 自称 acceptance_candidate 也不许升级」都还靠它。口径同出口门：多守一道不亏。
     # ⚠ 这两行**刻意提前到任何副作用之前**（原先在 makedirs 之后）：下面那道 `--source-facts`
     #   必填门是纯参数校验，必须在 `os.makedirs` / staging / Task1 之前拒，不留半个产物目录。
-    is_experimental_form = _spec_runner_form(spec) not in _ACCEPTANCE_RUNNER_FORMS
-    is_acceptance = _acceptance_capable(mode) and not is_experimental_form
+    is_non_admitted_form = _spec_runner_form(spec) not in _ACCEPTANCE_RUNNER_FORMS
+    is_acceptance = _acceptance_capable(mode) and not is_non_admitted_form
     # ★ 验收通路：`source_facts` 必填。**不给缺省、不自动去猜路径**——「自动发现」正是要被消灭的
     #   那个状态：门找不到时 PR 通路沿用旧行为不阻断，于是「收据自称 PR、事实其实是 local」无从查证。
     #   编排每次都显式指路后，「没有对照物」这件事在验收通路上不再可能悄悄发生。
@@ -732,13 +891,24 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     # 放在 `os.makedirs` 之前 = 三份原件有任何问题都不留下半个产物目录。
     staged_payloads = (_read_acceptance_inputs(spec_path, spec, source_facts)
                        if is_acceptance else None)
+    # ★★ **本轮 spec 身份就在这一行冻结**（见 `_SPEC_ROUND_ANCHOR_NOTE` 上方那段病历）。
+    # 摘要取自**上面已经读进内存的那串字节**——`_read_acceptance_inputs` 刚复核过它解析出来
+    # 就是驱动本轮执行的 `spec`，且待会儿 staging 落的也正是同一串字节。所以这一个值同时是
+    # 「实际执行的 spec」「报告目录里那份副本」「收据该记的东西」三者的**共同身份**。
+    # ⚠ **不许**改成 `spec_change_gate.spec_digest(spec_path)`：那是「此刻再去盘上读一次」，
+    #   等于把锚重新绑到一个运行期间可被换掉的东西上——本 finding 要修的正是这个。
+    entry_spec_sha256 = (spec_change_gate.bytes_digest(staged_payloads[_STAGED_SPEC_FILE])
+                         if staged_payloads is not None else None)
     # ★ spec 变更门 · ① 入口门。仍在 `os.makedirs` 之前 = 未确认的 spec 变更**不留半个产物目录**。
     # ⚠ 排在 `--source-facts` 必填门与 staging 可信性校验**之后**：那两道说的是「你这条命令
     #   少给/给错了对照物」，离用户当下敲错的那个字更近；本门说的是「这份 spec 没人签过字」。
     #   三道都在零副作用处早退，先后不改变任何不变式，只影响先看到哪句话。
     # ⚠ 传的是 `spec_path`（原件），**不是** `<out>/spec.json`——理由见 `_SPEC_GATE_ENTRY` 上方。
+    # ⚠ 入口门也吃 `expected_sha256`：它在这里把「收据签的到底是不是我们要跑的这一份」钉死
+    #   （判据 ⑥），并顺带覆盖「读字节与本门重算之间那一瞬被换掉」（判据 ⑤）。
     if is_acceptance:
-        spec_change_gate.assert_confirmed(spec_path, out_dir, _SPEC_GATE_ENTRY)
+        spec_change_gate.assert_confirmed(spec_path, out_dir, _SPEC_GATE_ENTRY,
+                                          expected_sha256=entry_spec_sha256)
     # U6a：默认已从 mock 翻为 new_example（真机通路）。mock 的「NPU 输出」= golden.copy()、精度按构造必过，
     # 默认指向它 = 默认产出一份与真验收同名同形的**伪造** acceptance.json（危险的默认）。翻真机后，缺真机
     # OPRUNWAY_* 配置时**在跑 Task1 之前**就 fail-closed 停下——绝不落半产物、绝不出「看起来对」的裁决，
@@ -762,11 +932,12 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     # 本轮非验收产物的注脚：**按真实原因取一次串**，全程复用同一个值。
     # ⚠ 它不看 `is_acceptance`，所以下面 adapter 自报 development 把 `is_acceptance` 降级之后，
     #   这句话依然成立（那种情形本来就落 `_NOTE_OTHER`，不会声称数据真假）。
-    non_acceptance_note = _non_acceptance_note(mode, is_experimental_form)
+    non_acceptance_note = _non_acceptance_note(mode, is_non_admitted_form)
     print(f"=== OpRunway workflow · {spec['op']} · mode={mode} ===")
-    if is_experimental_form:
+    if is_non_admitted_form:
         print(f"=== ⚠ runner_form={_spec_runner_form(spec)!r} 非验收准入通路"
-              f"（--allow-experimental-form）：本次不产 acceptance.json / verdict.json ===")
+              f"（已停止准入，本次只可能是显式的非验收 mode）："
+              f"本次不产 acceptance.json / verdict.json ===")
     if not is_acceptance:
         print(f"=== ⚠ {non_acceptance_note} ===")
     # 清上轮残留，防 stale 真基线被复用。`_torch_npu_baseline.json` / `perf_collect.json` / `_perf_plan.json`
@@ -869,7 +1040,14 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         _assert_acceptance_form_allowed(spec, mode)     # ② 出口门，见该函数的 ⚠
         # spec 变更门 · ② 出口门（**verdict.json 也是验收产物**，不能只守 acceptance.json）。
         # 堵的是「入口过了之后 spec 被换掉」：那样产物目录里的裁决与实际驱动执行的 spec 对不上。
-        spec_change_gate.assert_confirmed(spec_path, out_dir, _SPEC_GATE_EXIT)
+        # ⚠ **必须带 `expected_sha256`**：不带的话它只问「当前 spec 与当前收据一致吗」，
+        #   而「把 spec 换成 B 的同时也把收据 --update 成 B」正好让这句话继续成立
+        #   （本 finding 的绕法，见 `_SPEC_ROUND_ANCHOR_NOTE` 上方那张表）。
+        spec_change_gate.assert_confirmed(spec_path, out_dir, _SPEC_GATE_EXIT,
+                                          expected_sha256=entry_spec_sha256)
+        # 第三格：报告目录里那份副本也必须仍是入口那串字节（原件与收据都没动、只把副本换掉，
+        # 上一行看不见——而下游读的恰恰是副本）。
+        _assert_staged_spec_matches_entry(out_dir, entry_spec_sha256)
         _dump(verdict, "verdict.json")
     else:   # 非验收通路：精度判定照跑（管路自检要它），但**不写 verdict.json**——mock 下 out=golden.copy()，
             # 那份「pass」是构造出来的，落成验收裁决文件名就是伪证。
@@ -1137,8 +1315,11 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         if gpu_prov is not None:
             acc["gpu_baseline"] = gpu_prov
         _assert_acceptance_form_allowed(spec, mode)     # ② 出口门（acceptance.json 侧），见该函数的 ⚠
-        # spec 变更门 · ② 出口门（acceptance.json 侧）。同准入门口径：两处产物各校一次。
-        spec_change_gate.assert_confirmed(spec_path, out_dir, _SPEC_GATE_EXIT)
+        # spec 变更门 · ② 出口门（acceptance.json 侧）。同准入门口径：两处产物各校一次，
+        # 且**两次都带同一个入口锚**——Task3 与三级门跑在两次出口之间，那段时间同样够换 spec。
+        spec_change_gate.assert_confirmed(spec_path, out_dir, _SPEC_GATE_EXIT,
+                                          expected_sha256=entry_spec_sha256)
+        _assert_staged_spec_matches_entry(out_dir, entry_spec_sha256)
         final_file = _dump(acc, "acceptance.json")
         try:
             md_file = render_acceptance_markdown.write_report(out_dir)
@@ -1197,19 +1378,20 @@ def main():
     # 输出/退出码/`baseline.json` 被人截图或抄进报告的那条路（本仓最不能容忍的「看起来对」）。
     # ⚠ 别因为「加回去方便调试/演示」就恢复它们：调试与演示请走进程内 API。
     ap = argparse.ArgumentParser(
-        description="OpRunway Task1→2→3 编排。**正式验收裁决当前只由 cpp_extension 产出**"
-                    "（唯一跑通完整 torch_parity 矩阵的通路）；cpp / aclnn_py 需 "
-                    "--allow-experimental-form 才能跑，且只产 dev_run_summary.json / "
-                    "dev_precision_check.json（均标 NON-ACCEPTANCE）。mock 等通路同理。"
+        description="OpRunway Task1→2→3 编排。**验收裁决只由 cpp_extension 产出**"
+                    "（唯一跑通完整 torch_parity 矩阵的通路）；cpp / aclnn_py 已停止准入、"
+                    "连真机入口都没有了，spec 写它们即拒跑 —— 出路是把 spec 迁到 cpp_extension，"
+                    "不是换 mode 再试。mock 仅本地用例链自检、非验收。"
                     "⚠ 验收通路还须先用 spec_change_gate.py 建立 spec 变更收据"
                     "（<out>/work/spec_change_receipt.json），否则进 Task1 之前即 "
                     "BLOCKED(spec 变更未确认)。")
     ap.add_argument("spec")
     ap.add_argument("--mode", default=None, choices=list(repo_adapter.MODES),
-                    help="省略时据 spec.runner_form 派生：cpp→new_example、aclnn_py→aclnn_py、"
-                         "cpp_extension→cpp_extension（spec 未写 runner_form 时按 cpp_extension "
-                         "派生 —— 缺省跟着唯一准入形态走）。三条都是真机通路，但**只有 "
-                         "cpp_extension 准入正式验收**。mock 仅本地用例链自检、精度按构造必过、**非验收**")
+                    help="省略时据 spec.runner_form 派生，而**唯一派得出的真机 mode 是 "
+                         "cpp_extension**（spec 未写 runner_form 时也按它派生 —— 缺省跟着唯一"
+                         "准入形态走）。choices 列的是 adapter 执行器注册表，不是准入表：其中 "
+                         "new_example / aclnn_py 已无 spec 派得到它们，显式指定同样被拒；"
+                         "mock / catlass* 仅本地或开发自检、精度按构造必过、**非验收**")
     ap.add_argument("--out", default="reports/_run")
     ap.add_argument("--source-facts", default=None, metavar="PATH",
                     help="fetch_source.py 产的 source_facts.json。**验收通路必给、缺席即拒跑**："
@@ -1218,16 +1400,15 @@ def main():
                          "本次会把它按字节 staging 进 --out（连同 spec.json / golden.py），"
                          "CP-F 与事后单独复跑三级门都直接消费该副本。非验收通路（mock 等）不需要")
     ap.add_argument("--gpu-baseline", default=None, help="外部 GPU 标杆 JSON（Task3 consumer 侧对比）")
-    ap.add_argument("--allow-experimental-form", action="store_true",
-                    help="允许用非准入的 runner_form（cpp / aclnn_py）跑局部开发验证。"
-                         "该路径**物理上不产** acceptance.json / verdict.json，"
-                         "只产带 evidence_grade=\"development\" 的非验收产物")
+    # ⚠ **别把 `--allow-experimental-form` 加回来。** 它 2026-08-06 随通路收敛删除：
+    #   逃生阀放行的是「跑起来」，而 aclnnRoll 试跑实测——能跑起来的死路就会有人走进去
+    #   （编排层把 runner_form 改成 cpp、跑满 1h47m，物理上不可能产出裁决）。
+    #   要跑非准入形态做局部开发，用显式 `--mode mock`；要出裁决，把 spec 迁到 cpp_extension。
     ap.add_argument("--taskdoc-caseset", default=None,
                     help="规范化任务书用例集 taskdoc_caseset.json；"
                          "仅 spec.precision.case_source='taskdoc' 时需要（两向不匹配由 gen_cases fail-closed）")
     a = ap.parse_args()
     result = run(a.spec, a.mode, a.out, gpu_baseline=a.gpu_baseline,
-                 allow_experimental_form=a.allow_experimental_form,
                  source_facts=a.source_facts,
                  taskdoc_caseset=a.taskdoc_caseset)
     # CLI 退出码：0 干净 PASS / 2 PASSED_WITH_RISK(挂起转人工) / 1 其余（门未过/精度fail/性能未达/BLOCKED/needs_review）

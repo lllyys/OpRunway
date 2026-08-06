@@ -560,8 +560,8 @@ def _dump_facts(facts, out_dir):
 
 
 # 走目录快照时跳过的目录名：VCS 元数据 + 常见构建/缓存产物。
-# ⚠ 跳过项**必须记进 pr_facts**（`snapshot_skipped_dir_names` + `snapshot_digest_policy`），
-#   否则 merkle 覆盖了什么就成了暗知识。
+# ⚠ 跳过项**必须记进 pr_facts**（`snapshot_skipped_dir_names` + `snapshot_digest_policy`
+#   + 逐次的 `snapshot_skipped_symlinks`），否则 merkle 覆盖了什么就成了暗知识。
 _SNAPSHOT_SKIP_DIRS = frozenset({
     ".git", ".gitcode", ".github", ".hg", ".svn",
     "__pycache__", ".pytest_cache", ".mypy_cache", ".cache",
@@ -581,16 +581,28 @@ def snapshot_digest_policy():
     `source_facts.json` 的 payload，于是下游没有任何一道门拿得到、也就无从对账——
     「摘要覆盖了什么」重新变回暗知识。策略必须是**结构化 + 版本化**且随 payload 落盘，
     校验端逐字比，不接受任意排除策略。
+
+    ⚠ `excludes_symlinks` 是同一条纪律的第二半：**软链整个不入摘要**这件事此前只写在
+    `_snapshot_merkle` 的 docstring 里，产物里一个字都没有——而它是本算法**最大**的一处
+    不覆盖（把 `median.cpp` 换成 `-> /tmp/x.cpp`，编译器读到的字节完全在摘要之外）。
+    docstring 不是产物，下游拿不到，就还是暗知识。故把它升成受控策略字段。
+
+    ⚠ 加这个键**不动** `algorithm_version`：同一棵树算出的 merkle 一个 bit 都没变，
+    改的只是「披露得更完整」。但策略是逐字比的，所以**老事实包会落
+    `snapshot_contract_unsupported_digest_policy`（blocked）**——这是既有设计（见
+    `_snapshot_contract_reasons`）预期内的处置：重跑取材即可。反正 `producer.logic_sha256`
+    钉的就是本文件字节，本文件一改，老收据本来就得重取（AGENTS.md §9.4）。
     """
     return {
         "algorithm": SNAPSHOT_DIGEST_ALGORITHM,
         "algorithm_version": SNAPSHOT_DIGEST_ALGORITHM_VERSION,
         "skipped_dir_names": sorted(_SNAPSHOT_SKIP_DIRS),
+        "excludes_symlinks": True,
     }
 
 
-def _walk_snapshot(root, scope_rel=""):
-    """列出快照目录下的**普通文件**相对路径（相对 root、`/` 分隔、已排序）。
+def _scan_snapshot(root, scope_rel=""):
+    """走一遍快照 → `(普通文件相对路径, 被跳过的软链相对路径)`，两张表都相对 root、`/` 分隔、已排序。
 
     · 不跟随符号链接（目录与文件都跳过 symlink）——快照要的是「这份目录里的字节」，不是它指向别处的字节；
     · 按名跳过 `_SNAPSHOT_SKIP_DIRS`；
@@ -603,29 +615,66 @@ def _walk_snapshot(root, scope_rel=""):
     ⚠ 同理，`filenames` 里既非常规文件也非软链的条目（FIFO / socket / 设备节点）**当场抛**，
     不静默 `continue`：它们的被测语义未定义，跳过就等于摘要少覆盖一块而没人知道。
     软链仍按既有语义跳过（见 `_snapshot_merkle` 的「本算法明确不覆盖」表），此处不改，
-    改它会**改变摘要值**、作废现场全部收据。
+    改它会**改变摘要值**、作废现场全部收据——但**跳了哪些**要如实回报给调用方，
+    由取材侧记进事实包（`snapshot_skipped_symlinks`）。跳过本身是算法定义，
+    「跳过而不留痕」才是那个洞。
+
+    ⚠ **scope 逃逸 fail-closed**：`os.walk` 的 `followlinks=False` 只管「走进去之后不追软链」，
+    **顶层 `base` 是无条件 scandir 的**。于是 `root/op` 是一条指向仓外的软链时，走出来的
+    `filenames` 全是仓外的字节，而 `relpath(full, root)` 算出来的却是 `op/...` 这种**仓内模样**
+    的路径——摘要于是拿仓外字节冒充「这段子树的字节」，而外表看不出来。
+    这里用 realpath 复核「解析软链后位置没有移动」，任何一层中间目录是软链都拦得住。
+    ⚠ 这道检查**不改任何合法树的摘要值**：没有软链要解析时 realpath 是恒等的。
     """
     def _raise(exc):
         raise RuntimeError(
             f"读取目录失败，无法计算快照 merkle：{getattr(exc, 'filename', '?')}（{exc}）") from exc
 
-    base = os.path.join(root, *scope_rel.split("/")) if scope_rel else root
-    out = []
+    segs = scope_rel.split("/") if scope_rel else []
+    base = os.path.join(root, *segs) if segs else root
+    real_root = os.path.realpath(root)
+    expected = os.path.join(real_root, *segs) if segs else real_root
+    if os.path.realpath(base) != expected:
+        raise RuntimeError(
+            f"快照范围 {scope_rel or '<快照根>'} 经软链逃到了别处："
+            f"{base} → {os.path.realpath(base)}（应在 {expected}）。"
+            "遍历顶层是无条件跟随软链的，放过去等于把仓外字节摘成「这段子树的字节」，"
+            "而路径看着还是仓内的 —— fail-closed。")
+    files, symlinks = [], []
     for dirpath, dirnames, filenames in os.walk(base, followlinks=False, onerror=_raise):
-        dirnames[:] = sorted(d for d in dirnames
-                             if d not in _SNAPSHOT_SKIP_DIRS
-                             and not os.path.islink(os.path.join(dirpath, d)))
+        keep = []
+        for name in sorted(dirnames):
+            if name in _SNAPSHOT_SKIP_DIRS:
+                continue                    # 按名跳过，已由 digest policy 逐字披露
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full):
+                # 既有语义：软链目录不进（值保持，别改）——但它藏的是**一整棵**子树，留痕。
+                symlinks.append(os.path.relpath(full, root).replace(os.sep, "/"))
+                continue
+            keep.append(name)
+        dirnames[:] = keep
         for name in filenames:
             full = os.path.join(dirpath, name)
             if os.path.islink(full):
-                continue                    # 既有语义：软链不计入（值保持，别改）
+                # 既有语义：软链不计入（值保持，别改）
+                symlinks.append(os.path.relpath(full, root).replace(os.sep, "/"))
+                continue
             if not os.path.isfile(full):
                 raise RuntimeError(
                     f"快照里有既非常规文件、也非软链的条目：{full}。"
                     "FIFO/socket/设备节点的被测语义未定义，fail-closed —— 不猜、也不静默跳过"
                     "（跳过就等于摘要少覆盖一块，而外表看不出来）。")
-            out.append(os.path.relpath(full, root).replace(os.sep, "/"))
-    return sorted(out)
+            files.append(os.path.relpath(full, root).replace(os.sep, "/"))
+    return sorted(files), sorted(symlinks)
+
+
+def _walk_snapshot(root, scope_rel=""):
+    """`_scan_snapshot` 的只要文件那一半——喂给 `_snapshot_merkle` 的就是它。
+
+    单独留这个名字是因为**构建端**（`vendor_build_receipt`）与取材端必须调**同一份**遍历；
+    只需要文件表的调用点不该被迫解包两个返回值。
+    """
+    return _scan_snapshot(root, scope_rel)[0]
 
 
 def _snapshot_merkle(root, rel_paths):
@@ -639,7 +688,7 @@ def _snapshot_merkle(root, rel_paths):
 
     | 不覆盖 | 后果 |
     |---|---|
-    | **软链** | 文件/目录软链一律跳过。把 `median.cpp` 换成 `-> /tmp/x.cpp` 后，编译器跟随软链读到的字节**完全不在摘要覆盖内** |
+    | **软链** | 文件/目录软链一律跳过。把 `median.cpp` 换成 `-> /tmp/x.cpp` 后，编译器跟随软链读到的字节**完全不在摘要覆盖内**。⚠ 跳过不改（改了作废现场全部 merkle），但**跳了哪些**已由 `_scan_snapshot` 回报、落进 `pr_facts.snapshot_skipped_symlinks`：不覆盖是算法定义，静默不覆盖才是洞 |
     | **空目录** | 不计入。删掉目录里最后一个文件时 merkle 会变（少了那个文件），但空目录本身的增删不可见 |
     | **可执行位** | 不入帧。`build.sh` 644→755 改变构建行为却不改摘要 |
     | **硬链接拓扑** | 两个硬链到同一 inode 的文件与两份同内容的独立文件同值（语义等价，有意不建模） |
@@ -703,7 +752,7 @@ def scan_pr_snapshot(snapshot_dir, out_dir, target_dir=None):
     if _ov_dir and not os.path.isdir(os.path.join(root, *_ov_dir.split("/"))):
         raise ValueError(f"--target-dir 在快照里不存在：{_ov_dir}（快照根 {root}）")
 
-    paths = _walk_snapshot(root, _ov_dir or "")
+    paths, skipped_symlinks = _scan_snapshot(root, _ov_dir or "")
     if _ov_dir:
         op, tdir = _ov_op, _ov_dir
     else:
@@ -721,6 +770,12 @@ def scan_pr_snapshot(snapshot_dir, out_dir, target_dir=None):
         "snapshot_scope": _ov_dir or "",
         "snapshot_file_count": len(paths),
         "snapshot_skipped_dir_names": sorted(_SNAPSHOT_SKIP_DIRS),
+        # ⚠ **本轮实际跳掉了哪些软链**（算法定义如此，见 `_snapshot_merkle` 的不覆盖表）。
+        #   跳过不改，但不留痕就等于「摘要少覆盖一块，而外表看不出来」——一棵有 100 条软链
+        #   的树与一棵一条都没有的树，此前在事实包里长得**一模一样**。
+        #   ⚠ 这两项只是**如实记账**，本身不构成门：下游要判「这些软链要不要紧」得自己看。
+        "snapshot_skipped_symlinks": skipped_symlinks,
+        "snapshot_skipped_symlink_count": len(skipped_symlinks),
         # 结构化 + 版本化的摘要策略：随 payload 落盘，校验端逐字对账（见 `snapshot_digest_policy`）。
         "snapshot_digest_policy": snapshot_digest_policy(),
         "changed_files": paths,
@@ -737,6 +792,13 @@ def scan_pr_snapshot(snapshot_dir, out_dir, target_dir=None):
     facts["notes"].append(
         "changed_files 实为「该子树下的全部文件」，**不是 PR diff**——本形态没有 base，无法算真实改动集"
         "（中性事实，非降级）。")
+    if skipped_symlinks:
+        # 只在**非空**时写：空表时多一句噪音会把真正该看的那几行淹掉（同 completeness.warnings 口径）。
+        facts["notes"].append(
+            f"该范围内有 {len(skipped_symlinks)} 个软链被摘要**整个跳过**"
+            f"（前几个：{skipped_symlinks[:5]}）。软链不入摘要是本算法的既有定义，"
+            "但编译器**会**跟随它们读到别处的字节——那些字节不在 snapshot_merkle_sha256 的"
+            "覆盖内。全表见 snapshot_skipped_symlinks。")
     if _ov_dir:
         facts["notes"].append(f"target_dir 由 --target-dir 显式覆盖为 {tdir}（未走 _guess_op 路径探测）")
 
@@ -752,9 +814,14 @@ def scan_pr_snapshot(snapshot_dir, out_dir, target_dir=None):
     # ⚠ 取材期改动重校：merkle 在读关键文件**之前**算，两者之间有一个窗口。窗口里改了字节的话，
     #   落盘的 merkle 与落盘的 key_files 分别对应两份不同的源码——而外表看不出来。
     #   这里重算一次并要求逐字相同：不猜哪一半是真的，直接停。
-    if _snapshot_merkle(root, _walk_snapshot(root, _ov_dir or "")) != facts["snapshot_merkle_sha256"]:
+    #   ⚠ 软链台账也一起重校：软链**不进 merkle**，所以窗口里新增/删除一条软链时 merkle
+    #     纹丝不动——只比 merkle 的话，这类改动恰恰是那个查不出来的。
+    recheck_paths, recheck_symlinks = _scan_snapshot(root, _ov_dir or "")
+    if (_snapshot_merkle(root, recheck_paths) != facts["snapshot_merkle_sha256"]
+            or recheck_symlinks != skipped_symlinks):
         raise RuntimeError(
-            f"取材期间快照目录发生了改动（{root}）：重算的 snapshot_merkle_sha256 与开始时不一致。\n"
+            f"取材期间快照目录发生了改动（{root}）：重算的 snapshot_merkle_sha256 或软链台账"
+            "与开始时不一致。\n"
             "  → 落盘的 merkle 与落盘的 key_files 会分别对应两份源码，事实包不可信。"
             "请确认没有别的进程在写这个目录后重跑。")
     if not tdir:

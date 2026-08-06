@@ -20,6 +20,7 @@ import gen_cases as GC
 import precision_policy as P
 import validator as V
 import _golden_fixture as _gf
+import _spec_fixture as SF     # 4 份 elementwise 样例已无 case_target（2026-08-06 删历史沿用值）
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _MEDIAN_GOLDEN = os.path.join(_HERE, "..", "samples", "golden", "Median", "golden.py")
@@ -378,10 +379,12 @@ class SingleOutputBackwardCompatTest(unittest.TestCase):
 
     def test_existing_four_ops_dry_run(self):
         """现有 4 算子 dry-run（plan-only、不跑 golden、不需 torch）无回归——单输出通路计划稳定。"""
+        # ⚠ 经 `_spec_fixture` 读：这 4 份样例已于 2026-08-06 删掉历史沿用的 `case_target: 50`
+        #   （gen_cases 缺省值的化石、无覆盖矩阵依据），预算由测试侧注入（夹具值、非依据）。
+        #   本用例断言的是「单输出通路的 plan 不抛」，与用例数无关。
         for name, path in (("IsClose", "isclose"), ("Sign", "sign"),
                            ("Equal", "equal"), ("Neg", "neg")):
-            with open(os.path.join(_HERE, "..", "samples", "specs", f"{path}.spec.json"), encoding="utf-8") as fh:
-                spec = json.load(fh)
+            spec = SF.load(os.path.join(_HERE, "..", "samples", "specs", f"{path}.spec.json"))
             import contextlib, io
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
@@ -943,10 +946,9 @@ class UnpairedComboLedgerTest(unittest.TestCase):
 
     def test_four_ops_ledger_is_low_noise(self):
         """现有 4 算子（无归约轴）零配对应当极少——告警得可读，否则等于没有。"""
+        # ⚠ 同上：预算由 `_spec_fixture` 注入（样例已无 `case_target`，2026-08-06 删历史沿用值）。
         for path in ("isclose", "sign", "equal", "neg"):
-            with open(os.path.join(_HERE, "..", "samples", "specs", f"{path}.spec.json"),
-                      encoding="utf-8") as fh:
-                spec = json.load(fh)
+            spec = SF.load(os.path.join(_HERE, "..", "samples", "specs", f"{path}.spec.json"))
             led = self._plan_meta(spec)["unpaired_combo_classes"]
             self.assertLessEqual(led["count"], 4, f"{path} 零配对告警过多（{led['classes']}）")
 

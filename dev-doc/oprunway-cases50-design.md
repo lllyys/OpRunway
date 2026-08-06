@@ -10,6 +10,12 @@
 > ② 「**acc-spec `AskUserQuestion` 问用户**」——那条规矩物理上执行不了：`acc-spec-extractor` 的
 > `tools:` 里没有这个工具。现行口径见 `plugin/skills/acc-spec/references/taskdoc-to-spec.md`
 > 的『`case_target` 怎么定』。本文其余部分（覆盖-预算算法、白名单、1-wise 采样、数量门软化）仍然成立。
+> ③ 「**样例 specs（isclose/sign/equal/neg）补 `precision.case_target: 50`**」（§2 与文末「剩余」两处）
+> ——**这条已被反向执行**：那 4 份样例连同 `im2col` 的 50、两份 `upsample_nearest_*` 的 20，
+> 已于 2026-08-06 **全部删掉**，各留 `_case_target_note` 墓碑。理由是那些数**给不出覆盖矩阵依据**，
+> 把它们写进 spec 等于让「没人定过用例数」重新隐形，抵消删缺省的意义。⚠ 别照本节去回填任何数：
+> 那几份样例现在对 `gen_cases` **不可跑**，那是有意的状态。测试要跑用
+> `plugin/acc-common/_spec_fixture.py` 注夹具预算，**不回写 spec**。
 
 ## 决策更新 v2（2026-07-15 · 评审 REVISE 后）
 
@@ -69,7 +75,7 @@
   **✅ provenance 洞已封口（2026-07-16 续，bf16 转 tested）**：`run_on_npu.sh` 重写 provenance 机制（OPHASH 绑 `$OPS/$OPRUNWAY_OP_SRC` 真源、opp 落独立 stamp、顶层门 fail-closed：源不存在 exit3 / stamp 不符未授权 exit4 / build 失败 exit5，`OPRUNWAY_OPP_REBUILD=1` 才授权从源重建）＋ `repo_adapter._ne_cfg` 加 `op_src`(必填+安全路径校验)/`opp_rebuild`。**并查修一个致命 bug**：脚本漏 `OP_SRC="$OPRUNWAY_OP_SRC"` 短名桥接 → `$OP_SRC` 恒空 → 旧跑绑整仓 hash 且没走 `--experimental`（异源、非 A2/A3 正源）；补一行后，a3 CANN 9.0.1 容器**从 `experimental/math/is_close`(A2/A3 正源) provenance-clean 从源重建**：stamp `op_src=experimental/math/is_close`、ophash 与真源逐字节 sha256 **一致**(2c4d0ed1…)、Task2 pass(27 用例含 9 bf16、0 fail)、三门 PASSED、fail-closed 三情形(exit3/exit4/符则复用不重建)实测过 → **isclose spec bf16 `dtype_deferred`→`dtype_tested`**。487 单测全绿（a3 容器）。int32 仍 Track C。
 - **✅ Layer D 已落地**：acc-spec 三入口（SKILL/taskdoc/schema）补 `case_target` 交互（AskUserQuestion 问用户、默认 50）；gen_cases `--dry-run` 补 **`forced_total`(=强制下限 S)** + [S,pool_max] 区间行，使区间可真取（原只打 forced_special、非真 S，codex 散文门坐实并修）。
 - **✅ 测试重整已完成**：fork 重整 + 我修 codex 4 项后 **274 单测全绿**（a3 真 torch）。**✅ codex 门**（源码 + 散文各一轮）全修。
-- **剩余（非阻塞）**：其余 spec（sign/equal/neg）可补 `case_target`（现走默认 50）；真机验收（op-build 阻塞，见上）；GPU 标杆真数据（外部阻塞）。
+- **剩余（非阻塞）**：~~其余 spec（sign/equal/neg）可补 `case_target`（现走默认 50）~~ ⚠ **已作废，见文首 banner ③**：缺省 50 于 2026-08-06 删除，这几份样例的 `case_target` 也一并删掉且不许回填；真机验收（op-build 阻塞，见上）；GPU 标杆真数据（外部阻塞）。
 - **当前未 commit（本会话末步）**；本机 py3.14 无 torch → torch 相关测试在 a3 跑。
 
 ## 0. 决策回顾（原始蓝图 —— ⚠ **部分被 v2 + 评审覆盖，以 v2/实现进度为准**）
@@ -110,7 +116,9 @@
 ## 2. spec schema
 
 - 加 `spec.precision.case_target`（int，默认 50）。旧 spec 无此字段 → 默认 50（向后兼容）。
-- 样例 specs（isclose/sign/equal/neg）补 `precision.case_target: 50`。
+  ⚠ **缺省已于 2026-08-06 删除**（banner ①）：现在缺席即 fail-fast，没有「向后兼容回落」。
+- ~~样例 specs（isclose/sign/equal/neg）补 `precision.case_target: 50`。~~
+  ⚠ **已反向执行，见 banner ③**：那些 50 给不出依据，2026-08-06 全部删掉且不许回填。
 - `self_param.dtype` 保持「可跑集」；deferred 走 `dtype_deferred`（已有 Q7 语义）。
 
 ## 3. run_workflow：精度全过闸前置 + fail-fast

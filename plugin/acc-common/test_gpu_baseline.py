@@ -7,6 +7,7 @@ import json, os, shutil, tempfile, unittest
 import gen_cases
 import gpu_baseline as gb
 import _golden_fixture as _gf
+import _spec_fixture
 setUpModule = _gf.install        # golden 去引擎化：gen_cases 需 <ops_root>/<op>/golden.py（ADR 0011）
 tearDownModule = _gf.uninstall
 
@@ -29,8 +30,10 @@ class GpuBaselineTest(unittest.TestCase):
         # caseset 只读且所有测试相同：生成一次即可。旧写法每个 test 重生成约 56MB，
         # 既拖慢非真机阶段，也会在 setup 失败时遗留大量临时文件。
         cls.cases_dir = tempfile.mkdtemp()
-        with open(os.path.join(_HERE, "testdata", "gpu_demo.spec.json"), encoding="utf-8") as f:
-            spec = json.load(f)
+        # ⚠ 经 `_spec_fixture` 读：`gpu_demo.spec.json` 已于 2026-08-06 删掉历史沿用的
+        #   `case_target: 50`（gen_cases 缺省值的化石），预算由测试侧注入——它是夹具值，
+        #   这份合成 spec 的用例数不承载任何验收含义。
+        spec = _spec_fixture.load(os.path.join(_HERE, "testdata", "gpu_demo.spec.json"))
         cls.cs = gen_cases.gen_cases(spec, cls.cases_dir)
         cls.pcs = [c for c in cls.cs["cases"] if "性能" in c["dims"]]
 

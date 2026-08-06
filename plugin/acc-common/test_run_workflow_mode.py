@@ -4,10 +4,12 @@
 import ast
 import contextlib
 import copy
+import inspect
 import json
 import os
 import shutil
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -16,6 +18,7 @@ import cpp_extension_codegen
 import gen_cases
 import repo_adapter
 import run_workflow as W
+import _spec_fixture as SF
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 #: 真样例 spec（**显式**声明 `runner_form: "cpp"`）；单测里 pop 掉该键来造「省略」的场景。
@@ -25,8 +28,12 @@ _SAMPLE_GOLDEN_ROOT = os.path.join(_HERE, "..", "samples", "golden")
 
 
 def _sign_spec():
-    with open(_SIGN_SPEC, encoding="utf-8") as fh:
-        return json.load(fh)
+    """读样例 spec，并补上**测试侧**用例预算（`_spec_fixture`，仅当 spec 未声明时）。
+
+    ⚠ `sign.spec.json` 已于 2026-08-06 删掉历史沿用的 `case_target: 50`（缺省值的化石、无覆盖
+    矩阵依据）；本文件测的是 `runner_form → --mode` 派生，与用例数无关，预算只是让它跑得起来。
+    """
+    return SF.load(_SIGN_SPEC)
 
 
 @contextlib.contextmanager
@@ -235,35 +242,34 @@ def _witness_caseset():
 
 class WorkflowModeResolutionTest(unittest.TestCase):
     def test_omitted_mode_is_derived_from_runner_form(self):
-        # ⚠ 派生逻辑与**准入**是两件事：cpp / aclnn_py 仍然派生得出 mode，只是不准入正式验收。
-        #   这里带 allow_experimental_form=True 单测派生本身；准入见 AcceptanceFormGateTest。
-        self.assertEqual(W._resolve_mode({}, None, allow_experimental_form=True),
-                         "cpp_extension")
-        self.assertEqual(
-            W._resolve_mode({"runner_form": "cpp"}, None, allow_experimental_form=True),
-            "new_example")
-        self.assertEqual(
-            W._resolve_mode({"runner_form": "aclnn_py"}, None, allow_experimental_form=True),
-            "aclnn_py")
+        # 通路收敛（2026-08-06）后**只剩一条派生**：cpp_extension → cpp_extension。
+        # 键缺席吃缺省，缺省也是它。cpp / aclnn_py 已无映射（见 RetiredRunnerFormTest）。
+        self.assertEqual(W._resolve_mode({}, None), "cpp_extension")
         self.assertEqual(
             W._resolve_mode({"runner_form": "cpp_extension"}, None), "cpp_extension")
+        self.assertEqual(sorted(W._RUNNER_FORM_TO_MODE), ["cpp_extension"])
 
     def test_explicit_real_machine_mismatch_is_rejected(self):
         # 「走错真机通路」是输入错，应当比准入门更早报出来——否则用户打错 mode 时
         # 收到的是「这条通路不准入」，看不出自己 mode 打错了。
-        with self.assertRaisesRegex(SystemExit, "不匹配"):
-            W._resolve_mode({"runner_form": "aclnn_py"}, "new_example")
-        with self.assertRaisesRegex(SystemExit, "不匹配"):
-            W._resolve_mode({"runner_form": "cpp"}, "aclnn_py")
-        with self.assertRaisesRegex(SystemExit, "不匹配"):
-            W._resolve_mode({"runner_form": "cpp_extension"}, "aclnn_py")
+        # ⚠ 收敛后只有准入形态谈得上「不匹配」（退役形态压根没有期望 mode，那归退役门管）。
+        for bad in ("aclnn_py", "new_example"):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(SystemExit, "不匹配"):
+                    W._resolve_mode({"runner_form": "cpp_extension"}, bad)
 
     def test_explicit_non_acceptance_escape_remains_available(self):
-        """⭐ mock 逃生口不受准入门影响：它物理上就不产 acceptance.json，与 runner_form 准入无关。"""
+        """⭐ mock 逃生口不受准入门影响：它物理上就不产 acceptance.json，与 runner_form 准入无关。
+
+        ⚠ 退役形态也照走得通——**这不是给退役形态留后门**：mock 的「NPU 输出」= golden.copy()，
+        那条路产不出任何验收结论，堵它只会把「本地自检用例链」一起堵死。
+        """
         self.assertEqual(
             W._resolve_mode({"runner_form": "aclnn_py"}, "mock"), "mock")
         self.assertEqual(
             W._resolve_mode({"runner_form": "cpp"}, "mock"), "mock")
+        self.assertEqual(
+            W._resolve_mode({"runner_form": "cpp_extension"}, "mock"), "mock")
 
     def test_unknown_runner_form_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, "不受支持"):
@@ -284,19 +290,18 @@ class AcceptanceFormGateTest(unittest.TestCase):
                 with self.assertRaises(SystemExit) as cm:
                     W._resolve_mode({"runner_form": form}, None)
                 msg = str(cm.exception)
-                self.assertIn("不用于正式验收", msg)
-                self.assertIn("--allow-experimental-form", msg)   # 要讲清怎么绕
+                self.assertIn("已停止准入", msg)
                 self.assertIn("torch_parity", msg)                # 要讲清为什么堵
+                # 要讲清**出路**，且出路只有「迁到 cpp_extension」这一条
+                self.assertIn("cpp_extension", msg)
+                self.assertIn("迁到", msg)
 
     def test_entry_gate_lets_cpp_extension_through(self):
         self.assertEqual(W._resolve_mode({"runner_form": "cpp_extension"}, None),
                          "cpp_extension")
 
-    def test_escape_hatch_allows_run_but_never_acceptance_artifacts(self):
-        """逃生阀只放行**执行**，不放行**产验收裁决**——出口门仍然拦。"""
-        self.assertEqual(
-            W._resolve_mode({"runner_form": "aclnn_py"}, None, allow_experimental_form=True),
-            "aclnn_py")
+    def test_exit_gate_still_blocks_a_hand_fed_retired_mode(self):
+        """出口门不是冗余：绕开 `_resolve_mode` 把 mode 直接递进来，写产物前仍然被拦。"""
         with self.assertRaises(SystemExit) as cm:
             W._assert_acceptance_form_allowed({"runner_form": "aclnn_py"}, "aclnn_py")
         self.assertIn("出口门", str(cm.exception))
@@ -350,6 +355,106 @@ class AcceptanceFormGateTest(unittest.TestCase):
         import repo_adapter
         for form in ("cpp", "aclnn_py"):
             self.assertIn(form, repo_adapter.SUPPORTED_NP_BY_FORM)
+
+
+class RetiredRunnerFormTest(unittest.TestCase):
+    """⭐ 通路收敛（2026-08-06）：`cpp` / `aclnn_py` **连真机入口都没有了**，逃生阀已删。
+
+    上一轮的形态是「映射还在 + 白名单门 + `--allow-experimental-form`」——非准入形态跑得起来、
+    只是产不出裁决。aclnnRoll 试跑实测了那条设计的代价：编排层采信一句未经验证的论断把
+    `runner_form` 改成 `cpp`，之后整轮**物理上不可能产出裁决**，却跑满 1h47m 才 BLOCKED。
+    结论：能跑起来的死路就会有人走进去，所以把死路封在第一步。
+
+    本类钉三件事：**入口封死**、**错误信息给的是迁移出路而不是另一条死路**、**逃生阀不许回来**。
+    """
+
+    _RETIRED = ("cpp", "aclnn_py")
+
+    def test_derivation_table_and_admission_set_are_the_same_set(self):
+        """派生表 ≡ 准入集。两边只改一处 = 要么留下死路、要么准入了却派不出 mode。"""
+        self.assertEqual(set(W._RUNNER_FORM_TO_MODE), set(W._ACCEPTANCE_RUNNER_FORMS))
+        self.assertEqual(set(W._RUNNER_FORM_TO_MODE), {"cpp_extension"})
+
+    def test_retired_forms_are_known_vocabulary_but_have_no_mode(self):
+        """受控词表照旧（能力表 key），只是这些形态不再有映射——「不认识」与「已退役」要分得开。"""
+        for form in self._RETIRED:
+            with self.subTest(form=form):
+                self.assertIn(form, W._KNOWN_RUNNER_FORMS)
+                self.assertIn(form, W._RETIRED_RUNNER_FORMS)
+                self.assertNotIn(form, W._RUNNER_FORM_TO_MODE)
+
+    def test_omitted_mode_on_a_retired_form_is_refused(self):
+        for form in self._RETIRED:
+            with self.subTest(form=form):
+                with self.assertRaisesRegex(SystemExit, "已停止准入"):
+                    W._resolve_mode({"runner_form": form}, None)
+
+    def test_explicitly_asking_for_the_old_real_machine_mode_is_also_refused(self):
+        """⭐ 「换个 mode 再试」必须此路不通——否则删逃生阀只是把绕行换了个写法。"""
+        for form, mode in (("cpp", "new_example"), ("aclnn_py", "aclnn_py")):
+            with self.subTest(form=form, mode=mode):
+                with self.assertRaisesRegex(SystemExit, "已停止准入"):
+                    W._resolve_mode({"runner_form": form}, mode)
+        # 交叉写法（cpp 的 spec 却点名 aclnn_py 的 mode）同样不许溜过去
+        with self.assertRaisesRegex(SystemExit, "已停止准入"):
+            W._resolve_mode({"runner_form": "cpp"}, "aclnn_py")
+
+    def test_the_message_offers_migration_and_never_another_dead_end(self):
+        """错误信息是**承诺**不是注释：给出路（迁 cpp_extension），并明说别去换 mode。"""
+        msg = W._retired_form_message("cpp")
+        self.assertIn("cpp_extension", msg)
+        self.assertIn("迁到", msg)
+        self.assertIn("不要改用", msg)          # 明确劝阻「换个 mode 再试」
+        for dead in ("new_example", "aclnn_py"):
+            self.assertIn(dead, msg, "该讲清哪些 mode 也是死路")
+        # 历史不改判：不得把「不支持新建」写成「当时那次不算数」
+        self.assertIn("历史", msg)
+        # ⚠ 不许再指向任何逃生阀
+        self.assertNotIn("--allow-experimental-form", msg)
+
+    def test_no_stack_trace_instead_of_a_sentence(self):
+        """删映射项最容易踩的坑：`.get()` 拿不到之后一路 KeyError。本条钉「报的是人话」。"""
+        for form in self._RETIRED:
+            with self.subTest(form=form):
+                try:
+                    W._resolve_mode({"runner_form": form}, None)
+                except SystemExit as ex:
+                    self.assertGreater(len(str(ex)), 40, "错误信息不能只有一行光秃秃的枚举")
+                except KeyError as ex:                     # pragma: no cover - 回归时才会走到
+                    self.fail(f"退化成 KeyError 了（不说人话）：{ex!r}")
+                else:
+                    self.fail(f"runner_form={form!r} 竟然被放行了")
+
+    def test_the_escape_hatch_is_gone_from_both_the_api_and_the_cli(self):
+        """⭐ 「别把 `--allow-experimental-form` 加回来」这条钉子。
+
+        两处一起钉：`run()` 的签名（进程内调用面）与 argparse（命令行面）。
+        argparse 侧走 AST 只看 `add_argument` 的实参，所以源码里那句「别加回来」的注释
+        不会把本条弄成假绿。
+        """
+        self.assertNotIn("allow_experimental_form",
+                         inspect.signature(W.run).parameters)
+        added = []
+        for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(W.main)))):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "add_argument" and node.args
+                    and isinstance(node.args[0], ast.Constant)):
+                added.append(node.args[0].value)
+        self.assertIn("--mode", added, "AST 没扫到 add_argument —— 本条会假绿，先修扫描")
+        self.assertNotIn("--allow-experimental-form", added,
+                         "逃生阀被加回来了：它放行的是「跑起来」，而能跑起来的死路就会有人走进去")
+
+    def test_capability_tables_are_untouched(self):
+        """能力表 ≠ 准入表：退役的是「能不能出裁决」，不是「支持哪些 dtype」那份知识。"""
+        for form in self._RETIRED:
+            with self.subTest(form=form):
+                self.assertIn(form, repo_adapter.SUPPORTED_NP_BY_FORM)
+                self.assertIn(form, repo_adapter.DEFERRED_NP_BY_FORM)
+
+    def test_the_executor_registry_is_not_the_admission_table(self):
+        """`repo_adapter.MODES` 保留全部执行器 —— 门守在 runner_form 层，不靠藏执行器。"""
+        for mode in ("mock", "new_example"):
+            self.assertIn(mode, repo_adapter.MODES)
 
 
 class NonAcceptanceNoteTest(unittest.TestCase):
@@ -677,6 +782,9 @@ class RunnerFormDefaultSingleSourceTest(unittest.TestCase):
         self.assertEqual(plan["namespace"], manifest["namespace"])
 
 
+#: **历史**映射（收敛前 `_RUNNER_FORM_TO_MODE` 长这样），只作测试夹具用：
+#: 「出口门对着退役形态该派生出的那个 mode 也要拦」这类断言需要它。
+#: ⚠ 别把它读成生产表——生产表只剩 `{"cpp_extension": "cpp_extension"}`。
 _MODE_OF = {"cpp": "new_example", "aclnn_py": "aclnn_py", "cpp_extension": "cpp_extension"}
 
 

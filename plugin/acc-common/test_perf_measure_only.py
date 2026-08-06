@@ -24,6 +24,7 @@ import perf_mode as PM
 import run_workflow as W
 import validate_acceptance_state as G
 import _golden_fixture as _gf
+import _spec_fixture as SF     # 样例 spec 已无 case_target（2026-08-06 删历史沿用值）→ 测试侧注预算
 
 setUpModule = _gf.install
 tearDownModule = _gf.uninstall
@@ -433,8 +434,10 @@ class FailClosedSelfProofTest(unittest.TestCase):
 
 # ————————————————— 端到端：run_workflow 终态 + 缺省档零影响 —————————————————
 def _spec_file(d, name, mutate):
-    with open(os.path.join(_SPECS, "isclose.spec.json"), encoding="utf-8") as f:
-        spec = json.load(f)
+    # ⚠ 经 `_spec_fixture` 读：`isclose.spec.json` 已于 2026-08-06 删掉历史沿用的
+    #   `case_target: 50`（gen_cases 缺省值的化石、无覆盖矩阵依据），预算由测试侧注入。
+    #   本文件测的是 perf_mode 档位，与用例数无关。
+    spec = SF.load(os.path.join(_SPECS, "isclose.spec.json"))
     mutate(spec)
     path = os.path.join(d, name)
     with open(path, "w", encoding="utf-8") as f:
@@ -524,7 +527,10 @@ class RatioGatedUnaffectedTest(unittest.TestCase):
 
     def test_default_branch_still_produces_ratio_report(self):
         out = os.path.join(self.d, "out")
-        res = W.run(os.path.join(_SPECS, "isclose.spec.json"), mode="mock", out_dir=out)
+        # ⚠ 物化副本再喂路径：仓内样例已无 `case_target`（2026-08-06 删历史沿用的 50），
+        #   预算是**夹具值**；本用例断言的是缺省 perf 档的报告形状，与用例数无关。
+        res = W.run(SF.materialize(os.path.join(_SPECS, "isclose.spec.json"), self.d),
+                    mode="mock", out_dir=out)
         self.assertEqual(res["exit_code"], 0)
         with open(os.path.join(out, "perf_report.json"), encoding="utf-8") as f:
             perf = json.load(f)
