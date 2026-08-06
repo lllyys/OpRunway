@@ -150,9 +150,12 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   收据与当前 spec/完整 caseset、见证数据字节、golden 源码、PR/build/toolkit/SoC/符号及执行逻辑的绑定；未过、未留证或漂移一律停在 CP-C（详见 `skills/acceptance-workflow` CP-C）。
   ⚠ **`spec.runner_form == "cpp_extension"`（✅ 当前唯一准入形态，也是未声明时的缺省）的信任门是 vendor 构建收据**：DUT **不是** Extension 调用桥本身，而是被测来源
   构建出的那个 vendor `.so`——Extension 自己 build/load 成功，**一个字都没说被加载的 `.so` 是哪来的**。所以真机上构建 vendor 时
-  必须跑 `make_vendor_build_receipt.py` 产 `vendor_build_receipt`（真跑 build、`build.returncode` 实测、`--library` 须被这次
-  build 改写过、本地通路另核构建前后两次「构建树 ↔ 指纹树」），**不许人手写**——手写的 `returncode: 0` 是自报，而这份收据
-  存在的全部意义就是机器可核。产不出来就停在 CP-C，不带着说不清来源的 ELF 上真机；产出后经
+  必须用 `vendor_build_receipt.py` 产 `vendor_build_receipt`，**两个子命令、顺序固定**：`snapshot-digest`（**build 之前**
+  取源码树整树/子树 merkle，落中间凭据）→ `emit`（**真跑** `--build-argv`，`build.returncode` 是实测值、
+  记 `build.returncode_source="measured"`；`--library` 须被这次 build 改写过），**不许人手写**——手写的
+  `returncode: 0` 是自报，而这份收据存在的全部意义就是机器可核。
+  ⚠ 产出侧**不读 `source_facts`**：收据里的 merkle 由 `--source-root` 现算，与取材锚的对账要到三级门才做，
+  所以「收据产出来了」**不等于**「源码身份已对账」。产不出来就停在 CP-C，不带着说不清来源的 ELF 上真机；产出后经
   `OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT` 传给 CP-D 的 driver（详见 `skills/acceptance-workflow` CP-C）。
 - **CP-D 真机跑测（一次原子）**：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`
   ⚠ **`--source-facts` 在验收通路上必给、缺席直接拒跑**（在 `os.makedirs` / staging / Task1 之前就拒，不留半个产物目录）：三级门要拿它与

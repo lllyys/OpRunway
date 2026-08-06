@@ -794,6 +794,13 @@ python3 plugin/acc-common/fetch_source.py \
 - 产出方 `make_vendor_build_receipt.py` **已接进编排** —— `plugin/skills/acceptance-workflow/SKILL.md`
   的 CP-C 明写要跑它，产物 `vendor-build-receipt.json` 由 CP-D 经
   `OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT` 消费；
+
+  > ⚠ **2026-08-06 订正（本节以上为当时状态的历史档，不重写）**：合入 `origin/main` 后，
+  > 本地来源统一到 main 的 `local_snapshot`，`make_vendor_build_receipt.py` **已删除**，
+  > 由 `plugin/acc-common/vendor_build_receipt.py` 的两个子命令取代
+  > （`snapshot-digest` 在 build 前取树 → `emit` 真跑 `--build-argv`）。
+  > 「已接进编排」这句**现在指的是新脚本**；照旧稿去找那个文件会扑空。
+  > 三道随旧脚本一起消失的门见 `AGENTS.md` §9.4 与 task #27。
 - **`--source-facts` 在验收通路上已是必填**（`run_workflow.py` 缺席即拒跑，且开跑前先按三级门自己的
   `_find_source_facts` 验一遍再落副本）。所以「`source_facts` 缺席 + 收据自称 `pull_request`」那条
   伪装面，在**走 `run_workflow` 的验收路径上已经封住**；剩下的只是单独手工调

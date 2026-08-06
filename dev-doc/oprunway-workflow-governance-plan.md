@@ -120,7 +120,7 @@ A.4 要的那道门与它**不重叠**，别因为「已经有 `--source-facts` 
 （`run_workflow.py:548` 起的 `if mode == "aclnn_py"` 分支），**同样不在准入通路上**。
 
 准入通路（`cpp_extension`）上会被反复重试的确定性环节是另一组：
-`make_vendor_build_receipt.py`（真跑 build，产不出即停 CP-C）→
+`vendor_build_receipt.py snapshot-digest` + `emit`（后者真跑 build，产不出即停 CP-C）→
 `cpp_extension_adapter._validate_vendor_build_receipt`（`cpp_extension_adapter.py:281` 起）→
 三级门里的 build receipt / 来源锚对账（`validate_acceptance_state.py:789` 起）。它们**同样**可以被连试 N 次然后放弃转去写报告。
 

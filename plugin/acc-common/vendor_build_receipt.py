@@ -27,7 +27,8 @@ adapter / 三级门）分辨不出。这正是本仓最贵的两类缺陷之一�
    :func:`produce_receipt` 只接受 `run_build` 的返回值，**拿不到就产不出收据**。
    CLI 的 `--returncode` 降级成**可选的期望值断言**（与实测不符即拒），不再是被记录的那个值。
    ⚠ 刻意**不留**「只记录不执行」的逃生阀：这条路径上不存在任何需要自报退出码的合法场景，
-   留一个下来就等于把刚堵上的洞重新开成一个开关（口径同 `make_vendor_build_receipt.py`）。
+   留一个下来就等于把刚堵上的洞重新开成一个开关（这条口径承自 `make_vendor_build_receipt.py`——
+   曾经并存的另一份产出方，**已在合并中删除**，本模块现在是唯一产出方）。
 2. **校验侧**：收据新增 `build.returncode_source`。受控值只有 `measured`；显式写
    `declared` 当场点名拒。**整个键缺席**只表示「本字段引入之前产的老收据」，归一化摘要里
    落 `unproven_legacy`——它与 `measured` 在下游**长得不一样**，读收据的人一眼分得出
@@ -36,7 +37,15 @@ adapter / 三级门）分辨不出。这正是本仓最贵的两类缺陷之一�
 ⚠ **如实记账**：`run_build` 另核「`--library` 在构建窗口内是否被改写」（构建前后
 `(mtime_ns, size, sha256)` 三项全同即 fail-closed），堵的是「`-- /usr/bin/true` 配一个
 预先存在的 CANN 内置 `.so`」。但它只证明**该文件在窗口内被改写过**，**不证明它由那条 argv
-产出**——一次 `touch` 就能骗过。这一条与 `make_vendor_build_receipt.py` 的已知缺口相同。
+产出**——一次 `touch` 就能骗过。这条缺口是已知的（已删除的 `make_vendor_build_receipt.py` 同款，
+两份实现当年各自独立踩到同一处边界）。
+
+⚠ **本模块不读 `source_facts`**，如实记账：收据里的两个 merkle 由 `--source-root` 现算，
+「build 的这棵树是不是 CP-A 取材的那棵」由**三级门**（`validate_acceptance_state` 比
+`snapshot_subtree_sha256` ↔ `source_facts.pr.snapshot_merkle_sha256`）来判，本模块**不当场核**。
+已删除的 `make_vendor_build_receipt.py` 曾在构建前 + 构建后各做一次这项对账并 fail-closed；
+该能力随它一并消失，现在指错 `--source-root` 要跑到验收门才 BLOCK，而**构建后**那次
+（「这次 build 有没有把被测子树改掉」）已无任何门在做，只剩 `build.tree_state_at_emit` 供人工读。
 
 ⚠ **merkle 必须在 build 之前算**：build 会往源码树里写产物，事后再摘就摘到了「源码 + 产物」，
 与 CP-A 记的那份字节永远对不上（实测：build 后整树 merkle 变成另一个值）。
@@ -653,7 +662,7 @@ def run_build(build_argv, build_cwd, library_path):
     路径产出的收据长得和实测的一模一样，等于「宣称有门其实没门」。本函数是收据里
     `build.returncode` 的**唯一**来源，`returncode_source` 因此恒为 `measured`。
 
-    另核一条 `make_vendor_build_receipt.py` 同款的绑定：**`library_path` 必须真的被这次
+    另核一条绑定（口径同已删除的 `make_vendor_build_receipt.py`）：**`library_path` 必须真的被这次
     构建改写过**——构建前后各取一次 `(mtime_ns, size, sha256)`，三项全同即 fail-closed。
     堵的是「argv 写 `/usr/bin/true`、`--library` 指一个预先存在的 CANN 内置 `.so`」。
     ⚠ 它只证明**该文件在构建窗口内被改写过**，不证明它由这条 argv 产出（`touch` 即可骗过）。

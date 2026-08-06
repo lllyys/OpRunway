@@ -45,7 +45,7 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 | `aclnn_preflight.json` | CP-C0（primary；`aclnn_py` / `cpp_extension`） | 被测来源的 header 与 spec call variants/slots 静态对账完成（两条通路对账**完全同形**，只有绑的锚不同） | 续跑总是重算；cpp_extension 必须转入独立 build/load trust gate，不得复用 ctypes receipt |
 | `oprunway_<op>_runner.cpp`（自检证据满足） | CP-C（`gen_runner`→`verify_runner`） | runner 已锚定 example；由 acc-runner-dev 的 runner 自检证据满足/不满足纪律保证（当前**非代码强制 sidecar 硬门、待补**） | 自检证据不满足则停在 CP-C、不上真机 |
 | `work/aclnn_harness_trust.json`（仅 `aclnn_py`） | CP-C（`acc-verify-rootcause:verify_aclnn_harness`） | 内容寻址收据为 `TRUSTED_FOR_CP_D`，且绑定当前完整 caseset/spec/preflight、见证输入+golden+输出真实字节、golden 源码、PR/build/toolkit/SoC/符号与执行逻辑 | `run_workflow` 在正式 adapter 前按当前环境强制复核；缺失、字节漂移或执行来源漂移均停在 CP-C |
-| `vendor-build-receipt.json`（仅 `cpp_extension`；文件名由 `--out` 自定，此处按真机实测的命名） | CP-C（真机上跑 `make_vendor_build_receipt.py`，见 CP-C） | 被测 vendor `.so` 的出身已锁成机器可核的三段链：来源锚 → build argv/实测 returncode → 装出来的那个 ELF 的字节 | **不按「文件在就复用」判**：重跑 build、换 `--library`、被测源码字节变了，都必须重产一份；CP-D 由 `OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT` 消费 |
+| `vendor-build-receipt.json`（仅 `cpp_extension`；文件名由 `--out` 自定，此处按真机实测的命名） | CP-C（真机上跑 `vendor_build_receipt.py` 的两个子命令：`snapshot-digest`（build 前）→ `emit`（真跑 build），见 CP-C） | 被测 vendor `.so` 的出身已锁成机器可核的三段链：来源锚 → build argv/实测 returncode → 装出来的那个 ELF 的字节 | **不按「文件在就复用」判**：重跑 build、换 `--library`、被测源码字节变了，都必须重产一份；CP-D 由 `OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT` 消费 |
 | `evidence.json` / `verdict.json` / `baseline.json`（仅有基线时）/ `perf_report.json` / `acceptance.json`（真机裁决） | CP-D；mode 据 form 派生：cpp→new_example、aclnn_py→aclnn_py、cpp_extension→cpp_extension（⚠ **只有 `cpp_extension` 走得到这一格**，另两条被准入门拦，见 CP-A） | 真机一次原子跑完、门已校 | `acceptance.json.overall` 非 PASS 且非门问题 → 派 `rootcause` |
 | 中文验收报告 | CP-E（primary） | 报告已出 | — |
 
@@ -299,39 +299,64 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
     Extension 只是 `torch.ops` 调用桥，**DUT 是被测来源构建出的那个 vendor `.so`**（`libcust_opapi.so`）。而
     **Extension 自己 build/load 成功，一个字都没说被加载的那个 `.so` 是哪来的**——加载一份 CANN 内置的同名实现
     也能跑完全套、报告照样漂亮。所以在真机上构建 vendor 时**必须**用产出方落一份 `vendor_build_receipt`，
-    **不许人手写**（手写的话 `build.returncode: 0` 就是一句自报，而这份收据存在的全部意义就是「机器可核」）：
+    **不许人手写**（手写的话 `build.returncode: 0` 就是一句自报，而这份收据存在的全部意义就是「机器可核」）。
+    产出方是 `vendor_build_receipt.py` 的**两个子命令，顺序固定**：
     ```bash
-    python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/make_vendor_build_receipt.py \
-      --source-facts <CP-A 产的 source_facts.json> \
-      --build-cwd    <被测仓根> \
-      --library      <安装后真机实际会加载的那个 .so，须绝对路径> \
-      --out          <vendor-build-receipt.json> \
-      [--repo <覆盖派生的仓名>] [--allow-repo-override] \
-      -- <build 命令；build 与 install 要写进同一条>
+    # ① build 之前跑：对源码树取整树 + 子树两个 merkle，落成中间凭据（纯读，不改任何东西）
+    python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/vendor_build_receipt.py \
+      snapshot-digest \
+      --source-root   <被测源码树根> \
+      --subtree-scope <算子子目录；与 CP-A fetch_source --target-dir 逐字同一段> \
+      --out           <snapshot-digest.json>
+
+    # …此处不要自己先 build 一遍。下面这条命令**自己执行**构建命令并记实测退出码…
+
+    # ② emit：真跑 --build-argv，据凭据 + 实测事实产收据
+    python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/vendor_build_receipt.py \
+      emit \
+      --declared-source-form <git_pr|local_source> \
+      --snapshot-digest      <snapshot-digest.json> \
+      [--pr-head-sha <40 位 head SHA>] \
+      [--repo <仓标识；本地通路缺省取凭据里的源码树根>] \
+      --build-cwd <构建命令的工作目录> \
+      --library   <安装后真机实际会加载的那个 .so，须绝对路径> \
+      --build-argv=bash --build-argv=-c \
+      --build-argv='./build.sh … && ./build_out/*.run --install-path=…' \
+      --out <vendor-build-receipt.json>
     ```
-    `--out` 落点自定（上面的文件名按真机实测那次写）。它**真跑 build、有副作用**，属真机动作，须沿用用户对本轮真机
+    `--snapshot-digest` 与 `--pr-head-sha` **恰给一个**：本地源码通路给前者，PR 通路给后者（PR 通路整条 ① 不跑）。
+    `--out` 落点自定（上面的文件名按真机实测那次写）。第二步**真跑 build、有副作用**，属真机动作，须沿用用户对本轮真机
     实验的明确确认（与 `verify_aclnn_harness` 同一口径），**不是 primary inline 那类只读脚本**。四条别绕：
-    - **它真跑 build**，`build.returncode` 是 `subprocess.run` 的实测值；**没有「只记录不执行」模式**——消费者只校
-      `build.returncode == 0`，分辨不出这个 0 是实跑来的还是调用方自报的，加一个自报模式就是「宣称有门其实没门」。
-      build 与 install 是两步时**并进同一条命令**（`bash -c "./build.sh … && ./build_out/*.run --install-path=…"`），
-      否则脚本去 hash `--library` 时它还不存在。
-      ⚠⚠ **如实记账（已知缺口，别读成已封）**：同一份收据 schema 另有一条 `vendor_build_receipt.py emit --returncode <n>`
-      的生产路径，那条**不执行任何 build**、`returncode` 完全是调用方自报，而收据里**记不下**「这个 0 是实跑还是自报」。
-      所以「有一份 `status=VERIFIED` 的收据」当前**不等于**「build 真跑过」。要机器可核就只能走上面这个产出方；
-      看到来路不明的收据，按「未经实测」对待，不得据它宣称构建证据完整。
+    - **`emit` 自己执行 `--build-argv`**，`build.returncode` 是 `subprocess.run` 的实测值，收据另记
+      `build.returncode_source="measured"`；**没有「只记录不执行」模式**——消费者只校 `build.returncode == 0`，
+      没有这个区分位就分辨不出这个 0 是实跑来的还是调用方自报的，那就是「宣称有门其实没门」。
+      `--returncode` 只剩一个**可选的期望值断言**（与实测不符即拒、不产收据），不是被记录的那个值。
+      build 与 install 是两步时**并进同一条命令**（如上 `--build-argv=bash --build-argv=-c --build-argv='… && …'`），
+      否则脚本去 hash `--library` 时它还不存在，当场 fail-closed。
+      ⚠ `--build-argv` 的实参几乎全以 `-` 开头（`--pkg` / `-j16`），**必须写等号形式** `--build-argv=--pkg`，
+      分开写会被 argparse 当成另一个选项、当场报 `expected one argument`。
+      ⚠ **老收据如实记账**：`build.returncode_source` **整个键缺席**只表示本字段引入之前产的收据，校验兼容放行，
+      但归一化摘要落 `unproven_legacy`。看到这类收据按「未经实测」对待，不得据它宣称构建证据完整。
     - **`--library` 必须真的被这次 build 改写过**：构建前后各取一次 `(mtime_ns, size, sha256)`，三项全同即 fail-closed。
-      堵的是「`-- /usr/bin/true` 配一个预先存在的 CANN 内置 `.so`」那条伪造路径。
+      堵的是「`--build-argv=/usr/bin/true` 配一个预先存在的 CANN 内置 `.so`」那条伪造路径。
       ⚠ 这只证明「该文件在构建窗口内被改写过」，**不证明它由那条 argv 产出**——一次 `touch` 就能骗过，如实记账。
-    - **本地快照通路（`declared_source_form=local_source`）额外核「构建树 ↔ 快照 merkle」，构建前 + 构建后各一次**：
-      前者答「什么字节进了这次构建」，后者答「这次构建有没有把被测子树改掉」。两次都用取材端**同一份**摘要算法
-      （`vendor_build_receipt.take_snapshot_digest`，别另写第二份——两端算法不同必然永远 `SNAPSHOT_MISMATCH`）。
-      ⚠ 构建后那次**没有任何下游会替你做**——编排只在 CP-A 取材跑一次 `fetch_source`，三级门读的是同一份落盘
-      `source_facts.json`，拿旧锚比旧锚永远相等；收据里的 `build.tree_state_at_emit` 只是**记下来**，没有门在比它。
-      ⚠ **PR 通路两次都做不了**（`source_facts` 里没有本地快照路径、没有对照物），脚本会明说，别以为它也校了。
-    - **脚本末尾打印的 `repo` 字符串，起草 CP-F directive 时逐字抄**进 `source_identity.repo`：那边是字节比对、
-      **不归一化**，带不带 host、大小写、`.git` 后缀差一个字符就 BLOCK。`--repo` 与派生值**不逐字相同**时
-      （含压根派生不出来的情形），收据记 `repo_source="operator"`，如实标注这一项是操作者自报、不是从事实派生的；
-      与派生值不一致还要显式加 `--allow-repo-override`，否则脚本拒（不许静默把「事实」换成「自报」）。
+    - **两个 merkle 必须在 build 之前取**（这就是 ① 单独成一步的全部理由）：build 会往源码树里写产物，事后再摘就摘到
+      「源码 + 产物」，与 CP-A 记的那份字节永远对不上。`emit` **不会自己去摘源码树**，只接受 ① 落下的凭据——
+      错法被结构性杜绝。它会在产出时刻另摘一次当前树，记进 `build.tree_state_at_emit`（含 `matches_pre_build`）。
+      ⚠ **`tree_state_at_emit` 只是记下来，没有任何门在比它**：`matches_pre_build=false` 是**预期常态**（build 往树里写了产物），
+      「这次 build 有没有把被测**子树**改掉」当前无人裁决，要判就人工读那两个值。
+      ⚠ **产出侧不读 `source_facts`**，收据里的 merkle 由 `--source-root` 现算。所以「你 build 的这棵树是不是 CP-A 取材的那棵」
+      **不在 CP-C 当场核**，推迟到三级门（`validate_acceptance_state` 比收据 `snapshot_subtree_sha256` ↔
+      `source_facts.pr.snapshot_merkle_sha256`，两侧 scope 须逐字相同）。⚠ 连带后果：`--source-root` / `--subtree-scope`
+      指错时**要跑到验收门才 BLOCK**，真机时间已经花掉了——**别把「收据产出来了」读成「源码身份已对账」**。
+      ⚠ PR 通路（`--pr-head-sha`）没有快照凭据，本条整段不适用。
+    - **收据里的 `source.repo`，起草 CP-F directive 时逐字抄**进 `source_identity.repo`：那边是字节比对、
+      **不归一化**，带不带 host、大小写、`.git` 后缀差一个字符就 BLOCK。本地通路不给 `--repo` 时，它就是源码树根的绝对路径。
+      ⚠ **`--repo` 是操作者自报值、产出侧没有守卫，如实记账**：产出方既不校它带不带 URL 用户凭据，
+      也不写 `repo_source`，于是报告「源码仓」那一行恒落**强度未知**档——别把它当成从事实派生的仓名
+      （渲染层的「缺席 = 强度未知」兜底还在，不会被洗成事实派生）。带凭据的仓名也**只在渲染层**被拦
+      （`render_acceptance_markdown` 改印一条 ⚠、不回显原值），代价是整节「来源与 provenance」不渲染；
+      **CP-C 产收据时不会因此停**，别指望它替你把凭据挡在收据外面。
     产出的收据由 CP-D 经 `OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT` 传给 driver（见 CP-D）。
   - **张量 ACL 存储格式由 `spec.aclnn_tensor_format` 声明**（受控两值，缺席 = 历史默认）：
     - 缺席 → `torch_npu_rank_default`，沿用 op-plugin 的 `ConvertType` **按 rank 猜格式**
@@ -353,9 +378,9 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   - `runner_form == "cpp"`（cpp runner v1）：自检证据满足的 `oprunway_<op>_runner.cpp` + 构建路径配置。
   - **`runner_form == "aclnn_py"`：无 runner 源可产**，产出 =「**仓形态/接口签名检查结果** + **harness 真机自检证据**」两项（下条）。
   - **`runner_form == "cpp_extension"`：同样无手写 runner 源**，产出 = codegen 的官方 bundle + invocation plan +
-    `make_vendor_build_receipt.py` 产的 `vendor-build-receipt.json`（上条）。
+    `vendor_build_receipt.py`（`snapshot-digest` → `emit` 两步）产的 `vendor-build-receipt.json`（上条）。
 - **⚠ `aclnn_py` 的 harness 信任门（等价于 cpp 的 verify_runner，不可跳过）**：dispatch `acc-verify-rootcause`，`dispatch_mode=verify_aclnn_harness`。先在目标真机用正式 `gen_cases.py <spec> <report-root>/work <report-root>/caseset.json` 生成完整 caseset/golden，再运行 `verify_aclnn_harness.py --root <report-root> --spec ops/<Op>/<Op>.spec.json --caseset caseset.json --preflight work/aclnn_preflight.json --out work/aclnn_harness_trust.json`。脚本按**能力与契约**确定性取小见证集：本轮每种实际输入 dtype、每个签名/slot 变体；接口实际含标量 attr / 多输出时各至少一例；逐输出与绑定的 CPU `torch` golden 按既定 policy 对拍。它会执行真机 build/install（来源完全一致且显式允许时可按 provenance 复用）、部署清目录、NPU exec/readback，属于有副作用真机动作，须沿用用户对本轮真机实验的明确确认。成功只产 `TRUSTED_FOR_CP_D` 的内容寻址收据，`acceptance_verdict=null`，**不删正式 case、不改精度标准、不跑/改性能采集**。收据绑定见证输入/golden/输出真实字节、golden 源码、PR/build/toolkit/SoC/符号与执行逻辑；`run_workflow` 在正式 adapter 前用本轮重新生成的完整 caseset及当前环境强制复核，缺失/漂移/对拍失败 → 停在 CP-C。
-- **路由**：**runner/harness 自检证据不满足 → 停在 CP-C、不上正式 Task2/Task3**；scope gate BLOCKED → 停在 CP-C，出程序结论（转 P3 / 需扩 adapter），不进 CP-D。`cpp_extension` 的 `vendor_build_receipt` **产不出来**（build 退出码非 0 / `--library` 在构建窗口内没被动过 / 本地快照通路的构建树与快照 merkle 对不上 / 派生的仓名带用户凭据）同样**停在 CP-C**，不带着一份说不清来源的 ELF 上真机。harness 收据是代码硬门，不是 agent 口头纪律；算子 acceptance 裁决仍只来自 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py`（ADR 0007）。
+- **路由**：**runner/harness 自检证据不满足 → 停在 CP-C、不上正式 Task2/Task3**；scope gate BLOCKED → 停在 CP-C，出程序结论（转 P3 / 需扩 adapter），不进 CP-D。`cpp_extension` 的 `vendor_build_receipt` **产不出来**（build 退出码非 0 / `--library` 在构建窗口内没被动过 / `snapshot-digest` 凭据缺失或摘要算法已漂 / 构建后 ELF 状态与磁盘现状对不上）同样**停在 CP-C**，不带着一份说不清来源的 ELF 上真机。⚠ 「构建树 ↔ 取材锚对不上」**不在**这份清单里——产出方不读 `source_facts`，那条要到三级门才 BLOCK（见上）。harness 收据是代码硬门，不是 agent 口头纪律；算子 acceptance 裁决仍只来自 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py`（ADR 0007）。
 
 ### CP-D 真机跑测（一次原子；dispatch）
 
@@ -367,8 +392,9 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   - **`<mode>` 据 `spec.runner_form` 定**：cpp runner v1 → `--mode new_example`（`OPRUNWAY_*` 见 repo_adapter._ne_cfg）；`runner_form==aclnn_py`（torch 对标）→ `--mode aclnn_py`（`OPRUNWAY_ACLNN_OPS_DIR`（ops 仓 checkout 根）/`OPRUNWAY_ACLNN_OP_SUBDIR`/`OPRUNWAY_ACLNN_VENDOR_DIR`/`OPRUNWAY_ACLNN_VENDOR_NAME`/`OPRUNWAY_ACLNN_BASE_REPO`/`OPRUNWAY_ACLNN_PR_REF`/`OPRUNWAY_ACLNN_SOC` 等见 aclnn_adapter._aclnn_cfg，且须 `OPRUNWAY_ACLNN_REAL=1` + 人工确认 build install 写**用户态 vendor 目录**（`<vendor_dir>/vendors/<vendor_name>_nn`，⚠ `_nn` 后缀由 install 自动追加）、绝不写共享 opp）。
   - **新增 form 优先规则**：`runner_form==cpp_extension` 时，上句旧 aclnn_py 描述不适用，须走 `--mode cpp_extension`，显式设置 `OPRUNWAY_CPP_EXTENSION_REAL=1` 与 `OPRUNWAY_CPP_EXTENSION_DRIVER_JSON`；driver argv 只进本地机器 profile，不写 tracked 文件。
     另须把 CP-C 产的 vendor 收据传进来：`OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT=<vendor-build-receipt.json>` 与
-    `OPRUNWAY_CPP_EXTENSION_VENDOR_LIBRARY=<收据 artifact.library_path>`（两者都要**绝对路径**；`make_vendor_build_receipt.py`
-    跑完会把这两行 `export` 直接打印出来，照抄即可）。收据缺席或指向别的 ELF → driver fail-closed，不是「少个可选参数」。
+    `OPRUNWAY_CPP_EXTENSION_VENDOR_LIBRARY=<收据 artifact.library_path>`（两者都要**绝对路径**；前者就是 `emit --out`
+    那个路径，后者从收据里的 `artifact.library_path` 逐字取——⚠ `emit` 只把整份收据 JSON 打到 stdout，
+    **没有现成的两行 `export` 可抄**）。收据缺席或指向别的 ELF → driver fail-closed，不是「少个可选参数」。
   - **PR 身份钉死**：build receipt 和最终报告必须记录本轮远端 PR ref 解出的**精确 head SHA**。本地工作树里
     即使存在该 head 的后继修复提交，也只能作为诊断线索；未经用户把被测版本改为该提交，禁止用后继 build
     替换指定 PR 的失败证据，更不能把后继 PASS 写成原 PR PASS。
@@ -426,19 +452,21 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
     python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/vendor_build_receipt.py \
       snapshot-digest --source-root <源码树根> --subtree-scope <算子子目录> --out <凭据路径>
 
-    # …在这中间做真机 build…
+    # ⚠ 中间**不要**自己先 build 一遍：下面这条 emit 会亲自执行 --build-argv 并记实测退出码。
 
     # --snapshot-digest 与 --pr-head-sha **恰给一个**：本地源码通路给前者，PR 通路给后者。
     python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/vendor_build_receipt.py \
       emit --declared-source-form <git_pr|local_source> \
       --snapshot-digest <凭据路径> \
       --library <被加载的 vendor ELF 绝对路径> --build-cwd <构建工作目录> \
-      --returncode 0 --build-argv=--pkg --build-argv=-j16 --out <收据路径>
+      --build-argv=./build.sh --build-argv=--pkg --build-argv=-j16 --out <收据路径>
     ```
 
-    `emit` **不会自己去摘源码树**，只接受 `snapshot-digest` 在 build 前落下的那份凭据——这是
+    `emit` **真跑** `--build-argv` 那条命令，`build.returncode` 是 `subprocess.run` 的实测值、
+    另记 `build.returncode_source="measured"`；`--returncode` 只是**可选的期望值断言**（与实测不符即拒），
+    没有「只记录不执行」模式。它**不会自己去摘源码树**，只接受 `snapshot-digest` 在 build 前落下的那份凭据——这是
     结构性地杜绝上面那个错法；同时把**产出时刻**的树摘要记进 `build.tree_state_at_emit`，
-    「build 到底动没动源码树」因此是可审的。⚠ `--build-argv` 的实参几乎全以 `-` 开头
+    「build 到底动没动源码树」因此**可审、但无门在比**（详见 CP-C）。⚠ `--build-argv` 的实参几乎全以 `-` 开头
     （`--pkg` / `-j16`），**必须写等号形式** `--build-argv=--pkg`，分开写会被 argparse 当成另一个选项。
     收据按 `source.provenance_kind` 分流校验（`gitcode_pr` 绑 40 位 head + 非空 repo；
     `local_snapshot` 绑 `pr_head_sha=null` + 仓根 + 子目录 scope + 两个 merkle + 构建 argv +

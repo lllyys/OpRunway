@@ -230,7 +230,8 @@ def validate_build_receipt_source(source, *, expected_kind, where="build_receipt
     if not isinstance(repo, str) or not repo.strip():
         raise DutSourceError(f"{where}.repo 必填（两条通路都要）")
     # ⚠ `repo` 带用户凭据一律拒，**四处消费者一起拒**（adapter / 三级门 / CP-F / 渲染器都调本函数，
-    #   产出方 `make_vendor_build_receipt.self_check` 也调，且它在 `atomic_write` 之前）。
+    #   ⚠ 曾经在 `atomic_write` 之前也调本函数的那个产出方 `make_vendor_build_receipt.self_check`
+    #   **已随脚本一并删除**，现产出方 `vendor_build_receipt.py` 不做这道凭据检查——读侧因此更要拦。）
     #   只在产出方拦是不够的：老收据、外部构建驱动产的收据、手改的收据都从读侧进来，
     #   而渲染器会把 `repo` 原样印进**人读的验收报告**——那才是凭据真正泄漏出去的那一步。
     # ⚠ **刻意不回显原值**：报错会进终端与 CI 日志，回显就是再泄漏一次。

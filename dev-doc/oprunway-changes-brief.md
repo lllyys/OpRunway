@@ -2,6 +2,27 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-06 · 合并收尾：清掉指向已删脚本的编排引用
+
+合并删掉 `make_vendor_build_receipt.py` 之后，**编排文档还在指名要跑它**——照着做直接失败。
+共 10 处（我先点了 6 处，执行时又扫出 4 处）。两处尤其坑：
+
+- `SKILL.md:370` 让人照抄旧脚本打印的两行 `export`，而新 `emit` **只打整份收据 JSON**，
+  改成从 `artifact.library_path` 逐字取；
+- 一段 `--build-argv=--pkg --build-argv=-j16` **缺程序名**，照抄根本跑不起来。
+
+`AGENTS.md:688` 原写「`emit` 是自报值、真跑那条路径是 `make_vendor_build_receipt.py`」——
+**已反写**：`emit` 现在 `import subprocess` 真跑 build，区分位是 `build.returncode_source`
+（只收 `measured`，`declared` 当场拒，键缺席 = 老收据 → 摘要落 `unproven_legacy`）。
+
+⚠ **`build.tree_state_at_emit` 全仓没有任何消费者**——文档写成「只记录、没有门在比」，
+`matches_pre_build=false` 是预期常态，别当成漂移告警。
+
+⚠ **合并中丢掉三项能力**（已写进 `AGENTS.md` §9.4 + task #27），其中一项最值得记：
+旧产出方在**构建后**还比一次「这次 build 有没有把被测子树改掉」，
+**现在没有任何门在做这件事**。跨端对账整体推迟到三级门——所以 `--source-root` 指错了，
+要跑到验收门才 BLOCK，真机时间已经花掉。
+
 ## 2026-08-06 · 两条本地来源实现合并：留 `local_snapshot`，删 `local_checkout`
 
 两个 worktree 各自把「本地代码作为一等被测来源」做了一遍，合并时必须二选一。

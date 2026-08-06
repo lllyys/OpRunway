@@ -87,10 +87,15 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 - `check_golden.py`：golden 来源契约；
 - `preflight_aclnn.py`：`aclnn_py` 静态接口预检；
 - `verify_aclnn_harness.py`：真机 harness 信任门；
-- `make_vendor_build_receipt.py`：`cpp_extension` 的 vendor `.so` 出身证明（`vendor_build_receipt`）**产出方**；**真跑 build**、`build.returncode` 是 `subprocess.run` 实测值，**没有「只记录不执行」模式**；`--library` 须被这次 build 改写过，本地来源另核构建前后两次「构建树 ↔ 指纹树」。
-  ⚠ 另一条生产路径 `vendor_build_receipt.py` 的 CLI（`snapshot-digest` + `emit`）**自己不执行 build**，
-  `emit --returncode` 是**调用方自报值、不构成机器可核证据**；两条路径产的收据在 schema 上目前分不出来，
-  引用时必须点名是哪条产的（记账见 §9.4）；
+- `vendor_build_receipt.py` 的 CLI（同一个文件，见上）：`cpp_extension` 的 vendor `.so` 出身证明**产出方**，
+  **两个子命令、顺序固定**——`snapshot-digest`（**build 之前**取源码树的整树/子树 merkle，落中间凭据）→
+  `emit`（**真跑** `--build-argv` 那条构建命令，据凭据 + 实测事实产收据）。`build.returncode` 是
+  `subprocess.run` 实测值、另记 `build.returncode_source="measured"`，**没有「只记录不执行」模式**
+  （`--returncode` 只剩可选的期望值断言，与实测不符即拒）；`--library` 须被这次 build 改写过
+  （构建前后 `(mtime_ns, size, sha256)` 三项全同即 fail-closed）；产出时另摘一次树落 `build.tree_state_at_emit`。
+  ⚠ **产出侧不读 `source_facts`**：收据里的两个 merkle 由 `--source-root` 现算，与取材锚的对账推迟到三级门
+  （比 `snapshot_subtree_sha256` ↔ `source_facts.pr.snapshot_merkle_sha256`）。故「收据产出来了」**不等于**
+  「build 的那棵树就是 CP-A 取材的那棵」；`build.tree_state_at_emit` 也**只是记录、没有门在比**（记账见 §9.4）；
 - `validate_preparation_state.py`：非真机复用收据；
 - `validate_acceptance_state.py`：验收证据复核门；含 build receipt ↔ source_facts 的来源锚对账（`--source-facts` 可显式指路）。
 
@@ -683,13 +688,28 @@ CP-F 的 `directive.source_identity.repo` ↔ 首轮 build receipt `runner_bindi
 `cpp` / `aclnn_py` 的首轮 `execution_provenance` 里根本没有仓名字段，那两条通路的 `repo` 目前只作人工记账。
 写法不一致（同一个仓写成 `ops-nn` 与 `cann/ops-nn`）会直接 BLOCK。
 
-⚠ **`vendor_build_receipt.py` CLI 的 `emit --returncode` 是自报值，不是实测值。** 该脚本
-全文没有 `import subprocess`、从不执行 build，而 schema 目前**记不下**「这个 0 是实跑还是自报」，
-消费者分辨不出。真跑那条路径是 `make_vendor_build_receipt.py`（§3）。
-在两者可机读区分之前（拟加 `build.evidence ∈ {executed, self_reported}` 并由验收门要求 `executed`），
-**引用任何一份收据都必须点名它由哪条路径产出**，不许含糊过去。
-⚠ 落地这条会让现存那些用 `emit` 产的现场收据在验收门上变红、需要重产——这是**待用户拍板的成本项**，
-本轮只记账、未落地。
+✅ **`vendor_build_receipt.py emit` 现在真跑 build，上一版仓规那条「自报值」记账已作废。**
+脚本自己 `import subprocess` 执行 `--build-argv`，收据记的是实测 `returncode`；`--returncode`
+降级成可选的期望值断言。schema 也补上了区分位 `build.returncode_source`：只接受 `measured`，
+显式写 `declared` 当场点名拒；**整个键缺席**才表示本字段引入前的老收据，归一化摘要落 `unproven_legacy`。
+⚠ 老收据仍能过校验（兼容），但摘要**不替它宣称实测过**——引用一份没有 `returncode_source` 的收据时
+按「未经实测」对待，不得据它宣称构建证据完整。⚠ 上一版仓规写的「真跑那条路径是
+`make_vendor_build_receipt.py`」同样作废：那个脚本在本轮合并中**已删除**，产出方只剩这一个。
+
+⚠ **随那个脚本一起丢掉的三项能力，如实记账（不是待办清单，是当前缺口）：**
+
+1. **产出侧的「构建树 ↔ 指纹树」对账没了。** 旧产出方收 `--source-facts`，在**构建前**与**构建后**
+   各拿 `--build-cwd` 下重算的摘要与取材锚比一次，不等即 fail-closed。现产出方压根不读 `source_facts`，
+   跨端对账整体推迟到三级门——**指错 `--source-root` / `--subtree-scope` 要跑到验收门才 BLOCK**，
+   真机时间已经花掉；而**构建后**那次（「这次 build 有没有把被测子树改掉」）现在**没有任何门在做**，
+   只剩 `build.tree_state_at_emit` 里两个值供人工读；
+2. **`--repo` 的凭据守卫与强度记账没了。** 旧产出方拒绝带 URL userinfo 的仓名、要求与派生值不符时
+   显式加 `--allow-repo-override`、并记 `repo_source="operator"`。现产出方对 `--repo` 无任何校验、
+   也不写 `repo_source`，于是报告「源码仓」那一行恒落**强度未知**档（`render_acceptance_markdown` 的
+   「缺席 = 强度未知」兜底还在，不会被洗成事实派生；带凭据的仓名也仍被渲染层拦下、不回显原值，
+   但那只是**渲染时**少一节，CP-C 产收据不会因此停）；
+3. **`--out` 的 build 前可写性/同名前置检查没了。** 现在收据在 build 之后才写，`--out` 打错一个字
+   或目录只读 = 一次几十分钟的 build 白跑。
 
 ⚠ **`--target-dir` 收窄 scope 后，落在 scope 之外的 `aclnn_headers` 会不会被静默漏掉，本轮没有核到。**
 `_key_file_candidates(paths, tdir)` 只从 scope 内的 `paths` 里挑；scope 外的头文件是「消失」还是
