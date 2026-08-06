@@ -45,7 +45,11 @@ class DryRunLedgerTest(unittest.TestCase):
         self.assertRegex(first["ledger_digest"], r"^[0-9a-f]{64}$")
         self.assertEqual(first["golden_dependency"]["status"], "missing")
         changed = copy.deepcopy(spec)
-        changed["precision"]["case_target"] = changed["precision"].get("case_target", 50) + 1
+        # ⚠ 直接下标、**不许** `.get("case_target", 50)`：`sign.spec.json` 现在必带这个键
+        #   （2026-08-06 删缺省后 `_build_without_golden` 缺它就先炸了）。留个 50 兜底看着无害，
+        #   实则是把「样例 spec 掉了这个键」从当场 KeyError 降级成「悄悄拿 50 去扰动」——
+        #   本轮删的正是这种「别处再兜一个缺省」。
+        changed["precision"]["case_target"] = changed["precision"]["case_target"] + 1
         self.assertNotEqual(
             first["spec_binding"]["sha256"],
             self._build_without_golden(changed)["spec_binding"]["sha256"],

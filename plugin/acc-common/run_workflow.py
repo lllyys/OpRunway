@@ -5,6 +5,8 @@ stage 间只经 JSON/数据文件交接。CC/Codex/Antigravity 的薄壳只需�
 
 用法：python run_workflow.py <spec.json> [--mode new_example|aclnn_py|cpp_extension|mock] [--out <dir>]
               [--source-facts <source_facts.json>]
+验收通路开跑前须先建立 spec 变更收据（`spec_change_gate.py --spec … --out … --init --reason … --by …`），
+之后每次改 spec 都要 `--update`；否则本模块在进 Task1 之前与写验收产物之前两处都会拒（§spec 变更门）。
 省略 `--mode` 时据 `spec.runner_form` 唯一派生；
 `mock` 仅本地用例链自检、精度按构造必过、非验收。
 `--source-facts` 在**验收通路上必给**（缺席即拒跑）：它是三级门与 vendor build receipt 对账的
@@ -29,6 +31,7 @@ import repro_artifacts  # noqa: E402
 import render_acceptance_markdown  # noqa: E402
 import validate_acceptance_state as gate  # noqa: E402
 import source_facts_lookup  # noqa: E402
+import spec_change_gate  # noqa: E402
 import verify_aclnn_harness  # noqa: E402
 import content_address  # noqa: E402
 import perf_mode  # noqa: E402
@@ -96,6 +99,25 @@ _STAGED_SOURCE_FACTS_FILE = "source_facts.json"
 #: 三份 staging 产物的**统一清单**：开跑时先整体清掉上轮残留，再按本轮重新落。
 #: ⚠ 清理与落盘必须共用这一份清单——漏清一项，下一轮就可能拿上一轮的 spec/golden 去配本轮的 caseset。
 _STAGED_FILES = (_STAGED_SPEC_FILE, _STAGED_GOLDEN_FILE, _STAGED_SOURCE_FACTS_FILE)
+
+# —— spec 变更门（`spec_change_gate`）在本模块的两处落点 ————————————————————————————
+# 病历（2026-08-06，aclnnRoll 试跑）：跑不通就改 spec——`runner_form` 从 cpp_extension 改成 cpp、
+# dtype 从任务书要求的 8 种砍到 3 种。门都工作正常、没出假 PASS，塌的是**没有任何机制记录
+# 「spec 被改过、谁改的、为什么」**，于是「范围一路缩小」全程没有一处产物提到过。
+#
+# ⚠ 落点与准入门（`_ACCEPTANCE_RUNNER_FORMS`）**逐字同口径**：入口 + 出口两道，
+#   理由也一样——只拦入口拦不住（`repo_adapter.py` 那个 `catlass_mock` 后门就是现成先例）。
+#   出口那道跑在**每一处写验收产物之前**（verdict.json 与 acceptance.json 各一次），
+#   堵的是「入口过了之后 spec 被换掉」——那会让产物目录里的裁决与实际驱动执行的 spec 对不上。
+#
+# ⚠ **被校对象恒为 `spec_path` 原件**，绝不是 `<out>/spec.json`：
+#   ① 入口门跑在 staging **之前**，那时目录里躺的是**上一轮**的副本——校它等于换了 spec 也照过；
+#   ② 出口门时副本虽是本轮的，但它由本函数自己写出，拿来当被校对象是自己给自己作证。
+#
+# ⚠ 只对**验收通路**生效（`is_acceptance`）。mock / `--allow-experimental-form` 下的
+#   cpp / aclnn_py 物理上不产 acceptance.json，改 spec 缩范围在那条路上不产生假验收结论。
+_SPEC_GATE_ENTRY = "① 入口门（进 Task1 之前）"
+_SPEC_GATE_EXIT = "② 出口门（写验收产物之前）"
 # 可能产验收裁决的**真机通路**集合：new_example（cpp runner v1）+ aclnn_py（ctypes-aclnn runner form，
 # torch 对标 median 见证）。两者都产真 NPU 证据（evidence_grade=acceptance_candidate）。按**能力/形态**扩，
 # 非按算子身份——aclnn_py 无 per-op runner 源、op 工程即 DUT（蓝图 §6）。
@@ -646,6 +668,11 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     而是让三级门 `_gate_build_receipt_source_binding` 的最后一处残留伪装面（自动发现落空 +
     收据自称 `pull_request` → 无对照物可查）**在编排层被封死**：编排每次都显式指路，
     「缺席」本身就成了非法。非验收通路不要求它（那条路物理上不产验收裁决，也没有来源锚要对账）。
+
+    ⚠ 验收通路另受 **spec 变更门**（`spec_change_gate`）约束：`<out>/work/spec_change_receipt.json`
+    必须存在、其 `spec_sha256` 与**当场重算的 `spec_path` 字节**一致、且带非空非占位的
+    `change_reason` / `confirmed_by`，否则 `BLOCKED(spec 变更未确认)`。落点见 `_SPEC_GATE_ENTRY`
+    上方那段。⚠ 它证的是「spec 内容完整 + 有人显式署名声明过」，**不是**「用户确认过」。
     """
     # ★ **第一件事**：让 `--out` 里上一轮的结论立刻不可消费（详见 `_invalidate_stale_results`）。
     # 位置就是要在**所有**可能早退的校验之前——下面的 `--source-facts` 必填门、staging 的可信性
@@ -705,6 +732,13 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     # 放在 `os.makedirs` 之前 = 三份原件有任何问题都不留下半个产物目录。
     staged_payloads = (_read_acceptance_inputs(spec_path, spec, source_facts)
                        if is_acceptance else None)
+    # ★ spec 变更门 · ① 入口门。仍在 `os.makedirs` 之前 = 未确认的 spec 变更**不留半个产物目录**。
+    # ⚠ 排在 `--source-facts` 必填门与 staging 可信性校验**之后**：那两道说的是「你这条命令
+    #   少给/给错了对照物」，离用户当下敲错的那个字更近；本门说的是「这份 spec 没人签过字」。
+    #   三道都在零副作用处早退，先后不改变任何不变式，只影响先看到哪句话。
+    # ⚠ 传的是 `spec_path`（原件），**不是** `<out>/spec.json`——理由见 `_SPEC_GATE_ENTRY` 上方。
+    if is_acceptance:
+        spec_change_gate.assert_confirmed(spec_path, out_dir, _SPEC_GATE_ENTRY)
     # U6a：默认已从 mock 翻为 new_example（真机通路）。mock 的「NPU 输出」= golden.copy()、精度按构造必过，
     # 默认指向它 = 默认产出一份与真验收同名同形的**伪造** acceptance.json（危险的默认）。翻真机后，缺真机
     # OPRUNWAY_* 配置时**在跑 Task1 之前**就 fail-closed 停下——绝不落半产物、绝不出「看起来对」的裁决，
@@ -738,6 +772,10 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     # 清上轮残留，防 stale 真基线被复用。`_torch_npu_baseline.json` / `perf_collect.json` / `_perf_plan.json`
     # 同理必清：本轮若性能没采成，留在 work 里的上一轮基线会被 `_real_baseline_or_blocked` 当成本轮真数读走
     # ——那正是「用旧数冒充这次达标」，比缺基线挂起坏得多。
+    # ⚠ `work/spec_change_receipt.json` **刻意不在这张表里**：它是本轮的**输入侧凭证**（谁签的字、
+    #   为什么改），不是上一轮采出来的数据。跟着清的话，每次复跑都得重 `--init`，而
+    #   `previous_spec_sha256` 记的变更历史会在第一次复跑时蒸发——那正好毁掉这道门唯一的价值。
+    #   它已在上面的入口门被逐字校过，留着不会让任何旧结论复活。
     for stale in ("_real_baseline.json", "perf_result.txt", "_torch_npu_baseline.json",
                   "_aclnn_builtin_baseline.json",
                   "perf_collect.json", "_perf_plan.json", "_aclnn_perf_plan_sent.json"):
@@ -829,6 +867,9 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     verdict = validator.validate(spec, caseset, evidence)
     if is_acceptance:
         _assert_acceptance_form_allowed(spec, mode)     # ② 出口门，见该函数的 ⚠
+        # spec 变更门 · ② 出口门（**verdict.json 也是验收产物**，不能只守 acceptance.json）。
+        # 堵的是「入口过了之后 spec 被换掉」：那样产物目录里的裁决与实际驱动执行的 spec 对不上。
+        spec_change_gate.assert_confirmed(spec_path, out_dir, _SPEC_GATE_EXIT)
         _dump(verdict, "verdict.json")
     else:   # 非验收通路：精度判定照跑（管路自检要它），但**不写 verdict.json**——mock 下 out=golden.copy()，
             # 那份「pass」是构造出来的，落成验收裁决文件名就是伪证。
@@ -1096,6 +1137,8 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         if gpu_prov is not None:
             acc["gpu_baseline"] = gpu_prov
         _assert_acceptance_form_allowed(spec, mode)     # ② 出口门（acceptance.json 侧），见该函数的 ⚠
+        # spec 变更门 · ② 出口门（acceptance.json 侧）。同准入门口径：两处产物各校一次。
+        spec_change_gate.assert_confirmed(spec_path, out_dir, _SPEC_GATE_EXIT)
         final_file = _dump(acc, "acceptance.json")
         try:
             md_file = render_acceptance_markdown.write_report(out_dir)
@@ -1157,7 +1200,10 @@ def main():
         description="OpRunway Task1→2→3 编排。**正式验收裁决当前只由 cpp_extension 产出**"
                     "（唯一跑通完整 torch_parity 矩阵的通路）；cpp / aclnn_py 需 "
                     "--allow-experimental-form 才能跑，且只产 dev_run_summary.json / "
-                    "dev_precision_check.json（均标 NON-ACCEPTANCE）。mock 等通路同理。")
+                    "dev_precision_check.json（均标 NON-ACCEPTANCE）。mock 等通路同理。"
+                    "⚠ 验收通路还须先用 spec_change_gate.py 建立 spec 变更收据"
+                    "（<out>/work/spec_change_receipt.json），否则进 Task1 之前即 "
+                    "BLOCKED(spec 变更未确认)。")
     ap.add_argument("spec")
     ap.add_argument("--mode", default=None, choices=list(repo_adapter.MODES),
                     help="省略时据 spec.runner_form 派生：cpp→new_example、aclnn_py→aclnn_py、"

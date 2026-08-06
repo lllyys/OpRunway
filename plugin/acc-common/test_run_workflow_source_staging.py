@@ -29,6 +29,7 @@ import precision_retest_contract as R
 import render_acceptance_markdown as MD
 import repo_adapter
 import run_workflow as W
+import spec_change_gate as SCG
 import validate_acceptance_state as G
 from test_validate_cpp_extension_receipt import source_facts_payload
 
@@ -76,6 +77,20 @@ def _write_source_facts(path, **kw):
         json.dump(content_address.make_artifact(
             "oprunway/source-facts/v1", source_facts_payload(**kw)), out)
     return path
+
+
+def _confirm_spec(spec_path, out_dir):
+    """满足 **spec 变更门**：给 `out_dir` 落一份对得上**当前** spec 的确认收据。
+
+    ⚠ 这不是给门放水：收据里那串摘要是拿这份 spec 当场算出来的，四条判据一条没绕。
+      本文件测的是 staging 与来源锚，变更门本身在 `test_spec_change_gate.py` 专测
+      （含「不落收据就 BLOCKED」的反面见证）。
+    """
+    if not SCG.check(spec_path, out_dir):       # 已有一份对得上的收据 → 什么都不做
+        return spec_path
+    write = SCG.update_receipt if os.path.lexists(SCG.receipt_path(out_dir)) else SCG.init_receipt
+    write(spec_path, out_dir, "夹具：本轮 spec 基线", "lys")
+    return spec_path
 
 
 class _Sentinel(RuntimeError):
@@ -285,7 +300,7 @@ class AcceptanceRunTest(unittest.TestCase):
     def _run(self, root, *, source_facts, out_dir=None, calls=None):
         out_dir = out_dir or os.path.join(root, "reports", "widget")
         calls = calls if calls is not None else []
-        spec_path = _write_spec(root)
+        spec_path = _confirm_spec(_write_spec(root), out_dir)
         with self._stubbed(calls):
             result = W.run(spec_path, mode="cpp_extension",
                            out_dir=out_dir, source_facts=source_facts)
@@ -369,7 +384,7 @@ class AcceptanceRunTest(unittest.TestCase):
                 return self._caseset(spec["op"])
 
             calls = []
-            spec_path = _write_spec(root)
+            spec_path = _confirm_spec(_write_spec(root), out_dir)
             with self._stubbed(calls), \
                     mock.patch.object(W.gen_cases, "gen_cases",
                                       side_effect=_swap_then_gen):
@@ -654,6 +669,34 @@ class ExperimentalFormBypassTest(unittest.TestCase):
                 self.assertEqual([name for name, _, _ in calls], ["task1"])
                 self.assertEqual([p for _, _, p in calls], [None])
 
+    def test_real_machine_dev_artifacts_are_never_labelled_as_mock(self):
+        """⭐ 真机跑不许被标成「mock evidence」。
+
+        病历（2026-08-06，aclnnRoll 试跑）：一句 mock 措辞套所有非验收产物，于是
+        `--allow-experimental-form` 下这一轮**真机**跑的产物上写着「NPU 输出 = golden.copy()、
+        性能是编的假数」——一句凭空的假话，读报告的人会以为压根没上过真机。
+        措辞选串的单测在 `test_run_workflow_mode.NonAcceptanceNoteTest`，这里钉的是**落盘产物**。
+
+        ⚠ 断言范围刻意只到 `dev_run_summary.json` / `dev_precision_check.json`，不含
+          `perf_report.json`。两个理由，都与本门无关：
+          ① 本夹具精度判 fail → Task3 被 fail-fast 跳过，那份 perf 报告这一轮压根没走 perf_compare；
+          ② 精度通过的场景下，无 `_real_baseline.json` 的夹具里基线**确实**是
+             `perf_compare.mock_baseline`，那句 mock 措辞是**实话**（真机上 `run_on_npu.sh`
+             会落真基线）。要求产物对一件真事闭嘴，同样是失真。
+        """
+        for form, mode in self._FORMS:
+            with self.subTest(form=form), tempfile.TemporaryDirectory() as root, _env(root):
+                out_dir = os.path.join(root, "reports", form)
+                with self._stubbed(mode, []):
+                    W.run(_write_spec(root, _spec(runner_form=form)),
+                          out_dir=out_dir, allow_experimental_form=True)
+                for name in W._DEV_FILES:
+                    with open(os.path.join(out_dir, name), encoding="utf-8") as fh:
+                        text = fh.read()
+                    self.assertIn(W._NOTE_FORM, text, name)
+                    for word in ("mock", "golden.copy()", "假数"):
+                        self.assertNotIn(word, text.casefold(), f"{name} 把真机跑说成了假数")
+
     def test_they_are_still_refused_without_the_escape_hatch(self):
         """反面见证：放行的是**逃生阀**，不是「这两条 form 从此免检」。"""
         for form, mode in self._FORMS:
@@ -677,7 +720,7 @@ class CpFClosureTest(unittest.TestCase):
             facts = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
             calls = []
             out_dir = os.path.join(root, "reports", "widget")
-            spec_path = _write_spec(root)
+            spec_path = _confirm_spec(_write_spec(root), out_dir)
             with AcceptanceRunTest()._stubbed(calls):
                 W.run(spec_path, mode="cpp_extension",
                       out_dir=out_dir, source_facts=facts)
@@ -698,7 +741,7 @@ class CpFClosureTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, _env(root):
             facts = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
             out_dir = os.path.join(root, "reports", "widget")
-            spec_path = _write_spec(root)
+            spec_path = _confirm_spec(_write_spec(root), out_dir)
             with AcceptanceRunTest()._stubbed([]):
                 W.run(spec_path, mode="cpp_extension",
                       out_dir=out_dir, source_facts=facts)

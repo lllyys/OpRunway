@@ -1016,6 +1016,124 @@ class NoTargetIsFailClosedTest(unittest.TestCase):
                             _ev({"p": (1.0, "kernel_only")}), _bl({"p": 2.0}))
         self.assertEqual(r["summary"]["status"], "invalid_config")
 
+    # ── ③ 病历复现：aclnnRoll 的形状 ──────────────────────────────────────────
+    def test_the_roll_pathology_produces_no_fabricated_target_and_no_fabricated_failures(self):
+        """⭐ 病历复现：无 `perf` 块 + 一批性能用例（其中多条 ratio<0.95）→ 不得再造目标、不得再造失败。
+
+        aclnnRoll 试跑的实测形状是 `target_ratio: 0.95` / `perf_cases: 47` / `达标: 28` /
+        `failed: 19`。那 19 条「失败」全是**凭空目标**判出来的。这里用同样的形状复核：
+        每条都判 `blocked`（无目标可判），`failed` 计数为 0，且**没有任何一行拿到过比值裁决**。
+
+        ⚠ 不扫「报告文本里有没有 0.95」——拒绝语本身就逐字引了那个数（"这里刻意不再兜底套 0.95"），
+        扫字符串会把**说明**误当成**判据**。要钉的是结构：目标为 `None`、没有 `ratio` 字段、
+        没有一行 `达标 is True`。"""
+        ids = [f"p{i}" for i in range(12)]
+        cs = self._cs(ids)
+        # 一半 ratio=2.0（旧口径下「达标」），一半 ratio=0.5（旧口径下「未达标」）——
+        # 两侧都必须落进 blocked，而不是被分成 达标/failed 两堆。
+        ev = _ev({cid: (1.0, "kernel_only") for cid in ids})
+        bl = _bl({cid: (2.0 if i % 2 == 0 else 0.5) for i, cid in enumerate(ids)})
+        r = pc.perf_compare({"op": "Sign"}, cs, ev, bl)
+        self.assertEqual(r["summary"]["status"], "invalid_config")
+        self.assertIsNone(r["target_ratio"])
+        self.assertEqual(r["summary"]["blocked"], len(ids))
+        self.assertEqual(r["summary"]["达标"], 0)
+        self.assertEqual(r["summary"].get("failed", 0), 0)
+        # `达标: 0` 只有在「blocked 覆盖全部性能用例」时才不会被读成「一条都没达标」——
+        # 钉死这条同现关系，免得将来有人把 blocked 计数改小、只留下一个裸的 0。
+        self.assertEqual(r["summary"]["blocked"], r["summary"]["perf_cases"])
+        for row in r["per_case"]:
+            self.assertTrue(row["blocked"], row)
+            self.assertIs(row["达标"], False, row)
+            self.assertNotIn("ratio", row)          # 一条比值都没算过
+        for item in r["non_passing_cases"]:
+            self.assertEqual(item["outcome"], "blocked", item)
+            self.assertIsNone(item["target_ratio"], item)   # ★ 不得再出现凭空的 0.95
+
+    def test_invalid_config_emits_no_scoring_counters_at_all(self):
+        """`invalid_config` 下不得出现 `cases_scored` / `cases_above_threshold`。
+
+        没有目标就没有「评分」这件事；落一个 `cases_scored: 0` 会与「采了数但没评上」混淆，
+        而后者是另一种（真的采集失败的）故事。整块不出 > 出一堆 0（同 `_report_aggregate` 的纪律）。"""
+        r = pc.perf_compare({"op": "Sign"}, self._cs(["p"]), _ev({"p": (1.0, "kernel_only")}),
+                            _bl({"p": 2.0}))
+        self.assertEqual(r["summary"]["status"], "invalid_config")
+        for key in ("cases_scored", "cases_above_threshold"):
+            self.assertNotIn(key, r["summary"])
+
+    def test_zero_scored_cases_can_never_reach_status_ok(self):
+        """⭐ 不变式：`cases_scored == 0` 与 `status == "ok"` 不可同时成立。
+
+        规矩（AGENTS.md 与 op-acceptance 契约）：`cases_scored=0` 一律读作**性能未验证**，
+        绝不能被读成「没什么可判所以过了」。实现上靠「每行不是有 ratio 就是 blocked、
+        有 blocked 即 status=blocked」保证；这条测试把该结论钉在行为层，
+        免得将来有人加一条「既无 ratio 也不 blocked」的行把不变式悄悄捅穿。"""
+        cs = self._cs(["p0", "p1"])
+        # 两条性能用例都缺 evidence → 全部 blocked → 一条可比测量都没有。
+        r = pc.perf_compare(_spec(1.0), cs, {"op": "Sign", "evidence": []}, _bl({"p0": 1.0, "p1": 1.0}))
+        self.assertEqual(r["summary"]["blocked"], 2)
+        self.assertNotEqual(r["summary"]["status"], "ok")
+        self.assertEqual(r["summary"].get("cases_scored", 0), 0)
+
+
+class MeasureOnlyZeroCaseExitTest(unittest.TestCase):
+    """`measure_only` 的**零性能用例**出口不得携带比值通路的词表。
+
+    该出口复用了与 ratio 通路共享的 `_no_perf_cases`，历史上因此落了一个 `达标: 0`——
+    而 `validate_acceptance_state._gate_measure_only_report` 明令 measure_only 的 summary
+    **不得含** `达标` / `cases_above_threshold` / `cases_scored`。即 perf_compare 自己产出了一份
+    过不了自己那道门的产物，且那个 `0` 正是 plan 点名的「会被读成『一条都没达标』」。
+
+    ⚠ 这里钉的是**词表**，不是放行：本出口的 `status` 仍是 `no_perf_cases`，
+    gate_task3 见它照旧记 error → BLOCKED。下面第二条测试把这一点一起钉住。
+    """
+
+    _AUTH = {"taskdoc_requirement": "no_perf_requirement",
+             "cite": "任务书 §3 性能要求", "quote": "性能要求：无",
+             "taskdoc_snapshot_sha256": None}
+
+    def _spec_mo(self):
+        return {"op": "Sign", "perf": {"mode": "measure_only",
+                                       "measure_only_authorization": dict(self._AUTH)}}
+
+    def _caseset_without_perf_cases(self):
+        return {"op": "Sign", "cases": [
+            {"id": "f0", "dims": ["功能"], "tags": [],
+             "inputs": [{"name": "self", "dtype": "float32", "shape": [4]}], "attrs": {}}]}
+
+    def test_zero_perf_cases_report_has_no_verdict_vocabulary(self):
+        r = pc.perf_compare(self._spec_mo(), self._caseset_without_perf_cases(),
+                            {"op": "Sign", "evidence": []}, None)
+        self.assertEqual(r["perf_mode"], "measure_only")
+        self.assertEqual(r["summary"]["status"], "no_perf_cases")
+        for key in ("达标", "cases_above_threshold", "cases_scored"):
+            self.assertNotIn(key, r["summary"])
+        # 本口径的计数词要在场且为 0（缺席会让门另记一条「measured=None 非整数计数」的噪声 error）。
+        self.assertEqual(r["summary"]["measured"], 0)
+        self.assertEqual(r["summary"]["perf_cases"], 0)
+        self.assertIsNone(r["target_ratio"])
+        self.assertIsNone(r["baseline_source"])
+
+    def test_the_cleanup_does_not_turn_it_into_a_pass(self):
+        """⭐ 反向不变式：去掉 `达标` 这个键**不等于**放行。
+
+        `status` 必须仍是 `no_perf_cases`（gate_task3 见它即记 error），
+        且**不得**变成 `measured`——后者是 run_workflow 判「性能维不阻挡 overall」的唯一钥匙。"""
+        r = pc.perf_compare(self._spec_mo(), self._caseset_without_perf_cases(),
+                            {"op": "Sign", "evidence": []}, None)
+        self.assertNotEqual(r["summary"]["status"], "measured")
+        self.assertEqual(r["summary"]["status"], "no_perf_cases")
+
+    def test_ratio_gated_zero_case_exit_is_untouched(self):
+        """⭐ ratio 通路的同一出口**一个字节不变**：`达标: 0` 照旧在场、没有 `measured` 键。
+
+        本次只动 measure_only 分支，共享的 `_no_perf_cases` 本身没改。"""
+        r = pc.perf_compare(_spec(1.0), self._caseset_without_perf_cases(),
+                            {"op": "Sign", "evidence": []}, _bl({}))
+        self.assertEqual(r["summary"]["status"], "no_perf_cases")
+        self.assertEqual(r["summary"]["达标"], 0)
+        self.assertNotIn("measured", r["summary"])
+
 
 if __name__ == "__main__":
     unittest.main()

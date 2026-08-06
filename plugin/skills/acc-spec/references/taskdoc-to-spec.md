@@ -105,6 +105,12 @@
 - `case_profile == "torch_parity"`：`case_target` **必须精确等于**完整笛卡尔矩阵大小
   `dtype × rank × shape_profile × attribute_profile`（见 §1.3『Torch overload 覆盖与 `torch_parity_matrix`』）。
   不相等 `gen_cases` 直接报错，这条已经是硬校。
+- `precision.case_source == "taskdoc"`：`case_target` **照样必填**，且**必须精确等于**规范化后的
+  任务书用例条数——这一档你不推算这个数，它被用例集锁死（`_taskdoc_plan` 逐字核对，对不上当场报
+  「任务书用例集有 N 条、`precision.case_target=…`——两者必须相等」）。⚠ **别读成「这一档不用写」**：
+  不写照样 fail-fast，`_require_case_target` 排在分档之前。⚠ 也**别为了跑通把它改成报错里那个 N**：
+  规范化会按语义内容派生 `case_id`，原始条数与规范化条数不一致本身就是要查的事（样例见
+  `plugin/samples/specs/gaussian_blur.spec.json` 的 `_case_target_note`）。
 - 其它档：也按该算子的覆盖轴推算，并把算法写进 `precision.case_target_source`。
   ⚠ **统一的笛卡尔算法（含非 torch_parity 档）尚未落地**（roll19 方案步骤 11，需人评审轴集后实现）。
   在它落地之前，这个数**必须给得出依据**——沿用某份既有事实要写清沿用的是什么；
@@ -685,7 +691,7 @@ Torch 签名列出必须对标的 overload，再逐个建立：
 | | `generated`（缺省 / 省略） | `taskdoc` |
 |---|---|---|
 | 用例身份、shape、dtype、attr、值域 | 本引擎按覆盖-预算规则铺 | **全部**来自规范化后的任务书用例集 |
-| `case_target` 交互（上面那段） | 照走：dry-run 报区间 → 问用户 → 写 `case_target` | **不适用**：用例集全体即强制下限，一条都不许少 |
+| `case_target` 怎么定（上面那段） | 按覆盖轴推算（`torch_parity` 档 = 完整矩阵大小），依据写进 `case_target_source` | **两档都必填**，只是这一档的数不由你推算：须**精确等于**规范化后的用例条数，`_taskdoc_plan` 逐字核对。⚠ **不是「不适用」**——不写照样 fail-fast |
 | 规模预算（G4 降规模） | 行使 | **不行使**（降规模会把任务书点名的 shape 改掉，那就不是那条用例了） |
 | `coverage_strength` 表述 | `1-wise+whitelist：…` | `taskdoc_provided：用例集由任务书提供（N 条…），覆盖强度由任务书决定` |
 | 特殊值（inf/-inf/nan） | 按 `operator_class` 强制铺（§1.5） | 由任务书决定，本引擎这一档**不强制铺** |
@@ -825,7 +831,8 @@ C4 的 `dtype_unsupported_by_op_def`、`dtype_unsupported_on_target_hw`，见 §
   撞上要回去核 attr/rank，**不许删字段绕过**。任务书没点名就整字段省略。
 - **§1.6 · `precision.case_source`**：受控两值，**整字段省略 = `generated` = 现行为**。写了 `taskdoc` ⇒
   编排层**必须**把规范化 caseset 显式喂给 `gen_cases --taskdoc-caseset` / `run_workflow --taskdoc-caseset`，
-  否则 fail-closed（**不回退自生成**）；这一档不写 `case_target`（用例集全体即强制下限）。
+  否则 fail-closed（**不回退自生成**）；这一档 `case_target` **照样必填**，且须**精确等于**规范化后的
+  用例条数（对不上 `gen_cases` 当场炸——见上文『`case_target` 怎么定』与『两档的连带后果』表）。
   **拿不准就整字段省略**——判成 `generated` 等于把任务书点名的测试点整套换掉，代价特别贵。
 - **§1.6 · `aclnn_tensor_format`**：只在 `runner_form == "cpp_extension"` 下有意义；**整字段省略 = 现行为**。
   写 `nd` 前须有 ABI 事实源（header/docs/example）支持，且该算子的 stage2 形态是 `extended`——

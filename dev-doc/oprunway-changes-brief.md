@@ -2,6 +2,24 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-06 · 重测 `aclIntArray`：**推翻本文下面那条**，合并后两条通路都支持
+
+- 只跑不改，重写 `dev-doc/oprunway-aclintarray-probe.md`（第二版，基线 `96edacd`）。
+  下面那条同名条目（基线 `9209756`、合并前）的结论 **(b) 静默生成标量已作废，别再引用**。
+- `origin/main` 合进来的「改动⑮」（GaussianBlur 首程）把四层**同批**做完了：
+  `aclnn_runner._classify_param:301` 认 `aclIntArray*` → `int_array`、marshal 侧
+  `aclCreateIntArray`/`aclDestroyIntArray`、`gen_cases._attr_ctype:3049` 按取值结构给
+  `int_array`、`cpp_extension_codegen._attr_type:148` 生成 `at::IntArrayRef` + schema `int[]`。
+  实测 Roll spec 跑出来就是这两个类型。**结论是 (c)，`acc-spec-extractor` 那句论断整句都错。**
+- 数组性**由 `default` 的值结构派生、不新增 dtype 词**（`dtype` 仍写 `["int64"]`）；
+  畸形 list（空 / 浮点 / bool / 嵌套）**显式 fail-closed**，不会掉进标量分支——
+  第一版最担心的那个静默错型没有留下。CP-C0 的 slot↔签名对账也没被放宽（篡改成 `int64` 仍拒）。
+- 连带结论：**步骤 7 的 `aclIntArray` 兼容不用做了**；步骤 10 不会因这条堵死 Roll。
+  ⚠ 但 Roll 仍跑不了——`SUPPORTED_NP_BY_FORM["cpp_extension"]` 没有 `uint32`（步骤 8 的范围）。
+- 记一条没人拦的缝（本步不改）：codegen 按 spec `default` 判数组性、`gen_cases` 按 per-case
+  取值判，`build_invocation_plan` 不校 attr ctype、manifest 也没这个字段可对。
+  `aclIntArray` 场景会被 CP-C0 先拦；「签名本就是标量、spec 给 list 取值」那种**未实测**。
+
 ## 2026-08-06 · 合并收尾：清掉指向已删脚本的编排引用
 
 合并删掉 `make_vendor_build_receipt.py` 之后，**编排文档还在指名要跑它**——照着做直接失败。
@@ -69,8 +87,24 @@
   一直在吃的那个 50（`ExistingOpsByteIdenticalTest` 的字节 pin 因此原样通过）；
   `catlass_basic_matmul` **有意不补**——它的用例由 `catlass_adapter` 按 shape 列表造，不读这个键，
   填任何数都是死字段。⚠ 补上的 50 是**历史沿用值、不是按矩阵算出来的依据**，笛卡尔算法在步骤 11。
+- 合并后复核补齐三处（原 WIP commit 标「未验证」，这轮核过）：
+  ① **爆炸半径漏了 `plugin/workflows/archive_ops/{isclose,sign}`**。两份都**不回填数字**并写明理由——
+  它们是历史案例快照、无任何代码或测试读，记录的那轮验收早于本字段存在（`sign/case.md` 记的是
+  「精度 5/5 过」，即当时实产 5 条）。填 50 是编造，填 5 是把「计划期预算」挪用去记「历史实产数」。
+  拿它当模板复制去跑会 fail-fast，**那正是预期行为**。
+  ② **`taskdoc` 档的散文与实现互相打架**（`audit-20260805-pushgate-findings` #30 记为 not-fixed）：
+  `taskdoc-to-spec.md` 两处写「这一档不写 `case_target`」，而 `_require_case_target` 排在分档**之前**、
+  `_taskdoc_plan` 还要求它**精确等于**用例条数。缺省 50 在时这只是「默默吃个错数」，缺省删掉后直接变
+  fail-fast，所以必须改散文：两处改成「照样必填、且被用例集锁死」，主段补 `taskdoc` 档条目。
+  权威反例就在仓里——`samples/specs/gaussian_blur.spec.json` 是 taskdoc 档且写了 `case_target: 169`。
+  ③ **mutation 校验**（原 WIP 未做）：把缺省改回 `.get(...,50)` → 3 红；去掉 `bool` 子类防护 →
+  `case_target: true` 被当成 1 放行、1 红；把缺省搬成模块级常量 → 1 红。还原后全绿。
+  全量 **2281 passed / 12 skipped / 0 failed**（a3 容器），与基线一致。
 
-## 2026-08-06 · 实测 `aclIntArray`：`cpp_extension` 不是不支持，是**静默生成标量**
+## 2026-08-06 · ⛔ 已作废 · 实测 `aclIntArray`：`cpp_extension` 不是不支持，是**静默生成标量**
+
+⛔ **本条已被顶部同日那条推翻，勿引用。** 它测的是合并 `origin/main` **之前**的基线
+（`9209756`）；合并带进「改动⑮」后四层都支持了，正确结论是 (c)。保留原文只作过程记录。
 
 - 只跑不改，产出 `dev-doc/oprunway-aclintarray-probe.md`。`acc-spec-extractor` 那句
   「`aclnn_runtime` 和 `cpp_extension` 都不支持 `aclIntArray`」**半对半错**：`aclnn_py` 确实

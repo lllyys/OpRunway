@@ -2496,6 +2496,30 @@ class GateDeferredDtypeTerminalStateTest(unittest.TestCase):
                                "needs_review", unc=1)
         self.assertEqual(errs, [])
 
+    def test_non_list_task_pr_gaps_blocks_clean_pass(self):
+        """**容器层**漏方括号：`task_pr_gaps` 写成 dict/字符串而非 list → 归并侧的 `isinstance(…, list)`
+        守卫把**整份挂账**当 `[]` 丢掉。配上「不声明 `dtype_required`」（覆盖门此时按 legacy 宽容放行），
+        caseset 里明明写着 deferred、两级门却一起噤声 → 干净 pass。这是条目层那条钉子的孪生洞，
+        `gen_cases` 对 `spec["task_pr_gaps"]` 是裸透传（无类型校验），手写 spec 一个手滑即可达。"""
+        for bad in ({"kind": "dtype_deferred", "dtypes": ["complex64"]},
+                    "complex64 生成层不支持", 0):
+            errs = self._run_task2(self._cs(bad, required=None), "pass")
+            self.assertTrue(any("dtype_deferred" in e and "读不出" in e for e in errs), (bad, errs))
+
+    def test_non_list_task_pr_gaps_not_flagged_when_terminal_state_is_not_clean_pass(self):
+        """反向不误伤：终态不是干净 pass 时，容器层畸形同样不额外记 error。"""
+        self.assertEqual(
+            self._run_task2(self._cs({"kind": "dtype_deferred", "dtypes": ["complex64"]},
+                                     required=None), "needs_review", unc=1), [])
+
+    def test_absent_task_pr_gaps_is_not_treated_as_malformed(self):
+        """`task_pr_gaps` **缺席**是「这份 caseset 没有任何挂账」的正常形态，不是「读不出」——
+        不得因为容器层新判据把没有 gap 的老 caseset 一律拖进 FAILED（误伤面钉死）。"""
+        cs = json.loads(json.dumps(CASESET))
+        cs["dtype_tested"] = ["float32", "float16"]
+        self.assertNotIn("task_pr_gaps", cs)
+        self.assertEqual(self._run_task2(cs, "pass"), [])
+
     def test_free_text_gap_left_to_the_coverage_gate(self):
         """历史自由文本 gap 原样跳过——它压根不进挂账集，required 侧由**覆盖门**判「静默收窄」BLOCKED
         （aclnnRoll 实测正是这条路给出了正确结果），终态映射不重复插手。两级门各判一次，这里都钉住。"""

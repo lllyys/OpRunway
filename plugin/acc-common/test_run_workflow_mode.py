@@ -352,6 +352,65 @@ class AcceptanceFormGateTest(unittest.TestCase):
             self.assertIn(form, repo_adapter.SUPPORTED_NP_BY_FORM)
 
 
+class NonAcceptanceNoteTest(unittest.TestCase):
+    """⭐ 非验收产物的注脚**按真实原因取串**。
+
+    病历（2026-08-06，aclnnRoll 试跑）：一句 mock 措辞套所有非验收产物，于是
+    `--allow-experimental-form` 下那一轮**真机**跑被标成「NPU 输出 = golden.copy()、
+    性能是编的假数」——一句凭空的假话。读报告的人会以为这轮压根没上过真机，从而错判失败归因。
+
+    ⚠ **措辞错方向与判定错方向一样贵**：本仓不许把假数说成真机数据，同样不许把真机数据说成假数。
+    """
+
+    #: 「数据是编的」这句话的字面标志。真机跑的产物里出现任何一个都算说假话。
+    _FABRICATION_WORDS = ("mock", "golden.copy()", "假数", "构造必过")
+
+    def test_mock_family_gets_the_fabricated_data_wording(self):
+        for mode in W._MOCK_MODES:
+            with self.subTest(mode=mode):
+                self.assertEqual(W._non_acceptance_note(mode, False), W._NOTE_MOCK)
+
+    def test_real_machine_on_an_unlisted_form_is_never_called_mock(self):
+        """⭐ 主门：真机数据 + 非准入 form → 只说「这条 form 不出裁决」，不许声称数据是编的。"""
+        for mode in ("new_example", "aclnn_py", "cpp_extension"):
+            with self.subTest(mode=mode):
+                note = W._non_acceptance_note(mode, True)
+                self.assertEqual(note, W._NOTE_FORM)
+                for word in self._FABRICATION_WORDS:
+                    self.assertNotIn(word, note.casefold())
+                self.assertIn("真机", note)          # 要正面说清数据是真的
+
+    def test_mock_wins_when_both_reasons_apply(self):
+        """顺序不能反：「数据是编的」是更强、更要紧的那句话，不能被「form 不准入」盖过去。"""
+        for mode in W._MOCK_MODES:
+            with self.subTest(mode=mode):
+                self.assertEqual(W._non_acceptance_note(mode, True), W._NOTE_MOCK)
+
+    def test_unregistered_modes_fall_back_to_the_neutral_wording(self):
+        """漏登记一个 mock 家族的 mode，后果必须是「少说一句」，而不是凭空断言数据真假。"""
+        for mode in ("catlass", "some_future_mode"):
+            with self.subTest(mode=mode):
+                note = W._non_acceptance_note(mode, False)
+                self.assertEqual(note, W._NOTE_OTHER)
+                for word in self._FABRICATION_WORDS:
+                    self.assertNotIn(word, note.casefold())
+
+    def test_stamp_dev_defaults_to_the_neutral_string(self):
+        """漏传实参时的失败方向是「少说一句」。"""
+        self.assertEqual(W._stamp_dev({}, False, "development")["acceptance_note"],
+                         W._NOTE_OTHER)
+
+    def test_every_note_carries_the_non_acceptance_marker(self):
+        """三串都得能被「按标记词筛非验收产物」的下游认出来（`test_perf_compare` 就这么筛）。"""
+        for note in (W._NOTE_MOCK, W._NOTE_FORM, W._NOTE_OTHER):
+            self.assertIn("NON-ACCEPTANCE", note)
+            self.assertIn("不得作为验收结论引用", note)
+
+    def test_the_three_strings_are_actually_distinct(self):
+        """把两串写成同一个值 = 分支形同虚设，而上面那些断言仍可能碰巧全绿。"""
+        self.assertEqual(len({W._NOTE_MOCK, W._NOTE_FORM, W._NOTE_OTHER}), 3)
+
+
 class RunnerFormDefaultSingleSourceTest(unittest.TestCase):
     """⭐ P5：`spec.runner_form` 的缺省**只有一份定义**，全仓读侧同源。
 

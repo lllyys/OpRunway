@@ -290,10 +290,17 @@ def _deferred_untested(cs, actual):
       （同 codex#2 对 dtype_tested 的教训）。deferred 挂了任务书没要求的 dtype，本身就是挂账写错，
       该改的是那条挂账，不是让它换来一个干净 pass。
     · **扣 `actual`**——挂了 deferred、该 dtype 其实有真实用例在跑（陈旧条目）→ 不是缺口，不误伤。
-    · **读不懂即拒**：`dtypes` 不是「非空的非空字符串列表」时，门根本不知道被 defer 掉的是什么，
-      这种条目在 `_collect_dtype_gaps` 里会被**静默丢弃**（`isinstance(x, str)` 过滤），于是
-      `"dtypes": "complex64"`（漏了方括号）这类写法能让整条挂账凭空蒸发。判据在这里比
-      `_collect_dtype_gaps` **更严**是有意的：那边的宽松读法喂的是覆盖门，本步不改覆盖门语义。
+    · **读不懂即拒**，两层都管：
+      ① **条目层**——`dtypes` 不是「非空的非空字符串列表」时，门根本不知道被 defer 掉的是什么，
+        这种条目在 `_collect_dtype_gaps` 里会被**静默丢弃**（`isinstance(x, str)` 过滤），于是
+        `"dtypes": "complex64"`（漏了方括号）这类写法能让整条挂账凭空蒸发。
+      ② **容器层**——`task_pr_gaps` 本身不是 list 时（`"task_pr_gaps": {"kind":"dtype_deferred",…}`，
+        漏了**外层**方括号），归并侧的 `isinstance(..., list)` 守卫会把**整份挂账**当 `[]`，于是
+        *所有* 挂账一起蒸发。①堵了漏内层方括号、②不堵就等于漏外层方括号照样能开免检通道：
+        配上「不声明 `dtype_required`」（覆盖门此时按 legacy 宽容放行），caseset 里明明白白写着
+        deferred、终态却干净 pass。`gen_cases` 对 `spec["task_pr_gaps"]` 是**裸透传**
+        （`spec.get("task_pr_gaps", [])`，无类型校验），手写 spec 一个手滑即可达。
+      判据在这里比 `_collect_dtype_gaps` **更严**是有意的：那边的宽松读法喂的是覆盖门，本步不改覆盖门语义。
     · 非 dict 的历史自由文本条目原样跳过（与 `_collect_dtype_gaps` 同）——它压根不进挂账集，
       required 侧覆盖门本来就会判「静默收窄」BLOCKED，不需要本判据再管。
 
@@ -307,10 +314,13 @@ def _deferred_untested(cs, actual):
       本函数刻意不半做。这条与 canon 记的「dtype 门仅半闭合——『任务书要求』侧仍由**可缺省的**
       caseset `dtype_required` 代传、未真正锚到任务书」是同一个缺口，不是本次新开的。
     """
-    gaps = (cs.get("task_pr_gaps")
-            if isinstance(cs, dict) and isinstance(cs.get("task_pr_gaps"), list) else [])
+    raw = cs.get("task_pr_gaps") if isinstance(cs, dict) else None
     pending, malformed = set(), []
-    for i, g in enumerate(gaps):
+    if raw is not None and not isinstance(raw, list):
+        # 容器层读不懂（见 docstring ②）：归并侧整份当 `[]`，逐条判据在这里已经无从谈起 → 直接记账返回。
+        # 缺席（None）**不在此列**：那是「这份 caseset 没有任何挂账」的正常形态，不是读不出。
+        return [], [f"task_pr_gaps 整体={type(raw).__name__}（须为 list，现被归并侧整份丢弃）"]
+    for i, g in enumerate(raw or []):
         if not isinstance(g, dict) or g.get("kind") != "dtype_deferred":
             continue
         dts = g.get("dtypes")
@@ -1367,9 +1377,9 @@ def gate_task2(d, errs, source_facts_path=None):
                     "（或 fail / passed_with_risk；passed_with_gaps 另需结构合法的 finding gap 撑着）·"
                     "fail-closed 判 FAILED")
     if _verdict == "pass" and _bad_deferred:
-        errs.append(f"dtype_deferred 挂账 {_bad_deferred} 的 dtypes 非「非空 dtype 字符串列表」——"
-                    "门读不出被 defer 掉的是哪些 dtype（这种条目在挂账归并里会被静默丢弃，"
-                    "于是一条挂账凭空蒸发），却给了干净 pass·fail-closed 判 FAILED")
+        errs.append(f"dtype_deferred 挂账结构读不出：{_bad_deferred}——门不知道被 defer 掉的是哪些 dtype"
+                    "（这种写法在挂账归并里会被静默丢弃：条目层漏内层方括号 → 一条挂账蒸发；"
+                    "容器层漏外层方括号 → 整份挂账蒸发），却给了干净 pass·fail-closed 判 FAILED")
     counts = ov.get("counts") if isinstance(ov.get("counts"), dict) else None
     if counts is None:
         errs.append("verdict.overall.counts 缺失")
