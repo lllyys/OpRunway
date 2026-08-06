@@ -71,10 +71,13 @@ description: OpRunway 验收 ②（CP-B）的子 agent——先按 18 项标准�
   6. **C1 · 输出形状不进 spec**：非 elementwise 算子的输出形状由 per-op `golden.py` 的**可选**导出 `out_shape(in_shapes, attrs)` 定（**不搞 spec 表达式语言**）。**别在 spec 里发明 `out_shape`/`output_shape`/`shape_formula` 字段**；只在 `task_pr_gaps` 记「该算子非 elementwise + 输出形状规则出自任务书/`*_infershape.cpp` 的哪一句」，供 ③ 产 `golden.py` 时锚定（写法见 `skills/acc-runner/references/runner-skeleton.md` §6）。
   7. **批 4 · 产 `spec.golden` 判据锚**（判据只从 spec 派生，硬约束 #5；schema 见 ref §0 的 `golden` 块）：据任务书**独立**判两档链（`source` / `method_kind` / `authorization.kind`，判法与 `gen_golden` 同——手册 `golden-authoring.md` §1），写进 `spec.golden`。⚠ 这与 C1 不冲突：C1 说的是**输出形状**不进 spec，本条是 golden 的**判据来源**进 spec。⚠ 它是与 `golden.py` 的 `GOLDEN_CONTRACT` **平行的独立源**——validator 对账两源、不一致 fail-closed（双源交叉核验，别去抄 golden.py 凑一致，要各自据任务书独立判）。
      - **`taskdoc_snapshot.sha256`**（`oracle_method`/`formula` 才需要）：CP-A 的 `fetch_source` 已在 `workdir/task_doc.snapshot.md` 逐字节落稳定引文锚，直接读它算 SHA 填入 spec；缺失或与 `source_facts.taskdoc.bytes_sha256` 不一致即回报 CP-A 工件不完整，**不要先落空值再安排 gen_golden 回填**，也绝不编 SHA。`impl_reference`/`none` 无快照 → 省略 `taskdoc_snapshot`。
+  8. **`precision.case_target` 必填、无缺省**（2026-08-06）：不写这个键，下游 `gen_cases` 真跑与 `--dry-run` 都当场 fail-fast。**按覆盖矩阵算，不是拍一个数**——`case_profile=="torch_parity"` 时须**精确等于** `dtype × rank × shape_profile × attribute_profile`；其它档按覆盖轴推算，并把算法或沿用来源写进 `precision.case_target_source`。**给不出依据就回摘要报「需用户定」，不许随手填一个数**。
+     ⚠ 这条是被实测逼出来的：散文原先写「缺省 50、建议 50」，本 agent 照着自己填了 50、全程 0 次被审视，792 个候选组合就留了 50 条。原规矩还要求用 `AskUserQuestion` 问用户——而本文件 frontmatter 的 `tools:` 里**根本没有这个工具**，那一步物理上执行不了。缺省和那条做不到的规矩都已删除。
+     ⚠ **别把缺的工具当成「所以可以自己定」**：拿不准时的正确出口是**回摘要交还 orchestrator**（primary 有 `AskUserQuestion`），不是本 agent 自行拍板。
 
   多算子：一份任务书含 N 个算子 → N 份 spec（共享字段复用 + 逐算子独立，ref §5）。
 - **产出工件**：`<op>.spec.json`（一份或多份，落 spec 目录）。所有缺口/矛盾/推断落各自 `task_pr_gaps`，推断项标 `(推断)`。
-- **验收（本 agent 自检，非 pass/fail 裁决）**：按 acc-spec skill §7 逐条过——`verify_mode` 合法；`numerical` 必有 `threshold`；`params` 有 `out`；`exact ⇒ threshold=0`；`add_dtype ⇒ dtypes_added 非空`（其中 pipeline 支持项已并入 `params.dtype`、不支持项只记 `change.dtypes_added` + gap，不强求全 ⊆ `params.dtype`）；`params.dtype` 等于任务书全集与当前 form 的两层确定性能力交集、其余 dtype 全部显式入 gap；需要快照的 golden 锚已绑定 CP-A SHA；每份 spec 有 `task_pr_gaps` 且推断项已标 `(推断)`；runner 锚定线索来自 PR-head header/example 实读、非猜。自检不过 → 修到过再落盘、并在摘要说明；**自检是「结构自洽」检查，不等于「验收通过」，验收由下游确定性门裁决**。
+- **验收（本 agent 自检，非 pass/fail 裁决）**：按 acc-spec skill §7 逐条过——`verify_mode` 合法；`numerical` 必有 `threshold`；`params` 有 `out`；`exact ⇒ threshold=0`；**`precision.case_target` 显式在、≥1、且给得出依据**；`add_dtype ⇒ dtypes_added 非空`（其中 pipeline 支持项已并入 `params.dtype`、不支持项只记 `change.dtypes_added` + gap，不强求全 ⊆ `params.dtype`）；`params.dtype` 等于任务书全集与当前 form 的两层确定性能力交集、其余 dtype 全部显式入 gap；需要快照的 golden 锚已绑定 CP-A SHA；每份 spec 有 `task_pr_gaps` 且推断项已标 `(推断)`；runner 锚定线索来自 PR-head header/example 实读、非猜。自检不过 → 修到过再落盘、并在摘要说明；**自检是「结构自洽」检查，不等于「验收通过」，验收由下游确定性门裁决**。
 
 ### refine_spec
 

@@ -1501,7 +1501,11 @@ def _mk_id(op, dtn, shp, id_kind, attr_idx, seen):
 # format 轴：elementwise 仅 ND（op_def/example 佐证）→ 退化为单值，不进正交网格。
 KEY_DTYPES = ("float32", "float16", "bfloat16")     # §重点覆盖档
 _OTHER_DTYPE_QUOTA = 2                               # 非重点 dtype 每种至多 N 条（主流场景）
-_DEFAULT_CASE_TARGET = 50
+# ⚠ **`case_target` 没有缺省值，别再加回来**（2026-08-06 删掉原 `_DEFAULT_CASE_TARGET = 50`）。
+#   删的理由是实测：extractor 照散文里的「建议 50」自己填了 50、全程 0 次被审视，
+#   792 个候选组合就这么留了 50 条——「用例数没人定过」这件事被一个缺省值静默吞掉了。
+#   缺省值在这里等价于 fail-open：它让「谁定的用例数、依据是什么」永远不必回答。
+#   现在缺这个键就 fail-fast（读取点唯一：`_require_case_target`）。
 
 # §1.2 shape 阶梯：维度值取 2^k / 2^k-1（∈[1,2^20]），dims 1~8，总元素 ≤ 2^31。有限有序表（CAP 防爆炸）。
 _REG_SHAPES = [(3,), (4,), (7,), (16,), (255,), (4, 4), (7, 8), (16, 15),
@@ -2255,6 +2259,31 @@ def _make_empty_accepts(in_params, out_shape_fn, attrs):
     return accepts
 
 
+def _require_case_target(spec):
+    """§1 用例预算 `precision.case_target` 的**唯一读取点**：必须由 spec 显式声明，**无缺省值**。
+
+    两道校验、都 fail-closed：
+    ① **键缺席** → 报错。原先缺席回落 50，实测的后果是「没人定过用例数」被静默吞掉
+       （extractor 照散文的「建议 50」自己填，全程 0 次被审视）。缺省值在这里就是 fail-open。
+    ② 键在但不是 ≥1 的整数（含 `True`/`False`——`bool` 是 `int` 的子类，不先挡掉
+       `case_target: true` 会被当成 1）→ 报错，堵零用例空跑冒充验收。
+
+    ⚠ `gen_cases` 与 `_dry_run` **必须共用本函数**：dry-run 是 CP-B 的契约自检，
+    它若比真跑宽松一格，就是一道「自检过了、真跑照崩」的假门。
+    """
+    precision = spec.get("precision") or {}
+    if "case_target" not in precision:
+        raise ValueError(
+            "precision.case_target 缺失：用例数须由 spec 显式声明，**无缺省值**——"
+            "缺省会让『这个算子该造多少条用例、依据是什么』永远不必回答。"
+            "torch_parity 档按完整笛卡尔矩阵大小填（须与矩阵精确相等）；"
+            "其它档须给出该数字的依据，不许随手填一个。")
+    case_target = precision["case_target"]
+    if isinstance(case_target, bool) or not isinstance(case_target, int) or case_target < 1:
+        raise ValueError(f"precision.case_target 须为 ≥1 的整数（防零用例空跑冒充验收），得 {case_target!r}")
+    return case_target
+
+
 def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None, empty_accepts=None):
     """§1 覆盖-预算计划。返回 (entries, meta)。选择端无 rng（结构序 + 原始索引 tie-break）。
     ① §1.4 特殊场景（每 dtype，强制）→ ② 白名单必覆盖（key dtype × 每 attr × 大 shape，强制，防关键联合被采样丢）
@@ -2733,6 +2762,15 @@ def gen_cases(spec, work_dir):
     # mode 派生同源，否则同一份省略了该键的 spec 会被规划成 cpp、却被派去跑 cpp_extension（P5）。
     runner_form = repo_adapter.spec_runner_form(spec)
     check_spec_capability(in_params, runner_form)        # 能力边界前置：先于 load_golden，别为不支持的算子白加载 golden
+    # §1 用例预算 `spec.precision.case_target`（**必填、无缺省**，见 `_require_case_target`）。
+    # < 强制下限时 _plan 用 max(target,|forced|)、emit>target 并 note（评审 #8）。
+    # ⚠ **位置刻意夹在这里**，两侧都是有意的：
+    #   · 排在 `check_spec_capability` **之后** —— 与 `_dry_run` 的次序**逐字一致**。两条路的报错
+    #     优先级一旦分叉，「CP-B 自检报 A、CP-D 真跑报 B」就会把同一份坏 spec 说成两回事。
+    #   · 排在 `load_golden` / `os.makedirs` **之前** —— 那两步会**执行**用户侧 `golden.py`
+    #     （顶层副作用照跑）并真建目录；把「这份 spec 压根没定过用例数」拖到它们之后才报，
+    #     就成了「先动了外部状态、再说这活不能干」（经 run_workflow 调用时前面还夹着清残留与 staging）。
+    case_target = _require_case_target(spec)
     # C1：load_golden 返回具名元组，`.out_shape` 是**可选**的（未导出=None → 缺省同形语义）。
     _g = load_golden(op)                             # 具名元组：按名取，别再位置解包
     golden_fn, golden_source, out_shape_fn = _g.fn, _g.source, _g.out_shape
@@ -2748,12 +2786,6 @@ def gen_cases(spec, work_dir):
     vmode = spec["verify_mode"]
     exact = vmode == "exact"
     os.makedirs(work_dir, exist_ok=True)
-
-    # §1 用例预算 case_target（spec.precision.case_target，默认 50）。校验 int 且 ≥1——堵 0/负/非整
-    # 空跑冒充验收（评审 #5）；< 强制下限时 _plan 用 max(target,|forced|)、emit>target 并 note（评审 #8）。
-    case_target = (spec.get("precision") or {}).get("case_target", _DEFAULT_CASE_TARGET)
-    if isinstance(case_target, bool) or not isinstance(case_target, int) or case_target < 1:
-        raise ValueError(f"precision.case_target 须为 ≥1 的整数（防零用例空跑冒充验收），得 {case_target!r}")
 
     # 多输出契约触发（据 spec 字段、op-中立）+ torch_allclose 容差分源参数（仅 torch 对标场景用）。
     uses_multi = _uses_output_contract(spec)
@@ -2995,7 +3027,8 @@ def _build_dry_run_ledger(spec, preparation_inputs=None):
     attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
-    case_target = (spec.get("precision") or {}).get("case_target", _DEFAULT_CASE_TARGET)
+    # 与 gen_cases 同一读取点：dry-run 若比真跑宽松，CP-B 的契约自检就是假门。
+    case_target = _require_case_target(spec)
     # G4：取 cost 模型。**只对「golden.py 还没写」降级为「未核」**，不吞其它加载失败。
     # ⚠ 原来是 `except Exception` 一把吞：一份**已存在但坏掉**的 golden.py（语法错、顶层抛异常、
     # 契约导出不全）也能安静通过 CP-B —— 而散文把 dry-run 称作「契约自检」，这就是 fail-open。
@@ -3065,7 +3098,8 @@ def _build_dry_run_ledger(spec, preparation_inputs=None):
             "numpy_version": np.__version__,
             "numpy_stream_pin": current_numpy_stream_pin(),
             "numpy_stream_pin_granularity": _NUMPY_STREAM_PIN_GRANULARITY,
-            "default_case_target": _DEFAULT_CASE_TARGET,
+            # ⚠ 原有 `default_case_target` 已随缺省值一并删除：`case_target` 现在必由 spec 显式声明，
+            #   账本再落一个「缺省值」会重新暗示存在缺省。实际用的那个数在 `planning.case_target`。
             "default_golden_cost_budget": _GOLDEN_COST_BUDGET,
             "case_profiles": list(_CASE_PROFILES),
             "operator_classes": list(_OPERATOR_CLASSES),

@@ -56,6 +56,9 @@ _DTYPE_GAP_KIND = "dtype_unsupported_by_op_def"
 _TARGET_HW_GAP_KIND = "dtype_unsupported_on_target_hw"
 # 被测物侧「发现类」gap——都喂 passed_with_gaps、都进 unsupported 桶（覆盖门认作已挂账、passed_with_gaps
 # 交叉核验认作有据）。`dtype_deferred` 是「**我们的**能力缺口」，语义不同、不在此集。
+# ⚠ 「不在此集」**不等于**「无终态约束」：deferred 掉的 required dtype 由 gate_task2 方向③ 单独拦
+#   （终态不得为干净 pass，见 `_deferred_untested`）。别把 `dtype_deferred` 加进本集来「顺手实现」
+#   那条约束——加进来会连带把它当成 passed_with_gaps 的合法撑腰（方向①），语义就串了。
 _FINDING_GAP_KINDS = {_DTYPE_GAP_KIND, _TARGET_HW_GAP_KIND}
 
 
@@ -261,6 +264,49 @@ def _collect_dtype_gaps(cs, actual, required, errs):
         elif kind == _TARGET_HW_GAP_KIND:
             unsupported.update(_check_target_hw_gap(g, i, required, actual, errs))
     return deferred, unsupported
+
+
+def _deferred_untested(cs, actual):
+    """终态映射（gate_task2 方向③）的判据；返回 `(未测的 deferred dtype 列表, 读不懂的挂账条目列表)`。
+
+    任一非空 ⇒ 终态不得为最低档的干净 `pass`。
+
+    · **不扣 `dtype_required`**——`dtype_deferred` 的契约语义（`skills/acc-spec/references/taskdoc-to-spec.md`
+      §1.2）就是「**任务书要**、我们这条 pipeline 测不了」，挂了这个 kind 本身即声明该 dtype 被任务书要求。
+      拿 caseset 自报的 `dtype_required` 去缩小范围，等于把「改 caseset 里一个字段」做成免检开关：
+      删掉它、写成 `[]`、写成 `needs_user`、或只是把某个 dtype 从表里摘掉，免检通道就原地复活
+      （同 codex#2 对 dtype_tested 的教训）。deferred 挂了任务书没要求的 dtype，本身就是挂账写错，
+      该改的是那条挂账，不是让它换来一个干净 pass。
+    · **扣 `actual`**——挂了 deferred、该 dtype 其实有真实用例在跑（陈旧条目）→ 不是缺口，不误伤。
+    · **读不懂即拒**：`dtypes` 不是「非空的非空字符串列表」时，门根本不知道被 defer 掉的是什么，
+      这种条目在 `_collect_dtype_gaps` 里会被**静默丢弃**（`isinstance(x, str)` 过滤），于是
+      `"dtypes": "complex64"`（漏了方括号）这类写法能让整条挂账凭空蒸发。判据在这里比
+      `_collect_dtype_gaps` **更严**是有意的：那边的宽松读法喂的是覆盖门，本步不改覆盖门语义。
+    · 非 dict 的历史自由文本条目原样跳过（与 `_collect_dtype_gaps` 同）——它压根不进挂账集，
+      required 侧覆盖门本来就会判「静默收窄」BLOCKED，不需要本判据再管。
+
+    ⚠ **剩余面（如实记账，别当已封）**：判据的输入仍是 **caseset 自报**的 `task_pr_gaps`。把 caseset 里
+      的 deferred 条目**连同** `dtype_required` 里那个 dtype **一起删掉**，caseset 里就再没有该 dtype
+      的任何痕迹——覆盖门和本判据都无从发现。要封死得让两级门去跟 staging 进 `--out` 的权威
+      `spec.json` 逐条对账（`dtype_required` 与结构化 gap 都要对），那是**独立一道 caseset↔spec 透传门**：
+      · 只对 deferred 一项对账 = 半道门——`dtype_required` 照样能被同手法改，反而更像已经防住了；
+      · `gate_task2` 还被 `precision_retest_runner`（CP-F attempt 目录）和手工 CLI 调用，
+        那些目录里不一定有 staged `spec.json`，「有就核、没有就放」又是一处按缺席放行。
+      本函数刻意不半做。这条与 canon 记的「dtype 门仅半闭合——『任务书要求』侧仍由**可缺省的**
+      caseset `dtype_required` 代传、未真正锚到任务书」是同一个缺口，不是本次新开的。
+    """
+    gaps = (cs.get("task_pr_gaps")
+            if isinstance(cs, dict) and isinstance(cs.get("task_pr_gaps"), list) else [])
+    pending, malformed = set(), []
+    for i, g in enumerate(gaps):
+        if not isinstance(g, dict) or g.get("kind") != "dtype_deferred":
+            continue
+        dts = g.get("dtypes")
+        if not (isinstance(dts, list) and dts and all(isinstance(x, str) and x for x in dts)):
+            malformed.append(f"task_pr_gaps[{i}].dtypes={dts!r}")
+            continue
+        pending.update(x for x in dts if x not in actual)
+    return sorted(pending), malformed
 
 
 def _gate_dtype_coverage(cs, errs):
@@ -945,9 +991,10 @@ def gate_task2(d, errs, source_facts_path=None):
     # 无条件先算一次 _valid_finding（结构合法的 finding gap dtype 集），两个方向共用。
     probe = []
     _req = cs.get("dtype_required")
-    _, _valid_finding = _collect_dtype_gaps(
-        cs, _actual_dtypes(cs, None),
-        _req if isinstance(_req, list) and all(isinstance(x, str) for x in _req) else None, probe)
+    _required = (_req if isinstance(_req, list) and all(isinstance(x, str) for x in _req)
+                 else None)
+    _actual_dt = _actual_dtypes(cs, None)
+    _, _valid_finding = _collect_dtype_gaps(cs, _actual_dt, _required, probe)
     _verdict = ov.get("verdict")
     # 方向①：裁决自称 passed_with_gaps → caseset 必须真有结构合法的 finding gap 撑着
     #        （防手改 verdict.json 写个 passed_with_gaps 冒充「有 gap 所以放过」）。
@@ -966,6 +1013,27 @@ def gate_task2(d, errs, source_facts_path=None):
                     "（覆盖门据此认账放行），validator 裁决却是干净 pass——该 gap 未反映进 verdict"
                     "（verdict 侧未接线/被抹）→「算子未实现任务书要求的 dtype」不得机读成干净通过·"
                     "fail-closed 判 FAILED")
+    # 方向③（2026-08-06·aclnnRoll 试跑实测撞出）：`dtype_deferred` 是**我们自己**的能力缺口，它既不属
+    #        `_FINDING_GAP_KINDS`（语义不同、不喂 passed_with_gaps），此前也没有任何终态约束——于是
+    #        「任务书要求的 dtype 挂个 deferred」就成了一条纯免检通道：Q7 覆盖门把它算作已挂账放行，
+    #        终态还能是最低档的**干净 pass**。实测：complex64 / uint32 一条用例没跑，终态却干净。
+    #        「我们这条 pipeline 测不了任务书要的东西」不是可放行状态 → fail-closed 判 FAILED。
+    #        合法终态：`needs_review`（首选·交人核）/ `fail` / `passed_with_risk`；`passed_with_gaps`
+    #        只在**另有**结构合法 finding gap 撑着时才合法（方向① 仍管着，deferred 撑不起它）。
+    #    ⚠ 本步**只改终态映射**：`_gate_dtype_coverage` 的放行逻辑（`accounted = deferred | unsupported`）
+    #        与 `_collect_dtype_gaps` 的读法**原样不动**；deferred 自身的「能力来源」硬校
+    #        （自报不支持、能力表里其实支持 → 拒该 gap）是另一步的事，别在这里顺手做。
+    _pending_deferred, _bad_deferred = _deferred_untested(cs, _actual_dt)
+    if _verdict == "pass" and _pending_deferred:
+        errs.append(f"任务书要求的 dtype {_pending_deferred} 因 dtype_deferred 挂账「一条用例都没测」，"
+                    "validator 裁决却是干净 pass——「我们这条 pipeline 测不了任务书要求的 dtype」"
+                    "不得机读成干净通过（免检通道·fail-open）→ 终态至少须为 needs_review"
+                    "（或 fail / passed_with_risk；passed_with_gaps 另需结构合法的 finding gap 撑着）·"
+                    "fail-closed 判 FAILED")
+    if _verdict == "pass" and _bad_deferred:
+        errs.append(f"dtype_deferred 挂账 {_bad_deferred} 的 dtypes 非「非空 dtype 字符串列表」——"
+                    "门读不出被 defer 掉的是哪些 dtype（这种条目在挂账归并里会被静默丢弃，"
+                    "于是一条挂账凭空蒸发），却给了干净 pass·fail-closed 判 FAILED")
     counts = ov.get("counts") if isinstance(ov.get("counts"), dict) else None
     if counts is None:
         errs.append("verdict.overall.counts 缺失")

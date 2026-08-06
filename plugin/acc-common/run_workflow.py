@@ -15,9 +15,15 @@ stage 间只经 JSON/数据文件交接。CC/Codex/Antigravity 的薄壳只需�
 （精度按构造必过）、性能是 `_mock_us(numel)` 编的假数 + `perf_compare.mock_baseline` 的假基线——它跑出来的
 「PASS」什么都不证明。历史上它却写出与真验收**同名同形**的 `acceptance.json` / `verdict.json`，那才是真危害。
 现在：**非验收通路物理上不写这两个文件**，改写 `dev_run_summary.json` / `dev_precision_check.json`，
-两者都带 `evidence_grade="development"` + `acceptance_note="NON-ACCEPTANCE (mock evidence)…"`
-（字段名与措辞照 `catlass_adapter.run_catlass_mock` 的既有口径，不另发明）。
+两者都带 `evidence_grade="development"` + 一句 `NON-ACCEPTANCE` 注脚（字段名照
+`catlass_adapter.run_catlass_mock` 的既有口径，不另发明）。**注脚按真实原因取串**，
+见 `_non_acceptance_note`——一句 mock 措辞套所有非验收产物会把真机跑说成假数，那是凭空的假话。
 mock 通路本体**保留**（测试与本地演示照用），拔掉的只是「产验收裁决」这条出口。
+
+⚠ **验收通路另有一道 spec 变更门**（`spec_change_gate.py`，入口 + 出口两处）：跑的这份 spec
+必须有一份「谁、为什么」的收据，收据里的 `spec_sha256` 由校验方**当场重算**核对。
+它挡的是「跑不通就改 spec 缩范围」。⚠ 它证的是**内容完整 + 有人显式声明过**，
+**不是**「用户已确认」——收据无密钥，身份不可证，详见那边的模块 docstring。
 """
 import argparse, glob, json, os, sys
 
@@ -30,13 +36,34 @@ import validate_acceptance_state as gate  # noqa: E402
 import dut_source  # noqa: E402
 import verify_aclnn_harness  # noqa: E402
 import content_address  # noqa: E402
+import spec_change_gate  # noqa: E402
 
 # —— C5 · 验收 / 非验收两套产物的口径（唯一定义处）——————————————————————————
 _DEV_GRADE = "development"              # 照 catlass_adapter.run_catlass_mock
 _ACCEPTANCE_GRADE = "acceptance_candidate"   # 照 catlass_adapter.run_catlass 的真机等级
-_NON_ACCEPTANCE_NOTE = (
+# —— 非验收产物的注脚：**按真实原因取串** ——————————————————————————————————————
+# 病历（2026-08-06，aclnnRoll 试跑）：原先一句 mock 措辞套所有非验收产物，于是
+# `--allow-experimental-form` 下那一轮**真机**跑被标成「NPU 输出 = golden.copy()、性能是编的假数」
+# ——一句凭空的假话。读报告的人会以为这轮压根没上过真机，从而错判失败归因。
+# **措辞错方向与判定错方向一样贵**：本仓不许把假数说成真机数据，同样不许把真机数据说成假数。
+_NOTE_MOCK = (
     "NON-ACCEPTANCE (mock evidence)：mock 的「NPU 输出」= golden.copy()（精度按构造必过）、"
     "性能是按元素数编的假数 + 假基线 —— 本产物只证管路接通，非 NPU 验收，不得作为验收结论引用")
+_NOTE_FORM = (
+    "NON-ACCEPTANCE (非准入 runner_form)：数据来自真机、是真实测量值，但该 runner_form 当前"
+    "不用于出验收裁决（见 AGENTS.md §4）—— 本产物只作开发级证据，不得作为验收结论引用")
+_NOTE_OTHER = (
+    "NON-ACCEPTANCE：本轮不产验收裁决（mode 不在验收通路，或 adapter 自报 evidence_grade="
+    "development）—— 本产物只作开发级证据，不得作为验收结论引用")
+#: **兼容别名**（`test_perf_compare` 拿它与 `perf_compare._NON_ACCEPTANCE_NOTE` 对标记词）。
+#: ⚠ 生产代码一律走 `_non_acceptance_note()`，别再拿这一个串去套所有非验收情形——
+#:   那正是上面那条病历的成因。
+_NON_ACCEPTANCE_NOTE = _NOTE_MOCK
+#: 「证据是编出来的」那一类 mode：evidence 由构造保证必过，与真机测量不是一回事。
+#: ⚠ 本表**只用于选措辞**，不参与任何 pass/fail 判定（那是 `_acceptance_capable` 的事）。
+#:   漏登记一个 mock 家族的 mode，后果是落到 `_NOTE_OTHER`——一句不声称数据真假的中性话，
+#:   而**不是**把假数说成真机数据。失败方向刻意选在「少说」这边。
+_MOCK_MODES = frozenset({"mock", "catlass_mock"})
 # 非验收产物名：与验收产物 acceptance.json / verdict.json **物理隔离**（不同名 → 不可能被下游按老路径读走当裁决）
 _DEV_SUMMARY_FILE = "dev_run_summary.json"     # ← 取代 acceptance.json
 _DEV_VERDICT_FILE = "dev_precision_check.json"  # ← 取代 verdict.json
@@ -202,17 +229,40 @@ def _acceptance_capable(mode):
     return mode in _REAL_MACHINE_MODES
 
 
-def _stamp_dev(obj, is_acceptance, grade):
+def _non_acceptance_note(mode, is_experimental_form):
+    """非验收产物的注脚，**按真实原因取串**（三个串的病历见它们的定义处）。
+
+    | 情形 | 取哪一串 | 它声称了什么 |
+    |---|---|---|
+    | mode 属 mock 家族 | `_NOTE_MOCK` | 数据是编的（**只有这里能说这句话**） |
+    | 真机跑、但 runner_form 未准入 | `_NOTE_FORM` | 数据是真的，堵的是「这条 form 不出裁决」 |
+    | 其余（catlass 真机 / adapter 自报 development / 未登记的新 mode） | `_NOTE_OTHER` | 只说不产裁决，**不声称**数据真假 |
+
+    ⚠ 顺序不能反：mock 家族即使同时是非准入 form，也必须落 `_NOTE_MOCK`——
+    「数据是编的」是更强、更要紧的那句话，不能被「form 不准入」盖过去。
+    """
+    if mode in _MOCK_MODES:
+        return _NOTE_MOCK
+    if is_experimental_form:
+        return _NOTE_FORM
+    return _NOTE_OTHER
+
+
+def _stamp_dev(obj, is_acceptance, grade, note=_NOTE_OTHER):
     """非验收通路的产物打 NON-ACCEPTANCE 戳（幂等；验收通路原样返回、一个字节不动）。
 
     perf_compare 已对「消费 mock 基线」的报告自己打过戳；这里补的是它覆盖不到的情形——
     比如精度 fail-fast 时那份根本没跑 perf_compare 的 `perf_report.json`，以及 mock 通路里
     baseline 来自外部 GPU 标杆（基线是真的、但 NPU 侧证据是 mock 的）那种混合情形。
-    `setdefault` 保证不覆盖 perf_compare 已写的措辞。"""
+    `setdefault` 保证不覆盖 perf_compare 已写的措辞。
+
+    ⚠ `note` 缺省取**中性**的 `_NOTE_OTHER`，不是 mock 那一串：漏传实参时的失败方向应当是
+    「少说一句」，而不是「凭空断言这轮数据是编的」。生产路径一律显式传 `_non_acceptance_note(...)`。
+    """
     if is_acceptance or not isinstance(obj, dict):
         return obj
     obj.setdefault("evidence_grade", grade)
-    obj.setdefault("acceptance_note", _NON_ACCEPTANCE_NOTE)
+    obj.setdefault("acceptance_note", note)
     return obj
 
 
@@ -349,6 +399,37 @@ def _assert_acceptance_form_allowed(spec, mode):
     raise SystemExit(
         f"[出口门] 拒绝为 runner_form={runner_form!r}（mode={mode!r}）写验收产物。\n"
         + _experimental_form_message(runner_form))
+
+
+# —— spec 变更门：两道，口径照抄准入门（只拦入口拦不住）—————————————————————————
+# 判据、收据形态、以及**这道门证到哪一步 / 证不到什么**，唯一说明处在
+# `spec_change_gate.py` 的模块 docstring。这里只讲它在编排里落在哪、为什么落在那。
+#
+# ⚠ **只约束验收通路**（`is_acceptance`）：mock 与 `--allow-experimental-form` 下的
+#   `cpp`/`aclnn_py` 是开发逃生通路，物理上不产 acceptance.json，卡死它们只会逼人绕更远的路。
+#   这与 `--source-facts` 必填门、CP-E staging 的分流口径完全一致（按能力分流，非按算子/仓形态）。
+#
+# ⚠ **校的是 `spec_path` 原件，不是 `--out` 里 staging 出来的那份 `spec.json`**：
+#   副本是本进程自己刚写的，拿它当被校对象 = 自己给自己作证。所以入口门刻意排在
+#   `_write_staged_inputs` **之前**（读原件、还没落副本），出口门也仍然只看原件。
+def _assert_spec_change_confirmed(out_dir, spec_path, where, expect=None):
+    """spec 变更门；通过返回收据 payload，不过一律 `SystemExit(BLOCKED(spec 变更未确认))`。
+
+    `expect` 非 None 时另核一条：收据与**入口那一刻**读到的逐字相同。没有这一条的话，
+    「入口过门 → 跑一半改小 spec + 顺手 --update 收据 → 出口再核仍然自洽」就是一条完整的
+    绕过路径（出口只比 sha 的话，改 spec 又改收据的组合恰好对得上）。
+    """
+    try:
+        payload = spec_change_gate.validate(out_dir, spec_path)
+    except spec_change_gate.SpecChangeError as ex:
+        # 捕**基类**：门自身出任何岔子都当没过（fail-closed），绝不把「门坏了」读成「门过了」。
+        raise SystemExit(f"[{where}] {spec_change_gate.BLOCKED_LABEL}：{ex}")
+    if expect is not None and payload != expect:
+        raise SystemExit(
+            f"[{where}] {spec_change_gate.BLOCKED_LABEL}：spec 变更收据在本轮执行途中被改写。\n"
+            f"  → 入口门读到的与现在读到的不是同一份。跑到一半换 spec/换收据产出的裁决，"
+            f"说不清验的到底是哪一版 spec —— fail-closed。")
+    return payload
 
 
 def _read_regular_file(src, what):
@@ -570,6 +651,11 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     而是让三级门 `_gate_build_receipt_source_binding` 的最后一处残留伪装面（自动发现落空 +
     收据自称 `pull_request` → 无对照物可查）**在编排层被封死**：编排每次都显式指路，
     「缺席」本身就成了非法。非验收通路不要求它（那条路物理上不产验收裁决，也没有来源锚要对账）。
+
+    ⚠ 验收通路另需一份 **spec 变更收据**（`<out>/work/spec_change_receipt.json`），
+    缺席或对不上即 `BLOCKED(spec 变更未确认)`。先跑一次
+    `spec_change_gate.py --out <报告根> --spec <spec.json> --init --reason … --by …`。
+    同样只约束验收通路。
     """
     # ★ **第一件事**：让 `--out` 里上一轮的结论立刻不可消费（详见 `_invalidate_stale_results`）。
     # 位置就是要在**所有**可能早退的校验之前——下面的 `--source-facts` 必填门、staging 的可信性
@@ -615,6 +701,16 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     # 放在 `os.makedirs` 之前 = 三份原件有任何问题都不留下半个产物目录。
     staged_payloads = (_read_acceptance_inputs(spec_path, spec, source_facts)
                        if is_acceptance else None)
+    # ★ ① spec 变更门 · 入口（**进 Task1 之前**，见 `_assert_spec_change_confirmed` 上方那段）。
+    # 位置有三条约束，缺一不可：
+    #   · 在 `--source-facts` 必填门与 `_read_acceptance_inputs` 的可信性校验**之后**——
+    #     那两条讲的是「对照物在不在、可不可信」，比「spec 这版谁认领的」更贴近用户当下打错的字，
+    #     且既有测试按各自的错误串断言，顺序反了会把别人的门吞掉；
+    #   · 在 `os.makedirs` / staging / Task1 **之前**——拒跑时不留半个产物目录，与本函数既有口径一致；
+    #   · 在 `_write_staged_inputs` **之前**——此刻 `--out` 里还没有本进程写的 `spec.json` 副本，
+    #     门看得见的只有原件。这是「别校到自己 staging 出来的副本上」那条的物理保证。
+    spec_change = (_assert_spec_change_confirmed(out_dir, spec_path, "spec 变更门·入口")
+                   if is_acceptance else None)
     # U6a：默认已从 mock 翻为 new_example（真机通路）。mock 的「NPU 输出」= golden.copy()、精度按构造必过，
     # 默认指向它 = 默认产出一份与真验收同名同形的**伪造** acceptance.json（危险的默认）。翻真机后，缺真机
     # OPRUNWAY_* 配置时**在跑 Task1 之前**就 fail-closed 停下——绝不落半产物、绝不出「看起来对」的裁决，
@@ -635,12 +731,16 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         json.dump(obj, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         return p
 
+    # 本轮非验收产物的注脚：**按真实原因取一次串**，全程复用同一个值。
+    # ⚠ 它不看 `is_acceptance`，所以下面 adapter 自报 development 把 `is_acceptance` 降级之后，
+    #   这句话依然成立（那种情形本来就落 `_NOTE_OTHER`，不会声称数据真假）。
+    non_acceptance_note = _non_acceptance_note(mode, is_experimental_form)
     print(f"=== OpRunway workflow · {spec['op']} · mode={mode} ===")
     if is_experimental_form:
         print(f"=== ⚠ runner_form={_spec_runner_form(spec)!r} 非验收准入通路"
               f"（--allow-experimental-form）：本次不产 acceptance.json / verdict.json ===")
     if not is_acceptance:
-        print(f"=== ⚠ {_NON_ACCEPTANCE_NOTE} ===")
+        print(f"=== ⚠ {non_acceptance_note} ===")
     # 清上轮残留，防 stale 真基线被复用。`_torch_npu_baseline.json` / `perf_collect.json` / `_perf_plan.json`
     # 同理必清：本轮若性能没采成，留在 work 里的上一轮基线会被 `_real_baseline_or_blocked` 当成本轮真数读走
     # ——那正是「用旧数冒充这次达标」，比缺基线挂起坏得多。
@@ -729,11 +829,15 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     verdict = validator.validate(spec, caseset, evidence)
     if is_acceptance:
         _assert_acceptance_form_allowed(spec, mode)     # ② 出口门，见该函数的 ⚠
+        # ★ ② spec 变更门 · 出口（**写验收裁决之前**）。口径与准入门那两道完全一致：
+        #   只拦入口是拦不住的——绕开 CLI 直接 `run(...)`、或跑到一半换 spec，入口那次校验早已过去。
+        _assert_spec_change_confirmed(out_dir, spec_path, "spec 变更门·出口",
+                                      expect=spec_change)
         _dump(verdict, "verdict.json")
     else:   # 非验收通路：精度判定照跑（管路自检要它），但**不写 verdict.json**——mock 下 out=golden.copy()，
             # 那份「pass」是构造出来的，落成验收裁决文件名就是伪证。
         verdict["evidence_grade"] = grade
-        verdict["acceptance_note"] = _NON_ACCEPTANCE_NOTE
+        verdict["acceptance_note"] = non_acceptance_note
         _dump(verdict, _DEV_VERDICT_FILE)
     o = verdict["overall"]
     print(f"[Task2 run+validate] 裁决={o['verdict']} {o['counts']}")
@@ -775,7 +879,8 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
                   "summary": {"perf_cases": 0, "cases_scored": 0, "达标": 0, "blocked": 0,
                               "status": "skipped_precision_gate"}}
         report = perf_compare.attach_skipped_shape_plan(report, caseset)
-        _dump(_stamp_dev(report, is_acceptance, grade), "perf_report.json")
+        _dump(_stamp_dev(report, is_acceptance, grade, non_acceptance_note),
+              "perf_report.json")
         print(f"[Task3 perf_compare] 跳过（精度={o['verdict']} 未全过 → fail-fast）")
     else:
         # Task 3（new_example 会写真基线 _real_baseline.json；否则 mock；T8：--gpu-baseline / spec gpu_external）
@@ -817,7 +922,8 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
             svg_path = os.path.join(out_dir, svg_name)
             perf_sim_plot.render_svg(report["simulation"], svg_path)
             report["simulation_plot"] = {"file": svg_name, "sha256": perf_sim_plot.sha256_of(svg_path)}
-        _dump(_stamp_dev(report, is_acceptance, grade), "perf_report.json")
+        _dump(_stamp_dev(report, is_acceptance, grade, non_acceptance_note),
+              "perf_report.json")
         print(f"[Task3 perf_compare] {report['summary']} (基线={report['baseline_source']})")
         if report.get("acceptance_note"):
             print(f"[Task3 perf_compare] ⚠ {report['acceptance_note']}")
@@ -936,6 +1042,10 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         if gpu_prov is not None:
             acc["gpu_baseline"] = gpu_prov
         _assert_acceptance_form_allowed(spec, mode)     # ② 出口门（acceptance.json 侧），见该函数的 ⚠
+        # ★ spec 变更门 · 出口（acceptance.json 侧）。与上面 verdict.json 那处**都要有**：
+        #   `acceptance.json` 才是人和 CI 直接读的那一份，漏在这一格等于门只守了半扇。
+        _assert_spec_change_confirmed(out_dir, spec_path, "spec 变更门·出口",
+                                      expect=spec_change)
         final_file = _dump(acc, "acceptance.json")
         try:
             md_file = render_acceptance_markdown.write_report(out_dir)
@@ -954,7 +1064,7 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         # 的词汇，留着就还能被 `acc["state"] == "PASSED"` 这类代码顺手当裁决读；换成 pipeline_* 后，任何想拿它
         # 冒充验收的地方都得先改代码——把「顺手误用」变成「明知故犯」。
         dev = {"op": spec["op"], "repo_mode": mode,
-               "evidence_grade": grade, "acceptance_note": _NON_ACCEPTANCE_NOTE,
+               "evidence_grade": grade, "acceptance_note": non_acceptance_note,
                "is_acceptance": False,
                "pipeline_result": overall,      # 人读串；**不是**验收裁决
                "exit_code": exit_code,
@@ -972,7 +1082,7 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         final_file = _dump(dev, _DEV_SUMMARY_FILE)
     print(f"--- 产物在 {out_dir}/ ---（本次总结: {os.path.basename(final_file)}）")
     if not is_acceptance:
-        print(f"--- ⚠ {_NON_ACCEPTANCE_NOTE} ---")
+        print(f"--- ⚠ {non_acceptance_note} ---")
     return {"verdict": verdict, "perf_report": report,
             "gate": {"passed": gate_passed, "errors": gate_errs}, "overall": overall,
             "state": state, "exit_code": exit_code, "requires_human_cp": requires_human_cp,
@@ -995,7 +1105,10 @@ def main():
         description="OpRunway Task1→2→3 编排。**正式验收裁决当前只由 cpp_extension 产出**"
                     "（唯一跑通完整 torch_parity 矩阵的通路）；cpp / aclnn_py 需 "
                     "--allow-experimental-form 才能跑，且只产 dev_run_summary.json / "
-                    "dev_precision_check.json（均标 NON-ACCEPTANCE）。mock 等通路同理。")
+                    "dev_precision_check.json（均标 NON-ACCEPTANCE）。mock 等通路同理。"
+                    "⚠ 验收通路另需 <out>/work/spec_change_receipt.json："
+                    "先跑 spec_change_gate.py --out <报告根> --spec <spec.json> "
+                    "--init --reason \"…\" --by \"…\"，否则 BLOCKED(spec 变更未确认)。")
     ap.add_argument("spec")
     ap.add_argument("--mode", default=None, choices=list(repo_adapter.MODES),
                     help="省略时据 spec.runner_form 派生：cpp→new_example、aclnn_py→aclnn_py、"

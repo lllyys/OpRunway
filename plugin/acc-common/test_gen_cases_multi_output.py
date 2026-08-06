@@ -838,7 +838,7 @@ class UnpairedComboLedgerTest(unittest.TestCase):
         in_params = [p for p in spec["params"] if p["io"] == "in"]
         attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
         dtypes = next(p for p in in_params if p["name"] == "self")["dtype"]
-        target = (spec.get("precision") or {}).get("case_target", GC._DEFAULT_CASE_TARGET)
+        target = GC._require_case_target(spec)          # 无缺省：spec 没写就该当场炸
         of = GC.load_golden(spec["op"]).out_shape
         _entries, meta = GC._plan(
             spec, in_params, dtypes, attrs_default, spec["op"], target,

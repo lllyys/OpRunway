@@ -2,6 +2,33 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-06 · `case_target` 的缺省 50 删掉了：用例数必须由 spec 显式声明
+
+- `gen_cases` 的 `_DEFAULT_CASE_TARGET = 50` 连同散文里的「缺省 50 / `AskUserQuestion` 建议 50」一起删。
+  实测：extractor 照建议自己填了 50、全程 0 次被审视，792 个候选组合就这么留了 50 条——
+  缺省值让「这个算子该造多少条、依据是什么」永远不必回答，是个 fail-open。
+  顺带记账：那条规矩还要求用 `AskUserQuestion`，而 `acc-spec-extractor` 的 `tools:` 里根本没这个工具，
+  第 2 步物理上执行不了（跨制品工具契约不一致，另案）。
+- 现在缺这个键，`gen_cases` 真跑与 `--dry-run` **两条路都当场 fail-fast**（共用 `_require_case_target`）——
+  dry-run 若比真跑宽松就是「自检绿了、真跑照崩」的假门。
+- 爆炸半径逐份补了显式值：`sign`/`neg`/`equal` + 两份 test fixture + `testdata/gpu_demo` 写回它们
+  一直在吃的那个 50（`ExistingOpsByteIdenticalTest` 的字节 pin 因此原样通过）；
+  `catlass_basic_matmul` **有意不补**——它的用例由 `catlass_adapter` 按 shape 列表造，不读这个键，
+  填任何数都是死字段。⚠ 补上的 50 是**历史沿用值、不是按矩阵算出来的依据**，笛卡尔算法在步骤 11。
+
+## 2026-08-06 · 实测 `aclIntArray`：`cpp_extension` 不是不支持，是**静默生成标量**
+
+- 只跑不改，产出 `doc/oprunway-aclintarray-probe.md`。`acc-spec-extractor` 那句
+  「`aclnn_runtime` 和 `cpp_extension` 都不支持 `aclIntArray`」**半对半错**：`aclnn_py` 确实
+  真 fail-closed（`aclnn_runner.py:257`），但 `cpp_extension_codegen` **不 raise**，
+  它给 `const aclIntArray*` 生成了标量 `int64_t` + Torch schema `int`，生成物里连
+  `aclCreateIntArray` 都没有。spec 的 `dtype` 受控词表里**根本没有数组类型**，作者没有第二个选项。
+- ⚠ `cpp_extension` 现在之所以还没出事，靠的是隔壁 CP-C0 `preflight_aclnn.py` 替它挡着，
+  而且那里是**两道门串着**：签名解析拒 `aclIntArray*`，外加 slot ctype ↔ 签名 ctype 逐项对账。
+  所以只改 `_classify_param` 仍是干净 BLOCKED（对账那道会拦）；**真正的 fail-open 中间态是
+  「解析器 + `gen_cases._attr_ctype` 两侧都改成 `int_array`、却没动 codegen」**——两道门同时放行，
+  codegen 照旧吐 `int64_t`。修的时候 `_attr_ctype` 与 codegen 类型选择必须同批落地。
+
 ## 2026-08-06 · 收据侧凭据判别式去分叉 + `--repo` 凭据门前置到 build 之前
 
 - `make_vendor_build_receipt.py` 里那份私有 `_url_has_userinfo` **删掉**，统一调

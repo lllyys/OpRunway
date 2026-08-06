@@ -3,6 +3,14 @@
 > 已定需求（用户 2026-07-15）。权威源：`cann/opbase` `docs/zh/ops_precision_standard/experimental_standard.md`
 > （pin `f69d4e4e3f2626ddd37855a8d05063a1764ac4c9`）。本蓝图给实现，供对抗评审「先审地基」。
 
+> ⚠ **本文关于 `case_target` 的这两条已于 2026-08-06 被取代，本文只作历史记录，别当现行规则读**：
+> ① 「**默认 50 / 旧 spec 无此字段回落 50**」——缺省值已从 `gen_cases` 删除，`precision.case_target`
+> **必填、无缺省**，缺席即 fail-fast（真跑与 `--dry-run` 两条路都拦）。删它的理由是实测：extractor
+> 照「建议 50」自己填、全程 0 次被审视，792 个候选组合就这么留了 50 条。
+> ② 「**acc-spec `AskUserQuestion` 问用户**」——那条规矩物理上执行不了：`acc-spec-extractor` 的
+> `tools:` 里没有这个工具。现行口径见 `plugin/skills/acc-spec/references/taskdoc-to-spec.md`
+> 的『`case_target` 怎么定』。本文其余部分（覆盖-预算算法、白名单、1-wise 采样、数量门软化）仍然成立。
+
 ## 决策更新 v2（2026-07-15 · 评审 REVISE 后）
 
 评审（ultracode 4 lens + 汇总，run `wf_bc5287c2`）判 **REVISE**，抓 12 条必修。用户就 4 个改交付物的岔口定：

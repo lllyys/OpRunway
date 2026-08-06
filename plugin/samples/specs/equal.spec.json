@@ -54,7 +54,9 @@
       "max_mismatch": 0,
       "not_settled": false
     },
-    "threshold_source": "bool 逐元素严格一致（== 无容差）"
+    "threshold_source": "bool 逐元素严格一致（== 无容差）",
+    "case_target": 50,
+    "case_target_source": "显式化既有事实：本样例此前无此键、一直吃 gen_cases 的缺省 50；2026-08-06 缺省被删，这里如实写回它一直在用的那个数（改成别的数会改变已 pin 的 caseset 字节）。⚠ 它是历史沿用值、不是按矩阵算出来的依据"
   },
   "perf": {
     "baseline": "tbe",

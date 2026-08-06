@@ -283,7 +283,10 @@ class PassedWithRiskE2ETest(unittest.TestCase):
                 "params": [{"name": "self", "io": "in", "dtype": ["float32"]},
                            {"name": "out", "io": "out", "dtype": ["float32"]}],
                 "generalize": True, "verify_mode": "numerical",
+                # case_target 无缺省（2026-08-06），须显式写；本用例只需从生成的 caseset 里
+                # 挑出一条 numel≥16 的 fp32 精度 case 当 defect，条数本身无验收含义 → 取 20 够用。
                 "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default",
+                              "case_target": 20,
                               "acceptance_policy": {"standard": "ascendoptest_default",
                                                     "error_rate": 0.1}},
                 "perf": {"baseline": "tbe", "target_ratio": 1.0,

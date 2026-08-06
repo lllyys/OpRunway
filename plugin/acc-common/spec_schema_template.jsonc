@@ -96,7 +96,12 @@
     "tolerance_policy_id": "<spec 级摘要：exact→exact；ascendoptest→ascendoptest_default；mere_mare/atk_double→ecosystem_mere_mare；torch→torch_allclose>",
     "threshold": "<number：exact→0；numerical→主 dtype 默认（AscendOpTest fp16≈1e-3 等），标『(推断/待工具核实)』；behavioral 则删掉本键>",
     "threshold_source": "<阈值出处说明>",
-    "case_target": "<int，精度用例目标数；缺省 50。acc-spec 运行时 AskUserQuestion 问用户（建议 50），可先 gen_cases --dry-run 拿 [forced_total(=强制下限 S), pool_max] 区间呈现；须 ≥1（0/负→gen_cases fail-fast，堵零用例空跑冒充验收）。gen_cases 按 opbase §1 覆盖-预算铺到此数（覆盖驱动、封顶；< S 抬到 S、> pool_max 封顶且数量门软化 PASS+note）>"
+    // ⚠ `case_target` **必填、无缺省**（2026-08-06 删掉原「缺省 50」）：不写这个键，gen_cases 真跑与
+    //   `--dry-run` 两条路都当场 fail-fast。删缺省的理由是实测——extractor 照散文的「建议 50」自己填了
+    //   50、全程 0 次被审视，792 个候选组合就这么留了 50 条；缺省值让「这个算子该造多少条、依据是什么」
+    //   永远不必回答。**别把默认值加回来**，也别在别处兜一个。
+    "case_target": "<int，精度用例目标数，**必填无缺省**；须 ≥1（0/负/非整→gen_cases fail-fast，堵零用例空跑冒充验收）。**按覆盖矩阵算、不是拍一个数**：case_profile==torch_parity 时须精确等于 dtype×rank×shape_profile×attribute_profile；其它档按覆盖轴推算并在 case_target_source 写清算法。gen_cases 按 opbase §1 覆盖-预算铺到此数（覆盖驱动、封顶；< forced_total(=强制下限 S) 抬到 S、> pool_max 封顶且数量门软化 PASS+note）>",
+    "case_target_source": "<可选但强烈建议：上面那个数是怎么来的（矩阵怎么乘 / 沿用了哪份既有事实）。给不出依据就停下问用户，别随手填一个数>"
   },
   "task_pr_gaps": ["<所有缺口/矛盾/推断，推断项标 (推断)；无则空数组>"],
   // 批 4 · golden 判据锚（**判据只从 spec 派生**，硬约束 #5）。可选但**正式验收强烈建议写**，故留在主体：
@@ -400,7 +405,9 @@
 //     "dtype_required": ["<权威全集>"], "dtype_tested": ["float32", "float16"],
 //     "verify_mode": "numerical",
 //     "precision": {"oracle": "<oracle>", "standard": "<standard>", "tolerance_policy_id": "<id>",
-//                   "threshold": <number>, "threshold_source": "<出处>", "case_target": 50},
+//                   "threshold": <number>, "threshold_source": "<出处>",
+//                   // ⚠ 占位符，**不是建议值**：这个数必须按本算子的覆盖矩阵算出来（无缺省，见上文 case_target 注释）。
+//                   "case_target": <int>, "case_target_source": "<这个数怎么来的>"},
 //     "task_pr_gaps": [],
 //     "golden": {"source": "<source>", "method_kind": "<method_kind>",
 //                "authorization": {"kind": "<kind>"}}

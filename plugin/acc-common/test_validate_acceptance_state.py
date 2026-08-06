@@ -2181,6 +2181,140 @@ class GateTargetHwGapTest(unittest.TestCase):
             self.assertTrue(any("dtypes" in e for e in errs), (bad_dtypes, errs))
 
 
+def _defgap(dtypes=("complex64",), reason="gen_cases 生成层无该 dtype 分支"):
+    """`dtype_deferred` 结构化条目——「我们这条 pipeline 测不了」的自认能力缺口。"""
+    return {"kind": "dtype_deferred", "dtypes": list(dtypes), "reason": reason}
+
+
+class GateDeferredDtypeTerminalStateTest(unittest.TestCase):
+    """`dtype_deferred` 的**终态映射**（gate_task2 方向③）——实测撞出的免检通道回归钉。
+
+    aclnnRoll 试跑（2026-08-05）：complex64 / uint32 挂 `dtype_deferred` → Q7 覆盖门算作已挂账放行；
+    `dtype_deferred` 又不在 `_FINDING_GAP_KINDS` 里 → 不落 `passed_with_gaps` → 终态可以是**干净 pass**，
+    而任务书要求的 dtype 一条用例都没跑。**这条通道必须堵死**：终态不得为最低档的干净 `pass`。
+
+    判据比覆盖门侧的挂账归并**更严**、且**不看 `dtype_required`**：那个字段就在同一份 caseset 里，
+    拿它去缩范围等于把「改自己一个字段」做成免检开关（删掉 / `[]` / `needs_user` / 摘掉一个 dtype）；
+    `dtypes` 写成 `"complex64"` 这种漏方括号的形态在归并里会被静默丢弃，同样不许换来干净 pass。
+
+    ⚠ 本类只钉「终态」这一半。覆盖门的**放行逻辑**（`accounted = deferred | unsupported`）与
+    deferred 自身的能力来源硬校**是另一步的事**，这里反而有一条测试专门钉住「放行逻辑没被顺手改掉」——
+    两步的 mutation 校验要分得开。"""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _errs(self, stage):
+        errs = []
+        G._GATES[stage](self.d, errs)
+        return errs
+
+    def _cs(self, gaps, required=("float32", "float16", "complex64")):
+        cs = json.loads(json.dumps(CASESET))          # 真实用例 dtype = {float32, float16}
+        if required is not None:
+            cs["dtype_required"] = (list(required) if isinstance(required, (list, tuple))
+                                    else required)
+        cs["dtype_tested"] = ["float32", "float16"]
+        cs["task_pr_gaps"] = gaps
+        return cs
+
+    def _run_task2(self, cs, verdict, **vd_kw):
+        _w(self.d, "caseset.json", cs)
+        _w(self.d, "evidence.json", _ev(self.d, ["x_000", "x_001"]))
+        _w(self.d, "verdict.json", _vd(verdict, **vd_kw))
+        return self._errs("task2")
+
+    # --- 核心：required 的 dtype 挂 deferred 未测 → 终态不得为干净 pass ---
+    def test_deferred_required_dtype_blocks_clean_pass(self):
+        """任务书要 complex64、一条 complex64 用例都没有、gaps 挂结构化 dtype_deferred，
+        validator 却给干净 pass → 门 fail-closed 判 FAILED。"""
+        errs = self._run_task2(self._cs([_defgap()]), "pass")
+        self.assertTrue(any("dtype_deferred" in e and "complex64" in e and "fail-closed" in e
+                            for e in errs), errs)
+
+    def test_needs_review_is_the_accepted_terminal_state(self):
+        """规定的合法终态：`needs_review`（我们测不了 → 交人核）→ 门不再挡。"""
+        self.assertEqual(self._run_task2(self._cs([_defgap()]), "needs_review", unc=1), [])
+
+    def test_fail_terminal_state_not_flagged(self):
+        """更严的 `fail` 同样合法——门只拦最低档的干净 pass，不重判精度裁决。"""
+        self.assertEqual(self._run_task2(self._cs([_defgap()]), "fail", fail=1), [])
+
+    def test_deferred_cannot_prop_up_passed_with_gaps(self):
+        """`dtype_deferred` 撑不起 `passed_with_gaps`（那是被测物侧发现类 gap 的档位）→ 方向① 仍拒。
+        钉这条是防「把 dtype_deferred 塞进 _FINDING_GAP_KINDS」这种看起来更省事的错改法。"""
+        errs = self._run_task2(self._cs([_defgap()]), "passed_with_gaps")
+        self.assertTrue(any("无据" in e for e in errs), errs)
+
+    # --- 反向不误伤 ---
+    def test_stale_deferred_on_tested_dtype_not_flagged(self):
+        """挂了 deferred、该 dtype 其实**有真实用例在跑**（陈旧条目）→ 不是缺口，干净 pass 合法。"""
+        self.assertEqual(
+            self._run_task2(self._cs([_defgap(dtypes=["float32"])],
+                                     required=("float32", "float16")), "pass"), [])
+
+    def test_no_gap_clean_pass_not_flagged(self):
+        """完全无 gap 的老路子一行不变：干净 pass 合法。"""
+        self.assertEqual(self._run_task2(self._cs([], required=("float32", "float16")),
+                                         "pass"), [])
+
+    # --- 反后门：别想删个字段把免检通道开回来 ---
+    def test_deleting_dtype_required_does_not_reopen_the_channel(self):
+        """删掉 `dtype_required` 不得连带绕过终态约束——`dtype_deferred` 的契约语义本身就声明
+        「任务书要、我们测不了」（同 codex#2 对 dtype_tested 的教训）。"""
+        errs = self._run_task2(self._cs([_defgap()], required=None), "pass")
+        self.assertTrue(any("dtype_deferred" in e and "complex64" in e for e in errs), errs)
+
+    def test_needs_user_dtype_required_does_not_reopen_the_channel(self):
+        """`dtype_required="needs_user"`（全集未知）同理：全集不知道，不代表挂账的缺口可以当没有。"""
+        errs = self._run_task2(self._cs([_defgap()], required="needs_user"), "pass")
+        self.assertTrue(any("dtype_deferred" in e and "complex64" in e for e in errs), errs)
+
+    def test_empty_dtype_required_does_not_reopen_the_channel(self):
+        """`dtype_required=[]`（覆盖门按「未声明」放行的那档）同理，不得据此把缺口抹平。"""
+        errs = self._run_task2(self._cs([_defgap()], required=[]), "pass")
+        self.assertTrue(any("dtype_deferred" in e and "complex64" in e for e in errs), errs)
+
+    def test_narrowing_dtype_required_does_not_reopen_the_channel(self):
+        """把 complex64 从 caseset 的 `dtype_required` 里摘掉、挂账留着 → 覆盖门不再喊「覆盖不足」，
+        终态映射**仍**得拦住干净 pass。`dtype_deferred` 的语义本身就是「任务书要、我们测不了」，
+        不能拿同一份 caseset 自报的另一个字段来给它开免检。"""
+        errs = self._run_task2(self._cs([_defgap()], required=("float32", "float16")), "pass")
+        self.assertTrue(any("dtype_deferred" in e and "complex64" in e for e in errs), errs)
+
+    def test_malformed_deferred_gap_blocks_clean_pass_not_crash(self):
+        """畸形 dtypes（漏方括号 / 混类型 / 空表 / 缺字段）在挂账归并里会被**静默丢弃**——
+        门读不出被 defer 掉的是什么，就不得给干净 pass；同时不许崩（抗坏输入）。"""
+        for bad in ("complex64", [1, 2], ["complex64", 1], [], [""], None, {"nope": 1}):
+            errs = self._run_task2(self._cs([{"kind": "dtype_deferred", "dtypes": bad}]), "pass")
+            self.assertTrue(any("dtype_deferred" in e and "读不出" in e for e in errs), (bad, errs))
+
+    def test_malformed_deferred_gap_not_flagged_when_terminal_state_is_not_clean_pass(self):
+        """反向不误伤：终态本来就不是干净 pass 时，畸形挂账不额外记 error（本条只管终态映射）。"""
+        errs = self._run_task2(self._cs([{"kind": "dtype_deferred", "dtypes": "complex64"}]),
+                               "needs_review", unc=1)
+        self.assertEqual(errs, [])
+
+    def test_free_text_gap_left_to_the_coverage_gate(self):
+        """历史自由文本 gap 原样跳过——它压根不进挂账集，required 侧由**覆盖门**判「静默收窄」BLOCKED
+        （aclnnRoll 实测正是这条路给出了正确结果），终态映射不重复插手。两级门各判一次，这里都钉住。"""
+        cs = self._cs(["complex64 生成层不支持，见 PR 自测脚本"])   # required 含 complex64
+        _w(self.d, "caseset.json", cs)
+        self.assertTrue(any("dtype 覆盖不足" in e and "complex64" in e
+                            for e in self._errs("task1")))
+        self.assertEqual(self._run_task2(cs, "pass"), [])
+
+    # --- 边界钉：本步**只改终态**，覆盖门的放行逻辑原样不动（步骤 9 才动它）---
+    def test_task1_coverage_gate_release_logic_untouched(self):
+        """同一份 caseset 走 task1：覆盖门仍认 `dtype_deferred` 为已挂账、仍放行。
+        若哪天这条变红，说明有人把「放行逻辑」和「终态映射」两步搅在了一起。"""
+        _w(self.d, "caseset.json", self._cs([_defgap()]))
+        self.assertEqual(self._errs("task1"), [])
+
+
 class PassedWithGapsWiringTest(unittest.TestCase):
     """C4 最危险的拼接点：`passed_with_gaps` 从 validator 一路走到 `run_workflow` 的终态/退出码。
 

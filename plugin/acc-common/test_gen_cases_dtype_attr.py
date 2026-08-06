@@ -245,7 +245,10 @@ class SemanticIdTest(unittest.TestCase):
                "verify_mode": "numerical", "params_source": "fixture",
                "params": [{"name": "self", "io": "in", "dtype": ["float32", "float16"]},
                           {"name": "out", "io": "out", "dtype": ["float32", "float16"]}],
-               "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default"},
+               # case_target 无缺省（2026-08-06），须显式写；取 50 是为了与对照面 `_SIGN_FX`
+               # 同预算——本用例比的是「同 id → 同数据」，两侧预算不同会让共同 id 集无谓地缩小。
+               "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default",
+                             "case_target": 50},
                "perf": {"baseline": "tbe", "target_ratio": 0.95,
                         "case_source": "precision_cases",
                         "shape_classification": {"metric": "sum_input_bytes",
@@ -561,7 +564,9 @@ def _isclose_bf16_nan_spec():
                        {"name": "atol", "io": "attr", "dtype": ["double"], "default": 1e-08},
                        {"name": "equal_nan", "io": "attr", "dtype": ["bool"], "default": False},
                        {"name": "out", "io": "out", "dtype": ["bool"]}],
-            "precision": {"standard": "exact"},
+            # case_target 无缺省（2026-08-06），须显式写；50 = 本夹具此前吃的那个缺省值，
+            # 保持既有覆盖不变（这几条负例断言的是 attr 笛卡尔覆盖，不是具体条数）。
+            "precision": {"standard": "exact", "case_target": 50},
             "attr_matrix": [{"equal_nan": True}, {"equal_nan": False}]}
 
 
@@ -735,7 +740,10 @@ class GoldenTorchPreferredTest(unittest.TestCase):
         sp = {"op": "Sign", "runner_form": "cpp", "verify_mode": "numerical",
               "params": [{"name": "self", "io": "in", "dtype": ["float32"]},
                          {"name": "out", "io": "out", "dtype": ["float32"]}],
-              "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default"}}
+              # case_target 无缺省（2026-08-06），须显式写；本用例只看每条 case 的
+              # golden_source 标签，条数无关紧要 → 取小值让它跑得快。
+              "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default",
+                            "case_target": 3}}
         d = tempfile.mkdtemp()
         try:
             cs = GC.gen_cases(sp, d)
@@ -1286,7 +1294,7 @@ def _plan_args(sp):
     attrs_default = {p["name"]: p.get("default") for p in sp["params"] if p["io"] == "attr"}
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     return (sp, in_params, self_param["dtype"], attrs_default, sp["op"],
-            (sp.get("precision") or {}).get("case_target", GC._DEFAULT_CASE_TARGET))
+            GC._require_case_target(sp))                # 无缺省：spec 没写就该当场炸
 
 
 def _pair_spec(op, budget=_PAIR_BUDGET, case_target=1):
@@ -2116,6 +2124,113 @@ class ExistingOpsByteIdenticalTest(unittest.TestCase):
             self.assertEqual(self._digest(rel), want,
                              f"{rel} 的 caseset/产物字节变了 —— 现有算子的用例集必须逐字节不变"
                              f"（向后兼容硬约束）。若确属有意变更，须单独说明并重取基线摘要。")
+
+
+# ---- `case_target` 无缺省（2026-08-06 删掉 `_DEFAULT_CASE_TARGET = 50`）------------------
+class CaseTargetHasNoDefaultTest(_FakeOpCase):
+    """`precision.case_target` 必须由 spec 显式声明，**没有任何缺省兜底**。
+
+    删缺省的实测理由：extractor 照散文的「建议 50」自己填了 50、全程 0 次被审视，
+    792 个候选组合就这么留了 50 条。缺省值让「这个算子该造多少条、依据是什么」永远不必回答
+    —— 那正是本仓最贵的缺陷类型（fail-open）。
+
+    ⚠ **本类是「别把默认值加回来」的钉子**：把 `_require_case_target` 改回
+    `.get("case_target", 50)`，或在别处兜一个缺省，这里必红。
+    """
+
+    def _spec_without_case_target(self, op="FakeNoCaseTarget"):
+        sp = _fake_spec(op)
+        sp["precision"].pop("case_target")
+        return sp
+
+    def test_module_exposes_no_default_constant(self):
+        """模块级不得再有 `_DEFAULT_CASE_TARGET` 这类缺省常量（有它就等于缺省还在，只是换了个入口）。"""
+        leaked = [n for n in dir(GC)
+                  if "CASE_TARGET" in n.upper() and "DEFAULT" in n.upper()]
+        self.assertEqual(leaked, [],
+                         f"gen_cases 又出现了 case_target 缺省常量：{leaked}；"
+                         f"用例数必须由 spec 显式声明，不许兜默认")
+
+    def test_gen_cases_fails_fast_when_case_target_missing(self):
+        """真跑路径：缺 `case_target` 当场炸，且错误信息指向「须由 spec 显式声明」。"""
+        self.place("FakeNoCaseTarget", _BODY_ELEMENTWISE)
+        with self.assertRaises(ValueError) as cm:
+            GC.gen_cases(self._spec_without_case_target(), self.work())
+        msg = str(cm.exception)
+        self.assertIn("case_target", msg)
+        self.assertIn("无缺省", msg, f"错误信息没说清「无缺省、须显式声明」：{msg}")
+
+    def test_fails_before_touching_golden_or_work_dir(self):
+        """「fail-fast」得是**真的 fast**：报错前不许加载执行 `golden.py`、也不许建 `work_dir`。
+
+        ⚠ 这条防的是「先动外部状态、再说这活不能干」：`load_golden` 会 **执行** 用户侧 golden.py
+        （顶层副作用照跑），`os.makedirs` 会真建目录；经 `run_workflow` 调用时这两步之前还夹着
+        清残留与 staging。口径照抄 `check_spec_capability` 那条「能力边界前置，别为不支持的算子
+        白加载 golden」。
+        """
+        work = os.path.join(tempfile.mkdtemp(), "never_created")
+        self._dirs.append(os.path.dirname(work))
+        with mock.patch.object(GC, "load_golden",
+                               side_effect=AssertionError("case_target 校验前不该加载 golden")):
+            with self.assertRaises(ValueError) as cm:
+                GC.gen_cases(self._spec_without_case_target("FakeNoSideEffect"), work)
+        self.assertIn("case_target", str(cm.exception))
+        self.assertFalse(os.path.exists(work), "报错前不该建出 work_dir")
+
+    def test_check_order_matches_dry_run(self):
+        """两条路的**报错优先级**必须一致：能力边界（空 dtype 集）先于 case_target。
+
+        ⚠ 次序一旦分叉，同一份坏 spec 会被 CP-B 自检和 CP-D 真跑说成两回事——
+        「自检说 A、真跑说 B」比只报其中一个更难查。
+        """
+        sp = self._spec_without_case_target("FakeOrderProbe")
+        sp["params"][0]["dtype"] = []                  # 同时踩两个坑
+        msgs = {}
+        for label, fn in (("gen_cases", lambda: GC.gen_cases(sp, self.work())),
+                          ("_dry_run", lambda: GC._dry_run(sp))):
+            with self.assertRaises(ValueError, msg=label) as cm:
+                fn()
+            msgs[label] = str(cm.exception)
+        for label, msg in msgs.items():
+            self.assertIn("0 用例不得冒充验收", msg,
+                          f"{label} 该先报能力边界（与另一条路同序），实际：{msg}")
+
+    def test_dry_run_fails_fast_too(self):
+        """dry-run 路径口径必须与真跑**一致**。
+
+        ⚠ 这条防的是**假门**：`--dry-run` 是 CP-B 的契约自检，它若比真跑宽松一格，
+        就成了「自检绿了、CP-D 真跑照崩」的门——那种门比没有门更坏。
+        """
+        self.place("FakeNoCaseTargetDry", _BODY_ELEMENTWISE)
+        with self.assertRaises(ValueError) as cm:
+            GC._dry_run(self._spec_without_case_target("FakeNoCaseTargetDry"))
+        self.assertIn("case_target", str(cm.exception))
+
+    def test_present_but_invalid_values_still_rejected(self):
+        """键在、值不合法仍 fail-fast（原有 ≥1 校验没被这轮改动弄丢）。
+
+        `True` 单列：`bool` 是 `int` 的子类，不先挡掉就会被当成 `case_target=1` 悄悄跑起来。
+        """
+        self.place("FakeBadCaseTarget", _BODY_ELEMENTWISE)
+        for bad in (0, -1, True, False, 1.0, "50", None):
+            sp = _fake_spec("FakeBadCaseTarget")
+            sp["precision"]["case_target"] = bad
+            with self.assertRaises(ValueError, msg=f"case_target={bad!r} 竟被放行"):
+                GC.gen_cases(sp, self.work())
+
+    def test_valid_value_still_works(self):
+        """反向对照：显式给了合法值就该正常产用例（证上面几条不是「全都炸」的假绿）。"""
+        self.place("FakeGoodCaseTarget", _BODY_ELEMENTWISE)
+        cs = GC.gen_cases(_fake_spec("FakeGoodCaseTarget", case_target=3), self.work())
+        self.assertEqual(cs["requested_target"], 3)
+        self.assertGreaterEqual(len(cs["cases"]), 1)
+
+    def test_dry_run_ledger_records_no_default(self):
+        """dry-run 账本不得再落 `default_case_target` —— 账本里躺着一个「缺省值」会重新暗示存在缺省。"""
+        self.place("FakeLedgerNoDefault", _BODY_ELEMENTWISE)
+        ledger = GC._build_dry_run_ledger(_fake_spec("FakeLedgerNoDefault", case_target=3))
+        self.assertNotIn("default_case_target", ledger["planner_binding"])
+        self.assertEqual(ledger["planning"]["case_target"], 3)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ import precision_retest_contract as R
 import render_acceptance_markdown as MD
 import repo_adapter
 import run_workflow as W
+import spec_change_gate as S
 import validate_acceptance_state as G
 from test_validate_cpp_extension_receipt import source_facts_payload
 
@@ -76,6 +77,24 @@ def _write_source_facts(path, **kw):
         json.dump(content_address.make_artifact(
             "oprunway/source-facts/v1", source_facts_payload(**kw)), out)
     return path
+
+
+def confirm_spec(out_dir, spec_path, *, reason="首轮：按任务书抽出的初始 spec", by="lys"):
+    """夹具：把「这版 spec 有人认领过」摆出来，让验收通路穿过 spec 变更门。
+
+    ⚠ **只在测试里这么做**——生产侧没有任何自动确认的入口，那道门的全部意义就是逼一次显式声明。
+    本文件测的是 staging / 必填门 / 产物作废，spec 变更门本身另有专测
+    （`test_spec_change_gate.py`），这里只负责别把它们互相挡住。
+    """
+    try:
+        S.validate(out_dir, spec_path)
+        return                                  # 已有一份对得上的收据，什么都不用做
+    except S.SpecChangeError:
+        pass
+    if os.path.isfile(os.path.join(out_dir, S.RECEIPT_REL)):
+        S.update_receipt(out_dir, spec_path, reason, by)
+    else:
+        S.init_receipt(out_dir, spec_path, reason, by)
 
 
 class _Sentinel(RuntimeError):
@@ -276,8 +295,10 @@ class AcceptanceRunTest(unittest.TestCase):
     def _run(self, root, *, source_facts, out_dir=None, calls=None):
         out_dir = out_dir or os.path.join(root, "reports", "widget")
         calls = calls if calls is not None else []
+        spec_path = _write_spec(root)
+        confirm_spec(out_dir, spec_path)        # 让 spec 变更门放行（专测见 test_spec_change_gate）
         with self._stubbed(calls):
-            result = W.run(_write_spec(root), mode="cpp_extension",
+            result = W.run(spec_path, mode="cpp_extension",
                            out_dir=out_dir, source_facts=source_facts)
         return out_dir, result, calls
 
@@ -358,11 +379,13 @@ class AcceptanceRunTest(unittest.TestCase):
                 return self._caseset(spec["op"])
 
             calls = []
+            spec_path = _write_spec(root)
+            confirm_spec(out_dir, spec_path)
             with self._stubbed(calls), \
                     mock.patch.object(W.gen_cases, "gen_cases",
                                       side_effect=_swap_then_gen):
                 with self.assertRaisesRegex(SystemExit, r"staging 与 Task1 之间被改写"):
-                    W.run(_write_spec(root), mode="cpp_extension",
+                    W.run(spec_path, mode="cpp_extension",
                           out_dir=out_dir, source_facts=facts)
             self.assertEqual(calls, [], "已 fail-closed，不该再跑到三级门")
             self.assertFalse(os.path.isfile(os.path.join(out_dir, "acceptance.json")))
@@ -663,8 +686,10 @@ class CpFClosureTest(unittest.TestCase):
             facts = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
             calls = []
             out_dir = os.path.join(root, "reports", "widget")
+            spec_path = _write_spec(root)
+            confirm_spec(out_dir, spec_path)
             with AcceptanceRunTest()._stubbed(calls):
-                W.run(_write_spec(root), mode="cpp_extension",
+                W.run(spec_path, mode="cpp_extension",
                       out_dir=out_dir, source_facts=facts)
             directive = _cp_f_directive(out_dir)
             verified = R.verify_base_artifacts(directive, out_dir)
@@ -683,8 +708,10 @@ class CpFClosureTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, _env(root):
             facts = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
             out_dir = os.path.join(root, "reports", "widget")
+            spec_path = _write_spec(root)
+            confirm_spec(out_dir, spec_path)
             with AcceptanceRunTest()._stubbed([]):
-                W.run(_write_spec(root), mode="cpp_extension",
+                W.run(spec_path, mode="cpp_extension",
                       out_dir=out_dir, source_facts=facts)
             directive = _cp_f_directive(out_dir)
             original = os.path.join(root, "the.spec.json")

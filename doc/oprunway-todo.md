@@ -158,6 +158,11 @@
 > - **§1 用例生成规则 → 采纳为权威**（§0：仅浮点计算类算子；整型/搬运类另定，遇到先停确认）。
 > - **§2 误差指标/通过标准 → 不采纳**；阈值继续走 **ascendoptest**（= 现有 `precision_policy` 快照，**零改动**）。§0 也印证 IsClose/Equal(bool)/Sign(符号)=逐位精确、不适用 §2 混合容差。
 > - **数量以用户为准**：`case_target` 默认 50、运行时问用户（**覆盖 §1.1「不设固定下限」——用户明示以其为准**）。
+>   ⚠ **这一条的「默认 50 / 运行时问用户」已于 2026-08-06 作废**（本行只留历史）：缺省值已从 `gen_cases`
+>   删除，`precision.case_target` **必填、无缺省**、缺席即 fail-fast；「`AskUserQuestion` 问用户」那步
+>   `acc-spec-extractor` 的 `tools:` 里根本没这个工具、物理上执行不了。现行口径见
+>   `plugin/skills/acc-spec/references/taskdoc-to-spec.md` 的『`case_target` 怎么定』。
+>   「数量以用户为准」的**精神仍在**：拿不准就停下问用户，只是不许再兜一个默认值。
 > - **性能与精度同一套输入**（用户明示）：不再单独造大 shape 性能用例；**性能在全部相同输入上判**（§1 覆盖里维度可到 2²⁰、总元素 2³¹，大 shape 本在集里）。
 > - **精度门前置 + fail-fast**：跑完整套 → 任一精度挂 → `FAILED_PRECISION` + 跳过性能 + 提前结束（fail-fast 粒度=**跑完再判**、非首个短路）。
 - [x] **① 数量可配**：spec 加 `precision.case_target`（默认 50）；`acc-spec` agent `AskUserQuestion` 问用户写入；`gen_cases`/门读同一字段。

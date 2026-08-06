@@ -20,7 +20,9 @@
   "verify_mode": "exact",
   "precision": {"oracle": "ascendoptest", "standard": "exact", "tolerance_policy_id": "exact",
                 "threshold": 0, "policy": {"kind": "exact", "max_mismatch": 0, "not_settled": false},
-                "threshold_source": "bool 输出 → 精确逐位"},
+                "threshold_source": "bool 输出 → 精确逐位",
+                "case_target": 50,
+                "case_target_source": "fixture：此前无此键、一直吃 gen_cases 的缺省 50；2026-08-06 缺省被删，写回它一直在用的那个数（`ExistingOpsByteIdenticalTest` 按 50 pin 了 caseset 字节，改数即破 pin）"},
   "attr_matrix": [
     {"equal_nan": false},
     {"equal_nan": true},

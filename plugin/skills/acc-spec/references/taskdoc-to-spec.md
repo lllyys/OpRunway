@@ -63,7 +63,8 @@
                 "tolerance_source":"<dtype_table | taskdoc | torch_default；省略=dtype_table>",
                 "taskdoc_tol":"<仅 tolerance_source==taskdoc 必填：[rtol, atol]>",
                 "value_profiles":"<可选：[\"nan\"] / [\"tie\"] / 两者；省略=不产此类用例>",
-                "case_target":"<int 精度用例目标数，缺省 50；见下『case_target 交互』——AskUserQuestion 问用户>"},
+                "case_target":"<int 精度用例目标数，**必填、无缺省**；见下『case_target 怎么定』>",
+                "case_target_source":"<可选但强烈建议：这个数是怎么来的（矩阵怎么乘 / 沿用了什么既有事实）>"},
   // T6/T8（待散文门）：perf.small_shape_exception 升为对象——机读阈值供 perf_compare 判小shape例外
   //   (<when_us_below 且 |差|≤abs_gap_us_within → 出仿真图挂人核)；legacy 纯字符串 perf_compare 正则兜底。
   "perf": {"baseline":"<tbe|gpu_external|torch_npu|aclnn_builtin>","target_ratio":"<任务书性能目标换算：无劣化→1.0，≥95%→0.95>",
@@ -79,12 +80,33 @@
 }
 ```
 
-**`case_target` 交互（精度用例数，用户口径优先）**：`precision.case_target` = 精度用例目标数，**缺省 50**。
-opbase 精度标准 §1.1 说「用例数不设固定下限、覆盖优先」，但**用户 2026-07-15 明示：数量以用户为准、默认 50、运行时问用户**（覆盖 §1.1 的不设下限）。产 spec 时：
-1. 先 `python gen_cases.py --dry-run <spec.json>`（plan-only、无 torch、不落产物）——它打印 **`forced_total`（=强制下限 S，特殊场景+白名单）** 与 **`pool_max`**（覆盖池上限）及区间行。
-2. `AskUserQuestion`「本算子精度用例造多少条？建议 50（该算子区间 [S, pool_max]）」，把区间呈现给用户。
-3. 用户答（默认 50）→ 写入 `precision.case_target`。**须 ≥1**（0/负 → gen_cases fail-fast，堵零用例空跑冒充验收）；`< S` 时 gen_cases 用 `max(case_target,S)`、emit 略超并 note；`> pool_max` 时实际 emit=pool_max，数量门软化（PASS+note，不硬 BLOCK）。
-4. gen_cases 按 §1 覆盖-预算（dtype 分层 fp16/fp32/bf16 重点 + 其他 1-2、shape 阶梯、值域 uniform/normal、attr 笛卡尔、§1.4 特殊场景、白名单必覆盖 + 1-wise 采样）铺到 `case_target`。
+**`case_target` 怎么定（精度用例目标数）**：`precision.case_target` **必填、没有缺省值**——不写这个键，
+`gen_cases`（真跑与 `--dry-run` 两条路都是）当场 fail-fast。
+
+⚠ **这里原先写的是「缺省 50 / `AskUserQuestion` 问用户（建议 50）」，2026-08-06 整条删掉，理由有两条、都要记住：**
+
+1. **那个默认值实测就是个 fail-open**：extractor 照「建议 50」自己填了 50、全程 0 次被审视，
+   792 个候选组合就这么留了 50 条。「这个算子该造多少条、依据是什么」被一个缺省值永久免答了。
+2. **那条规矩物理上执行不了**：它要求用 `AskUserQuestion`，而 `agents/acc-spec-extractor.md` 的
+   `tools:` 里**根本没有这个工具**。写了一条做不到的动作，等于把第 2 步默认跳过、直接落「建议值」。
+
+**现在怎么定这个数**：**按覆盖矩阵算，不是拍一个数**。
+
+- `case_profile == "torch_parity"`：`case_target` **必须精确等于**完整笛卡尔矩阵大小
+  `dtype × rank × shape_profile × attribute_profile`（见 §1.3『Torch overload 覆盖与 `torch_parity_matrix`』）。
+  不相等 `gen_cases` 直接报错，这条已经是硬校。
+- 其它档：也按该算子的覆盖轴推算，并把算法写进 `precision.case_target_source`。
+  ⚠ **统一的笛卡尔算法（含非 torch_parity 档）尚未落地**（roll19 方案步骤 11，需人评审轴集后实现）。
+  在它落地之前，这个数**必须给得出依据**——沿用某份既有事实要写清沿用的是什么；
+  给不出依据就停下问用户，**别随手填一个数**（填了就退回本条要删的那个毛病）。
+
+**`gen_cases` 侧仍然成立的行为**（与上面怎么定这个数无关）：**须 ≥1**（0/负/非整 → fail-fast，
+堵零用例空跑冒充验收）；`< S`（`forced_total` = 特殊场景 + 白名单的强制下限）时用 `max(case_target, S)`、
+emit 略超并 note；`> pool_max` 时实际 emit = `pool_max`，数量门软化（PASS+note，不硬 BLOCK）。
+`gen_cases.py <spec> --dry-run` 会打印 `forced_total`、`pool_max` 与区间行——那是**产出 spec 之后的自检**，
+用来看「定的这个数落在哪」，**不再是**定这个数的手段（它自己也要求 spec 已有 `case_target`）。
+铺法仍按 §1 覆盖-预算（dtype 分层 fp16/fp32/bf16 重点 + 其他 1-2、shape 阶梯、值域 uniform/normal、
+attr 笛卡尔、§1.4 特殊场景、白名单必覆盖 + 1-wise 采样）铺到 `case_target`。
 
 **下游硬依赖**（抽错会崩/误判）：
 - `gen_cases.py` 读 `params`(区分 in/attr、取 self 的 dtype、attr 的 default)、`verify_mode`、`precision.threshold`。
@@ -701,6 +723,10 @@ C4 的 `dtype_unsupported_by_op_def`、`dtype_unsupported_on_target_hw`，见 §
 - `verify_mode=exact` ⇒ `threshold=0`；`precision.threshold_source` 非空。
 - add_dtype ⇒ `change.dtypes_added` 非空；其中 **pipeline 支持的** dtype 已并入 `params.dtype`，**不支持的** 只在 `change.dtypes_added` + `task_pr_gaps`（不强求 ⊆ params.dtype，避免让 gen_cases/runner 崩）。
 - `precision` 对象存在（任何 verify_mode 都不省略整个对象）；`perf` 无要求时整字段省略、不写 `{baseline:"none"}`。
+- **`precision.case_target` 存在且是 ≥1 的整数**（**无缺省**，省略 → `gen_cases` 真跑与 `--dry-run` 都 fail-fast），
+  且这个数**给得出依据**（`torch_parity` 档 = 完整笛卡尔矩阵大小，精确相等；其它档把算法/沿用来源写进
+  `precision.case_target_source`）。⚠ **拿不准就停下问用户，不许随手填一个数**——「缺省 50」正是因为
+  没人回答过这个问题才被删掉的（见上文『`case_target` 怎么定』）。
 - 多算子每份 spec 的 op 唯一、gaps 独立。
 - **C2 · attr 值类型**：每个 attr 的 `default`（及 `attr_matrix` 里的取值）∈ `bool/int/float/str` 标量 **或 `list[int]`**。
   ⚠ **数组只支持 `list[int]`**：嵌套数组、浮点数组、`list` 里混 `bool`（`[True]` 与 `[1]` 在 JSON 里都长成 `[true]`/`[1]`、语义会串）**引擎一律 fail-closed 拒**；空数组也拒（manifest 会错位）。真需要别的形态 → 记 gap、停下问，别硬塞。

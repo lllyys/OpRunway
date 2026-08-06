@@ -45,7 +45,8 @@
   "cases": {
     "functional": [[16, 16, 16], [32, 64, 48]],
     "perf": [[512, 512, 512]],
-    "shape_note": "A[m,k]·B[k,n]→C[m,n]；shape 可配置（非死钉 1024³），性能 shape 真机可加大"
+    "shape_note": "A[m,k]·B[k,n]→C[m,n]；shape 可配置（非死钉 1024³），性能 shape 真机可加大",
+    "case_target_note": "本 spec **有意不写 `precision.case_target`**：catlass 通路的用例由 `catlass_adapter.build_matmul_caseset` 直接按上面的 `functional`/`perf` shape 列表逐条造，压根不读 `case_target`。2026-08-06 删掉 gen_cases 的缺省 50 后逐份补显式值时，这份**补不出依据**——填任何数都是一个没人读的死字段，比缺席更误导。要走 gen_cases 通路时再按那条通路的规则定这个数。"
   },
   "provenance": {
     "kind": "synthetic",
