@@ -59,19 +59,26 @@ class DryRunLedgerTest(unittest.TestCase):
         self.assertEqual(binding["numpy_version"], np.__version__)
         self.assertEqual(binding["numpy_stream_pin"],
                          GC.numpy_stream_pin(np.__version__))
-        self.assertEqual(binding["numpy_stream_pin_granularity"], "major_minor")
+        self.assertEqual(binding["numpy_stream_pin_granularity"], "exact")
         # pin 必须真的是**收敛过的两段**，不是把全量版本原样抄一遍充数。
-        self.assertRegex(binding["numpy_stream_pin"], r"^\d+\.\d+$")
+        # pin 是**完整版本**（本仓固定 numpy 1.26.4），不是「主.次」两段
+        self.assertRegex(binding["numpy_stream_pin"], r"^\d+\.\d+\.")
 
-    def test_numpy_stream_pin_is_major_minor_and_fails_closed(self):
-        self.assertEqual(GC.numpy_stream_pin("2.4.6"), "2.4")
-        self.assertEqual(GC.numpy_stream_pin("1.26.4"), "1.26")
-        self.assertEqual(GC.numpy_stream_pin("2.4"), "2.4")
-        # 解析不出两段数字 → 抛错。若退回「原样返回」或「空串」，两台机器的
-        # 未知版本会互相相等，复用门就永远放行。
-        for bad in ("", "2", "2.x", "dev", "2..1", None):
-            with self.assertRaises(ValueError):
-                GC.numpy_stream_pin(bad)
+    def test_numpy_stream_pin_is_exact_and_fails_closed(self):
+        """pin 取**完整版本**，不做「主.次」收敛。
+
+        初版按「主.次」收敛，被反例推翻：numpy 1.18.4 在补丁版里改了
+        `Generator.integers(high=2**32)` 的取值，相对 1.18.3 输出就变了，
+        而两者的「主.次」pin 都是 `1.18`——那个粒度探测不到真实发生过的流变更。
+        本仓只支持 numpy 1.26.4，精确匹配也不会造成无谓 MISS。
+        """
+        self.assertEqual(GC.numpy_stream_pin("1.26.4"), "1.26.4")
+        self.assertNotEqual(GC.numpy_stream_pin("1.18.3"), GC.numpy_stream_pin("1.18.4"))
+        self.assertEqual(GC._NUMPY_STREAM_PIN_GRANULARITY, "exact")
+        for bad in ("garbage", "1", ""):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    GC.numpy_stream_pin(bad)
 
     def test_renderer_keeps_default_stdout_shape(self):
         ledger = self._build_without_golden(_spec())

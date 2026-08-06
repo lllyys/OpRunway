@@ -23,7 +23,34 @@ def _load(root, name):
 def _cell(value):
     if value is None:
         return "—"
-    return str(value).replace("|", "\\|").replace("\n", " ")
+    # ⚠ `\r` 也要吃掉：只转 `\n` 时，CR 单独作行分隔在部分渲染器上照样断行、伪造表格行。
+    return (str(value).replace("|", "\\|")
+            .replace("\r\n", " ").replace("\n", " ").replace("\r", " "))
+
+
+def _code_cell(value):
+    """把任意字符串安全地放进表格里的**代码段**。
+
+    ⚠ 不能写成 `` f"`{_cell(v)}`" `` —— 值里只要有一个反引号就能提前闭合代码段，
+    后面的内容按 markdown 正常渲染，于是「不可信的字符串」变成了「能排版的内容」。
+    本报告里 `源码仓` 这一格的值来自 vendor build receipt，而收据的 `repo` 只被校
+    「非空字符串」，是**外部可控**的——正是这条路。
+
+    做法照 CommonMark 的代码段规则：围栏用比内容里最长连续反引号还多一个的反引号，
+    内容首尾有反引号时各补一个空格（渲染时会被吃掉）。反斜杠在代码段里不转义，
+    所以「转义反引号」那条路走不通。
+    """
+    text = _cell(value)
+    if text == "—":
+        return text
+    longest = 0
+    run = 0
+    for ch in text:
+        run = run + 1 if ch == "`" else 0
+        longest = max(longest, run)
+    fence = "`" * (longest + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
 
 
 def _pct(value):
@@ -123,7 +150,9 @@ PROV_REPO_SOURCE_DERIVED_BY_KIND = {
     dut_source.PULL_REQUEST: "pr.source_repo",
     dut_source.LOCAL_CHECKOUT: "local_checkout.git.remote_url",
 }
-PROV_REPO_ROW = "| 源码仓 | `{repo}`（{strength}） |"
+# ⚠ `repo` 走 `_code_cell` 而不是自己包一对反引号：它来自 vendor build receipt，
+#   而收据的 `repo` 只被校「非空字符串」——值里一个反引号就能提前闭合代码段。
+PROV_REPO_ROW = "| 源码仓 | {repo}（{strength}） |"
 PROV_REPO_SOURCE_ABSENT = (
     "⚠ **强度未知**——本收据没记 `repo_source`（本轮之前产的收据都没有这个键）；"
     "**缺席不等于事实派生**，这个仓名怎么来的无从查证")
@@ -325,7 +354,7 @@ def _provenance_section(receipt, build_receipt, source, facts):
         # `repo` 已由 `validate_build_receipt_source` 校过必填非空；这里只取值展示，
         # 不参与任何来源判别。⚠ 值和**强度**必须同一行给：分成两行（或只给值）就等于
         # 让「事实派生」和「操作者手敲」在报告里同权，读的人分不出哪个有出处。
-        PROV_REPO_ROW.format(repo=_cell(source.get("repo")),
+        PROV_REPO_ROW.format(repo=_code_cell(source.get("repo")),
                              strength=_repo_source_strength(source, kind)),
         # 锚字段名与锚值都来自 `dut_source`，本文件不自选字段、不做 `a or b` 兜底。
         f"| {PROV_ANCHOR_LABEL.get(anchor_field, anchor_field)} | `{_cell(anchor_value)}` |",

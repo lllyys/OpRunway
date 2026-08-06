@@ -242,7 +242,7 @@ class ProvenanceSectionTest(unittest.TestCase):
         self.assertIn(f"| PR head | `{PR_HEAD}` |", text)
         # 这份收据没有 `repo_source`（老收据形态）→ 源码仓那一行必须标「强度未知」。
         self.assertIn(R.PROV_REPO_ROW.format(
-            repo="cann/ops-nn", strength=R.PROV_REPO_SOURCE_ABSENT), text)
+            repo=R._code_cell("cann/ops-nn"), strength=R.PROV_REPO_SOURCE_ABSENT), text)
         # provenance 节排在运行环境之前，且那两行确实从旧表里迁走了。
         self.assertLess(text.index(R.PROV_HEADING), text.index("## 被测物与运行环境"))
         env = text.split("## 被测物与运行环境", 1)[1]
@@ -405,7 +405,7 @@ class RepoSourceStrengthTest(unittest.TestCase):
             {"repo": "cann/ops-nn", "repo_source": "pr.source_repo",
              "pr_head_sha": PR_HEAD}))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
-            repo="cann/ops-nn", strength=R.PROV_REPO_SOURCE_LABEL["pr.source_repo"]))
+            repo=R._code_cell("cann/ops-nn"), strength=R.PROV_REPO_SOURCE_LABEL["pr.source_repo"]))
         self.assertIn("事实派生", row)
         self.assertIn("`pr.source_repo`", row)
 
@@ -416,7 +416,7 @@ class RepoSourceStrengthTest(unittest.TestCase):
              "repo_source": "local_checkout.git.remote_url",
              "local_root_digest": LOCAL_DIGEST}))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
-            repo="https://gitcode.com/cann/ops-nn.git",
+            repo=R._code_cell("https://gitcode.com/cann/ops-nn.git"),
             strength=R.PROV_REPO_SOURCE_LABEL["local_checkout.git.remote_url"]))
         self.assertIn("事实派生", row)
         self.assertIn("`local_checkout.git.remote_url`", row)
@@ -427,7 +427,7 @@ class RepoSourceStrengthTest(unittest.TestCase):
             {"dut_source": "local_checkout", "repo": "cann/ops-nn",
              "repo_source": "operator", "local_root_digest": LOCAL_DIGEST}))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
-            repo="cann/ops-nn", strength=R.PROV_REPO_SOURCE_LABEL["operator"]))
+            repo=R._code_cell("cann/ops-nn"), strength=R.PROV_REPO_SOURCE_LABEL["operator"]))
         self.assertIn("操作者自报", row)
         self.assertIn("无机器可核依据", row)
         # 自报绝不能读起来像派生。
@@ -440,7 +440,7 @@ class RepoSourceStrengthTest(unittest.TestCase):
             {"dut_source": "local_checkout", "repo": "cann/ops-nn",
              "local_root_digest": LOCAL_DIGEST}))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
-            repo="cann/ops-nn", strength=R.PROV_REPO_SOURCE_ABSENT))
+            repo=R._code_cell("cann/ops-nn"), strength=R.PROV_REPO_SOURCE_ABSENT))
         self.assertIn("强度未知", row)
         self.assertNotIn("事实派生", row.replace("缺席不等于事实派生", ""))
         self.assertNotIn("操作者自报", row)
@@ -451,7 +451,7 @@ class RepoSourceStrengthTest(unittest.TestCase):
             {"repo": "cann/ops-nn", "repo_source": "probably_the_pr_i_guess",
              "pr_head_sha": PR_HEAD}))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
-            repo="cann/ops-nn", strength=R.PROV_REPO_SOURCE_UNKNOWN.format(
+            repo=R._code_cell("cann/ops-nn"), strength=R.PROV_REPO_SOURCE_UNKNOWN.format(
                 value='"probably_the_pr_i_guess"')))
         self.assertIn("强度未知", row)
         self.assertNotIn("事实派生", row)
@@ -462,7 +462,7 @@ class RepoSourceStrengthTest(unittest.TestCase):
         row = self._repo_line(self._render(
             {"repo": "cann/ops-nn", "repo_source": None, "pr_head_sha": PR_HEAD}))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
-            repo="cann/ops-nn",
+            repo=R._code_cell("cann/ops-nn"),
             strength=R.PROV_REPO_SOURCE_UNKNOWN.format(value="null")))
         self.assertNotEqual(R.PROV_REPO_SOURCE_UNKNOWN.format(value="null"),
                             R.PROV_REPO_SOURCE_ABSENT)
@@ -474,7 +474,7 @@ class RepoSourceStrengthTest(unittest.TestCase):
             {"repo": "cann/ops-nn", "repo_source": "local_checkout.git.remote_url",
              "pr_head_sha": PR_HEAD}))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
-            repo="cann/ops-nn", strength=R.PROV_REPO_SOURCE_MISMATCH.format(
+            repo=R._code_cell("cann/ops-nn"), strength=R.PROV_REPO_SOURCE_MISMATCH.format(
                 value='"local_checkout.git.remote_url"', kind="pull_request")))
         self.assertNotIn("事实派生", row)
 
@@ -549,6 +549,49 @@ class LocalRowsSecondLineOfDefenceTest(unittest.TestCase):
         text = "\n".join(R._local_rows(facts, self.IDENT))
         self.assertIn(R.PROV_DIRTY_MALFORMED, text)
         self.assertNotIn(R.PROV_DIRTY_NOT_GIT, text)
+
+
+class CodeCellInjectionTest(unittest.TestCase):
+    """⭐ 表格里的代码段必须挡住反引号破出。
+
+    `源码仓` 那一格的值来自 vendor build receipt，而收据的 `repo` 只被校「非空字符串」——
+    是**外部可控**的。写成 `` f"`{v}`" `` 时，值里一个反引号就能提前闭合代码段，
+    后面的内容按 markdown 正常渲染：不可信的字符串就此变成能排版的内容。
+    """
+
+    @staticmethod
+    def _longest_backtick_run(text):
+        longest = run = 0
+        for ch in text:
+            run = run + 1 if ch == "`" else 0
+            longest = max(longest, run)
+        return longest
+
+    def test_backticks_cannot_break_out_of_the_code_span(self):
+        for payload in ("a`b", "`", "``", "a``b`c", "`lead", "trail`", "```x```"):
+            with self.subTest(payload=payload):
+                cell = R._code_cell(payload)
+                fence = cell[:len(cell) - len(cell.lstrip("`"))]
+                # 围栏必须严格长于内容里最长的连续反引号，否则内容能提前闭合它
+                self.assertGreater(
+                    len(fence), self._longest_backtick_run(payload),
+                    f"围栏 {fence!r} 挡不住 {payload!r} 里的反引号")
+                self.assertIn(payload, cell)          # 内容一个字符都没丢
+                self.assertTrue(cell.endswith(fence))  # 首尾同长围栏
+
+    def test_pipe_and_newlines_cannot_forge_table_rows(self):
+        for payload in ("a|b", "a\nb", "a\r\nb", "a\rb"):
+            with self.subTest(payload=repr(payload)):
+                cell = R._cell(payload)
+                self.assertNotIn("\n", cell)
+                self.assertNotIn("\r", cell)
+                if "|" in payload:
+                    self.assertIn("\\|", cell)
+
+    def test_repo_row_uses_the_hardened_code_cell(self):
+        """⭐ 钉住调用点：`源码仓` 行必须走 `_code_cell`，不是自己包一对反引号。"""
+        self.assertNotIn("`{repo}`", R.PROV_REPO_ROW)
+        self.assertIn("{repo}", R.PROV_REPO_ROW)
 
 
 if __name__ == "__main__":

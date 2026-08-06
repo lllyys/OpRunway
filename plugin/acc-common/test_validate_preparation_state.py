@@ -356,15 +356,21 @@ class PreparationStateTest(unittest.TestCase):
         # 所以 reason 必须分得开——只断言 MISS 的话，把缺键悄悄并进「不符」分支也测不出来。
         self.assertIn("未记录", check["reason"])
 
-    def test_blank_numpy_stream_pin_is_miss(self):
+    def test_blank_numpy_stream_pin_is_blocked_not_miss(self):
+        """键**在**、值却非法 → 账本损坏 → BLOCKED，不是 MISS。
+
+        MISS 的语义是「重跑一次准备就好」（老工件正常过期）；
+        而键在值坏说明这份账本被改过或写坏了，重跑救不了「账本不可信」。
+        两者混成一个状态，就会让「被改过的账本」看起来只是「有点旧」。
+        """
         """空串不是「记了」：否则一份被裁剪的账本能靠空串跟另一份空串对上。"""
         self.plan["planner_binding"]["numpy_stream_pin"] = ""
         self._rewrite_plan()
         receipt = self._evaluate()
-        self.assertEqual(receipt["status"], "MISS")
+        self.assertEqual(receipt["status"], "BLOCKED")
         check = self._stream_check(receipt)
-        self.assertEqual(check["status"], "MISS")
-        self.assertIn("未记录", check["reason"])
+        self.assertEqual(check["status"], "BLOCKED")
+        self.assertIn("形态非法", check["reason"])
 
     def test_unknown_current_numpy_stream_is_blocked_not_crash(self):
         """核不了 ≠ 核过了。当前流身份取不到时判 BLOCKED，且不许抛出去。"""
@@ -378,7 +384,7 @@ class PreparationStateTest(unittest.TestCase):
     def test_reusable_receipt_records_numpy_stream_pin(self):
         receipt = self._evaluate()
         self.assertEqual(receipt["status"], "REUSABLE")
-        self.assertRegex(receipt["bindings"]["numpy_stream_pin"], r"^\d+\.\d+$")
+        self.assertRegex(receipt["bindings"]["numpy_stream_pin"], r"^\d+\.\d+\.")
 
     def test_tampered_source_is_blocked_not_cache_miss(self):
         path = os.path.join(self.root, "work", "source_facts.json")
@@ -497,6 +503,51 @@ class PreparationStateTest(unittest.TestCase):
         self.assertEqual(receipt["status"], "BLOCKED")
         self.assertIn("pr", " ".join(
             item["reason"] for item in receipt["checks"]))
+
+
+class NumpyStreamPinBranchTest(unittest.TestCase):
+    """⭐ 随机流 pin 的五条判定分支各自判对——这是复用门上新加的一条判定链。
+
+    背景：`_case_rng` 把 `SEED ^ hash(case_id)` 喂给 `np.random.default_rng`，
+    所以「同一 case_id 产同一字节」只在同一条 numpy 随机流下成立。
+    pin 就是用来当场逮住流漂的。
+
+    ⚠ 三种「对不上」语义不同，判定必须分开（一锅炖成 MISS 是错的）：
+      · 取不到当前流身份       → BLOCKED（无从核对，重做准备也一样取不到）
+      · 账本**没有**这个键     → MISS  （老工件正常过期，重跑一次即可）
+      · 账本**有**但形态不合法 → BLOCKED（账本损坏/被改过，重跑救不了）
+    """
+
+    def test_wellformed_pin_accepts_real_versions(self):
+        for pin in ("1.26.4", "2.0.0", "1.18.3", "1.26.4.post1", "2.1.0rc1"):
+            with self.subTest(pin=pin):
+                self.assertTrue(VPS._is_wellformed_pin(pin))
+
+    def test_malformed_pin_is_rejected(self):
+        for pin in ("garbage", "1", "", "x.y.z", "..", "1.x"):
+            with self.subTest(pin=pin):
+                self.assertFalse(VPS._is_wellformed_pin(pin))
+
+    def test_pin_is_exact_not_major_minor(self):
+        """⭐ pin 必须是**完整版本**。
+
+        初版按「主.次」收敛，被反例推翻：numpy **1.18.4** 在补丁版里改了
+        `Generator.integers(high=2**32)` 的取值，相对 1.18.3 输出就变了，
+        而两者的「主.次」pin 都是 `1.18`——那个粒度探测不到已经真实发生过的流变更。
+        """
+        import gen_cases
+        self.assertEqual(gen_cases.numpy_stream_pin("1.18.3"), "1.18.3")
+        self.assertEqual(gen_cases.numpy_stream_pin("1.18.4"), "1.18.4")
+        self.assertNotEqual(gen_cases.numpy_stream_pin("1.18.3"),
+                            gen_cases.numpy_stream_pin("1.18.4"))
+        self.assertEqual(gen_cases._NUMPY_STREAM_PIN_GRANULARITY, "exact")
+
+    def test_unparseable_version_fails_closed(self):
+        import gen_cases
+        for bad in ("garbage", "1", ""):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    gen_cases.numpy_stream_pin(bad)
 
 
 if __name__ == "__main__":

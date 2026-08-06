@@ -150,23 +150,36 @@ SEED = 2026
 # （见该文件的 `_U3_CASESET_BASELINES`）——那份 pin 之所以要分版本，正是因为流会漂。
 #
 # 所以 `SEED` 之外还须把**产数据的那条流是哪一条**记进计划账本，让复用侧能当场失配。
-# 记两个字段而不是一个：`numpy_version` 是诚实的全量版本（诊断用，别拿它做判定，补丁版
-# 通常不改流、精确相等会造成大量无谓 MISS）；`numpy_stream_pin` 是**判定值**。
-_NUMPY_STREAM_PIN_GRANULARITY = "major_minor"
+#
+# ⚠ **pin 取完整版本，不做「主.次」收敛。** 初版按 `主.次` 收敛，理由是「补丁版通常不改流，
+# 精确相等会造成大量无谓 MISS」——那条推理**被反例推翻了**：numpy **1.18.4** 在补丁版里修了
+# `Generator.integers(high=2**32)` 的取值，相对 1.18.3 **输出就变了**，而两者的 `主.次` pin
+# 都是 `1.18`。NEP 19 本身也写明正确性修复可以在补丁版破坏流兼容。
+# 也就是说「主.次」这个粒度**探测不到已经真实发生过的流变更**——一个逮不住已知反例的门
+# 不叫门。宁可多几次 MISS（重跑取材/计划很便宜），不要一次把漂了流的 caseset 判成可复用。
+#
+# 记两个字段仍然保留，但语义换了：`numpy_stream_pin` 是**判定值**（完整版本），
+# `numpy_version` 保留作诊断字段、与 pin 同源，便于人一眼看出比的是什么。
+_NUMPY_STREAM_PIN_GRANULARITY = "exact"
 
 
 def numpy_stream_pin(version):
-    """把完整 numpy 版本号收敛成随机流比对用的 `主.次` 两段 pin。
+    """把 numpy 版本规范成随机流比对用的 pin —— **完整版本，不收敛**。
 
-    口径与仓内既有 pin 一致（`test_gen_cases_dtype_attr` 用 `startswith(pin + ".")` 判定），
-    不引入第二套标准。解析不出两段数字 → 抛错，**绝不回退成整串或空串**：一个含糊的 pin
-    会让「版本不同」和「版本存疑」长得一模一样，而后者本该 fail-closed。"""
-    parts = str(version).split(".")
+    解析不出「至少两段数字」→ 抛错，**绝不回退成空串或原样放行**：一个含糊的 pin
+    会让「版本不同」和「版本存疑」长得一模一样，而后者本该 fail-closed。
+
+    ⚠ 这里**不是**在做版本号语义比较（不判大小、不管 rc/dev 后缀怎么排序），
+    只做**身份**比较：两次生成用的是不是同一个 numpy。所以规范化只做形态校验、
+    不做归一化——`1.26.4` 与 `1.26.4.post1` 就该判成不同，它们确实是两个包。
+    """
+    text = str(version).strip()
+    parts = text.split(".")
     if len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
         raise ValueError(
-            f"无法从 numpy 版本 {version!r} 解析出 主.次 两段随机流 pin；"
+            f"无法把 numpy 版本 {version!r} 认成合法版本号（至少 主.次 两段数字）；"
             f"随机流身份不明时不得放行复用")
-    return f"{parts[0]}.{parts[1]}"
+    return text
 
 
 def current_numpy_stream_pin():

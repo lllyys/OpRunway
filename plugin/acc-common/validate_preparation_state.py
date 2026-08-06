@@ -372,6 +372,17 @@ def _current_numpy_stream_pin():
     return gen_cases.current_numpy_stream_pin()
 
 
+def _is_wellformed_pin(value):
+    """pin 的**形态**校验（不比大小、不判新旧，只判「像不像一个版本串」）。
+
+    刻意不复用 `gen_cases.numpy_stream_pin`：那个函数是**产**pin 的，会 import numpy；
+    这里要判的是账本里**已记录**的那串合不合法，不该为此拉起 numpy——
+    一份坏账本的诊断不该依赖 numpy 装没装好。
+    """
+    parts = str(value).split(".")
+    return len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit()
+
+
 def evaluate(root, spec_rel, case_plan_rel, golden_path=None,
              source_rel="source_facts.json",
              correspondence_rel="correspondence.json",
@@ -595,25 +606,42 @@ def evaluate(root, spec_rel, case_plan_rel, golden_path=None,
                 _check(checks, "case_planner", "PASS", "规划逻辑摘要一致")
 
             # ⚠ 规划逻辑摘要相等**不蕴含**用例数据字节相等：`gen_cases` 一个字节没改，只要
-            # numpy 换了大版本，`_case_rng` 那条随机流就可能整体漂，于是同一 spec、同一 case_id
-            # 落出不同的 `.npy`——而 spec / planner / golden 的摘要一个都不会动。所以随机流身份
-            # 要单独对账，判定用 `主.次` pin（补丁版通常不改流，精确相等只会造成无谓 MISS）。
+            # numpy 换了版本，`_case_rng` 那条随机流就可能漂，于是同一 spec、同一 case_id
+            # 落出不同的 `.npy`——而 spec / planner / golden 的摘要一个都不会动。
+            # 所以随机流身份要单独对账，判定用**完整版本**（不做「主.次」收敛，理由见
+            # `gen_cases.numpy_stream_pin` 的 ⚠：1.18.4 就在补丁版里改过 Generator.integers 的流）。
+            #
+            # ⚠ 三种「对不上」要分开判，别一锅炖成 MISS：
+            #   · 取不到当前流身份       → BLOCKED（无从核对，重做准备也一样取不到）
+            #   · 账本**没有**这个键     → MISS  （老工件正常过期，重跑一次即可）
+            #   · 账本**有**但形态不合法 → BLOCKED（账本损坏/被改过，重跑救不了，要人看）
             recorded_pin = planner_binding.get("numpy_stream_pin")
+            has_pin_key = "numpy_stream_pin" in planner_binding
             try:
                 current_pin = _current_numpy_stream_pin()
-            except (ImportError, ValueError) as ex:
-                # 取不到当前流身份 = **无从核对**，不是「核过了没问题」。既不能判 PASS，也不宜
-                # 判 MISS（MISS 的语义是「重做准备即可」，而重做同样要 numpy），故 BLOCKED。
+            except Exception as ex:                    # noqa: BLE001 — 见下方 ⚠
+                # ⚠ 这里必须宽捕：`_current_numpy_stream_pin` 是**懒导入**，会拉起 `gen_cases`
+                #   及其全部顶层依赖（numpy 的二进制加载）。除 ImportError/ValueError 外，
+                #   初始化失败还可能抛 RuntimeError / OSError / AttributeError——那些若裸穿，
+                #   调用方拿不到机读的 BLOCKED 收据，只会看到 traceback。
+                #   不捕 BaseException（KeyboardInterrupt / SystemExit 该照常传出去）。
                 current_pin = None
                 _check(checks, "case_data_stream", "BLOCKED",
-                       f"无法确定当前 numpy 随机流 pin：{ex}")
+                       f"无法确定当前 numpy 随机流 pin（{type(ex).__name__}）：{ex}")
             if current_pin is None:
                 pass                                   # 上面已记 BLOCKED，不再重复判定
-            elif not isinstance(recorded_pin, str) or not recorded_pin:
+            elif not has_pin_key:
                 # 老账本没有这个键 = 产它的那次没记随机流身份 → 无从证明数据可复现，重做准备。
                 # 这是**正常漂移**（同 `case_planner` 的 MISS 口径），不是账本损坏。
                 _check(checks, "case_data_stream", "MISS",
-                       "case plan 未记录 numpy 随机流 pin，无法证明用例数据可复现")
+                       "case plan 未记录 numpy 随机流 pin（本字段之前产的账本），"
+                       "无法证明用例数据可复现")
+            elif not isinstance(recorded_pin, str) or not _is_wellformed_pin(recorded_pin):
+                # 键在、值却不合法 → 这份账本被改过或写坏了。重跑准备救不了「账本不可信」，
+                # 所以是 BLOCKED 不是 MISS；也**绝不**把它当成普通的版本失配蒙混过去。
+                _check(checks, "case_data_stream", "BLOCKED",
+                       f"case plan 的 numpy_stream_pin 形态非法：{recorded_pin!r}"
+                       f"（应为至少 主.次 两段数字的版本串）——账本不可信，非重跑可解")
             elif recorded_pin != current_pin:
                 _check(checks, "case_data_stream", "MISS",
                        f"numpy 随机流已变（账本 {recorded_pin} → 当前 {current_pin}）："
