@@ -726,7 +726,7 @@ def _api_surface_gaps(spec, caseset):
 
 # ================= 逐 dtype 精度聚合（L3 · 对标 cannbot，**纯只读派生**，2026-07-25）=========
 # 出处：参考仓 cannbot-ops-input `skills/operator-evaluation/scripts/accuracy.py:624-694` 的
-# `accuracy.by_dtype` + `overall_pass_rate`。对齐清单见 `doc/oprunway-cannbot-alignment-plan.md` L3。
+# `accuracy.by_dtype` + `overall_pass_rate`。对齐清单见 `dev-doc/oprunway-cannbot-alignment-plan.md` L3。
 #
 # ⚠ **本节一行都不参与裁决**：只读已经成型的 `per_case` 行 + evidence 的执行信号，做一次统计聚合。
 #   三层口径（catlass_compare / standard_profile / acceptance_precision）、逐 case 的 risk/gaps、
@@ -855,6 +855,11 @@ def _acc_metrics_present(ev_prec):
     return isinstance(ev_prec.get("metrics"), dict)
 
 
+#: evidence 侧表示「这条 case 真跑到了」的状态集。其余任何状态（`execution_failed` /
+#: `golden_unavailable` / 未知自报值）都当作「没有可比结果」→ 功能维 fail、精度归 errored 桶。
+_EXECUTED_EV_STATUSES = ("ok", "skipped_empty")
+
+
 def _acc_executed(e):
     """该 case 是否「跑成了并产出可比结果」。对标 cannbot `accuracy.py:648`（`status != "ok"` → errored）
     ＋ `:656-659`（golden 读不了 → errored）。evidence 缺 / status≠ok / metrics 缺 → 都不算 executed。"""
@@ -938,8 +943,18 @@ def _empty_row(cid):
 
 
 def _verdict(op, vm, spec_standard, problems, per, gaps=None, scaled=None, golden_tiers=None,
-             golden_judged_from="caseset_self_declared", accuracy_summary=None):
-    fails = [p for p in per if p["功能"] == "fail" or p["精度"] == "fail"]
+             golden_judged_from="caseset_self_declared", accuracy_summary=None,
+             golden_unavailable_ids=None):
+    # `golden_unavailable`：参考实现**算不出真值**的 case（如通道数超 OpenCV CV_CN_MAX）。
+    # 它与「算子算错了」是两件完全不同的事，**不进 fails**——理由与下方批 5 对 tier 4 的处理逐字同源：
+    # 没有真值就**无从得出结论**，混进 fail 会把人引去查算子（查错方向，AGENTS.md 5.8）。
+    # 实测教训：GaussianBlur 任务书 169 条里 5 条 C>512 的用例本是 OpenCV 的能力边界，
+    # 却让终态落成 `FAIL(精度)`——而 164 条可判用例里 DUT 数值失败为 **0**。
+    # 名册只认 caseset（gen_cases 的确定性产物）那一份，被裁方在 evidence 里自报的状态拿不到这个待遇。
+    gu_ids = set(golden_unavailable_ids or ())
+    golden_unavailable = [p["case_id"] for p in per if p["case_id"] in gu_ids]
+    fails = [p for p in per if (p["功能"] == "fail" or p["精度"] == "fail")
+             and p["case_id"] not in gu_ids]
     # finding #9：standard 或 acceptance 任一 uncertain 都要计入 needs_review（不被 acceptance pass 吞）。
     unc_ids, seen = [], set()
     for p in per:
@@ -973,7 +988,13 @@ def _verdict(op, vm, spec_standard, problems, per, gaps=None, scaled=None, golde
     if golden_blocked:
         overall = "blocked_golden_unauthorized"
     elif problems or fails or api_surface_missing:
+        # ⚠ 真实失败**优先于** golden_unavailable：查得出的缺陷比查不动的空白更该被看见。
+        # 两者并存时报 fail，而 golden_unavailable 名单仍原样进产物，不被吞掉。
         overall = "fail"
+    elif golden_unavailable:
+        # 无真实失败、但有算不出真值的 case → **BLOCKED，不是 pass 也不是 fail**：
+        # 这批 case 的结论是**空白**，声称「精度通过」等于拿 164 条的结果替 169 条背书。
+        overall = "blocked_golden_unavailable"
     elif unc_ids:
         overall = "needs_review"
     elif risks:
@@ -1007,6 +1028,10 @@ def _verdict(op, vm, spec_standard, problems, per, gaps=None, scaled=None, golde
                         "scaled_cases": scaled,
                         # 批 5：golden 档位如实进裁决——blocked 的原因、需人核的原因都要能被下游直接读到
                         "golden_blocked": golden_blocked,
+                        # 参考实现算不出真值的 case（结论**空白**，非算子失败）——名单原样带出，
+                        # 报告须据它把「164/169 通过」写成「169 条里 5 条无从判定」，
+                        # 不得拿 164 条的结果替 169 条背书。
+                        "golden_unavailable": golden_unavailable,
                         "golden_needs_human_review": golden_needs_human,
                         # 批 4：判据是从 spec 派生（权威）还是 caseset 自声明（legacy·未从 spec 派生）——
                         # 让下游报告一眼看出这条 golden 链的判据可信度，别把 legacy 当权威读。
@@ -1016,6 +1041,7 @@ def _verdict(op, vm, spec_standard, problems, per, gaps=None, scaled=None, golde
                                    "uncertain": len(unc_ids), "risk": len(risks),
                                    "gaps": len(gaps), "scaled": len(scaled),
                                    "golden_blocked": len(golden_blocked),
+                                   "golden_unavailable": len(golden_unavailable),
                                    "contract_problems": len(problems)}}}
 
 
@@ -1096,6 +1122,15 @@ def validate(spec, caseset, evidence):
     if extra:
         problems.append(f"evidence 有多余 case: {sorted(extra)}")
 
+    # `golden_unavailable` 的**可信**名册：由 gen_cases（Layer 1 确定性产物）写进 caseset，
+    # **不是**被裁方在 evidence 里自报的状态。下面那条 dims 豁免只认这一份名册，故伪造者动
+    # evidence.status 无法拿到豁免——反伪造性质与 2026-08-05 那次修复逐字相同。
+    gu_ids = {
+        row.get("case_id")
+        for row in ((caseset.get("golden_unavailable") or {}).get("cases") or [])
+        if isinstance(row, dict) and isinstance(row.get("case_id"), str)
+    } if isinstance(caseset.get("golden_unavailable"), dict) else set()
+
     per = []
     for c in cases:
         if not isinstance(c, dict) or not c.get("id"):
@@ -1107,6 +1142,43 @@ def validate(spec, caseset, evidence):
         e = ev_by_id.get(cid)
         if e is None:
             row.update(功能="fail", 判据="evidence 缺此 case")
+            per.append(row); continue
+        # 证据自报「这条没有可比结果」（driver 逐 case 跑挂 = `execution_failed`；任务书用例算不出
+        # golden = `golden_unavailable`）→ 功能维直接 fail，不再往下走**口径**校验。
+        # 理由：归因要准——继续走下去会停在「精度口径不符/输出形状对账」之类的判据上，把
+        # 「压根没跑出来」写成「口径写错了」，那是错误归因（AGENTS.md 5.8）。
+        #
+        # ⚠ **但必须先过 dims 契约，不能直接短路**（2026-08-05 修，本文件的 fail-open 回归）：
+        #   `evidence.status` 是**被裁方自己写的**。若状态分支抢在 `_dims_contract` 前面 return，
+        #   伪造者只要把 status 写成任意非 ok 值，`dims=[]`（抹掉裁决维度）这类**契约伪造就再也不会被报出来**。
+        #   逐 case 结论确实仍是 fail，但 `contract_problems` 会因此掉数——而它正是
+        #   `blocked_golden_unauthorized` 之类结论的支点，等于给了一条「用坏状态压掉伪造发现」的路。
+        #   引入时的注释写「这条分支只会让结论更严、不存在放松用法」——对**档位**成立，对**检测**不成立。
+        #   实证：`test_dims_empty_numerical_caught`（dims=[] + status=bad）当场变绿，判据里 `dims` 消失。
+        ev_status = e.get("status")
+        if isinstance(ev_status, str) and ev_status not in _EXECUTED_EV_STATUSES:
+            # ⚠ `golden_unavailable` 的 case **本来就没有精度维**，豁免「必含精度」这一条。
+            #   gen_cases 对这类 case 逐字写 `dims=["功能"]`（无 golden 即无从判精度，留在精度维
+            #   会让分母混进一条永远判不了的 case）；而 `_dims_contract` 在 verify_mode=numerical
+            #   下要求必含「精度」——两处直接打架。不豁免的后果是**归因错**：工具自己产的合法
+            #   caseset 被报成「dims 契约违约」，而真正的原因（参考实现算不出 golden，例如通道数
+            #   > OpenCV CV_CN_MAX）被这句判据盖掉。实测：GaussianBlur 任务书 169 条里那 5 条
+            #   C>512 的用例全部落成「dims 契约…」，OpenCV 的报错一个字都没进裁决。
+            #   档位不变（这些 case 仍是 功能=fail），改的只是判据写得准不准。
+            #   豁免只认 caseset 的 `golden_unavailable` 名册 + `dims` 恰为 ["功能"]，
+            #   两条都是**确定性产物侧**的事实，动 evidence.status 拿不到它。
+            gu_exempt = cid in gu_ids and set(dims) == {"功能"}
+            dim_err = _dims_contract(dims, vm, allow_na=gu_exempt)
+            if dim_err:                                  # 伪造优先报，别被「没跑出来」盖过去
+                row.update(功能="fail", 判据=f"dims 契约{dim_err}")
+                per.append(row); continue
+            detail = e.get("error") or e.get("golden_unavailable_reason") or e.get("note") or ""
+            # 精度维**沿用既有口径**：该裁精度（dims 含「精度」）却没有可复算的误差 → fail；
+            # 本就不裁精度的 case（如无 golden 的任务书用例，dims 只有「功能」）→ na。
+            # 这条分支只改「判据写得准不准」，不改任何一条 case 的结论档位。
+            row.update(功能="fail",
+                       精度=("fail" if "精度" in dims else "na"),
+                       判据=f"未产出可比结果（evidence.status={ev_status}）：{detail}".strip("："))
             per.append(row); continue
         ev_prec = e.get("precision") or {}
         # §1.4 空 Tensor 功能用例（Layer A：expected.compare=na、dims=["功能"]）→ 判 na、不判精度。
@@ -1245,7 +1317,9 @@ def validate(spec, caseset, evidence):
     return _verdict(op, vm, spec_standard, problems, per, gaps,
                     scaled=_scaled if isinstance(_scaled, list) else None,
                     golden_tiers=_eff_tiers, golden_judged_from=_judged_from,
-                    accuracy_summary=_acc)
+                    accuracy_summary=_acc,
+                    # 只传 caseset 那份确定性名册（见 `gu_ids` 定义处的反伪造说明）。
+                    golden_unavailable_ids=gu_ids)
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")

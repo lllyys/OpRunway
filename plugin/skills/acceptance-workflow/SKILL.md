@@ -34,8 +34,10 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 
 | 工件 | 由哪个 CP 产 | 存在即代表 | 续跑判据 |
 |---|---|---|---|
-| `source_facts.json` | CP-A | 任务书字节、PR head 与关键文件 ref/摘要已形成内容身份 | envelope 摘要有效且 `completeness.status=complete`；否则 MISS/BLOCKED |
+| `source_facts.json` | CP-A | 任务书字节 + 本轮**声明的输入形态**（`declared_source_form`）与**实得**源身份已形成内容身份 | envelope 摘要有效且 `completeness.status=complete`。⚠ 判据是「**声明 × 实得是否一致**」，**不是**「有没有拿到 PR head」——声明 `local_source` 且实得本地快照就是 `complete`，无需任何授权；只有「声明 `git_pr` 却只实得快照」才落 `snapshot_only`、需授权（见 §3 CP-A 的形态表）。`blocked` 一律 MISS/BLOCKED，不得复用 |
 | `correspondence.json` | CP-A | 对应校验已落盘（读 `status` 定去留） | `status=confirmed` 且 `source_facts_digest` 等于当前事实包才进 CP-B；`mismatch/empty_task` 停 |
+| `taskdoc_links.json` | CP-B（primary inline `taskdoc_links.py`） | 任务书正文里的链接已按受控词表分类、可变 ref 已钉成 commit sha、仓内材料已内容寻址取回 | 退出码 0 且 `blocking` 为空才往下走；`blocking` 非空（见 `BLOCKING_STATUSES`）→ 摆给用户，不猜链接指向 |
+| `taskdoc_caseset.json` + `golden/golden.py` | CP-B（primary inline `taskdoc_caseset.py`；**仅 `precision.case_source=taskdoc`**） | 任务书自带用例集已被识别、接口映射 IR 已对账、caseset 已规范化、golden 包装层与任务书授权锚已落盘 | `outcome=recognized` 才可进 `gen_cases`；其余六种结局（见 `DISCOVERY_OUTCOMES`）**一律 BLOCKED，绝不回退自生成** |
 | `taskdoc_validation.json` + `taskdoc_validation_receipt.json` | CP-B0（`validate_taskdoc` + primary inline `validate_taskdoc_input.py`） | 任务书输入是否足以充当验收依据已逐项判过并机械复核 | receipt `status ∈ {PASSED, PASSED_WITH_PENDING}` 且 `source_facts_digest` 等于当前事实包才进 `extract_spec`；`NEEDS_USER` 停下问用户；`BLOCKED` 重做 CP-B0 |
 | `<op>.spec.json`（含 `task_pr_gaps`） | CP-B（`extract_spec`） | spec 已抽 | 缺 → 派 `extract_spec` |
 | `case_plan.json` | CP-B（primary inline `gen_cases.py --dry-run --ledger-out`） | 用例计划及 spec/planner/golden 依赖已结构化落盘 | `validate_preparation_state.py` 返回 `REUSABLE` 才复用；MISS 重做 CP-A/B 对应缺口，BLOCKED 停止并报告损坏 |
@@ -47,6 +49,38 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 | 中文验收报告 | CP-E（primary） | 报告已出 | — |
 
 > 多算子：一份任务书含 N 个算子 → CP-B 产 N 份 spec，每份独立走 CP-B..E，工件按 `reports/<op>/` 分目录。
+
+### 1.1 ⚠ `work` 目录口径：`work = <run_workflow --out>/work`（**放错就静默走空**）
+
+`run_workflow.py` 内部把工作目录**写死**成 `<--out>/work`（`work = os.path.join(out_dir, "work")`），
+CP-A/B 产的每一件东西都必须落在**这一个**目录里，**CP-D 才看得见**：
+
+```text
+reports/<op>/                 ← run_workflow --out 指这里
+├── work/                     ← ⚠ CP-A/B 全部产物必须在这里
+│   ├── aclnn_preflight.json      # CP-C0 预检（**必须是内容寻址 envelope**，见下）
+│   ├── source_facts.json / pr_facts.json / task_doc.md / task_doc.snapshot.md
+│   ├── <op>.spec.json / case_plan.json / preparation_receipt.json
+│   ├── taskdoc_links.json / taskdoc_caseset.json / golden/          # 仅 taskdoc 档
+│   └── <各 case 目录与 golden .npy>
+├── caseset.json / evidence.json / verdict.json / acceptance.json    # CP-D 落在 --out 根
+└── perf_report.json / baseline.json
+```
+
+**放别处的后果是「静默走空」，不是报错**——这是本轮实测踩过的坑，所以写进本页：
+
+- `cpp_extension_adapter._load_preflight` 只在 `<work>/aclnn_preflight.json` 找预检。
+  文件不在 → 返回 `None` → codegen **退回历史缺省的标准 4 参 stage2 形态**，并把
+  `stage2_form_unverified` 挂进 manifest 的 `degradations`。开发通路照跑，**验收门当场拒**
+  （`validate_acceptance_state`：「没核过就不能出验收裁决」）。所以症状是「跑完了，门说没核过」，
+  不是「找不到文件」。
+- 性能采集计划、真实基线（`_perf_plan.json` / `_real_baseline.json` / `_torch_npu_baseline.json` 等）
+  同样只认 `work/` 下的文件名；`run_workflow` 每轮开跑前会**先删**这几个文件，防上一轮的旧基线
+  被读成本轮真数。
+- ⚠ **预检工件必须用 `--out` 写**：`preflight_aclnn.py --root <work> --out aclnn_preflight.json`
+  产的是 `content_address` 的**可校验 envelope**（`schema_version`/`domain`/`digest`/`payload` 四键）；
+  而**把 stdout 重定向到文件得到的是裸 payload**，下游 `read_artifact` 校 domain + digest 时会
+  当场拒（且**不会**被当成「没有预检」静默跳过——那正好把 fail-closed 变成 fail-open）。
 
 ---
 
@@ -79,7 +113,30 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 **目的**：取材 + 任务书↔PR 对应校验 + 环境/模式确认，识别并挡掉「未验收空任务 / 任务书↔PR 配错」。
 
-- **取材**（确定性脚本，primary 直接跑）：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/fetch_source.py --taskdoc <路径|链接> --pr <PR链接> --out <work>` → `task_doc.md` + 逐字节 `task_doc.snapshot.md` + `pr_facts.json` + 内容寻址的 `source_facts.json`。快照在 CP-A/spec 之前即落，spec 与 golden 共用同一 SHA，不再后补回填；PR head、关键文件 ref 或任务书字节变化即新身份，`completeness=blocked` 不得复用。
+- **取材**（确定性脚本，primary 直接跑）。**两条互斥入口，按本轮被测物到底是什么二选一**：
+
+  ```bash
+  # ① 被测物是 PR                 → 声明 declared_source_form=git_pr
+  python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/fetch_source.py \
+    --taskdoc <路径|链接> --pr <PR链接> [--target-dir <算子子目录>] --out <work>
+
+  # ② 被测物是一份本地源码目录（无 .git 也行）→ 声明 declared_source_form=local_source
+  python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/fetch_source.py \
+    --taskdoc <路径|链接> --pr-snapshot <本地源码目录> [--target-dir <算子子目录>] --out <work>
+  ```
+
+  两条都产 `task_doc.md` + 逐字节 `task_doc.snapshot.md` + `pr_facts.json` + 内容寻址的 `source_facts.json`。快照在 CP-A/spec 之前即落，spec 与 golden 共用同一 SHA，不再后补回填；PR head / 快照 merkle、关键文件 ref 或任务书字节变化即新身份，`completeness=blocked` 不得复用。
+- **⚠ 本地代码是一等输入形态，不是降级路由**：`declared_source_form ∈ {git_pr, local_source}` 是**入口就定**的一等事实（不是推断），同时写进 `pr_facts.json` / `source_facts.json` 顶层、`bindings` 和 vendor build receipt 的 `source`。档位判据换了轴——从「有没有拿到 PR head」改成「**实得是否与声明一致**」（allowlist 见 `source_provenance._ROUTES`）：
+
+  | 声明 `declared_source_form` | 实得 `provenance_kind` | `completeness` | 要不要授权 | `degradations` |
+  |---|---|---|---|---|
+  | `local_source`（`--pr-snapshot`） | `local_snapshot` | **complete** | **不需要** | **`[]`** |
+  | `git_pr`（`--pr`） | `gitcode_pr` | complete | 不需要 | `[]` |
+  | `git_pr` / **两侧都未声明** | `local_snapshot` | `snapshot_only` | **仍需** `OPRUNWAY_ALLOW_DEGRADED_PROVENANCE=local_snapshot`（值必须逐字等于 kind，不接受 `1`/`true`） | `["pr_head_unbound", "changed_files_is_subtree_not_pr_diff"]` |
+  | `local_source` | `gitcode_pr` | — | — | **一律拒**（声明本地却带着上游 commit） |
+
+  **未声明 = 按最严的 `git_pr` 对待**：本次改动之前产的老事实包没有这个字段，两侧都没有时按 `git_pr` 走，规矩与改动前逐字相同；一侧有一侧没有 → fail-closed（那两份事实包不是同一次取材产的）。
+- **`pr_head_unbound` 语义已分家，报告里别混**：`local_source` 形态下 `head_sha=null` 是**正确值、不是缺陷**。这条形态本身的中性事实走 `bindings["source_form_facts"]`（`local_source_has_no_upstream_commit` / `local_source_file_set_is_subtree_not_pr_diff`，取回用 `source_provenance.form_facts`），报告**须原样带着**——据此不得声称「已绑定 PR head」「changed_files 是 PR diff」——但**不得把它呈现成异常**。`provenance_degradations` 只装「本该绑却没绑」那一类。
 - **对应校验**（落 `correspondence.json`，schema/枚举见 §4；canon verify-spec-pr-correspondence·proposed·未 settle，载重前需核）：靠三条证据合断——
   1. **改动落点目录**：`pr_facts.target_dir`（机器可比），对上任务书声明的算子目录；
   2. **issue / 追踪号**：**NL 读** `task_doc.md` 与 PR `title`（`pr_facts` **不抽 issue 号**，只能自然语言读），**非算子名字面匹配**；
@@ -129,7 +186,40 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   ⚠ 这个门**不产验收裁决**，只挡「输入不足以验收」；它也**判不出**任务书内容本身对不对——
   判宽（模糊的判成明确）会静默生效，唯一护栏是 ref 的判法 + 强制逐字引用。
 - **dispatch** `acc-spec-extractor`，`dispatch_mode = extract_spec`：按六段契约读 `task_doc.md` + `task_doc.snapshot.md` + `pr_facts.json` + `source_facts.json` + `correspondence.json`（含 `confirmed_constraints`）→ `<op>.spec.json` + `task_pr_gaps`（缺项落 gaps 不臆造；多算子多 spec）。
-- **dispatch** `acc-runner-dev`，`dispatch_mode = gen_golden`：读 `task_doc.md`+`spec` → 任务书快照入库 + `<ops_root>/<op>/golden.py`（真值口径走 **R3 两档链**；**PR/仓内参考实现禁作 golden 源**；后端生成期定死）→ 自跑 `check_golden.py <Op>` 出档位账本。**必须在 dry-run 之前**——`gen_cases` 缺 golden.py 即 fail-closed。
+- **CP-B1 任务书自带用例集（新档；`spec.precision.case_source` 分流）**：
+  **口径由用户定死——任务书给了 case 就用它的，不给才自己造。** 这不是「优化」，是验收权威归属问题：
+  另起炉灶铺正交网格等于把任务书点名的测试点换掉（AGENTS.md 5.8）。
+  1. **primary inline** `python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/taskdoc_links.py --taskdoc <路径|链接> --out <work> [--exclude <substr>]…`
+     → `<work>/taskdoc_links.json` + 内容寻址取回的仓内材料。它把任务书正文里的链接按**只看链接结构**的
+     受控词表 `KINDS` 分类（blob / tree / **相对链接** / repo 根 / MR / discussion / …），
+     **`STATUSES` 没有 `ok` 兜底**——每条链接都得落进一个有具体含义的格子；且**可变 ref 先解析成
+     commit sha 再 pin**，否则同一轮取回的几个文件可能来自不同 commit、产物摘要不再可复现。
+     退出码 `0` 正常 / `2` 有 blocking 状态 / `1` 参数或 IO 错。
+  2. **primary inline** `python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/taskdoc_caseset.py
+     --links <work>/taskdoc_links.json --spec <spec> --out <work> [--taskdoc-snapshot <work>/task_doc.snapshot.md]`
+     → 识别成套自测用例（cases JSON + golden `.py` + prototype JSON）、产**接口映射 IR**、规范化 caseset、
+     在 `<out>/golden/` 下生成 `golden.py` 包装层 + 冻结原件，**并把任务书快照落在同一目录**。
+     ⚠ 快照与 `golden.py` 是**一对，必须一起搬到 `<ops_root>/<op>/`**：授权核验读的是与 `golden.py`
+     同目录的 `task_doc.snapshot.md`，只搬 golden 不搬锚，档位会掉到 tier 4 blocked。
+     映射 IR 是这一档最要紧的产物：任务书那套符号名与本仓 spec **逐字不同、attr 结构也不同**
+     （两个标量 vs 一个数组），所以判据只能是 **io 角色 + 位置序 + 数量 + canonical dtype + 组合结构**，
+     **没有** `if op == "<某算子>"`。结局是受控词表 `DISCOVERY_OUTCOMES`（无 `ok` 兜底）：
+     只有 `recognized` 产 caseset，其余六种（`unsupported_case_field` / `unsupported_input_source` /
+     `caseset_ambiguous` / `identity_mismatch` / `not_a_caseset_dir` / `taskdoc_caseset_not_probed`）
+     一律 **BLOCKED**。⚠ **绝不回退自生成**——「认不出任务书的 case，那就自己造一套」正是这一档要堵的洞。
+  3. **spec 侧一个字段分档**：`precision.case_source ∈ {generated, taskdoc}`，**整字段省略 = `generated` = 现行为**
+     （已验收算子的产物逐字节不变）。`taskdoc` 档**必须显式把那份 caseset 喂进去**——
+     `gen_cases.py <spec> --taskdoc-caseset <path>` / `run_workflow.py … --taskdoc-caseset <path>`；
+     声明了 `taskdoc` 却拿不到文件 → `gen_cases` fail-closed。
+  4. ⚠ **两档的 `coverage_strength` 表述必须不同**：`taskdoc` 档写
+     `taskdoc_provided：用例集由任务书提供（N 条…），覆盖强度由任务书决定；本引擎不另铺正交网格、
+     不做 1-wise 采样、不加白名单必覆盖组合`。**不得**再声称「1-wise + 白名单」——那是本引擎自己铺网格时的
+     覆盖强度，拿来描述任务书给的用例就是冒领。同理这一档 `forced_total` = 用例集全体（一条都不许少）、
+     规模预算不行使（降规模会把任务书点名的 shape 改掉，那就不是那条用例了）。
+  5. **性能 case 跟着走**：`spec.perf.case_source="precision_cases"`（`perf` 存在时必填）。这一档的性能候选池 =
+     **全部可判精度的任务书用例**；不这么定的话，任务书用例天然不带「性能」维 → 性能维恒零数据。
+- **dispatch** `acc-runner-dev`，`dispatch_mode = gen_golden`（**仅 `case_source=generated`**；`taskdoc` 档的
+  `golden.py` 由上面的 `taskdoc_caseset.py` 生成，不再另派）：读 `task_doc.md`+`spec` → 任务书快照入库 + `<ops_root>/<op>/golden.py`（真值口径走 **R3 两档链**；**PR/仓内参考实现禁作 golden 源**；后端生成期定死）→ 自跑 `check_golden.py <Op>` 出档位账本。**必须在 dry-run 之前**——`gen_cases` 缺 golden.py 即 fail-closed。
   “任务书快照入库”必须实际落在授权核验生效路径 `<ops_root>/<op>/task_doc.snapshot.md`，内容逐字来自
   当前 CP-A `task_doc.snapshot.md`，并先核 source-facts digest 与 golden contract 声明的 SHA。只在
   `source/` 留一份同 SHA 文件、却漏掉 op 目录生效副本，仍须 BLOCKED，不能口头视为等价。
@@ -140,7 +230,9 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   路由**按退出码、不按档位数字**：**0**（可走）→ 进 dry-run；**2**（`needs_human_review`——tier 3 必然如此，⚠ **tier 1 也可能**：`multistep + oracle_method` 判 `(tier 1, 需人核)`）→ 进 dry-run 但**报告里显式标「golden 需人核」**；**1**（blocked / 词表不合规 / 缺件 / 账本自相矛盾 / 参数错误）→ **停在 CP-B**，把 `blocked_reason` 摆给用户，**不自动回落第二档**（R4）。
 - **primary inline**（确定性脚本，无 NL 生成）：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/gen_cases.py <spec> --dry-run --ledger-out <work>/case_plan.json --source-facts <work>/source_facts.json --correspondence <work>/correspondence.json`。plan-only，查这些：用例预算落不落 `[S=强制下限, pool_max]` 区间 · dtype 分布 · 特殊场景（empty/scalar/边界/inf/ninf/nan）覆盖 · 被丢组合类 · `case_id` 唯一（撞则 raise） · per-case 种子确定性；并绑定 canonical spec、规划器源码、golden.py、source facts 与用户确认摘要。后两项必须成对提供；只绑定一半直接报错。
   ⚠ **能力边界（别当成旧 mock 自检的等价物）**：dry-run **不调 `golden_fn`、不落 `.npy`、不产任何裁决**；但它**会加载执行 `golden.py`**（取 `out_shape` 造规模预算）——所以对 golden 的覆盖是**半道**的：**缺文件 → 只记「未核」、不阻塞**；**文件在但坏了（语法错 / 顶层抛 / 必需导出不全）→ 当场抛、拦得住**。仍**验不了**：来源契约合不合规（那是 `check_golden.py` 的活）/ `oracle_source` 映射 / `validator` 判定链 / 三级门 / evidence 结构——**这些只有 CP-D 真机跑测才验得到**。（照本仓约定 golden.py 把 torch 延迟 import，故 dry-run 通常不拉 torch；某算子若在模块顶层 `import torch`，它会跟着 import。）CP-B 过了**不代表**用例链整体可用。
-- **产出**：`<work>/taskdoc_validation.json`（subagent 产）+ `<work>/taskdoc_validation_receipt.json`（primary inline 产）+ `<op>.spec.json` + `<ops_root>/<op>/golden.py` + `<ops_root>/<op>/task_doc.snapshot.md`（三件均 subagent 产）+ `<work>/case_plan.json`。随后 primary 跑 `validate_preparation_state.py` 落 `preparation_receipt.json`；它只判非真机准备能否复用、**不产裁决**。`caseset.json` 仍由 CP-D 真机跑测时才落盘，绝不缓存复用。
+- **产出**（**全部落 `<work>/`，见 §1.1**）：`taskdoc_validation.json`（subagent 产）+ `taskdoc_validation_receipt.json`（primary inline 产）+ `<op>.spec.json` + `<ops_root>/<op>/golden.py` + `<ops_root>/<op>/task_doc.snapshot.md` + `case_plan.json`。
+  **`case_source` 两档的 golden 产法不同**：`generated` 档的 `golden.py` 与任务书快照由 `acc-runner-dev:gen_golden` 这个 subagent 产；`taskdoc` 档由 `taskdoc_caseset.py` 生成包装层并把快照落到 golden 同目录，另加 `taskdoc_links.json` + `taskdoc_caseset.json` 两件。
+  随后 primary 跑 `validate_preparation_state.py` 落 `preparation_receipt.json`；它只判非真机准备能否复用、**不产裁决**。`caseset.json` 仍由 CP-D 真机跑测时才落盘，绝不缓存复用。
 - **路由**：dry-run 报错或账本异常（如预算区间不合理、重点 dtype 未覆盖、特殊场景缺失、id 撞）→ **dispatch** `acc-spec-extractor`，`dispatch_mode = refine_spec`（据报错文本修 spec）→ 重跑 dry-run。**契约自检没过先修 spec，别上真机。**
   ⚠ **`golden.py` 缺文件这一种 dry-run 查不出**（只记「未核」照常出计划），会一路漏到 CP-D 才炸；且 `refine_spec`（改 spec）**变不出 `golden.py`**——**golden 侧的问题一律回 `acc-runner-dev:gen_golden`，不在 refine 循环里空转**。
 
@@ -152,7 +244,21 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 - **前置**：先确认用户已开 NPU/VPN（CP-A 已问）。
 - **按 form 分流**：`runner_form=cpp` 才 dispatch `acc-runner-dev:gen_runner` → `verify_runner`；`runner_form=aclnn_py` **不派这两个 mode**，直接使用 CP-C0 事实进入下述 harness 真机信任门。cpp 路仍先过 scope gate——ops-<族> 仓·aclnn 两段式·opp 安装型（含非 experimental 子树）；catlass/非 aclnn 接口/双实现/未支持 dtype → 返回 `BLOCKED` / 转 P3，**不硬塞**。过 gate 后据 `spec` + `pr_facts.key_files` 的 `test_aclnn_*.cpp` **锚定 example 不猜**，生成 `oprunway_<op>_runner.cpp` + 选构建路径。
   - `runner_form=cpp_extension`：不派手写 runner；codegen 生成官方 bundle 与 invocation plan。真机 driver 收据必须绑定 spec/caseset/manifest/plan/source/setup/ELF、torch/torch_npu/CANN/SoC、独立 namespace/schema、vendor 库与符号归属，缺项或漂移停在 CP-C。
-  - **⚠ `spec.runner_form == "aclnn_py"`（torch 对标 · ctypes-aclnn runner form）放行、且路径不同**（蓝图 §3 组件⑥/§4.1）：此形态**无 per-op runner 源**（op 工程即 DUT，`aclnn_runtime` 的 ctypes runner 完全 op-中立、从 header 推 arity），**不生成 `oprunway_<op>_runner.cpp`**。CP-C0 只提前消掉重复的 header/spec 研究，**不替代** scope gate 与信任门。scope gate 仍校 **ops-<族>仓形态**（**仓根** `build.sh` + `<op_subdir>/op_host/` + **在 `<op_subdir>` 下（有界递归，含 `op_host/op_api/`）能找到** `aclnn_*.h`（剔 `*_impl.h`），由 `aclnn_adapter.find_aclnn_project` 复核 + 逐段软链守卫）。⚠ **接口头落点不预设是哪一层**：PR6429 真实布局是 `<op_subdir>/op_host/op_api/aclnn_median.h`，`<op_subdir>/` 下**没有** `op_api/`（2026-07-24 dogfood 实测订正；旧文的 `<op_subdir>/op_api/aclnn_*.h` 是错的，钉死一层会把真 PR 判成「非域内」硬阻塞）。⚠ **不要求 per-op `build.sh`、不要求 `op_graph/`**——2026-07-24 实测坐实 ops-nn 实验算子（PR6429 median）二者皆无、build 走**仓根** `build.sh --pkg --experimental --ops=<op>`（见 `doc/oprunway-torch-baseline-design.md` §9.4/§9.6）；缺件 / 非标准两段式 / 有 opaque descriptor → `BLOCKED`「不支持的接口能力」，**不硬塞、不自动归某类 adapter**（域内假设：无状态 / 标准 aclnn 两段式 / 无 opaque descriptor）。过 gate → **跳过 per-op `verify_runner`（无 runner 源可自检），但必须完成下条的 aclnn_py harness 真机信任门后，方可进入 CP-D（`--mode aclnn_py`）**——**「无源可自检」≠「免验证」**，别把静态 preflight/scope gate 通过当成放行。
+    **张量 ACL 存储格式由 `spec.aclnn_tensor_format` 声明**（受控两值，缺席 = 历史默认）：
+    - 缺席 → `torch_npu_rank_default`，沿用 op-plugin 的 `ConvertType` **按 rank 猜格式**
+      （3→`ACL_FORMAT_NCL`、4→`ACL_FORMAT_NCHW`、5→`ACL_FORMAT_NCDHW`、其余→`ACL_FORMAT_ND`），
+      产物与本字段引入前**逐字节相同**，manifest 里记 `default_unverified`（= 这次没人核过张量格式，
+      是可读事实而非静默假设）；
+    - 显式 `nd` → codegen 生成 ND 转换器，manifest 记 `spec_declared`。
+      **什么时候要写它**：按 rank 猜格式是 op-plugin **自家算子**的约定，不是 aclnn 两段式的通用契约；
+      接口若按 `GetStorageFormat() == FORMAT_ND` 校格式，一条 rank-3 的普通 ND 图像张量就会被 L2 侧
+      当场拒成 `ACLNN_ERR_PARAM_INVALID`（161002）——而 Python 侧 `torch_npu.get_npu_format` 明明报 ND，
+      因为那个格式是**转换那一步**贴上去的，不是张量本来的属性。
+    - ⚠ **`nd` 当前只在手写 `extended` 派发下实现**：声明了 `nd` 却落在走官方宏的 `standard` 形态上
+      → **fail-closed**（宏内部自己调 `ConvertTypes`，插不进别的张量格式；那条路径是「逐字节不变」的红线，
+      不为此改写）。词表外取值同样 fail-closed。ABI 事实源（header/docs/example）说要 ND 才写 `nd`，
+      没人核过就沿用默认并如实挂账，**谁都不猜**（AGENTS.md 5.1）。
+  - **⚠ `spec.runner_form == "aclnn_py"`（torch 对标 · ctypes-aclnn runner form）放行、且路径不同**（蓝图 §3 组件⑥/§4.1）：此形态**无 per-op runner 源**（op 工程即 DUT，`aclnn_runtime` 的 ctypes runner 完全 op-中立、从 header 推 arity），**不生成 `oprunway_<op>_runner.cpp`**。CP-C0 只提前消掉重复的 header/spec 研究，**不替代** scope gate 与信任门。scope gate 仍校 **ops-<族>仓形态**（**仓根** `build.sh` + `<op_subdir>/op_host/` + **在 `<op_subdir>` 下（有界递归，含 `op_host/op_api/`）能找到** `aclnn_*.h`（剔 `*_impl.h`），由 `aclnn_adapter.find_aclnn_project` 复核 + 逐段软链守卫）。⚠ **接口头落点不预设是哪一层**：PR6429 真实布局是 `<op_subdir>/op_host/op_api/aclnn_median.h`，`<op_subdir>/` 下**没有** `op_api/`（2026-07-24 dogfood 实测订正；旧文的 `<op_subdir>/op_api/aclnn_*.h` 是错的，钉死一层会把真 PR 判成「非域内」硬阻塞）。⚠ **不要求 per-op `build.sh`、不要求 `op_graph/`**——2026-07-24 实测坐实 ops-nn 实验算子（PR6429 median）二者皆无、build 走**仓根** `build.sh --pkg --experimental --ops=<op>`（见 `dev-doc/oprunway-torch-baseline-design.md` §9.4/§9.6）；缺件 / 非标准两段式 / 有 opaque descriptor → `BLOCKED`「不支持的接口能力」，**不硬塞、不自动归某类 adapter**（域内假设：无状态 / 标准 aclnn 两段式 / 无 opaque descriptor）。过 gate → **跳过 per-op `verify_runner`（无 runner 源可自检），但必须完成下条的 aclnn_py harness 真机信任门后，方可进入 CP-D（`--mode aclnn_py`）**——**「无源可自检」≠「免验证」**，别把静态 preflight/scope gate 通过当成放行。
 - **dispatch** `acc-runner-dev`，`dispatch_mode = verify_runner`（⚠ **仅 `runner_form == "cpp"`**）：造手算 golden 小用例、逐元素比，形成 runner 自检证据（满足/不满足）。
 - **产出**（**按 form 分流，别混**）：
   - `runner_form != "aclnn_py"`（cpp runner v1）：自检证据满足的 `oprunway_<op>_runner.cpp` + 构建路径配置。
@@ -164,17 +270,27 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 **目的**：一次原子跑完 Task2 精度 + Task3 性能 + 三级门，落全套裁决工件。
 
-- **dispatch** `acc-verify-rootcause`，`dispatch_mode = run_npu`：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <spec> --mode <mode> --out reports/<op>/`（`OPRUNWAY_*` 指真实机器/路径，不写进仓）。**`<mode>` 据 `spec.runner_form` 定**：cpp runner v1 → `--mode new_example`（`OPRUNWAY_*` 见 repo_adapter._ne_cfg）；`runner_form==aclnn_py`（torch 对标）→ `--mode aclnn_py`（`OPRUNWAY_ACLNN_OPS_DIR`（ops 仓 checkout 根）/`OPRUNWAY_ACLNN_OP_SUBDIR`/`OPRUNWAY_ACLNN_VENDOR_DIR`/`OPRUNWAY_ACLNN_VENDOR_NAME`/`OPRUNWAY_ACLNN_BASE_REPO`/`OPRUNWAY_ACLNN_PR_REF`/`OPRUNWAY_ACLNN_SOC` 等见 aclnn_adapter._aclnn_cfg，且须 `OPRUNWAY_ACLNN_REAL=1` + 人工确认 build install 写**用户态 vendor 目录**（`<vendor_dir>/vendors/<vendor_name>_nn`，⚠ `_nn` 后缀由 install 自动追加）、绝不写共享 opp）。
+- **dispatch** `acc-verify-rootcause`，`dispatch_mode = run_npu`：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <spec> --mode <mode> --out reports/<op>/ [--taskdoc-caseset <work>/taskdoc_caseset.json]`（`OPRUNWAY_*` 指真实机器/路径，不写进仓；⚠ `--out` 决定 work 口径，CP-A/B 产物必须已在 `<--out>/work` 下，见 §1.1；`--taskdoc-caseset` **仅 `precision.case_source=taskdoc` 时给，且这一档必须给**，两向不匹配由 `gen_cases` fail-closed）。**`<mode>` 据 `spec.runner_form` 定**：cpp runner v1 → `--mode new_example`（`OPRUNWAY_*` 见 repo_adapter._ne_cfg）；`runner_form==aclnn_py`（torch 对标）→ `--mode aclnn_py`（`OPRUNWAY_ACLNN_OPS_DIR`（ops 仓 checkout 根）/`OPRUNWAY_ACLNN_OP_SUBDIR`/`OPRUNWAY_ACLNN_VENDOR_DIR`/`OPRUNWAY_ACLNN_VENDOR_NAME`/`OPRUNWAY_ACLNN_BASE_REPO`/`OPRUNWAY_ACLNN_PR_REF`/`OPRUNWAY_ACLNN_SOC` 等见 aclnn_adapter._aclnn_cfg，且须 `OPRUNWAY_ACLNN_REAL=1` + 人工确认 build install 写**用户态 vendor 目录**（`<vendor_dir>/vendors/<vendor_name>_nn`，⚠ `_nn` 后缀由 install 自动追加）、绝不写共享 opp）。
   - **新增 form 优先规则**：`runner_form==cpp_extension` 时，上句旧 aclnn_py 描述不适用，须走 `--mode cpp_extension`，显式设置 `OPRUNWAY_CPP_EXTENSION_REAL=1` 与 `OPRUNWAY_CPP_EXTENSION_DRIVER_JSON`；driver argv 只进本地机器 profile，不写 tracked 文件。
   - **PR 身份钉死**：build receipt 和最终报告必须记录本轮远端 PR ref 解出的**精确 head SHA**。本地工作树里
     即使存在该 head 的后继修复提交，也只能作为诊断线索；未经用户把被测版本改为该提交，禁止用后继 build
     替换指定 PR 的失败证据，更不能把后继 PASS 写成原 PR PASS。
-  - **源码身份前置门（build 前硬门）**：期望 SHA 只取当前 `source_facts.json` / `pr_facts.json`
-    绑定的 40 位 `head_sha`。先取得精确对象，再做 detached checkout，随后以 `git rev-parse HEAD`
-    逐字核对期望 SHA；状态只允许
-    `SOURCE_ACQUIRED → HEAD_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED` 顺序前进。精确 SHA
-    不可直接取得时，只能使用本轮 PR 元数据确定的 PR-head ref 或 head repo，且最终仍只认 SHA 等值；
-    候选须在执行前有限列明，不得失败后动态试探。禁止默认分支、base head、可移动分支或后继提交兜底。
+  - **源码身份前置门（build 前硬门）——⚠ 按 `declared_source_form` 分流，两条路都不放松**。
+    状态机两条路共用：只允许 `SOURCE_ACQUIRED → HEAD_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED`
+    顺序前进；判据由 `source_provenance.check_config_against_preflight`（起跑前）+
+    `check_build_identity`（build 段）两处出，编排层不另写第二套。
+    - **`git_pr` 档（绑 commit）**：期望 SHA 只取当前 `source_facts.json` / `pr_facts.json`
+      绑定的 40 位 `head_sha`。先取得精确对象，再做 detached checkout，随后以 `git rev-parse HEAD`
+      逐字核对期望 SHA。精确 SHA 不可直接取得时，只能使用本轮 PR 元数据确定的 PR-head ref 或
+      head repo，且最终仍只认 SHA 等值；候选须在执行前有限列明，不得失败后动态试探。
+      禁止默认分支、base head、可移动分支或后继提交兜底。
+    - **`local_source` 档（无 head 可绑，改绑字节）**：`head_sha` 在 cfg / bindings / build provenance
+      三处都必须**显式为 `null`**——「键缺失」不算数（那是「没人说过」，不是「说了没有」），
+      更不许合成一个 40 位 hex 冒充 commit（那是捏造 PR head，AGENTS.md 5.8）。
+      绑的是 **snapshot scope + 两个 merkle**：`snapshot_sha256`（整树）与
+      `snapshot_subtree_sha256`（算子子树），且**两侧 scope 必须逐字相同**才可比——
+      对不上就 fail-closed，宁可停，也不产一份「看起来绑过」的空收据。
+      实操上这意味着 `fetch_source --target-dir` 与 `OPRUNWAY_ACLNN_OP_SUBDIR` 得指向同一段子树。
   - **shell fail-fast 与首失败终止**：所有 CP-D shell 入口必须具备等价于
     `set -Eeuo pipefail` 的语义，并记录首个失败阶段、退出码和日志。源码对象未取得或 HEAD 未验证时
     `build_started=false`；build 未验证时 `workflow_started=false`。任一前置失败立即产 blocked receipt，
@@ -201,6 +317,60 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
     `.cases[].inputs[].path`、`.expected.golden_path` 与 `.expected.outputs[].golden_path`，
     按实际引用路径构造 allowlist 并逐文件校摘要；不得按 `input_*.npy`、`golden_*.npy` 等文件名模式
     猜测闭包。引用缺失、越界、符号链接或归档成员不等于 allowlist 均在准备门 fail-closed。
+  - **vendor build receipt 不再手拼，两步产**（`cpp_extension` 通路的 DUT 身份唯一凭据。
+    Extension 自身 build/load 成功只证明调用桥可用，**DUT 是哪份源码构建的必须由本收据独立绑定**）：
+
+    ```bash
+    # ⚠ 第一步必须在 build 之前跑 —— build 会往源码树里写产物，事后再摘就摘到「源码 + 产物」，
+    #    与 CP-A 记的那份字节永远对不上（实测：build 后整树 merkle 变成另一个值）。
+    python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/vendor_build_receipt.py \
+      snapshot-digest --source-root <源码树根> --subtree-scope <算子子目录> --out <凭据路径>
+
+    # …在这中间做真机 build…
+
+    # --snapshot-digest 与 --pr-head-sha **恰给一个**：本地源码通路给前者，PR 通路给后者。
+    python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/vendor_build_receipt.py \
+      emit --declared-source-form <git_pr|local_source> \
+      --snapshot-digest <凭据路径> \
+      --library <被加载的 vendor ELF 绝对路径> --build-cwd <构建工作目录> \
+      --returncode 0 --build-argv=--pkg --build-argv=-j16 --out <收据路径>
+    ```
+
+    `emit` **不会自己去摘源码树**，只接受 `snapshot-digest` 在 build 前落下的那份凭据——这是
+    结构性地杜绝上面那个错法；同时把**产出时刻**的树摘要记进 `build.tree_state_at_emit`，
+    「build 到底动没动源码树」因此是可审的。⚠ `--build-argv` 的实参几乎全以 `-` 开头
+    （`--pkg` / `-j16`），**必须写等号形式** `--build-argv=--pkg`，分开写会被 argparse 当成另一个选项。
+    收据按 `source.provenance_kind` 分流校验（`gitcode_pr` 绑 40 位 head + 非空 repo；
+    `local_snapshot` 绑 `pr_head_sha=null` + 仓根 + 子目录 scope + 两个 merkle + 构建 argv +
+    vendor ELF sha256，**六项一条不放松**），三处消费方（driver / adapter / 验收门）共用
+    `vendor_build_receipt.py` **一份**校验，不再各抄一遍。
+    ⚠ 同源码同 build 命令，vendor `.so` 产物哈希**不比特可复现**；收据的 ELF 摘要只证
+    「**这次**装的是这个」，不证「谁都能构出同一个」——报告别把它写成可复现性证明。
+  - **符号来源由收据反推自设，不再依赖谁 source 过 `set_env.bash`**：`torch_npu` 运行时按
+    `ASCEND_CUSTOM_OPP_PATH` 找 `libcust_opapi.so`，没有它则 `aclnnXxxGetWorkspaceSize` 只会在
+    CANN 内置 `libopapi.so` 里找不到，于是**每一条** case 都落 `execution_failed`
+    （`… not in libopapi.so, or libopapi.so not found`）。干净现场实证过：同一份逐字节相同的 codegen 产物，
+    164 条全挂——根因不在代码生成，在一条**没被任何产物记录**的环境状态。
+    现在 driver 从**已被 build receipt 绑定**的那个 vendor ELF 路径按 CANN 布局
+    （`<root>/vendors/<pkg>/op_api/lib/<lib>.so`）反推该值，并在**任何算子调用之前**设入进程环境，
+    生效值落进 `receipt.runtime.ascend_custom_opp_path`，门再从 `vendor.library_path` 重算对账。
+    环境里已有值且与本轮不一致 → **fail-closed**（不是覆盖也不是追加：那一轮可能跑在别人的符号上，
+    而报告写的却是本轮 PR 的身份）。**别预先 source 其它 vendor 的 `set_env.bash`，在干净环境里跑。**
+  - **stage2 形态按 CP-C0 预检分派，未知形态 fail-closed**：`standard`（标准 4 参）走官方
+    `EXEC_NPU_CMD_EXT` 宏；**`extended`（非四参）走手写两段式派发**——不能用宏，因为宏的执行段最终落到
+    op-plugin 的 `ExecuteApiFunc()`，那里 arity 是写死的 4，对 extended 形态是**静默错调**。
+    形态来源三选一并记进 manifest 的 `stage2_form_source`，优先级从高到低：
+    ① CP-C0 预检（推荐，形态直接来自 PR head header）→ ② spec 的 `call_variants[i].stage2_form`
+    显式声明 → ③ 历史缺省。走到 ③ 时 codegen 会把 `stage2_form_unverified` 写进 manifest 的
+    `degradations`，**验收门据此拒**。
+    ⚠ **manifest 里根本没有 `degradations` 这个键 = 「没人核过」，门同样拒**——旧 manifest 会撞上这条，
+    修法是用当前 codegen 重新 `prepare`，不是放松判据。
+  - **driver 逐 case try/except，单条失败不再中断全量**：每条 case 单独兜，失败的进
+    `out_manifest.failed[]`（`case_id` + **逐字**错误原文 + `error_kind`，按失败发生在哪一步归类：
+    `input_materialization_failed` / `execution_failed` / `output_readback_failed`），
+    跑完 plan 仍写 `complete: True`（= 这一轮把 plan 走完了，不是「采了个子集」）。
+    ⚠ **这不放松任何判定**：`failed` 里的 case 在 evidence 侧是 `status=execution_failed`、无输出可比，
+    功能维照样 fail。改的只是「第一条 case 被 DUT 拒就整轮零产物」这个工程缺陷。
   - **cpp_extension 性能次序**：先完成全量 Extension 精度 readback，用 validator 同源规则筛出精度通过且来自同一 caseset 的性能 case；再显式给 `OPRUNWAY_CPP_EXTENSION_DEVICE`，复用第一阶段内容寻址 ELF/vendor receipt，custom 与任务书 baseline 双侧统一走 `msprof --ai-core=off + ctypes MSTX + CSV` 的 kernel-only 采集。性能 collect 必须完整覆盖计划 case 序列并回绑同一 Extension provenance；partial/stale/换 ELF 一律拒。
   ⚠ **`aclnn_py` 的 perf 通路：代码已接通、真机也跑过一次，但一个耗时数都没产出（仍 BLOCKED）**（2026-07-24 两次更正——① 此前本节写「采集端尚未接入 / `parse_torch_npu_baseline` 仅 schema 占位 / Task3 必须 pending」已被落地的 perf 代码推翻；② 随后写的「一次真机都没跑过」也已被 median 首跑推翻：跑是跑了、**结果是 BLOCKED**。勿再照任一旧文办事）。现状：
     - **已落地**：`aclnn_runtime/perf_msprof.py` 做 msprof kernel-only 采集（`--task-time/--ascendcl/--msproftx`，**MSTX range 圈测量窗、缺 MSTX 证据即 fail-closed**；只累加 device 计算 kernel，MEMCPY_ASYNC 不计入；warmup 5 / repeat 20 取中位数）；基线 = **同机 `torch_npu` 跑同一份 torch reference**，行为五分类（`npu`/`cpu_fallback`/`hybrid_host_device`/`execution_failed`/`no_device_kernel_observed`）**只有 `npu` 才计时**；`repo_adapter.parse_torch_npu_baseline` 已从占位改成**真消费口**（scope / us / 重复 case_id 全 fail-closed，非 npu 行为进 `excluded`）；**精度先筛**（只测已过精度的 case，其余记 `skipped_accuracy_failed`）；双边 `timing_scope` 校验 + speedup 由 `perf_compare` 出（源无关、判定逻辑一行未改）。
@@ -225,6 +395,17 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 - **固定汇总视图**：精度逐字展示 `verdict.json.accuracy_summary.report.by_dtype/overall` 的 `total/passed/failed/needs_review`（`na` 单列）；性能逐字展示 `perf_report.json.by_shape_class/shape_overall` 的 `planned_cases/cases_scored/达标/blocked/npu_us/baseline_us/speedup`。这些字段由确定性脚本生成并由三级门做完整性对账，primary 不自行重算。
 - **失败明细解耦**：存在性能未通过 case 时，必须生成独立 `性能失败明细.md`，主报告只放汇总和链接。明细逐项展示 `caseset.json` 的输入/shape/dtype/属性/调用接口，以及 `perf_report.json` 的 outcome、双边 behavior/scope/us、speedup、`target_ratio` 和原始 reason；同时给单 case 性能重放入口。runner 尚无该能力时如实标缺口，不用 JSON 查询冒充复现。
 - **测量真实性红线**：所有性能 case 都须真实采集并按同口径比较，不允许按 numel 自动免测；必须同时报告 `cases_scored` 和有效 `us/speedup` 条数。`cases_scored=0` 时无论 `达标` 计数为何，统一明确“未产出任何可评分性能数据，性能未验证”。性能计划数须写成 `<dims 含性能的 case>/<caseset 总数>`，功能/精度-only case 不冒充性能覆盖。
+- **⚠ 红线：「164/169 通过」不等于精度通过**。`verdict.json` 的 `overall.golden_unavailable` /
+  `counts.golden_unavailable` 列的是**参考实现算不出真值**的 case（如通道数超 OpenCV `CV_CN_MAX`）——
+  它们的结论是**空白**，既不是通过也不是失败。报告须据这份名单如实写成
+  「**169 条里 5 条无从判定**（列出 case_id + 逐字原因）」，**不得**拿能判的那 164 条替整份用例集背书。
+  分母怎么写会直接改变读者对覆盖率的判断，所以这条不是措辞讲究，是 5.8 的「不捏造」。
+- **源身份如实呈现**：`local_source` 档的报告须原样带着 `bindings["source_form_facts"]`
+  （「本地源码无上游 commit」「文件集是子树而非 PR diff」），**不得声称已绑 PR head**；
+  但它也**不是降级**，别写成异常。`git_pr` 档若实得只有快照，那才要把 `provenance_degradations`
+  的 `pr_head_unbound` 摆出来。
+- **用例来源如实呈现**：`case_source=taskdoc` 时报告须写明「用例集由任务书提供、共 N 条」，
+  并逐字引用 caseset 的 `coverage_strength`；**不得**沿用「1-wise + 白名单」那套说法（见 CP-B1）。
 - **红线**：数字全引真实产物，推断项标 `(推断)`；`needs_review` **不当 pass**；**验收门 `validate_acceptance_state.py` STATUS: FAILED → 不出 pass 裁决；报告如实呈现 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整）；只认任务书为验收权威，「PR 有测试」≠「验收过了」。
 
 ### CP-F 验收后人工精度复核与重测（append-only）
@@ -322,6 +503,36 @@ CP-A 落盘的对应校验工件（断点续跑读它）。最小 schema：
 - **验收门 `validate_acceptance_state.py` STATUS: FAILED → BLOCKED**：**不出 pass 裁决；仍由 `run_workflow` 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整），一票否决。primary/CP-E 如实呈现 BLOCKED，不美化成 pass。
 - **本 skill 只调这三级门、不重实现判定**：编排层不复刻门逻辑、不复刻 validator/perf_compare，只读它们落盘的裁决。
 
+### 5.1 `golden_unavailable` —— 一等状态 + 独立终态 `BLOCKED_GOLDEN_UNAVAILABLE`
+
+**是什么**：参考实现**算不出真值**的 case（见证：通道数超 OpenCV `CV_CN_MAX`）。这不是工具坏了，
+也不是算子错了——是这批 case 在当前参考实现下**根本没有可比对象**。
+
+处置口径（三层，都在确定性脚本里，编排层只引用）：
+
+1. **gen_cases**：case 身份**仍进 caseset**、**允许无 golden 文件**、仍进 evidence，
+   顶层落一份 `golden_unavailable` 名册（case_id + 逐字原因）。
+   **其余 case 继续跑**——不因为几条算不出真值就中断全量生成/执行。
+2. **validator**：这批 case **移出 `fails`**，单列 `overall.golden_unavailable` 与
+   `counts.golden_unavailable`；没有任何真实精度失败时 verdict 落 `blocked_golden_unavailable`。
+   ⚠ **真实失败优先**：两者并存时仍报 `fail`（查得出的缺陷比查不动的空白更该被看见），
+   而 `golden_unavailable` 名单照样原样进产物、不被吞掉。
+   豁免带反查（顶层台账点名 + 逐字原因两处一致 + 有 verdict 时功能 fail 且精度非 pass +
+   不得留在精度维），任一不满足仍按伪造拒——名册缺席就不给豁免。
+3. **run_workflow**：新终态 **`BLOCKED_GOLDEN_UNAVAILABLE`**，在 `overall` 判定链里排在
+   `fail` **之后**、`needs_review` 之前。
+
+**⚠ 与 `BLOCKED_GOLDEN_UNAUTHORIZED` 是两回事，别混**（成因与处置都不同）：
+
+| 终态 | 含义 | 谁来解 |
+|---|---|---|
+| `BLOCKED_GOLDEN_UNAUTHORIZED` | 真值**来路不明**（授权链核不实） | 人把授权补齐 |
+| `BLOCKED_GOLDEN_UNAVAILABLE` | **压根没有真值**（参考实现算不出来） | 换参考实现，或由人裁定这批 case 不在验收范围内 |
+
+两者都**不在** `precision_ok` 放行集（`run_workflow` 只放行 `pass` / `passed_with_risk` /
+`passed_with_gaps`），因此**不会被当成「精度通过」去支撑性能结论**——拿一份判不了的精度结论
+去撑「性能达标」，是把无效结论往下传。两者也都已进 `validate_acceptance_state` 的 verdict 受控词表。
+
 ---
 
 ## 6. Task3 基线来源与 blocked 路由
@@ -333,7 +544,18 @@ CP-A 落盘的对应校验工件（断点续跑读它）。最小 schema：
   - **框架级 Torch 或已确认等价于 Torch 接口的小算子拼接 baseline**（`perf.baseline=="torch_npu"`）→ 同机 `torch_npu` kernel-only；
   - **实际要求直接 ACLNN baseline**（`perf.baseline=="aclnn_builtin"`）→ 按 spec `aclnn_baseline.variants` 从 CANN `libopapi.so` 直接调用。两者均须来自任务书事实或用户确认，不凭 API 名猜。
   基线口径以 `spec.perf.baseline` 为准，不写死。
+- **⚠ 缺省口径先看 AGENTS.md §5.10：只测 msprof 实测，不比 GPU**。任务书**即使写了**「与 GPU 比对」
+  （如「以 OpenCV CUDA A100 为参考，ratio ≥ 0.45×」），默认**同样只用 msprof 采 NPU 实测性能**——
+  **只有用户明确要求做 GPU 对比时**才真去取标杆、才走下面那条 blocked 路由。落地三条：
+  - **不因缺 GPU 数据把结论落到 `BLOCKED_WAIT_GPU_BENCHMARK`**；
+  - 性能维产出 = msprof 实测 kernel 耗时 + 分档说明，**不是比值裁决**；报告须如实写
+    「按用户口径只做 NPU msprof 实测，未做 GPU 标杆对比」，**不得**包装成「已达标 0.45×」（5.8）；
+  - **任务书的 GPU 比值条款按「未验收」记账**进 `task_pr_gaps`——不是「已通过」也不是「不适用」，
+    最终裁决**不得**因为 NPU 侧有实测数就宣称整体通过。
+  ⚠ **别和 §5.11 混**：5.11 讲的是**精度真值口径**（任务书写 GPU → 解析为同族 CPU，条款**已被满足**、
+  **不产生** gap）；这里讲的是**性能**（取消比较，条款按「未验收」挂账）。两者性质不同，别互相照搬。
 - **Task3 blocked 状态路由**（task3-state-machine）：
-  - `BLOCKED_WAIT_GPU_BENCHMARK`：任务书要求 GPU 基线但**缺外部 GPU 标杆数据** → BLOCKED、不出 pass；
+  - `BLOCKED_WAIT_GPU_BENCHMARK`：**仅在用户明确要求做 GPU 对比**、却缺外部 GPU 标杆数据时 → BLOCKED、不出 pass。
+    默认口径下这条不该出现（见上一条）；
   - `BLOCKED_INCOMPARABLE_TIMING_SCOPE`：计时**口径不可比**（如一边 kernel-only 一边含 H2D/D2H 墙钟）→ BLOCKED、不出 pass。
-- **GPU external 对比层：consumer 侧已接入 pipeline，缺的是真实数据**。`run_workflow --gpu-baseline <json>` → `gpu_baseline.parse_gpu_baseline`（按字段契约严格校验 + `case_id` 与完整输入签名交叉核对）→ `perf_compare` 出 NPU↔GPU 对比。**真实 GPU 标杆数据仍待外部方提供**；未给数据（或标杆被判废）时，移植类算子一律走 `BLOCKED_WAIT_GPU_BENCHMARK`（正规挂起、非 fail）。本 skill 只写路由文本、不产数据。
+- **GPU external 对比层：consumer 侧已接入 pipeline，缺的是真实数据**。`run_workflow --gpu-baseline <json>` → `gpu_baseline.parse_gpu_baseline`（按字段契约严格校验 + `case_id` 与完整输入签名交叉核对）→ `perf_compare` 出 NPU↔GPU 对比。**真实 GPU 标杆数据仍待外部方提供**。本 skill 只写路由文本、不产数据。

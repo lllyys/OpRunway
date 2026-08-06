@@ -21,6 +21,6 @@ status: proposed
 
 **验收职责边界**：验收把缺陷**定性**清楚即可，不替被测 PR 作者把算子修到底。
 
-动因案例（Equal，2026-07-08→07-09 三度翻案）：真机 `out.bin` 全 0 的归因 refine 了三遍——op-bug → harness-bug → op「真阳性(A3 缺陷)」——**但都错在没质疑最上游**。2026-07-09 正式确认 **#2890 根本不是这个 Equal 任务的 PR（配错）、且该任务未验收通过**，故「真阳性」结论**整体作废**。教训分两层：本页的「先解耦再归因」（op vs harness）**仍成立、必要**，但**不充分**——解耦之前还得先验证「比对基准（哪份任务书 × 哪个 PR）」本身，见 [[Verify spec-PR correspondence before acceptance]]。（原缺陷报告 `doc/equal-a3-defect-report.md` 已删除。）
+动因案例（Equal，2026-07-08→07-09 三度翻案）：真机 `out.bin` 全 0 的归因 refine 了三遍——op-bug → harness-bug → op「真阳性(A3 缺陷)」——**但都错在没质疑最上游**。2026-07-09 正式确认 **#2890 根本不是这个 Equal 任务的 PR（配错）、且该任务未验收通过**，故「真阳性」结论**整体作废**。教训分两层：本页的「先解耦再归因」（op vs harness）**仍成立、必要**，但**不充分**——解耦之前还得先验证「比对基准（哪份任务书 × 哪个 PR）」本身，见 [[Verify spec-PR correspondence before acceptance]]。（原缺陷报告 `dev-doc/equal-a3-defect-report.md` 已删除。）
 
 **Sources.** [[session 7f7b1411-e1d0-47aa-93d5-19ccd6fcd130 · 2026-07-08]]，[[session 37223d6d-c20e-48a9-84f5-99aeaddb7f51 · 2026-07-09]]（Equal 三度翻案：#2890 配错·任务未验收→前「真阳性」作废；解耦必要不充分、上游先验证对应）

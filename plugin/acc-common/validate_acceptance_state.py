@@ -21,13 +21,21 @@ OPRUNWAY_DONE 哨兵 / raw log hash / msprof 输出绑定（本轮不做）；�
 import argparse, hashlib, json, math, os, statistics, sys
 from collections import Counter
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import perf_mode  # noqa: E402
+import vendor_build_receipt  # noqa: E402
+
 # T6/T8 扩枚举：exception=小shape例外(合法放行需交叉校验)；
 # blocked_wait_gpu_benchmark=缺外部 GPU 标杆正规挂起；blocked_incomparable_timing_scope=双边口径不可比。
 _PERF_STATUS = {"ok", "no_perf_cases", "blocked", "fail",
                 "exception", "blocked_wait_gpu_benchmark", "blocked_incomparable_timing_scope",
                 # High#2（2026-07-24）：验收通路缺**真实**基线（采集端未接通）→ 正规挂起。
                 # 它取代的是原来那条「静默 mock 兜底」的路——mock 基线在验收通路上等于冒充达标。
-                "blocked_wait_real_baseline"}
+                "blocked_wait_real_baseline",
+                # §5.10（2026-08-03）：measure_only —— 已实测、**未做比值裁决**。
+                # ⚠ 它**只**在 caseset 落盘的 perf_case_policy.mode=measure_only 时才合法
+                #   （见 gate_task3 的双向交叉核）；否则就是「伪造一个宽档 status 绕开达标核对」。
+                perf_mode.STATUS_MEASURED}
 # gt3-1：blocked 行仅在这几种「合法挂起/不可采集」态下才允许免 scope 证据校验；
 # status ∈ {ok, fail, exception} 下出现 blocked 行 = 口径矛盾（零证据放行洞），记 error。
 _BLOCKED_OK_STATUS = {"blocked", "blocked_incomparable_timing_scope", "blocked_wait_gpu_benchmark",
@@ -39,9 +47,14 @@ _PERF_WAIT_STATUS = {"blocked_wait_gpu_benchmark", "blocked_wait_real_baseline"}
 # 算子 op_def 压根不支持 → 带发现的通过；差额挂 task_pr_gaps，见 _check_unsupported_gap 的反后门硬校）。
 # 2026-07-23：passed_with_gaps 再添一类撑法——op_def 声明了、但目标硬件那支实现没有
 # （`dtype_unsupported_on_target_hw`，见 _check_target_hw_gap）；两类均为被测物侧发现、同进 unsupported 桶。
+# 2026-08-05 加 blocked_golden_unavailable：参考实现**算不出真值**的 case（如通道数超 OpenCV
+# CV_CN_MAX）→ 结论空白，既非算子失败也非通过。与 blocked_golden_unauthorized 分开——那是
+# 「真值来路不明」（要人补授权），这是「压根没有真值」（要换参考实现或由人裁定不在验收范围）。
+# ⚠ 加进本词表**不放松任何门**：它不在 `_PASS_LIKE` 之类的放行集里，overall 仍落 BLOCKED_*；
+#   词表缺它反而会让门把一个合法终态报成「verdict 非法」，把真实结论盖成证据破损（实测踩过）。
 _VERDICT_ENUM = {
     "pass", "fail", "needs_review", "passed_with_risk", "passed_with_gaps",
-    "blocked_golden_unauthorized",
+    "blocked_golden_unauthorized", "blocked_golden_unavailable",
 }
 # C4 结构化 gap 类型：任务书要求、算子 op_def 不声明支持的 dtype 差额（与既有 dtype_deferred 语义不同——
 # deferred = 我们这条 pipeline 暂未测；unsupported = PR/算子根本没实现，是对被测方的**发现**）。
@@ -468,6 +481,10 @@ _STORAGE_ITEMSIZE = {
 _PERF_SHAPE_PROFILES = {
     "Atlas A3": {"metric": "sum_input_bytes", "small_max_bytes": 256 * 1024},
 }
+# 与 gen_cases.py 的 `_CASE_SOURCE_TASKDOC` / 性能候选池标识逐字一致；
+# 两侧是独立源，对不上就该 fail-closed（这里只复算，不放行）。
+_CASE_SOURCE_TASKDOC = "taskdoc"
+_CANDIDATE_POOL_TASKDOC = "taskdoc_precision_cases"
 
 
 def _gate_perf_case_policy(cs, cases, errs):
@@ -478,16 +495,49 @@ def _gate_perf_case_policy(cs, cases, errs):
     if not isinstance(policy, dict):
         errs.append("caseset.perf_case_policy 非对象")
         return
+    try:
+        perf_mode.policy_mode(policy)     # 未知 mode → fail-closed（不猜、不退默认）
+    except ValueError as ex:
+        errs.append(f"perf_case_policy.mode 非法：{ex}")
+        return
     rule = policy.get("shape_classification")
     limit = rule.get("small_max_bytes") if isinstance(rule, dict) else None
     hardware = rule.get("hardware") if isinstance(rule, dict) else None
+    limit_source = rule.get("source") if isinstance(rule, dict) else None
+    # ⚠ hardware 必须是非空字符串，**先于** profile 查表校。缺字段时 `hardware=None` →
+    # `_PERF_SHAPE_PROFILES.get(None)` 恒 None → 只要再声明 `source='spec_supplied'`，
+    # 任意正整数 small_max_bytes 都能过门：等于「硬件未知也能自定边界」，是 spec_supplied
+    # 这条授权分支上最直接的 fail-open。与 gen_cases._perf_case_policy 同一条硬校。
+    if not isinstance(hardware, str) or not hardware.strip():
+        errs.append(
+            f"perf_case_policy.shape_classification.hardware={hardware!r} 须为非空字符串——"
+            "大小 shape 边界必须绑定一个具名硬件，未知硬件不得自定边界")
+        return
+    if hardware != hardware.strip():
+        errs.append("perf_case_policy.shape_classification.hardware 含首尾空白（身份不稳定）")
+        return
     profile = _PERF_SHAPE_PROFILES.get(hardware)
+    # `spec_supplied` 是「本表没有该硬件时由 spec 直供并留痕」的授权，不是宽档开关：
+    # 授权必须**显式**（键在且逐字等于受控值），下面的受控词表检查已保证这点。
+    if limit_source is not None and not isinstance(limit_source, str):
+        errs.append("perf_case_policy.shape_classification.source 须为字符串")
+        return
+    # 大小 shape 边界的来源（与 gen_cases._SHAPE_LIMIT_SOURCES 同一枚受控词表）：
+    #   · 缺省/`hardware_profile` —— 必须命中本表且逐值相符（历史行为，一个字不放松）；
+    #   · `spec_supplied`         —— 本表没有该硬件的受控 profile 时，由 spec 直供并在产物里留痕。
+    #     ⚠ 表里**有**该硬件时仍强制逐值相符：spec 改不动我们已核定的硬件事实。
+    #     ⚠ 这条只影响**分组**（大/小 shape 怎么归桶），不影响免测、阈值或任何 pass/fail。
+    spec_supplied = (limit_source == "spec_supplied")
+    if limit_source is not None and not spec_supplied and limit_source != "hardware_profile":
+        errs.append(f"perf_case_policy.shape_classification.source={limit_source!r} 非受控值")
+        return
     if (policy.get("case_source") != "precision_cases"
             or not isinstance(rule, dict) or rule.get("metric") != "sum_input_bytes"
             or not _is_int(limit) or limit < 1
-            or profile is None
-            or limit != profile["small_max_bytes"]
-            or rule.get("metric") != profile["metric"]
+            or (profile is None and not spec_supplied)
+            or (profile is not None
+                and (limit != profile["small_max_bytes"]
+                     or rule.get("metric") != profile["metric"]))
             or rule.get("boundary") != "small_if_input_bytes_lte_limit"):
         errs.append("perf_case_policy 来源/分类规则非法")
         return
@@ -593,6 +643,7 @@ def _gate_perf_case_policy(cs, cases, errs):
                 or meta.get("input_bytes") != total or meta.get("small_max_bytes") != limit
                 or meta.get("metric") != "sum_input_bytes"
                 or meta.get("hardware") != hardware
+                or meta.get("source") != limit_source
                 or meta.get("boundary") != "small_if_input_bytes_lte_limit"):
             errs.append(f"{cid}: perf_shape_classification 与输入物理字节 {total} 不一致")
             continue
@@ -615,8 +666,104 @@ def _gate_perf_case_policy(cs, cases, errs):
     if new_selection_contract or (
             isinstance(sel, dict) and "excluded_degenerate_case_ids" in sel):
         expected_selection["excluded_degenerate_case_ids"] = excluded_degenerate_ids
+    # CS：`case_source=taskdoc` 档的候选池账本。gen_cases 在该档**多写两个键**
+    # （gen_cases.py:497-500 的 candidate_pool / excluded_golden_unavailable_case_ids），
+    # 而本门此前把 expected_selection 建成闭集再整体 `!=` 比 —— 于是任何 taskdoc 档用例集
+    # 都必然在这里报「身份不一致」，哪怕逐个身份字段都逐字相同。那是**门自己落后于产物契约**，
+    # 不是用例集有问题。这里按 gen_cases 的同一条规则**复算**再对账，而不是把这两个键放行：
+    #   · 非 taskdoc 档凭空多写这两个键 → 仍然不一致 → fail-closed；
+    #   · taskdoc 档漏写、或 golden_unavailable 名单被改动/漏记 → 仍然不一致 → fail-closed。
+    # 顺序也按 caseset 的 cases 顺序复算，与生产侧 append 的顺序一致（不做集合化比较，
+    # 「账本顺序被重排」同样应该看得见）。
+    if cs.get("case_source") == _CASE_SOURCE_TASKDOC:
+        expected_selection["candidate_pool"] = _CANDIDATE_POOL_TASKDOC
+        expected_selection["excluded_golden_unavailable_case_ids"] = [
+            c.get("id") for c in cases
+            if isinstance(c, dict)
+            and (c.get("expected") or {}).get("golden_status") == _EV_GOLDEN_UNAVAILABLE
+        ]
     if sel != expected_selection:
         errs.append("perf_case_policy.selection 与 caseset 实际性能/精度 case 身份不一致")
+
+
+def _golden_unavailable_ledger(cs, errs):
+    """caseset 顶层 `golden_unavailable` 台账 → `{case_id: 逐字原因}`；结构坏返回 None。
+
+    这是 `golden_unavailable` 从「case 自报的一个字段」升格成**一等状态**的佐证面：
+    单条 case 说「我没有 golden」不作数，caseset 还必须在顶层台账里点它的名、并写下参考实现
+    算不出 golden 的**逐字原因**。两处由生产侧独立写出，门在这里对账。
+    台账缺席（非 taskdoc 档的用例集根本没有这一节）→ 空台账，此时任何自报 `golden_unavailable`
+    都会因为「台账里没这条」被拒。
+    """
+    raw = cs.get("golden_unavailable")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or not isinstance(raw.get("cases"), list):
+        errs.append("caseset.golden_unavailable 台账结构非法（须为 {count, cases[]}）")
+        return None
+    ledger = {}
+    for item in raw["cases"]:
+        if (not isinstance(item, dict)
+                or not isinstance(item.get("case_id"), str) or not item["case_id"]
+                or not isinstance(item.get("reason"), str) or not item["reason"].strip()):
+            errs.append(f"caseset.golden_unavailable.cases 记录不完整（须含 case_id + 非空 reason）：{item!r}")
+            return None
+        ledger[item["case_id"]] = item["reason"]
+    if raw.get("count") != len(raw["cases"]) or len(ledger) != len(raw["cases"]):
+        errs.append("caseset.golden_unavailable 台账的 count / 条目数 / case 身份唯一性不自洽")
+        return None
+    return ledger
+
+
+def _gate_golden_unavailable_case(cid, case, exp, ledger, vrows, errs):
+    """`golden_unavailable` 是**一等状态**，不是「伪造的 na」——但豁免必须带反查。
+
+    改动前 gate_task1 压根不认识这个状态：它按 legacy 单输出分支要求 `golden_path` 必填，
+    又把这条 case 合法的 `compare=na` 当成「伪造 na 跳精度门」。BLOCKED 这个**结论**碰巧
+    是对的，**理由**却是假的——门在指控一份合规产物造假，看报告的人会去查根本不存在的伪造。
+    准确性本身就是纪律（AGENTS.md 5.8）。
+
+    现在门认这个状态，但只在下列反查全成立时才豁免 `golden_path` / 精度口径完整性：
+
+      1. caseset 顶层 `golden_unavailable` 台账里点了这条 case 的名；
+      2. case 自带**非空逐字原因**，且与台账那句**逐字相同**（两处独立写，对不上即不可信）；
+      3. 有 verdict 时，这条 case 在 `verdict.per_case` 里存在、功能维 fail、精度维不为 pass。
+         （没有 verdict = 还没跑到裁决，Task2 的 `_gate_task2_unjudgeable` 会再核一遍。）
+
+    另加两条自洽：`golden_path` 必须确实没有（自称没真值却挂着真值文件 = 自相矛盾），
+    且这条 case **不得**留在精度维——没有 golden 就没有可判的精度，把它留在分母里只会让
+    「判不了」被平均成「还行」。任一不满足，仍按伪造拒。
+    """
+    if ledger is None:                      # 台账结构已坏，错误已记；不在这里重复报
+        return
+    if cid not in ledger:
+        errs.append(f"{cid}: 自称 expected.golden_status=golden_unavailable，但 caseset 顶层"
+                    "golden_unavailable 台账未点名这条 case——无佐证的一等状态不予豁免精度门")
+        return
+    reason = exp.get("golden_unavailable_reason")
+    if not isinstance(reason, str) or not reason.strip():
+        errs.append(f"{cid}: golden_unavailable 无逐字失败原因（说不出为什么算不出 golden，不予豁免）")
+    elif reason != ledger[cid]:
+        errs.append(f"{cid}: golden_unavailable 的失败原因与 caseset 台账记的不一致"
+                    f"（case={reason!r} 台账={ledger[cid]!r}）")
+    if exp.get("golden_path"):
+        errs.append(f"{cid}: 自称 golden_unavailable 却带 golden_path={exp.get('golden_path')!r}"
+                    "（既然有真值就该判精度，自相矛盾）")
+    if exp.get("compare") != "na":
+        errs.append(f"{cid}: golden_unavailable 的 expected.compare 须为 na，"
+                    f"得 {exp.get('compare')!r}（没有真值却声明了比较口径）")
+    if "精度" in (case.get("dims") or []):
+        errs.append(f"{cid}: golden_unavailable 却仍留在精度维——没有 golden 就判不了精度，"
+                    "留在精度分母里等于把「判不了」摊薄成通过")
+    if vrows is None:                       # 尚无 verdict（Task1 阶段）：该条由 gate_task2 复核
+        return
+    row = vrows.get(cid)
+    if row is None:
+        errs.append(f"{cid}: golden_unavailable 但 verdict.per_case 无此 case"
+                    "（算不出真值的 case 没进裁决 = 静默跳过）")
+    elif row.get("功能") != "fail" or row.get("精度") == "pass":
+        errs.append(f"{cid}: golden_unavailable，裁决却是 功能={row.get('功能')!r}/"
+                    f"精度={row.get('精度')!r}——没有可比结果的 case 不得记成通过")
 
 
 def gate_task1(d, errs):
@@ -629,6 +776,13 @@ def gate_task1(d, errs):
     if not isinstance(cases, list) or not cases:
         errs.append("caseset 无用例或 cases 非列表")
         return
+    gu_ledger = _golden_unavailable_ledger(cs, errs)   # 一等状态的佐证台账（结构坏 → None）
+    vd = _load(d, "verdict.json")                      # 还没跑到裁决就没有；有就必须对得上
+    if vd == "__BAD__":
+        errs.append("verdict.json 解析失败（坏 JSON）")
+    vrows = ({r.get("case_id"): r for r in (vd.get("per_case") or [])
+              if isinstance(r, dict)} if isinstance(vd, dict) else None)
+    gu_seen = set()
     ids = []
     for i, c in enumerate(cases):
         if not isinstance(c, dict):
@@ -646,6 +800,13 @@ def gate_task1(d, errs):
             # 多输出契约：口径/golden 逐输出落在 `expected.outputs[]`，顶层无 golden_path/threshold/policy。
             # 逐输出校完整性（结构不合法即 fail-closed），legacy 单输出分支**一行不走**（向后兼容硬约束）。
             _mo_caseset_outputs(cid, exp, errs)
+            if not c.get("dims"):
+                errs.append(f"{cid}: 无 dims（功能/精度/性能维度）")
+            continue
+        if exp.get("golden_status") == _EV_GOLDEN_UNAVAILABLE:
+            # 一等状态：无 golden、无精度口径**是合规形态**，但豁免须带反查（见函数 docstring）。
+            _gate_golden_unavailable_case(cid, c, exp, gu_ledger, vrows, errs)
+            gu_seen.add(cid)
             if not c.get("dims"):
                 errs.append(f"{cid}: 无 dims（功能/精度/性能维度）")
             continue
@@ -671,6 +832,13 @@ def gate_task1(d, errs):
     dup = [k for k, v in Counter(ids).items() if v > 1]
     if dup:
         errs.append(f"caseset 有重复 case_id: {dup}")
+    if gu_ledger:
+        # 反方向：台账点了名、cases[] 里却没有这条 / 没标这个状态 → 台账与用例对不上，
+        # 「有几条算不出 golden」这件事就成了两份互相矛盾的说法。
+        orphan = sorted(set(gu_ledger) - gu_seen)
+        if orphan:
+            errs.append(f"caseset.golden_unavailable 台账点名 {orphan}，但这些 case 在 cases[] 中"
+                        "不存在或未标 expected.golden_status=golden_unavailable")
     cov = Counter(_case_key(c, errs) for c in cases if isinstance(c, dict))
     print(f"  用例数={len(cases)} | (dtype,shape) 覆盖={dict(cov)}")
     _gate_dtype_coverage(cs, errs)   # Q7：任务书 dtype 全集 vs 实测覆盖（未声明→不阻塞）
@@ -695,6 +863,50 @@ def _canonical_sha(value):
     except (TypeError, ValueError):
         return None
     return hashlib.sha256(raw).hexdigest()
+
+
+#: codegen 落的机读挂账：本轮 stage2 实参结构**没有任何 header 级证据**。
+#: 逐字对应 `cpp_extension_codegen.DEGRADATION_STAGE2_UNVERIFIED`（那里是定义处）。
+_STAGE2_UNVERIFIED = "stage2_form_unverified"
+_STAGE2_DISPATCHABLE_FORMS = ("standard", "extended")
+
+
+def _gate_cpp_extension_stage2_evidence(manifest, errs):
+    """stage2 实参结构必须有据：**没核过就不能出验收裁决**。
+
+    codegen 允许在「预检产物与 spec 都没说」时退回历史缺省（标准 4 参宏）——那是为了让
+    开发/冒烟通路不至于一改就断。但验收侧不能跟着放松：拿 4 参 argtypes 调一个 extended
+    形态的 native 函数，在 aarch64 上是段错误或**静默错值**，且下游没有任何一道门看得出来。
+    所以「这次按几参调的」必须来自 PR head header（CP-C0 预检）或 spec 的显式声明，
+    否则本门记 error → BLOCKED（AGENTS.md 5.8：没核过的事不得升级成通过）。
+
+    修法只有两条，都不是放松判据：
+      · 把本轮 CP-C0 预检工件放到 work/aclnn_preflight.json（推荐：形态直接来自 PR header）；
+      · 或在 spec 的 call_variants[i] 里显式写 stage2_form（须与 header 一致，冲突时以 header 为准）。
+    """
+    degradations = manifest.get("degradations")
+    if degradations is None:
+        # 旧 manifest（本字段之前生成的）没有这个键，它同样意味着「没人核过 stage2 形态」。
+        errs.append(
+            "cpp_extension manifest 无 degradations 台账——无法确认 stage2 实参结构有据，"
+            "请用当前 codegen 重新 prepare")
+        return
+    if not isinstance(degradations, list):
+        errs.append("cpp_extension manifest.degradations 非列表（台账坏）")
+        return
+    if _STAGE2_UNVERIFIED in degradations:
+        errs.append(
+            "cpp_extension stage2 实参结构未经 header 核验（manifest 挂账 "
+            f"{_STAGE2_UNVERIFIED}）——验收不接受「猜成标准 4 参」。请提供 CP-C0 预检工件"
+            "（work/aclnn_preflight.json）或在 spec.call_variants[i].stage2_form 显式声明")
+    for row in manifest.get("variants") or []:
+        if not isinstance(row, dict):
+            errs.append("cpp_extension manifest.variants 项非 object")
+            continue
+        if row.get("stage2_form") not in _STAGE2_DISPATCHABLE_FORMS:
+            errs.append(
+                f"cpp_extension variant {row.get('entrypoint')!r} 的 "
+                f"stage2_form={row.get('stage2_form')!r} 非可派发形态")
 
 
 def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs):
@@ -731,6 +943,7 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs):
     except (OSError, ValueError, TypeError) as ex:
         errs.append(f"cpp_extension 绑定工件坏 JSON: {type(ex).__name__}: {ex}")
         return
+    _gate_cpp_extension_stage2_evidence(manifest, errs)
     bindings = receipt.get("bindings")
     if not isinstance(bindings, dict):
         errs.append("cpp_extension receipt.bindings 缺失")
@@ -768,9 +981,26 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs):
     runtime = receipt.get("runtime")
     if not isinstance(runtime, dict) or any(
             not runtime.get(k) for k in
-            ("torch_version", "torch_npu_version", "cann_version", "soc")):
+            ("torch_version", "torch_npu_version", "cann_version", "soc",
+             "ascend_custom_opp_path")):
         errs.append("cpp_extension runtime provenance 不完整")
     vendor = receipt.get("vendor")
+    # 符号来源包必须与本轮 vendor ELF 同源。driver 在任何算子调用前把
+    # `ASCEND_CUSTOM_OPP_PATH` 设成从 vendor `.so` 反推的那个包（不再依赖谁 source 过
+    # vendor 的 set_env.bash——那正是上一轮「跑通但复现不出来」的根因）；本门按同一条规则
+    # 从 `vendor.library_path` 重算，与收据记下的生效值逐字对账。对不上 = 说不清这一轮的
+    # aclnnXxx 由谁提供，fail-closed（AGENTS.md 5.8）。
+    if isinstance(runtime, dict) and isinstance(vendor, dict):
+        try:
+            derived_opp = vendor_build_receipt.custom_opp_path(vendor.get("library_path"))
+        except vendor_build_receipt.VendorBuildReceiptError as ex:
+            errs.append(f"cpp_extension vendor.library_path 反推自定义算子包失败：{ex}")
+        else:
+            if runtime.get("ascend_custom_opp_path") != derived_opp:
+                errs.append(
+                    "cpp_extension runtime.ascend_custom_opp_path 与 vendor.library_path 反推的"
+                    f"自定义算子包不一致：收据记 {runtime.get('ascend_custom_opp_path')!r}，"
+                    f"重算 {derived_opp!r}——本轮符号来源不可核")
     vendor_sha = vendor.get("library_sha256") if isinstance(vendor, dict) else None
     symbols_owned = vendor.get("symbols_owned") if isinstance(vendor, dict) else None
     if (not isinstance(vendor_sha, str) or len(vendor_sha) != 64
@@ -780,31 +1010,29 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs):
             or any(not isinstance(symbol, str) or not symbol
                    for symbol in symbols_owned)):
         errs.append("cpp_extension vendor library/symbol ownership provenance 不完整")
-    build_receipt = vendor.get("build_receipt") if isinstance(vendor, dict) else None
-    source = build_receipt.get("source") if isinstance(build_receipt, dict) else None
-    build = build_receipt.get("build") if isinstance(build_receipt, dict) else None
-    artifact_rec = (build_receipt.get("artifact")
-                    if isinstance(build_receipt, dict) else None)
-    head = source.get("pr_head_sha") if isinstance(source, dict) else None
+    # vendor 构建收据：判据由 `vendor_build_receipt` 一处解释（driver / adapter / 本门共用）。
+    # 按 `source.provenance_kind` 分流——`gitcode_pr` 与改动前逐字同一套（40 位 head + 非空 repo）；
+    # `local_snapshot` 改绑「仓根 + 算子子目录 scope + 整树/子树 merkle + 构建 argv + ELF sha」
+    # 并强制显式 `degradations: ["pr_head_unbound"]`。合成 head 冒充绑定的收据一律当场拒。
+    vendor_map = vendor if isinstance(vendor, dict) else {}
+    build_receipt = vendor_map.get("build_receipt")
     build_digest = _canonical_sha(build_receipt)
-    if (not isinstance(build_receipt, dict)
-            or build_receipt.get("schema") != "oprunway.vendor_build_receipt"
-            or build_receipt.get("schema_version") != 1
-            or build_receipt.get("status") != "VERIFIED"
-            or not isinstance(head, str) or len(head) != 40
-            or any(ch not in "0123456789abcdefABCDEF" for ch in head)
-            or not isinstance(source.get("repo"), str) or not source["repo"].strip()
-            or not isinstance(build, dict)
-            or not isinstance(build.get("argv"), list) or not build["argv"]
-            or any(not isinstance(x, str) or not x for x in build["argv"])
-            or not isinstance(build.get("cwd"), str) or not build["cwd"]
-            or build.get("returncode") != 0
-            or not isinstance(artifact_rec, dict)
-            or artifact_rec.get("library_path") != vendor.get("library_path")
-            or artifact_rec.get("library_sha256") != vendor_sha
-            or vendor.get("build_receipt_sha256") != build_digest):
+    try:
+        summary = vendor_build_receipt.validate(
+            build_receipt,
+            library_path=vendor_map.get("library_path"),
+            library_sha256=vendor_sha)
+        if vendor_map.get("build_receipt_sha256") != build_digest:
+            raise vendor_build_receipt.VendorBuildReceiptError(
+                "build_receipt_sha256 与收据内容不符（漂移）")
+        recorded = vendor_map.get("source_provenance")
+        if recorded is not None and recorded != summary:
+            raise vendor_build_receipt.VendorBuildReceiptError(
+                "vendor.source_provenance 与 build_receipt 重算的源身份不一致")
+    except vendor_build_receipt.VendorBuildReceiptError as ex:
         errs.append(
-            "cpp_extension vendor build receipt 未完整绑定 PR head→构建→安装 ELF")
+            "cpp_extension vendor build receipt 未完整绑定 源身份→构建→安装 ELF："
+            f"{ex}")
     receipt_sha = _canonical_sha(receipt)
     for row in ev_list:
         if isinstance(row, dict) and row.get("cpp_extension_receipt_sha256") != receipt_sha:
@@ -818,6 +1046,57 @@ def _load_json_file(path):
             src,
             parse_constant=lambda token: (_ for _ in ()).throw(
                 ValueError(f"非法 JSON 常量 {token}")))
+
+
+#: evidence 侧「这条 case 没有可比结果」的两种一等状态（定义处：`repo_adapter.EV_STATUS_*`）。
+#: 它们**豁免的只是精度证据完整性**（本来就没有 metrics 可校），**不豁免结论**——
+#: 每一条都必须在 verdict 里落成失败，否则就是「跳过即通过」的 fail-open。
+_EV_EXECUTION_FAILED = "execution_failed"
+_EV_GOLDEN_UNAVAILABLE = "golden_unavailable"
+_EV_UNJUDGEABLE_STATUSES = (_EV_EXECUTION_FAILED, _EV_GOLDEN_UNAVAILABLE)
+
+
+def _gate_task2_unjudgeable(cases, ev_list, vd, errs):
+    """挑出「无精度证据可校」的 case 并**反向核**它们确实被判成了失败；返回豁免 id 集。
+
+    豁免精度证据完整性是必要的（没跑出来就没有 metrics / threshold / policy 可比），但豁免必须
+    带三道反向核，否则这个口子就是「自报一个状态即可跳过精度门」：
+
+      1. `execution_failed` 必须带**非空逐字错误原文**——说不出原话的失败不算证据；
+      2. `golden_unavailable` 必须在 **caseset** 侧也确实标了 `expected.golden_status`——
+         不许拿「没有真值」的名义给一条本该判精度的 case 开豁免；
+      3. 每一条都必须在 `verdict.per_case` 里存在、且功能维为 fail、精度维不为 pass。
+
+    任何一条不满足即记 error（门 FAILED → 编排层落 BLOCKED）。
+    """
+    exp_by_id = {c["id"]: (c.get("expected") or {})
+                 for c in cases if isinstance(c, dict) and c.get("id")}
+    rows = {r.get("case_id"): r for r in (vd.get("per_case") or [])
+            if isinstance(r, dict) and isinstance(r.get("case_id"), str)}
+    ids = set()
+    for e in ev_list:
+        if not isinstance(e, dict):
+            continue
+        cid, st = e.get("case_id"), e.get("status")
+        if not isinstance(cid, str) or not cid or st not in _EV_UNJUDGEABLE_STATUSES:
+            continue
+        ids.add(cid)
+        if st == _EV_EXECUTION_FAILED and not (
+                isinstance(e.get("error"), str) and e["error"].strip()):
+            errs.append(f"{cid}: evidence.status=execution_failed 却无逐字错误原文"
+                        "（说不出原话的失败不算证据，不予豁免精度证据完整性）")
+        if st == _EV_GOLDEN_UNAVAILABLE and exp_by_id.get(cid, {}).get(
+                "golden_status") != _EV_GOLDEN_UNAVAILABLE:
+            errs.append(f"{cid}: evidence 自称 golden_unavailable，但 caseset.expected.golden_status "
+                        "未如此标记——拿「没有真值」的名义跳过精度证据，拒")
+        row = rows.get(cid)
+        if row is None:
+            errs.append(f"{cid}: evidence.status={st!r} 但 verdict.per_case 无此 case"
+                        "（没有可比结果的 case 没进裁决 = 静默跳过）")
+        elif row.get("功能") != "fail" or row.get("精度") == "pass":
+            errs.append(f"{cid}: evidence.status={st!r}，裁决却是 功能={row.get('功能')!r}/"
+                        f"精度={row.get('精度')!r}——没有可比结果的 case 不得记成通过")
+    return ids
 
 
 def gate_task2(d, errs):
@@ -903,6 +1182,10 @@ def gate_task2(d, errs):
     na_ids = {c["id"] for c in cases if isinstance(c, dict) and c.get("id")
               and isinstance(c.get("expected"), dict) and c["expected"].get("compare") == "na"
               and _case_strict_empty(c)}
+    # 跑挂 / 无 golden 的 case：同样无精度证据可校，但豁免只给「证据完整性」这一项——
+    # 结论侧由 `_gate_task2_unjudgeable` 逐条反向核（必须在 verdict 里落成失败）。
+    unjudgeable_ids = _gate_task2_unjudgeable(cases, ev_list, vd, errs)
+    skip_precision_ids = na_ids | unjudgeable_ids
     # Q9 oracle_source 门校用 precision_policy（纯 stdlib：ORACLE_SOURCES + oracle_source_from_golden，不拉 numpy）。
     # import 失败（几乎不会）→ 记 error、oracle 校跳过（但门 FAILED），不静默放过。
     try:
@@ -914,8 +1197,8 @@ def gate_task2(d, errs):
         if not isinstance(e, dict) or not e.get("case_id"):
             continue
         cid = e["case_id"]
-        if cid in na_ids:
-            continue                                  # 空 Tensor 功能用例：无精度证据可校（validator→na）
+        if cid in skip_precision_ids:
+            continue                                  # 无精度证据可校：空 Tensor 功能用例 / 跑挂 / 无 golden
         prec = e.get("precision")
         if not isinstance(prec, dict):
             errs.append(f"{cid}: evidence 缺 precision（证据不完整、不可信）")
@@ -960,8 +1243,9 @@ def gate_task2(d, errs):
     # === A 方案：evidence.precision.metrics ↔ 磁盘产物 provenance 绑定（重算比对）===
     # 上文只校「阈值/口径三处一致」（防放宽），却全信 evidence 自报的 metrics **数值**；此段按 provenance 读产物、
     # 先校 sha、再依 caseset policy 重算 metrics 并逐字段比对，堵「伪造 bad_count=0 直接 pass」的自报数字洞。
-    _gate_precision_provenance(d, [e for e in ev_list if isinstance(e, dict) and e.get("case_id") not in na_ids],
-                               exp_by_id, errs, case_by_id)  # 空 Tensor 功能用例无产物 provenance，过滤（validator→na）
+    _gate_precision_provenance(d, [e for e in ev_list if isinstance(e, dict)
+                                   and e.get("case_id") not in skip_precision_ids],
+                               exp_by_id, errs, case_by_id)  # 无产物/无真值的 case 无 provenance 可核，过滤
     print(f"  精度裁决={ov.get('verdict')}(validator 判) | 证据覆盖={'一致' if cids == eids else '不一致'}")
 
 
@@ -1260,7 +1544,15 @@ def _recompute_case(np, precision_policy, d, cid, exp, prec, errs):
     # 先校 sha256——产物字节被替换/篡改而 provenance 未同改 → 不符 → FAILED（堵「改 out.npy 字节」洞）。
     # pv-3：读 bytes 与 sha/load 共用同一份内存（_load_verified），杜绝二次 open 的 TOCTOU。
     golden = _load_verified(np, gt, prov["golden_sha256"], cid, "golden", errs)
-    out = _load_verified(np, ot, prov["out_sha256"], cid, "out", errs)
+    # out 产物有两种落盘形态，**按字节本身判**（`.npy` 有 magic），不按扩展名、更不按算子/通路身份：
+    #   · `.npy`（new_example 等 runner 直接 np.save）；
+    #   · raw 扁平 `.bin`（aclnn_py driver 的 dump）——legacy 单输出通路以前只会 np.load，
+    #     于是 aclnn_py + 单输出的组合在这道门上恒 FAILED（Cannot load file containing pickled data）。
+    # raw 形态的 dtype/shape **只从 caseset.expected 取**（spec 派生的 canonical 判据），
+    # 不取 evidence 自报——判据不得随被校验方的自报值漂移。
+    out = _load_verified_out(
+        np, ot, prov["out_sha256"], cid, "out", errs,
+        dtype_name=exp.get("compare_dtype"), shape=exp.get("out_shape"))
     if golden is None or out is None:
         return
     if not _is_int(prov["numel"]) or int(golden.size) != prov["numel"]:
@@ -1286,6 +1578,70 @@ def _recompute_case(np, precision_policy, d, cid, exp, prec, errs):
             errs.append(f"{cid}: 依 caseset acceptance_policy 重算失败（{type(ex).__name__}: {ex}）")
             return
         _metrics_match(racc, prec.get("acceptance_metrics"), cid, errs, tag="acceptance_metrics")
+
+
+#: `.npy` 的固定魔数（numpy format spec）。用它判落盘形态——比扩展名可靠，也不需要任何
+#: 「这条通路会产哪种文件」的先验知识。
+_NPY_MAGIC = b"\x93NUMPY"
+
+#: **逻辑 compare_dtype → raw 产物的物理落盘 dtype** 的稳定存储契约。
+#: numpy 没有 bfloat16；aclnn runtime 的 out-slot D2H 会把 bf16 的 2 字节位模式
+#: 按 `bf16_bytes_to_f32` **展宽成 fp32** 再落盘（`repo_adapter` 已注明「此处 dtype 可能与
+#: caseset 的 compare_dtype 不同，属正常」）。门若直接拿逻辑 `compare_dtype` 去解 raw 字节，
+#: bf16 case 会恒 `np.dtype('bfloat16')` 报错、字节数也按 2 字节算错 —— 判的不是产物，是自己算错的口径。
+#: ⚠ 这是**按 dtype 的稳定物理契约**，不是按算子/通路身份的特判；表外 dtype 逻辑==物理，一字不放松。
+_RAW_STORAGE_DTYPE = {"bfloat16": "float32"}
+
+
+def _load_verified_out(np, path, want_sha, cid, kind, errs, dtype_name=None, shape=None):
+    """legacy 单输出 out 产物的形态自适应读回：`.npy` 走 np.load，raw 扁平字节走 frombuffer。
+
+    两条分支的 sha256 绑定与 TOCTOU 纪律完全相同（都是「一次性读入 bytes → 校 sha → 从同一份内存解释」）。
+    raw 分支的 dtype/shape 由调用方从 **caseset.expected**（canonical 判据）传入，并要求
+    `nbytes` 与 `numel(shape) * itemsize` 精确相等——多一字节少一字节都拒。
+    """
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as ex:
+        errs.append(f"{cid}: {kind} 产物读取失败（{type(ex).__name__}: {ex}）")
+        return None
+    if hashlib.sha256(data).hexdigest() != want_sha:
+        errs.append(f"{cid}: {kind} 产物 sha256 与 provenance 不符（产物被替换/篡改）")
+        return None
+    if data[:len(_NPY_MAGIC)] == _NPY_MAGIC:
+        import io
+        try:
+            return np.load(io.BytesIO(data), allow_pickle=False)
+        except Exception as ex:
+            errs.append(f"{cid}: {kind} 产物 np.load 失败（{type(ex).__name__}: {ex}）")
+            return None
+    if not isinstance(dtype_name, str) or not dtype_name:
+        errs.append(f"{cid}: {kind} 产物是 raw 字节，但 caseset.expected 缺 compare_dtype"
+                    "（无法按 canonical 口径读回·证据不完整）")
+        return None
+    if not _mo_shape_ok(shape):
+        errs.append(f"{cid}: {kind} 产物是 raw 字节，但 caseset.expected.out_shape 非法：{shape!r}")
+        return None
+    # 逻辑判据 dtype → 物理落盘 dtype（表外恒等）。映射本身必须可解析，否则 fail-closed。
+    storage_name = _RAW_STORAGE_DTYPE.get(dtype_name, dtype_name)
+    try:
+        dt = np.dtype(storage_name)
+    except Exception as ex:
+        errs.append(f"{cid}: {kind} 产物 compare_dtype={dtype_name!r}（物理落盘 dtype "
+                    f"{storage_name!r}）非法（{type(ex).__name__}: {ex}）")
+        return None
+    want_bytes = _mo_numel(shape) * dt.itemsize
+    if len(data) != want_bytes:
+        errs.append(f"{cid}: {kind} 产物字节数 {len(data)} ≠ caseset 口径应有的 {want_bytes}"
+                    f"（compare_dtype={dtype_name} 物理落盘 dtype={storage_name} shape={shape}·"
+                    "磁盘字节与 canonical 判据不符）")
+        return None
+    try:
+        return np.frombuffer(data, dtype=dt).reshape(shape)
+    except Exception as ex:
+        errs.append(f"{cid}: {kind} 产物按 canonical dtype/shape 解释失败（{type(ex).__name__}: {ex}）")
+        return None
 
 
 def _load_verified_bin(np, path, want_sha, dtype_name, shape, cid, kind, errs):
@@ -1612,7 +1968,202 @@ def _gate_perf_measurement_binding(cs, ev, pr, d, per, errs):
                         f"≠ baseline.json.source={baseline.get('source')!r}")
 
 
-def _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs):
+def _measure_only_mode(d, errs=None):
+    """本轮性能口径 —— **两份独立的、由 spec 派生的产物都说 measure_only 才算数**。
+
+    理由：`perf_report` 是被门审查的对象；让它自报「我是 measure_only」就等于让被审对象自选
+    宽档。但只读 caseset 也不够——caseset 同样落在被验目录里，一份伪造的
+    `perf_case_policy.mode` 就能把整条性能维降到宽档。故本函数要求：
+
+      ① `caseset.perf_case_policy.mode == measure_only`（Task1 产物，gate_task1 校过）；
+      ② `work/_perf_plan.json.mode == measure_only`（Task2 采集计划，由 `run_workflow`
+         从**同一份 spec** 独立派生，且是真正驱动 msprof 采集的那份口径）；
+      ③ caseset 账本里带着由 spec 授权门校过的 `measure_only_authorization`
+         （§5.10 的任务书性能要求事实），否则宽档就没有任何任务书依据。
+
+    任一条不成立 → 按**严档** ratio_gated 处理（fail-closed 方向：宁可多要一份 baseline 证据，
+    也不放行一个「没判过」的性能维）。
+    """
+    cs = _load(d, "caseset.json")
+    if not isinstance(cs, dict):
+        return False
+    policy = cs.get("perf_case_policy")
+    if policy is None:
+        return False                        # legacy caseset 无账本 → 显式选缺省严档
+    try:
+        if not perf_mode.is_measure_only(perf_mode.policy_mode(policy)):
+            return False
+    except ValueError as ex:
+        if errs is not None:
+            errs.append(f"caseset.perf_case_policy.mode 非法（按严档处理）：{ex}")
+        return False
+    auth = policy.get("measure_only_authorization")
+    if not isinstance(auth, dict) or auth.get("taskdoc_requirement") not in (
+            perf_mode.MEASURE_ONLY_GROUNDS):
+        if errs is not None:
+            errs.append(
+                "caseset 声明 measure_only 却缺 perf_case_policy.measure_only_authorization "
+                "（§5.10 的任务书性能要求事实）——宽档无任务书依据，按严档处理")
+        return False
+    plan = _load_perf_plan(d)
+    if not isinstance(plan, dict):
+        if errs is not None:
+            errs.append(
+                "caseset 声明 measure_only 却缺/坏 work/_perf_plan.json——"
+                "采集计划是同一份 spec 独立派生的口径，缺它就只剩被验目录自报，按严档处理")
+        return False
+    if plan.get("mode") != perf_mode.MODE_MEASURE_ONLY:
+        if errs is not None:
+            errs.append(
+                f"work/_perf_plan.json.mode={plan.get('mode')!r} 与 caseset 账本口径不一致——"
+                "采集端与裁决端必须用同一个性能口径，按严档处理")
+        return False
+    return True
+
+
+def _load_perf_plan(d):
+    """读 `work/_perf_plan.json`（Task2 采集计划）；缺/坏 → None（调用方 fail-closed）。
+
+    `_pinned_product` 的根就是 `<d>/work`，故这里传相对 work 的名字。
+    """
+    path = _pinned_product(d, "_perf_plan.json")
+    if path is None:
+        return None
+    try:
+        return _load_json_file(path)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _gate_measure_only_report(pr, d, per, s, errs):
+    """`measure_only` 专用复核：**每条性能 case 都必须有真实 `npu_us`**，且报告不得夹带比值裁决。
+
+    ⚠ 本函数只放松「必须有 baseline_us / ratio / target_ratio」这几项，其它一条不放松：
+      · 逐 case 实测（有限正数 + kernel_only）—— 强制，缺一条即 BLOCKED；
+      · per_case ↔ caseset ↔ evidence 三方对齐（防跑子集/空壳）—— 由 `_gate_perf_case_alignment`
+        + `_gate_perf_measurement_binding` 照常执行；
+      · 大小 shape 分档计数 —— 与生成期账本逐桶复核。
+    `measure_only` 的含义是「不做对比」，不是「不做测量」。
+    """
+    if pr.get("perf_mode") != perf_mode.MODE_MEASURE_ONLY:
+        errs.append(f"caseset 口径为 measure_only，perf_report.perf_mode={pr.get('perf_mode')!r} "
+                    "不符（产物口径漂移）")
+    # 只测不比 → 报告里不得出现任何对照物/阈值/达标字段。出现即口径矛盾，不做「忽略多余字段」。
+    for key in ("target_ratio", "baseline_source"):
+        if pr.get(key) is not None:
+            errs.append(f"measure_only 报告不得声明 {key}={pr.get(key)!r}（只测不比却携带对照物/阈值）")
+    for key in ("by_dtype", "overall_speedup", "non_passing_cases", "by_shape_class",
+                "shape_overall", "simulation"):
+        if key in pr:
+            errs.append(f"measure_only 报告不得含比值通路字段 {key}（该口径下没有可比测量）")
+    for key in ("达标", "cases_above_threshold", "cases_scored"):
+        if key in (s or {}):
+            errs.append(f"measure_only summary 不得含 {key}（没有对照物就没有达标这件事）")
+    if os.path.exists(os.path.join(d, "baseline.json")):
+        errs.append("measure_only 却落了 baseline.json（本口径不消费任何对照物）")
+
+    measured = 0
+    for r in per:
+        if not isinstance(r, dict) or not isinstance(r.get("case_id"), str):
+            continue                       # 坏行已由 gate_task3 行循环记 error
+        cid = r["case_id"]
+        for key in ("ratio", "达标", "baseline", "exception"):
+            if key in r:
+                errs.append(f"{cid}: measure_only per_case 不得含 {key}（该口径不产比值裁决）")
+        if r.get("blocked") is True:
+            # 已由 status=blocked 在 gate_task3 报过「无法采集」；这里逐条点名，便于定位。
+            errs.append(f"{cid}: measure_only 性能 case 无真实 NPU 实测（blocked）——"
+                        "「不做对比」不等于「不做测量」")
+            continue
+        if not _perf_finite_pos(r.get("npu_us")):
+            errs.append(f"{cid}: measure_only 缺/坏 npu_us={r.get('npu_us')!r}（须有限正数实测）")
+            continue
+        if r.get("scope") != "kernel_only":
+            errs.append(f"{cid}: scope={r.get('scope')!r} ≠ kernel_only（性能须 msprof op kernel-only）")
+            continue
+        measured += 1
+    claimed = (s or {}).get("measured")
+    if not _is_int(claimed):
+        errs.append(f"measure_only summary.measured={claimed!r} 非整数计数")
+    elif claimed != measured:
+        errs.append(f"measure_only summary.measured={claimed!r} 与 per_case 行级实际 {measured} 不一致")
+    if per and measured != len(per):
+        errs.append(f"measure_only 要求**每条**性能 case 都有真实实测："
+                    f"{measured}/{len(per)} 条有效 → BLOCKED")
+
+
+def _gate_measured_shape_report(pr, d, per, errs):
+    """measure_only 的大小 shape 分档复核：只核实测口径，不核 speedup/达标（本口径没有这些）。"""
+    cs = _load(d, "caseset.json")
+    if not isinstance(cs, dict) or not isinstance(cs.get("perf_case_policy"), dict):
+        return                                          # legacy caseset 无账本，保持兼容
+    policy = cs["perf_case_policy"]
+    by_id = {c.get("id"): c for c in (cs.get("cases") or [])
+             if isinstance(c, dict) and isinstance(c.get("id"), str)}
+    expected_counts = (policy.get("counts") or {}) if isinstance(policy.get("counts"), dict) else {}
+    actual = {k: {"cases": 0, "measured": 0, "us": []} for k in ("small", "large")}
+    for r in per:
+        if not isinstance(r, dict) or not isinstance(r.get("case_id"), str):
+            continue
+        meta = (by_id.get(r["case_id"]) or {}).get("perf_shape_classification")
+        cls = meta.get("class") if isinstance(meta, dict) else None
+        if cls not in actual:
+            errs.append(f"{r['case_id']}: 声明了 perf_case_policy 但缺/坏大小 shape 分类")
+            continue
+        actual[cls]["cases"] += 1
+        if r.get("blocked") is not True and _perf_finite_pos(r.get("npu_us")):
+            actual[cls]["measured"] += 1
+            actual[cls]["us"].append(float(r["npu_us"]))
+    for cls in ("small", "large"):
+        if expected_counts.get(cls) != actual[cls]["cases"]:
+            errs.append(f"{cls}: perf_case_policy.counts={expected_counts.get(cls)!r} "
+                        f"与性能行实际 {actual[cls]['cases']} 不一致")
+    if pr.get("measured_shape_complete") is not True:
+        errs.append(f"measure_only 大小 shape 汇总不完整：{pr.get('measured_shape_problems')}")
+    rows = pr.get("measured_by_shape_class")
+    if not isinstance(rows, list):
+        errs.append("perf_report 缺 measured_by_shape_class")
+        return
+    got = {r.get("class"): r for r in rows if isinstance(r, dict)}
+
+    def med(vals):
+        return float(statistics.median(vals)) if vals else None
+
+    def same_number(got_value, expected_value):
+        if expected_value is None:
+            return got_value is None
+        return (isinstance(got_value, (int, float)) and not isinstance(got_value, bool)
+                and math.isfinite(got_value)
+                and math.isclose(float(got_value), float(expected_value),
+                                 rel_tol=1e-12, abs_tol=1e-12))
+
+    for cls in ("small", "large"):
+        row = got.get(cls)
+        if not isinstance(row, dict):
+            errs.append(f"measured_by_shape_class 缺 {cls} 行")
+            continue
+        for key in ("cases", "measured"):
+            if row.get(key) != actual[cls][key]:
+                errs.append(f"measured_by_shape_class[{cls}].{key}={row.get(key)!r} "
+                            f"与行级实际 {actual[cls][key]} 不一致")
+        if not same_number(row.get("npu_us"), med(actual[cls]["us"])):
+            errs.append(f"measured_by_shape_class[{cls}].npu_us={row.get('npu_us')!r} "
+                        f"与行级派生 {med(actual[cls]['us'])!r} 不一致")
+    overall = pr.get("measured_shape_overall")
+    if not isinstance(overall, dict):
+        errs.append("perf_report 缺 measured_shape_overall")
+        return
+    for key in ("cases", "measured"):
+        total = sum(actual[cls][key] for cls in ("small", "large"))
+        if overall.get(key) != total:
+            errs.append(f"measured_shape_overall.{key}={overall.get(key)!r} 与大小桶合计 {total} 不一致")
+    all_us = actual["small"]["us"] + actual["large"]["us"]
+    if not same_number(overall.get("npu_us"), med(all_us)):
+        errs.append(f"measured_shape_overall.npu_us={overall.get('npu_us')!r} "
+                    f"与行级派生 {med(all_us)!r} 不一致")
+
+
+def _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs, measure_only=False):
     """per_case 与 caseset/evidence **按 case 对齐**（补 T5 门延后 finding）——防「跑性能子集 + 伪造
     summary=ok」蒙混：① caseset(dims 含「性能」)↔perf per_case 用 Counter 全量比对（拒缺/多/重复）；
     ② 性能 case 必须真有 evidence（拒伪造 per_case 未实跑）；③ summary 的 perf_cases/达标/blocked
@@ -1631,7 +2182,8 @@ def _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs):
         perf_ids = _perf_ids_from_caseset(cs, errs)  # cs=None 时内部记 error 并返回 None
         if perf_ids is not None:
             # gt3-4 交叉：status=ok 但 caseset 无任何「性能」dim 用例 → 口径矛盾（应为 no_perf_cases）。
-            if st == "ok" and not perf_ids:
+            # measure_only 的 `measured` 同理：宣称「已实测」却一条性能用例都没有，是自相矛盾。
+            if st in ("ok", perf_mode.STATUS_MEASURED) and not perf_ids:
                 errs.append("status=ok 但 caseset 无「性能」dim 用例（0 性能用例应为 no_perf_cases·口径矛盾）")
             want, got = Counter(perf_ids), Counter(per_ids)
             miss = sorted((want - got).elements())
@@ -1669,7 +2221,11 @@ def _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs):
                 n_meet += 1
             if r.get("blocked") is True:
                 n_blocked += 1
-        for key, actual in (("perf_cases", len(per)), ("达标", n_meet), ("blocked", n_blocked)):
+        # measure_only 下 `达标` 这一项**不该存在**（由 _gate_measure_only_report 强制其缺席），
+        # 故这里只核 perf_cases / blocked——不是放松，是这份报告里根本没有那个量。
+        checks = (("perf_cases", len(per)), ("blocked", n_blocked)) if measure_only else (
+            ("perf_cases", len(per)), ("达标", n_meet), ("blocked", n_blocked))
+        for key, actual in checks:
             claimed = s.get(key)
             if not _is_int(claimed):
                 errs.append(f"summary.{key}={claimed!r} 非整数计数（拒 bool/非法类型）")
@@ -1861,18 +2417,35 @@ def gate_task3(d, errs):
     T6：status=exception → 强制有仿真图 + 交叉一致 + sha 校验（_gate_small_shape_exception）。
     T8：blocked_wait_gpu_benchmark=正规挂起(不计完整性 FAILED)但仍卡 NPU 侧完整性；
         blocked_incomparable_timing_scope=双边口径不可比→FAILED。安全护栏(codex H4)：门放行挂起
-        只代表 NPU 证据完整，整体绝不显 PASS——那由 run_workflow 映射为 BLOCKED_* + 非零退出。"""
+        只代表 NPU 证据完整，整体绝不显 PASS——那由 run_workflow 映射为 BLOCKED_* + 非零退出。
+    §5.10（measure_only）：口径从 **caseset.perf_case_policy.mode** 读（不信 perf_report 自报）。
+        该口径下**只**放松「必须有 baseline_us / ratio / target_ratio」这几项；
+        「每条性能 case 都必须有真实 npu_us + kernel_only」**仍然强制**，缺一条即 BLOCKED
+        ——`measure_only` 是「不做对比」，不是「不做测量」。"""
     pr = _load(d, "perf_report.json")
     if not isinstance(pr, dict):
         errs.append("缺/坏 perf_report.json（Task3 未跑）")
         return
     _gate_cpp_extension_perf_collection(d, errs)
+    # §5.10：口径只从 caseset（Task1 落盘、gate_task1 校过）读，**不信 perf_report 自报**。
+    measure_only = _measure_only_mode(d, errs)
     s = pr.get("summary")
     has_summary = isinstance(s, dict)
     if not has_summary:
         errs.append("perf_report 缺 summary（产物不完整）")
         s = {}
     st = s.get("status")
+    # `measured` 与 measure_only 口径**双向绑死**：
+    #   · 非 measure_only 的 caseset 上出现 `measured` = 拿宽档 status 绕开达标核对；
+    #   · measure_only 的 caseset 上出现 ratio 通路 status（ok/fail/exception/blocked_wait_*）
+    #     = 报告在做它不该做的比值裁决。两个方向都记 error。
+    if st == perf_mode.STATUS_MEASURED and not measure_only:
+        errs.append("perf status='measured' 但 caseset.perf_case_policy.mode 不是 measure_only"
+                    "（用只测不比的宽档 status 绕开达标核对）")
+    if measure_only and isinstance(st, str) and st not in (
+            perf_mode.STATUS_MEASURED, "blocked", "no_perf_cases"):
+        errs.append(f"caseset 口径为 measure_only，perf status={st!r} 属比值通路"
+                    "（该口径下不产任何比值裁决）")
     # gt3-6①：status 为 list/dict 时 `st not in _PERF_STATUS`（对 set 成员判定）会崩 unhashable →
     # 先 isinstance(str) 守卫，非字符串记 error 且不参与 set 判定。
     wait = isinstance(st, str) and st in _PERF_WAIT_STATUS
@@ -1924,19 +2497,85 @@ def gate_task3(d, errs):
         if r.get("scope") != "kernel_only":  # 缺 scope(None) 也判失败
             errs.append(f"{cid}: scope={r.get('scope')!r} ≠ kernel_only（性能须 msprof op kernel-only）")
     # gt3-4：status=ok 与 0 性能用例自相矛盾（应为 no_perf_cases）→ 强制 perf_cases≥1 且 per_case 非空。
-    if st == "ok":
+    # measure_only 的 `measured` 同一条纪律：宣称「已实测」就必须真有 ≥1 条性能行。
+    if st in ("ok", perf_mode.STATUS_MEASURED):
         if not per:
-            errs.append("status=ok 但 per_case 为空（0 性能证据自相矛盾，应为 no_perf_cases）")
+            errs.append(f"status={st} 但 per_case 为空（0 性能证据自相矛盾，应为 no_perf_cases）")
         pc = s.get("perf_cases")
         if not (_is_int(pc) and pc >= 1):
-            errs.append(f"status=ok 但 summary.perf_cases={pc!r}（须为≥1 整数；0 性能用例应为 no_perf_cases）")
+            errs.append(f"status={st} 但 summary.perf_cases={pc!r}（须为≥1 整数；0 性能用例应为 no_perf_cases）")
     # per_case 与 caseset/evidence 按 case 对齐（补 T5 门延后 finding）：防跑性能子集 + 伪造 summary=ok。
-    _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs)
-    _gate_shape_report(pr, d, per, errs)
-    _gate_non_passing_report(pr, d, per, s, errs)
-    if st == "exception":
-        _gate_small_shape_exception(pr, d, errs)
-    print(f"  性能 status={st}(perf_compare 判) | 达标 {s.get('达标')}/{s.get('perf_cases')}")
+    _gate_perf_case_alignment(pr, d, per, s, has_summary, st, errs, measure_only=measure_only)
+    if measure_only:
+        # 只换掉「比值口径」的两级复核，**逐 case 实测强制**与三方对齐一条不放松。
+        _gate_measure_only_report(pr, d, per, s, errs)
+        _gate_measured_shape_report(pr, d, per, errs)
+    else:
+        _gate_shape_report(pr, d, per, errs)
+        _gate_non_passing_report(pr, d, per, s, errs)
+        if st == "exception":
+            _gate_small_shape_exception(pr, d, errs)
+    tail = (f"实测 {s.get('measured')}/{s.get('perf_cases')}（measure_only：未做标杆对比、无达标结论）"
+            if measure_only else f"达标 {s.get('达标')}/{s.get('perf_cases')}")
+    print(f"  性能 status={st}(perf_compare 判) | {tail}")
+
+
+def _cpp_extension_perf_subset_ok(cs, collect, planned, perf_ids, errs):
+    """性能采集只覆盖了性能 case 的**子集**时，判断这个子集是否合法并被完整挂账。
+
+    合法的唯一情形是 `measure_only`（AGENTS.md §5.10）：该口径不产比值、不产达标结论，
+    性能维只回答「这颗 kernel 实测多少微秒」。若沿用「整份精度通过才采性能」的总门，
+    精度一 fail 就等于零 msprof 数据，而绝对耗时恰恰是本档唯一产出。故允许子集，
+    但**分母一条不许丢**：落选的每条性能 case 都必须在 `skipped` 里写明真实原因。
+
+    口径同样要**两份独立产物都说了才算**（与 `_measure_only_mode` 同一条纪律）：
+      ① `caseset.perf_case_policy.mode`（Task1 账本，gate_task1 校过）；
+      ② `perf_collect.mode`（真正驱动 msprof 那一轮采集的口径，由采集端写）。
+    任一条不是 measure_only 一律按严档判「跑子集」，fail-closed。
+
+    ⚠ 子集合法**只**意味着「性能证据可以少于全部性能 case」；它不放松任何精度结论——
+    精度 fail 仍由 validator 判成 FAIL（5.8：有实测耗时 ≠ 验收通过）。
+    """
+    policy = cs.get("perf_case_policy")
+    ledger_measure_only = False
+    if isinstance(policy, dict):
+        try:
+            ledger_measure_only = perf_mode.is_measure_only(perf_mode.policy_mode(policy))
+        except ValueError as ex:
+            errs.append(f"caseset.perf_case_policy.mode 非法（按严档处理）：{ex}")
+            ledger_measure_only = False
+    collect_measure_only = collect.get("mode") == perf_mode.MODE_MEASURE_ONLY
+    if not (ledger_measure_only and collect_measure_only):
+        errs.append(
+            "cpp_extension perf_collection 非完整性能 caseset 或 case 顺序漂移"
+            f"（planned={planned!r} ≠ caseset 性能 case {perf_ids!r}；"
+            f"caseset 口径 measure_only={ledger_measure_only}、"
+            f"采集口径 measure_only={collect_measure_only}——两份都说 measure_only 才允许子集）")
+        return False
+    # 子集必须是**保序**子序列：换序 = 计划与采集不是同一份排期，同样不可信。
+    if [cid for cid in perf_ids if cid in set(planned)] != planned:
+        errs.append(
+            "cpp_extension measure_only 性能子集与 caseset 性能 case 顺序不一致（或含 caseset 外的 id）")
+        return False
+    skipped = collect.get("skipped")
+    if not isinstance(skipped, list):
+        errs.append("cpp_extension measure_only 性能子集缺 skipped 挂账（分母不完整）")
+        return False
+    reasons = {}
+    for item in skipped:
+        if (not isinstance(item, dict) or not isinstance(item.get("case_id"), str)
+                or not isinstance(item.get("reason"), str) or not item["reason"].strip()):
+            errs.append(f"cpp_extension perf_collection.skipped 记录不完整：{item!r}")
+            return False
+        reasons[item["case_id"]] = item["reason"]
+    missing = [cid for cid in perf_ids if cid not in set(planned)]
+    unaccounted = [cid for cid in missing if cid not in reasons]
+    if unaccounted:
+        errs.append(
+            f"cpp_extension measure_only 性能子集漏挂账 {unaccounted}"
+            "（性能 case 既没采、也没写为什么没采）")
+        return False
+    return True
 
 
 def _gate_cpp_extension_perf_collection(d, errs):
@@ -1976,13 +2615,16 @@ def _gate_cpp_extension_perf_collection(d, errs):
     if (collect.get("custom_kind") != "cpp_extension"
             or provenance != expected_provenance):
         errs.append("cpp_extension perf_collection 的 ELF/vendor/namespace provenance 与 receipt 漂移")
+    planned = checkpoint.get("planned_case_ids") if isinstance(checkpoint, dict) else None
     if (not isinstance(checkpoint, dict)
             or checkpoint.get("complete") is not True
-            or checkpoint.get("planned_case_ids") != perf_ids
-            or record_ids != perf_ids
             or not isinstance(records, list)
+            or record_ids != planned
             or len(record_ids) != len(records)):
-        errs.append("cpp_extension perf_collection 非完整性能 caseset 或 case 顺序漂移")
+        errs.append("cpp_extension perf_collection 非完整本轮采集或 case 顺序漂移")
+        return
+    if planned != perf_ids and not _cpp_extension_perf_subset_ok(
+            cs, collect, planned, perf_ids, errs):
         return
     ev_by_id = {row.get("case_id"): row for row in (ev.get("evidence") or [])
                 if isinstance(row, dict)}

@@ -1,7 +1,7 @@
 # OpRunway 设计评审（Codex 外部第二意见）
 
 > 评审者：Codex CLI v0.140.0 · model **gpt-5.5** · read-only · 2026-06-30
-> 评审对象：`doc/oprunway-design.md` + `CLAUDE.md` + canon 的 3 个 ADR + 4 个 architecture 页。
+> 评审对象：`dev-doc/oprunway-design.md` + `CLAUDE.md` + canon 的 3 个 ADR + 4 个 architecture 页。
 > 性质：**外部评审意见**，非 canon。认可并采纳的点，再经 `bureau:note → compile → review` 入 canon。
 
 ## 总体判断

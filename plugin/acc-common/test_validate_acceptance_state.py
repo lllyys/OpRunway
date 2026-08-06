@@ -213,6 +213,62 @@ class GatePerfCasePolicyTest(unittest.TestCase):
         G._gate_perf_case_policy(cs, cs["cases"], errs)
         self.assertTrue(any("分类规则非法" in e for e in errs), errs)
 
+    def _taskdoc_caseset(self):
+        """`case_source=taskdoc` 档的用例集：多一条算不出 golden 的用例 + 候选池账本两键。
+
+        逐字对齐 gen_cases 在该档的产物形态（gen_cases.py:497-500）：golden_unavailable 的用例
+        退出精度维（dims 只剩「功能」），既不在 excluded_precision_case_ids 里，也不进性能候选池，
+        而是单列进 excluded_golden_unavailable_case_ids。
+        """
+        cs = self._caseset()
+        cs["case_source"] = "taskdoc"
+        cs["cases"].append({
+            "id": "g0", "dims": ["功能"],
+            "expected": {"golden_status": "golden_unavailable"},
+            "inputs": [{"name": "a", "shape": [8], "dtype": "float32"}]})
+        cs["perf_case_policy"]["case_selection"] = {
+            "min_total_input_elements": 1, "include_precision_tags": []}
+        cs["perf_case_policy"]["selection"].update({
+            "excluded_degenerate_case_ids": [],
+            "candidate_pool": "taskdoc_precision_cases",
+            "excluded_golden_unavailable_case_ids": ["g0"],
+        })
+        return cs
+
+    def test_taskdoc_candidate_pool_ledger_is_accepted(self):
+        """taskdoc 档的两个额外键不该被门当成「身份不一致」——它们是产物契约的一部分。"""
+        cs = self._taskdoc_caseset()
+        errs = []
+        G._gate_perf_case_policy(cs, cs["cases"], errs)
+        self.assertEqual(errs, [])
+
+    def test_taskdoc_golden_unavailable_ledger_is_rechecked(self):
+        """漏记 / 改动 golden_unavailable 名单仍然 fail-closed（复算，不是放行）。"""
+        for tampered in ([], ["g0", "p0"], ["nope"]):
+            cs = self._taskdoc_caseset()
+            cs["perf_case_policy"]["selection"][
+                "excluded_golden_unavailable_case_ids"] = tampered
+            errs = []
+            G._gate_perf_case_policy(cs, cs["cases"], errs)
+            self.assertTrue(any("selection" in e for e in errs),
+                            f"篡改 {tampered!r} 未被拒: {errs!r}")
+
+    def test_candidate_pool_key_outside_taskdoc_profile_is_rejected(self):
+        """非 taskdoc 档凭空多写候选池键 → 仍然不一致（门不因为「多了个键」就宽容）。"""
+        cs = self._caseset()
+        cs["perf_case_policy"]["selection"]["candidate_pool"] = "taskdoc_precision_cases"
+        errs = []
+        G._gate_perf_case_policy(cs, cs["cases"], errs)
+        self.assertTrue(any("selection" in e for e in errs), errs)
+
+    def test_taskdoc_candidate_pool_value_is_pinned(self):
+        """candidate_pool 取值被钉死，改个字样同样 fail-closed。"""
+        cs = self._taskdoc_caseset()
+        cs["perf_case_policy"]["selection"]["candidate_pool"] = "whatever_pool"
+        errs = []
+        G._gate_perf_case_policy(cs, cs["cases"], errs)
+        self.assertTrue(any("selection" in e for e in errs), errs)
+
     def test_gate_sums_multiple_physical_inputs(self):
         cs = self._caseset()
         case = cs["cases"][0]
@@ -1351,6 +1407,148 @@ class Cases50NaAndPerfGateTest(unittest.TestCase):
         self.assertTrue(any("trivial 自动免测已废止" in e for e in errs), errs)
 
 
+class GoldenUnavailableIsAFirstClassStateTest(unittest.TestCase):
+    """gate_task1 必须**认识** `golden_unavailable`，而不是把它误报成伪造。
+
+    实测暴露：干净现场跑 GaussianBlur，5 条合法声明的 `golden_unavailable` 用例被 gate_task1
+    报成「无 golden_path」+「expected.compare=na 但非严格真空 Tensor（伪造 na 跳精度门，拒绝）」。
+    BLOCKED 这个结论是对的，但**理由是假的**——门在指控一份合规产物造假。这批测试钉的是：
+    有完整佐证时理由必须准确（不报伪造），佐证缺一条时仍旧 fail-closed。
+    """
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    _REASON = "通道数 512 超出参考实现上限"
+
+    def _cs(self):
+        """一条正常精度用例 + 一条算不出 golden 的任务书用例（含顶层台账）。"""
+        return {
+            "op": "X",
+            "case_source": "taskdoc",
+            "golden_unavailable": {
+                "count": 1,
+                "cases": [{"case_id": "g0", "reason": self._REASON,
+                           "case_origin": "taskdoc"}],
+            },
+            "cases": [
+                {"id": "p0", "dims": ["功能", "精度"], "tags": ["常规"],
+                 "inputs": [{"name": "a", "shape": [8], "dtype": "float32"}],
+                 "expected": {"golden_path": "p0/golden.npy", "compare": "allclose",
+                              "standard": "abs", "threshold": 1e-3,
+                              "tolerance_policy_id": "t1",
+                              "policy": {"rtol": 1e-3}}},
+                {"id": "g0", "dims": ["功能"], "tags": ["golden不可用"],
+                 "inputs": [{"name": "a", "shape": [8], "dtype": "float32"}],
+                 "expected": {"golden_status": "golden_unavailable",
+                              "golden_unavailable_reason": self._REASON,
+                              "golden_path": None, "compare": "na", "standard": "na",
+                              "compare_dtype": None}},
+            ],
+        }
+
+    def _verdict(self, 功能="fail", 精度="errored"):
+        return {"per_case": [{"case_id": "p0", "功能": "pass", "精度": "pass"},
+                             {"case_id": "g0", "功能": 功能, "精度": 精度}]}
+
+    def test_declared_state_with_full_backing_is_not_called_a_forgery(self):
+        _w(self.d, "caseset.json", self._cs())
+        _w(self.d, "verdict.json", self._verdict())
+        errs = []
+        G.gate_task1(self.d, errs)
+        self.assertEqual(errs, [], errs)
+
+    def test_state_without_verdict_yet_is_accepted_at_task1_time(self):
+        """CP-B 阶段还没有 verdict：其余反查照做，裁决那条留给 gate_task2 复核。"""
+        _w(self.d, "caseset.json", self._cs())
+        errs = []
+        G.gate_task1(self.d, errs)
+        self.assertEqual(errs, [], errs)
+
+    def test_state_without_ledger_entry_is_rejected(self):
+        cs = self._cs()
+        cs["golden_unavailable"] = {"count": 0, "cases": []}
+        _w(self.d, "caseset.json", cs)
+        _w(self.d, "verdict.json", self._verdict())
+        errs = []
+        G.gate_task1(self.d, errs)
+        self.assertTrue(any("台账未点名" in e for e in errs), errs)
+
+    def test_reason_must_match_the_ledger_verbatim(self):
+        cs = self._cs()
+        cs["cases"][1]["expected"]["golden_unavailable_reason"] = "换了个说法"
+        _w(self.d, "caseset.json", cs)
+        _w(self.d, "verdict.json", self._verdict())
+        errs = []
+        G.gate_task1(self.d, errs)
+        self.assertTrue(any("失败原因与 caseset 台账记的不一致" in e for e in errs), errs)
+
+    def test_empty_reason_is_rejected(self):
+        cs = self._cs()
+        cs["cases"][1]["expected"]["golden_unavailable_reason"] = "   "
+        _w(self.d, "caseset.json", cs)
+        errs = []
+        G.gate_task1(self.d, errs)
+        self.assertTrue(any("无逐字失败原因" in e for e in errs), errs)
+
+    def test_state_recorded_as_pass_in_verdict_is_rejected(self):
+        _w(self.d, "caseset.json", self._cs())
+        _w(self.d, "verdict.json", self._verdict(功能="pass", 精度="pass"))
+        errs = []
+        G.gate_task1(self.d, errs)
+        self.assertTrue(any("不得记成通过" in e for e in errs), errs)
+
+    def test_state_missing_from_verdict_is_rejected(self):
+        _w(self.d, "caseset.json", self._cs())
+        _w(self.d, "verdict.json", {"per_case": [
+            {"case_id": "p0", "功能": "pass", "精度": "pass"}]})
+        errs = []
+        G.gate_task1(self.d, errs)
+        self.assertTrue(any("verdict.per_case 无此 case" in e for e in errs), errs)
+
+    def test_state_still_sitting_in_the_precision_dim_is_rejected(self):
+        cs = self._cs()
+        cs["cases"][1]["dims"] = ["功能", "精度"]
+        _w(self.d, "caseset.json", cs)
+        _w(self.d, "verdict.json", self._verdict())
+        errs = []
+        G.gate_task1(self.d, errs)
+        self.assertTrue(any("仍留在精度维" in e for e in errs), errs)
+
+    def test_state_carrying_a_golden_path_is_rejected(self):
+        cs = self._cs()
+        cs["cases"][1]["expected"]["golden_path"] = "g0/golden.npy"
+        _w(self.d, "caseset.json", cs)
+        _w(self.d, "verdict.json", self._verdict())
+        errs = []
+        G.gate_task1(self.d, errs)
+        self.assertTrue(any("却带 golden_path" in e for e in errs), errs)
+
+    def test_ledger_pointing_at_an_unmarked_case_is_rejected(self):
+        cs = self._cs()
+        cs["golden_unavailable"]["cases"].append(
+            {"case_id": "p0", "reason": "台账瞎点名"})
+        cs["golden_unavailable"]["count"] = 2
+        _w(self.d, "caseset.json", cs)
+        _w(self.d, "verdict.json", self._verdict())
+        errs = []
+        G.gate_task1(self.d, errs)
+        self.assertTrue(any("台账点名" in e for e in errs), errs)
+
+    def test_forged_na_without_the_state_is_still_rejected(self):
+        """没声明一等状态、只写 compare=na 的非真空用例 —— 旧判据逐字不变。"""
+        cs = self._cs()
+        del cs["cases"][1]["expected"]["golden_status"]
+        _w(self.d, "caseset.json", cs)
+        errs = []
+        G.gate_task1(self.d, errs)
+        self.assertTrue(any("真空 Tensor" in e for e in errs), errs)
+        self.assertTrue(any("无 golden_path" in e for e in errs), errs)
+
+
 class DefaultModeIsRealMachineTest(unittest.TestCase):
     """U6a：省略 mode 时必须由 runner_form 派生到真机通路，绝不能回落危险的 mock。"""
     def setUp(self):
@@ -2178,6 +2376,103 @@ class PassedWithGapsWiringTest(unittest.TestCase):
         line = next(l for l in src.splitlines() if "precision_ok =" in l)
         for v in ("pass", "passed_with_risk", "passed_with_gaps"):
             self.assertIn(f'"{v}"', line, f"precision_ok 白名单漏了 {v}：{line.strip()}")
+
+
+class CppExtensionStage2EvidenceGateTest(unittest.TestCase):
+    """stage2 实参结构没核过 → 不许出验收裁决（错 arity 的 native 调用无门可拦）。"""
+
+    def test_unverified_stage2_blocks_acceptance(self):
+        errs = []
+        G._gate_cpp_extension_stage2_evidence(
+            {"degradations": ["stage2_form_unverified"],
+             "variants": [{"entrypoint": "invoke_v0", "stage2_form": "standard"}]},
+            errs)
+        self.assertTrue(any("stage2_form_unverified" in e for e in errs), errs)
+
+    def test_header_backed_stage2_passes(self):
+        for form in ("standard", "extended"):
+            errs = []
+            G._gate_cpp_extension_stage2_evidence(
+                {"degradations": [],
+                 "variants": [{"entrypoint": "invoke_v0", "stage2_form": form}]},
+                errs)
+            self.assertEqual(errs, [], form)
+
+    def test_legacy_manifest_without_ledger_is_blocked_not_waved_through(self):
+        errs = []
+        G._gate_cpp_extension_stage2_evidence({"variants": []}, errs)
+        self.assertTrue(any("degradations 台账" in e for e in errs), errs)
+
+    def test_non_dispatchable_form_is_blocked(self):
+        errs = []
+        G._gate_cpp_extension_stage2_evidence(
+            {"degradations": [],
+             "variants": [{"entrypoint": "invoke_v0", "stage2_form": "absent"}]},
+            errs)
+        self.assertTrue(any("非可派发形态" in e for e in errs), errs)
+
+
+class CppExtensionMeasureOnlyPerfSubsetGateTest(unittest.TestCase):
+    """cpp_extension 性能采集只覆盖子集：只有 measure_only（且两份产物都这么说）才合法。"""
+
+    _PERF_IDS = ["c0", "c1", "c2"]
+
+    def _caseset(self, mode):
+        policy = {"mode": mode} if mode else {}
+        return {"perf_case_policy": policy}
+
+    def _collect(self, mode, planned, skipped):
+        return {"mode": mode, "skipped": skipped}
+
+    def test_ratio_gated_subset_is_still_a_running_subset(self):
+        errs = []
+        ok = G._cpp_extension_perf_subset_ok(
+            self._caseset(None), self._collect("ratio_gated", ["c0"], []),
+            ["c0"], self._PERF_IDS, errs)
+        self.assertFalse(ok)
+        self.assertTrue(any("非完整性能 caseset" in e for e in errs))
+
+    def test_measure_only_subset_needs_both_products_to_say_so(self):
+        errs = []
+        self.assertFalse(G._cpp_extension_perf_subset_ok(
+            self._caseset("measure_only"),
+            self._collect("ratio_gated", ["c0"], []),
+            ["c0"], self._PERF_IDS, errs))
+        errs2 = []
+        self.assertFalse(G._cpp_extension_perf_subset_ok(
+            self._caseset(None),
+            self._collect("measure_only", ["c0"], []),
+            ["c0"], self._PERF_IDS, errs2))
+
+    def test_measure_only_subset_must_account_every_missing_case(self):
+        errs = []
+        self.assertFalse(G._cpp_extension_perf_subset_ok(
+            self._caseset("measure_only"),
+            self._collect("measure_only", ["c0"],
+                          [{"case_id": "c1", "reason": "skipped_accuracy_failed"}]),
+            ["c0"], self._PERF_IDS, errs))
+        self.assertTrue(any("漏挂账" in e for e in errs), errs)
+
+    def test_measure_only_subset_ok_when_fully_accounted(self):
+        errs = []
+        self.assertTrue(G._cpp_extension_perf_subset_ok(
+            self._caseset("measure_only"),
+            self._collect("measure_only", ["c0"], [
+                {"case_id": "c1", "reason": "skipped_accuracy_failed"},
+                {"case_id": "c2", "reason": "skipped_precision_not_evaluable"},
+            ]),
+            ["c0"], self._PERF_IDS, errs))
+        self.assertEqual(errs, [])
+
+    def test_measure_only_subset_must_keep_caseset_order(self):
+        errs = []
+        self.assertFalse(G._cpp_extension_perf_subset_ok(
+            self._caseset("measure_only"),
+            self._collect("measure_only", ["c2", "c0"], [
+                {"case_id": "c1", "reason": "skipped_accuracy_failed"},
+            ]),
+            ["c2", "c0"], self._PERF_IDS, errs))
+        self.assertTrue(any("顺序" in e for e in errs), errs)
 
 
 if __name__ == "__main__":

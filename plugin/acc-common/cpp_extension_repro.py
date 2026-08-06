@@ -21,6 +21,7 @@ import cpp_extension_adapter
 import cpp_extension_driver
 import repo_adapter
 import validator
+import vendor_build_receipt
 
 
 class ReproError(RuntimeError):
@@ -66,16 +67,23 @@ def _prepend_env_path(name, path):
 
 
 def _prepare_vendor_runtime_env(vendor):
-    """从 receipt 已校验的 exact vendor ELF 恢复正式 workflow 的 OPP/runtime 路径。"""
-    lib_dir = os.path.dirname(vendor)
-    op_api_dir = os.path.dirname(lib_dir)
-    vendor_root = os.path.dirname(op_api_dir)
-    if (os.path.basename(lib_dir) != "lib"
-            or os.path.basename(op_api_dir) != "op_api"):
+    """从 receipt 已校验的 exact vendor ELF 恢复正式 workflow 的 OPP/runtime 路径。
+
+    布局判据**不在这里第二遍解释**——复用 `vendor_build_receipt.custom_opp_path`，
+    与 driver、性能 wrapper、验收门是同一条规则。改动前这里手抄了一份：repro 知道要设
+    `ASCEND_CUSTOM_OPP_PATH`，正式 driver 却从来不设，于是「复现脚本跑得通、正式流水线
+    在干净现场一条都跑不通」。规则只写一处，两边才不会再各活各的。
+
+    ⚠ 语义与 driver 刻意不同：repro 是排障工具，对已有值**追加**而不是 fail-closed；
+    且它在 import torch 之前跑，所以在这里改 `LD_LIBRARY_PATH` 还来得及。
+    """
+    try:
+        vendor_root = vendor_build_receipt.custom_opp_path(vendor)
+    except vendor_build_receipt.VendorBuildReceiptError as ex:
         raise ReproError(
-            f"vendor ELF 不符合 <vendor-root>/op_api/lib 结构: {vendor}")
+            f"vendor ELF 不符合 <vendor-root>/op_api/lib 结构: {vendor}（{ex}）") from ex
     _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", vendor_root)
-    _prepend_env_path("LD_LIBRARY_PATH", lib_dir)
+    _prepend_env_path("LD_LIBRARY_PATH", os.path.join(vendor_root, "op_api", "lib"))
     toolkit = (os.environ.get("ASCEND_TOOLKIT_HOME") or "").strip()
     if toolkit:
         toolkit_lib = os.path.join(toolkit, "lib64")

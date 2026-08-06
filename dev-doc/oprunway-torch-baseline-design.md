@@ -30,7 +30,7 @@ sources: 用户 2026-07-24 指定参考仓 gitcode Justbin/cannbot-ops-input；3
 > **Option A（adapt/vendor 参考仓成熟代码进 OpRunway，对齐我们的契约/证据链/门）**。本文是该决策的可执行蓝图。
 > canon 张力见 §6，须走 `bureau:note→compile→review`；promote 前以 CLAUDE.md + 本蓝图为现行权威。
 
-见证算子：median（PR6429，aclnn 两段式、双输出 values+indices）。落地环境：a3 容器 `oprunway_prov`（torch_npu 2.10 / CANN 9.0.1 / 单卡 davinci0 / 根盘 8.6G）。
+见证算子：median（PR6429，aclnn 两段式、双输出 values+indices）。落地环境：a3 容器 专用容器（torch_npu 2.10 / CANN 9.0.1 / 单卡 davinci0 / 根盘 8.6G）。
 
 核心判断（贯穿全篇）：**torch-对标不是新建一套并行系统**。判定/证据链/门仍唯一归 OpRunway 确定性脚本链。新增面只有四块真能力——(A) ctypes-aclnn Python runner form（全新，参考仓最有价值的可搬件）、(B) `torch_allclose` 精度 standard、(C) torch golden 冻结、(D) **多输出契约扩展**（median 的 values+indices，是唯一契约级缺口，最重）。参考仓的六轴 case-gen / 三态计数 / pass_rate 分母语义 **不整搬**——映射进 OpRunway 既有 gen_cases/validator 语义。
 
@@ -303,7 +303,7 @@ arity 来源：header 签名 `aclnnMedian(self, dim, keepdim, valuesOut, indices
 - **bf16（半缺口，必改）**：`_ACL_DTYPES` 加 `"bfloat16":27`（ACL 枚举，**须对 9.0.1 `acl_base.h` 核实**）。numpy 无 bf16→输入侧 storage_dtype=fp32 读盘、device tensor 用真正窄化（不能 memcpy fp32 字节当 bf16——需 fp32→bf16 位截断，或用 ml_dtypes/torch 做窄化后再 memcpy）。首程见证集**至少 1 个 bf16 case** 压这条轴。输出 bf16 host buffer 按 2 字节开、D2H 后按 bf16 解释再转 fp32 落盘。
 - `acl_consts.py` 集中所有枚举，逐条核 9.0.1：`_ACL_FORMAT_ND=2`、`_MEMCPY_H2D=1/D2H=2`、`_MALLOC_HUGE_FIRST=0`、`_REPEAT_INITIALIZE=100002`（稳定 ABI，通常不变，但核）。
 
-### 4.5 在 oprunway_prov 容器跑
+### 4.5 在 专用容器 容器跑
 
 - **accuracy 通路（ctypes）不依赖 torch**：只要 CANN 9.0.1 提供四个 .so + set_env 设两 env + median 已 build install 出 libcust_opapi.so → 纯 ctypes+numpy 可跑。容器有 numpy ✓。
 - **device**：单卡 davinci0 → `AclnnRunner(device=0)`（`aclrtSetDevice(0)`）。
@@ -366,7 +366,7 @@ arity 来源：header 签名 `aclnnMedian(self, dim, keepdim, valuesOut, indices
 | ADR 0005/0007（三层口径/裁决只从 validator） | torch_allclose judge 落进现有三层字段，不新增裁决出口 | **无张力·保持** |
 | ADR 0011（golden 冻结） | torch golden.py `authorization.kind=oracle_method`→tier1 | 现有机制承载·无张力 |
 
-~~**未上真机提醒**（承 golden-branch-handoff）：全部为静态集成点+设计，torch_allclose NPU 实测、ctypes-aclnn 在 9.0.1 运行时能否跑通、多输出 arity 解析、bf16 窄化、torch_npu perf kernel-only 口径——**均须 a3 `oprunway_prov` 真机验证，covered≠真机绿**。~~
+~~**未上真机提醒**（承 golden-branch-handoff）：全部为静态集成点+设计，torch_allclose NPU 实测、ctypes-aclnn 在 9.0.1 运行时能否跑通、多输出 arity 解析、bf16 窄化、torch_npu perf kernel-only 口径——**均须 a3 专用容器 真机验证，covered≠真机绿**。~~
 ⚠ **SUPERSEDED（2026-07-24 真机首跑）**：上面这条**已过时**。实际结果——torch_allclose 判据 / ctypes-aclnn 在 9.0.1 / 多输出 arity / bf16 窄化**都已在 a3 真机跑过**，端到端出了裁决 **`FAIL(精度)`**（60 例 fail=6，见文首横幅与 §9.8）；**唯独 `torch_npu` perf kernel-only 口径仍未验证**——性能维一个耗时数都没产出（BLOCKED）。**别再据本条说「一切都还没上真机」，也别反过来说「都验过了」。**
 
 ---
@@ -536,7 +536,7 @@ arity 来源：header 签名 `aclnnMedian(self, dim, keepdim, valuesOut, indices
 
 ## 9. a3 de-risk 实测修正（2026-07-24 只读探测坐实，覆盖上文假设）
 
-在 `oprunway_prov` 容器（CANN 9.0.1 / torch_npu 2.10）只读探测，结论如下——**凡与上文冲突以本节为准**。
+在 专用容器 容器（CANN 9.0.1 / torch_npu 2.10）只读探测，结论如下——**凡与上文冲突以本节为准**。
 
 ### 9.1 ACL 枚举全部对表命中（`acl_consts.py` 按此落值、零猜测）
 `aclDataType`（`/usr/local/Ascend/cann-9.0.1/include/acl/acl_base_rt.h`）：FLOAT=0 / FLOAT16=1 / INT8=2 / INT32=3 / UINT8=4 / INT16=6 / INT64=9 / DOUBLE=11 / BOOL=12 / **BF16=27**（:156，✓ 蓝图假设正确）。
@@ -562,7 +562,7 @@ PR6429（fork `LiJianhao2/ops-nn` @ `0290d61ac066f9f4e620a3714f5941e82dc4e72a`�
 ### 9.5 aclnn 调用流坐实
 example `test_aclnn_median.cpp` 的流程 = aclInit(nullptr)→aclrtSetDevice→CreateStream→aclrtMalloc(HUGE_FIRST)→Memcpy(H2D)→aclCreateTensor(+strides)→GetWorkspaceSize→aclrtMalloc(ws)→aclnnMedian→同步→Memcpy(D2H)，与 §9.1 枚举一一对应，正是 ctypes runner 要复刻的流程。空张量不支持（numel==0→`ACLNN_ERR_PARAM_INVALID`）。
 
-### 9.6 D0/D1/D2 实测（2026-07-24 a3 容器 oprunway_prov 坐实）
+### 9.6 D0/D1/D2 实测（2026-07-24 a3 容器 专用容器 坐实）
 **D0（内置 `aclnnAbs`，走真实 `AclnnRunner.run` 1in/1out）✅**：fp32 max_abs_err=0.0、bf16 max_abs_err=0.0 → ctypes 底座（CDLL/CreateTensor/H2D/两段/D2H/枚举）+ **bf16=27** 真机全对。
 **D1（内置 `aclnnMedianDim`，手写正确签名）✅**：fp32 distinct/ties + bf16 三例全绿——多输出逐 D2H、int64 indices、index 值一致性、bf16 窄化机制真机成立。**但暴露 runner 两处必修**（已修复中）：① `_ensure_init` 无条件要 custom vendor lib → 内置算子被拦（改可选）；② `run()` 不能传 median 的 `dim`/`keepDim` 标量 attr（须按签名真实顺序交织 tensor/scalar）。
 **D2（PR6429 自定义 Median build）✅**：9.0.1 一次 build 通过（~2min），`libcust_opapi.so` 导出 `aclnnMedian`(+GetWorkspaceSize)，ctypes 可加载。

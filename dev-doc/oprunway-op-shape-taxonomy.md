@@ -30,7 +30,7 @@ FmodTensor 差两个文件，InplaceRsqrt 要改骨架。
 
 **⚠ 标 `inferred` 的还没核，是按算子名 / 同名 PyTorch 语义 / 冲突未决推的。载重前（写进 spec、开跑、
 当验收依据）必须先核。** 这仓栽过一次：Equal 被「按标题/算子名匹配」误配成 PR #2890，整条验收结论作废
-（见 `doc/oprunway-task-pr-map.md` 的 Equal 更正）。**宁可标 inferred，也不许假装核过。**
+（见 `dev-doc/oprunway-task-pr-map.md` 的 Equal 更正）。**宁可标 inferred，也不许假装核过。**
 
 ### 0.1 核实度三档（本轮新增中间档）
 

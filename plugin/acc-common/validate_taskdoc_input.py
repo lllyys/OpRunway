@@ -16,9 +16,21 @@ fail-closed 边界（每条都对应一种曾被审出来的绕过路径）：
 - 决策必须自报它针对的 item 状态并与当轮实际状态相符——否则旧决策可被搬到新一轮；
 - 契约路径不是运行时开关，只有进程内调用（测试）能替换。
 
+交付件清单（`deliverables`）是 `delivery_scope` 的机器可读半边：引文回答「任务书怎么说」，
+清单回答「于是本次必须交付哪几件、哪几件可选」。契约声明的受控标记词表（必选/可选一类）
+在任务书里出现几处，就必须被清单条目或显式豁免覆盖几处；`delivery_scope` 判 `satisfied`
+却仍有未覆盖标记，即结构性错误。它挡的是实测过的那条路：摘一句「aclnn 为必选交付项」
+就把交付范围判过，而任务书另外三处「必选」（适配层、kernel、接口分层）一句没抽，
+下游于是拿不到任何可对账的必选交付件清单，「PR 少交付一层」全流程无人发现。
+
 已知未封的口子（有意留待后续，别误以为已经堵上）：
 - 引用去重只按归一后全文相等，同一句话取不同重叠子串仍可分撑多项——要真堵住得给每项拆
   `required_facets`、逐 facet 绑定引用；
+- `deliverable_scan_exemptions` 只要一段自由文本 rationale，把每一处标记都豁免掉挡不住；
+  收据会把豁免逐条摆出来供编排层与人复核，但脚本本身不判「这处标记该不该算交付件」；
+- 标记词表按「交付件定性」收窄（不收 `必须`/`须` 这类泛义务词），任务书若用词表外的写法
+  写「必须交付 X」，本门扫不到——那不是判它已覆盖，而是这道门对该写法根本没生效，
+  须扩词表（改契约、不改脚本）；
 - `load_contract` 只锁 `resolution_actions_by_route.stop` 这一条不变量，**不锁 18 项各自的路由**，
   逐项路由由 `test_validate_taskdoc_input.py` 的 `_EXPECTED` 表锁定；
 - `decisions` 只绑到 item 的当轮 status，没有 round id / nonce，同状态的旧决策仍可重放；
@@ -49,6 +61,9 @@ _ROUTES = frozenset({"stop", "list_pending", "use_workflow_default"})
 _UNSATISFIED_KEYS = frozenset({"missing", "ambiguous"})
 _ITEM_STATUSES = frozenset({"satisfied", "ambiguous", "missing", "not_applicable"})
 _DECISION_ACTIONS = frozenset({"supplied", "waived"})
+_DELIVERABLE_REQUIREMENTS = frozenset({"required", "optional"})
+# 交付件 id 会被下游对账工件按字符串引用，也会进报告；限成短标识，避免路径/换行混进来。
+_DELIVERABLE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 _WHITESPACE = re.compile(r"\s+")
 # 中日韩表意文字与全角标点。任务书正文常在这些字符之间换行，那里的空白是排版
@@ -161,7 +176,43 @@ def load_contract(path=None):
                 raise TaskdocValidationError(
                     f"校验契约 {item_id}.on_unsatisfied.{key} 不在受控词表 "
                     f"{sorted(_ROUTES)}")
+    _check_inventory_spec(contract.get("deliverable_inventory"), seen)
     return contract
+
+
+def _check_inventory_spec(inventory, item_ids):
+    """契约必须自带交付件清单规格；缺了这块，交付件清单这道门整体失效。"""
+    if not isinstance(inventory, dict):
+        raise TaskdocValidationError(
+            "校验契约必须声明 deliverable_inventory（owner_item + markers）："
+            "缺这一块等于交付件清单这道门被整体关掉")
+    owner = inventory.get("owner_item")
+    if owner not in item_ids:
+        raise TaskdocValidationError(
+            f"校验契约 deliverable_inventory.owner_item 必须是受控项之一，得 {owner!r}")
+    markers = inventory.get("markers")
+    if (not isinstance(markers, dict)
+            or frozenset(markers) != _DELIVERABLE_REQUIREMENTS):
+        raise TaskdocValidationError(
+            "校验契约 deliverable_inventory.markers 的键必须严格等于 "
+            f"{sorted(_DELIVERABLE_REQUIREMENTS)}")
+    flat = []
+    for modality in sorted(markers):
+        words = markers[modality]
+        if not isinstance(words, list) or not words:
+            raise TaskdocValidationError(
+                f"校验契约 deliverable_inventory.markers.{modality} 必须是非空数组")
+        for word in words:
+            if not _nonempty_str(word) or _normalize(word) != word:
+                raise TaskdocValidationError(
+                    f"校验契约 deliverable_inventory.markers.{modality} 的标记 "
+                    f"{word!r} 必须是已归一（无多余空白）的非空字符串——"
+                    "扫描在归一后的任务书上做，未归一的标记永远扫不中")
+            flat.append(word)
+    if len(set(flat)) != len(flat):
+        raise TaskdocValidationError(
+            "校验契约 deliverable_inventory.markers 存在重复标记："
+            "同一个词同时算必选与可选会让 requirement 一致性检查自相矛盾")
 
 
 def _load_validation(root, validation_rel):
@@ -226,8 +277,14 @@ def _bind_source_facts(root, source_rel, declared_digest, taskdoc_sha256):
     return actual
 
 
-def _check_quotes(item_id, quotes, taskdoc_norm, min_quote_chars, owner=None):
-    """引用必须逐字出自任务书，且不得跨项复用同一条。"""
+def _check_quotes(item_id, quotes, taskdoc_norm, min_quote_chars, owner=None,
+                  owner_id=None):
+    """引用必须逐字出自任务书，且不得跨项复用同一条。
+
+    `owner_id` 让一组引用记在别的项名下：交付件清单的引文属于 `owner_item` 这一项，
+    条目之间可以共用同一句原文（同一项内不算复用），但仍不得与另外 17 项抢同一句。
+    """
+    holder = item_id if owner_id is None else owner_id
     if not isinstance(quotes, list) or not quotes:
         raise TaskdocValidationError(
             f"{item_id}: 必须给出非空 quotes（任务书原文引用）")
@@ -245,11 +302,273 @@ def _check_quotes(item_id, quotes, taskdoc_norm, min_quote_chars, owner=None):
                 f"{item_id}.quotes[{index}] 未逐字出现在任务书原文中: {text[:60]!r}")
         if owner is not None:
             previous = owner.get(text)
-            if previous is not None and previous != item_id:
+            if previous is not None and previous != holder:
                 raise TaskdocValidationError(
                     f"{item_id}.quotes[{index}] 与 {previous} 复用同一条引用: "
                     f"{text[:60]!r}；一条原文不能同时充当两项的证据")
-            owner[text] = item_id
+            owner[text] = holder
+
+
+def _occurrences(needle, haystack):
+    """`needle` 在 `haystack` 里的全部出现区间 [起, 止)；重叠出现也逐个给出。"""
+    spans = []
+    start = haystack.find(needle)
+    while start != -1:
+        spans.append((start, start + len(needle)))
+        start = haystack.find(needle, start + 1)
+    return spans
+
+
+def _bound_occurrences(where, quote, text, taskdoc_norm):
+    """一条引文所覆盖的**唯一**区间（audit#55）。
+
+    旧实现直接把 `_occurrences` 返回的**全部**区间并进覆盖集：同一句话在任务书里出现 N 次，
+    引它一次就把 N 处标记一起「覆盖」掉——覆盖关系成了不受限的多对多，漏抽的必选件因此
+    可以被另一处同文引用悄悄盖住。现在：出现多次即要求引文显式指定 `occurrence`（0 基序号），
+    未指定则 fail-closed；指定后只覆盖那一处。
+    """
+    spans = _occurrences(text, taskdoc_norm)
+    index = quote.get("occurrence") if isinstance(quote, dict) else None
+    if index is None:
+        if len(spans) > 1:
+            raise TaskdocValidationError(
+                f"{where} 的引文在任务书里出现 {len(spans)} 次，必须用 quote.occurrence"
+                "（0 基序号）指明覆盖的是哪一处——一条引文不得同时覆盖多处标记")
+        return spans
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        raise TaskdocValidationError(f"{where}.quote.occurrence 须为非负整数")
+    if index >= len(spans):
+        raise TaskdocValidationError(
+            f"{where}.quote.occurrence={index} 越界（该引文只出现 {len(spans)} 次）")
+    return [spans[index]]
+
+
+def _scan_modality_sites(taskdoc_norm, markers):
+    """扫出任务书里全部「交付定性标记」出现位置。
+
+    只按契约声明的受控词表按结构扫，与算子、领域、仓形态无关：任务书写了几处
+    「必选/可选」，就有几处必须在清单里有归宿。
+
+    同类标记互相包含时只留最长的那条（「必须交付」里的「须交付」不再单算一处），
+    否则一处写法会被记成两处、清单永远对不平。**跨类包含一律都留**：短的那个若是
+    required、长的那个是 optional，丢掉短的就等于把一处必选悄悄抹掉。
+    """
+    found = []
+    for modality in sorted(markers):
+        for word in markers[modality]:
+            for start, end in _occurrences(word, taskdoc_norm):
+                found.append({
+                    "offset": start,
+                    "end": end,
+                    "marker": word,
+                    "modality": modality,
+                    "context": taskdoc_norm[max(0, start - 40):end + 40],
+                })
+    sites = []
+    for site in found:
+        if any(other is not site
+               and other["modality"] == site["modality"]
+               and other["offset"] <= site["offset"]
+               and site["end"] <= other["end"]
+               and (other["end"] - other["offset"]) > (site["end"] - site["offset"])
+               for other in found):
+            continue
+        sites.append(site)
+    sites.sort(key=lambda site: (site["offset"], site["marker"]))
+    return sites
+
+
+def _marker_modalities(text, markers):
+    """`text` 里出现了哪几类定性标记（用于「声明 ↔ 原文」一致性检查）。"""
+    return {modality for modality in markers
+            if any(word in text for word in markers[modality])}
+
+
+def _check_deliverable_entries(entries, taskdoc_norm, min_quote_chars,
+                               quote_owner, owner_item, markers):
+    """逐条校验交付件清单；返回 (归一后的清单, 引文覆盖区间)。"""
+    if not isinstance(entries, list):
+        raise TaskdocValidationError(
+            "taskdoc_validation.deliverables 必须显式给出数组："
+            "任务书完全没有交付定性标记时才允许是空数组，缺这个键不等于「没有交付件」")
+    listed, spans, seen = [], [], set()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise TaskdocValidationError(f"deliverables[{index}] 须为 object")
+        entry_id = entry.get("id")
+        if not _nonempty_str(entry_id) or not _DELIVERABLE_ID_RE.match(entry_id):
+            raise TaskdocValidationError(
+                f"deliverables[{index}].id 必须是 [A-Za-z0-9_.-] 组成的短标识"
+                "（下游对账工件按它逐条指认归宿）")
+        if entry_id in seen:
+            raise TaskdocValidationError(f"deliverables 存在重复 id: {entry_id}")
+        seen.add(entry_id)
+        if not _nonempty_str(entry.get("name")):
+            raise TaskdocValidationError(
+                f"deliverables[{entry_id}].name 缺失：须写清交付件名称或层级")
+        requirement = entry.get("requirement")
+        if requirement not in _DELIVERABLE_REQUIREMENTS:
+            raise TaskdocValidationError(
+                f"deliverables[{entry_id}].requirement 不在受控词表 "
+                f"{sorted(_DELIVERABLE_REQUIREMENTS)}")
+        _check_quotes(f"deliverables[{entry_id}]", entry.get("quotes"),
+                      taskdoc_norm, min_quote_chars, owner=quote_owner,
+                      owner_id=owner_item)
+        modalities = set()
+        for quote in entry["quotes"]:
+            text = _normalize(quote["text"])
+            spans.extend(_bound_occurrences(
+                f"deliverables[{entry_id}]", quote, text, taskdoc_norm))
+            modalities |= _marker_modalities(text, markers)
+        # 只在「引文里只出现一类标记」时判冲突：一句话同时写了必选与可选
+        # （常见于「A 为必选、B 为可选」）本就无法机械归类，交给判断。
+        if len(modalities) == 1 and requirement not in modalities:
+            only = sorted(modalities)[0]
+            raise TaskdocValidationError(
+                f"deliverables[{entry_id}] 声明 requirement={requirement}，"
+                f"但其引文里只出现 {only} 类定性标记；"
+                "把必选写成可选就是让下游漏掉一件必交付物")
+        # audit#54：多 modality 的引文以前**整段跳过**一致性检查，于是一句
+        # 「A 为必选、B 为可选」就能把 A 声明成 optional，下游因此漏掉一件必交付物。
+        # 至少这一条不放：引文里出现了 required 标记，条目就不得声明成非 required。
+        if "required" in modalities and requirement != "required":
+            raise TaskdocValidationError(
+                f"deliverables[{entry_id}] 声明 requirement={requirement}，"
+                "但其引文里含 required 类定性标记；引文含多种 modality 时请拆成"
+                "单一语义的引文分条声明——不得靠「一句话里既有必选又有可选」绕过一致性检查")
+        listed.append({
+            "id": entry_id,
+            "name": entry["name"],
+            "requirement": requirement,
+            "quotes": [{"text": quote["text"]} for quote in entry["quotes"]],
+        })
+    return listed, spans
+
+
+def _check_deliverable_exemptions(exemptions, taskdoc_norm, min_quote_chars,
+                                  markers):
+    """校验「这处标记不是交付件」的显式豁免；返回 (记录, 引文覆盖区间)。
+
+    豁免引文**不进跨项引用去重表**：它不是任何项的证据，只是一句「这处标记与交付件无关」
+    的指认；把它记进去只会平白挡掉别的项引用同一句原文。
+    """
+    if not isinstance(exemptions, list):
+        raise TaskdocValidationError(
+            "taskdoc_validation.deliverable_scan_exemptions 须为数组")
+    recorded, spans = [], []
+    for index, exemption in enumerate(exemptions):
+        if not isinstance(exemption, dict):
+            raise TaskdocValidationError(
+                f"deliverable_scan_exemptions[{index}] 须为 object")
+        quote = exemption.get("quote")
+        if not isinstance(quote, dict):
+            raise TaskdocValidationError(
+                f"deliverable_scan_exemptions[{index}].quote 须为含 text 的 object")
+        if not _nonempty_str(exemption.get("rationale")):
+            raise TaskdocValidationError(
+                f"deliverable_scan_exemptions[{index}] 必须给出 rationale："
+                "说清这处定性标记为什么不是交付件，否则等于无声跳过一处必选")
+        _check_quotes(f"deliverable_scan_exemptions[{index}]", [quote],
+                      taskdoc_norm, min_quote_chars)
+        text = _normalize(quote["text"])
+        where = f"deliverable_scan_exemptions[{index}]"
+        modalities = _marker_modalities(text, markers)
+        record = {"quote": {"text": quote["text"]},
+                  "rationale": exemption["rationale"],
+                  "modalities": sorted(modalities)}
+        # audit#53：一段自由文本 rationale 就能把一处**必选**标记豁免掉——那是把「必选件
+        # 有没有归宿」这道门交给了被审查方的一句话。必选标记的豁免**不计入覆盖**：
+        # 该处仍留在 uncovered 里 → `complete=false` → 收据落 NEEDS_USER，等用户显式决策。
+        if "required" in modalities:
+            record["requires_user_confirmation"] = True
+            recorded.append(record)
+            continue
+        spans.extend(_bound_occurrences(where, quote, text, taskdoc_norm))
+        record["requires_user_confirmation"] = False
+        recorded.append(record)
+    return recorded, spans
+
+
+def _check_exhaustiveness_ack(ack, taskdoc_sha256):
+    """穷尽性承认：受控词表零命中时，唯一能把 `complete` 抬成 true 的东西（audit#56）。
+
+    必须绑定**本轮任务书字节**（防旧承认搬到新任务书上）、注明来源为 `user`、并给出 rationale。
+    缺席即 `None`——调用方据此把清单判为不完整，走 NEEDS_USER，而不是默认「已穷尽」。
+    """
+    if ack is None:
+        return None
+    if not isinstance(ack, dict):
+        raise TaskdocValidationError(
+            "taskdoc_validation.deliverable_inventory_exhaustive 须为 object")
+    if ack.get("taskdoc_bytes_sha256") != taskdoc_sha256:
+        raise TaskdocValidationError(
+            "deliverable_inventory_exhaustive.taskdoc_bytes_sha256 与本轮任务书不符——"
+            "穷尽性承认不得从上一份任务书搬过来")
+    if ack.get("source") != "user":
+        raise TaskdocValidationError(
+            "deliverable_inventory_exhaustive.source 必须是 'user'："
+            "受控词表零命中时，只有人能承认「任务书确实没有别的交付义务」")
+    if not _nonempty_str(ack.get("rationale")):
+        raise TaskdocValidationError(
+            "deliverable_inventory_exhaustive 必须给出 rationale（凭什么认为已穷尽）")
+    return {"source": "user", "rationale": ack["rationale"],
+            "taskdoc_bytes_sha256": taskdoc_sha256}
+
+
+def _check_deliverables(payload, taskdoc_norm, min_quote_chars, quote_owner,
+                        inventory_spec, owner_status, taskdoc_sha256):
+    """交付件清单门：任务书里每一处交付定性标记都必须有归宿。
+
+    `owner_item` 判 `satisfied` 却仍有未覆盖标记 → 结构性错误（BLOCKED）：
+    「摘到一句相关原文」不等于「交付范围已抽全」。`owner_item` 本就没判 satisfied 时
+    不额外阻断（该项已按契约路由停在用户那儿），但收据仍如实记 `complete=false`
+    与未覆盖清单，绝不把「没查清」记成「已覆盖」。
+    """
+    owner_item = inventory_spec["owner_item"]
+    markers = inventory_spec["markers"]
+    listed, spans = _check_deliverable_entries(
+        payload.get("deliverables"), taskdoc_norm, min_quote_chars,
+        quote_owner, owner_item, markers)
+    recorded, exempt_spans = _check_deliverable_exemptions(
+        payload.get("deliverable_scan_exemptions", []), taskdoc_norm,
+        min_quote_chars, markers)
+    spans = spans + exempt_spans
+    sites = _scan_modality_sites(taskdoc_norm, markers)
+    uncovered = [site for site in sites
+                 if not any(lo <= site["offset"] and site["end"] <= hi
+                            for lo, hi in spans)]
+    if uncovered and owner_status == "satisfied":
+        preview = " ｜ ".join(site["context"] for site in uncovered[:3])
+        raise TaskdocValidationError(
+            f"{owner_item} 判 satisfied，但任务书里还有 {len(uncovered)} 处交付定性标记"
+            f"（{sorted({site['marker'] for site in uncovered})}）"
+            "既未进 deliverables 清单、也未列入 deliverable_scan_exemptions："
+            f"{preview}；漏抽的必选交付件下游无从对账")
+    # audit#56：`complete` 以前的定义是「受控词表没扫出未覆盖项」——于是**零命中**
+    # （任务书用了词表外的写法，或根本不是这种文体）也会被判成「清单已穷尽」。
+    # 零命中改为**待确认**：须由 `deliverable_inventory_exhaustive` 显式承认穷尽性
+    # （绑任务书摘要 + rationale），否则 complete=false → 收据落 NEEDS_USER。
+    exhaustive_ack = _check_exhaustiveness_ack(
+        payload.get("deliverable_inventory_exhaustive"), taskdoc_sha256)
+    complete = (not uncovered) and (bool(sites) or exhaustive_ack is not None)
+    summary = {
+        "owner_item": owner_item,
+        "owner_status": owner_status,
+        "complete": complete,
+        "zero_marker_sites": not sites,
+        "exhaustiveness_ack": exhaustive_ack,
+        "modality_sites": len(sites),
+        "uncovered_sites": [
+            {"marker": site["marker"], "modality": site["modality"],
+             "context": site["context"]}
+            for site in uncovered],
+        "exemptions": recorded,
+        "required_ids": sorted(entry["id"] for entry in listed
+                               if entry["requirement"] == "required"),
+        "optional_ids": sorted(entry["id"] for entry in listed
+                               if entry["requirement"] == "optional"),
+    }
+    return listed, summary
 
 
 def _resolve_applicability(item_id, requirement, declared, status, perf_required):
@@ -302,7 +621,8 @@ def _resolve_perf_required(payload, taskdoc_norm, min_quote_chars):
     return perf_required
 
 
-def _route_items(items, by_id, taskdoc_norm, min_quote_chars, perf_required):
+def _route_items(items, by_id, taskdoc_norm, min_quote_chars, perf_required,
+                 quote_owner):
     """逐项校验并按契约派生路由；返回 {item_id: 路由条目}。"""
     for index, item in enumerate(items):
         if not isinstance(item, dict):
@@ -318,7 +638,6 @@ def _route_items(items, by_id, taskdoc_norm, min_quote_chars, perf_required):
         raise TaskdocValidationError(
             f"校验项未与契约逐项对齐: 缺失={missing_ids}, 多余={extra_ids}")
 
-    quote_owner = {}
     routed = {}
     for item in items:
         item_id = item["id"]
@@ -421,6 +740,8 @@ def evaluate(root, validation_rel, taskdoc_rel="task_doc.md",
         "status": "BLOCKED",
         "op": None,
         "perf_required": None,
+        "deliverables": [],
+        "deliverable_inventory": None,
         "blocking_items": [],
         "pending_items": [],
         "workflow_default_items": [],
@@ -454,8 +775,16 @@ def evaluate(root, validation_rel, taskdoc_rel="task_doc.md",
         items = payload.get("items")
         if not isinstance(items, list):
             raise TaskdocValidationError("taskdoc_validation.items 须为数组")
+        quote_owner = {}
         routed = _route_items(items, by_id, taskdoc_norm, min_quote_chars,
-                              perf_required)
+                              perf_required, quote_owner)
+        inventory_spec = contract["deliverable_inventory"]
+        owner_status = next(item["status"] for item in items
+                            if item["id"] == inventory_spec["owner_item"])
+        receipt["deliverables"], receipt["deliverable_inventory"] = (
+            _check_deliverables(payload, taskdoc_norm, min_quote_chars,
+                                quote_owner, inventory_spec, owner_status,
+                                taskdoc_sha256))
         decisions = _collect_decisions(payload, routed, actions_by_route)
 
         for item_id, entry in sorted(routed.items()):
@@ -481,6 +810,28 @@ def evaluate(root, validation_rel, taskdoc_rel="task_doc.md",
                 receipt["pending_items"].append(entry)
             else:
                 receipt["workflow_default_items"].append(entry)
+
+        # audit#52：清单不完整以前**只在 owner 原始状态是 satisfied 时**阻断；owner 判
+        # missing/ambiguous 再经一条 `supplied` 决策消化掉，收据就能带着
+        # `deliverable_inventory.complete=false` 落成 PASSED——下游据此宣称「必选件全有归宿」，
+        # 而清单本身还漏着标记。现在无条件：清单不完整 → 阻断项 → NEEDS_USER。
+        inventory = receipt["deliverable_inventory"] or {}
+        if not inventory.get("complete"):
+            receipt["blocking_items"].append({
+                "id": inventory_spec["owner_item"],
+                "title": by_id[inventory_spec["owner_item"]]["title"],
+                "requirement": by_id[inventory_spec["owner_item"]]["requirement"],
+                "status": "deliverable_inventory_incomplete",
+                "route": "stop",
+                "expects": "任务书里每一处交付定性标记都落进 deliverables 或 "
+                           "deliverable_scan_exemptions；受控词表零命中时须给 "
+                           "deliverable_inventory_exhaustive 穷尽性承认",
+                "unsatisfied_note": None,
+                "rationale": (
+                    f"交付件清单不完整：未覆盖 {len(inventory.get('uncovered_sites') or [])} 处"
+                    f"定性标记，zero_marker_sites={inventory.get('zero_marker_sites')}；"
+                    "清单不完整时不得判 PASSED——「没查清」不能记成「已覆盖」"),
+            })
 
         if receipt["blocking_items"]:
             receipt["status"] = "NEEDS_USER"

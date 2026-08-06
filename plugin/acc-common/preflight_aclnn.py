@@ -4,6 +4,20 @@
 只用 CP-A/B 已取到的 PR header 与 spec 做签名/slots 对账；不 clone、不 build、不加载
 `.so`、不访问 NPU。成功状态只能是 ``READY_WAIT_NPU_TRUST_GATE``，不能替代后续真机
 build、DUT 定义方核验或 harness trust gate。
+
+签名解析统一走 :func:`aclnn_runner.parse_aclnn_signature`，因此本门是 **stage2 感知**的
+（runner 改动⑮）。产物里逐签名/逐变体记两组来源，让两件本来不可见的事在产物里可审：
+
+1. ``stage2_dispatch_form`` / ``stage2_call_arity`` —— 执行段 ``aclnn<Op>`` 若是
+   「框架三参 + stage1 实参原样重复 + stream」形态（实测 ``aclnnGaussianBlur`` 为 10 参），
+   ``slot_contract`` 里的 N 项与真机 native 调用的实参个数**本来就不相等**。不记这两项，
+   读产物的人只能默认它是标准 4 参调用；
+2. 逐形参 ``direction_source`` —— ``dst`` 这类 stage1 写 ``const aclTensor *``、stage2 写
+   ``aclTensor *`` 的 DUT 上，「它是输出」这个结论**完全来自 stage2**。不落来源，产物里
+   就只剩一个凭空的 ``role="out"``（AGENTS.md 5.8：推断项须显式标注出处）。
+
+两组都只是**记录**：对账强度仍由 :meth:`AclnnRunner._validate_slots_against_signature`
+一处解释，本门不因 stage2 形态放宽任何一条逐项校验。
 """
 
 import argparse
@@ -15,7 +29,10 @@ import sys
 import content_address
 import gen_cases
 import precision_policy
+import source_provenance
 from aclnn_runtime.aclnn_runner import (
+    STAGE2_EXTENDED,
+    STAGE2_STANDARD,
     AclnnRunner,
     AclnnRunnerError,
     parse_aclnn_signature,
@@ -44,6 +61,51 @@ def _sha(value):
 def _self_sha256():
     with open(__file__, "rb") as src:
         return hashlib.sha256(src.read()).hexdigest()
+
+
+def _stage2_record(signature):
+    """签名的 stage2 派发形态 + **真机 native 实参个数**（只记录，不参与任何判定）。
+
+    ``stage2_form`` 照抄解析结果（``absent`` = header 里没有执行段声明，``None`` = 调用方没声明）；
+    ``stage2_dispatch_form`` 是 :meth:`AclnnRunner.run` 实际会走的分支——**不可派发的形态记 ``None``**，
+    绝不写成 ``STAGE2_STANDARD``（那等于在收据里替 runner 编了一个它根本不会走的分支）；
+    ``stage2_call_arity`` = 那次 native 调用的实参个数：standard 恒 4；extended 是
+    「框架三参 + stage1 实参原样重复 + stream」= ``3 + len(params) + 1``；不可派发时为 ``None``。
+    """
+    form = getattr(signature, "stage2_form", None)
+    params = list(getattr(signature, "params", None) or ())
+    dispatch = form if form in (STAGE2_STANDARD, STAGE2_EXTENDED) else None
+    if dispatch == STAGE2_EXTENDED:
+        arity = 3 + len(params) + 1
+    elif dispatch == STAGE2_STANDARD:
+        arity = 4
+    else:
+        arity = None
+    return {
+        "stage2_form": form,
+        "stage2_dispatch_form": dispatch,
+        "stage2_call_arity": arity,
+    }
+
+
+def _param_records(signature):
+    """签名形参表 → 产物记录，逐项补 ``direction_source``（in/out 这个结论**是从哪来的**）。
+
+    - ``stage2_param_qualifier``：extended 形态下，方向取自 stage2 那份重复实参的 const 限定符；
+    - ``stage1_const_heuristic``：stage2 缺席或为 standard，方向取自 stage1 的 ``const`` 启发式；
+    - ``not_applicable``：非张量形参（属性）没有方向可言。
+
+    按 ``ctype`` 分（通用类型判据），**绝不按算子身份**。
+    """
+    from_stage2 = getattr(signature, "stage2_form", None) == STAGE2_EXTENDED
+    records = []
+    for param in getattr(signature, "params", None) or ():
+        record = dict(param)
+        record["direction_source"] = (
+            ("stage2_param_qualifier" if from_stage2 else "stage1_const_heuristic")
+            if param.get("ctype") == "tensor" else "not_applicable")
+        records.append(record)
+    return records
 
 
 def _abstract_slots(spec, variant):
@@ -90,6 +152,12 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
         "acceptance_verdict": None,
         "required_next_gate": "NPU_BUILD_AND_HARNESS_TRUST_GATE",
         "bindings": {},
+        # 源 provenance 的机读**降级**挂账。只装「本该做到却没做到」的事（如声明要测 PR
+        # 却只拿到一份本地快照）；正常通路恒为空表。空表与「工具没记」是两回事，故恒存在。
+        "provenance_degradations": [],
+        # 源 provenance 的机读**中性形态事实**。如「本地源码没有上游 commit」——它不是降级，
+        # 是这条输入形态本来的样子。与上一项分开记，报告才不会把正常的本地源码验收读成异常。
+        "provenance_form_facts": [],
         "signatures": [],
         "variants": [],
         "blocked_reasons": [],
@@ -103,10 +171,6 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
             root, source_rel, _SOURCE_DOMAIN)
         if not isinstance(source, dict):
             raise ValueError("source_facts payload 须为 JSON object")
-        source_completeness = source.get("completeness")
-        if (not isinstance(source_completeness, dict)
-                or source_completeness.get("status") != "complete"):
-            raise ValueError("source_facts completeness 不是 complete")
         source_digest = content_address.content_digest(_SOURCE_DOMAIN, source)
         result["bindings"]["source_facts_digest"] = source_digest
 
@@ -115,7 +179,14 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
         if not isinstance(spec, dict) or not isinstance(pr_facts, dict):
             raise ValueError("spec/pr_facts 须为 JSON object")
         result["bindings"]["spec_sha256"] = _sha(spec)
-        result["bindings"]["pr_head_sha"] = pr_facts.get("head_sha")
+        # 源身份绑定（含档位）统一由 source_provenance 一处解释：判据是「**实得形态是否与
+        # 声明的输入形态一致**」——`git_pr`/`local_source` 两条声明如愿实得时都无条件放行；
+        # 只有「声明要测 PR 却只拿到本地快照」才要编排层显式授权，并把降级机读挂账进收据。
+        provenance_bindings, degradations = source_provenance.bind(source, pr_facts)
+        result["bindings"].update(provenance_bindings)
+        result["provenance_degradations"] = degradations
+        result["provenance_form_facts"] = source_provenance.form_facts(
+            provenance_bindings)
 
         runner_form = spec.get("runner_form", "cpp")
         if runner_form not in ("aclnn_py", "cpp_extension"):
@@ -127,13 +198,6 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
             "CPP_EXTENSION_BUILD_LOAD_AND_HARNESS_TRUST_GATE"
             if runner_form == "cpp_extension"
             else "NPU_BUILD_AND_HARNESS_TRUST_GATE")
-
-        source_pr = source.get("pr")
-        if not isinstance(source_pr, dict):
-            raise ValueError("source_facts.pr 须为 JSON object")
-        source_head = source_pr.get("head_sha")
-        if not source_head or pr_facts.get("head_sha") != source_head:
-            raise ValueError("pr_facts.head_sha 与 source_facts 绑定不一致")
 
         key_files = pr_facts.get("key_files")
         if not isinstance(key_files, dict):
@@ -168,8 +232,9 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
             result["signatures"].append({
                 "symbol": signature.op_name,
                 "header": path,
-                "params": [dict(param) for param in signature.params],
+                "params": _param_records(signature),
                 "bytes_sha256": recorded["bytes_sha256"],
+                **_stage2_record(signature),
             })
 
         variants = precision_policy.call_variants(spec)
@@ -197,6 +262,9 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
                     **({"ctype": slot["ctype"]}
                        if slot["kind"] == "attr" else {}),
                 } for slot in slots],
+                # slot_contract 是 stage1 的 N 项；extended 形态下真机 stage2 还要把这 N 项
+                # 原样重复一遍（3 + N + 1 个实参）——记下来，别让读产物的人默认成 4 参。
+                **_stage2_record(signature),
                 "status": "STATIC_SIGNATURE_MATCH",
             })
         result["status"] = "READY_WAIT_NPU_TRUST_GATE"

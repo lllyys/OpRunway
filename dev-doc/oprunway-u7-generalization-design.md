@@ -2,7 +2,7 @@
 
 > **产出方式**：2026-07-23 只读设计 fanout（10 agent，Survey 5 路实读代码 → Design 4 类 → Synthesize；
 > workflow run `wf_a624fa02-d58`，~1.23M token）。**全程只读、零改代码。**
-> **地基**：`doc/oprunway-op-shape-taxonomy.md`（44 算子形态清点，2026-07-22 快照）。
+> **地基**：`dev-doc/oprunway-op-shape-taxonomy.md`（44 算子形态清点，2026-07-22 快照）。
 > **本 doc 是 rule #1 的「先抛方案」产物** —— 待用户拍板 U7d 分期后才落地实施。
 
 ---

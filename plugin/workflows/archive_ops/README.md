@@ -4,7 +4,7 @@
 
 ## 入库判据（硬）
 
-1. **仅收真机-verified**：案例须已过机器门 / 有真机（a3/a5）实测证据；mock-only 不收（mock 全过、真机才暴露——见 `doc/oprunway-acceptance-evidence.md`）。
+1. **仅收真机-verified**：案例须已过机器门 / 有真机（a3/a5）实测证据；mock-only 不收（mock 全过、真机才暴露——见 `dev-doc/oprunway-acceptance-evidence.md`）。
 2. **verdict 如实分类、不混称**：一个案例的裁决按类别标——`pass`（精度+性能皆过）/ `precision-pass·perf-fail`（精度过、性能未达成）/ …；**性能未达成的样本绝不标 PASS**。
 3. **引用可解析**：`<op>.spec.json` 是**内联真实副本**（真样例已迁 `plugin/samples/specs/`、移出运行时路径，不再 symlink）；到 `plugin/samples/runners/oprunway_<op>_runner.cpp` 的 symlink 仍须能 `readlink` 解析（相对拓扑、不 sed 绝对路径）。
 4. **作废案例不收**：因「任务书↔PR 配错 / 未验收空任务」作废者不收（如 Equal——#2890 误配、任务未验收，整体作废；见 `Verify spec-PR correspondence before acceptance` proposed）。
@@ -19,7 +19,7 @@
 | `taskdoc` | 任务书路径或链接（无则标 from-scratch） | 链接 / `from-scratch example（无社区任务）` |
 | `pr` | 被测 PR（无则 from-scratch 标记） | `gitcode ops-math!2702` / `无（demo 算子）` |
 | `verdict` | 裁决类别（**如实、不混称**） | `pass` / `precision-pass·perf-fail` |
-| `evidence_path` | 真机证据落点（reports/… 或台账引用） | `doc/oprunway-acceptance-evidence.md` |
+| `evidence_path` | 真机证据落点（reports/… 或台账引用） | `dev-doc/oprunway-acceptance-evidence.md` |
 | `real_machine` | 哪台真机 | `a3` / `a5` |
 | `caveat` | 需注意的口径/未闭合项 | 文本 |
 

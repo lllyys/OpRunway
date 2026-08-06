@@ -361,7 +361,7 @@ C) 容差/口径（precision_policy）：`TORCH_ALLCLOSE` 标准 + `_TA_DTYPE_TO
 |---|---|---|
 | **D2·gap3 容差 dtype 键**(我们按输出 dtype `derive_output_dtype`,cannbot 按输入 `case['dtype']`) | 我们**改对了 cannbot 的潜在瑕**——非同型算子(IsClose float→bool)cannbot 会键错。 | 在 `precision_policy.py:202` 注释标「有意偏离、按输出 dtype 更正确」,别当 bug 对齐。 |
 | **D2·gap1 / D4·gap6 index_value_consistency**(gather 值一致;cannbot 只比 `golden_files[0]`、根本不判 index) | 我们**更强**——cannbot 对 median 的 indices 完全不比。保留。 | **修 provenance 注释**:`precision_policy.py:126-135` 及 index 判据处明标 `index_value_consistency` 系 OpRunway 原创、非 cannbot 口径,别让注释暗示 cannbot 出处。 |
-| **D3·gap4 采集入口分裂**(baseline 走 torch_npu.profiler db、custom 走 msprof CLI+ctypes mstx) | 被真机 finding §9.7 A 逼出(msprof CLI 下 Python 侧打不出 MSTX);回退会重蹈静默失败。 | 在设计 doc/报告标「本项目 baseline 采集通路与 cannbot 分歧及实测依据」,保留双边采集配置一致性闸(我们有、cannbot 无)。 |
+| **D3·gap4 采集入口分裂**(baseline 走 torch_npu.profiler db、custom 走 msprof CLI+ctypes mstx) | 被真机 finding §9.7 A 逼出(msprof CLI 下 Python 侧打不出 MSTX);回退会重蹈静默失败。 | 在设计 dev-doc/报告标「本项目 baseline 采集通路与 cannbot 分歧及实测依据」,保留双边采集配置一致性闸(我们有、cannbot 无)。 |
 | **D3·gap5 `--ai-core=off`**(cannbot 只「不请求 --aic-metrics」) | 有真机实测(§9.7 C:默认 on 使数字虚高 2.0~3.75×)。 | `perf_msprof.py:229` 注释标「对 cannbot 命令的一处有据偏离(§9.7 C),非口径遗漏」。 |
 
 ---

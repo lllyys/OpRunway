@@ -2,7 +2,7 @@
 
 > 来源：2026-07-13 隔离环境测 IsClose 插件（`OpRunway-usertest/work/`，真 A3 端到端跑通、裁决 `PASSED_WITH_RISK`）+ 用户 11 问 + transcript 精读。
 > **状态：设计/提案，未实施、未 commit。** 按 CLAUDE.md #1，先抛方案、点头才落地。
-> 测试本身的正面结论：隔离基本干净（未读 doc/canon/repos 源码），agent 诚实（裁决逐字引用脚本、主动点破仿真图不足）。以下是**要改的**。
+> 测试本身的正面结论：隔离基本干净（未读 dev-doc/canon/repos 源码），agent 诚实（裁决逐字引用脚本、主动点破仿真图不足）。以下是**要改的**。
 
 ---
 
@@ -40,7 +40,7 @@
 
 ### A · 真缺陷：私有环境写死默认值（别人拿到插件跑不起来）
 
-- **Q2 机器连接**：`repo_adapter._ne_cfg()` 把 `host="ascend-a3"` 写死默认，无 `AskUserQuestion`、**无"目标机=本机、直接跑"分支**（现在强制 ssh+scp）。
+- **Q2 机器连接**：`repo_adapter._ne_cfg()` 把 `host="A2A3 真机"` 写死默认，无 `AskUserQuestion`、**无"目标机=本机、直接跑"分支**（现在强制 ssh+scp）。
   改：CP-D 前 `AskUserQuestion`「目标机=① 本机直连 ② ssh 远端」；默认值改"必须显式提供，否则报错"，不用私有主机名兜底。
 - **Q3 被测仓路径**：`ops: "/home/lys/ops-math"` 写死；**全仓无 git clone**。别人机器没这路径即失败。
   改：被测仓缺失时从 PR 的 gitcode URL 现场浅 clone 到工作目录；路径运行时探测/询问，不给私有默认。

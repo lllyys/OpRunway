@@ -268,6 +268,11 @@ def derive_output_dtype(spec, case_input_dtypes):
     out_allowed = out_params[0].get("dtype") or []
     if in_dt in out_allowed:
         return in_dt                              # 同 dtype elementwise（Sign/Neg）
+    if FROM_INPUT_SENTINEL in out_allowed:
+        # `<from_input>` 是**占位符不是 dtype**：多输出通路的 `_resolve_out_dtype` 一直这么解，
+        # legacy 单输出通路以前漏了这一支，于是 `len(uniq)==1` 那条会把哨兵**原样当成 dtype 返回**，
+        # 一路带到 `threshold_for` 才炸（"无 dtype='<from_input>' 阈值"）。两条通路口径必须一致。
+        return in_dt
     uniq = set(out_allowed)
     if len(uniq) == 1:
         return next(iter(uniq))                   # 固定输出（bool：IsClose/Equal）
@@ -771,7 +776,8 @@ def oracle_source_from_golden(golden_source):
 # 用户 2026-07-22 裁定（R1–R12），本节是「档位怎么算」的**唯一**实现，别处只准调、不准复述判断逻辑：
 #   R2  PR 里的参考实现**一律禁止**作 golden 源 —— 落地方式是**值域里根本没有那个格子**
 #       （禁令会被绕过，缺值只能 fail-closed）。
-#   R3  golden 来源是**两档链**：① 任务书指定的测试方法 → ② CPU 上的 torch/numpy API。
+#   R3  golden 来源是**两档链**：① 任务书指定的测试方法 → ② CPU 上的现成库 API
+#       （原文举的是 torch/numpy；可跑方法族的**当前**权威集合以 `RUNNABLE_METHOD_KINDS` 为准）。
 #   R4  任务书**指定了、但本环境跑不起来**的方法（内置 TBE / cuSPARSE / OpenCV-GPU 等）
 #       → fail-closed 抛用户，**不自动回落**第二档。
 #   R5  第二档分两级：**现成 API 单调** → 不人核；**按公式自拼多步** → 必须人核。
@@ -792,8 +798,81 @@ PRODUCIBLE_ORACLE_SOURCES = ("torch_ref", "analytical_ref", "task_spec_expected"
 GOLDEN_SOURCE_KIND = ("single_api", "multistep", "external_method", "needs_user")
 
 # golden 的**方法族**，用来判「本环境跑不跑得起来」（R4）。
-GOLDEN_METHOD_KIND = ("torch_cpu", "numpy_cpu", "builtin_tbe", "gpu_lib", "other_external", "needs_user")
-RUNNABLE_METHOD_KINDS = frozenset({"torch_cpu", "numpy_cpu"})   # R3 第二档：CPU 上的 torch/numpy
+#
+# ⚠ `opencv_cpu` 与 `torch_cpu` / `numpy_cpu` **同族**、按同一条理由入 RUNNABLE：
+#   它们都是「装在本机、在 **CPU** 上现算得出真值的第三方库」。入族的判据是**这个能力**，
+#   不是某个算子（律令 5.1：绝不按算子身份特判）——任何任务书把某个 CPU 库指定为真值口径时都适用。
+#   加它的目的是让「诚实声明用 OpenCV CPU 算 golden」有格子可填；在此之前唯一「能跑」的写法是
+#   谎称 torch_cpu/numpy_cpu，那是被禁止的**静默换标杆**（5.8）。
+# ⛔ `gpu_lib`（含 OpenCV-CUDA / cuSPARSE 等）**刻意不进** RUNNABLE，别顺手加：
+#   R4 要求「任务书指定了、但本环境跑不起来」的方法一律 fail-closed 抛用户，**不自动回落**。
+#   「同一个库的 CPU 版能跑」不是放行 GPU 口径的理由——拿 CPU 结果**冒充** GPU 标杆就是换标杆。
+#   ⚠ 这条与下面的 §5.11 解析层**不矛盾**：那一层不是「回落」，是把任务书的 GPU 写法**读成** CPU
+#     并留下解析记录；解析后的 method_kind 仍须落在 RUNNABLE 里、仍走同一套判档。
+#     「冒充」被禁的是**不留痕地换**，不是「按仓规明示的读法解析后如实记账」。
+#: ⚠ `opencv_cuda`（2026-08-05 加）是**能定位到具体库**的 GPU 声明，供 §5.11 解析用；
+#: `gpu_lib` 保留作粗粒度兜底值——它**解析不了**（见 _UNRESOLVABLE_GPU_KINDS），
+#: 任务书写得太泛时如实落它并 fail-closed，不许拿它当「随便挑个 CPU 库」的入口。
+GOLDEN_METHOD_KIND = ("torch_cpu", "numpy_cpu", "opencv_cpu",
+                      "builtin_tbe", "gpu_lib", "opencv_cuda", "other_external", "needs_user")
+RUNNABLE_METHOD_KINDS = frozenset({"torch_cpu", "numpy_cpu", "opencv_cpu"})   # R3 第二档：CPU 上跑得起来的现成库
+
+# ---- §5.11 · 任务书写 GPU 一律解析为同族 CPU（用户 2026-08-05 全局解析规则）----
+#
+# 这是**解析口径**，不是降级取证：任务书里「以 OpenCV GPU 为标杆」这类写法，按仓规就该读成
+# 同族的 CPU 实现。故它**不产生**「GPU 口径未验收」的 gap（那是把解析规则误当成降级）。
+#
+# ⚠ 与 5.10 性质不同：5.10 是**取消比较**（性能不取标杆、不算比值），条款按未验收记账；
+#    5.11 是**解析**（真值口径按同族 CPU 读），条款视为已被满足。两者别互相照搬。
+#
+# 映射按**具体库**组织、是数据不是代码分支（5.1）：换任何算子、任何任务书零改即用。
+# ⚠ **键必须是能定位到具体库的标识，不能是 `gpu_lib` 这种粗粒度族**（2026-08-05 审修门 Critical）：
+#   `gpu_lib` 底下同时装着 OpenCV-CUDA、cuSPARSE、cuDNN……把它整族映射到 `opencv_cpu`，
+#   等于把「任务书点名 cuSPARSE」悄悄换成 OpenCV CPU —— 那不是「同族」，是**换了个不相干的实现**，
+#   而且正好绕过 §5.11 自己写的「同族无 CPU 对应则 fail-closed」。
+#   故本表只收**有明确同库 CPU 对应**的项；定位不到具体库的声明一律解析不出、由调用方 fail-closed。
+_GPU_TO_CPU_SAME_LIBRARY = {
+    # 任务书把 OpenCV 的 GPU/CUDA 实现写成真值口径 → 读作**同一个库**的 CPU 实现。
+    "opencv_cuda": "opencv_cpu",
+}
+
+#: 粗粒度、**定位不到具体库**的 GPU 声明。解析不了它——不是「暂不支持」的托词，
+#: 而是「不知道该换成哪个 CPU 实现」这件事本身。返回 `(None, record)` 让调用方 fail-closed。
+_UNRESOLVABLE_GPU_KINDS = frozenset({"gpu_lib"})
+
+
+def resolve_gpu_oracle_to_cpu(method_kind):
+    """§5.11 解析：GPU 真值口径 → **同一个库**的 CPU 实现。返回 `(resolved_kind|None, record|None)`。
+
+    三种出口，别混：
+      · 非 GPU 声明 → `(method_kind, None)`，对既有口径**零影响**；
+      · 能定位到具体库且该库有 CPU 对应 → `(cpu_kind, record)`；
+      · **定位不到具体库**（如泛泛的 `gpu_lib`）或该库无 CPU 对应 → `(None, record)`，
+        调用方必须 fail-closed。⚠ 绝不退回「猜一个最常见的 CPU 库」——那是换标杆。
+
+    `record` 不是装饰品：报告必须据它写「任务书写的是 X，按 §5.11 解析为 Y」，
+    **不得**直接写成「任务书要求 Y」把解析这一步抹掉（5.8：事实与推断分开）。
+    """
+    if method_kind in _GPU_TO_CPU_SAME_LIBRARY:
+        resolved = _GPU_TO_CPU_SAME_LIBRARY[method_kind]
+        return resolved, {
+            "rule": "agents_md_5_11",
+            "declared_in_taskdoc": method_kind,
+            "resolved_to": resolved,
+            "resolvable": True,
+            "basis": "同一库的 CPU 实现；仓规 §5.11 规定任务书的 GPU 真值口径统一按此解析",
+        }
+    if method_kind in _UNRESOLVABLE_GPU_KINDS:
+        return None, {
+            "rule": "agents_md_5_11",
+            "declared_in_taskdoc": method_kind,
+            "resolved_to": None,
+            "resolvable": False,
+            "basis": (f"{method_kind!r} 是粗粒度族、定位不到具体库（OpenCV-CUDA / cuSPARSE / cuDNN… 都在里面），"
+                      "无从确定该换成哪个 CPU 实现 → fail-closed。请把任务书的真值口径细化到具体库"
+                      f"（受控值见 {sorted(_GPU_TO_CPU_SAME_LIBRARY)}）后重判。"),
+        }
+    return method_kind, None
 
 # 任务书对 golden 的**授权强度**。三者区别是本节最吃重的判断：
 #   oracle_method  —— 任务书就**真值口径/怎么测**作出了指定（如 IsClose「二进制比较改为逻辑值比较」）；

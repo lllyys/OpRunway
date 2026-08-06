@@ -3,7 +3,7 @@
 **这是什么**：一份 **op 无关**的接口描述契约。探测器（只读 `header × op_def × example × glue × doc × infershape`）
 对**任意**域内算子产出一份符合 `contract_ir.schema.v1.json` 的 IR 实例；唯一 codegen 模板机械消费它，
 emit 出每个算子的**类型化薄 binding**。**契约里没有任何按算子名的分支**——加新算子 = 探测出一份 IR（纯数据），
-引擎/模板一行不改。设计与来龙去脉见 `doc/oprunway-u7-generalization-design.md` §3.5 / §3.6。
+引擎/模板一行不改。设计与来龙去脉见 `dev-doc/oprunway-u7-generalization-design.md` §3.5 / §3.6。
 
 ## 文件
 

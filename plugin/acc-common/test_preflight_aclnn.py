@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import content_address
 import preflight_aclnn as P
@@ -61,14 +62,17 @@ class AclnnPreflightTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = self.tmp.name
         self._write("spec.json", _spec())
+        # provenance_kind 两侧都必须**显式**声明（`fetch_pr` / `scan_pr_snapshot` 本就恒写）：
+        # source_provenance.bind 不再默认成 gitcode_pr，也不再只读单侧。
         self._write("pr_facts.json", {
+            "provenance_kind": "gitcode_pr",
             "head_sha": _HEAD,
             "key_files": {_PATH: _HEADER},
         })
         raw = _HEADER.encode()
         source = {
             "contract_version": 1,
-            "pr": {"head_sha": _HEAD},
+            "pr": {"provenance_kind": "gitcode_pr", "head_sha": _HEAD},
             "key_files": [{
                 "path": _PATH,
                 "ref": _HEAD,
@@ -90,6 +94,72 @@ class AclnnPreflightTest(unittest.TestCase):
     def _write(self, rel, value):
         with open(os.path.join(self.root, rel), "w", encoding="utf-8") as out:
             json.dump(value, out)
+
+    def _rewrite_as_local_source(self):
+        """把 CP-A 两份事实包换成「本地源码」形态（`fetch_source --pr-snapshot` 产的样子）。"""
+        merkle, scope = "b" * 64, "gaussian_blur"
+        self._write("pr_facts.json", {
+            "declared_source_form": "local_source",
+            "provenance_kind": "local_snapshot",
+            "head_sha": None,
+            "snapshot_merkle_sha256": merkle,
+            "snapshot_scope": scope,
+            "key_files": {_PATH: _HEADER},
+        })
+        raw = _HEADER.encode()
+        content_address.write_artifact(self.root, "source_facts.json", P._SOURCE_DOMAIN, {
+            "contract_version": 1,
+            "declared_source_form": "local_source",
+            "pr": {"provenance_kind": "local_snapshot", "head_sha": None,
+                   "snapshot_merkle_sha256": merkle, "snapshot_scope": scope},
+            "key_files": [{
+                "path": _PATH, "ref": "local_snapshot",
+                "bytes_sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw),
+            }],
+            "derived": {"aclnn_headers": [_PATH], "interface_kind": "aclnn_2stage"},
+            "completeness": {"status": "complete", "reasons": [], "form_facts": [
+                "local_source_has_no_upstream_commit",
+                "local_source_file_set_is_subtree_not_pr_diff"]},
+        })
+
+    def test_local_source_passes_without_any_degradation_authorization(self):
+        """本地源码是一等输入形态：**不设** OPRUNWAY_ALLOW_DEGRADED_PROVENANCE 也必须过门。"""
+        self._rewrite_as_local_source()
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OPRUNWAY_ALLOW_DEGRADED_PROVENANCE", None)
+            result = P.evaluate(self.root, "spec.json")
+        self.assertEqual(result["status"], "READY_WAIT_NPU_TRUST_GATE",
+                         result["blocked_reasons"])
+        self.assertEqual(result["provenance_degradations"], [],
+                         "声明即所得不是降级")
+        self.assertEqual(result["provenance_form_facts"],
+                         ["local_source_has_no_upstream_commit",
+                          "local_source_file_set_is_subtree_not_pr_diff"],
+                         "中性形态事实必须机读可取，且与降级分栏记")
+        self.assertIsNone(result["bindings"]["pr_head_sha"])
+        self.assertEqual(result["bindings"]["declared_source_form"], "local_source")
+
+    def test_undeclared_local_snapshot_is_still_a_degraded_route(self):
+        """老事实包（未声明形态）+ 本地快照：仍是降级，没授权就 BLOCKED。"""
+        self._rewrite_as_local_source()
+        facts = json.load(open(
+            os.path.join(self.root, "pr_facts.json"), encoding="utf-8"))
+        del facts["declared_source_form"]
+        self._write("pr_facts.json", facts)
+        source = content_address.read_artifact(
+            self.root, "source_facts.json", P._SOURCE_DOMAIN)
+        del source["declared_source_form"]
+        source["completeness"] = {"status": "snapshot_only",
+                                  "reasons": ["pr_provenance_local_snapshot"]}
+        content_address.write_artifact(
+            self.root, "source_facts.json", P._SOURCE_DOMAIN, source)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OPRUNWAY_ALLOW_DEGRADED_PROVENANCE", None)
+            result = P.evaluate(self.root, "spec.json")
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertTrue(any("OPRUNWAY_ALLOW_DEGRADED_PROVENANCE" in r
+                            for r in result["blocked_reasons"]),
+                        result["blocked_reasons"])
 
     def test_matching_variants_only_ready_for_later_trust_gate(self):
         result = P.evaluate(self.root, "spec.json")

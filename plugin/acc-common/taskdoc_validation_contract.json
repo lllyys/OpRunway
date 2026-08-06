@@ -1,7 +1,7 @@
 {
   "schema": "oprunway.taskdoc_validation_contract",
   "schema_version": 1,
-  "source_doc": "doc/oprunway-task-document-validation-standard.md",
+  "source_doc": "dev-doc/oprunway-task-document-validation-standard.md",
   "scope": "taskdoc-input-only",
   "acceptance_verdict": null,
   "min_quote_chars": 8,
@@ -11,6 +11,15 @@
     "use_workflow_default": ["supplied", "waived"]
   },
   "resolution_actions_note": "阻断项只能靠 supplied（补齐事实）解除。豁免掉 Golden 标杆、目标硬件或验收完成条件不会让这些事实凭空出现，只会让下游在缺必需输入的情况下继续跑；用户若不打算补，正确出口是停止验收去找任务书负责人。",
+  "deliverable_inventory": {
+    "owner_item": "delivery_scope",
+    "note": "交付件清单是 delivery_scope 的机器可读半边：引文回答『任务书怎么说』，清单回答『于是本次必须交付哪几件、哪几件可选』。owner_item 判 satisfied 时，任务书里每一处交付定性标记都必须落进 deliverables 或 deliverable_scan_exemptions，漏一处即结构性错误——否则摘到一句沾边的原文就能把整项判过，而下游拿不到任何可对账的必选交付件清单。",
+    "markers_note": "受控标记词表，按『交付件定性』收窄，刻意不收 `必须`/`须` 这类泛义务词：它们在任务书里大量修饰行为要求（『须与上游一致』『须支持 in-place』），收进来只会把每份任务书都逼成人工豁免堆。词表是数据不是代码，按结构判、与算子身份无关；确有新写法时改这里，不改脚本。",
+    "markers": {
+      "required": ["必选", "必须交付", "须交付", "必交付"],
+      "optional": ["可选", "选做"]
+    }
+  },
   "items": [
     {
       "id": "operator_identity",
@@ -23,7 +32,7 @@
     {
       "id": "delivery_scope",
       "title": "交付范围",
-      "expects": "本次新增、优化或修复什么；哪些内容明确不在范围内",
+      "expects": "本次新增、优化或修复什么；哪些内容明确不在范围内；以及逐件列出的必选/可选交付件清单（deliverable_inventory）",
       "requirement": "must",
       "on_unsatisfied": {"missing": "stop", "ambiguous": "stop"},
       "unsatisfied_note": "停止，确认范围边界"

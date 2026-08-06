@@ -1,6 +1,6 @@
 """perf_msprof — kernel-only 性能采集（MSTX 测量窗 + 窗内 kernel 累加），**op-中立、字段驱动**。
 
-⚠ **本模块先按 `doc/oprunway-torch-baseline-design.md` §9.7（2026-07-24）返工，又据
+⚠ **本模块先按 `dev-doc/oprunway-torch-baseline-design.md` §9.7（2026-07-24）返工，又据
 2026-07-26 cannbot 精确对标真机探针更正采集入口**：
 
 * **A（采集入口·已更正）**：旧探针只证明 `torch_npu.npu.mstx.range_start()` 在 msprof CLI
@@ -247,7 +247,7 @@ KERNEL_ACCOUNTING = "median_x_launches"
 #: `msprof --output=… --task-time=on --ascendcl=on --msproftx=on <python> <wrapper>`——前三项与我们**逐字同**，
 #: 差别只在它**不显式关 ai-core**（它的做法是「不请求 `--aic-metrics`」，而 `--ai-core` 默认就是 on，
 #: 于是 AI Core 采样照样开着）。我们多带 `--ai-core=off`，依据是真机实测
-#: （`doc/oprunway-torch-baseline-design.md` §9.7 C，2026-07-24 a3 容器）：默认 on 让 Sort(MIX_AIV)
+#: （`dev-doc/oprunway-torch-baseline-design.md` §9.7 C，2026-07-24 a3 容器）：默认 on 让 Sort(MIX_AIV)
 #: 单 kernel 虚高 **3.75×**（192.46 → 51.29 us）、每次调用 kernel 总和虚高 **2.0×**（308.9 → 153.2 us）；
 #: 关掉后 msprof 与 torch_npu profiler 三路吻合（150~159 us/call）。
 #: ⛔ 别为「与参考仓逐字一致」把这个参数删掉——删了拿到的不是「更 faithful 的数」，是虚高数倍的假数。
@@ -1435,6 +1435,28 @@ def select_perf_cases(caseset, accuracy_pass_ids=None):
 
 # ── 记录组装 → evidence perf / _torch_npu_baseline.json ────────────────────────────
 
+def build_measure_only_record(case_id, custom):
+    """`perf.mode=measure_only`（AGENTS.md §5.10）的单 case 记录：**只有 custom 一侧**。
+
+    与 `build_perf_record` 的区别只在「没有第二侧」：不比 scope、不比采集配置、不算 speedup、
+    不判 comparability —— 那四件事都需要对照物。custom 侧的行为分类与计时口径**完全同口径**，
+    未计时一律 `us=None` + 行为原因（下游 `build_custom_perf_map` 据此落 `us=None` →
+    perf_compare blocked → 验收门 BLOCKED）。
+    """
+    record = {"case_id": case_id,
+              "custom": dict(custom or {}),
+              "baseline": None,
+              "custom_timed": bool((custom or {}).get("behavior") in TIMED_BEHAVIORS),
+              "baseline_timed": None,
+              "speedup": None,
+              "comparability": None,
+              "timing_scope_status": None,
+              "collection_status": None,
+              "measure_only": True,
+              "note": "measure_only：只采 NPU 侧 kernel-only 实测，未采任何基线，故不算比值"}
+    return record
+
+
 def build_perf_record(case_id, custom, baseline):
     """把一个 case 的双边采集结果合成一条记录（**只描述、不裁决**）。
 
@@ -1680,12 +1702,16 @@ def resolve_aclnn_baseline_plan(aclnn_baseline, call, case):
         {"library": "cann_builtin_libopapi",
          "variants": [
            {"when": {"attr": "dim", "is_null": true},
-            "symbol": "Median", "slots": ["self", "valuesOut"]},
+            "symbol": "Median", "stage2_form": "standard",
+            "slots": ["self", "valuesOut"]},
            {"when": {"attr": "dim", "is_null": false},
-            "symbol": "MedianDim",
+            "symbol": "MedianDim", "stage2_form": "standard",
             "slots": ["self", "dim", "keepDim", "valuesOut", "indicesOut"],
             "output_dtypes": {"indicesOut": "int64"}}
          ]}
+
+    ``stage2_form`` 必填（``standard`` / ``extended``）：内置 ACLNN 没有可解析的 header，
+    执行段实参结构只能由任务书/spec 显式声明，工具不猜。
 
     ``slots`` 从该 case 已解析的 ``aclnn_call.slots`` 按名字选择并重排，因而可以表达“DUT
     统一接口、任务书基线是两个既有 ACLNN 接口”这类 ABI 差异。匹配必须恰好一条，缺/重名/多匹配
@@ -1730,6 +1756,16 @@ def resolve_aclnn_baseline_plan(aclnn_baseline, call, case):
     symbol = variant.get("symbol")
     names = variant.get("slots")
     output_dtypes = variant.get("output_dtypes") or {}
+    # audit C2：内置 ACLNN baseline **没有 header 可解析**，stage2 的实参结构只能由上游
+    # （任务书 → spec.perf.aclnn_baseline）显式带进 plan。缺它就只能靠 runner 兜底猜 4 参，
+    # 而那正是 GaussianBlur 那种 10 参 stage2 被静默错调的路径 —— 故此处**必填、受控**。
+    from .aclnn_runner import STAGE2_DISPATCHABLE     # 受控词表单一真源，别在这儿抄第二份
+    stage2_form = variant.get("stage2_form")
+    if stage2_form not in STAGE2_DISPATCHABLE:
+        raise PerfCollectError(
+            f"aclnn baseline variant.stage2_form={stage2_form!r} 缺失或非受控值，"
+            f"须显式属 {list(STAGE2_DISPATCHABLE)}——无 header 的调用方必须自报执行段实参结构，"
+            "工具绝不按 4 参猜（错 arity 的 native 调用 = 段错误或静默错值）")
     if not isinstance(symbol, str) or not symbol or symbol.startswith("aclnn"):
         raise PerfCollectError("aclnn baseline variant.symbol 须为不带 aclnn 前缀的非空基名")
     if not isinstance(names, list) or not names or any(not isinstance(n, str) or not n for n in names):
@@ -1762,7 +1798,8 @@ def resolve_aclnn_baseline_plan(aclnn_baseline, call, case):
             f"非法项={bad_overrides}")
     return {"library": aclnn_baseline["library"], "symbol": symbol,
             "slots": [by_name[name] for name in names],
-            "output_dtypes": dict(output_dtypes)}
+            "output_dtypes": dict(output_dtypes),
+            "stage2_form": stage2_form}
 
 
 def cann_builtin_libopapi():
@@ -1974,6 +2011,10 @@ if (not isinstance(vendor_path, str) or not os.path.isabs(vendor_path)
         or not os.path.isfile(vendor_path)
         or sha256(vendor_path) != vendor.get("library_sha256")):
     raise RuntimeError("cpp_extension vendor library 缺失或摘要漂移")
+# 本 wrapper 是 msprof 拉起的**独立进程**：自定义算子符号的来源包必须由它自己按同一条规则
+# 从已绑定的 vendor `.so` 反推并设入环境（`D.bind_custom_opp_path`），不指望继承。
+# 没有它，torch_npu 只会去 CANN 内置 libopapi.so 找 aclnnXxx → 性能侧整轮采不到。
+D.bind_custom_opp_path(vendor_path)
 handle = ctypes.CDLL(vendor_path, mode=ctypes.RTLD_GLOBAL)
 missing = [name for name in (vendor.get("symbols_owned") or [])
            if not isinstance(name, str) or not hasattr(handle, name)]
@@ -2075,7 +2116,10 @@ def materialize():
         params.append({"name": slot["name"], "role": role,
                        "ctype": "tensor" if role in ("in", "out") else slot.get("ctype"),
                        "const": True if role == "in" else False})
-    return slots, AclnnSignature(op_name=plan["symbol"], params=params)
+    # stage2 形态由 plan 逐字带下来（spec 声明 → resolve_aclnn_baseline_plan 校过受控词表）。
+    # runner 已删掉「未声明就按 4 参调」的兜底，这里必须显式传，采集端与执行端用的是同一个值。
+    return slots, AclnnSignature(op_name=plan["symbol"], params=params,
+                                 stage2_form=plan["stage2_form"])
 
 runner = AclnnRunner(device=int(CFG["device"]), required_symbol_lib=required_lib,
                      hash_symbol_libs=True)
@@ -2501,7 +2545,7 @@ def measure_side(*, side, case, caseset_path, work_dir, cfg_extra, warmup, repea
 
 def _collect_document(*, op, warmup, repeat, device, side_timeout_s, baseline_kind,
                       custom_kind, custom_provenance,
-                      records, skipped, planned_cases, complete):
+                      records, skipped, planned_cases, complete, mode="ratio_gated"):
     return {
         "op": op,
         "scope": TIMING_SCOPE,
@@ -2509,11 +2553,13 @@ def _collect_document(*, op, warmup, repeat, device, side_timeout_s, baseline_ki
         "repeat": repeat,
         "device": device,
         "side_timeout_s": side_timeout_s,
+        # §5.10 measure_only：**没有基线侧**，故这里落 None 而不是一份「看起来采过基线」的配置。
+        "mode": mode,
         "collection": {
             "custom": collection_config(
                 collector=collector_for("custom"), warmup=warmup, repeat=repeat),
-            "baseline": collection_config(
-                collector=collector_for("baseline"), warmup=warmup, repeat=repeat),
+            "baseline": (None if mode == "measure_only" else collection_config(
+                collector=collector_for("baseline"), warmup=warmup, repeat=repeat)),
         },
         "baseline_source": baseline_kind,
         "custom_kind": custom_kind,
@@ -2548,7 +2594,8 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
          "allow_builtin_symbols": false,          # 可选，缺省 false = 严格档（同精度通路口径）
          "dut_lib": "<.../op_api/lib/libcust_opapi.so>",   # 本次 DUT；严格档必给其一
          "dut_vendor_root": "<vendor 内容根>",     #   （或退 adapter 的 vendor_dir + vendor_name）
-         "baseline": "torch_npu" | "aclnn_builtin",
+         "mode": "ratio_gated" | "measure_only",  # 可选，缺省 ratio_gated（历史行为）
+         "baseline": "torch_npu" | "aclnn_builtin",              # mode=measure_only 时**必须缺席**
          "torch_baseline": {"api","positional","keyword"},       # baseline=torch_npu
          "aclnn_baseline": {"library","variants"},               # baseline=aclnn_builtin
          "cases": ["<case id>", ...],             # 已过精度先筛的 case
@@ -2586,8 +2633,20 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
     # 再进 AclnnRunner(dut_lib=...)。定不出即 fail-closed，绝不默默用宽松档。
     dut_lib = (resolve_plan_dut_lib(plan, strict=strict_custom_vendor)
                if custom_kind == "aclnn_py" else None)
+    # §5.10 只测不比：`mode="measure_only"` 时**没有基线侧**——plan 里因此不该有 baseline。
+    # 缺省（字段不存在）仍是历史的 ratio_gated：必须显式给出受控 baseline，一个字不放松。
+    plan_mode = plan.get("mode", "ratio_gated")
+    if plan_mode not in ("ratio_gated", "measure_only"):
+        raise PerfCollectError(
+            f"perf plan mode 须为 ratio_gated 或 measure_only，得 {plan_mode!r}")
+    measure_only = (plan_mode == "measure_only")
     baseline_kind = plan.get("baseline")
-    if baseline_kind not in ("torch_npu", "aclnn_builtin"):
+    if measure_only:
+        if baseline_kind is not None:
+            raise PerfCollectError(
+                f"perf plan mode='measure_only' 却带 baseline={baseline_kind!r}——"
+                "只测不比的口径下不采任何基线，fail-closed")
+    elif baseline_kind not in ("torch_npu", "aclnn_builtin"):
         raise PerfCollectError(
             f"perf plan baseline 须为 torch_npu 或 aclnn_builtin，得 {baseline_kind!r}")
     torch_baseline = plan.get("torch_baseline")
@@ -2611,21 +2670,25 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
                               scratch_dir=scratch, detect_hybrid=False,
                               baseline_kind=baseline_kind, side_timeout_s=side_timeout_s,
                               custom_kind=custom_kind)
-        baseline_cfg = ({"torch_baseline": torch_baseline}
-                        if baseline_kind == "torch_npu"
-                        else {"aclnn_baseline": aclnn_baseline})
-        if dut_lib is not None:
-            # libcust_opapi.so 固定在 <vendor-root>/op_api/lib/；由已唯一解析的 DUT so 反推，
-            # 不从可能受污染的进程环境猜 vendor 根。宽松档无 DUT 时没有 custom 路径需要移除。
-            baseline_cfg["exclude_dut_vendor_root"] = str(Path(dut_lib).resolve().parents[2])
-        baseline = measure_side(side="baseline", case=case, caseset_path=caseset_path,
-                                work_dir=work_dir,
-                                cfg_extra=baseline_cfg,
-                                warmup=warmup, repeat=repeat, device=device,
-                                scratch_dir=scratch,
-                                detect_hybrid=(baseline_kind == "torch_npu"),
-                                baseline_kind=baseline_kind, side_timeout_s=side_timeout_s)
-        records.append(build_perf_record(cid, custom, baseline))
+        if measure_only:
+            baseline = None
+            records.append(build_measure_only_record(cid, custom))
+        else:
+            baseline_cfg = ({"torch_baseline": torch_baseline}
+                            if baseline_kind == "torch_npu"
+                            else {"aclnn_baseline": aclnn_baseline})
+            if dut_lib is not None:
+                # libcust_opapi.so 固定在 <vendor-root>/op_api/lib/；由已唯一解析的 DUT so 反推，
+                # 不从可能受污染的进程环境猜 vendor 根。宽松档无 DUT 时没有 custom 路径需要移除。
+                baseline_cfg["exclude_dut_vendor_root"] = str(Path(dut_lib).resolve().parents[2])
+            baseline = measure_side(side="baseline", case=case, caseset_path=caseset_path,
+                                    work_dir=work_dir,
+                                    cfg_extra=baseline_cfg,
+                                    warmup=warmup, repeat=repeat, device=device,
+                                    scratch_dir=scratch,
+                                    detect_hybrid=(baseline_kind == "torch_npu"),
+                                    baseline_kind=baseline_kind, side_timeout_s=side_timeout_s)
+            records.append(build_perf_record(cid, custom, baseline))
         _write_collect_checkpoint(
             out_path,
             _collect_document(
@@ -2642,6 +2705,7 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
                 skipped=plan.get("skipped") or [],
                 planned_cases=planned_cases,
                 complete=False,
+                mode=plan_mode,
             ),
         )
         # 整轮采集受硬超时保护；逐 case flush 进度后，即使整轮被杀，诊断日志也能指出
@@ -2652,7 +2716,7 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
                 "total": len(planned_cases),
                 "case_id": cid,
                 "custom_behavior": custom.get("behavior"),
-                "baseline_behavior": baseline.get("behavior"),
+                "baseline_behavior": (baseline or {}).get("behavior"),
             }
         }, ensure_ascii=False), flush=True)
     doc = _collect_document(
@@ -2669,6 +2733,7 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
         skipped=plan.get("skipped") or [],
         planned_cases=planned_cases,
         complete=True,
+        mode=plan_mode,
     )
     _write_collect_checkpoint(out_path, doc)
     return doc

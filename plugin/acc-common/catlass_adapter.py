@@ -22,7 +22,7 @@ canon 归属（trust tier 已核）：
   **拒绝**把证据写成 `acceptance.json`/`verdict.json`/`perf_report.json` 这类裁决产物名。`--defect` 同批
   **移出 CLI**、降级成测试专用夹具（只经 `run_catlass_mock(defect_cases=...)` 在 `test_*.py` 里可达）。
 - **真机全部待验**：runner 能否在 bisheng/ccec 编成、extern C 符号能否被 msprof 命中、Task Duration 实数、staging
-  与 build.sh 交互 —— Mac 上只能写+静态审。真机路径 run_catlass 留桩、须 ascend-a5(arch 3510)+VPN+人工确认。
+  与 build.sh 交互 —— Mac 上只能写+静态审。真机路径 run_catlass 留桩、须 950 真机(arch 3510)+VPN+人工确认。
 """
 import argparse, hashlib, json, math, os, re, subprocess, sys, time
 import numpy as np
@@ -115,14 +115,14 @@ CATLASS_PROFILE = {
              "harness": "oprunway_catlass_basic_matmul_950",
              "kernel_symbol": "oprunway_catlass_basic_matmul_950",   # extern C 钉死名（真机回填校准）
              "layouts": {"A": "RowMajor", "B": "RowMajor", "C": "RowMajor"},
-             "role": "主目标（ascend-a5 真 950/fp32，任务书目标平台）"},
+             "role": "主目标（950 真机 真 950/fp32，任务书目标平台）"},
     "2201": {"example": "00_basic_matmul", "src": "basic_matmul.cpp",
              "archtag": "AtlasA2", "dtype": "float16",
              "runner": "oprunway_catlass_basic_matmul_a2_runner.cpp",
              "harness": "oprunway_catlass_basic_matmul_a2",
              "kernel_symbol": "oprunway_catlass_basic_matmul_a2",
              "layouts": {"A": "RowMajor", "B": "RowMajor", "C": "RowMajor"},
-             "role": "次目标（ascend-a3 910/A3 fp16，de-risk）"},
+             "role": "次目标（A2A3 真机 910/A3 fp16，de-risk）"},
 }
 
 
@@ -575,11 +575,11 @@ def run_catlass_mock(caseset, work_dir, defect_cases=None):
 
 
 def run_catlass(caseset, work_dir, defect_cases=None):
-    """真机采集（ascend-a5 arch 3510/fp32）：stage→build→run→pull→parse→collect。
+    """真机采集（950 真机 arch 3510/fp32）：stage→build→run→pull→parse→collect。
 
     ⚠⚠ **本轮不跑真机**（CLAUDE.md #1/#3 副作用门 + generated_harness 高风险首跑须人工确认）。
     本地可跑的部分（arch 探测 / materialize / manifest）已就绪；真正 build/run/msprof 硬阻塞于
-    ascend-a5(arch3510)+VPN+人工确认。为防误触发 ssh，默认 fail-fast，须显式 OPRUNWAY_CATLASS_REAL=1 opt-in。
+    950 真机(arch3510)+VPN+人工确认。为防误触发 ssh，默认 fail-fast，须显式 OPRUNWAY_CATLASS_REAL=1 opt-in。
     catlass **无 builtin-TBE 分母** → 不写 _real_baseline，perf 分母走外部 GPU（gpu_external，ADR0006）。
     evidence_grade=acceptance_candidate（真机 evidence 就绪后才谈裁决）。
     """
@@ -588,7 +588,7 @@ def run_catlass(caseset, work_dir, defect_cases=None):
     _write_manifest(ctx)   # 本地即可 materialize（写 A/B.bin + manifest），供真机部署
     if os.environ.get("OPRUNWAY_CATLASS_REAL") != "1":
         raise RuntimeError(
-            "run_catlass 真机路径未启用 —— 待 ascend-a5(arch 3510/fp32)+VPN+人工确认。"
+            "run_catlass 真机路径未启用 —— 待 950 真机(arch 3510/fp32)+VPN+人工确认。"
             "本地已完成 arch 探测/materialize/manifest；真 build/run/msprof/命中门须真机。"
             "确须真机跑请设 OPRUNWAY_CATLASS_REAL=1（并已人工确认 staging 改 catlass 工作副本的副作用）。")
     # —— 以下真机编排：调 catlass/{stage_into_catlass.sh, run_on_catlass_npu.sh}，解析真 CSV。
@@ -599,11 +599,11 @@ def run_catlass(caseset, work_dir, defect_cases=None):
 def _run_catlass_real(ctx):
     """真机实现骨架（留桩）：deploy→stage→build.sh→run→msprof→pull→catlass_parse→collect。
 
-    真值全部待 ascend-a5 验证：runner 能否编成、extern C 符号能否被 msprof `-k` 命中、Task Duration 实数。
+    真值全部待 950 真机 验证：runner 能否编成、extern C 符号能否被 msprof `-k` 命中、Task Duration 实数。
     profile_hit_gate 逻辑就绪、真值未验（catlass_parse.profile_hit_gate 标 pending）。
     """
     raise NotImplementedError(
-        "真机编排留桩：接入前须①ascend-a5(3510)+VPN ②人工确认 stage_into_catlass 注入 catlass 工作副本 "
+        "真机编排留桩：接入前须①950 真机(3510)+VPN ②人工确认 stage_into_catlass 注入 catlass 工作副本 "
         "③首跑 generated_harness 人工确认。届时用 catlass/run_on_catlass_npu.sh + catlass_parse 解析真 CSV。")
 
 

@@ -538,13 +538,57 @@ class BuildRecipeScriptTest(unittest.TestCase):
         self.assertIn("OPRUNWAY_ACLNN_HEAD_MISMATCH", s)
         self.assertIn('echo "OPRUNWAY_ACLNN_HEAD_SHA=$GOT_SHA"', s)
 
-    def test_build_sh_six_flags_at_repo_root(self):
+    def test_build_sh_flags_at_repo_root(self):
+        """改动⑯前这里断言六个 flag（含 `--no_force`）。现在 `--no_force` 已不是默认实参：
+        它不在 ops-cv `build.sh` 的 `SUPPORTED_LONG_OPTS` 里，会直接 `Invalid long option` 退 1。
+        `--experimental` 仍在——本用例的 op 子路径就是 `experimental/index/median`，按前缀判据该发。"""
         s = self._script()
         self.assertIn("bash build.sh --pkg --experimental --soc=ascend910_93 "
-                      "--ops=median --vendor_name=customize --no_force", s)
+                      "--ops=median --vendor_name=customize", s)
+        self.assertNotIn("--no_force", s)
         # 构建参数**单一事实源**：脚本与 provenance stamp 共用 `_build_args`，杜绝两处漂移
         with _env(**_cfg_env(self.root)):
             self.assertIn(A._build_args(A._aclnn_cfg()), s)
+
+    def test_extra_build_args_cannot_override_protected_keys(self):
+        """审计 High#3：附加实参重新声明 `--soc=` / `--ops=` / `--vendor_name=` 等受保护 key。
+
+        整词去重挡不住**换了值**的重声明（`--soc=ascend910_93` ≠ `--soc=ascend950`），
+        而 build.sh 通常取最后一个 → 真机 build 出的是另一套配置，provenance 指纹却没变。
+        """
+        with _env(**_cfg_env(self.root)):
+            cfg = A._aclnn_cfg()
+        for bad in ("--soc=ascend950", "--ops=other", "--vendor_name=evil",
+                    "--pkg", "--experimental"):
+            with self.subTest(arg=bad), _env(OPRUNWAY_ACLNN_BUILD_EXTRA_ARGS=bad):
+                with self.assertRaisesRegex(ValueError, "受保护实参"):
+                    A._build_args(cfg)
+
+    def test_extra_build_args_reject_duplicate_option_keys(self):
+        with _env(**_cfg_env(self.root)):
+            cfg = A._aclnn_cfg()
+        with _env(OPRUNWAY_ACLNN_BUILD_EXTRA_ARGS="--jobs=4 --jobs=8"):
+            with self.assertRaisesRegex(ValueError, "出现多次"):
+                A._build_args(cfg)
+
+    def test_extra_build_args_unprotected_key_still_passes_through(self):
+        with _env(**_cfg_env(self.root)):
+            cfg = A._aclnn_cfg()
+        with _env(OPRUNWAY_ACLNN_BUILD_EXTRA_ARGS="--jobs=4"):
+            self.assertTrue(A._build_args(cfg).endswith(" --jobs=4"))
+
+    def test_snapshot_copy_uses_the_digested_file_list_and_reverifies_cko(self):
+        """审计 C1 / High#2：构建树只装被摘要覆盖的普通文件，且复制后重算 `$CKO` 的两个摘要。"""
+        s = self._script(
+            symbols=["aclnnMedian"],
+            OPRUNWAY_ACLNN_SOURCE_MODE="local_snapshot",
+            OPRUNWAY_ACLNN_SNAPSHOT_DIR=self.root,
+            OPRUNWAY_ACLNN_SNAPSHOT_SHA256="b" * 64)
+        self.assertNotIn('cp -a "$SNAP"/.', s)          # 不再把未摘要的对象整棵搬进构建树
+        self.assertIn("symlink in snapshot", s)         # 复制脚本显式拒符号链接
+        self.assertIn('CKO_MERKLE=$(python3 -c "$OPRW_MERKLE_PY" "$CKO")', s)
+        self.assertIn("OPRUNWAY_ACLNN_SNAPSHOT_COPY_MISMATCH", s)
+        self.assertIn('echo "OPRUNWAY_ACLNN_SNAPSHOT_SHA256=$CKO_MERKLE"', s)
 
     def test_install_to_user_vendor_dir_never_shared_opp(self):
         s = self._script()
@@ -728,7 +772,7 @@ class BuildRecipeScriptTest(unittest.TestCase):
     def test_exec_script_respects_explicit_op_dir(self):
         """显式给了就尊重（保留「`OPRUNWAY_ACLNN_OP_DIR` 指源码树 op 目录」的现有用法）——
         默认值只在缺省时生效，绝不覆盖调用方的显式选择。"""
-        explicit = "/tmp/oprunway_aclnn_rr/aclnn_src/" + _OP_SUBDIR
+        explicit = "/tmp/oprunway_aclnn_rr/dut_src/" + _OP_SUBDIR
         with _env(**_cfg_env(self.root, OPRUNWAY_ACLNN_OP_DIR=explicit)):
             cfg = A._aclnn_cfg()
             s = A._exec_script(cfg, A._aclnn_paths(cfg))
@@ -1085,7 +1129,7 @@ class PerfPlanDutDeclarationTest(unittest.TestCase):
 
     def test_remote_plan_op_dir_explicit_wins(self):
         """plan / env 显式给了就尊重，默认值只在缺省时生效（两条来源都验一遍）。"""
-        explicit = "/tmp/oprunway_aclnn_rr/aclnn_src/" + _OP_SUBDIR
+        explicit = "/tmp/oprunway_aclnn_rr/dut_src/" + _OP_SUBDIR
         sent, _ = self._collect(plan={"op_dir": explicit})
         self.assertEqual(explicit, sent["op_dir"])
         self.plan_sent.clear()

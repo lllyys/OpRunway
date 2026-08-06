@@ -2,7 +2,7 @@
 
 > NPU 算子「验收（acceptance）」工作区。本文是设计基线，随分析推进持续更新。
 > 当前阶段：**调研收口 + 经 Codex 评审收敛（v3）**。组件尚未实现。
-> 评审来源见 `doc/oprunway-codex-review.md`（Codex gpt-5.5，2026-06-30）。
+> 评审来源见 `dev-doc/oprunway-codex-review.md`（Codex gpt-5.5，2026-06-30）。
 
 ---
 
@@ -100,7 +100,7 @@ cases:
 **统一仓适配器接口**（泛化到 ops-blas/ops-cv/tilelang 时换实现、不换接口）：
 `discover` · `build` · `materialize_case` · `run_correctness` · `run_perf` · `parse_results` · `collect_artifacts`。
 
-**catlass `generated_harness` 有现成配方**（借自 cannbot `catlass-op-generator`，详见 `doc/oprunway-cannbot-catlass-reuse.md`）：host 调用壳（ACL 初始化 + Tiling + `<<<>>>` 启动 + 结果搬回 + verify）+ op_kernel（catlass `using` 链 → **直接调 PR 交付的 kernel**）+ CMake 注入（`-I catlass/include` + `-DCATLASS_ARCH`）+ 确定性 `verify_cmake_config.py` 构建门禁 + `run.sh` 流水。与 cannbot 差异：我们**包住 PR 现成 kernel**，它是从 DESIGN 现写 kernel。**接入 AscendOpTest**（它是 aclnn 导向、catlass 裸 kernel 不能直测）需 generated_harness 补桥：路线 A 封成 aclnn 自定义算子（终交付）/ 路线 B 自造 exe 遵守框架协议（快验证）。详见 `doc/oprunway-ascendoptest-probe.md`。generated_harness 的 **4 项通用职责**（bin-IO shim / layout 字节契约 / 数据注入 / 性能测量栈）见 canon `generated_harness responsibilities`——这是「怎么让任意用例在某仓 kernel × 某框架上真跑」的跨仓/跨框架抽象，bridge 是其 catlass×AscendOpTest 实例。
+**catlass `generated_harness` 有现成配方**（借自 cannbot `catlass-op-generator`，详见 `dev-doc/oprunway-cannbot-catlass-reuse.md`）：host 调用壳（ACL 初始化 + Tiling + `<<<>>>` 启动 + 结果搬回 + verify）+ op_kernel（catlass `using` 链 → **直接调 PR 交付的 kernel**）+ CMake 注入（`-I catlass/include` + `-DCATLASS_ARCH`）+ 确定性 `verify_cmake_config.py` 构建门禁 + `run.sh` 流水。与 cannbot 差异：我们**包住 PR 现成 kernel**，它是从 DESIGN 现写 kernel。**接入 AscendOpTest**（它是 aclnn 导向、catlass 裸 kernel 不能直测）需 generated_harness 补桥：路线 A 封成 aclnn 自定义算子（终交付）/ 路线 B 自造 exe 遵守框架协议（快验证）。详见 `dev-doc/oprunway-ascendoptest-probe.md`。generated_harness 的 **4 项通用职责**（bin-IO shim / layout 字节契约 / 数据注入 / 性能测量栈）见 canon `generated_harness responsibilities`——这是「怎么让任意用例在某仓 kernel × 某框架上真跑」的跨仓/跨框架抽象，bridge 是其 catlass×AscendOpTest 实例。
 
 ---
 
@@ -112,7 +112,7 @@ cases:
 2. **统一平台标准作默认/补缺**（借 cannbot `ops-precision-standard` 的 MERE/MARE 按 dtype 分类）；
 3. **catlass 内置阈值只作仓内 smoke/回归**，**不作最终放行**（除非任务书明确引用）。
 
-> **（M1 实体）** 当前任务书的「平台层」= **AscendOpTest 默认阈值**（FP16 `tolerance=1e-3` + `error_rate=1e-3`/允许 0.1% 坏点；判据 `|golden|≥1` 相对、`<1` 绝对）。**精度直接复用其 `compare.py`**，我们只供 `expect_func`（numpy 融合 golden）。⚠ FP16 融合经 Matmul 累加未必稳过 1e-3，可能需 fp32 中间 golden——M3 实测。详见 `doc/oprunway-ascendoptest-probe.md`。
+> **（M1 实体）** 当前任务书的「平台层」= **AscendOpTest 默认阈值**（FP16 `tolerance=1e-3` + `error_rate=1e-3`/允许 0.1% 坏点；判据 `|golden|≥1` 相对、`<1` 绝对）。**精度直接复用其 `compare.py`**，我们只供 `expect_func`（numpy 融合 golden）。⚠ FP16 融合经 Matmul 累加未必稳过 1e-3，可能需 fp32 中间 golden——M3 实测。详见 `dev-doc/oprunway-ascendoptest-probe.md`。
 
 **报告同时输出三个 pass，最终结论只看 acceptance**：
 
@@ -132,7 +132,7 @@ cases:
 
 - **`timing_scope` 必填枚举**：`kernel_only` / `device_e2e_no_h2d_d2h` / `host_e2e_with_h2d_d2h`。**NPU 与 GPU 必须同 scope**；缺失或不一致 → **Task 3 不出结论，只出「不可比」诊断**。
 - **默认公平口径 = kernel-only**：NPU 用 **`msprof op`**（Task Duration；msTuner 是调优工具、不用于验收），GPU 用 CUDA event/等价 kernel event；均 warmup 后多次迭代取 **median/p50**，保留 p90/min。端到端作补充报告，不作默认加速比。
-- **1.2× 加速比（AscendOpTest 部分复用）**：AscendOpTest 只给 kernel-only 采集、不算 speedup、无 torch 通路 → 任务书的「≥ torch 未融合链 1.2×」基线由 **generated_harness 自测、比值由 validator 算**。⚠ **同 timing_scope 对同 timing_scope**——torch 链是 host/e2e，别拿它 e2e 比融合算子 kernel-only；两侧要么都 kernel-only 求和、要么都 device-e2e。分母口径用户确认中。**AscendOpTest 能采 e2e**（内建 `msprof --application`，解析归我们）→ **device_e2e 可行且更贴合「整体性能」**，融合类算子倾向之。详见 `doc/oprunway-ascendoptest-probe.md`。
+- **1.2× 加速比（AscendOpTest 部分复用）**：AscendOpTest 只给 kernel-only 采集、不算 speedup、无 torch 通路 → 任务书的「≥ torch 未融合链 1.2×」基线由 **generated_harness 自测、比值由 validator 算**。⚠ **同 timing_scope 对同 timing_scope**——torch 链是 host/e2e，别拿它 e2e 比融合算子 kernel-only；两侧要么都 kernel-only 求和、要么都 device-e2e。分母口径用户确认中。**AscendOpTest 能采 e2e**（内建 `msprof --application`，解析归我们）→ **device_e2e 可行且更贴合「整体性能」**，融合类算子倾向之。详见 `dev-doc/oprunway-ascendoptest-probe.md`。
 - **warmup/迭代 = policy（非建议值）**：warmup≥10、iters≥30 或方差收敛；每次计时前后同步；输入驻留 device；排除首次编译/缓存/初始化；记录频率/功耗模式/驱动/CANN/CUDA 版本。
 - **GPU 标杆 schema 是 Task 3 硬依赖，现在就定「我们需要对方给什么」的最小契约**（外部交付时对齐，不空想定死）：
   `case_id` · `device` · `dtype` · `shape` · `attrs` · `timing_scope` · `warmup` · `iters` · `sync_policy` · `statistic` · `unit` · `value` · `tool` · `clock/power mode` · `data_transfer_included`。

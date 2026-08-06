@@ -20,6 +20,8 @@
 - Task 1：从任务书与 PR 生成覆盖功能、精度、性能的用例集；
 - Task 2：同一份用例在 NPU 上生成精度证据和性能数据；
 - Task 3：消费外部 GPU 数据，按同一 case 身份生成跨设备性能报告。
+  ⚠ **Task 3 是按需能力，不是每轮必做**：按 5.10，任务书即使写了「与 GPU 比对」也默认只做
+  NPU msprof 实测；**只有用户明确要求做 GPU 对比时**才走 Task 3。
 
 任务书是验收权威；PR 和 op_def 是被测事实与能力证据，不能反过来覆盖任务书。
 
@@ -65,7 +67,8 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 常用脚本：
 
 - `fetch_source.py`：任务书/PR → 中立事实包；
-- `validate_taskdoc_input.py`：任务书输入校验门（18 项，抽 spec 之前）；
+- `validate_taskdoc_input.py`：任务书输入校验门（18 项 + 交付件清单，抽 spec 之前）；
+- `reconcile_deliverables.py`：任务书必选交付件 ↔ PR 实际交付物对账（不做模糊名字匹配，认不出即落缺口）；
 - `gen_cases.py <spec> --dry-run`：plan-only 用例计划自检，不产裁决；
 - `check_golden.py`：golden 来源契约；
 - `preflight_aclnn.py`：`aclnn_py` 静态接口预检；
@@ -131,7 +134,7 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 - build、pytest、用例生成、golden 生成、验收、profiler 全在远程 NPU 容器/目标环境执行；
 - 本地不建 venv、不跑 pytest、不 import torch/numpy 做验收 compute；
-- 真机环境统一入口：`doc/oprunway-real-machine-environment.md`；
+- 真机环境统一入口：`dev-doc/oprunway-real-machine-environment.md`；
 - 实际连接元数据：本地忽略文件 `.oprunway/real-machine.env`；
 - 每次新 session 做任何远端 clone/build/跑测/清理前，必须读取
   `.oprunway/real-machine.env` 的 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`。其中每个根及其全部子目录均为
@@ -158,10 +161,12 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 ### 5.6 文档落点与改动简表
 
-- 项目 Markdown、图、SVG 等文档统一放仓根 `doc/`；
+- 项目 Markdown、图、SVG 等**开发过程产物**统一放仓根 `dev-doc/`；
+  这里放的是设计稿、TODO、handoff、实测记录、环境说明——是**开发者写给自己和后来者看的**，
+  不是面向使用者的产品文档（那类若将来要有，另立目录，别混进来）；
 - 不写到工作区上层的 `markdown/`；
-- 每次落地后在 `doc/oprunway-changes-brief.md` 顶部追加一两句倒序摘要；
-- 当前交接以 `doc/oprunway-session-handoff-2026-07-26.md` 为准，旧 handoff 只作历史材料。
+- 每次落地后在 `dev-doc/oprunway-changes-brief.md` 顶部追加一两句倒序摘要；
+- 当前交接以 `dev-doc/oprunway-session-handoff-2026-08-05.md` 为准，旧 handoff 只作历史材料。
 
 ### 5.7 push 前审修门
 
@@ -195,6 +200,71 @@ push 前，对自上次 push 以来将要发布的全部改动统一做一轮审
 - 通读与 query 并用；未读或未 settle 页面不得冒充门禁依据；
 - 当前运行规则与未 review canon 冲突时，显式记录张力，不静默覆盖。
 
+### 5.10 性能口径：只测 msprof 实测，不比 GPU
+
+用户 2026-08-03 明示的**全局原则，适用于所有类型的任务书**：
+
+- 任务书**对性能没有要求** → 只用 msprof 采 NPU 实测性能即可；
+- 任务书要求的是**与 GPU 比对**（如“以 OpenCV CUDA A100 为参考，ratio ≥ 0.45×”）→ **同样只用 msprof 测实测性能**，
+  不必真的去对比 GPU、不必获取 GPU 标杆数据；
+- 本轮改动属**对原算子新增 dtype 支持 / 扩展 shape·rank / 开发新算子**三类之一（用户 2026-08-05 明示）
+  → **同样只用 msprof 测实测性能**，不做任何同机比值对比。
+
+理由：GPU 标杆（A100 / OpenCV CUDA / ATK 双标杆）要么拿不到环境，要么获取成本远高于它带来的验收价值；
+卡在等 GPU 数据上会把整条流水线阻塞住。而 NPU 侧 msprof kernel-only 数据在**真机实跑、
+与 case 及本轮 provenance 绑定、采样与有效性检查都做过**的前提下，是可信、可复现的性能证据
+（这三个前提缺一条就不成立——「kernel-only」只说明计时范围，本身不构成可信性）。
+
+落地约束：
+
+- 不因缺 GPU 数据把结论落到 `BLOCKED_WAIT_GPU_BENCHMARK`；该终态只在用户明确要求做 GPU 对比时才用；
+- 性能维产出 = msprof 实测 kernel 耗时 + 分档说明，不是比值裁决；
+- 三种情形（`no_perf_requirement` / `gpu_comparison` / `change_class_no_perf_comparison`）**授权强度相同**：
+  都须在 spec 的 `perf.measure_only_authorization` 里给出 ground + cite + quote + `taskdoc_snapshot_sha256`，
+  缺一 fail-closed（受控词表见 `plugin/acc-common/perf_mode.py`）；
+- 走**改动类别**这一条时，任务书**若另写了比值 / 绝对门限 / 吞吐条款，该条款照旧强制进 `task_pr_gaps`
+  标「未验收」**，本轮仍只产 msprof 绝对耗时，禁止取 baseline、禁止算 ratio、禁止任何达标宣称
+  ——与上面 GPU 条款的处置逐字同形；改的是取证方式，不是条款可以不算数；
+- 报告须如实写“按用户口径只做 NPU msprof 实测，未做 GPU 标杆对比”，
+  **不得把它包装成“已达标 0.45×”**——没测的比值不能编（5.8）；
+- msprof 数据仍须真机真跑，不接受推算（5.3）；
+- **任务书的 GPU 比值条款按「未验收」记账**，不是「已通过」也不是「不适用」：
+  该条进 `task_pr_gaps`，最终裁决**不得**因为 NPU 侧有实测数就宣称整体通过。
+  任务书仍是验收权威（5.8）——本节改的是「怎么取证」，不是「条款可以不算数」。
+
+### 5.11 精度真值口径：任务书写 GPU 一律解析为同族 CPU
+
+用户 2026-08-05 明示的**全局解析规则，适用于所有任务书**：
+
+> 任务书里指定 GPU 真值口径的（如「以 OpenCV GPU / CUDA 为标杆」），
+> **就应该被解析成同族的 CPU 实现**。这是一类问题的统一读法，不是逐份的例外处理。
+
+⚠ **它与 5.10 是两件不同性质的事，别照搬**：
+
+| | 5.10（性能） | 5.11（精度真值） |
+|---|---|---|
+| 做什么 | **取消比较**——不取标杆、不算比值、不产达标结论 | **解析口径**——把 GPU 写法读成同族 CPU |
+| 任务书条款 | 仍然成立，按「未验收」进 `task_pr_gaps` | **已被满足**（CPU 就是它的正确读法） |
+| 报告怎么写 | 「未做 GPU 标杆对比」 | 「任务书写 GPU，按 §5.11 解析为同族 CPU」 |
+
+因此 5.11 下**不产生**「GPU 口径未验收」这类 gap——那是把解析规则误当成降级取证。
+反过来也不许含糊：报告须留**解析记录**（原文怎么写的、解析成了什么、依据本节），
+不得直接写成「任务书要求 CPU」把解析这一步抹掉（5.8：事实与推断分开）。
+
+落地约束：
+
+- 映射是**数据**（受控表，如 `opencv_cuda` → `opencv_cpu`），按**具体库**判，
+  绝不按算子身份分支（5.1）；**该库无 CPU 对应 → 仍 fail-closed**，不硬凑；
+- ⚠ **粗粒度声明解析不了，也不许猜**：`gpu_lib` 这类兜底值底下同时装着 OpenCV-CUDA、cuSPARSE、
+  cuDNN……把整族映射到某一个 CPU 库，等于把「任务书点名 cuSPARSE」悄悄换成 OpenCV CPU，
+  那不是「同族」而是换了个不相干的实现。任务书写得太泛时如实落 `gpu_lib` 并 **fail-closed**，
+  要人把真值口径细化到具体库后重判；
+- 解析后的 `method_kind` 必须落在 `precision_policy.RUNNABLE_METHOD_KINDS` 内，否则照旧 fail-closed；
+- ⚠ **阈值不随口径自动搬家**：任务书阈值若是按 NPU↔GPU 误差预算给的，套到 CPU↔NPU 上未必成立
+  （同一库的 CPU 与 GPU 实现并非逐位一致）。阈值来源与真值口径**不同源**时，
+  报告须标明该维「阈值来源与真值口径不同源」，由人确认；本轮 GaussianBlur 的阈值走
+  workflow 默认口径、与该风险无关。
+
 ---
 
 ## 6 · 仓目录
@@ -207,7 +277,7 @@ OpRunway/
 ├── .oprunway/
 │   ├── real-machine.env.example      # tracked 脱敏模板
 │   └── real-machine.env              # ignored 本地真实值
-├── doc/                              # 设计、TODO、handoff、环境说明
+├── dev-doc/                          # 开发过程产物：设计、TODO、handoff、实测记录、环境说明
 ├── plugin/
 │   ├── acc-common/                   # Layer 0/1 契约与确定性脚本
 │   ├── agents/                       # Layer 2 agent 薄壳
@@ -255,11 +325,11 @@ OpRunway/
 | 目标 | 入口 |
 |---|---|
 | CP-A..E 状态机、硬门、subagent 契约 | `plugin/AGENTS.md` + `plugin/skills/acceptance-workflow/SKILL.md` |
-| 设计与数据契约 | `doc/oprunway-design.md` |
-| 最新交接 | `doc/oprunway-session-handoff-2026-07-26.md` |
-| 当前 TODO | `doc/oprunway-todo.md` |
-| 改动流水 | `doc/oprunway-changes-brief.md` |
-| 真机环境 | `doc/oprunway-real-machine-environment.md` + `.oprunway/real-machine.env` |
+| 设计与数据契约 | `dev-doc/oprunway-design.md` |
+| 最新交接 | `dev-doc/oprunway-session-handoff-2026-08-05.md` |
+| 当前 TODO | `dev-doc/oprunway-todo.md` |
+| 改动流水 | `dev-doc/oprunway-changes-brief.md` |
+| 真机环境 | `dev-doc/oprunway-real-machine-environment.md` + `.oprunway/real-machine.env` |
 | 已定决策 | `canon/decisions/`，先看 status/trust tier |
 | 人读蓝图/历史案例 | `plugin/workflows/`，冲突时以 acceptance-workflow skill 为准 |
 
@@ -270,6 +340,19 @@ OpRunway/
 - 真 NPU 已坐实：IsClose、Sign；Median PR6429 当前为 1152 例中 1101 PASS、51 FAIL，
   `gate.passed=true`、确定性裁决 `FAIL(精度)`；上一轮 1344-case 结果仅作历史记录；
   Elu/Silu 在 A5-950 有 18/18 非空例证据；
+- **GaussianBlur（ops-cv，2026-08-05，干净现场端到端）**：`runner_form=cpp_extension`、
+  `declared_source_form=local_source`（本地代码，非 PR）、`precision.case_source=taskdoc`
+  （用任务书自带的 169 条自测用例与 OpenCV CPU golden）。终态
+  `BLOCKED_GOLDEN_UNAVAILABLE`、`gate.passed=true`、`gate.errors={}`；
+  169 例中 164 例可判且**数值失败 0**，5 例因通道数超 OpenCV `CV_CN_MAX` 算不出真值 →
+  记为**结论空白**（非算子失败）；性能 16 条真实 kernel-only `npu_us`（`measure_only`，无标杆对比）。
+  ⚠ 这条**不是** PASS，是「能判的部分没查出问题、有一部分判不了」；
+- **本地代码是一等输入形态**（5.11 之外的另一条 2026-08-05 口径）：`--pr-snapshot` 即声明
+  `local_source`，`completeness=complete`、**无需**任何降级授权环境变量；
+  「声称测 PR 却只拿到快照」仍是降级、仍要显式授权，**未声明按最严的 `git_pr` 对待**；
+- **任务书自带用例集/golden 通路已闭环**：`taskdoc_links.py`（链接取材）→ `taskdoc_caseset.py`
+  （识别 + 接口映射 IR + golden wrapper）→ `gen_cases --taskdoc-caseset`。
+  任务书给了 case 就用它的，**识别不到即 BLOCKED，绝不回退自生成**；
 - Median 性能数据不是零数据：custom 50/50、`torch_npu` baseline 48/50 有效，48 对评分、35 对达到 `ratio >= 1.0`；
 - 2 个 BF16、`dim=1` baseline case 报 161002、custom 成功，按 baseline limitation 挂起，不归因 DUT；
 - 用户已确认 Median 任务书所称 `aclnnMedian` / `aclnnMedianDim` 小算子拼接版本等价于 Torch 对应接口，故性能 baseline 为同机 `torch_npu` 的 `torch.median`，无需另证等价、也不改为直调单个 ACLNN 接口；
@@ -277,7 +360,8 @@ OpRunway/
 - `aclnn_py` perf collector 已真机产出同口径 kernel-only 数据，但“通路有数据”不等于“任务书条款通过”；
 - mock/catlass_mock 只产带 `evidence_grade="development"` 和 NON-ACCEPTANCE 标记的 `dev_run_summary.json` / `dev_precision_check.json`，不产 `acceptance.json` / `verdict.json`；
 - ops-<族>、标准 aclnn 两段式、用户态 opp 安装型是当前主要闭环；域外形态 fail-closed；
-- 外部 GPU consumer 已接入，真实 GPU 数据仍待提供，缺失时走 `BLOCKED_WAIT_GPU_BENCHMARK`。
+- 外部 GPU consumer 已接入，真实 GPU 数据仍待提供；**仅当用户明确要求做 GPU 对比**时，
+  缺数据才走 `BLOCKED_WAIT_GPU_BENCHMARK`——默认口径见 5.10，不因缺 GPU 数据挂起。
 
 ---
 

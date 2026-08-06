@@ -15,11 +15,11 @@
 
 ## 现状
 
-**主干施工完毕 + 真机端到端验证通过**，但还不是「能对任意算子一键验收」的成品——见 [`doc/oprunway-todo.md`](doc/oprunway-todo.md)。
+**主干施工完毕 + 真机端到端验证通过**，但还不是「能对任意算子一键验收」的成品——见 [`dev-doc/oprunway-todo.md`](dev-doc/oprunway-todo.md)。
 
 - **架构**：三层可移植设计。Layer 0 六份 JSON 契约 · Layer 1 确定性脚本（工具中立的「脑子」）· Layer 2 per-tool 薄壳（编排）。Stage 间只传 JSON。
 - **已真机验证**：两个结构不同的算子（IsClose 二元/bool、Sign 一元/数值）在真昇腾 NPU 上跑通且**裁决经核对正确**——精度 = 真 NPU 输出 vs numpy golden，性能 = msprof 真 kernel-only vs 真内置 TBE 基线，总体门同时卡精度+性能。
-  ⚠ **Equal 不计入有效结论**：它虽也在真机跑过，但事后确认**任务书↔PR 配错、且该 Equal 社区任务本身从未验收通过**，故其验收裁决已整体作废（见 [`doc/oprunway-changes-brief.md`](doc/oprunway-changes-brief.md) 顶部横幅）。Neg 仅接入 mock 级流水线；catlass（GEMM 系）当前实现为「注入其自带 example 树」的 repo-native harness（对应 canon 的「路线 C」更正仍待 compile→review，非既定 canonical），真机待 950（ascend-a5）+ VPN 验证。
+  ⚠ **Equal 不计入有效结论**：它虽也在真机跑过，但事后确认**任务书↔PR 配错、且该 Equal 社区任务本身从未验收通过**，故其验收裁决已整体作废（见 [`dev-doc/oprunway-changes-brief.md`](dev-doc/oprunway-changes-brief.md) 顶部横幅）。Neg 仅接入 mock 级流水线；catlass（GEMM 系）当前实现为「注入其自带 example 树」的 repo-native harness（对应 canon 的「路线 C」更正仍待 compile→review，非既定 canonical），真机待 950（950 真机）+ VPN 验证。
 - **裁决可信（确定性 + 对抗加固）**：pass/fail 只出自确定性脚本——`validator.py` 判精度、`perf_compare.py` 判性能，编排层与 subagent **只引用不自判**（ADR 0007）；**三级完整性门不重判 pass/fail**，只校验证据可信完整，门失败映射 `BLOCKED`。并对 evidence↔落盘产物做 sha256 绑定 + 门内重算比对，堵「伪造 metrics / 跑子集报 100% / 放宽阈值 / 混 e2e 墙钟」等假通过；`validator` 保持 stdlib-only。`acc-common` 由 **368 个 unittest 用例**覆盖——含判定链、三级门、适配器与脚本，以及对抗负例（谎报 dtype、伪造 summary、跑性能子集、越界产物路径等）。
 - **加一个算子**：对 `experimental/math/<op>` 的 aclnn 两段式算子，agent 可自动产 `spec`（acc-spec）+ `runner`（acc-runner）；**catlass / legacy / 非 math 族 / dtype 超范围会返回 `BLOCKED` 或转 P3，不硬塞**。`gen_cases` 的 golden 仍是一处手工注册（待自动化）；runner 自检目前是**纪律、非代码强制门**。用户侧无感——只需在会话里给任务书 + PR。
 
@@ -44,14 +44,14 @@
 > ⚠ **当前行为是 fail-open，不是拒绝**：`precision_policy.select_standard` 对 `oracle` 非 `mere_mare`/`atk_double` 的
 > numerical 算子一律 `return ASCENDOPTEST_DEFAULT`（catch-all）。故上表「不支持」的 3 份任务书若真跑，
 > 会被**静默套上 AscendOpTest 的尺子**。改为 fail-closed 拒绝 + 提示「该标准未验证过，建议 agent 自行探索」
-> 是**已定方案、尚未实现**（见 [`doc/oprunway-plugin-op-decoupling-design.md`](doc/oprunway-plugin-op-decoupling-design.md)）。
+> 是**已定方案、尚未实现**（见 [`dev-doc/oprunway-plugin-op-decoupling-design.md`](dev-doc/oprunway-plugin-op-decoupling-design.md)）。
 
 ### 机型
 
 | 机型 | catlass arch | 任务书份数 | 状态 |
 |---|---|---:|---|
-| **Atlas A2 / A3**（`ascend-a3`，`Ascend910_9382`） | `2201` | **38** | ✅ 环境已 de-risk；IsClose / Sign 真机跑通、裁决核对正确 |
-| **Ascend 950PR / 950DT**（`ascend-a5`，`Ascend950PR_9579`） | `3510` | 13 | ✅ 环境已 de-risk（catlass 编译 + `Compare success.`）；**尚无 aclnn 算子在此完成验收** |
+| **Atlas A2 / A3**（`A2A3 真机`，`Ascend910_9382`） | `2201` | **38** | ✅ 环境已 de-risk；IsClose / Sign 真机跑通、裁决核对正确 |
+| **Ascend 950PR / 950DT**（`950 真机`，`Ascend950PR_9579`） | `3510` | 13 | ✅ 环境已 de-risk（catlass 编译 + `Compare success.`）；**尚无 aclnn 算子在此完成验收** |
 | **Atlas 300V Pro** | — | 2 | ❌ **无硬件、无 de-risk** —— 撞上须先停 |
 
 互斥分桶 38 + 13 + 1 = 52；涉及 300V Pro 的共 2 份（1 份纯 300V Pro，1 份在 A2/A3 桶内兼列）。
@@ -118,13 +118,13 @@ agent 内部完成全部六步（取材 → 任务书→spec → 生成并验证
 - 真机跑测的机器/路径经 `OPRUNWAY_*` 环境变量注入（agent 内部用、不写进仓、不需你手敲）。
 - 平台/精度/性能口径由 agent **从算子任务书推**（不猜）。
 
-> 内部实现（确定性脚本 `acc-common/*.py`、spec/runner 生成、判定 `validator.py`）是 agent 幕后的事，**不作为用法暴露给用户**。开发/契约细节见 `doc/oprunway-design.md`。
+> 内部实现（确定性脚本 `acc-common/*.py`、spec/runner 生成、判定 `validator.py`）是 agent 幕后的事，**不作为用法暴露给用户**。开发/契约细节见 `dev-doc/oprunway-design.md`。
 
 ## 目录
 
 ```
 plugin/     agent+skill 体系（acc-common 脚本 + skills + agents + commands + .claude-plugin/manifest）
-doc/        设计与流水线（oprunway-design.md）、改动简表、TODO
+dev-doc/        设计与流水线（oprunway-design.md）、改动简表、TODO
 canon/      bureau 决策/ADR（durable 知识，capture→compile→review 三态）
 spec/       算子 spec 笔记
 repos/      被测/参考算子仓（外部克隆，.gitignore 不入库）
@@ -134,7 +134,7 @@ repos/      被测/参考算子仓（外部克隆，.gitignore 不入库）
 
 零硬编码（仓名/路径/SOC/阈值运行时探测或询问）· 零持久化配置（产物落 CWD 下 `reports/`）· 全程中文 · 副作用先确认 · 跑测多层判定 · 不凭空捏造（推断项显式标注）。
 
-> 详细设计见 `doc/oprunway-design.md`；改动流水见 `doc/oprunway-changes-brief.md`；待办见 `doc/oprunway-todo.md`。
+> 详细设计见 `dev-doc/oprunway-design.md`；改动流水见 `dev-doc/oprunway-changes-brief.md`；待办见 `dev-doc/oprunway-todo.md`。
 
 ---
 

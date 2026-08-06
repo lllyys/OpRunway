@@ -26,6 +26,7 @@ import sys
 import aclnn_adapter
 import content_address
 import repo_adapter
+import source_provenance
 import validator
 
 
@@ -152,9 +153,13 @@ def _probe_runtime_environment(cfg):
 
 def _execution_binding(cfg, caseset):
     public = {
+        # `source_mode` / `snapshot_sha256` 必须在这份公开配置里：源身份按取源形态各核各的，
+        # 少了它们，snapshot 通路的收据就退化成「按 git 口径核了个空 head」。
+        # 两者都不是私有主机信息（一个是受控词表、一个是内容摘要），可直接落工件。
         key: cfg[key] for key in (
             "target", "op_subdir", "vendor_name", "base_repo", "pr_ref",
-            "head_sha", "soc", "snake_op", "device")
+            "head_sha", "soc", "snake_op", "device",
+            "source_mode", "snapshot_sha256")
     }
     public["build_args"] = aclnn_adapter._build_args(cfg)
     public["symbols"] = list(aclnn_adapter._required_symbols(caseset))
@@ -427,12 +432,16 @@ def _expected_output_contracts(case):
 
 
 def _validate_build_provenance(provenance, execution, preflight):
+    """核 build provenance ↔ 执行环境 ↔ CP-C0；返回源 provenance 的降级挂账（供收据留痕）。"""
     if not isinstance(provenance, dict):
         raise ValueError("harness trust receipt.build_provenance 缺失")
     cfg = execution["config"]
     runtime = execution["runtime"]
+    # 源身份（head SHA / 快照 merkle）按取源形态各核各的，统一由 source_provenance 解释；
+    # 其余 build 参数仍在下面逐字段硬比。
+    degradations = source_provenance.check_build_identity(
+        provenance, cfg, preflight.get("bindings") or {})
     expected = {
-        "head_sha": cfg["head_sha"],
         "pr_ref": cfg["pr_ref"],
         "base_repo": cfg["base_repo"],
         "op_subdir": cfg["op_subdir"],
@@ -448,14 +457,12 @@ def _validate_build_provenance(provenance, execution, preflight):
         if provenance.get(key) != value:
             raise ValueError(
                 f"harness trust build_provenance.{key} 与当前执行环境不一致")
-    if provenance.get("head_sha") != (
-            (preflight.get("bindings") or {}).get("pr_head_sha")):
-        raise ValueError("harness trust build head 与 CP-C0 PR head 不一致")
     for key in ("build_reused", "stamp_mismatch_rebuilt",
                 "so_digest_unavailable"):
         if not isinstance(provenance.get(key), bool):
             raise ValueError(
                 f"harness trust build_provenance.{key} 须为 bool")
+    return degradations
 
 
 def _validate_checks(root, selected, checks):
@@ -572,10 +579,11 @@ def run_gate(root, spec_rel, caseset_rel, preflight_rel, out_rel):
 
     cfg = aclnn_adapter._aclnn_cfg()
     execution = _execution_binding(cfg, caseset)
-    preflight_head = (preflight.get("bindings") or {}).get("pr_head_sha")
-    if cfg.get("head_sha") != preflight_head:
-        raise ValueError(
-            "真机配置 head_sha 与 CP-C0 已绑定的 PR head 不一致")
+    # 起跑前先按取源形态核一遍「配置声明的源」与 CP-C0 已绑定的源是否同一：
+    # git_fetch 比 head SHA；local_snapshot 无 head 可比，只能等 build 回报子树 merkle 后核
+    # （下面 `_validate_build_provenance` 那一处），故此处只挡形态/通路不匹配。
+    source_provenance.check_config_against_preflight(
+        cfg, preflight.get("bindings") or {})
     proj = aclnn_adapter.find_aclnn_project(
         spec["op"], cfg["ops_root"], cfg["op_subdir"])
     out_dir = os.path.join(work, "aclnn_trust_out")
@@ -584,7 +592,7 @@ def run_gate(root, spec_rel, caseset_rel, preflight_rel, out_rel):
     evidence = repo_adapter.build_multi_output_evidence(
         witness, work, out_dir)
     checks = _judge_evidence(selected, evidence)
-    _validate_build_provenance(provenance, execution, preflight)
+    degradations = _validate_build_provenance(provenance, execution, preflight)
     payload = {
         "schema": _SCHEMA,
         "schema_version": 1,
@@ -596,6 +604,13 @@ def run_gate(root, spec_rel, caseset_rel, preflight_rel, out_rel):
         "coverage": coverage,
         "checks": checks,
         "build_provenance": provenance,
+        # 源 provenance 的机读**降级**挂账（如 `pr_head_unbound` = 本该绑 PR head 却只拿到
+        # 一份本地快照）。收据带着它往下走。
+        "provenance_degradations": degradations,
+        # 机读**中性形态事实**：本地源码本来就没有上游 commit，这不是降级。两者分开记，
+        # 下游报告既不得据此声称已绑定 PR head，也不得把正常的本地源码验收写成异常。
+        "provenance_form_facts": source_provenance.form_facts(
+            preflight.get("bindings") or {}),
         "note": (
             "仅证明通用 aclnn_py harness 对当前 PR 签名、dtype 与 CPU golden 的确定性小见证；"
             "不替代、不裁剪正式 Task2/Task3。"),

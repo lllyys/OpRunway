@@ -46,7 +46,7 @@
 ## 🔒 已用教训钉住的硬约束（别再违反，先写这，因为最值钱）
 
 1. **验收前先验证「任务书 ↔ PR」对应关系本身**（2026-07-09 血的教训，最上游）：确认「这个 PR 确实是这份任务书的交付 PR」、且该任务**确有已验收交付**，才能开跑。配错对应、或对应的其实是「任务书要了但未落地/未验收」的空任务 → 下游一切裁决（哪怕 root-cause 解耦做得再干净）**全部作废**。查证靠 **issue 追踪号 + 改动落点目录**，别靠算子名字面匹配。
-   - **动因案例（Equal，结论已翻案两次到底）**：Equal 真机 fail 曾被归因 op-bug→harness→op「真阳性」refine 三遍，却**始终没质疑最上游**——「#2890 到底是不是这个任务的 PR」。**2026-07-09 正式确认**：① **#2890 系误配**（非本社区 Equal 任务的交付 PR）；② **Equal 社区任务至今未验收通过、无已验收对应 PR**。故先前「Equal A3 未达标·真阳性」**整体作废**。原缺陷报告 `doc/equal-a3-defect-report.md` **已删除**；上报**取消**（无缺陷可报）。
+   - **动因案例（Equal，结论已翻案两次到底）**：Equal 真机 fail 曾被归因 op-bug→harness→op「真阳性」refine 三遍，却**始终没质疑最上游**——「#2890 到底是不是这个任务的 PR」。**2026-07-09 正式确认**：① **#2890 系误配**（非本社区 Equal 任务的交付 PR）；② **Equal 社区任务至今未验收通过、无已验收对应 PR**。故先前「Equal A3 未达标·真阳性」**整体作废**。原缺陷报告 `dev-doc/equal-a3-defect-report.md` **已删除**；上报**取消**（无缺陷可报）。
 2. **FAIL 必先解耦 root-cause 再归因**：用「被测物自己的 build + 声明支持的 dtype + 手算 golden」独立复现，确认是「被测物 vs 我的 harness」，才能下结论。⚠ **排序**：本条是**确认对应关系为真之后**才谈的归因——对应本身错了（见 #1），解耦再干净也无意义。
 3. **平台 / spec / 构建路径从任务书推，不猜**：平台/dtype/阈值一律从**正确的**任务书推——前提是先确认哪份任务书才对应被测 PR（见 #1）。
 4. **合入状态用 gitcode 查证，别沿用假设**：「7月前=已合入」是设定、不是事实；`api.gitcode.com/api/v5/.../commits?path=` 一查即知。
@@ -65,7 +65,7 @@
 > - **R6 · torch 优先 numpy 兜底是生成期选型、写死进 `golden.py`**，运行时不按「谁装了」偷换（承 ADR 0011 决策 4）。
 >
 > ⚠ **旧记「golden 只能来自任务书指定的测试方法、否则 fail-closed」漏了第二档、是错的**（2026-07-22 更正），一律以本段为准。
-> 详见 `doc/oprunway-golden-decoupling-adr.md` 决策 3（⚠ 该 doc 是**设计稿**；canon 侧 **ADR 0011 仍 `proposed`**、未经 `bureau:review` promote）。
+> 详见 `dev-doc/oprunway-golden-decoupling-adr.md` 决策 3（⚠ 该 doc 是**设计稿**；canon 侧 **ADR 0011 仍 `proposed`**、未经 `bureau:review` promote）。
 
 ### 🆕 用户 2026-07-23 追加裁定（覆盖下方相关开放项，别再重开讨论）
 
@@ -79,7 +79,7 @@
 > 🔴 **(g) 期3 D / U7「泛化到任务书里所有算子类型」= 现为必要**（用户 2026-07-23 **改定**，此前记的「非必要」作废）。
 > 理由：分类学清点里 **elementwise 仅占 ~34%**（44 算子行；任务书 41 份）；gen_cases 层已通 shape_transform，但**列表输入 / 多输出 / 动态输出 buffer / 复数 / 稀疏等尚未一般化**（真机 runner 仍只单张量）→ 这是「通用算子验收工具」的**真缺口**、不是可选优化。
 > 承 (c)/(d) 的泛化律令（不针对某算子特判）。开工路径见本文档「U7」节 + 「Pdist G1–G4」节。
-> ⚠ 是**多 session 大工程**。**2026-07-23 只读设计 fanout 已产方案** → `doc/oprunway-u7-generalization-design.md`
+> ⚠ 是**多 session 大工程**。**2026-07-23 只读设计 fanout 已产方案** → `dev-doc/oprunway-u7-generalization-design.md`
 > （经实读核实的现状、per-class U7b/c 设计、分期候选、载重前必核缺口）。关键更正：
 > - **瓶颈是 U7c（通用真机 runner）、不是 U7b（spec schema）**——shape_transform 只落 gen_cases 层、**一次没上真机**；
 >   `samples/runners/` 仅三份三浮点单张量骨架，扩展 manifest 在 runner 侧无消费者（isclose 遇 extra 字段 hard fail）。
@@ -94,7 +94,7 @@
 
 ### 🔖 U7 落地进度 + 剩余 TODO —— 2026-07-24 **暂停存档**（用户主动暂停、转更重要事；回来从这接）
 
-> 全链细节见 `doc/oprunway-u7-generalization-design.md`（§3.5 契约 / §3.6 实测 / §3.7 Schema+G / §6 核实批）+ 简表 07-24 条。
+> 全链细节见 `dev-doc/oprunway-u7-generalization-design.md`（§3.5 契约 / §3.6 实测 / §3.7 Schema+G / §6 核实批）+ 简表 07-24 条。
 > ⚠ **架构已被用户 2 次纠偏定型**：**泛化优先、绝不针对具体算子做优化/特判**（= CLAUDE.md 最高律令 **#0**，已入 bureau logbook 待 review）。旧「A→B 按类分期」**作废**——改为「先建一份通用契约 + 生成式 binding，见证算子只作测试输入」。
 
 **✅ 已做成（真代码进 `plugin/acc-common/contract_ir/`，16 测全绿）**
@@ -108,7 +108,7 @@
 
 **🔴 剩余（回来接；多数卡真机/用户/人门）**
 - [ ] **#5 真机四见证**：`covered≠真机绿`。**须先确认 a3/a5 可连 + pta container 可用** → 在 container build+run 4 见证（foreach/inplace_sigmoid/bincount/argmax，⚠ 后两个是结构 fixture 非验收目标）、钉真机绿。**所有真机操作全在服务器 container 执行、绝不 mac。**
-- [ ] **#11 commit 本批**：审修门已跑、关键已修；**commit 须用户明示**。点头后先补散文（doc/CLAUDE.md）codex 审、再 commit（分支 `fix/pdist-usertest-gaps`，**不 push/merge 除非明示**、署名 lys、无 AI trailer）。
+- [ ] **#11 commit 本批**：审修门已跑、关键已修；**commit 须用户明示**。点头后先补散文（dev-doc/CLAUDE.md）codex 审、再 commit（分支 `fix/pdist-usertest-gaps`，**不 push/merge 除非明示**、署名 lys、无 AI trailer）。
 - [ ] **#10 bureau**：#0 原则 + 本轮 stale（ops-nn 已 clone / MinDim-MaxDim 有实现 / 七道闸快照）已 capture 进 logbook；**promote 到 canonical 须用户跑 `bureau:review`**（compile 可 AI 跑、review 是人门）。
 - [ ] **#13 prober/codegen v2 硬化**（真 v2、鲁莽做即过度设计、现 fail-close 于难例）：scalar/array 的 `abi_ctype` 区分 · C-lexer 签名解析（跳注释/字符串/嵌套逗号/EOF depth）· 全 error-path RAII · Schema 关系完整性约束（output_mapping 必填/id 唯一/abi_position 连续）· prober 语义 v2（从 example D2H 抠 direction、glue std::get→ViewCopy 抠 output_mapping——建议走 grounded 语义 fanout、别焊死脆 regex）。
 - [ ] **#12 旧 follow-up**（非 U7）：Q9 NaN/±0/Inf 边界测 · run_workflow Q7/Q9→BLOCKED 端到端断言 · 真机 msprof 跳 trivial · equal_nan 交集证明 · 其余 11 仓 adapter。⚠ 「int32 runner/neg_runner」等**手写 per-op runner 已被通用 codegen 取代**（承 #0）。
@@ -161,7 +161,7 @@
 - [x] **④ 门加两道**：精度全过门（任一 case≠pass → FAILED）+ 精度数量门（precision case 数 ≥ `case_target`，否则 BLOCKED——补「跑子集报全」的**数量维**）。
 - 落地方式：ultracode fan-out + codex 门 + a3 真 torch 全量测。**①②③④ 已全部落地（2026-07-15），见下条 ✅。**
 
-**✅ 已落地（2026-07-15）**：①②③④ 全实现 + Layer A（gen_cases §1）/B（validator na·nan/perf_compare trivial-met/run_workflow fail-fast/门 na·trivial 豁免+防伪造）/C（bf16 runner+repo_adapter）/D（acc-spec case_target）。**a3 真 torch mock e2e 全绿 + fail-fast 验 + bf16 生成验 + 274 单测全绿**。设计+验证详见 `doc/oprunway-cases50-design.md`。
+**✅ 已落地（2026-07-15）**：①②③④ 全实现 + Layer A（gen_cases §1）/B（validator na·nan/perf_compare trivial-met/run_workflow fail-fast/门 na·trivial 豁免+防伪造）/C（bf16 runner+repo_adapter）/D（acc-spec case_target）。**a3 真 torch mock e2e 全绿 + fail-fast 验 + bf16 生成验 + 274 单测全绿**。设计+验证详见 `dev-doc/oprunway-cases50-design.md`。
 - [x] **真机 blocker 已解（2026-07-16）**：根因非环境坏、是 **run_on_npu.sh 每次 fresh 都重建 op**（对 isclose 的 experimental/op 名路径不适用 + `rm -rf $OPP` 毁 opp）→ 修「用户态 opp 已建则复用、只建 runner_exe」；另修 isclose runner 第二道解析处 dtype 关卡漏补 bf16。真机彻底解封（完整 3-dtype 50 用例 Task2 全 pass、三门 PASSED）。
 - [x] **✅ 真机 opp provenance 绑定已落地（2026-07-16 续，bf16 已转 tested）**：`run_on_npu.sh` 重写 provenance 机制——OPHASH 绑**真实 op 源** `$OPS/$OPRUNWAY_OP_SRC`（必填、相对仓、安全路径校验）；opp 落独立 stamp `.oprunway_opp_provenance`（`op_src|ophash|soc|vendor|build`）；顶层门：缺 opp→建、stamp 全字段符→复用、不符/缺失→**fail-closed 拒复用**（exit 4）除非 `OPRUNWAY_OPP_REBUILD=1` 授权从源重建；源不存在→exit 3；build 失败/无 .run→exit 5。`repo_adapter._ne_cfg` 加 `op_src`(必填+安全校验)/`opp_rebuild` 透传。**查修一个致命 bug**：脚本漏 `OP_SRC="$OPRUNWAY_OP_SRC"` 短名桥接→`$OP_SRC` 恒空→绑整仓 hash 且没走 `--experimental`（异源）；补一行后真机坐实。**a3 CANN 9.0.1 容器 provenance-clean 从 `experimental/math/is_close`(A2/A3 正源) 重建**：stamp ophash 与真源逐字节 sha256 一致、Task2 pass(27 用例含 9 bf16、0 fail)、三门 PASSED、fail-closed 三情形(exit3/4/复用不重建)实测过 → **isclose spec bf16 转 tested**。487 单测全绿。（int32 仍 Track C；msprof 跳 trivial 见下条。）
 - [x] **GPU 标杆 trivial 豁免**（fork finding #4/reviewer #2/codex #4，**已做**）：`gpu_baseline.parse_gpu_baseline` 改为只要求覆盖**非 trivial**（numel≥4096）性能 case、trivial 宽容忽略（不当 extra）；GPU 标杆逐 trivial case 给数不现实的问题消除。
@@ -270,7 +270,7 @@
 > **用户原话**：「要能支持所有在任务书里出现过的算子类型，不要只支持 elementwise 类型。」
 > Pdist 的 G1–G4（见下节）是这条的**一个实例**，不是全部。
 
-**实底（`doc/oprunway-task-pr-map.md` 41 份任务书清点，算子形态按名称+仓内 README 抽查）**：
+**实底（`dev-doc/oprunway-task-pr-map.md` 41 份任务书清点，算子形态按名称+仓内 README 抽查）**：
 **elementwise 是少数派**。至少还有这些结构上过不去的类，每类都不是「加个 `golden.py` 」能解决的：
 
 | 类 | 例 | 卡在哪（结构性，非参数问题） |
@@ -298,7 +298,7 @@
 
 #### 🟢 shape_transform 用真算子跑通了（2026-07-23）——**三个全通，且经 a3 真 torch 复跑**
 
-> **a3 `oprunway_prov`（真 torch 2.10.0+cpu）实跑**：Im2col 50 用例 `(2,2,2,2)→(2,8,9)` ·
+> **a3 专用容器（真 torch 2.10.0+cpu）实跑**：Im2col 50 用例 `(2,2,2,2)→(2,8,9)` ·
 > UpsampleNearestExact2d 18 · UpsampleNearest3d 20 `(2,3,2,4,4)→(2,3,4,6,8)`（**rank 5**）。
 > 三者 `out_shape_source` 均为 `golden.out_shape` —— **声明值驱动整条链、且与真 torch 实际产出
 > 的形状逐 case 对过账**（对不上引擎 fail-closed）。全量 686 测在 a3 亦全绿。
@@ -320,7 +320,7 @@
     golden **为非法输入编造输出**（= 替算子发明它不支持的语义），或整条链卡死。
     ⚠ 开关**只收真布尔**：写成 `"false"` / `0` 直接拒（真值性判断会把它们悄悄读成「允许」，
     本仓在批 1 的 `authorization_verified` 上栽过同款 fail-open）。
-    ⚠ `doc/oprunway-op-shape-taxonomy.md` §3.5 早就点名要这个字段——**这次才补上**。
+    ⚠ `dev-doc/oprunway-op-shape-taxonomy.md` §3.5 早就点名要这个字段——**这次才补上**。
   - [x] **`_EXT_RANK_SHAPES` 补 5 维，且只在 rank 约束点名时并入**：`_MAX_RANK` 本是 8 而阶梯只到 4 维。
     ⚠ **第一版直接并进 `_REG_SHAPES`，当场误伤 elementwise**（`sign` 用例集多出两个 5 维 shape、
     4 个测试变红）——**改变既有算子的用例集 = 悄悄改变已验收过的东西**。改成按需并入，
@@ -427,7 +427,7 @@
 - [x] **4.2 · C1–C5 已落地（2026-07-22）**：shape_transform 通路打通（`out_shape` 契约——**当时是 4 元组，2026-07-23 已扩为 5 字段具名元组** `Golden(fn, source, provenance, out_shape, contract)`，别读作现行契约 —— 加 attr `list[int]` +
   spec `rank` 约束）· dtype 挂账 `passed_with_gaps` 全链接线（validator → 门 → `run_workflow`，**exit 2 挂人工、绝不回 0**）·
   mock 物理上产不出 `acceptance.json`（改产标 NON-ACCEPTANCE 的 `dev_run_summary.json`）· `--defect` 出 CLI。
-  验证：**a3 `oprunway_prov` 容器真 torch 2.10.0+cpu 跑 639 测全绿**（`OK (skipped=2)`，54.6s；
+  验证：**a3 专用容器 容器真 torch 2.10.0+cpu 跑 639 测全绿**（`OK (skipped=2)`，54.6s；
   传输逐文件 sha256 双侧一致 `6f0ac4a9…`）。本机：torch 替身 639 全绿 + 裸跑与基线零 diff + 两道门 PASS/SYNCED。
   ⚠ **本机「零新增红」不能当放行依据**——59 条恒红会掩盖结构性断裂（本轮就掩盖了 5 条：
   「文件不存在」「argparse 不认参数」这类，与数值无关）。**造 torch 替身重跑**才是本机唯一有效的自证手段。
@@ -451,7 +451,7 @@
   - [x] **`--perf-slow` 已下架**（2026-07-23）——与 `--defect` 同批理由：同类注入旋钮、只对非验收通路有意义；
     进程内 `run_workflow.run(..., perf_slow=[...])` 的回归能力**完整保留**，拿掉的只是 CLI 旋钮。
     ⚠ **这是施工 agent 自行拍的板，而本条原记为「未决」**——如实记账，**可推翻**：否决的话要连
-    `PerfSlowFlagRetiredTest` 一起回退，且 `doc/oprunway-todo-plans.md` §922 的本地演示配方
+    `PerfSlowFlagRetiredTest` 一起回退，且 `dev-doc/oprunway-todo-plans.md` §922 的本地演示配方
     已因下架失效、需改写成进程内调用。
   - [ ] canon 页 `catlass-synthetic-demo-cannot-forge-pass`：① 「全文不含 acceptance.json 字样」**已失真**（字样在、语义相反——
     现在是「拒绝以裁决产物名落盘」的白名单，比原表述更强）；② 它自己点名要的**负向测试已补**（7 条），
@@ -465,7 +465,7 @@
   ⚠ 按 BUREAU 写门，canon 页**不得手编**、`canonical` 不得手设 → 须走一次 `capture → compile → review`
   把路径重录为 `plugin/samples/...` **并重算 hash**；不许只改路径却留着未经确认的 verified 状态。
 - [ ] **5 · U4 / U5 本批不动**：U4 要换 marketplace 源形态 → 影响分发方式，得先定发布形态（T9 `proposed`）；U5 属 canon `pr-head-commit-is-the-tested-object`（`proposed`）的落地，该页自带前置「未合并 PR 的 head 常在贡献者 fork，open+fork 的 API 可解析性**尚未实测**」。
-- [~] **6 · U7a 形态分类学进行中**：产出 `doc/oprunway-op-shape-taxonomy.md`。首轮 ops-math 18 份完成，ops-nn 16 份 + 其余 6 仓 7 份**首轮 agent 交了桩**（已重跑补齐）。U7b/c/d 与 G1–G4 仍未开工，**优先级须用户拍板**。
+- [~] **6 · U7a 形态分类学进行中**：产出 `dev-doc/oprunway-op-shape-taxonomy.md`。首轮 ops-math 18 份完成，ops-nn 16 份 + 其余 6 仓 7 份**首轮 agent 交了桩**（已重跑补齐）。U7b/c/d 与 G1–G4 仍未开工，**优先级须用户拍板**。
 
 #### Pdist 暴露的「非 elementwise 通路」空白（G1–G4；能力边界扩展，须单独立项）
 
@@ -579,13 +579,13 @@
   - **审修门逮到 4 个 fail-open**（详见简表 07-23 条）：golden 里 `SystemExit(0)` 假绿（**引擎主路 `load_golden` 同洞、一并修**）· argparse 参数错误退 2 与「需人核」撞车 · 退出码按 tier 路由漏掉 `(tier 1, 需人核)` · 必需导出只查 `hasattr`。已全修 + 8 条回归。
   - ⚠ **留下的诚实边界（已写进 `check_golden.py` docstring，不是遗漏）**：golden.py 与检查器**同进程**执行，`os._exit(0)` / C 层退出挡不住，要挡须换子进程隔离。**有意不做**——runner.cpp 本身就要编译并在 NPU 上跑，只给 golden 加沙箱是不对称的。
   - 验证：本地 shim **743 绿** · **a3 真 torch 2.13.0 743/743 绿** · a3 上 `check_golden.py IsClose --load` exit 0、`SystemExit(0)` exit 1。
-- [~] **批 6b · 放宽 runner 的 scope gate 覆盖面**（方案 `doc/oprunway-batch6b-design.md`；期1-A 已落地）：**期1-A ✅**(接回 VENDOR_SUFFIX + 8 处 stale gate 全仓对齐 + 零引擎改动放行 ops-<族> 非 experimental aclnn;期0 债经实证确认已还、scout 误报)。**B-core ✅**(commit e1c2e6b:接口探测器 5 类 + 从 test_aclnn 抽真实入口名 + 18 算子据实核放行 6 个)。**期2 C ✅ gen_cases 层**(3 shape_transform 样例 im2col/upsample2d/3d 真 torch 各 50/21/21 case、out_shape 对账过;真机 NPU 验收另需 a3 build runner)。**剩** 期3 D(dtype/多输入/双实现/catlass,逐项立项+真机预算,开放大工程)。原条目——现仍只认 `experimental/math/<op>` + aclnn 两段式，非此一律 BLOCKED/转 P3。要从任务书推目标目录与接口形态（守「零硬编码 / 探测或问」的最高律令），配 `OPRUNWAY_TARGET_DIR` 等。⚠ 这是「支持所有任务书里出现过的算子类型」那条用户指令的**剩余大头**——批 6 只让 golden 侧不受它拖累，runner 侧仍窄。
+- [~] **批 6b · 放宽 runner 的 scope gate 覆盖面**（方案 `dev-doc/oprunway-batch6b-design.md`；期1-A 已落地）：**期1-A ✅**(接回 VENDOR_SUFFIX + 8 处 stale gate 全仓对齐 + 零引擎改动放行 ops-<族> 非 experimental aclnn;期0 债经实证确认已还、scout 误报)。**B-core ✅**(commit e1c2e6b:接口探测器 5 类 + 从 test_aclnn 抽真实入口名 + 18 算子据实核放行 6 个)。**期2 C ✅ gen_cases 层**(3 shape_transform 样例 im2col/upsample2d/3d 真 torch 各 50/21/21 case、out_shape 对账过;真机 NPU 验收另需 a3 build runner)。**剩** 期3 D(dtype/多输入/双实现/catlass,逐项立项+真机预算,开放大工程)。原条目——现仍只认 `experimental/math/<op>` + aclnn 两段式，非此一律 BLOCKED/转 P3。要从任务书推目标目录与接口形态（守「零硬编码 / 探测或问」的最高律令），配 `OPRUNWAY_TARGET_DIR` 等。⚠ 这是「支持所有任务书里出现过的算子类型」那条用户指令的**剩余大头**——批 6 只让 golden 侧不受它拖累，runner 侧仍窄。
 - [ ] **批 7 · 报告 + canon 收口**：报告展示 tier / provenance / 人核项；ADR 0011 与本轮裁定走 `capture → compile → review`（**现 ADR 0011 仍 `proposed`**）。
 - [ ] 贯穿项：产出物落点 `<ops_root>/<op>/`，与 `find_runner`/`load_golden` 的安全边界（**逐段拒软链**、`_check_id`、缺则 fail-closed）对齐。
 - [ ] **R8 记账**：catlass 通路（`catlass_adapter.py` 的内置 matmul golden）本轮 **out-of-scope**，两档链暂不覆盖它。
 
 ### 🔵 P2 · 扩展 / 接通
-- [~] **插件-算子解耦**（`doc/oprunway-plugin-op-decoupling-design.md`）**引擎侧两刀均已入 main** ✅：① **runner 去引擎化**（**PR #7**：3 份样例 runner 移出引擎 → `samples/runners/`、runner 只作输出、`find_runner` fallback 退役改 fail-closed、门 runner_source 仅 user）；② **golden 去引擎化**（**PR #8**，`1d2bb3a`：`GOLDEN` 硬表 → `load_golden(op)` 加载器、4 内置 golden 迁 `samples/golden/<op>/`、来源契约扩六枚举、ADR 0011 `proposed`、来源契约批 1 `0192e49`）。⚠ **口径（2026-07-22 收窄）**：成立的只是「**elementwise 通路**的 golden 值已去引擎化」，**不是「引擎零内置算子」**——`catlass_adapter.py:152/:162`（matmul golden 内置、注释明写有意不进加载器路径）与 `gen_cases.py:34` 的 `_BF16_EXACT_OPS` 按算子名硬表是**两处已知例外**（catlass 通路本轮 out-of-scope）。剩下的是产出侧，见上「🔴 下一刀」。
+- [~] **插件-算子解耦**（`dev-doc/oprunway-plugin-op-decoupling-design.md`）**引擎侧两刀均已入 main** ✅：① **runner 去引擎化**（**PR #7**：3 份样例 runner 移出引擎 → `samples/runners/`、runner 只作输出、`find_runner` fallback 退役改 fail-closed、门 runner_source 仅 user）；② **golden 去引擎化**（**PR #8**，`1d2bb3a`：`GOLDEN` 硬表 → `load_golden(op)` 加载器、4 内置 golden 迁 `samples/golden/<op>/`、来源契约扩六枚举、ADR 0011 `proposed`、来源契约批 1 `0192e49`）。⚠ **口径（2026-07-22 收窄）**：成立的只是「**elementwise 通路**的 golden 值已去引擎化」，**不是「引擎零内置算子」**——`catlass_adapter.py:152/:162`（matmul golden 内置、注释明写有意不进加载器路径）与 `gen_cases.py:34` 的 `_BF16_EXACT_OPS` 按算子名硬表是**两处已知例外**（catlass 通路本轮 out-of-scope）。剩下的是产出侧，见上「🔴 下一刀」。
 - [ ] **(a) TBE 信息库接通**（dtype 独立源）：每份任务书自带路径 `.../tbe/config/ascend910b`；读法随运行环境探测、**不写死 ssh**。
 - [ ] int32 扩展（Track C，锁已解）。
 
@@ -654,7 +654,7 @@
 3. **「完工」标准未定**（够 demo / 够内部用 / 够对外发布）——定了才能倒推「到可用 v2 还差哪几步」。
 
 ### B. 外部资源阻塞
-4. **真机验证**：待 `ascend-a5`（真 950 / arch 3510）+ VPN。catlass 真机 build/run、Track C 的 int/bf16 runner、AscendOpTest bool cross-check 全挂在这。
+4. **真机验证**：待 `950 真机`（真 950 / arch 3510）+ VPN。catlass 真机 build/run、Track C 的 int/bf16 runner、AscendOpTest bool cross-check 全挂在这。
 5. **真 GPU 基线数据**：consumer 侧与最小字段契约已就绪，缺数据即走 `BLOCKED_WAIT_GPU_BENCHMARK`。
 
 ### C. 已收口（不再是待办）
@@ -666,4 +666,4 @@
 
 ## 备注
 
-- 详细设计/契约见 `doc/oprunway-design.md`；各 todo 的实施 plan（均经 codex 审）见 `doc/oprunway-todo-plans.md`；改动流水见 `doc/oprunway-changes-brief.md`。
+- 详细设计/契约见 `dev-doc/oprunway-design.md`；各 todo 的实施 plan（均经 codex 审）见 `dev-doc/oprunway-todo-plans.md`；改动流水见 `dev-doc/oprunway-changes-brief.md`。

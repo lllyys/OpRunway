@@ -20,8 +20,10 @@
   "hardware": ["<从任务书『适配硬件』抽>"],
   // §1.3（torch 对标 / 多输出 / aclnn_py）新增的可选字段：不属该场景就**整字段省略**（缺省 = 现行 cpp 通路，零变更）
   "scenario": "<可选：torch_ref_aclnn>",      // 场景标识（编排层路由标签）
-  "runner_form": "<可选：cpp（缺省）| aclnn_py>",  // runner 形态；aclnn_py ⇒ 必须同时声明 call_variants
-  "call_variants": "<仅 aclnn_py：变体对象数组，见 §1.3.3>",
+  "runner_form": "<可选：cpp（缺省）| aclnn_py | cpp_extension>",  // runner 形态；后两者 ⇒ 必须同时声明 call_variants
+  "call_variants": "<仅 aclnn_py / cpp_extension：变体对象数组，见 §1.3.3>",
+  // §1.6 仅 cpp_extension：张量 ACL 存储格式（受控两值）。**整字段省略 = torch_npu_rank_default = 现行为**
+  "aclnn_tensor_format": "<可选：torch_npu_rank_default（缺省）| nd>",
   "allow_empty_tensor": "<可选 bool，缺省 true；任务书明写不支持空 Tensor→false>",
   // §1.4 可选：任务书点名「某 attr 所指的轴长度 = L」这类边界 → **定向生成**，别指望正交网格撞上
   "attr_axis_lengths": [{"attr":"<已声明的 attr 名>","lengths":[1]}],   // 不需要就整字段省略
@@ -56,6 +58,9 @@
   // T5 精度口径升级（待散文门）：precision 显式声明 standard + tolerance_policy_id；
   //   保留 oracle + threshold(digest) 向后兼容；per-case 结构化 policy 由 gen_cases 按 golden dtype 派生。
   "precision": {"oracle":"<按任务书原文抽>","standard":"<据 oracle+verify_mode 映射>","tolerance_policy_id":"<spec 级摘要>",
+                // §1.6 用例来源（受控两值）。**整字段省略 = generated = 现行为**；写 taskdoc ⇒ 必须喂 --taskdoc-caseset
+                "case_source":"<可选：generated（缺省）| taskdoc>",
+                "taskdoc_caseset":"<可选，仅 taskdoc 档：{\"sha256\":\"<64 位小写 hex>\" 或 null}——逻辑身份声明>",
                 "threshold":"<exact→0；numerical→主 dtype 默认>","threshold_source":"...",
                 // §1.3.4：仅 standard=="torch_allclose" 用
                 "tolerance_source":"<dtype_table | taskdoc | torch_default；省略=dtype_table>",
@@ -103,7 +108,7 @@ opbase 精度标准 §1.1 说「用例数不设固定下限、覆盖优先」，
 | `params_source` | 有无完整参数表 | 有表→`task_doc_table`；只写『原算子所有类型』→`derived_from_reference` |
 | `operator_class`（§1.5）| 任务书的**算子功能/公式**段 + 参考 API 语义（这算子到底在算什么） | 受控词表 `floating_compute / structural / integer_compute`，**三选一、无第四种**。决定 gen_cases 产不产 `inf/-inf/nan` 特殊场景、`value_profiles` 能不能含 `"nan"`。**每份新 spec 都判**；整字段省略 = legacy 向后兼容出口（照产 NaN·Inf），别当缺省答案用。词表外取值 → fail-closed |
 | `params[]` | 参数说明表 | 每参 `{name,io:in\|out\|attr,dtype:[],default?,noncontiguous?,rank?}`；Tensor→in/out，标量/属性→attr。**attr 值类型（C2）**：`int \| float \| bool \| str \| list[int]`——数组属性（`output_size`/`kernel_size`/`stride`/`padding`/`ksize`）照原样写成 `[a,b]`，别拍平成字符串、别只取首元素。**in 的 `rank`（C3）**见下一行 |
-| `params[].rank`（C3，可选）| 任务书参数表『维度(shape)』栏 / 算子 README / `*_infershape.cpp` 的 rank 校验 | int（`2`）或 int 列表（`[3,4]`）。**只声明确凿的 rank**，任务书没写死就**别填**（不写=不限制=现行为，不臆造）。例（依据 `doc/oprunway-op-shape-taxonomy.md`，相关行标 `verified`）：Pdist=2、im2col=[3,4]、UpsampleNearestExact1d=3、UpsampleNearest3d=5、bincount=1。⚠ **它只收窄「造哪些 shape」，收不掉「造哪些场景」**：`gen_cases._special_entries` 的空 Tensor / 标量 / 边界 / inf-nan 是**强制必覆盖**项，rank 约束下走 `_fit_rank` **保 numel 调维**（如空 `(0,)` 在 rank=2 时被调成合法 2 维的空 shape），**不会被过滤掉**。任务书明写「不支持空 Tensor」时**照记 `task_pr_gaps`**（当前 spec 没有关掉空 Tensor 用例的字段），别假定填了 rank 就自动干净 |
+| `params[].rank`（C3，可选）| 任务书参数表『维度(shape)』栏 / 算子 README / `*_infershape.cpp` 的 rank 校验 | int（`2`）或 int 列表（`[3,4]`）。**只声明确凿的 rank**，任务书没写死就**别填**（不写=不限制=现行为，不臆造）。例（依据 `dev-doc/oprunway-op-shape-taxonomy.md`，相关行标 `verified`）：Pdist=2、im2col=[3,4]、UpsampleNearestExact1d=3、UpsampleNearest3d=5、bincount=1。⚠ **它只收窄「造哪些 shape」，收不掉「造哪些场景」**：`gen_cases._special_entries` 的空 Tensor / 标量 / 边界 / inf-nan 是**强制必覆盖**项，rank 约束下走 `_fit_rank` **保 numel 调维**（如空 `(0,)` 在 rank=2 时被调成合法 2 维的空 shape），**不会被过滤掉**。任务书明写「不支持空 Tensor」时**照记 `task_pr_gaps`**（当前 spec 没有关掉空 Tensor 用例的字段），别假定填了 rank 就自动干净 |
 | `generalize` | 测试标准是否要泛化数据 | 默认 true；无张量IO(Sleep)/融合无泛化要求→false |
 | `dtype_required`（Q7 dtype 覆盖门）| 任务书**权威 dtype 全集**（来源优先级同下 dtype 行：任务书显式表 > 原 TBE 信息库 > 问用户）| list of dtype。任务书只写『支持所有类型』且信息库未接通/全集未知 → **填 `"needs_user"`**（不谎报覆盖、也不臆造全集）；legacy 未迁 → **整字段省略**（门判『未声明→覆盖门未行使』、不阻塞）。**IsClose 已核**：op_def 正源={float32,float16,bfloat16,int32} |
 | `dtype_tested`（Q7 dtype 覆盖门）| 当前 pipeline **实测子集**（通常 float32/float16）| list。**gen_cases 据实际生成的 cases 归并并写入 caseset**（门也用真实 cases 对账，口径一致、消除「并集过报」）；spec 侧此字段作声明/文档，**须与真实一致否则门抓「自报不符」→ BLOCKED** |
@@ -112,13 +117,16 @@ opbase 精度标准 §1.1 说「用例数不设固定下限、覆盖优先」，
 | `precision.oracle` | 精度校验工具/真值来源 | 受控词表 `ascendoptest / mere_mare / atk_double / torch / scipy / std_exact / none`，**按任务书原文抽**（多数社区任务=ascendoptest；SPMV=生态标准 MERE·MARE + ATK 双标杆=`atk_double`；Sleep=none）——**勿一律填 ascendoptest**。⚠ 旧文写的 `dual_benchmark` 已统一为 `atk_double`（与 `precision_policy.select_standard` 识别的词一致）；`mere_mare` 与 `atk_double` **都**映射到 standard `ecosystem_mere_mare`（ATK 双标杆 fallback 本轮 out-of-scope、未实现）|
 | `precision.standard`（T5，待散文门）| **先读任务书显式精度工具/标准；仅缺失时**才从 oracle+verify_mode 兜底（见 §1.1）| 受控词表 `ascendoptest_default / ecosystem_mere_mare / exact / behavioral / torch_allclose`。`oracle` 是真值来源，不得覆盖任务书点名的验收尺；缺省不填时 `precision_policy.select_standard` 才按 §1.1 兜底 |
 | `scenario`（§1.3）| 任务书『参考实现/功能对标』段是否把 **torch 指定为真值口径** × PR 是否**标准 aclnn 两段式**工程 | 受控值 `torch_ref_aclnn`；不属该场景 → **整字段省略**，别编新值 |
-| `runner_form`（§1.3）| 被测物形态（PR 工程结构，见 §1.3.1） | `cpp`（缺省，可省略）/ `aclnn_py`。`aclnn_py` ⇒ **必须**同时给 `call_variants`，否则 gen_cases fail-closed |
+| `runner_form`（§1.3）| 被测物形态（PR 工程结构，见 §1.3.1）× 本轮用哪条执行形态跑 | 受控三值 `cpp`（缺省，可省略）/ `aclnn_py` / `cpp_extension`（词表与派生 mode 见 `AGENTS.md` §4）。后两者 ⇒ **必须**同时给 `call_variants`，否则 fail-closed。⚠ runner form **只决定执行形态，不能反推任务书指定的性能标杆**——baseline 仍逐字按任务书核 |
+| `aclnn_tensor_format`（§1.6，可选，**仅 `runner_form=cpp_extension`**）| **ABI 事实源**（接口 header / docs / example）对张量存储格式的要求；任务书与 op_def 只作交叉 | 受控两值。整字段省略 = `torch_npu_rank_default` = op-plugin 按 rank 猜格式（3→NCL、4→NCHW、5→NCDHW、其余→ND），产物逐字节不变、manifest 记 `default_unverified`。接口按 `GetStorageFormat()==FORMAT_ND` 校格式（症状：rank-3 张量被 L2 拒成 `ACLNN_ERR_PARAM_INVALID` 161002）时才写 `nd`。⚠ `nd` 当前只在手写 `extended` stage2 下实现，落在走官方宏的 `standard` 形态上 → fail-closed。**没核过就别写，沿用缺省并挂账** |
 | `call_variants`（§1.3.3）| **递归发现的接口头**的函数签名（`<op_subdir>` 下有界递归找到的 `aclnn_*.h`，剔 `*_impl.h`；**层级不预设**）+ 任务书的 attr 语义 | 变体对象数组；`when`/`symbol`/`active_outputs` 必填，`active_attrs`/`attrs` 选填。按 **attr 取值**分派，**绝不按算子名** |
 | `params[].out_role` / `index_of` / `gather_from`（§1.3.2）| aclnn 签名的输出形参 + 任务书对各输出的语义描述 | `out_role ∈ {value, index}`（多输出时**每个** out 必填）；`index_of` 指本 spec 某 `value` 输出名；`gather_from` 指本 spec 某 `in` 参数名。二者仅 `index` 有、且**必填** |
 | `allow_empty_tensor`（§1.3.6）| 任务书『不支持空 Tensor』类明写约束 | 真 bool，缺省 `true`。`"false"`/`0` **fail-closed 拒收** |
 | `attr_axis_lengths`（§1.4，可选）| 任务书**点名**的轴长度边界（典型句式「归约维/dim 所指轴上维度为 1 时…」）| `[{"attr":"<已声明 attr 名>","lengths":[<正整数>…]}]`。**声明了却一条都产不出 → fail-closed**（假覆盖）。不需要就整字段省略 |
 | `precision.tolerance_policy_id`（T5，待散文门）| **口径 id（分两层，别混）**：`spec.precision.tolerance_policy_id`=**spec 级摘要/向后兼容**（exact→`exact`、ascendoptest→`ascendoptest_default`、mere_mare/atk_double→`ecosystem_mere_mare`，**无 dtype 后缀**）；`caseset.expected.tolerance_policy_id`=**门控用、格式 `standard:dtype`**（如 `ascendoptest_default:float32`，per-case 由 `gen_cases` 按 golden dtype 生成，exact/behavioral 无 dtype 后缀）。validator/gate 的三处一致比的是**caseset 级**那份 | 
 | `precision.acceptance_policy?`（T5，待散文门）| 任务书验收目标宽于平台底线时 | 可选 `{"standard":"...","error_rate":...}` 等覆盖；acceptance 过而 standard 不过 → PASSED_WITH_RISK 走人工 CP。**仅任务书明确放宽时才填**，勿臆造 |
+| `precision.case_source`（§1.6，可选）| 任务书**给没给成套自测用例**（典型：`精度自测用例参考[自测用例目录](./self_test_case/<op>/)` 这类链接，含相对链接）| 受控两值。整字段省略 = `generated` = 本引擎按覆盖-预算规则造例（现行为、逐字节不变）。任务书**给了**用例 → 写 `taskdoc`，并由编排层把 `taskdoc_caseset.py` 规范化后的 caseset 显式喂给 `gen_cases --taskdoc-caseset`。⚠ 声明 `taskdoc` 却拿不到那份文件 → **fail-closed，绝不回退自生成**；词表外取值同样 fail-closed（这个字段猜错的代价特别贵——判成 `generated` 就等于把任务书点名的测试点整套换掉）|
+| `precision.taskdoc_caseset`（可选，仅 taskdoc 档）| — | `{"sha256": "<64 位小写 hex>"}` 或显式 `null`（表示本轮未绑定）。spec 侧对那份 caseset 的**逻辑身份声明**，供跨轮对账 |
 | `precision.threshold` | 见 §3 | 数字：exact→0；behavioral→省略；numerical→AscendOpTest 主 dtype 默认值 |
 | `precision.threshold_source` | 必填，记数字依据+推断链 | 自由文本 |
 | `perf.baseline` | 『性能要求-基线』 | tbe / self_fp16 / small_op_concat / gpu / theoretical / none / **torch_npu** / **aclnn_builtin**。框架级 Torch 或已确认“小算子拼接等价于 Torch 接口”用 `torch_npu`；实际要求直接 ACLNN 才用 `aclnn_builtin` |
@@ -273,10 +281,11 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 | 真值口径是不是 torch | **任务书**『参考实现 / 功能对标』段 | `precision.oracle=torch`；`precision.standard` 仍先读独立精度条款，条款缺失才兜底 `torch_allclose` |
 | 被测物是不是 aclnn 两段式工程 | **PR** 工程结构（§1.3.1） | `runner_form=aclnn_py` |
 | 算子是不是多输出 | **aclnn header 签名** + 任务书输出描述 | `params[].out_role` 等（§1.3.2） |
-| 调用变体表（**`runner_form==aclnn_py` 一律必填**）| **接口头里有几个入口 + attr 怎么分派** | `call_variants`（§1.3.3） |
+| 调用变体表（**`runner_form ∈ {aclnn_py, cpp_extension}` 一律必填**）| **接口头里有几个入口 + attr 怎么分派** | `call_variants`（§1.3.3） |
 
-⚠ **`call_variants` 的触发条件是 `runner_form == "aclnn_py"`，不是「header 里有多个入口」**——
-**aclnn_py 一律必填**（缺了 `gen_cases` 当场 fail-closed）。入口个数只决定**产几条 variant**：
+⚠ **`call_variants` 的触发条件是 `runner_form ∈ {"aclnn_py", "cpp_extension"}`，不是「header 里有多个入口」**——
+这两种形态**一律必填**（缺了 `gen_cases` 当场 fail-closed；判据是 `needs_aclnn_call`，两形态共用同一份解析）。
+入口个数只决定**产几条 variant**：
 多入口产多条；**单入口也必须有一条**（`when` 写 `{"always": true}`，`active_attrs` / `active_outputs` 照签名填）。
 
 `scenario=torch_ref_aclnn` 是**前两条同时成立**时才写的**合并标签**（编排层路由用）；单独成立时只写各自的字段、
@@ -344,8 +353,11 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 
 ### 1.3.3 从 aclnn header 派生 `call_variants`
 
-**什么时候写**：**`runner_form == "aclnn_py"` 一律必填**（不填 `gen_cases` 当场 fail-closed）。
+**什么时候写**：**`runner_form ∈ {"aclnn_py", "cpp_extension"}` 一律必填**（不填 `gen_cases` 当场 fail-closed）。
 「header 里有多个入口」**不是触发条件**、只影响变体条数：单入口写一条 `{"when": {"always": true}, …}` 即可。
+⚠ `cpp_extension` 还可在 `call_variants[i]` 上写 `stage2_form`（`standard` / `extended`）——但那是**兜底**：
+形态的首选来源是 CP-C0 预检（直接读 PR head header），spec 显式声明只在拿不到预检时用，且须与 header 一致。
+两处都没有 → codegen 退回历史缺省并挂 `stage2_form_unverified`，**验收门据此拒**。
 
 **为什么需要**：同一个算子的不同 attr 取值可能对应**不同的 aclnn 符号**与**不同的输出 arity**——header 里
 往往能看到两个入口（如 `aclnnXxx(self, out, ...)` 与 `aclnnXxxDim(self, dim, keepdim, valuesOut, indicesOut, ...)`）。
@@ -582,6 +594,40 @@ Torch 签名列出必须对标的 overload，再逐个建立：
 - **整字段省略只是 legacy 兼容出口**（现有 isclose/sign/equal/neg 未声明、caseset 逐字节不变），
   **不是"拿不准就不写"的正当理由**：每个算子都落得进这三类之一，没有"不适用"。
 
+## 1.6 `precision.case_source` —— 任务书给了用例，就用它的（受控词表）
+
+**用户口径（2026-08-04 定）：任务书给了 case → 用任务书的，不自行生成；不给才自行生成 + 用默认精度标准。**
+这不是效率优化，是验收权威归属：任务书是验收权威（AGENTS.md 5.8），另起炉灶铺正交网格
+等于把任务书点名的测试点换掉。
+
+**怎么判**（判据是任务书文本结构，**不是算子身份**）：
+
+1. 任务书正文里有没有指向**成套自测用例**的链接 —— 典型句式
+   `精度自测用例参考[自测用例目录](./self_test_case/<op>/)`。**相对链接也算**（相对任务书自身所在目录解析）。
+2. 那个目录里是不是真的构成「成套件」——由 `acc-common/taskdoc_caseset.py` 的
+   `discover()` 按结构判（cases JSON + golden `.py` + prototype JSON），**抽 spec 的人不用自己判**：
+   编排层跑 `taskdoc_links.py` → `taskdoc_caseset.py`，结局落受控词表 `DISCOVERY_OUTCOMES`。
+3. 结局 `recognized` → spec 写 `precision.case_source: "taskdoc"`；其余六种结局 → **BLOCKED**，
+   **不回退自生成**（「认不出任务书的 case，那就自己造一套」正是这一档要堵的洞）。
+   任务书压根没给用例 → **整字段省略**（= `generated` = 现行为）。
+
+**两档的连带后果，落 spec 前须知**：
+
+| | `generated`（缺省 / 省略） | `taskdoc` |
+|---|---|---|
+| 用例身份、shape、dtype、attr、值域 | 本引擎按覆盖-预算规则铺 | **全部**来自规范化后的任务书用例集 |
+| `case_target` 交互（上面那段） | 照走：dry-run 报区间 → 问用户 → 写 `case_target` | **不适用**：用例集全体即强制下限，一条都不许少 |
+| 规模预算（G4 降规模） | 行使 | **不行使**（降规模会把任务书点名的 shape 改掉，那就不是那条用例了） |
+| `coverage_strength` 表述 | `1-wise+whitelist：…` | `taskdoc_provided：用例集由任务书提供（N 条…），覆盖强度由任务书决定` |
+| 特殊值（inf/-inf/nan） | 按 `operator_class` 强制铺（§1.5） | 由任务书决定，本引擎这一档**不强制铺** |
+
+⚠ **`coverage_strength` 两档表述必须不同**：用了任务书的 case 就**不得**再声称「1-wise + 白名单」——
+那是本引擎自己铺网格时的覆盖强度，拿来描述任务书给的用例就是冒领（5.8）。
+
+⚠ **性能维要跟着走**：`taskdoc` 档的性能候选池 = **全部可判精度的任务书用例**。
+任务书用例天然不带「性能」维，不这么定的话性能维恒零数据。spec 侧照常写
+`perf.case_source: "precision_cases"`（`perf` 存在时必填，见 §1 映射表那一行）。
+
 ## 2. verify_mode 决策树（⚠ 三值）
 
 ```
@@ -679,6 +725,13 @@ C4 的 `dtype_unsupported_by_op_def`、`dtype_unsupported_on_target_hw`，见 §
   **必须**声明该字段（否则该边界大概率零覆盖，而 `gaps=0` 的裁决会掩盖它）；写了则 `attr` 引用**已声明的 attr 名**、
   `lengths` 是**非空正整数列表**（0 走 `allow_empty_tensor`/`empty_axis`）；**声明了却产不出 → gen_cases fail-closed**，
   撞上要回去核 attr/rank，**不许删字段绕过**。任务书没点名就整字段省略。
+- **§1.6 · `precision.case_source`**：受控两值，**整字段省略 = `generated` = 现行为**。写了 `taskdoc` ⇒
+  编排层**必须**把规范化 caseset 显式喂给 `gen_cases --taskdoc-caseset` / `run_workflow --taskdoc-caseset`，
+  否则 fail-closed（**不回退自生成**）；这一档不写 `case_target`（用例集全体即强制下限）。
+  **拿不准就整字段省略**——判成 `generated` 等于把任务书点名的测试点整套换掉，代价特别贵。
+- **§1.6 · `aclnn_tensor_format`**：只在 `runner_form == "cpp_extension"` 下有意义；**整字段省略 = 现行为**。
+  写 `nd` 前须有 ABI 事实源（header/docs/example）支持，且该算子的 stage2 形态是 `extended`——
+  落在 `standard` 上会 fail-closed。没核过就别写。
 - **§1.3 · torch 对标 / 多输出 / aclnn_py 形态**：若写了 `scenario` / `runner_form` / `call_variants` /
   `out_role` / `tolerance_source` / `value_profiles` / `perf.torch_baseline` / `allow_empty_tensor` 中任一项，
   逐条过 **§1.3.7 自检清单**；不属该场景则这些字段**一个都不该出现**。

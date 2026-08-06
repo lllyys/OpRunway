@@ -70,6 +70,9 @@ class NeCfgNoPrivateDefaultsTest(unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             _cfg(env)
         msg = str(cm.exception)
+        # ⚠ 这份黑名单是**本测试的检测目标**，不是配置——律令 5.4 禁止私有主机名进 tracked 文件，
+        # 但「用来证明它们没被传出去」的断言必须拿得到字面量，否则这道防泄漏门形同虚设。
+        # 这是 5.4 的一处**有意例外**，仅限本文件；别处一律用脱敏说法。
         for leak in ("ascend-a3", "ascend-a5", "/home/lys", "ops-math", "oprunway_run", "oprunway_opp"):
             self.assertNotIn(leak, msg, f"报错泄露私有默认 {leak!r}")
 

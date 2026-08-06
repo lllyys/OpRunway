@@ -6,7 +6,7 @@
 | `taskdoc` | 社区任务【AscendC 实现 Sign】（gitcode `cann/ops-math`） |
 | `pr` | **gitcode ops-math!2702**（已 API + `pr_facts.json` 双核为真且 merged） |
 | `verdict` | **`precision-pass·perf-fail`**（精度过、**性能未达成**——⚠ 非 PASS） |
-| `evidence_path` | `doc/oprunway-acceptance-evidence.md`（已验证案例台账） |
+| `evidence_path` | `dev-doc/oprunway-acceptance-evidence.md`（已验证案例台账） |
 | `real_machine` | `a3`（真 Ascend910/A3 NPU 端到端 `new_example`） |
 | `caveat` | 需确认自定义 kernel 构建优化口径与 TBE 对等、取稳态/warmup、多 shape 复测，才能 100% 把慢归到 PR 实现而非构建配置；`target_ratio` 按任务书『无劣化』= 1.0 |
 

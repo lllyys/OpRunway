@@ -14,6 +14,6 @@ status: proposed
 
 **关键**：[[Repo adapter interface and modes]] 的三模式 **≠ 这三范式（不一一对应）**——三种范式**都优先复用 `existing_example`/`new_example`**（PR/仓自带可运行工程，直接 build/run），**只有无现成可运行壳或 catlass/aclnn 桥接才用 `generated_harness`**。社区任务这批基本 `new_example`。各仓 build/run/golden/perf 各不同 → repo_adapter 一接口、每仓一份小配置。
 
-依据 `doc/oprunway-spec-pr-analysis.md`。
+依据 `dev-doc/oprunway-spec-pr-analysis.md`。
 
 **Sources.** [[session d31ea446-dec3-479f-a7b3-d6c1dec4f611 · 2026-07-02]]（2026-07-06 检查点）

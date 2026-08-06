@@ -26,7 +26,7 @@ contradicts: [[Golden source uses taskdoc method then CPU API fallback]], [[PR r
 [[Golden is fixed to torch on CPU for determinism]] 被决策 4 更新；代码工作项（`gen_cases` 加载器 + `golden.py` 契约 +
 oracle_source loader 接线 + acc-spec/acc-runner-dev 产 golden 纪律 + 安全边界文档 + 单测改 fixture）**另开 PR，代码未实施**。
 
-**详细设计 / 取舍 / 候选** 见 `doc/oprunway-golden-decoupling-adr.md`。
+**详细设计 / 取舍 / 候选** 见 `dev-doc/oprunway-golden-decoupling-adr.md`。
 
 **tier 说明**：留 `proposed`，待 `bureau:review`。
 
