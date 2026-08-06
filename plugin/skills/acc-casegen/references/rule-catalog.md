@@ -2,7 +2,7 @@
 
 > **定位 guard**：acc-casegen 是落地设计 **P2 规划**、**尚未接入 live 流、不落盘 `caseset.json`、不调用/不替代 `gen_cases.py`**；本库只描述展开规则（live 用例生成由确定性 `gen_cases.py` 负责，判定归确定性 validator）。
 > acc-casegen 的知识库：**「算子含某原语 → 必须生成哪些测试用例」**。跨算子复用。
-> canon 设计页：`Primitive-to-case rule library`。种子：夹具 LayerNormGroupedMatmulBiasSilu 评审 + rule-catalog v1 对 catlass 74 example 的对抗评审（`doc/oprunway-task1-cases-critique.md` / `doc/oprunway-rule-catalog-critique.md`）。
+> canon 设计页：`Primitive-to-case rule library`。种子：夹具 LayerNormGroupedMatmulBiasSilu 评审 + rule-catalog v1 对 catlass 74 example 的对抗评审（`dev-doc/oprunway-task1-cases-critique.md` / `dev-doc/oprunway-rule-catalog-critique.md`）。
 > 本文件是**清单**；「拆原语→查库→实例化→去重→元规则」的展开逻辑见 [`../SKILL.md`](../SKILL.md)（acc-casegen skill）。**阈值/口径不在此（在 policy）；本库只管「测什么形状/什么数据/为什么」。**
 
 ## 怎么用（展开算法）

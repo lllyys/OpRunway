@@ -1,5 +1,5 @@
 #!/bin/bash
-# OpRunway · catlass 真机编排（ascend-a5 arch 3510/fp32 主；ascend-a3 arch 2201/fp16 de-risk）。
+# OpRunway · catlass 真机编排（950 真机 arch 3510/fp32 主；A2A3 真机 arch 2201/fp16 de-risk）。
 #
 # ⚠ 就地运行于 **NPU host**（非从 Mac ssh/scp 远端编排；文件名的 "remote" 指本机是那台远端 NPU）。
 #
@@ -7,7 +7,7 @@
 #       msprof op 采 kernel-only Task Duration(us) → 逐 case OpBasicInfo.csv → 交 Python catlass_parse 统计。
 #
 # ⚠⚠ **待真机验证**（本轮不跑）：runner 能否 bisheng/ccec 编成、extern C 符号能否被 msprof -k 命中、Task Duration
-#     实数、staging 与 build.sh 交互 —— 全须 ascend-a5/a3 实测 + 人工确认。**不得假称已验证**。
+#     实数、staging 与 build.sh 交互 —— 全须 950 / A2A3 真机 实测 + 人工确认。**不得假称已验证**。
 # ⚠ 副作用先确认（CLAUDE.md #1/#3）：build/run/msprof 改 catlass 工作副本、写 run 子目录 → **须显式
 #    OPRUNWAY_CATLASS_REAL=1 opt-in**，否则 fail-fast、零副作用。rm 只限受控前缀内的专属 run 子目录。
 # ⚠ 假通过零容忍：BIN/msprof 关键步失败一律非零退出并打印 OPRUNWAY_NPU_FAILED，**绝不 || true 吞失败后照报 DONE**。

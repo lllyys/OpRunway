@@ -386,6 +386,51 @@ def _perf_entry(cid, perf_by_case):
     return out
 
 
+#: evidence 里「这条 case 没有可比结果」的两种一等状态。**都不是 pass、也都不是「该 case 不存在」**：
+#: validator 见到非 `ok` 状态一律判功能 fail，验收门还会反向核它确实落成失败。
+#:
+#: · `execution_failed`   —— driver 逐 case 跑测失败（DUT 拒绝 / kernel 崩 / 输入物化或读回失败）。
+#:   身份、逐字错误原文由 `out_manifest.failed[]` 带过来。
+#: · `golden_unavailable` —— 任务书用例，但参考实现算不出 golden（`gen_cases.GOLDEN_UNAVAILABLE`
+#:   写在 `case.expected.golden_status`）。case 跑不跑得动是另一回事，精度维本身**判不了**。
+#:   ⚠ 词与 `gen_cases.GOLDEN_UNAVAILABLE` 必须一致；这里逐字重述而不 import，是因为
+#:   gen_cases 顶层依赖远比本模块重，改词时两处同改（单测钉住）。
+EV_STATUS_EXECUTION_FAILED = "execution_failed"
+EV_STATUS_GOLDEN_UNAVAILABLE = "golden_unavailable"
+
+
+def _failed_from_manifest(manifest, produced_by_cid):
+    """读 `out_manifest.failed[]`（driver 逐 case 失败台账）→ `{case_id: 记录}`；结构一处不合即拒。
+
+    缺席（老 driver 产的 manifest 没这个键）合法 → 空表，行为与本条落地前逐字相同。
+    在场就一条都不放松：缺 case_id / 缺逐字错误原文 / 重复 / **与 produced 撞车**（同一条 case
+    既成功又失败）一律 fail-closed —— 这些都属于「产物自相矛盾」，不是可以兜一下的小瑕疵。
+    """
+    rows = manifest.get("failed")
+    if rows is None:
+        return {}
+    if not isinstance(rows, list):
+        raise RuntimeError(f"out_manifest.failed 须为列表，得 {type(rows).__name__}——产物损坏，拒")
+    out = {}
+    for rec in rows:
+        if not isinstance(rec, dict):
+            raise RuntimeError(f"out_manifest.failed 含非对象条目（{rec!r}）——产物损坏，拒")
+        cid = rec.get("case_id")
+        if not (isinstance(cid, str) and cid):
+            raise RuntimeError(f"out_manifest.failed 有条目缺/坏 case_id（{cid!r}）——产物损坏，拒")
+        err = rec.get("error")
+        if not (isinstance(err, str) and err.strip()):
+            raise RuntimeError(f"{cid}: out_manifest.failed 缺逐字错误原文——"
+                               f"「这条没跑成」必须拿得出原话，空理由不算证据，拒")
+        if cid in out:
+            raise RuntimeError(f"out_manifest.failed 有重复 case_id={cid!r}——拒")
+        if cid in produced_by_cid:
+            raise RuntimeError(f"{cid}: 同时出现在 out_manifest 的 produced 与 failed——"
+                               f"同一条 case 不可能既产出又失败，产物自相矛盾，拒")
+        out[cid] = rec
+    return out
+
+
 def build_multi_output_evidence(caseset, work_dir, out_dir, perf_by_case=None):
     """多输出契约的 evidence 组装（OpRunway 侧 readback + 逐输出 compute_metrics，蓝图 §2.3）。
 
@@ -443,9 +488,10 @@ def build_multi_output_evidence(caseset, work_dir, out_dir, perf_by_case=None):
                 raise RuntimeError(f"{cid_m}: out_manifest 输出 index={idx} 重复——后写会静默覆盖前写，拒")
             by_idx[idx] = o
         produced_by_cid[cid_m] = by_idx
+    failed_by_cid = _failed_from_manifest(manifest, produced_by_cid)
     # manifest 记了 caseset 里没有的 case = driver 跑的不是这份用例集（或产物串了轮次）→ 拒。
     _cs_ids = {c["id"] for c in caseset["cases"]}
-    _extra_cids = sorted(set(produced_by_cid) - _cs_ids)
+    _extra_cids = sorted((set(produced_by_cid) | set(failed_by_cid)) - _cs_ids)
     if _extra_cids:
         raise RuntimeError(f"out_manifest 含 caseset 之外的 case_id {_extra_cids}"
                            f"——跑的不是这份用例集（或混了上一轮产物），拒")
@@ -454,6 +500,25 @@ def build_multi_output_evidence(caseset, work_dir, out_dir, perf_by_case=None):
         cid = c["id"]
         _check_id("case_id", cid)
         exp = c["expected"]
+        # —— 两种「没有可比结果」的一等状态：保留身份、如实记原因、**绝不当通过**————————
+        # 放在读 golden / out 之前：这两类 case 要么没有产物、要么没有真值，继续往下走只会
+        # 在 np.load(None) 之类的地方炸掉整轮（正是本轮要修的那种「一条挂、全轮零产物」）。
+        _failed = failed_by_cid.get(cid)
+        if _failed is not None:
+            ev.append({"case_id": cid, "status": EV_STATUS_EXECUTION_FAILED,
+                       "error_kind": _failed.get("error_kind") or EV_STATUS_EXECUTION_FAILED,
+                       "error_phase": _failed.get("phase"),
+                       "error_type": _failed.get("error_type"),
+                       "error": _failed["error"],           # 逐字原文，原样带进 evidence
+                       "perf": _perf_entry(cid, perf_by_case)})
+            continue
+        if exp.get("golden_status") == EV_STATUS_GOLDEN_UNAVAILABLE:
+            ev.append({"case_id": cid, "status": EV_STATUS_GOLDEN_UNAVAILABLE,
+                       "golden_unavailable_reason": exp.get("golden_unavailable_reason"),
+                       "note": "任务书用例，参考实现算不出 golden → 精度维不可判；"
+                               "身份与输入字节完整保留，须按 BLOCKED 记账，不得当通过",
+                       "perf": _perf_entry(cid, perf_by_case)})
+            continue
         outs = exp.get("outputs")
         prod = produced_by_cid.get(cid)
         if prod is None:
@@ -1161,7 +1226,7 @@ def run_new_example(caseset, work_dir, defect_cases=None):
         dtn = c["inputs"][0]["dtype"]
         if dtn not in _NP:  # T7：int16/int32/bfloat16 的 runner.cpp 分支属 **Track C**（挂真机+pr_facts）
             raise ValueError(f"{cid}: runner v1 仅支持 {sorted(_NP)}；dtype {dtn!r} 属 Track C——"
-                             f"runner.cpp 新 dtype 分支须从算子 example/op_def 抠+真机验证，见 doc/oprunway-todo.md gap")
+                             f"runner.cpp 新 dtype 分支须从算子 example/op_def 抠+真机验证，见 dev-doc/oprunway-todo.md gap")
         if any(inp["dtype"] != dtn for inp in c["inputs"]):  # runner v1 全输入同 dtype，拒静默强转
             raise ValueError(f"{cid}: 多输入 dtype 不一致 {[i['dtype'] for i in c['inputs']]}"
                              f"（runner v1 要求同 dtype；混合 dtype 需 per-input manifest）")

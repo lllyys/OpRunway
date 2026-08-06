@@ -7,6 +7,10 @@
 # 真机本地配置：实际主机别名 / 容器名 / 远端路径不入库；只跟踪脱敏模板
 /.oprunway/*.env
 !/.oprunway/*.env.example
+# per-op **输入**产物根（ops_root 缺省落点，见 repo_adapter.ops_root）：
+# golden.py / runner.cpp / spec 都是用户侧按算子生成的，不是仓内容。
+# 2026-08-05 补：此前只挡了 *.env，taskdoc golden wrapper 因此被误提交过一次。
+/.oprunway/ops/
 
 # 本地工具配置：各人自己的 LOC 门限、抽取规则等，不入库
 /.claude/*.local.md

@@ -12,8 +12,12 @@
 标准与性能采集策略均不在这里修改。CP-D 会重新生成完整 caseset，并在启动
 adapter 前复核这份收据与当前 spec/caseset/执行逻辑仍完全绑定。
 
-**来源通路**：本门目前只接 ``dut_source == "pull_request"``，``local_checkout``
-显式 fail-closed（见 ``_require_pull_request_path``）。
+**来源通路**：两条取源形态（``gitcode_pr`` / ``local_snapshot``）都接。判据一律由
+:mod:`source_provenance` 一处解释：起跑前 ``check_config_against_preflight`` 只挡通路错配，
+真正的字节对账在 build 段的 ``check_build_identity``（PR 比 40 位 head、本地比同 scope 的
+子树 merkle）。⚠ 曾经这里有一道「只接 PR 通路」的硬 BLOCK，理由是「aclnn 构建端没有可与
+本地摘要对账的锚」；那个前提已不成立——``aclnn_adapter`` 现在在容器内用与取材端**同一份**
+算法算出 ``SNAPSHOT_SHA256`` / ``SUBTREE_SHA256``，锚是存在的，故该门已删除。
 """
 
 import argparse
@@ -28,14 +32,8 @@ import sys
 
 import aclnn_adapter
 import content_address
-# ⚠ 只 import 判别式**内核**，不 import 聚合模块 `dut_source`：本门在来源这块的判定依赖
-#   就是 `of()` + `PULL_REQUEST` 两个名字，而 `_LOGIC_FILES` 是逐字节哈希。多绑一个
-#   `dut_source.py`，「改一个 URL 脱敏边界 / 调一下 source_facts 搜索顺序」就会作废
-#   真机 harness 收据、白跑一次昂贵的 NPU 见证。绑定面 = 判定面，不多不少。
-#   ⚠ 反过来也成立：哪天本门真要用 `dut_source` 里的东西，就**必须**同时把
-#   `dut_source.py` 加进 `_LOGIC_FILES`——`LogicBindingCoverageTest` 会当场变红。
-import dut_source_kind
 import repo_adapter
+import source_provenance
 import validator
 
 
@@ -50,14 +48,12 @@ _LOGIC_FILES = (
     "precision_policy.py",
     "validator.py",
     "content_address.py",
-    # ⚠ 判别式是本信任门的判定依赖（见 `_require_pull_request_path`），必须列进来：
-    #   漏了它，`bindings.logic_files` 就覆盖不到判别逻辑——有人把 `of()` 改成
-    #   「未知取值缺省 pull_request」，旧收据照样 revalidate 通过，等于开一个新的 fail-open 面。
-    # ⚠ 这里绑的是**内核** `dut_source_kind.py`（受控词表 + `of`），不是聚合模块
-    #   `dut_source.py`。后者还装着 URL 凭据策略 / build receipt 锚校验 /
-    #   `source_facts.json` 查找三类与本门判定**无关**的职责，绑它 = 那三类改动一动
-    #   就作废真机收据。内核零 import，逐字节哈希它 == 覆盖它的全部判定语义。
-    "dut_source_kind.py",
+    # ⚠ 来源身份判别式（`check_config_against_preflight` / `check_build_identity` /
+    #   `_require_present` / `_ROUTES`）就住在这个模块里，本门**直接 import 并依赖它出判定**，
+    #   所以它必须进逐字节哈希：漏了它，有人把 `_ROUTES` 放宽、或把 `_require_explicit_none`
+    #   改成 `.get()`，旧收据照样 revalidate 通过——绑定面覆盖不到判定面，就是一个 fail-open。
+    #   绑定面 = 判定面，不多不少（`LogicBindingCoverageTest` 检查①机械钉住这条）。
+    "source_provenance.py",
     "gen_cases.py",
     "aclnn_runtime/__init__.py",
     "aclnn_runtime/base.py",
@@ -65,60 +61,33 @@ _LOGIC_FILES = (
     "aclnn_runtime/aclnn_driver.py",
     "aclnn_runtime/aclnn_runner.py",
 )
-_HEX40 = re.compile(r"[0-9a-f]{40}")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
 def _require_bindings(preflight):
     """取出 `preflight.bindings` 并把形态硬化在**任何**字段读取之前；判不出形态就停。
 
-    单独拆出来是因为 `bindings` 有两个触碰点：来源通路门（`_require_pull_request_path`）
-    与 `run_gate` 里更早的 spec 绑定核对。两处都必须走同一套形态判定，否则同一个畸形
-    payload 会按触碰顺序给出两种不同的失败形态。
+    单独拆出来是因为 `bindings` 有多个触碰点：`run_gate` 的 spec 绑定核对，以及两处交给
+    `source_provenance` 做来源身份对账的入口。三处都必须走同一套形态判定，否则同一个畸形
+    payload 会按触碰顺序给出几种不同的失败形态。
+
+    ⚠ 别把调用点改回 `preflight.get("bindings") or {}`：`or {}` 会把缺席 / None / `[]` /
+    `""` 一律抹平成空 object，于是「这份 preflight 根本没有来源声明」和「它声明了什么」
+    在报错里变成同一件事。下游 `source_provenance._require_kind` 确实仍会 fail-closed，
+    但报的是「provenance_kind 键缺失」——把「形态判不出来」说成「字段没写」，误导排障。
     """
     # ⚠ 这两道检查现在是 preflight 的**第一次触碰**，形态要自己扛住：payload 不是 object
     #   时 `.get` 会抛 AttributeError（不在调用方的收敛清单里），当场变成裸 traceback。
     if not isinstance(preflight, dict):
         raise ValueError("aclnn preflight payload 须为 JSON object")
     bindings = preflight.get("bindings")
-    # ⚠ 这里**不能**简化成 `preflight.get("bindings") or {}`。`dut_source_kind.of()` 的
-    #   「缺席即 pull_request」是给**旧收据**的向后兼容，前提是 payload 形态本身可信；
-    #   `or {}` 会把缺席 / None / `[]` / 字符串一律抹平成空 object，于是「这份 preflight
-    #   根本没有来源声明」和「它明确声明了 pull_request」在通路门里变成同一件事——
-    #   本地通路的 preflight 只要 bindings 丢了形态（写坏、被裁剪、schema 换代），
-    #   那道门就当场判它是 PR 通路**放行**，而通路门的全部意义就是拦住这一步。
-    #   今天不出事靠的是下游 40-hex 硬化与 `provenance.head_sha != None` 的**间接**兜底，
-    #   那是偶然的 fail-closed、不是设计。形态判不出来 = 来源判不出来 = 停。
-    #   注：空 object `{}` 仍然放行——它是合法 JSON object，正是上面那条向后兼容要接的形态。
+    # ⚠ 注：空 object `{}` 在**本函数**放行——它是合法 JSON object。真正判它「没有来源声明」
+    #   的是 `source_provenance._require_kind`（`provenance_kind` 键缺失即 fail-closed）。
+    #   本函数只负责「形态判得出来」这一层，不替下游做来源判定。
     if not isinstance(bindings, dict):
         raise ValueError(
             "aclnn_preflight.bindings 缺失或不是 JSON object，无法判定来源通路 —— fail-closed")
     return bindings
-
-
-def _require_pull_request_path(preflight):
-    """本轮 aclnn_py 真机 harness 信任门只接 `pull_request` 来源通路，其余一律 fail-closed。
-
-    **为什么是显式 BLOCK 而不是接通**：`aclnn_adapter` 只能按 PR ref 在容器内重新取源
-    build，构建端根本没有可与 `local_checkout.root_digest` 对账的锚。放它过去，vendor `.so`
-    与被测字节之间就没有机器可核的对应关系了——收据看着齐全，绑定其实是空的。
-    这是**如实挂账**：通路没接就说没接。
-
-    **为什么要在三处各调一次**（不能只留一处）：`_validate_build_provenance` 是
-    `run_gate` 与 `validate_receipt` 的共同必经点，是兜底；但两条入口都会**更早**碰到
-    `aclnn_adapter._aclnn_cfg()`，那里在缺 `OPRUNWAY_ACLNN_PR_REF` 时抛的是
-    「PR head 引用必填」——本地通路会因此拿到一个**误导性**报错，把「这条通路没接」
-    说成「少配了个环境变量」。所以两条入口都要在碰 `_aclnn_cfg()` 之前先 BLOCK。
-    """
-    # 形态先硬化（含「空 object 仍按 pull_request 向后兼容」的边界），再判来源。
-    bindings = _require_bindings(preflight)
-    kind = dut_source_kind.of(bindings, where="aclnn_preflight.bindings")
-    if kind != dut_source_kind.PULL_REQUEST:
-        raise ValueError(
-            f"aclnn_py 真机 harness 信任门尚未接入 dut_source={kind}："
-            f"aclnn_adapter 只能按 PR ref 在容器内重新取源 build，"
-            f"构建端没有可与 local_checkout.root_digest 对账的锚 → fail-closed")
-    return kind
 
 
 def _strict_json(path):
@@ -223,9 +192,13 @@ def _probe_runtime_environment(cfg):
 
 def _execution_binding(cfg, caseset):
     public = {
+        # `source_mode` / `snapshot_sha256` 必须在这份公开配置里：源身份按取源形态各核各的，
+        # 少了它们，snapshot 通路的收据就退化成「按 git 口径核了个空 head」。
+        # 两者都不是私有主机信息（一个是受控词表、一个是内容摘要），可直接落工件。
         key: cfg[key] for key in (
             "target", "op_subdir", "vendor_name", "base_repo", "pr_ref",
-            "head_sha", "soc", "snake_op", "device")
+            "head_sha", "soc", "snake_op", "device",
+            "source_mode", "snapshot_sha256")
     }
     public["build_args"] = aclnn_adapter._build_args(cfg)
     public["symbols"] = list(aclnn_adapter._required_symbols(caseset))
@@ -469,9 +442,11 @@ def _receipt_bindings(root, spec, caseset, preflight, selected, execution):
         "caseset_sha256": _sha(caseset),
         "preflight_digest": content_address.content_digest(
             _PREFLIGHT_DOMAIN, preflight),
-        # 此处只可能是 PR 锚：本地通路已在 `run_gate` / `validate_receipt` /
-        # `_validate_build_provenance` 三处前置 BLOCK，走不到这里。
-        "pr_head_sha": (preflight.get("bindings") or {}).get("pr_head_sha"),
+        # ⚠ 收据里这一格**只是 PR 锚**：`local_snapshot` 通路它恒为 null，那是该形态的**正确值**
+        #   （没有 git 就是没有 head，绝不合成）。本地通路的字节锚不在这里，而是由
+        #   `source_provenance.check_build_identity` 在 build 段核「同 scope 的子树 merkle」。
+        #   ⛔ 别因为「本地通路这一格是空的」就给它填一个摘要顶上——那是拿 merkle 冒充 commit id。
+        "pr_head_sha": _require_bindings(preflight).get("pr_head_sha"),
         "logic_files": _logic_hashes(),
         "golden_source": _golden_source_binding(spec),
         "selected_data": _selected_data_manifest(root, selected),
@@ -500,15 +475,19 @@ def _expected_output_contracts(case):
 
 
 def _validate_build_provenance(provenance, execution, preflight):
-    # 通路门（兜底的那一处）：本函数是 run_gate 与 validate_receipt 的**共同**必经点，
-    # 下面整段构建对账都以「锚 = PR head」为前提，非 PR 通路一个字段都对不上。
-    _require_pull_request_path(preflight)
+    """核 build provenance ↔ 执行环境 ↔ CP-C0；返回源 provenance 的降级挂账（供收据留痕）。
+
+    本函数是 `run_gate` 与 `validate_receipt` 的**共同**必经点，是来源身份对账的兜底位置。
+    """
     if not isinstance(provenance, dict):
         raise ValueError("harness trust receipt.build_provenance 缺失")
     cfg = execution["config"]
     runtime = execution["runtime"]
+    # 源身份（head SHA / 快照 merkle）按取源形态各核各的，统一由 source_provenance 解释；
+    # 其余 build 参数仍在下面逐字段硬比。
+    degradations = source_provenance.check_build_identity(
+        provenance, cfg, _require_bindings(preflight))
     expected = {
-        "head_sha": cfg["head_sha"],
         "pr_ref": cfg["pr_ref"],
         "base_repo": cfg["base_repo"],
         "op_subdir": cfg["op_subdir"],
@@ -524,14 +503,12 @@ def _validate_build_provenance(provenance, execution, preflight):
         if provenance.get(key) != value:
             raise ValueError(
                 f"harness trust build_provenance.{key} 与当前执行环境不一致")
-    if provenance.get("head_sha") != (
-            (preflight.get("bindings") or {}).get("pr_head_sha")):
-        raise ValueError("harness trust build head 与 CP-C0 PR head 不一致")
     for key in ("build_reused", "stamp_mismatch_rebuilt",
                 "so_digest_unavailable"):
         if not isinstance(provenance.get(key), bool):
             raise ValueError(
                 f"harness trust build_provenance.{key} 须为 bool")
+    return degradations
 
 
 def _validate_checks(root, selected, checks):
@@ -595,10 +572,12 @@ def validate_receipt(root, receipt_rel, spec, caseset):
         raise ValueError(f"harness trust status 非可信: {receipt.get('status')!r}")
     if receipt.get("acceptance_verdict") is not None:
         raise ValueError("harness trust receipt 不得携带算子验收裁决")
-    # 通路门（入口处）：必须赶在 `_current_execution_binding` 之前——它会调
-    # `aclnn_adapter._aclnn_cfg()`，本地通路会先撞上「PR head 引用必填」这个误导性报错，
-    # 而 `_validate_build_provenance` 里的同一道门要到本函数最后才触发。
-    _require_pull_request_path(preflight)
+    # ⚠ preflight.bindings 的形态要在这里就硬化，**必须赶在 `_current_execution_binding` 之前**
+    #   ——它会调 `aclnn_adapter._aclnn_cfg()`，那里在缺 `OPRUNWAY_ACLNN_PR_REF` 时抛的是
+    #   「PR head 引用必填」。一份 bindings 写坏/被裁剪的 preflight 会因此拿到一个**误导性**报错，
+    #   把「来源形态判不出来」说成「少配了个环境变量」，而真正的形态校验要到本函数最后
+    #   （`_validate_build_provenance`）才触发。两条入口的失败形态必须一致。
+    _require_bindings(preflight)
     bindings = receipt.get("bindings")
     if not isinstance(bindings, dict):
         raise ValueError("harness trust receipt.bindings 缺失")
@@ -634,7 +613,7 @@ def run_gate(root, spec_rel, caseset_rel, preflight_rel, out_rel):
     if preflight.get("status") != "READY_WAIT_NPU_TRUST_GATE":
         raise ValueError(
             f"aclnn preflight 未就绪: {preflight.get('status')!r}")
-    # ⚠ 这是本函数里对 `bindings` 的**第一次**触碰，排在通路门之前，所以形态要在这里就硬化：
+    # ⚠ 这是本函数里对 `bindings` 的**第一次**触碰，所以形态要在这里就硬化：
     #   `or {}` 下 None/`[]` 会报「与当前 spec 不绑定」（fail-closed，但把「形态判不出来」
     #   说成「绑错了 spec」），非空字符串 / 非空 list 则直接让 `.get` 抛 AttributeError——
     #   裸 traceback，不在调用方的收敛清单里。走同一套显式形态校验，报同一个错。
@@ -654,20 +633,15 @@ def run_gate(root, spec_rel, caseset_rel, preflight_rel, out_rel):
         inp["dtype"] for case in selected for inp in case.get("inputs") or []
     })
 
-    # 通路门（入口处）：必须赶在 `_aclnn_cfg()` 之前，理由同 `validate_receipt`。
-    _require_pull_request_path(preflight)
     cfg = aclnn_adapter._aclnn_cfg()
     execution = _execution_binding(cfg, caseset)
-    preflight_head = (preflight.get("bindings") or {}).get("pr_head_sha")
-    # ⚠ 形态先硬化再交叉核：下面那条等值比较本身不挑形态，缺席/畸形时它只是「两边一样地
-    #   畸形」就放行了。今天没出事纯粹是靠 `cfg.head_sha` 必是 40-hex 间接兜住——那是偶然的
-    #   fail-closed，不是设计。CP-C0 没绑定合法 PR head 就没有可交叉核的锚，直接停。
-    if not isinstance(preflight_head, str) or not _HEX40.fullmatch(preflight_head):
-        raise ValueError(
-            f"CP-C0 preflight 未绑定 40 位 PR head，无法交叉核：{preflight_head!r}")
-    if cfg.get("head_sha") != preflight_head:
-        raise ValueError(
-            "真机配置 head_sha 与 CP-C0 已绑定的 PR head 不一致")
+    # 起跑前先按取源形态核一遍「配置声明的源」与 CP-C0 已绑定的源是否同一：
+    # git_fetch 比 head SHA；local_snapshot 无 head 可比，只能等 build 回报子树 merkle 后核
+    # （下面 `_validate_build_provenance` 那一处），故此处只挡形态/通路不匹配。
+    # ⚠ 锚的形态硬化（40-hex / 64-hex、缺席 vs 显式 null）在 `source_provenance` 里做，
+    #   比原先这里手写的 40-hex 检查更严——别再在本文件写第二份判据。
+    source_provenance.check_config_against_preflight(
+        cfg, _require_bindings(preflight))
     proj = aclnn_adapter.find_aclnn_project(
         spec["op"], cfg["ops_root"], cfg["op_subdir"])
     out_dir = os.path.join(work, "aclnn_trust_out")
@@ -676,7 +650,7 @@ def run_gate(root, spec_rel, caseset_rel, preflight_rel, out_rel):
     evidence = repo_adapter.build_multi_output_evidence(
         witness, work, out_dir)
     checks = _judge_evidence(selected, evidence)
-    _validate_build_provenance(provenance, execution, preflight)
+    degradations = _validate_build_provenance(provenance, execution, preflight)
     payload = {
         "schema": _SCHEMA,
         "schema_version": 1,
@@ -688,6 +662,13 @@ def run_gate(root, spec_rel, caseset_rel, preflight_rel, out_rel):
         "coverage": coverage,
         "checks": checks,
         "build_provenance": provenance,
+        # 源 provenance 的机读**降级**挂账（如 `pr_head_unbound` = 本该绑 PR head 却只拿到
+        # 一份本地快照）。收据带着它往下走。
+        "provenance_degradations": degradations,
+        # 机读**中性形态事实**：本地源码本来就没有上游 commit，这不是降级。两者分开记，
+        # 下游报告既不得据此声称已绑定 PR head，也不得把正常的本地源码验收写成异常。
+        "provenance_form_facts": source_provenance.form_facts(
+            preflight.get("bindings") or {}),
         "note": (
             "仅证明通用 aclnn_py harness 对当前 PR 签名、dtype 与 CPU golden 的确定性小见证；"
             "不替代、不裁剪正式 Task2/Task3。"),

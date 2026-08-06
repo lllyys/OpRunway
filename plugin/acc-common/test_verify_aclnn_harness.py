@@ -64,7 +64,10 @@ def _case(cid, dtype, nullable, size):
 def _fixtures():
     preflight = {
         "status": "READY_WAIT_NPU_TRUST_GATE",
-        "bindings": {"spec_sha256": "unused", "pr_head_sha": "a" * 40},
+        # `provenance_kind` 是 CP-C0 起就必落的绑定项：源身份按取源形态各核各的，
+        # 少了它，真机侧无从判断该比 head SHA 还是比快照 merkle。这里固定 git 取源那一档。
+        "bindings": {"spec_sha256": "unused", "pr_head_sha": "a" * 40,
+                     "provenance_kind": "gitcode_pr"},
         "variants": [_variant(True), _variant(False)],
     }
     caseset = {
@@ -92,6 +95,10 @@ def _execution_fixture():
             "soc": "ascend-test",
             "snake_op": "reduce",
             "device": 0,
+            # 取源形态与快照 merkle 同属公开执行配置：源身份按形态各核各的，缺了它
+            # snapshot 通路会被当成 git 通路去比一个空 head。
+            "source_mode": "git_fetch",
+            "snapshot_sha256": "",
             "build_args": "--pkg --ops=reduce",
             "symbols": ["Reduce"],
             "reuse_build": True,
@@ -109,6 +116,7 @@ def _build_provenance_fixture():
     cfg = execution["config"]
     return {
         "head_sha": cfg["head_sha"],
+        "provenance_kind": cfg["source_mode"],
         "pr_ref": cfg["pr_ref"],
         "base_repo": cfg["base_repo"],
         "op_subdir": cfg["op_subdir"],
@@ -301,117 +309,185 @@ class ReceiptTest(unittest.TestCase):
             self._validate()
 
 
+def _drive_gate(root, bindings, execution, build_provenance, cfg):
+    """铺齐一次 run_gate 所需的全部字节，真跑一遍门，再原地复核收据。
+
+    只 mock 三处**真机**动作（取执行配置 / 起 build / 拉回输出），其余判定逻辑全部真跑，
+    所以来源身份对账那一段是真实执行的。返回 `(payload, reused)`。
+
+    `bindings` 是 CP-C0 事实包的来源绑定（按取源形态给不同的一份），`cfg` 是真机侧
+    `_aclnn_cfg()` 的返回——两者必须描述**同一条**通路，否则本门就该报错，那正是被测行为。
+    """
+    spec = {"op": "Reduce", "runner_form": "aclnn_py"}
+    caseset, preflight = _fixtures()
+    preflight["bindings"] = dict(bindings)
+    preflight["bindings"]["spec_sha256"] = H._sha(spec)
+    selected, _ = H.select_cases(caseset, preflight)
+    work = os.path.join(root, "work")
+    ops_root = os.path.join(root, "ops")
+    os.makedirs(os.path.join(ops_root, "Reduce"))
+    with open(os.path.join(ops_root, "Reduce", "golden.py"), "wb") as out:
+        out.write(b"# golden source\n")
+    with open(os.path.join(root, "spec.json"), "w", encoding="utf-8") as out:
+        json.dump(spec, out)
+    with open(os.path.join(root, "caseset.json"), "w", encoding="utf-8") as out:
+        json.dump(caseset, out)
+    content_address.write_artifact(
+        root, "work/aclnn_preflight.json", H._PREFLIGHT_DOMAIN, preflight)
+
+    evidence = []
+    for case in selected:
+        case_dir = os.path.join(work, case["id"])
+        os.makedirs(case_dir)
+        with open(os.path.join(case_dir, "x1.npy"), "wb") as out:
+            out.write(("input:" + case["id"]).encode())
+        output_evidence = []
+        for index, expected in enumerate(case["expected"]["outputs"]):
+            golden_path = os.path.join(work, expected["golden_path"])
+            with open(golden_path, "wb") as out:
+                out.write(("golden:" + case["id"] + f":{index}").encode())
+            out_rel = f"aclnn_trust_out/{case['id']}/out_{index}.bin"
+            out_path = os.path.join(work, out_rel)
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with open(out_path, "wb") as out:
+                out.write(("actual:" + case["id"] + f":{index}").encode())
+            policy = expected["policy"]
+            metrics = (
+                {"exact_mismatch": 0, "numel": 1}
+                if policy["kind"] == "exact"
+                else {"mismatch": 0, "numel": 1,
+                      "max_abs_err": 0.0, "max_rel_err": 0.0}
+            )
+            output_evidence.append({
+                "name": expected["name"],
+                "role": expected["role"],
+                "policy": policy,
+                "metrics": metrics,
+                "golden_path": expected["golden_path"],
+                "out_path": out_rel,
+                "provenance": {
+                    "golden_sha256": H._file_sha(golden_path),
+                    "out_sha256": H._file_sha(out_path),
+                },
+            })
+        evidence.append({
+            "case_id": case["id"],
+            "status": "ok",
+            "precision": {"outputs": output_evidence},
+        })
+
+    with mock.patch.dict(os.environ, {
+            "OPRUNWAY_OPS_DIR": ops_root,
+            "OPRUNWAY_ACLNN_REAL": "1",
+            }), \
+            mock.patch.object(
+                H.aclnn_adapter, "_aclnn_cfg", return_value=cfg), \
+            mock.patch.object(
+                H, "_execution_binding", return_value=execution), \
+            mock.patch.object(
+                H.aclnn_adapter, "find_aclnn_project",
+                return_value="/unused/project"), \
+            mock.patch.object(
+                H.aclnn_adapter, "_run_aclnn_real",
+                return_value=build_provenance), \
+            mock.patch.object(
+                H.repo_adapter, "build_multi_output_evidence",
+                return_value=evidence):
+        payload = H.run_gate(
+            root, "spec.json", "caseset.json",
+            "work/aclnn_preflight.json", "work/aclnn_harness_trust.json")
+        with mock.patch.object(
+                H, "_current_execution_binding", return_value=execution):
+            reused = H.validate_receipt(
+                root, "work/aclnn_harness_trust.json", spec, caseset)
+    return payload, reused
+
+
 class RunGateTest(unittest.TestCase):
     def test_successful_gate_writes_a_revalidatable_receipt(self):
         with tempfile.TemporaryDirectory() as root:
-            spec = {"op": "Reduce", "runner_form": "aclnn_py"}
-            caseset, preflight = _fixtures()
-            preflight["bindings"]["spec_sha256"] = H._sha(spec)
-            selected, _ = H.select_cases(caseset, preflight)
-            work = os.path.join(root, "work")
-            ops_root = os.path.join(root, "ops")
-            os.makedirs(os.path.join(ops_root, "Reduce"))
-            with open(os.path.join(
-                    ops_root, "Reduce", "golden.py"), "wb") as out:
-                out.write(b"# golden source\n")
-            with open(os.path.join(root, "spec.json"), "w",
-                      encoding="utf-8") as out:
-                json.dump(spec, out)
-            with open(os.path.join(root, "caseset.json"), "w",
-                      encoding="utf-8") as out:
-                json.dump(caseset, out)
-            content_address.write_artifact(
-                root, "work/aclnn_preflight.json",
-                H._PREFLIGHT_DOMAIN, preflight)
+            payload, reused = _drive_gate(
+                root,
+                _fixtures()[1]["bindings"],
+                _execution_fixture(),
+                _build_provenance_fixture(),
+                {"head_sha": "a" * 40, "ops_root": "/unused/ops",
+                 "op_subdir": "experimental/reduce"})
+            self.assertEqual(payload["status"], H._STATUS_TRUSTED)
+            self.assertEqual(payload["bindings"]["pr_head_sha"], "a" * 40)
+            self.assertEqual(reused["coverage"]["selected_count"], 2)
 
-            evidence = []
-            for case in selected:
-                case_dir = os.path.join(work, case["id"])
-                os.makedirs(case_dir)
-                with open(os.path.join(case_dir, "x1.npy"), "wb") as out:
-                    out.write(("input:" + case["id"]).encode())
-                output_evidence = []
-                for index, expected in enumerate(
-                        case["expected"]["outputs"]):
-                    golden_path = os.path.join(
-                        work, expected["golden_path"])
-                    with open(golden_path, "wb") as out:
-                        out.write(("golden:" + case["id"] +
-                                   f":{index}").encode())
-                    out_rel = (
-                        f"aclnn_trust_out/{case['id']}/out_{index}.bin")
-                    out_path = os.path.join(work, out_rel)
-                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                    with open(out_path, "wb") as out:
-                        out.write(("actual:" + case["id"] +
-                                   f":{index}").encode())
-                    policy = expected["policy"]
-                    metrics = (
-                        {"exact_mismatch": 0, "numel": 1}
-                        if policy["kind"] == "exact"
-                        else {"mismatch": 0, "numel": 1,
-                              "max_abs_err": 0.0, "max_rel_err": 0.0}
-                    )
-                    output_evidence.append({
-                        "name": expected["name"],
-                        "role": expected["role"],
-                        "policy": policy,
-                        "metrics": metrics,
-                        "golden_path": expected["golden_path"],
-                        "out_path": out_rel,
-                        "provenance": {
-                            "golden_sha256": H._file_sha(golden_path),
-                            "out_sha256": H._file_sha(out_path),
-                        },
-                    })
-                evidence.append({
-                    "case_id": case["id"],
-                    "status": "ok",
-                    "precision": {"outputs": output_evidence},
-                })
+    def test_local_snapshot_route_runs_end_to_end_and_revalidates(self):
+        """本地档一路跑到收据、且能原地复核——门被删掉之后应有的样子。
 
-            execution = _execution_fixture()
-            cfg = {
-                "head_sha": "a" * 40,
-                "ops_root": "/unused/ops",
-                "op_subdir": "experimental/reduce",
-            }
-            with mock.patch.dict(os.environ, {
-                    "OPRUNWAY_OPS_DIR": ops_root,
-                    "OPRUNWAY_ACLNN_REAL": "1",
-                    }), \
-                    mock.patch.object(
-                        H.aclnn_adapter, "_aclnn_cfg",
-                        return_value=cfg), \
-                    mock.patch.object(
-                        H, "_execution_binding",
-                        return_value=execution), \
-                    mock.patch.object(
-                        H.aclnn_adapter, "find_aclnn_project",
-                        return_value="/unused/project"), \
-                    mock.patch.object(
-                        H.aclnn_adapter, "_run_aclnn_real",
-                        return_value=_build_provenance_fixture()), \
-                    mock.patch.object(
-                        H.repo_adapter, "build_multi_output_evidence",
-                        return_value=evidence):
-                payload = H.run_gate(
-                    root, "spec.json", "caseset.json",
-                    "work/aclnn_preflight.json",
-                    "work/aclnn_harness_trust.json")
-                self.assertEqual(payload["status"], H._STATUS_TRUSTED)
-                with mock.patch.object(
-                        H, "_current_execution_binding",
-                        return_value=execution):
-                    reused = H.validate_receipt(
-                        root, "work/aclnn_harness_trust.json",
-                        spec, caseset)
+        ⚠ 这是那道已删除的 `_require_pull_request_path` 的**反向见证**：谁把它加回来，
+        本例当场变红。锚对账没被一起删掉，由 `LocalSnapshotRouteTest` 分别钉住。
+        """
+        with tempfile.TemporaryDirectory() as root:
+            payload, reused = _drive_gate(
+                root,
+                _LOCAL_BINDINGS,
+                _local_execution_fixture(),
+                _local_build_provenance_fixture(),
+                {"ops_root": "/unused/ops", "op_subdir": "experimental/reduce",
+                 "source_mode": "local_snapshot"})
+            self.assertEqual(payload["status"], H._STATUS_TRUSTED)
+            # 本地档没有上游 commit：收据里这一格是 null，**不许**拿 merkle 顶上。
+            self.assertIsNone(payload["bindings"]["pr_head_sha"])
+            # 声明即所得 = 没有降级；中性形态事实原样带下去，两者分开记。
+            self.assertEqual([], payload["provenance_degradations"])
+            self.assertEqual(
+                _LOCAL_BINDINGS["source_form_facts"],
+                payload["provenance_form_facts"])
             self.assertEqual(reused["coverage"]["selected_count"], 2)
 
 
+# `local_snapshot` 取源形态的两个摘要：整树与算子子树。刻意取不同值——跨端对账比的是
+# **子树**那一个（intake 的 `snapshot_merkle_sha256` ↔ 收据的 `snapshot_subtree_sha256`），
+# 两个填成同一个字符串就看不出比错了哪一个。
+_SNAPSHOT_WHOLE = "1" * 64
+_SNAPSHOT_SUBTREE = "2" * 64
+
+
+def _local_execution_fixture():
+    """`local_snapshot` 档的执行绑定；与 git 档只差源身份那几格。"""
+    execution = _execution_fixture()
+    cfg = execution["config"]
+    cfg["source_mode"] = "local_snapshot"
+    # 本地源码没有上游 PR：这两格在真机侧就是空串（落进产物是 null），不合成假值。
+    cfg["pr_ref"] = ""
+    cfg["head_sha"] = ""
+    cfg["snapshot_sha256"] = _SNAPSHOT_WHOLE
+    return execution
+
+
+def _local_build_provenance_fixture():
+    cfg = _local_execution_fixture()["config"]
+    provenance = _build_provenance_fixture()
+    provenance.update({
+        # ⚠ **显式 null**，不是缺键、更不是拿 merkle 合成一个 40 位 hex。
+        "head_sha": None,
+        "provenance_kind": cfg["source_mode"],
+        "pr_ref": cfg["pr_ref"],
+        "snapshot_sha256": _SNAPSHOT_WHOLE,
+        "snapshot_subtree_sha256": _SNAPSHOT_SUBTREE,
+        "snapshot_subtree_scope": cfg["op_subdir"],
+    })
+    return provenance
+
+
+#: CP-C0 事实包在 `local_source` 档应有的 bindings。`source_form_facts` 是**中性形态事实**
+#: （不是降级），本门须原样往下传，故一并入夹具。
 _LOCAL_BINDINGS = {
-    "dut_source": "local_checkout",
-    "local_root_digest": "c" * 64,
+    "provenance_kind": "local_snapshot",
+    "declared_source_form": "local_source",
+    "pr_head_sha": None,
+    "snapshot_merkle_sha256": _SNAPSHOT_SUBTREE,
+    "snapshot_scope": "experimental/reduce",
+    "source_form_facts": [
+        "local_source_has_no_upstream_commit",
+        "local_source_file_set_is_subtree_not_pr_diff",
+    ],
 }
 
 # `bindings` 整个 key 缺席（区别于「值是 None」）的哨兵。
@@ -419,9 +495,9 @@ _ABSENT = object()
 
 
 def _write_gate_root(root, bindings):
-    """铺一个「刚够走到通路门」的根目录：spec/caseset/preflight 齐，work/ 空着即可。
+    """铺一个「刚够走到形态门」的根目录：spec/caseset/preflight 齐，work/ 空着即可。
 
-    刻意只铺到这一步——通路门必须在任何真机配置读取、任何数据落盘之前触发，
+    刻意只铺到这一步——形态门必须在任何真机配置读取、任何数据落盘之前触发，
     所以这些测试不需要 golden/输出字节也应当能把门打响。
     """
     spec = {"op": "Reduce", "runner_form": "aclnn_py"}
@@ -445,75 +521,21 @@ def _write_gate_root(root, bindings):
     return spec, caseset
 
 
-class SourcePathGateTest(unittest.TestCase):
-    """`local_checkout` 在本门是**显式挂账的 BLOCK**，不是「大概能跑」。
+class BindingsShapeGateTest(unittest.TestCase):
+    """`preflight.bindings` 的**形态**必须在读任何字段之前判掉，两处入口报同一个错。
 
-    `aclnn_adapter` 只能按 PR ref 在容器内重新取源 build，构建端没有可与
-    `local_checkout.root_digest` 对账的锚——放行等于让 vendor `.so` 与被测字节
-    失去机器可核的对应关系。
+    形态判不出来 = 来源判不出来。这里只管形态，「声明 × 实得」那一层的判据在
+    `source_provenance`（其单测见 `test_source_provenance.py`），本门只负责把畸形 payload
+    挡在真机配置与任何落盘之前。
     """
 
-    def test_run_gate_blocks_local_before_touching_real_machine_config(self):
-        with tempfile.TemporaryDirectory() as root:
-            _write_gate_root(root, _LOCAL_BINDINGS)
-            with mock.patch.dict(
-                    os.environ, {"OPRUNWAY_ACLNN_REAL": "1"}), \
-                    mock.patch.object(
-                        H.aclnn_adapter, "_aclnn_cfg",
-                        side_effect=AssertionError(
-                            "本地通路不得走到 _aclnn_cfg()")):
-                with self.assertRaisesRegex(
-                        ValueError, "尚未接入 dut_source=local_checkout"):
-                    H.run_gate(
-                        root, "spec.json", "caseset.json",
-                        "work/aclnn_preflight.json",
-                        "work/aclnn_harness_trust.json")
-
-    def test_validate_receipt_blocks_local_before_touching_real_machine_config(self):
-        with tempfile.TemporaryDirectory() as root:
-            spec, caseset = _write_gate_root(root, _LOCAL_BINDINGS)
-            content_address.write_artifact(
-                root, "work/aclnn_harness_trust.json", H._TRUST_DOMAIN, {
-                    "schema": H._SCHEMA,
-                    "schema_version": 1,
-                    "status": H._STATUS_TRUSTED,
-                    "scope": "harness-only",
-                    "acceptance_verdict": None,
-                    "bindings": {},
-                    "coverage": {},
-                    "checks": [],
-                    "build_provenance": {},
-                })
-            with mock.patch.object(
-                    H.aclnn_adapter, "_aclnn_cfg",
-                    side_effect=AssertionError("本地通路不得走到 _aclnn_cfg()")):
-                with self.assertRaisesRegex(
-                        ValueError, "尚未接入 dut_source=local_checkout"):
-                    H.validate_receipt(
-                        root, "work/aclnn_harness_trust.json", spec, caseset)
-
-    def test_build_provenance_is_itself_path_gated(self):
-        # run_gate 与 validate_receipt 的共同必经点也要挡，否则两处入口门只要
-        # 有人挪动顺序就整条失效。
-        with self.assertRaisesRegex(
-                ValueError, "尚未接入 dut_source=local_checkout"):
-            H._validate_build_provenance(
-                _build_provenance_fixture(), _execution_fixture(),
-                {"bindings": dict(_LOCAL_BINDINGS)})
-
-    def test_unknown_dut_source_value_is_fail_closed(self):
-        with self.assertRaisesRegex(ValueError, "受控词表"):
-            H._validate_build_provenance(
-                _build_provenance_fixture(), _execution_fixture(),
-                {"bindings": {"dut_source": "local"}})   # 拼错
-
     def test_malformed_bindings_is_fail_closed(self):
-        """`bindings` 形态不对 = 来源判不出来，不许 `or {}` 抹平成「缺席即 PR」。
+        """`bindings` 形态不对 = 来源判不出来，不许 `or {}` 抹平成一个空 object。
 
-        `dut_source.of()` 的「缺席即 pull_request」只为**旧收据的空 object** 而设；
-        把 None / list / 字符串一并抹成 `{}`，等于让「根本没有来源声明」冒充
-        「明确声明 pull_request」——本地通路的 preflight 只要 bindings 丢了形态，
-        这道门就会当场放行。
+        `or {}` 会把缺席 / None / `[]` / `""` 一律压成 `{}`，于是「这份 preflight 根本
+        没有来源声明」与「它声明了什么」在报错里成了同一件事。下游
+        `source_provenance._require_kind` 确实仍会 fail-closed，但报的是
+        「provenance_kind 键缺失」——把「形态判不出来」说成「字段没写」，误导排障。
         """
         for label, preflight in (
                 ("缺席", {}),
@@ -528,14 +550,17 @@ class SourcePathGateTest(unittest.TestCase):
                         _build_provenance_fixture(), _execution_fixture(),
                         preflight)
 
-    def test_empty_bindings_object_still_reads_as_pull_request(self):
-        """空 object 是**合法**形态，必须继续走向后兼容的「缺席即 pull_request」。
+    def test_empty_bindings_object_passes_shape_but_dies_on_the_source_check(self):
+        """空 object 是**合法形态**，所以本层放行；判它「没有来源声明」的是下游。
 
-        钉住这条边界，免得下一轮把「形态硬化」顺手收紧成「bindings 必须非空」——
-        那会让本门接入之前产出的旧 PR 通路收据一夜之间全部失效。
+        钉住这条分工，免得下一轮把形态硬化顺手收紧成「bindings 必须非空」（那会把
+        形态层和来源层揉成一个错），也免得反过来有人以为空 object 能一路走到底。
         """
-        self.assertEqual(
-            H._require_pull_request_path({"bindings": {}}), "pull_request")
+        self.assertEqual(H._require_bindings({"bindings": {}}), {})
+        with self.assertRaisesRegex(ValueError, "provenance_kind 键缺失"):
+            H._validate_build_provenance(
+                _build_provenance_fixture(), _execution_fixture(),
+                {"bindings": {}})
 
     def test_validate_receipt_blocks_malformed_bindings_before_real_machine_config(self):
         """CP-D 复核入口是 `bindings` 的第一次触碰——门必须赶在读真机配置之前打响。"""
@@ -592,11 +617,17 @@ class SourcePathGateTest(unittest.TestCase):
                                 "work/aclnn_preflight.json",
                                 "work/aclnn_harness_trust.json")
 
-    def test_preflight_without_40hex_pr_head_is_blocked(self):
-        """CP-C0 没绑定合法 PR head 就没有可交叉核的锚——不能靠 cfg 形态偶然兜住。"""
+    def test_preflight_without_40hex_pr_head_is_blocked_on_the_git_route(self):
+        """`gitcode_pr` 档 CP-C0 没绑合法 PR head 就没有可交叉核的锚。
+
+        ⚠ 刻意让 **cfg 侧的 head 完全合法**：判据必须落在 preflight 那一侧，
+        不能靠「cfg 也恰好是空的」偶然兜住。这条只约束 PR 档——`local_snapshot` 档
+        `pr_head_sha` 显式为 null 才是正确值，见 `LocalSnapshotRouteTest`。
+        """
         with tempfile.TemporaryDirectory() as root:
-            _write_gate_root(root, {"pr_head_sha": None})
-            cfg = {"head_sha": None, "ops_root": "/unused/ops",
+            _write_gate_root(
+                root, {"provenance_kind": "gitcode_pr", "pr_head_sha": None})
+            cfg = {"head_sha": "a" * 40, "ops_root": "/unused/ops",
                    "op_subdir": "experimental/reduce"}
             with mock.patch.dict(
                     os.environ, {"OPRUNWAY_ACLNN_REAL": "1"}), \
@@ -606,11 +637,82 @@ class SourcePathGateTest(unittest.TestCase):
                         H, "_execution_binding",
                         return_value=_execution_fixture()):
                 with self.assertRaisesRegex(
-                        ValueError, "未绑定 40 位 PR head"):
+                        ValueError,
+                        r"preflight\.bindings\.pr_head_sha 须为 40 位 commit SHA"):
                     H.run_gate(
                         root, "spec.json", "caseset.json",
                         "work/aclnn_preflight.json",
                         "work/aclnn_harness_trust.json")
+
+
+class LocalSnapshotRouteTest(unittest.TestCase):
+    """`local_snapshot` 在本门是**打通的通路**，不是 BLOCK —— 但锚对账一条不少。
+
+    历史：这里曾有一道「只接 PR 通路」的硬 BLOCK（`_require_pull_request_path`），
+    理由写成「aclnn 构建端根本不存在可与本地摘要对账的锚，属结构性 fail-closed」。
+    那个前提**已被证伪**：`aclnn_adapter._source_block` 在容器内内联与取材端**同一份**
+    摘要算法，算出 `SNAPSHOT_SHA256` / `SUBTREE_SHA256` 回报给 build provenance，
+    锚是存在的。门因此删除。
+
+    ⚠ **删门不等于放开。** 下面既钉「本地档能一路跑到收据」（少了 = 门又被谁加回来了），
+    也钉「锚一动就红」（少了 = 删门顺手把对账也删了，那才是真 fail-open）。
+    """
+
+    def _check(self, provenance=None, bindings=None):
+        return H._validate_build_provenance(
+            provenance or _local_build_provenance_fixture(),
+            _local_execution_fixture(),
+            {"bindings": bindings or dict(_LOCAL_BINDINGS)})
+
+    def test_declared_local_source_passes_and_books_no_degradation(self):
+        # `local_source` 如愿实得本地字节 = 正常形态，不是降级，不该挂任何账。
+        self.assertEqual([], self._check())
+
+    def test_subtree_merkle_drift_is_rejected(self):
+        """真机 build 报回来的子树 merkle 与 CP-A 读过的字节不同 → 停。
+
+        这一条就是删掉的那道门原本担心的东西；它现在由锚对账真实覆盖着。
+        """
+        provenance = _local_build_provenance_fixture()
+        provenance["snapshot_subtree_sha256"] = "3" * 64
+        with self.assertRaisesRegex(
+                ValueError, "真机跑的不是 CP-A 读过的那份字节"):
+            self._check(provenance=provenance)
+
+    def test_whole_tree_merkle_drift_is_rejected(self):
+        provenance = _local_build_provenance_fixture()
+        provenance["snapshot_sha256"] = "4" * 64
+        with self.assertRaisesRegex(
+                ValueError, "snapshot_sha256 与执行配置不一致"):
+            self._check(provenance=provenance)
+
+    def test_scope_mismatch_is_rejected_before_comparing_merkles(self):
+        """两个 merkle 覆盖范围不同就不可比——宁可停，也不产一份「看起来绑过」的收据。"""
+        provenance = _local_build_provenance_fixture()
+        provenance["snapshot_subtree_scope"] = "experimental/other"
+        with self.assertRaisesRegex(ValueError, "两个 merkle 不可比"):
+            self._check(provenance=provenance)
+
+    def test_a_synthesized_pr_head_on_the_local_route_is_rejected(self):
+        """本地档合成一个 40 位 hex 顶上 = 拿 merkle 冒充 commit id（AGENTS.md §5.8）。"""
+        bindings = dict(_LOCAL_BINDINGS)
+        bindings["pr_head_sha"] = "a" * 40
+        with self.assertRaisesRegex(ValueError, "须显式为 null"):
+            self._check(bindings=bindings)
+
+    def test_missing_pr_head_key_is_not_an_explicit_null(self):
+        """缺键 ≠ 声明没有。少了这一条，畸形 bindings 就能靠 `.get()→None` 自动过门。"""
+        bindings = dict(_LOCAL_BINDINGS)
+        bindings.pop("pr_head_sha")
+        with self.assertRaisesRegex(ValueError, "pr_head_sha 键缺失"):
+            self._check(bindings=bindings)
+
+    def test_local_provenance_may_not_masquerade_as_the_pr_route(self):
+        """收据自称 `gitcode_pr`、实得是本地字节 → 通路错配，当场拒。"""
+        bindings = dict(_LOCAL_BINDINGS)
+        bindings["provenance_kind"] = "gitcode_pr"
+        with self.assertRaisesRegex(ValueError, "不是同一条通路"):
+            self._check(bindings=bindings)
 
 
 class WorkflowHardGateTest(unittest.TestCase):
@@ -744,9 +846,9 @@ def _attrs_read_off(rel, alias):
 def _bare_module_references(rel, alias):
     """某文件里**不是** `alias.<attr>` 形态的 `alias` 裸引用（起别名、传参、下标…）。
 
-    为什么单挑这一种：`ds = dut_source_kind` 之后写 `ds.identity(...)`，是一句人畜无害的
-    「图省事起个短名」，却让 `_attrs_read_off` 一个字都读不到——绑定面扫描当场失明，
-    判定依赖悄悄长出去也不会有人知道。这是**会被无意写出来**的形态，值得单独拦。
+    为什么单挑这一种：`sp = source_provenance` 之后写 `sp.check_build_identity(...)`，是一句
+    人畜无害的「图省事起个短名」，却让 `_attrs_read_off` 一个字都读不到——绑定面扫描当场
+    失明，判定依赖悄悄长出去也不会有人知道。这是**会被无意写出来**的形态，值得单独拦。
     """
     tree = ast.parse(_source_of(rel))
     as_attr_value = {
@@ -759,9 +861,9 @@ def _bare_module_references(rel, alias):
 
 
 # 能绕过**静态**依赖扫描的装载/取名手段。三道 AST 检查全部建立在「读代码就能看全依赖」
-# 之上，这些一出现，那个前提就没了：`importlib.import_module("dut_source")` 让被扫的文件
-# 里连 `import dut_source` 都不存在，`getattr(dut_source_kind, "identity")` 让属性扫描
-# 看不见那次读取。本门与内核都不需要它们（实测零处使用），所以直接禁掉是免费的。
+# 之上，这些一出现，那个前提就没了：`importlib.import_module("source_provenance")` 让被扫的
+# 文件里连 `import source_provenance` 都不存在，`getattr(source_provenance, "check_...")`
+# 让属性扫描看不见那次读取。本门与判别式模块都不需要它们（实测零处使用），直接禁掉是免费的。
 _DYNAMIC_LOADERS = ("__import__", "eval", "exec", "getattr", "importlib")
 
 
@@ -790,47 +892,61 @@ def _import_statements(rel):
 class LogicBindingCoverageTest(unittest.TestCase):
     """`_LOGIC_FILES` 必须覆盖本门的**全部**判定依赖——这几道检查是机械的，不靠人记。
 
-    背景：本门的来源判别依赖已从聚合模块 `dut_source.py` 收窄到内核 `dut_source_kind.py`
-    （前者还装着 URL 凭据策略 / build receipt 锚校验 / `source_facts.json` 查找三类与本门
-    判定无关的职责，绑它 = 那三类一动就作废昂贵的真机收据）。收窄的**代价**是可能欠绑定：
-    以后有人让本门用上 `dut_source` 里的东西却忘了同步 `_LOGIC_FILES`，判定依赖就脱离了
-    哈希覆盖 —— 那是真 fail-open。下面几道检查专堵这个：
+    背景（本轮逮到的就是这个洞）：本门 `import source_provenance` 并**直接用它出 provenance
+    判定**（`check_config_against_preflight` / `check_build_identity`），而
+    `source_provenance.py` 一度**不在** `_LOGIC_FILES` 里 —— 判定面有一半脱离逐字节哈希：
+    放松 `_ROUTES` 的路由 allowlist、或把 `_require_explicit_none` 改成 `.get()`，
+    真机上留存的旧收据照样 revalidate 通过。门看着有、实际拦不住，是标准的 fail-open。
+    下面几道检查专堵这一类：
 
     ① 本门**直接 import** 的本仓模块，必须全在 `_LOGIC_FILES` 里；
-    ② 本门从 `dut_source_kind` 读到的名字，必须**恰好**是钉住的那一小组，且每个都**唯一
-       定义在** `dut_source_kind.py` 自己文件里（不是从某个没被哈希的模块再导出的）；
-    ③ 内核**一个 import 都不许有**（stdlib / 三方也不行）；
-    ④ 本门与内核都不许用动态装载/动态取名、也不许给内核模块起别名（否则 ①②③ 的静态
-       扫描直接被架空）。
+    ② 本门从 `source_provenance` 读到的名字，必须**恰好**是钉住的那一小组，且每个都**唯一
+       定义在** `source_provenance.py` 自己文件里（不是从某个没被哈希的模块再导出的）；
+    ③ `source_provenance` **一个本仓 import 都不许有**，且它的 import 清单被逐字钉住
+       （stdlib 也算数，见该测试的说明）；
+    ④ 本门与判别式模块都不许用动态装载/动态取名、也不许给判别式模块起别名（否则 ①②③ 的
+       静态扫描直接被架空）。
 
-    ⚠ **这几道检查挡的是「无意」与「顺手」，不是「蓄意」**。真正的哈希覆盖保证来自 ③：
-    内核零 import ⇒ 它导出的任何东西都只由本文件字节决定 ⇒ 逐字节哈希它 == 覆盖它的
-    全部判定语义。②里那条「绑定次数恰好 1」是**多一道保险**，不是保证的来源——即便有人
-    在内核里用 `if True: of = …` 这种花样重绑，那份改动**照样在被哈希的文件里**，旧收据
-    照样失效；语义走样另有 `SourcePathGateTest` 的行为测试兜。
+    ⚠ **这几道检查挡的是「无意」与「顺手」，不是「蓄意」**。哈希覆盖的保证主要来自 ③：
+    `source_provenance` 不依赖任何本仓模块 ⇒ 它的判定语义只由本文件字节 + stdlib 决定
+    ⇒ 逐字节哈希它 ≈ 覆盖它的全部判定语义。②里那条「绑定次数恰好 1」是**多一道保险**，
+    不是保证的来源——即便有人在该文件里用 `if True: check_build_identity = …` 这种花样重绑，
+    那份改动**照样在被哈希的文件里**，旧收据照样失效；语义走样另有
+    `LocalSnapshotRouteTest` / `BindingsShapeGateTest` 的行为测试兜。
     同理，`vars(__builtins__)["__import__"]` 这类刻意隐藏依赖的写法能绕过 ④ 的黑名单——
     但同一个人也能直接改 `_LOGIC_FILES` 或删掉本测试类。**没有任何自检能防住蓄意拆自己的门**，
     那一层由 push 前审修门（人）负责。把 ④ 换成「正向 AST 白名单」并不改变这个边界，
-    却会把 `_require_pull_request_path` 的实现形态钉死，正当重构一改就红。故不采纳。
+    却会把判定函数的实现形态钉死，正当重构一改就红。故不采纳。
 
-    ⚠ ① 只查**直接** import，**不查传递闭包**——这是如实挂账的既有张力，不是本轮遗漏：
-    `_LOGIC_FILES` 从设计上就是「判定依赖的**策展**清单」而非 import 闭包。实测本门的
-    一方传递闭包是 14 个模块（经 `repo_adapter → cpp_extension_adapter` 还会拉进
-    `dut_source` / `fetch_source` / `catlass_adapter` / `validate_preparation_state`），
-    而 `_LOGIC_FILES` 只列 8 个模块 + 5 份 `aclnn_runtime/`。改成「闭包 ⊆ `_LOGIC_FILES`」
-    会让**未改动的现有代码当场变红**，且要把清单撑到 14 个模块——那正好是本轮要削减的
-    过度绑定，方向相反。残留缺口如实记：**已哈希模块再去调一个未哈希 helper**，本检查
-    抓不到。要封它得先重画 `_LOGIC_FILES` 的语义（策展清单 → 闭包），属于另一个议题。
-    查直接 import 抓的是「**本门自己**开始调新东西了」这一步，也就是本轮收窄真正引入的
-    那个风险面；它严格优于收窄前的状态（那时一道机械检查都没有）。
+    ⚠ **③ 比它的前身弱了一档，如实记账**：上一版盯的是一个零 import 的小内核
+    （`dut_source_kind.py`），断言「一个 import 都不许有」。`source_provenance` 用了
+    `os`（读授权环境变量）/ `re`（锚的形态校验），做不到零 import，所以改判据为
+    「本仓 import 必须为空 + import 清单逐字钉住」。**残留缺口**：stdlib 的行为随解释器
+    版本走（如 `re` 的匹配语义），逐字节哈希覆盖不到那一层。这是形态换来的真实代价，
+    不是本轮遗漏。
+
+    ⚠ ① 只查**直接** import，**不查传递闭包**——这是如实挂账的既有张力：`_LOGIC_FILES`
+    从设计上就是「判定依赖的**策展**清单」而非 import 闭包。改成「闭包 ⊆ `_LOGIC_FILES`」
+    会让**未改动的现有代码当场变红**（经 `repo_adapter → cpp_extension_adapter` 还会拉进
+    一串与本门判定无关的模块），且要把清单撑到十几个模块——那正是要避免的过度绑定，
+    方向相反。残留缺口如实记：**已哈希模块再去调一个未哈希 helper**，本检查抓不到。
+    要封它得先重画 `_LOGIC_FILES` 的语义（策展清单 → 闭包），属于另一个议题。
+    查直接 import 抓的是「**本门自己**开始调新东西了」这一步，也就是本轮真正出事的那个面。
     """
 
     _SELF = "verify_aclnn_harness.py"
-    _KERNEL = "dut_source_kind.py"
-    # 本门从内核读到的名字，**钉死**。这不是为了防 fail-open（内核里的东西都被哈希），
+    _PROVENANCE = "source_provenance.py"
+    # 本门从判别式模块读到的名字，**钉死**。这不是为了防 fail-open（该文件整份被哈希），
     # 而是「绑定面变了就得有人重新审一遍」的强制触发点：多读一个名字 = 本门的判定依赖
     # 变了，必须当场复核 `_LOGIC_FILES` 是否仍然覆盖得住，而不是悄悄长出去。
-    _KERNEL_SURFACE = {"of", "PULL_REQUEST"}
+    _PROVENANCE_SURFACE = {
+        "check_config_against_preflight",   # 起跑前：通路错配
+        "check_build_identity",             # build 段：字节锚对账
+        "form_facts",                       # 中性形态事实，往收据里传
+    }
+    # `source_provenance` 允许的 import，**逐字钉住**。任何增删都会让本例变红，
+    # 强制有人当场回答「新依赖要不要一起进 _LOGIC_FILES / 绑定面还够不够」。
+    _PROVENANCE_IMPORTS = ["import os", "import re"]
 
     def test_every_first_party_module_the_gate_imports_is_hashed(self):
         # 相对 import 先拦：`_direct_imports` 解析不了它们，静默跳过 = 依赖悄悄逃出覆盖。
@@ -846,77 +962,66 @@ class LogicBindingCoverageTest(unittest.TestCase):
             f"要么把它们加进 _LOGIC_FILES，要么别在本门里用。")
 
     def test_the_source_discriminator_is_defined_inside_a_hashed_file(self):
-        self.assertIn(self._KERNEL, H._LOGIC_FILES)
-        self.assertIn(self._KERNEL, H._logic_hashes())
-        used = _attrs_read_off(self._SELF, "dut_source_kind")
-        # 少 = 本门没在判别来源通路（假门，`local_checkout` 静默放行）；
+        self.assertIn(self._PROVENANCE, H._LOGIC_FILES)
+        self.assertIn(self._PROVENANCE, H._logic_hashes())
+        used = _attrs_read_off(self._SELF, "source_provenance")
+        # 少 = 本门没在做来源身份对账（假门：通路错配 / 锚漂移静默放行）；
         # 多 = 判定依赖悄悄长出去了，必须有人重新审绑定面。两个方向都拦。
         self.assertEqual(
-            self._KERNEL_SURFACE, used,
-            f"本门读到的内核名字变成 {sorted(used)}（钉住的是 "
-            f"{sorted(self._KERNEL_SURFACE)}）—— 少了 = 来源通路门形同虚设；"
+            self._PROVENANCE_SURFACE, used,
+            f"本门读到的判别式名字变成 {sorted(used)}（钉住的是 "
+            f"{sorted(self._PROVENANCE_SURFACE)}）—— 少了 = 来源身份对账形同虚设；"
             f"多了 = 判定面扩张，请重新审定 _LOGIC_FILES 覆盖是否仍然足够，再更新本 pin。")
-        bindings = _module_level_bindings(self._KERNEL)
+        bindings = _module_level_bindings(self._PROVENANCE)
         bad = sorted(n for n in used if bindings.get(n) != 1)
         self.assertEqual(
             [], bad,
-            f"本门读的 {bad} 在 {self._KERNEL} 里不是**唯一的本地定义**（缺失、或被后面的 "
-            f"import/赋值覆盖）—— 真正导出的对象可能来自别的文件，哈希 {self._KERNEL} "
+            f"本门读的 {bad} 在 {self._PROVENANCE} 里不是**唯一的本地定义**（缺失、或被后面的 "
+            f"import/赋值覆盖）—— 真正导出的对象可能来自别的文件，哈希 {self._PROVENANCE} "
             f"覆盖不到，等于绕开绑定。")
 
-    def test_the_discriminator_kernel_imports_nothing_at_all(self):
-        """内核零 import 是「哈希这一个文件 == 覆盖全部判定语义」的前提；破了就得重算绑定面。
+    def test_the_discriminator_module_pulls_in_no_first_party_logic(self):
+        """判定语义只由这一个文件的字节（+ stdlib）决定；破了就得重算绑定面。
 
-        ⚠ 这里**不能**只查本仓模块。`from some_pkg import normalize_kind` 之后让 `of()`
+        ⚠ 这里**不只**查本仓模块。`from some_pkg import normalize_kind` 之后让路由判定
         调它，来源归类逻辑就住进了一个既不在 `_LOGIC_FILES`、版本也不被任何收据钉住的
-        三方包里——升个级就能悄悄改判定，旧收据照样 revalidate 通过。stdlib 同理
-        （行为随解释器版本走）。所以是**一个 import 都不许有**。
+        三方包里——升个级就能悄悄改判定，旧收据照样 revalidate 通过。所以本仓 import
+        必须为空，**且整份 import 清单逐字钉住**：新增哪怕一个 stdlib，也要当场有人回答
+        「这条依赖会不会改判定」。
         """
+        first_party = sorted(_direct_imports(self._PROVENANCE))
         self.assertEqual(
-            [], _import_statements(self._KERNEL),
-            f"{self._KERNEL} 出现了 import —— 内核的判定语义不再由本文件字节唯一决定。"
-            f"要么把新依赖一起纳入 _LOGIC_FILES 并重算绑定面，要么别在内核里引入依赖。")
+            [], first_party,
+            f"{self._PROVENANCE} import 了本仓模块 {first_party} —— 判定语义不再由本文件"
+            f"字节唯一决定。要么把它们一起纳入 _LOGIC_FILES 并重算绑定面，要么别引入。")
+        self.assertEqual(
+            [], _relative_imports(self._PROVENANCE),
+            f"{self._PROVENANCE} 出现了相对 import —— 本检查解析不了它，"
+            f"放过去等于一条依赖不进哈希覆盖。")
+        self.assertEqual(
+            self._PROVENANCE_IMPORTS, _import_statements(self._PROVENANCE),
+            f"{self._PROVENANCE} 的 import 清单变了（钉住的是 "
+            f"{self._PROVENANCE_IMPORTS}）—— 请先确认新依赖不会改动来源判定，"
+            f"再更新本 pin。")
 
-    def test_neither_the_gate_nor_the_kernel_can_dodge_the_static_scan(self):
-        """动态装载/动态取名会架空上面三道静态检查，本门与内核一律禁用。"""
-        for rel in (self._SELF, self._KERNEL):
+    def test_neither_the_gate_nor_the_discriminator_can_dodge_the_static_scan(self):
+        """动态装载/动态取名会架空上面三道静态检查，本门与判别式模块一律禁用。"""
+        for rel in (self._SELF, self._PROVENANCE):
             found = sorted(_dynamic_loader_calls(rel))
             self.assertEqual(
                 [], found,
                 f"{rel} 用了 {found} —— 静态 AST 扫描看不见这样引入的依赖/属性读取："
-                f"`importlib.import_module(\"dut_source\")` 能让依赖扫描完全落空，"
-                f"`getattr(dut_source_kind, …)` 能让绑定面扫描漏读。请改回静态写法。")
+                f"`importlib.import_module(\"source_provenance\")` 能让依赖扫描完全落空，"
+                f"`getattr(source_provenance, …)` 能让绑定面扫描漏读。请改回静态写法。")
 
-    def test_the_gate_never_aliases_the_kernel_module(self):
-        """内核模块只准以 `dut_source_kind.<attr>` 出现；起了别名，绑定面扫描就失明。"""
-        bare = _bare_module_references(self._SELF, "dut_source_kind")
+    def test_the_gate_never_aliases_the_discriminator_module(self):
+        """判别式模块只准以 `source_provenance.<attr>` 出现；起了别名，绑定面扫描就失明。"""
+        bare = _bare_module_references(self._SELF, "source_provenance")
         self.assertEqual(
             [], bare,
-            f"本门在 {bare} 把 `dut_source_kind` 当值用了（起别名 / 传参 / 下标）——"
+            f"本门在 {bare} 把 `source_provenance` 当值用了（起别名 / 传参 / 下标）——"
             f"之后经别名读到的属性，`_attrs_read_off` 一个都看不见，钉住的绑定面形同虚设。"
-            f"请一律直接写 `dut_source_kind.<名字>`。")
-
-
-class ReexportIdentityTest(unittest.TestCase):
-    """聚合模块 `dut_source` 必须**再导出**内核对象，而不是复制一份同名的。
-
-    复制一份的后果很隐蔽：`dut_source.DutSourceError` 与 `dut_source_kind.DutSourceError`
-    成为两个不同的类，既有 10+ 处 `except dut_source.DutSourceError` 从此漏捕内核抛的异常，
-    fail-closed 的门变成裸 traceback（甚至被更外层的宽 except 吞掉）。
-    """
-
-    def test_dut_source_reexports_the_very_same_objects(self):
-        import dut_source
-        import dut_source_kind
-        for name in ("DutSourceError", "PULL_REQUEST", "LOCAL_CHECKOUT", "ALL", "of"):
-            self.assertIs(
-                getattr(dut_source, name), getattr(dut_source_kind, name),
-                f"dut_source.{name} 与内核不是同一个对象")
-
-    def test_the_kernel_error_is_caught_through_the_aggregate_name(self):
-        import dut_source
-        with self.assertRaises(dut_source.DutSourceError):
-            dut_source.of({"dut_source": "made_up"}, where="t")
+            f"请一律直接写 `source_provenance.<名字>`。")
 
 
 if __name__ == "__main__":

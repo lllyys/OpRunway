@@ -28,7 +28,7 @@ agent 内部完成六步（取材 → 任务书→spec → 生成并验证 runne
 ## 现状（诚实）
 
 - **mock 端到端可用**（无需真机）；**真机跑测**需开 VPN + runner 验证。
-- runner 生成当前闭环 = ops-<族> 仓·aclnn 两段式·opp 安装型（含非 experimental 子树）（catlass/非 aclnn/双实现待扩，见 doc/oprunway-batch6b-design.md）；「验证-才-信」是**纪律**非代码硬门（sidecar 待补）。
+- runner 生成当前闭环 = ops-<族> 仓·aclnn 两段式·opp 安装型（含非 experimental 子树）（catlass/非 aclnn/双实现待扩，见 dev-doc/oprunway-batch6b-design.md）；「验证-才-信」是**纪律**非代码硬门（sidecar 待补）。
 - **加算子不改工具代码**：用例生成已去引擎化（PR #7 runner / PR #8 golden），加算子 = 在 `<ops_root>/<op>/golden.py`
   落一份 golden。⚠ 仅指 **elementwise 通路**；`catlass_adapter` 的内置 matmul golden 与 `gen_cases._BF16_EXACT_OPS`
   仍是引擎里的算子知识（两处已知例外，如实记账）。样例 golden 现 8 份

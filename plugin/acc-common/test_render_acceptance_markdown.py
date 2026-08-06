@@ -5,24 +5,62 @@ import unittest
 
 import content_address
 import render_acceptance_markdown as R
+import vendor_build_receipt as VBR
 
 PR_HEAD = "a" * 40
-LOCAL_DIGEST = "b" * 64
+SUBTREE_DIGEST = "b" * 64
+WHOLE_DIGEST = "e" * 64
 OTHER_DIGEST = "c" * 64
-LOCAL_GIT_HEAD = "d" * 40
+#: 只出现在 `source_facts` 里、绝不出现在收据里的值——用来见证「报告一个 facts 字段都不引用」。
+FACTS_ONLY_MARKER = "1" * 64
 _FACTS_DOMAIN = "oprunway/source-facts/v1"
+#: `summarize` 会连 build 段一起校（没有成功的 build argv 就没有「这个 so 是这么来的」）。
+_BUILD = {"argv": ["./build.sh"], "cwd": "/w", "returncode": 0,
+          VBR.RETURNCODE_SOURCE_KEY: VBR.RETURNCODE_SOURCE_MEASURED}
 
 
-def _receipt(source, **build_receipt_overrides):
+def _receipt(source, schema_version=VBR.SCHEMA_VERSION_LEGACY, degradations=None,
+             **build_receipt_overrides):
     """最小 cpp_extension 收据。
 
-    默认带 `VERIFIED v1` 的收据壳：provenance 节的强度断言以「收据已核验」为前提，
-    没有这三个字段它连锚都不看（见 `_provenance_section` 的分支 ②）。
+    默认带 `VERIFIED` 的收据壳：provenance 节的强度断言以「收据已核验」为前提，
+    schema/status/version 三项之一不对，它连锚都不看（见 `_provenance_section` 的分支 ②）。
     """
-    br = {"schema": "oprunway.vendor_build_receipt", "schema_version": 1,
-          "status": "VERIFIED", "source": source}
+    br = {"schema": VBR.SCHEMA, "schema_version": schema_version,
+          "status": "VERIFIED", "source": source, "build": dict(_BUILD)}
+    if degradations is not None:
+        br["degradations"] = degradations
     br.update(build_receipt_overrides)
     return {"vendor": {"build_receipt": br}}
+
+
+def _pr_source(**kw):
+    """v1 老收据形态的 PR 来源（**不得**带 `provenance_kind` / `declared_source_form`）。"""
+    source = {"repo": "cann/ops-nn", "pr_head_sha": PR_HEAD}
+    source.update(kw)
+    return source
+
+
+def _snapshot_source(declared_source_form=VBR.FORM_LOCAL_SOURCE,
+                     subtree=SUBTREE_DIGEST, scope="op", **kw):
+    """v2 本地快照来源。`pr_head_sha` **显式 null** —— 本形态没有上游 commit。"""
+    source = {
+        "provenance_kind": VBR.PROVENANCE_LOCAL_SNAPSHOT,
+        VBR.DECLARED_FORM_KEY: declared_source_form,
+        "pr_head_sha": None,
+        "repo": "cann/ops-nn",
+        "snapshot_subtree_scope": scope,
+        "snapshot_sha256": WHOLE_DIGEST,
+        "snapshot_subtree_sha256": subtree,
+    }
+    source.update(kw)
+    return source
+
+
+def _snapshot_receipt(**kw):
+    """声明即所得的本地快照收据（无降级）。"""
+    return _receipt(_snapshot_source(**kw),
+                    schema_version=VBR.SCHEMA_VERSION, degradations=[])
 
 
 def _docs(receipt):
@@ -52,9 +90,9 @@ def _docs(receipt):
 def _write_docs(root, docs, source_facts=None, source_facts_raw=None):
     """落盘产物；`source_facts` 按**真** content_address envelope 写。
 
-    ⚠ 夹具必须走 `make_artifact` 而不是手拼 `{"payload": …}`：`dut_source.find_source_facts`
-    会复算 digest，手拼信封没有 digest 就会被判 UNTRUSTED——那样这些用例测的其实是「读不出」分支，
-    看着绿、覆盖的却不是它们声称覆盖的路径。
+    ⚠ 夹具必须走 `make_artifact` 而不是手拼 `{"payload": …}`：
+    `source_facts_lookup.find_source_facts` 会复算 digest，手拼信封没有 digest 就会被判
+    UNTRUSTED——那样这些用例测的其实是「读不出」分支，看着绿、覆盖的却不是它们声称覆盖的路径。
     """
     for name, value in docs.items():
         with open(os.path.join(root, name), "w", encoding="utf-8") as out:
@@ -68,16 +106,17 @@ def _write_docs(root, docs, source_facts=None, source_facts_raw=None):
             out.write(source_facts_raw)
 
 
-def _local_facts(root_digest=LOCAL_DIGEST, git=None, op_subdir="ops/x",
-                 completeness=None):
-    """⚠ 用共享的**完整契约** payload：渲染器与三级门共用 `dut_source.find_source_facts`，
-    而它会拿 `validate_preparation_state._validate_source_payload` 校这份对照物。
-    只塞一个 `root_digest` 的最小 payload 会被判 UNTRUSTED，用例就测不到它想测的分支。
+def _snapshot_facts(snapshot_merkle=SUBTREE_DIGEST, snapshot_scope="op",
+                    completeness=None):
+    """⚠ 用共享的**完整契约** payload：渲染器与三级门共用
+    `source_facts_lookup.find_source_facts`，而它会拿
+    `validate_preparation_state._validate_source_payload` 校这份对照物。
+    只塞一个摘要的最小 payload 会被判 UNTRUSTED，用例就测不到它想测的分支。
     """
     from test_validate_cpp_extension_receipt import source_facts_payload
     return source_facts_payload(
-        dut_source="local_checkout", root_digest=root_digest,
-        git=git, completeness=completeness, op_subdir=op_subdir)
+        provenance_kind="local_snapshot", snapshot_merkle=snapshot_merkle,
+        snapshot_scope=snapshot_scope, completeness=completeness)
 
 
 class RenderAcceptanceMarkdownTest(unittest.TestCase):
@@ -225,7 +264,7 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
 
 
 class ProvenanceSectionTest(unittest.TestCase):
-    """「## 来源与 provenance」节：强度如实标注，未知绝不升级为 clean。"""
+    """「## 来源与 provenance」节：强度如实标注，「没有对照物」绝不升级为「已核」。"""
 
     def _render(self, receipt, source_facts=None, source_facts_raw=None):
         with tempfile.TemporaryDirectory() as root:
@@ -237,181 +276,240 @@ class ProvenanceSectionTest(unittest.TestCase):
                 return src.read()
 
     def test_pull_request_receipt_renders_pr_head_in_own_section(self):
-        text = self._render(_receipt({"repo": "cann/ops-nn", "pr_head_sha": PR_HEAD}))
+        text = self._render(_receipt(_pr_source()))
         self.assertIn(R.PROV_HEADING, text)
         self.assertIn(f"| PR head | `{PR_HEAD}` |", text)
         # 这份收据没有 `repo_source`（老收据形态）→ 源码仓那一行必须标「强度未知」。
         self.assertIn(R.PROV_REPO_ROW.format(
             repo=R._code_cell("cann/ops-nn"), strength=R.PROV_REPO_SOURCE_ABSENT), text)
+        # v1 老收据没有 `declared_source_form` → 声明形态必须写「未声明」，
+        # 不得被洗成 `git_pr`（那是替收据编一条它没说过的话）。
+        self.assertIn(R.PROV_FORM_ROW.format(value=R.PROV_FORM_UNDECLARED), text)
         # provenance 节排在运行环境之前，且那两行确实从旧表里迁走了。
         self.assertLess(text.index(R.PROV_HEADING), text.index("## 被测物与运行环境"))
         env = text.split("## 被测物与运行环境", 1)[1]
         self.assertNotIn("| PR head |", env)
         self.assertNotIn("| 源码仓 |", env)
         self.assertIn("| SoC |", env)
-        # PR 通路不该沾上本地通路的 caveat。
+        # PR 通路不该沾上本地通路的 caveat，也不该出现子树摘要的覆盖范围行。
         for caveat in R.PROV_LOCAL_CAVEATS:
             self.assertNotIn(caveat, text)
+        self.assertNotIn("| 摘要覆盖范围 |", text)
 
-    def test_local_receipt_without_source_facts_never_claims_clean(self):
-        text = self._render(_receipt({
-            "dut_source": "local_checkout", "repo": "cann/ops-nn",
-            "local_root_digest": LOCAL_DIGEST}))
-        self.assertIn(f"| 子树摘要 root_digest | `{LOCAL_DIGEST}` |", text)
+    def test_local_snapshot_receipt_renders_subtree_digest_and_scope(self):
+        """⭐ 本地快照通路：锚是子树摘要，且**必须**同时给出覆盖范围。
+
+        只印一个 64 位 hex 会让读的人以为它覆盖了整份被测代码——而它只覆盖
+        `snapshot_subtree_scope` 那一段。
+        """
+        text = self._render(_snapshot_receipt())
+        self.assertIn(f"| 子树摘要 snapshot_subtree_sha256 | `{SUBTREE_DIGEST}` |", text)
+        self.assertIn(R.PROV_SCOPE_ROW.format(scope=R._code_cell("op")), text)
+        self.assertIn(R.PROV_FORM_ROW.format(
+            value=R.PROV_FORM_LABEL[VBR.FORM_LOCAL_SOURCE]), text)
+        # 声明即所得 = 无降级：不得凭空挂一条降级账。
+        self.assertNotIn("| 降级挂账 |", text)
         # caveat 只依赖 kind：没有 source_facts 也必须一条不少。
         for caveat in R.PROV_LOCAL_CAVEATS:
             self.assertIn(caveat, text)
-        self.assertIn("不得据此认定 worktree clean", text)
-        # 防 fail-open 的核心断言：除了那句「不得据此认定 worktree clean」的告警本身，
-        # 报告里不许再出现任何 clean 措辞——把「查不到脏」写成「干净」是本节最贵的缺陷。
-        self.assertNotIn("clean", text.replace(R.PROV_DIRTY_UNKNOWN, ""))
-        self.assertNotIn(R.PROV_DIRTY_CLEAN, text)
+        # PR 通路的锚行不该出现（本形态压根没有 PR head，硬渲染一个「—」会读成「这次没记」）。
+        self.assertNotIn("| PR head |", text)
 
-    def test_local_receipt_with_matching_facts_renders_dirty(self):
-        text = self._render(
-            _receipt({"dut_source": "local_checkout", "repo": "cann/ops-nn",
-                      "local_root_digest": LOCAL_DIGEST}),
-            source_facts=_local_facts(git={
-                "head_sha": LOCAL_GIT_HEAD, "dirty": True,
-                "dirty_files": ["a.cpp", "b.cpp"], "dirty_files_in_op_subdir": ["a.cpp"]}))
-        self.assertIn("**dirty**——worktree 有 2 项未提交改动（被测子树内 1 项）", text)
-        self.assertNotIn(R.PROV_DIRTY_UNKNOWN, text)
-        self.assertNotIn(R.PROV_DIRTY_IGNORED, text)
-        # git head 可以渲染，但必须原地标成信息字段，不能被当 PR head 读。
-        self.assertIn(f"| git head（**信息字段，非 provenance 锚**） | `{LOCAL_GIT_HEAD}` |", text)
-        # caveat 不因为拿到了 facts 就消失。
-        for caveat in R.PROV_LOCAL_CAVEATS:
-            self.assertIn(caveat, text)
+    def test_whole_tree_scope_is_spelled_out_not_rendered_as_empty(self):
+        """⭐ `snapshot_subtree_scope` 是空串（= 整棵树）时必须**明说**。
 
-    def test_local_receipt_ignores_source_facts_with_mismatched_anchor(self):
-        text = self._render(
-            _receipt({"dut_source": "local_checkout", "repo": "cann/ops-nn",
-                      "local_root_digest": LOCAL_DIGEST}),
-            source_facts=_local_facts(root_digest=OTHER_DIGEST, op_subdir="ops/OTHER-SUBTREE",
-                                      git={"head_sha": LOCAL_GIT_HEAD, "dirty": False,
-                                           "dirty_files": [], "dirty_files_in_op_subdir": []}))
-        self.assertIn("与本轮收据的来源锚不一致，已忽略", text)
-        self.assertIn("不得据此认定 worktree clean", text)
-        # 整份忽略 = 里面的值一个都不进报告（否则等于把另一份 checkout 的事实注进本轮 provenance）。
+        渲染成一个空格子的话，读起来像「这次没记范围」，而它其实是一个合法的显式值。
+        """
+        text = self._render(_snapshot_receipt(scope=""))
+        self.assertIn(R.PROV_SCOPE_ROW.format(scope=R.PROV_SCOPE_WHOLE_TREE), text)
+        self.assertNotIn("| 摘要覆盖范围 |  |", text)
+
+    def test_degraded_snapshot_receipt_shows_the_degradation_on_the_first_layer(self):
+        """⭐ 「本来要测 PR、只拿到一份快照」必须在报告第一层看得见。
+
+        它与「本轮本来就是本地源码」在锚上长得一模一样（都只有子树摘要），
+        分得开两者的只有 `declared_source_form` + 降级台账这两行。
+        """
+        text = self._render(_receipt(
+            _snapshot_source(declared_source_form=VBR.FORM_GIT_PR),
+            schema_version=VBR.SCHEMA_VERSION,
+            degradations=[VBR.DEGRADATION_PR_HEAD_UNBOUND]))
+        self.assertIn(R.PROV_DEGRADATION_ROW.format(
+            items=VBR.DEGRADATION_PR_HEAD_UNBOUND), text)
+        self.assertIn(R.PROV_FORM_ROW.format(
+            value=R.PROV_FORM_LABEL[VBR.FORM_GIT_PR]), text)
+        self.assertIn("本该绑上游 commit 却没绑", text)
+
+    def test_local_receipt_without_source_facts_never_claims_corroboration(self):
+        """⭐ 本节最贵的一条：**「没有对照物」= 未经印证，不是「已核」**。"""
+        text = self._render(_snapshot_receipt())
+        self.assertIn(R.PROV_FACTS_ABSENT, text)
+        self.assertNotIn(R.PROV_FACTS_FOUND, text)
+        self.assertIn("未经第二方印证", text)
+
+    def test_matching_source_facts_is_reported_as_found_but_never_quoted(self):
+        """⭐ 有对照物只报「找到了」，**一个字段值都不引用**。
+
+        一份来源对不上的 facts，它里面的字段描述的是**另一份取材**。只要渲染器一个值
+        都不取，「把无关事实冒充本轮 provenance」这一整类缺陷就在结构上不存在；
+        锚是否逐字一致由三级门裁定，本节不重判。
+        """
+        text = self._render(_snapshot_receipt(), source_facts=_snapshot_facts())
+        self.assertIn(R.PROV_FACTS_FOUND, text)
+        self.assertNotIn(R.PROV_FACTS_ABSENT, text)
+        self.assertIn("由验收门裁定", text)
+        # facts 独有的字段值一个都不许进报告。
+        self.assertNotIn(FACTS_ONLY_MARKER, text)
+
+    def test_source_facts_with_a_mismatched_anchor_is_still_not_quoted(self):
+        """对照物的锚与收据对不上时，报告里同样只出现「找到了」这一句、不引用它的值。
+
+        ⚠ 这不是「渲染器判它对不上」——判定归三级门（那边会 BLOCK）。渲染器的职责是
+        **无论对不对得上都不引用它的字段**，于是没有任何一条路径能把另一份取材的事实
+        写进本轮 provenance。
+        """
+        text = self._render(_snapshot_receipt(),
+                            source_facts=_snapshot_facts(snapshot_merkle=OTHER_DIGEST,
+                                                         snapshot_scope="OTHER-SUBTREE"))
         self.assertNotIn(OTHER_DIGEST, text)
-        self.assertNotIn(LOCAL_GIT_HEAD, text)
         self.assertNotIn("OTHER-SUBTREE", text)
-        self.assertNotIn(R.PROV_DIRTY_CLEAN, text)
-        self.assertIn(f"| 子树摘要 root_digest | `{LOCAL_DIGEST}` |", text)
+        self.assertIn(f"| 子树摘要 snapshot_subtree_sha256 | `{SUBTREE_DIGEST}` |", text)
 
-    def test_legacy_receipt_carrying_a_credential_repo_never_reaches_the_report(self):
+    def test_credential_repo_never_reaches_the_report(self):
         """⭐ 报告是凭据真正**泄漏出去**的那一步——它是给人看、会被转发的 .md。
 
-        源头（`fetch_source` 扣留 remote_url）堵住的是新产的 source_facts；已经躺在
-        既有 reports 目录里的老收据、外部构建驱动产的收据、手改的收据，全都从**读侧**
-        进来。渲染器共用 `dut_source.validate_build_receipt_source`，那道门拦下即整节
-        退成「来源锚不合法」，一个 token 字节都不进 .md。
+        源头（`fetch_source` 扣留 remote_url）堵住的是新产的取材事实；已经躺在既有
+        reports 目录里的老收据、外部构建驱动产的收据、手改的收据，全都从**读侧**进来。
+        渲染器用 `url_credentials`（判别式唯一实现）当场拦下，整节退成「拒绝渲染」，
+        一个 token 字节都不进 .md，**且不回显原值**。
         """
         token = "gk_LEAKED_TOKEN_9f3a"
-        text = self._render(_receipt({
-            "dut_source": "local_checkout",
-            "repo": f"https://bot:{token}@gitcode.com/cann/ops-nn.git",
-            "repo_source": "local_checkout.git.remote_url",
-            "local_root_digest": LOCAL_DIGEST}))
+        text = self._render(_snapshot_receipt(
+            repo=f"https://bot:{token}@gitcode.com/cann/ops-nn.git",
+            repo_source="snapshot.source_root"))
         self.assertNotIn(token, text, "凭据被渲染进了人读的验收报告")
-        self.assertIn("来源锚不合法", text)
+        self.assertIn(R.PROV_CREDENTIAL_REPO, text)
         self.assertNotIn("| 源码仓 |", text)
-        self.assertNotIn(LOCAL_DIGEST, text, "校验没过就不该有任何 provenance 断言")
-        # 报告本体照出：异常被 catch 在节内，不能把整份 `验收报告.md` 拖没。
+        self.assertNotIn(SUBTREE_DIGEST, text, "校验没过就不该有任何 provenance 断言")
+        # 报告本体照出：整节退化不能把整份 `验收报告.md` 拖没。
         self.assertIn("## 精度汇总", text)
 
+    def test_ssh_style_remote_is_not_mistaken_for_a_credential(self):
+        """判过头与判不到同样是坏门：`git@host:path` 的 `@` 前面是用户名、不含任何密钥。"""
+        text = self._render(_snapshot_receipt(repo="git@gitcode.com:cann/ops-nn.git"))
+        self.assertIn(R._code_cell("git@gitcode.com:cann/ops-nn.git"), text)
+        self.assertNotIn(R.PROV_CREDENTIAL_REPO, text)
+
     def test_malformed_receipt_source_still_renders_report_without_anchor(self):
-        # `repo` 缺失 → `validate_build_receipt_source` 抛错；锚值虽在收据里，但校验没过，
+        # `repo` 缺失 → `summarize` 抛错；锚值虽在收据里，但校验没过，
         # 一个字都不该被当成 provenance 渲染出去。
-        text = self._render(_receipt({"dut_source": "local_checkout",
-                                      "local_root_digest": LOCAL_DIGEST}))
+        source = _snapshot_source()
+        del source["repo"]
+        text = self._render(_receipt(source, schema_version=VBR.SCHEMA_VERSION,
+                                     degradations=[]))
         self.assertIn("来源锚不合法", text)
-        self.assertNotIn(LOCAL_DIGEST, text)
-        self.assertNotIn("| 子树摘要 root_digest |", text)
+        self.assertNotIn(SUBTREE_DIGEST, text)
+        self.assertNotIn("| 子树摘要 snapshot_subtree_sha256 |", text)
         # 报告本体照出：异常被 catch 在节内，不能把整份 `验收报告.md` 拖没。
         self.assertIn("## 精度汇总", text)
         self.assertIn("## 被测物与运行环境", text)
 
-    def test_unreadable_source_facts_falls_back_to_unknown(self):
-        text = self._render(
-            _receipt({"dut_source": "local_checkout", "repo": "cann/ops-nn",
-                      "local_root_digest": LOCAL_DIGEST}),
-            source_facts_raw="{ 这不是 JSON")
-        self.assertIn(R.PROV_DIRTY_UNKNOWN, text)
-        self.assertNotIn("clean", text.replace(R.PROV_DIRTY_UNKNOWN, ""))
+    def test_synthesised_pr_head_on_a_snapshot_receipt_is_refused(self):
+        """⭐ 本地快照档合成一个 40 位 hex 当 head = 捏造 PR head（AGENTS.md 5.8）。
+
+        渲染器不自己判这一条，而是共用 `vendor_build_receipt`——判据只有一份。
+        """
+        text = self._render(_receipt(_snapshot_source(pr_head_sha=PR_HEAD),
+                                     schema_version=VBR.SCHEMA_VERSION,
+                                     degradations=[]))
+        self.assertIn("来源锚不合法", text)
+        # 合成的那个 hex 只以「被拒绝的实得值」出现在报错里（那是要给人看的），
+        # **绝不能**作为一条 provenance 断言被渲染成锚。
+        self.assertNotIn(f"| PR head | `{PR_HEAD}` |", text)
+        self.assertNotIn(SUBTREE_DIGEST, text)
+
+    def test_unreadable_source_facts_falls_back_to_uncorroborated(self):
+        text = self._render(_snapshot_receipt(), source_facts_raw="{ 这不是 JSON")
+        self.assertIn(R.PROV_FACTS_ABSENT, text)
+        self.assertNotIn(R.PROV_FACTS_FOUND, text)
         for caveat in R.PROV_LOCAL_CAVEATS:
             self.assertIn(caveat, text)
 
     def test_tampered_source_facts_envelope_is_not_trusted(self):
-        """⭐ payload 被改、digest 没跟着改 → 整份不可信，退「未知」而不是照采信。
+        """⭐ payload 被改、digest 没跟着改 → 整份不可信，退「未提供或不可信」。
 
-        对照物的可信度是本地锚的全部依据；不复算 digest 的话，随手编一份最小 JSON
-        就能给一份可能 dirty 的 checkout 发 clean 证明。
+        不复算 digest 的话，随手编一份最小 JSON 就能冒充一份「已过取材契约」的对照物。
         """
         with tempfile.TemporaryDirectory() as root:
-            _write_docs(root, _docs(_receipt(
-                {"dut_source": "local_checkout", "repo": "cann/ops-nn",
-                 "local_root_digest": LOCAL_DIGEST})),
-                source_facts=_local_facts(git={
-                    "head_sha": LOCAL_GIT_HEAD, "dirty": True,
-                    "dirty_files": ["a.cpp"], "dirty_files_in_op_subdir": ["a.cpp"]}))
+            _write_docs(root, _docs(_snapshot_receipt()),
+                        source_facts=_snapshot_facts())
             path = os.path.join(root, "source_facts.json")
             with open(path, encoding="utf-8") as src:
                 doc = json.load(src)
-            doc["payload"]["local_checkout"]["git"]["dirty"] = False   # 洗白，digest 不动
-            doc["payload"]["local_checkout"]["git"]["dirty_files"] = []
+            doc["payload"]["pr"]["snapshot_scope"] = "tampered"   # digest 不动
             with open(path, "w", encoding="utf-8") as out:
                 json.dump(doc, out)
             text = R.render(root)
-        self.assertIn(R.PROV_DIRTY_UNKNOWN, text)
-        self.assertNotIn(R.PROV_DIRTY_CLEAN, text)
+        self.assertIn(R.PROV_FACTS_ABSENT, text)
+        self.assertNotIn(R.PROV_FACTS_FOUND, text)
 
-    def test_complete_facts_without_git_key_render_not_a_git_repo(self):
+    def test_incomplete_source_facts_is_not_reported_as_found(self):
+        """⭐ `completeness != complete` 的取材产物只供诊断，不是可采信的对照物。
+
+        它是 fetch_source 亲手产的、digest 完全正确——只有跑完整契约才拦得住。
+        """
         text = self._render(
-            _receipt({"dut_source": "local_checkout", "repo": "cann/ops-nn",
-                      "local_root_digest": LOCAL_DIGEST}),
-            source_facts=_local_facts())
-        self.assertIn(R.PROV_DIRTY_NOT_GIT, text)
-
-
-    def test_clean_worktree_still_renders_clean(self):
-        """收紧不能误伤正例：dirty=false + 空清单 = 真的干净。"""
-        text = self._render(
-            _receipt({"dut_source": "local_checkout", "repo": "cann/ops-nn",
-                      "local_root_digest": LOCAL_DIGEST}),
-            source_facts=_local_facts(git={
-                "head_sha": LOCAL_GIT_HEAD, "dirty": False,
-                "dirty_files": [], "dirty_files_in_op_subdir": []}))
-        self.assertIn(R.PROV_DIRTY_CLEAN, text)
+            _snapshot_receipt(),
+            source_facts=_snapshot_facts(completeness={
+                "status": "blocked", "reasons": ["missing_key_files"],
+                "form_facts": []}))
+        self.assertIn(R.PROV_FACTS_ABSENT, text)
+        self.assertNotIn(R.PROV_FACTS_FOUND, text)
 
     def test_unverified_build_receipt_makes_no_provenance_claim(self):
         """⭐ 锚形态合法 ≠ 收据可信：没 VERIFIED 就不能出「可证明验的就是…」这类强度断言。"""
         for label, override in (
                 ("status 非 VERIFIED", {"status": "PENDING"}),
                 ("schema 不对", {"schema": "something.else"}),
-                ("schema_version 不对", {"schema_version": 2}),
+                ("schema_version 不受支持", {"schema_version": 99}),
         ):
             with self.subTest(label):
-                text = self._render(_receipt(
-                    {"repo": "cann/ops-nn", "pr_head_sha": PR_HEAD}, **override))
+                text = self._render(_receipt(_pr_source(), **override))
                 self.assertIn("本节不作任何 provenance 断言", text)
                 self.assertNotIn(f"| PR head | `{PR_HEAD}` |", text)
                 self.assertNotIn(PR_HEAD, text)
                 self.assertIn("## 精度汇总", text)      # 报告本体照出
 
+    def test_declared_returncode_receipt_makes_no_provenance_claim(self):
+        """⭐ 自报的 returncode 不是构建证据——收据整份不可信，本节就不该背书。
+
+        这一条靠的是渲染器走 `vendor_build_receipt.summarize`（连 build 段一起校），
+        而不是只看 `source` 里那几个字段。
+        """
+        receipt = _receipt(_pr_source())
+        receipt["vendor"]["build_receipt"]["build"][VBR.RETURNCODE_SOURCE_KEY] = \
+            VBR.RETURNCODE_SOURCE_DECLARED
+        text = self._render(receipt)
+        self.assertIn("来源锚不合法", text)
+        self.assertNotIn(PR_HEAD, text)
+        self.assertIn("## 精度汇总", text)
+
 
 class RepoSourceStrengthTest(unittest.TestCase):
     """「源码仓」一行必须同时呈现**强度**：事实派生 / 操作者自报 / 强度未知。
 
-    实测逮到的 fail-open：两轮真机跑出的报告里，`https://gitcode.com/cann/ops-nn.git`
-    （`repo_source=local_checkout.git.remote_url`，事实派生）与 `cann/ops-nn`
-    （去 git 那轮，`repo_source=operator`，树里根本没有仓名证据）**同权并列**，
-    审核员读不出后者只是一句自报。收据记得很老实，是渲染层把强度吞了。
+    实测逮到的 fail-open：真机跑出的报告里，一个从取材事实派生的仓名与一个操作者
+    `--repo` 手给的仓名**同权并列**，审核员读不出后者只是一句自报。收据记得很老实，
+    是渲染层把强度吞了。
+
+    ⚠ 当前**没有任何产出方**写 `repo_source`（`vendor_build_receipt.produce_receipt`
+    不写这个键），所以正常路径上恒走「缺席 = 强度未知」那一档。这几条用例钉住的是
+    「缺席绝不被洗成事实派生」，以及将来补上这个键时的归类纪律。
     """
 
-    def _render(self, source):
+    def _render(self, source, **kw):
         with tempfile.TemporaryDirectory() as root:
-            _write_docs(root, _docs(_receipt(source)))
+            _write_docs(root, _docs(_receipt(source, **kw)))
             return R.render(root)
 
     def _repo_line(self, text):
@@ -423,32 +521,31 @@ class RepoSourceStrengthTest(unittest.TestCase):
     # 三种已知取值各一 -------------------------------------------------------------
     def test_pr_derived_repo_says_where_it_came_from(self):
         row = self._repo_line(self._render(
-            {"repo": "cann/ops-nn", "repo_source": "pr.source_repo",
-             "pr_head_sha": PR_HEAD}))
+            _pr_source(repo_source="pr.source_repo")))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
-            repo=R._code_cell("cann/ops-nn"), strength=R.PROV_REPO_SOURCE_LABEL["pr.source_repo"]))
+            repo=R._code_cell("cann/ops-nn"),
+            strength=R.PROV_REPO_SOURCE_LABEL["pr.source_repo"]))
         self.assertIn("事实派生", row)
         self.assertIn("`pr.source_repo`", row)
 
-    def test_local_remote_url_derived_repo_says_where_it_came_from(self):
+    def test_snapshot_root_derived_repo_says_where_it_came_from(self):
         row = self._repo_line(self._render(
-            {"dut_source": "local_checkout",
-             "repo": "https://gitcode.com/cann/ops-nn.git",
-             "repo_source": "local_checkout.git.remote_url",
-             "local_root_digest": LOCAL_DIGEST}))
+            _snapshot_source(repo_source="snapshot.source_root"),
+            schema_version=VBR.SCHEMA_VERSION, degradations=[]))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
-            repo=R._code_cell("https://gitcode.com/cann/ops-nn.git"),
-            strength=R.PROV_REPO_SOURCE_LABEL["local_checkout.git.remote_url"]))
+            repo=R._code_cell("cann/ops-nn"),
+            strength=R.PROV_REPO_SOURCE_LABEL["snapshot.source_root"]))
         self.assertIn("事实派生", row)
-        self.assertIn("`local_checkout.git.remote_url`", row)
+        self.assertIn("`snapshot_digest.source_root`", row)
 
     def test_operator_reported_repo_is_marked_as_self_reported(self):
-        """⭐ 去 git 那轮的真实形态：树里没有仓名证据，仓名是构建时手给的。"""
+        """⭐ 快照树里根本没有仓名证据时的真实形态：仓名是构建时手给的。"""
         row = self._repo_line(self._render(
-            {"dut_source": "local_checkout", "repo": "cann/ops-nn",
-             "repo_source": "operator", "local_root_digest": LOCAL_DIGEST}))
+            _snapshot_source(repo_source="operator"),
+            schema_version=VBR.SCHEMA_VERSION, degradations=[]))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
-            repo=R._code_cell("cann/ops-nn"), strength=R.PROV_REPO_SOURCE_LABEL["operator"]))
+            repo=R._code_cell("cann/ops-nn"),
+            strength=R.PROV_REPO_SOURCE_LABEL["operator"]))
         self.assertIn("操作者自报", row)
         self.assertIn("无机器可核依据", row)
         # 自报绝不能读起来像派生。
@@ -456,10 +553,9 @@ class RepoSourceStrengthTest(unittest.TestCase):
 
     # 缺席与未知 -------------------------------------------------------------------
     def test_absent_repo_source_is_unknown_strength_not_derived(self):
-        """⭐ 老收据没有这个键：缺席 = 不知道，不是「大概是派生的」，也不是 operator。"""
+        """⭐ 当前所有产出方都不写这个键：缺席 = 不知道，不是「大概是派生的」，也不是 operator。"""
         row = self._repo_line(self._render(
-            {"dut_source": "local_checkout", "repo": "cann/ops-nn",
-             "local_root_digest": LOCAL_DIGEST}))
+            _snapshot_source(), schema_version=VBR.SCHEMA_VERSION, degradations=[]))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
             repo=R._code_cell("cann/ops-nn"), strength=R.PROV_REPO_SOURCE_ABSENT))
         self.assertIn("强度未知", row)
@@ -469,8 +565,7 @@ class RepoSourceStrengthTest(unittest.TestCase):
     def test_unknown_repo_source_value_fails_closed_to_unknown(self):
         """⭐ 词表外取值不猜属于哪一种——静默归类等于凭空给它发一张强度证明。"""
         row = self._repo_line(self._render(
-            {"repo": "cann/ops-nn", "repo_source": "probably_the_pr_i_guess",
-             "pr_head_sha": PR_HEAD}))
+            _pr_source(repo_source="probably_the_pr_i_guess")))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
             repo=R._code_cell("cann/ops-nn"), strength=R.PROV_REPO_SOURCE_UNKNOWN.format(
                 value='"probably_the_pr_i_guess"')))
@@ -479,9 +574,12 @@ class RepoSourceStrengthTest(unittest.TestCase):
         self.assertNotIn("操作者自报", row)
 
     def test_null_repo_source_is_unknown_and_distinguishable_from_absent(self):
-        """`repo_source: null` 是「记了个空」，与「没这个键」不同形，但同样退未知。"""
-        row = self._repo_line(self._render(
-            {"repo": "cann/ops-nn", "repo_source": None, "pr_head_sha": PR_HEAD}))
+        """`repo_source: null` 是「记了个空」，与「没这个键」不同形，但同样退未知。
+
+        ⚠ 顺带钉住一条会炸的写法：按 kind 查派生来源表时若 `.get()` 落空返回 `None`，
+        两个 `None` 一撞就会走进「事实派生」分支，然后 KeyError 炸掉整节。
+        """
+        row = self._repo_line(self._render(_pr_source(repo_source=None)))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
             repo=R._code_cell("cann/ops-nn"),
             strength=R.PROV_REPO_SOURCE_UNKNOWN.format(value="null")))
@@ -489,14 +587,13 @@ class RepoSourceStrengthTest(unittest.TestCase):
                             R.PROV_REPO_SOURCE_ABSENT)
 
     def test_derived_origin_from_the_other_path_fails_closed(self):
-        """⭐ PR 通路声称派生自本地 git remote——`derive_repo` 派生不出这种组合，
-        只可能来自手改收据；「事实派生」四个字没有出处，退未知。"""
+        """⭐ PR 通路声称派生自本地快照树根——这种组合派生不出来，只可能来自手改收据；
+        「事实派生」四个字没有出处，退未知。"""
         row = self._repo_line(self._render(
-            {"repo": "cann/ops-nn", "repo_source": "local_checkout.git.remote_url",
-             "pr_head_sha": PR_HEAD}))
+            _pr_source(repo_source="snapshot.source_root")))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
             repo=R._code_cell("cann/ops-nn"), strength=R.PROV_REPO_SOURCE_MISMATCH.format(
-                value='"local_checkout.git.remote_url"', kind="pull_request")))
+                value='"snapshot.source_root"', kind=VBR.PROVENANCE_GIT_PR)))
         self.assertNotIn("事实派生", row)
 
     def test_no_repo_row_at_all_when_receipt_is_unverified(self):
@@ -506,70 +603,10 @@ class RepoSourceStrengthTest(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as root:
             _write_docs(root, _docs(_receipt(
-                {"repo": "cann/ops-nn", "repo_source": "pr.source_repo",
-                 "pr_head_sha": PR_HEAD}, status="PENDING")))
+                _pr_source(repo_source="pr.source_repo"), status="PENDING")))
             text = R.render(root)
         self.assertNotIn("| 源码仓 |", text)
         self.assertIn("本节不作任何 provenance 断言", text)
-
-
-class LocalRowsSecondLineOfDefenceTest(unittest.TestCase):
-    """`_local_rows` 自己那层形态判定——**第二道防线**，所以只能直调来见证。
-
-    这些畸形 payload 走不到渲染层：`dut_source.find_source_facts` 已经拿
-    `validate_preparation_state._validate_source_payload` 把它们判成 UNTRUSTED 了
-    （contract 那层同样校 `completeness`、`dirty ↔ dirty_files`）。
-    早一层拦住是好事，但**不能因此把渲染层这几条删掉**：渲染层的职责是
-    「拿到什么都不许说成 clean」，它不该依赖上游一定筛干净。
-    这里直调 `_local_rows` 就是为了让第二道防线有独立见证，不被第一道遮住。
-    """
-
-    IDENT = ("local_checkout", "local_root_digest", LOCAL_DIGEST)
-
-    def _rows(self, **kw):
-        return "\n".join(R._local_rows(_local_facts(**kw), self.IDENT))
-
-    def test_incomplete_source_facts_is_unknown_not_non_git(self):
-        """⭐ 残缺事实包里 `git` 键缺席，含义是「不知道」，不是「不是 git 仓」。"""
-        text = self._rows(completeness={
-            "status": "blocked", "reasons": ["dirty_worktree_not_allowed"]})
-        self.assertIn(R.PROV_DIRTY_INCOMPLETE, text)
-        self.assertNotIn(R.PROV_DIRTY_NOT_GIT, text)
-        self.assertNotIn(R.PROV_DIRTY_CLEAN, text)
-
-    def test_dirty_true_with_empty_list_never_renders_zero_changes(self):
-        """⭐ 「有 0 项未提交改动」读起来像没事，实则自相矛盾——只能退「未知」。"""
-        text = self._rows(git={"dirty": True, "dirty_files": [],
-                               "dirty_files_in_op_subdir": []})
-        self.assertIn(R.PROV_DIRTY_MALFORMED, text)
-        self.assertNotIn("0 项未提交改动", text)
-        self.assertNotIn(R.PROV_DIRTY_CLEAN, text)
-
-    def test_dirty_false_with_nonempty_list_is_not_clean(self):
-        text = self._rows(git={"dirty": False, "dirty_files": ["a.cpp"],
-                               "dirty_files_in_op_subdir": []})
-        self.assertIn(R.PROV_DIRTY_MALFORMED, text)
-        self.assertNotIn(R.PROV_DIRTY_CLEAN, text)
-
-    def test_non_string_dirty_entry_is_not_counted(self):
-        """⭐ `dirty_files=[null]` 被 `len()` 数成 1 → 「有 1 项未提交改动」，数字是编的。"""
-        text = self._rows(git={"dirty": True, "dirty_files": [None],
-                               "dirty_files_in_op_subdir": []})
-        self.assertIn(R.PROV_DIRTY_MALFORMED, text)
-        self.assertNotIn("1 项未提交改动", text)
-
-    def test_in_op_subdir_must_be_a_subset(self):
-        """子树清单不是总清单的子集时，「被测子树内 N 项」可以大于总数——拒绝给结论。"""
-        text = self._rows(git={"dirty": True, "dirty_files": ["a.cpp"],
-                               "dirty_files_in_op_subdir": ["a.cpp", "b.cpp"]})
-        self.assertIn(R.PROV_DIRTY_MALFORMED, text)
-
-    def test_git_null_is_malformed_not_non_git(self):
-        facts = _local_facts()
-        facts["local_checkout"]["git"] = None
-        text = "\n".join(R._local_rows(facts, self.IDENT))
-        self.assertIn(R.PROV_DIRTY_MALFORMED, text)
-        self.assertNotIn(R.PROV_DIRTY_NOT_GIT, text)
 
 
 class CodeCellInjectionTest(unittest.TestCase):
@@ -619,43 +656,42 @@ class SourceFactsDiscoveryIsSharedTest(unittest.TestCase):
     """⭐ 钉住「渲染器和三级门用的是**同一份**来源对照物发现规则」。
 
     只把 `_find_source_facts` 改名成公开名是不够的：这条纪律要防的是**将来**有人在
-    某一侧另写一份查找规则（或多加一档 fallback 路径）。那时报告陈述的 facts 就不是
-    门校过的那一份文件——报告说 clean、门校的是另一份，两边都「自洽」，谁也发现不了。
+    某一侧另写一份查找规则（或多加一档 fallback 路径）。那时报告陈述的对照物就不是
+    门校过的那一份文件——报告说「已找到」、门校的是另一份，两边都「自洽」，谁也发现不了。
 
-    做法：把 `dut_source.find_source_facts` 换成桩，看两侧是否都观察得到。
-    任一侧改成自建实现、或改成 `from dut_source import find_source_facts`
+    做法：把 `source_facts_lookup.find_source_facts` 换成桩，看两侧是否都观察得到。
+    任一侧改成自建实现、或改成 `from source_facts_lookup import find_source_facts`
     （import 时就绑死了函数对象、换桩换不掉），本用例即红。
     """
 
-    def test_both_the_gate_and_the_renderer_go_through_dut_source(self):
-        import dut_source
+    def test_both_the_gate_and_the_renderer_go_through_source_facts_lookup(self):
+        import source_facts_lookup
         import validate_acceptance_state as vas
-        source = {"dut_source": "local_checkout", "repo": "cann/ops-nn",
-                  "local_root_digest": LOCAL_DIGEST}
+        receipt = _snapshot_receipt()
+        summary = VBR.summarize(receipt["vendor"]["build_receipt"])
         calls = []
-        original = dut_source.find_source_facts
+        original = source_facts_lookup.find_source_facts
 
         def stub(report_root, source_facts_path=None):
             calls.append((report_root, source_facts_path))
-            return dut_source.SOURCE_FACTS_UNTRUSTED
+            return source_facts_lookup.SOURCE_FACTS_UNTRUSTED
 
-        dut_source.find_source_facts = stub
+        source_facts_lookup.find_source_facts = stub
         try:
             with tempfile.TemporaryDirectory() as root:
-                _write_docs(root, _docs(_receipt(source)))
+                _write_docs(root, _docs(receipt))
                 text = R.render(root)
-                self.assertEqual(1, len(calls), "渲染器没走 dut_source.find_source_facts")
+                self.assertEqual(
+                    1, len(calls), "渲染器没走 source_facts_lookup.find_source_facts")
 
                 errs = []
-                vas._gate_build_receipt_source_binding(root, source, errs)
-                self.assertEqual(2, len(calls), "三级门没走 dut_source.find_source_facts")
+                vas._gate_build_receipt_source_binding(root, summary, errs)
+                self.assertEqual(
+                    2, len(calls), "三级门没走 source_facts_lookup.find_source_facts")
         finally:
-            dut_source.find_source_facts = original
+            source_facts_lookup.find_source_facts = original
 
-        # 桩返回 UNTRUSTED：两侧都必须按「拿不到可对账的对照物」处置，不能当 clean。
-        self.assertIn(R.PROV_DIRTY_UNKNOWN, text)
+        # 桩返回 UNTRUSTED：两侧都必须按「拿不到可对账的对照物」处置，不能当已核。
+        self.assertIn(R.PROV_FACTS_ABSENT, text)
+        self.assertNotIn(R.PROV_FACTS_FOUND, text)
         self.assertTrue(errs, "对照物不可信时三级门必须记 error，不能静默放行")
-
-
-if __name__ == "__main__":
-    unittest.main()

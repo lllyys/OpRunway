@@ -19,13 +19,16 @@ import os
 import sys
 
 import content_address
-import dut_source
-import fetch_source            # 摘要策略与 warnings 受控词表的**唯一真源**（不在此另抄一份）
+# 取源形态词表（实得 `provenance_kind` / 声明 `declared_source_form`）与形态中性事实的
+# **唯一真源**——不在此另抄一份字面量，抄一次就是两套词表，迟早对同一份事实包给出两种归类。
+import source_provenance
 
 
-_DUT_SOURCE_PR = dut_source.PULL_REQUEST
-_DUT_SOURCE_LOCAL = dut_source.LOCAL_CHECKOUT
-_DUT_SOURCES = dut_source.ALL
+#: 「键根本没写」与「显式写了某个值」必须分得开：`.get()` 会把两者压成同一个 `None`，
+#: 而 `provenance_kind` 的兼容规则恰恰是「**只有整键缺席**才按老事实包处理」。
+_KIND_ABSENT = object()
+_PROVENANCE_KINDS = (source_provenance.PROVENANCE_GIT_PR,
+                     source_provenance.PROVENANCE_LOCAL_SNAPSHOT)
 _SOURCE_DOMAIN = "oprunway/source-facts/v1"
 _RECEIPT_DOMAIN = "oprunway/preparation-receipt/v1"
 _LEDGER_SCHEMA = "oprunway.gen_cases.dry_run_ledger"
@@ -45,25 +48,29 @@ def _is_sha(value, length=64):
 def _validate_source_payload(source):
     """校验 source facts 的载重字段；摘要自洽不等于 producer 输出完整。
 
-    按 `dut_source` 判别式分支（缺省 `pull_request`，老收据不带这个键仍走 PR 分支）：
+    按 `pr.provenance_kind` 分支（**键缺席 = `gitcode_pr`**，老事实包照旧走 PR 分支，
+    与改动前逐字同规矩）：
 
-      · `pull_request`  ：`pr` 必填集**一行不改**，关键文件锚 = `pr.head_sha`；
-      · `local_checkout`：`local_checkout.root_digest` 必填（64 位 sha）、`op_subdir` 非空 str，
-        关键文件锚 = `root_digest`；**不接受 `pr` 键**（本地事实不许伪装成 PR 事实）。
+      · `gitcode_pr`     ：`pr` 必填集**一行不改**，关键文件锚 = `pr.head_sha`；
+      · `local_snapshot` ：`head_sha` 须**显式 null**（本形态没有上游 commit，合成一个
+        40 位 hex 就是捏造 PR head，AGENTS.md 5.8）、`snapshot_merkle_sha256` 与
+        `snapshot_scope` **成对**必填，关键文件锚 = 字面量 `"local_snapshot"`
+        （`fetch_source.scan_pr_snapshot` 就是这么写的，此处不另立第二套口径）。
+
+    另核「**声明**形态 × **实得**形态」仍在 `source_provenance` 的 allowlist 内：
+    声明 `local_source` 却实得绑着上游 commit 的 `gitcode_pr`，一律拒。
+
+    ⚠ 「本该测 PR、只拿到一份快照」那条**降级**路由在这里天然过不去：`fetch_source`
+    给它落的 `completeness.status` 是 `snapshot_only`，而本函数只收 `complete`。
+    这不是巧合，别在后续改动里把 `complete` 放宽成「complete 或 snapshot_only」。
     """
     if not isinstance(source, dict):
         raise content_address.ContentAddressError(
             "source_facts payload 须为 JSON object")
-    try:
-        # 判别式 + 「两条通路的事实键互斥」一并在这里收（未知取值、混装收据都当场拒）。
-        kind = dut_source.assert_facts_key_exclusive(source, where="source_facts")
-    except dut_source.DutSourceError as exc:
-        raise content_address.ContentAddressError(str(exc)) from exc
-    is_local = kind == _DUT_SOURCE_LOCAL
     required = {
-        "contract_version", "taskdoc", "changed_files", "key_files",
+        "contract_version", "taskdoc", "pr", "changed_files", "key_files",
         "derived", "completeness", "producer",
-    } | {dut_source.FACTS_KEY[kind]}
+    }
     missing = sorted(required.difference(source))
     if missing:
         raise content_address.ContentAddressError(
@@ -83,61 +90,56 @@ def _validate_source_payload(source):
             or not isinstance(taskdoc.get("source_locator"), str)):
         raise content_address.ContentAddressError(
             "source_facts.taskdoc 的 bytes/snapshot/size/source_locator 契约不完整")
-    if is_local:
-        local = source["local_checkout"]
-        if not isinstance(local, dict):
+    pr = source["pr"]
+    if not isinstance(pr, dict):
+        raise content_address.ContentAddressError(
+            "source_facts.pr 须为 JSON object")
+    # 实得取源形态：**键缺席**才表示「本字段引入之前产的老事实包」（按 gitcode_pr 处理）；
+    # 显式写了一个词表外的值一律拒——静默归类等于让未知档位自己挑一条分支走。
+    kind = pr.get("provenance_kind", _KIND_ABSENT)
+    if kind is _KIND_ABSENT:
+        kind = source_provenance.PROVENANCE_GIT_PR
+    elif kind not in _PROVENANCE_KINDS:
+        raise content_address.ContentAddressError(
+            f"source_facts.pr.provenance_kind={kind!r} 非受控值，"
+            f"须属 {list(_PROVENANCE_KINDS)}（fail-closed，不猜、不归类）")
+    is_snapshot = kind == source_provenance.PROVENANCE_LOCAL_SNAPSHOT
+    # 声明形态：入口就定的一等事实。缺席/null = 老事实包（按最严的 git_pr 一档对待）。
+    declared = source.get(source_provenance.DECLARED_FORM_KEY)
+    if declared is not None and declared not in source_provenance.DECLARED_SOURCE_FORMS:
+        raise content_address.ContentAddressError(
+            f"source_facts.{source_provenance.DECLARED_FORM_KEY}={declared!r} 非受控值，"
+            f"须属 {list(source_provenance.DECLARED_SOURCE_FORMS)}")
+    if declared == source_provenance.FORM_LOCAL_SOURCE and not is_snapshot:
+        raise content_address.ContentAddressError(
+            f"source_facts 声明 {source_provenance.DECLARED_FORM_KEY}="
+            f"{source_provenance.FORM_LOCAL_SOURCE}（本地源码），实得却是绑定上游 commit 的 "
+            f"{kind!r}——声明与实得不是同一件事，fail-closed")
+    if is_snapshot:
+        # ⚠ `head_sha` 必须**显式 null**：`.get()` 会把「键根本没写」与「写了 null」压成
+        #   同一个 `None`，而这一档的判据恰恰是「显式声明没有上游 commit」。
+        if "head_sha" not in pr:
             raise content_address.ContentAddressError(
-                "source_facts.local_checkout 须为 JSON object")
-        if (not _is_sha(local.get("root_digest"))
-                or not isinstance(local.get("op_subdir"), str)
-                or not local.get("op_subdir")):
+                "source_facts.pr.head_sha 键缺失——本地快照档须**显式**写 null，"
+                "「没写这个字段」与「显式写 null」不是一回事")
+        if pr["head_sha"] is not None:
             raise content_address.ContentAddressError(
-                "source_facts.local_checkout 的 root_digest/op_subdir 契约不完整"
-                "（root_digest 须 64 位小写 sha）")
-        # ⚠ 摘要策略必须**逐字**等于本工具当前支持的那一份，不能「是个非空列表就收下」：
-        # 一份声明了弱化/伪造排除规则的本地摘要，外表与正常摘要毫无区别，却覆盖不到它
-        # 声称覆盖的字节。未知算法/版本/规则一律 fail-closed。
-        if local.get("digest_policy") != fetch_source.digest_policy():
+                f"source_facts.pr.head_sha 在 {kind} 档须为 null（实得 {pr['head_sha']!r}）——"
+                "本地快照没有上游 commit，合成一个 40 位 hex 就是捏造 PR head")
+        # merkle 与 scope **成对**：没有范围的 merkle 与真机 build 侧不可比
+        # （对上了是巧合，对不上也说不清是改了字节还是换了范围）。
+        if not _is_sha(pr.get("snapshot_merkle_sha256")):
             raise content_address.ContentAddressError(
-                f"source_facts.local_checkout.digest_policy 不是本工具支持的策略：\n"
-                f"  收据里：{local.get('digest_policy')!r}\n"
-                f"  支持的：{fetch_source.digest_policy()!r}\n"
-                f"  → 排除规则不同则 root_digest 不可比，而外表看不出来；fail-closed。")
-        # 「非 git 仓」的唯一合法表示是**整键缺席**（`fetch_source` 就是这么写的）。
-        # ⚠ `git: null` 不算：`is not None` 会让它与缺席同义，于是一份被裁剪/写坏的收据
-        # 只要把 git 置空就能免掉下面全部 dirty 一致性校验，还顺带免掉 warnings 反向核对。
-        if "git" in local:
-            git = local["git"]
-            if (not isinstance(git, dict)
-                    or not isinstance(git.get("dirty"), bool)
-                    or not isinstance(git.get("dirty_files"), list)
-                    or any(not isinstance(p, str) or not p
-                           for p in git["dirty_files"])):
-                raise content_address.ContentAddressError(
-                    "source_facts.local_checkout.git 契约不完整"
-                    "（dirty 须 bool、dirty_files 须非空字符串数组；"
-                    "非 git 仓请让 git 整键缺席，不要写 null）")
-            # ⚠ `dirty` 与清单必须互相蕴含：`dirty=false` 配非空清单会让降级 warning
-            # 整条消失（`warnings` 是按 `git.dirty` 派生的），`dirty=true` 配空清单则是
-            # 「说脏却举不出一份脏文件」——两种都是自相矛盾的收据，不猜哪半是真的。
-            if bool(git["dirty"]) != bool(git["dirty_files"]):
-                raise content_address.ContentAddressError(
-                    f"source_facts.local_checkout.git 自相矛盾："
-                    f"dirty={git['dirty']!r} 但 dirty_files 有 {len(git['dirty_files'])} 项")
-            in_op = git.get("dirty_files_in_op_subdir")
-            if in_op is not None and (
-                    not isinstance(in_op, list)
-                    or not set(in_op).issubset(set(git["dirty_files"]))):
-                raise content_address.ContentAddressError(
-                    "source_facts.local_checkout.git.dirty_files_in_op_subdir "
-                    "须为 dirty_files 的子集")
-        anchor = local["root_digest"]
-        anchor_desc = "本地子树摘要 root_digest"
+                "source_facts.pr.snapshot_merkle_sha256 须为 64 位小写 sha"
+                f"（实得 {pr.get('snapshot_merkle_sha256')!r}）——本地快照的字节身份全靠它")
+        if not isinstance(pr.get("snapshot_scope"), str):
+            raise content_address.ContentAddressError(
+                "source_facts.pr.snapshot_scope 须为字符串（空串= 快照根，属合法显式值）——"
+                "merkle 没有范围就无法与真机 build 侧对账")
+        # 关键文件的锚：本形态没有 commit id 可绑，`fetch_source` 落的是这个字面量。
+        anchor = source_provenance.PROVENANCE_LOCAL_SNAPSHOT
+        anchor_desc = "本地快照锚（key_files[].ref 应为 'local_snapshot'）"
     else:
-        pr = source["pr"]
-        if not isinstance(pr, dict):
-            raise content_address.ContentAddressError(
-                "source_facts.pr 须为 JSON object")
         if (not isinstance(pr.get("canonical_url"), str)
                 or not isinstance(pr.get("source_repo"), str)
                 or not isinstance(pr.get("number"), int)
@@ -149,19 +151,21 @@ def _validate_source_payload(source):
                 or not isinstance(pr.get("state"), str)):
             raise content_address.ContentAddressError(
                 "source_facts.pr 的 URL/repo/number/head/fork/state 契约不完整")
+        # 反向排他：PR 档不得带任何本地快照锚（值为 None 才算「没有」——`fetch_source`
+        # 恒带这两个键、PR 通路值为 None，要求「键不存在」会把所有 PR 通路当场打死）。
+        for stray in ("snapshot_merkle_sha256", "snapshot_scope"):
+            if pr.get(stray) is not None:
+                raise content_address.ContentAddressError(
+                    f"source_facts.pr 声明 provenance_kind={kind!r} 却带着 "
+                    f"{stray}={pr.get(stray)!r}——PR 通路混装本地快照锚，fail-closed")
         anchor = pr["head_sha"]
         anchor_desc = "PR head"
     changed_files = source["changed_files"]
-    # ⚠ 本地通路允许 `"unavailable"`（没给 --base-ref 时算不出改动清单）——它与「确实没改」
-    # 是两回事，绝不能退化成空数组。PR 通路仍必须是非空数组。
-    if is_local and changed_files == "unavailable":
-        pass
-    elif (not isinstance(changed_files, list) or not changed_files
+    if (not isinstance(changed_files, list) or not changed_files
             or any(not isinstance(path, str) or not path
                    for path in changed_files)):
         raise content_address.ContentAddressError(
-            "source_facts.changed_files 须为非空字符串数组"
-            + ("（本地通路亦可为 'unavailable'）" if is_local else ""))
+            "source_facts.changed_files 须为非空字符串数组")
     key_files = source["key_files"]
     if not isinstance(key_files, list) or not key_files:
         raise content_address.ContentAddressError(
@@ -191,46 +195,22 @@ def _validate_source_payload(source):
             or completeness.get("reasons") != []):
         raise content_address.ContentAddressError(
             "source_facts.completeness 必须是 complete 且 reasons 为空")
-    # `warnings` 是非阻塞留痕（如本地通路的 changed_files_unavailable），**仅在非空时出现**。
-    # ⚠ 必须是**受控词表**且与载重事实**对得上**，不能「是字符串就收下」：否则把任意阻塞原因
-    # 写成 warning、再配 `status=complete, reasons=[]`，就能让降级的来源以干净 pass 过门。
-    if "warnings" in completeness:
-        warnings = completeness["warnings"]
-        if (not isinstance(warnings, list) or not warnings
-                or any(not isinstance(w, str) or not w for w in warnings)):
-            raise content_address.ContentAddressError(
-                "source_facts.completeness.warnings 若出现则须为非空字符串数组"
-                "（空数组请整键省略——恒为空的键会改动 PR 通路的业务字段）")
-        unknown = sorted(set(warnings) - set(fetch_source.SOURCE_WARNINGS))
-        if unknown:
-            raise content_address.ContentAddressError(
-                f"source_facts.completeness.warnings 含词表外取值 {unknown}"
-                f"（受控词表 {list(fetch_source.SOURCE_WARNINGS)}）——"
-                f"任意字符串都能进 warnings 就等于给阻塞原因开了后门")
-        # 逐条核「这条 warning 对应的降级事实是否真的存在」——反向的多写同样要拒。
-        expected = set()
-        if is_local:
-            if source["changed_files"] == "unavailable":
-                expected.add(fetch_source.WARN_CHANGED_FILES_UNAVAILABLE)
-            git = source["local_checkout"].get("git")
-            if isinstance(git, dict) and git.get("dirty"):
-                expected.add(fetch_source.WARN_DIRTY_WORKTREE_ALLOWED)
-        if set(warnings) != expected:
-            raise content_address.ContentAddressError(
-                f"source_facts.completeness.warnings={sorted(set(warnings))} 与载重事实派生的 "
-                f"{sorted(expected)} 不一致（少写 = 降级没留痕；多写 = 编造降级）")
-    elif is_local:
-        # 反向：降级发生了却整键缺席，同样是「没留痕」。
-        missing = set()
-        if source["changed_files"] == "unavailable":
-            missing.add(fetch_source.WARN_CHANGED_FILES_UNAVAILABLE)
-        git = source["local_checkout"].get("git")
-        if isinstance(git, dict) and git.get("dirty"):
-            missing.add(fetch_source.WARN_DIRTY_WORKTREE_ALLOWED)
-        if missing:
-            raise content_address.ContentAddressError(
-                f"source_facts 发生了来源降级但 completeness.warnings 整键缺席：应含 "
-                f"{sorted(missing)}（降级必须留痕，否则报告里看不出 provenance 弱在哪）")
+    # `form_facts` = 该输入形态本来就成立的**中性事实**（不是降级，见 `source_provenance`）。
+    # ⚠ 必须是**受控词表**且与形态**双向一致**：少写 = 形态弱点没留痕，多写 = 编造事实。
+    #   一个「随便什么字符串都收下」的 form_facts 等于给 provenance 强度声明开了后门。
+    facts_listed = completeness.get("form_facts", [])
+    if not isinstance(facts_listed, list) or any(
+            not isinstance(item, str) for item in facts_listed):
+        raise content_address.ContentAddressError(
+            "source_facts.completeness.form_facts 若出现则须为字符串数组")
+    expected_form_facts = (
+        list(source_provenance.LOCAL_SOURCE_FORM_FACTS)
+        if declared == source_provenance.FORM_LOCAL_SOURCE else [])
+    if sorted(facts_listed) != sorted(expected_form_facts):
+        raise content_address.ContentAddressError(
+            f"source_facts.completeness.form_facts={sorted(facts_listed)} 与声明形态 "
+            f"{declared!r} 派生的 {sorted(expected_form_facts)} 不一致"
+            f"（少写 = 形态弱点没留痕；多写 = 编造事实）")
     producer = source["producer"]
     if (not isinstance(producer, dict)
             or producer.get("tool") != "fetch_source.py"
@@ -362,7 +342,7 @@ def _current_numpy_stream_pin():
     """当前进程的 numpy 随机流 pin；取不到就说取不到（**不返回占位值**）。
 
     刻意走 `gen_cases` 的函数而不是在这里另写一行 `split(".")[:2]`：pin 口径一旦有两份实现，
-    两边迟早漂，而漂的表现是「门看着在跑、其实永远相等」。同 `fetch_source.digest_policy()`
+    两边迟早漂，而漂的表现是「门看着在跑、其实永远相等」。同 `source_provenance` 的词表
     在本文件里的用法——判定依赖只认产出方那一份真源。
 
     ⚠ 本函数是**懒导入**：`gen_cases` 会拉起 numpy，而本脚本其余部分是纯静态校验、

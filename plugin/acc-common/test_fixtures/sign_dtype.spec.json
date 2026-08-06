@@ -6,7 +6,7 @@
   "runner_form": "cpp",
   "hardware": ["Atlas A2", "Atlas A3"],
   "reference": {"type": "tbe", "ref": "fixture 占位：Sign 输出∈{-1,0,1}，各 dtype 精确可表示 → exact_equal"},
-  "change": {"kind": "fixture", "note": "扩 int16/int32/bfloat16 覆盖矩阵（fixture，不改权威 sign.spec.json）"},
+  "_change_note": "合成夹具，无任务书↔PR 对应关系，故**整个 `change` 键省略**（perf_mode.change_kind 明确：整个键省略才是合法的「未声明」；此前写的 kind=\"fixture\" 是词表外的编造值，2026-08-05 受控词表落地后当场 fail-closed）。原 note：扩 int16/int32/bfloat16 覆盖矩阵（fixture，不改权威 sign.spec.json）",
   "params_source": "fixture",
   "params": [
     {"name": "self", "io": "in",  "dtype": ["float32", "float16", "int16", "int32", "bfloat16"]},

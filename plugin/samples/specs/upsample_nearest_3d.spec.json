@@ -150,7 +150,7 @@
     "空 Tensor 冲突（**第二个** blocker，rank 5 之后紧接着就撞上）：任务书 :26/:31 明写『不支持空Tensor』『shape的C、D、H、W维的size大于0』，但 gen_cases 的 `_special_entries`（opbase §1.4）**无条件**为每个 dtype 强制注入一条 `empty` 用例。spec 没有『本算子不支持空 Tensor』的表达位 → golden 只能 fail-closed。已用探针（进程内给 `_REG_SHAPES` 临时补 5 维阶梯）验证：绕过 rank 5 后，下一条挡路的就是 (1,1,1,1,0) 这条 empty 用例，与 UpsampleNearestExact2d 同一 root cause",
     "性能基线口径与引擎槽位不符：任务书要求的是『uint8 对比同算子 fp16』的**跨 dtype 自比**，而 spec.perf.baseline 的取值域只有 {tbe, gpu_external}。本轮 uint8 未测 → 该性能要求实际无法行使；填 tbe 只是占位",
     "op_def 另有 ascend310p / kirinx90 / kirin9030 三个 config（upsample_nearest3d_def.cpp:66-68），dtype 更窄（只 {FLOAT16, FLOAT}，见 :58,:63）。本 spec 的 hardware 只取任务书『适配硬件』的 A2/A3，未覆盖这三支；950 支（:77）亦不在本 spec 口径内",
-    "PR 缺口（沿用 doc/oprunway-task-pr-map.md:60,68）：本任务未找到离散交付 PR，uint8 据记载混在 Dec-2025 的批量 PR #90 里 —— 意味着『被测物是哪次改动』尚未锁定，验收前须先定 PR 口径"
+    "PR 缺口（沿用 dev-doc/oprunway-task-pr-map.md:60,68）：本任务未找到离散交付 PR，uint8 据记载混在 Dec-2025 的批量 PR #90 里 —— 意味着『被测物是哪次改动』尚未锁定，验收前须先定 PR 口径"
   ],
   "allow_empty_tensor": false
 }

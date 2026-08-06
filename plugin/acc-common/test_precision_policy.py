@@ -653,6 +653,84 @@ class EffectiveStandardSecurityTest(unittest.TestCase):
         self.assertEqual(vd["overall"]["verdict"], "fail")
         self.assertIn("dims", vd["per_case"][0]["判据"])
 
+    def test_golden_unavailable_reports_real_reason_not_dims_contract(self):
+        """`golden_unavailable`（caseset 名册在案 + dims=["功能"]）→ 判据必须写**真原因**，不是「dims 契约」。
+
+        回归点（2026-08-05 GaussianBlur 干净现场实测）：gen_cases 对算不出 golden 的任务书用例
+        逐字写 `dims=["功能"]`，而 `_dims_contract` 在 numerical 下要求必含「精度」——两处打架，
+        于是工具自己产的合法 caseset 被报成「dims 契约违约」，参考实现的真实报错一个字都进不了裁决。
+        档位不变（仍 功能=fail），改的是归因准不准。
+        """
+        spec, cs, ev = _honest_triple("float32")
+        cid = cs["cases"][0]["id"]
+        cs["cases"][0]["dims"] = ["功能"]
+        cs["golden_unavailable"] = {
+            "count": 1,
+            "cases": [{"case_id": cid, "reason": "OpenCV: CV_CN_MAX 超限"}],
+        }
+        ev["evidence"][0]["status"] = "golden_unavailable"
+        ev["evidence"][0]["golden_unavailable_reason"] = "OpenCV: CV_CN_MAX 超限"
+        vd = V.validate(spec, cs, ev)
+        row = vd["per_case"][0]
+        self.assertEqual(row["功能"], "fail")           # 档位不放松
+        self.assertEqual(row["精度"], "na")             # 无 golden → 不判精度
+        self.assertNotIn("dims 契约", row["判据"])
+        self.assertIn("golden_unavailable", row["判据"])
+        self.assertIn("CV_CN_MAX", row["判据"])
+
+    def test_golden_unavailable_alone_blocks_not_fails(self):
+        """只有「算不出真值」、没有真实精度失败 → `blocked_golden_unavailable`，**不是 fail、更不是 pass**。
+
+        回归点（2026-08-05 GaussianBlur 干净现场实测）：169 条里 5 条因 OpenCV `CV_CN_MAX` 算不出
+        golden，终态却落成 `FAIL(精度)`——而 164 条可判用例里 DUT 数值失败为 **0**。
+        把参考实现的能力边界算成被测算子的精度失败，是 AGENTS.md 5.8 禁止的错误归因。
+        判据同 validator 对 golden tier 4 的既有处理：没有真值就**无从得出结论**，
+        混进 fail 会把人引去查算子（查错方向）。
+        ⚠ 也不能落 pass：那等于拿「能判的那部分全过」替整份用例集背书。
+        """
+        spec, cs, ev = _honest_triple("float32")
+        cid = cs["cases"][0]["id"]
+        cs["cases"][0]["dims"] = ["功能"]
+        cs["golden_unavailable"] = {
+            "count": 1, "cases": [{"case_id": cid, "reason": "OpenCV: CV_CN_MAX 超限"}]}
+        ev["evidence"][0]["status"] = "golden_unavailable"
+        ev["evidence"][0]["golden_unavailable_reason"] = "OpenCV: CV_CN_MAX 超限"
+        vd = V.validate(spec, cs, ev)
+        o = vd["overall"]
+        self.assertEqual(o["verdict"], "blocked_golden_unavailable")
+        self.assertEqual(o["counts"]["fail"], 0)           # 算子不背这口锅
+        self.assertEqual(o["counts"]["golden_unavailable"], 1)
+        self.assertEqual(o["golden_unavailable"], [cid])   # 名单原样进产物，不被吞掉
+        self.assertNotIn(o["verdict"], ("pass", "passed_with_gaps", "passed_with_risk"))
+
+    def test_real_failure_outranks_golden_unavailable(self):
+        """真实精度失败与 golden_unavailable 并存 → 仍报 fail（查得出的缺陷优先），名单照样带出。"""
+        spec, cs, ev = _honest_triple("float32", {"bad_count": 999, "numel": 1000})
+        gu = copy.deepcopy(cs["cases"][0]); gu["id"] = cs["cases"][0]["id"] + "_gu"
+        gu["dims"] = ["功能"]
+        cs["cases"].append(gu)
+        cs["golden_unavailable"] = {
+            "count": 1, "cases": [{"case_id": gu["id"], "reason": "OpenCV: CV_CN_MAX 超限"}]}
+        gu_ev = copy.deepcopy(ev["evidence"][0]); gu_ev["case_id"] = gu["id"]
+        gu_ev["status"] = "golden_unavailable"; gu_ev["golden_unavailable_reason"] = "OpenCV: CV_CN_MAX 超限"
+        ev["evidence"].append(gu_ev)
+        o = V.validate(spec, cs, ev)["overall"]
+        self.assertEqual(o["verdict"], "fail")             # 真缺陷优先报
+        self.assertEqual(o["counts"]["golden_unavailable"], 1)
+        self.assertIn(gu["id"], o["golden_unavailable"])   # 空白不被 fail 盖掉
+
+    def test_golden_unavailable_exemption_needs_caseset_ledger(self):
+        """豁免只认 caseset 名册：evidence 自报 `golden_unavailable`、名册里却没有 → 仍报 dims 契约。
+
+        反伪造性质与 `test_dims_empty_numerical_caught` 同：被裁方改自己的 status 拿不到豁免。
+        """
+        spec, cs, ev = _honest_triple("float32")
+        cs["cases"][0]["dims"] = ["功能"]              # 名册缺席（未写 caseset.golden_unavailable）
+        ev["evidence"][0]["status"] = "golden_unavailable"
+        vd = V.validate(spec, cs, ev)
+        self.assertEqual(vd["overall"]["verdict"], "fail")
+        self.assertIn("dims 契约", vd["per_case"][0]["判据"])
+
     def test_dims_unknown_token_caught(self):
         """dims 含受控词表外 token → contract fail（防伪造维度）。"""
         spec, cs, ev = _honest_triple("float32")
@@ -711,7 +789,11 @@ class GoldenTierDerivationTest(unittest.TestCase):
                 "authorization": {"kind": auth_kind, "cite": "", "quote": ""}}
 
     def test_exhaustive_cartesian_always_returns_valid_triple(self):
-        """4 source × 6 method_kind × 4 auth × 2 verified = 192 组，逐组必须有合法返回、无未定义态。"""
+        """4 source × 7 method_kind × 4 auth × 2 verified = 224 组，逐组必须有合法返回、无未定义态。
+
+        ⚠ 组合数**据词表现算**（不再写死 192）：加一个方法族就得改一个魔数，改魔数时很容易顺手把
+        「新词表项到底该落哪档」这件事跳过去。现算 + 下面那条独立期望矩阵才是真正的锁。
+        """
         n = 0
         for src in P.GOLDEN_SOURCE_KIND:
             for mk in P.GOLDEN_METHOD_KIND:
@@ -727,7 +809,15 @@ class GoldenTierDerivationTest(unittest.TestCase):
                             self.assertEqual(tier == 4, reason is not None)
                             # requires_human_review 的唯一算法，全组合恒成立
                             self.assertEqual(human, (tier >= 3 or src == "multistep"))
-        self.assertEqual(n, 192)
+        self.assertEqual(n, len(P.GOLDEN_SOURCE_KIND) * len(P.GOLDEN_METHOD_KIND)
+                         * len(P.AUTHORIZATION_KIND) * 2)
+        # 2026-08-05：GOLDEN_METHOD_KIND 增 `opencv_cuda`（§5.11 要能定位到**具体库**，
+        # 泛泛的 `gpu_lib` 解析不了）→ 7 变 8，组合数 224 → 256。
+        # ⚠ 这条断言本就是**故意**钉死总数的（「词表真变了就该在这里被看见」），它正常起作用了；
+        #   跟着改数字之前先确认上面那圈不变量对新值仍成立——本次已确认：
+        #   `opencv_cuda` 不在 RUNNABLE_METHOD_KINDS，故恒走规则③ tier 4 method_unavailable，
+        #   **没有**因为新增词表值而意外多出一条「跑得起来」的口径。
+        self.assertEqual(n, 256)   # 4 × 8 × 4 × 2
 
     @staticmethod
     def _expected(src, mk, ak, verified):
@@ -737,7 +827,9 @@ class GoldenTierDerivationTest(unittest.TestCase):
         tier 4，测试照样绿——它只能证明「没有未定义态」，证明不了「派生得对」（codex 审出）。
         本矩阵与实现各写一遍、逐组比对，才抓得住规则被删 / 被前面的分支遮蔽 / 顺序写反。
         """
-        runnable = mk in ("torch_cpu", "numpy_cpu")
+        # ⚠ 这里**逐字重写**可跑方法族（不引用 P.RUNNABLE_METHOD_KINDS）——引用实现常量就成了
+        #   「拿实现证明实现」，把 gpu_lib 悄悄加进去这条测试也照样绿。
+        runnable = mk in ("torch_cpu", "numpy_cpu", "opencv_cpu")
         if src == "needs_user" or mk == "needs_user":
             tier, reason = 4, "needs_user"
         elif ak in ("oracle_method", "formula") and not verified:
@@ -821,6 +913,46 @@ class GoldenTierDerivationTest(unittest.TestCase):
             self.assertEqual(P.derive_golden_tier(g, True), (4, True, "method_unavailable"))
         # external_method 形态同样出局（走穷举兜底）
         self.assertEqual(P.derive_golden_tier(self._g("external_method", "gpu_lib", "oracle_method"), True)[0], 4)
+
+    def test_opencv_cpu_is_a_runnable_method_family(self):
+        """`opencv_cpu` 与 torch_cpu/numpy_cpu 同族：CPU 上跑得起来 → **不该**因方法族被挡在 tier 4。
+
+        它入族的判据是「装在本机、CPU 上现算得出真值的第三方库」这个**能力**，与是哪个算子无关
+        （律令 5.1）。在此之前，诚实声明「用 OpenCV CPU 算 golden」只能填 other_external → 必落
+        tier 4 `method_unavailable` → 整轮不产精度结论；唯一「能跑」的写法是谎称 torch/numpy，
+        那是被禁止的静默换标杆。
+        """
+        self.assertIn("opencv_cpu", P.GOLDEN_METHOD_KIND)
+        self.assertIn("opencv_cpu", P.RUNNABLE_METHOD_KINDS)
+        # 任务书指定了 OpenCV CPU 口径且授权核实 → 第一档
+        self.assertEqual(P.derive_golden_tier(self._g("single_api", "opencv_cpu", "oracle_method"), True),
+                         (1, False, None))
+        # 任务书没指定 → 回落现成 API 单调 → 第二档，且不人核（与 torch/numpy 同待遇）
+        for ak in ("none", "impl_reference"):
+            self.assertEqual(P.derive_golden_tier(self._g("single_api", "opencv_cpu", ak), True),
+                             (2, False, None))
+        # 但它**不能**绕过别的门：假授权照样 blocked、无授权自拼多步照样算捏造
+        self.assertEqual(P.derive_golden_tier(self._g("single_api", "opencv_cpu", "oracle_method"), False),
+                         (4, True, "unverifiable_authorization"))
+        self.assertEqual(P.derive_golden_tier(self._g("multistep", "opencv_cpu", "none"), True),
+                         (4, True, "unverifiable_authorization"))
+        # 词表本身合法 → validate_golden_contract 收得下（不必再谎称 torch_cpu）
+        self.assertTrue(P.validate_golden_contract(
+            {"source": "single_api", "method_kind": "opencv_cpu",
+             "authorization": {"kind": "none"}}))
+
+    def test_gpu_lib_stays_blocked_after_opencv_cpu_was_allowed(self):
+        """**刻意的**边界：放行 OpenCV **CPU** 不等于放行 OpenCV **CUDA**。
+
+        R4 说「任务书指定了但本环境跑不起来 → fail-closed 抛用户，不自动回落」。`gpu_lib` 必须
+        原地不动 —— 「同一个库的 CPU 版能跑」不是放行 GPU 口径的理由（CPU 与 CUDA 实现并非逐位
+        一致，拿 CPU 结果冒充 GPU 标杆就是换标杆）。要改口径必须由人显式改声明，不许工具代劳。
+        """
+        self.assertNotIn("gpu_lib", P.RUNNABLE_METHOD_KINDS)
+        self.assertNotIn("builtin_tbe", P.RUNNABLE_METHOD_KINDS)
+        self.assertNotIn("other_external", P.RUNNABLE_METHOD_KINDS)
+        self.assertEqual(P.derive_golden_tier(self._g("single_api", "gpu_lib", "oracle_method"), True),
+                         (4, True, "method_unavailable"))
 
     def test_rule_tier1_taskdoc_specified(self):
         """第一档：任务书就真值口径作出指定 + 本环境跑得起来。单 API 不人核、多步自拼仍人核。"""
@@ -1603,3 +1735,52 @@ class MultiOutputAcceptanceContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GpuOracleResolutionTest(unittest.TestCase):
+    """§5.11：任务书写 GPU 真值口径 → 统一解析为同族 CPU（用户 2026-08-05 全局解析规则）。
+
+    ⚠ 它是**解析**不是降级：条款视为已被满足，**不产生**「GPU 口径未验收」的 gap。
+    与 §5.10（性能取消比较、条款按未验收记账）性质不同，别互相照搬。
+    """
+
+    def test_specific_gpu_library_resolves_to_same_library_cpu(self):
+        """能定位到**具体库**的 GPU 声明 → 同一个库的 CPU 实现，并留解析记录。"""
+        resolved, rec = P.resolve_gpu_oracle_to_cpu("opencv_cuda")
+        self.assertEqual(resolved, "opencv_cpu")
+        # 解析后必须落在「本环境跑得起来」的族里，否则等于换了个跑不动的口径
+        self.assertIn(resolved, P.RUNNABLE_METHOD_KINDS)
+        # 解析记录不是装饰品：报告要据它写「原文写 X、按 §5.11 解析为 Y」，不许把这一步抹掉
+        self.assertEqual(rec["rule"], "agents_md_5_11")
+        self.assertEqual(rec["declared_in_taskdoc"], "opencv_cuda")
+        self.assertEqual(rec["resolved_to"], "opencv_cpu")
+        self.assertTrue(rec["resolvable"])
+
+    def test_coarse_gpu_kind_is_unresolvable_not_guessed(self):
+        """粗粒度 `gpu_lib` **解析不出** → 返回 None 让调用方 fail-closed，**绝不猜一个 CPU 库**。
+
+        回归点（2026-08-05 审修门 Critical）：初版把整个 `gpu_lib` 族无条件映射成 `opencv_cpu`，
+        于是「任务书点名 cuSPARSE」会被悄悄换成 OpenCV CPU——那不是「同族」，是换了个不相干的实现，
+        而且正好绕过 §5.11 自己写的「同族无 CPU 对应则 fail-closed」。
+        """
+        resolved, rec = P.resolve_gpu_oracle_to_cpu("gpu_lib")
+        self.assertIsNone(resolved)                      # 不给任何可用口径
+        self.assertFalse(rec["resolvable"])              # 且把「为什么解析不了」说清楚
+        self.assertIsNone(rec["resolved_to"])
+        self.assertIn("gpu_lib", rec["basis"])
+
+    def test_non_gpu_kinds_pass_through_untouched(self):
+        """非 GPU 族原样返回且无记录——本解析层对既有口径必须**零影响**。"""
+        for kind in ("torch_cpu", "numpy_cpu", "opencv_cpu", "builtin_tbe",
+                     "other_external", "needs_user"):
+            with self.subTest(kind=kind):
+                resolved, rec = P.resolve_gpu_oracle_to_cpu(kind)
+                self.assertEqual(resolved, kind)
+                self.assertIsNone(rec)
+
+    def test_gpu_lib_still_not_runnable_by_itself(self):
+        """未经解析的 `gpu_lib` **仍不在** RUNNABLE——防止有人把解析层读成「GPU 现在能跑了」。
+
+        R4 的 fail-closed 一条没松：跑得起来的永远只有 CPU 那几族。
+        """
+        self.assertNotIn("gpu_lib", P.RUNNABLE_METHOD_KINDS)

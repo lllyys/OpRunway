@@ -29,7 +29,6 @@ import precision_retest_contract as R
 import render_acceptance_markdown as MD
 import repo_adapter
 import run_workflow as W
-import spec_change_gate as S
 import validate_acceptance_state as G
 from test_validate_cpp_extension_receipt import source_facts_payload
 
@@ -68,7 +67,7 @@ def _write_spec(root, spec=None):
 def _write_source_facts(path, **kw):
     """写一份**过完整契约**的 `source_facts.json` envelope（复用三级门单测的同一份 payload）。
 
-    ⚠ 别手拼最小 JSON：`dut_source.find_source_facts` 会复算 digest 并跑
+    ⚠ 别手拼最小 JSON：`source_facts_lookup.find_source_facts` 会复算 digest 并跑
     `validate_preparation_state._validate_source_payload`，最小 payload 一律 `__BAD__`，
     那样用例就全落在「对照物不可信」那条分支上，测不到它想测的东西。
     """
@@ -77,24 +76,6 @@ def _write_source_facts(path, **kw):
         json.dump(content_address.make_artifact(
             "oprunway/source-facts/v1", source_facts_payload(**kw)), out)
     return path
-
-
-def confirm_spec(out_dir, spec_path, *, reason="首轮：按任务书抽出的初始 spec", by="lys"):
-    """夹具：把「这版 spec 有人认领过」摆出来，让验收通路穿过 spec 变更门。
-
-    ⚠ **只在测试里这么做**——生产侧没有任何自动确认的入口，那道门的全部意义就是逼一次显式声明。
-    本文件测的是 staging / 必填门 / 产物作废，spec 变更门本身另有专测
-    （`test_spec_change_gate.py`），这里只负责别把它们互相挡住。
-    """
-    try:
-        S.validate(out_dir, spec_path)
-        return                                  # 已有一份对得上的收据，什么都不用做
-    except S.SpecChangeError:
-        pass
-    if os.path.isfile(os.path.join(out_dir, S.RECEIPT_REL)):
-        S.update_receipt(out_dir, spec_path, reason, by)
-    else:
-        S.init_receipt(out_dir, spec_path, reason, by)
 
 
 class _Sentinel(RuntimeError):
@@ -119,14 +100,18 @@ class SourceFactsMandatoryTest(unittest.TestCase):
             self.assertFalse(os.path.exists(out_dir),
                              "必填门必须在 makedirs 之前拒，不留半个产物目录")
 
-    def test_refusal_happens_before_the_dut_source_is_even_known(self):
+    def test_refusal_happens_before_the_source_form_is_even_known(self):
         """⭐ 「缺 `--source-facts` 时 **PR 通路也 BLOCKED**」在编排层是怎么成立的。
 
-        这道门**根本不看** `dut_source`——它在读任何 build receipt 之前就拒了，因此对
-        `pull_request` 与 `local_checkout` 一视同仁。这比「按通路分别拦」更强：编排层不存在
+        这道门**根本不看**取源形态——它在读任何 build receipt 之前就拒了，因此对
+        `git_pr` 与 `local_source` 一视同仁。这比「按通路分别拦」更强：编排层不存在
         「先判成 PR、再放过」的那一步。
         （门那一侧的对偶见证在 `test_validate_cpp_extension_receipt.py`：显式路径指不到文件
         时 PR 通路同样阻断。两边合起来才封住整条路。）
+
+        ⚠ 本条原名 `..._before_the_dut_source_is_even_known`，用的是已被合并裁定删除的
+          `dut_source` 词表；断言一个字没动，只把措辞换到主干的 `declared_source_form`
+          / `provenance_kind` 上。
         """
         with tempfile.TemporaryDirectory() as root, _env(root):
             spec_path = _write_spec(root)
@@ -274,8 +259,13 @@ class AcceptanceRunTest(unittest.TestCase):
             def _fn(d, errs, source_facts_path=None):
                 calls.append((name, d, source_facts_path))
             return _fn
-        with mock.patch.object(W.gen_cases, "gen_cases",
-                               side_effect=lambda spec, work: self._caseset(spec["op"])), \
+        with mock.patch.object(
+                    W.gen_cases, "gen_cases",
+                    # ⚠ 形参必须跟住 `run_workflow` 真实的调用点
+                    # （`gen_cases(spec, work, taskdoc_caseset=...)`）：夹具签名对不上时
+                    # 报的是 TypeError，长得像被测代码坏了，实际只是替身没跟上。
+                    side_effect=lambda spec, work, taskdoc_caseset=None:
+                        self._caseset(spec["op"])), \
                 mock.patch.object(W.cpp_extension_adapter, "prepare",
                                   return_value=(None, None)), \
                 mock.patch.dict(W.repo_adapter.MODES,
@@ -296,7 +286,6 @@ class AcceptanceRunTest(unittest.TestCase):
         out_dir = out_dir or os.path.join(root, "reports", "widget")
         calls = calls if calls is not None else []
         spec_path = _write_spec(root)
-        confirm_spec(out_dir, spec_path)        # 让 spec 变更门放行（专测见 test_spec_change_gate）
         with self._stubbed(calls):
             result = W.run(spec_path, mode="cpp_extension",
                            out_dir=out_dir, source_facts=source_facts)
@@ -373,14 +362,14 @@ class AcceptanceRunTest(unittest.TestCase):
             facts = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
             out_dir = os.path.join(root, "reports", "widget")
 
-            def _swap_then_gen(spec, work):
+            # 形参跟住真实调用点，理由同 `_stubbed`。
+            def _swap_then_gen(spec, work, taskdoc_caseset=None):
                 with open(os.path.join(ops, _OP, "golden.py"), "ab") as fh:
                     fh.write(b"\n# swapped mid-run\n")
                 return self._caseset(spec["op"])
 
             calls = []
             spec_path = _write_spec(root)
-            confirm_spec(out_dir, spec_path)
             with self._stubbed(calls), \
                     mock.patch.object(W.gen_cases, "gen_cases",
                                       side_effect=_swap_then_gen):
@@ -623,9 +612,11 @@ class ExperimentalFormBypassTest(unittest.TestCase):
             def _fn(d, errs, source_facts_path=None):
                 calls.append((name, d, source_facts_path))
             return _fn
-        with mock.patch.object(W.gen_cases, "gen_cases",
-                               side_effect=lambda spec, work:
-                                   AcceptanceRunTest._caseset(spec["op"])), \
+        with mock.patch.object(
+                    W.gen_cases, "gen_cases",
+                    # 形参跟住真实调用点，理由同 AcceptanceRunTest._stubbed。
+                    side_effect=lambda spec, work, taskdoc_caseset=None:
+                        AcceptanceRunTest._caseset(spec["op"])), \
                 mock.patch.dict(W.repo_adapter.MODES,
                                 {mode: lambda cs, wd: self._evidence(mode)}, clear=False), \
                 mock.patch.object(W.repo_adapter, "_ne_cfg", return_value={}), \
@@ -687,7 +678,6 @@ class CpFClosureTest(unittest.TestCase):
             calls = []
             out_dir = os.path.join(root, "reports", "widget")
             spec_path = _write_spec(root)
-            confirm_spec(out_dir, spec_path)
             with AcceptanceRunTest()._stubbed(calls):
                 W.run(spec_path, mode="cpp_extension",
                       out_dir=out_dir, source_facts=facts)
@@ -709,7 +699,6 @@ class CpFClosureTest(unittest.TestCase):
             facts = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
             out_dir = os.path.join(root, "reports", "widget")
             spec_path = _write_spec(root)
-            confirm_spec(out_dir, spec_path)
             with AcceptanceRunTest()._stubbed([]):
                 W.run(spec_path, mode="cpp_extension",
                       out_dir=out_dir, source_facts=facts)

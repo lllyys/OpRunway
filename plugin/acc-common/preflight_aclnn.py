@@ -5,10 +5,23 @@
 `.so`、不访问 NPU。成功状态只能是 ``READY_WAIT_NPU_TRUST_GATE``，不能替代后续真机
 build、DUT 定义方核验或 harness trust gate。
 
-来源通路由 `dut_source` 判别式区分（`pull_request` / `local_checkout`），两条通路的
-signature 对账逻辑完全同形，只有 provenance 锚不同：PR 通路锚 `pr.head_sha`，本地通路
-锚 `local_checkout.root_digest`。锚一律经 `dut_source.identity()` 取，本模块不自建
-「kind → 锚字段名」的映射。
+来源身份（声明形态 × 实得形态、provenance 锚、降级挂账）一律由
+:mod:`source_provenance` 一处解释，本模块不自建「kind → 锚字段名」的映射，也不重复
+做锚等值对账（`source_provenance.bind` 已做且更严）。
+
+签名解析统一走 :func:`aclnn_runner.parse_aclnn_signature`，因此本门是 **stage2 感知**的
+（runner 改动⑮）。产物里逐签名/逐变体记两组来源，让两件本来不可见的事在产物里可审：
+
+1. ``stage2_dispatch_form`` / ``stage2_call_arity`` —— 执行段 ``aclnn<Op>`` 若是
+   「框架三参 + stage1 实参原样重复 + stream」形态（实测 ``aclnnGaussianBlur`` 为 10 参），
+   ``slot_contract`` 里的 N 项与真机 native 调用的实参个数**本来就不相等**。不记这两项，
+   读产物的人只能默认它是标准 4 参调用；
+2. 逐形参 ``direction_source`` —— ``dst`` 这类 stage1 写 ``const aclTensor *``、stage2 写
+   ``aclTensor *`` 的 DUT 上，「它是输出」这个结论**完全来自 stage2**。不落来源，产物里
+   就只剩一个凭空的 ``role="out"``（AGENTS.md 5.8：推断项须显式标注出处）。
+
+两组都只是**记录**：对账强度仍由 :meth:`AclnnRunner._validate_slots_against_signature`
+一处解释，本门不因 stage2 形态放宽任何一条逐项校验。
 """
 
 import argparse
@@ -18,11 +31,13 @@ import os
 import sys
 
 import content_address
-import dut_source
 import gen_cases
 import precision_policy
 import repo_adapter
+import source_provenance
 from aclnn_runtime.aclnn_runner import (
+    STAGE2_EXTENDED,
+    STAGE2_STANDARD,
     AclnnRunner,
     AclnnRunnerError,
     parse_aclnn_signature,
@@ -51,6 +66,51 @@ def _sha(value):
 def _self_sha256():
     with open(__file__, "rb") as src:
         return hashlib.sha256(src.read()).hexdigest()
+
+
+def _stage2_record(signature):
+    """签名的 stage2 派发形态 + **真机 native 实参个数**（只记录，不参与任何判定）。
+
+    ``stage2_form`` 照抄解析结果（``absent`` = header 里没有执行段声明，``None`` = 调用方没声明）；
+    ``stage2_dispatch_form`` 是 :meth:`AclnnRunner.run` 实际会走的分支——**不可派发的形态记 ``None``**，
+    绝不写成 ``STAGE2_STANDARD``（那等于在收据里替 runner 编了一个它根本不会走的分支）；
+    ``stage2_call_arity`` = 那次 native 调用的实参个数：standard 恒 4；extended 是
+    「框架三参 + stage1 实参原样重复 + stream」= ``3 + len(params) + 1``；不可派发时为 ``None``。
+    """
+    form = getattr(signature, "stage2_form", None)
+    params = list(getattr(signature, "params", None) or ())
+    dispatch = form if form in (STAGE2_STANDARD, STAGE2_EXTENDED) else None
+    if dispatch == STAGE2_EXTENDED:
+        arity = 3 + len(params) + 1
+    elif dispatch == STAGE2_STANDARD:
+        arity = 4
+    else:
+        arity = None
+    return {
+        "stage2_form": form,
+        "stage2_dispatch_form": dispatch,
+        "stage2_call_arity": arity,
+    }
+
+
+def _param_records(signature):
+    """签名形参表 → 产物记录，逐项补 ``direction_source``（in/out 这个结论**是从哪来的**）。
+
+    - ``stage2_param_qualifier``：extended 形态下，方向取自 stage2 那份重复实参的 const 限定符；
+    - ``stage1_const_heuristic``：stage2 缺席或为 standard，方向取自 stage1 的 ``const`` 启发式；
+    - ``not_applicable``：非张量形参（属性）没有方向可言。
+
+    按 ``ctype`` 分（通用类型判据），**绝不按算子身份**。
+    """
+    from_stage2 = getattr(signature, "stage2_form", None) == STAGE2_EXTENDED
+    records = []
+    for param in getattr(signature, "params", None) or ():
+        record = dict(param)
+        record["direction_source"] = (
+            ("stage2_param_qualifier" if from_stage2 else "stage1_const_heuristic")
+            if param.get("ctype") == "tensor" else "not_applicable")
+        records.append(record)
+    return records
 
 
 def _abstract_slots(spec, variant):
@@ -97,6 +157,12 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
         "acceptance_verdict": None,
         "required_next_gate": "NPU_BUILD_AND_HARNESS_TRUST_GATE",
         "bindings": {},
+        # 源 provenance 的机读**降级**挂账。只装「本该做到却没做到」的事（如声明要测 PR
+        # 却只拿到一份本地快照）；正常通路恒为空表。空表与「工具没记」是两回事，故恒存在。
+        "provenance_degradations": [],
+        # 源 provenance 的机读**中性形态事实**。如「本地源码没有上游 commit」——它不是降级，
+        # 是这条输入形态本来的样子。与上一项分开记，报告才不会把正常的本地源码验收读成异常。
+        "provenance_form_facts": [],
         "signatures": [],
         "variants": [],
         "blocked_reasons": [],
@@ -110,10 +176,6 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
             root, source_rel, _SOURCE_DOMAIN)
         if not isinstance(source, dict):
             raise ValueError("source_facts payload 须为 JSON object")
-        source_completeness = source.get("completeness")
-        if (not isinstance(source_completeness, dict)
-                or source_completeness.get("status") != "complete"):
-            raise ValueError("source_facts completeness 不是 complete")
         source_digest = content_address.content_digest(_SOURCE_DOMAIN, source)
         result["bindings"]["source_facts_digest"] = source_digest
 
@@ -122,25 +184,20 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
         if not isinstance(spec, dict) or not isinstance(pr_facts, dict):
             raise ValueError("spec/pr_facts 须为 JSON object")
         result["bindings"]["spec_sha256"] = _sha(spec)
-        # 先由判别式定通路，再按通路写 provenance 锚。
-        # ⚠ PR 分支**逐字**保持改动前的写法（同一键名、同一取值、同一写入时机）→ PR 通路的
-        #   payload 字节不变；`dut_source` 键**只在本地分支写**，与 `fetch_source` 的形态一致
-        #   （PR 通路的 payload 里没有这个键，`test_fetch_source` 已把它钉成不变量）。
+        # 源身份绑定（含档位）统一由 source_provenance 一处解释：判据是「**实得形态是否与
+        # 声明的输入形态一致**」——`git_pr`/`local_source` 两条声明如愿实得时都无条件放行；
+        # 只有「声明要测 PR 却只拿到本地快照」才要编排层显式授权，并把降级机读挂账进收据。
         # ⚠ 这段不能挪到下面 runner_form 早退之后：`cpp` 的 NOT_APPLICABLE payload 历来就带
         #   来源绑定键，挪走会让它凭空少一个键。
-        kind = dut_source.of(pr_facts, where="pr_facts")
-        if kind == dut_source.PULL_REQUEST:
-            result["bindings"]["pr_head_sha"] = pr_facts.get("head_sha")
-        else:
-            # ⚠ 本地锚只能经 `identity()` 取，不许自己按字段名去翻：本地事实里合法地存在
-            #   `local_checkout.git.head_sha`，它是「这份 checkout 当时停在哪个 commit」的
-            #   信息字段，**不是锚**（worktree 可能 dirty）。任何「哪个字段有值用哪个」的
-            #   兜底都会把它当成 PR provenance 用。
-            # ⚠ 同理，64 位 root_digest 绝不能写进 `pr_head_sha`：下游是按键名认通路的。
-            _, anchor_field, anchor_value = dut_source.identity(
-                pr_facts, where="pr_facts")
-            result["bindings"]["dut_source"] = kind
-            result["bindings"][anchor_field] = anchor_value
+        # ⚠ 锚只能经 `source_provenance.bind` 取，不许自己按字段名去翻：本地事实里合法地
+        #   存在「这份快照来自哪个 commit」一类的信息字段，它**不是锚**；任何「哪个字段有值
+        #   用哪个」的兜底都会把它当成 PR provenance 用。同理 64 位 merkle 绝不能写进
+        #   `pr_head_sha`——下游是按键名认通路的。
+        provenance_bindings, degradations = source_provenance.bind(source, pr_facts)
+        result["bindings"].update(provenance_bindings)
+        result["provenance_degradations"] = degradations
+        result["provenance_form_facts"] = source_provenance.form_facts(
+            provenance_bindings)
 
         # 缺省口径经全仓唯一真源（P5）；本模块曾写死 `"cpp"` → spec 省略该键时这里判 NOT_APPLICABLE、
         # run_workflow 却按 cpp_extension 去跑，等于**静默跳过**了本应做的 ABI 预检。
@@ -169,27 +226,14 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
             if runner_form == "cpp_extension"
             else "NPU_BUILD_AND_HARNESS_TRUST_GATE")
 
-        # ⚠ 两步不能合并、更不能倒过来：**先确认两边说的是同一条来源通路，再按通路核锚**。
-        #   若先各自取锚再比值，一份「pr_facts 说本地、source_facts 说 PR」的混装事实只会
-        #   报「锚对不上」，把**来源身份被伪装**说成了普通的锚漂移；反过来若两边恰好各自
-        #   自洽而通路不同，等值校验会整条走进不该走的分支。
-        src_kind, anchor_field, anchor_value = dut_source.identity(
-            source, where="source_facts")
-        if src_kind != kind:
-            raise ValueError(
-                f"pr_facts.dut_source={kind} 与 source_facts.dut_source={src_kind} 不一致"
-                f"——两边必须先说同一条来源通路，再按通路核锚")
-        # PR 通路仍逐字比 `pr_facts.head_sha`（与改动前同一字段、同一语义）；本地通路比的是
-        # 上面已由 `identity()` 归一化写进 bindings 的 root_digest，不重新翻 payload。
-        claimed = (pr_facts.get("head_sha") if kind == dut_source.PULL_REQUEST
-                   else result["bindings"][anchor_field])
-        if claimed != anchor_value:
-            raise ValueError(f"pr_facts 的 {anchor_field} 与 source_facts 绑定不一致")
-
         # ⚠ 以下 key_files / aclnn_headers 对账**与来源通路无关**：它只消费
         #   `pr_facts.key_files` 的正文与 `source_facts.key_files[].bytes_sha256`，
         #   两条通路同形。别顺手把 `recorded["ref"]` 拉进来对账——PR 通路的 ref 是
-        #   head_sha、本地通路是 root_digest，一加进来这段就按通路分叉了。
+        #   head_sha、本地快照通路是 merkle，一加进来这段就按通路分叉了。
+        # ⚠ 这里**不再**自己做「先核 kind 一致、再核锚相等」的两步对账：
+        #   `source_provenance.bind` 上面已经做了同形且更严的版本（缺席与显式 null 分开、
+        #   local 档强制两侧 head 显式 null、snapshot_scope 必须相等）。留第二份判据
+        #   只会让两处慢慢漂移。
         key_files = pr_facts.get("key_files")
         if not isinstance(key_files, dict):
             raise ValueError("pr_facts.key_files 缺失或非 object")
@@ -223,8 +267,9 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
             result["signatures"].append({
                 "symbol": signature.op_name,
                 "header": path,
-                "params": [dict(param) for param in signature.params],
+                "params": _param_records(signature),
                 "bytes_sha256": recorded["bytes_sha256"],
+                **_stage2_record(signature),
             })
 
         variants = precision_policy.call_variants(spec)
@@ -252,6 +297,9 @@ def evaluate(root, spec_rel, pr_facts_rel="pr_facts.json",
                     **({"ctype": slot["ctype"]}
                        if slot["kind"] == "attr" else {}),
                 } for slot in slots],
+                # slot_contract 是 stage1 的 N 项；extended 形态下真机 stage2 还要把这 N 项
+                # 原样重复一遍（3 + N + 1 个实参）——记下来，别让读产物的人默认成 4 参。
+                **_stage2_record(signature),
                 "status": "STATIC_SIGNATURE_MATCH",
             })
         result["status"] = "READY_WAIT_NPU_TRUST_GATE"

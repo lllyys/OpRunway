@@ -21,7 +21,7 @@ T7 dtype/attr 扩面（据 codex 审终版）：
   · 每 case 带 `case_origin`/`rule_ref` 可追溯（codex#18）。
 
 ⚠ 真机（真 NPU）上 int/bf16 的数值校验本轮**不做**——runner.cpp 的新 dtype 分支属 Track C（挂真机+pr_facts），
-  见 doc/oprunway-todo.md gap。本文件仅证「流水线能造/收发 int/bf16 用例」，非「某算子在该 dtype 被验收」。
+  见 dev-doc/oprunway-todo.md gap。本文件仅证「流水线能造/收发 int/bf16 用例」，非「某算子在该 dtype 被验收」。
 
 U3 dtype 单一真源（2026-07-24）：dtype 支持不再由本文件独家说了算，拆成**两层、各自单一真源**——
   · 生成层 = 本文件 `_NATIVE` + bf16（能造输入 / 能算 golden / 能落盘读回；本轮补齐 int64/int8/uint8）；
@@ -135,10 +135,28 @@ G4 · 归约/成对类算子的**生成期规模预算**（2026-07-22，落地�
     必须精确等于完整矩阵大小，禁止静默抽样。`legacy` 与未声明仍保持逐字节兼容。
   · 词表外取值 / 非字符串（含**显式 `null`**）→ fail-closed：档位猜错 = 整份用例集悄悄换一套规则，
     比报错贵得多。
+
+用例来源 `spec.precision.case_source` —— **谁出的用例**（字段驱动、op-中立；2026-08-05 引入，
+落地见各处 `CS:` 标记）：
+  · **为什么要它**：有的任务书**自带整套用例**（`self_test_case/<op>/*_cases.json` + `*_golden.py`）。
+    那种情况下本引擎再铺一遍正交网格，验的就不是任务书要求的那批用例——流程看着通过、实际绕过了
+    任务书用例，正是本仓最忌的「看起来对」。
+  · **受控词表**（两档，无第三种；实现见 `_case_source` / `_case_source_declared`）：
+      - `generated`（= 整字段省略时的缺省）：现行造例规则，已验收算子逐字节不变；
+      - `taskdoc`：用例身份、shape、dtype、attr、值域全部来自**规范化后的**任务书用例集
+        （`taskdoc_caseset.json`，由取材侧产、本文件只消费），本引擎**不再铺网格、不做 1-wise 采样**，
+        只负责按 `materialize.seed` 确定性把描述物化成输入字节、算 golden、落盘。
+  · ⚠ **`taskdoc` 档必须显式喂入那份 caseset**（`gen_cases(..., taskdoc_caseset=<path>)` /
+    CLI `--taskdoc-caseset`）：任务书明确提供了用例却拿不到文件时**一律 fail-closed**，
+    **绝不回退自生成**——回退等于再产一次「绕过任务书用例」的产物。
+  · ⚠ `golden_unavailable` 是**一等状态**：某条任务书用例算不出 golden（如通道数超参考实现上限），
+    该 case 身份仍写进 caseset、允许无 golden 文件、标明原因，**其余 case 照常生成**。
+    它退出精度维（无 golden 即无从判精度）、也不进性能候选池，但**在账本里可见**，由门判 BLOCKED。
 """
-import collections, hashlib, importlib.util, json, math, os, sys
+import collections, hashlib, importlib.util, json, math, os, re, sys
 import numpy as np
 import content_address
+import perf_mode
 import precision_policy
 
 SEED = 2026
@@ -255,8 +273,17 @@ def _storage_name(dtn):
 
 _PERF_SHAPE_PROFILES = {
     # 用户确认的 A3 通用规则：全部物理输入载荷 <= 256 KiB 可一次搬完 UB。
+    # ⚠ **这里只登记我们手上真有硬件事实的型号**。没有事实的型号（如 Ascend 950PR 的 UB 单次
+    #   承载边界）**绝不塞猜测值**——要用就由 spec 显式 `source="spec_supplied"` 直供并留痕。
     "Atlas A3": {"metric": "sum_input_bytes", "small_max_bytes": 256 * 1024},
 }
+#: `shape_classification.source` 受控词表。缺省 = `hardware_profile`（历史行为：必须命中上表且逐值相符）。
+#: `spec_supplied` = 该硬件我们没有受控 profile，边界由 spec 直供并在产物里留痕
+#: （门读同一枚标记才不会「生成侧过、门侧卡」）。**不是**绕过已知硬件事实的口子：
+#: 上表有该硬件时仍强制逐值相符，spec 改不动我们已核定的数。
+_SHAPE_LIMIT_SOURCE_PROFILE = "hardware_profile"
+_SHAPE_LIMIT_SOURCE_SPEC = "spec_supplied"
+_SHAPE_LIMIT_SOURCES = (_SHAPE_LIMIT_SOURCE_PROFILE, _SHAPE_LIMIT_SOURCE_SPEC)
 
 
 def _perf_case_policy(spec):
@@ -264,10 +291,15 @@ def _perf_case_policy(spec):
 
     ``case_source=precision_cases`` 只表示性能 case 必须从精度 caseset 中选，不表示每条精度 case
     都必须测性能。``shape_classification`` 仅负责可审计分组，不参与免测、阈值放宽或 pass/fail。
+
+    ``perf.mode``（见 ``perf_mode``）落进本账本，供验收门从 caseset 这份**已过 task1 门的产物**
+    独立读取口径，而不是信 perf_report 自报。缺省档 ``ratio_gated`` **不写任何新字段**——
+    既有 spec 产出的 caseset 一个字节都不变。
     """
     perf = spec.get("perf")
     if not isinstance(perf, dict):
         return None
+    mode = perf_mode.resolve_spec_mode(spec)
     source = perf.get("case_source")
     rule = perf.get("shape_classification")
     if source is None or rule is None:
@@ -293,12 +325,23 @@ def _perf_case_policy(spec):
     if not isinstance(hardware, str) or not hardware.strip():
         raise ValueError("perf.shape_classification.hardware 须为非空字符串")
     hardware = hardware.strip()
+    limit_source = rule.get("source")
+    if limit_source is None:
+        limit_source = _SHAPE_LIMIT_SOURCE_PROFILE
+    if limit_source not in _SHAPE_LIMIT_SOURCES:
+        raise ValueError(
+            f"perf.shape_classification.source={limit_source!r} 非受控值，"
+            f"须属 {list(_SHAPE_LIMIT_SOURCES)}（字段省略 = {_SHAPE_LIMIT_SOURCE_PROFILE}）")
     profile = _PERF_SHAPE_PROFILES.get(hardware)
-    if profile is None:
+    if profile is None and limit_source != _SHAPE_LIMIT_SOURCE_SPEC:
         raise ValueError(
             f"perf.shape_classification.hardware={hardware!r} 尚无受控大小 shape profile；"
-            "须先按目标硬件核定 UB 单次承载边界，不能由 spec 任意填写")
-    if metric != profile["metric"] or limit != profile["small_max_bytes"]:
+            "须先按目标硬件核定 UB 单次承载边界，不能由 spec 任意填写"
+            f"（确已按任务书/硬件手册核定过 → 显式声明 source='{_SHAPE_LIMIT_SOURCE_SPEC}' 直供并留痕）")
+    # 上表有该硬件时**无论 source 是什么都逐值相符**：spec 不得推翻我们已核定的硬件事实，
+    # `spec_supplied` 只解锁「表里没有的硬件」，不是宽档开关。
+    if profile is not None and (metric != profile["metric"]
+                                or limit != profile["small_max_bytes"]):
         raise ValueError(
             f"{hardware} 大小 shape profile固定为 metric={profile['metric']!r}, "
             f"small_max_bytes={profile['small_max_bytes']}，得 metric={metric!r}, "
@@ -337,14 +380,26 @@ def _perf_case_policy(spec):
         selection_contract["max_cases"] = int(max_cases)
     if include_precision_tags_declared:
         selection_contract["include_precision_tags"] = include_precision_tags
-    return {"case_source": source,
-            "case_selection": selection_contract,
-            "shape_classification": {
-                "metric": metric,
-                "small_max_bytes": int(limit),
-                "boundary": "small_if_input_bytes_lte_limit",
-                "hardware": hardware,
-            }}
+    shape_contract = {
+        "metric": metric,
+        "small_max_bytes": int(limit),
+        "boundary": "small_if_input_bytes_lte_limit",
+        "hardware": hardware,
+    }
+    # 只在**偏离历史默认**时才多写字段：缺省档（ratio_gated + hardware_profile）产出的 caseset
+    # 与改动前逐字节一致，既有 spec（ops-nn / Median / catlass …）零影响。
+    if limit_source == _SHAPE_LIMIT_SOURCE_SPEC:
+        shape_contract["source"] = limit_source
+    policy = {"case_source": source,
+              "case_selection": selection_contract,
+              "shape_classification": shape_contract}
+    if mode != perf_mode.DEFAULT_MODE:
+        policy["mode"] = mode
+        # 宽档为什么被允许，与 mode 一起落进 Task1 账本：门读的是这份产物，
+        # 不读 spec，故授权事实必须随 mode 同行，否则门只能看见「谁自称 measure_only」。
+        if perf_mode.is_measure_only(mode):
+            policy["measure_only_authorization"] = perf_mode.measure_only_authorization(perf)
+    return policy
 
 
 def _classify_perf_cases(spec, cases):
@@ -393,13 +448,25 @@ def _classify_perf_cases(spec, cases):
     # 选择只读 case 字段，不另造输入；最终仍复用原 precision case_id。
     include_tags = policy["case_selection"].get("include_precision_tags", [])
     min_total_elements = policy["case_selection"]["min_total_input_elements"]
-    eligible, excluded_degenerate_ids = [], []
+    # CS：`case_source=taskdoc` 时**候选池 = 全部可判精度的任务书用例**，而不是「已带『性能』维的那些」。
+    # 理由是实打实的：任务书用例集只描述精度用例，规范化后一条都不带「性能」维 → 旧规则下候选池为空
+    # → 性能维零数据。这是**按 spec 的 case_source 字段分档**，不是按算子身份（换任意 taskdoc 档算子同样生效）。
+    taskdoc_pool = _case_source(spec) == _CASE_SOURCE_TASKDOC
+    eligible, excluded_degenerate_ids, excluded_golden_unavailable_ids = [], [], []
     for case in cases:
         dims = case.get("dims") or []
         tagged = bool(include_tags and set(case.get("tags") or []).intersection(include_tags))
-        if "性能" not in dims and not tagged:
-            continue
         cid = case.get("id")
+        if taskdoc_pool:
+            if (case.get("expected") or {}).get("golden_status") == GOLDEN_UNAVAILABLE:
+                # 无 golden 的 case 在验收门里是 BLOCKED 身份，不该同时充当性能证据来源。
+                # 显式记账、不静默丢——「少了几条性能 case」必须是看得见的。
+                excluded_golden_unavailable_ids.append(cid)
+                continue
+            if "精度" not in dims:
+                continue
+        elif "性能" not in dims and not tagged:
+            continue
         if "精度" not in dims:
             raise ValueError(
                 f"{cid}: perf.case_source='precision_cases'，但性能候选的 dims 不含「精度」")
@@ -478,6 +545,10 @@ def _classify_perf_cases(spec, cases):
                 "selected_case_ids": selected_ids,
                 "excluded_precision_case_ids": excluded_precision_ids,
                 "excluded_degenerate_case_ids": excluded_degenerate_ids,
+                # CS：只在 taskdoc 档多这两个键（缺省档产物逐字节不变）。
+                **({"candidate_pool": "taskdoc_precision_cases",
+                    "excluded_golden_unavailable_case_ids": excluded_golden_unavailable_ids}
+                   if taskdoc_pool else {}),
                 "selected_by_dtype": dict(sorted(by_dtype.items())),
                 "selected_total": len(selected_ids),
                 "precision_total": sum(1 for c in cases if "精度" in (c.get("dims") or [])),
@@ -825,6 +896,455 @@ def _case_profile_declared(spec):
     顺手把词表校验过一遍：单独调用本函数时非法值同样当场炸，不留「只问声明与否就绕过校验」的口子。"""
     _case_profile(spec)
     return "case_profile" in (spec.get("precision") or {})
+
+
+# ══════════════ CS · 用例来源 `precision.case_source`（generated / taskdoc）══════════════
+# 详见模块 docstring「用例来源 case_source」一节。**字段驱动、绝不按算子名分支**（律令 #0）：
+# 换任意「任务书自带用例」的算子，声明一句 case_source=taskdoc + 喂进规范化 caseset 即可，工具零改。
+_CASE_SOURCES = ("generated", "taskdoc")
+#: 未声明时的缺省 = 现行造例规则（向后兼容硬约束：现有 spec 一个都没声明，caseset 逐字节不变）。
+_DEFAULT_CASE_SOURCE = "generated"
+_CASE_SOURCE_TASKDOC = "taskdoc"
+
+#: 规范化任务书用例集的 schema 标识与版本（取材侧 `taskdoc_caseset.py` 产、本文件只消费）。
+#: ⚠ 版本**必须逐字相符**：schema 涨版意味着字段语义可能变了，「照旧解析」正是静默错读的入口。
+_TASKDOC_CASESET_SCHEMA = "oprunway.taskdoc_caseset"
+_TASKDOC_CASESET_SCHEMA_VERSION = 1
+#: 本文件**能确定性复现**的造数分布词表（取材侧 `DISTRIBUTION_BY_FAMILY` 的可实现子集）。
+#: 词表外一律 fail-closed——「不认识的分布名」意味着我们造出来的字节与取材侧设想的不是一回事，
+#: 而它还会被当成「任务书的那条用例」记账。
+#: ⚠ 取材侧还有一个 `uniform_bool`：本引擎**生成层**不支持 bool 输入（`_NATIVE` 无 bool），
+#: 故不放进词表——撞上就明说不支持，别造一批下游收发不了的字节。
+_TD_DIST_FLOAT = "uniform_float"
+_TD_DIST_INT = "uniform_int"
+_TASKDOC_DISTRIBUTIONS = (_TD_DIST_FLOAT, _TD_DIST_INT)
+#: case_id 安全 token：它会直接当**目录名**用（`<work_dir>/<case_id>/`），故拒路径分隔符、
+#: 拒 `..`、拒空串与超长名。与 `repo_adapter._check_id` 同一种把关思路。
+_TASKDOC_CASE_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+#: 无 golden 的一等状态标记（写进 `case.expected.golden_status`）。
+GOLDEN_UNAVAILABLE = "golden_unavailable"
+
+
+def _case_source(spec):
+    """spec.`precision.case_source` → 受控词表值；**整字段省略 → `"generated"`**（= 现行为）。
+
+    ⚠ 词表外取值 / 非字符串（含显式 `null`）→ fail-closed，口径同 `case_profile` / `tolerance_source`：
+      字段一旦出现就必须是词表内的字符串。这个字段猜错的代价特别贵——判成 `generated` 就等于
+      「任务书给了用例、我们却自己造了一套」，而报告照样会说「已按用例集验收」。"""
+    prec = spec.get("precision") or {}
+    if "case_source" not in prec:                        # 整字段省略 = 未声明 → 现行为
+        return _DEFAULT_CASE_SOURCE
+    raw = prec["case_source"]
+    if not isinstance(raw, str) or raw not in _CASE_SOURCES:
+        raise ValueError(
+            f"spec.precision.case_source={raw!r} 不在受控词表 {list(_CASE_SOURCES)} 里 —— fail-closed，不猜。\n"
+            f"  · 'generated' —— 本引擎按覆盖-预算规则造例（= 整字段省略时的缺省）；\n"
+            f"  · 'taskdoc'   —— 用例来自任务书自带用例集（须同时喂入规范化 taskdoc_caseset.json）。\n"
+            f"  字段一旦出现就必须是这两个字符串之一；拿不准就**整字段省略**（= generated = 现行为）。")
+    return raw
+
+
+def _case_source_declared(spec):
+    """spec 是否**显式声明**了 `precision.case_source`（不是「解析出来等于 generated」）。
+
+    同 `_case_profile_declared` 的理由：caseset 的账本键**只在写了的时候才落**，
+    现有样例 spec 一个都没写，产物里因此不许多出这个键（字节安全的关键）。"""
+    _case_source(spec)                                   # 顺手把词表校验过一遍，不留绕过口
+    return "case_source" in (spec.get("precision") or {})
+
+
+def _hex64(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _finite_number(value):
+    """非 bool 的有限实数。⚠ 显式拒 NaN/Inf：python 的 `json` **默认接受**非标准的
+    `NaN`/`Infinity` 字面量，一个 `Infinity` 值域端点会静默变成一整片同值输入。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(float(value))
+
+
+def _nonneg_int_shape(value):
+    return (isinstance(value, list)
+            and all(not isinstance(d, bool) and isinstance(d, int) and d >= 0 for d in value))
+
+
+def load_taskdoc_caseset(path):
+    """读**规范化后的**任务书用例集 → `(payload, sha256)`；结构/词表任一处不合即 fail-closed。
+
+    ⚠ **本函数不解析任务书、不解析原始 `*_cases.json`**——那是取材侧（`taskdoc_caseset.py`）的职责，
+    它负责识别、接口映射 IR、阈值规范化并产出这份内容寻址的中间件。本文件只做两件事：
+    **校它是不是我们能消费的形状**，以及**按它确定性物化输入**。两侧分工不混，换算子零改。
+
+    校验范围刻意只覆盖**会改变执行语义的字段**（schema / case 身份 / shape / dtype / 值域 / 物化参数 /
+    attr / 输出身份 / 阈值），未知的元数据键**保留不动、不阻断**——取材侧记的溯源信息不该被这里当脏数据拦掉。
+    """
+    if os.path.islink(path):                             # 与 golden.py 同一层把关：拒软链换靶
+        raise ValueError(f"taskdoc_caseset 是符号链接，拒绝（防换靶）: {path!r}")
+    if not os.path.isfile(path):
+        raise ValueError(f"taskdoc_caseset 不存在或不是普通文件: {path!r}")
+    with open(path, "rb") as fh:
+        raw_bytes = fh.read()
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    try:
+        payload = json.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as ex:
+        raise ValueError(f"taskdoc_caseset 不是合法 UTF-8 JSON: {path!r}: {ex}") from ex
+    if not isinstance(payload, dict):
+        raise ValueError(f"taskdoc_caseset 顶层须为 object，得 {type(payload).__name__}: {path!r}")
+    if payload.get("schema") != _TASKDOC_CASESET_SCHEMA:
+        raise ValueError(
+            f"taskdoc_caseset.schema={payload.get('schema')!r} ≠ {_TASKDOC_CASESET_SCHEMA!r}——"
+            "只消费取材侧产的规范化用例集，不认任何别的形状（fail-closed，不做格式嗅探）")
+    if payload.get("schema_version") != _TASKDOC_CASESET_SCHEMA_VERSION:
+        raise ValueError(
+            f"taskdoc_caseset.schema_version={payload.get('schema_version')!r} ≠ "
+            f"{_TASKDOC_CASESET_SCHEMA_VERSION}——涨版意味着字段语义可能变了，"
+            "「照旧解析」正是静默错读的入口；请同步本消费方后再放行")
+    if not _hex64(payload.get("taskdoc_sha256")):
+        raise ValueError("taskdoc_caseset.taskdoc_sha256 须为 64 位小写十六进制（用例集必须绑定任务书快照）")
+    for key in ("mapping_ir", "threshold_schema"):
+        if payload.get(key) is None:
+            raise ValueError(
+                f"taskdoc_caseset 缺 {key}——接口映射与阈值口径是「任务书字段怎么变成 spec 字段」的"
+                "唯一交代，缺了就没人说得清这批用例是按什么规则对上号的")
+    cases = payload.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise ValueError("taskdoc_caseset.cases 须为非空数组（0 条用例不得冒充「已按任务书用例验收」）")
+    seen = set()
+    for i, case in enumerate(cases):
+        where = f"taskdoc_caseset.cases[{i}]"
+        if not isinstance(case, dict):
+            raise ValueError(f"{where} 非 object")
+        cid = case.get("case_id")
+        if not isinstance(cid, str) or not _TASKDOC_CASE_ID_RE.fullmatch(cid):
+            raise ValueError(
+                f"{where}.case_id={cid!r} 非法——它会直接当用例目录名，"
+                "只接受 `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`（拒路径分隔符 / `..` / 空串 / 超长）")
+        if cid in seen:
+            raise ValueError(f"{where}.case_id={cid!r} 重复——case 身份必须唯一，重名会互相覆盖输入字节")
+        seen.add(cid)
+        if not _hex64(case.get("content_sha256")):
+            raise ValueError(f"{where}.content_sha256 须为 64 位小写十六进制（逐 case 内容寻址）")
+        inputs = case.get("inputs")
+        if not isinstance(inputs, list) or not inputs:
+            raise ValueError(f"{where}.inputs 须为非空数组")
+        for j, item in enumerate(inputs):
+            iw = f"{where}.inputs[{j}]"
+            if not isinstance(item, dict):
+                raise ValueError(f"{iw} 非 object")
+            if not isinstance(item.get("spec_name"), str) or not item["spec_name"]:
+                raise ValueError(f"{iw}.spec_name 须为非空字符串（映射到 spec 的 in 参数名）")
+            if not _nonneg_int_shape(item.get("shape")):
+                raise ValueError(f"{iw}.shape={item.get('shape')!r} 须为非负整数数组")
+            if not isinstance(item.get("dtype"), str) or not item["dtype"]:
+                raise ValueError(f"{iw}.dtype 须为非空字符串")
+            vr = item.get("value_range")
+            if (not isinstance(vr, list) or len(vr) != 2 or not all(_finite_number(v) for v in vr)
+                    or float(vr[0]) > float(vr[1])):
+                raise ValueError(
+                    f"{iw}.value_range={vr!r} 须为 [lo, hi] 两个**有限**实数且 lo<=hi"
+                    "（显式拒 NaN/Infinity：json 默认接受它们，一个非有限端点会静默毁掉整片输入）")
+        outputs = case.get("outputs")
+        if not isinstance(outputs, list) or not outputs:
+            raise ValueError(f"{where}.outputs 须为非空数组")
+        for j, item in enumerate(outputs):
+            ow = f"{where}.outputs[{j}]"
+            if not isinstance(item, dict):
+                raise ValueError(f"{ow} 非 object")
+            if not isinstance(item.get("spec_name"), str) or not item["spec_name"]:
+                raise ValueError(f"{ow}.spec_name 须为非空字符串（映射到 spec 的 out 参数名）")
+            if not _nonneg_int_shape(item.get("shape")):
+                raise ValueError(f"{ow}.shape={item.get('shape')!r} 须为非负整数数组")
+            if not isinstance(item.get("dtype"), str) or not item["dtype"]:
+                raise ValueError(f"{ow}.dtype 须为非空字符串")
+            # 阈值形状按取材侧的规范化产物：`{rtol, atol, raw:[rtol, atol]}`（口径声明在
+            # 顶层 `threshold_schema`，AscendOpTest 的 [rtol, atol] 两元组）。
+            # ⚠ 本轮**只规范化落盘、不参与裁决**（用户明示：精度按 workflow 默认口径），
+            #   但坏值仍当场拒——它会原样进产物，落进去就会被人读成「生效过的阈值」。
+            thr = item.get("err_threshold")
+            if not isinstance(thr, dict):
+                raise ValueError(
+                    f"{ow}.err_threshold 须为 object {{rtol, atol, raw}}，得 {thr!r}")
+            for key in ("rtol", "atol"):
+                if not (_finite_number(thr.get(key)) and float(thr[key]) >= 0):
+                    raise ValueError(
+                        f"{ow}.err_threshold.{key}={thr.get(key)!r} 须为**有限非负**实数"
+                        "（显式拒 NaN/Infinity：json 默认接受它们）")
+            raw = thr.get("raw")
+            if (not isinstance(raw, list) or len(raw) != 2
+                    or [float(raw[0]), float(raw[1])] != [float(thr["rtol"]), float(thr["atol"])]):
+                raise ValueError(
+                    f"{ow}.err_threshold.raw={raw!r} 与 (rtol, atol)="
+                    f"({thr['rtol']!r}, {thr['atol']!r}) 不一致——两处必须同源，"
+                    "对不上说明有人动过其中一处，fail-closed")
+        attrs = case.get("attrs")
+        if not isinstance(attrs, dict):
+            raise ValueError(f"{where}.attrs 须为 object（无属性的算子写 {{}}）")
+        for name, value in attrs.items():
+            _check_attr_value(value, f"{where}.attrs.{name}")
+        _check_materialize_plan(case, where)
+    return payload, digest
+
+
+def _check_materialize_plan(case, where):
+    """校**造数规格**（取材侧 `materialize_plan` 的产物）——它是「这批字节怎么来的」的唯一契约。
+
+    形状：``{generator_version, seed, seed_derivation, inputs:[{spec_name, shape, dtype,
+    distribution, low, high|high_inclusive}]}``。取材侧不 import numpy（Layer 1 纪律），
+    真正造数在本文件做；两边只靠这份规格对齐，**只要 `generator_version` 与 `seed` 不变，
+    产出的字节就该逐位相同**。
+
+    ⚠ 逐输入的 `spec_name / shape / dtype / 取值边界` 都要**与 case.inputs 交叉核**：
+      规格与用例描述是同源派生的，对不上就说明有一处被改过。不核的话，一份
+      「value_range 写着 [-1,1]、规格里却按 [-1e9,1e9] 造数」的产物能一路跑到底，
+      而账本上还写着任务书的那个值域——典型的 fail-open。
+    """
+    mat = case.get("materialize")
+    if not isinstance(mat, dict):
+        raise ValueError(f"{where}.materialize 须为 object（generator_version / seed / inputs）")
+    seed = mat.get("seed")
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2 ** 32:
+        raise ValueError(
+            f"{where}.materialize.seed={seed!r} 须为 [0, 2**32) 的整数（numpy 合法 seed 域）——"
+            "输入字节的可复现性全靠它，缺了就没法说「重跑还是那批用例」")
+    gen_ver = mat.get("generator_version")
+    if isinstance(gen_ver, bool) or not isinstance(gen_ver, (int, str)) or gen_ver == "":
+        raise ValueError(
+            f"{where}.materialize.generator_version={gen_ver!r} 须为非空字符串或整数"
+            "（物化规则版本，随产物留痕；换了版本就等于换了一批字节）")
+    plans = mat.get("inputs")
+    if not isinstance(plans, list) or len(plans) != len(case["inputs"]):
+        raise ValueError(
+            f"{where}.materialize.inputs 须与 case.inputs 一一对应（各 {len(case['inputs'])} 项），"
+            f"得 {plans if not isinstance(plans, list) else len(plans)}")
+    for j, (plan, item) in enumerate(zip(plans, case["inputs"])):
+        pw = f"{where}.materialize.inputs[{j}]"
+        if not isinstance(plan, dict):
+            raise ValueError(f"{pw} 非 object")
+        for key in ("spec_name", "dtype"):
+            if plan.get(key) != item[key]:
+                raise ValueError(
+                    f"{pw}.{key}={plan.get(key)!r} ≠ case.inputs[{j}].{key}={item[key]!r}"
+                    "——造数规格与用例描述必须同源，对不上即有人动过其中一处")
+        if list(plan.get("shape") or []) != list(item["shape"]):
+            raise ValueError(
+                f"{pw}.shape={plan.get('shape')!r} ≠ case.inputs[{j}].shape={item['shape']!r}")
+        dist = plan.get("distribution")
+        if dist not in _TASKDOC_DISTRIBUTIONS:
+            raise ValueError(
+                f"{pw}.distribution={dist!r} 非本引擎可复现的分布，须属 {list(_TASKDOC_DISTRIBUTIONS)}"
+                "——不认识的分布名一律 fail-closed，绝不「就当均匀分布」糊过去（那造出来的就不是"
+                "任务书那条用例了）。取材侧的 `uniform_bool` 也不在此列：本引擎生成层不支持 bool 输入。")
+        lo_src, hi_src = float(item["value_range"][0]), float(item["value_range"][1])
+        if dist == _TD_DIST_INT:
+            low, high = plan.get("low"), plan.get("high_inclusive")
+            if (isinstance(low, bool) or not isinstance(low, int)
+                    or isinstance(high, bool) or not isinstance(high, int) or low > high):
+                raise ValueError(
+                    f"{pw}: uniform_int 须给整数 low / high_inclusive 且 low<=high，"
+                    f"得 low={low!r} high_inclusive={high!r}")
+        else:
+            low, high = plan.get("low"), plan.get("high")
+            if not (_finite_number(low) and _finite_number(high)) or float(low) > float(high):
+                raise ValueError(
+                    f"{pw}: uniform_float 须给有限的 low / high 且 low<=high，"
+                    f"得 low={low!r} high={high!r}")
+        if (float(low), float(high)) != (lo_src, hi_src):
+            raise ValueError(
+                f"{pw} 的取值边界 [{low}, {high}] ≠ case.inputs[{j}].value_range "
+                f"[{lo_src}, {hi_src}]——账本上写着任务书的值域、实际按另一个域造数，"
+                "是最典型的 fail-open，一律拒")
+
+
+def _taskdoc_binding(spec):
+    """spec 侧对 taskdoc_caseset 的**逻辑身份声明**（可选）：`precision.taskdoc_caseset.sha256`。
+
+    ⚠ 诚实边界：spec 是**先于**取材产物写出来的，首轮往往还没有那串 sha（写不出来就别编，AGENTS.md 5.8）。
+    故本键**可省略**——省略时 gen_cases 仍把**实际**摘要落进 caseset / dry-run 账本，
+    「本轮用的是哪一份用例集」因此始终可见；一旦写了就逐字核，对不上当场拒（防换掉用例集还沿用旧结论）。
+    """
+    prec = spec.get("precision") or {}
+    if "taskdoc_caseset" not in prec:
+        return None
+    binding = prec["taskdoc_caseset"]
+    if not isinstance(binding, dict):
+        raise ValueError("precision.taskdoc_caseset 须为 object（当前只识别 sha256 一个键）")
+    sha = binding.get("sha256")
+    if sha is not None and not _hex64(sha):
+        raise ValueError(
+            f"precision.taskdoc_caseset.sha256={sha!r} 须为 64 位小写十六进制，或显式 null 表示本轮未绑定")
+    return sha
+
+
+def _taskdoc_dtype(case, in_params, where):
+    """取该 taskdoc case 的**统一 dtype**（本引擎的 case 模型是「一条 case 一个 dtype」）。
+
+    多输入 dtype 不一致 → fail-closed：`storage_dtype` / compare dtype / 落盘口径全部按单 dtype 派生，
+    硬塞会静默按第一个输入的 dtype 存掉其余输入的字节。真要支持混合 dtype 得先一般化那条链，
+    不是在这里放行（fail-closed 优于静默降级）。
+    ⚠ dtype 名必须已是**本引擎的规范名**（float32/float16/bfloat16/int*/uint8）——
+    任务书的 `"float"` 之类要在取材侧的映射 IR 里换完再进来，本文件不做第二套名字映射。
+    """
+    dts = {item["dtype"] for item in case["inputs"]}
+    if len(dts) != 1:
+        raise ValueError(
+            f"{where}: 同一条 case 的输入 dtype 不唯一 {sorted(dts)}——"
+            "本引擎按「一条 case 一个 dtype」落盘与判据，混合 dtype 须先一般化该链路，不在此静默取首个")
+    dtn = dts.pop()
+    if dtn not in set(_NATIVE) | {_BF16}:
+        raise ValueError(
+            f"{where}: dtype={dtn!r} 不是本引擎的规范 dtype 名"
+            f"（可选 {sorted(set(_NATIVE) | {_BF16})}）——任务书侧的类型名须由取材侧的映射 IR 换成规范名，"
+            "本文件不做第二套名字映射（两处映射必然漂）")
+    for p in in_params:
+        allowed = p.get("dtype") or []
+        if dtn not in allowed:
+            raise ValueError(
+                f"{where}: dtype={dtn!r} 不在 spec 的输入参数 {p['name']!r} 声明的 dtype 集 {allowed} 里"
+                "——任务书用例的 dtype 与 spec 声明打架，须先核对，不静默按 spec 或按任务书任一侧胜出")
+    return dtn
+
+
+def _taskdoc_plan(spec, in_params, attrs_default, case_target, taskdoc, taskdoc_sha256):
+    """CS · `case_source=taskdoc` 的计划期：任务书用例 → plan entries + 覆盖账本。
+
+    与 `_plan` 的关键区别（也是这一档存在的理由）：**一条网格都不铺、一次采样都不做**。
+    entries 与任务书用例**一一对应**，身份、shape、attr、值域全部照抄；本引擎只负责物化与算 golden。
+
+    硬校（全部 fail-closed）：
+      · 输入/输出的 `spec_name` 必须与 spec 的 in/out 参数**同序同名同数**——任何一处对不上都说明
+        接口映射没做对，此时继续跑只会产出「名字看着像、槽位其实错位」的用例；
+      · attr 键集必须**精确等于** spec 的 attr 参数集——多一个是无处安放的属性，少一个下游要兜默认值
+        （`_build_aclnn_call` 对 None 取值本来就 fail-closed）；
+      · `case_target` 必须**精确等于**用例条数——同 `torch_parity` 完整矩阵的口径：
+        账面声明与实产条数不许打架，否则报告里那个数就是编的。
+    """
+    perf_mode.normalize_change_kind(spec)                 # 与 `_plan` 同一道受控词表门，不留旁路
+    if _uses_output_contract(spec):
+        # 多输出契约 + 任务书用例集的组合本轮**未实现**（`golden_unavailable` 尚未接进多输出通路）。
+        # 半截支持比不支持贵得多：宁可明说不支持，也不产一批「看着有裁决、其实判据链没接全」的用例。
+        # 放在计划期 = 正式生成与 dry-run（CP-B 契约自检）两条路都拦得住。
+        raise ValueError(
+            f"{spec.get('op')}: precision.case_source='taskdoc' 暂不支持多输出契约"
+            "（out 参数 >1 或声明了 out_role）——fail-closed，不半截支持")
+    cases = taskdoc["cases"]
+    in_names = [p["name"] for p in in_params]
+    out_names = [p["name"] for p in spec.get("params", []) if p.get("io") == "out"]
+    attr_names = set(attrs_default)
+    if int(case_target) != len(cases):
+        raise ValueError(
+            f"precision.case_source='taskdoc'：任务书用例集有 {len(cases)} 条，"
+            f"precision.case_target={case_target}——两者必须相等。"
+            "账面数与实产数不一致时，报告里写的那个覆盖数就是编的（同 torch_parity 完整矩阵的口径）。")
+    entries = []
+    for i, case in enumerate(cases):
+        where = f"taskdoc_caseset.cases[{i}]({case['case_id']})"
+        got_in = [item["spec_name"] for item in case["inputs"]]
+        if got_in != in_names:
+            raise ValueError(
+                f"{where}: 输入身份 {got_in} ≠ spec 的 in 参数 {in_names}（须同序同名同数）——"
+                "接口映射对不上就停，绝不按位置硬塞（槽位错位的用例会「跑得过」但验的不是那件事）")
+        got_out = [item["spec_name"] for item in case["outputs"]]
+        if got_out != out_names:
+            raise ValueError(
+                f"{where}: 输出身份 {got_out} ≠ spec 的 out 参数 {out_names}（须同序同名同数）")
+        if set(case["attrs"]) != attr_names:
+            raise ValueError(
+                f"{where}: attr 键集 {sorted(case['attrs'])} ≠ spec 的 attr 参数 {sorted(attr_names)}——"
+                "缺的属性没人能替任务书补（下游对 None 取值一律 fail-closed），多的属性无处安放")
+        dtn = _taskdoc_dtype(case, in_params, where)
+        shapes = [tuple(item["shape"]) for item in case["inputs"]]
+        entries.append({
+            "dims": ["功能", "精度"],       # 性能维由 `_classify_perf_cases` 按 perf 策略事后挑选
+            "shape": shapes[0],             # 账本/统计口径用首个输入的形状（逐输入形状在 taskdoc.inputs 里）
+            "dtype": dtn,
+            "tags": ["任务书用例"],
+            "data_kind": "taskdoc",
+            "id_kind": "taskdoc",
+            "attrs": _copy_attrs(case["attrs"]),
+            "attr_idx": None,               # 任务书用例不走 attr_matrix 组合索引，case_id 也不带 a{k}
+            "case_origin": f"taskdoc_caseset:{case['case_id']}",
+            "rule_ref": "任务书自带 self_test_case（spec.precision.case_source=taskdoc）",
+            # 物化与溯源所需的原始描述，逐 case 随行（materializer 与落盘账本都读它）
+            "taskdoc": {"case_id": case["case_id"], "inputs": case["inputs"],
+                        "outputs": case["outputs"], "materialize": case["materialize"],
+                        "content_sha256": case["content_sha256"]},
+        })
+    n = len(entries)
+    meta = {
+        "pool_max": n,
+        "requested_target": int(case_target),
+        "emitted": n,
+        "forced_special": 0,
+        "operator_class": _operator_class(spec),
+        # 任务书用例里有没有非有限值由**任务书**说了算，本引擎这一档不强制铺 inf/-inf/nan。
+        "emits_nonfinite_specials": False,
+        "case_profile": _case_profile(spec),
+        "case_profile_declared": _case_profile_declared(spec),
+        "forced_total": n,                  # 一条都不许少：任务书用例集整体即强制下限
+        "dropped_combo_classes": [],
+        "unpaired_combo_classes": {"count": 0, "classes": [], "attr_values_never_emitted": []},
+        "attr_axis_lengths": {"declared": [], "emitted": 0, "items": [], "skipped": []},
+        # ⚠ 两档表述必须**不同**：这一档绝不能再声称「1-wise + 白名单」——那是本引擎自己铺网格时的
+        #   覆盖强度，拿来描述任务书给的用例就是冒领。覆盖强度由任务书决定，我们只如实报条数。
+        "coverage_strength": (
+            f"taskdoc_provided：用例集由任务书提供（{n} 条，spec.precision.case_source=taskdoc），"
+            "覆盖强度由任务书决定；本引擎不另铺正交网格、不做 1-wise 采样、不加白名单必覆盖组合"),
+        # G4 规模预算在这一档**不行使**：降规模会把任务书点名的 shape 改掉，那就不是那条用例了。
+        "golden_cost": _empty_cost_ledger(),
+        "case_source": _CASE_SOURCE_TASKDOC,
+        "taskdoc_caseset_sha256": taskdoc_sha256,
+        "taskdoc_sha256": taskdoc["taskdoc_sha256"],
+    }
+    return entries, meta
+
+
+def _materialize_taskdoc_inputs(entry, in_params, dtn):
+    """CS · 按取材侧的**造数规格**确定性物化输入字节（这一步是本文件的活：取材侧不 import numpy）。
+
+    确定性来源 = `materialize.seed`（取材侧从「任务书摘要 ‖ 单条 case 内容摘要」派生），
+    **不掺 case_id、不掺时间、不掺顺序**：同一份 taskdoc_caseset 在任何机器上重跑都是同一批字节。
+    多个输入按规格顺序从**同一个** rng 连抽（顺序固定 ⇒ 仍然确定）。
+
+    ⚠ 取值边界**只从规格读**（`low` / `high` / `high_inclusive`），不再自己从 `value_range` 换算：
+      「同一个数在两处各算一遍」正是两边悄悄分叉的经典入口；两者是否一致已在
+      `_check_materialize_plan` 逐项核过，这里只执行。
+    """
+    td = entry["taskdoc"]
+    mat = td["materialize"]
+    rng = np.random.default_rng(int(mat["seed"]))
+    cdt = _compute_np(dtn)
+    arrays = []
+    for plan in mat["inputs"]:
+        shape = tuple(int(d) for d in plan["shape"])
+        if plan["distribution"] == _TD_DIST_INT:
+            # 闭区间：`high_inclusive` 这个名字就是契约，端点必须取得到。
+            values = rng.integers(int(plan["low"]), int(plan["high_inclusive"]),
+                                  size=shape, endpoint=True)
+        else:
+            values = rng.uniform(float(plan["low"]), float(plan["high"]), size=shape)
+            if dtn == _BF16:                             # bf16 逻辑值必须落在 bf16 网格上（同常规通路）
+                values = _bf16_round(np.asarray(values, dtype=np.float32))
+        arrays.append(np.ascontiguousarray(values, dtype=cdt))
+    return arrays
+
+
+def _taskdoc_golden_or_unavailable(golden_fn, inputs, attrs, cid):
+    """算 golden；算不出来时**不中断全量生成**，返回 `(None, 原因串)`。
+
+    ⚠ 这正是 `golden_unavailable` 一等状态的入口：任务书用例集里总有几条超出参考实现的支持范围
+    （实测：通道数 > OpenCV `CV_CN_MAX` 的那几条）。旧行为是任一条抛异常就**整轮生成中断**——
+    于是 160 多条能跑的用例一条都产不出来，性能维直接零数据。现在改成逐条记账、其余照跑。
+    捕 `BaseException` 与 `load_golden` 同理：golden 是用户/生成的代码，一句 `sys.exit(0)` 不是 `Exception`。
+    """
+    try:
+        return golden_fn(inputs, attrs), None
+    except KeyboardInterrupt:                            # 用户主动中断不该被记成「这条用例算不出 golden」
+        raise
+    except BaseException as ex:                          # noqa: BLE001 —— 见 docstring
+        return None, f"{type(ex).__name__}: {ex}"
 
 
 _TORCH_PARITY_AXIS_CLASSES = ("first_axis", "middle_axis", "last_axis")
@@ -1360,7 +1880,7 @@ def check_spec_capability(in_params, runner_form):
     为什么必须有：`_build_inputs` 的常规 `varied` / `pair*` 路径末尾写死 `return [x0, x1]`（二元构造），
     而 `empty` 与特殊值路径按 `arity` 产满——**arity≥3 时多出来的输入被无声丢掉，两边行为还不一致**。
     与其静默截断，不如明说不支持（本仓纪律：**fail-closed 优于静默降级**）。
-    支持多输入算子须先一般化 pair 构造，见 `doc/oprunway-todo.md` 的 U7b。"""
+    支持多输入算子须先一般化 pair 构造，见 `dev-doc/oprunway-todo.md` 的 U7b。"""
     arity = len(in_params)
     if arity > 2:
         raise ValueError(
@@ -1495,7 +2015,7 @@ def _mk_id(op, dtn, shp, id_kind, attr_idx, seen):
 
 
 # ============================== §1 覆盖-预算 生成（opbase 精度标准 §1，pin f69d4e…）=====
-# 决策 v2（doc/oprunway-cases50-design.md）：dtype 分层（key 重点 + 其他 1-2）× shape 阶梯(2^k/2^k-1)
+# 决策 v2（dev-doc/oprunway-cases50-design.md）：dtype 分层（key 重点 + 其他 1-2）× shape 阶梯(2^k/2^k-1)
 # × 值域(uniform+normal) × attr 正交笛卡尔；白名单强制必覆盖组合 + 1-wise 采样 + case_target 预算封顶；
 # §1.4 特殊场景（空→功能only / 标量 / 边界 / inf·nan）强制纳入、id_kind 独立命名空间；per-case 独立种子。
 # format 轴：elementwise 仅 ND（op_def/example 佐证）→ 退化为单值，不进正交网格。
@@ -2297,6 +2817,11 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
     CP：`spec.precision.case_profile` 在此**读一次**（词表外取值当场 fail-closed）并落进
     `meta["case_profile"]` / `meta["case_profile_declared"]`；`torch_parity` 进入完整矩阵，
     `legacy` 保持原有 forced + 1-wise 行为。"""
+    # 改动类别受控词表（`spec.change.kind`）在此**读一次**、词表外当场 fail-closed。
+    # 放在计划期而不是各消费方现用现读，理由同 `case_profile`：gen_cases 与 dry-run 两条路径都过 `_plan`，
+    # 写错的 kind 没有绕过口。⚠ 这个字段此前**只是文档字段、无代码消费方**——写错没人管，
+    # 而它现在会决定「本轮要不要做性能对比」（perf_mode.derive_mode 支线①），必须真校。
+    perf_mode.normalize_change_kind(spec)
     arity = len(in_params)
     ranks = _allowed_ranks(in_params)                    # C3：None=不限制（现行为）
     reg_shapes, large_shapes = _shape_ladder(ranks)      # 过滤后无合法常规 shape → 已 fail-closed
@@ -2498,15 +3023,44 @@ def _uses_output_contract(spec):
 # 现在改成：**spec 声明式变体表 + gen_cases 逐 case 选中并完全解析**，写进该 case 的 `aclnn_call`；
 # driver 直接执行、不再推断。无匹配变体 → fail-closed，**绝不默认**。
 # 变体是**字段驱动**的（按 attr 取值判），不是按算子名分派——换任意声明了 call_variants 的算子零改即用。
-_ATTR_CTYPE_MAP = {"int64": "int64", "bool": "bool", "float32": "float", "float": "float"}
+#: **标量** attr 的 spec dtype → runner 的 ctype token。词表须与 `aclnn_runner._ATTR_CTYPES`
+#: （`{int64,bool,float32,float64}`）**逐字对齐**：runner 按这个 token 选 ctypes 类型拼 argtypes，
+#: 对不上就是 C ABI 宽度错位。`"double"` 是 spec 侧常见拼法（`isclose.spec.json` 的 rtol/atol 就写
+#: `["double"]`），在此归一到 `float64`，不新增第五个 token。
+#: ⚠ 旧表把 float32 映成 `"float"` —— 那是个**死 token**：runner 有专门的拒绝分支（C float/double 宽度
+#: 不同，须写 float32/float64），所以 aclnn_py 通路上任何浮点 attr 过去都必然 fail-closed。已删。
+_ATTR_CTYPE_MAP = {"int64": "int64", "bool": "bool", "float32": "float32",
+                   "float64": "float64", "double": "float64"}
+
+#: 数组型 attr 的 ctype token（与 runner 侧同名）。元素宽度由 ACL 的 `aclIntArray` 固定，
+#: **不由 spec dtype 派生**，故它不进 `_ATTR_CTYPE_MAP`（那张表是标量 C ABI 宽度表）。
+_ATTR_ARRAY_CTYPE = "int_array"
+
+#: “调用方没给值”的哨兵——`None` 是合法 attr 值（表示省略/缺省语义），不能拿它当“未传”。
+_UNSET = object()
 
 
-def _attr_ctype(p):
-    """attr 参数的 aclnn 标量 C 类型：int64→"int64"、bool→"bool"、float32/float→"float"。
+def _is_int_array(v):
+    """值结构判定：非空 `list[int]`（bool 元素拒，与 `_check_attr_value` 同口径）。"""
+    return (isinstance(v, list) and bool(v)
+            and all(isinstance(d, int) and not isinstance(d, bool) for d in v))
+
+
+def _attr_ctype(p, value=_UNSET):
+    """attr 参数的 aclnn ctype token：int64→"int64"、bool→"bool"、float32→"float32"、
+    float64/double→"float64"；**值是 `list[int]` → "int_array"**（`aclIntArray*` 形参）。
+
+    数组与标量的分流**只看值的结构**（op-中立：任何声明了 `list[int]` attr 的算子零改即用），
+    不看算子身份、也不新增 spec 字段。`value` 未传时退回看 `p["default"]` 的结构——
+    静态预检（`preflight_aclnn._abstract_slots`）只有 spec、没有 per-case 取值，靠这条得出同一答案。
 
     ⚠ dtype 候选必须**恰有一个**且在映射表内（审计 finding #5）：原先取 `dt[0]`，`["int64","int8"]` /
     `["float32","bogus"]` 都被静默收下 —— 而 attr 的 C 标量宽度拼错 = 远端 argtypes 错位 = 段错误。
-    多候选 / 空 / 未知一律 fail-closed（记 gap 交人裁，别静默挑一个）。"""
+    多候选 / 空 / 未知一律 fail-closed（记 gap 交人裁，别静默挑一个）。
+    数组分支不查这张表：`aclIntArray` 的元素宽度是 ACL 定死的，spec dtype 在那里不表示 C 宽度。"""
+    probe = p.get("default") if value is _UNSET else value
+    if _is_int_array(probe):
+        return _ATTR_ARRAY_CTYPE
     dt = p.get("dtype")
     if isinstance(dt, (list, tuple)):
         cands = list(dt)
@@ -2518,7 +3072,8 @@ def _attr_ctype(p):
     if dt not in _ATTR_CTYPE_MAP:
         raise ValueError(
             f"aclnn_call: attr {p.get('name')!r} 的 dtype {dt!r} 不支持标量映射"
-            f"（仅 {sorted(_ATTR_CTYPE_MAP)}），fail-closed（记 gap，别静默塞默认）")
+            f"（仅 {sorted(_ATTR_CTYPE_MAP)}；数组属性请给 list[int] 取值 → {_ATTR_ARRAY_CTYPE}），"
+            f"fail-closed（记 gap，别静默塞默认）")
     return _ATTR_CTYPE_MAP[dt]
 
 
@@ -2553,7 +3108,9 @@ def _build_aclnn_call(spec, variant, attrs, active_names, cid):
     slots 顺序 = spec.params 顺序 = aclnn 签名顺序（穿插的标量属性据此保位，ctypes runner 才拼得对 argtypes）。
     每个 slot 都带 `name`（供与 header 签名逐项对账）：
       · `{"role":"in","name":..,"input_idx":i}`      —— 第 i 个 case 输入；
-      · `{"role":"attr","name":..,"ctype":..,"value":..}` —— 已解析的标量实参（**None 一律 fail-closed**）；
+      · `{"role":"attr","name":..,"ctype":..,"value":..}` —— 已解析的实参（**None 一律 fail-closed**）；
+        ctype 由**值的结构**分流：标量 → `int64/bool/float32/float64`；非空 `list[int]` → `int_array`
+        （runner 侧建 `aclIntArray*`）。分流不看算子身份，只看这一个 case 里该 attr 的取值长什么样；
       · `{"role":"out","name":..,"output_idx":k}`    —— 对应 expected.outputs[k]；
       · `{"role":"out_null","name":..}`              —— 该变体不落地此输出 → 传 NULL、不回读。
     """
@@ -2576,7 +3133,11 @@ def _build_aclnn_call(spec, variant, attrs, active_names, cid):
                     f"**绝不静默转标量默认值**（那既不是该 case 的语义、又可能与签名不符）。"
                     f"请在 spec 的该变体里显式声明 attrs.{name}，或把它移出 active_attrs（换用无此形参的变体），"
                     f"fail-closed")
-            slots.append({"role": "attr", "name": name, "ctype": _attr_ctype(p), "value": value})
+            ctype = _attr_ctype(p, value)
+            # 数组值另拷一份：variant["attrs"] / case attrs 里的那个 list 会被多条 case 共享，
+            # 落进 caseset 的 slot 不该与它同一个对象（谁就地改一下就串到别的 case）。
+            slots.append({"role": "attr", "name": name, "ctype": ctype,
+                          "value": list(value) if isinstance(value, list) else value})
         elif io == "out":
             if name in out_pos:
                 slots.append({"role": "out", "name": name, "output_idx": out_pos[name]})
@@ -2750,7 +3311,38 @@ def _build_multi_output_case(spec, op, cid, cdir, entry, inputs, in_params, dtn,
             "inputs": in_items, "attrs": attrs, "expected": expected}
 
 
-def gen_cases(spec, work_dir):
+def _resolve_taskdoc_inputs(spec, taskdoc_caseset):
+    """CS：解出本轮的 `(case_source, taskdoc_payload, taskdoc_sha256)`；两向都 fail-closed。
+
+    · `case_source=taskdoc` 却没喂 caseset → 拒。**绝不回退自生成**：任务书明确给了用例，
+      拿不到文件时自己造一套，就是再产一次「流程看着通过、实际绕过任务书用例」的产物；
+    · 喂了 caseset 却没声明 `case_source=taskdoc` → 也拒。静默忽略一份喂进来的用例集，
+      等于让调用方以为用的是任务书用例、实际跑的是自生成网格。
+    """
+    case_source = _case_source(spec)
+    if case_source != _CASE_SOURCE_TASKDOC:
+        if taskdoc_caseset is not None:
+            raise ValueError(
+                f"传入了 taskdoc_caseset={taskdoc_caseset!r}，但 spec.precision.case_source="
+                f"{case_source!r} —— 要用任务书用例请显式声明 case_source='taskdoc'；"
+                "这里不静默忽略喂进来的用例集（静默忽略 = 调用方以为验的是任务书用例，实际不是）")
+        return case_source, None, None
+    if not taskdoc_caseset:
+        raise ValueError(
+            "spec.precision.case_source='taskdoc' 但未喂入规范化用例集 —— "
+            "请用 gen_cases(spec, work_dir, taskdoc_caseset=<taskdoc_caseset.json>) 或 CLI "
+            "`--taskdoc-caseset <path>` 显式给出。**绝不回退自生成**：任务书明确提供了用例，"
+            "识别不到就该 BLOCKED 并保留原因，不是自己造一套顶上（fail-closed）。")
+    payload, digest = load_taskdoc_caseset(taskdoc_caseset)
+    declared = _taskdoc_binding(spec)
+    if declared is not None and declared != digest:
+        raise ValueError(
+            f"taskdoc_caseset 摘要漂移：spec.precision.taskdoc_caseset.sha256={declared} ≠ "
+            f"实际 {digest}（{taskdoc_caseset!r}）—— 用例集换过了，旧结论不适用，fail-closed")
+    return case_source, payload, digest
+
+
+def gen_cases(spec, work_dir, taskdoc_caseset=None):
     op = spec["op"]
     # golden 按算子从用户侧 <ops_root>/<op>/golden.py 加载（elementwise 通路不内置 golden 值、缺则 fail-closed；
     # ADR 0011 决策 1/2/5，proposed）。⚠ 非「引擎零内置算子」——catlass_adapter 的 matmul golden 与本文件 :34
@@ -2762,11 +3354,15 @@ def gen_cases(spec, work_dir):
     # mode 派生同源，否则同一份省略了该键的 spec 会被规划成 cpp、却被派去跑 cpp_extension（P5）。
     runner_form = repo_adapter.spec_runner_form(spec)
     check_spec_capability(in_params, runner_form)        # 能力边界前置：先于 load_golden，别为不支持的算子白加载 golden
+    # CS：用例来源（generated / taskdoc）与规范化任务书用例集，**在加载 golden 之前**解出来——
+    # 一份「声明了 taskdoc 却没喂用例集」的 spec 应当停在零副作用处，而不是先 import 一遍用户 golden。
+    case_source, taskdoc_payload, taskdoc_sha256 = _resolve_taskdoc_inputs(spec, taskdoc_caseset)
     # §1 用例预算 `spec.precision.case_target`（**必填、无缺省**，见 `_require_case_target`）。
     # < 强制下限时 _plan 用 max(target,|forced|)、emit>target 并 note（评审 #8）。
     # ⚠ **位置刻意夹在这里**，两侧都是有意的：
-    #   · 排在 `check_spec_capability` **之后** —— 与 `_dry_run` 的次序**逐字一致**。两条路的报错
-    #     优先级一旦分叉，「CP-B 自检报 A、CP-D 真跑报 B」就会把同一份坏 spec 说成两回事。
+    #   · 排在 `check_spec_capability` / `_resolve_taskdoc_inputs` **之后** —— 与
+    #     `_build_dry_run_ledger` 的次序**逐字一致**。两条路的报错优先级一旦分叉，
+    #     「CP-B 自检报 A、CP-D 真跑报 B」就会把同一份坏 spec 说成两回事。
     #   · 排在 `load_golden` / `os.makedirs` **之前** —— 那两步会**执行**用户侧 `golden.py`
     #     （顶层副作用照跑）并真建目录；把「这份 spec 压根没定过用例数」拖到它们之后才报，
     #     就成了「先动了外部状态、再说这活不能干」（经 run_workflow 调用时前面还夹着清残留与 staging）。
@@ -2805,21 +3401,39 @@ def gen_cases(spec, work_dir):
                          f"aclnn 调用形态（符号/实参表/落地输出）必须由 spec 显式声明、逐 case 解析，"
                          f"不许下游兜默认值，fail-closed")
 
-    # G4：据 C1 的 out_shape 造生成期规模预算的 cost 模型（未导出 out_shape → 按输入广播形状 = elementwise）。
-    cost_fn = _make_cost_fn(in_params, out_shape_fn)
-    entries, plan_meta = _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=cost_fn,
-                               empty_accepts=_make_empty_accepts(in_params, out_shape_fn, attrs_default))
+    # CS：用例来源分叉。`taskdoc` 档在 `_plan` **之前**分出去——它一条网格都不铺，
+    # G4 的规模预算也不行使（降规模会改掉任务书点名的 shape，那就不是那条用例了）。
+    if case_source == _CASE_SOURCE_TASKDOC:
+        # ⚠ 「taskdoc 档不支持多输出契约」那道门在 `_taskdoc_plan` 里（计划期一处，dry-run 也拦得住）。
+        entries, plan_meta = _taskdoc_plan(spec, in_params, attrs_default, case_target,
+                                           taskdoc_payload, taskdoc_sha256)
+    else:
+        # G4：据 C1 的 out_shape 造生成期规模预算的 cost 模型（未导出 out_shape → 按输入广播形状 = elementwise）。
+        cost_fn = _make_cost_fn(in_params, out_shape_fn)
+        entries, plan_meta = _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=cost_fn,
+                                   empty_accepts=_make_empty_accepts(in_params, out_shape_fn, attrs_default))
     seen_ids, cases = set(), []
+    golden_unavailable = []                              # CS：一等状态账本（case 身份保留、无 golden 文件）
     for entry in entries:
         dims, shp, dtn = entry["dims"], entry["shape"], entry["dtype"]
         attrs, data_kind = entry["attrs"], entry["data_kind"]
-        cid = _mk_id(op, dtn, shp, entry["id_kind"], entry["attr_idx"], seen_ids)
+        td_entry = entry.get("taskdoc")                  # CS：非 None = 这条 case 的身份来自任务书
+        if td_entry is None:
+            cid = _mk_id(op, dtn, shp, entry["id_kind"], entry["attr_idx"], seen_ids)
+        else:
+            cid = td_entry["case_id"]                    # 身份照抄任务书（已在加载期校过唯一性与安全性）
+            if cid in seen_ids:                          # 兜底：与自生成 id 空间撞车也当场炸
+                raise ValueError(f"case_id 碰撞：{cid!r} 已存在（任务书用例身份与既有 id 冲突）")
+            seen_ids.add(cid)
         cdir = os.path.join(work_dir, cid)
         os.makedirs(cdir, exist_ok=True)
         case_rng = _case_rng(cid)                        # per-case 独立种子（数据只依赖稳定 cid，评审 #7）
 
-        inputs = _build_inputs(case_rng, in_params, shp, dtn, attrs, data_kind,
-                               runner_form)              # 逻辑数组（compute dtype）
+        if td_entry is None:
+            inputs = _build_inputs(case_rng, in_params, shp, dtn, attrs, data_kind,
+                                   runner_form)          # 逻辑数组（compute dtype）
+        else:                                            # CS：按任务书的 shape×值域×seed 确定性物化
+            inputs = _materialize_taskdoc_inputs(entry, in_params, dtn)
         # 逐 case 选中调用变体（无变体声明 → None；有声明但无匹配 → fail-closed，绝不退默认）。
         variant = _select_call_variant(variants, attrs, cid) if variants else None
         if uses_multi:                                   # 多输出契约（torch 对标 median）：全程 op-中立据字段
@@ -2832,7 +3446,43 @@ def gen_cases(spec, work_dir):
                     spec, variant, attrs, [o["name"] for o in case["expected"]["outputs"]], cid)
             cases.append(case)
             continue
-        golden = golden_fn(inputs, attrs)                # 用逻辑输入算 golden
+        if td_entry is None:
+            golden = golden_fn(inputs, attrs)            # 用逻辑输入算 golden
+        else:
+            # CS · `golden_unavailable` 一等状态：任务书用例集里总有几条超出参考实现的支持范围
+            # （实测：通道数 > OpenCV CV_CN_MAX 的那几条）。**不中断全量生成**——身份保留、
+            # 记原因、退出精度维，其余 case 照跑；由门判 BLOCKED，绝不当 pass。
+            golden, unavailable_reason = _taskdoc_golden_or_unavailable(
+                golden_fn, inputs, attrs, cid)
+            if unavailable_reason is not None:
+                in_items = _save_inputs_multi(cdir, cid, inputs, in_params, dtn)
+                gu_case = {
+                    "id": cid,
+                    # 只留「功能」：无 golden 即无从判精度，把它留在精度维会让精度分母里混进
+                    # 一条**永远判不了**的 case（validator 要么崩、要么静默 na 冒充无事）。
+                    "dims": ["功能"],
+                    "tags": list(entry["tags"]) + ["golden不可用"],
+                    "inputs": in_items, "attrs": attrs,
+                    "expected": {
+                        "golden_source": golden_source, "golden_tier": _tier,
+                        "golden_status": GOLDEN_UNAVAILABLE,
+                        "golden_unavailable_reason": unavailable_reason,
+                        "golden_path": None,             # 显式 None，不是缺键：读的人一眼看见「没有」
+                        "verify_mode": vmode, "compare": "na", "standard": "na",
+                        "compare_dtype": None,
+                        "case_origin": entry["case_origin"], "rule_ref": entry["rule_ref"],
+                        "note": ("任务书用例，但参考实现算不出 golden → 精度维不可判。"
+                                 "case 身份与输入字节仍完整保留，门须判 BLOCKED，"
+                                 "**不得**当作通过、也不得当作「该用例不存在」"),
+                    },
+                }
+                if needs_aclnn_call:                     # 调用契约照样解析：这条 case 仍可被人工复现
+                    gu_case["aclnn_call"] = _build_aclnn_call(
+                        spec, variant, attrs, _active_output_names(spec, variant, cid), cid)
+                cases.append(gu_case)
+                golden_unavailable.append({"case_id": cid, "reason": unavailable_reason,
+                                           "case_origin": entry["case_origin"]})
+                continue
         # C1：算子声明了 out_shape → **与 golden_fn 实际返回的形状对账**，不一致即 fail-closed。
         # 两者打架时既不信声明也不信实测：下游 runner 按 caseset 的形状收发、validator 按 golden 判，
         # 谁静默胜出都会产出「看起来对」的结果。out_shape_source 如实记这形状是「声明并已核」还是「实测」。
@@ -2999,6 +3649,19 @@ def gen_cases(spec, work_dir):
             # 声明了就把「这批用例是按哪个造例档位产的」如实落进产物，报告侧不必回头猜。
             **({"case_profile": plan_meta["case_profile"]}
                if plan_meta["case_profile_declared"] else {}),
+            # CS 账本：**仅在 spec 显式声明了 precision.case_source 时才出现**（同 case_profile 的处理，
+            # 未声明的算子 caseset 逐字节不变）。声明了就把「用例是谁出的 / 绑的哪一份用例集 /
+            # 哪几条算不出 golden」全部如实落进产物——报告与门都读这里，不必回头猜。
+            **({"case_source": case_source} if _case_source_declared(spec) else {}),
+            **({"taskdoc_caseset_sha256": taskdoc_sha256,
+                "taskdoc_sha256": taskdoc_payload["taskdoc_sha256"],
+                "golden_unavailable": {
+                    "count": len(golden_unavailable),
+                    "cases": golden_unavailable,
+                    "note": ("这些任务书用例的 golden 算不出来 → 已退出精度维与性能候选池，"
+                             "身份与输入字节仍在。门须判 BLOCKED，不得当 pass、也不得当作用例不存在"),
+                }}
+               if case_source == _CASE_SOURCE_TASKDOC else {}),
             **({"perf_case_policy": perf_case_policy} if perf_case_policy is not None else {}),
             "cases": cases}
     # ⚠ 原先这里挂一份 **op 级** `aclnn_call_template`，由 driver 自己按 case 兜变体（`dim=None`→`dim=0`）——
@@ -3007,7 +3670,7 @@ def gen_cases(spec, work_dir):
     return caseset
 
 
-def _build_dry_run_ledger(spec, preparation_inputs=None):
+def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
     """plan-only（**不跑 golden_fn**、不落 .npy）：构造可持久化覆盖账本 + 确定性自检。
 
     G4 起会**尽力**加载 golden.py 取 `out_shape` 造规模预算的 cost 模型——好让「归约/成对类算子的大 shape
@@ -3022,8 +3685,13 @@ def _build_dry_run_ledger(spec, preparation_inputs=None):
     # 能力边界前置：三元算子 / dtype 双层能力门在 CP-B 就拦下，不拖到 CP-D。
     # form 走全仓唯一缺省真源——dry-run 是 CP-B 契约自检，口径与 gen_cases/run_workflow 必须一致，
     # 否则「CP-B 按 cpp 自检过了、CP-D 按 cpp_extension 跑」就是一份骗人的自检（P5）。
+    # ⚠ 别改回 `spec.get("runner_form")`：`check_spec_capability` 已删掉 `runner_form=None` 的默认值
+    #   （P5-b），键缺席时直接传 None 会在受控词表处炸掉每一份省略该键的合法 spec。
     dry_runner_form = repo_adapter.spec_runner_form(spec)
     check_spec_capability(in_params, dry_runner_form)
+    # CS：dry-run 与正式生成走**同一道**用例来源解析 —— 「声明了 taskdoc 却没喂用例集」这类错
+    # 必须在 CP-B 契约自检就现形，不许 CP-B 全绿、CP-D 才炸。
+    case_source, taskdoc_payload, taskdoc_sha256 = _resolve_taskdoc_inputs(spec, taskdoc_caseset)
     attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
@@ -3055,10 +3723,21 @@ def _build_dry_run_ledger(spec, preparation_inputs=None):
         if not msg.startswith("缺 golden:"):            # 文件在、但契约/执行有问题 → 不降级
             raise
         cost_why = f" ← 未核（{msg.splitlines()[0][:80]}）"
-    entries, meta = _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=cost_fn,
-                          empty_accepts=_make_empty_accepts(in_params, _dry_out_shape_fn, attrs_default))
+    if case_source == _CASE_SOURCE_TASKDOC:              # CS：任务书用例集 → 不铺网格、不行使规模预算
+        entries, meta = _taskdoc_plan(spec, in_params, attrs_default, case_target,
+                                      taskdoc_payload, taskdoc_sha256)
+    else:
+        entries, meta = _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=cost_fn,
+                              empty_accepts=_make_empty_accepts(in_params, _dry_out_shape_fn, attrs_default))
     seen, ids = set(), []
     for e in entries:                                    # 跑 _mk_id 校 id 唯一（撞则 raise）
+        if e.get("taskdoc") is not None:                 # CS：任务书用例的身份照抄、不由 _mk_id 编
+            cid = e["taskdoc"]["case_id"]
+            if cid in seen:
+                raise ValueError(f"case_id 碰撞：{cid!r} 已存在（任务书用例身份重复）")
+            seen.add(cid)
+            ids.append(cid)
+            continue
         ids.append(_mk_id(op, e["dtype"], e["shape"], e["id_kind"], e["attr_idx"], seen))
     specials = {"empty", "scalar", "bndlo", "bndhi", "inf", "ninf", "nan"}
     ranks = _allowed_ranks(in_params)
@@ -3068,9 +3747,18 @@ def _build_dry_run_ledger(spec, preparation_inputs=None):
     determinism = None
     if ids:
         cid = ids[0]
-        a = float(_case_rng(cid).random())
-        b = float(_case_rng(cid).random())
-        determinism = {"case_id": cid, "first_draw_a": a, "first_draw_b": b, "equal": a == b}
+        if entries[0].get("taskdoc") is not None:
+            # CS：taskdoc 档的输入字节由 `materialize.seed` 定，不由 `_case_rng(case_id)` 定 ——
+            # 自检就必须核**真正在用的那条**种子链，否则「确定性已核」是核了个用不上的东西。
+            seed = int(entries[0]["taskdoc"]["materialize"]["seed"])
+            a = float(np.random.default_rng(seed).random())
+            b = float(np.random.default_rng(seed).random())
+            determinism = {"case_id": cid, "seed_source": "taskdoc_caseset.materialize.seed",
+                           "seed": seed, "first_draw_a": a, "first_draw_b": b, "equal": a == b}
+        else:
+            a = float(_case_rng(cid).random())
+            b = float(_case_rng(cid).random())
+            determinism = {"case_id": cid, "first_draw_a": a, "first_draw_b": b, "equal": a == b}
     canonical_spec = content_address.canonical_json_bytes(spec)
     logic_files = {}
     logic_root = os.path.dirname(os.path.abspath(__file__))
@@ -3102,7 +3790,9 @@ def _build_dry_run_ledger(spec, preparation_inputs=None):
             #   账本再落一个「缺省值」会重新暗示存在缺省。实际用的那个数在 `planning.case_target`。
             "default_golden_cost_budget": _GOLDEN_COST_BUDGET,
             "case_profiles": list(_CASE_PROFILES),
+            "case_sources": list(_CASE_SOURCES),
             "operator_classes": list(_OPERATOR_CLASSES),
+            "change_kinds": list(perf_mode.CHANGE_KINDS),
         },
         "planning": {
             "case_target": case_target,
@@ -3112,6 +3802,12 @@ def _build_dry_run_ledger(spec, preparation_inputs=None):
             "runner_form": dry_runner_form,
             "case_profile": meta["case_profile"],
             "case_profile_declared": meta["case_profile_declared"],
+            # CS：用例是谁出的 + 绑的哪一份用例集（generated 档两个键分别是 "generated"/None，
+            # 账本读者一眼看得出「这批用例是本引擎造的」，不必从别处推）。
+            "case_source": case_source,
+            "case_source_declared": _case_source_declared(spec),
+            "taskdoc_caseset_sha256": taskdoc_sha256,
+            "change_kind": perf_mode.normalize_change_kind(spec),
             "operator_class": meta["operator_class"],
             "input_ranks": None if ranks is None else sorted(ranks),
             "golden_out_shape": "loaded" if _dry_out_shape_fn is not None else "not_available",
@@ -3165,13 +3861,27 @@ def _render_dry_run_ledger(ledger):
     print(f"  区间: case_target 建议落 [S={forced_total}, pool_max={pool_max}]"
           f"（< S 则 emit 抬到 S；> pool_max 则 emit=pool_max、数量门软化 PASS+note）")
     # OC：算子类别 → 特殊值口径。未声明时明说「= 现行为」，别让人误以为已经按类别裁过。
+    # CS：taskdoc 档的「不产」是**另一个原因**（这一档一条网格都不铺），措辞必须分开——
+    # 沿用「该类别按方法学不适用 NaN·Inf」会把一个 floating_compute 算子说成不适用非有限值，是错话。
+    if planning["case_source"] == _CASE_SOURCE_TASKDOC:
+        nonfinite = "**不由工具铺**（taskdoc 档：特殊值有没有由任务书用例决定）"
+    elif coverage["emits_nonfinite_specials"]:
+        nonfinite = "产"
+    else:
+        nonfinite = "**不产**（该类别按方法学不适用 NaN·Inf）"
     print(f"  operator_class: {planning['operator_class'] or '未声明（缺省 = 现行为）'}"
-          f"  → inf/-inf/nan 特殊场景: "
-          f"{'产' if coverage['emits_nonfinite_specials'] else '**不产**（该类别按方法学不适用 NaN·Inf）'}")
+          f"  → inf/-inf/nan 特殊场景: {nonfinite}")
     # CP：造例档位。未声明时明说「缺省 = legacy = 现行为」，别让人以为已经按参考仓口径造过例。
     print("  case_profile: "
           + (f"{planning['case_profile']}（spec 显式声明）" if planning["case_profile_declared"]
              else "未声明（缺省 = legacy = 现行为）"))
+    # CS：用例来源。taskdoc 档必须把绑定的用例集摘要打出来——「这批用例是任务书的哪一份」
+    # 是报告里躲不掉的一句话，别让人事后去翻产物。
+    print("  case_source: "
+          + (f"{planning['case_source']}（spec 显式声明）" if planning["case_source_declared"]
+             else "未声明（缺省 = generated = 本引擎造例）")
+          + (f"  taskdoc_caseset_sha256={planning['taskdoc_caseset_sha256']}"
+             if planning["taskdoc_caseset_sha256"] else ""))
     print(f"  input_rank: {'不限制' if planning['input_ranks'] is None else planning['input_ranks']}  "
           f"shapes: {summary['shapes']}")
     print(f"  by_dtype : {summary['by_dtype']}")
@@ -3223,7 +3933,11 @@ def _render_dry_run_ledger(ledger):
     print(f"  coverage: {coverage['strength']}")
     det = ledger["determinism"]
     if det:
-        print(f"  determinism(_case_rng[{det['case_id']}] first draw): "
+        # CS：标签必须点名**这一档真正在用的那条种子链**——taskdoc 档的字节由 materialize.seed 定，
+        # 打成 `_case_rng[...]` 就是报了个用不上的自检。
+        label = (f"materialize.seed={det['seed']}[{det['case_id']}]" if det.get("seed_source")
+                 else f"_case_rng[{det['case_id']}]")
+        print(f"  determinism({label} first draw): "
               f"{det['first_draw_a']} == {det['first_draw_b']} -> {det['equal']}")
     if coverage["note_target_below_forced"]:
         print(f"  note: {coverage['note_target_below_forced']}")
@@ -3237,14 +3951,35 @@ def _write_json_atomic(path, payload):
     content_address.atomic_write_json(directory, base, payload)
 
 
-def _dry_run(spec, preparation_inputs=None):
+def _dry_run(spec, preparation_inputs=None, taskdoc_caseset=None):
     """兼容入口：构造 ledger 后按既有 stdout 语义渲染，并返回结构化账本。"""
-    ledger = _build_dry_run_ledger(spec, preparation_inputs=preparation_inputs)
+    ledger = _build_dry_run_ledger(spec, preparation_inputs=preparation_inputs,
+                                   taskdoc_caseset=taskdoc_caseset)
     _render_dry_run_ledger(ledger)
     return ledger
 
 
+def _take_taskdoc_caseset_flag(argv):
+    """CS：从 argv 里摘出 `--taskdoc-caseset <path>`，返回 `(剩余 argv, path|None)`。
+
+    dry-run 与正式生成**两条路径共用**同一个开关：任务书用例集是「本轮用哪批用例」的输入，
+    不是只在预探时才需要的调试项。缺值 → fail-closed（不当成没传）。
+    """
+    rest, path, i = [], None, 0
+    while i < len(argv):
+        if argv[i] == "--taskdoc-caseset":
+            if i + 1 >= len(argv):
+                raise ValueError("--taskdoc-caseset 缺少 taskdoc_caseset.json 路径")
+            path = argv[i + 1]
+            i += 2
+            continue
+        rest.append(argv[i])
+        i += 1
+    return rest, path
+
+
 def main(argv):
+    argv, taskdoc_caseset = _take_taskdoc_caseset_flag(argv)
     dry_only_flags = {"--ledger-out", "--source-facts", "--correspondence"}
     used_dry_only = sorted(dry_only_flags.intersection(argv))
     if used_dry_only and "--dry-run" not in argv:
@@ -3283,6 +4018,7 @@ def main(argv):
             raise ValueError(
                 "dry-run 用法: gen_cases.py <spec.json> --dry-run "
                 "[--ledger-out <ledger.json>] "
+                "[--taskdoc-caseset <taskdoc_caseset.json>] "
                 "[--source-facts <source_facts.json> "
                 "--correspondence <correspondence.json>]")
         if bool(source_facts_path) != bool(correspondence_path):
@@ -3311,16 +4047,18 @@ def main(argv):
                     correspondence_bytes).hexdigest(),
             }
         spec = json.load(open(rest[0], encoding="utf-8"))
-        ledger = _dry_run(spec, preparation_inputs=preparation_inputs)
+        ledger = _dry_run(spec, preparation_inputs=preparation_inputs,
+                          taskdoc_caseset=taskdoc_caseset)
         if ledger_out:
             _write_json_atomic(ledger_out, ledger)
         return
     if len(argv) != 3:
         raise ValueError(
-            "正式用法: gen_cases.py <spec.json> <work_dir> <caseset.json>")
+            "正式用法: gen_cases.py <spec.json> <work_dir> <caseset.json> "
+            "[--taskdoc-caseset <taskdoc_caseset.json>]")
     spec_path, work_dir, out_path = argv
     spec = json.load(open(spec_path, encoding="utf-8"))
-    caseset = gen_cases(spec, work_dir)
+    caseset = gen_cases(spec, work_dir, taskdoc_caseset=taskdoc_caseset)
     json.dump(caseset, open(out_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     print(f"[gen_cases] {caseset['op']}: {len(caseset['cases'])} cases -> {out_path}")
 

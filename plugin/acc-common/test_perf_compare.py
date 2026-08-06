@@ -897,274 +897,124 @@ class PerfReportAggregateTest(unittest.TestCase):
         self.assertEqual(pc._case_dtype({"inputs": [{"dtype": "bfloat16"}]}), "bfloat16")
 
 
-class NoPerfTargetTest(unittest.TestCase):
-    """任务书「性能要求：无」→ spec 整个省略 `perf` 块 → **采集但不判达标**（`collected_no_target`）。
+class NoTargetIsFailClosedTest(unittest.TestCase):
+    """有性能用例要判、spec 却给不出 `target_ratio` → `invalid_config`，**绝不兜底套 0.95**。
 
-    现场：aclnnRoll 试跑的 `perf_report.json` 实测 `target_ratio: 0.95`、`perf_cases: 47`、
-    `达标: 28`、`failed: 19`、`status: "fail"`——那个 0.95 **任务书里根本没有**，
-    是 `_resolve_target_ratio` 在「未声明基线」时静默兜底套上去的。本组测试钉死三件事：
-      ① 不再凭空造目标（`target_ratio` 必须是 None，不是 0.95）；
-      ② 不判达标 ≠ 判不达标（`达标` / `cases_above_threshold` 记 **None，不是 0**）；
-      ③ 不判达标也 ≠ 自动通过（status 既不是 `fail` 也不是 `ok`，报告里必须写明「性能未验证」）。
+    病历（aclnnRoll 试跑）：`perf_report.json` 实测 `target_ratio: 0.95`、`perf_cases: 47`、
+    `达标: 28`、`failed: 19`、`status: "fail"`——那个 0.95 **任务书里根本没有**，是
+    `_resolve_target_ratio` 在「未声明基线」时静默兜底套上去的。工具替任务书造了一条验收要求，
+    报告读者还会以为那是任务书写的（律令 5.8「不捏造」）。
+
+    ⚠ **本组钉的是 fail-closed 方向，不是「无目标也放行」**：任务书真没有性能要求时，
+    §5.10 给的出路是 `perf.mode='measure_only'` + `measure_only_authorization`
+    （ground + cite + quote + 快照指纹）——那是**带授权锚的显式宽档**。
+    「spec 里什么都不写」拿不到同样的待遇：无授权的隐式宽档等于给 §5.10 那道门开一扇后门。
     """
 
-    _NO_PERF_SPEC = {"op": "Sign"}       # 任务书无性能要求 → spec 如实省略整个 perf 块
+    def _cs(self, ids):
+        return _caseset([(cid, [], [4]) for cid in ids])
 
-    @staticmethod
-    def _cs(rows):
-        """rows: [(cid, dtype)] → 只含性能维用例的 caseset。"""
-        return {"op": "Sign",
-                "cases": [{"id": cid, "dims": ["性能"], "tags": ["性能", "常规"],
-                           "inputs": [{"name": "self", "dtype": dt, "shape": [1024]}], "attrs": {}}
-                          for cid, dt in rows]}
+    # ── ① 解析器本身 ────────────────────────────────────────────────────────
+    def test_resolver_refuses_to_fabricate_a_target(self):
+        """`{}`（= perf 块缺席时调用方归一出来的形态）→ `(None, err)`，**不是** `(0.95, None)`。
 
-    # —— ① 不再凭空造目标 ——
-    def test_resolver_returns_no_target_instead_of_default_095(self):
-        """`_resolve_target_ratio` 三态：无目标 (None, None) / invalid (None, err) / 有目标 (float, None)。
-        ⚠ 无目标那格此前是 `(0.95, None)`——回归它就等于把「任务书没写要求」重新变成「要求 ratio≥0.95」。"""
-        self.assertEqual(pc._resolve_target_ratio({}), (None, None))
+        ⚠ 断言写成「tgt 不是 0.95 **且** err 非空」，不只断言 `tgt is None`：
+        单看 `tgt is None` 的话，把返回值改成 `(None, None)` 也能过，而那正是「静默无目标」。"""
+        tgt, err = pc._resolve_target_ratio({})
+        self.assertIsNone(tgt)
+        self.assertIsInstance(err, str)
+        self.assertTrue(err.strip())
+        self.assertNotEqual(tgt, 0.95)
+        # 有目标 / 声明基线却缺阈 两格照旧
         self.assertEqual(pc._resolve_target_ratio({"target_ratio": 1.0}), (1.0, None))
+        self.assertIsNone(pc._resolve_target_ratio({"baseline": "tbe"})[0])
 
-    def test_only_a_wholly_absent_perf_block_counts_as_no_target(self):
-        """「无目标」入口收得很窄：**只有 perf 整块缺席/空**才算。写了性能配置却给不出目标 →
-        invalid_config。放宽这条就是 fail-open：残缺/被写坏的 spec 会伪装成「任务书没要求」，
-        把一条真实的性能要求整条吞掉。"""
-        for perf in ({"baseline": "tbe"},          # 声明基线却缺阈（原有规则）
-                     {"baseline": ""},             # 基线被写空 → 残缺，不是「没要求」
-                     {"warmup": 5, "repeat": 20},  # 只有采集参数、没有判据
-                     {"small_shape_exception": _EXC}):   # 例外只在有目标时才有意义
-            tgt, err = pc._resolve_target_ratio(perf)
-            self.assertIsNone(tgt, repr(perf))
-            self.assertIsNotNone(err, f"{perf!r} 必须是 invalid_config，不得被读成「无验收目标」")
+    def test_the_refusal_names_both_legal_ways_out(self):
+        """拒绝语必须同时给出两条出路，否则读到它的人会以为「无性能要求」这件事不再被支持。"""
+        _, err = pc._resolve_target_ratio({})
+        self.assertIn("target_ratio", err)
+        self.assertIn("measure_only", err)
+        self.assertIn("measure_only_authorization", err)
+        self.assertIn("5.10", err)
 
-    def test_partial_perf_block_reaches_invalid_config_end_to_end(self):
-        """上一条的端到端形态：残缺 perf 块必须落 invalid_config，不得落 collected_no_target。"""
-        cs = self._cs([("p0", "float32")])
-        for perf in ({"warmup": 5}, {"baseline": ""}, {"small_shape_exception": _EXC}):
-            r = pc.perf_compare({"op": "Sign", "perf": perf}, cs,
-                                _ev({"p0": (1.0, "kernel_only")}), _bl({"p0": 2.0}))
-            self.assertEqual(r["summary"]["status"], "invalid_config", repr(perf))
-            self.assertEqual(r["summary"]["达标"], 0, repr(perf))
-
-    def test_empty_and_null_perf_block_are_equivalent_to_absent(self):
-        """`perf` 缺席 / `null` / `{}` 三种写法等价——都是「任务书没有性能要求」的如实表达。"""
-        cs = self._cs([("p0", "float32")])
-        for spec in ({"op": "Sign"}, {"op": "Sign", "perf": None}, {"op": "Sign", "perf": {}}):
-            r = pc.perf_compare(spec, cs, _ev({"p0": (1.0, "kernel_only")}), _bl({"p0": 2.0}))
-            self.assertEqual(r["summary"]["status"], "collected_no_target", repr(spec))
-
-    def test_report_target_ratio_is_none_not_fabricated(self):
-        cs = self._cs([("p0", "float32")])
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs,
-                            _ev({"p0": (10.0, "kernel_only")}), _bl({"p0": 8.0}))
-        self.assertIsNone(r["target_ratio"], "无性能要求时不得回填任何阈值")
-
-    # —— ② 不判达标 ≠ 判不达标 ——
-    def test_collects_us_and_ratio_but_judges_nothing(self):
-        """`ratio` 高于/低于 0.95 的两条用例都不该产生任何 pass/fail 结论。
-        `p_slow` 的 raw=0.5 在旧逻辑下正是被判 fail 的那种行。"""
-        cs = self._cs([("p_fast", "float32"), ("p_slow", "float32")])
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs,
+    # ── ② 端到端 ───────────────────────────────────────────────────────────
+    def test_no_perf_block_with_perf_cases_is_invalid_config(self):
+        """spec 无 perf 块 + 有性能用例 + 有基线 → `invalid_config`，一条都不判达标。"""
+        cs = self._cs(["p_fast", "p_slow"])
+        r = pc.perf_compare({"op": "Sign"}, cs,
                             _ev({"p_fast": (1.0, "kernel_only"), "p_slow": (10.0, "kernel_only")}),
                             _bl({"p_fast": 2.0, "p_slow": 5.0}))
-        self.assertEqual(r["summary"]["status"], "collected_no_target")
-        rows = {row["case_id"]: row for row in r["per_case"]}
-        self.assertEqual(rows["p_fast"]["npu_us"], 1.0)         # us 照常记
-        self.assertEqual(rows["p_slow"]["npu_us"], 10.0)
-        self.assertEqual(rows["p_fast"]["ratio"], 2.0)          # ratio 照常记（实测导出值）
-        self.assertEqual(rows["p_slow"]["ratio"], 0.5)
-        for cid, row in rows.items():
-            self.assertIsNone(row["达标"], f"{cid}: 无目标时逐 case 不得判 True/False")
-            self.assertFalse(row.get("blocked"), cid)
+        self.assertEqual(r["summary"]["status"], "invalid_config")
+        self.assertIsNone(r["target_ratio"])           # ★ 不得出现凭空的 0.95
+        self.assertEqual(r["summary"]["达标"], 0)
+        self.assertEqual(r["summary"]["blocked"], 2)
+        self.assertTrue(all(row["blocked"] and row["达标"] is False for row in r["per_case"]))
 
-    def test_counts_are_none_not_zero(self):
-        """`达标` / `cases_above_threshold` 记 None——0 会被读成「一条都没达标」。
-        `cases_scored` 相反：它数实采条数，与有没有目标无关，必须是真实条数。"""
-        cs = self._cs([("p0", "float32"), ("p1", "float32")])
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs,
-                            _ev({"p0": (1.0, "kernel_only"), "p1": (10.0, "kernel_only")}),
-                            _bl({"p0": 2.0, "p1": 5.0}))
-        s = r["summary"]
-        self.assertIsNone(s["达标"])
-        self.assertIsNone(s["cases_above_threshold"])
-        self.assertEqual(s["perf_cases"], 2)
-        self.assertEqual(s["cases_scored"], 2)
+    def test_empty_and_null_perf_blocks_take_the_same_exit(self):
+        """`perf` 缺席 / `{}` 走同一出口；显式 `null` 由 perf_mode fail-closed 拦在更前面。
 
-    def test_summary_key_set_unchanged(self):
-        """无目标态**不新增/不丢**任何 summary 键——下游按键名读的地方一个都不会 KeyError。"""
-        cs = self._cs([("p0", "float32")])
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs,
-                            _ev({"p0": (1.0, "kernel_only")}), _bl({"p0": 2.0}))
-        self.assertEqual(set(r["summary"]),
-                         {"perf_cases", "达标", "blocked", "status",
-                          "cases_above_threshold", "cases_scored",
-                          "non_passing", "failed", "exceptions"})
+        ⚠ 显式 `null` **刻意不等价于缺席**（`perf_mode.resolve_spec_mode` 的 `_ABSENT` 哨兵口径）：
+        「字段没写」与「写了个坏值」必须分得开，后者是一份该被看见的坏 spec。"""
+        cs = self._cs(["p"])
+        ev, bl = _ev({"p": (1.0, "kernel_only")}), _bl({"p": 2.0})
+        for spec in ({"op": "Sign"}, {"op": "Sign", "perf": {}}):
+            r = pc.perf_compare(spec, cs, ev, bl)
+            self.assertEqual(r["summary"]["status"], "invalid_config", repr(spec))
+            self.assertIsNone(r["target_ratio"], repr(spec))
+        r_null = pc.perf_compare({"op": "Sign", "perf": None}, cs, ev, bl)
+        self.assertEqual(r_null["summary"]["status"], "invalid")
+        self.assertIsNone(r_null["target_ratio"])
 
-    def test_no_case_is_listed_as_a_performance_failure(self):
-        """`non_passing_cases` 必须为空、`failed` 必须为 0——本次现场就是这里凭空长出 19 条。"""
-        cs = self._cs([("p_slow", "float32")])
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs,
-                            _ev({"p_slow": (10.0, "kernel_only")}), _bl({"p_slow": 1.0}))
-        self.assertEqual(r["non_passing_cases"], [])
-        self.assertEqual(r["summary"]["failed"], 0)
-        self.assertEqual(r["summary"]["exceptions"], 0)
-        self.assertEqual(r["summary"]["non_passing"], 0)
+    def test_no_case_is_reported_as_a_performance_failure(self):
+        """`invalid_config` 的行是 `blocked`，`summary` 不得记出任何「未达标」计数。
 
-    # —— ③ 不判达标也 ≠ 自动通过 ——
-    def test_status_is_neither_ok_nor_fail(self):
-        cs = self._cs([("p0", "float32")])
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs,
-                            _ev({"p0": (1.0, "kernel_only")}), _bl({"p0": 2.0}))
-        self.assertNotIn(r["summary"]["status"], ("ok", "fail", "exception"))
-        self.assertEqual(r["summary"]["status"], "collected_no_target")
-
-    def test_report_states_performance_is_unverified(self):
-        """报告里要能一眼看出「没有验收目标 → 性能未验证」，而不是看起来「一切正常」。"""
-        cs = self._cs([("p0", "float32")])
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs,
-                            _ev({"p0": (1.0, "kernel_only")}), _bl({"p0": 2.0}))
-        joined = "".join(r["notes"])
-        self.assertIn("未声明性能验收目标", joined)
-        self.assertIn("性能未验证", joined)
-        self.assertIn("既不是通过也不是失败", joined)
-
-    def test_zero_comparable_measurement_says_so_explicitly(self):
-        """无目标 + 一条可比测量都没采到（全行缺基线 → blocked）→ 除「无目标」外还得点明「连数据都没有」。
-        此时 status 是 `blocked`（证据完整性问题排在无目标之前），不是 collected_no_target。"""
-        cs = self._cs([("p0", "float32")])
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs, _ev({"p0": (1.0, "kernel_only")}), _bl({}))
-        self.assertEqual(r["summary"]["status"], "blocked")
-        self.assertEqual(r["summary"]["cases_scored"], 0)
-        joined = "".join(r["notes"])
-        self.assertIn("未声明性能验收目标", joined)
-        self.assertIn("cases_scored=0", joined)
-
-    # —— 边界：无目标不得吞掉证据完整性问题，也不得改写别的通路 ——
-    def test_evidence_integrity_problems_still_surface(self):
-        """无目标只免掉「判达标」，不免掉「证据齐不齐」：缺基线的那条仍 blocked 且仍进未通过表，
-        判定为 None 的那条不进。"""
-        cs = self._cs([("p_ok", "float32"), ("p_nobase", "float32")])
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs,
-                            _ev({"p_ok": (1.0, "kernel_only"), "p_nobase": (2.0, "kernel_only")}),
-                            _bl({"p_ok": 2.0}))
-        self.assertEqual(r["summary"]["status"], "blocked")
-        self.assertEqual(r["summary"]["blocked"], 1)
-        self.assertEqual([item["case_id"] for item in r["non_passing_cases"]], ["p_nobase"])
-        self.assertEqual(r["non_passing_cases"][0]["outcome"], "blocked")
-        self.assertEqual(r["summary"]["failed"], 0)
-
-    def test_scope_mismatch_still_wins_over_no_target(self):
-        cs = self._cs([("p0", "float32")])
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs,
-                            _ev({"p0": (1.0, "device_e2e_no_h2d_d2h")}),
-                            _bl({"p0": 2.0}, scope="kernel_only"))
-        self.assertEqual(r["summary"]["status"], "blocked_incomparable_timing_scope")
-
-    def test_small_shape_exception_never_fires_without_a_target(self):
-        """例外是「未达标但可豁免」的通道；无目标态压根没有「未达标」，故不得产 exception/simulation。
-        （同一条 case 在 `_spec(1.0, _EXC)` 下会命中例外——见 SmallShapeExceptionTest。）"""
-        cs = _caseset([("s0", ["性能", "小shape"], [8192])])
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs, _ev({"s0": (1.5, "kernel_only")}), _bl({"s0": 1.2}))
-        self.assertEqual(r["summary"]["status"], "collected_no_target")
-        self.assertNotIn("exception", r["per_case"][0])
-        self.assertNotIn("simulation", r)
-
-    def test_missing_baseline_hang_also_records_none_not_zero(self):
-        """缺基线的挂起出口同样不许写 False/0：缺基线 **且** 本来就没目标时，
-        写「达标 0/47」照样是把「没有要求」渲染成「零条达标」。"""
-        cs = self._cs([("p0", "float32"), ("p1", "float32")])
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs,
-                            _ev({"p0": (1.0, "kernel_only"), "p1": (2.0, "kernel_only")}), None,
-                            baseline_blocked_status="blocked_wait_real_baseline")
-        self.assertEqual(r["summary"]["status"], "blocked_wait_real_baseline")
-        self.assertIsNone(r["summary"]["达标"])
-        for row in r["per_case"]:
-            self.assertIsNone(row["达标"], row["case_id"])
-            self.assertIsNotNone(row["npu_us"], row["case_id"])   # NPU 侧证据照记
-        # 提前出口照旧不挂聚合键——挂个 0 会让「没数据」看起来像「数据是 0」。
-        for key in ("cases_above_threshold", "cases_scored"):
-            self.assertNotIn(key, r["summary"])
-
-    def test_shape_class_table_does_not_contradict_summary(self):
-        """`by_shape_class` / `shape_overall` 的「达标」必须与顶层 summary 同口径记 None。
-        顶层写 null、这张表写 0，Markdown 渲染出来就是「达标 0」——读者得到的恰是相反结论。"""
-        cs = self._cs([("p_small", "float32"), ("p_large", "float32")])
-        cs["perf_case_policy"] = {"counts": {"small": 1, "large": 1}}
-        cs["cases"][0]["perf_shape_classification"] = {"class": "small", "input_bytes": 16}
-        cs["cases"][1]["perf_shape_classification"] = {"class": "large", "input_bytes": 1 << 20}
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs,
-                            _ev({"p_small": (1.0, "kernel_only"), "p_large": (10.0, "kernel_only")}),
-                            _bl({"p_small": 2.0, "p_large": 5.0}))
-        self.assertEqual(r["summary"]["status"], "collected_no_target")
-        self.assertTrue(r["shape_report_complete"], r.get("shape_report_problems"))
-        for row in r["by_shape_class"]:
-            self.assertIsNone(row["达标"], row["class"])
-            self.assertEqual(row["cases_scored"], 1, row["class"])   # 实采条数照记
-        self.assertIsNone(r["shape_overall"]["达标"])
-        self.assertEqual(r["shape_overall"]["cases_scored"], 2)
-
-    def test_shape_class_table_keeps_integer_counts_when_target_exists(self):
-        """有目标时 shape 表照旧是整数计数（回归保险：别把 None 泄漏到正常通路）。"""
-        cs = self._cs([("p_small", "float32"), ("p_large", "float32")])
-        cs["perf_case_policy"] = {"counts": {"small": 1, "large": 1}}
-        cs["cases"][0]["perf_shape_classification"] = {"class": "small", "input_bytes": 16}
-        cs["cases"][1]["perf_shape_classification"] = {"class": "large", "input_bytes": 1 << 20}
-        r = pc.perf_compare(_spec(1.0), cs,
-                            _ev({"p_small": (1.0, "kernel_only"), "p_large": (10.0, "kernel_only")}),
-                            _bl({"p_small": 2.0, "p_large": 5.0}))
-        self.assertEqual([row["达标"] for row in r["by_shape_class"]], [1, 0])
-        self.assertEqual(r["shape_overall"]["达标"], 1)
-
-    def test_policy_risk_recorded_but_not_promoted_to_risk_flag(self):
-        """无目标态如实挂 policy_risk（基线口径有风险是事实），但不落 summary.risk——
-        那面旗的语义是「达标了，可它是拿可疑基线达的」，这里没有达标这个结论。"""
-        cs = self._cs([("p0", "float32")])
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs, _ev({"p0": (1.0, "kernel_only")}),
-                            _bl({"p0": {"us": 2.0, "policy_risk": "sub_policy"}}))
-        self.assertEqual(r["per_case"][0]["policy_risk"], "sub_policy")
-        self.assertNotIn("risk", r["summary"])
-
-    def test_declared_baseline_without_target_is_still_invalid_config(self):
-        """只有「既没 target_ratio 又没 baseline」才算无目标；声明了基线却缺阈仍是 invalid_config
-        （拒静默套 0.95），本轮**没有**放松这条。"""
-        cs = self._cs([("p0", "float32")])
-        r = pc.perf_compare({"op": "Sign", "perf": {"baseline": "tbe"}}, cs,
-                            _ev({"p0": (1.0, "kernel_only")}), _bl({"p0": 2.0}))
+        这条钉的是病历里最贵的那一格：19 条 `failed` 是**凭空目标**造出来的假失败。"""
+        cs = self._cs(["p"])
+        r = pc.perf_compare({"op": "Sign"}, cs, _ev({"p": (10.0, "kernel_only")}),
+                            _bl({"p": 1.0}))          # ratio=0.1，旧口径下必是「未达标」
         self.assertEqual(r["summary"]["status"], "invalid_config")
         self.assertEqual(r["summary"]["达标"], 0)
+        self.assertEqual(r["summary"]["blocked"], 1)
+        self.assertEqual(r["summary"].get("failed", 0), 0)
 
-    def test_non_object_perf_block_is_invalid_not_no_target(self):
-        """把任务书原文直接塞成 `"perf": "性能要求：无"` → **invalid，不是无目标**：
-        坏 spec 必须报出来，不能被读成「合法地没有要求」（fail-closed）。旧行为是 AttributeError 崩。"""
-        cs = self._cs([("p0", "float32")])
-        for bad in ("性能要求：无", 0.95, ["tbe"]):
-            r = pc.perf_compare({"op": "Sign", "perf": bad}, cs,
-                                _ev({"p0": (1.0, "kernel_only")}), _bl({"p0": 2.0}))
-            self.assertEqual(r["summary"]["status"], "invalid", repr(bad))
-            self.assertEqual(r["summary"]["达标"], 0, repr(bad))
+    def test_zero_perf_cases_still_reaches_no_perf_cases(self):
+        """⭐ 反向不变式：**没有性能用例**的 spec 不写 perf 块 → 照旧 `no_perf_cases`。
 
-    def test_no_perf_cases_path_also_says_no_target(self):
-        """无目标 + caseset 没有性能用例 → 仍走 no_perf_cases，但要说清「本来也没要求」，
-        不能读成「有要求却没造出用例」。"""
-        cs = {"op": "Sign", "cases": [{"id": "f0", "dims": ["功能"], "tags": [],
-                                       "inputs": [{"name": "self", "dtype": "float32",
-                                                   "shape": [8]}], "attrs": {}}]}
-        r = pc.perf_compare(self._NO_PERF_SPEC, cs, _ev({}), _bl({}))
+        没有这条，上面几条可由一个「无 perf 块一律拒」的过严实现满足，而那会把
+        「PASS(无性能要求)」这条既有终态整条掐掉。收紧只针对「有用例要判却没有目标」。"""
+        empty = {"op": "Sign", "cases": [{"id": "f0", "dims": ["功能"], "tags": [],
+                                          "inputs": [{"name": "self", "dtype": "float32",
+                                                      "shape": [4]}], "attrs": {}}]}
+        r = pc.perf_compare({"op": "Sign"}, empty, {"op": "Sign", "evidence": []}, _bl({}))
         self.assertEqual(r["summary"]["status"], "no_perf_cases")
-        self.assertIn("未声明性能验收目标", "".join(r["notes"]))
-        self.assertNotIn("疑用例缺陷", "".join(r["notes"]))
+        self.assertIsNone(r["target_ratio"])           # 这里同样不得出现凭空的 0.95
 
-    def test_declared_target_path_is_byte_for_byte_unchanged(self):
-        """有验收目标的通路一个字都不受影响（回归保险）。"""
-        cs = self._cs([("p_fast", "float32"), ("p_slow", "float32")])
-        r = pc.perf_compare(_spec(1.0), cs,
-                            _ev({"p_fast": (1.0, "kernel_only"), "p_slow": (10.0, "kernel_only")}),
-                            _bl({"p_fast": 2.0, "p_slow": 5.0}))
-        self.assertEqual(r["summary"]["status"], "fail")
-        self.assertEqual(r["summary"]["达标"], 1)
-        self.assertEqual(r["summary"]["cases_above_threshold"], 1)
-        self.assertEqual(r["summary"]["failed"], 1)
-        self.assertEqual(r["target_ratio"], 1.0)
+    def test_measure_only_is_the_authorized_way_to_have_no_target(self):
+        """⭐ 出路真的走得通：同一份「没有比值要求」的 caseset，按 §5.10 声明 + 授权后落 `measured`。
+
+        没有这条，上面的 fail-closed 就成了「无性能要求 = 永远过不去」。"""
+        cs = self._cs(["p"])
+        spec = {"op": "Sign", "perf": {
+            "mode": "measure_only",
+            "measure_only_authorization": {
+                "taskdoc_requirement": "no_perf_requirement",
+                "cite": "任务书 §3 性能要求",
+                "quote": "性能要求：无",
+                "taskdoc_snapshot_sha256": None}}}
+        r = pc.perf_compare(spec, cs, _ev({"p": (1.25, "kernel_only")}), None)
+        self.assertEqual(r["summary"]["status"], "measured")
+        self.assertEqual(r["summary"]["measured"], 1)
+        self.assertEqual(r["summary"]["blocked"], 0)
+        self.assertIsNone(r["target_ratio"])
+        # 「没有目标」不得长出任何达标口径的键
+        self.assertNotIn("达标", r["summary"])
+        self.assertNotIn("cases_above_threshold", r["summary"])
+
+    def test_declared_baseline_without_target_still_invalid_config(self):
+        """既有护栏未被放松：声明基线却缺 target_ratio 仍 `invalid_config`（拒静默套 0.95）。"""
+        r = pc.perf_compare({"op": "Sign", "perf": {"baseline": "tbe"}}, self._cs(["p"]),
+                            _ev({"p": (1.0, "kernel_only")}), _bl({"p": 2.0}))
+        self.assertEqual(r["summary"]["status"], "invalid_config")
 
 
 if __name__ == "__main__":

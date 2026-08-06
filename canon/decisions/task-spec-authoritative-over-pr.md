@@ -14,7 +14,7 @@ status: proposed
 - 任务书↔PR 的落差进 `spec.task_pr_gaps`、显式标**待确认**，不当错、也不默默采信 PR。
 - **PR 自带的 UT ≠ 精度验收**（多是 `TestGetWorkspaceSize` / `SUCCEED()` 只跑不比）；证据（精度 + 性能）由 **OpRunway 自产**，不指望 PR 里有。仓内**性能证据基本缺席**、精度证据强弱不一——这正是 OpRunway 的价值所在。
 
-依据 `doc/oprunway-spec-pr-analysis.md`（41 任务书 + 18 PR 规律）。
+依据 `dev-doc/oprunway-spec-pr-analysis.md`（41 任务书 + 18 PR 规律）。
 
 ## 标准来源路由（2026-07-13 用户明示强化：绝不信 PR）
 

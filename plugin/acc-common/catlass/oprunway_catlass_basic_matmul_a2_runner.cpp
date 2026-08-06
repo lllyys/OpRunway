@@ -2,7 +2,7 @@
  * OpRunway · catlass generated_harness runner —— arch 2201 / fp16 / AtlasA2（de-risk·次目标）。
  * 对齐 catlass example 00_basic_matmul（basic_matmul.cpp）。
  *
- * ⚠⚠ 模板·**待真机验证**（ascend-a3 arch 2201 + 人工确认）·**Mac 不可编译**。**不得假称已验证**。
+ * ⚠⚠ 模板·**待真机验证**（A2A3 真机 arch 2201 + 人工确认）·**Mac 不可编译**。**不得假称已验证**。
  * 结构同 _950_runner，差异仅：dtype=half(2B)、ArchTag=AtlasA2、符号 = oprunway_catlass_basic_matmul_a2。
  * 唯一 op 专属边界：<<< using 链 >>> 与 <<< launch 段 >>>。bin 为 fp16 原始字节，host 只透传不算。
  */

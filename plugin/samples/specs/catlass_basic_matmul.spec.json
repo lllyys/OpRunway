@@ -55,7 +55,7 @@
     "pr": null
   },
   "acceptance_blocked_reason": [
-    "BLOCKED-on-real-NPU：无真机 NPU evidence（须 ascend-a5 arch3510 + VPN + 人工确认）",
+    "BLOCKED-on-real-NPU：无真机 NPU evidence（须 950 真机 arch3510 + VPN + 人工确认）",
     "BLOCKED-on-real-provenance：demo spec 为 synthetic，无 verify 过的 task↔PR 对应（correspondence gate 归上游 acc-spec/fetch_source，见 verify-spec-pr-correspondence）"
   ]
 }

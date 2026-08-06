@@ -7,12 +7,24 @@ import argparse
 import json
 import os
 
-# 来源判别 + 来源对照物（`source_facts.json`）的发现规则都在这里，本文件一条都不自建。
+# 来源对照物（`source_facts.json`）的发现规则在 `source_facts_lookup`，本文件一条都不自建。
 # ⚠ 发现规则曾是 `validate_acceptance_state._find_source_facts`，由本模块跨模块引用那个
 #   **私有**名。复用方向是对的（两处各写一份查找规则的话，报告说的 facts 和三级门校的
 #   facts 可能根本不是同一份文件），但私有名跨模块用，将来改名会**静默炸 import**，
-#   所以规则下沉到了 `dut_source`。本模块因此也不再依赖三级门那个重模块。
-import dut_source
+#   所以规则下沉成了公开模块。本模块因此也不依赖三级门那个重模块。
+import source_facts_lookup
+# 收据的源身份解释**只有一份**：`vendor_build_receipt.summarize`。本文件不自己按字段名
+# 去 `source` 里翻锚——那正是「哪个字段有值用哪个」这类兜底写法的入口。
+import vendor_build_receipt
+# `repo` 带用户凭据的判别式**唯一实现**（产出侧 `fetch_source` 用的是同一个对象）。
+import url_credentials
+
+
+#: §5.10 只测不比的口径声明——报告里必须**逐字**出现，不得包装成「已达标 N 倍」（律令 5.8）。
+_MEASURE_ONLY_STATEMENT = (
+    "本轮按 `perf.mode=measure_only` 口径，性能维**只做 NPU msprof kernel-only 实测，"
+    "未做任何标杆对比**（无 baseline、无 ratio、无阈值），因此不产任何性能达标结论。"
+    "下表全部为绝对 kernel 耗时，不是加速比。")
 
 
 def _load(root, name):
@@ -57,23 +69,6 @@ def _pct(value):
     return "—" if value is None else f"{float(value) * 100:.2f}%"
 
 
-def _n(value):
-    """列表长度；不是 list 就渲染 `?`。
-
-    ⚠ **不能退成 0**：把「收据没记清单」渲染成「0 项未提交改动」，就是凭空把 dirty 说小了。
-    """
-    return len(value) if isinstance(value, list) else "?"
-
-
-def _is_path_list(value):
-    """`list[str]` 且每项非空；允许空表（空表 = 确实没有脏文件）。
-
-    ⚠ 判到**元素**一级：只判「是个 list」的话，`[null]` 会被 `len()` 数成 1，
-    渲染出「有 1 项未提交改动」——那 1 项根本不是路径，数字是编出来的。
-    """
-    return isinstance(value, list) and all(isinstance(p, str) and p for p in value)
-
-
 def _gap_line(gap):
     if not isinstance(gap, dict):
         return f"- {_cell(gap)}"
@@ -99,7 +94,7 @@ def _gap_items(value):
 
 # ---- 「来源与 provenance」节的措辞 -----------------------------------------------
 # **全部落常量，不在 f-string 里就地手写**。理由不是洁癖：这一节的每句话都是对外的
-# **provenance 强度声明**，措辞被顺手改软（「无法证明」→「未验证」、「未知」→「clean」）
+# **provenance 强度声明**，措辞被顺手改软（「无法证明」→「未验证」、「未提供」→「已核」）
 # 等于悄悄抬高报告的可信度，而这种改动在 diff 里长得跟润色一模一样。集中成常量后，
 # 测试可以直接引用常量断言，措辞一漂移就当场红。
 PROV_HEADING = "## 来源与 provenance"
@@ -111,50 +106,78 @@ PROV_BAD_ANCHOR = (
 PROV_UNKNOWN_KIND = (
     "⚠ vendor build receipt 声明的来源通路 `{kind}` 本渲染器尚无对应的强度陈述"
     "——本节不作任何 provenance 断言。")
-# kind → 人话标签。**这不是 kind→锚字段名 的映射**（那个只有 `dut_source` 说了算），
-# 只是把已判定的 kind 翻译成带强度说明的一句话。
+# ⚠ **刻意不回显 `repo` 原值**：报告是给人看、会被转发的 .md，回显就是把凭据再泄漏一次。
+PROV_CREDENTIAL_REPO = (
+    "⚠ vendor build receipt 的 `source.repo` 是一个**带用户凭据**的 URL"
+    "（`scheme://…@host/…`），拒绝渲染——它会被印进人读的验收报告，撞仓规 §2"
+    "（token/密码/私钥不得写进任何产物）。此处刻意不回显原值。"
+    "本节因此不作任何 provenance 断言。")
+# kind → 人话标签。**这不是 kind→锚字段名 的映射**（那个只有 `vendor_build_receipt`
+# 的归一化摘要说了算），只是把已判定的 kind 翻译成带强度说明的一句话。
 PROV_KIND_LABEL = {
-    dut_source.PULL_REQUEST:
-        "线上 PR（`pull_request`）——可证明「验的就是这个 PR 的这个 commit」",
-    dut_source.LOCAL_CHECKOUT:
-        "本地 checkout（`local_checkout`）——只能证明「验的就是这份字节」",
+    vendor_build_receipt.PROVENANCE_GIT_PR:
+        "线上 PR（`gitcode_pr`）——可证明「验的就是这个 PR 的这个 commit」",
+    vendor_build_receipt.PROVENANCE_LOCAL_SNAPSHOT:
+        "本地源码快照（`local_snapshot`）——只能证明「验的就是这份字节」",
 }
-# 锚**字段名** → 表头文案。键取自 `dut_source` 的返回值，本文件不自己决定哪个通路用哪个锚。
-PROV_ANCHOR_LABEL = {
-    "pr_head_sha": "PR head",
-    "local_root_digest": "子树摘要 root_digest",
+# kind → 该通路的**锚字段名**（取自归一化摘要的键）与表头文案。
+# ⚠ 本文件不做 `a or b` 兜底：哪个通路用哪个锚是判据，不是「哪个有值用哪个」。
+PROV_ANCHOR_BY_KIND = {
+    vendor_build_receipt.PROVENANCE_GIT_PR: ("pr_head_sha", "PR head"),
+    vendor_build_receipt.PROVENANCE_LOCAL_SNAPSHOT:
+        ("snapshot_subtree_sha256", "子树摘要 snapshot_subtree_sha256"),
 }
+# 本地快照通路必须同时给出摘要的**覆盖范围**：没有范围的 merkle 与任何一侧都不可比，
+# 而报告里只印一个 64 位 hex 会让读的人以为它覆盖了整份被测代码。
+PROV_SCOPE_ROW = "| 摘要覆盖范围 | {scope} |"
+PROV_SCOPE_WHOLE_TREE = "`<整棵源码树>`（`snapshot_subtree_scope` 为空串）"
+# 声明形态：「本轮本来就是本地源码」与「本来要测 PR、只拿到一份快照」在产物里必须分得开。
+PROV_FORM_ROW = "| 声明的输入形态 | {value} |"
+PROV_FORM_LABEL = {
+    vendor_build_receipt.FORM_GIT_PR: "`git_pr`——本轮声明要测的是一个线上 PR",
+    vendor_build_receipt.FORM_LOCAL_SOURCE:
+        "`local_source`——本轮声明要测的**本来就是**一份本地源码（一等形态，非降级）",
+}
+PROV_FORM_UNDECLARED = (
+    "⚠ **未声明**——本字段引入之前产的老收据；按最严一档对待，"
+    "**不得**据此认定「本轮本来就是本地源码」")
+# 降级台账：非空即必须在报告第一层看得见，不许埋进嵌套 JSON 里等人自己翻。
+PROV_DEGRADATION_ROW = (
+    "| 降级挂账 | ⚠ `{items}`——本该绑上游 commit 却没绑，provenance 弱于正常 PR 通路 |")
 # ---- 「源码仓」一行的强度标注 ----------------------------------------------------
-# 收据里的 `source.repo_source` 记的是 repo 这一项**怎么来的**：从 source_facts 事实派生，
+# 收据里的 `source.repo_source` 记的是 repo 这一项**怎么来的**：从取材事实派生，
 # 还是操作者构建时手给的一句话。只渲染 `repo`、不渲染强度，两者在报告里就长得一模一样——
 # 真机两轮跑出来的 `https://gitcode.com/cann/ops-nn.git`（事实派生）与 `cann/ops-nn`
-# （去 git 那轮，树里根本没有仓名证据、`repo_source="operator"`）同权并列，审核员读不出
-# 后者只是自报。收据记得很老实，是渲染层把强度吞了，方向上是 fail-open。
+# （操作者 `--repo` 手给）同权并列，审核员读不出后者只是自报。方向上是 fail-open。
 #
-# 取值的真源是产出方 `make_vendor_build_receipt`（`derive_repo` 的 origin 与 `main` 里的
-# `"operator"`）。本文件只按字面消费、不改产出方。⚠ 产出方若改了字面量而这张表没跟上，
-# 命中的是「未知取值」分支 → 退「强度未知」：宁可少说一句，也不替一个不认识的取值背书。
+# ⚠ **当前没有任何产出方写这个键**（`vendor_build_receipt.produce_receipt` 不写），
+#   所以正常路径上这一行恒为「强度未知」。这条机制留着不是摆设：它保证的是
+#   「缺席绝不被洗成事实派生」，将来哪个产出方补上这个键，报告也不会替一个不认识的
+#   取值背书。⚠ 产出方若改了字面量而这张表没跟上，命中的是「未知取值」分支 →
+#   退「强度未知」：宁可少说一句，也不替一个不认识的取值背书。
 PROV_REPO_SOURCE_LABEL = {
     "pr.source_repo": "**事实派生**——取自 source_facts 的 `pr.source_repo`",
-    "local_checkout.git.remote_url":
-        "**事实派生**——取自 source_facts 的 `local_checkout.git.remote_url`",
-    "operator": "⚠ **操作者自报**——构建时由操作者给定，未从 source_facts 派生，无机器可核依据",
+    "snapshot.source_root":
+        "**事实派生**——取自本地快照凭据的源码树根 `snapshot_digest.source_root`",
+    # ⚠ 措辞里刻意不出现「事实派生」四个字（连「未从…事实派生」也不行）：这一格是给人扫读的，
+    #   一眼扫过去看见那四个字就会读成「派生的」，而它恰恰是自报。
+    "operator": "⚠ **操作者自报**——构建时由操作者给定，未从任何取材事实推导，无机器可核依据",
 }
 PROV_REPO_SOURCE_OPERATOR = "operator"
 # kind → 该通路**唯一可能**的事实派生来源。
-# ⚠ 这不是「kind → 锚字段名」映射（那个只有 `dut_source.ANCHOR_FIELD` 说了算，本文件不得
-#   自建）；它回答的是另一个问题：repo 这一项在该通路上只可能从哪儿派生出来。产出方
-#   `derive_repo` 按 kind 二选一，所以配错的组合（PR 通路却声称派生自本地 git remote）
-#   只可能来自手改收据——那种收据的「事实派生」四个字没有出处，退「强度未知」。
+# ⚠ 这不是「kind → 锚字段名」映射（那个由 `PROV_ANCHOR_BY_KIND` 说了算）；它回答的是
+#   另一个问题：repo 这一项在该通路上只可能从哪儿派生出来。配错的组合（PR 通路却声称
+#   派生自本地快照树根）只可能来自手改收据——那种收据的「事实派生」四个字没有出处，
+#   退「强度未知」。
 PROV_REPO_SOURCE_DERIVED_BY_KIND = {
-    dut_source.PULL_REQUEST: "pr.source_repo",
-    dut_source.LOCAL_CHECKOUT: "local_checkout.git.remote_url",
+    vendor_build_receipt.PROVENANCE_GIT_PR: "pr.source_repo",
+    vendor_build_receipt.PROVENANCE_LOCAL_SNAPSHOT: "snapshot.source_root",
 }
 # ⚠ `repo` 走 `_code_cell` 而不是自己包一对反引号：它来自 vendor build receipt，
 #   而收据的 `repo` 只被校「非空字符串」——值里一个反引号就能提前闭合代码段。
 PROV_REPO_ROW = "| 源码仓 | {repo}（{strength}） |"
 PROV_REPO_SOURCE_ABSENT = (
-    "⚠ **强度未知**——本收据没记 `repo_source`（本轮之前产的收据都没有这个键）；"
+    "⚠ **强度未知**——本收据没记 `repo_source`（当前所有产出方都不写这个键）；"
     "**缺席不等于事实派生**，这个仓名怎么来的无从查证")
 PROV_REPO_SOURCE_UNKNOWN = (
     "⚠ **强度未知**——`repo_source={value}` 不在本渲染器已知的取值内；"
@@ -163,59 +186,56 @@ PROV_REPO_SOURCE_MISMATCH = (
     "⚠ **强度未知**——`repo_source={value}` 与本轮来源通路 `{kind}` 对不上"
     "（该通路派生不出这个来源），这个仓名怎么来的无从查证")
 # 本地通路的两条 caveat：**只依赖 kind**，与 source_facts 在不在无关。
-# 它们陈述的是 root_digest 这个锚**本身**的能力边界，不是某一轮取材的结果，
+# 它们陈述的是子树摘要这个锚**本身**的能力边界，不是某一轮取材的结果，
 # 所以对照物缺席时也一个字都不能少。
 PROV_LOCAL_CAVEATS = (
-    "- ⚠ 本地 checkout **无法证明**它对应任何具体 PR：`root_digest` 锚定的是"
+    "- ⚠ 本地源码快照**无法证明**它对应任何具体 PR：子树摘要锚定的是"
     "「验的就是这份字节」，不是「验的就是线上某个 PR 的某个 commit」。",
-    "- ⚠ 子树摘要只覆盖 `op_subdir`，仓级构建脚本、公共头文件、代码生成器都不在内——"
-    "`root_digest` 相同**不等于** vendor `.so` 相同。",
+    "- ⚠ 子树摘要只覆盖 `snapshot_subtree_scope` 那一段，仓级构建脚本、公共头文件、"
+    "代码生成器都不在内——摘要相同**不等于** vendor `.so` 相同。",
 )
-PROV_DIRTY_ROW = "| worktree 干净度 | {value} |"
-PROV_DIRTY_UNKNOWN = (
-    "**未知**——报告目录内没有可对账的 source_facts.json；**不得据此认定 worktree clean**")
-PROV_DIRTY_IGNORED = (
-    "**未知**——⚠ 报告目录内的 source_facts.json 与本轮收据的来源锚不一致，已忽略；"
-    "**不得据此认定 worktree clean**")
-PROV_DIRTY_CLEAN = "clean——source_facts 记录 worktree 无未提交改动"
-PROV_DIRTY_DIRTY = (
-    "**dirty**——worktree 有 {n} 项未提交改动（被测子树内 {n_op} 项）；"
-    "git head 不代表被测字节，provenance 只靠 root_digest")
-PROV_DIRTY_NOT_GIT = (
-    "不适用——source_facts 记录本地目录不是 git 仓，provenance 只靠 root_digest")
-PROV_DIRTY_MALFORMED = (
-    "**未知**——source_facts 里的 `git.dirty` 与 `git.dirty_files` 形态不合法或互相矛盾；"
-    "**不得据此认定 worktree clean**")
-PROV_DIRTY_INCOMPLETE = (
-    "**未知**——source_facts 的 `completeness` 不是 `complete`，残缺事实不能推出结论；"
-    "**不得据此认定 worktree clean**")
+# ---- 来源对照物（`source_facts.json`）------------------------------------------
+# ⚠ 这一行只报**有没有可对账的对照物**，一个字段值都不从 facts 里取。
+#   两个理由，都不是洁癖：
+#   ① 锚是否逐字一致由三级门（`validate_acceptance_state._gate_build_receipt_source_binding`）
+#      裁定，本渲染器**不重判**——两处各写一套比对，迟早对同一份文件给出两种结论；
+#   ② 一份来源对不上的 facts，它里面的字段描述的是**另一份取材**。只要一个值都不渲染，
+#      「把无关事实冒充本轮 provenance」这一整类缺陷就在结构上不存在。
+PROV_FACTS_ROW = "| 来源对照物 `source_facts.json` | {value} |"
+PROV_FACTS_ABSENT = (
+    "**未提供或不可信**——报告目录内找不到可对账的 `source_facts.json`"
+    "（或它信封不自洽 / 取材未完成）；本节的锚**只出自收据本身，未经第二方印证**")
+PROV_FACTS_FOUND = (
+    "已找到并通过取材契约校验——⚠ 锚是否与收据**逐字一致**由验收门裁定，本节不重判、"
+    "也不引用它的任何字段值")
 PROV_RECEIPT_UNVERIFIED = (
-    "⚠ vendor build receipt 不是 `oprunway.vendor_build_receipt` v1 / `status=VERIFIED`"
+    "⚠ vendor build receipt 不是 `oprunway.vendor_build_receipt` "
+    "（schema_version ∈ {supported}）/ `status=VERIFIED`"
     "（实得 schema={schema}、schema_version={version}、status={status}）"
     "——本节不作任何 provenance 断言。")
-PROV_GIT_HEAD_ROW = "| git head（**信息字段，非 provenance 锚**） | `{sha}` |"
 
 
 def _repo_source_strength(source, kind):
-    """「源码仓」一行的强度陈述：三种已知取值各自成句，其余一律退「强度未知」。
+    """「源码仓」一行的强度陈述：已知取值各自成句，其余一律退「强度未知」。
 
-    ⚠ **缺席不是事实派生**。`repo_source` 是后加的键，本轮之前产的收据一个都没有。
-    把缺席补成「大概是派生的」，等于把未知洗成已知——这一节最贵的 fail-open 就是这个。
-    反过来把缺席一律当 `operator` 也不行：那是替收据编一条它没说过的事实。缺席只能说
-    「不知道这个仓名怎么来的」，让审核员自己去查收据。
+    ⚠ **缺席不是事实派生**。把缺席补成「大概是派生的」，等于把未知洗成已知——
+    这一节最贵的 fail-open 就是这个。反过来把缺席一律当 `operator` 也不行：
+    那是替收据编一条它没说过的事实。缺席只能说「不知道这个仓名怎么来的」。
 
-    ⚠ 未知取值同样不许静默归类。`repo` 已被 `validate_build_receipt_source` 校过必填非空，
+    ⚠ 未知取值同样不许静默归类。`repo` 已被 `vendor_build_receipt` 校过必填非空，
     但那道校验管的是**有没有值**，管不了**这个值有多硬**；强度只能由 `repo_source` 说，
     它说不清就如实写「未知」。
 
-    读 `source.repo_source` 不走 `dut_source`：判别式只管来源通路与 provenance 锚，
-    这个键是产出方对 repo 一项的记账，不属于判别式的管辖范围。
+    ⚠ `value is None` 必须**先**拦下：`PROV_REPO_SOURCE_DERIVED_BY_KIND.get()` 对未知
+    kind 也返回 `None`，两个 `None` 一撞就会走进「事实派生」分支再 KeyError 炸掉整节。
     """
     if "repo_source" not in source:
         return PROV_REPO_SOURCE_ABSENT
     value = source["repo_source"]
     # 原样回显（带引号/`null`/数字都能看出来），避免「空串」与「没这个键」在报告里同形。
     shown = _cell(json.dumps(value, ensure_ascii=False, default=str))
+    if value is None:
+        return PROV_REPO_SOURCE_UNKNOWN.format(value=shown)
     if value == PROV_REPO_SOURCE_OPERATOR:
         # 操作者自报与通路无关：两条通路都可以 `--repo` 手给。
         return PROV_REPO_SOURCE_LABEL[value]
@@ -226,75 +246,19 @@ def _repo_source_strength(source, kind):
     return PROV_REPO_SOURCE_UNKNOWN.format(value=shown)
 
 
-def _local_rows(facts, receipt_identity):
-    """本地通路的**事实行**（worktree 干净度、git head 信息字段）；返回表格行列表。
+def _facts_row(facts):
+    """来源对照物那一行：只报「有没有可对账的对照物」，**不渲染它的任何字段值**。
 
-    与 caveat 的分工不能混：`PROV_LOCAL_CAVEATS` 只依赖 kind、恒成立；本函数产出的行依赖
-    `source_facts` 这份**外部对照物**。对照物缺席只该让事实行退成「未知」，
-    绝不该顺手把 caveat 也一起吞掉。
+    `source_facts_lookup.find_source_facts` 三态：dict / None（自动发现没找到）/
+    `SOURCE_FACTS_UNTRUSTED`（找到但读不出、信封不自洽、或显式路径指空）。
+    后两态在本节里**同权**——都是「拿不到可对账的对照物」，强度一样。
 
-    采信 `source_facts` 的**唯一**前提：它的来源三元组与本轮收据的来源三元组逐字全等。
-    不全等（摘要对不上、两条通路的事实键混装、锚形态不合法）一律**整份忽略**，
-    绝不「挑能用的字段凑一凑」——一份来源对不上的 facts，它里面的 dirty/head_sha 描述的是
-    **另一份 checkout**，拿来填这张表就是把无关事实冒充本轮 provenance。
-
-    ⚠ 最贵的一条：**「没有对照物」= 未知，不是 clean**。把「查不到脏」渲染成「干净」，
-    等于凭空给一份可能 dirty 的 checkout 发 provenance 合格证。真正的阻断在
-    `validate_acceptance_state` 的三级门，本渲染器不重判、只如实标注强度。
+    ⚠ 最贵的一条：**「没有对照物」= 未经印证，不是「已核」**。真正的阻断在
+    `validate_acceptance_state` 的三级门（本地通路缺对照物直接 BLOCKED），
+    本渲染器不重判、只如实标注强度。
     """
-    if not isinstance(facts, dict):
-        # `dut_source.find_source_facts` 三态：dict / None（自动发现没找到）/ UNTRUSTED
-        # （找到但摘要不可信/读不出/显式路径指空）。后两态在本节里**同权**——
-        # 都是「拿不到可对账的对照物」，强度一样，都退「未知」。
-        return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_UNKNOWN)]
-    try:
-        if dut_source.identity(facts, where="source_facts") != receipt_identity:
-            return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_IGNORED)]
-    except dut_source.DutSourceError:
-        # 锚读不出来 == 对不上：处置相同，整份忽略，不降格采信。
-        return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_IGNORED)]
-    # ⚠ 只有 `completeness=complete` 的事实包才有资格给出**肯定式**陈述。
-    #   下面「git 键缺席 → 不是 git 仓」是一条**由缺席推出结论**的断言，只有在事实包
-    #   本身完整时才成立；一份被裁剪 / blocked 的 facts 缺 git 键，含义是「不知道」，
-    #   照旧渲染成「不适用——不是 git 仓」就是把残缺读成了结论。
-    completeness = facts.get("completeness")
-    if not isinstance(completeness, dict) or completeness.get("status") != "complete":
-        return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_INCOMPLETE)]
-    local = facts.get(dut_source.FACTS_KEY[dut_source.LOCAL_CHECKOUT])
-    git = local.get("git") if isinstance(local, dict) else None
-    if git is None and isinstance(local, dict) and "git" not in local:
-        return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_NOT_GIT)]
-    if not isinstance(git, dict):
-        # `git: null` / 非 object：不是「没有 git」，是「这份收据形态不对」。
-        return [PROV_DIRTY_ROW.format(value=PROV_DIRTY_MALFORMED)]
-    dirty, files = git.get("dirty"), git.get("dirty_files")
-    in_op = git.get("dirty_files_in_op_subdir")
-    # ⚠ 形态判到**元素**一级，别停在「是个 list」：`dirty_files=[null]` 会渲染成
-    #   「有 1 项未提交改动」，而那 1 项根本不是路径——数字是编出来的。
-    #   子树清单还必须是总清单的子集，否则「被测子树内 N 项」可以大于总数。
-    listed = files if _is_path_list(files) else None
-    if listed is not None and not (
-            _is_path_list(in_op) and set(in_op).issubset(set(listed))):
-        listed = None
-    if dirty is True and listed:
-        rows = [PROV_DIRTY_ROW.format(value=PROV_DIRTY_DIRTY.format(
-            n=_n(files), n_op=_n(in_op)))]
-    elif dirty is False and listed == []:
-        rows = [PROV_DIRTY_ROW.format(value=PROV_DIRTY_CLEAN)]
-    else:
-        # `is True` / `is False` 而不是真值判断：缺字段、None、字符串 "false" 都不是
-        # 「干净」的证据，只能是未知。
-        # ⚠ `dirty` 与清单**必须互相印证**才给结论：`dirty=true` 配空清单会渲染成
-        #   「有 0 项未提交改动」——一句自相矛盾、却读起来像「其实没什么事」的话；
-        #   `dirty=false` 配非空清单则是把脏说成干净。两种都退「未知」。
-        rows = [PROV_DIRTY_ROW.format(value=PROV_DIRTY_MALFORMED)]
-    head = git.get("head_sha")
-    if isinstance(head, str) and head:
-        # ⚠ 这里直取 `git.head_sha` 是**信息字段**（这份 checkout 当时停在哪个 commit），
-        # 不是锚——锚永远由 `dut_source.identity` 给。worktree 可能 dirty，它与被测字节
-        # 没有绑定关系，所以必须**原地**标注，不能让审核员把它当 PR head 读。
-        rows.append(PROV_GIT_HEAD_ROW.format(sha=_cell(head)))
-    return rows
+    return PROV_FACTS_ROW.format(
+        value=PROV_FACTS_FOUND if isinstance(facts, dict) else PROV_FACTS_ABSENT)
 
 
 def _provenance_section(receipt, build_receipt, source, facts):
@@ -302,65 +266,84 @@ def _provenance_section(receipt, build_receipt, source, facts):
 
     为什么单独成节、而不是继续在「被测物与运行环境」表里占两行：两条来源通路的
     provenance **强度不等**（PR head 能证明「验的就是这个 PR 的这个 commit」，
-    本地 root_digest 只能证明「验的就是这份字节」），强度差异得成段说清；
+    本地子树摘要只能证明「验的就是这份字节」），强度差异得成段说清；
     而且本地通路根本没有 PR head，硬渲染那一行只会渲染出一个「—」，
     看上去像「这次没记」而不是「这条通路压根不存在这个锚」。
 
-    三条分支，顺序不能换：
+    分支顺序不能换：
 
       ① `receipt` 为空（`aclnn_py` / `cpp` / 压根没收据）→ 只声明「不作任何断言」并 return。
          ⚠ **必须先判 `receipt` 真假，不能只看 `source` 空不空**：调用点的
          `build_receipt.get("source") or {}` 会把「压根没收据」和「有收据但 source 坏了」
-         抹平成同一个 `{}`。后者本该走 ② 报「来源锚不合法」，被抹平后就成了看起来无害的
+         抹平成同一个 `{}`。后者本该走 ② 报「收据未核验」，被抹平后就成了看起来无害的
          「本轮没有收据」——一条来源不可信的证据链就此静默降级为「正常的无收据通路」。
-      ② 收据自身没通过 `VERIFIED v1` → 渲染 ⚠ 并 return。
+      ② 收据信封不是 `VERIFIED` 的受支持版本 → 渲染 ⚠ 并 return。
          ⚠ **锚形态合法 ≠ 收据可信**。本节输出的是「可证明验的就是这个 PR 的这个 commit」
          这类**强度断言**，而它的全部依据是「有一份已核验的构建收据说 `.so` 来自这份源码」。
          收据若 schema 不对、或 `status != VERIFIED`（构建根本没核过），这句断言就没有出处——
          照渲染等于替一份未核验的收据背书。首轮把关在 `cpp_extension_adapter` /
          `cpp_extension_driver`，本节独立再校一次，理由与那两处「两处都是信任边界」相同。
-      ③ 来源锚不合法 → 渲染 ⚠ 并 return。**异常必须在这里 catch 掉、不能外抛**：
-         外抛虽被 `run_workflow` 的 except 兜住不崩，但整份 `验收报告.md` 就不产了，
-         审核员连「锚不合法」这条最该看见的话都看不到（只剩一个 JSON 错误文件）。
-      ④ 锚合法 → 按 kind 渲染；本地通路额外挂事实行与两条 caveat。
+      ③ `vendor_build_receipt.summarize` 不通过 → 渲染 ⚠ 并 return。
+         **异常必须在这里 catch 掉、不能外抛**：外抛虽被 `run_workflow` 的 except 兜住不崩，
+         但整份 `验收报告.md` 就不产了，审核员连「锚不合法」这条最该看见的话都看不到。
+      ④ `repo` 带用户凭据 → 渲染 ⚠（**不回显原值**）并 return。
+         报告是凭据真正**泄漏出去**的那一步：它是给人看、会被转发的 .md。源头
+         （`fetch_source` 扣留 remote_url）堵的是新产的取材事实；已经躺在既有 reports 目录里的
+         老收据、外部构建驱动产的收据、手改的收据，全都从**读侧**进来。判别式走
+         `url_credentials`（唯一实现），不在本文件另写一份。
+      ⑤ 通过 → 按 kind 渲染；本地通路额外挂覆盖范围行与两条 caveat。
 
-    `facts` 只透传给 `_local_rows`，本函数不按字段名读它——读法只有一处，判别式只有一份。
+    `facts` 只用来回答「有没有可对账的对照物」，本函数**不读它的任何字段**（见 `_facts_row`）。
     """
     lines = [PROV_HEADING, ""]
     if not receipt:
         return lines + [PROV_NO_RECEIPT, ""]
     br = build_receipt if isinstance(build_receipt, dict) else {}
-    if (br.get("schema") != "oprunway.vendor_build_receipt"
-            or br.get("schema_version") != 1
+    if (br.get("schema") != vendor_build_receipt.SCHEMA
+            or br.get("schema_version")
+            not in vendor_build_receipt.SUPPORTED_SCHEMA_VERSIONS
             or br.get("status") != "VERIFIED"):
         return lines + [PROV_RECEIPT_UNVERIFIED.format(
+            supported=list(vendor_build_receipt.SUPPORTED_SCHEMA_VERSIONS),
             schema=_cell(br.get("schema")), version=_cell(br.get("schema_version")),
             status=_cell(br.get("status"))), ""]
     try:
-        kind, anchor_field, anchor_value = dut_source.validate_build_receipt_source(
-            source,
-            expected_kind=dut_source.NO_EXPECTED_KIND,   # 渲染器不做来源对账，只如实标强度
-            where="vendor build receipt.source")
-    except dut_source.DutSourceError as ex:
+        # 归一化摘要是源身份的**唯一**解释处：kind、锚、repo、声明形态、降级台账全从它取。
+        summary = vendor_build_receipt.summarize(br)
+    except vendor_build_receipt.VendorBuildReceiptError as ex:
         return lines + [PROV_BAD_ANCHOR.format(ex=_cell(ex)), ""]
-    if kind not in PROV_KIND_LABEL:
+    if url_credentials.url_has_userinfo(summary.get("repo")):
+        return lines + [PROV_CREDENTIAL_REPO, ""]
+    kind = summary.get("provenance_kind")
+    if kind not in PROV_KIND_LABEL or kind not in PROV_ANCHOR_BY_KIND:
         # 受控词表扩了而本节没跟上 → 宁可什么都不断言：让一条未知强度的来源借着
         # 「渲染成功」看起来和 PR 通路一样硬，比少渲染一节贵得多。
         return lines + [PROV_UNKNOWN_KIND.format(kind=_cell(kind)), ""]
+    anchor_field, anchor_label = PROV_ANCHOR_BY_KIND[kind]
+    form = summary.get(vendor_build_receipt.DECLARED_FORM_KEY)
     lines += [
         "| 项目 | 值 |",
         "|---|---|",
         f"| 被测来源 | {PROV_KIND_LABEL[kind]} |",
-        # `repo` 已由 `validate_build_receipt_source` 校过必填非空；这里只取值展示，
+        PROV_FORM_ROW.format(value=PROV_FORM_LABEL.get(form, PROV_FORM_UNDECLARED)),
+        # `repo` 已由 `vendor_build_receipt` 校过必填非空；这里只取值展示，
         # 不参与任何来源判别。⚠ 值和**强度**必须同一行给：分成两行（或只给值）就等于
         # 让「事实派生」和「操作者手敲」在报告里同权，读的人分不出哪个有出处。
-        PROV_REPO_ROW.format(repo=_code_cell(source.get("repo")),
+        PROV_REPO_ROW.format(repo=_code_cell(summary.get("repo")),
                              strength=_repo_source_strength(source, kind)),
-        # 锚字段名与锚值都来自 `dut_source`，本文件不自选字段、不做 `a or b` 兜底。
-        f"| {PROV_ANCHOR_LABEL.get(anchor_field, anchor_field)} | `{_cell(anchor_value)}` |",
+        # 锚字段名与锚值都来自归一化摘要，本文件不自选字段、不做 `a or b` 兜底。
+        f"| {anchor_label} | `{_cell(summary.get(anchor_field))}` |",
     ]
-    if kind == dut_source.LOCAL_CHECKOUT:
-        lines += _local_rows(facts, (kind, anchor_field, anchor_value))
+    degradations = summary.get("degradations") or []
+    if degradations:
+        lines.append(PROV_DEGRADATION_ROW.format(
+            items=_cell(", ".join(str(item) for item in degradations))))
+    if kind == vendor_build_receipt.PROVENANCE_LOCAL_SNAPSHOT:
+        scope = summary.get("snapshot_subtree_scope")
+        lines.append(PROV_SCOPE_ROW.format(
+            scope=PROV_SCOPE_WHOLE_TREE if scope == "" else _code_cell(scope)))
+    lines.append(_facts_row(facts))
+    if kind == vendor_build_receipt.PROVENANCE_LOCAL_SNAPSHOT:
         lines.append("")
         lines += list(PROV_LOCAL_CAVEATS)
     lines.append("")
@@ -495,8 +478,8 @@ def render(report_root, source_facts_path=None):
     # 来源对照物：与三级门**调同一个函数**（显式路径 → `<报告目录>/` → `<报告目录>/work/`），
     # 不在这里另写一份——两处规则一旦分叉，报告陈述的 facts 就不是门校过的那一份了。
     # 返回三态：dict / None（没找到）/ `SOURCE_FACTS_UNTRUSTED`（找到但读不出/不可信）。
-    # ⚠ 后两态在本渲染器里**同权**，都当「未知」，绝不当 clean（见 `_local_rows`）。
-    facts = dut_source.find_source_facts(report_root, source_facts_path)
+    # ⚠ 后两态在本渲染器里**同权**，都当「未经印证」，绝不当「已核」（见 `_facts_row`）。
+    facts = source_facts_lookup.find_source_facts(report_root, source_facts_path)
 
     lines = [
         f"# {op} 算子验收报告",
@@ -574,35 +557,64 @@ def render(report_root, source_facts_path=None):
         lines.append("无精度失败。")
 
     ps = perf.get("summary") or {}
-    lines += [
-        "",
-        "## 性能汇总",
-        "",
-        f"- 状态：`{_cell(ps.get('status'))}`。",
-        f"- 计划 case：{ps.get('planned_cases', ps.get('perf_cases', 0))}；"
-        f"实际采集：{ps.get('perf_cases', 0)}；有效评分：{ps.get('cases_scored', 0)}；"
-        f"达标：{ps.get('达标', 0)}。",
-        "",
-        "| shape 类别 | 计划 | 实采 | 有效评分 | 达标 | NPU us | baseline us | speedup |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
-    ]
-    for row in perf.get("by_shape_class") or []:
-        lines.append(
-            f"| `{_cell(row.get('class'))}` | {row.get('planned_cases', 0)} | "
-            f"{row.get('cases', 0)} | {row.get('cases_scored', 0)} | "
-            f"{row.get('达标', 0)} | {_cell(row.get('npu_us'))} | "
-            f"{_cell(row.get('baseline_us'))} | {_cell(row.get('speedup'))} |")
-    if ps.get("status") == "skipped_precision_gate":
-        lines += ["", "> 精度门未通过，性能未执行；本报告不提供虚构加速比。"]
-    perf_non_passing = perf.get("non_passing_cases") or []
-    if perf_non_passing:
+    if perf.get("perf_mode") == "measure_only":
+        # §5.10 只测不比：**一个比值、一个「达标」字都不许出现**（律令 5.8：没测的比值不能编）。
         lines += [
             "",
-            f"性能未通过共 **{len(perf_non_passing)}** 条，逐项状态与原始原因见 "
-            "[性能失败明细.md](性能失败明细.md)。",
+            "## 性能汇总（只实测、未做标杆对比）",
+            "",
+            f"> {_MEASURE_ONLY_STATEMENT}",
+            "",
+            f"- 状态：`{_cell(ps.get('status'))}`。",
+            f"- 性能 case：{ps.get('perf_cases', 0)}；实测到 kernel 耗时：{ps.get('measured', 0)}；"
+            f"未采到：{ps.get('blocked', 0)}。",
+            "",
+            "| shape 类别 | case 数 | 实测数 | NPU kernel us（中位） |",
+            "|---|---:|---:|---:|",
         ]
-    elif ps.get("perf_cases", 0):
-        lines += ["", "无性能未通过 case。"]
+        for row in perf.get("measured_by_shape_class") or []:
+            lines.append(
+                f"| `{_cell(row.get('class'))}` | {row.get('cases', 0)} | "
+                f"{row.get('measured', 0)} | {_cell(row.get('npu_us'))} |")
+        by_dtype_rows = perf.get("measured_by_dtype") or []
+        if by_dtype_rows:
+            lines += ["", "| dtype | case 数 | NPU kernel us（中位） |", "|---|---:|---:|"]
+            for row in by_dtype_rows:
+                lines.append(f"| `{_cell(row.get('dtype'))}` | {row.get('count', 0)} | "
+                             f"{_cell(row.get('npu_us'))} |")
+        if ps.get("blocked", 0):
+            lines += ["", f"> ⚠ 有 **{ps.get('blocked')}** 条性能 case 没有采到真实 kernel 耗时，"
+                          "验收门据此 BLOCKED——`measure_only` 是「不做对比」，不是「不做测量」。"]
+    else:
+        lines += [
+            "",
+            "## 性能汇总",
+            "",
+            f"- 状态：`{_cell(ps.get('status'))}`。",
+            f"- 计划 case：{ps.get('planned_cases', ps.get('perf_cases', 0))}；"
+            f"实际采集：{ps.get('perf_cases', 0)}；有效评分：{ps.get('cases_scored', 0)}；"
+            f"达标：{ps.get('达标', 0)}。",
+            "",
+            "| shape 类别 | 计划 | 实采 | 有效评分 | 达标 | NPU us | baseline us | speedup |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        for row in perf.get("by_shape_class") or []:
+            lines.append(
+                f"| `{_cell(row.get('class'))}` | {row.get('planned_cases', 0)} | "
+                f"{row.get('cases', 0)} | {row.get('cases_scored', 0)} | "
+                f"{row.get('达标', 0)} | {_cell(row.get('npu_us'))} | "
+                f"{_cell(row.get('baseline_us'))} | {_cell(row.get('speedup'))} |")
+        if ps.get("status") == "skipped_precision_gate":
+            lines += ["", "> 精度门未通过，性能未执行；本报告不提供虚构加速比。"]
+        perf_non_passing = perf.get("non_passing_cases") or []
+        if perf_non_passing:
+            lines += [
+                "",
+                f"性能未通过共 **{len(perf_non_passing)}** 条，逐项状态与原始原因见 "
+                "[性能失败明细.md](性能失败明细.md)。",
+            ]
+        elif ps.get("perf_cases", 0):
+            lines += ["", "无性能未通过 case。"]
 
     gaps = _gap_items(caseset.get("task_pr_gaps"))
     lines += ["", "## 任务书与 PR 差额", ""]

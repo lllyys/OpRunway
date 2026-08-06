@@ -15,7 +15,7 @@ reviewed: 2026-07-06
 
 **统一接口**（泛化到 ops-blas/ops-cv/tilelang 时换实现、不换接口）：`discover` · `build` · `materialize_case` · `run_correctness` · `run_perf` · `parse_results` · `collect_artifacts`。catlass 的实现依据 [[catlass acceptance mechanics]]。
 
-**catlass 的 `generated_harness` 有现成配方**（借自 cannbot `catlass-op-generator`，详见 `doc/oprunway-cannbot-catlass-reuse.md`）：host 调用壳（ACL 初始化 + Tiling + `<<<>>>` 启动 + 结果搬回 + verify）+ op_kernel（catlass `using` 链 → **直接调 PR 交付的 kernel**）+ CMake 注入（`-I catlass/include` + `-DCATLASS_ARCH`，禁用 catlass 自家 CMake 函数）+ 确定性 `verify_cmake_config.py` 构建门禁 + `run.sh` 流水。与 cannbot 的关键差异：我们**包住 PR 现成 kernel**，不像它从 DESIGN 现写 kernel。接入 AscendOpTest 时，generated_harness 还要产出 [[catlass to aclnn bridge for AscendOpTest]] 的桥接层（封 aclnn 自定义算子，或自造遵守框架协议的 exe）。generated_harness 的 4 项通用职责见 [[generated_harness responsibilities]]。
+**catlass 的 `generated_harness` 有现成配方**（借自 cannbot `catlass-op-generator`，详见 `dev-doc/oprunway-cannbot-catlass-reuse.md`）：host 调用壳（ACL 初始化 + Tiling + `<<<>>>` 启动 + 结果搬回 + verify）+ op_kernel（catlass `using` 链 → **直接调 PR 交付的 kernel**）+ CMake 注入（`-I catlass/include` + `-DCATLASS_ARCH`，禁用 catlass 自家 CMake 函数）+ 确定性 `verify_cmake_config.py` 构建门禁 + `run.sh` 流水。与 cannbot 的关键差异：我们**包住 PR 现成 kernel**，不像它从 DESIGN 现写 kernel。接入 AscendOpTest 时，generated_harness 还要产出 [[catlass to aclnn bridge for AscendOpTest]] 的桥接层（封 aclnn 自定义算子，或自造遵守框架协议的 exe）。generated_harness 的 4 项通用职责见 [[generated_harness responsibilities]]。
 
 是 [[OpRunway component breakdown]] 中 acc-npu-run「仓适配器」一侧的设计，吃 [[Acceptance contract and evidence chain]] 的用例。
 

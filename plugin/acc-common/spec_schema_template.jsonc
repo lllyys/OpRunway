@@ -29,8 +29,17 @@
     "type": "<tbe | torch | numpy | gpu | cpu | builtin>",
     "ref": "<参考实现定位 + 语义改造点，自由文本>"
   },
+  // ── change · 本轮改动类别（**受控词表，代码强制**；实现见 `perf_mode.normalize_change_kind`）──────
+  //   ⚠ 2026-08-05 起它**不再只是文档字段**：`gen_cases` 在计划期校一次，词表外取值当场 fail-closed；
+  //     且 `add_dtype` / `extend_shape` / `new_op` 三类会驱动两处派生（`perf_mode.derive_mode` /
+  //     `derive_runner_form`，见 AGENTS.md §5.10 与下方 perf.mode 一节）。写错不再是「不起作用」，
+  //     而是会**改变本轮怎么取性能证据**——所以必须照实填。
+  //   ⚠ `extend_shape`（扩展 shape/rank）是 2026-08-05 新增的格子；此前没有它，扩 shape 只能硬塞
+  //     `semantic`，派生就判不出来。别再沿用旧写法。
+  //   ⚠ 整个 `change` 字段**只有「无任务书 ↔ PR 对应」的 demo spec 才可以省略**（catlass 那类）；
+  //     正式验收 spec 一律必填，且 `change` 一旦出现就必须有合法的 `kind`（只写 note 不算交代过）。
   "change": {
-    "kind": "<rewrite_tbe | add_dtype | align_dtype | semantic | new_op | gpu_port | bugfix>",
+    "kind": "<rewrite_tbe | add_dtype | extend_shape | align_dtype | semantic | new_op | gpu_port | bugfix>",
     "note": "<定性说明>"
   },
   "params_source": "<有完整参数表→task_doc_table；只写『原算子所有类型』→derived_from_reference>",
@@ -127,6 +136,12 @@
 //
 // ── 顶层 · 场景（**编排层据字段路由，绝不 if-算子名**）──────────────────────────────────────────
 //   "scenario":    "torch_ref_aclnn"        // 受控值只此一个，不属该场景→整字段省略、别编新值
+//   ⚠ **确定性派生**（`perf_mode.derive_runner_form`，用户 2026-08-05 口径）：`change.kind` ∈
+//     {add_dtype, extend_shape, new_op} 的算子「明确使用 torch 封装接入」→ 产 spec 时**显式写入**
+//     `"runner_form": "cpp_extension"`。接口预检（`preflight_aclnn`）只决定「支持 or BLOCKED」，
+//     **不得据此静默改选 `aclnn_py`**——换通路会同时换掉 DUT 形态与性能对照物，那是验收口径的改动。
+//     `run_workflow` 仍**只从 `spec.runner_form` 派生 mode**（单一真源不变），派生结果的落地方式
+//     是写进 spec，不是编排层临时算一个。（受控词表与缺省见下面「顶层 · runner 形态」一节。）
 //   scenario   ：场景标识（⟺ 任务书把 **torch 指定为真值口径** × 被测来源是**标准 aclnn 两段式**工程）。
 //                它是给编排层/人读的路由标签（Layer 1 脚本目前不读它），真正驱动执行的是 runner_form。
 //
@@ -291,6 +306,28 @@
 //     ⚠ 声明与否会**如实落进 caseset**：声明了才多一个 `case_profile` 键（未声明的算子产物一个键都不多，
 //       这正是字节安全的做法）。报告侧据此说清「这批用例是按哪套规则产的」，不必回头猜。
 //
+// ── precision 行内 · 用例来源 case_source（受控词表；**整字段省略 = generated = 现行为**）──────
+//   "case_source": "generated" | "taskdoc"        // 省略 = generated；实现见 `gen_cases._case_source`
+//   "taskdoc_caseset": {"sha256": "<taskdoc_caseset.json 的 sha256>"}   // 可选，仅 taskdoc 档有意义
+//     选**这份 spec 的用例是谁出的**（字段驱动、op-中立；换任意「任务书自带用例」的算子零改即用）：
+//       · generated —— 本引擎按覆盖-预算规则造例（= 缺省；已验收算子逐字节不变靠它）；
+//       · taskdoc   —— 用例身份 / shape / dtype / attr / 值域全部来自**规范化后的**任务书用例集
+//                      （`taskdoc_caseset.json`，取材侧产），本引擎不铺网格、不做 1-wise 采样，
+//                      只按 `materialize.seed` 确定性物化输入、算 golden、落盘。
+//     ⚠ **taskdoc 档必须显式喂入那份用例集**：`gen_cases(spec, work, taskdoc_caseset=<path>)` /
+//       CLI `--taskdoc-caseset <path>` / `run_workflow --taskdoc-caseset <path>`。
+//       声明了 taskdoc 却拿不到文件 → **fail-closed**，**绝不回退自生成**（回退 = 再产一次
+//       「流程看着通过、实际绕过任务书用例」的产物）；反向（喂了文件却没声明）同样拒。
+//     ⚠ `case_target` 必须**精确等于**任务书用例条数（同 torch_parity 完整矩阵的口径）：
+//       账面数与实产数不许打架，否则报告里那个覆盖数就是编的。
+//     ⚠ `taskdoc_caseset.sha256` **可省略**（spec 常先于取材产物写出来，写不出来就别编）；
+//       省略时产物里仍会落**实际**摘要，写了就逐字核、对不上当场拒。
+//     ⚠ `golden_unavailable` 是**一等状态**：某条任务书用例算不出 golden（如通道数超参考实现上限），
+//       该 case 身份仍写进 caseset、允许无 golden 文件、记原因，**其余 case 照常生成**；
+//       它退出精度维与性能候选池，在 `caseset.golden_unavailable` 账本里可见，由门判 BLOCKED，
+//       **不得当 pass、也不得当作「该用例不存在」**。
+//     ⚠ 本轮 taskdoc 档**不支持多输出契约**（out>1 或声明了 out_role）→ fail-closed，不半截支持。
+//
 // ── precision 行内 · torch 对标场景（standard=="torch_allclose"）专用 ────────────────────
 //   判据：|actual-golden| <= atol + rtol*|golden|，**容错率 = 0**（不是坏点占比门），equal_nan=true。
 //   "tolerance_source": "dtype_table | taskdoc | torch_default"   // **整字段省略 = 缺省走 dtype_table**
@@ -315,8 +352,9 @@
 //
 // ── 顶层 · perf（任务书性能栏为『无』时**整个 perf 字段省略**，勿写 {baseline:"none"}）────────────
 //   "perf": {
-//     "baseline": "<tbe | gpu_external | torch_npu | aclnn_builtin>",
-//     "target_ratio": <number>,
+//     "mode": "<ratio_gated | measure_only>",  // 可选，缺省 ratio_gated（= 下面这套比值裁决）
+//     "baseline": "<tbe | gpu_external | torch_npu | aclnn_builtin>",  // mode=measure_only 时**必须缺席**
+//     "target_ratio": <number>,                                        // mode=measure_only 时**必须缺席**
 //     "warmup": <int>,          // 可选，缺省 5
 //     "repeat": <int>,          // 可选，缺省 20
 //     "case_source": "precision_cases", // perf 存在时必填；每条性能 case 的 dims 必须同时含「精度」
@@ -325,10 +363,11 @@
 //       "include_precision_tags": ["<精度 case tag>", ...],
 //       "max_cases": <正整数>            // 可选；超出时按 dtype×small/large 队列轮转，仍复用精度 case_id
 //     },
-//     "shape_classification": {          // perf 存在时必填；只分类，不免测、不改 pass/fail
+//     "shape_classification": {          // perf 存在时必填（measure_only 也必填）；只分类，不免测、不改 pass/fail
 //       "metric": "sum_input_bytes",
 //       "small_max_bytes": <正整数，边界计入小 shape>,
-//       "hardware": "<任务书目标硬件>"
+//       "hardware": "<任务书目标硬件>",
+//       "source": "<hardware_profile | spec_supplied>"  // 可选，缺省 hardware_profile
 //     },
 //     "small_shape_exception": {"text": "<人读说明>", "when_us_below": <number>, "abs_gap_us_within": <number>},
 //     "torch_baseline": {
@@ -339,6 +378,33 @@
 //     },
 //     "aclnn_baseline": {"library": "cann_builtin_libopapi", "variants": [{"when": {…}, "symbol": "<基名>", "slots": ["<slot>"]}]}
 //   }
+//   ⚠ `mode`（AGENTS.md §5.10；用户 2026-08-03 + 2026-08-05 的全局口径）：
+//     · 任务书**对性能有明确的同机比值要求**（如「相比内置 TBE 不劣化」）且本轮改动**不属**下面三类
+//       → `ratio_gated`（= 省略本字段）。
+//     · 走 `measure_only`（只用 msprof 采 NPU kernel-only 实测耗时，不获取标杆、不算任何比值）的
+//       **三种被授权情形**，逐条对应 `measure_only_authorization.taskdoc_requirement` 的受控值：
+//         - `no_perf_requirement`             —— 任务书对性能没要求；
+//         - `gpu_comparison`                  —— 任务书要求的是与 GPU 比对（A100 / OpenCV CUDA / ATK 双标杆之类）；
+//         - `change_class_no_perf_comparison` —— 本轮 `change.kind` ∈ {add_dtype, extend_shape, new_op}
+//           （用户 2026-08-05：这三类改动统一按「无性能对比要求」办）。
+//           ⚠ 它**不要求任务书没写比值条款**——恰恰相反，它唯一非冗余的适用面就是「任务书写了比值条款、
+//             但本轮改动属这三类」。此时该条款**强制记进 `task_pr_gaps` 标「未验收」**，仍只产 msprof
+//             绝对耗时，禁止 baseline / ratio / 达标宣称（与 GPU 条款的处置逐字同形）。
+//           ⚠ 声明它就必须真有那三类的 `change.kind`——`resolve_spec_mode` 会交叉核，对不上 fail-closed。
+//       三条**授权强度相同**：都要 `measure_only_authorization` 给出 ground + cite + quote +
+//       `taskdoc_snapshot_sha256`（后者可显式 null 表示本轮无快照可绑，但**不许省略该键**）。
+//       此时 `baseline` / `target_ratio` / `small_shape_exception` / `torch_baseline` / `aclnn_baseline`
+//       **必须全部缺席**（声明了就是自相矛盾，工具 fail-closed 报错，不「忽略多余字段」）。
+//       报告须逐字写明「只做 NPU msprof 实测、未做任何标杆对比」，**不得**包装成「已达标 N 倍」。
+//     ⚠ `measure_only` 只免掉**对比**，不免掉**测量**：每条性能 case 仍须有真实 `npu_us`，
+//       缺一条验收门即 BLOCKED。
+//     ⚠ `measure_only` 下**性能维与精度裁决解耦**（`run_workflow` 第二层性能总门的分流）：精度未全过时
+//       仍会**继续消费已采到的 msprof 数据**、精度分母原样保留；报告里那份实测数据**不表示**精度通过，
+//       更不表示任务书性能条款通过。`ratio_gated` 仍按「精度未全过 → 跳过性能」的 fail-fast 走。
+//   ⚠ `shape_classification.source`：缺省 `hardware_profile` = 必须命中引擎内受控 profile 表且逐值相符。
+//     目标硬件在表里没有受控 UB 承载边界事实时（例如 Ascend 950PR），显式写 `spec_supplied` 由 spec 直供，
+//     产物里会留 `source=spec_supplied` 痕迹。表里**有**该硬件时仍强制逐值相符——spec 改不动已核定的事实。
+//     该值只影响大/小 shape **分组展示**，不参与免测、阈值或任何 pass/fail。
 //   ⚠ `target_ratio` **只从任务书原文换算**，绝不抄任何参考仓的通用默认值
 //     （参考仓 cannbot-ops-input `performance.py` 的 `PERF_SPEEDUP_THRESHOLD = 0.6` 是**它自家**口径，
 //      抄过来会把「比基线慢 40%」判成达标）。任务书是验收权威（硬约束 #1）：
@@ -360,6 +426,14 @@
 //                         `when.attr/is_null` 按 `case.attrs` 决定一组 keyword 是否整体出现；`slots`
 //                         必须都已在 `keyword` 声明，且不得跨组重复。缺语义 attr 或结构异常均 fail-closed。
 //       · out / out_null slot 一律忽略（torch 侧输出是返回值）。
+//   ⚠ **候选池随 `precision.case_source` 分档**（2026-08-05）：
+//     · `precision.case_source` 省略 / `generated` —— 候选池 = 已带「性能」维的 case（+ `include_precision_tags`
+//       命中的），行为逐字不变；
+//     · `precision.case_source == "taskdoc"` —— 候选池 = **全部可判精度的任务书用例**。任务书用例集只描述
+//       精度用例、规范化后一条都不带「性能」维，沿用旧规则会得到**零性能 case**（性能维直接归零）。
+//       `golden_unavailable` 的 case 不进池（无 golden 的 case 在门里是 BLOCKED 身份，不该同时充当性能证据），
+//       被排除的 id 落 `perf_case_policy.selection.excluded_golden_unavailable_case_ids`，不静默丢。
+//       选中的 case **仍复用原精度 case_id**，`max_cases` / 大小 shape 分档 / 轮转采样规则一律照旧。
 //   ⚠ `case_source=="precision_cases"` 表示性能 case 从同一份精度 caseset 选择；不是另造性能输入，
 //     且实际采集前必须再按本轮确定性精度 verdict 只保留 pass case；精度 fail/needs_review 不进入
 //     性能比较。精度 pass 只证明同一 DUT/输入的结果正确，不保证性能 ratio 达标或 baseline/profiler

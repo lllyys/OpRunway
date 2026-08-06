@@ -4,16 +4,18 @@
 blocked_incomparable_timing_scope、不出结论。ratio = baseline_us / npu_us（>1 表示 NPU 更快）；
 达标 = ratio ≥ spec.perf.target_ratio。缺证据/基线 → blocked；无性能用例 → 显式 no_perf_cases。
 
-**无验收目标**（任务书写「性能要求：无」→ spec 整个省略 `perf` 块）→ `collected_no_target`：
-计时照常采集、`per_case` 的 `us`/`ratio` 照常记，但**一条都不判达标**——`达标` 与
-`cases_above_threshold` 一律 `None`（**不是 0**：0 会被读成「一条都没达标」）。
-⚠ 它**既不是 pass 也不是 fail**，是「采了数但没有验收目标可判」；编排层不得把它计入性能 fail，
-也不得据它落干净 PASS。此前这里静默套 0.95 当阈值——那是**凭空造出一条任务书没写的验收要求**，
-本轮改掉的正是它。
-
 小 shape 例外（T6，任务书条款）：`小shape` tag 的性能用例，若 max(NPU,基线) < when_us_below 且
   |NPU-基线| ≤ abs_gap_us_within，达标**保持 False** + 打 `exception` 标 + 记 exception_detail；
   status=exception → 编排层映射 PASSED_WITH_RISK（挂人核仿真图，绝不偷偷置 True）。
+
+`perf.mode=measure_only`（AGENTS.md §5.10，2026-08-03）：**只测不比**——逐 case 转录 NPU msprof
+  kernel-only 实测耗时 + 只读分档汇总，`summary.status="measured"`，**不产 ratio、不产
+  cases_above_threshold、不产任何达标结论**。缺一条实测即 `blocked`（"不做对比" ≠ "不做测量"）。
+
+⚠ **「没有性能目标」不再有隐式档**（2026-08-06）：有性能用例要判、spec 却给不出 `target_ratio` 时
+  一律 `invalid_config`，**不再兜底套 0.95**（那是工具替任务书造要求，5.8 的反例）。任务书真没有
+  性能要求就走上面那条 `measure_only` —— 它要 cite/quote/快照指纹的授权锚，是**显式**的宽档；
+  「spec 里什么都不写」拿不到同样的待遇。详见 `_resolve_target_ratio` / `_NO_TARGET_ERR`。
 
 GPU 标杆 consumer（T8）：`expect_source ∈ {gpu, gpu_external}` 且缺基线 → blocked_wait_gpu_benchmark
   （正规挂起、非 fail、baseline=None 不崩）；消费的基线带 policy_risk 且达标 → summary.risk。
@@ -33,7 +35,10 @@ v0 提供 mock_baseline；真机/外部给基线时替换。
 **它们一个字节都不参与裁决**：`达标` / `blocked` / `status` / simulation 与本块无关，删掉这些字段
 报告的结论一模一样。加它们只为让人读报告时有 cannbot 同款的 dtype 汇总口径。
 """
-import argparse, json, math, re, statistics, sys
+import argparse, json, math, os, re, statistics, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import perf_mode  # noqa: E402
 
 _US_RE = re.compile(r"<\s*(\d+(?:\.\d+)?)\s*us")
 _GAP_RE = re.compile(r"差\s*(\d+(?:\.\d+)?)\s*us")
@@ -51,17 +56,6 @@ _DEV_GRADE = "development"
 _NON_ACCEPTANCE_NOTE = ("NON-ACCEPTANCE (mock evidence)：性能基线是 mock 编的假数（NPU mock us × 常数），"
                         "本报告只证管路接通，**不构成性能验收结论**")
 _MOCK_BASELINE_NOTE = "⚠ 使用 mock 基线（本地演示逻辑、非真实基线，不可当真通过验收）"
-# —— 无验收目标（spec 未声明 perf 目标）的统一措辞：既不是通过也不是失败，只是「没目标可判」。
-_NO_TARGET_STATUS = "collected_no_target"
-_NO_TARGET_NOTE = (
-    "spec 未声明性能验收目标（无 perf.target_ratio 且未声明 perf.baseline，对应任务书「性能要求：无」）"
-    f"→ {_NO_TARGET_STATUS}：只采集不判达标。`达标` 与 `cases_above_threshold` 记 None（**不是 0**）。"
-    "⚠ **性能未验证**——无验收目标即无从验证：这既不是通过也不是失败。本报告里任何「达标」计数"
-    "（含 by_shape_class 的行级 True 计数）在此状态下都没有判定含义，"
-    "不得读作「一条都没达标」，也不得读作「性能已验证通过」")
-_NO_TARGET_UNVERIFIED_NOTE = (
-    "⚠ 且本轮一条可比测量都没采到（cases_scored=0）：既没有验收目标，也没有性能数据——"
-    "报告里的性能部分不构成任何结论")
 
 
 def _mark_non_acceptance(report, baseline):
@@ -89,42 +83,42 @@ def _finite_pos(x):
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x > 0
 
 
+#: 缺 `target_ratio` 时的统一拒绝语。**两条出路都逐字给出**，免得读到这条错的人以为
+#: 「没有性能要求」这件事本身不再被支持——它仍然支持，只是必须**显式声明**（§5.10），
+#: 不能靠「spec 里什么都不写」让工具替任务书猜一个阈值。
+_NO_TARGET_ERR = (
+    "spec 未给出可判的性能验收目标（无 target_ratio）→ invalid_config。\n"
+    "  ⚠ **这里刻意不再兜底套 0.95**：那等于替任务书凭空造一条它没写过的验收要求"
+    "（aclnnRoll 试跑实测：47 条性能用例被这个凭空目标判出 19 条 fail）。\n"
+    "  两条合法出路，二选一显式写进 spec：\n"
+    "    · 任务书确有比值要求 → 补 perf.target_ratio（配 perf.baseline）；\n"
+    "    · 任务书没有性能要求 / 只要求与 GPU 比 / 本轮改动属新增 dtype·扩 shape·新算子 →\n"
+    "      按 AGENTS.md §5.10 写 perf.mode='measure_only' + perf.measure_only_authorization"
+    "（ground + cite + quote + taskdoc_snapshot_sha256），走「只测不比」。")
+
+
 def _resolve_target_ratio(perf_spec):
-    """pc-3：target_ratio 严格化。返回 `(tgt, err)`，三种出口**必须靠 err 区分，别只看 tgt is None**：
-
-    | 出口 | 返回 | 含义 |
-    |---|---|---|
-    | 有目标 | `(float, None)` | 正常判达标 |
-    | 配置非法 | `(None, err)` | invalid_config：perf 块存在但没给出可判的目标（详见下表） |
-    | **无验收目标** | `(None, None)` | 任务书「性能要求：无」→ spec **整块省略** perf → 采集但不判达标 |
-
-    ⚠ 「无验收目标」此前返回 `(0.95, None)`——那等于**替任务书凭空造一条 ratio≥0.95 的要求**，
-    aclnnRoll 试跑就因此把 47 条性能用例判出 19 条 fail。改成 `(None, None)` 后，
-    调用方须以 `tgt is None and err is None` 判「无目标」，以 `err is not None` 判 invalid_config。
-
-    ⚠ **「无目标」的入口收得很窄，只认「perf 整块不存在」**（调用方的 `spec.get("perf") or {}`
-    把「键缺席 / `null` / `{}`」都归一成空 dict，这三种等价）。只要 perf 块里**写了任何东西**却仍
-    给不出可判目标，一律 invalid_config——因为那更像 spec 被写坏/抽取残缺，而不是任务书真没要求：
+    """pc-3：target_ratio 严格化，返回 (tgt|None, err|None)。
 
     | perf 块 | 出口 | 为什么 |
     |---|---|---|
-    | 缺席 / `null` / `{}` | 无验收目标 | 任务书「性能要求：无」的如实表达 |
-    | `{"baseline": "tbe"}` | invalid_config | 声明了基线却缺阈（拒静默套 0.95） |
-    | `{"baseline": ""}`、`{"warmup": 5}`、`{"small_shape_exception": …}` | invalid_config | 写了性能配置却没有目标：残缺 spec，不是「没有要求」 |
-    | `"perf": "性能要求：无"`（非对象） | invalid_config | 坏 spec 必须报出来，不能被读成「合法地没有要求」 |
+    | 有合法 `target_ratio` | `(float, None)` | 正常判达标 |
+    | 缺 `target_ratio`（含 perf 块整块缺席 / `null` / `{}`） | `(None, err)` | **不兜底**：见 `_NO_TARGET_ERR` |
+    | `target_ratio` 非有限正数 | `(None, err)` | 0/负/bool/NaN/inf/字符串一律 invalid_config |
 
-    这道收窄是 fail-closed 方向：**误判成 invalid_config 只会多报一次错，误判成「无目标」会把
-    一条真实的性能要求整条吞掉。**"""
-    if not isinstance(perf_spec, dict):
-        return None, (f"spec.perf 非对象（{type(perf_spec).__name__}）；性能要求须为 object 或整体省略，"
-                      "写成字符串/数字不得被读成「无验收目标」→ invalid_config")
-    if "target_ratio" not in perf_spec:
-        if perf_spec.get("baseline"):
+    ⚠ 「perf 块整块缺席」此前返回 `(0.95, None)`——**那是本仓 5.8「不捏造」的反例写进了代码**：
+    工具替任务书造了一条 `ratio ≥ 0.95` 的验收要求，报告里 `target_ratio: 0.95` 看上去还像是
+    任务书写的。改成 fail-closed 后，「任务书没有性能要求」必须走 §5.10 的 `measure_only`
+    **显式声明 + 授权锚**（cite/quote/快照指纹），而不是靠「spec 里什么都不写」拿到同样的宽档。
+
+    ⚠ 本函数只在**有性能用例要判**时才决定成败：调用方的 `if not perf_ids: return _no_perf_cases(...)`
+    排在 `tgt_err` 检查之前，所以「没有性能用例的 spec 不写 perf 块」照旧走 `no_perf_cases`
+    →「PASS(无性能要求)」，一个字节没变。收紧的只有「有性能用例、却连目标都没有」这一格。
+    """
+    if not isinstance(perf_spec, dict) or "target_ratio" not in perf_spec:
+        if isinstance(perf_spec, dict) and perf_spec.get("baseline"):
             return None, "spec 声明了性能基线却缺 target_ratio（拒静默套 0.95）→ invalid_config"
-        if perf_spec:
-            return None, (f"spec.perf 写了 {sorted(perf_spec)} 却既无 target_ratio 也无有效 baseline"
-                          "（残缺 spec，非「无性能要求」——后者须整块省略 perf）→ invalid_config")
-        return None, None       # perf 整块缺席/空 → 无验收目标：合法状态，不是错误
+        return None, _NO_TARGET_ERR
     tgt = perf_spec["target_ratio"]
     if not _finite_pos(tgt):
         return None, f"target_ratio={tgt!r} 非法（须有限正数，拒 0/负/bool/NaN/inf/字符串）→ invalid_config"
@@ -143,13 +137,6 @@ def _precheck(spec, caseset, evidence, baseline):
     op = spec.get("op") if isinstance(spec, dict) else None
     if not isinstance(op, str) or not op:
         return _invalid("?", ["spec 缺/坏 op（须非空字符串）"])
-    # 「无验收目标」是靠 `spec.perf` **缺席或空对象**判定的，所以坏掉的 perf 块必须在这里就拦下：
-    # 否则 `"perf": "性能要求：无"` 这种写法会一路走到 `(spec.get("perf") or {}).get(...)` 抛
-    # AttributeError（旧行为），或者更糟——被误读成「合法地没有要求」。fail-closed。
-    perf_spec = spec.get("perf")
-    if perf_spec is not None and not isinstance(perf_spec, dict):
-        return _invalid(op, [f"spec.perf 非对象（{type(perf_spec).__name__}）；性能要求须为 object "
-                             "或整体省略，写成字符串/数字不得被读成「无验收目标」"])
     if not isinstance(caseset, dict) or not isinstance(caseset.get("cases"), list):
         return _invalid(op, ["caseset 缺/坏 cases（须 list）"])
     if not isinstance(evidence, dict) or not isinstance(evidence.get("evidence"), list):
@@ -276,7 +263,7 @@ def _no_perf_cases(spec, src, tgt, perf_spec, extra_notes=None):
 #   · cases_above_threshold ← performance.py:80-95  `count_speedup_above`（**严格 `ratio > threshold`**）
 #   · custom_only_by_dtype  ← performance.py:62-77  `summarize_custom_only_latency`（无基线只报绝对时延）
 #
-# ⚠⚠ 两把尺子故意并存（蓝本 `doc/oprunway-cannbot-alignment-plan.md` L1 的裁决，别「顺手统一」）：
+# ⚠⚠ 两把尺子故意并存（蓝本 `dev-doc/oprunway-cannbot-alignment-plan.md` L1 的裁决，别「顺手统一」）：
 #   - **硬门**（`perf_compare` 里的 `met = raw >= tgt`）用 `>=`，**一个字不动**——它是我们的验收判据，
 #     4 个 pin 算子的真机验收结论就挂在它上面；`>=` 对「恰好压线」更友好，是有意选的。
 #   - **本块的 `cases_above_threshold`** 用 cannbot 的**严格 `>`**——它是**展示口径**，为的是我们报告里
@@ -332,10 +319,6 @@ def _report_aggregate(rows, case_by_id, ev, bl, tgt):
     标签就是撒谎）。
 
     返回 dict；`custom_only_by_dtype` **没有内容时不返回该键**（省得每份报告都挂一个空列表）。
-
-    `tgt is None`（无验收目标）时 `cases_above_threshold` 返回 **None 而不是 0**：没有阈值就没有
-    「超过阈值的条数」这回事，落 0 会被读成「一条都没超」。`cases_scored` 不受影响——它数的是
-    实际采到的可比测量条数，与有没有目标无关。
     """
     by, custom_only = {}, {}
     above = scored = 0
@@ -351,9 +334,7 @@ def _report_aggregate(rows, case_by_id, ev, bl, tgt):
             g["npu"].append(float(npu))
             g["baseline"].append(float(base))
             scored += 1
-            # 严格 >：cannbot count_speedup_above 口径（与硬门 >= 并存）。tgt is None（无验收目标）→
-            # 压根没有阈值可比，不计数（下面整块出 None，不出 0）。
-            if tgt is not None and raw > tgt:
+            if raw > tgt:                   # 严格 >：cannbot count_speedup_above 口径（与硬门 >= 并存）
                 above += 1
             continue
         if not r.get("blocked") or cid in bl:
@@ -378,7 +359,7 @@ def _report_aggregate(rows, case_by_id, ev, bl, tgt):
     base_total = sum(row["baseline_us"] * row["count"] for row in by_dtype)
     # 分母为 0（一行可比测量都没有）→ None，**绝不编造**一个 speedup（cannbot `speedup()` 同款守卫）。
     out = {"by_dtype": by_dtype, "overall_speedup": (base_total / npu_total) if npu_total > 0 else None,
-           "cases_above_threshold": (above if tgt is not None else None), "cases_scored": scored}
+           "cases_above_threshold": above, "cases_scored": scored}
     if custom_only:
         out["custom_only_by_dtype"] = [
             {"dtype": dt, "count": len(vals), "npu_us": _median(vals),
@@ -387,17 +368,12 @@ def _report_aggregate(rows, case_by_id, ev, bl, tgt):
     return out
 
 
-def _shape_class_aggregate(rows, caseset, no_target=False):
+def _shape_class_aggregate(rows, caseset):
     """按 caseset 的大小 shape 元数据做只读汇总；不参与任何裁决。
 
     新契约声明 ``perf_case_policy`` 后，每条性能行都必须有合法分类，且两桶计数要与生成期账本一致；
     缺失时产 ``problems``，绝不静默少算。旧 caseset 未声明 policy 且没有分类元数据时返回 ``None``，
     保持历史兼容。
-
-    ``no_target=True``（无验收目标）时每桶与 overall 的 ``达标`` 一律写 ``None``——与 summary 同口径。
-    否则顶层写 ``达标: null``、这张表却写 ``达标: 0``，Markdown 渲染出来就是「达标 0」，
-    读者只会得出「一条都没达标」这个恰好相反的结论。``cases_scored`` / ``blocked`` 不受影响：
-    它们数的是实采与挂起，与有没有目标无关。
     """
     case_by_id = {c.get("id"): c for c in (caseset.get("cases") or [])
                   if isinstance(c, dict) and isinstance(c.get("id"), str)}
@@ -421,7 +397,7 @@ def _shape_class_aggregate(rows, caseset, no_target=False):
             cls, {"rows": 0, "scored": 0, "met": 0, "blocked": 0,
                   "npu_all": [], "baseline_all": [], "paired_npu": [], "paired_baseline": []})
         item["rows"] += 1
-        item["met"] += int(row.get("达标") is True)   # 严格 is True：None（无目标）不得被算作 0 以外的东西
+        item["met"] += int(bool(row.get("达标")))
         item["blocked"] += int(bool(row.get("blocked")))
         if _finite_pos(row.get("npu_us")):
             item["npu_all"].append(float(row["npu_us"]))
@@ -452,7 +428,7 @@ def _shape_class_aggregate(rows, caseset, no_target=False):
         all_paired_base.extend(item["paired_baseline"])
         out.append({"class": cls, "cases": item["rows"], "planned_cases": item["rows"],
                     "cases_scored": item["scored"],
-                    "达标": (None if no_target else item["met"]), "blocked": item["blocked"],
+                    "达标": item["met"], "blocked": item["blocked"],
                     "npu_us": npu_med, "baseline_us": base_med,
                     "speedup": (pair_base_med / pair_npu_med)
                     if _finite_pos(pair_npu_med) else None})
@@ -461,18 +437,17 @@ def _shape_class_aggregate(rows, caseset, no_target=False):
     overall = {"class": "overall", "cases": sum(x["cases"] for x in out),
                "planned_cases": sum(x["planned_cases"] for x in out),
                "cases_scored": sum(x["cases_scored"] for x in out),
-               "达标": (None if no_target else sum(x["达标"] for x in out)),
-               "blocked": sum(x["blocked"] for x in out),
+               "达标": sum(x["达标"] for x in out), "blocked": sum(x["blocked"] for x in out),
                "npu_us": npu_med, "baseline_us": base_med,
                "speedup": (pair_base_med / pair_npu_med) if _finite_pos(pair_npu_med) else None}
     return {"by_shape_class": out, "overall": overall,
             "complete": not problems, "problems": problems}
 
 
-def _attach_shape_report(report, caseset, no_target=False):
+def _attach_shape_report(report, caseset):
     """给已成型报告附加大小 shape 只读视图；异常只记 notes，不改 summary/status。"""
     try:
-        agg = _shape_class_aggregate(report.get("per_case") or [], caseset, no_target=no_target)
+        agg = _shape_class_aggregate(report.get("per_case") or [], caseset)
     except Exception as exc:
         report.setdefault("notes", []).append(
             f"大小 shape 报告生成失败已跳过，裁决不受影响：{exc!r}")
@@ -556,10 +531,6 @@ def _attach_non_passing_cases(report, caseset, evidence, baseline):
     * 每行带 dtype、输入 shape、small/large、双边行为/计时和原因；
     * 不猜归因，不把 baseline limitation 写成 DUT defect；
     * 本块不参与 ``达标`` / ``blocked`` / ``status`` 计算，生成失败也不能改写裁决。
-
-    ⚠ ``达标 is None``（无验收目标，见 ``_NO_TARGET_NOTE``）的行**不是**未通过：没有目标就既没达标
-    也没未达标。这类行只有在自己 blocked / 命中 exception 时才进本表；否则跳过。把它们当 failed
-    列进来，就等于把「任务书没提要求」重新写成「一条都没达到要求」——本轮要修的正是这个。
     """
     rows = report.get("per_case")
     if not isinstance(rows, list):
@@ -586,9 +557,6 @@ def _attach_non_passing_cases(report, caseset, evidence, baseline):
     for row in rows:
         if not isinstance(row, dict) or row.get("达标") is True:
             continue
-        if (row.get("达标") is None and not row.get("blocked")
-                and not row.get("exception")):
-            continue                    # 无验收目标 → 该行既非达标也非未达标，不入未通过表
         cid = row.get("case_id")
         case = case_by_id.get(cid) or {}
         inputs = case.get("inputs") if isinstance(case.get("inputs"), list) else []
@@ -647,6 +615,127 @@ def _attach_non_passing_cases(report, caseset, evidence, baseline):
     return report
 
 
+# ————————————————— measure_only · 只测不比（AGENTS.md §5.10）—————————————————
+# ⚠ 本块**不算 ratio、不比阈值、不出达标**。它唯一的产出是「每条性能 case 的 NPU kernel-only
+#   实测耗时」+ 只读分档汇总。缺一条实测即 `blocked`——`measure_only` 是「不做对比」，
+#   **不是**「不做测量」；让零 msprof 数据也能过门就等于把它做成了 fail-open 开关。
+#
+# 字段命名刻意**避开** ratio 通路的词表（`by_dtype` / `by_shape_class` / `达标` / `speedup`）：
+#   下游任何按老键名读报告的地方在 measure_only 报告上会**读不到东西**（→ 显式缺失），
+#   而不是读到一个 0 或 None 被误解成「测了、只是没达标」。
+
+
+def _measured_by_dtype(rows, case_by_id):
+    """按输入 dtype 汇总实测耗时中位数（只读展示，零裁决影响）。dtype 口径同 `_case_dtype`。"""
+    buckets = {}
+    for r in rows:
+        if r.get("blocked") or not _finite_pos(r.get("npu_us")):
+            continue
+        buckets.setdefault(_case_dtype(case_by_id.get(r.get("case_id"))), []).append(
+            float(r["npu_us"]))
+    return [{"dtype": dt, "count": len(vals), "npu_us": _median(vals),
+             # 照 cannbot `no_npu_baseline` 的标法：这一行是**绝对时延**，不是加速比。
+             "comparison": "no_baseline_measured_only"}
+            for dt, vals in sorted(buckets.items())]
+
+
+def _measured_shape_aggregate(rows, caseset):
+    """measure_only 的大小 shape 只读汇总；口径与生成期账本交叉对齐，不参与裁决。
+
+    与 `_shape_class_aggregate` 的区别：**只出实测字段**（cases / measured / npu_us），
+    绝不出 `达标` / `baseline_us` / `speedup`——没有对照物时那三个字段无从谈起，
+    填 0/None 会被读成「比过了只是没达标」。
+    """
+    case_by_id = {c.get("id"): c for c in (caseset.get("cases") or [])
+                  if isinstance(c, dict) and isinstance(c.get("id"), str)}
+    policy = caseset.get("perf_case_policy")
+    if not isinstance(policy, dict):
+        return None                                   # legacy caseset 无账本 → 不产半份视图
+    buckets, problems = {}, []
+    for row in rows:
+        cid = row.get("case_id")
+        meta = (case_by_id.get(cid) or {}).get("perf_shape_classification")
+        if not isinstance(meta, dict) or meta.get("class") not in ("small", "large"):
+            problems.append(f"{cid}: 缺/坏 perf_shape_classification")
+            continue
+        item = buckets.setdefault(meta["class"], {"cases": 0, "measured": 0, "us": []})
+        item["cases"] += 1
+        if not row.get("blocked") and _finite_pos(row.get("npu_us")):
+            item["measured"] += 1
+            item["us"].append(float(row["npu_us"]))
+    expected = (policy.get("counts") or {}) if isinstance(policy.get("counts"), dict) else {}
+    out, all_us = [], []
+    for cls in ("small", "large"):
+        item = buckets.get(cls) or {"cases": 0, "measured": 0, "us": []}
+        if expected.get(cls) != item["cases"]:
+            problems.append(
+                f"{cls}: 生成期账本={expected.get(cls)!r}，报告行={item['cases']}，大小 shape 计数不一致")
+        all_us.extend(item["us"])
+        out.append({"class": cls, "cases": item["cases"], "measured": item["measured"],
+                    "npu_us": _median(item["us"])})
+    overall = {"class": "overall", "cases": sum(x["cases"] for x in out),
+               "measured": sum(x["measured"] for x in out), "npu_us": _median(all_us)}
+    return {"by_shape_class": out, "overall": overall,
+            "complete": not problems, "problems": problems}
+
+
+def _measure_only_compare(spec, caseset, evidence, op, perf_ids, case_by_id):
+    """`perf.mode=measure_only` 的唯一出口：逐 case 转录 NPU 实测，**不做任何对比**。"""
+    perf_spec = spec.get("perf") or {}
+    notes = [perf_mode.MEASURE_ONLY_NOTE]
+    if not perf_ids:
+        report = _no_perf_cases(spec, None, None, perf_spec, notes)
+        report["perf_mode"] = perf_mode.MODE_MEASURE_ONLY
+        return report
+    ev_list = evidence["evidence"]
+    ev_ids = [e.get("case_id") for e in ev_list if isinstance(e, dict)]
+    dup = len(set(ev_ids)) != len(ev_ids)
+    if dup:
+        notes.append("evidence 有重复 case_id")
+    ev = {e.get("case_id"): e for e in ev_list if isinstance(e, dict) and e.get("case_id")}
+
+    rows, measured, blocked = [], 0, 0
+    for cid in perf_ids:
+        eperf = (ev.get(cid) or {}).get("perf")
+        us = eperf.get("us") if isinstance(eperf, dict) else None
+        scope = eperf.get("scope") if isinstance(eperf, dict) else None
+        row = {"case_id": cid, "npu_us": us, "scope": scope}
+        # ★ 红线：没有真实实测（us 非有限正数 / scope 缺失或非法）→ blocked。
+        #   status 因此落 `blocked`，验收门 gate_task3 见 blocked 即 FAILED。
+        if _finite_pos(us) and scope in _VALID_SCOPES:
+            row["blocked"] = False
+            measured += 1
+        else:
+            row["blocked"] = True
+            row["note"] = (f"measure_only 缺真实 NPU 实测：npu_us={us!r} scope={scope!r}"
+                           "（须有限正数 + 合法计时口径）——不得以「未做对比」为由免测")
+            blocked += 1
+        rows.append(row)
+
+    status = "blocked" if (blocked or dup) else perf_mode.STATUS_MEASURED
+    report = {"op": op, "perf_mode": perf_mode.MODE_MEASURE_ONLY,
+              "baseline_source": None, "target_ratio": None,
+              "per_case": rows, "notes": notes,
+              # 刻意**不出** `达标` / `cases_above_threshold` / `cases_scored`：
+              # 没有对照物就没有「达标」这件事，出一个 0 等于给出一个未做的裁决。
+              "summary": {"perf_cases": len(rows), "measured": measured,
+                          "blocked": blocked, "status": status}}
+    report["measured_by_dtype"] = _measured_by_dtype(rows, case_by_id)
+    try:
+        agg = _measured_shape_aggregate(rows, caseset)
+    except Exception as exc:   # 只读报表塌了也绝不拖垮裁决（同 ratio 通路的纪律）
+        agg = None
+        notes.append(f"measure_only 大小 shape 汇总生成失败已跳过，实测数据不受影响：{exc!r}")
+    if agg is not None:
+        report["measured_by_shape_class"] = agg["by_shape_class"]
+        report["measured_shape_overall"] = agg["overall"]
+        report["measured_shape_complete"] = agg["complete"]
+        if agg["problems"]:
+            report["measured_shape_problems"] = agg["problems"]
+            notes.append("measure_only 大小 shape 汇总契约不完整：" + "；".join(agg["problems"]))
+    return report
+
+
 def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline_blocked_status=None):
     # pc-7：入口轻量 schema 校验——坏输入收敛为结构化 invalid，绝不下标崩溃。
     # C5：**每一条 return 都过 `_mark_non_acceptance`**——mock 基线的报告无论走哪个出口（invalid / no_perf_cases /
@@ -660,11 +749,23 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
                        if isinstance(c, dict) and c.get("id") and "性能" in (c.get("dims") or [])})
     perf_spec = spec.get("perf") or {}
     case_by_id = {c["id"]: c for c in cases if isinstance(c, dict) and c.get("id")}
+    # AGENTS.md §5.10 · 只测不比：**在取基线之前**分流。放在这里而不是更靠后，是因为
+    # `baseline is None` 在下面的 ratio 通路里意味着「缺/废标杆 → 挂起」，而 measure_only
+    # 的 baseline 本来就该是 None——不分流会被误判成 blocked_wait_gpu_benchmark。
+    try:
+        mode = perf_mode.resolve_spec_mode(spec)
+    except ValueError as ex:
+        return _mark_non_acceptance(_invalid(op, [f"perf.mode 配置非法：{ex}"]), baseline)
+    if perf_mode.is_measure_only(mode):
+        if baseline is not None:
+            # 走到这里说明编排层给了一份 measure_only 不该有的基线 → 宁可停下也不「顺手忽略」。
+            return _mark_non_acceptance(
+                _invalid(op, ["perf.mode='measure_only' 却收到了性能基线——"
+                              "只测不比的口径下不得消费任何对照物，fail-closed"]), baseline)
+        return _measure_only_compare(spec, caseset, evidence, op, perf_ids, case_by_id)
     exc, exc_note = _parse_small_shape_exception(spec)
     # pc-3：target_ratio 严格化（非法/声明基线却缺 → invalid_config；绝不静默套 0.95 放行）。
-    # 三态：有目标 (float, None) / invalid_config (None, err) / **无验收目标** (None, None)。
     tgt, tgt_err = _resolve_target_ratio(perf_spec)
-    no_target = tgt is None and tgt_err is None
 
     # 缺/废基线（T8/gb-9）：期待外部 GPU 标杆但没给（或标杆被判废）→ 正规挂起；
     # 不静默 mock、不判 fail、baseline=None 不崩；据 baseline_blocked_status 落**正确**挂起码
@@ -674,8 +775,7 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
         status = baseline_blocked_status or "blocked_wait_gpu_benchmark"
         top_note = _BLOCKED_NOTE.get(status, f"缺/废基线 → 挂起（{status}）")
         if not perf_ids:
-            return _no_perf_cases(spec, src, tgt, perf_spec,
-                                  [top_note] + ([_NO_TARGET_NOTE] if no_target else []))
+            return _no_perf_cases(spec, src, tgt, perf_spec, [top_note])
         ev = {e.get("case_id"): e for e in evidence["evidence"] if isinstance(e, dict) and e.get("case_id")}
         rows = []
         for cid in perf_ids:
@@ -683,36 +783,24 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
             rows.append({"case_id": cid,
                          "npu_us": (perf.get("us") if isinstance(perf, dict) else None),
                          "npu_scope": (perf.get("scope") if isinstance(perf, dict) else None),
-                         # 无验收目标时这里同样记 None：缺基线 + 本来也没目标，写 False/0 就是
-                         # 又一次把「没有要求」渲染成「零条达标」。
-                         "达标": (None if no_target else False),
-                         "blocked": False, "note": top_note})
+                         "达标": False, "blocked": False, "note": top_note})
         notes = [top_note]
-        if no_target:   # 挂起态仍如实说明「本来就没有验收目标」，免得被读成「性能没达标才挂起」
-            notes.append(_NO_TARGET_NOTE)
         if exc_note:
             notes.append(exc_note)
         report = _attach_shape_report(
             {"op": op, "baseline_source": src, "target_ratio": tgt,
              "per_case": rows, "notes": notes,
-             "summary": {"perf_cases": len(rows), "达标": (None if no_target else 0),
-                         "blocked": 0, "status": status}},
-            caseset, no_target=no_target)
-        # ⚠ 这条提前出口**照旧不挂任何聚合键**（`cases_above_threshold` / `cases_scored` / `by_dtype`）：
-        #   它按定义一条可比测量都没有，挂上去会让「没数据」看起来像「数据是 0」。
-        #   `test_early_exits_carry_no_aggregate_fields` 钉死这条，别顺手补一个 None 进来。
+             "summary": {"perf_cases": len(rows), "达标": 0, "blocked": 0, "status": status}},
+            caseset)
         return _attach_non_passing_cases(report, caseset, evidence, baseline)
 
     src = baseline.get("source")
     if not perf_ids:
-        extra = ([_NO_TARGET_NOTE] if no_target else []) + ([exc_note] if exc_note else [])
         return _mark_non_acceptance(
-            _no_perf_cases(spec, src, tgt, perf_spec, extra), baseline)
+            _no_perf_cases(spec, src, tgt, perf_spec, [exc_note] if exc_note else None), baseline)
 
-    # pc-3：有性能用例要判、但 target_ratio 非法/声明基线却缺 → invalid_config；不进 ratio、绝不全达标。
-    # ⚠ 判据是 `tgt_err is not None`，**不是** `tgt is None`——后者现在还包含合法的「无验收目标」，
-    #   用它会把「任务书没提性能要求」误判成「spec 配置坏了」。
-    if tgt_err is not None:
+    # pc-3：有性能用例要判、但 target_ratio 非法/缺 → invalid_config；不进 ratio、绝不全达标。
+    if tgt is None:
         rows = [{"case_id": cid, "达标": False, "blocked": True, "note": tgt_err} for cid in perf_ids]
         notes = [tgt_err] + ([exc_note] if exc_note else [])
         report = _attach_shape_report(
@@ -726,8 +814,6 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
 
     ev_list, bl_list = evidence["evidence"], baseline["per_case"]
     notes = []
-    if no_target:   # 无验收目标：数照采、判定不做——措辞必须让人一眼看出「不是通过、也不是失败」
-        notes.append(_NO_TARGET_NOTE)
     if baseline.get("mock"):  # pc-1：mock 基线明标——防「纯 NPU 数据造出通过报告」被当真验收
         notes.append(_MOCK_BASELINE_NOTE)
     if exc_note:
@@ -775,25 +861,14 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
                          "note": f"非法计时数值 npu_us={npu} baseline_us={base}（须有限正数）"})
             continue
         raw = base / npu           # pc-2：先算原始比再比阈——round 只用于展示，不得把 <tgt 的比值救活成达标
-        # 无验收目标 → `达标` 记 None（**不是 False**）：没有目标就没有「未达标」这个结论。
-        # ratio 仍照记——它是实测导出的展示值，与有没有验收目标无关。
-        met = None if no_target else (raw >= tgt)
+        met = raw >= tgt
         ratio = round(raw, 3)
         row = {"case_id": cid, "scope": bscope, "npu_us": npu,
                "baseline": {"source": src, "us": base}, "ratio": ratio, "达标": met}
-        # T8 M6：消费 sub-policy 基线且达标 → 记风险（不允许干净 PASS）。
-        # 无目标时也把 policy_risk 如实挂在行上（基线口径有风险是事实），但**不进 risk_flags**——
-        # risk_flags 限定「达标了但基线口径可疑」，这里压根没有达标这个结论。
-        if b.get("policy_risk") and (met is True or no_target):
+        if met and b.get("policy_risk"):  # T8 M6：消费 sub-policy 基线且达标 → 记风险（不允许干净 PASS）
             row["policy_risk"] = b["policy_risk"]
-            if met is True:
-                risk_flags.add("sub_policy_timing")
-        # 小 shape 例外：仅对**判定为未达标**的行判资格（`met is None` 的无目标态不进——没有未达标可豁免）。
-        # ⚠ 诚实记账：收窄「无目标」入口后这条 `is False` 在**当前契约下测不出差异**——带
-        #   `small_shape_exception` 的 perf 块已被判 invalid_config，故 `no_target` 恒有 `exc is None`，
-        #   `is False` 与 `not met` 结果相同（mutation 验证里 M8 是唯一没被逮住的一条，原因就是这个）。
-        #   仍写 `is False` 是**防将来**：哪天有人放宽了入口，`not None` 会让无目标行凭空长出 exception。
-        if met is False and exc is not None:
+            risk_flags.add("sub_policy_timing")
+        if not met and exc is not None:  # 小 shape 例外：仅对未达标行判资格
             tags = (case_by_id.get(cid) or {}).get("tags") or []
             gap = round(abs(npu - base), 6)
             if ("小shape" in tags and max(npu, base) < exc["when_us_below"]
@@ -807,24 +882,16 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
                                   f"（达标记 False，挂人核）"}
         rows.append(row)
 
-    # 无验收目标 → `达标` 计数记 None（**不是 0**）：0 会被读成「一条都没达标」。
-    passed = None if no_target else sum(1 for r in rows if r.get("达标"))
+    passed = sum(1 for r in rows if r.get("达标"))
     blocked = sum(1 for r in rows if r.get("blocked"))
     exc_rows = [r for r in rows if r.get("exception")]
-    # `达标 is False` 而非 `not 达标`：无目标态的 None 不得被算成「真失败」。
     genuine_fail = sum(1 for r in rows
-                       if r.get("达标") is False and not r.get("blocked") and not r.get("exception"))
-    # status 优先级：incomparable > blocked(其它) > collected_no_target > fail(genuine) > exception > ok
-    # 证据完整性问题（scope 不可比 / 缺证据缺基线）仍排在无目标之前：任务书不要求性能，
-    # 不代表「采到的数据缺一半」这件事可以不报。
+                       if not r.get("达标") and not r.get("blocked") and not r.get("exception"))
+    # status 优先级：incomparable > blocked(其它) > fail(genuine) > exception > ok
     if scope_mismatch:
         status = "blocked_incomparable_timing_scope"
     elif blocked or dup:
         status = "blocked"
-    elif no_target:
-        # 采了数但没有验收目标可判。**既不是 ok 也不是 fail**——放在 fail/exception/ok 之前，
-        # 免得哪天有人改了上面的计数逻辑就悄悄落回 `ok`（那等于把「没要求」读成「通过了」）。
-        status = _NO_TARGET_STATUS
     elif genuine_fail:
         status = "fail"
     elif exc_rows:
@@ -836,7 +903,7 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
               "per_case": rows, "notes": notes,
               "summary": {"perf_cases": len(rows), "达标": passed, "blocked": blocked,
                           "status": status}}
-    _attach_shape_report(report, caseset, no_target=no_target)
+    _attach_shape_report(report, caseset)
     # M3：cannbot 报告三件套——**只读展示、零裁决影响**（上面 passed/blocked/status 已经算完了，
     # 这里只是把同一批 rows 再汇总一遍给人看）。dtype 聚合只挂在正常判定出口；
     # shape 报告在已有 case 行的早退路径也保留，用于如实展示 NPU 已采集值、baseline 缺失与 blocked，
@@ -859,10 +926,6 @@ def perf_compare(spec, caseset, evidence, baseline, expect_source=None, baseline
             report["custom_only_by_dtype"] = agg["custom_only_by_dtype"]
         report["summary"]["cases_above_threshold"] = agg["cases_above_threshold"]
         report["summary"]["cases_scored"] = agg["cases_scored"]
-        # 「无目标」绝不等于「自动通过」：一条可比测量都没采到时（全行 blocked，status 落 blocked），
-        # 额外点明「连数据都没有」，免得只读 status 的人以为「没要求所以一切正常」。
-        if no_target and not agg["cases_scored"]:
-            notes.append(_NO_TARGET_UNVERIFIED_NOTE)
     if risk_flags:
         report["summary"]["risk"] = sorted(risk_flags)
     if exc_rows:  # 唯一事实源：仅在有例外行时产 simulation
@@ -892,6 +955,9 @@ def main(argv):
     elif a.mock:
         baseline = mock_baseline(spec, evidence)
         print("[perf_compare] ⚠ 使用 mock 基线（--mock）——本地演示，产物不可当真通过验收")
+    elif perf_mode.resolve_spec_mode(spec) == perf_mode.MODE_MEASURE_ONLY:
+        baseline = None                  # §5.10 只测不比：本来就不该有基线，不打「挂起」误导语
+        print(f"[perf_compare] {perf_mode.MEASURE_ONLY_NOTE}")
     else:  # pc-1：默认不再静默 mock，缺基线 → None → 挂起（非 status=ok）
         baseline = None
         print("[perf_compare] ⚠ 未提供基线且未加 --mock → 挂起（不静默造 mock、不产假通过）")

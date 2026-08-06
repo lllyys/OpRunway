@@ -7,7 +7,7 @@
 ``aclDataType`` 在 ``acl/acl_base_rt.h``（不在 acl_base.h，注意）：BF16=27（:156）、FLOAT=0、
 FLOAT16=1、INT8=2、INT32=3、UINT8=4、INT16=6、INT64=9、DOUBLE=11、BOOL=12；``aclFormat`` 同文件
 ND=2；``aclrtMemcpyKind`` 在 ``acl/acl_rt.h`` H2D=1/D2H=2；``aclrtMemMallocPolicy`` HUGE_FIRST=0。
-其它 CANN 版本上仍应重核（ABI 通常稳定但不假定）。详见 doc/oprunway-torch-baseline-design.md §9.1。
+其它 CANN 版本上仍应重核（ABI 通常稳定但不假定）。详见 dev-doc/oprunway-torch-baseline-design.md §9.1。
 """
 
 from __future__ import annotations

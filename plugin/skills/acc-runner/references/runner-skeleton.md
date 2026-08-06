@@ -4,7 +4,7 @@
 >
 > **⚠ 准入状态（先看这条）**：本页描述的是 `spec.runner_form == "cpp"` → `--mode new_example` 这条通路。`runner_form` 受控词表为 `{cpp, aclnn_py, cpp_extension}`、**缺省 = `cpp_extension`**，而**验收裁决当前只出自 `cpp_extension`**（`run_workflow._ACCEPTANCE_RUNNER_FORMS`，见仓根 `AGENTS.md` §4）。`cpp` 仍跑得起来（须 `--allow-experimental-form`），但只产 `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"`），**不写** `acceptance.json` / `verdict.json`。所以下面整套骨架/四槽/自检**机制仍然有效**，服务修通路、复现问题、局部开发验证；**跑绿了不等于验收通过**，正式验收须走 `cpp_extension`。
 >
-> **⚠ 当前闭环范围（诚实说明，勿超范围声称）**：**代码闭环 = ops-<族> 仓 · opp 安装型产物 · aclnn 两段式接口**。⚠ 引擎的目录/vendor 后缀/build 旗标**已生成化**（`OPRUNWAY_OP_SRC`/`OPRUNWAY_VENDOR_SUFFIX`/`experimental/` 前缀），**不再硬编码 `experimental/math/$OP` + `${VEN}_math`**（2026-07-23 批 6b 调研更正）。真正的闸是三块：`build.sh --pkg --ops` 家族命令 · opp vendor 布局 · aclnn 链接。catlass（换构建体系+换接口）/ 双实现 **尚未支持**（放宽计划见 `doc/oprunway-batch6b-design.md`；⚠ 旧文提的 `OPRUNWAY_TARGET_DIR` 是幽灵变量、runner 通路无此配置）。
+> **⚠ 当前闭环范围（诚实说明，勿超范围声称）**：**代码闭环 = ops-<族> 仓 · opp 安装型产物 · aclnn 两段式接口**。⚠ 引擎的目录/vendor 后缀/build 旗标**已生成化**（`OPRUNWAY_OP_SRC`/`OPRUNWAY_VENDOR_SUFFIX`/`experimental/` 前缀），**不再硬编码 `experimental/math/$OP` + `${VEN}_math`**（2026-07-23 批 6b 调研更正）。真正的闸是三块：`build.sh --pkg --ops` 家族命令 · opp vendor 布局 · aclnn 链接。catlass（换构建体系+换接口）/ 双实现 **尚未支持**（放宽计划见 `dev-doc/oprunway-batch6b-design.md`；⚠ 旧文提的 `OPRUNWAY_TARGET_DIR` 是幽灵变量、runner 通路无此配置）。
 > **验证-才-信目前是「纪律」不是「代码强制门」**：`repo_adapter` 只检查 runner 文件是否存在，**不识别 unverified 标记**。真正的硬门要加 sidecar 契约（§4），未加前 agent/人**必须自觉执行验证**。
 >
 > 已跑通的三个 runner（`${OPRUNWAY_PLUGIN_ROOT}/samples/runners/oprunway_{isclose,sign,equal}_runner.cpp`，分别 unary/数值、binary/bool、binary/bool+attr）是**只读参考样例 / 生成器骨架种子**（非引擎组件、非运行时回退靶）。`samples/` 随插件分发（在插件内，2026-07-22 由仓根迁入）；`${OPRUNWAY_PLUGIN_ROOT}` = 本插件根中立变量，Claude 下等价 `${CLAUDE_PLUGIN_ROOT}`（harness 自动设），**Codex 等非 Claude 运行时须显式 `export OPRUNWAY_PLUGIN_ROOT=<插件根绝对路径>`**；写进可执行命令时用自兜底形式 `${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`。
@@ -74,7 +74,7 @@ main: 读 OPRUNWAY_CASES/manifest → 逐行 ParseLine+RunCase → 打印 OPRUNW
 | pr_facts.target_dir | 状态 | 做法 |
 |---|---|---|
 | ops-<族> 仓 · aclnn 两段式 · opp 安装型（is_close/sign/equal，含 experimental 与非 experimental 子树）| ✅ **已闭环** | `run_on_npu.sh` 走 `build.sh --pkg [--experimental] --ops=<basename OP_SRC> --soc --vendor_name`；目录/后缀由 `OPRUNWAY_OP_SRC`/`OPRUNWAY_VENDOR_SUFFIX` 生成 |
-| **换构建体系**（catlass `scripts/build.sh <example>`）/ **换接口**（非 aclnn 两段式）/ 双实现 | ⛔ **未支持** | 按 `doc/oprunway-batch6b-design.md` 扩「构建策略 + 接口分派」；当前遇到 → 记 gap、不假装能跑（⚠ 别指幽灵变量 `OPRUNWAY_TARGET_DIR`）|
+| **换构建体系**（catlass `scripts/build.sh <example>`）/ **换接口**（非 aclnn 两段式）/ 双实现 | ⛔ **未支持** | 按 `dev-doc/oprunway-batch6b-design.md` 扩「构建策略 + 接口分派」；当前遇到 → 记 gap、不假装能跑（⚠ 别指幽灵变量 `OPRUNWAY_TARGET_DIR`）|
 > ⚠ Equal 那次 = experimental 实现本身坏、非路径选错；但 legacy/双实现确要选对——**现在代码还没做，别声称能选**。
 
 ## 4. 验证-才-信（**当前是纪律；代码硬门待补 sidecar**）
@@ -147,7 +147,7 @@ def out_shape(in_shapes, attrs):
   不一致直接报错（不许「以其中一个为准」静默糊过去——本仓最高纪律：fail-closed 优于静默降级）。
 
 **非 elementwise 具体例子① · Pdist（归约）**：`(N, M)` 两两求距离 → 1D、长 `N*(N-1)/2`；
-attr `p` 只改距离范数、**不改形状**（依据 `doc/oprunway-op-shape-taxonomy.md` Pdist 行，该行标 `verified`，
+attr `p` 只改距离范数、**不改形状**（依据 `dev-doc/oprunway-op-shape-taxonomy.md` Pdist 行，该行标 `verified`，
 出处 `.../pdist/op_host/pdist_infershape.cpp`）：
 
 ```python
@@ -216,7 +216,7 @@ runner 侧对应地按逗号拆这个 token 成 `std::vector<int64_t>`，再按 
 ### 6.3 形状通了 ≠ 能验收（别越界声称）
 
 `out_shape` 只解「输出形状」这一道闸。同一批算子还卡在别处
-（依据 `doc/oprunway-op-shape-taxonomy.md` §3.5 及其 dtype 表，相关行标 `verified`）：
+（依据 `dev-doc/oprunway-op-shape-taxonomy.md` §3.5 及其 dtype 表，相关行标 `verified`）：
 
 - **dtype**：两个 Upsample 的**任务增量本身就是 `uint8`**、UpsampleNearest3d 还要 `double`，
   im2col 的 op_def 谱含 complex32/64 等 15 类；而 runner 侧只有 `float32/float16/bfloat16`（§0 dtype 行）

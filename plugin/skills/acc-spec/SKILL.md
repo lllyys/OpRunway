@@ -18,6 +18,10 @@ description: 把算子任务书（md 本地路径或链接）+ PR 链接，先�
 - **只看任务书自己**，不读 PR/op_def/header——「PR 里写了」补不了任务书的缺，那是 `task_pr_gaps` 的分工。
 - 逐项判 `satisfied` / `ambiguous` / `missing` / `not_applicable`，落 `<workdir>/taskdoc_validation.json`。
   判 `satisfied` **必须附任务书逐字原文**；凑不出原文就说明该项没明确，别摘一句沾边的凑数。
+- **交付范围还要产机器可读的 `deliverables` 清单**（逐件 `id`/`name`/`requirement`/`quotes`）。
+  任务书里每一处受控交付定性标记（必选/可选一类）都必须落进清单或显式豁免，漏一处
+  `delivery_scope` 就不得判 `satisfied`。⚠ 「以 X 为验收基准」（拿什么比对）和
+  「X 为必选交付项」（PR 必须包含什么）是两个问题，常写在同一句里，分开答。
 - primary 随后 inline 跑
   `python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/validate_taskdoc_input.py --root <workdir> --out taskdoc_validation_receipt.json`：
   它复核 18 项是否逐项对齐、引用是否真出自任务书、条件项适用性是否自洽、决策是否绑定当前
@@ -25,6 +29,11 @@ description: 把算子任务书（md 本地路径或链接）+ PR 链接，先�
   `BLOCKED` → 校验工件本身不可信，重做本步。
 - 这个门**不产验收裁决**（`acceptance_verdict` 恒 null），也不判任务书内容对不对，
   只挡「输入不足以验收」。
+- 过门之后、写 `task_pr_gaps` 之前，跑
+  `python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/reconcile_deliverables.py --root <workdir> --out deliverable_reconciliation.json`：
+  把清单里的**必选**交付件逐条对到 PR 的 `changed_files` / `key_files` 上。**不做模糊名字匹配**——
+  归宿由编排层/人在 `deliverable_mapping.json` 里逐条指认，脚本只验证；认不出的一律落成缺口，
+  绝不静默放行。退出码 `0` RECONCILED / `2` GAPS / `1` BLOCKED；gaps 是 `task_pr_gaps` 的事实来源。
 
 ## 步骤
 
@@ -84,4 +93,4 @@ description: 把算子任务书（md 本地路径或链接）+ PR 链接，先�
   ⚠ **mock 不产验收裁决**（C5，用户 2026-07-22 拍板）：mock 的「NPU 输出」= `golden.copy()`、精度按构造必过、性能是编的假数，它**物理上不再写 `acceptance.json` / `verdict.json`**（改产标明 NON-ACCEPTANCE 的 `dev_run_summary.json`，evidence 带 `evidence_grade="development"` + `acceptance_note`）。CP-B 的契约自检走 **`gen_cases.py --dry-run`**（**plan-only**：不调 `golden_fn`、不落 `.npy`、不产任何裁决；会加载执行 `golden.py` 取 `out_shape`（缺文件只记「未核」，文件在但坏了则当场抛）），**别再说「跑 mock 看裁决」**。
 
 **详规见** `references/taskdoc-to-spec.md`（目标 schema · 字段映射 · **§1.2 dtype 冲突以任务书为准(C4)** · **§1.3 torch 对标 / 多输出 / aclnn_py 形态怎么填** · verify_mode 决策树 · threshold 兜底 · 多算子拆分 · GPU 移植特例 · 自检清单）
-与 `references/taskdoc-validation.md`（**抽 spec 之前**的 18 项任务书输入校验判法 · 状态词表 · 条件项适用性 · `taskdoc_validation.json` schema）。
+与 `references/taskdoc-validation.md`（**抽 spec 之前**的 18 项任务书输入校验判法 · 状态词表 · 条件项适用性 · `taskdoc_validation.json` schema · **交付件清单与 PR 对账**）。

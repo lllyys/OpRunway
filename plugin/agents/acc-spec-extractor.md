@@ -46,6 +46,12 @@ description: OpRunway 验收 ②（CP-B）的子 agent——先按 18 项标准�
   三个 `conditional` 项要显式给 `applicable` 并说明依据，`not_applicable` 不是省事选项——
   归约取元素类算子几乎必然存在 tie，判 false 前想清楚。两个性能项的适用性由顶层 `perf_required` 统一决定，
   `perf_required=true` 须附任务书里那句性能要求的原文。
+- **交付范围还要产 `deliverables` 机器可读清单**（逐件 `id`/`name`/`requirement ∈ {required, optional}`/
+  支撑该判定的 `quotes`）。脚本会按契约受控词表扫任务书里全部交付定性标记（必选/可选一类），
+  **每一处都必须落进清单或写进 `deliverable_scan_exemptions`（附 rationale 说清它为什么不是交付件）**，
+  漏一处 `delivery_scope` 就不得判 `satisfied`。⚠ 判之前先把两个问题拆开：
+  「以 X 为验收基准」说的是拿什么当**参照物比对**，「X 为必选交付项」说的是 **PR 必须包含什么**——
+  任务书常把两者写在同一句里，同一个名字可以既是基准又是交付件，也可以只是其中之一。
 - **产出工件**：`workdir/taskdoc_validation.json`（schema 见 ref §4）。`decisions` **一律留空数组**——
   那是 primary 问过用户之后才追加的，本 agent 不得自行写入，也不得替用户判「这项其实不重要」。
 - **边界**：**不产阻断结论**。阻断/待确认清单由 primary inline 跑
@@ -54,6 +60,7 @@ description: OpRunway 验收 ②（CP-B）的子 agent——先按 18 项标准�
 - **验收（本 agent 自检）**：18 项恰好齐、id 与契约逐项对齐不多不少不重；每个 `satisfied` 都有能在任务书里
   逐字找到的 `quotes`；每个 `ambiguous`/`missing` 的 `rationale` 写成**能直接拿去问用户**的形式
   （模糊在哪、两种读法各是什么，而不是「不够清楚」）；条件项 `applicable` 与 status 自洽；
+  `deliverables` 已显式给出且逐件带引文，任务书里的交付定性标记一处不漏（要么进清单、要么显式豁免）；
   `source_facts_digest` 取自当前 `source_facts.json`。
 
 ### extract_spec

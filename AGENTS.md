@@ -21,6 +21,8 @@
 - Task 1：从任务书与被测来源（PR 或本地 checkout）生成覆盖功能、精度、性能的用例集；
 - Task 2：同一份用例在 NPU 上生成精度证据和性能数据；
 - Task 3：消费外部 GPU 数据，按同一 case 身份生成跨设备性能报告。
+  ⚠ **Task 3 是按需能力，不是每轮必做**：按 5.10，任务书即使写了「与 GPU 比对」也默认只做
+  NPU msprof 实测；**只有用户明确要求做 GPU 对比时**才走 Task 3。
 
 任务书是验收权威；被测来源（PR 或本地 checkout）和 op_def 是被测事实与能力证据，不能反过来覆盖任务书。
 
@@ -65,7 +67,7 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 ```
 
 ⚠ **`--source-facts` 在验收通路上必给，缺席直接拒跑**（不是可选参数）：三级门要拿它与 vendor build receipt
-的来源锚逐字对账，缺对照物时「收据自称 `pull_request`、事实其实是 `local_checkout`」这类伪装查不出来。
+的来源锚逐字对账，缺对照物时「收据自称 `gitcode_pr`、事实其实是 `local_snapshot`」这类伪装查不出来。
 它拒在 `os.makedirs` / staging / Task1 **之前**，不留半个产物目录。
 路径就是 **CP-A 取材那一步 `fetch_source.py --out <取材目录>` 产的那份**（`completeness.status` 须为 `complete`），
 **与 `--out <报告目录>` 不是同一个目录**——报告目录里那份是本轮 staging 出来的副本，是产物不是输入。
@@ -74,14 +76,21 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 常用脚本：
 
-- `fetch_source.py`：任务书 + 被测来源（`--pr` 或 `--local-repo --op-subdir`）→ 中立事实包；`completeness=blocked` 时非 0 退出（3）；
-- `dut_source.py`：被测来源判别式（`{pull_request, local_checkout}`）与 provenance 锚的**读侧唯一入口**；词表和“缺省即 `pull_request`”的兜底只留这一份实现；
-- `validate_taskdoc_input.py`：任务书输入校验门（18 项，抽 spec 之前）；
+- `fetch_source.py`：任务书 + 被测来源（`--pr <PR 链接>` 或 `--pr-snapshot <本地目录> [--target-dir <仓内相对目录>]`）→ 中立事实包；`completeness=blocked` 时非 0 退出（3）；
+- `source_provenance.py`：来源形态判别式（声明 `declared_source_form ∈ {git_pr, local_source}` × 实得 `provenance_kind ∈ {gitcode_pr, local_snapshot}`）与 provenance 锚绑定的**读侧唯一入口**；档位路由表、降级授权与「未声明按最严的 `git_pr` 对待」只留这一份实现；
+- `vendor_build_receipt.py`：`vendor_build_receipt` 的 schema 与**唯一校验处**（`validate()` / `summarize()`）；adapter、driver、三级门都调它，不许各抄一份；
+- `validate_taskdoc_input.py`：任务书输入校验门（18 项 + 交付件清单，抽 spec 之前）；
+- `reconcile_deliverables.py`：任务书必选交付件 ↔ PR 实际交付物对账（不做模糊名字匹配，认不出即落缺口）；
+- `perf_mode.py`：`spec.perf.mode` 口径（`ratio_gated` / `measure_only`）与 `measure_only_authorization` 的唯一真源（§5.10）；
+- `taskdoc_links.py` / `taskdoc_caseset.py`：任务书自带用例集与 golden 的取材、识别与接口映射；
 - `gen_cases.py <spec> --dry-run`：plan-only 用例计划自检，不产裁决；
 - `check_golden.py`：golden 来源契约；
 - `preflight_aclnn.py`：`aclnn_py` 静态接口预检；
 - `verify_aclnn_harness.py`：真机 harness 信任门；
-- `make_vendor_build_receipt.py`：`cpp_extension` 的 vendor `.so` 出身证明（`vendor_build_receipt`）**产出方**；**真跑 build**、`build.returncode` 是实测值，**没有「只记录不执行」模式**；`--library` 须被这次 build 改写过，本地通路另核构建前后两次「构建树 ↔ 指纹树」；
+- `make_vendor_build_receipt.py`：`cpp_extension` 的 vendor `.so` 出身证明（`vendor_build_receipt`）**产出方**；**真跑 build**、`build.returncode` 是 `subprocess.run` 实测值，**没有「只记录不执行」模式**；`--library` 须被这次 build 改写过，本地来源另核构建前后两次「构建树 ↔ 指纹树」。
+  ⚠ 另一条生产路径 `vendor_build_receipt.py` 的 CLI（`snapshot-digest` + `emit`）**自己不执行 build**，
+  `emit --returncode` 是**调用方自报值、不构成机器可核证据**；两条路径产的收据在 schema 上目前分不出来，
+  引用时必须点名是哪条产的（记账见 §9.4）；
 - `validate_preparation_state.py`：非真机复用收据；
 - `validate_acceptance_state.py`：验收证据复核门；含 build receipt ↔ source_facts 的来源锚对账（`--source-facts` 可显式指路）。
 
@@ -173,27 +182,33 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 | caseset | spec 出处 | 矩阵构成（仓内可证部分） | 例数 | PASS | FAIL | `gate.passed` | 确定性裁决 | 本仓留档的来源锚 |
 |---|---|---|---|---|---|---|---|---|
-| **①「仅按维」** | 真机当轮 per-run spec，**未入仓** | `8 dtype × 8 rank × 3 规模 × 6 属性`（cannbot 仅按维 overload） | **1152** | 1101 | **51** | `true` | `FAIL(精度)` | PR 通路（`local_checkout` 2026-08-05 才落地，此前只此一路），本仓一贯记为 `cann/ops-nn` PR6429 |
-| **②「按维 + global」** | 仓内 tracked 样例 `plugin/samples/specs/median.spec.json` | `8 dtype × 8 rank × 3 shape × 7 attr`（1 global + 6 by-dim） | **1344** | 1286 | **58** | `true` | `FAIL(精度)` | ⚠ **本仓留档的那次是 `local_checkout`**，锚是 `root_digest=c8867ce09f6e…`；**不是 PR 锚**（见 §9.3） |
+| **①「仅按维」** | 真机当轮 per-run spec，**未入仓** | `8 dtype × 8 rank × 3 规模 × 6 属性`（cannbot 仅按维 overload） | **1152** | 1101 | **51** | `true` | `FAIL(精度)` | PR 通路，本仓一贯记为 `cann/ops-nn` PR6429 |
+| **②「按维 + global」** | 仓内 tracked 样例 `plugin/samples/specs/median.spec.json` | `8 dtype × 8 rank × 3 shape × 7 attr`（1 global + 6 by-dim） | **1344** | 1286 | **58** | `true` | `FAIL(精度)` | ⚠ **本仓留档的那次走的是本地来源**，锚是当时那套 `local_checkout.root_digest=c8867ce09f6e…`；**不是 PR 锚**（见 §9.3） |
 
-⚠ **两条 caseset 的来源身份不同，别合并成一句「PR6429 的结果」**：② 本仓留档的那一轮走的是本地 checkout 通路，
-它的 `local_checkout.git.head_sha` **恰好**等于 MR 6429 的 head，但那是**信息字段、不是 provenance 锚**
-（`doc/oprunway-local-source-realmachine-validation.md` §4 已明确记这一点）。
-更早一轮出现过**同规模**的 1344 例 / 58 fail，但**本仓没有留下那一轮的 `dut_source` 与来源锚**——
+⚠ **两条 caseset 的来源身份不同，别合并成一句「PR6429 的结果」**：② 本仓留档的那一轮走的是本地来源通路，
+它记的 git head **恰好**等于 MR 6429 的 head，但那是**信息字段、不是 provenance 锚**
+（`dev-doc/oprunway-local-source-realmachine-validation.md` §4 已明确记这一点）。
+更早一轮出现过**同规模**的 1344 例 / 58 fail，但**本仓没有留下那一轮的来源形态与来源锚**——
 所以它只能作「同规模的另一次记录」并存，**不得**被当作 ② 的 PR 侧背书。
+
+⚠ **② 那个 `c8867ce09f6e…` 是历史值，现在复算不出来**：它由已被取代的
+`oprunway.local_subtree_merkle` v1 算出（§9.3）。当前实现是快照 merkle
+（`fetch_source._snapshot_merkle`），帧格式、排除集合、路径基准三处都不同，
+**对同一份源码必然算出另一个值**。
+引用 ② 时只能把它当作「那一轮留下的历史锚」，**不得**拿它去和今天任何一份收据对账。
 
 **证据分层，别把推断说成已证**：
 
 | 说法 | 证据强度 |
 |---|---|
 | ② 是 `8×8×3×7 = 1344 = case_target`，dtype 8 种、rank 1..8、shape `31/2047/262144` 加尾随 1 | ✅ **机器可复算**（直接读 `plugin/samples/specs/median.spec.json`） |
-| ① 是 `8 dtype × 8 rank × 3 规模 × 6 属性 = 1152` | ✅ 有留档（`doc/oprunway-execution-direction-review-checklist.md`），但只留了**计数结构** |
-| ② 相对 ① 多出来的正是 `global`（无 `dim`）那一档、共 192 条 | ⚠ **设计记录级**：`doc/oprunway-changes-brief.md`「1152 是 cannbot 仅按维 overload 的数量，任务书 global 接口另补 192 条，不能漏测」 |
+| ① 是 `8 dtype × 8 rank × 3 规模 × 6 属性 = 1152` | ✅ 有留档（`dev-doc/oprunway-execution-direction-review-checklist.md`），但只留了**计数结构** |
+| ② 相对 ① 多出来的正是 `global`（无 `dim`）那一档、共 192 条 | ⚠ **设计记录级**：`dev-doc/oprunway-changes-brief.md`「1152 是 cannbot 仅按维 overload 的数量，任务书 global 接口另补 192 条，不能漏测」 |
 | 「两者**只**差这一档，其余轴逐字段完全相同」 | ❌ **不可证**。① 的 per-run spec **未入仓**，仓内没有它的 dtype 清单、shape 数值、attr 逐档内容，**无法机校**。不得写成已证事实 |
 
 - ① 的 51 条失败**全部**含越界 `indicesOut=2147483647`，技术归因已闭环到 DUT 长轴浮点路径
-  （补证记录见 `doc/oprunway-changes-brief.md`）；⚠ ② 的 58 条**逐 case 分布本仓无记录**，别照抄这条归因；
-- ② 在本仓有**多次留档、全部走本地 checkout 通路**：`doc/oprunway-local-source-realmachine-validation.md`
+  （补证记录见 `dev-doc/oprunway-changes-brief.md`）；⚠ ② 的 58 条**逐 case 分布本仓无记录**，别照抄这条归因；
+- ② 在本仓有**多次留档、全部走本地 checkout 通路**：`dev-doc/oprunway-local-source-realmachine-validation.md`
   §6（2026-08-05 端到端验收）与 §8（2026-08-06「就地跑」形态的 A/B 两跑）。
   ⚠ 强度分层：§8 的 A/B **两份 `verdict.json` 字节级相同**（实测）；§6 那次与 §8 之间**只核到汇总计数相同
   （1344 例 / 58 fail），没做逐 case 对照**——别把它写成「三次逐 case 一致」。
@@ -213,7 +228,7 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 - 算术上 `1344 − 1152 = 192 = 8×8×3`（恰是新增的 `global` attr profile 那一档）、`58 − 51 = 7`。
   ⚠ **这只是算术相符，不是逐 case 对照结论**——本仓**没有**把两份逐 case 比对过的证据，
   **不得**据此宣称「① 的 51 条在 ② 里原样重现」或「② 只是多挂了 7 条」；
-- 任务书要求的无 `dim`（global）接口**只在 ② 里被覆盖**：`doc/oprunway-changes-brief.md` 原话是
+- 任务书要求的无 `dim`（global）接口**只在 ② 里被覆盖**：`dev-doc/oprunway-changes-brief.md` 原话是
   「1152 是 cannbot 仅按维 overload 的数量，任务书 global 接口另补 192 条，不能漏测」。
   所以论**任务书覆盖面** ② 更全，论**真机 per-run provenance** ① 是当时实跑的那份——两件事分开说，别互相顶替；
 - 两组数的**确定性裁决同为 `FAIL(精度)`**，`gate.passed=true` 只说明证据完整、判定链自洽，
@@ -251,7 +266,8 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 - build、pytest、用例生成、golden 生成、验收、profiler 全在 NPU 容器/目标环境执行；
 - **没有 NPU 的开发机上**不建 venv、不跑 pytest、不 import torch/numpy 做验收 compute；
-- 真机环境统一入口：`doc/oprunway-real-machine-environment.md`。
+- 真机环境统一入口：`dev-doc/oprunway-real-machine-environment.md`；
+- 「远程连」形态的实际连接元数据：本地忽略文件 `.oprunway/real-machine.env`。
 
 **先认清自己在哪种执行形态**，两种都是一等通路，不是「主 + 降级」：
 
@@ -263,7 +279,7 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 - ⚠ **`.oprunway/real-machine.env` 是「远程连」这一种形态的连接元数据，不是跑验收的通用硬前置。**
   **文件不存在不构成阻塞**：就地跑时本来就用不到它，编排层**不得**以「缺 `.oprunway/real-machine.env` /
   拿不到 SSH alias、容器名、远端工作目录」为由拒绝启动验收。两种形态各自要哪些环境变量，
-  见 `doc/oprunway-real-machine-environment.md` §1；
+  见 `dev-doc/oprunway-real-machine-environment.md` §1；
 - **保护根语义不随形态放松**：该文件**存在时**，每次新 session 做任何 clone/build/跑测/清理前**必须读取**其
   `OPRUNWAY_MACHINE_PROTECTED_ROOTS`。其中每个根及其全部子目录均为
   **只读保留现场**：禁止写入、覆盖、移动、删除或作为新执行目录；只允许经用户明确要求的只读核验。
@@ -291,11 +307,17 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 ### 5.6 文档落点与改动简表
 
-- 项目 Markdown、图、SVG 等文档统一放仓根 `doc/`；
+- 项目 Markdown、图、SVG 等**开发过程产物**统一放仓根 `dev-doc/`；
+  这里放的是设计稿、TODO、handoff、实测记录、环境说明——是**开发者写给自己和后来者看的**，
+  不是面向使用者的产品文档（那类若将来要有，另立目录，别混进来）；
 - 不写到工作区上层的 `markdown/`；
-- 每次落地后在 `doc/oprunway-changes-brief.md` 顶部追加一两句倒序摘要；
-- 当前交接以 `doc/oprunway-session-handoff-2026-08-05-evening.md` 为准，
-  旧 handoff（2026-08-05 / 2026-07-26 / 2026-07-13）只作历史材料。
+- 每次落地后在 `dev-doc/oprunway-changes-brief.md` 顶部追加一两句倒序摘要；
+- 当前交接**两份并列，都要读**，⚠ **合并后尚无单一权威 handoff**：
+  `dev-doc/oprunway-session-handoff-2026-08-05.md`（主线：GaussianBlur / ops-cv、`measure_only`、
+  任务书自带用例集）与 `dev-doc/oprunway-session-handoff-2026-08-05-evening.md`
+  （本地来源 + `runner_form` 准入收敛那条线）。两份各自成文于合并之前，**都不描述合并后的状态**——
+  下一轮开工第一件事是产一份合并后的新 handoff，届时这两份降为历史材料；
+  更早的 handoff（2026-08-04 / 2026-07-26 / 2026-07-13）只作历史材料。
 
 ### 5.7 push 前审修门
 
@@ -329,6 +351,71 @@ push 前，对自上次 push 以来将要发布的全部改动统一做一轮审
 - 通读与 query 并用；未读或未 settle 页面不得冒充门禁依据；
 - 当前运行规则与未 review canon 冲突时，显式记录张力，不静默覆盖。
 
+### 5.10 性能口径：只测 msprof 实测，不比 GPU
+
+用户 2026-08-03 明示的**全局原则，适用于所有类型的任务书**：
+
+- 任务书**对性能没有要求** → 只用 msprof 采 NPU 实测性能即可；
+- 任务书要求的是**与 GPU 比对**（如“以 OpenCV CUDA A100 为参考，ratio ≥ 0.45×”）→ **同样只用 msprof 测实测性能**，
+  不必真的去对比 GPU、不必获取 GPU 标杆数据；
+- 本轮改动属**对原算子新增 dtype 支持 / 扩展 shape·rank / 开发新算子**三类之一（用户 2026-08-05 明示）
+  → **同样只用 msprof 测实测性能**，不做任何同机比值对比。
+
+理由：GPU 标杆（A100 / OpenCV CUDA / ATK 双标杆）要么拿不到环境，要么获取成本远高于它带来的验收价值；
+卡在等 GPU 数据上会把整条流水线阻塞住。而 NPU 侧 msprof kernel-only 数据在**真机实跑、
+与 case 及本轮 provenance 绑定、采样与有效性检查都做过**的前提下，是可信、可复现的性能证据
+（这三个前提缺一条就不成立——「kernel-only」只说明计时范围，本身不构成可信性）。
+
+落地约束：
+
+- 不因缺 GPU 数据把结论落到 `BLOCKED_WAIT_GPU_BENCHMARK`；该终态只在用户明确要求做 GPU 对比时才用；
+- 性能维产出 = msprof 实测 kernel 耗时 + 分档说明，不是比值裁决；
+- 三种情形（`no_perf_requirement` / `gpu_comparison` / `change_class_no_perf_comparison`）**授权强度相同**：
+  都须在 spec 的 `perf.measure_only_authorization` 里给出 ground + cite + quote + `taskdoc_snapshot_sha256`，
+  缺一 fail-closed（受控词表见 `plugin/acc-common/perf_mode.py`）；
+- 走**改动类别**这一条时，任务书**若另写了比值 / 绝对门限 / 吞吐条款，该条款照旧强制进 `task_pr_gaps`
+  标「未验收」**，本轮仍只产 msprof 绝对耗时，禁止取 baseline、禁止算 ratio、禁止任何达标宣称
+  ——与上面 GPU 条款的处置逐字同形；改的是取证方式，不是条款可以不算数；
+- 报告须如实写“按用户口径只做 NPU msprof 实测，未做 GPU 标杆对比”，
+  **不得把它包装成“已达标 0.45×”**——没测的比值不能编（5.8）；
+- msprof 数据仍须真机真跑，不接受推算（5.3）；
+- **任务书的 GPU 比值条款按「未验收」记账**，不是「已通过」也不是「不适用」：
+  该条进 `task_pr_gaps`，最终裁决**不得**因为 NPU 侧有实测数就宣称整体通过。
+  任务书仍是验收权威（5.8）——本节改的是「怎么取证」，不是「条款可以不算数」。
+
+### 5.11 精度真值口径：任务书写 GPU 一律解析为同族 CPU
+
+用户 2026-08-05 明示的**全局解析规则，适用于所有任务书**：
+
+> 任务书里指定 GPU 真值口径的（如「以 OpenCV GPU / CUDA 为标杆」），
+> **就应该被解析成同族的 CPU 实现**。这是一类问题的统一读法，不是逐份的例外处理。
+
+⚠ **它与 5.10 是两件不同性质的事，别照搬**：
+
+| | 5.10（性能） | 5.11（精度真值） |
+|---|---|---|
+| 做什么 | **取消比较**——不取标杆、不算比值、不产达标结论 | **解析口径**——把 GPU 写法读成同族 CPU |
+| 任务书条款 | 仍然成立，按「未验收」进 `task_pr_gaps` | **已被满足**（CPU 就是它的正确读法） |
+| 报告怎么写 | 「未做 GPU 标杆对比」 | 「任务书写 GPU，按 §5.11 解析为同族 CPU」 |
+
+因此 5.11 下**不产生**「GPU 口径未验收」这类 gap——那是把解析规则误当成降级取证。
+反过来也不许含糊：报告须留**解析记录**（原文怎么写的、解析成了什么、依据本节），
+不得直接写成「任务书要求 CPU」把解析这一步抹掉（5.8：事实与推断分开）。
+
+落地约束：
+
+- 映射是**数据**（受控表，如 `opencv_cuda` → `opencv_cpu`），按**具体库**判，
+  绝不按算子身份分支（5.1）；**该库无 CPU 对应 → 仍 fail-closed**，不硬凑；
+- ⚠ **粗粒度声明解析不了，也不许猜**：`gpu_lib` 这类兜底值底下同时装着 OpenCV-CUDA、cuSPARSE、
+  cuDNN……把整族映射到某一个 CPU 库，等于把「任务书点名 cuSPARSE」悄悄换成 OpenCV CPU，
+  那不是「同族」而是换了个不相干的实现。任务书写得太泛时如实落 `gpu_lib` 并 **fail-closed**，
+  要人把真值口径细化到具体库后重判；
+- 解析后的 `method_kind` 必须落在 `precision_policy.RUNNABLE_METHOD_KINDS` 内，否则照旧 fail-closed；
+- ⚠ **阈值不随口径自动搬家**：任务书阈值若是按 NPU↔GPU 误差预算给的，套到 CPU↔NPU 上未必成立
+  （同一库的 CPU 与 GPU 实现并非逐位一致）。阈值来源与真值口径**不同源**时，
+  报告须标明该维「阈值来源与真值口径不同源」，由人确认；本轮 GaussianBlur 的阈值走
+  workflow 默认口径、与该风险无关。
+
 ---
 
 ## 6 · 仓目录
@@ -341,7 +428,7 @@ OpRunway/
 ├── .oprunway/
 │   ├── real-machine.env.example      # tracked 脱敏模板
 │   └── real-machine.env              # ignored 本地真实值
-├── doc/                              # 设计、TODO、handoff、环境说明
+├── dev-doc/                          # 开发过程产物：设计、TODO、handoff、实测记录、环境说明
 ├── plugin/
 │   ├── acc-common/                   # Layer 0/1 契约与确定性脚本
 │   ├── agents/                       # Layer 2 agent 薄壳
@@ -389,12 +476,12 @@ OpRunway/
 | 目标 | 入口 |
 |---|---|
 | CP-A..E 状态机、硬门、subagent 契约 | `plugin/AGENTS.md` + `plugin/skills/acceptance-workflow/SKILL.md` |
-| 设计与数据契约 | `doc/oprunway-design.md` |
-| 最新交接 | `doc/oprunway-session-handoff-2026-08-05-evening.md` |
-| 当前 TODO | `doc/oprunway-todo.md` |
-| 改动流水 | `doc/oprunway-changes-brief.md` |
-| 真机环境 | `doc/oprunway-real-machine-environment.md`（「远程连」另需 `.oprunway/real-machine.env`；「就地跑」不需要，§5.3）|
-| 本地来源通路真机验证 | `doc/oprunway-local-source-realmachine-validation.md` |
+| 设计与数据契约 | `dev-doc/oprunway-design.md` |
+| 最新交接 | ⚠ **两份并列**：`dev-doc/oprunway-session-handoff-2026-08-05.md` + `dev-doc/oprunway-session-handoff-2026-08-05-evening.md`（都成文于本次合并之前，见 §5.6）|
+| 当前 TODO | `dev-doc/oprunway-todo.md` |
+| 改动流水 | `dev-doc/oprunway-changes-brief.md` |
+| 真机环境 | `dev-doc/oprunway-real-machine-environment.md`（「远程连」另需 `.oprunway/real-machine.env`；「就地跑」不需要，§5.3）|
+| 本地来源真机验证（⚠ 记录的是已被取代的 `local_checkout` 实现，见 §9.3）| `dev-doc/oprunway-local-source-realmachine-validation.md` |
 | 已定决策 | `canon/decisions/`，先看 status/trust tier |
 | 人读蓝图/历史案例 | `plugin/workflows/`，冲突时以 acceptance-workflow skill 为准 |
 
@@ -402,7 +489,8 @@ OpRunway/
 
 ## 9 · 当前能力边界
 
-先看三条最容易踩的：正式验收只走 `cpp_extension`（§4）；本地 checkout 来源**已跑通真机验收并出裁决，但性能维仍未见证**（§9.3）；
+先看三条最容易踩的：正式验收只走 `cpp_extension`（§4）；本地代码是一等输入形态、
+**已跑通端到端全链，但「出性能比值裁决」仍未见证**（§9.3）；
 `fetch_source.py` 一改，既有 preparation 收据全部变 `MISS`（§9.4）。
 
 ### 9.1 真机已坐实的
@@ -411,6 +499,19 @@ OpRunway/
   PR 通路 per-run spec 的 1152 例（1101 PASS / 51 FAIL）与本地通路仓内样例 spec 的 1344 例（1286 PASS / 58 FAIL），
   两者均 `gate.passed=true`、确定性裁决同为 `FAIL(精度)`；**引用必须点名 spec 与来源身份**，完整口径与纪律见 §4.5；
   Elu/Silu 在 A5-950 有 18/18 非空例证据；
+- **GaussianBlur（ops-cv，2026-08-05，干净现场端到端）**：`runner_form=cpp_extension`、
+  `declared_source_form=local_source`（本地代码，非 PR）、`precision.case_source=taskdoc`
+  （用任务书自带的 169 条自测用例与 OpenCV CPU golden）。终态
+  `BLOCKED_GOLDEN_UNAVAILABLE`、`gate.passed=true`、`gate.errors={}`；
+  169 例中 164 例可判且**数值失败 0**，5 例因通道数超 OpenCV `CV_CN_MAX` 算不出真值 →
+  记为**结论空白**（非算子失败）；性能 16 条真实 kernel-only `npu_us`（`measure_only`，无标杆对比）。
+  ⚠ 这条**不是** PASS，是「能判的部分没查出问题、有一部分判不了」；
+- **本地代码是一等输入形态**（5.11 之外的另一条 2026-08-05 口径）：`--pr-snapshot` 即声明
+  `local_source`，`completeness=complete`、**无需**任何降级授权环境变量；
+  「声称测 PR 却只拿到快照」仍是降级、仍要显式授权，**未声明按最严的 `git_pr` 对待**；
+- **任务书自带用例集/golden 通路已闭环**：`taskdoc_links.py`（链接取材）→ `taskdoc_caseset.py`
+  （识别 + 接口映射 IR + golden wrapper）→ `gen_cases --taskdoc-caseset`。
+  任务书给了 case 就用它的，**识别不到即 BLOCKED，绝不回退自生成**；
 - Median 性能数据不是零数据：custom 50/50、`torch_npu` baseline 48/50 有效，48 对评分、35 对达到 `ratio >= 1.0`；
 - 2 个 BF16、`dim=1` baseline case 报 161002、custom 成功，按 baseline limitation 挂起，不归因 DUT；
 - 用户已确认 Median 任务书所称 `aclnnMedian` / `aclnnMedianDim` 小算子拼接版本等价于 Torch 对应接口，故性能 baseline 为同机 `torch_npu` 的 `torch.median`，无需另证等价、也不改为直调单个 ACLNN 接口；
@@ -440,101 +541,108 @@ OpRunway/
   再对它做 CP-F。⚠ 那是**新验收**，不能称作旧通路的漂移复测。
   编排层在 F0/F1 就不该起草这类 directive，别拖到 F3 才失败、白做冻结。
 
-### 9.3 被测来源：本地 checkout 已是一等通路（**已跑通真机验收并出裁决**）
+### 9.3 被测来源：本地代码是一等输入形态
 
-被测代码现在有两条**平级**来源通路，不是“主 + 降级”：
+被测代码有两条**平级**输入形态，不是“主 + 降级”。判别式**不是一个字段，是两条正交词表**——
+一条说“你声明要测什么”，一条说“工具真拿到了什么”，两者比对才是档位判据：
 
-| `dut_source` | 怎么取 | provenance 锚 | 这个锚证明什么 |
-|---|---|---|---|
-| `pull_request`（缺省） | `fetch_source.py --pr <PR 链接>` | `pr.head_sha` | 被测的是这个 PR 的这个 commit |
-| `local_checkout` | `fetch_source.py --local-repo <仓根> --op-subdir <算子子目录> [--base-ref <ref>] [--allow-dirty]` | `local_checkout.root_digest`（被测子树 Merkle 摘要，64 位 sha） | 被测算子子树的字节是这一份 |
+| 声明 `declared_source_form` | 实得 `provenance_kind` | 怎么取 | 档位 | provenance 锚 |
+|---|---|---|---|---|
+| `git_pr` | `gitcode_pr` | `fetch_source.py --pr <PR 链接>` | `complete`，不需授权 | `pr.head_sha`（恰 40 hex） |
+| `local_source` | `local_snapshot` | `fetch_source.py --pr-snapshot <本地目录> [--target-dir <仓内相对目录>]` | `complete`，**不需任何授权环境变量** | `snapshot_merkle_sha256`（恰 64 hex）+ `snapshot_scope` |
+| `git_pr` | `local_snapshot` | 本来要测 PR、只拿到快照 | `snapshot_only` = **降级** | 须 `OPRUNWAY_ALLOW_DEGRADED_PROVENANCE` 授权，并挂 `pr_head_unbound` |
+| `local_source` | `gitcode_pr` | —— | **一律拒**（声明本地却带着上游 commit） | —— |
 
-- `--pr` 与 `--local-repo` 互斥；任务书本来就同时收本地路径和 http(s) 链接，所以四种组合都成立；
-- 判别式受控词表 `{pull_request, local_checkout}`，读侧唯一入口是 `plugin/acc-common/dut_source.py`。
-  **缺省是 `pull_request`，且 PR 通路不写这个键**——老收据不会一夜失效，PR 通路的业务字段一个没动；
-- 两条通路的来源键（`head_sha` / `local_checkout.root_digest`）**互斥出现**，混装即拒，
-  堵的是“本地 provenance 伪装成 PR provenance”；
-- 摘要算法是 `oprunway.local_subtree_merkle` v1；排除规则以**结构化 + 版本化**的 `digest_policy`
-  写进收据，校验端逐字核对，不接受任意排除策略。
+- 读侧唯一入口是 `plugin/acc-common/source_provenance.py`；路由 allowlist `_ROUTES` 只装上表**前三行**
+  这三条可达路由（第四行不在表里 = 不可达 = 拒），**表外一律拒**。
+  adapter 侧另有 `source_mode ∈ {git_fetch, local_snapshot}`，换算表只在 `ADAPTER_KIND_TO_INTAKE` 一处；
+- `--pr` 与 `--pr-snapshot` 走 argparse 互斥组，同给在**解析期**退 2；
+- `--target-dir` **两条通路共用**，逐字采用、末段即 op 名，绕过 `_guess_op`。ops-cv 那种仓根一级算子目录
+  （`gaussian_blur/`）能跑通靠的就是它；
+- **未声明形态按最严的 `git_pr` 对待**：老事实包没有 `declared_source_form`，两侧都没有时仍落降级档、
+  仍要授权，与改动前逐字同规矩；一侧有一侧没有则 fail-closed（那不是同一次取材产的）；
+- `pr_head_unbound` 的语义**已分家**：`local_source` 形态的 `head_sha=null` 是**中性事实**，
+  走 `bindings["source_form_facts"]`（`local_source_has_no_upstream_commit` /
+  `..._file_set_is_subtree_not_pr_diff`），**不进降级台账**；只有「本该绑却没绑」才是降级。
+  ⚠ 报告须原样带着这些中性事实（不得声称已绑 PR head），但**不得**把它们渲染成「降级 / 未绑定」。
 
-⚠ **两条硬限制，别含糊过去：**
+⚠ **`--pr-snapshot` 收的是「一份没有 git 的目录快照」，工具完全不探 git。** 所以这条通路里
+不存在 dirty worktree、base-ref、git head 之类的概念，也没有对应的门——别去找。
 
-1. **`root_digest` 只覆盖 `op_subdir`**，不含仓级构建脚本、公共头文件。它证明的是
-   “被测算子子树的字节是这一份”，**不是**“整个构建输入闭包是这一份”。
-2. **性能维尚未跑到。** 本轮真机验收精度判 `fail`，Task3 按既有 fail-fast 跳过性能采集
-   （`skipped_precision_gate`）。所以“本地来源能出**性能**裁决”这件事仍未见证。
+**摘要与锚的覆盖面：**
 
-真机验证（a3 容器 `oprunway_prov`，2026-08-05；CANN 9.0.1、SoC `ascend910_93`、torch_npu 2.10.0）——
-任务书为 `cann/cann-ops-competitions` 的 `median_task_doc.md`，被测是 `cann/ops-nn` MR 6429
-（head `0290d61ac066f9f4e620a3714f5941e82dc4e72a`），算子子目录 `experimental/index/median`。
-两段都**只给本地路径、不带任何 PR id**。完整记录见 `doc/oprunway-local-source-realmachine-validation.md`。
+- intake 侧产**一个** merkle（`snapshot_merkle_sha256`），范围由 `--target-dir` 决定的 `snapshot_scope`；
+- vendor build receipt 侧绑**六项**：仓根 `repo` + `snapshot_subtree_scope` + `snapshot_sha256`（**整树** merkle）
+  + `snapshot_subtree_sha256`（**算子子树** merkle）+ 构建 argv + vendor ELF `sha256`；
+  `source_provenance.check_build_identity` 做「build 实得 ↔ 执行配置 ↔ CP-C0 bindings」三方对账，
+  且要求两侧 scope 相等才比 merkle；
+- ⚠ **跨端对账比的是子树那一个**：intake 的 `snapshot_merkle_sha256` ↔ 收据的 `snapshot_subtree_sha256`。
+  两侧**不同名**，别按同名比；
+- ⚠ **`gitcode_pr` 档必须反向排他**：`snapshot_sha256` / `snapshot_subtree_sha256` / `snapshot_subtree_scope`
+  须为缺席或 `None`，堵「本地 provenance 伪装成 PR provenance」。注意 payload 里 PR 通路**恒带**这些键、值为 `None`，
+  判据只能写「值是 `None`」，写成「键不存在」会把所有 PR 通路当场打死；
+- 排除目录名与算法版本以结构化的 `snapshot_digest_policy` 写进事实包（**本轮新增**），校验端逐字对账，
+  不接受任意排除策略。⚠ 在它落地之前，跳过目录名只落在 `pr_facts.snapshot_skipped_dir_names`、
+  **下游任何一道门都拿不到、也没人对账**——「摘要覆盖了什么」是暗知识。
 
-**① 取材段**（本地 vs 在线两条通路对比）：
+⚠ **摘要算法明确不覆盖三件事**（要修就得升 `algorithm_version` 并同步改三处实现，且**作废现存全部
+现场 merkle 与收据**——本轮没做）：
 
-| 项 | 结果 |
-|---|---|
-| 结果 | 一次跑到 `completeness=complete`、`reasons=[]` |
-| 与在线 PR 通路比对 | 任务书字节（`5d24e733…`，4379 字节）、`derived`（op=median / target_dir / interface_kind=aclnn_2stage / aclnn_entry=aclnnMedian / aclnn_headers）、`changed_files`（23 个）、`key_files`（6 份，路径集合与逐份摘要都同）**逐字相同** |
-| 唯一有意差异 | `taskdoc.source_locator`：本地记 `<local-file>`、在线记 URL |
-| 锚 | 本地 `root_digest=c8867ce09f6e…`、在线 `head_sha=0290d61ac066…`，不同且互不伪装 |
+1. **软链**：文件与目录软链一律跳过、不进摘要。`median.cpp -> /tmp/x.cpp` 这类替换后，
+   编译器跟随软链读到的字节完全不在覆盖内；
+2. **空目录**：不计入，空目录本身的增删不可见；
+3. **可执行位**：不入帧，`build.sh` 从 644 改到 755 会改变构建行为却不改摘要。
 
-**② 验收段**（同日续跑，`cpp_extension` 主链，构建 → 收据 → NPU 跑测 → 三级门 → 裁决 → 报告）：
+⚠ **两条硬限制仍在，别含糊过去：**
 
-| 项 | 结果 |
-|---|---|
-| 构建 | 从本地 checkout 全量 `build.sh --experimental --ops=median --soc=ascend910_93 --vendor_name=customize --pkg` + `.run --install-path`，成功；产物 `libcust_opapi.so`，`sha256=35ba85e0d719…` |
-| 收据 | `make_vendor_build_receipt.py` 产出，四道校验全绿；`source.dut_source=local_checkout`、`local_root_digest=c8867ce09f6e…`（与取材侧 `root_digest` 同值，三级门等值校验对上了） |
-| 裁决 | `op=Median`、`repo_mode=cpp_extension`、`state=FAILED_PRECISION`、**`overall=FAIL(精度)`** |
-| Task1 / Task2 | 生成 1344 例；Task2 `裁决=fail`，`{total:1344, fail:58, uncertain:0, risk:0, gaps:0, scaled:0, golden_blocked:0, contract_problems:0}` |
-| 验收门 | task1/task2 → **STATUS: PASSED**，`gate.errors={}`。⚠ 这说的是**证据完整、判定链自洽**，不是算子过了 |
-| Task3 性能 | **跳过**，`perf_status=skipped_precision_gate`（精度 fail → 既有 fail-fast） |
-| 三级门 | 带 `--source-facts` 复核 → **STATUS: PASSED** |
-| 报告 | `验收报告.md` 的「来源与 provenance」节按 `local_checkout` 如实渲染：强度声明、`root_digest`、worktree `clean`、git head（**标注为信息字段、非 provenance 锚**），并带两条 ⚠（无法证明对应任何具体 PR / 摘要只覆盖 `op_subdir`） |
+1. **子树 merkle 只覆盖 `snapshot_scope`。** 整树 `snapshot_sha256` 把仓级构建脚本、公共头文件
+   也纳进来了，比只有子树锚时严得多；但**跨端对账用的仍是子树那一个**，整树摘要目前只作记录。
+   ⚠ 落在 scope 之外的 `aclnn_headers` 是否会被静默漏掉（`_key_file_candidates` 只从 scope 内挑），
+   **本轮没有核到**，留作待查（见 §9.4）；
+2. **本地来源的性能维尚未见证到「出比值裁决」。** GaussianBlur 那轮性能走的是 `measure_only`
+   （16 条真实 kernel-only `npu_us`，无标杆对比，§5.10）；更早 Median 那轮精度判 `fail`、
+   Task3 按 fail-fast 跳过采集。所以“本地来源能出**性能比值**裁决”这件事仍未见证。
 
-⚠ **本次 1344 例 / 58 fail 与 1152 例 / 51 FAIL 不是同一个 caseset**：本次用仓内样例
-`plugin/samples/specs/median.spec.json`（= §4.5 的 caseset ②），其 torch_parity 矩阵比真机那次的
-per-run spec（caseset ①）多一档 `global` attr profile。**不许写成「复现了基线」。**
-两组数按 §4.5 **并列记录**，本次的价值是通路走通，不是刷新精度基线。
+**真机见证：**
 
-⚠ 收据对 `--library` 的绑定只到「该文件在构建窗口内被改写」（构建前后 `(mtime_ns, size, sha256)`
-三项全同即 fail-closed），**不证明它由那条 argv 产出**——一次 `touch` 就能骗过。
-（⚠ 本次真机跑测时产出方尚未接进编排、是手工调用；此后已补进
-`skills/acceptance-workflow/SKILL.md` 的 CP-C 与 `plugin/AGENTS.md`，编排层现在要求产这份收据。）
+- **GaussianBlur（ops-cv，2026-08-05，当前唯一的本地来源全链见证）**：
+  `runner_form=cpp_extension` + `declared_source_form=local_source` + `--pr-snapshot`，端到端跑通。
+  终态与逐项数字见 §9.1；
+- ⚠ **Median 那轮本地来源验收（2026-08-05，专用容器）是历史记录，其实现已被取代。**
+  那次走的是本轮合并中**已删除**的另一套实现（`dut_source.py` 判别式 + `local_checkout.root_digest`
+  + `oprunway.local_subtree_merkle` v1）。它留下的 `root_digest=c8867ce09f6e…` 由那套算法算出，
+  **在当前实现下复算不出来**（帧格式、排除集合、路径基准三处都不同）。
+  完整记录见 `dev-doc/oprunway-local-source-realmachine-validation.md`——读它时**只把结论当历史**，
+  里面的字段名、CLI 参数（`--local-repo` / `--op-subdir` / `--allow-dirty`）与锚值**都已不是现行口径**。
 
-降级与记账口径：
-
-- `changed_files` 算不出来时记字符串 `"unavailable"`，**不是 `[]`**——后者语义是“确实没有改动”，两件事必须分得开；
-- dirty worktree 默认 fail-closed；`--allow-dirty` 是逃生阀，全量记账 dirty 清单并在
-  `completeness.warnings` 落 `dirty_worktree_allowed`；
-- `completeness` 新增平级 `warnings`（**仅非空时写入**），`status` 仍只看 `reasons`。
-  warnings 是受控词表且与载重事实**双向一致**：少写 = 降级没留痕，多写 = 编造降级，两边都拒。
-  下游若有“`reasons` 空即万事大吉”的假设，要同步改成也看 `warnings`；
-- `fetch_source` 在 `completeness=blocked` 时**非 0 退出（3）**；原先是落盘就返回 0。
-
-**接入状态有三种，别把 ⛔ 读成 ✅。** 权威表在 `plugin/acc-common/dut_source.py` 模块头，以代码为准：
+**接入状态（权威表在 `plugin/acc-common/source_provenance.py` 模块头，以代码为准）：**
 
 | 消费者 | 状态 |
 |---|---|
 | `fetch_source`（产出方） | ✅ 已接 |
 | `validate_preparation_state` | ✅ 已接 |
-| `preflight_aclnn` | ✅ 已接（两条通路 signature 对账完全同形，只有锚不同） |
+| `preflight_aclnn` | ✅ 已接（`source_provenance.bind` 一处出判定，不再手写分支） |
 | `cpp_extension_adapter` / `cpp_extension_driver` / `validate_acceptance_state` | ✅ 已接（vendor build receipt 绑定，**主验收链**） |
-| `render_acceptance_markdown` | ✅ 已接（按 kind 渲染「来源与 provenance」节，强度如实标注） |
+| `render_acceptance_markdown` | ✅ 已接（按 `provenance_kind` + `declared_source_form` 渲染「来源与 provenance」节） |
 | `precision_retest_contract` / `precision_retest_runner` | ✅ 已接（CP-F 验收后复测） |
-| `verify_aclnn_harness` | ⛔ 判别式已接，但 `local_checkout` **显式 fail-closed** |
+| `verify_aclnn_harness` | ✅ 已接（`source_provenance.check_config_against_preflight` / `check_build_identity`） |
 
-⚠ 那个 ⛔ 是**结构性 fail-closed，不是待办**：`aclnn_adapter` 只能按 PR ref 在容器内重新取源 build，
-**构建端根本不存在可与 `local_root_digest` 对账的锚**；放它过去，收据看着齐全、绑定其实是空的。
-只要 `aclnn_adapter` 的取源方式不变，这道门就一直关着——**别当成“下一批补上就行”**。
-要走本地来源的完整验收，用已接通的 `cpp_extension` 主链（这也正是 §4 收敛后唯一准入的通路，
-且是上面「验收段」实测跑通的那条）。
+⚠ **最后一行是本轮翻案的：** 上一版仓规写着「`aclnn_adapter` 构建端根本不存在可与本地锚对账的锚，
+所以这道门对本地来源结构性 fail-closed、不是待办」。那个判断**已被证伪**——`aclnn_adapter._source_block`
+现在在容器内内联**同一份**摘要算法，算出 `SNAPSHOT_SHA256` / `SUBTREE_SHA256` 与 intake 侧对账
+（真机实测两端对同一目录得同值、2565 个文件）。原来的 `_require_pull_request_path` 是在拦一条已经跑通的通路，
+本轮已删。⚠ 连带纪律：**这份算法现在有三处实现**（`fetch_source._snapshot_merkle`、
+`vendor_build_receipt.take_snapshot_digest`、`aclnn_adapter` 里那段内联 python3），
+**改一处必须同步改三处**，否则症状是永远的 `SNAPSHOT_MISMATCH`。
 
-三级门里新增 build receipt ↔ source_facts 的来源锚对账，两步且顺序固定：
-先核两边 `dut_source` 一致，再核锚值相等。
+**三级门里的来源锚对账，两步且顺序固定：** 先核两边 `provenance_kind`（及两侧都在场时的
+`declared_source_form`）一致，再按形态核锚值相等。⚠ 第 0 步不等时的错误信息要说
+「来源身份被伪装」而不是「锚漂移」——两件事的排查方向完全不同。
 
 `source_facts.json` 缺席时**本门自己**的处置按通路分，这条是实测逼出来的：历史真机验收报告目录
 （`reports/<Op>-spec-<x>/`）里**本来就没有** `source_facts.json`，取材的 `--out` 与验收产物目录不是同一个。
-所以本地通路找不到就 BLOCKED，PR 通路沿用旧行为；`validate_acceptance_state` 的 `--source-facts` 可显式指路。
+所以 `local_snapshot` 找不到就 BLOCKED，`gitcode_pr` 沿用旧行为；`validate_acceptance_state` 的
+`--source-facts` 可显式指路。
 
 ✅ **那条伪装面已由编排层封死（2026-08-05）**，不再是待办：`run_workflow` 在**验收通路**上把
 `--source-facts` 定为**必填**（缺席即拒跑，且拒在 `os.makedirs` / staging / Task1 **之前**，不留半个产物目录），
@@ -544,10 +652,10 @@ per-run spec（caseset ①）多一档 `global` attr profile。**不许写成「
 `source_facts.json`，上一段那句「报告目录里本来就没有」只对**封死之前**的老产物成立。
 
 ⚠ **剩余面，如实记账**：**手工单独跑 `validate_acceptance_state` CLI 且不给 `--source-facts`** 时，
-PR 通路照旧不阻断（就是上一段那条按通路分的处置）。要判断一份产物是不是走了封死后的编排链，
+`gitcode_pr` 照旧不阻断（就是上一段那条按通路分的处置）。要判断一份产物是不是走了封死后的编排链，
 看它 `--out` 里有没有那份 staging 的 `source_facts.json`；没有就说明它是老产物或手工拼的，
 **别当成「门放行了」**。显式给了 `--source-facts` 却指不到文件**不属于**这条剩余面——那按
-`dut_source.SOURCE_FACTS_UNTRUSTED` 阻断。
+`SOURCE_FACTS_UNTRUSTED` 阻断（typo 不得退化成「没找到」）。
 
 ### 9.4 本轮的连带账单
 
@@ -556,28 +664,55 @@ PR 通路照旧不阻断（就是上一段那条按通路分的处置）。要�
 **这是正确行为，不是复用坏了**：看到 MISS 别去“修”复用逻辑，重跑取材即可。
 
 ⚠ **真机上留存的 aclnn harness 信任门收据会 revalidate 失败。** `verify_aclnn_harness._LOGIC_FILES`
-新增了 `dut_source.py`（判别式已成这道门的判定依赖，不纳入摘要就能被静默改），
+新增了 `source_provenance.py`：这道门直接 import 它并用它做 provenance 判定
+（`check_config_against_preflight` / `check_build_identity`），不纳入摘要就等于**判定逻辑有一半
+脱离逐字节哈希覆盖**——放松路由表或把严校改成 `.get()`，旧收据照样能 revalidate 通过。
 `bindings.logic_files` 因此整体变化。同样**是正确行为**：门的判定逻辑变了，旧收据不该继续算数。
 下一轮要走 `aclnn_py` 真机通路的话，先重跑这道门。
 
-⚠ **CP-F directive schema 是 breaking change，在途 attempt 全废。** 旧 `source_identity`
-只有 `{pr_head, build_receipt_sha256, runner_form}`，`pr_head` 被一条 `^[0-9a-f]{40,64}$` 校过——
-那个 40..64 的区间就是物理入口：填 64 位摘要能原样通过。现在 `pr_head` → `pr_head_sha`（恰 40 位）
-或 `local_root_digest`（恰 64 位），`repo` 两条通路都必填。**旧 directive 不能继续执行**，
+⚠ **CP-F directive schema 又一次 breaking change，在途 attempt 全废。** 这是**第二次**：
+上一轮把 `pr_head` 拆成 `pr_head_sha`（恰 40 位）/ 本地摘要（恰 64 位），本轮随判别式换词表
+再改一次——本地侧现在是 `snapshot_subtree_sha256`（恰 64 位）+ `snapshot_subtree_scope`，
+判别键改用 `provenance_kind`，`repo` 两条通路都必填。**旧 directive 一律不能继续执行**，
 要重新起草 directive、重新跑 F2。
+（历史成因值得记一笔：最早那版 `pr_head` 只有一条 `^[0-9a-f]{40,64}$`，那个 40..64 的区间
+就是物理入口——填 64 位摘要能原样通过。所以字段宽度校验要**恰好**，不要给区间。）
 
-CP-F 另新增 `directive.source_identity.repo` ↔ 首轮 build receipt `runner_binding.base_source_repo`
-的逐字对账（`repo` 原本“宣称有门其实没门”）。⚠ **只有 `cpp_extension` 通路有这个对照物**；
+CP-F 的 `directive.source_identity.repo` ↔ 首轮 build receipt `runner_binding.base_source_repo`
+逐字对账保留（`repo` 原本“宣称有门其实没门”）。⚠ **只有 `cpp_extension` 通路有这个对照物**；
 `cpp` / `aclnn_py` 的首轮 `execution_provenance` 里根本没有仓名字段，那两条通路的 `repo` 目前只作人工记账。
 写法不一致（同一个仓写成 `ops-nn` 与 `cann/ops-nn`）会直接 BLOCK。
 
-Roll 的迁移成本：spec 现写 `aclnn_py`，通路收敛后必须迁到 `cpp_extension` 才能做正式验收，
+⚠ **`vendor_build_receipt.py` CLI 的 `emit --returncode` 是自报值，不是实测值。** 该脚本
+全文没有 `import subprocess`、从不执行 build，而 schema 目前**记不下**「这个 0 是实跑还是自报」，
+消费者分辨不出。真跑那条路径是 `make_vendor_build_receipt.py`（§3）。
+在两者可机读区分之前（拟加 `build.evidence ∈ {executed, self_reported}` 并由验收门要求 `executed`），
+**引用任何一份收据都必须点名它由哪条路径产出**，不许含糊过去。
+⚠ 落地这条会让现存那些用 `emit` 产的现场收据在验收门上变红、需要重产——这是**待用户拍板的成本项**，
+本轮只记账、未落地。
+
+⚠ **`--target-dir` 收窄 scope 后，落在 scope 之外的 `aclnn_headers` 会不会被静默漏掉，本轮没有核到。**
+`_key_file_candidates(paths, tdir)` 只从 scope 内的 `paths` 里挑；scope 外的头文件是「消失」还是
+「报错」，需要到 `_apply_key_file_facts` / `_key_file_candidates` 实测一次再定。
+**在核清之前不得假定它已 fail-closed。**
+
+⚠ **§5.10 目前没有进 spec 的抽取路径。** `plugin/skills/acc-spec/references/taskdoc-to-spec.md`
+仍只教 extractor 写 `baseline` + `target_ratio`，对「任务书性能要求：无」没有任何指引。
+两条出路二选一：补这份 reference（教它写 `mode=measure_only` + 授权四件套），
+或靠性能口径解析处的 fail-closed 把这类 spec 拦成 BLOCKED、逼人手工补授权。**别两个都不做。**
+
+⚠ **张力，显式挂着不静默压平**：§4 把验收准入收敛到 `cpp_extension`（`aclnn_py` 不产裁决），
+而同期 `aclnn_py` 的 ops-cv / 仓根一级算子 / 非标准 stage2 通路刚被打通。
+样例上不冲突（GaussianBlur 的 spec 写的是 `cpp_extension`），但**若有 `aclnn_py` 的 spec 期望出正式裁决，
+准入门会当场拒它**。这需要用户拍板，本轮不自行改任何一侧。
+连带的 Roll 迁移成本照旧：其 spec 现写 `aclnn_py`，要做正式验收就得迁到 `cpp_extension`，
 而后者要 torch.ops 桥 + vendor ELF 构建收据，接入成本更高（详见 §4.3）。
 
 ### 9.5 仓形态与外部依赖
 
 - ops-<族>、标准 aclnn 两段式、用户态 opp 安装型是当前主要闭环；域外形态 fail-closed；
-- 外部 GPU consumer 已接入，真实 GPU 数据仍待提供，缺失时走 `BLOCKED_WAIT_GPU_BENCHMARK`。
+- 外部 GPU consumer 已接入，真实 GPU 数据仍待提供；**仅当用户明确要求做 GPU 对比**时，
+  缺数据才走 `BLOCKED_WAIT_GPU_BENCHMARK`——默认口径见 5.10，不因缺 GPU 数据挂起。
 
 ---
 
