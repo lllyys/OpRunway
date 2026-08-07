@@ -116,6 +116,38 @@ def _fake_torch(write_value=None):
 
 
 class CppExtensionDriverStaticTest(unittest.TestCase):
+    def _formal_pr_receipt(self, vendor, *, head=None):
+        sha = D._sha_file(vendor)
+        return {
+            "schema": "oprunway.vendor_build_receipt",
+            "schema_version": 2,
+            "status": "VERIFIED",
+            "source": {
+                "provenance_kind": "gitcode_pr",
+                "declared_source_form": "git_pr",
+                "repo": "https://example.invalid/ops.git",
+                "pr_head_sha": head or "a" * 40,
+            },
+            "build": {
+                "argv": ["bash", "build.sh", "--ops=x"],
+                "cwd": "/work/ops",
+                "returncode": 0,
+                "returncode_source": "measured",
+                "execution": {
+                    "started_at": "2026-08-07T00:00:00Z",
+                    "ended_at": "2026-08-07T00:00:01Z",
+                    "duration_s": 1.0,
+                    "library_path": vendor,
+                    "library_before": None,
+                    "library_after": {"mtime_ns": 1, "size": os.path.getsize(vendor),
+                                      "sha256": sha},
+                },
+            },
+            "artifact": {"library_path": vendor, "library_sha256": sha},
+            "degradations": [],
+            "producer": {"tool": "vendor_build_receipt.py", "logic_sha256": "f" * 64},
+        }
+
     def test_canonical_digest_is_key_order_independent(self):
         self.assertEqual(D._canonical_sha({"a": 1, "b": 2}),
                          D._canonical_sha({"b": 2, "a": 1}))
@@ -143,24 +175,7 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
             with open(vendor, "wb") as dst:
                 dst.write(b"vendor")
             receipt_path = os.path.join(td, "build-receipt.json")
-            receipt = {
-                "schema": "oprunway.vendor_build_receipt",
-                "schema_version": 1,
-                "status": "VERIFIED",
-                "source": {
-                    "repo": "https://example.invalid/ops.git",
-                    "pr_head_sha": "a" * 40,
-                },
-                "build": {
-                    "argv": ["bash", "build.sh", "--ops=x"],
-                    "cwd": "/work/ops",
-                    "returncode": 0,
-                },
-                "artifact": {
-                    "library_path": vendor,
-                    "library_sha256": D._sha_file(vendor),
-                },
-            }
+            receipt = self._formal_pr_receipt(vendor)
             with open(receipt_path, "w", encoding="utf-8") as dst:
                 json.dump(receipt, dst)
             with mock.patch.dict(
@@ -177,18 +192,7 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
                 dst.write(b"vendor")
             receipt_path = os.path.join(td, "receipt.json")
             with open(receipt_path, "w", encoding="utf-8") as dst:
-                json.dump({
-                    "schema": "oprunway.vendor_build_receipt",
-                    "schema_version": 1,
-                    "status": "VERIFIED",
-                    "source": {"repo": "repo", "pr_head_sha": "a" * 7},
-                    "build": {
-                        "argv": ["build"], "cwd": "/work", "returncode": 0},
-                    "artifact": {
-                        "library_path": vendor,
-                        "library_sha256": D._sha_file(vendor),
-                    },
-                }, dst)
+                json.dump(self._formal_pr_receipt(vendor, head="a" * 7), dst)
             with mock.patch.dict(
                     os.environ,
                     {"OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT":
@@ -248,27 +252,56 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
 
     def _local_snapshot_receipt(self, vendor):
         """无 `.git` 的本地快照：没有 PR head 可绑，改绑仓根 + 子目录 scope + 两个 merkle。"""
+        sha = D._sha_file(vendor)
+        root = os.path.join(os.path.dirname(vendor), "source")
+        scope = "witness_op"
         return {
             "schema": "oprunway.vendor_build_receipt",
             "schema_version": 2,
             "status": "VERIFIED",
-            "degradations": ["pr_head_unbound"],
+            "degradations": [],
             "source": {
                 "provenance_kind": "local_snapshot",
+                "declared_source_form": "local_source",
                 "repo": "repos/ops-witness-local-snapshot",
                 "pr_head_sha": None,
-                "snapshot_subtree_scope": "witness_op",
+                "snapshot_subtree_scope": scope,
                 "snapshot_sha256": "c" * 64,
                 "snapshot_subtree_sha256": "d" * 64,
             },
-            "build": {"argv": ["bash", "build.sh"], "cwd": "/w", "returncode": 0},
+            "build": {
+                "argv": ["bash", "build.sh"], "cwd": os.path.join(root, scope),
+                "returncode": 0, "returncode_source": "measured",
+                "execution": {
+                    "started_at": "2026-08-07T00:00:00Z",
+                    "ended_at": "2026-08-07T00:00:01Z", "duration_s": 1.0,
+                    "library_path": vendor, "library_before": None,
+                    "library_after": {"mtime_ns": 1, "size": os.path.getsize(vendor),
+                                      "sha256": sha},
+                },
+                "source_snapshot_digest": {
+                    "schema": "oprunway.source_snapshot_digest", "schema_version": 1,
+                    "taken_stage": "pre_build", "source_root": root,
+                    "subtree_scope": scope, "snapshot_sha256": "c" * 64,
+                    "snapshot_subtree_sha256": "d" * 64,
+                    "algorithm": {"tool": "fetch_source.py", "logic_sha256": "e" * 64},
+                    "file_count": 2, "subtree_file_count": 1,
+                    "skipped_symlink_count": 0, "subtree_skipped_symlink_count": 0,
+                },
+                "tree_state_at_emit": {
+                    "snapshot_sha256": "c" * 64,
+                    "snapshot_subtree_sha256": "d" * 64,
+                    "matches_pre_build": True, "subtree_matches_pre_build": True,
+                },
+            },
             "artifact": {
                 "library_path": vendor,
-                "library_sha256": D._sha_file(vendor),
+                "library_sha256": sha,
             },
+            "producer": {"tool": "vendor_build_receipt.py", "logic_sha256": "f" * 64},
         }
 
-    def test_local_snapshot_receipt_is_accepted_with_explicit_degradation(self):
+    def test_local_source_snapshot_receipt_is_accepted_without_git_head(self):
         with tempfile.TemporaryDirectory() as td:
             vendor = os.path.join(td, "lib.so")
             with open(vendor, "wb") as dst:
@@ -282,7 +315,8 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
         summary = D.vendor_build_receipt.summarize(receipt)
         self.assertIsNone(summary["pr_head_sha"])
         self.assertEqual(summary["provenance_kind"], "local_snapshot")
-        self.assertEqual(summary["degradations"], ["pr_head_unbound"])
+        self.assertEqual(summary["degradations"], [])
+        self.assertEqual(summary["declared_source_form"], "local_source")
 
     def test_local_snapshot_may_not_fabricate_a_pr_head(self):
         with tempfile.TemporaryDirectory() as td:
@@ -298,19 +332,40 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
                 with self.assertRaisesRegex(D.DriverError, "捏造 PR head"):
                     D._vendor_build_provenance(vendor)
 
-    def test_local_snapshot_must_account_the_degradation(self):
+    def test_local_source_snapshot_may_not_fabricate_a_degradation(self):
         with tempfile.TemporaryDirectory() as td:
             vendor = os.path.join(td, "lib.so")
             with open(vendor, "wb") as dst:
                 dst.write(b"vendor")
             receipt = self._local_snapshot_receipt(vendor)
-            del receipt["degradations"]
+            receipt["degradations"] = ["pr_head_unbound"]
             path = self._write_receipt(td, receipt)
             with mock.patch.dict(
                     os.environ,
                     {"OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT": path}):
                 with self.assertRaisesRegex(D.DriverError, "degradations"):
                     D._vendor_build_provenance(vendor)
+
+    def test_run_rejects_manifest_plan_drift_before_vendor_binding(self):
+        with tempfile.TemporaryDirectory() as td:
+            bundle, work = os.path.join(td, "bundle"), os.path.join(td, "work")
+            os.makedirs(bundle)
+            os.makedirs(work)
+            manifest = {"namespace": "oprunway_x", "spec_sha256": "a" * 64}
+            plan = {"caseset_sha256": D._canonical_sha({"cases": []}),
+                    "manifest_sha256": "0" * 64, "namespace": "oprunway_x",
+                    "cases": [{"symbol": "Witness"}]}
+            for path, value in (
+                    (os.path.join(bundle, "extension_manifest.json"), manifest),
+                    (os.path.join(work, "cpp_extension_invocation_plan.json"), plan),
+                    (os.path.join(work, "cpp_extension_caseset.json"), {"cases": []})):
+                with open(path, "w", encoding="utf-8") as out:
+                    json.dump(value, out)
+            with mock.patch.object(
+                    D, "_bind_vendor",
+                    side_effect=AssertionError("身份门之前必须先核 N2 manifest binding")):
+                with self.assertRaisesRegex(D.DriverError, "N2 闭合生成物"):
+                    D.run(bundle, work)
 
     def test_perf_plan_must_bind_exact_caseset_and_receipt(self):
         with tempfile.TemporaryDirectory() as td:

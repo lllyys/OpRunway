@@ -15,6 +15,7 @@ import hashlib, json, math, numbers, os, posixpath, re, shlex, shutil, subproces
 import numpy as np
 import precision_policy
 import gen_cases  # T7：复用 bf16 位级 codec（_f32_to_bf16_uint16/_bf16_uint16_to_f32）+ 原生 dtype 表
+import cpp_extension_identity
 
 _NP = {"float32": np.float32, "float16": np.float16, "bfloat16": np.float32}  # **runner-supported**（真机 new_example）；bf16 逻辑=fp32-on-grid（本轮扩，runner.cpp 加 ACL_BF16 分支）；int 仍 Track C
 _ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")     # case_id / host / op：拒空白、slash、shell 特殊字符
@@ -686,24 +687,12 @@ def parse_device_baseline(path, expected_source):
             item["execution_path"] = r["execution_path"]
         provenance = r.get("runtime_provenance")
         if expected_source == "aclnn_builtin":
-            if not isinstance(provenance, dict):
-                raise ValueError(f"{cid}: aclnn_builtin 基线缺 runtime_provenance——拒（fail-closed）")
-            required = provenance.get("required_symbol_lib")
-            symbols = provenance.get("symbols")
-            if (not isinstance(required, dict)
-                    or not isinstance(required.get("path"), str)
-                    or not isinstance(required.get("sha256"), str)
-                    or len(required["sha256"]) != 64):
+            try:
+                cpp_extension_identity.validate_required_symbol_library(provenance)
+            except cpp_extension_identity.CppExtensionIdentityError as ex:
                 raise ValueError(
-                    f"{cid}: aclnn_builtin 基线缺指定库 path/sha256 指纹——拒（fail-closed）")
-            if (not isinstance(symbols, list) or len(symbols) != 2
-                    or any(s.get("source") != "required_symbol_lib"
-                           or s.get("defining_lib") != required["path"] for s in symbols
-                           if isinstance(s, dict))
-                    or any(not isinstance(s, dict) for s in symbols)):
-                raise ValueError(
-                    f"{cid}: aclnn_builtin 两段式符号未完整证明由指定 libopapi.so 定义——"
-                    f"拒（fail-closed）")
+                    f"{cid}: aclnn_builtin workspace/stage2 双符号未完整证明"
+                    f"由指定 libopapi.so 定义：{ex}——拒（fail-closed）") from ex
         if provenance is not None:
             item["runtime_provenance"] = provenance
         per.append(item)

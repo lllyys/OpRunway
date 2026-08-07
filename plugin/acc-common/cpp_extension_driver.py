@@ -21,6 +21,7 @@ from pathlib import Path
 import tempfile
 
 import cann_version
+import cpp_extension_identity
 import vendor_build_receipt
 
 
@@ -229,7 +230,7 @@ def _vendor_build_provenance(vendor):
     receipt = _load(path)
     # driver 侧独立再校一遍，不依赖 adapter 已经校过——两处都是信任边界。
     try:
-        vendor_build_receipt.validate(
+        vendor_build_receipt.validate_for_acceptance(
             receipt, library_path=vendor, library_sha256=_sha_file(vendor),
             # 真机侧拿到的是 realpath 后的绝对路径，故按 realpath 比对；
             # 离线复核方比的是收据里逐字记录的字符串（不碰文件系统）。
@@ -311,16 +312,22 @@ def _bind_vendor(plan):
     # 顺序是判据的一部分：收据先核过这个 `.so` 的身份，才轮到从它反推符号来源包；
     # 而绑定必须发生在 CDLL / torch.ops 调用**之前**。
     custom_opp = bind_custom_opp_path(vendor)
-    symbols = sorted({"aclnn" + row["symbol"] for row in plan["cases"]})
-    handle = ctypes.CDLL(vendor, mode=ctypes.RTLD_GLOBAL)
-    missing = [symbol for symbol in symbols if not hasattr(handle, symbol)]
-    if missing:
-        raise DriverError(f"指定 vendor library 缺 DUT symbols: {missing}")
+    try:
+        handle, symbol_identity = cpp_extension_identity.attest(vendor, plan)
+        identity_summary = cpp_extension_identity.validate(
+            symbol_identity, invocation_plan=plan,
+            library_path=vendor, library_sha256=_sha_file(vendor))
+    except cpp_extension_identity.CppExtensionIdentityError as ex:
+        raise DriverError(f"DUT 双符号/实际定义 ELF 身份门未过：{ex}") from ex
     return handle, custom_opp, {
         "library_path": vendor,
         "library_sha256": _sha_file(vendor),
-        "symbols_owned": symbols,
-        "binding": "ctypes.CDLL(exact_path, RTLD_GLOBAL) before torch.ops.load_library",
+        # 兼容展示字段；不再是自报清单，而是从下方 dladdr 身份收据派生的双符号全集。
+        "symbols_owned": identity_summary["symbols"],
+        "symbol_identity": symbol_identity,
+        "binding": (
+            "ctypes.CDLL(exact_path, RTLD_GLOBAL) + per-symbol dladdr "
+            "before torch.ops.load_library"),
         "build_receipt": build_provenance,
         "build_receipt_sha256": _canonical_sha(build_provenance),
         # 源身份摘要（含 `degradations` 机读挂账）。它是 build_receipt 的**派生视图**，
@@ -647,6 +654,11 @@ def run(bundle, work):
     caseset = _load(os.path.join(work, "cpp_extension_caseset.json"))
     if plan.get("caseset_sha256") != _canonical_sha(caseset):
         raise DriverError("invocation plan 与 caseset 摘要不一致")
+    if (plan.get("manifest_sha256") != _canonical_sha(manifest)
+            or plan.get("namespace") != manifest.get("namespace")):
+        raise DriverError(
+            "invocation plan 与 N2 闭合生成物 manifest 的摘要/namespace 不一致；"
+            "正式 build receipt 不得消费漂移或 development 生成物")
     _handle, custom_opp, vendor = _bind_vendor(plan)
     build_argv, artifact = _build(bundle, manifest)
     torch, schemas, invocation = _invoke_all(
@@ -747,6 +759,23 @@ def run_perf_only(bundle, work):
             != receipt.get("bindings", {}).get("invocation_plan_sha256")
             or _canonical_sha(invocation) != cpp.get("invocation_plan_sha256")):
         raise DriverError("性能阶段 invocation plan 与第一阶段 receipt 漂移")
+    expected_vendor = receipt.get("vendor") or {}
+    expected_perf_vendor = {
+        key: expected_vendor.get(key)
+        for key in ("library_path", "library_sha256", "symbols_owned", "symbol_identity")
+    }
+    if vendor != expected_perf_vendor:
+        raise DriverError("性能计划的 vendor 双符号/实际 ELF 身份与精度阶段 receipt 漂移")
+    try:
+        cpp_extension_identity.validate(
+            vendor.get("symbol_identity"), invocation_plan=invocation,
+            library_path=vendor_path, library_sha256=vendor.get("library_sha256"))
+        _perf_vendor_handle, actual_identity = cpp_extension_identity.attest(
+            vendor_path, invocation)
+    except cpp_extension_identity.CppExtensionIdentityError as ex:
+        raise DriverError(f"性能阶段 DUT 身份门未过：{ex}") from ex
+    if actual_identity != vendor.get("symbol_identity"):
+        raise DriverError("性能阶段实际加载的双符号定义者与精度阶段身份收据漂移")
     os.environ["OPRUNWAY_ACLNN_REAL"] = "1"
     from aclnn_runtime import perf_msprof as PM
     return PM.collect(

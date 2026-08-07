@@ -1037,7 +1037,9 @@ class TestCppExtensionCollectorRoute(unittest.TestCase):
     def test_wrapper_uses_exact_elf_vendor_and_current_stream_mstx(self):
         wrapper = PM._CPP_EXTENSION_WRAPPER
         self.assertIn('torch.ops.load_library(artifact)', wrapper)
-        self.assertIn('ctypes.CDLL(vendor_path, mode=ctypes.RTLD_GLOBAL)', wrapper)
+        self.assertIn('D.cpp_extension_identity.attest(vendor_path, invocation)', wrapper)
+        self.assertIn('D.cpp_extension_identity.validate(', wrapper)
+        self.assertNotIn('hasattr(handle', wrapper)
         self.assertIn("D.materialize_invocation(", wrapper)
         self.assertIn("torch.npu.current_stream().npu_stream", wrapper)
         self.assertNotIn("time.perf_counter", wrapper)
@@ -1065,6 +1067,19 @@ class TestCppExtensionCollectorRoute(unittest.TestCase):
                 caseset_path = os.path.join(root, "caseset.json")
                 with open(caseset_path, "w", encoding="utf-8") as out:
                     json.dump({"op": "X", "cases": [{"id": "c0"}]}, out)
+                vendor_path = os.path.join(
+                    root, "vendors", "pkg", "op_api", "lib", "libcust_opapi.so")
+                os.makedirs(os.path.dirname(vendor_path))
+                with open(vendor_path, "wb") as out:
+                    out.write(b"fixture")
+                invocation = {"cases": [{"case_id": "c0", "symbol": "X"}]}
+                invocation_path = os.path.join(root, "cpp_extension_invocation_plan.json")
+                with open(invocation_path, "w", encoding="utf-8") as out:
+                    json.dump(invocation, out)
+                invocation_sha = PM.hashlib.sha256(json.dumps(
+                    invocation, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+                identity = {"schema": "fixture.identity"}
                 plan = {
                     "op": "X",
                     "custom_kind": "cpp_extension",
@@ -1074,13 +1089,28 @@ class TestCppExtensionCollectorRoute(unittest.TestCase):
                     "baseline": "torch_npu",
                     "torch_baseline": {
                         "api": "torch.x", "positional": [], "keyword": {}},
-                    "cpp_extension": {"artifact": {"path": "x.so"}},
+                    "cpp_extension": {
+                        "artifact": {"path": "x.so"},
+                        "invocation_plan": "cpp_extension_invocation_plan.json",
+                        "invocation_plan_sha256": invocation_sha,
+                        "vendor": {
+                            "library_path": vendor_path,
+                            "library_sha256": "2" * 64,
+                            "symbols_owned": ["aclnnXGetWorkspaceSize", "aclnnX"],
+                            "symbol_identity": identity,
+                        },
+                    },
                     "cases": ["c0"],
                 }
                 with mock.patch.object(
                         PM, "resolve_plan_dut_lib",
                         side_effect=AssertionError("cpp_extension 不应解析 aclnn dut_lib")), \
-                     mock.patch.object(PM, "measure_side", fake_measure_side):
+                     mock.patch.object(PM, "measure_side", fake_measure_side), \
+                     mock.patch.object(
+                         PM.cpp_extension_identity, "file_sha256", return_value="2" * 64), \
+                     mock.patch.object(PM.cpp_extension_identity, "validate"), \
+                     mock.patch.object(
+                         PM.cpp_extension_identity, "attest", return_value=(object(), identity)):
                     doc = PM.collect(
                         caseset_path, root, plan, os.path.join(root, "out.json"))
         finally:
@@ -1088,11 +1118,75 @@ class TestCppExtensionCollectorRoute(unittest.TestCase):
             if old is not None:
                 os.environ["OPRUNWAY_ACLNN_REAL"] = old
         custom = next(row for row in captured if row["side"] == "custom")
+        baseline = next(row for row in captured if row["side"] == "baseline")
         self.assertEqual(custom["custom_kind"], "cpp_extension")
         self.assertEqual(
             custom["cfg_extra"]["cpp_extension"], plan["cpp_extension"])
+        self.assertEqual(
+            baseline["cfg_extra"]["exclude_dut_vendor_root"],
+            os.path.join(root, "vendors", "pkg"))
         self.assertEqual(doc["custom_kind"], "cpp_extension")
         self.assertEqual(doc["custom_provenance"], plan["cpp_extension"])
+
+    def test_same_source_builtin_baseline_is_blocked_before_measurement(self):
+        """DUT 与 aclnn_builtin 对到同一 ELF 时，一次 msprof 都不能启动。"""
+        from unittest import mock
+
+        old = os.environ.get("OPRUNWAY_ACLNN_REAL")
+        os.environ["OPRUNWAY_ACLNN_REAL"] = "1"
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                caseset_path = os.path.join(root, "caseset.json")
+                with open(caseset_path, "w", encoding="utf-8") as out:
+                    json.dump({"op": "X", "cases": [{"id": "c0"}]}, out)
+                vendor_path = os.path.join(
+                    root, "vendors", "pkg", "op_api", "lib", "libcust_opapi.so")
+                os.makedirs(os.path.dirname(vendor_path))
+                with open(vendor_path, "wb") as out:
+                    out.write(b"fixture")
+                invocation = {"cases": [{"case_id": "c0", "symbol": "X"}]}
+                with open(os.path.join(
+                        root, "cpp_extension_invocation_plan.json"),
+                        "w", encoding="utf-8") as out:
+                    json.dump(invocation, out)
+                invocation_sha = PM.hashlib.sha256(json.dumps(
+                    invocation, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+                identity = {
+                    "library": {"path": vendor_path, "sha256": "2" * 64},
+                }
+                plan = {
+                    "op": "X", "custom_kind": "cpp_extension", "device": 0,
+                    "warmup": 1, "repeat": 2, "baseline": "aclnn_builtin",
+                    "cpp_extension": {
+                        "artifact": {"path": "x.so"},
+                        "invocation_plan": "cpp_extension_invocation_plan.json",
+                        "invocation_plan_sha256": invocation_sha,
+                        "vendor": {
+                            "library_path": vendor_path,
+                            "library_sha256": "2" * 64,
+                            "symbols_owned": ["aclnnXGetWorkspaceSize", "aclnnX"],
+                            "symbol_identity": identity,
+                        },
+                    },
+                    "cases": ["c0"],
+                }
+                with mock.patch.object(
+                        PM.cpp_extension_identity, "file_sha256", return_value="2" * 64), \
+                     mock.patch.object(PM.cpp_extension_identity, "validate"), \
+                     mock.patch.object(
+                         PM.cpp_extension_identity, "attest", return_value=(object(), identity)), \
+                     mock.patch.object(PM, "cann_builtin_libopapi", return_value=vendor_path), \
+                     mock.patch.object(
+                         PM, "measure_side",
+                         side_effect=AssertionError("同源门之前不得启动 msprof")) as measure:
+                    with self.assertRaisesRegex(PM.PerfCollectError, "同源"):
+                        PM.collect(caseset_path, root, plan, os.path.join(root, "out.json"))
+                measure.assert_not_called()
+        finally:
+            os.environ.pop("OPRUNWAY_ACLNN_REAL", None)
+            if old is not None:
+                os.environ["OPRUNWAY_ACLNN_REAL"] = old
 
 
 class TestLiveCollectorAlignment(unittest.TestCase):
@@ -1205,12 +1299,18 @@ class TestBaselineDocRoundTrip(unittest.TestCase):
     def test_aclnn_builtin_round_trip_preserves_library_provenance(self):
         import repo_adapter as RA
         lib = "/opt/ascend/lib64/libopapi.so"
+        common = {
+            "source": "required_symbol_lib",
+            "resolved_via": lib,
+            "defining_lib": lib,
+            "defining_lib_verified": True,
+            "lib": lib,
+            "lib_sha256": "a" * 64,
+        }
         provenance = {"required_symbol_lib": {"path": lib, "sha256": "a" * 64},
                       "symbols": [
-                          {"symbol": "aclnnMedian", "source": "required_symbol_lib",
-                           "defining_lib": lib},
-                          {"symbol": "aclnnMedianGetWorkspaceSize",
-                           "source": "required_symbol_lib", "defining_lib": lib}]}
+                          {**common, "symbol": "aclnnMedian"},
+                          {**common, "symbol": "aclnnMedianGetWorkspaceSize"}]}
         rec = PM.build_perf_record(
             "c0",
             {"behavior": PM.BEHAVIOR_NPU, "us": 10.0, "scope": "kernel_only",
@@ -1226,6 +1326,39 @@ class TestBaselineDocRoundTrip(unittest.TestCase):
             baseline = RA.parse_aclnn_builtin_baseline(path)
         self.assertEqual(baseline["source"], "aclnn_builtin")
         self.assertEqual(baseline["per_case"][0]["runtime_provenance"], provenance)
+
+    def test_aclnn_builtin_parser_rejects_per_symbol_fingerprint_forgery(self):
+        import repo_adapter as RA
+        lib = "/opt/ascend/lib64/libopapi.so"
+        common = {
+            "source": "required_symbol_lib",
+            "resolved_via": lib,
+            "defining_lib": lib,
+            "defining_lib_verified": True,
+            "lib": lib,
+            "lib_sha256": "b" * 64,
+        }
+        provenance = {
+            "required_symbol_lib": {"path": lib, "sha256": "a" * 64},
+            "symbols": [
+                {**common, "symbol": "aclnnMedian"},
+                {**common, "symbol": "aclnnMedianGetWorkspaceSize"},
+            ],
+        }
+        rec = PM.build_perf_record(
+            "c0",
+            {"behavior": PM.BEHAVIOR_NPU, "us": 10.0, "scope": "kernel_only",
+             "execution_path": PM.PATH_DEVICE_KERNEL},
+            {"behavior": PM.BEHAVIOR_NPU, "us": 20.0, "scope": "kernel_only",
+             "execution_path": PM.PATH_DEVICE_KERNEL,
+             "runtime_provenance": provenance})
+        doc = PM.build_baseline_document([rec], op="Median", source="aclnn_builtin")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "_aclnn_builtin_baseline.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(doc, f)
+            with self.assertRaisesRegex(ValueError, "双符号"):
+                RA.parse_aclnn_builtin_baseline(path)
 
 
 class TestParseBaselineFailClosed(unittest.TestCase):

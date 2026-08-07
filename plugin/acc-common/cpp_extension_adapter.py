@@ -19,6 +19,7 @@ from pathlib import Path
 import cann_version
 import content_address
 import cpp_extension_codegen
+import cpp_extension_identity
 import perf_mode
 import vendor_build_receipt
 
@@ -385,6 +386,7 @@ def _write_perf_plan(caseset, work, evidence, receipt):
                 "library_path": receipt["vendor"]["library_path"],
                 "library_sha256": receipt["vendor"]["library_sha256"],
                 "symbols_owned": receipt["vendor"]["symbols_owned"],
+                "symbol_identity": receipt["vendor"]["symbol_identity"],
             },
         },
     }
@@ -435,7 +437,7 @@ def _validate_vendor_build_receipt(vendor):
     #   逐条判据都在 `vendor_build_receipt` 一处解释）；与 `source_facts` 的**来源身份一致性**
     #   前置校验在三级门（`validate_acceptance_state`）里做——adapter 手上没有 source_facts。
     try:
-        summary = vendor_build_receipt.validate(
+        summary = vendor_build_receipt.validate_for_acceptance(
             build_receipt,
             library_path=vendor.get("library_path"),
             library_sha256=vendor.get("library_sha256"))
@@ -586,9 +588,21 @@ def validate_receipt(work, caseset):
         raise CppExtensionAdapterError("Extension runtime schemas 与生成 entrypoints 不一致")
     vendor = receipt.get("vendor")
     if not isinstance(vendor, dict) or not vendor.get("library_path") \
-            or not vendor.get("library_sha256") or not vendor.get("symbols_owned"):
-        raise CppExtensionAdapterError("receipt.vendor 缺库路径/摘要/符号归属")
+            or not vendor.get("library_sha256") or not vendor.get("symbols_owned") \
+            or not isinstance(vendor.get("symbol_identity"), dict):
+        raise CppExtensionAdapterError(
+            "receipt.vendor 缺库路径/摘要/双符号实际定义 ELF 身份")
     _require_sha("receipt.vendor.library_sha256", vendor["library_sha256"])
+    try:
+        identity = cpp_extension_identity.validate(
+            vendor["symbol_identity"], invocation_plan=plan,
+            library_path=vendor["library_path"],
+            library_sha256=vendor["library_sha256"])
+    except cpp_extension_identity.CppExtensionIdentityError as ex:
+        raise CppExtensionAdapterError(f"receipt.vendor.symbol_identity: {ex}") from ex
+    if vendor.get("symbols_owned") != identity["symbols"]:
+        raise CppExtensionAdapterError(
+            "receipt.vendor.symbols_owned 未由双符号实际定义 ELF 身份收据逐字派生")
     # 符号来源包 ↔ vendor ELF 必须同源：按同一条布局规则从 library_path 重算，与 driver
     # 实际设进环境的那个值逐字对账。对不上 = 收据说不清「本轮的 aclnnXxx 从哪来」。
     try:

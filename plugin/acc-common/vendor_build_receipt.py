@@ -533,6 +533,118 @@ def validate(receipt, *, library_path, library_sha256, normalize_path=False):
     return summary
 
 
+def validate_for_acceptance(
+        receipt, *, library_path, library_sha256, normalize_path=False):
+    """正式验收严格档：只接受当前生产路径可证明的 build/tree 事实。
+
+    :func:`validate` 保留历史解释兼容：老收据缺 ``returncode_source`` 时仍可读，但摘要明确记
+    ``unproven_legacy``。正式 driver/adapter/三级门不能把“可读”误当“足以出新裁决”，故在
+    这里再要求：
+
+    * schema v2 + 当前 producer 标记；
+    * build returncode 的来源确为 ``subprocess.run`` 实测；
+    * 构建窗口后的 ELF 状态与收据 artifact 逐字段相扣，且不是未改写的旧文件；
+    * 本地快照额外有 build 前 digest 凭据和 build 后子树复核，scope/merkle 与 source 段逐字一致；
+    * PR 通路以 commit head 为锚，本来没有本地 tree 可复核，反向禁止伪装 tree 字段。
+
+    这不会重判历史产物；它只决定一份收据能否支撑**新建** acceptance receipt。
+    """
+    summary = validate(
+        receipt, library_path=library_path, library_sha256=library_sha256,
+        normalize_path=normalize_path)
+    if receipt.get("schema_version") != SCHEMA_VERSION:
+        raise VendorBuildReceiptError(
+            f"正式验收只接受当前 vendor build receipt v{SCHEMA_VERSION}；"
+            "历史 v1 可解释但没有完整来源形态/生产证明，须重跑 build 产收据")
+    if summary.get("build_returncode_source") != RETURNCODE_SOURCE_MEASURED:
+        raise VendorBuildReceiptError(
+            "正式验收要求 build.returncode_source='measured'；"
+            "unproven_legacy 只可解释历史，不能支撑新裁决")
+    producer = receipt.get("producer")
+    if (not isinstance(producer, dict)
+            or producer.get("tool") != _PRODUCER_TOOL
+            or not isinstance(producer.get("logic_sha256"), str)
+            or _HEX64.fullmatch(producer["logic_sha256"]) is None):
+        raise VendorBuildReceiptError(
+            "正式验收缺当前 vendor_build_receipt.py 生产者标记/逻辑指纹")
+    build = receipt["build"]
+    execution = build.get("execution")
+    artifact = receipt["artifact"]
+    if not isinstance(execution, dict):
+        raise VendorBuildReceiptError("正式验收缺 build.execution 构建窗口实测记录")
+    before, after = execution.get("library_before"), execution.get("library_after")
+    normalized_artifact = artifact.get("library_path")
+    if normalize_path and isinstance(normalized_artifact, str):
+        normalized_artifact = os.path.realpath(normalized_artifact)
+    normalized_execution = execution.get("library_path")
+    if normalize_path and isinstance(normalized_execution, str):
+        normalized_execution = os.path.realpath(normalized_execution)
+    if (normalized_execution != normalized_artifact
+            or not isinstance(after, dict)
+            or after.get("sha256") != artifact.get("library_sha256")
+            or not isinstance(after.get("mtime_ns"), int)
+            or not isinstance(after.get("size"), int)
+            or after["size"] < 0
+            or (before is not None and (not isinstance(before, dict) or before == after))):
+        raise VendorBuildReceiptError(
+            "正式验收的 build.execution 未证明本轮改写的 ELF 与 artifact 路径/指纹逐字一致")
+
+    kind = summary["provenance_kind"]
+    digest = build.get("source_snapshot_digest", _ABSENT)
+    tree = build.get("tree_state_at_emit", _ABSENT)
+    if kind == PROVENANCE_GIT_PR:
+        if digest is not _ABSENT or tree is not _ABSENT:
+            raise VendorBuildReceiptError(
+                "gitcode_pr 收据不得混装 local_snapshot 的 tree digest 字段")
+        return summary
+
+    if not isinstance(digest, dict):
+        raise VendorBuildReceiptError(
+            "local_snapshot 正式收据缺 build 前 source_snapshot_digest")
+    if (digest.get("schema") != SNAPSHOT_DIGEST_SCHEMA
+            or digest.get("schema_version") != SNAPSHOT_DIGEST_VERSION
+            or digest.get("taken_stage") != "pre_build"
+            or not isinstance(digest.get("source_root"), str)
+            or not os.path.isabs(digest.get("source_root"))
+            or digest.get("subtree_scope") != summary.get("snapshot_subtree_scope")
+            or digest.get("snapshot_sha256") != summary.get("snapshot_sha256")
+            or digest.get("snapshot_subtree_sha256")
+            != summary.get("snapshot_subtree_sha256")):
+        raise VendorBuildReceiptError(
+            "local_snapshot 的 build 前 digest envelope/root/scope/merkle 与来源锚不一致")
+    algorithm = digest.get("algorithm")
+    if (not isinstance(algorithm, dict)
+            or algorithm.get("tool") != "fetch_source.py"
+            or _HEX64.fullmatch(algorithm.get("logic_sha256") or "") is None):
+        raise VendorBuildReceiptError(
+            "local_snapshot 的 build 前 digest 缺 fetch_source.py 算法指纹")
+    for key in ("file_count", "subtree_file_count", "skipped_symlink_count",
+                "subtree_skipped_symlink_count"):
+        value = digest.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise VendorBuildReceiptError(
+                f"local_snapshot build.source_snapshot_digest.{key} 须为非负整数")
+    root = os.path.normpath(digest["source_root"])
+    cwd = build.get("cwd")
+    try:
+        within = (isinstance(cwd, str) and os.path.isabs(cwd)
+                  and os.path.commonpath((root, os.path.normpath(cwd))) == root)
+    except ValueError:
+        within = False
+    if not within:
+        raise VendorBuildReceiptError(
+            "local_snapshot 正式收据的 build.cwd 不在 build 前 digest.source_root 内")
+    if (not isinstance(tree, dict)
+            or tree.get(SUBTREE_GATE_KEY) is not True
+            or tree.get("snapshot_subtree_sha256")
+            != summary.get("snapshot_subtree_sha256")
+            or _HEX64.fullmatch(tree.get("snapshot_sha256") or "") is None
+            or not isinstance(tree.get("matches_pre_build"), bool)):
+        raise VendorBuildReceiptError(
+            "local_snapshot 正式收据缺 build 后子树复核，或 tree digest 与来源锚不一致")
+    return summary
+
+
 def summarize(receipt):
     """收据 → 归一化摘要（幂等、无副作用）：源身份 + `build_returncode_source`。
 
@@ -976,6 +1088,11 @@ def produce_receipt(*, declared_source_form, build_result,
             "taken_stage": "pre_build",
             "source_root": root,
             "subtree_scope": scope,
+            # 完整保留 build 前 digest 与算法身份。`source` 段也带这两个 merkle，严格验收入口
+            # 会逐字交叉核；两份近邻事实不同就不是一份可裁决的收据。
+            "snapshot_sha256": whole,
+            "snapshot_subtree_sha256": subtree,
+            "algorithm": dict(snapshot_digest["algorithm"]),
             "file_count": snapshot_digest.get("file_count"),
             "subtree_file_count": snapshot_digest.get("subtree_file_count"),
             # 软链**整棵不入 merkle**（算法定义）。把 build 前那次扫到的条数带进收据，
@@ -1011,7 +1128,8 @@ def produce_receipt(*, declared_source_form, build_result,
         },
     }
     # 自过一遍门：产出的东西若过不了本模块自己的校验，就不该落盘。
-    validate(receipt, library_path=elf, library_sha256=elf_sha, normalize_path=True)
+    validate_for_acceptance(
+        receipt, library_path=elf, library_sha256=elf_sha, normalize_path=True)
     return receipt
 
 

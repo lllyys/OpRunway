@@ -254,6 +254,15 @@ class ReturncodeSourceValidationTest(_Fixture):
                             V.RETURNCODE_SOURCE_MEASURED,
                             "「没人知道」不许在下游长成「实测过」")
 
+    def test_legacy_receipt_is_readable_but_cannot_back_a_new_acceptance(self):
+        receipt = self._produce()
+        del receipt["build"][V.RETURNCODE_SOURCE_KEY]
+        self._validated(receipt)  # 历史解释入口保持兼容。
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "正式验收"):
+            V.validate_for_acceptance(
+                receipt, library_path=os.path.realpath(self.elf),
+                library_sha256=V._sha256_file(self.elf), normalize_path=True)
+
     def test_summarize_and_validate_agree(self):
         """driver 落的派生视图与离线复核方重算的结果逐字比对，两侧必须同形。"""
         receipt = self._produce()
@@ -289,22 +298,18 @@ class ReturncodeSourceValidationTest(_Fixture):
                              V.RETURNCODE_SOURCE_MEASURED)
 
     def test_a_legacy_receipt_is_distinguishable_as_a_whole_artifact(self):
-        """⚠ **残留缺口，如实钉住**：老收据（键缺席）**仍能过验收门**，只是摘要不同。
+        """历史解释保持兼容；正式验收另走 strict 入口，不再把可读误作可裁决。
 
-        为什么这仍然要紧：`vendor.source_provenance` 就是这份摘要，它会被 driver 落进
-        `cpp_extension_receipt.json`、并被三级门重算比对——所以「没人证过这次 build
-        跑过」这件事**在产物里是机读可见的**，不是全无痕迹。
-        ⚠ 但它**不是门**：一份手写的、没有 `returncode_source` 键的收据照样能撑起一次
-        `STATUS: PASSED`，且 `验收报告.md` 当前**不渲染**这个字段。要彻底封死得让
-        `validate` 拒掉 `unproven_legacy`（会作废真机上留存的手拼收据），那是一次
-        有意的口径变更，不该由本用例偷偷替人做掉。
+        `summarize` / `validate` 的职责仍是解释历史，因此摘要必须把「没人证明真跑过」
+        原样写成 `unproven_legacy`。新建裁决由 `validate_for_acceptance` 拒掉它；两条入口
+        刻意分开，既不改判旧留档，也不允许旧证据撑起新 acceptance。
         """
         measured = self._produce()
         legacy = json.loads(json.dumps(measured))
         del legacy["build"][V.RETURNCODE_SOURCE_KEY]
         self.assertNotEqual(V.summarize(measured), V.summarize(legacy),
                             "两份摘要长一样 = 同名同形的产物迟早被当真裁决读走")
-        # 兼容放行是当前有意的口径；此处如实钉住，改口径时这条会红，逼人当场表态。
+        # 历史解释兼容是有意口径；正式验收拒绝由上一条单测单独钉住。
         self.assertEqual(V.summarize(legacy)["build_returncode_source"],
                          V.RETURNCODE_SOURCE_UNPROVEN_LEGACY)
 
@@ -319,6 +324,26 @@ class ProduceReceiptTest(_Fixture):
         self.assertEqual(summary["snapshot_subtree_scope"], _OP)
         self.assertEqual(receipt["schema_version"], V.SCHEMA_VERSION)
         self.assertEqual(receipt["source"][V.DECLARED_FORM_KEY], V.FORM_LOCAL_SOURCE)
+        self.assertEqual(
+            V.validate_for_acceptance(
+                receipt, library_path=os.path.realpath(self.elf),
+                library_sha256=V._sha256_file(self.elf), normalize_path=True),
+            summary)
+
+    def test_formal_local_receipt_rejects_missing_or_forged_tree_gate(self):
+        receipt = self._produce()
+        for mutate in ("missing", "forged"):
+            with self.subTest(mutate=mutate):
+                bad = json.loads(json.dumps(receipt))
+                if mutate == "missing":
+                    del bad["build"]["tree_state_at_emit"]
+                else:
+                    bad["build"]["tree_state_at_emit"][
+                        "snapshot_subtree_sha256"] = "0" * 64
+                with self.assertRaises(V.VendorBuildReceiptError):
+                    V.validate_for_acceptance(
+                        bad, library_path=os.path.realpath(self.elf),
+                        library_sha256=V._sha256_file(self.elf), normalize_path=True)
 
     def test_merkle_is_taken_before_build_not_after(self):
         """build 会往树里写产物 —— 收据里的 source merkle 必须仍是 **build 前**那个值。
@@ -344,6 +369,11 @@ class ProduceReceiptTest(_Fixture):
         self.assertEqual(receipt["source"]["snapshot_sha256"],
                          digest["snapshot_sha256"], "整树 merkle 同样取自 build 前")
         state = receipt["build"]["tree_state_at_emit"]
+        pre = receipt["build"]["source_snapshot_digest"]
+        self.assertEqual(pre["snapshot_sha256"], receipt["source"]["snapshot_sha256"])
+        self.assertEqual(pre["snapshot_subtree_sha256"],
+                         receipt["source"]["snapshot_subtree_sha256"])
+        self.assertEqual(pre["algorithm"]["tool"], "fetch_source.py")
         self.assertFalse(state["matches_pre_build"],
                          "build 动过树是常态——记下来才看得出摘要取自 build 前")
         self.assertNotEqual(state["snapshot_sha256"],
@@ -362,6 +392,9 @@ class ProduceReceiptTest(_Fixture):
             repo="cann/ops-cv", pr_head_sha="a" * 40)
         self.assertEqual(receipt["source"]["pr_head_sha"], "a" * 40)
         self.assertEqual(receipt["degradations"], [])
+        V.validate_for_acceptance(
+            receipt, library_path=os.path.realpath(self.elf),
+            library_sha256=V._sha256_file(self.elf), normalize_path=True)
         with self.assertRaises(V.VendorBuildReceiptError):
             self._produce(form=V.FORM_GIT_PR, pr_head_sha="a" * 40)
 

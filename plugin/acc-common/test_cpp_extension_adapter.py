@@ -11,6 +11,7 @@ from unittest import mock
 import cpp_extension_adapter as A
 import cpp_extension_codegen as C
 import cann_version as CV
+import cpp_extension_identity as I
 
 
 def _spec():
@@ -70,6 +71,28 @@ def _caseset():
                 },
             },
         ],
+    }
+
+
+def _symbol_identity(library_path, library_sha256, *entrypoints):
+    plan = {"cases": [{"symbol": name} for name in entrypoints]}
+    pairs = I.required_symbol_pairs(plan)
+    definitions = []
+    for item in I.required_symbols(plan):
+        definitions.append({
+            **item,
+            "resolved_via": I.RESOLVED_VIA,
+            "defining_library": {
+                "path": library_path,
+                "sha256": library_sha256,
+            },
+        })
+    return {
+        "schema": I.SCHEMA,
+        "schema_version": I.SCHEMA_VERSION,
+        "library": {"path": library_path, "sha256": library_sha256},
+        "required_symbol_pairs": pairs,
+        "definitions": definitions,
     }
 
 
@@ -148,7 +171,12 @@ class CppExtensionAdapterContractTest(unittest.TestCase):
             "vendor": {
                 "library_path": "/opt/vendor/lib.so",
                 "library_sha256": "2" * 64,
-                "symbols_owned": ["aclnnWitness"],
+                "symbols_owned": [
+                    "aclnnWitnessGetWorkspaceSize", "aclnnWitness",
+                    "aclnnWitnessDimGetWorkspaceSize", "aclnnWitnessDim",
+                ],
+                "symbol_identity": _symbol_identity(
+                    "/opt/vendor/lib.so", "2" * 64, "Witness", "WitnessDim"),
             },
         }
         with tempfile.TemporaryDirectory() as td:
@@ -170,6 +198,9 @@ class CppExtensionAdapterContractTest(unittest.TestCase):
         self.assertEqual(plan["custom_kind"], "cpp_extension")
         self.assertEqual(plan["device"], 3)
         self.assertEqual(plan["cases"], ["c1"])
+        self.assertEqual(
+            plan["cpp_extension"]["vendor"]["symbol_identity"],
+            receipt["vendor"]["symbol_identity"])
         self.assertEqual(skipped[0]["case_id"], "c0")
 
     def test_partial_accuracy_never_starts_perf_plan(self):
@@ -338,7 +369,12 @@ def _perf_receipt():
         "vendor": {
             "library_path": "/opt/vendor/lib.so",
             "library_sha256": "2" * 64,
-            "symbols_owned": ["aclnnWitness"],
+            "symbols_owned": [
+                "aclnnWitnessGetWorkspaceSize", "aclnnWitness",
+                "aclnnWitnessDimGetWorkspaceSize", "aclnnWitnessDim",
+            ],
+            "symbol_identity": _symbol_identity(
+                "/opt/vendor/lib.so", "2" * 64, "Witness", "WitnessDim"),
         },
     }
 

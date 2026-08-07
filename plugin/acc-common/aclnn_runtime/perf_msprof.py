@@ -111,6 +111,7 @@ from __future__ import annotations
 
 import csv
 import glob
+import hashlib
 import json
 import os
 import re
@@ -123,6 +124,8 @@ import sys
 import tempfile
 from datetime import date
 from pathlib import Path
+
+import cpp_extension_identity
 
 # ── 常量（单一真源）────────────────────────────────────────────────────────────────
 
@@ -2015,16 +2018,19 @@ if (not isinstance(vendor_path, str) or not os.path.isabs(vendor_path)
 # 从已绑定的 vendor `.so` 反推并设入环境（`D.bind_custom_opp_path`），不指望继承。
 # 没有它，torch_npu 只会去 CANN 内置 libopapi.so 找 aclnnXxx → 性能侧整轮采不到。
 D.bind_custom_opp_path(vendor_path)
-handle = ctypes.CDLL(vendor_path, mode=ctypes.RTLD_GLOBAL)
-missing = [name for name in (vendor.get("symbols_owned") or [])
-           if not isinstance(name, str) or not hasattr(handle, name)]
-if missing:
-    raise RuntimeError("cpp_extension vendor symbols 漂移: %r" % (missing,))
-
 plan_path = D._safe(work, cpp.get("invocation_plan"))
 invocation = D._load(plan_path)
 if D._canonical_sha(invocation) != cpp.get("invocation_plan_sha256"):
     raise RuntimeError("cpp_extension invocation plan 摘要漂移")
+try:
+    D.cpp_extension_identity.validate(
+        vendor.get("symbol_identity"), invocation_plan=invocation,
+        library_path=vendor_path, library_sha256=vendor.get("library_sha256"))
+    handle, actual_identity = D.cpp_extension_identity.attest(vendor_path, invocation)
+except D.cpp_extension_identity.CppExtensionIdentityError as ex:
+    raise RuntimeError("cpp_extension vendor 双符号/实际定义 ELF 身份未闭合: %s" % ex) from ex
+if actual_identity != vendor.get("symbol_identity"):
+    raise RuntimeError("cpp_extension vendor 实际加载身份与精度阶段 receipt 漂移")
 row = next((item for item in invocation.get("cases") or []
             if item.get("case_id") == CFG["case_id"]), None)
 if row is None:
@@ -2631,8 +2637,49 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
     strict_custom_vendor = not plan_bool(plan, "allow_builtin_symbols")
     # 严格档还得知道「本次该绑哪个 so」（runner 改动⑪）：DUT 从 plan 一路传到 wrapper 的 CFG，
     # 再进 AclnnRunner(dut_lib=...)。定不出即 fail-closed，绝不默默用宽松档。
-    dut_lib = (resolve_plan_dut_lib(plan, strict=strict_custom_vendor)
-               if custom_kind == "aclnn_py" else None)
+    cpp_dut_identity = None
+    if custom_kind == "aclnn_py":
+        dut_lib = resolve_plan_dut_lib(plan, strict=strict_custom_vendor)
+    else:
+        cpp = plan.get("cpp_extension")
+        vendor = cpp.get("vendor") if isinstance(cpp, dict) else None
+        dut_lib = vendor.get("library_path") if isinstance(vendor, dict) else None
+        if (not isinstance(dut_lib, str) or not os.path.isabs(dut_lib)
+                or not os.path.isfile(dut_lib)
+                or cpp_extension_identity.file_sha256(dut_lib)
+                != vendor.get("library_sha256")):
+            raise PerfCollectError(
+                "cpp_extension 性能计划缺实际存在且指纹一致的 DUT vendor ELF")
+        invocation_rel = cpp.get("invocation_plan")
+        if (not isinstance(invocation_rel, str) or not invocation_rel
+                or os.path.isabs(invocation_rel)):
+            raise PerfCollectError("cpp_extension 性能计划 invocation_plan 须为相对路径")
+        work_real = os.path.realpath(work_dir)
+        invocation_path = os.path.realpath(os.path.join(work_real, invocation_rel))
+        if (invocation_path != work_real
+                and not invocation_path.startswith(work_real + os.sep)):
+            raise PerfCollectError("cpp_extension invocation_plan 路径逃出 work_dir")
+        try:
+            with open(invocation_path, encoding="utf-8") as src:
+                invocation = json.load(src)
+            raw = json.dumps(
+                invocation, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"), allow_nan=False).encode()
+            invocation_sha = hashlib.sha256(raw).hexdigest()
+            if invocation_sha != cpp.get("invocation_plan_sha256"):
+                raise PerfCollectError("cpp_extension invocation plan 摘要漂移")
+            cpp_extension_identity.validate(
+                vendor.get("symbol_identity"), invocation_plan=invocation,
+                library_path=dut_lib, library_sha256=vendor.get("library_sha256"))
+            _cpp_vendor_handle, actual_identity = cpp_extension_identity.attest(
+                dut_lib, invocation)
+        except (OSError, ValueError, cpp_extension_identity.CppExtensionIdentityError) as ex:
+            raise PerfCollectError(
+                f"cpp_extension 性能前置 DUT 双符号/ELF 身份门未过：{ex}") from ex
+        if actual_identity != vendor.get("symbol_identity"):
+            raise PerfCollectError(
+                "cpp_extension 性能进程实际加载的双符号定义者与精度 receipt 漂移")
+        cpp_dut_identity = actual_identity
     # §5.10 只测不比：`mode="measure_only"` 时**没有基线侧**——plan 里因此不该有 baseline。
     # 缺省（字段不存在）仍是历史的 ratio_gated：必须显式给出受控 baseline，一个字不放松。
     plan_mode = plan.get("mode", "ratio_gated")
@@ -2651,6 +2698,16 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
             f"perf plan baseline 须为 torch_npu 或 aclnn_builtin，得 {baseline_kind!r}")
     torch_baseline = plan.get("torch_baseline")
     aclnn_baseline = plan.get("aclnn_baseline")
+    if (not measure_only and custom_kind == "cpp_extension"
+            and baseline_kind == "aclnn_builtin"):
+        baseline_lib = cann_builtin_libopapi()
+        try:
+            cpp_extension_identity.assert_distinct_library(
+                cpp_dut_identity, baseline_lib,
+                cpp_extension_identity.file_sha256(baseline_lib),
+                label="CANN 内置 ACLNN 标杆")
+        except cpp_extension_identity.CppExtensionIdentityError as ex:
+            raise PerfCollectError(f"DUT/标杆 ELF 隔离门未过：{ex}") from ex
     scratch = scratch_dir or tempfile.mkdtemp(prefix="oprunway-perf-")
     records = []
     planned_cases = plan.get("cases") or []
@@ -2688,6 +2745,20 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
                                     scratch_dir=scratch,
                                     detect_hybrid=(baseline_kind == "torch_npu"),
                                     baseline_kind=baseline_kind, side_timeout_s=side_timeout_s)
+            if custom_kind == "cpp_extension" and baseline_kind == "aclnn_builtin":
+                call = case.get("aclnn_call") if isinstance(case, dict) else None
+                expected = resolve_aclnn_baseline_plan(aclnn_baseline, call, case)["symbol"]
+                try:
+                    baseline_identity = cpp_extension_identity.validate_required_symbol_library(
+                        baseline.get("runtime_provenance"),
+                        expected_entrypoint=expected)
+                    cpp_extension_identity.assert_distinct_library(
+                        cpp_dut_identity, baseline_identity["library"]["path"],
+                        baseline_identity["library"]["sha256"],
+                        label="CANN 内置 ACLNN 标杆")
+                except cpp_extension_identity.CppExtensionIdentityError as ex:
+                    raise PerfCollectError(
+                        f"标杆 workspace/stage2 双符号实际定义 ELF 身份未闭合：{ex}") from ex
             records.append(build_perf_record(cid, custom, baseline))
         _write_collect_checkpoint(
             out_path,

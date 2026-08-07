@@ -25,6 +25,7 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cann_version  # noqa: E402
+import cpp_extension_identity  # noqa: E402
 import perf_mode  # noqa: E402
 import source_facts_lookup  # noqa: E402
 import source_provenance  # noqa: E402
@@ -1417,6 +1418,21 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
             or any(not isinstance(symbol, str) or not symbol
                    for symbol in symbols_owned)):
         errs.append("cpp_extension vendor library/symbol ownership provenance 不完整")
+    if receipt_version == cann_version.RECEIPT_SCHEMA_VERSION:
+        try:
+            identity = cpp_extension_identity.validate(
+                vendor.get("symbol_identity") if isinstance(vendor, dict) else None,
+                invocation_plan=plan,
+                library_path=vendor.get("library_path") if isinstance(vendor, dict) else None,
+                library_sha256=vendor_sha)
+        except cpp_extension_identity.CppExtensionIdentityError as ex:
+            errs.append(
+                "cpp_extension vendor workspace/stage2 双符号实际定义 ELF 身份未闭合："
+                f"{ex}")
+        else:
+            if symbols_owned != identity["symbols"]:
+                errs.append(
+                    "cpp_extension vendor.symbols_owned 未由双符号实际定义 ELF 身份逐字派生")
     # vendor 构建收据：判据由 `vendor_build_receipt` 一处解释（driver / adapter / 本门共用）。
     # 按 `source.provenance_kind` 分流——`gitcode_pr` 与改动前逐字同一套（40 位 head + 非空 repo）；
     # `local_snapshot` 改绑「仓根 + 算子子目录 scope + 整树/子树 merkle + 构建 argv + ELF sha」
@@ -1425,9 +1441,11 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
     build_receipt = vendor_map.get("build_receipt")
     build_digest = _canonical_sha(build_receipt)
     try:
-        summary = vendor_build_receipt.validate(
-            build_receipt,
-            library_path=vendor_map.get("library_path"),
+        validate_build = (vendor_build_receipt.validate_for_acceptance
+                          if receipt_version == cann_version.RECEIPT_SCHEMA_VERSION
+                          else vendor_build_receipt.validate)
+        summary = validate_build(
+            build_receipt, library_path=vendor_map.get("library_path"),
             library_sha256=vendor_sha)
         if vendor_map.get("build_receipt_sha256") != build_digest:
             raise vendor_build_receipt.VendorBuildReceiptError(
@@ -1444,7 +1462,9 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
         # ⚠ 收据自身完整**不等于**它绑的就是本轮取材那份源码：上面 `validate` 全程只看收据自己。
         #   与 `source_facts` 的交叉对账是**另一件事**，缺了它，一份自洽但指向别的源码的收据照样过门。
         _gate_build_receipt_source_binding(
-            d, summary, errs, source_facts_path=source_facts_path)
+            d, summary, errs, source_facts_path=source_facts_path,
+            build_receipt=(build_receipt if receipt_version
+                           == cann_version.RECEIPT_SCHEMA_VERSION else None))
     receipt_sha = _canonical_sha(receipt)
     for row in ev_list:
         if isinstance(row, dict) and row.get("cpp_extension_receipt_sha256") != receipt_sha:
@@ -1452,7 +1472,8 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
                 f"{row.get('case_id')}: cpp_extension receipt digest 缺失或漂移")
 
 
-def _gate_build_receipt_source_binding(d, summary, errs, source_facts_path=None):
+def _gate_build_receipt_source_binding(
+        d, summary, errs, source_facts_path=None, build_receipt=None):
     """三级门：vendor build receipt 的源身份 ↔ `source_facts` 的源身份**必须一一对上**。
 
     `summary` 是 `vendor_build_receipt.validate()` 返回的**归一化**源身份摘要，不是原始
@@ -1559,6 +1580,20 @@ def _gate_build_receipt_source_binding(d, summary, errs, source_facts_path=None)
                         "source_facts.pr.head_sha", facts_pr.get("head_sha"))
         return
     # local_snapshot：scope 必须先相等，才谈得上比 merkle。
+    if build_receipt is not None:
+        digest = ((build_receipt.get("build") or {}).get("source_snapshot_digest")
+                  if isinstance(build_receipt, dict) else None)
+        algorithm = digest.get("algorithm") if isinstance(digest, dict) else None
+        facts_producer = facts.get("producer")
+        receipt_logic = (algorithm.get("logic_sha256")
+                         if isinstance(algorithm, dict) else None)
+        facts_logic = (facts_producer.get("logic_sha256")
+                       if isinstance(facts_producer, dict) else None)
+        if receipt_logic is None or receipt_logic != facts_logic:
+            errs.append(
+                "local_snapshot build 前 tree digest 的 fetch_source.py 算法指纹与 "
+                "source_facts.producer.logic_sha256 不逐字一致——merkle 算法身份不同，BLOCKED")
+            return
     if not _compare_anchor(
             errs, "snapshot_subtree_scope", summary.get("snapshot_subtree_scope"),
             "source_facts.pr.snapshot_scope", facts_pr.get("snapshot_scope"),
@@ -3206,17 +3241,22 @@ def _gate_cpp_extension_perf_collection(d, errs):
         errs.append("cpp_extension 性能门缺 build receipt/perf_collection")
         return
     provenance = collect.get("custom_provenance")
+    expected_vendor = {
+        "library_path": (receipt.get("vendor") or {}).get("library_path"),
+        "library_sha256": (receipt.get("vendor") or {}).get("library_sha256"),
+        "symbols_owned": (receipt.get("vendor") or {}).get("symbols_owned"),
+    }
+    # v1 是历史产物：当时 schema 没有 dladdr 双符号收据，保持原裁决；当前 v2 必须逐字绑定。
+    if receipt.get("schema_version") == cann_version.RECEIPT_SCHEMA_VERSION:
+        expected_vendor["symbol_identity"] = (
+            receipt.get("vendor") or {}).get("symbol_identity")
     expected_provenance = {
         "artifact": receipt.get("artifact"),
         "namespace": (receipt.get("load") or {}).get("namespace"),
         "invocation_plan": "cpp_extension_invocation_plan.json",
         "invocation_plan_sha256": (
             receipt.get("bindings") or {}).get("invocation_plan_sha256"),
-        "vendor": {
-            "library_path": (receipt.get("vendor") or {}).get("library_path"),
-            "library_sha256": (receipt.get("vendor") or {}).get("library_sha256"),
-            "symbols_owned": (receipt.get("vendor") or {}).get("symbols_owned"),
-        },
+        "vendor": expected_vendor,
     }
     checkpoint = collect.get("collection_checkpoint")
     perf_ids = [case.get("id") for case in (cs.get("cases") or [])
