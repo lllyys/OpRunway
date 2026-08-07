@@ -2,7 +2,7 @@
 
 **结论：当前验收不了这两个算子，卡在精度维与性能维的能力缺口上。**
 
-- 基线：`96edacd`；指路：[gap revalidation findings](../.cc-suite/audits/audit-fix-20260806-gap-revalidation-findings.md)、[Bernoulli / Remainder plan](oprunway-bernoulli-remainder-plan.md)
+- 基线：`96edacd`；指路：[gap revalidation findings](../.cc-suite/audits/audit-fix-20260806-gap-revalidation-findings.md)、[P0 readonly findings](../.cc-suite/audits/audit-p0-readonly-findings-20260807.md)、[Bernoulli / Remainder plan](oprunway-bernoulli-remainder-plan.md)
 
 ## 1 · 待确认：0 项 —— 三项已由技术决策者裁定
 
@@ -35,7 +35,8 @@ G11a、G18、G20 已分别按裁定 F、G、H 给出实施方向；**已裁定�
 
 「影响哪条 case 来源」只有三种取值：`两条都影响`、`仅 generated`（taskdoc 通路已绕开）、`仅 taskdoc`。不确定性直接写在证据说明里。
 
-**19 个在册 gap 项中，当前 0 个需要人工确认；18 个归入组 2、可由 agent 按既定方向推进，G16 本轮不做。**
+**21 个在册 gap 项中，当前 0 个需要人工确认；20 个归入组 2、可由 agent 按既定方向推进，G16 本轮不做。**
+（G22、G23 是 2026-08-07 P0 只读核验新增，均已确认属实。）
 
 ### 组 2 · agent 可自主推进（方向明确，改完能自验证）
 
@@ -61,6 +62,8 @@ G11a、G18、G20 已分别按裁定 F、G、H 给出实施方向；**已裁定�
 | **G5 广播（G3 的 shape 维）** | 仅 generated | 把写死的 `(4,1)/(1,5)`（`gen_cases.py:1939`）换成字段驱动；taskdoc 逐 case 自带 `shapes`（`:1258`），不走 shape 池。默认矩阵随 §5.2 方案提交评审，评审属常规流程、非标准缺失，不再单列拍板项 |
 | **G8 rank 全局默认 1–8** | 仅 generated | 裁定 D 已给死；当前 `_REG_SHAPES`（`:2031`）仅 1–4 维，`_EXT_RANK_SHAPES`（`:2039`）仅两条 5 维且只在 spec 点名 rank 时并入，taskdoc 自带 shape；必须捆绑轴集版本化（旧算子锁旧版本），否则撞 `ExistingOpsByteIdenticalTest` |
 | **G21 Bernoulli rank 0 未覆盖（High）** | 两条都影响 | 已核任务书 A 参数表：`self`/`out` 维度为 `0-8`，而裁定 D 的 1–8 只是任务书未明确时的默认。caseset schema、生成器和执行通路都须支持真正的 `shape=()`；rank 0 必须有真实执行与精度证据，不得用单元素一维 `(1,)` 冒充，缺失即 fail-closed |
+| **G22 cpp_extension format 缺省非 ND（High，P0-a 确认属实）** | 两条都影响 | 未显式指定 format 时，rank 3/4/5 走 `torch_npu_rank_default` 映射成 NCL/NCHW/NCDHW，而非两份任务书都要求的 **ND**；`standard` 派发下显式传 `nd` 在**生成期**直接拒（不是运行期 phase-2 拒），显式 ND 目前只有 `extended` stage-2 实现（展开见下）。spec 须显式声明 `aclnn_tensor_format=nd`；生成/codegen 须能按该声明选中支持 ND 的派发路径，选不到时 fail-closed，不得静默落回按 rank 猜的默认映射 |
+| **G23 CANN 8.5.0+ 版本门未做语义比较（Medium，P0-b 确认属实）** | 两条都影响 | 两份任务书均要求 CANN 8.5.0 及以上；当前只把版本记成非空字符串，唯一阻断条件是字面值 `"unknown"`，不做语义化版本比较（`cpp_extension_driver.py:473/480`、`validate_acceptance_state.py:1029-1034`）。须接入语义版本比较，低于 8.5.0 时 fail-closed，而不是任意非空字符串放行 |
 
 **G12 展开 · BF16 与 DOUBLE 的事实方向相反：**
 
@@ -103,10 +106,22 @@ if dut_lib is not None:
 |---|---|
 | **G10 provenance** | **原判错，已撤**：`source_provenance.py` 里声明 `local_source`→实得 `local_snapshot` 本就是 `complete` 档，**不需授权、无降级**。仅「不能证明等于线上某 PR」仍成立，那是输入形态边界，不是缺陷 |
 
-### 待核（未回代码核实，不得当作已定 gap）
+*两条「待核」项已在 2026-08-07 通过 P0 只读核验回代码核实，均属实，转为 G22 / G23（见组 2）；
+完整证据链另归档于 `.cc-suite/audits/audit-p0-readonly-findings-20260807.md`。*
 
-- **待核 · format ND 构造**：有说法称 `cpp_extension` 通路未显式指定 format 时会按 rank 将 3/4/5 维映射为 NCL/NCHW/NCDHW，而两份任务书参数表均要求 **ND**；若属实，正式验收通路可能产不出任务书要求的 ND 输入。**本文档未核实，须先核 `cpp_extension_codegen.py`。**
-- **待核 · CANN 最低版本门**：两份任务书均要求 **CANN 8.5.0 及以上**（任务书 `:8`）；有说法称当前只把版本记为字符串，不做语义比较与阻断。**本文档未核实。**
+**G22 展开 · format 默认路径与显式 ND 的实际关系：**
+
+```python
+# cpp_extension_codegen.py:99-105  缺省按 rank 猜格式
+# rank 3 → ACL_FORMAT_NCL, rank 4 → ACL_FORMAT_NCHW, rank 5 → ACL_FORMAT_NCDHW, 其它 → ACL_FORMAT_ND
+# cpp_extension_codegen.py:250-252  spec 未声明 aclnn_tensor_format 时落这条默认路径，来源记 default_unverified
+# cpp_extension_codegen.py:537-545  standard 派发下，只要 format 非默认值，生成期立即抛 CppExtensionCodegenError
+# cpp_extension_codegen.py:379-423  显式 nd 目前只有 extended stage-2 实现了专用转换器
+```
+
+即：spec 不声明 format → 3/4/5 维静默按 rank 猜，不是 ND；spec 显式声明 `nd` 但走 `standard` 派发 →
+生成期直接报错，不产任何用例。**两条路都到不了「显式产出 ND」这个任务书要求的结果**，
+除非改走 `extended` stage-2。修法方向已在组 2 表格给出。
 
 ## 3 · 红线
 

@@ -27,13 +27,15 @@
 
 当前不再保留人工拍板项。BF16/DOUBLE 按任务书全测，promote 按任务书指定的 PyTorch 语义，随机 oracle 与 `exact` 已由裁定 E 给定。
 
-## 2 · P0：待核前置（只读，不改代码）
+## 2 · P0：待核前置（只读，不改代码）—— **已于 2026-08-07 全部完成**
 
-- **P0-a · format ND。** 只读核验 `cpp_extension` 的 format 构造，确认 rank 3/4/5 是否被映射为 NCL/NCHW/NCDHW，以及能否按任务书生成 ND。
-- **P0-b · CANN 8.5.0+。** 只读核验最低版本是否做语义比较与阻断，还是仅记录字符串。
-- **P0-c · dtype 分类契约。** 只读核出 Layer 1 对 API 拒绝、harness 限制、证据不完整、已确认 DUT 能力缺失四类成因已有的受控状态字段确值、退出码与产物集合；缺类时明确记为 B4 须先补的契约项，实施者不得自选分类。
-- **完成判据：**P0-a/b 各形成“属实 / 不属实 / 未能确认”，P0-c 形成逐类确值表或“未能确认”；均列出实际控制流、入口和可复核证据。
-  “未能确认”须列出缺失证据、阻断受影响路径，且不得据此认定现有通路满足要求。P0-a/b 属实才新增后续修复批次，不属实则不造 gap。P0 落点为核验记录；只产记录，不改代码、不生成验收裁决。
+完整证据链：`.cc-suite/audits/audit-p0-readonly-findings-20260807.md`。
+
+- **P0-a · format ND。** ✅ RESULT=属实 → 已转 **G22**，批次见 B16。
+- **P0-b · CANN 8.5.0+。** ✅ RESULT=属实 → 已转 **G23**，批次见 B17。
+- **P0-c · dtype 分类契约。** ✅ RESULT=未区分（需 B4 先补契约）→ 四类成因的具体断链位置已钉死在归档文件里，B4 直接按那四行改，不必重新分析。
+- 三项均已列出实际控制流、入口和可复核证据，无「未能确认」项。P0 本身**不改代码、不生成验收裁决**，
+  只产核验记录——真正的代码改动在 B16/B17/B4 里。
 
 ## 3 · Phase A：覆盖硬门
 
@@ -123,6 +125,37 @@
 - **做什么：**按裁定 F，在两份 spec 的性能字段显式写 `aclnn_builtin`；Layer 1 取证前门绑定预期 libopapi 身份、ELF 指纹及 `aclnnXxx` / `aclnnXxxGetWorkspaceSize` 两个 ACLNN 符号定义者。性能侧只用 msprof 比较 NPU 实测，不取 GPU 标杆。
 - **完成判据：**来源锚缺失、baseline kind 不是 `aclnn_builtin`、预期 libopapi 身份/ELF 指纹不符或任一 ACLNN 符号定义者不符时，均在取证前退出非 0，且无性能裁决；不得退换其他 baseline。合法收据中的 baseline kind、身份、defining ELF 指纹与两个符号定义者逐字等于预期值。
 
+### B16 · 修 G22：cpp_extension 显式产出 ND（P0-a 确认属实）
+
+- **来源标注**：`cpp_extension_codegen.py:99-105` 是**代码里描述 op-plugin 外部行为的说明性注释**，不是本仓自己的映射实现；真正的默认路径调用点在 `:474-477`（走官方 `ConvertTypes(...)`），显式 ND 转换器在 `:389-405`，缺省来源判定在 `:250-252`，standard 拒绝分支在 `:537-545`。
+- **做什么：**spec 新增显式 `aclnn_tensor_format` 声明入口（对齐现有字段，值域含 `nd`）；`cpp_extension_codegen` 按声明选中支持 ND 的派发路径。
+  ⚠ **当前只有 `extended` stage-2 实现了显式 ND 转换器**（`:389-405`），`standard` 遇非默认 format
+  在生成期即拒（`:537-545`）。**若某个接口的实际派发形态是 `standard`（由 header/preflight 判定，
+  `:208-241`），仅仅「声明 nd 就报错退出」不构成 G22 的修复**——那只是把静默猜错换成了显式拒绝，
+  任务书要求的 ND 用例依然一条都产不出来。本批必须先核清两个算子实际落在哪种派发形态：
+  若均可合法走 `extended`，则按声明路由过去即可关闭 G22；若有算子的接口只能是 `standard`，
+  则必须**同时**给 `standard` 实现等价的显式 ND 支持（在 stage1 转换段插入 `ACL_FORMAT_ND` 覆盖，
+  不改 4 参 ABI），否则 G22 对该算子仍是未关闭状态，必须如实记录、不得算作完成。
+- **完成判据：**① 先产出「两个算子的接口各自落在 standard 还是 extended」的核验结论（file:line 证据）；
+  ② 声明 `nd` 且实际可达路径存在时，生成产物的 tensor format 字段逐字等于 `ACL_FORMAT_ND`；
+  ③ 声明 `nd` 但确无可用路径（且未按上一条补齐 standard 支持）时，生成期退出非 0、错误信息指向
+  具体缺口，不产任何用例产物，且**报告需如实写「G22 对该算子仍未关闭」**，不得含糊带过；
+  ④ 未声明 format 时行为不变（回归护栏，见 §7）。
+
+### B17 · 修 G23：CANN 最低版本语义门（P0-b 确认属实，通用化）
+
+- **做什么：**在 `cpp_extension_driver.py`（`:473-482` 读取 `cann_version` 处）与
+  `validate_acceptance_state.py`（`:1029-1034` 非空检查处）接入语义化版本比较，替换现有
+  「非空即通过、仅 `"unknown"` 阻断」的判据。⚠ **不得把 `8.5.0` 写死进通用门**——按 §5.1
+  泛化优先，最低版本要求本身来自任务书，须新增字段从任务书/spec 读取「要求的最低版本」，
+  门比较的是「要求值 vs 实测值」，不是硬编码某个具体版本号。落点为上述两文件、
+  spec schema 的最低版本字段、及现有测试 `test_validate_cpp_extension_receipt.py:156-186`
+  （须同步改造该处的非语义化字符串 fixture）。
+- **完成判据：**spec 声明最低版本要求时，实测版本低于该要求（含无法解析的非语义化字符串）时退出非 0、
+  状态为受控阻断值、无 PASS；实测版本 `≥` 要求值时正常通过；`"unknown"` 仍按原有语义阻断（回归，
+  不得放松）；未声明最低版本要求时的行为需显式定义（缺省放行还是 fail-closed，二选一写清楚，
+  不留隐式默认）。
+
 ## 5 · Phase C：取证身份可信门
 
 ### C2 · 修 G11b：双符号正向定义者证明
@@ -141,20 +174,23 @@ C2 → B10 不仅是性能卫生，也是精度 oracle 完整性前提：标杆�
 ## 6 · 顺序与见证依赖
 
 ```text
-P0-a + P0-b
+P0-a + P0-b + P0-c（已全部完成，2026-08-07）
+  → B16（G22 format ND）                             （落地前必做，其后 B3-a/B2 才在同一文件基础上改）
+  → B17（G23 版本门）                                  与 B16 平行，与主链无文件重叠，可随时插入
   → C2 → B10
   → A0 → A1 → A2
   → B11 → B12
-  → B3-a → B2；B3-b
-  → B4；B5 ↔ B14；B6；B7 → B9 → B13（RNG 前提验证收据）→ 正式 Bernoulli 精度取证
+  → B3-a → B2；B3-b                                    （B16 之后再动 cpp_extension_codegen.py，避免同文件冲突）
+  → B4（先按 P0-c 归档的四行断链证据补契约）；B5 ↔ B14；B6；B7 → B9 → B13（RNG 前提验证收据）→ 正式 Bernoulli 精度取证
   → B8（按裁定 F 使用 `aclnn_builtin`）
   → 真机见证
 ```
 
-- P0 最先；核验结论为“属实”时，先补经批准的新修复批次，再继续受影响路径。
+- P0 三项均已完成且均需后续批次（P0-a/b 属实 → B16/B17；P0-c 未区分 → B4 先补契约）。
 - `C2 → B10` 必须早于任何真机精度或性能取证；B10 的标杆正向身份校验同时保护性能 baseline 与精度 oracle。
 - `B11 → B12` 必须早于任何 taskdoc 见证；`B3-a → B2` 不得倒置；B5 与 B14 同批或紧邻。
 - B13 只产不可用于裁决的 RNG 前提验证收据；该收据通过后才能开始正式 Bernoulli 精度取证，未通过时保持 BLOCKED。
+- Remainder 的真机见证（build/exec）依赖 B16 落地后 spec 才能显式声明 ND；未落地前 Remainder 的 format 仍是隐性猜测，不构成任务书要求的证据。
 - Remainder 按裁定 G 在 A2/A3 上执行构建前门与真实构建；构建失败或无对应注册交确定性链形成受控非通过/阻断态，禁止 PASS。`ascend950` 最多作 development 诊断，不作验收证据。
 - Remainder 按裁定 H 使用 `--target-dir math/floor_mod` 取材，并在 source_facts/spec 与 `task_pr_gaps` 中保留 `experimental/math` 冲突和目录条款未满足记录。
 
@@ -196,12 +232,19 @@ P0-a + P0-b
 | **G19** | 以 `(0,1)` prob 验证 RNG 消耗一致前提 | B13 |
 | **G20** | 按裁定 H 以 `math/floor_mod` 取材，同时把 `experimental/math` 冲突与目录条款未满足列入 `task_pr_gaps` | §1，Remainder 取材 |
 | **G21** | 真正 `shape=()` 的 rank 0 全链 | B14 |
+| **G22** | spec 显式声明 ND，codegen 按声明选中支持路径，选不到即 fail-closed | B16 |
+| **G23** | 接入语义版本比较，低于 8.5.0 阻断 | B17 |
 
 ## 9 · 挂账与回炉条件
 
 - G18 按裁定 G 仍以 A2/A3 为验收目标：源码仅声明 `ascend950` 的事实不能单独判 DUT 失败；须在报告同时记录任务书目标、PR 声明、实际硬件与真实构建结果。真实构建失败或无对应注册交确定性链形成受控非通过/阻断态，禁止 PASS；真机核验前保持 fail-closed，`ascend950` 诊断只能标记为 development。
 - G20 按裁定 H 使用 `--target-dir math/floor_mod`，但任务书 `:68` 的 `experimental/math` 与实际交付目录矛盾仍须写入 source_facts/spec；目录自相矛盾与「实际交付未位于 `experimental/math`」列入 `task_pr_gaps`，不得宣称目录条款已满足。
-- P0 的 format ND 与 CANN 8.5.0+ 版本门尚未核实；结论出来前不得把疑点写成缺陷，也不得假定现有通路满足要求。
+- P0 的 format ND（G22）与 CANN 8.5.0+ 版本门（G23）已于 2026-08-07 核实，均属实，批次见 B16/B17；
+  证据链归档 `.cc-suite/audits/audit-p0-readonly-findings-20260807.md`。
+- B4 实施前先读 P0-c 归档文件里的四行断链证据（① API 拒绝混入普通执行失败、②harness 限制可合法落成
+  `fail`、③ 证据不完整拆成两套语义且与①混用、④ `dtype_unsupported_by_op_def` 映射成
+  `passed_with_gaps` 非「未通过」且 `dtype_unsupported_on_target_hw` 未接入 `validator.py`），
+  不必重新分析这四类现状，直接从那四行开始改。
 - B13 若证明 DUT 与标杆的 RNG 消耗方式不一致，随机精度维保持 BLOCKED，裁定 E 的 `exact` 前提须回炉；不得直接把逐位差异判成 DUT 未通过。
 - G11a 按裁定 F 固定为 `aclnn_builtin`；报告须标明这是对「原算子」的解释及其依据。预期 libopapi 身份、ELF 指纹或两个 ACLNN 符号定义者任一不符即 fail-closed，不得退换其他 baseline。
 - B5 的轴集版本与规模预算须在实施方案获准后定稿；不得以扩面为由破坏旧 caseset 可复现性。
