@@ -2,6 +2,30 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-06 · aclnnBernoulli / aclnnRemainderTensorTensor 接入调研：不能验收，产 gap 清单 + 实施方案
+
+- 调研两份 7 月社区任务书（`aclnnBernoulli` / `aclnnRemainderTensorTensor`）加对应 ops-math 代码仓，
+  结论是**当前 workflow 验收不了这两个算子**：差一整条验收轴（内存一致性 <5% vs GPU，无采集/契约/
+  比较器/门，GPU 基线契约也只有耗时字段）和一条判定通路（随机算子，IR 的 `acceptance_predicate`
+  只有 pointwise/equivalence_relation）。另有广播只有写死的 `(4,1)/(1,5)` 哨兵、多输入同形同 dtype
+  假设、float64 不在任何能力表、rank 池只到 5 维等，共 13 条 gap。
+- 三源核对逮到一条真冲突：**Remainder 的 BF16 与 DOUBLE 方向相反**——BF16 在任务书和 `op_def` 有、
+  header 推导集没有；DOUBLE 在任务书和 header 有、`op_def` 没有。按 §5.1 停下问用户。
+  Bernoulli 三源一致。
+- 产 `dev-doc/oprunway-bernoulli-remainder-gap-todo.md`（G1–G13）与
+  `dev-doc/oprunway-bernoulli-remainder-plan.md`（7 个待拍板问题 + A/B/C 三阶段批次 + 全 gap 处置
+  对照表）。两份都过了 codex 散文审的 audit→fix→verify（清单 34→10、方案 24→11，剩余均已修完）。
+- **本轮只产文档、未改 `plugin/` 代码、未开工**——方案按 §5.2 需先经用户同意。
+- ⚠ **调研基线是 `739a691`，本工作区基线是 `96edacd`（领先 30 个 commit、已合 PR #15）。**
+  搬运时抽查了 6 条承重判据（准入形态、float64、广播哨兵、终态先例、golden 词表、授权口径），
+  结论见 gap 清单顶部的基线声明；其余 `file:line` 引用**未逐条重核**。
+- ⚠ **待决（口径张力，不是 bug）**：新基线的 `taskdoc_caseset.py` 把任务书自带的
+  `self_test_case/<op>/` 明确定为**验收权威**；而 gap 清单的调研口径来自用户当时的明确指示
+  ——**`self_test_case/` 不算输入**。两者相反、未 settle，按 §5.9 显式记录张力，不擅自改写任一方。
+- ⚠ 待决（需用户拍板）：Q1 dtype 三源冲突、Q2 随机算子判定标准、Q4 内存指标定义（三条不答对应
+  批次没法开工），另有 Q3 baseline 是哪个「原算子」、Q5 Remainder 非连续是否纳入、Q6 promote
+  规则来源、Q7 Remainder rank 上界。
+
 ## 2026-08-06 · 合并收尾：清掉指向已删脚本的编排引用
 
 合并删掉 `make_vendor_build_receipt.py` 之后，**编排文档还在指名要跑它**——照着做直接失败。
