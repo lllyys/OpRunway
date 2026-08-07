@@ -1042,6 +1042,9 @@ class TestCppExtensionCollectorRoute(unittest.TestCase):
         self.assertNotIn('hasattr(handle', wrapper)
         self.assertIn("D.materialize_invocation(", wrapper)
         self.assertIn("torch.npu.current_stream().npu_stream", wrapper)
+        self.assertIn("D.probe_runtime_cann_version()", wrapper)
+        self.assertIn("torch.npu.get_device_name(dev_index)", wrapper)
+        self.assertIn("marker_execution_identity", wrapper)
         self.assertNotIn("time.perf_counter", wrapper)
 
     def test_collect_routes_cpp_extension_without_aclnn_dut_resolution(self):

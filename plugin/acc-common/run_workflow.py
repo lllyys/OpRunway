@@ -35,6 +35,7 @@ import spec_change_gate  # noqa: E402
 import verify_aclnn_harness  # noqa: E402
 import content_address  # noqa: E402
 import perf_mode  # noqa: E402
+import perf_evidence_contract  # noqa: E402
 
 # —— C5 · 验收 / 非验收两套产物的口径（唯一定义处）——————————————————————————
 _DEV_GRADE = "development"              # 照 catlass_adapter.run_catlass_mock
@@ -852,6 +853,11 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     except ValueError as ex:
         raise SystemExit(f"spec.perf 配置非法：{ex}")
     measure_only = perf_mode.is_measure_only(perf_mode_name)
+    measure_only_requirement_gaps = []
+    if measure_only:
+        measure_only_requirement_gaps = (
+            perf_evidence_contract.validate_measure_only_requirement_gaps(
+                spec, perf_mode.measure_only_authorization(spec["perf"])))
     if measure_only and gpu_baseline is not None:
         raise SystemExit(
             "perf.mode='measure_only' 与 --gpu-baseline 自相矛盾："
@@ -1270,6 +1276,10 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     elif prec == "passed_with_risk":                     # 精度带风险(任务书宽于平台底线)、性能达标 → 人工 CP
         overall, requires_human_cp = "PASSED_WITH_RISK", True
     elif prec == "passed_with_gaps":                     # dtype 挂账、性能达标 → 人工 CP（C4）
+        overall, requires_human_cp = "PASSED_WITH_GAPS", True
+    elif perf_measured_only and measure_only_requirement_gaps:
+        # msprof 实测完成不能把任务书中**未做**的 GPU/ratio/绝对时延/吞吐条款
+        # 洗成 overall PASS。条款仍有效，只是本轮不做比较 → 显式挂账、转人工。
         overall, requires_human_cp = "PASSED_WITH_GAPS", True
     elif perf_measured_only:      # §5.10：精度 pass，性能**只实测未裁决**——绝不落笼统的 "PASS"
         overall = _MEASURED_ONLY_OVERALL

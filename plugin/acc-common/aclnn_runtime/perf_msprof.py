@@ -126,6 +126,7 @@ from datetime import date
 from pathlib import Path
 
 import cpp_extension_identity
+import perf_evidence_contract as perf_evidence
 
 # ── 常量（单一真源）────────────────────────────────────────────────────────────────
 
@@ -307,6 +308,7 @@ MARKER_OUTPUT_DEVICES = "__OPRUNWAY_PERF_OUTPUT_DEVICES__"
 MARKER_PHASE = "__OPRUNWAY_PERF_PHASE__"
 MARKER_PROF_DIR = "__OPRUNWAY_PERF_PROF_DIR__"
 MARKER_RUNTIME_PROVENANCE = "__OPRUNWAY_PERF_RUNTIME_PROVENANCE__"
+MARKER_EXECUTION_IDENTITY = "__OPRUNWAY_PERF_EXECUTION_IDENTITY__"
 
 _MSTX_CSV_GLOB = "msprof_tx_*.csv"
 _TASK_TIME_CSV_GLOB = "task_time_*.csv"
@@ -1070,6 +1072,12 @@ def repeated_breakdown(rows, *, repeat, memcpy_only=False):
             "kernel_type": kernel_type,
             "execution_path": PATH_DEVICE_MEMCPY_ONLY if memcpy_only else PATH_DEVICE_KERNEL,
             "launches_per_invocation": launches,
+            # N9：保留可重算的原始稳态样本；只留 median 会让验收门无法识别
+            # 样本被删改、repeat 漂移或一次调用启动数被篡改。
+            "repeat": repeat,
+            "sample_count": len(times),
+            "discarded_prefix_count": extra,
+            "samples_us": list(times),
             "median_launch_us": median_launch_us,
             "invocation_us": median_launch_us * launches,
         })
@@ -1446,8 +1454,20 @@ def build_measure_only_record(case_id, custom):
     未计时一律 `us=None` + 行为原因（下游 `build_custom_perf_map` 据此落 `us=None` →
     perf_compare blocked → 验收门 BLOCKED）。
     """
+    custom_copy = dict(custom or {})
+    sampling_receipt = None
+    if custom_copy.get("behavior") in TIMED_BEHAVIORS:
+        collection = custom_copy.get("collection") or {}
+        try:
+            sampling_receipt = perf_evidence.build_sampling_receipt(
+                custom_copy,
+                case_id=case_id,
+                warmup=collection.get("warmup"),
+                repeat=collection.get("repeat"))
+        except perf_evidence.PerfEvidenceContractError as ex:
+            raise PerfCollectError(f"case={case_id!r} 性能采样证据不可重算：{ex}") from ex
     record = {"case_id": case_id,
-              "custom": dict(custom or {}),
+              "custom": custom_copy,
               "baseline": None,
               "custom_timed": bool((custom or {}).get("behavior") in TIMED_BEHAVIORS),
               "baseline_timed": None,
@@ -1456,6 +1476,7 @@ def build_measure_only_record(case_id, custom):
               "timing_scope_status": None,
               "collection_status": None,
               "measure_only": True,
+              "sampling_receipt": sampling_receipt,
               "note": "measure_only：只采 NPU 侧 kernel-only 实测，未采任何基线，故不算比值"}
     return record
 
@@ -1551,6 +1572,21 @@ def build_custom_perf_map(records, skipped=None):
                  "execution_path": custom.get("execution_path")}
         if not timed:
             entry["note"] = side_failure_reason("custom", custom)
+        elif record.get("measure_only") is True:
+            receipt = record.get("sampling_receipt")
+            if not isinstance(receipt, dict):
+                raise PerfCollectError(
+                    f"case={cid!r} 已计时但缺 sampling_receipt，不能把不可重算数字写入 evidence")
+            entry["sampling_receipt_sha256"] = receipt.get("sha256")
+        identity = custom.get("execution_identity")
+        if identity is not None:
+            try:
+                normalized_identity = perf_evidence.validate_execution_identity(identity)
+            except perf_evidence.PerfEvidenceContractError as ex:
+                raise PerfCollectError(
+                    f"case={cid!r} execution_identity 非法：{ex}") from ex
+            entry["execution_identity_sha256"] = perf_evidence.canonical_sha(
+                normalized_identity)
         out[cid] = entry
     for item in skipped or []:
         cid = item.get("case_id")
@@ -2083,6 +2119,20 @@ finally:
     mstx.mstxRangeEnd(range_id)
 print("%sMEASURE_DONE" % CFG["marker_phase"], flush=True)
 print(CFG["marker_devices"] + json.dumps(["npu:%d" % dev_index]), flush=True)
+cann_observation = D.probe_runtime_cann_version()
+identity = {
+    "schema": "oprunway.perf_execution_identity",
+    "schema_version": 1,
+    "device_index": dev_index,
+    "device_name": str(torch.npu.get_device_name(dev_index)),
+    "soc": os.environ.get("OPRUNWAY_SOC") or "unknown",
+    "cann_version": cann_observation.get("normalized") or "unknown",
+    "cann_observation_sha256": D._canonical_sha(cann_observation),
+    "dut_library_sha256": vendor["library_sha256"],
+    "dut_symbol_identity_sha256": D._canonical_sha(actual_identity),
+}
+print(CFG["marker_execution_identity"] + json.dumps(
+    identity, ensure_ascii=False, sort_keys=True), flush=True)
 '''
 
 
@@ -2405,7 +2455,8 @@ def _measure_side_once(*, side, case, caseset_path, work_dir, cfg_extra, warmup,
            "prof_dir": str(prof_root),
            "marker_phase": MARKER_PHASE, "marker_devices": MARKER_OUTPUT_DEVICES,
            "marker_prof_dir": MARKER_PROF_DIR,
-           "marker_provenance": MARKER_RUNTIME_PROVENANCE}
+           "marker_provenance": MARKER_RUNTIME_PROVENANCE,
+           "marker_execution_identity": MARKER_EXECUTION_IDENTITY}
     cfg.update(cfg_extra or {})
     cfg_path = side_dir / "_cfg.json"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
@@ -2463,6 +2514,17 @@ def _measure_side_once(*, side, case, caseset_path, work_dir, cfg_extra, warmup,
               "breakdown": (measurement or {}).get("breakdown") or [],
               "collection": collection_config(collector=collector, warmup=warmup, repeat=repeat),
               "detail": detail}
+    if side == "custom" and custom_kind == "cpp_extension":
+        identity = _marker_json(output, MARKER_EXECUTION_IDENTITY)
+        try:
+            result["execution_identity"] = perf_evidence.validate_execution_identity(
+                identity, expected=cfg.get("execution_identity_expected"))
+        except perf_evidence.PerfEvidenceContractError as ex:
+            result["behavior"] = BEHAVIOR_FAILED
+            result["us"] = None
+            result["scope"] = None
+            result["detail"]["note"] = (
+                f"cpp_extension 性能进程身份未与精度 receipt 闭合：{ex}")
     if side == "baseline" and baseline_kind == "aclnn_builtin":
         provenance = _marker_json(output, MARKER_RUNTIME_PROVENANCE)
         if provenance is None:
@@ -2614,8 +2676,14 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
     _require_real_gate()
     caseset = json.loads(Path(caseset_path).read_text(encoding="utf-8"))
     by_id = {c["id"]: c for c in caseset.get("cases", []) if isinstance(c, dict) and c.get("id")}
-    warmup = int(plan.get("warmup", DEFAULT_WARMUP))
-    repeat = int(plan.get("repeat", DEFAULT_REPEAT))
+    try:
+        sampling = perf_evidence.validate_sampling_config(
+            plan.get("warmup", DEFAULT_WARMUP),
+            plan.get("repeat", DEFAULT_REPEAT))
+    except perf_evidence.PerfEvidenceContractError as ex:
+        raise PerfCollectError(f"perf plan 采样配置非法：{ex}") from ex
+    warmup = sampling["warmup"]
+    repeat = sampling["repeat"]
     side_timeout_s = plan.get("side_timeout_s", 120)
     if (isinstance(side_timeout_s, bool) or not isinstance(side_timeout_s, int)
             or side_timeout_s < 30 or side_timeout_s > 3600):
@@ -2719,7 +2787,9 @@ def collect(caseset_path, work_dir, plan, out_path, *, scratch_dir=None):
                        "strict_custom_vendor": strict_custom_vendor,
                        "dut_lib": dut_lib}
                       if custom_kind == "aclnn_py"
-                      else {"cpp_extension": plan.get("cpp_extension")})
+                      else {"cpp_extension": plan.get("cpp_extension"),
+                            "execution_identity_expected": plan.get(
+                                "execution_identity_expected")})
         custom = measure_side(side="custom", case=case, caseset_path=caseset_path,
                               work_dir=work_dir,
                               cfg_extra=custom_cfg,

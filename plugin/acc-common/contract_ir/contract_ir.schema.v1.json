@@ -71,6 +71,7 @@
     },
     "constraint_graph": { "$ref": "#/$defs/constraint_graph" },
     "output_mapping": { "$ref": "#/$defs/output_mapping" },
+    "stochastic": { "$ref": "#/$defs/stochastic_capability" },
     "target_hardware": {
       "type": "object", "additionalProperties": false,
       "description": "目标机由「任务书 适配硬件 × op_def AddConfig」双源交叉核定（用户 2026-07-23：目标 a3/a5 两台均支持，逐算子定）。",
@@ -85,6 +86,67 @@
     }
   },
   "$defs": {
+    "stochastic_capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "bindings", "probabilities", "rng", "oracle_precondition", "statistics"],
+      "description": "随机接口的正式验收 IR。只按 capability 启用；RNG 前提收据与正式统计证据物理分离。",
+      "properties": {
+        "kind": { "const": "binary_probability_sampler" },
+        "bindings": {
+          "type": "object", "additionalProperties": false,
+          "required": ["probability", "seed", "offset"],
+          "properties": {
+            "probability": { "type": "string", "minLength": 1 },
+            "seed": { "type": "string", "minLength": 1 },
+            "offset": { "type": "string", "minLength": 1 }
+          }
+        },
+        "probabilities": {
+          "type": "object", "additionalProperties": false,
+          "required": ["boundaries", "interior"],
+          "properties": {
+            "boundaries": { "const": [0, 1] },
+            "interior": {
+              "type": "array", "minItems": 1, "uniqueItems": true,
+              "items": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 }
+            }
+          }
+        },
+        "rng": {
+          "type": "object", "additionalProperties": false,
+          "required": ["seed", "alternate_seed", "offset", "alternate_offset", "offset_alignment", "repeat_count"],
+          "properties": {
+            "seed": { "type": "integer" },
+            "alternate_seed": { "type": "integer" },
+            "offset": { "type": "integer", "minimum": 0 },
+            "alternate_offset": { "type": "integer", "minimum": 0 },
+            "offset_alignment": { "type": "integer", "minimum": 1 },
+            "repeat_count": { "type": "integer", "minimum": 2 }
+          }
+        },
+        "oracle_precondition": {
+          "type": "object", "additionalProperties": false,
+          "required": ["method_kind", "callable", "predicate"],
+          "properties": {
+            "method_kind": { "const": "same_device_npu" },
+            "callable": { "type": "string", "pattern": "^(torch|torch_npu)\\.Tensor\\.[A-Za-z_][A-Za-z0-9_]*$" },
+            "predicate": { "const": "exact" }
+          }
+        },
+        "statistics": {
+          "type": "object", "additionalProperties": false,
+          "required": ["predicate", "independence_predicate", "confidence", "min_samples", "witness_profile_id"],
+          "properties": {
+            "predicate": { "const": "hoeffding_two_sided" },
+            "independence_predicate": { "const": "joint_and_hamming_hoeffding" },
+            "confidence": { "type": "number", "exclusiveMinimum": 0.5, "exclusiveMaximum": 1 },
+            "min_samples": { "type": "integer", "minimum": 1 },
+            "witness_profile_id": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
     "provenance": {
       "type": "object", "additionalProperties": false,
       "required": ["source", "state"],
@@ -284,7 +346,7 @@
       "required": ["kind", "threshold_source"],
       "description": "判据是『关系』而非固定比较（F6）。G4：支持跨输出引用 + 阈值来源降级 tier。",
       "properties": {
-        "kind": { "type": "string", "enum": ["pointwise", "equivalence_relation"] },
+        "kind": { "type": "string", "enum": ["pointwise", "equivalence_relation", "statistical"] },
         "compare": { "type": "string", "enum": ["exact", "isclose"], "description": "kind=pointwise：整型/计数/reduce-选择→exact；浮点超越/加和→isclose" },
         "tol_ref": { "type": "string" },
         "equivalence": {
@@ -295,6 +357,7 @@
             "over": { "type": "array", "items": { "type": "string" }, "description": "G4：可引用 inputs 与 other_outputs 的 logical_value_id" }
           }
         },
+        "stochastic_ref": { "const": "#/stochastic", "description": "kind=statistical 时引用同一 IR 的 stochastic capability" },
         "threshold_source": {
           "type": "object", "additionalProperties": false,
           "required": ["tier"],

@@ -35,6 +35,7 @@ def _contract():
             "independence_predicate": "joint_and_hamming_hoeffding",
             "confidence": 0.999,
             "min_samples": 4096,
+            "witness_profile_id": "statistical_witness",
         },
     }
 

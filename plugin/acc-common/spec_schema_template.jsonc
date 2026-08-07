@@ -539,6 +539,29 @@
 //   "taskdoc_snapshot": {"sha256": "<任务书快照 sha256>"}   // **仅** authorization.kind ∈ {oracle_method, formula}
 //                                                          // impl_reference / none 无快照 → 整键省略
 //
+// ── 顶层 · 随机二元采样 capability（任务书要求固定 seed/offset + 统计策略时才写）────────────
+//   ⚠ 它不按算子名启用，只按 `kind` 和具名参数绑定启用；须与 `multi_input_contract` 同时声明，
+//     `statistics.witness_profile_id` 逐字绑定其中唯一的统计 witness profile。该 profile 输出
+//     numel 必须 ≥ min_samples。正式 role 矩阵由 workflow 生成，不采信任务书附件自带随机输出。
+//   ⚠ `oracle_precondition` 只生成独立 precondition 收据，固定 `usable_for_verdict=false`；
+//     同设备/同 probability/seed/offset 的 exact 未通过时正式统计证据不得生成，最终状态 BLOCKED，
+//     不得把 RNG 消耗差异直接写成 DUT 精度 FAIL。
+//   "stochastic": {
+//     "kind": "binary_probability_sampler",
+//     "bindings": {"probability": "<参数名>", "seed": "<参数名>", "offset": "<参数名>"},
+//     "probabilities": {"boundaries": [0.0, 1.0], "interior": ["<至少一个 0<p<1>"]},
+//     "rng": {"seed": "<int64>", "alternate_seed": "<不同 int64>",
+//             "offset": "<非负且对齐>", "alternate_offset": "<不同且对齐>",
+//             "offset_alignment": "<任务书约束，如 4>", "repeat_count": "<int>=2"},
+//     "oracle_precondition": {"method_kind": "same_device_npu",
+//                             "callable": "<torch.Tensor.method_ 或 torch_npu.Tensor.method_>",
+//                             "predicate": "exact"},
+//     "statistics": {"predicate": "hoeffding_two_sided",
+//                    "independence_predicate": "joint_and_hamming_hoeffding",
+//                    "confidence": "<0.5<x<1>", "min_samples": "<正整数>",
+//                    "witness_profile_id": "<multi_input_contract profile_id>"}
+//   }
+//
 // ════════════════════════════════════════════════════════════════════════════════
 // 《最小合法骨架》——照抄哪一份看 runner_form；抄完把 `<…>` 全部替换成真值
 //   ⚠ **正式验收只有 ① 可抄**：`cpp_extension` 是当前唯一能产验收裁决、也是唯一派得出 mode 的形态。

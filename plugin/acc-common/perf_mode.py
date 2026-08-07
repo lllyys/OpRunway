@@ -36,6 +36,8 @@ import hashlib
 import os
 import re
 
+import perf_evidence_contract
+
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _TASKDOC_SNAPSHOT_NAME = "task_doc.snapshot.md"
 _CITE_RE = re.compile(
@@ -319,6 +321,10 @@ def resolve_spec_mode(spec):
                     f"'{GROUND_CHANGE_CLASS_NO_PERF_COMPARISON}' 要求 spec.change.kind 属 "
                     f"{list(NO_PERF_COMPARISON_CHANGE_KINDS)}，实得 {kind!r}——"
                     "「本轮改动属那三类」是可机核的事实，对不上就不是这个 ground 能授权的场景。")
+        try:
+            perf_evidence_contract.validate_measure_only_requirement_gaps(spec, auth)
+        except perf_evidence_contract.PerfEvidenceContractError as ex:
+            raise PerfModeError(f"measure_only 未验收性能条款账本非法：{ex}") from ex
     return mode
 
 

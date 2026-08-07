@@ -229,8 +229,10 @@ def normalize_contract(value, params=None):
 
     stats = _object(
         value["statistics"], "spec.stochastic.statistics",
-        {"predicate", "independence_predicate", "confidence", "min_samples"},
-        {"predicate", "independence_predicate", "confidence", "min_samples"})
+        {"predicate", "independence_predicate", "confidence", "min_samples",
+         "witness_profile_id"},
+        {"predicate", "independence_predicate", "confidence", "min_samples",
+         "witness_profile_id"})
     if stats["predicate"] != STAT_HOEFFDING:
         raise StochasticContractError(
             f"statistics.predicate 必须为 {STAT_HOEFFDING!r}")
@@ -241,6 +243,8 @@ def normalize_contract(value, params=None):
     if not 0.5 < confidence < 1.0:
         raise StochasticContractError("statistics.confidence 须严格位于 (0.5,1)")
     min_samples = _int(stats["min_samples"], "statistics.min_samples", minimum=1)
+    witness_profile_id = _token(
+        stats["witness_profile_id"], "statistics.witness_profile_id")
 
     normalized = {
         "kind": KIND_BINARY_PROBABILITY_SAMPLER,
@@ -257,6 +261,7 @@ def normalize_contract(value, params=None):
             "independence_predicate": INDEPENDENCE_JOINT,
             "confidence": confidence,
             "min_samples": min_samples,
+            "witness_profile_id": witness_profile_id,
         },
     }
     tests = _statistical_test_count(normalized)
@@ -333,6 +338,7 @@ def build_case_plan(value):
         "schema": PLAN_SCHEMA,
         "schema_version": SCHEMA_VERSION,
         "contract_sha256": canonical_sha256(contract),
+        "witness_profile_id": contract["statistics"]["witness_profile_id"],
         "cases": cases,
     }
     return body

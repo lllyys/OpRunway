@@ -45,6 +45,8 @@ judge_* 入口做 metric **schema 校验**（计数=非负整数、numel=正整�
 """
 import json, math, operator as _operator, re, sys
 import precision_policy
+import stochastic_collector
+import stochastic_contract
 
 
 # ------------------------------------------------------ metric schema 校验 ---
@@ -1121,6 +1123,55 @@ def validate(spec, caseset, evidence):
         problems.append(f"evidence 缺 case: {sorted(missing)}")
     if extra:
         problems.append(f"evidence 有多余 case: {sorted(extra)}")
+
+    # 随机 capability 的逐 case 证据只证明执行身份/role；精度值来自一份正式统计工件，
+    # 绝不把某次随机 realization 当逐点 golden。RNG 前提不在本 envelope 中，最终由三级门
+    # 读取独立收据；因此缺 formal 只记待门控，不在这里冒充 DUT precision fail。
+    if "stochastic" in spec:
+        try:
+            contract = stochastic_contract.from_spec(spec)
+            if caseset.get("stochastic_contract") != contract:
+                raise stochastic_contract.StochasticContractError(
+                    "caseset.stochastic_contract 与 staged spec 规范化结果漂移")
+            stochastic_collector.validate_caseset_bindings(contract, caseset)
+        except (stochastic_contract.StochasticContractError,
+                stochastic_collector.StochasticCollectorError) as ex:
+            problems.append(f"stochastic contract/caseset 非法：{ex}")
+        evaluation = evidence.get("stochastic_evaluation")
+        formal = evidence.get("stochastic_formal_evidence")
+        state = evaluation.get("status") if isinstance(evaluation, dict) else None
+        if state not in (stochastic_contract.EVAL_SATISFIED,
+                         stochastic_contract.EVAL_FAILED):
+            problems.append("stochastic formal/evaluation 缺失；须由三级门落 BLOCKED，不是 DUT 精度失败")
+        if not isinstance(formal, dict):
+            problems.append("stochastic_formal_evidence 缺失")
+        per = []
+        for case in cases:
+            if not isinstance(case, dict) or not case.get("id"):
+                continue
+            cid = case["id"]
+            row = _empty_row(cid)
+            ev = ev_by_id.get(cid)
+            binding = case.get("stochastic")
+            if not isinstance(ev, dict) or ev.get("status") != "ok" \
+                    or ev.get("stochastic") != binding \
+                    or (case.get("expected") or {}).get("stochastic") != binding:
+                row.update(功能="fail", 判据="stochastic role/binding/执行状态漂移")
+            else:
+                row["功能"] = "pass"
+                if state == stochastic_contract.EVAL_SATISFIED:
+                    row.update(精度="pass", standard_profile_pass="pass",
+                               acceptance_precision_pass="pass",
+                               判据="正式随机统计谓词全部满足")
+                elif state == stochastic_contract.EVAL_FAILED:
+                    row.update(精度="fail", standard_profile_pass="fail",
+                               acceptance_precision_pass="fail",
+                               判据="前提门通过后的正式随机统计谓词未满足")
+                else:
+                    row.update(判据="正式随机证据不可用，等待三级门 BLOCKED")
+            per.append(row)
+        return _verdict(op, vm, None, problems, per,
+                        golden_judged_from="not_applicable_stochastic")
 
     # `golden_unavailable` 的**可信**名册：由 gen_cases（Layer 1 确定性产物）写进 caseset，
     # **不是**被裁方在 evidence 里自报的状态。下面那条 dims 豁免只认这一份名册，故伪造者动

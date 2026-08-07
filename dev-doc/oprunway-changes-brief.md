@@ -2,6 +2,11 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-07 · 三算子统一计划 N9：measure-only msprof 证据链
+
+- measure-only 现逐 case 保存并重算 kernel-only 原始采样，且把 NPU device、SoC、CANN 观测、DUT ELF 与双符号身份绑定进确定性收据；三类授权均强制 cite/quote/任务书摘要，GPU/ratio 条款只以未验收 gap 进入 `PASSED_WITH_GAPS`，资源条款不得进入性能裁决。
+- A3 定向回归 271 项通过；Bernoulli、Roll、Remainder 均已按 `snapshot-digest → build → emit` 取得 VERIFIED build receipt。三算子正式 msprof 仍等待下一阶段由 OpRunway 自生成 caseset/调用计划，未手写 case、未编造性能数。
+
 ## 2026-08-07 · 三算子统一计划 N7：rank0、atomic attrs 与 layout 生产链
 
 - 生成与执行链现严格区分 rank0、empty、singleton；显式 `attr_type=int_array` 才允许空数组，atomic rows 按 P×A×Q 完整账本生成，负轴以具名输入 rank 归一但向 DUT 传 raw 值。

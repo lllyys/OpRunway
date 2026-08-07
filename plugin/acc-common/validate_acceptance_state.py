@@ -29,8 +29,10 @@ import content_address  # noqa: E402
 import cpp_extension_adapter  # noqa: E402
 import cpp_extension_identity  # noqa: E402
 import perf_mode  # noqa: E402
+import perf_evidence_contract  # noqa: E402
 import source_facts_lookup  # noqa: E402
 import source_provenance  # noqa: E402
+import stochastic_contract  # noqa: E402
 import vendor_build_receipt  # noqa: E402
 
 # T6/T8 扩枚举：exception=小shape例外(合法放行需交叉校验)；
@@ -1758,6 +1760,34 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
             d, summary, errs, source_facts_path=source_facts_path,
             build_receipt=(build_receipt if receipt_version
                            == cann_version.RECEIPT_SCHEMA_VERSION else None))
+    # 随机正式证据门：独立前提文件只在本门消费。任何缺失/漂移/exact mismatch 都是
+    # evidence BLOCKED；只有前提 ready 后，合法的统计 failed 才留给 validator 判 precision FAIL。
+    try:
+        stochastic = cpp_extension_adapter.validate_stochastic_collection(
+            d, caseset, receipt)
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        errs.append(f"stochastic evidence 未闭合：{ex}")
+    else:
+        declared = envelope.get("stochastic_collection")
+        if stochastic is None:
+            if declared is not None or envelope.get("stochastic_formal_evidence") is not None:
+                errs.append("非 stochastic caseset 的 evidence 冒领 stochastic 工件")
+        else:
+            try:
+                staged_contract = stochastic_contract.from_spec(staged_spec)
+            except stochastic_contract.StochasticContractError as ex:
+                errs.append(f"staged spec.stochastic 非法：{ex}")
+                staged_contract = None
+            if staged_contract != stochastic.get("contract"):
+                errs.append("staged spec.stochastic 与 caseset/receipt 随机契约漂移")
+            if declared != receipt.get("stochastic_collection"):
+                errs.append("evidence.stochastic_collection 与 receipt 漂移")
+            if not stochastic.get("gate", {}).get("ready_for_formal_precision"):
+                errs.append("随机 RNG 同机 exact 前提未通过/不完整：正式精度必须 BLOCKED")
+            elif envelope.get("stochastic_formal_evidence") != stochastic.get("formal"):
+                errs.append("evidence.stochastic_formal_evidence 与独立正式工件漂移")
+            elif envelope.get("stochastic_evaluation") != stochastic.get("evaluation"):
+                errs.append("evidence.stochastic_evaluation 与正式工件重算结果漂移")
     receipt_sha = _canonical_sha(receipt)
     for row in ev_list:
         if isinstance(row, dict) and row.get("cpp_extension_receipt_sha256") != receipt_sha:
@@ -3574,6 +3604,16 @@ def _gate_cpp_extension_perf_collection(d, errs):
         return
     ev_by_id = {row.get("case_id"): row for row in (ev.get("evidence") or [])
                 if isinstance(row, dict)}
+    current_receipt = (
+        receipt.get("schema_version") == cann_version.RECEIPT_SCHEMA_VERSION)
+    expected_identity = None
+    if current_receipt:
+        try:
+            expected_identity = perf_evidence_contract.expected_execution_identity(
+                receipt, device_index=collect.get("device"))
+        except perf_evidence_contract.PerfEvidenceContractError as ex:
+            errs.append(f"cpp_extension 性能 execution identity 期望值无法从 receipt 派生：{ex}")
+    measure_only = collect.get("mode") == perf_mode.MODE_MEASURE_ONLY
     for record in records:
         cid = record["case_id"]
         custom = record.get("custom") if isinstance(record.get("custom"), dict) else {}
@@ -3585,6 +3625,24 @@ def _gate_cpp_extension_perf_collection(d, errs):
             errs.append(f"{cid}: cpp_extension evidence.perf.us 与原始采集记录漂移")
         if evidence_perf.get("scope") != "kernel_only":
             errs.append(f"{cid}: cpp_extension evidence.perf.scope 非 kernel_only")
+        if not current_receipt:
+            continue
+        try:
+            identity = perf_evidence_contract.validate_execution_identity(
+                custom.get("execution_identity"), expected=expected_identity)
+            if measure_only and custom.get("behavior") == "npu":
+                receipt_sampling = perf_evidence_contract.validate_sampling_receipt(
+                    custom, record.get("sampling_receipt"), case_id=cid,
+                    warmup=collect.get("warmup"), repeat=collect.get("repeat"))
+                if evidence_perf.get("sampling_receipt_sha256") != receipt_sampling["sha256"]:
+                    raise perf_evidence_contract.PerfEvidenceContractError(
+                        "evidence.perf.sampling_receipt_sha256 与原始采样收据漂移")
+            if evidence_perf.get("execution_identity_sha256") != \
+                    perf_evidence_contract.canonical_sha(identity):
+                raise perf_evidence_contract.PerfEvidenceContractError(
+                    "evidence.perf.execution_identity_sha256 与实测身份漂移")
+        except perf_evidence_contract.PerfEvidenceContractError as ex:
+            errs.append(f"{cid}: cpp_extension 性能 identity/sampling evidence 未闭合：{ex}")
 
 
 _GATES = {"task1": gate_task1, "task2": gate_task2, "task3": gate_task3}

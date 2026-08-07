@@ -2400,6 +2400,110 @@ def _resolve_multi_input_contract(spec):
     return bundle
 
 
+def _resolve_stochastic_contract(spec):
+    """解析可选随机 capability；字段缺席保持既有 deterministic 路径不变。"""
+    import stochastic_contract as SC
+    try:
+        return SC.from_spec(spec)
+    except SC.StochasticContractError as ex:
+        raise ValueError(f"spec.stochastic 非法：{ex}") from ex
+
+
+def _stochastic_profile_plan(spec, bundle, stochastic, attrs_default, case_target):
+    """把一个外部冻结的统计 witness profile 展开为稳定 RNG 角色计划。
+
+    v1 有意只准一个 witness profile / 一个 primitive attr cell：统计样本不能把不同
+    shape/dtype 或重复的 RNG 子序列拼成一个 Hoeffding 样本冒充 iid。其它结构覆盖应由
+    独立 caseset 承担；将来若要多 profile，须先定义逐 profile 的独立 seed/offset 分配。
+    """
+    import stochastic_contract as SC
+    if bundle is None:
+        raise ValueError("spec.stochastic 必须与 multi_input_contract 同时声明，绑定真实 host scalar/输出")
+    witness = stochastic["statistics"]["witness_profile_id"]
+    profiles = [p for p in bundle["profiles"] if p.get("profile_id") == witness]
+    if len(profiles) != 1 or len(bundle["profiles"]) != 1:
+        raise ValueError(
+            "stochastic v1 要求 multi_input_contract 恰含一个、且 id 等于 "
+            f"statistics.witness_profile_id={witness!r} 的统计 witness profile")
+    plan = SC.build_case_plan(stochastic)
+    base_entries, meta = _multi_input_profile_plan(
+        spec, bundle, attrs_default, len(bundle["profiles"]))
+    if len(base_entries) != 1:
+        raise ValueError(
+            "stochastic v1 要求 witness profile 只有一个 primitive attr cell；"
+            "不得把不同 attr/RNG 子序列拼成一个统计样本")
+    base = base_entries[0]
+    if base.get("contract_bindings", {}).get("atomic_attr_row") is not None:
+        raise ValueError("stochastic v1 尚未定义 atomic attr rows × RNG roles 的统计独立性，拒绝混用")
+    output_numel = _numel(base["input_profile"]["output"]["shape"])
+    minimum = stochastic["statistics"]["min_samples"]
+    if output_numel < minimum:
+        raise ValueError(
+            f"stochastic witness profile 输出样本数 {output_numel} < min_samples={minimum}")
+    bindings = stochastic["bindings"]
+    scalar_names = {
+        item["name"] for item in base["input_profile"]["inputs"]
+        if item.get("kind") == "scalar" and item.get("binding") == "host_scalar"
+    }
+    attr_names = {
+        p.get("name") for p in spec.get("params") or []
+        if isinstance(p, dict) and p.get("io") == "attr"
+    }
+    for role, name in bindings.items():
+        if name not in scalar_names and name not in attr_names:
+            raise ValueError(
+                f"stochastic binding {role}={name!r} 未绑定 host_scalar 或 attr 参数")
+
+    entries = []
+    for row in plan["cases"]:
+        entry = json.loads(json.dumps(base, ensure_ascii=False, allow_nan=False))
+        entry["shape"] = tuple(entry["shape"])
+        profile = entry["input_profile"]
+        profile["profile_id"] = f"{witness}__{row['role']}"
+        attrs = entry["attrs"]
+        for name, value in row["values"].items():
+            scalar = next((item for item in profile["inputs"] if item.get("name") == name), None)
+            if scalar is not None:
+                scalar["value"] = value
+            elif name in attr_names:
+                attrs[name] = value
+            else:  # 上方绑定门理论上已挡；保留防未来结构变更。
+                raise ValueError(f"stochastic role {row['role']} 无法物化参数 {name!r}")
+        entry.update({
+            "dims": ["功能", "精度"],
+            "tags": ["随机统计契约", row["purpose"]],
+            "id_kind": "stochastic",
+            "case_origin": f"stochastic_contract:{row['role']}",
+            "rule_ref": "stochastic_contract.v1 capability-driven role plan",
+            "stochastic_case": json.loads(json.dumps(row, ensure_ascii=False, allow_nan=False)),
+        })
+        entries.append(entry)
+    if int(case_target) != len(entries):
+        raise ValueError(
+            f"stochastic 完整角色矩阵={len(entries)}，precision.case_target={case_target}；"
+            "必须逐字相等，禁止抽样/截断")
+    meta.update({
+        "pool_max": len(entries), "requested_target": len(entries),
+        "emitted": len(entries), "forced_total": len(entries),
+        "coverage_strength": "stochastic_contract.v1 完整 RNG role 计划；不抽样、不拼接 profile",
+        "stochastic_ledger": {
+            "schema": SC.PLAN_SCHEMA,
+            "schema_version": SC.SCHEMA_VERSION,
+            "contract_sha256": SC.canonical_sha256(stochastic),
+            "plan_sha256": SC.canonical_sha256(plan),
+            "witness_profile_id": witness,
+            "sample_count": output_numel,
+            "roles": [row["role"] for row in plan["cases"]],
+        },
+    })
+    meta["multi_input_ledger"]["case_coverage"] = {
+        key: (len(entries) if value else 0)
+        for key, value in meta["multi_input_ledger"]["case_coverage"].items()
+    }
+    meta["multi_input_ledger"]["case_coverage"]["cases"] = len(entries)
+    return entries, meta
+
+
 _TENSOR_SHAPE_ATTRS_SCHEMA_VERSION = 1
 _TENSOR_SHAPE_ATTRS_KEYS = frozenset({
     "schema_version", "atomic_attr_rows", "cyclic_indices", "layout_requirements",
@@ -4777,6 +4881,7 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
     runner_form = repo_adapter.spec_runner_form(spec)
     check_spec_capability(in_params, runner_form)        # 能力边界前置：先于 load_golden，别为不支持的算子白加载 golden
     multi_input_bundle = _resolve_multi_input_contract(spec)
+    stochastic = _resolve_stochastic_contract(spec)
     # CS：用例来源（generated / taskdoc）与规范化任务书用例集，**在加载 golden 之前**解出来——
     # 一份「声明了 taskdoc 却没喂用例集」的 spec 应当停在零副作用处，而不是先 import 一遍用户 golden。
     case_source, taskdoc_payload, taskdoc_sha256 = _resolve_taskdoc_inputs(spec, taskdoc_caseset)
@@ -4793,12 +4898,16 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
     #     就成了「先动了外部状态、再说这活不能干」（经 run_workflow 调用时前面还夹着清残留与 staging）。
     case_target = _require_case_target(spec)
     # C1：load_golden 返回具名元组，`.out_shape` 是**可选**的（未导出=None → 缺省同形语义）。
-    _g = load_golden(op)                             # 具名元组：按名取，别再位置解包
-    golden_fn, golden_source, out_shape_fn = _g.fn, _g.source, _g.out_shape
-    # 批 2：派生 golden 档位（tier 1..4 / 是否需人核 / blocked 原因），**记录不阻断**。
-    # 阻断是批 5 门侧的事——这里若直接拦，任何还没把任务书快照入库的算子会当场跑不了，
-    # 而「快照没入库」本身正是要被**看见**的问题，不是要被静默绕过的。
-    _tier = _derive_tier(op, _g.contract)
+    if stochastic is None:
+        _g = load_golden(op)                         # 具名元组：按名取，别再位置解包
+        golden_fn, golden_source, out_shape_fn = _g.fn, _g.source, _g.out_shape
+        # 批 2：派生 golden 档位（tier 1..4 / 是否需人核 / blocked 原因），**记录不阻断**。
+        _tier = _derive_tier(op, _g.contract)
+    else:
+        # 随机 capability 的真值是独立前提收据 + 正式统计谓词；调用 per-op golden 会把
+        # 一次随机 realization 伪装成逐点真值。故这里物理上不加载 golden.py。
+        golden_fn, golden_source, out_shape_fn, _tier = (
+            None, "stochastic_formal_contract", None, None)
     attrs_default = {
         p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"
         and not (multi_input_bundle is not None and p.get("binding") == "host_scalar")
@@ -4820,6 +4929,8 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
 
     # 多输出契约触发（据 spec 字段、op-中立）+ torch_allclose 容差分源参数（仅 torch 对标场景用）。
     uses_multi = _uses_output_contract(spec)
+    if stochastic is not None and uses_multi:
+        raise ValueError("stochastic v1 当前只支持单输出；多输出统计关系未定义")
     if multi_input_bundle is not None and uses_multi:
         raise ValueError(
             "multi_input_contract.v1 当前只支持单输出 expected 契约；多输出不得静默走 legacy")
@@ -4841,7 +4952,13 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
 
     # CS：用例来源分叉。`taskdoc` 档在 `_plan` **之前**分出去——它一条网格都不铺，
     # G4 的规模预算也不行使（降规模会改掉任务书点名的 shape，那就不是那条用例了）。
-    if multi_input_bundle is not None:
+    if stochastic is not None:
+        if case_source == _CASE_SOURCE_TASKDOC:
+            raise ValueError(
+                "stochastic 正式角色计划必须由 workflow 生成；任务书附带 case 只可 reference_only")
+        entries, plan_meta = _stochastic_profile_plan(
+            spec, multi_input_bundle, stochastic, attrs_default, case_target)
+    elif multi_input_bundle is not None:
         if case_source == _CASE_SOURCE_TASKDOC:
             raise ValueError(
                 "multi_input_contract 与 case_source=taskdoc 不得同时声明；正式 cases/golden 由 "
@@ -4889,6 +5006,73 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
             inputs = _materialize_taskdoc_inputs(entry, in_params, dtn)
         # 逐 case 选中调用变体（无变体声明 → None；有声明但无匹配 → fail-closed，绝不退默认）。
         variant = _select_call_variant(variants, attrs, cid) if variants else None
+        stochastic_case = entry.get("stochastic_case")
+        if stochastic_case is not None:
+            if input_profile is None:
+                raise ValueError(f"{cid}: stochastic case 缺 multi_input parameter_contract")
+            tensor_contracts = _profile_tensor_inputs(input_profile)
+            input_dtns = [item["dtype"] for item in tensor_contracts]
+            input_layout_bindings = _claim_input_layout_bindings(
+                layout_tracker, case_id=cid, entry=entry, inputs=inputs,
+                in_params=in_params, tensor_contracts=tensor_contracts)
+            in_items = _save_case_tensor_inputs(
+                cdir, cid, inputs, in_params, input_dtns,
+                tensor_contracts=tensor_contracts,
+                layout_bindings=input_layout_bindings)
+            output = input_profile["output"]
+            logical_cdtype = precision_policy.derive_output_dtype(
+                spec, [(p["name"], input_dtns[j]) for j, p in enumerate(in_params)])
+            if logical_cdtype != output["dtype"]:
+                raise ValueError(
+                    f"{cid}: stochastic 输出 dtype={output['dtype']!r} ≠ spec 派生 {logical_cdtype!r}")
+            stochastic_binding = {
+                "contract_sha256": plan_meta["stochastic_ledger"]["contract_sha256"],
+                "plan_sha256": plan_meta["stochastic_ledger"]["plan_sha256"],
+                "witness_profile_id": plan_meta["stochastic_ledger"]["witness_profile_id"],
+                "role": stochastic_case["role"],
+                "purpose": stochastic_case["purpose"],
+                "probability": stochastic_case["probability"],
+                "values": stochastic_case["values"],
+                "sample_count": _numel(output["shape"]),
+            }
+            expected = {
+                "golden_source": golden_source,
+                "golden_status": "formal_statistical",
+                "golden_path": None,
+                "verify_mode": vmode,
+                "compare": "stochastic",
+                "standard": "stochastic_contract.v1",
+                "compare_dtype": output["dtype"],
+                "out_shape": list(output["shape"]),
+                "out_shape_source": "multi_input_contract.output",
+                "case_origin": entry["case_origin"],
+                "rule_ref": entry["rule_ref"],
+                "stochastic": stochastic_binding,
+            }
+            output_names = _active_output_names(spec, variant, cid)
+            if output_names != [output["name"]]:
+                raise ValueError(
+                    f"{cid}: stochastic active output={output_names!r} ≠ profile output {output['name']!r}")
+            _attach_output_layout(
+                expected,
+                _claim_output_layout(
+                    layout_tracker, spec=spec, case_id=cid, entry=entry,
+                    output_name=output["name"], output_index=0,
+                    output_shape=output["shape"], input_profile=input_profile))
+            case = {
+                "id": cid, "dims": dims, "tags": entry["tags"],
+                "inputs": in_items, "attrs": attrs, "expected": expected,
+                "parameter_contract": input_profile,
+                "stochastic": stochastic_binding,
+            }
+            if needs_aclnn_call:
+                case["aclnn_call"] = _build_aclnn_call(
+                    spec, variant, attrs, output_names, cid,
+                    parameter_contract=input_profile)
+                _bind_layout_to_aclnn_call(case, cid)
+            _attach_entry_contract_bindings(case, entry)
+            cases.append(case)
+            continue
         if uses_multi:                                   # 多输出契约（torch 对标 median）：全程 op-中立据字段
             case = _build_multi_output_case(
                 spec, op, cid, cdir, entry, inputs, in_params, dtn, attrs, dims, vmode,
@@ -5127,6 +5311,10 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                if "case_matrix_ledger" in plan_meta else {}),
             **({"multi_input_ledger": plan_meta["multi_input_ledger"]}
                if "multi_input_ledger" in plan_meta else {}),
+            **({"stochastic_ledger": plan_meta["stochastic_ledger"]}
+               if "stochastic_ledger" in plan_meta else {}),
+            **({"stochastic_contract": stochastic}
+               if stochastic is not None else {}),
             **({"atomic_attr_ledger": atomic_attr_ledger,
                 "atomic_attr_ledger_sha256": atomic_attr_ledger_sha256}
                if atomic_attr_ledger is not None else {}),
@@ -5192,6 +5380,7 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
     dry_runner_form = repo_adapter.spec_runner_form(spec)
     check_spec_capability(in_params, dry_runner_form)
     multi_input_bundle = _resolve_multi_input_contract(spec)
+    stochastic = _resolve_stochastic_contract(spec)
     # CS：dry-run 与正式生成走**同一道**用例来源解析 —— 「声明了 taskdoc 却没喂用例集」这类错
     # 必须在 CP-B 契约自检就现形，不许 CP-B 全绿、CP-D 才炸。
     case_source, taskdoc_payload, taskdoc_sha256 = _resolve_taskdoc_inputs(spec, taskdoc_caseset)
@@ -5218,26 +5407,40 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
     cost_fn, cost_why, _dry_out_shape_fn = None, "", None
     golden_dependency = {"status": "missing", "bytes_sha256": None,
                          "contract_sha256": None}
-    try:
-        golden = load_golden(op)
-        _dry_out_shape_fn = golden.out_shape            # 具名取：下标在字段重排后会静默指错
-        cost_fn = _make_cost_fn(in_params, _dry_out_shape_fn)
-        import repo_adapter
-        golden_path = os.path.join(repo_adapter.op_dir(op), "golden.py")
-        with open(golden_path, "rb") as golden_fh:
-            golden_bytes = golden_fh.read()
-        contract_bytes = content_address.canonical_json_bytes(golden.contract)
+    if stochastic is None:
+        try:
+            golden = load_golden(op)
+            _dry_out_shape_fn = golden.out_shape            # 具名取：下标在字段重排后会静默指错
+            cost_fn = _make_cost_fn(in_params, _dry_out_shape_fn)
+            import repo_adapter
+            golden_path = os.path.join(repo_adapter.op_dir(op), "golden.py")
+            with open(golden_path, "rb") as golden_fh:
+                golden_bytes = golden_fh.read()
+            contract_bytes = content_address.canonical_json_bytes(golden.contract)
+            golden_dependency = {
+                "status": "loaded",
+                "bytes_sha256": hashlib.sha256(golden_bytes).hexdigest(),
+                "contract_sha256": hashlib.sha256(contract_bytes).hexdigest(),
+            }
+        except ValueError as ex:
+            msg = str(ex)
+            if not msg.startswith("缺 golden:"):            # 文件在、但契约/执行有问题 → 不降级
+                raise
+            cost_why = f" ← 未核（{msg.splitlines()[0][:80]}）"
+    else:
         golden_dependency = {
-            "status": "loaded",
-            "bytes_sha256": hashlib.sha256(golden_bytes).hexdigest(),
-            "contract_sha256": hashlib.sha256(contract_bytes).hexdigest(),
+            "status": "not_applicable_stochastic",
+            "bytes_sha256": None,
+            "contract_sha256": None,
         }
-    except ValueError as ex:
-        msg = str(ex)
-        if not msg.startswith("缺 golden:"):            # 文件在、但契约/执行有问题 → 不降级
-            raise
-        cost_why = f" ← 未核（{msg.splitlines()[0][:80]}）"
-    if multi_input_bundle is not None:
+        cost_why = "随机 capability 使用独立前提+正式统计证据，不加载逐点 golden"
+    if stochastic is not None:
+        if case_source == _CASE_SOURCE_TASKDOC:
+            raise ValueError(
+                "stochastic 正式角色计划必须由 workflow 生成；任务书附带 case 只可 reference_only")
+        entries, meta = _stochastic_profile_plan(
+            spec, multi_input_bundle, stochastic, attrs_default, case_target)
+    elif multi_input_bundle is not None:
         if case_source == _CASE_SOURCE_TASKDOC:
             raise ValueError(
                 "multi_input_contract 与 case_source=taskdoc 不得同时声明；正式 cases/golden 由 "
@@ -5315,6 +5518,8 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
     dependency_filenames = list(_PLANNER_DEPENDENCIES)
     if multi_input_bundle is not None:
         dependency_filenames.append("multi_input_contract.py")
+    if stochastic is not None:
+        dependency_filenames.append("stochastic_contract.py")
     for filename in dependency_filenames:
         with open(os.path.join(logic_root, filename), "rb") as source_fh:
             logic_files[filename] = hashlib.sha256(source_fh.read()).hexdigest()
@@ -5368,6 +5573,10 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
             **({"input_rank_profiles": input_rank_profiles,
                 "multi_input_contract_sha256": multi_input_bundle["sha256"]}
                if multi_input_bundle is not None else {}),
+            **({"stochastic_contract_sha256": meta["stochastic_ledger"]["contract_sha256"],
+                "stochastic_plan_sha256": meta["stochastic_ledger"]["plan_sha256"],
+                "stochastic_witness_profile_id": meta["stochastic_ledger"]["witness_profile_id"]}
+               if stochastic is not None else {}),
             "golden_out_shape": "loaded" if _dry_out_shape_fn is not None else "not_available",
             "golden_cost_note": cost_why.strip(),
             **({"perf_case_policy": perf_case_policy}
@@ -5394,6 +5603,8 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
                if "case_matrix_ledger" in meta else {}),
             **({"multi_input_ledger": meta["multi_input_ledger"]}
                if "multi_input_ledger" in meta else {}),
+            **({"stochastic_ledger": meta["stochastic_ledger"]}
+               if "stochastic_ledger" in meta else {}),
             **({"atomic_attr_ledger": meta["atomic_attr_ledger"],
                 "atomic_attr_ledger_sha256": hashlib.sha256(
                     content_address.canonical_json_bytes(

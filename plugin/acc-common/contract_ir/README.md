@@ -7,7 +7,7 @@ emit 出每个算子的**类型化薄 binding**。**契约里没有任何按算�
 
 ## 文件
 
-- `contract_ir.schema.v1.json` —— 版本化 JSON Schema（draft 2020-12）。9 个正交 IR 元素 + G1–G5 缺口补齐。
+- `contract_ir.schema.v1.json` —— 版本化 JSON Schema（draft 2020-12）。9 个正交 IR 元素 + G1–G5 缺口补齐；可选 `stochastic` capability 描述 RNG 角色、前提 oracle 与正式统计谓词。
 - `examples/*.ir.json` —— 跨轴见证算子的 IR 实例（= 探测器应产出的样子 + Schema 的 round-trip 正例）。
 - `codegen.py` —— **唯一通用 codegen**：吃一份 IR JSON → 机械 emit 类型化 `binding.cpp`。**零 op 名分支**（元测试钉住）；域外/fail_closed/ data-dependent-出-尺寸-算不出 → **拒绝生成、退非零**，绝不硬凑。用法：`python codegen.py <ir.json> [-o binding.cpp]`。
 - `test_codegen.py` —— codegen 回归测试（foreach emit 正确 + 三条 fail-closed + 无 op 名分支）。
@@ -32,6 +32,7 @@ emit 出每个算子的**类型化薄 binding**。**契约里没有任何按算�
    `const` 不可信（foreach `x1` 是 `const aclTensorList*` 却被写）；唯一回读 ground truth = example 的 D2H 源 buffer。
 2. **缺源/冲突/域外一律 fail-closed**：`provenance.state ∈ {needs_source, conflict, out_of_domain}` → 模板停手、不生成、交人裁，**绝不静默猜**（尤其 data-dependent 输出的 out 尺寸算不出时，绝不猜个 size 分配了就比对）。
 3. **目标机双源核**：目标 a3/a5 两台，逐算子由「任务书 适配硬件 × op_def AddConfig」定；`contested`（如 op_def 仅 ascend950 vs 任务书 A2/A3）→ 停下人核。
+4. **随机证据分层**：`acceptance.kind=statistical` 时必须引用 `#/stochastic`；同机同设备、同 seed/offset 的 exact RNG 前提只产 `precondition` 级收据且永不可裁决。前提未过时正式统计证据不得生成；过门后才评价概率边界、重复序列与独立性置信谓词。
 
 ## 适用域
 

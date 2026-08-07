@@ -25,6 +25,7 @@ def _contract():
             "independence_predicate": "joint_and_hamming_hoeffding",
             "confidence": 0.999,
             "min_samples": 4096,
+            "witness_profile_id": "statistical_witness",
         },
     }
 
@@ -148,6 +149,7 @@ class PlanTest(unittest.TestCase):
         second = S.build_case_plan(copy.deepcopy(_contract()))
         self.assertEqual(first, second)
         self.assertEqual(first["contract_sha256"], S.canonical_sha256(S.normalize_contract(_contract())))
+        self.assertEqual(first["witness_profile_id"], "statistical_witness")
         roles = [row["role"] for row in first["cases"]]
         self.assertEqual(roles, [
             "boundary_0", "boundary_1", "interior_0_oracle_precondition",

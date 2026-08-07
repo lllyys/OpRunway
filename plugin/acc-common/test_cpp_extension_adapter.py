@@ -12,6 +12,7 @@ import cpp_extension_adapter as A
 import cpp_extension_codegen as C
 import cann_version as CV
 import cpp_extension_identity as I
+import perf_evidence_contract as P
 
 
 def _spec():
@@ -168,6 +169,8 @@ class CppExtensionAdapterContractTest(unittest.TestCase):
             "artifact": {"path": "cpp_extension/x.so", "sha256": "1" * 64},
             "load": {"namespace": "oprunway_test"},
             "bindings": {"invocation_plan_sha256": "3" * 64},
+            "runtime": {"soc": "ascend910_93", "cann_version": "9.0.1",
+                        "cann": {"status": "observed", "normalized": "9.0.1"}},
             "vendor": {
                 "library_path": "/opt/vendor/lib.so",
                 "library_sha256": "2" * 64,
@@ -242,16 +245,25 @@ class CppExtensionAdapterContractTest(unittest.TestCase):
 
     def test_perf_collection_must_be_complete_and_provenance_bound(self):
         cpp = {"artifact": {"path": "x.so", "sha256": "1" * 64}}
+        identity = {
+            "schema": P.EXECUTION_IDENTITY_SCHEMA, "schema_version": 1,
+            "device_index": 0, "device_name": "Ascend A3", "soc": "ascend910_93",
+            "cann_version": "9.0.1", "cann_observation_sha256": "3" * 64,
+            "dut_library_sha256": "2" * 64, "dut_symbol_identity_sha256": "4" * 64,
+        }
         plan = {
             "baseline": "torch_npu",
             "cases": ["c0", "c1"],
             "cpp_extension": cpp,
+            "execution_identity_expected": {
+                key: value for key, value in identity.items() if key != "device_name"},
         }
         document = {
             "custom_kind": "cpp_extension",
             "baseline_source": "torch_npu",
             "custom_provenance": cpp,
-            "records": [{"case_id": "c0"}, {"case_id": "c1"}],
+            "records": [{"case_id": "c0", "custom": {"execution_identity": identity}},
+                        {"case_id": "c1", "custom": {"execution_identity": identity}}],
             "collection_checkpoint": {
                 "complete": True,
                 "planned_case_ids": ["c0", "c1"],
@@ -358,6 +370,14 @@ def _measure_only_spec():
             "taskdoc_snapshot_sha256": "a" * 64,
         },
     }
+    auth = spec["perf"]["measure_only_authorization"]
+    spec.setdefault("task_pr_gaps", []).append({
+        "kind": "performance_requirement_unvalidated", "dimension": "performance",
+        "status": "unvalidated", "requirement_type": "gpu_comparison",
+        "cite": auth["cite"], "quote": auth["quote"],
+        "taskdoc_snapshot_sha256": auth["taskdoc_snapshot_sha256"],
+        "reason": "未取 GPU baseline、未计算 ratio",
+    })
     return spec
 
 
@@ -366,6 +386,8 @@ def _perf_receipt():
         "artifact": {"path": "cpp_extension/x.so", "sha256": "1" * 64},
         "load": {"namespace": "oprunway_test"},
         "bindings": {"invocation_plan_sha256": "3" * 64},
+        "runtime": {"soc": "ascend910_93", "cann_version": "9.0.1",
+                    "cann": {"status": "observed", "normalized": "9.0.1"}},
         "vendor": {
             "library_path": "/opt/vendor/lib.so",
             "library_sha256": "2" * 64,

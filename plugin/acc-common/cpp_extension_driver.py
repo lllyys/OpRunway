@@ -23,6 +23,8 @@ import tempfile
 import cann_version
 import cpp_extension_adapter
 import cpp_extension_identity
+import stochastic_collector
+import stochastic_contract
 import tensor_shape_attrs
 import vendor_build_receipt
 
@@ -33,6 +35,12 @@ class DriverError(RuntimeError):
 
 class LayoutContractError(DriverError):
     """布局身份/物理 transport 漂移；必须中止整轮，不能降格成某 case 的精度失败。"""
+
+
+_STOCHASTIC_PRECONDITION = "stochastic_precondition.json"
+_STOCHASTIC_FORMAL = "stochastic_formal_evidence.json"
+_STOCHASTIC_REFERENCE_DIR = "stochastic_reference"
+_STOCHASTIC_REFERENCE_MANIFEST = "stochastic_reference_execution.json"
 
 
 # 逻辑 dtype 名 → torch dtype 名。**必须与 `repo_adapter.SUPPORTED_NP_BY_FORM["cpp_extension"]`
@@ -994,6 +1002,192 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact, *, layout_contr
     return torch, schemas, invocation
 
 
+def _stochastic_dut_sequences(caseset, work):
+    """从 driver 刚落盘的 out_manifest 读取完整 role→0/1 bytes。"""
+    import numpy as np
+
+    contract = stochastic_contract.normalize_contract(caseset.get("stochastic_contract"))
+    plan = stochastic_contract.build_case_plan(contract)
+    case_by_role = {
+        case["stochastic"]["role"]: case for case in caseset.get("cases") or []
+        if isinstance(case, dict) and isinstance(case.get("stochastic"), dict)
+    }
+    manifest = _load(os.path.join(work, "cpp_extension_out", "out_manifest.json"))
+    if manifest.get("complete") is not True or manifest.get("failed"):
+        failed = [row.get("case_id") for row in manifest.get("failed") or []]
+        raise stochastic_collector.StochasticCollectorError(
+            f"DUT stochastic role 未全量产出；failed_case_ids={failed}")
+    produced = {
+        row.get("case_id"): row for row in manifest.get("produced") or []
+        if isinstance(row, dict)
+    }
+    dtype_map = {
+        "float64": np.float64, "float32": np.float32, "float16": np.float16,
+        "int64": np.int64, "int32": np.int32, "int16": np.int16,
+        "int8": np.int8, "uint8": np.uint8, "bool": np.uint8,
+    }
+    sequences = {}
+    for row in plan["cases"]:
+        role = row["role"]
+        case = case_by_role.get(role)
+        output_row = produced.get(case.get("id") if isinstance(case, dict) else None)
+        outputs = output_row.get("outputs") if isinstance(output_row, dict) else None
+        if not isinstance(outputs, list) or len(outputs) != 1:
+            raise stochastic_collector.StochasticCollectorError(
+                f"DUT role={role!r} 缺唯一输出")
+        output = outputs[0]
+        dtype = output.get("dtype")
+        if dtype not in dtype_map:
+            raise stochastic_collector.StochasticCollectorError(
+                f"DUT role={role!r} disk dtype={dtype!r} 非受控值")
+        path = os.path.realpath(os.path.join(work, "cpp_extension_out", output.get("path", "")))
+        root = os.path.realpath(os.path.join(work, "cpp_extension_out"))
+        if not path.startswith(root + os.sep) or not os.path.isfile(path):
+            raise stochastic_collector.StochasticCollectorError(
+                f"DUT role={role!r} 输出路径逃逸/缺失")
+        values = np.fromfile(path, dtype=dtype_map[dtype])
+        expected = int((case.get("stochastic") or {}).get("sample_count", -1))
+        if values.size != expected:
+            raise stochastic_collector.StochasticCollectorError(
+                f"DUT role={role!r} sample_count={values.size} ≠ caseset={expected}")
+        if not bool(np.all((values == 0) | (values == 1))):
+            raise stochastic_collector.StochasticCollectorError(
+                f"DUT role={role!r} 输出含非二元值")
+        sequences[role] = bytes(values.astype(np.uint8).tolist())
+    return contract, sequences
+
+
+def _reference_sequences(caseset, work, device):
+    """在未加载 DUT vendor 的隔离子进程执行 taskbook 指定同机 NPU reference。"""
+    reference_dir = os.path.join(work, _STOCHASTIC_REFERENCE_DIR)
+    if os.path.lexists(reference_dir):
+        if os.path.islink(reference_dir):
+            raise DriverError("stochastic reference 目录不得为软链")
+        shutil.rmtree(reference_dir)
+    os.makedirs(reference_dir)
+    manifest_path = os.path.join(work, _STOCHASTIC_REFERENCE_MANIFEST)
+    if os.path.lexists(manifest_path):
+        if os.path.islink(manifest_path) or not os.path.isfile(manifest_path):
+            raise DriverError("stochastic reference manifest 旧路径形态非法")
+        os.unlink(manifest_path)
+    worker = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "stochastic_reference_worker.py")
+    env = dict(os.environ)
+    env.pop(vendor_build_receipt.CUSTOM_OPP_ENV, None)
+    env.pop("OPRUNWAY_CPP_EXTENSION_VENDOR_LIBRARY", None)
+    result = subprocess.run(
+        [sys.executable, worker,
+         "--caseset", os.path.join(work, "cpp_extension_caseset.json"),
+         "--out-dir", reference_dir, "--out", manifest_path,
+         "--device", str(device["index"])],
+        env=env, check=False, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise stochastic_collector.StochasticCollectorError(
+            "隔离 reference worker 失败 "
+            f"rc={result.returncode}: {(result.stderr or result.stdout).strip()}")
+    manifest = _load(manifest_path)
+    exact_keys = {
+        "schema", "schema_version", "status", "device", "reference_method",
+        "reference_callable", "custom_opp_path_present", "dut_vendor_env_present", "records",
+    }
+    if not isinstance(manifest, dict) or set(manifest) != exact_keys \
+            or manifest.get("schema") != "oprunway.stochastic_reference_execution" \
+            or manifest.get("schema_version") != 1 or manifest.get("status") != "complete" \
+            or manifest.get("device") != device \
+            or manifest.get("custom_opp_path_present") is not False \
+            or manifest.get("dut_vendor_env_present") is not False:
+        raise stochastic_collector.StochasticCollectorError(
+            "隔离 reference execution schema/device/environment 与父 driver 漂移")
+    contract = stochastic_contract.normalize_contract(caseset["stochastic_contract"])
+    oracle = contract["oracle_precondition"]
+    if (manifest.get("reference_method") != oracle["method_kind"]
+            or manifest.get("reference_callable") != oracle["callable"]):
+        raise stochastic_collector.StochasticCollectorError(
+            "reference method/callable 与 stochastic contract 漂移")
+    records = manifest.get("records")
+    if not isinstance(records, list):
+        raise stochastic_collector.StochasticCollectorError("reference records 非列表")
+    sequences = {}
+    for record in records:
+        role = record.get("role") if isinstance(record, dict) else None
+        if not isinstance(role, str) or role in sequences:
+            raise stochastic_collector.StochasticCollectorError("reference role 缺失/重复")
+        rel = record.get("path")
+        path = os.path.realpath(os.path.join(reference_dir, rel or ""))
+        if not path.startswith(os.path.realpath(reference_dir) + os.sep) \
+                or not os.path.isfile(path):
+            raise stochastic_collector.StochasticCollectorError("reference 输出路径逃逸/缺失")
+        with open(path, "rb") as src:
+            payload = src.read()
+        if (record.get("sha256") != hashlib.sha256(payload).hexdigest()
+                or record.get("sample_count") != len(payload)):
+            raise stochastic_collector.StochasticCollectorError(
+                f"reference role={role!r} 文件摘要/样本数漂移")
+        sequences[role] = payload
+    return sequences, {
+        "runner": "isolated_subprocess_without_dut_vendor_env",
+        "manifest_path": _STOCHASTIC_REFERENCE_MANIFEST,
+        "manifest_sha256": _sha_file(manifest_path),
+    }
+
+
+def _collect_stochastic(caseset, work, runtime, torch):
+    """正式随机工件生产；任何采集缺口结构化 blocked，不伪装成统计 FAIL。"""
+    if "stochastic_contract" not in caseset:
+        if "stochastic_ledger" in caseset:
+            raise DriverError("caseset 有 stochastic_ledger 却缺 contract")
+        return None
+    contract = stochastic_contract.normalize_contract(caseset["stochastic_contract"])
+    plan = stochastic_contract.build_case_plan(contract)
+    base = {
+        "schema": "oprunway.cpp_extension_stochastic_collection",
+        "schema_version": 1,
+        "contract_sha256": stochastic_contract.canonical_sha256(contract),
+        "plan_sha256": stochastic_contract.canonical_sha256(plan),
+    }
+    try:
+        index = int(torch.npu.current_device())
+        soc = str(torch.npu.get_device_name(index))
+        device = stochastic_collector.device_identity(
+            index, soc, runtime["torch_version"], runtime["torch_npu_version"])
+        runtime["device"] = device
+        contract, dut = _stochastic_dut_sequences(caseset, work)
+        reference, reference_execution = _reference_sequences(caseset, work, device)
+        precondition, formal = stochastic_collector.collect(
+            contract, caseset, dut, reference, device)
+        _atomic_dump(os.path.join(work, _STOCHASTIC_PRECONDITION), precondition)
+        pre_file = {
+            "path": _STOCHASTIC_PRECONDITION,
+            "sha256": _sha_file(os.path.join(work, _STOCHASTIC_PRECONDITION)),
+        }
+        if formal is None:
+            return {
+                **base, "status": "blocked_precondition",
+                "device": device, "reference_execution": reference_execution,
+                "precondition": pre_file,
+                "formal_evidence": None,
+                "reason": "RNG exact 前提不一致；正式统计证据按契约未生成",
+            }
+        _atomic_dump(os.path.join(work, _STOCHASTIC_FORMAL), formal)
+        return {
+            **base, "status": "complete",
+            "device": device, "reference_execution": reference_execution,
+            "precondition": pre_file,
+            "formal_evidence": {
+                "path": _STOCHASTIC_FORMAL,
+                "sha256": _sha_file(os.path.join(work, _STOCHASTIC_FORMAL)),
+            },
+        }
+    except (stochastic_contract.StochasticContractError,
+            stochastic_collector.StochasticCollectorError,
+            OSError, subprocess.SubprocessError, ValueError) as ex:
+        return {
+            **base, "status": "blocked_collection",
+            "precondition": None, "formal_evidence": None,
+            "reason": f"{type(ex).__name__}: {ex}",
+        }
+
+
 def run(bundle, work):
     bundle, work = os.path.realpath(bundle), os.path.realpath(work)
     if not os.path.isdir(bundle) or not os.path.isdir(work):
@@ -1055,6 +1249,7 @@ def run(bundle, work):
             "torch_version", "torch_npu_version", "soc", RUNTIME_CUSTOM_OPP_KEY)):
         raise DriverError(
             "runtime provenance 不完整；须提供 OPRUNWAY_SOC，且 torch/torch_npu 须可识别")
+    stochastic_collection = _collect_stochastic(caseset, work, runtime, torch)
     receipt = {
         "schema": "oprunway.cpp_extension_receipt",
         "schema_version": cann_version.RECEIPT_SCHEMA_VERSION,
@@ -1079,6 +1274,8 @@ def run(bundle, work):
         },
         "vendor": vendor,
     }
+    if stochastic_collection is not None:
+        receipt["stochastic_collection"] = stochastic_collection
     # 显式 ND 才有这份收据；默认 rank-derived 通路为保持 legacy payload 字节不写键、不写 null。
     # 在场时逐字镜像，不在 driver 里猜默认或按算子分支。
     if "tensor_format_receipt" in manifest:

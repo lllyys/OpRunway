@@ -6,6 +6,8 @@ import os
 import tempfile
 import unittest
 
+import cann_version
+import perf_evidence_contract as P
 import validate_acceptance_state as G
 
 
@@ -17,6 +19,7 @@ def _write(root, name, value):
 class CppExtensionPerfCollectionGateTest(unittest.TestCase):
     def _fixture(self):
         receipt = {
+            "schema_version": cann_version.RECEIPT_SCHEMA_VERSION,
             "artifact": {"path": "cpp_extension/x.so", "sha256": "1" * 64},
             "load": {"namespace": "oprunway_x"},
             "bindings": {"invocation_plan_sha256": "3" * 64},
@@ -24,7 +27,11 @@ class CppExtensionPerfCollectionGateTest(unittest.TestCase):
                 "library_path": "/opt/vendor/lib.so",
                 "library_sha256": "2" * 64,
                 "symbols_owned": ["aclnnX"],
+                "symbol_identity": {"workspace": "aclnnXGetWorkspaceSize",
+                                    "stage2": "aclnnX"},
             },
+            "runtime": {"soc": "ascend910_93", "cann_version": "9.0.1",
+                        "cann": {"status": "observed", "normalized": "9.0.1"}},
         }
         provenance = {
             "artifact": receipt["artifact"],
@@ -33,19 +40,26 @@ class CppExtensionPerfCollectionGateTest(unittest.TestCase):
             "invocation_plan_sha256": "3" * 64,
             "vendor": receipt["vendor"],
         }
+        identity = {
+            **P.expected_execution_identity(receipt, device_index=0),
+            "device_name": "Ascend A3",
+        }
         evidence = {
             "runner_form": "cpp_extension",
             "cpp_extension_receipt": receipt,
             "evidence": [{
                 "case_id": "c0",
-                "perf": {"scope": "kernel_only", "us": 3.5},
+                "perf": {"scope": "kernel_only", "us": 3.5,
+                         "execution_identity_sha256": P.canonical_sha(identity)},
             }],
             "perf_collection": {
                 "custom_kind": "cpp_extension",
                 "custom_provenance": provenance,
+                "device": 0,
                 "records": [{
                     "case_id": "c0",
-                    "custom": {"scope": "kernel_only", "us": 3.5},
+                    "custom": {"scope": "kernel_only", "us": 3.5,
+                               "execution_identity": identity},
                 }],
                 "collection_checkpoint": {
                     "complete": True,

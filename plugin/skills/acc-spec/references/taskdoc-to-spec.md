@@ -863,6 +863,7 @@ exact 走 mismatch），再要求 spec/caseset/evidence 三处一致。所以 th
 | perf(性能栏『无』) | 走 **§4.1**：`perf.mode="measure_only"` + `measure_only_authorization`（ground `no_perf_requirement` + cite + quote + 快照指纹）。⚠ **不再靠「整块省略 `perf`」表达「没要求」**；**勿写 `{baseline:"none"}`**——下游把非空 baseline 当有性能目标会误报 `BLOCKED(声明性能目标但无性能用例)` |
 | shape/规格 | 泛化验收，交 casegen；参数表 '-' 不阻塞 |
 | CANN 版本 | **必须进**顶层 `runtime_requirements.cann` 两态契约：任务书给最低版本 → `{"kind":"minimum","minimum_version":"X.Y.Z","cite":"…","quote":"…","taskdoc_snapshot_sha256":"…"}`（版本只收 canonical `X.Y.Z`，引用四件套缺一即拒）；任务书确实未声明 → 只写 `{"kind":"not_declared"}`。禁止按仓、环境变量或版本文件猜。driver 只以当前进程实际调用的 `aclsysGetCANNVersion(ACL_PKG_NAME_CANN)` 证明 **runtime CANN**，不冒充 build-time 版本。|
+| 固定 seed/offset 的随机二元采样 | **必须进**顶层 `stochastic` capability，而不是写成某个算子的特判：具名绑定 probability/seed/offset，逐字抄概率边界与 offset 对齐约束；至少给一个 `(0,1)` interior 概率、两个不同 seed、两个不同且合法的 offset、重复次数与整体 confidence。`statistics.witness_profile_id` 必须绑定 `multi_input_contract` 中唯一统计 witness profile，输出 numel ≥ `min_samples`。任务书指定的同机 NPU Tensor 方法写入 `oracle_precondition.callable`；该方法只产 `evidence_grade=precondition, usable_for_verdict=false` 的 exact 前提收据，不能充当 golden 或 verdict。|
 
 ### 4.1 「本轮不做比值裁决」的**唯一**合法写法：`perf.mode=measure_only` + 授权
 

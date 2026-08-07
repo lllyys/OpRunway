@@ -21,6 +21,9 @@ import content_address
 import cpp_extension_codegen
 import cpp_extension_identity
 import perf_mode
+import perf_evidence_contract
+import stochastic_collector
+import stochastic_contract
 import tensor_shape_attrs
 import vendor_build_receipt
 
@@ -37,6 +40,8 @@ _PERF_PLAN = "cpp_extension_perf_plan.json"
 _PERF_COLLECT = "cpp_extension_perf_collect.json"
 _BUNDLE = "cpp_extension"
 _OUT = "cpp_extension_out"
+_STOCHASTIC_PRECONDITION = "stochastic_precondition.json"
+_STOCHASTIC_FORMAL = "stochastic_formal_evidence.json"
 
 LAYOUT_LEDGER_SCHEMA = "oprunway.tensor_layout_ledger"
 LAYOUT_LEDGER_VERSION = 1
@@ -1494,6 +1499,9 @@ def _write_perf_plan(caseset, work, evidence, receipt):
         "caseset_sha256": _canonical_sha(caseset),
         "cpp_extension_receipt_sha256": _canonical_sha(receipt),
         "device": device,
+        "execution_identity_expected": (
+            perf_evidence_contract.expected_execution_identity(
+                receipt, device_index=device)),
         "cases": selected,
         "skipped": skipped,
         # 精度台账：**分母完整落盘**，让「本轮为什么只采了这些 case」成为机读事实。
@@ -1545,6 +1553,21 @@ def _validate_perf_collection(plan, document):
     if ids != plan.get("cases") or len(ids) != len(records):
         raise CppExtensionAdapterError(
             "cpp_extension perf_collect records 与性能计划 case 序列不一致")
+    expected_identity = plan.get("execution_identity_expected")
+    measure_only = plan.get("mode") == perf_mode.MODE_MEASURE_ONLY
+    for record in records:
+        cid = record["case_id"]
+        custom = record.get("custom") if isinstance(record.get("custom"), dict) else {}
+        try:
+            perf_evidence_contract.validate_execution_identity(
+                custom.get("execution_identity"), expected=expected_identity)
+            if measure_only and custom.get("behavior") == "npu":
+                perf_evidence_contract.validate_sampling_receipt(
+                    custom, record.get("sampling_receipt"), case_id=cid,
+                    warmup=plan.get("warmup"), repeat=plan.get("repeat"))
+        except perf_evidence_contract.PerfEvidenceContractError as ex:
+            raise CppExtensionAdapterError(
+                f"{cid}: cpp_extension 性能 identity/sampling evidence 未闭合：{ex}") from ex
 
 
 def _require_sha(label, value):
@@ -1799,7 +1822,100 @@ def validate_receipt(work, caseset):
             "receipt.runtime.ascend_custom_opp_path 与 vendor.library_path 反推的自定义算子包"
             f"不一致：收据记 {runtime.get('ascend_custom_opp_path')!r}，重算 {derived_opp!r}")
     _validate_vendor_build_receipt(vendor)
+    validate_stochastic_collection(work, caseset, receipt)
     return receipt
+
+
+def _artifact_json(work, ref, expected_path, where):
+    if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}:
+        raise CppExtensionAdapterError(f"{where} 工件引用须只含 path/sha256")
+    if ref.get("path") != expected_path:
+        raise CppExtensionAdapterError(f"{where}.path 必须为 {expected_path!r}")
+    _require_sha(f"{where}.sha256", ref.get("sha256"))
+    path = _safe(work, ref["path"])
+    if not os.path.isfile(path) or _file_sha(path) != ref["sha256"]:
+        raise CppExtensionAdapterError(f"{where} 文件缺失或 sha256 漂移")
+    return _strict_json(path)
+
+
+def validate_stochastic_collection(work, caseset, receipt):
+    """随机收据复核；前提失败是 BLOCKED 状态，不是 precision fail。"""
+    raw_contract = caseset.get("stochastic_contract")
+    collection = receipt.get("stochastic_collection")
+    if raw_contract is None:
+        if collection is not None:
+            raise CppExtensionAdapterError("非 stochastic caseset 不得冒领随机采集收据")
+        return None
+    try:
+        contract = stochastic_contract.normalize_contract(raw_contract)
+        plan, _cases, _n = stochastic_collector.validate_caseset_bindings(contract, caseset)
+    except (stochastic_contract.StochasticContractError,
+            stochastic_collector.StochasticCollectorError) as ex:
+        raise CppExtensionAdapterError(f"stochastic caseset 契约非法：{ex}") from ex
+    if not isinstance(collection, dict) \
+            or collection.get("schema") != "oprunway.cpp_extension_stochastic_collection" \
+            or collection.get("schema_version") != 1:
+        raise CppExtensionAdapterError("stochastic collection schema/version 缺失")
+    if collection.get("contract_sha256") != stochastic_contract.canonical_sha256(contract) \
+            or collection.get("plan_sha256") != stochastic_contract.canonical_sha256(plan):
+        raise CppExtensionAdapterError("stochastic collection contract/plan sha256 漂移")
+    status = collection.get("status")
+    if status == "blocked_collection":
+        if collection.get("formal_evidence") is not None or not collection.get("reason"):
+            raise CppExtensionAdapterError("blocked_collection 须无 formal 且有 reason")
+        return {"status": status, "contract": contract, "plan": plan,
+                "gate": {"status": stochastic_contract.EVAL_BLOCKED,
+                         "ready_for_formal_precision": False,
+                         "usable_for_verdict": False,
+                         "reason": collection["reason"]}}
+    if status not in ("blocked_precondition", "complete"):
+        raise CppExtensionAdapterError(f"stochastic collection.status 非法：{status!r}")
+    reference = collection.get("reference_execution")
+    if not isinstance(reference, dict) \
+            or reference.get("runner") != "isolated_subprocess_without_dut_vendor_env" \
+            or reference.get("manifest_path") != "stochastic_reference_execution.json":
+        raise CppExtensionAdapterError("stochastic reference execution 身份/隔离形态缺失")
+    reference_manifest = _safe(work, reference["manifest_path"])
+    _require_sha("reference_execution.manifest_sha256", reference.get("manifest_sha256"))
+    if not os.path.isfile(reference_manifest) \
+            or _file_sha(reference_manifest) != reference["manifest_sha256"]:
+        raise CppExtensionAdapterError("stochastic reference manifest 缺失或摘要漂移")
+    manifest = _strict_json(reference_manifest)
+    if manifest.get("device") != collection.get("device") \
+            or manifest.get("custom_opp_path_present") is not False \
+            or manifest.get("dut_vendor_env_present") is not False:
+        raise CppExtensionAdapterError("stochastic reference manifest device/隔离环境漂移")
+    oracle = contract["oracle_precondition"]
+    if manifest.get("reference_method") != oracle["method_kind"] \
+            or manifest.get("reference_callable") != oracle["callable"]:
+        raise CppExtensionAdapterError("stochastic reference method/callable 与契约漂移")
+    pre = _artifact_json(work, collection.get("precondition"),
+                         _STOCHASTIC_PRECONDITION, "stochastic precondition")
+    try:
+        normalized = stochastic_contract.validate_precondition_receipt(contract, pre)
+        gate = stochastic_contract.precondition_gate(contract, normalized)
+    except stochastic_contract.StochasticContractError as ex:
+        raise CppExtensionAdapterError(f"stochastic precondition 非法：{ex}") from ex
+    device = collection.get("device")
+    if device != normalized["execution"]["dut_device"]:
+        raise CppExtensionAdapterError("stochastic collection.device 与前提 device 漂移")
+    if status == "blocked_precondition":
+        if gate["ready_for_formal_precision"] or collection.get("formal_evidence") is not None:
+            raise CppExtensionAdapterError("blocked_precondition 不得带正式证据")
+        return {"status": status, "contract": contract, "plan": plan,
+                "precondition": normalized, "formal": None, "gate": gate}
+    if not gate["ready_for_formal_precision"]:
+        raise CppExtensionAdapterError("complete collection 的 RNG 前提未通过")
+    formal = _artifact_json(work, collection.get("formal_evidence"),
+                            _STOCHASTIC_FORMAL, "stochastic formal evidence")
+    try:
+        evaluation = stochastic_contract.evaluate_formal_evidence(
+            contract, normalized, formal)
+    except stochastic_contract.StochasticContractError as ex:
+        raise CppExtensionAdapterError(f"stochastic formal evidence 非法：{ex}") from ex
+    return {"status": status, "contract": contract, "plan": plan,
+            "precondition": normalized, "formal": formal,
+            "gate": gate, "evaluation": evaluation}
 
 
 def source_provenance_summary(receipt):
@@ -1811,6 +1927,28 @@ def source_provenance_summary(receipt):
         return vendor_build_receipt.summarize(vendor.get("build_receipt"))
     except vendor_build_receipt.VendorBuildReceiptError as ex:
         raise CppExtensionAdapterError(f"receipt.vendor.build_receipt: {ex}") from ex
+
+
+def _build_execution_evidence(caseset, work, receipt):
+    """随机 capability 不制造逐点 golden；其正式判据只来自独立统计工件。"""
+    if caseset.get("stochastic_contract") is None:
+        import repo_adapter as RA
+        return RA.build_multi_output_evidence(
+            caseset, work, os.path.join(work, _OUT))
+    validated = validate_stochastic_collection(work, caseset, receipt)
+    rows = []
+    for case in caseset.get("cases") or []:
+        binding = case.get("stochastic")
+        rows.append({
+            "case_id": case.get("id"), "status": "ok",
+            "stochastic": binding,
+            "precision": {
+                "compare": "stochastic",
+                "out_shape": (case.get("expected") or {}).get("out_shape"),
+                "out_dtype": (case.get("expected") or {}).get("compare_dtype"),
+            },
+        })
+    return rows, validated
 
 
 def _bind_multi_input_evidence(caseset, evidence, receipt):
@@ -1957,8 +2095,11 @@ def run_cpp_extension(caseset, work, defect_cases=None):
             f"CPP Extension 外部 driver 失败 rc={result.returncode}")
     receipt = validate_receipt(work, caseset)
     import repo_adapter as RA
-    evidence = RA.build_multi_output_evidence(
-        caseset, work, os.path.join(work, _OUT))
+    built = _build_execution_evidence(caseset, work, receipt)
+    if isinstance(built, tuple):
+        evidence, stochastic = built
+    else:
+        evidence, stochastic = built, None
     _bind_multi_input_evidence(caseset, evidence, receipt)
     _bind_tensor_shape_attr_evidence(caseset, evidence, receipt)
     _bind_layout_evidence(caseset, evidence, receipt)
@@ -2018,6 +2159,11 @@ def run_cpp_extension(caseset, work, defect_cases=None):
         "cpp_extension_receipt": receipt,
         "evidence": evidence,
     }
+    if stochastic is not None:
+        envelope["stochastic_collection"] = receipt["stochastic_collection"]
+        # 前提内容不进入裁决 envelope；这里只带正式统计证据。三级门另读独立前提文件。
+        envelope["stochastic_formal_evidence"] = stochastic.get("formal")
+        envelope["stochastic_evaluation"] = stochastic.get("evaluation")
     if perf_collection is not None:
         envelope["perf_collection"] = perf_collection
         # 性能采集的口径与分母台账原样带走：measure_only 下性能子集可能小于全部性能 case，
@@ -2057,9 +2203,11 @@ def run_cpp_extension_precision_only(caseset, work):
         raise CppExtensionAdapterError(
             f"CPP Extension 外部 driver 失败 rc={result.returncode}")
     receipt = validate_receipt(root, caseset)
-    import repo_adapter as RA
-    evidence = RA.build_multi_output_evidence(
-        caseset, root, os.path.join(root, _OUT))
+    built = _build_execution_evidence(caseset, root, receipt)
+    if isinstance(built, tuple):
+        evidence, stochastic = built
+    else:
+        evidence, stochastic = built, None
     _bind_multi_input_evidence(caseset, evidence, receipt)
     _bind_tensor_shape_attr_evidence(caseset, evidence, receipt)
     _bind_layout_evidence(caseset, evidence, receipt)
@@ -2068,7 +2216,7 @@ def run_cpp_extension_precision_only(caseset, work):
     digest = _canonical_sha(receipt)
     for row in evidence:
         row["cpp_extension_receipt_sha256"] = digest
-    return {
+    envelope = {
         "op": caseset["op"],
         "repo_mode": "cpp_extension",
         "runner_form": "cpp_extension",
@@ -2081,6 +2229,11 @@ def run_cpp_extension_precision_only(caseset, work):
         "cpp_extension_receipt": receipt,
         "evidence": evidence,
     }
+    if stochastic is not None:
+        envelope["stochastic_collection"] = receipt["stochastic_collection"]
+        envelope["stochastic_formal_evidence"] = stochastic.get("formal")
+        envelope["stochastic_evaluation"] = stochastic.get("evaluation")
+    return envelope
 
 
 CPP_EXTENSION_MODES = {"cpp_extension": run_cpp_extension}

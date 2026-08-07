@@ -42,7 +42,7 @@ def _w(d, name, obj):
 #: `measure_only` 的任务书授权事实（§5.10）。宽档不再由 spec 自报一句 mode 就能开，
 #: 必须绑定「任务书性能要求属哪一类 + 引文锚 + 任务书快照指纹」。
 _AUTH = {
-    "taskdoc_requirement": "gpu_comparison",
+    "taskdoc_requirement": "no_perf_requirement",
     "cite": "task_doc.snapshot.md:12-14",
     "quote": "以 OpenCV CUDA A100 为参考",
     "taskdoc_snapshot_sha256": "c" * 64,
@@ -84,6 +84,24 @@ class PerfModeContractTest(unittest.TestCase):
                                            "measure_only_authorization": _AUTH}}),
             PM.MODE_MEASURE_ONLY)
         self.assertTrue(PM.is_measure_only(PM.MODE_MEASURE_ONLY))
+
+    def test_gpu_ground_requires_structured_unvalidated_requirement_gap(self):
+        auth = dict(_AUTH, taskdoc_requirement="gpu_comparison")
+        spec = {"perf": {"mode": "measure_only",
+                         "measure_only_authorization": auth}}
+        with self.assertRaisesRegex(PM.PerfModeError, "GPU 性能比较条款"):
+            PM.resolve_spec_mode(spec)
+        spec["task_pr_gaps"] = [{
+            "kind": "performance_requirement_unvalidated",
+            "dimension": "performance",
+            "status": "unvalidated",
+            "requirement_type": "gpu_comparison",
+            "cite": auth["cite"],
+            "quote": auth["quote"],
+            "taskdoc_snapshot_sha256": auth["taskdoc_snapshot_sha256"],
+            "reason": "未取 GPU baseline、未计算 ratio",
+        }]
+        self.assertEqual(PM.resolve_spec_mode(spec), PM.MODE_MEASURE_ONLY)
 
     def test_unknown_mode_fails_closed(self):
         for bad in ("MEASURE_ONLY", "measure", "", 1, True, [], {}):
@@ -557,6 +575,25 @@ class MeasureOnlyWorkflowTest(unittest.TestCase):
         self.assertNotIn("baseline", plan)
         self.assertFalse(os.path.exists(os.path.join(self.d, "out", "baseline.json")))
 
+    def test_unvalidated_gpu_clause_never_becomes_overall_pass(self):
+        def mutate(spec):
+            _to_measure_only(spec)
+            auth = dict(_BOUND_AUTH, taskdoc_requirement="gpu_comparison")
+            spec["perf"]["measure_only_authorization"] = auth
+            spec.setdefault("task_pr_gaps", []).append({
+                "kind": "performance_requirement_unvalidated",
+                "dimension": "performance", "status": "unvalidated",
+                "requirement_type": "gpu_comparison",
+                "cite": auth["cite"], "quote": auth["quote"],
+                "taskdoc_snapshot_sha256": auth["taskdoc_snapshot_sha256"],
+                "reason": "本轮未取 GPU baseline、未计算 ratio",
+            })
+        path = _spec_file(self.d, "gpu-gap.spec.json", mutate)
+        res = W.run(path, mode="mock", out_dir=os.path.join(self.d, "gpu-gap-out"))
+        self.assertEqual(res["overall"], "PASSED_WITH_GAPS")
+        self.assertEqual(res["state"], "PASSED_WITH_GAPS")
+        self.assertEqual(res["exit_code"], 2)
+
     def test_contradictory_spec_is_rejected_before_any_side_effect(self):
         def mutate(spec):
             _to_measure_only(spec)
@@ -618,6 +655,18 @@ class ChangeClassDerivationTest(unittest.TestCase):
             spec["change"] = {"kind": kind, "note": "fixture"}
         if perf is not None:
             spec["perf"] = perf
+            auth = perf.get("measure_only_authorization") if isinstance(perf, dict) else None
+            if isinstance(auth, dict) and auth.get("taskdoc_requirement") == "gpu_comparison":
+                spec["task_pr_gaps"] = [{
+                    "kind": "performance_requirement_unvalidated",
+                    "dimension": "performance",
+                    "status": "unvalidated",
+                    "requirement_type": "gpu_comparison",
+                    "cite": auth["cite"],
+                    "quote": auth["quote"],
+                    "taskdoc_snapshot_sha256": auth["taskdoc_snapshot_sha256"],
+                    "reason": "本轮只测 NPU msprof，未取 GPU baseline、未计算 ratio",
+                }]
         return spec
 
     def _auth(self, ground):
