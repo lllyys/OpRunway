@@ -4,14 +4,9 @@
 
 - 基线：`96edacd`；指路：[gap revalidation findings](../.cc-suite/audits/audit-fix-20260806-gap-revalidation-findings.md)、[Bernoulli / Remainder plan](oprunway-bernoulli-remainder-plan.md)
 
-## 1 · 待确认：3 项
+## 1 · 待确认：0 项 —— 三项已由技术决策者裁定
 
-**待确认 · 「不低于原算子性能」的「原算子」指哪个 baseline？**
-
-推断：两个 PR 都是对现有算子做内存优化 → 原算子 = 优化前的当前实现 = `aclnn_builtin`（三候选中也只有它既在受控词表内、又已有 libopapi 指纹 + 符号定义证明机制）。⚠ **这是推断，未经确认**；确认后即可并入组 2。
-
-- **G18**：Remainder 任务书要求 Atlas A2/A3 训练系列，但 PR 只为 `ascend950` 注册/构建；须由人确认如何处理该任务书与被测事实的冲突。
-- **G20**：Remainder 同一任务书同时写 `math/floor_mod` 与 `experimental/math`；取材前须由人确认本轮权威目标目录。
+G11a、G18、G20 已分别按裁定 F、G、H 给出实施方向；**已裁定不等于已解决或已通过**。G18 的硬件冲突与 G20 的目录矛盾仍须进入 `task_pr_gaps`，并由真实取证链 fail-closed。
 
 其余原拍板项均已消化，保留去向如下以便追溯。
 
@@ -19,7 +14,7 @@
 |---|---|
 | **1 · BF16 / DOUBLE** | 任务书是验收权威，列了 BF16 与 DOUBLE 就全测；结果交确定性产物分类，仅确认属于 DUT 能力缺失时形成未通过裁决，harness 限制或证据不完整保持 `blocked` / `needs_review`。§5.1 的“三源冲突停下问用户”针对无法确定测什么，此处目标完全确定，不适用 |
 | **2 · Bernoulli 比较关系** | 裁定 E 已分清来源：任务书指定同机 NPU `torch_npu` `Tensor.bernoulli_` + 相同 seed；人工裁定据用户事实主张取 `exact`。首次取证须先验证 RNG 消耗方式一致这一前提 |
-| **4 · baseline 选型** | 移回待确认；当前 `aclnn_builtin` 仅为有依据的推断，未经人工确认 |
+| **4 · baseline 选型** | 裁定 F 已确认「原算子」解释为优化前的 CANN 内置实现，baseline kind 为 `aclnn_builtin`；解释依据与身份约束须入报告 |
 | **6 · promote 规则** | 任务书 `aclnnRemainderTensorTensor_task_doc.md:27` 已要求与 PyTorch `torch.remainder` / `Tensor.remainder` 语义一致，类型提升属于 torch 语义；缺的是混合 dtype case 生成能力，不是判据 |
 
 ### 本轮已裁定
@@ -32,20 +27,15 @@
 | D · rank 全局默认 1–8 | 这是任务书未明确时今后所有验收的默认口径，不只针对本轮两个算子；任务书明写 0–8 时以任务书为准 | G8 升为已裁定能力扩面；<br>落地必须同时轴集版本化、旧算子锁旧版本；Bernoulli 的 rank 0 另见 G21 |
 | E1 · 任务书（提示词）指定 | 标杆 = 同机 NPU 的 `torch_npu` `Tensor.bernoulli_`；DUT 与标杆使用相同随机种子；授权强度为 tier 1 / `oracle_method` | 任务书显式指定的 oracle 优先于自带 `golden.py` |
 | E2 · 人工裁定（用户 2026-08-07） | 依据「`Tensor.bernoulli_` 在 NPU 下，用相同随机种子的结果一致」这一事实主张，比较关系取 `exact` | 前提是 DUT 与标杆消耗 RNG 的方式一致。本 PR 的 `fill + DropoutDoMask` inplace 融合若改变掩码生成顺序或状态推进，两者可能合法地不一致；首次取证须先验证此前提，逐位不一致时不得直接判 DUT 未通过，须先归因是 DUT 缺陷还是前提不成立 |
+| F · G11a baseline | 「原算子」解释为优化前的 CANN 内置实现，baseline kind 用 `aclnn_builtin`；与「对现有算子做内存优化」语义一致，且现有词表、libopapi 指纹与双符号定义者证明可复用 | 两份 spec 的性能配置显式写 `aclnn_builtin`；B8 绑定预期 libopapi 身份、ELF 指纹及两个 ACLNN 符号定义者；msprof 只比 NPU 实测。报告注明这是解释及其依据；身份、指纹或符号证明不符即 fail-closed，不得退换其他 baseline |
+| G · G18 Remainder 验收硬件 | 仍以任务书的 Atlas A2/A3 训练系列为验收目标，不得改到 `ascend950` 验收；任务书是验收权威，按 PR 的 SoC 跑等于改写任务要求 | spec 保留 A2/A3 并记录 PR 仅声明 `ascend950` 的冲突；在 A2/A3 上执行构建前门与真实构建。构建失败或无对应注册交确定性链形成受控非通过/阻断态，禁止 PASS；`ascend950` 最多作标记为 development 的诊断。静态声明未必完整，不得仅凭源码直接判 DUT 失败；报告同时记录任务书目标、PR 声明、实际硬件与真实构建结果，真机核验前保持 fail-closed |
+| H · G20 Remainder 取材目录 | 取材 `--target-dir` 用 `math/floor_mod`；任务书开源仓地址与实际被测代码都指向该目录，`experimental/math` 取不到实际交付物 | source_facts/spec 同时记录任务书 `:68` 的 `experimental/math` 冲突；交付物按实际取材目录对账。目录自相矛盾与「实际交付未位于 `experimental/math`」均进入 `task_pr_gaps`，不得宣称目录条款已满足 |
 
 ## 2 · Gap 表
 
 「影响哪条 case 来源」只有三种取值：`两条都影响`、`仅 generated`（taskdoc 通路已绕开）、`仅 taskdoc`。不确定性直接写在证据说明里。
 
-**19 个在册 gap 项中，当前 3 个需要人工确认；15 个归入组 2、可由 agent 按既定方向推进，G16 本轮不做。**
-
-### 组 1 · 需人工确认
-
-| gap | 影响哪条 case 来源 | 待确认事项 |
-|---|---|---|
-| **G11a baseline 选型** | 两条都影响 | 确认「原算子」是否指优化前的当前实现 `aclnn_builtin`；当前仅为推断，依据见 §1，未经确认不得并入组 2 |
-| **G18 Remainder 目标硬件冲突（Critical）** | 两条都影响 | 两份任务书 `:6` 均要求 **Atlas A2/A3 训练系列产品**；但仅 Remainder PR 在 `math/floor_mod/CMakeLists.txt:12` 与 `math/floor_mod/op_host/floor_mod_def.cpp:45` 只声明 `ascend950`。这是任务书与被测事实冲突，不是工具能力缺口；不得用 PR SoC 改写任务书。须先确认并在目标硬件真实构建、执行核验，之前 fail-closed、不得产通过裁决。Bernoulli 在 `experimental/random/bernoulli/CMakeLists.txt:11`、`op_host/bernoulli_def.cpp:67-68` 声明 `ascend910b` + `ascend910_93`，与 A2/A3 一致，不存在此问题 |
-| **G20 Remainder 任务书目标目录矛盾（High）** | 两条都影响 | 同一任务书 `aclnnRemainderTensorTensor_task_doc.md:7` 的开源仓地址指向 `math/floor_mod`，`:68` 的 PR 申请合入目录却指向 `experimental/math`，实际被测代码位于 `math/floor_mod/`；两处冲突直接影响「任务书 ↔ PR 对应」核定和取材 `--target-dir`。取材前须确认本轮权威目标目录，未确认不得把当前 checkout 当作任务交付来源；这与已撤销的 G10 本地 provenance 不是一回事 |
+**19 个在册 gap 项中，当前 0 个需要人工确认；18 个归入组 2、可由 agent 按既定方向推进，G16 本轮不做。**
 
 ### 组 2 · agent 可自主推进（方向明确，改完能自验证）
 
@@ -53,6 +43,9 @@
 
 | gap | 影响哪条 case 来源 | 方向从哪来；做完怎么自验证（含现有证据 file:line） |
 |---|---|---|
+| **G11a baseline 选型** | 两条都影响 | 按裁定 F 推进：两份 spec 的性能配置显式写 `aclnn_builtin`，解释为优化前的 CANN 内置实现；B8 绑定预期 libopapi 身份、ELF 指纹及 `aclnnXxx` / `aclnnXxxGetWorkspaceSize` 两个 ACLNN 符号定义者，msprof 只比 NPU 实测。报告须注明这是解释及其依据；身份、指纹或任一符号证明不符即 fail-closed，不得退换其他 baseline |
+| **G18 Remainder 目标硬件冲突（Critical）** | 两条都影响 | 按裁定 G 推进：两份任务书 `:6` 均要求 **Atlas A2/A3 训练系列产品**；但仅 Remainder PR 在 `math/floor_mod/CMakeLists.txt:12` 与 `math/floor_mod/op_host/floor_mod_def.cpp:45` 只声明 `ascend950`。spec 保留 A2/A3 并记录冲突，在 A2/A3 上执行构建前门与真实构建；构建失败或无对应注册交确定性链形成受控非通过/阻断态，禁止 PASS。`ascend950` 最多作标记为 development 的诊断，不作验收证据。静态声明未必完整，不得仅凭源码直接判 DUT 失败；报告须同时写明任务书目标、PR 声明、实际硬件与真实构建结果，未完成真机核验前保持 fail-closed。Bernoulli 在 `experimental/random/bernoulli/CMakeLists.txt:11`、`op_host/bernoulli_def.cpp:67-68` 声明 `ascend910b` + `ascend910_93`，与 A2/A3 一致，不存在此问题 |
+| **G20 Remainder 任务书目标目录矛盾（High）** | 两条都影响 | 按裁定 H 推进：取材使用 `--target-dir math/floor_mod`；同一任务书 `aclnnRemainderTensorTensor_task_doc.md:7` 的开源仓地址指向 `math/floor_mod`，`:68` 的 PR 申请合入目录却指向 `experimental/math`，实际被测代码位于 `math/floor_mod/`。source_facts/spec 同时记录 `:68` 冲突，交付物按实际取材目录对账；目录自相矛盾与「实际交付未位于 `experimental/math`」均进入 `task_pr_gaps`，不得宣称目录条款已满足。这与已撤销的 G10 本地 provenance 不是一回事 |
 | **G17 baseline / oracle 被 DUT 污染** | 两条都影响 | 明确 bug；取证前由确定性脚本 fail-closed：DUT 侧 defining ELF 命中来源锚，标杆侧命中预期身份/指纹，两段式两个符号的实际定义者均获证明，且两侧 ELF 不同；故意注入即非 0 退出（展开见下）。它与 G11b 已从性能维卫生升级为精度 oracle 的完整性前提 |
 | **G11b 符号隔离（半成品）** | 两条都影响 | 路径/环境/来源锚已由 PR #15 绑定；补正向身份校验：DUT 侧命中来源锚，标杆侧命中预期身份/指纹，并证明 `aclnnXxx` 与 `aclnnXxxGetWorkspaceSize` 两个符号的实际定义者（现在只有 `hasattr`，且漏后者）；机器可校验收据由确定性门在取证前强制对账，缺失/同源/指纹不符三种负向都阻断。须与 G17 一起先于 Bernoulli 精度取证完成 |
 | **G2 Bernoulli 已定判据、待实现** | 两条都影响 | **机器前置：G17 + G11b 的依赖/收据状态通过确定性门。** 同机 NPU `torch_npu` `Tensor.bernoulli_` + 相同 seed；首次先验证 DUT 与标杆 RNG 消耗方式一致，成立后按人工裁定 `exact` 逐位比对；不一致先归因，不直接判 DUT 未通过。`RUNNABLE_METHOD_KINDS` 当前只有 `torch_cpu` / `numpy_cpu` / `opencv_cpu`（`precision_policy.py:863`），须新增“同机 NPU 参考” method_kind；这不违反 R3，任务书指定测试方法即走 tier 1 / `oracle_method`，不是绕过 CPU 兜底。`exact` 已有，无需新建；seed/offset 必须以完全相同的值喂给 DUT 与标杆，连带 G3 + G13 |

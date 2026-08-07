@@ -17,15 +17,15 @@
 8. **裁定 E。** 随机算子标杆为同机 NPU `torch_npu` `Tensor.bernoulli_`，DUT 与标杆使用相同 seed，
    比较关系为人工裁定的 `exact`；成立前提是二者消耗 RNG 的方式一致。
 
-## 1 · 开工前待拍板 / 待确认
+## 1 · 已裁定的三项及其记账要求
 
-| gap | 必须由人确认的事项 | 未确认时的阻断范围 |
+| 裁定 | 实施口径 | 风险与记账要求 |
 |---|---|---|
-| **G11a** | 推断“不低于原算子性能”的“原算子”是优化前当前实现 `aclnn_builtin`，但尚未确认 | 不得定稿性能 baseline，不得开始相应性能见证 |
-| **G18** | Remainder 任务书要求 A2/A3 训练系列，而 `math/floor_mod/CMakeLists.txt:12` 与 `op_host/floor_mod_def.cpp:45` 只声明 `ascend950`；任务书与被测事实冲突，agent 不能替任务书选择硬件 | Remainder 一切真机见证不得开始，也不得产通过裁决 |
-| **G20** | Remainder 同一任务书 `:7` 写 `math/floor_mod`、`:68` 写 `experimental/math`；任务书自身给出两个目标目录，agent 不能代选权威目标 | Remainder 取材的 `--target-dir` 不得定稿，不得把当前 checkout 当作任务交付来源 |
+| **F · G11a** | 「原算子」解释为优化前的 CANN 内置实现；两份 spec 的性能配置显式写 `aclnn_builtin`。B8 绑定预期 libopapi 身份、ELF 指纹及 `aclnnXxx` / `aclnnXxxGetWorkspaceSize` 两个 ACLNN 符号定义者；msprof 只比 NPU 实测 | 报告须注明这是解释及其依据：与「对现有算子做内存优化」语义一致，且现有词表、libopapi 指纹与双符号定义者证明可复用。身份、指纹或任一符号证明不符即 fail-closed，不得退换其他 baseline |
+| **G · G18** | Remainder 仍以任务书的 A2/A3 为验收目标；spec 保留 A2/A3，并记录 `math/floor_mod/CMakeLists.txt:12` 与 `op_host/floor_mod_def.cpp:45` 中 PR 仅声明 `ascend950` 的冲突，在 A2/A3 上执行构建前门与真实构建。构建失败或无对应注册交确定性链形成受控非通过/阻断态，禁止 PASS；`ascend950` 最多作标记为 development 的诊断 | 静态声明未必完整，不得仅凭源码直接判 DUT 失败。报告须同时写明任务书目标、PR 声明、实际硬件与真实构建结果；未完成真机核验前保持 fail-closed |
+| **H · G20** | Remainder 取材使用 `--target-dir math/floor_mod`；source_facts/spec 同时记录任务书 `:7` 的 `math/floor_mod` 与 `:68` 的 `experimental/math` 冲突，交付物对账按实际取材目录执行 | 目录自相矛盾与「实际交付未位于 `experimental/math`」均列入 `task_pr_gaps`，不得宣称目录条款已满足 |
 
-除以上三项外，不再保留人工拍板项。BF16/DOUBLE 按任务书全测，promote 按任务书指定的 PyTorch 语义，随机 oracle 与 `exact` 已由裁定 E 给定。
+当前不再保留人工拍板项。BF16/DOUBLE 按任务书全测，promote 按任务书指定的 PyTorch 语义，随机 oracle 与 `exact` 已由裁定 E 给定。
 
 ## 2 · P0：待核前置（只读，不改代码）
 
@@ -118,10 +118,10 @@
 - **做什么：**caseset 至少包含一个严格位于 `(0,1)` 的 prob；在相同 shape/dtype/seed/offset 下同时运行 DUT 与同机 NPU 标杆并做 `exact`，只产独立的“RNG 前提验证收据”。该收据与正式精度证据物理分离，标记为不可用于裁决，且裁决链不得消费；落点为独立收据 schema/入口及消费隔离测试。
 - **完成判据：**收据中的 prob 满足 `0 < prob < 1`，两侧字段逐字相同、逐元素关系为 `exact`，且 `evidence_grade=precondition`、`usable_for_verdict=false`；只有收据通过后才允许开始正式 Bernoulli 精度取证。未执行或逐位不一致时状态为 BLOCKED、退出非 0、无正式精度证据和精度裁决；不一致只进入归因流程，不直接判 DUT 未通过。
 
-### B8 · 修 G11a：性能 baseline（依赖人工确认）
+### B8 · 修 G11a：性能 baseline `aclnn_builtin`
 
-- **做什么：**人工确认后把选定 baseline 写入 spec 的性能字段，并在 Layer 1 取证前门绑定预期身份、指纹与证据；性能侧不取 GPU 标杆，测试落在收据身份正负 fixture。
-- **完成判据：**来源锚缺失、身份/指纹不符或未确认 baseline 时均在取证前退出非 0，且无性能裁决；合法收据中的 baseline kind、身份和 defining ELF 指纹逐字等于预期值。
+- **做什么：**按裁定 F，在两份 spec 的性能字段显式写 `aclnn_builtin`；Layer 1 取证前门绑定预期 libopapi 身份、ELF 指纹及 `aclnnXxx` / `aclnnXxxGetWorkspaceSize` 两个 ACLNN 符号定义者。性能侧只用 msprof 比较 NPU 实测，不取 GPU 标杆。
+- **完成判据：**来源锚缺失、baseline kind 不是 `aclnn_builtin`、预期 libopapi 身份/ELF 指纹不符或任一 ACLNN 符号定义者不符时，均在取证前退出非 0，且无性能裁决；不得退换其他 baseline。合法收据中的 baseline kind、身份、defining ELF 指纹与两个符号定义者逐字等于预期值。
 
 ## 5 · Phase C：取证身份可信门
 
@@ -147,7 +147,7 @@ P0-a + P0-b
   → B11 → B12
   → B3-a → B2；B3-b
   → B4；B5 ↔ B14；B6；B7 → B9 → B13（RNG 前提验证收据）→ 正式 Bernoulli 精度取证
-  → B8（仅在 G11a 确认后）
+  → B8（按裁定 F 使用 `aclnn_builtin`）
   → 真机见证
 ```
 
@@ -155,18 +155,19 @@ P0-a + P0-b
 - `C2 → B10` 必须早于任何真机精度或性能取证；B10 的标杆正向身份校验同时保护性能 baseline 与精度 oracle。
 - `B11 → B12` 必须早于任何 taskdoc 见证；`B3-a → B2` 不得倒置；B5 与 B14 同批或紧邻。
 - B13 只产不可用于裁决的 RNG 前提验证收据；该收据通过后才能开始正式 Bernoulli 精度取证，未通过时保持 BLOCKED。
-- G18 未确认前不得开始 Remainder 真机见证；G20 未确认前不得定稿 Remainder `--target-dir` 或开始取材。
+- Remainder 按裁定 G 在 A2/A3 上执行构建前门与真实构建；构建失败或无对应注册交确定性链形成受控非通过/阻断态，禁止 PASS。`ascend950` 最多作 development 诊断，不作验收证据。
+- Remainder 按裁定 H 使用 `--target-dir math/floor_mod` 取材，并在 source_facts/spec 与 `task_pr_gaps` 中保留 `experimental/math` 冲突和目录条款未满足记录。
 
 | 见证 | 硬依赖 |
 |---|---|
-| **Remainder** | P0；G18、G20 已确认；C2 → B10；A0 → A1 → A2；B11 → B12；B3-a → B2，B3-b；B4；B5；G11a 确认后 B8 |
-| **Bernoulli** | P0；C2 → B10；A0 → A1 → A2；B11 → B12；B3-a；B4；B5 ↔ B14；B6；B7 → B9 → B13；G11a 确认后 B8 |
+| **Remainder** | P0；裁定 H：以 `--target-dir math/floor_mod` 取材并记录目录冲突；裁定 G：以 A2/A3 为验收目标并真实构建；C2 → B10；A0 → A1 → A2；B11 → B12；B3-a → B2，B3-b；B4；B5；裁定 F → B8 |
+| **Bernoulli** | P0；C2 → B10；A0 → A1 → A2；B11 → B12；B3-a；B4；B5 ↔ B14；B6；B7 → B9 → B13；裁定 F → B8 |
 
 ## 7 · 回归护栏与明确不做
 
 1. 轴集扩面必须版本化；未命中新能力的旧 fixture 不得静默变化。工具变化导致 `producer.logic_sha256` 改变时，只比较去除 `producer` 后的 payload。
 2. 不新增监工 agent，不按算子名改通用规则，不由真机能力反推任务书范围，不把 `(1,)` 当 rank 0。
-3. 不在本地 build、跑测试或做验收 compute；不在待确认项未答时实施其阻断批次。
+3. 不在本地 build、跑测试或做验收 compute；不得把 F/G/H 已裁定写成相关 gap 已解决或验收已通过。
 4. 不做资源类评估或 GPU 性能标杆；任务书若写 GPU 精度真值，按同族 CPU 解析并留下解析记录。
 5. 不验任务书未规定的行为，不把“裁定不做”写成“已解决”，不把待核项写成已确认 gap。
 6. G16 保持有意不支持；本轮两算子单输出，不扩多输出契约。
@@ -183,7 +184,7 @@ P0-a + P0-b
 | **G7** | 只做任务书明写的 Bernoulli 非连续，in/out 分账 | B6 |
 | **G8** | 未明确时默认 rank 1–8，强制轴集版本化 | B5 |
 | **G10** | 原判错已撤；不作为待办 | 已撤销 |
-| **G11a** | `aclnn_builtin` 只是推断，须人工确认 | §1 → B8 |
+| **G11a** | 按裁定 F 使用 `aclnn_builtin`，绑定预期 libopapi 身份、ELF 指纹与双符号定义者；不符即 fail-closed，不得换 baseline | B8 |
 | **G11b** | DUT 来源锚、标杆身份/指纹与双符号定义者正向校验 | C2 → B10 |
 | **G12** | BF16/DOUBLE 分开全测并由确定性证据分类 | B4 |
 | **G13** | 只核任务书明写边界和属性绑定 | B9 |
@@ -191,15 +192,16 @@ P0-a + P0-b
 | **G15** | `I∩E` / `I−E` / `E−I` 对称 fail-closed，加 `R` 总门 | B12 |
 | **G16** | 有意缺口；本轮单输出不受影响 | 本轮不实施 |
 | **G17** | 取证前隔离 DUT/标杆并正向校验身份 | C2 → B10 |
-| **G18** | 任务书硬件与被测事实冲突，须人工确认 | §1，阻断 Remainder 真机见证 |
+| **G18** | 按裁定 G 保留 A2/A3 验收目标与 `ascend950` 冲突；在 A2/A3 上真实构建，失败或无注册交确定性链形成受控非通过/阻断态 | §1，Remainder 真机见证 |
 | **G19** | 以 `(0,1)` prob 验证 RNG 消耗一致前提 | B13 |
-| **G20** | 任务书两个目标目录冲突，须人工确认 | §1，阻断 Remainder 取材定稿 |
+| **G20** | 按裁定 H 以 `math/floor_mod` 取材，同时把 `experimental/math` 冲突与目录条款未满足列入 `task_pr_gaps` | §1，Remainder 取材 |
 | **G21** | 真正 `shape=()` 的 rank 0 全链 | B14 |
 
 ## 9 · 挂账与回炉条件
 
-- G18 未确认前 Remainder 真机见证不能开工；G20 未确认前 Remainder 取材与 `--target-dir` 不能定稿。
+- G18 按裁定 G 仍以 A2/A3 为验收目标：源码仅声明 `ascend950` 的事实不能单独判 DUT 失败；须在报告同时记录任务书目标、PR 声明、实际硬件与真实构建结果。真实构建失败或无对应注册交确定性链形成受控非通过/阻断态，禁止 PASS；真机核验前保持 fail-closed，`ascend950` 诊断只能标记为 development。
+- G20 按裁定 H 使用 `--target-dir math/floor_mod`，但任务书 `:68` 的 `experimental/math` 与实际交付目录矛盾仍须写入 source_facts/spec；目录自相矛盾与「实际交付未位于 `experimental/math`」列入 `task_pr_gaps`，不得宣称目录条款已满足。
 - P0 的 format ND 与 CANN 8.5.0+ 版本门尚未核实；结论出来前不得把疑点写成缺陷，也不得假定现有通路满足要求。
 - B13 若证明 DUT 与标杆的 RNG 消耗方式不一致，随机精度维保持 BLOCKED，裁定 E 的 `exact` 前提须回炉；不得直接把逐位差异判成 DUT 未通过。
-- G11a 未确认前不定性能 baseline；若确认结果不是当前推断，B8 按确认值重写后再实施。
+- G11a 按裁定 F 固定为 `aclnn_builtin`；报告须标明这是对「原算子」的解释及其依据。预期 libopapi 身份、ELF 指纹或两个 ACLNN 符号定义者任一不符即 fail-closed，不得退换其他 baseline。
 - B5 的轴集版本与规模预算须在实施方案获准后定稿；不得以扩面为由破坏旧 caseset 可复现性。
