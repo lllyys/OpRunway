@@ -338,8 +338,39 @@ def _bind_vendor(plan):
     }
 
 
-def _input_tensor(torch, np, work, item):
+def _validate_input_slot(item, slot, case_id):
+    if not isinstance(item, dict) or not isinstance(slot, dict):
+        raise DriverError(f"{case_id}: input item/slot 须为 object")
+    expected = {
+        key: item.get(key)
+        for key in ("name", "kind", "binding", "shape", "dtype", "format")
+    }
+    actual = {key: slot.get(key) for key in expected}
+    if actual != expected:
+        raise DriverError(
+            f"{case_id}: plan slot 与 caseset input 契约不一致：slot={actual}, input={expected}")
+    if expected["kind"] != "tensor" or expected["binding"] != "device_tensor":
+        raise DriverError(
+            f"{case_id}: input {expected['name']!r} 非 tensor/device_tensor")
+    shape = expected["shape"]
+    if not isinstance(shape, list) or any(
+            isinstance(dim, bool) or not isinstance(dim, int) or dim < 0 for dim in shape):
+        raise DriverError(
+            f"{case_id}: input {expected['name']!r} shape={shape!r} 非非负整数数组")
+    if expected["format"] not in ("nd", "torch_npu_rank_default"):
+        raise DriverError(
+            f"{case_id}: input {expected['name']!r} format={expected['format']!r} 非受控值")
+
+
+def _input_tensor(torch, np, work, item, *, slot=None, case_id=None):
+    if slot is not None:
+        _validate_input_slot(item, slot, case_id or item.get("name") or "<unknown-case>")
     arr = np.load(_safe(work, item["path"]), allow_pickle=False)
+    declared_shape = item.get("shape")
+    if declared_shape is not None and list(arr.shape) != declared_shape:
+        raise DriverError(
+            f"{case_id or item.get('name')}: {item.get('name')!r} 落盘 shape={list(arr.shape)} "
+            f"≠ 逐输入契约 {declared_shape}")
     dtype = item["dtype"]
     if dtype == "bfloat16":
         if str(arr.dtype) != "uint16":
@@ -471,15 +502,48 @@ def _dump_output(torch, np, tensor, dtype, path):
 
 def materialize_invocation(torch, np, work, case, row):
     """按已冻结 invocation-plan 物化一次 Extension 调用；供精度与性能共用。"""
-    inputs = [_input_tensor(torch, np, work, item) for item in case["inputs"]]
+    cid = case.get("id")
+    parameter_contract = case.get("parameter_contract")
+    parameter_digest = row.get("parameter_contract_sha256")
+    if (parameter_contract is None) != (parameter_digest is None):
+        raise DriverError(
+            f"{cid}: case.parameter_contract 与 plan.parameter_contract_sha256 在场性不一致")
+    if parameter_digest is not None and _canonical_sha(parameter_contract) != parameter_digest:
+        raise DriverError(f"{cid}: parameter_contract 摘要与 invocation plan 漂移")
+    input_slots = {}
+    for slot in row["slots"]:
+        if slot.get("role") != "in":
+            continue
+        index = slot.get("input_idx")
+        if isinstance(index, bool) or not isinstance(index, int) or index in input_slots:
+            raise DriverError(f"{cid}: input_idx={index!r} 非唯一整数")
+        input_slots[index] = slot
+    if set(input_slots) != set(range(len(case["inputs"]))):
+        raise DriverError(
+            f"{cid}: plan input_idx={sorted(input_slots)} 未完整覆盖 "
+            f"case.inputs[0..{len(case['inputs']) - 1}]")
+    inputs = [
+        _input_tensor(
+            torch, np, work, item,
+            slot=input_slots[index] if parameter_digest is not None else None,
+            case_id=cid)
+        for index, item in enumerate(case["inputs"])
+    ]
     output_contracts = _expected_outputs(case)
     outputs = [_empty_output(torch, item) for item in output_contracts]
+    scalar_dtypes = row.get("host_scalar_dtypes") or {}
     args = []
     for slot in row["slots"]:
         role = slot["role"]
         if role == "in":
             args.append(inputs[int(slot["input_idx"])])
         elif role == "attr":
+            if slot.get("binding") == "host_scalar":
+                name = slot.get("name")
+                if slot.get("ctype") != "scalar" or slot.get("kind") != "scalar" \
+                        or scalar_dtypes.get(name) != slot.get("dtype"):
+                    raise DriverError(
+                        f"{cid}: host scalar slot {name!r} 与 entrypoint dtype 契约不一致")
             args.append(slot["value"])
         elif role == "out":
             args.append(outputs[int(slot["output_idx"])])
@@ -717,6 +781,8 @@ def run(bundle, work):
     # 在场时逐字镜像，不在 driver 里猜默认或按算子分支。
     if "tensor_format_receipt" in manifest:
         receipt["tensor_format_receipt"] = manifest["tensor_format_receipt"]
+    if "multi_input_receipt" in manifest:
+        receipt["multi_input_receipt"] = manifest["multi_input_receipt"]
     _atomic_dump(
         os.path.join(work, "cpp_extension_receipt.json"), receipt)
     return receipt

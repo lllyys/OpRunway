@@ -362,6 +362,31 @@ def derive_output_dtype(spec, case_input_dtypes):
         in_dts.append(dt)
     if not in_dts:
         raise ValueError("case 无有效输入 dtype（无法派生输出 dtype）")
+    # N6：非 legacy dtype 关系只有在**输出参数显式声明受控 dtype_relation**时才可进入。
+    # tensor-tensor promote 要 taskbook×op_def 双源；host-scalar 常用的 follows/fixed 只读
+    # tensor case 输入、要 taskbook 来源。规则均由 stdlib-only 的 multi_input_contract 一处解释；
+    # 这里不调用 torch/numpy，也不复制 promote 表，更不把 host scalar 冒充 tensor operand。
+    relation = out_params[0].get("dtype_relation")
+    if relation is not None:
+        in_order = [p["name"] for p in params
+                    if isinstance(p, dict) and p.get("io") == "in" and p.get("name")]
+        case_order = [name for name, _ in case_input_dtypes]
+        if case_order != in_order:
+            raise ValueError(
+                f"case 输入参数身份/顺序 {case_order} ≠ spec {in_order}；"
+                "promote operand 必须绑定完整有序输入，缺项/多项/换序均拒")
+        import multi_input_contract as MIC
+        try:
+            output_dtype = MIC.derive_output_dtype_relation(
+                relation, case_input_dtypes)
+        except MIC.MultiInputContractError as ex:
+            raise ValueError(f"spec 输出 dtype_relation 非法：{ex}") from ex
+        allowed_out = out_params[0].get("dtype") or []
+        if output_dtype not in allowed_out:
+            raise ValueError(
+                f"dtype_relation 派生输出 dtype={output_dtype!r} 不在输出参数允许集 {allowed_out}；"
+                "任务书语义与 IO 能力声明冲突，fail-closed")
+        return output_dtype
     in_dt = in_dts[0]
     if any(d != in_dt for d in in_dts):
         raise ValueError(f"case 多输入 dtype 不一致 {in_dts}（elementwise 需同 dtype）")

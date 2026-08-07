@@ -184,6 +184,7 @@ import numpy as np
 import content_address
 import perf_mode
 import precision_policy
+import tensor_shape_attrs as TSA
 
 SEED = 2026
 
@@ -929,6 +930,7 @@ _PLANNER_DEPENDENCIES = (
     "gen_cases.py",
     "repo_adapter.py",
     "precision_policy.py",
+    "tensor_shape_attrs.py",
 )
 # 未声明时的缺省档 = 现行造例规则（向后兼容硬约束：老算子 caseset 逐字节不变）。
 _DEFAULT_CASE_PROFILE = "legacy"
@@ -2356,17 +2358,6 @@ def check_spec_capability(in_params, runner_form):
         raise ValueError("spec 无 io=='in' 参数 → 产不出任何用例（0 用例不得冒充验收），fail-closed。")
     # dtype 集的三道校验也放这里，好让 **`_dry_run`（= CP-B 契约自检）** 也能拦住，
     # 而不是只在正式生成期才炸——CP-B 过了却在 CP-D 才发现，正是本轮要消灭的「漏到下游」。
-    self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
-    dtypes = self_param.get("dtype") or []
-    if not dtypes:
-        # 空 dtype 集 → 一条用例都产不出。**0 用例冒充验收**是本仓明令禁止的
-        # （跑 0 条也能显示「无失败」），与 case_target=0 同一判据。（预先存在的洞，2026-07-22 补。）
-        raise ValueError(
-            f"spec 的输入参数 {self_param['name']!r} dtype 集为空 → 产不出任何用例。"
-            f"0 用例不得冒充验收（同 case_target=0 的判据），fail-closed。")
-    if len(dtypes) != len(set(dtypes)):               # finding #13：dtype 集含重复 → plan entry 撞车
-        dup = sorted(d for d in set(dtypes) if dtypes.count(d) > 1)
-        raise ValueError(f"spec dtype 集含重复项 {dup}（会致 case_id 碰撞/伪造覆盖，fail-fast）")
     # dtype 白名单（fail-fast，不静默）——**双层单一真源**：生成层 `_NATIVE`+bf16 × 真机层 repo_adapter。
     import repo_adapter                                # 延迟 import：repo_adapter 顶层已 import gen_cases
     # ⚠ 这里**不再做任何归一**（P5-b）：形参必填，`None` 与 `""`、`0`、`"opaque"` 一样是非法 form，
@@ -2376,11 +2367,48 @@ def check_spec_capability(in_params, runner_form):
     runner_set = repo_adapter.supported_np(form)       # 未知 form 在此 fail-closed（不兜任何一支）
     deferred_set = repo_adapter.deferred_np(form)
     gen_set = set(_NATIVE) | {_BF16}
-    for dtn in dtypes:
-        gen_ok = dtn in gen_set
-        run_ok = dtn in runner_set or dtn in deferred_set
-        if not (gen_ok and run_ok):
-            raise ValueError(_dtype_layer_error(dtn, form, gen_ok, run_ok, runner_set, deferred_set))
+    # N6：逐输入校，不再只看 self/首参。旧同 dtype spec 的判定不变；异构 spec 的第二个输入若
+    # 声明了 runner/生成层不支持的 dtype，会在 CP-B 就暴露，不能等到物化第一个 case 才炸。
+    for param in in_params:
+        dtypes = param.get("dtype") or []
+        if not dtypes:
+            raise ValueError(
+                f"spec 的输入参数 {param['name']!r} dtype 集为空 → 产不出任何用例。"
+                "0 用例不得冒充验收（同 case_target=0 的判据），fail-closed。")
+        if len(dtypes) != len(set(dtypes)):
+            dup = sorted(d for d in set(dtypes) if dtypes.count(d) > 1)
+            raise ValueError(
+                f"spec 输入参数 {param['name']!r} dtype 集含重复项 {dup}"
+                "（会致 case 身份/覆盖账本漂移，fail-fast）")
+        for dtn in dtypes:
+            gen_ok = dtn in gen_set
+            run_ok = dtn in runner_set or dtn in deferred_set
+            if not (gen_ok and run_ok):
+                raise ValueError(
+                    f"输入参数 {param['name']!r}: "
+                    + _dtype_layer_error(dtn, form, gen_ok, run_ok, runner_set, deferred_set))
+
+
+def _resolve_multi_input_contract(spec):
+    """spec.multi_input_contract → 已解析 bundle；字段缺席保持 legacy 路径逐字不变。"""
+    import multi_input_contract as MIC
+    try:
+        bundle = MIC.resolve_spec_contract(spec)
+    except MIC.MultiInputContractError as ex:
+        raise ValueError(f"spec.multi_input_contract 非法：{ex}") from ex
+    return bundle
+
+
+def _profile_tensor_inputs(profile):
+    return [item for item in profile["inputs"] if item["kind"] == "tensor"]
+
+
+def _build_profile_inputs(rng, profile, regime="uniform"):
+    """逐 tensor 描述物化逻辑数组；host scalar 留在 attrs/调用槽，不伪装 device tensor。"""
+    return [
+        _make_varied(rng, tuple(item["shape"]), item["dtype"], regime)
+        for item in _profile_tensor_inputs(profile)
+    ]
 
 
 def _build_inputs(rng, in_params, shp, dtn, attrs, data_kind, runner_form):
@@ -2425,11 +2453,14 @@ def _build_inputs(rng, in_params, shp, dtn, attrs, data_kind, runner_form):
 def _shape_tag(shp):
     if shp == "broadcast":
         return "bcast"
+    if not shp:
+        return "rank0"
     return "x".join(str(int(d)) for d in shp)
 
 
 # ── shape 的**结构类**（零配对告警用；按结构、不按具体尺寸，故类数少、告警才读得动）──────
 SHAPE_CLASS_BCAST = "bcast"          # 广播哨兵
+SHAPE_CLASS_RANK0 = "rank0"          # 0 维 Tensor（numel=1），不是空 Tensor
 SHAPE_CLASS_EMPTY = "empty"          # 含 0 长度轴（numel=0）
 SHAPE_CLASS_ALL_UNIT = "all_unit"    # 每一轴长度都是 1（标量类）——「归约轴长度=1」这类边界落这
 SHAPE_CLASS_HAS_UNIT = "has_unit_axis"   # 含长度 1 的轴、但不全是
@@ -2447,7 +2478,9 @@ def _shape_class(shp):
     if shp == "broadcast":
         return SHAPE_CLASS_BCAST
     dims = [int(d) for d in shp]
-    if not dims or any(d == 0 for d in dims):
+    if not dims:
+        return SHAPE_CLASS_RANK0
+    if any(d == 0 for d in dims):
         return SHAPE_CLASS_EMPTY
     if all(d == 1 for d in dims):
         return SHAPE_CLASS_ALL_UNIT
@@ -2742,11 +2775,14 @@ def _copy_attrs(a):
     return {k: (list(v) if isinstance(v, list) else v) for k, v in a.items()}
 
 
-def _attr_value_sets(spec, attrs_default):
+def _attr_value_sets(spec, attrs_default, *, exclude_host_scalar=False):
     """§1.3：每 attr 的取值集——布尔→[F,T]、枚举→全值、标量→等价类代表（默认值）。
     有 attr_matrix 时用它给的取值集（每 key 的并集，保序）；否则据 attr dtype/默认派生。
     返回 [(name, [values])]，供笛卡尔展开（attr 作真正交轴，评审 #12）。"""
-    attr_params = [p for p in spec["params"] if p["io"] == "attr"]
+    attr_params = [
+        p for p in spec["params"] if p["io"] == "attr"
+        and not (exclude_host_scalar and p.get("binding") == "host_scalar")
+    ]
     matrix = spec.get("attr_matrix")
     # finding #12（§1 重写勿丢）：attr_matrix 每项须为 dict、key ⊆ spec io=='attr' 名集、值受类型闸约束——
     # 防伪造 attr key（如 {foo:12345}）冒充覆盖 / 非法值类型。fail-fast，不静默忽略未知 key。
@@ -2796,7 +2832,7 @@ def _attr_combos(attr_sets, attrs_default):
 
 
 # ================================================= C3 · input_rank 约束 =========
-_MAX_RANK = 8                                        # §1.2 阶梯设定 dims 1~8，rank 声明不得越界
+_MAX_RANK = 8                                        # §1.2 阶梯设定 dims 0~8，rank 声明不得越界
 
 
 def _allowed_ranks(in_params):
@@ -2816,9 +2852,9 @@ def _allowed_ranks(in_params):
                              f"等于把用例集清零）——不写 rank 才表示不限制")
         got = set()
         for r in vals:
-            if isinstance(r, bool) or not isinstance(r, int) or not (1 <= r <= _MAX_RANK):
+            if isinstance(r, bool) or not isinstance(r, int) or not (0 <= r <= _MAX_RANK):
                 raise ValueError(f"in 参数 {p.get('name')!r} 的 rank={r!r} 非法"
-                                 f"（须为 1..{_MAX_RANK} 的整数，或这种整数的列表）")
+                                 f"（须为 0..{_MAX_RANK} 的整数，或这种整数的列表）")
             got.add(int(r))
         sets.append(got)
     if not sets:
@@ -2851,6 +2887,12 @@ def _fit_rank(shape, ranks):
     if r0 in ranks:
         return shape
     r = min(sorted(ranks), key=lambda x: (abs(x - r0), x))
+    if r == 0:
+        if _numel(shp) != 1:
+            raise ValueError(
+                f"shape={shp} 的 numel={_numel(shp)}，不能在保持元素数的前提下改为 rank0；"
+                "rank0 Tensor 的 shape=()、numel=1，不得把 empty/多元素 Tensor 冒充成标量")
+        return ()
     if r > r0:
         return (1,) * (r - r0) + shp
     head = 1
@@ -2869,6 +2911,13 @@ def _shape_ladder(ranks):
     pool = list(_REG_SHAPES)
     if ranks and (set(ranks) - {len(s) for s in _REG_SHAPES}):
         pool += _EXT_RANK_SHAPES
+    # 显式 rank 声明是任务书权威轴：阶梯缺哪个 rank 就补一条小而确定的通用见证。
+    # 它只在 `ranks is not None` 时生效，故未声明 rank 的 legacy 用例池字节不变。
+    # rank0 见证必须是 `()`（numel=1）；不能用 `(0,)` 那个 empty Tensor 顶替。
+    if ranks is not None:
+        present = {len(s) for s in pool}
+        pool += [(() if rank == 0 else (2,) * rank)
+                 for rank in sorted(ranks) if rank not in present]
     reg = [s for s in pool if _numel(s) <= _MAX_NUMEL and _rank_ok(s, ranks)]
     large = [s for s in _LARGE_SHAPES if _numel(s) <= _MAX_NUMEL and _rank_ok(s, ranks)]
     if not reg:
@@ -3270,6 +3319,116 @@ def _require_case_target(spec):
     return case_target
 
 
+def _multi_input_profile_plan(spec, bundle, attrs_default, case_target):
+    """N6 完整 profile×primitive-attr 笛卡尔；不抽样、不改写逐输入 shape/dtype/format。"""
+    perf_mode.normalize_change_kind(spec)
+    attr_sets = _attr_value_sets(spec, attrs_default, exclude_host_scalar=True)
+    attr_combos = _attr_combos(attr_sets, attrs_default)
+    entries = []
+    for profile in bundle["profiles"]:
+        scalar_attrs = {
+            item["name"]: item["value"] for item in profile["inputs"]
+            if item["kind"] == "scalar"
+        }
+        for attr_idx, primitive_attrs in enumerate(attr_combos):
+            overlap = sorted(set(scalar_attrs) & set(primitive_attrs))
+            if overlap:
+                raise ValueError(
+                    f"profile {profile['profile_id']!r} host scalar 与 primitive attr 重名 {overlap}")
+            attrs = {**_copy_attrs(primitive_attrs), **scalar_attrs}
+            entries.append({
+                "dims": ["功能", "精度", "性能"],
+                # legacy 代码仍要求 entry.shape/dtype；这两个兼容字段取**输出**契约，
+                # 真输入逐项只读 `input_profile`，绝不再用它们反向同化输入。
+                "shape": tuple(profile["output"]["shape"]),
+                "dtype": profile["output"]["dtype"],
+                "tags": ["多输入契约"],
+                "data_kind": "varied:uniform",
+                "id_kind": "input_profile",
+                "attrs": attrs,
+                "attr_idx": attr_idx if len(attr_combos) > 1 else None,
+                "case_origin": f"multi_input_profile:{profile['profile_id']}",
+                "rule_ref": "multi_input_contract.v1（任务书权威 profile×完整 attr 笛卡尔）",
+                "input_profile": profile,
+            })
+    expected = len(bundle["profiles"]) * len(attr_combos)
+    if int(case_target) != expected:
+        raise ValueError(
+            f"multi_input_contract 完整矩阵 = {len(bundle['profiles'])} profiles × "
+            f"{len(attr_combos)} attrs = {expected}，precision.case_target={case_target}；"
+            "必须逐字相等，禁止抽样/截断")
+    # profile 是任务书显式 materialization：超预算不允许缩 shape（缩了就不是那条 case）。
+    budget = _cost_budget(spec)
+    over = []
+    for profile in bundle["profiles"]:
+        cost = max(
+            [_numel(item["shape"]) for item in _profile_tensor_inputs(profile)]
+            + [_numel(profile["output"]["shape"])])
+        if cost > budget:
+            over.append({"profile_id": profile["profile_id"], "cost": cost, "budget": budget})
+    if over:
+        raise ValueError(
+            f"multi_input_contract profile 超 golden_cost_budget：{over}；"
+            "显式 profile 不得静默降规模，请修任务书映射或显式提高预算")
+
+    def count_cases(predicate):
+        return sum(bool(predicate(profile)) for profile in bundle["profiles"]) * len(attr_combos)
+
+    case_coverage = {
+        "cases": len(entries),
+        "broadcasted": count_cases(lambda p: p["relations"]["shape"]["broadcasted"]),
+        "rank_mismatch": count_cases(lambda p: p["relations"]["shape"]["rank_mismatch"]),
+        "rank0_tensor": count_cases(lambda p: p["relations"]["shape"]["rank0_tensor"]),
+        "host_scalar": count_cases(lambda p: any(i["kind"] == "scalar" for i in p["inputs"])),
+        "mixed_dtype": count_cases(
+            lambda p: len({i["dtype"] for i in _profile_tensor_inputs(p)}) > 1),
+        "mixed_format": count_cases(
+            lambda p: len({i["format"] for i in _profile_tensor_inputs(p)}) > 1),
+    }
+    op_class = _operator_class(spec)
+    case_profile = _case_profile(spec)
+    return entries, {
+        "pool_max": len(entries),
+        "requested_target": int(case_target),
+        "emitted": len(entries),
+        "forced_special": 0,
+        "forced_total": len(entries),
+        "operator_class": op_class,
+        "emits_nonfinite_specials": _emits_nonfinite(op_class),
+        "case_profile": case_profile,
+        "case_profile_declared": _case_profile_declared(spec),
+        "dropped_combo_classes": [],
+        "unpaired_combo_classes": [],
+        "attr_axis_lengths": {"declared": [], "emitted": 0, "items": [], "skipped": []},
+        "coverage_strength": (
+            "multi_input_contract.v1：完整 profile×primitive-attr 笛卡尔；逐输入 shape/dtype/format "
+            "原样物化，不抽样、不广播预展开"),
+        "golden_cost": {
+            "budget": budget, "model": _COST_MODEL,
+            "scaled_cases": [], "skipped_shapes": [], "skipped_shape_classes": 0,
+        },
+        "multi_input_ledger": {
+            "schema_version": bundle["schema_version"],
+            "contract_sha256": bundle["sha256"],
+            "profiles": len(bundle["profiles"]),
+            "attrs": len(attr_combos),
+            "profile_coverage": bundle["coverage"],
+            "required_coverage": bundle["required_coverage"],
+            "case_coverage": case_coverage,
+        },
+    }
+
+
+def _mk_multi_input_id(op, profile, attr_idx, seen):
+    base = f"{op.lower()}_profile_{profile['profile_id'].lower()}"
+    if attr_idx is not None:
+        base += f"_a{attr_idx}"
+    if base in seen:
+        raise ValueError(f"case_id 碰撞：{base!r}（multi_input profile/attr 身份重复）")
+    seen.add(base)
+    return base
+
+
 def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None, empty_accepts=None):
     """§1 覆盖-预算计划。返回 (entries, meta)。选择端无 rng（结构序 + 原始索引 tie-break）。
     ① §1.4 特殊场景（每 dtype，强制）→ ② 白名单必覆盖（key dtype × 每 attr × 大 shape，强制，防关键联合被采样丢）
@@ -3529,6 +3688,17 @@ def _attr_ctype(p, value=_UNSET):
     `["float32","bogus"]` 都被静默收下 —— 而 attr 的 C 标量宽度拼错 = 远端 argtypes 错位 = 段错误。
     多候选 / 空 / 未知一律 fail-closed（记 gap 交人裁，别静默挑一个）。
     数组分支不查这张表：`aclIntArray` 的元素宽度是 ACL 定死的，spec dtype 在那里不表示 C 宽度。"""
+    # N6 host scalar 是 aclScalar*，不是 C ABI primitive。binding 是接口事实；dtype 继续随 slot
+    # 落盘，runner/codegen 据它构造具有精确逻辑 dtype 的 aclScalar。
+    if p.get("binding") == "host_scalar":
+        if p.get("kind") != "scalar":
+            raise ValueError(
+                f"aclnn_call: host_scalar attr {p.get('name')!r} 缺 kind='scalar'")
+        dtypes = p.get("dtype")
+        if not isinstance(dtypes, list) or len(dtypes) < 1:
+            raise ValueError(
+                f"aclnn_call: host_scalar attr {p.get('name')!r} dtype 集为空")
+        return "scalar"
     probe = p.get("default") if value is _UNSET else value
     if _is_int_array(probe):
         return _ATTR_ARRAY_CTYPE
@@ -3573,7 +3743,7 @@ def _select_call_variant(variants, attrs, cid):
     return precision_policy.select_call_variant(variants, attrs, cid)
 
 
-def _build_aclnn_call(spec, variant, attrs, active_names, cid):
+def _build_aclnn_call(spec, variant, attrs, active_names, cid, parameter_contract=None):
     """把选中的变体 + 本 case 的 attr 取值**完全解析**成该 case 的 `aclnn_call`（driver 直接执行、不再推断）。
 
     slots 顺序 = spec.params 顺序 = aclnn 签名顺序（穿插的标量属性据此保位，ctypes runner 才拼得对 argtypes）。
@@ -3586,18 +3756,38 @@ def _build_aclnn_call(spec, variant, attrs, active_names, cid):
       · `{"role":"out_null","name":..}`              —— 该变体不落地此输出 → 传 NULL、不回读。
     """
     out_pos = {n: k for k, n in enumerate(active_names)}
+    dynamic = ({item["name"]: item for item in parameter_contract["inputs"]}
+               if parameter_contract is not None else {})
+    dynamic_output = parameter_contract.get("output") if parameter_contract is not None else None
     slots, in_i = [], 0
     for p in spec.get("params", []):
         if not isinstance(p, dict):
             raise ValueError(f"{cid}: 非法 param 条目 {p!r}")
         io, name = p.get("io"), p.get("name")
         if io == "in":
-            slots.append({"role": "in", "name": name, "input_idx": in_i})
+            slot = {"role": "in", "name": name, "input_idx": in_i}
+            if parameter_contract is not None:
+                item = dynamic.get(name)
+                if item is None or item.get("kind") != "tensor":
+                    raise ValueError(f"{cid}: in 参数 {name!r} 未绑定 multi_input tensor profile")
+                slot.update({key: item[key] for key in ("kind", "binding", "dtype", "format", "shape")})
+            slots.append(slot)
             in_i += 1
         elif io == "attr":
             if name not in variant["active_attrs"]:
                 continue                                 # 该变体签名里没有这个标量槽（如全局 API 无 dim/keepdim）
-            value = variant["attrs"][name] if name in variant["attrs"] else attrs.get(name)
+            if p.get("binding") == "host_scalar":
+                if name in variant["attrs"]:
+                    raise ValueError(
+                        f"{cid}: host scalar {name!r} 同时由 profile 与 call_variant.attrs 声明；"
+                        "两份真相冲突，fail-closed")
+                item = dynamic.get(name)
+                if item is None or item.get("kind") != "scalar" \
+                        or item.get("binding") != "host_scalar":
+                    raise ValueError(f"{cid}: host scalar {name!r} 缺 profile binding")
+                value = item["value"]
+            else:
+                value = variant["attrs"][name] if name in variant["attrs"] else attrs.get(name)
             if value is None:
                 raise ValueError(
                     f"{cid}: 变体 {variant['symbol']!r} 的 attr {name!r} 取值为 None —— "
@@ -3607,11 +3797,24 @@ def _build_aclnn_call(spec, variant, attrs, active_names, cid):
             ctype = _attr_ctype(p, value)
             # 数组值另拷一份：variant["attrs"] / case attrs 里的那个 list 会被多条 case 共享，
             # 落进 caseset 的 slot 不该与它同一个对象（谁就地改一下就串到别的 case）。
-            slots.append({"role": "attr", "name": name, "ctype": ctype,
-                          "value": list(value) if isinstance(value, list) else value})
+            slot = {"role": "attr", "name": name, "ctype": ctype,
+                    "value": list(value) if isinstance(value, list) else value}
+            if parameter_contract is not None:
+                if p.get("binding") == "host_scalar":
+                    slot.update({"kind": "scalar", "binding": "host_scalar",
+                                 "dtype": dynamic[name]["dtype"]})
+                else:
+                    slot.update({"kind": "attr", "binding": "attr"})
+            slots.append(slot)
         elif io == "out":
             if name in out_pos:
-                slots.append({"role": "out", "name": name, "output_idx": out_pos[name]})
+                slot = {"role": "out", "name": name, "output_idx": out_pos[name]}
+                if parameter_contract is not None:
+                    if dynamic_output is None or dynamic_output.get("name") != name:
+                        raise ValueError(f"{cid}: out 参数 {name!r} 未绑定 multi_input output")
+                    slot.update({key: dynamic_output[key]
+                                 for key in ("kind", "binding", "dtype", "format", "shape")})
+                slots.append(slot)
             else:
                 slots.append({"role": "out_null", "name": name})
         else:
@@ -3640,23 +3843,75 @@ def _mo_taskdoc_tol(spec):
     return None
 
 
-def _save_inputs_multi(cdir, cid, inputs, in_params, dtn):
-    """多输出通路存输入（与 legacy 单输出**同口径**：bf16→uint16 位模式 + storage_dtype，其余原生）。"""
+def _save_case_tensor_inputs(cdir, cid, inputs, in_params, input_dtns,
+                             tensor_contracts=None):
+    """所有 generated 路径的唯一输入 saver。
+
+    ``np.ascontiguousarray`` 对 0-d 会升成 ``(1,)``，所以连续化后必须再
+    reshape 回已冻结的 logical shape，并在落盘前后都通过 N7 形状身份门。
+    这一道同时服务 legacy 单输出、多输出与 N6 多输入，避免再出现
+    “JSON 写 []、.npy 实际 (1,)”的双真相。
+
+    N7 的 base-storage/layout 表示后续也只从本函数扩展；其它保存点不得
+    自行连续化或伪造布局。
+    """
+    if len(inputs) != len(in_params) or len(inputs) != len(input_dtns):
+        raise ValueError(
+            f"{cid}: input saver 数量漂移：inputs={len(inputs)} "
+            f"params={len(in_params)} dtypes={len(input_dtns)}")
+    if tensor_contracts is not None and len(tensor_contracts) != len(inputs):
+        raise ValueError(
+            f"{cid}: tensor_contracts={len(tensor_contracts)} != inputs={len(inputs)}")
     items = []
     for j, x_logical in enumerate(inputs):
-        if dtn == _BF16:                                 # 物理 = 从逻辑单独 encode 出的 uint16 位模式
+        param = in_params[j]
+        input_dtn = input_dtns[j]
+        logical = np.asarray(x_logical)
+        expected_shape = tuple(int(dim) for dim in logical.shape)
+        if tensor_contracts is not None:
+            contract = tensor_contracts[j]
+            if contract.get("name") != param.get("name"):
+                raise ValueError(
+                    f"{cid}: tensor#{j} contract name={contract.get('name')!r} "
+                    f"!= spec param {param.get('name')!r}")
+            TSA.assert_shape_identity(
+                contract.get("shape"), expected_shape,
+                where=f"{cid}.inputs[{j}].planned_shape")
+        if input_dtn == _BF16:                            # 物理 = 从逻辑单独 encode 出的 uint16 位模式
             x_bin = _f32_to_bf16_uint16(x_logical)
             if x_bin.size and np.shares_memory(x_bin, x_logical):
                 raise ValueError(f"{cid}: bf16 X_bin 与 X_logical 共享内存（违 layout 字节契约 职责#2）")
         else:
-            x_bin = np.ascontiguousarray(x_logical, dtype=_storage_np(dtn))
-        np.save(os.path.join(cdir, f"x{j + 1}.npy"), x_bin)
-        item = {"name": in_params[j]["name"], "shape": list(np.asarray(x_logical).shape),
-                "dtype": dtn, "path": f"{cid}/x{j + 1}.npy"}
-        if dtn == _BF16:
-            item["storage_dtype"] = _storage_name(dtn)
+            x_bin = np.ascontiguousarray(
+                x_logical, dtype=_storage_np(input_dtn))
+        # ascontiguousarray 保证字节连续，reshape 专门撤销它对 0-d 的强制升维。
+        x_bin = np.ascontiguousarray(x_bin).reshape(expected_shape)
+        TSA.assert_shape_identity(
+            expected_shape, x_bin.shape,
+            where=f"{cid}.inputs[{j}].storage_payload")
+        path = os.path.join(cdir, f"x{j + 1}.npy")
+        np.save(path, x_bin)
+        with open(path, "rb") as payload_fh:
+            saved = np.load(payload_fh, allow_pickle=False)
+        TSA.assert_shape_identity(
+            expected_shape, saved.shape,
+            where=f"{cid}.inputs[{j}].saved_payload")
+        item = {"name": param["name"], "shape": list(expected_shape),
+                "dtype": input_dtn, "path": f"{cid}/x{j + 1}.npy"}
+        if tensor_contracts is not None:
+            item.update({"kind": tensor_contracts[j]["kind"],
+                         "binding": tensor_contracts[j]["binding"],
+                         "format": tensor_contracts[j]["format"]})
+        if input_dtn == _BF16:
+            item["storage_dtype"] = _storage_name(input_dtn)
         items.append(item)
     return items
+
+
+def _save_inputs_multi(cdir, cid, inputs, in_params, dtn):
+    """多输出历史包装；实体统一由 :func:`_save_case_tensor_inputs` 落盘。"""
+    return _save_case_tensor_inputs(
+        cdir, cid, inputs, in_params, [dtn] * len(inputs))
 
 
 def _index_golden_array(arr, dtype_name, where):
@@ -3831,6 +4086,7 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
     # mode 派生同源，否则同一份省略了该键的 spec 会被规划成 cpp、却被派去跑 cpp_extension（P5）。
     runner_form = repo_adapter.spec_runner_form(spec)
     check_spec_capability(in_params, runner_form)        # 能力边界前置：先于 load_golden，别为不支持的算子白加载 golden
+    multi_input_bundle = _resolve_multi_input_contract(spec)
     # CS：用例来源（generated / taskdoc）与规范化任务书用例集，**在加载 golden 之前**解出来——
     # 一份「声明了 taskdoc 却没喂用例集」的 spec 应当停在零副作用处，而不是先 import 一遍用户 golden。
     case_source, taskdoc_payload, taskdoc_sha256 = _resolve_taskdoc_inputs(spec, taskdoc_caseset)
@@ -3853,7 +4109,10 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
     # 阻断是批 5 门侧的事——这里若直接拦，任何还没把任务书快照入库的算子会当场跑不了，
     # 而「快照没入库」本身正是要被**看见**的问题，不是要被静默绕过的。
     _tier = _derive_tier(op, _g.contract)
-    attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
+    attrs_default = {
+        p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"
+        and not (multi_input_bundle is not None and p.get("binding") == "host_scalar")
+    }
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
     # （dtype 空/重复/白名单三道校验已提进 check_spec_capability，先于 load_golden 执行）
@@ -3864,6 +4123,9 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
 
     # 多输出契约触发（据 spec 字段、op-中立）+ torch_allclose 容差分源参数（仅 torch 对标场景用）。
     uses_multi = _uses_output_contract(spec)
+    if multi_input_bundle is not None and uses_multi:
+        raise ValueError(
+            "multi_input_contract.v1 当前只支持单输出 expected 契约；多输出不得静默走 legacy")
     tol_src = _tolerance_source(spec)
     tol_tuple = _mo_taskdoc_tol(spec)
     # ACLNN 调用变体：ctypes 与官方 C++ Extension 两种执行形态共用逐 case 已解析调用契约。
@@ -3882,7 +4144,14 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
 
     # CS：用例来源分叉。`taskdoc` 档在 `_plan` **之前**分出去——它一条网格都不铺，
     # G4 的规模预算也不行使（降规模会改掉任务书点名的 shape，那就不是那条用例了）。
-    if case_source == _CASE_SOURCE_TASKDOC:
+    if multi_input_bundle is not None:
+        if case_source == _CASE_SOURCE_TASKDOC:
+            raise ValueError(
+                "multi_input_contract 与 case_source=taskdoc 不得同时声明；正式 cases/golden 由 "
+                "OpRunway profile planner 生成，附带用例只可 reference_only")
+        entries, plan_meta = _multi_input_profile_plan(
+            spec, multi_input_bundle, attrs_default, case_target)
+    elif case_source == _CASE_SOURCE_TASKDOC:
         # ⚠ 「taskdoc 档不支持多输出契约」那道门在 `_taskdoc_plan` 里（计划期一处，dry-run 也拦得住）。
         entries, plan_meta = _taskdoc_plan(spec, in_params, attrs_default, case_target,
                                            taskdoc_payload, taskdoc_sha256)
@@ -3896,8 +4165,11 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
     for entry in entries:
         dims, shp, dtn = entry["dims"], entry["shape"], entry["dtype"]
         attrs, data_kind = entry["attrs"], entry["data_kind"]
+        input_profile = entry.get("input_profile")
         td_entry = entry.get("taskdoc")                  # CS：非 None = 这条 case 的身份来自任务书
-        if td_entry is None:
+        if input_profile is not None:
+            cid = _mk_multi_input_id(op, input_profile, entry["attr_idx"], seen_ids)
+        elif td_entry is None:
             cid = _mk_id(op, dtn, shp, entry["id_kind"], entry["attr_idx"], seen_ids)
         else:
             cid = td_entry["case_id"]                    # 身份照抄任务书（已在加载期校过唯一性与安全性）
@@ -3908,7 +4180,9 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
         os.makedirs(cdir, exist_ok=True)
         case_rng = _case_rng(cid)                        # per-case 独立种子（数据只依赖稳定 cid，评审 #7）
 
-        if td_entry is None:
+        if input_profile is not None:
+            inputs = _build_profile_inputs(case_rng, input_profile)
+        elif td_entry is None:
             inputs = _build_inputs(case_rng, in_params, shp, dtn, attrs, data_kind,
                                    runner_form)          # 逻辑数组（compute dtype）
         else:                                            # CS：按任务书的 shape×值域×seed 确定性物化
@@ -3987,20 +4261,15 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                     f"否则下游按错形状收发。fail-closed。"
                     f"（in_shapes={[tuple(np.asarray(x).shape) for x in inputs]} attrs={attrs}）")
             out_shape_source = "golden_fn_actual"        # 未声明且已核 = 缺省同形语义成立
+        output_dtn = input_profile["output"]["dtype"] if input_profile is not None else dtn
         if not exact:
-            golden = golden.astype(_compute_np(dtn))     # numerical：golden 同逻辑 dtype（bf16→fp32-on-grid）
+            golden = golden.astype(_compute_np(output_dtn))  # numerical：按输出关系的逻辑 dtype
 
         # §1.4 空 Tensor（numel=0）：只挂「功能」、无精度判定；存空 X/golden，expected compare=na（评审 #1）。
         if entry["id_kind"] == "empty":
-            for j, x_logical in enumerate(inputs):
-                x_bin = (_f32_to_bf16_uint16(x_logical) if dtn == _BF16
-                         else np.ascontiguousarray(x_logical, dtype=_storage_np(dtn)))
-                np.save(os.path.join(cdir, f"x{j + 1}.npy"), x_bin)
+            in_items = _save_case_tensor_inputs(
+                cdir, cid, inputs, in_params, [dtn] * len(inputs))
             np.save(os.path.join(cdir, "golden.npy"), golden)
-            in_items = [{"name": in_params[j]["name"], "shape": list(inputs[j].shape),
-                         "dtype": dtn, "path": f"{cid}/x{j + 1}.npy",
-                         **({"storage_dtype": _storage_name(dtn)} if dtn == _BF16 else {})}
-                        for j in range(len(inputs))]
             # 批 2：golden 档位随每条 case 走（无契约块 → None，行为与批 2 前一致）
             empty_expected = {"golden_source": golden_source, "golden_tier": _tier,
                               "golden_path": f"{cid}/golden.npy",
@@ -4031,27 +4300,28 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
             _assert_equal_nan_effective(golden_fn, inputs, attrs, cid)
 
         # 保存：X_bin(x{j}.npy·物理位模式) 与 golden(golden.npy·op(逻辑值)) **分两份造**（canonical 职责#2/#3）
-        storage_np = _storage_np(dtn)
-        ishapes, has_storage = [], (dtn == _BF16)
-        for j, x_logical in enumerate(inputs):
-            if dtn == _BF16:                             # 物理 = 从逻辑**单独 encode** 出的 uint16 位模式
-                x_bin = _f32_to_bf16_uint16(x_logical)
-                if x_bin.size and np.shares_memory(x_bin, x_logical):  # finding #11：改 raise（空数组免检）
-                    raise ValueError(f"{cid}: bf16 X_bin 与 X_logical 共享内存（违 layout 字节契约 职责#2）")
-            else:
-                x_bin = np.ascontiguousarray(x_logical, dtype=storage_np)
-            np.save(os.path.join(cdir, f"x{j + 1}.npy"), x_bin)
-            ishapes.append(list(x_logical.shape))
+        tensor_contracts = (_profile_tensor_inputs(input_profile)
+                            if input_profile is not None else None)
+        input_dtns = ([item["dtype"] for item in tensor_contracts]
+                      if tensor_contracts is not None else [dtn] * len(inputs))
+        in_items = _save_case_tensor_inputs(
+            cdir, cid, inputs, in_params, input_dtns,
+            tensor_contracts=tensor_contracts)
+        ishapes = [item["shape"] for item in in_items]
         np.save(os.path.join(cdir, "golden.npy"), golden)
 
         # 精度口径 per-case：cdtype **据 spec IO 矩阵派生**（与 validator 同源 derive_output_dtype，绝不取 golden
         # 自声明；bf16 numerical 输出→'bfloat16'、bool 输出(IsClose/Equal 即便 bf16 输入)→'bool'）。
-        case_in_dts = [(p["name"], dtn) for p in in_params]
+        case_in_dts = [(p["name"], input_dtns[j]) for j, p in enumerate(in_params)]
         logical_cdtype = precision_policy.derive_output_dtype(spec, case_in_dts)
+        if input_profile is not None and logical_cdtype != input_profile["output"]["dtype"]:
+            raise ValueError(
+                f"{cid}: precision_policy 派生输出 dtype={logical_cdtype!r} ≠ "
+                f"multi_input_contract={input_profile['output']['dtype']!r}")
         out_is_bool = (golden.dtype == bool)
         # finding #14：bf16 白名单与「输出是否 bool/exact 语义」**拆成两道独立校验**——verify_mode=exact 不再
         # 短路豁免 bf16。bf16 且**输出非 bool**（真数值输出）且 op 不在白名单 → 需 lossy 阈值 → fail-fast。
-        if dtn == _BF16 and not out_is_bool and not _bf16_bitexact(spec, op):
+        if output_dtn == _BF16 and not out_is_bool and not _bf16_bitexact(spec, op):
             raise ValueError(
                 f"bf16 numerical for op {op!r} 需 lossy 阈值：输出非 bool，且该算子未声明 bf16 逐位可达。\n"
                 f"  → 若本算子是**纯搬运/纯符号**类（输出恒等于某个输入元素、不做算术，如 gather/\n"
@@ -4061,9 +4331,9 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                 f"  ⚠ 不因 verify_mode=exact 静默放行——exact 是判据、不是算子性质。")
         if exact:
             compare = "exact_equal"
-        elif precision_policy.is_integer_dtype(dtn):
+        elif precision_policy.is_integer_dtype(output_dtn):
             compare = "exact_equal"                      # §1.1 int→exact（有效标准也会强制 EXACT）
-        elif dtn == _BF16:
+        elif output_dtn == _BF16:
             compare = "exact_equal"                      # Sign/Neg bf16 输出精确可表示（已过上文白名单）
         else:
             compare = "rel_err"                          # fp32/fp16 数值 → 沿用平台标准（向后兼容）
@@ -4083,26 +4353,22 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
         acc = precision_policy.resolve_acceptance(spec, eff_std, logical_cdtype)
         if acc:
             expected["acceptance_policy"], expected["acceptance_tolerance_policy_id"] = acc
-        in_items = []
-        for j in range(len(inputs)):
-            item = {"name": in_params[j]["name"], "shape": ishapes[j], "dtype": dtn,
-                    "path": f"{cid}/x{j + 1}.npy"}
-            if has_storage:                              # 仅物理≠逻辑时带 storage_dtype（native 保向后兼容）
-                item["storage_dtype"] = _storage_name(dtn)
-            in_items.append(item)
         legacy_case = {"id": cid, "dims": dims, "tags": entry["tags"],
                        "inputs": in_items, "attrs": attrs, "expected": expected}
+        if input_profile is not None:
+            legacy_case["parameter_contract"] = input_profile
         if needs_aclnn_call:                             # legacy 单输出 + aclnn_py：同样逐 case 解析调用
             legacy_case["aclnn_call"] = _build_aclnn_call(
-                spec, variant, attrs, _active_output_names(spec, variant, cid), cid)
+                spec, variant, attrs, _active_output_names(spec, variant, cid), cid,
+                parameter_contract=input_profile)
         cases.append(legacy_case)
     perf_case_policy = _classify_perf_cases(spec, cases)
     attr_order = [p["name"] for p in spec["params"] if p["io"] == "attr"]
     # Q7 dtype 覆盖门用：dtype_required=任务书权威全集（spec 透传，未声明则 None→门不阻塞）；
     # dtype_tested=实测子集，**从实际生成的 cases 归并**（非 in 参数并集——门也用真实 cases 对账，两侧口径一致、
     # 消除「并集过报」与「自报漂移」）；task_pr_gaps 透传供门查 dtype_deferred。
-    dtype_tested = sorted({c["inputs"][0]["dtype"] for c in cases
-                           if c.get("inputs") and c["inputs"][0].get("dtype")})
+    dtype_tested = sorted({item["dtype"] for c in cases for item in (c.get("inputs") or [])
+                           if isinstance(item, dict) and item.get("dtype")})
     caseset = {"op": op, "spec_ref": spec.get("op"), "work_dir": work_dir,
             "attr_order": attr_order,
             "dtype_required": spec.get("dtype_required"),
@@ -4119,6 +4385,8 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
             # 报告要说「这批用例是怎么算出来的、排除了什么、其中多少是重复组合」，读这里就够。
             **({"case_matrix_ledger": plan_meta["case_matrix_ledger"]}
                if "case_matrix_ledger" in plan_meta else {}),
+            **({"multi_input_ledger": plan_meta["multi_input_ledger"]}
+               if "multi_input_ledger" in plan_meta else {}),
             # G4 覆盖账本：预算 + cost 模型（含其诚实边界）+ 被降规模的强制项 + 被剔除的超预算 shape。
             # 报告侧读这里就能说清「大 shape 是降规模后覆盖的 / 哪些规模根本没跑」，不靠猜。
             "golden_cost": plan_meta["golden_cost"],
@@ -4177,12 +4445,16 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
     #   （P5-b），键缺席时直接传 None 会在受控词表处炸掉每一份省略该键的合法 spec。
     dry_runner_form = repo_adapter.spec_runner_form(spec)
     check_spec_capability(in_params, dry_runner_form)
+    multi_input_bundle = _resolve_multi_input_contract(spec)
     # CS：dry-run 与正式生成走**同一道**用例来源解析 —— 「声明了 taskdoc 却没喂用例集」这类错
     # 必须在 CP-B 契约自检就现形，不许 CP-B 全绿、CP-D 才炸。
     case_source, taskdoc_payload, taskdoc_sha256 = _resolve_taskdoc_inputs(spec, taskdoc_caseset)
     reference_case_material_role = _reference_case_material_role(
         spec, resolved_case_source=case_source)
-    attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
+    attrs_default = {
+        p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"
+        and not (multi_input_bundle is not None and p.get("binding") == "host_scalar")
+    }
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
     # 与 gen_cases 同一读取点：dry-run 若比真跑宽松，CP-B 的契约自检就是假门。
@@ -4213,7 +4485,14 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
         if not msg.startswith("缺 golden:"):            # 文件在、但契约/执行有问题 → 不降级
             raise
         cost_why = f" ← 未核（{msg.splitlines()[0][:80]}）"
-    if case_source == _CASE_SOURCE_TASKDOC:              # CS：任务书用例集 → 不铺网格、不行使规模预算
+    if multi_input_bundle is not None:
+        if case_source == _CASE_SOURCE_TASKDOC:
+            raise ValueError(
+                "multi_input_contract 与 case_source=taskdoc 不得同时声明；正式 cases/golden 由 "
+                "OpRunway profile planner 生成，附带用例只可 reference_only")
+        entries, meta = _multi_input_profile_plan(
+            spec, multi_input_bundle, attrs_default, case_target)
+    elif case_source == _CASE_SOURCE_TASKDOC:            # CS：任务书用例集 → 不铺网格、不行使规模预算
         entries, meta = _taskdoc_plan(spec, in_params, attrs_default, case_target,
                                       taskdoc_payload, taskdoc_sha256)
     else:
@@ -4228,9 +4507,37 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
             seen.add(cid)
             ids.append(cid)
             continue
-        ids.append(_mk_id(op, e["dtype"], e["shape"], e["id_kind"], e["attr_idx"], seen))
+        if e.get("input_profile") is not None:
+            ids.append(_mk_multi_input_id(
+                op, e["input_profile"], e["attr_idx"], seen))
+        else:
+            ids.append(_mk_id(op, e["dtype"], e["shape"], e["id_kind"], e["attr_idx"], seen))
     specials = {"empty", "scalar", "bndlo", "bndhi", "inf", "ninf", "nan"}
-    ranks = _allowed_ranks(in_params)
+    if multi_input_bundle is None:
+        ranks = _allowed_ranks(in_params)
+        input_rank_profiles = None
+    else:
+        # legacy `input_ranks` 表示「所有输入共享的 rank 允许集」，不能拿逐参 profile 的秩并集
+        # 填进去冒充同质约束；多输入逐参事实另落具名账本。
+        ranks = None
+        input_rank_profiles = [
+            {
+                "profile_id": profile["profile_id"],
+                "inputs": [
+                    {"name": item["name"], "rank": len(item["shape"]),
+                     "shape": item["shape"], "dtype": item["dtype"], "format": item["format"]}
+                    for item in _profile_tensor_inputs(profile)
+                ],
+                "output": {
+                    "name": profile["output"]["name"],
+                    "rank": len(profile["output"]["shape"]),
+                    "shape": profile["output"]["shape"],
+                    "dtype": profile["output"]["dtype"],
+                    "format": profile["output"]["format"],
+                },
+            }
+            for profile in multi_input_bundle["profiles"]
+        ]
     eqn = None
     if any(p.get("io") == "attr" and p.get("name") == "equal_nan" for p in spec["params"]):
         eqn = sorted({str(e["attrs"].get("equal_nan")) for e in entries if "equal_nan" in e["attrs"]})
@@ -4252,7 +4559,10 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
     canonical_spec = content_address.canonical_json_bytes(spec)
     logic_files = {}
     logic_root = os.path.dirname(os.path.abspath(__file__))
-    for filename in _PLANNER_DEPENDENCIES:
+    dependency_filenames = list(_PLANNER_DEPENDENCIES)
+    if multi_input_bundle is not None:
+        dependency_filenames.append("multi_input_contract.py")
+    for filename in dependency_filenames:
         with open(os.path.join(logic_root, filename), "rb") as source_fh:
             logic_files[filename] = hashlib.sha256(source_fh.read()).hexdigest()
     planner_sha256 = logic_files["gen_cases.py"]
@@ -4302,6 +4612,9 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
             "change_kind": perf_mode.normalize_change_kind(spec),
             "operator_class": meta["operator_class"],
             "input_ranks": None if ranks is None else sorted(ranks),
+            **({"input_rank_profiles": input_rank_profiles,
+                "multi_input_contract_sha256": multi_input_bundle["sha256"]}
+               if multi_input_bundle is not None else {}),
             "golden_out_shape": "loaded" if _dry_out_shape_fn is not None else "not_available",
             "golden_cost_note": cost_why.strip(),
             **({"perf_case_policy": perf_case_policy}
@@ -4326,6 +4639,8 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
             # TP：只在 torch_parity 档出现（其它档 dry-run 账本一个键都不多，ledger_digest 不变）。
             **({"case_matrix_ledger": meta["case_matrix_ledger"]}
                if "case_matrix_ledger" in meta else {}),
+            **({"multi_input_ledger": meta["multi_input_ledger"]}
+               if "multi_input_ledger" in meta else {}),
             "unpaired_combo_classes": meta["unpaired_combo_classes"],
             "attr_axis_lengths": meta["attr_axis_lengths"],
             "golden_cost": meta["golden_cost"],

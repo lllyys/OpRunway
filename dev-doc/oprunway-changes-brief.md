@@ -2,6 +2,11 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-07 · 三算子统一计划 N6：通用多输入、广播与 dtype 关系链
+
+- 新增纯 stdlib 多输入契约，以任务书/op_def 有源的显式关系解析每个参数的 kind/binding/shape/dtype/format；合法广播、rank mismatch、rank0 tensor、host scalar 与受控 promote 进入确定性账本，缺绑定、不兼容广播和无来源 promote 均在执行前拒绝。
+- caseset、调用 plan、生成 C++ schema、driver receipt 与 evidence 现按同一份逐参数 `parameter_contract` 和摘要对账；A3 上 N6 接缝 9 项、通用 contract/precision/casegen 28 项及 legacy 58 项全部通过。⚠ Remainder 最小真机调用未完成：本地源构建在 A3 明确记录 `floor_mod` 不支持 `ascend910b`，且高性能 kernel 日志数为 0；已终止空等，未产 ELF/receipt，不得宣称真机闭环。
+
 ## 2026-08-07 · 三算子统一计划 N4：DUT 构建、ELF 与双符号身份闭环
 
 - 正式 v2 build receipt 现按 PR / local provenance 档位绑定 build 前与 emit 时源码树、measured 构建和实际 vendor ELF；历史 v1 只保读取兼容，不能承载新的正式验收。

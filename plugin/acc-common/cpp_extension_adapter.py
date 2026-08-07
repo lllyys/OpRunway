@@ -87,6 +87,95 @@ def _variants_by_symbol(manifest):
 GOLDEN_UNAVAILABLE = "golden_unavailable"
 
 
+def _multi_item_projection(item):
+    keys = ("name", "kind", "binding", "shape", "dtype", "format")
+    return {key: item.get(key) for key in keys}
+
+
+def _validate_case_parameter_contract(case, slots, manifest_receipt):
+    """逐 case 对账 caseset item ↔ parameter_contract ↔ aclnn_call slot ↔ codegen manifest。"""
+    cid = case.get("id")
+    contract = case.get("parameter_contract")
+    if not isinstance(contract, dict):
+        raise CppExtensionAdapterError(
+            f"{cid}: manifest 声明 multi_input，但 case 缺 parameter_contract")
+    inputs = contract.get("inputs")
+    output = contract.get("output")
+    if not isinstance(inputs, list) or not inputs or not isinstance(output, dict):
+        raise CppExtensionAdapterError(f"{cid}: parameter_contract inputs/output 非法")
+    contract_tensors = [item for item in inputs if item.get("kind") == "tensor"]
+    case_inputs = case.get("inputs")
+    if not isinstance(case_inputs, list) or len(case_inputs) != len(contract_tensors):
+        raise CppExtensionAdapterError(
+            f"{cid}: parameter_contract tensor 数与 case.inputs 不一致")
+    tensor_manifest = {
+        (row.get("io"), row.get("name")): row
+        for row in manifest_receipt.get("tensor_parameters") or []
+    }
+    scalar_manifest = {
+        row.get("name"): row
+        for row in manifest_receipt.get("host_scalar_parameters") or []
+    }
+    scalar_dtypes = {}
+    seen_inputs = set()
+    for slot_index, slot in enumerate(slots):
+        role, name = slot.get("role"), slot.get("name")
+        if role == "in":
+            input_index = slot.get("input_idx")
+            if isinstance(input_index, bool) or not isinstance(input_index, int) \
+                    or not 0 <= input_index < len(contract_tensors) or input_index in seen_inputs:
+                raise CppExtensionAdapterError(
+                    f"{cid}: slots[{slot_index}] input_idx={input_index!r} 非完整唯一索引")
+            seen_inputs.add(input_index)
+            expected = contract_tensors[input_index]
+            case_item = case_inputs[input_index]
+            if (_multi_item_projection(slot) != _multi_item_projection(expected)
+                    or _multi_item_projection(case_item) != _multi_item_projection(expected)):
+                raise CppExtensionAdapterError(
+                    f"{cid}: in slot/case item 与 parameter_contract[{input_index}] 不一致")
+            static = tensor_manifest.get(("in", name))
+            if not isinstance(static, dict) or any(
+                    static.get(key) != expected.get(key)
+                    for key in ("name", "kind", "binding", "format")):
+                raise CppExtensionAdapterError(
+                    f"{cid}: input {name!r} 与 manifest 逐参数 format/identity 不一致")
+        elif role == "attr" and slot.get("binding") == "host_scalar":
+            expected = next((item for item in inputs if item.get("name") == name), None)
+            if not isinstance(expected, dict) or expected.get("kind") != "scalar" \
+                    or expected.get("binding") != "host_scalar":
+                raise CppExtensionAdapterError(
+                    f"{cid}: host scalar slot {name!r} 未绑定 parameter_contract")
+            if any(slot.get(key) != expected.get(key)
+                   for key in ("name", "kind", "binding", "dtype", "value")) \
+                    or (case.get("attrs") or {}).get(name) != expected.get("value"):
+                raise CppExtensionAdapterError(
+                    f"{cid}: host scalar {name!r} slot/attrs 与 parameter_contract 不一致")
+            static = scalar_manifest.get(name)
+            if not isinstance(static, dict) or expected["dtype"] not in (static.get("dtypes") or []):
+                raise CppExtensionAdapterError(
+                    f"{cid}: host scalar {name!r} dtype 未被 codegen manifest 覆盖")
+            scalar_dtypes[name] = expected["dtype"]
+        elif role == "out":
+            if _multi_item_projection(slot) != _multi_item_projection(output):
+                raise CppExtensionAdapterError(
+                    f"{cid}: out slot 与 parameter_contract.output 不一致")
+            static = tensor_manifest.get(("out", name))
+            if not isinstance(static, dict) or any(
+                    static.get(key) != output.get(key)
+                    for key in ("name", "kind", "binding", "format")):
+                raise CppExtensionAdapterError(
+                    f"{cid}: output {name!r} 与 manifest 逐参数 format/identity 不一致")
+            expected_output = case.get("expected") or {}
+            if (expected_output.get("out_shape") != output.get("shape")
+                    or expected_output.get("compare_dtype") != output.get("dtype")):
+                raise CppExtensionAdapterError(
+                    f"{cid}: expected 输出 shape/dtype 与 parameter_contract.output 不一致")
+    if seen_inputs != set(range(len(contract_tensors))):
+        raise CppExtensionAdapterError(
+            f"{cid}: aclnn_call 未完整覆盖 parameter_contract tensor inputs")
+    return _canonical_sha(contract), scalar_dtypes
+
+
 def build_invocation_plan(caseset, manifest):
     """把 caseset.aclnn_call 绑定到生成 Extension 的 entrypoint；不重推变体。
 
@@ -98,6 +187,19 @@ def build_invocation_plan(caseset, manifest):
     **不因为没执行就变成通过**。
     """
     variants = _variants_by_symbol(manifest)
+    manifest_multi = manifest.get("multi_input_receipt")
+    caseset_multi = caseset.get("multi_input_ledger")
+    if (manifest_multi is None) != (caseset_multi is None):
+        raise CppExtensionAdapterError(
+            "caseset.multi_input_ledger 与 manifest.multi_input_receipt 在场性不一致")
+    multi_contract_sha = None
+    if manifest_multi is not None:
+        if not isinstance(manifest_multi, dict) or not isinstance(caseset_multi, dict):
+            raise CppExtensionAdapterError("multi_input receipt/ledger 须为 object")
+        multi_contract_sha = manifest_multi.get("contract_sha256")
+        if caseset_multi.get("contract_sha256") != multi_contract_sha:
+            raise CppExtensionAdapterError(
+                "caseset 与 Extension manifest 的 multi_input contract 摘要漂移")
     rows, seen, excluded = [], set(), []
     cases = caseset.get("cases")
     if not isinstance(cases, list) or not cases:
@@ -136,26 +238,36 @@ def build_invocation_plan(caseset, manifest):
                 active_attrs.append(name)
             if role == "out":
                 active_outputs.append(name)
+        parameter_contract_sha, scalar_dtypes = (None, {})
+        if manifest_multi is not None:
+            parameter_contract_sha, scalar_dtypes = _validate_case_parameter_contract(
+                case, slots, manifest_multi)
         matches = [
             row for row in candidates
             if row.get("active_attrs") == active_attrs
             and row.get("active_outputs") == active_outputs
+            and (manifest_multi is None
+                 or row.get("host_scalar_dtypes") == scalar_dtypes)
         ]
         if len(matches) != 1:
             raise CppExtensionAdapterError(
                 f"{cid}: symbol={symbol!r}, active attrs={active_attrs!r}, "
                 f"active outputs={active_outputs!r} 匹配 Extension variant 数={len(matches)}")
         variant = matches[0]
-        rows.append({
+        plan_row = {
             "case_id": cid,
             "symbol": symbol,
             "entrypoint": variant["entrypoint"],
             "slots": slots,
-        })
+        }
+        if parameter_contract_sha is not None:
+            plan_row["parameter_contract_sha256"] = parameter_contract_sha
+            plan_row["host_scalar_dtypes"] = dict(variant.get("host_scalar_dtypes") or {})
+        rows.append(plan_row)
     if not rows:
         raise CppExtensionAdapterError(
             "invocation plan 无任何可执行 case（全部被排除）——没有可跑的 DUT 调用，拒")
-    return {
+    plan = {
         "schema": "oprunway.cpp_extension_invocation_plan",
         "schema_version": 1,
         "caseset_sha256": _canonical_sha(caseset),
@@ -165,6 +277,9 @@ def build_invocation_plan(caseset, manifest):
         # 分母台账：谁没进执行计划、为什么。空表 = 一条都没排除。
         "excluded": excluded,
     }
+    if multi_contract_sha is not None:
+        plan["multi_input_contract_sha256"] = multi_contract_sha
+    return plan
 
 
 _PREFLIGHT = "aclnn_preflight.json"
@@ -496,6 +611,29 @@ def _validate_tensor_format_receipt(manifest, receipt):
             "receipt.tensor_format_receipt 未原样镜像 manifest 的生效 format")
 
 
+def _validate_multi_input_receipt(manifest, receipt):
+    """多输入逐参数契约只由 codegen 生成，driver 必须逐字镜像。"""
+    expected = manifest.get("multi_input_receipt")
+    recorded = receipt.get("multi_input_receipt")
+    if expected is None:
+        if "multi_input_receipt" in receipt:
+            raise CppExtensionAdapterError(
+                "receipt 凭空声明 multi_input_receipt，但 manifest 无对应事实")
+        return
+    if not isinstance(expected, dict) \
+            or expected.get("schema") != cpp_extension_codegen.MULTI_INPUT_RECEIPT_SCHEMA \
+            or expected.get("schema_version") != cpp_extension_codegen.MULTI_INPUT_RECEIPT_VERSION:
+        raise CppExtensionAdapterError("manifest.multi_input_receipt schema 非法")
+    digest = expected.get("contract_sha256")
+    if not isinstance(digest, str) or len(digest) != 64 \
+            or any(char not in "0123456789abcdef" for char in digest):
+        raise CppExtensionAdapterError(
+            "manifest.multi_input_receipt.contract_sha256 非小写 sha256")
+    if recorded != expected:
+        raise CppExtensionAdapterError(
+            "receipt.multi_input_receipt 未原样镜像 manifest 的逐参数契约")
+
+
 def _validate_cann_runtime(runtime):
     """独立复算 ACL runtime probe；unknown/invalid 保留给三级门作 BLOCKED 判定。"""
     observation = runtime.get("cann") if isinstance(runtime, dict) else None
@@ -549,6 +687,7 @@ def validate_receipt(work, caseset):
                 f"receipt.bindings.{key} 漂移：期望 {value}，得 {bindings.get(key)!r}")
 
     _validate_tensor_format_receipt(manifest, receipt)
+    _validate_multi_input_receipt(manifest, receipt)
 
     for key, rec in (manifest.get("files") or {}).items():
         if not isinstance(rec, dict):
@@ -628,6 +767,38 @@ def source_provenance_summary(receipt):
         raise CppExtensionAdapterError(f"receipt.vendor.build_receipt: {ex}") from ex
 
 
+def _bind_multi_input_evidence(caseset, evidence, receipt):
+    """把逐参数执行身份原样带进 evidence；只绑定事实，不参与 pass/fail。"""
+    multi = receipt.get("multi_input_receipt") if isinstance(receipt, dict) else None
+    if multi is None:
+        return evidence
+    contract_sha = multi.get("contract_sha256")
+    by_id = {case.get("id"): case for case in caseset.get("cases") or []}
+    seen = set()
+    for row in evidence:
+        cid = row.get("case_id")
+        case = by_id.get(cid)
+        if not isinstance(case, dict):
+            raise CppExtensionAdapterError(
+                f"evidence case_id={cid!r} 不在 multi_input caseset")
+        parameter_contract = case.get("parameter_contract")
+        if not isinstance(parameter_contract, dict):
+            raise CppExtensionAdapterError(
+                f"{cid}: multi_input evidence 缺 caseset parameter_contract")
+        row["multi_input_contract_sha256"] = contract_sha
+        row["parameter_contract_sha256"] = _canonical_sha(parameter_contract)
+        row["parameter_contract"] = parameter_contract
+        seen.add(cid)
+    # golden_unavailable 可以没有执行结果，但 build_multi_output_evidence 仍应给一条结构化状态；
+    # 若将来消费方改变这一点，这里不能把缺 evidence 静默当完整。
+    expected_ids = {case.get("id") for case in caseset.get("cases") or []}
+    if seen != expected_ids:
+        raise CppExtensionAdapterError(
+            f"multi_input evidence case 集漂移：缺 {sorted(expected_ids - seen)}，"
+            f"多 {sorted(seen - expected_ids)}")
+    return evidence
+
+
 def _driver_argv():
     raw = os.environ.get("OPRUNWAY_CPP_EXTENSION_DRIVER_JSON")
     if not raw:
@@ -665,6 +836,7 @@ def run_cpp_extension(caseset, work, defect_cases=None):
     import repo_adapter as RA
     evidence = RA.build_multi_output_evidence(
         caseset, work, os.path.join(work, _OUT))
+    _bind_multi_input_evidence(caseset, evidence, receipt)
     perf_plan, skipped = _write_perf_plan(caseset, work, evidence, receipt)
     perf_collection = None
     if perf_plan is not None:
@@ -682,6 +854,7 @@ def run_cpp_extension(caseset, work, defect_cases=None):
         perf_by_case = PM.build_custom_perf_map(records, skipped=skipped)
         evidence = RA.build_multi_output_evidence(
             caseset, work, os.path.join(work, _OUT), perf_by_case=perf_by_case)
+        _bind_multi_input_evidence(caseset, evidence, receipt)
         if not perf_mode.is_measure_only(perf_plan.get("mode", perf_mode.DEFAULT_MODE)):
             baseline = PM.build_baseline_document(
                 records, op=caseset.get("op"),
@@ -756,6 +929,7 @@ def run_cpp_extension_precision_only(caseset, work):
     import repo_adapter as RA
     evidence = RA.build_multi_output_evidence(
         caseset, root, os.path.join(root, _OUT))
+    _bind_multi_input_evidence(caseset, evidence, receipt)
     digest = _canonical_sha(receipt)
     for row in evidence:
         row["cpp_extension_receipt_sha256"] = digest

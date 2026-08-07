@@ -49,6 +49,8 @@ import os
 import re
 from pathlib import Path
 
+import multi_input_contract
+
 
 class CppExtensionCodegenError(ValueError):
     pass
@@ -69,6 +71,22 @@ _ATTR_SCHEMA_TYPES = {
     "int32": "int",
     "float32": "float",
     "float64": "float",
+}
+
+# host scalar 是 native ``aclScalar*``，不能沿用 Python float → C++ double 的 wrapped-number
+# 隐式语义。每个生成 entrypoint 由 profile 钉住一个逻辑 dtype，再在 C++ 侧显式窄化成相应
+# ``at::Scalar``；ConvertType 由此创建 dtype 正确的 aclScalar。
+_HOST_SCALAR_CPP_CASTS = {
+    "bool": ("bool", "toBool"),
+    "uint8": ("uint8_t", "toLong"),
+    "int8": ("int8_t", "toLong"),
+    "int16": ("int16_t", "toLong"),
+    "int32": ("int32_t", "toLong"),
+    "int64": ("int64_t", "toLong"),
+    "float16": ("at::Half", "toDouble"),
+    "bfloat16": ("at::BFloat16", "toDouble"),
+    "float32": ("float", "toDouble"),
+    "float64": ("double", "toDouble"),
 }
 
 #: 数组属性的受控能力名。与 `gen_cases._ATTR_ARRAY_CTYPE` **同一个词**（`aclIntArray *` 形参）。
@@ -93,7 +111,11 @@ STAGE2_SOURCE_DEFAULT = "default_unverified"     # 两处都没说 → 沿用历
 #: 生成代码实际走的派发分支。
 DISPATCH_MACRO = "exec_npu_cmd_ext_macro"
 DISPATCH_STANDARD_ND = "generated_standard_two_stage_nd"
+DISPATCH_STANDARD_PARAMETER_CONTRACT = "generated_standard_two_stage_parameter_contract"
 DISPATCH_EXTENDED = "generated_extended_two_stage"
+
+MULTI_INPUT_RECEIPT_SCHEMA = "oprunway.cpp_extension_multi_input_receipt"
+MULTI_INPUT_RECEIPT_VERSION = 1
 
 #: 「本次 stage2 形态没有任何 header 级证据」的机读挂账。
 DEGRADATION_STAGE2_UNVERIFIED = "stage2_form_unverified"
@@ -160,6 +182,22 @@ def _attr_type(param):
     codegen 本来就只有 spec，靠这条得出与 caseset 里 slot `ctype` 相同的答案。
     """
     name = param.get("name")
+    if param.get("binding") == multi_input_contract.BINDING_HOST_SCALAR:
+        if param.get("kind") != multi_input_contract.KIND_SCALAR:
+            raise CppExtensionCodegenError(
+                f"host_scalar attr {name!r} 必须显式声明 kind='scalar'")
+        dtypes = param.get("dtype")
+        if not isinstance(dtypes, list) or not dtypes \
+                or len(dtypes) != len(set(dtypes)) \
+                or any(dtype not in _HOST_SCALAR_CPP_CASTS for dtype in dtypes):
+            raise CppExtensionCodegenError(
+                f"host_scalar attr {name!r} dtype 须为无重复的受控标量集合 "
+                f"{sorted(_HOST_SCALAR_CPP_CASTS)}，得 {dtypes!r}")
+        if "default" in param:
+            raise CppExtensionCodegenError(
+                f"host_scalar attr {name!r} 的值/dtype 必须由 multi_input profile 给出，"
+                "不得再声明 default 形成第二份真相")
+        return "const at::Scalar&", "Scalar", "scalar"
     default = param.get("default")
     if _is_int_array(default):
         return _ATTR_ARRAY_CPP_TYPE, _ATTR_ARRAY_SCHEMA_TYPE, _ATTR_ARRAY_CTYPE
@@ -292,8 +330,62 @@ def tensor_format_receipt(tensor_format, tensor_format_source):
         f"tensor format={tensor_format!r} 无可达的生成路径（fail-closed）")
 
 
+def _host_scalar_combinations(bundle, active_names):
+    """按 profile 顺序取 active host scalar dtype 组合；去重但不排序改写任务书顺序。"""
+    active_names = [name for name in active_names]
+    if not active_names:
+        return [{}]
+    combinations, seen = [], set()
+    for profile in bundle["profiles"]:
+        by_name = {item["name"]: item for item in profile["inputs"]}
+        try:
+            combo = {name: by_name[name]["dtype"] for name in active_names}
+        except KeyError as ex:
+            raise CppExtensionCodegenError(
+                f"profile {profile['profile_id']!r} 缺 active host scalar {ex.args[0]!r}") from ex
+        key = tuple((name, combo[name]) for name in active_names)
+        if key not in seen:
+            seen.add(key)
+            combinations.append(combo)
+    if not combinations:
+        raise CppExtensionCodegenError("host scalar dtype 组合为空，无法生成 entrypoint")
+    return combinations
+
+
+def _multi_input_receipt(bundle, rows):
+    tensor_parameters = [
+        {"name": row["name"], "io": row["io"], "kind": row["kind"],
+         "binding": row["binding"], "format": row["tensor_format"]}
+        for row in rows if row["io"] in ("in", "out")
+    ]
+    scalar_names = [
+        row["name"] for row in rows
+        if row["io"] == "attr"
+        and row.get("binding") == multi_input_contract.BINDING_HOST_SCALAR
+    ]
+    host_scalar_parameters = []
+    for name in scalar_names:
+        dtypes = []
+        for profile in bundle["profiles"]:
+            item = next(value for value in profile["inputs"] if value["name"] == name)
+            if item["dtype"] not in dtypes:
+                dtypes.append(item["dtype"])
+        host_scalar_parameters.append({
+            "name": name, "io": "attr", "kind": multi_input_contract.KIND_SCALAR,
+            "binding": multi_input_contract.BINDING_HOST_SCALAR, "dtypes": dtypes,
+        })
+    return {
+        "schema": MULTI_INPUT_RECEIPT_SCHEMA,
+        "schema_version": MULTI_INPUT_RECEIPT_VERSION,
+        "contract_sha256": bundle["sha256"],
+        "tensor_parameters": tensor_parameters,
+        "host_scalar_parameters": host_scalar_parameters,
+        "profile_count": len(bundle["profiles"]),
+    }
+
+
 def _contract(spec, preflight_table=None,
-              tensor_format=TENSOR_FORMAT_TORCH_NPU_DEFAULT):
+              tensor_format=TENSOR_FORMAT_TORCH_NPU_DEFAULT, multi_input_bundle=None):
     # 形态断言经全仓唯一缺省真源（P5）。**这不是把门放宽**：`spec_runner_form` 只在**键缺席**时
     # 吃缺省，显式写成 `cpp` / `aclnn_py` / null / `""` 一律照旧当场拒。键缺席的 spec 现在全仓
     # 一致地解析为 `cpp_extension`（run_workflow 据此派 mode、gen_cases 据此要 `call_variants`），
@@ -309,6 +401,10 @@ def _contract(spec, preflight_table=None,
         raise CppExtensionCodegenError("spec.params 须为非空列表")
     if not isinstance(variants, list) or not variants:
         raise CppExtensionCodegenError("runner_form=cpp_extension 时 call_variants 须为非空列表")
+    if multi_input_bundle is not None and "aclnn_tensor_format" in spec:
+        raise CppExtensionCodegenError(
+            "multi_input_contract 已逐参数声明 tensor format；禁止再声明全局 "
+            "spec.aclnn_tensor_format 与逐参数真相竞争")
 
     seen = set()
     rows = []
@@ -325,6 +421,14 @@ def _contract(spec, preflight_table=None,
         row = {"name": name, "io": io}
         if io == "attr":
             row["cpp_type"], row["schema_type"], row["attr_ctype"] = _attr_type(p)
+        if multi_input_bundle is not None:
+            if io in ("in", "out"):
+                row.update({
+                    "kind": p.get("kind"), "binding": p.get("binding"),
+                    "tensor_format": p.get("format"),
+                })
+            elif p.get("binding") == multi_input_contract.BINDING_HOST_SCALAR:
+                row.update({"kind": p.get("kind"), "binding": p.get("binding")})
         rows.append(row)
 
     in_names = [p["name"] for p in rows if p["io"] == "in"]
@@ -357,28 +461,51 @@ def _contract(spec, preflight_table=None,
             raise CppExtensionCodegenError(
                 f"call_variants[{i}].active_outputs={active!r} 须为 out 名集 {out_names!r} 的无重复子集")
         stage2_form, stage2_source = _resolve_stage2(v, i, symbol, preflight_table)
-        entry = {
-            "index": i,
-            "symbol": symbol,
-            "active_attrs": list(active_attrs),
-            "active_outputs": list(active),
-            "entrypoint": f"invoke_v{i}",
-            "stage2_form": stage2_form,
-            "stage2_form_source": stage2_source,
-            "dispatch": (
-                DISPATCH_STANDARD_ND
+        active_scalar_names = [
+            row["name"] for row in rows
+            if row["io"] == "attr" and row["name"] in active_attrs
+            and row.get("binding") == multi_input_contract.BINDING_HOST_SCALAR
+        ]
+        scalar_combinations = (
+            _host_scalar_combinations(multi_input_bundle, active_scalar_names)
+            if multi_input_bundle is not None else [{}])
+        for combo_index, combo in enumerate(scalar_combinations):
+            entrypoint = (
+                f"invoke_v{i}_s{combo_index}" if active_scalar_names else f"invoke_v{i}")
+            variant_params = _variant_params(rows, {"active_attrs": active_attrs})
+            explicit_parameter_conversion = (
+                multi_input_bundle is not None and any(
+                    p.get("tensor_format") == TENSOR_FORMAT_ND
+                    or p.get("binding") == multi_input_contract.BINDING_HOST_SCALAR
+                    for p in variant_params)
+            )
+            dispatch = (
+                DISPATCH_STANDARD_PARAMETER_CONTRACT
+                if (stage2_form == STAGE2_STANDARD and explicit_parameter_conversion)
+                else DISPATCH_STANDARD_ND
                 if (stage2_form == STAGE2_STANDARD
                     and tensor_format == TENSOR_FORMAT_ND)
                 else DISPATCH_MACRO if stage2_form == STAGE2_STANDARD
-                else DISPATCH_EXTENDED),
-        }
-        # 真机 native 调用的**实参个数**：standard 恒 4；extended = 框架三参 + 该变体
-        # 实际出现的 stage1 实参 + stream。记下来，别让读收据的人默认成 4 参
-        # （与 `preflight_aclnn._stage2_record` 的 `stage2_call_arity` 同一算法）。
-        entry["stage2_call_arity"] = (
-            4 if stage2_form == STAGE2_STANDARD
-            else 3 + len(_variant_params(rows, entry)) + 1)
-        normalized.append(entry)
+                else DISPATCH_EXTENDED)
+            entry = {
+                "index": i,
+                "symbol": symbol,
+                "active_attrs": list(active_attrs),
+                "active_outputs": list(active),
+                # 顺序刻意保持 legacy manifest 字节：entrypoint 在 stage2 字段之前。
+                "entrypoint": entrypoint,
+                "stage2_form": stage2_form,
+                "stage2_form_source": stage2_source,
+                "dispatch": dispatch,
+            }
+            if multi_input_bundle is not None:
+                entry["host_scalar_dtypes"] = combo
+            # 真机 native 调用的**实参个数**：standard 恒 4；extended = 框架三参 + 该变体
+            # 实际出现的 stage1 实参 + stream。记下来，别让读收据的人默认成 4 参。
+            entry["stage2_call_arity"] = (
+                4 if stage2_form == STAGE2_STANDARD
+                else 3 + len(variant_params) + 1)
+            normalized.append(entry)
     return rows, normalized
 
 
@@ -456,16 +583,35 @@ inline aclTensor *{_ND_CONVERTER}(const c10::optional<at::Tensor> &opt_tensor)
 }}  // namespace"""
 
 
-def _convert_expr(param, tensor_format):
-    """该实参在 stage1 转换里的表达式：张量按声明格式走，其余一律官方 `ConvertType`。"""
-    if param["io"] in ("in", "out") and tensor_format == TENSOR_FORMAT_ND:
+def _typed_host_scalar_expr(name, dtype):
+    cast = _HOST_SCALAR_CPP_CASTS.get(dtype)
+    if cast is None:
+        raise CppExtensionCodegenError(
+            f"host scalar {name!r} dtype={dtype!r} 无受控 C++ 窄化表达式")
+    cpp_type, extractor = cast
+    return (
+        f"ConvertType(at::Scalar(static_cast<{cpp_type}>("
+        f"{name}.{extractor}())))")
+
+
+def _convert_expr(param, tensor_format, host_scalar_dtypes=None):
+    """stage1 逐参数转换：tensor format 与 host scalar dtype 都来自显式 contract。"""
+    if param.get("binding") == multi_input_contract.BINDING_HOST_SCALAR:
+        dtype = (host_scalar_dtypes or {}).get(param["name"])
+        if dtype is None:
+            raise CppExtensionCodegenError(
+                f"host scalar {param['name']!r} 缺 entrypoint dtype 绑定")
+        return _typed_host_scalar_expr(param["name"], dtype)
+    effective_format = param.get("tensor_format", tensor_format)
+    if param["io"] in ("in", "out") and effective_format == TENSOR_FORMAT_ND:
         return f"{_ND_CONVERTER}({param['name']})"
     return f"ConvertType({param['name']})"
 
 
 def _render_generated_two_stage_body(
         variant, call_args, arg_count, first_input, *, variant_params=None,
-        tensor_format=TENSOR_FORMAT_TORCH_NPU_DEFAULT, standard_abi=False):
+        tensor_format=TENSOR_FORMAT_TORCH_NPU_DEFAULT, standard_abi=False,
+        explicit_conversion=False):
     """需自定义 stage1 转换时，按官方 helper 手写两段式派发。
 
     extended 为什么不能用 ``EXEC_NPU_CMD_EXT``：宏的执行段最终落到
@@ -508,12 +654,13 @@ def _render_generated_two_stage_body(
     picks = ",\n        ".join(
         f"std::get<{i}>(converted_params)" for i in range(arg_count))
     symbol = f"aclnn{variant['symbol']}"
-    if tensor_format == TENSOR_FORMAT_ND:
+    if explicit_conversion:
         # 逐槽显式转换：张量走生成的 ND 转换器，其余原样交给官方 ConvertType。
         # 元组布局与 `ConvertTypes(...)` 逐项相同（含末两项 stage1 专有出参），故下面
         # picks / ReleaseConvertTypes 一个字都不用改。
         exprs = ",\n        ".join(
-            _convert_expr(p, tensor_format) for p in (variant_params or []))
+            _convert_expr(p, tensor_format, variant.get("host_scalar_dtypes"))
+            for p in (variant_params or []))
         convert_line = (f"""auto converted_params = std::make_tuple(
         {exprs},
         workspace_size_addr, executor_addr);""")
@@ -587,29 +734,33 @@ def _render_cpp(namespace, params, variants,
     first_input = next(p["name"] for p in params if p["io"] == "in")
     for v in variants:
         variant_params = _variant_params(params, v)
+        explicit_conversion = (
+            tensor_format == TENSOR_FORMAT_ND
+            or any(
+                p.get("tensor_format") == TENSOR_FORMAT_ND
+                or p.get("binding") == multi_input_contract.BINDING_HOST_SCALAR
+                for p in variant_params)
+        )
         active = set(v["active_outputs"])
         args = ", ".join(_cpp_arg(p, active) for p in variant_params)
         call_args = ", ".join(p["name"] for p in variant_params)
         returned = ", ".join(v["active_outputs"])
         if v["stage2_form"] == STAGE2_STANDARD:
-            if tensor_format == TENSOR_FORMAT_TORCH_NPU_DEFAULT:
+            if not explicit_conversion:
                 # 未命中新能力：继续走官方宏，生成字节与 N2 前相同。
                 body = _render_standard_body(v, call_args)
-            elif tensor_format == TENSOR_FORMAT_ND:
-                # 宏内的 ConvertTypes 无法注入 format；复用 extended 已验证的手写
-                # 两段式骨架完成 stage1 ND 转换，但 phase-2 元组仍严格四参。
+            else:
+                # 宏内的 ConvertTypes 无法注入逐参数 format / typed host scalar；复用 extended
+                # 已验证的手写两段式骨架，phase-2 元组仍严格四参。
                 body = _render_generated_two_stage_body(
                     v, call_args, len(variant_params), first_input,
                     variant_params=variant_params, tensor_format=tensor_format,
-                    standard_abi=True)
-            else:
-                raise CppExtensionCodegenError(
-                    f"call_variants[{v['index']}] 的 standard stage2 无法施加 "
-                    f"tensor format={tensor_format!r}（fail-closed）")
+                    standard_abi=True, explicit_conversion=True)
         elif v["stage2_form"] == STAGE2_EXTENDED:
             body = _render_generated_two_stage_body(
                 v, call_args, len(variant_params), first_input,
-                variant_params=variant_params, tensor_format=tensor_format)
+                variant_params=variant_params, tensor_format=tensor_format,
+                explicit_conversion=explicit_conversion)
         else:
             # `_resolve_stage2` 已把词表外的值拦死；这里是最后一道，防将来有人扩词表却忘了改这。
             raise CppExtensionCodegenError(
@@ -624,7 +775,11 @@ def _render_cpp(namespace, params, variants,
         schema_args = ", ".join(_schema_arg(p, active) for p in variant_params)
         schemas.append(f'    m.def("{v["entrypoint"]}({schema_args}) -> Tensor[]");')
         impls.append(f'    m.impl("{v["entrypoint"]}", &{v["entrypoint"]});')
-    prelude = ([_render_nd_converter()] if tensor_format == TENSOR_FORMAT_ND else [])
+    needs_nd_converter = (
+        tensor_format == TENSOR_FORMAT_ND
+        or any(p.get("tensor_format") == TENSOR_FORMAT_ND for p in params)
+    )
+    prelude = ([_render_nd_converter()] if needs_nd_converter else [])
     return f"""// Generated by OpRunway. Do not hand-edit.
 #include <tuple>
 #include <vector>
@@ -689,9 +844,22 @@ def generate(spec, out_dir, preflight=None):
     digest = _canonical_digest(spec)
     preflight_table = (None if preflight is None
                        else _preflight_stage2_by_symbol(preflight, digest))
-    tensor_format, tensor_format_source = _resolve_tensor_format(spec)
-    format_receipt = tensor_format_receipt(tensor_format, tensor_format_source)
-    params, variants = _contract(spec, preflight_table, tensor_format)
+    try:
+        multi_input_bundle = multi_input_contract.resolve_spec_contract(spec)
+    except multi_input_contract.MultiInputContractError as ex:
+        raise CppExtensionCodegenError(
+            f"spec.multi_input_contract 非法：{ex}") from ex
+    if multi_input_bundle is None:
+        tensor_format, tensor_format_source = _resolve_tensor_format(spec)
+        format_receipt = tensor_format_receipt(tensor_format, tensor_format_source)
+    else:
+        # 逐参数 format 已由 multi_input_contract 解析；这个局部默认值只供未命中 ND 的
+        # `_convert_expr` 回落官方转换，绝不写成全局 manifest 事实。
+        tensor_format = TENSOR_FORMAT_TORCH_NPU_DEFAULT
+        tensor_format_source = None
+        format_receipt = None
+    params, variants = _contract(
+        spec, preflight_table, tensor_format, multi_input_bundle)
     namespace = f"oprunway_{digest[:16]}"
     module_name = f"{namespace}_lib"
     out = Path(out_dir)
@@ -709,10 +877,10 @@ def generate(spec, out_dir, preflight=None):
         "spec_sha256": digest,
         "namespace": namespace,
         "module_name": module_name,
-        # 本次张量按哪种 ACL 存储格式建：`torch_npu_rank_default` = op-plugin 按 rank 猜
-        # （历史行为）；`nd` = 按 spec 声明的公共 ND。来源一并落盘，别让读收据的人以为「默认就对」。
-        "tensor_acl_format": tensor_format,
-        "tensor_acl_format_source": tensor_format_source,
+        **({"tensor_acl_format": tensor_format,
+            "tensor_acl_format_source": tensor_format_source}
+           if multi_input_bundle is None else {
+               "multi_input_receipt": _multi_input_receipt(multi_input_bundle, params)}),
         "official_pattern": {
             "source": "Ascend/op-plugin examples/cpp_extension_base",
             "ascend_pytorch_master_commit": "c255c0003f1ddff0e34190e417dc29b1c6f566a3",

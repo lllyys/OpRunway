@@ -1198,16 +1198,13 @@ class InputRankTest(_FakeOpCase):
         cs = GC.gen_cases(_fake_spec("FakeNoRank", case_target=30), self.work())
         self.assertGreater(len({len(c["inputs"][0]["shape"]) for c in cs["cases"]}), 1)
 
-    def test_rank_with_no_legal_shape_fail_closed(self):
-        """阶梯覆盖不到的 rank → 过滤后无合法常规 shape → **报错**，绝不产 0 条常规用例冒充验收。
-
-        ⚠ 例子用 **rank=6**，不是 5：2026-07-23 起 `_EXT_RANK_SHAPES` 已补 5 维
-        （UpsampleNearest3d 的 (N,C,D,H,W) 要它）。测试的**意图**没变——变的只是「哪个 rank 还没覆盖」。
-        6 仍 ≤ `_MAX_RANK`(8)，所以走的确实是「取值合法但阶梯给不出 shape」这条路，不是取值校验。"""
+    def test_rank6_now_gets_a_generic_witness(self):
+        """显式声明的合法 rank 不得因内置阶梯缺档被拒；补一条通用小 shape 见证。"""
         self.place("FakeRank6", _BODY_ELEMENTWISE)
-        with self.assertRaises(ValueError) as cm:
-            GC.gen_cases(_fake_spec("FakeRank6", rank=6), self.work())
-        self.assertIn("rank", str(cm.exception).lower())
+        cs = GC.gen_cases(_fake_spec("FakeRank6", rank=6, case_target=10), self.work())
+        self.assertTrue(cs["cases"])
+        self.assertTrue(all(len(c["inputs"][0]["shape"]) == 6 for c in cs["cases"]))
+        self.assertTrue(any("常规" in c.get("tags", []) for c in cs["cases"]))
 
     def test_rank5_now_covered_by_ext_ladder(self):
         """对照：rank=5 **现在能跑**（`_EXT_RANK_SHAPES` 按需并入），证补阶梯真生效。"""
@@ -1228,15 +1225,16 @@ class InputRankTest(_FakeOpCase):
         self.assertFalse(ranks - {0, 1, 2, 3, 4},
                          f"无 rank 约束的算子出现了 >4 维 shape：{sorted(ranks)}")
 
-    def test_rank_guard_fires_in_dry_run(self):
-        """与 arity 守卫同一条纪律：rank 不可行要在 **CP-B 的 dry-run** 就拦下，不拖到正式生成。"""
-        with self.assertRaises(ValueError):
-            GC._dry_run(_fake_spec("FakeRankDry", rank=6))
+    def test_rank6_witness_is_visible_in_dry_run(self):
+        """CP-B 与正式生成共用阶梯：dry-run 也必须看到 rank6 见证。"""
+        ledger = GC._dry_run(_fake_spec("FakeRankDry", rank=6, case_target=10))
+        self.assertEqual(ledger["planning"]["input_ranks"], [6])
+        self.assertIn("2x2x2x2x2x2", ledger["summary"]["shapes"])
 
     def test_illegal_rank_value_rejected(self):
-        """rank 取值非法（0 / 负 / 超上限 / 非整数 / 空列表）→ fail-fast。"""
+        """rank 取值非法（负 / 超上限 / 非整数 / 空列表）→ fail-fast。"""
         self.place("FakeRankBad", _BODY_ELEMENTWISE)
-        for bad in (0, -1, 99, 2.5, True, "4", []):
+        for bad in (-1, 99, 2.5, True, "4", []):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 GC.gen_cases(_fake_spec("FakeRankBad", rank=bad), self.work())
 
@@ -1258,6 +1256,9 @@ class InputRankTest(_FakeOpCase):
         self.assertEqual(GC._fit_rank((1024, 1024), frozenset({1})), (1024 * 1024,))
         self.assertEqual(GC._fit_rank((0,), frozenset({3})), (1, 1, 0))
         self.assertEqual(GC._fit_rank((2, 3, 4), frozenset({2})), (6, 4))
+        self.assertEqual(GC._fit_rank((1,), frozenset({0})), ())
+        with self.assertRaisesRegex(ValueError, "不能.*rank0"):
+            GC._fit_rank((0,), frozenset({0}))
 
 
 # ==================================================================================================
