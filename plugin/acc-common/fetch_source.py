@@ -278,8 +278,15 @@ def _key_file_candidates(paths, target_dir):
     """按同一优先级口径列出关键文件候选 → (一等接口头列表, 去重保序的候选列表)。
 
     `--pr` 与 `--pr-snapshot` **共用这一份口径**，免得两条取材路各自漂移。
-    顺序即优先级；**aclnn 接口头不进任何截断档**（见 `_aclnn_headers` 的理由），
-    后两档仍各自设上限（防某些 PR 改上百个文件时把请求数打爆）。
+    顺序即优先级；**aclnn 接口头、example 和 `*_def.cpp` 不进任何截断档**：
+
+    - 一个目录可同时承载 TensorTensor / TensorScalar / inplace 等多个 overload，
+      任务书点名的 example 若排在第 7 个之后，截断就会让接口身份由文件名排序决定；
+    - `*_def.cpp` 是 dtype / 注册能力的对照依据，也不得被普通 `op_host`
+      上下文文件挤掉。
+
+    只有其余 `op_host` 上下文仍保留 4 份上限，防某些 PR 改上百个文件时
+    把请求数打爆。两条取材通路共用此函数，故不会一边完整、一边截断。
     """
     hdrs = _aclnn_headers(paths, target_dir)
     # audit#13：example 与 `_def.cpp`/`op_host` 两档以前从**整个 PR** 里挑，不限 `target_dir`。
@@ -287,13 +294,15 @@ def _key_file_candidates(paths, target_dir):
     # 下游据它反推签名、dtype、调用写法——验的就不是这个算子了。三档统一先按目标目录过滤。
     pref = target_dir.rstrip("/") + "/"
     scoped = [p for p in paths if str(p).startswith(pref)]
-    want = (hdrs
-            + [p for p in scoped if "/examples/" in p and p.endswith(".cpp")][:6]
-            + [p for p in scoped if p.endswith("_def.cpp") or "/op_host/" in p][:4])
+    examples = [p for p in scoped if "/examples/" in p and p.endswith(".cpp")]
+    op_defs = [p for p in scoped if p.endswith("_def.cpp")]
+    context = [p for p in scoped
+               if "/op_host/" in p and p not in hdrs and p not in op_defs][:4]
+    want = hdrs + examples + op_defs + context
     return hdrs, list(dict.fromkeys(want))     # 去重保序：接口头也落在 `/op_host/` 档里，别重复请求
 
 
-def _apply_key_file_facts(facts, key, key_ref, hdrs):
+def _apply_key_file_facts(facts, key, key_ref, hdrs, taskdoc_apis=None):
     """把关键文件与接口形态派生事实写进 facts —— `--pr` 与 `--pr-snapshot` 共用。"""
     facts["key_files"] = key
     facts["key_files_ref"] = key_ref  # 每个关键文件实际取自哪个 ref（供下游判新鲜度）
@@ -313,8 +322,41 @@ def _apply_key_file_facts(facts, key, key_ref, hdrs):
             "**aclnn 路由的第一依据缺席**：`call_variants` 的 symbol/形参顺序、多输出 out_role、runner arity "
             "都不得据 example 或算子名反推。要么该 PR 本就没改接口头（去 base 仓同目录取），要么取材失败——"
             "两种都须核实后再抽 spec。")
+    declared = list(taskdoc_apis or [])
+    facts["taskdoc_aclnn_apis"] = declared
     # 批 6b B-core：据 key_files 机器判接口形态 + 抽真实 aclnn 入口（供 runner 锚定、scope gate 消费）。
-    _ik, _entry, _ik_note = _detect_interface_kind(key)
+    # N5：任务书若点名 API，则不再用「路径排序后第一个两段式调用」代替身份选择；
+    # 必须逐 API 与对外 header + 唯一 example 精确交叉。任务书未声明 API 时才保留
+    # legacy 结构探测（兼容不在正式 main 通路中的旧调用者）。
+    if declared:
+        mapping = _resolve_taskdoc_api_mapping(key, facts["aclnn_headers"], declared)
+        facts["api_mapping"] = mapping
+        facts["aclnn_entries"] = list(mapping["matched_apis"])
+        if mapping["status"] == "exact":
+            _entries = facts["aclnn_entries"]
+            _ik = ("aclnn_2stage_distributed"
+                   if any(_HCCL_RE.search(_strip_c_comments(c)) for c in key.values())
+                   else "aclnn_2stage")
+            # 旧字段只表达单入口：多 API 时故意不挑「第一个」，
+            # 完整身份只认 aclnn_entries / api_mapping.targets。
+            _entry = _entries[0] if len(_entries) == 1 else None
+            _ik_note = (
+                f"任务书 API ↔ header/example 精确交叉通过：{_entries}；"
+                + ("含 HCCL 多卡通信，归类为分布式两段式。"
+                   if _ik.endswith("distributed") else "归类为标准 aclnn 两段式。"))
+        else:
+            _ik, _entry = "unknown", None
+            _ik_note = (
+                f"任务书 API ↔ header/example 精确交叉失败（{mapping['status']}）："
+                f"{mapping['issues']}。已 fail-closed，不按 example 路径排序改选其它 overload。")
+            facts.setdefault("blocked", "taskdoc_api_mapping_" + mapping["status"])
+    else:
+        _ik, _entry, _ik_note = _detect_interface_kind(key)
+        facts["api_mapping"] = {
+            "status": "taskdoc_api_not_declared", "declared_apis": [],
+            "matched_apis": [_entry] if _entry else [], "targets": [], "issues": [],
+        }
+        facts["aclnn_entries"] = [_entry] if _entry else []
     facts["interface_kind"], facts["aclnn_entry"] = _ik, _entry
     facts["notes"].append(f"接口形态(批6b探测)：{_ik_note}")
     return facts
@@ -378,6 +420,101 @@ def _parse_pr_url(pr_url):
 _ACLNN_WS_RE = re.compile(r"\baclnn(\w+)GetWorkspaceSize\s*\(")
 _HCCL_RE = re.compile(r'hccl/hccl\.h|HcclComm|HcclGetCommName|\brankId\b')
 _GEIR_RE = re.compile(r"ge::Session|->\s*AddGraph\s*\(|->\s*RunGraph\s*\(")
+# 任务书里只抽 C API 形态的标识符；负向前瞻堵住 URL/文件名里
+# `aclnnFoo_task_doc.md` 这类文本被截成假函数名。
+_TASKDOC_ACLNN_API_RE = re.compile(
+    r"\baclnn[A-Z][A-Za-z0-9]*(?:GetWorkspaceSize)?(?![A-Za-z0-9_])")
+_TASKDOC_NON_ENTRY_IDENTIFIERS = frozenset({"aclnnStatus"})
+
+
+def _strip_c_comments(content):
+    """C/C++ 文本去注释；接口证据不认被注释掉的声明/调用。"""
+    text = re.sub(r"/\*.*?\*/", " ", content or "", flags=re.S)
+    return re.sub(r"//[^\n]*", " ", text)
+
+
+def _extract_taskdoc_aclnn_apis(content):
+    """从任务书正文抽出点名的 aclnn API 基名，去重保出现顺序。
+
+    `GetWorkspaceSize` 是同一两段式 API 的第一段，归一到执行段基名。
+    不做 snake/camel 模糊匹配：任务书点名 TensorTensor 就不能命中
+    TensorScalar / inplace。
+    """
+    out = []
+    for match in _TASKDOC_ACLNN_API_RE.finditer(content or ""):
+        api = match.group(0)
+        if api.endswith("GetWorkspaceSize"):
+            api = api[:-len("GetWorkspaceSize")]
+        if api in _TASKDOC_NON_ENTRY_IDENTIFIERS or api in out:
+            continue
+        out.append(api)
+    return out
+
+
+def _paired_two_stage_entries(content):
+    """一份 C/C++ 文本中真实配对的两段式 API，去重保出现顺序。"""
+    text = _strip_c_comments(content)
+    out = []
+    for match in _ACLNN_WS_RE.finditer(text):
+        entry = "aclnn" + match.group(1)
+        exec_segment = re.sub(r"\baclnn\w+GetWorkspaceSize\s*\(", "", text)
+        if re.search(r"\b" + re.escape(entry) + r"\s*\(", exec_segment) and entry not in out:
+            out.append(entry)
+    return out
+
+
+def _entry_paths(key_files, *, paths):
+    """把指定文件集里的两段式 entry 反向索引到证据路径。"""
+    out = {}
+    for path in paths:
+        for entry in _paired_two_stage_entries((key_files or {}).get(path, "")):
+            out.setdefault(entry, []).append(path)
+    return out
+
+
+def _resolve_taskdoc_api_mapping(key_files, aclnn_headers, declared_apis):
+    """任务书 API ↔ 对外 header ↔ example 一对一映射；无解/多解均 fail-closed。
+
+    共享 header 合法：同一份头可声明多个 taskdoc API。但对某一 API 来说，
+    对外 header 或 runner 锚定 example 出现多份都是多解，不靠路径排序代替人做选择。
+    """
+    kf = key_files or {}
+    example_paths = [p for p in kf
+                     if str(p).endswith(".cpp")
+                     and ("test_aclnn" in os.path.basename(str(p)) or "/examples/" in str(p))]
+    header_index = _entry_paths(kf, paths=list(aclnn_headers or []))
+    example_index = _entry_paths(kf, paths=example_paths)
+    targets, matched, issues = [], [], []
+    for api in declared_apis:
+        headers = list(header_index.get(api, []))
+        examples = list(example_index.get(api, []))
+        targets.append({"api": api, "header_paths": headers, "example_paths": examples})
+        if len(headers) == 1 and len(examples) == 1:
+            matched.append(api)
+            continue
+        if not headers:
+            issues.append(f"{api}:missing_header")
+        elif len(headers) > 1:
+            issues.append(f"{api}:ambiguous_headers:{headers}")
+        if not examples:
+            issues.append(f"{api}:missing_example")
+        elif len(examples) > 1:
+            issues.append(f"{api}:ambiguous_examples:{examples}")
+    all_source_entries = []
+    for path in list(aclnn_headers or []) + example_paths:
+        for api in _paired_two_stage_entries(kf.get(path, "")):
+            if api not in all_source_entries:
+                all_source_entries.append(api)
+    status = "exact" if not issues and len(matched) == len(declared_apis) else (
+        "ambiguous" if any(":ambiguous_" in issue for issue in issues) else "no_exact_match")
+    return {
+        "status": status,
+        "declared_apis": list(declared_apis),
+        "matched_apis": matched,
+        "targets": targets,
+        "source_only_apis": [api for api in all_source_entries if api not in declared_apis],
+        "issues": issues,
+    }
 
 
 def _detect_interface_kind(key_files):
@@ -399,14 +536,11 @@ def _detect_interface_kind(key_files):
     ⚠ 探测**只用取到的 key_files**：取不到（网络/无 PR）→ `unknown`/`library_header`，下游 fail-closed，不假装是 aclnn。"""
     kf = key_files or {}
     # 先去 C/C++ 注释：注释掉的 aclnn 调用不算（codex 审：`// aclnnFooGetWorkspaceSize(...)` 曾被误判成 aclnn）。
-    def _nc(c):
-        c = re.sub(r"/\*.*?\*/", " ", c or "", flags=re.S)
-        return re.sub(r"//[^\n]*", " ", c)
-    examples = {p: _nc(c) for p, c in kf.items()
+    examples = {p: _strip_c_comments(c) for p, c in kf.items()
                 if str(p).endswith(".cpp") and ("test_aclnn" in os.path.basename(str(p)) or "/examples/" in str(p))}
     # HCCL 跨**所有** key_files 查（codex 审加固）：MC2 算子的 `hccl/hccl.h` include 可能落在辅助文件、
     # 不在命中 aclnn 的那个 → 只查单文件会把分布式漏判成单卡 aclnn。跨文件查 = fail-closed 方向。
-    _any_hccl = any(_HCCL_RE.search(_nc(c)) for c in kf.values())
+    _any_hccl = any(_HCCL_RE.search(_strip_c_comments(c)) for c in kf.values())
     for p, c in examples.items():
         m = _ACLNN_WS_RE.search(c)
         if not m:
@@ -442,7 +576,7 @@ def _detect_interface_kind(key_files):
             "有 op_def 迹象但探不到确切的 aclnn 两段式配对 → fail-closed，BLOCKED，不猜")
 
 
-def fetch_pr(pr_url, out_dir, target_dir=None):
+def fetch_pr(pr_url, out_dir, target_dir=None, taskdoc_apis=None):
     """PR：解析 gitcode PR 链接 → API 取 元信息 + 改动文件 + 关键文件（example/op_def），写 pr_facts.json。
 
     `target_dir` 非 None 时**逐字覆盖** `_guess_op` 的探测结果（op 取其末段）；为 None 时行为与既往逐字一致。
@@ -541,7 +675,7 @@ def fetch_pr(pr_url, out_dir, target_dir=None):
             c, r = _grab(rel)
             if c:
                 key[rel], key_ref[rel] = c, r
-    _apply_key_file_facts(facts, key, key_ref, hdrs)
+    _apply_key_file_facts(facts, key, key_ref, hdrs, taskdoc_apis=taskdoc_apis)
     # 现在只有 head_sha 一个 ref，取到的必定就是 head；stale 概念随兜底一并退役。
     # 保留一条正向记账：明确告知下游「这些文件确实钉在哪个 commit 上」。
     if key and head_sha:
@@ -731,7 +865,7 @@ def _assert_snapshot_dir(snapshot_dir):
     return root
 
 
-def scan_pr_snapshot(snapshot_dir, out_dir, target_dir=None):
+def scan_pr_snapshot(snapshot_dir, out_dir, target_dir=None, taskdoc_apis=None):
     """**本地源码**取材：把本地一份没有 git 的目录快照扫成 pr_facts.json（与 `--pr` 互斥）。
 
     这是一等输入形态，**不是降级路由**：走这条路即声明 `declared_source_form="local_source"`，
@@ -810,7 +944,7 @@ def scan_pr_snapshot(snapshot_dir, out_dir, target_dir=None):
             c = _read_snapshot_text(root, rel)
             if c is not None:
                 key[rel], key_ref[rel] = c, "local_snapshot"
-    _apply_key_file_facts(facts, key, key_ref, hdrs)
+    _apply_key_file_facts(facts, key, key_ref, hdrs, taskdoc_apis=taskdoc_apis)
     # ⚠ 取材期改动重校：merkle 在读关键文件**之前**算，两者之间有一个窗口。窗口里改了字节的话，
     #   落盘的 merkle 与落盘的 key_files 分别对应两份不同的源码——而外表看不出来。
     #   这里重算一次并要求逐字相同：不猜哪一半是真的，直接停。
@@ -1066,6 +1200,13 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
                 p for p in (facts.get("aclnn_headers") or []) if isinstance(p, str)),
             "interface_kind": facts.get("interface_kind"),
             "aclnn_entry": facts.get("aclnn_entry"),
+            # N5：单入口旧字段不足以表达任务书同时点名多个 overload。
+            # 完整顺序列表 + header/example 逐项证据随事实包进下游，
+            # 防 spec/runner 又回到「挑第一个」。
+            "taskdoc_aclnn_apis": list(facts.get("taskdoc_aclnn_apis") or []),
+            "aclnn_entries": list(facts.get("aclnn_entries") or []),
+            "api_mapping": (facts.get("api_mapping")
+                            if isinstance(facts.get("api_mapping"), dict) else None),
         },
         # reasons = **缺口**；form_facts = 该输入形态本来就成立的**中性事实**。
         # 两者分开记，报告才分得清「正常的本地源码验收」与「本该绑 PR head 却没绑」。
@@ -1191,11 +1332,15 @@ def main(argv):
         print("        在线被测代码用 --pr <gitcode PR 链接>；"
               "本地源码用 --pr-snapshot <目录>[ --target-dir <仓内相对目录>]。", file=sys.stderr)
         return 2
+    with open(td, encoding="utf-8") as taskdoc_stream:
+        taskdoc_apis = _extract_taskdoc_aclnn_apis(taskdoc_stream.read())
     if a.pr:
-        pf = fetch_pr(a.pr, a.out, target_dir=a.target_dir)
+        pf = fetch_pr(a.pr, a.out, target_dir=a.target_dir,
+                      taskdoc_apis=taskdoc_apis)
         _label = "PR"
     else:
-        pf = scan_pr_snapshot(a.pr_snapshot, a.out, target_dir=a.target_dir)
+        pf = scan_pr_snapshot(a.pr_snapshot, a.out, target_dir=a.target_dir,
+                              taskdoc_apis=taskdoc_apis)
         _label = "本地源码"
     facts = json.load(open(pf, encoding="utf-8"))
     sf = write_source_facts(td, facts, a.out, source_locator=a.taskdoc)

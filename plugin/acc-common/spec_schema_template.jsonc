@@ -384,12 +384,19 @@
 //
 // ── precision 行内 · 用例来源 case_source（受控词表；**整字段省略 = generated = 现行为**）──────
 //   "case_source": "generated" | "taskdoc"        // 省略 = generated；实现见 `gen_cases._case_source`
+//   "reference_case_material_role": "reference_only" // 可选；显式裁定附带 case/golden/selftest 只作参考
 //   "taskdoc_caseset": {"sha256": "<taskdoc_caseset.json 的 sha256>"}   // 可选，仅 taskdoc 档有意义
 //     选**这份 spec 的用例是谁出的**（字段驱动、op-中立；换任意「任务书自带用例」的算子零改即用）：
 //       · generated —— 本引擎按覆盖-预算规则造例（= 缺省；已验收算子逐字节不变靠它）；
 //       · taskdoc   —— 用例身份 / shape / dtype / attr / 值域全部来自**规范化后的**任务书用例集
 //                      （`taskdoc_caseset.json`，取材侧产），本引擎不铺网格、不做 1-wise 采样，
 //                      只按 `materialize.seed` 确定性物化输入、算 golden、落盘。
+//     ⚠ 用户/当前计划若明示「正式 caseset/golden 由 OpRunway 生成，附带材料只作 reference」，
+//       必须**同时显式**写 `case_source:"generated"` +
+//       `reference_case_material_role:"reference_only"`。该字段优先于「看见 self_test 链接就走 taskdoc」
+//       的旧启发式；材料可取材留档，但字节不进 planner、不决定 case_target/case/golden。
+//       缺显式 generated、与 taskdoc 组合、声明 `taskdoc_caseset`（含 null）、或运行时传
+//       `--taskdoc-caseset` 都 fail-closed。省略本字段才沿用下面的历史两档规则。
 //     ⚠ **taskdoc 档必须显式喂入那份用例集**：`gen_cases(spec, work, taskdoc_caseset=<path>)` /
 //       CLI `--taskdoc-caseset <path>` / `run_workflow --taskdoc-caseset <path>`。
 //       声明了 taskdoc 却拿不到文件 → **fail-closed**，**绝不回退自生成**（回退 = 再产一次

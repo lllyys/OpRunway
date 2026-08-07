@@ -170,6 +170,14 @@ G4 · 归约/成对类算子的**生成期规模预算**（2026-07-22，落地�
   · ⚠ `golden_unavailable` 是**一等状态**：某条任务书用例算不出 golden（如通道数超参考实现上限），
     该 case 身份仍写进 caseset、允许无 golden 文件、标明原因，**其余 case 照常生成**。
     它退出精度维（无 golden 即无从判精度）、也不进性能候选池，但**在账本里可见**，由门判 BLOCKED。
+
+正式用例权威 `spec.precision.reference_case_material_role`（N5，2026-08-07）：
+  · 整字段省略 = 保留旧 spec 的两档语义，不改历史产物；
+  · 显式写 `"reference_only"` = 任务书附带 case/golden 与源仓 selftest 只是参考证据，
+    正式 caseset/golden 必须由 workflow 生成。它与**显式** `case_source="generated"` 绑定；
+    省略 `case_source`、写成 `taskdoc`、在 spec 绑 `taskdoc_caseset`、或运行时传
+    `--taskdoc-caseset` 都当场 fail-closed。附带材料可被取材/引用，但字节不进 planner，
+    不能改 `case_target`、case 身份或 golden。
 """
 import collections, hashlib, importlib.util, itertools, json, math, os, re, sys
 import numpy as np
@@ -979,6 +987,10 @@ _CASE_SOURCES = ("generated", "taskdoc")
 _DEFAULT_CASE_SOURCE = "generated"
 _CASE_SOURCE_TASKDOC = "taskdoc"
 
+#: 任务书附带用例/golden 与源仓 selftest 在**正式** caseset 中的角色。
+#: 本轮只有一个已裁定的显式值；未来扩词表必须同时定义它与 case_source 的组合门。
+_REFERENCE_CASE_MATERIAL_ROLES = ("reference_only",)
+
 #: 规范化任务书用例集的 schema 标识与版本（取材侧 `taskdoc_caseset.py` 产、本文件只消费）。
 #: ⚠ 版本**必须逐字相符**：schema 涨版意味着字段语义可能变了，「照旧解析」正是静默错读的入口。
 _TASKDOC_CASESET_SCHEMA = "oprunway.taskdoc_caseset"
@@ -1006,6 +1018,9 @@ def _case_source(spec):
       「任务书给了用例、我们却自己造了一套」，而报告照样会说「已按用例集验收」。"""
     prec = spec.get("precision") or {}
     if "case_source" not in prec:                        # 整字段省略 = 未声明 → 现行为
+        # `reference_only` 刻意**不认** generated 的历史缺省：既然是本轮权威裁定，
+        # 两个字段就必须同时显式。先调组合门，不许这个 early return 绕过它。
+        _reference_case_material_role(spec, resolved_case_source=_DEFAULT_CASE_SOURCE)
         return _DEFAULT_CASE_SOURCE
     raw = prec["case_source"]
     if not isinstance(raw, str) or raw not in _CASE_SOURCES:
@@ -1014,6 +1029,39 @@ def _case_source(spec):
             f"  · 'generated' —— 本引擎按覆盖-预算规则造例（= 整字段省略时的缺省）；\n"
             f"  · 'taskdoc'   —— 用例来自任务书自带用例集（须同时喂入规范化 taskdoc_caseset.json）。\n"
             f"  字段一旦出现就必须是这两个字符串之一；拿不准就**整字段省略**（= generated = 现行为）。")
+    _reference_case_material_role(spec, resolved_case_source=raw)
+    return raw
+
+
+def _reference_case_material_role(spec, *, resolved_case_source=None):
+    """N5：解析、交叉校验「附带 case 材料仅作参考」的显式权威。
+
+    这不是从「看见 self_test 链接」推出的启发式，而是 spec 内可机校的用户/计划裁定。
+    仅当字段显式在场时收紧，保证旧 spec/caseset 字节不因本次增量改造漂移。
+    """
+    prec = spec.get("precision") or {}
+    if "reference_case_material_role" not in prec:
+        return None
+    raw = prec["reference_case_material_role"]
+    if not isinstance(raw, str) or raw not in _REFERENCE_CASE_MATERIAL_ROLES:
+        raise ValueError(
+            f"spec.precision.reference_case_material_role={raw!r} 不在受控词表 "
+            f"{list(_REFERENCE_CASE_MATERIAL_ROLES)} 里—— fail-closed，不猜附带材料能否进正式 caseset。")
+    # 不调 `_case_source`，避免与上面的组合校验递归。调用者已解析时传进来；
+    # 单独调本函数时仍严格要求原始键显式存在且取值正确。
+    if "case_source" not in prec:
+        raise ValueError(
+            "precision.reference_case_material_role='reference_only' 必须同时**显式**声明 "
+            "precision.case_source='generated'；不认 generated 的历史缺省——正式权威必须一眼可审。")
+    source = prec["case_source"] if resolved_case_source is None else resolved_case_source
+    if source != _DEFAULT_CASE_SOURCE:
+        raise ValueError(
+            "precision.reference_case_material_role='reference_only' 与 "
+            f"precision.case_source={source!r} 冲突：附带材料既是参考，就不能又作正式用例源。")
+    if "taskdoc_caseset" in prec:
+        raise ValueError(
+            "precision.reference_case_material_role='reference_only' 时禁止声明 "
+            "precision.taskdoc_caseset（含 null）：参考材料不得绑定正式 caseset。")
     return raw
 
 
@@ -3743,8 +3791,14 @@ def _resolve_taskdoc_inputs(spec, taskdoc_caseset):
       等于让调用方以为用的是任务书用例、实际跑的是自生成网格。
     """
     case_source = _case_source(spec)
+    reference_role = _reference_case_material_role(spec, resolved_case_source=case_source)
     if case_source != _CASE_SOURCE_TASKDOC:
         if taskdoc_caseset is not None:
+            if reference_role == "reference_only":
+                raise ValueError(
+                    f"spec.precision.reference_case_material_role='reference_only'，却传入了 "
+                    f"taskdoc_caseset={taskdoc_caseset!r} ——附带 case/golden 可取材留档，"
+                    "但不得进 planner、不得决定 case_target/case 身份/golden。")
             raise ValueError(
                 f"传入了 taskdoc_caseset={taskdoc_caseset!r}，但 spec.precision.case_source="
                 f"{case_source!r} —— 要用任务书用例请显式声明 case_source='taskdoc'；"
@@ -3780,6 +3834,8 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
     # CS：用例来源（generated / taskdoc）与规范化任务书用例集，**在加载 golden 之前**解出来——
     # 一份「声明了 taskdoc 却没喂用例集」的 spec 应当停在零副作用处，而不是先 import 一遍用户 golden。
     case_source, taskdoc_payload, taskdoc_sha256 = _resolve_taskdoc_inputs(spec, taskdoc_caseset)
+    reference_case_material_role = _reference_case_material_role(
+        spec, resolved_case_source=case_source)
     # §1 用例预算 `spec.precision.case_target`（**必填、无缺省**，见 `_require_case_target`）。
     # < 强制下限时 _plan 用 max(target,|forced|)、emit>target 并 note（评审 #8）。
     # ⚠ **位置刻意夹在这里**，两侧都是有意的：
@@ -4081,6 +4137,10 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
             # 未声明的算子 caseset 逐字节不变）。声明了就把「用例是谁出的 / 绑的哪一份用例集 /
             # 哪几条算不出 golden」全部如实落进产物——报告与门都读这里，不必回头猜。
             **({"case_source": case_source} if _case_source_declared(spec) else {}),
+            # N5：仅显式裁定时落账；这个键使报告/门能区分
+            # 「没有附带材料」与「有，但只作 reference」，不靠散文猜。
+            **({"reference_case_material_role": reference_case_material_role}
+               if reference_case_material_role is not None else {}),
             **({"taskdoc_caseset_sha256": taskdoc_sha256,
                 "taskdoc_sha256": taskdoc_payload["taskdoc_sha256"],
                 "golden_unavailable": {
@@ -4120,6 +4180,8 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
     # CS：dry-run 与正式生成走**同一道**用例来源解析 —— 「声明了 taskdoc 却没喂用例集」这类错
     # 必须在 CP-B 契约自检就现形，不许 CP-B 全绿、CP-D 才炸。
     case_source, taskdoc_payload, taskdoc_sha256 = _resolve_taskdoc_inputs(spec, taskdoc_caseset)
+    reference_case_material_role = _reference_case_material_role(
+        spec, resolved_case_source=case_source)
     attrs_default = {p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"}
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
@@ -4234,6 +4296,8 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
             # 账本读者一眼看得出「这批用例是本引擎造的」，不必从别处推）。
             "case_source": case_source,
             "case_source_declared": _case_source_declared(spec),
+            **({"reference_case_material_role": reference_case_material_role}
+               if reference_case_material_role is not None else {}),
             "taskdoc_caseset_sha256": taskdoc_sha256,
             "change_kind": perf_mode.normalize_change_kind(spec),
             "operator_class": meta["operator_class"],
@@ -4313,6 +4377,10 @@ def _render_dry_run_ledger(ledger):
              else "未声明（缺省 = generated = 本引擎造例）")
           + (f"  taskdoc_caseset_sha256={planning['taskdoc_caseset_sha256']}"
              if planning["taskdoc_caseset_sha256"] else ""))
+    if planning.get("reference_case_material_role") is not None:
+        print("  reference_case_material_role: "
+              f"{planning['reference_case_material_role']}"
+              "（任务书附带 case/golden 与源仓 selftest 不进正式 planner）")
     print(f"  input_rank: {'不限制' if planning['input_ranks'] is None else planning['input_ranks']}  "
           f"shapes: {summary['shapes']}")
     print(f"  by_dtype : {summary['by_dtype']}")

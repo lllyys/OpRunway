@@ -2,6 +2,16 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-07 · 三算子统一计划 N4：DUT 构建、ELF 与双符号身份闭环
+
+- 正式 v2 build receipt 现按 PR / local provenance 档位绑定 build 前与 emit 时源码树、measured 构建和实际 vendor ELF；历史 v1 只保读取兼容，不能承载新的正式验收。
+- 精度与性能入口均用真实函数地址 + `dladdr` 核 workspace/stage2 双符号定义 ELF，拒绝缺符号、依赖库代答、指纹伪造及 DUT/标杆同源；A3 相关集 260 项及追加 7 个同源/伪造负例均通过。
+
+## 2026-08-07 · 三算子统一计划 N5：任务书 API 精确映射与自生成用例权威门
+
+- `fetch_source` 现保留任务书中按出现顺序去重的全部 ACLNN API，与目标目录的公开 header + 唯一 example 逐项精确交叉；去掉 example / `*_def.cpp` 顺序截断，0 匹配或歧义均 fail-closed，不再以“第一个 example”代替接口身份。
+- `precision.reference_case_material_role="reference_only"` 必须与显式 `case_source="generated"` 绑定，严禁 spec 或运行时传入 taskdoc caseset；附带 JSON/selftest 可留作 reference，但不进 planner、不决定 `case_target`、不产 golden/裁决。A3 新目录完成 283 项回归（另 1 项因 root 权限无法构造不可读目录而跳过），三份本地源取材均 `complete + exact`；Remainder 已精确选中 `aclnnRemainderTensorTensor`，不再误选 Inplace TensorScalar。
+
 ## 2026-08-07 · 三算子统一计划 N3：运行时 CANN 最低版本门
 
 - spec 现显式承载任务书的 CANN `minimum` / `not_declared` 两态要求，并与本轮任务书快照摘要对账；unknown、坏版本、低版本及最低版本同 core 的不明 suffix 均在三级门 fail-closed。

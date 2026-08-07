@@ -63,6 +63,8 @@
   "precision": {"oracle":"<按任务书原文抽>","standard":"<据 oracle+verify_mode 映射>","tolerance_policy_id":"<spec 级摘要>",
                 // §1.6 用例来源（受控两值）。**整字段省略 = generated = 现行为**；写 taskdoc ⇒ 必须喂 --taskdoc-caseset
                 "case_source":"<可选：generated（缺省）| taskdoc>",
+                // N5：用户/计划显式裁定附带 case/golden/selftest 只作参考时必填；与显式 generated 绑定
+                "reference_case_material_role":"<可选：reference_only>",
                 "taskdoc_caseset":"<可选，仅 taskdoc 档：{\"sha256\":\"<64 位小写 hex>\" 或 null}——逻辑身份声明>",
                 "threshold":"<exact→0；numerical→主 dtype 默认>","threshold_source":"...",
                 // §1.3.4：仅 standard=="torch_allclose" 用
@@ -167,7 +169,8 @@ attr 笛卡尔、§1.4 特殊场景、白名单必覆盖 + 1-wise 采样）铺�
 | `attr_axis_lengths`（§1.4，可选）| 任务书**点名**的轴长度边界（典型句式「归约维/dim 所指轴上维度为 1 时…」）| `[{"attr":"<已声明 attr 名>","lengths":[<正整数>…]}]`。**声明了却一条都产不出 → fail-closed**（假覆盖）。不需要就整字段省略 |
 | `precision.tolerance_policy_id`（T5，待散文门）| **口径 id（分两层，别混）**：`spec.precision.tolerance_policy_id`=**spec 级摘要/向后兼容**（exact→`exact`、ascendoptest→`ascendoptest_default`、mere_mare/atk_double→`ecosystem_mere_mare`，**无 dtype 后缀**）；`caseset.expected.tolerance_policy_id`=**门控用、格式 `standard:dtype`**（如 `ascendoptest_default:float32`，per-case 由 `gen_cases` 按 golden dtype 生成，exact/behavioral 无 dtype 后缀）。validator/gate 的三处一致比的是**caseset 级**那份 | 
 | `precision.acceptance_policy?`（T5，待散文门）| 任务书验收目标宽于平台底线时 | 可选 `{"standard":"...","error_rate":...}` 等覆盖；acceptance 过而 standard 不过 → PASSED_WITH_RISK 走人工 CP。**仅任务书明确放宽时才填**，勿臆造 |
-| `precision.case_source`（§1.6，可选）| 任务书**给没给成套自测用例**（典型：`精度自测用例参考[自测用例目录](./self_test_case/<op>/)` 这类链接，含相对链接）| 受控两值。整字段省略 = `generated` = 本引擎按覆盖-预算规则造例（现行为、逐字节不变）。任务书**给了**用例 → 写 `taskdoc`，并由编排层把 `taskdoc_caseset.py` 规范化后的 caseset 显式喂给 `gen_cases --taskdoc-caseset`。⚠ 声明 `taskdoc` 却拿不到那份文件 → **fail-closed，绝不回退自生成**；词表外取值同样 fail-closed（这个字段猜错的代价特别贵——判成 `generated` 就等于把任务书点名的测试点整套换掉）|
+| `precision.case_source`（§1.6，可选）| 任务书**给没给成套自测用例**（含相对链接），以及本轮有无更高优先级的显式用例权威裁定 | 受控两值。整字段省略 = `generated` = 历史现行为。**无显式覆盖时**，任务书给了成套用例 → 写 `taskdoc`，并显式喂 `--taskdoc-caseset`；拿不到则 fail-closed，不回退。**若用户/当前计划显式指定 workflow 自生成**，则必须显式写 `generated` 并同时写下一行的 `reference_only`；此时 self_test 链接只作 reference，不能把本字段反推回 `taskdoc` |
+| `precision.reference_case_material_role`（§1.6，可选）| 用户/当前计划是否明示「任务书附带 case/golden 与源仓 selftest 只作 reference，正式 caseset/golden 由 OpRunway 生成」 | 当前只收 `"reference_only"`。一旦写就必须同时**显式** `precision.case_source="generated"`，且禁止 `precision.taskdoc_caseset`（含 null）和运行时 `--taskdoc-caseset`。附带材料可取材/引用 requirement/impact，但字节不进 planner，不得决定 `case_target`、case 身份或 golden；该组合由 `gen_cases` 确定性 fail-closed 校验 |
 | `precision.taskdoc_caseset`（可选，仅 taskdoc 档）| — | `{"sha256": "<64 位小写 hex>"}` 或显式 `null`（表示本轮未绑定）。spec 侧对那份 caseset 的**逻辑身份声明**，供跨轮对账 |
 | `precision.threshold` | 见 §3 | 数字：exact→0；behavioral→省略；numerical→AscendOpTest 主 dtype 默认值 |
 | `precision.threshold_source` | 必填，记数字依据+推断链 | 自由文本 |
@@ -763,13 +766,19 @@ Torch 签名列出必须对标的 overload，再逐个建立：
 - **整字段省略只是 legacy 兼容出口**（现有 isclose/sign/equal/neg 未声明、caseset 逐字节不变），
   **不是"拿不准就不写"的正当理由**：每个算子都落得进这三类之一，没有"不适用"。
 
-## 1.6 `precision.case_source` —— 任务书给了用例，就用它的（受控词表）
+## 1.6 `precision.case_source` / `reference_case_material_role` —— 正式用例权威（受控词表）
 
-**用户口径（2026-08-04 定）：任务书给了 case → 用任务书的，不自行生成；不给才自行生成 + 用默认精度标准。**
-这不是效率优化，是验收权威归属：任务书是验收权威（AGENTS.md 5.8），另起炉灶铺正交网格
-等于把任务书点名的测试点换掉。
+**默认历史口径（2026-08-04）**：无其它显式裁定时，任务书给了成套 case → 用任务书的；不给才自行生成。
 
-**怎么判**（判据是任务书文本结构，**不是算子身份**）：
+**N5 显式覆盖（2026-08-07）**：用户/当前计划若明示「正式 caseset 与 golden 均由 OpRunway 根据任务书生成，任务书附带材料和源仓 selftest 只作 coverage/reference evidence」，该显式裁定优先于上述链接启发式。spec 必须写：
+
+```json
+{"precision":{"case_source":"generated","reference_case_material_role":"reference_only"}}
+```
+
+两字段少一个、与 `taskdoc` 组合、在 spec 里绑 `taskdoc_caseset`（含 null）、或运行时传 `--taskdoc-caseset` 都由 `gen_cases` 当场拒绝。附带材料仍可内容寻址取回，用于提取有引用的 requirement/impact 场景或记 reference gap；但**不跑 `taskdoc_caseset.py` 把它规范化为正式用例、不把它的数量当 `case_target`、不调它的 golden 形成裁决**。
+
+**无 N5 显式覆盖时怎么判**（判据是任务书文本结构，**不是算子身份**）：
 
 1. 任务书正文里有没有指向**成套自测用例**的链接 —— 典型句式
    `精度自测用例参考[自测用例目录](./self_test_case/<op>/)`。**相对链接也算**（相对任务书自身所在目录解析）。
@@ -779,6 +788,8 @@ Torch 签名列出必须对标的 overload，再逐个建立：
 3. 结局 `recognized` → spec 写 `precision.case_source: "taskdoc"`；其余六种结局 → **BLOCKED**，
    **不回退自生成**（「认不出任务书的 case，那就自己造一套」正是这一档要堵的洞）。
    任务书压根没给用例 → **整字段省略**（= `generated` = 现行为）。
+
+⚠ **N5 覆盖下不执行上述第 2/3 步来决定正式用例源**：链接取回的成功/失败只影响 reference 记账，不能把已确认的 `generated` 改回 `taskdoc`。
 
 **两档的连带后果，落 spec 前须知**：
 
@@ -932,7 +943,8 @@ N 个算子 → N 个 `<op>.spec.json`。**共享字段抽一次复用**(hardwar
   编排层**必须**把规范化 caseset 显式喂给 `gen_cases --taskdoc-caseset` / `run_workflow --taskdoc-caseset`，
   否则 fail-closed（**不回退自生成**）；这一档 `case_target` **照样必填**，且须**精确等于**规范化后的
   用例条数（对不上 `gen_cases` 当场炸——见上文『`case_target` 怎么定』与『两档的连带后果』表）。
-  **拿不准就整字段省略**——判成 `generated` 等于把任务书点名的测试点整套换掉，代价特别贵。
+  **只有未出现下一条 N5 显式裁定时**，拿不准才整字段省略并交还 primary——擅自判成 `generated` 等于把任务书点名的测试点整套换掉，代价特别贵。
+- **§1.6 · `precision.reference_case_material_role`**：当用户/当前计划明示 workflow 自生成正式 cases/golden 时，必须写 `"reference_only"` 并同时**显式** `case_source="generated"`；不得声明/传入 taskdoc caseset。附带 JSON 或源仓 selftest 内容变化不得改 caseset；任务书 requirement 或生成 profile 变化则必须改 spec/caseset 摘要。
 - **§1.6 · `aclnn_tensor_format`**：只在 `runner_form == "cpp_extension"` 下有意义；**整字段省略 = 现行为**。
   写 `nd` 前须有 ABI 事实源（header/docs/example）支持，且该算子的 stage2 形态是 `extended`——
   落在 `standard` 上会 fail-closed。没核过就别写。

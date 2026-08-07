@@ -13,6 +13,12 @@ description: 把算子任务书拆成原语组合、按 rule-catalog 拉每原�
 **输入**：算子任务书（公式 / 功能 / 规格 / dtype / shape / 属性 / 精度目标 / 性能目标）+（可选）PR 事实。
 **输出（说明性）**：一份**覆盖矩阵**推理——原语 × tag × 三轴（dtype / 特殊值 / layout·对齐·tiling·workspace），每条用例标清「测什么形状 / 什么数据 / 为什么 / 走哪个 compare 分支 / 对应任务书条款」；缺口 / 不可达显式列出（no silent 漏项）。
 
+**N5 权威边界**：当 spec 显式写
+`precision.case_source="generated"` + `precision.reference_case_material_role="reference_only"` 时，
+本 skill 只从任务书正文条款与已定身的 header/op_def/example 事实拆原语。任务书附带
+case/golden 和源仓 selftest 可作 requirement/impact 引用，但它们的 case id、条数、字节、
+golden 函数与执行结果**均不得**进正式 planner，不得决定 `case_target`或裁决。
+
 ## 展开算法（5 步；明细见 `references/rule-catalog.md`）
 
 1. **拆原语**：读任务书公式 / 功能，把算子每个功能段映射到 rule-catalog §2 的原语（按 `identify_by`）。

@@ -36,8 +36,8 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 |---|---|---|---|
 | `source_facts.json` | CP-A | 任务书字节 + 本轮**声明的输入形态**（`declared_source_form`）与**实得**源身份（`provenance_kind` + 对应锚）+ 关键文件 ref/摘要已形成内容身份 | envelope 摘要有效且 `completeness.status=complete`。⚠ 判据是「**声明 × 实得是否一致**」，**不是**「有没有拿到 PR head」——声明 `local_source` 且实得本地快照就是 `complete`，无需任何授权；只有「声明 `git_pr` 却只实得快照」才落 `snapshot_only`、需授权（见 §3 CP-A 的形态表）。`blocked` 一律 MISS/BLOCKED，不得复用 |
 | `correspondence.json` | CP-A | 对应校验已落盘（读 `status` 定去留） | `status=confirmed` 且 `source_facts_digest` 等于当前事实包才进 CP-B；`mismatch/empty_task` 停 |
-| `taskdoc_links.json` | CP-B（primary inline `taskdoc_links.py`） | 任务书正文里的链接已按受控词表分类、可变 ref 已钉成 commit sha、仓内材料已内容寻址取回 | 退出码 0 且 `blocking` 为空才往下走；`blocking` 非空（见 `BLOCKING_STATUSES`）→ 摆给用户，不猜链接指向 |
-| `taskdoc_caseset.json` + `golden/golden.py` | CP-B（primary inline `taskdoc_caseset.py`；**仅 `precision.case_source=taskdoc`**） | 任务书自带用例集已被识别、接口映射 IR 已对账、caseset 已规范化、golden 包装层与任务书授权锚已落盘 | `outcome=recognized` 才可进 `gen_cases`；其余六种结局（见 `DISCOVERY_OUTCOMES`）**一律 BLOCKED，绝不回退自生成** |
+| `taskdoc_links.json` | CP-B（primary inline `taskdoc_links.py`） | 任务书正文里的链接已按受控词表分类、可变 ref 已钉成 commit sha、仓内材料已内容寻址取回 | legacy `case_source=taskdoc` 时：退出码 0 且 `blocking` 为空才往下走；`blocking` 非空摆给用户，不猜链接指向。N5 `reference_only` 时：只作 reference 取材，取回失败记 reference gap，不得改换正式 `case_source/case_target` |
+| `taskdoc_caseset.json` + `golden/golden.py` | CP-B（primary inline `taskdoc_caseset.py`；**仅 `precision.case_source=taskdoc` 且没有 N5 reference-only 裁定**） | 任务书自带用例集已被识别、接口映射 IR 已对账、caseset 已规范化、golden 包装层与任务书授权锚已落盘 | `outcome=recognized` 才可进 `gen_cases`；其余六种结局（见 `DISCOVERY_OUTCOMES`）**一律 BLOCKED，绝不回退自生成**。⚠ `reference_case_material_role=reference_only` 时根本不产/不消费本工件；附带材料只进 reference 记账 |
 | `taskdoc_validation.json` + `taskdoc_validation_receipt.json` | CP-B0（`validate_taskdoc` + primary inline `validate_taskdoc_input.py`） | 任务书输入是否足以充当验收依据已逐项判过并机械复核 | receipt `status ∈ {PASSED, PASSED_WITH_PENDING}` 且 `source_facts_digest` 等于当前事实包才进 `extract_spec`；`NEEDS_USER` 停下问用户；`BLOCKED` 重做 CP-B0 |
 | `<op>.spec.json`（含 `task_pr_gaps`） | CP-B（`extract_spec`） | spec 已抽 | 缺 → 派 `extract_spec` |
 | `case_plan.json` | CP-B（primary inline `gen_cases.py --dry-run --ledger-out`） | 用例计划及 spec/planner/golden 依赖已结构化落盘 | `validate_preparation_state.py` 返回 `REUSABLE` 才复用；MISS 重做 CP-A/B 对应缺口，BLOCKED 停止并报告损坏 |
@@ -62,7 +62,8 @@ reports/<op>/                 ← run_workflow --out 指这里
 │   ├── aclnn_preflight.json      # CP-C0 预检（**必须是内容寻址 envelope**，见下）
 │   ├── source_facts.json / pr_facts.json / task_doc.md / task_doc.snapshot.md
 │   ├── <op>.spec.json / case_plan.json / preparation_receipt.json
-│   ├── taskdoc_links.json / taskdoc_caseset.json / golden/          # 仅 taskdoc 档
+│   ├── taskdoc_links.json                                          # 可作 reference 取材；不当然进正式 caseset
+│   ├── taskdoc_caseset.json / golden/                             # 仅 legacy taskdoc 档；reference_only 不产
 │   └── <各 case 目录与 golden .npy>
 ├── caseset.json / evidence.json / verdict.json / acceptance.json    # CP-D 落在 --out 根
 └── perf_report.json / baseline.json
@@ -241,9 +242,22 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   ⚠ 这个门**不产验收裁决**，只挡「输入不足以验收」；它也**判不出**任务书内容本身对不对——
   判宽（模糊的判成明确）会静默生效，唯一护栏是 ref 的判法 + 强制逐字引用。
 - **dispatch** `acc-spec-extractor`，`dispatch_mode = extract_spec`：按六段契约读 `task_doc.md` + `task_doc.snapshot.md` + `pr_facts.json` + `source_facts.json` + `correspondence.json`（含 `confirmed_constraints`）→ `<op>.spec.json` + `task_pr_gaps`（缺项落 gaps 不臆造；多算子多 spec）。
-- **CP-B1 任务书自带用例集（新档；`spec.precision.case_source` 分流）**：
-  **口径由用户定死——任务书给了 case 就用它的，不给才自己造。** 这不是「优化」，是验收权威归属问题：
-  另起炉灶铺正交网格等于把任务书点名的测试点换掉（AGENTS.md 5.8）。
+- **CP-B1 任务书附带用例材料（`case_source` + N5 权威字段分流）**：
+  **先看显式裁定，再用历史链接启发式。**
+
+  - 若 spec 显式 `precision.case_source="generated"` +
+    `precision.reference_case_material_role="reference_only"`：正式 caseset/golden 全部由 workflow 生成。
+    任务书链接和源仓 selftest 可经 `taskdoc_links.py` 内容寻址取回，用于提取有引用的
+    requirement/impact 或记 reference gap；**不跑 `taskdoc_caseset.py`、不产正式 taskdoc caseset/golden、
+    不把附件数量当 `case_target`、不给 `gen_cases`/`run_workflow` 传 `--taskdoc-caseset`**。
+    链接取材状态只影响 reference 记账，不得把已确认的 generated 改回 taskdoc。
+    两字段少一个、绑了 `precision.taskdoc_caseset`（含 null）或传了文件都由 `gen_cases`
+    确定性 fail-closed。然后直接走下面 `acc-runner-dev:gen_golden` + generated dry-run。
+
+  - **只有没有上述显式裁定时**，才沿用 2026-08-04 口径：任务书给了成套 case 就用它，不给才自己造。
+    这是验收权威归属问题：另起炉灶铺正交网格等于把任务书点名的测试点换掉（AGENTS.md 5.8）。
+
+  下列 1–5 仅适用于这个**无 N5 显式覆盖**的历史 taskdoc 档：
   1. **primary inline** `python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/taskdoc_links.py --taskdoc <路径|链接> --out <work> [--exclude <substr>]…`
      → `<work>/taskdoc_links.json` + 内容寻址取回的仓内材料。它把任务书正文里的链接按**只看链接结构**的
      受控词表 `KINDS` 分类（blob / tree / **相对链接** / repo 根 / MR / discussion / …），
@@ -273,7 +287,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
      规模预算不行使（降规模会把任务书点名的 shape 改掉，那就不是那条用例了）。
   5. **性能 case 跟着走**：`spec.perf.case_source="precision_cases"`（`perf` 存在时必填）。这一档的性能候选池 =
      **全部可判精度的任务书用例**；不这么定的话，任务书用例天然不带「性能」维 → 性能维恒零数据。
-- **dispatch** `acc-runner-dev`，`dispatch_mode = gen_golden`（**仅 `case_source=generated`**；`taskdoc` 档的
+- **dispatch** `acc-runner-dev`，`dispatch_mode = gen_golden`（**`case_source=generated` 都走，包括 `reference_case_material_role=reference_only`**；`taskdoc` 档的
   `golden.py` 由上面的 `taskdoc_caseset.py` 生成，不再另派）：读 `task_doc.md`+`spec` → 任务书快照入库 + `<ops_root>/<op>/golden.py`（真值口径走 **R3 两档链**；**PR/仓内参考实现禁作 golden 源**；后端生成期定死）→ 自跑 `check_golden.py <Op>` 出档位账本。**必须在 dry-run 之前**——`gen_cases` 缺 golden.py 即 fail-closed。
   “任务书快照入库”必须实际落在授权核验生效路径 `<ops_root>/<op>/task_doc.snapshot.md`，内容逐字来自
   当前 CP-A `task_doc.snapshot.md`，并先核 source-facts digest 与 golden contract 声明的 SHA。只在
@@ -286,7 +300,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 - **primary inline**（确定性脚本，无 NL 生成）：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/gen_cases.py <spec> --dry-run --ledger-out <work>/case_plan.json --source-facts <work>/source_facts.json --correspondence <work>/correspondence.json`。plan-only，查这些：用例预算落不落 `[S=强制下限, pool_max]` 区间 · dtype 分布 · 特殊场景（empty/scalar/边界/inf/ninf/nan）覆盖 · 被丢组合类 · `case_id` 唯一（撞则 raise） · per-case 种子确定性；并绑定 canonical spec、规划器源码、golden.py、source facts 与用户确认摘要。后两项必须成对提供；只绑定一半直接报错。
   ⚠ **能力边界（别当成旧 mock 自检的等价物）**：dry-run **不调 `golden_fn`、不落 `.npy`、不产任何裁决**；但它**会加载执行 `golden.py`**（取 `out_shape` 造规模预算）——所以对 golden 的覆盖是**半道**的：**缺文件 → 只记「未核」、不阻塞**；**文件在但坏了（语法错 / 顶层抛 / 必需导出不全）→ 当场抛、拦得住**。仍**验不了**：来源契约合不合规（那是 `check_golden.py` 的活）/ `oracle_source` 映射 / `validator` 判定链 / 三级门 / evidence 结构——**这些只有 CP-D 真机跑测才验得到**。（照本仓约定 golden.py 把 torch 延迟 import，故 dry-run 通常不拉 torch；某算子若在模块顶层 `import torch`，它会跟着 import。）CP-B 过了**不代表**用例链整体可用。
 - **产出**（**全部落 `<work>/`，见 §1.1**）：`taskdoc_validation.json`（subagent 产）+ `taskdoc_validation_receipt.json`（primary inline 产）+ `<op>.spec.json` + `<ops_root>/<op>/golden.py` + `<ops_root>/<op>/task_doc.snapshot.md` + `case_plan.json`。
-  **`case_source` 两档的 golden 产法不同**：`generated` 档的 `golden.py` 与任务书快照由 `acc-runner-dev:gen_golden` 这个 subagent 产；`taskdoc` 档由 `taskdoc_caseset.py` 生成包装层并把快照落到 golden 同目录，另加 `taskdoc_links.json` + `taskdoc_caseset.json` 两件。
+  **`case_source` 两档的 golden 产法不同**：`generated` 档（含 N5 `reference_only`）的 `golden.py` 与任务书快照由 `acc-runner-dev:gen_golden` 这个 subagent 产；`taskdoc` 档由 `taskdoc_caseset.py` 生成包装层并把快照落到 golden 同目录，另加 `taskdoc_links.json` + `taskdoc_caseset.json` 两件。
   随后 primary 跑 `validate_preparation_state.py` 落 `preparation_receipt.json`；它只判非真机准备能否复用、**不产裁决**。`caseset.json` 仍由 CP-D 真机跑测时才落盘，绝不缓存复用。
 - **路由**：dry-run 报错或账本异常（如预算区间不合理、重点 dtype 未覆盖、特殊场景缺失、id 撞）→ **dispatch** `acc-spec-extractor`，`dispatch_mode = refine_spec`（据报错文本修 spec）→ 重跑 dry-run。**契约自检没过先修 spec，别上真机。**
   ⚠ **`golden.py` 缺文件这一种 dry-run 查不出**（只记「未核」照常出计划），会一路漏到 CP-D 才炸；且 `refine_spec`（改 spec）**变不出 `golden.py`**——**golden 侧的问题一律回 `acc-runner-dev:gen_golden`，不在 refine 循环里空转**。
@@ -569,6 +583,8 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   的 `pr_head_unbound` 摆出来。
 - **用例来源如实呈现**：`case_source=taskdoc` 时报告须写明「用例集由任务书提供、共 N 条」，
   并逐字引用 caseset 的 `coverage_strength`；**不得**沿用「1-wise + 白名单」那套说法（见 CP-B1）。
+- **N5 reference-only 如实呈现**：`case_source=generated` 且 caseset 带
+  `reference_case_material_role=reference_only` 时，报告须写「正式用例/golden 由 OpRunway 生成；任务书附带材料与源仓 selftest 仅作 reference，未消费其执行结果形成裁决」，并引 caseset 的显式角色键。不得写成「任务书用例已验收」。
 - **红线**：数字全引真实产物，推断项标 `(推断)`；`needs_review` **不当 pass**；**验收门 `validate_acceptance_state.py` STATUS: FAILED → 不出 pass 裁决；报告如实呈现 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整）；只认任务书为验收权威，「PR 有测试」≠「验收过了」。
 
 ### CP-F 验收后人工精度复核与重测（append-only）

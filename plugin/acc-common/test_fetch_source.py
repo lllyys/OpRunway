@@ -182,6 +182,111 @@ class InterfaceKindDetectTest(unittest.TestCase):
         self.assertIsNone(entry)
 
 
+class TaskdocApiMappingTest(unittest.TestCase):
+    """N5：任务书 API ↔ header/example 精确映射，不再由 example 排序选 overload。"""
+
+    HDR = "math/floor_mod/op_api/aclnn_remainder.h"
+    WRONG = "math/floor_mod/examples/test_aclnn_inplace_remainder_tensor_scalar.cpp"
+    TARGET = "math/floor_mod/examples/test_aclnn_remainder_tensor_tensor.cpp"
+    API = "aclnnRemainderTensorTensor"
+
+    @staticmethod
+    def _pair(api):
+        return (f"aclnnStatus {api}GetWorkspaceSize(const aclTensor* x, uint64_t* ws, "
+                f"aclOpExecutor** executor);\naclnnStatus {api}(void* workspace, uint64_t ws, "
+                "aclOpExecutor* executor, aclrtStream stream);\n")
+
+    @staticmethod
+    def _facts():
+        return {"notes": []}
+
+    def test_taskdoc_api_extraction_preserves_order_and_deduplicates(self):
+        text = ("# aclnnRemainderTensorTensor\n"
+                "`aclnnRemainderTensorTensorGetWorkspaceSize` 与 `aclnnRemainderTensorTensor`\n"
+                "后续再验 aclnnRoll；类型 aclnnStatus 不是入口。\n"
+                "https://example/aclnnNoise_task_doc.md\n")
+        self.assertEqual(
+            fs._extract_taskdoc_aclnn_apis(text),
+            ["aclnnRemainderTensorTensor", "aclnnRoll"])
+
+    def test_exact_taskdoc_api_beats_earlier_wrong_overload(self):
+        wrong_api = "aclnnInplaceRemainderTensorScalar"
+        key = {
+            self.HDR: self._pair(wrong_api) + self._pair(self.API),
+            self.WRONG: self._pair(wrong_api),
+            self.TARGET: self._pair(self.API),
+        }
+        facts = self._facts()
+        fs._apply_key_file_facts(
+            facts, key, {p: "local_snapshot" for p in key}, [self.HDR], [self.API])
+        self.assertEqual(facts["interface_kind"], "aclnn_2stage")
+        self.assertEqual(facts["aclnn_entry"], self.API)
+        self.assertEqual(facts["aclnn_entries"], [self.API])
+        self.assertEqual(facts["api_mapping"]["status"], "exact")
+        self.assertEqual(facts["api_mapping"]["source_only_apis"], [wrong_api])
+        self.assertNotIn("blocked", facts)
+
+    def test_all_taskdoc_apis_are_preserved_in_declared_order(self):
+        first, second = "aclnnFooTensor", "aclnnFooScalar"
+        h = "math/foo/op_api/aclnn_foo.h"
+        e1 = "math/foo/examples/test_aclnn_foo_tensor.cpp"
+        e2 = "math/foo/examples/test_aclnn_foo_scalar.cpp"
+        key = {h: self._pair(second) + self._pair(first),
+               e1: self._pair(first), e2: self._pair(second)}
+        facts = self._facts()
+        fs._apply_key_file_facts(
+            facts, key, {p: "local_snapshot" for p in key}, [h], [first, second])
+        self.assertEqual(facts["api_mapping"]["status"], "exact")
+        self.assertEqual(facts["aclnn_entries"], [first, second])
+        self.assertIsNone(facts["aclnn_entry"], "多 API 时旧单值字段不得擅自挑第一个")
+
+    def test_missing_exact_target_fails_closed_instead_of_falling_back(self):
+        wrong_api = "aclnnInplaceRemainderTensorScalar"
+        key = {self.HDR: self._pair(wrong_api), self.WRONG: self._pair(wrong_api)}
+        facts = self._facts()
+        fs._apply_key_file_facts(
+            facts, key, {p: "local_snapshot" for p in key}, [self.HDR], [self.API])
+        self.assertEqual(facts["interface_kind"], "unknown")
+        self.assertIsNone(facts["aclnn_entry"])
+        self.assertEqual(facts["api_mapping"]["status"], "no_exact_match")
+        self.assertEqual(facts["blocked"], "taskdoc_api_mapping_no_exact_match")
+
+    def test_duplicate_target_examples_are_ambiguous_and_blocked(self):
+        second = "math/floor_mod/examples/another_test_aclnn_remainder_tensor_tensor.cpp"
+        key = {self.HDR: self._pair(self.API), self.TARGET: self._pair(self.API),
+               second: self._pair(self.API)}
+        facts = self._facts()
+        fs._apply_key_file_facts(
+            facts, key, {p: "local_snapshot" for p in key}, [self.HDR], [self.API])
+        self.assertEqual(facts["api_mapping"]["status"], "ambiguous")
+        self.assertEqual(facts["blocked"], "taskdoc_api_mapping_ambiguous")
+        self.assertTrue(any("ambiguous_examples" in issue
+                            for issue in facts["api_mapping"]["issues"]))
+
+    def test_target_without_public_header_is_blocked(self):
+        key = {self.TARGET: self._pair(self.API)}
+        facts = self._facts()
+        fs._apply_key_file_facts(
+            facts, key, {self.TARGET: "local_snapshot"}, [], [self.API])
+        self.assertEqual(facts["api_mapping"]["status"], "no_exact_match")
+        self.assertTrue(any(issue.endswith(":missing_header")
+                            for issue in facts["api_mapping"]["issues"]))
+        self.assertIn("blocked", facts)
+
+    def test_examples_and_op_def_are_not_truncated_by_context_caps(self):
+        root = "math/floor_mod"
+        hdr = root + "/op_api/aclnn_remainder.h"
+        examples = [root + f"/examples/test_aclnn_variant_{i}.cpp" for i in range(8)]
+        contexts = [root + f"/op_host/a_context_{i}.cpp" for i in range(8)]
+        op_def = root + "/op_host/z_floor_mod_def.cpp"
+        _hdrs, want = fs._key_file_candidates([hdr, *examples, *contexts, op_def], root)
+        self.assertEqual([p for p in want if "/examples/" in p], examples)
+        self.assertIn(examples[7], want, "第 7 个之后的目标 example 也必须可取")
+        self.assertIn(op_def, want, "*_def.cpp 不得被普通 op_host 上下文的 4 份上限挤掉")
+        selected_contexts = [p for p in want if p in contexts]
+        self.assertEqual(selected_contexts, contexts[:4])
+
+
 class FetchPrFailModeTest(unittest.TestCase):
     """fetch_pr 层：区分「URL 形态错(fail-loud，不写文件)」与「网络取不到(记 note，仍写文件)」。
 
