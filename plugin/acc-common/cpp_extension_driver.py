@@ -26,6 +26,10 @@ class DriverError(RuntimeError):
     pass
 
 
+# 逻辑 dtype 名 → torch dtype 名。**必须与 `repo_adapter.SUPPORTED_NP_BY_FORM["cpp_extension"]`
+# 同步**：那张表宣称本通路收发得了哪些 dtype，这张表是它在真机上的兑现处。少一条 = 能力表说支持、
+# 驱动当场拒（声明与实现不一致，本仓判定比缺能力更坏）。同步由
+# `test_dtype_capability_closure.py` 的双向对账钉死，别单改一边。
 _TORCH_DTYPES = {
     "float32": "float32",
     "float16": "float16",
@@ -35,6 +39,8 @@ _TORCH_DTYPES = {
     "int16": "int16",
     "int8": "int8",
     "uint8": "uint8",
+    "uint32": "uint32",        # 2026-08-06 · 真机实测往返（见 repo_adapter 同处 provenance 注）
+    "complex64": "complex64",  # 同上
     "bool": "bool",
 }
 

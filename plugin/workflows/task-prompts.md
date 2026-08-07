@@ -44,7 +44,7 @@ dispatch_mode: refine_spec
 
 ## 2. `acc-runner-dev`（skill: acc-runner）
 
-⚠ **下面两个 mode 只对显式 `spec.runner_form == "cpp"` 派发**，而 `cpp` ⛔ **非准入形态、产不出验收裁决**（要跑须加 `--allow-experimental-form`，只产开发级产物）——模板照留，服务修通路 / 复现问题 / 局部开发验证。
+⚠ **下面两个 mode 只对显式 `spec.runner_form == "cpp"` 派发**，而 `cpp` ⛔ 自 2026-08-06 **停止准入、连真机入口都没有**（逃生阀 `--allow-experimental-form` 已删）——模板**仅作历史保留**，照着跑会在 `_resolve_mode` 当场被拒。
 **验收路径（缺省的 `cpp_extension`）不手写 per-op runner**：由 `cpp_extension_codegen.py` 生成官方 `NpuExtension` bundle，真机 build/load/执行由显式 driver 完成并回传内容寻址收据（须绑定精确来源锚 + 构建命令 + 实际加载的 vendor ELF）；`aclnn_py` 无 per-op runner 源，同样不派这两个 mode。
 
 ### 2a. `dispatch_mode = gen_runner`
@@ -77,18 +77,18 @@ dispatch_mode: run_npu
 验收标准: 真机 run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json
           （OPRUNWAY_* 指真实机器/路径，不写进仓）——
           --source-facts 在验收通路上必给、缺席直接拒跑；路径是 CP-A fetch_source.py --out 产的那份，
-          与 --out 报告目录不是同一个。非验收通路（mock、加了 --allow-experimental-form 的 cpp/aclnn_py）不强制。
-          <mode> 据 spec.runner_form 派生（受控词表 {cpp, aclnn_py, cpp_extension}，缺省 = cpp_extension）：
-          cpp_extension → cpp_extension（须 OPRUNWAY_CPP_EXTENSION_REAL=1 且过 build/load/vendor receipt 门）；
-          cpp → new_example；aclnn_py → aclnn_py（且须 OPRUNWAY_ACLNN_REAL=1）；
+          与 --out 报告目录不是同一个。非验收通路（显式 --mode mock / catlass*）不强制。
+          <mode> 据 spec.runner_form 派生（受控词表 {cpp, aclnn_py, cpp_extension}，缺省 = cpp_extension），
+          而派得出 mode 的只剩一条：
+          cpp_extension（或未声明）→ cpp_extension（须 OPRUNWAY_CPP_EXTENSION_REAL=1 且过 build/load/vendor receipt 门）；
+          cpp / aclnn_py ⛔ 停止准入（2026-08-06）：派生表里没有条目，省 --mode 派不出、显式指定真机 mode 也被拒；
           mock / catlass / catlass_mock 派生不出、只能显式指定（非验收通路 / catlass 逃生口）。
           ⚠ 验收裁决当前只出自 cpp_extension（run_workflow._ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})，
             入口门 _resolve_mode + 出口门 _assert_acceptance_form_allowed 两道；理由见仓根 AGENTS.md §4）。
-            别把「能跑」读成「能出裁决」：new_example / aclnn_py 仍跑得起来（须 --allow-experimental-form），
-            但物理上只产 dev_run_summary.json / dev_precision_check.json（evidence_grade="development"），
-            不写 acceptance.json / verdict.json——「加了逃生阀跑绿了」不得写成验收通过。
+            拿到写着 cpp / aclnn_py 的 spec，正确动作是回报 BLOCKED + 「须先迁 cpp_extension」，
+            不是换个 mode 再试——逃生阀已随通路收敛删除，没有任何办法把它们跑起来。
             mode 只从 spec.runner_form 派生，不问用户走哪条 form（验收统一按 cpp_extension）。
-          ⚠ 开发级路径的机制边界仍成立：cpp 路真机 dtype 白名单只有 fp32/fp16/bf16
+          ⚠ 历史机制边界仍作记录：cpp 路真机 dtype 白名单只有 fp32/fp16/bf16
             （int32 等落 DEFERRED_NP_BY_FORM["cpp"]、真机 fail-closed）→ 覆盖缺一块；
             性能基线由任务书/spec 逐字决定、不能从 form 反推（new_example 的缺省对照物才是内置 TBE）。
           Task2 真 NPU 精度 vs numpy golden + Task3 msprof kernel-only 性能 vs 基线 + 末尾统一校三级门，一次原子跑完。

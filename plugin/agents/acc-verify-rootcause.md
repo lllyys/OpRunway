@@ -25,17 +25,22 @@ tools: Bash, Read, Write, Edit
 
 | dispatch_mode | 触发（何时被 dispatch） | 输入工件 | 本次动作 | 本次产出 | 验收标准（回给 orchestrator 才算成） |
 |---|---|---|---|---|---|
-| `verify_aclnn_harness`（⛔ **非准入形态专用**：`aclnn_py` 产不出验收裁决，本 mode 只服务 `--allow-experimental-form` 的开发级路径） | CP-C0 已为 `READY_WAIT_NPU_TRUST_GATE`，且 `runner_form=aclnn_py` | spec + golden.py + `caseset.json` + `work/aclnn_preflight.json` + 真机环境变量 | 正式生成完整 caseset/golden；运行 `verify_aclnn_harness.py`，按能力确定性选小见证集，真机 build/exec/readback，与 CPU golden 对拍 | 内容寻址 `work/aclnn_harness_trust.json` | `status=TRUSTED_FOR_CP_D`；绑定 spec/完整 caseset/preflight、见证数据字节、golden 源码、PR/build/toolkit/SoC/符号与执行逻辑；`acceptance_verdict=null` |
-| `run_npu` | CP-D，CP-C 的自证门已过（`cpp_extension` → build/load/vendor receipt，**验收路径**；`cpp` → runner 收据、`aclnn_py` → harness 收据，仅开发级路径）、用户已确认执行形态（就地跑 / 远程连）与 NPU 可达 | `<op>.spec.json` + ⚠ **CP-A 事实包 `<CP-A 取材目录>/source_facts.json`（验收路径上是必需输入，不是可选）**——orchestrator 必须把这个路径随 dispatch 一起交下来，本子agent 原样传给 `--source-facts`；拿不到就当场 BLOCKED 回报，**不自己去猜路径、不去别处翻**。再按 `spec.runner_form` 分叉：`cpp_extension` 用生成的官方 NpuExtension bundle、逐 case invocation plan 与精确 vendor；`cpp` 用已验证 per-op runner；`aclnn_py` 用 DUT + 通用 ctypes runner | 真机 `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json` **一次原子**跑 Task2 精度 + Task3 性能 + 门（派生 `cpp_extension` / `new_example` / `aclnn_py`；后两者须 `--allow-experimental-form`，**不产验收裁决**、也**不受 `--source-facts` 强制**） | **按路径分，别混列**（详见下节「产出按路径分叉」）。**验收路径**（`cpp_extension`）：`caseset.json`、`evidence.json`、`verdict.json`、`baseline.json`（有基线时）、`perf_report.json`、`acceptance.json` + Markdown 验收报告。**开发级路径**（`cpp` / `aclnn_py` + `--allow-experimental-form`）：`caseset.json`、`evidence.json`、`dev_precision_check.json`、`perf_report.json`（带 NON-ACCEPTANCE 戳）、`dev_run_summary.json`；**物理上不产** `verdict.json` / `acceptance.json`，也不产 Markdown 验收报告 | 工件落盘。**验收路径**：逐字引用 `acceptance.json` / `verdict.json` 的确定性裁决和来源；门 FAILED / Task3 BLOCKED 如实暴露。**开发级路径**：只回报 `dev_run_summary.json` / `dev_precision_check.json` 的事实（`is_acceptance=false`、`selfcheck` 是管路自检非验收门），**不进入裁决引用流程**、`verdict_quoted` 留 null；⚠ 不得等待或索要 `verdict.json` / `acceptance.json`（**不是缺件，是这条路压根不写**） |
-| `run_precision_retest` | CP-F F2 已产生 confirmed directive 与 prepared attempt，用户已确认真机副作用；⚠ **只接受 base `spec.runner_form == "cpp_extension"`**（CP-F 要写 `verdict.json`，**没有逃生阀**，`--allow-experimental-form` 不适用也不得用于绕过；`cpp` / `aclnn_py` 的历史验收产物仍保持原裁决与历史效力，只是不支持创建或执行 CP-F attempt） | 可信 `attempts_root` 与其直接四位 attempt、含 golden 授权来源的冻结包、DUT 身份和真机环境 | 先校验 `CANN_VERSION/ASCEND_TOOLKIT_VERSION/OPRUNWAY_SOC` 与 spec/receipt/driver 一致，再真机调用 `cp_f_execute_attempt.py`；只执行 manifest 指定原 case，不调 `run_workflow`、性能 collector 或 `perf_compare` | attempt 内 `caseset/evidence/verdict/attempt_gate/retest_acceptance/attempt.receipt/精度重测报告` | 逐字引用 validator 与 Task-2 gate；基础验收不变、`performance_retested=false`；分开回报“机械闭环”与“新标准裁决生效”；失败单轮返回 blocker，不内部重跑 |
+| `verify_aclnn_harness`（⛔ **已停止准入的形态专用**：`aclnn_py` 自 2026-08-06 无真机入口，本 mode 已无下游、仅作历史保留） | CP-C0 已为 `READY_WAIT_NPU_TRUST_GATE`，且 `runner_form=aclnn_py` | spec + golden.py + `caseset.json` + `work/aclnn_preflight.json` + 真机环境变量 | 正式生成完整 caseset/golden；运行 `verify_aclnn_harness.py`，按能力确定性选小见证集，真机 build/exec/readback，与 CPU golden 对拍 | 内容寻址 `work/aclnn_harness_trust.json` | `status=TRUSTED_FOR_CP_D`；绑定 spec/完整 caseset/preflight、见证数据字节、golden 源码、PR/build/toolkit/SoC/符号与执行逻辑；`acceptance_verdict=null` |
+| `run_npu` | CP-D，CP-C 的自证门已过（`cpp_extension` → build/load/vendor receipt，**验收路径**；`cpp` → runner 收据、`aclnn_py` → harness 收据，两者均已停止准入、仅作历史保留）、用户已确认执行形态（就地跑 / 远程连）与 NPU 可达 | `<op>.spec.json` + ⚠ **CP-A 事实包 `<CP-A 取材目录>/source_facts.json`（验收路径上是必需输入，不是可选）**——orchestrator 必须把这个路径随 dispatch 一起交下来，本子agent 原样传给 `--source-facts`；拿不到就当场 BLOCKED 回报，**不自己去猜路径、不去别处翻**。再按 `spec.runner_form` 分叉：`cpp_extension` 用生成的官方 NpuExtension bundle、逐 case invocation plan 与精确 vendor；`cpp` 用已验证 per-op runner；`aclnn_py` 用 DUT + 通用 ctypes runner | 真机 `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json` **一次原子**跑 Task2 精度 + Task3 性能 + 门（**唯一派得出的是** `cpp_extension`；`new_example` / `aclnn_py` 自 2026-08-06 停止准入，派不出、显式指定也被拒） | **按路径分，别混列**（详见下节「产出按路径分叉」）。**验收路径**（`cpp_extension`）：`caseset.json`、`evidence.json`、`verdict.json`、`baseline.json`（有基线时）、`perf_report.json`、`acceptance.json` + Markdown 验收报告。**非验收路径**（显式 `--mode mock` / `catlass*`）：`caseset.json`、`evidence.json`、`dev_precision_check.json`、`perf_report.json`（带 NON-ACCEPTANCE 戳）、`dev_run_summary.json`；**物理上不产** `verdict.json` / `acceptance.json`，也不产 Markdown 验收报告 | 工件落盘。**验收路径**：逐字引用 `acceptance.json` / `verdict.json` 的确定性裁决和来源；门 FAILED / Task3 BLOCKED 如实暴露。**开发级路径**：只回报 `dev_run_summary.json` / `dev_precision_check.json` 的事实（`is_acceptance=false`、`selfcheck` 是管路自检非验收门），**不进入裁决引用流程**、`verdict_quoted` 留 null；⚠ 不得等待或索要 `verdict.json` / `acceptance.json`（**不是缺件，是这条路压根不写**） |
+| `run_precision_retest` | CP-F F2 已产生 confirmed directive 与 prepared attempt，用户已确认真机副作用；⚠ **只接受 base `spec.runner_form == "cpp_extension"`**（CP-F 要写 `verdict.json`，**没有逃生阀**，任何「放行非准入通路」的旁路都不适用、也不得用于绕过；`cpp` / `aclnn_py` 的历史验收产物仍保持原裁决与历史效力，只是不支持创建或执行 CP-F attempt） | 可信 `attempts_root` 与其直接四位 attempt、含 golden 授权来源的冻结包、DUT 身份和真机环境 | 先校验 `CANN_VERSION/ASCEND_TOOLKIT_VERSION/OPRUNWAY_SOC` 与 spec/receipt/driver 一致，再真机调用 `cp_f_execute_attempt.py`；只执行 manifest 指定原 case，不调 `run_workflow`、性能 collector 或 `perf_compare` | attempt 内 `caseset/evidence/verdict/attempt_gate/retest_acceptance/attempt.receipt/精度重测报告` | 逐字引用 validator 与 Task-2 gate；基础验收不变、`performance_retested=false`；分开回报“机械闭环”与“新标准裁决生效”；失败单轮返回 blocker，不内部重跑 |
 | `rootcause` | CP-D 出现**任何 FAIL**（精度/性能/门），由 orchestrator 再 dispatch | 失败的 `evidence.json` + 精度判定产物（**验收路径**读 `verdict.json`；**开发级路径**读 `dev_precision_check.json`，那条路没有 `verdict.json`）+ `<op>.spec.json` + PR 改动落点 | 「**被测物自 build + 声明 dtype + 手算 golden**」独立复现，解耦 **op vs harness** 再归因 | `rootcause.md`（独立复现记录 + 归因证据 + 责任归属：op / harness / 环境） | 复现路径与观测数字全来自真实日志/采集；归因有实锤、非臆断；技术判定与官方口径分开、不外发、不替 PR 作者修到底 |
 
-## dispatch_mode: verify_aclnn_harness — CP-C 真机自证
+<!-- oprunway:retired-begin -->
+## dispatch_mode: verify_aclnn_harness — CP-C 真机自证（历史区）
 
-仅用于 `runner_form=aclnn_py`。⛔ **该形态当前不准入验收**（`run_workflow._ACCEPTANCE_RUNNER_FORMS`
-只含 `cpp_extension`）：本节机制仍然有效，但它服务的是 `--allow-experimental-form` 的**开发级**路径——
-harness 信任门通过也**产不出** `acceptance.json` / `verdict.json`。别把「信任门 TRUSTED」讲成验收进展。
-在报告根执行：
+⛔ 历史留档 · 不得 dispatch · 不要照做
+
+仅用于 `runner_form=aclnn_py`，而该形态自 2026-08-06 **停止准入**（`run_workflow._ACCEPTANCE_RUNNER_FORMS`
+只含 `cpp_extension`，派生表里也没有它的条目，逃生阀已删除）：**这个 dispatch_mode 已经没有下游**——
+信任门就算 TRUSTED，CP-D 也跑不起来，更**产不出** `acceptance.json` / `verdict.json`。
+拿到 `runner_form=aclnn_py` 的正确动作是回报 BLOCKED 并要求先迁 `cpp_extension`，**不是**照本节跑一遍。
+本节留着只为解释历史产物是怎么来的：当年这道门过了才准进 CP-D 的 `--mode aclnn_py`，
+而那一行派生早已从派生表里删除。当年在报告根执行：
 
 ```bash
 python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/gen_cases.py \
@@ -54,6 +59,7 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
 
 回报只含：收据路径、见证数/完整 case 数、覆盖的 dtype/variant、build provenance、
 `TRUSTED_FOR_CP_D|BLOCKED`。不得把 harness trusted 表述成算子 PASS。
+<!-- oprunway:retired-end -->
 
 ## dispatch_mode: run_npu — 真机跑测（一次原子，CP-D）
 
@@ -93,7 +99,7 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
    会被 fail-closed 拒）。⚠ **它与 `--out reports/<op>/` 不是同一个目录**——取材目录在前、验收产物目录在后；
    本子agent 自己拿不到该路径时**当场 BLOCKED 回报**，不猜、不拿 `reports/<op>/` 里的副本顶上去
    （那份是本次 staging 出来的产物，拿它当输入等于自己给自己作证）。
-   ⚠ **非验收通路不受此强制**：`mock` 与加了 `--allow-experimental-form` 的 `cpp` / `aclnn_py`
+   ⚠ **非验收通路不受此强制**：显式 `--mode mock` / `catlass*`
    物理上不产验收裁决、也没有来源锚要对账，`run_workflow.py` 对它们不要求 `--source-facts`。
 
    ⚠ **`<mode>` 不写死、不问用户——`spec.runner_form` 是唯一真源**（受控词表
@@ -102,14 +108,14 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
    | `spec.runner_form` | `--mode` | 能否产验收裁决 | 附加前置 |
    |---|---|---|---|
    | `cpp_extension`（或未声明） | `cpp_extension` | ✅ **当前唯一准入形态** | 须 `OPRUNWAY_CPP_EXTENSION_REAL=1` + 显式 driver/device/vendor；只认绑定精确 spec/caseset/ELF/vendor/runtime 与来源锚的 receipt |
-   | `cpp` | `new_example` | ❌ 须 `--allow-experimental-form` 才跑得起来，只产 `dev_run_summary.json` / `dev_precision_check.json` | `OPRUNWAY_*` 见 `repo_adapter._ne_cfg`；真机 dtype 白名单 fp32/fp16/bf16 |
-   | `aclnn_py` | `aclnn_py` | ❌ 同上 | 须 `OPRUNWAY_ACLNN_REAL=1` + `OPRUNWAY_ACLNN_*` 见 `aclnn_adapter._aclnn_cfg`；build install 只写**用户态 vendor 目录**、绝不写共享 opp |
+   | `cpp` | （无）| ⛔ **停止准入（2026-08-06）**：派不出 mode，显式 `--mode new_example` 也被拒 | — （真机入口已删；历史机制见文末历史区） |
+   | `aclnn_py` | （无）| ⛔ **停止准入（2026-08-06）**：同上 | — （同上） |
 
    `mock` / `catlass` / `catlass_mock` **派生不出来**，只能由人显式指定（局部自检 / catlass 通路的正当逃生口），**且不产验收裁决**。
    **验收裁决当前只出自 `cpp_extension`**（`run_workflow._ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})`，
    入口门 `_resolve_mode` + 出口门 `_assert_acceptance_form_allowed` 两道；理由见 `AGENTS.md` §4）。
-   ⚠ **「能跑」和「能出裁决」分开读**：`cpp` / `aclnn_py` 加逃生阀仍跑得起来（修通路、复现问题、局部开发验证），
-   但那条路**物理上不写** `acceptance.json` / `verdict.json`——「跑绿了」不得写成验收通过、不得进报告的裁决栏。
+   ⚠ **别把「能跑」和「能出裁决」的旧说法照搬过来**：`cpp` / `aclnn_py` 现在连跑都跑不起来——逃生阀已删除，
+   两道门前后各拦一次。拿到这类 spec 的正确回报是 **BLOCKED + 「须先迁 `cpp_extension`」**，不是想办法绕。
    历史小 caseset 的 56/60-case 结果只属当时证据，不得作为当前 CP-D 放行条件或当前验收结论；当前状态只引用本轮确定性产物。
 
    > ⚠ **收敛到 `cpp_extension` 的理由是真机成熟度，不是形态优劣**（`AGENTS.md` §4.1）：
@@ -135,7 +141,7 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
    | 路径 | 落盘产物 | 不产（**不是缺件**） |
    |---|---|---|
    | **验收路径** `cpp_extension` | `caseset.json`、`evidence.json`、`verdict.json`、`baseline.json`（有基线时）、`perf_report.json`、`acceptance.json`、Markdown 验收报告；另有 `repro/index.tsv` + `repro/cases/<case_id>.sh`（只重放本轮冻结输入/ELF，`acceptance_verdict=null`） | — |
-   | **开发级路径** `cpp` / `aclnn_py`（须 `--allow-experimental-form`） | `caseset.json`、`evidence.json`、`dev_precision_check.json`（精度判定照跑，但**换了文件名**）、`baseline.json`（有基线时）、`perf_report.json`（带 `evidence_grade` + NON-ACCEPTANCE 戳）、`dev_run_summary.json`（字段是 `pipeline_result` / `precision_check` / `selfcheck`，**不是** `overall` / `precision_verdict` / `gate`） | `verdict.json`、`acceptance.json`、Markdown 验收报告 |
+   | **非验收路径**（显式 `--mode mock` / `catlass*`） | `caseset.json`、`evidence.json`、`dev_precision_check.json`（精度判定照跑，但**换了文件名**）、`baseline.json`（有基线时）、`perf_report.json`（带 `evidence_grade` + NON-ACCEPTANCE 戳）、`dev_run_summary.json`（字段是 `pipeline_result` / `precision_check` / `selfcheck`，**不是** `overall` / `precision_verdict` / `gate`） | `verdict.json`、`acceptance.json`、Markdown 验收报告 |
 
    ⚠ 换名不是「加个标注」而是**物理不产**：下游按文件名读裁决，同名同形的产物迟早被当验收结论用掉。所以在开发级路径上**等待、索要或按缺件上报** `verdict.json` / `acceptance.json` 都是错的读法。
 7. **回报**：除裁决/判定字段与门结果外，固定记录
@@ -190,7 +196,7 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
 | 路径 | `artifacts` | `verdict_quoted` | `gate` |
 |---|---|---|---|
 | **验收路径** `cpp_extension` | `reports/<op>/acceptance.json`、`verdict.json`、`evidence.json`、`perf_report.json` 等本轮真实落盘者 | `source` = `reports/<op>/acceptance.json`，逐字引用 | task1/task2（+ task3）如实填 |
-| **开发级路径** `cpp` / `aclnn_py` | `reports/<op>/dev_run_summary.json`、`dev_precision_check.json`、`evidence.json`、`perf_report.json` | **`null`**——本轮无验收裁决可引；把 `dev_run_summary.json` 的 `pipeline_result` 放 `notes` 并标 NON-ACCEPTANCE，**不得**塞进 `verdict_quoted` 冒充裁决 | task1（+ 条件性 task3）如实填；**task2 填 `N/A`**，且整个 `gate` 是**管路自检**结果、非验收门 |
+| **非验收路径**（显式 `--mode mock` / `catlass*`）| `reports/<op>/dev_run_summary.json`、`dev_precision_check.json`、`evidence.json`、`perf_report.json` | **`null`**——本轮无验收裁决可引；把 `dev_run_summary.json` 的 `pipeline_result` 放 `notes` 并标 NON-ACCEPTANCE，**不得**塞进 `verdict_quoted` 冒充裁决 | task1（+ 条件性 task3）如实填；**task2 填 `N/A`**，且整个 `gate` 是**管路自检**结果、非验收门 |
 | `verify_aclnn_harness` / `rootcause` | 各自收据 / `rootcause.md` | `null`（这两个 mode 本就不产裁决） | 不适用，留空或 `null` |
 
 ## 约束（收束，与全项目措辞一致）

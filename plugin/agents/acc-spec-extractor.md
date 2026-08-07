@@ -20,7 +20,7 @@ description: OpRunway 验收 ②（CP-B）的子 agent——先按 18 项标准�
 - **只回结构化摘要给 orchestrator**：不直接面向用户对话、不展示脚本命令；产出=落盘的 spec 文件 + 一段结构化中文摘要（见末节）。
 - **不自行判定**：判定唯一归**确定性脚本链**——`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）→ 门控后写 `acceptance.json`。编排层与 subagent **不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**（ADR 0007）——不是「绝不提 pass/fail」。本 agent 只产 spec 与 gaps；spec 抽得对不对不由自己宣告「通过」，而由 CP-B 的 **`--dry-run` 契约自检**（只查用例**计划**自洽，**不产任何裁决**）与 **CP-D 真机门**用确定性脚本裁决。
   ⚠ **验收裁决只有真机通路产得出来**（C5，用户 2026-07-22 拍板）：mock 的「NPU 输出」= `golden.copy()`、精度按构造必过、性能是编的假数，它**已不再写 `acceptance.json` / `verdict.json`**（改产标明 NON-ACCEPTANCE 的 `dev_run_summary.json`）。**别再说「跑 mock 看裁决」**。
-  ⚠ **真机是必要不是充分**：真机通路里当前**只有 `runner_form="cpp_extension"` 准入产裁决**（`AGENTS.md` §4），`cpp` / `aclnn_py` 上真机也只产开发级产物。
+  ⚠ **真机是必要不是充分**：当前**只有 `runner_form="cpp_extension"` 有真机入口并准入产裁决**（`AGENTS.md` §4）。`cpp` / `aclnn_py` 是只为读取旧 spec 保留的历史值，本 agent 不得为新一轮抽取它们。
 
 ## dispatch 契约
 
@@ -71,6 +71,7 @@ description: OpRunway 验收 ②（CP-B）的子 agent——先按 18 项标准�
 - **干什么**：加载 `acc-spec` skill，按 `references/taskdoc-to-spec.md` 字段映射表逐字段抽，重点守住这几个最易错点（都在 ref 里）：
   1. **dtype 全集 vs 子集**：任务书显式枚举时逐字采用；任务书把范围定义为“所有进入 AICore 的数据类型”等实现域集合时，从本轮同一 PR head 的 `op_def` 与目标硬件配置枚举成员。不得复用旧 spec/报告，也不得因任务书未重复列举就回 `needs_user`。只有本轮任务书语义和本轮 PR/op_def 都无法确定集合时才问用户。再以确定性生成/runner 能力表求当前可测子集，写入 `params.dtype`，其余逐项挂账。
      **C4 · dtype 冲突以任务书为准**（用户 2026-07-22 拍板，详规 ref §1.2）：任务书要、**算子 `op_def` 压根不支持**的差额，写成结构化 gap `{kind:"dtype_unsupported_by_op_def", dtypes, task_doc_ref, op_def_ref, op_def_dtypes}`，裁决落 `passed_with_gaps`。「没实现」是**发现**、不是借口。⚠ 这是上面那条红线的**延伸不是例外**；⚠ 也**不是「宣称有 gap 就免检」的后门**——`validator` 四道硬校（有据 / 自洽 / **不得覆盖真失败**（该 dtype 有真实用例在跑 = 实现了但跑挂了，必须走精度裁决）/ 在 `dtype_required` 内），缺一即 `overall=fail`。与「我们暂时测不了」的 `dtype_deferred` **别混**。
+     **`dtype_deferred` 同样不是免检牌**（详规 ref §1.2a）：它必须**声明能力来源**——`capability_source` ∈ `{generation, runner, compute}`，指名是 `gen_cases._NATIVE` / `repo_adapter.SUPPORTED_NP_BY_FORM[<runner_form>]`（此来源另须写 `runner_form`）/ `precision_policy.SUPPORTED_COMPUTE_DTYPES` 哪一张表不支持；门拿**活表**交叉核验，🔴 **自报不支持而表里其实支持 → 拒该 gap**（该 dtype 随即按「静默收窄」判 BLOCKED）。且挂了它的 dtype 若一条用例都没跑，终态**不会**是干净 `pass`（至少 `needs_review`）。所以别用它罩「不想测」的 dtype——写上去只会把结论从 pass 变成 BLOCKED/needs_review。
   2. **verify_mode**：behavioral/exact/numerical 三值决策树（ref §2），靠输出 dtype + 运算性质推断，任务书从不直写。
   3. **precision.threshold**：必落数字（exact→0；numerical→主 dtype 默认值），标『(推断/待工具核实)』。
   4. **runner 锚定线索**：从 `pr_facts.key_files` 的 `test_aclnn_*.cpp` 读算子实测用的 **aclnn 入口 + 输入 dtype**，记进 spec 供 ③ `acc-runner-dev` 锚定——**别凭 header 猜**（Equal 曾因猜错入口/dtype 翻车）。
@@ -113,17 +114,18 @@ description: OpRunway 验收 ②（CP-B）的子 agent——先按 18 项标准�
 - **任务书是验收权威**；PR 提供本轮 ABI、op_def 枚举、example 和目录等被测事实。任务书以
   “所有进入 AICore 的类型”定义集合时，op_def 负责枚举成员；不得复用旧 spec/报告，也不代表验收通过。
 - 确定性活（取材/fetch）在 `fetch_source.py`（primary CP-A 跑），本 agent 只做 NL 抽取判断；换运行时只换本壳，`acc-spec` skill 的 `references/` + `fetch_source.py` 不动；此可移植性依赖 canon 项 `cross-cli-unified-form`（proposed·未 settle，载重前需核）。
-- 相关：`skills/acc-spec`（本 agent 承载的 skill）、CP-A primary `fetch_source.py`（取材）、CP-B primary `gen_cases.py --dry-run`（下游契约自检，**非裁决**）、CP-D 真机 `run_workflow.py --mode <mode>`、`op-acceptance`（dispatch 本 agent 的 orchestrator）。
-  ⚠ `<mode>` **据 `spec.runner_form` 派生**（受控词表 `{cpp, aclnn_py, cpp_extension}`，**缺省 = `cpp_extension`**：
-  `cpp_extension`（或未声明）→ `cpp_extension`、`cpp` → `new_example`、`aclnn_py` → `aclnn_py`；`mock`/`catlass*` 派生不出、只能显式指定）。
-  ⚠ **验收裁决当前只出自 `cpp_extension` 一条通路**（`run_workflow._ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})`，
-  入口门 + 出口门两道；理由见 `AGENTS.md` §4）。`cpp` / `aclnn_py` 仍能在真机跑（须 `--allow-experimental-form`），
-  但**物理上只产** `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"`），
-  **不写** `acceptance.json` / `verdict.json`——「能跑」不等于「能出裁决」。历史某次跑测结果也不能替代本轮 form 与 provenance。
-  ⚠ **这条与本 agent 的职责直接相关**：`runner_form` 正是**本 agent 抽出来的字段**——抽成 `cpp` / `aclnn_py`
-  就等于把下游整条通路挡在准入门外（编排会在入口门停摆），而它要的其实就是当前唯一准入的那条。
-  - **默认抽 `runner_form="cpp_extension"`**（正式验收统一走这条，不问用户选 form）。任务书把 stock `torch.*` 指定为功能真值时更是如此；DUT 与 baseline 必须分属独立 namespace。逐项核对任务书要求的 Torch overload 与本轮 PR-head ABI：可执行项生成 profile/call variant；任务书要求但 PR 无可执行 ABI 的项写 `api_surface_unsupported_by_pr` gap，摘要明确“要求但未实现”。不得伪造 profile，也不得因被测物缺功能把 CP-B 判成事实不足；该 gap 必须进入最终验收并阻止干净 PASS。
-  - 只有在任务书/PR 事实确凿指向 `cpp` / `aclnn_py`、且明知**该轮只做开发级验证不出裁决**时才抽那两个值；正式验收场景一律 `cpp_extension`，
-  迁移成本（torch.ops 调用桥 + vendor ELF 构建收据）是已知账单，不是改抽别的 form 的理由。
-  （另：`cpp` 通路真机 dtype 白名单只有 fp32/fp16/bf16，`int32` 落 `DEFERRED_NP_BY_FORM["cpp"]`、真机 fail-closed → 覆盖缺一块。
-  ⚠ **runner form 不决定性能基线**——每份任务书要求的 baseline 须逐份单独核实，不得由 form 反推。）
+- 相关：`skills/acc-spec`（本 agent 承载的 skill）、CP-A primary `fetch_source.py`（取材）、CP-B primary `gen_cases.py --dry-run`（下游契约自检，**非裁决**）、CP-D 真机 `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`（⚠ 验收通路上 `--source-facts` 必给、缺席直接拒跑）、`op-acceptance`（dispatch 本 agent 的 orchestrator）。
+  ⚠ 新一轮 spec **一律显式写 `runner_form="cpp_extension"`**，不问用户选 form；这是当前唯一能派生真机 mode、产验收裁决的执行形态。任务书/PR 提到旧调用桥，只能作为历史或 ABI 事实，不能驱动本字段改值。若本轮 ABI 无法接入 `cpp_extension`，就按不支持的接口能力回 `BLOCKED` 并挂迁移缺口，**不得**改抽退役 form 绕过。
+  任务书把 stock `torch.*` 指定为功能真值时，DUT 与 baseline 必须分属独立 namespace。逐项核对任务书要求的 Torch overload 与本轮 PR-head ABI：可执行项生成 profile/call variant；任务书要求但 PR 无可执行 ABI 的项写 `api_surface_unsupported_by_pr` gap，摘要明确“要求但未实现”。不得伪造 profile，也不得因被测物缺功能把 CP-B 判成事实不足；该 gap 必须进入最终验收并阻止干净 PASS。
+  ⚠ **runner form 不决定性能基线**——每份任务书要求的 baseline 须逐份单独核实，不得由 form 反推。
+
+<!-- oprunway:retired-begin -->
+### runner form 历史区
+
+⛔ 历史留档 · 不得 dispatch · 不要照做
+
+受控词表仍保留 `cpp` / `aclnn_py`，是为了读懂旧 spec 与按旧 form 解释能力账本，并不表示本 agent
+还能生成它们。2026-08-06 以前，`cpp` 使用 per-op runner，真机 dtype 白名单只有
+fp32/fp16/bf16，`int32` 落 `DEFERRED_NP_BY_FORM["cpp"]`；`aclnn_py` 使用通用 ctypes 两段式
+调用桥。这两条旧形态现在都没有真机入口，历史结果也不能替代本轮 form 与 provenance。
+<!-- oprunway:retired-end -->

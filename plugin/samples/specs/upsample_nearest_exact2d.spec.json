@@ -96,7 +96,7 @@
     },
     "policy_note": "spec 级 policy 为主 dtype(fp16) 代表；per-case policy 由 gen_cases 按 golden dtype 派生(fp32=1e-4/fp16=1e-3)",
     "threshold_source": "任务书『算子计算精度需满足 AscendOpTest 工具默认阈值』无数值；0.001 为 fp16 惯例 (推断/待工具核实)。注：最近邻插值是纯 gather，输出恒为输入元素的逐位拷贝、理论上应精确相等，此阈值实际是宽松上界",
-    "case_target": 20,
+    "_case_target_note": "本样例**有意不写 `precision.case_target`**。原先写的 20 出自 commit 9898745（2026-07-23）——那次是拿本算子当 shape_transform 见证跑通通路，且 commit message 记的实产条数是 **18**、与写下的 20 都对不上（20 是预算、18 是被 pool_max 截到的实产），从未写过 20 是怎么按覆盖轴算出来的。⚠ 这份与 im2col 的 50 不同：20 不是 gen_cases 缺省值，所以它不是「缺省的化石」；但同样**给不出推算依据**，按「编不出依据就不许留一个数」一并删除。要跑本样例先照 `plugin/skills/acc-spec/references/taskdoc-to-spec.md` 的『case_target 怎么定』现算一个并写清 `case_target_source`——直接跑 gen_cases 会当场 fail-fast，**那正是预期行为**。",
     "bf16_bitexact": true
   },
   "perf": {

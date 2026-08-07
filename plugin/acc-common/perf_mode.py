@@ -32,9 +32,14 @@
 ⚠ `change.kind` 此前只是**文档字段、无代码消费方**（写错没人管）；本模块给了它受控词表与
 fail-closed 校验，`gen_cases` 在计划期调一次，让写错的 kind 当场炸而不是安静地不起作用。
 """
+import hashlib
+import os
 import re
 
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+_TASKDOC_SNAPSHOT_NAME = "task_doc.snapshot.md"
+_CITE_RE = re.compile(
+    rf"{re.escape(_TASKDOC_SNAPSHOT_NAME)}:([1-9][0-9]*)(?:-([1-9][0-9]*))?\Z")
 
 #: 受控词表。**别在这里加第三个值**而不同步四个消费方——门会 fail-closed 拒绝未知值。
 MODE_RATIO_GATED = "ratio_gated"
@@ -135,7 +140,8 @@ def normalize(mode):
     旧实现把它们合并后返回 `DEFAULT_MODE`——于是一份写了 `"mode": null` 的坏 spec / 坏账本
     会被静默当成「没声明 → 缺省严档」，而**「产物里显式写了个坏值」这件事被吞掉了**。
     这与本模块 `_ABSENT` 哨兵要解决的是同一类问题（见 `measure_only_authorization` 的
-    `taskdoc_snapshot_sha256`：显式 null 合法、省略键不合法——两者语义必须分得开）。
+    `taskdoc_snapshot_sha256`：显式 null 是可识别的旧未绑定状态、省略键是旧 schema；两者都拒，
+    但错误语义必须分得开）。
 
     「字段真正缺失 → 缺省档」的判断归调用方：调用方用 `_ABSENT` 哨兵区分缺键与坏值
     （见 `resolve_spec_mode` / `policy_mode`），本函数只负责「给我一个值，我判它合不合法」。
@@ -156,11 +162,10 @@ def measure_only_authorization(perf):
         走 `change_class_no_perf_comparison` 时**还要**与 `spec.change.kind` 对得上——那道交叉核在
         `resolve_spec_mode`（本函数只拿得到 `perf`，看不见 `change`）；
       · `cite` / `quote`      —— 任务书里说这句话的**位置与逐字原文**；
-      · `taskdoc_snapshot_sha256` —— 引文所依附的任务书快照指纹，使上面两项**可机核**。
-        允许**显式** `null`（本轮没有 `task_doc.snapshot.md` 入库时的诚实表述，AGENTS.md 5.8：
-        不填未经核实的 sha），但**不允许省略该键**——省略等于没人说过引文有没有锚。
-        `null` 时授权仍成立，但 `taskdoc_snapshot_sha256: null` 会原样进 Task1 账本与报告，
-        「本轮授权未绑快照」这件事因此是**可见的**，而不是消失的。
+      · `taskdoc_snapshot_sha256` —— 引文所依附的任务书快照指纹，使上面两项**可机核**；
+        必须是 64 位小写 sha256。旧产物的显式 `null` 只说明「当时没有绑定」，**不再构成授权**，
+        必须补任务书快照并重生成 caseset。字段缺席与显式 `null` 分别报错，便于迁移时区分旧 schema
+        与旧的未绑定状态；两者都 fail-closed。
     """
     if not isinstance(perf, dict):
         raise PerfModeError("spec.perf 须为 object")
@@ -193,17 +198,81 @@ def measure_only_authorization(perf):
                 f"perf.measure_only_authorization.{key} 须为非空字符串（实得 {value!r}）——"
                 "无引文锚则授权不可核（fail-closed）")
     digest = auth["taskdoc_snapshot_sha256"]
-    if digest is not None and (not isinstance(digest, str) or not _HEX64.fullmatch(digest)):
+    if digest is None:
+        raise PerfModeError(
+            "perf.measure_only_authorization.taskdoc_snapshot_sha256=null 是旧产物的未绑定状态，"
+            "收紧后不再构成 measure_only 授权；须补 task_doc.snapshot.md 的真实 sha256 并重生成 caseset")
+    if not isinstance(digest, str) or not _HEX64.fullmatch(digest):
         raise PerfModeError(
             "perf.measure_only_authorization.taskdoc_snapshot_sha256 须为 64 位小写十六进制，"
-            f"或**显式** null 表示本轮无任务书快照可绑（实得 {digest!r}）——"
-            "绝不接受省略该键：省略 = 谁也不知道引文有没有锚")
+            f"实得 {digest!r}；无真实快照锚不得进入 measure_only")
     return {
         "taskdoc_requirement": ground,
         "cite": auth["cite"].strip(),
         "quote": auth["quote"],
         "taskdoc_snapshot_sha256": digest,
     }
+
+
+def verify_measure_only_authorization(auth, snapshot_path):
+    """现场核验 measure-only 授权的**文本锚**，返回 ``(ok, reason)``。
+
+    本函数证明且只证明：
+
+    1. 授权对象结构完整，快照 sha256 非空且格式合法；
+    2. 校验方现场读取的 ``task_doc.snapshot.md`` 字节摘要与声明逐字相同；
+    3. ``quote`` 是 ``cite`` 指定的 1-based 行区间的逐字子串。
+
+    ⚠ **静态不可证边界（显式挂账）**：文本子串校验不能理解自然语言，因此本函数不宣称
+    ``quote`` 的语义真的支持所选 ``taskdoc_requirement``（例如一句普通的“GPU”是否真是性能比较条款），
+    也不证明任务书与 PR 的业务对应关系。前者须由 spec 抽取/人审负责，后者由来源与任务书↔PR 对账门负责。
+    这里不做关键词猜测；关键词分类会制造一个看似更强、实际可绕过的假门。
+
+    路径由调用方从受控仓布局解析，本函数不信授权对象自报路径。符号链接拒绝跟随，防止校验时换靶。
+    """
+    try:
+        normalized = measure_only_authorization(
+            {"measure_only_authorization": auth})
+    except PerfModeError as ex:
+        return False, str(ex)
+    if not snapshot_path:
+        return False, "measure_only 授权所需任务书快照路径缺失"
+    try:
+        path = os.fspath(snapshot_path)
+    except TypeError:
+        return False, f"measure_only 任务书快照路径类型非法：{type(snapshot_path).__name__}"
+    if os.path.islink(path):
+        return False, f"measure_only 任务书快照不得是符号链接：{path!r}"
+    if not os.path.isfile(path):
+        return False, f"measure_only 任务书快照不存在或不是普通文件：{path!r}"
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as ex:
+        return False, f"measure_only 任务书快照读取失败：{path!r}：{ex}"
+    actual = hashlib.sha256(raw).hexdigest()
+    declared = normalized["taskdoc_snapshot_sha256"]
+    if actual != declared:
+        return False, (f"measure_only 任务书快照指纹不符：声明 {declared[:12]}…，"
+                       f"现场重算 {actual[:12]}…（快照被换或授权锚不是本任务书）")
+
+    cite = normalized["cite"]
+    match = _CITE_RE.fullmatch(cite)
+    if match is None:
+        return False, (f"measure_only cite={cite!r} 格式非法；须为 "
+                       f"{_TASKDOC_SNAPSHOT_NAME}:<起>[-<止>]，不接受其它文件")
+    start = int(match.group(1))
+    end = int(match.group(2)) if match.group(2) else start
+    if end < start:
+        return False, f"measure_only cite 行区间非法：{start}-{end}（须起<=止）"
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    if end > len(lines):
+        return False, f"measure_only cite 行区间越界：{start}-{end}，快照仅 {len(lines)} 行"
+    segment = "\n".join(lines[start - 1:end])
+    if normalized["quote"] not in segment:
+        return False, (f"measure_only quote 不是 {cite} 行区间的逐字子串——"
+                       "引文与现场任务书快照对不上")
+    return True, None
 
 
 def resolve_spec_mode(spec):

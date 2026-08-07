@@ -13,6 +13,32 @@ import precision_retest_runner as R
 import precision_retest_contract as C
 
 
+def _vendor_build_receipt(*, local, anchor, scope=None, repo="repo",
+                          argv=("bash", "build.sh")):
+    """一份能过 `vendor_build_receipt.summarize()` 的收据。
+
+    CP-F 迁到 `source_provenance` 之后**不再自己解释** `receipt["source"]` 的原始字段，
+    只消费归一化摘要——fixture 因此必须是完整合法收据，不能是旧 `dut_source` 时代那种
+    `{"source": …, "build": …}` 残片。
+    """
+    build = {"argv": list(argv), "cwd": "/src",
+             "returncode": 0, "returncode_source": "measured"}
+    if not local:
+        return {"schema": "oprunway.vendor_build_receipt", "schema_version": 1,
+                "status": "VERIFIED",
+                "source": {"repo": repo, "pr_head_sha": anchor},
+                "build": build}
+    return {"schema": "oprunway.vendor_build_receipt", "schema_version": 2,
+            "status": "VERIFIED",
+            "source": {"provenance_kind": "local_snapshot",
+                       "declared_source_form": "local_source",
+                       "pr_head_sha": None, "repo": repo,
+                       "snapshot_subtree_scope": scope,
+                       "snapshot_sha256": "6" * 64,
+                       "snapshot_subtree_sha256": anchor},
+            "build": build, "degradations": []}
+
+
 class SelectedCasesetTest(unittest.TestCase):
     def test_preserves_manifest_order_and_original_case_content(self):
         base = {
@@ -41,16 +67,14 @@ class SelectedCasesetTest(unittest.TestCase):
         # cpp_extension 是当前唯一验收准入通路，runner 也正是这样**不带任何旁路**调它的。
         self.assertEqual(R.run_workflow._resolve_mode(
             {"runner_form": "cpp_extension"}, None), "cpp_extension")
-        # cpp / aclnn_py 现被验收准入白名单（run_workflow._ACCEPTANCE_RUNNER_FORMS）挡下。
-        # 本用例测的是**映射复用**、不是准入，故显式 allow_experimental_form=True 关掉准入门，
-        # 断言才落回 runner_form→mode 这张表上；换成 cpp_extension 夹具则这两行什么都不再覆盖。
-        # ⚠ 该旁路只存在于断言里：runner 自身（precision_retest_runner 的 execute 路径）调
-        #   _resolve_mode 时**不带**这个 flag，所以这两种 form 的 base spec 在 CP-F 重测中
-        #   仍会被准入门 fail-closed 拦住——本用例不改变、也不放宽那条业务行为。
-        self.assertEqual(R.run_workflow._resolve_mode(
-            {"runner_form": "cpp"}, None, allow_experimental_form=True), "new_example")
-        self.assertEqual(R.run_workflow._resolve_mode(
-            {"runner_form": "aclnn_py"}, None, allow_experimental_form=True), "aclnn_py")
+        # 通路收敛（2026-08-06）后那张表只剩一条，且 cpp / aclnn_py 连映射都没有了。
+        # CP-F 借的就是这张表，所以那两种 form 的 base spec 在这里当场派生失败——
+        # 正是 CP-F 想要的行为（2026-08-05 定论：CP-F 只支持 cpp_extension，且没有逃生阀）。
+        self.assertEqual(sorted(R.run_workflow._RUNNER_FORM_TO_MODE), ["cpp_extension"])
+        for retired in ("cpp", "aclnn_py"):
+            with self.subTest(retired=retired):
+                with self.assertRaises(SystemExit):
+                    R.run_workflow._resolve_mode({"runner_form": retired}, None)
 
     def test_cpf_calls_resolve_mode_without_any_escape_hatch(self):
         """⭐ CP-F 只支持 `cpp_extension` 是**定论**，不是收敛的副作用（2026-08-05 决策）。
@@ -60,6 +84,10 @@ class SelectedCasesetTest(unittest.TestCase):
         `verdict.json`**（`_write_json(attempt, "verdict.json", …)`），报告还直接展示
         「validator 精度裁决」。放非准入通路进来，产出的东西长得就是一份验收裁决——
         准入门要防的正是这个，只是换了个门进来。
+
+        ⚠ 那个逃生阀本身已于 2026-08-06 随通路收敛从 `run_workflow` 整个删除（`_resolve_mode`
+        不再有该形参）。本条**照旧保留**：它钉的是「调用点不许长出关键字实参」这条形状约束，
+        与逃生阀叫什么名字无关——下一个逃生阀若以别的名字回来，这里同样会红。
 
         ⚠ **这条必须断言调用点本身，不能断言 `_resolve_mode` 的行为。**
         初版写成 `assertRaises(SystemExit, R.run_workflow._resolve_mode(...))` 是错的：
@@ -83,8 +111,8 @@ class SelectedCasesetTest(unittest.TestCase):
         call = calls[0]
         self.assertEqual(
             [kw.arg for kw in call.keywords], [],
-            "CP-F 的 _resolve_mode 调用点出现了关键字实参——若是 allow_experimental_form，"
-            "那就是给 CP-F 开了逃生阀，与 2026-08-05 定论冲突（理由见本用例 docstring）")
+            "CP-F 的 _resolve_mode 调用点出现了关键字实参——若那是某种「放行非准入通路」的旁路，"
+            "就是给 CP-F 开了逃生阀，与 2026-08-05 定论冲突（理由见本用例 docstring）")
         self.assertEqual(len(call.args), 2, "调用点的位置实参应为 (spec, None)")
 
     def test_cpf_rejection_message_states_the_rule_not_a_workaround(self):
@@ -360,14 +388,18 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
         }
         generated_manifest_sha = R.cpp_extension_adapter._canonical_sha(
             generated_manifest)
-        # 两条来源通路共用同一份 fixture：锚字段名和锚长度都由 `dut_source` 决定，
-        # 测试不按字面拼 key，也不复用同一段 hex 冒充另一条通路。
-        anchor_field = "local_root_digest" if local else "pr_head_sha"
+        # 两条来源通路共用同一份 fixture：锚字段名、锚长度和 scope 维都由
+        # `source_provenance` 的词表决定，测试不按字面拼 key，也不复用同一段 hex
+        # 冒充另一条通路。
+        kind = "local_snapshot" if local else "gitcode_pr"
+        anchor_field = C.SOURCE_ANCHOR_FIELD[kind]
         anchor_value = ("7" * 64) if local else ("c" * 40)
+        scope = "experimental/index/median" if local else None
         source_identity = {
-            "dut_source": "local_checkout" if local else "pull_request",
+            "provenance_kind": kind,
             "anchor_field": anchor_field,
             "anchor_value": anchor_value,
+            "snapshot_subtree_scope": scope,
         }
         manifest = {
             "runner_binding": {
@@ -393,20 +425,15 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
             },
         }
         directive = {
-            "source_identity": {
-                "repo": "repo",
-                anchor_field: anchor_value,
-                "build_receipt_sha256": "d" * 64,
-            },
+            "source_identity": dict(
+                {"repo": "repo", anchor_field: anchor_value,
+                 "build_receipt_sha256": "d" * 64},
+                **({"provenance_kind": kind,
+                    "snapshot_subtree_scope": scope} if local else {})),
         }
-        if local:
-            directive["source_identity"]["dut_source"] = "local_checkout"
-        build_receipt = {
-            "source": dict(
-                {"repo": "repo", anchor_field: anchor_value},
-                **({"dut_source": "local_checkout"} if local else {})),
-            "build": {"argv": ["bash", "build.sh", "-f", "x"]},
-        }
+        build_receipt = _vendor_build_receipt(
+            local=local, anchor=anchor_value, scope=scope,
+            argv=["bash", "build.sh", "-f", "x"])
         receipt = {
             "bindings": {
                 "manifest_sha256": generated_manifest_sha,
@@ -463,8 +490,38 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
     def test_fresh_receipt_claiming_other_channel_is_blocked(self):
         """fresh 收据改口说 PR + 任意 40 位 hex → 本地锚等值校验会整条跳过，必须先拒。"""
         manifest, directive, plan, receipt, generated = self._fixture(local=True)
-        receipt["vendor"]["build_receipt"]["source"] = {
-            "repo": "repo", "pr_head_sha": "a" * 40}
+        receipt["vendor"]["build_receipt"] = _vendor_build_receipt(
+            local=False, anchor="a" * 40, argv=["bash", "build.sh", "-f", "x"])
+        with self.assertRaisesRegex(
+                R.RetestExecutionError, "来源锚不可信"):
+            R._validate_cpp_extension_fresh_receipt(
+                receipt, manifest, directive, plan, generated)
+
+    def test_fresh_receipt_scope_drift_is_blocked_even_when_merkle_matches(self):
+        """⭐ 只比 merkle 值等于没比：范围不同的两个 merkle 本来就不可比。
+
+        这一维在旧 `dut_source` 的 `local_root_digest` 下**根本不存在**，是本轮迁移
+        新增的载重校验。
+        """
+        manifest, directive, plan, receipt, generated = self._fixture(local=True)
+        receipt["vendor"]["build_receipt"] = _vendor_build_receipt(
+            local=True, anchor="7" * 64, scope="",
+            argv=["bash", "build.sh", "-f", "x"])
+        with self.assertRaisesRegex(
+                R.RetestExecutionError, "source_scope 身份漂移"):
+            R._validate_cpp_extension_fresh_receipt(
+                receipt, manifest, directive, plan, generated)
+
+    def test_fresh_receipt_with_self_declared_returncode_is_blocked(self):
+        """⭐ 迁到 `vendor_build_receipt.summarize()` 顺带接管的一条门。
+
+        旧 `dut_source.validate_build_receipt_source` 只看 `source` 块，一份
+        `build.returncode_source="declared"`（调用方自报退出码）的收据照过；现在判据
+        统一归 `vendor_build_receipt`，自报即当场拒。
+        """
+        manifest, directive, plan, receipt, generated = self._fixture(local=True)
+        receipt["vendor"]["build_receipt"]["build"]["returncode_source"] = (
+            "declared")
         with self.assertRaisesRegex(
                 R.RetestExecutionError, "来源锚不可信"):
             R._validate_cpp_extension_fresh_receipt(
@@ -483,8 +540,27 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
     def test_same_anchor_value_across_channels_is_still_blocked(self):
         """同一段 hex 在两条通路里含义完全不同：只比锚值不比通路等于没比。"""
         manifest, directive, plan, receipt, generated = self._fixture(local=True)
-        manifest["runner_binding"]["base_source_identity"]["dut_source"] = (
-            "pull_request")
+        manifest["runner_binding"]["base_source_identity"]["provenance_kind"] = (
+            "gitcode_pr")
+        with self.assertRaisesRegex(
+                R.RetestExecutionError, "来源身份与本轮漂移"):
+            R._validate_cpp_extension_fresh_receipt(
+                receipt, manifest, directive, plan, generated)
+
+    def test_legacy_manifest_carrying_the_deleted_vocabulary_is_refused(self):
+        """已删的 `dut_source` 词表不得靠「键名不同但值一样」蒙混过关。
+
+        旧 manifest 的 `base_source_identity` 长 `{dut_source, anchor_field, anchor_value}`，
+        新的长 `{provenance_kind, anchor_field, anchor_value, snapshot_subtree_scope}`——
+        整块比就会不等，刻意不留任何旧键兼容兜底。
+        """
+        manifest, directive, plan, receipt, generated = self._fixture(local=True)
+        legacy = manifest["runner_binding"]["base_source_identity"]
+        manifest["runner_binding"]["base_source_identity"] = {
+            "dut_source": "local_checkout",
+            "anchor_field": "local_root_digest",
+            "anchor_value": legacy["anchor_value"],
+        }
         with self.assertRaisesRegex(
                 R.RetestExecutionError, "来源身份与本轮漂移"):
             R._validate_cpp_extension_fresh_receipt(
@@ -531,7 +607,9 @@ class FrozenSourceFactsTest(unittest.TestCase):
             attempt, "source_facts.json", payload)
 
     def _directive(self, *, local):
-        anchor = ({"dut_source": "local_checkout", "local_root_digest": "7" * 64}
+        anchor = ({"provenance_kind": "local_snapshot",
+                   "snapshot_subtree_sha256": "7" * 64,
+                   "snapshot_subtree_scope": "experimental/index/median"}
                   if local else {"pr_head_sha": "c" * 40})
         return {"source_identity": dict(
             anchor, repo="repo", build_receipt_sha256="d" * 64,
@@ -560,8 +638,9 @@ class FrozenSourceFactsTest(unittest.TestCase):
     def test_frozen_facts_path_is_returned_after_sha_check(self):
         with tempfile.TemporaryDirectory() as attempt:
             path = self._write(attempt, {
-                "dut_source": "local_checkout",
-                "local_checkout": {"root_digest": "7" * 64}})
+                "pr": {"provenance_kind": "local_snapshot",
+                       "snapshot_merkle_sha256": "7" * 64,
+                       "snapshot_scope": "experimental/index/median"}})
             self.assertEqual(
                 R._frozen_source_facts_path(
                     attempt, self._manifest(C.sha256_file(path)),
@@ -571,12 +650,14 @@ class FrozenSourceFactsTest(unittest.TestCase):
     def test_tampered_frozen_facts_is_refused(self):
         with tempfile.TemporaryDirectory() as attempt:
             path = self._write(attempt, {
-                "dut_source": "local_checkout",
-                "local_checkout": {"root_digest": "7" * 64}})
+                "pr": {"provenance_kind": "local_snapshot",
+                       "snapshot_merkle_sha256": "7" * 64,
+                       "snapshot_scope": "experimental/index/median"}})
             recorded = C.sha256_file(path)
             self._write(attempt, {
-                "dut_source": "local_checkout",
-                "local_checkout": {"root_digest": "8" * 64}})
+                "pr": {"provenance_kind": "local_snapshot",
+                       "snapshot_merkle_sha256": "8" * 64,
+                       "snapshot_scope": "experimental/index/median"}})
             with self.assertRaisesRegex(R.RetestExecutionError, "字节漂移"):
                 R._frozen_source_facts_path(
                     attempt, self._manifest(recorded),

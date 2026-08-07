@@ -33,7 +33,7 @@
 
 【E·perf 选例】performance_selection.py 确定性选 50：core float32/float16/bfloat16 **各 10**（缺则报错，:91-96）；每个声明的 complex dtype **各 ≥5**（:104-110）；float64 目标 5（:113-117）；其他声明 dtype（int/bool/uint）预算允许时 **各 ≥3**（:127-130）；配额 ≥5 的档保留 small+large（≥10 的档各 ≥3）、含 medium；禁 empty/非有限；最后确定性填满，不足 50 即失败（:153-155）。
 - **我们现状**：gen_cases.py 是「op 驱动、按 spec 字段生成」的单套 caseset，每 case 打 dims 标签（功能/精度/性能），不分 accuracy/performance 两套。
-· 数量：case_target 默认 50（gen_cases.py:949,2179）**封顶总用例数**；budget=max(case_target,|forced|)（:1852），常规网格用 `_one_wise_pick` **1-wise 采样**填到 budget（:1854）；coverage_strength 自己注明「50 封顶下 §1.1 100% 正交不可达」（:1872-1873）。强制项=§1.4 特殊场景(每 dtype)+白名单(key dtype×attr×大shape)。
+· 数量：~~case_target 默认 50（gen_cases.py:949,2179）~~ ⚠ **2026-08-06 起不成立**：`_DEFAULT_CASE_TARGET` 已删除，`precision.case_target` **必填、无缺省**，缺席即 fail-fast（唯一读取点 `gen_cases._require_case_target`）；仓内样例 spec 里那些没依据的 50/20 也一并删掉、不许回填。下文的行号是当时的快照，已失效。`case_target` 仍 **封顶总用例数**；budget=max(case_target,|forced|)（:1852），常规网格用 `_one_wise_pick` **1-wise 采样**填到 budget（:1854）；coverage_strength 自己注明「50 封顶下 §1.1 100% 正交不可达」（:1872-1873）。强制项=§1.4 特殊场景(每 dtype)+白名单(key dtype×attr×大shape)。
 · 值域：uniform [-5,5]（:357）与 cannbot 一致；normal 用**固定 _NORMAL_MU=0.0/_NORMAL_SIGMA=1.0**（:966）、**clip 到 [-5,5]**（:355）、且**锚定前 3 元素为 (-2,0,3)**（:360）；int 用自定义 [max(-100,min+1),min(100,max)] + 锚点(-2,0,3)/(0,1,3)（:343-352）。
 · 特殊值 operator_class 门：`_OPERATOR_CLASSES` 词表与 cannbot 完全一致（:439），`_NONFINITE_CLASSES={floating_compute}`（:441）、`_emits_nonfinite`（:463-468），未声明=None→照产（向后兼容）。**这一子维忠实对齐 cannbot、且代码显式引用其 design_contract.py:512**（:83-93,594-597）。
 · 特殊场景本体（:1476-1494）：empty(仅功能)、scalar[1]、bndlo(1,1,1)、bndhi=(1024,1024)=2^20、inf/ninf/nan 各一条(shape 都用 (16,))；special 数据是**前 1/4 位放特殊值 + 其余 uniform**（:427-432）。
@@ -41,7 +41,7 @@
 · value_profile：自造 nan/tie 两枚（:478,499-519，借 generate_array 的 special_values/np.resize 机制），非 cannbot 的 uniform/normal/semantic 轴。
 · perf 选例：`select_perf_cases`（aclnn_runtime/perf_msprof.py:1377）只挑所有 dims 含「性能」且过精度的 case，**无 dtype 配额、无恰 50 目标、无 small/large 保留**。
 - **gaps**：
-  - [HIGH] 数量口径根本不同：cannbot accuracy=完整笛卡尔无上限(1728/3384…)+perf 恰选50，两套；我们单套用 case_target=50 封顶 + 1-wise 采样，精度覆盖被压到 50 条边际采样
+  - [HIGH] 数量口径根本不同：cannbot accuracy=完整笛卡尔无上限(1728/3384…)+perf 恰选50，两套；我们单套用 case_target 封顶 + 1-wise 采样，精度覆盖被压到边际采样。⚠ **「=50」那部分 2026-08-06 起不成立**：缺省已删、`case_target` 必填无缺省，仓内样例里没依据的 50/20 也全删了；本条的**结构性**偏离（单套 + 封顶 + 1-wise）仍然成立，与那个具体数字无关
     - 偏离：gen_cases.py:1852-1854 budget=max(case_target,|forced|)、常规网格 _one_wise_pick 采样填充；:1872 自认「50 封顶下 100% 正交不可达」
     - 对齐改法：在 torch-对标 spec 分支下拆成两口径：accuracy 走 _plan 的完整正交网格全量展开(去掉 1-wise 封顶、去掉 case_target 上限)，另起 perf 子集恰 50。至少把 precision.case_target 语义从『总封顶』改为『perf 选例目标』，accuracy 恒全笛卡尔
   - [HIGH] shape 阶梯缺 medium 档、且非 cannbot 的『base×size×rank padding』结构：cannbot small/medium/large=31/2047/262144 每档 × 8 rank；我们常规全是 numel≤255 的 small、直跳 2^20 大，无 2047 medium 档；size 门槛 2^16 ≠ cannbot 2^18
@@ -63,7 +63,7 @@
     - 偏离：gen_cases.py:343-352
     - 对齐改法：允许 spec 传显式 int 值域(对齐 case_generator.py:55-57 的 integers min/max)；保留排除 dtype-min 的溢出保护即可
 - **cannbot 证据**：skills/operator-case-generation/common/design_contract.py:32-34 (shape_size_class: small≤2^10 / large≥2^18 / else medium); skills/operator-case-generation/common/design_contract.py:412-421 (_validate_floating_rules 硬约束 uniform[-5,5]、normal mu[-5,5] sigma[0.1,2]); skills/operator-case-generation/common/case_generator.py:43-57 (generate_array: uniform/normal 每case采样mu·sigma/integers); skills/operator-case-generation/common/case_generator.py:37-42 (special_values 别名映射 + np.resize 整张量循环填充); skills/operator-case-generation/common/design_contract.py:379-393 (floating 特殊矩阵 8 类 + 非有限须不同 shape); skills/operator-case-generation/common/design_contract.py:427 与 :512 (operator_class 词表 + 仅 floating_compute 调 _validate_floating_rules); skills/operator-case-generation/common/design_contract.py:403-406,399 (维度 2^n/2^n-1 ≤2^20，numel ≤2^31); skills/operator-case-generation/common/design_contract.py:436-437,506-511 (perf≥50候选、accuracy=full Cartesian 减排除); skills/operator-case-generation/scripts/gen/performance_selection.py:10-14,91-130,153-155 (TARGET=50、core各10/complex各5/float64=5/其他≥3); skills/operator-case-generation/SKILL.md:252-255 (结构/整型特殊值: 极值/0·1·-1/重复/越界索引/广播/规约轴/饱和); docs/operator-case-generation.md:36-41,95 (IsClose 1728 全笛卡尔算例 + 不设固定精度用例下限); ops-bench/ops-eval-dataset/designs/aclnnRelu|aclnnSign|aclnnGatherV2/case_design.json (实证: small=[31]/medium=[2047]/large=[262144]、structural special=0、index用zeros+semantic_constraint)
-- **我方证据**：plugin/acc-common/gen_cases.py:949 (_DEFAULT_CASE_TARGET=50); plugin/acc-common/gen_cases.py:2179 (case_target 读取), :1852-1854 (budget=max(target,forced)+_one_wise_pick 采样), :1872-1873 (coverage_strength 自认 100% 正交不可达); plugin/acc-common/gen_cases.py:355,360,966 (normal 固定 mu=0/sigma=1 + clip[-5,5] + 锚定前3元素-2,0,3); plugin/acc-common/gen_cases.py:343-352 (int 值域 [max(-100,min+1),min(100,max)] + 有/无符号锚点); plugin/acc-common/gen_cases.py:439-441,463-468 (operator_class 门忠实对齐 cannbot 词表 + 仅 floating 铺非有限); plugin/acc-common/gen_cases.py:1476-1494 (_special_entries: empty/scalar/bndlo/bndhi/inf/ninf/nan 皆 shape(16,)); plugin/acc-common/gen_cases.py:419-433 (_build_value_special: 前1/4特殊值+其余uniform，非整张量填充); plugin/acc-common/gen_cases.py:952-961,897 (shape 阶梯: 全 small 常规 + 直跳 2^20 大; _LARGE_NUMEL=2^16; 无 medium); plugin/acc-common/gen_cases.py:478,499-519 (value_profile nan/tie 自造); plugin/acc-common/aclnn_runtime/perf_msprof.py:1377 (select_perf_cases: 仅按「性能」tag 全选，无配额/无50)
+- **我方证据**（⚠ 行号与结论均为**当时快照**；`_DEFAULT_CASE_TARGET=50` 已于 2026-08-06 删除，第一条现已不存在，第二条的读取点改为 `_require_case_target`＝缺席即 fail-fast）：plugin/acc-common/gen_cases.py:949 (_DEFAULT_CASE_TARGET=50，**已删**); plugin/acc-common/gen_cases.py:2179 (case_target 读取), :1852-1854 (budget=max(target,forced)+_one_wise_pick 采样), :1872-1873 (coverage_strength 自认 100% 正交不可达); plugin/acc-common/gen_cases.py:355,360,966 (normal 固定 mu=0/sigma=1 + clip[-5,5] + 锚定前3元素-2,0,3); plugin/acc-common/gen_cases.py:343-352 (int 值域 [max(-100,min+1),min(100,max)] + 有/无符号锚点); plugin/acc-common/gen_cases.py:439-441,463-468 (operator_class 门忠实对齐 cannbot 词表 + 仅 floating 铺非有限); plugin/acc-common/gen_cases.py:1476-1494 (_special_entries: empty/scalar/bndlo/bndhi/inf/ninf/nan 皆 shape(16,)); plugin/acc-common/gen_cases.py:419-433 (_build_value_special: 前1/4特殊值+其余uniform，非整张量填充); plugin/acc-common/gen_cases.py:952-961,897 (shape 阶梯: 全 small 常规 + 直跳 2^20 大; _LARGE_NUMEL=2^16; 无 medium); plugin/acc-common/gen_cases.py:478,499-519 (value_profile nan/tie 自造); plugin/acc-common/aclnn_runtime/perf_msprof.py:1377 (select_perf_cases: 仅按「性能」tag 全选，无配额/无50)
 
 ### 精度测试方式方法（仅 torch 对标场景）：容差表 / 比对公式 / nan·inf / index 输出 / pass-fail 门 / 报告格式
 - **已忠实对齐**：False
@@ -231,7 +231,11 @@ C) 容差/口径（precision_policy）：`TORCH_ALLCLOSE` 标准 + `_TA_DTYPE_TO
 
 ---
 
-### H2 —— 【D1·gap1】数量口径根本不同:cannbot accuracy=完整笛卡尔无上限 + perf 恰选 50(两套);我们单套 `case_target=50` 封顶 + 1-wise 边际采样,精度覆盖被压成 50 条采样
+### H2 —— 【D1·gap1】数量口径根本不同:cannbot accuracy=完整笛卡尔无上限 + perf 恰选 50(两套);我们单套 `case_target` 封顶 + 1-wise 边际采样,精度覆盖被压成边际采样
+
+> ⚠ 本节原标题与正文写的是「我们 `case_target=50`」。**那个 50 在 2026-08-06 起不成立**：`gen_cases`
+> 的缺省已删（`case_target` 必填、缺席即 fail-fast），仓内样例里那些没依据的 50/20 也一并删掉。
+> 本节要指的**结构性**偏离（单套 caseset + 预算封顶 + 1-wise 采样）与那个具体数字无关，仍然成立。
 
 **偏离的规则**:cannbot accuracy = dtype×format×rank×shape×value×attr 完整笛卡尔减排除(IsClose 1728/Sign 192/Scatter 3384),`design_contract.py` 明写「不设固定精度用例下限」;perf 另起、`performance_selection.py:10 TARGET=50` 恰选 50。我们 `gen_cases.py:1852 budget=max(case_target,len(forced))` + `_one_wise_pick` 采样,`:1872` 自认「50 封顶下 100% 正交不可达」。
 

@@ -248,7 +248,8 @@ def _measure_only_spec():
             "taskdoc_requirement": "gpu_comparison",
             "cite": "任务书 §6",
             "quote": "以 GPU 为参考，ratio ≥ 0.45×",
-            "taskdoc_snapshot_sha256": None,
+            # 本文件只测 adapter 透传；真实快照重算与 quote 定位由 acceptance gate 专测。
+            "taskdoc_snapshot_sha256": "a" * 64,
         },
     }
     return spec

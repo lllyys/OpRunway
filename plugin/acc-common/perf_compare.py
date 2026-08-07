@@ -686,6 +686,19 @@ def _measure_only_compare(spec, caseset, evidence, op, perf_ids, case_by_id):
     if not perf_ids:
         report = _no_perf_cases(spec, None, None, perf_spec, notes)
         report["perf_mode"] = perf_mode.MODE_MEASURE_ONLY
+        # `_no_perf_cases` 是与 ratio 通路共用的出口，它落的 `达标: 0` 在本口径下**没有含义**：
+        # 没有对照物就没有「达标」这件事，留一个 `0` 会被读成「一条都没达标」——那正是本档刻意
+        # 不出该键的理由（见上面主出口的注释）。本仓契约也明令禁止：
+        # `validate_acceptance_state._gate_measure_only_report` 对 measure_only 报告校
+        # 「summary 不得含 达标 / cases_above_threshold / cases_scored」，
+        # 留着这个 0 等于自己产出一份过不了自己那道门的产物。
+        # ⚠ **一道门都没放松**：`status` 仍是 `no_perf_cases`，gate_task3 见它照旧记 error → BLOCKED；
+        #   run_workflow 的 `perf_measured_only` 要求 `status == measured`，此出口拿不到，
+        #   overall 仍落 `BLOCKED(measure_only 性能实测未完成)`。这里改的只是**词表**，不是判定。
+        report["summary"].pop("达标", None)
+        # 补本口径的计数词（0 条性能 case → 0 条实测）。缺这一项时门会另记一条
+        # 「summary.measured=None 非整数计数」的**噪声** error，把真正的原因（无性能用例）淹掉。
+        report["summary"]["measured"] = 0
         return report
     ev_list = evidence["evidence"]
     ev_ids = [e.get("case_id") for e in ev_list if isinstance(e, dict)]

@@ -166,7 +166,19 @@ SUPPORTED_NP_BY_FORM = {
                  "int8": np.int8, "uint8": np.uint8, "bool": np.bool_},
     "cpp_extension": {"float32": np.float32, "float16": np.float16, "bfloat16": np.float32,
                       "int64": np.int64, "int32": np.int32, "int16": np.int16,
-                      "int8": np.int8, "uint8": np.uint8, "bool": np.bool_},
+                      "int8": np.int8, "uint8": np.uint8, "bool": np.bool_,
+                      # 2026-08-06 扩：uint32 / complex64。**实测证据**（不是查文档、更不是推断）——
+                      # a3 容器 `oprunway_prov`（torch 2.10.0 + torch_npu 2.10.0，即验收真机那份栈）
+                      # 上逐条跑通 `cpp_extension_driver` 的**整条载体路径**：
+                      #   np.load → torch.from_numpy → .npu() → torch.empty(dtype, device="npu")
+                      #   → copy_ → .cpu().numpy() 回读，两个 dtype 值与 dtype 均无损往返。
+                      # ⚠ 这张表的语义只到「**这条通路收发得了这个 dtype**」。它**不**声明
+                      #   「哪个 aclnn kernel 接受这个 dtype」——那是被测算子自己的事，正是验收要测的东西。
+                      #   （同 AGENTS.md §4.1：能力表 ≠ 准入表；`_ACCEPTANCE_RUNNER_FORMS` 一个字没动。）
+                      # ⚠ `cpp` / `aclnn_py` 两条通路**没有**跟着加：它们各有自己的收发实现
+                      #   （runner.cpp 的 dtype 分支 / ctypes-ACL 的 dtype 映射），本轮一条都没实测。
+                      #   没证据就不写进能力表 —— 那正是这张表存在的意义。
+                      "uint32": np.uint32, "complex64": np.complex64},
 }
 
 # runner_form → **真机尚未实现、但生成期允许先造用例**的 dtype（Track C 挂账集；U3）。
@@ -1450,6 +1462,21 @@ def run_new_example(caseset, work_dir, defect_cases=None):
             "runner_source": runner_source, "runner_path": runner, "evidence": ev}
 
 
+# —— `MODES` 是**执行器注册表**，不是准入表（2026-08-06 通路收敛时评估过，结论：不删条目）——————
+# 它回答的是「这个 mode 名对应哪个 adapter 函数」，与 `run_workflow._ACCEPTANCE_RUNNER_FORMS`
+# 回答的「哪种 runner_form 能出验收裁决」是两个问题——同 `SUPPORTED_NP_BY_FORM`（能力表）
+# 与准入表的关系，一模一样的道理。所以通路收敛**没有**从这里删任何条目：
+#   · `mock` **保留**：它是唯一不依赖真机的用例链自检通路，`run_workflow --mode mock` 与
+#     全套 test_*.py 都直接吃它；删了等于把「本地能验证编排链是否自洽」这件事一起删掉，
+#     而它物理上不产 acceptance.json / verdict.json，留着不构成任何假验收面；
+#   · `catlass` / `catlass_mock` **保留**：另一种仓形态的通路，本来就不由 runner_form 派生
+#     （只能显式指定），自带 C5 落盘守卫，与本次收敛无关；
+#   · `new_example` / `aclnn_py` **保留**：删了 `repo_adapter.py` 自己的 CLI（只产采集证据、
+#     不产裁决）与 `precision_retest_runner` 的 dispatch 会变 KeyError，而**安全收益为零**——
+#     它们已经没有任何 spec 派得到（`run_workflow._RUNNER_FORM_TO_MODE` 只剩 cpp_extension），
+#     显式 `--mode new_example` 也在 `_resolve_mode` 被拒。门守在 runner_form 那一层，
+#     不靠「把执行器藏起来」。
+# ⚠ 换句话说：往这里加一个 mode **不等于**它能出裁决；要能出裁决必须动准入表，那里有两道门。
 MODES = {"mock": run_mock, "new_example": run_new_example}
 
 # --- P3 · catlass adapter（generated_harness）注册：实现在自有模块 catlass_adapter.py，此处仅加法接入 ---

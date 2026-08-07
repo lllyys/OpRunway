@@ -2,7 +2,18 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-07 · 合入 worktree19，保留两边交接与倒序改动账
+
+- 将 worktree19 的 8 个独有提交（tip `4eb1d2a`）合入 worktree21；唯一文本冲突位于本文件，
+  已按时间顺序保留 worktree21 的 Bernoulli/Remainder 摘要与 worktree19 的 F7/F2/F3 等全部记录。
+- `AGENTS.md` 自动合并后保留 worktree19 的 `cpp_extension` 唯一准入收敛，同时保留 worktree21 新增的
+  §5.10/§5.11/§5.12 口径；`dev-doc/oprunway-codex-handoff-2026-08-07.md` 已标记为完成处理的合并记录。
+
 ## 2026-08-06 · aclnnBernoulli / aclnnRemainderTensorTensor 接入调研：不能验收，产 gap 清单 + 实施方案
+
+> **历史状态，已被后续裁定取代。** 本条记录的是调研当时的 13-gap / 7-待拍板快照；当前以
+> `oprunway-bernoulli-remainder-gap-todo.md`、实施方案和 AGENTS.md §5.12 为准：内存不是验收轴，
+> F/G/H 等裁定已落账，待人工确认项为 0。
 
 - 调研两份 7 月社区任务书（`aclnnBernoulli` / `aclnnRemainderTensorTensor`）加对应 ops-math 代码仓，
   结论是**当前 workflow 验收不了这两个算子**：差一整条验收轴（内存一致性 <5% vs GPU，无采集/契约/
@@ -25,6 +36,206 @@
 - ⚠ 待决（需用户拍板）：Q1 dtype 三源冲突、Q2 随机算子判定标准、Q4 内存指标定义（三条不答对应
   批次没法开工），另有 Q3 baseline 是哪个「原算子」、Q5 Remainder 非连续是否纳入、Q6 promote
   规则来源、Q7 Remainder rank 上界。
+## 2026-08-06 · F7 恢复 legacy 字节门并解释 IsClose 唯一漂移
+
+- Git/a3 二分定位首个漂移为 `12fdc0c`：IsClose 的 `dtype_deferred` gap 新增
+  `capability_source="runner"` 与 `runner_form="cpp"`，供三级门按活能力表核验；50 个 case、case_id
+  与全部 `.npy` 字节未变，故定性为必要契约补强并只重取 numpy 1.26.4 的 IsClose 摘要。
+- 其余 5 份 legacy 摘要不变；补齐精确 numpy pin 后，当前环境无基线会由独立元测试直接失败，
+  不再让关键门以 skip 冒充全绿。a3 mutation 删除两字段时字节门明确红，恢复后全量 2533 passed。
+
+## 2026-08-06 · F2 spec 变更门堵单删收据重置，并降格到可证明范围
+
+- `--init` 现在只接受全新/空报告根，并写独立初始化标记；单删收据或目录已有任意工件时都拒绝清零。
+  门的阻断标签、注释与 CLI 统一只称“内容完整性 + 有人显式声明”，不再声称用户已确认。
+- **静态门边界如实挂账**：`confirmed_by` 无签名/外部审批 ID，`previous_spec_sha256` 与同目录产物也在
+  同一可写信任域，不能证明真人身份或不可伪造的跨轮历史；要补这两项必须接外部签名/append-only 审计锚。
+
+## 2026-08-06 · F3 dtype 双删改由 staged spec 独立兜底
+
+- 三级门不再只信 caseset 自报：正式 CP-E 目录以 `<out>/spec.json` 为 dtype 权威，逐项核
+  `dtype_required` 与三类结构化 dtype gap 透传，并直接用 spec 全集对真实 cases 算覆盖；Task2 另把
+  staged spec 摘要接回 cpp_extension receipt。`required + deferred` 同时从 caseset 删除会在 Task1、
+  Task2 各自 fail-closed，正式目录连 staged spec 整体缺失/未决也不再退回 legacy 宽容。
+- **静态门边界如实挂账**：它只证 `spec ↔ caseset ↔ actual cases`，不证 spec 抽取忠实覆盖任务书；
+  后者需可复算的 taskdoc→spec 派生收据。CP-F attempt 当前只冻 `base_spec_sha256`、不冻 spec 字节，
+  因而暂时 fail-closed（不改基础裁决）；恢复须把 base spec 字节纳入 attempt manifest 后显式交门。
+  拥有全目录写权限者一致重写全部收据链也需外部锚/签名才能识别。
+
+## 2026-08-06 · F1 measure_only 授权锚改成现场可核的实门
+
+- `taskdoc_snapshot_sha256` 现在必须是非空真实摘要；三级门按 caseset 的 `op` 定位任务书快照，现场重算
+  sha256，并校 `quote` 是 `cite` 行区间的逐字子串。缺键与旧产物的显式 `null` 都 fail-closed，且报错可区分。
+- **静态门边界如实挂账**：本门只证“这句引文确实来自这份任务书快照”，不能理解自然语言并证明引文语义
+  必然支持所选 ground；该项仍须由 spec 抽取/人审负责，未用关键词猜测伪装成语义门。
+
+## 2026-08-06 · F5 退役 runner form 从活跃 spec 指引退出
+
+- `acc-spec-extractor`、spec 字段手册与空模板现在只允许新一轮显式生成 `runner_form="cpp_extension"`；
+  `cpp` / `aclnn_py` 的能力与骨架保留在带「不得 dispatch · 不要照做」横幅的历史区，接口迁不动就
+  `BLOCKED` 挂账，不再以“开发级验证”为由生成一份没有入口的 spec。插件 README 同步移除
+  `aclnn_py` 现行 preflight/通路介绍，并把旧 dtype 能力表降为历史。
+- **静态门边界如实挂账**：`check_acceptance_entrypoints.py` 只能机械证明其 `ENTRYPOINTS` 中出现的退役
+  派生/调用未逃出合规历史区，不能理解任意自然语言是否仍在暗示旧 form；`plugin/README.md` 当前也不在
+  `ENTRYPOINTS`。本轮按分工不改 `acc-common/*.py`，所以 README 与语义一致性仍靠显式历史横幅、grep 和审阅；
+  若要升级为机器保证，后续须把 README 纳入受检集合，并新增针对“新 spec 只能生成 cpp_extension”的语义夹具。
+
+## 2026-08-06 · torch_parity shape 档有派生默认，配置口不做假字段
+
+- 回填 `dev-doc/oprunway-case-axis-design.md` §13：按 `axis_class` 接口能力去退化的布局已成为工程默认，
+  写明 rank 1..8 的派生 shape、零跑测硬门三组实测，以及 numel 最多 4 倍、caseset 字节变化和必须重跑真机的代价。
+- Median 1344/58 与 1152/51 两组历史真机基线均不能再与新矩阵对照；硬门只证历史缺陷触发区域没有被结构性删光，
+  **不证** 58 条会逐条复现。
+- 当前生成器还没有消费自定义布局字段，因此 schema 只如实记录派生默认与代码接入点，不暴露“声明了却没人消费”的
+  假配置；`legacy` 侧保持字节不变。§13 同步并行分支已落地的决定②“特殊场景显式 0 条”，避免同节自相矛盾。
+
+## 2026-08-06 · 用例轴集 §13 决定收敛：2 项已落地、3 项由实测判定、1 项留用户
+
+- 追加 `dev-doc/oprunway-case-axis-design.md` §13：④ 三重记账、⑥ 单一 attr 声明归为已由步骤 11b 解掉；
+  ① shape 优先、③ 暂不引入值域 regime、⑤ 重复组合留着记账由 §12 实测定案；② 特殊场景的两条规则真冲突，
+  留用户决定参考仓忠实度与本仓边界底线谁优先。① 的具体布局档值也不越权代填，明确列出拍板前所缺数据与取舍面。
+
+## 2026-08-06 · 轴集设计的「交互效应」从推断变实测：58 条 fail 的交叉表
+
+- 把 a3 上那份已存在的 Median 1344 例 `verdict.json`（sha256 已核）按 (dtype × rank × 规模 × attr profile)
+  摊成交叉表，结果追加进 `dev-doc/oprunway-case-axis-design.md` 新增的 §12。**只读，零新增跑测、没改一行代码。**
+- 最硬的一条：58 条 fail 全挤在 90 个 cell（占矩阵 6.7%）里，由 **dtype 类 × 归约长度**
+  **共同**圈定——float 在 small/medium 全绿，large 在 5 个整型 dtype 上也全绿，**必须两条同时成立**。
+  而且能构造出一个合法的 1-wise 边际覆盖集把这个区整个避开、fail=0 完全漏报。所以这一对**必须交叉**是实测的，不是口水。
+- 反过来 `keepDim` 实测测不到任何效应（fail 区内 72.7% vs 81.8%），rank 的表观梯度也 100% 由
+  「轴类塌缩到轴 0 的 profile 数」解释。这正好给 §9 那条判据（共同决定分支才交叉）配齐了一个正例一个反例。
+- 最贵的发现是个**覆盖缺口**：现矩阵结构上取不到「归约长度 > 24576 且 batch > 1」这个格子
+  （shape 恒为 `(L,1,…,1)`，归约轴 0 则 batch 必为 1，归约轴 k>0 则长度必为 1），
+  而已知根因三条件里正好有 `batch == 1`——也就是说这一条**本轮从没被验证过**。
+- 附带逮到两处报告口径问题：`coverage_strength` 那句「全覆盖」实际是 1344 例 / **1200** 个不同组合；
+  以及 §8「选项 0 均分布局」按字面改会把 43/58 条 fail 测没（rank≥2 各轴长 ≤512 ≪ 阈值），
+  布局档必须再留一个 `(B, K)` 长轴形态。
+- ⚠ 边界写死在 §12.14：一个算子、一轮跑测、一类缺陷；能证伪不能证明；
+  1254 个零 fail 的 cell **不构成删用例的依据**（那是幸存者偏差）。
+
+## 2026-08-06 · `complex64` 口径收成一条：实虚分量各按 `float32` 判（用户定）
+
+- 用户原话：「complex64 的标准就沿用 float32 的，虚部和实部都沿用 float32 的标准」。
+  **本条取代本文下面「`complex64` + `uint32` 打通四层」里那段「比对口径按标准分档」**——
+  那时 AscendOpTest 走分量各判、torch_allclose 走模长、exact 走逐分量，三档三个算法。现在只剩一条。
+- 落法是**删规则、不是加规则**：复数在 `precision_policy` 里不再有自己的常量或判据。
+  · 容差经受控表 `_COMPLEX_COMPONENT_DTYPE`（complex64 → float32）折算后查 float32 那一行，
+    `_TA_DTYPE_TOLS` 里那条标着「外推」的 `complex64` 直接删掉（值本来就和 float32 一样，
+    维护两份只是给「哪天它们不一样了」留口子）；
+  · 判据把 float32 那份抽成 `_aot_valid_float`，复数的实部、虚部**各调它一次**，`两者都过才算过`；
+    torch 档同理复用 `_allclose_close_mask`。于是「沿用」是同一段代码，不是两处写得碰巧一样。
+- 🔴 **代价如实记账：`torch_allclose` 这一档因此与 torch 本身不一致。** `torch.isclose` 对复数判的是
+  **模长**。判别构造 `o=0` vs `g=0.8+0.8j`、rtol=0/atol=1：torch 判 not close、本仓判 close；
+  上一轮 24576 对差分实测里 16 处不一致。**这是有意选择的口径，不是 bug**——拿 torch 对拍复数
+  出现分歧时先看这条。差异记在四处：`precision_policy` 模块 docstring 的复数小节、
+  `_allclose_close_complex` docstring、`compute_metrics` 的复数小节、本条。
+- 与 AscendOpTest `compare_complex` 也因此有两处**有意偏离**，方向都更严：both-NaN 放行支改成
+  **逐分量**取（`nan+1j` vs `nan+9j` 不再被实部的 NaN 一起放过）、`_replace_inf` 改成对**分量**做
+  （分量是 float32，与真跑 float32 同一件事；参考实现对复数是空操作）。
+- **边界一个没动**：`complex128` 仍四层全拒（缺真机实证）；`ecosystem_mere_mare` × 复数、
+  `index_value_consistency` × 复数仍 fail-closed；生成层四处复数收窄（§1.4 非有限特殊值、
+  `value_profile` nan/tie、`pairfar`、`nanpair`）仍 fail-closed；能力表 / 准入表一个字没改。
+  ⚠ `_make_pairfar` 的**理由**换了：旧理由「两个标准各选一头」已失效，现在的理由是
+  near/far 边界属于**被测算子自己**的 close 语义（任务书没给出处），与我们的比对口径无关。
+- 测试：删掉「与 `compare_complex` 逐字转录件差分」那条（前提已被上面两处偏离取代），
+  换成两条更强的——独立手写 float32 参考的分量差分、以及拿**生产 float32 路径**当 oracle 的逐元素对照
+  （前者防共用实现被改坏两边一起错，后者防复数分支偷偷分叉）。
+  mutation 三红：去掉虚部判定 8 红、容差换值 3~4 红、复数当实数处理 13 红。
+
+## 2026-08-06 · CP-F 迁到 `source_provenance`，`dut_source` 两个文件整份删除（task #28）
+
+- **拆的是一颗定时炸弹，不是「有两份代码」**：合并裁定删掉 `dut_source` / `local_checkout`，
+  但那两个文件还在，且被 CP-F 两个模块 import。于是仓里**同时存在两套来源判别式、答案不同**——
+  首轮验收的 vendor build receipt 走 `provenance_kind` + 整树/子树两个 merkle，CP-F 的
+  `source_identity` 却按 `local_root_digest` 对账。下次跑 CP-F 大概率对不上，**症状还长得像
+  「漂移」**，会让人去查一个根本不存在的漂移。
+- `source_identity` 换词表**并跟着换长度判据**：`gitcode_pr`（缺省）恰 40 位 `pr_head_sha`；
+  `local_snapshot` 恰 64 位小写 `snapshot_subtree_sha256` **加 `snapshot_subtree_scope`**。
+  scope 是**新增的载重字段**——旧锚没有范围这一维，只改名字就会留下一道假门（范围不同的两个
+  merkle 本来就不可比）。缺省 `gitcode_pr` 不构成放行路径：漏写该键的本地 directive 会撞键集校验。
+- 收据侧判据全部改由 `vendor_build_receipt.summarize()` 出，CP-F 不再自己解释
+  `receipt["source"]` 的原始字段——两处各解释一遍正是这次双判别式的成因。顺带接管了
+  信封 / 版本-kind 成对 / degradations / `build.returncode_source=declared` 当场拒这几道。
+- ⚠ **在途 CP-F directive 全废**（schema breaking，有意的 fail-closed）：旧的既没有新锚也没有
+  scope。重新起草 directive、重新跑 F2，比放行一份判别式已失效的 attempt 便宜得多。
+- ⚠ 一条能力**没有等价物、如实记账**：`dut_source.find_source_facts` 早已被
+  `source_facts_lookup` 取代（CP-F 本来就没用），但 F2 的 `_freeze_source_facts` 仍是自己那套
+  两候选扫描，**不验内容寻址信封、不跑取材完整性契约**；那道校验推迟到 F3 交给三级门。
+  端到端仍 fail-closed，但别把「F2 过了」读成「这份 source_facts 已被完整验过」。
+- 9 条 mutation 全部变红（长度判据、scope 必填、通路一致性前置、URL 凭据、
+  F2 整块对账、facts 侧 scope 先比、facts 侧通路先比、F3 scope 维、锚互斥）。
+
+## 2026-08-06 · 快照摘要：软链 scope 逃逸 fail-closed + 跳过留痕（task #25 F3）
+
+- **`_walk_snapshot` 只挡得住「走进去之后」的软链**：`os.walk(followlinks=False)` 对**顶层**
+  是无条件跟随的。于是 `root/op` 是一条指向仓外的软链时，仓外字节被摘成「这段子树的字节」，
+  而 `relpath` 算出来的路径看着还是仓内的 `op/...`——一个没有任何外部症状的假摘要。
+  现在按 realpath 复核「解析软链后位置没有移动」，中间任何一层是软链都拦得住。
+- **软链跳过不改，但不再静默**：`_scan_snapshot` 回报跳掉了哪些，落进
+  `pr_facts.snapshot_skipped_symlinks`（+ 计数）；`snapshot_digest_policy` 新增受控字段
+  `excludes_symlinks`；build 侧 `take_snapshot_digest` 记两个计数并带进收据。
+  此前一棵有 100 条软链的树与一条都没有的树，在产物里长得一模一样。
+  ⚠ **merkle 算法一个字节没动**（值保持有用例钉着），改的只是「披露」。
+- ⚠ 连带账单：policy 多了一个键，**老 local_snapshot 事实包会落
+  `snapshot_contract_unsupported_digest_policy`（blocked）**——重跑取材即可，
+  这是 `_snapshot_contract_reasons` 早就设计好的处置。
+- 顺手核清 F1/F2（合并时已修）并补测钉住：`source_provenance.py` 在 `_LOGIC_FILES` 里、
+  `LogicBindingCoverageTest` 是活的；`returncode_source=declared` 的收据两个读入口都拒。
+
+## 2026-08-06 · 只保留 `cpp_extension`：`cpp` / `aclnn_py` 连入口一起删（步骤 10）
+
+- `_RUNNER_FORM_TO_MODE` 只剩 `{"cpp_extension": "cpp_extension"}`，逃生阀 `--allow-experimental-form`
+  **整个删除**（CLI + `run()` 形参）。删的理由是 aclnnRoll 试跑那笔账：留一条「跑得起来的死路」，
+  就真有人走进去（编排层把 form 改成 `cpp`，之后整轮物理上产不出裁决，却跑满 1h47m 才 BLOCKED）。
+- 删映射项后**没有退化成 KeyError**：`_retired_form_message` 分清「不认识这个值」与「认识但已退役」，
+  并把出路写死成**迁到 `cpp_extension`**，还明说别去换 `--mode`（那些真机 mode 一样被拒）。
+- 门现在三处：入口 `_resolve_mode`、出口 `_assert_acceptance_form_allowed`、
+  外加 `finalize_clean_acceptance`（跳过状态机直接拼裁决的近路，之前只报「runner_source 不匹配」，
+  会把人引去改错东西，已拆成两句）。
+- **没动的**：能力表 `SUPPORTED_NP_BY_FORM` / `DEFERRED_NP_BY_FORM`、执行器注册表 `repo_adapter.MODES`
+  （含 `mock`）、`_REAL_MACHINE_MODES`。前两个回答的是别的问题；最后一个**必须留全三项**——
+  入口门正是靠它把 `--mode new_example` 这类显式绕行认出来，删了反而放松。
+- 样例 spec 的 `runner_form` **一个字没改**：改了是假话（那几份是 `cpp` 通路的历史见证）、改了会坏
+  （`cpp_extension` 要 `call_variants`，八份里只有两份有，补等于发明 ABI 事实）、还会破四份 caseset 字节 pin。
+  改的是 `samples/specs/README.md`，把「历史参考样例」和「这条通路还可选」分开。
+- 历史产物**不改判**：停止准入 = 不支持新建，不是追溯否定。
+- 顺带修一处散文漂移：`preflight_aclnn.py` 不是「仅 `aclnn_py` 形态」，代码里早退的只有精确的 `"cpp"`。
+- 张力变大不变小（AGENTS.md §9.4）：`aclnn_py` 的 ops-cv 通路刚打通就没了入口，连开发级 dev 产物都跑不出来。
+
+## 2026-08-06 · `complex64` + `uint32` 打通四层（步骤 8）
+
+- 先在 a3 容器实测（torch 2.10.0 / torch_npu 2.10.0）：两个 dtype 走 `cpp_extension` 的整条载体路径
+  （`from_numpy → .npu() → torch.empty(npu) → copy_ → cpu().numpy()`）**都无损往返**。
+  所以「造不出/收不了」这个旧理由不成立，deferred 不再合法。
+- `uint32` 零特判接入：它本就是整型，`_make_varied` 走整型分支、比对按 §1.1 exact。
+- ⚠ **本条下面这粒「口径按标准分档」当天成立、当天之内即被取代**：同日晚些用户定「complex64 沿用
+  float32、实虚各判」，三档合并成一条。以本文顶部那条为准，别再引用这里的分档描述。
+- `complex64` 补齐四层，但**比对口径按标准分档、各有出处**：AscendOpTest 走**实虚分量各判**
+  （逐字复刻 `compare.py:compare_complex`，sha256 与文件头 provenance 同一枚）；torch_allclose 走
+  **模长**（24576 对与 `torch.isclose` 差分实测，仅 16 处更严、成因是我们按房规用 fp64 精算）；
+  exact 走逐分量 NaN 容忍。`mere_mare` 与 `index_value_consistency` 对复数**保持 fail-closed**（没口径）。
+- 生成层几处**声明式收窄**：§1.4 非有限特殊值、`value_profile`、`pairfar`、`nanpair` 对复数一律
+  fail-closed——「复数的 inf/NaN 是哪种字节形态」没有权威出处，挑一种就是臆造覆盖。
+- `complex128` 一层都没进：缺的是真机实证不是实现，别顺手补齐。
+- 能力表 ≠ 准入表：`_ACCEPTANCE_RUNNER_FORMS` 一个字没动；`cpp` / `aclnn_py` 也没跟着放开（没实测）。
+
+## 2026-08-06 · 重测 `aclIntArray`：**推翻本文下面那条**，合并后两条通路都支持
+
+- 只跑不改，重写 `dev-doc/oprunway-aclintarray-probe.md`（第二版，基线 `96edacd`）。
+  下面那条同名条目（基线 `9209756`、合并前）的结论 **(b) 静默生成标量已作废，别再引用**。
+- `origin/main` 合进来的「改动⑮」（GaussianBlur 首程）把四层**同批**做完了：
+  `aclnn_runner._classify_param:301` 认 `aclIntArray*` → `int_array`、marshal 侧
+  `aclCreateIntArray`/`aclDestroyIntArray`、`gen_cases._attr_ctype:3049` 按取值结构给
+  `int_array`、`cpp_extension_codegen._attr_type:148` 生成 `at::IntArrayRef` + schema `int[]`。
+  实测 Roll spec 跑出来就是这两个类型。**结论是 (c)，`acc-spec-extractor` 那句论断整句都错。**
+- 数组性**由 `default` 的值结构派生、不新增 dtype 词**（`dtype` 仍写 `["int64"]`）；
+  畸形 list（空 / 浮点 / bool / 嵌套）**显式 fail-closed**，不会掉进标量分支——
+  第一版最担心的那个静默错型没有留下。CP-C0 的 slot↔签名对账也没被放宽（篡改成 `int64` 仍拒）。
+- 连带结论：**步骤 7 的 `aclIntArray` 兼容不用做了**；步骤 10 不会因这条堵死 Roll。
+  ⚠ 但 Roll 仍跑不了——`SUPPORTED_NP_BY_FORM["cpp_extension"]` 没有 `uint32`（步骤 8 的范围）。
+- 记一条没人拦的缝（本步不改）：codegen 按 spec `default` 判数组性、`gen_cases` 按 per-case
+  取值判，`build_invocation_plan` 不校 attr ctype、manifest 也没这个字段可对。
+  `aclIntArray` 场景会被 CP-C0 先拦；「签名本就是标量、spec 给 list 取值」那种**未实测**。
 
 ## 2026-08-06 · 合并收尾：清掉指向已删脚本的编排引用
 
@@ -80,6 +291,29 @@
 - 合并后**尚无单一权威 handoff**：`session-handoff-2026-08-05.md` 与同名 `-evening` 两份并列、
   都成文于合并之前，下一轮开工第一件事是产一份合并后的新 handoff。
 
+## 2026-08-06（续）· 补进 spec 的那些 50 又被删了：显性化不能靠把值搬个地方
+
+- 用户判定：上一条「爆炸半径逐份补了显式值」等于**把问题重新藏起来**，抵消了删缺省的意义。
+  那些 50 是缺省值的化石，不是按覆盖矩阵算出来的依据，写进 tracked spec 后下一个人只会当它是
+  合理默认值。**全删**：`sign`/`neg`/`equal`/`isclose`/`im2col`（50）+ 两份 `test_fixtures`
+  + `testdata/gpu_demo`（50）。顺手一并删的还有 `upsample_nearest_3d` / `upsample_nearest_exact2d`
+  的 20 —— 它们不是缺省化石（20≠50），但同样给不出推算依据，且 exact2d 那份写的 20 与
+  commit 记的实产 18 本来就对不上。每份留 `_case_target_note` 墓碑说明为什么不许回填。
+- 留下的两个数都**有真实依据**：`median` 的 1344 = 8 dtype × 8 rank × 3 shape × 7 attr，
+  `_torch_parity_plan` 逐字核对（本轮补了 `case_target_source` 把这条乘法写下来）；
+  `gaussian_blur` 的 169 = 任务书用例条数，早有 `_case_target_note`。
+- 字节 pin 的处置：`ExistingOpsByteIdenticalTest` 守的是「gen_cases 逻辑改动不得改变现有算子的
+  caseset 字节」，**样例 spec 是它的输入、不是保护对象**。预算改由新的
+  `plugin/acc-common/_spec_fixture.py`（`FIXTURE_CASE_TARGET = 50`）在测试侧注入，输入的有效取值
+  没变 → 两组 sha256 **一个都没重取**，pin 原样成立；且预算不再能靠改样例 spec 悄悄挪动。
+- 连带：11 个测试模块改走 `_spec_fixture.load/materialize`（吃 spec **路径**的子进程用后者物化副本，
+  刻意不回写源文件）。散文里 3 处仍在陈述「默认 50 / 给样例补 50」的活规则改成失效标注
+  （`cases50-design` banner 补 ③、`cannbot-alignment-plan` 两处「我方现状/证据」、`todo` ①）。
+- ⚠ **代价照实记**：`samples/specs/{sign,neg,equal,isclose,im2col,upsample_nearest_*}.spec.json`
+  现在对 `gen_cases` **不可跑**（缺席即 fail-fast）。这是有意的状态，等推算规则定出来再由人写值 +
+  `case_target_source`。⚠ **张力**：`canon/architecture/case-generation-follows-opbase-section-1.md`
+  仍写「默认 50、运行时问用户」，与现行规则冲突；按 §5.9 不手改 cabinet 页，显式挂在这里等 review。
+
 ## 2026-08-06 · `case_target` 的缺省 50 删掉了：用例数必须由 spec 显式声明
 
 - `gen_cases` 的 `_DEFAULT_CASE_TARGET = 50` 连同散文里的「缺省 50 / `AskUserQuestion` 建议 50」一起删。
@@ -93,8 +327,24 @@
   一直在吃的那个 50（`ExistingOpsByteIdenticalTest` 的字节 pin 因此原样通过）；
   `catlass_basic_matmul` **有意不补**——它的用例由 `catlass_adapter` 按 shape 列表造，不读这个键，
   填任何数都是死字段。⚠ 补上的 50 是**历史沿用值、不是按矩阵算出来的依据**，笛卡尔算法在步骤 11。
+- 合并后复核补齐三处（原 WIP commit 标「未验证」，这轮核过）：
+  ① **爆炸半径漏了 `plugin/workflows/archive_ops/{isclose,sign}`**。两份都**不回填数字**并写明理由——
+  它们是历史案例快照、无任何代码或测试读，记录的那轮验收早于本字段存在（`sign/case.md` 记的是
+  「精度 5/5 过」，即当时实产 5 条）。填 50 是编造，填 5 是把「计划期预算」挪用去记「历史实产数」。
+  拿它当模板复制去跑会 fail-fast，**那正是预期行为**。
+  ② **`taskdoc` 档的散文与实现互相打架**（`audit-20260805-pushgate-findings` #30 记为 not-fixed）：
+  `taskdoc-to-spec.md` 两处写「这一档不写 `case_target`」，而 `_require_case_target` 排在分档**之前**、
+  `_taskdoc_plan` 还要求它**精确等于**用例条数。缺省 50 在时这只是「默默吃个错数」，缺省删掉后直接变
+  fail-fast，所以必须改散文：两处改成「照样必填、且被用例集锁死」，主段补 `taskdoc` 档条目。
+  权威反例就在仓里——`samples/specs/gaussian_blur.spec.json` 是 taskdoc 档且写了 `case_target: 169`。
+  ③ **mutation 校验**（原 WIP 未做）：把缺省改回 `.get(...,50)` → 3 红；去掉 `bool` 子类防护 →
+  `case_target: true` 被当成 1 放行、1 红；把缺省搬成模块级常量 → 1 红。还原后全绿。
+  全量 **2281 passed / 12 skipped / 0 failed**（a3 容器），与基线一致。
 
-## 2026-08-06 · 实测 `aclIntArray`：`cpp_extension` 不是不支持，是**静默生成标量**
+## 2026-08-06 · ⛔ 已作废 · 实测 `aclIntArray`：`cpp_extension` 不是不支持，是**静默生成标量**
+
+⛔ **本条已被顶部同日那条推翻，勿引用。** 它测的是合并 `origin/main` **之前**的基线
+（`9209756`）；合并带进「改动⑮」后四层都支持了，正确结论是 (c)。保留原文只作过程记录。
 
 - 只跑不改，产出 `dev-doc/oprunway-aclintarray-probe.md`。`acc-spec-extractor` 那句
   「`aclnn_runtime` 和 `cpp_extension` 都不支持 `aclIntArray`」**半对半错**：`aclnn_py` 确实
@@ -357,7 +607,7 @@ verify 轮（codex 复核修复本身）又逮出 5 条：digest 自洽证明不
   而后者要 torch.ops 桥 + vendor ELF 构建收据，接入成本明显更高——这是已知账单。
 - ⚠ **真机上留存的 aclnn 信任门收据会 revalidate 失败**：`verify_aclnn_harness._LOGIC_FILES`
   加了 `dut_source.py`（判别式已成这道门的判定依赖），`bindings.logic_files` 整体变化。
-  和 preparation 收据变 MISS 同理，是正确行为；下一轮要走 `aclnn_py` 真机通路得先重跑这道门。
+  和 preparation 收据变 MISS 同理，是正确行为；若未来重新准入 `aclnn_py` 真机通路，须先重跑这道门。
 - ⚠ **CP-F directive schema 是 breaking change，在途 attempt 全废**：`pr_head` → `pr_head_sha`（恰 40 位）
   或 `local_root_digest`（恰 64 位），`repo` 变必填。旧的 `^[0-9a-f]{40,64}$` 区间正则就是物理入口——
   往 `pr_head` 里填 64 位摘要能原样通过。旧 directive 不能继续执行，**要重新起草 directive、重跑 F2**。

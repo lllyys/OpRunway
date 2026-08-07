@@ -21,6 +21,7 @@ import gen_cases as GC
 import precision_policy as PP
 import repo_adapter as R
 import _golden_fixture as _gf   # golden 去引擎化：沙盒 ops_root 放 golden.py 供 gen_cases 加载（ADR 0011）
+import _spec_fixture as SF     # 样例 spec 已无 case_target（2026-08-06 删历史沿用值）→ 测试侧注夹具预算
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SIGN_SPEC = os.path.join(_HERE, "..", "samples", "specs", "sign.spec.json")
@@ -213,8 +214,9 @@ def _mk_local_sandbox():
         os.makedirs(p)
     # 1 个 fp32 小 case：从权威 sign.spec.json 起、把 dtype 收窄到 float32（避开 run_new_example 的
     # int/bf16 Track C 拦截），gen 到 scratch 再挑第一条搬进 work（保持 work 只含这一个 case 目录）。
-    with open(_SIGN_SPEC, encoding="utf-8") as f:
-        sp = json.load(f)
+    # ⚠ 经 `_spec_fixture` 读：`sign.spec.json` 已于 2026-08-06 删掉历史沿用的 `case_target: 50`
+    #   （缺省值的化石、无覆盖矩阵依据），预算由测试侧注入。本沙盒只挑第一条 case 用，条数无关紧要。
+    sp = SF.load(_SIGN_SPEC)
     for p in sp["params"]:
         p["dtype"] = ["float32"]
     # 沙盒 ops_root（home/.oprunway/ops/Sign）放 golden.py（gen_cases 加载，ADR 0011）+ user runner（find_runner 命中）

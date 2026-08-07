@@ -3,16 +3,30 @@
 本模块只负责 directive、relaxed spec、attempt 身份和原子工件；不执行 NPU、
 不计算精度 metrics，也不产 pass/fail。裁决继续由 validator.py 与验收门负责。
 
-⚠ **directive schema 是 breaking change，在途 attempt 必然失效，这是有意的 fail-closed。**
-旧 `source_identity` 长这样：`{"pr_head", "build_receipt_sha256", "runner_form"}`，
-`pr_head` 只被一条 `^[0-9a-f]{40,64}$` 正则校过。那条 40..64 的区间就是物理入口：
-往 `pr_head` 里填一个 64 位摘要能原样通过校验，而 `_cpp_extension_base_binding` 当时
-对基础收据的 `source.pr_head_sha` **一个字节都不校**——CP-F 复测链比它要复测的验收链还松。
-现在来源判别一律走 `dut_source`：`pull_request` 恰 40 位 `pr_head_sha`、
-`local_checkout` 恰 64 位 `local_root_digest`，`repo` 两条通路都必填。
-所以旧 directive **不能**继续执行：它既没有 `repo`，也无法区分手里那串 hex 到底是线上
-commit 还是本地子树摘要。重新起草 directive、重新 F2，比放行一份来源不可信的在途 attempt
-便宜得多。
+⚠ **directive schema 又一次 breaking change（2026-08-06），在途 attempt 必然失效，
+这是有意的 fail-closed。** 本轮换的是**来源判别式本身**：
+
+| | 判别式 | 锚 |
+|---|---|---|
+| 旧（`dut_source`，本轮**已整份删除**） | `{pull_request, local_checkout}` 单轴 | `pr_head_sha` / `local_root_digest`（子树 merkle，算法也是另一套） |
+| 现（`source_provenance`，主干唯一真源） | `provenance_kind` ∈ `{gitcode_pr, local_snapshot}` | `pr_head_sha` / `snapshot_subtree_sha256` **+ `snapshot_subtree_scope`** |
+
+仓里一度**同时存在两套来源判别式且答案不同**：首轮验收产的 vendor build receipt 走
+`source_provenance`（`provenance_kind` + 整树/子树两个 merkle），CP-F 的 `source_identity`
+却还在按 `dut_source` 的 `local_root_digest` 对账。两边永远对不上，而症状长得像「漂移」——
+读的人会去查一个根本不存在的漂移。所以这里不留兼容层：旧 directive **不能**继续执行，
+重新起草、重新 F2，比放行一份来源判别式已经失效的在途 attempt 便宜得多。
+
+**长度判据跟着换到新锚**，不是只改名字：`gitcode_pr` 恰 40 位 `pr_head_sha`；
+`local_snapshot` 恰 64 位小写 `snapshot_subtree_sha256`，**且必须带 `snapshot_subtree_scope`**。
+scope 是新增的载重字段、不是装饰：同一棵树按「整仓」和按「算子子树」摘出来是两个值，
+范围对不上的两个 merkle 不可比（对上了是巧合，对不上也说不清是改了字节还是换了范围）。
+更早那版 `pr_head` 的 `^[0-9a-f]{40,64}$` 区间（填 64 位摘要能冒充 PR head）早已删除，
+本轮**不得**以任何形式复活成「哪个字段有值用哪个」。
+
+**收据侧的判据只在 `vendor_build_receipt` 一处解释**：本模块不再自己去读
+`build_receipt["source"]` 的原始字段，只消费 `vendor_build_receipt.summarize()` 的
+归一化摘要。两处各解释一遍，正是刚拆掉的那个双判别式的成因。
 
 `repo` 的**实际校验范围**（别当成全通路都有的门）：`cpp_extension` 通路在
 `materialize_attempt` 里核 `directive.source_identity.repo` 与首轮 build receipt 的
@@ -31,8 +45,10 @@ import re
 import tempfile
 
 import content_address
-import dut_source
 import precision_policy
+import source_provenance
+import url_credentials
+import vendor_build_receipt
 
 
 SCHEMA_VERSION = 1
@@ -48,6 +64,9 @@ BASE_ARTIFACTS = (
     "spec", "caseset", "evidence", "verdict", "acceptance",
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+#: PR head 大小写都收（收据侧 `vendor_build_receipt._HEX40` 同口径），且**两侧都不做大小写
+#: 归一**。只在一侧 `.lower()` 会把一份大写 head 的合法收据判成「漂移」，那是假门。
+_HEX40_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 _DIRECTIVE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _UTC_TIME_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
@@ -63,13 +82,25 @@ _OVERRIDE_KEYS_BY_STANDARD = {
     precision_policy.TORCH_ALLCLOSE:
         frozenset({"standard", "rtol", "atol"}),
 }
+#: `source_identity` 的取源形态词表 —— **逐字复用**主干常量，不另起第二套名字。
+PROVENANCE_KIND_KEY = "provenance_kind"
+PROVENANCE_GIT_PR = source_provenance.PROVENANCE_GIT_PR
+PROVENANCE_LOCAL_SNAPSHOT = source_provenance.PROVENANCE_LOCAL_SNAPSHOT
+#: 两条通路各自的**锚字段名**。与 `vendor_build_receipt.summarize()` 归一化摘要里的键名
+#: 逐字同名，因此 directive ↔ 收据可以直接比对，不需要任何翻译表。
+SOURCE_ANCHOR_FIELD = {
+    PROVENANCE_GIT_PR: "pr_head_sha",
+    PROVENANCE_LOCAL_SNAPSHOT: "snapshot_subtree_sha256",
+}
+#: `local_snapshot` 档的 merkle **必须**带覆盖范围才可比，故它是载重字段而非记账字段。
+SNAPSHOT_SCOPE_FIELD = "snapshot_subtree_scope"
 # 锚字段名 → 首轮 `evidence.execution_provenance` 里承载它的**历史**键名。
-# 这张表只做「改名」这一件事，**不重判来源**——来源判别只有 `dut_source` 一处。
+# 这张表只做「改名」这一件事，**不重判来源**——来源判别只有 `validate_source_identity` 一处。
 # PR 通路刻意沿用历史键 `head_sha`：aclnn_py/cpp 两条通路的既有 evidence 都是这么写的，
 # 改名会让所有历史产物一夜之间对不上，而那与本批要堵的来源伪装毫无关系。
 _PROVENANCE_ANCHOR_KEY = {
     "pr_head_sha": "head_sha",
-    "local_root_digest": "local_root_digest",
+    "snapshot_subtree_sha256": "snapshot_subtree_sha256",
 }
 # F2 冻进 attempt 的首轮来源事实副本；名字与 fetch_source 产物一致，便于门直接消费。
 _SOURCE_FACTS_NAME = "source_facts.json"
@@ -86,7 +117,7 @@ class RetestContractError(ValueError):
 def _provenance_anchor_key(anchor_field, where):
     """锚字段名 → 首轮 `execution_provenance` 里承载它的键名；未登记即 fail-closed。
 
-    ⚠ **不能写成裸下标 `_PROVENANCE_ANCHOR_KEY[anchor_field]`**。`dut_source` 是受控词表，
+    ⚠ **不能写成裸下标 `_PROVENANCE_ANCHOR_KEY[anchor_field]`**。`provenance_kind` 是受控词表，
     哪天加进第三种来源通路（新的锚字段名）而这张表没跟着改，裸下标抛的是 `KeyError`；
     而 `cp_f_prepare_attempt.py` 只收 `(OSError, RetestContractError)`，`KeyError` 会穿过去
     变成裸 traceback——调用方拿不到约定的 `[CP-F prepare] BLOCKED: …` 单行机读契约，
@@ -100,7 +131,7 @@ def _provenance_anchor_key(anchor_field, where):
     except KeyError as ex:
         raise RetestContractError(
             f"{where}: 来源锚字段 {anchor_field!r} 在 _PROVENANCE_ANCHOR_KEY 里没有登记对应的 "
-            f"execution_provenance 键名（dut_source 扩了受控词表而 CP-F 未跟进）"
+            f"execution_provenance 键名（provenance_kind 扩了受控词表而 CP-F 未跟进）"
             f"——fail-closed，不猜键名") from ex
 
 
@@ -121,6 +152,134 @@ def _checked_number(value, where):
             or not math.isfinite(value) or value < 0):
         raise RetestContractError(f"{where} 须为有限非负数，得 {value!r}")
     return value
+
+
+def _source_identity_record(kind, anchor_field, anchor_value, scope):
+    """来源身份的**整块**记录（四个键恒在，不适用的落 `None`，**绝不省略**）。
+
+    整块记、整块比，是刻意的：同一段 hex 在两条通路里含义完全不同（线上 commit vs
+    本地子树 merkle），只比锚值等于没比通路；而 `local_snapshot` 的 merkle 不带
+    `snapshot_subtree_scope` 就不可比。省略任一键都会让「没这回事」与「工具忘了记」
+    在产物上长得一样。
+    """
+    return {
+        PROVENANCE_KIND_KEY: kind,
+        "anchor_field": anchor_field,
+        "anchor_value": anchor_value,
+        SNAPSHOT_SCOPE_FIELD: scope,
+    }
+
+
+def validate_source_identity(source, *, where="directive.source_identity"):
+    """校验 CP-F `source_identity` 的来源身份，返回 `(kind, anchor_field, anchor_value, scope)`。
+
+    **判别式与长度判据只此一处**，且逐字复用 `source_provenance` 的词表：
+
+    | `provenance_kind` | 锚 | 额外必填 |
+    |---|---|---|
+    | `gitcode_pr`（**键缺席即此档**） | `pr_head_sha`，恰 40 位 hex | —— |
+    | `local_snapshot` | `snapshot_subtree_sha256`，恰 64 位**小写** hex | `snapshot_subtree_scope`（字符串；空串= 仓根，属合法显式值） |
+
+    ⚠ 「缺席即 `gitcode_pr`」**不是**兜底猜测：它只在 PR 通路上生效，而 `validate_directive`
+    对键集做严格相等校验——一份漏写 `provenance_kind` 的本地 directive 会带着
+    `snapshot_subtree_sha256` 撞进 PR 档，当场被键集校验拒。默认值因此不构成放行路径。
+
+    ⚠ **两条通路的锚互斥**：声明 `gitcode_pr` 却同时带 `snapshot_subtree_sha256`（反之亦然）
+    一律拒。锚都齐了的话，任何**按字段名直取**而不走本函数的下游都能自选一套来源身份——
+    那正是判别式要消灭的分叉。同理，PR 档不得带 `snapshot_subtree_scope`。
+
+    ⚠ 不做大小写归一：收据侧 `vendor_build_receipt` 也不归一，两边口径必须一致
+    （只在一侧 `.lower()` 会把一份大写 head 的合法收据判成漂移）。
+
+    ⚠ `repo` 带用户凭据一律拒。**这道检查在读侧**：现产出方 `vendor_build_receipt.py`
+    不做凭据判别（模块文档明写），而 CP-F 的 `repo` 会被逐字带进 manifest 与人读报告，
+    撞仓规 §2。**刻意不回显原值**——报错会进终端与 CI 日志，回显就是再泄漏一次。
+    """
+    if not isinstance(source, dict):
+        raise RetestContractError(f"{where} 缺失或不是 JSON object")
+    kind = source.get(PROVENANCE_KIND_KEY, PROVENANCE_GIT_PR)
+    if kind not in SOURCE_ANCHOR_FIELD:
+        raise RetestContractError(
+            f"{where}.{PROVENANCE_KIND_KEY}={kind!r} 不在受控词表 "
+            f"{list(SOURCE_ANCHOR_FIELD)}（未知来源一律 fail-closed，不猜、不归类）")
+    repo = source.get("repo")
+    if not isinstance(repo, str) or not repo.strip():
+        raise RetestContractError(f"{where}.repo 必填（两条通路都要），实得 {repo!r}")
+    if url_credentials.url_has_userinfo(repo):
+        raise RetestContractError(
+            f"{where}.repo 是一个**带用户凭据**的 URL（`scheme://…@host/…`），拒绝采信。\n"
+            f"  它会被逐字带进 attempt manifest 与人读报告，撞仓规 §2"
+            f"（token/密码/私钥不得写进任何产物）。\n"
+            f"  此处刻意不回显原值——回显就是再泄漏一次。\n"
+            f"  → 起草 directive 时抄收据里那个不含凭据的仓名（如 `cann/ops-nn`），"
+            f"并把本机 git remote 里的凭据挪进 credential helper。")
+    other_kind = (PROVENANCE_GIT_PR if kind == PROVENANCE_LOCAL_SNAPSHOT
+                  else PROVENANCE_LOCAL_SNAPSHOT)
+    other = SOURCE_ANCHOR_FIELD[other_kind]
+    if other in source:
+        raise RetestContractError(
+            f"{where}.{PROVENANCE_KIND_KEY}={kind} 却同时带着另一条通路的锚 {other!r}——"
+            f"两套锚齐备时，任何按字段名直取的下游都能自选来源身份，拒绝")
+    field = SOURCE_ANCHOR_FIELD[kind]
+    value = source.get(field)
+    if kind == PROVENANCE_GIT_PR:
+        if not isinstance(value, str) or _HEX40_RE.fullmatch(value) is None:
+            raise RetestContractError(
+                f"{where}.{field} 须为恰 40 位 hex 的 commit SHA（实得 {value!r}）——"
+                f"64 位摘要不是 PR head，不接受任何区间正则")
+        if SNAPSHOT_SCOPE_FIELD in source:
+            raise RetestContractError(
+                f"{where}.{PROVENANCE_KIND_KEY}={kind} 不得带 {SNAPSHOT_SCOPE_FIELD}"
+                f"（PR 通路没有快照范围可言，混装即来源身份不可信）")
+        return kind, field, value, None
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise RetestContractError(
+            f"{where}.{field} 须为恰 64 位小写 hex 的子树 merkle（实得 {value!r}）——"
+            f"40 位 commit SHA 不是本地快照锚")
+    scope = source.get(SNAPSHOT_SCOPE_FIELD)
+    if not isinstance(scope, str):
+        raise RetestContractError(
+            f"{where}.{SNAPSHOT_SCOPE_FIELD} 须为字符串（空串= 仓根，属合法显式值；"
+            f"实得 {scope!r}）——merkle 没有范围就无法与收据/事实包对账")
+    return kind, field, value, scope
+
+
+def receipt_source_identity(build_receipt, *, expected_kind,
+                            where="vendor build receipt"):
+    """校验一份 vendor build receipt 并返回 `(归一化摘要, 来源身份整块)`。
+
+    ⚠ **判据只在 `vendor_build_receipt` 一处解释**：本函数不重读 `receipt["source"]` 的
+    原始字段，只消费 `summarize()` 的归一化摘要（信封 + 版本/`provenance_kind` 成对 +
+    声明形态 + degradations + 按通路分流的锚 + build argv/cwd/实测 returncode 都在那里校）。
+    CP-F 自己再解释一遍原始字段，正是本轮刚拆掉的那个「两套来源判别式」的成因。
+
+    ⚠ **`expected_kind` 是必填关键字，没有默认值也没有「我确实没有对照物」的哨兵**：
+    绕过路径是——`source_identity` 声明 `local_snapshot`，而收据改口说 `gitcode_pr` 并填一个
+    **任意 40 位 hex** → 校验走进 PR 分支 → 本地锚的等值校验**根本不会执行** →
+    vendor `.so` 与被测源码的绑定完全失效。所以两边必须**先确认说的是同一条通路，再按通路分支**。
+    CP-F 的两个调用点手上都有 directive 这个对照物，故不留任何免检口。
+    """
+    if expected_kind not in SOURCE_ANCHOR_FIELD:
+        raise RetestContractError(
+            f"expected_kind={expected_kind!r} 不在受控词表 {list(SOURCE_ANCHOR_FIELD)}")
+    try:
+        summary = vendor_build_receipt.summarize(build_receipt)
+    except vendor_build_receipt.VendorBuildReceiptError as ex:
+        raise RetestContractError(
+            f"drift_blocked:vendor_build_receipt_invalid：{where}：{ex}") from ex
+    kind = summary[PROVENANCE_KIND_KEY]
+    if kind != expected_kind:
+        raise RetestContractError(
+            f"drift_blocked:vendor_build_source_kind_mismatch：{where} 声明 "
+            f"{PROVENANCE_KIND_KEY}={kind!r}，directive 声明 {expected_kind!r}——"
+            f"两边说的根本不是同一条来源通路（不是锚漂移），拒绝按任一方分支")
+    if url_credentials.url_has_userinfo(summary["repo"]):
+        raise RetestContractError(
+            f"{where}.source.repo 是一个**带用户凭据**的 URL，拒绝采信"
+            f"（产出方不做这道检查，读侧必须拦；刻意不回显原值）")
+    field = SOURCE_ANCHOR_FIELD[kind]
+    return summary, _source_identity_record(
+        kind, field, summary[field], summary[SNAPSHOT_SCOPE_FIELD])
 
 
 def sha256_file(path):
@@ -321,7 +480,7 @@ def _cpp_extension_base_binding(evidence, caseset, reports_dir, case_ids,
     """从首次 cpp_extension 证据冻结可执行身份；不依赖已清理的远端绝对路径。
 
     `expected_kind` 是 directive 声明的来源通路，**不是形式主义参数**：不传它，
-    「directive 说 `local_checkout`、基础收据说 `pull_request` 并填一个任意 40 位 hex」
+    「directive 说 `local_snapshot`、基础收据说 `gitcode_pr` 并填一个任意 40 位 hex」
     这条路就会走进 PR 分支，本地锚的等值校验**整条不执行**——vendor `.so` 与被测源码
     之间的机器可核对应关系就此消失。所以两边必须先确认说的是同一条通路，再按通路分支。
     """
@@ -376,27 +535,23 @@ def _cpp_extension_base_binding(evidence, caseset, reports_dir, case_ids,
             f"drift_blocked:base_invocation_plan_missing_cases={missing}")
     vendor = receipt.get("vendor")
     build_receipt = vendor.get("build_receipt") if isinstance(vendor, dict) else None
-    source = build_receipt.get("source") if isinstance(build_receipt, dict) else None
     runtime = receipt.get("runtime")
     if (not isinstance(vendor, dict) or not isinstance(build_receipt, dict)
-            or not isinstance(source, dict) or not isinstance(runtime, dict)):
+            or not isinstance(runtime, dict)):
         raise RetestContractError(
             "drift_blocked:base_cpp_extension_provenance_incomplete")
-    # 基础收据的来源锚校验**只此一处**，且必带 expected_kind（理由见函数 docstring）。
-    # `repo` 的非空校验也由这里统一强制，本函数不再自己判一次。
+    # 基础收据的来源判别**只此一处**，且必带 expected_kind（理由见函数 docstring）。
+    # `repo` 非空、build argv/cwd/实测 returncode 也一并由 `vendor_build_receipt` 统一校，
+    # 本函数不再自己解释一遍原始字段。
     try:
-        kind, anchor_field, anchor_value = dut_source.validate_build_receipt_source(
-            source, expected_kind=expected_kind,
-            where="base cpp_extension vendor build_receipt.source")
-    except dut_source.DutSourceError as ex:
+        summary, base_identity = receipt_source_identity(
+            build_receipt, expected_kind=expected_kind,
+            where="base cpp_extension vendor build_receipt")
+    except RetestContractError as ex:
         raise RetestContractError(
             f"drift_blocked:base_vendor_build_source_anchor_invalid：{ex}") from ex
-    build = build_receipt.get("build")
-    if (not isinstance(build, dict)
-            or not isinstance(build.get("argv"), list) or not build["argv"]
-            or any(not isinstance(x, str) or not x for x in build["argv"])):
-        raise RetestContractError(
-            "drift_blocked:base_vendor_build_invocation_incomplete")
+    # `summarize` 已保证 build.argv 是非空的非空字符串列表，故这里直接取。
+    build = build_receipt["build"]
     if vendor.get("build_receipt_sha256") != _canonical_sha(build_receipt):
         raise RetestContractError(
             "drift_blocked:base_vendor_build_receipt_sha256_mismatch")
@@ -424,17 +579,13 @@ def _cpp_extension_base_binding(evidence, caseset, reports_dir, case_ids,
         "base_namespace": extension_manifest.get("namespace"),
         "base_invocation_plan_sha256": expected["invocation_plan_sha256"],
         "base_spec_sha256": bindings.get("spec_sha256"),
-        # 整块记三元组，**不**另留一个「有值就用」的 base_pr_head 旧键：那等于把刚堵掉的
+        # 整块记来源身份，**不**另留一个「有值就用」的 base_pr_head 旧键：那等于把刚堵掉的
         # `.get(...) or .get(...)` 兜底放回来，同一段 hex 在两条通路里含义完全不同。
-        "base_source_identity": {
-            "dut_source": kind,
-            "anchor_field": anchor_field,
-            "anchor_value": anchor_value,
-        },
+        "base_source_identity": base_identity,
         "base_build_receipt_sha256": vendor.get("build_receipt_sha256"),
         "base_vendor_build_argv": copy.deepcopy(
             build["argv"]),
-        "base_source_repo": source.get("repo"),
+        "base_source_repo": summary["repo"],
         "base_vendor_elf_sha256": vendor.get("library_sha256"),
         "base_soc": runtime.get("soc"),
         "base_toolkit": runtime.get("cann_version"),
@@ -442,11 +593,11 @@ def _cpp_extension_base_binding(evidence, caseset, reports_dir, case_ids,
     }
 
 
-def _freeze_source_facts(base_reports_dir, kind, anchor_field, anchor_value):
+def _freeze_source_facts(base_reports_dir, kind, anchor_value, scope):
     """定位首轮 `source_facts.json` 并核锚；返回 ``(doc, base_path)``，PR 缺席时 ``(None, None)``。
 
     **为什么非冻不可**：`validate_acceptance_state.gate_task2` →
-    `_gate_build_receipt_source_binding` 在 `local_checkout` 且找不到 `source_facts.json`
+    `_gate_build_receipt_source_binding` 在 `local_snapshot` 且找不到 `source_facts.json`
     时按设计 BLOCKED，而 attempt 目录原本只复制 case 输入与 golden，**永远**不会有这份文件。
     也就是说本地通路的 CP-F 执行必 BLOCKED——不是偶发，是结构性缺口。所以 F2 就把首轮
     这份事实一并冻进 attempt，F3 再把冻结副本指给门。
@@ -455,12 +606,22 @@ def _freeze_source_facts(base_reports_dir, kind, anchor_field, anchor_value):
 
     | 通路 | 找不到 | 理由 |
     |---|---|---|
-    | `local_checkout` | **BLOCKED** | 本地锚的全部可信度就来自它与 build receipt 的等值校验；没有对照物等于没绑定，而这是新通路、没有历史包袱 |
-    | `pull_request` | 允许缺席 | 实测真机报告目录里本来就没有这份文件（取材 `--out` 与验收产物目录不同），硬要求会把现有 PR 通路整条打断 |
+    | `local_snapshot` | **BLOCKED** | 本地锚的全部可信度就来自它与 build receipt 的等值校验；没有对照物等于没绑定，而这是新通路、没有历史包袱 |
+    | `gitcode_pr` | 允许缺席 | 实测真机报告目录里本来就没有这份文件（取材 `--out` 与验收产物目录不同），硬要求会把现有 PR 通路整条打断 |
 
-    读锚一律走 `dut_source.identity`：**不许**手翻 `local_checkout.root_digest`，更不能碰
-    `local_checkout.git.head_sha`——后者只是「这份 checkout 当时停在哪个 commit」的信息字段，
-    worktree 可能 dirty，它与被测字节没有绑定关系。
+    **锚的读法与三级门 `_gate_build_receipt_source_binding` 逐字同一套**（两侧字段名不同名，
+    别按同名比）：`gitcode_pr` 比 `pr.head_sha`；`local_snapshot` 先比 `pr.snapshot_scope`
+    再比 `pr.snapshot_merkle_sha256`——intake 只产**一个** merkle（范围由 `--target-dir` 决定），
+    收据产**两个**（整树 + 子树），与 intake 可比的是**子树**那一个。范围不同的两个 merkle
+    不可比，所以 scope 必须先相等。
+
+    ⚠ 顺序固定：**先核通路身份、再核锚**。先各自取锚再比值的话，一份「收据说本地、事实说 PR」
+    的混装只会报「锚对不上」，把**来源身份被伪装**说成普通的锚漂移。
+
+    ⚠ 本函数只在 F2 侧做锚对账，**不验内容寻址信封、不跑取材完整性契约**——那由 F3 把冻结
+    副本交给 `validate_acceptance_state.gate_task2`（经 `source_facts_lookup.find_source_facts`）
+    时完成。如实记账：这道 F2 检查单独看比三级门弱，端到端仍是 fail-closed（弱的那一侧
+    先过、强的那一侧后过），但别把「F2 过了」读成「这份 source_facts 已被完整验过」。
     """
     root = os.path.realpath(os.fspath(base_reports_dir))
     for candidate in (os.path.join(root, _SOURCE_FACTS_NAME),
@@ -470,24 +631,60 @@ def _freeze_source_facts(base_reports_dir, kind, anchor_field, anchor_value):
         doc = load_strict_json(candidate, "base source_facts")
         payload = doc.get("payload")
         facts = payload if isinstance(payload, dict) else doc
-        try:
-            identity_triple = dut_source.identity(
-                facts, where="base source_facts")
-        except dut_source.DutSourceError as ex:
+        facts_pr = facts.get("pr")
+        if not isinstance(facts_pr, dict):
             raise RetestContractError(
-                f"drift_blocked:base_source_facts_anchor_invalid：{ex}") from ex
-        if identity_triple != (kind, anchor_field, anchor_value):
+                "drift_blocked:base_source_facts_anchor_invalid："
+                "source_facts.pr 缺失或非 object，无法与 directive 对账")
+        facts_kind = facts_pr.get(PROVENANCE_KIND_KEY)
+        if facts_kind != kind:
             raise RetestContractError(
-                f"drift_blocked:base_source_facts_anchor_mismatch "
-                f"facts={identity_triple!r} "
-                f"directive={(kind, anchor_field, anchor_value)!r}")
+                f"drift_blocked:base_source_facts_provenance_kind_mismatch "
+                f"facts={facts_kind!r} directive={kind!r}——"
+                f"**来源身份被伪装**（不是锚漂移：两边说的根本不是同一条来源通路）")
+        if kind == PROVENANCE_GIT_PR:
+            # 反向排他：PR 档的对照物不得带任何快照锚（值为 None 才算「没有」，缺键不算——
+            # `fetch_source` 的 PR 通路恒带这两个键、值为 None）。
+            for stray in ("snapshot_merkle_sha256", "snapshot_scope"):
+                if facts_pr.get(stray) is not None:
+                    raise RetestContractError(
+                        f"drift_blocked:base_source_facts_anchor_invalid："
+                        f"source_facts 声明 {PROVENANCE_KIND_KEY}={kind!r} 却带着 "
+                        f"{stray}={facts_pr.get(stray)!r}——PR 通路混装本地快照锚")
+            _require_facts_anchor(
+                "head_sha", facts_pr.get("head_sha"), anchor_value)
+            return doc, candidate
+        # local_snapshot：scope 必须先相等，才谈得上比 merkle。
+        _require_facts_anchor(
+            "snapshot_scope", facts_pr.get("snapshot_scope"), scope,
+            label="scope_mismatch",
+            why="两个 merkle 的覆盖范围对不上就不可比（对上了是巧合，"
+                "对不上也说不清是改了字节还是换了范围）")
+        _require_facts_anchor(
+            "snapshot_merkle_sha256", facts_pr.get("snapshot_merkle_sha256"),
+            anchor_value)
         return doc, candidate
-    if kind == dut_source.LOCAL_CHECKOUT:
+    if kind == PROVENANCE_LOCAL_SNAPSHOT:
         raise RetestContractError(
-            f"drift_blocked:base_source_facts_missing；dut_source={kind} 的 attempt 必须"
-            f"冻结首轮 source_facts.json（找过 <报告目录>/ 与 <报告目录>/work/），"
+            f"drift_blocked:base_source_facts_missing；{PROVENANCE_KIND_KEY}={kind} 的 "
+            f"attempt 必须冻结首轮 source_facts.json（找过 <报告目录>/ 与 <报告目录>/work/），"
             f"否则 F3 的 gate_task2 拿不到本地锚的对照物，必然 BLOCKED")
     return None, None
+
+
+def _require_facts_anchor(facts_field, facts_value, expected,
+                          label="anchor_mismatch", why=None):
+    """逐字比一对来源锚；不等即 BLOCKED。
+
+    ⚠ 两侧**都不许是 `None`**：`None == None` 会让「两边都没说」被读成「两边说的一样」，
+    那正是这道门要挡的东西。缺值一律当不相等。
+    """
+    if expected is not None and facts_value == expected:
+        return
+    raise RetestContractError(
+        f"drift_blocked:base_source_facts_{label} "
+        f"facts.pr.{facts_field}={facts_value!r} directive={expected!r}"
+        + (f"——{why}" if why else ""))
 
 
 def materialize_attempt(directive, reports_dir, execution_identity):
@@ -528,14 +725,12 @@ def materialize_attempt(directive, reports_dir, execution_identity):
             raise RetestContractError(f"execution_identity.{key} 须为非空字符串")
     for key in ("vendor_elf_sha256", "golden_source_sha256"):
         _require_sha256(identity.get(key), f"execution_identity.{key}")
-    # directive 的来源三元组：kind 决定基础收据按哪条通路核，anchor_field 决定与首轮
-    # evidence 对账时读哪个 provenance 键。判别只在这一处做，下面全部复用这三个值。
+    # directive 的来源身份：kind 决定基础收据按哪条通路核，anchor_field 决定与首轮
+    # evidence 对账时读哪个 provenance 键，scope 决定本地 merkle 拿哪一段来比。
+    # 判别只在这一处做，下面全部复用这四个值。
     # `validate_directive` 已经跑过同一个 helper，故这里不可能抛。
-    directive_kind, directive_anchor_field, directive_anchor_value = (
-        dut_source.validate_build_receipt_source(
-            d["source_identity"],
-            expected_kind=dut_source.NO_EXPECTED_KIND,   # directive 自己就是被比对的那一侧
-            where="directive.source_identity"))
+    (directive_kind, directive_anchor_field, directive_anchor_value,
+     directive_scope) = validate_source_identity(d["source_identity"])
     anchor_provenance_key = _provenance_anchor_key(
         directive_anchor_field, "directive.source_identity")
     runner_binding = None
@@ -547,8 +742,19 @@ def materialize_attempt(directive, reports_dir, execution_identity):
         if runner_binding.get("base_spec_sha256") != _canonical_sha(spec):
             raise RetestContractError(
                 "drift_blocked:base_cpp_extension_spec_sha256_mismatch")
+        # 来源身份整块对账：directive ↔ 首轮 build receipt。**整块比而不是只比锚值**——
+        # kind、anchor_field、anchor_value、snapshot_subtree_scope 一起比，任何一格被换掉
+        # 都当场拒（scope 尤其：范围不同的两个 merkle 不可比，只比 merkle 值等于没比）。
+        directive_identity = _source_identity_record(
+            directive_kind, directive_anchor_field, directive_anchor_value,
+            directive_scope)
+        if runner_binding["base_source_identity"] != directive_identity:
+            raise RetestContractError(
+                f"drift_blocked:base_source_identity_mismatch "
+                f"base={runner_binding['base_source_identity']!r} "
+                f"directive={directive_identity!r}")
         # 人工确认的仓名 ↔ 首轮 build receipt 自报的仓名，逐字对账。
-        # **锚相等不蕴含仓相同**：`local_root_digest` 只覆盖 `op_subdir` 子树，fork、vendored
+        # **锚相等不蕴含仓相同**：`snapshot_subtree_sha256` 只覆盖算子子树，fork、vendored
         # 目录、同一份代码换个仓名重开都能让两个不同的仓在该子树上字节全等；PR 通路的
         # head_sha 同样可以出现在 fork 里。所以 directive 里那句人工确认的 `repo` 必须真的
         # 参与校验，否则它只是一行没人核的自述——而模块 docstring 曾据此宣称有门。
@@ -616,13 +822,14 @@ def materialize_attempt(directive, reports_dir, execution_identity):
     elif anchor_provenance_key not in base_provenance:
         # aclnn_py / cpp 通路的 fail-closed：首轮 `execution_provenance` 里只有
         # `head_sha`——那是 aclnn_adapter 按 **PR ref** 取源核出来的线上 commit，
-        # 对本地 checkout 通路毫无意义。缺本通路的锚就是没有可对账的首轮事实，
+        # 对本地快照通路毫无意义。缺本通路的锚就是没有可对账的首轮事实，
         # 必须显式 BLOCKED；**绝不**回退去读 head_sha 充数（那正是来源伪装的入口）。
         # 单靠下面的等值循环也会拒，但报出来是 `_mismatch`，读的人容易误以为
         # 「把 head_sha 抄过去就好了」——所以这里单独给出正确归因。
         raise RetestContractError(
             f"drift_blocked:base_execution_provenance_anchor_missing："
-            f"dut_source={directive_kind} 需要 execution_provenance.{anchor_provenance_key}，"
+            f"{PROVENANCE_KIND_KEY}={directive_kind} 需要 "
+            f"execution_provenance.{anchor_provenance_key}，"
             f"首次 evidence 实有键 {sorted(base_provenance)}")
     expected_provenance = {
         anchor_provenance_key: directive_anchor_value,
@@ -645,7 +852,7 @@ def materialize_attempt(directive, reports_dir, execution_identity):
                 f"expected={identity[field]!r}")
     source_facts_doc, source_facts_path = _freeze_source_facts(
         prepared["base_reports_dir"], directive_kind,
-        directive_anchor_field, directive_anchor_value)
+        directive_anchor_value, directive_scope)
     manifest = build_attempt_manifest(
         d, prepared["case_bindings"], identity, runner_binding,
         os.path.realpath(os.fspath(reports_dir)),
@@ -712,27 +919,25 @@ def validate_directive(directive, *, require_confirmed=False):
             raise RetestContractError(f"base_artifacts.{name} 须仅含 path/sha256")
         _require_sha256(item.get("sha256"), f"base_artifacts.{name}.sha256")
     source = _require_object(d.get("source_identity"), "source_identity")
-    # 来源锚的判别与长度校验**只此一处**，且只能由 `dut_source` 出：
-    # PR 恰 40 位 `pr_head_sha`、本地恰 64 位 `local_root_digest`。旧的 40..64 区间正则
-    # 已删——它让「叫 pr_head 却装 64 位摘要」原样通过，是本批要堵的那个洞。
-    try:
-        # 变量刻意叫 source_kind：本函数里 `kind` 已经是 attempt_kind，重名会把
-        # 下面「只有 relaxed_rerun 可带 precision_override」那道校验悄悄改判。
-        source_kind, anchor_field, _anchor_value = (
-            dut_source.validate_build_receipt_source(
-                source,
-                expected_kind=dut_source.NO_EXPECTED_KIND,   # 此处只校 directive 自身形态
-                where="directive.source_identity"))
-    except dut_source.DutSourceError as ex:
-        raise RetestContractError(f"source_identity 来源锚不合法：{ex}") from ex
-    # `repo` 是本批新增的必填，旧 directive 因此失效（见模块 docstring）。
-    # ⚠ 本函数只校它非空——**对账不在这里**：`cpp_extension` 通路由 `materialize_attempt`
-    # 与 `runner_binding.base_source_repo` 逐字比；`cpp`/`aclnn_py` 没有可比的对照物。
+    # 来源锚的判别与长度校验**只此一处**（`validate_source_identity`）：
+    # `gitcode_pr` 恰 40 位 `pr_head_sha`；`local_snapshot` 恰 64 位小写
+    # `snapshot_subtree_sha256` **加** `snapshot_subtree_scope`。
+    # 更早那版 `pr_head` 的 40..64 区间正则（让 64 位摘要冒充 PR head）早已删除，别复活。
+    # 变量刻意叫 source_kind：本函数里 `kind` 已经是 attempt_kind，重名会把
+    # 下面「只有 relaxed_rerun 可带 precision_override」那道校验悄悄改判。
+    source_kind, anchor_field, _anchor_value, _scope = validate_source_identity(
+        source, where="source_identity")
+    # ⚠ 本函数只校 `repo` 非空/不含凭据——**对账不在这里**：`cpp_extension` 通路由
+    # `materialize_attempt` 与 `runner_binding.base_source_repo` 逐字比；
+    # `cpp`/`aclnn_py` 的首轮 `execution_provenance` 里没有仓名字段，没有可比的对照物。
     required_source = {"repo", "build_receipt_sha256", "runner_form", anchor_field}
-    if set(source) - {"dut_source"} != required_source:
+    if source_kind == PROVENANCE_LOCAL_SNAPSHOT:
+        # scope 是载重字段：漏了它，两个覆盖范围不同的 merkle 会被当成可比的。
+        required_source.add(SNAPSHOT_SCOPE_FIELD)
+    if set(source) - {PROVENANCE_KIND_KEY} != required_source:
         raise RetestContractError(
-            f"source_identity(dut_source={source_kind}) 键须严格等于 "
-            f"{sorted(required_source)}（另可选 dut_source），实得 {sorted(source)}")
+            f"source_identity({PROVENANCE_KIND_KEY}={source_kind}) 键须严格等于 "
+            f"{sorted(required_source)}（另可选 {PROVENANCE_KIND_KEY}），实得 {sorted(source)}")
     _require_sha256(source.get("build_receipt_sha256"),
                     "source_identity.build_receipt_sha256")
     if source.get("runner_form") not in ("cpp", "aclnn_py", "cpp_extension"):

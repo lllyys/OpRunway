@@ -22,10 +22,9 @@
 挂到那道门的绑定面上——门看着有、实际拦不住。为了让 import 通过而去改那条 pin，
 正是「删门换绿」。故规则住在这里，`source_provenance.py` 保持零本仓依赖。
 
-口径与仓内既有做法一致：`dut_source_kind.py` 的模块文档早写过同一条理由
-（判别式内核要小，URL 凭据策略 / 收据锚校验 / `source_facts.json` 查找这三类职责
-不该跟它绑在同一个被哈希的文件里）；theirs 把凭据判别拆成 `url_credentials.py`
-也是同一个动作。
+口径与仓内既有做法一致：被哈希的判定内核要小，URL 凭据策略 / 收据锚校验 /
+`source_facts.json` 查找这三类职责都不该跟它绑在同一个文件里。凭据判别拆成
+`url_credentials.py` 是同一个动作。
 
 ## 历史
 

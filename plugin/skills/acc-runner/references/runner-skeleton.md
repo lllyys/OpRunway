@@ -2,7 +2,7 @@
 
 > `acc-runner` skill 的 reference。据 spec + `pr_facts`（算子自带 example + op_def）**生成一个锚定算子实测路径的 runner** `oprunway_<op>_runner.cpp`，供 `repo_adapter.run_new_example` 在真 NPU 上跑正确性 + msprof 测性能。
 >
-> **⚠ 准入状态（先看这条）**：本页描述的是 `spec.runner_form == "cpp"` → `--mode new_example` 这条通路。`runner_form` 受控词表为 `{cpp, aclnn_py, cpp_extension}`、**缺省 = `cpp_extension`**，而**验收裁决当前只出自 `cpp_extension`**（`run_workflow._ACCEPTANCE_RUNNER_FORMS`，见仓根 `AGENTS.md` §4）。`cpp` 仍跑得起来（须 `--allow-experimental-form`），但只产 `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"`），**不写** `acceptance.json` / `verdict.json`。所以下面整套骨架/四槽/自检**机制仍然有效**，服务修通路、复现问题、局部开发验证；**跑绿了不等于验收通过**，正式验收须走 `cpp_extension`。
+> **⚠ 准入状态（先看这条）**：本页描述的是 `spec.runner_form == "cpp"` → `--mode new_example` 这条通路。`runner_form` 受控词表为 `{cpp, aclnn_py, cpp_extension}`、**缺省 = `cpp_extension`**，而**验收裁决当前只出自 `cpp_extension`**（`run_workflow._ACCEPTANCE_RUNNER_FORMS`，见仓根 `AGENTS.md` §4）。⛔ `cpp` 已于 2026-08-06 **停止准入**：派生表无条目、逃生阀 `--allow-experimental-form` 已删，显式 `--mode new_example` 也被拒——**这条通路现在跑不起来**。所以下面整套骨架/四槽/自检**仅作历史保留**（解释既有 `cpp` 产物是怎么来的、以及将来若恢复该通路要满足什么）；正式验收须走 `cpp_extension`。⚠ 历史 `cpp` 验收产物保持原裁决与历史效力。
 >
 > **⚠ 当前闭环范围（诚实说明，勿超范围声称）**：**代码闭环 = ops-<族> 仓 · opp 安装型产物 · aclnn 两段式接口**。⚠ 引擎的目录/vendor 后缀/build 旗标**已生成化**（`OPRUNWAY_OP_SRC`/`OPRUNWAY_VENDOR_SUFFIX`/`experimental/` 前缀），**不再硬编码 `experimental/math/$OP` + `${VEN}_math`**（2026-07-23 批 6b 调研更正）。真正的闸是三块：`build.sh --pkg --ops` 家族命令 · opp vendor 布局 · aclnn 链接。catlass（换构建体系+换接口）/ 双实现 **尚未支持**（放宽计划见 `dev-doc/oprunway-batch6b-design.md`；⚠ 旧文提的 `OPRUNWAY_TARGET_DIR` 是幽灵变量、runner 通路无此配置）。
 > **验证-才-信目前是「纪律」不是「代码强制门」**：`repo_adapter` 只检查 runner 文件是否存在，**不识别 unverified 标记**。真正的硬门要加 sidecar 契约（§4），未加前 agent/人**必须自觉执行验证**。

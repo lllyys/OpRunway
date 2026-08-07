@@ -165,7 +165,7 @@
 >   「数量以用户为准」的**精神仍在**：拿不准就停下问用户，只是不许再兜一个默认值。
 > - **性能与精度同一套输入**（用户明示）：不再单独造大 shape 性能用例；**性能在全部相同输入上判**（§1 覆盖里维度可到 2²⁰、总元素 2³¹，大 shape 本在集里）。
 > - **精度门前置 + fail-fast**：跑完整套 → 任一精度挂 → `FAILED_PRECISION` + 跳过性能 + 提前结束（fail-fast 粒度=**跑完再判**、非首个短路）。
-- [x] **① 数量可配**：spec 加 `precision.case_target`（默认 50）；`acc-spec` agent `AskUserQuestion` 问用户写入；`gen_cases`/门读同一字段。
+- [x] **① 数量可配**：spec 加 `precision.case_target`（默认 50）；`acc-spec` agent `AskUserQuestion` 问用户写入；`gen_cases`/门读同一字段。⚠ 括号里的「默认 50」与「`AskUserQuestion` 问用户」**均已于 2026-08-06 作废**（见本节上方 ⚠）；本行只记「① 当时做了什么」，不是现行规则。
 - [x] **② gen_cases 重写按 §1**：轴 = `dtype(可跑集) × 数据格式 × 维度 × attr` 正交覆盖——维度 1~8、每维取 **2ᵏ / 2ᵏ−1**、总元素 ≤ 2³¹；值域 **50% 均匀[-5,5] + 50% 正态(μ∈[-5,5],σ∈[0.1,2])**；attr 走等价类/布尔 T,F/枚举全值。§1.4 特殊场景（空 Tensor、标量[1]、边界全1维/某维最大、INF/-INF/NAN 遍历）**优先纳入、不与常规正交**，余量用正交组合确定性填到 `case_target`（SEED 稳定序）。每条 torch golden。**边界值域正好落实 Q9 剩余 NaN/±0/Inf 边界（codex #6）**。defer 的 dtype（runner 跑不了）隔 blocked-pending、不计必过集。
 - [x] **③ 单集单跑双出**：`run_workflow` Task2 一套用例在 NPU 跑一次 → 每条出精度(vs torch golden, ascendoptest 阈值)+性能(kernel-only us)。精度门前置 fail-fast：任一挂 → `FAILED_PRECISION`+跳过 Task3+非零退出+`acceptance.json` 记「精度未全过、性能未跑」。全过 → Task3 性能对比在**全部相同输入**上做。
 - [x] **④ 门加两道**：精度全过门（任一 case≠pass → FAILED）+ 精度数量门（precision case 数 ≥ `case_target`，否则 BLOCKED——补「跑子集报全」的**数量维**）。

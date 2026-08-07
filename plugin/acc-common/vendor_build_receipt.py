@@ -43,9 +43,24 @@ adapter / 三级门）分辨不出。这正是本仓最贵的两类缺陷之一�
 ⚠ **本模块不读 `source_facts`**，如实记账：收据里的两个 merkle 由 `--source-root` 现算，
 「build 的这棵树是不是 CP-A 取材的那棵」由**三级门**（`validate_acceptance_state` 比
 `snapshot_subtree_sha256` ↔ `source_facts.pr.snapshot_merkle_sha256`）来判，本模块**不当场核**。
-已删除的 `make_vendor_build_receipt.py` 曾在构建前 + 构建后各做一次这项对账并 fail-closed；
-该能力随它一并消失，现在指错 `--source-root` 要跑到验收门才 BLOCK，而**构建后**那次
-（「这次 build 有没有把被测子树改掉」）已无任何门在做，只剩 `build.tree_state_at_emit` 供人工读。
+
+本模块自己核的是另一件更近的事——「build 的这棵树是不是**本模块刚摘过指纹**的那棵」。
+这项对账构建前后各一次（承自已删除的 `make_vendor_build_receipt.py`，两次语义不同）：
+
+| 时机 | 入口 | 判什么 | **不**判什么 |
+|---|---|---|---|
+| **构建前**（跑 build 之前） | :func:`assert_build_tree_matches_digest` | `--build-cwd` 落在 `snapshot_digest.source_root` 之内；整树 + 子树 merkle 都还是凭据里那两个值 | 与 `source_facts` 的对账（那是三级门的事） |
+| **构建后**（落盘之前） | :func:`_tree_state_at_emit` | **子树** merkle 仍等于 build 前的值 | 整树——build 往树里写产物是常态，`matches_pre_build=False` 是**预期结果**，不是告警 |
+
+两次分别堵住两个各自无声通过的错法：**在 A 目录摘树、在 B 目录 build**（收据声称的源码与
+实际构建输入毫无关系，是一份空绑定），以及**这次 build 把被测子树改掉了**（收据声称的那份
+字节此刻已不存在，谁也复现不了）。后者尤其**没有下游会接住**——编排只在 CP-A 取材跑一次
+`fetch_source`，三级门读的是同一份落盘的 `source_facts.json`，拿旧锚比旧锚永远相等。
+
+⚠ 这两道门查不出的漂移（别当万能）：`build` / `output` 等目录名在 `_walk_snapshot` 里按名
+跳过，往那里写生成源再编译它，摘要不变；软链只记指向字符串、不记目标字节；构建期间临时改
+源码、编完再改回去同样查不出——快照就是快照。PR 通路（`--pr-head-sha`）压根没有
+`source_root` 这个对照物，**两次都做不了**，别看到这两个函数就以为两条通路都核了。
 
 ⚠ **merkle 必须在 build 之前算**：build 会往源码树里写产物，事后再摘就摘到了「源码 + 产物」，
 与 CP-A 记的那份字节永远对不上（实测：build 后整树 merkle 变成另一个值）。
@@ -56,6 +71,40 @@ adapter / 三级门）分辨不出。这正是本仓最贵的两类缺陷之一�
 （另一种设想是「产出时自己检测树里已有构建产物就拒绝」。不采用：那需要枚举「构建产物长什么样」，
 是 denylist；而且 `_walk_snapshot` 本就按名跳过 `build/`、`output/`，build 若把生成的头文件、
 `.d`、`cmake-build-*` 写在别处，检测不到却照样改了 merkle —— 给的是假保证。）
+
+### 「emit 不摘树」这条设计有没有被破坏？没有
+
+有人会问：构建后再比一次，`emit` 就得自己重算一遍树，那不是把「emit 不摘树」推翻了吗？
+
+不是。那条设计约束的从来不是「emit 不许调 `_walk_snapshot`」——`_tree_state_at_emit` 在本次
+改动**之前**就已经在 emit 时刻走了一遍树。它约束的是**收据里记录的那两个 merkle 只能来自
+build 前落盘的凭据**，`produce_receipt` 永远不许拿自己现摘的值去填 `source.snapshot_*`
+（那样填出来的是「源码 + 产物」，与 CP-A 记的字节永远对不上）。
+
+把一次**已经在算**的 emit 期扫描从「只记录」升成「记录 + 判子树」，新增的树遍历是 **0 次**，
+`source.snapshot_*` 的取值来源一个字节没动。所以两者不冲突，不需要取舍。
+
+## `source.repo` 不得带用户凭据
+
+`repo` 会落盘进收据、会被 CLI 打印、还会由 `render_acceptance_markdown` 渲进人读验收报告的
+「源码仓」一行——那是凭据真正**泄漏出去**的那一步，撞仓规 §2（token/密码/私钥不得写进任何
+产物）。判别式只有 `url_credentials` 一份实现，产出侧与读侧共用；各写一套的话两边迟早对同一个
+URL 给出不同答案，那时门就是摆设。⚠ **报错刻意不回显原值**：报错会进终端与 CI 日志，
+回显就是再泄漏一次。
+
+门落在 :func:`validate` —— driver / adapter / 三级门共用的那道「这份收据能不能当本轮验收
+凭据」，产出方 :func:`produce_receipt` 自过一遍 `validate`，故四处一起拒。
+⚠ :func:`summarize` **刻意不抛**，别顺手挪进 `_validate_source` 去「统一」：`summarize` 是
+**解释**函数，`render_acceptance_markdown` 得先拿到摘要才能对带凭据的 repo 印出专门的
+「拒绝渲染」整节退化；挪进去会让那条已测过的路径变成死代码，报告只剩一句通用解析失败。
+
+## `--out` 在 build 之前就得落得下去
+
+`emit` 没有「只记录不执行」模式，而 vendor 全量构建以十分钟计，写盘却在最后一步。于是
+`--out` 打错一个字、目录写不进去、或与 `--library` / `--snapshot-digest` 撞同一个文件，
+代价都是整轮重跑；撞 `--library` 更糟——写收据会把被测 ELF **原子替换成一份 JSON**，
+这一轮直接没有 DUT 了。故 :func:`assert_out_is_writable` **在跑 build 之前**探一次落点，
+写盘统一走 :func:`atomic_write`：异常时不留半截产物（半截收据比没有更坏，它看着像一份真的）。
 
 ## 为什么要分流：本地快照没有 PR head
 
@@ -115,9 +164,11 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 import source_provenance
+import url_credentials
 
 
 class VendorBuildReceiptError(ValueError):
@@ -292,8 +343,40 @@ def _validate_degradations(receipt, accepted):
     return list(value)
 
 
+def assert_repo_has_no_credentials(repo, where):
+    """`repo` 带用户凭据一律拒；**刻意不回显原值**。
+
+    为什么这道门必须存在：`repo` 会落盘进收据、会被 CLI 打印、还会由
+    `render_acceptance_markdown` 渲进人读验收报告的「源码仓」一行——报告是会被转发的 .md，
+    那才是凭据真正**泄漏出去**的那一步，直接撞仓规 §2。
+    源头（`fetch_source` 扣留 remote_url）只堵得住新产的取材事实；老收据、外部构建驱动产的
+    收据、手改的收据全都从别的入口进来。
+
+    判别式走 :mod:`url_credentials`（本仓唯一实现），本模块**不另写一份**：产出侧与读侧各
+    写一套的话，两边迟早对同一个 URL 给出不同答案，那时「一边扣了、另一边没拦」，门就是摆设。
+
+    ⚠ **不做脱敏后照用**：脱敏会改字节，而 CP-F 对 `repo` 是**逐字**比对，
+    脱敏值当载重字段用等于换个方式制造 BLOCK。要继续就显式给一个干净的 `--repo`。
+    """
+    if not url_credentials.url_has_userinfo(repo):
+        return
+    # ⚠ **刻意不回显原值**：报错会进终端、CI 日志和 issue，回显就是再泄漏一次。
+    raise VendorBuildReceiptError(
+        f"{where} 是一个**带用户凭据**的 URL（`scheme://…@host/…`），拒绝采信。\n"
+        "  它会落盘进收据、被打印，并渲进人读验收报告的「源码仓」一行——"
+        "撞仓规 §2（token/密码/私钥不得写进任何产物）。\n"
+        "  此处刻意**不回显原值**——回显就是再泄漏一次。\n"
+        "  → 用 --repo 显式给一个不含凭据的仓名（如 `cann/ops-nn`），"
+        "并把本机 git remote 里的凭据挪进 credential helper。")
+
+
 def _validate_source(receipt):
-    """校源身份并返回**归一化摘要**；`summarize` 复用同一实现，避免两处解释漂移。"""
+    """校源身份并返回**归一化摘要**；`summarize` 复用同一实现，避免两处解释漂移。
+
+    ⚠ 这里**不判 `repo` 的用户凭据**，是刻意的分工，不是漏判：本函数经 :func:`summarize`
+    被报告渲染器调用，而渲染器要先拿到摘要才能对带凭据的 repo 印出专门的「拒绝渲染」。
+    凭据门在 :func:`validate`（见 :func:`assert_repo_has_no_credentials` 与模块 docstring）。
+    """
     version = _validate_envelope(receipt)
     source = _require_dict(receipt.get("source"), "vendor build receipt.source")
     kind = _resolve_kind(receipt, source)
@@ -433,10 +516,19 @@ def _validate_artifact(receipt, library_path, library_sha256, normalize_path):
 def validate(receipt, *, library_path, library_sha256, normalize_path=False):
     """完整校验一份收据，返回归一化摘要；任一条不满足即抛 `VendorBuildReceiptError`。
 
-    = :func:`summarize`（信封 + 源身份 + 构建段）**再加**「安装 ELF 与调用方现场绑定的
-    那一个逐字相同」。两者共用同一条实现，避免离线复核方与真机 driver 各解释一遍。
+    = :func:`summarize`（信封 + 源身份 + 构建段）**再加**两条：
+
+    * `source.repo` 不带用户凭据（:func:`assert_repo_has_no_credentials`）；
+    * 安装 ELF 与调用方现场绑定的那一个逐字相同（:func:`_validate_artifact`）。
+
+    这条实现由**四处**共用——真机 driver、离线 adapter、三级门，以及自过一遍本函数的产出方
+    :func:`produce_receipt`——所以「这份收据能不能当本轮验收凭据」只有一个答案。
+
+    ⚠ 凭据那条刻意落在这里而不是 `_validate_source`：`summarize` 是解释函数，报告渲染器
+    要靠它先拿到摘要才能印出专门的拒绝语。挪进去会让那条路径变成死代码（模块 docstring）。
     """
     summary = summarize(receipt)
+    assert_repo_has_no_credentials(summary["repo"], "vendor build receipt.source.repo")
     _validate_artifact(receipt, library_path, library_sha256, normalize_path)
     return summary
 
@@ -571,14 +663,22 @@ def take_snapshot_digest(source_root, subtree_scope=""):
 
     `algorithm.logic_sha256` 钉的是 `fetch_source.py` 本身：算法一改，旧摘要立即失效，
     不会被一份口径已变的摘要悄悄拿去产收据。
+
+    ⚠ 两个 `*_skipped_symlink_count` 与取材侧的 `snapshot_skipped_symlinks` 同源同算法：
+    软链**整棵不入 merkle**（算法定义），所以一份「把源文件换成指向仓外的软链」的构建树
+    与一份干净的树可以摘出**同一个** merkle。计数本身不是门（下面没有任何一处拿它做判定），
+    但它让这块不覆盖在收据里**看得见**，而不是只写在某个 docstring 里。
+    ⚠ 如实记账：**目前没有任何一道门拿它跟取材侧对账**——真要封死，得让三级门把两侧的软链台账
+    也逐字比一遍，那要动 `_validate_source` 的摘要形状（进而动 driver ↔ adapter 的等值比对），
+    是另一件事。
     """
     fetch_source = _fetch_source()
     root = os.path.realpath(os.fspath(source_root))
     if not os.path.isdir(root):
         raise VendorBuildReceiptError(f"源码树不存在或不是目录：{source_root!r}")
     scope = _normalized_scope(fetch_source, root, subtree_scope)
-    whole_rels = fetch_source._walk_snapshot(root, "")
-    subtree_rels = fetch_source._walk_snapshot(root, scope)
+    whole_rels, whole_links = fetch_source._scan_snapshot(root, "")
+    subtree_rels, subtree_links = fetch_source._scan_snapshot(root, scope)
     return {
         "schema": SNAPSHOT_DIGEST_SCHEMA,
         "schema_version": SNAPSHOT_DIGEST_VERSION,
@@ -590,6 +690,8 @@ def take_snapshot_digest(source_root, subtree_scope=""):
         "snapshot_subtree_sha256": fetch_source._snapshot_merkle(root, subtree_rels),
         "file_count": len(whole_rels),
         "subtree_file_count": len(subtree_rels),
+        "skipped_symlink_count": len(whole_links),
+        "subtree_skipped_symlink_count": len(subtree_links),
         "algorithm": {
             "tool": "fetch_source.py",
             "logic_sha256": _sha256_file(
@@ -630,6 +732,78 @@ def _validate_snapshot_digest(digest):
             "snapshot digest 记的摘要算法（fetch_source.py logic_sha256）与当前不一致："
             f"记={recorded!r} 现={current!r}——两端算法不同则 merkle 不可比，请重取摘要")
     return root, scope, whole, subtree
+
+
+def _assert_build_cwd_within(source_root, build_cwd):
+    """`--build-cwd` 必须落在**被摘过指纹的那棵树**里（等于树根，或在它之下）。
+
+    没有这一条，「在 A 目录摘树、在 B 目录 build」全程无声通过：收据会声称这个 `.so`
+    构建自 merkle=X 的那份源码，而 X 与本次构建的实际输入毫无关系——一份空绑定。
+
+    两端都 realpath 后比，免得一条软链就把判据绕过去。允许 `build_cwd` 是树根的子目录：
+    从子目录发起构建仍然读的是这棵树的字节；落在树外才是问题。
+    """
+    if not isinstance(build_cwd, str) or not build_cwd or not os.path.isdir(build_cwd):
+        raise VendorBuildReceiptError(f"--build-cwd 不是已存在的目录：{build_cwd!r}")
+    root = os.path.realpath(source_root)
+    cwd = os.path.realpath(build_cwd)
+    if cwd != root and not cwd.startswith(root.rstrip(os.sep) + os.sep):
+        raise VendorBuildReceiptError(
+            "`--build-cwd` 不在被摘过指纹的那棵源码树里：\n"
+            f"  snapshot_digest.source_root = {root}\n"
+            f"  --build-cwd                 = {cwd}\n"
+            "  → 收据会声称这个 .so 构建自 source_root 那份字节，而这次 build 根本没在那里跑。\n"
+            "    在 A 目录摘树、在 B 目录 build 产出的是一份空绑定，fail-closed。")
+    return root
+
+
+def _recompute_tree(root, scope):
+    """在 `root` 上重算 `(整树 merkle, 子树 merkle)`；树读不到即 fail-closed。
+
+    走的是 :func:`_fetch_source` 拿到的**同一份算法**（`take_snapshot_digest` 用的也是它），
+    否则两端的值不可比，症状会表现成「字节没改却对不上」。
+    """
+    fetch_source = _fetch_source()
+    if not os.path.isdir(root):
+        raise VendorBuildReceiptError(
+            f"源码树不可读：{root!r}——无法重算 merkle 与凭据对账，fail-closed")
+    return (fetch_source._snapshot_merkle(root, fetch_source._walk_snapshot(root, "")),
+            fetch_source._snapshot_merkle(root, fetch_source._walk_snapshot(root, scope)))
+
+
+def assert_build_tree_matches_digest(snapshot_digest, build_cwd):
+    """**构建前**：核「你要 build 的那棵树」就是「刚被摘过指纹的那棵树」。
+
+    两件事一起判，缺一不可：
+
+    1. `--build-cwd` 落在 `snapshot_digest.source_root` 之内（:func:`_assert_build_cwd_within`）；
+    2. 整树与子树 merkle **都**还是凭据里那两个值。build 还没跑，树本来就该一个字节没变；
+       不等只有两种可能——凭据取自另一棵树，或摘完指纹之后有人动过这棵树。
+
+    ⚠ 整树在这里也硬校（与构建**后**那次刻意不同）：产物是 build 写进去的，build 之前
+    整树不该有任何差异。放过整树等于允许「摘完之后往树里塞点别的」。
+
+    ⚠ 这**不是**与 `source_facts` 的对账（那是三级门的事，本模块不读 source_facts）。
+
+    ⚠ 跑在 build **之前**是判据的一部分，不是优化：vendor 全量构建以十分钟计，
+    等跑完再发现摘错树，代价是整轮重跑。
+    """
+    root, scope, whole, subtree = _validate_snapshot_digest(snapshot_digest)
+    _assert_build_cwd_within(root, build_cwd)
+    now_whole, now_subtree = _recompute_tree(root, scope)
+    if (now_whole, now_subtree) == (whole, subtree):
+        return root, scope
+    raise VendorBuildReceiptError(
+        "构建前对账未过：源码树与 snapshot-digest 凭据**不是同一份字节**：\n"
+        f"  source_root = {root}（子树范围 {scope or '<整棵树>'}）\n"
+        f"  整树 merkle  凭据={whole}\n"
+        f"               现算={now_whole}\n"
+        f"  子树 merkle  凭据={subtree}\n"
+        f"               现算={now_subtree}\n"
+        "  → 要么凭据取自另一棵树，要么摘完指纹之后这棵树被改过（build 还没跑，"
+        "此刻本该一个字节没变）。\n"
+        "    收据若照产，它会声称构建自一份此处并不存在的源码。fail-closed。\n"
+        "  → 重跑 `snapshot-digest` 取一份当前的凭据，或换回正确的 --source-root / --build-cwd。")
 
 
 def _library_state(path):
@@ -748,9 +922,16 @@ def produce_receipt(*, declared_source_form, build_result,
     ⚠ `build_result` 只能是 :func:`run_build` 的返回值——**拿不到就产不出收据**。
     这条约束替掉了原先那个 `returncode=0` 参数：退出码是实测出来的，不是调用方说了算的。
 
-    ⚠ 本函数**不会**自己去摘源码树：`snapshot_digest` 必须是 :func:`take_snapshot_digest`
-    在 build 之前落下的那一份。产出时会另摘一次当前树状态记进
-    `build.tree_state_at_emit`，让「build 到底动没动源码树」在收据里可审。
+    ⚠ 本函数**不会**拿自己现摘的值去填 `source.snapshot_*`：那两个 merkle 只能来自
+    :func:`take_snapshot_digest` 在 build 之前落下的 `snapshot_digest`。
+
+    落盘前另有两道结构性的门（本地快照通路），直接调本函数的人也绕不过：
+
+    * `build_result["cwd"]` 必须落在 `snapshot_digest.source_root` 之内
+      （:func:`_assert_build_cwd_within`）——否则收据是一份空绑定；
+    * 产出时刻重算的**子树** merkle 必须仍等于 build 前的值
+      （:func:`_tree_state_at_emit`）——这次 build 把被测子树改掉了就 fail-closed。
+      整树变化只记进 `build.tree_state_at_emit`，那是 build 写产物的预期常态。
     """
     if declared_source_form not in DECLARED_SOURCE_FORMS:
         raise VendorBuildReceiptError(
@@ -775,6 +956,9 @@ def produce_receipt(*, declared_source_form, build_result,
              "execution": dict(result["execution"])}
     if snapshot_digest is not None:
         root, scope, whole, subtree = _validate_snapshot_digest(snapshot_digest)
+        # 结构性的一道：CLI 在 build 之前已核过一次（那次还能省下整轮构建），但直接调本函数的
+        # 人绕不过这里——「在 A 目录摘树、在 B 目录 build」的收据是空绑定，落盘前必须拦住。
+        _assert_build_cwd_within(root, build_cwd)
         kind = PROVENANCE_LOCAL_SNAPSHOT
         source = {
             "provenance_kind": kind,
@@ -794,6 +978,12 @@ def produce_receipt(*, declared_source_form, build_result,
             "subtree_scope": scope,
             "file_count": snapshot_digest.get("file_count"),
             "subtree_file_count": snapshot_digest.get("subtree_file_count"),
+            # 软链**整棵不入 merkle**（算法定义）。把 build 前那次扫到的条数带进收据，
+            # 让「这个 merkle 有多少块没覆盖」在产物里看得见，而不是只写在 docstring 里。
+            # ⚠ 只是记账、不是门（见 `take_snapshot_digest` 的如实记账段）。
+            "skipped_symlink_count": snapshot_digest.get("skipped_symlink_count"),
+            "subtree_skipped_symlink_count": snapshot_digest.get(
+                "subtree_skipped_symlink_count"),
         }
         build["tree_state_at_emit"] = _tree_state_at_emit(root, scope, whole, subtree)
     else:
@@ -825,31 +1015,128 @@ def produce_receipt(*, declared_source_form, build_result,
     return receipt
 
 
-def _tree_state_at_emit(root, scope, pre_whole, pre_subtree):
-    """产出时刻再摘一次源码树，如实记录它与 build 前是否还一样。
+#: `build.tree_state_at_emit` 里「构建后子树对账**跑过了**」的标记。
+#: 与 `returncode_source` 同一口径：**键在场**才表示这份收据由带这道门的版本产出；
+#: 缺席只说明是老收据（那时子树漂移无人拦），不许把缺席读成「核过且没问题」。
+SUBTREE_GATE_KEY = "subtree_matches_pre_build"
 
-    `matches_pre_build=False` 是**预期常态**（build 往树里写了产物），记它不是为了报警，
-    而是为了让「收据里那两个 merkle 是 build 前的值」这件事在产物里可审——
-    否则读收据的人无从判断摘要是 build 前取的还是事后补的。
+
+def _tree_state_at_emit(root, scope, pre_whole, pre_subtree):
+    """产出时刻再摘一次源码树：**子树 fail-closed，整树只记账**。
+
+    两个 merkle 的处置刻意**不对称**，这正是本函数的判据：
+
+    * **整树只记不判**——build 往树里写产物是常态，`matches_pre_build=False` 是**预期结果**，
+      不是告警。记它是为了让「收据里那两个 merkle 取自 build 前」在产物里可审，
+      否则读收据的人无从判断摘要是 build 前取的还是事后补的；
+    * **子树 fail-closed**——收据的核心主张就是「这个 `.so` 构建自 merkle=X 的那份算子源码」。
+      build 若把 `op_subdir` 改掉，X 对应的字节此刻已不存在，谁也复现不了。
+
+    ⚠ 这道门**不在这里做就没人做**：编排只在 CP-A 取材跑一次 `fetch_source`，build 之后
+    再没有任何一步重新取材；三级门读的是同一份落盘的 `source_facts.json`，拿旧锚比旧锚
+    永远相等。指望「下游再跑一次就发现了」的那个救援从不发生。
+
+    ⚠ 本函数在 emit 时刻走树，**不违反**「emit 不摘树」——那条约束的是「收据记录的
+    `source.snapshot_*` 只能取自 build 前的凭据」，而不是「emit 不许调 `_walk_snapshot`」。
+    这次扫描本来就在（改动前它只用于记账），升成门**没有新增任何一次树遍历**。
+
+    ⚠ 查不出「构建期间改了源码、编完又改回去」——快照就是快照。
     """
-    fetch_source = _fetch_source()
-    if not os.path.isdir(root):
+    whole, subtree = _recompute_tree(root, scope)
+    if subtree != pre_subtree:
+        excluded = "、".join(
+            _fetch_source().snapshot_digest_policy()["skipped_dir_names"])
         raise VendorBuildReceiptError(
-            f"源码树在产出收据时已不可读：{root!r}——无法如实记录树状态，fail-closed")
-    whole = fetch_source._snapshot_merkle(root, fetch_source._walk_snapshot(root, ""))
-    subtree = fetch_source._snapshot_merkle(
-        root, fetch_source._walk_snapshot(root, scope))
+            "**这次 build 把被测子树改掉了**：build 前与凭据一致，build 后已不是同一份字节：\n"
+            f"  子树范围 = {scope or '<整棵树>'}（树根 {root}）\n"
+            f"  build 前 = {pre_subtree}\n"
+            f"  build 后 = {subtree}\n"
+            f"  → 收据会声称「这个 .so 构建自 {pre_subtree[:12]}…」，而那份字节此刻已不存在，\n"
+            "    谁也复现不了；而且**没有下游会发现**（编排只在 CP-A 取材跑一次 fetch_source）。\n"
+            f"  → 改成 out-of-tree 构建，或让生成物落进已被跳过的目录名（{excluded}）。fail-closed。")
     return {
         "snapshot_sha256": whole,
         "snapshot_subtree_sha256": subtree,
+        # 整树变了是常态，这个 False 不是告警。子树变了根本走不到这里（上面已 fail-closed），
+        # 所以下面那个标记恒为 True——它的信息量在**键是否在场**，不在取值。
         "matches_pre_build": (whole == pre_whole and subtree == pre_subtree),
+        SUBTREE_GATE_KEY: True,
     }
 
 
-def _write_json(path, payload):
-    with open(path, "w", encoding="utf-8") as out:
-        json.dump(payload, out, ensure_ascii=False, indent=2, sort_keys=True)
-        out.write("\n")
+_PROBE_PREFIX = ".vendor-build-receipt-probe-"
+_TMP_PREFIX = ".vendor-build-receipt-"
+
+
+def assert_out_is_writable(path, *, conflicts=()):
+    """**在跑 build 之前**确认 `--out` 落得下去，并拒绝它与输入路径撞同一个文件。
+
+    ⚠ 这条不是洁癖，是两个设计决定交叉出来的最贵失败模式：`emit` 没有「只记录不执行」模式，
+    vendor 全量构建以十分钟计，而写盘在最后一步。`--out` 打错一个字、或落点目录写不进去，
+    代价就是整轮重跑——失败点还落在「已经改了机器状态之后」。
+
+    `conflicts` 是 `(flag, path, 后果)` 三元组：写收据会把那个文件覆盖掉，而两处后果都是
+    **毁掉本轮的判据本身**，所以一并前置，不留到写盘那一刻。
+
+    :returns: `--out` 的 realpath，供调用方做进一步的落点判断。
+    """
+    if not isinstance(path, str) or not path:
+        raise VendorBuildReceiptError("--out 须为非空路径")
+    out_real = os.path.realpath(path)
+    for flag, other, consequence in conflicts:
+        if isinstance(other, str) and other and os.path.realpath(other) == out_real:
+            raise VendorBuildReceiptError(
+                f"--out 与 {flag} 指向同一个文件（{out_real}）：写收据会把它覆盖掉——"
+                f"{consequence}。fail-closed。")
+    parent = os.path.dirname(out_real) or "."
+    try:
+        os.makedirs(parent, exist_ok=True)
+        fd, probe = tempfile.mkstemp(prefix=_PROBE_PREFIX, dir=parent)
+        os.close(fd)
+        os.unlink(probe)
+    except OSError as ex:
+        raise VendorBuildReceiptError(
+            f"--out 的落点写不进去：{parent}（{ex}）——先修好落点，"
+            "别等 build 跑完几十分钟才发现") from ex
+    return out_real
+
+
+def atomic_write(path, payload):
+    """原子写；异常时不留半截产物——**半截收据比没有更坏，它看着像一份真的**。
+
+    ⚠ 刻意不复用 `content_address.atomic_write_json`：那个函数按
+    `(root, relative_path)` 做 root 内的**内容寻址**落盘，写的是 canonical（紧凑单行）字节。
+    收据和凭据是**人要读**的自由落点产物（`--out` 由操作者给，不在任何 root 之内），
+    压成一行会毁掉可读性，硬套 root 模型也只是把一个不存在的约束加进来。
+    两者解决的不是同一个问题，不是重复实现。
+    """
+    parent = os.path.abspath(os.path.dirname(path) or ".")
+    fd, tmp = -1, None
+    try:
+        os.makedirs(parent, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=_TMP_PREFIX, dir=parent)
+    except OSError as ex:
+        raise VendorBuildReceiptError(f"落点不可写：{parent}（{ex}）") from ex
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            fd = -1
+            json.dump(payload, out, ensure_ascii=False, indent=2, sort_keys=True,
+                      allow_nan=False)
+            out.write("\n")
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, path)
+        tmp = None
+    except (OSError, ValueError, TypeError) as ex:
+        # ⚠ 不只接 OSError：`allow_nan=False` 或不可序列化的载重会抛 ValueError/TypeError，
+        #   放它裸奔出去就绕过了本模块的错误契约（调用方按 VendorBuildReceiptError 收敛），
+        #   而临时文件的清理靠下面的 finally——两件事都得管。
+        raise VendorBuildReceiptError(f"写文件失败：{path}（{ex}）") from ex
+    finally:
+        if fd != -1:
+            os.close(fd)
+        if tmp is not None and os.path.exists(tmp):
+            os.unlink(tmp)
     return path
 
 
@@ -893,8 +1180,17 @@ def main(argv=None):
 
     args = ap.parse_args(argv)
     if args.cmd == "snapshot-digest":
+        out_real = assert_out_is_writable(args.out)
+        root = os.path.realpath(args.source_root)
+        if out_real == root or out_real.startswith(root.rstrip(os.sep) + os.sep):
+            # 写凭据就改了刚摘完的那棵树 → 凭据当场自我作废，而症状要等到 emit 的
+            # 构建前对账才炸，且报出来的原因看着毫无道理。落点必须在源码树之外。
+            raise VendorBuildReceiptError(
+                f"--out 落在 --source-root 之内（{out_real}）：写这份凭据本身就改了刚被摘过"
+                "指纹的那棵树，凭据当场自我作废（下一步 emit 的构建前对账会 BLOCK，"
+                "而原因看着毫无道理）。把凭据写到源码树外面。")
         payload = take_snapshot_digest(args.source_root, args.subtree_scope)
-        _write_json(args.out, payload)
+        atomic_write(args.out, payload)
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return 0
     digest = None
@@ -905,6 +1201,20 @@ def main(argv=None):
         raise VendorBuildReceiptError(
             "emit 缺 --build-argv：本子命令**自己执行**构建命令并记实测退出码，"
             "没有「只给一个 returncode、不执行」的模式（模块 docstring 说明了为什么）")
+    # ⚠ 以下三项**全部前置到跑 build 之前**：build 动辄几十分钟，跑完才发现参数错是纯浪费，
+    #    而且失败点会落在「已经改了机器状态之后」。三项各自都能让整轮白跑。
+    assert_out_is_writable(args.out, conflicts=(
+        ("--library", args.library,
+         "被测 ELF 会被一份 JSON 原子替换掉，这一轮直接没有 DUT 了"),
+        ("--snapshot-digest", args.snapshot_digest,
+         "build 前那份对照凭据被覆盖，构建前后两次树对账就都没了"),
+    ))
+    if args.repo is not None:
+        assert_repo_has_no_credentials(args.repo, "--repo")
+    if digest is not None:
+        # 构建前对账：build 的这棵树必须就是刚被摘过指纹的那棵，且此刻字节未变。
+        # PR 通路（只给 --pr-head-sha）没有 source_root 这个对照物，做不了这一步。
+        assert_build_tree_matches_digest(digest, args.build_cwd)
     # ⚠ 顺序：先真跑 build，再产收据。`--returncode` 只是期望值断言，不是被记录的那个值。
     result = run_build(args.build_argv, args.build_cwd, args.library)
     if args.returncode is not None and args.returncode != result["returncode"]:
@@ -915,7 +1225,7 @@ def main(argv=None):
         declared_source_form=args.declared_source_form,
         build_result=result,
         repo=args.repo, snapshot_digest=digest, pr_head_sha=args.pr_head_sha)
-    _write_json(args.out, receipt)
+    atomic_write(args.out, receipt)
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
     return 0
 

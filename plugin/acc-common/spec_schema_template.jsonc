@@ -12,18 +12,17 @@
 //   · ⚠ **`runner_form` 不是可选字段**（2026-08-05 起）：它是执行形态声明，**每份 spec 都显式写**，
 //     所以它**留在 JSON 主体**；《可选字段目录》里那条只集中说明三种取值的口径，不代表它可省。
 //     省略虽然有缺省兜底（键缺席 → `cpp_extension`），但缺省兜住 ≠ 可以不写：
-//     执行身份要在 spec 里一眼可读、可审。**省略再也不表达 `cpp`**——要 `cpp` 就显式写 `"cpp"`。
-//   · 末尾另附三份**最小合法骨架**（cpp_extension 验收准入 / aclnn_py 开发级 / cpp 开发级），照着抄即可跑。
-//     ⚠ **正式验收抄 ①**：`cpp_extension` 是当前唯一能产验收裁决的形态，②③ 只出开发级证据。
+//     执行身份要在 spec 里一眼可读、可审。**省略再也不表达 `cpp`**。
+//   · 末尾只提供一份可用于新一轮的 `cpp_extension` 骨架；另保留两份明确不可 dispatch 的历史结构，
+//     仅用于读懂旧 spec，禁止照抄生成新 spec。
 //   · 占位串的形状（`"<…>"`）只是给人看的口径说明，**不是**合法取值：主体里每个占位串都必须被替换。
 {
   "op": "<PascalCase 算子名，去 aclnn 前缀>",
   "repo": "<顶层仓名：ops-math / ops-nn / ops-transformer / catlass>",
   // ── runner_form · 执行形态（**每份 spec 必填，别省**；口径与三种取值见《可选字段目录》「runner 形态」条）──
-  //   正式验收恒填 `cpp_extension`（当前唯一能产验收裁决的形态）；填 `aclnn_py` / `cpp` 只出开发级证据。
-  //   ⚠ 填 `cpp_extension` 或 `aclnn_py` ⇒ **必须**同时从目录把 `call_variants` 抄进主体，否则 gen_cases fail-closed。
-  //   ⚠ 键缺席才吃缺省（缺省 = `cpp_extension`）；这里的占位串**不是**合法取值，必须替换成上述三者之一。
-  "runner_form": "<cpp_extension（正式验收唯一准入） | aclnn_py（开发级） | cpp（开发级）>",
+  //   新一轮恒填 `cpp_extension`（当前唯一有真机入口并能产验收裁决的形态），且必须同时从目录把
+  //   `call_variants` 抄进主体，否则 gen_cases fail-closed。键缺席虽吃同值缺省，正式 spec 仍不得省略。
+  "runner_form": "cpp_extension",
   "hardware": ["<从任务书『适配硬件』抽，如 Atlas A2 / Atlas A3 / Ascend 950PR>"],
   "reference": {
     "type": "<tbe | torch | numpy | gpu | cpu | builtin>",
@@ -109,8 +108,11 @@
     //   `--dry-run` 两条路都当场 fail-fast。删缺省的理由是实测——extractor 照散文的「建议 50」自己填了
     //   50、全程 0 次被审视，792 个候选组合就这么留了 50 条；缺省值让「这个算子该造多少条、依据是什么」
     //   永远不必回答。**别把默认值加回来**，也别在别处兜一个。
-    "case_target": "<int，精度用例目标数，**必填无缺省**；须 ≥1（0/负/非整→gen_cases fail-fast，堵零用例空跑冒充验收）。**按覆盖矩阵算、不是拍一个数**：case_profile==torch_parity 时须精确等于 dtype×rank×shape_profile×attribute_profile；其它档按覆盖轴推算并在 case_target_source 写清算法。gen_cases 按 opbase §1 覆盖-预算铺到此数（覆盖驱动、封顶；< forced_total(=强制下限 S) 抬到 S、> pool_max 封顶且数量门软化 PASS+note）>",
-    "case_target_source": "<可选但强烈建议：上面那个数是怎么来的（矩阵怎么乘 / 沿用了哪份既有事实）。给不出依据就停下问用户，别随手填一个数>"
+    "case_target": "<int，精度用例目标数，**必填无缺省**；须 ≥1（0/负/非整→gen_cases fail-fast，堵零用例空跑冒充验收）。**按覆盖矩阵算、不是拍一个数**：case_profile==torch_parity 时须精确等于 dtype×rank×shape_profile×attribute_profile **减去 torch_parity_matrix.excluded 展开后的组合数**，且还要等于实际生成条数（三重记账，见下文 torch_parity 节）；其它档按覆盖轴推算并在 case_target_source 写清算法。gen_cases 按 opbase §1 覆盖-预算铺到此数（覆盖驱动、封顶；< forced_total(=强制下限 S) 抬到 S、> pool_max 封顶且数量门软化 PASS+note）>",
+    // ⚠ `case_target_source` 是**纯散文、无消费方**：写错不会有任何门报错，别把它当一道门。
+    //   `torch_parity` 档真正可机核的是三重记账（矩阵 − excluded == case_target == 实产数）+
+    //   caseset 里的 `case_matrix_ledger`；legacy 档这段话则是这个数的**唯一**出处，更要写实。
+    "case_target_source": "<可选但强烈建议（**纯注释、无消费方**）：上面那个数是怎么来的（矩阵怎么乘 / 减掉了哪些有证据的排除 / 沿用了哪份既有事实）。给不出依据就停下问用户，别随手填一个数>"
   },
   "task_pr_gaps": ["<所有缺口/矛盾/推断，推断项标 (推断)；无则空数组>"],
   // 批 4 · golden 判据锚（**判据只从 spec 派生**，硬约束 #5）。可选但**正式验收强烈建议写**，故留在主体：
@@ -146,29 +148,21 @@
 //                它是给编排层/人读的路由标签（Layer 1 脚本目前不读它），真正驱动执行的是 runner_form。
 //
 // ── 顶层 · runner 形态 `runner_form`（⚠ **不是可选字段，每份 spec 都显式写**；列这儿只为集中说明）──
-//   受控词表 `{cpp_extension, aclnn_py, cpp}`。**缺省 = `cpp_extension`**（键缺席即此）；缺省值的唯一
-//   真源是 `repo_adapter.DEFAULT_RUNNER_FORM`，读侧统一 `repo_adapter.spec_runner_form(spec)`。
-//   ⚠ **省略再也不表达 `cpp`**——`cpp` / `aclnn_py` 现在只能显式声明。
+//   受控词表 `{cpp_extension, aclnn_py, cpp}` 仍用于读取历史 spec；**新一轮只写 `cpp_extension`**。
+//   缺省同为 `cpp_extension`（键缺席即此），唯一真源是 `repo_adapter.DEFAULT_RUNNER_FORM`，读侧统一
+//   `repo_adapter.spec_runner_form(spec)`。
 //   ⚠ 只有**键缺席**吃缺省：显式写 `null` / `""` / `0` 是一份写坏的 spec，照旧在受控词表处 fail-closed。
 //   ⚠ 缺省能兜住 ≠ 可以省着不写：执行身份要在 spec 里一眼可读、可审（同 taskdoc-to-spec.md §1.3.7 自检）。
-//   各形态：
-//     `cpp_extension` = 按官方 NpuExtension/EXEC_NPU_CMD_EXT 生成独立 torch.ops namespace，
-//                由显式外部 driver build/load/执行并回传内容寻址收据；不复制旧 helper、不改 op-plugin。
-//                ✅ **当前唯一能产验收裁决的形态**（准入白名单 `run_workflow._ACCEPTANCE_RUNNER_FORMS`）。
-//     `aclnn_py` = **无 per-op runner 源**、op 工程即 DUT，走 op-中立的 ctypes-aclnn runner
-//                （`aclnn_runtime`，从 aclnn header 推 arity）。
-//                ⛔ 产不出裁决：要跑须 `--allow-experimental-form`，且**物理上只产**
-//                `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"`）。
-//     `cpp`      = per-op `oprunway_<op>_runner.cpp`。⛔ 同上，只出开发级证据。
-//   ⚠ `runner_form ∈ {"cpp_extension","aclnn_py"}` **必须**同时声明 `call_variants`（gen_cases 当场
-//     fail-closed；`cpp_extension` 另有 `cpp_extension_codegen` 的「非空列表」硬校）。
-//   ⚠ 它还决定真机可收发 dtype 白名单（`repo_adapter.supported_np(runner_form)`：
-//     `cpp_extension` 与 `aclnn_py` 同集、放开 int/bf16；`cpp` 只到 fp32/fp16/bf16，int 走 Track C 挂账）。
+//   `cpp_extension` 按官方 NpuExtension/EXEC_NPU_CMD_EXT 生成独立 torch.ops namespace，由显式外部
+//   driver build/load/执行并回传内容寻址收据；不复制旧 helper、不改 op-plugin。它必须同时声明
+//   `call_variants`（gen_cases 与 codegen 都会 fail-closed 校非空）。
+//   已有 spec 写着退役值 → 迁到 `cpp_extension`（补 torch.ops 调用桥 + vendor ELF 构建收据）；若接口能力
+//   不支持迁移就回 BLOCKED 并挂缺口，**不是**换个 mode 再试、更不是把准入门放宽。
 //   ⚠ runner form **只决定执行形态**，不反推任务书指定的性能标杆——baseline 仍逐字按任务书核。
 //
-// ── 顶层 · aclnn 调用变体表（runner_form 为 aclnn_py/cpp_extension 时必填；实现见 ─────────────────
+// ── 顶层 · aclnn 调用变体表（新一轮 runner_form=cpp_extension 时必填；实现见 ────────────────────────
 //    `precision_policy.call_variants` / `gen_cases._build_aclnn_call`）：
-//   ⚠ 触发条件是 **runner_form ∈ {cpp_extension, aclnn_py}**，不是「header 里有多个入口」——
+//   ⚠ 新一轮 `cpp_extension` spec **一律必填**，不是「header 里有多个入口」才填——
 //     **单入口也必须写一条**（`when` 用 `{"always": true}`），多入口只是产多条。
 //     ⚠ 因为缺省已是 `cpp_extension`：一份**省略 `runner_form`** 的 spec 同样落进这个触发条件，
 //       不给 `call_variants` 就是 gen_cases 当场 fail-closed（这正是「省略不再表达 cpp」的连带后果）。
@@ -191,6 +185,16 @@
 //       {"name":"medium","leading_dim":2047},
 //       {"name":"large","leading_dim":262144}
 //     ],
+//     // ⚠ 当前 shape 档**只有规模值可配，布局值尚无 spec 配置口**：不要自行给上述行加 `layout` / `dims` 等键，
+//     //   `gen_cases._torch_parity_plan` 会按未知字段 fail-closed。布局由 `attribute_profiles` 的接口能力信号派生：
+//     //   · 未出现 `axis_class` → `(L,1,…,1)`（elementwise 等无轴选择器接口保持参考布局）；
+//     //   · 出现 `axis_class` → 首轴保留 `L=leading_dim`，并把实际可能被选中的轴提升到至少 2。
+//     //   Median 这类同时含 first/middle/last 的矩阵，其 rank 1..8 默认依次为
+//     //   `(L)`、`(L,2)`、`(L,2,2)`、`(L,2,1,2)`、`(L,1,2,1,2)`、
+//     //   `(L,1,2,1,1,2)`、`(L,1,1,2,1,1,2)`、`(L,1,1,2,1,1,1,2)`。
+//     //   可配置化**待接**：接入时须同时修改 `gen_cases._torch_parity_plan` 的 shape_profiles 严格校验、
+//     //   `gen_cases._torch_parity_shape_layout` / `_torch_parity_shape` 的消费与受控词表，并把实得布局落入
+//     //   caseset/dry-run 账本；在这些门齐备前，schema 不声明一个“写了却没人消费”的假字段。
 //     "attribute_profiles": [
 //       {"name":"attr_00","attrs":{"dim":{"axis_class":"first_axis"},"keepDim":false}},
 //       {"name":"attr_01","attrs":{"dim":{"axis_class":"first_axis"},"keepDim":true}},
@@ -199,10 +203,57 @@
 //       {"name":"attr_04","attrs":{"dim":{"axis_class":"last_axis"},"keepDim":false}},
 //       {"name":"attr_05","attrs":{"dim":{"axis_class":"last_axis"},"keepDim":true}}
 //     ],
-//     "generator":{"kind":"uniform","min":-5,"max":5}
+//     "generator":{"kind":"uniform","min":-5,"max":5},
+//     // 选填 · **有证据的排除项**（不写整个键就省略；写了必须非空）：
+//     "excluded": [
+//       {"combo": {"dtype":"<该矩阵里的某个 dtype>", "attribute_profile":"<某个 profile 名>"},
+//        "reason": "<为什么这组不测>", "evidence": "<出处：任务书行号 / op_def / PR 事实 / 参考仓设计>"}
+//     ]
 //   }
-//   完整笛卡尔大小 = dtype×rank×shape_profile×attribute_profile，必须与 case_target 精确相等；
+//   ⚠ **三重记账**（`gen_cases._torch_parity_plan`，任一处漂移当场 fail-closed）：
+//       ∏|轴取值| − |excluded 展开后的组合| == precision.case_target == 实际生成条数
+//     · 第一重防「声明 1152 全覆盖却静默只取 60 条」；第三重防「有排除项之后账面数与实产数
+//       只靠『完整笛卡尔不采样』这个实现细节隐式对齐」——那条隐式保证一有排除就断。
+//     · `case_target` 仍**必填、无缺省**：这里加的是「它必须与矩阵对得上」的第二重约束，
+//       **不是**把缺省值加回来。
+//     · 轴是**列取值、不是列基数**：`8` 说不出哪 8 个 dtype 被测了，`ranks`/`shape_profiles`/
+//       `attribute_profiles` 逐项摊开才可读可审；dtype 轴逐项来自 `params[io=="in"].dtype`。
+//       **不要另起一份 `case_matrix.axes`**——那会让同一条轴在 spec 里出现两处（`attr_matrix` 已经踩过）。
+//   `excluded` 硬校（全部 fail-closed）：`combo` 非空、轴名只能是
+//     `{dtype, rank, shape_profile, attribute_profile}`、取值必须真在该矩阵里、`reason`/`evidence`
+//     必须非空、多条之间**不许重叠**（重叠会把排除数重复计一次，记账失真）。缩水必须留痕，
+//     形状沿用 `golden_cost.skipped_shapes` / `dropped_combo_classes`。
+//   账本落 caseset 与 dry-run 的 `case_matrix_ledger`（含轴取值、排除逐条、三个数、
+//     以及 `distinct_combinations` / `duplicate_cases`）。
+//   ⚠ 「完整笛卡尔」≠「N 个不同覆盖组合」：低 rank 下 `axis_class` 会塌缩（rank1 的
+//     first/middle/last 同为轴 0），解析后 attrs 相同的 case 会重复出现（median 实测 1344 例里 144 例）。
+//     它们的输入字节仍不同（种子吃 case_id）→ 是**同一覆盖组合的额外随机样本**，有价值，
+//     但**报告不得按「不同组合」计数**。`coverage_strength` 已按实数如实措辞，逐字引它即可。
 //   不走 legacy 1-wise 抽样。axis_class 在每个 rank 下解析，禁止把 middle/last 静态写死。
+//   ⚠ **本档拒收这些 legacy 造例键**（`gen_cases._TORCH_PARITY_UNCONSUMED_KEYS`，声明即 fail-closed）：
+//     `attr_matrix`（attr 轴在本档由 `attribute_profiles` 唯一声明，两处声明必然漂）、
+//     `attr_axis_lengths`（会在完整笛卡尔外追加用例，破坏上面的三重记账）、
+//     `allow_empty_tensor` / `empty_axis`、`precision.value_profiles`（本档 `forced_special=0`，
+//     一条特殊场景都不产）。要表达**算子事实**（如「本算子不支持空 Tensor」）请写 `_` 前缀的纯注释键。
+//   ⚠ **轴集契约**（有明文与实测依据，别在轴集里开第二个口）：
+//     · **通用交叉判据**：只有当两条轴**共同决定被测实现的分支或切分决策**时才必须交叉；
+//       只改变数值量级、不改变控制流的轴，边际覆盖就够。实测正例：`dtype` 类 × 归约长度共同圈定
+//       90 个 cell，58 条 fail 全在区内、区外 0；任一单轴都圈不出，且合法 1-wise 边际覆盖集可对该真实缺陷
+//       **100% 漏报**。实测反例：`keepDim` 在 fail 区内为 72.7% vs 81.8%，**无可测效应**；它只改
+//       输出 shape，不改切分决策（数字来源：`dev-doc/oprunway-case-axis-design.md` §12.2/§12.6/§12.8）。
+//       这是接口能力级规则：只据 spec 已有的轴选择器 / rank / attr /
+//       `call_variants` / `operator_class` 等字段判，**绝不按算子名分支**。
+//     · **特殊场景独立叠加、绝不与常规网格交叉**——参考仓 `design_contract.py` 明文，理由逐字是
+//       避免组合爆炸；本仓 legacy 同样只把特殊场景配第一组 attr。代价要认：「空 Tensor × 按维归约」
+//       这类组合因此永远测不到，这是**已知且被参考仓接受**的取舍。⚠ 本条只定「不进笛卡尔」；
+//       `torch_parity` 现在一条特殊场景都不产，与 legacy「边界一律保留」有张力，究竟保持为零还是独立叠加边界集
+//       **待用户拍板**，本契约不替人定。
+//     · **输出个数不是自由轴**，它是 attr 轴的确定性函数（`gen_cases._select_call_variant` 从 attrs
+//       选调用变体，输出集随之定死）。当轴放进笛卡尔 = 重复计数，还会造出「attr 为 null 却要求
+//       index 输出」这种不存在的组合。
+//     · 🔴 **值域 regime 轴暂不引入**：现 `torch_parity` 只有 `uniform` 一档，结构上测不了
+//       regime 与 dtype 或其它轴的交互，故「加了有没有用」至今**零实测支撑**。引入前必须先有能对照
+//       至少两档 regime 的可测矩阵；否则只是让对应用例数翻倍，覆盖收益未知。
 //   任务书要求、但本轮 PR-head ABI 无法执行的 overload 不得伪造成 profile/call_variant；
 //   写入 task_pr_gaps(kind=api_surface_unsupported_by_pr)，由后续验收报告功能缺口并阻止干净 PASS。
 //             逐 case 按**声明顺序取首个匹配者**。
@@ -229,6 +280,9 @@
 //   "attr_matrix": [{"<attr名>": <取值>}, {"<attr名>": <取值>}]
 //   逐行给「一组 attr 取值」，gen_cases 按行铺覆盖。取值类型限制同 params 的 `default`
 //   （bool / int / float / str 标量，或 list[int]；不支持嵌套/浮点数组/bool 数组/空数组）。
+//   ⚠ **仅 `case_profile` 为 legacy（含省略）时可写**：`torch_parity` 档 attr 轴由
+//     `torch_parity_matrix.attribute_profiles` 唯一声明，这里再写一份 = 同一条轴两处声明、
+//     必然漂（median 实测曾是 4 组 vs 7 组）→ 该档声明即 fail-closed。
 //
 // ── 顶层 · 轴维度约束（**定向生成**任务书点名的「某 attr 所指轴长度 = L」；实现见 ──────────────────
 //    `gen_cases._attr_axis_lengths`）：
@@ -247,10 +301,15 @@
 //     · **声明了却一条都产不出 → 当场 fail-closed**（「声明覆盖却产零条」= 假覆盖，本仓最忌）。
 //       撞上一般是：attr 的取值不是轴下标 / 轴下标越界 / in 参数的 `rank` 约束把 shape 掐死了 → 回去核，别删字段绕。
 //   dry-run 账本会打印 `attr_axis_lengths: 声明 N → 定向生成 M 条`，M=0 即上面的 fail-closed。
+//   ⚠ **仅 legacy 档可写**：`torch_parity` 档不做定向生成（那会在完整笛卡尔之外追加用例，
+//     破坏「矩阵大小 == case_target == 实产数」的三重记账）→ 该档声明即 fail-closed。
 //
 // ── 顶层 · 空 Tensor 开关 ───────────────────────────────────────────────────────────
 //   "allow_empty_tensor": false          // **只接受真布尔**，`"false"`/`0` 一律 fail-closed 拒收
 //   "empty_axis": <非负 int>             // 允许空 Tensor、但 0 只能落在某一特定轴时声明轴号
+//   ⚠ **两个键都仅 legacy 档可写**：`torch_parity` 档 `forced_special=0`、一条特殊场景都不产，
+//     开关没有消费方 → 该档声明即 fail-closed。算子不支持空 Tensor 这个**事实**照旧要记，
+//     写成 `_` 前缀的纯注释键 + `task_pr_gaps` 里的依据原句即可。
 //   缺省（两者都不写）= 现行为：铺空 Tensor 用例、0 落最后一维。
 //   opbase §1.4 把「空 Tensor」当普适特殊场景强制铺，但**任务书白纸黑字写「不支持空 Tensor」**的算子
 //   （实测 Upsample 系 / im2col 的部分形态）没有第三条路——要么 golden 替算子**编造**它并不支持的语义、
@@ -296,8 +355,8 @@
 //     换任意声明了 torch_parity 的域内算子，工具零改即用）：
 //       · legacy       —— 现行造例规则。**已真机验收的算子靠它逐字节不变**（caseset + 全部 .npy 有 sha256
 //                         pin），所以它既是缺省、也是拿不准时的正确选择。
-//       · torch_parity —— **忠实对齐**参考仓 `Justbin/cannbot-ops-input` 的造例规则（完整笛卡尔精度网格、
-//                         medium shape 档、normal 值域重采样、4-kind 非有限特殊值…）。**仅**用于
+//       · torch_parity —— 对齐参考仓的完整笛卡尔精度网格与 medium shape 档；值域当前只有
+//                         `uniform` 一档，regime 轴按上述契约暂不引入；特殊场景当前为零且去留待用户拍板。**仅**用于
 //                         「任务书对标 torch」场景（`precision.standard == "torch_allclose"`），不碰 catlass 通路。
 //     ⚠ 翻档 = **换一整套用例**：case id 与 golden 字节全变 → 必须**重生成 golden + 真机重验**，绿了才算数。
 //       别为「看起来更全」顺手翻档，更别在还没重验的算子上翻。
@@ -305,6 +364,9 @@
 //       不确定就**整字段省略**。
 //     ⚠ 声明与否会**如实落进 caseset**：声明了才多一个 `case_profile` 键（未声明的算子产物一个键都不多，
 //       这正是字节安全的做法）。报告侧据此说清「这批用例是按哪套规则产的」，不必回头猜。
+//     ⚠ 选了 `torch_parity` 就**不许再写这些 legacy 造例键**：`attr_matrix` / `attr_axis_lengths` /
+//       `allow_empty_tensor` / `empty_axis` / `precision.value_profiles`（本档一行都不消费，
+//       声明即 fail-closed，一次报全部命中项）。理由与替代写法见下文 torch_parity_matrix 节。
 //
 // ── precision 行内 · 用例来源 case_source（受控词表；**整字段省略 = generated = 现行为**）──────
 //   "case_source": "generated" | "taskdoc"        // 省略 = generated；实现见 `gen_cases._case_source`
@@ -348,6 +410,8 @@
 //     ⚠ **`"nan"` 只允许配 `operator_class: "floating_compute"`**（或未声明该字段的 legacy spec）：
 //       structural / integer_compute 再写 `"nan"` → **fail-closed**（两处自相矛盾，引擎不静默丢 profile）。
 //       `"tie"` 三档通吃——重复 / 并列本就属结构 / 整型类特殊值那一档。
+//     ⚠ **仅 legacy 档可写**：`torch_parity` 档不产任何 value_profile 强制项（`generator` 受控词表
+//       只有 uniform 一档）→ 该档声明即 fail-closed，绝不静默忽略。
 //   "acceptance_policy": {…}                                     // 仅任务书验收目标明确宽于平台底线时才写
 //
 // ── 顶层 · perf（任务书性能栏为『无』时**整个 perf 字段省略**，勿写 {baseline:"none"}）────────────
@@ -456,11 +520,11 @@
 //
 // ════════════════════════════════════════════════════════════════════════════════
 // 《最小合法骨架》——照抄哪一份看 runner_form；抄完把 `<…>` 全部替换成真值
-//   ⚠ **正式验收抄 ①**：`cpp_extension` 是当前唯一能产验收裁决的形态。②③ 只出**开发级**证据——
-//     要跑得加 `--allow-experimental-form`，且那条路径**物理上产不出** acceptance.json / verdict.json。
-//     「加了逃生阀跑绿了」**不是**验收通过，不得写进报告的裁决栏。
+//   ⚠ **正式验收只有 ① 可抄**：`cpp_extension` 是当前唯一能产验收裁决、也是唯一派得出 mode 的形态。
+//     ⛔ ②③ 自 2026-08-06 **停止准入**——`run_workflow` 派不出 mode、显式指定真机 mode 也被拒、
+//     逃生阀已删除，**照它们抄出来的 spec 开跑即被拒**。留在下面只为读得懂历史 spec，不是备选项。
 //   ⚠ 三份**都显式写** `runner_form`。省略虽有缺省兜底（键缺席 → `cpp_extension`），
-//     但省略**再也不表达 `cpp`**——要 `cpp` 就照 ③ 显式写出来。
+//     但省略**再也不表达 `cpp`**——它是一份历史值，不是「抄 ③ 就能跑」的意思。
 // ════════════════════════════════════════════════════════════════════════════════
 //
 // ⓪ 基座 —— 所有形态共有的必填字段。**单独抄它不构成一份完整 spec**，须再叠 ①/②/③ 之一。
@@ -512,7 +576,14 @@
 //   ⚠ 它另需**独立构建收据**把被测来源锚（PR head / 本地子树摘要）、构建命令与实际加载的 vendor ELF
 //     绑起来（三级门 `validate_acceptance_state` 会对账）——接入成本比 ②③ 高，这是已知账单。
 //
-// ② aclnn_py（**开发级，非验收准入**）—— 与 ① **逐字同形**，只把 runner_form 的值换成 `"aclnn_py"`：
+// <!-- oprunway:retired-begin -->
+// ⛔ 历史留档 · 不得 dispatch · 不要照做 —— ②③ 两份骨架自 2026-08-06 停止准入：
+//    照抄产出的 spec 在 `_resolve_mode` 当场被拒，跑不出任何产物。
+//    留着只为读得懂历史 spec 与解释历史产物，**不是「跑不通就换一份抄」的备选**。
+//    当年它们分别派生 `--mode aclnn_py` 与 `--mode new_example`，逃生阀 `--allow-experimental-form`
+//    只放行「跑起来」、不放行「产裁决」；两行派生与那个 flag 现在都已删除。
+//
+// ② aclnn_py（⛔ **已停止准入**）—— 与 ① **逐字同形**，只把 runner_form 的值换成 `"aclnn_py"`：
 //    两形态共用同一份逐 case 调用契约 `aclnn_call`，`call_variants` 的抽法完全一样。
 //   {
 //     …① 的全部字段…,
@@ -521,7 +592,7 @@
 //   ⚠ 已有 spec 写着 `aclnn_py`（如 Roll）→ 要做正式验收就是**迁到 ①**，不是放宽准入门。
 //     旧 `aclnn_py` 跑出来的 PASS 属于旧 caseset，不得沿用。
 //
-// ③ cpp（**开发级，非验收准入**；历史 per-op runner 通路）—— 在 ⓪ 之上**只加一行**，
+// ③ cpp（⛔ **已停止准入**；历史 per-op runner 通路）—— 在 ⓪ 之上**只加一行**，
 //    不写 call_variants / scenario / out_role 等 §1.3 字段：
 //   {
 //     …⓪ 的全部必填字段…,
@@ -530,3 +601,4 @@
 //   }
 //   ⚠ dtype 只到 fp32/fp16/bf16（`repo_adapter.supported_np("cpp")`）；int16/int32 属 Track C 挂账集
 //     （生成期放行、真机跑到仍 fail-closed），须在 `task_pr_gaps` 以 `dtype_deferred` 显式挂账。
+// <!-- oprunway:retired-end -->

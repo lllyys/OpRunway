@@ -29,6 +29,7 @@ import precision_retest_contract as R
 import render_acceptance_markdown as MD
 import repo_adapter
 import run_workflow as W
+import spec_change_gate as SCG
 import validate_acceptance_state as G
 from test_validate_cpp_extension_receipt import source_facts_payload
 
@@ -76,6 +77,20 @@ def _write_source_facts(path, **kw):
         json.dump(content_address.make_artifact(
             "oprunway/source-facts/v1", source_facts_payload(**kw)), out)
     return path
+
+
+def _confirm_spec(spec_path, out_dir):
+    """满足 **spec 变更门**：给 `out_dir` 落一份对得上**当前** spec 的显式声明收据。
+
+    ⚠ 这不是给门放水：收据里那串摘要是拿这份 spec 当场算出来的，四条判据一条没绕。
+      本文件测的是 staging 与来源锚，变更门本身在 `test_spec_change_gate.py` 专测
+      （含「不落收据就 BLOCKED」的反面见证）。
+    """
+    if not SCG.check(spec_path, out_dir):       # 已有一份对得上的收据 → 什么都不做
+        return spec_path
+    write = SCG.update_receipt if os.path.lexists(SCG.receipt_path(out_dir)) else SCG.init_receipt
+    write(spec_path, out_dir, "夹具：本轮 spec 基线", "lys")
+    return spec_path
 
 
 class _Sentinel(RuntimeError):
@@ -285,7 +300,7 @@ class AcceptanceRunTest(unittest.TestCase):
     def _run(self, root, *, source_facts, out_dir=None, calls=None):
         out_dir = out_dir or os.path.join(root, "reports", "widget")
         calls = calls if calls is not None else []
-        spec_path = _write_spec(root)
+        spec_path = _confirm_spec(_write_spec(root), out_dir)
         with self._stubbed(calls):
             result = W.run(spec_path, mode="cpp_extension",
                            out_dir=out_dir, source_facts=source_facts)
@@ -342,11 +357,14 @@ class AcceptanceRunTest(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as root, _env(root):
             out_dir = os.path.join(root, "reports", "widget")
-            os.makedirs(out_dir)
+            # init 只接受无历史报告根；本用例要测的是 **init 之后、staging 之前**被塞进的软链。
+            spec_path = _confirm_spec(_write_spec(root), out_dir)
             outside = os.path.join(root, "escaped.py")
             os.symlink(outside, os.path.join(out_dir, "golden.py"))   # 目标尚不存在
             facts = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
-            self._run(root, source_facts=facts, out_dir=out_dir)
+            with self._stubbed([]):
+                W.run(spec_path, mode="cpp_extension",
+                      out_dir=out_dir, source_facts=facts)
             self.assertFalse(os.path.exists(outside), "绝不能写出报告目录")
             staged = os.path.join(out_dir, "golden.py")
             self.assertFalse(os.path.islink(staged))
@@ -369,7 +387,7 @@ class AcceptanceRunTest(unittest.TestCase):
                 return self._caseset(spec["op"])
 
             calls = []
-            spec_path = _write_spec(root)
+            spec_path = _confirm_spec(_write_spec(root), out_dir)
             with self._stubbed(calls), \
                     mock.patch.object(W.gen_cases, "gen_cases",
                                       side_effect=_swap_then_gen):
@@ -458,7 +476,7 @@ class StaleResultInvalidationTest(unittest.TestCase):
             ("取材事实 completeness=blocked", _spec(),
              {"mode": "cpp_extension", "source_facts": blocked}, r"不是可信的 source_facts"),
             ("准入门（与 source_facts 无关）", _spec(runner_form="cpp"),
-             {"source_facts": blocked}, r"不用于正式验收"),
+             {"source_facts": blocked}, r"已停止准入"),
             ("spec 不是 JSON object（更早，连 mode 都还没派生）", [],
              {"mode": "cpp_extension"}, r"JSON object"),
         )
@@ -586,15 +604,20 @@ class StaleResultInvalidationTest(unittest.TestCase):
         self.assertTrue(set(W._REPORT_MD_FILES) <= set(W._RESULT_FILES))
 
 
-class ExperimentalFormBypassTest(unittest.TestCase):
-    """⭐ 非验收旁路**不只有 mock**：`cpp` / `aclnn_py` + `--allow-experimental-form` 同样不该被必填门卡死。
+class NonAdmittedFormBypassTest(unittest.TestCase):
+    """⭐ 非验收旁路**不只看 mode**：`is_acceptance` 是「真机 mode **且** 准入 form」的合取。
 
-    生产代码用的是 `is_acceptance`（= 真机 mode **且** 准入 form），不是「非 mock」。
     若哪天有人把它简化成「非 mock 即强制 source_facts」，正式验收与 mock 两边的测试都还会绿，
-    而这两条**开发逃生通路会在跑起来之前就被错误卡死**——本类就是钉那一格。
+    而非准入 form 那一格会在跑起来之前就被错误卡死——本类就是钉那一格。
+
+    ⚠ **夹具 2026-08-06 换过一次**（原类名 `ExperimentalFormBypassTest`）。原来走的是
+    `cpp` / `aclnn_py` + `--allow-experimental-form`；通路收敛后那两种 form 已无真机入口、
+    逃生阀也删了，所以这里改用 `mock.patch.dict` 把**派生表**临时接回一条来走完整条 run()。
+    **准入集 `_ACCEPTANCE_RUNNER_FORMS` 一个字没动**——正因如此，本类断言的
+    「不产 acceptance.json / 不 staging」才仍然是生产行为，而不是夹具造出来的假象。
     """
 
-    #: (spec.runner_form, 派生出的 mode)。⚠ 表里两条都必须留着：只测一条时，另一条被卡死不会红。
+    #: (spec.runner_form, 该 form 历史上派生出的 mode)。⚠ 两条都必须留着：只测一条时，另一条被卡死不会红。
     _FORMS = (("cpp", "new_example"), ("aclnn_py", "aclnn_py"))
 
     @staticmethod
@@ -607,16 +630,20 @@ class ExperimentalFormBypassTest(unittest.TestCase):
                 "evidence": [{"case_id": "c0"}]}
 
     @contextlib.contextmanager
-    def _stubbed(self, mode, calls):
+    def _stubbed(self, mode, calls, form=None):
         def _gate(name):
             def _fn(d, errs, source_facts_path=None):
                 calls.append((name, d, source_facts_path))
             return _fn
+        # 只把**派生表**临时接回一条（见类 docstring）；准入集不动，出口门与
+        # `is_acceptance` 的判定照旧按生产口径走。
+        derivation = {form: mode} if form is not None else {}
         with mock.patch.object(
                     W.gen_cases, "gen_cases",
                     # 形参跟住真实调用点，理由同 AcceptanceRunTest._stubbed。
                     side_effect=lambda spec, work, taskdoc_caseset=None:
                         AcceptanceRunTest._caseset(spec["op"])), \
+                mock.patch.dict(W._RUNNER_FORM_TO_MODE, derivation, clear=False), \
                 mock.patch.dict(W.repo_adapter.MODES,
                                 {mode: lambda cs, wd: self._evidence(mode)}, clear=False), \
                 mock.patch.object(W.repo_adapter, "_ne_cfg", return_value={}), \
@@ -631,14 +658,14 @@ class ExperimentalFormBypassTest(unittest.TestCase):
                                 clear=False):
             yield
 
-    def test_experimental_forms_run_without_source_facts_and_produce_no_verdict(self):
+    def test_non_admitted_forms_run_without_source_facts_and_produce_no_verdict(self):
         for form, mode in self._FORMS:
             with self.subTest(form=form), tempfile.TemporaryDirectory() as root, _env(root):
                 out_dir = os.path.join(root, "reports", form)
                 calls = []
-                with self._stubbed(mode, calls):
+                with self._stubbed(mode, calls, form=form):
                     result = W.run(_write_spec(root, _spec(runner_form=form)),
-                                   out_dir=out_dir, allow_experimental_form=True)
+                                   out_dir=out_dir)
                 # ① 不要求 source_facts：跑到底了（被必填门卡死的话这里是 SystemExit）。
                 self.assertFalse(result["is_acceptance"])
                 self.assertEqual(result["summary_file"], W._DEV_SUMMARY_FILE)
@@ -654,12 +681,44 @@ class ExperimentalFormBypassTest(unittest.TestCase):
                 self.assertEqual([name for name, _, _ in calls], ["task1"])
                 self.assertEqual([p for _, _, p in calls], [None])
 
-    def test_they_are_still_refused_without_the_escape_hatch(self):
-        """反面见证：放行的是**逃生阀**，不是「这两条 form 从此免检」。"""
+    def test_real_machine_dev_artifacts_are_never_labelled_as_mock(self):
+        """⭐ 真机跑不许被标成「mock evidence」。
+
+        病历（2026-08-06，aclnnRoll 试跑）：一句 mock 措辞套所有非验收产物，于是当时那条
+        非准入 form 通路上的一轮**真机**跑的产物上写着「NPU 输出 = golden.copy()、
+        性能是编的假数」——一句凭空的假话，读报告的人会以为压根没上过真机。
+        措辞选串的单测在 `test_run_workflow_mode.NonAcceptanceNoteTest`，这里钉的是**落盘产物**。
+
+        ⚠ 断言范围刻意只到 `dev_run_summary.json` / `dev_precision_check.json`，不含
+          `perf_report.json`。两个理由，都与本门无关：
+          ① 本夹具精度判 fail → Task3 被 fail-fast 跳过，那份 perf 报告这一轮压根没走 perf_compare；
+          ② 精度通过的场景下，无 `_real_baseline.json` 的夹具里基线**确实**是
+             `perf_compare.mock_baseline`，那句 mock 措辞是**实话**（真机上 `run_on_npu.sh`
+             会落真基线）。要求产物对一件真事闭嘴，同样是失真。
+        """
         for form, mode in self._FORMS:
             with self.subTest(form=form), tempfile.TemporaryDirectory() as root, _env(root):
+                out_dir = os.path.join(root, "reports", form)
+                with self._stubbed(mode, [], form=form):
+                    W.run(_write_spec(root, _spec(runner_form=form)), out_dir=out_dir)
+                for name in W._DEV_FILES:
+                    with open(os.path.join(out_dir, name), encoding="utf-8") as fh:
+                        text = fh.read()
+                    self.assertIn(W._NOTE_FORM, text, name)
+                    for word in ("mock", "golden.copy()", "假数"):
+                        self.assertNotIn(word, text.casefold(), f"{name} 把真机跑说成了假数")
+
+    def test_they_are_refused_outright_by_the_production_derivation_table(self):
+        """⭐ 反面见证：上面两条靠的是**夹具接回派生表**，生产路径上这两种 form 压根跑不起来。
+
+        没有这一条，上面两个用例就可能被读成「非准入 form 现在还能跑」——那正好是
+        2026-08-06 通路收敛要消灭的读法。
+        """
+        for form, mode in self._FORMS:
+            with self.subTest(form=form), tempfile.TemporaryDirectory() as root, _env(root):
+                # 注意：**不传 form=**，即不接回派生表 —— 走的就是生产口径。
                 with self._stubbed(mode, []):
-                    with self.assertRaisesRegex(SystemExit, r"不用于正式验收"):
+                    with self.assertRaisesRegex(SystemExit, r"已停止准入"):
                         W.run(_write_spec(root, _spec(runner_form=form)),
                               out_dir=os.path.join(root, "reports", form))
 
@@ -677,7 +736,7 @@ class CpFClosureTest(unittest.TestCase):
             facts = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
             calls = []
             out_dir = os.path.join(root, "reports", "widget")
-            spec_path = _write_spec(root)
+            spec_path = _confirm_spec(_write_spec(root), out_dir)
             with AcceptanceRunTest()._stubbed(calls):
                 W.run(spec_path, mode="cpp_extension",
                       out_dir=out_dir, source_facts=facts)
@@ -698,7 +757,7 @@ class CpFClosureTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, _env(root):
             facts = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
             out_dir = os.path.join(root, "reports", "widget")
-            spec_path = _write_spec(root)
+            spec_path = _confirm_spec(_write_spec(root), out_dir)
             with AcceptanceRunTest()._stubbed([]):
                 W.run(spec_path, mode="cpp_extension",
                       out_dir=out_dir, source_facts=facts)

@@ -17,6 +17,7 @@ import repo_adapter as RA
 import validator as V
 import precision_policy as P
 import validate_acceptance_state as G
+import _spec_fixture as SF
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SIGN_FX = os.path.join(_HERE, "test_fixtures", "sign_dtype.spec.json")
@@ -24,8 +25,14 @@ _ISCLOSE_FX = os.path.join(_HERE, "test_fixtures", "isclose_attr.spec.json")
 
 
 def _spec(path):
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    """读样例/夹具 spec，并补上**测试侧**的用例预算（`_spec_fixture`，仅当 spec 未声明时）。
+
+    ⚠ 为什么预算不在 spec 里：那些文件里的 `case_target: 50` 是 gen_cases 已删缺省值的化石、
+    没有覆盖矩阵依据，2026-08-06 一并删掉（各 spec 留 `_case_target_note` 墓碑）。这里注入的 50
+    是**夹具值**——`ExistingOpsByteIdenticalTest` 的 sha256 基线正是在这个预算下取的，与
+    「这些算子该造多少条用例」无关。详见 `_spec_fixture` 模块 docstring。
+    """
+    return SF.load(path)
 
 
 def _wj(path, obj):
@@ -167,9 +174,12 @@ class MaterializeReadbackTest(unittest.TestCase):
         self.assertFalse(np.shares_memory(phys, logical))       # X_bin 与 X_logical 不共内存
 
     def test_unknown_dtype_rejected(self):
+        # ⚠ 见证 dtype 从 complex64 换成 complex128（2026-08-06）：complex64 已进 `gen_cases._NATIVE`，
+        #   再拿它当「未知 dtype」见证，测试会因为**另一个理由**（逻辑数组 dtype 与 storage 不符）通过，
+        #   钉不住 `_expected_storage` 的白名单本身。complex128 至今不在生成层。
         for fn in (RA.materialize_input, RA.readback_output):
             with self.assertRaises(ValueError):
-                fn(np.zeros(3), {"dtype": "complex64"})
+                fn(np.zeros(3), {"dtype": "complex128"})
 
 
 # ============================================================ gen_cases dtype ===
@@ -220,7 +230,9 @@ class GenCasesDtypeTest(unittest.TestCase):
             self.assertTrue(c["expected"].get("rule_ref"))
 
     def test_unsupported_dtype_fail_fast(self):
-        sp = _spec(_SIGN_FX); sp["params"][0]["dtype"] = ["complex64"]
+        # 见证 dtype 同上换成 complex128（complex64 自 2026-08-06 起是受支持 dtype，见
+        # test_dtype_capability_closure.py）——这条测的是「生成层白名单外的 dtype 当场炸」。
+        sp = _spec(_SIGN_FX); sp["params"][0]["dtype"] = ["complex128"]
         with self.assertRaises(ValueError):
             GC.gen_cases(sp, tempfile.mkdtemp())
 
@@ -245,10 +257,11 @@ class SemanticIdTest(unittest.TestCase):
                "verify_mode": "numerical", "params_source": "fixture",
                "params": [{"name": "self", "io": "in", "dtype": ["float32", "float16"]},
                           {"name": "out", "io": "out", "dtype": ["float32", "float16"]}],
-               # case_target 无缺省（2026-08-06），须显式写；取 50 是为了与对照面 `_SIGN_FX`
-               # 同预算——本用例比的是「同 id → 同数据」，两侧预算不同会让共同 id 集无谓地缩小。
+               # case_target 无缺省（2026-08-06），须显式写。**直接引夹具常量、不写字面量 50**：
+               # 对照面 `_SIGN_FX` 的预算也由 `_spec_fixture` 注入，本用例比的是「同 id → 同数据」，
+               # 两侧预算不同会让共同 id 集无谓地缩小；写死一个 50 则会在常量改动时悄悄分叉。
                "precision": {"oracle": "ascendoptest", "standard": "ascendoptest_default",
-                             "case_target": 50},
+                             "case_target": SF.FIXTURE_CASE_TARGET},
                "perf": {"baseline": "tbe", "target_ratio": 0.95,
                         "case_source": "precision_cases",
                         "shape_classification": {"metric": "sum_input_bytes",
@@ -523,9 +536,16 @@ class DtypeRejectTest(unittest.TestCase):
 class SubprocessE2ETest(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
+        # ⚠ 夹具 spec 已无 `case_target`（2026-08-06 删历史沿用的 50），交**路径**给
+        #   run_workflow 会当场 fail-fast。故先物化一份注了夹具预算的副本；副本落**独立**目录，
+        #   `self.d` 是 `--out`、run_workflow 会在里面清残留。预算是测试值，本类测的是退出码。
+        self.specdir = tempfile.mkdtemp()
+        self.sign_fx = SF.materialize(_SIGN_FX, self.specdir)
+        self.isclose_fx = SF.materialize(_ISCLOSE_FX, self.specdir)
 
     def tearDown(self):
         shutil.rmtree(self.d, ignore_errors=True)
+        shutil.rmtree(self.specdir, ignore_errors=True)
 
     def _run(self, spec_path, *extra):
         return subprocess.run(
@@ -533,7 +553,7 @@ class SubprocessE2ETest(unittest.TestCase):
              "--mode", "mock", "--out", self.d, *extra], capture_output=True, text=True)
 
     def test_fixture_clean_exit0(self):
-        for fx in (_SIGN_FX, _ISCLOSE_FX):
+        for fx in (self.sign_fx, self.isclose_fx):
             r = self._run(fx)
             self.assertEqual(r.returncode, 0, fx + "\n" + r.stdout + r.stderr)
 
@@ -542,7 +562,7 @@ class SubprocessE2ETest(unittest.TestCase):
         # C5：`--defect` 出 CLI → 进程内调用；mock 非验收通路 → 读 dev_run_summary.json。
         # ⚠ 要测的能力（合法精度 fail 不被门盖成 BLOCKED·codex#3）一点没动。
         import run_workflow as W
-        r = W.run(_SIGN_FX, mode="mock", out_dir=self.d, defect=[did])
+        r = W.run(self.sign_fx, mode="mock", out_dir=self.d, defect=[did])
         self.assertEqual(r["exit_code"], 1, r)
         self.assertEqual(r["state"], "FAILED_PRECISION")          # 返回值里 state 仍在
         acc = _rj(os.path.join(self.d, "dev_run_summary.json"))
@@ -564,9 +584,10 @@ def _isclose_bf16_nan_spec():
                        {"name": "atol", "io": "attr", "dtype": ["double"], "default": 1e-08},
                        {"name": "equal_nan", "io": "attr", "dtype": ["bool"], "default": False},
                        {"name": "out", "io": "out", "dtype": ["bool"]}],
-            # case_target 无缺省（2026-08-06），须显式写；50 = 本夹具此前吃的那个缺省值，
-            # 保持既有覆盖不变（这几条负例断言的是 attr 笛卡尔覆盖，不是具体条数）。
-            "precision": {"standard": "exact", "case_target": 50},
+            # case_target 无缺省（2026-08-06），须显式写。**引夹具常量、不写字面量 50**：
+            # 这几条负例断言的是 attr 笛卡尔覆盖、不是具体条数，与同文件其它夹具同预算即可，
+            # 写死一个数会在常量改动时悄悄分叉（也会读着像「50 是个合理默认值」）。
+            "precision": {"standard": "exact", "case_target": SF.FIXTURE_CASE_TARGET},
             "attr_matrix": [{"equal_nan": True}, {"equal_nan": False}]}
 
 
@@ -2024,11 +2045,12 @@ class DtypeSingleSourceTest(unittest.TestCase):
 # 本机无 torch（samples/golden/* 的 golden.py 一律 torch 后端、缺则 fail-closed），故这里用**确定性
 # numpy 假 golden** 驱动同一批真 spec 走完整生成路径，对 caseset.json + 全部落盘 .npy 取 sha256 钉住。
 # 它证的是「gen_cases 的生成行为没被 U3 改动碰到」——不是「golden 数值正确」（那是别的测试的事）。
-# ⚠ 摘要与 numpy 的随机流绑定：numpy 大版本变了摘要会**整体漂**（不是理论风险——见下方
-#   `_U3_CASESET_BASELINES` 里两条基线，6 份摘要**逐份不同**，实测于 numpy 2.4.x 与 1.26.4）。
+# ⚠ 摘要与 numpy 的随机流绑定：numpy 版本变了摘要可能**整体漂**（不是理论风险——见下方
+#   `_U3_CASESET_BASELINES` 里两条基线，6 份摘要**逐份不同**，实测于 numpy 2.4.6 与 1.26.4）。
 #   原先只存一条 2.4 基线、其余版本一律 skip；结果是**所有 compute 所在的那台真机（numpy 1.26.4）
 #   上这张网整个是暗的**——字节回归在最该看住的地方从来没跑过。
-#   改法：按 `主.次` pin 存**多条基线**，命中哪条跑哪条；只有词表外的版本才 skip。
+#   改法：按完整版本 pin 存**多条基线**，命中哪条跑哪条；未知随机流仍 skip，
+#   但下方独立元测试会让当前环境缺基线立即 FAIL，不再让这道门静默关闭。
 #   新增一条基线：在目标机上跑一次本文件的 `test_caseset_digests_pinned`，把它报出的实际摘要
 #   补进下表并在 PR 里说明该版本从哪来——**绝不允许**拿新版本的摘要去覆盖旧版本那条。
 _U3_FAKE_GOLDEN = {
@@ -2041,9 +2063,18 @@ _U3_FAKE_GOLDEN = {
     "Equal": "def golden_fn(inputs, attrs):\n    return inputs[0] == inputs[1]\n",
     "Neg": "def golden_fn(inputs, attrs):\n    return np.negative(inputs[0])\n",
 }
-# pin（`gen_cases.numpy_stream_pin` 的 `主.次` 口径）→ 该随机流下的 caseset 字节基线。
+# pin（`gen_cases.numpy_stream_pin` 的完整版本口径）→ 该随机流下的 caseset 字节基线。
+#
+# ⚠ **这道 pin 守的是「gen_cases 的逻辑改动不得改变现有算子的 caseset 字节」**（向后兼容硬约束），
+#   守的**不是**「这几份样例 spec 文件不许动」。样例 spec 是它的**输入**，不是它的保护对象。
+#   2026-08-06 从那几份 spec 里删掉历史沿用的 `case_target: 50` 后，预算改由
+#   `_spec_fixture.FIXTURE_CASE_TARGET`（同样是 50）在 `_spec()` 里注入 —— 输入的**有效取值**没变，
+#   故下面两组 sha256 **一个都不用重取**，pin 的效力与含义原样保留。
+#   顺带变强了一点：预算不再能被人改样例 spec 悄悄挪动，只能改这个测试常量（改了就得重取全部基线）。
 _U3_CASESET_BASELINES = {
-    "2.4": {
+    # Git 历史中的治理记录明确标出当时取这条基线的 Roll 环境为 numpy 2.4.6；
+    # 因此这是对既有基线的精确迁移，不是猜测一个 2.4.x 补丁号。
+    "2.4.6": {
         "../samples/specs/equal.spec.json": "08041f0e2e7b840f117d0f28ee4b748782a27d9b74427e1ec9608554e04c4b52",
         "../samples/specs/isclose.spec.json": "7a4390ecf21c383504f79f375a98a4f0b3ec24793092169f6f514b624eb2fd92",
         "../samples/specs/neg.spec.json": "e538781640a6e81ad217c2831dafc2c2635104cd5f32a1facd9152d75983210c",
@@ -2053,11 +2084,16 @@ _U3_CASESET_BASELINES = {
         "test_fixtures/sign_dtype.spec.json":
             "7e01b619718bb691cd9abf9d02759a93653c7b660183362de429311028c9d701",
     },
-    # 实测于验收真机（`numpy 1.26.4`，2026-08-05）：与 2.4 那条**逐份不同**，
+    # 实测于验收真机（`numpy 1.26.4`，2026-08-05）：与 2.4.6 那条**逐份不同**，
     # 这就是「随机流跨版本会漂」的实证，不是推断。
-    "1.26": {
+    "1.26.4": {
         "../samples/specs/equal.spec.json": "4566e041bc1dbf21fd464dc8a6c28793362d7f262a561c09c1e33def7cf00bc2",
-        "../samples/specs/isclose.spec.json": "ea2c9dad4b1241df18a71b3a003b8ffe6c69971d73a5f525763cc1d790a8b297",
+        # 2026-08-06（F7）重取：12fdc0c 给 IsClose 的 dtype_deferred gap 补了
+        # capability_source="runner" + runner_form="cpp"。两字段须透传进 caseset，供
+        # validate_acceptance_state 按**活的 runner 能力表**核 gap；隐去它们会重新打开
+        # 「自称 deferred 即免检」的 fail-open。a33a571→12fdc0c 实际 diff 只有这两个
+        # task_pr_gaps 元数据字段：50 个 case、case_id、全部 .npy 摘要均逐字不变。
+        "../samples/specs/isclose.spec.json": "23e6ae3041a6533fd63fdbe9b9fa4f98927afa3128269c69bbcce7320b3e396b",
         "../samples/specs/neg.spec.json": "8c4dd1d24b27163b605762f36a5c90249f9b540244f9e23d8a4b9b2774ee0fd6",
         "../samples/specs/sign.spec.json": "cbe4c66bccd7c3d061f1c96f1e9ba9abba0d3916bd778f0a71916e5b826c0151",
         "test_fixtures/isclose_attr.spec.json":
@@ -2066,6 +2102,22 @@ _U3_CASESET_BASELINES = {
             "8d7f3621e2d54e1f5c6b00bf72cd25378d02e8d7ef52214af8ce60a6551d014b",
     },
 }
+
+
+class CasesetBaselineAvailabilityTest(unittest.TestCase):
+    """legacy 字节门不得因当前 numpy 随机流未建基线而静默关闭。"""
+
+    def test_current_numpy_stream_pin_has_a_baseline(self):
+        pin = GC.numpy_stream_pin(np.__version__)
+        self.assertIn(
+            pin,
+            _U3_CASESET_BASELINES,
+            f"当前 numpy {np.__version__}（pin {pin}）在 _U3_CASESET_BASELINES 里没有基线；"
+            "ExistingOpsByteIdenticalTest 会跳过，legacy caseset 字节门实际未运行。"
+            "要么在该完整 numpy 版本下重取并补入基线，"
+            "要么明确说明为什么当前环境不应跑这道门，不得以 skip 冒充通过；"
+            f"已存基线：{sorted(_U3_CASESET_BASELINES)}",
+        )
 
 
 class ExistingOpsByteIdenticalTest(unittest.TestCase):

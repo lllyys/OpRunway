@@ -13,7 +13,6 @@ import shutil
 
 import content_address
 import cpp_extension_adapter
-import dut_source
 import precision_policy
 import precision_retest_contract as contract
 import repo_adapter
@@ -234,40 +233,39 @@ def _validate_cpp_extension_fresh_receipt(
             "fresh receipt bindings/load 未绑定实际 manifest/spec/invocation/namespace")
     vendor = receipt.get("vendor")
     build_receipt = vendor.get("build_receipt") if isinstance(vendor, dict) else None
-    source = build_receipt.get("source") if isinstance(build_receipt, dict) else None
     runtime = receipt.get("runtime")
     identity = manifest.get("execution_identity")
     # fresh 收据是真机本轮刚产的，是整条链上**最有条件伪装**的一份：所以来源校验必须带
-    # `expected_kind`。少了它，收据只要改口说 `pull_request` 并填一个任意 40 位 hex，
+    # `expected_kind`。少了它，收据只要改口说 `gitcode_pr` 并填一个任意 40 位 hex，
     # 本地锚的等值校验整条就不会执行。校验只此一处，锚字段名从返回值取，不按字面拼 key。
     try:
-        directive_kind, _anchor_field, directive_anchor = (
-            dut_source.validate_build_receipt_source(
-                directive["source_identity"],
-                expected_kind=dut_source.NO_EXPECTED_KIND,   # directive 是对照物本身
-                where="directive.source_identity"))
-    except (dut_source.DutSourceError, KeyError, TypeError) as ex:
+        (directive_kind, _anchor_field, directive_anchor,
+         directive_scope) = contract.validate_source_identity(
+             directive.get("source_identity"))
+    except contract.RetestContractError as ex:
         raise RetestExecutionError(
             f"directive.source_identity 来源锚不可信：{ex}") from ex
     try:
-        fresh_kind, fresh_anchor_field, fresh_anchor = (
-            dut_source.validate_build_receipt_source(
-                source, expected_kind=directive_kind,
-                where="fresh cpp_extension vendor build_receipt.source"))
-    except dut_source.DutSourceError as ex:
+        fresh_summary, fresh_identity = contract.receipt_source_identity(
+            build_receipt, expected_kind=directive_kind,
+            where="fresh cpp_extension vendor build_receipt")
+    except contract.RetestContractError as ex:
         raise RetestExecutionError(
             f"fresh cpp_extension vendor build receipt 来源锚不可信：{ex}") from ex
     expected = {
         "source_anchor": directive_anchor,
+        # scope 与锚同等载重：范围不同的两个 merkle 不可比，只比 merkle 值等于没比。
+        "source_scope": directive_scope,
         "vendor_elf": identity.get("vendor_elf_sha256")
             if isinstance(identity, dict) else None,
         "soc": identity.get("soc") if isinstance(identity, dict) else None,
         "toolkit": identity.get("toolkit") if isinstance(identity, dict) else None,
     }
     actual = {
-        # 已按通路核过长度的锚值，不是裸 `.get`：收据是 local 时裸 get 拿到 None、
+        # 已按通路核过形态的锚值，不是裸 `.get`：收据是 local 时裸 get 拿到 None、
         # 是「64 位假 pr_head_sha」时裸 get 会原样收下。
-        "source_anchor": fresh_anchor,
+        "source_anchor": fresh_identity["anchor_value"],
+        "source_scope": fresh_identity[contract.SNAPSHOT_SCOPE_FIELD],
         "vendor_elf": vendor.get("library_sha256")
             if isinstance(vendor, dict) else None,
         "soc": runtime.get("soc") if isinstance(runtime, dict) else None,
@@ -279,15 +277,10 @@ def _validate_cpp_extension_fresh_receipt(
             raise RetestExecutionError(
                 f"fresh cpp_extension {field} 身份漂移："
                 f"actual={actual[field]!r} expected={wanted!r}")
-    # 整块比三元组，**不只比锚值**：同一段 hex 在两条通路里含义完全不同（线上 commit
-    # vs 本地子树摘要），只比值等于没比通路。旧 manifest 只有 `base_pr_head`、没有
-    # `base_source_identity` → 这里直接不相等 → 拒执行；刻意不留旧键兼容兜底，
+    # 整块比来源身份，**不只比锚值**：同一段 hex 在两条通路里含义完全不同（线上 commit
+    # vs 本地子树 merkle），只比值等于没比通路。旧 manifest 只有 `base_pr_head`、或带着
+    # 已删除的 `dut_source` 词表 → 这里直接不相等 → 拒执行；刻意不留旧键兼容兜底，
     # 那正是本批刚堵掉的「有值就用」。
-    fresh_identity = {
-        "dut_source": fresh_kind,
-        "anchor_field": fresh_anchor_field,
-        "anchor_value": fresh_anchor,
-    }
     if binding.get("base_source_identity") != fresh_identity:
         raise RetestExecutionError(
             f"cpp_extension 基础 receipt 来源身份与本轮漂移："
@@ -299,10 +292,10 @@ def _validate_cpp_extension_fresh_receipt(
             != directive["source_identity"]["build_receipt_sha256"]:
         raise RetestExecutionError(
             "cpp_extension 基础 receipt 身份与 directive/execution identity 漂移")
-    fresh_build = build_receipt.get("build") if isinstance(build_receipt, dict) else None
-    if (not isinstance(fresh_build, dict)
-            or fresh_build.get("argv") != binding.get("base_vendor_build_argv")
-            or source.get("repo") != binding.get("base_source_repo")):
+    # `receipt_source_identity` 已经过 `vendor_build_receipt.summarize`，故 build 段的
+    # argv/cwd/实测 returncode 已被校过，这里只比「与首轮是否同一条构建命令」。
+    if (build_receipt["build"]["argv"] != binding.get("base_vendor_build_argv")
+            or fresh_summary["repo"] != binding.get("base_source_repo")):
         raise RetestExecutionError(
             "fresh vendor build argv/source repo 与首次 receipt 漂移")
     return {
@@ -362,31 +355,31 @@ def _frozen_source_facts_path(attempt, manifest, directive):
     """复核 F2 冻进 attempt 的 `source_facts.json`，返回给三级门的路径。
 
     没有这条线，本地来源通路的 CP-F 执行是**结构性**必 BLOCKED：
-    `gate_task2` → `_gate_build_receipt_source_binding` 在 `local_checkout` 且找不到
+    `gate_task2` → `_gate_build_receipt_source_binding` 在 `local_snapshot` 且找不到
     `source_facts.json` 时按设计阻断，而 attempt 目录只复制 case 输入与 golden，
     这份文件永远不会出现。F2 冻结 + 这里指路，才让本地锚有对照物可核。
 
     manifest 缺 `source_facts` 时按 directive 声明的通路分：PR 返回 `None`，门沿用既有
     PR 行为一个字节不变；本地则当场拒。**不能**只依赖「F2 已经 fail-closed 过」——
     directive.json 与 attempt.manifest.json 都是自洽 envelope，手搓一对声明
-    `local_checkout` 却不带 `source_facts` 的工件，就绕过了 F2 那道门。
+    `local_snapshot` 却不带 `source_facts` 的工件，就绕过了 F2 那道门。
 
     只比 sha256，不在这里重判来源：manifest 是内容寻址 envelope 且已在
     `_read_envelope` 校过摘要，manifest 里的 sha256 又绑死了这份文件的内容，
-    来源三元组在 F2 已对着 directive 核过。执行侧再判一次只会多出第二处判别逻辑。
+    来源身份在 F2 已对着 directive 核过。执行侧再判一次只会多出第二处判别逻辑。
     """
     try:
-        kind = dut_source.of(
-            directive.get("source_identity"), where="directive.source_identity")
-    except dut_source.DutSourceError as ex:
+        kind, _field, _value, _scope = contract.validate_source_identity(
+            directive.get("source_identity"))
+    except contract.RetestContractError as ex:
         raise RetestExecutionError(
             f"directive.source_identity 来源判别式不合法：{ex}") from ex
     recorded = manifest.get("source_facts")
     if recorded is None:
-        if kind == dut_source.LOCAL_CHECKOUT:
+        if kind == contract.PROVENANCE_LOCAL_SNAPSHOT:
             raise RetestExecutionError(
-                f"dut_source={kind} 的 attempt 必须带 F2 冻结的 source_facts.json，"
-                f"manifest 里却没有——本地锚没有对照物即无绑定，拒绝执行")
+                f"{contract.PROVENANCE_KIND_KEY}={kind} 的 attempt 必须带 F2 冻结的 "
+                f"source_facts.json，manifest 里却没有——本地锚没有对照物即无绑定，拒绝执行")
         return None
     if not isinstance(recorded, dict):
         raise RetestExecutionError("manifest.source_facts 非法")
@@ -537,14 +530,19 @@ def _execute_precision_attempt_locked(attempt_dir):
     subset, copied = prepare_execution_caseset(
         base_caseset, manifest, effective_spec, directive["attempt_kind"],
         base_work, attempt_work)
-    # ⚠ **刻意不传 `allow_experimental_form`** —— CP-F 只支持 `cpp_extension`，这是**定论**，
+    # ⚠ **刻意不给任何旁路** —— CP-F 只支持 `cpp_extension`，这是**定论**，
     # 不是收敛的副作用（2026-08-05 决策，见 AGENTS.md §9.2）。
     #
-    # 为什么 CP-F 不能像 `run_workflow` 那样给个逃生阀：`--allow-experimental-form` 的全部安全性
-    # 建立在「该路径**物理上不产** `acceptance.json` / `verdict.json`」之上。而 CP-F **就是要写
-    # `verdict.json`**（本文件 `_write_json(attempt, "verdict.json", verdict)`），报告还直接
-    # 展示「validator 精度裁决」。把非准入通路放进来，产出的东西长得就是一份验收裁决——
+    # 为什么 CP-F 不能像 `run_workflow` 当年那样给个逃生阀：那个逃生阀（`--allow-experimental-form`，
+    # 2026-08-06 已随通路收敛整个删除）的全部安全性建立在「该路径**物理上不产**
+    # `acceptance.json` / `verdict.json`」之上。而 CP-F **就是要写 `verdict.json`**
+    # （本文件 `_write_json(attempt, "verdict.json", verdict)`），报告还直接展示
+    # 「validator 精度裁决」。把非准入通路放进来，产出的东西长得就是一份验收裁决——
     # 那正是准入门要防的那件事，只是换了个门进来。
+    #
+    # ⚠ 通路收敛后 `_resolve_mode` 本身对 `cpp` / `aclnn_py` 就直接拒了，下面这个 try/except
+    #   因此更像是「把上游的拒绝翻译成 CP-F 的话」——**别当冗余删掉**：它保证被拒时说的是
+    #   「复测能力不覆盖该通路、基础验收仍然有效」，而不是一句上游的通用报错。
     #
     # 现实存量也支持这个决定：仓内唯一坐实的完整验收基线（Median PR6429）本来就是
     # `cpp_extension`；`aclnn_py` 的历史 60/60 属旧 caseset、仓规明写不得沿用。
@@ -560,8 +558,9 @@ def _execute_precision_attempt_locked(attempt_dir):
             f"{repo_adapter.spec_runner_form(spec)!r} 不受支持。\n"
             f"  这不表示基础验收失效或被重新裁决——它仍保持原裁决与历史效力，"
             f"只是当前复测能力不覆盖该通路。\n"
-            f"  ⚠ 没有逃生阀：`--allow-experimental-form` 不适用于 CP-F，"
-            f"也不得用于绕过（理由见本函数上方注释）。\n"
+            f"  ⚠ 没有逃生阀：CP-F 不接受任何「放行非准入通路」的旁路，也不得绕过"
+            f"（理由见本函数上方注释）。要复测该通路，须先用 cpp_extension 重做一次完整"
+            f"CP-A..E 验收当新基线——那是**新验收**，不是旧通路的漂移复测。\n"
             f"  派生失败原文：{ex}") from ex
     if mode == "aclnn_py":
         verify_aclnn_harness.validate_receipt(

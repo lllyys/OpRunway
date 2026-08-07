@@ -26,7 +26,7 @@
   "call_variants": "<cpp_extension / aclnn_py 两种形态**均必填**：变体对象数组，见 §1.3.3>",
   // §1.6 仅 cpp_extension：张量 ACL 存储格式（受控两值）。**整字段省略 = torch_npu_rank_default = 现行为**
   "aclnn_tensor_format": "<可选：torch_npu_rank_default（缺省）| nd>",
-  "allow_empty_tensor": "<可选 bool，缺省 true；任务书明写不支持空 Tensor→false>",
+  "allow_empty_tensor": "<仅 legacy 档可选 bool，缺省 true；torch_parity 决定②不产特殊场景、声明即拒>",
   // §1.4 可选：任务书点名「某 attr 所指的轴长度 = L」这类边界 → **定向生成**，别指望正交网格撞上
   "attr_axis_lengths": [{"attr":"<已声明的 attr 名>","lengths":[1]}],   // 不需要就整字段省略
   "reference": {"type":"<tbe|torch|numpy|gpu|cpu|builtin>","ref":"...","path":"opp/built-in/..."},
@@ -53,7 +53,8 @@
   //   `references/runner-skeleton.md` §6）。**别在 spec 里发明 out_shape / output_shape / shape_formula 字段。**
   "generalize": true,
   // Q7 dtype 覆盖门（gate 消费）：dtype_required=任务书**权威全集**（来源见 §1 dtype 行）；全集未知/信息库未接通→"needs_user"；
-  //   legacy 未迁→省略。dtype_tested=实测子集（gen_cases 据**真实生成的 cases** 归并写入 caseset、门据此对账）。缺项由 task_pr_gaps 的 dtype_deferred 记录。
+  //   legacy 未迁→省略。dtype_tested=实测子集（gen_cases 据**真实生成的 cases** 归并写入 caseset、门据此对账）。
+  //   缺项由 task_pr_gaps 的 dtype_deferred 记录 —— ⚠ 记下来 ≠ 免检，且该条目须声明 `capability_source`（§1.2a）。
   "dtype_required": ["<权威全集>  或  \"needs_user\"  或  省略"],
   "dtype_tested": ["<实测子集，如 float32/float16>"],
   "verify_mode": "<exact|numerical|behavioral>",   // 三值，与 validator 一致
@@ -102,9 +103,21 @@
 
 **现在怎么定这个数**：**按覆盖矩阵算，不是拍一个数**。
 
-- `case_profile == "torch_parity"`：`case_target` **必须精确等于**完整笛卡尔矩阵大小
-  `dtype × rank × shape_profile × attribute_profile`（见 §1.3『Torch overload 覆盖与 `torch_parity_matrix`』）。
+- `case_profile == "torch_parity"`：`case_target` **必须精确等于常规完整笛卡尔矩阵大小**
+  `dtype × rank × shape_profile × attribute_profile`（再减去有 `reason + evidence` 的 `excluded`；
+  见 §1.3『Torch overload 覆盖与 `torch_parity_matrix`』）。特殊场景按 §1.3 的结构约束本来就不进
+  笛卡尔、也不计入 `case_target`；决定②进一步明确本档当前三类 `operator_class` 均产 0 条，故
+  `total_emitted == regular_emitted == case_target`。账本分别写 `regular_emitted / special_emitted /
+  total_emitted`，不得把独立叠加的概念偷塞进矩阵乘法。
   不相等 `gen_cases` 直接报错，这条已经是硬校。
+  ⚠ 这四条是**当前矩阵已有的自由轴**，不表示看到任何字段都要再加一维：特殊场景已决定不产、
+  输出个数不是自由轴、值域 regime 暂不引入；新增轴是否必须交叉统一按 §1.3「轴集契约」判断。
+- `precision.case_source == "taskdoc"`：`case_target` **照样必填**，且**必须精确等于**规范化后的
+  任务书用例条数——这一档你不推算这个数，它被用例集锁死（`_taskdoc_plan` 逐字核对，对不上当场报
+  「任务书用例集有 N 条、`precision.case_target=…`——两者必须相等」）。⚠ **别读成「这一档不用写」**：
+  不写照样 fail-fast，`_require_case_target` 排在分档之前。⚠ 也**别为了跑通把它改成报错里那个 N**：
+  规范化会按语义内容派生 `case_id`，原始条数与规范化条数不一致本身就是要查的事（样例见
+  `plugin/samples/specs/gaussian_blur.spec.json` 的 `_case_target_note`）。
 - 其它档：也按该算子的覆盖轴推算，并把算法写进 `precision.case_target_source`。
   ⚠ **统一的笛卡尔算法（含非 torch_parity 档）尚未落地**（roll19 方案步骤 11，需人评审轴集后实现）。
   在它落地之前，这个数**必须给得出依据**——沿用某份既有事实要写清沿用的是什么；
@@ -135,22 +148,22 @@ attr 笛卡尔、§1.4 特殊场景、白名单必覆盖 + 1-wise 采样）铺�
 | `change.kind` | 『任务概述』定性词 | 受控**八值**：rewrite_tbe / add_dtype / **extend_shape** / align_dtype / semantic / new_op / gpu_port / bugfix（复合取主 kind，余入 note；唯一真源 `perf_mode.CHANGE_KINDS`，词表外 fail-closed）。⚠ `extend_shape`（扩展 shape·rank）**别再硬塞进 `semantic`**——`add_dtype` / `extend_shape` / `new_op` 三类是 §4.1 `change_class_no_perf_comparison` 授权的机器判据，塞错就派生不出来。⚠ 整字段省略 = **未声明**，不兜任何默认 |
 | `change.dtypes_added` | add_dtype 新增类型 | 如 `["int16"]`、`["bf16"]` |
 | `params_source` | 有无完整参数表 | 有表→`task_doc_table`；只写『原算子所有类型』→`derived_from_reference` |
-| `operator_class`（§1.5）| 任务书的**算子功能/公式**段 + 参考 API 语义（这算子到底在算什么） | 受控词表 `floating_compute / structural / integer_compute`，**三选一、无第四种**。决定 gen_cases 产不产 `inf/-inf/nan` 特殊场景、`value_profiles` 能不能含 `"nan"`。**每份新 spec 都判**；整字段省略 = legacy 向后兼容出口（照产 NaN·Inf），别当缺省答案用。词表外取值 → fail-closed |
+| `operator_class`（§1.5）| 任务书的**算子功能/公式**段 + 参考 API 语义（这算子到底在算什么） | 受控词表 `floating_compute / structural / integer_compute`，**三选一、无第四种**。legacy 档据它决定产不产 `inf/-inf/nan` 特殊场景、`value_profiles` 能不能含 `"nan"`；`torch_parity` 决定②则对三类统一保持特殊场景 0 条，字段仍须照实填写并落账，**不得**据类别自行加例。**每份新 spec 都判**；整字段省略 = legacy 向后兼容出口（照产 NaN·Inf），别当缺省答案用。词表外取值 → fail-closed |
 | `params[]` | 参数说明表 | 每参 `{name,io:in\|out\|attr,dtype:[],default?,noncontiguous?,rank?}`；Tensor→in/out，标量/属性→attr。**attr 值类型（C2）**：`int \| float \| bool \| str \| list[int]`——数组属性（`output_size`/`kernel_size`/`stride`/`padding`/`ksize`）照原样写成 `[a,b]`，别拍平成字符串、别只取首元素。**in 的 `rank`（C3）**见下一行 |
-| `params[].rank`（C3，可选）| 任务书参数表『维度(shape)』栏 / 算子 README / `*_infershape.cpp` 的 rank 校验 | int（`2`）或 int 列表（`[3,4]`）。**只声明确凿的 rank**，任务书没写死就**别填**（不写=不限制=现行为，不臆造）。例（依据 `dev-doc/oprunway-op-shape-taxonomy.md`，相关行标 `verified`）：Pdist=2、im2col=[3,4]、UpsampleNearestExact1d=3、UpsampleNearest3d=5、bincount=1。⚠ **它只收窄「造哪些 shape」，收不掉「造哪些场景」**：`gen_cases._special_entries` 的空 Tensor / 标量 / 边界 / inf-nan 是**强制必覆盖**项，rank 约束下走 `_fit_rank` **保 numel 调维**（如空 `(0,)` 在 rank=2 时被调成合法 2 维的空 shape），**不会被过滤掉**。任务书明写「不支持空 Tensor」时**照记 `task_pr_gaps`**（当前 spec 没有关掉空 Tensor 用例的字段），别假定填了 rank 就自动干净 |
+| `params[].rank`（C3，可选）| 任务书参数表『维度(shape)』栏 / 算子 README / `*_infershape.cpp` 的 rank 校验 | int（`2`）或 int 列表（`[3,4]`）。**只声明确凿的 rank**，任务书没写死就**别填**（不写=不限制=现行为，不臆造）。例（依据 `dev-doc/oprunway-op-shape-taxonomy.md`，相关行标 `verified`）：Pdist=2、im2col=[3,4]、UpsampleNearestExact1d=3、UpsampleNearest3d=5、bincount=1。⚠ legacy 档中它只收窄「造哪些 shape」，收不掉特殊场景：`gen_cases._special_entries` 的空 Tensor / 标量 / 边界 / inf-nan 是强制项，rank 约束下走 `_fit_rank` 保 numel 调维。`torch_parity` 决定②则一条特殊场景都不产，不能拿 rank 声明反推已经覆盖。任务书明写「不支持空 Tensor」时照记 `task_pr_gaps`；在 `torch_parity` 下不得声明 `allow_empty_tensor` 冒充消费方 |
 | `generalize` | 测试标准是否要泛化数据 | 默认 true；无张量IO(Sleep)/融合无泛化要求→false |
 | `dtype_required`（Q7 dtype 覆盖门）| 任务书**权威 dtype 全集**（来源优先级同下 dtype 行：任务书显式表 > 原 TBE 信息库 > 问用户）| list of dtype。任务书只写『支持所有类型』且信息库未接通/全集未知 → **填 `"needs_user"`**（不谎报覆盖、也不臆造全集）；legacy 未迁 → **整字段省略**（门判『未声明→覆盖门未行使』、不阻塞）。**IsClose 已核**：op_def 正源={float32,float16,bfloat16,int32} |
 | `dtype_tested`（Q7 dtype 覆盖门）| 当前 pipeline **实测子集**（通常 float32/float16）| list。**gen_cases 据实际生成的 cases 归并并写入 caseset**（门也用真实 cases 对账，口径一致、消除「并集过报」）；spec 侧此字段作声明/文档，**须与真实一致否则门抓「自报不符」→ BLOCKED** |
-| dtype 覆盖缺口 → `task_pr_gaps` | required 有、tested 无的 dtype | **两类挂账，按成因选**（§1.2 有对照表）：① **我们测不了** → `{"kind":"dtype_deferred","dtypes":["bfloat16","int32"],"reason":"…runner 未支持/Track C…"}`；② **算子 op_def 压根不支持**（C4）→ `{"kind":"dtype_unsupported_by_op_def","dtypes":[…],"task_doc_ref":…,"op_def_ref":…,"op_def_dtypes":[…]}`（四道硬校见 §1.2，缺一即 `overall=fail`）。**门据此放行**（显式挂账 ≠ 静默收窄）；两类记录都无 → 门 BLOCKED |
+| dtype 覆盖缺口 → `task_pr_gaps` | required 有、tested 无的 dtype | **两类挂账，按成因选**（§1.2 有对照表）：① **我们测不了** → `{"kind":"dtype_deferred","dtypes":["int32"],"capability_source":"runner","runner_form":"cpp","reason":"…runner 无 int 分支/Track C…"}`（**必须声明能力来源**，四道硬校见 §1.2a）；② **算子 op_def 压根不支持**（C4）→ `{"kind":"dtype_unsupported_by_op_def","dtypes":[…],"task_doc_ref":…,"op_def_ref":…,"op_def_dtypes":[…]}`（四道硬校见 §1.2，缺一即 `overall=fail`）。**挂账合规 → 门不判「静默收窄」**；⚠ 那**只**表示缺口被如实记下来了，**不表示该 dtype 免检**：`dtype_deferred` 的终态不会是干净 `pass`（§1.2a），C4/target_hw 落 `passed_with_gaps`。挂账不合规 = 不算挂账；两类记录都无 → 门 BLOCKED |
 | `verify_mode` | 见 §2 决策树 | exact / numerical / behavioral |
 | `precision.oracle` | 精度校验工具/真值来源 | 受控词表 `ascendoptest / mere_mare / atk_double / torch / scipy / std_exact / none`，**按任务书原文抽**（多数社区任务=ascendoptest；SPMV=生态标准 MERE·MARE + ATK 双标杆=`atk_double`；Sleep=none）——**勿一律填 ascendoptest**。⚠ 旧文写的 `dual_benchmark` 已统一为 `atk_double`（与 `precision_policy.select_standard` 识别的词一致）；`mere_mare` 与 `atk_double` **都**映射到 standard `ecosystem_mere_mare`（ATK 双标杆 fallback 本轮 out-of-scope、未实现）|
 | `precision.standard`（T5，待散文门）| **先读任务书显式精度工具/标准；仅缺失时**才从 oracle+verify_mode 兜底（见 §1.1）| 受控词表 `ascendoptest_default / ecosystem_mere_mare / exact / behavioral / torch_allclose`。`oracle` 是真值来源，不得覆盖任务书点名的验收尺；缺省不填时 `precision_policy.select_standard` 才按 §1.1 兜底 |
 | `scenario`（§1.3）| 任务书『参考实现/功能对标』段是否把 **torch 指定为真值口径** × PR 是否**标准 aclnn 两段式**工程 | 受控值 `torch_ref_aclnn`；不属该场景 → **整字段省略**，别编新值 |
-| `runner_form`（§1.3）| **执行形态 = 用哪座调用桥去调被测物**（见 §1.3.1）。⚠ 它**不是**「被测物工程结构」的同义词——被测物是不是 aclnn 两段式，判的是**域内/域外**，不是这个字段 | 受控词表 `cpp_extension` / `aclnn_py` / `cpp`（派生 mode 见 `AGENTS.md` §4）。**正式验收一律 `cpp_extension`**：它是当前**唯一**能产验收裁决的形态（准入白名单 `run_workflow._ACCEPTANCE_RUNNER_FORMS`），另两个只能加 `--allow-experimental-form` 跑出开发级证据、**产不出** `acceptance.json` / `verdict.json`。⚠ **缺省 = `cpp_extension`**（键缺席即此，唯一真源 `repo_adapter.DEFAULT_RUNNER_FORM`，`run_workflow` / `gen_cases` / `cpp_extension_codegen` / `cpp_extension_adapter.prepare` 全部同源）——所以**省略再也不表达 `cpp`**，`cpp` / `aclnn_py` 只能显式声明。⚠ **缺省兜得住 ≠ 可以省着不写**：正式验收的 spec 一律显式写 `"runner_form": "cpp_extension"`，执行身份要在 spec 里一眼可读、可审。⚠ 只有**键缺席**吃缺省：显式写 `null` / `""` 是一份写坏的 spec，照旧在受控词表处 fail-closed。`cpp_extension` / `aclnn_py` ⇒ **都必须**同时给 `call_variants`，否则 gen_cases fail-closed。⚠ runner form **只决定执行形态，不能反推任务书指定的性能标杆**——baseline 仍逐字按任务书核 |
+| `runner_form`（§1.3）| **执行形态 = 用哪座调用桥去调被测物**（见 §1.3.1）。⚠ 它**不是**「被测物工程结构」的同义词——被测物是不是 aclnn 两段式，判的是**域内/域外**，不是这个字段 | 受控词表 `cpp_extension` / `aclnn_py` / `cpp`（派生 mode 见 `AGENTS.md` §4）。**正式验收一律 `cpp_extension`**：它是当前**唯一**能产验收裁决的形态（准入白名单 `run_workflow._ACCEPTANCE_RUNNER_FORMS`），另两个已于 2026-08-06 **停止准入**：不但产不出 `acceptance.json` / `verdict.json`，**连真机入口都没有了**（逃生阀已删），抽成它们等于抽出一份跑不了的 spec。⚠ **缺省 = `cpp_extension`**（键缺席即此，唯一真源 `repo_adapter.DEFAULT_RUNNER_FORM`，`run_workflow` / `gen_cases` / `cpp_extension_codegen` / `cpp_extension_adapter.prepare` 全部同源）——所以**省略再也不表达 `cpp`**，`cpp` / `aclnn_py` 只能显式声明。⚠ **缺省兜得住 ≠ 可以省着不写**：正式验收的 spec 一律显式写 `"runner_form": "cpp_extension"`，执行身份要在 spec 里一眼可读、可审。⚠ 只有**键缺席**吃缺省：显式写 `null` / `""` 是一份写坏的 spec，照旧在受控词表处 fail-closed。`cpp_extension` / `aclnn_py` ⇒ **都必须**同时给 `call_variants`，否则 gen_cases fail-closed。⚠ runner form **只决定执行形态，不能反推任务书指定的性能标杆**——baseline 仍逐字按任务书核 |
 | `aclnn_tensor_format`（§1.6，可选，**仅 `runner_form=cpp_extension`**）| **ABI 事实源**（接口 header / docs / example）对张量存储格式的要求；任务书与 op_def 只作交叉 | 受控两值。整字段省略 = `torch_npu_rank_default` = op-plugin 按 rank 猜格式（3→NCL、4→NCHW、5→NCDHW、其余→ND），产物逐字节不变、manifest 记 `default_unverified`。接口按 `GetStorageFormat()==FORMAT_ND` 校格式（症状：rank-3 张量被 L2 拒成 `ACLNN_ERR_PARAM_INVALID` 161002）时才写 `nd`。⚠ `nd` 当前只在手写 `extended` stage2 下实现，落在走官方宏的 `standard` 形态上 → fail-closed。**没核过就别写，沿用缺省并挂账** |
 | `call_variants`（§1.3.3）| **递归发现的接口头**的函数签名（`<op_subdir>` 下有界递归找到的 `aclnn_*.h`，剔 `*_impl.h`；**层级不预设**）+ 任务书的 attr 语义 | 变体对象数组；`when`/`symbol`/`active_outputs` 必填，`active_attrs`/`attrs` 选填。按 **attr 取值**分派，**绝不按算子名**。`runner_form ∈ {cpp_extension, aclnn_py}` **一律必填**（两种形态共用同一份逐 case 调用契约 `aclnn_call`）|
 | `params[].out_role` / `index_of` / `gather_from`（§1.3.2）| aclnn 签名的输出形参 + 任务书对各输出的语义描述 | `out_role ∈ {value, index}`（多输出时**每个** out 必填）；`index_of` 指本 spec 某 `value` 输出名；`gather_from` 指本 spec 某 `in` 参数名。二者仅 `index` 有、且**必填** |
-| `allow_empty_tensor`（§1.3.6）| 任务书『不支持空 Tensor』类明写约束 | 真 bool，缺省 `true`。`"false"`/`0` **fail-closed 拒收** |
+| `allow_empty_tensor`（§1.3.6）| 任务书『不支持空 Tensor』类明写约束 | **仅 legacy 档可写**：真 bool，缺省 `true`，`"false"`/`0` fail-closed。`torch_parity` 决定②不产特殊场景，本键无消费方，声明即 fail-closed；算子事实照记 `task_pr_gaps` 或 `_` 前缀注释，不能用一个无效开关冒充已覆盖 |
 | `attr_axis_lengths`（§1.4，可选）| 任务书**点名**的轴长度边界（典型句式「归约维/dim 所指轴上维度为 1 时…」）| `[{"attr":"<已声明 attr 名>","lengths":[<正整数>…]}]`。**声明了却一条都产不出 → fail-closed**（假覆盖）。不需要就整字段省略 |
 | `precision.tolerance_policy_id`（T5，待散文门）| **口径 id（分两层，别混）**：`spec.precision.tolerance_policy_id`=**spec 级摘要/向后兼容**（exact→`exact`、ascendoptest→`ascendoptest_default`、mere_mare/atk_double→`ecosystem_mere_mare`，**无 dtype 后缀**）；`caseset.expected.tolerance_policy_id`=**门控用、格式 `standard:dtype`**（如 `ascendoptest_default:float32`，per-case 由 `gen_cases` 按 golden dtype 生成，exact/behavioral 无 dtype 后缀）。validator/gate 的三处一致比的是**caseset 级**那份 | 
 | `precision.acceptance_policy?`（T5，待散文门）| 任务书验收目标宽于平台底线时 | 可选 `{"standard":"...","error_rate":...}` 等覆盖；acceptance 过而 standard 不过 → PASSED_WITH_RISK 走人工 CP。**仅任务书明确放宽时才填**，勿臆造 |
@@ -229,13 +242,61 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
    **这就是「没实现」与「实现了但跑挂了」的判别式**：前者压根造不出用例，后者一定有用例 + 证据，必须走精度/功能裁决。
 4. **在需求内**：spec 声明了 `dtype_required` 时，gap 的 dtype 须确在任务书要求内（给任务书没要求的 dtype 挂账 = 无据）。
 
-**与 `dtype_deferred` 别混**（三类挂账，`validate_acceptance_state` 的 dtype 覆盖门都认）：
+**与 `dtype_deferred` 别混**（三类挂账，`validate_acceptance_state` 的 dtype 覆盖门都认，且**三类都逐条硬校、不合规即不算挂账**）：
 
-| kind | 什么情形 | 谁的问题 |
+| kind | 什么情形 | 谁的问题 | 挂上以后 |
+|---|---|---|---|
+| `dtype_deferred` | 任务书要、算子也做了，**是我们这条 pipeline 暂时测不了**（某张能力表没有该 dtype）| **我们的**能力缺口 | **不是免检**：覆盖门只放行「不算静默收窄」这一点；终态**不会**是干净 `pass`，且须过能力来源硬校（见 §1.2a）|
+| `dtype_unsupported_by_op_def` | 任务书要、**算子 `op_def` 压根没声明支持** | **被测物的**缺口 = 验收**发现** | 裁决落 `passed_with_gaps`（不是 pass）|
+| `dtype_unsupported_on_target_hw` | 任务书要、**`op_def` 声明了**，但**目标硬件那一支的 aclnn 实现没有**（分支 `DTYPE_SUPPORT_LIST` 不含）| **被测物的**缺口 = 验收**发现** | 裁决落 `passed_with_gaps`（不是 pass）|
+
+⚠ **「挂账」= 「这个缺口被如实记下来了」，不等于「这个 dtype 免于验收」。** 三类都一样。
+`dtype_deferred` 尤其容易被读成免检牌，实测也确实被这么用过（aclnnRoll 试跑：任务书要的两个 dtype
+一条用例没跑、终态却是干净 pass）。现在两道门各拦一半，见 §1.2a。
+
+### §1.2a `dtype_deferred` 的两道门（2026-08-06 收严，写 spec 前必读）
+
+**① 终态映射**（`gate_task2`）：任务书要求的 dtype 挂了 `dtype_deferred` 且**一条用例都没跑**时，
+终态**不得**是最低档的干净 `pass`。合法终态：`needs_review`（首选，交人核）/ `fail` / `passed_with_risk`；
+`passed_with_gaps` 只在**另有**结构合法的被测物侧 finding gap 撑着时才合法——**deferred 撑不起它**。
+
+**② 能力来源硬校**（`gate_task1` 的覆盖门，`validate_acceptance_state._check_deferred_gap`）：
+挂 deferred 必须**指名是哪张能力表不支持**，门拿**活表**逐条交叉核验。四道校缺一即拒；
+**拒 = 这条挂账不算数** → 该 dtype 仍按「静默收窄」判 → 门 BLOCKED。
+
+```jsonc
+{"kind": "dtype_deferred",
+ "dtypes": ["<非空 dtype 字符串列表>"],
+ "capability_source": "generation | runner | compute",   // 必填：哪张能力表不支持
+ "runner_form": "cpp | aclnn_py | cpp_extension",        // 仅 capability_source=runner 时必填；其余来源**不得**写
+ "reason": "<人读说明>"}
+```
+
+| `capability_source` | 对应能力表 | 含义 |
 |---|---|---|
-| `dtype_deferred` | 任务书要、算子也做了，**是我们这条 pipeline 暂时测不了**（runner 无该 dtype 分支、真机环境阻塞…）| **我们的**能力缺口 |
-| `dtype_unsupported_by_op_def` | 任务书要、**算子 `op_def` 压根没声明支持** | **被测物的**缺口 = 验收**发现** |
-| `dtype_unsupported_on_target_hw` | 任务书要、**`op_def` 声明了**，但**目标硬件那一支的 aclnn 实现没有**（分支 `DTYPE_SUPPORT_LIST` 不含）| **被测物的**缺口 = 验收**发现** |
+| `generation` | `gen_cases._NATIVE`（+ `bfloat16`）| 造不出输入 / 算不出 golden / 落盘读不回 |
+| `runner` | `repo_adapter.SUPPORTED_NP_BY_FORM[<runner_form>]` | 该 runner form 的真机侧收发不了（含 Track-C：`DEFERRED_NP_BY_FORM` 里的 dtype 本就不在支持表里，合法）|
+| `compute` | `precision_policy.SUPPORTED_COMPUTE_DTYPES` | 误差 metrics 复算不出来（如 bf16、`complex128`）|
+
+⚠ **`complex64` / `uint32` 别再照旧例挂 deferred**（2026-08-06 起两者四层齐备：生成 / 收发（仅
+`cpp_extension`）/ 阈值 / 复算）。给它们挂 `dtype_deferred` 会撞上第 4 条硬校「与表不矛盾」——
+门读活表发现其实支持 → **拒该 gap**，该 dtype 随即按「静默收窄」判 BLOCKED。仍然不支持的复数是
+`complex128`（缺真机实证）。`cpp` / `aclnn_py` 两条通路本轮**没有**跟着放开，走那两条时
+`capability_source=runner` 依然成立。
+
+四道硬校：
+
+1. **读得出**：`dtypes` 须为非空的 dtype 字符串列表。写成 `"dtypes": "complex64"`（漏内层方括号）
+   或把整个 `task_pr_gaps` 写成对象（漏外层方括号）→ 门读不出被 defer 掉的是什么 → 拒。
+2. **有来源**：`capability_source` 必填且属受控词表。**不指名 = 门没有对照物 = 「宣称有缺口就免检」。**
+3. **来源可定位**：`runner` 来源须带 `runner_form`（真机表逐形态各一份）；其余来源带了 `runner_form` 即拒。
+   本轮实跑的 evidence 记了 `runner_form` 时还要**逐字相符**——不许挑一支更弱的 runner 表来给缺口撑腰。
+4. 🔴 **与表不矛盾**：自报不支持的 dtype 若在那张表的**当前**支持集里 → 伪造 deferred，拒。
+   （门读的是**活表**，不是文档里的快照：别处给表补了 dtype，门当天就跟着变严。）
+
+⚠ **不扣 `dtype_required`、也不扣实测集**：删掉 / 清空 / 改写 caseset 的 `dtype_required` 绕不过这两道门；
+反过来，Track-C 那种「用例造得出、真机跑不了」的形态下 caseset 里**有**该 dtype 的真实用例，
+挂账**仍然成立**，不会被误伤。
 
 ### §1.2b 第三类 `dtype_unsupported_on_target_hw`（已裁定补入，2026-07-23）
 
@@ -367,7 +428,7 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
 | 写成 | 后果 |
 |---|---|
 | `cpp_extension` | ✅ 正常出验收裁决（`acceptance.json` / `verdict.json`）|
-| `aclnn_py` / `cpp` | ⛔ 入口门直接拦下；加 `--allow-experimental-form` 只能**跑起来**，物理上只产 `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"` + NON-ACCEPTANCE 标记）。「加了逃生阀跑绿了」**不是**验收通过，不得进报告裁决栏 |
+| `aclnn_py` / `cpp` | ⛔ **停止准入（2026-08-06）**：入口门直接拦下，且**没有任何办法跑起来**——逃生阀 `--allow-experimental-form` 已删除，显式 `--mode new_example` / `aclnn_py` 同样被拒。抽 spec 时抽出这两个值 = 这份 spec 直接作废，**正确处置是抽成 `cpp_extension`**（要补 `call_variants`）|
 | 整字段省略（键缺席）| 全仓一致解析为 **`cpp_extension`**（缺省唯一真源 `repo_adapter.DEFAULT_RUNNER_FORM`；`run_workflow` 派 mode、`gen_cases` 校 dtype 与 `aclnn_call`、`cpp_extension_codegen` / `cpp_extension_adapter.prepare` 全走同一个读侧入口 `repo_adapter.spec_runner_form`，不会两处打架）。⚠ **但别这么写**：缺省兜住的是「漏写」这类事故，不是可以不声明执行身份的许可——正式验收一律显式写。⚠ 也**别再用省略表达 `cpp`**：那个语义已经没有了 |
 | 显式 `null` / `""` | ⛔ 不是「没写」，是一份写坏的 spec。读侧一律 `.get(k, DEFAULT)`（**不用 `or` 兜**），所以这些值原样送进受控词表 → fail-closed 报「不受支持的 runner_form」 |
 
@@ -475,6 +536,38 @@ Torch 签名列出必须对标的 overload，再逐个建立：
 例如参考设计只有带 attr 的 6 个组合，而任务书还点名无 attr overload，则须新增 **1 个** null profile，
 不能继续沿用原矩阵大小并宣称“完整 Torch 对标”。这条规则按签名/字段生效，不得按算子名特判。
 
+#### 轴集契约：哪些必须交叉，哪些不进笛卡尔
+
+**通用判据**：只有当两条轴**共同决定被测实现的分支或切分决策**时才必须交叉；只改变数值量级、
+不改变控制流的轴，边际覆盖就够。应用这条判据时只看 spec 已有的**接口能力 / 算子类别**字段，例如
+`params[].rank`、轴选择器 attr、`call_variants` / `active_outputs`、`operator_class`；**不得按算子身份分派**。
+
+这条判据已有一正一反两个实测见证，二者必须一起读：
+以下数字逐字来自 `dev-doc/oprunway-case-axis-design.md` §12.2 / §12.6 / §12.8：
+
+- **正例（带轴选择器、实现按归约长度切分支的接口能力）**：`dtype` 类 × 归约长度共同圈定 90 个 cell，
+  58 条 fail 全在区内、区外 0；任何一条轴单独都圈不出。更强的反事实是：可构造合法的 1-wise
+  边际覆盖集避开整个失败区，对这个真实缺陷 **100% 漏报**。所以这一对必须交叉。
+- **反例**：`keepDim` 在失败区内为 72.7% vs 81.8%，**无可测效应**；它只改变输出 shape，
+  不改变切分决策。这个结果支持边际覆盖，防止把正例误读成「所有轴都要全交叉」。
+
+当前轴集另有三条边界：
+
+1. **特殊场景不进笛卡尔；决定②已定本档当前产 0 条。** 参考仓 `design_contract.py` 明文规定
+   特殊场景若存在只能独立叠加，理由逐字是**避免组合爆炸**；这条结构约束不因数量为 0 而失效。
+   取舍按用户既定的「最遵守原计划 + 实施时间最短」执行：参考仓明确给 structural `special=0`，
+   而本仓 §12 对空 / 标量 / 上下边界没有任何实测输入；这与值域 regime 同属「收益零实测支撑」，
+   因此不把 legacy 四类 forced 项接入 `torch_parity`，也不把 structural 的明文结论外推成其它类别
+   应新增场景。三类受控 `operator_class` 均为 0；`gen_cases` 在 `special_scenario_policy` 中写
+   `reason + evidence + emitted=0`。抽 spec 时不得声明 `allow_empty_tensor / empty_axis`，它们在本档
+   没有消费方、会 fail-closed；算子事实改用 `task_pr_gaps` 或 `_` 前缀说明。
+2. **多输出不是自由轴。** 输出集是 attr 轴的确定性函数：`_select_call_variant` 据 attrs 选变体，
+   `active_outputs` 随之确定。再加一条“输出个数”轴只会重复计数，并造出 attr 与输出 arity 不可能同时成立的组合。
+3. 🔴 **值域 regime 轴暂不引入。** 现 `torch_parity` 只有 `uniform` 一档，结构上没有第二档可比，
+   因而测不了 regime 与 dtype 或其它轴的交互；「加了有没有用」至今**零实测支撑**。
+   引入前必须先有能对照至少两档 regime 的可测矩阵；否则直接增加第二档只会让相应用例数翻倍，
+   覆盖收益仍未知。这里明确留痕是为了防止后续把“有意不加”误当成遗漏。
+
 结构示例（**纯占位、非任何真实算子**）：
 
 ```jsonc
@@ -547,17 +640,23 @@ Torch 签名列出必须对标的 overload，再逐个建立：
 
 ### 1.3.6 `allow_empty_tensor`
 
-顶层可选 bool，**缺省 `true` = 现行为**（opbase §1.4 把空 Tensor 当普适特殊场景强制铺）。
+**本字段仅在 legacy 档有消费方。** 顶层可选 bool，**缺省 `true` = legacy 现行为**
+（opbase §1.4 把空 Tensor 当普适特殊场景强制铺）。
 任务书**明写**「不支持空 Tensor」（Upsample 系、im2col 的部分形态、以及很多归约类）→ 写 `false`。
 理由：强塞一条算子语义上不存在的用例，只有两个出口——要么 golden **替算子编造**它并不支持的语义，
 要么整链 fail-closed 卡死。写 `false` 是**算子的显式声明**，不是默认放松，仍要在 `task_pr_gaps` 记依据原句。
 ⚠ **只接受真布尔**：`"false"` / `0` 会被真值性判断误读成「允许」，引擎 fail-closed 拒收。
 （相关可选字段 `empty_axis`：允许空 Tensor、但 0 只能落在某一特定轴时声明轴号；两者都不写 = 老行为。）
 
+`case_profile="torch_parity"` 下决定②已定特殊场景为 0 条，`allow_empty_tensor / empty_axis`
+没有任何代码消费，声明即 fail-closed。任务书里的空 Tensor 支持事实仍须落 `task_pr_gaps` 或 `_` 前缀注释；
+这只是如实记录，不得写成“本轮已覆盖空 Tensor”。
+
 ### 1.3.7 本节自检（并入 §7）
 
-- **`runner_form` 已显式写出**，且正式验收写的是 `cpp_extension`（唯一准入形态，§1.3.1 ③）；
-  写 `aclnn_py` / `cpp` 只在「明知这轮只做开发级验证」时才允许，且必须在 `task_pr_gaps` 记明「非验收通路」。
+- **`runner_form` 已显式写成 `cpp_extension`**（当前唯一准入形态，§1.3.1 ③）；新一轮抽取不得写
+  `aclnn_py` / `cpp`。已有旧 spec 写着退役值时，先迁移到 `cpp_extension`；若接口能力不支持迁移，
+  回 `BLOCKED` 并挂明确缺口，不得以“只做开发级验证”为由继续生成一份没有下游入口的 spec。
 - `runner_form ∈ {cpp_extension, aclnn_py}` ⇒ `call_variants` 非空；每条 `when` 是三种谓词之一；`attr_matrix` 的**每一行**
   都能匹配到至少一条变体（无匹配 → 运行时 fail-closed）。
 - `call_variants[].active_attrs` / `active_outputs` 分别是 spec attr / out 顺序的**子序列**且不重名；
@@ -573,7 +672,8 @@ Torch 签名列出必须对标的 overload，再逐个建立：
   或 gap 里写清出处），**不是** 0.6 这类抄来的默认值。
 - `perf.baseline=="aclnn_builtin"` ⇒ `perf.aclnn_baseline.library=="cann_builtin_libopapi"`；
   `variants` 对每个性能 case 恰好命中一条，`symbol/slots` 完整；真机产物须带实际库 sha256 与符号定义方。
-- `allow_empty_tensor` / `scenario` 等**不属本场景就整字段省略**，别写空串或占位值。
+- `allow_empty_tensor` / `scenario` 等**不属本场景就整字段省略**，别写空串或占位值；
+  `torch_parity` 下前者必须省略（决定②为 0 条，声明会被无消费方门拒绝）。
   ⚠ **`runner_form` 不在这条里**：它是执行形态声明、不是场景标签，正式验收必须显式写 `cpp_extension`。
 
 ## 1.4 `attr_axis_lengths` —— 任务书**点名的轴长度边界**怎么定向生成（可选，顶层）
@@ -685,7 +785,7 @@ Torch 签名列出必须对标的 overload，再逐个建立：
 | | `generated`（缺省 / 省略） | `taskdoc` |
 |---|---|---|
 | 用例身份、shape、dtype、attr、值域 | 本引擎按覆盖-预算规则铺 | **全部**来自规范化后的任务书用例集 |
-| `case_target` 交互（上面那段） | 照走：dry-run 报区间 → 问用户 → 写 `case_target` | **不适用**：用例集全体即强制下限，一条都不许少 |
+| `case_target` 怎么定（上面那段） | 按覆盖轴推算（`torch_parity` 档 = 完整矩阵大小），依据写进 `case_target_source` | **两档都必填**，只是这一档的数不由你推算：须**精确等于**规范化后的用例条数，`_taskdoc_plan` 逐字核对。⚠ **不是「不适用」**——不写照样 fail-fast |
 | 规模预算（G4 降规模） | 行使 | **不行使**（降规模会把任务书点名的 shape 改掉，那就不是那条用例了） |
 | `coverage_strength` 表述 | `1-wise+whitelist：…` | `taskdoc_provided：用例集由任务书提供（N 条…），覆盖强度由任务书决定` |
 | 特殊值（inf/-inf/nan） | 按 `operator_class` 强制铺（§1.5） | 由任务书决定，本引擎这一档**不强制铺** |
@@ -783,10 +883,12 @@ N 个算子 → N 个 `<op>.spec.json`。**共享字段抽一次复用**(hardwar
 
 ## 6. task_pr_gaps 收敛
 
-**两种形态并存**：`kind` 已定义的**结构化条目**（门/validator 会读并硬校——`dtype_deferred`、
-C4 的 `dtype_unsupported_by_op_def`、`dtype_unsupported_on_target_hw`，见 §1.2/§1.2b）必须按字段写全；
-其余仍写自由文本条目（历史条目原样被忽略、不报错）。
+**两种形态并存**：`kind` 已定义的**结构化条目**（门/validator 会读并硬校——`dtype_deferred`（见 §1.2a，
+**须带 `capability_source`**）、C4 的 `dtype_unsupported_by_op_def`、`dtype_unsupported_on_target_hw`，
+见 §1.2/§1.2a/§1.2b）必须按字段写全；其余仍写自由文本条目（历史条目原样被忽略、不报错）。
 **别给自由文本条目乱安 `kind`**——安上就要过对应硬校，过不了就是 `overall=fail`。
+⚠ 结构化条目**写不全 = 不算挂账**：`dtype_deferred` 缺 `capability_source`（或自报的层其实支持该 dtype）
+会被覆盖门拒，该 dtype 随即按「静默收窄」判 BLOCKED——不是「写少一个字段但还是放行」。
 
 每条记『缺什么 / 影响字段 / 兜底』。常见类型：缺 dtype 列表、缺 threshold 数值、缺 verify_mode 明写、缺 per_dtype 声明、缺 shape 规格、缺 CANN 版本、缺性能绝对基线、**语义矛盾需澄清**(bincount 支持负数 vs 必须非负)、**模板残留**(MaxUnpool2d 仓名矛盾、Cast 合入路径矛盾、自验证报告 `xxx` 占位)。供 op-acceptance 报告步骤列『任务书↔PR 落差』，推断项标 (推断)。无缺口→`[]`。
 
@@ -805,6 +907,9 @@ C4 的 `dtype_unsupported_by_op_def`、`dtype_unsupported_on_target_hw`，见 §
   且这个数**给得出依据**（`torch_parity` 档 = 完整笛卡尔矩阵大小，精确相等；其它档把算法/沿用来源写进
   `precision.case_target_source`）。⚠ **拿不准就停下问用户，不许随手填一个数**——「缺省 50」正是因为
   没人回答过这个问题才被删掉的（见上文『`case_target` 怎么定』）。
+- **§1.3 · 轴集契约**：新增交叉只由「共同决定实现分支 / 切分」的接口能力证据触发，绝不按算子名；
+  特殊场景不进笛卡尔且决定②已定 `torch_parity` 当前为 0 条（与值域 regime 同按零实测不扩面）；
+  输出个数不作自由轴；值域 regime 暂不引入，直到先有能实测其交互收益的多档矩阵。
 - 多算子每份 spec 的 op 唯一、gaps 独立。
 - **C2 · attr 值类型**：每个 attr 的 `default`（及 `attr_matrix` 里的取值）∈ `bool/int/float/str` 标量 **或 `list[int]`**。
   ⚠ **数组只支持 `list[int]`**：嵌套数组、浮点数组、`list` 里混 `bool`（`[True]` 与 `[1]` 在 JSON 里都长成 `[true]`/`[1]`、语义会串）**引擎一律 fail-closed 拒**；空数组也拒（manifest 会错位）。真需要别的形态 → 记 gap、停下问，别硬塞。
@@ -825,7 +930,8 @@ C4 的 `dtype_unsupported_by_op_def`、`dtype_unsupported_on_target_hw`，见 §
   撞上要回去核 attr/rank，**不许删字段绕过**。任务书没点名就整字段省略。
 - **§1.6 · `precision.case_source`**：受控两值，**整字段省略 = `generated` = 现行为**。写了 `taskdoc` ⇒
   编排层**必须**把规范化 caseset 显式喂给 `gen_cases --taskdoc-caseset` / `run_workflow --taskdoc-caseset`，
-  否则 fail-closed（**不回退自生成**）；这一档不写 `case_target`（用例集全体即强制下限）。
+  否则 fail-closed（**不回退自生成**）；这一档 `case_target` **照样必填**，且须**精确等于**规范化后的
+  用例条数（对不上 `gen_cases` 当场炸——见上文『`case_target` 怎么定』与『两档的连带后果』表）。
   **拿不准就整字段省略**——判成 `generated` 等于把任务书点名的测试点整套换掉，代价特别贵。
 - **§1.6 · `aclnn_tensor_format`**：只在 `runner_form == "cpp_extension"` 下有意义；**整字段省略 = 现行为**。
   写 `nd` 前须有 ABI 事实源（header/docs/example）支持，且该算子的 stage2 形态是 `extended`——
