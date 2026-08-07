@@ -1568,3 +1568,4 @@ verify 轮（codex 复核修复本身）又逮出 5 条：digest 自洽证明不
 - 性能双边新增环境隔离：baseline 子进程精确移除本次 DUT vendor 的 OPP/动态库路径，防系统 torch_npu 基线被 custom 同名 op 覆盖。
 - Torch baseline 映射新增通用 `keyword_groups`：统一 ACLNN ABI 的可选属性占位槽可按 `case.attrs` 语义条件整组省略，避免把全局接口误测成按维接口。
 - 新增通用性能重采合并门：仅允许同口径、primary 子集、双边有效的 retry 记录补齐采集缺口，禁止覆盖既有有效数据，并记录输入哈希与替换 case。
+# 2026-08-07：完成 Roll 对当前 workflow 的只读 gap 调研，并基于合并后现状重排 Roll/Bernoulli/Remainder 统一实施计划；三算子正式用例统一改为 workflow 自生成，附带 cases 只作参考，同时纳入 output-written、空 int_array 与多卡确定性分片要求，未启动代码或真机实施。
