@@ -1,0 +1,31 @@
+{
+  "kind": "binary_probability_sampler",
+  "bindings": {
+    "probability": "probability_value",
+    "seed": "generator_seed",
+    "offset": "generator_offset"
+  },
+  "probabilities": {
+    "boundaries": [0.0, 1.0],
+    "interior": [0.5]
+  },
+  "rng": {
+    "seed": 20260807,
+    "alternate_seed": 20260808,
+    "offset": 0,
+    "alternate_offset": 4,
+    "offset_alignment": 4,
+    "repeat_count": 2
+  },
+  "oracle_precondition": {
+    "method_kind": "same_device_npu",
+    "callable": "torch.Tensor.bernoulli_",
+    "predicate": "exact"
+  },
+  "statistics": {
+    "predicate": "hoeffding_two_sided",
+    "independence_predicate": "joint_and_hamming_hoeffding",
+    "confidence": 0.999,
+    "min_samples": 4096
+  }
+}

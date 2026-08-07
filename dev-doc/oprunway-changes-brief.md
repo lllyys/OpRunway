@@ -2,6 +2,11 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-07 · 三算子统一计划 N8：随机算子统计契约独立层
+
+- 新增 capability 驱动的 binary probability sampler 契约，覆盖 p=0/1、seed/offset 重复性与独立性、Hoeffding + Bonferroni 整体置信门；reference 前提证据固定不可直接裁决。
+- A3 真实 reference self-check 通过（4096 样本，同 seed/offset mismatch=0，边界与独立性检查均绿）；产物明确为 development、`usable_for_verdict=false`，尚待接入 planner/collector/validator 后才能作为 Bernoulli 正式验收链。
+
 ## 2026-08-07 · 三算子统一计划 N6：通用多输入、广播与 dtype 关系链
 
 - 新增纯 stdlib 多输入契约，以任务书/op_def 有源的显式关系解析每个参数的 kind/binding/shape/dtype/format；合法广播、rank mismatch、rank0 tensor、host scalar 与受控 promote 进入确定性账本，缺绑定、不兼容广播和无来源 promote 均在执行前拒绝。
