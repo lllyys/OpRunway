@@ -59,7 +59,14 @@ _DRY_RUN_ENV = "OPRUNWAY_TASKDOC_VALIDATION_DRY_RUN"
 _REQUIREMENTS = frozenset({"must", "conditional", "conditional_perf", "optional"})
 _ROUTES = frozenset({"stop", "list_pending", "use_workflow_default"})
 _UNSATISFIED_KEYS = frozenset({"missing", "ambiguous"})
-_ITEM_STATUSES = frozenset({"satisfied", "ambiguous", "missing", "not_applicable"})
+_ITEM_STATUSES = frozenset({
+    "satisfied", "ambiguous", "missing", "not_applicable",
+    "not_declared_in_taskdoc",
+})
+_WORKFLOW_DEFAULTABLE = frozenset({
+    "performance_metric_scope", "acceptance_completion_criteria",
+})
+_WORKFLOW_DEFAULT_SOURCES = frozenset({"repository_policy", "unified_plan"})
 _DECISION_ACTIONS = frozenset({"supplied", "waived"})
 _DELIVERABLE_REQUIREMENTS = frozenset({"required", "optional"})
 # 交付件 id 会被下游对账工件按字符串引用，也会进报告；限成短标识，避免路径/换行混进来。
@@ -649,6 +656,30 @@ def _route_items(items, by_id, taskdoc_norm, min_quote_chars, perf_required,
         applicable = _resolve_applicability(
             item_id, spec["requirement"], item.get("applicable"), status,
             perf_required)
+        if status == "not_declared_in_taskdoc":
+            if item_id not in _WORKFLOW_DEFAULTABLE:
+                raise TaskdocValidationError(
+                    f"{item_id}: 不允许以 workflow default 替代任务书权威语义")
+            provenance = item.get("workflow_default")
+            if not isinstance(provenance, dict) or set(provenance) != {
+                    "source", "cite", "sha256", "rule"}:
+                raise TaskdocValidationError(
+                    f"{item_id}.workflow_default 须恰含 source/cite/sha256/rule")
+            if provenance.get("source") not in _WORKFLOW_DEFAULT_SOURCES \
+                    or not _nonempty_str(provenance.get("cite")) \
+                    or not _nonempty_str(provenance.get("rule")) \
+                    or not _is_sha(provenance.get("sha256")):
+                raise TaskdocValidationError(
+                    f"{item_id}.workflow_default 来源/引用/摘要非法")
+            routed[item_id] = {
+                "id": item_id, "title": spec["title"],
+                "requirement": spec["requirement"], "status": status,
+                "route": "use_workflow_default", "expects": spec.get("expects"),
+                "unsatisfied_note": spec.get("unsatisfied_note"),
+                "rationale": item.get("rationale") or "任务书未声明执行细节",
+                "workflow_default": dict(provenance),
+            }
+            continue
         if status == "satisfied":
             _check_quotes(item_id, item.get("quotes"), taskdoc_norm,
                           min_quote_chars, owner=quote_owner)

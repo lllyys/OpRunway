@@ -95,6 +95,12 @@ _SOURCE_BINDING_KEYS = frozenset({
 })
 _COMPOSE_KINDS = frozenset({"spec_taskdoc_compose"})
 _ATOMIC_ROW_KEYS = frozenset({"id", "attrs", "source_parse"})
+_ATOMIC_ROW_APPLICABILITY_KEY = "applicability"
+_ATOMIC_APPLICABILITY_KEYS = frozenset({
+    "rank_domain", "required_nonempty_attrs", "source_parse",
+})
+_ATOMIC_RANK_DOMAIN_KEYS = frozenset({"input", "allowed_ranks"})
+_MAX_PROFILE_RANK = 8
 _SHA256_HEX = frozenset("0123456789abcdef")
 
 
@@ -299,6 +305,65 @@ def _normalize_source_binding(value, where):
     }
 
 
+def _normalize_atomic_applicability(value, attr_types, where):
+    """规范化一条 atomic row 的 profile 适用谓词。
+
+    谓词必须把 rank 绑定到**具名 tensor input**，把“非空”绑定到已声明的
+    ``int_array`` attr，并自带来源解析锚。这里只校声明；具名 input 是否在某个
+    profile 中唯一存在，由 :func:`evaluate_atomic_attr_applicability` 对每个 cell 实测。
+    """
+    record = _object(value, where)
+    _exact_keys(record, _ATOMIC_APPLICABILITY_KEYS, where)
+    rank_domain = _object(record["rank_domain"], f"{where}.rank_domain")
+    _exact_keys(rank_domain, _ATOMIC_RANK_DOMAIN_KEYS, f"{where}.rank_domain")
+    input_name = _nonempty_string(
+        rank_domain["input"], f"{where}.rank_domain.input")
+    ranks = rank_domain["allowed_ranks"]
+    if not isinstance(ranks, list) or not ranks:
+        raise TensorShapeAttrError(
+            f"{where}.rank_domain.allowed_ranks 须为非空 rank 列表")
+    normalized_ranks = []
+    for idx, rank in enumerate(ranks):
+        normalized = _plain_int(
+            rank, f"{where}.rank_domain.allowed_ranks[{idx}]", minimum=0)
+        if normalized > _MAX_PROFILE_RANK:
+            raise TensorShapeAttrError(
+                f"{where}.rank_domain.allowed_ranks[{idx}]={normalized} 超出"
+                f"受控上限 {_MAX_PROFILE_RANK}")
+        normalized_ranks.append(normalized)
+    if len(normalized_ranks) != len(set(normalized_ranks)):
+        raise TensorShapeAttrError(
+            f"{where}.rank_domain.allowed_ranks 含重复 rank {normalized_ranks}")
+
+    nonempty = record["required_nonempty_attrs"]
+    if (not isinstance(nonempty, list)
+            or any(not isinstance(name, str) or not name.strip() for name in nonempty)):
+        raise TensorShapeAttrError(
+            f"{where}.required_nonempty_attrs 须为属性名列表（可为空）")
+    if len(nonempty) != len(set(nonempty)):
+        raise TensorShapeAttrError(
+            f"{where}.required_nonempty_attrs 含重复属性 {nonempty}")
+    unknown = set(nonempty) - set(attr_types)
+    if unknown:
+        raise TensorShapeAttrError(
+            f"{where}.required_nonempty_attrs 引用了未声明属性 {sorted(unknown)}")
+    non_arrays = [name for name in nonempty
+                  if attr_types[name] != ATTR_INT_ARRAY]
+    if non_arrays:
+        raise TensorShapeAttrError(
+            f"{where}.required_nonempty_attrs={non_arrays} 不是显式 "
+            f"{ATTR_INT_ARRAY}；不得从标量值猜非空数组语义")
+    return {
+        "rank_domain": {
+            "input": input_name,
+            "allowed_ranks": normalized_ranks,
+        },
+        "required_nonempty_attrs": list(nonempty),
+        "source_parse": _normalize_source_parse(
+            record["source_parse"], f"{where}.source_parse"),
+    }
+
+
 def _normalize_constraint_groups(attr_types, groups, where):
     if not isinstance(groups, list) or not groups:
         raise TensorShapeAttrError(f"{where} 须为非空 constraint group 列表")
@@ -393,7 +458,10 @@ def normalize_atomic_attr_rows(rows, *, attr_types, constraint_groups, source_bi
     for row_idx, raw in enumerate(rows):
         row_where = f"{where}[{row_idx}]"
         row = _object(raw, row_where)
-        _exact_keys(row, _ATOMIC_ROW_KEYS, row_where)
+        row_keys = set(_ATOMIC_ROW_KEYS)
+        if _ATOMIC_ROW_APPLICABILITY_KEY in row:
+            row_keys.add(_ATOMIC_ROW_APPLICABILITY_KEY)
+        _exact_keys(row, row_keys, row_where)
         row_id = _nonempty_string(row["id"], f"{row_where}.id")
         if row_id in seen_row_ids:
             raise TensorShapeAttrError(f"{row_where}.id={row_id!r} 重复")
@@ -412,6 +480,13 @@ def normalize_atomic_attr_rows(rows, *, attr_types, constraint_groups, source_bi
             "source_parse": _normalize_source_parse(
                 row["source_parse"], f"{row_where}.source_parse"),
         }
+        if _ATOMIC_ROW_APPLICABILITY_KEY in row:
+            applicability = _normalize_atomic_applicability(
+                row[_ATOMIC_ROW_APPLICABILITY_KEY], declarations,
+                f"{row_where}.applicability")
+            normalized_row["applicability"] = applicability
+            normalized_row["applicability_sha256"] = _canonical_sha256(
+                applicability, f"{row_where}.applicability")
         normalized_row["row_sha256"] = _canonical_sha256(
             normalized_row, f"{row_where}.row")
         normalized_rows.append(normalized_row)
@@ -479,9 +554,16 @@ def validate_atomic_attr_contract(contract, *, expected_sha256,
     raw_rows = []
     for idx, row in enumerate(rows):
         item = _object(row, f"{where}.rows[{idx}]")
-        _exact_keys(item, {"id", "attrs", "source_parse", "row_sha256"},
-                    f"{where}.rows[{idx}]")
-        raw_rows.append({key: item[key] for key in _ATOMIC_ROW_KEYS})
+        has_applicability = ("applicability" in item
+                             or "applicability_sha256" in item)
+        expected_row_keys = set(_ATOMIC_ROW_KEYS) | {"row_sha256"}
+        if has_applicability:
+            expected_row_keys |= {"applicability", "applicability_sha256"}
+        _exact_keys(item, expected_row_keys, f"{where}.rows[{idx}]")
+        raw_row = {key: item[key] for key in _ATOMIC_ROW_KEYS}
+        if has_applicability:
+            raw_row["applicability"] = item["applicability"]
+        raw_rows.append(raw_row)
     rebuilt = normalize_atomic_attr_rows(
         raw_rows,
         attr_types=value["attr_types"],
@@ -521,6 +603,87 @@ def bind_atomic_attr_row(contract, row_id, attrs, *, expected_contract_sha256,
         "row_sha256": row["row_sha256"],
         "atomic_rows_sha256": value["sha256"],
         "attrs": normalized,
+    }
+
+
+def evaluate_atomic_attr_applicability(
+        contract, row_id, profile_inputs, *, expected_contract_sha256,
+        where="atomic_attr_applicability"):
+    """对一条 ``profile × atomic-row`` cell 机校可执行性。
+
+    返回值只会是 ``executable`` 或 ``excluded``；excluded 带受控原因，供生成器
+    把 cell 原样写进 full-denominator ledger。没有 ``applicability`` 的旧 row
+    维持旧行为并返回固定的 executable receipt，且不会凭 profile 内容新增字段/摘要。
+    """
+    value = validate_atomic_attr_contract(
+        contract, expected_sha256=expected_contract_sha256,
+        where=f"{where}.contract")
+    wanted_id = _nonempty_string(row_id, f"{where}.row_id")
+    matches = [row for row in value["rows"] if row["id"] == wanted_id]
+    if len(matches) != 1:
+        raise TensorShapeAttrError(
+            f"{where}.row_id={wanted_id!r} 未唯一绑定权威 atomic row")
+    row = matches[0]
+    applicability = row.get("applicability")
+    if applicability is None:
+        return {
+            "status": "executable",
+            "applicability_sha256": None,
+            "rank_domain": None,
+            "required_nonempty_attrs": [],
+            "reasons": [],
+        }
+
+    if not isinstance(profile_inputs, list):
+        raise TensorShapeAttrError(
+            f"{where}.profile_inputs 须为 profile input 列表")
+    input_name = applicability["rank_domain"]["input"]
+    named = []
+    for idx, raw_input in enumerate(profile_inputs):
+        item = _object(raw_input, f"{where}.profile_inputs[{idx}]")
+        if item.get("name") == input_name:
+            named.append(item)
+    if len(named) != 1 or named[0].get("kind") != "tensor":
+        raise TensorShapeAttrError(
+            f"{where}.rank_domain.input={input_name!r} 未在 profile_inputs 中"
+            "唯一绑定 kind='tensor' 的具名输入")
+    shape = normalize_shape(
+        named[0].get("shape"), where=f"{where}.profile_inputs[{input_name}].shape",
+        max_rank=_MAX_PROFILE_RANK)
+    allowed = applicability["rank_domain"]["allowed_ranks"]
+    actual_rank = len(shape)
+    rank_matched = actual_rank in allowed
+    rank_receipt = {
+        "input": input_name,
+        "allowed_ranks": list(allowed),
+        "actual_rank": actual_rank,
+        "matched": rank_matched,
+    }
+    reasons = []
+    if not rank_matched:
+        reasons.append({
+            "kind": "rank_outside_domain",
+            "input": input_name,
+            "actual_rank": actual_rank,
+            "allowed_ranks": list(allowed),
+        })
+    attr_receipts = []
+    for name in applicability["required_nonempty_attrs"]:
+        actual_length = len(row["attrs"][name])
+        matched = actual_length > 0
+        attr_receipts.append({
+            "attr": name,
+            "actual_length": actual_length,
+            "matched": matched,
+        })
+        if not matched:
+            reasons.append({"kind": "required_attr_empty", "attr": name})
+    return {
+        "status": "excluded" if reasons else "executable",
+        "applicability_sha256": row["applicability_sha256"],
+        "rank_domain": rank_receipt,
+        "required_nonempty_attrs": attr_receipts,
+        "reasons": reasons,
     }
 
 

@@ -59,6 +59,7 @@ PROMOTION_RULES = (PROMOTE_TORCH_TENSOR_TENSOR_V1,)
 _DTYPES = (
     "bool",
     "uint8",
+    "uint32",
     "int8",
     "int16",
     "int32",
@@ -274,7 +275,8 @@ def _scalar_value(value, dtype, where):
 def _normalize_input(raw, index):
     where = f"profile.inputs[{index}]"
     item = _object(raw, where)
-    _unknown_keys(item, {"name", "kind", "binding", "shape", "dtype", "format", "value"}, where)
+    _unknown_keys(item, {"name", "kind", "binding", "shape", "dtype", "format", "value",
+                         "value_constraints"}, where)
     for key in ("name", "kind", "binding", "dtype"):
         if key not in item:
             raise MultiInputContractError(f"{where} 缺必填字段 {key!r}")
@@ -290,7 +292,13 @@ def _normalize_input(raw, index):
                 raise MultiInputContractError(f"{where} tensor 缺必填字段 {key!r}")
         if "value" in item:
             raise MultiInputContractError(f"{where} tensor 不得带 host scalar value")
-        return {
+        constraints = item.get("value_constraints", {})
+        if not isinstance(constraints, dict) or set(constraints) - {"nonzero"}:
+            raise MultiInputContractError(
+                f"{where}.value_constraints 仅支持 object {{'nonzero': true}}")
+        if "nonzero" in constraints and constraints["nonzero"] is not True:
+            raise MultiInputContractError(f"{where}.value_constraints.nonzero 只能为 true")
+        result = {
             "name": name,
             "kind": KIND_TENSOR,
             "binding": BINDING_DEVICE_TENSOR,
@@ -298,6 +306,9 @@ def _normalize_input(raw, index):
             "dtype": dtype,
             "format": _format(item["format"], f"{where}.format"),
         }
+        if constraints:
+            result["value_constraints"] = {"nonzero": True}
+        return result
     if kind == KIND_SCALAR:
         if binding != BINDING_HOST_SCALAR:
             raise MultiInputContractError(

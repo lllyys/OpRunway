@@ -30,7 +30,7 @@
   // §1.4 可选：任务书点名「某 attr 所指的轴长度 = L」这类边界 → **定向生成**，别指望正交网格撞上
   "attr_axis_lengths": [{"attr":"<已声明的 attr 名>","lengths":[1]}],   // 不需要就整字段省略
   "reference": {"type":"<tbe|torch|numpy|gpu|cpu|builtin>","ref":"...","path":"opp/built-in/..."},
-  "change": {"kind":"<rewrite_tbe|add_dtype|align_dtype|semantic|new_op|gpu_port|bugfix>","note":"...","dtypes_added":["<add_dtype 才有>"]},
+  "change": {"kind":"<rewrite_tbe|add_dtype|extend_shape|align_dtype|semantic|new_op|gpu_port|bugfix|memory_optimization>","note":"...","dtypes_added":["<add_dtype 才有>"]},
   "params_source": "<task_doc_table | derived_from_reference>",
   // §1.5：算子类别（受控词表，决定「该不该给它喂 NaN·Inf」）。**每份新 spec 都要判**——
   //   判错会「该测的没测」或「不该判挂的判挂」（median PR6429 血教训）。省略 = legacy 兼容出口。
@@ -147,7 +147,7 @@ attr 笛卡尔、§1.4 特殊场景、白名单必覆盖 + 1-wise 采样）铺�
 | `reference.type` | 『参考实现/功能对标』段动词 | tbe / torch / numpy / gpu / cpu / builtin（现有 aclnn 再开发）|
 | `reference.ref` | 参考的具体定位 **+ 语义改造点** | 自由文本：TBE 文件路径 / gitcode URL / torch API / CUTLASS example 号。语义改造(如『二进制比较→逻辑值比较』)必记，供 casegen/golden |
 | `reference.path` | TBE 内置三件套路径 | kernel=`opp/built-in/op_impl/ai_core/tbe/impl/dynamic/`、proto=`op_proto/inc/`、信息库=`config/ascend910b`（legacy 走 `ops_legacy/` + `*-legacy.json`）。**信息库 config（`config/<soc>` 下 ops-info）= dtype 全集的独立对照/兜底源（独立于被测 PR）**，任务书对 dtype 模糊时作全集来源；⚠ **当前 `fetch_source.py` 未抓此文件、读法随运行环境变（本机直读/ssh/ssh+docker）→ 该独立源尚未接通（TODO），模糊时回退问用户** |
-| `change.kind` | 『任务概述』定性词 | 受控**八值**：rewrite_tbe / add_dtype / **extend_shape** / align_dtype / semantic / new_op / gpu_port / bugfix（复合取主 kind，余入 note；唯一真源 `perf_mode.CHANGE_KINDS`，词表外 fail-closed）。⚠ `extend_shape`（扩展 shape·rank）**别再硬塞进 `semantic`**——`add_dtype` / `extend_shape` / `new_op` 三类是 §4.1 `change_class_no_perf_comparison` 授权的机器判据，塞错就派生不出来。⚠ 整字段省略 = **未声明**，不兜任何默认 |
+| `change.kind` | 『任务概述』定性词 | 受控**九值**：rewrite_tbe / add_dtype / **extend_shape** / align_dtype / semantic / new_op / gpu_port / bugfix / **memory_optimization**（复合取主 kind，余入 note；唯一真源 `perf_mode.CHANGE_KINDS`，词表外 fail-closed）。`memory_optimization` 仅在任务书明确声明并以 cite/quote/快照摘要绑定时成立。⚠ 整字段省略 = **未声明**，不兜任何默认 |
 | `change.dtypes_added` | add_dtype 新增类型 | 如 `["int16"]`、`["bf16"]` |
 | `params_source` | 有无完整参数表 | 有表→`task_doc_table`；只写『原算子所有类型』→`derived_from_reference` |
 | `operator_class`（§1.5）| 任务书的**算子功能/公式**段 + 参考 API 语义（这算子到底在算什么） | 受控词表 `floating_compute / structural / integer_compute`，**三选一、无第四种**。legacy 档据它决定产不产 `inf/-inf/nan` 特殊场景、`value_profiles` 能不能含 `"nan"`；`torch_parity` 决定②则对三类统一保持特殊场景 0 条，字段仍须照实填写并落账，**不得**据类别自行加例。**每份新 spec 都判**；整字段省略 = legacy 向后兼容出口（照产 NaN·Inf），别当缺省答案用。词表外取值 → fail-closed |
@@ -175,7 +175,7 @@ attr 笛卡尔、§1.4 特殊场景、白名单必覆盖 + 1-wise 采样）铺�
 | `precision.threshold` | 见 §3 | 数字：exact→0；behavioral→省略；numerical→AscendOpTest 主 dtype 默认值 |
 | `precision.threshold_source` | 必填，记数字依据+推断链 | 自由文本 |
 | `perf.mode`（§4.1，可选）| 本轮性能维**要不要做比值裁决**（AGENTS.md §5.10 三种情形）| 受控两值。整字段省略 = `ratio_gated` = 现行为（要 baseline + target_ratio）。属 §5.10 三种情形之一 → 写 `measure_only`，并**同时**给 `measure_only_authorization`；此时 `baseline` / `target_ratio` / `small_shape_exception` / `torch_baseline` / `aclnn_baseline` **五项必须缺席**，`perf` 块字段走白名单（`mode` / `measure_only_authorization` / `case_source` / `case_selection` / `shape_classification` / `warmup` / `repeat` / `side_timeout_s`），词表外一律 fail-closed |
-| `perf.measure_only_authorization`（§4.1，`mode=measure_only` 时**必填**）| 任务书原文（或本轮改动类别）+ CP-A 任务书快照 | `{taskdoc_requirement ∈ {no_perf_requirement, gpu_comparison, change_class_no_perf_comparison}, cite, quote, taskdoc_snapshot_sha256}` **四项缺一即 fail-closed**（与 `golden.authorization` 同一套锚）。⚠ **宽档必须由可核事实授权，不由 spec 自报或省略取得**；走 `change_class_no_perf_comparison` 还要与 `spec.change.kind ∈ {add_dtype, extend_shape, new_op}` 机器对账 |
+| `perf.measure_only_authorization`（§4.1，`mode=measure_only` 时**必填**）| 任务书原文（或本轮改动类别）+ CP-A 任务书快照 | `{taskdoc_requirement ∈ {no_perf_requirement, gpu_comparison, change_class_no_perf_comparison}, cite, quote, taskdoc_snapshot_sha256}` **四项缺一即 fail-closed**；走 `change_class_no_perf_comparison` 还要与 `spec.change.kind ∈ {add_dtype, extend_shape, new_op, memory_optimization}` 机器对账，且内存优化必须由任务书原文明确授权 |
 | `perf.baseline` | 『性能要求-基线』（**仅 `ratio_gated` 档**）| tbe / self_fp16 / small_op_concat / gpu / theoretical / none / **torch_npu** / **aclnn_builtin**。框架级 Torch 或已确认“小算子拼接等价于 Torch 接口”用 `torch_npu`；实际要求直接 ACLNN 才用 `aclnn_builtin` |
 | `perf.torch_baseline`（§1.3.5）| aclnn 签名的形参名（= slot name）↔ torch API 形参名 | `{api: "torch.*", positional: [slot…], keyword: {slot: torch形参}}`。`positional` 缺任一 slot → fail-closed；`keyword` 里某 slot 在该 case 不存在 → 该 kwarg 自然缺席（变体自动跟随）|
 | `perf.aclnn_baseline`（§1.3.5）| 任务书点名的 ACLNN API + case 调用形态 | `{library:"cann_builtin_libopapi", variants:[{when,symbol,slots}]}`；`symbol` 不带 `aclnn` 前缀，`slots` 从逐 case `aclnn_call.slots` 选择/重排；每个 case 须恰好匹配一条 |
@@ -873,7 +873,7 @@ AGENTS.md §5.10 列了三种情形，**授权强度完全相同**（都要 grou
 |---|---|---|
 | `no_perf_requirement` | 任务书对性能**没有要求** | 任务书原文（引「性能要求：无」那一段） |
 | `gpu_comparison` | 任务书要求的是**与 GPU 比对**（如「以 OpenCV CUDA A100 为参考，ratio ≥ 0.45×」）| 任务书原文那条 GPU 条款 |
-| `change_class_no_perf_comparison` | 本轮改动属**新增 dtype / 扩展 shape·rank / 开发新算子**三类之一 | `spec.change.kind ∈ {add_dtype, extend_shape, new_op}`，机器对账 |
+| `change_class_no_perf_comparison` | 本轮改动属**新增 dtype / 扩展 shape·rank / 开发新算子 / 任务书明确的内存优化**四类之一 | `spec.change.kind ∈ {add_dtype, extend_shape, new_op, memory_optimization}`，机器对账 |
 
 ⚠ **别再用「整块省略 `perf`」表达「任务书没有性能要求」。** 省略不是声明，它表达不了「谁授权的、依据是哪句话」，
 且下游拿不到目标比值时会落 `invalid_config`（BLOCKED）。**方向是 fail-closed**：误判成 `invalid_config` 只多报一次错，
@@ -914,7 +914,7 @@ N 个算子 → N 个 `<op>.spec.json`。**共享字段抽一次复用**(hardwar
   `perf.mode="measure_only"` + 授权四件套（**不再整字段省略**），且不写 `{baseline:"none"}`。
 - **§4.1 · `perf.mode`**：写了 `measure_only` ⇒ 授权四件套齐全、`baseline`/`target_ratio`/`small_shape_exception`/
   `torch_baseline`/`aclnn_baseline` **五项一个都不出现**、`perf` 块其余字段在白名单内；
-  走 `change_class_no_perf_comparison` ⇒ `change.kind ∈ {add_dtype, extend_shape, new_op}`。任一条不满足即 fail-closed。
+  走 `change_class_no_perf_comparison` ⇒ `change.kind ∈ {add_dtype, extend_shape, new_op, memory_optimization}`。任一条不满足即 fail-closed。
 - **`precision.case_target` 存在且是 ≥1 的整数**（**无缺省**，省略 → `gen_cases` 真跑与 `--dry-run` 都 fail-fast），
   且这个数**给得出依据**（`torch_parity` 档 = 完整笛卡尔矩阵大小，精确相等；其它档把算法/沿用来源写进
   `precision.case_target_source`）。⚠ **拿不准就停下问用户，不许随手填一个数**——「缺省 50」正是因为

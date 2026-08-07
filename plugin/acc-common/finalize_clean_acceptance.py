@@ -41,6 +41,8 @@ import tempfile
 
 import repo_adapter
 import run_workflow
+import perf_evidence_contract
+import perf_mode
 import source_facts_lookup
 import spec_change_gate
 import validate_acceptance_state as gate
@@ -177,6 +179,34 @@ def build_clean_acceptance(spec, evidence, verdict, perf_report, gate_errors):
     if not isinstance(summary, dict):
         raise FinalizeError("perf_report 缺 summary")
     perf_cases = summary.get("perf_cases")
+    mode = perf_mode.resolve_spec_mode(spec)
+    if perf_mode.is_measure_only(mode):
+        if (summary.get("status") != "measured" or summary.get("blocked") != 0
+                or not isinstance(perf_cases, int) or isinstance(perf_cases, bool)
+                or perf_cases <= 0 or summary.get("measured") != perf_cases):
+            raise FinalizeError(f"measure_only 性能实测未完整：{summary!r}")
+        authorization = perf_mode.measure_only_authorization(spec.get("perf") or {})
+        requirement_gaps = perf_evidence_contract.validate_measure_only_requirement_gaps(
+            spec, authorization)
+        clean = "PASSED_WITH_GAPS" if requirement_gaps else run_workflow._MEASURED_ONLY_OVERALL
+        state = run_workflow._canonical_state(clean, summary)
+        exit_code = run_workflow._exit_code(clean)
+        return {
+            "op": spec.get("op"), "overall": clean, "state": state,
+            "exit_code": exit_code,
+            "requires_human_cp": bool(requirement_gaps),
+            "repo_mode": evidence.get("repo_mode"),
+            "gate": {"passed": True, "errors": {}},
+            "precision_verdict": "pass", "perf_status": "measured",
+            "measure_only_requirement_gaps": requirement_gaps,
+            "perf_note": perf_mode.MEASURE_ONLY_NOTE,
+            "three_layer": {
+                "catlass_compare_na": verdict.get("catlass_compare_na", []),
+                "risk_cases": overall.get("risk", []),
+                "uncertain_cases": overall.get("uncertain", []),
+                "note": "性能维只实测未裁决；任务书未验收性能条款保留为 gap。",
+            },
+        }
     if (summary.get("status") != "ok" or summary.get("blocked") != 0
             or not isinstance(perf_cases, int) or isinstance(perf_cases, bool) or perf_cases <= 0
             or summary.get("达标") != perf_cases

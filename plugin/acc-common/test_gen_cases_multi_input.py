@@ -257,6 +257,7 @@ class MultiInputCasesetTest(unittest.TestCase):
                 dry["coverage"]["multi_input_ledger"],
                 caseset["multi_input_ledger"],
             )
+            GC._render_dry_run_ledger(dry)
 
     def test_host_scalar_is_not_materialized_as_a_device_tensor(self):
         spec = _host_scalar_spec()
@@ -277,6 +278,10 @@ class MultiInputCasesetTest(unittest.TestCase):
 
     def test_mutations_fail_closed(self):
         mutations = {}
+        bad_constraint = _binary_spec()
+        bad_constraint["multi_input_contract"]["profiles"][0]["inputs"][1][
+            "value_constraints"] = {"nonzero": False}
+        mutations["nonzero 只能为 true"] = bad_constraint
         bad_target = _binary_spec()
         bad_target["precision"]["case_target"] += 1
         mutations["完整矩阵"] = bad_target

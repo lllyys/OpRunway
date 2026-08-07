@@ -182,6 +182,7 @@ G4 · 归约/成对类算子的**生成期规模预算**（2026-07-22，落地�
 import collections, hashlib, importlib.util, itertools, json, math, os, re, sys
 import numpy as np
 import content_address
+import dtype_requirement_sets as DRS
 import perf_mode
 import precision_policy
 import tensor_shape_attrs as TSA
@@ -253,10 +254,10 @@ _BF16 = "bfloat16"
 #     · `value_profile`（nan/tie）、`pairfar`（rtol 跨界）、`nanpair` 对复数一律 fail-closed
 #       （见各自函数）——它们的语义都建立在实数序/实数容差上，复数没有天然的序。
 #   要放开其中任何一条，先给出口径出处，别为了「矩阵好看」补一个猜出来的实现。
-_NATIVE = {"float32": np.float32, "float16": np.float16,
+_NATIVE = {"float64": np.float64, "float32": np.float32, "float16": np.float16,
            "int64": np.int64, "int32": np.int32, "int16": np.int16,
            "int8": np.int8, "uint8": np.uint8, "uint32": np.uint32,
-           "complex64": np.complex64}
+           "bool": np.bool_, "complex64": np.complex64}
 # Sign/Neg：输出在 bf16 网格上**精确可表示**（sign∈{-1,0,1}、neg 精确取负）→ bf16/fp16 走 exact_equal。
 # genuinely-lossy 数值算子（bf16 阈值须来自 policy/ascendoptest）本轮无、留 gap。
 # bf16 数值输出**逐位可达**的算子（纯搬运/纯符号类：输出恒等于某个输入元素、不做算术）。
@@ -273,6 +274,7 @@ def _f32_to_bf16_uint16(v):
     """fp32 -> bf16 的 uint16 位模式（round-half-to-even）。
     ±0 保符号；inf 保 inf；进位可正确溢为 inf；NaN 保 quiet（尾数高位置 1）+ 保符号（low#17）。"""
     x = np.asarray(v, dtype=np.float32)
+    logical_shape = x.shape
     u32 = x.view(np.uint32)
     is_nan = np.isnan(x)
     lsb = (u32 >> np.uint32(16)) & np.uint32(1)          # 目标 LSB，用于 round-half-to-even
@@ -281,13 +283,15 @@ def _f32_to_bf16_uint16(v):
     bf = rounded.astype(np.uint16)
     sign16 = ((u32 >> np.uint32(16)) & np.uint32(0x8000)).astype(np.uint16)
     bf = np.where(is_nan, np.uint16(0x7FC0) | sign16, bf)  # NaN → quiet NaN（防截断后误成 inf）
-    return np.ascontiguousarray(bf, dtype=np.uint16)
+    return np.ascontiguousarray(bf, dtype=np.uint16).reshape(logical_shape)
 
 
 def _bf16_uint16_to_f32(u):
     """bf16 的 uint16 位模式 -> fp32（低 16 位零扩展；对网格上的值无损）。"""
-    uu = (np.asarray(u, dtype=np.uint16).astype(np.uint32) << np.uint32(16))
-    return np.ascontiguousarray(uu.view(np.float32), dtype=np.float32)
+    encoded = np.asarray(u, dtype=np.uint16)
+    logical_shape = encoded.shape
+    uu = (encoded.astype(np.uint32) << np.uint32(16))
+    return np.ascontiguousarray(uu.view(np.float32), dtype=np.float32).reshape(logical_shape)
 
 
 def _bf16_round(v):
@@ -749,6 +753,12 @@ def _make_varied(rng, shape, dtn, regime="uniform"):
     codex#14）；bf16：fp32 造后 round 到 bf16 网格（返回 fp32-on-grid 逻辑值）。
     regime（§1.2 值域）：uniform=均匀[-5,5]；normal=正态(μ,σ) 后 clip 到 [-5,5]。int dtype 忽略 regime。"""
     cdt = _compute_np(dtn)
+    if dtn == "bool":
+        x = rng.integers(0, 2, size=shape, dtype=np.uint8).astype(np.bool_)
+        f = x.reshape(-1)
+        if f.size >= 2:
+            f[0], f[1] = False, True
+        return x
     if precision_policy.is_complex_dtype(dtn):
         # 复数：实部、虚部**各自**按同一 regime 独立造，绝不用「实部造完 astype(complex)」——
         # 那样虚部恒 0，一条复数用例连虚部通路都没碰过，账面上却是「complex64 已覆盖」。
@@ -2410,31 +2420,34 @@ def _resolve_stochastic_contract(spec):
 
 
 def _stochastic_profile_plan(spec, bundle, stochastic, attrs_default, case_target):
-    """把一个外部冻结的统计 witness profile 展开为稳定 RNG 角色计划。
+    """统计 witness 与结构覆盖 profile 分账展开。
 
-    v1 有意只准一个 witness profile / 一个 primitive attr cell：统计样本不能把不同
-    shape/dtype 或重复的 RNG 子序列拼成一个 Hoeffding 样本冒充 iid。其它结构覆盖应由
-    独立 caseset 承担；将来若要多 profile，须先定义逐 profile 的独立 seed/offset 分配。
+    只有 ``witness_profile_id`` 展开完整 RNG/统计角色；其余 profile 各生成一条 p=0
+    boundary-exact case，用来覆盖 dtype/rank/layout，绝不拼进 Hoeffding 样本。
     """
     import stochastic_contract as SC
     if bundle is None:
         raise ValueError("spec.stochastic 必须与 multi_input_contract 同时声明，绑定真实 host scalar/输出")
     witness = stochastic["statistics"]["witness_profile_id"]
     profiles = [p for p in bundle["profiles"] if p.get("profile_id") == witness]
-    if len(profiles) != 1 or len(bundle["profiles"]) != 1:
+    if len(profiles) != 1:
         raise ValueError(
-            "stochastic v1 要求 multi_input_contract 恰含一个、且 id 等于 "
+            "stochastic 要求 multi_input_contract 恰有一个 id 等于 "
             f"statistics.witness_profile_id={witness!r} 的统计 witness profile")
     plan = SC.build_case_plan(stochastic)
     base_entries, meta = _multi_input_profile_plan(
         spec, bundle, attrs_default, len(bundle["profiles"]))
-    if len(base_entries) != 1:
-        raise ValueError(
-            "stochastic v1 要求 witness profile 只有一个 primitive attr cell；"
-            "不得把不同 attr/RNG 子序列拼成一个统计样本")
-    base = base_entries[0]
-    if base.get("contract_bindings", {}).get("atomic_attr_row") is not None:
-        raise ValueError("stochastic v1 尚未定义 atomic attr rows × RNG roles 的统计独立性，拒绝混用")
+    by_profile = {}
+    for entry in base_entries:
+        pid = (entry.get("input_profile") or {}).get("profile_id")
+        if not isinstance(pid, str) or pid in by_profile:
+            raise ValueError(f"stochastic profile id 缺失/重复：{pid!r}")
+        if entry.get("contract_bindings", {}).get("atomic_attr_row") is not None:
+            raise ValueError("stochastic 尚未定义 atomic attr rows × RNG roles，拒绝混用")
+        by_profile[pid] = entry
+    if set(by_profile) != {p["profile_id"] for p in bundle["profiles"]}:
+        raise ValueError("stochastic multi_input profiles 未一一物化")
+    base = by_profile[witness]
     output_numel = _numel(base["input_profile"]["output"]["shape"])
     minimum = stochastic["statistics"]["min_samples"]
     if output_numel < minimum:
@@ -2465,12 +2478,16 @@ def _stochastic_profile_plan(spec, bundle, stochastic, attrs_default, case_targe
             scalar = next((item for item in profile["inputs"] if item.get("name") == name), None)
             if scalar is not None:
                 scalar["value"] = value
+                # ``_multi_input_profile_plan`` mirrors host scalars into attrs for the
+                # invocation layer.  A stochastic role changes the scalar value, so the
+                # mirror must move atomically or adapter sees two competing truths.
+                attrs[name] = value
             elif name in attr_names:
                 attrs[name] = value
             else:  # 上方绑定门理论上已挡；保留防未来结构变更。
                 raise ValueError(f"stochastic role {row['role']} 无法物化参数 {name!r}")
         entry.update({
-            "dims": ["功能", "精度"],
+            "dims": ["功能", "精度", "性能"],
             "tags": ["随机统计契约", row["purpose"]],
             "id_kind": "stochastic",
             "case_origin": f"stochastic_contract:{row['role']}",
@@ -2478,6 +2495,40 @@ def _stochastic_profile_plan(spec, bundle, stochastic, attrs_default, case_targe
             "stochastic_case": json.loads(json.dumps(row, ensure_ascii=False, allow_nan=False)),
         })
         entries.append(entry)
+    coverage_rows = []
+    for index, profile in enumerate(bundle["profiles"]):
+        pid = profile["profile_id"]
+        if pid == witness:
+            continue
+        entry = json.loads(json.dumps(by_profile[pid], ensure_ascii=False, allow_nan=False))
+        entry["shape"] = tuple(entry["shape"])
+        role = f"coverage_{index}_boundary_0"
+        values = {
+            bindings["probability"]: 0.0,
+            bindings["seed"]: stochastic["rng"]["seed"],
+            bindings["offset"]: stochastic["rng"]["offset"],
+        }
+        for name, value in values.items():
+            scalar = next((item for item in entry["input_profile"]["inputs"]
+                           if item.get("name") == name), None)
+            if scalar is not None:
+                scalar["value"] = value
+                entry["attrs"][name] = value
+            elif name in attr_names:
+                entry["attrs"][name] = value
+            else:
+                raise ValueError(f"stochastic coverage role {role} 无法物化参数 {name!r}")
+        row = {"role": role, "purpose": "structural_boundary_exact",
+               "probability": 0.0, "values": values, "profile_id": pid}
+        entry.update({
+            "dims": ["功能", "精度", "性能"],
+            "tags": ["随机统计契约", "结构覆盖", "boundary_exact"],
+            "id_kind": "stochastic", "case_origin": f"stochastic_contract:{role}",
+            "rule_ref": "stochastic_contract.v2 structural profile boundary plan",
+            "stochastic_case": row,
+        })
+        entries.append(entry)
+        coverage_rows.append(row)
     if int(case_target) != len(entries):
         raise ValueError(
             f"stochastic 完整角色矩阵={len(entries)}，precision.case_target={case_target}；"
@@ -2485,7 +2536,7 @@ def _stochastic_profile_plan(spec, bundle, stochastic, attrs_default, case_targe
     meta.update({
         "pool_max": len(entries), "requested_target": len(entries),
         "emitted": len(entries), "forced_total": len(entries),
-        "coverage_strength": "stochastic_contract.v1 完整 RNG role 计划；不抽样、不拼接 profile",
+        "coverage_strength": "stochastic_contract.v2：单一统计 witness + 逐 profile boundary exact；不拼统计样本",
         "stochastic_ledger": {
             "schema": SC.PLAN_SCHEMA,
             "schema_version": SC.SCHEMA_VERSION,
@@ -2493,7 +2544,9 @@ def _stochastic_profile_plan(spec, bundle, stochastic, attrs_default, case_targe
             "plan_sha256": SC.canonical_sha256(plan),
             "witness_profile_id": witness,
             "sample_count": output_numel,
-            "roles": [row["role"] for row in plan["cases"]],
+            "roles": ([row["role"] for row in plan["cases"]]
+                      + [row["role"] for row in coverage_rows]),
+            "coverage_roles": coverage_rows,
         },
     })
     meta["multi_input_ledger"]["case_coverage"] = {
@@ -2828,10 +2881,13 @@ def _profile_tensor_inputs(profile):
 
 def _build_profile_inputs(rng, profile, regime="uniform"):
     """逐 tensor 描述物化逻辑数组；host scalar 留在 attrs/调用槽，不伪装 device tensor。"""
-    return [
-        _make_varied(rng, tuple(item["shape"]), item["dtype"], regime)
-        for item in _profile_tensor_inputs(profile)
-    ]
+    result = []
+    for item in _profile_tensor_inputs(profile):
+        value = _make_varied(rng, tuple(item["shape"]), item["dtype"], regime)
+        if (item.get("value_constraints") or {}).get("nonzero") is True:
+            value = np.where(value == 0, np.asarray(1, dtype=value.dtype), value)
+        result.append(value)
+    return result
 
 
 def _build_inputs(rng, in_params, shp, dtn, attrs, data_kind, runner_form):
@@ -3313,6 +3369,40 @@ def _planned_attr_combinations(spec, attrs_default, *, exclude_host_scalar=False
              "independent_combinations": len(independent)})
 
 
+def _dtype_requirement_sets_receipt(spec):
+    """解析可选 dtype 集合权威，并钉住既有 ``dtype_required`` 投影。
+
+    解析放在 golden 加载和目录创建之前：主表/保持集与扁平全集若打架，这份 spec
+    连用例计划都不成立，不得先执行用户 golden 或留下半个工作目录。字段缺席时返回
+    ``None``，保持 legacy 产物零增量。
+    """
+    try:
+        receipt = DRS.from_spec(spec)
+    except DRS.DtypeRequirementSetsError as ex:
+        raise ValueError(f"dtype requirement sets 非法：{ex}") from ex
+    if receipt is None:
+        return None
+    if spec.get("dtype_required") != receipt["required_dtypes"]:
+        raise ValueError(
+            "spec.dtype_required 与 dtype requirement sets 的主表∪保持集不一致："
+            f"dtype_required={spec.get('dtype_required')!r} "
+            f"requirement sets={receipt['required_dtypes']!r}")
+    return receipt
+
+
+def _atomic_cell_id(profile_id, atomic_binding, independent_binding):
+    """P×A×Q cell 的内容身份；执行与排除两侧使用同一公式。"""
+    identity = {
+        "profile_id": profile_id,
+        "row_id": atomic_binding["row_id"],
+        "row_sha256": atomic_binding["row_sha256"],
+        "q_id": independent_binding["q_id"],
+        "q_sha256": independent_binding["q_sha256"],
+    }
+    return hashlib.sha256(
+        content_address.canonical_json_bytes(identity)).hexdigest()
+
+
 def _entry_named_input_shape(entry, in_params, input_name):
     """取 cyclic rank 的唯一入口：严格按具名输入，绝不猜首输入/输出。"""
     profile = entry.get("input_profile")
@@ -3495,6 +3585,15 @@ def _bf16_bitexact(spec, op):
         raise ValueError(
             f"spec.precision.bf16_bitexact 须为布尔真值，得 {v!r}（{type(v).__name__}）——"
             f"字符串 \"false\" / 数字 0 会被真值性判断误读，fail-closed 拒收。")
+    return v
+
+
+def _bf16_lossy(spec):
+    """显式允许 bf16 数值输出走 precision_policy 的受控 lossy 阈值。"""
+    v = (spec.get("precision") or {}).get("bf16_lossy", False)
+    if v is not True and v is not False:
+        raise ValueError(
+            f"spec.precision.bf16_lossy 须为布尔真值，得 {v!r}（{type(v).__name__}）")
     return v
 
 
@@ -3854,12 +3953,41 @@ def _multi_input_profile_plan(spec, bundle, attrs_default, case_target):
         spec, attrs_default, exclude_host_scalar=True)
     in_params = [p for p in spec["params"] if p.get("io") == "in"]
     entries = []
+    atomic_contract = structure["atomic_contract"]
+    applicability_v2 = bool(
+        atomic_contract is not None
+        and any("applicability" in row for row in atomic_contract["rows"]))
+    excluded_cells = []
     for profile in bundle["profiles"]:
         scalar_attrs = {
             item["name"]: item["value"] for item in profile["inputs"]
             if item["kind"] == "scalar"
         }
         for attr_idx, attr_record in enumerate(attr_records):
+            applicability = None
+            atomic_binding = attr_record["atomic_binding"]
+            independent_binding = attr_record["independent_binding"]
+            if applicability_v2:
+                applicability = TSA.evaluate_atomic_attr_applicability(
+                    atomic_contract, atomic_binding["row_id"], profile["inputs"],
+                    expected_contract_sha256=atomic_contract["sha256"],
+                    where=(f"multi_input_profile[{profile['profile_id']}]"
+                           f".atomic[{atomic_binding['row_id']}]"))
+                if applicability["status"] == "excluded":
+                    excluded_cells.append({
+                        "profile_id": profile["profile_id"],
+                        "row_id": atomic_binding["row_id"],
+                        "row_sha256": atomic_binding["row_sha256"],
+                        "q_id": independent_binding["q_id"],
+                        "q_sha256": independent_binding["q_sha256"],
+                        "cell_id": _atomic_cell_id(
+                            profile["profile_id"], atomic_binding,
+                            independent_binding),
+                        "applicability": applicability,
+                    })
+                    # 必须先判 applicability、再做 cyclic normalization：rank0×非空轴
+                    # 是有据排除的结构单元，不是 planner 异常，更不能被静默丢掉。
+                    continue
             primitive_attrs = attr_record["attrs"]
             overlap = sorted(set(scalar_attrs) & set(primitive_attrs))
             if overlap:
@@ -3888,16 +4016,21 @@ def _multi_input_profile_plan(spec, bundle, attrs_default, case_target):
                     "independent_attr_combination": json.loads(json.dumps(
                         attr_record["independent_binding"], ensure_ascii=False)),
                 }
+                if applicability_v2:
+                    entry["_atomic_applicability"] = applicability
             _apply_entry_cyclic_bindings(
                 entry, in_params, structure,
                 where=f"multi_input_profile[{profile['profile_id']}].attrs[{attr_idx}]")
             entries.append(entry)
-    expected = len(bundle["profiles"]) * len(attr_records)
-    if int(case_target) != expected:
+    structure_denominator_total = len(bundle["profiles"]) * len(attr_records)
+    planned = len(entries)
+    if int(case_target) != planned:
         raise ValueError(
             f"multi_input_contract 完整矩阵 = {len(bundle['profiles'])} profiles × "
-            f"{len(attr_records)} attrs = {expected}，precision.case_target={case_target}；"
-            "必须逐字相等，禁止抽样/截断")
+            f"{len(attr_records)} attrs = {structure_denominator_total}，"
+            f"其中 executable={planned}、excluded={len(excluded_cells)}，"
+            f"precision.case_target={case_target}；case_target 必须逐字等于 executable，"
+            "完整分母另由 structure_denominator_total 与 excluded ledger 守住")
     # profile 是任务书显式 materialization：超预算不允许缩 shape（缩了就不是那条 case）。
     budget = _cost_budget(spec)
     over = []
@@ -3913,7 +4046,7 @@ def _multi_input_profile_plan(spec, bundle, attrs_default, case_target):
             "显式 profile 不得静默降规模，请修任务书映射或显式提高预算")
 
     def count_cases(predicate):
-        return sum(bool(predicate(profile)) for profile in bundle["profiles"]) * len(attr_records)
+        return sum(bool(predicate(entry["input_profile"])) for entry in entries)
 
     case_coverage = {
         "cases": len(entries),
@@ -3939,7 +4072,8 @@ def _multi_input_profile_plan(spec, bundle, attrs_default, case_target):
         "case_profile": case_profile,
         "case_profile_declared": _case_profile_declared(spec),
         "dropped_combo_classes": [],
-        "unpaired_combo_classes": [],
+        "unpaired_combo_classes": {
+            "count": 0, "classes": [], "attr_values_never_emitted": []},
         "attr_axis_lengths": {"declared": [], "emitted": 0, "items": [], "skipped": []},
         "coverage_strength": (
             "multi_input_contract.v1：完整 profile×primitive-attr 笛卡尔；逐输入 shape/dtype/format "
@@ -3966,26 +4100,48 @@ def _multi_input_profile_plan(spec, bundle, attrs_default, case_target):
                 spec["op"], entry["input_profile"], entry["attr_idx"], seen,
                 contract_bindings=entry.get("contract_bindings"))
             binding = entry["contract_bindings"]["atomic_attr_row"]
-            cells.append({
+            cell = {
                 "profile_id": entry["input_profile"]["profile_id"],
                 "row_id": binding["row_id"],
                 "row_sha256": binding["row_sha256"],
                 "q_id": entry["contract_bindings"]["independent_attr_combination"]["q_id"],
                 "q_sha256": entry["contract_bindings"]["independent_attr_combination"]["q_sha256"],
                 "case_id": cid,
-            })
-        meta["atomic_attr_ledger"] = {
+            }
+            if applicability_v2:
+                independent = entry["contract_bindings"]["independent_attr_combination"]
+                cell.update({
+                    "cell_id": _atomic_cell_id(
+                        entry["input_profile"]["profile_id"], binding, independent),
+                    "applicability": entry["_atomic_applicability"],
+                })
+            cells.append(cell)
+        ledger = {
             "schema": "oprunway.atomic_attr_case_ledger",
-            "schema_version": 1,
+            "schema_version": 2 if applicability_v2 else 1,
             "atomic_rows_sha256": structure["atomic_contract"]["sha256"],
             "source_binding": structure["atomic_contract"]["source_binding"],
             "profiles": len(bundle["profiles"]),
             "atomic_rows": attr_axes["atomic_rows"],
             "independent_combinations": attr_axes["independent_combinations"],
-            "expected": expected,
-            "emitted": len(entries),
-            "cells": cells,
         }
+        if applicability_v2:
+            ledger.update({
+                "structure_denominator_total": structure_denominator_total,
+                "planned": planned,
+                "excluded": len(excluded_cells),
+                "emitted": len(entries),
+                "cells": cells,
+                "excluded_cells": excluded_cells,
+            })
+        else:
+            # legacy atomic row 未声明 applicability：保持 v1 键集与字节不变。
+            ledger.update({
+                "expected": structure_denominator_total,
+                "emitted": len(entries),
+                "cells": cells,
+            })
+        meta["atomic_attr_ledger"] = ledger
     return entries, meta
 
 
@@ -4071,7 +4227,7 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
         # 判据必须是**实数浮点**：复数既非整型（不会被原来那半个条件挡住）、又没有权威的
         # 非有限字节形态（`inf+0j` / `0+infj` / `inf+infj` 三选一无出处），故显式排除。
         # 这是**声明式收窄**，不是漏——`_build_value_special` 那边还有一道同理由的 fail-closed。
-        is_float = not (precision_policy.is_integer_dtype(dtn)
+        is_float = not (dtn == "bool" or precision_policy.is_integer_dtype(dtn)
                         or precision_policy.is_complex_dtype(dtn))
         for dims, shp, dk, ik in _special_entries(op, dtn, arity, is_float, attr_combos[0], ranks,
                                                   allow_empty=_allow_empty_tensor(spec),
@@ -4882,6 +5038,7 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
     check_spec_capability(in_params, runner_form)        # 能力边界前置：先于 load_golden，别为不支持的算子白加载 golden
     multi_input_bundle = _resolve_multi_input_contract(spec)
     stochastic = _resolve_stochastic_contract(spec)
+    dtype_sets_receipt = _dtype_requirement_sets_receipt(spec)
     # CS：用例来源（generated / taskdoc）与规范化任务书用例集，**在加载 golden 之前**解出来——
     # 一份「声明了 taskdoc 却没喂用例集」的 spec 应当停在零副作用处，而不是先 import 一遍用户 golden。
     case_source, taskdoc_payload, taskdoc_sha256 = _resolve_taskdoc_inputs(spec, taskdoc_caseset)
@@ -5226,22 +5383,22 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                 f"{cid}: precision_policy 派生输出 dtype={logical_cdtype!r} ≠ "
                 f"multi_input_contract={input_profile['output']['dtype']!r}")
         out_is_bool = (golden.dtype == bool)
-        # finding #14：bf16 白名单与「输出是否 bool/exact 语义」**拆成两道独立校验**——verify_mode=exact 不再
-        # 短路豁免 bf16。bf16 且**输出非 bool**（真数值输出）且 op 不在白名单 → 需 lossy 阈值 → fail-fast。
-        if output_dtn == _BF16 and not out_is_bool and not _bf16_bitexact(spec, op):
+        bf16_bitexact = output_dtn == _BF16 and _bf16_bitexact(spec, op)
+        bf16_lossy = output_dtn == _BF16 and _bf16_lossy(spec)
+        if output_dtn == _BF16 and not out_is_bool and not (bf16_bitexact or bf16_lossy):
             raise ValueError(
                 f"bf16 numerical for op {op!r} 需 lossy 阈值：输出非 bool，且该算子未声明 bf16 逐位可达。\n"
-                f"  → 若本算子是**纯搬运/纯符号**类（输出恒等于某个输入元素、不做算术，如 gather/\n"
-                f"    转置/最近邻采样/符号），在 spec 写 `precision.bf16_bitexact: true` 显式声明；\n"
-                f"  → 若它真做算术（加乘、插值、归约），bf16 输出本就不可能逐位重现，"
-                f"应挂 dtype_deferred 或给 lossy 阈值。\n"
-                f"  ⚠ 不因 verify_mode=exact 静默放行——exact 是判据、不是算子性质。")
+                "  → 若输出在 bf16 网格上逐位可达，在 spec 写 "
+                "`precision.bf16_bitexact: true` 显式声明；若是数值输出，则显式写 "
+                "`precision.bf16_lossy: true` 使用 precision_policy 的受控阈值。")
         if exact:
             compare = "exact_equal"
         elif precision_policy.is_integer_dtype(output_dtn):
             compare = "exact_equal"                      # §1.1 int→exact（有效标准也会强制 EXACT）
+        elif output_dtn == _BF16 and bf16_bitexact:
+            compare = "exact_equal"
         elif output_dtn == _BF16:
-            compare = "exact_equal"                      # Sign/Neg bf16 输出精确可表示（已过上文白名单）
+            compare = "rel_err"                          # 真数值 bf16 走 precision_policy 的 lossy 阈值
         else:
             compare = "rel_err"                          # fp32/fp16 数值 → 沿用平台标准（向后兼容）
         eff_std = precision_policy.effective_standard(spec_standard, logical_cdtype, compare)
@@ -5318,6 +5475,9 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
             **({"atomic_attr_ledger": atomic_attr_ledger,
                 "atomic_attr_ledger_sha256": atomic_attr_ledger_sha256}
                if atomic_attr_ledger is not None else {}),
+            **({"dtype_requirement_sets_receipt": dtype_sets_receipt,
+                "dtype_requirement_sets_sha256": dtype_sets_receipt["sha256"]}
+               if dtype_sets_receipt is not None else {}),
             **({"layout_ledger": layout_ledger,
                 "layout_ledger_sha256": layout_ledger_sha256}
                if layout_ledger is not None else {}),
@@ -5381,6 +5541,7 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
     check_spec_capability(in_params, dry_runner_form)
     multi_input_bundle = _resolve_multi_input_contract(spec)
     stochastic = _resolve_stochastic_contract(spec)
+    dtype_sets_receipt = _dtype_requirement_sets_receipt(spec)
     # CS：dry-run 与正式生成走**同一道**用例来源解析 —— 「声明了 taskdoc 却没喂用例集」这类错
     # 必须在 CP-B 契约自检就现形，不许 CP-B 全绿、CP-D 才炸。
     case_source, taskdoc_payload, taskdoc_sha256 = _resolve_taskdoc_inputs(spec, taskdoc_caseset)
@@ -5610,6 +5771,9 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
                     content_address.canonical_json_bytes(
                         meta["atomic_attr_ledger"])).hexdigest()}
                if "atomic_attr_ledger" in meta else {}),
+            **({"dtype_requirement_sets_receipt": dtype_sets_receipt,
+                "dtype_requirement_sets_sha256": dtype_sets_receipt["sha256"]}
+               if dtype_sets_receipt is not None else {}),
             **({"layout_requirement_plan": list(structure_plan["layout_requirements"])}
                if structure_plan["layout_requirements"] else {}),
             "unpaired_combo_classes": meta["unpaired_combo_classes"],

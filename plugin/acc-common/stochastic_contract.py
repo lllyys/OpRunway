@@ -501,7 +501,7 @@ def evaluate_formal_evidence(value, receipt, evidence):
     evidence = _object(
         evidence, "stochastic formal evidence",
         {"schema", "schema_version", "contract_sha256", "plan_sha256",
-         "precondition_receipt_sha256", "device", "boundaries", "groups"},
+         "precondition_receipt_sha256", "device", "boundaries", "coverage_boundaries", "groups"},
         {"schema", "schema_version", "contract_sha256", "plan_sha256",
          "precondition_receipt_sha256", "device", "boundaries", "groups"})
     _check_header(evidence, FORMAL_SCHEMA, contract, plan, "formal evidence")
@@ -528,6 +528,25 @@ def evaluate_formal_evidence(value, receipt, evidence):
     if set(by_probability) != set(contract["probabilities"]["boundaries"]):
         raise StochasticContractError("formal evidence.boundaries 未逐项覆盖契约概率边界")
 
+    coverage = evidence.get("coverage_boundaries", [])
+    if not isinstance(coverage, list):
+        raise StochasticContractError("formal evidence.coverage_boundaries 须为列表")
+    coverage_seen = set()
+    for i, row in enumerate(coverage):
+        row = _object(
+            row, f"coverage_boundaries[{i}]",
+            {"role", "profile_id", "probability", "sample_count", "ones_count"},
+            {"role", "profile_id", "probability", "sample_count", "ones_count"})
+        role = _token(row["role"], f"coverage_boundaries[{i}].role")
+        profile_id = _token(row["profile_id"], f"coverage_boundaries[{i}].profile_id")
+        if role in coverage_seen:
+            raise StochasticContractError("formal evidence.coverage_boundaries role 重复")
+        coverage_seen.add(role)
+        if _probability(row["probability"], f"coverage_boundaries[{i}].probability") != 0.0:
+            raise StochasticContractError("结构覆盖只接受 p=0 boundary exact")
+        n = _int(row["sample_count"], f"coverage_boundaries[{i}].sample_count", minimum=0)
+        ones = _count(row["ones_count"], f"coverage_boundaries[{i}].ones_count", n)
+
     groups = evidence["groups"]
     if not isinstance(groups, list):
         raise StochasticContractError("formal evidence.groups 须为列表")
@@ -549,6 +568,9 @@ def evaluate_formal_evidence(value, receipt, evidence):
     confidence = contract["statistics"]["confidence"]
     test_count = _statistical_test_count(contract)
     checks = []
+    for row in coverage:
+        _check_row(checks, f"structural_boundary:{row['profile_id']}",
+                   float(row["ones_count"]), 0.0, 0.0, exact=True)
     for probability in contract["probabilities"]["boundaries"]:
         n, ones = by_probability[probability]
         expected_ones = int(probability * n)

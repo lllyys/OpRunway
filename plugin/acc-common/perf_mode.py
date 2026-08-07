@@ -102,15 +102,18 @@ CHANGE_KIND_SEMANTIC = "semantic"
 CHANGE_KIND_NEW_OP = "new_op"
 CHANGE_KIND_GPU_PORT = "gpu_port"
 CHANGE_KIND_BUGFIX = "bugfix"
+CHANGE_KIND_MEMORY_OPTIMIZATION = "memory_optimization"
 CHANGE_KINDS = (CHANGE_KIND_REWRITE_TBE, CHANGE_KIND_ADD_DTYPE, CHANGE_KIND_EXTEND_SHAPE,
                 CHANGE_KIND_ALIGN_DTYPE, CHANGE_KIND_SEMANTIC, CHANGE_KIND_NEW_OP,
-                CHANGE_KIND_GPU_PORT, CHANGE_KIND_BUGFIX)
+                CHANGE_KIND_GPU_PORT, CHANGE_KIND_BUGFIX,
+                CHANGE_KIND_MEMORY_OPTIMIZATION)
 
-#: 用户 2026-08-05 口径里「统一认为无性能对比要求」的**改动类别**三项（第四项是任务书条款，不在此表）。
+#: 「统一认为无性能对比要求」的受控改动类别：前三项来自 2026-08-05 口径；
+#: memory_optimization 来自用户批准的三算子统一计划，且仍须任务书引文锚。
 NO_PERF_COMPARISON_CHANGE_KINDS = (CHANGE_KIND_ADD_DTYPE, CHANGE_KIND_EXTEND_SHAPE,
-                                   CHANGE_KIND_NEW_OP)
+                                   CHANGE_KIND_NEW_OP, CHANGE_KIND_MEMORY_OPTIMIZATION)
 
-#: 这三类改动的接入形态：官方 C++ Extension（`torch.ops` 桥）。见 `derive_runner_form`。
+#: 这些改动类别的接入形态：官方 C++ Extension（`torch.ops` 桥）。见 `derive_runner_form`。
 RUNNER_FORM_CPP_EXTENSION = "cpp_extension"
 
 #: 「任务书把 GPU 指定为性能标杆」的**结构信号**（ratio_gated 形态下）：`spec.perf.baseline` 的两个 GPU 值。
@@ -310,7 +313,7 @@ def resolve_spec_mode(spec):
                 f"本档只接受 {sorted(_MEASURE_ONLY_ALLOWED)}（以及 `_` 开头的注释键）。"
                 "未知字段一律 fail-closed——拼错的判据字段不能靠「不在禁用表里」被默默接受。")
         auth = measure_only_authorization(perf)
-        # 改动类别支线的**机器锚**：声称「本轮改动属那三类所以不比性能」，就必须真有那三类的
+        # 改动类别支线的**机器锚**：声称「本轮改动属受控类别所以不比性能」，就必须真有对应的
         # `change.kind`。缺这道核，这个 ground 就退化成一句谁都能写的自报（另两个 ground 的锚是
         # cite/quote 指向的任务书原文，人核得动；这一个的事实全在 spec 自己身上，必须机核）。
         if auth["taskdoc_requirement"] == GROUND_CHANGE_CLASS_NO_PERF_COMPARISON:
@@ -320,7 +323,7 @@ def resolve_spec_mode(spec):
                     f"perf.measure_only_authorization.taskdoc_requirement="
                     f"'{GROUND_CHANGE_CLASS_NO_PERF_COMPARISON}' 要求 spec.change.kind 属 "
                     f"{list(NO_PERF_COMPARISON_CHANGE_KINDS)}，实得 {kind!r}——"
-                    "「本轮改动属那三类」是可机核的事实，对不上就不是这个 ground 能授权的场景。")
+                    "本轮受控改动类别是可机核的事实，对不上就不是这个 ground 能授权的场景。")
         try:
             perf_evidence_contract.validate_measure_only_requirement_gaps(spec, auth)
         except perf_evidence_contract.PerfEvidenceContractError as ex:

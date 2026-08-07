@@ -71,6 +71,12 @@ def _plan(d, mode="measure_only"):
 
 # ————————————————— 契约层：perf.mode 解析 —————————————————
 class PerfModeContractTest(unittest.TestCase):
+    def test_taskdoc_bound_memory_optimization_is_measure_only_change_class(self):
+        auth = dict(_AUTH, taskdoc_requirement="change_class_no_perf_comparison")
+        spec = {"change": {"kind": "memory_optimization"},
+                "perf": {"mode": "measure_only", "measure_only_authorization": auth}}
+        self.assertEqual(PM.resolve_spec_mode(spec), PM.MODE_MEASURE_ONLY)
+
     def test_absent_field_is_ratio_gated(self):
         self.assertEqual(PM.resolve_spec_mode({}), PM.MODE_RATIO_GATED)
         self.assertEqual(PM.resolve_spec_mode({"perf": {"baseline": "tbe"}}),

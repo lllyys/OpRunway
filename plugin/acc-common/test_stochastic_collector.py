@@ -39,6 +39,28 @@ def _caseset():
 
 
 class StochasticCollectorTest(unittest.TestCase):
+    def test_structural_profiles_are_exact_boundaries_and_not_pooled(self):
+        spec = _spec()
+        profile = copy.deepcopy(spec["multi_input_contract"]["profiles"][0])
+        profile["profile_id"] = "rank0"
+        profile["inputs"][0]["shape"] = []
+        spec["multi_input_contract"]["profiles"].append(profile)
+        spec["precision"]["case_target"] = 8
+        with tempfile.TemporaryDirectory() as work, mock.patch.object(
+                G, "load_golden", side_effect=AssertionError):
+            caseset = G.gen_cases(spec, work)
+        dut = _sequences()
+        role = caseset["stochastic_ledger"]["coverage_roles"][0]["role"]
+        reference = {"interior_0_oracle_precondition": dut["interior_0_oracle_precondition"]}
+        pre, formal = C.collect(spec["stochastic"], caseset, dut, reference, _device())
+        self.assertEqual(pre["case"]["sample_count"], 4096)
+        self.assertEqual(formal["coverage_boundaries"], [])
+        self.assertEqual(S.evaluate_formal_evidence(
+            spec["stochastic"], pre, formal)["status"], "satisfied")
+        bad = copy.deepcopy(dut); bad[role] = bytes([1])
+        with self.assertRaises(C.StochasticCollectorError):
+            C.collect(spec["stochastic"], caseset, bad, reference, _device())
+
     def test_precondition_and_formal_evidence_are_separate_and_valid(self):
         contract = _spec()["stochastic"]
         dut = _sequences()

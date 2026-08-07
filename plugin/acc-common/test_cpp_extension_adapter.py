@@ -414,8 +414,8 @@ class CppExtensionMeasureOnlyPerfGateTest(unittest.TestCase):
         caseset = self._caseset_with_perf_dims()
         # c0 精度可判但没过；c1 过了。分母（两条精度 case）必须原样落盘。
         evidence = [
-            {"case_id": "c0", "precision": {"policy": {}, "metrics": {}}},
-            {"case_id": "c1", "precision": {"policy": {}, "metrics": {}}},
+            {"case_id": "c0", "status": "ok", "precision": {"policy": {}, "metrics": {}}},
+            {"case_id": "c1", "status": "ok", "precision": {"policy": {}, "metrics": {}}},
         ]
         with tempfile.TemporaryDirectory() as td:
             A.prepare(_measure_only_spec(), caseset, td)
@@ -426,20 +426,22 @@ class CppExtensionMeasureOnlyPerfGateTest(unittest.TestCase):
                 plan, skipped = A._write_perf_plan(
                     caseset, td, evidence, _perf_receipt())
         self.assertIsNotNone(plan)
-        self.assertEqual(plan["cases"], ["c1"])
+        self.assertEqual(plan["cases"], ["c0", "c1"])
         self.assertEqual(plan["mode"], "measure_only")
         self.assertNotIn("baseline", plan)
         gate = plan["precision_gate"]
         self.assertFalse(gate["gate_passed"])
         self.assertEqual(gate["precision_case_total"], 2)
         self.assertEqual(gate["precision_not_passed"], ["c0"])
-        self.assertEqual(
-            skipped, [{"case_id": "c0", "reason": "skipped_accuracy_failed"}])
+        self.assertEqual(skipped, [])
 
     def test_measure_only_distinguishes_unjudgeable_from_failed(self):
         """没跑出来（无精度块）和算错了是两回事，skipped 理由不许混成一个词。"""
         caseset = self._caseset_with_perf_dims()
-        evidence = [{"case_id": "c1", "precision": {"policy": {}, "metrics": {}}}]
+        evidence = [
+            {"case_id": "c0", "status": "execution_failed"},
+            {"case_id": "c1", "status": "ok", "precision": {"policy": {}, "metrics": {}}},
+        ]
         with tempfile.TemporaryDirectory() as td:
             A.prepare(_measure_only_spec(), caseset, td)
             with mock.patch(

@@ -165,7 +165,7 @@ SUPPORTED_NP_BY_FORM = {
     "aclnn_py": {"float32": np.float32, "float16": np.float16, "bfloat16": np.float32,
                  "int64": np.int64, "int32": np.int32, "int16": np.int16,
                  "int8": np.int8, "uint8": np.uint8, "bool": np.bool_},
-    "cpp_extension": {"float32": np.float32, "float16": np.float16, "bfloat16": np.float32,
+    "cpp_extension": {"float64": np.float64, "float32": np.float32, "float16": np.float16, "bfloat16": np.float32,
                       "int64": np.int64, "int32": np.int32, "int16": np.int16,
                       "int8": np.int8, "uint8": np.uint8, "bool": np.bool_,
                       # 2026-08-06 扩：uint32 / complex64。**实测证据**（不是查文档、更不是推断）——
@@ -393,7 +393,11 @@ def _perf_entry(cid, perf_by_case):
     if not isinstance(entry, dict):
         return {"scope": "kernel_only", "us": None, "note": _PERF_PENDING_NOTE}
     out = {"scope": entry.get("scope") or "kernel_only", "us": entry.get("us")}
-    for key in ("behavior", "execution_path", "note"):
+    # N9 measure-only provenance：这两枚摘要由 perf_msprof 从原始采样收据和
+    # execution identity 受控重算。evidence 必须原样携带，三级门再与 collection 交叉核验；
+    # 在这里投影掉会让真实 msprof 全部因“证据漂移”被拒。
+    for key in ("behavior", "execution_path", "note",
+                "sampling_receipt_sha256", "execution_identity_sha256"):
         if entry.get(key) is not None:
             out[key] = entry[key]
     return out
@@ -578,11 +582,39 @@ def build_multi_output_evidence(caseset, work_dir, out_dir, perf_by_case=None):
             po = prod.get(0)
             if po is None:
                 raise RuntimeError(f"{cid}: 单输出 caseset 但 out_manifest 无 index=0 产物")
+            if exp.get("golden_status") == "formal_statistical":
+                # 随机接口的逐数组输出没有 deterministic golden；正式裁决消费
+                # collector 绑定的 stochastic formal evidence。这里仍验证产物存在、
+                # 输出写入与性能台账，但绝不把 null golden 送进 np.load。
+                formal_ev = {
+                    "case_id": cid,
+                    "status": "ok",
+                    # 与 adapter 首轮 transport evidence 使用同一字段；validator
+                    # 逐字对账 caseset.stochastic binding，不能在 perf 二次组装时改名。
+                    "stochastic": exp.get("stochastic"),
+                    "precision": {
+                        "compare": "stochastic",
+                        "out_shape": exp.get("out_shape"),
+                        "out_dtype": exp.get("compare_dtype"),
+                    },
+                    "perf": _perf_entry(cid, perf_by_case),
+                }
+                _copy_output_written_evidence(formal_ev, po, produced=True)
+                ev.append(formal_ev)
+                continue
             golden = np.load(_safe(work_dir, exp["golden_path"]))
             out = _read_out_bin(out_dir, po)
             out_rel = _out_rel(po["path"])
+            legacy_precision = _precision_evidence(c, out, golden, out_rel, work_dir)
+            # 单输出也必须把 driver 实际落盘 manifest 里的 shape/dtype 带进 evidence。
+            # 尤其是 numel=0：空字节本身无法区分 [0] / [0, 3]，若只报
+            # metrics.numel=0，validator 只能拿 caseset 声明与自己互证，无法证明 driver
+            # 实际按哪一个输出形状分配。这里的 ``po.shape`` 来自 driver 对真实输出
+            # tensor 的观测，与多输出分支已有的 out_shape/out_dtype 逐字同源。
+            legacy_precision["out_shape"] = [int(x) for x in (po.get("shape") or [])]
+            legacy_precision["out_dtype"] = str(po.get("dtype"))
             legacy_ev = {"case_id": cid, "status": "ok",
-                         "precision": _precision_evidence(c, out, golden, out_rel, work_dir),
+                         "precision": legacy_precision,
                          "perf": _perf_entry(cid, perf_by_case)}
             _copy_output_written_evidence(legacy_ev, po, produced=True)
             ev.append(legacy_ev)

@@ -98,6 +98,16 @@
     }
   },
   "task_pr_gaps": [
+    {
+      "kind": "performance_requirement_unvalidated",
+      "dimension": "performance",
+      "status": "unvalidated",
+      "requirement_type": "gpu_comparison",
+      "cite": "task_doc.snapshot.md:140",
+      "quote": "整体性能以 OpenCV CUDA（A100）或 OCL GPU 为参考，验收取最优实现。",
+      "taskdoc_snapshot_sha256": "4c4d53143a59fccb5f1256814e2634121989df413c4d48972451d64f1ff4fb99",
+      "reason": "按 AGENTS.md §5.10 本轮只采 NPU msprof 绝对耗时，未获取 GPU 标杆、未计算比值，因此该性能条款保持未验收。"
+    },
     "【用例来源已改为任务书自带用例集】本轮 caseset **不再**由通用正交网格铺出（precision.case_source=taskdoc）：169 条用例的身份 / shape / dtype / attr / 值域全部来自任务书 self_test_case/gaussian_blur/gaussian_blur_cases.json 的规范化产物，本引擎只按 materialize.seed 确定性物化输入。覆盖强度因此**由任务书决定**，报告不得再引用「1-wise + 白名单」那套覆盖强度说辞。",
     "【定向用例 TC-03..TC-11 是否覆盖：未核】任务书正文另列了 TC-01..TC-11 的定向测试点。本轮用例来自任务书自带的 169 条 case，**尚未逐条核对**这批 case 与 TC-01..TC-11 的对应关系（case_name ↔ 测试点没有机器可核的绑定）。故本轮结论**不得**声称任务书定向用例已覆盖，也不得声称未覆盖——这一项是「未核」，不是已判。(推断)",
     "【attr 取值覆盖由任务书用例决定】原 spec 的 attr_matrix（ksize{[5,5],[3,3]} × border_type{1,4}）在 taskdoc 档不被消费，已删除。attr 取值现在逐条来自任务书用例；其中 **border_type 任务书 prototype 里根本没有这个属性**，取值由取材侧的映射 IR 从任务书 golden 的可执行语义派生（cv2.GaussianBlur 省略 borderType = OpenCV BORDER_DEFAULT）。因此本轮 border_type 取值很可能**单一**，其它 border 模式（CONSTANT/REPLICATE/REFLECT/ISOLATED）未覆盖。(推断：最终取值以取材侧产出的 taskdoc_caseset.json 为准)",

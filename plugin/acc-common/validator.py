@@ -38,7 +38,9 @@ overall 优先级：`contract/fail > needs_review(uncertain) > passed_with_risk 
    口径、与 cannbot 的有意偏离、以及**当前分不出来的那一类**，逐条写在该节抬头。
 
 judge_* 入口做 metric **schema 校验**（计数=非负整数、numel=正整数、MERE/MARE=有限非负浮点）：
-非法/缺失/坏类型一律收敛到 fail（不进正常 pass、不抛异常崩溃，finding #8）。
+非法/缺失/坏类型一律收敛到 fail（不进正常 pass、不抛异常崩溃，finding #8）。纯 judge 仍故意拒
+``numel=0``；只有 case-aware 裁决拿到期望/实际 shape、产物 provenance 与空输出写入收据并逐字闭合时，
+才走 ``empty-structural exact``，避免把一份裸 ``mismatch=0,numel=0`` 自报升级成通过。
 顶层坏 JSON（cases/evidence 非列表、case 缺 id 等）→ 收敛 contract_problems + overall=fail，不下标崩溃（finding #10）。
 
 **纯 stdlib**（judge 只做纯算术；误差分布复算在采集层 repo_adapter，本文件不 import numpy）。
@@ -388,10 +390,17 @@ def _judge_multi(spec, spec_standard, tol_src, e, c, exp, ev_prec, dims, row):
         metrics = ev_o.get("metrics")
         if not isinstance(metrics, dict):
             row.update(判据=f"输出#{k}({name}/{role}) 缺 metrics（误差分布未复算）"); _mark_prec_fail(row); return
-        st, w = _judge_by_policy(canon["policy"], metrics)
+        empty_judgement = _judge_empty_output(
+            canon["policy"], metrics, exp_o, ev_o, ev_o, canon["dtype"])
+        st, w = (empty_judgement if empty_judgement is not None
+                 else _judge_by_policy(canon["policy"], metrics))
         std_states.append(st)
         if canon_acc is not None:                        # acceptance 有独立口径 → 用 acceptance_metrics 单判
-            ast, aw = _judge_by_policy(canon_acc["policy"], ev_o.get("acceptance_metrics"))
+            acc_metrics = ev_o.get("acceptance_metrics")
+            empty_acc = _judge_empty_output(
+                canon_acc["policy"], acc_metrics, exp_o, ev_o, ev_o, canon["dtype"])
+            ast, aw = (empty_acc if empty_acc is not None
+                       else _judge_by_policy(canon_acc["policy"], acc_metrics))
         else:                                            # 无独立 acceptance → 继承 standard（同 legacy 语义）
             ast, aw = st, w
         acc_states.append(ast)
@@ -603,6 +612,87 @@ def _out_shape_contract(c, exp, ev_prec):
             return (f"：evidence {label}={n} ≠ 期望输出形状 {exp_shape} 的元素数 {want}"
                     "（输出规模与期望形状不符——形状 bug 不许被静默吞掉）")
     return None
+
+
+_EMPTY_COUNTER_BY_POLICY = {
+    precision_policy.ASCENDOPTEST_DEFAULT: "bad_count",
+    precision_policy.EXACT: "exact_mismatch",
+    precision_policy.TORCH_ALLCLOSE: "mismatch",
+    precision_policy.INDEX_VALUE_CONSISTENCY: "mismatch",
+}
+
+
+def _judge_empty_output(policy, metrics, expected, observed, written, compare_dtype):
+    """在完整结构证据下判空输出；非空输出返回 ``None`` 交给普通 judge。
+
+    空 tensor 没有可比较元素，数值计数为 0 是必然事实，但**单凭这两个 0 不能通过**。
+    本分支要求五条独立事实闭合：caseset 的受信期望 shape 明确含 0、driver manifest
+    观测到的实际 shape 逐维相同、产物 provenance 对 numel/两份文件摘要有账、输出写入
+    检查明确落 ``skipped_empty`` 且逻辑 dtype/numel 一致、对应误差计数严格为 0。
+    任一缺失都 fail-closed；标量 ``[]`` 不是空 tensor，不走本分支。
+    """
+    exp_shape, err = _shape_decl(expected, _EXP_SHAPE_KEYS, "caseset.expected")
+    if err:
+        return "fail", f"空Tensor期望形状非法：{err}"
+    if exp_shape is None or not _strict_empty_shape(exp_shape):
+        return None
+
+    act_shape, err = _evidence_shape(observed)
+    if err:
+        return "fail", f"空Tensor实际形状非法：{err}"
+    if act_shape is None:
+        return "fail", "空Tensor缺 driver manifest 实际 out_shape（空字节无法自证逐维形状）"
+    if act_shape != exp_shape:
+        return "fail", f"空Tensor实际 out_shape {act_shape} ≠ 期望 {exp_shape}"
+
+    if not isinstance(metrics, dict):
+        return "fail", "空Tensor缺 metrics"
+    n = metrics.get("numel")
+    if not _is_nonneg_int(n) or n != 0:
+        return "fail", f"空Tensor metrics.numel 须严格为整数 0，得 {n!r}"
+    kind = policy.get("kind") if isinstance(policy, dict) else None
+    counter_key = _EMPTY_COUNTER_BY_POLICY.get(kind)
+    if counter_key is None:
+        return "fail", f"空Tensor policy.kind={kind!r} 无结构空集判据（不猜）"
+    counter = metrics.get(counter_key)
+    if not _is_nonneg_int(counter) or counter != 0:
+        return "fail", f"空Tensor {counter_key} 须严格为整数 0，得 {counter!r}"
+    # 用一元素零误差的等价计数只做 policy schema 校验（例如 error_rate/max_mismatch）；
+    # 真实 numel 仍由上方严格钉在 0，绝不改写 evidence。
+    policy_probe = dict(metrics)
+    policy_probe["numel"] = 1
+    probe_state, probe_why = _judge_by_policy(policy, policy_probe)
+    if probe_state != "pass":
+        return "fail", f"空Tensor policy schema 非法：{probe_why}"
+
+    provenance = observed.get("provenance") if isinstance(observed, dict) else None
+    if not isinstance(provenance, dict) or provenance.get("numel") != 0:
+        return "fail", "空Tensor provenance.numel 缺失或不为 0"
+    for key in ("golden_sha256", "out_sha256"):
+        sha = provenance.get(key)
+        if not (isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha)):
+            return "fail", f"空Tensor provenance.{key} 缺失或不是 sha256"
+
+    if not isinstance(written, dict) or written.get("output_written_check") != "skipped_empty":
+        return "fail", "空Tensor缺 output_written_check=skipped_empty"
+    diag = written.get("output_written_diagnostic")
+    if not isinstance(diag, dict) or diag.get("status") != "skipped_empty":
+        return "fail", "空Tensor缺完整 output_written_diagnostic"
+    if diag.get("numel") != 0:
+        return "fail", f"空Tensor写入诊断 numel 须为 0，得 {diag.get('numel')!r}"
+    if diag.get("dtype") != compare_dtype:
+        return "fail", (f"空Tensor写入诊断 dtype={diag.get('dtype')!r} "
+                        f"≠ spec 派生输出 dtype {compare_dtype!r}")
+    exp_name = expected.get("name") if isinstance(expected, dict) else None
+    if exp_name is not None and diag.get("output_name") != exp_name:
+        return "fail", (f"空Tensor写入诊断 output_name={diag.get('output_name')!r} "
+                        f"≠ 期望 {exp_name!r}")
+    exp_index = expected.get("index") if isinstance(expected, dict) else None
+    if exp_index is not None and diag.get("output_index") != exp_index:
+        return "fail", (f"空Tensor写入诊断 output_index={diag.get('output_index')!r} "
+                        f"≠ 期望 {exp_index!r}")
+    return "pass", (f"empty-structural exact：shape={exp_shape}, dtype={compare_dtype}, "
+                    f"{counter_key}=0, provenance/output-written receipt 完整")
 
 
 # ==================================== C4 · dtype 冲突（任务书 vs op_def），2026-07-22 ========
@@ -817,12 +907,21 @@ def _acc_dtype_and_tol(spec, spec_standard, tol_src, case):
         （比 cannbot 严：它只判 outputs[0]），故「passed」意味着该 case 的**每个**输出都过了。
     """
     unknown = (_ACC_UNKNOWN_DTYPE, None, None)
-    if not isinstance(case, dict) or spec_standard is None:
+    if not isinstance(case, dict):
+        return unknown
+    exp = case.get("expected") if isinstance(case.get("expected"), dict) else {}
+    if exp.get("compare") == "stochastic":
+        try:
+            dtypes = _case_input_dtypes(case)
+            names = {dtype for _name, dtype in dtypes}
+            return (next(iter(names)), None, None) if len(names) == 1 else unknown
+        except Exception:
+            return unknown
+    if spec_standard is None:
         return unknown
     try:
         in_dts = _case_input_dtypes(case)
         tol_tuple = _taskdoc_tol(spec) if tol_src == "taskdoc" else None
-        exp = case.get("expected") if isinstance(case.get("expected"), dict) else {}
         if precision_policy.uses_output_contract(spec):
             contracts = precision_policy.derive_output_contracts(
                 spec, in_dts, spec_standard, tol_src, tol_tuple)
@@ -1151,6 +1250,7 @@ def validate(spec, caseset, evidence):
                 continue
             cid = case["id"]
             row = _empty_row(cid)
+            row["_prec_expected"] = True
             ev = ev_by_id.get(cid)
             binding = case.get("stochastic")
             if not isinstance(ev, dict) or ev.get("status") != "ok" \
@@ -1170,8 +1270,10 @@ def validate(spec, caseset, evidence):
                 else:
                     row.update(判据="正式随机证据不可用，等待三级门 BLOCKED")
             per.append(row)
-        return _verdict(op, vm, None, problems, per,
-                        golden_judged_from="not_applicable_stochastic")
+        return _verdict(
+            op, vm, None, problems, per,
+            golden_judged_from="not_applicable_stochastic",
+            accuracy_summary=_accuracy_summary(spec, None, None, cases, ev_by_id, per))
 
     # `golden_unavailable` 的**可信**名册：由 gen_cases（Layer 1 确定性产物）写进 caseset，
     # **不是**被裁方在 evidence 里自报的状态。下面那条 dims 豁免只认这一份名册，故伪造者动
@@ -1332,11 +1434,17 @@ def validate(spec, caseset, evidence):
             if not isinstance(metrics, dict):
                 row.update(精度="fail", 判据="evidence 缺 precision.metrics（误差分布未复算）")
                 per.append(row); continue
-            std_state, std_why = _judge_by_policy(policy, metrics)
+            empty_judgement = _judge_empty_output(
+                policy, metrics, exp, ev_prec, e, cdtype)
+            std_state, std_why = (empty_judgement if empty_judgement is not None
+                                  else _judge_by_policy(policy, metrics))
             acc_policy = exp.get("acceptance_policy")
             if acc_policy:
                 acc_metrics = ev_prec.get("acceptance_metrics", metrics)
-                acc_state, acc_why = _judge_by_policy(acc_policy, acc_metrics)
+                empty_acc = _judge_empty_output(
+                    acc_policy, acc_metrics, exp, ev_prec, e, cdtype)
+                acc_state, acc_why = (empty_acc if empty_acc is not None
+                                      else _judge_by_policy(acc_policy, acc_metrics))
             else:                                   # 无 acceptance_policy → 继承 standard
                 acc_state, acc_why = std_state, std_why
             row["catlass_compare_pass"] = "na"      # mock/new_example：仓内无 catlass smoke

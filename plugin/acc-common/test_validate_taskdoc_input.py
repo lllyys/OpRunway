@@ -92,6 +92,35 @@ _EXPECTED = {
 
 
 class TaskdocValidationTest(unittest.TestCase):
+    def test_execution_detail_may_use_digest_bound_workflow_default(self):
+        payload = self._payload()
+        self._set_item(
+            payload["items"], "performance_metric_scope",
+            status="not_declared_in_taskdoc", applicable=True,
+            rationale="任务书要求性能但未声明采样执行细节",
+            workflow_default={
+                "source": "repository_policy", "cite": "AGENTS.md §5.10",
+                "sha256": "a" * 64, "rule": "NPU msprof kernel-only",
+            })
+        receipt = self._evaluate(payload)
+        self.assertEqual(receipt["status"], "PASSED")
+        row = next(x for x in receipt["workflow_default_items"]
+                   if x["id"] == "performance_metric_scope")
+        self.assertEqual(row["workflow_default"]["source"], "repository_policy")
+
+    def test_semantic_authority_item_cannot_be_replaced_by_workflow_default(self):
+        payload = self._payload()
+        self._set_item(
+            payload["items"], "golden_reference",
+            status="not_declared_in_taskdoc", rationale="缺失",
+            workflow_default={
+                "source": "repository_policy", "cite": "AGENTS.md",
+                "sha256": "a" * 64, "rule": "numpy",
+            })
+        receipt = self._evaluate(payload)
+        self.assertEqual(receipt["status"], "BLOCKED")
+        self.assertTrue(any("不允许" in error for error in receipt["errors"]))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

@@ -34,7 +34,7 @@ def device_identity(index, soc, torch_version, torch_npu_version):
     }
 
 
-def _binary(value, where):
+def _binary(value, where, *, allow_empty=False):
     if isinstance(value, bytes):
         data = value
     elif isinstance(value, (list, tuple)):
@@ -43,7 +43,7 @@ def _binary(value, where):
         data = bytes(value)
     else:
         raise StochasticCollectorError(f"{where} 须为 bytes 或 0/1 序列")
-    if not data:
+    if not data and not allow_empty:
         raise StochasticCollectorError(f"{where} 为空")
     if any(item not in (0, 1) for item in data):
         raise StochasticCollectorError(f"{where} 含非二元值")
@@ -59,7 +59,6 @@ def validate_caseset_bindings(contract, caseset):
         "contract_sha256": SC.canonical_sha256(contract),
         "plan_sha256": SC.canonical_sha256(plan),
         "witness_profile_id": contract["statistics"]["witness_profile_id"],
-        "roles": [row["role"] for row in plan["cases"]],
     }
     if not isinstance(ledger, dict):
         raise StochasticCollectorError("caseset 缺 stochastic_ledger")
@@ -71,17 +70,43 @@ def validate_caseset_bindings(contract, caseset):
     if isinstance(sample_count, bool) or not isinstance(sample_count, int) \
             or sample_count < contract["statistics"]["min_samples"]:
         raise StochasticCollectorError("caseset.stochastic_ledger.sample_count 非法或低于 min_samples")
+    coverage_rows = ledger.get("coverage_roles", [])
+    if not isinstance(coverage_rows, list):
+        raise StochasticCollectorError("stochastic_ledger.coverage_roles 须为列表")
+    role_plan = list(plan["cases"])
+    for i, row in enumerate(coverage_rows):
+        if not isinstance(row, dict) or set(row) != {
+                "role", "purpose", "probability", "values", "profile_id"} \
+                or row.get("purpose") != "structural_boundary_exact" \
+                or row.get("probability") != 0.0:
+            raise StochasticCollectorError(f"coverage_roles[{i}] 非法")
+        role_plan.append(row)
+    expected_roles = [row["role"] for row in role_plan]
+    if ledger.get("roles") != expected_roles or len(expected_roles) != len(set(expected_roles)):
+        raise StochasticCollectorError("stochastic_ledger.roles 与正式/结构 role plan 漂移")
     cases = caseset.get("cases")
-    if not isinstance(cases, list) or len(cases) != len(plan["cases"]):
+    if not isinstance(cases, list) or len(cases) != len(role_plan):
         raise StochasticCollectorError("stochastic cases 未完整覆盖 role plan")
     by_role = {}
-    plan_by_role = {row["role"]: row for row in plan["cases"]}
+    plan_by_role = {row["role"]: row for row in role_plan}
     for case in cases:
         binding = case.get("stochastic") if isinstance(case, dict) else None
         role = binding.get("role") if isinstance(binding, dict) else None
         if role not in plan_by_role or role in by_role:
             raise StochasticCollectorError(f"stochastic case role 缺失/重复/计划外：{role!r}")
         planned = plan_by_role[role]
+        binding_sample_count = binding.get("sample_count") if isinstance(binding, dict) else None
+        if planned.get("purpose") == "structural_boundary_exact":
+            output_shape = ((case.get("parameter_contract") or {}).get("output") or {}).get("shape")
+            expected_count = 1
+            if not isinstance(output_shape, list):
+                raise StochasticCollectorError(f"coverage role={role!r} 缺 output shape")
+            for dim in output_shape:
+                expected_count *= dim
+            if binding_sample_count != expected_count:
+                raise StochasticCollectorError(f"coverage role={role!r} sample_count 与 output shape 漂移")
+        else:
+            expected_count = sample_count
         expected = {
             "contract_sha256": expected_ledger["contract_sha256"],
             "plan_sha256": expected_ledger["plan_sha256"],
@@ -90,7 +115,7 @@ def validate_caseset_bindings(contract, caseset):
             "purpose": planned["purpose"],
             "probability": planned["probability"],
             "values": planned["values"],
-            "sample_count": sample_count,
+            "sample_count": expected_count,
         }
         if binding != expected or (case.get("expected") or {}).get("stochastic") != expected:
             raise StochasticCollectorError(f"case role={role!r} 的 stochastic binding 漂移")
@@ -133,12 +158,20 @@ def collect(contract_value, caseset, dut_sequences, reference_sequences, device)
     """返回 ``(precondition_receipt, formal_evidence_or_none)``。"""
     contract = SC.normalize_contract(contract_value)
     plan, _cases, sample_count = validate_caseset_bindings(contract, caseset)
+    # Formal statistics depend only on the contract's witness roles.  Structural
+    # profile boundaries are a separate execution/coverage partition: a rejected
+    # rank or dtype remains recorded by the driver but cannot erase valid witness
+    # statistics from another profile.
     roles = [row["role"] for row in plan["cases"]]
     if not isinstance(dut_sequences, dict) or set(dut_sequences) != set(roles):
-        raise StochasticCollectorError("DUT 序列 role 集与完整 stochastic plan 漂移")
-    dut = {role: _binary(dut_sequences[role], f"dut[{role}]") for role in roles}
-    if any(len(value) != sample_count for value in dut.values()):
-        raise StochasticCollectorError("DUT 序列 sample_count 与 caseset ledger 不一致")
+        raise StochasticCollectorError("DUT 序列 role 集与 formal witness plan 漂移")
+    dut = {role: _binary(
+        dut_sequences[role], f"dut[{role}]")
+        for role in roles}
+    by_role = {case["stochastic"]["role"]: case for case in caseset["cases"]}
+    for role, value in dut.items():
+        if len(value) != by_role[role]["stochastic"]["sample_count"]:
+            raise StochasticCollectorError(f"DUT role={role!r} 序列 sample_count 与 case binding 不一致")
     pre_roles = [row["role"] for row in plan["cases"]
                  if row["purpose"] == "rng_consumption_precondition"]
     if not pre_roles:
@@ -232,6 +265,7 @@ def collect(contract_value, caseset, dut_sequences, reference_sequences, device)
         "precondition_receipt_sha256": SC.canonical_sha256(normalized_receipt),
         "device": json.loads(json.dumps(device)),
         "boundaries": boundaries,
+        "coverage_boundaries": [],
         "groups": groups,
     }
     # 生产者先走消费方同一确定性评价，保证合法但统计失败的 evidence 仍可落盘。

@@ -48,6 +48,7 @@ _STOCHASTIC_REFERENCE_MANIFEST = "stochastic_reference_execution.json"
 # 驱动当场拒（声明与实现不一致，本仓判定比缺能力更坏）。同步由
 # `test_dtype_capability_closure.py` 的双向对账钉死，别单改一边。
 _TORCH_DTYPES = {
+    "float64": "float64",
     "float32": "float32",
     "float16": "float16",
     "bfloat16": "bfloat16",
@@ -66,6 +67,7 @@ _TORCH_DTYPES = {
 #: 可识别的预填值，宁可在分配前 fail-closed，也不能退回未初始化的 ``torch.empty``。
 #: tuple[0] 是实际填充值，tuple[1] 是可安全写入 JSON 的诊断表示。
 _OUTPUT_SENTINELS = {
+    "float64": (float("nan"), "nan"),
     "float32": (float("nan"), "nan"),
     "float16": (float("nan"), "nan"),
     "bfloat16": (float("nan"), "nan"),
@@ -635,7 +637,7 @@ def _output_written_check(torch, tensor, contract, *, case_id, output_index):
     if dtype_name == "bool":
         diagnostic["status"] = OUTPUT_CHECK_SKIPPED_BOOL
         return diagnostic
-    if dtype_name in ("float32", "float16", "bfloat16"):
+    if dtype_name in ("float64", "float32", "float16", "bfloat16"):
         matches = torch.isnan(value)
     elif dtype_name == "complex64":
         # torch.isnan(complex) 在任一分量为 NaN 时即为真；这里要求实部、虚部都仍是预填 NaN。
@@ -868,6 +870,20 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact, *, layout_contr
     import torch
     import torch_npu  # noqa: F401
 
+    raw_device = os.environ.get("OPRUNWAY_CPP_EXTENSION_DEVICE")
+    if raw_device is not None:
+        try:
+            device_index = int(raw_device)
+        except ValueError as ex:
+            raise DriverError(
+                "OPRUNWAY_CPP_EXTENSION_DEVICE 须为非负整数") from ex
+        if device_index < 0:
+            raise DriverError("OPRUNWAY_CPP_EXTENSION_DEVICE 须为非负整数")
+        # The adapter binds perf/reference plans to this same explicit index.
+        # Select it before loading/invoking the DUT so precision, stochastic
+        # precondition and performance cannot silently run on different cards.
+        torch.npu.set_device(device_index)
+
     torch.ops.load_library(artifact)
     namespace = getattr(torch.ops, manifest["namespace"])
     variants = {row["entrypoint"]: row for row in manifest["variants"]}
@@ -1013,10 +1029,8 @@ def _stochastic_dut_sequences(caseset, work):
         if isinstance(case, dict) and isinstance(case.get("stochastic"), dict)
     }
     manifest = _load(os.path.join(work, "cpp_extension_out", "out_manifest.json"))
-    if manifest.get("complete") is not True or manifest.get("failed"):
-        failed = [row.get("case_id") for row in manifest.get("failed") or []]
-        raise stochastic_collector.StochasticCollectorError(
-            f"DUT stochastic role 未全量产出；failed_case_ids={failed}")
+    if manifest.get("complete") is not True:
+        raise stochastic_collector.StochasticCollectorError("DUT invocation manifest 未完整走完")
     produced = {
         row.get("case_id"): row for row in manifest.get("produced") or []
         if isinstance(row, dict)
@@ -1054,7 +1068,39 @@ def _stochastic_dut_sequences(caseset, work):
             raise stochastic_collector.StochasticCollectorError(
                 f"DUT role={role!r} 输出含非二元值")
         sequences[role] = bytes(values.astype(np.uint8).tolist())
-    return contract, sequences
+    coverage_roles = {
+        row["role"] for row in (caseset.get("stochastic_ledger") or {}).get("coverage_roles", [])
+    }
+    case_to_role = {
+        case.get("id"): (case.get("stochastic") or {}).get("role")
+        for case in caseset.get("cases") or [] if isinstance(case, dict)
+    }
+    produced_ids = {row.get("case_id") for row in manifest.get("produced") or []}
+    failed_by_id = {
+        row.get("case_id"): row for row in manifest.get("failed") or [] if isinstance(row, dict)
+    }
+    structural = {
+        "schema": "oprunway.stochastic_structural_execution",
+        "schema_version": 1,
+        "planned": len(coverage_roles),
+        "produced": [],
+        "failed": [],
+    }
+    for cid, role in case_to_role.items():
+        if role not in coverage_roles:
+            continue
+        if cid in produced_ids:
+            structural["produced"].append({"case_id": cid, "role": role})
+        elif cid in failed_by_id:
+            failure = failed_by_id[cid]
+            structural["failed"].append({
+                "case_id": cid, "role": role,
+                "error_kind": failure.get("error_kind"), "error": failure.get("error"),
+            })
+        else:
+            raise stochastic_collector.StochasticCollectorError(
+                f"structural role={role!r} 无 produced/failed 执行结果")
+    return contract, sequences, structural
 
 
 def _reference_sequences(caseset, work, device):
@@ -1151,7 +1197,7 @@ def _collect_stochastic(caseset, work, runtime, torch):
         device = stochastic_collector.device_identity(
             index, soc, runtime["torch_version"], runtime["torch_npu_version"])
         runtime["device"] = device
-        contract, dut = _stochastic_dut_sequences(caseset, work)
+        contract, dut, structural = _stochastic_dut_sequences(caseset, work)
         reference, reference_execution = _reference_sequences(caseset, work, device)
         precondition, formal = stochastic_collector.collect(
             contract, caseset, dut, reference, device)
@@ -1164,6 +1210,7 @@ def _collect_stochastic(caseset, work, runtime, torch):
             return {
                 **base, "status": "blocked_precondition",
                 "device": device, "reference_execution": reference_execution,
+                "structural_execution": structural,
                 "precondition": pre_file,
                 "formal_evidence": None,
                 "reason": "RNG exact 前提不一致；正式统计证据按契约未生成",
@@ -1172,6 +1219,7 @@ def _collect_stochastic(caseset, work, runtime, torch):
         return {
             **base, "status": "complete",
             "device": device, "reference_execution": reference_execution,
+            "structural_execution": structural,
             "precondition": pre_file,
             "formal_evidence": {
                 "path": _STOCHASTIC_FORMAL,

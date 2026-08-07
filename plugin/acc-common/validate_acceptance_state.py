@@ -28,6 +28,7 @@ import cann_version  # noqa: E402
 import content_address  # noqa: E402
 import cpp_extension_adapter  # noqa: E402
 import cpp_extension_identity  # noqa: E402
+import dtype_requirement_sets  # noqa: E402
 import perf_mode  # noqa: E402
 import perf_evidence_contract  # noqa: E402
 import source_facts_lookup  # noqa: E402
@@ -90,6 +91,59 @@ _DTYPE_CONTRACT_GAP_KINDS = {_DEFERRED_GAP_KIND, *_FINDING_GAP_KINDS}
 # 区分「报告目录没有 staged spec（仅 legacy）」与「staged spec 在、但
 # dtype_required 写坏/未决」。后者必须已有 error，绝不能再落回 legacy 宽容分支。
 _NO_STAGED_DTYPE_AUTHORITY = object()
+
+
+def _gate_dtype_requirement_sets_authority(caseset, staged_spec, errs):
+    """复核任务书主表/保持集/回归扩展从 staged spec 到 caseset 的内容寻址透传。
+
+    整块缺席保持 legacy 零增量；一旦 spec 声明，就要求 caseset 原样携带 canonical receipt
+    与摘要，并要求它的 required union 逐字等于既有 ``dtype_required``。这样既不让三张表
+    被压成一个无来源并集，也不另开一套 dtype 覆盖判据。
+    """
+    receipt_key = "dtype_requirement_sets_receipt"
+    digest_key = "dtype_requirement_sets_sha256"
+    if not isinstance(staged_spec, dict):
+        if isinstance(caseset, dict) and (
+                receipt_key in caseset or digest_key in caseset):
+            errs.append(
+                "caseset 声明 dtype requirement sets，但 staged spec.json 缺失/非法")
+        return
+    raw_present = "dtype_requirement_sets" in staged_spec
+    if not raw_present:
+        if isinstance(caseset, dict) and (
+                receipt_key in caseset or digest_key in caseset):
+            errs.append(
+                "legacy staged spec 未声明 dtype_requirement_sets，caseset 不得凭空补 receipt")
+        return
+    try:
+        expected = dtype_requirement_sets.from_spec(staged_spec)
+    except dtype_requirement_sets.DtypeRequirementSetsError as ex:
+        errs.append(f"staged spec.dtype_requirement_sets 非法：{ex}")
+        return
+    if not isinstance(caseset, dict):
+        errs.append("caseset 非 object，无法复核 dtype requirement sets")
+        return
+    receipt = caseset.get(receipt_key)
+    digest = caseset.get(digest_key)
+    if receipt is None or digest is None:
+        errs.append(
+            "staged spec 声明 dtype_requirement_sets，但 caseset 缺 receipt/sha256")
+        return
+    if digest != expected["sha256"]:
+        errs.append(
+            "caseset dtype requirement sets 摘要与 staged spec 重算摘要不一致")
+    try:
+        dtype_requirement_sets.validate_receipt(
+            receipt, expected_sha256=expected["sha256"])
+    except dtype_requirement_sets.DtypeRequirementSetsError as ex:
+        errs.append(f"caseset dtype requirement sets receipt 非法：{ex}")
+    required = expected["required_dtypes"]
+    if staged_spec.get("dtype_required") != required:
+        errs.append(
+            "staged spec.dtype_required 与 dtype requirement sets 的主表∪保持集不一致")
+    if caseset.get("dtype_required") != required:
+        errs.append(
+            "caseset.dtype_required 与 dtype requirement sets 的主表∪保持集不一致")
 
 # ══ `dtype_deferred` 的「能力来源」受控词表 ══════════════════════════════════════════════════
 # 自认能力缺口这句话必须**指名道姓说是哪张能力表不支持**，门才有对照物。不指名就只剩一句自报，
@@ -1167,10 +1221,57 @@ def _gate_tensor_shape_attr_spec_authority(
             errs.append("atomic_attr_rows 只准入带 multi_input_contract 的完整 P×A×Q 计划")
         else:
             expected_profiles = {row["profile_id"] for row in bundle["profiles"]}
-            actual_profiles = {cell.get("profile_id")
-                               for cell in actual_ledger.get("cells", [])}
+            denominator_cells = list(actual_ledger.get("cells", []))
+            if actual_ledger.get("schema_version") == 2:
+                denominator_cells.extend(actual_ledger.get("excluded_cells", []))
+            actual_profiles = {cell.get("profile_id") for cell in denominator_cells}
             if actual_profiles != expected_profiles:
                 errs.append("atomic ledger 的 P profile 身份与 staged spec 不一致")
+            if actual_ledger.get("schema_version") == 2:
+                profile_by_id = {row["profile_id"]: row for row in bundle["profiles"]}
+                expected_rows = {row["id"]: row for row in expected_atomic["rows"]}
+                emitted_count = len(actual_ledger.get("cells", []))
+                for index, cell in enumerate(denominator_cells):
+                    location = "cells" if index < emitted_count else "excluded_cells"
+                    wanted_status = "executable" if location == "cells" else "excluded"
+                    where = f"atomic_attr_ledger.{location}[{index if location == 'cells' else index - emitted_count}]"
+                    profile = profile_by_id.get(cell.get("profile_id"))
+                    row = expected_rows.get(cell.get("row_id"))
+                    independent = q_by_id.get(cell.get("q_id"))
+                    if profile is None or row is None or independent is None:
+                        errs.append(
+                            f"{where}: P/A/Q identity 不属于 staged spec 完整分母")
+                        continue
+                    try:
+                        atomic_binding = gen_cases.TSA.bind_atomic_attr_row(
+                            expected_atomic, row["id"], row["attrs"],
+                            expected_contract_sha256=expected_atomic["sha256"],
+                            where=f"{where}.staged_atomic_replay")
+                        expected_app = gen_cases.TSA.evaluate_atomic_attr_applicability(
+                            expected_atomic, row["id"], profile["inputs"],
+                            expected_contract_sha256=expected_atomic["sha256"],
+                            where=f"{where}.staged_applicability_replay")
+                    except Exception as ex:
+                        errs.append(f"{where}: staged applicability 无法重放：{ex}")
+                        continue
+                    expected_identity = {
+                        "profile_id": profile["profile_id"],
+                        "row_id": atomic_binding["row_id"],
+                        "row_sha256": atomic_binding["row_sha256"],
+                        "q_id": independent["q_id"],
+                        "q_sha256": independent["q_sha256"],
+                    }
+                    if any(cell.get(key) != value
+                           for key, value in expected_identity.items()):
+                        errs.append(
+                            f"{where}: P/A/Q digest 与 staged spec 重放结果不一致")
+                    if cell.get("cell_id") != gen_cases._atomic_cell_id(
+                            profile["profile_id"], atomic_binding, independent):
+                        errs.append(f"{where}: cell_id 未绑定 staged spec P/A/Q identity")
+                    if (expected_app.get("status") != wanted_status
+                            or cell.get("applicability") != expected_app):
+                        errs.append(
+                            f"{where}: applicability/actual_rank 与 staged spec 具名 profile 重放结果不一致")
         source_binding = expected_atomic.get("source_binding") or {}
         facts = source_facts_lookup.find_source_facts(d, source_facts_path)
         if facts == source_facts_lookup.SOURCE_FACTS_UNTRUSTED:
@@ -1233,8 +1334,10 @@ def gate_task1(d, errs, source_facts_path=None):
         cpp_extension_adapter.validate_caseset_tensor_shape_attr_contract(cs)
     except cpp_extension_adapter.CppExtensionAdapterError as ex:
         errs.append(f"caseset tensor shape/attr ledger 契约非法：{ex}")
+    staged_spec = _load(d, "spec.json")
+    _gate_dtype_requirement_sets_authority(cs, staged_spec, errs)
     _gate_tensor_shape_attr_spec_authority(
-        d, cs, _load(d, "spec.json"), errs,
+        d, cs, staged_spec, errs,
         source_facts_path=source_facts_path)
     gu_ledger = _golden_unavailable_ledger(cs, errs)   # 一等状态的佐证台账（结构坏 → None）
     vd = _load(d, "verdict.json")                      # 还没跑到裁决就没有；有就必须对得上
@@ -1256,6 +1359,16 @@ def gate_task1(d, errs, source_facts_path=None):
         if not c.get("inputs"):
             errs.append(f"{cid}: 无 inputs")
         exp = c.get("expected") if isinstance(c.get("expected"), dict) else {}
+        if cs.get("stochastic_contract") is not None and exp.get("compare") == "stochastic":
+            # Random capabilities are judged by the separately digested formal
+            # collection, not by a fabricated pointwise golden/tolerance.
+            if not isinstance(c.get("stochastic"), dict):
+                errs.append(f"{cid}: stochastic case 缺 role/contract binding")
+            if exp.get("golden_path") is not None:
+                errs.append(f"{cid}: stochastic case 不得声明 pointwise golden_path")
+            if not c.get("dims"):
+                errs.append(f"{cid}: 无 dims（功能/精度/性能维度）")
+            continue
         if _is_multi_output(exp):
             # 多输出契约：口径/golden 逐输出落在 `expected.outputs[]`，顶层无 golden_path/threshold/policy。
             # 逐输出校完整性（结构不合法即 fail-closed），legacy 单输出分支**一行不走**（向后兼容硬约束）。
@@ -1637,6 +1750,7 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
     # 本 receipt 子门缺席时仍按既有 base_spec_sha256 读法，但同级 dtype 权威门会明确 FAILED，
     # 不会据此放行（静态残余与恢复条件在 `_staged_dtype_authority` 挂账）。
     staged_spec = _load(d, "spec.json")
+    _gate_dtype_requirement_sets_authority(caseset, staged_spec, errs)
     _gate_tensor_shape_attr_spec_authority(
         d, caseset, staged_spec, errs,
         source_facts_path=source_facts_path)
@@ -1764,7 +1878,7 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
     # evidence BLOCKED；只有前提 ready 后，合法的统计 failed 才留给 validator 判 precision FAIL。
     try:
         stochastic = cpp_extension_adapter.validate_stochastic_collection(
-            d, caseset, receipt)
+            os.path.join(d, "work"), caseset, receipt)
     except cpp_extension_adapter.CppExtensionAdapterError as ex:
         errs.append(f"stochastic evidence 未闭合：{ex}")
     else:
@@ -2129,10 +2243,18 @@ def gate_task2(d, errs, source_facts_path=None):
     na_ids = {c["id"] for c in cases if isinstance(c, dict) and c.get("id")
               and isinstance(c.get("expected"), dict) and c["expected"].get("compare") == "na"
               and _case_strict_empty(c)}
+    stochastic_ids = {
+        c["id"] for c in cases
+        if isinstance(c, dict) and c.get("id")
+        and cs.get("stochastic_contract") is not None
+        and isinstance(c.get("expected"), dict)
+        and c["expected"].get("compare") == "stochastic"
+        and isinstance(c.get("stochastic"), dict)
+    }
     # 跑挂 / 无 golden 的 case：同样无精度证据可校，但豁免只给「证据完整性」这一项——
     # 结论侧由 `_gate_task2_unjudgeable` 逐条反向核（必须在 verdict 里落成失败）。
     unjudgeable_ids = _gate_task2_unjudgeable(cases, ev_list, vd, errs)
-    skip_precision_ids = na_ids | unjudgeable_ids
+    skip_precision_ids = na_ids | unjudgeable_ids | stochastic_ids
     # Q9 oracle_source 门校用 precision_policy（纯 stdlib：ORACLE_SOURCES + oracle_source_from_golden，不拉 numpy）。
     # import 失败（几乎不会）→ 记 error、oracle 校跳过（但门 FAILED），不静默放过。
     try:

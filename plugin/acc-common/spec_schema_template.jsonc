@@ -52,7 +52,7 @@
   //   ⚠ 整个 `change` 字段**只有「无任务书 ↔ PR 对应」的 demo spec 才可以省略**（catlass 那类）；
   //     正式验收 spec 一律必填，且 `change` 一旦出现就必须有合法的 `kind`（只写 note 不算交代过）。
   "change": {
-    "kind": "<rewrite_tbe | add_dtype | extend_shape | align_dtype | semantic | new_op | gpu_port | bugfix>",
+    "kind": "<rewrite_tbe | add_dtype | extend_shape | align_dtype | semantic | new_op | gpu_port | bugfix | memory_optimization>",
     "note": "<定性说明>"
   },
   "params_source": "<有完整参数表→task_doc_table；只写『原算子所有类型』→derived_from_reference>",
@@ -470,7 +470,7 @@
 //       **三种被授权情形**，逐条对应 `measure_only_authorization.taskdoc_requirement` 的受控值：
 //         - `no_perf_requirement`             —— 任务书对性能没要求；
 //         - `gpu_comparison`                  —— 任务书要求的是与 GPU 比对（A100 / OpenCV CUDA / ATK 双标杆之类）；
-//         - `change_class_no_perf_comparison` —— 本轮 `change.kind` ∈ {add_dtype, extend_shape, new_op}
+//         - `change_class_no_perf_comparison` —— 本轮 `change.kind` ∈ {add_dtype, extend_shape, new_op, memory_optimization}；最后一类必须有任务书引文锚
 //           （用户 2026-08-05：这三类改动统一按「无性能对比要求」办）。
 //           ⚠ 它**不要求任务书没写比值条款**——恰恰相反，它唯一非冗余的适用面就是「任务书写了比值条款、
 //             但本轮改动属这三类」。此时该条款**强制记进 `task_pr_gaps` 标「未验收」**，仍只产 msprof

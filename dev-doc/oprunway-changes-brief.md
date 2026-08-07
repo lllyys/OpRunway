@@ -2,6 +2,12 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-07 · 三算子 N10 单卡正式验收与实测回修
+
+- 三算子均用 fresh intake、generated cases、VERIFIED vendor receipt 和独立 A3 device 完成单卡正式验收：Bernoulli=`FAIL(精度)`、Remainder=`PASSED_WITH_GAPS`、Roll=`FAIL(精度)`；所有结论均由确定性产物写出。
+- 实测回修覆盖 stochastic formal/structural 分区、合法 empty tensor 结构精度、atomic applicability、dtype requirement sets、BF16 显式 lossy、任务书 workflow-default 分层、measure-only gap 终态和性能证据摘要投影；未把 gate passed、部分 msprof 或 stock vendor 对照包装成算子通过。
+- Roll/Bernoulli 的 rank0 exact vendor 均返回 161002；Roll 已用自建 rank0 descriptor、官方 ConvertType 与同机 stock torch_npu 做 A/B，排除通用 converter 后保留为 exact DUT 构建侧缺口。
+
 ## 2026-08-07 · 三算子统一计划 N9：measure-only msprof 证据链
 
 - measure-only 现逐 case 保存并重算 kernel-only 原始采样，且把 NPU device、SoC、CANN 观测、DUT ELF 与双符号身份绑定进确定性收据；三类授权均强制 cite/quote/任务书摘要，GPU/ratio 条款只以未验收 gap 进入 `PASSED_WITH_GAPS`，资源条款不得进入性能裁决。

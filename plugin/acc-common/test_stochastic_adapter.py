@@ -50,6 +50,10 @@ def _fixture(root):
         "contract_sha256": S.canonical_sha256(contract),
         "plan_sha256": S.canonical_sha256(plan), "status": "complete",
         "device": _device(),
+        "structural_execution": {
+            "schema": "oprunway.stochastic_structural_execution", "schema_version": 1,
+            "planned": 0, "produced": [], "failed": [],
+        },
         "reference_execution": {
             "runner": "isolated_subprocess_without_dut_vendor_env",
             "manifest_path": manifest_ref["path"],

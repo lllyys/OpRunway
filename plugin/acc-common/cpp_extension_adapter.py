@@ -57,6 +57,7 @@ _LAYOUT_OUTPUT_FIELDS = frozenset({
 })
 ATOMIC_ATTR_LEDGER_SCHEMA = "oprunway.atomic_attr_case_ledger"
 ATOMIC_ATTR_LEDGER_VERSION = 1
+ATOMIC_ATTR_LEDGER_APPLICABILITY_VERSION = 2
 TENSOR_SHAPE_ATTR_BINDINGS_SCHEMA = "oprunway.tensor_shape_attr_bindings"
 TENSOR_SHAPE_ATTR_BINDINGS_VERSION = 1
 INVOCATION_ACCOUNTING_SCHEMA = "oprunway.cpp_extension_invocation_accounting"
@@ -65,6 +66,90 @@ INVOCATION_ACCOUNTING_VERSION = 1
 
 def _canonical_sha(value):
     return hashlib.sha256(content_address.canonical_json_bytes(value)).hexdigest()
+
+
+def _atomic_cell_id(cell):
+    return _canonical_sha({key: cell[key] for key in (
+        "profile_id", "row_id", "row_sha256", "q_id", "q_sha256")})
+
+
+def _validate_atomic_applicability(value, *, expected_status, where):
+    """严格重放 v2 cell 的适用性收据；不从算子名或属性名推断。"""
+    _layout_exact_keys(value, {
+        "status", "applicability_sha256", "rank_domain",
+        "required_nonempty_attrs", "reasons"}, where)
+    status = value.get("status")
+    if status != expected_status:
+        raise CppExtensionAdapterError(
+            f"{where}.applicability.status={status!r}，应为 {expected_status!r}")
+    app_sha = value.get("applicability_sha256")
+    if app_sha is None:
+        if (value.get("rank_domain") is not None
+                or value.get("required_nonempty_attrs") != []
+                or value.get("reasons") != []
+                or status != "executable"):
+            raise CppExtensionAdapterError(
+                f"{where}.applicability 无谓词摘要却声明了判据/排除理由")
+        return value
+    _layout_sha256(app_sha, f"{where}.applicability_sha256")
+    rank = value.get("rank_domain")
+    _layout_exact_keys(rank, {
+        "input", "allowed_ranks", "actual_rank", "matched"},
+        f"{where}.rank_domain")
+    _layout_nonempty_string(rank.get("input"), f"{where}.rank_domain.input")
+    allowed = rank.get("allowed_ranks")
+    if (not isinstance(allowed, list) or not allowed
+            or any(isinstance(item, bool) or not isinstance(item, int) or item < 0
+                   for item in allowed)
+            or len(allowed) != len(set(allowed))):
+        raise CppExtensionAdapterError(
+            f"{where}.rank_domain.allowed_ranks 须为非空、无重复的非负整数列表")
+    actual_rank = rank.get("actual_rank")
+    if isinstance(actual_rank, bool) or not isinstance(actual_rank, int) or actual_rank < 0:
+        raise CppExtensionAdapterError(
+            f"{where}.applicability.actual_rank 须为非负整数")
+    if type(rank.get("matched")) is not bool \
+            or rank["matched"] != (actual_rank in allowed):
+        raise CppExtensionAdapterError(
+            f"{where}.applicability rank matched 与 actual_rank/allowed_ranks 不一致")
+    attrs = value.get("required_nonempty_attrs")
+    if not isinstance(attrs, list):
+        raise CppExtensionAdapterError(
+            f"{where}.required_nonempty_attrs 须为列表")
+    seen_attrs = set()
+    for index, item in enumerate(attrs):
+        item_where = f"{where}.required_nonempty_attrs[{index}]"
+        _layout_exact_keys(item, {"attr", "actual_length", "matched"}, item_where)
+        name = _layout_nonempty_string(item.get("attr"), f"{item_where}.attr")
+        if name in seen_attrs:
+            raise CppExtensionAdapterError(
+                f"{where}.required_nonempty_attrs 属性 {name!r} 重复")
+        seen_attrs.add(name)
+        length = item.get("actual_length")
+        if isinstance(length, bool) or not isinstance(length, int) or length < 0:
+            raise CppExtensionAdapterError(
+                f"{item_where}.actual_length 须为非负整数")
+        if type(item.get("matched")) is not bool or item["matched"] != (length > 0):
+            raise CppExtensionAdapterError(
+                f"{item_where}.matched 与 actual_length 不一致")
+    expected_reasons = []
+    if not rank["matched"]:
+        expected_reasons.append({
+            "kind": "rank_outside_domain", "input": rank["input"],
+            "actual_rank": actual_rank, "allowed_ranks": list(allowed),
+        })
+    expected_reasons.extend(
+        {"kind": "required_attr_empty", "attr": item["attr"]}
+        for item in attrs if not item["matched"])
+    if not _layout_equal(value.get("reasons"), expected_reasons,
+                         f"{where}.applicability.reasons"):
+        raise CppExtensionAdapterError(
+            f"{where}.applicability reasons 与 rank/非空属性判据不一致")
+    derived_status = "excluded" if expected_reasons else "executable"
+    if status != derived_status:
+        raise CppExtensionAdapterError(
+            f"{where}.applicability status 与确定性判据不一致")
+    return value
 
 
 def _file_sha(path):
@@ -403,6 +488,10 @@ def validate_caseset_tensor_shape_attr_contract(caseset):
             if not isinstance(profile_id, str) or not profile_id:
                 raise CppExtensionAdapterError(
                     f"{cid}: atomic case 缺 parameter_contract.profile_id（P 轴身份）")
+            profile_inputs = profile.get("inputs")
+            if not isinstance(profile_inputs, list):
+                raise CppExtensionAdapterError(
+                    f"{cid}: atomic case 的 parameter_contract.inputs 缺失")
             atomic_rows.append({
                 "profile_id": profile_id,
                 "row_id": row_id,
@@ -411,6 +500,8 @@ def validate_caseset_tensor_shape_attr_contract(caseset):
                 "q_sha256": independent["q_sha256"],
                 "case_id": cid,
                 "atomic_rows_sha256": atomic["atomic_rows_sha256"],
+                "atomic_attrs": atomic["attrs"],
+                "profile_inputs": profile_inputs,
             })
 
         cyclic = bindings.get("cyclic_indices")
@@ -473,16 +564,26 @@ def validate_caseset_tensor_shape_attr_contract(caseset):
     if atomic_rows and ledger is None:
         raise CppExtensionAdapterError("atomic cases 缺顶层 atomic_attr_ledger")
     if ledger is not None:
-        _layout_exact_keys(ledger, {
-            "schema", "schema_version", "atomic_rows_sha256", "source_binding",
-            "profiles", "atomic_rows", "independent_combinations", "expected",
-            "emitted", "cells"}, "atomic_attr_ledger")
+        version = ledger.get("schema_version")
         if ledger.get("schema") != ATOMIC_ATTR_LEDGER_SCHEMA \
-                or type(ledger.get("schema_version")) is not int \
-                or ledger.get("schema_version") != ATOMIC_ATTR_LEDGER_VERSION:
+                or type(version) is not int \
+                or version not in {
+                    ATOMIC_ATTR_LEDGER_VERSION,
+                    ATOMIC_ATTR_LEDGER_APPLICABILITY_VERSION}:
             raise CppExtensionAdapterError(
                 f"atomic_attr_ledger 须为 {ATOMIC_ATTR_LEDGER_SCHEMA} "
-                f"v{ATOMIC_ATTR_LEDGER_VERSION}")
+                f"v{ATOMIC_ATTR_LEDGER_VERSION}/"
+                f"v{ATOMIC_ATTR_LEDGER_APPLICABILITY_VERSION}")
+        common_keys = {
+            "schema", "schema_version", "atomic_rows_sha256", "source_binding",
+            "profiles", "atomic_rows", "independent_combinations", "emitted", "cells"}
+        if version == ATOMIC_ATTR_LEDGER_VERSION:
+            _layout_exact_keys(
+                ledger, common_keys | {"expected"}, "atomic_attr_ledger")
+        else:
+            _layout_exact_keys(ledger, common_keys | {
+                "structure_denominator_total", "planned", "excluded",
+                "excluded_cells"}, "atomic_attr_ledger")
         _layout_sha256(ledger_sha, "atomic_attr_ledger_sha256")
         if _canonical_sha(ledger) != ledger_sha:
             raise CppExtensionAdapterError("atomic_attr_ledger_sha256 与 ledger 重算不一致")
@@ -496,37 +597,110 @@ def validate_caseset_tensor_shape_attr_contract(caseset):
             raise CppExtensionAdapterError("atomic source_binding.compose_kind 非受控值")
         for key in ("spec_sha256", "taskdoc_snapshot_sha256", "source_facts_sha256"):
             _layout_sha256(source_binding.get(key), f"atomic source_binding.{key}")
-        for key in ("profiles", "atomic_rows", "independent_combinations",
-                    "expected", "emitted"):
+        positive_keys = ["profiles", "atomic_rows", "independent_combinations", "emitted"]
+        if version == ATOMIC_ATTR_LEDGER_VERSION:
+            positive_keys.append("expected")
+        else:
+            positive_keys.extend(["structure_denominator_total", "planned"])
+        for key in positive_keys:
             if isinstance(ledger.get(key), bool) or not isinstance(ledger.get(key), int) \
                     or ledger[key] < 1:
                 raise CppExtensionAdapterError(f"atomic_attr_ledger.{key} 须为正整数")
         product = (ledger["profiles"] * ledger["atomic_rows"]
                    * ledger["independent_combinations"])
-        if product != ledger["expected"] or ledger["expected"] != ledger["emitted"]:
-            raise CppExtensionAdapterError("atomic P×A×Q 三重计数不一致")
+        if version == ATOMIC_ATTR_LEDGER_VERSION:
+            if product != ledger["expected"] or ledger["expected"] != ledger["emitted"]:
+                raise CppExtensionAdapterError("atomic P×A×Q 三重计数不一致")
+        else:
+            excluded = ledger.get("excluded")
+            if isinstance(excluded, bool) or not isinstance(excluded, int) or excluded < 0:
+                raise CppExtensionAdapterError("atomic_attr_ledger.excluded 须为非负整数")
+            if (product != ledger["structure_denominator_total"]
+                    or ledger["planned"] + excluded != product
+                    or ledger["planned"] != ledger["emitted"]):
+                raise CppExtensionAdapterError(
+                    "atomic applicability 完整分母 P×A×Q 与 planned/excluded/emitted 不一致")
         cells = ledger.get("cells")
         if not isinstance(cells, list) or len(cells) != ledger["emitted"]:
             raise CppExtensionAdapterError("atomic cells 数与 emitted 不一致")
         normalized_cells = []
         for index, cell in enumerate(cells):
-            _layout_exact_keys(cell, {
+            keys = {
                 "profile_id", "row_id", "row_sha256", "q_id", "q_sha256",
-                "case_id"}, f"atomic_attr_ledger.cells[{index}]")
+                "case_id"}
+            if version == ATOMIC_ATTR_LEDGER_APPLICABILITY_VERSION:
+                keys |= {"cell_id", "applicability"}
+            _layout_exact_keys(cell, keys, f"atomic_attr_ledger.cells[{index}]")
             normalized_cells.append(cell)
         expected_cells = [{key: row[key] for key in (
             "profile_id", "row_id", "row_sha256", "q_id", "q_sha256", "case_id")}
                           for row in atomic_rows]
-        if not _layout_equal(normalized_cells, expected_cells, "atomic cells"):
+        emitted_projection = [{key: cell[key] for key in expected_cells[0]}
+                              for cell in normalized_cells] if expected_cells else []
+        if not _layout_equal(emitted_projection, expected_cells, "atomic cells"):
             raise CppExtensionAdapterError(
                 "atomic cells 未按 case 顺序逐字绑定 P/row/Q/case")
         if any(row["atomic_rows_sha256"] != table_sha for row in atomic_rows):
             raise CppExtensionAdapterError("atomic case 的 table digest 与顶层 ledger 漂移")
-        profiles = {row["profile_id"] for row in atomic_rows}
-        rows = {(row["row_id"], row["row_sha256"]) for row in atomic_rows}
-        qs = {(row["q_id"], row["q_sha256"]) for row in atomic_rows}
+        denominator_cells = list(normalized_cells)
+        if version == ATOMIC_ATTR_LEDGER_APPLICABILITY_VERSION:
+            excluded_cells = ledger.get("excluded_cells")
+            if not isinstance(excluded_cells, list) \
+                    or len(excluded_cells) != ledger["excluded"]:
+                raise CppExtensionAdapterError(
+                    "atomic applicability excluded_cells 数与 excluded/完整分母不一致")
+            for index, cell in enumerate(excluded_cells):
+                where = f"atomic_attr_ledger.excluded_cells[{index}]"
+                _layout_exact_keys(cell, {
+                    "profile_id", "row_id", "row_sha256", "q_id", "q_sha256",
+                    "cell_id", "applicability"}, where)
+                _validate_atomic_applicability(
+                    cell["applicability"], expected_status="excluded", where=where)
+            for index, cell in enumerate(normalized_cells):
+                where = f"atomic_attr_ledger.cells[{index}]"
+                app = _validate_atomic_applicability(
+                    cell["applicability"], expected_status="executable", where=where)
+                row = atomic_rows[index]
+                rank = app.get("rank_domain")
+                if rank is not None:
+                    named = [item for item in row["profile_inputs"]
+                             if isinstance(item, dict)
+                             and item.get("name") == rank["input"]
+                             and item.get("kind") == "tensor"]
+                    if len(named) != 1 or not isinstance(named[0].get("shape"), list) \
+                            or len(named[0]["shape"]) != rank["actual_rank"]:
+                        raise CppExtensionAdapterError(
+                            f"{where}.applicability.actual_rank 未绑定具名 profile input")
+                    for attr_receipt in app["required_nonempty_attrs"]:
+                        raw_attr = row["atomic_attrs"].get(attr_receipt["attr"])
+                        if not isinstance(raw_attr, list) \
+                                or len(raw_attr) != attr_receipt["actual_length"]:
+                            raise CppExtensionAdapterError(
+                                f"{where}.applicability 非空属性长度未绑定 case atomic attrs")
+            denominator_cells.extend(excluded_cells)
+            cell_ids = []
+            for index, cell in enumerate(denominator_cells):
+                where = f"atomic denominator cell[{index}]"
+                for key in ("profile_id", "row_id", "q_id"):
+                    _layout_nonempty_string(cell.get(key), f"{where}.{key}")
+                for key in ("row_sha256", "q_sha256", "cell_id"):
+                    _layout_sha256(cell.get(key), f"{where}.{key}")
+                if cell["cell_id"] != _atomic_cell_id(cell):
+                    raise CppExtensionAdapterError(
+                        f"{where}.cell_id 与 P/A/Q identity 确定性重算不一致")
+                cell_ids.append(cell["cell_id"])
+            if len(cell_ids) != len(set(cell_ids)):
+                raise CppExtensionAdapterError(
+                    "atomic denominator cell_id identity 重复（executed/excluded 交叉或复制）")
+        profiles = {row["profile_id"] for row in denominator_cells}
+        rows = {(row["row_id"], row["row_sha256"]) for row in denominator_cells}
+        qs = {(row["q_id"], row["q_sha256"]) for row in denominator_cells}
         triples = {(row["profile_id"], row["row_id"], row["q_id"])
-                   for row in atomic_rows}
+                   for row in denominator_cells}
+        if len({row["row_id"] for row in denominator_cells}) != len(rows):
+            raise CppExtensionAdapterError("atomic row_id 对应多个 row_sha256 identity")
+        if len({row["q_id"] for row in denominator_cells}) != len(qs):
+            raise CppExtensionAdapterError("atomic q_id 对应多个 q_sha256 identity")
         if (len(profiles), len(rows), len(qs), len(triples)) != (
                 ledger["profiles"], ledger["atomic_rows"],
                 ledger["independent_combinations"], product):
@@ -1440,7 +1614,7 @@ def _write_perf_plan(caseset, work, evidence, receipt):
       一条性能都不采。理由是比值裁决要拿这批数去和标杆比，算错的快不算快。
     · ``measure_only``：口径本身不产任何达标结论，性能维只是「这颗 kernel 实测多少微秒」。
       此时若沿用总门，精度一 fail 就等于 msprof 零数据 —— 而「只输出绝对耗时」恰恰是本档
-      唯一的产出。故改为从**已成功执行且精度可判为 pass** 的 case 里选性能子集继续采，
+      唯一的产出。故改为从**已成功执行、可继续 profiler 调用**的 case 里选性能子集继续采，
       **分母一条不丢**：每条落选的性能 case 都进 `skipped` 并写明真实原因。
       这不放松任何结论：性能计划里显式带着 `precision_gate` 台账，且本档不产比值、
       不贡献 pass/fail，最终裁决仍由 validator 按精度出（这里出的一定还是 FAIL）。
@@ -1454,14 +1628,19 @@ def _write_perf_plan(caseset, work, evidence, receipt):
     except perf_mode.PerfModeError as ex:
         raise CppExtensionAdapterError(f"cpp_extension 性能模板口径非法：{ex}") from ex
     measure_only = perf_mode.is_measure_only(mode)
-    passed = PM.accuracy_pass_ids(evidence)
+    accuracy_passed = PM.accuracy_pass_ids(evidence)
+    # measure_only records runtime cost and makes no performance pass claim.
+    # Its executable partition is therefore transport-produced cases, even when
+    # formal/statistical precision is FAIL/BLOCKED; failures remain in skipped.
+    produced = {row.get("case_id") for row in evidence
+                if isinstance(row, dict) and row.get("status") == "ok"}
     precision_ids = {
         case["id"] for case in caseset.get("cases") or []
         if "精度" in (case.get("dims") or [])
     }
     if not precision_ids:
         precision_ids = {case["id"] for case in caseset.get("cases") or []}
-    not_passed = sorted(precision_ids - passed)
+    not_passed = sorted(precision_ids - accuracy_passed)
     if not_passed and not measure_only:
         # 与 run_workflow 的 Task2 总门同口径：任何应裁精度 case 未通过，都不得提前采性能。
         # 性能 case 虽是 precision-pass 子集，但这个“子集”只在整份精度验收通过后做选择。
@@ -1469,7 +1648,8 @@ def _write_perf_plan(caseset, work, evidence, receipt):
             "case_id": cid,
             "reason": SKIPPED_PRECISION_OVERALL_GATE,
         } for cid in not_passed]
-    selected, skipped = PM.select_perf_cases(caseset, passed)
+    eligible = produced if measure_only else accuracy_passed
+    selected, skipped = PM.select_perf_cases(caseset, eligible)
     if measure_only:
         # `select_perf_cases` 对所有未 pass 的 case 一律记 `skipped_accuracy_failed`；
         # 其中「精度块根本不存在」的那些其实是**没跑出来/判不了**，理由要改写准。
@@ -1510,9 +1690,9 @@ def _write_perf_plan(caseset, work, evidence, receipt):
             "mode": mode,
             "gate_passed": not not_passed,
             "precision_case_total": len(precision_ids),
-            "precision_passed_count": len(passed & precision_ids),
+            "precision_passed_count": len(accuracy_passed & precision_ids),
             "precision_not_passed": not_passed,
-            "note": ("measure_only：只测不比，性能子集仅取精度已 pass 的 case；"
+            "note": ("measure_only：只测不比，性能子集取 transport 已成功产出、可执行的 case；"
                      "本子集**不表示**精度或整体通过（AGENTS.md 5.8/5.10）")
             if measure_only else "ratio_gated：整份精度通过才进入性能采集",
         },
@@ -1870,6 +2050,41 @@ def validate_stochastic_collection(work, caseset, receipt):
                          "reason": collection["reason"]}}
     if status not in ("blocked_precondition", "complete"):
         raise CppExtensionAdapterError(f"stochastic collection.status 非法：{status!r}")
+    structural = collection.get("structural_execution")
+    coverage_roles = {
+        row["role"] for row in (caseset.get("stochastic_ledger") or {}).get("coverage_roles", [])
+    }
+    role_by_case = {
+        case.get("id"): (case.get("stochastic") or {}).get("role")
+        for case in caseset.get("cases") or [] if isinstance(case, dict)
+    }
+    if not isinstance(structural, dict) or structural.get("schema") != \
+            "oprunway.stochastic_structural_execution" \
+            or structural.get("schema_version") != 1 \
+            or structural.get("planned") != len(coverage_roles):
+        raise CppExtensionAdapterError("stochastic structural execution schema/分母非法")
+    manifest = (_strict_json(os.path.join(work, _OUT, "out_manifest.json"))
+                if coverage_roles else {"produced": [], "failed": []})
+    produced_ids = {row.get("case_id") for row in manifest.get("produced") or []}
+    failed_by_id = {row.get("case_id"): row for row in manifest.get("failed") or []
+                    if isinstance(row, dict)}
+    expected_produced, expected_failed = [], []
+    for cid, role in role_by_case.items():
+        if role not in coverage_roles:
+            continue
+        if cid in produced_ids:
+            expected_produced.append({"case_id": cid, "role": role})
+        elif cid in failed_by_id:
+            failure = failed_by_id[cid]
+            expected_failed.append({
+                "case_id": cid, "role": role,
+                "error_kind": failure.get("error_kind"), "error": failure.get("error"),
+            })
+        else:
+            raise CppExtensionAdapterError(f"stochastic structural case={cid!r} 无执行结果")
+    if structural.get("produced") != expected_produced \
+            or structural.get("failed") != expected_failed:
+        raise CppExtensionAdapterError("stochastic structural execution 与 out_manifest 漂移")
     reference = collection.get("reference_execution")
     if not isinstance(reference, dict) \
             or reference.get("runner") != "isolated_subprocess_without_dut_vendor_env" \
@@ -1936,18 +2151,40 @@ def _build_execution_evidence(caseset, work, receipt):
         return RA.build_multi_output_evidence(
             caseset, work, os.path.join(work, _OUT))
     validated = validate_stochastic_collection(work, caseset, receipt)
+    invocation = validate_invocation_accounting(
+        _strict_json(os.path.join(work, _PLAN)), receipt.get("invocation"))
+    outcomes = {
+        row["case_id"]: row["outcome"]
+        for row in invocation["case_records"]
+    }
+    out_manifest = _strict_json(os.path.join(work, _OUT, "out_manifest.json"))
+    failed = {
+        row.get("case_id"): row for row in (out_manifest.get("failed") or [])
+        if isinstance(row, dict) and isinstance(row.get("case_id"), str)
+    }
     rows = []
     for case in caseset.get("cases") or []:
         binding = case.get("stochastic")
-        rows.append({
-            "case_id": case.get("id"), "status": "ok",
+        cid = case.get("id")
+        evidence_row = {
+            "case_id": cid,
+            # Formal stochastic predicates are separate from transport success.
+            # Preserve the driver's per-case outcome so a rejected rank/dtype is
+            # evidence-incomplete (BLOCKED), never rewritten into a synthetic OK.
+            "status": ("ok" if outcomes.get(cid) == "produced"
+                       else "execution_failed"),
             "stochastic": binding,
             "precision": {
                 "compare": "stochastic",
                 "out_shape": (case.get("expected") or {}).get("out_shape"),
                 "out_dtype": (case.get("expected") or {}).get("compare_dtype"),
             },
-        })
+        }
+        if outcomes.get(cid) == "failed":
+            detail = failed.get(cid) or {}
+            evidence_row["error"] = detail.get("error") or "driver execution failed"
+            evidence_row["error_kind"] = detail.get("error_kind") or "execution_failed"
+        rows.append(evidence_row)
     return rows, validated
 
 

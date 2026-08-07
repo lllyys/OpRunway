@@ -97,6 +97,12 @@ def tearDownModule():
 
 # ============================================================ bf16 位级 codec ===
 class Bf16CodecTest(unittest.TestCase):
+    def test_rank0_roundtrip_preserves_scalar_shape(self):
+        value = np.asarray(1.5, dtype=np.float32)
+        encoded = GC._f32_to_bf16_uint16(value)
+        self.assertEqual(encoded.shape, ())
+        self.assertEqual(GC._bf16_uint16_to_f32(encoded).shape, ())
+
     def test_round_half_to_even_down(self):
         # 1.00390625 = 0x3F808000 = bf16 0x3F80(even LSB) 与 0x3F81(odd) 的中点 → 舍向 even 0x3F80
         v = np.array([1.00390625], np.float32)
@@ -380,6 +386,19 @@ class EffectiveStandardTest(unittest.TestCase):
         try:
             with self.assertRaises(ValueError):
                 GC.gen_cases(_spec(_SIGN_FX), tempfile.mkdtemp())
+        finally:
+            GC._BF16_EXACT_OPS = saved
+
+    def test_gen_cases_bf16_lossy_requires_explicit_opt_in(self):
+        spec = _spec(_SIGN_FX)
+        spec["precision"]["bf16_lossy"] = True
+        saved = GC._BF16_EXACT_OPS
+        GC._BF16_EXACT_OPS = frozenset()
+        try:
+            caseset = GC.gen_cases(spec, tempfile.mkdtemp())
+            bf16 = [c for c in caseset["cases"] if c["inputs"][0]["dtype"] == "bfloat16"]
+            self.assertTrue(bf16)
+            self.assertTrue(any(c["expected"]["compare"] == "rel_err" for c in bf16))
         finally:
             GC._BF16_EXACT_OPS = saved
 
@@ -1728,14 +1747,23 @@ class Bf16BitexactDeclarationTest(_FakeOpCase):
             sp["precision"]["bf16_bitexact"] = declare
         return sp
 
-    def test_undeclared_new_op_still_fails_closed(self):
-        """没声明的新算子 → 仍 fail-closed，且报错要给出**两条可操作的出路**。"""
+    def test_undeclared_new_op_fails_closed_instead_of_guessing_bf16_policy(self):
+        """真数值 bf16 未声明 bitexact/lossy 时拒绝，不从算子身份或旧默认猜。"""
         self.place("FakeBf16New", self._BODY)
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaisesRegex(ValueError, "bf16_lossy"):
             GC.gen_cases(self._spec("FakeBf16New"), self.work())
-        msg = str(cm.exception)
-        self.assertIn("bf16_bitexact", msg)          # 出路一：真是搬运类就声明
-        self.assertIn("dtype_deferred", msg)         # 出路二：真做算术就挂 deferred
+
+    def test_explicit_lossy_bf16_uses_controlled_policy(self):
+        """显式 lossy 声明才启用 precision_policy 的受控 BF16 阈值。"""
+        self.place("FakeBf16Lossy", self._BODY)
+        spec = self._spec("FakeBf16Lossy")
+        spec["precision"]["bf16_lossy"] = True
+        cs = GC.gen_cases(spec, self.work())
+        self.assertTrue(cs["cases"])
+        numerical = [c for c in cs["cases"] if c["expected"]["compare"] == "rel_err"]
+        self.assertTrue(numerical)
+        self.assertTrue(all(c["expected"]["standard"] == "ascendoptest_default"
+                            for c in numerical))
 
     def test_declared_true_unlocks_bf16(self):
         """声明为真 → bf16 数值用例造得出来（这正是 im2col/Upsample 这类算子需要的）。"""
@@ -1984,13 +2012,10 @@ class DtypeSingleSourceTest(unittest.TestCase):
         for dt in ("int16", "int32", "float32", "float16", "bfloat16"):
             GC.check_spec_capability(self._in(dt), "cpp")        # 同上：显式问 cpp 这一支
 
-    def test_bool_rejected_points_at_generation_layer(self):
-        """反向缺口：aclnn_py runner 收得了 bool，但 gen_cases 造不出 → fail-closed，且报错点名**生成层**。"""
-        with self.assertRaises(ValueError) as cm:
-            GC.check_spec_capability(self._in("bool"), "aclnn_py")
-        msg = str(cm.exception)
-        self.assertIn("真机收得了、但 gen_cases 造不出", msg)
-        self.assertIn("bool", msg.split("真机层")[-1])           # 真机层那行的集合里确实有 bool
+    def test_bool_is_supported_by_generation_and_aclnn_transport(self):
+        """bool 已有确定性生成与 aclnn transport，不能保留过时的 generation 缺口。"""
+        for form in ("aclnn_py", "cpp_extension"):
+            GC.check_spec_capability(self._in("bool"), form)
 
     def test_unknown_runner_form_fail_closed(self):
         """未知 runner_form → 直接炸，绝不静默兜 cpp（兜了就会用错口径判 dtype）。"""

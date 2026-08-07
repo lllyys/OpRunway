@@ -91,6 +91,33 @@ def _spec():
 
 
 class StochasticGenerationTest(unittest.TestCase):
+    def test_bool_input_generation_is_deterministic_and_covers_both_values(self):
+        first = G._make_varied(G.np.random.default_rng(7), (32,), "bool")
+        second = G._make_varied(G.np.random.default_rng(7), (32,), "bool")
+        self.assertEqual(first.dtype, G.np.dtype("bool"))
+        self.assertTrue(G.np.array_equal(first, second))
+        self.assertEqual({False, True}, set(first.tolist()))
+
+    def test_multi_profile_structural_coverage_is_boundary_exact_not_statistical_pooling(self):
+        spec = _spec()
+        profiles = spec["multi_input_contract"]["profiles"]
+        for pid, shape in (("rank0", []), ("rank2", [2, 3])):
+            profile = copy.deepcopy(profiles[0])
+            profile["profile_id"] = pid
+            profile["inputs"][0]["shape"] = shape
+            profiles.append(profile)
+        spec["precision"]["case_target"] = 9
+        with tempfile.TemporaryDirectory() as work, mock.patch.object(
+                G, "load_golden", side_effect=AssertionError("不得加载 golden")):
+            caseset = G.gen_cases(spec, work)
+        ledger = caseset["stochastic_ledger"]
+        self.assertEqual(len(ledger["coverage_roles"]), 2)
+        self.assertEqual(len(caseset["cases"]), 9)
+        coverage = [c for c in caseset["cases"]
+                    if c["stochastic"]["purpose"] == "structural_boundary_exact"]
+        self.assertEqual([c["stochastic"]["probability"] for c in coverage], [0.0, 0.0])
+        self.assertEqual([c["stochastic"]["sample_count"] for c in coverage], [1, 6])
+
     def test_role_plan_is_materialized_without_pointwise_golden(self):
         spec = _spec()
         with tempfile.TemporaryDirectory() as work, mock.patch.object(
@@ -109,6 +136,7 @@ class StochasticGenerationTest(unittest.TestCase):
         boundary = by_role["boundary_0"]
         self.assertEqual(boundary["attrs"]["generator_seed"], 17)
         self.assertEqual(boundary["attrs"]["generator_offset"], 0)
+        self.assertEqual(boundary["attrs"]["probability_value"], 0.0)
         self.assertEqual(boundary["parameter_contract"]["inputs"][1]["value"], 0.0)
         self.assertEqual(boundary["expected"]["compare"], "stochastic")
         self.assertIsNone(boundary["expected"]["golden_path"])

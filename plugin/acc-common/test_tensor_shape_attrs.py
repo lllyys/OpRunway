@@ -32,8 +32,25 @@ def _source_binding():
     }
 
 
-def _row(row_id, attrs):
-    return {"id": row_id, "attrs": attrs, "source_parse": _source_parse()}
+def _row(row_id, attrs, applicability=None):
+    row = {"id": row_id, "attrs": attrs, "source_parse": _source_parse()}
+    if applicability is not None:
+        row["applicability"] = applicability
+    return row
+
+
+def _applicability(*, ranks=(1, 2, 3, 4, 5, 6, 7, 8), nonempty=("dims",)):
+    return {
+        "rank_domain": {"input": "x", "allowed_ranks": list(ranks)},
+        "required_nonempty_attrs": list(nonempty),
+        "source_parse": {
+            "source": "taskdoc_pr_compose",
+            "source_sha256": SHA_FACTS,
+            "cite": "task_doc.snapshot.md:29-31",
+            "quote": "dims 取值范围在[-x.dim(), x.dim() - 1]之内",
+            "interpretation": "非空 dims 行只对 rank 1..8 的具名输入 x 可执行",
+        },
+    }
 
 
 def _canonical_sha(value):
@@ -284,6 +301,143 @@ class AttrContractTest(unittest.TestCase):
             T.normalize_declared_attrs(
                 self.TYPES, {"shifts": [1], "dims": [], 7: [0]},
             )
+
+    def test_profile_applicability_binds_named_rank_nonempty_attrs_and_source(self):
+        contract = T.normalize_atomic_attr_rows(
+            [_row("axis", {"shifts": [1], "dims": [-1]}, _applicability())],
+            attr_types=self.TYPES,
+            constraint_groups=self.GROUPS,
+            source_binding=_source_binding(),
+        )
+        row = contract["rows"][0]
+        self.assertEqual(len(row["applicability_sha256"]), 64)
+        self.assertEqual(
+            row["applicability"]["source_parse"]["source_sha256"], SHA_FACTS)
+
+        executable = T.evaluate_atomic_attr_applicability(
+            contract, "axis",
+            [{"name": "x", "kind": "tensor", "shape": [2, 3]}],
+            expected_contract_sha256=contract["sha256"],
+        )
+        self.assertEqual(executable["status"], "executable")
+        self.assertEqual(executable["reasons"], [])
+        self.assertEqual(executable["rank_domain"]["actual_rank"], 2)
+        self.assertEqual(executable["applicability_sha256"],
+                         row["applicability_sha256"])
+
+        excluded = T.evaluate_atomic_attr_applicability(
+            contract, "axis",
+            [{"name": "x", "kind": "tensor", "shape": []}],
+            expected_contract_sha256=contract["sha256"],
+        )
+        self.assertEqual(excluded["status"], "excluded")
+        self.assertEqual(
+            [reason["kind"] for reason in excluded["reasons"]],
+            ["rank_outside_domain"],
+        )
+
+    def test_required_nonempty_attr_is_an_audited_exclusion_not_silent_drop(self):
+        contract = T.normalize_atomic_attr_rows(
+            [_row("flatten", {"shifts": [1], "dims": []},
+                  _applicability(ranks=(0, 1, 2), nonempty=("dims",)))],
+            attr_types=self.TYPES,
+            constraint_groups=self.GROUPS,
+            source_binding=_source_binding(),
+        )
+        receipt = T.evaluate_atomic_attr_applicability(
+            contract, "flatten",
+            [{"name": "x", "kind": "tensor", "shape": [3]}],
+            expected_contract_sha256=contract["sha256"],
+        )
+        self.assertEqual(receipt["status"], "excluded")
+        self.assertEqual(receipt["required_nonempty_attrs"], [{
+            "attr": "dims", "actual_length": 0, "matched": False,
+        }])
+        self.assertEqual(receipt["reasons"], [{
+            "kind": "required_attr_empty", "attr": "dims",
+        }])
+
+    def test_applicability_source_and_predicate_digest_cannot_be_coherently_rewritten(self):
+        contract = T.normalize_atomic_attr_rows(
+            [_row("axis", {"shifts": [1], "dims": [0]}, _applicability())],
+            attr_types=self.TYPES,
+            constraint_groups=self.GROUPS,
+            source_binding=_source_binding(),
+        )
+        forged = copy.deepcopy(contract)
+        row = forged["rows"][0]
+        row["applicability"]["source_parse"]["quote"] = "forged rank authority"
+        row["applicability_sha256"] = _canonical_sha(row["applicability"])
+        row_body = {key: value for key, value in row.items() if key != "row_sha256"}
+        row["row_sha256"] = _canonical_sha(row_body)
+        for ledger_row in forged["constraint_ledger"]:
+            ledger_row["row_sha256"] = row["row_sha256"]
+        forged_body = {key: value for key, value in forged.items() if key != "sha256"}
+        forged["sha256"] = _canonical_sha(forged_body)
+        with self.assertRaisesRegex(T.TensorShapeAttrError, "外部冻结摘要"):
+            T.validate_atomic_attr_contract(
+                forged, expected_sha256=contract["sha256"])
+
+    def test_applicability_is_strict_and_profile_identity_cannot_be_forged(self):
+        mutations = [
+            _applicability(ranks=(True,)),
+            _applicability(ranks=(1, 1)),
+            _applicability(nonempty=("unknown",)),
+        ]
+        for applicability in mutations:
+            with self.subTest(applicability=applicability):
+                with self.assertRaises(T.TensorShapeAttrError):
+                    T.normalize_atomic_attr_rows(
+                        [_row("axis", {"shifts": [1], "dims": [0]},
+                              applicability)],
+                        attr_types=self.TYPES,
+                        constraint_groups=self.GROUPS,
+                        source_binding=_source_binding(),
+                    )
+
+        contract = T.normalize_atomic_attr_rows(
+            [_row("axis", {"shifts": [1], "dims": [0]}, _applicability())],
+            attr_types=self.TYPES,
+            constraint_groups=self.GROUPS,
+            source_binding=_source_binding(),
+        )
+        for profile_inputs in (
+            [],
+            [{"name": "other", "kind": "tensor", "shape": [2]}],
+            [{"name": "x", "kind": "tensor", "shape": [2]},
+             {"name": "x", "kind": "tensor", "shape": [2]}],
+            [{"name": "x", "kind": "scalar", "shape": [2]}],
+        ):
+            with self.subTest(profile_inputs=profile_inputs):
+                with self.assertRaisesRegex(T.TensorShapeAttrError, "唯一绑定"):
+                    T.evaluate_atomic_attr_applicability(
+                        contract, "axis", profile_inputs,
+                        expected_contract_sha256=contract["sha256"],
+                    )
+
+    def test_legacy_row_has_identical_shape_without_applicability_fields(self):
+        contract = T.normalize_atomic_attr_rows(
+            [_row("legacy", {"shifts": [1], "dims": [0]})],
+            attr_types=self.TYPES,
+            constraint_groups=self.GROUPS,
+            source_binding=_source_binding(),
+        )
+        self.assertEqual(
+            set(contract["rows"][0]),
+            {"id", "attrs", "source_parse", "row_sha256"},
+        )
+        receipt = T.evaluate_atomic_attr_applicability(
+            contract, "legacy",
+            [{"name": "anything", "kind": "tensor", "shape": []}],
+            expected_contract_sha256=contract["sha256"],
+        )
+        self.assertEqual(receipt, {
+            "status": "executable",
+            "applicability_sha256": None,
+            "rank_domain": None,
+            "required_nonempty_attrs": [],
+            "reasons": [],
+        })
 
 
 class CyclicIndexContractTest(unittest.TestCase):
