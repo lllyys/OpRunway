@@ -2148,8 +2148,11 @@ def _build_execution_evidence(caseset, work, receipt):
     """随机 capability 不制造逐点 golden；其正式判据只来自独立统计工件。"""
     if caseset.get("stochastic_contract") is None:
         import repo_adapter as RA
-        return RA.build_multi_output_evidence(
+        rows = RA.build_multi_output_evidence(
             caseset, work, os.path.join(work, _OUT))
+        if caseset.get("execution_scope") == "environment_identity_smoke":
+            _bind_stochastic_transport_outputs(rows, work)
+        return rows
     validated = validate_stochastic_collection(work, caseset, receipt)
     invocation = validate_invocation_accounting(
         _strict_json(os.path.join(work, _PLAN)), receipt.get("invocation"))
@@ -2160,6 +2163,10 @@ def _build_execution_evidence(caseset, work, receipt):
     out_manifest = _strict_json(os.path.join(work, _OUT, "out_manifest.json"))
     failed = {
         row.get("case_id"): row for row in (out_manifest.get("failed") or [])
+        if isinstance(row, dict) and isinstance(row.get("case_id"), str)
+    }
+    produced = {
+        row.get("case_id"): row for row in (out_manifest.get("produced") or [])
         if isinstance(row, dict) and isinstance(row.get("case_id"), str)
     }
     rows = []
@@ -2185,7 +2192,39 @@ def _build_execution_evidence(caseset, work, receipt):
             evidence_row["error"] = detail.get("error") or "driver execution failed"
             evidence_row["error_kind"] = detail.get("error_kind") or "execution_failed"
         rows.append(evidence_row)
+    _bind_stochastic_transport_outputs(rows, work)
     return rows, validated
+
+
+def _bind_stochastic_transport_outputs(rows, work):
+    """把 stochastic runtime output 文件绑定到 evidence；不制造逐点 golden。"""
+    manifest = _strict_json(os.path.join(work, _OUT, "out_manifest.json"))
+    produced = {row.get("case_id"): row for row in manifest.get("produced") or []
+                if isinstance(row, dict)}
+    for evidence_row in rows:
+        precision = evidence_row.get("precision") if isinstance(evidence_row, dict) else None
+        if not isinstance(precision, dict) or precision.get("compare") != "stochastic" \
+                or evidence_row.get("status") != "ok":
+            continue
+        cid = evidence_row.get("case_id")
+        transport = []
+        for output in produced.get(cid, {}).get("outputs") or []:
+            rel = output.get("path") if isinstance(output, dict) else None
+            path = (_safe(os.path.join(work, _OUT), rel)
+                    if isinstance(rel, str) else None)
+            if path is None or not os.path.isfile(path) or os.path.islink(path):
+                raise CppExtensionAdapterError(
+                    f"{cid}: stochastic produced output 缺失/逃逸/非普通文件")
+            transport.append({
+                "index": output.get("index"), "name": output.get("name"),
+                "out_path": os.path.relpath(path, work),
+                "out_sha256": _file_sha(path),
+            })
+        if not transport:
+            raise CppExtensionAdapterError(
+                f"{cid}: stochastic produced outcome 缺实际 output artifact")
+        precision["transport_outputs"] = transport
+        evidence_row["output_written_check"] = "passed"
 
 
 def _bind_multi_input_evidence(caseset, evidence, receipt):

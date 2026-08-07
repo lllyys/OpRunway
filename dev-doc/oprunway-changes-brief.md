@@ -4,6 +4,7 @@
 
 ## 2026-08-07 · 三算子 N10 单卡正式验收与实测回修
 
+- 新增三算子统一中文实测记录与机器 R/G/E 总账校验：A3 上 30/30 hermetic mutation、2637 项无排除 verbose 全量回归通过；总账从正式 source/spec/cases/evidence/verdict/perf/acceptance/build/receipt/gate 重投影数字与终态，并对 multi-card v3 的顶层、shard formal/pre-smoke、正式 single work、ELF、input/golden/out 做精确递归闭包及当前 Task2/stochastic/equivalence 重放。Roll exact 在线 PR intake 已用禁 tree fallback 后的 current producer 重新闭合，三算子 precision-only 多卡 verdict 与单卡逐算子等价；N10 因 Bernoulli 缺 exact online identity、Remainder online 候选歧义仍为 `PARTIALLY_VERIFIED`。
 - 三算子均用 fresh intake、generated cases、VERIFIED vendor receipt 和独立 A3 device 完成单卡正式验收：Bernoulli=`FAIL(精度)`、Remainder=`PASSED_WITH_GAPS`、Roll=`FAIL(精度)`；所有结论均由确定性产物写出。
 - 实测回修覆盖 stochastic formal/structural 分区、合法 empty tensor 结构精度、atomic applicability、dtype requirement sets、BF16 显式 lossy、任务书 workflow-default 分层、measure-only gap 终态和性能证据摘要投影；未把 gate passed、部分 msprof 或 stock vendor 对照包装成算子通过。
 - Roll/Bernoulli 的 rank0 exact vendor 均返回 161002；Roll 已用自建 rank0 descriptor、官方 ConvertType 与同机 stock torch_npu 做 A/B，排除通用 converter 后保留为 exact DUT 构建侧缺口。

@@ -20,7 +20,7 @@ OPRUNWAY_DONE 哨兵 / raw log hash / msprof 输出绑定（本轮不做）；�
 读能力表做交叉核验（这两个模块拉 numpy）——读不出即 FAILED，绝不「读不出就当挂账有效」。
 validator.py 仍 stdlib-only、不受本门引入 numpy 影响。）
 """
-import argparse, hashlib, json, math, os, statistics, sys
+import argparse, copy, hashlib, json, math, os, statistics, sys
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -29,6 +29,7 @@ import content_address  # noqa: E402
 import cpp_extension_adapter  # noqa: E402
 import cpp_extension_identity  # noqa: E402
 import dtype_requirement_sets  # noqa: E402
+import multi_card_shards  # noqa: E402
 import perf_mode  # noqa: E402
 import perf_evidence_contract  # noqa: E402
 import source_facts_lookup  # noqa: E402
@@ -1697,6 +1698,193 @@ def _gate_cpp_extension_invocation_accounting(plan, receipt, ev_list, errs):
         errs.append(f"cpp_extension receipt.invocation 分母账未闭合：{ex}")
 
 
+def _gate_precision_work_dir(report_root, work, caseset, envelope, staged_spec,
+                             errs, *, source_facts_path=None,
+                             require_runner_outputs=True, validated_receipt=None,
+                             authority_caseset=None):
+    """单卡与 multi shard 共用的 current-v2 precision work 语义门。"""
+    before = len(errs)
+    work = os.path.realpath(work)
+    required = (
+        *(("caseset.json",) if require_runner_outputs else ()),
+        "cpp_extension_caseset.json",
+        "cpp_extension/extension_manifest.json", "cpp_extension_invocation_plan.json",
+        *(("cpp_extension_receipt.json", "evidence.json")
+          if require_runner_outputs else ()))
+    for rel in required:
+        path = os.path.join(work, rel)
+        if (os.path.islink(path) or not os.path.isfile(path)
+                or os.path.commonpath((os.path.realpath(path), work)) != work):
+            errs.append(f"precision work 固定产物 {rel} 缺失/符号链接/逃逸/非普通文件")
+    if len(errs) != before:
+        return None
+    try:
+        disk_caseset = (_load_json_file(os.path.join(work, "caseset.json"))
+                        if require_runner_outputs else caseset)
+        snapshot = _load_json_file(os.path.join(work, "cpp_extension_caseset.json"))
+        disk_envelope = (_load_json_file(os.path.join(work, "evidence.json"))
+                         if require_runner_outputs else envelope)
+        plan = _load_json_file(os.path.join(work, "cpp_extension_invocation_plan.json"))
+        manifest = _load_json_file(os.path.join(
+            work, "cpp_extension", "extension_manifest.json"))
+        receipt = (cpp_extension_adapter.validate_receipt(work, caseset)
+                   if validated_receipt is None else validated_receipt)
+    except (OSError, ValueError, TypeError,
+            cpp_extension_adapter.CppExtensionAdapterError) as exc:
+        errs.append(f"precision work 正式 receipt 语义失败：{exc}")
+        return None
+    artifact = receipt.get("artifact") if isinstance(receipt, dict) else None
+    artifact_path = _gate_work_file(
+        work, artifact.get("path") if isinstance(artifact, dict) else None,
+        errs, "precision work Extension artifact")
+    if artifact_path is not None and _sha256(artifact_path) != artifact.get("sha256"):
+        errs.append("precision work Extension artifact sha256 漂移")
+    if disk_caseset != caseset or snapshot != caseset or disk_envelope != envelope:
+        errs.append("precision work 落盘 caseset/snapshot/envelope 与消费对象漂移")
+    if receipt.get("bindings", {}).get("spec_sha256") != _canonical_sha(staged_spec):
+        errs.append("precision work receipt spec 锚未绑定 staged parent spec")
+    _gate_cann_runtime_requirement(
+        report_root, receipt, receipt.get("runtime"), staged_spec, errs,
+        source_facts_path=source_facts_path)
+    vendor = receipt.get("vendor") or {}; build_receipt = vendor.get("build_receipt")
+    try:
+        summary = vendor_build_receipt.validate_for_acceptance(
+            build_receipt, library_path=vendor.get("library_path"),
+            library_sha256=vendor.get("library_sha256"))
+    except vendor_build_receipt.VendorBuildReceiptError as exc:
+        errs.append(f"precision work vendor build receipt 非法：{exc}")
+    else:
+        _gate_build_receipt_source_binding(
+            report_root, summary, errs, source_facts_path=source_facts_path,
+            build_receipt=build_receipt)
+    rows = envelope.get("evidence") if isinstance(envelope, dict) else None
+    if not isinstance(rows, list):
+        errs.append("precision work envelope.evidence 非列表")
+        return receipt
+    _gate_cpp_extension_layout(caseset, receipt, rows, errs, manifest=manifest, plan=plan)
+    _gate_cpp_extension_tensor_shape_attrs(caseset, receipt, rows, errs, plan=plan)
+    _gate_cpp_extension_invocation_accounting(plan, receipt, rows, errs)
+    _gate_cpp_extension_stage2_evidence(manifest, errs)
+    authority_caseset = caseset if authority_caseset is None else authority_caseset
+    _gate_dtype_requirement_sets_authority(authority_caseset, staged_spec, errs)
+    _gate_tensor_shape_attr_spec_authority(
+        report_root, authority_caseset, staged_spec, errs,
+        source_facts_path=source_facts_path)
+    receipt_sha = _canonical_sha(receipt)
+    if any(row.get("cpp_extension_receipt_sha256") != receipt_sha for row in rows):
+        errs.append("precision work per-case cpp_extension receipt 摘要漂移")
+    try:
+        stochastic = cpp_extension_adapter.validate_stochastic_collection(
+            work, caseset, receipt)
+    except cpp_extension_adapter.CppExtensionAdapterError as exc:
+        errs.append(f"precision work stochastic evidence 未闭合：{exc}")
+    else:
+        if stochastic is not None:
+            try:
+                staged_stochastic = stochastic_contract.from_spec(staged_spec)
+            except stochastic_contract.StochasticContractError as exc:
+                errs.append(f"precision work staged spec.stochastic 非法：{exc}")
+                staged_stochastic = None
+            if staged_stochastic != stochastic.get("contract"):
+                errs.append("precision work staged spec.stochastic 与 caseset/receipt 契约漂移")
+            if not stochastic.get("gate", {}).get("ready_for_formal_precision"):
+                errs.append("precision work stochastic precondition 未 ready")
+            expected = {
+                "stochastic_collection": receipt.get("stochastic_collection"),
+                "stochastic_formal_evidence": stochastic.get("formal"),
+                "stochastic_evaluation": stochastic.get("evaluation"),
+            }
+            if any(envelope.get(key) != value for key, value in expected.items()):
+                errs.append("precision work stochastic collection/formal/evaluation 漂移")
+    return receipt
+
+
+def _gate_work_file(work, rel, errs, where):
+    work = os.path.realpath(work)
+    if not isinstance(rel, str) or not rel or os.path.isabs(rel):
+        errs.append(f"{where}: 相对路径非法")
+        return None
+    path = os.path.join(work, rel)
+    try:
+        escaped = os.path.commonpath((os.path.realpath(path), work)) != work
+    except ValueError:
+        escaped = True
+    if (os.path.islink(path) or not os.path.isfile(path) or escaped):
+        errs.append(f"{where}: 缺失/符号链接/逃逸/非普通文件")
+        return None
+    return path
+
+
+def _gate_shard_precision_files(shard_work, report_root, rows, errs, *, require_output=False):
+    """把 shard runtime 产物逐字节绑定到 evidence provenance 与顶层 materialized copy。"""
+    top_work = (os.path.realpath(os.path.join(report_root, "work"))
+                if report_root is not None else None)
+    verified_outputs = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cid = row.get("case_id")
+        precision = row.get("precision")
+        if not isinstance(precision, dict):
+            if require_output:
+                errs.append(f"{cid}: successful smoke evidence 缺 precision")
+            continue
+        outputs = precision.get("outputs")
+        refs = []
+        if isinstance(outputs, list):
+            if not outputs and require_output:
+                errs.append(f"{cid}: successful smoke precision.outputs 为空")
+            for index, output in enumerate(outputs):
+                if not isinstance(output, dict):
+                    continue
+                provenance = output.get("provenance")
+                if not isinstance(provenance, dict):
+                    if require_output:
+                        errs.append(f"{cid}: successful smoke output[{index}] 缺 provenance")
+                    continue
+                refs.extend((
+                    (f"output[{index}] golden", output.get("golden_path"),
+                     provenance.get("golden_sha256")),
+                    (f"output[{index}] out", output.get("out_path"),
+                     provenance.get("out_sha256")),
+                ))
+        elif precision.get("compare") == "stochastic" \
+                and isinstance(precision.get("transport_outputs"), list):
+            transport = precision["transport_outputs"]
+            if not transport and require_output:
+                errs.append(f"{cid}: successful stochastic smoke transport_outputs 为空")
+            for index, output in enumerate(transport):
+                if not isinstance(output, dict):
+                    continue
+                refs.append((f"transport output[{index}] out",
+                             output.get("out_path"), output.get("out_sha256")))
+        else:
+            provenance = precision.get("provenance")
+            if not isinstance(provenance, dict):
+                if require_output:
+                    errs.append(f"{cid}: successful smoke precision 缺 provenance")
+                continue  # 公共 Task2 门负责要求可比较 case 必有 provenance。
+            refs.extend((
+                ("golden", precision.get("golden_path"), provenance.get("golden_sha256")),
+                ("out", precision.get("out_path"), provenance.get("out_sha256")),
+            ))
+        for kind, rel, claimed in refs:
+            shard_path = _gate_work_file(
+                shard_work, rel, errs, f"{cid}: shard {kind}")
+            top_path = (_gate_work_file(top_work, rel, errs, f"{cid}: top {kind}")
+                        if top_work is not None else shard_path)
+            if shard_path is None or top_path is None:
+                continue
+            shard_sha, top_sha = _sha256(shard_path), _sha256(top_path)
+            if (not isinstance(claimed, str) or len(claimed) != 64
+                    or shard_sha != claimed or top_sha != claimed):
+                errs.append(
+                    f"{cid}: shard/top {kind} 与 evidence provenance sha256 未逐字绑定")
+            elif kind.endswith("out") or kind == "out":
+                verified_outputs += 1
+    return verified_outputs
+
+
 def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_facts_path=None):
     """cpp_extension 的独立 build/load/ELF receipt 完整性门。
 
@@ -1734,6 +1922,16 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
     except (OSError, ValueError, TypeError) as ex:
         errs.append(f"cpp_extension 绑定工件坏 JSON: {type(ex).__name__}: {ex}")
         return
+    if receipt_version == cann_version.RECEIPT_SCHEMA_VERSION:
+        work = os.path.dirname(plan_path)
+        shared_errors = []
+        _gate_precision_work_dir(
+            d, work, caseset, {**envelope, "evidence": ev_list},
+            _load(d, "spec.json"), shared_errors,
+            source_facts_path=source_facts_path, require_runner_outputs=False,
+            validated_receipt=receipt)
+        errs.extend(f"cpp_extension 共享 precision work 门：{item}"
+                    for item in shared_errors)
     _gate_cpp_extension_layout(
         caseset, receipt, ev_list, errs, manifest=manifest, plan=plan)
     _gate_cpp_extension_tensor_shape_attrs(
@@ -2118,6 +2316,318 @@ def _gate_task2_unjudgeable(cases, ev_list, vd, errs):
     return ids
 
 
+def _gate_multi_card_receipt(d, caseset, evidence, errs, source_facts_path):
+    """存在 multi-card 产物时，按父输入重建 manifest/projection/result；不存在则保持单卡路径。"""
+    names = ("multi_card_manifest.json", "multi_card_merged_evidence.json")
+    present = [os.path.lexists(os.path.join(d, name)) for name in names]
+    if not any(present):
+        return
+    if not all(present):
+        errs.append("multi-card manifest/merged receipt 必须成对存在")
+        return
+    top_file_errors = []
+    for name in names:
+        _gate_work_file(d, name, top_file_errors, f"multi-card top {name}")
+    if top_file_errors:
+        errs.extend(top_file_errors)
+        return
+    manifest = _load(d, names[0]); merged = _load(d, names[1]); spec = _load(d, "spec.json")
+    source = None
+    source_path = source_facts_path or os.path.join(d, "source_facts.json")
+    try:
+        with open(source_path, encoding="utf-8") as src:
+            source = json.load(src)
+    except (OSError, ValueError, TypeError):
+        pass
+    if not all(isinstance(x, dict) for x in (manifest, merged, spec, source)):
+        errs.append("multi-card gate 缺/坏 parent spec/caseset/source/manifest/merged receipt")
+        return
+    try:
+        results = merged.get("shard_results")
+        expected = multi_card_shards.merge_results(
+            manifest, results, spec, caseset, source)
+        if merged != expected:
+            raise multi_card_shards.ShardContractError("merged receipt 不是父输入确定性重算结果")
+        if evidence.get("evidence") != merged.get("evidence"):
+            raise multi_card_shards.ShardContractError(
+                "正式 evidence 不是 multi-card merged evidence 的逐字投影")
+        # Multi-card 只是分片编排，不能成为绕过单卡正式 receipt 语义门的后门。
+        # 每片必须指向报告根下自己的独立 work-dir，并由 adapter 从落盘
+        # manifest/plan/caseset/ELF/build/source/output 重新验证，而非采信 merged
+        # receipt 内嵌的摘要或 schema 自报。
+        actual_identities = []
+        formal_stochastic_projection = None
+        formal_ids = set((manifest.get("affinity") or {}).get("formal_case_ids") or [])
+        _gate_dtype_requirement_sets_authority(caseset, spec, errs)
+        _gate_tensor_shape_attr_spec_authority(
+            d, caseset, spec, errs, source_facts_path=source_path)
+        shard_envelopes = []
+        for result in expected.get("shard_results", []):
+            sid = result["shard_id"]
+            projected = result["shard_caseset"]
+            work = projected.get("work_dir")
+            expected_work = os.path.realpath(os.path.join(d, sid))
+            if (not isinstance(work, str) or not os.path.isabs(work)
+                    or os.path.realpath(work) != expected_work):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: projection work_dir 未逐字/realpath 绑定正式独立 shard 目录")
+            for rel in (
+                    "caseset.json", "cpp_extension_caseset.json",
+                    "cpp_extension/extension_manifest.json",
+                    "cpp_extension_invocation_plan.json", "cpp_extension_receipt.json",
+                    "evidence.json", "device_identity.json", "shard_result.json"):
+                path = os.path.join(work, rel)
+                if (os.path.islink(path) or not os.path.isfile(path)
+                        or os.path.commonpath((os.path.realpath(path), work)) != work):
+                    raise multi_card_shards.ShardContractError(
+                        f"{sid}: 固定产物 {rel} 缺失/符号链接/逃逸/非普通文件")
+            disk_envelope_for_common = _load_json_file(os.path.join(work, "evidence.json"))
+            common_errors = []
+            validated = _gate_precision_work_dir(
+                d, work, projected, disk_envelope_for_common, spec, common_errors,
+                source_facts_path=source_path, authority_caseset=caseset)
+            if common_errors or validated is None:
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: 共享 precision work 门失败：" + "; ".join(common_errors))
+            disk_caseset = _load_json_file(os.path.join(work, "caseset.json"))
+            disk_snapshot = _load_json_file(os.path.join(work, "cpp_extension_caseset.json"))
+            if disk_caseset != projected or disk_snapshot != projected:
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: 落盘 caseset/projection snapshot 漂移")
+            embedded = result.get("receipts", {}).get("cpp_extension")
+            if validated != embedded:
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: 内嵌 cpp_extension receipt 与落盘正式 receipt 漂移")
+            if validated.get("bindings", {}).get("spec_sha256") != _canonical_sha(spec):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: shard receipt spec 锚未绑定 parent staged spec")
+            cann_errors = []
+            _gate_cann_runtime_requirement(
+                d, validated, validated.get("runtime"), spec, cann_errors,
+                source_facts_path=source_path)
+            if cann_errors:
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: staged spec CANN runtime 门失败：" + "; ".join(cann_errors))
+            vendor = validated.get("vendor") or {}
+            build_receipt = vendor.get("build_receipt")
+            summary = vendor_build_receipt.validate_for_acceptance(
+                build_receipt, library_path=vendor.get("library_path"),
+                library_sha256=vendor.get("library_sha256"))
+            source_errors = []
+            _gate_build_receipt_source_binding(
+                d, summary, source_errors, source_facts_path=source_path,
+                build_receipt=build_receipt)
+            if source_errors:
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: build receipt 与本轮 source_facts 漂移："
+                    + "; ".join(source_errors))
+            smoke = result.get("execution_identity", {}).get(
+                "pre_execution_device_smoke") or {}
+            smoke_work = smoke.get("work_dir")
+            expected_smoke_work = os.path.realpath(work + ".pre-smoke")
+            if (not isinstance(smoke_work, str)
+                    or os.path.realpath(smoke_work) != expected_smoke_work):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: common smoke work_dir 未绑定独立正式目录")
+            smoke_caseset = copy.deepcopy(
+                projected.get("common_smoke_caseset_template"))
+            if not isinstance(smoke_caseset, dict):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: 缺 common smoke caseset template")
+            smoke_caseset["work_dir"] = smoke_work
+            smoke_file_errors = []
+            for rel in (
+                    "caseset.json", "cpp_extension_caseset.json",
+                    "cpp_extension/extension_manifest.json",
+                    "cpp_extension_invocation_plan.json", "cpp_extension_receipt.json",
+                    "evidence.json"):
+                _gate_work_file(smoke_work, rel, smoke_file_errors,
+                                f"{sid} common smoke {rel}")
+            if smoke_file_errors:
+                    raise multi_card_shards.ShardContractError("; ".join(smoke_file_errors))
+            if (_load_json_file(os.path.join(smoke_work, "caseset.json")) != smoke_caseset
+                    or _load_json_file(os.path.join(
+                        smoke_work, "cpp_extension_caseset.json")) != smoke_caseset):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: common smoke caseset/snapshot 与模板实例漂移")
+            smoke_validated = cpp_extension_adapter.validate_receipt(
+                smoke_work, smoke_caseset)
+            smoke_artifact = smoke_validated.get("artifact") or {}
+            smoke_artifact_path = _gate_work_file(
+                smoke_work, smoke_artifact.get("path"), smoke_file_errors,
+                f"{sid} common smoke Extension artifact")
+            if (smoke_artifact_path is None
+                    or _sha256(smoke_artifact_path) != smoke_artifact.get("sha256")):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: common smoke Extension artifact 缺失/symlink/摘要漂移")
+            if smoke_validated.get("bindings", {}).get("spec_sha256") != _canonical_sha(spec):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: common smoke receipt spec 锚未绑定 parent staged spec")
+            if _canonical_sha(smoke_validated) != smoke.get(
+                    "cpp_extension_receipt_sha256"):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: common smoke receipt 摘要漂移")
+            smoke_vendor = smoke_validated.get("vendor") or {}
+            smoke_runtime = smoke_validated.get("runtime") or {}
+            smoke_actual = {
+                "dut_library_sha256": smoke_vendor.get("library_sha256"),
+                "symbol_identity_sha256": _canonical_sha(smoke_vendor.get("symbol_identity")),
+                "soc": smoke_runtime.get("soc"),
+                "cann_version": smoke_runtime.get("cann_version"),
+                "source_provenance_sha256": smoke_vendor.get("build_receipt_sha256"),
+            }
+            if any(smoke.get(key) != value for key, value in smoke_actual.items()):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: common smoke embedded identity 与落盘 receipt 漂移")
+            formal_actual = {
+                "dut_library_sha256": vendor.get("library_sha256"),
+                "dut_symbol_identity_sha256": _canonical_sha(vendor.get("symbol_identity")),
+                "soc": validated.get("runtime", {}).get("soc"),
+                "cann_version": validated.get("runtime", {}).get("cann_version"),
+                "source_provenance_sha256": vendor.get("build_receipt_sha256"),
+            }
+            result_actual = {key: result.get("execution_identity", {}).get(key)
+                             for key in formal_actual}
+            if result_actual != formal_actual:
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: result execution_identity 与落盘正式 receipt 实测身份漂移")
+            actual_identities.append(formal_actual)
+            formal_smoke_actual = dict(formal_actual)
+            formal_smoke_actual["symbol_identity_sha256"] = formal_smoke_actual.pop(
+                "dut_symbol_identity_sha256")
+            if smoke_actual != formal_smoke_actual:
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: common smoke 与正式 shard identity 漂移")
+            smoke_build = smoke_vendor.get("build_receipt")
+            smoke_summary = vendor_build_receipt.validate_for_acceptance(
+                smoke_build, library_path=smoke_vendor.get("library_path"),
+                library_sha256=smoke_vendor.get("library_sha256"))
+            smoke_source_errors = []
+            _gate_build_receipt_source_binding(
+                d, smoke_summary, smoke_source_errors, source_facts_path=source_path,
+                build_receipt=smoke_build)
+            if smoke_source_errors:
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: common smoke source 锚漂移：" + "; ".join(smoke_source_errors))
+            smoke_envelope = _load_json_file(os.path.join(smoke_work, "evidence.json"))
+            smoke_rows = smoke_envelope.get("evidence")
+            if (not isinstance(smoke_rows, list)
+                    or [row.get("case_id") for row in smoke_rows]
+                    != manifest.get("common_smoke_case_ids")
+                    or not all(row.get("status") == "ok"
+                               and row.get("output_written_check") == "passed"
+                               for row in smoke_rows)):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: common smoke output-write 证据不完整")
+            smoke_output_errors = []
+            verified_smoke_outputs = _gate_shard_precision_files(
+                smoke_work, None, smoke_rows, smoke_output_errors,
+                require_output=True)
+            if smoke_output_errors or verified_smoke_outputs < len(smoke_rows):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: common smoke output provenance 未闭合："
+                    + "; ".join(smoke_output_errors))
+            if smoke.get("successful_output_case_ids") != [
+                    row.get("case_id") for row in smoke_rows]:
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: common smoke successful ids 与落盘 evidence 漂移")
+            smoke_receipt_sha = _canonical_sha(smoke_validated)
+            if any(row.get("cpp_extension_receipt_sha256") != smoke_receipt_sha
+                   for row in smoke_rows):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: common smoke evidence receipt 摘要漂移")
+            shard_errors = []
+            envelope = _load_json_file(os.path.join(work, "evidence.json"))
+            shard_envelopes.append(envelope)
+            if (_load_json_file(os.path.join(work, "shard_result.json")) != result
+                    or _load_json_file(os.path.join(work, "device_identity.json"))
+                    != result.get("execution_identity")):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: 落盘 shard_result/device_identity 与 merged result 漂移")
+            if (envelope.get("evidence") != result.get("evidence")
+                    or envelope.get("cpp_extension_receipt") != validated):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: 落盘 envelope 与 merged result 内嵌 evidence/receipt 漂移")
+            _gate_shard_precision_files(
+                work, d, envelope.get("evidence") or [], shard_errors)
+            stochastic = cpp_extension_adapter.validate_stochastic_collection(
+                work, projected, validated)
+            if stochastic is not None:
+                if not stochastic.get("gate", {}).get("ready_for_formal_precision"):
+                    raise multi_card_shards.ShardContractError(
+                        f"{sid}: stochastic precondition 未 ready，禁止进入正式精度/等价门")
+                declared = {
+                    "stochastic_collection": envelope.get("stochastic_collection"),
+                    "stochastic_formal_evidence": envelope.get("stochastic_formal_evidence"),
+                    "stochastic_evaluation": envelope.get("stochastic_evaluation"),
+                }
+                expected_stochastic = {
+                    "stochastic_collection": validated.get("stochastic_collection"),
+                    "stochastic_formal_evidence": stochastic.get("formal"),
+                    "stochastic_evaluation": stochastic.get("evaluation"),
+                }
+                if declared != expected_stochastic:
+                    raise multi_card_shards.ShardContractError(
+                        f"{sid}: shard stochastic collection/formal/evaluation 漂移")
+                if formal_ids & set(result.get("case_ids") or []):
+                    if formal_stochastic_projection is not None:
+                        raise multi_card_shards.ShardContractError(
+                            "stochastic formal evidence 出现多个 owner shard")
+                    formal_stochastic_projection = declared
+            receipt_sha = _canonical_sha(validated)
+            if any(row.get("cpp_extension_receipt_sha256") != receipt_sha
+                   for row in envelope.get("evidence", [])):
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: evidence cpp_extension receipt 摘要漂移")
+            _gate_cpp_extension_invocation_accounting(
+                _load_json_file(os.path.join(work, "cpp_extension_invocation_plan.json")),
+                validated, envelope.get("evidence"), shard_errors)
+            plan = _load_json_file(os.path.join(work, "cpp_extension_invocation_plan.json"))
+            extension_manifest = _load_json_file(os.path.join(
+                work, "cpp_extension", "extension_manifest.json"))
+            _gate_cpp_extension_layout(
+                projected, validated, envelope.get("evidence"), shard_errors,
+                manifest=extension_manifest, plan=plan)
+            _gate_cpp_extension_tensor_shape_attrs(
+                projected, validated, envelope.get("evidence"), shard_errors, plan=plan)
+            _gate_cpp_extension_stage2_evidence(extension_manifest, shard_errors)
+            if shard_errors:
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: " + "; ".join(shard_errors))
+            shard_row = next(row for row in manifest["shards"] if row["shard_id"] == sid)
+            replayed_result = multi_card_shards.build_result(
+                manifest, shard_row, projected, envelope,
+                result.get("execution_identity"))
+            if replayed_result != result:
+                raise multi_card_shards.ShardContractError(
+                    f"{sid}: execution_plan/output receipt 不是正式输入的确定性重投影")
+        if (not actual_identities
+                or any(row != actual_identities[0] for row in actual_identities[1:])
+                or expected.get("execution_identity_common") != actual_identities[0]):
+            raise multi_card_shards.ShardContractError(
+                "跨卡落盘正式 receipt 实测 identity 不同或与 merged common 漂移")
+        top_stochastic = {key: evidence.get(key) for key in (
+            "stochastic_collection", "stochastic_formal_evidence",
+            "stochastic_evaluation")}
+        if formal_ids:
+            if formal_stochastic_projection is None or top_stochastic != formal_stochastic_projection:
+                raise multi_card_shards.ShardContractError(
+                    "top stochastic_* 未逐字绑定唯一 formal-owner shard 落盘工件")
+        elif any(value is not None for value in top_stochastic.values()):
+            raise multi_card_shards.ShardContractError(
+                "非 stochastic multi evidence 冒领 top stochastic_* 工件")
+        replayed_envelope = multi_card_shards.assemble_envelope(
+            manifest, expected, shard_envelopes)
+        if replayed_envelope != evidence:
+            raise multi_card_shards.ShardContractError(
+                "top evidence envelope 不是落盘 shard envelopes 的确定性重组")
+    except (multi_card_shards.ShardContractError, KeyError, TypeError, ValueError) as exc:
+        errs.append(f"multi-card 正式 receipt 未闭合：{exc}")
+    except (OSError, cpp_extension_adapter.CppExtensionAdapterError,
+            vendor_build_receipt.VendorBuildReceiptError) as exc:
+        errs.append(f"multi-card 正式 receipt 语义校验失败：{exc}")
+
+
 def gate_task2(d, errs, source_facts_path=None):
     """精度证据**完整性**门：全覆盖(防子集) + precision 必填 + 阈值三处一致(防放宽) + oracle_source 门校 + 无契约问题。
     注：精度 pass/fail 本身由 validator 判、**此门不重判**——合法的精度 fail 不该被门当 BLOCKED。
@@ -2127,6 +2637,7 @@ def gate_task2(d, errs, source_facts_path=None):
     if not (isinstance(cs, dict) and isinstance(ev, dict) and isinstance(vd, dict)):
         errs.append("缺/坏 caseset/evidence/verdict.json（Task2 未跑全）")
         return
+    _gate_multi_card_receipt(d, cs, ev, errs, source_facts_path)
     # finding #13：cases/evidence 非列表或空 → 直接 FAILED（不静默兜成空列表放过）。
     cases = cs.get("cases")
     if not isinstance(cases, list) or not cases:
@@ -2136,7 +2647,12 @@ def gate_task2(d, errs, source_facts_path=None):
     if not isinstance(ev_list, list) or not ev_list:
         errs.append("evidence.evidence 缺失/非列表/空（Task2 无证据可核）")
         return
-    _gate_cpp_extension_receipt(d, cs, ev, ev_list, errs, source_facts_path=source_facts_path)
+    if os.path.lexists(os.path.join(d, "multi_card_merged_evidence.json")):
+        if ev.get("multi_card_receipt") != _load(d, "multi_card_merged_evidence.json"):
+            errs.append("evidence.multi_card_receipt 与正式 merged receipt 漂移")
+    else:
+        _gate_cpp_extension_receipt(
+            d, cs, ev, ev_list, errs, source_facts_path=source_facts_path)
     # ID 用 Counter 校验（重复不被 set 折叠）。
     cid_list = [c["id"] for c in cases if isinstance(c, dict) and c.get("id")]
     cid_dups = [k for k, v in Counter(cid_list).items() if v > 1]

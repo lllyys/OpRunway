@@ -25,6 +25,12 @@ _PR_FACTS = {
     # 钉到内容寻址的 source_facts 上，源身份由 source_provenance.bind 逐条硬校。
     "provenance_kind": "gitcode_pr",
     "head_sha": "0" * 40,
+    "head_repo": "cann/ops-nn",
+    "head_target_manifest": {
+        "repository": "cann/ops-nn", "ref": "0" * 40,
+        "target_dir": "math/witness_op", "sha256": "c" * 64,
+        "file_count": 3,
+    },
     "source_repo": "cann/ops-nn",
     "changed_files": [
         "math/witness_op/op_host/op_api/aclnn_witness_op.h",
@@ -43,7 +49,8 @@ def _source_payload(taskdoc_raw, facts=_PR_FACTS):
     return {
         "taskdoc": {"bytes_sha256": hashlib.sha256(taskdoc_raw).hexdigest()},
         "pr": {"provenance_kind": facts["provenance_kind"],
-               "head_sha": facts["head_sha"]},
+               "head_sha": facts["head_sha"], "head_repo": facts["head_repo"],
+               "head_target_manifest": copy.deepcopy(facts["head_target_manifest"])},
         "changed_files": sorted(facts["changed_files"]),
         "key_files": [
             {"path": path, "ref": facts["head_sha"],

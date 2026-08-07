@@ -20,14 +20,20 @@ import source_provenance as SP
 
 
 def _complete_source(head="a" * 40, **extra):
-    pr = {"provenance_kind": SP.PROVENANCE_GIT_PR, "head_sha": head}
+    manifest = {"repository": "fork/ops", "ref": head, "target_dir": "math/op",
+                "sha256": "c" * 64, "file_count": 1}
+    pr = {"provenance_kind": SP.PROVENANCE_GIT_PR, "head_sha": head,
+          "head_repo": "fork/ops", "head_target_manifest": manifest}
     pr.update(extra)
     return {"completeness": {"status": SP.TIER_COMPLETE}, "pr": pr}
 
 
 def _complete_facts(head="a" * 40, **extra):
     """`fetch_pr` 产的 pr_facts 形态（provenance_kind 恒在）。"""
-    facts = {"provenance_kind": SP.PROVENANCE_GIT_PR, "head_sha": head}
+    manifest = {"repository": "fork/ops", "ref": head, "target_dir": "math/op",
+                "sha256": "c" * 64, "file_count": 1}
+    facts = {"provenance_kind": SP.PROVENANCE_GIT_PR, "head_sha": head,
+             "head_repo": "fork/ops", "head_target_manifest": manifest}
     facts.update(extra)
     return facts
 
@@ -75,6 +81,21 @@ class BindCompleteTest(unittest.TestCase):
         self.assertEqual(deg, [])
         # 三个键恒在：省略会让人分不清「没这回事」和「工具忘了记」
         self.assertIn("snapshot_merkle_sha256", b)
+
+    def test_head_target_manifest_must_match_both_facts_and_selected_head(self):
+        src = _complete_source()
+        facts = _complete_facts()
+        facts["head_target_manifest"] = dict(facts["head_target_manifest"], sha256="d" * 64)
+        with self.assertRaisesRegex(SP.ProvenanceError, "head_target_manifest"):
+            SP.bind(src, facts, getenv=_env())
+
+        src = _complete_source()
+        src["pr"]["head_target_manifest"] = dict(
+            src["pr"]["head_target_manifest"], repository="base/ops")
+        facts = _complete_facts()
+        facts["head_target_manifest"] = src["pr"]["head_target_manifest"]
+        with self.assertRaisesRegex(SP.ProvenanceError, "repository"):
+            SP.bind(src, facts, getenv=_env())
 
     def test_head_mismatch_between_two_fact_packs_is_rejected(self):
         with self.assertRaises(SP.ProvenanceError):

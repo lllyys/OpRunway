@@ -23,8 +23,38 @@
 不打真网络: URL 形态用例走纯函数 _parse_pr_url（解析在网络之前）; 网络分支用桩替掉 fetch_source._get；
     快照用例全走本地临时目录，一次网络都不碰。
 """
-import hashlib, os, json, sys, tempfile, unittest
+import base64, hashlib, os, json, sys, tempfile, unittest
+import urllib.parse
 import fetch_source as fs
+
+
+def _blob_row(text):
+    raw = text.encode("utf-8")
+    sha = hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()
+    return sha, {"type": "file", "sha": sha,
+                 "content": base64.b64encode(raw).decode("ascii")}
+
+
+def _directory_rows(files, directory, text_for_file):
+    """Build one recursive Contents-API directory page for test fixtures."""
+
+    prefix = directory.rstrip("/") + "/"
+    children = {}
+    for path in files:
+        if not path.startswith(prefix):
+            continue
+        tail = path[len(prefix):]
+        name, separator, _rest = tail.partition("/")
+        child = prefix + name
+        if separator:
+            children[name] = {"path": child, "type": "dir", "sha": "d" * 40}
+        else:
+            children[name] = {
+                "path": child,
+                "type": "file",
+                "sha": _blob_row(text_for_file(path))[0],
+            }
+    return [children[name] for name in sorted(children)] if children else None
 
 
 class ParsePrUrlTest(unittest.TestCase):
@@ -372,6 +402,20 @@ class AclnnHeaderIsFirstClassKeyFileTest(unittest.TestCase):
 
     def _stub(self, files):
         def g(url, params=None, timeout=30):
+            if "/contents/" in url and params and params.get("ref"):
+                path = urllib.parse.unquote(url.split("/contents/", 1)[1])
+                listing = _directory_rows(files, path, lambda rel: f"// {rel}")
+                if listing is not None:
+                    return 200, listing
+                if path in files:
+                    self.asked.append(path)
+                    return 200, _blob_row(f"// {path}")[1]
+            if "/git/trees/" in url:
+                return 200, {"tree": [
+                    {"path": self.OP_DIR, "type": "tree", "sha": "d" * 40},
+                    *[{"path": f, "type": "blob", "sha": _blob_row(f"// {f}")[0]}
+                      for f in files],
+                ]}
             if url.endswith("/files"):
                 return 200, [{"filename": f} for f in files]
             return 200, {"title": "t", "state": "open", "base": {"ref": "master"},
@@ -393,6 +437,45 @@ class AclnnHeaderIsFirstClassKeyFileTest(unittest.TestCase):
         self.assertIn(self.HDR, facts["key_files"],
                       f"接口头被截断挤掉了（key_files={sorted(facts['key_files'])}）——"
                       f"aclnn 路由的第一依据不得受 [:4] 截断")
+
+    def test_unchanged_header_is_loaded_from_exact_head_tree(self):
+        """PR diff 只改实现 cpp，未改接口头；完整 head tree 仍必须提供 header。"""
+        changed = f"{self.OP_DIR}/op_kernel/median.cpp"
+        tree_files = [changed, self.HDR,
+                      f"{self.OP_DIR}/examples/test_aclnn_median.cpp",
+                      f"{self.OP_DIR}/op_host/median_def.cpp"]
+
+        def g(url, params=None, timeout=30):
+            if "/contents/" in url and params and params.get("ref"):
+                path = urllib.parse.unquote(url.split("/contents/", 1)[1])
+                listing = _directory_rows(
+                    tree_files, path, lambda rel: f"// {rel}"
+                )
+                if listing is not None:
+                    return 200, listing
+                if path in tree_files:
+                    return 200, _blob_row(f"// {path}")[1]
+            if url.endswith("/files"):
+                return 200, [{"filename": changed}]
+            if "/git/trees/" in url:
+                return 200, {"tree": [
+                    {"path": self.OP_DIR, "type": "tree", "sha": "d" * 40},
+                    *[{"path": f, "type": "blob", "sha": _blob_row(f"// {f}")[0]}
+                      for f in tree_files],
+                ]}
+            return 200, {"title": "t", "state": "open", "base": {"ref": "master"},
+                         "head": {"ref": "feat", "sha": "abc123",
+                                  "repo": {"full_name": "cann/ops-nn"}}}
+        fs._get = g
+        fs._repo_file = lambda o, r, p, ref=None: f"// {p}"
+        fs.fetch_pr("https://gitcode.com/cann/ops-nn/merge_requests/6429", self.d,
+                    target_dir=self.OP_DIR)
+        with open(os.path.join(self.d, "pr_facts.json"), encoding="utf-8") as src:
+            facts = json.load(src)
+        self.assertEqual(facts["changed_files"], [changed])
+        self.assertIn(self.HDR, facts["key_files"])
+        self.assertEqual(facts["key_files_ref"][self.HDR], "abc123")
+        self.assertRegex(facts["head_target_manifest_sha256"], r"^[0-9a-f]{64}$")
 
     def test_header_is_fetched_first(self):
         """顺序即优先级：接口头排在所有其它候选之前被取（取材失败时先保住最要紧的那份）。"""
@@ -595,7 +678,7 @@ class HeadShaPinningTest(unittest.TestCase):
         **静默取到完全不相干的代码，却仍被记成「取自 PR head」**。
       · MR 2663（merged，正是 Pdist 首跑那个）：head 同样在 fork 上，旧实现记的是 `head=base="master"`、无 sha。
       · `contents?ref=<head_sha>` 对 **base 仓** HTTP 200（**仅这 2 个 PR 实测，非平台保证**）→
-        实现以 base 仓为首选、拿不到时用**同一个 sha** 退到 head_repo。
+        这个 200 不能证明内容属于 fork head；实现只读 `head.repo + head.sha`，不请求或回退 base 仓。
     桩掉 `_get`/`_repo_file`，绝不打真网络。"""
 
     def setUp(self):
@@ -610,12 +693,30 @@ class HeadShaPinningTest(unittest.TestCase):
         head = {"ref": head_ref, "sha": head_sha, "repo": {"full_name": head_repo}}
 
         def g(url, params=None, timeout=30):
+            if "/contents/" in url and params and params.get("ref"):
+                path = urllib.parse.unquote(url.split("/contents/", 1)[1])
+                listing = _directory_rows(
+                    ["experimental/math/foo/examples/test_aclnn_foo.cpp"],
+                    path,
+                    lambda _rel: "src",
+                )
+                if listing is not None:
+                    return 200, listing
+                if path == "experimental/math/foo/examples/test_aclnn_foo.cpp":
+                    self.asked.append((url.split("/repos/", 1)[1].split("/contents/", 1)[0],
+                                       params["ref"]))
+                    return 200, _blob_row("src")[1]
             if url.endswith("/files"):
                 return 200, [{"filename": "experimental/math/foo/examples/test_aclnn_foo.cpp"}]
+            if "/git/trees/" in url:
+                return 200, {"tree": [
+                    {"path": "experimental/math/foo", "type": "tree", "sha": "d" * 40},
+                    {"path": "experimental/math/foo/examples/test_aclnn_foo.cpp",
+                     "type": "blob", "sha": _blob_row("src")[0]},
+                ]}
             return 200, {"title": "t", "state": "open", "base": {"ref": "master"}, "head": head}
         fs._get = g
-        # ⚠ 桩必须记 **(owner, repo, ref) 三元组**：只记 ref 的话，实现哪怕向错误的仓请求，测试也全绿。
-        fs._repo_file = lambda o, r, p, ref=None: (self.asked.append((o, r, ref)) or "src") if ref else None
+        fs._repo_file = lambda o, r, p, ref=None: "src" if ref else None
 
     def test_key_files_pinned_to_head_sha_not_branch_name(self):
         self._stub("9b494b2d835fd8a9")
@@ -624,11 +725,10 @@ class HeadShaPinningTest(unittest.TestCase):
         self.assertEqual(facts["head_sha"], "9b494b2d835fd8a9")
         self.assertTrue(facts["is_fork"], "head.repo 与 base 仓不同 → 应判 fork")
         # 核心断言：**只按 sha 问过**，一次都没拿分支名去问（那正是取错代码的路）
-        refs = {a[2] for a in self.asked}
+        refs = {a[1] for a in self.asked}
         self.assertEqual(refs, {"9b494b2d835fd8a9"}, self.asked)
         self.assertNotIn("master", refs)
-        # 且首选 base 仓（fork 只作 404 退路）——证没有一上来就打 fork
-        self.assertEqual(self.asked[0][:2], ("cann", "ops-math"), self.asked[0])
+        self.assertTrue(all(a[0] == "contrib/ops-math" for a in self.asked), self.asked)
 
     def test_no_head_sha_fetches_nothing_and_says_why(self):
         """拿不到 head.sha → **一个关键文件都不取**，并说清为什么（宁可没有，不要来源不明的）。"""
@@ -648,7 +748,7 @@ class HeadShaPinningTest(unittest.TestCase):
         fs.fetch_pr("https://gitcode.com/cann/ops-math/merge_requests/7", self.d)
         facts = json.load(open(os.path.join(self.d, "pr_facts.json"), encoding="utf-8"))
         self.assertFalse(facts["is_fork"], facts["head_repo"])
-        self.assertEqual({a[:2] for a in self.asked}, {("cann", "ops-math")}, self.asked)
+        self.assertTrue(all(a[0] == "CANN/Ops-Math" for a in self.asked), self.asked)
 
     def test_unknown_head_repo_is_none_not_false(self):
         """`head.repo` 缺失 → is_fork 应为 **None（不知道）**，不是 False（同仓）。
@@ -659,18 +759,91 @@ class HeadShaPinningTest(unittest.TestCase):
         facts = json.load(open(os.path.join(self.d, "pr_facts.json"), encoding="utf-8"))
         self.assertIsNone(facts["is_fork"])
 
-    def test_falls_back_to_head_repo_when_base_lacks_the_sha(self):
-        """base 仓拿不到该 sha → 用**同一个 sha**退到 head_repo（不引入分支名风险）。
-
-        「fork 的 sha 一定能从 base 仓解析」只在实测的两个 PR 上观察到，**不是平台保证**。"""
+    def test_fork_head_never_consumes_base_tree(self):
+        """fork PR 唯一选择 fork head repo；base 即使声称能解析该 SHA 也不得被请求。"""
         self._stub("deadbeef", head_repo="contrib/ops-math")
-        base = ("cann", "ops-math")
-        real = fs._repo_file
-        fs._repo_file = lambda o, r, p, ref=None: None if (o, r) == base else real(o, r, p, ref)
         fs.fetch_pr("https://gitcode.com/cann/ops-math/merge_requests/9", self.d)
         facts = json.load(open(os.path.join(self.d, "pr_facts.json"), encoding="utf-8"))
-        self.assertTrue(facts.get("key_files"), "应经 head_repo 退路取到")
-        self.assertIn(("contrib", "ops-math", "deadbeef"), self.asked, self.asked)
+        self.assertTrue(facts.get("key_files"))
+        self.assertEqual(facts["head_source_repo"], "contrib/ops-math")
+        self.assertTrue(all(a[0] == "contrib/ops-math" for a in self.asked), self.asked)
+
+
+class ExactHeadTreeIdentityTest(unittest.TestCase):
+    TARGET = "experimental/math/foo"
+    FILE = TARGET + "/examples/test_aclnn_foo.cpp"
+    HEAD = "a" * 40
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.old_get = fs._get
+        self.urls = []
+
+    def tearDown(self):
+        fs._get = self.old_get
+
+    def _run(self, *, mismatch=False, contents_failure=False):
+        good_sha, blob = _blob_row("src")
+
+        def g(url, params=None, timeout=30):
+            self.urls.append(url)
+            if url.endswith("/files"):
+                return 200, [{"filename": self.FILE}]
+            if url.endswith("/pulls/1"):
+                return 200, {"title": "t", "state": "open", "base": {"ref": "master"},
+                             "head": {"ref": "feat", "sha": self.HEAD,
+                                      "repo": {"full_name": "fork/ops-math"}}}
+            if "/repos/fork/ops-math/contents/" in url:
+                path = urllib.parse.unquote(url.split("/contents/", 1)[1])
+                if contents_failure:
+                    return 503, {}
+                listing = _directory_rows([self.FILE], path, lambda _rel: "src")
+                if listing is not None:
+                    return 200, listing
+                if path == self.FILE:
+                    row = dict(blob)
+                    if mismatch:
+                        row["sha"] = "f" * 40
+                    return 200, row
+                return 404, {}
+            if "/repos/fork/ops-math/git/trees/" in url:
+                # 诱饵：fork endpoint 自己也可能把 base 视图包装成 200。
+                # 生产实现不得在 recursive contents 失败后调用或采信它。
+                return 200, {"tree": [
+                    {"path": self.TARGET, "type": "tree", "sha": "d" * 40},
+                    {"path": self.FILE, "type": "blob", "sha": "e" * 40}]}
+            # 如果实现错误地消费 base tree，这份“可用但错误”的树会诱使它 fail-open。
+            if "/repos/cann/ops-math/git/trees/" in url:
+                return 200, {"tree": [{"path": self.FILE, "type": "blob", "sha": "e" * 40}]}
+            return 404, {}
+
+        fs._get = g
+        fs.fetch_pr("https://gitcode.com/cann/ops-math/merge_requests/1", self.d,
+                    target_dir=self.TARGET)
+        return json.load(open(os.path.join(self.d, "pr_facts.json"), encoding="utf-8"))
+
+    def test_base_tree_wrong_head_tree_right_selects_head_repo_only(self):
+        facts = self._run()
+        source_urls = [u for u in self.urls if "/contents/" in u or "/git/trees/" in u]
+        self.assertTrue(source_urls)
+        self.assertTrue(all("/repos/fork/ops-math/" in u for u in source_urls), source_urls)
+        self.assertEqual(facts["head_target_manifest"]["repository"], "fork/ops-math")
+        self.assertNotIn("blocked", facts)
+
+    def test_blob_sha_mismatch_is_blocked(self):
+        facts = self._run(mismatch=True)
+        self.assertEqual(facts.get("blocked"), "head_target_blob_sha_mismatch")
+        self.assertFalse(facts.get("key_files"))
+
+    def test_failed_fork_contents_is_not_rescued_by_base_view_tree_endpoint(self):
+        facts = self._run(contents_failure=True)
+        self.assertEqual(facts.get("blocked"), "missing_head_target_tree")
+        self.assertEqual(facts["head_target_files"], [])
+        self.assertFalse(facts.get("key_files"))
+        self.assertFalse(
+            any("/git/trees/" in url for url in self.urls),
+            "recursive contents 失败后不应请求可能返回 base 视图的 tree endpoint",
+        )
 
 
 class MalformedTailRejectedTest(unittest.TestCase):
@@ -724,6 +897,7 @@ class SourceFactsTest(unittest.TestCase):
             "source_repo": "cann/ops-nn",
             "head_sha": sha,
             "head_repo": "contributor/ops-nn",
+            "head_source_repo": "contributor/ops-nn",
             "is_fork": True,
             "state": "opened",
             "changed_files": ["index/median/op_host/aclnn_median.h"],
@@ -732,6 +906,12 @@ class SourceFactsTest(unittest.TestCase):
             "aclnn_headers": ["index/median/op_host/aclnn_median.h"],
             "op": "median",
             "target_dir": "index/median",
+            "head_target_files": ["index/median/op_host/aclnn_median.h"],
+            "head_target_manifest": {
+                "repository": "contributor/ops-nn", "ref": sha,
+                "target_dir": "index/median", "sha256": "c" * 64,
+                "file_count": 1,
+            },
             "interface_kind": "aclnn_2stage",
             "aclnn_entry": "aclnnMedian",
         }
@@ -866,8 +1046,28 @@ class TargetDirOverrideInFetchPrTest(unittest.TestCase):
 
     def _facts(self, files, target_dir=None, num=1):
         def g(url, params=None, timeout=30):
+            if "/contents/" in url and params and params.get("ref"):
+                path = urllib.parse.unquote(url.split("/contents/", 1)[1])
+                listing = _directory_rows(
+                    files,
+                    path,
+                    lambda rel: _ROOT_SRC_BY_PATH.get(rel, f"// {rel}"),
+                )
+                if listing is not None:
+                    return 200, listing
+                if path in files:
+                    text = _ROOT_SRC_BY_PATH.get(path, f"// {path}")
+                    self.asked.append(path)
+                    return 200, _blob_row(text)[1]
             if url.endswith("/files"):
                 return 200, [{"filename": f} for f in files]
+            if "/git/trees/" in url:
+                return 200, {"tree": [
+                    {"path": _ROOT_OP_DIR, "type": "tree", "sha": "d" * 40},
+                    *[{"path": f, "type": "blob",
+                       "sha": _blob_row(_ROOT_SRC_BY_PATH.get(f, f"// {f}"))[0]}
+                      for f in files],
+                ]}
             return 200, {"title": "t", "state": "opened", "base": {"ref": "master"},
                          "head": {"ref": "feat", "sha": "c" * 40,
                                   "repo": {"full_name": "cann/ops-cv"}}}
@@ -1125,6 +1325,11 @@ class PrSnapshotProvenanceTest(unittest.TestCase):
             "pr_url": "https://gitcode.com/cann/ops-nn/pull/6429",
             "source_repo": "cann/ops-nn", "head_sha": sha,
             "head_repo": "contributor/ops-nn", "is_fork": True, "state": "opened",
+            "head_source_repo": "contributor/ops-nn", "target_dir": "index/median",
+            "head_target_files": ["index/median/op_host/aclnn_median.h"],
+            "head_target_manifest": {
+                "repository": "contributor/ops-nn", "ref": sha,
+                "target_dir": "index/median", "sha256": "c" * 64, "file_count": 1},
             "changed_files": ["index/median/op_host/aclnn_median.h"],
             "key_files": {"index/median/op_host/aclnn_median.h": "void aclnnMedian();"},
             "key_files_ref": {"index/median/op_host/aclnn_median.h": sha},
@@ -1290,10 +1495,15 @@ class CredentialWithholdingTest(unittest.TestCase):
             "declared_source_form": "git_pr", "provenance_kind": "gitcode_pr",
             "pr_url": "https://gitcode.com/cann/ops-nn/merge_requests/1",
             "source_repo": "cann/ops-nn", "head_sha": sha, "head_repo": "cann/ops-nn",
+            "head_source_repo": "cann/ops-nn",
             "is_fork": False, "state": "merged",
             "changed_files": ["op/x.h"], "key_files": {"op/x.h": "void x();"},
             "key_files_ref": {"op/x.h": sha},
             "op": "x", "target_dir": "op", "aclnn_headers": ["op/x.h"],
+            "head_target_files": ["op/x.h"],
+            "head_target_manifest": {"repository": "cann/ops-nn", "ref": sha,
+                                     "target_dir": "op", "sha256": "c" * 64,
+                                     "file_count": 1},
         }
         payload = fs.build_source_facts(
             self.task, facts,

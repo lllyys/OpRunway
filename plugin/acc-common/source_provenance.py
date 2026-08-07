@@ -198,10 +198,34 @@ def _bind_git_pr(source_pr, pr_facts, kind, form):
         _require_present(pr_facts, "head_sha", "pr_facts"), "pr_facts.head_sha")
     if facts_head != head:
         raise ProvenanceError("pr_facts.head_sha 与 source_facts 绑定不一致")
+    source_manifest = _require_present(
+        source_pr, "head_target_manifest", "source_facts.pr")
+    facts_manifest = _require_present(
+        pr_facts, "head_target_manifest", "pr_facts")
+    if not isinstance(source_manifest, dict) or not isinstance(facts_manifest, dict):
+        raise ProvenanceError("head_target_manifest 须为 object")
+    if source_manifest != facts_manifest:
+        raise ProvenanceError("pr_facts.head_target_manifest 与 source_facts 绑定不一致")
+    repo = _require_present(source_pr, "head_repo", "source_facts.pr")
+    expected = {
+        "repository": repo,
+        "ref": head,
+    }
+    for field, value in expected.items():
+        if source_manifest.get(field) != value:
+            raise ProvenanceError(f"head_target_manifest.{field} 与选定 head 身份不一致")
+    digest = source_manifest.get("sha256")
+    if not isinstance(digest, str) or not _HEX64.fullmatch(digest):
+        raise ProvenanceError("head_target_manifest.sha256 须为 64 位小写 hex")
+    if not isinstance(source_manifest.get("target_dir"), str) or not source_manifest["target_dir"]:
+        raise ProvenanceError("head_target_manifest.target_dir 缺失")
+    if not isinstance(source_manifest.get("file_count"), int) or source_manifest["file_count"] <= 0:
+        raise ProvenanceError("head_target_manifest.file_count 须为正整数")
     return {
         "provenance_kind": kind,
         DECLARED_FORM_KEY: form,
         "pr_head_sha": head,
+        "head_target_manifest": source_manifest,
         "snapshot_merkle_sha256": source_pr.get("snapshot_merkle_sha256"),
         "source_form_facts": [],
     }

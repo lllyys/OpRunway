@@ -603,8 +603,8 @@ def fetch_pr(pr_url, out_dir, target_dir=None, taskdoc_apis=None):
         #      （实测 cann/ops-math MR 3400：head.repo=<fork>、head.ref="master"）——
         #      按分支名去 base 仓取会**静默取到 base 仓的 master**（实测 sha e16a230c ≠ head 9b494b2d），
         #      拿到完全不相干的代码却报告「取自 PR head」。
-        # 实测结论（2026-07-22，真打 gitcode API）：**fork 的 head sha 可直接从 base 仓解析**
-        #   （`contents?ref=<head_sha>` 对 base 仓 HTTP 200），故不需特判 fork 仓。
+        # 注意：即使 base 仓的 API 能「解析」fork head SHA，也不能证明返回的
+        # 是 fork head 视图。下文因此只读 PR 明示的 head.repo + head.sha，失败即阻断。
         facts["head_sha"] = (pr.get("head") or {}).get("sha")
         facts["head_repo"] = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
         # is_fork：**不知道就是 None，别默认「同仓」**（unknown 当成同仓会让下游少一层警觉）；
@@ -641,28 +641,112 @@ def fetch_pr(pr_url, out_dir, target_dir=None, taskdoc_apis=None):
             "（不按分支名兜底：那会静默取到 base 仓同名分支的代码、与 PR 实际内容无关）。"
             "已置 blocked='missing_head_sha'：编排层须停下，**不得据此往下抽 spec / 产 runner**。")
 
-    # 取仓顺序：base 仓优先，**404 时用同一个 sha 退到 head_repo**。
-    # ⚠ 「fork 的 sha 一定能从 base 仓解析」只在 2026-07-22 实测的两个 PR 上观察到，
-    #   **不是平台保证**——不能据此断定所有仓/所有 fork commit 都可达。退一层是廉价的保险，
-    #   且因为**用的仍是同一个 sha**，不会重新引入「按分支名取错代码」的风险。
-    _repos = [(owner, repo)]
+    # 被测树只选一次：fork PR 必须读 fork head repo；同仓 PR 才读 base repo。
+    # 禁止「先试 base、失败再试 fork」：base 服务即使能解析 fork SHA，也可能返回 base tree，
+    # 造成 manifest 与实际内容跨仓拼接。
     _hr = facts.get("head_repo")
-    if _hr and "/" in _hr and _hr.strip().casefold() != f"{owner}/{repo}".strip().casefold():
-        _repos.append(tuple(_hr.split("/", 1)))
+    selected_repo = _hr.strip() if isinstance(_hr, str) and "/" in _hr else None
+    if selected_repo:
+        selected_owner, selected_name = selected_repo.split("/", 1)
+        facts["head_source_repo"] = selected_repo
+    else:
+        selected_owner = selected_name = None
 
-    def _grab(rel):
-        for r in refs:
-            for o2, r2 in _repos:
-                c = _repo_file(o2, r2, rel, r)
-                if c:
-                    return c, r
-        return None, None
+    def _git_blob_sha(raw):
+        return hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()
+
+    def _grab(rel, expected_blob_sha):
+        if not (selected_owner and selected_name and head_sha):
+            return None, None
+        stc, row = _get(
+            f"{API}/repos/{urllib.parse.quote(selected_owner)}/{urllib.parse.quote(selected_name)}"
+            f"/contents/{urllib.parse.quote(rel)}", {"ref": head_sha})
+        if stc != 200 or not isinstance(row, dict) or not row.get("content"):
+            return None, None
+        import base64
+        try:
+            raw = base64.b64decode(row["content"], validate=True)
+        except (ValueError, TypeError):
+            return None, None
+        api_sha = row.get("sha")
+        if api_sha != expected_blob_sha or _git_blob_sha(raw) != expected_blob_sha:
+            facts.setdefault("blocked", "head_target_blob_sha_mismatch")
+            facts["notes"].append(
+                f"PR head 内容摘要不自洽：{rel} 的 manifest blob={expected_blob_sha!r}、"
+                f"contents blob={api_sha!r}、实算 git blob={_git_blob_sha(raw)!r}；已 fail-closed。")
+            return None, None
+        return raw.decode("utf-8", "replace"), head_sha
+
+    def _head_target_tree():
+        """从同一 PR head repo + SHA 的 Contents API 递归取完整名册。
+
+        PR files API 只是 diff，未改的接口头不会出现；GitCode tree 端点
+        对 fork SHA 可能返回 base 视图，所以本路径禁止 tree fallback。
+        """
+        if not (head_sha and target_dir):
+            return {}, None
+
+        def manifest_digest(entries):
+            mh = hashlib.sha256()
+            for rel, blob_sha in sorted(entries):
+                mh.update(hashlib.sha256(rel.encode("utf-8")).digest())
+                mh.update(hashlib.sha256(blob_sha.encode("ascii")).digest())
+            return mh.hexdigest()
+
+        if not (selected_owner and selected_name):
+            return {}, None
+        for o2, r2 in [(selected_owner, selected_name)]:
+            # Contents API 可按 commit SHA 枚举 fork head 中尚未进入 base 的目录；
+            # GitCode 的 git/trees/<commit> 对这类 SHA 实测会回 base 视图，不能使用。
+            manifest = []
+            pending = [target_dir]
+            contents_ok = True
+            while pending:
+                rel_dir = pending.pop()
+                stc, entries = _get(
+                    f"{API}/repos/{o2}/{r2}/contents/{urllib.parse.quote(rel_dir, safe='/')}",
+                    params={"ref": head_sha})
+                if stc != 200 or not isinstance(entries, list):
+                    contents_ok = False
+                    break
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    rel = entry.get("path")
+                    if entry.get("type") in ("dir", "tree") and isinstance(rel, str):
+                        pending.append(rel)
+                    elif entry.get("type") in ("file", "blob") \
+                            and isinstance(rel, str) and isinstance(entry.get("sha"), str):
+                        manifest.append((rel, entry["sha"]))
+            if contents_ok and manifest:
+                return dict(sorted(manifest)), manifest_digest(manifest)
+            # GitCode 的 git/trees/<commit> 在 fork head SHA 上可能返回 base
+            # 视图。递归 contents 任一层失败或得到空树时必须直接 fail-closed；
+            # 不得拿 tree API 当后备，也不区分 fork/同仓偷偷放宽。
+            return {}, None
+        return {}, None
 
     key, key_ref = {}, {}
     hdrs = []
     if target_dir:
-        hdrs, want = _key_file_candidates(paths, target_dir)
-        if paths and not want:
+        head_manifest, head_tree_sha = _head_target_tree()
+        head_paths = sorted(head_manifest)
+        facts["head_target_files"] = head_paths
+        facts["head_target_manifest_sha256"] = head_tree_sha
+        facts["head_target_manifest_ref"] = head_sha
+        facts["head_target_manifest"] = {
+            "repository": facts.get("head_source_repo"),
+            "ref": head_sha,
+            "target_dir": target_dir,
+            "sha256": head_tree_sha,
+            "file_count": len(head_paths),
+        }
+        # 关键文件从完整 head tree 选；changed_files 仍保留为真实 PR diff 台账。
+        # tree 取不到时 fail-closed 回到空集，不再用 diff 子集假装完整快照。
+        hdrs, want = _key_file_candidates(head_paths, target_dir)
+        changed_under_target = [p for p in paths if isinstance(p, str)
+                                and (p == target_dir or p.startswith(target_dir + "/"))]
+        if paths and not changed_under_target:
             # audit#13：关键文件三档现在都限定在 target_dir 之下。目标目录下一个改动文件都没有
             # → 本 PR 根本没碰这个算子（或 target_dir 给错了）。给**机读**阻断状态，
             # 别让下游拿着空 key_files 继续抽 spec（那就是「验的不是这个 PR」）。
@@ -671,8 +755,13 @@ def fetch_pr(pr_url, out_dir, target_dir=None, taskdoc_apis=None):
                 f"target_dir={target_dir!r} 之下没有任何改动文件 → 关键文件为空。"
                 "已置 blocked='no_changed_files_under_target_dir'：请核对 --target-dir 是否指对算子目录，"
                 "或确认该 PR 是否真的改了这个算子。")
+        if not head_paths:
+            facts.setdefault("blocked", "missing_head_target_tree")
+            facts["notes"].append(
+                "无法从 PR head commit 的 Git tree 取得 target subtree 完整名册；"
+                "不回退 changed-files 子集、不拼 base，已 fail-closed。")
         for rel in want:
-            c, r = _grab(rel)
+            c, r = _grab(rel, head_manifest.get(rel))
             if c:
                 key[rel], key_ref[rel] = c, r
     _apply_key_file_facts(facts, key, key_ref, hdrs, taskdoc_apis=taskdoc_apis)
@@ -1091,6 +1180,9 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
         reasons.append("missing_source_repo")
     if not _nonempty_str(facts.get("head_repo")):
         reasons.append("missing_head_repo")
+    if ((facts.get("provenance_kind") or "gitcode_pr") == "gitcode_pr"
+            and facts.get("head_source_repo") != facts.get("head_repo")):
+        reasons.append("head_source_repo_not_selected_head_repo")
     if not isinstance(facts.get("is_fork"), bool):
         reasons.append("unknown_fork_status")
     if not _nonempty_str(facts.get("state")):
@@ -1103,6 +1195,26 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
         reasons.append("missing_key_files")
     elif any(not _safe_rel_path(item["path"]) for item in key_index):
         reasons.append("unsafe_key_file_path")
+    manifest = facts.get("head_target_manifest")
+    target_dir = facts.get("target_dir")
+    if (facts.get("provenance_kind") or "gitcode_pr") == "gitcode_pr" and not isinstance(manifest, dict):
+        reasons.append("missing_head_target_manifest")
+    elif isinstance(manifest, dict):
+        if manifest.get("repository") != facts.get("head_repo"):
+            reasons.append("head_target_manifest_repo_mismatch")
+        if manifest.get("ref") != head_sha:
+            reasons.append("head_target_manifest_ref_mismatch")
+        if manifest.get("target_dir") != target_dir or not _safe_rel_path(target_dir):
+            reasons.append("head_target_manifest_target_mismatch")
+        if not isinstance(manifest.get("sha256"), str) or not _HEX64_RE.fullmatch(manifest["sha256"]):
+            reasons.append("head_target_manifest_bad_digest")
+        head_files = facts.get("head_target_files")
+        if (not isinstance(head_files, list) or not head_files
+                or any(not _safe_rel_path(p) or not p.startswith(target_dir + "/")
+                       for p in head_files)):
+            reasons.append("head_target_manifest_bad_files")
+        elif manifest.get("file_count") != len(head_files):
+            reasons.append("head_target_manifest_file_count_mismatch")
     # audit#17：档位由调用方自报的 `provenance_kind` 选，构造侧从不校该档的结构契约——
     # 一份声称 local_snapshot、却带着 head_sha / 没有 merkle 的 pr_facts 会走进折叠分支，
     # 把真实缺口一并折掉，最后落成一个**被放行**的档。
@@ -1172,6 +1284,9 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
             "head_repo": facts.get("head_repo"),
             "is_fork": facts.get("is_fork"),
             "state": facts.get("state"),
+            "head_target_manifest": (
+                facts.get("head_target_manifest")
+                if isinstance(facts.get("head_target_manifest"), dict) else None),
             # provenance_kind ∈ {gitcode_pr, local_snapshot}；后者的 merkle **只证本地字节**，
             # 不是 head_sha 的替代品，任何下游都不得据它声称「已绑定 PR head」。
             "provenance_kind": provenance_kind,

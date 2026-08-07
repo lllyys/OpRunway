@@ -38,6 +38,11 @@ _SCOPE = "experimental/index/reduce"
 _PATH = "experimental/index/reduce/op_host/op_api/aclnn_reduce.h"
 
 
+def _head_manifest():
+    return {"repository": "cann/ops-nn", "ref": _HEAD, "target_dir": _SCOPE,
+            "sha256": "c" * 64, "file_count": 1}
+
+
 def _spec(active_attrs=("dim", "keepDim")):
     return {
         "op": "Reduce",
@@ -77,12 +82,16 @@ class AclnnPreflightTest(unittest.TestCase):
         self._write("pr_facts.json", {
             "provenance_kind": "gitcode_pr",
             "head_sha": _HEAD,
+            "head_repo": "cann/ops-nn",
+            "head_target_manifest": _head_manifest(),
             "key_files": {_PATH: _HEADER},
         })
         raw = _HEADER.encode()
         source = {
             "contract_version": 1,
-            "pr": {"provenance_kind": "gitcode_pr", "head_sha": _HEAD},
+            "pr": {"provenance_kind": "gitcode_pr", "head_sha": _HEAD,
+                   "head_repo": "cann/ops-nn",
+                   "head_target_manifest": _head_manifest()},
             "key_files": [{
                 "path": _PATH,
                 "ref": _HEAD,
