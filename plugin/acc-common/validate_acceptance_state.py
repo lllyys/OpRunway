@@ -1566,6 +1566,22 @@ def _gate_cpp_extension_tensor_shape_attrs(caseset, receipt, ev_list, errs, *, p
             errs.append(f"{cid}: 非 structure case 不得冒领 structure evidence")
 
 
+def _gate_cpp_extension_invocation_accounting(plan, receipt, ev_list, errs):
+    """当前 receipt 必须把 plan.cases∪excluded 分母逐 case 接到 evidence outcome。"""
+    if not isinstance(receipt, dict):
+        errs.append("cpp_extension receipt 非 object，无法核 invocation 分母账")
+        return
+    if receipt.get("schema_version") == 1:
+        return  # 历史 v1 产物不追写新字段、不改判。
+    if receipt.get("schema_version") != cann_version.RECEIPT_SCHEMA_VERSION:
+        return  # schema 主门负责报错。
+    try:
+        cpp_extension_adapter.validate_invocation_accounting(
+            plan, receipt.get("invocation"), evidence=ev_list)
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        errs.append(f"cpp_extension receipt.invocation 分母账未闭合：{ex}")
+
+
 def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_facts_path=None):
     """cpp_extension 的独立 build/load/ELF receipt 完整性门。
 
@@ -1607,6 +1623,7 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
         caseset, receipt, ev_list, errs, manifest=manifest, plan=plan)
     _gate_cpp_extension_tensor_shape_attrs(
         caseset, receipt, ev_list, errs, plan=plan)
+    _gate_cpp_extension_invocation_accounting(plan, receipt, ev_list, errs)
     _gate_cpp_extension_stage2_evidence(manifest, errs)
     bindings = receipt.get("bindings")
     if not isinstance(bindings, dict):

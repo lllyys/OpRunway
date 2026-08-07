@@ -979,10 +979,11 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact, *, layout_contr
         _progress("running")
     _snapshot(True)
     _progress("complete")
-    invocation = {
-        "planned": total, "produced": len(produced), "failed": len(failed),
-        "failed_case_ids": [row["case_id"] for row in failed],
-    }
+    invocation = cpp_extension_adapter.build_invocation_accounting(
+        plan,
+        produced_case_ids=[row["case_id"] for row in produced],
+        failed_case_ids=[row["case_id"] for row in failed],
+    )
     if layout_contract is not None:
         invocation["_layout_execution"] = {
             "schema": cpp_extension_adapter.LAYOUT_EXECUTION_SCHEMA,

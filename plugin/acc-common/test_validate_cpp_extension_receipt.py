@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 import cann_version as CV
+import cpp_extension_adapter as A
 import cpp_extension_identity as I
 import validate_acceptance_state as G
 
@@ -127,6 +128,15 @@ def _currentize_build_and_identity(root, envelope, evidence):
         vendor["library_path"], vendor["library_sha256"], plan)
     vendor["symbols_owned"] = [
         item["symbol"] for item in I.required_symbols(plan)]
+    for row in evidence:
+        row.setdefault("status", "ok")
+    receipt["invocation"] = A.build_invocation_accounting(
+        plan,
+        produced_case_ids=[row["case_id"] for row in evidence
+                           if row.get("status") == "ok"],
+        failed_case_ids=[row["case_id"] for row in evidence
+                         if row.get("status") == "execution_failed"],
+    )
     evidence[0]["cpp_extension_receipt_sha256"] = G._canonical_sha(receipt)
 
 

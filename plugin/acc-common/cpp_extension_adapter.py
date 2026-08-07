@@ -54,6 +54,8 @@ ATOMIC_ATTR_LEDGER_SCHEMA = "oprunway.atomic_attr_case_ledger"
 ATOMIC_ATTR_LEDGER_VERSION = 1
 TENSOR_SHAPE_ATTR_BINDINGS_SCHEMA = "oprunway.tensor_shape_attr_bindings"
 TENSOR_SHAPE_ATTR_BINDINGS_VERSION = 1
+INVOCATION_ACCOUNTING_SCHEMA = "oprunway.cpp_extension_invocation_accounting"
+INVOCATION_ACCOUNTING_VERSION = 1
 
 
 def _canonical_sha(value):
@@ -155,6 +157,171 @@ def _layout_relative_path(value, where):
             or normalized.startswith(".." + os.sep):
         raise CppExtensionAdapterError(f"{where} 须为不逃逸根目录的相对路径")
     return path
+
+
+def _invocation_plan_rows(plan):
+    if not isinstance(plan, dict):
+        raise CppExtensionAdapterError("invocation accounting 的 plan 须为 object")
+    cases = plan.get("cases")
+    excluded = plan.get("excluded", [])
+    if not isinstance(cases, list) or not isinstance(excluded, list):
+        raise CppExtensionAdapterError("invocation plan.cases/excluded 须为列表")
+    rows = []
+    seen = set()
+    for partition, values in (("cases", cases), ("excluded", excluded)):
+        for index, row in enumerate(values):
+            if not isinstance(row, dict):
+                raise CppExtensionAdapterError(
+                    f"invocation plan.{partition}[{index}] 须为 object")
+            cid = row.get("case_id")
+            if not isinstance(cid, str) or not cid:
+                raise CppExtensionAdapterError(
+                    f"invocation plan.{partition}[{index}].case_id 缺失")
+            if cid in seen:
+                raise CppExtensionAdapterError(
+                    f"invocation plan cases/excluded 重复 case_id={cid!r}")
+            seen.add(cid)
+            if partition == "excluded" and (
+                    not isinstance(row.get("reason"), str) or not row["reason"]):
+                raise CppExtensionAdapterError(
+                    f"invocation plan.excluded[{index}].reason 缺失")
+            rows.append({
+                "case_id": cid,
+                "partition": partition,
+                "plan_row_sha256": _canonical_sha(row),
+                **({"reason": row["reason"]} if partition == "excluded" else {}),
+            })
+    return rows
+
+
+def _invocation_case_ids(values, where):
+    if not isinstance(values, list) or any(
+            not isinstance(value, str) or not value for value in values):
+        raise CppExtensionAdapterError(f"{where} 须为非空 case_id 组成的列表（可为空）")
+    if len(values) != len(set(values)):
+        raise CppExtensionAdapterError(f"{where} 含重复 case_id")
+    return list(values)
+
+
+def build_invocation_accounting(plan, *, produced_case_ids, failed_case_ids):
+    """生成 receipt.invocation；分母只来自冻结 plan，不从执行结果反推。"""
+    plan_rows = _invocation_plan_rows(plan)
+    executable = [row["case_id"] for row in plan_rows if row["partition"] == "cases"]
+    produced = _invocation_case_ids(produced_case_ids, "produced_case_ids")
+    failed = _invocation_case_ids(failed_case_ids, "failed_case_ids")
+    if set(produced) & set(failed):
+        raise CppExtensionAdapterError("produced/failed case_id 不得重叠")
+    if set(produced) | set(failed) != set(executable):
+        raise CppExtensionAdapterError(
+            "produced∪failed 未完整且唯一覆盖 invocation plan.cases")
+    outcomes = {cid: "produced" for cid in produced}
+    outcomes.update({cid: "failed" for cid in failed})
+    records = []
+    for row in plan_rows:
+        record = dict(row)
+        record["outcome"] = (
+            outcomes[row["case_id"]] if row["partition"] == "cases" else "excluded")
+        records.append(record)
+    return {
+        "schema": INVOCATION_ACCOUNTING_SCHEMA,
+        "schema_version": INVOCATION_ACCOUNTING_VERSION,
+        "total": len(plan_rows),
+        "planned": len(executable),
+        "produced": len(produced),
+        "failed": len(failed),
+        "excluded": len(plan_rows) - len(executable),
+        "failed_case_ids": [row["case_id"] for row in records
+                            if row["outcome"] == "failed"],
+        "case_records": records,
+    }
+
+
+def validate_invocation_accounting(plan, value, *, evidence=None):
+    """重放 plan.cases∪excluded 分母，并可与最终 evidence outcome 交叉。"""
+    _layout_exact_keys(value, {
+        "schema", "schema_version", "total", "planned", "produced", "failed",
+        "excluded", "failed_case_ids", "case_records",
+    }, "receipt.invocation")
+    if value.get("schema") != INVOCATION_ACCOUNTING_SCHEMA \
+            or type(value.get("schema_version")) is not int \
+            or value["schema_version"] != INVOCATION_ACCOUNTING_VERSION:
+        raise CppExtensionAdapterError(
+            f"receipt.invocation 须为 {INVOCATION_ACCOUNTING_SCHEMA} "
+            f"v{INVOCATION_ACCOUNTING_VERSION}")
+    plan_rows = _invocation_plan_rows(plan)
+    records = value.get("case_records")
+    if not isinstance(records, list) or len(records) != len(plan_rows):
+        raise CppExtensionAdapterError(
+            "receipt.invocation.case_records 未完整覆盖 plan.cases∪excluded")
+    outcomes = []
+    for index, (expected, record) in enumerate(zip(plan_rows, records)):
+        keys = {"case_id", "partition", "plan_row_sha256", "outcome"}
+        if expected["partition"] == "excluded":
+            keys.add("reason")
+        _layout_exact_keys(record, keys, f"receipt.invocation.case_records[{index}]")
+        for key in ("case_id", "partition", "plan_row_sha256"):
+            if record.get(key) != expected[key]:
+                raise CppExtensionAdapterError(
+                    f"receipt.invocation.case_records[{index}].{key} 与 plan 漂移")
+        _layout_sha256(record.get("plan_row_sha256"),
+                       f"receipt.invocation.case_records[{index}].plan_row_sha256")
+        if expected["partition"] == "cases":
+            if record.get("outcome") not in ("produced", "failed"):
+                raise CppExtensionAdapterError(
+                    f"receipt.invocation.case_records[{index}].outcome 非 produced/failed")
+        else:
+            if record.get("outcome") != "excluded" \
+                    or record.get("reason") != expected["reason"]:
+                raise CppExtensionAdapterError(
+                    f"receipt.invocation.case_records[{index}] excluded reason/outcome 漂移")
+        outcomes.append(record["outcome"])
+    recomputed = {
+        "total": len(plan_rows),
+        "planned": sum(row["partition"] == "cases" for row in plan_rows),
+        "produced": outcomes.count("produced"),
+        "failed": outcomes.count("failed"),
+        "excluded": outcomes.count("excluded"),
+    }
+    for key, expected in recomputed.items():
+        if type(value.get(key)) is not int or value[key] != expected:
+            raise CppExtensionAdapterError(
+                f"receipt.invocation.{key}={value.get(key)!r} 与 plan/records 重算 {expected} 不一致")
+    wanted_failed = [record["case_id"] for record in records
+                     if record["outcome"] == "failed"]
+    failed_ids = _invocation_case_ids(
+        value.get("failed_case_ids"), "receipt.invocation.failed_case_ids")
+    if failed_ids != wanted_failed:
+        raise CppExtensionAdapterError(
+            "receipt.invocation.failed_case_ids 未按 plan 顺序逐字绑定失败 records")
+    if evidence is None:
+        return value
+    if not isinstance(evidence, list):
+        raise CppExtensionAdapterError("cpp_extension evidence 须为列表")
+    evidence_by_id = {}
+    for index, row in enumerate(evidence):
+        if not isinstance(row, dict):
+            raise CppExtensionAdapterError(f"evidence[{index}] 须为 object")
+        cid = row.get("case_id")
+        if not isinstance(cid, str) or not cid or cid in evidence_by_id:
+            raise CppExtensionAdapterError(
+                f"evidence case_id 缺失/重复：{cid!r}")
+        evidence_by_id[cid] = row
+    expected_ids = {row["case_id"] for row in records}
+    if set(evidence_by_id) != expected_ids:
+        raise CppExtensionAdapterError(
+            "evidence 未完整且唯一覆盖 receipt.invocation.case_records")
+    status_outcomes = {
+        "ok": "produced",
+        "execution_failed": "failed",
+        GOLDEN_UNAVAILABLE: "excluded",
+    }
+    for record in records:
+        status = evidence_by_id[record["case_id"]].get("status")
+        if status_outcomes.get(status) != record["outcome"]:
+            raise CppExtensionAdapterError(
+                f"{record['case_id']}: evidence.status={status!r} 与 "
+                f"receipt invocation outcome={record['outcome']!r} 不一致")
+    return value
 
 
 def _case_output_contracts(case):
@@ -1534,6 +1701,7 @@ def validate_receipt(work, caseset):
         if bindings.get(key) != value:
             raise CppExtensionAdapterError(
                 f"receipt.bindings.{key} 漂移：期望 {value}，得 {bindings.get(key)!r}")
+    validate_invocation_accounting(plan, receipt.get("invocation"))
 
     _validate_tensor_format_receipt(manifest, receipt)
     _validate_multi_input_receipt(manifest, receipt)
@@ -1794,6 +1962,8 @@ def run_cpp_extension(caseset, work, defect_cases=None):
     _bind_multi_input_evidence(caseset, evidence, receipt)
     _bind_tensor_shape_attr_evidence(caseset, evidence, receipt)
     _bind_layout_evidence(caseset, evidence, receipt)
+    validate_invocation_accounting(
+        _strict_json(plan), receipt.get("invocation"), evidence=evidence)
     perf_plan, skipped = _write_perf_plan(caseset, work, evidence, receipt)
     perf_collection = None
     if perf_plan is not None:
@@ -1814,6 +1984,8 @@ def run_cpp_extension(caseset, work, defect_cases=None):
         _bind_multi_input_evidence(caseset, evidence, receipt)
         _bind_tensor_shape_attr_evidence(caseset, evidence, receipt)
         _bind_layout_evidence(caseset, evidence, receipt)
+        validate_invocation_accounting(
+            _strict_json(plan), receipt.get("invocation"), evidence=evidence)
         if not perf_mode.is_measure_only(perf_plan.get("mode", perf_mode.DEFAULT_MODE)):
             baseline = PM.build_baseline_document(
                 records, op=caseset.get("op"),
@@ -1891,6 +2063,8 @@ def run_cpp_extension_precision_only(caseset, work):
     _bind_multi_input_evidence(caseset, evidence, receipt)
     _bind_tensor_shape_attr_evidence(caseset, evidence, receipt)
     _bind_layout_evidence(caseset, evidence, receipt)
+    validate_invocation_accounting(
+        _strict_json(plan), receipt.get("invocation"), evidence=evidence)
     digest = _canonical_sha(receipt)
     for row in evidence:
         row["cpp_extension_receipt_sha256"] = digest
