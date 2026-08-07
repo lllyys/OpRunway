@@ -237,6 +237,49 @@ class CppExtensionAdapterContractTest(unittest.TestCase):
             A.run_cpp_extension(_caseset(), "/tmp/not-used")
 
 
+class CppExtensionTensorFormatReceiptTest(unittest.TestCase):
+    def _nd_manifest(self):
+        record = {
+            "requested": "nd",
+            "effective_acl_format": "ACL_FORMAT_ND",
+            "source": "spec_declared",
+        }
+        return {
+            "tensor_acl_format": "nd",
+            "tensor_acl_format_source": "spec_declared",
+            "tensor_format_receipt": record,
+        }, record
+
+    def test_nd_receipt_must_mirror_the_manifest_exactly(self):
+        manifest, record = self._nd_manifest()
+        A._validate_tensor_format_receipt(
+            manifest, {"tensor_format_receipt": copy.deepcopy(record)})
+        for bad in ({},
+                    {"tensor_format_receipt": {**record,
+                                               "effective_acl_format": "ACL_FORMAT_NCHW"}}):
+            with self.subTest(receipt=bad), self.assertRaisesRegex(
+                    A.CppExtensionAdapterError, "未原样镜像"):
+                A._validate_tensor_format_receipt(manifest, bad)
+
+    def test_manifest_may_not_claim_nd_without_the_codegen_receipt(self):
+        manifest, _record = self._nd_manifest()
+        del manifest["tensor_format_receipt"]
+        with self.assertRaisesRegex(
+                A.CppExtensionAdapterError, "manifest.tensor_format_receipt"):
+            A._validate_tensor_format_receipt(manifest, {})
+
+    def test_rank_default_keeps_the_legacy_receipt_shape(self):
+        manifest = {
+            "tensor_acl_format": "torch_npu_rank_default",
+            "tensor_acl_format_source": "default_unverified",
+        }
+        A._validate_tensor_format_receipt(manifest, {})
+        with self.assertRaisesRegex(
+                A.CppExtensionAdapterError, "rank-default"):
+            A._validate_tensor_format_receipt(
+                manifest, {"tensor_format_receipt": {"requested": "nd"}})
+
+
 def _measure_only_spec():
     """§5.10 只测不比：spec.perf 里不得有任何对照物/阈值字段，须带任务书授权。"""
     spec = _spec()

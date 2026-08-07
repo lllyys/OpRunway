@@ -246,6 +246,21 @@ class ErroredBucketTest(unittest.TestCase):
         b = _by_dtype(v["accuracy_summary"])["float32"]
         self.assertEqual((b["count"], b["passed"], b["failed"], b["errored"]), (2, 1, 0, 1))
 
+    def test_output_not_written_is_errored_not_precision_mismatch(self):
+        """写入门命中是 harness/调用失败：保留分母，但不得进入数值 failed 或 passed。"""
+        spec, caseset, evidence = _bundle([("ow", "float32", {})])
+        evidence["evidence"][0] = {
+            "case_id": "ow",
+            "status": "execution_failed",
+            "error_kind": "output_not_written",
+            "error": "整块仍为哨兵；不是算子精度问题",
+        }
+        verdict = V.validate(spec, caseset, evidence)
+        bucket = _by_dtype(verdict["accuracy_summary"])["float32"]
+        self.assertEqual(
+            (bucket["passed"], bucket["failed"], bucket["errored"]), (0, 0, 1))
+        self.assertEqual(verdict["accuracy_summary"]["executed"], 0)
+
     def test_contract_failure_counted_as_failed_documented(self):
         """**边界钉子**：口径契约不符（caseset 谎报 compare_dtype）当前落 `failed`、**分不出**是契约问题。
 

@@ -2,12 +2,117 @@
 """cpp_extension_driver 的纯静态 helper 测试；不 import torch、不 build。"""
 
 import json
+import math
 import os
+import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
 import cpp_extension_driver as D
+import repo_adapter as RA
+
+
+class _ScalarResult:
+    def __init__(self, value):
+        self._value = value
+
+    def item(self):
+        return self._value
+
+
+class _Mask:
+    def __init__(self, values):
+        self.values = list(values)
+
+    def sum(self):
+        return _ScalarResult(sum(self.values))
+
+    def __and__(self, other):
+        return _Mask(a and b for a, b in zip(self.values, other.values))
+
+
+class _Tensor:
+    def __init__(self, shape, value, dtype):
+        self.shape = tuple(shape)
+        count = 1
+        for dim in shape:
+            count *= dim
+        self.values = [value for _ in range(count)]
+        self.dtype = dtype
+        self.moved_to_npu = False
+
+    def npu(self):
+        self.moved_to_npu = True
+        return self
+
+    def detach(self):
+        return self
+
+    def contiguous(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numel(self):
+        return len(self.values)
+
+    def __eq__(self, other):
+        return _Mask(value == other for value in self.values)
+
+    @property
+    def real(self):
+        return _Tensor.from_values(self.shape, [value.real for value in self.values], "float32")
+
+    @property
+    def imag(self):
+        return _Tensor.from_values(self.shape, [value.imag for value in self.values], "float32")
+
+    @classmethod
+    def from_values(cls, shape, values, dtype):
+        obj = cls.__new__(cls)
+        obj.shape = tuple(shape)
+        obj.values = list(values)
+        obj.dtype = dtype
+        obj.moved_to_npu = False
+        return obj
+
+
+class _FakeOp:
+    _schema = "fake::invoke_v0(Tensor out) -> Tensor[]"
+
+    def __init__(self, write_value=None):
+        self.default = self
+        self.write_value = write_value
+
+    def __call__(self, output):
+        if self.write_value is not None:
+            output.values = [self.write_value for _ in output.values]
+        return [output]
+
+
+def _fake_torch(write_value=None):
+    module = types.ModuleType("torch")
+    for name in D._TORCH_DTYPES.values():
+        setattr(module, name, name)
+    module.full_calls = []
+
+    def full(shape, value, *, dtype, device):
+        module.full_calls.append((tuple(shape), value, dtype, device))
+        return _Tensor(shape, value, dtype)
+
+    module.full = full
+    module.isnan = lambda tensor: _Mask(
+        math.isnan(value) for value in tensor.values)
+    op = _FakeOp(write_value)
+    module.ops = types.SimpleNamespace(
+        load_library=lambda _path: None,
+        oprunway_witness=types.SimpleNamespace(invoke_v0=op),
+    )
+    module.npu = types.SimpleNamespace(synchronize=lambda: None)
+    return module
 
 
 class CppExtensionDriverStaticTest(unittest.TestCase):
@@ -186,6 +291,95 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
                     json.dump(value, dst)
             with self.assertRaisesRegex(D.DriverError, "绑定漂移"):
                 D.run_perf_only(td, td)
+
+
+class OutputWrittenGateTest(unittest.TestCase):
+    """行为型夹具：删掉 `_invoke_all` 中的哨兵检查调用，no-write 用例会重新 produced，本测试必红。"""
+
+    def _invoke(self, *, dtype="uint8", shape=None, write_value=None):
+        shape = [] if shape is None else shape
+        torch = _fake_torch(write_value)
+        case = {
+            "id": "no_write_u8_scalar",
+            "inputs": [],
+            "expected": {"compare_dtype": dtype, "out_shape": shape},
+        }
+        row = {"case_id": case["id"], "entrypoint": "invoke_v0",
+               "slots": [{"role": "out", "output_idx": 0}]}
+        manifest = {
+            "namespace": "oprunway_witness",
+            "variants": [{"entrypoint": "invoke_v0"}],
+        }
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(
+                sys.modules,
+                {"torch": torch, "torch_npu": types.ModuleType("torch_npu")}), mock.patch.object(
+                    D, "_dump_output",
+                    side_effect=lambda _t, _n, tensor, logical_dtype, path: (
+                        logical_dtype, list(tensor.shape))):
+            _torch, _schemas, summary = D._invoke_all(
+                td, td, manifest, {"cases": [row]}, {"cases": [case]}, "/tmp/fake.so")
+            with open(os.path.join(td, "cpp_extension_out", "out_manifest.json"),
+                      encoding="utf-8") as src:
+                out_manifest = json.load(src)
+        return torch, summary, out_manifest
+
+    def test_sentinel_table_covers_every_supported_dtype_and_allocation_is_known(self):
+        self.assertEqual(set(D._OUTPUT_SENTINELS), set(D._TORCH_DTYPES))
+        torch = _fake_torch()
+        for dtype in D._TORCH_DTYPES:
+            with self.subTest(dtype=dtype):
+                output = D._empty_output(
+                    torch, {"name": "out", "compare_dtype": dtype, "out_shape": [2]})
+                self.assertTrue(output.moved_to_npu)
+                self.assertEqual(torch.full_calls[-1][3], "cpu")
+        self.assertEqual(D._OUTPUT_SENTINELS["int16"][0], 0x5A5A)
+        self.assertEqual(D._OUTPUT_SENTINELS["uint8"][0], 0x5A)
+
+    def test_future_dtype_without_sentinel_fails_closed(self):
+        torch = _fake_torch()
+        torch.future = "future"
+        with mock.patch.dict(D._TORCH_DTYPES, {"future": "future"}):
+            with self.assertRaisesRegex(D.DriverError, "缺输出写入哨兵"):
+                D._empty_output(
+                    torch, {"name": "out", "compare_dtype": "future", "out_shape": []})
+
+    def test_uint8_scalar_no_write_is_output_not_written_mutation_guard(self):
+        torch, summary, manifest = self._invoke()
+        self.assertEqual(torch.full_calls[0][1], 0x5A)
+        self.assertEqual(summary["produced"], 0)
+        self.assertEqual(summary["failed"], 1)
+        failure = manifest["failed"][0]
+        self.assertEqual(failure["error_kind"], D.FAILED_NOT_WRITTEN)
+        self.assertEqual(failure["output_written_check"], D.OUTPUT_CHECK_FAILED_ALL_SENTINEL)
+        self.assertEqual(failure["output_written_diagnostic"]["sentinel_hits"], 1)
+        self.assertEqual(failure["output_written_diagnostic"]["hit_ratio"], 1.0)
+        evidence = {}
+        RA._copy_output_written_evidence(evidence, failure, produced=False)
+        self.assertEqual(evidence["output_written_check"], "failed_all_sentinel")
+
+    def test_normal_write_is_produced_and_check_passes(self):
+        _torch, summary, manifest = self._invoke(write_value=7)
+        self.assertEqual((summary["produced"], summary["failed"]), (1, 0))
+        output = manifest["produced"][0]["outputs"][0]
+        self.assertEqual(output["output_written_check"], D.OUTPUT_CHECK_PASSED)
+        evidence = {}
+        RA._copy_output_written_evidence(evidence, output, produced=True)
+        self.assertEqual(evidence["output_written_check"], "passed")
+
+    def test_bool_and_empty_skips_are_visible(self):
+        _torch, _summary, bool_manifest = self._invoke(dtype="bool")
+        bool_output = bool_manifest["produced"][0]["outputs"][0]
+        self.assertEqual(bool_output["output_written_check"], D.OUTPUT_CHECK_SKIPPED_BOOL)
+        bool_evidence = {}
+        RA._copy_output_written_evidence(bool_evidence, bool_output, produced=True)
+        self.assertEqual(bool_evidence["output_written_check"], "skipped_bool")
+
+        _torch, _summary, empty_manifest = self._invoke(shape=[0])
+        empty_output = empty_manifest["produced"][0]["outputs"][0]
+        self.assertEqual(empty_output["output_written_check"], D.OUTPUT_CHECK_SKIPPED_EMPTY)
+        empty_evidence = {}
+        RA._copy_output_written_evidence(empty_evidence, empty_output, produced=True)
+        self.assertEqual(empty_evidence["output_written_check"], "skipped_empty")
 
 
 class CustomOppBindingTest(unittest.TestCase):

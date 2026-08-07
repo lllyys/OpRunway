@@ -6,7 +6,8 @@
 
 * ``torch_npu.utils.cpp_extension.NpuExtension`` + ``BuildExtension``；
 * ``#include "npu_cpp_extension.h"``；
-* ``EXEC_NPU_CMD_EXT(aclnnXxx, ...)``（**标准 4 参 stage2** 才走这条）；
+* ``EXEC_NPU_CMD_EXT(aclnnXxx, ...)``（**标准 4 参 stage2 + rank-default format**
+  才走这条；标准 ABI + 显式 ND 走同骨架的生成两段式）；
 * ``TORCH_LIBRARY`` / ``TORCH_LIBRARY_IMPL(..., PrivateUse1, ...)``；
 * Python 侧由 ``torch.ops.load_library`` 加载独立共享库。
 
@@ -22,8 +23,9 @@
 也不自己读 header：形态从 CP-C0 预检产物（`preflight_aclnn`，它调的就是
 ``parse_aclnn_signature``）或 spec 显式声明取得。
 
-* ``standard`` —— ``(workspace, workspaceSize, executor, stream)``：走官方
-  ``EXEC_NPU_CMD_EXT``，与本改动之前**逐字节相同**；
+* ``standard`` —— ``(workspace, workspaceSize, executor, stream)``：rank-default format 走官方
+  ``EXEC_NPU_CMD_EXT``，与本改动之前**逐字节相同**；显式 ND 只改
+  stage1 tensor conversion，stage2 仍是上述四参；
 * ``extended`` —— ``(workspace, workspaceSize, executor, <stage1 实参原样重复>, stream)``：
   **官方宏走不了**。宏的执行段落在 op-plugin 的 ``ExecuteApiFunc()``，那里把 phase-2 函数指针
   写死成 ``int (*)(void *, uint64_t, aclOpExecutor *, const aclrtStream)`` 并按 4 参调用
@@ -90,6 +92,7 @@ STAGE2_SOURCE_DEFAULT = "default_unverified"     # 两处都没说 → 沿用历
 
 #: 生成代码实际走的派发分支。
 DISPATCH_MACRO = "exec_npu_cmd_ext_macro"
+DISPATCH_STANDARD_ND = "generated_standard_two_stage_nd"
 DISPATCH_EXTENDED = "generated_extended_two_stage"
 
 #: 「本次 stage2 形态没有任何 header 级证据」的机读挂账。
@@ -108,6 +111,10 @@ TENSOR_FORMAT_ND = "nd"
 TENSOR_FORMATS = (TENSOR_FORMAT_TORCH_NPU_DEFAULT, TENSOR_FORMAT_ND)
 TENSOR_FORMAT_SOURCE_SPEC = "spec_declared"
 TENSOR_FORMAT_SOURCE_DEFAULT = "default_unverified"
+
+#: manifest/driver receipt 里记录的 C++ ACL 枚举词。不记数字 ``2``：这份
+#: 收据要回答「生成桥实际把张量转成什么 format」，不是再造一份 CANN 枚举表。
+ACL_FORMAT_ND_TOKEN = "ACL_FORMAT_ND"
 
 #: 生成 ND 转换器时用的函数名（只在 `nd` 档出现在生成源码里）。
 _ND_CONVERTER = "OprunwayConvertNdTensor"
@@ -247,9 +254,9 @@ def _resolve_tensor_format(spec):
     缺席即历史默认（op-plugin 按 rank 猜），并记 `default_unverified` —— 与改动前**逐字节相同**
     的那条路径，只是「这次没人核过张量格式」变成 manifest 里可读的事实，而不是静默假设。
     """
-    declared = spec.get("aclnn_tensor_format")
-    if declared is None:
+    if "aclnn_tensor_format" not in spec:
         return TENSOR_FORMAT_TORCH_NPU_DEFAULT, TENSOR_FORMAT_SOURCE_DEFAULT
+    declared = spec["aclnn_tensor_format"]
     if declared not in TENSOR_FORMATS:
         raise CppExtensionCodegenError(
             f"spec.aclnn_tensor_format={declared!r} 非受控值，须属 {list(TENSOR_FORMATS)}"
@@ -257,7 +264,36 @@ def _resolve_tensor_format(spec):
     return declared, TENSOR_FORMAT_SOURCE_SPEC
 
 
-def _contract(spec, preflight_table=None):
+def tensor_format_receipt(tensor_format, tensor_format_source):
+    """已解析 format → 需镜像进 driver receipt 的机读事实。
+
+    只有显式 ``nd`` 会生成收据；历史 rank-default 路径返回 ``None``，以保持
+    未命中新能力的 manifest / receipt 字节不漂移。该函数同时是 codegen 与
+    adapter receipt 校验的单一结构真源：driver 只能原样镜像，不得自行推导。
+    """
+    if tensor_format == TENSOR_FORMAT_TORCH_NPU_DEFAULT:
+        if tensor_format_source not in (
+                TENSOR_FORMAT_SOURCE_DEFAULT, TENSOR_FORMAT_SOURCE_SPEC):
+            raise CppExtensionCodegenError(
+                f"tensor format={tensor_format!r} 的 source={tensor_format_source!r} "
+                "非受控值")
+        return None
+    if tensor_format == TENSOR_FORMAT_ND:
+        if tensor_format_source != TENSOR_FORMAT_SOURCE_SPEC:
+            raise CppExtensionCodegenError(
+                "ACL_FORMAT_ND 必须由 spec.aclnn_tensor_format 显式声明，"
+                f"当前 source={tensor_format_source!r}")
+        return {
+            "requested": TENSOR_FORMAT_ND,
+            "effective_acl_format": ACL_FORMAT_ND_TOKEN,
+            "source": TENSOR_FORMAT_SOURCE_SPEC,
+        }
+    raise CppExtensionCodegenError(
+        f"tensor format={tensor_format!r} 无可达的生成路径（fail-closed）")
+
+
+def _contract(spec, preflight_table=None,
+              tensor_format=TENSOR_FORMAT_TORCH_NPU_DEFAULT):
     # 形态断言经全仓唯一缺省真源（P5）。**这不是把门放宽**：`spec_runner_form` 只在**键缺席**时
     # 吃缺省，显式写成 `cpp` / `aclnn_py` / null / `""` 一律照旧当场拒。键缺席的 spec 现在全仓
     # 一致地解析为 `cpp_extension`（run_workflow 据此派 mode、gen_cases 据此要 `call_variants`），
@@ -329,8 +365,12 @@ def _contract(spec, preflight_table=None):
             "entrypoint": f"invoke_v{i}",
             "stage2_form": stage2_form,
             "stage2_form_source": stage2_source,
-            "dispatch": (DISPATCH_MACRO if stage2_form == STAGE2_STANDARD
-                         else DISPATCH_EXTENDED),
+            "dispatch": (
+                DISPATCH_STANDARD_ND
+                if (stage2_form == STAGE2_STANDARD
+                    and tensor_format == TENSOR_FORMAT_ND)
+                else DISPATCH_MACRO if stage2_form == STAGE2_STANDARD
+                else DISPATCH_EXTENDED),
         }
         # 真机 native 调用的**实参个数**：standard 恒 4；extended = 框架三参 + 该变体
         # 实际出现的 stage1 实参 + stream。记下来，别让读收据的人默认成 4 参
@@ -423,11 +463,13 @@ def _convert_expr(param, tensor_format):
     return f"ConvertType({param['name']})"
 
 
-def _render_extended_body(variant, call_args, arg_count, first_input,
-                          variant_params=None, tensor_format=TENSOR_FORMAT_TORCH_NPU_DEFAULT):
-    """extended stage2：按官方 helper 手写两段式派发。
+def _render_generated_two_stage_body(
+        variant, call_args, arg_count, first_input, *, variant_params=None,
+        tensor_format=TENSOR_FORMAT_TORCH_NPU_DEFAULT, standard_abi=False):
+    """需自定义 stage1 转换时，按官方 helper 手写两段式派发。
 
-    为什么不能用 ``EXEC_NPU_CMD_EXT``：宏的执行段最终落到 op-plugin 的 ``ExecuteApiFunc()``，
+    extended 为什么不能用 ``EXEC_NPU_CMD_EXT``：宏的执行段最终落到
+    op-plugin 的 ``ExecuteApiFunc()``，
     那里把 phase-2 函数指针写死成 ``int (*)(void *, uint64_t, aclOpExecutor *, const aclrtStream)``
     并按 4 参调用。extended 形态的 native 函数要收 ``3 + N + 1`` 个实参，错 arity 调用在
     aarch64 上会从垃圾寄存器取 stream —— 段错误或**静默错值**，全链无门能拦。
@@ -452,6 +494,10 @@ def _render_extended_body(variant, call_args, arg_count, first_input,
     一块 byte buffer；该张量**按值捕获**进 ``acl_call``，生命周期覆盖到执行段跑完
     （``RunAclCall`` 可能把 lambda 丢到下发线程）。``workspace_size == 0`` 时传 ``nullptr``。
 
+    standard + 显式 ND 也复用同一骨架，但执行元组严格保持
+    ``(workspace, workspaceSize, executor, stream)`` 四参；只是把 stage1 的张量
+    conversion 换成字段驱动的 ``ACL_FORMAT_ND``。
+
     两处**刻意的偏离**，都不是遗漏：
       1. 不走 ``hit_cache_ext``：aclnn 执行缓存的重放路径（``ExecuteCachedOp``）同样把 phase-2
          写死成 4 参，缓存命中就等于绕回错 arity 调用。宁可每次都走完整两段式；
@@ -475,9 +521,26 @@ def _render_extended_body(variant, call_args, arg_count, first_input,
         convert_line = (
             f"auto converted_params = ConvertTypes({call_args}, "
             f"workspace_size_addr, executor_addr);")
-    return f"""    // stage2 = extended（框架三参 + stage1 实参原样重复 + stream，共 {variant['stage2_call_arity']} 参）。
+    if standard_abi:
+        stage2_header = f"""    // stage2 = standard（workspace + size + executor + stream，严格 {variant['stage2_call_arity']} 参）。
+    // 显式 ND 需在 stage1 逐张量转换；执行段仍保持标准四参 ABI。
+    // 骨架逐句对齐 op_api_common_base.h 的 EXEC_NPU_CMD_V1_EXT。"""
+        exec_block = """    // 标准 stage2 不重复 stage1 实参；这个元组就是四参 ABI 的机读对应物。
+    auto exec_params = std::make_tuple(
+        workspace_addr, workspace_size, executor,
+        acl_stream);"""
+    else:
+        stage2_header = f"""    // stage2 = extended（框架三参 + stage1 实参原样重复 + stream，共 {variant['stage2_call_arity']} 参）。
     // 官方 EXEC_NPU_CMD_EXT 的执行段固定按 4 参调 phase-2，对这条 ABI 会静默错调，故手写派发。
-    // 骨架逐句对齐 op_api_common_base.h 的 EXEC_NPU_CMD_V1_EXT，只换掉执行段那一行。
+    // 骨架逐句对齐 op_api_common_base.h 的 EXEC_NPU_CMD_V1_EXT，只换掉执行段那一行。"""
+        exec_block = f"""    // 执行段实参 = 框架三参 + **本次已转换好的 stage1 实参原样重复** + stream。
+    // 复用 converted_params 的前 {arg_count} 项，绝不二次 ConvertTypes（那会再造一批 acl 对象）；
+    // 末两项 workspace_size_addr / executor_addr 是 stage1 专有出参，不进 stage2。
+    auto exec_params = std::make_tuple(
+        workspace_addr, workspace_size, executor,
+        {picks},
+        acl_stream);"""
+    return f"""{stage2_header}
     static void *op_api_addr = nullptr;
     static void *get_workspace_size_addr = nullptr;
     GetApiFunc("{symbol}", "{symbol}GetWorkspaceSize", op_api_addr, get_workspace_size_addr);
@@ -502,13 +565,7 @@ def _render_extended_body(variant, call_args, arg_count, first_input,
                                      {first_input}.options().dtype(at::kByte));
         workspace_addr = workspace_tensor.data_ptr();
     }}
-    // 执行段实参 = 框架三参 + **本次已转换好的 stage1 实参原样重复** + stream。
-    // 复用 converted_params 的前 {arg_count} 项，绝不二次 ConvertTypes（那会再造一批 acl 对象）；
-    // 末两项 workspace_size_addr / executor_addr 是 stage1 专有出参，不进 stage2。
-    auto exec_params = std::make_tuple(
-        workspace_addr, workspace_size, executor,
-        {picks},
-        acl_stream);
+{exec_block}
     auto op_api_func = ConvertToOpApiFunc(exec_params, op_api_addr);
     auto acl_call = [exec_params, converted_params, workspace_tensor, op_api_func,
                      acl_stream]() -> int {{
@@ -535,19 +592,24 @@ def _render_cpp(namespace, params, variants,
         call_args = ", ".join(p["name"] for p in variant_params)
         returned = ", ".join(v["active_outputs"])
         if v["stage2_form"] == STAGE2_STANDARD:
-            if tensor_format != TENSOR_FORMAT_TORCH_NPU_DEFAULT:
-                # 官方 EXEC_NPU_CMD_EXT 宏内部自己调 ConvertTypes，插不进别的张量格式；
-                # 而那条路径是「与改动前逐字节相同」的红线，不为此改写。声明了非默认格式却
-                # 落在 standard 派发上 → fail-closed，绝不悄悄按 rank 猜格式跑过去。
+            if tensor_format == TENSOR_FORMAT_TORCH_NPU_DEFAULT:
+                # 未命中新能力：继续走官方宏，生成字节与 N2 前相同。
+                body = _render_standard_body(v, call_args)
+            elif tensor_format == TENSOR_FORMAT_ND:
+                # 宏内的 ConvertTypes 无法注入 format；复用 extended 已验证的手写
+                # 两段式骨架完成 stage1 ND 转换，但 phase-2 元组仍严格四参。
+                body = _render_generated_two_stage_body(
+                    v, call_args, len(variant_params), first_input,
+                    variant_params=variant_params, tensor_format=tensor_format,
+                    standard_abi=True)
+            else:
                 raise CppExtensionCodegenError(
-                    f"call_variants[{v['index']}] 的 stage2 形态是 {STAGE2_STANDARD}（走官方宏），"
-                    f"无法施加 spec.aclnn_tensor_format={tensor_format!r}——"
-                    "该格式当前只在手写 extended 派发下实现，fail-closed")
-            body = _render_standard_body(v, call_args)
+                    f"call_variants[{v['index']}] 的 standard stage2 无法施加 "
+                    f"tensor format={tensor_format!r}（fail-closed）")
         elif v["stage2_form"] == STAGE2_EXTENDED:
-            body = _render_extended_body(v, call_args, len(variant_params), first_input,
-                                         variant_params=variant_params,
-                                         tensor_format=tensor_format)
+            body = _render_generated_two_stage_body(
+                v, call_args, len(variant_params), first_input,
+                variant_params=variant_params, tensor_format=tensor_format)
         else:
             # `_resolve_stage2` 已把词表外的值拦死；这里是最后一道，防将来有人扩词表却忘了改这。
             raise CppExtensionCodegenError(
@@ -627,8 +689,9 @@ def generate(spec, out_dir, preflight=None):
     digest = _canonical_digest(spec)
     preflight_table = (None if preflight is None
                        else _preflight_stage2_by_symbol(preflight, digest))
-    params, variants = _contract(spec, preflight_table)
     tensor_format, tensor_format_source = _resolve_tensor_format(spec)
+    format_receipt = tensor_format_receipt(tensor_format, tensor_format_source)
+    params, variants = _contract(spec, preflight_table, tensor_format)
     namespace = f"oprunway_{digest[:16]}"
     module_name = f"{namespace}_lib"
     out = Path(out_dir)
@@ -691,6 +754,10 @@ def generate(spec, out_dir, preflight=None):
             },
         },
     }
+    # 只有显式 ND 命中新能力时才新增字段；driver 必须原样镜像这个对象，
+    # adapter 再与 manifest 逐字对账。默认路径不写 null，以保持旧 fixture 字节。
+    if format_receipt is not None:
+        manifest["tensor_format_receipt"] = format_receipt
     (out / "extension_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return manifest

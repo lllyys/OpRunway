@@ -2,6 +2,12 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-07 · 三算子统一计划 N1/N2：输出写入门与显式 ND 通路闭合
+
+- `cpp_extension` 现以全 dtype 哨兵在落盘前识别 `output_not_written`，把它作为 harness/调用错误而非精度 mismatch；bool 与 empty 的不可判场景显式记 skip，诊断逐级透传。
+- standard 四参 stage2 在 spec 显式声明 `nd` 时复用生成式两阶段骨架：stage1 明确使用 `ACL_FORMAT_ND`，manifest 与 driver receipt 原样记账并由 adapter 对账；未声明 format 的旧生成字节保持不变。
+- A3 上完成 2545 项全量回归、11 dtype 真实 NPU 写入探针、三种结构的 NpuExtension 编译/加载及 mutation 红灯；两批窄范围 Claude audit-fix 最终均为 CLEAN。
+
 ## 2026-08-07 · 合入 worktree19，保留两边交接与倒序改动账
 
 - 将 worktree19 的 8 个独有提交（tip `4eb1d2a`）合入 worktree21；唯一文本冲突位于本文件，

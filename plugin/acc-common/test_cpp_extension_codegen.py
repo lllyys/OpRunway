@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import unittest
@@ -102,6 +103,24 @@ class CppExtensionCodegenTest(unittest.TestCase):
         self.assertIn("EXEC_NPU_CMD_EXT(aclnnWitness,", cpp)
         self.assertNotIn("ConvertToOpApiFunc", cpp)
 
+    def test_default_fixture_bytes_do_not_drift(self):
+        """N2 未命中时不改任何生成字节；producer 若未来出现则不参比。"""
+        with tempfile.TemporaryDirectory() as td:
+            manifest = C.generate(_spec(), td)
+            root = Path(td)
+            cpp = (root / "csrc" / "oprunway_extension.cpp").read_bytes()
+            setup = (root / "setup.py").read_bytes()
+        payload = dict(manifest)
+        payload.pop("producer", None)
+        manifest_bytes = (
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode()
+        self.assertEqual(hashlib.sha256(cpp).hexdigest(),
+                         "371dafc8f9f244eec511218083945d6756a35cd9a3afe171c509255cc1fddc2b")
+        self.assertEqual(hashlib.sha256(setup).hexdigest(),
+                         "7b3aa22a20c80cb89a55b0ba34ead92e0ac58a0d3a8ea5426f567137f774d9d0")
+        self.assertEqual(hashlib.sha256(manifest_bytes).hexdigest(),
+                         "24ac2afdb373664e5439dfc95b840ffd64fc691e30a297031a05666e0aa540ef")
+
 
 def _array_attr_spec():
     """数组属性 + extended stage2 的通用见证（结构见证，不是算子特判）。"""
@@ -118,6 +137,70 @@ def _array_attr_spec():
             {"symbol": "ArrayWitness", "active_attrs": ["ksize", "sigmaX"],
              "active_outputs": ["dst"]},
         ],
+    }
+
+
+def _standard_nd_fixtures():
+    """Roll / Bernoulli / Remainder 的结构见证；只压 ABI 轴，不进通用代码分派。"""
+    return [
+        {
+            "op": "RollStyleWitness",
+            "runner_form": "cpp_extension",
+            "aclnn_tensor_format": "nd",
+            "params": [
+                {"name": "x", "io": "in", "dtype": ["float32"]},
+                {"name": "shifts", "io": "attr", "dtype": ["int64"], "default": [1]},
+                {"name": "dims", "io": "attr", "dtype": ["int64"], "default": [0]},
+                {"name": "out", "io": "out", "dtype": ["<from_input>"]},
+            ],
+            "call_variants": [{
+                "symbol": "RollStyleWitness", "active_attrs": ["shifts", "dims"],
+                "active_outputs": ["out"],
+            }],
+        },
+        {
+            "op": "BernoulliStyleWitness",
+            "runner_form": "cpp_extension",
+            "aclnn_tensor_format": "nd",
+            "params": [
+                {"name": "self", "io": "in", "dtype": ["float32"]},
+                {"name": "prob", "io": "attr", "dtype": ["float64"], "default": 0.5},
+                {"name": "seed", "io": "attr", "dtype": ["int64"], "default": 1},
+                {"name": "offset", "io": "attr", "dtype": ["int64"], "default": 0},
+                {"name": "out", "io": "out", "dtype": ["<from_input>"]},
+            ],
+            "call_variants": [{
+                "symbol": "BernoulliStyleWitness",
+                "active_attrs": ["prob", "seed", "offset"],
+                "active_outputs": ["out"],
+            }],
+        },
+        {
+            "op": "RemainderStyleWitness",
+            "runner_form": "cpp_extension",
+            "aclnn_tensor_format": "nd",
+            "params": [
+                {"name": "self", "io": "in", "dtype": ["float32"]},
+                {"name": "other", "io": "in", "dtype": ["float32"]},
+                {"name": "out", "io": "out", "dtype": ["<from_input>"]},
+            ],
+            "call_variants": [{
+                "symbol": "RemainderStyleWitness", "active_attrs": [],
+                "active_outputs": ["out"],
+            }],
+        },
+    ]
+
+
+def _standard_preflight(spec):
+    return {
+        "status": "READY_WAIT_NPU_TRUST_GATE",
+        "bindings": {"spec_sha256": C._canonical_digest(spec)},
+        "signatures": [{
+            "symbol": variant["symbol"],
+            "stage2_dispatch_form": C.STAGE2_STANDARD,
+            "stage2_form": C.STAGE2_STANDARD,
+        } for variant in spec["call_variants"]],
     }
 
 
@@ -188,6 +271,38 @@ class CppExtensionStage2DispatchTest(unittest.TestCase):
                         "GetWorkSpaceAddr", "ReleaseExecCommonCtx"):
             self.assertNotIn(phantom, cpp)
             self.assertNotIn(phantom, json.dumps(manifest, ensure_ascii=False))
+
+    def test_standard_nd_is_field_driven_and_keeps_four_argument_abi(self):
+        expected_receipt = {
+            "requested": "nd",
+            "effective_acl_format": "ACL_FORMAT_ND",
+            "source": "spec_declared",
+        }
+        for spec in _standard_nd_fixtures():
+            with self.subTest(op=spec["op"]), tempfile.TemporaryDirectory() as td:
+                manifest = C.generate(spec, td, _standard_preflight(spec))
+                cpp = (Path(td) / "csrc" / "oprunway_extension.cpp").read_text()
+            variant = manifest["variants"][0]
+            self.assertEqual(manifest["tensor_acl_format"], C.TENSOR_FORMAT_ND)
+            self.assertEqual(manifest["tensor_format_receipt"], expected_receipt)
+            self.assertEqual(variant["stage2_form"], C.STAGE2_STANDARD)
+            self.assertEqual(variant["stage2_form_source"], C.STAGE2_SOURCE_PREFLIGHT)
+            self.assertEqual(variant["dispatch"], C.DISPATCH_STANDARD_ND)
+            self.assertEqual(variant["stage2_call_arity"], 4)
+            self.assertIn("ACL_FORMAT_ND", cpp)
+            self.assertIn("stage2 = standard", cpp)
+            self.assertIn(
+                "workspace_addr, workspace_size, executor,\n        acl_stream);", cpp)
+            self.assertNotIn("EXEC_NPU_CMD_EXT(", cpp)
+            self.assertNotIn("std::get<", cpp)
+
+    def test_tensor_format_vocabulary_is_fail_closed_at_generation(self):
+        for bad_value in (None, "", 0, "nchw", "ACL_FORMAT_ND"):
+            spec = _standard_nd_fixtures()[0]
+            spec["aclnn_tensor_format"] = bad_value
+            with self.subTest(value=bad_value), self.assertRaisesRegex(
+                    C.CppExtensionCodegenError, "aclnn_tensor_format.*非受控值"):
+                C.generate(spec, tempfile.mkdtemp(), _standard_preflight(spec))
 
     def test_preflight_must_bind_the_same_spec(self):
         spec = _array_attr_spec()

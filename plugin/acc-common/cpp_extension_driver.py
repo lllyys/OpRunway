@@ -45,6 +45,26 @@ _TORCH_DTYPES = {
 }
 
 
+#: 输出缓冲的运行期预填值。键集必须与 ``_TORCH_DTYPES`` 完全相同；新增 dtype 若没有
+#: 可识别的预填值，宁可在分配前 fail-closed，也不能退回未初始化的 ``torch.empty``。
+#: tuple[0] 是实际填充值，tuple[1] 是可安全写入 JSON 的诊断表示。
+_OUTPUT_SENTINELS = {
+    "float32": (float("nan"), "nan"),
+    "float16": (float("nan"), "nan"),
+    "bfloat16": (float("nan"), "nan"),
+    "int64": (0x5A5A5A5A, "0x5a5a5a5a"),
+    "int32": (0x5A5A5A5A, "0x5a5a5a5a"),
+    "int16": (0x5A5A, "0x5a5a"),
+    "int8": (0x5A, "0x5a"),
+    "uint8": (0x5A, "0x5a"),
+    "uint32": (0x5A5A5A5A, "0x5a5a5a5a"),
+    "complex64": (complex(float("nan"), float("nan")), "complex(nan,nan)"),
+    # bool 只有两个合法值，无法选择一个“不可能是真输出”的哨兵；仍用已知值初始化，
+    # 但回读必须显式记 skipped_bool，不能把它包装成通过了写入检查。
+    "bool": (False, "false"),
+}
+
+
 def _sha_file(path):
     h = hashlib.sha256()
     with open(path, "rb") as src:
@@ -276,7 +296,67 @@ def _empty_output(torch, output):
     if not isinstance(shape, list) or any(
             isinstance(x, bool) or not isinstance(x, int) or x < 0 for x in shape):
         raise DriverError(f"输出 {output.get('name')}: out_shape 非非负整数数组")
-    return torch.empty(tuple(shape), dtype=getattr(torch, torch_name), device="npu")
+    sentinel = _OUTPUT_SENTINELS.get(dtype_name)
+    if sentinel is None:
+        raise DriverError(
+            f"输出 {output.get('name')}: dtype={dtype_name!r} 缺输出写入哨兵——"
+            "能力表已扩展但可信门未同步，fail-closed")
+    # 在 CPU 上构造已知字节再搬到 NPU：本通路的输入 transport 已逐 dtype 见证；相比直接在
+    # NPU 上调用 fill kernel，这不额外假定 uint32/complex64 的设备端 fill 能力。
+    return torch.full(
+        tuple(shape), sentinel[0], dtype=getattr(torch, torch_name), device="cpu").npu()
+
+
+OUTPUT_CHECK_PASSED = "passed"
+OUTPUT_CHECK_SKIPPED_BOOL = "skipped_bool"
+OUTPUT_CHECK_SKIPPED_EMPTY = "skipped_empty"
+OUTPUT_CHECK_FAILED_ALL_SENTINEL = "failed_all_sentinel"
+
+
+def _output_written_check(torch, tensor, contract, *, case_id, output_index):
+    """在任何 dtype 转换/落盘前确认输出不再是整块预填哨兵；返回 JSON-safe 诊断。"""
+    dtype_name = contract.get("compare_dtype")
+    sentinel = _OUTPUT_SENTINELS.get(dtype_name)
+    if sentinel is None:
+        raise DriverError(
+            f"{case_id}: 输出#{output_index} dtype={dtype_name!r} 缺输出写入哨兵，fail-closed")
+    value = tensor.detach().contiguous().cpu()
+    numel = int(value.numel())
+    diagnostic = {
+        "status": None,
+        "output_index": output_index,
+        "output_name": contract.get("name"),
+        "dtype": dtype_name,
+        "sentinel": sentinel[1],
+        "numel": numel,
+        "sentinel_hits": None,
+        "hit_ratio": None,
+    }
+    if numel == 0:
+        diagnostic["status"] = OUTPUT_CHECK_SKIPPED_EMPTY
+        return diagnostic
+    if dtype_name == "bool":
+        diagnostic["status"] = OUTPUT_CHECK_SKIPPED_BOOL
+        return diagnostic
+    if dtype_name in ("float32", "float16", "bfloat16"):
+        matches = torch.isnan(value)
+    elif dtype_name == "complex64":
+        # torch.isnan(complex) 在任一分量为 NaN 时即为真；这里要求实部、虚部都仍是预填 NaN。
+        matches = torch.isnan(value.real) & torch.isnan(value.imag)
+    else:
+        matches = value == sentinel[0]
+    hits = int(matches.sum().item())
+    diagnostic["sentinel_hits"] = hits
+    diagnostic["hit_ratio"] = hits / numel
+    if hits == numel:
+        diagnostic["status"] = OUTPUT_CHECK_FAILED_ALL_SENTINEL
+        raise OutputNotWrittenError(
+            f"{case_id}: 输出#{output_index}({contract.get('name')}) 的 {numel} 个元素"
+            f"全部仍等于预填哨兵 {sentinel[1]}——DUT 未写入该输出缓冲；"
+            "这是 harness/调用侧故障，不是算子精度问题",
+            diagnostic)
+    diagnostic["status"] = OUTPUT_CHECK_PASSED
+    return diagnostic
 
 
 def _dump_output(torch, np, tensor, dtype, path):
@@ -323,11 +403,22 @@ def materialize_invocation(torch, np, work, case, row):
 FAILED_MATERIALIZE = "input_materialization_failed"   # 输入落盘字节 → NPU 张量这一步就没成
 FAILED_EXECUTE = "execution_failed"                   # 真正调 DUT entrypoint（含同步、返回元数）失败
 FAILED_READBACK = "output_readback_failed"            # 调用成功但输出读回/落盘失败
+FAILED_NOT_WRITTEN = "output_not_written"             # 读回成功，但整块仍是预填哨兵
 _FAILED_KIND_BY_PHASE = {
     "materialize": FAILED_MATERIALIZE,
     "execute": FAILED_EXECUTE,
     "readback": FAILED_READBACK,
 }
+
+
+class OutputNotWrittenError(DriverError):
+    """让 readback 阶段覆盖通用 phase→kind 映射，并携带可独立复核的诊断。"""
+
+    error_kind = FAILED_NOT_WRITTEN
+
+    def __init__(self, message, diagnostic):
+        super().__init__(message)
+        self.output_written_diagnostic = diagnostic
 
 
 def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
@@ -410,6 +501,8 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
             out_rows = []
             for index, (tensor, contract) in enumerate(zip(returned, output_contracts)):
                 rel = f"{case['id']}/out_{index}.bin"
+                written = _output_written_check(
+                    torch, tensor, contract, case_id=case["id"], output_index=index)
                 dtype, shape = _dump_output(
                     torch, np, tensor, contract["compare_dtype"],
                     os.path.join(out_root, rel))
@@ -420,21 +513,30 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
                     "path": rel,
                     "dtype": dtype,
                     "shape": shape,
+                    "output_written_check": written["status"],
+                    "output_written_diagnostic": written,
                 })
         except Exception as ex:  # noqa: BLE001 —— 单条 case 的任何失败都只归这条，不带走整轮
             if os.path.isdir(cdir):
                 # 半截产物必须清掉：下游按 manifest 读字节，留一堆残缺 out_k.bin 只会制造
                 # 「看起来有产物」的假象。
                 shutil.rmtree(cdir, ignore_errors=True)
-            failed.append({
+            failure = {
                 "case_id": case["id"],
                 "entrypoint": row["entrypoint"],
                 "phase": phase,
-                "error_kind": _FAILED_KIND_BY_PHASE[phase],
+                "error_kind": getattr(ex, "error_kind", _FAILED_KIND_BY_PHASE[phase]),
                 "error_type": type(ex).__name__,
                 # **逐字原文**：不截断、不改写、不翻译。归因要拿得出原话（AGENTS.md 5.8）。
                 "error": str(ex),
-            })
+            }
+            diagnostic = getattr(ex, "output_written_diagnostic", None)
+            if diagnostic is not None:
+                # 半截 out_k.bin 仍按既有纪律删除；可复核物证留在 failed[]，避免残缺目录被
+                # 下游误当成可比较产物，同时保留哨兵、numel、命中数/比例。
+                failure["output_written_check"] = diagnostic["status"]
+                failure["output_written_diagnostic"] = diagnostic
+            failed.append(failure)
             last_case[0] = case["id"]
             _snapshot(False)
             _progress("running")
@@ -510,6 +612,10 @@ def run(bundle, work):
         },
         "vendor": vendor,
     }
+    # 显式 ND 才有这份收据；默认 rank-derived 通路为保持 legacy payload 字节不写键、不写 null。
+    # 在场时逐字镜像，不在 driver 里猜默认或按算子分支。
+    if "tensor_format_receipt" in manifest:
+        receipt["tensor_format_receipt"] = manifest["tensor_format_receipt"]
     _atomic_dump(
         os.path.join(work, "cpp_extension_receipt.json"), receipt)
     return receipt

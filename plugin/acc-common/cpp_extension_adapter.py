@@ -455,6 +455,44 @@ def _validate_vendor_build_receipt(vendor):
     return summary
 
 
+def _validate_tensor_format_receipt(manifest, receipt):
+    """校验「生成时生效的 tensor format」确实进了 driver receipt。
+
+    driver 只原样镜像 manifest；结构的真源仍是 codegen。这样收据能直接
+    说出 ``ACL_FORMAT_ND``，而不是只给一个 manifest hash 要人再反查。
+    历史 rank-default 路径两侧都不写这个键，保持原字节。
+    """
+    tensor_format = manifest.get("tensor_acl_format")
+    tensor_format_source = manifest.get("tensor_acl_format_source")
+    # N2 之前的历史 manifest 可能两键都没有；它不得凭空带新收据。
+    if tensor_format is None and tensor_format_source is None:
+        if "tensor_format_receipt" in receipt:
+            raise CppExtensionAdapterError(
+                "receipt 声称了 tensor format，但 manifest 无对应生成事实")
+        return
+    try:
+        expected = cpp_extension_codegen.tensor_format_receipt(
+            tensor_format, tensor_format_source)
+    except cpp_extension_codegen.CppExtensionCodegenError as ex:
+        raise CppExtensionAdapterError(
+            f"manifest tensor format 契约非法：{ex}") from ex
+    recorded = receipt.get("tensor_format_receipt")
+    if expected is None:
+        if "tensor_format_receipt" in receipt:
+            raise CppExtensionAdapterError(
+                "rank-default manifest 不得凭空带 tensor_format_receipt")
+        if "tensor_format_receipt" in manifest:
+            raise CppExtensionAdapterError(
+                "rank-default manifest 不得宣称显式 tensor format 收据")
+        return
+    if manifest.get("tensor_format_receipt") != expected:
+        raise CppExtensionAdapterError(
+            "manifest.tensor_format_receipt 与字段驱动的生效 format 不一致")
+    if recorded != expected:
+        raise CppExtensionAdapterError(
+            "receipt.tensor_format_receipt 未原样镜像 manifest 的生效 format")
+
+
 def validate_receipt(work, caseset):
     """验证外部 driver 回传的 build/load receipt 与当前输入、源码、ELF 精确绑定。"""
     work = os.path.abspath(work)
@@ -481,6 +519,8 @@ def validate_receipt(work, caseset):
         if bindings.get(key) != value:
             raise CppExtensionAdapterError(
                 f"receipt.bindings.{key} 漂移：期望 {value}，得 {bindings.get(key)!r}")
+
+    _validate_tensor_format_receipt(manifest, receipt)
 
     for key, rec in (manifest.get("files") or {}).items():
         if not isinstance(rec, dict):

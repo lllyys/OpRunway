@@ -410,6 +410,27 @@ def _perf_entry(cid, perf_by_case):
 EV_STATUS_EXECUTION_FAILED = "execution_failed"
 EV_STATUS_GOLDEN_UNAVAILABLE = "golden_unavailable"
 
+_OUTPUT_WRITTEN_PRODUCED = frozenset({"passed", "skipped_bool", "skipped_empty"})
+_OUTPUT_WRITTEN_FAILED = "failed_all_sentinel"
+
+
+def _copy_output_written_evidence(target, source, *, produced):
+    """把新 driver 的写入检查事实带进 evidence；老 manifest 两键都缺时保持兼容。"""
+    has_status = "output_written_check" in source
+    has_detail = "output_written_diagnostic" in source
+    if not has_status and not has_detail:
+        return
+    if has_status != has_detail:
+        raise RuntimeError("output_written_check/diagnostic 必须成对出现——写入检查证据不完整，拒")
+    status = source["output_written_check"]
+    detail = source["output_written_diagnostic"]
+    allowed = _OUTPUT_WRITTEN_PRODUCED if produced else frozenset({_OUTPUT_WRITTEN_FAILED})
+    if status not in allowed or not isinstance(detail, dict) or detail.get("status") != status:
+        raise RuntimeError(
+            f"output_written_check={status!r} 与产物类别/诊断不一致——写入检查证据损坏，拒")
+    target["output_written_check"] = status
+    target["output_written_diagnostic"] = detail
+
 
 def _failed_from_manifest(manifest, produced_by_cid):
     """读 `out_manifest.failed[]`（driver 逐 case 失败台账）→ `{case_id: 记录}`；结构一处不合即拒。
@@ -439,6 +460,10 @@ def _failed_from_manifest(manifest, produced_by_cid):
         if cid in produced_by_cid:
             raise RuntimeError(f"{cid}: 同时出现在 out_manifest 的 produced 与 failed——"
                                f"同一条 case 不可能既产出又失败，产物自相矛盾，拒")
+        if rec.get("error_kind") == "output_not_written":
+            # 只写一个新 error_kind 不够：必须同时拿得出哨兵/numel/命中比例。
+            # 这里只借 helper 做完整性校验；失败记录仍原样保存在 `out`，无需复制到临时目标。
+            _copy_output_written_evidence({}, rec, produced=False)
         out[cid] = rec
     return out
 
@@ -517,12 +542,14 @@ def build_multi_output_evidence(caseset, work_dir, out_dir, perf_by_case=None):
         # 在 np.load(None) 之类的地方炸掉整轮（正是本轮要修的那种「一条挂、全轮零产物」）。
         _failed = failed_by_cid.get(cid)
         if _failed is not None:
-            ev.append({"case_id": cid, "status": EV_STATUS_EXECUTION_FAILED,
-                       "error_kind": _failed.get("error_kind") or EV_STATUS_EXECUTION_FAILED,
-                       "error_phase": _failed.get("phase"),
-                       "error_type": _failed.get("error_type"),
-                       "error": _failed["error"],           # 逐字原文，原样带进 evidence
-                       "perf": _perf_entry(cid, perf_by_case)})
+            failed_ev = {"case_id": cid, "status": EV_STATUS_EXECUTION_FAILED,
+                         "error_kind": _failed.get("error_kind") or EV_STATUS_EXECUTION_FAILED,
+                         "error_phase": _failed.get("phase"),
+                         "error_type": _failed.get("error_type"),
+                         "error": _failed["error"],         # 逐字原文，原样带进 evidence
+                         "perf": _perf_entry(cid, perf_by_case)}
+            _copy_output_written_evidence(failed_ev, _failed, produced=False)
+            ev.append(failed_ev)
             continue
         if exp.get("golden_status") == EV_STATUS_GOLDEN_UNAVAILABLE:
             ev.append({"case_id": cid, "status": EV_STATUS_GOLDEN_UNAVAILABLE,
@@ -553,9 +580,11 @@ def build_multi_output_evidence(caseset, work_dir, out_dir, perf_by_case=None):
             golden = np.load(_safe(work_dir, exp["golden_path"]))
             out = _read_out_bin(out_dir, po)
             out_rel = _out_rel(po["path"])
-            ev.append({"case_id": cid, "status": "ok",
-                       "precision": _precision_evidence(c, out, golden, out_rel, work_dir),
-                       "perf": _perf_entry(cid, perf_by_case)})
+            legacy_ev = {"case_id": cid, "status": "ok",
+                         "precision": _precision_evidence(c, out, golden, out_rel, work_dir),
+                         "perf": _perf_entry(cid, perf_by_case)}
+            _copy_output_written_evidence(legacy_ev, po, produced=True)
+            ev.append(legacy_ev)
             continue
         ev_outs = []
         golden_src = exp.get("golden_source")
@@ -592,6 +621,7 @@ def build_multi_output_evidence(caseset, work_dir, out_dir, perf_by_case=None):
                     "provenance": {"golden_sha256": _sha256_file(_safe(work_dir, o["golden_path"])),
                                    "out_sha256": _sha256_file(_safe(out_dir, po["path"])),
                                    "numel": int(np.asarray(golden).size)}}
+            _copy_output_written_evidence(item, po, produced=True)
             if o.get("index_of") is not None:
                 item["index_of"] = o["index_of"]
             ev_outs.append(item)
