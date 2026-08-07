@@ -120,6 +120,48 @@ def _snapshot_facts(snapshot_merkle=SUBTREE_DIGEST, snapshot_scope="op",
 
 
 class RenderAcceptanceMarkdownTest(unittest.TestCase):
+    def test_renders_runtime_cann_requirement_probe_and_scope(self):
+        observation = {
+            "status": "measured",
+            "raw": "v8.5.1-rc1",
+            "normalized": "8.5.1",
+            "core": [8, 5, 1],
+            "suffix": "-rc1",
+            "probe": {
+                "api": "aclsysGetCANNVersion",
+                "package": "ACL_PKG_NAME_CANN",
+                "returncode": 0,
+                "returncode_source": "measured",
+                "defining_elf": {"path": "/opt/cann/libascendcl.so", "sha256": "d" * 64},
+            },
+        }
+        receipt = _receipt(_pr_source())
+        receipt["runtime"] = {"cann_version": "8.5.1", "cann": observation}
+        spec = {
+            "runtime_requirements": {
+                "cann": {
+                    "kind": "minimum",
+                    "minimum_version": "8.5.0",
+                    "cite": "task_doc.md:1",
+                    "quote": "CANN 8.5.0 及以上",
+                    "taskdoc_snapshot_sha256": "e" * 64,
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as root:
+            _write_docs(root, _docs(receipt))
+            with open(os.path.join(root, "spec.json"), "w", encoding="utf-8") as out:
+                json.dump(spec, out)
+            text = R.render(root)
+
+        self.assertIn("| CANN runtime 原始值 | `v8.5.1-rc1` |", text)
+        self.assertIn("| CANN runtime 规范化 | `8.5.1` |", text)
+        self.assertIn("| 任务书最低 CANN runtime | `8.5.0` |", text)
+        self.assertIn("| CANN runtime 版本门 | `satisfied` |", text)
+        self.assertIn("aclsysGetCANNVersion(ACL_PKG_NAME_CANN), rc=0/measured", text)
+        self.assertIn("/opt/cann/libascendcl.so sha256=" + "d" * 64, text)
+        self.assertIn("仅证明本进程实际调用的 runtime；不证明 vendor build-time CANN", text)
+
     def test_renders_structured_and_legacy_text_gaps(self):
         self.assertEqual(
             R._gap_items("单条自由文本"),

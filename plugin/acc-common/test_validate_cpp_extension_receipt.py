@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 
+import cann_version as CV
 import validate_acceptance_state as G
 
 
@@ -332,6 +333,7 @@ class BuildReceiptSourceBindingTest(unittest.TestCase):
             self._write_source_facts(root)
             self.assertEqual([], self._run(root, caseset, envelope, evidence))
 
+
     def test_subtree_merkle_mismatch_is_blocked(self):
         with tempfile.TemporaryDirectory() as root:
             caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
@@ -433,6 +435,101 @@ class BuildReceiptSourceBindingTest(unittest.TestCase):
             self._write_source_facts(
                 root, provenance_kind="gitcode_pr", head_sha=head.lower())
             self.assertEqual([], self._run(root, caseset, envelope, evidence))
+
+
+class CannRuntimeRequirementGateTest(unittest.TestCase):
+    TASKDOC_SHA = "1" * 64
+
+    def _v2_fixture(self, root, raw="8.5.0", requirement=None, unknown=False):
+        import content_address
+
+        caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
+        receipt = envelope["cpp_extension_receipt"]
+        receipt["schema_version"] = CV.RECEIPT_SCHEMA_VERSION
+        acl_elf = os.path.join(root, "libascendcl.so")
+        with open(acl_elf, "wb") as dst:
+            dst.write(b"runtime-acl")
+        probe = {
+            "api": CV.PROBE_API,
+            "package": CV.PROBE_PACKAGE,
+            "returncode": 7 if unknown else 0,
+            "returncode_source": CV.PROBE_RETURN_MEASURED,
+            "defining_elf": None if unknown else {
+                "path": acl_elf, "sha256": G._sha256(acl_elf)},
+        }
+        if unknown:
+            observation = CV.unknown_observation(probe, "runtime query failed")
+        else:
+            observation = CV.normalize_observation(raw)
+            observation["probe"] = probe
+            if observation["status"] == CV.OBS_INVALID:
+                observation["error"] = "unparseable"
+        receipt["runtime"]["cann"] = observation
+        receipt["runtime"]["cann_version"] = observation.get("normalized") or "unknown"
+        if requirement is None:
+            requirement = {
+                "kind": "minimum",
+                "minimum_version": "8.5.0",
+                "cite": "task.md:7",
+                "quote": "最低 CANN 8.5.0",
+                "taskdoc_snapshot_sha256": self.TASKDOC_SHA,
+            }
+        spec = {"op": "X", "runner_form": "cpp_extension",
+                "runtime_requirements": {"cann": requirement}}
+        _write_json(os.path.join(root, "spec.json"), spec)
+        manifest_path = os.path.join(
+            root, "work", "cpp_extension", "extension_manifest.json")
+        with open(manifest_path, encoding="utf-8") as src:
+            manifest = json.load(src)
+        manifest["spec_sha256"] = G._canonical_sha(spec)
+        _write_json(manifest_path, manifest)
+        receipt["bindings"]["spec_sha256"] = G._canonical_sha(spec)
+        receipt["bindings"]["manifest_sha256"] = G._canonical_sha(manifest)
+        evidence[0]["cpp_extension_receipt_sha256"] = G._canonical_sha(receipt)
+        facts = source_facts_payload(provenance_kind="gitcode_pr")
+        _write_json(os.path.join(root, "source_facts.json"),
+                    content_address.make_artifact(
+                        "oprunway/source-facts/v1", facts))
+        return caseset, envelope, evidence
+
+    def _errors(self, root, caseset, envelope, evidence):
+        errors = []
+        G._gate_cpp_extension_receipt(
+            root, caseset, envelope, evidence, errors,
+            source_facts_path=os.path.join(root, "source_facts.json"))
+        return errors
+
+    def test_equal_and_newer_runtime_satisfy_minimum(self):
+        for raw in ("8.5.0", "8.5.1", "v9.0.1"):
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as root:
+                fixture = self._v2_fixture(root, raw=raw)
+                self.assertEqual([], self._errors(root, *fixture))
+
+    def test_lower_unknown_invalid_and_equal_suffix_are_blocked(self):
+        for raw, unknown in (
+                ("8.4.9", False), ("8.5.0-RC1", False),
+                ("CANN-8.5.0 junk", False), ("8.5.0", True)):
+            with self.subTest(raw=raw, unknown=unknown), tempfile.TemporaryDirectory() as root:
+                fixture = self._v2_fixture(root, raw=raw, unknown=unknown)
+                errors = self._errors(root, *fixture)
+                self.assertTrue(any("最低版本门未满足" in item for item in errors), errors)
+
+    def test_taskdoc_anchor_drift_is_blocked(self):
+        requirement = {
+            "kind": "minimum", "minimum_version": "8.5.0",
+            "cite": "task.md:7", "quote": "最低 CANN 8.5.0",
+            "taskdoc_snapshot_sha256": "f" * 64,
+        }
+        with tempfile.TemporaryDirectory() as root:
+            fixture = self._v2_fixture(root, requirement=requirement)
+            errors = self._errors(root, *fixture)
+            self.assertTrue(any("taskdoc_snapshot_sha256" in item for item in errors), errors)
+
+    def test_not_declared_explicitly_allows_unknown_without_claiming_pass(self):
+        with tempfile.TemporaryDirectory() as root:
+            fixture = self._v2_fixture(
+                root, unknown=True, requirement={"kind": "not_declared"})
+            self.assertEqual([], self._errors(root, *fixture))
 
 
 if __name__ == "__main__":

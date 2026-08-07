@@ -24,6 +24,7 @@ import argparse, hashlib, json, math, os, statistics, sys
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cann_version  # noqa: E402
 import perf_mode  # noqa: E402
 import source_facts_lookup  # noqa: E402
 import source_provenance  # noqa: E402
@@ -1219,6 +1220,82 @@ def _gate_cpp_extension_stage2_evidence(manifest, errs):
                 f"stage2_form={row.get('stage2_form')!r} 非可派发形态")
 
 
+def _gate_cann_runtime_requirement(
+        d, receipt, runtime, staged_spec, errs, source_facts_path=None):
+    """任务书最低 CANN ↔ 当前进程 ACL runtime probe 的三方证据门。
+
+    v1 receipt 只为历史产物保留：它的 ``cann_version`` 来自环境自报，不能承担新 spec
+    的版本要求。当前 driver 只产 v2；v2 必须有 staged spec 的显式两态声明。
+    """
+    version = receipt.get("schema_version")
+    req_block = (staged_spec.get("runtime_requirements")
+                 if isinstance(staged_spec, dict) else None)
+    has_requirement = isinstance(req_block, dict) and "cann" in req_block
+    if version == 1:
+        if has_requirement:
+            errs.append(
+                "cpp_extension receipt v1 的 CANN 版本来自历史环境自报，不能证明 staged spec 的"
+                " runtime_requirements.cann；须用当前 driver 重跑生成 v2 ACL runtime probe")
+        return
+    if version != cann_version.RECEIPT_SCHEMA_VERSION:
+        return  # schema 主门已报错，避免重复噪声
+    if not isinstance(staged_spec, dict):
+        errs.append("cpp_extension v2 缺 staged spec.json，无法取得任务书 CANN 版本要求")
+        return
+    if not has_requirement:
+        errs.append(
+            "staged spec 缺显式 runtime_requirements.cann 两态声明"
+            "（有要求写 minimum；无要求写 not_declared）")
+        return
+    try:
+        requirement = cann_version.normalize_requirement(req_block["cann"])
+    except cann_version.CannVersionError as ex:
+        errs.append(f"staged spec CANN 版本要求非法：{ex}")
+        return
+    observation = runtime.get("cann") if isinstance(runtime, dict) else None
+    try:
+        cann_version.validate_observation_record(observation)
+    except cann_version.CannVersionError as ex:
+        errs.append(f"cpp_extension runtime CANN probe 收据不自洽：{ex}")
+        return
+    expected_flat = observation.get("normalized") or "unknown"
+    if runtime.get("cann_version") != expected_flat:
+        errs.append(
+            "cpp_extension runtime.cann_version 与 ACL probe 规范化结果不一致")
+    defining = (observation.get("probe") or {}).get("defining_elf")
+    if defining is not None:
+        path = defining.get("path")
+        if not isinstance(path, str) or not os.path.isabs(path) or not os.path.isfile(path):
+            errs.append("cpp_extension CANN runtime probe 的 defining ELF 缺失或不可复核")
+        elif defining.get("sha256") != _sha256(path):
+            errs.append("cpp_extension CANN runtime probe 的 defining ELF sha256 漂移")
+    if requirement["kind"] == cann_version.REQUIREMENT_MINIMUM:
+        facts = source_facts_lookup.find_source_facts(d, source_facts_path)
+        if facts == source_facts_lookup.SOURCE_FACTS_UNTRUSTED:
+            errs.append("CANN minimum 的任务书来源对照物 source_facts 不可信")
+            return
+        if not isinstance(facts, dict):
+            errs.append("CANN minimum 缺 source_facts，无法核 taskdoc snapshot 锚")
+            return
+        taskdoc = facts.get("taskdoc")
+        actual_sha = taskdoc.get("snapshot_sha256") if isinstance(taskdoc, dict) else None
+        if requirement["taskdoc_snapshot_sha256"] != actual_sha:
+            errs.append(
+                "spec.runtime_requirements.cann.taskdoc_snapshot_sha256 与 CP-A source_facts"
+                f" 不一致：spec={requirement['taskdoc_snapshot_sha256']!r} facts={actual_sha!r}")
+    try:
+        evaluation = cann_version.evaluate(requirement, observation)
+    except cann_version.CannVersionError as ex:
+        errs.append(f"CANN runtime 版本比较失败：{ex}")
+        return
+    if evaluation["satisfied"] is False:
+        errs.append(
+            "CANN runtime 最低版本门未满足："
+            f"status={evaluation['status']}, required={evaluation['required']!r}, "
+            f"raw={evaluation['raw']!r}, normalized={evaluation['measured']!r}。"
+            "本门只证明 runtime CANN，不代表 vendor build-time CANN")
+
+
 def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_facts_path=None):
     """cpp_extension 的独立 build/load/ELF receipt 完整性门。
 
@@ -1231,10 +1308,13 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
     if not isinstance(receipt, dict):
         errs.append("cpp_extension evidence 缺 cpp_extension_receipt")
         return
+    receipt_version = receipt.get("schema_version")
     if (receipt.get("schema") != "oprunway.cpp_extension_receipt"
-            or receipt.get("schema_version") != 1
+            or receipt_version not in (1, cann_version.RECEIPT_SCHEMA_VERSION)
             or receipt.get("status") != "VERIFIED"):
-        errs.append("cpp_extension receipt schema/status 非 VERIFIED v1")
+        errs.append(
+            "cpp_extension receipt schema/status 非 VERIFIED "
+            f"v1(历史) / v{cann_version.RECEIPT_SCHEMA_VERSION}(当前)")
         return
     manifest_path = _pinned_product(d, "cpp_extension/extension_manifest.json")
     plan_path = _pinned_product(d, "cpp_extension_invocation_plan.json")
@@ -1307,6 +1387,10 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
             ("torch_version", "torch_npu_version", "cann_version", "soc",
              "ascend_custom_opp_path")):
         errs.append("cpp_extension runtime provenance 不完整")
+    if isinstance(runtime, dict):
+        _gate_cann_runtime_requirement(
+            d, receipt, runtime, staged_spec, errs,
+            source_facts_path=source_facts_path)
     vendor = receipt.get("vendor")
     # 符号来源包必须与本轮 vendor ELF 同源。driver 在任何算子调用前把
     # `ASCEND_CUSTOM_OPP_PATH` 设成从 vendor `.so` 反推的那个包（不再依赖谁 source 过

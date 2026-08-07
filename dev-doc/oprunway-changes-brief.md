@@ -2,6 +2,12 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-07 · 三算子统一计划 N3：运行时 CANN 最低版本门
+
+- spec 现显式承载任务书的 CANN `minimum` / `not_declared` 两态要求，并与本轮任务书快照摘要对账；unknown、坏版本、低版本及最低版本同 core 的不明 suffix 均在三级门 fail-closed。
+- `cpp_extension` 不再信任 `CANN_VERSION` 等环境自报：算子调用后从当前进程实际 `libascendcl` 调 `aclsysGetCANNVersion`，记录 `dladdr` 定义 ELF 与 SHA；报告明确这只证明 runtime，不冒充 vendor build-time CANN。
+- A3 上 143 项定向回归通过，真实探针取得 `9.0.1`、measured rc=0，并完成 staged spec ↔ source facts 任务书摘要漂移负例。
+
 ## 2026-08-07 · 三算子统一计划 N1/N2：输出写入门与显式 ND 通路闭合
 
 - `cpp_extension` 现以全 dtype 哨兵在落盘前识别 `output_not_written`，把它作为 harness/调用错误而非精度 mismatch；bool 与 empty 的不可判场景显式记 skip，诊断逐级透传。

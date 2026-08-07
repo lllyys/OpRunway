@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import ctypes.util
 import hashlib
 import json
 import os
@@ -19,6 +20,7 @@ import sys
 from pathlib import Path
 import tempfile
 
+import cann_version
 import vendor_build_receipt
 
 
@@ -71,6 +73,89 @@ def _sha_file(path):
         for chunk in iter(lambda: src.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+class _AclCannPackageVersion(ctypes.Structure):
+    """``aclCANNPackageVersion`` 的 ABI 镜像（acl/acl_rt.h）。"""
+
+    _fields_ = [
+        ("version", ctypes.c_char * 128),
+        ("majorVersion", ctypes.c_char * 64),
+        ("minorVersion", ctypes.c_char * 64),
+        ("releaseVersion", ctypes.c_char * 64),
+        ("patchVersion", ctypes.c_char * 64),
+        ("reserved", ctypes.c_char * 128),
+    ]
+
+
+class _DlInfo(ctypes.Structure):
+    _fields_ = [
+        ("dli_fname", ctypes.c_char_p),
+        ("dli_fbase", ctypes.c_void_p),
+        ("dli_sname", ctypes.c_char_p),
+        ("dli_saddr", ctypes.c_void_p),
+    ]
+
+
+def _defining_elf(symbol):
+    """用 ``dladdr`` 取得当前进程该函数指针的实际定义 ELF，并现场摘要。"""
+    libdl_name = ctypes.util.find_library("dl") or "libdl.so.2"
+    libdl = ctypes.CDLL(libdl_name)
+    dladdr = libdl.dladdr
+    dladdr.argtypes = [ctypes.c_void_p, ctypes.POINTER(_DlInfo)]
+    dladdr.restype = ctypes.c_int
+    info = _DlInfo()
+    address = ctypes.cast(symbol, ctypes.c_void_p)
+    if dladdr(address, ctypes.byref(info)) == 0 or not info.dli_fname:
+        raise DriverError("dladdr 无法定位 aclsysGetCANNVersion 的定义 ELF")
+    try:
+        decoded = info.dli_fname.decode("utf-8", "strict")
+    except UnicodeDecodeError as ex:
+        raise DriverError("ACL runtime 定义 ELF 路径不是 UTF-8") from ex
+    path = os.path.realpath(decoded)
+    if not os.path.isabs(path) or not os.path.isfile(path):
+        raise DriverError(f"ACL runtime 定义 ELF 不存在或非绝对普通文件：{path!r}")
+    return {"path": path, "sha256": _sha_file(path)}
+
+
+def probe_runtime_cann_version():
+    """调用当前进程实际加载的 AscendCL API；失败也返回结构化 unknown。
+
+    禁止回退 ``CANN_VERSION`` / ``ASCEND_TOOLKIT_VERSION`` 或版本文件：那些值只能
+    说明环境/安装树自称什么，不能证明本进程正在调用哪一个 runtime ELF。
+    """
+    probe = {
+        "api": cann_version.PROBE_API,
+        "package": cann_version.PROBE_PACKAGE,
+        "returncode": None,
+        "returncode_source": cann_version.PROBE_NOT_CALLED,
+        "defining_elf": None,
+    }
+    try:
+        acl = ctypes.CDLL("libascendcl.so", mode=ctypes.RTLD_GLOBAL)
+        fn = getattr(acl, cann_version.PROBE_API)
+        fn.argtypes = [ctypes.c_int, ctypes.POINTER(_AclCannPackageVersion)]
+        fn.restype = ctypes.c_int
+        probe["defining_elf"] = _defining_elf(fn)
+        version = _AclCannPackageVersion()
+        # ACL_PKG_NAME_CANN 是 aclCANNPackageName 的第一个枚举值（0）。收据同时记录
+        # 受控 token；adapter 校 token，不把这个数字当另一份版本语义真源。
+        rc = int(fn(0, ctypes.byref(version)))
+        probe["returncode"] = rc
+        probe["returncode_source"] = cann_version.PROBE_RETURN_MEASURED
+        if rc != 0:
+            return cann_version.unknown_observation(
+                probe, f"{cann_version.PROBE_API} 返回非零 rc={rc}")
+        raw = bytes(version.version).split(b"\0", 1)[0].decode("utf-8", "strict")
+        observation = cann_version.normalize_observation(raw)
+        observation["probe"] = probe
+        if observation["status"] == cann_version.OBS_INVALID:
+            observation["error"] = f"ACL API 返回的 CANN version 无法解析：{raw!r}"
+        cann_version.validate_observation_record(observation)
+        return observation
+    except Exception as ex:  # noqa: BLE001 —— 探针失败须落证，不得让 env 自报顶上
+        return cann_version.unknown_observation(
+            probe, f"{type(ex).__name__}: {ex}")
 
 
 def _canonical_sha(value):
@@ -575,22 +660,26 @@ def run(bundle, work):
         torch_npu_version = torch_npu.__version__
     except AttributeError:
         torch_npu_version = "unknown"
+    cann_observation = probe_runtime_cann_version()
     runtime = {
         "torch_version": str(torch.__version__),
         "torch_npu_version": str(torch_npu_version),
-        "cann_version": (os.environ.get("ASCEND_TOOLKIT_VERSION")
-                         or os.environ.get("CANN_VERSION") or "unknown"),
+        # 兼容既有报告/CP-F 的扁平展示字段；其值只能从下方 ACL runtime probe 的
+        # 规范化结果派生，绝不再读取 CANN_VERSION/ASCEND_TOOLKIT_VERSION。
+        "cann_version": cann_observation.get("normalized") or "unknown",
+        "cann": cann_observation,
         "soc": os.environ.get("OPRUNWAY_SOC") or "unknown",
         # 本轮自定义算子符号的来源包（由 `_bind_vendor` 在任何算子调用前实际设入进程环境的值）。
         # 它和 `vendor.library_path` 是同源的两面：门会用同一条规则重算并逐字对账。
         RUNTIME_CUSTOM_OPP_KEY: custom_opp,
     }
-    if "unknown" in runtime.values():
+    if any(runtime[key] == "unknown" for key in (
+            "torch_version", "torch_npu_version", "soc", RUNTIME_CUSTOM_OPP_KEY)):
         raise DriverError(
-            "runtime provenance 不完整；须提供 CANN_VERSION/ASCEND_TOOLKIT_VERSION 与 OPRUNWAY_SOC")
+            "runtime provenance 不完整；须提供 OPRUNWAY_SOC，且 torch/torch_npu 须可识别")
     receipt = {
         "schema": "oprunway.cpp_extension_receipt",
-        "schema_version": 1,
+        "schema_version": cann_version.RECEIPT_SCHEMA_VERSION,
         "status": "VERIFIED",
         "bindings": {
             "caseset_sha256": _canonical_sha(caseset),

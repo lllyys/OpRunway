@@ -10,6 +10,7 @@ from unittest import mock
 
 import cpp_extension_adapter as A
 import cpp_extension_codegen as C
+import cann_version as CV
 
 
 def _spec():
@@ -235,6 +236,37 @@ class CppExtensionAdapterContractTest(unittest.TestCase):
     def test_real_mode_fails_before_driver_without_explicit_gate(self):
         with self.assertRaisesRegex(A.CppExtensionAdapterError, "真机路径未启用"):
             A.run_cpp_extension(_caseset(), "/tmp/not-used")
+
+    def test_cann_runtime_receipt_recomputes_normalization_and_defining_elf(self):
+        with tempfile.TemporaryDirectory() as td:
+            elf = os.path.join(td, "libascendcl.so")
+            with open(elf, "wb") as dst:
+                dst.write(b"acl-runtime")
+            observation = CV.normalize_observation("v8.5.1")
+            observation["probe"] = {
+                "api": CV.PROBE_API,
+                "package": CV.PROBE_PACKAGE,
+                "returncode": 0,
+                "returncode_source": CV.PROBE_RETURN_MEASURED,
+                "defining_elf": {"path": elf, "sha256": A._file_sha(elf)},
+            }
+            runtime = {"cann_version": "8.5.1", "cann": observation}
+            self.assertIs(A._validate_cann_runtime(runtime), observation)
+            runtime["cann_version"] = "99.0.0"
+            with self.assertRaisesRegex(A.CppExtensionAdapterError, "规范化结果"):
+                A._validate_cann_runtime(runtime)
+
+    def test_cann_runtime_unknown_remains_structured_for_acceptance_gate(self):
+        observation = CV.unknown_observation({
+            "api": CV.PROBE_API,
+            "package": CV.PROBE_PACKAGE,
+            "returncode": 7,
+            "returncode_source": CV.PROBE_RETURN_MEASURED,
+            "defining_elf": None,
+        }, "probe failed")
+        self.assertIs(
+            A._validate_cann_runtime({"cann_version": "unknown", "cann": observation}),
+            observation)
 
 
 class CppExtensionTensorFormatReceiptTest(unittest.TestCase):

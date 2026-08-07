@@ -16,6 +16,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import cann_version
 import content_address
 import cpp_extension_codegen
 import perf_mode
@@ -493,6 +494,30 @@ def _validate_tensor_format_receipt(manifest, receipt):
             "receipt.tensor_format_receipt 未原样镜像 manifest 的生效 format")
 
 
+def _validate_cann_runtime(runtime):
+    """独立复算 ACL runtime probe；unknown/invalid 保留给三级门作 BLOCKED 判定。"""
+    observation = runtime.get("cann") if isinstance(runtime, dict) else None
+    try:
+        cann_version.validate_observation_record(observation)
+    except cann_version.CannVersionError as ex:
+        raise CppExtensionAdapterError(f"receipt.runtime.cann: {ex}") from ex
+    expected_flat = observation.get("normalized") or "unknown"
+    if runtime.get("cann_version") != expected_flat:
+        raise CppExtensionAdapterError(
+            "receipt.runtime.cann_version 与 ACL probe 规范化结果不一致")
+    defining = (observation.get("probe") or {}).get("defining_elf")
+    if defining is not None:
+        path = defining.get("path")
+        if not isinstance(path, str) or not os.path.isabs(path) \
+                or not os.path.isfile(path):
+            raise CppExtensionAdapterError(
+                "receipt.runtime.cann.probe.defining_elf 不在当前复核环境或非普通文件")
+        if _file_sha(path) != defining.get("sha256"):
+            raise CppExtensionAdapterError(
+                "receipt.runtime.cann.probe.defining_elf sha256 与现场 ELF 漂移")
+    return observation
+
+
 def validate_receipt(work, caseset):
     """验证外部 driver 回传的 build/load receipt 与当前输入、源码、ELF 精确绑定。"""
     work = os.path.abspath(work)
@@ -501,9 +526,10 @@ def validate_receipt(work, caseset):
     plan = _strict_json(os.path.join(work, _PLAN))
     receipt = _strict_json(os.path.join(work, _RECEIPT))
     if receipt.get("schema") != "oprunway.cpp_extension_receipt" \
-            or receipt.get("schema_version") != 1 \
+            or receipt.get("schema_version") != cann_version.RECEIPT_SCHEMA_VERSION \
             or receipt.get("status") != "VERIFIED":
-        raise CppExtensionAdapterError("cpp_extension receipt schema/status 非 VERIFIED v1")
+        raise CppExtensionAdapterError(
+            f"cpp_extension receipt schema/status 非 VERIFIED v{cann_version.RECEIPT_SCHEMA_VERSION}")
 
     expected = {
         "caseset_sha256": _canonical_sha(caseset),
@@ -530,11 +556,12 @@ def validate_receipt(work, caseset):
             raise CppExtensionAdapterError(f"生成源码 {key} 缺失或摘要漂移")
 
     runtime = receipt.get("runtime")
-    required_runtime = ("torch_version", "torch_npu_version", "cann_version", "soc",
+    required_runtime = ("torch_version", "torch_npu_version", "cann_version", "cann", "soc",
                         "ascend_custom_opp_path")
     if not isinstance(runtime, dict) or any(not runtime.get(k) for k in required_runtime):
         raise CppExtensionAdapterError(
             f"receipt.runtime 须完整包含 {required_runtime}")
+    _validate_cann_runtime(runtime)
     build = receipt.get("build")
     if not isinstance(build, dict) or not isinstance(build.get("argv"), list) \
             or not build["argv"] or build.get("returncode") != 0:

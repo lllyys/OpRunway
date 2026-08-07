@@ -851,7 +851,7 @@ exact 走 mismatch），再要求 spec/caseset/evidence 三处一致。所以 th
 | hardware（验收标准类·不猜）| 从任务书『适配硬件』栏取；缺失/模糊 → **问用户**（硬件属验收标准，不按 arch 推断、不缺省 A2/A3）|
 | perf(性能栏『无』) | 走 **§4.1**：`perf.mode="measure_only"` + `measure_only_authorization`（ground `no_perf_requirement` + cite + quote + 快照指纹）。⚠ **不再靠「整块省略 `perf`」表达「没要求」**；**勿写 `{baseline:"none"}`**——下游把非空 baseline 当有性能目标会误报 `BLOCKED(声明性能目标但无性能用例)` |
 | shape/规格 | 泛化验收，交 casegen；参数表 '-' 不阻塞 |
-| CANN 版本 | 『算子开源仓指定版本』→ 运行时按仓定，不入 spec |
+| CANN 版本 | **必须进**顶层 `runtime_requirements.cann` 两态契约：任务书给最低版本 → `{"kind":"minimum","minimum_version":"X.Y.Z","cite":"…","quote":"…","taskdoc_snapshot_sha256":"…"}`（版本只收 canonical `X.Y.Z`，引用四件套缺一即拒）；任务书确实未声明 → 只写 `{"kind":"not_declared"}`。禁止按仓、环境变量或版本文件猜。driver 只以当前进程实际调用的 `aclsysGetCANNVersion(ACL_PKG_NAME_CANN)` 证明 **runtime CANN**，不冒充 build-time 版本。|
 
 ### 4.1 「本轮不做比值裁决」的**唯一**合法写法：`perf.mode=measure_only` + 授权
 

@@ -24,6 +24,20 @@
   //   `call_variants` 抄进主体，否则 gen_cases fail-closed。键缺席虽吃同值缺省，正式 spec 仍不得省略。
   "runner_form": "cpp_extension",
   "hardware": ["<从任务书『适配硬件』抽，如 Atlas A2 / Atlas A3 / Ascend 950PR>"],
+  // ── runtime_requirements · 任务书对**运行时** CANN 的要求（每份正式 spec 显式二选一）────────
+  //   有最低版本：使用下方 minimum 形态，版本只收 canonical X.Y.Z；cite/quote/快照锚缺一即拒。
+  //   任务书未声明：把整个 cann 对象替换成 {"kind":"not_declared"}，不得夹带其它键。
+  //   driver 通过当前进程实际调用的 aclsysGetCANNVersion(ACL_PKG_NAME_CANN) 取证；
+  //   这只证明 runtime CANN，不证明 vendor ELF 的 build-time CANN。
+  "runtime_requirements": {
+    "cann": {
+      "kind": "minimum",
+      "minimum_version": "<X.Y.Z>",
+      "cite": "<任务书定位>",
+      "quote": "<任务书最低版本原文>",
+      "taskdoc_snapshot_sha256": "<64 位任务书快照 sha256>"
+    }
+  },
   "reference": {
     "type": "<tbe | torch | numpy | gpu | cpu | builtin>",
     "ref": "<参考实现定位 + 语义改造点，自由文本>"

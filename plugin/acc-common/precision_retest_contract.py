@@ -44,6 +44,7 @@ import os
 import re
 import tempfile
 
+import cann_version
 import content_address
 import precision_policy
 import source_provenance
@@ -487,7 +488,8 @@ def _cpp_extension_base_binding(evidence, caseset, reports_dir, case_ids,
     receipt = evidence.get("cpp_extension_receipt")
     if (not isinstance(receipt, dict)
             or receipt.get("schema") != "oprunway.cpp_extension_receipt"
-            or receipt.get("schema_version") != 1
+            or receipt.get("schema_version") not in (
+                1, cann_version.RECEIPT_SCHEMA_VERSION)
             or receipt.get("status") != "VERIFIED"):
         raise RetestContractError(
             "drift_blocked:base_cpp_extension_receipt_missing")
@@ -540,6 +542,15 @@ def _cpp_extension_base_binding(evidence, caseset, reports_dir, case_ids,
             or not isinstance(runtime, dict)):
         raise RetestContractError(
             "drift_blocked:base_cpp_extension_provenance_incomplete")
+    if receipt.get("schema_version") == cann_version.RECEIPT_SCHEMA_VERSION:
+        try:
+            observation = cann_version.validate_observation_record(runtime.get("cann"))
+        except cann_version.CannVersionError as ex:
+            raise RetestContractError(
+                f"drift_blocked:base_cpp_extension_cann_probe_invalid：{ex}") from ex
+        if runtime.get("cann_version") != (observation.get("normalized") or "unknown"):
+            raise RetestContractError(
+                "drift_blocked:base_cpp_extension_cann_version_mismatch")
     # 基础收据的来源判别**只此一处**，且必带 expected_kind（理由见函数 docstring）。
     # `repo` 非空、build argv/cwd/实测 returncode 也一并由 `vendor_build_receipt` 统一校，
     # 本函数不再自己解释一遍原始字段。

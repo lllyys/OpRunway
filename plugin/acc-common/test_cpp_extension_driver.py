@@ -200,6 +200,46 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
                         D.DriverError, "缺完整 PR head/source repo"):
                     D._vendor_build_provenance(vendor)
 
+    def test_runtime_cann_probe_uses_acl_api_not_environment_claim(self):
+        class Fn:
+            argtypes = None
+            restype = None
+
+            def __call__(self, package, out):
+                self.package = package
+                ptr = D.ctypes.cast(out, D.ctypes.POINTER(D._AclCannPackageVersion))
+                ptr.contents.version = b"9.0.1"
+                return 0
+
+        fn = Fn()
+        acl = types.SimpleNamespace(aclsysGetCANNVersion=fn)
+        with tempfile.TemporaryDirectory() as td:
+            elf = os.path.join(td, "libascendcl.so")
+            with open(elf, "wb") as dst:
+                dst.write(b"runtime-elf")
+            defining = {"path": elf, "sha256": D._sha_file(elf)}
+            with mock.patch.object(D.ctypes, "CDLL", return_value=acl), \
+                    mock.patch.object(D, "_defining_elf", return_value=defining), \
+                    mock.patch.dict(os.environ, {
+                        "CANN_VERSION": "1.2.3",
+                        "ASCEND_TOOLKIT_VERSION": "4.5.6",
+                    }):
+                observed = D.probe_runtime_cann_version()
+        self.assertEqual(fn.package, 0)
+        self.assertEqual(observed["status"], "measured")
+        self.assertEqual(observed["raw"], "9.0.1")
+        self.assertEqual(observed["normalized"], "9.0.1")
+        self.assertEqual(observed["probe"]["defining_elf"], defining)
+
+    def test_runtime_cann_probe_failure_is_structured_unknown(self):
+        with mock.patch.object(D.ctypes, "CDLL", side_effect=OSError("no acl")), \
+                mock.patch.dict(os.environ, {"CANN_VERSION": "99.0.0"}):
+            observed = D.probe_runtime_cann_version()
+        self.assertEqual(observed["status"], "unknown")
+        self.assertIsNone(observed["normalized"])
+        self.assertEqual(observed["probe"]["returncode_source"], "not_called")
+        self.assertIn("no acl", observed["error"])
+
     def _write_receipt(self, td, receipt):
         path = os.path.join(td, "receipt.json")
         with open(path, "w", encoding="utf-8") as dst:

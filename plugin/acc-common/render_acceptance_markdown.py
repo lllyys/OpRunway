@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 
+import cann_version
 # 来源对照物（`source_facts.json`）的发现规则在 `source_facts_lookup`，本文件一条都不自建。
 # ⚠ 发现规则曾是 `validate_acceptance_state._find_source_facts`，由本模块跨模块引用那个
 #   **私有**名。复用方向是对的（两处各写一份查找规则的话，报告说的 facts 和三级门校的
@@ -67,6 +68,41 @@ def _code_cell(value):
 
 def _pct(value):
     return "—" if value is None else f"{float(value) * 100:.2f}%"
+
+
+def _cann_runtime_view(runtime, spec):
+    """只展示统一版本模块的结果；不重判 acceptance。"""
+    observation = runtime.get("cann") if isinstance(runtime, dict) else None
+    requirement = ((spec.get("runtime_requirements") or {}).get("cann")
+                   if isinstance(spec, dict) else None)
+    if not isinstance(observation, dict):
+        return {
+            "raw": runtime.get("cann_version") if isinstance(runtime, dict) else None,
+            "normalized": None,
+            "required": None,
+            "evaluation": "legacy_unproven",
+            "probe": None,
+            "elf": None,
+        }
+    try:
+        cann_version.validate_observation_record(observation)
+        evaluated = (cann_version.evaluate(requirement, observation)
+                     if requirement is not None else None)
+    except cann_version.CannVersionError as ex:
+        evaluated = {"status": f"invalid_contract: {ex}", "required": None}
+    probe = observation.get("probe") or {}
+    elf = probe.get("defining_elf") or {}
+    return {
+        "raw": observation.get("raw"),
+        "normalized": observation.get("normalized"),
+        "required": evaluated.get("required") if evaluated else None,
+        "evaluation": (evaluated.get("status") if evaluated
+                       else "runtime_requirement_missing"),
+        "probe": (f"{probe.get('api')}({probe.get('package')}), "
+                  f"rc={probe.get('returncode')!r}/"
+                  f"{probe.get('returncode_source')}") if probe else None,
+        "elf": (f"{elf.get('path')} sha256={elf.get('sha256')}") if elf else None,
+    }
 
 
 def _gap_line(gap):
@@ -475,6 +511,9 @@ def render(report_root, source_facts_path=None):
     vendor = receipt.get("vendor") or {}
     build_receipt = vendor.get("build_receipt") or {}
     source = build_receipt.get("source") or {}
+    spec_path = os.path.join(report_root, "spec.json")
+    spec = _load(report_root, "spec.json") if os.path.isfile(spec_path) else None
+    cann_view = _cann_runtime_view(runtime, spec)
     # 来源对照物：与三级门**调同一个函数**（显式路径 → `<报告目录>/` → `<报告目录>/work/`），
     # 不在这里另写一份——两处规则一旦分叉，报告陈述的 facts 就不是门校过的那一份了。
     # 返回三态：dict / None（没找到）/ `SOURCE_FACTS_UNTRUSTED`（找到但读不出/不可信）。
@@ -520,7 +559,13 @@ def render(report_root, source_facts_path=None):
         f"| vendor ELF SHA256 | `{_cell(vendor.get('library_sha256'))}` |",
         f"| Extension ELF SHA256 | `{_cell((receipt.get('artifact') or {}).get('sha256'))}` |",
         f"| SoC | `{_cell(runtime.get('soc'))}` |",
-        f"| CANN | `{_cell(runtime.get('cann_version'))}` |",
+        f"| CANN runtime 原始值 | `{_cell(cann_view['raw'])}` |",
+        f"| CANN runtime 规范化 | `{_cell(cann_view['normalized'])}` |",
+        f"| 任务书最低 CANN runtime | `{_cell(cann_view['required'])}` |",
+        f"| CANN runtime 版本门 | `{_cell(cann_view['evaluation'])}` |",
+        f"| CANN runtime probe | `{_cell(cann_view['probe'])}` |",
+        f"| CANN runtime 定义 ELF | `{_cell(cann_view['elf'])}` |",
+        "| CANN 证明范围 | `仅证明本进程实际调用的 runtime；不证明 vendor build-time CANN` |",
         f"| torch | `{_cell(runtime.get('torch_version'))}` |",
         f"| torch_npu | `{_cell(runtime.get('torch_npu_version'))}` |",
         "",

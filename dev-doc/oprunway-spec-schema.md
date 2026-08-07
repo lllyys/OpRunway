@@ -9,6 +9,14 @@
   "op": "string",                         // 算子名
   "repo": "string",
   "hardware": ["string"],                 // 适配硬件（A2/A3/950PR/300V Pro…）
+  "runtime_requirements": {
+    "cann": {                              // 正式 spec 必须显式二选一
+      "kind": "minimum | not_declared",
+      "minimum_version": "X.Y.Z?",        // minimum 档必填，只收 canonical 三段式
+      "cite": "string?", "quote": "string?",
+      "taskdoc_snapshot_sha256": "sha256?" // minimum 档三项引用均必填
+    }
+  },
   "language": "AscendC",
   "reference": {                          // 参考实现（三类）
     "type": "tbe | gpu_lib | existing_op",
