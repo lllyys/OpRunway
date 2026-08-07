@@ -25,6 +25,8 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cann_version  # noqa: E402
+import content_address  # noqa: E402
+import cpp_extension_adapter  # noqa: E402
 import cpp_extension_identity  # noqa: E402
 import perf_mode  # noqa: E402
 import source_facts_lookup  # noqa: E402
@@ -1062,6 +1064,155 @@ def _gate_golden_unavailable_case(cid, case, exp, ledger, vrows, errs):
                     f"精度={row.get('精度')!r}——没有可比结果的 case 不得记成通过")
 
 
+def _gate_tensor_shape_attr_spec_authority(
+        d, caseset, staged_spec, errs, *, source_facts_path=None):
+    """从 staged spec/CP-A facts 外部重放 N7 atomic/cyclic 声明。
+
+    caseset 内的 row/Q/cyclic receipt 可以整套重写后保持自洽；本门把它重新钉回
+    ``spec.json``（planner 输入）以及 CP-A taskdoc/source-facts 摘要。布局声明另由
+    layout ledger 门负责，避免两套代码各解释一遍 stride 能力。
+    """
+    try:
+        actual = cpp_extension_adapter.validate_caseset_tensor_shape_attr_contract(
+            caseset)
+    except cpp_extension_adapter.CppExtensionAdapterError:
+        return  # 同级 caseset 门已经给出精确结构错误，避免重复噪声。
+    if not isinstance(staged_spec, dict):
+        if actual is not None:
+            errs.append("caseset 含 tensor shape/attr binding，但 staged spec.json 缺失/非法")
+        return
+    raw = staged_spec.get("tensor_shape_attrs")
+    if raw is None:
+        if actual is not None:
+            errs.append("caseset 凭空声明 tensor shape/attr binding；staged spec 未声明")
+        return
+    try:
+        import gen_cases
+        expected = gen_cases._resolve_tensor_shape_attr_plan(staged_spec)
+    except Exception as ex:
+        errs.append(
+            "staged spec.tensor_shape_attrs 无法确定性重放："
+            f"{type(ex).__name__}: {ex}")
+        return
+    expects_structure = (
+        expected.get("atomic_contract") is not None
+        or bool(expected.get("cyclic_indices")))
+    if not expects_structure:
+        if actual is not None:
+            errs.append(
+                "caseset 声明 atomic/cyclic binding，但 staged spec 只有 layout requirement")
+        return
+    if actual is None:
+        errs.append("staged spec 声明 tensor_shape_attrs，但 caseset 缺逐 case binding ledger")
+        return
+
+    expected_atomic = expected.get("atomic_contract")
+    actual_ledger = actual.get("atomic_ledger")
+    if (expected_atomic is None) != (actual_ledger is None):
+        errs.append("staged spec atomic_attr_rows 与 caseset atomic ledger 在场性不一致")
+    elif expected_atomic is not None:
+        if actual_ledger.get("atomic_rows_sha256") != expected_atomic.get("sha256"):
+            errs.append("caseset atomic rows digest 与 staged spec 重放结果不一致")
+        if actual_ledger.get("source_binding") != expected_atomic.get("source_binding"):
+            errs.append("caseset atomic source_binding 未逐字绑定 staged spec")
+        attrs_default = {
+            param["name"]: param.get("default")
+            for param in staged_spec.get("params", [])
+            if isinstance(param, dict) and param.get("io") == "attr"
+            and param.get("binding") != "host_scalar"
+        }
+        try:
+            attr_records, _sets, _structure, _axes = (
+                gen_cases._planned_attr_combinations(
+                    staged_spec, attrs_default, exclude_host_scalar=True))
+        except Exception as ex:
+            errs.append(
+                "staged spec atomic/Q 轴无法重放："
+                f"{type(ex).__name__}: {ex}")
+            attr_records = []
+        q_by_id = {}
+        for record in attr_records:
+            q = record.get("independent_binding")
+            if isinstance(q, dict):
+                q_by_id.setdefault(q.get("q_id"), q)
+        for binding_row in actual["bindings"]["cases"]:
+            cid = binding_row["case_id"]
+            bindings = binding_row["contract_bindings"]
+            atomic_binding = bindings.get("atomic_attr_row")
+            independent = bindings.get("independent_attr_combination")
+            if not isinstance(atomic_binding, dict) or not isinstance(independent, dict):
+                errs.append(f"{cid}: staged spec atomic 声明缺逐 case row/Q binding")
+                continue
+            try:
+                rebound = gen_cases.TSA.bind_atomic_attr_row(
+                    expected_atomic, atomic_binding.get("row_id"),
+                    atomic_binding.get("attrs"),
+                    expected_contract_sha256=expected_atomic["sha256"],
+                    where=f"{cid}.staged_atomic_replay")
+            except Exception as ex:
+                errs.append(f"{cid}: atomic row 未绑定 staged spec：{ex}")
+            else:
+                if rebound != atomic_binding:
+                    errs.append(f"{cid}: atomic row binding 与 staged spec 重放结果不一致")
+            if q_by_id.get(independent.get("q_id")) != independent:
+                errs.append(f"{cid}: independent Q binding 不属于 staged spec 生成轴")
+        try:
+            bundle = gen_cases._resolve_multi_input_contract(staged_spec)
+        except Exception as ex:
+            errs.append(f"staged spec multi-input P 轴无法重放：{ex}")
+            bundle = None
+        if bundle is None:
+            errs.append("atomic_attr_rows 只准入带 multi_input_contract 的完整 P×A×Q 计划")
+        else:
+            expected_profiles = {row["profile_id"] for row in bundle["profiles"]}
+            actual_profiles = {cell.get("profile_id")
+                               for cell in actual_ledger.get("cells", [])}
+            if actual_profiles != expected_profiles:
+                errs.append("atomic ledger 的 P profile 身份与 staged spec 不一致")
+        source_binding = expected_atomic.get("source_binding") or {}
+        facts = source_facts_lookup.find_source_facts(d, source_facts_path)
+        if facts == source_facts_lookup.SOURCE_FACTS_UNTRUSTED:
+            errs.append("atomic_attr_rows 的 CP-A source_facts 对照物不可信")
+        elif not isinstance(facts, dict):
+            errs.append("atomic_attr_rows 缺 CP-A source_facts，无法核任务书/取材摘要")
+        else:
+            actual_facts_sha = content_address.content_digest(
+                source_facts_lookup.SOURCE_FACTS_DOMAIN, facts)
+            if source_binding.get("source_facts_sha256") != actual_facts_sha:
+                errs.append("atomic source_facts_sha256 与 CP-A 内容寻址摘要不一致")
+            taskdoc = facts.get("taskdoc")
+            actual_taskdoc_sha = (taskdoc.get("snapshot_sha256")
+                                  if isinstance(taskdoc, dict) else None)
+            if source_binding.get("taskdoc_snapshot_sha256") != actual_taskdoc_sha:
+                errs.append("atomic taskdoc_snapshot_sha256 与 CP-A taskdoc 快照不一致")
+
+    declarations = {
+        row["attr"]: {
+            "rank_from_input": row["rank_from_input"],
+            "duplicate_policy": row["duplicate_policy"],
+        }
+        for row in expected.get("cyclic_indices", ())
+    }
+    for binding_row in actual["bindings"]["cases"]:
+        cid = binding_row["case_id"]
+        bindings = binding_row["contract_bindings"]
+        cyclic = bindings.get("cyclic_indices") if isinstance(bindings, dict) else None
+        cyclic = cyclic or {}
+        if set(cyclic) != set(declarations):
+            errs.append(
+                f"{cid}: cyclic binding 属性集与 staged spec 声明不一致")
+            continue
+        for name, declaration in declarations.items():
+            receipt = cyclic[name]
+            input_ref = receipt.get("input") if isinstance(receipt, dict) else None
+            if (not isinstance(input_ref, dict)
+                    or input_ref.get("name") != declaration["rank_from_input"]
+                    or receipt.get("duplicate_policy")
+                    != declaration["duplicate_policy"]):
+                errs.append(
+                    f"{cid}: cyclic {name!r} 未逐字绑定 staged spec 的具名输入/重复策略")
+
+
 def gate_task1(d, errs, source_facts_path=None):
     """用例集自洽 + （有 evidence 时）id 一一对应，专防跑子集。"""
     cs = _load(d, "caseset.json")
@@ -1072,6 +1223,17 @@ def gate_task1(d, errs, source_facts_path=None):
     if not isinstance(cases, list) or not cases:
         errs.append("caseset 无用例或 cases 非列表")
         return
+    try:
+        cpp_extension_adapter.validate_caseset_layout_contract(cs)
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        errs.append(f"caseset layout ledger/receipt 契约非法：{ex}")
+    try:
+        cpp_extension_adapter.validate_caseset_tensor_shape_attr_contract(cs)
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        errs.append(f"caseset tensor shape/attr ledger 契约非法：{ex}")
+    _gate_tensor_shape_attr_spec_authority(
+        d, cs, _load(d, "spec.json"), errs,
+        source_facts_path=source_facts_path)
     gu_ledger = _golden_unavailable_ledger(cs, errs)   # 一等状态的佐证台账（结构坏 → None）
     vd = _load(d, "verdict.json")                      # 还没跑到裁决就没有；有就必须对得上
     if vd == "__BAD__":
@@ -1297,6 +1459,113 @@ def _gate_cann_runtime_requirement(
             "本门只证明 runtime CANN，不代表 vendor build-time CANN")
 
 
+def _gate_cpp_extension_layout(caseset, receipt, ev_list, errs, *, manifest=None, plan=None):
+    """三级门从 caseset 外部 ledger 重放 layout receipt/execution/evidence 绑定。"""
+    try:
+        contract = (
+            cpp_extension_adapter.validate_invocation_layout_contract(
+                caseset, manifest, plan)
+            if isinstance(manifest, dict)
+            else cpp_extension_adapter.validate_caseset_layout_contract(caseset))
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        errs.append(f"cpp_extension layout caseset/manifest/plan 契约非法：{ex}")
+        return
+    receipt_map = receipt if isinstance(receipt, dict) else {}
+    rows = ev_list if isinstance(ev_list, list) else []
+    if contract is None:
+        if "layout_ledger_sha256" in receipt_map or "layout_execution" in receipt_map:
+            errs.append("legacy cpp_extension receipt 凭空声明 layout ledger/execution")
+        for row in rows:
+            if isinstance(row, dict) and (
+                    "layout_ledger_sha256" in row or "layout_observations" in row):
+                errs.append(
+                    f"{row.get('case_id')}: legacy evidence 凭空声明 layout observation")
+        return
+    ledger_sha = contract["sha256"]
+    if receipt_map.get("layout_ledger_sha256") != ledger_sha:
+        errs.append("cpp_extension receipt.layout_ledger_sha256 与 caseset 外部 ledger 漂移")
+        return
+    execution = receipt_map.get("layout_execution")
+    try:
+        cpp_extension_adapter.validate_layout_execution(caseset, execution)
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        errs.append(f"cpp_extension receipt 实际 input/output layout 未闭合：{ex}")
+        return
+    execution_by_id = {row.get("case_id"): row for row in execution.get("cases") or []
+                       if isinstance(row, dict)}
+    evidence_by_id = {row.get("case_id"): row for row in rows if isinstance(row, dict)}
+    layout_ids = {row["case_id"] for row in contract["cases"]}
+    for cid in layout_ids:
+        evidence = evidence_by_id.get(cid)
+        if not isinstance(evidence, dict):
+            errs.append(f"{cid}: cpp_extension evidence 缺 layout observation")
+            continue
+        if evidence.get("layout_ledger_sha256") != ledger_sha:
+            errs.append(f"{cid}: evidence.layout_ledger_sha256 缺失或漂移")
+        if evidence.get("layout_observations") != execution_by_id.get(cid):
+            errs.append(f"{cid}: evidence.layout_observations 未原样镜像 driver 实测布局")
+    for row in rows:
+        if not isinstance(row, dict) or row.get("case_id") in layout_ids:
+            continue
+        if "layout_ledger_sha256" in row or "layout_observations" in row:
+            errs.append(
+                f"{row.get('case_id')}: 非 layout case 不得冒领 layout requirement evidence")
+
+
+def _gate_cpp_extension_tensor_shape_attrs(caseset, receipt, ev_list, errs, *, plan=None):
+    """三级门重放 atomic/cyclic ledger→plan→receipt→evidence 摘要链。"""
+    try:
+        contract = cpp_extension_adapter.validate_invocation_tensor_shape_attr_contract(
+            caseset, plan)
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        errs.append(f"cpp_extension tensor shape/attr caseset/plan 契约非法：{ex}")
+        return
+    receipt_map = receipt if isinstance(receipt, dict) else {}
+    rows = ev_list if isinstance(ev_list, list) else []
+    reserved = {
+        "tensor_shape_attr_bindings_sha256", "atomic_attr_ledger_sha256",
+        "contract_bindings", "contract_bindings_sha256",
+    }
+    if contract is None:
+        if set(receipt_map) & {
+                "tensor_shape_attr_bindings_sha256", "atomic_attr_ledger_sha256"}:
+            errs.append("legacy cpp_extension receipt 凭空声明 tensor shape/attr ledger")
+        for row in rows:
+            if isinstance(row, dict) and set(row) & reserved:
+                errs.append(
+                    f"{row.get('case_id')}: legacy evidence 凭空声明 structure binding")
+        return
+    if receipt_map.get("tensor_shape_attr_bindings_sha256") \
+            != contract["bindings_sha256"]:
+        errs.append("cpp_extension receipt.tensor_shape_attr_bindings_sha256 漂移")
+    atomic_sha = contract["atomic_ledger_sha256"]
+    if atomic_sha is None:
+        if "atomic_attr_ledger_sha256" in receipt_map:
+            errs.append("cyclic-only receipt 凭空声明 atomic_attr_ledger_sha256")
+    elif receipt_map.get("atomic_attr_ledger_sha256") != atomic_sha:
+        errs.append("cpp_extension receipt.atomic_attr_ledger_sha256 漂移")
+    binding_by_id = {row["case_id"]: row["contract_bindings"]
+                     for row in contract["bindings"]["cases"]}
+    evidence_by_id = {row.get("case_id"): row for row in rows if isinstance(row, dict)}
+    for cid, binding in binding_by_id.items():
+        row = evidence_by_id.get(cid)
+        if not isinstance(row, dict):
+            errs.append(f"{cid}: cpp_extension evidence 缺 structure binding")
+            continue
+        if row.get("tensor_shape_attr_bindings_sha256") != contract["bindings_sha256"]:
+            errs.append(f"{cid}: evidence tensor_shape_attr_bindings_sha256 漂移")
+        if atomic_sha is not None and row.get("atomic_attr_ledger_sha256") != atomic_sha:
+            errs.append(f"{cid}: evidence atomic_attr_ledger_sha256 漂移")
+        if row.get("contract_bindings") != binding:
+            errs.append(f"{cid}: evidence 未原样镜像 contract_bindings")
+        expected_binding_sha = _canonical_sha(binding)
+        if row.get("contract_bindings_sha256") != expected_binding_sha:
+            errs.append(f"{cid}: evidence contract_bindings_sha256 漂移")
+    for cid, row in evidence_by_id.items():
+        if cid not in binding_by_id and set(row) & reserved:
+            errs.append(f"{cid}: 非 structure case 不得冒领 structure evidence")
+
+
 def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_facts_path=None):
     """cpp_extension 的独立 build/load/ELF receipt 完整性门。
 
@@ -1334,6 +1603,10 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
     except (OSError, ValueError, TypeError) as ex:
         errs.append(f"cpp_extension 绑定工件坏 JSON: {type(ex).__name__}: {ex}")
         return
+    _gate_cpp_extension_layout(
+        caseset, receipt, ev_list, errs, manifest=manifest, plan=plan)
+    _gate_cpp_extension_tensor_shape_attrs(
+        caseset, receipt, ev_list, errs, plan=plan)
     _gate_cpp_extension_stage2_evidence(manifest, errs)
     bindings = receipt.get("bindings")
     if not isinstance(bindings, dict):
@@ -1345,6 +1618,9 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
     # 本 receipt 子门缺席时仍按既有 base_spec_sha256 读法，但同级 dtype 权威门会明确 FAILED，
     # 不会据此放行（静态残余与恢复条件在 `_staged_dtype_authority` 挂账）。
     staged_spec = _load(d, "spec.json")
+    _gate_tensor_shape_attr_spec_authority(
+        d, caseset, staged_spec, errs,
+        source_facts_path=source_facts_path)
     staged_spec_sha = _canonical_sha(staged_spec) if isinstance(staged_spec, dict) else None
     if staged_spec is not None and staged_spec_sha is None:
         errs.append("cpp_extension staged spec.json 坏/不可 canonical 化，无法接入 receipt 绑定")

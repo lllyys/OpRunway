@@ -21,12 +21,18 @@ from pathlib import Path
 import tempfile
 
 import cann_version
+import cpp_extension_adapter
 import cpp_extension_identity
+import tensor_shape_attrs
 import vendor_build_receipt
 
 
 class DriverError(RuntimeError):
     pass
+
+
+class LayoutContractError(DriverError):
+    """布局身份/物理 transport 漂移；必须中止整轮，不能降格成某 case 的精度失败。"""
 
 
 # 逻辑 dtype 名 → torch dtype 名。**必须与 `repo_adapter.SUPPORTED_NP_BY_FORM["cpp_extension"]`
@@ -360,33 +366,159 @@ def _validate_input_slot(item, slot, case_id):
     if expected["format"] not in ("nd", "torch_npu_rank_default"):
         raise DriverError(
             f"{case_id}: input {expected['name']!r} format={expected['format']!r} 非受控值")
+    layout_fields = (
+        "storage_representation", "layout_requirement_id", "layout_receipt_sha256")
+    layout_enabled = any(key in item for key in (
+        "storage_representation", "base_storage_path", "layout_requirement_id",
+        "layout_receipt", "layout_receipt_sha256"))
+    if layout_enabled:
+        if item.get("storage_representation") != cpp_extension_adapter.BASE_STORAGE_V1:
+            raise LayoutContractError(
+                f"{case_id}: input {expected['name']!r} storage representation 非 base_storage_v1")
+        if "path" in item:
+            raise LayoutContractError(
+                f"{case_id}: base_storage_v1 input 不得同时携带 legacy path")
+        expected_layout = {key: item.get(key) for key in layout_fields}
+        actual_layout = {key: slot.get(key) for key in layout_fields}
+        if actual_layout != expected_layout:
+            raise LayoutContractError(
+                f"{case_id}: plan slot 与 caseset input layout/requirement/digest 不一致")
+        if expected["format"] != tensor_shape_attrs.TENSOR_FORMAT_ND:
+            raise LayoutContractError(
+                f"{case_id}: N7 v1 layout input 只支持 format=nd")
+    elif any(key in slot for key in layout_fields):
+        raise LayoutContractError(
+            f"{case_id}: legacy input slot 不得凭空声明 layout 字段")
 
 
 def _input_tensor(torch, np, work, item, *, slot=None, case_id=None):
     if slot is not None:
         _validate_input_slot(item, slot, case_id or item.get("name") or "<unknown-case>")
-    arr = np.load(_safe(work, item["path"]), allow_pickle=False)
+    layout_enabled = item.get("storage_representation") is not None
+    storage_path = item.get("base_storage_path") if layout_enabled else item.get("path")
+    if layout_enabled and item.get("storage_representation") != cpp_extension_adapter.BASE_STORAGE_V1:
+        raise LayoutContractError(
+            f"{case_id}: storage_representation={item.get('storage_representation')!r} 非受控值")
+    arr = np.load(_safe(work, storage_path), allow_pickle=False)
     declared_shape = item.get("shape")
-    if declared_shape is not None and list(arr.shape) != declared_shape:
+    if not layout_enabled and declared_shape is not None and list(arr.shape) != declared_shape:
         raise DriverError(
             f"{case_id or item.get('name')}: {item.get('name')!r} 落盘 shape={list(arr.shape)} "
             f"≠ 逐输入契约 {declared_shape}")
+    if layout_enabled:
+        receipt = item.get("layout_receipt")
+        expected_numel = (receipt or {}).get("base_storage_numel")
+        if list(arr.shape) != [expected_numel]:
+            raise LayoutContractError(
+                f"{case_id}: {item.get('name')!r} base storage shape={list(arr.shape)} "
+                f"≠ [{expected_numel}]")
+        if not bool(arr.flags.c_contiguous):
+            raise LayoutContractError(
+                f"{case_id}: base storage .npy 必须是一维 contiguous 存储")
     dtype = item["dtype"]
     if dtype == "bfloat16":
         if str(arr.dtype) != "uint16":
             raise DriverError(
                 f"{item.get('name')}: bf16 输入 storage 须为 uint16，得 {arr.dtype}")
-        tensor = torch.from_numpy(np.ascontiguousarray(arr)).view(torch.bfloat16)
+        tensor = torch.from_numpy(arr if layout_enabled else np.ascontiguousarray(arr)).view(
+            torch.bfloat16)
     else:
         name = _TORCH_DTYPES.get(dtype)
         if name is None:
             raise DriverError(f"不支持输入 dtype={dtype!r}")
-        tensor = torch.from_numpy(np.ascontiguousarray(arr))
+        tensor = torch.from_numpy(arr if layout_enabled else np.ascontiguousarray(arr))
         target = getattr(torch, name)
         if tensor.dtype != target:
             raise DriverError(
                 f"{item.get('name')}: numpy storage dtype→torch {tensor.dtype} ≠ {target}")
-    return tensor.npu()
+    base = tensor.npu()
+    if not layout_enabled:
+        return base
+    receipt = item["layout_receipt"]
+    view = torch.as_strided(
+        base,
+        size=tuple(receipt["logical_shape"]),
+        stride=tuple(receipt["strides"]),
+        storage_offset=receipt["storage_offset"],
+    )
+    _observe_runtime_layout(
+        view, item, role=tensor_shape_attrs.LAYOUT_ROLE_INPUT,
+        case_id=case_id, tensor_name=item.get("name"),
+        tensor_index=slot.get("input_idx") if isinstance(slot, dict) else 0)
+    return view
+
+
+def _runtime_storage(tensor):
+    if hasattr(tensor, "untyped_storage"):
+        return tensor.untyped_storage(), True
+    return tensor.storage(), False
+
+
+def _runtime_base_numel(tensor):
+    storage, untyped = _runtime_storage(tensor)
+    if untyped:
+        return int(storage.nbytes()) // int(tensor.element_size())
+    return int(storage.size())
+
+
+def _runtime_storage_ptr(tensor):
+    storage, _untyped = _runtime_storage(tensor)
+    return int(storage.data_ptr())
+
+
+def _observe_runtime_layout(tensor, contract, *, role, case_id,
+                            tensor_name, tensor_index):
+    """从真实 NPU tensor 元数据重建 receipt，并与外部 case receipt/digest 对账。"""
+    shape = (contract.get("shape") if role == tensor_shape_attrs.LAYOUT_ROLE_INPUT
+             else contract.get("out_shape"))
+    try:
+        is_contiguous = bool(tensor.is_contiguous())
+        observed = {
+            "case_id": case_id,
+            "tensor_name": tensor_name,
+            "tensor_index": tensor_index,
+            "role": role,
+            "format": tensor_shape_attrs.TENSOR_FORMAT_ND,
+            "logical_shape": list(tensor.shape),
+            "layout_kind": (
+                tensor_shape_attrs.LAYOUT_CONTIGUOUS if is_contiguous
+                else tensor_shape_attrs.LAYOUT_NONCONTIGUOUS),
+            "layout_capability": (
+                tensor_shape_attrs.LAYOUT_CAPABILITY_CONTIGUOUS if is_contiguous
+                else tensor_shape_attrs.LAYOUT_CAPABILITY_SPAN_SEPARABLE),
+            "strides": list(tensor.stride()),
+            "storage_offset": int(tensor.storage_offset()),
+            "base_storage_numel": _runtime_base_numel(tensor),
+        }
+        receipt = tensor_shape_attrs.assert_layout_preserved(
+            contract.get("layout_receipt"), observed,
+            expected_shape=shape,
+            expected_role=role,
+            expected_case_id=case_id,
+            expected_tensor_name=tensor_name,
+            expected_tensor_index=tensor_index,
+            expected_receipt_sha256=contract.get("layout_receipt_sha256"),
+            where=f"{case_id}.{role}[{tensor_index}]",
+        )
+    except (tensor_shape_attrs.TensorShapeAttrError, AttributeError, TypeError, ValueError) as ex:
+        raise LayoutContractError(
+            f"{case_id}: {role} tensor#{tensor_index} 实际布局未保持：{ex}") from ex
+    return {
+        "layout_receipt": receipt,
+        "layout_receipt_sha256": tensor_shape_attrs.layout_receipt_sha256(receipt),
+        "storage_data_ptr": _runtime_storage_ptr(tensor),
+    }
+
+
+def _assert_layout_observation_roundtrip(before, after, where):
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        raise LayoutContractError(f"{where}: 调用前后布局 observation 缺失")
+    if before.get("storage_data_ptr") != after.get("storage_data_ptr"):
+        raise LayoutContractError(f"{where}: base storage ptr 调用前后漂移")
+    for key in ("layout_receipt", "layout_receipt_sha256"):
+        if _canonical_sha(before.get(key)) != _canonical_sha(after.get(key)):
+            raise LayoutContractError(f"{where}: {key} 调用前后漂移")
+    return after
 
 
 def _expected_outputs(case):
@@ -394,6 +526,17 @@ def _expected_outputs(case):
     outputs = expected.get("outputs")
     if isinstance(outputs, list):
         return outputs
+    if any(key in expected for key in (
+            "layout_requirement_id", "layout_receipt", "layout_receipt_sha256")):
+        output = dict(expected)
+        output.setdefault("role", "value")
+        if not output.get("name"):
+            slot = next((item for item in (
+                (case.get("aclnn_call") or {}).get("slots") or [])
+                if isinstance(item, dict) and item.get("role") == "out"
+                and item.get("output_idx") == 0), None)
+            output["name"] = slot.get("name") if isinstance(slot, dict) else None
+        return [output]
     return [{
         "name": "out",
         "role": "value",
@@ -406,7 +549,7 @@ def _expected_outputs(case):
     }]
 
 
-def _empty_output(torch, output):
+def _empty_output(torch, output, *, case_id=None, output_index=None):
     dtype_name = output.get("compare_dtype")
     torch_name = _TORCH_DTYPES.get(dtype_name)
     if torch_name is None:
@@ -424,10 +567,33 @@ def _empty_output(torch, output):
         raise DriverError(
             f"输出 {output.get('name')}: dtype={dtype_name!r} 缺输出写入哨兵——"
             "能力表已扩展但可信门未同步，fail-closed")
+    layout_enabled = any(key in output for key in (
+        "layout_requirement_id", "layout_receipt", "layout_receipt_sha256"))
     # 在 CPU 上构造已知字节再搬到 NPU：本通路的输入 transport 已逐 dtype 见证；相比直接在
     # NPU 上调用 fill kernel，这不额外假定 uint32/complex64 的设备端 fill 能力。
-    return torch.full(
-        tuple(shape), sentinel[0], dtype=getattr(torch, torch_name), device="cpu").npu()
+    if not layout_enabled:
+        return torch.full(
+            tuple(shape), sentinel[0], dtype=getattr(torch, torch_name), device="cpu").npu()
+    if case_id is None or output_index is None:
+        raise LayoutContractError("layout output 分配缺 case_id/output_index 外部身份")
+    receipt = output.get("layout_receipt")
+    if not isinstance(receipt, dict):
+        raise LayoutContractError(
+            f"{case_id}: output#{output_index} 缺外部 layout_receipt")
+    base = torch.full(
+        (receipt.get("base_storage_numel"),), sentinel[0],
+        dtype=getattr(torch, torch_name), device="cpu").npu()
+    view = torch.as_strided(
+        base,
+        size=tuple(receipt["logical_shape"]),
+        stride=tuple(receipt["strides"]),
+        storage_offset=receipt["storage_offset"],
+    )
+    _observe_runtime_layout(
+        view, output, role=tensor_shape_attrs.LAYOUT_ROLE_OUTPUT,
+        case_id=case_id, tensor_name=output.get("name"),
+        tensor_index=output_index)
+    return view
 
 
 OUTPUT_CHECK_PASSED = "passed"
@@ -525,19 +691,40 @@ def materialize_invocation(torch, np, work, case, row):
     inputs = [
         _input_tensor(
             torch, np, work, item,
-            slot=input_slots[index] if parameter_digest is not None else None,
+            slot=(input_slots[index] if parameter_digest is not None
+                  or item.get("storage_representation") is not None else None),
             case_id=cid)
         for index, item in enumerate(case["inputs"])
     ]
     output_contracts = _expected_outputs(case)
-    outputs = [_empty_output(torch, item) for item in output_contracts]
+    outputs = [_empty_output(
+        torch, item, case_id=cid, output_index=index)
+        for index, item in enumerate(output_contracts)]
     scalar_dtypes = row.get("host_scalar_dtypes") or {}
+    active_attr_contracts = row.get("active_attr_contracts")
+    if active_attr_contracts is not None:
+        actual_attr_contracts = [{
+            "name": slot.get("name"), "attr_ctype": slot.get("ctype")}
+            for slot in row["slots"] if slot.get("role") == "attr"]
+        if actual_attr_contracts != active_attr_contracts:
+            raise DriverError(
+                f"{cid}: invocation plan attr slot/name/ctype 漂移")
     args = []
-    for slot in row["slots"]:
+    for slot_index, slot in enumerate(row["slots"]):
         role = slot["role"]
         if role == "in":
             args.append(inputs[int(slot["input_idx"])])
         elif role == "attr":
+            if active_attr_contracts is not None:
+                attr_type = (tensor_shape_attrs.ATTR_INT_ARRAY
+                             if slot.get("ctype") == "int_array"
+                             else tensor_shape_attrs.ATTR_SCALAR)
+                try:
+                    tensor_shape_attrs.normalize_attr_value(
+                        slot.get("value"), attr_type=attr_type,
+                        where=f"{cid}.slots[{slot_index}].value")
+                except tensor_shape_attrs.TensorShapeAttrError as ex:
+                    raise DriverError(f"{cid}: attr slot 值违反显式类型：{ex}") from ex
             if slot.get("binding") == "host_scalar":
                 name = slot.get("name")
                 if slot.get("ctype") != "scalar" or slot.get("kind") != "scalar" \
@@ -577,7 +764,83 @@ class OutputNotWrittenError(DriverError):
         self.output_written_diagnostic = diagnostic
 
 
-def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
+def _layout_enabled(value):
+    return isinstance(value, dict) and any(key in value for key in (
+        "layout_requirement_id", "layout_receipt", "layout_receipt_sha256"))
+
+
+def _capture_layout_before(case, row, args, outputs, output_contracts):
+    cid = case["id"]
+    input_arg_positions = {
+        int(slot["input_idx"]): position
+        for position, slot in enumerate(row["slots"])
+        if slot.get("role") == "in"
+    }
+    record = {"case_id": cid, "inputs": [], "outputs": []}
+    for index, item in enumerate(case.get("inputs") or []):
+        if not _layout_enabled(item):
+            continue
+        observation = _observe_runtime_layout(
+            args[input_arg_positions[index]], item,
+            role=tensor_shape_attrs.LAYOUT_ROLE_INPUT,
+            case_id=cid, tensor_name=item.get("name"), tensor_index=index)
+        record["inputs"].append({
+            "layout_requirement_id": item["layout_requirement_id"],
+            "tensor_index": index,
+            "name": item["name"],
+            "expected_layout_receipt_sha256": item["layout_receipt_sha256"],
+            "before": observation,
+            "after": None,
+        })
+    for index, item in enumerate(output_contracts):
+        if not _layout_enabled(item):
+            continue
+        observation = _observe_runtime_layout(
+            outputs[index], item,
+            role=tensor_shape_attrs.LAYOUT_ROLE_OUTPUT,
+            case_id=cid, tensor_name=item.get("name"), tensor_index=index)
+        record["outputs"].append({
+            "layout_requirement_id": item["layout_requirement_id"],
+            "tensor_index": index,
+            "name": item["name"],
+            "expected_layout_receipt_sha256": item["layout_receipt_sha256"],
+            "before": observation,
+            "after": None,
+        })
+    return record if record["inputs"] or record["outputs"] else None
+
+
+def _capture_layout_after(case, row, args, returned, output_contracts, record):
+    if record is None:
+        return None
+    cid = case["id"]
+    input_arg_positions = {
+        int(slot["input_idx"]): position
+        for position, slot in enumerate(row["slots"])
+        if slot.get("role") == "in"
+    }
+    for item in record["inputs"]:
+        index = item["tensor_index"]
+        contract = case["inputs"][index]
+        item["after"] = _observe_runtime_layout(
+            args[input_arg_positions[index]], contract,
+            role=tensor_shape_attrs.LAYOUT_ROLE_INPUT,
+            case_id=cid, tensor_name=item["name"], tensor_index=index)
+        _assert_layout_observation_roundtrip(
+            item["before"], item["after"], f"{cid}.inputs[{index}]")
+    for item in record["outputs"]:
+        index = item["tensor_index"]
+        contract = output_contracts[index]
+        item["after"] = _observe_runtime_layout(
+            returned[index], contract,
+            role=tensor_shape_attrs.LAYOUT_ROLE_OUTPUT,
+            case_id=cid, tensor_name=item["name"], tensor_index=index)
+        _assert_layout_observation_roundtrip(
+            item["before"], item["after"], f"{cid}.outputs[{index}]")
+    return record
+
+
+def _invoke_all(bundle, work, manifest, plan, caseset, artifact, *, layout_contract=None):
     """逐 case 执行整份 invocation plan；**单条失败不中断整轮**。
 
     改动前这里是一句裸调用：第一条 case 抛异常就把整个 driver 带走，于是 169 条里第 1 条被
@@ -615,6 +878,7 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
     os.makedirs(out_root)
     produced = []
     failed = []
+    layout_cases = []
     progress_path = os.path.join(out_root, "progress.json")
     manifest_path = os.path.join(out_root, "out_manifest.json")
     total = len(plan["cases"])
@@ -645,6 +909,8 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
         try:
             args, outputs, output_contracts = materialize_invocation(
                 torch, np, work, case, row)
+            layout_record = _capture_layout_before(
+                case, row, args, outputs, output_contracts)
             phase = "execute"
             result = getattr(namespace, row["entrypoint"])(*args)
             torch.npu.synchronize()
@@ -652,6 +918,8 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
             if len(returned) != len(outputs):
                 raise DriverError(
                     f"{case['id']}: Extension 返回 {len(returned)} 输出，期望 {len(outputs)}")
+            layout_record = _capture_layout_after(
+                case, row, args, returned, output_contracts, layout_record)
             phase = "readback"
             os.makedirs(cdir)
             out_rows = []
@@ -673,6 +941,10 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
                     "output_written_diagnostic": written,
                 })
         except Exception as ex:  # noqa: BLE001 —— 单条 case 的任何失败都只归这条，不带走整轮
+            if isinstance(ex, LayoutContractError):
+                # 布局漂移不是 DUT 数值失败：一旦降格进 failed[]，后续 precision/perf 仍可能消费
+                # 已被 contiguous/换槽的张量。必须整轮 fail-closed，不产 VERIFIED receipt。
+                raise
             if os.path.isdir(cdir):
                 # 半截产物必须清掉：下游按 manifest 读字节，留一堆残缺 out_k.bin 只会制造
                 # 「看起来有产物」的假象。
@@ -697,16 +969,28 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact):
             _snapshot(False)
             _progress("running")
             continue
-        produced.append({"case_id": case["id"], "outputs": out_rows})
+        produced_row = {"case_id": case["id"], "outputs": out_rows}
+        if layout_record is not None:
+            produced_row["layout_observations"] = layout_record
+            layout_cases.append(layout_record)
+        produced.append(produced_row)
         last_case[0] = case["id"]
         _snapshot(False)
         _progress("running")
     _snapshot(True)
     _progress("complete")
-    return torch, schemas, {
+    invocation = {
         "planned": total, "produced": len(produced), "failed": len(failed),
         "failed_case_ids": [row["case_id"] for row in failed],
     }
+    if layout_contract is not None:
+        invocation["_layout_execution"] = {
+            "schema": cpp_extension_adapter.LAYOUT_EXECUTION_SCHEMA,
+            "schema_version": cpp_extension_adapter.LAYOUT_EXECUTION_VERSION,
+            "layout_ledger_sha256": layout_contract["sha256"],
+            "cases": layout_cases,
+        }
+    return torch, schemas, invocation
 
 
 def run(bundle, work):
@@ -723,10 +1007,27 @@ def run(bundle, work):
         raise DriverError(
             "invocation plan 与 N2 闭合生成物 manifest 的摘要/namespace 不一致；"
             "正式 build receipt 不得消费漂移或 development 生成物")
+    try:
+        layout_contract = cpp_extension_adapter.validate_invocation_layout_contract(
+            caseset, manifest, plan)
+        structure_contract = (
+            cpp_extension_adapter.validate_invocation_tensor_shape_attr_contract(
+                caseset, plan))
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        raise LayoutContractError(
+            f"caseset/plan tensor shape/attr/layout contract 非法：{ex}") from ex
     _handle, custom_opp, vendor = _bind_vendor(plan)
     build_argv, artifact = _build(bundle, manifest)
     torch, schemas, invocation = _invoke_all(
-        bundle, work, manifest, plan, caseset, artifact)
+        bundle, work, manifest, plan, caseset, artifact,
+        layout_contract=layout_contract)
+    layout_execution = invocation.pop("_layout_execution", None)
+    if layout_contract is not None:
+        try:
+            cpp_extension_adapter.validate_layout_execution(caseset, layout_execution)
+        except cpp_extension_adapter.CppExtensionAdapterError as ex:
+            raise LayoutContractError(
+                f"driver 实际 layout execution 未闭合：{ex}") from ex
 
     artifact_rel = os.path.relpath(artifact, work).replace(os.sep, "/")
     if artifact_rel.startswith("../"):
@@ -783,6 +1084,13 @@ def run(bundle, work):
         receipt["tensor_format_receipt"] = manifest["tensor_format_receipt"]
     if "multi_input_receipt" in manifest:
         receipt["multi_input_receipt"] = manifest["multi_input_receipt"]
+    if layout_contract is not None:
+        receipt["layout_ledger_sha256"] = layout_contract["sha256"]
+        receipt["layout_execution"] = layout_execution
+    if structure_contract is not None:
+        receipt["tensor_shape_attr_bindings_sha256"] = structure_contract["bindings_sha256"]
+        if structure_contract["atomic_ledger_sha256"] is not None:
+            receipt["atomic_attr_ledger_sha256"] = structure_contract["atomic_ledger_sha256"]
     _atomic_dump(
         os.path.join(work, "cpp_extension_receipt.json"), receipt)
     return receipt
@@ -795,6 +1103,42 @@ def run_perf_only(bundle, work):
     receipt = _load(os.path.join(work, "cpp_extension_receipt.json"))
     plan = _load(os.path.join(work, "cpp_extension_perf_plan.json"))
     caseset = _load(os.path.join(work, "cpp_extension_caseset.json"))
+    try:
+        layout_contract = cpp_extension_adapter.validate_caseset_layout_contract(caseset)
+        if layout_contract is None:
+            if "layout_ledger_sha256" in receipt or "layout_execution" in receipt:
+                raise cpp_extension_adapter.CppExtensionAdapterError(
+                    "legacy receipt 凭空声明 layout execution")
+        else:
+            if receipt.get("layout_ledger_sha256") != layout_contract["sha256"]:
+                raise cpp_extension_adapter.CppExtensionAdapterError(
+                    "receipt.layout_ledger_sha256 与 caseset 漂移")
+            cpp_extension_adapter.validate_layout_execution(
+                caseset, receipt.get("layout_execution"))
+        structure_contract = (
+            cpp_extension_adapter.validate_caseset_tensor_shape_attr_contract(caseset))
+        if structure_contract is not None:
+            structure_contract = (
+                cpp_extension_adapter.validate_invocation_tensor_shape_attr_contract(
+                    caseset, _load(os.path.join(
+                        work, "cpp_extension_invocation_plan.json"))))
+        if structure_contract is None:
+            if ("tensor_shape_attr_bindings_sha256" in receipt
+                    or "atomic_attr_ledger_sha256" in receipt):
+                raise cpp_extension_adapter.CppExtensionAdapterError(
+                    "legacy receipt 凭空声明 tensor shape/attr binding")
+        else:
+            if receipt.get("tensor_shape_attr_bindings_sha256") \
+                    != structure_contract["bindings_sha256"]:
+                raise cpp_extension_adapter.CppExtensionAdapterError(
+                    "receipt.tensor_shape_attr_bindings_sha256 与 caseset 漂移")
+            if receipt.get("atomic_attr_ledger_sha256") \
+                    != structure_contract["atomic_ledger_sha256"]:
+                raise cpp_extension_adapter.CppExtensionAdapterError(
+                    "receipt.atomic_attr_ledger_sha256 与 caseset 漂移")
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        raise LayoutContractError(
+            f"性能阶段前 tensor shape/attr/layout contract 未闭合：{ex}") from ex
     if (plan.get("caseset_sha256") != _canonical_sha(caseset)
             or plan.get("cpp_extension_receipt_sha256") != _canonical_sha(receipt)):
         raise DriverError("性能计划与本轮 caseset/build receipt 绑定漂移")

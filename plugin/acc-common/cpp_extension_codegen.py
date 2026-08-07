@@ -50,6 +50,7 @@ import re
 from pathlib import Path
 
 import multi_input_contract
+import tensor_shape_attrs
 
 
 class CppExtensionCodegenError(ValueError):
@@ -116,6 +117,8 @@ DISPATCH_EXTENDED = "generated_extended_two_stage"
 
 MULTI_INPUT_RECEIPT_SCHEMA = "oprunway.cpp_extension_multi_input_receipt"
 MULTI_INPUT_RECEIPT_VERSION = 1
+ATTR_PARAMETER_CONTRACT_SCHEMA = "oprunway.cpp_extension_attr_parameter_contract"
+ATTR_PARAMETER_CONTRACT_VERSION = 1
 
 #: 「本次 stage2 形态没有任何 header 级证据」的机读挂账。
 DEGRADATION_STAGE2_UNVERIFIED = "stage2_form_unverified"
@@ -182,7 +185,17 @@ def _attr_type(param):
     codegen 本来就只有 spec，靠这条得出与 caseset 里 slot `ctype` 相同的答案。
     """
     name = param.get("name")
+    has_declared_type = "attr_type" in param
+    declared_type = param.get("attr_type")
+    if has_declared_type and declared_type not in tensor_shape_attrs.ATTR_TYPES:
+        raise CppExtensionCodegenError(
+            f"attr {name!r} 的 attr_type={declared_type!r} 不在受控词表 "
+            f"{sorted(tensor_shape_attrs.ATTR_TYPES)}")
     if param.get("binding") == multi_input_contract.BINDING_HOST_SCALAR:
+        if declared_type == tensor_shape_attrs.ATTR_INT_ARRAY:
+            raise CppExtensionCodegenError(
+                f"host_scalar attr {name!r} 不得声明 attr_type='int_array'；"
+                "host scalar 只能承载显式 scalar")
         if param.get("kind") != multi_input_contract.KIND_SCALAR:
             raise CppExtensionCodegenError(
                 f"host_scalar attr {name!r} 必须显式声明 kind='scalar'")
@@ -199,6 +212,18 @@ def _attr_type(param):
                 "不得再声明 default 形成第二份真相")
         return "const at::Scalar&", "Scalar", "scalar"
     default = param.get("default")
+    if declared_type == tensor_shape_attrs.ATTR_INT_ARRAY:
+        if "default" in param:
+            try:
+                tensor_shape_attrs.normalize_attr_value(
+                    default, attr_type=declared_type,
+                    where=f"attr {name!r}.default")
+            except tensor_shape_attrs.TensorShapeAttrError as ex:
+                raise CppExtensionCodegenError(str(ex)) from ex
+        return _ATTR_ARRAY_CPP_TYPE, _ATTR_ARRAY_SCHEMA_TYPE, _ATTR_ARRAY_CTYPE
+    if declared_type == tensor_shape_attrs.ATTR_SCALAR and isinstance(default, list):
+        raise CppExtensionCodegenError(
+            f"attr {name!r} 显式声明 attr_type='scalar'，default 不得为 list")
     if _is_int_array(default):
         return _ATTR_ARRAY_CPP_TYPE, _ATTR_ARRAY_SCHEMA_TYPE, _ATTR_ARRAY_CTYPE
     if isinstance(default, list):
@@ -214,6 +239,23 @@ def _attr_type(param):
             f"attr {name!r} dtype 须为单值 {sorted(_ATTR_CPP_TYPES)}，得 {dtypes!r}"
             f"（数组属性请给非空 list[int] 的 default → {_ATTR_ARRAY_CTYPE}）")
     return (_ATTR_CPP_TYPES[dtypes[0]], _ATTR_SCHEMA_TYPES[dtypes[0]], dtypes[0])
+
+
+def _attr_parameter_contract(rows):
+    """仅在 spec 显式 opt-in ``attr_type`` 时落 manifest；legacy 字节保持原样。"""
+    attrs = [row for row in rows if row["io"] == "attr"]
+    if not any(row.get("attr_type_source") == "spec_declared" for row in attrs):
+        return None
+    return {
+        "schema": ATTR_PARAMETER_CONTRACT_SCHEMA,
+        "schema_version": ATTR_PARAMETER_CONTRACT_VERSION,
+        "parameters": [{
+            "name": row["name"],
+            "attr_type": row["attr_type"],
+            "attr_ctype": row["attr_ctype"],
+            "source": row["attr_type_source"],
+        } for row in attrs],
+    }
 
 
 def _preflight_stage2_by_symbol(preflight, spec_digest):
@@ -421,6 +463,13 @@ def _contract(spec, preflight_table=None,
         row = {"name": name, "io": io}
         if io == "attr":
             row["cpp_type"], row["schema_type"], row["attr_ctype"] = _attr_type(p)
+            row["attr_type"] = (
+                p["attr_type"] if "attr_type" in p
+                else (tensor_shape_attrs.ATTR_INT_ARRAY
+                      if row["attr_ctype"] == _ATTR_ARRAY_CTYPE
+                      else tensor_shape_attrs.ATTR_SCALAR))
+            row["attr_type_source"] = (
+                "spec_declared" if "attr_type" in p else "legacy_inferred")
         if multi_input_bundle is not None:
             if io in ("in", "out"):
                 row.update({
@@ -500,6 +549,13 @@ def _contract(spec, preflight_table=None,
             }
             if multi_input_bundle is not None:
                 entry["host_scalar_dtypes"] = combo
+            if any(row.get("attr_type_source") == "spec_declared"
+                   for row in rows if row["io"] == "attr"):
+                by_attr_name = {row["name"]: row for row in rows if row["io"] == "attr"}
+                entry["active_attr_contracts"] = [{
+                    "name": name,
+                    "attr_ctype": by_attr_name[name]["attr_ctype"],
+                } for name in active_attrs]
             # 真机 native 调用的**实参个数**：standard 恒 4；extended = 框架三参 + 该变体
             # 实际出现的 stage1 实参 + stream。记下来，别让读收据的人默认成 4 参。
             entry["stage2_call_arity"] = (
@@ -860,6 +916,7 @@ def generate(spec, out_dir, preflight=None):
         format_receipt = None
     params, variants = _contract(
         spec, preflight_table, tensor_format, multi_input_bundle)
+    attr_parameter_contract = _attr_parameter_contract(params)
     namespace = f"oprunway_{digest[:16]}"
     module_name = f"{namespace}_lib"
     out = Path(out_dir)
@@ -881,6 +938,8 @@ def generate(spec, out_dir, preflight=None):
             "tensor_acl_format_source": tensor_format_source}
            if multi_input_bundle is None else {
                "multi_input_receipt": _multi_input_receipt(multi_input_bundle, params)}),
+        **({"attr_parameter_contract": attr_parameter_contract}
+           if attr_parameter_contract is not None else {}),
         "official_pattern": {
             "source": "Ascend/op-plugin examples/cpp_extension_base",
             "ascend_pytorch_master_commit": "c255c0003f1ddff0e34190e417dc29b1c6f566a3",

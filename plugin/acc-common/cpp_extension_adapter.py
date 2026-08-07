@@ -21,6 +21,7 @@ import content_address
 import cpp_extension_codegen
 import cpp_extension_identity
 import perf_mode
+import tensor_shape_attrs
 import vendor_build_receipt
 
 
@@ -36,6 +37,23 @@ _PERF_PLAN = "cpp_extension_perf_plan.json"
 _PERF_COLLECT = "cpp_extension_perf_collect.json"
 _BUNDLE = "cpp_extension"
 _OUT = "cpp_extension_out"
+
+LAYOUT_LEDGER_SCHEMA = "oprunway.tensor_layout_ledger"
+LAYOUT_LEDGER_VERSION = 1
+LAYOUT_EXECUTION_SCHEMA = "oprunway.cpp_extension_layout_execution"
+LAYOUT_EXECUTION_VERSION = 1
+BASE_STORAGE_V1 = "base_storage_v1"
+_LAYOUT_INPUT_FIELDS = frozenset({
+    "storage_representation", "base_storage_path", "layout_requirement_id",
+    "layout_receipt", "layout_receipt_sha256",
+})
+_LAYOUT_OUTPUT_FIELDS = frozenset({
+    "layout_requirement_id", "layout_receipt", "layout_receipt_sha256",
+})
+ATOMIC_ATTR_LEDGER_SCHEMA = "oprunway.atomic_attr_case_ledger"
+ATOMIC_ATTR_LEDGER_VERSION = 1
+TENSOR_SHAPE_ATTR_BINDINGS_SCHEMA = "oprunway.tensor_shape_attr_bindings"
+TENSOR_SHAPE_ATTR_BINDINGS_VERSION = 1
 
 
 def _canonical_sha(value):
@@ -90,6 +108,705 @@ GOLDEN_UNAVAILABLE = "golden_unavailable"
 def _multi_item_projection(item):
     keys = ("name", "kind", "binding", "shape", "dtype", "format")
     return {key: item.get(key) for key in keys}
+
+
+def _layout_error(message, ex=None):
+    error = CppExtensionAdapterError(message)
+    if ex is not None:
+        error.__cause__ = ex
+    return error
+
+
+def _layout_exact_keys(value, expected, where):
+    if not isinstance(value, dict):
+        raise CppExtensionAdapterError(f"{where} 须为 object")
+    got = set(value)
+    wanted = set(expected)
+    if got != wanted:
+        raise CppExtensionAdapterError(
+            f"{where} 键集合漂移：缺 {sorted(wanted - got)}，多 {sorted(got - wanted)}")
+
+
+def _layout_equal(left, right, where):
+    try:
+        return (content_address.canonical_json_bytes(left)
+                == content_address.canonical_json_bytes(right))
+    except (TypeError, ValueError) as ex:
+        raise CppExtensionAdapterError(f"{where} 不是 canonical JSON：{ex}") from ex
+
+
+def _layout_nonempty_string(value, where):
+    if not isinstance(value, str) or not value.strip():
+        raise CppExtensionAdapterError(f"{where} 须为非空字符串")
+    return value
+
+
+def _layout_sha256(value, where):
+    if (not isinstance(value, str) or len(value) != 64
+            or any(char not in "0123456789abcdef" for char in value)):
+        raise CppExtensionAdapterError(f"{where} 须为 64 位小写 sha256")
+    return value
+
+
+def _layout_relative_path(value, where):
+    path = _layout_nonempty_string(value, where)
+    normalized = os.path.normpath(path)
+    if os.path.isabs(path) or normalized in (".", "..") \
+            or normalized.startswith(".." + os.sep):
+        raise CppExtensionAdapterError(f"{where} 须为不逃逸根目录的相对路径")
+    return path
+
+
+def _case_output_contracts(case):
+    expected = case.get("expected")
+    if not isinstance(expected, dict):
+        return []
+    outputs = expected.get("outputs")
+    if isinstance(outputs, list):
+        return outputs
+    return [expected]
+
+
+def validate_caseset_tensor_shape_attr_contract(caseset):
+    """重放 atomic A×Q 与 cyclic receipt；legacy 返回 ``None``。
+
+    覆盖身份只从 caseset 顶层 ledger 与逐 case binding 交叉取得。adapter 不重新
+    解释任务书，也不按属性名猜轴语义；它只证明 planner 落下的 P×A×Q 单元、
+    raw attr、具名输入 rank 与摘要仍逐字一致。
+    """
+    if not isinstance(caseset, dict) or not isinstance(caseset.get("cases"), list):
+        raise CppExtensionAdapterError("tensor_shape_attr caseset/cases 须为 object/list")
+    binding_rows = []
+    atomic_rows = []
+    seen_case_ids = set()
+    for case_index, case in enumerate(caseset["cases"]):
+        if not isinstance(case, dict):
+            raise CppExtensionAdapterError(f"cases[{case_index}] 须为 object")
+        cid = case.get("id")
+        if not isinstance(cid, str) or not cid or cid in seen_case_ids:
+            raise CppExtensionAdapterError(f"tensor_shape_attr case id 缺失或重复: {cid!r}")
+        seen_case_ids.add(cid)
+        bindings = case.get("contract_bindings")
+        if bindings is None:
+            continue
+        if not isinstance(bindings, dict) or not bindings:
+            raise CppExtensionAdapterError(f"{cid}.contract_bindings 须为非空 object")
+        unknown = set(bindings) - {
+            "atomic_attr_row", "independent_attr_combination", "cyclic_indices"}
+        if unknown:
+            raise CppExtensionAdapterError(
+                f"{cid}.contract_bindings 含未知字段 {sorted(unknown)}")
+        atomic = bindings.get("atomic_attr_row")
+        independent = bindings.get("independent_attr_combination")
+        if (atomic is None) != (independent is None):
+            raise CppExtensionAdapterError(
+                f"{cid}: atomic_attr_row 与 independent_attr_combination 必须同时在场")
+        if atomic is not None:
+            _layout_exact_keys(atomic, {
+                "row_id", "row_sha256", "atomic_rows_sha256", "attrs"},
+                f"{cid}.atomic_attr_row")
+            _layout_exact_keys(independent, {"q_id", "q_sha256", "attrs"},
+                               f"{cid}.independent_attr_combination")
+            for label, value in (
+                    ("row_sha256", atomic.get("row_sha256")),
+                    ("atomic_rows_sha256", atomic.get("atomic_rows_sha256")),
+                    ("q_sha256", independent.get("q_sha256"))):
+                _layout_sha256(value, f"{cid}.{label}")
+            row_id = _layout_nonempty_string(atomic.get("row_id"), f"{cid}.row_id")
+            q_id = _layout_nonempty_string(independent.get("q_id"), f"{cid}.q_id")
+            attrs = case.get("attrs")
+            if not isinstance(attrs, dict) or not isinstance(atomic.get("attrs"), dict) \
+                    or not isinstance(independent.get("attrs"), dict):
+                raise CppExtensionAdapterError(f"{cid}: atomic/Q/case attrs 须为 object")
+            for source, label in ((atomic["attrs"], "atomic"),
+                                  (independent["attrs"], "independent")):
+                projected = {name: attrs.get(name) for name in source}
+                if not _layout_equal(projected, source, f"{cid}.{label}_attrs"):
+                    raise CppExtensionAdapterError(
+                        f"{cid}: case attrs 与 {label} binding 不一致")
+            if _canonical_sha(independent["attrs"]) != independent["q_sha256"]:
+                raise CppExtensionAdapterError(f"{cid}: q_sha256 与独立属性组合不一致")
+            profile = case.get("parameter_contract")
+            profile_id = profile.get("profile_id") if isinstance(profile, dict) else None
+            if not isinstance(profile_id, str) or not profile_id:
+                raise CppExtensionAdapterError(
+                    f"{cid}: atomic case 缺 parameter_contract.profile_id（P 轴身份）")
+            atomic_rows.append({
+                "profile_id": profile_id,
+                "row_id": row_id,
+                "row_sha256": atomic["row_sha256"],
+                "q_id": q_id,
+                "q_sha256": independent["q_sha256"],
+                "case_id": cid,
+                "atomic_rows_sha256": atomic["atomic_rows_sha256"],
+            })
+
+        cyclic = bindings.get("cyclic_indices")
+        if cyclic is not None:
+            if not isinstance(cyclic, dict) or not cyclic:
+                raise CppExtensionAdapterError(f"{cid}.cyclic_indices 须为非空 object")
+            inputs = case.get("inputs")
+            attrs = case.get("attrs")
+            if not isinstance(inputs, list) or not isinstance(attrs, dict):
+                raise CppExtensionAdapterError(f"{cid}: cyclic case 缺 inputs/attrs")
+            for name, receipt in cyclic.items():
+                _layout_nonempty_string(name, f"{cid}.cyclic attr name")
+                _layout_exact_keys(receipt, {
+                    "raw", "normalized", "rank", "had_negative",
+                    "duplicate_policy", "input"}, f"{cid}.cyclic_indices.{name}")
+                input_ref = receipt.get("input")
+                _layout_exact_keys(input_ref, {
+                    "name", "index", "shape", "shape_receipt_sha256"},
+                    f"{cid}.cyclic_indices.{name}.input")
+                index = input_ref.get("index")
+                if isinstance(index, bool) or not isinstance(index, int) \
+                        or not 0 <= index < len(inputs):
+                    raise CppExtensionAdapterError(
+                        f"{cid}.cyclic_indices.{name}.input.index 非合法 input index")
+                item = inputs[index]
+                if not isinstance(item, dict) or item.get("name") != input_ref.get("name") \
+                        or item.get("shape") != input_ref.get("shape"):
+                    raise CppExtensionAdapterError(
+                        f"{cid}.cyclic_indices.{name} 未绑定具名 input shape")
+                _layout_sha256(input_ref.get("shape_receipt_sha256"),
+                               f"{cid}.cyclic_indices.{name}.shape_receipt_sha256")
+                shape = item.get("shape")
+                if _canonical_sha(tensor_shape_attrs.make_shape_receipt(shape)) \
+                        != input_ref["shape_receipt_sha256"]:
+                    raise CppExtensionAdapterError(
+                        f"{cid}.cyclic_indices.{name} input shape receipt 漂移")
+                if not _layout_equal(attrs.get(name), receipt.get("raw"),
+                                     f"{cid}.cyclic_indices.{name}.raw"):
+                    raise CppExtensionAdapterError(
+                        f"{cid}.cyclic_indices.{name}.raw 未逐字绑定 DUT attr")
+                try:
+                    rebuilt = tensor_shape_attrs.normalize_cyclic_indices(
+                        receipt["raw"], len(shape),
+                        duplicate_policy=receipt["duplicate_policy"],
+                        where=f"{cid}.cyclic_indices.{name}.recompute")
+                except tensor_shape_attrs.TensorShapeAttrError as ex:
+                    raise CppExtensionAdapterError(f"{cid}: {ex}") from ex
+                rebuilt["input"] = input_ref
+                if not _layout_equal(rebuilt, receipt,
+                                     f"{cid}.cyclic_indices.{name}"):
+                    raise CppExtensionAdapterError(
+                        f"{cid}.cyclic_indices.{name} 与具名 rank 确定性重算不一致")
+        binding_rows.append({"case_id": cid, "contract_bindings": bindings})
+
+    ledger = caseset.get("atomic_attr_ledger")
+    ledger_sha = caseset.get("atomic_attr_ledger_sha256")
+    if (ledger is None) != (ledger_sha is None):
+        raise CppExtensionAdapterError(
+            "atomic_attr_ledger 与 atomic_attr_ledger_sha256 必须同时在场")
+    if atomic_rows and ledger is None:
+        raise CppExtensionAdapterError("atomic cases 缺顶层 atomic_attr_ledger")
+    if ledger is not None:
+        _layout_exact_keys(ledger, {
+            "schema", "schema_version", "atomic_rows_sha256", "source_binding",
+            "profiles", "atomic_rows", "independent_combinations", "expected",
+            "emitted", "cells"}, "atomic_attr_ledger")
+        if ledger.get("schema") != ATOMIC_ATTR_LEDGER_SCHEMA \
+                or type(ledger.get("schema_version")) is not int \
+                or ledger.get("schema_version") != ATOMIC_ATTR_LEDGER_VERSION:
+            raise CppExtensionAdapterError(
+                f"atomic_attr_ledger 须为 {ATOMIC_ATTR_LEDGER_SCHEMA} "
+                f"v{ATOMIC_ATTR_LEDGER_VERSION}")
+        _layout_sha256(ledger_sha, "atomic_attr_ledger_sha256")
+        if _canonical_sha(ledger) != ledger_sha:
+            raise CppExtensionAdapterError("atomic_attr_ledger_sha256 与 ledger 重算不一致")
+        table_sha = _layout_sha256(
+            ledger.get("atomic_rows_sha256"), "atomic_attr_ledger.atomic_rows_sha256")
+        source_binding = ledger.get("source_binding")
+        _layout_exact_keys(source_binding, {
+            "compose_kind", "spec_sha256", "taskdoc_snapshot_sha256",
+            "source_facts_sha256"}, "atomic_attr_ledger.source_binding")
+        if source_binding.get("compose_kind") != "spec_taskdoc_compose":
+            raise CppExtensionAdapterError("atomic source_binding.compose_kind 非受控值")
+        for key in ("spec_sha256", "taskdoc_snapshot_sha256", "source_facts_sha256"):
+            _layout_sha256(source_binding.get(key), f"atomic source_binding.{key}")
+        for key in ("profiles", "atomic_rows", "independent_combinations",
+                    "expected", "emitted"):
+            if isinstance(ledger.get(key), bool) or not isinstance(ledger.get(key), int) \
+                    or ledger[key] < 1:
+                raise CppExtensionAdapterError(f"atomic_attr_ledger.{key} 须为正整数")
+        product = (ledger["profiles"] * ledger["atomic_rows"]
+                   * ledger["independent_combinations"])
+        if product != ledger["expected"] or ledger["expected"] != ledger["emitted"]:
+            raise CppExtensionAdapterError("atomic P×A×Q 三重计数不一致")
+        cells = ledger.get("cells")
+        if not isinstance(cells, list) or len(cells) != ledger["emitted"]:
+            raise CppExtensionAdapterError("atomic cells 数与 emitted 不一致")
+        normalized_cells = []
+        for index, cell in enumerate(cells):
+            _layout_exact_keys(cell, {
+                "profile_id", "row_id", "row_sha256", "q_id", "q_sha256",
+                "case_id"}, f"atomic_attr_ledger.cells[{index}]")
+            normalized_cells.append(cell)
+        expected_cells = [{key: row[key] for key in (
+            "profile_id", "row_id", "row_sha256", "q_id", "q_sha256", "case_id")}
+                          for row in atomic_rows]
+        if not _layout_equal(normalized_cells, expected_cells, "atomic cells"):
+            raise CppExtensionAdapterError(
+                "atomic cells 未按 case 顺序逐字绑定 P/row/Q/case")
+        if any(row["atomic_rows_sha256"] != table_sha for row in atomic_rows):
+            raise CppExtensionAdapterError("atomic case 的 table digest 与顶层 ledger 漂移")
+        profiles = {row["profile_id"] for row in atomic_rows}
+        rows = {(row["row_id"], row["row_sha256"]) for row in atomic_rows}
+        qs = {(row["q_id"], row["q_sha256"]) for row in atomic_rows}
+        triples = {(row["profile_id"], row["row_id"], row["q_id"])
+                   for row in atomic_rows}
+        if (len(profiles), len(rows), len(qs), len(triples)) != (
+                ledger["profiles"], ledger["atomic_rows"],
+                ledger["independent_combinations"], product):
+            raise CppExtensionAdapterError(
+                "atomic P/A/Q identity 不完整（丢单元、复制单元或 row/Q digest 漂移）")
+    elif ledger_sha is not None:
+        raise CppExtensionAdapterError("legacy caseset 凭空声明 atomic ledger digest")
+
+    if not binding_rows and ledger is None:
+        return None
+    binding_ledger = {
+        "schema": TENSOR_SHAPE_ATTR_BINDINGS_SCHEMA,
+        "schema_version": TENSOR_SHAPE_ATTR_BINDINGS_VERSION,
+        "cases": binding_rows,
+    }
+    return {
+        "bindings": binding_ledger,
+        "bindings_sha256": _canonical_sha(binding_ledger),
+        "atomic_ledger": ledger,
+        "atomic_ledger_sha256": ledger_sha,
+    }
+
+
+def validate_invocation_tensor_shape_attr_contract(caseset, plan=None):
+    """把 invocation plan 的顶层摘要与逐 case binding 摘要接回 caseset。"""
+    contract = validate_caseset_tensor_shape_attr_contract(caseset)
+    if not isinstance(plan, dict):
+        return contract
+    top_keys = {"tensor_shape_attr_bindings_sha256", "atomic_attr_ledger_sha256"}
+    rows = plan.get("cases")
+    excluded = plan.get("excluded", [])
+    if not isinstance(rows, list) or not isinstance(excluded, list):
+        raise CppExtensionAdapterError("invocation plan.cases/excluded 须为列表")
+    if contract is None:
+        if set(plan) & top_keys or any(
+                isinstance(row, dict) and "contract_bindings_sha256" in row
+                for row in [*rows, *excluded]):
+            raise CppExtensionAdapterError(
+                "legacy invocation plan 凭空声明 tensor shape/attr binding")
+        return None
+    if plan.get("tensor_shape_attr_bindings_sha256") != contract["bindings_sha256"]:
+        raise CppExtensionAdapterError(
+            "invocation plan.tensor_shape_attr_bindings_sha256 与 caseset 漂移")
+    if contract["atomic_ledger_sha256"] is None:
+        if "atomic_attr_ledger_sha256" in plan:
+            raise CppExtensionAdapterError(
+                "无 atomic ledger 的 plan 不得凭空声明 atomic_attr_ledger_sha256")
+    elif plan.get("atomic_attr_ledger_sha256") != contract["atomic_ledger_sha256"]:
+        raise CppExtensionAdapterError(
+            "invocation plan.atomic_attr_ledger_sha256 与 caseset 漂移")
+    binding_by_id = {row["case_id"]: row["contract_bindings"]
+                     for row in contract["bindings"]["cases"]}
+    planned_ids = set()
+    for row in [*rows, *excluded]:
+        if not isinstance(row, dict):
+            raise CppExtensionAdapterError(
+                "invocation plan case/excluded row 须为 object")
+        cid = row.get("case_id")
+        if cid in planned_ids:
+            raise CppExtensionAdapterError(
+                f"invocation plan cases/excluded 重复 case_id={cid!r}")
+        binding = binding_by_id.get(cid)
+        if binding is None:
+            if "contract_bindings_sha256" in row:
+                raise CppExtensionAdapterError(
+                    f"{cid}: 非 structure case 凭空声明 binding digest")
+            continue
+        planned_ids.add(cid)
+        if row.get("contract_bindings_sha256") != _canonical_sha(binding):
+            raise CppExtensionAdapterError(
+                f"{cid}: plan structure binding digest 与 caseset 漂移")
+    if planned_ids != set(binding_by_id):
+        raise CppExtensionAdapterError(
+            "invocation plan 未完整覆盖 tensor shape/attr binding cases")
+    return contract
+
+
+def _has_any_layout_field(value, fields):
+    return isinstance(value, dict) and bool(set(value) & set(fields))
+
+
+def _validate_layout_receipt(receipt, *, shape, role, case_id, name, index, digest, where):
+    _layout_sha256(digest, f"{where}.layout_receipt_sha256")
+    try:
+        normalized = tensor_shape_attrs.validate_layout_receipt(
+            receipt,
+            expected_shape=shape,
+            expected_role=role,
+            expected_case_id=case_id,
+            expected_tensor_name=name,
+            expected_tensor_index=index,
+            where=f"{where}.layout_receipt",
+        )
+        actual_sha = tensor_shape_attrs.layout_receipt_sha256(
+            normalized, where=f"{where}.layout_receipt")
+    except tensor_shape_attrs.TensorShapeAttrError as ex:
+        raise CppExtensionAdapterError(f"{where}: {ex}") from ex
+    if actual_sha != digest:
+        raise CppExtensionAdapterError(
+            f"{where}.layout_receipt_sha256 漂移：声明 {digest}，重算 {actual_sha}")
+    if normalized.get("format") != tensor_shape_attrs.TENSOR_FORMAT_ND:
+        raise CppExtensionAdapterError(f"{where}: N7 v1 layout 只支持 format=nd")
+    return normalized
+
+
+def validate_caseset_layout_contract(caseset):
+    """从 caseset 外部 ledger 绑定每个布局 case/slot/receipt；legacy 返回 ``None``。"""
+    if not isinstance(caseset, dict):
+        raise CppExtensionAdapterError("caseset 须为 object")
+    cases = caseset.get("cases")
+    if not isinstance(cases, list):
+        raise CppExtensionAdapterError("caseset.cases 须为列表")
+    normalized_cases = []
+    seen_case_ids = set()
+    seen_requirement_ids = set()
+    for case_index, case in enumerate(cases):
+        if not isinstance(case, dict):
+            raise CppExtensionAdapterError(f"cases[{case_index}] 须为 object")
+        cid = case.get("id")
+        if not isinstance(cid, str) or not cid or cid in seen_case_ids:
+            raise CppExtensionAdapterError(f"layout caseset case id 缺失或重复: {cid!r}")
+        seen_case_ids.add(cid)
+        call = case.get("aclnn_call")
+        slots = call.get("slots") if isinstance(call, dict) else None
+        inputs = case.get("inputs")
+        if not isinstance(inputs, list):
+            inputs = []
+        if not isinstance(slots, list):
+            slots = []
+        input_slots = {}
+        output_slots = {}
+        for slot_index, slot in enumerate(slots):
+            if not isinstance(slot, dict):
+                raise CppExtensionAdapterError(f"{cid}: slots[{slot_index}] 须为 object")
+            role = slot.get("role")
+            if role == "in":
+                tensor_index = slot.get("input_idx")
+                if (isinstance(tensor_index, bool) or not isinstance(tensor_index, int)
+                        or tensor_index in input_slots):
+                    raise CppExtensionAdapterError(
+                        f"{cid}: layout input_idx={tensor_index!r} 非唯一整数")
+                input_slots[tensor_index] = slot
+            elif role == "out":
+                tensor_index = slot.get("output_idx")
+                if (isinstance(tensor_index, bool) or not isinstance(tensor_index, int)
+                        or tensor_index in output_slots):
+                    raise CppExtensionAdapterError(
+                        f"{cid}: layout output_idx={tensor_index!r} 非唯一整数")
+                output_slots[tensor_index] = slot
+
+        normalized_inputs = []
+        for tensor_index, item in enumerate(inputs):
+            has_layout = _has_any_layout_field(item, _LAYOUT_INPUT_FIELDS)
+            slot = input_slots.get(tensor_index)
+            slot_has_layout = _has_any_layout_field(slot, _LAYOUT_INPUT_FIELDS)
+            if not has_layout and not slot_has_layout:
+                continue
+            if not isinstance(item, dict) or set(item) & _LAYOUT_INPUT_FIELDS != _LAYOUT_INPUT_FIELDS:
+                raise CppExtensionAdapterError(
+                    f"{cid}: inputs[{tensor_index}] layout 字段不完整")
+            if not isinstance(slot, dict):
+                raise CppExtensionAdapterError(
+                    f"{cid}: inputs[{tensor_index}] 无对应 aclnn_call input slot")
+            if set(slot) & (_LAYOUT_INPUT_FIELDS - {"base_storage_path", "layout_receipt"}) \
+                    != (_LAYOUT_INPUT_FIELDS - {"base_storage_path", "layout_receipt"}):
+                raise CppExtensionAdapterError(
+                    f"{cid}: input slot#{tensor_index} layout 绑定字段不完整")
+            if item.get("storage_representation") != BASE_STORAGE_V1:
+                raise CppExtensionAdapterError(
+                    f"{cid}: inputs[{tensor_index}].storage_representation 只支持 {BASE_STORAGE_V1}")
+            if "path" in item:
+                raise CppExtensionAdapterError(
+                    f"{cid}: base_storage_v1 input 不得同时携带 legacy path")
+            _layout_relative_path(
+                item.get("base_storage_path"), f"{cid}.inputs[{tensor_index}].base_storage_path")
+            name = _layout_nonempty_string(item.get("name"), f"{cid}.inputs[{tensor_index}].name")
+            requirement_id = _layout_nonempty_string(
+                item.get("layout_requirement_id"),
+                f"{cid}.inputs[{tensor_index}].layout_requirement_id")
+            if requirement_id in seen_requirement_ids:
+                raise CppExtensionAdapterError(
+                    f"layout requirement_id={requirement_id!r} 重复；一份 receipt 不得冒充双覆盖")
+            seen_requirement_ids.add(requirement_id)
+            if item.get("format") != tensor_shape_attrs.TENSOR_FORMAT_ND:
+                raise CppExtensionAdapterError(
+                    f"{cid}.inputs[{tensor_index}]: N7 v1 layout 只支持 format=nd")
+            slot_projection = {
+                key: slot.get(key) for key in (
+                    "name", "kind", "binding", "shape", "dtype", "format",
+                    "storage_representation", "layout_requirement_id",
+                    "layout_receipt_sha256")
+            }
+            item_projection = {
+                key: item.get(key) for key in slot_projection
+            }
+            if not _layout_equal(slot_projection, item_projection,
+                                 f"{cid}.inputs[{tensor_index}].slot_binding"):
+                raise CppExtensionAdapterError(
+                    f"{cid}: input layout slot#{tensor_index} 与 case item 逐字段不一致")
+            receipt = _validate_layout_receipt(
+                item.get("layout_receipt"), shape=item.get("shape"),
+                role=tensor_shape_attrs.LAYOUT_ROLE_INPUT,
+                case_id=cid, name=name, index=tensor_index,
+                digest=item.get("layout_receipt_sha256"),
+                where=f"{cid}.inputs[{tensor_index}]")
+            normalized_inputs.append({
+                "requirement_id": requirement_id,
+                "tensor_index": tensor_index,
+                "name": name,
+                "layout_receipt_sha256": item["layout_receipt_sha256"],
+                "layout_receipt": receipt,
+            })
+
+        normalized_outputs = []
+        for tensor_index, output in enumerate(_case_output_contracts(case)):
+            has_layout = _has_any_layout_field(output, _LAYOUT_OUTPUT_FIELDS)
+            slot = output_slots.get(tensor_index)
+            slot_has_layout = _has_any_layout_field(slot, _LAYOUT_OUTPUT_FIELDS)
+            if not has_layout and not slot_has_layout:
+                continue
+            if not isinstance(output, dict) or set(output) & _LAYOUT_OUTPUT_FIELDS \
+                    != _LAYOUT_OUTPUT_FIELDS:
+                raise CppExtensionAdapterError(
+                    f"{cid}: expected output#{tensor_index} layout 字段不完整")
+            if not isinstance(slot, dict):
+                raise CppExtensionAdapterError(
+                    f"{cid}: expected output#{tensor_index} 无对应 aclnn_call output slot")
+            if set(slot) & _LAYOUT_OUTPUT_FIELDS != {
+                    "layout_requirement_id", "layout_receipt_sha256"}:
+                raise CppExtensionAdapterError(
+                    f"{cid}: output slot#{tensor_index} layout 绑定字段不完整")
+            slot_name = _layout_nonempty_string(
+                slot.get("name"), f"{cid}.slots.output[{tensor_index}].name")
+            declared_name = output.get("name")
+            if declared_name is not None and declared_name != slot_name:
+                raise CppExtensionAdapterError(
+                    f"{cid}: expected output#{tensor_index}.name 与 slot.name 不一致")
+            requirement_id = _layout_nonempty_string(
+                output.get("layout_requirement_id"),
+                f"{cid}.expected.output[{tensor_index}].layout_requirement_id")
+            if requirement_id in seen_requirement_ids:
+                raise CppExtensionAdapterError(
+                    f"layout requirement_id={requirement_id!r} 重复；一份 receipt 不得冒充双覆盖")
+            seen_requirement_ids.add(requirement_id)
+            shape = output.get("out_shape")
+            dtype = output.get("compare_dtype")
+            expected_slot = {
+                "name": slot_name,
+                "kind": "tensor",
+                "binding": "device_tensor",
+                "shape": shape,
+                "dtype": dtype,
+                "format": tensor_shape_attrs.TENSOR_FORMAT_ND,
+                "layout_requirement_id": requirement_id,
+                "layout_receipt_sha256": output.get("layout_receipt_sha256"),
+            }
+            actual_slot = {key: slot.get(key) for key in expected_slot}
+            if not _layout_equal(actual_slot, expected_slot,
+                                 f"{cid}.outputs[{tensor_index}].slot_binding"):
+                raise CppExtensionAdapterError(
+                    f"{cid}: output layout slot#{tensor_index} 与 expected 逐字段不一致")
+            receipt = _validate_layout_receipt(
+                output.get("layout_receipt"), shape=shape,
+                role=tensor_shape_attrs.LAYOUT_ROLE_OUTPUT,
+                case_id=cid, name=slot_name, index=tensor_index,
+                digest=output.get("layout_receipt_sha256"),
+                where=f"{cid}.expected.output[{tensor_index}]")
+            normalized_outputs.append({
+                "requirement_id": requirement_id,
+                "tensor_index": tensor_index,
+                "name": slot_name,
+                "layout_receipt_sha256": output["layout_receipt_sha256"],
+                "layout_receipt": receipt,
+            })
+        if normalized_inputs or normalized_outputs:
+            normalized_cases.append({
+                "case_id": cid,
+                "inputs": normalized_inputs,
+                "outputs": normalized_outputs,
+            })
+
+    ledger_present = "layout_ledger" in caseset or "layout_ledger_sha256" in caseset
+    if not normalized_cases:
+        if ledger_present:
+            raise CppExtensionAdapterError(
+                "caseset 声明 layout_ledger，但没有任何 layout-enabled case")
+        return None
+    if "layout_ledger" not in caseset or "layout_ledger_sha256" not in caseset:
+        raise CppExtensionAdapterError(
+            "layout-enabled caseset 必须同时携带外部 layout_ledger/layout_ledger_sha256")
+    ledger = caseset.get("layout_ledger")
+    _layout_exact_keys(ledger, {"schema", "schema_version", "cases"}, "layout_ledger")
+    if ledger.get("schema") != LAYOUT_LEDGER_SCHEMA \
+            or type(ledger.get("schema_version")) is not int \
+            or ledger.get("schema_version") != LAYOUT_LEDGER_VERSION:
+        raise CppExtensionAdapterError(
+            f"layout_ledger 须为 {LAYOUT_LEDGER_SCHEMA} v{LAYOUT_LEDGER_VERSION}")
+    expected_ledger_cases = []
+    for case in normalized_cases:
+        expected_ledger_cases.append({
+            "case_id": case["case_id"],
+            "inputs": [{key: item[key] for key in (
+                "requirement_id", "tensor_index", "name", "layout_receipt_sha256")}
+                for item in case["inputs"]],
+            "outputs": [{key: item[key] for key in (
+                "requirement_id", "tensor_index", "name", "layout_receipt_sha256")}
+                for item in case["outputs"]],
+        })
+    ledger_cases = ledger.get("cases")
+    if not isinstance(ledger_cases, list):
+        raise CppExtensionAdapterError("layout_ledger.cases 须为列表")
+    for index, ledger_case in enumerate(ledger_cases):
+        _layout_exact_keys(
+            ledger_case, {"case_id", "inputs", "outputs"},
+            f"layout_ledger.cases[{index}]")
+        for role in ("inputs", "outputs"):
+            entries = ledger_case.get(role)
+            if not isinstance(entries, list):
+                raise CppExtensionAdapterError(
+                    f"layout_ledger.cases[{index}].{role} 须为列表")
+            for entry_index, entry in enumerate(entries):
+                _layout_exact_keys(
+                    entry,
+                    {"requirement_id", "tensor_index", "name", "layout_receipt_sha256"},
+                    f"layout_ledger.cases[{index}].{role}[{entry_index}]")
+    if content_address.canonical_json_bytes(ledger_cases) != \
+            content_address.canonical_json_bytes(expected_ledger_cases):
+        raise CppExtensionAdapterError(
+            "layout_ledger 与 case/slot/requirement_id/receipt digest 逐字绑定漂移")
+    ledger_sha = _layout_sha256(
+        caseset.get("layout_ledger_sha256"), "layout_ledger_sha256")
+    actual_sha = _canonical_sha(ledger)
+    if ledger_sha != actual_sha:
+        raise CppExtensionAdapterError(
+            f"layout_ledger_sha256 漂移：声明 {ledger_sha}，重算 {actual_sha}")
+    return {"ledger": ledger, "sha256": ledger_sha, "cases": normalized_cases}
+
+
+def validate_invocation_layout_contract(caseset, manifest, plan=None):
+    """把外部 layout ledger 绑定到 codegen format 与 invocation plan。"""
+    contract = validate_caseset_layout_contract(caseset)
+    if contract is None:
+        if isinstance(plan, dict) and "layout_ledger_sha256" in plan:
+            raise CppExtensionAdapterError(
+                "legacy caseset 的 invocation plan 不得凭空声明 layout_ledger_sha256")
+        return None
+    multi = manifest.get("multi_input_receipt") if isinstance(manifest, dict) else None
+    if multi is None:
+        if manifest.get("tensor_acl_format") != tensor_shape_attrs.TENSOR_FORMAT_ND:
+            raise CppExtensionAdapterError(
+                "N7 layout 禁止 torch_npu_rank_default；manifest 必须显式 ND")
+    else:
+        formats = {(row.get("io"), row.get("name")): row.get("format")
+                   for row in multi.get("tensor_parameters") or []
+                   if isinstance(row, dict)}
+        for case in contract["cases"]:
+            for item in case["inputs"]:
+                if formats.get(("in", item["name"])) != tensor_shape_attrs.TENSOR_FORMAT_ND:
+                    raise CppExtensionAdapterError(
+                        f"layout input {item['name']!r} 的 manifest 逐参数 format 非 ND")
+            for item in case["outputs"]:
+                if formats.get(("out", item["name"])) != tensor_shape_attrs.TENSOR_FORMAT_ND:
+                    raise CppExtensionAdapterError(
+                        f"layout output {item['name']!r} 的 manifest 逐参数 format 非 ND")
+    if isinstance(plan, dict) and plan.get("layout_ledger_sha256") != contract["sha256"]:
+        raise CppExtensionAdapterError(
+            "invocation plan.layout_ledger_sha256 与 caseset 外部 ledger 漂移")
+    return contract
+
+
+def _attr_contract_by_name(manifest):
+    contract = manifest.get("attr_parameter_contract")
+    if contract is None:
+        return None, None
+    _layout_exact_keys(
+        contract, {"schema", "schema_version", "parameters"},
+        "manifest.attr_parameter_contract")
+    if contract.get("schema") != cpp_extension_codegen.ATTR_PARAMETER_CONTRACT_SCHEMA \
+            or type(contract.get("schema_version")) is not int \
+            or contract.get("schema_version") != \
+            cpp_extension_codegen.ATTR_PARAMETER_CONTRACT_VERSION:
+        raise CppExtensionAdapterError("manifest.attr_parameter_contract schema 非法")
+    parameters = contract.get("parameters")
+    if not isinstance(parameters, list):
+        raise CppExtensionAdapterError(
+            "manifest.attr_parameter_contract.parameters 须为列表")
+    by_name = {}
+    for index, item in enumerate(parameters):
+        _layout_exact_keys(
+            item, {"name", "attr_type", "attr_ctype", "source"},
+            f"manifest.attr_parameter_contract.parameters[{index}]")
+        name = _layout_nonempty_string(
+            item.get("name"),
+            f"manifest.attr_parameter_contract.parameters[{index}].name")
+        if name in by_name:
+            raise CppExtensionAdapterError(
+                f"manifest.attr_parameter_contract 参数 {name!r} 重复")
+        if item.get("attr_type") not in tensor_shape_attrs.ATTR_TYPES:
+            raise CppExtensionAdapterError(
+                f"manifest attr {name!r}.attr_type 非受控值")
+        if item.get("source") not in ("spec_declared", "legacy_inferred"):
+            raise CppExtensionAdapterError(
+                f"manifest attr {name!r}.source 非受控值")
+        _layout_nonempty_string(item.get("attr_ctype"), f"manifest attr {name!r}.attr_ctype")
+        by_name[name] = item
+    if not any(item["source"] == "spec_declared" for item in parameters):
+        raise CppExtensionAdapterError(
+            "attr_parameter_contract 在场却没有任何 spec_declared opt-in 参数")
+    for index, variant in enumerate(manifest.get("variants") or []):
+        active = variant.get("active_attrs")
+        expected = [{"name": name, "attr_ctype": by_name[name]["attr_ctype"]}
+                    for name in active or [] if name in by_name]
+        if not isinstance(active, list) or len(expected) != len(active) \
+                or variant.get("active_attr_contracts") != expected:
+            raise CppExtensionAdapterError(
+                f"manifest.variants[{index}].active_attr_contracts 未逐字绑定参数 ctype")
+    return contract, by_name
+
+
+def _case_active_attr_contracts(cid, slots, attr_by_name, case_attrs):
+    if attr_by_name is None:
+        return None
+    if not isinstance(case_attrs, dict):
+        raise CppExtensionAdapterError(
+            f"{cid}: manifest 声明 attr 参数契约，但 case.attrs 缺失/非 object")
+    active = []
+    for index, slot in enumerate(slots):
+        if slot.get("role") != "attr":
+            continue
+        name = slot.get("name")
+        declared = attr_by_name.get(name)
+        if not isinstance(declared, dict):
+            raise CppExtensionAdapterError(
+                f"{cid}: slots[{index}] attr {name!r} 不在 manifest 参数契约")
+        actual_ctype = slot.get("ctype")
+        if actual_ctype != declared["attr_ctype"]:
+            raise CppExtensionAdapterError(
+                f"{cid}: attr_ctype 漂移：{name!r} slot={actual_ctype!r}, "
+                f"manifest={declared['attr_ctype']!r}")
+        try:
+            tensor_shape_attrs.normalize_attr_value(
+                slot.get("value"), attr_type=declared["attr_type"],
+                where=f"{cid}.slots[{index}].value")
+        except tensor_shape_attrs.TensorShapeAttrError as ex:
+            raise CppExtensionAdapterError(f"{cid}: {ex}") from ex
+        if name not in case_attrs or not _layout_equal(
+                slot.get("value"), case_attrs[name],
+                f"{cid}.slots[{index}].value_vs_case_attrs"):
+            raise CppExtensionAdapterError(
+                f"{cid}: attr slot.value 未逐字绑定 case.attrs[{name!r}]")
+        active.append({"name": name, "attr_ctype": actual_ctype})
+    return active
 
 
 def _validate_case_parameter_contract(case, slots, manifest_receipt):
@@ -187,6 +904,12 @@ def build_invocation_plan(caseset, manifest):
     **不因为没执行就变成通过**。
     """
     variants = _variants_by_symbol(manifest)
+    attr_contract, attr_by_name = _attr_contract_by_name(manifest)
+    layout_contract = validate_invocation_layout_contract(caseset, manifest)
+    structure_contract = validate_caseset_tensor_shape_attr_contract(caseset)
+    structure_by_id = ({row["case_id"]: row["contract_bindings"]
+                        for row in structure_contract["bindings"]["cases"]}
+                       if structure_contract is not None else {})
     manifest_multi = manifest.get("multi_input_receipt")
     caseset_multi = caseset.get("multi_input_ledger")
     if (manifest_multi is None) != (caseset_multi is None):
@@ -210,7 +933,11 @@ def build_invocation_plan(caseset, manifest):
             raise CppExtensionAdapterError(f"case id 缺失或重复: {cid!r}")
         seen.add(cid)
         if (case.get("expected") or {}).get("golden_status") == GOLDEN_UNAVAILABLE:
-            excluded.append({"case_id": cid, "reason": GOLDEN_UNAVAILABLE})
+            excluded_row = {"case_id": cid, "reason": GOLDEN_UNAVAILABLE}
+            if cid in structure_by_id:
+                excluded_row["contract_bindings_sha256"] = _canonical_sha(
+                    structure_by_id[cid])
+            excluded.append(excluded_row)
             continue
         call = case.get("aclnn_call")
         if not isinstance(call, dict):
@@ -238,6 +965,8 @@ def build_invocation_plan(caseset, manifest):
                 active_attrs.append(name)
             if role == "out":
                 active_outputs.append(name)
+        active_attr_contracts = _case_active_attr_contracts(
+            cid, slots, attr_by_name, case.get("attrs"))
         parameter_contract_sha, scalar_dtypes = (None, {})
         if manifest_multi is not None:
             parameter_contract_sha, scalar_dtypes = _validate_case_parameter_contract(
@@ -246,6 +975,8 @@ def build_invocation_plan(caseset, manifest):
             row for row in candidates
             if row.get("active_attrs") == active_attrs
             and row.get("active_outputs") == active_outputs
+            and (attr_contract is None
+                 or row.get("active_attr_contracts") == active_attr_contracts)
             and (manifest_multi is None
                  or row.get("host_scalar_dtypes") == scalar_dtypes)
         ]
@@ -263,6 +994,15 @@ def build_invocation_plan(caseset, manifest):
         if parameter_contract_sha is not None:
             plan_row["parameter_contract_sha256"] = parameter_contract_sha
             plan_row["host_scalar_dtypes"] = dict(variant.get("host_scalar_dtypes") or {})
+        if active_attr_contracts is not None:
+            plan_row["active_attr_contracts"] = active_attr_contracts
+        if cid in structure_by_id:
+            binding = structure_by_id[cid]
+            if not _layout_equal(case.get("contract_bindings"), binding,
+                                 f"{cid}.contract_bindings"):
+                raise CppExtensionAdapterError(
+                    f"{cid}: structure binding 与 caseset 重算 ledger 漂移")
+            plan_row["contract_bindings_sha256"] = _canonical_sha(binding)
         rows.append(plan_row)
     if not rows:
         raise CppExtensionAdapterError(
@@ -279,7 +1019,116 @@ def build_invocation_plan(caseset, manifest):
     }
     if multi_contract_sha is not None:
         plan["multi_input_contract_sha256"] = multi_contract_sha
+    if attr_contract is not None:
+        plan["attr_parameter_contract_sha256"] = _canonical_sha(attr_contract)
+    if layout_contract is not None:
+        plan["layout_ledger_sha256"] = layout_contract["sha256"]
+    if structure_contract is not None:
+        plan["tensor_shape_attr_bindings_sha256"] = structure_contract["bindings_sha256"]
+        if structure_contract["atomic_ledger_sha256"] is not None:
+            plan["atomic_attr_ledger_sha256"] = structure_contract["atomic_ledger_sha256"]
     return plan
+
+
+def _validate_runtime_layout_observation(observation, expected, role, where):
+    _layout_exact_keys(
+        observation, {"layout_receipt", "layout_receipt_sha256", "storage_data_ptr"}, where)
+    pointer = observation.get("storage_data_ptr")
+    if isinstance(pointer, bool) or not isinstance(pointer, int) or pointer <= 0:
+        raise CppExtensionAdapterError(f"{where}.storage_data_ptr 须为正整数")
+    digest = _layout_sha256(
+        observation.get("layout_receipt_sha256"), f"{where}.layout_receipt_sha256")
+    try:
+        normalized = tensor_shape_attrs.assert_layout_preserved(
+            expected["layout_receipt"], observation.get("layout_receipt"),
+            expected_shape=expected["layout_receipt"]["logical_shape"],
+            expected_role=role,
+            expected_case_id=expected["layout_receipt"]["case_id"],
+            expected_tensor_name=expected["name"],
+            expected_tensor_index=expected["tensor_index"],
+            expected_receipt_sha256=expected["layout_receipt_sha256"],
+            where=where,
+        )
+    except tensor_shape_attrs.TensorShapeAttrError as ex:
+        raise CppExtensionAdapterError(f"{where}: {ex}") from ex
+    actual_digest = tensor_shape_attrs.layout_receipt_sha256(
+        normalized, where=f"{where}.layout_receipt")
+    if digest != actual_digest or digest != expected["layout_receipt_sha256"]:
+        raise CppExtensionAdapterError(
+            f"{where}.layout_receipt_sha256 未绑定外部 expected receipt")
+    return {"layout_receipt": normalized,
+            "layout_receipt_sha256": digest,
+            "storage_data_ptr": pointer}
+
+
+def validate_layout_execution(caseset, execution):
+    """校验 driver 的 before/after 实测布局，身份只从 caseset 外部 ledger 取得。"""
+    contract = validate_caseset_layout_contract(caseset)
+    if contract is None:
+        if execution is not None:
+            raise CppExtensionAdapterError(
+                "legacy caseset 不得凭空携带 layout_execution")
+        return None
+    _layout_exact_keys(
+        execution, {"schema", "schema_version", "layout_ledger_sha256", "cases"},
+        "layout_execution")
+    if execution.get("schema") != LAYOUT_EXECUTION_SCHEMA \
+            or type(execution.get("schema_version")) is not int \
+            or execution.get("schema_version") != LAYOUT_EXECUTION_VERSION:
+        raise CppExtensionAdapterError(
+            f"layout_execution 须为 {LAYOUT_EXECUTION_SCHEMA} v{LAYOUT_EXECUTION_VERSION}")
+    if execution.get("layout_ledger_sha256") != contract["sha256"]:
+        raise CppExtensionAdapterError(
+            "layout_execution.layout_ledger_sha256 与 caseset 外部 ledger 漂移")
+    actual_cases = execution.get("cases")
+    if not isinstance(actual_cases, list) or len(actual_cases) != len(contract["cases"]):
+        raise CppExtensionAdapterError(
+            "layout_execution case 数与外部 layout ledger 不一致（缺实际布局证据）")
+    for case_index, (actual_case, expected_case) in enumerate(
+            zip(actual_cases, contract["cases"])):
+        where = f"layout_execution.cases[{case_index}]"
+        _layout_exact_keys(actual_case, {"case_id", "inputs", "outputs"}, where)
+        if actual_case.get("case_id") != expected_case["case_id"]:
+            raise CppExtensionAdapterError(
+                f"{where}.case_id 与外部 layout ledger 顺序/身份漂移")
+        for role_key, layout_role in (
+                ("inputs", tensor_shape_attrs.LAYOUT_ROLE_INPUT),
+                ("outputs", tensor_shape_attrs.LAYOUT_ROLE_OUTPUT)):
+            actual_items = actual_case.get(role_key)
+            expected_items = expected_case[role_key]
+            if not isinstance(actual_items, list) or len(actual_items) != len(expected_items):
+                raise CppExtensionAdapterError(
+                    f"{where}.{role_key} 数量与外部 layout ledger 不一致")
+            for item_index, (actual, expected) in enumerate(
+                    zip(actual_items, expected_items)):
+                item_where = f"{where}.{role_key}[{item_index}]"
+                _layout_exact_keys(actual, {
+                    "layout_requirement_id", "tensor_index", "name",
+                    "expected_layout_receipt_sha256", "before", "after",
+                }, item_where)
+                identity = {
+                    "layout_requirement_id": expected["requirement_id"],
+                    "tensor_index": expected["tensor_index"],
+                    "name": expected["name"],
+                    "expected_layout_receipt_sha256": expected["layout_receipt_sha256"],
+                }
+                if not _layout_equal(
+                        {key: actual.get(key) for key in identity}, identity,
+                        f"{item_where}.identity"):
+                    raise CppExtensionAdapterError(
+                        f"{item_where} requirement/slot/name/digest 与外部 ledger 漂移")
+                before = _validate_runtime_layout_observation(
+                    actual.get("before"), expected, layout_role, f"{item_where}.before")
+                after = _validate_runtime_layout_observation(
+                    actual.get("after"), expected, layout_role, f"{item_where}.after")
+                if before["storage_data_ptr"] != after["storage_data_ptr"]:
+                    raise CppExtensionAdapterError(
+                        f"{item_where} base storage ptr 调用前后漂移")
+                if content_address.canonical_json_bytes(before["layout_receipt"]) != \
+                        content_address.canonical_json_bytes(after["layout_receipt"]):
+                    raise CppExtensionAdapterError(
+                        f"{item_where} 调用前后物理布局漂移")
+    return execution
 
 
 _PREFLIGHT = "aclnn_preflight.json"
@@ -688,6 +1537,35 @@ def validate_receipt(work, caseset):
 
     _validate_tensor_format_receipt(manifest, receipt)
     _validate_multi_input_receipt(manifest, receipt)
+    layout_contract = validate_invocation_layout_contract(caseset, manifest, plan)
+    if layout_contract is None:
+        if "layout_ledger_sha256" in receipt or "layout_execution" in receipt:
+            raise CppExtensionAdapterError(
+                "legacy receipt 不得凭空声明 layout ledger/execution")
+    else:
+        if receipt.get("layout_ledger_sha256") != layout_contract["sha256"]:
+            raise CppExtensionAdapterError(
+                "receipt.layout_ledger_sha256 与 caseset 外部 ledger 漂移")
+        validate_layout_execution(caseset, receipt.get("layout_execution"))
+    structure_contract = validate_invocation_tensor_shape_attr_contract(caseset, plan)
+    if structure_contract is None:
+        if ("tensor_shape_attr_bindings_sha256" in receipt
+                or "atomic_attr_ledger_sha256" in receipt):
+            raise CppExtensionAdapterError(
+                "legacy receipt 不得凭空声明 tensor shape/attr binding")
+    else:
+        if receipt.get("tensor_shape_attr_bindings_sha256") \
+                != structure_contract["bindings_sha256"]:
+            raise CppExtensionAdapterError(
+                "receipt.tensor_shape_attr_bindings_sha256 与 caseset 漂移")
+        atomic_sha = structure_contract["atomic_ledger_sha256"]
+        if atomic_sha is None:
+            if "atomic_attr_ledger_sha256" in receipt:
+                raise CppExtensionAdapterError(
+                    "cyclic-only receipt 不得凭空声明 atomic_attr_ledger_sha256")
+        elif receipt.get("atomic_attr_ledger_sha256") != atomic_sha:
+            raise CppExtensionAdapterError(
+                "receipt.atomic_attr_ledger_sha256 与 caseset 漂移")
 
     for key, rec in (manifest.get("files") or {}).items():
         if not isinstance(rec, dict):
@@ -799,6 +1677,83 @@ def _bind_multi_input_evidence(caseset, evidence, receipt):
     return evidence
 
 
+def _bind_layout_evidence(caseset, evidence, receipt):
+    """把已校过的实际 input/output before/after 布局原样镜像到 evidence。"""
+    contract = validate_caseset_layout_contract(caseset)
+    if contract is None:
+        if isinstance(receipt, dict) and (
+                "layout_ledger_sha256" in receipt or "layout_execution" in receipt):
+            raise CppExtensionAdapterError(
+                "legacy evidence 不得绑定凭空出现的 layout receipt")
+        return evidence
+    if not isinstance(receipt, dict) \
+            or receipt.get("layout_ledger_sha256") != contract["sha256"]:
+        raise CppExtensionAdapterError(
+            "layout evidence 缺 receipt.layout_ledger_sha256 外部锚")
+    execution = receipt.get("layout_execution")
+    validate_layout_execution(caseset, execution)
+    observations = {row["case_id"]: row for row in execution["cases"]}
+    evidence_by_id = {
+        row.get("case_id"): row for row in evidence if isinstance(row, dict)
+    }
+    for case in contract["cases"]:
+        cid = case["case_id"]
+        row = evidence_by_id.get(cid)
+        if not isinstance(row, dict):
+            raise CppExtensionAdapterError(
+                f"layout evidence 缺 layout-enabled case {cid!r}")
+        row["layout_ledger_sha256"] = contract["sha256"]
+        row["layout_observations"] = observations[cid]
+    return evidence
+
+
+def _bind_tensor_shape_attr_evidence(caseset, evidence, receipt):
+    """把 atomic/cyclic case binding 与顶层 ledger 摘要原样镜像进 evidence。"""
+    contract = validate_caseset_tensor_shape_attr_contract(caseset)
+    reserved = {
+        "tensor_shape_attr_bindings_sha256", "atomic_attr_ledger_sha256",
+        "contract_bindings", "contract_bindings_sha256",
+    }
+    if contract is None:
+        if isinstance(receipt, dict) and set(receipt) & {
+                "tensor_shape_attr_bindings_sha256", "atomic_attr_ledger_sha256"}:
+            raise CppExtensionAdapterError(
+                "legacy receipt 不得绑定 tensor shape/attr ledger")
+        for row in evidence:
+            if isinstance(row, dict) and set(row) & reserved:
+                raise CppExtensionAdapterError(
+                    f"{row.get('case_id')}: legacy evidence 凭空声明 structure binding")
+        return evidence
+    if not isinstance(receipt, dict) \
+            or receipt.get("tensor_shape_attr_bindings_sha256") \
+            != contract["bindings_sha256"]:
+        raise CppExtensionAdapterError(
+            "structure evidence 缺 receipt.tensor_shape_attr_bindings_sha256")
+    atomic_sha = contract["atomic_ledger_sha256"]
+    if atomic_sha is not None and receipt.get("atomic_attr_ledger_sha256") != atomic_sha:
+        raise CppExtensionAdapterError(
+            "structure evidence 缺 receipt.atomic_attr_ledger_sha256")
+    binding_by_id = {row["case_id"]: row["contract_bindings"]
+                     for row in contract["bindings"]["cases"]}
+    evidence_by_id = {row.get("case_id"): row for row in evidence
+                      if isinstance(row, dict)}
+    for cid, binding in binding_by_id.items():
+        row = evidence_by_id.get(cid)
+        if not isinstance(row, dict):
+            raise CppExtensionAdapterError(
+                f"structure evidence 缺 case {cid!r}")
+        row["tensor_shape_attr_bindings_sha256"] = contract["bindings_sha256"]
+        if atomic_sha is not None:
+            row["atomic_attr_ledger_sha256"] = atomic_sha
+        row["contract_bindings"] = binding
+        row["contract_bindings_sha256"] = _canonical_sha(binding)
+    for cid, row in evidence_by_id.items():
+        if cid not in binding_by_id and set(row) & reserved:
+            raise CppExtensionAdapterError(
+                f"{cid}: 非 structure case 不得冒领 structure evidence")
+    return evidence
+
+
 def _driver_argv():
     raw = os.environ.get("OPRUNWAY_CPP_EXTENSION_DRIVER_JSON")
     if not raw:
@@ -837,6 +1792,8 @@ def run_cpp_extension(caseset, work, defect_cases=None):
     evidence = RA.build_multi_output_evidence(
         caseset, work, os.path.join(work, _OUT))
     _bind_multi_input_evidence(caseset, evidence, receipt)
+    _bind_tensor_shape_attr_evidence(caseset, evidence, receipt)
+    _bind_layout_evidence(caseset, evidence, receipt)
     perf_plan, skipped = _write_perf_plan(caseset, work, evidence, receipt)
     perf_collection = None
     if perf_plan is not None:
@@ -855,6 +1812,8 @@ def run_cpp_extension(caseset, work, defect_cases=None):
         evidence = RA.build_multi_output_evidence(
             caseset, work, os.path.join(work, _OUT), perf_by_case=perf_by_case)
         _bind_multi_input_evidence(caseset, evidence, receipt)
+        _bind_tensor_shape_attr_evidence(caseset, evidence, receipt)
+        _bind_layout_evidence(caseset, evidence, receipt)
         if not perf_mode.is_measure_only(perf_plan.get("mode", perf_mode.DEFAULT_MODE)):
             baseline = PM.build_baseline_document(
                 records, op=caseset.get("op"),
@@ -930,6 +1889,8 @@ def run_cpp_extension_precision_only(caseset, work):
     evidence = RA.build_multi_output_evidence(
         caseset, root, os.path.join(root, _OUT))
     _bind_multi_input_evidence(caseset, evidence, receipt)
+    _bind_tensor_shape_attr_evidence(caseset, evidence, receipt)
+    _bind_layout_evidence(caseset, evidence, receipt)
     digest = _canonical_sha(receipt)
     for row in evidence:
         row["cpp_extension_receipt_sha256"] = digest

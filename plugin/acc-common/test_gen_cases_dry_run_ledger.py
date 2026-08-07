@@ -46,7 +46,8 @@ class DryRunLedgerTest(unittest.TestCase):
         self.assertEqual(len(first["planner_binding"]["gen_cases_py_sha256"]), 64)
         self.assertEqual(
             set(first["planner_binding"]["logic_files"]),
-            {"gen_cases.py", "repo_adapter.py", "precision_policy.py"})
+            {"gen_cases.py", "repo_adapter.py", "precision_policy.py",
+             "tensor_shape_attrs.py"})
         self.assertRegex(first["ledger_digest"], r"^[0-9a-f]{64}$")
         self.assertEqual(first["golden_dependency"]["status"], "missing")
         changed = copy.deepcopy(spec)

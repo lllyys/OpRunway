@@ -1907,7 +1907,7 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
             "生成循环与记账已经漂了，绝不放行")
     # 覆盖组合统计只属于常规矩阵；特殊场景是独立叠加，未来即使重开也不能混入这份矩阵账。
     distinct_combinations, duplicate_cases = _torch_parity_combination_stats(regular_entries)
-    return entries, {
+    meta = {
         "pool_max": expected,
         "requested_target": expected,
         "emitted": total_emitted,
@@ -1989,6 +1989,7 @@ def _torch_parity_plan(spec, in_params, dtypes, attrs_default, case_target, cost
                 "有价值但不得按『不同组合』计数）；distinct_combinations 才是不同覆盖组合数。"),
         },
     }
+    return entries, meta
 
 
 # ============================ value_profile 受控数值生成（借参考仓 generate_array，op-中立）=========
@@ -2399,6 +2400,324 @@ def _resolve_multi_input_contract(spec):
     return bundle
 
 
+_TENSOR_SHAPE_ATTRS_SCHEMA_VERSION = 1
+_TENSOR_SHAPE_ATTRS_KEYS = frozenset({
+    "schema_version", "atomic_attr_rows", "cyclic_indices", "layout_requirements",
+})
+
+
+def _tensor_shape_attrs_base_spec_sha256(spec):
+    """计算 N7 结构声明的外部 spec 锚。
+
+    整个 ``tensor_shape_attrs`` 从输入副本移除后再做 canonical sha256，从而避免
+    ``source_binding.spec_sha256`` 把自己包进摘要形成自引用。任何算子名、参数、精度或
+    multi-input 事实漂移仍会改变该锚。
+    """
+    base = json.loads(json.dumps(spec, ensure_ascii=False, allow_nan=False))
+    base.pop("tensor_shape_attrs", None)
+    return hashlib.sha256(content_address.canonical_json_bytes(base)).hexdigest()
+
+
+def _resolve_tensor_shape_attr_plan(spec):
+    """解析 N7 结构契约；整块缺席时返回零增量计划，不改 legacy 产物。"""
+    raw = spec.get("tensor_shape_attrs")
+    empty = {"atomic_contract": None, "atomic_attr_names": (),
+             "cyclic_indices": (), "layout_requirements": ()}
+    if raw is None:
+        return empty
+    if not isinstance(raw, dict):
+        raise ValueError("spec.tensor_shape_attrs 须为 object")
+    unknown = set(raw) - _TENSOR_SHAPE_ATTRS_KEYS
+    if unknown:
+        raise ValueError(f"spec.tensor_shape_attrs 含未知字段 {sorted(unknown)}")
+    if type(raw.get("schema_version")) is not int \
+            or raw["schema_version"] != _TENSOR_SHAPE_ATTRS_SCHEMA_VERSION:
+        raise ValueError(
+            f"spec.tensor_shape_attrs.schema_version 须为整数 "
+            f"{_TENSOR_SHAPE_ATTRS_SCHEMA_VERSION}")
+    if not any(key in raw for key in (
+            "atomic_attr_rows", "cyclic_indices", "layout_requirements")):
+        raise ValueError("spec.tensor_shape_attrs 至少须声明一项结构能力")
+
+    params = spec.get("params")
+    if not isinstance(params, list):
+        raise ValueError("spec.params 须为列表")
+    attr_params = {p.get("name"): p for p in params
+                   if isinstance(p, dict) and p.get("io") == "attr"}
+    input_names = {p.get("name") for p in params
+                   if isinstance(p, dict) and p.get("io") == "in"}
+
+    contract = None
+    attr_names = ()
+    atomic = raw.get("atomic_attr_rows")
+    if atomic is not None:
+        if not isinstance(atomic, dict) or set(atomic) != {
+                "attr_names", "expected_sha256", "source_binding",
+                "constraint_groups", "rows"}:
+            raise ValueError(
+                "tensor_shape_attrs.atomic_attr_rows 须恰含 attr_names/expected_sha256/"
+                "source_binding/constraint_groups/rows")
+        names = atomic["attr_names"]
+        if (not isinstance(names, list) or not names
+                or len(names) != len(set(names))
+                or any(not isinstance(name, str) or not name for name in names)):
+            raise ValueError("atomic_attr_rows.attr_names 须为非空、无重复的属性名列表")
+        missing = set(names) - set(attr_params)
+        if missing:
+            raise ValueError(f"atomic_attr_rows.attr_names 引用了未声明 attr {sorted(missing)}")
+        attr_types = {}
+        for name in names:
+            param = attr_params[name]
+            if "attr_type" not in param:
+                raise ValueError(
+                    f"atomic attr {name!r} 必须在 params[] 显式声明 attr_type，禁止据值猜")
+            attr_types[name] = param["attr_type"]
+        binding = atomic["source_binding"]
+        if not isinstance(binding, dict):
+            raise ValueError("atomic_attr_rows.source_binding 须为 object")
+        base_sha = _tensor_shape_attrs_base_spec_sha256(spec)
+        if binding.get("spec_sha256") != base_sha:
+            raise ValueError(
+                "atomic_attr_rows.source_binding.spec_sha256 与移除 tensor_shape_attrs 后的"
+                f" staged spec 不一致：declared={binding.get('spec_sha256')!r} actual={base_sha!r}")
+        contract = TSA.normalize_atomic_attr_rows(
+            atomic["rows"], attr_types=attr_types,
+            constraint_groups=atomic["constraint_groups"],
+            source_binding=binding,
+            where="spec.tensor_shape_attrs.atomic_attr_rows.rows")
+        if contract["sha256"] != atomic["expected_sha256"]:
+            raise ValueError(
+                f"atomic_attr_rows 重算摘要 {contract['sha256']!r} ≠ "
+                f"外部冻结 expected_sha256={atomic['expected_sha256']!r}")
+        # 从外部字段再走一次唯一验证入口，不只信 normalize 的自报 sha。
+        contract = TSA.validate_atomic_attr_contract(
+            contract, expected_sha256=atomic["expected_sha256"],
+            where="spec.tensor_shape_attrs.atomic_attr_rows.contract")
+        attr_names = tuple(names)
+
+    cyclic_rows = raw.get("cyclic_indices", [])
+    if not isinstance(cyclic_rows, list):
+        raise ValueError("tensor_shape_attrs.cyclic_indices 须为列表")
+    cyclic = []
+    seen_cyclic = set()
+    for idx, item in enumerate(cyclic_rows):
+        where = f"tensor_shape_attrs.cyclic_indices[{idx}]"
+        if not isinstance(item, dict) or set(item) != {
+                "attr", "rank_from_input", "duplicate_policy"}:
+            raise ValueError(
+                f"{where} 须恰含 attr/rank_from_input/duplicate_policy")
+        name, input_name = item["attr"], item["rank_from_input"]
+        if name in seen_cyclic:
+            raise ValueError(f"{where}.attr={name!r} 重复声明")
+        seen_cyclic.add(name)
+        if name not in attr_params:
+            raise ValueError(f"{where}.attr={name!r} 未声明")
+        if attr_params[name].get("attr_type") != TSA.ATTR_INT_ARRAY:
+            raise ValueError(f"{where}.attr={name!r} 必须显式 attr_type='int_array'")
+        if input_name not in input_names:
+            raise ValueError(f"{where}.rank_from_input={input_name!r} 不是具名输入参数")
+        if item["duplicate_policy"] not in TSA.CYCLIC_DUPLICATE_POLICIES:
+            raise ValueError(
+                f"{where}.duplicate_policy={item['duplicate_policy']!r} 非受控值")
+        cyclic.append(dict(item))
+
+    layout_rows = raw.get("layout_requirements", [])
+    if not isinstance(layout_rows, list):
+        raise ValueError("tensor_shape_attrs.layout_requirements 须为列表")
+    layouts = []
+    seen_layout_ids = set()
+    seen_layout_slots = set()
+    for idx, item in enumerate(layout_rows):
+        where = f"tensor_shape_attrs.layout_requirements[{idx}]"
+        if not isinstance(item, dict) or set(item) != {
+                "id", "role", "tensor_name", "layout_kind", "selector"}:
+            raise ValueError(
+                f"{where} 须恰含 id/role/tensor_name/layout_kind/selector")
+        requirement_id = item["id"]
+        if not isinstance(requirement_id, str) or not requirement_id or requirement_id in seen_layout_ids:
+            raise ValueError(f"{where}.id 须为非空且唯一的字符串")
+        seen_layout_ids.add(requirement_id)
+        role = item["role"]
+        expected_io = "in" if role == TSA.LAYOUT_ROLE_INPUT else "out"
+        if role not in TSA.LAYOUT_ROLES:
+            raise ValueError(f"{where}.role={role!r} 非受控值")
+        tensor_name = item["tensor_name"]
+        matches = [p for p in params if isinstance(p, dict)
+                   and p.get("io") == expected_io and p.get("name") == tensor_name]
+        if len(matches) != 1:
+            raise ValueError(
+                f"{where}.tensor_name={tensor_name!r} 未唯一绑定 role={role!r} 的 spec 参数")
+        if matches[0].get("format") != TSA.TENSOR_FORMAT_ND:
+            raise ValueError(
+                f"{where} 布局 v1 只支持显式 format='nd'，spec 参数 "
+                f"{tensor_name!r} 得 {matches[0].get('format')!r}")
+        slot_key = (role, tensor_name)
+        if slot_key in seen_layout_slots:
+            raise ValueError(
+                f"{where} 与前项重复约束 slot={slot_key}；v1 每个 tensor slot 只允许一条布局要求")
+        seen_layout_slots.add(slot_key)
+        if item["layout_kind"] not in TSA.LAYOUT_KINDS:
+            raise ValueError(f"{where}.layout_kind={item['layout_kind']!r} 非受控值")
+        selector = item["selector"]
+        if not isinstance(selector, dict) or selector.get("kind") not in {
+                "first_eligible", "profile_id"}:
+            raise ValueError(f"{where}.selector.kind 须为 first_eligible/profile_id")
+        expected_selector_keys = ({"kind"} if selector["kind"] == "first_eligible"
+                                  else {"kind", "profile_id"})
+        if set(selector) != expected_selector_keys:
+            raise ValueError(
+                f"{where}.selector 键集须恰为 {sorted(expected_selector_keys)}")
+        if selector["kind"] == "profile_id" and (
+                not isinstance(selector["profile_id"], str) or not selector["profile_id"]):
+            raise ValueError(f"{where}.selector.profile_id 须为非空字符串")
+        layouts.append({
+            "id": requirement_id, "role": role, "tensor_name": tensor_name,
+            "layout_kind": item["layout_kind"], "selector": dict(selector),
+        })
+    return {"atomic_contract": contract, "atomic_attr_names": attr_names,
+            "cyclic_indices": tuple(cyclic), "layout_requirements": tuple(layouts)}
+
+
+class _LayoutRequirementTracker:
+    """按 deterministic case 顺序为每条 spec 布局要求选一个见证，完成时强制全覆盖。"""
+
+    def __init__(self, requirements):
+        self.requirements = [json.loads(json.dumps(row, ensure_ascii=False))
+                             for row in requirements]
+        self._claimed = set()
+        self._claims = []
+
+    @staticmethod
+    def _profile_id(entry):
+        profile = entry.get("input_profile")
+        return profile.get("profile_id") if isinstance(profile, dict) else None
+
+    def _selector_matches(self, requirement, entry):
+        selector = requirement["selector"]
+        return (selector["kind"] == "first_eligible"
+                or self._profile_id(entry) == selector["profile_id"])
+
+    def claim(self, *, role, case_id, entry, tensor_name, tensor_index,
+              shape, tensor_format):
+        for requirement in self.requirements:
+            if requirement["id"] in self._claimed:
+                continue
+            if requirement["role"] != role or requirement["tensor_name"] != tensor_name:
+                continue
+            if not self._selector_matches(requirement, entry):
+                continue
+            selector_kind = requirement["selector"]["kind"]
+            if tensor_format != TSA.TENSOR_FORMAT_ND:
+                if selector_kind == "first_eligible":
+                    continue
+                raise ValueError(
+                    f"layout requirement {requirement['id']!r} 选中 format={tensor_format!r}，"
+                    "v1 只支持 nd")
+            try:
+                declaration = TSA.derive_layout_declaration(
+                    shape, layout_kind=requirement["layout_kind"], role=role,
+                    case_id=case_id, tensor_name=tensor_name,
+                    tensor_index=tensor_index,
+                    where=f"layout_requirement[{requirement['id']!r}]")
+            except TSA.TensorShapeAttrError as ex:
+                if selector_kind == "first_eligible" and "unsupported_layout" in str(ex):
+                    continue
+                raise
+            receipt = TSA.make_layout_receipt(
+                declaration, expected_shape=shape, expected_role=role,
+                expected_case_id=case_id, expected_tensor_name=tensor_name,
+                expected_tensor_index=tensor_index,
+                where=f"layout_requirement[{requirement['id']!r}].receipt")
+            digest = TSA.layout_receipt_sha256(receipt)
+            self._claimed.add(requirement["id"])
+            self._claims.append({
+                "requirement_id": requirement["id"], "role": role,
+                "case_id": case_id, "tensor_name": tensor_name,
+                "tensor_index": tensor_index, "layout_receipt_sha256": digest,
+            })
+            return {"requirement_id": requirement["id"],
+                    "layout_receipt": receipt,
+                    "layout_receipt_sha256": digest}
+        return None
+
+    def finish(self):
+        if not self.requirements:
+            return None, None
+        missing = sorted(row["id"] for row in self.requirements
+                         if row["id"] not in self._claimed)
+        if missing:
+            raise ValueError(
+                f"layout requirements 未找到合法见证 {missing}；不得以连续/rank0/empty 冒充布局覆盖")
+        cases = {}
+        for claim in self._claims:
+            row = cases.setdefault(claim["case_id"], {
+                "case_id": claim["case_id"], "inputs": [], "outputs": []})
+            key = "inputs" if claim["role"] == TSA.LAYOUT_ROLE_INPUT else "outputs"
+            row[key].append({
+                "requirement_id": claim["requirement_id"],
+                "tensor_index": claim["tensor_index"],
+                "name": claim["tensor_name"],
+                "layout_receipt_sha256": claim["layout_receipt_sha256"],
+            })
+        for row in cases.values():
+            row["inputs"].sort(key=lambda item: item["tensor_index"])
+            row["outputs"].sort(key=lambda item: item["tensor_index"])
+        ledger = {
+            "schema": "oprunway.tensor_layout_ledger",
+            "schema_version": 1,
+            "cases": list(cases.values()),
+        }
+        digest = hashlib.sha256(content_address.canonical_json_bytes(ledger)).hexdigest()
+        return ledger, digest
+
+
+def _claim_input_layout_bindings(tracker, *, case_id, entry, inputs,
+                                 in_params, tensor_contracts=None):
+    if tracker is None or not tracker.requirements:
+        return {}
+    bindings = {}
+    for index, logical in enumerate(inputs):
+        tensor_format = (tensor_contracts[index]["format"]
+                         if tensor_contracts is not None
+                         else in_params[index].get("format"))
+        binding = tracker.claim(
+            role=TSA.LAYOUT_ROLE_INPUT, case_id=case_id, entry=entry,
+            tensor_name=in_params[index]["name"], tensor_index=index,
+            shape=tuple(np.asarray(logical).shape), tensor_format=tensor_format)
+        if binding is not None:
+            bindings[index] = binding
+    return bindings
+
+
+def _claim_output_layout(tracker, *, spec, case_id, entry, output_name,
+                         output_index, output_shape, input_profile=None):
+    if tracker is None or not tracker.requirements:
+        return None
+    if input_profile is not None:
+        profile_output = input_profile.get("output")
+        tensor_format = (profile_output.get("format")
+                         if isinstance(profile_output, dict)
+                         and profile_output.get("name") == output_name else None)
+    else:
+        matches = [param for param in spec.get("params", [])
+                   if param.get("io") == "out" and param.get("name") == output_name]
+        tensor_format = matches[0].get("format") if len(matches) == 1 else None
+    return tracker.claim(
+        role=TSA.LAYOUT_ROLE_OUTPUT, case_id=case_id, entry=entry,
+        tensor_name=output_name, tensor_index=output_index,
+        shape=tuple(output_shape), tensor_format=tensor_format)
+
+
+def _attach_output_layout(expected, binding):
+    if binding is not None:
+        expected.update({
+            "layout_requirement_id": binding["requirement_id"],
+            "layout_receipt": binding["layout_receipt"],
+            "layout_receipt_sha256": binding["layout_receipt_sha256"],
+        })
+    return expected
+
+
 def _profile_tensor_inputs(profile):
     return [item for item in profile["inputs"] if item["kind"] == "tensor"]
 
@@ -2764,6 +3083,19 @@ def _check_attr_value(v, where):
         raise ValueError(f"{where}={v!r} 非法（attr 值须为 bool/int/float/str 标量，或 list[int]）")
 
 
+def _check_param_attr_value(param, value, where):
+    """按 param 的显式 ``attr_type`` 校属性值；字段缺席时完全沿用 legacy 判据。
+
+    ``[]`` 没有足够信息让引擎猜它是 ``aclIntArray`` 还是写坏的标量，
+    因此只有 ``attr_type='int_array'`` 能放行空数组；未声明的旧 spec 继续按原规则拒绝。
+    """
+    if "attr_type" not in param:
+        _check_attr_value(value, where)
+        return list(value) if isinstance(value, list) else value
+    return TSA.normalize_attr_value(
+        value, attr_type=param["attr_type"], where=where)
+
+
 def _attr_hashable(v):
     """attr 值 → 可哈希键（`list` → `tuple`；标量原样）。仅供 combo 索引 `_akey` 用，不改落盘的值。"""
     return tuple(v) if isinstance(v, list) else v
@@ -2775,13 +3107,15 @@ def _copy_attrs(a):
     return {k: (list(v) if isinstance(v, list) else v) for k, v in a.items()}
 
 
-def _attr_value_sets(spec, attrs_default, *, exclude_host_scalar=False):
+def _attr_value_sets(spec, attrs_default, *, exclude_host_scalar=False,
+                     exclude_names=frozenset()):
     """§1.3：每 attr 的取值集——布尔→[F,T]、枚举→全值、标量→等价类代表（默认值）。
     有 attr_matrix 时用它给的取值集（每 key 的并集，保序）；否则据 attr dtype/默认派生。
     返回 [(name, [values])]，供笛卡尔展开（attr 作真正交轴，评审 #12）。"""
     attr_params = [
         p for p in spec["params"] if p["io"] == "attr"
         and not (exclude_host_scalar and p.get("binding") == "host_scalar")
+        and p.get("name") not in exclude_names
     ]
     matrix = spec.get("attr_matrix")
     # finding #12（§1 重写勿丢）：attr_matrix 每项须为 dict、key ⊆ spec io=='attr' 名集、值受类型闸约束——
@@ -2789,6 +3123,7 @@ def _attr_value_sets(spec, attrs_default, *, exclude_host_scalar=False):
     # C2：值类型闸从「只许标量」放开到「标量 或 list[int]」，判定统一走 _check_attr_value。
     if matrix:
         attr_names = {p["name"] for p in attr_params}
+        attr_by_name = {p["name"]: p for p in attr_params}
         for k_idx, variant in enumerate(matrix):
             if not isinstance(variant, dict):
                 raise ValueError(f"attr_matrix[{k_idx}] 须为 attr 字典，得 {type(variant).__name__}")
@@ -2797,7 +3132,8 @@ def _attr_value_sets(spec, attrs_default, *, exclude_host_scalar=False):
                 raise ValueError(f"attr_matrix[{k_idx}] 含未知 attr key {sorted(unknown)}"
                                  f"（须 ⊆ spec io=='attr' 名集 {sorted(attr_names)}，防伪造覆盖）")
             for k, v in variant.items():
-                _check_attr_value(v, f"attr_matrix[{k_idx}].{k}")
+                _check_param_attr_value(
+                    attr_by_name[k], v, f"attr_matrix[{k_idx}].{k}")
     out = []
     for p in attr_params:
         name = p["name"]
@@ -2816,8 +3152,8 @@ def _attr_value_sets(spec, attrs_default, *, exclude_host_scalar=False):
         # 直到真机造 manifest 才炸——正是本文件声称已堵住的那条「本机过、真机炸」。
         # ⚠ 只对 list 值行使：标量与 `None`（未定哨兵）的既有语义**一字不动**，避免误伤现存 spec。
         for v in vals:
-            if isinstance(v, list):
-                _check_attr_value(v, f"params[attr={name}].default")
+            if "attr_type" in p or isinstance(v, list):
+                _check_param_attr_value(p, v, f"params[attr={name}].default")
         out.append((name, vals))
     return out
 
@@ -2829,6 +3165,94 @@ def _attr_combos(attr_sets, attrs_default):
     for name, vals in attr_sets:
         combos = [_copy_attrs({**c, name: v}) for c in combos for v in vals]
     return combos
+
+
+def _planned_attr_combinations(spec, attrs_default, *, exclude_host_scalar=False):
+    """产生 independent attrs(Q) × atomic rows(A)，atomic 列永远不拆开重做笛卡尔积。"""
+    structure = _resolve_tensor_shape_attr_plan(spec)
+    atomic_names = frozenset(structure["atomic_attr_names"])
+    independent_sets = _attr_value_sets(
+        spec, attrs_default, exclude_host_scalar=exclude_host_scalar,
+        exclude_names=atomic_names)
+    independent = _attr_combos(independent_sets, attrs_default)
+    independent_names = [name for name, _values in independent_sets]
+    q_bindings = []
+    for q_idx, attrs in enumerate(independent):
+        q_attrs = {name: (list(attrs[name]) if isinstance(attrs[name], list) else attrs[name])
+                   for name in independent_names}
+        q_bindings.append({
+            "q_id": f"q{q_idx:04d}",
+            "q_sha256": hashlib.sha256(
+                content_address.canonical_json_bytes(q_attrs)).hexdigest(),
+            "attrs": q_attrs,
+        })
+    contract = structure["atomic_contract"]
+    if contract is None:
+        return ([{"attrs": attrs, "atomic_binding": None,
+                  "independent_binding": q_bindings[idx]}
+                 for idx, attrs in enumerate(independent)], independent_sets, structure,
+                {"atomic_rows": 1, "independent_combinations": len(independent)})
+    records = []
+    for row in contract["rows"]:
+        for q_idx, attrs in enumerate(independent):
+            merged = _copy_attrs(attrs)
+            merged.update(_copy_attrs(row["attrs"]))
+            binding = TSA.bind_atomic_attr_row(
+                contract, row["id"],
+                {name: merged[name] for name in structure["atomic_attr_names"]},
+                expected_contract_sha256=contract["sha256"],
+                where=f"attr_plan.atomic_row[{row['id']!r}]")
+            records.append({"attrs": merged, "atomic_binding": binding,
+                            "independent_binding": q_bindings[q_idx]})
+    return (records, independent_sets, structure,
+            {"atomic_rows": len(contract["rows"]),
+             "independent_combinations": len(independent)})
+
+
+def _entry_named_input_shape(entry, in_params, input_name):
+    """取 cyclic rank 的唯一入口：严格按具名输入，绝不猜首输入/输出。"""
+    profile = entry.get("input_profile")
+    if profile is not None:
+        matches = [item for item in profile["inputs"]
+                   if item.get("kind") == "tensor" and item.get("name") == input_name]
+        if len(matches) != 1:
+            raise ValueError(
+                f"entry profile={profile.get('profile_id')!r} 未唯一绑定输入 {input_name!r}")
+        tensor_inputs = [item for item in profile["inputs"] if item.get("kind") == "tensor"]
+        return tuple(matches[0]["shape"]), tensor_inputs.index(matches[0])
+    names = [param.get("name") for param in in_params]
+    if input_name not in names:
+        raise ValueError(f"entry 未找到具名输入 {input_name!r}")
+    shapes = _entry_in_shapes(entry["shape"], len(in_params))
+    input_index = names.index(input_name)
+    return tuple(shapes[input_index]), input_index
+
+
+def _apply_entry_cyclic_bindings(entry, in_params, structure, *, where):
+    if not structure["cyclic_indices"]:
+        return entry
+    bindings = entry.setdefault("contract_bindings", {})
+    cyclic = bindings.setdefault("cyclic_indices", {})
+    for declaration in structure["cyclic_indices"]:
+        name = declaration["attr"]
+        if name not in entry["attrs"]:
+            raise ValueError(f"{where}.attrs 缺 cyclic attr {name!r}")
+        shape, input_index = _entry_named_input_shape(
+            entry, in_params, declaration["rank_from_input"])
+        receipt = TSA.normalize_cyclic_indices(
+            entry["attrs"][name], len(shape),
+            duplicate_policy=declaration["duplicate_policy"],
+            where=f"{where}.attrs.{name}")
+        shape_receipt = TSA.make_shape_receipt(shape)
+        receipt["input"] = {
+            "name": declaration["rank_from_input"],
+            "index": input_index,
+            "shape": list(shape),
+            "shape_receipt_sha256": hashlib.sha256(
+                content_address.canonical_json_bytes(shape_receipt)).hexdigest(),
+        }
+        cyclic[name] = receipt
+    return entry
 
 
 # ================================================= C3 · input_rank 约束 =========
@@ -3322,21 +3746,23 @@ def _require_case_target(spec):
 def _multi_input_profile_plan(spec, bundle, attrs_default, case_target):
     """N6 完整 profile×primitive-attr 笛卡尔；不抽样、不改写逐输入 shape/dtype/format。"""
     perf_mode.normalize_change_kind(spec)
-    attr_sets = _attr_value_sets(spec, attrs_default, exclude_host_scalar=True)
-    attr_combos = _attr_combos(attr_sets, attrs_default)
+    attr_records, attr_sets, structure, attr_axes = _planned_attr_combinations(
+        spec, attrs_default, exclude_host_scalar=True)
+    in_params = [p for p in spec["params"] if p.get("io") == "in"]
     entries = []
     for profile in bundle["profiles"]:
         scalar_attrs = {
             item["name"]: item["value"] for item in profile["inputs"]
             if item["kind"] == "scalar"
         }
-        for attr_idx, primitive_attrs in enumerate(attr_combos):
+        for attr_idx, attr_record in enumerate(attr_records):
+            primitive_attrs = attr_record["attrs"]
             overlap = sorted(set(scalar_attrs) & set(primitive_attrs))
             if overlap:
                 raise ValueError(
                     f"profile {profile['profile_id']!r} host scalar 与 primitive attr 重名 {overlap}")
             attrs = {**_copy_attrs(primitive_attrs), **scalar_attrs}
-            entries.append({
+            entry = {
                 "dims": ["功能", "精度", "性能"],
                 # legacy 代码仍要求 entry.shape/dtype；这两个兼容字段取**输出**契约，
                 # 真输入逐项只读 `input_profile`，绝不再用它们反向同化输入。
@@ -3346,16 +3772,27 @@ def _multi_input_profile_plan(spec, bundle, attrs_default, case_target):
                 "data_kind": "varied:uniform",
                 "id_kind": "input_profile",
                 "attrs": attrs,
-                "attr_idx": attr_idx if len(attr_combos) > 1 else None,
+                "attr_idx": attr_idx if len(attr_records) > 1 else None,
                 "case_origin": f"multi_input_profile:{profile['profile_id']}",
                 "rule_ref": "multi_input_contract.v1（任务书权威 profile×完整 attr 笛卡尔）",
                 "input_profile": profile,
-            })
-    expected = len(bundle["profiles"]) * len(attr_combos)
+            }
+            if attr_record["atomic_binding"] is not None:
+                entry["contract_bindings"] = {
+                    "atomic_attr_row": json.loads(json.dumps(
+                        attr_record["atomic_binding"], ensure_ascii=False)),
+                    "independent_attr_combination": json.loads(json.dumps(
+                        attr_record["independent_binding"], ensure_ascii=False)),
+                }
+            _apply_entry_cyclic_bindings(
+                entry, in_params, structure,
+                where=f"multi_input_profile[{profile['profile_id']}].attrs[{attr_idx}]")
+            entries.append(entry)
+    expected = len(bundle["profiles"]) * len(attr_records)
     if int(case_target) != expected:
         raise ValueError(
             f"multi_input_contract 完整矩阵 = {len(bundle['profiles'])} profiles × "
-            f"{len(attr_combos)} attrs = {expected}，precision.case_target={case_target}；"
+            f"{len(attr_records)} attrs = {expected}，precision.case_target={case_target}；"
             "必须逐字相等，禁止抽样/截断")
     # profile 是任务书显式 materialization：超预算不允许缩 shape（缩了就不是那条 case）。
     budget = _cost_budget(spec)
@@ -3372,7 +3809,7 @@ def _multi_input_profile_plan(spec, bundle, attrs_default, case_target):
             "显式 profile 不得静默降规模，请修任务书映射或显式提高预算")
 
     def count_cases(predicate):
-        return sum(bool(predicate(profile)) for profile in bundle["profiles"]) * len(attr_combos)
+        return sum(bool(predicate(profile)) for profile in bundle["profiles"]) * len(attr_records)
 
     case_coverage = {
         "cases": len(entries),
@@ -3387,7 +3824,7 @@ def _multi_input_profile_plan(spec, bundle, attrs_default, case_target):
     }
     op_class = _operator_class(spec)
     case_profile = _case_profile(spec)
-    return entries, {
+    meta = {
         "pool_max": len(entries),
         "requested_target": int(case_target),
         "emitted": len(entries),
@@ -3411,17 +3848,58 @@ def _multi_input_profile_plan(spec, bundle, attrs_default, case_target):
             "schema_version": bundle["schema_version"],
             "contract_sha256": bundle["sha256"],
             "profiles": len(bundle["profiles"]),
-            "attrs": len(attr_combos),
+            "attrs": len(attr_records),
             "profile_coverage": bundle["coverage"],
             "required_coverage": bundle["required_coverage"],
             "case_coverage": case_coverage,
         },
     }
+    if structure["atomic_contract"] is not None:
+        seen = set()
+        cells = []
+        for entry in entries:
+            cid = _mk_multi_input_id(
+                spec["op"], entry["input_profile"], entry["attr_idx"], seen,
+                contract_bindings=entry.get("contract_bindings"))
+            binding = entry["contract_bindings"]["atomic_attr_row"]
+            cells.append({
+                "profile_id": entry["input_profile"]["profile_id"],
+                "row_id": binding["row_id"],
+                "row_sha256": binding["row_sha256"],
+                "q_id": entry["contract_bindings"]["independent_attr_combination"]["q_id"],
+                "q_sha256": entry["contract_bindings"]["independent_attr_combination"]["q_sha256"],
+                "case_id": cid,
+            })
+        meta["atomic_attr_ledger"] = {
+            "schema": "oprunway.atomic_attr_case_ledger",
+            "schema_version": 1,
+            "atomic_rows_sha256": structure["atomic_contract"]["sha256"],
+            "source_binding": structure["atomic_contract"]["source_binding"],
+            "profiles": len(bundle["profiles"]),
+            "atomic_rows": attr_axes["atomic_rows"],
+            "independent_combinations": attr_axes["independent_combinations"],
+            "expected": expected,
+            "emitted": len(entries),
+            "cells": cells,
+        }
+    return entries, meta
 
 
-def _mk_multi_input_id(op, profile, attr_idx, seen):
+def _mk_multi_input_id(op, profile, attr_idx, seen, contract_bindings=None):
     base = f"{op.lower()}_profile_{profile['profile_id'].lower()}"
-    if attr_idx is not None:
+    atomic = ((contract_bindings or {}).get("atomic_attr_row")
+              if isinstance(contract_bindings, dict) else None)
+    independent = ((contract_bindings or {}).get("independent_attr_combination")
+                   if isinstance(contract_bindings, dict) else None)
+    if atomic is not None or independent is not None:
+        if not isinstance(atomic, dict) or not isinstance(independent, dict):
+            raise ValueError("atomic case_id 必须同时绑定 atomic row 与 independent Q")
+        row_sha, q_sha = atomic.get("row_sha256"), independent.get("q_sha256")
+        if (not isinstance(row_sha, str) or len(row_sha) != 64
+                or not isinstance(q_sha, str) or len(q_sha) != 64):
+            raise ValueError("atomic case_id 缺 64 位 row_sha256/q_sha256")
+        base += f"_a{row_sha[:12]}_q{q_sha[:12]}"
+    elif attr_idx is not None:
         base += f"_a{attr_idx}"
     if base in seen:
         raise ValueError(f"case_id 碰撞：{base!r}（multi_input profile/attr 身份重复）")
@@ -3451,6 +3929,12 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
     ranks = _allowed_ranks(in_params)                    # C3：None=不限制（现行为）
     reg_shapes, large_shapes = _shape_ladder(ranks)      # 过滤后无合法常规 shape → 已 fail-closed
     big_shape = _fit_rank(_LARGE_SHAPES[0], ranks)       # 白名单/bndhi 的大 shape（ranks=None 时恒等）
+    structure = _resolve_tensor_shape_attr_plan(spec)
+    if structure["atomic_contract"] is not None or structure["cyclic_indices"]:
+        raise ValueError(
+            "tensor_shape_attrs.atomic_attr_rows/cyclic_indices 只准入 "
+            "multi_input_contract 的完整 P×A×Q profile matrix；legacy/torch_parity 抽样不能"
+            "自报完整 atomic 覆盖")
     attr_sets = _attr_value_sets(spec, attrs_default)
     attr_combos = _attr_combos(attr_sets, attrs_default)
 
@@ -3459,9 +3943,10 @@ def _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=None,
     combo_idx = {_akey(a): i for i, a in enumerate(attr_combos)}
 
     def mk(dims, shp, dtn, data_kind, id_kind, attrs, origin, rule, tags):
+        attr_idx = combo_idx.get(_akey(attrs))
         return {"dims": list(dims), "shape": shp, "dtype": dtn, "tags": list(tags),
                 "data_kind": data_kind, "id_kind": id_kind, "attrs": _copy_attrs(attrs),
-                "attr_idx": combo_idx.get(_akey(attrs)), "case_origin": origin, "rule_ref": rule}
+                "attr_idx": attr_idx, "case_origin": origin, "rule_ref": rule}
 
     # OC：算子类别 → 特殊值口径（受控词表；未声明=None=现行为）。词表外取值在此当场 fail-closed。
     op_class = _operator_class(spec)
@@ -3688,9 +4173,18 @@ def _attr_ctype(p, value=_UNSET):
     `["float32","bogus"]` 都被静默收下 —— 而 attr 的 C 标量宽度拼错 = 远端 argtypes 错位 = 段错误。
     多候选 / 空 / 未知一律 fail-closed（记 gap 交人裁，别静默挑一个）。
     数组分支不查这张表：`aclIntArray` 的元素宽度是 ACL 定死的，spec dtype 在那里不表示 C 宽度。"""
+    declared_type = p.get("attr_type", _UNSET)
+    if declared_type is not _UNSET and declared_type not in TSA.ATTR_TYPES:
+        raise ValueError(
+            f"aclnn_call: attr {p.get('name')!r} 的 attr_type={declared_type!r} "
+            f"不在受控词表 {sorted(TSA.ATTR_TYPES)}")
     # N6 host scalar 是 aclScalar*，不是 C ABI primitive。binding 是接口事实；dtype 继续随 slot
     # 落盘，runner/codegen 据它构造具有精确逻辑 dtype 的 aclScalar。
     if p.get("binding") == "host_scalar":
+        if declared_type == TSA.ATTR_INT_ARRAY:
+            raise ValueError(
+                f"aclnn_call: host_scalar attr {p.get('name')!r} 不得声明 "
+                "attr_type='int_array'；aclScalar 与 aclIntArray 是不同 ABI")
         if p.get("kind") != "scalar":
             raise ValueError(
                 f"aclnn_call: host_scalar attr {p.get('name')!r} 缺 kind='scalar'")
@@ -3700,7 +4194,10 @@ def _attr_ctype(p, value=_UNSET):
                 f"aclnn_call: host_scalar attr {p.get('name')!r} dtype 集为空")
         return "scalar"
     probe = p.get("default") if value is _UNSET else value
-    if _is_int_array(probe):
+    if declared_type is not _UNSET:
+        _check_param_attr_value(p, probe, f"aclnn_call.attr[{p.get('name')!r}]")
+    if declared_type == TSA.ATTR_INT_ARRAY or (
+            declared_type is _UNSET and _is_int_array(probe)):
         return _ATTR_ARRAY_CTYPE
     dt = p.get("dtype")
     if isinstance(dt, (list, tuple)):
@@ -3822,6 +4319,89 @@ def _build_aclnn_call(spec, variant, attrs, active_names, cid, parameter_contrac
     return {"symbol": variant["symbol"], "slots": slots}
 
 
+def _bind_layout_to_aclnn_call(case, cid):
+    """把 generator 已物化的 layout 身份逐字段钉回调用槽。
+
+    ``aclnn_call`` 在输入/输出 layout claim 之前即可解析出 ABI 槽，但 layout receipt
+    只有物化完 base storage / output contract 才存在。这里是唯一的后绑定点：只从
+    case 的外部 input/expected ledger 投影，不据算子或 shape 猜；已有 N6 字段若冲突
+    当场拒绝，不能用 ``dict.update`` 把漂移覆盖掉。
+    """
+    call = case.get("aclnn_call")
+    if not isinstance(call, dict):
+        return case
+    slots = call.get("slots")
+    if not isinstance(slots, list):
+        raise ValueError(f"{cid}: aclnn_call.slots 须为列表")
+
+    def merge(slot, projection, where):
+        for key, value in projection.items():
+            if key in slot and slot[key] != value:
+                raise ValueError(
+                    f"{where}.{key}={slot[key]!r} 与 layout 外部契约 {value!r} 冲突")
+        slot.update(projection)
+
+    input_slots = {}
+    output_slots = {}
+    for slot_index, slot in enumerate(slots):
+        if not isinstance(slot, dict):
+            raise ValueError(f"{cid}: aclnn_call.slots[{slot_index}] 须为 object")
+        if slot.get("role") == "in":
+            index = slot.get("input_idx")
+            if isinstance(index, bool) or not isinstance(index, int) or index in input_slots:
+                raise ValueError(f"{cid}: layout input_idx={index!r} 非唯一整数")
+            input_slots[index] = slot
+        elif slot.get("role") == "out":
+            index = slot.get("output_idx")
+            if isinstance(index, bool) or not isinstance(index, int) or index in output_slots:
+                raise ValueError(f"{cid}: layout output_idx={index!r} 非唯一整数")
+            output_slots[index] = slot
+
+    for index, item in enumerate(case.get("inputs") or []):
+        if not isinstance(item, dict) or "layout_requirement_id" not in item:
+            continue
+        slot = input_slots.get(index)
+        if slot is None:
+            raise ValueError(f"{cid}: layout input#{index} 缺 aclnn_call slot")
+        projection = {key: item.get(key) for key in (
+            "name", "kind", "binding", "shape", "dtype", "format",
+            "storage_representation", "layout_requirement_id",
+            "layout_receipt_sha256")}
+        if any(value is None for value in projection.values()):
+            raise ValueError(f"{cid}: layout input#{index} 结构/身份字段不完整 {projection}")
+        merge(slot, projection, f"{cid}.aclnn_call.input[{index}]")
+
+    expected = case.get("expected")
+    if not isinstance(expected, dict):
+        return case
+    outputs = expected.get("outputs")
+    if outputs is None:
+        outputs = [expected]
+    if not isinstance(outputs, list):
+        raise ValueError(f"{cid}: expected.outputs 须为列表")
+    for index, output in enumerate(outputs):
+        if not isinstance(output, dict) or "layout_requirement_id" not in output:
+            continue
+        slot = output_slots.get(index)
+        if slot is None:
+            raise ValueError(f"{cid}: layout output#{index} 缺 aclnn_call slot")
+        name = output.get("name", slot.get("name"))
+        projection = {
+            "name": name,
+            "kind": "tensor",
+            "binding": "device_tensor",
+            "shape": output.get("out_shape"),
+            "dtype": output.get("compare_dtype"),
+            "format": TSA.TENSOR_FORMAT_ND,
+            "layout_requirement_id": output.get("layout_requirement_id"),
+            "layout_receipt_sha256": output.get("layout_receipt_sha256"),
+        }
+        if any(value is None for value in projection.values()):
+            raise ValueError(f"{cid}: layout output#{index} 结构/身份字段不完整 {projection}")
+        merge(slot, projection, f"{cid}.aclnn_call.output[{index}]")
+    return case
+
+
 def _normalize_golden_outputs(golden):
     """golden_fn 返回值 → **数组列表**：tuple/list→list（多输出）；单数组→[数组]（单输出）。
     多输出算子的某些 case 可能只出前缀个输出（如全局 median 只出 values、无 indices）→ 列表随之变短。"""
@@ -3844,7 +4424,7 @@ def _mo_taskdoc_tol(spec):
 
 
 def _save_case_tensor_inputs(cdir, cid, inputs, in_params, input_dtns,
-                             tensor_contracts=None):
+                             tensor_contracts=None, layout_bindings=None):
     """所有 generated 路径的唯一输入 saver。
 
     ``np.ascontiguousarray`` 对 0-d 会升成 ``(1,)``，所以连续化后必须再
@@ -3862,6 +4442,11 @@ def _save_case_tensor_inputs(cdir, cid, inputs, in_params, input_dtns,
     if tensor_contracts is not None and len(tensor_contracts) != len(inputs):
         raise ValueError(
             f"{cid}: tensor_contracts={len(tensor_contracts)} != inputs={len(inputs)}")
+    layout_bindings = {} if layout_bindings is None else layout_bindings
+    if not isinstance(layout_bindings, dict) or any(
+            isinstance(index, bool) or not isinstance(index, int)
+            or not (0 <= index < len(inputs)) for index in layout_bindings):
+        raise ValueError(f"{cid}: layout_bindings 的键须为合法 input index")
     items = []
     for j, x_logical in enumerate(inputs):
         param = in_params[j]
@@ -3884,20 +4469,104 @@ def _save_case_tensor_inputs(cdir, cid, inputs, in_params, input_dtns,
         else:
             x_bin = np.ascontiguousarray(
                 x_logical, dtype=_storage_np(input_dtn))
-        # ascontiguousarray 保证字节连续，reshape 专门撤销它对 0-d 的强制升维。
+        # 此处的连续 payload 只是待填入的逻辑值；启用 layout 时真实落盘的是 base storage，
+        # 不得把这份临时 payload 冒充 DUT 输入布局。
         x_bin = np.ascontiguousarray(x_bin).reshape(expected_shape)
         TSA.assert_shape_identity(
             expected_shape, x_bin.shape,
             where=f"{cid}.inputs[{j}].storage_payload")
-        path = os.path.join(cdir, f"x{j + 1}.npy")
-        np.save(path, x_bin)
-        with open(path, "rb") as payload_fh:
-            saved = np.load(payload_fh, allow_pickle=False)
-        TSA.assert_shape_identity(
-            expected_shape, saved.shape,
-            where=f"{cid}.inputs[{j}].saved_payload")
+        layout_binding = layout_bindings.get(j)
         item = {"name": param["name"], "shape": list(expected_shape),
-                "dtype": input_dtn, "path": f"{cid}/x{j + 1}.npy"}
+                "dtype": input_dtn}
+        if layout_binding is None:
+            path = os.path.join(cdir, f"x{j + 1}.npy")
+            np.save(path, x_bin)
+            with open(path, "rb") as payload_fh:
+                saved = np.load(payload_fh, allow_pickle=False)
+            TSA.assert_shape_identity(
+                expected_shape, saved.shape,
+                where=f"{cid}.inputs[{j}].saved_payload")
+            item["path"] = f"{cid}/x{j + 1}.npy"
+        else:
+            if not isinstance(layout_binding, dict) or set(layout_binding) != {
+                    "requirement_id", "layout_receipt", "layout_receipt_sha256"}:
+                raise ValueError(
+                    f"{cid}.inputs[{j}].layout binding 须恰含 requirement_id/"
+                    "layout_receipt/layout_receipt_sha256")
+            requirement_id = layout_binding["requirement_id"]
+            if not isinstance(requirement_id, str) or not requirement_id:
+                raise ValueError(f"{cid}.inputs[{j}].layout requirement_id 须为非空字符串")
+            receipt = layout_binding["layout_receipt"]
+            receipt_sha = layout_binding["layout_receipt_sha256"]
+            actual_sha = TSA.layout_receipt_sha256(
+                receipt, where=f"{cid}.inputs[{j}].layout_receipt")
+            if actual_sha != receipt_sha:
+                raise ValueError(
+                    f"{cid}.inputs[{j}] layout receipt 摘要漂移："
+                    f"actual={actual_sha} expected={receipt_sha}")
+            receipt = TSA.validate_layout_receipt(
+                receipt, expected_shape=expected_shape, expected_role=TSA.LAYOUT_ROLE_INPUT,
+                expected_case_id=cid, expected_tensor_name=param["name"],
+                expected_tensor_index=j, where=f"{cid}.inputs[{j}].layout_receipt")
+            if tensor_contracts is not None and tensor_contracts[j]["format"] != TSA.TENSOR_FORMAT_ND:
+                raise ValueError(
+                    f"{cid}.inputs[{j}] layout v1 只支持 format='nd'，得 "
+                    f"{tensor_contracts[j]['format']!r}")
+            base = np.zeros(receipt["base_storage_numel"], dtype=x_bin.dtype)
+            byte_strides = tuple(int(stride) * base.dtype.itemsize
+                                 for stride in receipt["strides"])
+            view = np.ndarray(
+                shape=expected_shape, dtype=base.dtype, buffer=base,
+                offset=receipt["storage_offset"] * base.dtype.itemsize,
+                strides=byte_strides)
+            view[...] = x_bin
+            base_path = os.path.join(cdir, f"x{j + 1}_base.npy")
+            np.save(base_path, base)
+            saved_base = np.load(base_path, allow_pickle=False)
+            saved_view = np.ndarray(
+                shape=expected_shape, dtype=saved_base.dtype, buffer=saved_base,
+                offset=receipt["storage_offset"] * saved_base.dtype.itemsize,
+                strides=byte_strides)
+            observed = {
+                "case_id": cid, "tensor_name": param["name"], "tensor_index": j,
+                "role": TSA.LAYOUT_ROLE_INPUT, "format": TSA.TENSOR_FORMAT_ND,
+                "logical_shape": list(saved_view.shape),
+                "layout_kind": (TSA.LAYOUT_CONTIGUOUS if saved_view.flags.c_contiguous
+                                else TSA.LAYOUT_NONCONTIGUOUS),
+                "layout_capability": receipt["layout_capability"],
+                "strides": [stride // saved_base.dtype.itemsize
+                            for stride in saved_view.strides],
+                "storage_offset": ((saved_view.ctypes.data - saved_base.ctypes.data)
+                                   // saved_base.dtype.itemsize),
+                "base_storage_numel": int(saved_base.size),
+            }
+            TSA.assert_layout_preserved(
+                receipt, observed, expected_shape=expected_shape,
+                expected_role=TSA.LAYOUT_ROLE_INPUT, expected_case_id=cid,
+                expected_tensor_name=param["name"], expected_tensor_index=j,
+                expected_receipt_sha256=receipt_sha,
+                where=f"{cid}.inputs[{j}].saved_layout")
+            if saved_view.tobytes(order="C") != x_bin.tobytes(order="C"):
+                raise ValueError(
+                    f"{cid}.inputs[{j}] base-storage 重建 view 的逻辑字节与计划输入不一致")
+            item.update({
+                "storage_representation": "base_storage_v1",
+                "base_storage_path": f"{cid}/x{j + 1}_base.npy",
+                "layout_requirement_id": requirement_id,
+                "layout_receipt": receipt,
+                "layout_receipt_sha256": receipt_sha,
+            })
+            if tensor_contracts is None:
+                kind = param.get("kind", "tensor")
+                binding = param.get("binding", "device_tensor")
+                tensor_format = param.get("format")
+                if (kind, binding, tensor_format) != (
+                        "tensor", "device_tensor", TSA.TENSOR_FORMAT_ND):
+                    raise ValueError(
+                        f"{cid}.inputs[{j}] layout v1 要求 tensor/device_tensor/nd，"
+                        f"得 kind={kind!r} binding={binding!r} format={tensor_format!r}")
+                item.update({"kind": kind, "binding": binding,
+                             "format": tensor_format})
         if tensor_contracts is not None:
             item.update({"kind": tensor_contracts[j]["kind"],
                          "binding": tensor_contracts[j]["binding"],
@@ -3908,10 +4577,11 @@ def _save_case_tensor_inputs(cdir, cid, inputs, in_params, input_dtns,
     return items
 
 
-def _save_inputs_multi(cdir, cid, inputs, in_params, dtn):
+def _save_inputs_multi(cdir, cid, inputs, in_params, dtn, layout_bindings=None):
     """多输出历史包装；实体统一由 :func:`_save_case_tensor_inputs` 落盘。"""
     return _save_case_tensor_inputs(
-        cdir, cid, inputs, in_params, [dtn] * len(inputs))
+        cdir, cid, inputs, in_params, [dtn] * len(inputs),
+        layout_bindings=layout_bindings)
 
 
 def _index_golden_array(arr, dtype_name, where):
@@ -3958,7 +4628,8 @@ def _active_output_names(spec, variant, cid):
 
 def _build_multi_output_case(spec, op, cid, cdir, entry, inputs, in_params, dtn, attrs, dims,
                              vmode, golden_fn, out_shape_fn, golden_source, tier,
-                             spec_standard, tol_src, tol_tuple, active_names):
+                             spec_standard, tol_src, tol_tuple, active_names,
+                             layout_tracker=None):
     """多输出契约（torch 对标 median 见证）：golden_fn 返回 tuple → 逐输出 `np.save(golden_{k}.npy)`、
     逐输出 out_shape 对账、据 spec **op-中立**派生每输出判据契约（`derive_output_contracts`：只据 out_role/
     index_of/dtype 字段，绝无算子名分支）→ `expected.outputs[]`。
@@ -4017,6 +4688,11 @@ def _build_multi_output_case(spec, op, cid, cdir, entry, inputs, in_params, dtn,
                 "compare": ct["policy"]["kind"], "compare_dtype": ct["dtype"],
                 "standard": ct["standard"], "tolerance_policy_id": ct["tolerance_policy_id"],
                 "policy": ct["policy"], "threshold": precision_policy.threshold_digest(ct["policy"])}
+        _attach_output_layout(
+            item,
+            _claim_output_layout(
+                layout_tracker, spec=spec, case_id=cid, entry=entry,
+                output_name=name, output_index=k, output_shape=actual_shape))
         if ct.get("index_of") is not None:               # index 输出：所引 value 输出名（同 spec 的 index_of 字段）
             item["index_of"] = ct["index_of"]
         out_items.append(item)
@@ -4028,7 +4704,12 @@ def _build_multi_output_case(spec, op, cid, cdir, entry, inputs, in_params, dtn,
         if o["role"] != by_name[o["name"]]["role"]:
             raise ValueError(f"{cid}: 输出 {o['name']!r} 的 role {o['role']!r} ≠ spec out_role "
                              f"{by_name[o['name']]['role']!r}（身份三元组不自洽，fail-closed）")
-    in_items = _save_inputs_multi(cdir, cid, inputs, in_params, dtn)
+    input_layout_bindings = _claim_input_layout_bindings(
+        layout_tracker, case_id=cid, entry=entry, inputs=inputs,
+        in_params=in_params)
+    in_items = _save_inputs_multi(
+        cdir, cid, inputs, in_params, dtn,
+        layout_bindings=input_layout_bindings)
     expected = {"golden_source": golden_source, "golden_tier": tier, "verify_mode": vmode,
                 "outputs": out_items, "case_origin": entry["case_origin"], "rule_ref": entry["rule_ref"]}
     if entry.get("cost_scaled"):                         # G4：该 case 被降过规模 → 随 case 一起如实留痕
@@ -4074,6 +4755,15 @@ def _resolve_taskdoc_inputs(spec, taskdoc_caseset):
     return case_source, payload, digest
 
 
+def _attach_entry_contract_bindings(case, entry):
+    """把 planner 已机校的 N7 binding 逐字落到 case；缺席时不增加 legacy 字段。"""
+    bindings = entry.get("contract_bindings")
+    if bindings is not None:
+        case["contract_bindings"] = json.loads(json.dumps(
+            bindings, ensure_ascii=False, allow_nan=False))
+    return case
+
+
 def gen_cases(spec, work_dir, taskdoc_caseset=None):
     op = spec["op"]
     # golden 按算子从用户侧 <ops_root>/<op>/golden.py 加载（elementwise 通路不内置 golden 值、缺则 fail-closed；
@@ -4113,6 +4803,13 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
         p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"
         and not (multi_input_bundle is not None and p.get("binding") == "host_scalar")
     }
+    structure_plan = _resolve_tensor_shape_attr_plan(spec)
+    if case_source == _CASE_SOURCE_TASKDOC and any((
+            structure_plan["atomic_contract"] is not None,
+            structure_plan["cyclic_indices"], structure_plan["layout_requirements"])):
+        raise ValueError(
+            "tensor_shape_attrs v1 尚未接入 case_source=taskdoc；不得让 taskdoc 物化绕过"
+            " P×A×Q/layout 身份账本")
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
     # （dtype 空/重复/白名单三道校验已提进 check_spec_capability，先于 load_golden 执行）
@@ -4160,6 +4857,7 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
         cost_fn = _make_cost_fn(in_params, out_shape_fn)
         entries, plan_meta = _plan(spec, in_params, dtypes, attrs_default, op, case_target, cost_fn=cost_fn,
                                    empty_accepts=_make_empty_accepts(in_params, out_shape_fn, attrs_default))
+    layout_tracker = _LayoutRequirementTracker(structure_plan["layout_requirements"])
     seen_ids, cases = set(), []
     golden_unavailable = []                              # CS：一等状态账本（case 身份保留、无 golden 文件）
     for entry in entries:
@@ -4168,7 +4866,9 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
         input_profile = entry.get("input_profile")
         td_entry = entry.get("taskdoc")                  # CS：非 None = 这条 case 的身份来自任务书
         if input_profile is not None:
-            cid = _mk_multi_input_id(op, input_profile, entry["attr_idx"], seen_ids)
+            cid = _mk_multi_input_id(
+                op, input_profile, entry["attr_idx"], seen_ids,
+                contract_bindings=entry.get("contract_bindings"))
         elif td_entry is None:
             cid = _mk_id(op, dtn, shp, entry["id_kind"], entry["attr_idx"], seen_ids)
         else:
@@ -4193,10 +4893,12 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
             case = _build_multi_output_case(
                 spec, op, cid, cdir, entry, inputs, in_params, dtn, attrs, dims, vmode,
                 golden_fn, out_shape_fn, golden_source, _tier, spec_standard, tol_src, tol_tuple,
-                _active_output_names(spec, variant, cid))
+                _active_output_names(spec, variant, cid), layout_tracker=layout_tracker)
             if needs_aclnn_call:                         # 该 case **完全解析好**的调用（driver 直接执行）
                 case["aclnn_call"] = _build_aclnn_call(
                     spec, variant, attrs, [o["name"] for o in case["expected"]["outputs"]], cid)
+                _bind_layout_to_aclnn_call(case, cid)
+            _attach_entry_contract_bindings(case, entry)
             cases.append(case)
             continue
         if td_entry is None:
@@ -4232,6 +4934,8 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                 if needs_aclnn_call:                     # 调用契约照样解析：这条 case 仍可被人工复现
                     gu_case["aclnn_call"] = _build_aclnn_call(
                         spec, variant, attrs, _active_output_names(spec, variant, cid), cid)
+                    _bind_layout_to_aclnn_call(gu_case, cid)
+                _attach_entry_contract_bindings(gu_case, entry)
                 cases.append(gu_case)
                 golden_unavailable.append({"case_id": cid, "reason": unavailable_reason,
                                            "case_origin": entry["case_origin"]})
@@ -4267,8 +4971,12 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
 
         # §1.4 空 Tensor（numel=0）：只挂「功能」、无精度判定；存空 X/golden，expected compare=na（评审 #1）。
         if entry["id_kind"] == "empty":
+            empty_layout_bindings = _claim_input_layout_bindings(
+                layout_tracker, case_id=cid, entry=entry, inputs=inputs,
+                in_params=in_params)
             in_items = _save_case_tensor_inputs(
-                cdir, cid, inputs, in_params, [dtn] * len(inputs))
+                cdir, cid, inputs, in_params, [dtn] * len(inputs),
+                layout_bindings=empty_layout_bindings)
             np.save(os.path.join(cdir, "golden.npy"), golden)
             # 批 2：golden 档位随每条 case 走（无契约块 → None，行为与批 2 前一致）
             empty_expected = {"golden_source": golden_source, "golden_tier": _tier,
@@ -4281,11 +4989,22 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                               "note": "空Tensor 功能用例（numel=0，无精度判定，validator→na）"}
             if entry.get("cost_scaled"):                 # G4：该 case 被降过规模 → 随 case 一起如实留痕
                 empty_expected["cost_scaled"] = entry["cost_scaled"]
+            output_names = _active_output_names(spec, variant, cid)
+            if len(output_names) != 1:
+                raise ValueError(f"{cid}: legacy empty case 要求恰有一个 active output")
+            _attach_output_layout(
+                empty_expected,
+                _claim_output_layout(
+                    layout_tracker, spec=spec, case_id=cid, entry=entry,
+                    output_name=output_names[0], output_index=0,
+                    output_shape=actual_out_shape))
             empty_case = {"id": cid, "dims": dims, "tags": entry["tags"], "inputs": in_items,
                           "attrs": attrs, "expected": empty_expected}
             if needs_aclnn_call:                         # legacy 单输出 + aclnn_py：同样逐 case 解析调用
                 empty_case["aclnn_call"] = _build_aclnn_call(
                     spec, variant, attrs, _active_output_names(spec, variant, cid), cid)
+                _bind_layout_to_aclnn_call(empty_case, cid)
+            _attach_entry_contract_bindings(empty_case, entry)
             cases.append(empty_case)
             continue
 
@@ -4304,9 +5023,13 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                             if input_profile is not None else None)
         input_dtns = ([item["dtype"] for item in tensor_contracts]
                       if tensor_contracts is not None else [dtn] * len(inputs))
+        input_layout_bindings = _claim_input_layout_bindings(
+            layout_tracker, case_id=cid, entry=entry, inputs=inputs,
+            in_params=in_params, tensor_contracts=tensor_contracts)
         in_items = _save_case_tensor_inputs(
             cdir, cid, inputs, in_params, input_dtns,
-            tensor_contracts=tensor_contracts)
+            tensor_contracts=tensor_contracts,
+            layout_bindings=input_layout_bindings)
         ishapes = [item["shape"] for item in in_items]
         np.save(os.path.join(cdir, "golden.npy"), golden)
 
@@ -4350,6 +5073,15 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                     "case_origin": entry["case_origin"], "rule_ref": entry["rule_ref"]}
         if entry.get("cost_scaled"):                     # G4：该 case 被降过规模 → 随 case 一起如实留痕
             expected["cost_scaled"] = entry["cost_scaled"]
+        output_names = _active_output_names(spec, variant, cid)
+        if len(output_names) != 1:
+            raise ValueError(f"{cid}: legacy single-output case 要求恰有一个 active output")
+        _attach_output_layout(
+            expected,
+            _claim_output_layout(
+                layout_tracker, spec=spec, case_id=cid, entry=entry,
+                output_name=output_names[0], output_index=0,
+                output_shape=actual_out_shape, input_profile=input_profile))
         acc = precision_policy.resolve_acceptance(spec, eff_std, logical_cdtype)
         if acc:
             expected["acceptance_policy"], expected["acceptance_tolerance_policy_id"] = acc
@@ -4361,7 +5093,10 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
             legacy_case["aclnn_call"] = _build_aclnn_call(
                 spec, variant, attrs, _active_output_names(spec, variant, cid), cid,
                 parameter_contract=input_profile)
+            _bind_layout_to_aclnn_call(legacy_case, cid)
+        _attach_entry_contract_bindings(legacy_case, entry)
         cases.append(legacy_case)
+    layout_ledger, layout_ledger_sha256 = layout_tracker.finish()
     perf_case_policy = _classify_perf_cases(spec, cases)
     attr_order = [p["name"] for p in spec["params"] if p["io"] == "attr"]
     # Q7 dtype 覆盖门用：dtype_required=任务书权威全集（spec 透传，未声明则 None→门不阻塞）；
@@ -4369,6 +5104,11 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
     # 消除「并集过报」与「自报漂移」）；task_pr_gaps 透传供门查 dtype_deferred。
     dtype_tested = sorted({item["dtype"] for c in cases for item in (c.get("inputs") or [])
                            if isinstance(item, dict) and item.get("dtype")})
+    atomic_attr_ledger = plan_meta.get("atomic_attr_ledger")
+    atomic_attr_ledger_sha256 = (
+        hashlib.sha256(content_address.canonical_json_bytes(
+            atomic_attr_ledger)).hexdigest()
+        if atomic_attr_ledger is not None else None)
     caseset = {"op": op, "spec_ref": spec.get("op"), "work_dir": work_dir,
             "attr_order": attr_order,
             "dtype_required": spec.get("dtype_required"),
@@ -4387,6 +5127,12 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                if "case_matrix_ledger" in plan_meta else {}),
             **({"multi_input_ledger": plan_meta["multi_input_ledger"]}
                if "multi_input_ledger" in plan_meta else {}),
+            **({"atomic_attr_ledger": atomic_attr_ledger,
+                "atomic_attr_ledger_sha256": atomic_attr_ledger_sha256}
+               if atomic_attr_ledger is not None else {}),
+            **({"layout_ledger": layout_ledger,
+                "layout_ledger_sha256": layout_ledger_sha256}
+               if layout_ledger is not None else {}),
             # G4 覆盖账本：预算 + cost 模型（含其诚实边界）+ 被降规模的强制项 + 被剔除的超预算 shape。
             # 报告侧读这里就能说清「大 shape 是降规模后覆盖的 / 哪些规模根本没跑」，不靠猜。
             "golden_cost": plan_meta["golden_cost"],
@@ -4455,6 +5201,12 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
         p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"
         and not (multi_input_bundle is not None and p.get("binding") == "host_scalar")
     }
+    structure_plan = _resolve_tensor_shape_attr_plan(spec)
+    if case_source == _CASE_SOURCE_TASKDOC and any((
+            structure_plan["atomic_contract"] is not None,
+            structure_plan["cyclic_indices"], structure_plan["layout_requirements"])):
+        raise ValueError(
+            "tensor_shape_attrs v1 尚未接入 case_source=taskdoc；dry-run 不得比正式生成更宽")
     self_param = next((p for p in in_params if p["name"] == "self"), in_params[0])
     dtypes = self_param["dtype"]
     # 与 gen_cases 同一读取点：dry-run 若比真跑宽松，CP-B 的契约自检就是假门。
@@ -4509,7 +5261,8 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
             continue
         if e.get("input_profile") is not None:
             ids.append(_mk_multi_input_id(
-                op, e["input_profile"], e["attr_idx"], seen))
+                op, e["input_profile"], e["attr_idx"], seen,
+                contract_bindings=e.get("contract_bindings")))
         else:
             ids.append(_mk_id(op, e["dtype"], e["shape"], e["id_kind"], e["attr_idx"], seen))
     specials = {"empty", "scalar", "bndlo", "bndhi", "inf", "ninf", "nan"}
@@ -4641,6 +5394,13 @@ def _build_dry_run_ledger(spec, preparation_inputs=None, taskdoc_caseset=None):
                if "case_matrix_ledger" in meta else {}),
             **({"multi_input_ledger": meta["multi_input_ledger"]}
                if "multi_input_ledger" in meta else {}),
+            **({"atomic_attr_ledger": meta["atomic_attr_ledger"],
+                "atomic_attr_ledger_sha256": hashlib.sha256(
+                    content_address.canonical_json_bytes(
+                        meta["atomic_attr_ledger"])).hexdigest()}
+               if "atomic_attr_ledger" in meta else {}),
+            **({"layout_requirement_plan": list(structure_plan["layout_requirements"])}
+               if structure_plan["layout_requirements"] else {}),
             "unpaired_combo_classes": meta["unpaired_combo_classes"],
             "attr_axis_lengths": meta["attr_axis_lengths"],
             "golden_cost": meta["golden_cost"],

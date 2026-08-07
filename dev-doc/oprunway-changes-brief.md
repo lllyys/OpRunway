@@ -2,6 +2,12 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-07 · 三算子统一计划 N7：rank0、atomic attrs 与 layout 生产链
+
+- 生成与执行链现严格区分 rank0、empty、singleton；显式 `attr_type=int_array` 才允许空数组，atomic rows 按 P×A×Q 完整账本生成，负轴以具名输入 rank 归一但向 DUT 传 raw 值。
+- layout 从 base storage/offset/stride 生成并按 case+slot 外锚，贯穿 manifest、driver receipt、evidence 与三级门；拒绝静默 contiguous、slot 互换、摘要漂移和结构用例分母缺口。
+- A3 完整生成回归 334 项、runner/N6 93 项、三级门/shape 283 项均通过；device 7 真机 base-storage/sentinel 12 项通过。
+
 ## 2026-08-07 · 三算子统一计划 N8：随机算子统计契约独立层
 
 - 新增 capability 驱动的 binary probability sampler 契约，覆盖 p=0/1、seed/offset 重复性与独立性、Hoeffding + Bonferroni 整体置信门；reference 前提证据固定不可直接裁决。
