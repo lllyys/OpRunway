@@ -1127,8 +1127,9 @@ class TestCppExtensionCollectorRoute(unittest.TestCase):
             custom["cfg_extra"]["cpp_extension"], plan["cpp_extension"])
         self.assertEqual(
             baseline["cfg_extra"]["exclude_dut_vendor_root"],
-            os.path.join(root, "vendors", "pkg"))
+            os.path.realpath(os.path.join(root, "vendors", "pkg")))
         self.assertEqual(doc["custom_kind"], "cpp_extension")
+        self.assertEqual(doc["execution_isolation_mode"], "subprocess_per_case_v1")
         self.assertEqual(doc["custom_provenance"], plan["cpp_extension"])
 
     def test_same_source_builtin_baseline_is_blocked_before_measurement(self):

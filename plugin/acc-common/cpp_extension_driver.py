@@ -852,6 +852,27 @@ def _capture_layout_after(case, row, args, returned, output_contracts, record):
     return record
 
 
+def _launch_case_worker(argv, env, result_path, timeout=300):
+    """启动一个 case worker，并只用父进程可观测事实分类终止方式。"""
+    process = subprocess.Popen(argv, env=env)
+    parent_pid = process.pid
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        return {"parent_pid": parent_pid, "returncode": None,
+                "termination_kind": "timeout"}
+    if returncode < 0:
+        termination = "signal"
+    elif returncode == 0 and not os.path.isfile(result_path):
+        termination = "missing_result"
+    else:
+        termination = "normal"
+    return {"parent_pid": parent_pid, "returncode": returncode,
+            "termination_kind": termination}
+
+
 def _invoke_all(bundle, work, manifest, plan, caseset, artifact, *, layout_contract=None):
     """逐 case 执行整份 invocation plan；**单条失败不中断整轮**。
 
@@ -868,6 +889,112 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact, *, layout_contr
     metrics）、在 validator 侧功能维恒 fail、在验收门里必须被反向核到确实落成失败。「跳过了」
     绝不等于「通过了」（AGENTS.md 5.8）。
     """
+    if os.environ.get("OPRUNWAY_CPP_EXTENSION_CASE_WORKER") != "1":
+        produced, failed, call_records, schemas, layout_cases = [], [], [], None, []
+        parent_pids = set()
+        by_id = {case["id"]: case for case in caseset["cases"]}
+        final_out_root = os.path.join(work, "cpp_extension_out")
+        if os.path.lexists(final_out_root):
+            if os.path.islink(final_out_root):
+                raise DriverError("cpp_extension_out 不得为软链")
+            shutil.rmtree(final_out_root)
+        os.makedirs(final_out_root)
+        worker_root = os.path.join(work, ".cpp_extension_case_workers")
+        if os.path.lexists(worker_root):
+            if os.path.islink(worker_root):
+                raise DriverError("case worker root 不得为软链")
+            shutil.rmtree(worker_root)
+        os.makedirs(worker_root)
+        for index, row in enumerate(plan["cases"]):
+            cid = row["case_id"]
+            launch_id = f"{index:08d}-{hashlib.sha256((cid + _canonical_sha(row)).encode()).hexdigest()}"
+            croot = os.path.join(worker_root, f"{index:08d}")
+            os.makedirs(croot)
+            request = {
+                "case": by_id[cid], "plan_row": row, "launch_id": launch_id,
+                "artifact": artifact, "manifest": manifest,
+                "layout_contract": layout_contract,
+            }
+            request_path, result_path = os.path.join(croot, "request.json"), os.path.join(croot, "result.json")
+            _atomic_dump(request_path, request)
+            env = dict(os.environ)
+            env["OPRUNWAY_CPP_EXTENSION_CALL_STATUS"] = os.path.join(croot, "call_status.json")
+            env.pop("OPRUNWAY_CPP_EXTENSION_CASE_WORKER", None)
+            observation = _launch_case_worker(
+                [sys.executable, os.path.abspath(__file__), "--bundle", bundle,
+                 "--work", work, "--case-worker-request", request_path,
+                 "--case-worker-result", result_path], env, result_path)
+            returncode = observation["returncode"]
+            parent_pid = observation["parent_pid"]
+            if parent_pid in parent_pids:
+                raise DriverError(f"{cid}: case worker PID 被复用")
+            parent_pids.add(parent_pid)
+            record = {
+                "case_id": cid, "launch_id": launch_id,
+                "isolation_mode": "subprocess_per_case_v1",
+                "termination_kind": observation["termination_kind"],
+                "returncode": returncode, "parent_pid": parent_pid,
+                "child_pid": None,
+            }
+            status_path = env["OPRUNWAY_CPP_EXTENSION_CALL_STATUS"]
+            record["call_status"] = _load(status_path) if os.path.isfile(status_path) else None
+            if observation["termination_kind"] != "normal" or returncode != 0:
+                record["outcome"] = "failed"
+                kind = observation["termination_kind"]
+                failed.append({"case_id": cid, "entrypoint": row["entrypoint"],
+                               "phase": "execute", "error_kind": (
+                                   "process_fatal" if kind in ("signal", "timeout")
+                                   else "case_worker_missing_result" if kind == "missing_result"
+                                   else "case_worker_failed"),
+                               "error_type": "CaseWorkerFailure",
+                               "error": f"case worker {kind} rc={returncode}",
+                               "call_status": record["call_status"]})
+            else:
+                child = _load(result_path)
+                if (set(child) != {"case_id", "launch_id", "child_pid", "outcome",
+                                   "out_root", "schemas", "layout_execution"}
+                        or child.get("launch_id") != launch_id or child.get("case_id") != cid
+                        or type(child.get("child_pid")) is not int
+                        or child.get("child_pid") != parent_pid):
+                    raise DriverError(f"{cid}: case worker challenge 漂移")
+                schemas = child["schemas"] if schemas is None else schemas
+                if schemas != child["schemas"]:
+                    raise DriverError(f"{cid}: case worker schema 漂移")
+                record["child_pid"] = child["child_pid"]
+                record["outcome"] = child["outcome"]
+                if child.get("layout_execution") is not None:
+                    layout_cases.extend(child["layout_execution"].get("cases") or [])
+                src_root = child["out_root"]
+                child_manifest = _load(os.path.join(src_root, "out_manifest.json"))
+                for item in child_manifest.get("produced") or []:
+                    source = os.path.join(src_root, cid)
+                    target = os.path.join(final_out_root, cid)
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    if os.path.isdir(target): shutil.rmtree(target)
+                    shutil.copytree(source, target)
+                    produced.append(item)
+                failed.extend(child_manifest.get("failed") or [])
+            call_records.append(record)
+        _atomic_dump(os.path.join(final_out_root, "out_manifest.json"), {
+            "schema_version": 1, "complete": True,
+            "produced": produced, "failed": failed})
+        invocation = cpp_extension_adapter.build_invocation_accounting(
+            plan, produced_case_ids=[r["case_id"] for r in produced],
+            failed_case_ids=[r["case_id"] for r in failed])
+        invocation["execution_isolation"] = {
+            "schema": "oprunway.cpp_extension_execution_isolation",
+            "schema_version": 1, "mode": "subprocess_per_case_v1",
+            "records": call_records}
+        if layout_contract is not None:
+            invocation["_layout_execution"] = {
+                "schema": cpp_extension_adapter.LAYOUT_EXECUTION_SCHEMA,
+                "schema_version": cpp_extension_adapter.LAYOUT_EXECUTION_VERSION,
+                "layout_ledger_sha256": layout_contract["sha256"],
+                "cases": layout_cases,
+            }
+        import torch
+        return torch, schemas or {}, invocation
+
     import numpy as np
     import torch
     import torch_npu  # noqa: F401
@@ -896,7 +1023,7 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact, *, layout_contr
         schemas[entrypoint] = str(overload._schema)
 
     by_id = {case["id"]: case for case in caseset["cases"]}
-    out_root = os.path.join(work, "cpp_extension_out")
+    out_root = os.environ.get("OPRUNWAY_CPP_EXTENSION_WORKER_OUT") or os.path.join(work, "cpp_extension_out")
     if os.path.lexists(out_root):
         if os.path.islink(out_root):
             raise DriverError("cpp_extension_out 不得为软链")
@@ -995,7 +1122,10 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact, *, layout_contr
             _snapshot(False)
             _progress("running")
             continue
-        produced_row = {"case_id": case["id"], "outputs": out_rows}
+        status_path = os.environ.get("OPRUNWAY_CPP_EXTENSION_CALL_STATUS")
+        call_status = _load(status_path) if status_path and os.path.isfile(status_path) else None
+        produced_row = {"case_id": case["id"], "outputs": out_rows,
+                        "call_status": call_status}
         if layout_record is not None:
             produced_row["layout_observations"] = layout_record
             layout_cases.append(layout_record)
@@ -1239,6 +1369,8 @@ def _collect_stochastic(caseset, work, runtime, torch):
 
 
 def run(bundle, work):
+    if "OPRUNWAY_CPP_EXTENSION_CASE_WORKER" in os.environ:
+        raise DriverError("拒绝外部注入 case worker 环境标记")
     bundle, work = os.path.realpath(bundle), os.path.realpath(work)
     if not os.path.isdir(bundle) or not os.path.isdir(work):
         raise DriverError("bundle/work 须为存在目录")
@@ -1268,19 +1400,6 @@ def run(bundle, work):
                 != golden_invocation_receipt_sha256:
             raise cpp_extension_adapter.CppExtensionAdapterError(
                 "invocation plan 的 golden invocation receipt 摘要与 caseset 漂移")
-        expected_exception_ledger = (
-            cpp_extension_adapter.validate_caseset_expected_exceptions(caseset))
-        expected_exception_ledger_sha256 = (
-            _canonical_sha(expected_exception_ledger)
-            if expected_exception_ledger is not None else None)
-        if expected_exception_ledger_sha256 is None:
-            if "expected_exception_ledger_sha256" in plan:
-                raise cpp_extension_adapter.CppExtensionAdapterError(
-                    "legacy invocation plan 不得凭空声明 expected exception ledger")
-        elif plan.get("expected_exception_ledger_sha256") \
-                != expected_exception_ledger_sha256:
-            raise cpp_extension_adapter.CppExtensionAdapterError(
-                "invocation plan 的 expected exception ledger 摘要与 caseset 漂移")
     except cpp_extension_adapter.CppExtensionAdapterError as ex:
         raise DriverError(f"golden invocation contract/receipt 非法：{ex}") from ex
     try:
@@ -1297,6 +1416,7 @@ def run(bundle, work):
     torch, schemas, invocation = _invoke_all(
         bundle, work, manifest, plan, caseset, artifact,
         layout_contract=layout_contract)
+    execution_isolation = invocation.pop("execution_isolation", None)
     layout_execution = invocation.pop("_layout_execution", None)
     if layout_contract is not None:
         try:
@@ -1343,14 +1463,12 @@ def run(bundle, work):
             **({"golden_invocation_receipt_sha256":
                 golden_invocation_receipt_sha256}
                if golden_invocation_receipt_sha256 is not None else {}),
-            **({"expected_exception_ledger_sha256":
-                expected_exception_ledger_sha256}
-               if expected_exception_ledger_sha256 is not None else {}),
         },
         "runtime": runtime,
         # 本轮逐 case 执行的分母台账：`failed > 0` 时 receipt 自己就说得出「哪些没跑成」，
         # 不必翻 out_manifest 才知道这一轮不是满堂彩（AGENTS.md 5.8）。
         "invocation": invocation,
+        "execution_isolation": execution_isolation,
         "build": {"argv": build_argv, "returncode": 0},
         "artifact": {"path": artifact_rel, "sha256": _sha_file(artifact)},
         "load": {
@@ -1486,7 +1604,35 @@ def main(argv=None):
     parser.add_argument("--bundle", required=True)
     parser.add_argument("--work", required=True)
     parser.add_argument("--perf-only", action="store_true")
+    parser.add_argument("--case-worker-request")
+    parser.add_argument("--case-worker-result")
     ns = parser.parse_args(argv)
+    if bool(ns.case_worker_request) != bool(ns.case_worker_result):
+        raise DriverError("case worker 仅接受成对 request/result")
+    if ns.case_worker_request:
+        if "OPRUNWAY_CPP_EXTENSION_CASE_WORKER" in os.environ:
+            raise DriverError("拒绝外部注入 case worker 环境标记")
+        os.environ["OPRUNWAY_CPP_EXTENSION_CASE_WORKER"] = "1"
+        if not ns.case_worker_result:
+            raise DriverError("case worker 仅接受父 driver 的成对 request/result")
+        request = _load(ns.case_worker_request)
+        out_root = os.path.join(os.path.dirname(ns.case_worker_request), "out")
+        os.environ["OPRUNWAY_CPP_EXTENSION_WORKER_OUT"] = out_root
+        one_plan = {"schema": "oprunway.cpp_extension_invocation_plan", "schema_version": 1,
+                    "cases": [request["plan_row"]], "excluded": []}
+        _torch, schemas, _invocation = _invoke_all(
+            ns.bundle, ns.work, request["manifest"], one_plan,
+            {"cases": [request["case"]]}, request["artifact"],
+            layout_contract=request.get("layout_contract"))
+        layout_execution = _invocation.pop("_layout_execution", None)
+        child_manifest = _load(os.path.join(out_root, "out_manifest.json"))
+        outcome = "produced" if child_manifest.get("produced") else "failed"
+        _atomic_dump(ns.case_worker_result, {
+            "case_id": request["case"]["id"], "launch_id": request["launch_id"],
+            "child_pid": os.getpid(),
+            "outcome": outcome, "out_root": out_root, "schemas": schemas,
+            "layout_execution": layout_execution})
+        return 0
     result = (run_perf_only(ns.bundle, ns.work) if ns.perf_only
               else run(ns.bundle, ns.work))
     print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -126,6 +126,26 @@ def _currentize_build_and_identity(root, envelope, evidence):
         failed_case_ids=[row["case_id"] for row in evidence
                          if row.get("status") == "execution_failed"],
     )
+    records = []
+    for index, plan_row in enumerate(plan.get("cases") or []):
+        records.append({
+            "case_id": plan_row["case_id"], "launch_id": f"fixture-{index}",
+            "isolation_mode": "subprocess_per_case_v1", "termination_kind": "normal",
+            "returncode": 0, "parent_pid": 1000 + index, "child_pid": 1000 + index,
+            "outcome": "produced", "call_status": {
+                "schema": "oprunway.cpp_extension_call_status", "schema_version": 1,
+                "stage1_ret": 0, "workspace_size": 0, "executor_null": False,
+                "stage2_called": True, "stage2_ret": 0}})
+    receipt["execution_isolation"] = {
+        "schema": A.EXECUTION_ISOLATION_SCHEMA, "schema_version": 1,
+        "mode": "subprocess_per_case_v1", "records": records}
+    record_by_id = {row["case_id"]: row for row in records}
+    for row in evidence:
+        record = record_by_id.get(row["case_id"])
+        if record is not None:
+            row["execution_isolation_mode"] = "subprocess_per_case_v1"
+            row["call_status"] = record["call_status"]
+            row["call_record_sha256"] = G._canonical_sha(record)
     evidence[0]["cpp_extension_receipt_sha256"] = G._canonical_sha(receipt)
 
 

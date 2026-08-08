@@ -2631,6 +2631,9 @@ def _collect_document(*, op, warmup, repeat, device, side_timeout_s, baseline_ki
         },
         "baseline_source": baseline_kind,
         "custom_kind": custom_kind,
+        # 每个 side/case 均由 `_run_msprof` 启动独立进程；同 case 的 warmup/repeat
+        # 留在该 wrapper 内，因此进程启动不进入 MSTX kernel-only 测量窗。
+        "execution_isolation_mode": "subprocess_per_case_v1",
         "custom_provenance": custom_provenance,
         "records": records,
         "skipped": skipped,

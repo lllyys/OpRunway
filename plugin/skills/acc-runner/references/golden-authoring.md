@@ -1,17 +1,5 @@
 # golden.py 产出手册（`gen_golden` 用）
 
-## 预期异常是一等结果
-
-generated golden 在合法 case 上直接抛异常时，`gen_cases` 不删除该 case，也不伪造输入或输出值。
-该 case 必须有可用于安全分配 NPU 输出的 `out_shape()` 声明；生成器把 CPU 异常记录为严格
-`oprunway.expected_exception` 契约，绑定异常类、`golden`/`execute` 阶段以及 exact message policy，
-并将 case 收敛为 `dims=["功能"]`、`compare=na`。NPU 只有抛出同类、同阶段、同消息异常才算功能匹配；
-执行成功、异常类不同、阶段不同或消息不同均由确定性 validator 判 FAIL。
-
-空 Tensor 的 `compare=na` 与预期异常是两个独立状态：前者仍必须保存 golden/out 字节摘要、实际 shape
-和 output-written receipt，并在任何数值 policy/metrics 解析之前分流；不得用一元素 probe、虚构 policy
-或非空输入冒充空结果。
-
 `acc-runner-dev` 的 `gen_golden` 模式据**任务书**为一个算子产出 `<ops_root>/<op>/golden.py`。
 
 **为什么这个 mode 存在**：`gen_cases.load_golden` 缺 golden.py 就 fail-closed，而在批 6 之前

@@ -335,6 +335,7 @@ class OutputWrittenGateTest(unittest.TestCase):
             "variants": [{"entrypoint": "invoke_v0"}],
         }
         with tempfile.TemporaryDirectory() as td, mock.patch.dict(
+                os.environ, {"OPRUNWAY_CPP_EXTENSION_CASE_WORKER": "1"}), mock.patch.dict(
                 sys.modules,
                 {"torch": torch, "torch_npu": types.ModuleType("torch_npu")}), mock.patch.object(
                     D, "_dump_output",

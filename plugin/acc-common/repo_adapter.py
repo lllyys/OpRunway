@@ -14,7 +14,6 @@
 import hashlib, json, math, numbers, os, posixpath, re, shlex, shutil, subprocess, sys, uuid
 import numpy as np
 import precision_policy
-import expected_exception_contract
 import gen_cases  # T7：复用 bf16 位级 codec（_f32_to_bf16_uint16/_bf16_uint16_to_f32）+ 原生 dtype 表
 import cpp_extension_identity
 
@@ -548,23 +547,6 @@ def build_multi_output_evidence(caseset, work_dir, out_dir, perf_by_case=None):
         # 在 np.load(None) 之类的地方炸掉整轮（正是本轮要修的那种「一条挂、全轮零产物」）。
         _failed = failed_by_cid.get(cid)
         if _failed is not None:
-            expected_exception = exp.get("expected_exception")
-            if expected_exception is not None:
-                expected_exception_contract.normalize_contract(
-                    expected_exception, where=f"{cid}.expected.expected_exception")
-                ev.append({
-                    "case_id": cid,
-                    "status": "expected_exception",
-                    "exception": {
-                        "schema": expected_exception_contract.OBSERVED_SCHEMA,
-                        "schema_version": expected_exception_contract.OBSERVED_VERSION,
-                        "class": _failed.get("error_type"),
-                        "phase": _failed.get("phase"),
-                        "message": _failed["error"],
-                    },
-                    "perf": _perf_entry(cid, perf_by_case),
-                })
-                continue
             failed_ev = {"case_id": cid, "status": EV_STATUS_EXECUTION_FAILED,
                          "error_kind": _failed.get("error_kind") or EV_STATUS_EXECUTION_FAILED,
                          "error_phase": _failed.get("phase"),
@@ -573,13 +555,6 @@ def build_multi_output_evidence(caseset, work_dir, out_dir, perf_by_case=None):
                          "perf": _perf_entry(cid, perf_by_case)}
             _copy_output_written_evidence(failed_ev, _failed, produced=False)
             ev.append(failed_ev)
-            continue
-        if exp.get("expected_exception") is not None:
-            expected_exception_contract.normalize_contract(
-                exp["expected_exception"], where=f"{cid}.expected.expected_exception")
-            # DUT succeeded while CPU reference declared a controlled exception.
-            ev.append({"case_id": cid, "status": "ok", "exception": None,
-                       "perf": _perf_entry(cid, perf_by_case)})
             continue
         if exp.get("golden_status") == EV_STATUS_GOLDEN_UNAVAILABLE:
             ev.append({"case_id": cid, "status": EV_STATUS_GOLDEN_UNAVAILABLE,
@@ -592,39 +567,6 @@ def build_multi_output_evidence(caseset, work_dir, out_dir, perf_by_case=None):
         prod = produced_by_cid.get(cid)
         if prod is None:
             raise RuntimeError(f"{cid}: out_manifest 无该 case 的产物（driver 未跑该 case？）")
-        # compare=na is a structural empty result, not a numerical policy.  Handle it
-        # before any policy/metric lookup while retaining shape, bytes and write receipt.
-        if exp.get("compare") == "na":
-            strict_empty = any(
-                isinstance(item, dict) and isinstance(item.get("shape"), list)
-                and any(isinstance(dim, int) and not isinstance(dim, bool) and dim == 0
-                        for dim in item["shape"])
-                for item in c.get("inputs") or [])
-            if not strict_empty or set(prod) != {0}:
-                raise RuntimeError(
-                    f"{cid}: compare=na 仅允许严格空输入且恰有一个实际输出")
-            po = prod[0]
-            golden_path = exp.get("golden_path")
-            if not isinstance(golden_path, str):
-                raise RuntimeError(f"{cid}: strict-empty 缺 golden_path")
-            golden_abs = _safe(work_dir, golden_path)
-            out_abs = _safe(out_dir, po["path"])
-            shape = [int(x) for x in (po.get("shape") or [])]
-            if shape != exp.get("out_shape") or not any(dim == 0 for dim in shape):
-                raise RuntimeError(
-                    f"{cid}: strict-empty 实际输出 shape={shape} ≠ expected={exp.get('out_shape')}")
-            row = {"case_id": cid, "status": "skipped_empty",
-                   "precision": {
-                       "compare": "na", "out_shape": shape,
-                       "out_dtype": str(po.get("dtype")),
-                       "provenance": {
-                           "golden_sha256": _sha256_file(golden_abs),
-                           "out_sha256": _sha256_file(out_abs), "numel": 0,
-                       },
-                   }, "perf": _perf_entry(cid, perf_by_case)}
-            _copy_output_written_evidence(row, po, produced=True)
-            ev.append(row)
-            continue
         # Medium#7：**index 集必须精确等于 range(n)**——多一个（driver 多写/写错位）或少一个（漏跑某输出）
         # 都拒。缺失单看下面逐 k 的 `po is None` 也拦得住，但**多余**的以前完全没人管；两边一起卡才闭合。
         # 单输出旧 caseset（无 `outputs[]`）的期望集就是 {0}。

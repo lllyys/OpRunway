@@ -260,6 +260,7 @@ class CppExtensionAdapterContractTest(unittest.TestCase):
         }
         document = {
             "custom_kind": "cpp_extension",
+            "execution_isolation_mode": "subprocess_per_case_v1",
             "baseline_source": "torch_npu",
             "custom_provenance": cpp,
             "records": [{"case_id": "c0", "custom": {"execution_identity": identity}},

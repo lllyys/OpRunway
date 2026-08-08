@@ -185,7 +185,6 @@ import content_address
 import dtype_requirement_sets as DRS
 import perf_mode
 import precision_policy
-import expected_exception_contract
 import source_provenance
 import tensor_shape_attrs as TSA
 
@@ -1074,7 +1073,6 @@ _PLANNER_DEPENDENCIES = (
     "gen_cases.py",
     "repo_adapter.py",
     "precision_policy.py",
-    "expected_exception_contract.py",
     "tensor_shape_attrs.py",
 )
 # 未声明时的缺省档 = 现行造例规则（向后兼容硬约束：老算子 caseset 逐字节不变）。
@@ -5394,51 +5392,8 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
             cases.append(case)
             continue
         if td_entry is None:
-            try:
-                golden = _invoke_golden(
-                    _g, inputs, attrs, case_context, where=f"{cid}: golden")
-            except Exception as ex:  # expected exception is a formal functional result
-                if out_shape_fn is None:
-                    raise ValueError(
-                        f"{cid}: golden 抛出 {type(ex).__name__}，但 golden.py 未声明 out_shape；"
-                        "NPU 调用无法安全分配输出，拒绝把异常冒充正式结果") from ex
-                declared = _declared_out_shape(out_shape_fn, inputs, attrs, cid)
-                input_dtns = (_case_context_input_dtypes(
-                    entry, inputs, in_params, dtn, cid))
-                logical_output_dtype = precision_policy.derive_output_dtype(
-                    spec, [(param["name"], input_dtns[index])
-                           for index, param in enumerate(in_params)])
-                if (input_profile is not None
-                        and logical_output_dtype != input_profile["output"]["dtype"]):
-                    raise ValueError(
-                        f"{cid}: expected exception 输出 dtype 与 multi-input profile 漂移") from ex
-                in_items = _save_case_tensor_inputs(
-                    cdir, cid, inputs, in_params, input_dtns)
-                exception_contract = expected_exception_contract.from_golden_exception(ex)
-                output_names = _active_output_names(spec, variant, cid)
-                if len(output_names) != 1:
-                    raise ValueError(
-                        f"{cid}: expected exception 当前要求恰有一个 active output") from ex
-                expected = {
-                    "golden_source": golden_source, "golden_tier": _tier,
-                    "golden_path": None, "verify_mode": vmode,
-                    "compare": "na", "standard": "na",
-                    "compare_dtype": logical_output_dtype,
-                    "out_shape": list(declared), "out_shape_source": "golden.out_shape",
-                    "expected_exception": exception_contract,
-                    "case_origin": entry["case_origin"], "rule_ref": entry["rule_ref"],
-                }
-                case = {"id": cid, "dims": ["功能"],
-                        "tags": list(entry["tags"]) + ["预期异常"],
-                        "inputs": in_items, "attrs": attrs, "expected": expected}
-                if needs_aclnn_call:
-                    case["aclnn_call"] = _build_aclnn_call(
-                        spec, variant, attrs, output_names, cid)
-                    _bind_layout_to_aclnn_call(case, cid)
-                _attach_entry_contract_bindings(case, entry)
-                _attach_golden_case_context(case, case_context)
-                cases.append(case)
-                continue
+            golden = _invoke_golden(
+                _g, inputs, attrs, case_context, where=f"{cid}: golden")
         else:
             # CS · `golden_unavailable` 一等状态：任务书用例集里总有几条超出参考实现的支持范围
             # （实测：通道数 > OpenCV CV_CN_MAX 的那几条）。**不中断全量生成**——身份保留、

@@ -29,7 +29,6 @@ import content_address  # noqa: E402
 import cpp_extension_adapter  # noqa: E402
 import cpp_extension_identity  # noqa: E402
 import dtype_requirement_sets  # noqa: E402
-import expected_exception_contract  # noqa: E402
 import multi_card_shards  # noqa: E402
 import perf_mode  # noqa: E402
 import perf_evidence_contract  # noqa: E402
@@ -1468,25 +1467,12 @@ def gate_task1(d, errs, source_facts_path=None):
             if not c.get("dims"):
                 errs.append(f"{cid}: 无 dims（功能/精度/性能维度）")
             continue
-        expected_exception = exp.get("expected_exception")
-        if expected_exception is not None:
-            try:
-                expected_exception_contract.normalize_contract(
-                    expected_exception, where=f"{cid}.expected.expected_exception")
-            except ValueError as ex:
-                errs.append(str(ex))
-            if c.get("dims") != ["功能"] or exp.get("golden_path") is not None:
-                errs.append(
-                    f"{cid}: expected_exception 须绑定 dims=['功能'] 且 golden_path=null")
-        elif not exp.get("golden_path"):
+        if not exp.get("golden_path"):
             errs.append(f"{cid}: 无 golden_path")
         # §1.4 空 Tensor 功能用例（compare=na，numel=0）：无精度口径可判 → 豁免阈值/标准/policy 完整性
         #  （validator 判 na）；防伪造：na 仅对真空 Tensor（某 input shape 含 0）合法，否则记 error。
         if exp.get("compare") == "na":
-            if expected_exception is not None:
-                if exp.get("standard") != "na":
-                    errs.append(f"{cid}: expected_exception 的 standard 须为 na")
-            elif not _case_strict_empty(c):    # codex #4：严格真空（拒 shape:[false]/[0.0] 伪造）
+            if not _case_strict_empty(c):    # codex #4：严格真空（拒 shape:[false]/[0.0] 伪造）
                 errs.append(f"{cid}: expected.compare=na 但非严格真空 Tensor（伪造 na 跳精度门，拒绝）")
         else:
             if exp.get("threshold") is None:
@@ -2035,6 +2021,19 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
     _gate_cpp_extension_tensor_shape_attrs(
         caseset, receipt, ev_list, errs, plan=plan)
     _gate_cpp_extension_invocation_accounting(plan, receipt, ev_list, errs)
+    try:
+        isolation = cpp_extension_adapter.validate_execution_isolation(
+            plan, receipt.get("execution_isolation"))
+        by_id = {row.get("case_id"): row for row in ev_list if isinstance(row, dict)}
+        for record in isolation["records"]:
+            ev = by_id.get(record["case_id"])
+            if not isinstance(ev, dict) \
+                    or ev.get("execution_isolation_mode") != isolation["mode"] \
+                    or ev.get("call_status") != record.get("call_status") \
+                    or ev.get("call_record_sha256") != _canonical_sha(record):
+                errs.append(f"{record['case_id']}: evidence 未逐字绑定 subprocess/call status")
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        errs.append(f"cpp_extension per-case 隔离/两段式状态非法：{ex}")
     _gate_cpp_extension_stage2_evidence(manifest, errs)
     bindings = receipt.get("bindings")
     if not isinstance(bindings, dict):
@@ -2416,34 +2415,6 @@ def _gate_task2_unjudgeable(cases, ev_list, vd, errs):
         elif row.get("功能") != "fail" or row.get("精度") == "pass":
             errs.append(f"{cid}: evidence.status={st!r}，裁决却是 功能={row.get('功能')!r}/"
                         f"精度={row.get('精度')!r}——没有可比结果的 case 不得记成通过")
-    return ids
-
-
-def _gate_expected_exceptions(cases, ev_list, vd, errs):
-    ev_by_id = {row.get("case_id"): row for row in ev_list if isinstance(row, dict)}
-    verdict_by_id = {row.get("case_id"): row for row in (vd.get("per_case") or [])
-                     if isinstance(row, dict)}
-    ids = set()
-    for case in cases:
-        exp = case.get("expected") if isinstance(case, dict) else None
-        contract = exp.get("expected_exception") if isinstance(exp, dict) else None
-        if contract is None:
-            continue
-        cid = case.get("id")
-        ids.add(cid)
-        ev = ev_by_id.get(cid)
-        observed = (ev.get("exception") if isinstance(ev, dict)
-                    and ev.get("status") == "expected_exception" else None)
-        try:
-            matched, why = expected_exception_contract.compare(contract, observed)
-        except ValueError as ex:
-            matched, why = False, str(ex)
-        row = verdict_by_id.get(cid)
-        if not matched:
-            if isinstance(row, dict) and row.get("功能") != "fail":
-                errs.append(f"{cid}: expected exception 不匹配({why})，verdict 却未判功能 fail")
-        elif not isinstance(row, dict) or row.get("功能") != "pass" or row.get("精度") != "na":
-            errs.append(f"{cid}: expected exception 已匹配，但 verdict 未落功能 pass/精度 na")
     return ids
 
 
@@ -2889,8 +2860,7 @@ def gate_task2(d, errs, source_facts_path=None):
     #  不豁免 → 下方精度证据完整性照校、因缺字段被门 FAILED。
     na_ids = {c["id"] for c in cases if isinstance(c, dict) and c.get("id")
               and isinstance(c.get("expected"), dict) and c["expected"].get("compare") == "na"
-              and (_case_strict_empty(c)
-                   or c["expected"].get("expected_exception") is not None)}
+              and _case_strict_empty(c)}
     stochastic_ids = {
         c["id"] for c in cases
         if isinstance(c, dict) and c.get("id")
@@ -2902,8 +2872,6 @@ def gate_task2(d, errs, source_facts_path=None):
     # 跑挂 / 无 golden 的 case：同样无精度证据可校，但豁免只给「证据完整性」这一项——
     # 结论侧由 `_gate_task2_unjudgeable` 逐条反向核（必须在 verdict 里落成失败）。
     unjudgeable_ids = _gate_task2_unjudgeable(cases, ev_list, vd, errs)
-    expected_exception_ids = _gate_expected_exceptions(cases, ev_list, vd, errs)
-    na_ids.update(expected_exception_ids)
     skip_precision_ids = na_ids | unjudgeable_ids | stochastic_ids
     # Q9 oracle_source 门校用 precision_policy（纯 stdlib：ORACLE_SOURCES + oracle_source_from_golden，不拉 numpy）。
     # import 失败（几乎不会）→ 记 error、oracle 校跳过（但门 FAILED），不静默放过。
@@ -4361,6 +4329,7 @@ def _gate_cpp_extension_perf_collection(d, errs):
     record_ids = [row.get("case_id") for row in records
                   if isinstance(row, dict)] if isinstance(records, list) else None
     if (collect.get("custom_kind") != "cpp_extension"
+            or collect.get("execution_isolation_mode") != "subprocess_per_case_v1"
             or provenance != expected_provenance):
         errs.append("cpp_extension perf_collection 的 ELF/vendor/namespace provenance 与 receipt 漂移")
     planned = checkpoint.get("planned_case_ids") if isinstance(checkpoint, dict) else None

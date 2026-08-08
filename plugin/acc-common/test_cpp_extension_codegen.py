@@ -36,8 +36,8 @@ class CppExtensionCodegenTest(unittest.TestCase):
             disk = json.loads((Path(td) / "extension_manifest.json").read_text())
         self.assertEqual(manifest, disk)
         self.assertIn('#include "npu_cpp_extension.h"', cpp)
-        self.assertIn("EXEC_NPU_CMD_EXT(aclnnWitness,", cpp)
-        self.assertIn("EXEC_NPU_CMD_EXT(aclnnWitnessDim,", cpp)
+        self.assertIn("OpRunwayWriteCallStatus", cpp)
+        self.assertIn("workspace_status != 0 || executor == nullptr", cpp)
         self.assertIn("TORCH_LIBRARY(oprunway_", cpp)
         self.assertIn("PrivateUse1", cpp)
         self.assertIn("Tensor? indicesOut", cpp)
@@ -89,8 +89,8 @@ class CppExtensionCodegenTest(unittest.TestCase):
         with self.assertRaises(C.CppExtensionCodegenError):
             C.generate(bad, tempfile.mkdtemp())
 
-    def test_default_stage2_keeps_macro_and_records_degradation(self):
-        """两处都没声明 stage2 形态 → 走历史宏，但 `stage2_form_unverified` 必须挂账。"""
+    def test_default_stage2_uses_status_bridge_and_records_degradation(self):
+        """两处都没声明形态仍挂账；运行桥不得因 legacy 输入绕过状态记录。"""
         with tempfile.TemporaryDirectory() as td:
             manifest = C.generate(_spec(), td)
             cpp = (Path(td) / "csrc" / "oprunway_extension.cpp").read_text()
@@ -98,10 +98,10 @@ class CppExtensionCodegenTest(unittest.TestCase):
         for variant in manifest["variants"]:
             self.assertEqual(variant["stage2_form"], C.STAGE2_STANDARD)
             self.assertEqual(variant["stage2_form_source"], C.STAGE2_SOURCE_DEFAULT)
-            self.assertEqual(variant["dispatch"], C.DISPATCH_MACRO)
+            self.assertEqual(variant["dispatch"], C.DISPATCH_STANDARD_STATUS)
             self.assertEqual(variant["stage2_call_arity"], 4)
-        self.assertIn("EXEC_NPU_CMD_EXT(aclnnWitness,", cpp)
-        self.assertNotIn("ConvertToOpApiFunc", cpp)
+        self.assertIn("ConvertToOpApiFunc", cpp)
+        self.assertIn("executor == nullptr", cpp)
 
     def test_default_fixture_bytes_do_not_drift(self):
         """N2 未命中时不改任何生成字节；producer 若未来出现则不参比。"""
@@ -115,11 +115,11 @@ class CppExtensionCodegenTest(unittest.TestCase):
         manifest_bytes = (
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode()
         self.assertEqual(hashlib.sha256(cpp).hexdigest(),
-                         "371dafc8f9f244eec511218083945d6756a35cd9a3afe171c509255cc1fddc2b")
+                         "44e9e3201e24670046b8cdd94808a6e33867fe24101982ef6f96f037bde1d5a2")
         self.assertEqual(hashlib.sha256(setup).hexdigest(),
                          "7b3aa22a20c80cb89a55b0ba34ead92e0ac58a0d3a8ea5426f567137f774d9d0")
         self.assertEqual(hashlib.sha256(manifest_bytes).hexdigest(),
-                         "24ac2afdb373664e5439dfc95b840ffd64fc691e30a297031a05666e0aa540ef")
+                         "19b3cc40bcc8a0d5d7fc438295b587b94fe0a46c55acc95fc7525ec7fc23dabe")
 
 
 def _array_attr_spec():

@@ -2,15 +2,13 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
-## 2026-08-08 · Expected-exception 与 strict-empty 正式结果契约（隔离补丁）
+## 2026-08-08 · cpp_extension 两段式状态与逐 case 进程隔离
 
-- 新增通用 expected-exception 契约：CPU golden 直接异常结构化绑定 class/phase/exact-message，case 不删除、
-  不改输入；NPU 成功或异常不等价均判功能 FAIL，等价异常判功能 PASS/精度 na。
-- exception ledger 显式贯穿 caseset→invocation plan→driver receipt→evidence→validator/gate；planner dependency
-  同时绑定新契约实现，单层篡改 fail-closed。
-- strict-empty `compare=na` 在 adapter 的数值 policy/metrics 之前处理，仍保留 actual shape、golden/out SHA
-  和 output-written receipt，不制造数值 policy。
-- A3 独立容器定向与相关回归 354 tests OK，包含 legacy byte pin；未运行 Remainder。
+- generated bridge 显式记录 stage1 返回值、workspace、executor 空值与 stage2 调用/返回状态；
+  stage1 失败或 executor 为空时在 bridge 内停止，绝不进入 stage2。
+- 精度调用按冻结 plan 逐 case 启动独立 worker，receipt/evidence 绑定 subprocess 隔离记录及逐 case
+  digest；父侧观测 PID 与子侧回报 PID 必须一致且逐 case 唯一，normal/signal/timeout/missing_result
+  四类终止均严格记账，fresh gate 以 total validator 重放状态机。输出哨兵检查保持独立，不由调用成功替代。
 
 ## 2026-08-08 · Generated golden 逻辑 dtype 调用契约
 

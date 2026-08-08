@@ -23,7 +23,6 @@ import cpp_extension_identity
 import perf_mode
 import perf_evidence_contract
 import precision_policy
-import expected_exception_contract
 import stochastic_collector
 import stochastic_contract
 import tensor_shape_attrs
@@ -64,6 +63,110 @@ TENSOR_SHAPE_ATTR_BINDINGS_SCHEMA = "oprunway.tensor_shape_attr_bindings"
 TENSOR_SHAPE_ATTR_BINDINGS_VERSION = 1
 INVOCATION_ACCOUNTING_SCHEMA = "oprunway.cpp_extension_invocation_accounting"
 INVOCATION_ACCOUNTING_VERSION = 1
+EXECUTION_ISOLATION_SCHEMA = "oprunway.cpp_extension_execution_isolation"
+EXECUTION_ISOLATION_VERSION = 1
+
+
+def validate_execution_isolation(plan, value):
+    try:
+        _layout_exact_keys(value, {"schema", "schema_version", "mode", "records"},
+                           "receipt.execution_isolation")
+        if (value.get("schema") != EXECUTION_ISOLATION_SCHEMA
+                or type(value.get("schema_version")) is not int
+                or value.get("schema_version") != EXECUTION_ISOLATION_VERSION
+                or value.get("mode") != "subprocess_per_case_v1"):
+            raise CppExtensionAdapterError(
+                "execution_isolation 须为 subprocess_per_case_v1 current schema")
+        records = value.get("records")
+        cases = plan.get("cases") if isinstance(plan, dict) else None
+        if not isinstance(cases, list) or not all(isinstance(row, dict) for row in cases):
+            raise CppExtensionAdapterError("execution_isolation plan 非法")
+        expected = [row.get("case_id") for row in cases]
+        if (not isinstance(records, list) or not all(isinstance(r, dict) for r in records)
+                or [r.get("case_id") for r in records] != expected):
+            raise CppExtensionAdapterError("execution_isolation.records 未按 plan 完整覆盖")
+        launches, parent_pids = set(), set()
+        record_keys = {"case_id", "launch_id", "isolation_mode", "termination_kind",
+                       "returncode", "parent_pid", "child_pid", "outcome", "call_status"}
+        status_keys = {"schema", "schema_version", "stage1_ret", "workspace_size",
+                       "executor_null", "stage2_called", "stage2_ret"}
+        for index, record in enumerate(records):
+            where = f"execution_isolation.records[{index}]"
+            _layout_exact_keys(record, record_keys, where)
+            if (not isinstance(record["case_id"], str) or not record["case_id"]
+                    or record["isolation_mode"] != "subprocess_per_case_v1"
+                    or record["outcome"] not in ("produced", "failed")):
+                raise CppExtensionAdapterError(f"{where} identity/mode/outcome 非法")
+            launch = record["launch_id"]
+            if not isinstance(launch, str) or not launch or launch in launches:
+                raise CppExtensionAdapterError(f"{where}.launch_id 缺失/复用")
+            launches.add(launch)
+            parent_pid = record["parent_pid"]
+            if type(parent_pid) is not int or parent_pid <= 0 or parent_pid in parent_pids:
+                raise CppExtensionAdapterError(f"{where}.parent_pid 非正整数或复用")
+            parent_pids.add(parent_pid)
+            child_pid = record["child_pid"]
+            if child_pid is not None and (type(child_pid) is not int or child_pid <= 0):
+                raise CppExtensionAdapterError(f"{where}.child_pid 非正整数/null")
+            termination = record["termination_kind"]
+            returncode = record["returncode"]
+            if termination not in ("normal", "signal", "timeout", "missing_result"):
+                raise CppExtensionAdapterError(f"{where}.termination_kind 非法")
+            if termination == "timeout":
+                if returncode is not None or child_pid is not None:
+                    raise CppExtensionAdapterError(f"{where}: timeout 记账非法")
+            elif type(returncode) is not int:
+                raise CppExtensionAdapterError(f"{where}.returncode 须为 plain int")
+            elif termination == "signal":
+                if returncode >= 0 or child_pid is not None:
+                    raise CppExtensionAdapterError(f"{where}: signal 记账非法")
+            elif termination == "missing_result":
+                if returncode != 0 or child_pid is not None:
+                    raise CppExtensionAdapterError(f"{where}: missing_result 记账非法")
+            elif returncode < 0 or (returncode == 0 and child_pid != parent_pid):
+                raise CppExtensionAdapterError(f"{where}: normal pid/returncode 非法")
+            status = record["call_status"]
+            success = False
+            if status is not None:
+                _layout_exact_keys(status, status_keys, f"{where}.call_status")
+                if (status["schema"] != "oprunway.cpp_extension_call_status"
+                        or type(status["schema_version"]) is not int
+                        or status["schema_version"] != 1
+                        or type(status["stage1_ret"]) is not int
+                        or type(status["workspace_size"]) is not int
+                        or status["workspace_size"] < 0
+                        or type(status["executor_null"]) is not bool
+                        or type(status["stage2_called"]) is not bool
+                        or (status["stage2_ret"] is not None
+                            and type(status["stage2_ret"]) is not int)):
+                    raise CppExtensionAdapterError(f"{where}.call_status 类型/值非法")
+                bad_stage1 = status["stage1_ret"] != 0 or status["executor_null"]
+                if (bad_stage1 and (status["stage2_called"] or status["stage2_ret"] is not None)) \
+                        or (not status["stage2_called"] and status["stage2_ret"] is not None) \
+                        or (status["stage2_called"] and status["stage2_ret"] is None):
+                    raise CppExtensionAdapterError(f"{where}: 两段式状态组合非法")
+                success = (not bad_stage1 and status["stage2_called"]
+                           and status["stage2_ret"] == 0)
+            produced = (termination == "normal" and returncode == 0
+                        and child_pid == parent_pid and success)
+            if (record["outcome"] == "produced") != produced:
+                raise CppExtensionAdapterError(f"{where}: outcome 与进程/调用状态不一致")
+        return value
+    except CppExtensionAdapterError:
+        raise
+    except Exception as ex:
+        raise CppExtensionAdapterError(f"execution_isolation 非法: {ex}") from ex
+
+
+def bind_execution_isolation_evidence(evidence, isolation):
+    records = {row["case_id"]: row for row in isolation["records"]}
+    for row in evidence:
+        record = records.get(row.get("case_id"))
+        if record is None:
+            continue
+        row["execution_isolation_mode"] = isolation["mode"]
+        row["call_status"] = record.get("call_status")
+        row["call_record_sha256"] = _canonical_sha(record)
 
 
 def _canonical_sha(value):
@@ -309,31 +412,6 @@ def validate_caseset_golden_invocation(caseset):
         raise CppExtensionAdapterError(
             "golden_invocation_receipt 的 case 分母/context 摘要与 caseset 漂移")
     return receipt
-
-
-def validate_caseset_expected_exceptions(caseset):
-    """Validate and content-bind every formal expected-exception result."""
-    rows = []
-    for index, case in enumerate(caseset.get("cases") or []):
-        if not isinstance(case, dict):
-            raise CppExtensionAdapterError(f"cases[{index}] 须为 object")
-        expected = case.get("expected") or {}
-        contract = expected.get("expected_exception")
-        if contract is None:
-            continue
-        try:
-            normalized = expected_exception_contract.normalize_contract(
-                contract, where=f"{case.get('id')}.expected_exception")
-        except ValueError as ex:
-            raise CppExtensionAdapterError(str(ex)) from ex
-        if case.get("dims") != ["功能"] or expected.get("compare") != "na" \
-                or expected.get("standard") != "na" or expected.get("golden_path") is not None:
-            raise CppExtensionAdapterError(
-                f"{case.get('id')}: expected_exception 须绑定 dims=['功能']、compare/standard=na、golden_path=null")
-        rows.append({"case_id": case.get("id"),
-                     "sha256": _canonical_sha(normalized)})
-    return ({"schema": "oprunway.expected_exception_ledger", "schema_version": 1,
-             "cases": rows, "case_count": len(rows)} if rows else None)
 
 
 def _layout_nonempty_string(value, where):
@@ -1361,7 +1439,6 @@ def build_invocation_plan(caseset, manifest):
     variants = _variants_by_symbol(manifest)
     attr_contract, attr_by_name = _attr_contract_by_name(manifest)
     golden_invocation_receipt = validate_caseset_golden_invocation(caseset)
-    expected_exception_ledger = validate_caseset_expected_exceptions(caseset)
     golden_invocation_receipt_sha256 = (
         content_address.content_digest(
             precision_policy.GOLDEN_INVOCATION_RECEIPT_DOMAIN,
@@ -1483,8 +1560,6 @@ def build_invocation_plan(caseset, manifest):
         plan["multi_input_contract_sha256"] = multi_contract_sha
     if golden_invocation_receipt_sha256 is not None:
         plan["golden_invocation_receipt_sha256"] = golden_invocation_receipt_sha256
-    if expected_exception_ledger is not None:
-        plan["expected_exception_ledger_sha256"] = _canonical_sha(expected_exception_ledger)
     if attr_contract is not None:
         plan["attr_parameter_contract_sha256"] = _canonical_sha(attr_contract)
     if layout_contract is not None:
@@ -1841,6 +1916,7 @@ def _validate_perf_collection(plan, document):
     checkpoint = document.get("collection_checkpoint")
     records = document.get("records")
     if (document.get("custom_kind") != "cpp_extension"
+            or document.get("execution_isolation_mode") != "subprocess_per_case_v1"
             or document.get("baseline_source") != plan.get("baseline")
             or document.get("custom_provenance") != plan.get("cpp_extension")
             or not isinstance(checkpoint, dict)
@@ -2050,17 +2126,6 @@ def validate_receipt(work, caseset):
             != golden_invocation_receipt_sha256:
         raise CppExtensionAdapterError(
             "invocation plan 的 golden invocation receipt 摘要与 caseset 漂移")
-    expected_exception_ledger = validate_caseset_expected_exceptions(caseset)
-    expected_exception_ledger_sha256 = (
-        _canonical_sha(expected_exception_ledger)
-        if expected_exception_ledger is not None else None)
-    if expected_exception_ledger_sha256 is None:
-        if "expected_exception_ledger_sha256" in plan:
-            raise CppExtensionAdapterError(
-                "legacy invocation plan 不得凭空声明 expected exception ledger")
-    elif plan.get("expected_exception_ledger_sha256") != expected_exception_ledger_sha256:
-        raise CppExtensionAdapterError(
-            "invocation plan 的 expected exception ledger 摘要与 caseset 漂移")
     expected = {
         "caseset_sha256": _canonical_sha(caseset),
         "manifest_sha256": _canonical_sha(manifest),
@@ -2070,8 +2135,6 @@ def validate_receipt(work, caseset):
     if golden_invocation_receipt_sha256 is not None:
         expected["golden_invocation_receipt_sha256"] = (
             golden_invocation_receipt_sha256)
-    if expected_exception_ledger_sha256 is not None:
-        expected["expected_exception_ledger_sha256"] = expected_exception_ledger_sha256
     bindings = receipt.get("bindings")
     if not isinstance(bindings, dict):
         raise CppExtensionAdapterError("receipt.bindings 缺失")
@@ -2079,16 +2142,13 @@ def validate_receipt(work, caseset):
             and "golden_invocation_receipt_sha256" in bindings):
         raise CppExtensionAdapterError(
             "legacy receipt 不得凭空声明 golden invocation receipt")
-    if (expected_exception_ledger_sha256 is None
-            and "expected_exception_ledger_sha256" in bindings):
-        raise CppExtensionAdapterError(
-            "legacy receipt 不得凭空声明 expected exception ledger")
     for key, value in expected.items():
         _require_sha(f"expected.{key}", value)
         if bindings.get(key) != value:
             raise CppExtensionAdapterError(
                 f"receipt.bindings.{key} 漂移：期望 {value}，得 {bindings.get(key)!r}")
     validate_invocation_accounting(plan, receipt.get("invocation"))
+    validate_execution_isolation(plan, receipt.get("execution_isolation"))
 
     _validate_tensor_format_receipt(manifest, receipt)
     _validate_multi_input_receipt(manifest, receipt)
@@ -2563,6 +2623,7 @@ def run_cpp_extension(caseset, work, defect_cases=None):
     _bind_multi_input_evidence(caseset, evidence, receipt)
     _bind_tensor_shape_attr_evidence(caseset, evidence, receipt)
     _bind_layout_evidence(caseset, evidence, receipt)
+    bind_execution_isolation_evidence(evidence, receipt["execution_isolation"])
     validate_invocation_accounting(
         _strict_json(plan), receipt.get("invocation"), evidence=evidence)
     perf_plan, skipped = _write_perf_plan(caseset, work, evidence, receipt)
@@ -2585,6 +2646,7 @@ def run_cpp_extension(caseset, work, defect_cases=None):
         _bind_multi_input_evidence(caseset, evidence, receipt)
         _bind_tensor_shape_attr_evidence(caseset, evidence, receipt)
         _bind_layout_evidence(caseset, evidence, receipt)
+        bind_execution_isolation_evidence(evidence, receipt["execution_isolation"])
         validate_invocation_accounting(
             _strict_json(plan), receipt.get("invocation"), evidence=evidence)
         if not perf_mode.is_measure_only(perf_plan.get("mode", perf_mode.DEFAULT_MODE)):
@@ -2671,6 +2733,7 @@ def run_cpp_extension_precision_only(caseset, work):
     _bind_multi_input_evidence(caseset, evidence, receipt)
     _bind_tensor_shape_attr_evidence(caseset, evidence, receipt)
     _bind_layout_evidence(caseset, evidence, receipt)
+    bind_execution_isolation_evidence(evidence, receipt["execution_isolation"])
     validate_invocation_accounting(
         _strict_json(plan), receipt.get("invocation"), evidence=evidence)
     digest = _canonical_sha(receipt)
