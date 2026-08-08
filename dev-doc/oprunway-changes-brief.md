@@ -4,6 +4,8 @@
 
 ## 2026-08-07 · 三算子 N10 单卡正式验收与实测回修
 
+- 根 README 从历史状态页重写为当前用户入口：只描述 caller-trusted 输入、content→build→ELF→NPU
+  证据链、`cpp_extension` fresh 准入和现行文档入口，不再复制旧 runner、算子计数和易漂移实测快照。
 - Workflow 不负责或操作 GPU：任务书写 GPU 精度真值时解析为同族 CPU，写 GPU 性能对比时只测 NPU
   msprof 并挂未验收条款；不建立 Task 3，不连接、运行、采集或消费 GPU 数据。
 - 文档清理：根 `AGENTS.md` 从 773 行压到 262 行，只保留 current 可执行仓规；`oprunway-todo.md`
