@@ -52,6 +52,17 @@ _BUILD_PY = (
     "sys.exit(rc)\n"
 )
 
+_SEARCH_BUILD_PY = (
+    "import os, shutil, sys\n"
+    "elf, sentinel, installed, package, object_rel = sys.argv[1:6]\n"
+    "shutil.copytree(installed, package)\n"
+    "payload = sentinel.encode()\n"
+    "open(elf, 'wb').write(payload)\n"
+    "open(os.path.join(installed, object_rel), 'wb').write(payload)\n"
+    "open(os.path.join(package, object_rel), 'wb').write(payload)\n"
+    "open(sentinel, 'w').write('built')\n"
+)
+
 
 class _Fixture(unittest.TestCase):
     def setUp(self):
@@ -117,6 +128,14 @@ class _Fixture(unittest.TestCase):
     def _noop_argv(self):
         """什么都不做的命令：ELF 一个字节都不会变 → 收据必须产不出来。"""
         return [sys.executable, "-c", "pass"]
+
+    def _search_argv(self, package_opp):
+        """build 期间才创建一个任意父层级的 CPack package root。"""
+        self._builds += 1
+        self.sentinel = os.path.join(self.d, f"searched-{self._builds}.stamp")
+        return [sys.executable, "-c", _SEARCH_BUILD_PY,
+                self.elf, self.sentinel, self.installed_opp, package_opp,
+                self.object_rel, f"--soc={_SOC}", f"--ops={_SELECTED_OP}"]
 
     def _run(self, rc=0):
         return V.run_build(self._argv(rc), self.root, self.elf,
@@ -248,6 +267,21 @@ class RunBuildTest(_Fixture):
             V.run_build(self._argv(), os.path.join(self.d, "no-such-dir"), self.elf)
         with self.assertRaises(V.VendorBuildReceiptError):
             V.run_build([], self.root, self.elf)
+
+    def test_programmatic_package_location_contract_fails_before_build(self):
+        both = self._delivery_kwargs()
+        both["package_search_root"] = self.d
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "PACKAGE_LOCATION_CONFLICT"):
+            V.run_build(self._argv(), self.root, self.elf, **both)
+        missing = self._delivery_kwargs()
+        del missing["package_opp_root"]
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "PACKAGE_LOCATION_CONFLICT"):
+            V.run_build(self._argv(), self.root, self.elf, **missing)
+        relative = dict(missing, package_search_root="relative/package-root")
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "绝对路径"):
+            V.run_build(self._argv(), self.root, self.elf, **relative)
+        self.assertFalse(os.path.isfile(self.sentinel),
+                         "package location 参数错误必须在 build 前拒绝")
 
     def test_produce_refuses_a_hand_made_build_result(self):
         """⭐ 生产侧唯一入口：拼一个「长得像」的 dict 也产不出收据。"""
@@ -495,6 +529,72 @@ class ProduceReceiptTest(_Fixture):
                          V.RETURNCODE_SOURCE_MEASURED)
         self.assertEqual(receipt["degradations"], [])
         self._validated(receipt)
+
+    def test_cli_search_root_resolves_the_post_build_cpack_root_into_closure(self):
+        """调用方只给有界根；真正 package root 在 build 后由共享 resolver 唯一确定。"""
+        digest_path = os.path.join(self.d, "search-prebuild.json")
+        receipt_path = os.path.join(self.d, "search-receipt.json")
+        package_search = os.path.join(self.root, "build_out", "_CPack_Packages")
+        package_opp = os.path.join(
+            package_search, "Linux", "External", "arbitrary-run-name",
+            "packages", "vendors", "fixture")
+        self.assertFalse(os.path.exists(package_search),
+                         "见证必须证明 search root 可由 build 本身创建")
+        V.main(["snapshot-digest", "--source-root", self.root,
+                "--subtree-scope", _OP, "--out", digest_path])
+        argv = self._search_argv(package_opp)
+        V.main([
+            "emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
+            "--snapshot-digest", digest_path, "--library", self.elf,
+            "--build-cwd", self.root,
+            "--requested-soc", _SOC,
+            "--selected-op", _SELECTED_OP,
+            "--expected-op-type", _OP_TYPE,
+            "--installed-opp-root", self.installed_opp,
+            "--package-search-root", package_search,
+            "--cmake-cache", self.cache,
+        ] + [f"--build-argv={arg}" for arg in argv]
+          + ["--out", receipt_path])
+        with open(receipt_path, encoding="utf-8") as src:
+            receipt = json.load(src)
+        request = receipt[V.TARGET_KERNEL_DELIVERY_KEY]["request"]
+        self.assertEqual(request["package_opp_root"], os.path.realpath(package_opp))
+        self.assertEqual(receipt["status"], "VERIFIED")
+        self.assertTrue(os.path.isfile(self.sentinel))
+        self._validated(receipt)
+
+    def test_cli_explicit_package_root_remains_the_compatible_path(self):
+        """已有显式 root 的调用不因 resolver 接入而改变 receipt 语义。"""
+        receipt = self._produce()
+        self.assertEqual(
+            receipt[V.TARGET_KERNEL_DELIVERY_KEY]["request"]["package_opp_root"],
+            os.path.realpath(self.package_opp))
+        self.assertEqual(receipt["status"], "VERIFIED")
+
+    def test_cli_rejects_both_or_neither_package_location_before_build(self):
+        digest_path = os.path.join(self.d, "location-prebuild.json")
+        V.main(["snapshot-digest", "--source-root", self.root,
+                "--subtree-scope", _OP, "--out", digest_path])
+        base = [
+            "emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
+            "--snapshot-digest", digest_path, "--library", self.elf,
+            "--build-cwd", self.root,
+            "--requested-soc", _SOC,
+            "--selected-op", _SELECTED_OP,
+            "--expected-op-type", _OP_TYPE,
+            "--installed-opp-root", self.installed_opp,
+            "--cmake-cache", self.cache,
+        ]
+        argv = [f"--build-argv={arg}" for arg in self._argv()]
+        out = ["--out", os.path.join(self.d, "must-not-exist.json")]
+        with self.assertRaises(SystemExit):
+            V.main(base + ["--package-opp-root", self.package_opp,
+                           "--package-search-root", self.d] + argv + out)
+        with self.assertRaises(SystemExit):
+            V.main(base + argv + out)
+        self.assertFalse(os.path.isfile(self.sentinel),
+                         "参数契约必须在 build 启动前 fail-closed")
+        self.assertFalse(os.path.exists(out[1]))
 
     def test_cli_build_argv_accepts_dash_leading_args(self):
         """构建实参以 `-` 开头（真实 build 命令的常态）必须能原样进收据。

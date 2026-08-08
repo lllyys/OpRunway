@@ -2,6 +2,13 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-08 · CPack package OPP 根改为共享唯一解析
+
+- 新增 stdlib-only `package_layout.py`：只在显式有界绝对根内按 installed vendor basename + expected op type
+  接受唯一 package OPP 候选，零/多命中、链接、越界和错身份均 fail-closed。`vendor_build_receipt emit`
+  新增互斥的 `--package-search-root`，build 后把解析出的真实根送入既有 target-kernel closure；显式
+  `--package-opp-root` 保持兼容，workflow/primary 明令禁止临时 wrapper 猜 CPack 层级或 first-match。
+
 ## 2026-08-08 · current vendor receipt 增加目标 kernel 交付闭包
 
 - fresh v3 receipt 新增 `target_kernel_delivery_closure_v1`：显式绑定 requested SoC、build 选择名、

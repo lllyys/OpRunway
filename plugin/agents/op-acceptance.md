@@ -47,6 +47,9 @@ CP-D `run_npu` 重跑性能，不重新抽 spec/生成 case/golden。
 ## primary 职责边界
 
 - **可直接跑「无 NL 生成、无判定」的确定性脚本**：`fetch_source.py`（取材）、`validate_taskdoc_input.py`（CP-B0 任务书输入校验门）、`gen_cases.py --dry-run`（CP-B 契约自检）、`validate_acceptance_state.py`（复核门）、`check_manifest_sync.py`——脚本是本 agent 内部实现、用 Bash 幕后跑。
+- **CP-C package 根不在 wrapper 里猜**：只把本轮 CPack staging 的有界绝对根交
+  `vendor_build_receipt.py emit --package-search-root`；共享 `package_layout.py` 负责 exact vendor/op 的唯一解析。
+  禁止临时 `find`/glob/first-match、按 `build`/`build_out` 猜父层级或复制目录冒充 package 根。
 - **不做 NL 生成 durable 工件**：spec 派 `acc-spec-extractor`；**`golden.py` 与 `runner.cpp` 都派 `acc-runner-dev`**（前者 `gen_golden`、后者 `gen_runner`）——**不自己手写 `spec.json` / `golden.py` / `runner.cpp`**。
 - **不自行判 pass/fail**：判定唯一归**确定性脚本链**（`validator.py` 精度 + `perf_compare.py` 性能 + `validate_acceptance_state.py` 三级门）；本 agent **只逐字引用确定性产物的裁决并标来源**——不是「绝不提 pass/fail」。验收路径的总结工件只按 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一；开发级路径落 `dev_*`。三者不能互相顶替。
 - **首响应先加载 `acceptance-workflow` skill**，再按 CP-A..E 状态机调度；**禁裸调 subagent**（不脱离状态机直接 fan-out）。

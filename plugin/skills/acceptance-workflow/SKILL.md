@@ -324,13 +324,20 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
       --selected-op <build --ops 使用的选择名> \
       --expected-op-type <ops-info 与 kernel metadata 使用的 op type> \
       --installed-opp-root <本轮安装出的 custom OPP 根，须绝对路径> \
-      --package-opp-root <本轮 package OPP 根，须绝对路径> \
+      --package-search-root <本轮 CPack staging 的有界搜索根，须绝对路径> \
       --cmake-cache <本轮 CMakeCache.txt，须绝对路径> \
       --build-argv=bash --build-argv=-c \
       --build-argv='./build.sh … && ./build_out/*.run --install-path=…' \
       --out <vendor-build-receipt.json>
     ```
     current schema v3 **一律要求 `--snapshot-digest`**；在线定位器也须先把目标字节物化成快照再 build。head-only 不能产 fresh receipt。
+    `--package-search-root` 是 current 编排的默认入口：`emit` 在 build **结束后**调用共享
+    `package_layout.resolve_package_opp_root`，以 installed OPP 根的 exact vendor basename +
+    `--expected-op-type` 在这个有界根内要求唯一候选；父目录叫 `build`、`build_out` 还是其它名字不属于契约。
+    零命中、多命中、符号链接/越界或 vendor/op 不匹配一律不产收据。已由 adapter 事实直接得到 exact package
+    根时仍可用兼容参数 `--package-opp-root`，但它与 `--package-search-root` **互斥**。编排 wrapper 禁止自己
+    `find | head`、猜 CPack 层级或复制一个目录再冒充 package 根；解析出的真实 package 根会直接进入既有
+    target-kernel package↔installed 摘要闭包。
     `--out` 落点自定（上面的文件名按真机实测那次写）。第二步**真跑 build、有副作用**，属真机动作，须沿用用户对本轮真机
     实验的明确确认（与 `verify_aclnn_harness` 同一口径），**不是 primary inline 那类只读脚本**。四条别绕：
     - **`emit` 自己执行 `--build-argv`**，`build.returncode` 是 `subprocess.run` 的实测值，收据另记
@@ -486,7 +493,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
       --library <被加载的 vendor ELF 绝对路径> --build-cwd <构建工作目录> \
       --requested-soc <目标 SoC> --selected-op <build 选择名> \
       --expected-op-type <op type> --installed-opp-root <安装 OPP 根> \
-      --package-opp-root <package OPP 根> --cmake-cache <CMakeCache.txt> \
+      --package-search-root <CPack staging 有界搜索根> --cmake-cache <CMakeCache.txt> \
       --build-argv=./build.sh --build-argv=--pkg --build-argv=-j16 --out <收据路径>
     ```
 
@@ -496,6 +503,9 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
     结构性地杜绝上面那个错法；同时把**产出时刻**的树摘要记进 `build.tree_state_at_emit`，
     「build 到底动没动源码树」因此**可审、但无门在比**（详见 CP-C）。⚠ `--build-argv` 的实参几乎全以 `-` 开头
     （`--pkg` / `-j16`），**必须写等号形式** `--build-argv=--pkg`，分开写会被 argparse 当成另一个选项。
+    package 根的唯一解析只走 `package_layout.py`：wrapper 不得按仓布局写 `find`/glob/first-match；
+    `--package-search-root` 与兼容的显式 `--package-opp-root` 互斥，解析结果由 target-kernel closure 继续做
+    exact-target 资产与 installed↔package 摘要闭合。
     current 收据统一校验 `source.content_anchor == build.source_snapshot_digest.content_anchor`，再绑定构建 argv、
     vendor ELF sha256 与执行现场；transport locator 不分流准入。三处消费方（driver / adapter / 验收门）共用
     `vendor_build_receipt.py` **一份**校验，不再各抄一遍。

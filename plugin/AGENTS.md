@@ -171,6 +171,9 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   取源码树整树/子树 merkle，落中间凭据）→ `emit`（**真跑** `--build-argv`，`build.returncode` 是实测值、
   记 `build.returncode_source="measured"`；`--library` 须被这次 build 改写过），**不许人手写**——手写的
   `returncode: 0` 是自报，而这份收据存在的全部意义就是机器可核。
+  package staging 位置不由临时 wrapper 猜：current 编排给 `emit --package-search-root <有界绝对根>`，
+  由共享 `package_layout.py` 按 installed vendor basename + expected op type 要求唯一命中；零/多命中、链接或越界
+  均停在 CP-C。只有已有 exact adapter 事实时才用互斥的兼容参数 `--package-opp-root`。
   ⚠ 产出侧**不读 `source_facts`**：收据里的 merkle 由 `--source-root` 现算，与取材锚的对账要到三级门才做，
   所以「收据产出来了」**不等于**「源码身份已对账」。产不出来就停在 CP-C，不带着说不清来源的 ELF 上真机；产出后经
   `OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT` 传给 CP-D 的 driver（详见 `skills/acceptance-workflow` CP-C）。

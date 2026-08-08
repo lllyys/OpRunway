@@ -167,6 +167,7 @@ import sys
 import tempfile
 import time
 
+import package_layout
 import source_provenance
 import target_kernel_delivery
 import url_credentials
@@ -1031,7 +1032,8 @@ def _validate_build_argv(build_argv, build_cwd):
 
 def run_build(build_argv, build_cwd, library_path, *, requested_soc=None,
               selected_op=None, expected_op_type=None, installed_opp_root=None,
-              package_opp_root=None, cmake_cache_path=None):
+              package_opp_root=None, package_search_root=None,
+              cmake_cache_path=None):
     """**真跑** build，返回唯一能喂给 :func:`produce_receipt` 的构建结果（有副作用）。
 
     ⚠ **没有「只记录不执行」模式**，这是刻意的，见模块 docstring：把退出码当参数收下的那条
@@ -1047,27 +1049,53 @@ def run_build(build_argv, build_cwd, library_path, *, requested_soc=None,
     也不设超时——vendor 全量构建本来就以十分钟计。
     """
     argv = _validate_build_argv(build_argv, build_cwd)
-    requested = {
+    requested_common = {
         "requested_soc": requested_soc,
         "selected_op": selected_op,
         "expected_op_type": expected_op_type,
         "installed_opp_root": installed_opp_root,
-        "package_opp_root": package_opp_root,
         "cmake_cache_path": cmake_cache_path,
     }
-    if any(value is not None for value in requested.values()):
-        missing = sorted(key for key, value in requested.items()
+    target_requested = (any(value is not None for value in requested_common.values())
+                        or package_opp_root is not None
+                        or package_search_root is not None)
+    if target_requested:
+        missing = sorted(key for key, value in requested_common.items()
                          if not isinstance(value, str) or not value.strip())
         if missing:
             raise VendorBuildReceiptError(
                 "MISSING_EXPLICIT_TARGET: target kernel delivery 参数必须整组显式提供，缺 "
                 + ", ".join(missing))
+        explicit_package = isinstance(package_opp_root, str) and bool(package_opp_root.strip())
+        searched_package = (isinstance(package_search_root, str)
+                            and bool(package_search_root.strip()))
+        if explicit_package == searched_package:
+            raise VendorBuildReceiptError(
+                "PACKAGE_LOCATION_CONFLICT: package_opp_root 与 package_search_root "
+                "必须且只能提供一个")
+        if package_opp_root is not None and not explicit_package:
+            raise VendorBuildReceiptError(
+                "PACKAGE_ROOT_UNAVAILABLE: package_opp_root 须为非空字符串")
+        if package_search_root is not None and not searched_package:
+            raise VendorBuildReceiptError(
+                "PACKAGE_SEARCH_ROOT_UNAVAILABLE: package_search_root 须为非空字符串")
+        if searched_package:
+            if not os.path.isabs(package_search_root):
+                raise VendorBuildReceiptError(
+                    "PACKAGE_SEARCH_ROOT_UNAVAILABLE: package_search_root 须为绝对路径")
+            if os.path.islink(package_search_root):
+                raise VendorBuildReceiptError(
+                    "PACKAGE_SEARCH_ROOT_SYMLINK: package_search_root 不得为符号链接")
+        requested = dict(requested_common)
+        if explicit_package:
+            requested["package_opp_root"] = package_opp_root
         try:
             target_assets_before = target_kernel_delivery.target_manifest(
                 installed_opp_root, requested_soc, allow_missing=True)
         except target_kernel_delivery.TargetKernelDeliveryError as ex:
             raise VendorBuildReceiptError(str(ex)) from ex
     else:
+        requested = None
         target_assets_before = None
     target = os.path.realpath(os.fspath(library_path))
     before = _library_state(target)
@@ -1090,6 +1118,16 @@ def run_build(build_argv, build_cwd, library_path, *, requested_soc=None,
             f"vendor ELF 在这次构建窗口内一个字节都没变：{target}"
             "（mtime_ns / size / sha256 三项全同）——这份收据要证明的正是「这个 .so 由这次 build "
             "产出」，对着一个预先存在、构建根本没碰过的文件出收据 = 宣称有门其实没门（fail-closed）")
+    if target_assets_before is not None and package_search_root is not None \
+            and run.returncode == 0:
+        expected_vendor_dir = os.path.basename(
+            os.path.realpath(requested_common["installed_opp_root"]))
+        try:
+            requested["package_opp_root"] = package_layout.resolve_package_opp_root(
+                package_search_root, expected_vendor_dir,
+                requested_common["expected_op_type"])
+        except package_layout.PackageLayoutError as ex:
+            raise VendorBuildReceiptError(str(ex)) from ex
     result = {
         "argv": argv,
         "cwd": build_cwd,
@@ -1426,8 +1464,14 @@ def main(argv=None):
                    help="目标 ops-info 必须精确包含的 op type")
     e.add_argument("--installed-opp-root", required=True,
                    help="安装后 custom OPP vendor 包根，须与 --library 布局同源")
-    e.add_argument("--package-opp-root", required=True,
-                   help="安装前 package 内 vendor 包根；缺失即不具正式验收资格")
+    package_location = e.add_mutually_exclusive_group(required=True)
+    package_location.add_argument(
+        "--package-opp-root",
+        help="安装前 package 内 vendor 包根；显式已知时走兼容路径")
+    package_location.add_argument(
+        "--package-search-root",
+        help="build 后搜索 package OPP 根的显式有界绝对根；共享 resolver 按 "
+             "installed vendor basename + expected op type 要求唯一命中")
     e.add_argument("--cmake-cache", required=True,
                    help="本轮 build 的 CMakeCache.txt；SoC/op 必须与 argv 和显式请求同时一致")
     e.add_argument("--returncode", type=int, default=None,
@@ -1489,6 +1533,7 @@ def main(argv=None):
         expected_op_type=args.expected_op_type,
         installed_opp_root=args.installed_opp_root,
         package_opp_root=args.package_opp_root,
+        package_search_root=args.package_search_root,
         cmake_cache_path=args.cmake_cache)
     if args.returncode is not None and args.returncode != result["returncode"]:
         raise VendorBuildReceiptError(
