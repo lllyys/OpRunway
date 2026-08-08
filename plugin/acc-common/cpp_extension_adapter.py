@@ -23,6 +23,7 @@ import cpp_extension_identity
 import perf_mode
 import perf_evidence_contract
 import precision_policy
+import expected_exception_contract
 import stochastic_collector
 import stochastic_contract
 import tensor_shape_attrs
@@ -308,6 +309,31 @@ def validate_caseset_golden_invocation(caseset):
         raise CppExtensionAdapterError(
             "golden_invocation_receipt 的 case 分母/context 摘要与 caseset 漂移")
     return receipt
+
+
+def validate_caseset_expected_exceptions(caseset):
+    """Validate and content-bind every formal expected-exception result."""
+    rows = []
+    for index, case in enumerate(caseset.get("cases") or []):
+        if not isinstance(case, dict):
+            raise CppExtensionAdapterError(f"cases[{index}] 须为 object")
+        expected = case.get("expected") or {}
+        contract = expected.get("expected_exception")
+        if contract is None:
+            continue
+        try:
+            normalized = expected_exception_contract.normalize_contract(
+                contract, where=f"{case.get('id')}.expected_exception")
+        except ValueError as ex:
+            raise CppExtensionAdapterError(str(ex)) from ex
+        if case.get("dims") != ["功能"] or expected.get("compare") != "na" \
+                or expected.get("standard") != "na" or expected.get("golden_path") is not None:
+            raise CppExtensionAdapterError(
+                f"{case.get('id')}: expected_exception 须绑定 dims=['功能']、compare/standard=na、golden_path=null")
+        rows.append({"case_id": case.get("id"),
+                     "sha256": _canonical_sha(normalized)})
+    return ({"schema": "oprunway.expected_exception_ledger", "schema_version": 1,
+             "cases": rows, "case_count": len(rows)} if rows else None)
 
 
 def _layout_nonempty_string(value, where):
@@ -1335,6 +1361,7 @@ def build_invocation_plan(caseset, manifest):
     variants = _variants_by_symbol(manifest)
     attr_contract, attr_by_name = _attr_contract_by_name(manifest)
     golden_invocation_receipt = validate_caseset_golden_invocation(caseset)
+    expected_exception_ledger = validate_caseset_expected_exceptions(caseset)
     golden_invocation_receipt_sha256 = (
         content_address.content_digest(
             precision_policy.GOLDEN_INVOCATION_RECEIPT_DOMAIN,
@@ -1456,6 +1483,8 @@ def build_invocation_plan(caseset, manifest):
         plan["multi_input_contract_sha256"] = multi_contract_sha
     if golden_invocation_receipt_sha256 is not None:
         plan["golden_invocation_receipt_sha256"] = golden_invocation_receipt_sha256
+    if expected_exception_ledger is not None:
+        plan["expected_exception_ledger_sha256"] = _canonical_sha(expected_exception_ledger)
     if attr_contract is not None:
         plan["attr_parameter_contract_sha256"] = _canonical_sha(attr_contract)
     if layout_contract is not None:
@@ -2021,6 +2050,17 @@ def validate_receipt(work, caseset):
             != golden_invocation_receipt_sha256:
         raise CppExtensionAdapterError(
             "invocation plan 的 golden invocation receipt 摘要与 caseset 漂移")
+    expected_exception_ledger = validate_caseset_expected_exceptions(caseset)
+    expected_exception_ledger_sha256 = (
+        _canonical_sha(expected_exception_ledger)
+        if expected_exception_ledger is not None else None)
+    if expected_exception_ledger_sha256 is None:
+        if "expected_exception_ledger_sha256" in plan:
+            raise CppExtensionAdapterError(
+                "legacy invocation plan 不得凭空声明 expected exception ledger")
+    elif plan.get("expected_exception_ledger_sha256") != expected_exception_ledger_sha256:
+        raise CppExtensionAdapterError(
+            "invocation plan 的 expected exception ledger 摘要与 caseset 漂移")
     expected = {
         "caseset_sha256": _canonical_sha(caseset),
         "manifest_sha256": _canonical_sha(manifest),
@@ -2030,6 +2070,8 @@ def validate_receipt(work, caseset):
     if golden_invocation_receipt_sha256 is not None:
         expected["golden_invocation_receipt_sha256"] = (
             golden_invocation_receipt_sha256)
+    if expected_exception_ledger_sha256 is not None:
+        expected["expected_exception_ledger_sha256"] = expected_exception_ledger_sha256
     bindings = receipt.get("bindings")
     if not isinstance(bindings, dict):
         raise CppExtensionAdapterError("receipt.bindings 缺失")
@@ -2037,6 +2079,10 @@ def validate_receipt(work, caseset):
             and "golden_invocation_receipt_sha256" in bindings):
         raise CppExtensionAdapterError(
             "legacy receipt 不得凭空声明 golden invocation receipt")
+    if (expected_exception_ledger_sha256 is None
+            and "expected_exception_ledger_sha256" in bindings):
+        raise CppExtensionAdapterError(
+            "legacy receipt 不得凭空声明 expected exception ledger")
     for key, value in expected.items():
         _require_sha(f"expected.{key}", value)
         if bindings.get(key) != value:

@@ -2,6 +2,16 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-08 · Expected-exception 与 strict-empty 正式结果契约（隔离补丁）
+
+- 新增通用 expected-exception 契约：CPU golden 直接异常结构化绑定 class/phase/exact-message，case 不删除、
+  不改输入；NPU 成功或异常不等价均判功能 FAIL，等价异常判功能 PASS/精度 na。
+- exception ledger 显式贯穿 caseset→invocation plan→driver receipt→evidence→validator/gate；planner dependency
+  同时绑定新契约实现，单层篡改 fail-closed。
+- strict-empty `compare=na` 在 adapter 的数值 policy/metrics 之前处理，仍保留 actual shape、golden/out SHA
+  和 output-written receipt，不制造数值 policy。
+- A3 独立容器定向与相关回归 354 tests OK，包含 legacy byte pin；未运行 Remainder。
+
 ## 2026-08-08 · Generated golden 逻辑 dtype 调用契约
 
 - `GOLDEN_CONTRACT.invocation` 新增可选、严格版本化的 keyword context ABI；只有显式声明时，
