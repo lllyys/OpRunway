@@ -257,7 +257,6 @@ OpRunway/
 | 当前 TODO | `dev-doc/oprunway-todo.md` |
 | 改动流水 | `dev-doc/oprunway-changes-brief.md` |
 | 真机环境 | `dev-doc/oprunway-real-machine-environment.md` |
-| 当前三算子实测 | `dev-doc/oprunway-roll-bernoulli-remainder-validation-2026-08-07.md` |
 | Canon 状态 | `canon/decisions/` + `canon/lint/findings.md` |
 
 ## 10 · 当前诚实边界

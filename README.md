@@ -38,8 +38,7 @@ OpRunway 是面向昇腾 NPU 算子的验收工作区。调用方提供**算子�
 - Build、用例/golden 生成、测试和 profiler 必须在 NPU 目标环境执行。
 
 当前未完成能力与回归阻塞统一记录在 [OpRunway 当前 TODO](dev-doc/oprunway-todo.md)。具体算子的历史结果、
-case 数和机器证据不复制到 README，以对应验收产物和
-[三算子实测记录](dev-doc/oprunway-roll-bernoulli-remainder-validation-2026-08-07.md) 为准。
+case 数和机器证据不复制到 README 或仓规，以对应验收产物为准。
 
 ## 使用方式
 
