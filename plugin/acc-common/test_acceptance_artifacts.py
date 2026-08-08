@@ -138,6 +138,57 @@ class FormalAcceptanceBoundaryTest(unittest.TestCase):
                 A.publish_acceptance_json(out_dir, _candidate())
             self.assertFalse(os.path.lexists(os.path.join(out_dir, "acceptance.json")))
 
+    def test_orphan_atomic_temp_blocks_formal_publish(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            orphan = os.path.join(
+                out_dir, A.ARTIFACT_TEMP_PREFIX + "dead-round.acceptance.json.tmp")
+            with open(orphan, "w", encoding="utf-8") as out:
+                out.write("partial\n")
+            with self.assertRaisesRegex(A.ArtifactNameConflictError, "临时|orphan"):
+                A.publish_acceptance_json(out_dir, _candidate())
+            self.assertTrue(os.path.isfile(orphan))
+            self.assertFalse(os.path.lexists(os.path.join(out_dir, "acceptance.json")))
+
+    def test_legacy_renderer_temp_orphan_blocks_formal_publish(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            orphan = os.path.join(out_dir, "验收报告.md.tmp")
+            with open(orphan, "w", encoding="utf-8") as out:
+                out.write("partial\n")
+            with self.assertRaisesRegex(A.ArtifactNameConflictError, "临时|orphan"):
+                A.publish_acceptance_json(out_dir, _candidate())
+            self.assertTrue(os.path.isfile(orphan))
+            self.assertFalse(os.path.lexists(os.path.join(out_dir, "acceptance.json")))
+
+    def test_transaction_pins_directory_fd_and_rejects_root_swap(self):
+        with tempfile.TemporaryDirectory() as parent:
+            out_dir = os.path.join(parent, "report")
+            os.mkdir(out_dir)
+            guard = A.artifact_path_guard.prepare_existing_directory(out_dir)
+            displaced = out_dir + ".displaced"
+            with self.assertRaisesRegex(A.ArtifactNameConflictError, "替换"):
+                with A.artifact_transaction(out_dir, guard=guard) as transaction:
+                    os.rename(out_dir, displaced)
+                    os.mkdir(out_dir)
+                    transaction.atomic_write_json("attempt_record.json", {"x": 1})
+            self.assertFalse(os.path.lexists(os.path.join(
+                out_dir, "attempt_record.json")))
+
+    def test_failed_atomic_replace_cleans_only_current_round_temp(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            os.mkdir(os.path.join(out_dir, "acceptance.json"))
+            unrelated = os.path.join(out_dir, ".unrelated.tmp")
+            with open(unrelated, "w", encoding="utf-8") as out:
+                out.write("keep\n")
+            guard = A.artifact_path_guard.prepare_existing_directory(out_dir)
+            with self.assertRaises(OSError):
+                with A.artifact_transaction(
+                        out_dir, guard=guard) as transaction:
+                    transaction.atomic_write_json("acceptance.json", {"x": 1})
+            self.assertFalse(any(
+                name.startswith(A.ARTIFACT_TEMP_PREFIX)
+                for name in os.listdir(out_dir)))
+            self.assertTrue(os.path.isfile(unrelated))
+
     def test_public_writers_reject_a_symlink_report_root(self):
         with tempfile.TemporaryDirectory() as root:
             real = os.path.join(root, "real")

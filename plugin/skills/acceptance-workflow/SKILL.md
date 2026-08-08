@@ -376,7 +376,19 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
       严校且不落完整 argv/env/原始异常文本。父链校验从调用方受信稳定 base 向下开始，允许 base 之上的系统
       alias；marker 前崩溃留下的任一 pre-execution 保留 payload 也阻断正式 publisher/finalize/renderer，
       renderer 的 terminal 检查到 Markdown 写盘全程持同一报告根锁。这条路径不需要也不生成 golden/caseset，
-      不调用 Task1、driver、DUT 或 profiler；消费方验 marker 三件套交叉绑定后必须拒绝正式发布。
+      不调用 Task1、driver、DUT 或 profiler；消费方验 marker 三件套交叉绑定后必须拒绝正式发布。标准布局
+      的可信输入可保留在 `<out>/work/`：finalizer 只清理/写入显式枚举的根级终态名，允许报告根包含这个
+      保留子树，但拒绝 `out == trusted input`、`out` 位于 trusted input 下，以及任一根级 mutation target
+      与 trusted input 相等或互为祖先；父链 no-follow、事务 inode 复核、artifact lock 与 orphan 阻断不放松。
+      保留输入必须从稳定 base 逐段 no-follow 单次读取，marker commit 前按 inode/SHA 复核，并由 marker 绑定
+      相对路径/SHA 供消费方 no-follow 重开复核。事务从 lock 到 commit 持有同一报告根 dirfd；unlink、临时写、
+      replace、fsync 都用相对 fd。统一临时文件前缀的旧轮 orphan 同时阻断 finalizer 和正式 publisher，本轮
+      异常只清自己创建且 inode 未换绑的临时文件。
+      marker 消费方还要把 retained spec raw SHA、facts envelope digest、spec+facts 重建 identity/op、retained
+      vendor payload 与 binding/根级 terminal payload 逐项交叉。renderer 读取根内正式 JSON 与自动发现的
+      root/work source_facts、写 Markdown、删旧明细同样必须走该 transaction；根外显式普通 facts 才可保留
+      外部输入兼容，根内 symlink 不得跟随。
+      根外显式 facts 也必须单次 `O_NOFOLLOW` open、`fstat regular`、同 fd 读完，不得先 `isfile/islink` 后重开。
     - **两个 merkle 必须在 build 之前取**（这就是 ① 单独成一步的全部理由）：build 会往源码树里写产物，事后再摘就摘到
       「源码 + 产物」，与 CP-A 记的那份字节永远对不上。`emit` **不会自己去摘源码树**，只接受 ① 落下的凭据——
       错法被结构性杜绝。它会在产出时刻另摘一次当前树，记进 `build.tree_state_at_emit`（含 `matches_pre_build`）。

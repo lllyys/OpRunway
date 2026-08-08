@@ -249,7 +249,8 @@ def build_clean_acceptance(
     return acceptance
 
 
-def _finalize_directory_locked(out_dir, spec_path, source_facts_path):
+def _finalize_directory_locked(
+        out_dir, spec_path, source_facts_path, *, artifact_transaction):
     """对 `out_dir` 里已落盘的验收证据生成干净 PASS `acceptance.json`。
 
     步骤顺序**本身就是判据**，别重排：
@@ -313,7 +314,8 @@ def _finalize_directory_locked(out_dir, spec_path, source_facts_path):
     _assert_spec_change_confirmed(spec_path, out_dir, _SPEC_GATE_EXIT)
 
     # 与主入口共用同一个正式发布断言与原子写原语；以后状态门收紧只改一处。
-    acceptance_artifacts.publish_acceptance_json_locked(out_dir, acceptance)
+    acceptance_artifacts.publish_acceptance_json_locked(
+        out_dir, acceptance, transaction=artifact_transaction)
     return acceptance
 
 
@@ -323,8 +325,8 @@ def finalize_directory(out_dir, spec_path, source_facts_path):
         guard = artifact_path_guard.prepare_existing_directory(out_dir)
     except artifact_path_guard.ArtifactPathError as ex:
         raise FinalizeError(f"正式报告根不可信：{ex}") from ex
-    with acceptance_artifacts.artifact_transaction(guard["path"]):
-        artifact_path_guard.assert_stable(guard)
+    with acceptance_artifacts.artifact_transaction(
+            guard["path"], guard=guard) as transaction:
         try:
             acceptance_artifacts.assert_no_pre_execution_artifacts(guard["path"])
         except acceptance_artifacts.ArtifactNameConflictError as ex:
@@ -339,7 +341,8 @@ def finalize_directory(out_dir, spec_path, source_facts_path):
                         f"pre-execution terminal commit manifest 非法：{marker_ex}") from marker_ex
             raise FinalizeError(str(ex)) from ex
         return _finalize_directory_locked(
-            guard["path"], spec_path, source_facts_path)
+            guard["path"], spec_path, source_facts_path,
+            artifact_transaction=transaction)
 
 
 def main(argv=None):

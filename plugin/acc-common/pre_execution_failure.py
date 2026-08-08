@@ -14,6 +14,8 @@ import json
 import math
 import os
 import re
+import stat
+from contextlib import contextmanager
 
 import acceptance_artifacts
 import artifact_path_guard
@@ -48,8 +50,27 @@ _DOWNSTREAM_FILES = (
 )
 
 
+def _controlled_terminal_paths(out_dir):
+    """finalizer 唯一会写/清理的根级路径；``work/`` 从不在其中。"""
+    names = tuple(dict.fromkeys(_DOWNSTREAM_FILES + (
+        acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE,
+        acceptance_artifacts.ARTIFACT_LOCK_FILE,
+    )))
+    return tuple(os.path.join(out_dir, name) for name in names)
+
+
 class PreExecutionFailureError(RuntimeError):
     """failure attempt 或它与 CP-A/spec 的绑定不可信。"""
+
+
+@contextmanager
+def _artifact_transaction(out_dir, guard):
+    try:
+        with acceptance_artifacts.artifact_transaction(
+                out_dir, guard=guard) as transaction:
+            yield transaction
+    except acceptance_artifacts.ArtifactNameConflictError as ex:
+        raise PreExecutionFailureError(str(ex)) from ex
 
 
 def _sha256_file(path):
@@ -58,6 +79,109 @@ def _sha256_file(path):
         for chunk in iter(lambda: src.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _open_below_report_root_nofollow(path, report_root):
+    """当可信输入位于报告根内时，逐段 openat/no-follow；外部输入保持兼容。"""
+    path_abs = os.path.abspath(path)
+    root_abs = os.path.abspath(report_root)
+    try:
+        below = os.path.commonpath((path_abs, root_abs)) == root_abs
+    except ValueError:
+        below = False
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    if not below:
+        return os.open(path_abs, flags)
+    relative = os.path.relpath(path_abs, root_abs)
+    parts = relative.split(os.path.sep)
+    if relative in {".", ".."} or any(part in {"", ".", ".."} for part in parts):
+        raise PreExecutionFailureError("可信输入不得等于报告根或逃逸报告根")
+    directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                       | getattr(os, "O_NOFOLLOW", 0))
+    directory_fd = os.open(root_abs, directory_flags)
+    try:
+        for part in parts[:-1]:
+            child_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+        return os.open(parts[-1], flags, dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _read_retained_json(path, *, role, report_root):
+    """一次 no-follow 读取得到 JSON、原字节、摘要与 inode 绑定。"""
+    if not isinstance(path, str) or not path:
+        raise PreExecutionFailureError(f"{role} 可信输入路径缺失")
+    try:
+        fd = _open_below_report_root_nofollow(path, report_root)
+        try:
+            status = os.fstat(fd)
+            if not stat.S_ISREG(status.st_mode):
+                raise PreExecutionFailureError(f"{role} 可信输入不是普通文件")
+            chunks = []
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(fd)
+        raw = b"".join(chunks)
+        payload = json.loads(raw)
+    except PreExecutionFailureError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as ex:
+        raise PreExecutionFailureError(
+            f"{role} 可信输入不可 no-follow 读取（父链可能含符号链接）：{ex}") from ex
+    return {
+        "role": role, "path": os.path.abspath(path), "report_root": report_root,
+        "raw": raw, "payload": payload,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "device": status.st_dev, "inode": status.st_ino,
+    }
+
+
+def _verify_retained_inputs(retained_inputs):
+    for retained in retained_inputs:
+        current = _read_retained_json(
+            retained["path"], role=retained["role"],
+            report_root=retained["report_root"])
+        if ((current["device"], current["inode"])
+                != (retained["device"], retained["inode"])
+                or current["sha256"] != retained["sha256"]):
+            raise PreExecutionFailureError(
+                f"{retained['role']} 可信输入在终态提交前换绑或内容漂移")
+
+
+def _retained_manifest(out_dir, retained_inputs):
+    return [{
+        "role": item["role"],
+        "path": os.path.relpath(item["path"], out_dir),
+        "sha256": item["sha256"],
+    } for item in retained_inputs]
+
+
+def _source_facts_from_retained(retained):
+    envelope = retained["payload"]
+    if not isinstance(envelope, dict):
+        raise PreExecutionFailureError("source_facts envelope 须为 object")
+    payload = envelope.get("payload")
+    try:
+        digest = content_address.content_digest(
+            source_facts_lookup.SOURCE_FACTS_DOMAIN, payload)
+    except content_address.ContentAddressError as ex:
+        raise PreExecutionFailureError(f"source_facts envelope 非法：{ex}") from ex
+    if (envelope.get("schema_version") != 1
+            or envelope.get("domain") != source_facts_lookup.SOURCE_FACTS_DOMAIN
+            or envelope.get("digest") != digest):
+        raise PreExecutionFailureError("source_facts envelope 摘要不可信")
+    import validate_preparation_state
+    try:
+        validate_preparation_state._validate_source_payload(payload)
+    except content_address.ContentAddressError as ex:
+        raise PreExecutionFailureError(f"source_facts payload 不可信：{ex}") from ex
+    return payload, envelope["digest"]
 
 
 def _canonical_sha(value):
@@ -459,20 +583,18 @@ def _validate_bindings(spec, facts, attempt):
     return identity
 
 
-def _remove_downstream(out_dir, guard):
+def _remove_downstream(transaction):
     for name in _DOWNSTREAM_FILES:
-        artifact_path_guard.assert_stable(guard)
-        path = os.path.join(out_dir, name)
-        if os.path.lexists(path):
+        if transaction.lexists(name):
             try:
-                os.remove(path)
+                transaction.unlink(name)
             except OSError as ex:
                 raise PreExecutionFailureError(
                     f"清不掉 stale downstream artifact {name!r}：{ex}") from ex
 
 
 def finalize(*, out_dir, spec, spec_sha256, source_facts, source_facts_digest,
-             vendor_attempt, trusted_paths=()):
+             vendor_attempt, trusted_paths=(), retained_inputs=()):
     """在同一 artifact lock 下清旧 downstream，写 payload，最后提交 marker。"""
     if (not _HEX64.fullmatch(spec_sha256 or "")
             or not _HEX64.fullmatch(source_facts_digest or "")):
@@ -480,7 +602,9 @@ def finalize(*, out_dir, spec, spec_sha256, source_facts, source_facts_digest,
             "pre-execution finalizer 缺可信 spec/source_facts envelope 摘要")
     identity = _validate_bindings(spec, source_facts, vendor_attempt)
     try:
-        guard = artifact_path_guard.prepare_report_root(out_dir, trusted_paths)
+        guard = artifact_path_guard.prepare_report_root(
+            out_dir, trusted_paths,
+            mutation_paths=_controlled_terminal_paths(out_dir))
     except artifact_path_guard.ArtifactPathError as ex:
         raise PreExecutionFailureError(str(ex)) from ex
     out_dir = guard["path"]
@@ -510,11 +634,11 @@ def finalize(*, out_dir, spec, spec_sha256, source_facts, source_facts_digest,
         "pre_execution_failure": binding,
     }
     record = acceptance_artifacts.build_attempt_record(candidate)
-    with acceptance_artifacts.artifact_transaction(out_dir):
-        artifact_path_guard.assert_stable(guard)
-        _remove_downstream(out_dir, guard)
+    with _artifact_transaction(out_dir, guard) as transaction:
+        _verify_retained_inputs(retained_inputs)
+        _remove_downstream(transaction)
         vendor_path = acceptance_artifacts._atomic_write_json(
-            out_dir, VENDOR_ATTEMPT_FILE, vendor_attempt)
+            transaction, VENDOR_ATTEMPT_FILE, vendor_attempt)
         detail = (
             "# 前置执行失败明细（非正式验收报告）\n\n"
             "本轮在 Task1、golden/caseset、外部 driver、DUT 调用和 profiler 之前停止。\n\n"
@@ -531,32 +655,35 @@ def finalize(*, out_dir, spec, spec_sha256, source_facts, source_facts_digest,
             },
             "vendor_build_attempt": {
                 "kind": "vendor_build_attempt", "path": VENDOR_ATTEMPT_FILE,
-                "sha256": _sha256_file(vendor_path),
+                "sha256": transaction.sha256(VENDOR_ATTEMPT_FILE),
             },
         }
-        artifact_path_guard.assert_stable(guard)
-        detail_path = _atomic_write_text(out_dir, DETAIL_REPORT_FILE, detail)
-        artifact_path_guard.assert_stable(guard)
+        detail_path = _atomic_write_text(transaction, DETAIL_REPORT_FILE, detail)
         attempt_path = acceptance_artifacts._atomic_write_json(
-            out_dir, acceptance_artifacts.ATTEMPT_RECORD_FILE, record)
+            transaction, acceptance_artifacts.ATTEMPT_RECORD_FILE, record)
+        _verify_retained_inputs(retained_inputs)
         marker = {
             "schema": TERMINAL_SCHEMA, "schema_version": TERMINAL_VERSION,
             "status": "blocked_pre_execution", "formal_eligible": False,
             "acceptance_verdict": None, "op": spec.get("op"),
             "execution_identity": identity, "binding": binding,
+            "retained_inputs": _retained_manifest(out_dir, retained_inputs),
             "artifacts": {
                 "vendor_build_attempt": {
-                    "path": VENDOR_ATTEMPT_FILE, "sha256": _sha256_file(vendor_path)},
+                    "path": VENDOR_ATTEMPT_FILE,
+                    "sha256": transaction.sha256(VENDOR_ATTEMPT_FILE)},
                 "detail_report": {
-                    "path": DETAIL_REPORT_FILE, "sha256": _sha256_file(detail_path)},
+                    "path": DETAIL_REPORT_FILE,
+                    "sha256": transaction.sha256(DETAIL_REPORT_FILE)},
                 "attempt_record": {
                     "path": acceptance_artifacts.ATTEMPT_RECORD_FILE,
-                    "sha256": _sha256_file(attempt_path)},
+                    "sha256": transaction.sha256(
+                        acceptance_artifacts.ATTEMPT_RECORD_FILE)},
             },
         }
-        artifact_path_guard.assert_stable(guard)
         acceptance_artifacts._atomic_write_json(
-            out_dir, acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE, marker)
+            transaction, acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE, marker)
+        _verify_retained_inputs(retained_inputs)
     return {
         "attempt_record": attempt_path,
         "detail_report": os.path.join(out_dir, DETAIL_REPORT_FILE),
@@ -576,24 +703,8 @@ def failed_claim_from_path(path):
             "sha256": _sha256_file(path)}
 
 
-def _atomic_write_text(out_dir, filename, text):
-    path = os.path.join(out_dir, filename)
-    tmp = path + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as out:
-            out.write(text)
-            out.flush()
-            os.fsync(out.fileno())
-        os.replace(tmp, path)
-        dir_fd = os.open(out_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-    return path
+def _atomic_write_text(transaction, filename, text):
+    return transaction.atomic_write_bytes(filename, text.encode("utf-8"))
 
 
 def validate_terminal_marker(out_dir):
@@ -614,8 +725,10 @@ def validate_terminal_marker(out_dir):
     }
     expected_marker = {
         "schema", "schema_version", "status", "formal_eligible",
-        "acceptance_verdict", "op", "execution_identity", "binding", "artifacts"}
+        "acceptance_verdict", "op", "execution_identity", "binding", "artifacts",
+        "retained_inputs"}
     binding = marker.get("binding") if isinstance(marker, dict) else None
+    retained_inputs = marker.get("retained_inputs") if isinstance(marker, dict) else None
     if (not isinstance(marker, dict) or set(marker) != expected_marker
             or marker.get("schema") != TERMINAL_SCHEMA
             or marker.get("schema_version") != TERMINAL_VERSION
@@ -629,8 +742,59 @@ def validate_terminal_marker(out_dir):
                 "stage", "error_code", "failure_subject"}
             or any(not _HEX64.fullmatch(binding.get(key) or "") for key in (
                 "vendor_attempt_sha256", "spec_sha256", "source_facts_digest"))
+            or not isinstance(retained_inputs, list)
+            or len(retained_inputs) not in {2, 3}
             or not isinstance(artifacts, dict) or set(artifacts) != set(expected)):
         raise PreExecutionFailureError("pre-execution terminal commit manifest 非法")
+    roles = []
+    retained_by_role = {}
+    for item in retained_inputs:
+        if (not isinstance(item, dict)
+                or set(item) != {"role", "path", "sha256"}
+                or item.get("role") not in {
+                    "spec", "source_facts", "vendor_build_attempt"}
+                or not isinstance(item.get("path"), str)
+                or not item["path"] or os.path.isabs(item["path"])
+                or os.path.normpath(item["path"]) != item["path"]
+                or not _HEX64.fullmatch(item.get("sha256") or "")):
+            raise PreExecutionFailureError(
+                "pre-execution retained trusted input manifest 非法")
+        roles.append(item["role"])
+        retained_path = os.path.abspath(os.path.join(out_dir, item["path"]))
+        current = _read_retained_json(
+            retained_path, role=item["role"], report_root=out_dir)
+        if current["sha256"] != item["sha256"]:
+            raise PreExecutionFailureError(
+                f"pre-execution retained 可信输入 {item['role']} 摘要漂移")
+        retained_by_role[item["role"]] = current
+    if (len(set(roles)) != len(roles)
+            or set(roles) not in (
+                {"spec", "source_facts"},
+                {"spec", "source_facts", "vendor_build_attempt"})):
+        raise PreExecutionFailureError(
+            "pre-execution retained trusted input roles 非法")
+    retained_spec = retained_by_role["spec"]
+    if retained_spec["sha256"] != binding["spec_sha256"]:
+        raise PreExecutionFailureError(
+            "pre-execution retained spec raw SHA 与 binding.spec_sha256 漂移")
+    retained_facts, retained_facts_digest = _source_facts_from_retained(
+        retained_by_role["source_facts"])
+    if retained_facts_digest != binding["source_facts_digest"]:
+        raise PreExecutionFailureError(
+            "pre-execution retained source_facts digest 与 binding 漂移")
+    retained_spec_payload = retained_spec["payload"]
+    if not isinstance(retained_spec_payload, dict):
+        raise PreExecutionFailureError("pre-execution retained spec 须为 object")
+    try:
+        retained_identity = kernel_identity.resolve(
+            retained_spec_payload, retained_facts, require_explicit=True)
+    except kernel_identity.KernelIdentityError as ex:
+        raise PreExecutionFailureError(
+            f"pre-execution retained spec/facts execution identity 非法：{ex}") from ex
+    if (retained_spec_payload.get("op") != marker["op"]
+            or retained_identity != marker["execution_identity"]):
+        raise PreExecutionFailureError(
+            "pre-execution retained spec/facts 与 marker op/execution identity 漂移")
     for key, filename in expected.items():
         item = artifacts.get(key)
         path = os.path.join(out_dir, filename)
@@ -650,6 +814,10 @@ def validate_terminal_marker(out_dir):
     except (OSError, UnicodeError, json.JSONDecodeError) as ex:
         raise PreExecutionFailureError(f"pre-execution terminal payload 不可解析：{ex}") from ex
     validate_vendor_attempt(vendor)
+    retained_vendor = retained_by_role.get("vendor_build_attempt")
+    if retained_vendor is not None and retained_vendor["payload"] != vendor:
+        raise PreExecutionFailureError(
+            "pre-execution retained vendor attempt 与 terminal payload 漂移")
     source = vendor["source_snapshot"]
     try:
         candidate = kernel_identity.validate(
@@ -696,21 +864,45 @@ def validate_terminal_marker(out_dir):
 
 
 def finalize_from_files(*, out_dir, spec_path, source_facts_path,
-                        vendor_attempt):
-    spec, spec_sha = _read_spec(spec_path)
-    facts = source_facts_lookup.find_source_facts(None, source_facts_path)
-    if not isinstance(facts, dict):
-        raise PreExecutionFailureError("原始 CP-A source_facts 不可信")
+                        vendor_attempt, vendor_attempt_path=None):
+    boundary_inputs = [spec_path, source_facts_path]
+    if vendor_attempt_path is not None:
+        boundary_inputs.append(vendor_attempt_path)
     try:
-        with open(source_facts_path, encoding="utf-8") as src:
-            envelope = json.load(src)
-    except (OSError, UnicodeError, json.JSONDecodeError) as ex:
-        raise PreExecutionFailureError(f"source_facts envelope 不可读：{ex}") from ex
+        artifact_path_guard.assert_report_root_not_within_trusted(
+            out_dir, boundary_inputs)
+    except artifact_path_guard.ArtifactPathError as ex:
+        raise PreExecutionFailureError(str(ex)) from ex
+    spec_retained = _read_retained_json(
+        spec_path, role="spec", report_root=out_dir)
+    spec = spec_retained["payload"]
+    if not isinstance(spec, dict):
+        raise PreExecutionFailureError("spec 顶层须为 object")
+    spec_sha = spec_retained["sha256"]
+    facts_retained = _read_retained_json(
+        source_facts_path, role="source_facts", report_root=out_dir)
+    facts, facts_digest = _source_facts_from_retained(facts_retained)
+    retained_inputs = [spec_retained, facts_retained]
+    trusted_paths = [spec_path, source_facts_path]
+    if vendor_attempt_path is not None:
+        vendor_retained = _read_retained_json(
+            vendor_attempt_path, role="vendor_build_attempt",
+            report_root=out_dir)
+        persisted_attempt = vendor_retained["payload"]
+        if vendor_attempt is not None and persisted_attempt != vendor_attempt:
+            raise PreExecutionFailureError(
+                "vendor build attempt 内存对象与可信原件漂移")
+        vendor_attempt = persisted_attempt
+        trusted_paths.append(vendor_attempt_path)
+        retained_inputs.append(vendor_retained)
+    if not isinstance(vendor_attempt, dict):
+        raise PreExecutionFailureError("vendor build attempt 可信输入缺失")
     return finalize(
         out_dir=out_dir, spec=spec, spec_sha256=spec_sha,
-        source_facts=facts, source_facts_digest=envelope.get("digest"),
+        source_facts=facts, source_facts_digest=facts_digest,
         vendor_attempt=vendor_attempt,
-        trusted_paths=(spec_path, source_facts_path))
+        trusted_paths=tuple(trusted_paths),
+        retained_inputs=tuple(retained_inputs))
 
 
 def main(argv=None):
@@ -720,11 +912,10 @@ def main(argv=None):
     ap.add_argument("--source-facts", required=True)
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
-    with open(args.failure_attempt, encoding="utf-8") as src:
-        attempt = json.load(src)
     result = finalize_from_files(
         out_dir=args.out, spec_path=args.spec,
-        source_facts_path=args.source_facts, vendor_attempt=attempt)
+        source_facts_path=args.source_facts, vendor_attempt=None,
+        vendor_attempt_path=args.failure_attempt)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 

@@ -113,21 +113,80 @@ def assert_leaf_safe(path):
         raise ArtifactPathError(f"产物落点已有符号链接或非普通文件：{path!r}")
 
 
-def prepare_report_root(out_dir, trusted_paths):
+def _paths_overlap(left, right):
+    left = os.path.realpath(left)
+    right = os.path.realpath(right)
+    try:
+        common = os.path.commonpath((left, right))
+    except ValueError as ex:
+        raise ArtifactPathError("产物路径与可信输入无法建立路径边界") from ex
+    return common in (left, right)
+
+
+def assert_report_root_not_within_trusted(out_dir, trusted_paths):
+    """纯检查：在读取可信输入和创建报告根之前拒绝反向包含。"""
+    out = _absolute(out_dir)
+    out_boundary = os.path.realpath(out)
+    for trusted in trusted_paths:
+        if not isinstance(trusted, str) or not trusted:
+            raise ArtifactPathError("可信输入路径缺失")
+        trusted_boundary = os.path.realpath(os.path.abspath(trusted))
+        try:
+            common = os.path.commonpath((out_boundary, trusted_boundary))
+        except ValueError as ex:
+            raise ArtifactPathError("报告根与可信输入无法建立路径边界") from ex
+        if common == trusted_boundary:
+            raise ArtifactPathError(
+                f"报告根不得等于可信输入或落在可信输入之下：{out!r}")
+    return out
+
+
+def prepare_report_root(out_dir, trusted_paths, *, mutation_paths=()):
+    """准备报告根，并证明可信输入不会被本事务的具体落点改写。
+
+    默认保持最严边界：报告根不能包含可信输入。只有调用方显式枚举本事务会
+    写入或清理的全部 ``mutation_paths`` 时，才允许把可信输入保存在报告根的
+    其它子树（标准 workflow 的 ``work/``）。mutation path 必须严格位于报告根
+    下，且与每个可信输入均不互为祖先；本函数不授权递归清理报告根。
+    """
     if not isinstance(trusted_paths, (tuple, list)) or not trusted_paths:
         raise ArtifactPathError("报告根必须与显式可信输入建立不重叠边界")
-    out = _absolute(out_dir)
-    for trusted in trusted_paths or ():
+    if not isinstance(mutation_paths, (tuple, list)):
+        raise ArtifactPathError("报告根 mutation paths 须为 tuple/list")
+    out = assert_report_root_not_within_trusted(out_dir, trusted_paths)
+    out_boundary = os.path.realpath(out)
+    mutations = []
+    for path in mutation_paths:
+        mutation = _absolute(path)
+        mutation_boundary = os.path.realpath(mutation)
+        try:
+            common = os.path.commonpath((out_boundary, mutation_boundary))
+        except ValueError as ex:
+            raise ArtifactPathError("报告根与 mutation path 无法建立路径边界") from ex
+        if common != out_boundary or mutation_boundary == out_boundary:
+            raise ArtifactPathError("受控 mutation path 必须严格位于报告根下")
+        mutations.append(mutation)
+    for trusted in trusted_paths:
         if not isinstance(trusted, str) or not trusted:
             raise ArtifactPathError("可信输入路径缺失")
         trusted_abs = os.path.abspath(trusted)
+        trusted_boundary = os.path.realpath(trusted_abs)
         try:
-            common = os.path.commonpath((out, trusted_abs))
+            common = os.path.commonpath((out_boundary, trusted_boundary))
         except ValueError as ex:
             raise ArtifactPathError("报告根与可信输入无法建立路径边界") from ex
-        if common in (out, trusted_abs):
+        if common == trusted_boundary:
             raise ArtifactPathError(
-                f"报告根不得包含可信输入或落在可信输入之下：{out!r}")
+                f"报告根不得等于可信输入或落在可信输入之下：{out!r}")
+        if common == out_boundary:
+            if not mutations:
+                raise ArtifactPathError(
+                    f"报告根包含可信输入但调用方未声明受控 mutation paths：{out!r}")
+            for mutation in mutations:
+                if _paths_overlap(mutation, trusted_abs):
+                    raise ArtifactPathError(
+                        "受控终态路径不得与可信输入相等或互为祖先："
+                        f"{mutation!r} ↔ {trusted_abs!r}")
     bases = [os.getcwd(), tempfile.gettempdir()]
     bases.extend(os.path.dirname(os.path.abspath(path))
                  for path in trusted_paths)

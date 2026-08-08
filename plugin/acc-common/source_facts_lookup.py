@@ -51,6 +51,38 @@ SOURCE_FACTS_DOMAIN = "oprunway/source-facts/v1"
 SOURCE_FACTS_UNTRUSTED = "__BAD__"
 
 
+def caller_trusted_marker_in_document(doc):
+    """对已读取 JSON 做纯 marker 检测；不定位、不打开路径。"""
+    payload = doc.get("payload") if isinstance(doc, dict) else None
+    candidate = payload if isinstance(payload, dict) else doc
+    return (isinstance(candidate, dict)
+            and (candidate.get("contract_version") == 2
+                 or "input_association" in candidate))
+
+
+def validate_source_facts_document(doc):
+    """对已读取 JSON 做纯 envelope/payload 校验，返回 payload 或 UNTRUSTED。"""
+    if not isinstance(doc, dict):
+        return SOURCE_FACTS_UNTRUSTED
+    payload = doc.get("payload")
+    if not isinstance(payload, dict) or not isinstance(doc.get("digest"), str):
+        return SOURCE_FACTS_UNTRUSTED
+    try:
+        actual = content_address.content_digest(SOURCE_FACTS_DOMAIN, payload)
+    except content_address.ContentAddressError:
+        return SOURCE_FACTS_UNTRUSTED
+    if (doc.get("domain") != SOURCE_FACTS_DOMAIN
+            or doc.get("schema_version") != 1
+            or doc["digest"] != actual):
+        return SOURCE_FACTS_UNTRUSTED
+    import validate_preparation_state
+    try:
+        validate_preparation_state._validate_source_payload(payload)
+    except content_address.ContentAddressError:
+        return SOURCE_FACTS_UNTRUSTED
+    return payload
+
+
 def caller_trusted_marker_present(report_root, source_facts_path=None):
     """只检测原始 payload 中是否**出现** caller-trusted/current marker。
 
@@ -71,11 +103,7 @@ def caller_trusted_marker_present(report_root, source_facts_path=None):
             # 文件已经占据 current facts 的正式槽位，却连 marker 都无法可信解析；
             # fail-closed，不能借「看不见 marker」降到 historical。
             return True
-        payload = doc.get("payload") if isinstance(doc, dict) else None
-        candidate = payload if isinstance(payload, dict) else doc
-        if (isinstance(candidate, dict)
-                and (candidate.get("contract_version") == 2
-                     or "input_association" in candidate)):
+        if caller_trusted_marker_in_document(doc):
             return True
     return False
 
@@ -130,23 +158,5 @@ def find_source_facts(report_root, source_facts_path=None):
                 doc = json.load(src)
         except (OSError, ValueError):
             return SOURCE_FACTS_UNTRUSTED
-        if not isinstance(doc, dict):
-            return SOURCE_FACTS_UNTRUSTED
-        payload = doc.get("payload")
-        if not isinstance(payload, dict) or not isinstance(doc.get("digest"), str):
-            return SOURCE_FACTS_UNTRUSTED
-        try:
-            actual = content_address.content_digest(SOURCE_FACTS_DOMAIN, payload)
-        except content_address.ContentAddressError:
-            return SOURCE_FACTS_UNTRUSTED
-        if (doc.get("domain") != SOURCE_FACTS_DOMAIN
-                or doc.get("schema_version") != 1
-                or doc["digest"] != actual):
-            return SOURCE_FACTS_UNTRUSTED
-        import validate_preparation_state
-        try:
-            validate_preparation_state._validate_source_payload(payload)
-        except content_address.ContentAddressError:
-            return SOURCE_FACTS_UNTRUSTED
-        return payload
+        return validate_source_facts_document(doc)
     return SOURCE_FACTS_UNTRUSTED if explicit else None

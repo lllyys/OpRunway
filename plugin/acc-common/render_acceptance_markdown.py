@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 
 import acceptance_artifacts
 import artifact_path_guard
@@ -33,9 +34,8 @@ _MEASURE_ONLY_STATEMENT = (
     "下表全部为绝对 kernel 耗时，不是加速比。")
 
 
-def _load(root, name):
-    with open(os.path.join(root, name), encoding="utf-8") as src:
-        return json.load(src)
+def _load(transaction, name):
+    return transaction.read_json(name)
 
 
 def _cell(value):
@@ -406,11 +406,8 @@ def _provenance_section(receipt, build_receipt, source, facts):
     return lines
 
 
-def _atomic_write(path, text):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8", newline="\n") as out:
-        out.write(text)
-    os.replace(tmp, path)
+def _atomic_write(transaction, filename, text):
+    return transaction.atomic_write_bytes(filename, text.encode("utf-8"))
 
 
 def _precision_failure_detail(failed):
@@ -516,22 +513,81 @@ def _performance_failure_detail(non_passing, caseset):
 
 
 HISTORICAL_REPORT_FILENAME = "历史验收报告（只读）.md"
+REPORT_MD_FILES = ("验收报告.md", "精度失败明细.md", "性能失败明细.md")
 
 
-def _render_locked(report_root, source_facts_path=None, *, allow_historical_read_only=False):
-    if os.path.lexists(os.path.join(
-            report_root, acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE)):
+def _external_source_facts_document(path):
+    """根外显式 facts：单次 no-follow open 后只从同一 regular inode 读取。"""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            current = os.fstat(fd)
+            if not stat.S_ISREG(current.st_mode):
+                return source_facts_lookup.SOURCE_FACTS_UNTRUSTED, True
+            chunks = []
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(fd)
+        doc = json.loads(b"".join(chunks))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return source_facts_lookup.SOURCE_FACTS_UNTRUSTED, True
+    return (
+        source_facts_lookup.validate_source_facts_document(doc),
+        source_facts_lookup.caller_trusted_marker_in_document(doc),
+    )
+
+
+def _locked_source_facts(transaction, report_root, source_facts_path):
+    """报告根内按 dirfd/no-follow 发现 facts；真正根外普通文件保持显式兼容。"""
+    if source_facts_path is not None:
+        if not isinstance(source_facts_path, str) or not source_facts_path:
+            return source_facts_lookup.SOURCE_FACTS_UNTRUSTED, True
+        root_abs = os.path.abspath(report_root)
+        path_abs = os.path.abspath(source_facts_path)
+        try:
+            inside = os.path.commonpath((root_abs, path_abs)) == root_abs
+        except ValueError:
+            inside = False
+        if not inside:
+            return _external_source_facts_document(path_abs)
+        candidates = (os.path.relpath(path_abs, root_abs),)
+        explicit = True
+    else:
+        candidates = ("source_facts.json", os.path.join("work", "source_facts.json"))
+        explicit = False
+    for relative in candidates:
+        try:
+            doc = transaction.read_json(relative)
+        except FileNotFoundError:
+            continue
+        except (OSError, acceptance_artifacts.ArtifactNameConflictError):
+            return source_facts_lookup.SOURCE_FACTS_UNTRUSTED, True
+        return (
+            source_facts_lookup.validate_source_facts_document(doc),
+            source_facts_lookup.caller_trusted_marker_in_document(doc),
+        )
+    return (source_facts_lookup.SOURCE_FACTS_UNTRUSTED, True) if explicit else (None, False)
+
+
+def _render_locked(
+        report_root, source_facts_path=None, *, transaction,
+        allow_historical_read_only=False):
+    if transaction.lexists(acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE):
         pre_execution_failure.validate_terminal_marker(report_root)
         raise acceptance_artifacts.FormalAcceptanceError(
             "报告根存在 durable pre-execution terminal marker；不得渲染正式验收报告")
-    acceptance = _load(report_root, "acceptance.json")
+    acceptance = _load(transaction, "acceptance.json")
     # renderer 可被 CLI 单独调用，不能假定文件一定来自 run_workflow。正式命名的发布门须在
     # 读取其它诊断件之前执行：blocked/未过门候选即使目录里缺其它文件，也应明确按产物边界拒绝。
     acceptance_artifacts.assert_formal_acceptance_allowed(acceptance)
-    verdict = _load(report_root, "verdict.json")
-    perf = _load(report_root, "perf_report.json")
-    evidence = _load(report_root, "evidence.json")
-    caseset = _load(report_root, "caseset.json")
+    verdict = _load(transaction, "verdict.json")
+    perf = _load(transaction, "perf_report.json")
+    evidence = _load(transaction, "evidence.json")
+    caseset = _load(transaction, "caseset.json")
 
     op = acceptance.get("op") or verdict.get("op") or caseset.get("op") or "?"
     accuracy = verdict.get("accuracy_summary") or {}
@@ -541,19 +597,17 @@ def _render_locked(report_root, source_facts_path=None, *, allow_historical_read
     vendor = receipt.get("vendor") or {}
     build_receipt = vendor.get("build_receipt") or {}
     source = build_receipt.get("source") or {}
-    spec_path = os.path.join(report_root, "spec.json")
-    spec = _load(report_root, "spec.json") if os.path.isfile(spec_path) else None
+    spec = _load(transaction, "spec.json") if transaction.lexists("spec.json") else None
     cann_view = _cann_runtime_view(runtime, spec)
     # 来源对照物：与三级门**调同一个函数**（显式路径 → `<报告目录>/` → `<报告目录>/work/`），
     # 不在这里另写一份——两处规则一旦分叉，报告陈述的 facts 就不是门校过的那一份了。
     # 返回三态：dict / None（没找到）/ `SOURCE_FACTS_UNTRUSTED`（找到但读不出/不可信）。
     # ⚠ 后两态在本渲染器里**同权**，都当「未经印证」，绝不当「已核」（见 `_facts_row`）。
-    facts = source_facts_lookup.find_source_facts(report_root, source_facts_path)
+    facts, caller_trusted_marker = _locked_source_facts(
+        transaction, report_root, source_facts_path)
     execution_identity = acceptance.get("execution_identity") or {}
     # 只要原始 facts 出现 current marker 就进严格路径；envelope 被篡改不能
     # 让 marker 随 `find_source_facts -> UNTRUSTED` 一起消失，再借 historical 开关降级。
-    caller_trusted_marker = source_facts_lookup.caller_trusted_marker_present(
-        report_root, source_facts_path)
     current_identity_marker = (
         caller_trusted_marker
         or build_receipt.get("schema_version") == vendor_build_receipt.SCHEMA_VERSION
@@ -780,11 +834,12 @@ def render(report_root, source_facts_path=None, *, allow_historical_read_only=Fa
     except artifact_path_guard.ArtifactPathError as ex:
         raise acceptance_artifacts.FormalAcceptanceError(
             f"正式 renderer 报告根不可信：{ex}") from ex
-    with acceptance_artifacts.artifact_transaction(guard["path"]):
-        artifact_path_guard.assert_stable(guard)
-        acceptance_artifacts.assert_no_pre_execution_artifacts(guard["path"])
+    with acceptance_artifacts.artifact_transaction(
+            guard["path"], guard=guard) as transaction:
+        acceptance_artifacts.assert_no_pre_execution_artifacts(transaction)
         return _render_locked(
             guard["path"], source_facts_path=source_facts_path,
+            transaction=transaction,
             allow_historical_read_only=allow_historical_read_only)
 
 
@@ -797,48 +852,49 @@ def write_report(
         raise acceptance_artifacts.FormalAcceptanceError(
             f"正式 renderer 报告根不可信：{ex}") from ex
     report_root = guard["path"]
-    with acceptance_artifacts.artifact_transaction(report_root):
-        artifact_path_guard.assert_stable(guard)
-        acceptance_artifacts.assert_no_pre_execution_artifacts(report_root)
+    with acceptance_artifacts.artifact_transaction(
+            report_root, guard=guard) as transaction:
+        acceptance_artifacts.assert_no_pre_execution_artifacts(transaction)
         return _write_report_locked(
             report_root, filename, source_facts_path,
+            transaction=transaction,
             allow_historical_read_only=allow_historical_read_only)
 
 
 def _write_report_locked(
         report_root, filename, source_facts_path, *,
+        transaction,
         allow_historical_read_only=False):
     text = _render_locked(
         report_root, source_facts_path=source_facts_path,
+        transaction=transaction,
         allow_historical_read_only=allow_historical_read_only)
     historical_render = bool(
         text.splitlines() and "算子历史验收报告（只读）" in text.splitlines()[0])
     if historical_render and filename == "验收报告.md":
         filename = HISTORICAL_REPORT_FILENAME
-    path = os.path.join(report_root, filename)
-    _atomic_write(path, text)
+    path = _atomic_write(transaction, filename, text)
 
-    verdict = _load(report_root, "verdict.json")
+    verdict = _load(transaction, "verdict.json")
     failed = [
         row for row in (verdict.get("per_case") or [])
         if row.get("精度") != "pass"
     ]
-    precision_path = os.path.join(report_root, "精度失败明细.md")
     if failed:
-        _atomic_write(precision_path, _precision_failure_detail(failed))
-    elif os.path.exists(precision_path):
-        os.unlink(precision_path)
+        _atomic_write(
+            transaction, "精度失败明细.md", _precision_failure_detail(failed))
+    elif transaction.lexists("精度失败明细.md"):
+        transaction.unlink("精度失败明细.md")
 
-    perf = _load(report_root, "perf_report.json")
+    perf = _load(transaction, "perf_report.json")
     perf_non_passing = perf.get("non_passing_cases") or []
-    performance_path = os.path.join(report_root, "性能失败明细.md")
     if perf_non_passing:
         _atomic_write(
-            performance_path,
+            transaction, "性能失败明细.md",
             _performance_failure_detail(
-                perf_non_passing, _load(report_root, "caseset.json")))
-    elif os.path.exists(performance_path):
-        os.unlink(performance_path)
+                perf_non_passing, _load(transaction, "caseset.json")))
+    elif transaction.lexists("性能失败明细.md"):
+        transaction.unlink("性能失败明细.md")
     return path
 
 

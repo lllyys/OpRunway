@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 import os
 import re
-import tempfile
+import secrets
+import stat
 from contextlib import contextmanager
 
 import fcntl
@@ -29,6 +30,13 @@ PRE_EXECUTION_RESERVED_FILES = (
     "前置执行失败明细.md",
 )
 ARTIFACT_LOCK_FILE = ".oprunway-artifacts.lock"
+ARTIFACT_TEMP_PREFIX = ".oprunway-artifact-tmp-"
+LEGACY_ARTIFACT_TEMP_FILES = (
+    "验收报告.md.tmp",
+    "历史验收报告（只读）.md.tmp",
+    "精度失败明细.md.tmp",
+    "性能失败明细.md.tmp",
+)
 
 # 既有 run_workflow 人读 overall → canonical state 实现的唯一真源。公开常量供 workflow
 # 保留兼容别名；正式发布门与 workflow 由此使用同一张关系表，而不是各维护一份白名单。
@@ -165,21 +173,26 @@ def assert_formal_acceptance_allowed(acceptance):
         "本轮只能保留非正式 attempt 诊断工件。")
 
 
-def _assert_opposite_summary_absent(out_dir, filename):
+def _artifact_exists(root, filename):
+    if isinstance(root, ArtifactTransaction):
+        return root.lexists(filename)
+    return os.path.lexists(os.path.join(root, filename))
+
+
+def _assert_opposite_summary_absent(root, filename):
     """公共 writer 也维护两种总结名互斥；不暗中删除调用方已有工件。"""
     opposite = (ATTEMPT_RECORD_FILE
                 if filename == FORMAL_ACCEPTANCE_FILE else FORMAL_ACCEPTANCE_FILE)
-    opposite_path = os.path.join(out_dir, opposite)
-    if os.path.lexists(opposite_path):
+    if _artifact_exists(root, opposite):
         raise ArtifactNameConflictError(
             f"总结工件名必须互斥：写 {filename!r} 前发现已有 {opposite!r}；"
             "请由 workflow 的统一失效步骤先处理上一轮总结。")
 
 
-def assert_no_pre_execution_artifacts(out_dir):
+def assert_no_pre_execution_artifacts(root):
     """marker 或任一 pre-execution payload 均代表终态/半提交，正式路径不得忽略。"""
     present = [name for name in PRE_EXECUTION_RESERVED_FILES
-               if os.path.lexists(os.path.join(out_dir, name))]
+               if _artifact_exists(root, name)]
     if present:
         raise ArtifactNameConflictError(
             "报告根存在 pre-execution terminal/incomplete 工件："
@@ -187,50 +200,215 @@ def assert_no_pre_execution_artifacts(out_dir):
             + "；只有一次新的完整 workflow 能在同一工件锁内显式失效后重跑")
 
 
-def _atomic_write_json(out_dir, filename, payload):
-    """在既有报告根内原子写一份 JSON；不创建或猜测报告根。"""
-    fd, tmp = tempfile.mkstemp(prefix=f".{filename}.", suffix=".tmp", dir=out_dir)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as out:
-            json.dump(payload, out, ensure_ascii=False, indent=2)
-            out.flush()
-            os.fsync(out.fileno())
-        path = os.path.join(out_dir, filename)
-        os.replace(tmp, path)
-        dir_fd = os.open(out_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+class ArtifactTransaction:
+    """持有报告根 inode 与锁的 dirfd-relative 事务。"""
+
+    def __init__(self, path, dir_fd):
+        self.path = path
+        self.dir_fd = dir_fd
+        root_stat = os.fstat(dir_fd)
+        self._identity = (root_stat.st_dev, root_stat.st_ino)
+        self._owned_temps = {}
+        self._round = secrets.token_hex(12)
+
+    @staticmethod
+    def _name(filename):
+        if (not isinstance(filename, str) or not filename
+                or filename in {".", ".."}
+                or os.path.basename(filename) != filename):
+            raise ArtifactNameConflictError("事务工件名必须是报告根下的单个文件名")
+        return filename
+
+    def assert_path_stable(self):
         try:
-            os.fsync(dir_fd)
+            current = os.stat(self.path, follow_symlinks=False)
+        except OSError as ex:
+            raise ArtifactNameConflictError("报告根事务期间被替换或移除") from ex
+        if (not stat.S_ISDIR(current.st_mode)
+                or (current.st_dev, current.st_ino) != self._identity):
+            raise ArtifactNameConflictError("报告根事务期间被替换")
+
+    def lexists(self, filename):
+        name = self._name(filename)
+        try:
+            os.stat(name, dir_fd=self.dir_fd, follow_symlinks=False)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def unlink(self, filename):
+        name = self._name(filename)
+        self.assert_path_stable()
+        try:
+            os.unlink(name, dir_fd=self.dir_fd)
+        except FileNotFoundError:
+            return False
+        self.assert_path_stable()
+        return True
+
+    def sha256(self, filename):
+        import hashlib
+        name = self._name(filename)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(name, flags, dir_fd=self.dir_fd)
+        try:
+            value = hashlib.sha256()
+            for chunk in iter(lambda: os.read(fd, 1024 * 1024), b""):
+                value.update(chunk)
+            return value.hexdigest()
         finally:
-            os.close(dir_fd)
-        return path
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+            os.close(fd)
+
+    def read_bytes(self, relative_path):
+        """从固定报告根 dirfd 逐段 no-follow 读取正式输入。"""
+        if (not isinstance(relative_path, str) or not relative_path
+                or os.path.isabs(relative_path)
+                or os.path.normpath(relative_path) != relative_path):
+            raise ArtifactNameConflictError("事务读取路径须为报告根内规范相对路径")
+        parts = relative_path.split(os.path.sep)
+        if any(part in {"", ".", ".."} for part in parts):
+            raise ArtifactNameConflictError("事务读取路径不得逃逸报告根")
+        directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                           | getattr(os, "O_NOFOLLOW", 0))
+        directory_fd = os.dup(self.dir_fd)
+        try:
+            for part in parts[:-1]:
+                child_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = child_fd
+            fd = os.open(
+                parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd)
+            try:
+                current = os.fstat(fd)
+                if not stat.S_ISREG(current.st_mode):
+                    raise ArtifactNameConflictError("事务正式输入不是普通文件")
+                chunks = []
+                while True:
+                    chunk = os.read(fd, 1024 * 1024)
+                    if not chunk:
+                        return b"".join(chunks)
+                    chunks.append(chunk)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(directory_fd)
+
+    def read_json(self, relative_path):
+        try:
+            return json.loads(self.read_bytes(relative_path))
+        except (UnicodeError, json.JSONDecodeError) as ex:
+            raise ArtifactNameConflictError(
+                f"事务正式 JSON 输入不可解析：{relative_path!r}") from ex
+
+    def atomic_write_bytes(self, filename, raw):
+        name = self._name(filename)
+        if not isinstance(raw, bytes):
+            raise TypeError("atomic payload 须为 bytes")
+        temp_name = (
+            f"{ARTIFACT_TEMP_PREFIX}{self._round}.{secrets.token_hex(8)}.tmp")
+        flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                 | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(temp_name, flags, 0o600, dir_fd=self.dir_fd)
+        temp_stat = os.fstat(fd)
+        self._owned_temps[temp_name] = (temp_stat.st_dev, temp_stat.st_ino)
+        try:
+            view = memoryview(raw)
+            while view:
+                written = os.write(fd, view)
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        self.assert_path_stable()
+        current = os.stat(temp_name, dir_fd=self.dir_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != self._owned_temps[temp_name]:
+            raise ArtifactNameConflictError("本轮原子写临时文件在提交前被换绑")
+        os.replace(
+            temp_name, name, src_dir_fd=self.dir_fd, dst_dir_fd=self.dir_fd)
+        self._owned_temps.pop(temp_name, None)
+        os.fsync(self.dir_fd)
+        self.assert_path_stable()
+        return os.path.join(self.path, name)
+
+    def atomic_write_json(self, filename, payload):
+        raw = json.dumps(
+            payload, ensure_ascii=False, indent=2).encode("utf-8")
+        return self.atomic_write_bytes(filename, raw)
+
+    def cleanup_own_temps(self):
+        for name, identity in tuple(self._owned_temps.items()):
+            try:
+                current = os.stat(
+                    name, dir_fd=self.dir_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) == identity:
+                    os.unlink(name, dir_fd=self.dir_fd)
+            except FileNotFoundError:
+                pass
+            finally:
+                self._owned_temps.pop(name, None)
+
+
+def _atomic_write_json(root, filename, payload):
+    """在已持锁事务内原子写 JSON；兼容入口会自行取得同一把锁。"""
+    if isinstance(root, ArtifactTransaction):
+        return root.atomic_write_json(filename, payload)
+    guard = artifact_path_guard.prepare_existing_directory(root)
+    with artifact_transaction(guard["path"], guard=guard) as transaction:
+        return transaction.atomic_write_json(filename, payload)
 
 
 @contextmanager
-def artifact_transaction(out_dir):
+def artifact_transaction(out_dir, *, guard=None):
     """序列化同一报告根的正式/attempt 终态切换。
 
     lock 文件只负责并发互斥，不承载状态；崩溃后的 durable 状态由正式总结或
     ``pre_execution_terminal.json`` 表达。调用方必须先创建报告根。
     """
-    lock_path = os.path.join(out_dir, ARTIFACT_LOCK_FILE)
-    with open(lock_path, "a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+             | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        dir_fd = os.open(out_dir, flags)
+    except OSError as ex:
+        raise ArtifactNameConflictError("报告根无法以 no-follow dirfd 打开") from ex
+    transaction = ArtifactTransaction(os.path.abspath(out_dir), dir_fd)
+    lock_fd = None
+    try:
+        if guard is not None:
+            expected = guard["identities"][-1][1:]
+            if transaction._identity != expected:
+                raise ArtifactNameConflictError("报告根取得事务前已被替换")
+        transaction.assert_path_stable()
+        lock_flags = (os.O_RDWR | os.O_CREAT
+                      | getattr(os, "O_NOFOLLOW", 0))
+        lock_fd = os.open(
+            ARTIFACT_LOCK_FILE, lock_flags, 0o600, dir_fd=dir_fd)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        orphans = sorted(
+            name for name in os.listdir(dir_fd)
+            if (name.startswith(ARTIFACT_TEMP_PREFIX)
+                or name in LEGACY_ARTIFACT_TEMP_FILES))
+        if orphans:
+            raise ArtifactNameConflictError(
+                "报告根存在上一轮 orphan 原子写临时文件：" + ", ".join(orphans))
+        transaction.assert_path_stable()
+        yield transaction
+        transaction.assert_path_stable()
+    finally:
+        transaction.cleanup_own_temps()
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        os.close(dir_fd)
 
 
-def publish_acceptance_json_locked(out_dir, acceptance):
+def publish_acceptance_json_locked(out_dir, acceptance, *, transaction):
     """调用方已持有报告根锁时发布正式 acceptance。"""
     assert_formal_acceptance_allowed(acceptance)
     _assert_execution_identity(acceptance)
-    _assert_opposite_summary_absent(out_dir, FORMAL_ACCEPTANCE_FILE)
-    assert_no_pre_execution_artifacts(out_dir)
-    return _atomic_write_json(out_dir, FORMAL_ACCEPTANCE_FILE, acceptance)
+    _assert_opposite_summary_absent(transaction, FORMAL_ACCEPTANCE_FILE)
+    assert_no_pre_execution_artifacts(transaction)
+    return _atomic_write_json(transaction, FORMAL_ACCEPTANCE_FILE, acceptance)
 
 
 def publish_acceptance_json(out_dir, acceptance):
@@ -241,9 +419,9 @@ def publish_acceptance_json(out_dir, acceptance):
         guard = artifact_path_guard.prepare_existing_directory(out_dir)
     except artifact_path_guard.ArtifactPathError as ex:
         raise ArtifactNameConflictError(f"正式报告根不可信：{ex}") from ex
-    with artifact_transaction(guard["path"]):
-        artifact_path_guard.assert_stable(guard)
-        return publish_acceptance_json_locked(guard["path"], acceptance)
+    with artifact_transaction(guard["path"], guard=guard) as transaction:
+        return publish_acceptance_json_locked(
+            guard["path"], acceptance, transaction=transaction)
 
 
 def build_attempt_record(acceptance):
@@ -285,8 +463,7 @@ def write_attempt_record(out_dir, acceptance):
         guard = artifact_path_guard.prepare_existing_directory(out_dir)
     except artifact_path_guard.ArtifactPathError as ex:
         raise ArtifactNameConflictError(f"attempt 报告根不可信：{ex}") from ex
-    with artifact_transaction(guard["path"]):
-        artifact_path_guard.assert_stable(guard)
-        _assert_opposite_summary_absent(guard["path"], ATTEMPT_RECORD_FILE)
-        assert_no_pre_execution_artifacts(guard["path"])
-        return _atomic_write_json(guard["path"], ATTEMPT_RECORD_FILE, record)
+    with artifact_transaction(guard["path"], guard=guard) as transaction:
+        _assert_opposite_summary_absent(transaction, ATTEMPT_RECORD_FILE)
+        assert_no_pre_execution_artifacts(transaction)
+        return _atomic_write_json(transaction, ATTEMPT_RECORD_FILE, record)

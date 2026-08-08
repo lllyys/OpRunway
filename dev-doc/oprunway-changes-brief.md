@@ -4,6 +4,15 @@
 
 ## 2026-08-08 · CP-C 构建/交付失败统一为不可发布 attempt
 
+- 修复 pre-execution finalizer 对标准 `<out>/work/` 布局的误拒：只有显式声明完整根级 mutation 集后才允许
+  报告根包含保留的可信输入；`out` 与 trusted input 的 exact/ancestor 冲突、根级清理/写入目标的双向祖先
+  冲突仍 fail-closed，父链 no-follow、realpath alias、inode 复核、artifact lock、orphan 门与 `work/` 原样保留
+  均有行为测试；finalizer 与 renderer 的读写统一固定在持有的 report-root dirfd，保留输入以 raw SHA、
+  envelope digest、执行身份和 vendor payload 交叉绑定；根内逐段 no-follow，根外显式 facts 单次
+  `O_NOFOLLOW` 打开并从同一 fd 校验，统一随机临时名前缀和 orphan 门不再允许固定 `.tmp` 或换绑旁路。
+  A3 最终相关集 276 项全绿；`trace --missing` 的 97 项定向集记录 artifact transaction 92%、path guard 76%、
+  pre-execution finalizer 83%、renderer 89%、source-facts lookup 64%；17 个定向语义 mutant 全部被杀死，
+  独立安全复审 CLEAN；无排除 full 2811 项全绿（18 skip，100.729s），compileall 通过，未运行算子或 DUT。
 - `vendor_build_receipt emit` 新增互斥 `--failure-out`：受控 build、ELF、package、target closure 与源码子树
   失败保留 typed stage/code 和能取得的实测 safe facts，仍返回 rc=2，绝不写 `VERIFIED` receipt。
 - 新增唯一 pre-execution finalizer，把 producer attempt 与原始 CP-A facts、spec public/internal identity、

@@ -770,23 +770,10 @@ class StaleResultInvalidationTest(unittest.TestCase):
                 W.run(_write_spec(root), mode="cpp_extension", out_dir=out_dir)
 
     def test_result_file_list_covers_the_markdown_the_renderer_actually_writes(self):
-        """⭐ 漂移哨：`_REPORT_MD_FILES` 是照抄 `render_acceptance_markdown` 的字面量。
-
-        那边改名 / 多产一份人读报告而这里没同步 → 旧报告会在早退后留任。反向也钉住
-        （列了渲染器根本不产的名字 = 这份清单在自欺）。
-
-        ⚠ 这是**启发式**哨兵，不是证明（2026-08-06 codex 审修门自核）：它只看得见
-        `report_root, "x.md"` 这种落点形态。渲染器若改用常量/辅助函数另产一份报告，
-        它抓不到。所以另加一条**非空**断言——正则一个都匹配不上时（大改写），哨兵自己先红，
-        而不是悄悄变成一句空话。**真正的根治**是让渲染器导出唯一的报告清单常量、生产侧直接
-        引用，那要改 `render_acceptance_markdown.py`，不在本批的文件范围内。
-        """
-        src = inspect.getsource(MD)
-        # 同时吃 `os.path.join(report_root, "x.md")` 与 `Path(report_root, "x.md")`。
-        joined = set(re.findall(r'report_root\s*,\s*"([^"]+\.md)"', src))
-        self.assertTrue(joined, "漂移哨已失效：渲染器里一个 .md 落点都没匹配到")
+        """renderer 与 workflow 直接共享同一份报告名真源。"""
         default_name = inspect.signature(MD.write_report).parameters["filename"].default
-        self.assertEqual(set(W._REPORT_MD_FILES), joined | {default_name})
+        self.assertIs(W._REPORT_MD_FILES, MD.REPORT_MD_FILES)
+        self.assertIn(default_name, MD.REPORT_MD_FILES)
         self.assertTrue(set(W._REPORT_MD_FILES) <= set(W._RESULT_FILES))
 
 

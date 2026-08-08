@@ -77,10 +77,8 @@ _MARKDOWN_REPORT_ERROR_FILE = "markdown_report_error.json"
 _TARGET_KERNEL_FAILURE_MD = pre_execution_failure.DETAIL_REPORT_FILE
 _ACCEPTANCE_FILES = ("acceptance.json", "verdict.json")
 _DEV_FILES = (_DEV_SUMMARY_FILE, _DEV_VERDICT_FILE)
-#: 人读交付物：`render_acceptance_markdown.write_report` 落进报告目录的三份 Markdown。
-#: ⚠ 那边是**字面量**、没有可 import 的常量，这里只能照抄——`test_run_workflow_source_staging`
-#:   里有一条**漂移哨**直接从那个模块的落点反查这份清单，改了名而这里没同步会红。
-_REPORT_MD_FILES = ("验收报告.md", "精度失败明细.md", "性能失败明细.md")
+#: 人读交付物唯一清单由 renderer 导出；清旧轮与写新轮不得各抄一份。
+_REPORT_MD_FILES = render_acceptance_markdown.REPORT_MD_FILES
 #: 「本轮结论」的**全部消费面**：精度裁决 + 性能裁决 + 非验收那一套同位产物 + 人读报告 + 小 shape 仿真图。
 #: 见 `_invalidate_stale_results`——它们在 `run()` 的**第一行**被作废，早于任何可能早退的校验。
 #: ⚠ **两套产物一起清、不按 is_acceptance 二选一**：`is_acceptance` 在下游还会被 adapter 自报的

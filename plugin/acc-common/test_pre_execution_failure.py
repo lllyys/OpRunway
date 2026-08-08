@@ -7,7 +7,6 @@ import os
 import tempfile
 import math
 import unittest
-from unittest import mock
 
 import content_address
 import kernel_identity as K
@@ -87,6 +86,139 @@ class PreExecutionFailureContractTest(unittest.TestCase):
         attempt["attempt_sha256"] = P.attempt_digest(attempt)
         return attempt
 
+    def _write_standard_work_inputs(self, label):
+        out_dir = os.path.join(self.root, "reports", label)
+        work_dir = os.path.join(out_dir, "work")
+        os.makedirs(work_dir)
+        spec_path = os.path.join(work_dir, "spec.json")
+        facts_path = os.path.join(work_dir, "source_facts.json")
+        vendor_path = os.path.join(work_dir, "vendor_build_attempt.json")
+        with open(spec_path, "w", encoding="utf-8") as out:
+            json.dump(self.spec, out)
+        with open(facts_path, "w", encoding="utf-8") as out:
+            json.dump(content_address.make_artifact(
+                "oprunway/source-facts/v1", self.payload), out)
+        with open(vendor_path, "w", encoding="utf-8") as out:
+            json.dump(self.vendor_attempt, out)
+        return out_dir, work_dir, spec_path, facts_path, vendor_path
+
+    def test_standard_report_work_inputs_are_preserved_and_finalize(self):
+        out_dir, work_dir, spec_path, facts_path, vendor_path = \
+            self._write_standard_work_inputs("standard-layout")
+        keep = os.path.join(work_dir, "keep-input.txt")
+        with open(keep, "w", encoding="utf-8") as out:
+            out.write("caller-trusted input\n")
+        fixed_tmp = os.path.join(out_dir, P.DETAIL_REPORT_FILE + ".tmp")
+        with open(fixed_tmp, "w", encoding="utf-8") as out:
+            out.write("unrelated root file\n")
+        for stale in ("acceptance.json", "verdict.json", "验收报告.md"):
+            with open(os.path.join(out_dir, stale), "w", encoding="utf-8") as out:
+                out.write("stale\n")
+
+        self.assertEqual(P.main([
+            "--failure-attempt", vendor_path,
+            "--spec", spec_path,
+            "--source-facts", facts_path,
+            "--out", out_dir,
+        ]), 0)
+
+        with open(keep, encoding="utf-8") as src:
+            self.assertEqual(src.read(), "caller-trusted input\n")
+        with open(fixed_tmp, encoding="utf-8") as src:
+            self.assertEqual(src.read(), "unrelated root file\n")
+        self.assertTrue(os.path.isfile(spec_path))
+        self.assertTrue(os.path.isfile(facts_path))
+        self.assertTrue(os.path.isfile(vendor_path))
+        self.assertTrue(os.path.isfile(os.path.join(
+            out_dir, P.acceptance_artifacts.ATTEMPT_RECORD_FILE)))
+        self.assertTrue(os.path.isfile(os.path.join(
+            out_dir, P.acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE)))
+        for stale in ("acceptance.json", "verdict.json", "验收报告.md"):
+            self.assertFalse(os.path.lexists(os.path.join(out_dir, stale)), stale)
+
+    def test_standard_work_directory_symlink_is_not_a_trusted_input_base(self):
+        out_dir = os.path.join(self.root, "reports", "linked-work")
+        external = os.path.join(self.root, "external-work")
+        os.makedirs(out_dir)
+        os.makedirs(external)
+        work_dir = os.path.join(out_dir, "work")
+        os.symlink(external, work_dir)
+        spec_path = os.path.join(work_dir, "spec.json")
+        facts_path = os.path.join(work_dir, "source_facts.json")
+        vendor_path = os.path.join(work_dir, "vendor_build_attempt.json")
+        with open(spec_path, "w", encoding="utf-8") as out:
+            json.dump(self.spec, out)
+        with open(facts_path, "w", encoding="utf-8") as out:
+            json.dump(content_address.make_artifact(
+                "oprunway/source-facts/v1", self.payload), out)
+        with open(vendor_path, "w", encoding="utf-8") as out:
+            json.dump(self.vendor_attempt, out)
+
+        with self.assertRaisesRegex(P.PreExecutionFailureError, "符号链接"):
+            P.finalize_from_files(
+                out_dir=out_dir, spec_path=spec_path,
+                source_facts_path=facts_path,
+                vendor_attempt=self.vendor_attempt,
+                vendor_attempt_path=vendor_path)
+        self.assertEqual(os.listdir(out_dir), ["work"])
+
+    def test_retained_input_inode_swap_is_detected_before_commit(self):
+        retained = P._read_retained_json(
+            self.spec_path, role="spec", report_root=self.root)
+        replacement = self.spec_path + ".replacement"
+        with open(replacement, "wb") as out:
+            out.write(retained["raw"])
+        os.replace(replacement, self.spec_path)
+        with self.assertRaisesRegex(P.PreExecutionFailureError, "换绑|漂移"):
+            P._verify_retained_inputs((retained,))
+
+    def test_terminal_consumer_reopens_and_hashes_retained_inputs_nofollow(self):
+        out_dir, _, spec_path, facts_path, vendor_path = \
+            self._write_standard_work_inputs("retained-consumer")
+        P.finalize_from_files(
+            out_dir=out_dir, spec_path=spec_path,
+            source_facts_path=facts_path, vendor_attempt=self.vendor_attempt,
+            vendor_attempt_path=vendor_path)
+        P.validate_terminal_marker(out_dir)
+
+        with open(spec_path, "a", encoding="utf-8") as out:
+            out.write("\n")
+        with self.assertRaisesRegex(P.PreExecutionFailureError, "retained|可信输入"):
+            P.validate_terminal_marker(out_dir)
+
+    def test_terminal_consumer_rejects_retained_leaf_symlink_even_same_bytes(self):
+        out_dir, _, spec_path, facts_path, vendor_path = \
+            self._write_standard_work_inputs("retained-symlink-consumer")
+        P.finalize_from_files(
+            out_dir=out_dir, spec_path=spec_path,
+            source_facts_path=facts_path, vendor_attempt=self.vendor_attempt,
+            vendor_attempt_path=vendor_path)
+        replacement = os.path.join(self.root, "same-spec.json")
+        with open(spec_path, "rb") as src, open(replacement, "wb") as out:
+            out.write(src.read())
+        os.unlink(spec_path)
+        os.symlink(replacement, spec_path)
+        with self.assertRaisesRegex(P.PreExecutionFailureError, "符号链接|no-follow"):
+            P.validate_terminal_marker(out_dir)
+
+    def test_orphan_atomic_temp_blocks_finalizer_and_preserves_work(self):
+        out_dir, work_dir, spec_path, facts_path, vendor_path = \
+            self._write_standard_work_inputs("orphan-temp-finalizer")
+        orphan = os.path.join(
+            out_dir, P.acceptance_artifacts.ARTIFACT_TEMP_PREFIX + "old.tmp")
+        with open(orphan, "w", encoding="utf-8") as out:
+            out.write("partial\n")
+        with self.assertRaisesRegex(
+                P.PreExecutionFailureError, "orphan"):
+            P.finalize_from_files(
+                out_dir=out_dir, spec_path=spec_path,
+                source_facts_path=facts_path,
+                vendor_attempt=self.vendor_attempt,
+                vendor_attempt_path=vendor_path)
+        self.assertTrue(os.path.isfile(orphan))
+        self.assertEqual(sorted(os.listdir(work_dir)), [
+            "source_facts.json", "spec.json", "vendor_build_attempt.json"])
+
     def test_public_api_and_internal_kernel_can_differ_and_finalize_without_task1(self):
         out = os.path.join(self.root, "reports", "attempt")
         result = P.finalize_from_files(
@@ -107,6 +239,7 @@ class PreExecutionFailureContractTest(unittest.TestCase):
             P._sha256_file(os.path.join(out, vendor_source["path"])))
         self.assertTrue(os.path.isfile(result["detail_report"]))
         self.assertTrue(os.path.isfile(result["terminal_marker"]))
+        P.validate_terminal_marker(out)
         with open(result["terminal_marker"], encoding="utf-8") as src:
             marker = json.load(src)
         self.assertEqual(set(marker["artifacts"]), {
@@ -164,7 +297,7 @@ class PreExecutionFailureContractTest(unittest.TestCase):
                 source_facts=self.payload, source_facts_digest=None,
                 vendor_attempt=self.vendor_attempt)
 
-    def test_report_root_parent_symlink_and_trusted_input_overlap_are_rejected(self):
+    def test_report_root_parent_symlink_exact_and_ancestor_overlap_are_rejected(self):
         outside = os.path.join(self.root, "outside")
         os.makedirs(outside)
         linked = os.path.join(self.root, "linked")
@@ -175,12 +308,161 @@ class PreExecutionFailureContractTest(unittest.TestCase):
                 source_facts_path=self.facts_path,
                 vendor_attempt=self.vendor_attempt)
         self.assertEqual(os.listdir(outside), [])
-        with self.assertRaises(P.PreExecutionFailureError):
-            P.finalize_from_files(
-                out_dir=os.path.dirname(self.spec_path), spec_path=self.spec_path,
-                source_facts_path=self.facts_path,
-                vendor_attempt=self.vendor_attempt)
+        for label, out_dir in (
+                ("exact", self.spec_path),
+                ("below-trusted-input", os.path.join(self.spec_path, "report"))):
+            with self.subTest(label=label), self.assertRaisesRegex(
+                    P.PreExecutionFailureError,
+                    "报告根不得等于可信输入或落在可信输入之下"):
+                P.finalize_from_files(
+                    out_dir=out_dir, spec_path=self.spec_path,
+                    source_facts_path=self.facts_path,
+                    vendor_attempt=self.vendor_attempt)
         self.assertTrue(os.path.isfile(self.spec_path))
+
+    def test_trusted_inputs_overlapping_controlled_root_targets_are_rejected(self):
+        controlled = tuple(dict.fromkeys(P._DOWNSTREAM_FILES + (
+            P.acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE,
+            P.acceptance_artifacts.ARTIFACT_LOCK_FILE,
+        )))
+        for name in controlled:
+            with self.subTest(name=name):
+                out_dir = os.path.join(self.root, "reports", "collision-" +
+                                       name.replace(".", "-"))
+                work = os.path.join(out_dir, "work")
+                os.makedirs(work)
+                spec_path = os.path.join(out_dir, name)
+                facts_path = os.path.join(work, "source_facts.json")
+                with open(spec_path, "w", encoding="utf-8") as out:
+                    json.dump(self.spec, out)
+                with open(facts_path, "w", encoding="utf-8") as out:
+                    json.dump(content_address.make_artifact(
+                        "oprunway/source-facts/v1", self.payload), out)
+                with self.assertRaisesRegex(
+                        P.PreExecutionFailureError, "受控终态路径.*可信输入"):
+                    P.finalize_from_files(
+                        out_dir=out_dir, spec_path=spec_path,
+                        source_facts_path=facts_path,
+                        vendor_attempt=self.vendor_attempt)
+                self.assertTrue(os.path.isfile(spec_path))
+
+    def test_trusted_input_below_controlled_target_is_rejected(self):
+        out_dir = os.path.join(self.root, "reports", "controlled-ancestor")
+        spec_path = os.path.join(
+            out_dir, P.acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE,
+            "spec.json")
+        facts_path = os.path.join(out_dir, "work", "source_facts.json")
+        os.makedirs(os.path.dirname(spec_path))
+        os.makedirs(os.path.dirname(facts_path))
+        with open(spec_path, "w", encoding="utf-8") as out:
+            json.dump(self.spec, out)
+        with open(facts_path, "w", encoding="utf-8") as out:
+            json.dump(content_address.make_artifact(
+                "oprunway/source-facts/v1", self.payload), out)
+        with self.assertRaisesRegex(
+                P.PreExecutionFailureError, "符号链接|受控终态路径.*可信输入"):
+            P.finalize_from_files(
+                out_dir=out_dir, spec_path=spec_path,
+                source_facts_path=facts_path,
+                vendor_attempt=self.vendor_attempt)
+        self.assertTrue(os.path.isfile(spec_path))
+
+    def test_cli_vendor_attempt_is_a_trusted_input_not_only_an_in_memory_value(self):
+        out_dir, _, spec_path, facts_path, _ = \
+            self._write_standard_work_inputs("vendor-input-collision")
+        vendor_path = os.path.join(out_dir, "acceptance.json")
+        with open(vendor_path, "w", encoding="utf-8") as out:
+            json.dump(self.vendor_attempt, out)
+        with self.assertRaisesRegex(
+                P.PreExecutionFailureError, "受控终态路径.*可信输入"):
+            P.main([
+                "--failure-attempt", vendor_path,
+                "--spec", spec_path,
+                "--source-facts", facts_path,
+                "--out", out_dir,
+            ])
+        with open(vendor_path, encoding="utf-8") as src:
+            self.assertEqual(json.load(src), self.vendor_attempt)
+
+    def test_vendor_attempt_path_symlink_or_object_drift_is_rejected(self):
+        out_dir = os.path.join(self.root, "reports", "vendor-original")
+        vendor_path = os.path.join(self.root, "vendor-original.json")
+        with open(vendor_path, "w", encoding="utf-8") as out:
+            json.dump(self.vendor_attempt, out)
+        alias = os.path.join(self.root, "vendor-alias.json")
+        os.symlink(vendor_path, alias)
+        with self.assertRaisesRegex(P.PreExecutionFailureError, "符号链接"):
+            P.finalize_from_files(
+                out_dir=out_dir, spec_path=self.spec_path,
+                source_facts_path=self.facts_path,
+                vendor_attempt=self.vendor_attempt, vendor_attempt_path=alias)
+        changed = copy.deepcopy(self.vendor_attempt)
+        changed["attempt_sha256"] = "f" * 64
+        with open(vendor_path, "w", encoding="utf-8") as out:
+            json.dump(changed, out)
+        with self.assertRaisesRegex(P.PreExecutionFailureError, "内存对象与可信原件漂移"):
+            P.finalize_from_files(
+                out_dir=out_dir, spec_path=self.spec_path,
+                source_facts_path=self.facts_path,
+                vendor_attempt=self.vendor_attempt,
+                vendor_attempt_path=vendor_path)
+        self.assertFalse(os.path.lexists(out_dir))
+
+    def test_report_root_inode_replacement_is_rejected(self):
+        out_dir = os.path.join(self.root, "reports", "inode-race")
+        trusted = os.path.join(self.root, "trusted.json")
+        with open(trusted, "w", encoding="utf-8") as out:
+            out.write("{}")
+        guard = P.artifact_path_guard.prepare_report_root(
+            out_dir, (trusted,), mutation_paths=(
+                os.path.join(out_dir, "attempt_record.json"),))
+        moved = out_dir + ".old"
+        os.rename(out_dir, moved)
+        os.mkdir(out_dir)
+        with self.assertRaisesRegex(
+                P.artifact_path_guard.ArtifactPathError, "事务期间被替换"):
+            P.artifact_path_guard.assert_stable(guard)
+
+    def test_mutation_scope_must_be_declared_and_stay_below_report_root(self):
+        out_dir = os.path.join(self.root, "reports", "mutation-scope")
+        work = os.path.join(out_dir, "work")
+        os.makedirs(work)
+        trusted = os.path.join(work, "trusted.json")
+        with open(trusted, "w", encoding="utf-8") as out:
+            out.write("{}")
+        invalid_scopes = (
+            (),
+            (out_dir,),
+            (os.path.join(self.root, "outside.json"),),
+        )
+        for mutation_paths in invalid_scopes:
+            with self.subTest(mutation_paths=mutation_paths), self.assertRaises(
+                    P.artifact_path_guard.ArtifactPathError):
+                P.artifact_path_guard.prepare_report_root(
+                    out_dir, (trusted,), mutation_paths=mutation_paths)
+        self.assertEqual(os.listdir(work), ["trusted.json"])
+
+    def test_symlink_alias_cannot_hide_controlled_target_overlap(self):
+        out_dir = os.path.join(self.root, "reports", "alias-overlap")
+        os.makedirs(out_dir)
+        target = os.path.join(
+            out_dir, P.acceptance_artifacts.ATTEMPT_RECORD_FILE)
+        with open(target, "w", encoding="utf-8") as out:
+            json.dump(self.spec, out)
+        alias = os.path.join(out_dir, "work")
+        os.symlink(out_dir, alias)
+        facts_path = os.path.join(self.root, "alias-facts.json")
+        with open(facts_path, "w", encoding="utf-8") as out:
+            json.dump(content_address.make_artifact(
+                "oprunway/source-facts/v1", self.payload), out)
+        with self.assertRaisesRegex(
+                P.PreExecutionFailureError, "符号链接|受控终态路径.*可信输入"):
+            P.finalize_from_files(
+                out_dir=out_dir,
+                spec_path=os.path.join(alias, "attempt_record.json"),
+                source_facts_path=facts_path,
+                vendor_attempt=self.vendor_attempt)
+        self.assertTrue(os.path.isfile(target))
 
     def test_safe_build_facts_validation_is_exact_and_stage_aware(self):
         variants = []
@@ -228,35 +510,6 @@ class PreExecutionFailureContractTest(unittest.TestCase):
             P._validate_safe_build(
                 self.vendor_attempt["build"], "receipt_preflight",
                 "LIVE_RECEIPT_PREFLIGHT_FAILED")
-
-    def test_marker_write_failure_leaves_only_blocking_orphan_payloads(self):
-        real_json = P.acceptance_artifacts._atomic_write_json
-
-        def fail_marker(out_dir, filename, payload):
-            if filename == P.acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE:
-                raise OSError("injected marker commit failure")
-            return real_json(out_dir, filename, payload)
-
-        out_dir = os.path.join(self.root, "reports", "marker-fault")
-        with self.assertRaisesRegex(OSError, "marker commit"), mock.patch.object(
-                P.acceptance_artifacts, "_atomic_write_json",
-                side_effect=fail_marker):
-            P.finalize_from_files(
-                out_dir=out_dir,
-                spec_path=self.spec_path, source_facts_path=self.facts_path,
-                vendor_attempt=self.vendor_attempt)
-        self.assertFalse(os.path.lexists(os.path.join(
-            out_dir, P.acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE)))
-        self.assertTrue(os.path.isfile(os.path.join(out_dir, P.VENDOR_ATTEMPT_FILE)))
-        with self.assertRaises(P.acceptance_artifacts.ArtifactNameConflictError):
-            P.acceptance_artifacts.publish_acceptance_json(out_dir, {
-                "op": "Remainder",
-                "execution_identity": P.kernel_identity.resolve(
-                    self.spec, self.payload, require_explicit=True),
-                "overall": "PASS", "state": "PASSED", "exit_code": 0,
-                "repo_mode": "cpp_extension", "perf_status": "ok",
-                "gate": {"passed": True, "errors": {}},
-            })
 
     def test_trusted_base_allows_alias_above_base_but_rejects_alias_below(self):
         real = os.path.join(self.root, "real")
@@ -347,6 +600,70 @@ class PreExecutionFailureContractTest(unittest.TestCase):
                     json.dump(marker, out)
                 with self.assertRaisesRegex(
                         P.PreExecutionFailureError, "交叉绑定|execution identity"):
+                    P.validate_terminal_marker(out_dir)
+
+    def test_retained_manifest_cannot_resign_semantically_different_inputs(self):
+        for label in ("spec_raw", "identity", "facts_binding", "vendor"):
+            with self.subTest(label=label):
+                out_dir, _, spec_path, facts_path, vendor_path = \
+                    self._write_standard_work_inputs("retained-cross-" + label)
+                P.finalize_from_files(
+                    out_dir=out_dir, spec_path=spec_path,
+                    source_facts_path=facts_path,
+                    vendor_attempt=self.vendor_attempt,
+                    vendor_attempt_path=vendor_path)
+                marker_path = os.path.join(
+                    out_dir, P.acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE)
+                attempt_path = os.path.join(
+                    out_dir, P.acceptance_artifacts.ATTEMPT_RECORD_FILE)
+                with open(marker_path, encoding="utf-8") as src:
+                    marker = json.load(src)
+                retained = {item["role"]: item
+                            for item in marker["retained_inputs"]}
+                if label == "spec_raw":
+                    with open(spec_path, "a", encoding="utf-8") as out:
+                        out.write("\n")
+                    retained["spec"]["sha256"] = P._sha256_file(spec_path)
+                elif label == "identity":
+                    unrelated = copy.deepcopy(self.spec)
+                    unrelated["op"] = "Unrelated"
+                    with open(spec_path, "w", encoding="utf-8") as out:
+                        json.dump(unrelated, out)
+                    retained["spec"]["sha256"] = P._sha256_file(spec_path)
+                    with open(attempt_path, encoding="utf-8") as src:
+                        record = json.load(src)
+                    marker["binding"]["spec_sha256"] = retained["spec"]["sha256"]
+                    record["pre_execution_failure"]["spec_sha256"] = \
+                        retained["spec"]["sha256"]
+                    with open(attempt_path, "w", encoding="utf-8") as out:
+                        json.dump(record, out)
+                    marker["artifacts"]["attempt_record"]["sha256"] = \
+                        P._sha256_file(attempt_path)
+                elif label == "facts_binding":
+                    with open(attempt_path, encoding="utf-8") as src:
+                        record = json.load(src)
+                    marker["binding"]["source_facts_digest"] = "f" * 64
+                    record["pre_execution_failure"]["source_facts_digest"] = "f" * 64
+                    with open(attempt_path, "w", encoding="utf-8") as out:
+                        json.dump(record, out)
+                    marker["artifacts"]["attempt_record"]["sha256"] = \
+                        P._sha256_file(attempt_path)
+                else:
+                    other_vendor = copy.deepcopy(self.vendor_attempt)
+                    other_vendor["failure"]["error_code"] = "TARGET_OP_MISMATCH"
+                    other_vendor["failure"]["error_text"] = P._redacted_error(
+                        "target_closure", "TARGET_OP_MISMATCH")
+                    self._resign(other_vendor)
+                    P.validate_vendor_attempt(other_vendor)
+                    with open(vendor_path, "w", encoding="utf-8") as out:
+                        json.dump(other_vendor, out)
+                    retained["vendor_build_attempt"]["sha256"] = \
+                        P._sha256_file(vendor_path)
+                with open(marker_path, "w", encoding="utf-8") as out:
+                    json.dump(marker, out)
+                with self.assertRaisesRegex(
+                        P.PreExecutionFailureError,
+                        "retained|可信输入|binding|execution identity"):
                     P.validate_terminal_marker(out_dir)
 
     def test_renderer_cannot_promote_an_attempt_to_a_formal_report(self):

@@ -34,9 +34,23 @@ manifest 后拒绝它。marker 提交前崩溃留下的任一 pre-execution 保�
 不能把旧 evidence/verdict/perf 重新发布成 acceptance。
 
 所有输出路径从调用方已建立信任的稳定 base 开始逐段 `lstat`，因此允许 base 之上的系统级路径 alias
-（如 macOS `/var -> /private/var`），仍拒绝 base 之下任一父级软链、非目录、leaf 软链、报告根与可信输入
-重叠；fresh workflow 创建、正式 publisher、clean-finalize 与 renderer 共用该守卫。提交前复核报告目录的
-device/inode，防止路径检查与原子发布之间被替换。
+（如 macOS `/var -> /private/var`），仍拒绝 base 之下任一父级软链、非目录和 leaf 软链。报告根不得等于
+可信输入或落在可信输入之下；标准布局允许可信 `spec/source_facts/vendor attempt` 保存在
+`<out>/work/`，但 finalizer 必须显式枚举本事务实际会写或清理的全部根级路径，并拒绝任一受控路径与可信
+输入相等或互为祖先。它不递归清理报告根，`work/` 及其可信输入必须原样保留。保留输入从报告根稳定 base
+向下逐段 `openat(O_NOFOLLOW)` 一次读成 payload + SHA，并记录 device/inode；marker 提交前复核 inode/SHA，
+marker 记录相对路径与 SHA，消费方再次 no-follow 打开复核。报告根事务从加锁到 marker/正式总结 commit 全程
+持有 `O_DIRECTORY|O_NOFOLLOW` dirfd，lock、临时文件、删除、replace 和 fsync 均走相对 fd；根路径换绑只会
+fail-closed，不会把工件写进替换目录。所有原子 writer 共用 `.oprunway-artifact-tmp-` 前缀：进事务时发现
+旧轮 orphan 即拒绝，异常清理只删除本轮自己创建且 inode 未换绑的临时文件。fresh workflow 创建、正式
+publisher、clean-finalize 与 renderer 继续共用父链/inode 守卫。消费 marker 时还须把 retained spec raw SHA、
+source_facts envelope digest、spec+facts 重建的 op/execution identity、retained vendor payload 分别与 binding、
+marker 和根级 terminal payload 交叉，不能只相信 marker 自报 path/hash。renderer 的正式 JSON、自动发现的
+根级或 `work/source_facts.json`、Markdown 写入与明细删除也都走同一 transaction；仅报告根外显式普通
+source_facts 保持兼容，根内父链或 leaf symlink 一律拒绝。
+报告根外显式 source_facts 也不是先 `islink/isfile` 再按路径重开：它须以
+`O_NOFOLLOW` 单次打开、`fstat` 证明 regular，并只从该 fd/inode 读取和校验，避免检查与打开之间被原子换成
+symlink。
 
 ## 执行边界
 

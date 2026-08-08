@@ -198,6 +198,100 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
                 root, R.HISTORICAL_REPORT_FILENAME)))
             self.assertTrue(terminal_entered.is_set())
 
+    def test_renderer_root_swap_cannot_redirect_final_markdown_write(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "report")
+            os.mkdir(root)
+            _write_docs(root, _docs(_receipt(_pr_source())))
+            rendering = threading.Event()
+            release = threading.Event()
+            errors = []
+            real_render = R._render_locked
+
+            def paused_render(*args, **kwargs):
+                rendering.set()
+                release.wait(3)
+                return real_render(*args, **kwargs)
+
+            def write_report():
+                try:
+                    R.write_report(root, allow_historical_read_only=True)
+                except Exception as ex:
+                    errors.append(ex)
+
+            with mock.patch.object(R, "_render_locked", side_effect=paused_render):
+                renderer = threading.Thread(target=write_report)
+                renderer.start()
+                self.assertTrue(rendering.wait(2))
+                displaced = root + ".displaced"
+                os.rename(root, displaced)
+                os.mkdir(root)
+                release.set()
+                renderer.join(3)
+            self.assertEqual(len(errors), 1)
+            self.assertRegex(str(errors[0]), "替换")
+            self.assertFalse(os.path.lexists(os.path.join(
+                root, R.HISTORICAL_REPORT_FILENAME)))
+
+    def test_renderer_rejects_work_source_facts_symlink_to_external_valid_file(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "report")
+            external = os.path.join(parent, "external")
+            os.mkdir(root)
+            os.mkdir(external)
+            docs, facts = self._current_docs(root)
+            _write_docs(root, docs)
+            _write_docs(external, {}, source_facts=facts)
+            os.symlink(external, os.path.join(root, "work"))
+            with self.assertRaisesRegex(
+                    R.acceptance_artifacts.FormalAcceptanceError,
+                    "source_facts|符号链接|no-follow|可信"):
+                R.render(root)
+
+    def test_external_explicit_source_facts_symlink_swap_never_renders(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "report")
+            os.mkdir(root)
+            docs, facts = self._current_docs(root)
+            _write_docs(root, docs)
+            valid = os.path.join(parent, "valid-facts.json")
+            _write_docs(parent, {}, source_facts=facts)
+            os.replace(os.path.join(parent, "source_facts.json"), valid)
+            candidate = os.path.join(parent, "candidate.json")
+            with open(candidate, "w", encoding="utf-8") as out:
+                out.write("{}")
+            stop = threading.Event()
+
+            def swap_candidate():
+                index = 0
+                while not stop.is_set():
+                    alias = os.path.join(parent, f"alias-{index}")
+                    os.symlink(valid, alias)
+                    os.replace(alias, candidate)
+                    regular = os.path.join(parent, f"regular-{index}")
+                    with open(regular, "w", encoding="utf-8") as out:
+                        out.write("{}")
+                    os.replace(regular, candidate)
+                    index += 1
+
+            swapper = threading.Thread(target=swap_candidate)
+            swapper.start()
+            accepted = False
+            try:
+                for _ in range(1500):
+                    try:
+                        R.render(root, source_facts_path=candidate)
+                    except (OSError, R.acceptance_artifacts.FormalAcceptanceError,
+                            R.acceptance_artifacts.ArtifactNameConflictError):
+                        continue
+                    accepted = True
+                    break
+            finally:
+                stop.set()
+                swapper.join(3)
+            self.assertFalse(
+                accepted, "外部 explicit facts 换成 symlink 的竞态不得成功渲染")
+
     def test_renders_public_and_internal_operator_identities_separately(self):
         with tempfile.TemporaryDirectory() as root:
             _write_docs(root, _docs(_snapshot_receipt()))
@@ -1020,43 +1114,45 @@ class CodeCellInjectionTest(unittest.TestCase):
 
 
 class SourceFactsDiscoveryIsSharedTest(unittest.TestCase):
-    """⭐ 钉住「渲染器和三级门用的是**同一份**来源对照物发现规则」。
+    """⭐ 钉住「渲染器和三级门用的是**同一份**来源对照物文档校验规则」。
 
     只把 `_find_source_facts` 改名成公开名是不够的：这条纪律要防的是**将来**有人在
     某一侧另写一份查找规则（或多加一档 fallback 路径）。那时报告陈述的对照物就不是
     门校过的那一份文件——报告说「已找到」、门校的是另一份，两边都「自洽」，谁也发现不了。
 
-    做法：把 `source_facts_lookup.find_source_facts` 换成桩，看两侧是否都观察得到。
-    任一侧改成自建实现、或改成 `from source_facts_lookup import find_source_facts`
+    做法：把 `source_facts_lookup.validate_source_facts_document` 换成桩，看两侧是否都观察得到。
+    任一侧改成自建实现、或改成 `from source_facts_lookup import validate_source_facts_document`
     （import 时就绑死了函数对象、换桩换不掉），本用例即红。
     """
 
-    def test_both_the_gate_and_the_renderer_go_through_source_facts_lookup(self):
+    def test_both_the_gate_and_the_renderer_share_document_validation(self):
         import source_facts_lookup
         import validate_acceptance_state as vas
         receipt = _snapshot_receipt()
         summary = VBR.summarize(receipt["vendor"]["build_receipt"])
         calls = []
-        original = source_facts_lookup.find_source_facts
+        original = source_facts_lookup.validate_source_facts_document
 
-        def stub(report_root, source_facts_path=None):
-            calls.append((report_root, source_facts_path))
+        def stub(doc):
+            calls.append(doc)
             return source_facts_lookup.SOURCE_FACTS_UNTRUSTED
 
-        source_facts_lookup.find_source_facts = stub
+        source_facts_lookup.validate_source_facts_document = stub
         try:
             with tempfile.TemporaryDirectory() as root:
-                _write_docs(root, _docs(receipt))
+                _write_docs(root, _docs(receipt), source_facts_raw="{}")
                 text = R.render(root, allow_historical_read_only=True)
                 self.assertEqual(
-                    1, len(calls), "渲染器没走 source_facts_lookup.find_source_facts")
+                    1, len(calls),
+                    "渲染器没走 source_facts_lookup.validate_source_facts_document")
 
                 errs = []
                 vas._gate_build_receipt_source_binding(root, summary, errs)
                 self.assertEqual(
-                    2, len(calls), "三级门没走 source_facts_lookup.find_source_facts")
+                    2, len(calls),
+                    "三级门没走 source_facts_lookup.validate_source_facts_document")
         finally:
-            source_facts_lookup.find_source_facts = original
+            source_facts_lookup.validate_source_facts_document = original
 
         # 桩返回 UNTRUSTED：两侧都必须按「拿不到可对账的对照物」处置，不能当已核。
         self.assertIn(R.PROV_FACTS_ABSENT, text)

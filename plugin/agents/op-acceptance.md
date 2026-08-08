@@ -54,7 +54,15 @@ CP-D `run_npu` 重跑性能，不重新抽 spec/生成 case/golden。
   vendor attempt 仍是 producer 事实，不是验收裁决。primary 必须把它连同原始 CP-A `source_facts.json` 和
   spec 交 `pre_execution_failure.py` 严格对账并收口；`run_workflow` 的 live receipt preflight 失败也复用
   同一 finalizer。标准结果只有 schema-v2 `attempt_record.json` + durable terminal marker + 中文非正式明细，
-  不启动 Task1/driver/DUT/profiler，也不得进入 CP-E 或正式 renderer。
+  不启动 Task1/driver/DUT/profiler，也不得进入 CP-E 或正式 renderer。可信 `spec/source_facts/vendor attempt`
+  可保留在标准 `<out>/work/`；finalizer 只动显式枚举的报告根级终态名，并对 mutation target 与可信输入
+  做双向祖先冲突检查，不递归清理 `work/`。可信输入须 no-follow 单次读取并在 marker commit 前按 inode/SHA
+  复核；marker 绑定其相对路径与 SHA。报告根 lock、清理、临时写、replace、fsync 必须全程走同一 dirfd，
+  上一轮遗留的统一前缀原子临时文件一律阻断 finalizer 与正式 publisher。
+  terminal consumer 必须把 retained spec/facts/vendor 语义与 binding、重建 identity、根级 payload 交叉；
+  renderer 的根内正式 JSON/source_facts/Markdown 也必须复用同一 dirfd transaction，不得退回 path-based
+  `open`/固定 `.tmp`。只有报告根外显式普通 source_facts 可继续走外部输入兼容分支。
+  该外部分支仍须单次 `O_NOFOLLOW` open + `fstat regular` 并从同一 fd 读取，禁止 check→open 两阶段路径复核。
 - **不做 NL 生成 durable 工件**：spec 派 `acc-spec-extractor`；**`golden.py` 与 `runner.cpp` 都派 `acc-runner-dev`**（前者 `gen_golden`、后者 `gen_runner`）——**不自己手写 `spec.json` / `golden.py` / `runner.cpp`**。
 - **不自行判 pass/fail**：判定唯一归**确定性脚本链**（`validator.py` 精度 + `perf_compare.py` 性能 + `validate_acceptance_state.py` 三级门）；本 agent **只逐字引用确定性产物的裁决并标来源**——不是「绝不提 pass/fail」。验收路径的总结工件只按 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一；开发级路径落 `dev_*`。三者不能互相顶替。
 - **首响应先加载 `acceptance-workflow` skill**，再按 CP-A..E 状态机调度；**禁裸调 subagent**（不脱离状态机直接 fan-out）。
