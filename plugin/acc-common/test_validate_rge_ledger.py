@@ -13,6 +13,7 @@ from pathlib import Path
 import cann_version
 import content_address
 import cpp_extension_adapter
+import kernel_identity
 import cpp_extension_identity
 import multi_card_shards
 import multi_card_verdict_equivalence
@@ -531,6 +532,10 @@ def _fixture(root: Path, *, transport_variant: bool = False) -> dict:
         }],
         "producer": {"tool": "fetch_source.py", "logic_sha256": "3" * 64},
     }
+    identity_fact = kernel_identity.discover(
+        {"experimental/math/fixture/op_host/x_def.cpp": "OP_ADD(X);\n"},
+        target_scope="experimental/math/fixture", content_anchor=content_anchor)
+    source_payload["derived"]["kernel_identity"] = identity_fact
     source_facts = content_address.make_artifact(rge._SOURCE_FACTS_DOMAIN, source_payload)
     source_path = formal / "source_facts.json"
     _write_json(source_path, source_facts)
@@ -551,6 +556,7 @@ def _fixture(root: Path, *, transport_variant: bool = False) -> dict:
     }
     spec = {
         "op": "Fixture",
+        "execution": kernel_identity.spec_execution(identity_fact),
         "runner_form": "cpp_extension",
         "declared_source_form": "local_source",
         "dtype_required": ["float32", "int64"],
@@ -648,6 +654,7 @@ def _fixture(root: Path, *, transport_variant: bool = False) -> dict:
     _write_json(perf_path, perf)
     acceptance = {
         "op": "Fixture",
+        "execution_identity": kernel_identity.resolve(spec, source_payload),
         "overall": "FAIL(精度)",
         "state": "FAILED_PRECISION",
         "exit_code": 1,
@@ -1718,6 +1725,19 @@ class RgeLedgerTest(unittest.TestCase):
             refs[:] = [ref for ref in refs if ref.get("artifact") != "source_facts"]
 
         self.assert_error(self.errors(mutate), "required artifact 'source_facts'")
+
+    def test_current_source_facts_missing_kernel_identity_is_rejected(self) -> None:
+        def mutate(ledger) -> None:
+            def remove_identity(envelope) -> None:
+                payload = envelope["payload"]
+                del payload["derived"]["kernel_identity"]
+                replacement = content_address.make_artifact(
+                    rge._SOURCE_FACTS_DOMAIN, payload)
+                envelope.clear()
+                envelope.update(replacement)
+            self.rewrite_artifact(ledger, "source_facts", remove_identity)
+
+        self.assert_error(self.errors(mutate), "kernel_identity")
 
     def test_repository_test_must_bind_log_identity_and_rc(self) -> None:
         def mutate(ledger) -> None:

@@ -12,6 +12,7 @@ import subprocess
 
 import vendor_build_receipt as V
 import target_kernel_delivery as TK
+import kernel_identity as K
 
 
 DEFAULT_SCOPE = "witness_op"
@@ -137,6 +138,13 @@ def vendor_build_receipt(
     # 测试 helper 的所有真实写入都锁在 vendor 所属临时根内。保留参数只为旧测试
     # 调用兼容；不能让一个逻辑来源标签把 fixture 写到 /work、/local 等外部路径。
     source_root = str(default_source_root)
+    def_rel = scope.rstrip("/") + "/op_host/x_def.cpp"
+    def_path = os.path.join(source_root, *def_rel.split("/"))
+    os.makedirs(os.path.dirname(def_path), exist_ok=True)
+    with open(def_path, "w", encoding="utf-8") as out:
+        out.write("OP_ADD(X);\n")
+    identity = K.discover(
+        {def_rel: "OP_ADD(X);\n"}, target_scope=scope, content_anchor=anchor)
     package_opp = "/package/vendors/oprunway_fixture"
     closure = {
         "schema": TK.SCHEMA,
@@ -236,6 +244,7 @@ def vendor_build_receipt(
                 "snapshot_sha256": whole,
                 "snapshot_subtree_sha256": subtree,
                 "content_anchor": anchor,
+                "kernel_identity": identity,
                 "algorithm": {
                     "tool": "fetch_source.py",
                     "logic_sha256": "e" * 64,

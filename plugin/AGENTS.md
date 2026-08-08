@@ -121,7 +121,9 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
 ### 检查点（CP，对话暂停点 + 工件门；缺 NPU/VPN 到可验证的非真机准备 / aclnn CP-C0 为止）
 
 - **CP-A 前置**（primary 亲自）：用 `fetch_source.py` 取材调用方给定的“任务书 + 被测来源”→ 核
-  `source_facts.input_association=caller_trusted_pair_v1` 与 `pr.content_anchor` 完整→
+  `source_facts.input_association=caller_trusted_pair_v1`、`pr.content_anchor` 完整，且
+  `derived.kernel_identity` 在目标 op_def scope 内词法安全扫描到唯一 `OP_ADD(<Identifier>)`
+  （0/多候选 fail-closed；这是内部 kernel type，不得用公开 `spec.op` 顶替）→
   环境确认（**执行形态：就地跑还是远程连** / NPU 通不通 / 目标机按任务书 `适配硬件` × op_def `AddConfig` 双源定），`AskUserQuestion` 由 primary 做。
   ⚠ **`.oprunway/real-machine.env` 只是「远程连」形态的连接元数据，不是开工前置**：就地跑（会话本身已在目标机或其
   NPU 容器里）时设 `OPRUNWAY_TARGET=local` 即可、`OPRUNWAY_SSH_HOST` 免填，**不得**以「缺该文件 / 拿不到 SSH alias、

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 
 
@@ -51,6 +52,33 @@ class FormalAcceptanceError(RuntimeError):
 
 class ArtifactNameConflictError(RuntimeError):
     """正式总结与 attempt 总结本应互斥，但目标目录已有另一种文件名。"""
+
+
+def _assert_execution_identity(acceptance):
+    identity = acceptance.get("execution_identity") if isinstance(acceptance, dict) else None
+    binding = identity.get("source_binding") if isinstance(identity, dict) else None
+    candidate = binding.get("candidate") if isinstance(binding, dict) else None
+    public_op = identity.get("public_op") if isinstance(identity, dict) else None
+    kernel_op = identity.get("kernel_op_type") if isinstance(identity, dict) else None
+    if (public_op != acceptance.get("op")
+            or not isinstance(kernel_op, str)
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", kernel_op) is None
+            or identity.get("resolution") not in {
+                "derived_exact_source_candidate", "explicit_spec_binding"}
+            or not isinstance(binding, dict)
+            or binding.get("schema") != "oprunway.kernel_identity_spec_binding"
+            or binding.get("schema_version") != 1
+            or re.fullmatch(r"[0-9a-f]{64}", binding.get("identity_sha256") or "") is None
+            or not isinstance(candidate, dict)
+            or candidate.get("kernel_op_type") != kernel_op
+            or not isinstance(candidate.get("source_path"), str)
+            or re.fullmatch(r"[0-9a-f]{64}",
+                            candidate.get("source_sha256") or "") is None
+            or not isinstance(candidate.get("line"), int)
+            or isinstance(candidate.get("line"), bool)
+            or candidate.get("line", 0) < 1):
+        raise FormalAcceptanceError(
+            "正式 acceptance.execution_identity 缺失或未绑定 public op、source fact 与 kernel op type")
 
 
 def _is_incomplete_label(value):
@@ -156,6 +184,7 @@ def _atomic_write_json(out_dir, filename, payload):
 def publish_acceptance_json(out_dir, acceptance):
     """正式 ``acceptance.json`` 的唯一写出原语。"""
     assert_formal_acceptance_allowed(acceptance)
+    _assert_execution_identity(acceptance)
     _assert_opposite_summary_absent(out_dir, FORMAL_ACCEPTANCE_FILE)
     return _atomic_write_json(out_dir, FORMAL_ACCEPTANCE_FILE, acceptance)
 
@@ -172,6 +201,7 @@ def build_attempt_record(acceptance):
         "status": "not_publishable",
         "acceptance_verdict": None,
         "op": acceptance.get("op"),
+        "execution_identity": acceptance.get("execution_identity"),
         "repo_mode": acceptance.get("repo_mode"),
         "pipeline_result": acceptance.get("overall"),
         "pipeline_state": acceptance.get("state"),

@@ -2,6 +2,27 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-08 · current 报告强制闭合来源内容锚
+
+- standalone renderer 与三级门共用唯一 current source/build binding 校验：caller-trusted facts、v3 receipt
+  或 current acceptance marker 任一出现即走严格路径；`source_facts.pr.content_anchor`、receipt source 与
+  build 前 snapshot anchor 必须逐字一致，缺失、篡改或降级均拒绝，显式 historical 只保留合法 legacy 读取。
+
+## 2026-08-08 · 公开算子身份与内部 kernel type 分层绑定
+
+- `source_facts` 现对目标 op_def 文件做注释/字符串安全的 `OP_ADD(<Identifier>)` 词法扫描，
+  记录候选路径、文件 SHA、内容锚与独立摘要；唯一候选可派生 current spec 执行身份，零/多候选
+  fail-closed。`spec.op` 继续只表达任务书/API 的公开身份，`spec.execution` 显式绑定内部类型。
+- Workflow 在创建报告目录、Task1 与 DUT 之前完成 source-bound identity preflight；target closure、三级门
+  和 RGE 只按内部类型对账。build 前 snapshot 与 current receipt 会从实际 `source_root + scope`
+  独立重扫并绑定同一事实；三级门、RGE、正式发布器、attempt 与 renderer 均拒绝 identity 缺失或漂移，
+  clean-finalize 的两种裁决分支也投影同一身份。current spec 必须显式写绑定；renderer 默认只接受
+  current 产物，legacy 必须由调用方显式启用 historical-read-only 并输出独立命名的只读报告，不能信任
+  产物自报标签或冒充 current。中文报告分别展示
+  public/internal 身份。扫描还拒绝 scope 外/非 `*_def.cpp` 路径，并按 C++ 续行规则屏蔽 `// ... \\`
+  后续行。A3/Linux 相关回归 608 项 + 112 subtests 全绿（1 skip），核心模块 trace 180/180 行、
+  续行行为变异被测试杀死；本批未运行任何算子或 Remainder。
+
 ## 2026-08-08 · CPack package OPP 根改为共享唯一解析
 
 - 新增 stdlib-only `package_layout.py`：只在显式有界绝对根内按 installed vendor basename + expected op type

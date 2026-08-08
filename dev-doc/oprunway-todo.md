@@ -32,6 +32,7 @@
 | `aclTensorList` 正式链 | 尚未贯通 casegen → cpp_extension → driver → evidence/gate | 用字段驱动的通用 fixture 跑通生成、真机执行与三级门；不得按算子名分支 |
 | 多输入 + 多输出组合契约 | `multi_input_contract` 当前主要覆盖单输出，多输出能力尚未与其组合验证 | 同一 spec 同时包含多输入、多输出，slot/manifest/receipt/evidence 全链对账，并有缺失/漂移 mutation |
 | Contract IR 硬化 | scalar/array ABI、复杂 C/C++ 签名解析、error-path RAII、关系约束与语义 probe 仍可加强 | 每项先有可复现失败；实现后由 schema、codegen 和 mutation 测试共同闭合 |
+| 多注册 target 的 kernel identity 选择 | current 只接受目标 scope 内恰好一个 `OP_ADD`；零/多候选会在 CP-A fail-closed，尚无受控的多注册选择契约 | 出现真实多注册任务后，用 source-bound selector 明示选中候选并证明其属于扫描集合；spec/closure/gate/RGE 全链拒绝缺选、错选和摘要漂移，不按算子名分支 |
 | 精度边界 | NaN、±0、Inf、`equal_nan` 交集尚缺统一的端到端覆盖盘点 | 按 dtype/compare mode 建行为矩阵；判据来自 spec，caseset/evidence 同改也不能绕门 |
 | Pdist 属性轴 | 通用 attr/rank/cost 能力已存在，但正式 `p=inf` 属性覆盖尚未以当前 workflow 复核 | 仅在有真实任务书+源码输入时生成正式 spec/caseset并真机验证，不沿用旧 runner 结论 |
 | TBE 信息库输入源 | 任务书 dtype 独立源尚未形成稳定 adapter | 从运行环境探测，不写死 SSH/路径；缺源时 fail-closed 询问用户，不回退信任被测源码自证 |

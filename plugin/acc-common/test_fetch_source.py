@@ -992,7 +992,7 @@ _ROOT_EXAMPLE_SRC = (
     "  auto ksize = aclCreateIntArray(ksizeData.data(), 2);\n"
     "  aclnnGaussianBlurGetWorkspaceSize(src, ksize, 1.5, 1.5, 0, dst, &ws, &exe);\n"
     "  aclnnGaussianBlur(wsAddr, ws, exe, src, ksize, 1.5, 1.5, 0, dst, stream);\n")
-_ROOT_DEF_SRC = 'this->AICore().AddConfig("ascend950");\n'
+_ROOT_DEF_SRC = 'OP_ADD(GaussianBlur);\nthis->AICore().AddConfig("ascend950");\n'
 _ROOT_SRC_BY_PATH = {_ROOT_HDR: _ROOT_HDR_SRC,
                      _ROOT_EXAMPLE: _ROOT_EXAMPLE_SRC,
                      _ROOT_DEF: _ROOT_DEF_SRC}
@@ -1104,6 +1104,9 @@ class TargetDirOverrideInFetchPrTest(unittest.TestCase):
         facts = self._facts([_ROOT_HDR, _ROOT_EXAMPLE, _ROOT_DEF], target_dir="gaussian_blur")
         self.assertEqual(facts["interface_kind"], "aclnn_2stage")
         self.assertEqual(facts["aclnn_entry"], "aclnnGaussianBlur")
+        self.assertEqual(
+            facts["kernel_identity"]["candidates"][0]["kernel_op_type"],
+            "GaussianBlur")
 
     def test_override_is_recorded_in_notes(self):
         """覆盖了探测器就必须留痕——否则下游看不出 target_dir 是人给的还是探出来的。"""
@@ -1364,6 +1367,9 @@ class PrSnapshotProvenanceTest(unittest.TestCase):
         self.assertEqual(payload["completeness"]["status"], "complete")
         self.assertEqual(payload["derived"]["op"], "gaussian_blur")
         self.assertEqual(payload["derived"]["interface_kind"], "aclnn_2stage")
+        self.assertEqual(
+            payload["derived"]["kernel_identity"]["candidates"][0]["kernel_op_type"],
+            "GaussianBlur")
         # 任务书那一半照旧：字节锚落在工作区
         with open(os.path.join(out, "task_doc.snapshot.md"), "rb") as got, \
                 open(self.task, "rb") as want:

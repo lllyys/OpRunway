@@ -168,6 +168,7 @@ import tempfile
 import time
 
 import package_layout
+import kernel_identity
 import source_provenance
 import target_kernel_delivery
 import url_credentials
@@ -651,6 +652,7 @@ def validate_for_acceptance(
     if not isinstance(digest, dict):
         raise VendorBuildReceiptError(
             "local_snapshot 正式收据缺 build 前 source_snapshot_digest")
+    validate_current_snapshot_anchor_binding(receipt, summary=summary)
     if (digest.get("schema") != SNAPSHOT_DIGEST_SCHEMA
             or digest.get("schema_version") != SNAPSHOT_DIGEST_VERSION
             or digest.get("taken_stage") != "pre_build"
@@ -659,8 +661,7 @@ def validate_for_acceptance(
             or digest.get("subtree_scope") != summary.get("snapshot_subtree_scope")
             or digest.get("snapshot_sha256") != summary.get("snapshot_sha256")
             or digest.get("snapshot_subtree_sha256")
-            != summary.get("snapshot_subtree_sha256")
-            or digest.get("content_anchor") != summary.get("content_anchor")):
+            != summary.get("snapshot_subtree_sha256")):
         raise VendorBuildReceiptError(
             "local_snapshot 的 build 前 digest envelope/root/scope/merkle 与来源锚不一致")
     algorithm = digest.get("algorithm")
@@ -678,6 +679,20 @@ def validate_for_acceptance(
     if digest.get("subtree_skipped_symlink_count") != 0:
         raise VendorBuildReceiptError(
             "fresh build snapshot 含未纳入内容锚的符号链接，拒绝验收")
+    recorded_identity = digest.get("kernel_identity")
+    try:
+        kernel_identity.validate(
+            recorded_identity, content_anchor=summary.get("content_anchor"),
+            require_exact=True)
+        live_identity = _kernel_identity_from_source(
+            digest["source_root"], digest["subtree_scope"],
+            summary.get("content_anchor"))
+    except (kernel_identity.KernelIdentityError, VendorBuildReceiptError) as ex:
+        raise VendorBuildReceiptError(
+            f"fresh build receipt kernel identity 无法由实际 source_root/scope 复核：{ex}") from ex
+    if recorded_identity != live_identity:
+        raise VendorBuildReceiptError(
+            "fresh build receipt kernel identity 与实际 source_root/scope 的 OP_ADD 重扫不一致")
     root = os.path.realpath(digest["source_root"])
     cwd = build.get("cwd")
     try:
@@ -699,6 +714,14 @@ def validate_for_acceptance(
     closure = receipt.get(TARGET_KERNEL_DELIVERY_KEY)
     validate_target_kernel_delivery_closure(
         closure, build_argv=build.get("argv"), live=normalize_path)
+    request = closure.get("request") if isinstance(closure, dict) else None
+    expected_type = (request.get("expected_op_type")
+                     if isinstance(request, dict) else None)
+    live_type = live_identity["candidates"][0]["kernel_op_type"]
+    if expected_type != live_type:
+        raise VendorBuildReceiptError(
+            "target kernel closure expected_op_type 与实际 build source 的唯一 OP_ADD "
+            f"候选不一致：{expected_type!r} != {live_type!r}")
     try:
         derived_opp = custom_opp_path(artifact.get("library_path"))
     except VendorBuildReceiptError:
@@ -710,6 +733,38 @@ def validate_for_acceptance(
         raise VendorBuildReceiptError(
             "target kernel closure 的 installed_opp_root 与 vendor ELF 所属 custom OPP 根不一致")
     return summary
+
+
+def validate_current_snapshot_anchor_binding(receipt, *, summary=None):
+    """Current v3 receipt 内部 ``source`` ↔ build 前 snapshot 内容锚唯一校验。
+
+    只读冻结 JSON，不读 ``source_root``；故 standalone renderer 也能复用。
+    """
+    if (not isinstance(receipt, dict)
+            or receipt.get("schema") != SCHEMA
+            or receipt.get("schema_version") != SCHEMA_VERSION):
+        raise VendorBuildReceiptError(
+            f"current content anchor 绑定只接受 vendor build receipt v{SCHEMA_VERSION}")
+    canonical = summarize(receipt)
+    if summary is not None and summary != canonical:
+        raise VendorBuildReceiptError(
+            "调用方提供的 vendor build receipt 摘要（含 content_anchor）与原始收据不一致")
+    return canonical
+
+
+def _validate_current_snapshot_anchor_binding_normalized(receipt, normalized):
+    """校验已由本模块归一化的 v3 receipt；供 ``summarize`` 无递归复用。"""
+    source_anchor = (normalized.get("content_anchor")
+                     if isinstance(normalized, dict) else None)
+    build = receipt.get("build")
+    digest = (build.get("source_snapshot_digest")
+              if isinstance(build, dict) else None)
+    snapshot_anchor = (digest.get("content_anchor")
+                       if isinstance(digest, dict) else None)
+    if not isinstance(source_anchor, dict) or snapshot_anchor != source_anchor:
+        raise VendorBuildReceiptError(
+            "vendor build receipt source.content_anchor 与 "
+            "build.source_snapshot_digest.content_anchor 未逐字一致")
 
 
 def summarize(receipt):
@@ -725,6 +780,10 @@ def summarize(receipt):
     """
     summary = _validate_source(receipt)
     summary["build_returncode_source"] = _validate_build(receipt)[1]
+    if (isinstance(receipt, dict)
+            and receipt.get("schema") == SCHEMA
+            and receipt.get("schema_version") == SCHEMA_VERSION):
+        _validate_current_snapshot_anchor_binding_normalized(receipt, summary)
     return summary
 
 
@@ -863,6 +922,8 @@ def take_snapshot_digest(source_root, subtree_scope=""):
             "fresh build 的 target scope 含符号链接，内容锚无法覆盖编译器实际读取字节")
     content_anchor = fetch_source._content_anchor_from_snapshot(
         root, scope, subtree_rels)
+    identity = _kernel_identity_from_source(
+        root, scope, content_anchor, rel_paths=subtree_rels)
     return {
         "schema": SNAPSHOT_DIGEST_SCHEMA,
         "schema_version": SNAPSHOT_DIGEST_VERSION,
@@ -873,6 +934,7 @@ def take_snapshot_digest(source_root, subtree_scope=""):
         "snapshot_sha256": fetch_source._snapshot_merkle(root, whole_rels),
         "snapshot_subtree_sha256": fetch_source._snapshot_merkle(root, subtree_rels),
         "content_anchor": content_anchor,
+        "kernel_identity": identity,
         "file_count": len(whole_rels),
         "subtree_file_count": len(subtree_rels),
         "skipped_symlink_count": len(whole_links),
@@ -932,7 +994,47 @@ def _validate_snapshot_digest(digest):
         raise VendorBuildReceiptError("snapshot digest.subtree_file_count 与现场不一致")
     if digest.get("subtree_skipped_symlink_count") != 0:
         raise VendorBuildReceiptError("snapshot digest.subtree_skipped_symlink_count 须为 0")
+    recorded_identity = digest.get("kernel_identity")
+    actual_identity = _kernel_identity_from_source(
+        root, scope, recorded_anchor, rel_paths=actual_paths)
+    if recorded_identity != actual_identity:
+        raise VendorBuildReceiptError(
+            "snapshot digest.kernel_identity 与 source_root/subtree_scope 现场 OP_ADD 重扫不一致")
     return root, scope, whole, subtree
+
+
+def _kernel_identity_from_source(root, scope, content_anchor, *, rel_paths=None):
+    """从真实 build root/scope 独立重扫 ``*_def.cpp``，不信任收据自报候选。"""
+    if not scope:
+        raise VendorBuildReceiptError(
+            "fresh kernel identity 要求显式 target subtree scope；整仓扫描可能混入其它算子")
+    fetch_source = _fetch_source()
+    if rel_paths is None:
+        try:
+            rel_paths, links = fetch_source._scan_snapshot(root, scope)
+        except (OSError, RuntimeError, ValueError) as ex:
+            raise VendorBuildReceiptError(
+                f"无法从 build source_root/scope 重扫 kernel identity：{ex}") from ex
+        if links:
+            raise VendorBuildReceiptError(
+                "build target scope 含符号链接，kernel identity 扫描不完整")
+    files = {}
+    for rel in rel_paths:
+        if not rel.endswith("_def.cpp"):
+            continue
+        text = fetch_source._read_snapshot_text(root, rel)
+        if text is None:
+            raise VendorBuildReceiptError(
+                f"kernel identity 源文件不可按 UTF-8 完整读取：{rel}")
+        files[rel] = text
+    try:
+        fact = kernel_identity.discover(
+            files, target_scope=scope, content_anchor=content_anchor)
+        kernel_identity.validate(
+            fact, content_anchor=content_anchor, require_exact=True)
+    except kernel_identity.KernelIdentityError as ex:
+        raise VendorBuildReceiptError(f"build source kernel identity 非法：{ex}") from ex
+    return fact
 
 
 def _assert_build_cwd_within(source_root, build_cwd):
@@ -1245,6 +1347,7 @@ def produce_receipt(*, build_result, declared_source_form=None,
             "snapshot_sha256": whole,
             "snapshot_subtree_sha256": subtree,
             "content_anchor": dict(snapshot_digest["content_anchor"]),
+            "kernel_identity": dict(snapshot_digest["kernel_identity"]),
             "algorithm": dict(snapshot_digest["algorithm"]),
             "file_count": snapshot_digest.get("file_count"),
             "subtree_file_count": snapshot_digest.get("subtree_file_count"),

@@ -25,6 +25,7 @@ import unittest
 from unittest import mock
 
 import fetch_source as fs
+import kernel_identity as K
 import vendor_build_receipt as V
 
 
@@ -35,7 +36,7 @@ _OP_TYPE = "GaussianBlur"
 _KERNEL = "GaussianBlur_fixture_kernel"
 _TREE = {
     _OP + "/op_host/op_api/aclnn_gaussian_blur.h": "aclnnStatus aclnnGaussianBlur();\n",
-    _OP + "/op_host/gaussian_blur_def.cpp": "// def\n",
+    _OP + "/op_host/gaussian_blur_def.cpp": "// def\nOP_ADD(GaussianBlur);\n",
     "other_op/op_host/other_def.cpp": "// 不属于本轮子树\n",
 }
 
@@ -181,6 +182,27 @@ class SnapshotDigestTest(_Fixture):
         self.assertNotEqual(want_subtree, want_whole, "子树与整树本就不同，别混用")
         self.assertEqual(digest["taken_stage"], "pre_build")
         self.assertEqual(digest["subtree_file_count"], 2)
+        self.assertEqual(
+            digest["kernel_identity"]["candidates"][0]["kernel_op_type"],
+            _OP_TYPE)
+
+    def test_current_receipt_rejects_a_coherently_resigned_identity_not_in_live_source(self):
+        receipt = self._produce()
+        fact = receipt["build"]["source_snapshot_digest"]["kernel_identity"]
+        fact["candidates"][0]["kernel_op_type"] = "Forged"
+        fact["identity_sha256"] = K.content_address.content_digest(
+            "oprunway/kernel-identity-source/v1",
+            {key: value for key, value in fact.items()
+             if key != "identity_sha256"})
+        receipt[V.TARGET_KERNEL_DELIVERY_KEY]["request"]["expected_op_type"] = "Forged"
+        closure = receipt[V.TARGET_KERNEL_DELIVERY_KEY]
+        closure["closure_sha256"] = V.target_kernel_delivery._canonical_sha(
+            {key: value for key, value in closure.items()
+             if key != "closure_sha256"})
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "kernel identity|OP_ADD"):
+            V.validate_for_acceptance(
+                receipt, library_path=os.path.realpath(self.elf),
+                library_sha256=V._sha256_file(self.elf), normalize_path=True)
 
     def test_subtree_digest_matches_what_intake_records(self):
         """与 `scan_pr_snapshot --target-dir` 记的 `snapshot_merkle_sha256` 逐字相等。"""

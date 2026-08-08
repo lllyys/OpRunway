@@ -19,6 +19,7 @@ import pytest
 
 import content_address
 import finalize_clean_acceptance as F
+import kernel_identity as K
 import run_workflow as W
 import spec_change_gate as SCG
 from test_validate_cpp_extension_receipt import source_facts_payload
@@ -155,6 +156,9 @@ class _Bed:
     def __init__(self, root):
         spec, evidence, verdict, perf = copy.deepcopy(_docs())
         spec["op"] = _OP
+        facts_payload = source_facts_payload()
+        spec["execution"] = K.spec_execution(
+            facts_payload["derived"]["kernel_identity"])
         self.root = root
         self.out = os.path.join(root, "reports", "widget")
         self.spec_path = _write_json(os.path.join(root, "orig", "the.spec.json"), spec)
@@ -172,7 +176,7 @@ class _Bed:
         self.source_facts = _write_json(
             os.path.join(root, "fetch", "source_facts.json"),
             content_address.make_artifact(
-                "oprunway/source-facts/v1", source_facts_payload()))
+                "oprunway/source-facts/v1", facts_payload))
 
     def seed_previous_pass(self):
         for name, text in _PREVIOUS_VERDICTS.items():
@@ -214,9 +218,24 @@ class FinalizeDirectoryTest(unittest.TestCase):
             acc = bed.run()
             self.assertEqual(acc["overall"], "PASS")
             self.assertEqual(acc["op"], _OP)
+            self.assertEqual(acc["execution_identity"]["kernel_op_type"], "X")
             with open(bed.path("acceptance.json"), encoding="utf-8") as fh:
                 self.assertEqual(json.load(fh), acc)
             self.assertEqual([s for s, _, _ in seen], ["task1", "task2", "task3"])
+
+    def test_coherently_resigned_source_identity_drift_is_rejected(self):
+        with self._bed() as bed, _stub_gates():
+            with open(bed.source_facts, encoding="utf-8") as src:
+                envelope = json.load(src)
+            payload = envelope["payload"]
+            anchor = payload["pr"]["content_anchor"]
+            payload["derived"]["kernel_identity"] = K.discover(
+                {"op/op_host/forged_def.cpp": "OP_ADD(Forged);\n"},
+                target_scope="op", content_anchor=anchor)
+            _write_json(bed.source_facts, content_address.make_artifact(
+                "oprunway/source-facts/v1", payload))
+            with self.assertRaisesRegex(F.FinalizeError, "execution_identity"):
+                bed.run()
 
     def test_every_gate_stage_gets_the_source_facts_path_explicitly(self):
         """⭐ Critical ② 的一半：门**看着调了**不等于门核了东西。

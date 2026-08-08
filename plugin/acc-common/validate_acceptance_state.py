@@ -29,10 +29,12 @@ import content_address  # noqa: E402
 import cpp_extension_adapter  # noqa: E402
 import cpp_extension_identity  # noqa: E402
 import dtype_requirement_sets  # noqa: E402
+import kernel_identity  # noqa: E402
 import multi_card_shards  # noqa: E402
 import perf_mode  # noqa: E402
 import perf_evidence_contract  # noqa: E402
 import source_facts_lookup  # noqa: E402
+import source_build_binding  # noqa: E402
 import source_provenance  # noqa: E402
 import stochastic_contract  # noqa: E402
 import vendor_build_receipt  # noqa: E402
@@ -2276,17 +2278,44 @@ def _gate_build_receipt_source_binding(
         errs.append("source_facts.pr 缺失或非 object，无法与 build receipt 对账")
         return
     try:
-        source_provenance.caller_trusted_association(facts, allow_legacy=False)
-    except source_provenance.ProvenanceError as ex:
-        errs.append(f"fresh source_facts caller-trusted 契约非法：{ex}")
+        source_build_binding.validate_current(
+            facts, build_receipt, summary=summary)
+    except source_build_binding.SourceBuildBindingError as ex:
+        errs.append(f"fresh source_facts/vendor build receipt 绑定非法：{ex}")
         return
     else:
         expected = facts_pr.get("content_anchor")
-        actual = summary.get("content_anchor")
-        if not isinstance(expected, dict) or actual != expected:
+        identity_fact = ((facts.get("derived") or {}).get("kernel_identity")
+                         if isinstance(facts.get("derived"), dict) else None)
+        if identity_fact is None:
             errs.append(
-                "caller-trusted 输入的实际摄取 content_anchor 与 vendor build 前内容摘要"
-                "未逐字一致，BLOCKED（transport/head 身份不参与此判据）")
+                "fresh source_facts 缺 derived.kernel_identity，不能绑定公开任务身份与实际 kernel op type")
+        else:
+            try:
+                candidate = kernel_identity.validate(
+                    identity_fact, content_anchor=expected, require_exact=True)
+            except kernel_identity.KernelIdentityError as ex:
+                errs.append(f"source_facts kernel identity 不可信：{ex}")
+            else:
+                digest = (((build_receipt or {}).get("build") or {}).get(
+                    "source_snapshot_digest")
+                    if isinstance(build_receipt, dict) else None)
+                build_identity = (digest.get("kernel_identity")
+                                  if isinstance(digest, dict) else None)
+                if build_identity != identity_fact:
+                    errs.append(
+                        "vendor build 实际 source scope 重扫的 kernel identity 与 CP-A "
+                        "source_facts 不一致，BLOCKED")
+                closure = (build_receipt or {}).get(
+                    vendor_build_receipt.TARGET_KERNEL_DELIVERY_KEY)
+                request = closure.get("request") if isinstance(closure, dict) else None
+                actual_type = (request.get("expected_op_type")
+                               if isinstance(request, dict) else None)
+                if actual_type != candidate["kernel_op_type"]:
+                    errs.append(
+                        "vendor target closure expected_op_type 与 source_facts 唯一 "
+                        f"OP_ADD 候选不一致：{actual_type!r} != "
+                        f"{candidate['kernel_op_type']!r}，BLOCKED")
         return
     # —— 第 0 步：通路身份 + 声明形态 ——
     facts_kind = facts_pr.get("provenance_kind")

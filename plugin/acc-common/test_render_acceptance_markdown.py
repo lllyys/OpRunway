@@ -1,10 +1,15 @@
+import copy
 import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import content_address
+import kernel_identity as K
 import render_acceptance_markdown as R
+import source_build_binding as SBB
+import test_current_receipt_fixtures as F
 import vendor_build_receipt as VBR
 
 PR_HEAD = "a" * 40
@@ -68,6 +73,9 @@ def _docs(receipt):
     return {
         "acceptance.json": {
             "op": "X", "overall": "PASS", "state": "PASSED",
+            "artifact_contract": "historical_read_only",
+            "execution_identity": {"public_op": "X", "kernel_op_type": "InternalX",
+                                   "resolution": "explicit_spec_binding"},
             "precision_verdict": "pass", "perf_status": "ok",
             "repo_mode": "cpp_extension", "gate": {"passed": True, "errors": {}},
         },
@@ -120,6 +128,200 @@ def _snapshot_facts(snapshot_merkle=SUBTREE_DIGEST, snapshot_scope="op",
 
 
 class RenderAcceptanceMarkdownTest(unittest.TestCase):
+    def _current_docs(self, root):
+        vendor_path = os.path.join(
+            root, "vendors", "fixture", "op_api", "lib", "libcust_opapi.so")
+        build_receipt = F.vendor_build_receipt(
+            vendor_path, "a" * 64, scope="op", subtree=SUBTREE_DIGEST,
+            anchor=F.content_anchor("op", SUBTREE_DIGEST))
+        facts = _snapshot_facts()
+        fact = facts["derived"]["kernel_identity"]
+        spec = {"op": "X", "runner_form": "cpp_extension",
+                "execution": K.spec_execution(fact)}
+        docs = _docs({"vendor": {"build_receipt": build_receipt}})
+        docs["acceptance.json"].pop("artifact_contract")
+        docs["acceptance.json"]["execution_identity"] = K.resolve(spec, facts)
+        docs["spec.json"] = spec
+        return docs, facts
+
+    def test_renders_public_and_internal_operator_identities_separately(self):
+        with tempfile.TemporaryDirectory() as root:
+            _write_docs(root, _docs(_snapshot_receipt()))
+            text = R.render(root, allow_historical_read_only=True)
+        self.assertIn("| 公开任务/API 身份 | `X` |", text)
+        self.assertIn("| 内部 kernel op type | `InternalX` |", text)
+
+    def test_current_renderer_rejects_missing_source_kernel_identity(self):
+        with tempfile.TemporaryDirectory() as root:
+            docs, facts = self._current_docs(root)
+            del facts["derived"]["kernel_identity"]
+            _write_docs(root, docs, source_facts=facts)
+            with self.assertRaisesRegex(RuntimeError, "kernel identity"):
+                R.render(root)
+
+    def test_current_renderer_rejects_acceptance_identity_drift(self):
+        with tempfile.TemporaryDirectory() as root:
+            docs, facts = self._current_docs(root)
+            docs["acceptance.json"]["execution_identity"]["kernel_op_type"] = "Forged"
+            _write_docs(root, docs, source_facts=facts)
+            with self.assertRaisesRegex(RuntimeError, "execution_identity"):
+                R.render(root)
+
+    def test_current_renderer_accepts_exact_source_and_build_anchor(self):
+        with tempfile.TemporaryDirectory() as root:
+            docs, facts = self._current_docs(root)
+            _write_docs(root, docs, source_facts=facts)
+            text = R.render(root)
+        self.assertIn("# X 算子验收报告", text)
+        self.assertNotIn("历史验收报告", text)
+
+    def test_historical_flag_does_not_rename_a_current_report(self):
+        with tempfile.TemporaryDirectory() as root:
+            docs, facts = self._current_docs(root)
+            _write_docs(root, docs, source_facts=facts)
+            path = R.write_report(root, allow_historical_read_only=True)
+        self.assertEqual("验收报告.md", os.path.basename(path))
+
+    def test_current_renderer_rejects_coherently_rewritten_build_anchors(self):
+        """source + snapshot digest 一起改，也不能逃过 CP-A facts 对账。"""
+        with tempfile.TemporaryDirectory() as root:
+            docs, facts = self._current_docs(root)
+            br = docs["evidence.json"]["cpp_extension_receipt"]["vendor"][
+                "build_receipt"]
+            forged = F.content_anchor("other-scope", OTHER_DIGEST)
+            br["source"]["content_anchor"] = copy.deepcopy(forged)
+            br["build"]["source_snapshot_digest"]["content_anchor"] = copy.deepcopy(
+                forged)
+            _write_docs(root, docs, source_facts=facts)
+            with self.assertRaisesRegex(RuntimeError, "content_anchor"):
+                R.render(root)
+
+    def test_current_renderer_rejects_source_and_snapshot_anchor_drift(self):
+        """receipt source 与 build 前 snapshot 也必须彼此逐字一致。"""
+        with tempfile.TemporaryDirectory() as root:
+            docs, facts = self._current_docs(root)
+            br = docs["evidence.json"]["cpp_extension_receipt"]["vendor"][
+                "build_receipt"]
+            br["build"]["source_snapshot_digest"]["content_anchor"] = \
+                F.content_anchor("other-scope", OTHER_DIGEST)
+            _write_docs(root, docs, source_facts=facts)
+            with self.assertRaisesRegex(RuntimeError, "content_anchor"):
+                R.render(root)
+
+    def test_current_v3_receipt_rejects_missing_facts_even_in_historical_mode(self):
+        with tempfile.TemporaryDirectory() as root:
+            docs, _facts = self._current_docs(root)
+            _write_docs(root, docs)
+            with self.assertRaisesRegex(RuntimeError, "source_facts"):
+                R.render(root, allow_historical_read_only=True)
+
+    def test_current_v3_receipt_rejects_untrusted_facts(self):
+        with tempfile.TemporaryDirectory() as root:
+            docs, _facts = self._current_docs(root)
+            _write_docs(root, docs, source_facts_raw="{not-json")
+            with self.assertRaisesRegex(RuntimeError, "source_facts"):
+                R.render(root, allow_historical_read_only=True)
+
+    def test_tampered_caller_marker_cannot_downgrade_to_historical(self):
+        with tempfile.TemporaryDirectory() as root:
+            docs = _docs(_snapshot_receipt())
+            _write_docs(root, docs, source_facts=_snapshot_facts())
+            path = os.path.join(root, "source_facts.json")
+            with open(path, encoding="utf-8") as src:
+                envelope = json.load(src)
+            envelope["digest"] = "0" * 64
+            with open(path, "w", encoding="utf-8") as out:
+                json.dump(envelope, out)
+            with self.assertRaisesRegex(RuntimeError, "current.*source_facts"):
+                R.render(root, allow_historical_read_only=True)
+
+    def test_caller_trusted_marker_rejects_legacy_receipt_even_in_historical_mode(self):
+        with tempfile.TemporaryDirectory() as root:
+            facts = _snapshot_facts()
+            fact = facts["derived"]["kernel_identity"]
+            spec = {"op": "X", "runner_form": "cpp_extension",
+                    "execution": K.spec_execution(fact)}
+            docs = _docs(_snapshot_receipt())
+            docs["acceptance.json"].pop("artifact_contract")
+            docs["acceptance.json"]["execution_identity"] = K.resolve(spec, facts)
+            docs["spec.json"] = spec
+            br = docs["evidence.json"]["cpp_extension_receipt"]["vendor"][
+                "build_receipt"]
+            br.setdefault("build", {}).setdefault(
+                "source_snapshot_digest", {})["kernel_identity"] = fact
+            br[VBR.TARGET_KERNEL_DELIVERY_KEY] = {
+                "request": {"expected_op_type": "X"}}
+            _write_docs(root, docs, source_facts=facts)
+            with self.assertRaisesRegex(RuntimeError, "current.*receipt|receipt.*current"):
+                R.render(root, allow_historical_read_only=True)
+
+    def test_current_acceptance_binding_rejects_legacy_inputs_in_historical_mode(self):
+        with tempfile.TemporaryDirectory() as root:
+            docs = _docs(_snapshot_receipt())
+            docs["acceptance.json"].pop("artifact_contract")
+            docs["acceptance.json"]["execution_identity"]["source_binding"] = {
+                "schema": K.SPEC_BINDING_SCHEMA,
+                "schema_version": K.SCHEMA_VERSION,
+                "identity_sha256": "a" * 64,
+                "candidate": {},
+            }
+            _write_docs(root, docs)
+            with self.assertRaisesRegex(RuntimeError, "current"):
+                R.render(root, allow_historical_read_only=True)
+
+    def test_malformed_acceptance_binding_marker_cannot_downgrade(self):
+        with tempfile.TemporaryDirectory() as root:
+            docs = _docs(_snapshot_receipt())
+            docs["acceptance.json"].pop("artifact_contract")
+            docs["acceptance.json"]["execution_identity"]["source_binding"] = {
+                "schema": "tampered"}
+            _write_docs(root, docs)
+            with self.assertRaisesRegex(RuntimeError, "current"):
+                R.render(root, allow_historical_read_only=True)
+
+    def test_current_acceptance_marker_cannot_fall_back_when_receipt_is_removed(self):
+        with tempfile.TemporaryDirectory() as root:
+            docs, facts = self._current_docs(root)
+            docs["evidence.json"]["cpp_extension_receipt"] = {}
+            _write_docs(root, docs, source_facts=facts)
+            with self.assertRaisesRegex(RuntimeError, "current|receipt|binding"):
+                R.render(root)
+
+    def test_caller_trusted_facts_prevent_coherent_identity_downgrade(self):
+        with tempfile.TemporaryDirectory() as root:
+            docs, facts = self._current_docs(root)
+            docs["evidence.json"]["cpp_extension_receipt"]["vendor"][
+                "build_receipt"]["schema_version"] = 2
+            docs["acceptance.json"].pop("execution_identity")
+            docs["acceptance.json"]["artifact_contract"] = "historical_read_only"
+            facts["derived"].pop("kernel_identity")
+            _write_docs(root, docs, source_facts=facts)
+            with self.assertRaisesRegex(RuntimeError, "current|receipt|binding"):
+                R.render(root)
+
+    def test_fully_coherent_downgrade_cannot_self_authorize_historical_mode(self):
+        with tempfile.TemporaryDirectory() as root:
+            docs, _ = self._current_docs(root)
+            docs["evidence.json"]["cpp_extension_receipt"]["vendor"][
+                "build_receipt"]["schema_version"] = 2
+            docs["acceptance.json"].pop("execution_identity")
+            docs["acceptance.json"]["artifact_contract"] = "historical_read_only"
+            docs.pop("spec.json")
+            _write_docs(root, docs)
+            with self.assertRaisesRegex(RuntimeError, "调用方必须显式"):
+                R.render(root)
+
+    def test_explicit_historical_mode_uses_distinct_filename_and_banner(self):
+        with tempfile.TemporaryDirectory() as root:
+            _write_docs(root, _docs(_snapshot_receipt()))
+            path = R.write_report(root, allow_historical_read_only=True)
+            self.assertEqual(os.path.basename(path), R.HISTORICAL_REPORT_FILENAME)
+            self.assertFalse(os.path.exists(os.path.join(root, "验收报告.md")))
+            with open(path, encoding="utf-8") as src:
+                text = src.read()
+            self.assertIn("历史验收报告（只读）", text)
+            self.assertIn("不是 current 正式验收报告", text)
+
     def test_renders_runtime_cann_requirement_probe_and_scope(self):
         observation = {
             "status": "measured",
@@ -152,7 +354,7 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
             _write_docs(root, _docs(receipt))
             with open(os.path.join(root, "spec.json"), "w", encoding="utf-8") as out:
                 json.dump(spec, out)
-            text = R.render(root)
+            text = R.render(root, allow_historical_read_only=True)
 
         self.assertIn("| CANN runtime 原始值 | `v8.5.1-rc1` |", text)
         self.assertIn("| CANN runtime 规范化 | `8.5.1` |", text)
@@ -193,6 +395,7 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
             docs = {
                 "acceptance.json": {
                     "op": "X", "overall": "FAIL(精度)", "state": "FAILED_PRECISION",
+                    "artifact_contract": "historical_read_only",
                     "precision_verdict": "fail", "perf_status": "skipped_precision_gate",
                     "repo_mode": "cpp_extension", "gate": {"passed": True, "errors": {}},
                 },
@@ -223,10 +426,10 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
             for name, value in docs.items():
                 with open(os.path.join(root, name), "w", encoding="utf-8") as out:
                     json.dump(value, out)
-            path = R.write_report(root)
+            path = R.write_report(root, allow_historical_read_only=True)
             with open(path, encoding="utf-8") as src:
                 text = src.read()
-            self.assertIn("# X 算子验收报告", text)
+            self.assertIn("# X 算子历史验收报告（只读）", text)
             self.assertIn("`FAIL(精度)`", text)
             self.assertIn("| `float32` | 2 | 1 | 1 |", text)
             self.assertIn("[精度失败明细.md](精度失败明细.md)", text)
@@ -295,6 +498,7 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
             docs = {
                 "acceptance.json": {
                     "op": "X", "overall": "性能未达成(failed)", "state": "FAILED_PERFORMANCE",
+                    "artifact_contract": "historical_read_only",
                     "precision_verdict": "pass", "perf_status": "failed",
                     "repo_mode": "cpp_extension", "gate": {"passed": True, "errors": {}},
                 },
@@ -331,7 +535,7 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
             for name, value in docs.items():
                 with open(os.path.join(root, name), "w", encoding="utf-8") as out:
                     json.dump(value, out)
-            path = R.write_report(root)
+            path = R.write_report(root, allow_historical_read_only=True)
             with open(path, encoding="utf-8") as src:
                 text = src.read()
             self.assertIn("[性能失败明细.md](性能失败明细.md)", text)
@@ -355,9 +559,33 @@ class ProvenanceSectionTest(unittest.TestCase):
 
     def _render(self, receipt, source_facts=None, source_facts_raw=None):
         with tempfile.TemporaryDirectory() as root:
-            _write_docs(root, _docs(receipt),
+            docs = _docs(receipt)
+            if (isinstance(source_facts, dict)
+                    and (source_facts.get("completeness") or {}).get("status")
+                    == "complete"):
+                fact = (source_facts.get("derived") or {}).get("kernel_identity")
+                try:
+                    candidate = K.validate(fact) if isinstance(fact, dict) else None
+                except K.KernelIdentityError:
+                    candidate = None
+                if candidate is not None:
+                    spec = {"op": "X", "runner_form": "cpp_extension",
+                            "execution": K.spec_execution(fact)}
+                    docs["acceptance.json"].pop("artifact_contract")
+                    docs["acceptance.json"]["execution_identity"] = K.resolve(
+                        spec, source_facts, require_explicit=True)
+                    docs["spec.json"] = spec
+                    br = docs["evidence.json"]["cpp_extension_receipt"]["vendor"][
+                        "build_receipt"]
+                    br.setdefault("build", {}).setdefault(
+                        "source_snapshot_digest", {})["kernel_identity"] = fact
+                    br[VBR.TARGET_KERNEL_DELIVERY_KEY] = {
+                        "request": {
+                            "expected_op_type": candidate["kernel_op_type"]}}
+            _write_docs(root, docs,
                         source_facts=source_facts, source_facts_raw=source_facts_raw)
-            path = R.write_report(root)
+            path = R.write_report(
+                root, allow_historical_read_only=("spec.json" not in docs))
             self.assertTrue(os.path.isfile(path))
             with open(path, encoding="utf-8") as src:
                 return src.read()
@@ -441,26 +669,28 @@ class ProvenanceSectionTest(unittest.TestCase):
         都不取，「把无关事实冒充本轮 provenance」这一整类缺陷就在结构上不存在；
         锚是否逐字一致由三级门裁定，本节不重判。
         """
-        text = self._render(_snapshot_receipt(), source_facts=_snapshot_facts())
+        with tempfile.TemporaryDirectory() as root:
+            docs, facts = RenderAcceptanceMarkdownTest()._current_docs(root)
+            _write_docs(root, docs, source_facts=facts)
+            text = R.render(root)
         self.assertIn(R.PROV_FACTS_FOUND, text)
         self.assertNotIn(R.PROV_FACTS_ABSENT, text)
         self.assertIn("由验收门裁定", text)
         # facts 独有的字段值一个都不许进报告。
         self.assertNotIn(FACTS_ONLY_MARKER, text)
 
-    def test_source_facts_with_a_mismatched_anchor_is_still_not_quoted(self):
-        """对照物的锚与收据对不上时，报告里同样只出现「找到了」这一句、不引用它的值。
-
-        ⚠ 这不是「渲染器判它对不上」——判定归三级门（那边会 BLOCK）。渲染器的职责是
-        **无论对不对得上都不引用它的字段**，于是没有任何一条路径能把另一份取材的事实
-        写进本轮 provenance。
-        """
-        text = self._render(_snapshot_receipt(),
-                            source_facts=_snapshot_facts(snapshot_merkle=OTHER_DIGEST,
-                                                         snapshot_scope="OTHER-SUBTREE"))
-        self.assertNotIn(OTHER_DIGEST, text)
-        self.assertNotIn("OTHER-SUBTREE", text)
-        self.assertIn(f"| 子树摘要 snapshot_subtree_sha256 | `{SUBTREE_DIGEST}` |", text)
+    def test_source_facts_with_a_mismatched_anchor_is_rejected_for_current_report(self):
+        """caller-trusted current facts 一旦出现，就不能退回 legacy 展示路径。"""
+        with tempfile.TemporaryDirectory() as root:
+            docs, facts = RenderAcceptanceMarkdownTest()._current_docs(root)
+            br = docs["evidence.json"]["cpp_extension_receipt"]["vendor"][
+                "build_receipt"]
+            forged = F.content_anchor("OTHER-SUBTREE", OTHER_DIGEST)
+            br["source"]["content_anchor"] = copy.deepcopy(forged)
+            br["build"]["source_snapshot_digest"]["content_anchor"] = forged
+            _write_docs(root, docs, source_facts=facts)
+            with self.assertRaisesRegex(RuntimeError, "content_anchor"):
+                R.render(root)
 
     def test_credential_repo_never_reaches_the_report(self):
         """⭐ 报告是凭据真正**泄漏出去**的那一步——它是给人看、会被转发的 .md。
@@ -515,15 +745,12 @@ class ProvenanceSectionTest(unittest.TestCase):
         self.assertNotIn(f"| PR head | `{PR_HEAD}` |", text)
         self.assertNotIn(SUBTREE_DIGEST, text)
 
-    def test_unreadable_source_facts_falls_back_to_uncorroborated(self):
-        text = self._render(_snapshot_receipt(), source_facts_raw="{ 这不是 JSON")
-        self.assertIn(R.PROV_FACTS_ABSENT, text)
-        self.assertNotIn(R.PROV_FACTS_FOUND, text)
-        for caveat in R.PROV_LOCAL_CAVEATS:
-            self.assertIn(caveat, text)
+    def test_unreadable_source_facts_cannot_downgrade_to_historical(self):
+        with self.assertRaisesRegex(RuntimeError, "current.*source_facts"):
+            self._render(_snapshot_receipt(), source_facts_raw="{ 这不是 JSON")
 
-    def test_tampered_source_facts_envelope_is_not_trusted(self):
-        """⭐ payload 被改、digest 没跟着改 → 整份不可信，退「未提供或不可信」。
+    def test_tampered_source_facts_envelope_is_rejected_not_downgraded(self):
+        """⭐ payload 被改、digest 没跟着改 → 整份不可信且禁止降级。
 
         不复算 digest 的话，随手编一份最小 JSON 就能冒充一份「已过取材契约」的对照物。
         """
@@ -536,22 +763,21 @@ class ProvenanceSectionTest(unittest.TestCase):
             doc["payload"]["pr"]["snapshot_scope"] = "tampered"   # digest 不动
             with open(path, "w", encoding="utf-8") as out:
                 json.dump(doc, out)
-            text = R.render(root)
-        self.assertIn(R.PROV_FACTS_ABSENT, text)
-        self.assertNotIn(R.PROV_FACTS_FOUND, text)
+            with self.assertRaisesRegex(RuntimeError, "current.*source_facts"):
+                R.render(root, allow_historical_read_only=True)
 
-    def test_incomplete_source_facts_is_not_reported_as_found(self):
+    def test_incomplete_current_source_facts_is_rejected_not_downgraded(self):
         """⭐ `completeness != complete` 的取材产物只供诊断，不是可采信的对照物。
 
-        它是 fetch_source 亲手产的、digest 完全正确——只有跑完整契约才拦得住。
+        它是 fetch_source 亲手产的、digest 完全正确——只有跑完整契约才拦得住；
+        既然 payload 已是 current，就不得借 historical 开关继续。
         """
-        text = self._render(
-            _snapshot_receipt(),
-            source_facts=_snapshot_facts(completeness={
-                "status": "blocked", "reasons": ["missing_key_files"],
-                "form_facts": []}))
-        self.assertIn(R.PROV_FACTS_ABSENT, text)
-        self.assertNotIn(R.PROV_FACTS_FOUND, text)
+        with self.assertRaisesRegex(RuntimeError, "current.*source_facts"):
+            self._render(
+                _snapshot_receipt(),
+                source_facts=_snapshot_facts(completeness={
+                    "status": "blocked", "reasons": ["missing_key_files"],
+                    "form_facts": []}))
 
     def test_unverified_build_receipt_makes_no_provenance_claim(self):
         """⭐ 锚形态合法 ≠ 收据可信：没 VERIFIED 就不能出「可证明验的就是…」这类强度断言。"""
@@ -597,7 +823,7 @@ class RepoSourceStrengthTest(unittest.TestCase):
     def _render(self, source, **kw):
         with tempfile.TemporaryDirectory() as root:
             _write_docs(root, _docs(_receipt(source, **kw)))
-            return R.render(root)
+            return R.render(root, allow_historical_read_only=True)
 
     def _repo_line(self, text):
         """取「源码仓」那一行；断言它**存在且唯一**——强度被拆到别处也算吞掉了。"""
@@ -691,7 +917,7 @@ class RepoSourceStrengthTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             _write_docs(root, _docs(_receipt(
                 _pr_source(repo_source="pr.source_repo"), status="PENDING")))
-            text = R.render(root)
+            text = R.render(root, allow_historical_read_only=True)
         self.assertNotIn("| 源码仓 |", text)
         self.assertIn("本节不作任何 provenance 断言", text)
 
@@ -767,7 +993,7 @@ class SourceFactsDiscoveryIsSharedTest(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as root:
                 _write_docs(root, _docs(receipt))
-                text = R.render(root)
+                text = R.render(root, allow_historical_read_only=True)
                 self.assertEqual(
                     1, len(calls), "渲染器没走 source_facts_lookup.find_source_facts")
 
@@ -782,3 +1008,27 @@ class SourceFactsDiscoveryIsSharedTest(unittest.TestCase):
         self.assertIn(R.PROV_FACTS_ABSENT, text)
         self.assertNotIn(R.PROV_FACTS_FOUND, text)
         self.assertTrue(errs, "对照物不可信时三级门必须记 error，不能静默放行")
+
+    def test_renderer_and_gate_share_current_source_build_binding_helper(self):
+        import validate_acceptance_state as vas
+
+        calls = []
+        original = SBB.validate_current
+
+        def recording(*args, **kwargs):
+            calls.append((args, kwargs))
+            return original(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as root, \
+                mock.patch.object(SBB, "validate_current", side_effect=recording):
+            docs, facts = RenderAcceptanceMarkdownTest()._current_docs(root)
+            _write_docs(root, docs, source_facts=facts)
+            R.render(root)
+            br = docs["evidence.json"]["cpp_extension_receipt"]["vendor"][
+                "build_receipt"]
+            errs = []
+            vas._gate_build_receipt_source_binding(
+                root, VBR.summarize(br), errs, build_receipt=br)
+            self.assertEqual([], errs)
+
+        self.assertEqual(2, len(calls), "renderer 与三级门必须各调同一 helper 一次")

@@ -9,12 +9,14 @@ import os
 
 import acceptance_artifacts
 import cann_version
+import kernel_identity
 # 来源对照物（`source_facts.json`）的发现规则在 `source_facts_lookup`，本文件一条都不自建。
 # ⚠ 发现规则曾是 `validate_acceptance_state._find_source_facts`，由本模块跨模块引用那个
 #   **私有**名。复用方向是对的（两处各写一份查找规则的话，报告说的 facts 和三级门校的
 #   facts 可能根本不是同一份文件），但私有名跨模块用，将来改名会**静默炸 import**，
 #   所以规则下沉成了公开模块。本模块因此也不依赖三级门那个重模块。
 import source_facts_lookup
+import source_build_binding
 # 收据的源身份解释**只有一份**：`vendor_build_receipt.summarize`。本文件不自己按字段名
 # 去 `source` 里翻锚——那正是「哪个字段有值用哪个」这类兜底写法的入口。
 import vendor_build_receipt
@@ -511,7 +513,10 @@ def _performance_failure_detail(non_passing, caseset):
     return "\n".join(lines)
 
 
-def render(report_root, source_facts_path=None):
+HISTORICAL_REPORT_FILENAME = "历史验收报告（只读）.md"
+
+
+def render(report_root, source_facts_path=None, *, allow_historical_read_only=False):
     report_root = os.path.realpath(report_root)
     acceptance = _load(report_root, "acceptance.json")
     # renderer 可被 CLI 单独调用，不能假定文件一定来自 run_workflow。正式命名的发布门须在
@@ -538,17 +543,70 @@ def render(report_root, source_facts_path=None):
     # 返回三态：dict / None（没找到）/ `SOURCE_FACTS_UNTRUSTED`（找到但读不出/不可信）。
     # ⚠ 后两态在本渲染器里**同权**，都当「未经印证」，绝不当「已核」（见 `_facts_row`）。
     facts = source_facts_lookup.find_source_facts(report_root, source_facts_path)
+    execution_identity = acceptance.get("execution_identity") or {}
+    # 只要原始 facts 出现 current marker 就进严格路径；envelope 被篡改不能
+    # 让 marker 随 `find_source_facts -> UNTRUSTED` 一起消失，再借 historical 开关降级。
+    caller_trusted_marker = source_facts_lookup.caller_trusted_marker_present(
+        report_root, source_facts_path)
+    current_identity_marker = (
+        caller_trusted_marker
+        or build_receipt.get("schema_version") == vendor_build_receipt.SCHEMA_VERSION
+        or (isinstance(execution_identity, dict)
+            and "source_binding" in execution_identity))
+    if not current_identity_marker and not allow_historical_read_only:
+        raise acceptance_artifacts.FormalAcceptanceError(
+            "报告缺 current kernel identity 标记；如需读取 legacy 产物，调用方必须显式启用 "
+            "historical_read_only，且只能生成独立命名的历史只读报告")
+    if current_identity_marker:
+        if not isinstance(spec, dict) or not isinstance(facts, dict):
+            raise acceptance_artifacts.FormalAcceptanceError(
+                "current 正式报告缺可信 staged spec/source_facts，无法复核 execution_identity")
+        try:
+            source_build_binding.validate_current(facts, build_receipt)
+        except source_build_binding.SourceBuildBindingError as ex:
+            raise acceptance_artifacts.FormalAcceptanceError(
+                f"current 正式报告 source_facts/vendor build receipt 内容绑定非法：{ex}") from ex
+        try:
+            resolved_identity = kernel_identity.resolve(
+                spec, facts, require_explicit=True)
+        except kernel_identity.KernelIdentityError as ex:
+            raise acceptance_artifacts.FormalAcceptanceError(
+                f"current 正式报告 kernel identity 绑定非法：{ex}") from ex
+        digest = ((build_receipt.get("build") or {}).get("source_snapshot_digest")
+                  if isinstance(build_receipt.get("build"), dict) else None)
+        build_identity = (digest.get("kernel_identity")
+                          if isinstance(digest, dict) else None)
+        source_identity = ((facts.get("derived") or {}).get("kernel_identity")
+                           if isinstance(facts.get("derived"), dict) else None)
+        closure = build_receipt.get(vendor_build_receipt.TARGET_KERNEL_DELIVERY_KEY)
+        request = closure.get("request") if isinstance(closure, dict) else None
+        closure_type = (request.get("expected_op_type")
+                        if isinstance(request, dict) else None)
+        if (execution_identity != resolved_identity
+                or build_identity != source_identity
+                or closure_type != resolved_identity["kernel_op_type"]):
+            raise acceptance_artifacts.FormalAcceptanceError(
+                "current 正式报告的 acceptance/source_facts/build receipt/target closure "
+                "execution_identity 漂移")
+        execution_identity = resolved_identity
 
+    historical_mode = not current_identity_marker
     lines = [
-        f"# {op} 算子验收报告",
+        (f"# {op} 算子历史验收报告（只读）"
+         if historical_mode else f"# {op} 算子验收报告"),
         "",
-        "> 本报告由确定性 JSON 产物渲染，只展示既有裁决，不重新判断 pass/fail。",
+        ("> 这是 legacy 历史产物的只读展示，不是 current 正式验收报告；"
+         "不得用于生成或升级 current 裁决。"
+         if historical_mode else
+         "> 本报告由确定性 JSON 产物渲染，只展示既有裁决，不重新判断 pass/fail。"),
         "",
         "## 验收结论",
         "",
         "| 项目 | 结果 |",
         "|---|---|",
         f"| 最终裁决 | `{_cell(acceptance.get('overall'))}` |",
+        f"| 公开任务/API 身份 | `{_cell(execution_identity.get('public_op') or op)}` |",
+        f"| 内部 kernel op type | `{_cell(execution_identity.get('kernel_op_type'))}` |",
         f"| 状态 | `{_cell(acceptance.get('state'))}` |",
         f"| 精度裁决 | `{_cell(acceptance.get('precision_verdict'))}` |",
         f"| 性能状态 | `{_cell(acceptance.get('perf_status'))}` |",
@@ -710,9 +768,17 @@ def render(report_root, source_facts_path=None):
     return "\n".join(lines)
 
 
-def write_report(report_root, filename="验收报告.md", source_facts_path=None):
+def write_report(
+        report_root, filename="验收报告.md", source_facts_path=None, *,
+        allow_historical_read_only=False):
     report_root = os.path.realpath(report_root)
-    text = render(report_root, source_facts_path=source_facts_path)
+    text = render(
+        report_root, source_facts_path=source_facts_path,
+        allow_historical_read_only=allow_historical_read_only)
+    historical_render = bool(
+        text.splitlines() and "算子历史验收报告（只读）" in text.splitlines()[0])
+    if historical_render and filename == "验收报告.md":
+        filename = HISTORICAL_REPORT_FILENAME
     path = os.path.join(report_root, filename)
     _atomic_write(path, text)
 
@@ -748,8 +814,13 @@ def main(argv=None):
     # 门和报告必须能被指到同一个文件上，否则「门校过」与「报告写的」可以是两份东西。
     parser.add_argument("--source-facts", default=None, metavar="PATH",
                         help="显式指定 source_facts.json；不给则在报告目录与其 work/ 下自动发现")
+    parser.add_argument(
+        "--historical-read-only", action="store_true",
+        help="显式读取 legacy 产物；只生成独立命名的历史只读报告，不能发布 current 裁决")
     args = parser.parse_args(argv)
-    print(write_report(args.report_root, args.filename, args.source_facts))
+    print(write_report(
+        args.report_root, args.filename, args.source_facts,
+        allow_historical_read_only=args.historical_read_only))
     return 0
 
 

@@ -13,6 +13,19 @@ import run_workflow as W
 def _candidate(overall="PASS", state="PASSED", gate_passed=True, perf_status="ok"):
     return {
         "op": "Widget",
+        "execution_identity": {
+            "public_op": "Widget", "kernel_op_type": "InternalWidget",
+            "resolution": "derived_exact_source_candidate",
+            "source_binding": {
+                "schema": "oprunway.kernel_identity_spec_binding",
+                "schema_version": 1, "identity_sha256": "a" * 64,
+                "candidate": {
+                    "kernel_op_type": "InternalWidget",
+                    "source_path": "op/op_host/widget_def.cpp",
+                    "source_sha256": "b" * 64, "line": 1,
+                },
+            },
+        },
         "overall": overall,
         "state": state,
         "exit_code": 0,
@@ -84,13 +97,23 @@ class FormalAcceptanceBoundaryTest(unittest.TestCase):
 
     def test_attempt_record_has_no_acceptance_verdict(self):
         candidate = _candidate("BLOCKED_WAIT_EXTERNAL", "BLOCKED_WAIT_EXTERNAL")
+        candidate["execution_identity"] = {
+            "public_op": "Widget", "kernel_op_type": "InternalWidget"}
         record = A.build_attempt_record(candidate)
         self.assertEqual(record["schema"], "oprunway.workflow_attempt_record")
         self.assertEqual(record["schema_version"], 1)
         self.assertEqual(record["status"], "not_publishable")
         self.assertIsNone(record["acceptance_verdict"])
         self.assertEqual(record["pipeline_state"], "BLOCKED_WAIT_EXTERNAL")
+        self.assertEqual(record["execution_identity"], candidate["execution_identity"])
         self.assertNotIn("precision_verdict", record)
+
+    def test_formal_publisher_rejects_missing_execution_identity(self):
+        with tempfile.TemporaryDirectory() as root:
+            candidate = _candidate()
+            del candidate["execution_identity"]
+            with self.assertRaisesRegex(A.FormalAcceptanceError, "execution_identity"):
+                A.publish_acceptance_json(root, candidate)
 
     def test_each_writer_rejects_the_other_kind_of_candidate(self):
         with tempfile.TemporaryDirectory() as formal_root, \

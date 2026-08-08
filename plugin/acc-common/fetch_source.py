@@ -48,6 +48,7 @@ gitcode token 走环境：优先 $GITCODE_TOKEN，退回 $OPRUNWAY_GITCODE_TOKEN
 import argparse, hashlib, json, os, re, sys, tempfile, urllib.parse, urllib.request
 
 import content_address
+import kernel_identity
 import source_provenance
 import url_credentials
 
@@ -306,6 +307,16 @@ def _apply_key_file_facts(facts, key, key_ref, hdrs, taskdoc_apis=None):
     """把关键文件与接口形态派生事实写进 facts —— `--pr` 与 `--pr-snapshot` 共用。"""
     facts["key_files"] = key
     facts["key_files_ref"] = key_ref  # 每个关键文件实际取自哪个 ref（供下游判新鲜度）
+    # 公共 API/任务身份与内部注册类型不是同一命名空间。只从本轮目标 scope 下完整取回的
+    # op_def 文件词法提取 OP_ADD；不按算子名猜，也不把 example/API 调用拼成 C++ call graph。
+    # 0/多候选仍落事实供诊断，build_source_facts 会把它收敛为 blocked。
+    anchor = facts.get("content_anchor")
+    target_scope = facts.get("target_dir")
+    if isinstance(anchor, dict) and isinstance(target_scope, str) and target_scope:
+        op_defs = {path: text for path, text in key.items()
+                   if isinstance(path, str) and path.endswith("_def.cpp")}
+        facts["kernel_identity"] = kernel_identity.discover(
+            op_defs, target_scope=target_scope, content_anchor=anchor)
     facts["aclnn_headers"] = [p for p in hdrs if p in key]   # 一等接口头：真取到的那些（供下游只认它）
     # 一等接口头是否真取到 —— 下游（acc-spec 的 call_variants / out_role / runner arity）**只认它**，
     # 取不到就必须知道「是没改动、还是没取到」，不能让下游拿 example 的调用写法反推签名当权威。
@@ -1278,6 +1289,13 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
         reasons.append("missing_or_invalid_content_anchor")
     if caller_policy and (facts.get("snapshot_skipped_symlink_count") or 0) != 0:
         reasons.append("content_scope_contains_symlink")
+    kernel_fact = facts.get("kernel_identity")
+    if caller_policy:
+        try:
+            kernel_identity.validate(
+                kernel_fact, content_anchor=content_anchor, require_exact=True)
+        except kernel_identity.KernelIdentityError as ex:
+            reasons.append("kernel_identity_not_exact:" + str(ex))
 
     # 用户显式给入的任务书与代码天然对应。PR/head/fork/ref/changed-files 只描述运输，
     # 不再替调用方重判对应关系；但 target tree 内容锚缺失、关键接口字节缺失仍阻断。
@@ -1377,6 +1395,7 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
             "aclnn_entries": list(facts.get("aclnn_entries") or []),
             "api_mapping": (facts.get("api_mapping")
                             if isinstance(facts.get("api_mapping"), dict) else None),
+            "kernel_identity": (kernel_fact if isinstance(kernel_fact, dict) else None),
         },
         # reasons = **缺口**；form_facts = 该输入形态本来就成立的**中性事实**。
         # 两者分开记，报告才分得清「正常的本地源码验收」与「本该绑 PR head 却没绑」。

@@ -2623,7 +2623,7 @@ def preflight_target_kernel_delivery(*, expected_op_type, expected_content_ancho
         if not isinstance(request, dict) \
                 or request.get("expected_op_type") != expected_op_type:
             raise CppExtensionAdapterError(
-                "target kernel delivery closure 与本轮 spec.op 不一致")
+                "target kernel delivery closure 与本轮 source-bound kernel_op_type 不一致")
         source = receipt.get("source")
         if not isinstance(source, dict) \
                 or source.get("content_anchor") != expected_content_anchor:

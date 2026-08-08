@@ -39,6 +39,7 @@ import json
 import os
 
 import acceptance_artifacts
+import kernel_identity
 import repo_adapter
 import run_workflow
 import perf_evidence_contract
@@ -99,13 +100,14 @@ def _assert_source_facts_trusted(source_facts_path):
     时是**直接返回、不报错**的（历史 PR 通路的报告目录里确实没有这份文件）。于是不验就传，
     一个指不到的路径在 PR 通路上等价于「没这道门」——那正是 Critical ② 的物理入口。
     """
-    if (source_facts_lookup.find_source_facts(None, source_facts_path)
-            == source_facts_lookup.SOURCE_FACTS_UNTRUSTED):
+    facts = source_facts_lookup.find_source_facts(None, source_facts_path)
+    if facts == source_facts_lookup.SOURCE_FACTS_UNTRUSTED or not isinstance(facts, dict):
         raise FinalizeError(
             f"--source-facts 指向的文件不是可信的 source_facts.json：{source_facts_path!r}\n"
             f"  → 它必须是 fetch_source.py 落的内容寻址 envelope，且 "
             f"completeness.status=complete、reasons=[]。\n"
             f"  → blocked/半成品的取材事实只供诊断，不能当验收的来源锚（fail-closed）。")
+    return facts
 
 
 def _load_verified_spec(out_dir, spec_path):
@@ -142,7 +144,9 @@ def _load_verified_spec(out_dir, spec_path):
     return spec
 
 
-def build_clean_acceptance(spec, evidence, verdict, perf_report, gate_errors):
+def build_clean_acceptance(
+        spec, evidence, verdict, perf_report, gate_errors,
+        execution_identity=None):
     if gate_errors:
         raise FinalizeError(f"验收门未过：{gate_errors}")
     if evidence.get("evidence_grade") != "acceptance_candidate":
@@ -191,7 +195,7 @@ def build_clean_acceptance(spec, evidence, verdict, perf_report, gate_errors):
         clean = "PASSED_WITH_GAPS" if requirement_gaps else run_workflow._MEASURED_ONLY_OVERALL
         state = run_workflow._canonical_state(clean, summary)
         exit_code = run_workflow._exit_code(clean)
-        return {
+        acceptance = {
             "op": spec.get("op"), "overall": clean, "state": state,
             "exit_code": exit_code,
             "requires_human_cp": bool(requirement_gaps),
@@ -207,6 +211,9 @@ def build_clean_acceptance(spec, evidence, verdict, perf_report, gate_errors):
                 "note": "性能维只实测未裁决；任务书未验收性能条款保留为 gap。",
             },
         }
+        if execution_identity is not None:
+            acceptance["execution_identity"] = execution_identity
+        return acceptance
     if (summary.get("status") != "ok" or summary.get("blocked") != 0
             or not isinstance(perf_cases, int) or isinstance(perf_cases, bool) or perf_cases <= 0
             or summary.get("达标") != perf_cases
@@ -219,7 +226,7 @@ def build_clean_acceptance(spec, evidence, verdict, perf_report, gate_errors):
     exit_code = run_workflow._exit_code(clean)
     if state != "PASSED" or exit_code != 0:
         raise FinalizeError(f"状态映射异常：state={state!r}, exit_code={exit_code!r}")
-    return {
+    acceptance = {
         "op": spec.get("op"),
         "overall": clean,
         "state": state,
@@ -236,6 +243,9 @@ def build_clean_acceptance(spec, evidence, verdict, perf_report, gate_errors):
             "note": "放行只看 acceptance_precision_pass；risk=acceptance 过但 standard 不过 → 人工 CP",
         },
     }
+    if execution_identity is not None:
+        acceptance["execution_identity"] = execution_identity
+    return acceptance
 
 
 def finalize_directory(out_dir, spec_path, source_facts_path):
@@ -263,8 +273,13 @@ def finalize_directory(out_dir, spec_path, source_facts_path):
         out_dir, run_workflow._FINAL_VERDICT_FILES, error_cls=FinalizeError)
 
     _assert_spec_change_confirmed(spec_path, out_dir, _SPEC_GATE_ENTRY)
-    _assert_source_facts_trusted(source_facts_path)
+    source_facts = _assert_source_facts_trusted(source_facts_path)
     spec = _load_verified_spec(out_dir, spec_path)
+    try:
+        execution_identity = kernel_identity.resolve(
+            spec, source_facts, require_explicit=True)
+    except kernel_identity.KernelIdentityError as ex:
+        raise FinalizeError(f"current spec/source_facts execution_identity 未闭合：{ex}") from ex
     evidence = _load(os.path.join(out_dir, "evidence.json"))
     verdict = _load(os.path.join(out_dir, "verdict.json"))
     perf_report = _load(os.path.join(out_dir, "perf_report.json"))
@@ -279,7 +294,8 @@ def finalize_directory(out_dir, spec_path, source_facts_path):
         if errors:
             gate_errors[stage] = errors
     acceptance = build_clean_acceptance(
-        spec, evidence, verdict, perf_report, gate_errors)
+        spec, evidence, verdict, perf_report, gate_errors,
+        execution_identity=execution_identity)
 
     # ② 出口门：写验收产物**之前**再校一次 spec 原件（入口过了之后它仍可能被换掉）。
     _assert_spec_change_confirmed(spec_path, out_dir, _SPEC_GATE_EXIT)

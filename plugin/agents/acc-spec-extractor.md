@@ -66,6 +66,10 @@ description: OpRunway 验收 CP-B 子 agent——校验任务书输入，再把�
 ### extract_spec
 
 - **输入工件**：任务书、`pr_facts.json` 与 current `source_facts.json`。后者必须带 exact caller association 与 content anchor；URL/repo/fork/ref/head 只作 transport 观察。已有 bundle 足够时禁止重新联网追查“身份”；缺源码内容事实才回摘要报缺。
+- **两种算子身份不得混用**：`spec.op` 只表达任务书/API 的公开身份；新 spec 的
+  `execution.kernel_op_type` 与 `execution.source_binding` 必须逐字复制
+  `source_facts.payload.derived.kernel_identity` 的唯一 `OP_ADD` 候选。0/多候选、缺路径/SHA/摘要
+  都回 CP-A；禁止从公开名、目录或 API 名猜内部类型。
 - **调用方约束优先**：dispatch 的已确认约束逐项原样消费，不重新推导、不再次提问，也不得用源码实现覆盖任务书。
 - **执行边界**：只读点名输入与 acc-spec skill 路由到的相关章节，不遍历无关目录。单轮预算 300 秒；预算将尽仍缺权威事实时写结构化 gap/`needs_user` 并交还 primary，禁止用扩展联网或无界阅读拖延。
 - **干什么**：加载 `acc-spec` skill，按 `references/taskdoc-to-spec.md` 字段映射表逐字段抽，重点守住这几个最易错点（都在 ref 里）：

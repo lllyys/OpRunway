@@ -25,6 +25,7 @@ import unittest
 from unittest import mock
 
 import content_address
+import kernel_identity as K
 import precision_retest_contract as R
 import render_acceptance_markdown as MD
 import repo_adapter
@@ -41,7 +42,12 @@ _OP = "Widget"          # 中立见证名；本文件不含任何按算子身份
 
 
 def _spec(op=_OP, runner_form="cpp_extension"):
+    payload = source_facts_payload()
+    fact = K.discover(
+        {"op/op_host/internal_def.cpp": "OP_ADD(InternalWidget);\n"},
+        target_scope="op", content_anchor=payload["pr"]["content_anchor"])
     return {"op": op, "runner_form": runner_form,
+            "execution": K.spec_execution(fact),
             "params": [{"name": "x", "dtype": ["float32"]}]}
 
 
@@ -73,9 +79,14 @@ def _write_source_facts(path, **kw):
     那样用例就全落在「对照物不可信」那条分支上，测不到它想测的东西。
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = source_facts_payload(**kw)
+    anchor = payload["pr"]["content_anchor"]
+    payload["derived"]["kernel_identity"] = K.discover(
+        {"op/op_host/internal_def.cpp": "OP_ADD(InternalWidget);\n"},
+        target_scope="op", content_anchor=anchor)
     with open(path, "w", encoding="utf-8") as out:
         json.dump(content_address.make_artifact(
-            "oprunway/source-facts/v1", source_facts_payload(**kw)), out)
+            "oprunway/source-facts/v1", payload), out)
     return path
 
 
@@ -247,6 +258,22 @@ class StagingInputsTest(unittest.TestCase):
 class AcceptanceRunTest(unittest.TestCase):
     """把 `run()` 整条跑一遍（真机侧全用夹具替身），观察 staging 与门的实参。"""
 
+    def test_missing_kernel_identity_blocks_before_task1_or_dut(self):
+        with tempfile.TemporaryDirectory() as root, _env(root):
+            path = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
+            with open(path, encoding="utf-8") as src:
+                doc = json.load(src)
+            del doc["payload"]["derived"]["kernel_identity"]
+            doc = content_address.make_artifact("oprunway/source-facts/v1", doc["payload"])
+            with open(path, "w", encoding="utf-8") as out:
+                json.dump(doc, out)
+            out_dir = os.path.join(root, "reports", "widget")
+            with self.assertRaisesRegex(SystemExit, "kernel identity"):
+                W.run(_write_spec(root), mode="cpp_extension",
+                      out_dir=out_dir, source_facts=path)
+            self.assertFalse(os.path.exists(out_dir),
+                             "identity preflight 必须先于报告目录与 DUT")
+
     @staticmethod
     def _caseset(op=_OP):
         return {"op": op, "cases": [{
@@ -353,6 +380,9 @@ class AcceptanceRunTest(unittest.TestCase):
             self.assertEqual(attempt["pipeline_result"], "BLOCKED(验收门未过)")
             self.assertTrue(attempt["pipeline_state"].startswith("BLOCKED"))
             self.assertIs(attempt["gate"]["passed"], False)
+            self.assertEqual(attempt["execution_identity"]["public_op"], _OP)
+            self.assertEqual(
+                attempt["execution_identity"]["kernel_op_type"], "InternalWidget")
             self.assertEqual(
                 attempt["gate"]["errors"]["task2"],
                 ["夹具：Task2 evidence 不完整"])
@@ -381,7 +411,7 @@ class AcceptanceRunTest(unittest.TestCase):
             self.assertEqual(result["summary_file"], "attempt_record.json")
             self.assertEqual(calls, [], "target preflight 失败后仍进入了 Task1/三级门")
             call = preflight.call_args.kwargs
-            self.assertEqual(call["expected_op_type"], _OP)
+            self.assertEqual(call["expected_op_type"], "InternalWidget")
             expected_facts = W.source_facts_lookup.find_source_facts(None, facts)
             self.assertEqual(
                 call["expected_content_anchor"],

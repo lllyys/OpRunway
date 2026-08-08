@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import fetch_source
 import precision_retest_runner as R
 import precision_retest_contract as C
 
@@ -28,8 +29,11 @@ def _vendor_build_receipt(*, local, anchor, scope=None, repo="repo",
     """
     build = {"argv": list(argv), "cwd": "/src",
              "returncode": 0, "returncode_source": "measured"}
-    effective_anchor = anchor if isinstance(anchor, str) and len(anchor) == 64 else "7" * 64
-    effective_scope = scope or CONTENT_ANCHOR["scope"]
+    del local  # current v3 内容身份与 transport channel 无关。
+    effective_anchor = copy.deepcopy(anchor)
+    effective_scope = (effective_anchor["scope"]
+                       if scope is None else scope)
+    effective_anchor["scope"] = effective_scope
     return {"schema": "oprunway.vendor_build_receipt", "schema_version": 3,
             "status": "VERIFIED",
             "source": {"provenance_kind": "local_snapshot",
@@ -37,11 +41,12 @@ def _vendor_build_receipt(*, local, anchor, scope=None, repo="repo",
                        "pr_head_sha": None, "repo": repo,
                        "snapshot_subtree_scope": effective_scope,
                        "snapshot_sha256": "6" * 64,
-                       "snapshot_subtree_sha256": effective_anchor,
-                       "content_anchor": dict(CONTENT_ANCHOR,
-                                              scope=effective_scope,
-                                              sha256=effective_anchor)},
-            "build": build, "degradations": []}
+                       "snapshot_subtree_sha256": effective_anchor["sha256"],
+                       "content_anchor": copy.deepcopy(effective_anchor)},
+            "build": dict(build, source_snapshot_digest={
+                "content_anchor": copy.deepcopy(effective_anchor),
+            }),
+            "degradations": []}
 
 
 class SelectedCasesetTest(unittest.TestCase):
@@ -393,16 +398,20 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
         }
         generated_manifest_sha = R.cpp_extension_adapter._canonical_sha(
             generated_manifest)
-        # 两条来源通路共用同一份 fixture：锚字段名、锚长度和 scope 维都由
-        # `source_provenance` 的词表决定，测试不按字面拼 key，也不复用同一段 hex
-        # 冒充另一条通路。
-        kind = "local_snapshot" if local else "gitcode_pr"
-        anchor_field = C.SOURCE_ANCHOR_FIELD[kind]
-        anchor_value = ("7" * 64) if local else ("c" * 40)
-        scope = "experimental/index/median" if local else None
-        source_identity = {"content_anchor": dict(
-            CONTENT_ANCHOR, scope=scope or CONTENT_ANCHOR["scope"],
-            sha256=anchor_value if local else CONTENT_ANCHOR["sha256"])}
+        # current 身份只认物化内容：从一棵真实 fixture source tree 计算一次 anchor，
+        # directive、manifest 与 build receipt 的 source/build 两侧都复用该对象。
+        # `local` 只保留为 transport 见证，不参与内容身份。
+        scope = CONTENT_ANCHOR["scope"]
+        source_tree = tempfile.TemporaryDirectory()
+        self.addCleanup(source_tree.cleanup)
+        source_rel = f"{scope}/op_host/x_def.cpp"
+        source_path = os.path.join(source_tree.name, *source_rel.split("/"))
+        os.makedirs(os.path.dirname(source_path), exist_ok=True)
+        with open(source_path, "w", encoding="utf-8") as out:
+            out.write("OP_ADD(Any);\n")
+        content_anchor = fetch_source._content_anchor_from_snapshot(
+            source_tree.name, scope, [source_rel])
+        source_identity = {"content_anchor": copy.deepcopy(content_anchor)}
         manifest = {
             "runner_binding": {
                 "schema": "oprunway.precision_retest.cpp_extension_binding",
@@ -431,7 +440,7 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
             "build_receipt_sha256": "d" * 64,
             "runner_form": "cpp_extension"}}
         build_receipt = _vendor_build_receipt(
-            local=local, anchor=anchor_value, scope=scope,
+            local=local, anchor=content_anchor, scope=scope,
             argv=["bash", "build.sh", "-f", "x"])
         receipt = {
             "bindings": {
@@ -490,7 +499,9 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
         """locator 形态只是 transport observation，内容锚一致即可。"""
         manifest, directive, plan, receipt, generated = self._fixture(local=True)
         receipt["vendor"]["build_receipt"] = _vendor_build_receipt(
-            local=False, anchor="a" * 40, argv=["bash", "build.sh", "-f", "x"])
+            local=False,
+            anchor=directive["source_identity"]["content_anchor"],
+            argv=["bash", "build.sh", "-f", "x"])
         got = R._validate_cpp_extension_fresh_receipt(
             receipt, manifest, directive, plan, generated)
         self.assertEqual(got["fresh_extension_elf_sha256"], "1" * 64)
@@ -503,9 +514,9 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
         """
         manifest, directive, plan, receipt, generated = self._fixture(local=True)
         receipt["vendor"]["build_receipt"] = _vendor_build_receipt(
-            local=True, anchor="7" * 64, scope="",
+            local=True, anchor=directive["source_identity"]["content_anchor"],
+            scope="",
             argv=["bash", "build.sh", "-f", "x"])
-        receipt["vendor"]["build_receipt"]["source"]["content_anchor"]["scope"] = ""
         with self.assertRaisesRegex(
                 R.RetestExecutionError, "source_anchor 身份漂移"):
             R._validate_cpp_extension_fresh_receipt(

@@ -35,6 +35,7 @@ import source_facts_lookup  # noqa: E402
 import spec_change_gate  # noqa: E402
 import verify_aclnn_harness  # noqa: E402
 import content_address  # noqa: E402
+import kernel_identity  # noqa: E402
 import perf_mode  # noqa: E402
 import perf_evidence_contract  # noqa: E402
 
@@ -864,6 +865,28 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     # 放在 `os.makedirs` 之前 = 三份原件有任何问题都不留下半个产物目录。
     staged_payloads = (_read_acceptance_inputs(spec_path, spec, source_facts)
                        if is_acceptance else None)
+    execution_identity = None
+    acceptance_source_facts = None
+    if staged_payloads is not None:
+        try:
+            facts_doc = json.loads(staged_payloads[_STAGED_SOURCE_FACTS_FILE])
+            acceptance_source_facts = facts_doc.get("payload")
+            if (not isinstance(facts_doc, dict)
+                    or facts_doc.get("domain") != source_facts_lookup.SOURCE_FACTS_DOMAIN
+                    or not isinstance(acceptance_source_facts, dict)
+                    or facts_doc.get("digest") != content_address.content_digest(
+                        source_facts_lookup.SOURCE_FACTS_DOMAIN, acceptance_source_facts)):
+                raise kernel_identity.KernelIdentityError(
+                    "source_facts staging 字节不是自洽的 current envelope")
+            execution_identity = kernel_identity.resolve(
+                spec, acceptance_source_facts, require_explicit=True)
+        except (ValueError, TypeError, UnicodeError,
+                content_address.ContentAddressError,
+                kernel_identity.KernelIdentityError) as ex:
+            raise SystemExit(
+                f"[CP-A kernel identity preflight] 公开任务身份无法绑定源码注册类型：{ex}\n"
+                "  → current 验收要求 source_facts 中恰有一个词法安全的 OP_ADD 候选；"
+                "spec 若显式声明 execution，则必须逐字绑定该候选。") from ex
     # ★★ **本轮 spec 身份就在这一行冻结**（见 `_SPEC_ROUND_ANCHOR_NOTE` 上方那段病历）。
     # 摘要取自**上面已经读进内存的那串字节**——`_read_acceptance_inputs` 刚复核过它解析出来
     # 就是驱动本轮执行的 `spec`，且待会儿 staging 落的也正是同一串字节。所以这一个值同时是
@@ -952,12 +975,10 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     if (mode == "cpp_extension"
             and os.environ.get("OPRUNWAY_CPP_EXTENSION_REAL") == "1"):
         try:
-            staged_facts = source_facts_lookup.find_source_facts(
-                None, staged_source_facts)
-            expected_anchor = ((staged_facts.get("pr") or {}).get("content_anchor")
-                               if isinstance(staged_facts, dict) else None)
+            expected_anchor = ((acceptance_source_facts.get("pr") or {}).get("content_anchor")
+                               if isinstance(acceptance_source_facts, dict) else None)
             cpp_extension_adapter.preflight_target_kernel_delivery(
-                expected_op_type=spec.get("op"),
+                expected_op_type=execution_identity["kernel_op_type"],
                 expected_content_anchor=expected_anchor)
         except cpp_extension_adapter.CppExtensionAdapterError as ex:
             detail = str(ex)
@@ -969,6 +990,7 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
                     os.remove(stale_path)
             candidate = {
                 "op": spec.get("op"),
+                "execution_identity": execution_identity,
                 "repo_mode": mode,
                 "overall": "BLOCKED(target kernel delivery closure 未通过)",
                 "state": "BLOCKED_TARGET_KERNEL_DELIVERY_CLOSURE",
@@ -1326,10 +1348,10 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
                    "uncertain_cases": ov.get("uncertain", []),
                    "note": "放行只看 acceptance_precision_pass；risk=acceptance 过但 standard 不过 → 人工 CP"}
     if is_acceptance:
-        # ⚠ 验收通路的 acceptance.json **一个字段都没加**（本轮红线：真机通路不动）。证据等级另有出处：
-        #   evidence.json 的 `evidence_grade`（repo_adapter 写）+ 本函数返回值 —— 且「acceptance.json 存在」
-        #   本身已经等价于「这是验收级证据」，再塞一遍是冗余。
-        acc = {"op": spec["op"], "overall": overall, "state": state, "exit_code": exit_code,
+        # evidence 等级仍由 evidence.json + formal 发布谓词表达；execution_identity 只记录已经由
+        # source_facts/closure 门复核过的 public/internal 身份投影，不新增或重判验收维度。
+        acc = {"op": spec["op"], "execution_identity": execution_identity,
+               "overall": overall, "state": state, "exit_code": exit_code,
                "requires_human_cp": requires_human_cp, "repo_mode": mode,
                "gate": {"passed": gate_passed, "errors": gate_errs},
                "precision_verdict": prec, "perf_status": ps.get("status"),

@@ -19,6 +19,22 @@
 {
   "op": "<PascalCase 算子名，去 aclnn 前缀>",
   "repo": "<顶层仓名：ops-math / ops-nn / ops-transformer / catlass>",
+  // public `op` 与内部注册类型是两个命名空间。该对象只能由本轮 source_facts 的唯一
+  // OP_ADD(<Identifier>) 候选生成；不得从 op、目录名或 API 名猜。零/多候选须停在 CP-A。
+  "execution": {
+    "kernel_op_type": "<source_facts 唯一 OP_ADD 标识符>",
+    "source_binding": {
+      "schema": "oprunway.kernel_identity_spec_binding",
+      "schema_version": 1,
+      "identity_sha256": "<source_facts.derived.kernel_identity.identity_sha256>",
+      "candidate": {
+        "kernel_op_type": "<与 execution.kernel_op_type 逐字相同>",
+        "source_path": "<目标 scope 内 *_def.cpp 路径>",
+        "source_sha256": "<该源码文件字节 sha256>",
+        "line": 1
+      }
+    }
+  },
   // ── runner_form · 执行形态（**每份 spec 必填，别省**；口径与三种取值见《可选字段目录》「runner 形态」条）──
   //   新一轮恒填 `cpp_extension`（当前唯一有真机入口并能产验收裁决的形态），且必须同时从目录把
   //   `call_variants` 抄进主体，否则 gen_cases fail-closed。键缺席虽吃同值缺省，正式 spec 仍不得省略。

@@ -9,8 +9,10 @@ import unittest
 import cann_version as CV
 import cpp_extension_adapter as A
 import cpp_extension_identity as I
+import kernel_identity as K
 import test_current_receipt_fixtures as F
 import validate_acceptance_state as G
+import vendor_build_receipt as V
 
 
 def _write_json(path, value):
@@ -56,6 +58,13 @@ def source_facts_payload(provenance_kind="local_snapshot",
               # PR 档这两项**恒在场且为 None**（不是缺席）——反向排他校验比的是「显式 null」。
               "snapshot_merkle_sha256": None, "snapshot_scope": None}
         key_ref = head_sha
+    anchor = F.content_anchor(snapshot_scope, snapshot_merkle)
+    identity_scope = anchor["scope"]
+    header_path = identity_scope.rstrip("/") + "/x.h"
+    def_path = identity_scope.rstrip("/") + "/op_host/x_def.cpp"
+    identity = K.discover(
+        {def_path: "OP_ADD(X);\n"},
+        target_scope=identity_scope, content_anchor=anchor)
     return {
         "contract_version": 2,
         "input_association": {
@@ -66,13 +75,14 @@ def source_facts_payload(provenance_kind="local_snapshot",
         "declared_source_form": form,
         "taskdoc": {"bytes_sha256": "1" * 64, "snapshot_sha256": "1" * 64,
                     "size": 12, "source_locator": "task.md"},
-        "pr": dict(pr, content_anchor=F.content_anchor(
-            snapshot_scope, snapshot_merkle)),
-        "changed_files": ["op/x.h"],
-        "key_files": [{"path": "op/x.h", "ref": key_ref,
+        "pr": dict(pr, content_anchor=anchor),
+        "changed_files": [header_path],
+        "key_files": [{"path": header_path, "ref": key_ref,
                        "bytes_sha256": "2" * 64, "size": 9}],
-        "derived": {"op": "X", "target_dir": "op", "aclnn_headers": ["op/x.h"],
-                    "interface_kind": "aclnn_2stage", "aclnn_entry": "aclnnX"},
+        "derived": {"op": "X", "target_dir": identity_scope,
+                    "aclnn_headers": [header_path],
+                    "interface_kind": "aclnn_2stage", "aclnn_entry": "aclnnX",
+                    "kernel_identity": identity},
         "completeness": (completeness if completeness is not None
                          else {"status": "complete", "reasons": [],
                                "form_facts": form_facts}),
@@ -198,7 +208,7 @@ class CppExtensionReceiptGateTest(unittest.TestCase):
         # （`<root>/vendors/<pkg>/op_api/lib/<lib>.so`）——门要从这条路径反推
         # `ASCEND_CUSTOM_OPP_PATH`，也就是「本轮 aclnnXxx 由哪个包提供」。反推不出来 =
         # 符号来源不可核，fail-closed。改动前这里写的 `/opt/vendor/lib.so` 不符合布局。
-        vendor_pkg = "/opt/vendor_root/vendors/oprunway_test"
+        vendor_pkg = os.path.join(root, "vendor_root", "vendors", "oprunway_test")
         vendor_path = vendor_pkg + "/op_api/lib/libcust_opapi.so"
         build_receipt = {
             "schema": "oprunway.vendor_build_receipt",
@@ -426,6 +436,34 @@ class BuildReceiptSourceBindingTest(unittest.TestCase):
             self._relocalize(envelope, evidence)
             self._write_source_facts(root)
             self.assertEqual([], self._run(root, caseset, envelope, evidence))
+
+    def test_source_fact_rejects_coherently_renamed_target_closure(self):
+        """即使 spec/closure 一起改名，source fact 的唯一 OP_ADD 候选仍是最终对照物。"""
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
+            self._relocalize(envelope, evidence)
+            self._write_source_facts(root)
+            build_receipt = envelope["cpp_extension_receipt"]["vendor"]["build_receipt"]
+            build_receipt[V.TARGET_KERNEL_DELIVERY_KEY]["request"]["expected_op_type"] = "Forged"
+            summary = V.summarize(build_receipt)
+            errors = []
+            G._gate_build_receipt_source_binding(
+                root, summary, errors, build_receipt=build_receipt)
+            self.assertTrue(any("OP_ADD" in item for item in errors), errors)
+
+    def test_current_source_facts_missing_kernel_identity_is_blocked(self):
+        with tempfile.TemporaryDirectory() as root:
+            caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
+            self._relocalize(envelope, evidence)
+            payload = source_facts_payload(
+                snapshot_merkle=self.MERKLE, snapshot_scope=self.SCOPE)
+            del payload["derived"]["kernel_identity"]
+            import content_address
+            _write_json(os.path.join(root, "source_facts.json"),
+                        content_address.make_artifact(
+                            "oprunway/source-facts/v1", payload))
+            self.assertTrue(any("kernel_identity" in item.lower()
+                                for item in self._run(root, caseset, envelope, evidence)))
 
     def test_current_v3_content_snapshot_receipt_passes_without_git_head(self):
         """当前正式档按 source_provenance 路由：local_source 不要求、更不许捏造 git head。"""

@@ -51,6 +51,35 @@ SOURCE_FACTS_DOMAIN = "oprunway/source-facts/v1"
 SOURCE_FACTS_UNTRUSTED = "__BAD__"
 
 
+def caller_trusted_marker_present(report_root, source_facts_path=None):
+    """只检测原始 payload 中是否**出现** caller-trusted/current marker。
+
+    这不是信任判定：即使 envelope digest 坏了，新 marker 也不得消失并
+    退回 legacy 展示。真正的契约校验仍由 :func:`find_source_facts` 与下游门完成。
+    """
+    explicit = source_facts_path is not None
+    paths = ([source_facts_path] if explicit else
+             [os.path.join(report_root, "source_facts.json"),
+              os.path.join(report_root, "work", "source_facts.json")])
+    for path in paths:
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as src:
+                doc = json.load(src)
+        except (OSError, ValueError):
+            # 文件已经占据 current facts 的正式槽位，却连 marker 都无法可信解析；
+            # fail-closed，不能借「看不见 marker」降到 historical。
+            return True
+        payload = doc.get("payload") if isinstance(doc, dict) else None
+        candidate = payload if isinstance(payload, dict) else doc
+        if (isinstance(candidate, dict)
+                and (candidate.get("contract_version") == 2
+                     or "input_association" in candidate)):
+            return True
+    return False
+
+
 def find_source_facts(report_root, source_facts_path=None):
     """定位并**验摘要**读出 `source_facts.json`：显式路径 → `<d>/` → `<d>/work/`。
 

@@ -34,7 +34,7 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 
 | 工件 | 由哪个 CP 产 | 存在即代表 | 续跑判据 |
 |---|---|---|---|
-| `source_facts.json` | CP-A | 任务书字节 + 调用方关联声明 + 实际物化源码的统一内容锚 | current facts 必须为 contract v2，且 `input_association` 逐字等于 `caller_trusted_pair_v1/asserted_by_caller`；`pr.content_anchor` 的 algorithm/scope/sha256/file_count 完整，`completeness.status=complete`。transport locator/head/repo 警告不阻断；缺完整源码字节/内容锚才阻断 |
+| `source_facts.json` | CP-A | 任务书字节 + 调用方关联声明 + 实际物化源码的统一内容锚 | current facts 必须为 contract v2，且 `input_association` 逐字等于 `caller_trusted_pair_v1/asserted_by_caller`；`pr.content_anchor` 完整；`derived.kernel_identity` 在目标 op_def 范围词法安全扫描 `OP_ADD(<Identifier>)`，必须恰有一个绑定路径/文件 SHA/内容锚的候选；`completeness.status=complete`。transport locator/head/repo 警告不阻断 |
 | `correspondence.json` | CP-A（仅 legacy） | 历史对应校验记录 | fresh caller-trusted facts 不产、不要求；只在显式历史只读流程中按旧契约解释，不得补写它把 legacy 升格成 current |
 | `taskdoc_links.json` | CP-B（primary inline `taskdoc_links.py`） | 任务书正文里的链接已按受控词表分类、可变 ref 已钉成 commit sha、仓内材料已内容寻址取回 | legacy `case_source=taskdoc` 时：退出码 0 且 `blocking` 为空才往下走；`blocking` 非空摆给用户，不猜链接指向。N5 `reference_only` 时：只作 reference 取材，取回失败记 reference gap，不得改换正式 `case_source/case_target` |
 | `taskdoc_caseset.json` + `golden/golden.py` | CP-B（primary inline `taskdoc_caseset.py`；**仅 `precision.case_source=taskdoc` 且没有 N5 reference-only 裁定**） | 任务书自带用例集已被识别、接口映射 IR 已对账、caseset 已规范化、golden 包装层与任务书授权锚已落盘 | `outcome=recognized` 才可进 `gen_cases`；其余六种结局（见 `DISCOVERY_OUTCOMES`）**一律 BLOCKED，绝不回退自生成**。⚠ `reference_case_material_role=reference_only` 时根本不产/不消费本工件；附带材料只进 reference 记账 |
@@ -129,6 +129,9 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   ```
 
   两条都产 `task_doc.md` + 逐字节 `task_doc.snapshot.md` + `pr_facts.json` + 内容寻址的 `source_facts.json`。current facts 的 `input_association` 记录调用方断言；`pr.content_anchor` 统一锚定实际物化的源码文件集，输入形态不改变验收语义。源码字节、scope、file_count 或任务书字节变化即新身份，`completeness=blocked` 不得复用。
+  `derived.kernel_identity` 只从目标 scope 的 `*_def.cpp` 中扫描注释/字符串外的
+  `OP_ADD(<Identifier>)`；0/多候选一律 blocked。它是内部 target closure 身份，不能拿公开
+  `spec.op` 顶替；workflow preflight、request 与 receipt 只消费该内部类型。
   - **两条都不给 = CP-A 没过，别只产任务书就往下走**：不给任何被测来源时脚本**压根不写 `source_facts.json`**（只落任务书与快照），§1 的工件门自然拦住；这条由编排层守，不要看到「命令退 0」就当过了。
   - **`completeness=blocked` 不得复用**：落盘不等于成功，blocked 事实只供诊断。阻断原因必须是源码内容未完整物化或内容锚不成立；locator/head/repo/declared-form 漂移只进入 `transport_warnings`。
 - **输入形态中立**：current facts 只接受 exact caller association + content anchor。URL、repo、fork、ref、head、`declared_source_form`、`provenance_kind` 均为 transport observation，不是准入权威。legacy v1/v2 工件继续按旧严格身份门只读解释，禁止合成 caller assertion/content anchor、禁止升格为 current。

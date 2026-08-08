@@ -19,6 +19,7 @@ from typing import Any, Iterable
 
 import content_address
 import cpp_extension_adapter
+import kernel_identity
 import multi_card_shards
 import multi_card_verdict_equivalence
 import stochastic_contract
@@ -2052,6 +2053,45 @@ def _validate_formal_artifact_projection(
 
     if spec.get("runner_form") != "cpp_extension":
         errors.append(f"{where}.artifacts.spec.runner_form: expected cpp_extension")
+    identity_fact = derived.get("kernel_identity")
+    if current_contract:
+        if identity_fact is None:
+            errors.append(
+                f"{where}.artifacts.source_facts.payload.derived.kernel_identity: required")
+        else:
+            try:
+                resolved_identity = kernel_identity.resolve(
+                    spec, facts_payload, require_explicit=True)
+            except kernel_identity.KernelIdentityError as exc:
+                errors.append(f"{where}.artifacts.kernel_identity: {exc}")
+                resolved_identity = None
+        if identity_fact is not None and resolved_identity is not None:
+            _same(
+                acceptance_artifact.get("execution_identity"),
+                resolved_identity,
+                f"{where}.artifacts.acceptance.execution_identity",
+                errors,
+                message="public/internal operator identity projection drift",
+            )
+            closure = build_receipt.get(vendor_build_receipt.TARGET_KERNEL_DELIVERY_KEY)
+            request = closure.get("request") if isinstance(closure, dict) else None
+            _same(
+                request.get("expected_op_type") if isinstance(request, dict) else None,
+                resolved_identity["kernel_op_type"],
+                f"{where}.artifacts.vendor_build_receipt.kernel_op_type",
+                errors,
+                message="target closure/internal operator identity drift",
+            )
+            snapshot_digest = build.get("source_snapshot_digest")
+            build_identity = (snapshot_digest.get("kernel_identity")
+                              if isinstance(snapshot_digest, dict) else None)
+            _same(
+                build_identity,
+                identity_fact,
+                f"{where}.artifacts.vendor_build_receipt.build.kernel_identity",
+                errors,
+                message="build source rescan/kernel identity drift",
+            )
     if not caller_contract and spec.get("declared_source_form") is not None:
         _same(
             spec.get("declared_source_form"),

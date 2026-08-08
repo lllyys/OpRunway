@@ -50,7 +50,7 @@ class TargetKernelDeliveryPreflightTest(unittest.TestCase):
         self.assertEqual(self._run()["status"], "VERIFIED")
 
     def test_other_op_or_source_anchor_is_rejected_before_dut(self):
-        with self.assertRaisesRegex(A.CppExtensionAdapterError, "spec.op"):
+        with self.assertRaisesRegex(A.CppExtensionAdapterError, "kernel_op_type"):
             self._run(expected_op_type="OtherOp")
         with self.assertRaisesRegex(A.CppExtensionAdapterError, "source_facts"):
             self._run(expected_content_anchor={"sha256": "b" * 64})
