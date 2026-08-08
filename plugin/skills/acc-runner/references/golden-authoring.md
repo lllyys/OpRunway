@@ -147,6 +147,40 @@ def out_shape(in_shapes, attrs):               # 仅非 elementwise 才导出；
 **必需三件套**：`golden_fn` + `GOLDEN_SOURCE` + `GOLDEN_PROVENANCE`（`load_golden` fail-closed 校）。
 `GOLDEN_CONTRACT` 缺失不阻塞加载，但**没有它就派生不出档位**——正式验收一律要写。
 
+### 逻辑 input dtype context（仅确实需要时启用）
+
+NumPy 载体不能总表达逻辑 dtype：例如逻辑 BF16 与真实 FP32 都会以 `numpy.float32`
+进入 generated golden。若目标 CPU direct API 必须按**原逻辑 dtype**构造输入，禁止从
+`inputs[i].dtype` 或数值反推，也禁止全量 cast、组合近似；在同一份 `GOLDEN_CONTRACT`
+里显式声明唯一受控调用 ABI：
+
+```python
+GOLDEN_CONTRACT = {
+    # 上文 source / method_kind / authorization / taskdoc_snapshot 原样保留
+    "invocation": {
+        "schema": "oprunway.golden_invocation",
+        "schema_version": 1,
+        "mode": "keyword_case_context_v1",
+    },
+}
+
+def golden_fn(inputs, attrs, *, case_context):
+    logical_dtype = case_context["inputs"][0]["logical_dtype"]
+    # 据 direct API 的 dtype 表构造同 dtype CPU tensor；词表外值必须 raise，不能猜。
+    ...
+```
+
+`case_context` 的固定形态是
+`{"schema":"oprunway.golden_case_context","schema_version":1,"inputs":[{"index":0,"name":"<spec参数名>","logical_dtype":"<spec/profile dtype>"}, ...]}`；
+只含按 spec 顺序的输入身份与逻辑 dtype，不含 op 名、case id、值、storage/output dtype 或 attrs。
+声明在场时，函数签名必须**恰为** `golden_fn(inputs, attrs, *, case_context)`；位置第三参、
+`*args` / `**kwargs`、错 schema/version/mode 均 fail-closed。声明缺席则仍只调用 legacy 两参，
+caseset 不增加 context/receipt 字段，既有 golden 行为与字节不变。
+
+其中 `inputs`、`attrs` 必须是普通 positional-or-keyword 参数（不能写成 `/` 前的位置专用参数）；
+`logical_dtype` 只接受 `precision_policy.GOLDEN_LOGICAL_INPUT_DTYPES` 的共享受控词表。扩词必须先扩该权威
+及生成实现，不能在 golden、adapter 或 gate 另抄一份名单。
+
 ### 输出形状（C1）
 
 elementwise（输出同输入形状）→ **不导出** `out_shape`，缺省语义即同形。

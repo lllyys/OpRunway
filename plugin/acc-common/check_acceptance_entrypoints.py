@@ -9,6 +9,8 @@
   ③ `run_workflow.py` 调用模板漏 `--source-facts`（验收通路上缺席即拒跑）；
   ④ **已退役 runner form / mode 的派生关系与调用**（`cpp` / `aclnn_py` → `--mode new_example`
      / `--mode aclnn_py`，以及已删除的逃生阀 `--allow-experimental-form`）。
+源码执行门额外守 current caller-trusted 口径：实际物化内容与 `content_anchor`
+取代旧 head 鉴权，fresh/current 不得恢复依赖 `correspondence.json`。
 ③④ 的共同点是：文本照抄下去**做得下去、跑不起来**——代价是整轮昂贵准备白做。
 """
 import argparse
@@ -48,12 +50,26 @@ SOURCE_GATE_FILES = (
 )
 
 SOURCE_GATE_TOKENS = (
-    "SOURCE_ACQUIRED",
-    "HEAD_VERIFIED",
+    "SOURCE_MATERIALIZED",
+    "CONTENT_ANCHOR_VERIFIED",
     "BUILD_VERIFIED",
     "WORKFLOW_STARTED",
     "set -Eeuo pipefail",
 )
+CALLER_TRUSTED_TOKENS = (
+    "caller_trusted_pair_v1",
+    "asserted_by_caller",
+    "content_anchor",
+)
+
+# current/fresh 来源准入不再以 `correspondence.json` 鉴权。它只能在 legacy 历史只读
+# 语义下出现。这里只守 `SOURCE_GATE_FILES` 两个真机源码门入口，避免把 schema
+# 示例里的字段名或历史说明误当成活跃指令。
+_CURRENT_WORD = re.compile(r"(?<![\w-])(?:fresh|current)(?![\w-])", re.IGNORECASE)
+_CORRESPONDENCE_WORD = re.compile(r"(?<![\w-])correspondence(?:\.json)?(?![\w-])", re.IGNORECASE)
+_CORRESPONDENCE_REQUIREMENT_MARKERS = ("必须", "须", "要求", "依赖", "生成", "产出", "提供", "前置")
+_CORRESPONDENCE_NEGATION_MARKERS = (
+    "不产", "不要求", "无需", "不依赖", "不得", "禁止", "仅供 legacy", "只供 legacy")
 
 _STALE_PASS = re.compile(r"Median.{0,160}(?:56/56|60/60).{0,80}PASS", re.IGNORECASE)
 _HISTORICAL_MARKERS = ("历史", "旧", "不得沿用", "不再", "取代", "失效")
@@ -130,7 +146,8 @@ _EXPERIMENTAL_FLAG = re.compile(r"--allow[-_]experimental[-_]form(?![\w-])")
 #   那种写法必须硬拒。下一个人要加固，方向是收紧词表或改用下面的历史区，不是把这两档合并放宽。
 _RETIRED_STATEMENT_MARKERS = (
     "⛔", "拒", "停止准入", "已删", "删除", "删掉", "无真机入口", "退役", "历史保留", "历史留档")
-_FLAG_REMOVED_MARKERS = ("已删", "删除", "删掉", "退役", "别加回", "不得加回", "历史保留", "历史留档")
+_FLAG_REMOVED_MARKERS = (
+    "已删", "删除", "删掉", "退役", "别加回", "不得加回", "不得恢复", "历史保留", "历史留档")
 
 # ── 历史区：退役机制的描述留着（有参考价值），但要让 agent 一眼看出「不要照做」──────
 # 区块内豁免上面的退役规则；代价是必须挂横幅，且**未闭合的区块一律不豁免**（fail-closed）。
@@ -253,6 +270,25 @@ def _check_source_facts_flag(rel, text, errors):
                     f"（验收通路必填，缺席即拒跑；路径 = CP-A fetch_source.py --out 那份 source_facts.json）")
 
 
+def _check_current_correspondence(rel, text, errors):
+    """fresh/current 不得重新把 legacy correspondence 变成执行前置。
+
+    按句号/分号切子句：同一逻辑行可同时写「fresh 不要求」与「legacy 可读」，
+    不能因后半句出现「要求」子串就误报；但另起一句写「fresh 必须生成」必须拦住。
+    """
+    for lineno, line in _logical_lines(text):
+        for clause in re.split(r"[。；]", line):
+            if not (_CURRENT_WORD.search(clause) and _CORRESPONDENCE_WORD.search(clause)):
+                continue
+            if any(marker in clause for marker in _CORRESPONDENCE_NEGATION_MARKERS):
+                continue
+            if any(marker in clause for marker in _CORRESPONDENCE_REQUIREMENT_MARKERS):
+                errors.append(
+                    f"{rel}:{lineno}: fresh/current caller-trusted 文本仍把 correspondence.json "
+                    "当必需前置（current 准入只认 caller assertion + content_anchor；"
+                    "correspondence.json 仅供 legacy 历史只读）")
+
+
 def _read(path):
     try:
         with open(path, encoding="utf-8") as f:
@@ -298,6 +334,10 @@ def collect(plugin_root, repo_root=None):
         for token in SOURCE_GATE_TOKENS:
             if token not in text:
                 errors.append(f"{rel}: 缺源码执行门 token {token!r}")
+        for token in CALLER_TRUSTED_TOKENS:
+            if token not in text:
+                errors.append(f"{rel}: 缺 current caller-trusted 源码门 token {token!r}")
+        _check_current_correspondence(rel, text, errors)
     return errors
 
 

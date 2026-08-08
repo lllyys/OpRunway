@@ -1,6 +1,6 @@
 ---
 name: op-acceptance
-description: OpRunway NPU 算子验收编排。输入=调用方配对的算子任务书与被测源码（各自均可为在线或本地输入）→ 派 subagent 产 spec/runner/跑测，primary 逐字引用确定性裁决；出中文验收报告。
+description: OpRunway NPU 算子验收编排。输入=调用方配对的算子任务书与被测源码（各自均可为在线或本地输入）→ 派 subagent 产 spec/runner/跑测；总结工件按 acceptance_artifacts.formal_acceptance_allowed 在 formal / attempt 间二选一。
 mode: primary
 skills:
   - acc-casegen
@@ -25,7 +25,7 @@ agents:
 > **脚本是内部实现——用户全程只对话、不碰脚本、不被要求手敲命令**（proposed·未 settle，载重前需核）。
 
 **输入**：调用方给定的一对“算子任务书 + 被测源码”；任务书与源码各自可为本地路径或在线 URL，二者关联由调用方断言。
-**产出**（**验收裁决当前只出自 `--mode cpp_extension`**，见下节与仓根 `AGENTS.md` §4）：`reports/<op>/` 下 `source_facts.json` / `caseset.json` / `evidence.json` / `verdict.json` / `baseline.json`（有基线时）/ `perf_report.json` / `acceptance.json` + 中文验收报告；`cpp_extension` 另产与裁决解耦的 `repro/` 全量人工复现入口。
+**产出**（**验收裁决当前只出自 `--mode cpp_extension`**，见下节与仓根 `AGENTS.md` §4）：`reports/<op>/` 下共有 `source_facts.json` / `caseset.json` / `evidence.json` / raw `verdict.json` / `baseline.json`（有基线时）/ `perf_report.json`；总结工件只按 `acceptance_artifacts.formal_acceptance_allowed` 二选一：true 产 `acceptance.json` 并进入报告渲染，false 产 `attempt_record.json`（`acceptance_verdict=null`），两者互斥。`cpp_extension` 另产与裁决解耦的 `repro/` 全量人工复现入口。
 ⚠ **非验收通路（显式 `--mode mock` / `catlass*`）产的都是** `dev_run_summary.json` + `dev_precision_check.json`（带 `evidence_grade=development` + NON-ACCEPTANCE 戳），**物理上不产 `acceptance.json` / `verdict.json`**（mock 侧口径自 C5，2026-07-22）。
 ⚠ **`cpp` / `aclnn_py` 已于 2026-08-06 停止准入，连真机入口都没有了**：spec 写它们即拒跑，出路是迁到 `cpp_extension`（不是换 `--mode` 再试）。
 
@@ -86,8 +86,11 @@ _RUNNER_FORM_TO_MODE = {"cpp_extension": "cpp_extension"}
 
 出**任何 pass 裁决前**，**必须**先过机器可校验验收门 `acc-common/validate_acceptance_state.py`
 （三级 `--stage task1|task2|task3`，读**落盘** `evidence.json` 独立复核：**防跑子集报 100%、防放宽阈值、防混 e2e 墙钟**）。
-验收门 `validate_acceptance_state.py` `STATUS: FAILED` → **不出 pass 裁决；仍由 run_workflow 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整）。`run_workflow.py` 已内嵌此门（Task1→2→3 **全跑完后统一校门** →
-门未过总体 `BLOCKED`；**注：批量驱动、非阶段间实时阻断**）；**「不推进下一 Task」是 agent 编排纪律**。
+验收门 `validate_acceptance_state.py` 已内嵌在 `run_workflow.py`（Task1→2→3 **全跑完后统一校门**；
+**注：批量驱动、非阶段间实时阻断**）。总结工件只按
+`acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一；只有 attempt 时不写
+`acceptance.json` 或 Markdown 验收报告。
+**「不推进下一 Task」是 agent 编排纪律**。
 判定脑子在 `acc-common/validator.py`（ADR 0007）、**不在编排层**；门只管「证据可信完整」，精度/性能 pass-fail 由 `validator`/`perf_compare` 判。
 
 ## 编排（CP-A..E · 薄 orchestrator + 3 subagent 状态机）
@@ -180,7 +183,7 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   （须 `OPRUNWAY_CPP_EXTENSION_REAL=1` + 过 build/load/vendor receipt 门，✅ **当前唯一能产验收裁决的通路**）；
   `cpp` / `aclnn_py` ⛔ **已停止准入、派不出 mode，显式指定同样被拒**；
   `mock` / `catlass` / `catlass_mock` 派生不出、须显式指定，见上文「跑测 mode 的唯一真源」）
-  （**Task2 精度 + Task3 性能 + 三级门 task1/2/3 一次成**）→ `evidence.json`/`verdict.json`/`baseline.json`（有基线时）/`perf_report.json`/`acceptance.json`；
+  （**Task2 精度 + Task3 性能 + 三级门 task1/2/3 一次成**）→ `evidence.json`/`verdict.json`/`baseline.json`（有基线时）/`perf_report.json`，总结工件按 `acceptance_artifacts.formal_acceptance_allowed` 在 `acceptance.json` / `attempt_record.json` 间二选一；
   FAIL → dispatch `rootcause`（先解耦「被测算子 vs harness」再归因）。
   ⚠ **正式验收不得按 `cpp` / `aclnn_py` 直接派生运行**：入口门 `_resolve_mode` 会当场拦下，加了逃生阀也只拿到开发级产物
   （无 `acceptance.json` / `verdict.json` 可引，上面那串产物根本不存在）。正确处置是**回 CP-B 把 spec 迁到 `cpp_extension`**
@@ -195,7 +198,9 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   executable bit，禁止用无关的权限假设制造假 BLOCKED。
   固定快照必须把远端执行入口与 payload 一起纳入同一摘要 manifest；上传前须在空目录真实解包并核
   入口存在、可读且 `bash -n` 通过，禁止只校 payload 后漏传入口。
-- **CP-E 报告**（primary）：**逐字引用** `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + `task_pr_gaps` + 各维度；
+- **CP-E 报告**（primary）：只在正式 `acceptance.json` 已存在、且 renderer 调用
+  `acceptance_artifacts` 的共享发布谓词通过时启动；primary 不另抄字段判断。随后**逐字引用** `acceptance.json`/`verdict.json`/`perf_report.json`
+  裁决 + `task_pr_gaps` + 各维度。只有 `attempt_record.json` 时停在 CP-D，不得拿 raw JSON 补正式报告；
   性能同时报告 `cases_scored`、有效 us/speedup 数和计划覆盖分母；所有性能 case 都须真实采集，`cases_scored=0` 明确性能未验证；
   `needs_review` 不当 pass；门 `FAILED` → `BLOCKED`。`cpp_extension` 的 `repro/index.tsv` 列全 case 与原结果，
   `show_case.sh` / 逐 case `--describe` 展示冻结输入摘要、attrs、调用槽、golden、policy 与原 metrics，
@@ -212,7 +217,7 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
 ### 编排硬约束（措辞与 3 subagent / SKILL 一致）
 
 - **判定唯一归确定性脚本链**：`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`
-  （三级完整性门）→ 门控后写 `acceptance.json`。**编排层与 subagent 不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**
+  （三级完整性门）；总结工件只按 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一。**编排层与 subagent 不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**
   （ADR 0007）——不是「绝不提 pass/fail」。
 - **subagent**：**单轮、禁内部循环、禁跨阶段、只回结构化摘要给 orchestrator、不自行判定**。
 - **primary**：**可直接跑「无 NL 生成、无判定」的确定性脚本**（`fetch_source` / `validate_taskdoc_input` / `gen_cases --dry-run --ledger-out` /

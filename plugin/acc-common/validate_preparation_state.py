@@ -37,12 +37,55 @@ _PLANNER_DEPENDENCIES = (
     "gen_cases.py",
     "repo_adapter.py",
     "precision_policy.py",
+    "tensor_shape_attrs.py",
 )
+_PLANNER_CAPABILITY_DEPENDENCIES = (
+    ("multi_input_contract", "multi_input_contract.py"),
+    ("stochastic", "stochastic_contract.py"),
+)
+_STOCHASTIC_GOLDEN_DEPENDENCY = {
+    "status": "not_applicable_stochastic",
+    "bytes_sha256": None,
+    "contract_sha256": None,
+}
 
 
 def _is_sha(value, length=64):
     return (isinstance(value, str) and len(value) == length
             and all(c in "0123456789abcdef" for c in value))
+
+
+def _planner_dependency_filenames(spec):
+    """按 gen_cases 的能力解析结果返回本 spec 的规划依赖。
+
+    基础依赖始终参与 dry-run；可选能力先复用 producer 的共享 resolver，只有成功解析
+    为有效契约才加入对应逻辑文件。字段缺席仍走 legacy 路径，显式 ``null`` 或坏对象
+    则与 gen_cases 一样 fail-closed，不能靠重算账本摘要伪装成可复用。具体算子身份不参与
+    依赖选择。
+    """
+    import multi_input_contract as MIC
+    import stochastic_contract as SC
+
+    try:
+        resolved = {
+            "multi_input_contract": MIC.resolve_spec_contract(spec),
+            "stochastic": SC.from_spec(spec),
+        }
+    except (MIC.MultiInputContractError, SC.StochasticContractError) as ex:
+        raise content_address.ContentAddressError(
+            f"spec planner capability 非法：{ex}") from ex
+    if (resolved["stochastic"] is not None
+            and resolved["multi_input_contract"] is None):
+        raise content_address.ContentAddressError(
+            "spec.stochastic 必须与 multi_input_contract 同时声明，"
+            "否则 gen_cases 无法生成 planner ledger")
+    dependencies = list(_PLANNER_DEPENDENCIES)
+    dependencies.extend(
+        filename
+        for field, filename in _PLANNER_CAPABILITY_DEPENDENCIES
+        if resolved[field] is not None
+    )
+    return tuple(dependencies)
 
 
 def _validate_source_payload(source):
@@ -629,25 +672,31 @@ def evaluate(root, spec_rel, case_plan_rel, golden_path=None,
                 _check(checks, "case_plan_spec", "PASS",
                        "case plan 绑定当前 spec")
 
-            logic_root = os.path.dirname(os.path.abspath(__file__))
-            current_logic_files = {
-                filename: _file_sha256(os.path.join(logic_root, filename))
-                for filename in _PLANNER_DEPENDENCIES
-            }
-            planner_sha = current_logic_files["gen_cases.py"]
-            bindings["planner_sha256"] = planner_sha
             planner_binding = plan.get("planner_binding")
             if not isinstance(planner_binding, dict):
                 raise content_address.ContentAddressError(
                     "case plan planner_binding 须为 JSON object")
-            recorded_planner = planner_binding.get("gen_cases_py_sha256")
-            recorded_logic_files = planner_binding.get("logic_files")
-            if (recorded_planner != planner_sha
-                    or recorded_logic_files != current_logic_files):
-                _check(checks, "case_planner", "MISS",
-                       "gen_cases.py 或其规划依赖逻辑已变化")
+            stochastic_active = False
+            if spec is None:
+                _check(checks, "case_planner", "MISS", "spec 尚不可绑定")
             else:
-                _check(checks, "case_planner", "PASS", "规划逻辑摘要一致")
+                logic_root = os.path.dirname(os.path.abspath(__file__))
+                current_logic_files = {
+                    filename: _file_sha256(os.path.join(logic_root, filename))
+                    for filename in _planner_dependency_filenames(spec)
+                }
+                stochastic_active = (
+                    "stochastic_contract.py" in current_logic_files)
+                planner_sha = current_logic_files["gen_cases.py"]
+                bindings["planner_sha256"] = planner_sha
+                recorded_planner = planner_binding.get("gen_cases_py_sha256")
+                recorded_logic_files = planner_binding.get("logic_files")
+                if (recorded_planner != planner_sha
+                        or recorded_logic_files != current_logic_files):
+                    _check(checks, "case_planner", "MISS",
+                           "gen_cases.py 或其规划依赖逻辑已变化")
+                else:
+                    _check(checks, "case_planner", "PASS", "规划逻辑摘要一致")
 
             # ⚠ 规划逻辑摘要相等**不蕴含**用例数据字节相等：`gen_cases` 一个字节没改，只要
             # numpy 换了版本，`_case_rng` 那条随机流就可能漂，于是同一 spec、同一 case_id
@@ -697,7 +746,19 @@ def evaluate(root, spec_rel, case_plan_rel, golden_path=None,
                 bindings["numpy_stream_pin"] = current_pin
 
             golden = plan.get("golden_dependency")
-            if not isinstance(golden, dict) or golden.get("status") != "loaded":
+            if stochastic_active:
+                if golden != _STOCHASTIC_GOLDEN_DEPENDENCY:
+                    _check(
+                        checks, "golden", "BLOCKED",
+                        "stochastic dry-run 的 golden_dependency 必须逐字为 "
+                        "not_applicable_stochastic 且 bytes/contract 摘要均为 null",
+                    )
+                else:
+                    _check(
+                        checks, "golden", "PASS",
+                        "stochastic capability 按 producer 契约不使用逐点 golden",
+                    )
+            elif not isinstance(golden, dict) or golden.get("status") != "loaded":
                 _check(checks, "golden", "MISS",
                        "dry-run 未成功绑定 golden.py")
             elif not golden_path:

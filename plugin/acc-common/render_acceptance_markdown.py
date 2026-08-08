@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 
+import acceptance_artifacts
 import cann_version
 # 来源对照物（`source_facts.json`）的发现规则在 `source_facts_lookup`，本文件一条都不自建。
 # ⚠ 发现规则曾是 `validate_acceptance_state._find_source_facts`，由本模块跨模块引用那个
@@ -513,6 +514,9 @@ def _performance_failure_detail(non_passing, caseset):
 def render(report_root, source_facts_path=None):
     report_root = os.path.realpath(report_root)
     acceptance = _load(report_root, "acceptance.json")
+    # renderer 可被 CLI 单独调用，不能假定文件一定来自 run_workflow。正式命名的发布门须在
+    # 读取其它诊断件之前执行：blocked/未过门候选即使目录里缺其它文件，也应明确按产物边界拒绝。
+    acceptance_artifacts.assert_formal_acceptance_allowed(acceptance)
     verdict = _load(report_root, "verdict.json")
     perf = _load(report_root, "perf_report.json")
     evidence = _load(report_root, "evidence.json")

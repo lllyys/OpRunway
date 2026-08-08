@@ -3,6 +3,21 @@
 本文件只记录**尚未完成、当前仍有价值**的工作。规则以仓根 `AGENTS.md` 为唯一真源；已完成事项、
 历史实测和迁移过程查 `dev-doc/oprunway-changes-brief.md` 与 Git 历史。
 
+## P0 · 当前最高优先级
+
+- [ ] **修复任务书要求与能力声明缺项的验收状态映射**：任务书明确要求的 dtype、shape、rank、attr
+  或接口能力若未在 `op_def`/正式能力声明中出现，应判为交付契约 `FAIL`，不能降为 `UNVALIDATED`。
+  Roll 是当前见证：任务书要求的 `int16`、`int64` 同时缺于 `op_def`、ACLNN 实现的
+  `DTYPE_SUPPORT_LIST` 和接口文档，应判“任务书要求未实现”，不是证据不足。
+  `UNVALIDATED` 只用于缺外部环境或证据、当前确实无法判断的事项。完成判据：spec/caseset/validator/
+  acceptance/report 对该分类逐字一致；补“任务书要求但 op_def 漏声明 → FAIL”“外部证据不可得 →
+  UNVALIDATED”及两者不可互换的行为与 mutation 测试，并让报告分别展示契约失败与执行失败。
+- [ ] **修复 measure-only 不生成性能失败明细**：`perf_report.json` 已在 `per_case[]` 记录
+  `blocked=true`、`npu_us=null` 与失败原因，但 `render_acceptance_markdown.py` 只读取
+  `non_passing_cases`，导致主报告显示 blocked 并引用 `性能失败明细.md`，实际文件却不存在。完成判据：
+  renderer 从确定性性能产物投影所有 blocked/exception 等未通过行；存在未通过性能 case 时必须生成明细，
+  不存在时不得留下链接或旧文件；补 measure-only 行为测试及 stale-file 清理测试。
+
 ## P2 · 当前回归阻塞
 
 - [ ] **迁移剩余 legacy receipt 测试夹具**：当前无排除全量测试共 2642 项，其中 21 failure、3 error、

@@ -120,8 +120,13 @@ _BY = "lys"
 _PREVIOUS_VERDICTS = {
     "acceptance.json":
         '{"op": "Widget", "overall": "PASS", "state": "PASSED", "exit_code": 0}',
+    "attempt_record.json":
+        '{"schema": "oprunway.workflow_attempt_record", "schema_version": 1, '
+        '"status": "not_publishable", "acceptance_verdict": null}',
     "dev_run_summary.json": '{"pipeline_result": "PASS", "is_acceptance": false}',
     "dev_precision_check.json": '{"overall": {"verdict": "pass"}}',
+    "markdown_report_error.json":
+        '{"schema": "oprunway.markdown_report_error", "acceptance_verdict": null}',
     "验收报告.md": "# Widget 算子验收报告\n\n总体结论：**PASS**\n",
     "精度失败明细.md": "（上一轮的）\n",
     "性能失败明细.md": "（上一轮的）\n",
@@ -396,6 +401,7 @@ class InvalidationPrimitiveTest(unittest.TestCase):
     def test_final_verdict_set_is_a_strict_subset_that_excludes_the_inputs(self):
         self.assertTrue(set(W._FINAL_VERDICT_FILES) < set(W._RESULT_FILES))
         self.assertIn("acceptance.json", W._FINAL_VERDICT_FILES)
+        self.assertIn("attempt_record.json", W._FINAL_VERDICT_FILES)
         self.assertTrue(set(W._REPORT_MD_FILES) <= set(W._FINAL_VERDICT_FILES))
         # 差集恰好是这条旁路的**输入**——多一件少一件都说明清单漂了。
         self.assertEqual(set(W._RESULT_FILES) - set(W._FINAL_VERDICT_FILES),

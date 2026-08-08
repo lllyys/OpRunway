@@ -9,6 +9,7 @@ import unittest
 import cann_version as CV
 import cpp_extension_adapter as A
 import cpp_extension_identity as I
+import test_current_receipt_fixtures as F
 import validate_acceptance_state as G
 
 
@@ -56,11 +57,17 @@ def source_facts_payload(provenance_kind="local_snapshot",
               "snapshot_merkle_sha256": None, "snapshot_scope": None}
         key_ref = head_sha
     return {
-        "contract_version": 1,
+        "contract_version": 2,
+        "input_association": {
+            "schema": "oprunway.caller_trusted_input", "schema_version": 1,
+            "policy": "caller_trusted_pair_v1",
+            "correspondence": "asserted_by_caller",
+        },
         "declared_source_form": form,
         "taskdoc": {"bytes_sha256": "1" * 64, "snapshot_sha256": "1" * 64,
                     "size": 12, "source_locator": "task.md"},
-        "pr": pr,
+        "pr": dict(pr, content_anchor=F.content_anchor(
+            snapshot_scope, snapshot_merkle)),
         "changed_files": ["op/x.h"],
         "key_files": [{"path": "op/x.h", "ref": key_ref,
                        "bytes_sha256": "2" * 64, "size": 9}],
@@ -91,26 +98,8 @@ def _symbol_identity(vendor_path, vendor_sha, plan):
 
 
 def _formal_pr_build_receipt(vendor_path, vendor_sha):
-    return {
-        "schema": "oprunway.vendor_build_receipt", "schema_version": 2,
-        "status": "VERIFIED", "degradations": [],
-        "source": {
-            "provenance_kind": "gitcode_pr", "declared_source_form": "git_pr",
-            "repo": "https://example.invalid/ops.git", "pr_head_sha": "a" * 40,
-        },
-        "build": {
-            "argv": ["bash", "build.sh", "--ops=x"], "cwd": "/work/ops",
-            "returncode": 0, "returncode_source": "measured",
-            "execution": {
-                "started_at": "2026-08-07T00:00:00Z",
-                "ended_at": "2026-08-07T00:00:01Z", "duration_s": 1.0,
-                "library_path": vendor_path, "library_before": None,
-                "library_after": {"mtime_ns": 1, "size": 6, "sha256": vendor_sha},
-            },
-        },
-        "artifact": {"library_path": vendor_path, "library_sha256": vendor_sha},
-        "producer": {"tool": "vendor_build_receipt.py", "logic_sha256": "f" * 64},
-    }
+    return F.vendor_build_receipt(
+        vendor_path, vendor_sha, scope="op", subtree="c" * 64)
 
 
 def _currentize_build_and_identity(root, envelope, evidence):
@@ -143,6 +132,13 @@ def _currentize_build_and_identity(root, envelope, evidence):
 class CppExtensionReceiptGateTest(unittest.TestCase):
     def _fixture(self, root):
         work = os.path.join(root, "work")
+        spec_path = os.path.join(root, "spec.json")
+        spec = {
+            "op": "X", "runner_form": "cpp_extension",
+            "dtype_required": ["float32"], "task_pr_gaps": [],
+            "runtime_requirements": {"cann": {"kind": "not_declared"}},
+        }
+        _write_json(spec_path, spec)
         artifact_rel = "cpp_extension/oprunway_test.so"
         artifact_path = os.path.join(work, artifact_rel)
         os.makedirs(os.path.dirname(artifact_path), exist_ok=True)
@@ -154,7 +150,7 @@ class CppExtensionReceiptGateTest(unittest.TestCase):
             "schema": "oprunway.cpp_extension_manifest",
             "schema_version": 1,
             "namespace": "oprunway_test",
-            "spec_sha256": "1" * 64,
+            "spec_sha256": G._canonical_sha(spec),
             # stage2_form 是 2026-08-05 新增的必填项：形态必须**可派发**，不许由 codegen 默认猜
             # 「标准 4 参」——GaussianBlur 的 extended 10 参 stage2 正是被那个默认猜法坑到的。
             "variants": [{"entrypoint": "invoke_v0", "stage2_form": "standard"}],
@@ -225,7 +221,14 @@ class CppExtensionReceiptGateTest(unittest.TestCase):
             "runtime": {
                 "torch_version": "2.x",
                 "torch_npu_version": "2.x",
-                "cann_version": "8.x",
+                "cann_version": "unknown",
+                "cann": CV.unknown_observation({
+                    "api": CV.PROBE_API,
+                    "package": CV.PROBE_PACKAGE,
+                    "returncode": 7,
+                    "returncode_source": CV.PROBE_RETURN_MEASURED,
+                    "defining_elf": None,
+                }, "fixture: runtime requirement not declared"),
                 "soc": "Ascend",
                 # driver 在任何算子调用前实际设入进程环境的自定义算子包（不再依赖谁 source 过
                 # vendor 的 set_env.bash）。门按同一条布局规则从 vendor.library_path 重算对账。
@@ -247,6 +250,11 @@ class CppExtensionReceiptGateTest(unittest.TestCase):
             "case_id": "x_000",
             "cpp_extension_receipt_sha256": G._canonical_sha(receipt),
         }]
+        _currentize_build_and_identity(root, envelope, evidence)
+        import content_address
+        _write_json(os.path.join(root, "source_facts.json"),
+                    content_address.make_artifact(
+                        "oprunway/source-facts/v1", source_facts_payload()))
         return caseset, envelope, evidence, artifact_path
 
     def test_accepts_fully_bound_receipt(self):
@@ -360,51 +368,15 @@ class BuildReceiptSourceBindingTest(unittest.TestCase):
                     whole="e" * 64, form="local_source", degradations=None):
         """把 fixture 的 build receipt 从 PR 形态改成本地快照形态，并重算受影响的摘要。"""
         vendor = envelope["cpp_extension_receipt"]["vendor"]
-        br = vendor["build_receipt"]
-        br["schema_version"] = 2          # v1 恒等于 gitcode_pr，按形态分流必须升版
-        br["source"] = {
-            "provenance_kind": "local_snapshot",
-            "declared_source_form": form,
-            "repo": "/local/ops-nn",
-            # 本地快照没有上游 commit：**显式 null**，缺席不算（缺席 = 没人说过）。
-            "pr_head_sha": None,
-            "snapshot_subtree_scope": scope,
-            "snapshot_sha256": whole,
-            "snapshot_subtree_sha256": subtree,
-        }
-        # 声明 local_source + 实得 local_snapshot = 声明即所得，**必须无降级**。
-        br["degradations"] = [] if degradations is None else degradations
         vendor_path = vendor["library_path"]
         vendor_sha = vendor["library_sha256"]
         source_root = "/local/ops-nn"
-        br["build"] = {
-            "argv": ["bash", "build.sh"],
-            "cwd": os.path.join(source_root, scope),
-            "returncode": 0, "returncode_source": "measured",
-            "execution": {
-                "started_at": "2026-08-07T00:00:00Z",
-                "ended_at": "2026-08-07T00:00:01Z", "duration_s": 1.0,
-                "library_path": vendor_path, "library_before": None,
-                "library_after": {"mtime_ns": 1, "size": 6, "sha256": vendor_sha},
-            },
-            "source_snapshot_digest": {
-                "schema": "oprunway.source_snapshot_digest", "schema_version": 1,
-                "taken_stage": "pre_build", "source_root": source_root,
-                "subtree_scope": scope, "snapshot_sha256": whole,
-                "snapshot_subtree_sha256": subtree,
-                # 与本文件 source_facts_payload.producer 逐字相同，见 N4 算法身份门。
-                "algorithm": {"tool": "fetch_source.py", "logic_sha256": "3" * 64},
-                "file_count": 2, "subtree_file_count": 1,
-                "skipped_symlink_count": 0, "subtree_skipped_symlink_count": 0,
-            },
-            "tree_state_at_emit": {
-                "snapshot_sha256": whole, "snapshot_subtree_sha256": subtree,
-                "matches_pre_build": True, "subtree_matches_pre_build": True,
-            },
-        }
-        br["artifact"] = {"library_path": vendor_path, "library_sha256": vendor_sha}
-        br["producer"] = {
-            "tool": "vendor_build_receipt.py", "logic_sha256": "f" * 64}
+        br = F.vendor_build_receipt(
+            vendor_path, vendor_sha, source_root=source_root, scope=scope,
+            whole=whole, subtree=subtree, repo="/local/ops-nn")
+        if degradations is not None:
+            br["degradations"] = degradations
+        vendor["build_receipt"] = br
         vendor["build_receipt_sha256"] = G._canonical_sha(br)
         evidence[0]["cpp_extension_receipt_sha256"] = G._canonical_sha(
             envelope["cpp_extension_receipt"])
@@ -435,21 +407,21 @@ class BuildReceiptSourceBindingTest(unittest.TestCase):
             self._write_source_facts(root)
             self.assertEqual([], self._run(root, caseset, envelope, evidence))
 
-    def test_current_v2_local_source_formal_receipt_passes_without_git_head(self):
+    def test_current_v3_content_snapshot_receipt_passes_without_git_head(self):
         """当前正式档按 source_provenance 路由：local_source 不要求、更不许捏造 git head。"""
         with tempfile.TemporaryDirectory() as root:
-            fixture = CannRuntimeRequirementGateTest()._v2_fixture(root)
+            fixture = CannRuntimeRequirementGateTest()._current_fixture(root)
             caseset, envelope, evidence = fixture
             self._relocalize(envelope, evidence)
             self._write_source_facts(root)
             self.assertEqual([], self._run(root, caseset, envelope, evidence))
 
-    def test_current_v2_local_tree_algorithm_drift_is_blocked(self):
+    def test_current_v3_local_tree_algorithm_drift_is_blocked(self):
         with tempfile.TemporaryDirectory() as root:
-            caseset, envelope, evidence = CannRuntimeRequirementGateTest()._v2_fixture(root)
+            caseset, envelope, evidence = CannRuntimeRequirementGateTest()._current_fixture(root)
             self._relocalize(envelope, evidence)
             br = envelope["cpp_extension_receipt"]["vendor"]["build_receipt"]
-            br["build"]["source_snapshot_digest"]["algorithm"]["logic_sha256"] = "4" * 64
+            br["build"]["source_snapshot_digest"]["algorithm"]["logic_sha256"] = "not-a-sha"
             vendor = envelope["cpp_extension_receipt"]["vendor"]
             vendor["build_receipt_sha256"] = G._canonical_sha(br)
             evidence[0]["cpp_extension_receipt_sha256"] = G._canonical_sha(
@@ -481,6 +453,7 @@ class BuildReceiptSourceBindingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
             self._relocalize(envelope, evidence)
+            os.unlink(os.path.join(root, "source_facts.json"))
             self.assertTrue(self._run(root, caseset, envelope, evidence),
                             "本地档拿不到 source_facts 必须 BLOCKED")
 
@@ -492,21 +465,27 @@ class BuildReceiptSourceBindingTest(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as root:
             caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
-            # 收据保持 PR 形态（fixture 默认就是），source_facts 声明 local_snapshot
+            vendor = envelope["cpp_extension_receipt"]["vendor"]
+            vendor["build_receipt"]["source"]["provenance_kind"] = "gitcode_pr"
+            vendor["build_receipt_sha256"] = G._canonical_sha(vendor["build_receipt"])
+            evidence[0]["cpp_extension_receipt_sha256"] = G._canonical_sha(
+                envelope["cpp_extension_receipt"])
             self._write_source_facts(root)
             self.assertTrue(self._run(root, caseset, envelope, evidence),
                             "来源身份被伪装必须阻断")
 
-    def test_pull_request_receipt_without_source_facts_keeps_legacy_behaviour(self):
-        """PR 通路不能被这条新校验打断——实测真机报告目录里本来就没有 source_facts.json。"""
+    def test_current_receipt_without_source_facts_is_blocked(self):
         with tempfile.TemporaryDirectory() as root:
             caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
-            self.assertEqual([], self._run(root, caseset, envelope, evidence))
+            os.unlink(os.path.join(root, "source_facts.json"))
+            errors = self._run(root, caseset, envelope, evidence)
+            self.assertTrue(any("source_facts" in item for item in errors), errors)
 
     def test_source_facts_under_work_dir_is_found(self):
         with tempfile.TemporaryDirectory() as root:
             caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
             self._relocalize(envelope, evidence)
+            os.unlink(os.path.join(root, "source_facts.json"))
             self._write_source_facts(root, sub="work")
             self.assertEqual([], self._run(root, caseset, envelope, evidence))
 
@@ -538,7 +517,7 @@ class BuildReceiptSourceBindingTest(unittest.TestCase):
                 source_facts_path=os.path.join(root, "nope", "source_facts.json"))
             self.assertTrue(errors, "显式 --source-facts 指不到文件必须阻断")
 
-    def test_pull_request_anchor_must_match_source_facts_too(self):
+    def test_content_anchor_must_match_source_facts(self):
         """⭐ 拿得到对照物时，PR 通路的锚也要核——不能只有本地通路被查。
 
         `preflight_aclnn` 那条 head 校验比的是 `pr_facts ↔ source_facts`，
@@ -547,25 +526,22 @@ class BuildReceiptSourceBindingTest(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as root:
             caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
-            self._write_source_facts(
-                root, provenance_kind="gitcode_pr", head_sha="b" * 40)
+            self._write_source_facts(root, snapshot_merkle="b" * 64)
             self.assertTrue(self._run(root, caseset, envelope, evidence),
                             "PR head 与 source_facts 不等必须阻断")
 
-    def test_pull_request_anchor_matching_source_facts_passes(self):
+    def test_transport_pr_observation_with_matching_content_anchor_passes(self):
         with tempfile.TemporaryDirectory() as root:
             caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
-            head = envelope["cpp_extension_receipt"]["vendor"]["build_receipt"][
-                "source"]["pr_head_sha"]
             self._write_source_facts(
-                root, provenance_kind="gitcode_pr", head_sha=head.lower())
+                root, provenance_kind="gitcode_pr", head_sha="9" * 40)
             self.assertEqual([], self._run(root, caseset, envelope, evidence))
 
 
 class CannRuntimeRequirementGateTest(unittest.TestCase):
     TASKDOC_SHA = "1" * 64
 
-    def _v2_fixture(self, root, raw="8.5.0", requirement=None, unknown=False):
+    def _current_fixture(self, root, raw="8.5.0", requirement=None, unknown=False):
         import content_address
 
         caseset, envelope, evidence, _ = CppExtensionReceiptGateTest()._fixture(root)
@@ -628,13 +604,13 @@ class CannRuntimeRequirementGateTest(unittest.TestCase):
     def test_equal_and_newer_runtime_satisfy_minimum(self):
         for raw in ("8.5.0", "8.5.1", "v9.0.1"):
             with self.subTest(raw=raw), tempfile.TemporaryDirectory() as root:
-                fixture = self._v2_fixture(root, raw=raw)
+                fixture = self._current_fixture(root, raw=raw)
                 self.assertEqual([], self._errors(root, *fixture))
 
     def test_current_receipt_rejects_missing_workspace_or_foreign_defining_elf(self):
         for mutation in ("missing_workspace", "foreign_elf"):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as root:
-                caseset, envelope, evidence = self._v2_fixture(root)
+                caseset, envelope, evidence = self._current_fixture(root)
                 identity = envelope["cpp_extension_receipt"]["vendor"]["symbol_identity"]
                 if mutation == "missing_workspace":
                     identity["definitions"].pop(0)
@@ -648,7 +624,7 @@ class CannRuntimeRequirementGateTest(unittest.TestCase):
 
     def test_current_receipt_rejects_unmeasured_build_before_evidence(self):
         with tempfile.TemporaryDirectory() as root:
-            caseset, envelope, evidence = self._v2_fixture(root)
+            caseset, envelope, evidence = self._current_fixture(root)
             vendor = envelope["cpp_extension_receipt"]["vendor"]
             vendor["build_receipt"]["build"].pop("returncode_source")
             vendor["build_receipt_sha256"] = G._canonical_sha(vendor["build_receipt"])
@@ -662,7 +638,7 @@ class CannRuntimeRequirementGateTest(unittest.TestCase):
                 ("8.4.9", False), ("8.5.0-RC1", False),
                 ("CANN-8.5.0 junk", False), ("8.5.0", True)):
             with self.subTest(raw=raw, unknown=unknown), tempfile.TemporaryDirectory() as root:
-                fixture = self._v2_fixture(root, raw=raw, unknown=unknown)
+                fixture = self._current_fixture(root, raw=raw, unknown=unknown)
                 errors = self._errors(root, *fixture)
                 self.assertTrue(any("最低版本门未满足" in item for item in errors), errors)
 
@@ -673,13 +649,13 @@ class CannRuntimeRequirementGateTest(unittest.TestCase):
             "taskdoc_snapshot_sha256": "f" * 64,
         }
         with tempfile.TemporaryDirectory() as root:
-            fixture = self._v2_fixture(root, requirement=requirement)
+            fixture = self._current_fixture(root, requirement=requirement)
             errors = self._errors(root, *fixture)
             self.assertTrue(any("taskdoc_snapshot_sha256" in item for item in errors), errors)
 
     def test_not_declared_explicitly_allows_unknown_without_claiming_pass(self):
         with tempfile.TemporaryDirectory() as root:
-            fixture = self._v2_fixture(
+            fixture = self._current_fixture(
                 root, unknown=True, requirement={"kind": "not_declared"})
             self.assertEqual([], self._errors(root, *fixture))
 

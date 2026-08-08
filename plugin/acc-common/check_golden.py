@@ -49,6 +49,7 @@ import repo_adapter
 # `precision_policy.derive_golden_tier = lambda *a: (1, False, None)` 把自己判成绿的。
 # 先固化引用就挡住了这一类「被检查者改写检查器」的改绑（挡不住 `os._exit`，见 docstring 边界②）。
 _V = precision_policy.validate_golden_contract
+_S = precision_policy.validate_golden_fn_contract
 _A = precision_policy.verify_authorization
 _D = precision_policy.derive_golden_tier
 
@@ -215,6 +216,19 @@ def check(op, do_load=False, spec_path=None):
         return out
     except Exception as ex:                      # noqa: BLE001
         out["error"] = f"[词表] 校验异常 {type(ex).__name__}: {ex}"
+        return out
+
+    # 调用 ABI 属同一份 GOLDEN_CONTRACT，但签名核验与来源词表分层报错：声明正确、
+    # 函数少了 keyword-only context 时应直接指出 ABI，不伪装成来源/授权问题。
+    try:
+        _S(mod.golden_fn, contract, where=f"{path}.golden_fn")
+    except ValueError as ex:
+        out["contract_ok"] = False
+        out["error"] = f"[调用ABI] 不合规: {ex}"
+        return out
+    except Exception as ex:                      # noqa: BLE001
+        out["contract_ok"] = False
+        out["error"] = f"[调用ABI] 校验异常 {type(ex).__name__}: {ex}"
         return out
 
     # ── 第二层：授权真伪（读快照逐字核，独立于判档）──────────────────────────

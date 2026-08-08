@@ -26,6 +26,7 @@ import _spec_fixture as SF     # 样例 spec 已无 case_target（2026-08-06 删
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SIGN_SPEC = os.path.join(_HERE, "..", "samples", "specs", "sign.spec.json")
 _REAL_SHELL = R._shell   # 原始 _shell（任何 patch 之前捕获）：fake_shell 让"部署步"委托真跑本机 bash
+_TRANSPORT_SIGN_GOLDEN = "def golden_fn(inputs, attrs):\n    return np.sign(inputs[0])\n"
 
 # 一份"齐全"的 remote env（各用例按需删字段来触发缺失报错）
 _FULL_REMOTE = {
@@ -220,13 +221,16 @@ def _mk_local_sandbox():
     for p in sp["params"]:
         p["dtype"] = ["float32"]
     # 沙盒 ops_root（home/.oprunway/ops/Sign）放 golden.py（gen_cases 加载，ADR 0011）+ user runner（find_runner 命中）
-    opdir = os.path.join(d["home"], ".oprunway", "ops", "Sign")
+    ops_root = os.path.join(d["home"], ".oprunway", "ops")
+    opdir = os.path.join(ops_root, "Sign")
     os.makedirs(opdir)
-    _gf.place_golden(os.path.join(d["home"], ".oprunway", "ops"), "Sign")
+    # 本组只测 transport；用显式 NumPy test golden，避免把测试结论绑到 torch 是否安装。
+    _gf.place_golden(ops_root, "Sign", body=_TRANSPORT_SIGN_GOLDEN)
     with open(os.path.join(opdir, "oprunway_sign_runner.cpp"), "w", encoding="utf-8") as f:
         f.write("// stub runner\n")
     scratch = os.path.join(base, "scratch")
-    with mock.patch.dict(os.environ, {"OPRUNWAY_WORK_DIR": d["home"]}):   # gen_cases 用沙盒 ops_root 加载 golden
+    with mock.patch.dict(os.environ, {"OPRUNWAY_WORK_DIR": d["home"],
+                                      "OPRUNWAY_OPS_DIR": ops_root}):   # gen_cases 用沙盒 ops_root 加载 golden
         cs = GC.gen_cases(sp, scratch)
     # §1 后 cases[0] 是空 Tensor na 用例（§1.4 特殊场景排在前、无 metrics）——挑**常规网格**非 na 小 case，
     # 保证有真精度 metrics（transport roundtrip 要证 bad_count=0）。
@@ -236,11 +240,11 @@ def _mk_local_sandbox():
     shutil.copytree(os.path.join(scratch, cid), os.path.join(d["work"], cid))
     caseset = {"op": cs["op"], "attr_order": cs.get("attr_order", []), "cases": [c]}
     d["base"], d["caseset"], d["cid"] = base, caseset, cid
-    # OPRUNWAY_WORK_DIR=home → find_runner 的 ops_root 落 home/.oprunway/ops（不在插件树内）
+    # 显式 OPRUNWAY_OPS_DIR → golden/runner 都锁到本沙盒；不能让目标 runtime 预置值抢走优先级。
     d["env"] = {"OPRUNWAY_TARGET": "local", "OPRUNWAY_REMOTE_DIR": d["rroot"],
                 "OPRUNWAY_OPS_REPO": d["ops"], "OPRUNWAY_OPP": d["opp"],
                 "OPRUNWAY_OP_SRC": "experimental/math/is_close",   # provenance：被测 op 源子路径（必填）
-                "OPRUNWAY_WORK_DIR": d["home"]}
+                "OPRUNWAY_WORK_DIR": d["home"], "OPRUNWAY_OPS_DIR": ops_root}
     return d
 
 
@@ -428,7 +432,7 @@ def _fake_orch(work_dir, rroot, cids):
 
 
 class _NeSandboxBase(unittest.TestCase):
-    """local 沙盒基类（自身无用例）：五个互不相交的目录 + 一份 stub runner + local env。"""
+    """local 沙盒基类（自身无用例）：五个互不相交的目录 + 显式 ops root 内的一份 stub runner。"""
 
     OP = "Foo"
 
@@ -437,7 +441,8 @@ class _NeSandboxBase(unittest.TestCase):
         self.d = {k: os.path.join(self.base, k) for k in ("work", "rroot", "ops", "opp", "home")}
         for p in self.d.values():
             os.makedirs(p)
-        opdir = os.path.join(self.d["home"], ".oprunway", "ops", self.OP)
+        ops_root = os.path.join(self.d["home"], ".oprunway", "ops")
+        opdir = os.path.join(ops_root, self.OP)
         os.makedirs(opdir)
         with open(os.path.join(opdir, f"oprunway_{self.OP.lower()}_runner.cpp"), "w",
                   encoding="utf-8") as f:
@@ -445,7 +450,7 @@ class _NeSandboxBase(unittest.TestCase):
         self.env = {"OPRUNWAY_TARGET": "local", "OPRUNWAY_REMOTE_DIR": self.d["rroot"],
                     "OPRUNWAY_OPS_REPO": self.d["ops"], "OPRUNWAY_OPP": self.d["opp"],
                     "OPRUNWAY_OP_SRC": "experimental/math/foo",
-                    "OPRUNWAY_WORK_DIR": self.d["home"]}
+                    "OPRUNWAY_WORK_DIR": self.d["home"], "OPRUNWAY_OPS_DIR": ops_root}
 
     def tearDown(self):
         shutil.rmtree(self.base, ignore_errors=True)

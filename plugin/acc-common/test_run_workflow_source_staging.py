@@ -268,11 +268,14 @@ class AcceptanceRunTest(unittest.TestCase):
                             "risk": [], "uncertain": []}}
 
     @contextlib.contextmanager
-    def _stubbed(self, calls):
+    def _stubbed(self, calls, gate_errors=None):
         """把真机侧全部换成夹具，并记录每一级门收到的 `source_facts_path`。"""
+        gate_errors = gate_errors or {}
+
         def _gate(name):
             def _fn(d, errs, source_facts_path=None):
                 calls.append((name, d, source_facts_path))
+                errs.extend(gate_errors.get(name, ()))
             return _fn
         with mock.patch.object(
                     W.gen_cases, "gen_cases",
@@ -297,11 +300,11 @@ class AcceptanceRunTest(unittest.TestCase):
                                 clear=False):
             yield
 
-    def _run(self, root, *, source_facts, out_dir=None, calls=None):
+    def _run(self, root, *, source_facts, out_dir=None, calls=None, gate_errors=None):
         out_dir = out_dir or os.path.join(root, "reports", "widget")
         calls = calls if calls is not None else []
         spec_path = _confirm_spec(_write_spec(root), out_dir)
-        with self._stubbed(calls):
+        with self._stubbed(calls, gate_errors=gate_errors):
             result = W.run(spec_path, mode="cpp_extension",
                            out_dir=out_dir, source_facts=source_facts)
         return out_dir, result, calls
@@ -321,7 +324,53 @@ class AcceptanceRunTest(unittest.TestCase):
                 self.assertEqual(path, staged, f"{name} 未拿到 staging 出来的对照物")
                 self.assertEqual(gate_dir, out_dir)
             self.assertEqual(result["overall"], "FAIL(精度)")
+            self.assertEqual(result["summary_file"], "acceptance.json")
             self.assertTrue(os.path.isfile(os.path.join(out_dir, "acceptance.json")))
+            self.assertFalse(os.path.exists(os.path.join(out_dir, "attempt_record.json")))
+
+    def test_failed_deterministic_gate_writes_attempt_record_not_formal_acceptance(self):
+        """证据完整性门没过时只有诊断 attempt；raw 精度/性能产物不冒充最终验收包。"""
+        with tempfile.TemporaryDirectory() as root, _env(root):
+            facts = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
+            out_dir, result, _ = self._run(
+                root, source_facts=facts,
+                gate_errors={"task2": ["夹具：Task2 evidence 不完整"]})
+
+            self.assertEqual(result["overall"], "BLOCKED(验收门未过)")
+            self.assertEqual(result["summary_file"], "attempt_record.json")
+            self.assertFalse(os.path.exists(os.path.join(out_dir, "acceptance.json")))
+            for name in W._REPORT_MD_FILES:
+                self.assertFalse(os.path.exists(os.path.join(out_dir, name)), name)
+            self.assertTrue(os.path.isfile(os.path.join(out_dir, "verdict.json")))
+            self.assertTrue(os.path.isfile(os.path.join(out_dir, "perf_report.json")))
+
+            with open(os.path.join(out_dir, "attempt_record.json"), encoding="utf-8") as fh:
+                attempt = json.load(fh)
+            self.assertEqual(attempt["schema"], "oprunway.workflow_attempt_record")
+            self.assertEqual(attempt["schema_version"], 1)
+            self.assertEqual(attempt["status"], "not_publishable")
+            self.assertIsNone(attempt["acceptance_verdict"])
+            self.assertEqual(attempt["pipeline_result"], "BLOCKED(验收门未过)")
+            self.assertTrue(attempt["pipeline_state"].startswith("BLOCKED"))
+            self.assertIs(attempt["gate"]["passed"], False)
+            self.assertEqual(
+                attempt["gate"]["errors"]["task2"],
+                ["夹具：Task2 evidence 不完整"])
+
+    def test_gate_passed_but_blocked_state_is_still_attempt_only(self):
+        """完整性门通过不等于 blocked 业务状态已完成；正式命名仍须等 canonical 终态。"""
+        with tempfile.TemporaryDirectory() as root, _env(root):
+            facts = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
+            with mock.patch.object(W, "_runner_source_allowed", return_value=False):
+                out_dir, result, _ = self._run(root, source_facts=facts)
+
+            self.assertTrue(result["gate"]["passed"])
+            self.assertTrue(result["state"].startswith("BLOCKED"))
+            self.assertEqual(result["summary_file"], "attempt_record.json")
+            self.assertTrue(os.path.isfile(os.path.join(out_dir, "attempt_record.json")))
+            self.assertFalse(os.path.exists(os.path.join(out_dir, "acceptance.json")))
+            for name in W._REPORT_MD_FILES:
+                self.assertFalse(os.path.exists(os.path.join(out_dir, name)), name)
 
     def test_run_stages_all_three_inputs(self):
         with tempfile.TemporaryDirectory() as root, _env(root) as ops:
@@ -431,10 +480,15 @@ class StaleResultInvalidationTest(unittest.TestCase):
     _PREVIOUS_RESULTS = {
         "acceptance.json":
             '{"op": "Widget", "overall": "PASS", "state": "PASSED", "exit_code": 0}',
+        "attempt_record.json":
+            '{"schema": "oprunway.workflow_attempt_record", "schema_version": 1, '
+            '"status": "not_publishable", "acceptance_verdict": null}',
         "verdict.json": '{"overall": {"verdict": "pass", "counts": {"total": 8, "fail": 0}}}',
         "perf_report.json": '{"summary": {"status": "ok", "perf_cases": 8, "\\u8fbe\\u6807": 8}}',
         "dev_run_summary.json": '{"pipeline_result": "PASS", "is_acceptance": false}',
         "dev_precision_check.json": '{"overall": {"verdict": "pass"}}',
+        "markdown_report_error.json":
+            '{"schema": "oprunway.markdown_report_error", "acceptance_verdict": null}',
         "验收报告.md": "# Widget 算子验收报告\n\n总体结论：**PASS**\n",
         "精度失败明细.md": "（上一轮的）\n",
         "性能失败明细.md": "（上一轮的）\n",
@@ -783,7 +837,12 @@ def _cp_f_directive(out_dir):
             for name in R.BASE_ARTIFACTS
         },
         "source_identity": {
-            "repo": "o/r", "pr_head_sha": "d" * 40,
+            "content_anchor": {
+                "schema": "oprunway.source_content_anchor",
+                "schema_version": 1,
+                "algorithm": "git_blob_manifest_sha256_v1",
+                "scope": "op", "sha256": "c" * 64, "file_count": 1,
+            },
             "build_receipt_sha256": "b" * 64, "runner_form": "cpp_extension",
         },
         "human_instruction": "复测失败 case",

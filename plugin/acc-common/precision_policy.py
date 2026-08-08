@@ -91,6 +91,7 @@ error_rate 是**第 2 位**、逐 dtype 变；第 3 位 legacy=0.1 代码不读�
 # 顶层只允许 **stdlib**——本模块的不变量是「`import precision_policy` 不拉 numpy」
 # （validator 靠它保持 stdlib-only）。numpy 仍在 compute_metrics 等函数体内惰性 import，勿上提。
 import hashlib
+import inspect
 import math
 import os
 import re
@@ -188,6 +189,12 @@ SUPPORTED_COMPUTE_DTYPES = frozenset({
     "int8", "int16", "int32", "int64", "uint8", "uint32", "bool",
     "complex64",
 })
+
+# generated golden 的逐输入逻辑 dtype 受控词表。生成层、case context 与下游 receipt
+# 复核都必须读这一处；``float`` 是 precision compute 的历史别名，不是 caseset 的
+# canonical dtype，BF16 则能生成但以 NumPy float32 作载体，故在这里显式换入。
+GOLDEN_LOGICAL_INPUT_DTYPES = frozenset(
+    (SUPPORTED_COMPUTE_DTYPES - {"float"}) | {"bfloat16"})
 
 # ---- 复数 dtype 受控集 ----
 # ⚠ 「在 `SUPPORTED_COMPUTE_DTYPES` 里」≠「每个 policy.kind 都能判它」：复数只有
@@ -1020,6 +1027,164 @@ GOLDEN_BLOCKED_REASON = ("method_unavailable", "unverifiable_authorization", "ne
 TASKDOC_SNAPSHOT_NAME = "task_doc.snapshot.md"
 _CITE_RE = re.compile(r"^" + re.escape(TASKDOC_SNAPSHOT_NAME) + r":(\d+)(?:-(\d+))?$")
 
+# generated golden 的**调用 ABI 唯一声明面**。它刻意住在既有 `GOLDEN_CONTRACT`
+# 里面，而不是另导出一份 `GOLDEN_ABI_VERSION` module 常量：完整 contract 已被
+# dry-run / preparation receipt 内容寻址；再开平行声明只会多一处两边漂移的机会。
+GOLDEN_INVOCATION_SCHEMA = "oprunway.golden_invocation"
+GOLDEN_INVOCATION_SCHEMA_VERSION = 1
+GOLDEN_INVOCATION_MODE_KEYWORD_CONTEXT = "keyword_case_context_v1"
+GOLDEN_INVOCATION_MODES = (GOLDEN_INVOCATION_MODE_KEYWORD_CONTEXT,)
+
+# 传给 golden 的 payload 只描述**逐输入逻辑身份**，不带 op/case/value/storage/output/attrs。
+# 这是一个窄 ABI，不是让 golden 读取任意 planner 内部状态的逃生口。
+GOLDEN_CASE_CONTEXT_SCHEMA = "oprunway.golden_case_context"
+GOLDEN_CASE_CONTEXT_SCHEMA_VERSION = 1
+GOLDEN_INVOCATION_RECEIPT_SCHEMA = "oprunway.golden_invocation_receipt"
+GOLDEN_INVOCATION_RECEIPT_SCHEMA_VERSION = 1
+GOLDEN_INVOCATION_CONTRACT_DOMAIN = "oprunway/golden-invocation-contract/v1"
+GOLDEN_CASE_CONTEXT_DOMAIN = "oprunway/golden-case-context/v1"
+GOLDEN_CASE_CONTEXTS_DOMAIN = "oprunway/golden-case-contexts/v1"
+GOLDEN_INVOCATION_RECEIPT_DOMAIN = "oprunway/golden-invocation-receipt/v1"
+
+
+def golden_invocation_contract(g, where="golden.py 的 GOLDEN_CONTRACT"):
+    """返回规范化的可选 generated-golden 调用声明；新 marker 一旦出现即严格校验。
+
+    键缺席才是 legacy 两参 ABI。显式 ``null``、缺键、多键、错 schema/version/mode
+    都不能回落 legacy——否则一份写坏的新声明会被当作旧 golden 静默执行。
+    """
+    if not isinstance(g, dict):
+        raise ValueError(f"{where} 须为对象，得 {type(g).__name__}")
+    if "invocation" not in g:
+        return None
+    invocation = g["invocation"]
+    if not isinstance(invocation, dict):
+        raise ValueError(
+            f"{where}.invocation 须为对象，得 {type(invocation).__name__}——"
+            "显式新 marker 不得回落 legacy")
+    wanted = {"schema", "schema_version", "mode"}
+    got = set(invocation)
+    if got != wanted:
+        raise ValueError(
+            f"{where}.invocation 键集合漂移：缺 {sorted(wanted - got, key=repr)}，"
+            f"多 {sorted(got - wanted, key=repr)}")
+    if invocation["schema"] != GOLDEN_INVOCATION_SCHEMA:
+        raise ValueError(
+            f"{where}.invocation.schema={invocation['schema']!r}，"
+            f"须为 {GOLDEN_INVOCATION_SCHEMA!r}")
+    version = invocation["schema_version"]
+    if isinstance(version, bool) or version != GOLDEN_INVOCATION_SCHEMA_VERSION:
+        raise ValueError(
+            f"{where}.invocation.schema_version={version!r}，"
+            f"须为整数 {GOLDEN_INVOCATION_SCHEMA_VERSION}")
+    mode = invocation["mode"]
+    if mode not in GOLDEN_INVOCATION_MODES:
+        raise ValueError(
+            f"{where}.invocation.mode={mode!r} 不在受控词表 "
+            f"{GOLDEN_INVOCATION_MODES}")
+    return {key: invocation[key] for key in ("schema", "schema_version", "mode")}
+
+
+def validate_golden_fn_contract(fn, contract, where="golden.py 的 golden_fn"):
+    """校调用声明与函数签名一致；legacy 缺声明时保持原来的两参调用行为。
+
+    新 ABI 只接受精确的 ``golden_fn(inputs, attrs, *, case_context)``。拒绝位置
+    第三参、``*args``/``**kwargs`` 与额外缺省参数：宽签名会吞掉拼写错误，让“声明的
+    context”与“函数真正消费的 context”无法证明是同一件事。
+    """
+    invocation = golden_invocation_contract(
+        contract, where=where.rsplit(".", 1)[0] + ".GOLDEN_CONTRACT")
+    if invocation is None:
+        return True
+    if not callable(fn):
+        raise ValueError(f"{where} 不可调用")
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError) as ex:
+        raise ValueError(
+            f"{where} 声明了 {invocation['mode']!r}，但函数签名不可检查：{ex}") from ex
+    params = list(signature.parameters.values())
+    if len(params) != 3:
+        raise ValueError(
+            f"{where} 声明了 {invocation['mode']!r}，签名必须恰为 "
+            "(inputs, attrs, *, case_context)，"
+            f"实际 {signature}")
+    first, second, context = params
+    if (first.name != "inputs"
+            or first.kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD
+            or first.default is not inspect.Parameter.empty
+            or second.name != "attrs"
+            or second.kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD
+            or second.default is not inspect.Parameter.empty
+            or context.name != "case_context"
+            or context.kind is not inspect.Parameter.KEYWORD_ONLY
+            or context.default is not inspect.Parameter.empty):
+        raise ValueError(
+            f"{where} 声明了 {invocation['mode']!r}，签名必须恰为 "
+            "(inputs, attrs, *, case_context)，"
+            f"实际 {signature}")
+    return True
+
+
+def validate_golden_case_context(value, expected_inputs=None,
+                                 where="golden case_context"):
+    """严格校受控 context，并可与 caseset/spec 的逐输入 name/dtype 交叉对账。"""
+    if not isinstance(value, dict):
+        raise ValueError(f"{where} 须为对象，得 {type(value).__name__}")
+    wanted = {"schema", "schema_version", "inputs"}
+    got = set(value)
+    if got != wanted:
+        raise ValueError(
+            f"{where} 键集合漂移：缺 {sorted(wanted - got, key=repr)}，"
+            f"多 {sorted(got - wanted, key=repr)}")
+    if value["schema"] != GOLDEN_CASE_CONTEXT_SCHEMA:
+        raise ValueError(
+            f"{where}.schema={value['schema']!r}，须为 {GOLDEN_CASE_CONTEXT_SCHEMA!r}")
+    version = value["schema_version"]
+    if isinstance(version, bool) or version != GOLDEN_CASE_CONTEXT_SCHEMA_VERSION:
+        raise ValueError(
+            f"{where}.schema_version={version!r}，"
+            f"须为整数 {GOLDEN_CASE_CONTEXT_SCHEMA_VERSION}")
+    inputs = value["inputs"]
+    if not isinstance(inputs, list) or not inputs:
+        raise ValueError(f"{where}.inputs 须为非空列表")
+    normalized = []
+    for index, item in enumerate(inputs):
+        if not isinstance(item, dict) or set(item) != {
+                "index", "name", "logical_dtype"}:
+            raise ValueError(
+                f"{where}.inputs[{index}] 须只含 index/name/logical_dtype")
+        if isinstance(item["index"], bool) or item["index"] != index:
+            raise ValueError(
+                f"{where}.inputs[{index}].index={item['index']!r}，须逐项等于 {index}")
+        if not isinstance(item["name"], str) or not item["name"]:
+            raise ValueError(f"{where}.inputs[{index}].name 须为非空字符串")
+        if not isinstance(item["logical_dtype"], str) or not item["logical_dtype"]:
+            raise ValueError(
+                f"{where}.inputs[{index}].logical_dtype 须为非空受控 dtype 名")
+        if item["logical_dtype"] not in GOLDEN_LOGICAL_INPUT_DTYPES:
+            raise ValueError(
+                f"{where}.inputs[{index}].logical_dtype={item['logical_dtype']!r} "
+                f"不在受控词表 {sorted(GOLDEN_LOGICAL_INPUT_DTYPES)}")
+        normalized.append({key: item[key] for key in (
+            "index", "name", "logical_dtype")})
+    if expected_inputs is not None:
+        if not isinstance(expected_inputs, list) or not expected_inputs:
+            raise ValueError(f"{where} 的权威 expected_inputs 须为非空列表")
+        if any(not isinstance(item, dict) for item in expected_inputs):
+            raise ValueError(f"{where} 的权威 expected_inputs 每项须为 object")
+        expected = [
+            {"index": index, "name": item.get("name"),
+             "logical_dtype": item.get("dtype")}
+            for index, item in enumerate(expected_inputs)
+        ]
+        if normalized != expected:
+            raise ValueError(
+                f"{where}.inputs 与权威逐输入 logical dtype/身份不一致："
+                f"声明 {normalized!r}，期望 {expected!r}")
+    return {"schema": value["schema"], "schema_version": version,
+            "inputs": normalized}
+
 
 def validate_golden_contract(g, where="golden.py 的 GOLDEN_CONTRACT"):
     """校 golden 契约块的**受控词表**，不合规 → ValueError（批 2）。
@@ -1061,6 +1226,8 @@ def validate_golden_contract(g, where="golden.py 的 GOLDEN_CONTRACT"):
                 f"{where} 声称有任务书授权，但缺 taskdoc_snapshot.sha256——"
                 f"须先把任务书全文快照入库（`fetch_source.py --snapshot-into <ops_root>/<op>/`）"
                 f"再把它打印的 sha256 填进来（R12 / 批 3）。")
+    # 可选调用 ABI 与来源/授权共享同一份 GOLDEN_CONTRACT 内容锚；键缺席才走 legacy。
+    golden_invocation_contract(g, where=where)
     return True
 
 

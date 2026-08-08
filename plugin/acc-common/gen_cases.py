@@ -259,6 +259,9 @@ _NATIVE = {"float64": np.float64, "float32": np.float32, "float16": np.float16,
            "int64": np.int64, "int32": np.int32, "int16": np.int16,
            "int8": np.int8, "uint8": np.uint8, "uint32": np.uint32,
            "bool": np.bool_, "complex64": np.complex64}
+if set(_NATIVE) | {_BF16} != set(precision_policy.GOLDEN_LOGICAL_INPUT_DTYPES):
+    raise RuntimeError(
+        "gen_cases dtype 实现表与 precision_policy.GOLDEN_LOGICAL_INPUT_DTYPES 漂移")
 # Sign/Neg：输出在 bf16 网格上**精确可表示**（sign∈{-1,0,1}、neg 精确取负）→ bf16/fp16 走 exact_equal。
 # genuinely-lossy 数值算子（bf16 阈值须来自 policy/ascendoptest）本轮无、留 gap。
 # bf16 数值输出**逐位可达**的算子（纯搬运/纯符号类：输出恒等于某个输入元素、不做算术）。
@@ -599,7 +602,7 @@ def _classify_perf_cases(spec, cases):
             }}
 
 
-def _assert_equal_nan_effective(golden_fn, inputs, attrs, cid):
+def _assert_equal_nan_effective(golden_impl, inputs, attrs, cid, case_context=None):
     """finding #10：nanpair 用例断言 equal_nan **真起作用**——输入含 aligned-NaN 且翻转 equal_nan 后 golden 有别。
 
     否则该 attr 对 golden 毫无影响（算子彻底忽略 equal_nan 也逐位对上 golden）→ 假覆盖，fail-fast。
@@ -608,8 +611,12 @@ def _assert_equal_nan_effective(golden_fn, inputs, attrs, cid):
     aligned_nan = bool((np.isnan(a) & np.isnan(b)).any())
     if not aligned_nan:
         raise ValueError(f"{cid}: nanpair 用例输入无 aligned-NaN（equal_nan 无从生效 → 假覆盖，fail-fast）")
-    g_true = golden_fn(inputs, {**attrs, "equal_nan": True})
-    g_false = golden_fn(inputs, {**attrs, "equal_nan": False})
+    g_true = _invoke_golden(
+        golden_impl, inputs, {**attrs, "equal_nan": True}, case_context,
+        where=f"{cid}: equal_nan=true")
+    g_false = _invoke_golden(
+        golden_impl, inputs, {**attrs, "equal_nan": False}, case_context,
+        where=f"{cid}: equal_nan=false")
     if np.array_equal(g_true, g_false):
         raise ValueError(f"{cid}: equal_nan 翻转后 golden 不变（该 attr 对 golden 无影响 → 假覆盖，fail-fast）")
 
@@ -640,7 +647,9 @@ def load_golden(op):
 
     **本加载路径不含内置 golden 值、绝不回退内置/样例**（ADR 0011 决策 1/2）：缺 golden.py → **fail-closed** 报错。
     （⚠ 仅指 elementwise 通路；catlass 通路与 `_BF16_EXACT_OPS` 仍是引擎里的算子知识。）
-    golden.py 须导出 `golden_fn(inputs, attrs) -> ndarray` + `GOLDEN_SOURCE`（首 token = oracle_source 六枚举之一：
+    golden.py 须导出 legacy `golden_fn(inputs, attrs) -> ndarray`，或在 `GOLDEN_CONTRACT.invocation`
+    显式声明受控 ABI 后导出 `golden_fn(inputs, attrs, *, case_context) -> ndarray`；另须导出
+    `GOLDEN_SOURCE`（首 token = oracle_source 六枚举之一：
     cpu_ref/catlass_existing_ref/task_spec_expected/torch_ref/analytical_ref/external_ref——**支撑多仓多算子的各类来源**；
     elementwise 内置样例可用 backend 简写 torch/numpy）+ `GOLDEN_PROVENANCE`（来源出处）；缺任一 → fail-closed。
     **可选**导出 `out_shape(in_shapes, attrs) -> tuple[int,...]`（C1，见模块 docstring）：
@@ -712,7 +721,130 @@ def load_golden(op):
     contract = getattr(mod, "GOLDEN_CONTRACT", None)
     if contract is not None:
         precision_policy.validate_golden_contract(contract, f"{gpath} 的 GOLDEN_CONTRACT")
+        precision_policy.validate_golden_fn_contract(
+            mod.golden_fn, contract, f"{gpath}.golden_fn")
     return Golden(mod.golden_fn, mod.GOLDEN_SOURCE, mod.GOLDEN_PROVENANCE, out_shape_fn, contract)
+
+
+def _golden_case_context(in_params, input_dtns, where="golden case_context"):
+    """从已经字段化的 spec/profile 事实造最窄的 golden context。
+
+    不读取 NumPy carrier dtype——BF16 与 FP32 恰好共用 ``np.float32`` 载体；用载体反推
+    会重开本次要堵的洞。逻辑 dtype 只从 planner 已解析的逐输入声明进入。
+    """
+    if not isinstance(in_params, list) or not in_params:
+        raise ValueError(f"{where}: in_params 须为非空列表")
+    if not isinstance(input_dtns, list) or len(input_dtns) != len(in_params):
+        raise ValueError(
+            f"{where}: logical input dtype 数量 {len(input_dtns) if isinstance(input_dtns, list) else '非法'} "
+            f"≠ spec input 数量 {len(in_params)}")
+    items = []
+    for index, (param, dtype_name) in enumerate(zip(in_params, input_dtns)):
+        name = param.get("name") if isinstance(param, dict) else None
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"{where}: in_params[{index}].name 须为非空字符串")
+        if dtype_name not in precision_policy.GOLDEN_LOGICAL_INPUT_DTYPES:
+            raise ValueError(
+                f"{where}: input#{index} logical dtype={dtype_name!r} 不在生成层受控词表 "
+                f"{sorted(precision_policy.GOLDEN_LOGICAL_INPUT_DTYPES)}")
+        items.append({"index": index, "name": name, "logical_dtype": dtype_name})
+    context = {
+        "schema": precision_policy.GOLDEN_CASE_CONTEXT_SCHEMA,
+        "schema_version": precision_policy.GOLDEN_CASE_CONTEXT_SCHEMA_VERSION,
+        "inputs": items,
+    }
+    return precision_policy.validate_golden_case_context(context, where=where)
+
+
+def _case_context_input_dtypes(entry, in_params, inputs, dtn, cid):
+    """从同一份 case 计划取逐输入 logical dtype；multi-input 逐参，其余同质。"""
+    if len(inputs) != len(in_params):
+        raise ValueError(
+            f"{cid}: golden context 输入数量 {len(inputs)} ≠ spec in 参数 {len(in_params)}")
+    profile = entry.get("input_profile")
+    if profile is None:
+        return [dtn] * len(in_params)
+    tensor_contracts = _profile_tensor_inputs(profile)
+    if len(tensor_contracts) != len(in_params):
+        raise ValueError(
+            f"{cid}: multi_input tensor 参数数 {len(tensor_contracts)} ≠ spec in 参数 {len(in_params)}")
+    for index, (contract, param) in enumerate(zip(tensor_contracts, in_params)):
+        if contract.get("name") != param.get("name"):
+            raise ValueError(
+                f"{cid}: multi_input.inputs[{index}].name={contract.get('name')!r} "
+                f"≠ spec in 参数 {param.get('name')!r}")
+    return [item.get("dtype") for item in tensor_contracts]
+
+
+def _invoke_golden(golden_impl, inputs, attrs, case_context=None, where="golden_fn"):
+    """generated golden 的唯一调用口；legacy 原样两参，新 ABI 只走受控 keyword。"""
+    if not isinstance(golden_impl, Golden):
+        raise ValueError(f"{where}: golden_impl 须为 load_golden 返回的 Golden")
+    invocation = (
+        precision_policy.golden_invocation_contract(
+            golden_impl.contract, where=f"{where}.GOLDEN_CONTRACT")
+        if golden_impl.contract is not None else None)
+    if invocation is None:
+        return golden_impl.fn(inputs, attrs)
+    if case_context is None:
+        raise ValueError(
+            f"{where}: 声明了 {invocation['mode']!r}，但本 case 缺 case_context")
+    normalized = precision_policy.validate_golden_case_context(
+        case_context, where=f"{where}.case_context")
+    # golden.py 与 runner 同信任级，但不能让它就地改写随后要落 receipt 的原对象；每次调用给独立副本。
+    call_context = json.loads(
+        content_address.canonical_json_bytes(normalized).decode("utf-8"))
+    return golden_impl.fn(inputs, attrs, case_context=call_context)
+
+
+def _attach_golden_case_context(case, case_context):
+    """新 ABI 才随 case 落 context；legacy 不增键，保持 caseset 字节。"""
+    if case_context is not None:
+        case["golden_case_context"] = json.loads(
+            content_address.canonical_json_bytes(case_context).decode("utf-8"))
+    return case
+
+
+def _build_golden_invocation_receipt(contract, cases):
+    """把调用声明与实际逐 case context 变成 caseset 内的内容寻址收据。"""
+    invocation = (
+        precision_policy.golden_invocation_contract(
+            contract, where="GOLDEN_CONTRACT")
+        if contract is not None else None)
+    if invocation is None:
+        if any("golden_case_context" in case for case in cases):
+            raise ValueError("legacy golden caseset 不得凭空带 golden_case_context")
+        return None
+    records, seen = [], set()
+    for index, case in enumerate(cases):
+        if not isinstance(case, dict):
+            raise ValueError(f"cases[{index}] 须为 object")
+        cid = case.get("id")
+        if not isinstance(cid, str) or not cid or cid in seen:
+            raise ValueError(f"golden invocation receipt 的 case id 缺失或重复: {cid!r}")
+        seen.add(cid)
+        context = precision_policy.validate_golden_case_context(
+            case.get("golden_case_context"),
+            expected_inputs=case.get("inputs"),
+            where=f"{cid}.golden_case_context")
+        records.append({
+            "case_id": cid,
+            "sha256": content_address.content_digest(
+                precision_policy.GOLDEN_CASE_CONTEXT_DOMAIN, context),
+        })
+    return {
+        "schema": precision_policy.GOLDEN_INVOCATION_RECEIPT_SCHEMA,
+        "schema_version": precision_policy.GOLDEN_INVOCATION_RECEIPT_SCHEMA_VERSION,
+        "invocation": invocation,
+        "invocation_sha256": content_address.content_digest(
+            precision_policy.GOLDEN_INVOCATION_CONTRACT_DOMAIN, invocation),
+        "case_context_schema": precision_policy.GOLDEN_CASE_CONTEXT_SCHEMA,
+        "case_context_schema_version": precision_policy.GOLDEN_CASE_CONTEXT_SCHEMA_VERSION,
+        "case_count": len(records),
+        "case_contexts": records,
+        "case_contexts_sha256": content_address.content_digest(
+            precision_policy.GOLDEN_CASE_CONTEXTS_DOMAIN, records),
+    }
 
 
 def _norm_out_shape(raw, where):
@@ -1327,10 +1459,10 @@ def _taskdoc_dtype(case, in_params, where):
             f"{where}: 同一条 case 的输入 dtype 不唯一 {sorted(dts)}——"
             "本引擎按「一条 case 一个 dtype」落盘与判据，混合 dtype 须先一般化该链路，不在此静默取首个")
     dtn = dts.pop()
-    if dtn not in set(_NATIVE) | {_BF16}:
+    if dtn not in precision_policy.GOLDEN_LOGICAL_INPUT_DTYPES:
         raise ValueError(
             f"{where}: dtype={dtn!r} 不是本引擎的规范 dtype 名"
-            f"（可选 {sorted(set(_NATIVE) | {_BF16})}）——任务书侧的类型名须由取材侧的映射 IR 换成规范名，"
+            f"（可选 {sorted(precision_policy.GOLDEN_LOGICAL_INPUT_DTYPES)}）——任务书侧的类型名须由取材侧的映射 IR 换成规范名，"
             "本文件不做第二套名字映射（两处映射必然漂）")
     for p in in_params:
         allowed = p.get("dtype") or []
@@ -1465,7 +1597,8 @@ def _materialize_taskdoc_inputs(entry, in_params, dtn):
     return arrays
 
 
-def _taskdoc_golden_or_unavailable(golden_fn, inputs, attrs, cid):
+def _taskdoc_golden_or_unavailable(golden_impl, inputs, attrs, cid,
+                                   case_context=None):
     """算 golden；算不出来时**不中断全量生成**，返回 `(None, 原因串)`。
 
     ⚠ 这正是 `golden_unavailable` 一等状态的入口：任务书用例集里总有几条超出参考实现的支持范围
@@ -1474,7 +1607,8 @@ def _taskdoc_golden_or_unavailable(golden_fn, inputs, attrs, cid):
     捕 `BaseException` 与 `load_golden` 同理：golden 是用户/生成的代码，一句 `sys.exit(0)` 不是 `Exception`。
     """
     try:
-        return golden_fn(inputs, attrs), None
+        return _invoke_golden(
+            golden_impl, inputs, attrs, case_context, where=f"{cid}: taskdoc golden"), None
     except KeyboardInterrupt:                            # 用户主动中断不该被记成「这条用例算不出 golden」
         raise
     except BaseException as ex:                          # noqa: BLE001 —— 见 docstring
@@ -2318,8 +2452,8 @@ def _axis_length_shape(base, axes, length):
 
 
 def generatable_dtypes():
-    """**生成层**能造的 dtype 名集合（`_NATIVE` + bf16）——gen_cases 侧的单一真源，供门与报错点名用。"""
-    return sorted(set(_NATIVE) | {_BF16})
+    """返回 precision_policy 唯一声明的 generated-golden logical dtype 词表。"""
+    return sorted(precision_policy.GOLDEN_LOGICAL_INPUT_DTYPES)
 
 
 def _dtype_layer_error(dtn, form, gen_ok, run_ok, runner_set, deferred_set):
@@ -2378,7 +2512,7 @@ def check_spec_capability(in_params, runner_form):
     form = runner_form
     runner_set = repo_adapter.supported_np(form)       # 未知 form 在此 fail-closed（不兜任何一支）
     deferred_set = repo_adapter.deferred_np(form)
-    gen_set = set(_NATIVE) | {_BF16}
+    gen_set = set(precision_policy.GOLDEN_LOGICAL_INPUT_DTYPES)
     # N6：逐输入校，不再只看 self/首参。旧同 dtype spec 的判定不变；异构 spec 的第二个输入若
     # 声明了 runner/生成层不支持的 dtype，会在 CP-B 就暴露，不能等到物化第一个 case 才炸。
     for param in in_params:
@@ -4888,9 +5022,9 @@ def _active_output_names(spec, variant, cid):
 
 
 def _build_multi_output_case(spec, op, cid, cdir, entry, inputs, in_params, dtn, attrs, dims,
-                             vmode, golden_fn, out_shape_fn, golden_source, tier,
+                             vmode, golden_impl, out_shape_fn, golden_source, tier,
                              spec_standard, tol_src, tol_tuple, active_names,
-                             layout_tracker=None):
+                             layout_tracker=None, case_context=None):
     """多输出契约（torch 对标 median 见证）：golden_fn 返回 tuple → 逐输出 `np.save(golden_{k}.npy)`、
     逐输出 out_shape 对账、据 spec **op-中立**派生每输出判据契约（`derive_output_contracts`：只据 out_role/
     index_of/dtype 字段，绝无算子名分支）→ `expected.outputs[]`。
@@ -4902,7 +5036,9 @@ def _build_multi_output_case(spec, op, cid, cdir, entry, inputs, in_params, dtn,
     if entry["id_kind"] == "empty":
         raise ValueError(f"{cid}: 多输出契约暂不支持空 Tensor 用例（median 等归约类 numel==0 非法、"
                          f"spec 应设 allow_empty_tensor:false）——fail-closed，不为多输出空 case 编造语义")
-    gouts = _normalize_golden_outputs(golden_fn(inputs, attrs))   # [values(, indices)]，长度随 case 分派
+    gouts = _normalize_golden_outputs(_invoke_golden(
+        golden_impl, inputs, attrs, case_context,
+        where=f"{cid}: multi-output golden"))       # [values(, indices)]，长度随 case 分派
     if not gouts:
         raise ValueError(f"{cid}: golden_fn 未返回任何输出（多输出契约至少 1 个）")
     declared = None                                      # value/index 归约后同形 → 共用一个声明形状
@@ -5058,14 +5194,18 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
     # C1：load_golden 返回具名元组，`.out_shape` 是**可选**的（未导出=None → 缺省同形语义）。
     if stochastic is None:
         _g = load_golden(op)                         # 具名元组：按名取，别再位置解包
-        golden_fn, golden_source, out_shape_fn = _g.fn, _g.source, _g.out_shape
+        golden_source, out_shape_fn = _g.source, _g.out_shape
+        golden_invocation = (
+            precision_policy.golden_invocation_contract(
+                _g.contract, where=f"{op}.GOLDEN_CONTRACT")
+            if _g.contract is not None else None)
         # 批 2：派生 golden 档位（tier 1..4 / 是否需人核 / blocked 原因），**记录不阻断**。
         _tier = _derive_tier(op, _g.contract)
     else:
         # 随机 capability 的真值是独立前提收据 + 正式统计谓词；调用 per-op golden 会把
         # 一次随机 realization 伪装成逐点真值。故这里物理上不加载 golden.py。
-        golden_fn, golden_source, out_shape_fn, _tier = (
-            None, "stochastic_formal_contract", None, None)
+        _g, golden_source, out_shape_fn, _tier, golden_invocation = (
+            None, "stochastic_formal_contract", None, None, None)
     attrs_default = {
         p["name"]: p.get("default") for p in spec["params"] if p["io"] == "attr"
         and not (multi_input_bundle is not None and p.get("binding") == "host_scalar")
@@ -5162,6 +5302,12 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                                    runner_form)          # 逻辑数组（compute dtype）
         else:                                            # CS：按任务书的 shape×值域×seed 确定性物化
             inputs = _materialize_taskdoc_inputs(entry, in_params, dtn)
+        case_context, context_input_dtns = None, None
+        if golden_invocation is not None:
+            context_input_dtns = _case_context_input_dtypes(
+                entry, in_params, inputs, dtn, cid)
+            case_context = _golden_case_context(
+                in_params, context_input_dtns, where=f"{cid}.golden_case_context")
         # 逐 case 选中调用变体（无变体声明 → None；有声明但无匹配 → fail-closed，绝不退默认）。
         variant = _select_call_variant(variants, attrs, cid) if variants else None
         stochastic_case = entry.get("stochastic_case")
@@ -5234,23 +5380,26 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
         if uses_multi:                                   # 多输出契约（torch 对标 median）：全程 op-中立据字段
             case = _build_multi_output_case(
                 spec, op, cid, cdir, entry, inputs, in_params, dtn, attrs, dims, vmode,
-                golden_fn, out_shape_fn, golden_source, _tier, spec_standard, tol_src, tol_tuple,
-                _active_output_names(spec, variant, cid), layout_tracker=layout_tracker)
+                _g, out_shape_fn, golden_source, _tier, spec_standard, tol_src, tol_tuple,
+                _active_output_names(spec, variant, cid), layout_tracker=layout_tracker,
+                case_context=case_context)
             if needs_aclnn_call:                         # 该 case **完全解析好**的调用（driver 直接执行）
                 case["aclnn_call"] = _build_aclnn_call(
                     spec, variant, attrs, [o["name"] for o in case["expected"]["outputs"]], cid)
                 _bind_layout_to_aclnn_call(case, cid)
             _attach_entry_contract_bindings(case, entry)
+            _attach_golden_case_context(case, case_context)
             cases.append(case)
             continue
         if td_entry is None:
-            golden = golden_fn(inputs, attrs)            # 用逻辑输入算 golden
+            golden = _invoke_golden(
+                _g, inputs, attrs, case_context, where=f"{cid}: golden")
         else:
             # CS · `golden_unavailable` 一等状态：任务书用例集里总有几条超出参考实现的支持范围
             # （实测：通道数 > OpenCV CV_CN_MAX 的那几条）。**不中断全量生成**——身份保留、
             # 记原因、退出精度维，其余 case 照跑；由门判 BLOCKED，绝不当 pass。
             golden, unavailable_reason = _taskdoc_golden_or_unavailable(
-                golden_fn, inputs, attrs, cid)
+                _g, inputs, attrs, cid, case_context=case_context)
             if unavailable_reason is not None:
                 in_items = _save_inputs_multi(cdir, cid, inputs, in_params, dtn)
                 gu_case = {
@@ -5278,6 +5427,7 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                         spec, variant, attrs, _active_output_names(spec, variant, cid), cid)
                     _bind_layout_to_aclnn_call(gu_case, cid)
                 _attach_entry_contract_bindings(gu_case, entry)
+                _attach_golden_case_context(gu_case, case_context)
                 cases.append(gu_case)
                 golden_unavailable.append({"case_id": cid, "reason": unavailable_reason,
                                            "case_origin": entry["case_origin"]})
@@ -5347,6 +5497,7 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                     spec, variant, attrs, _active_output_names(spec, variant, cid), cid)
                 _bind_layout_to_aclnn_call(empty_case, cid)
             _attach_entry_contract_bindings(empty_case, entry)
+            _attach_golden_case_context(empty_case, case_context)
             cases.append(empty_case)
             continue
 
@@ -5358,13 +5509,18 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                 raise ValueError(f"{cid}: golden 未覆盖 True/False 边界（exact bool 用例数据缺陷）")
         # finding #10：equal_nan variant 必须**真起作用**（仅 nanpair 数据路径；新 §1 不产 nanpair、保留兼容）。
         if data_kind.split(":")[0] == "nanpair":
-            _assert_equal_nan_effective(golden_fn, inputs, attrs, cid)
+            _assert_equal_nan_effective(
+                _g, inputs, attrs, cid, case_context=case_context)
 
         # 保存：X_bin(x{j}.npy·物理位模式) 与 golden(golden.npy·op(逻辑值)) **分两份造**（canonical 职责#2/#3）
         tensor_contracts = (_profile_tensor_inputs(input_profile)
                             if input_profile is not None else None)
         input_dtns = ([item["dtype"] for item in tensor_contracts]
                       if tensor_contracts is not None else [dtn] * len(inputs))
+        if context_input_dtns is not None and input_dtns != context_input_dtns:
+            raise ValueError(
+                f"{cid}: golden context logical dtypes={context_input_dtns!r} "
+                f"与输入落盘 logical dtypes={input_dtns!r} 漂移")
         input_layout_bindings = _claim_input_layout_bindings(
             layout_tracker, case_id=cid, entry=entry, inputs=inputs,
             in_params=in_params, tensor_contracts=tensor_contracts)
@@ -5437,6 +5593,7 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                 parameter_contract=input_profile)
             _bind_layout_to_aclnn_call(legacy_case, cid)
         _attach_entry_contract_bindings(legacy_case, entry)
+        _attach_golden_case_context(legacy_case, case_context)
         cases.append(legacy_case)
     layout_ledger, layout_ledger_sha256 = layout_tracker.finish()
     perf_case_policy = _classify_perf_cases(spec, cases)
@@ -5451,6 +5608,8 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
         hashlib.sha256(content_address.canonical_json_bytes(
             atomic_attr_ledger)).hexdigest()
         if atomic_attr_ledger is not None else None)
+    golden_invocation_receipt = _build_golden_invocation_receipt(
+        _g.contract if _g is not None else None, cases)
     caseset = {"op": op, "spec_ref": spec.get("op"), "work_dir": work_dir,
             "attr_order": attr_order,
             "dtype_required": spec.get("dtype_required"),
@@ -5514,6 +5673,8 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                 }}
                if case_source == _CASE_SOURCE_TASKDOC else {}),
             **({"perf_case_policy": perf_case_policy} if perf_case_policy is not None else {}),
+            **({"golden_invocation_receipt": golden_invocation_receipt}
+               if golden_invocation_receipt is not None else {}),
             "cases": cases}
     # ⚠ 原先这里挂一份 **op 级** `aclnn_call_template`，由 driver 自己按 case 兜变体（`dim=None`→`dim=0`）——
     # 已被 finding #3 判为不合规并**整体替换**：调用形态现在逐 case 解析、写在 `case["aclnn_call"]` 里。

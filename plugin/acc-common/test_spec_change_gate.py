@@ -922,13 +922,18 @@ def _anchor_assignment():
 
 
 def _acceptance_dump(stmt):
-    """本语句里是否 `_dump(..., "<验收产物名>")`；是则返回那个文件名。"""
+    """识别 raw verdict writer 与正式 acceptance 的唯一共享 writer。"""
     for node in ast.walk(stmt):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == "_dump"):
             for arg in node.args:
                 if isinstance(arg, ast.Constant) and arg.value in W._ACCEPTANCE_FILES:
                     return arg.value
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "publish_acceptance_json"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "acceptance_artifacts"):
+            return W.acceptance_artifacts.FORMAL_ACCEPTANCE_FILE
     return None
 
 
@@ -949,6 +954,10 @@ class GatePlacementDriftTest(unittest.TestCase):
     def test_every_acceptance_artifact_write_is_preceded_by_the_gate(self):
         guarded = set()
         for seq in _statement_lists(_run_def()):
+            # 正式 writer 现在位于发布谓词的子分支；父 statement list 里的出口门支配该
+            # 分支。没有本地门的叶子 list 会由父 list 检查，不能把 inherited guard 当缺失。
+            if not any(_gate_calls(stmt) for stmt in seq):
+                continue
             seen_gate = False
             for stmt in seq:
                 if _gate_calls(stmt):
@@ -1026,6 +1035,9 @@ class GatePlacementDriftTest(unittest.TestCase):
         """
         guarded = set()
         for seq in _statement_lists(_run_def()):
+            # 同上：发布分支继承父 statement list 已完成的 staged-copy 出口检查。
+            if not any(_staged_spec_checks(stmt) for stmt in seq):
+                continue
             seen = False
             for stmt in seq:
                 if _staged_spec_checks(stmt):

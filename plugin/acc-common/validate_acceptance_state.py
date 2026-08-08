@@ -1313,8 +1313,90 @@ def _gate_tensor_shape_attr_spec_authority(
                     or input_ref.get("name") != declaration["rank_from_input"]
                     or receipt.get("duplicate_policy")
                     != declaration["duplicate_policy"]):
+                    errs.append(
+                        f"{cid}: cyclic {name!r} 未逐字绑定 staged spec 的具名输入/重复策略")
+
+
+def _gate_golden_invocation_spec_authority(caseset, staged_spec, errs):
+    """把可自洽重算的 golden context 重新钉回 staged spec/profile 权威。"""
+    try:
+        invocation = cpp_extension_adapter.validate_caseset_golden_invocation(caseset)
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        errs.append(f"golden invocation caseset/context/receipt 契约非法：{ex}")
+        return
+    if invocation is None:
+        return
+    if not isinstance(staged_spec, dict):
+        errs.append("golden invocation 在场，但 staged spec.json 缺失/非法")
+        return
+    in_params = [
+        param for param in (staged_spec.get("params") or [])
+        if isinstance(param, dict) and param.get("io") == "in"
+    ]
+    if not in_params:
+        errs.append("golden invocation 无法从 staged spec 取得具名 input 参数")
+        return
+    try:
+        import gen_cases
+        bundle = gen_cases._resolve_multi_input_contract(staged_spec)
+    except Exception as ex:
+        errs.append(
+            "golden invocation staged spec multi-input profile 无法重放："
+            f"{type(ex).__name__}: {ex}")
+        return
+    profile_by_id = ({row["profile_id"]: row for row in bundle["profiles"]}
+                     if bundle is not None else None)
+    for index, case in enumerate(caseset.get("cases") or []):
+        if not isinstance(case, dict):
+            continue  # 同级 caseset validator 已给结构错误。
+        cid = case.get("id") or f"cases[{index}]"
+        context = case.get("golden_case_context") or {}
+        actual = [
+            {"index": row.get("index"), "name": row.get("name"),
+             "logical_dtype": row.get("logical_dtype")}
+            for row in (context.get("inputs") or []) if isinstance(row, dict)
+        ]
+        if profile_by_id is None:
+            expected = []
+            for input_index, param in enumerate(in_params):
+                dtype = (actual[input_index].get("logical_dtype")
+                         if input_index < len(actual) else None)
+                declared = param.get("dtype")
+                if not isinstance(declared, list) or dtype not in declared:
+                    errs.append(
+                        f"{cid}: golden logical dtype={dtype!r} 不属于 staged spec input "
+                        f"{param.get('name')!r} 的声明 {declared!r}")
+                expected.append({
+                    "index": input_index, "name": param.get("name"),
+                    "logical_dtype": dtype,
+                })
+        else:
+            parameter_contract = case.get("parameter_contract")
+            profile_id = (parameter_contract.get("profile_id")
+                          if isinstance(parameter_contract, dict) else None)
+            expected_profile = profile_by_id.get(profile_id)
+            if expected_profile is None:
                 errs.append(
-                    f"{cid}: cyclic {name!r} 未逐字绑定 staged spec 的具名输入/重复策略")
+                    f"{cid}: golden invocation parameter_contract.profile_id={profile_id!r} "
+                    "不属于 staged spec multi-input profiles")
+                continue
+            if parameter_contract != expected_profile:
+                errs.append(
+                    f"{cid}: golden invocation parameter_contract 与 staged spec profile "
+                    f"{profile_id!r} 漂移")
+            tensors = [
+                item for item in expected_profile.get("inputs") or []
+                if isinstance(item, dict) and item.get("kind") == "tensor"
+            ]
+            expected = [
+                {"index": input_index, "name": item.get("name"),
+                 "logical_dtype": item.get("dtype")}
+                for input_index, item in enumerate(tensors)
+            ]
+        if actual != expected:
+            errs.append(
+                f"{cid}: golden case_context input name/order/logical dtype 与 staged spec "
+                f"权威不一致：实际 {actual!r}，期望 {expected!r}")
 
 
 def gate_task1(d, errs, source_facts_path=None):
@@ -1337,6 +1419,7 @@ def gate_task1(d, errs, source_facts_path=None):
         errs.append(f"caseset tensor shape/attr ledger 契约非法：{ex}")
     staged_spec = _load(d, "spec.json")
     _gate_dtype_requirement_sets_authority(cs, staged_spec, errs)
+    _gate_golden_invocation_spec_authority(cs, staged_spec, errs)
     _gate_tensor_shape_attr_spec_authority(
         d, cs, staged_spec, errs,
         source_facts_path=source_facts_path)
@@ -1767,6 +1850,7 @@ def _gate_precision_work_dir(report_root, work, caseset, envelope, staged_spec,
     _gate_cpp_extension_stage2_evidence(manifest, errs)
     authority_caseset = caseset if authority_caseset is None else authority_caseset
     _gate_dtype_requirement_sets_authority(authority_caseset, staged_spec, errs)
+    _gate_golden_invocation_spec_authority(authority_caseset, staged_spec, errs)
     _gate_tensor_shape_attr_spec_authority(
         report_root, authority_caseset, staged_spec, errs,
         source_facts_path=source_facts_path)

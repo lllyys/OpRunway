@@ -21,8 +21,10 @@ from pathlib import Path
 import tempfile
 
 import cann_version
+import content_address
 import cpp_extension_adapter
 import cpp_extension_identity
+import precision_policy
 import stochastic_collector
 import stochastic_contract
 import tensor_shape_attrs
@@ -1251,6 +1253,24 @@ def run(bundle, work):
             "invocation plan 与 N2 闭合生成物 manifest 的摘要/namespace 不一致；"
             "正式 build receipt 不得消费漂移或 development 生成物")
     try:
+        golden_invocation_receipt = (
+            cpp_extension_adapter.validate_caseset_golden_invocation(caseset))
+        golden_invocation_receipt_sha256 = (
+            content_address.content_digest(
+                precision_policy.GOLDEN_INVOCATION_RECEIPT_DOMAIN,
+                golden_invocation_receipt)
+            if golden_invocation_receipt is not None else None)
+        if golden_invocation_receipt_sha256 is None:
+            if "golden_invocation_receipt_sha256" in plan:
+                raise cpp_extension_adapter.CppExtensionAdapterError(
+                    "legacy invocation plan 不得凭空声明 golden invocation receipt")
+        elif plan.get("golden_invocation_receipt_sha256") \
+                != golden_invocation_receipt_sha256:
+            raise cpp_extension_adapter.CppExtensionAdapterError(
+                "invocation plan 的 golden invocation receipt 摘要与 caseset 漂移")
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        raise DriverError(f"golden invocation contract/receipt 非法：{ex}") from ex
+    try:
         layout_contract = cpp_extension_adapter.validate_invocation_layout_contract(
             caseset, manifest, plan)
         structure_contract = (
@@ -1307,6 +1327,9 @@ def run(bundle, work):
             "manifest_sha256": _canonical_sha(manifest),
             "invocation_plan_sha256": _canonical_sha(plan),
             "spec_sha256": manifest["spec_sha256"],
+            **({"golden_invocation_receipt_sha256":
+                golden_invocation_receipt_sha256}
+               if golden_invocation_receipt_sha256 is not None else {}),
         },
         "runtime": runtime,
         # 本轮逐 case 执行的分母台账：`failed > 0` 时 receipt 自己就说得出「哪些没跑成」，

@@ -2880,18 +2880,17 @@ class DeferredGapCapabilitySourceTest(unittest.TestCase):
         """给活表临时加一个 dtype，同一条挂账立刻从「成立」变成「与表矛盾」。
         这条钉死的是**读表不抄表**：若有人把三张表的内容复制进 `validate_acceptance_state`，
         表扩了门却不跟着变严，扩张出来的新 dtype 就又能挂 deferred 免检。"""
-        import gen_cases
         dt = _absent_from("generation")
         if dt is None:
             self.skipTest("生成层能力表已覆盖全部候选")
         gap = self._gap_for("generation", dt)
         self.assertEqual(self._errs([gap], ["float32", "float16", dt]), [])   # 表里没有 → 成立
-        _native = gen_cases._NATIVE
-        gen_cases._NATIVE = dict(_native, **{dt: np.float32})                 # 表扩了
+        logical_dtypes = precision_policy.GOLDEN_LOGICAL_INPUT_DTYPES
+        precision_policy.GOLDEN_LOGICAL_INPUT_DTYPES = frozenset((*logical_dtypes, dt))  # 权威表扩了
         try:
             errs = self._errs([gap], ["float32", "float16", dt])
         finally:
-            gen_cases._NATIVE = _native
+            precision_policy.GOLDEN_LOGICAL_INPUT_DTYPES = logical_dtypes
         self.assertTrue(any(dt in e and "支持" in e for e in errs), (dt, errs))
 
 

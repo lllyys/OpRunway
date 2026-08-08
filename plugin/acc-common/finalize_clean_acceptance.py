@@ -37,8 +37,8 @@
 import argparse
 import json
 import os
-import tempfile
 
+import acceptance_artifacts
 import repo_adapter
 import run_workflow
 import perf_evidence_contract
@@ -284,16 +284,8 @@ def finalize_directory(out_dir, spec_path, source_facts_path):
     # ② 出口门：写验收产物**之前**再校一次 spec 原件（入口过了之后它仍可能被换掉）。
     _assert_spec_change_confirmed(spec_path, out_dir, _SPEC_GATE_EXIT)
 
-    fd, tmp = tempfile.mkstemp(prefix=".acceptance.", suffix=".json", dir=out_dir)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(acceptance, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, os.path.join(out_dir, "acceptance.json"))
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    # 与主入口共用同一个正式发布断言与原子写原语；以后状态门收紧只改一处。
+    acceptance_artifacts.publish_acceptance_json(out_dir, acceptance)
     return acceptance
 
 

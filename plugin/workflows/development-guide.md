@@ -2,12 +2,12 @@
 
 > **这是材料仓，不是 skill。** `plugin/workflows/` 无 `SKILL.md`（判据 = 有无 SKILL.md）——它装「怎么把一个 NPU 算子从『任务书+PR』走到验收裁决」的人读蓝图、分阶段 dispatch 模板（`task-prompts.md`）、已验证算子案例（`archive_ops/`），供人 / subagent 组合参考。**承载状态机的单数 workflow 是 skill `skills/acceptance-workflow/SKILL.md`**（CP-A..E 状态机脑子），本蓝图是它的人读伴侣、不重复其权威。
 >
-> **判定唯一归确定性脚本链**（`validator.py` 精度 + `perf_compare.py` 性能 + `validate_acceptance_state.py` 三级完整性门 → 门控后写 `acceptance.json`，ADR 0007）。本蓝图与所有原子 skill 都**不自行判 pass/fail**，只描述怎么做。
+> **判定唯一归确定性脚本链**（`validator.py` 精度 + `perf_compare.py` 性能 + `validate_acceptance_state.py` 三级完整性门，ADR 0007）；正式发布边界随后决定写 `acceptance.json` 还是无裁决语义的 `attempt_record.json`。本蓝图与所有原子 skill 都**不自行判 pass/fail**，只描述怎么做。
 
 ## 0. 输入 / 输出
 
 - **输入**：算子任务书（md 本地路径或链接）+ PR 链接。
-- **输出**：`reports/<op>/` 下 `correspondence.json` / `<op>.spec.json` / `caseset.json` / `evidence.json` / `verdict.json` / `baseline.json`（**仅有基线时**——缺 GPU 标杆挂起时不产）/ `perf_report.json` / `acceptance.json` + 中文验收报告。
+- **输出**：`reports/<op>/` 下共有 `correspondence.json` / `<op>.spec.json` / `caseset.json` / `evidence.json` / raw `verdict.json` / `baseline.json`（**仅有基线时**）/ `perf_report.json`；总结工件只按 `acceptance_artifacts.formal_acceptance_allowed` 二选一：true 产 `acceptance.json` + 中文报告，false 产 `attempt_record.json`（`acceptance_verdict=null`）。
 - **产物只落用户 CWD 的 `reports/`**；私有主机名 / 目标机路径（远程连时即远端路径）走 `OPRUNWAY_*` 环境变量、**不入仓**；副作用（clone/build/真机跑测/对外动作）先列计划、点头再做。
 
 ## 1. 六步验收流水线（对齐 AGENTS.md 硬门 + design §2）
@@ -23,7 +23,7 @@
 | ③ spec → 用例集 | 产覆盖「功能/精度/性能」的 caseset | `acc-casegen`（展开规则）+ `gen_cases.py`（确定性落盘，仅注册算子） | 无原语匹配 → `UNCOVERED_PRIMITIVE`，禁静默归并 |
 | ④ 调用侧锚定 + 自检 | 产被测调用侧代码，验证-才-信（`cpp_extension`（缺省·验收路径）= codegen 官方 Extension bundle + build/load/vendor 收据；`cpp` = 手写 per-op runner；`aclnn_py` = 无 per-op 源、走 harness 信任门） | `acc-runner`（NL 锚定 example）+ `run_on_npu.sh` | aclnn 入口/dtype/顺序**抠 example 不猜**；自检不满足停在此、不上真机 |
 | ⑤ 真机跑测 | Task2 精度 vs golden + Task3 性能 vs 基线 | `repo_adapter` / `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`（⚠ `--source-facts` 验收通路必给、缺席拒跑，非验收通路不强制；`<mode>` 据 `spec.runner_form` 派生，受控词表 `{cpp, aclnn_py, cpp_extension}`、**缺省 = `cpp_extension`**：`cpp_extension`→`cpp_extension`（✅ **当前唯一能产验收裁决**）、`cpp` / `aclnn_py` ⛔ **已停止准入（2026-08-06）**：派不出 mode、显式指定也被拒；`mock`/`catlass*` 派生不出、须显式指定）；方法论 `acc-precision` / `acc-perf` | 精度=真 NPU vs numpy golden；性能=msprof kernel-only vs 基线（**基线逐字按任务书/spec 定，runner form 不决定 baseline**；`new_example` 的缺省对照物才是同法测的内置 TBE）；`OPRUNWAY_*` 指真机 |
-| ⑥ 门 + 裁决 + 报告 | 三级完整性门 → 裁决 → 中文报告 | `validate_acceptance_state.py` + `validator.py` + `perf_compare.py`；FAIL→`acc-rootcause` | 门 FAILED → `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**——仅准入的 `cpp_extension` 通路**；非验收通路（显式 `--mode mock` / `catlass*`）产 `dev_run_summary.json.pipeline_result`、不跑验收门。报告逐字引用产物、`needs_review` 不当 pass |
+| ⑥ 门 + 裁决 + 报告 | 三级完整性门 → 正式发布边界 → 中文报告 | `validate_acceptance_state.py` + `validator.py` + `perf_compare.py`；正式 FAIL→`acc-rootcause` | 只按 `acceptance_artifacts.formal_acceptance_allowed` 二选一：true 产 `acceptance.json` + Markdown，false 产 `attempt_record.json`（`acceptance_verdict=null`）并停在 CP-D。非验收通路产 `dev_run_summary.json.pipeline_result`、不跑验收门 |
 
 ## 2. CP-A..E 检查点（对话暂停点 + 工件门）
 
@@ -35,7 +35,7 @@
 - **CP-C runner**（需 NPU）：dispatch `acc-runner-dev`（先过 scope gate）→ 自证门满足才允许上真机。**验收路径 `cpp_extension`** 核的是 build/load/vendor receipt 齐备且绑定来源锚。⛔ `cpp` 的 `verify_runner` 与 `aclnn_py` 的 harness 真机信任门已随两条形态停止准入，**不再 dispatch**；机制描述见 `acceptance-workflow/SKILL.md` CP-C 历史区。
 - **CP-D 真机跑测**（一次原子）：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`（⚠ `--source-facts` 验收通路必给、缺席直接拒跑，路径是 CP-A 取材 `--out` 那份、与报告目录不同；非验收通路不强制。**`<mode>` 据 `spec.runner_form` 定，而派得出的只剩一条**：`cpp_extension`（或未声明）→ `cpp_extension`，须 `OPRUNWAY_CPP_EXTENSION_REAL=1` 且过 build/load/vendor receipt 门；`cpp` / `aclnn_py` ⛔ 停止准入，派生表里没有条目、显式指定真机 mode 也被拒），Task2+3+三级门一次成；FAIL → `rootcause`。
   ⚠ **验收裁决当前只出自 `cpp_extension`**（`run_workflow._ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})`，入口门 `_resolve_mode` + 出口门 `_assert_acceptance_form_allowed` 两道；理由见仓根 `AGENTS.md` §4）。⛔ `cpp` / `aclnn_py` 自 2026-08-06 **停止准入、连真机入口都没有**（逃生阀已删）。只想本地自检用例链 → 显式 `--mode mock`，那条路物理上只产 `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"` + NON-ACCEPTANCE 标记），**不写** `acceptance.json` / `verdict.json`——「加了逃生阀跑绿了」不得写成验收通过、不得进报告的裁决栏。mode 只从 `spec.runner_form` 派生；性能 baseline 仍由任务书/spec 决定，不能从 form 反推。
-- **CP-E 报告**（primary）：逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + `task_pr_gaps` + 各维度通过数。
+- **CP-E 报告**（primary）：只在正式 `acceptance.json` 已存在且 renderer 调用 `acceptance_artifacts` 的共享发布谓词通过时，逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + `task_pr_gaps` + 各维度通过数；primary 不另抄字段判断，只有 `attempt_record.json` 时不产正式报告。
 
 ## 3. 铁律（每步都受约束）
 

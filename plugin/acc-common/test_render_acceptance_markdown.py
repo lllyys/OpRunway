@@ -69,7 +69,7 @@ def _docs(receipt):
         "acceptance.json": {
             "op": "X", "overall": "PASS", "state": "PASSED",
             "precision_verdict": "pass", "perf_status": "ok",
-            "repo_mode": "cpp_extension", "gate": {"passed": True},
+            "repo_mode": "cpp_extension", "gate": {"passed": True, "errors": {}},
         },
         "verdict.json": {
             "op": "X", "standard": "s",
@@ -194,7 +194,7 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
                 "acceptance.json": {
                     "op": "X", "overall": "FAIL(精度)", "state": "FAILED_PRECISION",
                     "precision_verdict": "fail", "perf_status": "skipped_precision_gate",
-                    "repo_mode": "cpp_extension", "gate": {"passed": True},
+                    "repo_mode": "cpp_extension", "gate": {"passed": True, "errors": {}},
                 },
                 "verdict.json": {
                     "op": "X", "standard": "ascendoptest_default",
@@ -245,13 +245,58 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
             self.assertIn("`b`", detail_text)
             self.assertFalse(os.path.exists(os.path.join(root, "性能失败明细.md")))
 
+    def test_refuses_to_render_gate_failed_or_blocked_acceptance_as_formal_report(self):
+        """renderer 是可单独调用的入口，不能绕过 workflow 的正式发布门。"""
+        candidates = (
+            {
+                "op": "X", "overall": "BLOCKED(验收门未过)",
+                "state": "BLOCKED_EVIDENCE_INCOMPLETE",
+                "gate": {"passed": False, "errors": {"task2": ["missing"]}},
+            },
+            {
+                "op": "X", "overall": "BLOCKED_WAIT_GPU_BENCHMARK",
+                "state": "BLOCKED_WAIT_GPU_BENCHMARK",
+                "gate": {"passed": True, "errors": {}},
+            },
+            {
+                "op": "X", "overall": "NEEDS_REVIEW", "state": "NEEDS_REVIEW",
+                "gate": {"passed": True, "errors": {}},
+            },
+            {
+                "op": "X", "overall": "PASS", "state": "PASSED",
+                "gate": {"passed": True, "errors": {"task2": ["missing"]}},
+            },
+            {
+                "op": "X", "overall": "BLOCKED(验收门未过)", "state": "PASSED",
+                "gate": {"passed": True, "errors": {}},
+            },
+            {
+                "op": "X", "overall": "PASS", "state": "FAILED_PRECISION",
+                "gate": {"passed": True, "errors": {}},
+            },
+            {
+                "op": "X", "overall": "NOT_A_REAL_OVERALL", "state": "PASSED",
+                "gate": {"passed": True, "errors": {}},
+            },
+        )
+        for acceptance in candidates:
+            with self.subTest(state=acceptance["state"]), tempfile.TemporaryDirectory() as root:
+                with open(os.path.join(root, "acceptance.json"), "w", encoding="utf-8") as out:
+                    json.dump(acceptance, out)
+                with self.assertRaisesRegex(RuntimeError, r"正式验收"):
+                    R.render(root)
+                with self.assertRaisesRegex(RuntimeError, r"正式验收"):
+                    R.write_report(root)
+                for name in ("验收报告.md", "精度失败明细.md", "性能失败明细.md"):
+                    self.assertFalse(os.path.exists(os.path.join(root, name)), name)
+
     def test_splits_performance_non_passing_detail(self):
         with tempfile.TemporaryDirectory() as root:
             docs = {
                 "acceptance.json": {
-                    "op": "X", "overall": "FAIL(性能)", "state": "FAILED_PERFORMANCE",
+                    "op": "X", "overall": "性能未达成(failed)", "state": "FAILED_PERFORMANCE",
                     "precision_verdict": "pass", "perf_status": "failed",
-                    "repo_mode": "cpp_extension", "gate": {"passed": True},
+                    "repo_mode": "cpp_extension", "gate": {"passed": True, "errors": {}},
                 },
                 "verdict.json": {
                     "op": "X", "standard": "s",

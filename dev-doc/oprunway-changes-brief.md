@@ -2,6 +2,27 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-08 · Generated golden 逻辑 dtype 调用契约
+
+- `GOLDEN_CONTRACT.invocation` 新增可选、严格版本化的 keyword context ABI；只有显式声明时，
+  `golden_fn(inputs, attrs, *, case_context)` 才收到按 spec/profile 顺序绑定的逐输入逻辑 dtype，
+  不再从 NumPy 载体或数值猜 BF16/FP32。legacy 两参调用与 caseset 字节保持不变。
+- 调用 schema、函数签名、逐 case context 与 digest 贯穿 dry-run/preparation 的既有 contract/logic hash，
+  并由 caseset、cpp_extension invocation plan、driver receipt、evidence 与正式 gate 继续绑定；逻辑 dtype
+  共用生成层受控词表，前两参只接受普通位置或关键字参数，golden receipt 错误保持为 driver contract 错误。
+  真实多输入 fixture 证明正常链可通，并拒绝错序/错名/错 dtype、任一层单边篡改及全链一致重签但偏离 staged
+  profile 的篡改。A3 fresh 新契约 14 项、legacy byte pin 3 项、golden/adapter 45 项及
+  receipt/正式门 271 项全部通过，相关文件 `py_compile` 通过；本批未跑算子、未跑全仓 full。
+
+## 2026-08-08 · 未完成验收 attempt 与正式报告物理分名
+
+- full R1 的 receipt/CP-F legacy 测试夹具已迁到 current vendor receipt v3、caller-trusted
+  `content_anchor` 与 CP-F `source_identity.content_anchor`；只改测试与测试 helper，生产 anti-downgrade 门不放宽。
+- `run_workflow` 只经 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一。
+  formal 先原子发布 `acceptance.json`，再渲染中文 Markdown；Markdown 失败时保留 JSON 并写
+  `markdown_report_error.json`。attempt 只产 `attempt_record.json`（`acceptance_verdict=null`）；两种总结名互斥，
+  renderer 与 clean-finalize 共用同一发布谓词和唯一 JSON writer。
+
 ## 2026-08-07 · 三算子 N10 单卡正式验收与实测回修
 
 - 根 README 从历史状态页重写为当前用户入口：只描述 caller-trusted 输入、content→build→ELF→NPU

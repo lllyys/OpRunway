@@ -8,7 +8,10 @@ import check_acceptance_entrypoints as C
 
 GOOD = """
 三条真机通路：new_example、aclnn_py、cpp_extension。
-SOURCE_ACQUIRED → HEAD_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED。
+SOURCE_MATERIALIZED → CONTENT_ANCHOR_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED。
+current source facts 的 input_association 为 caller_trusted_pair_v1 / asserted_by_caller，
+正式准入只认实际物化内容的 content_anchor；transport locator / ref / head 只作诊断。
+fresh caller-trusted facts 不产、不要求 correspondence.json；该工件仅供 legacy 历史只读解释。
 远端入口使用 set -Eeuo pipefail。
 历史 Median 60/60 PASS 只证明旧 caseset，不得沿用。
 """
@@ -59,8 +62,47 @@ class AcceptanceEntrypointGateTest(_GateTestBase):
         self.assertEqual(C.collect(self.root), [])
 
     def test_missing_source_gate_token_fails(self):
-        self.write("agents/acc-verify-rootcause.md", GOOD.replace("HEAD_VERIFIED", "HEAD_OK"))
-        self.assertTrue(any("HEAD_VERIFIED" in x for x in C.collect(self.root)))
+        self.write(
+            "agents/acc-verify-rootcause.md",
+            GOOD.replace("CONTENT_ANCHOR_VERIFIED", "CONTENT_OK"))
+        self.assertTrue(any("CONTENT_ANCHOR_VERIFIED" in x for x in C.collect(self.root)))
+
+    def test_legacy_head_gate_does_not_satisfy_current_content_gate(self):
+        legacy = GOOD.replace(
+            "SOURCE_MATERIALIZED → CONTENT_ANCHOR_VERIFIED",
+            "SOURCE_ACQUIRED → HEAD_VERIFIED")
+        self.write("agents/acc-verify-rootcause.md", legacy)
+        errors = C.collect(self.root)
+        self.assertTrue(any("SOURCE_MATERIALIZED" in x for x in errors), errors)
+        self.assertTrue(any("CONTENT_ANCHOR_VERIFIED" in x for x in errors), errors)
+
+    def test_missing_caller_trusted_semantics_fails(self):
+        replacements = (
+            ("caller_trusted_pair_v1", "caller_pair_v0"),
+            ("asserted_by_caller", "asserted_by_tool"),
+            ("content_anchor", "head_sha"),
+        )
+        for token, replacement in replacements:
+            with self.subTest(token=token):
+                self.write(
+                    "agents/acc-verify-rootcause.md",
+                    GOOD.replace(token, replacement))
+                self.assertTrue(any(token in x for x in C.collect(self.root)))
+
+    def test_fresh_correspondence_requirement_is_rejected(self):
+        self.write(
+            "agents/acc-verify-rootcause.md",
+            GOOD + "\nfresh caller-trusted facts 必须生成 correspondence.json 才能继续。\n")
+        errors = C.collect(self.root)
+        self.assertTrue(any("fresh/current" in x and "correspondence.json" in x
+                            for x in errors), errors)
+
+    def test_legacy_only_correspondence_prohibition_is_allowed(self):
+        self.write(
+            "agents/acc-verify-rootcause.md",
+            GOOD + ("\ncorrespondence.json 只供 legacy 历史只读解释；"
+                    "fresh current 不产、不要求，不得补写升格。\n"))
+        self.assertEqual(C.collect(self.root), [])
 
     def test_missing_file_fails_closed(self):
         os.remove(os.path.join(self.root, "skills", "acc-runner", "SKILL.md"))
@@ -233,6 +275,13 @@ class RetiredDispatchGateTest(_GateTestBase):
         self.assertTrue(any("逃生阀" in e for e in self.errors()), C.collect(self.root))
         self.write("skills/acc-spec/SKILL.md", GOOD + (
             "\n逃生阀 `--allow-experimental-form` 已删除（2026-08-06），别加回来。\n"))
+        self.assertEqual(self.errors(), [])
+
+    def test_experimental_flag_safety_prohibition_is_allowed(self):
+        # 仓根安全规则的真实措辞：禁止恢复逃生阀，不是活跃 flag 指示。
+        self.write_repo(
+            "AGENTS.md",
+            GOOD + "\n- 不得恢复 `--allow-experimental-form` 逃生阀。\n")
         self.assertEqual(self.errors(), [])
 
     def test_experimental_flag_inside_invocation_is_rejected_regardless_of_wording(self):

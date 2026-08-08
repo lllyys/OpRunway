@@ -16,13 +16,13 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 
 ## 0. 铁律（贯穿全流程，每段都受约束）
 
-1. **判定唯一归确定性脚本链**：`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）→ 门控后由 `run_workflow.py` 写 `acceptance.json`。**编排层（primary）与 subagent 都不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**（ADR 0007）——这是「不得自行判定、只能引用」，**不是「绝不提 pass/fail」**：可以复述脚本判出的 pass/fail，但不能自己判。
+1. **判定唯一归确定性脚本链**：`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）；正式命名只认 `acceptance_artifacts.formal_acceptance_allowed`，不在 skill/agent 展开条件。谓词为 true 时写正式 `acceptance.json`，为 false 时只写 `attempt_record.json`（`acceptance_verdict=null`），两者互斥。**编排层（primary）与 subagent 都不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**（ADR 0007）——这是「不得自行判定、只能引用」，**不是「绝不提 pass/fail」**：可以复述脚本判出的 pass/fail，但不能自己判。
 
 2. **primary 边界**：primary **可直接跑「无 NL 生成、无判定」的确定性脚本**——`fetch_source.py`（取材 + `source_facts.json`）、`validate_taskdoc_input.py`（只复核任务书输入校验工件的结构与绑定、机械派生阻断清单）、`gen_cases.py --dry-run --ledger-out <case_plan.json>`（契约自检 + durable 计划账本）、`validate_preparation_state.py`（只判非真机准备是否可复用）、`preflight_aclnn.py`（只做 PR header↔spec slots 静态对账）、`validate_acceptance_state.py`（复核门）、`check_manifest_sync.py`（漂移门），用 Bash 幕后跑。primary **不做 NL 生成的 durable 工件**（spec / runner 一律派 subagent），**不自行判 pass/fail**（归确定性脚本链），首响应先加载本 skill、**禁裸调 subagent**。
 
 3. **subagent 边界**：每个 subagent **单轮、禁内部循环、禁跨阶段、不自行判定，只回结构化摘要给 orchestrator**。循环由 primary 控（如 dry-run 契约自检异常 → 再派 `refine_spec`），subagent 自己不多轮迭代。
 
-4. **三级门在 `run_workflow.py` 内部**：`run_workflow.py` **一次性串 Task1→2→3**，末尾**统一校门**（`validate_acceptance_state` 的 task1/task2/task3 三级，读**落盘** evidence 独立复核）——是**批量驱动、非阶段间实时阻断**，**不是** orchestrator 分阶段单独调度的 stage。验收门 `validate_acceptance_state.py` STATUS: FAILED → **不出 pass 裁决；仍由 `run_workflow` 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整）。「不推进下一 Task / 停在当前阶段」是 **agent 编排纪律**，不是脚本里的实时闸。
+4. **三级门在 `run_workflow.py` 内部**：`run_workflow.py` **一次性串 Task1→2→3**，末尾**统一校门**（`validate_acceptance_state` 的 task1/task2/task3 三级，读**落盘** evidence 独立复核）——是**批量驱动、非阶段间实时阻断**，**不是** orchestrator 分阶段单独调度的 stage。门结果随候选交给 `acceptance_artifacts.formal_acceptance_allowed`，由该唯一谓词决定 formal / attempt 二选一；本 skill 不展开命名条件。「不推进下一 Task / 停在当前阶段」是 **agent 编排纪律**，不是脚本里的实时闸。
 
 5. **对外单一对话入口、脚本幕后**（canon conversational-agent-sole-delivery-form·proposed·未 settle，载重前需核）：用户给出调用方已配对的“任务书 + 被测来源”；二者关联由调用方断言。输入的在线/本地形态及 URL/repo/fork/ref/head 只作 transport 诊断，不另行追问身份。脚本幕后执行；缺执行环境事实时再问，副作用照常先确认。
 
@@ -46,8 +46,8 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 | `oprunway_<op>_runner.cpp`（自检证据满足） | CP-C（`gen_runner`→`verify_runner`） | runner 已锚定 example；由 acc-runner-dev 的 runner 自检证据满足/不满足纪律保证（当前**非代码强制 sidecar 硬门、待补**） | 自检证据不满足则停在 CP-C、不上真机 |
 | ~~`work/aclnn_harness_trust.json`~~（⛔ 仅退役的 `aclnn_py`，**本状态机不再产、不再等**） | — | — | 见 §3 CP-C 的历史区；停止准入后这一格没有下游，别把它当缺件停在 CP-C |
 | `vendor-build-receipt.json`（仅 `cpp_extension`；文件名由 `--out` 自定，此处按真机实测的命名） | CP-C（真机上跑 `vendor_build_receipt.py` 的两个子命令：`snapshot-digest`（build 前）→ `emit`（真跑 build），见 CP-C） | 被测 vendor `.so` 的出身已锁成机器可核的三段链：来源锚 → build argv/实测 returncode → 装出来的那个 ELF 的字节 | **不按「文件在就复用」判**：重跑 build、换 `--library`、被测源码字节变了，都必须重产一份；CP-D 由 `OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT` 消费 |
-| `evidence.json` / `verdict.json` / `baseline.json`（仅有基线时）/ `perf_report.json` / `acceptance.json`（真机裁决） | CP-D；mode 据 form 派生，**派得出的只有一条**：`cpp_extension` → `--mode cpp_extension`（`cpp` / `aclnn_py` 在派生表里没有条目，走不到这一格，见 CP-A） | 真机一次原子跑完、门已校 | `acceptance.json.overall` 非 PASS 且非门问题 → 派 `rootcause` |
-| 中文验收报告 | CP-E（primary） | 报告已出 | — |
+| `evidence.json` / `verdict.json` / `baseline.json`（仅有基线时）/ `perf_report.json` + `acceptance.json` **或** `attempt_record.json` | CP-D；mode 据 form 派生，**派得出的只有一条**：`cpp_extension` → `--mode cpp_extension`（`cpp` / `aclnn_py` 在派生表里没有条目，走不到这一格，见 CP-A） | 真机一次原子跑完；总结工件只按 `acceptance_artifacts.formal_acceptance_allowed` 二选一 | `acceptance.json` 存在才是正式终态；只有 `attempt_record.json` 则停在 CP-D，如实回报 `pipeline_state` / `gate.errors`，不得补正式报告 |
+| 中文验收报告 | CP-E（primary） | 正式 `acceptance.json` 已存在且 renderer 调用同一共享谓词通过 | 只有 `attempt_record.json` 时不进 CP-E |
 
 > 多算子：一份任务书含 N 个算子 → CP-B 产 N 份 spec，每份独立走 CP-B..E，工件按 `reports/<op>/` 分目录。
 
@@ -65,7 +65,8 @@ reports/<op>/                 ← run_workflow --out 指这里
 │   ├── taskdoc_links.json                                          # 可作 reference 取材；不当然进正式 caseset
 │   ├── taskdoc_caseset.json / golden/                             # 仅 legacy taskdoc 档；reference_only 不产
 │   └── <各 case 目录与 golden .npy>
-├── caseset.json / evidence.json / verdict.json / acceptance.json    # CP-D 落在 --out 根
+├── caseset.json / evidence.json / verdict.json                      # CP-D 共有诊断件
+├── acceptance.json | attempt_record.json                            # formal_acceptance_allowed 二选一
 └── perf_report.json / baseline.json
 ```
 
@@ -412,7 +413,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 ### CP-D 真机跑测（一次原子；dispatch）
 
-**目的**：一次原子跑完 Task2 精度 + Task3 性能 + 三级门，落全套裁决工件。
+**目的**：一次原子跑完 Task2 精度 + Task3 性能 + 三级门；总结工件按 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一。
 
 - **dispatch** `acc-verify-rootcause`，`dispatch_mode = run_npu`：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <spec> --mode <mode> --out reports/<op>/ --source-facts <CP-A 取材目录>/source_facts.json [--taskdoc-caseset <work>/taskdoc_caseset.json]`（`OPRUNWAY_*` 指真实机器/路径，不写进仓；⚠ `--out` 决定 work 口径，CP-A/B 产物必须已在 `<--out>/work` 下，见 §1.1；`--taskdoc-caseset` **仅 `precision.case_source=taskdoc` 时给，且这一档必须给**，两向不匹配由 `gen_cases` fail-closed）。
   - **⚠ `--source-facts` 在验收通路上必给，缺席直接拒跑**（不是可选参数）。三级门要拿它与 vendor build receipt 的来源锚逐字对账；没有对照物时 `git_pr` 档会沿用旧行为放过，「收据自称 `gitcode_pr`、事实其实是 `local_snapshot`」这类伪装就查不出来。传的就是 CP-A `fetch_source.py --out` 产的那份 `source_facts.json`（`completeness.status` 必须是 `complete`；`blocked`/半成品只供诊断，会被 fail-closed 拒）。
@@ -517,8 +518,8 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
     - **最新状态（2026-07-26）**：用户已确认 Median 任务书里的 `aclnnMedian` / `aclnnMedianDim` 小算子拼接版本等价于 Torch 对应接口，故 spec 基线为同机 `torch_npu:torch.median`，无需再证明等价、也不改为直调单个 ACLNN。已有 custom 50/50、baseline 48/50 有效数据；2 个 BF16 case 基线失败，性能整体仍 BLOCKED。
     - **执行口径**：有 spec 指定来源的有效真实基线、且双边 scope 同为 `kernel_only` 时，才引用 `perf_report.json` 裁决；无有效基线 / provenance 缺失 / 缺 MSTX / scope 不可比 → BLOCKED，绝不自己算比值。功能/精度 oracle 与性能 baseline 分开解释。
     - **最短证据链**：任务书已明确或用户已确认实际对照语义时，直接按该事实配置 baseline，不另造证明层。性能 case 通用地从精度 caseset 选择；A3 按全部输入物理载荷之和 `<=256 KiB` 为小 shape、其余为大 shape，分类不免测。Median 的 `target_ratio=1.0` 仍逐字来自“不劣化”，非参考仓默认 0.6。
-- **run_workflow 内部一次成**（不是 orchestrator 分三段调度）：Task2 真 NPU 精度 vs numpy golden（`validator.py`）+ Task3 msprof 真 kernel-only 性能 vs 基线（`perf_compare.py`）+ **末尾统一校三级门**（`validate_acceptance_state` task1/task2/task3，读落盘 evidence 独立复核：防跑子集报 100%、防放宽阈值、防混 e2e 墙钟；三级都由编排层**显式**传 staging 出来的 `source_facts.json`，不走自动发现）。**验收门 `validate_acceptance_state.py` STATUS: FAILED → 不出 pass 裁决；仍由 `run_workflow` 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整；见 §5）。
-- **产出**：`evidence.json` / `verdict.json` / `baseline.json`（仅有基线时）/ `perf_report.json` / `acceptance.json`，外加 staging 的输入原件副本 `spec.json` / `golden.py` / `source_facts.json`（后三者是**输入**不是裁决，CP-F 与事后复跑三级门直接消费）。
+- **run_workflow 内部一次成**（不是 orchestrator 分三段调度）：Task2 真 NPU 精度 vs numpy golden（`validator.py`）+ Task3 msprof 真 kernel-only 性能 vs 基线（`perf_compare.py`）+ **末尾统一校三级门**（`validate_acceptance_state` task1/task2/task3，读落盘 evidence 独立复核：防跑子集报 100%、防放宽阈值、防混 e2e 墙钟；三级都由编排层**显式**传 staging 出来的 `source_facts.json`，不走自动发现）。随后只调用 `acceptance_artifacts` 的唯一发布谓词，不在编排文档复刻其 schema 检查；通过才写 `acceptance.json`，否则写 `attempt_record.json`（exit 与原 deterministic state 不改）。
+- **产出**：共有诊断件 `evidence.json` / `verdict.json` / `baseline.json`（仅有基线时）/ `perf_report.json`；`acceptance_artifacts.formal_acceptance_allowed` 为 true 时产 `acceptance.json` + Markdown，为 false 时产 `attempt_record.json`（`acceptance_verdict=null`，无 Markdown），两者互斥。另有 staging 输入副本 `spec.json` / `golden.py` / `source_facts.json`（三者是**输入**不是裁决，只有正式 `acceptance.json` 的目录才能作为 CP-F base）。
 - **路由**：任何 FAIL → **dispatch** `acc-verify-rootcause`，`dispatch_mode = rootcause`：先「被测物自 build + 声明支持的 dtype + 手算 golden」**独立复现，解耦『被测算子 vs 我的 harness』再归因**——技术判定与官方口径分开、不外发、不臆断、不来回改口（Equal 血教训）。Task3 缺外部 GPU 标杆 / 口径不可比 → 走 §6 的 BLOCKED 路由，不出 pass。
   - 多输出 index 场景先读 evidence 的结构化 metrics：`index_value_consistency` 已允许 tie 时不同合法位置；
     `invalid_index_count>0` 表示 DUT 给出负数/越界下标，不得再以“重复中位数、设备可选不同位置”为由放宽。
@@ -526,8 +527,9 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 ### CP-E 报告（primary）
 
-**目的**：把确定性产物裁决翻成中文验收报告，一个字不自己判。
+**目的**：把已经通过正式发布门的确定性产物裁决翻成中文验收报告，一个字不自己判。只有 `attempt_record.json` 时本 CP 不启动。
 
+- **前置工件门**：必须存在正式 `acceptance.json`，并由 renderer 调用 `acceptance_artifacts` 的共享谓词通过；不得在 primary 另抄字段判断。`attempt_record.json`、raw `verdict.json` 或 `perf_report.json` 均不能替代这道门。
 - **primary 亲自**：**逐字引用** `acceptance.json`（门控后总体裁决）/ `verdict.json`（validator 精度裁决）/ `perf_report.json`（perf_compare 性能）的裁决**并标来源**，加 `spec.task_pr_gaps`（任务书↔PR 落差）+ 各维度（功能 / 精度 / 性能）通过数、失败用例+判据、性能达标比。
   **另列「任务书待确认项」**：逐字引用 `taskdoc_validation_receipt.json` 的 `pending_items`（未阻断但未说明的条款）
   与 `decided_items`（用户补充或豁免的项及其理由）。这两类与 `task_pr_gaps` 分开呈现——前者是**任务书自身**的缺口，
@@ -548,7 +550,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   并逐字引用 caseset 的 `coverage_strength`；**不得**沿用「1-wise + 白名单」那套说法（见 CP-B1）。
 - **N5 reference-only 如实呈现**：`case_source=generated` 且 caseset 带
   `reference_case_material_role=reference_only` 时，报告须写「正式用例/golden 由 OpRunway 生成；任务书附带材料与源仓 selftest 仅作 reference，未消费其执行结果形成裁决」，并引 caseset 的显式角色键。不得写成「任务书用例已验收」。
-- **红线**：数字全引真实产物，推断项标 `(推断)`；`needs_review` **不当 pass**；**验收门 `validate_acceptance_state.py` STATUS: FAILED → 不出 pass 裁决；报告如实呈现 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整）；只认任务书为验收权威，「PR 有测试」≠「验收过了」。
+- **红线**：数字全引真实产物，推断项标 `(推断)`；正式报告准入只认 `acceptance_artifacts.formal_acceptance_allowed`，不得在文档或 agent 另抄条件；只有 `attempt_record.json` 时不得生成或命名为正式验收报告。只认任务书为验收权威，「PR 有测试」≠「验收过了」。
 
 ### CP-F 验收后人工精度复核与重测（append-only）
 
@@ -674,7 +676,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 - **门在哪跑**：`run_workflow.py` 串完 Task1→2→3 后，内部按 `gate_stages`（`task1`、`task2`，若有性能用例或 `spec.perf.baseline` 再加 `task3`）统一调 `validate_acceptance_state._GATES[st]` 读**落盘产物**独立复核 → 打 `STATUS: PASSED|FAILED`。**批量驱动、非阶段间实时阻断。**
 - **门管什么**：只管「证据可信 + 完整」（全覆盖防跑子集、阈值三处一致防放宽、scope=kernel_only 防混 e2e）。**精度/性能 pass-fail 不由门判**——那是 `validator.py` / `perf_compare.py` 的活，门不重判（合法的精度 fail 不该被门当 BLOCKED）。
-- **验收门 `validate_acceptance_state.py` STATUS: FAILED → BLOCKED**：**不出 pass 裁决；仍由 `run_workflow` 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整），一票否决。primary/CP-E 如实呈现 BLOCKED，不美化成 pass。
+- **正式命名边界**：门结果随候选交给 `acceptance_artifacts.formal_acceptance_allowed`；true 为 formal，false 为 attempt，两者互斥。本 skill 不展开何种状态命中，primary 只逐字回报确定性产物。
 - **本 skill 只调这三级门、不重实现判定**：编排层不复刻门逻辑、不复刻 validator/perf_compare，只读它们落盘的裁决。
 
 ### 5.1 `golden_unavailable` —— 一等状态 + 独立终态 `BLOCKED_GOLDEN_UNAVAILABLE`

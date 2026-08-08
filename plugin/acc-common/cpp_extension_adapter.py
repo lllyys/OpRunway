@@ -22,6 +22,7 @@ import cpp_extension_codegen
 import cpp_extension_identity
 import perf_mode
 import perf_evidence_contract
+import precision_policy
 import stochastic_collector
 import stochastic_contract
 import tensor_shape_attrs
@@ -225,6 +226,88 @@ def _layout_equal(left, right, where):
                 == content_address.canonical_json_bytes(right))
     except (TypeError, ValueError) as ex:
         raise CppExtensionAdapterError(f"{where} 不是 canonical JSON：{ex}") from ex
+
+
+def validate_caseset_golden_invocation(caseset):
+    """复核 generated golden 新 ABI 的声明/context/receipt；legacy 返回 ``None``。
+
+    下游不执行 golden.py，也不重新猜 logical dtype；只把 caseset 的 context 与同一 case
+    已冻结的 ``inputs[].name/dtype`` 逐项对账。任一侧单改都使 receipt 或 caseset SHA 漂移。
+    """
+    if not isinstance(caseset, dict) or not isinstance(caseset.get("cases"), list):
+        raise CppExtensionAdapterError("golden invocation caseset/cases 须为 object/list")
+    cases = caseset["cases"]
+    receipt = caseset.get("golden_invocation_receipt")
+    context_cases = [
+        case for case in cases
+        if isinstance(case, dict) and "golden_case_context" in case
+    ]
+    if receipt is None:
+        if context_cases:
+            raise CppExtensionAdapterError(
+                "legacy caseset 不得凭空带 golden_case_context")
+        return None
+    if not isinstance(receipt, dict):
+        raise CppExtensionAdapterError("golden_invocation_receipt 须为 object")
+    _layout_exact_keys(receipt, {
+        "schema", "schema_version", "invocation", "invocation_sha256",
+        "case_context_schema", "case_context_schema_version", "case_count",
+        "case_contexts", "case_contexts_sha256",
+    }, "golden_invocation_receipt")
+    if (receipt.get("schema") != precision_policy.GOLDEN_INVOCATION_RECEIPT_SCHEMA
+            or isinstance(receipt.get("schema_version"), bool)
+            or receipt.get("schema_version")
+            != precision_policy.GOLDEN_INVOCATION_RECEIPT_SCHEMA_VERSION):
+        raise CppExtensionAdapterError("golden_invocation_receipt schema/version 非法")
+    try:
+        invocation = precision_policy.golden_invocation_contract(
+            {"invocation": receipt.get("invocation")},
+            where="caseset.golden_invocation_receipt")
+    except ValueError as ex:
+        raise CppExtensionAdapterError(f"golden invocation contract 非法：{ex}") from ex
+    expected_invocation_sha = content_address.content_digest(
+        precision_policy.GOLDEN_INVOCATION_CONTRACT_DOMAIN, invocation)
+    if receipt.get("invocation_sha256") != expected_invocation_sha:
+        raise CppExtensionAdapterError(
+            "golden_invocation_receipt.invocation_sha256 漂移")
+    if (receipt.get("case_context_schema")
+            != precision_policy.GOLDEN_CASE_CONTEXT_SCHEMA
+            or isinstance(receipt.get("case_context_schema_version"), bool)
+            or receipt.get("case_context_schema_version")
+            != precision_policy.GOLDEN_CASE_CONTEXT_SCHEMA_VERSION):
+        raise CppExtensionAdapterError(
+            "golden_invocation_receipt 的 case context schema/version 非法")
+    records, seen = [], set()
+    for index, case in enumerate(cases):
+        if not isinstance(case, dict):
+            raise CppExtensionAdapterError(f"cases[{index}] 须为 object")
+        cid = case.get("id")
+        if not isinstance(cid, str) or not cid or cid in seen:
+            raise CppExtensionAdapterError(
+                f"golden invocation case id 缺失或重复: {cid!r}")
+        seen.add(cid)
+        inputs = case.get("inputs")
+        if not isinstance(inputs, list) or not inputs:
+            raise CppExtensionAdapterError(f"{cid}.inputs 须为非空列表")
+        try:
+            context = precision_policy.validate_golden_case_context(
+                case.get("golden_case_context"), expected_inputs=inputs,
+                where=f"{cid}.golden_case_context")
+        except ValueError as ex:
+            raise CppExtensionAdapterError(f"{cid} golden context 非法：{ex}") from ex
+        records.append({
+            "case_id": cid,
+            "sha256": content_address.content_digest(
+                precision_policy.GOLDEN_CASE_CONTEXT_DOMAIN, context),
+        })
+    if (isinstance(receipt.get("case_count"), bool)
+            or receipt.get("case_count") != len(records)
+            or receipt.get("case_contexts") != records
+            or receipt.get("case_contexts_sha256") != content_address.content_digest(
+                precision_policy.GOLDEN_CASE_CONTEXTS_DOMAIN, records)):
+        raise CppExtensionAdapterError(
+            "golden_invocation_receipt 的 case 分母/context 摘要与 caseset 漂移")
+    return receipt
 
 
 def _layout_nonempty_string(value, where):
@@ -1251,6 +1334,12 @@ def build_invocation_plan(caseset, manifest):
     """
     variants = _variants_by_symbol(manifest)
     attr_contract, attr_by_name = _attr_contract_by_name(manifest)
+    golden_invocation_receipt = validate_caseset_golden_invocation(caseset)
+    golden_invocation_receipt_sha256 = (
+        content_address.content_digest(
+            precision_policy.GOLDEN_INVOCATION_RECEIPT_DOMAIN,
+            golden_invocation_receipt)
+        if golden_invocation_receipt is not None else None)
     layout_contract = validate_invocation_layout_contract(caseset, manifest)
     structure_contract = validate_caseset_tensor_shape_attr_contract(caseset)
     structure_by_id = ({row["case_id"]: row["contract_bindings"]
@@ -1365,6 +1454,8 @@ def build_invocation_plan(caseset, manifest):
     }
     if multi_contract_sha is not None:
         plan["multi_input_contract_sha256"] = multi_contract_sha
+    if golden_invocation_receipt_sha256 is not None:
+        plan["golden_invocation_receipt_sha256"] = golden_invocation_receipt_sha256
     if attr_contract is not None:
         plan["attr_parameter_contract_sha256"] = _canonical_sha(attr_contract)
     if layout_contract is not None:
@@ -1916,15 +2007,36 @@ def validate_receipt(work, caseset):
         raise CppExtensionAdapterError(
             f"cpp_extension receipt schema/status 非 VERIFIED v{cann_version.RECEIPT_SCHEMA_VERSION}")
 
+    golden_invocation_receipt = validate_caseset_golden_invocation(caseset)
+    golden_invocation_receipt_sha256 = (
+        content_address.content_digest(
+            precision_policy.GOLDEN_INVOCATION_RECEIPT_DOMAIN,
+            golden_invocation_receipt)
+        if golden_invocation_receipt is not None else None)
+    if golden_invocation_receipt_sha256 is None:
+        if "golden_invocation_receipt_sha256" in plan:
+            raise CppExtensionAdapterError(
+                "legacy invocation plan 不得凭空声明 golden invocation receipt")
+    elif plan.get("golden_invocation_receipt_sha256") \
+            != golden_invocation_receipt_sha256:
+        raise CppExtensionAdapterError(
+            "invocation plan 的 golden invocation receipt 摘要与 caseset 漂移")
     expected = {
         "caseset_sha256": _canonical_sha(caseset),
         "manifest_sha256": _canonical_sha(manifest),
         "invocation_plan_sha256": _canonical_sha(plan),
         "spec_sha256": manifest.get("spec_sha256"),
     }
+    if golden_invocation_receipt_sha256 is not None:
+        expected["golden_invocation_receipt_sha256"] = (
+            golden_invocation_receipt_sha256)
     bindings = receipt.get("bindings")
     if not isinstance(bindings, dict):
         raise CppExtensionAdapterError("receipt.bindings 缺失")
+    if (golden_invocation_receipt_sha256 is None
+            and "golden_invocation_receipt_sha256" in bindings):
+        raise CppExtensionAdapterError(
+            "legacy receipt 不得凭空声明 golden invocation receipt")
     for key, value in expected.items():
         _require_sha(f"expected.{key}", value)
         if bindings.get(key) != value:

@@ -18,7 +18,7 @@ tools: Bash, Read, Write, Edit
 - **单轮**：一次 dispatch 只干一件事，干完即回，不自行开第二轮。
 - **禁内部循环**：不在本子agent 里反复重跑/自我迭代凑结果；循环控制权在 orchestrator。
 - **禁跨阶段**：verify_aclnn_harness 只做 CP-C 自证，run_npu 只跑 CP-D，rootcause 只复现解耦；**不自行 dispatch 别的 subagent、不推进下一 CP**（那是 orchestrator 的编排纪律）。
-- **不自行判 pass/fail**：判定唯一归**确定性脚本链**——`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）→ 门控后写 `acceptance.json`（⚠ 这条链的**末端产物只在验收路径 `cpp_extension` 上落盘**；开发级路径同样跑判定，但落的是 `dev_*` 产物，见「产出按路径分叉」）。本子agent **只逐字引用确定性产物的裁决并标来源**（ADR 0007）——不是「绝不提 pass/fail」，而是「不得自己下 pass/fail 结论」。
+- **不自行判 pass/fail**：判定唯一归**确定性脚本链**——`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）。链末端只按 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一；开发级路径写 `dev_*`。本子agent **只逐字引用确定性产物的裁决并标来源**（ADR 0007）——不是「绝不提 pass/fail」，而是「不得自己下 pass/fail 结论」。
 - **只回结构化摘要给 orchestrator**：不面向用户长篇输出；回一份机读摘要（见文末 schema），路由/追问由 primary 决定。
 
 ## dispatch_mode 表
@@ -26,7 +26,7 @@ tools: Bash, Read, Write, Edit
 | dispatch_mode | 触发（何时被 dispatch） | 输入工件 | 本次动作 | 本次产出 | 验收标准（回给 orchestrator 才算成） |
 |---|---|---|---|---|---|
 | `verify_aclnn_harness`（⛔ **已停止准入的形态专用**：`aclnn_py` 自 2026-08-06 无真机入口，本 mode 已无下游、仅作历史保留） | CP-C0 已为 `READY_WAIT_NPU_TRUST_GATE`，且 `runner_form=aclnn_py` | spec + golden.py + `caseset.json` + `work/aclnn_preflight.json` + 真机环境变量 | 正式生成完整 caseset/golden；运行 `verify_aclnn_harness.py`，按能力确定性选小见证集，真机 build/exec/readback，与 CPU golden 对拍 | 内容寻址 `work/aclnn_harness_trust.json` | `status=TRUSTED_FOR_CP_D`；绑定 spec/完整 caseset/preflight、见证数据字节、golden 源码、PR/build/toolkit/SoC/符号与执行逻辑；`acceptance_verdict=null` |
-| `run_npu` | CP-D，CP-C 的自证门已过（`cpp_extension` → build/load/vendor receipt，**验收路径**；`cpp` → runner 收据、`aclnn_py` → harness 收据，两者均已停止准入、仅作历史保留）、用户已确认执行形态（就地跑 / 远程连）与 NPU 可达 | `<op>.spec.json` + ⚠ **CP-A 事实包 `<CP-A 取材目录>/source_facts.json`（验收路径上是必需输入，不是可选）**——orchestrator 必须把这个路径随 dispatch 一起交下来，本子agent 原样传给 `--source-facts`；拿不到就当场 BLOCKED 回报，**不自己去猜路径、不去别处翻**。再按 `spec.runner_form` 分叉：`cpp_extension` 用生成的官方 NpuExtension bundle、逐 case invocation plan 与精确 vendor；`cpp` 用已验证 per-op runner；`aclnn_py` 用 DUT + 通用 ctypes runner | 真机 `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json` **一次原子**跑 Task2 精度 + Task3 性能 + 门（**唯一派得出的是** `cpp_extension`；`new_example` / `aclnn_py` 自 2026-08-06 停止准入，派不出、显式指定也被拒） | **按路径分，别混列**（详见下节「产出按路径分叉」）。**验收路径**（`cpp_extension`）：`caseset.json`、`evidence.json`、`verdict.json`、`baseline.json`（有基线时）、`perf_report.json`、`acceptance.json` + Markdown 验收报告。**非验收路径**（显式 `--mode mock` / `catlass*`）：`caseset.json`、`evidence.json`、`dev_precision_check.json`、`perf_report.json`（带 NON-ACCEPTANCE 戳）、`dev_run_summary.json`；**物理上不产** `verdict.json` / `acceptance.json`，也不产 Markdown 验收报告 | 工件落盘。**验收路径**：逐字引用 `acceptance.json` / `verdict.json` 的确定性裁决和来源；门 FAILED / Task3 BLOCKED 如实暴露。**开发级路径**：只回报 `dev_run_summary.json` / `dev_precision_check.json` 的事实（`is_acceptance=false`、`selfcheck` 是管路自检非验收门），**不进入裁决引用流程**、`verdict_quoted` 留 null；⚠ 不得等待或索要 `verdict.json` / `acceptance.json`（**不是缺件，是这条路压根不写**） |
+| `run_npu` | CP-D，CP-C 的自证门已过（`cpp_extension` → build/load/vendor receipt，**验收路径**；`cpp` → runner 收据、`aclnn_py` → harness 收据，两者均已停止准入、仅作历史保留）、用户已确认执行形态（就地跑 / 远程连）与 NPU 可达 | `<op>.spec.json` + ⚠ **CP-A 事实包 `<CP-A 取材目录>/source_facts.json`（验收路径上是必需输入，不是可选）**——orchestrator 必须把这个路径随 dispatch 一起交下来，本子agent 原样传给 `--source-facts`；拿不到就当场 BLOCKED 回报，**不自己去猜路径、不去别处翻**。再按 `spec.runner_form` 分叉：`cpp_extension` 用生成的官方 NpuExtension bundle、逐 case invocation plan 与精确 vendor；`cpp` 用已验证 per-op runner；`aclnn_py` 用 DUT + 通用 ctypes runner | 真机 `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json` **一次原子**跑 Task2 精度 + Task3 性能 + 门（**唯一派得出的是** `cpp_extension`；`new_example` / `aclnn_py` 自 2026-08-06 停止准入，派不出、显式指定也被拒） | **按三类结果分，别混列**（详见下节）：正式验收终态产 `acceptance.json` + Markdown；验收 attempt 产 `attempt_record.json`、无正式报告；开发级路径产 `dev_*`、无正式报告。三类共有/各有的 raw 工件按真实落盘列出 | 工件落盘。正式终态逐字引用 `acceptance.json`；attempt 回报 `attempt_record.pipeline_state` / `gate.errors` 且 `verdict_quoted=null`，不得拿 raw `verdict.json` 当总体裁决；开发级路径同样 `verdict_quoted=null` |
 | `run_precision_retest` | CP-F F2 已产生 confirmed directive 与 prepared attempt，用户已确认真机副作用；⚠ **只接受 base `spec.runner_form == "cpp_extension"`**（CP-F 要写 `verdict.json`，**没有逃生阀**，任何「放行非准入通路」的旁路都不适用、也不得用于绕过；`cpp` / `aclnn_py` 的历史验收产物仍保持原裁决与历史效力，只是不支持创建或执行 CP-F attempt） | 可信 `attempts_root` 与其直接四位 attempt、含 golden 授权来源的冻结包、DUT 身份和真机环境 | 先校验 `CANN_VERSION/ASCEND_TOOLKIT_VERSION/OPRUNWAY_SOC` 与 spec/receipt/driver 一致，再真机调用 `cp_f_execute_attempt.py`；只执行 manifest 指定原 case，不调 `run_workflow`、性能 collector 或 `perf_compare` | attempt 内 `caseset/evidence/verdict/attempt_gate/retest_acceptance/attempt.receipt/精度重测报告` | 逐字引用 validator 与 Task-2 gate；基础验收不变、`performance_retested=false`；分开回报“机械闭环”与“新标准裁决生效”；失败单轮返回 blocker，不内部重跑 |
 | `rootcause` | CP-D 出现**任何 FAIL**（精度/性能/门），由 orchestrator 再 dispatch | 失败的 `evidence.json` + 精度判定产物（**验收路径**读 `verdict.json`；**开发级路径**读 `dev_precision_check.json`，那条路没有 `verdict.json`）+ `<op>.spec.json` + PR 改动落点 | 「**被测物自 build + 声明 dtype + 手算 golden**」独立复现，解耦 **op vs harness** 再归因 | `rootcause.md`（独立复现记录 + 归因证据 + 责任归属：op / harness / 环境） | 复现路径与观测数字全来自真实日志/采集；归因有实锤、非臆断；技术判定与官方口径分开、不外发、不替 PR 作者修到底 |
 
@@ -71,11 +71,14 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
    - **远程连**（开发机 → 目标机）：`OPRUNWAY_TARGET=remote`（缺省）时 `OPRUNWAY_SSH_HOST` 必填；SSH alias / 容器名 / 远端工作根来自 `.oprunway/real-machine.env`，另需确认 VPN / 跳板通不通。
    - ⚠ **该文件缺席不构成阻塞**（它只是远程连形态的连接元数据），**不得**据此拒绝上真机；但它**存在时**必须读 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`，那些根及其子目录是只读保留现场，未登记 ≠ 可随意清理（`AGENTS.md` §5.3）。
 2. **源码与执行四段门**：shell 必须使用等价于 `set -Eeuo pipefail` 的 fail-fast 语义，并按
-   `SOURCE_ACQUIRED → HEAD_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED` 顺序推进。期望 SHA
-   只取当前 facts bundle 的 40 位 `head_sha`；先取得精确对象、detached checkout，再以
-   `git rev-parse HEAD` 逐字核对。直接 SHA 不可取得时，只允许按执行前有限列明的 PR-head ref/head repo
-   取得对象，最终仍只认 SHA；不得用默认分支、base head、可移动分支或后继提交兜底。任一步失败立即
-   blocked，禁止启动后续 build/workflow，也不得在同一 subagent 内换 ref、补 fetch 或重跑。
+   `SOURCE_MATERIALIZED → CONTENT_ANCHOR_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED`
+   顺序推进。current facts 必须逐字记录
+   `input_association=caller_trusted_pair_v1/asserted_by_caller`，再把实际物化的完整目标内容
+   重算为 `content_anchor`，与 `source_facts.pr.content_anchor` 及 build snapshot 逐字对账。
+   URL/repo/fork/ref/head 只是 transport observation，不参与准入或重新质疑调用方给定的配对。
+   fresh caller-trusted facts 不产、不要求 `correspondence.json`；它只能在 legacy 历史只读
+   流程中解释，不得补写后升格为 current。任一内容物化/锚点/build 绑定失败立即
+   blocked，禁止启动后续 build/workflow，也不得在同一 subagent 内换 locator、补 fetch 或重跑。
    构建入口的权限检查必须匹配实际 argv：`bash build.sh` 只校文件可读，直接 `./build.sh` 才校
    executable bit；不得以无关的 `-x` 假设把合法的 `0644 build.sh` 误判为 build 失败。
    投放冻结包前还须在空目录真实解包，校验同一 manifest 覆盖目标侧执行入口与全部 payload，并对最终
@@ -128,25 +131,26 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
    > ⚠ **能力表（`SUPPORTED_NP_BY_FORM` / `DEFERRED_NP_BY_FORM`）不是准入表**，两者别互相反推。
 
    - `run_workflow.py` **一次性串 Task1→2→3**：Task2 = 真 NPU 精度 vs numpy golden（走 `validator.py`）；Task3 = msprof 真 kernel-only 性能 vs 基线（走 `perf_compare.py`）；**末尾统一校门**（`validate_acceptance_state.py`，读**落盘** evidence.json 独立复核：防跑子集报 100%、防放宽阈值、防混 e2e 墙钟）。
-   - ⚠ **门的级数也按路径分**：**验收路径**（`cpp_extension`）跑 `--stage task1|task2|task3`（无性能要求或精度未全过则不加 task3），落 `acceptance.json.gate`；**开发级路径**只跑 `task1`（+ 条件性 `task3`）——task2 门读 `verdict.json`，而那条路物理不产此文件，这级无从跑起——结果落 `dev_run_summary.json.selfcheck`，脚本自己就写明「**管路自检，非验收门**」。⚠ 别把开发级路径的 `selfcheck.passed=true` 讲成「三级验收门过了」。
+   - ⚠ **门的级数也按路径分**：**验收路径**（`cpp_extension`）跑 `--stage task1|task2|task3`（无性能要求或精度未全过则不加 task3），总结工件按 `acceptance_artifacts.formal_acceptance_allowed` 在 `acceptance.json` / `attempt_record.json` 间二选一；**开发级路径**只跑 `task1`（+ 条件性 `task3`）并落 `dev_run_summary.json.selfcheck`。⚠ 三者不能互相顶替。
    - ⚠ 门是 **`run_workflow.py` 内部**的一环——**批量驱动、末尾统一校门，非阶段间实时阻断**；**不是**本子agent 分阶段单独调度。本子agent 不拆开跑各级门、不重实现判定。
-4. **门 FAILED → 总体 BLOCKED**（**验收路径专属**）：验收门 `validate_acceptance_state.py` `STATUS: FAILED` → 不出 pass 裁决；仍由 `run_workflow` 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1；验收门未过=证据不可信/不完整）。本子agent **如实回报 BLOCKED + 失败级别 + evidence.json 证据**，**不自己改判为 pass**。
+4. **门结果进入统一正式命名边界**（**验收路径专属**）：候选只交给 `acceptance_artifacts.formal_acceptance_allowed`，由该唯一谓词决定 formal / attempt 二选一；本子agent不展开命名条件，只逐字回报 `pipeline_state`、失败级别与 evidence，不自己改判或补报告。
    开发级路径没有这条：它压根不写 `acceptance.json`，自检失败只落 `dev_run_summary.json.selfcheck.errors` + `pipeline_result`（**人读串，不是验收裁决**），如实透传即可。
 5. **Task3 blocked 路由**（如实透传，不自行 judge）：
    - `BLOCKED_WAIT_GPU_BENCHMARK` —— 任务书要求 GPU 基线但**缺外部 GPU 标杆数据**（GPU external 对比层 **consumer 侧已接入 pipeline**，缺的是外部提供的真实数据）。
    - `BLOCKED_INCOMPARABLE_TIMING_SCOPE` —— 计时**口径不可比**（如 kernel-only vs e2e 墙钟）。
    - 基线来源与调用层级由**任务书事实 + 已记录的用户确认**落进 `spec.perf.baseline`。Median 已确认“小算子拼接等价于 Torch 对应接口”，故用同机 `torch_npu:torch.median`，不再重复证明，也不改为直调单个 ACLNN 接口。性能 case 从精度 caseset 选择，A3 按输入物理载荷 `<=256 KiB` / `>256 KiB` 分小/大 shape；分类不免测。任何缺数或 scope 不可比均走采集侧 BLOCKED/rootcause，不能猜、放宽 parser 或跳 case。
-6. **产出按路径分叉**（⚠ 落盘文件名由 `run_workflow.py` 按 `is_acceptance` 二选一决定，**两套不并存**；先认清自己跑的是哪条，再去读文件）：
+6. **产出按路径与正式发布门分叉**（三类总结名不并存；先认清结果类别，再去读文件）：
 
    | 路径 | 落盘产物 | 不产（**不是缺件**） |
    |---|---|---|
-   | **验收路径** `cpp_extension` | `caseset.json`、`evidence.json`、`verdict.json`、`baseline.json`（有基线时）、`perf_report.json`、`acceptance.json`、Markdown 验收报告；另有 `repro/index.tsv` + `repro/cases/<case_id>.sh`（只重放本轮冻结输入/ELF，`acceptance_verdict=null`） | — |
+   | **验收正式终态** `cpp_extension` | `caseset.json`、`evidence.json`、`verdict.json`、`baseline.json`（有基线时）、`perf_report.json`、`acceptance.json`、Markdown 验收报告；另有 `repro/index.tsv` + `repro/cases/<case_id>.sh`（只重放本轮冻结输入/ELF，`acceptance_verdict=null`） | `attempt_record.json`、`dev_*` |
+   | **验收 attempt** `cpp_extension` | `caseset.json`、`evidence.json`、raw `verdict.json`、`baseline.json`（有基线时）、`perf_report.json`、`attempt_record.json`；`acceptance_verdict=null` | `acceptance.json`、Markdown 验收报告、`dev_*` |
    | **非验收路径**（显式 `--mode mock` / `catlass*`） | `caseset.json`、`evidence.json`、`dev_precision_check.json`（精度判定照跑，但**换了文件名**）、`baseline.json`（有基线时）、`perf_report.json`（带 `evidence_grade` + NON-ACCEPTANCE 戳）、`dev_run_summary.json`（字段是 `pipeline_result` / `precision_check` / `selfcheck`，**不是** `overall` / `precision_verdict` / `gate`） | `verdict.json`、`acceptance.json`、Markdown 验收报告 |
 
    ⚠ 换名不是「加个标注」而是**物理不产**：下游按文件名读裁决，同名同形的产物迟早被当验收结论用掉。所以在开发级路径上**等待、索要或按缺件上报** `verdict.json` / `acceptance.json` 都是错的读法。
 7. **回报**：除裁决/判定字段与门结果外，固定记录
    `expected_pr_head/resolved_head/source_acquisition/checkout_verified/build_started/workflow_started/failed_stage/first_failure_exit_code`。
-   **验收路径**逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json`；**开发级路径**逐字引用 `dev_run_summary.json`/`dev_precision_check.json`/`perf_report.json`，并**显式标注 `evidence_grade="development"` / NON-ACCEPTANCE、本轮无验收裁决**——那条路的结果**不进入 CP-E 验收报告的裁决栏**，「跑绿了」不得写成验收通过。两条路都给出 `cases_scored`、有效 us/speedup 条数及“性能计划数/caseset 总数”。所有性能 case 都须真实采集，`cases_scored=0` 必须明确性能未验证，不能把“达标”计数改写成真实性能 PASS。**FAIL 时不自行 dispatch rootcause**（禁跨阶段）——由 orchestrator 决定是否再 dispatch 本子agent 的 `rootcause`。
+   **验收正式终态**逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json`；**验收 attempt** 只引用 `attempt_record.json` 的非裁决状态与 raw 诊断来源，明确“本轮无正式验收裁决/报告”；**开发级路径**逐字引用 `dev_run_summary.json`/`dev_precision_check.json`/`perf_report.json`，并标 NON-ACCEPTANCE。后三类均不能互相顶替。所有路径都给出真实 `cases_scored`、有效 us/speedup 条数及计划覆盖分母；`cases_scored=0` 明确性能未验证。**正式 FAIL 时不自行 dispatch rootcause**（禁跨阶段）——由 orchestrator 决定。
 
 ## dispatch_mode: rootcause — FAIL 独立复现解耦（先解耦、再归因）
 
@@ -195,7 +199,8 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
 
 | 路径 | `artifacts` | `verdict_quoted` | `gate` |
 |---|---|---|---|
-| **验收路径** `cpp_extension` | `reports/<op>/acceptance.json`、`verdict.json`、`evidence.json`、`perf_report.json` 等本轮真实落盘者 | `source` = `reports/<op>/acceptance.json`，逐字引用 | task1/task2（+ task3）如实填 |
+| **验收正式终态** `cpp_extension` | `reports/<op>/acceptance.json`、`verdict.json`、`evidence.json`、`perf_report.json` 等本轮真实落盘者 | `source` = `reports/<op>/acceptance.json`，逐字引用 | task1/task2（+ task3）如实填 |
+| **验收 attempt** `cpp_extension` | `reports/<op>/attempt_record.json`、raw `verdict.json`、`evidence.json`、`perf_report.json` 等本轮真实落盘者 | **`null`**；把 `attempt_record.pipeline_result/pipeline_state` 与 `gate.errors` 放 notes，标 `acceptance_verdict=null` | task1/task2（+ task3）如实填；不得进 CP-E |
 | **非验收路径**（显式 `--mode mock` / `catlass*`）| `reports/<op>/dev_run_summary.json`、`dev_precision_check.json`、`evidence.json`、`perf_report.json` | **`null`**——本轮无验收裁决可引；把 `dev_run_summary.json` 的 `pipeline_result` 放 `notes` 并标 NON-ACCEPTANCE，**不得**塞进 `verdict_quoted` 冒充裁决 | task1（+ 条件性 task3）如实填；**task2 填 `N/A`**，且整个 `gate` 是**管路自检**结果、非验收门 |
 | `verify_aclnn_harness` / `rootcause` | 各自收据 / `rootcause.md` | `null`（这两个 mode 本就不产裁决） | 不适用，留空或 `null` |
 
@@ -203,7 +208,7 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
 
 - **判定唯一归确定性脚本链**（`validator` + `perf_compare` + 三级 acceptance gate，ADR 0007）；本子agent 不自行判定，只逐字引用产物裁决并标来源。
 - **单轮 / 禁内部循环 / 禁跨阶段 / 只回结构化摘要**；不面向用户、不自行推进 CP、不自行 dispatch 他人。
-- **门在 `run_workflow.py` 内部**（批量驱动、末尾统一校门、非阶段间实时阻断）；**验收路径**跑满三级、门 FAILED → 总体 BLOCKED、不出 pass；**开发级路径**只跑 task1（+ 条件性 task3）的**管路自检**，落 `dev_run_summary.json.selfcheck`，自检过了也**不构成**验收门通过。
+- **门在 `run_workflow.py` 内部**（批量驱动、末尾统一校门、非阶段间实时阻断）；总结工件只按 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一，只有 attempt 时不产正式裁决/报告；**开发级路径**只跑 task1（+ 条件性 task3）的管路自检，落 `dev_run_summary.json.selfcheck`。
 - **对外单一对话入口在 primary、脚本幕后**（proposed·未 settle，载重前需核）；真机路径 `OPRUNWAY_*` 走环境变量、不入仓；真机 build/跑测 + 任何对外动作先确认。
 - 换运行时（Codex/Antigravity）：换本子agent 壳，`acc-common/` 脚本不动（proposed·未 settle，载重前需核）。
 - 相关：`agents/op-acceptance.md`（CP-D dispatch 本子agent）、`skills/acceptance-workflow`（CP-A..E 状态机）、`acc-common/run_workflow.py`（run_npu 执行体）、`acc-common/validate_acceptance_state.py`（三级门）。

@@ -18,7 +18,7 @@ description: OpRunway 验收 CP-B 子 agent——校验任务书输入，再把�
 - **禁内部循环**：不在本 agent 内反复「抽→自跑门→再抽」。循环由 orchestrator 控（CP-B 的 **`--dry-run` 契约自检**报错/账本异常时，由 orchestrator 再 dispatch `refine_spec`）。
 - **禁跨阶段**：只产 spec。不跑取材/生成/验收脚本，不重判调用方给定的任务书↔源码关联。fresh facts 不要求 `correspondence.json`；legacy 只读流程不得借本 agent 合成 current 关联声明。
 - **只回结构化摘要给 orchestrator**：不直接面向用户对话、不展示脚本命令；产出=落盘的 spec 文件 + 一段结构化中文摘要（见末节）。
-- **不自行判定**：判定唯一归**确定性脚本链**——`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）→ 门控后写 `acceptance.json`。编排层与 subagent **不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**（ADR 0007）——不是「绝不提 pass/fail」。本 agent 只产 spec 与 gaps；spec 抽得对不对不由自己宣告「通过」，而由 CP-B 的 **`--dry-run` 契约自检**（只查用例**计划**自洽，**不产任何裁决**）与 **CP-D 真机门**用确定性脚本裁决。
+- **不自行判定**：判定唯一归**确定性脚本链**——`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）；formal / attempt 总结只按 `acceptance_artifacts.formal_acceptance_allowed` 二选一。编排层与 subagent **不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**（ADR 0007）——不是「绝不提 pass/fail」。本 agent 只产 spec 与 gaps；spec 抽得对不对不由自己宣告「通过」，而由 CP-B 的 **`--dry-run` 契约自检**（只查用例**计划**自洽，**不产任何裁决**）与 **CP-D 真机门**用确定性脚本裁决。
   ⚠ **验收裁决只有真机通路产得出来**（C5，用户 2026-07-22 拍板）：mock 的「NPU 输出」= `golden.copy()`、精度按构造必过、性能是编的假数，它**已不再写 `acceptance.json` / `verdict.json`**（改产标明 NON-ACCEPTANCE 的 `dev_run_summary.json`）。**别再说「跑 mock 看裁决」**。
   ⚠ **真机是必要不是充分**：当前**只有 `runner_form="cpp_extension"` 有真机入口并准入产裁决**（`AGENTS.md` §4）。`cpp` / `aclnn_py` 是只为读取旧 spec 保留的历史值，本 agent 不得为新一轮抽取它们。
 

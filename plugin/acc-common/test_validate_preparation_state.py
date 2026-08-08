@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """非真机准备状态复用校验器单测。"""
 
+import copy
 import hashlib
 import json
 import os
@@ -315,6 +316,216 @@ class PreparationStateTest(unittest.TestCase):
         self.assertIn("case_planner", {
             item["name"] for item in receipt["checks"]
             if item["status"] == "MISS"})
+
+    def test_planner_base_dependencies_match_gen_cases_producer(self):
+        import gen_cases
+        self.assertEqual(VPS._PLANNER_DEPENDENCIES,
+                         gen_cases._PLANNER_DEPENDENCIES)
+
+    def _configure_capability_planner(self, spec, *, missing_dependency=None):
+        """用 gen_cases 的真实 dry-run 产出能力依赖，再嵌回门测试夹具。"""
+        import gen_cases
+
+        self.spec = copy.deepcopy(spec)
+        self.spec["golden"] = {
+            "authorization": {"kind": "oracle_method"},
+            "taskdoc_snapshot": {"sha256": self.snapshot_sha},
+        }
+        self._write_json("spec.json", self.spec)
+        self.plan["spec_binding"]["sha256"] = hashlib.sha256(
+            content_address.canonical_json_bytes(self.spec)).hexdigest()
+        with mock.patch.object(
+                gen_cases, "load_golden",
+                side_effect=ValueError("缺 golden: planner binding fixture")):
+            producer_plan = gen_cases._build_dry_run_ledger(self.spec)
+        logic_files = copy.deepcopy(
+            producer_plan["planner_binding"]["logic_files"])
+        if missing_dependency is not None:
+            logic_files.pop(missing_dependency)
+        self.plan["planner_binding"]["logic_files"] = logic_files
+        self.plan["planner_binding"]["gen_cases_py_sha256"] = (
+            producer_plan["planner_binding"]["gen_cases_py_sha256"])
+        self._rewrite_plan()
+
+    def _configure_stochastic_producer_plan(self):
+        """完整采用 gen_cases 的合法 stochastic ledger，不借 deterministic 夹具。"""
+        import gen_cases
+        from test_gen_cases_stochastic import _spec
+
+        preparation_inputs = copy.deepcopy(self.plan["preparation_inputs"])
+        self.spec = _spec()
+        self.spec["golden"] = {
+            "authorization": {"kind": "oracle_method"},
+            "taskdoc_snapshot": {"sha256": self.snapshot_sha},
+        }
+        self._write_json("spec.json", self.spec)
+        self.plan = gen_cases._build_dry_run_ledger(
+            self.spec, preparation_inputs=preparation_inputs)
+        self._rewrite_plan()
+
+    def test_multi_input_planner_binding_is_reusable_when_dependency_matches(self):
+        from test_gen_cases_multi_input import _binary_spec
+
+        self._configure_capability_planner(_binary_spec())
+        receipt = self._evaluate()
+        self.assertEqual(receipt["status"], "REUSABLE")
+        self.assertEqual(
+            next(item["status"] for item in receipt["checks"]
+                 if item["name"] == "case_planner"),
+            "PASS",
+        )
+
+    def test_multi_input_planner_binding_missing_dependency_is_miss(self):
+        from test_gen_cases_multi_input import _binary_spec
+
+        self._configure_capability_planner(
+            _binary_spec(), missing_dependency="multi_input_contract.py")
+        receipt = self._evaluate()
+        self.assertEqual(receipt["status"], "MISS")
+        self.assertEqual(
+            next(item["status"] for item in receipt["checks"]
+                 if item["name"] == "case_planner"),
+            "MISS",
+        )
+
+    def test_stochastic_producer_plan_is_reusable_without_pointwise_golden(self):
+        self._configure_stochastic_producer_plan()
+        self.assertEqual(self.plan["golden_dependency"], {
+            "status": "not_applicable_stochastic",
+            "bytes_sha256": None,
+            "contract_sha256": None,
+        })
+        receipt = self._evaluate()
+        self.assertEqual(receipt["status"], "REUSABLE")
+        self.assertEqual(
+            next(item["status"] for item in receipt["checks"]
+                 if item["name"] == "case_planner"),
+            "PASS",
+        )
+
+    def test_stochastic_planner_binding_missing_dependency_is_miss(self):
+        self._configure_stochastic_producer_plan()
+        self.plan["planner_binding"]["logic_files"].pop(
+            "stochastic_contract.py")
+        self._rewrite_plan()
+        receipt = self._evaluate()
+        self.assertEqual(receipt["status"], "MISS")
+        self.assertEqual(
+            next(item["status"] for item in receipt["checks"]
+                 if item["name"] == "case_planner"),
+            "MISS",
+        )
+
+    def test_stochastic_golden_not_applicable_marker_must_be_exact(self):
+        self._configure_stochastic_producer_plan()
+        baseline = copy.deepcopy(self.plan)
+        invalid_markers = (
+            {
+                "status": "not_applicable_stochastic",
+                "bytes_sha256": "a" * 64,
+                "contract_sha256": None,
+            },
+            {
+                "status": "not_applicable_stochastic",
+                "bytes_sha256": None,
+            },
+            {
+                "status": "not_applicable_stochastic",
+                "bytes_sha256": None,
+                "contract_sha256": None,
+                "unexpected": True,
+            },
+            {
+                "status": "loaded",
+                "bytes_sha256": self.golden_sha,
+                "contract_sha256": self.golden_contract_sha,
+            },
+        )
+        for marker in invalid_markers:
+            with self.subTest(marker=marker):
+                self.plan = copy.deepcopy(baseline)
+                self.plan["golden_dependency"] = marker
+                self._rewrite_plan()
+                receipt = self._evaluate()
+                self.assertEqual(receipt["status"], "BLOCKED")
+                golden_check = next(
+                    item for item in receipt["checks"]
+                    if item["name"] == "golden")
+                self.assertEqual(golden_check["status"], "BLOCKED")
+
+    def test_invalid_capability_marker_is_blocked_even_if_ledger_is_rebound(self):
+        baseline_spec = copy.deepcopy(self.spec)
+        baseline_plan = copy.deepcopy(self.plan)
+        invalid_markers = (
+            ("multi_input_contract", None, "multi_input_contract.py"),
+            ("multi_input_contract", [], "multi_input_contract.py"),
+            ("stochastic", None, "stochastic_contract.py"),
+            ("stochastic", [], "stochastic_contract.py"),
+        )
+        for field, value, dependency in invalid_markers:
+            with self.subTest(field=field, value=value):
+                self.spec = copy.deepcopy(baseline_spec)
+                self.plan = copy.deepcopy(baseline_plan)
+                self.spec[field] = value
+                self._write_json("spec.json", self.spec)
+                self.plan["spec_binding"]["sha256"] = hashlib.sha256(
+                    content_address.canonical_json_bytes(self.spec)).hexdigest()
+                self.plan["planner_binding"]["logic_files"][dependency] = (
+                    VPS._file_sha256(os.path.join(
+                        os.path.dirname(VPS.__file__), dependency)))
+                self._rewrite_plan()
+
+                receipt = self._evaluate()
+                self.assertEqual(receipt["status"], "BLOCKED")
+                case_plan_check = next(
+                    item for item in receipt["checks"]
+                    if item["name"] == "case_plan")
+                self.assertEqual(case_plan_check["status"], "BLOCKED")
+                self.assertIn(field, case_plan_check["reason"])
+
+    def test_missing_spec_does_not_block_case_planner_resolution(self):
+        os.unlink(os.path.join(self.root, "spec.json"))
+        receipt = self._evaluate()
+        self.assertEqual(
+            next(item["status"] for item in receipt["checks"]
+                 if item["name"] == "spec"),
+            "MISS",
+        )
+        self.assertEqual(
+            next(item["status"] for item in receipt["checks"]
+                 if item["name"] == "case_planner"),
+            "MISS",
+        )
+        self.assertNotIn(
+            ("case_plan", "BLOCKED"),
+            {(item["name"], item["status"]) for item in receipt["checks"]},
+        )
+
+    def test_stochastic_without_multi_input_is_blocked_even_if_rebound(self):
+        from test_gen_cases_stochastic import _spec
+
+        self.spec = _spec()
+        self.spec.pop("multi_input_contract")
+        self.spec["golden"] = {
+            "authorization": {"kind": "oracle_method"},
+            "taskdoc_snapshot": {"sha256": self.snapshot_sha},
+        }
+        self._write_json("spec.json", self.spec)
+        self.plan["spec_binding"]["sha256"] = hashlib.sha256(
+            content_address.canonical_json_bytes(self.spec)).hexdigest()
+        dependency = "stochastic_contract.py"
+        self.plan["planner_binding"]["logic_files"][dependency] = (
+            VPS._file_sha256(os.path.join(
+                os.path.dirname(VPS.__file__), dependency)))
+        self._rewrite_plan()
+
+        receipt = self._evaluate()
+        self.assertEqual(receipt["status"], "BLOCKED")
+        case_plan_check = next(
+            item for item in receipt["checks"] if item["name"] == "case_plan")
+        self.assertEqual(case_plan_check["status"], "BLOCKED")
+        self.assertIn("stochastic", case_plan_check["reason"])
+        self.assertIn("multi_input_contract", case_plan_check["reason"])
 
     def _rewrite_plan(self):
         """改完 plan 载重后重算 ledger_digest 并落盘（不然会先被篡改门拦下）。"""

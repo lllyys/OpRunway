@@ -29,6 +29,7 @@ import gen_cases, repo_adapter, validator, perf_compare  # noqa: E402
 import cpp_extension_adapter  # noqa: E402
 import repro_artifacts  # noqa: E402
 import render_acceptance_markdown  # noqa: E402
+import acceptance_artifacts  # noqa: E402
 import validate_acceptance_state as gate  # noqa: E402
 import source_facts_lookup  # noqa: E402
 import spec_change_gate  # noqa: E402
@@ -68,6 +69,8 @@ _MOCK_MODES = frozenset({"mock", "catlass_mock"})
 # 非验收产物名：与验收产物 acceptance.json / verdict.json **物理隔离**（不同名 → 不可能被下游按老路径读走当裁决）
 _DEV_SUMMARY_FILE = "dev_run_summary.json"     # ← 取代 acceptance.json
 _DEV_VERDICT_FILE = "dev_precision_check.json"  # ← 取代 verdict.json
+_ATTEMPT_RECORD_FILE = acceptance_artifacts.ATTEMPT_RECORD_FILE
+_MARKDOWN_REPORT_ERROR_FILE = "markdown_report_error.json"
 _ACCEPTANCE_FILES = ("acceptance.json", "verdict.json")
 _DEV_FILES = (_DEV_SUMMARY_FILE, _DEV_VERDICT_FILE)
 #: 人读交付物：`render_acceptance_markdown.write_report` 落进报告目录的三份 Markdown。
@@ -79,7 +82,9 @@ _REPORT_MD_FILES = ("验收报告.md", "精度失败明细.md", "性能失败明
 #: ⚠ **两套产物一起清、不按 is_acceptance 二选一**：`is_acceptance` 在下游还会被 adapter 自报的
 #:   evidence_grade 降级（见「只降不升」那处），按降级前的值二选一时，上一轮真机的
 #:   acceptance.json 会与本轮 dev_* 并存——正是这套机制要堵的洞。
-_RESULT_FILES = _ACCEPTANCE_FILES + _DEV_FILES + ("perf_report.json",) + _REPORT_MD_FILES
+_RESULT_FILES = (_ACCEPTANCE_FILES + _DEV_FILES
+                 + (_ATTEMPT_RECORD_FILE, "perf_report.json", _MARKDOWN_REPORT_ERROR_FILE)
+                 + _REPORT_MD_FILES)
 #: 同上，只是要按通配清（T6 小 shape 仿真图，防 stale SVG 让「有图」门误过；codex H7）。
 _RESULT_GLOBS = ("perf_sim_*.svg",)
 #: **只清最终裁决**的最小集合：根裁决 + 非验收那一套同位裁决 + 它们的人读渲染。
@@ -90,7 +95,9 @@ _RESULT_GLOBS = ("perf_sim_*.svg",)
 #:   真子集（有断言钉着），差集恰好是那两份输入。
 #: ⚠ 同理**不含** `_RESULT_GLOBS`：`perf_sim_*.svg` 渲染的正是仍被留作输入的 `perf_report.json`，
 #:   清了等于把有效渲染删掉，而它并不是一份「裁决」。
-_FINAL_VERDICT_FILES = ("acceptance.json",) + _DEV_FILES + _REPORT_MD_FILES
+_FINAL_VERDICT_FILES = (("acceptance.json", _ATTEMPT_RECORD_FILE,
+                         _MARKDOWN_REPORT_ERROR_FILE)
+                        + _DEV_FILES + _REPORT_MD_FILES)
 
 # —— CP-E 自证材料 staging：验收产物目录必须自带「这一轮到底验的是什么」——————————————————
 # 病历（两条，同一个根因）：
@@ -233,8 +240,8 @@ def _spec_runner_form(spec):
 # mock 基线 = 「NPU mock us × 1.08」编出来的数，拿它算出的 ratio 天然 ≥1、天然「达标」；
 # 而 aclnn_py 是验收通路，会物理写出 acceptance.json——那就是一份**冒充达标**的验收裁决。
 # 现在：验收通路缺真实基线一律挂起 `blocked_wait_real_baseline`（非 fail、非 pass），绝不兜底。
-_BLOCKED_WAIT_REAL_BASELINE = "blocked_wait_real_baseline"
-_BLOCKED_WAIT_REAL_BASELINE_STATE = "BLOCKED_WAIT_REAL_BASELINE"
+_BLOCKED_WAIT_REAL_BASELINE = acceptance_artifacts.BLOCKED_WAIT_REAL_BASELINE_STATUS
+_BLOCKED_WAIT_REAL_BASELINE_STATE = acceptance_artifacts.BLOCKED_WAIT_REAL_BASELINE_STATE
 # 真实基线的**来源 → 取数**登记表：按 `spec.perf.baseline` 这个**字段**分派（承律令#0，非按算子身份；
 # median 只是当前唯一见证）。每项 = (work 下的产物文件名, 解析函数)。采集端把真数落成该文件本函数才认；
 # 文件不在 = 采集端未接通 → 挂起。**新增来源在这里加一行即可，无需改判定逻辑。**
@@ -363,56 +370,14 @@ def _stamp_dev(obj, is_acceptance, grade, note=_NOTE_OTHER):
 # —— §5.10 measure_only 的两个终态串（人读 overall）。**措辞红线**：不得出现任何会被读成
 #    「性能通过 / 已达标」的字样——它就是「测了，没判」。前缀 PASS 指的是**精度维**裁决，
 #    括号里逐字说明性能维只实测、未裁决。
-_MEASURED_ONLY_OVERALL = "PASS(性能仅实测未裁决)"
-_MEASURED_ONLY_STATE = "PASSED_PRECISION_PERF_MEASURED_ONLY"
-_MEASURE_INCOMPLETE_OVERALL = "BLOCKED(measure_only 性能实测未完成)"
-_MEASURE_INCOMPLETE_STATE = "BLOCKED_PERF_MEASUREMENT_INCOMPLETE"
+_MEASURED_ONLY_OVERALL = acceptance_artifacts.MEASURED_ONLY_OVERALL
+_MEASURED_ONLY_STATE = acceptance_artifacts.MEASURED_ONLY_STATE
+_MEASURE_INCOMPLETE_OVERALL = acceptance_artifacts.MEASURE_INCOMPLETE_OVERALL
+_MEASURE_INCOMPLETE_STATE = acceptance_artifacts.MEASURE_INCOMPLETE_STATE
 
-# T6/T8：人读 overall → 机读 canonical 状态（task3 状态机词汇）。
-_STATE_MAP = {
-    "PASS": "PASSED", "PASS(无性能要求)": "PASSED",
-    # §5.10：精度维定裁决、性能维只实测未裁决。**刻意不复用 `PASSED`**——机读方必须能一眼
-    # 分出「性能比过阈值的通过」与「性能压根没判的通过」，否则这两件事在下游合流即失真。
-    _MEASURED_ONLY_OVERALL: _MEASURED_ONLY_STATE,
-    _MEASURE_INCOMPLETE_OVERALL: _MEASURE_INCOMPLETE_STATE,
-    "FAIL(精度)": "FAILED_PRECISION", "NEEDS_REVIEW": "NEEDS_REVIEW",
-    "PASSED_WITH_RISK": "PASSED_WITH_RISK",
-    "PASSED_WITH_GAPS": "PASSED_WITH_GAPS",   # C4：精度全过但任务书要求的 dtype 有差额挂账
-    "BLOCKED_GOLDEN_UNAUTHORIZED": "BLOCKED_GOLDEN_UNAUTHORIZED",  # 批 5：golden 授权核不实
-    # 参考实现算不出真值（如通道数超 OpenCV CV_CN_MAX）→ 这批 case 的结论是**空白**。
-    # 与 UNAUTHORIZED 分开：那是「真值来路不明」，这是「压根没有真值」，成因与处置都不同
-    #（前者要人把授权补齐，后者要换参考实现或由人裁定这批 case 不在验收范围内）。
-    "BLOCKED_GOLDEN_UNAVAILABLE": "BLOCKED_GOLDEN_UNAVAILABLE",
-
-    "BLOCKED_WAIT_GPU_BENCHMARK": "BLOCKED_WAIT_GPU_BENCHMARK",
-    # High#2：验收通路缺真实基线（采集端未接通）→ 正规挂起，**不是** fail、更**不是** pass。
-    _BLOCKED_WAIT_REAL_BASELINE_STATE: _BLOCKED_WAIT_REAL_BASELINE_STATE,
-    "BLOCKED_INCOMPARABLE_TIMING_SCOPE": "BLOCKED_INCOMPARABLE_TIMING_SCOPE",
-    "BLOCKED_GPU_BASELINE_INVALID": "BLOCKED_GPU_BASELINE_INVALID",  # gb-9：标杆被判废（非缺标杆）
-}
-
-def _canonical_state(overall, ps):
-    """人读 overall → 机读 canonical 状态（T6/T8）。门因不可比/挂起而 FAILED 时据 perf status 细化，
-    避免笼统 BLOCKED(验收门未过) 掩盖 canonical 出口。"""
-    if overall in _STATE_MAP:
-        return _STATE_MAP[overall]
-    st = ps.get("status")
-    if st == "blocked_incomparable_timing_scope":
-        return "BLOCKED_INCOMPARABLE_TIMING_SCOPE"
-    if st == "blocked_gpu_baseline_invalid":       # gb-9：有硬错的标杆被判废 ≠ 缺标杆
-        return "BLOCKED_GPU_BASELINE_INVALID"
-    if st == "blocked_wait_gpu_benchmark":
-        return "BLOCKED_WAIT_GPU_BENCHMARK"
-    if st == _BLOCKED_WAIT_REAL_BASELINE:
-        # High#2：门也可能因「挂起态下 NPU 侧计时缺失」而 FAILED（perf 采集端整条未接通时正是如此）。
-        # 那种情况 overall 是笼统的 BLOCKED(验收门未过)，这里据 perf status 细化出机读 canonical 出口，
-        # 免得「等真实基线」被读成「证据破损」。
-        return _BLOCKED_WAIT_REAL_BASELINE_STATE
-    if isinstance(overall, str) and overall.startswith("性能未达成"):
-        return "FAILED_PERFORMANCE"
-    if isinstance(overall, str) and overall.startswith("BLOCKED"):
-        return "BLOCKED_EVIDENCE_INCOMPLETE"
-    return "NEEDS_REVIEW"
+# T6/T8 兼容别名：映射与函数对象均直接指向 artifact boundary 的唯一共享实现。
+_STATE_MAP = acceptance_artifacts.CANONICAL_STATE_BY_OVERALL
+_canonical_state = acceptance_artifacts.canonical_state
 
 
 def _exit_code(overall):
@@ -1330,19 +1295,24 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         spec_change_gate.assert_confirmed(spec_path, out_dir, _SPEC_GATE_EXIT,
                                           expected_sha256=entry_spec_sha256)
         _assert_staged_spec_matches_entry(out_dir, entry_spec_sha256)
-        final_file = _dump(acc, "acceptance.json")
-        try:
-            md_file = render_acceptance_markdown.write_report(out_dir)
-            print(f"[Markdown 报告] {md_file}")
-        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as ex:
-            _dump({
-                "schema": "oprunway.markdown_report_error",
-                "schema_version": 1,
-                "error": f"{type(ex).__name__}: {ex}",
-                "acceptance_verdict": None,
-                "note": "Markdown 渲染失败，不改变 JSON 验收裁决",
-            }, "markdown_report_error.json")
-            print(f"[Markdown 报告] 生成失败（不改变 JSON 裁决）：{type(ex).__name__}: {ex}")
+        if acceptance_artifacts.formal_acceptance_allowed(acc):
+            final_file = acceptance_artifacts.publish_acceptance_json(out_dir, acc)
+            try:
+                md_file = render_acceptance_markdown.write_report(out_dir)
+                print(f"[Markdown 报告] {md_file}")
+            except (OSError, RuntimeError, TypeError, ValueError, KeyError) as ex:
+                _dump({
+                    "schema": "oprunway.markdown_report_error",
+                    "schema_version": 1,
+                    "error": f"{type(ex).__name__}: {ex}",
+                    "acceptance_verdict": None,
+                    "note": "Markdown 渲染失败，不改变 JSON 验收裁决",
+                }, _MARKDOWN_REPORT_ERROR_FILE)
+                print(f"[Markdown 报告] 生成失败（不改变 JSON 裁决）：{type(ex).__name__}: {ex}")
+        else:
+            final_file = acceptance_artifacts.write_attempt_record(out_dir, acc)
+            print(f"[正式产物门] 本轮 state={state!r}, gate.passed={gate_passed!r}，"
+                  f"仅写 {_ATTEMPT_RECORD_FILE}；不产 acceptance.json / Markdown 验收报告")
     else:
         # C5 非验收产物：**字段名也换掉**，不只是加个注脚。`overall` / `state` / `precision_verdict` 是验收裁决
         # 的词汇，留着就还能被 `acc["state"] == "PASSED"` 这类代码顺手当裁决读；换成 pipeline_* 后，任何想拿它
