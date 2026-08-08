@@ -152,7 +152,7 @@ PROV_CREDENTIAL_REPO = (
 # 的归一化摘要说了算），只是把已判定的 kind 翻译成带强度说明的一句话。
 PROV_KIND_LABEL = {
     vendor_build_receipt.PROVENANCE_GIT_PR:
-        "线上 PR（`gitcode_pr`）——可证明「验的就是这个 PR 的这个 commit」",
+        "线上 PR transport observation（`gitcode_pr`）——不证明任务书与代码对应关系",
     vendor_build_receipt.PROVENANCE_LOCAL_SNAPSHOT:
         "本地源码快照（`local_snapshot`）——只能证明「验的就是这份字节」",
 }
@@ -350,6 +350,21 @@ def _provenance_section(receipt, build_receipt, source, facts):
         return lines + [PROV_BAD_ANCHOR.format(ex=_cell(ex)), ""]
     if url_credentials.url_has_userinfo(summary.get("repo")):
         return lines + [PROV_CREDENTIAL_REPO, ""]
+    if br.get("schema_version") == vendor_build_receipt.SCHEMA_VERSION:
+        anchor = summary.get("content_anchor")
+        if not isinstance(anchor, dict):
+            return lines + [PROV_BAD_ANCHOR.format(ex="current receipt 缺 content_anchor"), ""]
+        lines += [
+            "| 项目 | 值 |", "|---|---|",
+            "| 被测来源证明 | 实际物化内容快照；locator/head/repo 仅是 transport observation |",
+            f"| content scope | `{_cell(anchor.get('scope'))}` |",
+            f"| content sha256 | `{_cell(anchor.get('sha256'))}` |",
+            f"| content file_count | `{_cell(anchor.get('file_count'))}` |",
+            PROV_REPO_ROW.format(repo=_code_cell(summary.get("repo")),
+                                 strength="transport observation，不证明对应关系"),
+            _facts_row(facts), "",
+        ]
+        return lines
     kind = summary.get("provenance_kind")
     if kind not in PROV_KIND_LABEL or kind not in PROV_ANCHOR_BY_KIND:
         # 受控词表扩了而本节没跟上 → 宁可什么都不断言：让一条未知强度的来源借着

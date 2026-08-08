@@ -1899,11 +1899,11 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
         return
     receipt_version = receipt.get("schema_version")
     if (receipt.get("schema") != "oprunway.cpp_extension_receipt"
-            or receipt_version not in (1, cann_version.RECEIPT_SCHEMA_VERSION)
+            or receipt_version != cann_version.RECEIPT_SCHEMA_VERSION
             or receipt.get("status") != "VERIFIED"):
         errs.append(
-            "cpp_extension receipt schema/status 非 VERIFIED "
-            f"v1(历史) / v{cann_version.RECEIPT_SCHEMA_VERSION}(当前)")
+            "fresh cpp_extension gate 只接受 VERIFIED current receipt "
+            f"v{cann_version.RECEIPT_SCHEMA_VERSION}；v1仅供历史解释")
         return
     manifest_path = _pinned_product(d, "cpp_extension/extension_manifest.json")
     plan_path = _pinned_product(d, "cpp_extension_invocation_plan.json")
@@ -2048,10 +2048,7 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
     build_receipt = vendor_map.get("build_receipt")
     build_digest = _canonical_sha(build_receipt)
     try:
-        validate_build = (vendor_build_receipt.validate_for_acceptance
-                          if receipt_version == cann_version.RECEIPT_SCHEMA_VERSION
-                          else vendor_build_receipt.validate)
-        summary = validate_build(
+        summary = vendor_build_receipt.validate_for_acceptance(
             build_receipt, library_path=vendor_map.get("library_path"),
             library_sha256=vendor_sha)
         if vendor_map.get("build_receipt_sha256") != build_digest:
@@ -2174,17 +2171,25 @@ def _gate_build_receipt_source_binding(
                     "无法与 build receipt 对账")
         return
     if facts is None:
-        if kind == source_provenance.PROVENANCE_LOCAL_SNAPSHOT:
-            errs.append(
-                "cpp_extension vendor build receipt 声明 "
-                f"provenance_kind={source_provenance.PROVENANCE_LOCAL_SNAPSHOT}，"
-                "但找不到 source_facts.json 与之对账（找过 <报告目录>/ 与 <报告目录>/work/，"
-                "也可用 --source-facts 指路）。本地锚的可信度全部来自这条等值校验，"
-                "没有对照物即无绑定 → BLOCKED")
+        errs.append("fresh acceptance 找不到可信 caller-trusted v2 source_facts.json，"
+                    "无法把实际摄取内容与 build receipt 对账")
         return
     facts_pr = facts.get("pr")
     if not isinstance(facts_pr, dict):
         errs.append("source_facts.pr 缺失或非 object，无法与 build receipt 对账")
+        return
+    try:
+        source_provenance.caller_trusted_association(facts, allow_legacy=False)
+    except source_provenance.ProvenanceError as ex:
+        errs.append(f"fresh source_facts caller-trusted 契约非法：{ex}")
+        return
+    else:
+        expected = facts_pr.get("content_anchor")
+        actual = summary.get("content_anchor")
+        if not isinstance(expected, dict) or actual != expected:
+            errs.append(
+                "caller-trusted 输入的实际摄取 content_anchor 与 vendor build 前内容摘要"
+                "未逐字一致，BLOCKED（transport/head 身份不参与此判据）")
         return
     # —— 第 0 步：通路身份 + 声明形态 ——
     facts_kind = facts_pr.get("provenance_kind")

@@ -60,7 +60,7 @@ def _snapshot_source(declared_source_form=VBR.FORM_LOCAL_SOURCE,
 def _snapshot_receipt(**kw):
     """声明即所得的本地快照收据（无降级）。"""
     return _receipt(_snapshot_source(**kw),
-                    schema_version=VBR.SCHEMA_VERSION, degradations=[])
+                    schema_version=VBR.SCHEMA_VERSION_IDENTITY_ROUTED, degradations=[])
 
 
 def _docs(receipt):
@@ -374,7 +374,7 @@ class ProvenanceSectionTest(unittest.TestCase):
         """
         text = self._render(_receipt(
             _snapshot_source(declared_source_form=VBR.FORM_GIT_PR),
-            schema_version=VBR.SCHEMA_VERSION,
+            schema_version=VBR.SCHEMA_VERSION_IDENTITY_ROUTED,
             degradations=[VBR.DEGRADATION_PR_HEAD_UNBOUND]))
         self.assertIn(R.PROV_DEGRADATION_ROW.format(
             items=VBR.DEGRADATION_PR_HEAD_UNBOUND), text)
@@ -447,7 +447,7 @@ class ProvenanceSectionTest(unittest.TestCase):
         # 一个字都不该被当成 provenance 渲染出去。
         source = _snapshot_source()
         del source["repo"]
-        text = self._render(_receipt(source, schema_version=VBR.SCHEMA_VERSION,
+        text = self._render(_receipt(source, schema_version=VBR.SCHEMA_VERSION_IDENTITY_ROUTED,
                                      degradations=[]))
         self.assertIn("来源锚不合法", text)
         self.assertNotIn(SUBTREE_DIGEST, text)
@@ -462,7 +462,7 @@ class ProvenanceSectionTest(unittest.TestCase):
         渲染器不自己判这一条，而是共用 `vendor_build_receipt`——判据只有一份。
         """
         text = self._render(_receipt(_snapshot_source(pr_head_sha=PR_HEAD),
-                                     schema_version=VBR.SCHEMA_VERSION,
+                                     schema_version=VBR.SCHEMA_VERSION_IDENTITY_ROUTED,
                                      degradations=[]))
         self.assertIn("来源锚不合法", text)
         # 合成的那个 hex 只以「被拒绝的实得值」出现在报错里（那是要给人看的），
@@ -573,7 +573,7 @@ class RepoSourceStrengthTest(unittest.TestCase):
     def test_snapshot_root_derived_repo_says_where_it_came_from(self):
         row = self._repo_line(self._render(
             _snapshot_source(repo_source="snapshot.source_root"),
-            schema_version=VBR.SCHEMA_VERSION, degradations=[]))
+            schema_version=VBR.SCHEMA_VERSION_IDENTITY_ROUTED, degradations=[]))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
             repo=R._code_cell("cann/ops-nn"),
             strength=R.PROV_REPO_SOURCE_LABEL["snapshot.source_root"]))
@@ -584,7 +584,7 @@ class RepoSourceStrengthTest(unittest.TestCase):
         """⭐ 快照树里根本没有仓名证据时的真实形态：仓名是构建时手给的。"""
         row = self._repo_line(self._render(
             _snapshot_source(repo_source="operator"),
-            schema_version=VBR.SCHEMA_VERSION, degradations=[]))
+            schema_version=VBR.SCHEMA_VERSION_IDENTITY_ROUTED, degradations=[]))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
             repo=R._code_cell("cann/ops-nn"),
             strength=R.PROV_REPO_SOURCE_LABEL["operator"]))
@@ -597,7 +597,7 @@ class RepoSourceStrengthTest(unittest.TestCase):
     def test_absent_repo_source_is_unknown_strength_not_derived(self):
         """⭐ 当前所有产出方都不写这个键：缺席 = 不知道，不是「大概是派生的」，也不是 operator。"""
         row = self._repo_line(self._render(
-            _snapshot_source(), schema_version=VBR.SCHEMA_VERSION, degradations=[]))
+            _snapshot_source(), schema_version=VBR.SCHEMA_VERSION_IDENTITY_ROUTED, degradations=[]))
         self.assertEqual(row, R.PROV_REPO_ROW.format(
             repo=R._code_cell("cann/ops-nn"), strength=R.PROV_REPO_SOURCE_ABSENT))
         self.assertIn("强度未知", row)

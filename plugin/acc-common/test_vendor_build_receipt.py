@@ -123,7 +123,7 @@ class SnapshotDigestTest(_Fixture):
         with self.assertRaises(V.VendorBuildReceiptError):
             V.take_snapshot_digest(self.root, "not_here")
 
-    def test_the_digest_books_how_many_symlinks_it_could_not_cover(self):
+    def test_target_scope_symlink_is_rejected(self):
         """⭐ 软链**整棵不入 merkle**：一份「源文件被换成指向仓外的软链」的构建树，
         与一份干净的树可以摘出同一个 merkle。计数是收据里唯一看得见这块不覆盖的地方。
 
@@ -134,16 +134,8 @@ class SnapshotDigestTest(_Fixture):
         self.assertEqual(0, clean["subtree_skipped_symlink_count"])
         os.symlink("/etc/hosts",
                    os.path.join(self.root, _OP, "op_host", "smuggled.h"))
-        dirty = V.take_snapshot_digest(self.root, _OP)
-        self.assertEqual(dirty["snapshot_subtree_sha256"],
-                         clean["snapshot_subtree_sha256"],
-                         "软链不入摘要是既有算法定义（值保持）——正因如此才必须记账")
-        self.assertEqual(1, dirty["subtree_skipped_symlink_count"])
-        self.assertEqual(1, dirty["skipped_symlink_count"])
-        receipt = self._produce(digest=dirty)
-        booked = receipt["build"]["source_snapshot_digest"]
-        self.assertEqual(1, booked["subtree_skipped_symlink_count"])
-        self.assertEqual(1, booked["skipped_symlink_count"])
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "符号链接"):
+            V.take_snapshot_digest(self.root, _OP)
 
     def test_a_scope_that_escapes_the_tree_through_a_symlink_is_refused(self):
         """构建端与取材端必须对「软链 scope」给同一个答案：都拒。"""
@@ -292,7 +284,8 @@ class ReturncodeSourceValidationTest(_Fixture):
         snapshot = self._produce()
         pr_route = V.produce_receipt(
             declared_source_form=V.FORM_GIT_PR, build_result=self._run(),
-            repo="cann/ops-cv", pr_head_sha="a" * 40)
+            repo="cann/ops-cv", pr_head_sha="a" * 40,
+            snapshot_digest=V.take_snapshot_digest(self.root, _OP))
         for receipt in (snapshot, pr_route):
             self.assertEqual(receipt["build"][V.RETURNCODE_SOURCE_KEY],
                              V.RETURNCODE_SOURCE_MEASURED)
@@ -323,7 +316,8 @@ class ProduceReceiptTest(_Fixture):
         self.assertIsNone(summary["pr_head_sha"], "null 是这条形态的正确值")
         self.assertEqual(summary["snapshot_subtree_scope"], _OP)
         self.assertEqual(receipt["schema_version"], V.SCHEMA_VERSION)
-        self.assertEqual(receipt["source"][V.DECLARED_FORM_KEY], V.FORM_LOCAL_SOURCE)
+        self.assertEqual(receipt["source"]["transport"][V.DECLARED_FORM_KEY],
+                         V.FORM_LOCAL_SOURCE)
         self.assertEqual(
             V.validate_for_acceptance(
                 receipt, library_path=os.path.realpath(self.elf),
@@ -382,31 +376,36 @@ class ProduceReceiptTest(_Fixture):
 
     def test_production_path_never_digests_the_tree_itself(self):
         """结构性杜绝错法：不给 build 前摘要就产不出收据，没有「现场自己摘一遍」的口子。"""
-        with self.assertRaisesRegex(V.VendorBuildReceiptError, "恰好给一个"):
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "必须给 snapshot_digest"):
             V.produce_receipt(declared_source_form=V.FORM_LOCAL_SOURCE,
                               build_result=self._run())
 
     def test_pr_route_needs_a_head_and_rejects_both_at_once(self):
+        digest = V.take_snapshot_digest(self.root, _OP)
         receipt = V.produce_receipt(
             declared_source_form=V.FORM_GIT_PR, build_result=self._run(),
-            repo="cann/ops-cv", pr_head_sha="a" * 40)
-        self.assertEqual(receipt["source"]["pr_head_sha"], "a" * 40)
+            repo="cann/ops-cv", pr_head_sha="a" * 40, snapshot_digest=digest)
+        self.assertIsNone(receipt["source"]["pr_head_sha"])
+        self.assertEqual(receipt["source"]["transport"]["pr_head_sha"], "a" * 40)
         self.assertEqual(receipt["degradations"], [])
         V.validate_for_acceptance(
             receipt, library_path=os.path.realpath(self.elf),
             library_sha256=V._sha256_file(self.elf), normalize_path=True)
-        with self.assertRaises(V.VendorBuildReceiptError):
-            self._produce(form=V.FORM_GIT_PR, pr_head_sha="a" * 40)
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "必须给 snapshot_digest"):
+            V.produce_receipt(declared_source_form=V.FORM_GIT_PR,
+                              build_result=self._run(), repo="cann/ops-cv",
+                              pr_head_sha="a" * 40)
 
-    def test_declared_git_pr_over_a_snapshot_books_the_degradation(self):
-        """本该绑 PR head 却只拿到一份本地快照 = 降级，这条一个字都没放松。"""
+    def test_declared_git_pr_over_snapshot_is_caller_trusted_not_degraded(self):
         receipt = self._produce(form=V.FORM_GIT_PR)
-        self.assertEqual(receipt["degradations"], [V.DEGRADATION_PR_HEAD_UNBOUND])
+        self.assertEqual(receipt["degradations"], [])
         self._validated(receipt)
 
-    def test_out_of_vocabulary_form_is_rejected(self):
-        with self.assertRaises(V.VendorBuildReceiptError):
-            self._produce(form="snapshot_only")
+    def test_out_of_vocabulary_form_is_transport_only(self):
+        receipt = self._produce(form="snapshot_only")
+        self.assertEqual(receipt["source"]["transport"][V.DECLARED_FORM_KEY],
+                         "snapshot_only")
+        self._validated(receipt)
 
     def test_cli_round_trip(self):
         digest_path = os.path.join(self.d, "prebuild.json")
@@ -498,36 +497,30 @@ class DegradationVocabularyTest(_Fixture):
         with self.assertRaisesRegex(V.VendorBuildReceiptError, "degradations"):
             self._validated(receipt)
 
-    def test_declared_git_pr_over_snapshot_must_book_it(self):
+    def test_v3_rejects_forged_degradation(self):
         receipt = self._produce(form=V.FORM_GIT_PR)
-        receipt["degradations"] = []
+        receipt["degradations"] = [V.DEGRADATION_PR_HEAD_UNBOUND]
         with self.assertRaisesRegex(V.VendorBuildReceiptError, "degradations"):
             self._validated(receipt)
 
-    def test_legacy_undeclared_snapshot_keeps_the_old_strict_rule(self):
-        """未声明形态 = 老收据：仍必须挂 `pr_head_unbound`，与改动前逐字同规矩。"""
+    def test_v3_undeclared_snapshot_is_not_identity_degraded(self):
         receipt = self._produce()
-        del receipt["source"][V.DECLARED_FORM_KEY]
+        receipt["source"]["transport"].pop(V.DECLARED_FORM_KEY)
         receipt["degradations"] = []
-        with self.assertRaisesRegex(V.VendorBuildReceiptError, "degradations"):
-            self._validated(receipt)
-        receipt["degradations"] = [V.DEGRADATION_PR_HEAD_UNBOUND]
-        self.assertEqual(self._validated(receipt)["degradations"],
-                         [V.DEGRADATION_PR_HEAD_UNBOUND], "老现场收据不得被判死")
+        self.assertEqual(self._validated(receipt)["degradations"], [])
 
     def test_declared_local_source_over_a_real_pr_is_rejected(self):
         receipt = V.produce_receipt(
             declared_source_form=V.FORM_GIT_PR, build_result=self._run(),
-            repo="cann/ops-cv", pr_head_sha="a" * 40)
+            repo="cann/ops-cv", pr_head_sha="a" * 40,
+            snapshot_digest=V.take_snapshot_digest(self.root, _OP))
         receipt["source"][V.DECLARED_FORM_KEY] = V.FORM_LOCAL_SOURCE
-        with self.assertRaises(V.VendorBuildReceiptError):
-            self._validated(receipt)
+        self._validated(receipt)
 
     def test_schema_v1_may_not_declare_a_form(self):
-        receipt = V.produce_receipt(
-            declared_source_form=V.FORM_GIT_PR, build_result=self._run(),
-            repo="cann/ops-cv", pr_head_sha="a" * 40)
+        receipt = self._produce()
         receipt["schema_version"] = V.SCHEMA_VERSION_LEGACY
+        receipt["source"][V.DECLARED_FORM_KEY] = V.FORM_LOCAL_SOURCE
         del receipt["source"]["provenance_kind"]
         with self.assertRaisesRegex(V.VendorBuildReceiptError, "schema_version=1"):
             self._validated(receipt)
@@ -660,7 +653,7 @@ class BuildTreeReconciliationTest(_Fixture):
         with open(os.path.join(self.root, _OP, "op_host", "sneaked_in.cpp"), "w",
                   encoding="utf-8") as out:
             out.write("// 取材之后被塞进来的\n")
-        with self.assertRaisesRegex(V.VendorBuildReceiptError, "构建前对账"):
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "content_anchor|构建前对账"):
             self._emit(digest_path)
         self.assertFalse(os.path.isfile(self.sentinel),
                          "⭐ 对账跑在 build 之后 = 一次几十分钟的构建白跑")
@@ -688,7 +681,7 @@ class BuildTreeReconciliationTest(_Fixture):
         with open(os.path.join(self.root, _OP, "generated_tiling.h"), "w",
                   encoding="utf-8") as out:
             out.write("// build 把生成物写进了被测子树\n")
-        with self.assertRaisesRegex(V.VendorBuildReceiptError, "把被测子树改掉"):
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "content_anchor|把被测子树改掉"):
             V.produce_receipt(declared_source_form=V.FORM_LOCAL_SOURCE,
                               build_result=result, snapshot_digest=digest)
 
@@ -699,16 +692,14 @@ class BuildTreeReconciliationTest(_Fixture):
         self.assertIs(state[V.SUBTREE_GATE_KEY], True)
         self.assertTrue(state["matches_pre_build"], "本例 build 没碰源码树")
 
-    def test_pr_route_has_no_tree_reconciliation_and_says_so(self):
-        """⚠ 如实钉住残留面：PR 通路压根没有 `source_root` 这个对照物，两次对账都做不了。"""
+    def test_online_transport_still_requires_tree_reconciliation(self):
         elsewhere = os.path.join(self.d, "elsewhere")
         os.makedirs(elsewhere)
-        receipt = V.produce_receipt(
-            declared_source_form=V.FORM_GIT_PR,
-            build_result=V.run_build(self._argv(), elsewhere, self.elf),
-            repo="cann/ops-cv", pr_head_sha="a" * 40)
-        self.assertNotIn("tree_state_at_emit", receipt["build"],
-                         "PR 通路没有树对账可言，别渲染出一个看着像核过的字段")
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "必须给 snapshot_digest"):
+            V.produce_receipt(
+                declared_source_form=V.FORM_GIT_PR,
+                build_result=V.run_build(self._argv(), elsewhere, self.elf),
+                repo="cann/ops-cv", pr_head_sha="a" * 40)
 
     def test_digest_written_into_the_source_tree_is_refused(self):
         """凭据写进刚被摘过的那棵树 = 当场自我作废；症状要到 emit 才炸，且看着毫无道理。"""

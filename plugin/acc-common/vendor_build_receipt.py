@@ -178,9 +178,12 @@ class VendorBuildReceiptError(ValueError):
 SCHEMA = "oprunway.vendor_build_receipt"
 #: 历史版本：无 `source.provenance_kind`，语义恒为 `gitcode_pr`。
 SCHEMA_VERSION_LEGACY = 1
-#: 当前版本：`source.provenance_kind` 必填，按形态分流。
-SCHEMA_VERSION = 2
-SUPPORTED_SCHEMA_VERSIONS = (SCHEMA_VERSION_LEGACY, SCHEMA_VERSION)
+#: v2 是 caller-trusted 迁移前的 head/local 双路收据；仍可解释历史，不支撑 fresh acceptance。
+SCHEMA_VERSION_IDENTITY_ROUTED = 2
+#: 当前版本：online/local 一律以 build 前完整内容快照为硬锚；PR/head 只作 transport metadata。
+SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSIONS = (
+    SCHEMA_VERSION_LEGACY, SCHEMA_VERSION_IDENTITY_ROUTED, SCHEMA_VERSION)
 
 #: 收据侧取源形态词表 —— **逐字复用 intake 侧常量**，不另起名字。
 PROVENANCE_GIT_PR = source_provenance.PROVENANCE_GIT_PR
@@ -249,6 +252,20 @@ def _require_hex64(value, where):
     if not isinstance(value, str) or not _HEX64.fullmatch(value):
         raise VendorBuildReceiptError(f"{where} 须为 64 位小写十六进制摘要（实得 {value!r}）")
     return value
+
+
+def _validate_content_anchor(value, where):
+    row = _require_dict(value, where)
+    if (row.get("schema") != "oprunway.source_content_anchor"
+            or row.get("schema_version") != 1
+            or row.get("algorithm") != "git_blob_manifest_sha256_v1"
+            or not isinstance(row.get("scope"), str)
+            or _HEX64.fullmatch(row.get("sha256") or "") is None
+            or isinstance(row.get("file_count"), bool)
+            or not isinstance(row.get("file_count"), int)
+            or row["file_count"] <= 0):
+        raise VendorBuildReceiptError(f"{where} 不是受支持的内容锚")
+    return dict(row)
 
 
 def _validate_envelope(receipt):
@@ -380,12 +397,18 @@ def _validate_source(receipt):
     version = _validate_envelope(receipt)
     source = _require_dict(receipt.get("source"), "vendor build receipt.source")
     kind = _resolve_kind(receipt, source)
-    form = _read_declared_form(source)
+    # v3 的声明形态只是 locator observation，不参与内容身份；旧 schema 仍按历史规则解释。
+    form = None if version == SCHEMA_VERSION else _read_declared_form(source)
     if form is not None and version == SCHEMA_VERSION_LEGACY:
         raise VendorBuildReceiptError(
             f"schema_version=1 的收据不得声明 source.{DECLARED_FORM_KEY}"
             f"（实得 {form!r}）——要按声明形态判降级请升到 schema_version={SCHEMA_VERSION}")
-    accepted = _expected_degradations(kind, form)
+    if version == SCHEMA_VERSION and kind != PROVENANCE_LOCAL_SNAPSHOT:
+        raise VendorBuildReceiptError(
+            "vendor build receipt v3 fresh 收据只接受完整 content snapshot；"
+            "PR head/repo 仅可作 transport metadata")
+    accepted = (([],) if version == SCHEMA_VERSION else
+                _expected_degradations(kind, form))
 
     if kind == PROVENANCE_GIT_PR:
         head = source.get("pr_head_sha")
@@ -433,6 +456,9 @@ def _validate_source(receipt):
     subtree = _require_hex64(
         _require_present(source, "snapshot_subtree_sha256", "vendor build receipt.source"),
         "vendor build receipt.source.snapshot_subtree_sha256（算子子树 merkle）")
+    anchor = (None if "content_anchor" not in source else
+              _validate_content_anchor(source["content_anchor"],
+                                       "vendor build receipt.source.content_anchor"))
     degradations = _validate_degradations(receipt, accepted)
     return {
         # 声明形态进摘要（2026-08-05）：报告第一层就要能分出「本轮本来就是本地代码」
@@ -445,6 +471,7 @@ def _validate_source(receipt):
         "snapshot_sha256": whole,
         "snapshot_subtree_sha256": subtree,
         "snapshot_subtree_scope": scope,
+        "content_anchor": anchor,
         "degradations": degradations,
     }
 
@@ -554,8 +581,8 @@ def validate_for_acceptance(
         normalize_path=normalize_path)
     if receipt.get("schema_version") != SCHEMA_VERSION:
         raise VendorBuildReceiptError(
-            f"正式验收只接受当前 vendor build receipt v{SCHEMA_VERSION}；"
-            "历史 v1 可解释但没有完整来源形态/生产证明，须重跑 build 产收据")
+            f"fresh 正式验收只接受当前 vendor build receipt v{SCHEMA_VERSION}；"
+            "历史 v1/v2 仅可解释，须重跑 build 产收据")
     if summary.get("build_returncode_source") != RETURNCODE_SOURCE_MEASURED:
         raise VendorBuildReceiptError(
             "正式验收要求 build.returncode_source='measured'；"
@@ -563,8 +590,7 @@ def validate_for_acceptance(
     producer = receipt.get("producer")
     if (not isinstance(producer, dict)
             or producer.get("tool") != _PRODUCER_TOOL
-            or not isinstance(producer.get("logic_sha256"), str)
-            or _HEX64.fullmatch(producer["logic_sha256"]) is None):
+            or producer.get("logic_sha256") != _sha256_file(os.path.abspath(__file__))):
         raise VendorBuildReceiptError(
             "正式验收缺当前 vendor_build_receipt.py 生产者标记/逻辑指纹")
     build = receipt["build"]
@@ -593,10 +619,8 @@ def validate_for_acceptance(
     digest = build.get("source_snapshot_digest", _ABSENT)
     tree = build.get("tree_state_at_emit", _ABSENT)
     if kind == PROVENANCE_GIT_PR:
-        if digest is not _ABSENT or tree is not _ABSENT:
-            raise VendorBuildReceiptError(
-                "gitcode_pr 收据不得混装 local_snapshot 的 tree digest 字段")
-        return summary
+        raise VendorBuildReceiptError(
+            "fresh acceptance 拒绝 head-only 收据；online/local 均须物化 build 前 content snapshot")
 
     if not isinstance(digest, dict):
         raise VendorBuildReceiptError(
@@ -609,7 +633,8 @@ def validate_for_acceptance(
             or digest.get("subtree_scope") != summary.get("snapshot_subtree_scope")
             or digest.get("snapshot_sha256") != summary.get("snapshot_sha256")
             or digest.get("snapshot_subtree_sha256")
-            != summary.get("snapshot_subtree_sha256")):
+            != summary.get("snapshot_subtree_sha256")
+            or digest.get("content_anchor") != summary.get("content_anchor")):
         raise VendorBuildReceiptError(
             "local_snapshot 的 build 前 digest envelope/root/scope/merkle 与来源锚不一致")
     algorithm = digest.get("algorithm")
@@ -624,11 +649,14 @@ def validate_for_acceptance(
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise VendorBuildReceiptError(
                 f"local_snapshot build.source_snapshot_digest.{key} 须为非负整数")
-    root = os.path.normpath(digest["source_root"])
+    if digest.get("subtree_skipped_symlink_count") != 0:
+        raise VendorBuildReceiptError(
+            "fresh build snapshot 含未纳入内容锚的符号链接，拒绝验收")
+    root = os.path.realpath(digest["source_root"])
     cwd = build.get("cwd")
     try:
         within = (isinstance(cwd, str) and os.path.isabs(cwd)
-                  and os.path.commonpath((root, os.path.normpath(cwd))) == root)
+                  and os.path.commonpath((root, os.path.realpath(cwd))) == root)
     except ValueError:
         within = False
     if not within:
@@ -791,6 +819,11 @@ def take_snapshot_digest(source_root, subtree_scope=""):
     scope = _normalized_scope(fetch_source, root, subtree_scope)
     whole_rels, whole_links = fetch_source._scan_snapshot(root, "")
     subtree_rels, subtree_links = fetch_source._scan_snapshot(root, scope)
+    if subtree_links:
+        raise VendorBuildReceiptError(
+            "fresh build 的 target scope 含符号链接，内容锚无法覆盖编译器实际读取字节")
+    content_anchor = fetch_source._content_anchor_from_snapshot(
+        root, scope, subtree_rels)
     return {
         "schema": SNAPSHOT_DIGEST_SCHEMA,
         "schema_version": SNAPSHOT_DIGEST_VERSION,
@@ -800,6 +833,7 @@ def take_snapshot_digest(source_root, subtree_scope=""):
         "subtree_scope": scope,
         "snapshot_sha256": fetch_source._snapshot_merkle(root, whole_rels),
         "snapshot_subtree_sha256": fetch_source._snapshot_merkle(root, subtree_rels),
+        "content_anchor": content_anchor,
         "file_count": len(whole_rels),
         "subtree_file_count": len(subtree_rels),
         "skipped_symlink_count": len(whole_links),
@@ -835,6 +869,9 @@ def _validate_snapshot_digest(digest):
     subtree = _require_hex64(
         _require_present(digest, "snapshot_subtree_sha256", "snapshot digest"),
         "snapshot digest.snapshot_subtree_sha256")
+    recorded_anchor = _validate_content_anchor(
+        _require_present(digest, "content_anchor", "snapshot digest"),
+        "snapshot digest.content_anchor")
     algorithm = _require_dict(digest.get("algorithm"), "snapshot digest.algorithm")
     recorded = algorithm.get("logic_sha256")
     current = _sha256_file(
@@ -843,6 +880,19 @@ def _validate_snapshot_digest(digest):
         raise VendorBuildReceiptError(
             "snapshot digest 记的摘要算法（fetch_source.py logic_sha256）与当前不一致："
             f"记={recorded!r} 现={current!r}——两端算法不同则 merkle 不可比，请重取摘要")
+    fetch_source = _fetch_source()
+    actual_paths, actual_links = fetch_source._scan_snapshot(root, scope)
+    if actual_links:
+        raise VendorBuildReceiptError(
+            "snapshot digest target scope 现场含符号链接，内容锚未覆盖实际读取字节")
+    actual_anchor = fetch_source._content_anchor_from_snapshot(root, scope, actual_paths)
+    if actual_anchor != recorded_anchor:
+        raise VendorBuildReceiptError(
+            "snapshot digest.content_anchor 与 source_root/subtree_scope 现场字节重算不一致")
+    if digest.get("subtree_file_count") != len(actual_paths):
+        raise VendorBuildReceiptError("snapshot digest.subtree_file_count 与现场不一致")
+    if digest.get("subtree_skipped_symlink_count") != 0:
+        raise VendorBuildReceiptError("snapshot digest.subtree_skipped_symlink_count 须为 0")
     return root, scope, whole, subtree
 
 
@@ -1020,7 +1070,7 @@ def _validate_build_result(build_result):
     return result
 
 
-def produce_receipt(*, declared_source_form, build_result,
+def produce_receipt(*, build_result, declared_source_form=None,
                     repo=None, snapshot_digest=None, pr_head_sha=None):
     """据 build 现场事实产一份**已自过 validate()** 的 vendor build receipt。
 
@@ -1045,14 +1095,10 @@ def produce_receipt(*, declared_source_form, build_result,
       （:func:`_tree_state_at_emit`）——这次 build 把被测子树改掉了就 fail-closed。
       整树变化只记进 `build.tree_state_at_emit`，那是 build 写产物的预期常态。
     """
-    if declared_source_form not in DECLARED_SOURCE_FORMS:
+    if snapshot_digest is None:
         raise VendorBuildReceiptError(
-            f"declared_source_form={declared_source_form!r} 非受控值，"
-            f"须属 {list(DECLARED_SOURCE_FORMS)}")
-    if (snapshot_digest is None) == (pr_head_sha is None):
-        raise VendorBuildReceiptError(
-            "snapshot_digest 与 pr_head_sha 必须**恰好给一个**："
-            "前者绑本地源码的字节身份，后者绑上游 commit，两者不是一回事，也不能都不给")
+            "fresh vendor receipt 必须给 snapshot_digest；online/local 均以实际 build 字节为硬锚，"
+            "pr_head_sha 只作 transport metadata，不能替代内容摘要")
     result = _validate_build_result(build_result)
     argv, build_cwd = result["argv"], result["cwd"]
     returncode = result["returncode"]
@@ -1074,13 +1120,15 @@ def produce_receipt(*, declared_source_form, build_result,
         kind = PROVENANCE_LOCAL_SNAPSHOT
         source = {
             "provenance_kind": kind,
-            DECLARED_FORM_KEY: declared_source_form,
             # 本地源码没有上游 commit —— 显式 null 是**正确值**，绝不合成 40 位 hex（5.8）。
             "pr_head_sha": None,
             "repo": repo or root,
             "snapshot_subtree_scope": scope,
             "snapshot_sha256": whole,
             "snapshot_subtree_sha256": subtree,
+            "content_anchor": dict(snapshot_digest["content_anchor"]),
+            "transport": {"pr_head_sha": pr_head_sha, "repo": repo,
+                          DECLARED_FORM_KEY: declared_source_form},
         }
         build["source_snapshot_digest"] = {
             "schema": SNAPSHOT_DIGEST_SCHEMA,
@@ -1092,6 +1140,7 @@ def produce_receipt(*, declared_source_form, build_result,
             # 会逐字交叉核；两份近邻事实不同就不是一份可裁决的收据。
             "snapshot_sha256": whole,
             "snapshot_subtree_sha256": subtree,
+            "content_anchor": dict(snapshot_digest["content_anchor"]),
             "algorithm": dict(snapshot_digest["algorithm"]),
             "file_count": snapshot_digest.get("file_count"),
             "subtree_file_count": snapshot_digest.get("subtree_file_count"),
@@ -1121,7 +1170,7 @@ def produce_receipt(*, declared_source_form, build_result,
         "source": source,
         "build": build,
         "artifact": {"library_path": elf, "library_sha256": elf_sha},
-        "degradations": list(_expected_degradations(kind, declared_source_form)[0]),
+        "degradations": [],
         "producer": {
             "tool": _PRODUCER_TOOL,
             "logic_sha256": _sha256_file(os.path.abspath(__file__)),
@@ -1273,9 +1322,8 @@ def main(argv=None):
     e = sub.add_parser(
         "emit",
         help="**真跑 --build-argv 那条构建命令**，再据凭据 + 实测事实产收据（有副作用）")
-    e.add_argument("--declared-source-form", required=True,
-                   choices=list(DECLARED_SOURCE_FORMS),
-                   help="本轮**声明**的输入形态；决定这份收据该不该挂降级")
+    e.add_argument("--declared-source-form", default=None,
+                   help="可选 transport observation；不参与 v3 内容/构建身份")
     e.add_argument("--snapshot-digest", default=None,
                    help="snapshot-digest 子命令产的凭据（本地源码通路必给）")
     e.add_argument("--pr-head-sha", default=None, help="PR 通路的 40 位 head commit SHA")

@@ -12,6 +12,11 @@ from unittest import mock
 import precision_retest_runner as R
 import precision_retest_contract as C
 
+CONTENT_ANCHOR = {"schema": "oprunway.source_content_anchor", "schema_version": 1,
+                  "algorithm": "git_blob_manifest_sha256_v1",
+                  "scope": "experimental/index/median", "sha256": "7" * 64,
+                  "file_count": 3}
+
 
 def _vendor_build_receipt(*, local, anchor, scope=None, repo="repo",
                           argv=("bash", "build.sh")):
@@ -23,19 +28,19 @@ def _vendor_build_receipt(*, local, anchor, scope=None, repo="repo",
     """
     build = {"argv": list(argv), "cwd": "/src",
              "returncode": 0, "returncode_source": "measured"}
-    if not local:
-        return {"schema": "oprunway.vendor_build_receipt", "schema_version": 1,
-                "status": "VERIFIED",
-                "source": {"repo": repo, "pr_head_sha": anchor},
-                "build": build}
-    return {"schema": "oprunway.vendor_build_receipt", "schema_version": 2,
+    effective_anchor = anchor if isinstance(anchor, str) and len(anchor) == 64 else "7" * 64
+    effective_scope = scope or CONTENT_ANCHOR["scope"]
+    return {"schema": "oprunway.vendor_build_receipt", "schema_version": 3,
             "status": "VERIFIED",
             "source": {"provenance_kind": "local_snapshot",
                        "declared_source_form": "local_source",
                        "pr_head_sha": None, "repo": repo,
-                       "snapshot_subtree_scope": scope,
+                       "snapshot_subtree_scope": effective_scope,
                        "snapshot_sha256": "6" * 64,
-                       "snapshot_subtree_sha256": anchor},
+                       "snapshot_subtree_sha256": effective_anchor,
+                       "content_anchor": dict(CONTENT_ANCHOR,
+                                              scope=effective_scope,
+                                              sha256=effective_anchor)},
             "build": build, "degradations": []}
 
 
@@ -395,12 +400,9 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
         anchor_field = C.SOURCE_ANCHOR_FIELD[kind]
         anchor_value = ("7" * 64) if local else ("c" * 40)
         scope = "experimental/index/median" if local else None
-        source_identity = {
-            "provenance_kind": kind,
-            "anchor_field": anchor_field,
-            "anchor_value": anchor_value,
-            "snapshot_subtree_scope": scope,
-        }
+        source_identity = {"content_anchor": dict(
+            CONTENT_ANCHOR, scope=scope or CONTENT_ANCHOR["scope"],
+            sha256=anchor_value if local else CONTENT_ANCHOR["sha256"])}
         manifest = {
             "runner_binding": {
                 "schema": "oprunway.precision_retest.cpp_extension_binding",
@@ -424,13 +426,10 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
                 "soc": "A3", "toolkit": "9.0.1",
             },
         }
-        directive = {
-            "source_identity": dict(
-                {"repo": "repo", anchor_field: anchor_value,
-                 "build_receipt_sha256": "d" * 64},
-                **({"provenance_kind": kind,
-                    "snapshot_subtree_scope": scope} if local else {})),
-        }
+        directive = {"source_identity": {
+            "content_anchor": copy.deepcopy(source_identity["content_anchor"]),
+            "build_receipt_sha256": "d" * 64,
+            "runner_form": "cpp_extension"}}
         build_receipt = _vendor_build_receipt(
             local=local, anchor=anchor_value, scope=scope,
             argv=["bash", "build.sh", "-f", "x"])
@@ -487,15 +486,14 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
             receipt, manifest, directive, plan, generated)
         self.assertEqual(got["fresh_extension_elf_sha256"], "1" * 64)
 
-    def test_fresh_receipt_claiming_other_channel_is_blocked(self):
-        """fresh 收据改口说 PR + 任意 40 位 hex → 本地锚等值校验会整条跳过，必须先拒。"""
+    def test_fresh_receipt_transport_channel_does_not_change_identity(self):
+        """locator 形态只是 transport observation，内容锚一致即可。"""
         manifest, directive, plan, receipt, generated = self._fixture(local=True)
         receipt["vendor"]["build_receipt"] = _vendor_build_receipt(
             local=False, anchor="a" * 40, argv=["bash", "build.sh", "-f", "x"])
-        with self.assertRaisesRegex(
-                R.RetestExecutionError, "来源锚不可信"):
-            R._validate_cpp_extension_fresh_receipt(
-                receipt, manifest, directive, plan, generated)
+        got = R._validate_cpp_extension_fresh_receipt(
+            receipt, manifest, directive, plan, generated)
+        self.assertEqual(got["fresh_extension_elf_sha256"], "1" * 64)
 
     def test_fresh_receipt_scope_drift_is_blocked_even_when_merkle_matches(self):
         """⭐ 只比 merkle 值等于没比：范围不同的两个 merkle 本来就不可比。
@@ -507,8 +505,9 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
         receipt["vendor"]["build_receipt"] = _vendor_build_receipt(
             local=True, anchor="7" * 64, scope="",
             argv=["bash", "build.sh", "-f", "x"])
+        receipt["vendor"]["build_receipt"]["source"]["content_anchor"]["scope"] = ""
         with self.assertRaisesRegex(
-                R.RetestExecutionError, "source_scope 身份漂移"):
+                R.RetestExecutionError, "source_anchor 身份漂移"):
             R._validate_cpp_extension_fresh_receipt(
                 receipt, manifest, directive, plan, generated)
 
@@ -531,7 +530,7 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
         """旧 manifest 只有 base_pr_head：刻意不留兼容兜底，直接拒执行。"""
         manifest, directive, plan, receipt, generated = self._fixture()
         binding = manifest["runner_binding"]
-        binding["base_pr_head"] = binding.pop("base_source_identity")["anchor_value"]
+        binding["base_pr_head"] = binding.pop("base_source_identity")["content_anchor"]["sha256"]
         with self.assertRaisesRegex(
                 R.RetestExecutionError, "来源身份与本轮漂移"):
             R._validate_cpp_extension_fresh_receipt(
@@ -559,7 +558,7 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
         manifest["runner_binding"]["base_source_identity"] = {
             "dut_source": "local_checkout",
             "anchor_field": "local_root_digest",
-            "anchor_value": legacy["anchor_value"],
+            "anchor_value": legacy["content_anchor"]["sha256"],
         }
         with self.assertRaisesRegex(
                 R.RetestExecutionError, "来源身份与本轮漂移"):
@@ -589,6 +588,8 @@ class CppExtensionRetestBindingTest(unittest.TestCase):
                         "cpp_extension_receipt": receipt,
                         "evidence": [],
                     }) as precision_only, \
+                mock.patch.object(R.cpp_extension_adapter, "validate_receipt",
+                                  return_value=receipt), \
                 mock.patch.object(
                     R.cpp_extension_adapter, "run_cpp_extension") as full:
             got = R._run_cpp_extension_task2_only(
@@ -607,13 +608,9 @@ class FrozenSourceFactsTest(unittest.TestCase):
             attempt, "source_facts.json", payload)
 
     def _directive(self, *, local):
-        anchor = ({"provenance_kind": "local_snapshot",
-                   "snapshot_subtree_sha256": "7" * 64,
-                   "snapshot_subtree_scope": "experimental/index/median"}
-                  if local else {"pr_head_sha": "c" * 40})
-        return {"source_identity": dict(
-            anchor, repo="repo", build_receipt_sha256="d" * 64,
-            runner_form="cpp_extension")}
+        return {"source_identity": {
+            "content_anchor": copy.deepcopy(CONTENT_ANCHOR),
+            "build_receipt_sha256": "d" * 64, "runner_form": "cpp_extension"}}
 
     def _manifest(self, sha256):
         return {"source_facts": {
@@ -622,7 +619,7 @@ class FrozenSourceFactsTest(unittest.TestCase):
             "sha256": sha256,
         }}
 
-    def test_pull_request_attempt_without_frozen_facts_keeps_old_behaviour(self):
+    def legacy_pull_request_attempt_without_frozen_facts_keeps_old_behaviour(self):
         with tempfile.TemporaryDirectory() as attempt:
             self.assertIsNone(R._frozen_source_facts_path(
                 attempt, {}, self._directive(local=False)))
@@ -637,10 +634,11 @@ class FrozenSourceFactsTest(unittest.TestCase):
 
     def test_frozen_facts_path_is_returned_after_sha_check(self):
         with tempfile.TemporaryDirectory() as attempt:
-            path = self._write(attempt, {
-                "pr": {"provenance_kind": "local_snapshot",
-                       "snapshot_merkle_sha256": "7" * 64,
-                       "snapshot_scope": "experimental/index/median"}})
+            path = self._write(attempt, {"contract_version": 2,
+                "input_association": {"schema": "oprunway.caller_trusted_input",
+                    "schema_version": 1, "policy": "caller_trusted_pair_v1",
+                    "correspondence": "asserted_by_caller"},
+                "pr": {"content_anchor": copy.deepcopy(CONTENT_ANCHOR)}})
             self.assertEqual(
                 R._frozen_source_facts_path(
                     attempt, self._manifest(C.sha256_file(path)),

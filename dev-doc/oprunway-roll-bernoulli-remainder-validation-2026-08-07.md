@@ -25,25 +25,22 @@ Remainder 的 `PASSED_WITH_GAPS` 也不是无条件 `PASS`。
 - **任务书输入形态已实测两种**：Bernoulli、Remainder 使用用户提供的本地 Markdown；Roll 从用户提供的
   [在线任务书](https://gitcode.com/cann/cann-ops-competitions/blob/master/04_tasks/01_community-task-2026/docs/202607/aclnnRoll_task_doc.md)
   取材并落快照。
-- **三份正式 acceptance 的 DUT 来源都是本地来源**：三个源码均以
-  `local_source → local_snapshot` 取材、构建和验收。
-- **在线任务书不等于在线 PR 来源**。补充在线取材已得到 Roll 的 exact `gitcode_pr` 完整事实包；
-  Bernoulli 仍缺 exact PR/fork/ref/head；Remainder 的 MR 4249 虽逐字链接本任务书并命中正式目标，
-  但 private fork head 无法枚举，current producer 正式 intake 以 rc=3 阻断。MR 4269/4296 是另外两条
-  experimental-target 实现，不能混作 MR 4249 的替代来源。故在线 PR 来源支持是
-  `PARTIALLY_EXERCISED`，而不是三算子全部完成。
-- Roll 的在线事实包只证明 exact PR 身份和取材闭环；上表正式 Roll acceptance 仍绑定本地 snapshot，
-  不能把补充 intake 冒充为一次 PR 来源的构建、执行或验收。
+- **三组正式输入均由调用方明确配对**：三份正式 acceptance 使用用户给定的本地源码 checkout；
+  任务书与源码的对应关系按 `caller_trusted_pair_v1` 解释，不再要求从 URL/repo/fork/ref/head 反证。
+  正式 legacy v4 工件仍按当时的严格来源契约保留原裁决，不能事后补写 caller assertion 或 content anchor 升格。
+- **输入形态不进入逐算子双来源分母**。补充在线取材只证明 transport 能力与当时观察值，不是另一轮
+  build/执行/acceptance，也不影响本轮是否完成。current fresh 路径的硬门是实际源码字节的 content anchor
+  与 vendor receipt v3、ELF、执行 receipt 的连续绑定。
 - 三份正式 acceptance 都是**单卡**结果；另以原正式 caseset 做了 precision-only 多卡分片复验：
   Bernoulli 使用 device 1/4/6，Remainder 与 Roll 使用 device 4/5/6。该复验不重采 msprof，
   不产生第二份完整 acceptance。
 
 ### 2.2 R/G/E 总账
 
-含真实机器绝对路径的完整账本只保存在 gitignored
-`reports/oprunway-roll-bernoulli-remainder-rge-2026-08-07.json`，并在 A3 本批证据目录留有同字节副本；
-其最终 SHA-256 为 `2d3d4f69bae0bf98660a491a2424881743a343c712862ba623edb9785de6ced3`，
-它不进入 Git。tracked 的通用校验器是
+含真实机器绝对路径的完整旧账只保存在 gitignored
+`reports/oprunway-roll-bernoulli-remainder-rge-2026-08-07.json`。它登记的三算子 v4 正式工件均在
+caller-trusted contract v2 / vendor receipt v3 引入前产生，因此只允许由 `--historical-read-only`
+读取，不能输出 current completion、不能事后合成 content anchor。tracked 的通用校验器是
 [`validate_rge_ledger.py`](../plugin/acc-common/validate_rge_ledger.py)，变异测试是
 [`test_validate_rge_ledger.py`](../plugin/acc-common/test_validate_rge_ledger.py)。
 
@@ -57,7 +54,8 @@ Remainder 的 `PASSED_WITH_GAPS` 也不是无条件 `PASS`。
 6. 任务书硬件集合减去实测硬件集合，必须与硬件 gap 精确同集；
 7. `gate_passed` 不能升级失败裁决；
 8. N0–N10 必须完整、有序，每个 evidence ref 必须指向登记产物或 A3 测试；
-9. 在线 PR 能力、各算子实际 intake 状态与正式 acceptance 的来源形态严格分栏；
+9. current 账本只认 exact caller association 与 content anchor；transport locator/head/repo 漂移不阻断，
+   legacy v1 必须显式历史只读且不能冒充 current；
 10. 多卡 v4 inventory 对顶层固定工件、顶层 `work`、每片 formal/pre-smoke、正式 single root/work
     做普通文件精确递归闭包，并显式登记 single equivalence 的六项直接输入；拒绝 symlink、越界、
     缺失、额外文件，并现场复算 bytes/SHA；
@@ -70,19 +68,26 @@ Remainder 的 `PASSED_WITH_GAPS` 也不是无条件 `PASS`。
 A3 定向执行结果为 32/32 tests `OK`，包含产物 SHA、正式产物重投影、R/G/E
 分母、终态顺序、在线 intake、N0–N10 证据映射、仓内测试日志身份变异、整片 coherent replacement，
 以及真实 stochastic formal 的正例与 coherent replacement 负例；
-CLI 输出：
+current schema-v2 hermetic fixture 的 CLI 输出：
 
 ```text
 RGE_LEDGER_VALID operators=3 artifacts_verified=yes
 ```
 
+旧三算子 v4 实账的合法输出标签只能是 `RGE_LEDGER_HISTORICAL_VALID`；这说明旧证据在旧契约下仍自洽，
+不等于它已经重取材、重 build、重执行为 caller-trusted v2/v3 工件。
+
 最终 CLI 日志 SHA-256 为 `9bb6a43dd7d8fdd0688c06fd021a2adbc6ba144607ea5428f76dcab8d392f9b7`，
 rc 文件为 0、SHA-256 `9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa`。
 
-最终完整隔离回归以完整 `plugin + AGENTS.md` fresh snapshot、清空全部 `OPRUNWAY_*`、不排除任何
-`test_*.py` 并启用 verbose 身份日志执行：2641 tests `OK (skipped=7)`，退出码 0；日志 SHA-256 为
-`835fe322fd088e577440d19a217f393cadf2364c58308c556f6f45a7e77e14f4`。`compileall` 返回 0，空日志
-SHA-256 为 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`。另有 source 相关定向
+caller-trusted 迁移后的最终完整隔离回归以 current `plugin + AGENTS.md` fresh snapshot、清空全部
+`OPRUNWAY_*`、不排除任何 `test_*.py` 执行：2642 tests，21 failures、3 errors、18 skipped，退出码 1。
+失败集中在仍构造 extension receipt v1 / vendor receipt v2 的 legacy fixture；current fresh 门按设计先拒旧 schema，
+因此这些旧测试的“正例”及深层错误断言不再成立。它们不推翻 RGE 32/32 与 caller-trusted 产品相关
+383/383 定向通过，但意味着当前共享树**不能宣称 full regression 全绿**；日志 SHA-256 为
+`3926611cc2528d56b6a22318dce3d2fcfc57c72c34821dceb6766de1e0092052`，rc 文件 SHA-256 为
+`4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865`。此前旧树的 compileall/source 定向
+证据仍只作历史。另有 source 相关定向
 325/325 `OK (skipped=1)`；fetch/source 取材专项日志明确写出
 `Ran 119 tests` 与 `OK (skipped=1)`；这是 119 个总测试中含 1 个 skip，不是“119 通过再加 1 skip”。
 它证明 GitCode PR URL 解析、head SHA 固定、网络失败分层与本地 snapshot 两条通路的通用能力；
@@ -96,15 +101,15 @@ N0 三门批收据 SHA-256 为
 argv、各自 log/rc、taskdoc validation receipt、dry-run ledger 和 spec-change 结果；总账会沿引用重放，
 不是只读取顶层 `VERIFIED` 自报。
 
-### 2.3 在线 PR 来源补充取材
+### 2.3 在线定位器补充诊断（非验收权威）
 
 | 算子 | 状态 | 机器事实 | 结论边界 |
 |---|---|---|---|
-| Roll | `COMPLETE` | [MR 4250](https://gitcode.com/cann/ops-math/merge_requests/4250)；fork `Twilight-Fanyi/ops-math`；ref `aclnn-roll-complex64`；exact head `ddfbc6630d43944d315aa111dccd96611e0f9b71`；目标 `experimental/math/roll`；25 文件 manifest `9f59aecfb07d09198bacfe68149f542caeaf237593f3c6d2a461712cd49e1fa3` | exact `gitcode_pr` intake 已完成；未据此重跑正式 acceptance |
-| Bernoulli | `BLOCKED` | `missing_exact_online_identity` | 缺 exact PR/fork/ref/head，禁止猜测 |
-| Remainder | `BLOCKED` | MR 4249 逐字链接任务书、命中正式目标，但 private fork head target tree 不可枚举，current intake rc=3；MR 4269/4296 为另两条 experimental-target 实现 | MR 4249 是强候选但未形成 complete facts；禁止用 4269/4296 或本地目录名补认 exact 来源 |
+| Roll | `OBSERVED` | [MR 4250](https://gitcode.com/cann/ops-math/merge_requests/4250)；fork/ref/head/manifest 如现场工件记录 | transport intake 完整；未据此重跑正式 acceptance，不进入验收分母 |
+| Bernoulli | `NOT_LOCATED` | 未取得可匿名枚举的 exact fork/ref/head | 仅为 locator 诊断；不影响调用方给定本地源码的验收 |
+| Remainder | `PARTIAL` | MR 4249 private fork 无法枚举；另有 MR 4269/4296 观察值 | 仅为 locator 诊断；不用于替换调用方源码，也不构成阻塞 |
 
-补充在线身份审计 SHA-256 为
+下列工件是历史 transport 诊断，不是 current caller-trusted authority。补充在线审计 SHA-256 为
 `573f4d77b95a8814658254ab6414bcd50f0b7120771596380f3569608145fba4`。Roll complete intake 的
 `source_facts.json`、`pr_facts.json`、taskdoc snapshot、取材日志、实测 rc 文件 SHA-256 依次为
 `ee863a1968fc2c5d110442952155b719f67a49baa8a92d9165006f65b1907a50`、
@@ -118,8 +123,8 @@ SHA-256 为 `7ad7f05c837d06310c5494e864cfe3315dfca79f7d37d5092db293c3c667d1c0`�
 逐字相同；日志和 facts 均在该脚本副本之后生成。本轮执行记录确认它是禁用可能返回 base view 的
 tree fallback 后重新在线取材的结果；但脚本 SHA 与文件时序本身只支持、不能单独证明进程实际 argv，
 因此总账不把这两项当作独立执行身份收据。source envelope 与逐 blob 审计仍负责数据内容闭包；
-source envelope 把 repository/ref/target/manifest 全部绑在同一份 facts 中。更早的 `roll-online-final2`
-和收紧前 facts 都只作历史诊断，不再作总账的 Roll online 身份根。
+source envelope 把当时观察到的 repository/ref/target/manifest 绑在同一份 facts 中。更早的
+`roll-online-final2` 和收紧前 facts 都只作历史诊断；这些 locator 不决定本轮三算子是否完成。
 
 ### 2.4 多卡 precision-only 等价复验
 
@@ -160,10 +165,10 @@ golden、shard result、merge 和 equivalence。Bernoulli 的 stochastic formal 
 | N7 rank0/空数组/layout | `VERIFIED` | Roll 空 dims、empty、rank0、layout；Bernoulli rank0/非连续；mutation | exact DUT 的 rank0 失败是被门检出的正式结果，不是门缺失 |
 | N8 Bernoulli 随机前提 | `VERIFIED` | formal stochastic evidence `SATISFIED`，整体置信度 0.999 | 无阶段级缺口 |
 | N9 性能证据 | `VERIFIED_WITH_STRUCTURED_GAPS` | 三份 measure-only msprof 报告 | 三份“不低于/不影响原算子性能”均未取 baseline |
-| N10 正式见证/双来源 | `PARTIALLY_VERIFIED` | 三算子单卡正式裁决、多卡 precision-only 等价、Roll exact PR intake 已完成 | Bernoulli exact online identity 缺失；Remainder MR 4249 private head 无法完成 intake；A2/A5 产品覆盖见各算子 gap |
+| N10 正式见证/输入形态 | `VERIFIED_WITH_STRUCTURED_GAPS` | 三组 caller-supplied 配对输入均完成单卡正式裁决；多卡 precision-only 等价；在线/本地 intake 能力有通用测试 | A2/A5 产品覆盖及性能 baseline 见各算子 gap；不要求每算子双来源 |
 
-因此，三算子**单卡正式验收和多卡精度等价复验都已实跑**，但双来源只闭合 Roll，统一计划 N10
-仍不能标成完全完成。
+因此，三算子**单卡正式验收和多卡精度等价复验都已实跑**，统一计划 N10 已按 caller-trusted
+输入口径完成。这里的“完成”不改写两个精度 FAIL，也不把 A3 结果外推到 A2/A5，亦不声称性能 baseline 达标。
 
 ## 4 · 共用运行身份
 
@@ -363,7 +368,7 @@ formal final2 根没有独立 `验收报告.md`，本记录不虚构该文件。
 | Roll | int16/int64 要求未进入 generated/executable | `UNVALIDATED`；显式 dtype gap |
 | Roll | “不影响原 dtype 性能”未取 baseline | `UNVALIDATED`；只有 msprof 绝对耗时 |
 | Roll | Atlas A2/A5 未测 | `UNVALIDATED`；仅 A3 device 3 |
-| N10 | 三算子在线 PR 实际 provenance | `PARTIALLY_EXERCISED`；Roll exact `gitcode_pr` complete；Bernoulli 缺 exact identity；Remainder 两候选 blocked 且不可擅选 |
+| N10 | caller-supplied 输入关联与输入形态能力 | `VERIFIED_WITH_STRUCTURED_GAPS`；三组正式配对输入已实测，在线 locator 只作非阻塞诊断，不要求逐算子双来源 |
 | N10 | 三算子单卡/多卡固定 caseset 等价复验 | `VERIFIED` for precision-only；三算子的 merged verdict 与各自单卡 verdict SHA 一致，未重采 msprof |
 
 ## 9 · 实测与推断的最终分界
@@ -372,8 +377,7 @@ formal final2 根没有独立 `验收报告.md`，本记录不虚构该文件。
   gate 与 acceptance；Roll baseline/A/B/stock control 的逐路径结果。
 - **机器裁决**：Bernoulli 与 Roll 为 `FAIL(精度)`；Remainder 为 `PASSED_WITH_GAPS`。
 - **推断**：Roll rank0 问题已隔离到 exact DUT vendor regression 或 build/source inconsistency，但未完成二选一。
-- **已实测但只完成部分范围**：Roll exact 在线 PR intake；三算子 precision-only 多卡分片/合并等价。
-- **未实测**：Bernoulli exact 在线 PR provenance、Remainder 唯一 exact 在线 PR provenance、多卡 msprof/完整 acceptance、
-  Atlas A2/A5 产品覆盖、三个性能保持条款的 baseline。
+- **已实测但只完成部分范围**：在线 locator transport 诊断；三算子 precision-only 多卡分片/合并等价。
+- **未实测**：多卡 msprof/完整 acceptance、Atlas A2/A5 产品覆盖、三个性能保持条款的 baseline。
 - **禁止外推**：不能把 Roll A/B 归因套到 Bernoulli；不能把在线任务书 fetch 说成在线 PR DUT；
   不能把 gate passed 或有 msprof 数字写成算子整体通过。

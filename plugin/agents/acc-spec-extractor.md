@@ -3,12 +3,12 @@ name: acc-spec-extractor
 mode: subagent
 skills: [acc-spec]
 tools: Bash, Read, Write, Edit, Skill
-description: OpRunway 验收 ②（CP-B）的子 agent——先按 18 项标准校验任务书输入是否足以充当验收依据，再把已取材的算子任务书(task_doc.md)+PR 事实(pr_facts.json)抽成中立的 <op>.spec.json + task_pr_gaps（一份任务书含多算子→多份 spec）。它是 acc-spec skill 的单轮 agent 壳：只做 NL 判断与抽取，不自行判定 pass/fail，只回结构化摘要给 orchestrator。由 op-acceptance orchestrator 在 CP-B dispatch，dispatch_mode = validate_taskdoc / extract_spec / refine_spec。
+description: OpRunway 验收 CP-B 子 agent——校验任务书输入，再把调用方配对的任务书与源码事实抽成中立 spec + task_pr_gaps；不自行判定 pass/fail。
 ---
 
 # acc-spec-extractor — 任务书→spec 子 agent（acc-spec skill 的 agent 壳）
 
-**是什么**：`mode:subagent` 的「任务书→spec」抽取子 agent。承 `op-acceptance`（primary orchestrator）在 **CP-B** 的 dispatch，把 CP-A 已取材落盘的 `task_doc.md` + `pr_facts.json` 抽成 Layer 0 中立契约 `<op>.spec.json` + 每份显式 `task_pr_gaps`。
+**是什么**：`mode:subagent` 的「任务书→spec」抽取子 agent。消费 CP-A 已落盘的 caller-trusted 任务书与源码事实，抽成 Layer 0 中立契约与显式 gaps。
 **边界**：这一步只把「任务书/PR 里有什么、缺什么」确定性地落成 spec，**不做验收判定**（判定在确定性脚本链）。缺项落 `task_pr_gaps`，**不臆造**、推断项标 `(推断)`。
 **它是 acc-spec skill 的 agent 壳**：NL 抽取核心逻辑在 `acc-spec` skill（含 `references/taskdoc-to-spec.md` 字段映射表 / verify_mode 决策树 / threshold 兜底 / 多算子拆分 / 自检清单）；本 agent 只负责在被 dispatch 时加载并跑这个 skill、按 `dispatch_mode` 分支、回结构化摘要。换运行时（Codex/Antigravity）只换本 agent 壳，`acc-spec` skill + `fetch_source.py` 不动；此可移植性依赖 canon 项 `cross-cli-unified-form`（proposed·未 settle，载重前需核）。
 
@@ -16,7 +16,7 @@ description: OpRunway 验收 ②（CP-B）的子 agent——先按 18 项标准�
 
 - **单轮**：一次 dispatch 只做一次抽取/一次修订，做完即回摘要交还 orchestrator，**不自问自答滚下一轮**。
 - **禁内部循环**：不在本 agent 内反复「抽→自跑门→再抽」。循环由 orchestrator 控（CP-B 的 **`--dry-run` 契约自检**报错/账本异常时，由 orchestrator 再 dispatch `refine_spec`）。
-- **禁跨阶段**：只产 spec。**不**跑 `fetch_source.py`（取材是 primary 在 CP-A 做的确定性活）、**不**跑 `gen_cases.py` / `run_workflow.py`（含 dry-run 自检）、**不**碰 runner、**不**重判 CP-A 的 `correspondence.json`。所需工件缺失 → 回摘要报缺，交还 orchestrator，不自行补跑上/下游。
+- **禁跨阶段**：只产 spec。不跑取材/生成/验收脚本，不重判调用方给定的任务书↔源码关联。fresh facts 不要求 `correspondence.json`；legacy 只读流程不得借本 agent 合成 current 关联声明。
 - **只回结构化摘要给 orchestrator**：不直接面向用户对话、不展示脚本命令；产出=落盘的 spec 文件 + 一段结构化中文摘要（见末节）。
 - **不自行判定**：判定唯一归**确定性脚本链**——`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）→ 门控后写 `acceptance.json`。编排层与 subagent **不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**（ADR 0007）——不是「绝不提 pass/fail」。本 agent 只产 spec 与 gaps；spec 抽得对不对不由自己宣告「通过」，而由 CP-B 的 **`--dry-run` 契约自检**（只查用例**计划**自洽，**不产任何裁决**）与 **CP-D 真机门**用确定性脚本裁决。
   ⚠ **验收裁决只有真机通路产得出来**（C5，用户 2026-07-22 拍板）：mock 的「NPU 输出」= `golden.copy()`、精度按构造必过、性能是编的假数，它**已不再写 `acceptance.json` / `verdict.json`**（改产标明 NON-ACCEPTANCE 的 `dev_run_summary.json`）。**别再说「跑 mock 看裁决」**。
@@ -29,7 +29,7 @@ description: OpRunway 验收 ②（CP-B）的子 agent——先按 18 项标准�
 | dispatch_mode | 输入工件 | 产出工件 | 一句话职责 |
 |---|---|---|---|
 | `validate_taskdoc` | `task_doc.md` + `source_facts.json`（**只读任务书自己，禁读 `pr_facts.json`/op_def/header**） | `<workdir>/taskdoc_validation.json` | 按 18 项标准逐项判任务书是否足以充当验收依据；判 satisfied 必附逐字原文；不产阻断结论、不替用户决策 |
-| `extract_spec` | `task_doc.md` + `pr_facts.json` + `source_facts.json`（CP-A primary 取材已落盘）+ `correspondence.json`（状态 `confirmed` 且绑定事实摘要，作前置证据、不重判） | 一份或多份 `<op>.spec.json`（落 specs 目录）+ 每份内嵌 `task_pr_gaps` | 只消费已取材 evidence bundle，不重复联网研究 PR；按 acc-spec skill 字段映射抽 spec；一份任务书 N 算子 → N 份 spec |
+| `extract_spec` | `task_doc.md` + `pr_facts.json` + current contract-v2 `source_facts.json` | 一份或多份 `<op>.spec.json` + 每份内嵌 `task_pr_gaps` | 只消费 caller-trusted evidence bundle；URL/repo/ref/head 不是准入门；一份任务书 N 算子 → N 份 spec |
 | `refine_spec` | 待修 `<op>.spec.json` + CP-B **dry-run 契约自检**的报错/账本异常 + `task_doc.md` + `pr_facts.json` | 定向修订后的同名 `<op>.spec.json`（更新 `task_pr_gaps` 记改动理由） | 据该报错定向修 spec 字段，交还 orchestrator 重跑 dry-run；不臆造去凑通过 |
 
 ### validate_taskdoc
@@ -65,8 +65,8 @@ description: OpRunway 验收 ②（CP-B）的子 agent——先按 18 项标准�
 
 ### extract_spec
 
-- **输入工件**：`workdir/task_doc.md`（任务书原文）+ `workdir/pr_facts.json`（`fetch_source.py` 产：op / 目标仓·目录 `target_dir` / merged / 改动文件 / `key_files` = 算子自带 `test_aclnn_*.cpp` + `*_def.cpp`）+ `workdir/source_facts.json`（任务书/PR head/key files 的内容身份）。`correspondence.json` 状态须为 `confirmed`，且 `source_facts_digest` 须绑定当前事实包（该前置对应由 canon 项 `verify-spec-pr-correspondence` 保证——proposed·未 settle，载重前需核）——本 agent 只被 dispatch 在对应已成立后（`mismatch`/`empty_task`/`needs_user_confirmation` 的处置在 CP-A，由 primary 出程序结论或问用户，**不轮到本 agent**）。已有 evidence bundle 足够时**禁止重新联网拉 PR、重复做 dtype/接口研究**；缺事实则回摘要报缺。
-- **已确认约束优先**：dispatch 的“已确认约束”与 `correspondence.json.confirmed_constraints` 是 primary 记录的本轮用户选择；逐项原样消费，不重新推导、不再次提问，也不得用 PR 实现覆盖。两处不一致则立即回 `BLOCKED(dispatch_contract_conflict)`，不靠继续研究猜哪份对。
+- **输入工件**：任务书、`pr_facts.json` 与 current `source_facts.json`。后者必须带 exact caller association 与 content anchor；URL/repo/fork/ref/head 只作 transport 观察。已有 bundle 足够时禁止重新联网追查“身份”；缺源码内容事实才回摘要报缺。
+- **调用方约束优先**：dispatch 的已确认约束逐项原样消费，不重新推导、不再次提问，也不得用源码实现覆盖任务书。
 - **执行边界**：只读点名输入与 acc-spec skill 路由到的相关章节，不遍历无关目录。单轮预算 300 秒；预算将尽仍缺权威事实时写结构化 gap/`needs_user` 并交还 primary，禁止用扩展联网或无界阅读拖延。
 - **干什么**：加载 `acc-spec` skill，按 `references/taskdoc-to-spec.md` 字段映射表逐字段抽，重点守住这几个最易错点（都在 ref 里）：
   1. **dtype 全集 vs 子集**：任务书显式枚举时逐字采用；任务书把范围定义为“所有进入 AICore 的数据类型”等实现域集合时，从本轮同一 PR head 的 `op_def` 与目标硬件配置枚举成员。不得复用旧 spec/报告，也不得因任务书未重复列举就回 `needs_user`。只有本轮任务书语义和本轮 PR/op_def 都无法确定集合时才问用户。再以确定性生成/runner 能力表求当前可测子集，写入 `params.dtype`，其余逐项挂账。

@@ -264,8 +264,8 @@ def _validate_cpp_extension_fresh_receipt(
     actual = {
         # 已按通路核过形态的锚值，不是裸 `.get`：收据是 local 时裸 get 拿到 None、
         # 是「64 位假 pr_head_sha」时裸 get 会原样收下。
-        "source_anchor": fresh_identity["anchor_value"],
-        "source_scope": fresh_identity[contract.SNAPSHOT_SCOPE_FIELD],
+        "source_anchor": fresh_identity["content_anchor"],
+        "source_scope": None,
         "vendor_elf": vendor.get("library_sha256")
             if isinstance(vendor, dict) else None,
         "soc": runtime.get("soc") if isinstance(runtime, dict) else None,
@@ -294,10 +294,9 @@ def _validate_cpp_extension_fresh_receipt(
             "cpp_extension 基础 receipt 身份与 directive/execution identity 漂移")
     # `receipt_source_identity` 已经过 `vendor_build_receipt.summarize`，故 build 段的
     # argv/cwd/实测 returncode 已被校过，这里只比「与首轮是否同一条构建命令」。
-    if (build_receipt["build"]["argv"] != binding.get("base_vendor_build_argv")
-            or fresh_summary["repo"] != binding.get("base_source_repo")):
+    if build_receipt["build"]["argv"] != binding.get("base_vendor_build_argv"):
         raise RetestExecutionError(
-            "fresh vendor build argv/source repo 与首次 receipt 漂移")
+            "fresh vendor build argv 与首次 receipt 漂移")
     return {
         "base_receipt_sha256": binding["base_receipt_sha256"],
         "fresh_receipt_sha256": cpp_extension_adapter._canonical_sha(receipt),
@@ -341,6 +340,12 @@ def _run_cpp_extension_task2_only(
             raise RetestExecutionError(
                 f"Task-2-only 非法产生性能工件 {forbidden}")
     receipt = evidence.get("cpp_extension_receipt")
+    try:
+        validated_receipt = cpp_extension_adapter.validate_receipt(attempt_work, subset)
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        raise RetestExecutionError(f"fresh cpp_extension receipt 正式重放失败: {ex}") from ex
+    if validated_receipt != receipt:
+        raise RetestExecutionError("fresh evidence 内嵌 receipt 与落盘正式 receipt 漂移")
     execution = _validate_cpp_extension_fresh_receipt(
         receipt, manifest, directive, generated_plan, generated_manifest)
     evidence["precision_retest_execution"] = execution
@@ -376,11 +381,8 @@ def _frozen_source_facts_path(attempt, manifest, directive):
             f"directive.source_identity 来源判别式不合法：{ex}") from ex
     recorded = manifest.get("source_facts")
     if recorded is None:
-        if kind == contract.PROVENANCE_LOCAL_SNAPSHOT:
-            raise RetestExecutionError(
-                f"{contract.PROVENANCE_KIND_KEY}={kind} 的 attempt 必须带 F2 冻结的 "
-                f"source_facts.json，manifest 里却没有——本地锚没有对照物即无绑定，拒绝执行")
-        return None
+        raise RetestExecutionError(
+            "fresh content_snapshot attempt 必须带 F2 冻结的 source_facts.json")
     if not isinstance(recorded, dict):
         raise RetestExecutionError("manifest.source_facts 非法")
     try:

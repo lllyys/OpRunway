@@ -185,6 +185,7 @@ import content_address
 import dtype_requirement_sets as DRS
 import perf_mode
 import precision_policy
+import source_provenance
 import tensor_shape_attrs as TSA
 
 SEED = 2026
@@ -5985,9 +5986,9 @@ def main(argv):
                 "[--taskdoc-caseset <taskdoc_caseset.json>] "
                 "[--source-facts <source_facts.json> "
                 "--correspondence <correspondence.json>]")
-        if bool(source_facts_path) != bool(correspondence_path):
+        if correspondence_path and not source_facts_path:
             raise ValueError(
-                "--source-facts 与 --correspondence 必须同时提供，防止只绑定一半准备输入")
+                "--correspondence 不能脱离 --source-facts 单独提供")
         preparation_inputs = None
         if source_facts_path:
             source_root = os.path.dirname(os.path.abspath(source_facts_path))
@@ -5996,20 +5997,25 @@ def main(argv):
                 source_root, source_name, "oprunway/source-facts/v1")
             source_digest = content_address.content_digest(
                 "oprunway/source-facts/v1", source_payload)
-            with open(correspondence_path, encoding="utf-8") as corr_fh:
-                correspondence = json.load(corr_fh)
-            correspondence_bytes = content_address.canonical_json_bytes(
-                correspondence)
-            if (not isinstance(correspondence, dict)
-                    or correspondence.get("status") != "confirmed"
-                    or correspondence.get("source_facts_digest") != source_digest):
-                raise ValueError(
-                    "correspondence 必须 confirmed 且绑定当前 source_facts digest")
-            preparation_inputs = {
-                "source_facts_digest": source_digest,
-                "correspondence_sha256": hashlib.sha256(
-                    correspondence_bytes).hexdigest(),
-            }
+            association = source_provenance.caller_trusted_association(source_payload)
+            caller_trusted = association is not None
+            preparation_inputs = {"source_facts_digest": source_digest}
+            if caller_trusted:
+                preparation_inputs["input_association_sha256"] = hashlib.sha256(
+                    content_address.canonical_json_bytes(association)).hexdigest()
+            else:
+                if not correspondence_path:
+                    raise ValueError("legacy source_facts 仍必须提供 correspondence")
+                with open(correspondence_path, encoding="utf-8") as corr_fh:
+                    correspondence = json.load(corr_fh)
+                correspondence_bytes = content_address.canonical_json_bytes(correspondence)
+                if (not isinstance(correspondence, dict)
+                        or correspondence.get("status") != "confirmed"
+                        or correspondence.get("source_facts_digest") != source_digest):
+                    raise ValueError(
+                        "correspondence 必须 confirmed 且绑定当前 source_facts digest")
+                preparation_inputs["correspondence_sha256"] = hashlib.sha256(
+                    correspondence_bytes).hexdigest()
         spec = json.load(open(rest[0], encoding="utf-8"))
         ledger = _dry_run(spec, preparation_inputs=preparation_inputs,
                           taskdoc_caseset=taskdoc_caseset)

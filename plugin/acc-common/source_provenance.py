@@ -97,6 +97,8 @@ _ROUTES_NEEDING_AUTHORIZATION = frozenset({ROUTE_DEGRADED_SNAPSHOT})
 
 _HEX40 = re.compile(r"[0-9a-fA-F]{40}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+CALLER_TRUST_POLICY = "caller_trusted_pair_v1"
+CONTENT_ANCHOR_SCHEMA = "oprunway.source_content_anchor"
 
 
 class ProvenanceError(ValueError):
@@ -270,6 +272,65 @@ def _bind_local_snapshot(source_pr, pr_facts, kind, form):
     }
 
 
+def caller_trusted_association(source, *, allow_legacy=True):
+    """严格解析 caller-trusted marker；半新半旧一律拒绝，绝不回落 legacy。"""
+    if not isinstance(source, dict):
+        raise ProvenanceError("source_facts 须为 JSON object")
+    row = source.get("input_association") if isinstance(source, dict) else None
+    marked = source.get("contract_version") == 2 or row is not None
+    if not marked:
+        if allow_legacy:
+            return None
+        raise ProvenanceError("fresh source_facts 必须是 caller-trusted v2")
+    expected = {"schema": "oprunway.caller_trusted_input", "schema_version": 1,
+                "policy": CALLER_TRUST_POLICY,
+                "correspondence": "asserted_by_caller"}
+    if source.get("contract_version") != 2 or row != expected:
+        raise ProvenanceError("caller-trusted input_association/contract_version 非法")
+    pr = source.get("pr")
+    if not isinstance(pr, dict):
+        raise ProvenanceError("caller-trusted source_facts.pr 缺失")
+    _validate_content_anchor(pr.get("content_anchor"), "source_facts.pr.content_anchor")
+    return row
+
+
+def _validate_content_anchor(anchor, where):
+    if (not isinstance(anchor, dict)
+            or set(anchor) != {"schema", "schema_version", "algorithm", "scope", "sha256", "file_count"}
+            or anchor.get("schema") != CONTENT_ANCHOR_SCHEMA
+            or anchor.get("schema_version") != 1
+            or anchor.get("algorithm") != "git_blob_manifest_sha256_v1"
+            or not isinstance(anchor.get("scope"), str)
+            or _HEX64.fullmatch(anchor.get("sha256") or "") is None
+            or isinstance(anchor.get("file_count"), bool)
+            or not isinstance(anchor.get("file_count"), int)
+            or anchor["file_count"] <= 0):
+        raise ProvenanceError(f"{where} 结构非法")
+    return anchor
+
+
+def _caller_trusted(source):
+    return caller_trusted_association(source) is not None
+
+
+def _bind_content_anchor(source, source_pr, pr_facts):
+    left = _require_present(source_pr, "content_anchor", "source_facts.pr")
+    right = _require_present(pr_facts, "content_anchor", "pr_facts")
+    if not isinstance(left, dict) or left != right:
+        raise ProvenanceError("caller-trusted 输入的 content_anchor 未逐字绑定实际摄取字节")
+    _validate_content_anchor(left, "caller-trusted 输入的 content_anchor")
+    return {
+        "association_policy": CALLER_TRUST_POLICY,
+        "correspondence": "asserted_by_caller",
+        "content_anchor": left,
+        "provenance_kind": source_pr.get("provenance_kind"),
+        DECLARED_FORM_KEY: source.get(DECLARED_FORM_KEY),
+        "pr_head_sha": source_pr.get("head_sha"),
+        "source_form_facts": list((source.get("completeness") or {}).get(
+            "transport_warnings") or []),
+    }
+
+
 def bind(source, pr_facts, getenv=None):
     """校验 `source_facts` ↔ `pr_facts` 的源身份绑定，返回 `(bindings, degradations)`。
 
@@ -287,6 +348,9 @@ def bind(source, pr_facts, getenv=None):
     source_pr = source.get("pr")
     if not isinstance(source_pr, dict):
         raise ProvenanceError("source_facts.pr 须为 JSON object")
+
+    if _caller_trusted(source):
+        return _bind_content_anchor(source, source_pr, pr_facts), []
 
     completeness = source.get("completeness")
     if not isinstance(completeness, dict):
@@ -357,6 +421,14 @@ def check_config_against_preflight(cfg, preflight_bindings):
     if not isinstance(preflight_bindings, dict):
         raise ProvenanceError("CP-C0 preflight bindings 缺失或非 object")
     bindings = preflight_bindings
+    if bindings.get("association_policy") == CALLER_TRUST_POLICY:
+        _bind_content_anchor(
+            {"input_association": {"schema": "oprunway.caller_trusted_input",
+             "schema_version": 1, "policy": CALLER_TRUST_POLICY,
+             "correspondence": "asserted_by_caller"}},
+            {"content_anchor": bindings.get("content_anchor")},
+            {"content_anchor": bindings.get("content_anchor")})
+        return
     adapter_kind = cfg.get("source_mode") or "git_fetch"
     intake_kind = ADAPTER_KIND_TO_INTAKE.get(adapter_kind)
     if intake_kind is None:
@@ -398,6 +470,12 @@ def check_build_identity(provenance, cfg, preflight_bindings):
     if not isinstance(preflight_bindings, dict):
         raise ProvenanceError("CP-C0 preflight bindings 缺失或非 object")
     bindings = preflight_bindings
+    if bindings.get("association_policy") == CALLER_TRUST_POLICY:
+        if not isinstance(provenance.get("content_anchor"), dict):
+            raise ProvenanceError("build provenance 缺 content_anchor")
+        if provenance["content_anchor"] != bindings.get("content_anchor"):
+            raise ProvenanceError("build content_anchor 与 caller-trusted intake 字节漂移")
+        return []
     adapter_kind = cfg.get("source_mode") or "git_fetch"
     intake_kind = ADAPTER_KIND_TO_INTAKE.get(adapter_kind)
     if intake_kind is None:

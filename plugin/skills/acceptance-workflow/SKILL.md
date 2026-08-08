@@ -24,7 +24,7 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 
 4. **三级门在 `run_workflow.py` 内部**：`run_workflow.py` **一次性串 Task1→2→3**，末尾**统一校门**（`validate_acceptance_state` 的 task1/task2/task3 三级，读**落盘** evidence 独立复核）——是**批量驱动、非阶段间实时阻断**，**不是** orchestrator 分阶段单独调度的 stage。验收门 `validate_acceptance_state.py` STATUS: FAILED → **不出 pass 裁决；仍由 `run_workflow` 写 `acceptance.json.overall="BLOCKED(验收门未过)"`（exit 1）**（验收门未过=证据不可信/不完整）。「不推进下一 Task / 停在当前阶段」是 **agent 编排纪律**，不是脚本里的实时闸。
 
-5. **对外单一对话入口、脚本幕后**（canon conversational-agent-sole-delivery-form·proposed·未 settle，载重前需核）：用户全程只用自然语言（给「任务书 + PR」）；`python3 …` 是 primary 的内部实现，Bash 幕后跑，**不展示脚本命令、不让用户手敲**。缺东西（任务书 / 被测来源 / **执行形态是就地跑还是远程连** / NPU 通不通 / 目标机是哪台）用对话问。⚠ **别问「mock 还是真机」——验收只有真机一条路**。`OPRUNWAY_*`（真实机器名 / 远端路径 / token）**走环境变量、不写进仓**。**副作用先确认**（真机 clone / build / 跑测、对外动作先列计划点头再做）。
+5. **对外单一对话入口、脚本幕后**（canon conversational-agent-sole-delivery-form·proposed·未 settle，载重前需核）：用户给出调用方已配对的“任务书 + 被测来源”；二者关联由调用方断言。输入的在线/本地形态及 URL/repo/fork/ref/head 只作 transport 诊断，不另行追问身份。脚本幕后执行；缺执行环境事实时再问，副作用照常先确认。
 
 ---
 
@@ -34,8 +34,8 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 
 | 工件 | 由哪个 CP 产 | 存在即代表 | 续跑判据 |
 |---|---|---|---|
-| `source_facts.json` | CP-A | 任务书字节 + 本轮**声明的输入形态**（`declared_source_form`）与**实得**源身份（`provenance_kind` + 对应锚）+ 关键文件 ref/摘要已形成内容身份 | envelope 摘要有效且 `completeness.status=complete`。⚠ 判据是「**声明 × 实得是否一致**」，**不是**「有没有拿到 PR head」——声明 `local_source` 且实得本地快照就是 `complete`，无需任何授权；只有「声明 `git_pr` 却只实得快照」才落 `snapshot_only`、需授权（见 §3 CP-A 的形态表）。`blocked` 一律 MISS/BLOCKED，不得复用 |
-| `correspondence.json` | CP-A | 对应校验已落盘（读 `status` 定去留） | `status=confirmed` 且 `source_facts_digest` 等于当前事实包才进 CP-B；`mismatch/empty_task` 停 |
+| `source_facts.json` | CP-A | 任务书字节 + 调用方关联声明 + 实际物化源码的统一内容锚 | current facts 必须为 contract v2，且 `input_association` 逐字等于 `caller_trusted_pair_v1/asserted_by_caller`；`pr.content_anchor` 的 algorithm/scope/sha256/file_count 完整，`completeness.status=complete`。transport locator/head/repo 警告不阻断；缺完整源码字节/内容锚才阻断 |
+| `correspondence.json` | CP-A（仅 legacy） | 历史对应校验记录 | fresh caller-trusted facts 不产、不要求；只在显式历史只读流程中按旧契约解释，不得补写它把 legacy 升格成 current |
 | `taskdoc_links.json` | CP-B（primary inline `taskdoc_links.py`） | 任务书正文里的链接已按受控词表分类、可变 ref 已钉成 commit sha、仓内材料已内容寻址取回 | legacy `case_source=taskdoc` 时：退出码 0 且 `blocking` 为空才往下走；`blocking` 非空摆给用户，不猜链接指向。N5 `reference_only` 时：只作 reference 取材，取回失败记 reference gap，不得改换正式 `case_source/case_target` |
 | `taskdoc_caseset.json` + `golden/golden.py` | CP-B（primary inline `taskdoc_caseset.py`；**仅 `precision.case_source=taskdoc` 且没有 N5 reference-only 裁定**） | 任务书自带用例集已被识别、接口映射 IR 已对账、caseset 已规范化、golden 包装层与任务书授权锚已落盘 | `outcome=recognized` 才可进 `gen_cases`；其余六种结局（见 `DISCOVERY_OUTCOMES`）**一律 BLOCKED，绝不回退自生成**。⚠ `reference_case_material_role=reference_only` 时根本不产/不消费本工件；附带材料只进 reference 记账 |
 | `taskdoc_validation.json` + `taskdoc_validation_receipt.json` | CP-B0（`validate_taskdoc` + primary inline `validate_taskdoc_input.py`） | 任务书输入是否足以充当验收依据已逐项判过并机械复核 | receipt `status ∈ {PASSED, PASSED_WITH_PENDING}` 且 `source_facts_digest` 等于当前事实包才进 `extract_spec`；`NEEDS_USER` 停下问用户；`BLOCKED` 重做 CP-B0 |
@@ -113,42 +113,24 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 ### CP-A 前置（primary 亲自，不派 subagent）
 
-**目的**：取材 + 任务书↔PR 对应校验 + 环境/模式确认，识别并挡掉「未验收空任务 / 任务书↔PR 配错」。
+**目的**：取材调用方已配对的任务书与被测源码，形成统一内容锚，并确认环境/模式。
 
 - **取材**（确定性脚本，primary 直接跑）。**两条互斥入口，按本轮被测物到底是什么二选一**：
 
   ```bash
-  # ① 被测物是 PR                 → 声明 declared_source_form=git_pr
+  # ① 被测物由在线定位器取得
   python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/fetch_source.py \
     --taskdoc <路径|链接> --pr <PR链接> [--target-dir <算子子目录>] --out <work>
 
-  # ② 被测物是一份本地源码目录（无 .git 也行）→ 声明 declared_source_form=local_source
+  # ② 被测物是一份本地源码目录（无 .git 也行）
   python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/fetch_source.py \
     --taskdoc <路径|链接> --pr-snapshot <本地源码目录> [--target-dir <算子子目录>] --out <work>
   ```
 
-  两条都产 `task_doc.md` + 逐字节 `task_doc.snapshot.md` + `pr_facts.json` + 内容寻址的 `source_facts.json`。快照在 CP-A/spec 之前即落，spec 与 golden 共用同一 SHA，不再后补回填；PR head / 快照 merkle、关键文件 ref 或任务书字节变化即新身份，`completeness=blocked` 不得复用。
+  两条都产 `task_doc.md` + 逐字节 `task_doc.snapshot.md` + `pr_facts.json` + 内容寻址的 `source_facts.json`。current facts 的 `input_association` 记录调用方断言；`pr.content_anchor` 统一锚定实际物化的源码文件集，输入形态不改变验收语义。源码字节、scope、file_count 或任务书字节变化即新身份，`completeness=blocked` 不得复用。
   - **两条都不给 = CP-A 没过，别只产任务书就往下走**：不给任何被测来源时脚本**压根不写 `source_facts.json`**（只落任务书与快照），§1 的工件门自然拦住；这条由编排层守，不要看到「命令退 0」就当过了。
-  - **`completeness=blocked` 不得复用，而且脚本会告诉你**：`fetch_source` 在 `completeness=blocked` 时**非 0 退出（3）**——落盘 ≠ 成功，blocked 的事实索引只供诊断，不得据它抽 spec / 产 runner / 跑验收。⚠ `snapshot_only` **不在此列**：那是下表里「已授权的降级档」，正常退 0，按降级口径记账即可，别把它也当成阻断。
-- **⚠ 本地代码是一等输入形态，不是降级路由**：`declared_source_form ∈ {git_pr, local_source}` 是**入口就定**的一等事实（不是推断），同时写进 `pr_facts.json` / `source_facts.json` 顶层、`bindings` 和 vendor build receipt 的 `source`。档位判据换了轴——从「有没有拿到 PR head」改成「**实得是否与声明一致**」（allowlist 见 `source_provenance._ROUTES`）：
-
-  | 声明 `declared_source_form` | 实得 `provenance_kind` | `completeness` | 要不要授权 | `degradations` |
-  |---|---|---|---|---|
-  | `local_source`（`--pr-snapshot`） | `local_snapshot` | **complete** | **不需要** | **`[]`** |
-  | `git_pr`（`--pr`） | `gitcode_pr` | complete | 不需要 | `[]` |
-  | `git_pr` / **两侧都未声明** | `local_snapshot` | `snapshot_only` | **仍需** `OPRUNWAY_ALLOW_DEGRADED_PROVENANCE=local_snapshot`（值必须逐字等于 kind，不接受 `1`/`true`） | `["pr_head_unbound", "changed_files_is_subtree_not_pr_diff"]` |
-  | `local_source` | `gitcode_pr` | — | — | **一律拒**（声明本地却带着上游 commit） |
-
-  **未声明 = 按最严的 `git_pr` 对待**：本次改动之前产的老事实包没有这个字段，两侧都没有时按 `git_pr` 走，规矩与改动前逐字相同；一侧有一侧没有 → fail-closed（那两份事实包不是同一次取材产的）。
-- **`pr_head_unbound` 语义已分家，报告里别混**：`local_source` 形态下 `head_sha=null` 是**正确值、不是缺陷**。这条形态本身的中性事实走 `bindings["source_form_facts"]`（`local_source_has_no_upstream_commit` / `local_source_file_set_is_subtree_not_pr_diff`，取回用 `source_provenance.form_facts`），报告**须原样带着**——据此不得声称「已绑定 PR head」「changed_files 是 PR diff」——但**不得把它呈现成异常**。`provenance_degradations` 只装「本该绑却没绑」那一类。
-- ⚠ **`local_source` 做不了下面对应校验的第 2 条**：那条要读 PR `title` 拿 issue/追踪号，而本地源码目录根本没有 PR。
-  所以这条通路的对应校验只剩「改动落点目录」+「用户确认」两条腿，**用户确认因此变成载重项**，不是走过场。
-  只有 `pr_facts.target_dir` 对上任务书声明的算子目录、用户又明确认下「这份源码就是任务书要验的东西」，才算过；
-  两者缺一即 BLOCKED。**绝不能**拿用户自己给的 `--target-dir` 反过来当对应证据——那是自证。
-- **对应校验**（落 `correspondence.json`，schema/枚举见 §4；canon verify-spec-pr-correspondence·proposed·未 settle，载重前需核）：靠三条证据合断——
-  1. **改动落点目录**：`pr_facts.target_dir`（机器可比），对上任务书声明的算子目录；
-  2. **issue / 追踪号**：**NL 读** `task_doc.md` 与 PR `title`（`pr_facts` **不抽 issue 号**，只能自然语言读），**非算子名字面匹配**；
-  3. **用户确认**：证据摆给用户拍板。
+  - **`completeness=blocked` 不得复用**：落盘不等于成功，blocked 事实只供诊断。阻断原因必须是源码内容未完整物化或内容锚不成立；locator/head/repo/declared-form 漂移只进入 `transport_warnings`。
+- **输入形态中立**：current facts 只接受 exact caller association + content anchor。URL、repo、fork、ref、head、`declared_source_form`、`provenance_kind` 均为 transport observation，不是准入权威。legacy v1/v2 工件继续按旧严格身份门只读解释，禁止合成 caller assertion/content anchor、禁止升格为 current。
 - **环境确认**（`AskUserQuestion` **必由 primary 做**）：NPU 通不通（远程连时另含 VPN 开没开）、目标机按任务书硬件 × op_def 双源核定。验收只认真机；`spec.runner_form` 受控词表仍为 `{cpp, aclnn_py, cpp_extension}`（**词表 ≠ 准入表**），但**派得出 mode 的只剩 `cpp_extension` 一条** → `--mode cpp_extension`；`cpp` / `aclnn_py` 在 `run_workflow._RUNNER_FORM_TO_MODE` 里没有条目，省 `--mode` 派不出、显式指定真机 mode 也被拒。mock/catlass 只能显式指定且不产真机裁决。
   ⚠ **执行形态先问清，两种都是一等通路，别把其中一种当通用前置**：
   - **就地跑**（当前会话本身已在目标机或其 NPU 容器里）：**不需要** `.oprunway/real-machine.env`——没有 SSH alias /
@@ -199,13 +181,13 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"` + NON-ACCEPTANCE 戳），
   **不写 `acceptance.json`、不进验收报告的裁决栏**。
   ⚠ 历史 Median 60/60 来自 aclnn_py 的旧 caseset；迁到 torch_parity + cpp_extension 后必须重跑，不得沿用旧 PASS。性能 baseline 仍逐字按任务书配置，不能从 runner form 反推。
-- **产出**：`correspondence.json`。除既有字段外必须写入当前 `source_facts.json` envelope 的 `digest` 为 `source_facts_digest`；事实包变化后旧确认自动失效，须重新核对应关系。用户已经明确的范围/选择写入可选 `confirmed_constraints` 数组，后续 dispatch 原样传递，避免每个子任务重新澄清同一问题。`status=confirmed` → 进 CP-B；`mismatch`/`empty_task` → 出**程序结论（非 pass/fail）**并停跑；`needs_user_confirmation` → 摆证据、等用户拍板（**不自动 judge 空任务**——Equal #2890 配错作废血教训）。
+- **产出**：current `source_facts.json`（contract v2）及任务书/源码快照；`correspondence.json` 仅为历史工件，不进入 fresh denominator。
 
 ### CP-B Task1 用例（dispatch + primary inline）
 
 **目的**：先校验任务书输入是否足以充当验收依据（CP-B0），再任务书→spec + golden，并用 `--dry-run` 做**用例计划的契约自检**（不产任何裁决）。
 
-- **先查热续跑，不先派 NL agent**：CP-A 已轻量刷新任务书/PR head 并得到当前 `source_facts` 后，若旧 spec/golden/case-plan/receipt 都存在，primary **先重跑** `validate_preparation_state.py`。结果 `REUSABLE` → 直接复用 CP-B 三件套、跳过 `extract_spec` / `gen_golden` / dry-run，进入 CP-C0；`MISS` → 只重做 checks 指向的最小缺口（source/correspondence 变化才重抽 spec，planner/golden 变化只重跑对应步骤）；`BLOCKED` → 停止并报告损坏。不得因为“可能有缓存”先照旧派完两次 NL 再查 receipt——那会让热续跑优化完全失效。
+- **先查热续跑，不先派 NL agent**：CP-A 已刷新任务书与源码内容锚并得到当前 `source_facts` 后，primary 先重跑 `validate_preparation_state.py`。内容锚或任务书变化才重抽 spec；transport locator 变化而内容锚不变不使验收身份漂移。
 - **CP-B0 任务书输入校验门（先于 `extract_spec`）**：
   ⚠ **本门不随 `validate_preparation_state.py` 的 `REUSABLE` 跳过**——那份收据只复核它自己检查的
   source/correspondence/spec/case-plan/golden 绑定，**既不读也不绑** `taskdoc_validation*`，
@@ -234,14 +216,14 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
      `taskdoc_validation.json.decisions`（`source` 固定 `"user"`）后**重跑脚本**，
      转 `PASSED` **或 `PASSED_WITH_PENDING`** 才继续（阻断项全决策完、但还留着未决的
      `list_pending` 项时，脚本返回的就是后者——别把它当没过）；
-     `supplied` 项的 `confirmed_constraints_candidates` 一并写入
-     `correspondence.json.confirmed_constraints`，供后续 dispatch 原样传递、不再重复澄清。
+     `supplied` 项的 `confirmed_constraints_candidates` 作为 dispatch 约束原样传递；fresh caller-trusted
+     facts 不写 `correspondence.json`。
      `BLOCKED` → 校验工件本身不可信（引用编造 / 项数不齐 / 事实包漂移），重做 CP-B0，**不得跳过**。
   ⚠ 决策绑 `source_facts_digest`：**任务书字节一变，本轮校验与用户决策整体失效**，须重做——
-  与 `correspondence.json` 同一套失效语义。
+  current 下由 source-facts digest 与任务书摘要共同提供失效语义。
   ⚠ 这个门**不产验收裁决**，只挡「输入不足以验收」；它也**判不出**任务书内容本身对不对——
   判宽（模糊的判成明确）会静默生效，唯一护栏是 ref 的判法 + 强制逐字引用。
-- **dispatch** `acc-spec-extractor`，`dispatch_mode = extract_spec`：按六段契约读 `task_doc.md` + `task_doc.snapshot.md` + `pr_facts.json` + `source_facts.json` + `correspondence.json`（含 `confirmed_constraints`）→ `<op>.spec.json` + `task_pr_gaps`（缺项落 gaps 不臆造；多算子多 spec）。
+- **dispatch** `acc-spec-extractor`，`dispatch_mode = extract_spec`：current 路径读 `task_doc.md` + `task_doc.snapshot.md` + `pr_facts.json` + `source_facts.json` → `<op>.spec.json` + `task_pr_gaps`；仅 legacy 只读流程附带历史 correspondence。
 - **CP-B1 任务书附带用例材料（`case_source` + N5 权威字段分流）**：
   **先看显式裁定，再用历史链接启发式。**
 
@@ -297,7 +279,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   `out_shape`/输出契约。存在合法 0-D 输出时必须显式覆盖；只通过 import/load 或 dry-run 不算 smoke 通过。
   smoke 只验证 golden 契约，不产验收裁决，也不得用 PR 实现作 oracle。
   路由**按退出码、不按档位数字**：**0**（可走）→ 进 dry-run；**2**（`needs_human_review`——tier 3 必然如此，⚠ **tier 1 也可能**：`multistep + oracle_method` 判 `(tier 1, 需人核)`）→ 进 dry-run 但**报告里显式标「golden 需人核」**；**1**（blocked / 词表不合规 / 缺件 / 账本自相矛盾 / 参数错误）→ **停在 CP-B**，把 `blocked_reason` 摆给用户，**不自动回落第二档**（R4）。
-- **primary inline**（确定性脚本，无 NL 生成）：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/gen_cases.py <spec> --dry-run --ledger-out <work>/case_plan.json --source-facts <work>/source_facts.json --correspondence <work>/correspondence.json`。plan-only，查这些：用例预算落不落 `[S=强制下限, pool_max]` 区间 · dtype 分布 · 特殊场景（empty/scalar/边界/inf/ninf/nan）覆盖 · 被丢组合类 · `case_id` 唯一（撞则 raise） · per-case 种子确定性；并绑定 canonical spec、规划器源码、golden.py、source facts 与用户确认摘要。后两项必须成对提供；只绑定一半直接报错。
+- **primary inline**（确定性脚本，无 NL 生成）：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/gen_cases.py <spec> --dry-run --ledger-out <work>/case_plan.json --source-facts <work>/source_facts.json`。plan-only，绑定 canonical spec、规划器源码、golden.py 与 caller-trusted source facts；仅处理 legacy facts 时才追加 `--correspondence`。
   ⚠ **能力边界（别当成旧 mock 自检的等价物）**：dry-run **不调 `golden_fn`、不落 `.npy`、不产任何裁决**；但它**会加载执行 `golden.py`**（取 `out_shape` 造规模预算）——所以对 golden 的覆盖是**半道**的：**缺文件 → 只记「未核」、不阻塞**；**文件在但坏了（语法错 / 顶层抛 / 必需导出不全）→ 当场抛、拦得住**。仍**验不了**：来源契约合不合规（那是 `check_golden.py` 的活）/ `oracle_source` 映射 / `validator` 判定链 / 三级门 / evidence 结构——**这些只有 CP-D 真机跑测才验得到**。（照本仓约定 golden.py 把 torch 延迟 import，故 dry-run 通常不拉 torch；某算子若在模块顶层 `import torch`，它会跟着 import。）CP-B 过了**不代表**用例链整体可用。
 - **产出**（**全部落 `<work>/`，见 §1.1**）：`taskdoc_validation.json`（subagent 产）+ `taskdoc_validation_receipt.json`（primary inline 产）+ `<op>.spec.json` + `<ops_root>/<op>/golden.py` + `<ops_root>/<op>/task_doc.snapshot.md` + `case_plan.json`。
   **`case_source` 两档的 golden 产法不同**：`generated` 档（含 N5 `reference_only`）的 `golden.py` 与任务书快照由 `acc-runner-dev:gen_golden` 这个 subagent 产；`taskdoc` 档由 `taskdoc_caseset.py` 生成包装层并把快照落到 golden 同目录，另加 `taskdoc_links.json` + `taskdoc_caseset.json` 两件。
@@ -309,7 +291,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 **目的**：把被测 vendor `.so` 的出身锁成机器可核的收据，「验证-才-信」后才允许上真机。
 
-- **CP-C0 纯静态前置（验收通路即 `runner_form == "cpp_extension"`，primary 亲自）**：运行 `preflight_aclnn.py`，只消费被测来源的 header 正文和 spec（`git_pr` 档是 PR-head header，`local_source` 档是那份本地快照里的 header——**对账完全同形，只有绑的锚不同**），逐变体校 symbol、arity、参数顺序/名字/role/ctype。cpp_extension 的 `required_next_gate` 必须为 `CPP_EXTENSION_BUILD_LOAD_AND_HARNESS_TRUST_GATE`。
+- **CP-C0 纯静态前置（验收通路即 `runner_form == "cpp_extension"`，primary 亲自）**：运行 `preflight_aclnn.py`，只消费内容锚对应快照中的 header 正文和 spec；在线/本地输入对账完全同形。逐变体校 symbol、arity、参数顺序/名字/role/ctype。cpp_extension 的 `required_next_gate` 必须为 `CPP_EXTENSION_BUILD_LOAD_AND_HARNESS_TRUST_GATE`。
 - **前置**：先确认用户已开 NPU/VPN（CP-A 已问）。
 - **不再按 form 分流——正式验收只有 `cpp_extension` 一条路由**：不派手写 runner；codegen 生成官方 bundle 与 invocation plan。真机 driver 收据必须绑定 spec/caseset/manifest/plan/source/setup/ELF、torch/torch_npu/CANN/SoC、独立 namespace/schema、vendor 库与符号归属，缺项或漂移停在 CP-C。
   ⚠ spec 若写着 `cpp` / `aclnn_py`，**CP-C 不是想办法把它跑起来的地方**——回 CP-B 把 spec 迁到 `cpp_extension`。
@@ -333,17 +315,15 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
     # ② emit：真跑 --build-argv，据凭据 + 实测事实产收据
     python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/vendor_build_receipt.py \
       emit \
-      --declared-source-form <git_pr|local_source> \
       --snapshot-digest      <snapshot-digest.json> \
-      [--pr-head-sha <40 位 head SHA>] \
-      [--repo <仓标识；本地通路缺省取凭据里的源码树根>] \
+      [--repo <transport 观察值>] \
       --build-cwd <构建命令的工作目录> \
       --library   <安装后真机实际会加载的那个 .so，须绝对路径> \
       --build-argv=bash --build-argv=-c \
       --build-argv='./build.sh … && ./build_out/*.run --install-path=…' \
       --out <vendor-build-receipt.json>
     ```
-    `--snapshot-digest` 与 `--pr-head-sha` **恰给一个**：本地源码通路给前者，PR 通路给后者（PR 通路整条 ① 不跑）。
+    current schema v3 **一律要求 `--snapshot-digest`**；在线定位器也须先把目标字节物化成快照再 build。head-only 不能产 fresh receipt。
     `--out` 落点自定（上面的文件名按真机实测那次写）。第二步**真跑 build、有副作用**，属真机动作，须沿用用户对本轮真机
     实验的明确确认（与 `verify_aclnn_harness` 同一口径），**不是 primary inline 那类只读脚本**。四条别绕：
     - **`emit` 自己执行 `--build-argv`**，`build.returncode` 是 `subprocess.run` 的实测值，收据另记
@@ -364,11 +344,11 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
       错法被结构性杜绝。它会在产出时刻另摘一次当前树，记进 `build.tree_state_at_emit`（含 `matches_pre_build`）。
       ⚠ **`tree_state_at_emit` 只是记下来，没有任何门在比它**：`matches_pre_build=false` 是**预期常态**（build 往树里写了产物），
       「这次 build 有没有把被测**子树**改掉」当前无人裁决，要判就人工读那两个值。
-      ⚠ **产出侧不读 `source_facts`**，收据里的 merkle 由 `--source-root` 现算。所以「你 build 的这棵树是不是 CP-A 取材的那棵」
-      **不在 CP-C 当场核**，推迟到三级门（`validate_acceptance_state` 比收据 `snapshot_subtree_sha256` ↔
-      `source_facts.pr.snapshot_merkle_sha256`，两侧 scope 须逐字相同）。⚠ 连带后果：`--source-root` / `--subtree-scope`
+      ⚠ **产出侧不读 `source_facts`**，内容锚由 `--source-root` 现算。所以「build 的树是不是 CP-A 取材的树」
+      推迟到三级门：逐字比 `source_facts.pr.content_anchor`、收据 `source.content_anchor` 与
+      `build.source_snapshot_digest.content_anchor`。⚠ 连带后果：`--source-root` / `--subtree-scope`
       指错时**要跑到验收门才 BLOCK**，真机时间已经花掉了——**别把「收据产出来了」读成「源码身份已对账」**。
-      ⚠ PR 通路（`--pr-head-sha`）没有快照凭据，本条整段不适用。
+      在线与本地通路均适用；URL/repo/ref/head 只保留在 `source.transport`，不参与准入。
     - **收据里的 `source.repo`，起草 CP-F directive 时逐字抄**进 `source_identity.repo`：那边是字节比对、
       **不归一化**，带不带 host、大小写、`.git` 后缀差一个字符就 BLOCK。本地通路不给 `--repo` 时，它就是源码树根的绝对路径。
       ⚠ **`--repo` 是操作者自报值、产出侧没有守卫，如实记账**：产出方既不校它带不带 URL 用户凭据，
@@ -443,28 +423,12 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
     `OPRUNWAY_CPP_EXTENSION_VENDOR_LIBRARY=<收据 artifact.library_path>`（两者都要**绝对路径**；前者就是 `emit --out`
     那个路径，后者从收据里的 `artifact.library_path` 逐字取——⚠ `emit` 只把整份收据 JSON 打到 stdout，
     **没有现成的两行 `export` 可抄**）。收据缺席或指向别的 ELF → driver fail-closed，不是「少个可选参数」。
-  - **PR 身份钉死**：build receipt 和最终报告必须记录本轮远端 PR ref 解出的**精确 head SHA**。本地工作树里
-    即使存在该 head 的后继修复提交，也只能作为诊断线索；未经用户把被测版本改为该提交，禁止用后继 build
-    替换指定 PR 的失败证据，更不能把后继 PASS 写成原 PR PASS。
-  - **源码身份前置门（build 前硬门）——⚠ 按 `declared_source_form` 分流，两条路都不放松**。
-    状态机两条路共用：只允许 `SOURCE_ACQUIRED → HEAD_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED`
-    顺序前进；判据由 `source_provenance.check_config_against_preflight`（起跑前）+
-    `check_build_identity`（build 段）两处出，编排层不另写第二套。
-    - **`git_pr` 档（绑 commit）**：期望 SHA 只取当前 `source_facts.json` / `pr_facts.json`
-      绑定的 40 位 `head_sha`。先取得精确对象，再做 detached checkout，随后以 `git rev-parse HEAD`
-      逐字核对期望 SHA。精确 SHA 不可直接取得时，只能使用本轮 PR 元数据确定的 PR-head ref 或
-      head repo，且最终仍只认 SHA 等值；候选须在执行前有限列明，不得失败后动态试探。
-      禁止默认分支、base head、可移动分支或后继提交兜底。
-    - **`local_source` 档（无 head 可绑，改绑字节）**：`head_sha` 在 cfg / bindings / build provenance
-      三处都必须**显式为 `null`**——「键缺失」不算数（那是「没人说过」，不是「说了没有」），
-      更不许合成一个 40 位 hex 冒充 commit（那是捏造 PR head，AGENTS.md 5.8）。
-      绑的是 **snapshot scope + 两个 merkle**：`snapshot_sha256`（整树）与
-      `snapshot_subtree_sha256`（算子子树），且**两侧 scope 必须逐字相同**才可比——
-      对不上就 fail-closed，宁可停，也不产一份「看起来绑过」的空收据。
-      实操上这意味着 `fetch_source --target-dir` 与 `OPRUNWAY_ACLNN_OP_SUBDIR` 得指向同一段子树。
-      ⚠ 这条通路**没有远端取源与 detached checkout 这一步**（树本来就在那儿），它的 `HEAD_VERIFIED` 等价物
-      就是上面那组 merkle 对账 + CP-C 那份 vendor 收据**构建前**的「构建树 ↔ 快照 merkle」核对；
-      **别拿 `git_pr` 档的措辞去要一个不存在的 SHA**，那只会制造假 BLOCKED。
+  - **源码内容前置门（build 前硬门）**：current 路径统一按
+    `SOURCE_MATERIALIZED → CONTENT_ANCHOR_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED` 前进。
+    `source_facts.input_association` 只认 caller-trusted exact contract；`pr.content_anchor` 必须与 vendor receipt v3
+    的两份 content anchor 逐字相同，再绑定实际 vendor ELF 与执行 receipt。URL/repo/fork/ref/head 只作
+    transport observation，可漂移但不得覆盖内容锚。legacy facts/receipt 只能在历史只读模式按旧严格身份门解释，
+    不得合成新字段或进入 current completion。
   - **shell fail-fast 与首失败终止**：所有 CP-D shell 入口必须具备等价于
     `set -Eeuo pipefail` 的语义，并记录首个失败阶段、退出码和日志。源码对象未取得或 HEAD 未验证时
     `build_started=false`；build 未验证时 `workflow_started=false`。任一前置失败立即产 blocked receipt，
@@ -516,9 +480,8 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
     结构性地杜绝上面那个错法；同时把**产出时刻**的树摘要记进 `build.tree_state_at_emit`，
     「build 到底动没动源码树」因此**可审、但无门在比**（详见 CP-C）。⚠ `--build-argv` 的实参几乎全以 `-` 开头
     （`--pkg` / `-j16`），**必须写等号形式** `--build-argv=--pkg`，分开写会被 argparse 当成另一个选项。
-    收据按 `source.provenance_kind` 分流校验（`gitcode_pr` 绑 40 位 head + 非空 repo；
-    `local_snapshot` 绑 `pr_head_sha=null` + 仓根 + 子目录 scope + 两个 merkle + 构建 argv +
-    vendor ELF sha256，**六项一条不放松**），三处消费方（driver / adapter / 验收门）共用
+    current 收据统一校验 `source.content_anchor == build.source_snapshot_digest.content_anchor`，再绑定构建 argv、
+    vendor ELF sha256 与执行现场；transport locator 不分流准入。三处消费方（driver / adapter / 验收门）共用
     `vendor_build_receipt.py` **一份**校验，不再各抄一遍。
     ⚠ 同源码同 build 命令，vendor `.so` 产物哈希**不比特可复现**；收据的 ELF 摘要只证
     「**这次**装的是这个」，不证「谁都能构出同一个」——报告别把它写成可复现性证明。
@@ -664,16 +627,16 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
   `cpp_extension` 复用正式
   codegen/adapter/driver 做 fresh Extension build/load/invoke，但走独立 Task-2-only 入口，物理上不生成或执行
   perf plan/collector。F2 冻结首次 invocation plan 与 build/load/vendor receipt，本地来源通路另须
-  冻结首轮 `source_facts.json`（否则 F3 三级门拿不到本地锚的对照物）；F3 要求 fresh invocation
-  逐行全等、来源锚（PR head 或本地快照子树 merkle + scope，含 `provenance_kind` 本身）/实际 vendor ELF/SoC/toolkit
+  冻结首轮 `source_facts.json`；F3 要求 fresh invocation
+  逐行全等、content anchor/实际 vendor ELF/SoC/toolkit
   与基础身份全等，任一漂移 fail-closed。Extension ELF 可 fresh
   build，但必须由本轮完整 receipt 绑定。`replay_only` 只保留契约枚举，当前执行入口不接线，不得用重判冒充重测。
 
 ---
 
-## 4. `correspondence.json` schema + 状态枚举
+## 4. Legacy-only：`correspondence.json` schema + 状态枚举
 
-CP-A 落盘的对应校验工件（断点续跑读它）。最小 schema：
+以下仅解释历史 facts；fresh caller-trusted 路径不产、不读该工件，且不得用它升格 legacy。最小 schema：
 
 ```json
 {

@@ -1,20 +1,20 @@
 # Roll / Bernoulli / Remainder 统一实施计划
 
 **日期**：2026-08-07
-**状态**：已实施并完成 N0–N9 机械验收；N10 `PARTIALLY_VERIFIED`（2026-08-07 收口）
+**状态**：N0–N10 已端到端实施；以结构化 gap 限定结论边界（2026-08-07 收口）
 **取代关系**：本文取代 `oprunway-bernoulli-remainder-plan.md` 作为后续实施顺序的当前入口；旧文保留为历史裁定与 gap provenance，不删除、不改写。
 
 **用例来源裁定**：三个算子的正式 caseset 与 golden 均由 OpRunway 根据任务书与被测事实自行生成。任务书附带 case/golden 和源码自测只作 coverage/reference evidence，不作为 caseset component，不决定 `case_target`，不消费其执行结果形成裁决。
 
 **实施状态入口**：逐阶段机读状态、三算子单卡裁决、多卡 v4 等价复验、N0 三静态门与 N2 生成
 C++/receipt 重投影见 `dev-doc/oprunway-roll-bernoulli-remainder-validation-2026-08-07.md` 及 ignored R/G/E
-总账。N0–N9 的机械完成判据已闭合；N10 未宣称完成：Roll exact 在线 PR intake 已闭合，Bernoulli 缺 exact
-在线身份，Remainder MR 4249 的 private fork head 无法形成 complete intake。三算子本地来源正式验收均已实测，
-未完成的双来源部分继续以结构化 gap 保留。
+总账。三组“任务书 + 被测源码”由调用方断言对应，N0–N10 的机械完成判据及三算子正式验收均已实测。
+在线/本地、URL/repo/fork/ref/head 只描述 transport，不要求每个算子重复走两种输入形态；A2/A5 与性能
+baseline 未测仍以结构化 gap 限制外推。
 
 ## 0 · 目标与边界
 
-目标是在同一套字段驱动、可机校的 workflow 中支持三份任务书与两种被测来源（在线 PR、本地 checkout），并最终分别得到可复核的精度证据、NPU msprof 性能证据和确定性裁决。具体算子只作见证，通用代码不得按算子名分支。
+目标是在同一套字段驱动、可机校的 workflow 中支持调用方配对的任务书与被测源码（两者均可在线或本地），并最终分别得到可复核的精度证据、NPU msprof 性能证据和确定性裁决。具体算子只作见证，通用代码不得按算子名分支。
 
 本计划不改变已有裁定：验收维度只有精度/性能；不做 GPU 性能比较；资源类不构成第三维；正式裁决只准 `cpp_extension`；任务书是权威，PR/op_def 是被测事实；本地不做 compute，测试和跑测均在 NPU 环境。
 
@@ -117,14 +117,14 @@ C++/receipt 重投影见 `dev-doc/oprunway-roll-bernoulli-remainder-validation-2
 
 **完成判据**：缺 identity、profiler 采样或 timing scope 时无性能结论；Roll 不生成 ratio PASS；资源类不进入裁决。
 
-### N10 · 三算子正式见证与双来源复核
+### N10 · 三算子正式见证与输入形态能力复核
 
 执行顺序固定为最小可信见证 → per-op 全 caseset → 性能：
 
 1. Roll：先历史假 PASS/int_array/ND 最小集，再跑自生成的完整矩阵、PR-impact supplement 和 msprof。
 2. Remainder：按 `math/floor_mod` 取材，保留任务书目录冲突；在 A2/A3 真实构建，多输入/广播/promote 后跑全量。
 3. Bernoulli：RNG 前提通过后跑正式精度，再做 msprof 绝对耗时采集（measure_only，不做 builtin ratio）。
-4. 每个算子至少验证一次在线来源和一次本地来源的 intake/provenance；若代码字节不是同一来源，不要求 verdict 相同，只要求门语义相同。
+4. 每个调用方配对输入至少完成一次 content anchor→build receipt→ELF→执行闭环；在线/本地取材能力另做通用测试，不进入逐算子双来源分母。
 
 目标环境有多张 NPU 时，正式 caseset 允许按 case identity 做确定性多卡分片：
 
@@ -134,7 +134,7 @@ C++/receipt 重投影见 `dev-doc/oprunway-roll-bernoulli-remainder-validation-2
 - 精度与 msprof 可以跨卡并行，但同一个性能 case 的采样不得跨卡拼成一组统计；性能分档须保留 device identity，避免把卡间差异伪装成样本波动。
 - 最终只由确定性汇总器按 case id 合并 shard 工件；agent 不手算总数或重判 pass/fail。
 
-**完成判据**：单卡路径与多卡分片路径对同一固定 caseset 产生相同的 case 集合；Roll/Remainder 的逐 case 判定须一致。Bernoulli 只在 N8 前提成立且 execution identity/seed/offset 全同的受控复验中检查一致性，正式多卡分片仍逐卡保留判定与设备身份，不跨卡强求或投票改判。分片无重无漏且每份证据绑定实际 device。只有确定性脚本可写 verdict；gate passed 只表示证据完整；FAIL/BLOCKED/needs_review 原样报告。三算子全部完成后才形成统一验收总结。
+**完成判据**：单卡路径与多卡分片路径对同一固定 caseset 产生相同的 case 集合；Roll/Remainder 的逐 case 判定须一致。Bernoulli 只在 N8 前提成立且 execution identity/seed/offset 全同的受控复验中检查一致性。分片无重无漏且每份证据绑定实际 device。只有确定性脚本可写 verdict；gate passed 只表示证据完整；FAIL/BLOCKED/needs_review 原样报告。A2/A5 与未比较 baseline 不阻断本计划实施完成，但必须保留 `UNVALIDATED`，禁止外推。
 
 ## 3 · 依赖 DAG
 
@@ -163,7 +163,7 @@ N4 + N5 + per-op functional prerequisites ─ N9(perf) ─ N10(full witnesses)
 
 只有同时满足下列条件才停止实施循环：
 
-- 在线任务书 URL 与本地任务书路径均可进入同一 intake；在线 PR 与本地 checkout 均可进入同一来源契约；调用方给什么就按什么取材，不推测来源。
+- 在线/本地任务书与在线/本地源码均可进入同一 caller-trusted intake；调用方给什么就按什么取材，不追问二者身份对应。内容不完整或 content anchor 无法建立仍 fail-closed。
 - N1–N9 的机械完成判据全部通过，且对应 mutation/负例能证明门真实存在。
 - Roll、Bernoulli、Remainder 各自完成 N10 的精度与性能实测；没有把未执行项包装为 PASS。
 - 最终 deterministic acceptance/verdict、报告和 provenance 能从落盘工件独立复核。

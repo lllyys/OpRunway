@@ -652,9 +652,6 @@ def fetch_pr(pr_url, out_dir, target_dir=None, taskdoc_apis=None):
     else:
         selected_owner = selected_name = None
 
-    def _git_blob_sha(raw):
-        return hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()
-
     def _grab(rel, expected_blob_sha):
         if not (selected_owner and selected_name and head_sha):
             return None, None
@@ -686,13 +683,6 @@ def fetch_pr(pr_url, out_dir, target_dir=None, taskdoc_apis=None):
         if not (head_sha and target_dir):
             return {}, None
 
-        def manifest_digest(entries):
-            mh = hashlib.sha256()
-            for rel, blob_sha in sorted(entries):
-                mh.update(hashlib.sha256(rel.encode("utf-8")).digest())
-                mh.update(hashlib.sha256(blob_sha.encode("ascii")).digest())
-            return mh.hexdigest()
-
         if not (selected_owner and selected_name):
             return {}, None
         for o2, r2 in [(selected_owner, selected_name)]:
@@ -719,7 +709,8 @@ def fetch_pr(pr_url, out_dir, target_dir=None, taskdoc_apis=None):
                             and isinstance(rel, str) and isinstance(entry.get("sha"), str):
                         manifest.append((rel, entry["sha"]))
             if contents_ok and manifest:
-                return dict(sorted(manifest)), manifest_digest(manifest)
+                anchor = _content_anchor_from_manifest(target_dir, manifest)
+                return dict(sorted(manifest)), anchor["sha256"]
             # GitCode 的 git/trees/<commit> 在 fork head SHA 上可能返回 base
             # 视图。递归 contents 任一层失败或得到空树时必须直接 fail-closed；
             # 不得拿 tree API 当后备，也不区分 fork/同仓偷偷放宽。
@@ -741,6 +732,9 @@ def fetch_pr(pr_url, out_dir, target_dir=None, taskdoc_apis=None):
             "sha256": head_tree_sha,
             "file_count": len(head_paths),
         }
+        if head_paths:
+            facts["content_anchor"] = _content_anchor_from_manifest(
+                target_dir, head_manifest.items())
         # 关键文件从完整 head tree 选；changed_files 仍保留为真实 PR diff 台账。
         # tree 取不到时 fail-closed 回到空集，不再用 diff 子集假装完整快照。
         hdrs, want = _key_file_candidates(head_paths, target_dir)
@@ -933,6 +927,33 @@ def _snapshot_merkle(root, rel_paths):
     return h.hexdigest()
 
 
+CALLER_TRUST_SCHEMA = "oprunway.caller_trusted_input"
+CONTENT_ANCHOR_SCHEMA = "oprunway.source_content_anchor"
+
+
+def _git_blob_sha(raw):
+    return hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()
+
+
+def _content_anchor_from_manifest(scope, entries):
+    """把实际摄取的 target tree 归一成与 transport 身份无关的内容锚。"""
+    h = hashlib.sha256()
+    for rel, blob_sha in sorted(entries):
+        h.update(hashlib.sha256(rel.encode("utf-8")).digest())
+        h.update(hashlib.sha256(blob_sha.encode("ascii")).digest())
+    return {"schema": CONTENT_ANCHOR_SCHEMA, "schema_version": 1,
+            "algorithm": "git_blob_manifest_sha256_v1", "scope": scope,
+            "sha256": h.hexdigest(), "file_count": len(entries)}
+
+
+def _content_anchor_from_snapshot(root, scope, rel_paths):
+    entries = []
+    for rel in rel_paths:
+        with open(os.path.join(root, *rel.split("/")), "rb") as src:
+            entries.append((rel, _git_blob_sha(src.read())))
+    return _content_anchor_from_manifest(scope, entries)
+
+
 def _read_snapshot_text(root, rel):
     """从快照里读一份关键文件的 UTF-8 文本；读不出（越界/二进制/IO 错）→ None，不抛。"""
     try:
@@ -990,6 +1011,7 @@ def scan_pr_snapshot(snapshot_dir, out_dir, target_dir=None, taskdoc_apis=None):
         "provenance_kind": "local_snapshot",
         "head_sha": None,                      # 没有 git 就是没有 head——不合成、不猜
         "snapshot_merkle_sha256": _snapshot_merkle(root, paths),
+        "content_anchor": _content_anchor_from_snapshot(root, _ov_dir or "", paths),
         "snapshot_scope": _ov_dir or "",
         "snapshot_file_count": len(paths),
         "snapshot_skipped_dir_names": sorted(_SNAPSHOT_SKIP_DIRS),
@@ -1240,6 +1262,39 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
     elif effective_form == source_provenance.FORM_LOCAL_SOURCE:
         # 声明「本地源码」却实得一个绑定上游 commit 的取材结果：声明与实得不是同一件事。
         reasons.append("declared_local_source_but_got_upstream_commit")
+    content_anchor = facts.get("content_anchor")
+    anchor_ok = (isinstance(content_anchor, dict)
+                 and content_anchor.get("schema") == CONTENT_ANCHOR_SCHEMA
+                 and content_anchor.get("schema_version") == 1
+                 and content_anchor.get("algorithm") == "git_blob_manifest_sha256_v1"
+                 and isinstance(content_anchor.get("scope"), str)
+                 and isinstance(content_anchor.get("sha256"), str)
+                 and _HEX64_RE.fullmatch(content_anchor["sha256"])
+                 and isinstance(content_anchor.get("file_count"), int)
+                 and not isinstance(content_anchor.get("file_count"), bool)
+                 and content_anchor["file_count"] > 0)
+    caller_policy = "content_anchor" in facts
+    if caller_policy and not anchor_ok:
+        reasons.append("missing_or_invalid_content_anchor")
+    if caller_policy and (facts.get("snapshot_skipped_symlink_count") or 0) != 0:
+        reasons.append("content_scope_contains_symlink")
+
+    # 用户显式给入的任务书与代码天然对应。PR/head/fork/ref/changed-files 只描述运输，
+    # 不再替调用方重判对应关系；但 target tree 内容锚缺失、关键接口字节缺失仍阻断。
+    transport_reason_names = {
+        "missing_head_sha", "missing_or_invalid_head_sha", "missing_pr_url",
+        "missing_source_repo", "missing_head_repo", "head_source_repo_not_selected_head_repo",
+        "unknown_fork_status", "missing_pr_state", "missing_changed_files",
+        "no_changed_files_under_target_dir", "declared_local_source_but_got_upstream_commit",
+        "unknown_declared_source_form", "unknown_provenance_kind",
+        "head_target_manifest_repo_mismatch", "head_target_manifest_ref_mismatch",
+    }
+    transport_warnings = (sorted({r for r in reasons
+                                  if r in transport_reason_names
+                                  or r.startswith("key_file_ref_not_head:")})
+                          if caller_policy else [])
+    if caller_policy:
+        reasons = [r for r in reasons if r not in transport_warnings]
     form_facts = []
     if may_fold:
         # key_file_ref_not_head:* 同属「没有 head 可绑」这一族必然事实 → 一并折叠。
@@ -1262,7 +1317,7 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
     with open(__file__, "rb") as src:
         logic_sha = hashlib.sha256(src.read()).hexdigest()
     payload = {
-        "contract_version": 1,
+        "contract_version": 2 if caller_policy else 1,
         # 一等字段：本轮**声明**要测哪种输入形态（`--pr` → git_pr、`--pr-snapshot` → local_source）。
         # 老事实包没有它 → null，下游按 `git_pr` 这一最严档对待。
         "declared_source_form": declared,
@@ -1329,6 +1384,14 @@ def build_source_facts(taskdoc_path, pr_facts, source_locator=None):
                          "form_facts": form_facts},
         "producer": {"tool": "fetch_source.py", "logic_sha256": logic_sha},
     }
+    if caller_policy:
+        payload["input_association"] = {
+            "schema": CALLER_TRUST_SCHEMA, "schema_version": 1,
+            "policy": "caller_trusted_pair_v1",
+            "correspondence": "asserted_by_caller",
+        }
+        payload["pr"]["content_anchor"] = content_anchor if anchor_ok else None
+        payload["completeness"]["transport_warnings"] = transport_warnings
     content_address.canonical_json_bytes(payload)
     return payload
 

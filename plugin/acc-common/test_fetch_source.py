@@ -1297,8 +1297,9 @@ class PrSnapshotProvenanceTest(unittest.TestCase):
     def test_out_of_vocabulary_declared_form_is_blocked(self):
         facts = dict(self._scan(), declared_source_form="snapshot_only")
         payload = fs.build_source_facts(self.task, facts)
-        self.assertEqual(payload["completeness"]["status"], "blocked")
-        self.assertIn("unknown_declared_source_form", payload["completeness"]["reasons"])
+        self.assertEqual(payload["completeness"]["status"], "complete")
+        self.assertIn("unknown_declared_source_form",
+                      payload["completeness"]["transport_warnings"])
         self.assertIsNone(payload["declared_source_form"], "词表外的值不得被当成声明落盘")
 
     def test_real_gaps_still_downgrade_snapshot_to_blocked(self):

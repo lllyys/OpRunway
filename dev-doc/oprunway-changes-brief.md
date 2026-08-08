@@ -4,7 +4,8 @@
 
 ## 2026-08-07 · 三算子 N10 单卡正式验收与实测回修
 
-- 三算子统一中文实测记录与机器 R/G/E 总账已收敛到 multi-card v4：A3 上 32/32 hermetic mutation、2641 项无排除 verbose 全量回归通过；N0 对三份正式 spec 分别保存并重放 taskdoc/dry-run/spec-change 三门，N2 从 fresh single 与每片 formal/pre-smoke 的 manifest、receipt 和生成 C++ 重投影 `ACL_FORMAT_ND`，v4 对 single root/work、六项 equivalence 输入、各 shard、ELF、input/golden/out 做精确递归闭包并现场重放 Task2/stochastic/equivalence。Roll exact 在线 PR intake 已闭合；Remainder MR 4249 是逐字链接任务书的强候选但 private head 无法完成 intake，Bernoulli 仍缺 exact online identity，因此 N10 保持 `PARTIALLY_VERIFIED`。
+- caller-trusted 输入契约完成收口：任务书与源码由调用方断言对应，在线/本地 locator 只作 transport 诊断；current RGE 以 content anchor→vendor receipt v3→ELF→执行为硬门，旧三算子 v4 只按 historical 读取。N0–N10 已完成，A2/A5 与性能 baseline 继续以 `UNVALIDATED` 限制外推。
+- 三算子统一中文实测记录与机器 R/G/E 总账已收敛到 multi-card v4：N0 三静态门与 N2 生成 C++/receipt 均可重投影，v4 对 single root/work、equivalence 输入、各 shard、ELF、input/golden/out 做精确递归闭包并现场重放 Task2/stochastic/equivalence；该批仍是 legacy historical 证据，保持原裁决而不追认 current content-anchor 身份。
 - 三算子均用 fresh intake、generated cases、VERIFIED vendor receipt 和独立 A3 device 完成单卡正式验收：Bernoulli=`FAIL(精度)`、Remainder=`PASSED_WITH_GAPS`、Roll=`FAIL(精度)`；所有结论均由确定性产物写出。
 - 实测回修覆盖 stochastic formal/structural 分区、合法 empty tensor 结构精度、atomic applicability、dtype requirement sets、BF16 显式 lossy、任务书 workflow-default 分层、measure-only gap 终态和性能证据摘要投影；未把 gate passed、部分 msprof 或 stock vendor 对照包装成算子通过。
 - Roll/Bernoulli 的 rank0 exact vendor 均返回 161002；Roll 已用自建 rank0 descriptor、官方 ConvertType 与同机 stock torch_npu 做 A/B，排除通用 converter 后保留为 exact DUT 构建侧缺口。

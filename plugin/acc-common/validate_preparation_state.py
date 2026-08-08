@@ -75,7 +75,7 @@ def _validate_source_payload(source):
     if missing:
         raise content_address.ContentAddressError(
             f"source_facts 缺必要字段: {missing}")
-    if source["contract_version"] != 1:
+    if source["contract_version"] not in (1, 2):
         raise content_address.ContentAddressError(
             "source_facts.contract_version 不受支持")
     taskdoc = source["taskdoc"]
@@ -94,6 +94,55 @@ def _validate_source_payload(source):
     if not isinstance(pr, dict):
         raise content_address.ContentAddressError(
             "source_facts.pr 须为 JSON object")
+    association = source.get("input_association")
+    caller_trusted = (source.get("contract_version") == 2
+                      and isinstance(association, dict)
+                      and association.get("schema") == "oprunway.caller_trusted_input"
+                      and association.get("schema_version") == 1
+                      and association.get("policy") == "caller_trusted_pair_v1"
+                      and association.get("correspondence") == "asserted_by_caller")
+    if source.get("contract_version") == 2 and not caller_trusted:
+        raise content_address.ContentAddressError(
+            "source_facts v2 缺合法 caller-trusted input_association")
+    if caller_trusted:
+        anchor = pr.get("content_anchor")
+        if (not isinstance(anchor, dict)
+                or anchor.get("schema") != "oprunway.source_content_anchor"
+                or anchor.get("schema_version") != 1
+                or anchor.get("algorithm") != "git_blob_manifest_sha256_v1"
+                or not isinstance(anchor.get("scope"), str)
+                or not _is_sha(anchor.get("sha256"))
+                or isinstance(anchor.get("file_count"), bool)
+                or not isinstance(anchor.get("file_count"), int)
+                or anchor["file_count"] <= 0):
+            raise content_address.ContentAddressError(
+                "caller-trusted source_facts.pr.content_anchor 契约不完整")
+        key_files = source.get("key_files")
+        if not isinstance(key_files, list) or not key_files:
+            raise content_address.ContentAddressError("source_facts.key_files 须为非空数组")
+        for index, item in enumerate(key_files):
+            if (not isinstance(item, dict) or not isinstance(item.get("path"), str)
+                    or not _is_sha(item.get("bytes_sha256"))
+                    or not isinstance(item.get("size"), int)
+                    or isinstance(item.get("size"), bool) or item["size"] < 0):
+                raise content_address.ContentAddressError(
+                    f"source_facts.key_files[{index}] 内容契约不完整")
+        derived = source.get("derived")
+        if (not isinstance(derived, dict) or not isinstance(derived.get("op"), str)
+                or not isinstance(derived.get("target_dir"), str)):
+            raise content_address.ContentAddressError("source_facts.derived 内容契约不完整")
+        completeness = source.get("completeness")
+        if (not isinstance(completeness, dict)
+                or completeness.get("status") != "complete"
+                or completeness.get("reasons") != []
+                or not isinstance(completeness.get("transport_warnings", []), list)):
+            raise content_address.ContentAddressError(
+                "caller-trusted source_facts completeness 必须 content-complete")
+        producer = source.get("producer")
+        if (not isinstance(producer, dict) or producer.get("tool") != "fetch_source.py"
+                or not _is_sha(producer.get("logic_sha256"))):
+            raise content_address.ContentAddressError("source_facts.producer 契约不完整")
+        return
     # 实得取源形态：**键缺席**才表示「本字段引入之前产的老事实包」（按 gitcode_pr 处理）；
     # 显式写了一个词表外的值一律拒——静默归类等于让未知档位自己挑一条分支走。
     kind = pr.get("provenance_kind", _KIND_ABSENT)
@@ -448,9 +497,22 @@ def evaluate(root, spec_rel, case_plan_rel, golden_path=None,
         _check(checks, "source_facts", "BLOCKED", str(ex))
 
     correspondence_sha = None
+    caller_association = None
+    caller_trusted = False
+    if isinstance(source, dict):
+        try:
+            caller_association = source_provenance.caller_trusted_association(source)
+            caller_trusted = caller_association is not None
+        except source_provenance.ProvenanceError as ex:
+            _check(checks, "correspondence", "BLOCKED", str(ex))
     try:
         correspondence_path = content_address.safe_path(root, correspondence_rel)
-        if not os.path.exists(correspondence_path):
+        if caller_trusted:
+            bindings["input_association_sha256"] = hashlib.sha256(
+                content_address.canonical_json_bytes(caller_association)).hexdigest()
+            _check(checks, "correspondence", "PASS",
+                   "caller-trusted 输入已由调用方声明对应；transport identity 仅记账")
+        elif not os.path.exists(correspondence_path):
             _check(checks, "correspondence", "MISS",
                    "correspondence.json 不存在")
         else:
@@ -542,11 +604,13 @@ def evaluate(root, spec_rel, case_plan_rel, golden_path=None,
             if not isinstance(preparation_inputs, dict):
                 _check(checks, "case_plan_inputs", "MISS",
                        "case plan 未绑定 source_facts/correspondence")
-            elif (not source_digest or not correspondence_sha
-                  or preparation_inputs.get("source_facts_digest")
-                  != source_digest
-                  or preparation_inputs.get("correspondence_sha256")
-                  != correspondence_sha):
+            elif (not source_digest
+                  or preparation_inputs.get("source_facts_digest") != source_digest
+                  or (caller_trusted and preparation_inputs.get(
+                      "input_association_sha256") != bindings.get("input_association_sha256"))
+                  or (not caller_trusted and (
+                      not correspondence_sha or preparation_inputs.get(
+                          "correspondence_sha256") != correspondence_sha))):
                 _check(checks, "case_plan_inputs", "MISS",
                        "case plan 的来源事实或用户确认已变化")
             else:

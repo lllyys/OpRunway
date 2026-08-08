@@ -38,13 +38,13 @@ def _write_json(path: Path, value: object) -> None:
 
 def _local_build_receipt(
     vendor_path: Path, vendor_sha: str, source_root: Path,
-    subtree_sha: str, full_sha: str,
+    subtree_sha: str, full_sha: str, content_anchor: dict,
 ) -> dict:
     scope = "experimental/math/fixture"
     size = vendor_path.stat().st_size
     return {
         "schema": "oprunway.vendor_build_receipt",
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "VERIFIED",
         "degradations": [],
         "source": {
@@ -55,6 +55,8 @@ def _local_build_receipt(
             "snapshot_subtree_scope": scope,
             "snapshot_sha256": full_sha,
             "snapshot_subtree_sha256": subtree_sha,
+            "content_anchor": copy.deepcopy(content_anchor),
+            "transport": {"pr_head_sha": None, "repo": str(source_root)},
         },
         "build": {
             "argv": ["bash", "build.sh"],
@@ -79,7 +81,13 @@ def _local_build_receipt(
                 "subtree_scope": scope,
                 "snapshot_sha256": full_sha,
                 "snapshot_subtree_sha256": subtree_sha,
-                "algorithm": {"tool": "fetch_source.py", "logic_sha256": "3" * 64},
+                "content_anchor": copy.deepcopy(content_anchor),
+                "algorithm": {
+                    "tool": "fetch_source.py",
+                    "logic_sha256": _sha(
+                        Path(vendor_build_receipt.__file__).with_name("fetch_source.py")
+                    ),
+                },
                 "file_count": 2,
                 "subtree_file_count": 1,
                 "skipped_symlink_count": 0,
@@ -95,7 +103,10 @@ def _local_build_receipt(
         "artifact": {
             "library_path": str(vendor_path), "library_sha256": vendor_sha,
         },
-        "producer": {"tool": "vendor_build_receipt.py", "logic_sha256": "f" * 64},
+        "producer": {
+            "tool": "vendor_build_receipt.py",
+            "logic_sha256": _sha(Path(vendor_build_receipt.__file__)),
+        },
     }
 
 
@@ -468,7 +479,7 @@ def _materialize_n0_fixture(root: Path, ledger: dict) -> None:
     )
 
 
-def _fixture(root: Path) -> dict:
+def _fixture(root: Path, *, transport_variant: bool = False) -> dict:
     formal = root / "formal"
     formal.mkdir()
     taskdoc = formal / "task_doc.snapshot.md"
@@ -476,6 +487,14 @@ def _fixture(root: Path) -> dict:
     taskdoc_sha = _sha(taskdoc)
     subtree_sha = "2" * 64
     full_sha = "3" * 64
+    content_anchor = {
+        "schema": "oprunway.source_content_anchor",
+        "schema_version": 1,
+        "algorithm": "git_blob_manifest_sha256_v1",
+        "scope": "experimental/math/fixture",
+        "sha256": "4" * 64,
+        "file_count": 1,
+    }
     vendor_elf = (
         root / "vendor-root" / "vendors" / "fixture" / "op_api" / "lib"
         / "libcust_opapi.so"
@@ -490,10 +509,14 @@ def _fixture(root: Path) -> dict:
     source_payload = {
         "completeness": {
             "status": "complete", "reasons": [],
-            "form_facts": list(source_provenance.LOCAL_SOURCE_FORM_FACTS),
+            "transport_warnings": (
+                ["transport_locator_unverified"]
+                if transport_variant
+                else ["local_snapshot_has_no_remote_locator"]
+            ),
         },
-        "contract_version": 1,
-        "declared_source_form": "local_source",
+        "contract_version": 2,
+        "input_association": copy.deepcopy(rge._CALLER_INPUT_ASSOCIATION),
         "derived": {
             "op": "Fixture",
             "aclnn_entry": "aclnnFixture",
@@ -502,16 +525,20 @@ def _fixture(root: Path) -> dict:
             "interface_kind": "aclnn_2stage",
         },
         "pr": {
-            "canonical_url": None,
+            "canonical_url": (
+                "https://example.invalid/not-an-identity-root"
+                if transport_variant else None
+            ),
             "source_repo": None,
             "number": None,
-            "head_repo": None,
-            "head_sha": None,
+            "head_repo": "unresolvable/fork" if transport_variant else None,
+            "head_sha": "f" * 40 if transport_variant else None,
             "is_fork": None,
             "state": None,
-            "provenance_kind": "local_snapshot",
+            "provenance_kind": "gitcode_pr" if transport_variant else "local_snapshot",
             "snapshot_merkle_sha256": subtree_sha,
             "snapshot_scope": "experimental/math/fixture",
+            "content_anchor": copy.deepcopy(content_anchor),
         },
         "taskdoc": {
             "bytes_sha256": taskdoc_sha, "snapshot_sha256": taskdoc_sha,
@@ -547,7 +574,7 @@ def _fixture(root: Path) -> dict:
         "runner_form": "cpp_extension",
         "declared_source_form": "local_source",
         "dtype_required": ["float32", "int64"],
-        "hardware": ["Atlas A3", "Atlas A5"],
+        "hardware": ["Atlas A2", "Atlas A3", "Atlas A5"],
         "runtime_requirements": {"cann": {"kind": "not_declared"}},
         "params": [
             {"name": "x", "io": "in", "dtype": ["float32"]},
@@ -612,7 +639,8 @@ def _fixture(root: Path) -> dict:
 
     source_root = root / "local-source"
     build_receipt = _local_build_receipt(
-        vendor_elf, vendor_elf_sha, source_root, subtree_sha, full_sha)
+        vendor_elf, vendor_elf_sha, source_root, subtree_sha, full_sha,
+        content_anchor)
     build_path = root / "vendor-build-receipt.json"
     _write_json(build_path, build_receipt)
     formal_work = formal / "work"
@@ -967,12 +995,7 @@ def _fixture(root: Path) -> dict:
     supplemental_paths = {
         "regression_log": regression_log,
         "regression_rc": regression_rc,
-        "online_source": online_source_path,
-        "online_pr": online_pr_path,
-        "online_taskdoc": online_taskdoc,
-        "online_log": online_log,
-        "online_rc": online_rc,
-        "multicard_v4_inventory": multicard_inventory,
+            "multicard_v4_inventory": multicard_inventory,
     }
     supplemental_artifacts = {
         name: {"path": str(path), "sha256": _sha(path)}
@@ -1031,20 +1054,13 @@ def _fixture(root: Path) -> dict:
     )
     phases[10].update(
         {
-            "status": "PARTIALLY_VERIFIED",
+            "status": "VERIFIED_WITH_STRUCTURED_GAPS",
             "structured_gap_ids": ["fixture.hardware.missing"],
         }
     )
     phases[10]["evidence_refs"].extend(
         {"kind": "supplemental_artifact", "artifact": name}
-        for name in (
-            "online_source",
-            "online_pr",
-            "online_taskdoc",
-            "online_log",
-            "online_rc",
-            "multicard_v4_inventory",
-        )
+        for name in ("multicard_v4_inventory",)
     )
 
     ledger = {
@@ -1053,13 +1069,6 @@ def _fixture(root: Path) -> dict:
         "recorded_at": "2026-08-07",
         "authority": {
             "actual_taskbook_input_forms": ["local_file"],
-            "actual_dut_provenance_kinds": ["local_snapshot"],
-            "online_pr_source_support": {
-                "capability_status": "VALIDATED",
-                "actual_provenance_status": "EXERCISED",
-                "completed_operators": ["fixture"],
-                "blocked_operators": [],
-            },
             "runtime_cann": {
                 "status": "MEASURED",
                 "version": "9.0.1",
@@ -1068,34 +1077,6 @@ def _fixture(root: Path) -> dict:
             },
         },
         "supplemental_artifacts": supplemental_artifacts,
-        "supplemental_online_pr_intakes": [
-            {
-                "operator_id": "fixture",
-                "status": "COMPLETE",
-                "provenance_kind": "gitcode_pr",
-                "completeness": "complete",
-                "merge_request": 1,
-                "head_repo": "fork/fixture",
-                "head_ref": "feature",
-                "head_sha": "1" * 40,
-                "pr_url": "https://gitcode.com/base/repo/merge_requests/1",
-                "target_scope": "experimental/math/fixture",
-                "head_manifest_sha256": "7" * 64,
-                "head_manifest_file_count": 2,
-                "source_facts_artifact": "online_source",
-                "pr_facts_artifact": "online_pr",
-                "taskdoc_artifact": "online_taskdoc",
-                "log_artifact": "online_log",
-                "rc_artifact": "online_rc",
-                "artifact_refs": [
-                    "online_source",
-                    "online_pr",
-                    "online_taskdoc",
-                    "online_log",
-                    "online_rc",
-                ],
-            }
-        ],
         "multi_card_precision_equivalence": [
             {
                 "operator_id": "fixture",
@@ -1145,16 +1126,15 @@ def _fixture(root: Path) -> dict:
                     "snapshot_sha256": taskdoc_sha,
                 },
                 "source": {
-                    "declared_source_form": "local_source",
-                    "provenance_kind": "local_snapshot",
-                    "snapshot_subtree_sha256": subtree_sha,
-                    "snapshot_full_sha256": full_sha,
-                    "snapshot_scope": "experimental/math/fixture",
+                    "input_association": copy.deepcopy(
+                        rge._CALLER_INPUT_ASSOCIATION
+                    ),
+                    "content_anchor": copy.deepcopy(content_anchor),
                     "envelope_sha256": source_facts["digest"],
                 },
                 "required": {
                     "dtypes": ["float32", "int64"],
-                    "hardware": ["Atlas A3", "Atlas A5"],
+                    "hardware": ["Atlas A2", "Atlas A3", "Atlas A5"],
                     "case_target": 3,
                     "structure_denominator_total": 3,
                     "structured_excluded": 0,
@@ -1227,7 +1207,7 @@ def _fixture(root: Path) -> dict:
                         "dimension": "hardware",
                         "status": "UNVALIDATED",
                         "source_kind": "derived_coverage_limit",
-                        "details": {"hardware": ["Atlas A5"]},
+                        "details": {"hardware": ["Atlas A2", "Atlas A5"]},
                     },
                 ],
                 "artifacts": artifacts,
@@ -1473,10 +1453,10 @@ class RgeLedgerTest(unittest.TestCase):
 
         self.assert_error(self.errors(mutate, verify_artifacts=True), "verdict projection drift")
 
-    def test_source_envelope_rewrite_cannot_escape_build_anchor(self) -> None:
+    def test_coherent_source_and_build_anchor_rewrite_cannot_escape_execution(self) -> None:
         def mutate(ledger) -> None:
             def change(value) -> None:
-                value["payload"]["pr"]["snapshot_merkle_sha256"] = "a" * 64
+                value["payload"]["pr"]["content_anchor"]["sha256"] = "a" * 64
                 value["digest"] = content_address.content_digest(
                     rge._SOURCE_FACTS_DOMAIN, value["payload"]
                 )
@@ -1485,9 +1465,21 @@ class RgeLedgerTest(unittest.TestCase):
             ledger["operators"][0]["source"]["envelope_sha256"] = json.loads(
                 Path(ledger["operators"][0]["artifacts"]["source_facts"]["path"]).read_text()
             )["digest"]
-            ledger["operators"][0]["source"]["snapshot_subtree_sha256"] = "a" * 64
+            ledger["operators"][0]["source"]["content_anchor"]["sha256"] = "a" * 64
+            self.rewrite_artifact(
+                ledger,
+                "vendor_build_receipt",
+                lambda value: (
+                    value["source"]["content_anchor"].__setitem__("sha256", "a" * 64),
+                    value["build"]["source_snapshot_digest"]["content_anchor"].__setitem__(
+                        "sha256", "a" * 64
+                    ),
+                ),
+            )
 
-        self.assert_error(self.errors(mutate, verify_artifacts=True), "vendor_build_receipt")
+        self.assert_error(
+            self.errors(mutate, verify_artifacts=True), "external build receipt drift"
+        )
 
     def test_generated_denominator_loss_is_rejected(self) -> None:
         errors = self.errors(
@@ -1639,38 +1631,44 @@ class RgeLedgerTest(unittest.TestCase):
 
         self.assert_error(self.errors(mutate), "BLOCKED_PERF_MEASUREMENT_INCOMPLETE")
 
-    def test_online_pr_status_must_mirror_actual_intakes(self) -> None:
-        errors = self.errors(
-            lambda ledger: ledger["authority"]["online_pr_source_support"].__setitem__(
-                "actual_provenance_status", "NOT_EXERCISED"
-            )
-        )
-        self.assert_error(errors, "actual status must mirror intakes")
+    def test_no_online_identity_authority_or_intake_is_required(self) -> None:
+        self.assertNotIn("online_pr_source_support", self.ledger["authority"])
+        self.assertNotIn("supplemental_online_pr_intakes", self.ledger)
+        self.assertEqual(rge.validation_errors(self.ledger), [])
 
-    def test_complete_online_intake_head_repo_is_bound_to_both_facts(self) -> None:
-        errors = self.errors(
-            lambda ledger: ledger["supplemental_online_pr_intakes"][0].__setitem__(
-                "head_repo", "wrong/repo"
+    def test_transport_locator_drift_does_not_change_content_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            variant = _fixture(Path(raw), transport_variant=True)
+            self.assertEqual(rge.validation_errors(variant), [])
+            self.assertEqual(
+                variant["operators"][0]["source"]["content_anchor"],
+                self.ledger["operators"][0]["source"]["content_anchor"],
             )
-        )
-        self.assert_error(errors, "head_repo")
 
-    def test_complete_online_intake_requires_exact_gitcode_mr_url(self) -> None:
-        errors = self.errors(
-            lambda ledger: ledger["supplemental_online_pr_intakes"][0].__setitem__(
-                "pr_url", "https://example.invalid/merge_requests/1"
-            )
-        )
-        self.assert_error(errors, "exact GitCode MR URL")
+    def test_content_anchor_shape_sha_and_count_are_hard(self) -> None:
+        for key, value in (
+            ("scope", 7),
+            ("sha256", "f" * 63),
+            ("file_count", 0),
+        ):
+            with self.subTest(key=key):
+                errors = self.errors(
+                    lambda ledger, k=key, v=value: ledger["operators"][0]
+                    ["source"]["content_anchor"].__setitem__(k, v)
+                )
+                self.assert_error(errors, "content anchor")
 
-    def test_blocked_online_intake_cannot_select_head(self) -> None:
+    def test_current_ledger_rejects_vendor_v2_head_only_downgrade(self) -> None:
         def mutate(ledger) -> None:
-            intake = ledger["supplemental_online_pr_intakes"][0]
-            intake.update(
-                {"status": "BLOCKED", "failure_kind": "ambiguous", "selected_head_sha": "1" * 40}
+            self.rewrite_artifact(
+                ledger,
+                "vendor_build_receipt",
+                lambda value: value.update({"schema_version": 2}),
             )
 
-        self.assert_error(self.errors(mutate), "BLOCKED cannot select a head SHA")
+        self.assert_error(
+            self.errors(mutate), "requires current v3 content snapshot"
+        )
 
     def test_multicard_partition_must_cover_single_card_denominator(self) -> None:
         errors = self.errors(

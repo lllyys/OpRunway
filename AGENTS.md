@@ -8,7 +8,9 @@
 ## 1 · 这个仓是什么
 
 **OpRunway = NPU（昇腾）算子验收工作区**：输入是“算子任务书 + 被测来源”，输出是机器可校验的验收裁决和中文验收报告。
-被测来源有两条平级通路：在线 PR 链接，或本地已 clone 的 checkout（见 §9.3）。
+任务书与被测来源均由调用方传入，二者的关联由调用方断言为正确；工具不再反查 issue、fork、ref、head
+来决定这对输入能否验收。任务书与源码各自都可来自在线 URL 或本地路径，被测源码的在线/本地传输形态
+是两条平级通路（见 §9.3）。
 
 ```
 任务书 + 被测来源 ──① 用例生成（ST）──▶ 测试用例集 ──② NPU 跑测──▶ NPU 精度 + 性能
@@ -18,13 +20,15 @@
 
 用例集是整条流水线的脊柱：
 
-- Task 1：从任务书与被测来源（PR 或本地 checkout）生成覆盖功能、精度、性能的用例集；
+- Task 1：从任务书与被测源码（在线 URL 或本地 checkout）生成覆盖功能、精度、性能的用例集；
 - Task 2：同一份用例在 NPU 上生成精度证据和性能数据；
 - Task 3：消费外部 GPU 数据，按同一 case 身份生成跨设备性能报告。
   ⚠ **Task 3 是按需能力，不是每轮必做**：按 5.10，任务书即使写了「与 GPU 比对」也默认只做
   NPU msprof 实测；**只有用户明确要求做 GPU 对比时**才走 Task 3。
 
-任务书是验收权威；被测来源（PR 或本地 checkout）和 op_def 是被测事实与能力证据，不能反过来覆盖任务书。
+任务书是验收权威；被测来源（在线源码或本地 checkout）和 op_def 是被测事实与能力证据，不能反过来覆盖任务书。
+“调用方断言关联正确”只免除来源对应关系的再鉴定，**不**免除任务书字节摘要、源码内容摘要、构建树、
+vendor ELF、实际加载符号、输出与执行证据的硬绑定。
 
 ---
 
@@ -66,8 +70,9 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
   --source-facts <CP-A 取材目录>/source_facts.json
 ```
 
-⚠ **`--source-facts` 在验收通路上必给，缺席直接拒跑**（不是可选参数）：三级门要拿它与 vendor build receipt
-的来源锚逐字对账，缺对照物时「收据自称 `gitcode_pr`、事实其实是 `local_snapshot`」这类伪装查不出来。
+⚠ **`--source-facts` 在验收通路上必给，缺席直接拒跑**（不是可选参数）：三级门要拿其中的任务书摘要、
+调用方关联声明和源码 `content_anchor` 与 vendor build receipt 逐字对账；缺对照物时，无法证明构建/加载的
+ELF 来自调用方实际传入的那份源码字节。
 它拒在 `os.makedirs` / staging / Task1 **之前**，不留半个产物目录。
 路径就是 **CP-A 取材那一步 `fetch_source.py --out <取材目录>` 产的那份**（`completeness.status` 须为 `complete`），
 **与 `--out <报告目录>` 不是同一个目录**——报告目录里那份是本轮 staging 出来的副本，是产物不是输入。
@@ -76,8 +81,10 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
 
 常用脚本：
 
-- `fetch_source.py`：任务书 + 被测来源（`--pr <PR 链接>` 或 `--pr-snapshot <本地目录> [--target-dir <仓内相对目录>]`）→ 中立事实包；`completeness=blocked` 时非 0 退出（3）；
-- `source_provenance.py`：来源形态判别式（声明 `declared_source_form ∈ {git_pr, local_source}` × 实得 `provenance_kind ∈ {gitcode_pr, local_snapshot}`）与 provenance 锚绑定的**读侧唯一入口**；档位路由表、降级授权与「未声明按最严的 `git_pr` 对待」只留这一份实现；
+- `fetch_source.py`：任务书 + 被测来源（在线入口 `--pr <URL>` 或本地入口 `--pr-snapshot <目录> [--target-dir <仓内相对目录>]`）→ 中立事实包；参数名 `--pr` 是兼容名，不把输入限定成可枚举的 PR 身份；`completeness=blocked` 时非 0 退出（3）；
+- `source_provenance.py`：调用方受信关联、源码 `content_anchor` 与 build receipt 对账的**读侧唯一入口**。
+  新事实包认 `input_association.policy=caller_trusted_pair_v1`；URL/repo/fork/ref/head 只作
+  `transport_observation`。没有新关联声明的 legacy 事实包继续走旧的声明×实得严格路由，不能被静默升级；
 - `vendor_build_receipt.py`：`vendor_build_receipt` 的 schema 与**唯一校验处**（`validate()` / `summarize()`）；adapter、driver、三级门都调它，不许各抄一份；
 - `validate_taskdoc_input.py`：任务书输入校验门（18 项 + 交付件清单，抽 spec 之前）；
 - `reconcile_deliverables.py`：任务书必选交付件 ↔ PR 实际交付物对账（不做模糊名字匹配，认不出即落缺口）；
@@ -93,8 +100,8 @@ python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py
   `subprocess.run` 实测值、另记 `build.returncode_source="measured"`，**没有「只记录不执行」模式**
   （`--returncode` 只剩可选的期望值断言，与实测不符即拒）；`--library` 须被这次 build 改写过
   （构建前后 `(mtime_ns, size, sha256)` 三项全同即 fail-closed）；产出时另摘一次树落 `build.tree_state_at_emit`。
-  ⚠ **产出侧不读 `source_facts`**：收据里的两个 merkle 由 `--source-root` 现算，与取材锚的对账推迟到三级门
-  （比 `snapshot_subtree_sha256` ↔ `source_facts.pr.snapshot_merkle_sha256`）。故「收据产出来了」**不等于**
+  ⚠ **产出侧不读 `source_facts`**：收据里的源码快照与 `content_anchor` 由 `--source-root` 现算，与取材锚
+  的对账推迟到三级门。故「收据产出来了」**不等于**
   「build 的那棵树就是 CP-A 取材的那棵」；`build.tree_state_at_emit` 也**只是记录、没有门在比**（记账见 §9.4）；
 - `validate_preparation_state.py`：非真机复用收据；
 - `validate_acceptance_state.py`：验收证据复核门；含 build receipt ↔ source_facts 的来源锚对账（`--source-facts` 可显式指路）。
@@ -190,7 +197,7 @@ _RUNNER_FORM_TO_MODE = {"cpp_extension": "cpp_extension"}
 ### 4.4 其余仍然成立的约定
 
 - `cpp_extension` 不重编 op-plugin，也不把 op-plugin 当 DUT；它只复用官方 C++ Extension 接入机制，
-  并须以独立构建收据机校绑定完整 PR head、构建命令和实际加载的 vendor ELF；
+  并须以独立构建收据机校绑定调用方源码 `content_anchor`、构建命令和实际加载的 vendor ELF；
 - Median + PR6429 的 `cpp_extension` torch-parity 真机精度结果**并列记两个 caseset**（1152 与 1344），
   **不存在单一的「Median 精度基线数字」**；两组数各自的 spec 出处、矩阵构成与引用纪律见 **§4.5**；
 - `mock`、`catlass`、`catlass_mock` 不能从 `runner_form` 派生，只能显式用于局部开发或对应通路；
@@ -278,7 +285,8 @@ _RUNNER_FORM_TO_MODE = {"cpp_extension": "cpp_extension"}
 - 域内定义以 `plugin/acc-common/contract_ir/` 为准；无状态、标准 aclnn 两段式、无 opaque descriptor 的形态应工具零改可跑；
 - 域外或未知接口能力一律 fail-closed 标“不支持的接口能力”，不硬塞、不自动归类；
 - ABI 以 header/example 为事实源；语义、dtype、硬件以任务书和 op_def 交叉；
-- 三源缺失或冲突仍无法确定时，停下询问用户，绝不静默猜测。
+- 任务书与被测来源的**关联关系**由调用方断言，禁止再据目录名、issue、fork/ref/head 猜测或反问来源；
+  输入内容内部的必需事实缺失或互相冲突时仍 fail-closed，绝不静默猜值。
 
 ### 5.2 方案、权限与副作用
 
@@ -311,11 +319,11 @@ _RUNNER_FORM_TO_MODE = {"cpp_extension": "cpp_extension"}
   **只读保留现场**：禁止写入、覆盖、移动、删除或作为新执行目录；只允许经用户明确要求的只读核验。
   **文件不存在、或存在但未设该变量**，都只表示**当前未登记保护根**——不构成阻塞，但同样**不得**据此
   推断任何目录可以随意写入或清理（未登记 ≠ 已授权；删除/覆盖仍按 §5.2 逐次征得用户确认）；
-- 机器 profile 只负责找到执行环境，不能替代任务书硬件核定和本轮 PR provenance。
+- 机器 profile 只负责找到执行环境，不能替代任务书硬件核定和本轮源码内容→构建→ELF→执行绑定。
 
 ### 5.4 零硬编码与本地配置
 
-- 仓名、路径、SoC、目标算子、阈值、PR head 不写死在通用代码；
+- 仓名、路径、SoC、目标算子、阈值、源码 URL/ref/head 等传输观察值不写死在通用代码；
 - 运行时探测、从 spec/pr_facts 派生或询问用户；
 - 不碰 `~/.config`、不改 shell rc；
 - 验收产物只落用户 CWD 的 `reports/`；
@@ -364,7 +372,8 @@ push 前，对自上次 push 以来将要发布的全部改动统一做一轮审
 - 推断项显式标“推断”；
 - `needs_review` 不当 pass；
 - “PR 有测试”“代码接通”“covered”“collector 有数据”都不等于验收通过；
-- FAIL 归因前先核任务书↔PR 对应，再解耦 DUT 与 harness；
+- FAIL 归因使用调用方给定的任务书/源码对，不再重新裁定二者是否“对应”；先复核二者各自字节摘要及
+  源码内容→build→ELF→实际加载对象绑定，再解耦 DUT 与 harness；
 - 验收权威只认任务书，最终裁决只认确定性脚本链。
 
 ### 5.9 canon 写门与开工 grounding
@@ -376,6 +385,9 @@ push 前，对自上次 push 以来将要发布的全部改动统一做一轮审
 - canon 过大时至少读 overview，并用 bureau query 按需查证；
 - 通读与 query 并用；未读或未 settle 页面不得冒充门禁依据；
 - 当前运行规则与未 review canon 冲突时，显式记录张力，不静默覆盖。
+- `Verify spec-PR correspondence before acceptance` 与 `PR head commit is the tested object` 当前均为
+  `proposed`，其“由工具鉴定对应关系/以 head 身份作为准入根”的旧前提已被 §9.3 的调用方受信关联口径取代；
+  在 bureau review 前保留历史页，不拿它们覆盖现行仓规。内容摘要、构建和执行绑定不受此张力影响。
 
 ### 5.10 性能口径：只测 msprof 实测，不比 GPU
 
@@ -528,7 +540,7 @@ OpRunway/
 - `cannbot-ops-input`/cannbot 只作 case、精度、性能方法参考，不成为运行时依赖；
 - catlass、ops-*、稀疏/通信等不同仓形态通过通用能力或 per-repo adapter 接入，不互相硬套；
 - 姊妹项目的环境搭建经验可复用，“跑没跑崩”式判定不能替代本仓精度/性能验收；
-- 具体任务始终以正确的任务书、对应 PR 和本轮事实包为准。
+- 具体任务始终以调用方传入的任务书、被测来源和本轮事实包为准；工具不另做二者对应关系侦查。
 
 ---
 
@@ -607,121 +619,76 @@ OpRunway/
   再对它做 CP-F。⚠ 那是**新验收**，不能称作旧通路的漂移复测。
   编排层在 F0/F1 就不该起草这类 directive，别拖到 F3 才失败、白做冻结。
 
-### 9.3 被测来源：本地代码是一等输入形态
+### 9.3 调用方受信输入关联与源码内容锚
 
-被测代码有两条**平级**输入形态，不是“主 + 降级”。判别式**不是一个字段，是两条正交词表**——
-一条说“你声明要测什么”，一条说“工具真拿到了什么”，两者比对才是档位判据：
+任务书与被测源码是两份**由调用方共同传入**的输入。调用方传入这对输入，即断言二者关联正确；
+OpRunway 不再以 issue/追踪号、目标目录相似度、fork/ref/head 是否可枚举来批准或否决这段关联，
+也不因在线身份缺失再次询问来源。两份输入各自的传输形态彼此正交：
 
-| 声明 `declared_source_form` | 实得 `provenance_kind` | 怎么取 | 档位 | provenance 锚 |
-|---|---|---|---|---|
-| `git_pr` | `gitcode_pr` | `fetch_source.py --pr <PR 链接>` | `complete`，不需授权 | `pr.head_sha`（恰 40 hex） |
-| `local_source` | `local_snapshot` | `fetch_source.py --pr-snapshot <本地目录> [--target-dir <仓内相对目录>]` | `complete`，**不需任何授权环境变量** | `snapshot_merkle_sha256`（恰 64 hex）+ `snapshot_scope` |
-| `git_pr` | `local_snapshot` | 本来要测 PR、只拿到快照 | `snapshot_only` = **降级** | 须 `OPRUNWAY_ALLOW_DEGRADED_PROVENANCE` 授权，并挂 `pr_head_unbound` |
-| `local_source` | `gitcode_pr` | —— | **一律拒**（声明本地却带着上游 commit） | —— |
+| 输入 | 在线形态 | 本地形态 | 验收硬锚 |
+|---|---|---|---|
+| 任务书 | `http(s)` URL 取材后落快照 | 本地 Markdown 落快照 | `taskdoc.snapshot_sha256` |
+| 被测源码 | `fetch_source.py --pr <URL>` 取得目标内容 | `--pr-snapshot <目录>` 取得目标内容 | 统一 `pr.content_anchor` |
 
-- 读侧唯一入口是 `plugin/acc-common/source_provenance.py`；路由 allowlist `_ROUTES` 只装上表**前三行**
-  这三条可达路由（第四行不在表里 = 不可达 = 拒），**表外一律拒**。
-  adapter 侧另有 `source_mode ∈ {git_fetch, local_snapshot}`，换算表只在 `ADAPTER_KIND_TO_INTAKE` 一处；
-- `--pr` 与 `--pr-snapshot` 走 argparse 互斥组，同给在**解析期**退 2；
-- `--target-dir` **两条通路共用**，逐字采用、末段即 op 名，绕过 `_guess_op`。ops-cv 那种仓根一级算子目录
-  （`gaussian_blur/`）能跑通靠的就是它；
-- **未声明形态按最严的 `git_pr` 对待**：老事实包没有 `declared_source_form`，两侧都没有时仍落降级档、
-  仍要授权，与改动前逐字同规矩；一侧有一侧没有则 fail-closed（那不是同一次取材产的）；
-- `pr_head_unbound` 的语义**已分家**：`local_source` 形态的 `head_sha=null` 是**中性事实**，
-  走 `bindings["source_form_facts"]`（`local_source_has_no_upstream_commit` /
-  `..._file_set_is_subtree_not_pr_diff`），**不进降级台账**；只有「本该绑却没绑」才是降级。
-  ⚠ 报告须原样带着这些中性事实（不得声称已绑 PR head），但**不得**把它们渲染成「降级 / 未绑定」。
+新事实包必须逐字携带：
+
+```json
+{
+  "input_association": {
+    "schema": "oprunway.caller_trusted_input",
+    "schema_version": 1,
+    "policy": "caller_trusted_pair_v1",
+    "correspondence": "asserted_by_caller"
+  },
+  "pr": {
+    "content_anchor": {
+      "schema": "oprunway.source_content_anchor",
+      "schema_version": 1,
+      "algorithm": "git_blob_manifest_sha256_v1",
+      "scope": "<目标子树>",
+      "sha256": "<64 hex>",
+      "file_count": "<正整数>"
+    }
+  }
+}
+```
+
+- URL、repository、fork、ref、head、MR 编号和 `provenance_kind` 继续据实记录，但语义是
+  **`transport_observation`**，不是任务书↔源码关联准入根；缺失、歧义或与本地目录名不同只进
+  `completeness.transport_warnings`，不进 acceptance blocker；
+- **拿不到源码目标字节或产不出 `content_anchor` 仍然阻断。** 放松的是“它叫什么、来自哪个 fork/head”的
+  身份侦查，不是“实际验了哪些字节”的内容证明；
+- `--pr` 与 `--pr-snapshot` 仍走 argparse 互斥组，同给在解析期退 2；`--target-dir` 两条通路共用；
+- 新链的读侧唯一入口是 `plugin/acc-common/source_provenance.py`。它校
+  `input_association → content_anchor → build receipt`，而不是校 declared/provenance 形态是否配对；
+- **legacy 不追认。** 没有 `input_association` / `content_anchor` 的旧事实包与旧收据继续按原
+  `declared_source_form × provenance_kind` 严格路由读取；不得由报告、R/G/E ledger 或兼容层合成
+  `asserted_by_caller`，也不得把旧 `snapshot_merkle_sha256` 改名冒充新锚。要按新策略出新裁决，须从
+  caller 输入重新取材、重做 build snapshot/receipt，并重放执行门。
 
 ⚠ **`--pr-snapshot` 收的是「一份没有 git 的目录快照」，工具完全不探 git。** 所以这条通路里
 不存在 dirty worktree、base-ref、git head 之类的概念，也没有对应的门——别去找。
 
-**摘要与锚的覆盖面：**
+**新链的硬绑定顺序：**
 
-- intake 侧产**一个** merkle（`snapshot_merkle_sha256`），范围由 `--target-dir` 决定的 `snapshot_scope`；
-- vendor build receipt 侧绑**六项**：仓根 `repo` + `snapshot_subtree_scope` + `snapshot_sha256`（**整树** merkle）
-  + `snapshot_subtree_sha256`（**算子子树** merkle）+ 构建 argv + vendor ELF `sha256`；
-  `source_provenance.check_build_identity` 做「build 实得 ↔ 执行配置 ↔ CP-C0 bindings」三方对账，
-  且要求两侧 scope 相等才比 merkle；
-- ⚠ **跨端对账比的是子树那一个**：intake 的 `snapshot_merkle_sha256` ↔ 收据的 `snapshot_subtree_sha256`。
-  两侧**不同名**，别按同名比；
-- ⚠ **`gitcode_pr` 档必须反向排他**：`snapshot_sha256` / `snapshot_subtree_sha256` / `snapshot_subtree_scope`
-  须为缺席或 `None`，堵「本地 provenance 伪装成 PR provenance」。注意 payload 里 PR 通路**恒带**这些键、值为 `None`，
-  判据只能写「值是 `None`」，写成「键不存在」会把所有 PR 通路当场打死；
-- 排除目录名与算法版本以结构化的 `snapshot_digest_policy` 写进事实包（**本轮新增**），校验端逐字对账，
-  不接受任意排除策略。⚠ 在它落地之前，跳过目录名只落在 `pr_facts.snapshot_skipped_dir_names`、
-  **下游任何一道门都拿不到、也没人对账**——「摘要覆盖了什么」是暗知识。
+1. `source_facts` contract v2 把调用方声明与任务书快照、实际摄取的源码文件名册一起内容寻址；
+2. `pr.content_anchor` 与 `pr_facts.content_anchor` 必须逐字相同。当前算法为
+   `git_blob_manifest_sha256_v1`，字段为 `scope/sha256/file_count`；在线与本地输入同形；
+3. online 输入也必须先物化成 build 前的完整源码快照。vendor build receipt v3 的
+   `source.content_anchor` 与 `build.source_snapshot_digest.content_anchor` 必须同值；head/repo 只在
+   `source.transport` 记账，不能替代内容快照；
+4. 三级门继续把该内容锚串到 measured build、实际 vendor ELF、workspace/stage2 符号定义者、实际加载对象、
+   输出和性能证据。任一漂移在裁决前 BLOCKED。
 
-⚠ **摘要算法明确不覆盖三件事**（要修就得升 `algorithm_version` 并同步改三处实现，且**作废现存全部
-现场 merkle 与收据**——本轮没做）：
+⚠ **legacy 不追认。** contract v1 与 vendor receipt v1/v2 仍按其当时的
+`declared_source_form × provenance_kind`、PR head 或 snapshot merkle 规则解释；历史裁决不改判，
+但不得由报告/RGE/兼容层补一个 `input_association` 或把旧摘要改名成 `content_anchor`。要按新口径形成
+fresh 裁决，须重新取材、在 build 前重做内容快照、重建收据并重放执行门。
 
-1. **软链**：文件与目录软链一律跳过、不进摘要。`median.cpp -> /tmp/x.cpp` 这类替换后，
-   编译器跟随软链读到的字节完全不在覆盖内；
-2. **空目录**：不计入，空目录本身的增删不可见；
-3. **可执行位**：不入帧，`build.sh` 从 644 改到 755 会改变构建行为却不改摘要。
-
-⚠ **两条硬限制仍在，别含糊过去：**
-
-1. **子树 merkle 只覆盖 `snapshot_scope`。** 整树 `snapshot_sha256` 把仓级构建脚本、公共头文件
-   也纳进来了，比只有子树锚时严得多；但**跨端对账用的仍是子树那一个**，整树摘要目前只作记录。
-   ⚠ 落在 scope 之外的 `aclnn_headers` 是否会被静默漏掉（`_key_file_candidates` 只从 scope 内挑），
-   **本轮没有核到**，留作待查（见 §9.4）；
-2. **本地来源的性能维尚未见证到「出比值裁决」。** GaussianBlur 那轮性能走的是 `measure_only`
-   （16 条真实 kernel-only `npu_us`，无标杆对比，§5.10）；更早 Median 那轮精度判 `fail`、
-   Task3 按 fail-fast 跳过采集。所以“本地来源能出**性能比值**裁决”这件事仍未见证。
-
-**真机见证：**
-
-- **GaussianBlur（ops-cv，2026-08-05，当前唯一的本地来源全链见证）**：
-  `runner_form=cpp_extension` + `declared_source_form=local_source` + `--pr-snapshot`，端到端跑通。
-  终态与逐项数字见 §9.1；
-- ⚠ **Median 那轮本地来源验收（2026-08-05，专用容器）是历史记录，其实现已被取代。**
-  那次走的是本轮合并中**已删除**的另一套实现（`dut_source.py` 判别式 + `local_checkout.root_digest`
-  + `oprunway.local_subtree_merkle` v1）。它留下的 `root_digest=c8867ce09f6e…` 由那套算法算出，
-  **在当前实现下复算不出来**（帧格式、排除集合、路径基准三处都不同）。
-  完整记录见 `dev-doc/oprunway-local-source-realmachine-validation.md`——读它时**只把结论当历史**，
-  里面的字段名、CLI 参数（`--local-repo` / `--op-subdir` / `--allow-dirty`）与锚值**都已不是现行口径**。
-
-**接入状态（权威表在 `plugin/acc-common/source_provenance.py` 模块头，以代码为准）：**
-
-| 消费者 | 状态 |
-|---|---|
-| `fetch_source`（产出方） | ✅ 已接 |
-| `validate_preparation_state` | ✅ 已接 |
-| `preflight_aclnn` | ✅ 已接（`source_provenance.bind` 一处出判定，不再手写分支） |
-| `cpp_extension_adapter` / `cpp_extension_driver` / `validate_acceptance_state` | ✅ 已接（vendor build receipt 绑定，**主验收链**） |
-| `render_acceptance_markdown` | ✅ 已接（按 `provenance_kind` + `declared_source_form` 渲染「来源与 provenance」节） |
-| `precision_retest_contract` / `precision_retest_runner` | ✅ 已接（CP-F 验收后复测） |
-| `verify_aclnn_harness` | ✅ 已接（`source_provenance.check_config_against_preflight` / `check_build_identity`） |
-
-⚠ **最后一行是本轮翻案的：** 上一版仓规写着「`aclnn_adapter` 构建端根本不存在可与本地锚对账的锚，
-所以这道门对本地来源结构性 fail-closed、不是待办」。那个判断**已被证伪**——`aclnn_adapter._source_block`
-现在在容器内内联**同一份**摘要算法，算出 `SNAPSHOT_SHA256` / `SUBTREE_SHA256` 与 intake 侧对账
-（真机实测两端对同一目录得同值、2565 个文件）。原来的 `_require_pull_request_path` 是在拦一条已经跑通的通路，
-本轮已删。⚠ 连带纪律：**这份算法现在有三处实现**（`fetch_source._snapshot_merkle`、
-`vendor_build_receipt.take_snapshot_digest`、`aclnn_adapter` 里那段内联 python3），
-**改一处必须同步改三处**，否则症状是永远的 `SNAPSHOT_MISMATCH`。
-
-**三级门里的来源锚对账，两步且顺序固定：** 先核两边 `provenance_kind`（及两侧都在场时的
-`declared_source_form`）一致，再按形态核锚值相等。⚠ 第 0 步不等时的错误信息要说
-「来源身份被伪装」而不是「锚漂移」——两件事的排查方向完全不同。
-
-`source_facts.json` 缺席时**本门自己**的处置按通路分，这条是实测逼出来的：历史真机验收报告目录
-（`reports/<Op>-spec-<x>/`）里**本来就没有** `source_facts.json`，取材的 `--out` 与验收产物目录不是同一个。
-所以 `local_snapshot` 找不到就 BLOCKED，`gitcode_pr` 沿用旧行为；`validate_acceptance_state` 的
-`--source-facts` 可显式指路。
-
-✅ **那条伪装面已由编排层封死（2026-08-05）**，不再是待办：`run_workflow` 在**验收通路**上把
-`--source-facts` 定为**必填**（缺席即拒跑，且拒在 `os.makedirs` / staging / Task1 **之前**，不留半个产物目录），
-把它按字节 staging 进 `--out`，并**每次都显式**把这份 staging 副本指给 task1/task2/task3 三级门，不走自动发现。
-于是正常验收链上「没有对照物」不再是一个可达状态——**缺席本身成了非法**。CP-F 同理
-（`precision_retest_runner` 显式传冻结副本）。⚠ 连带后果：报告目录里现在**会**有一份 staging 的
-`source_facts.json`，上一段那句「报告目录里本来就没有」只对**封死之前**的老产物成立。
-
-⚠ **剩余面，如实记账**：**手工单独跑 `validate_acceptance_state` CLI 且不给 `--source-facts`** 时，
-`gitcode_pr` 照旧不阻断（就是上一段那条按通路分的处置）。要判断一份产物是不是走了封死后的编排链，
-看它 `--out` 里有没有那份 staging 的 `source_facts.json`；没有就说明它是老产物或手工拼的，
-**别当成「门放行了」**。显式给了 `--source-facts` 却指不到文件**不属于**这条剩余面——那按
-`SOURCE_FACTS_UNTRUSTED` 阻断（typo 不得退化成「没找到」）。
+⚠ **传输观察不是验收完成条件。** 在线 URL 是否能解析到公开 fork/ref/head、同一源码是否另有本地副本，
+都不要求“双来源各跑一次”；调用方给入的一种任务书形态和一种源码形态只要内容硬链闭合，即可形成该轮裁决。
+Atlas A2/A5 未测、性能保持条款未取 baseline 等**任务书覆盖 gap 仍须 UNVALIDATED 原样报告**，但不因
+来源身份侦查缺失额外阻断。
 
 ### 9.4 本轮的连带账单
 

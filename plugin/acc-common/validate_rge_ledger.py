@@ -23,10 +23,11 @@ import multi_card_shards
 import multi_card_verdict_equivalence
 import stochastic_contract
 import validate_acceptance_state
+import vendor_build_receipt
 
 
 SCHEMA = "oprunway.multi_operator_rge_ledger"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _FORMAL_REQUIRED_ARTIFACTS = frozenset(
     {
@@ -55,11 +56,19 @@ _PLAN_STATUSES = {
     "VERIFIED_WITH_STRUCTURED_GAPS",
     "PARTIALLY_VERIFIED",
 }
-_ONLINE_PR_STATUSES = {"NOT_EXERCISED", "PARTIALLY_EXERCISED", "EXERCISED"}
 _SOURCE_FACTS_DOMAIN = "oprunway/source-facts/v1"
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _GITCODE_MR_URL = re.compile(
     r"^https://gitcode\.com/[^/]+/[^/]+/merge_requests/(?P<number>[1-9][0-9]*)$"
+)
+_CALLER_INPUT_ASSOCIATION = {
+    "schema": "oprunway.caller_trusted_input",
+    "schema_version": 1,
+    "policy": "caller_trusted_pair_v1",
+    "correspondence": "asserted_by_caller",
+}
+_CONTENT_ANCHOR_KEYS = frozenset(
+    {"schema", "schema_version", "algorithm", "scope", "sha256", "file_count"}
 )
 _MULTICARD_INVENTORY_SCHEMA = "oprunway.multi_card_artifact_inventory"
 _MULTICARD_INVENTORY_VERSION = 4
@@ -178,6 +187,27 @@ class LedgerValidationError(ValueError):
     def __init__(self, errors: Iterable[str]):
         self.errors = tuple(errors)
         super().__init__("\n".join(self.errors))
+
+
+def _content_anchor(value: Any, where: str, errors: list[str]) -> dict[str, Any]:
+    """Validate the current caller-trusted source content anchor."""
+
+    row = _as_dict(value, where, errors)
+    if set(row) != _CONTENT_ANCHOR_KEYS:
+        errors.append(f"{where}: expected exact content-anchor fields")
+    if (
+        row.get("schema") != "oprunway.source_content_anchor"
+        or row.get("schema_version") != 1
+        or row.get("algorithm") != "git_blob_manifest_sha256_v1"
+        or not isinstance(row.get("scope"), str)
+        or not isinstance(row.get("sha256"), str)
+        or not _SHA256.fullmatch(row.get("sha256", ""))
+        or isinstance(row.get("file_count"), bool)
+        or not isinstance(row.get("file_count"), int)
+        or row.get("file_count", 0) <= 0
+    ):
+        errors.append(f"{where}: unsupported source content anchor")
+    return row
 
 
 def _is_int(value: Any) -> bool:
@@ -1704,6 +1734,7 @@ def _validate_formal_artifact_projection(
     operator: dict[str, Any],
     artifacts: dict[str, Any],
     where: str,
+    current_contract: bool,
     errors: list[str],
 ) -> None:
     """Re-project ledger facts from the registered formal workflow artifacts."""
@@ -1771,18 +1802,6 @@ def _validate_formal_artifact_projection(
         errors,
     )
     _same(
-        facts_payload.get("declared_source_form"),
-        source.get("declared_source_form"),
-        f"{where}.source.declared_source_form",
-        errors,
-    )
-    _same(
-        pr.get("provenance_kind"),
-        source.get("provenance_kind"),
-        f"{where}.source.provenance_kind",
-        errors,
-    )
-    _same(
         derived.get("aclnn_entry"),
         operator.get("api"),
         f"{where}.api",
@@ -1812,100 +1831,228 @@ def _validate_formal_artifact_projection(
     )
     if build_receipt.get("schema") != "oprunway.vendor_build_receipt":
         errors.append(f"{where}.artifacts.vendor_build_receipt.schema: unsupported")
-    if build_receipt.get("schema_version") != 2 or build_receipt.get("status") != "VERIFIED":
-        errors.append(f"{where}.artifacts.vendor_build_receipt: expected v2 VERIFIED")
+    if build_receipt.get("status") != "VERIFIED":
+        errors.append(f"{where}.artifacts.vendor_build_receipt: expected VERIFIED")
     build = _as_dict(
         build_receipt.get("build"), f"{where}.artifacts.vendor_build_receipt.build", errors
     )
     if build.get("returncode") != 0 or build.get("returncode_source") != "measured":
         errors.append(f"{where}.artifacts.vendor_build_receipt.build: expected measured rc=0")
-    _same(
-        build_source.get("declared_source_form"),
-        source.get("declared_source_form"),
-        f"{where}.artifacts.vendor_build_receipt.source.declared_source_form",
-        errors,
+
+    caller_contract = (
+        facts_payload.get("contract_version") == 2
+        or "input_association" in facts_payload
+        or "input_association" in source
+        or "content_anchor" in source
     )
-    _same(
-        build_source.get("provenance_kind"),
-        source.get("provenance_kind"),
-        f"{where}.artifacts.vendor_build_receipt.source.provenance_kind",
-        errors,
-    )
-    provenance = source.get("provenance_kind")
-    if provenance == "local_snapshot":
-        if any(pr.get(key) is not None for key in ("head_sha", "head_repo", "canonical_url")):
-            errors.append(f"{where}.artifacts.source_facts.payload.pr: local source carries PR identity")
-        _same(
-            pr.get("snapshot_merkle_sha256"),
-            source.get("snapshot_subtree_sha256"),
-            f"{where}.source.snapshot_subtree_sha256",
+    if current_contract and not caller_contract:
+        errors.append(
+            f"{where}.source: current RGE ledger requires caller-trusted content anchor"
+        )
+    if not current_contract and caller_contract:
+        errors.append(
+            f"{where}.source: legacy RGE ledger cannot claim caller-trusted association"
+        )
+    if current_contract:
+        association = _as_dict(
+            facts_payload.get("input_association"),
+            f"{where}.artifacts.source_facts.payload.input_association",
             errors,
         )
-        _same(
-            pr.get("snapshot_scope"),
-            source.get("snapshot_scope"),
-            f"{where}.source.snapshot_scope",
-            errors,
-        )
-        _same(
-            build_source.get("snapshot_sha256"),
-            source.get("snapshot_full_sha256"),
-            f"{where}.source.snapshot_full_sha256",
-            errors,
-        )
-        _same(
-            build_source.get("snapshot_subtree_sha256"),
-            source.get("snapshot_subtree_sha256"),
-            f"{where}.artifacts.vendor_build_receipt.source.snapshot_subtree_sha256",
-            errors,
-        )
-        _same(
-            build_source.get("snapshot_subtree_scope"),
-            source.get("snapshot_scope"),
-            f"{where}.artifacts.vendor_build_receipt.source.snapshot_subtree_scope",
-            errors,
-        )
-        if build_source.get("pr_head_sha") is not None:
-            errors.append(f"{where}.artifacts.vendor_build_receipt.source: local source has PR head")
-    elif provenance == "gitcode_pr":
-        for key in ("head_sha", "head_repo", "canonical_url"):
-            if not isinstance(pr.get(key), str) or not pr.get(key):
-                errors.append(f"{where}.artifacts.source_facts.payload.pr.{key}: required")
-        if not isinstance(pr.get("head_sha"), str) or not _HEX40.fullmatch(pr["head_sha"]):
-            errors.append(f"{where}.artifacts.source_facts.payload.pr.head_sha: expected 40 hex")
-        url_match = _GITCODE_MR_URL.fullmatch(str(pr.get("canonical_url", "")))
-        if url_match is None or int(url_match.group("number")) != pr.get("number"):
+        if facts_payload.get("contract_version") != 2:
             errors.append(
-                f"{where}.artifacts.source_facts.payload.pr.canonical_url: "
-                "expected exact GitCode MR URL matching pr.number"
+                f"{where}.artifacts.source_facts.payload.contract_version: expected 2"
             )
-        for ledger_key, facts_key in (
-            ("pr_head_sha", "head_sha"),
-            ("pr_head_repo", "head_repo"),
-            ("pr_url", "canonical_url"),
+        if association != _CALLER_INPUT_ASSOCIATION:
+            errors.append(
+                f"{where}.artifacts.source_facts.payload.input_association: "
+                "expected caller_trusted_pair_v1"
+            )
+        _same(
+            source.get("input_association"),
+            association,
+            f"{where}.source.input_association",
+            errors,
+            message="caller input association drift",
+        )
+        facts_anchor = _content_anchor(
+            pr.get("content_anchor"),
+            f"{where}.artifacts.source_facts.payload.pr.content_anchor",
+            errors,
+        )
+        ledger_anchor = _content_anchor(
+            source.get("content_anchor"), f"{where}.source.content_anchor", errors
+        )
+        _same(
+            ledger_anchor,
+            facts_anchor,
+            f"{where}.source.content_anchor",
+            errors,
+            message="source-facts content anchor drift",
+        )
+        if not isinstance(completeness.get("transport_warnings", []), list):
+            errors.append(
+                f"{where}.artifacts.source_facts.payload.completeness."
+                "transport_warnings: expected list"
+            )
+        if build_receipt.get("schema_version") != 3:
+            errors.append(
+                f"{where}.artifacts.vendor_build_receipt: caller-trusted input "
+                "requires current v3 content snapshot"
+            )
+        build_anchor = _content_anchor(
+            build_source.get("content_anchor"),
+            f"{where}.artifacts.vendor_build_receipt.source.content_anchor",
+            errors,
+        )
+        snapshot_digest = _as_dict(
+            build.get("source_snapshot_digest"),
+            f"{where}.artifacts.vendor_build_receipt.build.source_snapshot_digest",
+            errors,
+        )
+        digest_anchor = _content_anchor(
+            snapshot_digest.get("content_anchor"),
+            f"{where}.artifacts.vendor_build_receipt.build."
+            "source_snapshot_digest.content_anchor",
+            errors,
+        )
+        for projected, label in (
+            (build_anchor, "source.content_anchor"),
+            (digest_anchor, "build.source_snapshot_digest.content_anchor"),
         ):
             _same(
-                source.get(ledger_key),
-                pr.get(facts_key),
-                f"{where}.source.{ledger_key}",
+                projected,
+                facts_anchor,
+                f"{where}.artifacts.vendor_build_receipt.{label}",
                 errors,
+                message="caller content anchor drift",
+            )
+        if build_source.get("provenance_kind") != "local_snapshot":
+            errors.append(
+                f"{where}.artifacts.vendor_build_receipt.source.provenance_kind: "
+                "fresh caller input must be a materialized content snapshot"
+            )
+    else:
+        # Legacy v1/v2 artifacts retain their original strict identity routing.  They
+        # are still valid historical evidence, but are never relabelled caller-trusted.
+        _same(
+            facts_payload.get("declared_source_form"),
+            source.get("declared_source_form"),
+            f"{where}.source.declared_source_form",
+            errors,
+        )
+        _same(
+            pr.get("provenance_kind"),
+            source.get("provenance_kind"),
+            f"{where}.source.provenance_kind",
+            errors,
+        )
+        if build_receipt.get("schema_version") not in (1, 2):
+            errors.append(
+                f"{where}.artifacts.vendor_build_receipt: legacy facts require v1/v2 receipt"
             )
         _same(
-            build_source.get("pr_head_sha"),
-            pr.get("head_sha"),
-            f"{where}.artifacts.vendor_build_receipt.source.pr_head_sha",
+            build_source.get("declared_source_form"),
+            source.get("declared_source_form"),
+            f"{where}.artifacts.vendor_build_receipt.source.declared_source_form",
             errors,
         )
         _same(
-            build_source.get("repo"),
-            pr.get("head_repo"),
-            f"{where}.artifacts.vendor_build_receipt.source.repo",
+            build_source.get("provenance_kind"),
+            source.get("provenance_kind"),
+            f"{where}.artifacts.vendor_build_receipt.source.provenance_kind",
             errors,
         )
+        provenance = source.get("provenance_kind")
+        if provenance == "local_snapshot":
+            if any(
+                pr.get(key) is not None
+                for key in ("head_sha", "head_repo", "canonical_url")
+            ):
+                errors.append(
+                    f"{where}.artifacts.source_facts.payload.pr: "
+                    "legacy local source carries PR identity"
+                )
+            _same(
+                pr.get("snapshot_merkle_sha256"),
+                source.get("snapshot_subtree_sha256"),
+                f"{where}.source.snapshot_subtree_sha256",
+                errors,
+            )
+            _same(
+                pr.get("snapshot_scope"),
+                source.get("snapshot_scope"),
+                f"{where}.source.snapshot_scope",
+                errors,
+            )
+            _same(
+                build_source.get("snapshot_sha256"),
+                source.get("snapshot_full_sha256"),
+                f"{where}.source.snapshot_full_sha256",
+                errors,
+            )
+            _same(
+                build_source.get("snapshot_subtree_sha256"),
+                source.get("snapshot_subtree_sha256"),
+                f"{where}.artifacts.vendor_build_receipt.source.snapshot_subtree_sha256",
+                errors,
+            )
+            _same(
+                build_source.get("snapshot_subtree_scope"),
+                source.get("snapshot_scope"),
+                f"{where}.artifacts.vendor_build_receipt.source.snapshot_subtree_scope",
+                errors,
+            )
+            if build_source.get("pr_head_sha") is not None:
+                errors.append(
+                    f"{where}.artifacts.vendor_build_receipt.source: "
+                    "legacy local source has PR head"
+                )
+        elif provenance == "gitcode_pr":
+            for key in ("head_sha", "head_repo", "canonical_url"):
+                if not isinstance(pr.get(key), str) or not pr.get(key):
+                    errors.append(
+                        f"{where}.artifacts.source_facts.payload.pr.{key}: required"
+                    )
+            if not isinstance(pr.get("head_sha"), str) or not _HEX40.fullmatch(
+                pr["head_sha"]
+            ):
+                errors.append(
+                    f"{where}.artifacts.source_facts.payload.pr.head_sha: expected 40 hex"
+                )
+            url_match = _GITCODE_MR_URL.fullmatch(str(pr.get("canonical_url", "")))
+            if url_match is None or int(url_match.group("number")) != pr.get("number"):
+                errors.append(
+                    f"{where}.artifacts.source_facts.payload.pr.canonical_url: "
+                    "expected exact GitCode MR URL matching pr.number"
+                )
+            for ledger_key, facts_key in (
+                ("pr_head_sha", "head_sha"),
+                ("pr_head_repo", "head_repo"),
+                ("pr_url", "canonical_url"),
+            ):
+                _same(
+                    source.get(ledger_key),
+                    pr.get(facts_key),
+                    f"{where}.source.{ledger_key}",
+                    errors,
+                )
+            _same(
+                build_source.get("pr_head_sha"),
+                pr.get("head_sha"),
+                f"{where}.artifacts.vendor_build_receipt.source.pr_head_sha",
+                errors,
+            )
+            _same(
+                build_source.get("repo"),
+                pr.get("head_repo"),
+                f"{where}.artifacts.vendor_build_receipt.source.repo",
+                errors,
+            )
 
     if spec.get("runner_form") != "cpp_extension":
         errors.append(f"{where}.artifacts.spec.runner_form: expected cpp_extension")
-    if spec.get("declared_source_form") is not None:
+    if not caller_contract and spec.get("declared_source_form") is not None:
         _same(
             spec.get("declared_source_form"),
             source.get("declared_source_form"),
@@ -2146,6 +2293,13 @@ def _validate_formal_artifact_projection(
     vendor_elf = _as_dict(
         artifacts.get("vendor_elf"), f"{where}.artifacts.vendor_elf", errors
     )
+    _same(
+        build_artifact.get("library_path"),
+        vendor_elf.get("path"),
+        f"{where}.artifacts.vendor_build_receipt.artifact.library_path",
+        errors,
+        message="vendor ELF path drift",
+    )
     for projected, projected_where in (
         (build_artifact.get("library_sha256"), "vendor_build_receipt.artifact"),
         (vendor.get("library_sha256"), "extension_receipt.vendor"),
@@ -2157,6 +2311,18 @@ def _validate_formal_artifact_projection(
             f"{where}.artifacts.{projected_where}.library_sha256",
             errors,
             message="vendor ELF identity drift",
+        )
+    try:
+        vendor_build_receipt.validate_for_acceptance(
+            build_receipt,
+            library_path=vendor_elf.get("path"),
+            library_sha256=vendor_elf.get("sha256"),
+            normalize_path=True,
+        )
+    except (TypeError, vendor_build_receipt.VendorBuildReceiptError) as exc:
+        errors.append(
+            f"{where}.artifacts.vendor_build_receipt: formal acceptance validation "
+            f"failed: {exc}"
         )
     embedded_build = _as_dict(
         vendor.get("build_receipt"),
@@ -2346,7 +2512,8 @@ def _validate_formal_artifact_projection(
 
 
 def _validate_operator(
-    operator: dict[str, Any], index: int, verify_artifacts: bool, errors: list[str]
+    operator: dict[str, Any], index: int, ledger_version: int,
+    verify_artifacts: bool, errors: list[str]
 ) -> None:
     operator_id = operator.get("operator_id")
     where = f"operators[{index}]({operator_id or '?'})"
@@ -2360,35 +2527,47 @@ def _validate_operator(
         errors.append(f"{where}.taskbook.input_form: unsupported input form")
 
     source = _as_dict(operator.get("source"), f"{where}.source", errors)
-    declared = source.get("declared_source_form")
-    provenance = source.get("provenance_kind")
-    allowed_pairs = {("local_source", "local_snapshot"), ("git_pr", "gitcode_pr")}
-    if (declared, provenance) not in allowed_pairs:
-        errors.append(
-            f"{where}.source: incompatible declared/provenance pair "
-            f"{declared!r}/{provenance!r}"
-        )
     for key in ("envelope_sha256",):
         value = source.get(key)
         if not isinstance(value, str) or not _SHA256.fullmatch(value):
             errors.append(f"{where}.source.{key}: expected lowercase SHA-256")
-    if provenance == "local_snapshot":
-        for key in ("snapshot_subtree_sha256", "snapshot_full_sha256"):
-            value = source.get(key)
-            if not isinstance(value, str) or not _SHA256.fullmatch(value):
-                errors.append(f"{where}.source.{key}: expected lowercase SHA-256")
-        if not isinstance(source.get("snapshot_scope"), str) or not source.get(
-            "snapshot_scope"
-        ):
-            errors.append(f"{where}.source.snapshot_scope: expected non-empty string")
-    elif provenance == "gitcode_pr":
-        if not isinstance(source.get("pr_head_sha"), str) or not _HEX40.fullmatch(
-            source["pr_head_sha"]
-        ):
-            errors.append(f"{where}.source.pr_head_sha: expected exact 40-hex head")
-        for key in ("pr_head_repo", "pr_url"):
-            if not isinstance(source.get(key), str) or not source.get(key):
-                errors.append(f"{where}.source.{key}: expected non-empty string")
+    if ledger_version == SCHEMA_VERSION:
+        if source.get("input_association") != _CALLER_INPUT_ASSOCIATION:
+            errors.append(
+                f"{where}.source.input_association: expected caller_trusted_pair_v1"
+            )
+        _content_anchor(source.get("content_anchor"), f"{where}.source.content_anchor", errors)
+    else:
+        # Do not silently upgrade old ledgers: absent caller association means the
+        # original declared-form/provenance identity contract remains mandatory.
+        declared = source.get("declared_source_form")
+        provenance = source.get("provenance_kind")
+        allowed_pairs = {
+            ("local_source", "local_snapshot"),
+            ("git_pr", "gitcode_pr"),
+        }
+        if (declared, provenance) not in allowed_pairs:
+            errors.append(
+                f"{where}.source: incompatible legacy declared/provenance pair "
+                f"{declared!r}/{provenance!r}"
+            )
+        if provenance == "local_snapshot":
+            for key in ("snapshot_subtree_sha256", "snapshot_full_sha256"):
+                value = source.get(key)
+                if not isinstance(value, str) or not _SHA256.fullmatch(value):
+                    errors.append(f"{where}.source.{key}: expected lowercase SHA-256")
+            if not isinstance(source.get("snapshot_scope"), str) or not source.get(
+                "snapshot_scope"
+            ):
+                errors.append(f"{where}.source.snapshot_scope: expected non-empty string")
+        elif provenance == "gitcode_pr":
+            if not isinstance(source.get("pr_head_sha"), str) or not _HEX40.fullmatch(
+                source["pr_head_sha"]
+            ):
+                errors.append(f"{where}.source.pr_head_sha: expected exact 40-hex head")
+            for key in ("pr_head_repo", "pr_url"):
+                if not isinstance(source.get(key), str) or not source.get(key):
+                    errors.append(f"{where}.source.{key}: expected non-empty string")
 
     required = _as_dict(operator.get("required"), f"{where}.required", errors)
     required_dtypes = _strings(required.get("dtypes"), f"{where}.required.dtypes", errors)
@@ -2635,18 +2814,29 @@ def _validate_operator(
         )
 
     artifacts = _validate_artifacts(operator, where, verify_artifacts, errors)
-    _validate_formal_artifact_projection(operator, artifacts, where, errors)
+    _validate_formal_artifact_projection(
+        operator, artifacts, where, ledger_version == SCHEMA_VERSION, errors
+    )
 
 
-def validation_errors(ledger: Any, *, verify_artifacts: bool = False) -> list[str]:
+def validation_errors(
+    ledger: Any, *, verify_artifacts: bool = False, allow_historical: bool = False
+) -> list[str]:
     """Return all validation errors without short-circuiting."""
 
     errors: list[str] = []
     root = _as_dict(ledger, "ledger", errors)
     if root.get("schema") != SCHEMA:
         errors.append(f"ledger.schema: expected {SCHEMA!r}")
-    if root.get("schema_version") != SCHEMA_VERSION:
-        errors.append(f"ledger.schema_version: expected {SCHEMA_VERSION}")
+    ledger_version = root.get("schema_version")
+    if ledger_version == 1 and not allow_historical:
+        errors.append(
+            "ledger.schema_version: historical v1 requires explicit read-only mode"
+        )
+        ledger_version = SCHEMA_VERSION
+    elif ledger_version not in (1, SCHEMA_VERSION):
+        errors.append(f"ledger.schema_version: expected current {SCHEMA_VERSION}")
+        ledger_version = SCHEMA_VERSION
 
     authority = _as_dict(root.get("authority"), "ledger.authority", errors)
     actual_taskbook_forms = _strings(
@@ -2654,23 +2844,16 @@ def validation_errors(ledger: Any, *, verify_artifacts: bool = False) -> list[st
         "ledger.authority.actual_taskbook_input_forms",
         errors,
     )
-    actual_provenance = _strings(
-        authority.get("actual_dut_provenance_kinds"),
-        "ledger.authority.actual_dut_provenance_kinds",
-        errors,
-    )
-    pr_support = _as_dict(
-        authority.get("online_pr_source_support"),
-        "ledger.authority.online_pr_source_support",
-        errors,
-    )
-    if pr_support.get("capability_status") != "VALIDATED":
-        errors.append("ledger.authority.online_pr_source_support: capability not VALIDATED")
-    if pr_support.get("actual_provenance_status") not in _ONLINE_PR_STATUSES:
-        errors.append(
-            "ledger.authority.online_pr_source_support.actual_provenance_status: unsupported"
+    actual_provenance_raw = authority.get("actual_dut_provenance_kinds")
+    actual_provenance = (
+        _strings(
+            actual_provenance_raw,
+            "ledger.authority.actual_dut_provenance_kinds",
+            errors,
         )
-
+        if actual_provenance_raw is not None
+        else []
+    )
     supplemental_artifacts = _validate_artifact_map(
         root.get("supplemental_artifacts"),
         "ledger.supplemental_artifacts",
@@ -2687,7 +2870,7 @@ def validation_errors(ledger: Any, *, verify_artifacts: bool = False) -> list[st
         operator_id = operator.get("operator_id")
         if isinstance(operator_id, str):
             operator_ids.append(operator_id)
-        _validate_operator(operator, index, verify_artifacts, errors)
+        _validate_operator(operator, index, ledger_version, verify_artifacts, errors)
     if not operators:
         errors.append("ledger.operators: expected at least one operator")
     if len(operator_ids) != len(set(operator_ids)):
@@ -2870,248 +3053,10 @@ def validation_errors(ledger: Any, *, verify_artifacts: bool = False) -> list[st
             f"{missing_n0_supplemental}"
         )
 
-    online_intakes_raw = _as_list(
-        root.get("supplemental_online_pr_intakes"),
-        "ledger.supplemental_online_pr_intakes",
-        errors,
-    )
-    intake_operator_ids: list[str] = []
-    completed_online: list[str] = []
-    blocked_online: list[str] = []
-    for index, raw_intake in enumerate(online_intakes_raw):
-        intake = _as_dict(
-            raw_intake, f"ledger.supplemental_online_pr_intakes[{index}]", errors
-        )
-        op_id = intake.get("operator_id")
-        intake_where = f"ledger.supplemental_online_pr_intakes[{index}]({op_id or '?'})"
-        if op_id not in operator_by_id:
-            errors.append(f"{intake_where}.operator_id: unknown operator")
-        elif isinstance(op_id, str):
-            intake_operator_ids.append(op_id)
-        status = intake.get("status")
-        artifact_refs = _strings(
-            intake.get("artifact_refs"), f"{intake_where}.artifact_refs", errors
-        )
-        unknown_artifacts = sorted(set(artifact_refs) - supplemental_artifacts.keys())
-        if unknown_artifacts:
-            errors.append(f"{intake_where}: unknown artifact refs {unknown_artifacts}")
-        if status == "COMPLETE":
-            if isinstance(op_id, str):
-                completed_online.append(op_id)
-            if intake.get("provenance_kind") != "gitcode_pr":
-                errors.append(f"{intake_where}: COMPLETE requires gitcode_pr provenance")
-            if intake.get("completeness") != "complete":
-                errors.append(f"{intake_where}: COMPLETE requires completeness=complete")
-            head_sha = intake.get("head_sha")
-            if not isinstance(head_sha, str) or not _HEX40.fullmatch(head_sha):
-                errors.append(f"{intake_where}.head_sha: expected exact 40-hex head")
-            if not artifact_refs:
-                errors.append(f"{intake_where}: COMPLETE requires artifacts")
-            required_fields = (
-                "head_repo",
-                "head_ref",
-                "pr_url",
-                "target_scope",
-                "head_manifest_sha256",
-            )
-            for key in required_fields:
-                if not isinstance(intake.get(key), str) or not intake.get(key):
-                    errors.append(f"{intake_where}.{key}: COMPLETE requires non-empty string")
-            if not _SHA256.fullmatch(str(intake.get("head_manifest_sha256", ""))):
-                errors.append(f"{intake_where}.head_manifest_sha256: expected SHA-256")
-            if not _is_int(intake.get("merge_request")) or intake.get(
-                "merge_request", 0
-            ) <= 0:
-                errors.append(f"{intake_where}.merge_request: expected positive integer")
-            url_match = _GITCODE_MR_URL.fullmatch(str(intake.get("pr_url", "")))
-            if (
-                url_match is None
-                or not _is_int(intake.get("merge_request"))
-                or int(url_match.group("number")) != intake.get("merge_request")
-            ):
-                errors.append(
-                    f"{intake_where}.pr_url: expected exact GitCode MR URL matching "
-                    "merge_request"
-                )
-            if not _is_int(intake.get("head_manifest_file_count")) or intake.get(
-                "head_manifest_file_count", 0
-            ) <= 0:
-                errors.append(
-                    f"{intake_where}.head_manifest_file_count: expected positive integer"
-                )
-            artifact_fields = (
-                "source_facts_artifact",
-                "pr_facts_artifact",
-                "taskdoc_artifact",
-                "log_artifact",
-                "rc_artifact",
-            )
-            named_artifacts: list[str] = []
-            for key in artifact_fields:
-                value = intake.get(key)
-                if not isinstance(value, str) or value not in supplemental_artifacts:
-                    errors.append(f"{intake_where}.{key}: unknown supplemental artifact")
-                else:
-                    named_artifacts.append(value)
-            if not set(named_artifacts).issubset(artifact_refs):
-                errors.append(f"{intake_where}.artifact_refs: missing named identity artifact")
-
-            online_facts = _supplemental_json(
-                supplemental_artifacts,
-                intake.get("source_facts_artifact"),
-                f"{intake_where}.source_facts_artifact",
-                errors,
-            )
-            online_payload = _as_dict(
-                online_facts.get("payload"),
-                f"{intake_where}.source_facts_artifact.payload",
-                errors,
-            )
-            try:
-                online_digest = content_address.content_digest(
-                    _SOURCE_FACTS_DOMAIN, online_payload
-                )
-            except content_address.ContentAddressError as exc:
-                errors.append(f"{intake_where}.source_facts_artifact.digest: {exc}")
-                online_digest = None
-            if (
-                online_facts.get("domain") != _SOURCE_FACTS_DOMAIN
-                or online_facts.get("schema_version") != 1
-                or online_facts.get("digest") != online_digest
-            ):
-                errors.append(f"{intake_where}.source_facts_artifact: invalid envelope")
-            online_pr = _as_dict(
-                online_payload.get("pr"),
-                f"{intake_where}.source_facts_artifact.payload.pr",
-                errors,
-            )
-            online_completeness = _as_dict(
-                online_payload.get("completeness"),
-                f"{intake_where}.source_facts_artifact.payload.completeness",
-                errors,
-            )
-            online_derived = _as_dict(
-                online_payload.get("derived"),
-                f"{intake_where}.source_facts_artifact.payload.derived",
-                errors,
-            )
-            if (
-                online_payload.get("declared_source_form") != "git_pr"
-                or online_pr.get("provenance_kind") != "gitcode_pr"
-                or online_completeness.get("status") != "complete"
-                or online_completeness.get("reasons") != []
-            ):
-                errors.append(f"{intake_where}.source_facts_artifact: incomplete gitcode_pr")
-            manifest = _as_dict(
-                online_pr.get("head_target_manifest"),
-                f"{intake_where}.source_facts_artifact.payload.pr.head_target_manifest",
-                errors,
-            )
-            for projected, expected, label in (
-                (online_pr.get("head_sha"), head_sha, "head_sha"),
-                (online_pr.get("head_repo"), intake.get("head_repo"), "head_repo"),
-                (online_pr.get("canonical_url"), intake.get("pr_url"), "pr_url"),
-                (online_pr.get("number"), intake.get("merge_request"), "merge_request"),
-                (online_derived.get("target_dir"), intake.get("target_scope"), "target_scope"),
-                (manifest.get("repository"), intake.get("head_repo"), "manifest.repository"),
-                (manifest.get("ref"), head_sha, "manifest.ref"),
-                (manifest.get("target_dir"), intake.get("target_scope"), "manifest.target_dir"),
-                (
-                    manifest.get("sha256"),
-                    intake.get("head_manifest_sha256"),
-                    "manifest.sha256",
-                ),
-                (
-                    manifest.get("file_count"),
-                    intake.get("head_manifest_file_count"),
-                    "manifest.file_count",
-                ),
-            ):
-                _same(projected, expected, f"{intake_where}.{label}", errors)
-            online_pr_facts = _supplemental_json(
-                supplemental_artifacts,
-                intake.get("pr_facts_artifact"),
-                f"{intake_where}.pr_facts_artifact",
-                errors,
-            )
-            for projected, expected, label in (
-                (online_pr_facts.get("pr_url"), intake.get("pr_url"), "pr_url"),
-                (online_pr_facts.get("head_sha"), head_sha, "head_sha"),
-                (online_pr_facts.get("head_repo"), intake.get("head_repo"), "head_repo"),
-                (online_pr_facts.get("head"), intake.get("head_ref"), "head_ref"),
-                (online_pr_facts.get("target_dir"), intake.get("target_scope"), "target_scope"),
-                (
-                    online_pr_facts.get("head_target_manifest"),
-                    manifest,
-                    "head_target_manifest",
-                ),
-            ):
-                _same(projected, expected, f"{intake_where}.pr_facts.{label}", errors)
-            taskdoc_item = _as_dict(
-                supplemental_artifacts.get(intake.get("taskdoc_artifact")),
-                f"{intake_where}.taskdoc_artifact",
-                errors,
-            )
-            _same(
-                _as_dict(
-                    online_payload.get("taskdoc"),
-                    f"{intake_where}.source_facts_artifact.payload.taskdoc",
-                    errors,
-                ).get("snapshot_sha256"),
-                taskdoc_item.get("sha256"),
-                f"{intake_where}.taskdoc_artifact.sha256",
-                errors,
-            )
-            online_log = _supplemental_text(
-                supplemental_artifacts,
-                intake.get("log_artifact"),
-                f"{intake_where}.log_artifact",
-                errors,
-            )
-            online_rc = _supplemental_text(
-                supplemental_artifacts,
-                intake.get("rc_artifact"),
-                f"{intake_where}.rc_artifact",
-                errors,
-            )
-            if "completeness=complete" not in online_log or online_rc.strip() != "0":
-                errors.append(f"{intake_where}: fetch log/rc does not prove complete success")
-        elif status == "BLOCKED":
-            if isinstance(op_id, str):
-                blocked_online.append(op_id)
-            if not isinstance(intake.get("failure_kind"), str) or not intake.get(
-                "failure_kind"
-            ):
-                errors.append(f"{intake_where}: BLOCKED requires failure_kind")
-            if intake.get("selected_head_sha") is not None:
-                errors.append(f"{intake_where}: BLOCKED cannot select a head SHA")
-        else:
-            errors.append(f"{intake_where}.status: expected COMPLETE or BLOCKED")
-    if len(intake_operator_ids) != len(set(intake_operator_ids)):
-        errors.append("ledger.supplemental_online_pr_intakes: duplicate operator_id")
-    if set(intake_operator_ids) != set(operator_by_id):
-        errors.append(
-            "ledger.supplemental_online_pr_intakes must account for every operator"
-        )
-    if not completed_online:
-        derived_online_status = "NOT_EXERCISED"
-    elif len(completed_online) == len(operator_by_id):
-        derived_online_status = "EXERCISED"
-    else:
-        derived_online_status = "PARTIALLY_EXERCISED"
-    if pr_support.get("actual_provenance_status") != derived_online_status:
-        errors.append(
-            "ledger.authority.online_pr_source_support actual status must mirror intakes"
-        )
-    if sorted(pr_support.get("completed_operators", [])) != sorted(completed_online):
-        errors.append(
-            "ledger.authority.online_pr_source_support.completed_operators must mirror intakes"
-        )
-    if sorted(pr_support.get("blocked_operators", [])) != sorted(blocked_online):
-        errors.append(
-            "ledger.authority.online_pr_source_support.blocked_operators must mirror intakes"
-        )
-
+    # Online locator/repository/ref/head observations are deliberately not an
+    # acceptance denominator.  Historical diagnostic rows may remain as
+    # supplemental artifacts; formal authority comes only from each operator's
+    # source content anchor (or its unchanged legacy identity route).
     multicard_raw = _as_list(
         root.get("multi_card_precision_equivalence"),
         "ledger.multi_card_precision_equivalence",
@@ -3218,12 +3163,6 @@ def validation_errors(ledger: Any, *, verify_artifacts: bool = False) -> list[st
     n10_supplemental = phase_ref_index.get("N10", {}).get("supplemental", set())
     required_n10_supplemental = {
         artifact
-        for intake in online_intakes_raw
-        if isinstance(intake, dict)
-        for artifact in intake.get("artifact_refs", [])
-        if isinstance(artifact, str)
-    } | {
-        artifact
         for record in multicard_raw
         if isinstance(record, dict)
         for artifact in record.get("artifact_refs", [])
@@ -3234,7 +3173,7 @@ def validation_errors(ledger: Any, *, verify_artifacts: bool = False) -> list[st
     )
     if missing_n10_supplemental:
         errors.append(
-            "ledger.workflow_plan_evidence[N10]: missing online/multi-card evidence refs "
+            "ledger.workflow_plan_evidence[N10]: missing multi-card evidence refs "
             f"{missing_n10_supplemental}"
         )
 
@@ -3341,25 +3280,23 @@ def validation_errors(ledger: Any, *, verify_artifacts: bool = False) -> list[st
             and isinstance(op.get("source", {}).get("provenance_kind"), str)
         }
     )
-    if sorted(actual_provenance) != measured_provenance:
+    if actual_provenance_raw is not None and sorted(actual_provenance) != measured_provenance:
         errors.append(
             "ledger.authority.actual_dut_provenance_kinds must exactly mirror operators"
-        )
-    pr_gap_present = (
-        "N10.online_pr_actual_provenance_partially_exercised" in workflow_gap_ids
-    )
-    if (derived_online_status != "EXERCISED") != pr_gap_present:
-        errors.append(
-            "ledger.workflow_plan_gaps: online PR partial-provenance gap must exactly "
-            "mirror whether all operator intakes completed"
         )
     return errors
 
 
-def validate(ledger: Any, *, verify_artifacts: bool = False) -> None:
+def validate(
+    ledger: Any, *, verify_artifacts: bool = False, allow_historical: bool = False
+) -> None:
     """Raise :class:`LedgerValidationError` unless every invariant holds."""
 
-    errors = validation_errors(ledger, verify_artifacts=verify_artifacts)
+    errors = validation_errors(
+        ledger,
+        verify_artifacts=verify_artifacts,
+        allow_historical=allow_historical,
+    )
     if errors:
         raise LedgerValidationError(errors)
 
@@ -3372,6 +3309,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="recompute every recorded artifact SHA-256 (run in the artifact environment)",
     )
+    parser.add_argument(
+        "--historical-read-only",
+        action="store_true",
+        help=(
+            "read legacy v1 identity ledgers without upgrading them; output is "
+            "historical evidence, never a current completion verdict"
+        ),
+    )
     return parser
 
 
@@ -3382,14 +3327,23 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, json.JSONDecodeError) as exc:
         print(f"RGE_LEDGER_INVALID: cannot read ledger: {exc}", file=sys.stderr)
         return 1
-    errors = validation_errors(ledger, verify_artifacts=args.verify_artifacts)
+    errors = validation_errors(
+        ledger,
+        verify_artifacts=args.verify_artifacts,
+        allow_historical=args.historical_read_only,
+    )
     if errors:
         print("RGE_LEDGER_INVALID", file=sys.stderr)
         for error in errors:
             print(f"- {error}", file=sys.stderr)
         return 1
+    label = (
+        "RGE_LEDGER_HISTORICAL_VALID"
+        if args.historical_read_only and ledger.get("schema_version") == 1
+        else "RGE_LEDGER_VALID"
+    )
     print(
-        "RGE_LEDGER_VALID "
+        f"{label} "
         f"operators={len(ledger['operators'])} "
         f"artifacts_verified={'yes' if args.verify_artifacts else 'no'}"
     )

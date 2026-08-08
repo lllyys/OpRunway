@@ -1,6 +1,6 @@
 ---
 name: op-acceptance
-description: OpRunway NPU 算子验收编排。输入=算子任务书(md 本地路径或链接)+PR 链接 → 派 subagent 产 spec/runner/跑测，primary 逐字引用 acceptance.json 等确定性产物裁决、不自行判定、不产 NL durable 工件；出中文验收报告。当用户要验收一个 NPU 算子、或给「任务书+PR」要验收结论时用。
+description: OpRunway NPU 算子验收编排。输入=调用方配对的算子任务书与被测源码（各自均可为在线或本地输入）→ 派 subagent 产 spec/runner/跑测，primary 逐字引用确定性裁决；出中文验收报告。
 mode: primary
 skills:
   - acc-casegen
@@ -24,8 +24,8 @@ agents:
 > （`AGENTS.md` 是 Codex 原生约定，plugin 根搭车）。编排 / 依赖 / 硬门以此为准。
 > **脚本是内部实现——用户全程只对话、不碰脚本、不被要求手敲命令**（proposed·未 settle，载重前需核）。
 
-**输入**：算子任务书（md 本地路径 **或** `http(s)` 链接）+ PR 链接。
-**产出**（**验收裁决当前只出自 `--mode cpp_extension`**，见下节与仓根 `AGENTS.md` §4）：`reports/<op>/` 下 `correspondence.json` / `caseset.json` / `evidence.json` / `verdict.json` / `baseline.json`（有基线时）/ `perf_report.json` / `acceptance.json` + 中文验收报告；`cpp_extension` 另产与裁决解耦的 `repro/` 全量人工复现入口。
+**输入**：调用方给定的一对“算子任务书 + 被测源码”；任务书与源码各自可为本地路径或在线 URL，二者关联由调用方断言。
+**产出**（**验收裁决当前只出自 `--mode cpp_extension`**，见下节与仓根 `AGENTS.md` §4）：`reports/<op>/` 下 `source_facts.json` / `caseset.json` / `evidence.json` / `verdict.json` / `baseline.json`（有基线时）/ `perf_report.json` / `acceptance.json` + 中文验收报告；`cpp_extension` 另产与裁决解耦的 `repro/` 全量人工复现入口。
 ⚠ **非验收通路（显式 `--mode mock` / `catlass*`）产的都是** `dev_run_summary.json` + `dev_precision_check.json`（带 `evidence_grade=development` + NON-ACCEPTANCE 戳），**物理上不产 `acceptance.json` / `verdict.json`**（mock 侧口径自 C5，2026-07-22）。
 ⚠ **`cpp` / `aclnn_py` 已于 2026-08-06 停止准入，连真机入口都没有了**：spec 写它们即拒跑，出路是迁到 `cpp_extension`（不是换 `--mode` 再试）。
 
@@ -36,7 +36,7 @@ agents:
 
 | `spec.runner_form` | `run_workflow.py --mode` | 能否产验收裁决 | 说明 |
 |---|---|---|---|
-| `cpp_extension`（**或未声明**） | `cpp_extension` | ✅ **当前唯一准入形态** | 隔离构建官方 PyTorch `NpuExtension`，以 build/load/vendor receipt 绑定被测来源锚（PR 通路是 exact PR head，本地 checkout 通路是子树 `root_digest`）与现场 ELF；须 `OPRUNWAY_CPP_EXTENSION_REAL=1` |
+| `cpp_extension`（**或未声明**） | `cpp_extension` | ✅ **当前唯一准入形态** | 隔离构建官方 PyTorch `NpuExtension`，以统一 `content_anchor` + build/load/vendor receipt 绑定调用方源码字节与现场 ELF；URL/repo/ref/head 只作 transport 诊断；须 `OPRUNWAY_CPP_EXTENSION_REAL=1` |
 | `cpp` | （无）| ⛔ **停止准入（2026-08-06）**：派生表无条目，省 `--mode` 派不出、显式 `--mode new_example` 也拒 | 曾为「编译 per-op C++ runner 上真机；真机 dtype 白名单 fp32/fp16/bf16」 |
 | `aclnn_py` | （无）| ⛔ **停止准入（2026-08-06）**：同上 | 曾为「op 工程即 DUT、通用 ctypes 两段式 runner（**无 per-op runner 源**）」 |
 
@@ -117,7 +117,8 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
 
 ### 检查点（CP，对话暂停点 + 工件门；缺 NPU/VPN 到可验证的非真机准备 / aclnn CP-C0 为止）
 
-- **CP-A 前置**（primary 亲自）：取材 `fetch_source.py` → **任务书↔PR 对应校验**（落 `correspondence.json`；proposed·未 settle，载重前需核）→
+- **CP-A 前置**（primary 亲自）：用 `fetch_source.py` 取材调用方给定的“任务书 + 被测来源”→ 核
+  `source_facts.input_association=caller_trusted_pair_v1` 与 `pr.content_anchor` 完整→
   环境确认（**执行形态：就地跑还是远程连** / NPU 通不通 / 目标机按任务书 `适配硬件` × op_def `AddConfig` 双源定），`AskUserQuestion` 由 primary 做。
   ⚠ **`.oprunway/real-machine.env` 只是「远程连」形态的连接元数据，不是开工前置**：就地跑（会话本身已在目标机或其
   NPU 容器里）时设 `OPRUNWAY_TARGET=local` 即可、`OPRUNWAY_SSH_HOST` 免填，**不得**以「缺该文件 / 拿不到 SSH alias、
@@ -127,9 +128,8 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   跑哪条据 `spec.runner_form` 在 CP-D **派生**（见上节表，**未声明即缺省 `cpp_extension`**），不由用户选。
   ⚠ **热续跑复用既有 spec 时先看一眼 `runner_form`**：若它写着 `cpp` / `aclnn_py`，正式验收的正确处置是**在 CP-B 把 spec 迁到
   `cpp_extension`**，**不是**按旧 form 继续派生运行、也**不是**回头问用户走哪条——按旧 form 跑下去只能拿到开发级产物。
-  校验靠 **改动落点目录 `pr_facts.target_dir`（机器可比）** + **issue/追踪号（NL 读 `task_doc`/PR title，非算子名字面匹配）** + **用户确认**。
-  `correspondence.json` 的 `status ∈ {confirmed, mismatch, empty_task, needs_user_confirmation}`：
-  `mismatch` / `empty_task` → 出**程序结论（非 pass/fail）**并停跑；`needs_user_confirmation` → primary **摆证据、由用户拍板**（不自动 judge 空任务）。
+  **调用方已经断言二者对应**：URL、repo、fork、ref、head、目录名和来源形态只作 transport 诊断，不能据此推翻关联或阻断验收。
+  `correspondence.json` 只供 legacy facts 续读；fresh caller-trusted facts 不产、不要求该工件。
 - **CP-B0 任务书输入校验门**（先于 `extract_spec`）：dispatch `acc-spec-extractor:validate_taskdoc`（**只读任务书自己**）→
   `taskdoc_validation.json`；primary inline `validate_taskdoc_input.py` 按
   `taskdoc_validation_contract.json` 的 18 项复核结构与绑定并**机械派生**阻断清单，
@@ -139,7 +139,7 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   ⚠ 本门**不随 `validate_preparation_state.py` 的 `REUSABLE` 跳过**（那份收据不绑 `taskdoc_validation*`）：
   脚本每轮都重跑，热续跑省掉的只有贵的 `validate_taskdoc` NL dispatch。
 - **CP-B Task1 用例**：dispatch `acc-spec-extractor:extract_spec` → `spec` + `task_pr_gaps`；primary inline
-  `gen_cases.py <spec> --dry-run --ledger-out <case_plan.json> --source-facts <source_facts.json> --correspondence <correspondence.json>`（plan-only 契约自检 + 绑定 facts/用户确认的 durable 计划账本，**不产任何裁决**）与
+  `gen_cases.py <spec> --dry-run --ledger-out <case_plan.json> --source-facts <source_facts.json>`（plan-only 契约自检 + 绑定 caller-trusted facts 的 durable 计划账本，**不产任何裁决**；仅 legacy facts 才追加 `--correspondence`）与
   `validate_preparation_state.py`（只判 CP-A/B 准备工件能否复用，`acceptance_verdict=null`）——**CP-B 只关注 task1 用例计划自洽**；
   `preflight_aclnn.py`（⚠ **`aclnn_py` 与 `cpp_extension` 两种形态都要跑**——旧文案写「仅 `aclnn_py` 形态」与代码不符，
   实际早退的只有**精确的 `"cpp"`**（落 `NOT_APPLICABLE`），词表外的值 fail-closed；
@@ -185,9 +185,10 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   ⚠ **正式验收不得按 `cpp` / `aclnn_py` 直接派生运行**：入口门 `_resolve_mode` 会当场拦下，加了逃生阀也只拿到开发级产物
   （无 `acceptance.json` / `verdict.json` 可引，上面那串产物根本不存在）。正确处置是**回 CP-B 把 spec 迁到 `cpp_extension`**
   （详见 CP-B 那条），**不是**在这里问用户走哪条 form、也不是加逃生阀硬跑。
-  启动 build 前必须按 `SOURCE_ACQUIRED → HEAD_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED`
-  四段门推进：精确取得当前 facts bundle 的 PR head、detached checkout、核
-  `git rev-parse HEAD == expected head`；shell 须具备 `set -Eeuo pipefail` 等价语义。任一阶段首失败
+  启动 build 前必须按 `SOURCE_MATERIALIZED → CONTENT_ANCHOR_VERIFIED → BUILD_VERIFIED → WORKFLOW_STARTED`
+  四段门推进：逐字核 `source_facts.pr.content_anchor` → vendor receipt v3 的
+  `source.content_anchor` / `build.source_snapshot_digest.content_anchor` → 实际 vendor ELF → 执行 receipt；
+  URL/repo/ref/head 不参与准入。shell 须具备 `set -Eeuo pipefail` 等价语义。任一阶段首失败
   立即 blocked，禁止继续 build/workflow，同轮不得换 ref、补 fetch 或重跑；下一轮必须使用新的执行目录，
   不复用失败 checkout/build 制品。
   build 入口检查须与实际 argv 一致：`bash build.sh` 只要求脚本可读，直接执行 `./build.sh` 才要求
