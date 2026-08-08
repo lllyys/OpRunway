@@ -17,7 +17,7 @@ OpRunway 是昇腾 NPU 算子验收工作区。输入是**调用方给定的任�
 流水线：
 
 1. Task 1：从任务书和源码生成 spec、caseset 与 golden。
-2. Task 2：同一 caseset 在 NPU 上生成精度证据和 msprof 性能数据。
+2. Task 2：同一 caseset 在 NPU 上生成精度证据和任务书要求的性能证据。
 
 Workflow 不负责 GPU，也不得连接、运行、采集或消费 GPU 数据。任务书出现 GPU 口径时，只按 §6
 解析为 CPU 或 NPU 侧可执行口径，并如实记录未覆盖项。
@@ -162,11 +162,12 @@ Fresh 构建必须先 `snapshot-digest`，再由 `emit` 真正执行构建并生
 
 ## 6 · 验收口径
 
-### 6.1 性能：默认只做 NPU msprof
+### 6.1 性能：指定场景只做 NPU msprof
 
-- 无性能要求、要求 GPU 比对、新增 dtype/shape/rank/新算子，或任务书明确属于内存优化时，默认都只做
+- 无性能要求、要求 GPU 比对、新增 dtype/shape/rank/新算子，或任务书明确属于内存优化时，只做
   NPU msprof kernel-only 实测。资源条款仍按 §6.3 处理，不得据此宣称内存达标。
 - GPU 性能数据不属于本 workflow 的输入或产物；不建立 Task 3，不因缺 GPU 数据阻塞验收。
+- 不属于上述场景时，不得自动套用 measure-only；性能取证与裁决逐字按任务书及正式 spec 执行。
 - Spec 必须用 `perf.measure_only_authorization` 记录受控 ground、cite、quote 和任务书摘要，缺一 fail-closed。
 - 任务书中的比值、绝对门限或吞吐条款若未实测，必须进入 `task_pr_gaps` 标 `UNVALIDATED`；不得因有
   NPU 绝对耗时而宣称条款达标。

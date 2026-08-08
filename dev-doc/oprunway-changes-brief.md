@@ -6,8 +6,9 @@
 
 - 根 README 从历史状态页重写为当前用户入口：只描述 caller-trusted 输入、content→build→ELF→NPU
   证据链、`cpp_extension` fresh 准入和现行文档入口，不再复制旧 runner、算子计数和易漂移实测快照。
-- Workflow 不负责或操作 GPU：任务书写 GPU 精度真值时解析为同族 CPU，写 GPU 性能对比时只测 NPU
-  msprof 并挂未验收条款；不建立 Task 3，不连接、运行、采集或消费 GPU 数据。
+- Workflow 不负责或操作 GPU：任务书写 GPU 精度真值时解析为同族 CPU；无性能要求、GPU 比对、
+  dtype/shape/rank 扩展、新算子或明确内存优化场景只测 NPU msprof，其它性能场景仍按任务书与 spec，
+  不自动套用 measure-only。
 - 文档清理：根 `AGENTS.md` 从 773 行压到 262 行，只保留 current 可执行仓规；`oprunway-todo.md`
   从 685 行重写为 53 行 active backlog；删除旧 handoff、已完成/被替代计划、历史状态快照与无效设计稿，
   并修复产品 README、样例 spec、代码注释和 archive 文档中的活引用。仍有活代码/canon 引用的设计依据

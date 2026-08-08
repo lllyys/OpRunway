@@ -15,7 +15,7 @@ OpRunway 是面向昇腾 NPU 算子的验收工作区。调用方提供**算子�
 被测源码构建 → vendor ELF → NPU 执行
         │
         ├── 精度：可执行 golden 对 NPU DUT 输出
-        └── 性能：NPU msprof kernel-only 实测
+        └── 性能：按任务书与正式 spec 取证
         │
         ▼
 证据完整性门 → 确定性裁决 → 中文报告
@@ -23,8 +23,9 @@ OpRunway 是面向昇腾 NPU 算子的验收工作区。调用方提供**算子�
 
 - 任务书与源码的对应关系由调用方保证；URL、PR、fork、ref、head 或本地路径只是取材方式。
 - Workflow 严格绑定任务书摘要、源码内容锚、构建树、vendor ELF、实际加载符号、调用和输出证据。
-- Workflow 不连接、运行、采集或消费 GPU 数据。任务书写 GPU 精度真值时解析为同族 CPU；写 GPU
-  性能对比时只测 NPU msprof，并如实记录未验收条款。
+- Workflow 不连接、运行、采集或消费 GPU 数据。任务书写 GPU 精度真值时解析为同族 CPU；无性能要求、
+  要求 GPU 比对、新增 dtype/shape/rank/新算子或明确内存优化时，只测 NPU msprof。其它场景按任务书与
+  正式 spec 执行，不自动套用 measure-only。
 - 最终 PASS/FAIL 只能由确定性脚本产生，agent 和编排层不得自行改判。
 
 ## 当前准入范围
