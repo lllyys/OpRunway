@@ -12,7 +12,8 @@
 > 得到 1344 例 / 58 fail 与 `FAIL(精度)`（`AGENTS.md` §4.5 的 caseset ②）。
 > 读本文只读这一层，别照着里面的参数去跑。
 
-> 验的是 `dev-doc/oprunway-local-source-plan.md` 的目标 1（本地来源一等通路）。
+> 本文记录的是已经退役的本地来源契约，只作历史实测；current 验收以 caller-trusted `content_anchor`
+> 与 vendor receipt v3 为准。
 > 本文分两段：**①§1–5 取材段**（本地 vs 在线两条通路的事实包比对）；
 > **②§6 端到端验收段**（同日续跑：构建 → 收据 → NPU 跑测 → 三级门 → 裁决 → 报告）。
 >

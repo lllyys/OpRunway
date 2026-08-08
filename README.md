@@ -118,13 +118,13 @@ agent 内部完成全部六步（取材 → 任务书→spec → 生成并验证
 - 真机跑测的机器/路径经 `OPRUNWAY_*` 环境变量注入（agent 内部用、不写进仓、不需你手敲）。
 - 平台/精度/性能口径由 agent **从算子任务书推**（不猜）。
 
-> 内部实现（确定性脚本 `acc-common/*.py`、spec/runner 生成、判定 `validator.py`）是 agent 幕后的事，**不作为用法暴露给用户**。开发/契约细节见 `dev-doc/oprunway-design.md`。
+> 内部实现（确定性脚本 `acc-common/*.py`、spec/runner 生成、判定 `validator.py`）是 agent 幕后的事，**不作为用法暴露给用户**。开发与契约入口见 `AGENTS.md` 和 `plugin/README.md`。
 
 ## 目录
 
 ```
 plugin/     agent+skill 体系（acc-common 脚本 + skills + agents + commands + .claude-plugin/manifest）
-dev-doc/        设计与流水线（oprunway-design.md）、改动简表、TODO
+dev-doc/    当前 TODO、实测记录、环境说明与改动流水
 canon/      bureau 决策/ADR（durable 知识，capture→compile→review 三态）
 spec/       算子 spec 笔记
 repos/      被测/参考算子仓（外部克隆，.gitignore 不入库）
@@ -134,7 +134,7 @@ repos/      被测/参考算子仓（外部克隆，.gitignore 不入库）
 
 零硬编码（仓名/路径/SOC/阈值运行时探测或询问）· 零持久化配置（产物落 CWD 下 `reports/`）· 全程中文 · 副作用先确认 · 跑测多层判定 · 不凭空捏造（推断项显式标注）。
 
-> 详细设计见 `dev-doc/oprunway-design.md`；改动流水见 `dev-doc/oprunway-changes-brief.md`；待办见 `dev-doc/oprunway-todo.md`。
+> 当前规则见 `AGENTS.md`；改动流水见 `dev-doc/oprunway-changes-brief.md`；待办见 `dev-doc/oprunway-todo.md`。
 
 ---
 

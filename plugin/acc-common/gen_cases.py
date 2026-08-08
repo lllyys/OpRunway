@@ -2994,7 +2994,7 @@ def _mk_id(op, dtn, shp, id_kind, attr_idx, seen):
 
 
 # ============================== §1 覆盖-预算 生成（opbase 精度标准 §1，pin f69d4e…）=====
-# 决策 v2（dev-doc/oprunway-cases50-design.md）：dtype 分层（key 重点 + 其他 1-2）× shape 阶梯(2^k/2^k-1)
+# 当前生成策略：dtype 分层（key 重点 + 其他 1-2）× shape 阶梯（2^k / 2^k-1）。
 # × 值域(uniform+normal) × attr 正交笛卡尔；白名单强制必覆盖组合 + 1-wise 采样 + case_target 预算封顶；
 # §1.4 特殊场景（空→功能only / 标量 / 边界 / inf·nan）强制纳入、id_kind 独立命名空间；per-case 独立种子。
 # format 轴：elementwise 仅 ND（op_def/example 佐证）→ 退化为单值，不进正交网格。

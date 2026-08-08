@@ -53,6 +53,8 @@
 - **职责边界**：把缺陷定性清楚即可，不替 PR 作者修到底。
 - **裁决归脚本**：解耦结论供理解；pass/fail 仍由 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py` 出（ADR 0007）。
 
-## 5. 反面案例（Equal，钉在这里防重犯）
+## 5. 反面教训
 
-真机 `out.bin` 全 0 → 归因 refine 三遍（op-bug → harness-bug → op「真阳性/A3 缺陷」），**每遍都错在没质疑最上游**。2026-07-09 确认 #2890 系误配、Equal 社区任务未验收 → 前「A3 未达标·真阳性」**整体作废**。教训分两层：解耦（②）**必要但不充分**——之前还得先验证对应（①）。原缺陷报告 `dev-doc/equal-a3-defect-report.md` 已删除。
+真机异常不能靠源码阅读或单次输出直接归因。Current workflow 接受调用方给定的任务书/源码配对，不再鉴定
+PR 对应关系；但必须先核任务书摘要、源码 `content_anchor`、build receipt、实际加载 ELF/符号和输出写入，
+再用独立 golden 解耦 DUT 与 harness。历史误配案例只留在 Git 与 changes brief，不作为现行身份门。

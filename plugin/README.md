@@ -57,4 +57,4 @@ agent 内部完成六步（取材 → 任务书→spec → 生成并验证 runne
 这两种 form 自 2026-08-06 起都没有真机入口；旧结果保持历史效力，但不得据此生成或 dispatch 新一轮。
 <!-- oprunway:retired-end -->
 
-> 设计/契约见 `../doc/oprunway-design.md`；改动流水见 `../doc/oprunway-changes-brief.md`；TODO 见 `../doc/oprunway-todo.md`。
+> 规则与契约入口见 `../AGENTS.md`；改动流水见 `../dev-doc/oprunway-changes-brief.md`；TODO 见 `../dev-doc/oprunway-todo.md`。

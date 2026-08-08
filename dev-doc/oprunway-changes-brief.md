@@ -4,6 +4,10 @@
 
 ## 2026-08-07 · 三算子 N10 单卡正式验收与实测回修
 
+- 文档清理：根 `AGENTS.md` 从 773 行压到 262 行，只保留 current 可执行仓规；`oprunway-todo.md`
+  从 685 行重写为 53 行 active backlog；删除旧 handoff、已完成/被替代计划、历史状态快照与无效设计稿，
+  并修复产品 README、样例 spec、代码注释和 archive 文档中的活引用。仍有活代码/canon 引用的设计依据
+  暂保留，待内容迁入当前契约后再删。
 - caller-trusted 输入契约完成收口：任务书与源码由调用方断言对应，在线/本地 locator 只作 transport 诊断；current RGE 以 content anchor→vendor receipt v3→ELF→执行为硬门，旧三算子 v4 只按 historical 读取。N0–N10 已完成，A2/A5 与性能 baseline 继续以 `UNVALIDATED` 限制外推。
 - 三算子统一中文实测记录与机器 R/G/E 总账已收敛到 multi-card v4：N0 三静态门与 N2 生成 C++/receipt 均可重投影，v4 对 single root/work、equivalence 输入、各 shard、ELF、input/golden/out 做精确递归闭包并现场重放 Task2/stochastic/equivalence；该批仍是 legacy historical 证据，保持原裁决而不追认 current content-anchor 身份。
 - 三算子均用 fresh intake、generated cases、VERIFIED vendor receipt 和独立 A3 device 完成单卡正式验收：Bernoulli=`FAIL(精度)`、Remainder=`PASSED_WITH_GAPS`、Roll=`FAIL(精度)`；所有结论均由确定性产物写出。
