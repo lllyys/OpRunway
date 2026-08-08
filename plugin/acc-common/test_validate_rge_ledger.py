@@ -19,6 +19,7 @@ import multi_card_verdict_equivalence
 import numpy as np
 import precision_policy
 import source_provenance
+import test_current_receipt_fixtures as current_receipt_fixtures
 import vendor_build_receipt
 import validate_rge_ledger as rge
 import validator
@@ -41,73 +42,21 @@ def _local_build_receipt(
     subtree_sha: str, full_sha: str, content_anchor: dict,
 ) -> dict:
     scope = "experimental/math/fixture"
-    size = vendor_path.stat().st_size
-    return {
-        "schema": "oprunway.vendor_build_receipt",
-        "schema_version": 3,
-        "status": "VERIFIED",
-        "degradations": [],
-        "source": {
-            "provenance_kind": "local_snapshot",
-            "declared_source_form": "local_source",
-            "repo": str(source_root),
-            "pr_head_sha": None,
-            "snapshot_subtree_scope": scope,
-            "snapshot_sha256": full_sha,
-            "snapshot_subtree_sha256": subtree_sha,
-            "content_anchor": copy.deepcopy(content_anchor),
-            "transport": {"pr_head_sha": None, "repo": str(source_root)},
-        },
-        "build": {
-            "argv": ["bash", "build.sh"],
-            "cwd": str(source_root / scope),
-            "returncode": 0,
-            "returncode_source": "measured",
-            "execution": {
-                "started_at": "2026-08-07T00:00:00Z",
-                "ended_at": "2026-08-07T00:00:01Z",
-                "duration_s": 1.0,
-                "library_path": str(vendor_path),
-                "library_before": None,
-                "library_after": {
-                    "mtime_ns": 1, "size": size, "sha256": vendor_sha,
-                },
-            },
-            "source_snapshot_digest": {
-                "schema": "oprunway.source_snapshot_digest",
-                "schema_version": 1,
-                "taken_stage": "pre_build",
-                "source_root": str(source_root),
-                "subtree_scope": scope,
-                "snapshot_sha256": full_sha,
-                "snapshot_subtree_sha256": subtree_sha,
-                "content_anchor": copy.deepcopy(content_anchor),
-                "algorithm": {
-                    "tool": "fetch_source.py",
-                    "logic_sha256": _sha(
-                        Path(vendor_build_receipt.__file__).with_name("fetch_source.py")
-                    ),
-                },
-                "file_count": 2,
-                "subtree_file_count": 1,
-                "skipped_symlink_count": 0,
-                "subtree_skipped_symlink_count": 0,
-            },
-            "tree_state_at_emit": {
-                "snapshot_sha256": full_sha,
-                "snapshot_subtree_sha256": subtree_sha,
-                "matches_pre_build": True,
-                "subtree_matches_pre_build": True,
-            },
-        },
-        "artifact": {
-            "library_path": str(vendor_path), "library_sha256": vendor_sha,
-        },
-        "producer": {
-            "tool": "vendor_build_receipt.py",
-            "logic_sha256": _sha(Path(vendor_build_receipt.__file__)),
-        },
-    }
+    receipt = current_receipt_fixtures.vendor_build_receipt(
+        str(vendor_path),
+        vendor_sha,
+        source_root=str(source_root),
+        scope=scope,
+        whole=full_sha,
+        subtree=subtree_sha,
+        repo=str(source_root),
+        anchor=copy.deepcopy(content_anchor),
+    )
+    receipt["source"].update({
+        "declared_source_form": "local_source",
+        "transport": {"pr_head_sha": None, "repo": str(source_root)},
+    })
+    return receipt
 
 
 def _symbol_identity(vendor_path: Path, vendor_sha: str, plan: dict) -> dict:
@@ -193,6 +142,29 @@ def _materialize_work(
     produced = [case_id for case_id, status in statuses.items() if status == "ok"]
     failed = [case_id for case_id, status in statuses.items()
               if status == "execution_failed"]
+    isolation_records = []
+    for index, row in enumerate(plan["cases"]):
+        case_id = row["case_id"]
+        succeeded = statuses[case_id] == "ok"
+        isolation_records.append({
+            "case_id": case_id,
+            "launch_id": f"rge-fixture-{index}-{case_id}",
+            "isolation_mode": "subprocess_per_case_v1",
+            "termination_kind": "normal",
+            "returncode": 0 if succeeded else 1,
+            "parent_pid": 2000 + index,
+            "child_pid": 2000 + index if succeeded else None,
+            "outcome": "produced" if succeeded else "failed",
+            "call_status": {
+                "schema": "oprunway.cpp_extension_call_status",
+                "schema_version": 1,
+                "stage1_ret": 0 if succeeded else 1,
+                "workspace_size": 0,
+                "executor_null": not succeeded,
+                "stage2_called": succeeded,
+                "stage2_ret": 0 if succeeded else None,
+            },
+        })
     receipt = {
         "schema": "oprunway.cpp_extension_receipt",
         "schema_version": cann_version.RECEIPT_SCHEMA_VERSION,
@@ -227,6 +199,12 @@ def _materialize_work(
         },
         "invocation": cpp_extension_adapter.build_invocation_accounting(
             plan, produced_case_ids=produced, failed_case_ids=failed),
+        "execution_isolation": {
+            "schema": cpp_extension_adapter.EXECUTION_ISOLATION_SCHEMA,
+            "schema_version": cpp_extension_adapter.EXECUTION_ISOLATION_VERSION,
+            "mode": "subprocess_per_case_v1",
+            "records": isolation_records,
+        },
         "tensor_format_receipt": copy.deepcopy(manifest["tensor_format_receipt"]),
     }
     _write_json(work / "cpp_extension_receipt.json", receipt)
@@ -276,6 +254,8 @@ def _materialize_work(
                 }
             )
         rows.append(row)
+    cpp_extension_adapter.bind_execution_isolation_evidence(
+        rows, receipt["execution_isolation"])
     envelope = {
         "op": caseset["op"], "runner_form": "cpp_extension",
         "runner_source": "generated_official_cpp_extension",

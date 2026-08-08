@@ -119,7 +119,8 @@ def _fake_torch(write_value=None):
 class CppExtensionDriverStaticTest(unittest.TestCase):
     def _current_content_receipt(self, vendor):
         sha = D._sha_file(vendor)
-        return F.vendor_build_receipt(vendor, sha)
+        return F.vendor_build_receipt(
+            vendor, sha, source_root=os.path.join(os.path.dirname(vendor), "source"))
 
     def test_canonical_digest_is_key_order_independent(self):
         self.assertEqual(D._canonical_sha({"a": 1, "b": 2}),
@@ -144,14 +145,17 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
 
     def test_vendor_build_receipt_binds_content_anchor_and_exact_elf(self):
         with tempfile.TemporaryDirectory() as td:
-            vendor = os.path.join(td, "libcust_opapi.so")
+            vendor = os.path.join(td, "vendors", "fixture", "op_api", "lib",
+                                  "libcust_opapi.so")
+            os.makedirs(os.path.dirname(vendor), exist_ok=True)
             with open(vendor, "wb") as dst:
                 dst.write(b"vendor")
             receipt_path = os.path.join(td, "build-receipt.json")
             receipt = self._current_content_receipt(vendor)
             with open(receipt_path, "w", encoding="utf-8") as dst:
                 json.dump(receipt, dst)
-            with mock.patch.dict(
+            with mock.patch.object(D.vendor_build_receipt, "_global_defined_symbols",
+                                   return_value={"X_fixture"}), mock.patch.dict(
                     os.environ,
                     {"OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT":
                      receipt_path}):
@@ -160,7 +164,8 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
 
     def test_vendor_build_receipt_rejects_malformed_content_anchor(self):
         with tempfile.TemporaryDirectory() as td:
-            vendor = os.path.join(td, "lib.so")
+            vendor = os.path.join(td, "vendors", "fixture", "op_api", "lib", "lib.so")
+            os.makedirs(os.path.dirname(vendor), exist_ok=True)
             with open(vendor, "wb") as dst:
                 dst.write(b"vendor")
             receipt_path = os.path.join(td, "receipt.json")
@@ -168,7 +173,8 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
                 receipt = self._current_content_receipt(vendor)
                 receipt["source"]["content_anchor"]["sha256"] = "a" * 7
                 json.dump(receipt, dst)
-            with mock.patch.dict(
+            with mock.patch.object(D.vendor_build_receipt, "_global_defined_symbols",
+                                   return_value={"X_fixture"}), mock.patch.dict(
                     os.environ,
                     {"OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT":
                      receipt_path}):
@@ -232,12 +238,14 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
 
     def test_local_source_snapshot_receipt_is_accepted_without_git_head(self):
         with tempfile.TemporaryDirectory() as td:
-            vendor = os.path.join(td, "lib.so")
+            vendor = os.path.join(td, "vendors", "fixture", "op_api", "lib", "lib.so")
+            os.makedirs(os.path.dirname(vendor), exist_ok=True)
             with open(vendor, "wb") as dst:
                 dst.write(b"vendor")
             receipt = self._local_snapshot_receipt(vendor)
             path = self._write_receipt(td, receipt)
-            with mock.patch.dict(
+            with mock.patch.object(D.vendor_build_receipt, "_global_defined_symbols",
+                                   return_value={"X_fixture"}), mock.patch.dict(
                     os.environ,
                     {"OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT": path}):
                 self.assertEqual(D._vendor_build_provenance(vendor), receipt)
@@ -249,7 +257,9 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
 
     def test_local_snapshot_may_not_fabricate_a_pr_head(self):
         with tempfile.TemporaryDirectory() as td:
-            vendor = os.path.join(td, "lib.so")
+            vendor = os.path.join(
+                td, "vendors", "fixture", "op_api", "lib", "lib.so")
+            os.makedirs(os.path.dirname(vendor), exist_ok=True)
             with open(vendor, "wb") as dst:
                 dst.write(b"vendor")
             receipt = self._local_snapshot_receipt(vendor)
@@ -263,7 +273,9 @@ class CppExtensionDriverStaticTest(unittest.TestCase):
 
     def test_local_source_snapshot_may_not_fabricate_a_degradation(self):
         with tempfile.TemporaryDirectory() as td:
-            vendor = os.path.join(td, "lib.so")
+            vendor = os.path.join(
+                td, "vendors", "fixture", "op_api", "lib", "lib.so")
+            os.makedirs(os.path.dirname(vendor), exist_ok=True)
             with open(vendor, "wb") as dst:
                 dst.write(b"vendor")
             receipt = self._local_snapshot_receipt(vendor)

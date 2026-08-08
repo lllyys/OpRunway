@@ -496,6 +496,33 @@ class GoldenInvocationEndToEndBindingTest(unittest.TestCase):
             produced_case_ids=[row["case_id"] for row in plan["cases"]],
             failed_case_ids=[],
         )
+        invocation["execution_isolation"] = {
+            "schema": A.EXECUTION_ISOLATION_SCHEMA,
+            "schema_version": A.EXECUTION_ISOLATION_VERSION,
+            "mode": "subprocess_per_case_v1",
+            "records": [
+                {
+                    "case_id": row["case_id"],
+                    "launch_id": f"golden-invocation-fixture-{index}",
+                    "isolation_mode": "subprocess_per_case_v1",
+                    "termination_kind": "normal",
+                    "returncode": 0,
+                    "parent_pid": 1000 + index,
+                    "child_pid": 1000 + index,
+                    "outcome": "produced",
+                    "call_status": {
+                        "schema": "oprunway.cpp_extension_call_status",
+                        "schema_version": 1,
+                        "stage1_ret": 0,
+                        "workspace_size": 0,
+                        "executor_null": False,
+                        "stage2_called": True,
+                        "stage2_ret": 0,
+                    },
+                }
+                for index, row in enumerate(plan["cases"])
+            ],
+        }
         schemas = {
             row["entrypoint"]: f"oprunway_witness::{row['entrypoint']}(...)"
             for row in manifest["variants"]
@@ -528,6 +555,8 @@ class GoldenInvocationEndToEndBindingTest(unittest.TestCase):
             }
             for row in plan["cases"]
         ]
+        A.bind_execution_isolation_evidence(
+            evidence, receipt["execution_isolation"])
         A._bind_multi_input_evidence(caseset, evidence, receipt)
         envelope = {
             "runner_form": "cpp_extension",

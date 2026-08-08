@@ -178,7 +178,7 @@ def build_attempt_record(acceptance):
         "exit_code": acceptance.get("exit_code"),
         "requires_human_cp": acceptance.get("requires_human_cp", False),
         "gate": acceptance.get("gate"),
-        "diagnostic_sources": {
+        "diagnostic_sources": acceptance.get("diagnostic_sources") or {
             "precision": "verdict.json",
             "performance": "perf_report.json",
             "evidence": "evidence.json",

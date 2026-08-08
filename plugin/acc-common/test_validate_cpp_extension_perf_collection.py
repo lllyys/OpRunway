@@ -54,6 +54,7 @@ class CppExtensionPerfCollectionGateTest(unittest.TestCase):
             }],
             "perf_collection": {
                 "custom_kind": "cpp_extension",
+                "execution_isolation_mode": "subprocess_per_case_v1",
                 "custom_provenance": provenance,
                 "device": 0,
                 "records": [{

@@ -320,6 +320,12 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
       [--repo <transport 观察值>] \
       --build-cwd <构建命令的工作目录> \
       --library   <安装后真机实际会加载的那个 .so，须绝对路径> \
+      --requested-soc <任务书/op_def 核定的目标 SoC> \
+      --selected-op <build --ops 使用的选择名> \
+      --expected-op-type <ops-info 与 kernel metadata 使用的 op type> \
+      --installed-opp-root <本轮安装出的 custom OPP 根，须绝对路径> \
+      --package-opp-root <本轮 package OPP 根，须绝对路径> \
+      --cmake-cache <本轮 CMakeCache.txt，须绝对路径> \
       --build-argv=bash --build-argv=-c \
       --build-argv='./build.sh … && ./build_out/*.run --install-path=…' \
       --out <vendor-build-receipt.json>
@@ -340,6 +346,12 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
     - **`--library` 必须真的被这次 build 改写过**：构建前后各取一次 `(mtime_ns, size, sha256)`，三项全同即 fail-closed。
       堵的是「`--build-argv=/usr/bin/true` 配一个预先存在的 CANN 内置 `.so`」那条伪造路径。
       ⚠ 这只证明「该文件在构建窗口内被改写过」，**不证明它由那条 argv 产出**——一次 `touch` 就能骗过，如实记账。
+    - **current fresh 还必须闭合 exact-target kernel 交付**：上述六个 target/package/cache 实参全部显式给出，
+      `emit` 同时对账 build argv 与 CMakeCache 的 SoC/op 选择，只扫描 exact SoC 的非空 ops-info 与目标 op
+      metadata；逐 `.o` 拒绝缺失、符号链接和越界，逐摘要闭合 installed↔package，并用 readelf/nm 证明
+      metadata 的 kernel symbol 属于对应 ELF。build rc=0 但目标资产为零或未改变照样 fatal。正式 workflow
+      在 Task1 和外部 driver/DUT 之前 live 重放本门；失败只写 `attempt_record.json`
+      (`acceptance_verdict=null`) 与中文非正式失败明细，不产 `acceptance.json`。
     - **两个 merkle 必须在 build 之前取**（这就是 ① 单独成一步的全部理由）：build 会往源码树里写产物，事后再摘就摘到
       「源码 + 产物」，与 CP-A 记的那份字节永远对不上。`emit` **不会自己去摘源码树**，只接受 ① 落下的凭据——
       错法被结构性杜绝。它会在产出时刻另摘一次当前树，记进 `build.tree_state_at_emit`（含 `matches_pre_build`）。
@@ -472,6 +484,9 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
       emit --declared-source-form <git_pr|local_source> \
       --snapshot-digest <凭据路径> \
       --library <被加载的 vendor ELF 绝对路径> --build-cwd <构建工作目录> \
+      --requested-soc <目标 SoC> --selected-op <build 选择名> \
+      --expected-op-type <op type> --installed-opp-root <安装 OPP 根> \
+      --package-opp-root <package OPP 根> --cmake-cache <CMakeCache.txt> \
       --build-argv=./build.sh --build-argv=--pkg --build-argv=-j16 --out <收据路径>
     ```
 

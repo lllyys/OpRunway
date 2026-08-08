@@ -2595,6 +2595,46 @@ def _driver_argv():
     return argv
 
 
+def preflight_target_kernel_delivery(*, expected_op_type, expected_content_anchor):
+    """在启动外部 driver/DUT 前现场复核 current vendor + target-kernel closure。"""
+    if not isinstance(expected_op_type, str) or not expected_op_type:
+        raise CppExtensionAdapterError("target kernel preflight：expected_op_type 缺失")
+    if not isinstance(expected_content_anchor, dict):
+        raise CppExtensionAdapterError("target kernel preflight：expected_content_anchor 缺失")
+    receipt_path = os.environ.get("OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT")
+    library = os.environ.get("OPRUNWAY_CPP_EXTENSION_VENDOR_LIBRARY")
+    if not isinstance(receipt_path, str) or not os.path.isabs(receipt_path) \
+            or not os.path.isfile(receipt_path):
+        raise CppExtensionAdapterError(
+            "target kernel delivery preflight：OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT "
+            "须指向存在的绝对普通文件")
+    if not isinstance(library, str) or not os.path.isabs(library) \
+            or not os.path.isfile(library):
+        raise CppExtensionAdapterError(
+            "target kernel delivery preflight：OPRUNWAY_CPP_EXTENSION_VENDOR_LIBRARY "
+            "须指向存在的绝对普通文件")
+    try:
+        receipt = _strict_json(receipt_path)
+        result = vendor_build_receipt.validate_for_acceptance(
+            receipt, library_path=os.path.realpath(library),
+            library_sha256=_file_sha(library), normalize_path=True)
+        closure = receipt.get(vendor_build_receipt.TARGET_KERNEL_DELIVERY_KEY)
+        request = closure.get("request") if isinstance(closure, dict) else None
+        if not isinstance(request, dict) \
+                or request.get("expected_op_type") != expected_op_type:
+            raise CppExtensionAdapterError(
+                "target kernel delivery closure 与本轮 spec.op 不一致")
+        source = receipt.get("source")
+        if not isinstance(source, dict) \
+                or source.get("content_anchor") != expected_content_anchor:
+            raise CppExtensionAdapterError(
+                "target kernel delivery receipt 与本轮 source_facts content_anchor 不一致")
+        return result
+    except (OSError, ValueError, vendor_build_receipt.VendorBuildReceiptError) as ex:
+        raise CppExtensionAdapterError(
+            f"target kernel delivery closure 未通过：{ex}") from ex
+
+
 def run_cpp_extension(caseset, work, defect_cases=None):
     """执行显式外部 driver，验证 receipt 后复用确定性 evidence 组装。"""
     if defect_cases:

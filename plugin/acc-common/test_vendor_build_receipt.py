@@ -22,12 +22,17 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import fetch_source as fs
 import vendor_build_receipt as V
 
 
 _OP = "gaussian_blur"
+_SOC = "ascend910_93"
+_SELECTED_OP = "gaussian_blur"
+_OP_TYPE = "GaussianBlur"
+_KERNEL = "GaussianBlur_fixture_kernel"
 _TREE = {
     _OP + "/op_host/op_api/aclnn_gaussian_blur.h": "aclnnStatus aclnnGaussianBlur();\n",
     _OP + "/op_host/gaussian_blur_def.cpp": "// def\n",
@@ -39,7 +44,10 @@ _TREE = {
 _BUILD_PY = (
     "import sys\n"
     "elf, sentinel, rc = sys.argv[1], sys.argv[2], int(sys.argv[3])\n"
+    "installed_obj, package_obj = sys.argv[4], sys.argv[5]\n"
     "open(elf, 'wb').write(sentinel.encode())\n"
+    "open(installed_obj, 'wb').write(sentinel.encode())\n"
+    "open(package_obj, 'wb').write(sentinel.encode())\n"
     "open(sentinel, 'w').write('built')\n"
     "sys.exit(rc)\n"
 )
@@ -56,11 +64,43 @@ class _Fixture(unittest.TestCase):
             with open(full, "w", encoding="utf-8") as out:
                 out.write(body)
         self.elf = os.path.join(self.d, "libcust_opapi.so")
+        self.installed_opp = os.path.join(self.d, "installed", "vendors", "fixture")
+        self.package_opp = os.path.join(self.d, "package", "vendors", "fixture")
+        self.elf = os.path.join(self.installed_opp, "op_api", "lib", "libcust_opapi.so")
+        os.makedirs(os.path.dirname(self.elf), exist_ok=True)
         with open(self.elf, "wb") as out:
             out.write(b"vendor-elf-before-any-build")
+        self.cache = os.path.join(self.root, "build", "CMakeCache.txt")
+        os.makedirs(os.path.dirname(self.cache), exist_ok=True)
+        with open(self.cache, "w", encoding="utf-8") as out:
+            out.write(f"ASCEND_COMPUTE_UNIT:STRING={_SOC}\n"
+                      f"ASCEND_OP_NAME:STRING={_SELECTED_OP}\n")
+        config_rel = os.path.join("op_impl", "ai_core", "tbe", "config", _SOC,
+                                  f"aic-{_SOC}-ops-info.json")
+        metadata_rel = os.path.join("op_impl", "ai_core", "tbe", "kernel", _SOC,
+                                    _SELECTED_OP, _KERNEL + ".json")
+        self.object_rel = os.path.join("op_impl", "ai_core", "tbe", "kernel", _SOC,
+                                       _SELECTED_OP, _KERNEL + ".o")
+        for opp in (self.installed_opp, self.package_opp):
+            for rel, payload in (
+                    (config_rel, json.dumps({_OP_TYPE: {"opFile": _SELECTED_OP}})),
+                    (metadata_rel, json.dumps({"binList": [{
+                        "binPath": _KERNEL + ".o",
+                        "kernelList": [{"kernelName": _KERNEL}],
+                    }]}))):
+                path = os.path.join(opp, rel)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as out:
+                    out.write(payload)
+            object_path = os.path.join(opp, self.object_rel)
+            with open(object_path, "wb") as out:
+                out.write(b"kernel-before-build")
+        self._symbols = mock.patch.object(V, "_global_defined_symbols", return_value={_KERNEL})
+        self._symbols.start()
         self._builds = 0
 
     def tearDown(self):
+        self._symbols.stop()
         self.tmp.cleanup()
 
     # —— 构建命令 ——————————————————————————————————————————————
@@ -69,14 +109,32 @@ class _Fixture(unittest.TestCase):
         self._builds += 1
         self.sentinel = os.path.join(self.d, f"built-{self._builds}.stamp")
         return [sys.executable, "-c", _BUILD_PY,
-                self.elf, self.sentinel, str(rc)] + list(extra)
+                self.elf, self.sentinel, str(rc),
+                os.path.join(self.installed_opp, self.object_rel),
+                os.path.join(self.package_opp, self.object_rel),
+                f"--soc={_SOC}", f"--ops={_SELECTED_OP}"] + list(extra)
 
     def _noop_argv(self):
         """什么都不做的命令：ELF 一个字节都不会变 → 收据必须产不出来。"""
         return [sys.executable, "-c", "pass"]
 
     def _run(self, rc=0):
-        return V.run_build(self._argv(rc), self.root, self.elf)
+        return V.run_build(self._argv(rc), self.root, self.elf,
+                           **self._delivery_kwargs())
+
+    def _delivery_kwargs(self):
+        return dict(requested_soc=_SOC, selected_op=_SELECTED_OP,
+                    expected_op_type=_OP_TYPE,
+                    installed_opp_root=self.installed_opp,
+                    package_opp_root=self.package_opp,
+                    cmake_cache_path=self.cache)
+
+    def _delivery_cli(self):
+        return ["--requested-soc", _SOC, "--selected-op", _SELECTED_OP,
+                "--expected-op-type", _OP_TYPE,
+                "--installed-opp-root", self.installed_opp,
+                "--package-opp-root", self.package_opp,
+                "--cmake-cache", self.cache]
 
     def _produce(self, form=V.FORM_LOCAL_SOURCE, digest=None, **over):
         # ⚠ 摘要必须在 build **之前**取，这里的求值顺序就是那条纪律。
@@ -380,6 +438,15 @@ class ProduceReceiptTest(_Fixture):
             V.produce_receipt(declared_source_form=V.FORM_LOCAL_SOURCE,
                               build_result=self._run())
 
+    def test_production_rejects_removed_prebuild_target_manifest(self):
+        digest = V.take_snapshot_digest(self.root, _OP)
+        result = self._run()
+        del result["target_assets_before"]
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "target_assets_before|build 前"):
+            V.produce_receipt(
+                declared_source_form=V.FORM_LOCAL_SOURCE,
+                build_result=result, snapshot_digest=digest)
+
     def test_pr_route_needs_a_head_and_rejects_both_at_once(self):
         digest = V.take_snapshot_digest(self.root, _OP)
         receipt = V.produce_receipt(
@@ -416,6 +483,7 @@ class ProduceReceiptTest(_Fixture):
         V.main(["emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
                 "--snapshot-digest", digest_path, "--library", self.elf,
                 "--build-cwd", self.root, "--returncode", "0"]
+               + self._delivery_cli()
                + [f"--build-argv={a}" for a in argv]
                + ["--out", receipt_path])
         with open(receipt_path, encoding="utf-8") as src:
@@ -438,12 +506,13 @@ class ProduceReceiptTest(_Fixture):
         """
         digest_path = os.path.join(self.d, "prebuild2.json")
         receipt_path = os.path.join(self.d, "receipt2.json")
-        argv = self._argv(extra=["--pkg", "--soc=ascend950", "-j16"])
+        argv = self._argv(extra=["--pkg", "-j16"])
         V.main(["snapshot-digest", "--source-root", self.root,
                 "--subtree-scope", _OP, "--out", digest_path])
         V.main(["emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
                 "--snapshot-digest", digest_path, "--library", self.elf,
                 "--build-cwd", self.root]
+               + self._delivery_cli()
                + [f"--build-argv={a}" for a in argv]
                + ["--out", receipt_path])
         with open(receipt_path, encoding="utf-8") as src:
@@ -462,14 +531,14 @@ class ProduceReceiptTest(_Fixture):
             V.main(["emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
                     "--snapshot-digest", digest_path, "--library", self.elf,
                     "--build-cwd", self.root, "--returncode", "0",
-                    "--out", receipt_path])
+                    "--out", receipt_path] + self._delivery_cli())
         self.assertFalse(os.path.exists(receipt_path), "拒了就不该落盘")
         # ⭐ 真正要钉的是「这条路根本不存在」：argparse 层面就不该有能单独产收据的自报模式。
         with self.assertRaises(V.VendorBuildReceiptError) as caught:
             V.main(["emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
                     "--snapshot-digest", digest_path, "--library", self.elf,
                     "--build-cwd", self.root, "--returncode", "0",
-                    "--out", receipt_path])
+                    "--out", receipt_path] + self._delivery_cli())
         self.assertIn("不执行", str(caught.exception),
                       "报错必须说清「没有只记录不执行的模式」，否则下一个人会以为是漏传参数")
 
@@ -483,6 +552,7 @@ class ProduceReceiptTest(_Fixture):
             V.main(["emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
                     "--snapshot-digest", digest_path, "--library", self.elf,
                     "--build-cwd", self.root, "--returncode", "0"]
+                   + self._delivery_cli()
                    + [f"--build-argv={a}" for a in self._argv(rc=7)]
                    + ["--out", receipt_path])
         self.assertFalse(os.path.exists(receipt_path))
@@ -578,6 +648,7 @@ class RepoCredentialGateTest(_Fixture):
             V.main(["emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
                     "--snapshot-digest", digest_path, "--library", self.elf,
                     "--build-cwd", self.root, "--repo", _CRED_REPO]
+                   + self._delivery_cli()
                    + [f"--build-argv={a}" for a in argv]
                    + ["--out", receipt_path])
         self.assertFalse(os.path.isfile(self.sentinel),
@@ -619,6 +690,7 @@ class BuildTreeReconciliationTest(_Fixture):
             ["emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
              "--snapshot-digest", digest_path, "--library", self.elf,
              "--build-cwd", build_cwd or self.root]
+            + self._delivery_cli()
             + [f"--build-argv={a}" for a in (argv or self._argv())]
             + ["--out", out or os.path.join(self.d, "tree-receipt.json")])
 
@@ -628,7 +700,8 @@ class BuildTreeReconciliationTest(_Fixture):
         elsewhere = os.path.join(self.d, "elsewhere")
         os.makedirs(elsewhere)
         digest = V.take_snapshot_digest(self.root, _OP)
-        result = V.run_build(self._argv(), elsewhere, self.elf)
+        result = V.run_build(self._argv(), elsewhere, self.elf,
+                             **self._delivery_kwargs())
         with self.assertRaisesRegex(V.VendorBuildReceiptError, "不在被摘过指纹"):
             V.produce_receipt(declared_source_form=V.FORM_LOCAL_SOURCE,
                               build_result=result, snapshot_digest=digest)
@@ -698,7 +771,8 @@ class BuildTreeReconciliationTest(_Fixture):
         with self.assertRaisesRegex(V.VendorBuildReceiptError, "必须给 snapshot_digest"):
             V.produce_receipt(
                 declared_source_form=V.FORM_GIT_PR,
-                build_result=V.run_build(self._argv(), elsewhere, self.elf),
+                build_result=V.run_build(self._argv(), elsewhere, self.elf,
+                                         **self._delivery_kwargs()),
                 repo="cann/ops-cv", pr_head_sha="a" * 40)
 
     def test_digest_written_into_the_source_tree_is_refused(self):
@@ -723,6 +797,7 @@ class OutPathGuardTest(_Fixture):
             ["emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
              "--snapshot-digest", digest_path, "--library", self.elf,
              "--build-cwd", self.root]
+            + self._delivery_cli()
             + [f"--build-argv={a}" for a in self._argv()] + ["--out", out])
 
     def test_out_colliding_with_the_library_never_clobbers_the_dut(self):

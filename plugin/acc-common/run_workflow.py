@@ -71,6 +71,7 @@ _DEV_SUMMARY_FILE = "dev_run_summary.json"     # ← 取代 acceptance.json
 _DEV_VERDICT_FILE = "dev_precision_check.json"  # ← 取代 verdict.json
 _ATTEMPT_RECORD_FILE = acceptance_artifacts.ATTEMPT_RECORD_FILE
 _MARKDOWN_REPORT_ERROR_FILE = "markdown_report_error.json"
+_TARGET_KERNEL_FAILURE_MD = "目标内核交付失败明细.md"
 _ACCEPTANCE_FILES = ("acceptance.json", "verdict.json")
 _DEV_FILES = (_DEV_SUMMARY_FILE, _DEV_VERDICT_FILE)
 #: 人读交付物：`render_acceptance_markdown.write_report` 落进报告目录的三份 Markdown。
@@ -84,6 +85,7 @@ _REPORT_MD_FILES = ("验收报告.md", "精度失败明细.md", "性能失败明
 #:   acceptance.json 会与本轮 dev_* 并存——正是这套机制要堵的洞。
 _RESULT_FILES = (_ACCEPTANCE_FILES + _DEV_FILES
                  + (_ATTEMPT_RECORD_FILE, "perf_report.json", _MARKDOWN_REPORT_ERROR_FILE)
+                 + (_TARGET_KERNEL_FAILURE_MD,)
                  + _REPORT_MD_FILES)
 #: 同上，只是要按通配清（T6 小 shape 仿真图，防 stale SVG 让「有图」门误过；codex H7）。
 _RESULT_GLOBS = ("perf_sim_*.svg",)
@@ -96,7 +98,7 @@ _RESULT_GLOBS = ("perf_sim_*.svg",)
 #: ⚠ 同理**不含** `_RESULT_GLOBS`：`perf_sim_*.svg` 渲染的正是仍被留作输入的 `perf_report.json`，
 #:   清了等于把有效渲染删掉，而它并不是一份「裁决」。
 _FINAL_VERDICT_FILES = (("acceptance.json", _ATTEMPT_RECORD_FILE,
-                         _MARKDOWN_REPORT_ERROR_FILE)
+                         _MARKDOWN_REPORT_ERROR_FILE, _TARGET_KERNEL_FAILURE_MD)
                         + _DEV_FILES + _REPORT_MD_FILES)
 
 # —— CP-E 自证材料 staging：验收产物目录必须自带「这一轮到底验的是什么」——————————————————
@@ -945,6 +947,58 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     # 位置刻意在**清残留之后、Task1 之前**：清在前才不会把本轮刚落的副本删掉。
     staged_source_facts = (_write_staged_inputs(out_dir, staged_payloads)
                            if staged_payloads is not None else None)
+    # 真机正式入口先核 target kernel delivery，再做 Task1，更不会启动外部 driver/DUT。
+    # driver 加载前还会由同一 strict validator 再核一次，缩小 preflight→load 的 TOCTOU。
+    if (mode == "cpp_extension"
+            and os.environ.get("OPRUNWAY_CPP_EXTENSION_REAL") == "1"):
+        try:
+            staged_facts = source_facts_lookup.find_source_facts(
+                None, staged_source_facts)
+            expected_anchor = ((staged_facts.get("pr") or {}).get("content_anchor")
+                               if isinstance(staged_facts, dict) else None)
+            cpp_extension_adapter.preflight_target_kernel_delivery(
+                expected_op_type=spec.get("op"),
+                expected_content_anchor=expected_anchor)
+        except cpp_extension_adapter.CppExtensionAdapterError as ex:
+            detail = str(ex)
+            # 这里还没生成本轮 caseset/evidence；若同一 out_dir 有同名文件，只可能来自上轮。
+            # 保留它们会让 attempt 看起来像已执行过本轮 Task1/DUT，故与旧裁决一起作废。
+            for stale in ("caseset.json", "evidence.json"):
+                stale_path = os.path.join(out_dir, stale)
+                if os.path.lexists(stale_path):
+                    os.remove(stale_path)
+            candidate = {
+                "op": spec.get("op"),
+                "repo_mode": mode,
+                "overall": "BLOCKED(target kernel delivery closure 未通过)",
+                "state": "BLOCKED_TARGET_KERNEL_DELIVERY_CLOSURE",
+                "exit_code": 1,
+                "requires_human_cp": False,
+                "gate": {"passed": False,
+                         "errors": {"pre_execution": [detail]}},
+                "diagnostic_sources": {
+                    "target_kernel_delivery": _TARGET_KERNEL_FAILURE_MD,
+                },
+            }
+            final_file = acceptance_artifacts.write_attempt_record(out_dir, candidate)
+            md_path = os.path.join(out_dir, _TARGET_KERNEL_FAILURE_MD)
+            with open(md_path, "w", encoding="utf-8") as report:
+                report.write(
+                    "# 目标内核交付失败明细（非正式验收报告）\n\n"
+                    "本轮在 Task1、外部 driver、DUT 调用和性能采集之前停止。\n\n"
+                    "- `acceptance_verdict = null`\n"
+                    "- 本文件不得命名、引用或渲染为正式验收报告。\n"
+                    f"- 失败详情：{detail}\n")
+            print("[CP-C target kernel delivery] FAILED；仅写 attempt_record.json 与"
+                  f" {_TARGET_KERNEL_FAILURE_MD}，不产 acceptance.json")
+            return {
+                "verdict": None, "perf_report": None,
+                "gate": candidate["gate"], "overall": candidate["overall"],
+                "state": candidate["state"], "exit_code": 1,
+                "requires_human_cp": False, "is_acceptance": True,
+                "evidence_grade": None,
+                "summary_file": os.path.basename(final_file),
+            }
     # Task 1
     caseset = gen_cases.gen_cases(spec, work, taskdoc_caseset=taskdoc_caseset)
     _assert_staged_golden_matches_task1(spec, staged_payloads)

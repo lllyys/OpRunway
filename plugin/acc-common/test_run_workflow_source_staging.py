@@ -357,6 +357,54 @@ class AcceptanceRunTest(unittest.TestCase):
                 attempt["gate"]["errors"]["task2"],
                 ["夹具：Task2 evidence 不完整"])
 
+    def test_target_kernel_preflight_blocks_before_task1_and_writes_only_attempt_detail(self):
+        """target 交付闭包失败必须先于 Task1/DUT，且不能留下上一轮正式裁决。"""
+        with tempfile.TemporaryDirectory() as root, _env(root):
+            facts = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
+            out_dir = os.path.join(root, "reports", "widget")
+            _confirm_spec(_write_spec(root), out_dir)
+            for name in ("acceptance.json", "verdict.json", "验收报告.md",
+                         "caseset.json", "evidence.json"):
+                with open(os.path.join(out_dir, name), "w", encoding="utf-8") as out:
+                    out.write("stale PASS")
+            calls = []
+            failure = W.cpp_extension_adapter.CppExtensionAdapterError(
+                "TARGET_ASSETS_EMPTY: exact target 无内核资产")
+            with mock.patch.dict(os.environ, {"OPRUNWAY_CPP_EXTENSION_REAL": "1"}), \
+                    mock.patch.object(
+                        W.cpp_extension_adapter, "preflight_target_kernel_delivery",
+                        side_effect=failure) as preflight:
+                out_dir, result, calls = self._run(
+                    root, source_facts=facts, out_dir=out_dir, calls=calls)
+
+            self.assertEqual(result["state"], "BLOCKED_TARGET_KERNEL_DELIVERY_CLOSURE")
+            self.assertEqual(result["summary_file"], "attempt_record.json")
+            self.assertEqual(calls, [], "target preflight 失败后仍进入了 Task1/三级门")
+            call = preflight.call_args.kwargs
+            self.assertEqual(call["expected_op_type"], _OP)
+            expected_facts = W.source_facts_lookup.find_source_facts(None, facts)
+            self.assertEqual(
+                call["expected_content_anchor"],
+                expected_facts["pr"]["content_anchor"])
+            self.assertFalse(os.path.exists(os.path.join(out_dir, "caseset.json")))
+            self.assertFalse(os.path.exists(os.path.join(out_dir, "evidence.json")))
+            self.assertFalse(os.path.exists(os.path.join(out_dir, "acceptance.json")))
+            self.assertFalse(os.path.exists(os.path.join(out_dir, "verdict.json")))
+            self.assertFalse(os.path.exists(os.path.join(out_dir, "验收报告.md")))
+            with open(os.path.join(out_dir, "attempt_record.json"), encoding="utf-8") as src:
+                attempt = json.load(src)
+            self.assertIsNone(attempt["acceptance_verdict"])
+            self.assertEqual(
+                attempt["diagnostic_sources"],
+                {"target_kernel_delivery": W._TARGET_KERNEL_FAILURE_MD})
+            detail_path = os.path.join(out_dir, W._TARGET_KERNEL_FAILURE_MD)
+            with open(detail_path, encoding="utf-8") as src:
+                detail = src.read()
+            self.assertIn("非正式验收报告", detail)
+            self.assertIn("acceptance_verdict = null", detail)
+            self.assertIn("Task1", detail)
+            self.assertIn("TARGET_ASSETS_EMPTY", detail)
+
     def test_gate_passed_but_blocked_state_is_still_attempt_only(self):
         """完整性门通过不等于 blocked 业务状态已完成；正式命名仍须等 canonical 终态。"""
         with tempfile.TemporaryDirectory() as root, _env(root):

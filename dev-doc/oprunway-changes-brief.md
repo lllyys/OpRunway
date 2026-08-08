@@ -2,6 +2,17 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-08 · current vendor receipt 增加目标 kernel 交付闭包
+
+- fresh v3 receipt 新增 `target_kernel_delivery_closure_v1`：显式绑定 requested SoC、build 选择名、
+  op type、installed/package OPP 根与 CMakeCache；exact-target ops-info、metadata、逐 `.o`、
+  installed↔package 摘要及 metadata kernelName↔ELF global symbol 任一不闭合即拒绝，build rc=0
+  但目标资产为零或未改写同样不能进入正式验收。legacy 只保历史读取，不放宽 current fresh 门。
+- 正式 `cpp_extension` workflow 在 Task1/外部 driver/DUT 前 live 重放闭包；失败会清旧正式结论，
+  仅产 `attempt_record.json`（`acceptance_verdict=null`）与中文非正式失败明细。A3/CANN 9.0.1
+  实际 metadata 的顶层 `binFileName/binFileSuffix/kernelName` + `kernelList[].kernelName` 格式已用
+  真实 FloorMod `.o` 和 readelf 校准；隔离 A3 容器相关回归 115 项通过，本批未运行算子或 Remainder。
+
 ## 2026-08-08 · cpp_extension 两段式状态与逐 case 进程隔离
 
 - generated bridge 显式记录 stage1 返回值、workspace、executor 空值与 stage2 调用/返回状态；

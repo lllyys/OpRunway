@@ -168,6 +168,7 @@ import tempfile
 import time
 
 import source_provenance
+import target_kernel_delivery
 import url_credentials
 
 
@@ -184,6 +185,30 @@ SCHEMA_VERSION_IDENTITY_ROUTED = 2
 SCHEMA_VERSION = 3
 SUPPORTED_SCHEMA_VERSIONS = (
     SCHEMA_VERSION_LEGACY, SCHEMA_VERSION_IDENTITY_ROUTED, SCHEMA_VERSION)
+
+# Fresh receipt 的目标 kernel 交付闭环。实现独立放在 stdlib-only 模块，producer、driver、
+# adapter 与三级门仍统一从本模块的 current strict validator 进入。
+TARGET_KERNEL_DELIVERY_KEY = "target_kernel_delivery_closure_v1"
+_global_defined_symbols = target_kernel_delivery._global_defined_symbols
+
+
+def build_target_kernel_delivery_closure(**kwargs):
+    """公开生产入口；把 closure 的错误统一收敛到本模块既有异常契约。"""
+    try:
+        return target_kernel_delivery.build_closure(
+            **kwargs, symbol_inspector=_global_defined_symbols)
+    except target_kernel_delivery.TargetKernelDeliveryError as ex:
+        raise VendorBuildReceiptError(str(ex)) from ex
+
+
+def validate_target_kernel_delivery_closure(closure, *, build_argv, live=False):
+    """公开校验入口；``live=True`` 会从声明根重读、重散列并重跑符号检查。"""
+    try:
+        return target_kernel_delivery.validate_closure(
+            closure, build_argv=build_argv, live=live,
+            symbol_inspector=_global_defined_symbols)
+    except target_kernel_delivery.TargetKernelDeliveryError as ex:
+        raise VendorBuildReceiptError(str(ex)) from ex
 
 #: 收据侧取源形态词表 —— **逐字复用 intake 侧常量**，不另起名字。
 PROVENANCE_GIT_PR = source_provenance.PROVENANCE_GIT_PR
@@ -670,6 +695,19 @@ def validate_for_acceptance(
             or not isinstance(tree.get("matches_pre_build"), bool)):
         raise VendorBuildReceiptError(
             "local_snapshot 正式收据缺 build 后子树复核，或 tree digest 与来源锚不一致")
+    closure = receipt.get(TARGET_KERNEL_DELIVERY_KEY)
+    validate_target_kernel_delivery_closure(
+        closure, build_argv=build.get("argv"), live=normalize_path)
+    try:
+        derived_opp = custom_opp_path(artifact.get("library_path"))
+    except VendorBuildReceiptError:
+        raise
+    declared_opp = ((closure.get("request") or {}).get("installed_opp_root")
+                    if isinstance(closure, dict) else None)
+    if not isinstance(declared_opp, str) \
+            or os.path.realpath(declared_opp) != os.path.realpath(derived_opp):
+        raise VendorBuildReceiptError(
+            "target kernel closure 的 installed_opp_root 与 vendor ELF 所属 custom OPP 根不一致")
     return summary
 
 
@@ -991,7 +1029,9 @@ def _validate_build_argv(build_argv, build_cwd):
     return argv
 
 
-def run_build(build_argv, build_cwd, library_path):
+def run_build(build_argv, build_cwd, library_path, *, requested_soc=None,
+              selected_op=None, expected_op_type=None, installed_opp_root=None,
+              package_opp_root=None, cmake_cache_path=None):
     """**真跑** build，返回唯一能喂给 :func:`produce_receipt` 的构建结果（有副作用）。
 
     ⚠ **没有「只记录不执行」模式**，这是刻意的，见模块 docstring：把退出码当参数收下的那条
@@ -1007,6 +1047,28 @@ def run_build(build_argv, build_cwd, library_path):
     也不设超时——vendor 全量构建本来就以十分钟计。
     """
     argv = _validate_build_argv(build_argv, build_cwd)
+    requested = {
+        "requested_soc": requested_soc,
+        "selected_op": selected_op,
+        "expected_op_type": expected_op_type,
+        "installed_opp_root": installed_opp_root,
+        "package_opp_root": package_opp_root,
+        "cmake_cache_path": cmake_cache_path,
+    }
+    if any(value is not None for value in requested.values()):
+        missing = sorted(key for key, value in requested.items()
+                         if not isinstance(value, str) or not value.strip())
+        if missing:
+            raise VendorBuildReceiptError(
+                "MISSING_EXPLICIT_TARGET: target kernel delivery 参数必须整组显式提供，缺 "
+                + ", ".join(missing))
+        try:
+            target_assets_before = target_kernel_delivery.target_manifest(
+                installed_opp_root, requested_soc, allow_missing=True)
+        except target_kernel_delivery.TargetKernelDeliveryError as ex:
+            raise VendorBuildReceiptError(str(ex)) from ex
+    else:
+        target_assets_before = None
     target = os.path.realpath(os.fspath(library_path))
     before = _library_state(target)
     started = time.time()
@@ -1028,7 +1090,7 @@ def run_build(build_argv, build_cwd, library_path):
             f"vendor ELF 在这次构建窗口内一个字节都没变：{target}"
             "（mtime_ns / size / sha256 三项全同）——这份收据要证明的正是「这个 .so 由这次 build "
             "产出」，对着一个预先存在、构建根本没碰过的文件出收据 = 宣称有门其实没门（fail-closed）")
-    return {
+    result = {
         "argv": argv,
         "cwd": build_cwd,
         "returncode": run.returncode,
@@ -1042,6 +1104,10 @@ def run_build(build_argv, build_cwd, library_path):
             "library_after": after,
         },
     }
+    if target_assets_before is not None:
+        result["target_delivery_request"] = requested
+        result["target_assets_before"] = target_assets_before
+    return result
 
 
 def _validate_build_result(build_result):
@@ -1163,6 +1229,26 @@ def produce_receipt(*, build_result, declared_source_form=None,
             "pr_head_sha": pr_head_sha,
             "repo": _require_nonempty_str(repo, "repo（PR 通路必须显式给仓标识）"),
         }
+    delivery = result.get("target_delivery_request")
+    if not isinstance(delivery, dict):
+        raise VendorBuildReceiptError(
+            "MISSING_EXPLICIT_TARGET: fresh vendor receipt 缺 target kernel delivery 显式参数；"
+            "不能只凭 build rc=0 与 host vendor ELF 改写判定目标 SoC kernel 已交付")
+    target_assets_before = result.get("target_assets_before")
+    if not isinstance(target_assets_before, dict):
+        raise VendorBuildReceiptError(
+            "MISSING_EXPLICIT_TARGET: fresh vendor receipt 缺 run_build 在 build 前取得的 "
+            "target_assets_before，不能证明 selected op 是本轮交付")
+    derived_opp = custom_opp_path(elf)
+    declared_opp = delivery.get("installed_opp_root")
+    if (not isinstance(declared_opp, str)
+            or os.path.realpath(declared_opp) != derived_opp):
+        raise VendorBuildReceiptError(
+            "installed_opp_root 与本轮 artifact.library_path 反推的 custom OPP 根不一致")
+    closure = build_target_kernel_delivery_closure(
+        **delivery, build_argv=argv,
+        build_cwd=(snapshot_digest or {}).get("source_root", build_cwd),
+        target_assets_before=target_assets_before)
     receipt = {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
@@ -1170,6 +1256,7 @@ def produce_receipt(*, build_result, declared_source_form=None,
         "source": source,
         "build": build,
         "artifact": {"library_path": elf, "library_sha256": elf_sha},
+        TARGET_KERNEL_DELIVERY_KEY: closure,
         "degradations": [],
         "producer": {
             "tool": _PRODUCER_TOOL,
@@ -1331,6 +1418,18 @@ def main(argv=None):
                    help="仓标识；本地源码通路缺省取凭据里的源码树根")
     e.add_argument("--library", required=True, help="被加载的 vendor ELF 绝对路径")
     e.add_argument("--build-cwd", required=True, help="构建命令的工作目录")
+    e.add_argument("--requested-soc", required=True,
+                   help="调用方显式请求的目标 SoC；不从日志/路径/metadata 推断")
+    e.add_argument("--selected-op", required=True,
+                   help="构建系统选择的 op token（如 build --ops 的精确值）")
+    e.add_argument("--expected-op-type", required=True,
+                   help="目标 ops-info 必须精确包含的 op type")
+    e.add_argument("--installed-opp-root", required=True,
+                   help="安装后 custom OPP vendor 包根，须与 --library 布局同源")
+    e.add_argument("--package-opp-root", required=True,
+                   help="安装前 package 内 vendor 包根；缺失即不具正式验收资格")
+    e.add_argument("--cmake-cache", required=True,
+                   help="本轮 build 的 CMakeCache.txt；SoC/op 必须与 argv 和显式请求同时一致")
     e.add_argument("--returncode", type=int, default=None,
                    help="**期望**的构建退出码（可选断言）。⚠ 收据里记的是本命令**实测**到的值："
                         "`emit` 会真的执行 --build-argv，没有「只记录不执行」模式；"
@@ -1374,6 +1473,8 @@ def main(argv=None):
          "被测 ELF 会被一份 JSON 原子替换掉，这一轮直接没有 DUT 了"),
         ("--snapshot-digest", args.snapshot_digest,
          "build 前那份对照凭据被覆盖，构建前后两次树对账就都没了"),
+        ("--cmake-cache", args.cmake_cache,
+         "目标 SoC/op 的机器校验凭据会被覆盖，target kernel closure 失效"),
     ))
     if args.repo is not None:
         assert_repo_has_no_credentials(args.repo, "--repo")
@@ -1382,7 +1483,13 @@ def main(argv=None):
         # PR 通路（只给 --pr-head-sha）没有 source_root 这个对照物，做不了这一步。
         assert_build_tree_matches_digest(digest, args.build_cwd)
     # ⚠ 顺序：先真跑 build，再产收据。`--returncode` 只是期望值断言，不是被记录的那个值。
-    result = run_build(args.build_argv, args.build_cwd, args.library)
+    result = run_build(
+        args.build_argv, args.build_cwd, args.library,
+        requested_soc=args.requested_soc, selected_op=args.selected_op,
+        expected_op_type=args.expected_op_type,
+        installed_opp_root=args.installed_opp_root,
+        package_opp_root=args.package_opp_root,
+        cmake_cache_path=args.cmake_cache)
     if args.returncode is not None and args.returncode != result["returncode"]:
         raise VendorBuildReceiptError(
             f"--returncode 期望 {args.returncode}，实测 {result['returncode']}——"

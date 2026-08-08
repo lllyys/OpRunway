@@ -249,7 +249,7 @@ def _vendor_build_provenance(vendor):
     # driver 侧独立再校一遍，不依赖 adapter 已经校过——两处都是信任边界。
     try:
         vendor_build_receipt.validate_for_acceptance(
-            receipt, library_path=vendor, library_sha256=_sha_file(vendor),
+            receipt, library_path=os.path.realpath(vendor), library_sha256=_sha_file(vendor),
             # 真机侧拿到的是 realpath 后的绝对路径，故按 realpath 比对；
             # 离线复核方比的是收据里逐字记录的字符串（不碰文件系统）。
             normalize_path=True)
