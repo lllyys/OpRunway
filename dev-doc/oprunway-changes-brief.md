@@ -4,6 +4,8 @@
 
 ## 2026-08-07 · 三算子 N10 单卡正式验收与实测回修
 
+- Workflow 口径收敛为纯 NPU 验收：删除 AGENTS、根 README 与插件 README 中的 GPU/Task 3 流程，
+  性能统一只产 NPU msprof 实测，不采集、消费或比较其它设备数据。
 - 文档清理：根 `AGENTS.md` 从 773 行压到 262 行，只保留 current 可执行仓规；`oprunway-todo.md`
   从 685 行重写为 53 行 active backlog；删除旧 handoff、已完成/被替代计划、历史状态快照与无效设计稿，
   并修复产品 README、样例 spec、代码注释和 archive 文档中的活引用。仍有活代码/canon 引用的设计依据
