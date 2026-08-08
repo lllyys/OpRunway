@@ -18,7 +18,9 @@ OpRunway 是昇腾 NPU 算子验收工作区。输入是**调用方给定的任�
 
 1. Task 1：从任务书和源码生成 spec、caseset 与 golden。
 2. Task 2：同一 caseset 在 NPU 上生成精度证据和 msprof 性能数据。
-3. Task 3：仅当用户明确要求 GPU 对比时，消费外部 GPU 数据；默认不执行。
+
+Workflow 不负责 GPU，也不得连接、运行、采集或消费 GPU 数据。任务书出现 GPU 口径时，只按 §6
+解析为 CPU 或 NPU 侧可执行口径，并如实记录未覆盖项。
 
 ## 2 · 插件根与本地配置
 
@@ -164,7 +166,7 @@ Fresh 构建必须先 `snapshot-digest`，再由 `emit` 真正执行构建并生
 
 - 无性能要求、要求 GPU 比对、新增 dtype/shape/rank/新算子，或任务书明确属于内存优化时，默认都只做
   NPU msprof kernel-only 实测。资源条款仍按 §6.3 处理，不得据此宣称内存达标。
-- 只有用户明确要求 GPU 对比时才执行 Task 3；缺 GPU 数据不得阻塞默认验收。
+- GPU 性能数据不属于本 workflow 的输入或产物；不建立 Task 3，不因缺 GPU 数据阻塞验收。
 - Spec 必须用 `perf.measure_only_authorization` 记录受控 ground、cite、quote 和任务书摘要，缺一 fail-closed。
 - 任务书中的比值、绝对门限或吞吐条款若未实测，必须进入 `task_pr_gaps` 标 `UNVALIDATED`；不得因有
   NPU 绝对耗时而宣称条款达标。
@@ -176,6 +178,7 @@ Fresh 构建必须先 `snapshot-digest`，再由 `emit` 真正执行构建并生
 - 这是口径解析，不产生“GPU 真值未验收”gap；但阈值若来自不同实现，须标来源差异并由人确认。
 - 映射按库能力数据驱动，禁止按算子名分支；粗粒度 `gpu_lib` 或无 CPU 对应时 fail-closed，询问用户。
 - 解析后的 `method_kind` 必须属于 `precision_policy.RUNNABLE_METHOD_KINDS`。
+- Workflow 不运行 GPU；这里仅解析任务书口径并执行 CPU golden 与 NPU DUT 的精度验收。
 
 ### 6.3 验收维度只有精度与性能
 

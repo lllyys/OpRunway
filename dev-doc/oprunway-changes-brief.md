@@ -4,8 +4,8 @@
 
 ## 2026-08-07 · 三算子 N10 单卡正式验收与实测回修
 
-- Workflow 默认只做 NPU 精度与 msprof；任务书写 GPU 精度真值时解析为同族 CPU，只有用户明确要求时
-  才启用 Task 3 消费外部 GPU 性能数据。
+- Workflow 不负责或操作 GPU：任务书写 GPU 精度真值时解析为同族 CPU，写 GPU 性能对比时只测 NPU
+  msprof 并挂未验收条款；不建立 Task 3，不连接、运行、采集或消费 GPU 数据。
 - 文档清理：根 `AGENTS.md` 从 773 行压到 262 行，只保留 current 可执行仓规；`oprunway-todo.md`
   从 685 行重写为 53 行 active backlog；删除旧 handoff、已完成/被替代计划、历史状态快照与无效设计稿，
   并修复产品 README、样例 spec、代码注释和 archive 文档中的活引用。仍有活代码/canon 引用的设计依据

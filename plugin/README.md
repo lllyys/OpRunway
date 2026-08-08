@@ -1,6 +1,6 @@
 # OpRunway — NPU 算子验收 agent+skill 体系
 
-输入 = **算子任务书（md 或链接）+ 被测源码（在线 locator 或本地快照）** → agent 自动产 spec、跑测、出**裁决 + 中文报告**。主链为：用例生成(ST) → NPU 精度 + msprof 性能跑测；只有用户明确要求时才追加 GPU 性能对比。
+输入 = **算子任务书（md 或链接）+ 被测源码（在线 locator 或本地快照）** → agent 自动产 spec、跑测、出**裁决 + 中文报告**。主链为：用例生成(ST) → CPU golden 对 NPU DUT 的精度验收 + NPU msprof 性能跑测。Workflow 不连接、运行、采集或消费 GPU 数据；任务书中的 GPU 口径只按仓规解析或挂账。
 
 ## 怎么用：在会话里对话，不碰脚本
 
