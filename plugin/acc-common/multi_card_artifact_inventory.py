@@ -8,7 +8,17 @@ import os
 
 
 SCHEMA = "oprunway.multi_card_artifact_inventory"
-VERSION = 3
+VERSION = 4
+
+
+_SINGLE_EQUIVALENCE_INPUTS = {
+    "single_spec": "spec.json",
+    "single_caseset": "caseset.json",
+    "single_source_facts": "source_facts.json",
+    "single_evidence": "evidence.json",
+    "single_verdict": "verdict.json",
+    "single_receipt": "work/cpp_extension_receipt.json",
+}
 
 
 def _sha(path):
@@ -58,6 +68,9 @@ def _external(receipt, prefix):
 def build(report_root, single_work):
     root = os.path.realpath(report_root)
     single_work = os.path.realpath(single_work)
+    single_root = os.path.dirname(single_work)
+    if os.path.basename(single_work) != "work":
+        raise ValueError("single_work 须为 fresh single root 下的固定 work 目录")
     top = {
         "parent_spec": "spec.json", "parent_caseset": "parent-caseset.json",
         "staged_caseset": "caseset.json", "source_facts": "source_facts.json",
@@ -98,12 +111,19 @@ def build(report_root, single_work):
         "artifact_root": root,
         "generated_from": {
             "task2_gate_replay_entry": "validate_acceptance_state._gate_multi_card_receipt",
+            "equivalence_replay_entry": "multi_card_verdict_equivalence.build_equivalence",
             "inventory_scope": "precision_task2_transitive_closure",
         },
         "artifacts": sorted(artifacts, key=lambda row: row["role"]),
         "top_work_artifacts": _closure(
             os.path.join(root, "work"), "top_work", relative_to=root),
-        "shards": shards, "single_work": single_work,
+        "shards": shards, "single_root": single_root, "single_work": single_work,
+        "single_equivalence_inputs": sorted(
+            (_row(role, os.path.join(single_root, rel), relative_to=single_root)
+             for role, rel in _SINGLE_EQUIVALENCE_INPUTS.items()),
+            key=lambda row: row["role"]),
+        "single_root_artifacts": _closure(
+            single_root, "single_root", relative_to=single_root),
         "single_artifacts": _closure(single_work, "single", relative_to=single_work),
         "external_artifacts": external,
     }

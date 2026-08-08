@@ -8,7 +8,8 @@ import multi_card_artifact_inventory as I
 
 class MultiCardArtifactInventoryTest(unittest.TestCase):
     def test_recursive_closure_and_external_receipts(self):
-        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as single:
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as single_root:
+            single = os.path.join(single_root, "work")
             external = os.path.join(root, "external.so")
             with open(external, "wb") as dst: dst.write(b"elf")
             receipt = {"vendor": {"library_path": external}, "runtime": {"cann": {
@@ -34,14 +35,29 @@ class MultiCardArtifactInventoryTest(unittest.TestCase):
                     dst.write(b"out")
             for rel in ("shard_result.json", "device_identity.json"):
                 with open(os.path.join(work, rel), "w") as dst: json.dump({}, dst)
+            for rel in ("spec.json", "caseset.json", "source_facts.json",
+                        "evidence.json", "verdict.json"):
+                with open(os.path.join(single_root, rel), "w") as dst: json.dump({}, dst)
             got = I.build(root, single)
-            self.assertEqual(got["schema_version"], 3)
+            self.assertEqual(got["schema_version"], 4)
             self.assertTrue(any(row["role"].endswith("nested/out.bin")
                                 for row in got["shards"][0]["formal_artifacts"]))
             self.assertEqual(len(got["top_work_artifacts"]), 1)
             self.assertEqual(len(got["external_artifacts"]), 6)
+            self.assertEqual(got["single_root"], os.path.realpath(single_root))
+            self.assertEqual(
+                {row["role"] for row in got["single_equivalence_inputs"]},
+                set(I._SINGLE_EQUIVALENCE_INPUTS))
+            root_paths = {row["path"] for row in got["single_root_artifacts"]}
+            self.assertIn("verdict.json", root_paths)
+            self.assertIn("work/cpp_extension_receipt.json", root_paths)
             os.symlink(external, os.path.join(work, "bad-link"))
             with self.assertRaises(ValueError): I.build(root, single)
+
+    def test_single_work_must_be_fixed_work_directory(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as single:
+            with self.assertRaisesRegex(ValueError, "固定 work"):
+                I.build(root, single)
 
 
 if __name__ == "__main__": unittest.main()

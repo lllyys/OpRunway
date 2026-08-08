@@ -27,9 +27,11 @@ Remainder 的 `PASSED_WITH_GAPS` 也不是无条件 `PASS`。
   取材并落快照。
 - **三份正式 acceptance 的 DUT 来源都是本地来源**：三个源码均以
   `local_source → local_snapshot` 取材、构建和验收。
-- **在线任务书不等于在线 PR 来源**。补充在线取材已得到 Roll 的 exact `gitcode_pr` 完整事实包，
-  但 Bernoulli 缺 exact PR/fork/ref/head，Remainder 的两个候选都因目标目录下无 changed files 而
-  blocked，不能任选其一。故在线 PR 来源支持是 `PARTIALLY_EXERCISED`，而不是三算子全部完成。
+- **在线任务书不等于在线 PR 来源**。补充在线取材已得到 Roll 的 exact `gitcode_pr` 完整事实包；
+  Bernoulli 仍缺 exact PR/fork/ref/head；Remainder 的 MR 4249 虽逐字链接本任务书并命中正式目标，
+  但 private fork head 无法枚举，current producer 正式 intake 以 rc=3 阻断。MR 4269/4296 是另外两条
+  experimental-target 实现，不能混作 MR 4249 的替代来源。故在线 PR 来源支持是
+  `PARTIALLY_EXERCISED`，而不是三算子全部完成。
 - Roll 的在线事实包只证明 exact PR 身份和取材闭环；上表正式 Roll acceptance 仍绑定本地 snapshot，
   不能把补充 intake 冒充为一次 PR 来源的构建、执行或验收。
 - 三份正式 acceptance 都是**单卡**结果；另以原正式 caseset 做了 precision-only 多卡分片复验：
@@ -40,7 +42,7 @@ Remainder 的 `PASSED_WITH_GAPS` 也不是无条件 `PASS`。
 
 含真实机器绝对路径的完整账本只保存在 gitignored
 `reports/oprunway-roll-bernoulli-remainder-rge-2026-08-07.json`，并在 A3 本批证据目录留有同字节副本；
-其最终 SHA-256 为 `efeb056b5010e729c9d61aa3f60055728a781de7964ae871bcdd882bb531b5ba`，
+其最终 SHA-256 为 `2d3d4f69bae0bf98660a491a2424881743a343c712862ba623edb9785de6ced3`，
 它不进入 Git。tracked 的通用校验器是
 [`validate_rge_ledger.py`](../plugin/acc-common/validate_rge_ledger.py)，变异测试是
 [`test_validate_rge_ledger.py`](../plugin/acc-common/test_validate_rge_ledger.py)。
@@ -56,15 +58,16 @@ Remainder 的 `PASSED_WITH_GAPS` 也不是无条件 `PASS`。
 7. `gate_passed` 不能升级失败裁决；
 8. N0–N10 必须完整、有序，每个 evidence ref 必须指向登记产物或 A3 测试；
 9. 在线 PR 能力、各算子实际 intake 状态与正式 acceptance 的来源形态严格分栏；
-10. 多卡 v3 inventory 对顶层固定工件、顶层 `work`、每片 formal/pre-smoke、正式 single work
-    做普通文件精确递归闭包；拒绝 symlink、越界、缺失、额外文件，并现场复算 bytes/SHA；
+10. 多卡 v4 inventory 对顶层固定工件、顶层 `work`、每片 formal/pre-smoke、正式 single root/work
+    做普通文件精确递归闭包，并显式登记 single equivalence 的六项直接输入；拒绝 symlink、越界、
+    缺失、额外文件，并现场复算 bytes/SHA；
 11. 每片逐字加载 caseset、cpp snapshot、plan、receipt、device identity、shard result、manifest、
     vendor/CANN ELF 与输入/golden/out，再只用这些磁盘 result 重放 merge；
 12. 直接复用当前 Task2 multi gate，重放单卡 adapter receipt、single/multi equivalence 与 Bernoulli
     stochastic precondition/formal/collection/evaluation；旧 gate log 只作 trace，不作信任根；
 13. `--verify-artifacts` 在证据所在环境逐文件复算所有登记 SHA-256。
 
-A3 定向执行结果为 30/30 tests `OK`，包含产物 SHA、正式产物重投影、R/G/E
+A3 定向执行结果为 32/32 tests `OK`，包含产物 SHA、正式产物重投影、R/G/E
 分母、终态顺序、在线 intake、N0–N10 证据映射、仓内测试日志身份变异、整片 coherent replacement，
 以及真实 stochastic formal 的正例与 coherent replacement 负例；
 CLI 输出：
@@ -73,17 +76,25 @@ CLI 输出：
 RGE_LEDGER_VALID operators=3 artifacts_verified=yes
 ```
 
-最终 CLI 日志 SHA-256 为 `5dec1961db9ad6cf76215fac68baf5f6673082b0643a68aba4d33311b86429f0`，
+最终 CLI 日志 SHA-256 为 `9bb6a43dd7d8fdd0688c06fd021a2adbc6ba144607ea5428f76dcab8d392f9b7`，
 rc 文件为 0、SHA-256 `9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa`。
 
 最终完整隔离回归以完整 `plugin + AGENTS.md` fresh snapshot、清空全部 `OPRUNWAY_*`、不排除任何
-`test_*.py` 并启用 verbose 身份日志执行：2637 tests `OK (skipped=7)`，退出码 0；日志 SHA-256 为
-`5b82768b797fbc0d54fbd8957e940afa304b16adb1363153315c580782e87e97`。`compileall` 返回 0，空日志
+`test_*.py` 并启用 verbose 身份日志执行：2641 tests `OK (skipped=7)`，退出码 0；日志 SHA-256 为
+`835fe322fd088e577440d19a217f393cadf2364c58308c556f6f45a7e77e14f4`。`compileall` 返回 0，空日志
 SHA-256 为 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`。另有 source 相关定向
 325/325 `OK (skipped=1)`；fetch/source 取材专项日志明确写出
 `Ran 119 tests` 与 `OK (skipped=1)`；这是 119 个总测试中含 1 个 skip，不是“119 通过再加 1 skip”。
 它证明 GitCode PR URL 解析、head SHA 固定、网络失败分层与本地 snapshot 两条通路的通用能力；
 只有 Roll 的补充 intake 实际走到了 exact `gitcode_pr` complete。
+
+N0 三门批收据 SHA-256 为
+`a88a6df36140657e563abbae9d4db90c205ed0b9c254c2af15a366097c7fd63f`；Bernoulli、Remainder、Roll
+逐算子收据依次为 `83ae4f32b23aba7864a097fddb0a0d57e016c8b9c2744a26d91b4af0f89b8fec`、
+`26f81aabd5646b47f0ccec2ba24d24cc7d7d28630af7b80a63a00023a747ea70`、
+`a2a0d5cf8d4e3da0192f224cdd21b1dc856f16a695cb3d5fa6d2f95cd1746da4`。每份收据都绑定三条实际
+argv、各自 log/rc、taskdoc validation receipt、dry-run ledger 和 spec-change 结果；总账会沿引用重放，
+不是只读取顶层 `VERIFIED` 自报。
 
 ### 2.3 在线 PR 来源补充取材
 
@@ -91,7 +102,7 @@ SHA-256 为 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`�
 |---|---|---|---|
 | Roll | `COMPLETE` | [MR 4250](https://gitcode.com/cann/ops-math/merge_requests/4250)；fork `Twilight-Fanyi/ops-math`；ref `aclnn-roll-complex64`；exact head `ddfbc6630d43944d315aa111dccd96611e0f9b71`；目标 `experimental/math/roll`；25 文件 manifest `9f59aecfb07d09198bacfe68149f542caeaf237593f3c6d2a461712cd49e1fa3` | exact `gitcode_pr` intake 已完成；未据此重跑正式 acceptance |
 | Bernoulli | `BLOCKED` | `missing_exact_online_identity` | 缺 exact PR/fork/ref/head，禁止猜测 |
-| Remainder | `BLOCKED` | MR 4269、4296 均 `rc=3/no_changed_files_under_target_dir` | 候选歧义，禁止任选一个冒充 exact 来源 |
+| Remainder | `BLOCKED` | MR 4249 逐字链接任务书、命中正式目标，但 private fork head target tree 不可枚举，current intake rc=3；MR 4269/4296 为另两条 experimental-target 实现 | MR 4249 是强候选但未形成 complete facts；禁止用 4269/4296 或本地目录名补认 exact 来源 |
 
 补充在线身份审计 SHA-256 为
 `573f4d77b95a8814658254ab6414bcd50f0b7120771596380f3569608145fba4`。Roll complete intake 的
@@ -112,14 +123,15 @@ source envelope 把 repository/ref/target/manifest 全部绑在同一份 facts �
 
 ### 2.4 多卡 precision-only 等价复验
 
-fresh v3 为每个算子分别生成 `oprunway.multi_card_artifact_inventory/v3`。inventory 不只登记
-manifest/result：它还精确闭包顶层 work、每片 formal、每片 pre-smoke、正式 single work、生成源码、
-extension manifest/ELF、vendor/CANN 定义 ELF 与全部 input/golden/out，并由总账现场调用当前 Task2 gate。
+fresh v4 为每个算子分别生成 `oprunway.multi_card_artifact_inventory/v4`。inventory 不只登记
+manifest/result：它还精确闭包顶层 work、每片 formal、每片 pre-smoke、正式 single root/work、
+single equivalence 六项直接输入、生成源码、extension manifest/ELF、vendor/CANN 定义 ELF 与全部
+input/golden/out，并由总账现场调用当前 Task2 gate。
 三个 inventory 的稳定 ID 与 SHA-256 为：
 
-- `multicard_v3_bernoulli`：`50badd31c7320c9e666b31816e3657c48da61a202965d4e5bdefb98f25203b22`；
-- `multicard_v3_remainder`：`ab89c371f21af882499a12d547f74b9e8500b7f41eb694698cb0cf2bb4900b83`；
-- `multicard_v3_roll`：`2104b24cd2e2f557d5fd23bc04a5c87bd0b81aa9ff563547afa13d4fd9280c86`。
+- `multicard_v4_bernoulli`：`f8fcabc48c1204eb3520a57c2c8537adb38288e29d7edaf078cb7f680c3d80d8`；
+- `multicard_v4_remainder`：`998fcbdc315c9b84c086237980e1383e6b1b3623badfe977ae569109d52188bb`；
+- `multicard_v4_roll`：`b7992fd0f21a4a981f78e347ac7cad8a43df795b12aa20faf8bcf318fb3f9ca0`。
 
 所有 shard 使用独立工作目录、没有共享执行写目录。这批复验没有采集或重放 msprof。
 
@@ -129,7 +141,7 @@ extension manifest/ELF、vendor/CANN 定义 ELF 与全部 input/golden/out，并
 | Remainder | devices `[4,5,6]`；`case_order_round_robin_v1` / `[6,6,6]` | `[6/0,6/0,6/0]` | 18/0；SHA `df4617204c4a396d8e21be346f4d9efdea8f302db0a794e08389ce4f7b095d3b` | `passed=true`；SHA `4b886bdac4cdb40d5939a0a62ec16381fd534d201e655ce1660384364d4ca529` |
 | Roll | devices `[4,5,6]`；`atomic_profile_affinity_round_robin_v1` / `[84,84,84]` | `[81/3,81/3,81/3]` | 243/9；SHA `3998130be206ee629b7575b81e594ad48c9975a1aa31579ace11916df0fbbc24` | `passed=true`；SHA `e3c6eea26ca117aff9f982824cafc47540943fb6830c4169b5ed938e2145888c` |
 
-三份单卡/多卡 verdict SHA 逐算子相同，三份 fresh v3 Task2 gate 均现场重放 rc=0。总账并不信任
+三份单卡/多卡 verdict SHA 逐算子相同，三份 fresh v4 Task2 gate 均现场重放 rc=0。总账并不信任
 旧 gate log 的文字；它从登记的磁盘闭包重新验证 loader、CANN、source/build receipt、ELF、输出、
 golden、shard result、merge 和 equivalence。Bernoulli 的 stochastic formal 内容也由正式 single work
 重算后与登记 artifact/evidence 对账，而不是只核一个自报 SHA。
@@ -138,9 +150,9 @@ golden、shard result、merge 和 equivalence。Bernoulli 的 stochastic formal 
 
 | 阶段 | 机读状态 | 本轮证据 | 未闭合项 |
 |---|---|---|---|
-| N0 基线与差量 | `VERIFIED` | 三份正式 spec/caseset、Roll exact PR 补充取材、spec-change 测试 | 无阶段级缺口 |
+| N0 基线与差量 | `VERIFIED` | 三算子分别以当前正式 spec 独立执行并保存 `validate_taskdoc_input`、`gen_cases --dry-run`、`spec_change_gate --check` 的 argv/log/rc/output/receipt；三份 dry-run emitted 分别为 98/18/252 | 无阶段级缺口 |
 | N1 输出写入门 | `VERIFIED` | 三份 precision evidence、driver sentinel 测试 | 无阶段级缺口 |
-| N2 显式 ND format | `VERIFIED` | 三份 extension receipt、codegen 测试 | 无阶段级缺口 |
+| N2 显式 ND format | `VERIFIED` | fresh single 及每片 formal/pre-smoke 的 manifest、receipt 与生成 `oprunway_extension.cpp` 现场重投影 `ACL_FORMAT_ND` | 无阶段级缺口 |
 | N3 CANN 版本门 | `VERIFIED` | 三份 receipt 均由 API 实测 CANN 9.0.1；版本 mutation | 无阶段级缺口 |
 | N4 DUT 身份/构建 | `VERIFIED` | 三份 VERIFIED build receipt、三枚 ELF、双符号定义者 | 无阶段级缺口 |
 | N5 权威覆盖/RGE/dtype | `VERIFIED_WITH_STRUCTURED_GAPS` | 三份自产 caseset、dtype requirement ledger | Roll 的 int16/int64 未生成，已结构化挂账 |
@@ -148,7 +160,7 @@ golden、shard result、merge 和 equivalence。Bernoulli 的 stochastic formal 
 | N7 rank0/空数组/layout | `VERIFIED` | Roll 空 dims、empty、rank0、layout；Bernoulli rank0/非连续；mutation | exact DUT 的 rank0 失败是被门检出的正式结果，不是门缺失 |
 | N8 Bernoulli 随机前提 | `VERIFIED` | formal stochastic evidence `SATISFIED`，整体置信度 0.999 | 无阶段级缺口 |
 | N9 性能证据 | `VERIFIED_WITH_STRUCTURED_GAPS` | 三份 measure-only msprof 报告 | 三份“不低于/不影响原算子性能”均未取 baseline |
-| N10 正式见证/双来源 | `PARTIALLY_VERIFIED` | 三算子单卡正式裁决、多卡 precision-only 等价、Roll exact PR intake 已完成 | Bernoulli exact online identity 缺失；Remainder online identity 歧义；A2/A5 产品覆盖见各算子 gap |
+| N10 正式见证/双来源 | `PARTIALLY_VERIFIED` | 三算子单卡正式裁决、多卡 precision-only 等价、Roll exact PR intake 已完成 | Bernoulli exact online identity 缺失；Remainder MR 4249 private head 无法完成 intake；A2/A5 产品覆盖见各算子 gap |
 
 因此，三算子**单卡正式验收和多卡精度等价复验都已实跑**，但双来源只闭合 Roll，统一计划 N10
 仍不能标成完全完成。

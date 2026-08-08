@@ -140,6 +140,7 @@ TENSOR_FORMAT_SOURCE_DEFAULT = "default_unverified"
 #: manifest/driver receipt 里记录的 C++ ACL 枚举词。不记数字 ``2``：这份
 #: 收据要回答「生成桥实际把张量转成什么 format」，不是再造一份 CANN 枚举表。
 ACL_FORMAT_ND_TOKEN = "ACL_FORMAT_ND"
+MULTI_INPUT_FORMAT_SOURCE_PARAMETER_CONTRACT = "spec_parameter_contract"
 
 #: 生成 ND 转换器时用的函数名（只在 `nd` 档出现在生成源码里）。
 _ND_CONVERTER = "OprunwayConvertNdTensor"
@@ -395,11 +396,19 @@ def _host_scalar_combinations(bundle, active_names):
 
 
 def _multi_input_receipt(bundle, rows):
-    tensor_parameters = [
-        {"name": row["name"], "io": row["io"], "kind": row["kind"],
-         "binding": row["binding"], "format": row["tensor_format"]}
-        for row in rows if row["io"] in ("in", "out")
-    ]
+    tensor_parameters = []
+    for row in rows:
+        if row["io"] not in ("in", "out"):
+            continue
+        item = {"name": row["name"], "io": row["io"], "kind": row["kind"],
+                "binding": row["binding"], "format": row["tensor_format"]}
+        if row["tensor_format"] == TENSOR_FORMAT_ND:
+            item.update({
+                "requested_format": TENSOR_FORMAT_ND,
+                "effective_acl_format": ACL_FORMAT_ND_TOKEN,
+                "format_source": MULTI_INPUT_FORMAT_SOURCE_PARAMETER_CONTRACT,
+            })
+        tensor_parameters.append(item)
     scalar_names = [
         row["name"] for row in rows
         if row["io"] == "attr"

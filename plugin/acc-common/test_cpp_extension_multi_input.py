@@ -44,6 +44,16 @@ class MultiInputCodegenTest(unittest.TestCase):
              ("right", "in", "torch_npu_rank_default"),
              ("out", "out", "nd")],
         )
+        nd_rows = [row for row in receipt["tensor_parameters"]
+                   if row["format"] == "nd"]
+        self.assertTrue(nd_rows)
+        self.assertTrue(all(row["requested_format"] == "nd"
+                            and row["effective_acl_format"] == "ACL_FORMAT_ND"
+                            and row["format_source"] == "spec_parameter_contract"
+                            for row in nd_rows))
+        default_row = next(row for row in receipt["tensor_parameters"]
+                           if row["format"] == "torch_npu_rank_default")
+        self.assertNotIn("effective_acl_format", default_row)
         self.assertEqual(
             receipt["contract_sha256"],
             C.multi_input_contract.resolve_spec_contract(spec)["sha256"],
@@ -135,6 +145,22 @@ class MultiInputAdapterTest(unittest.TestCase):
             manifest, {"multi_input_receipt": copy.deepcopy(manifest["multi_input_receipt"])})
         with self.assertRaisesRegex(A.CppExtensionAdapterError, "multi_input_receipt"):
             A._validate_multi_input_receipt(manifest, {})
+
+    def test_nd_effective_acl_literal_and_source_mutations_are_rejected(self):
+        spec = _binary_spec()
+        with tempfile.TemporaryDirectory() as out:
+            manifest = C.generate(spec, out)
+        for key, value in (("requested_format", "nchw"),
+                           ("effective_acl_format", "ACL_FORMAT_NCHW"),
+                           ("format_source", "self_reported")):
+            bad = copy.deepcopy(manifest)
+            row = next(item for item in bad["multi_input_receipt"]["tensor_parameters"]
+                       if item["format"] == "nd")
+            row[key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(
+                    A.CppExtensionAdapterError, "requested/effective/source"):
+                A._validate_multi_input_receipt(
+                    bad, {"multi_input_receipt": bad["multi_input_receipt"]})
 
     def test_evidence_carries_the_exact_parameter_identity(self):
         spec = _binary_spec()

@@ -1848,6 +1848,32 @@ def _validate_multi_input_receipt(manifest, receipt):
             or any(char not in "0123456789abcdef" for char in digest):
         raise CppExtensionAdapterError(
             "manifest.multi_input_receipt.contract_sha256 非小写 sha256")
+    tensors = expected.get("tensor_parameters")
+    if not isinstance(tensors, list):
+        raise CppExtensionAdapterError(
+            "manifest.multi_input_receipt.tensor_parameters 非列表")
+    for index, row in enumerate(tensors):
+        if not isinstance(row, dict):
+            raise CppExtensionAdapterError(
+                f"multi_input tensor_parameters[{index}] 非对象")
+        fmt = row.get("format")
+        nd_fields = {
+            "requested_format": cpp_extension_codegen.TENSOR_FORMAT_ND,
+            "effective_acl_format": cpp_extension_codegen.ACL_FORMAT_ND_TOKEN,
+            "format_source": (
+                cpp_extension_codegen.MULTI_INPUT_FORMAT_SOURCE_PARAMETER_CONTRACT),
+        }
+        if fmt == cpp_extension_codegen.TENSOR_FORMAT_ND:
+            if any(row.get(key) != value for key, value in nd_fields.items()):
+                raise CppExtensionAdapterError(
+                    f"multi_input tensor_parameters[{index}] ND requested/effective/source 漂移")
+        elif fmt == cpp_extension_codegen.TENSOR_FORMAT_TORCH_NPU_DEFAULT:
+            if any(key in row for key in nd_fields):
+                raise CppExtensionAdapterError(
+                    f"multi_input tensor_parameters[{index}] rank-default 冒领 ACL_FORMAT_ND")
+        else:
+            raise CppExtensionAdapterError(
+                f"multi_input tensor_parameters[{index}].format 非受控值")
     if recorded != expected:
         raise CppExtensionAdapterError(
             "receipt.multi_input_receipt 未原样镜像 manifest 的逐参数契约")

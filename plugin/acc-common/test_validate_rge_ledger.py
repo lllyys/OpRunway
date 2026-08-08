@@ -16,9 +16,12 @@ import cpp_extension_adapter
 import cpp_extension_identity
 import multi_card_shards
 import multi_card_verdict_equivalence
+import numpy as np
+import precision_policy
 import source_provenance
 import vendor_build_receipt
 import validate_rge_ledger as rge
+import validator
 from test_gen_cases_stochastic import _spec as stochastic_spec
 from test_stochastic_adapter import _fixture as stochastic_fixture
 
@@ -126,6 +129,13 @@ def _materialize_work(
     work.mkdir(parents=True)
     bundle = work / "cpp_extension"
     bundle.mkdir()
+    csrc = bundle / "csrc"
+    csrc.mkdir()
+    (csrc / "oprunway_extension.cpp").write_text(
+        "return aclCreateTensorFunc(nullptr, 0, 0, nullptr, 0, nullptr, "
+        "ACL_FORMAT_ND, nullptr);\n",
+        encoding="utf-8",
+    )
     extension = bundle / "fixture_extension.so"
     extension.write_bytes(b"fixture-extension")
     manifest = {
@@ -134,6 +144,13 @@ def _materialize_work(
         "namespace": "oprunway_fixture",
         "spec_sha256": rge._canonical_sha256(spec),
         "variants": [{"entrypoint": "invoke_v0", "stage2_form": "standard"}],
+        "tensor_acl_format": "nd",
+        "tensor_acl_format_source": "spec_declared",
+        "tensor_format_receipt": {
+            "requested": "nd",
+            "effective_acl_format": "ACL_FORMAT_ND",
+            "source": "spec_declared",
+        },
         "degradations": [],
     }
     plan = {
@@ -199,6 +216,7 @@ def _materialize_work(
         },
         "invocation": cpp_extension_adapter.build_invocation_accounting(
             plan, produced_case_ids=produced, failed_case_ids=failed),
+        "tensor_format_receipt": copy.deepcopy(manifest["tensor_format_receipt"]),
     }
     _write_json(work / "cpp_extension_receipt.json", receipt)
     receipt_sha = rge._canonical_sha256(receipt)
@@ -211,6 +229,41 @@ def _materialize_work(
         }
         if status == "execution_failed":
             row["error"] = "fixture execution failure"
+        elif status == "ok":
+            case_dir = work / case_id
+            case_dir.mkdir()
+            golden = np.arange(2, dtype=np.float32)
+            out = golden.copy()
+            golden_path = case_dir / "golden.npy"
+            out_path = case_dir / "out.npy"
+            np.save(golden_path, golden)
+            np.save(out_path, out)
+            expected = case["expected"]
+            row.update(
+                {
+                    "output_written_check": "passed",
+                    "precision": {
+                        "standard": expected["standard"],
+                        "tolerance_policy_id": expected["tolerance_policy_id"],
+                        "policy": copy.deepcopy(expected["policy"]),
+                        "threshold": expected["threshold"],
+                        "metrics": precision_policy.compute_metrics(
+                            out, golden, expected["policy"]
+                        ),
+                        "oracle_source": "analytical_ref",
+                        "out_shape": [2],
+                        "out_dtype": "float32",
+                        "golden_path": f"{case_id}/golden.npy",
+                        "out_path": f"{case_id}/out.npy",
+                        "provenance": {
+                            "golden_sha256": _sha(golden_path),
+                            "out_sha256": _sha(out_path),
+                            "numel": 2,
+                            "out_shape": [2],
+                        },
+                    },
+                }
+            )
         rows.append(row)
     envelope = {
         "op": caseset["op"], "runner_form": "cpp_extension",
@@ -220,6 +273,199 @@ def _materialize_work(
     }
     _write_json(work / "evidence.json", envelope)
     return receipt, envelope
+
+
+def _materialize_n0_fixture(root: Path, ledger: dict) -> None:
+    """Attach a real, fully replayable N0 static-gate bundle to ``ledger``."""
+
+    operator = ledger["operators"][0]
+    artifacts = operator["artifacts"]
+    n0_root = root / "n0"
+    op_root = n0_root / "fixture"
+    (op_root / "logs").mkdir(parents=True)
+    (op_root / "receipts").mkdir()
+    (op_root / "work").mkdir()
+    for relative, formal_name in (
+        ("spec.json", "spec"),
+        ("source_facts.json", "source_facts"),
+        ("task_doc.md", "taskdoc_snapshot"),
+    ):
+        source = Path(artifacts[formal_name]["path"])
+        (op_root / relative).write_bytes(source.read_bytes())
+    _write_json(op_root / "taskdoc_validation.json", {"schema": "fixture.input"})
+    spec = json.loads((op_root / "spec.json").read_text(encoding="utf-8"))
+    facts = json.loads((op_root / "source_facts.json").read_text(encoding="utf-8"))
+    spec_change = {
+        "schema": "oprunway.spec_change_receipt",
+        "schema_version": 1,
+        "spec_sha256": _sha(op_root / "spec.json"),
+        "previous_spec_sha256": "0" * 64,
+        "change_reason": "hermetic fixture",
+        "confirmed_by": "lys",
+    }
+    _write_json(op_root / "work/spec_change_receipt.json", spec_change)
+    taskdoc_payload = {
+        "status": "PASSED",
+        "blocking_items": [],
+        "errors": [],
+        "bindings": {
+            "taskdoc_bytes_sha256": _sha(op_root / "task_doc.md"),
+            "source_facts_digest": facts["digest"],
+        },
+    }
+    taskdoc_receipt = content_address.make_artifact(
+        "oprunway/taskdoc-validation-receipt/v1", taskdoc_payload
+    )
+    _write_json(op_root / "taskdoc-validation-receipt.json", taskdoc_receipt)
+    dry = {
+        "schema": "oprunway.gen_cases.dry_run_ledger",
+        "schema_version": 1,
+        "spec_binding": {"op": spec["op"], "sha256": rge._canonical_sha256(spec)},
+        "planner_binding": {
+            "implementation": "gen_cases.py::_plan",
+            "gen_cases_py_sha256": _sha(Path(rge.__file__).parent / "gen_cases.py"),
+        },
+        "planning": {"case_target": operator["required"]["case_target"]},
+        "summary": {"emitted": operator["generated"]["case_count"]},
+    }
+    dry["ledger_digest"] = content_address.content_digest(
+        "oprunway/case-plan/v1", dry
+    )
+    _write_json(op_root / "dry-run-ledger.json", dry)
+
+    output_by_gate = {
+        "validate_taskdoc_input": op_root / "taskdoc-validation-receipt.json",
+        "gen_cases_dry_run": op_root / "dry-run-ledger.json",
+        "spec_change_gate_check": op_root / "work/spec_change_receipt.json",
+    }
+    args_by_gate = {
+        "validate_taskdoc_input": [
+            "--root", str(op_root), "--out", "taskdoc-validation-receipt.json"
+        ],
+        "gen_cases_dry_run": [
+            str(op_root / "spec.json"),
+            "--dry-run",
+            "--ledger-out",
+            str(op_root / "dry-run-ledger.json"),
+        ],
+        "spec_change_gate_check": [
+            "--spec",
+            str(op_root / "spec.json"),
+            "--out",
+            str(op_root),
+            "--check",
+        ],
+    }
+    gates = {}
+    for gate_name, script_name in rge._N0_GATE_SCRIPTS.items():
+        log = op_root / "logs" / f"{gate_name}.log"
+        rc = op_root / "logs" / f"{gate_name}.rc"
+        log.write_text(f"{gate_name}: PASSED\n", encoding="utf-8")
+        rc.write_text("0\n", encoding="ascii")
+        output = output_by_gate[gate_name]
+        execution = {
+            "schema": "oprunway.n0_static_gate_execution",
+            "schema_version": 1,
+            "gate": gate_name,
+            "command": [
+                "/usr/bin/python3",
+                str(root / "plugin/acc-common" / script_name),
+                *args_by_gate[gate_name],
+            ],
+            "returncode": 0,
+            "passed": True,
+            "log": {"path": str(log), "sha256": _sha(log), "bytes": log.stat().st_size},
+            "rc_artifact": {"path": str(rc), "sha256": _sha(rc)},
+            "outputs": [
+                {
+                    "path": str(output),
+                    "exists": True,
+                    "sha256": _sha(output),
+                    "bytes": output.stat().st_size,
+                }
+            ],
+        }
+        execution_path = op_root / "receipts" / f"{gate_name}.execution.json"
+        _write_json(execution_path, execution)
+        gates[gate_name] = {
+            **execution,
+            "execution_receipt": {
+                "path": str(execution_path), "sha256": _sha(execution_path)
+            },
+        }
+    inputs = {}
+    for relative in (
+        "spec.json",
+        "source_facts.json",
+        "task_doc.md",
+        "taskdoc_validation.json",
+        "work/spec_change_receipt.json",
+    ):
+        path = op_root / relative
+        inputs[relative] = {
+            "path": str(path), "sha256": _sha(path), "bytes": path.stat().st_size
+        }
+    operator_receipt = {
+        "schema": "oprunway.n0_static_operator_receipt",
+        "schema_version": 1,
+        "operator": "fixture",
+        "scope": "static_only_no_build_no_dut",
+        "inputs": inputs,
+        "gates": gates,
+        "all_passed": True,
+    }
+    operator_receipt_path = op_root / "n0-static-receipt.json"
+    _write_json(operator_receipt_path, operator_receipt)
+    batch = {
+        "schema": "oprunway.n0_static_gate_batch",
+        "schema_version": 1,
+        "scope": "static_only_no_build_no_dut",
+        "plugin": {
+            "root": str(root / "plugin"),
+            "files": {
+                filename: _sha(Path(rge.__file__).parent / filename)
+                for filename in rge._N0_GATE_SCRIPTS.values()
+            },
+        },
+        "operators": {
+            "fixture": {
+                "root": str(op_root),
+                "receipt": str(operator_receipt_path),
+                "receipt_sha256": _sha(operator_receipt_path),
+                "all_passed": True,
+                "gate_returncodes": {
+                    gate_name: 0 for gate_name in rge._N0_GATE_NAMES
+                },
+            }
+        },
+        "all_passed": True,
+    }
+    batch_path = n0_root / "n0-static-batch-receipt.json"
+    _write_json(batch_path, batch)
+    ledger["supplemental_artifacts"].update(
+        {
+            "n0_static_batch": {"path": str(batch_path), "sha256": _sha(batch_path)},
+            "n0_static_fixture": {
+                "path": str(operator_receipt_path),
+                "sha256": _sha(operator_receipt_path),
+            },
+        }
+    )
+    ledger["n0_static_gate_evidence"] = {
+        "status": "VERIFIED",
+        "batch_artifact": "n0_static_batch",
+        "operators": [
+            {
+                "operator_id": "fixture",
+                "batch_key": "fixture",
+                "receipt_artifact": "n0_static_fixture",
+            }
+        ],
+    }
+    ledger["workflow_plan_evidence"][0]["evidence_refs"].extend(
+        {"kind": "supplemental_artifact", "artifact": name}
+        for name in ("n0_static_batch", "n0_static_fixture")
+    )
 
 
 def _fixture(root: Path) -> dict:
@@ -289,6 +535,13 @@ def _fixture(root: Path) -> dict:
         "requirement_type": "no_regression",
         "taskdoc_snapshot_sha256": taskdoc_sha,
     }
+    dtype_gap = {
+        "kind": "dtype_unsupported_by_op_def",
+        "dtypes": ["int64"],
+        "op_def_dtypes": ["float32"],
+        "task_doc_ref": "fixture taskbook dtype table",
+        "op_def_ref": "fixture op_def dtype table",
+    }
     spec = {
         "op": "Fixture",
         "runner_form": "cpp_extension",
@@ -296,19 +549,39 @@ def _fixture(root: Path) -> dict:
         "dtype_required": ["float32", "int64"],
         "hardware": ["Atlas A3", "Atlas A5"],
         "runtime_requirements": {"cann": {"kind": "not_declared"}},
-        "precision": {"case_target": 3},
+        "params": [
+            {"name": "x", "io": "in", "dtype": ["float32"]},
+            {"name": "y", "io": "out", "dtype": ["float32"]},
+        ],
+        "verify_mode": "numerical",
+        "precision": {
+            "case_target": 3,
+            "oracle": "ascendoptest",
+            "standard": "ascendoptest_default",
+        },
         "perf": {"mode": "measure_only"},
-        "task_pr_gaps": [perf_gap],
+        "task_pr_gaps": [perf_gap, dtype_gap],
     }
     spec_path = formal / "spec.json"
     _write_json(spec_path, spec)
     case_ids = ["case0", "case1", "case2"]
+    policy = precision_policy.threshold_for("ascendoptest_default", "float32")
+    expected = {
+        "verify_mode": "numerical",
+        "compare_dtype": "float32",
+        "standard": "ascendoptest_default",
+        "tolerance_policy_id": "ascendoptest_default:float32",
+        "policy": policy,
+        "threshold": precision_policy.threshold_digest(policy),
+        "golden_source": "numpy reference",
+        "out_shape": [2],
+    }
     caseset = {
         "op": "Fixture",
         "spec_ref": "Fixture",
         "dtype_required": ["float32", "int64"],
         "dtype_tested": ["float32"],
-        "task_pr_gaps": [perf_gap],
+        "task_pr_gaps": [perf_gap, dtype_gap],
         "pool_max": 3,
         "requested_target": 3,
         "emitted": 3,
@@ -320,7 +593,15 @@ def _fixture(root: Path) -> dict:
             }
         },
         "cases": [
-            {"id": case_id, "inputs": [{"dtype": "float32", "shape": [2]}]}
+            {
+                "id": case_id,
+                "dims": ["功能", "精度"],
+                "inputs": [
+                    {"name": "x", "dtype": "float32", "shape": [2]}
+                ],
+                "attrs": {},
+                "expected": copy.deepcopy(expected),
+            }
             for case_id in case_ids
         ],
     }
@@ -343,24 +624,7 @@ def _fixture(root: Path) -> dict:
     receipt_path = formal_work / "cpp_extension_receipt.json"
     evidence_path = formal / "evidence.json"
     _write_json(evidence_path, evidence)
-    verdict = {
-        "op": "Fixture",
-        "per_case": [
-            {"case_id": "case0", "verdict": "pass"},
-            {"case_id": "case1", "verdict": "pass"},
-            {"case_id": "case2", "verdict": "error"},
-        ],
-        "accuracy_summary": {
-            "total": 3,
-            "executed": 2,
-            "passed": 2,
-            "failed": 0,
-            "errored": 1,
-            "uncertain": 0,
-            "na": 0,
-        },
-        "overall": {"verdict": "fail", "counts": {"total": 3, "fail": 1}},
-    }
+    verdict = validator.validate(spec, caseset, evidence)
     verdict_path = formal / "verdict.json"
     _write_json(verdict_path, verdict)
     perf = {
@@ -469,7 +733,7 @@ def _fixture(root: Path) -> dict:
     online_log.write_text("facts completeness=complete\n", encoding="utf-8")
     online_rc = root / "online.rc"
     online_rc.write_text("0\n", encoding="utf-8")
-    multicard_root = root / "multicard-v3"
+    multicard_root = root / "multicard-v4"
     multicard_root.mkdir()
     (multicard_root / "work").mkdir()
     manifest = multi_card_shards.build_manifest(
@@ -517,22 +781,7 @@ def _fixture(root: Path) -> dict:
             smoke_root, spec, smoke_caseset, smoke_statuses,
             vendor_elf, build_receipt, cann_elf)
         for row in smoke_envelope["evidence"]:
-            case_id = row["case_id"]
-            case_dir = smoke_root / case_id
-            case_dir.mkdir()
-            golden, out = case_dir / "golden.npy", case_dir / "out.npy"
-            golden.write_bytes(b"gold")
-            out.write_bytes(b"out")
-            row.update({
-                "output_written_check": "passed",
-                "precision": {
-                    "golden_path": f"{case_id}/golden.npy",
-                    "out_path": f"{case_id}/out.npy",
-                    "provenance": {
-                        "golden_sha256": _sha(golden), "out_sha256": _sha(out),
-                    },
-                },
-            })
+            row["output_written_check"] = "passed"
         _write_json(smoke_root / "evidence.json", smoke_envelope)
         identity = {
             "device_id": shard["device_id"],
@@ -592,6 +841,14 @@ def _fixture(root: Path) -> dict:
     merged = multi_card_shards.merge_results(
         manifest, shard_results, spec, caseset, source_facts
     )
+    for case_id in case_ids:
+        for filename in ("golden.npy", "out.npy"):
+            source = formal_work / case_id / filename
+            if not source.is_file():
+                continue
+            target = multicard_root / "work" / case_id / filename
+            target.parent.mkdir(exist_ok=True)
+            target.write_bytes(source.read_bytes())
     multi_envelope = multi_card_shards.assemble_envelope(
         manifest, merged, shard_envelopes
     )
@@ -671,16 +928,18 @@ def _fixture(root: Path) -> dict:
             "role": f"single.{role}", "path": str(path), "sha256": _sha(path),
             "bytes": path.stat().st_size,
         })
-    multicard_inventory = multicard_root / "artifact-inventory-v3.json"
+    multicard_inventory = multicard_root / rge._MULTICARD_INVENTORY_FILENAME
     _write_json(
         multicard_inventory,
         {
             "schema": rge._MULTICARD_INVENTORY_SCHEMA,
-            "schema_version": 3,
+            "schema_version": rge._MULTICARD_INVENTORY_VERSION,
             "artifact_root": str(multicard_root),
             "generated_from": {
                 "task2_gate_replay_entry":
                     "validate_acceptance_state._gate_multi_card_receipt",
+                "equivalence_replay_entry":
+                    "multi_card_verdict_equivalence.build_equivalence",
                 "inventory_scope": "precision_task2_transitive_closure",
             },
             "artifacts": [
@@ -690,6 +949,16 @@ def _fixture(root: Path) -> dict:
             "top_work_artifacts": recursive_rows(
                 multicard_root / "work", "top_work", multicard_root),
             "shards": shard_inventory,
+            "single_root": str(formal),
+            "single_root_artifacts": recursive_rows(
+                formal, "single_root", formal
+            ),
+            "single_equivalence_inputs": [
+                inventory_item(formal / relative, formal, role)
+                for role, relative in sorted(
+                    rge._MULTICARD_SINGLE_INPUT_PATHS.items()
+                )
+            ],
             "single_work": str(formal_work),
             "single_artifacts": recursive_rows(formal_work, "single", formal_work),
             "external_artifacts": external_rows,
@@ -703,7 +972,7 @@ def _fixture(root: Path) -> dict:
         "online_taskdoc": online_taskdoc,
         "online_log": online_log,
         "online_rc": online_rc,
-        "multicard_v3_inventory": multicard_inventory,
+        "multicard_v4_inventory": multicard_inventory,
     }
     supplemental_artifacts = {
         name: {"path": str(path), "sha256": _sha(path)}
@@ -774,11 +1043,11 @@ def _fixture(root: Path) -> dict:
             "online_taskdoc",
             "online_log",
             "online_rc",
-            "multicard_v3_inventory",
+            "multicard_v4_inventory",
         )
     )
 
-    return {
+    ledger = {
         "schema": rge.SCHEMA,
         "schema_version": rge.SCHEMA_VERSION,
         "recorded_at": "2026-08-07",
@@ -832,7 +1101,7 @@ def _fixture(root: Path) -> dict:
                 "operator_id": "fixture",
                 "status": "VERIFIED",
                 "execution_scope": "precision_only",
-                "inventory_artifact": "multicard_v3_inventory",
+                "inventory_artifact": "multicard_v4_inventory",
                 "partition": "case_order_round_robin_v1",
                 "devices": [1, 2],
                 "shard_sizes": [2, 1],
@@ -845,7 +1114,7 @@ def _fixture(root: Path) -> dict:
                 "multi_verdict_sha256": artifacts["verdict"]["sha256"],
                 "equivalent": True,
                 "performance_collected": False,
-                "artifact_refs": ["multicard_v3_inventory"],
+                "artifact_refs": ["multicard_v4_inventory"],
             }
         ],
         "regression_evidence": [
@@ -965,6 +1234,8 @@ def _fixture(root: Path) -> dict:
             }
         ],
     }
+    _materialize_n0_fixture(root, ledger)
+    return ledger
 
 
 class RgeLedgerTest(unittest.TestCase):
@@ -988,7 +1259,7 @@ class RgeLedgerTest(unittest.TestCase):
         item["sha256"] = _sha(path)
 
     def rewrite_multicard_artifact(self, ledger, basename: str, mutation) -> None:
-        outer = ledger["supplemental_artifacts"]["multicard_v3_inventory"]
+        outer = ledger["supplemental_artifacts"]["multicard_v4_inventory"]
         inventory_path = Path(outer["path"])
         inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
         item = next(
@@ -1007,7 +1278,7 @@ class RgeLedgerTest(unittest.TestCase):
     def rewrite_multicard_shard_bundle(self, ledger) -> None:
         """Coherently rewrite one full shard, while leaving an invalid load receipt."""
 
-        outer = ledger["supplemental_artifacts"]["multicard_v3_inventory"]
+        outer = ledger["supplemental_artifacts"]["multicard_v4_inventory"]
         inventory_path = Path(outer["path"])
         inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
         artifact_root = Path(inventory["artifact_root"])
@@ -1106,6 +1377,62 @@ class RgeLedgerTest(unittest.TestCase):
         eq_path = artifact_root / eq_item["path"]
         _write_json(eq_path, equivalence)
         eq_item.update({"sha256": _sha(eq_path), "bytes": eq_path.stat().st_size})
+        _write_json(inventory_path, inventory)
+        outer["sha256"] = _sha(inventory_path)
+
+    def rewrite_n0_dry_bundle(self, ledger) -> None:
+        """Coherently rewrite every hash layer around a false dry-run count."""
+
+        receipt_item = ledger["supplemental_artifacts"]["n0_static_fixture"]
+        receipt_path = Path(receipt_item["path"])
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        gate = receipt["gates"]["gen_cases_dry_run"]
+        dry_path = Path(gate["outputs"][0]["path"])
+        dry = json.loads(dry_path.read_text(encoding="utf-8"))
+        dry["summary"]["emitted"] += 1
+        core = dict(dry)
+        core.pop("ledger_digest")
+        dry["ledger_digest"] = content_address.content_digest(
+            "oprunway/case-plan/v1", core
+        )
+        _write_json(dry_path, dry)
+        gate["outputs"][0].update(
+            {"sha256": _sha(dry_path), "bytes": dry_path.stat().st_size}
+        )
+        execution_path = Path(gate["execution_receipt"]["path"])
+        execution = dict(gate)
+        execution.pop("execution_receipt")
+        _write_json(execution_path, execution)
+        gate["execution_receipt"]["sha256"] = _sha(execution_path)
+        _write_json(receipt_path, receipt)
+        receipt_item["sha256"] = _sha(receipt_path)
+        batch_item = ledger["supplemental_artifacts"]["n0_static_batch"]
+        batch_path = Path(batch_item["path"])
+        batch = json.loads(batch_path.read_text(encoding="utf-8"))
+        batch["operators"]["fixture"]["receipt_sha256"] = _sha(receipt_path)
+        _write_json(batch_path, batch)
+        batch_item["sha256"] = _sha(batch_path)
+
+    def rewrite_multicard_cpp_format(self, ledger) -> None:
+        """Keep the v4 inventory coherent while changing the generated ACL enum."""
+
+        outer = ledger["supplemental_artifacts"]["multicard_v4_inventory"]
+        inventory_path = Path(outer["path"])
+        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        artifact_root = Path(inventory["artifact_root"])
+        item = next(
+            row
+            for row in inventory["shards"][0]["formal_artifacts"]
+            if row["path"].endswith("cpp_extension/csrc/oprunway_extension.cpp")
+        )
+        source_path = artifact_root / item["path"]
+        source_path.write_text(
+            source_path.read_text(encoding="utf-8").replace(
+                "ACL_FORMAT_ND", "ACL_FORMAT_NCHW"
+            ),
+            encoding="utf-8",
+        )
+        item.update({"sha256": _sha(source_path), "bytes": source_path.stat().st_size})
         _write_json(inventory_path, inventory)
         outer["sha256"] = _sha(inventory_path)
 
@@ -1367,7 +1694,19 @@ class RgeLedgerTest(unittest.TestCase):
                 "devices", [2, 1]
             )
         )
-        self.assert_error(errors, "v3 projection drift")
+        self.assert_error(errors, "multi-card projection drift")
+
+    def test_n0_coherent_dry_run_bundle_replacement_is_rejected(self) -> None:
+        self.assert_error(
+            self.errors(self.rewrite_n0_dry_bundle, verify_artifacts=True),
+            "dry_run: semantic projection drift",
+        )
+
+    def test_n2_generated_cpp_enum_is_reprojected_from_v4_inventory(self) -> None:
+        self.assert_error(
+            self.errors(self.rewrite_multicard_cpp_format, verify_artifacts=True),
+            "does not use ACL_FORMAT_ND",
+        )
 
     def test_multicard_equivalence_cannot_be_rewritten_with_coherent_hashes(self) -> None:
         def mutate(ledger) -> None:

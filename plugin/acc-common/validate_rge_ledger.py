@@ -62,7 +62,16 @@ _GITCODE_MR_URL = re.compile(
     r"^https://gitcode\.com/[^/]+/[^/]+/merge_requests/(?P<number>[1-9][0-9]*)$"
 )
 _MULTICARD_INVENTORY_SCHEMA = "oprunway.multi_card_artifact_inventory"
-_MULTICARD_INVENTORY_VERSION = 3
+_MULTICARD_INVENTORY_VERSION = 4
+_MULTICARD_INVENTORY_FILENAME = "artifact-inventory-v4.json"
+_MULTICARD_SINGLE_INPUT_PATHS = {
+    "single_spec": "spec.json",
+    "single_caseset": "caseset.json",
+    "single_source_facts": "source_facts.json",
+    "single_evidence": "evidence.json",
+    "single_verdict": "verdict.json",
+    "single_receipt": "work/cpp_extension_receipt.json",
+}
 _MULTICARD_TOP_ROLE_PATHS = {
     "parent_spec": "spec.json",
     "parent_caseset": "parent-caseset.json",
@@ -152,6 +161,14 @@ _PLAN_REQUIRED_TESTS = {
         }
     ),
     "N9": frozenset({"plugin/acc-common/test_perf_n9_contract.py"}),
+}
+_N0_GATE_NAMES = frozenset(
+    {"validate_taskdoc_input", "gen_cases_dry_run", "spec_change_gate_check"}
+)
+_N0_GATE_SCRIPTS = {
+    "validate_taskdoc_input": "validate_taskdoc_input.py",
+    "gen_cases_dry_run": "gen_cases.py",
+    "spec_change_gate_check": "spec_change_gate.py",
 }
 
 
@@ -417,7 +434,7 @@ def _v3_inventory_rows(
     *,
     absolute_paths: bool = False,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Validate v3 content-addressed rows and index by role and effective path."""
+    """Validate content-addressed inventory rows and index role/effective path."""
 
     rows = _as_list(value, where, errors)
     by_role: dict[str, dict[str, Any]] = {}
@@ -567,7 +584,458 @@ def _expected_external_authorities(
     return result
 
 
-def _validate_multicard_v3_projection(
+def _validate_n0_static_projection(
+    claim: Any,
+    operator_by_id: dict[str, dict[str, Any]],
+    supplemental_artifacts: dict[str, Any],
+    errors: list[str],
+) -> set[str]:
+    """Re-project N0 from three independently executed static-gate receipts.
+
+    A phase label or a repository unit test is not evidence that a concrete
+    operator spec passed the taskbook, dry-run planner, and spec-change gates.
+    This projection therefore follows the saved batch receipt down to every
+    command receipt, measured log/rc/output, and the semantic output of all
+    three gates.  It also binds the executed producer scripts to this checkout.
+    """
+
+    where = "ledger.n0_static_gate_evidence"
+    row = _as_dict(claim, where, errors)
+    if row.get("status") != "VERIFIED":
+        errors.append(f"{where}.status: expected VERIFIED")
+    batch_name = row.get("batch_artifact")
+    if not isinstance(batch_name, str) or batch_name not in supplemental_artifacts:
+        errors.append(f"{where}.batch_artifact: unknown supplemental artifact")
+        return set()
+    batch_item = _as_dict(
+        supplemental_artifacts.get(batch_name), f"{where}.batch_artifact", errors
+    )
+    batch_path_raw = batch_item.get("path")
+    batch_path = Path(batch_path_raw) if isinstance(batch_path_raw, str) else Path("/")
+    batch = _supplemental_json(
+        supplemental_artifacts, batch_name, f"{where}.batch_artifact", errors
+    )
+    if (
+        batch.get("schema") != "oprunway.n0_static_gate_batch"
+        or batch.get("schema_version") != 1
+        or batch.get("scope") != "static_only_no_build_no_dut"
+        or batch.get("all_passed") is not True
+    ):
+        errors.append(f"{where}.batch_artifact: invalid N0 batch receipt")
+
+    plugin = _as_dict(batch.get("plugin"), f"{where}.batch.plugin", errors)
+    plugin_files = _as_dict(
+        plugin.get("files"), f"{where}.batch.plugin.files", errors
+    )
+    if set(plugin_files) != set(_N0_GATE_SCRIPTS.values()):
+        errors.append(f"{where}.batch.plugin.files: exact producer set drift")
+    common = Path(__file__).resolve().parent
+    for filename in _N0_GATE_SCRIPTS.values():
+        path = common / filename
+        expected = _sha256_file(path) if path.is_file() else None
+        if plugin_files.get(filename) != expected:
+            errors.append(
+                f"{where}.batch.plugin.files.{filename}: current producer SHA drift"
+            )
+
+    claims = _as_list(row.get("operators"), f"{where}.operators", errors)
+    claim_by_id: dict[str, dict[str, Any]] = {}
+    for index, raw_claim in enumerate(claims):
+        item = _as_dict(raw_claim, f"{where}.operators[{index}]", errors)
+        op_id = item.get("operator_id")
+        if not isinstance(op_id, str) or op_id not in operator_by_id:
+            errors.append(f"{where}.operators[{index}].operator_id: unknown operator")
+        elif op_id in claim_by_id:
+            errors.append(f"{where}.operators[{index}].operator_id: duplicate")
+        else:
+            claim_by_id[op_id] = item
+    if set(claim_by_id) != set(operator_by_id):
+        errors.append(f"{where}.operators: must account for every operator")
+
+    batch_operators = _as_dict(
+        batch.get("operators"), f"{where}.batch.operators", errors
+    )
+    required_refs = {batch_name}
+
+    def measured_file(
+        raw: Any, label: str, root: Path, *, expected_relative: str | None = None
+    ) -> tuple[Path, str] | None:
+        item = _as_dict(raw, label, errors)
+        path_raw = item.get("path")
+        if not isinstance(path_raw, str) or not os.path.isabs(path_raw):
+            errors.append(f"{label}.path: expected absolute path")
+            return None
+        path = Path(path_raw)
+        try:
+            relative = Path(os.path.realpath(path)).relative_to(
+                Path(os.path.realpath(root))
+            )
+        except ValueError:
+            errors.append(f"{label}.path: escapes operator receipt root")
+            return None
+        if path.is_symlink() or not path.is_file():
+            errors.append(f"{label}.path: expected regular non-symlink file")
+            return None
+        if expected_relative is not None and relative.as_posix() != expected_relative:
+            errors.append(
+                f"{label}.path: expected {expected_relative!r}, got {relative.as_posix()!r}"
+            )
+        digest = _sha256_file(path)
+        if item.get("sha256") != digest:
+            errors.append(f"{label}.sha256: measured file digest drift")
+        if "bytes" in item and item.get("bytes") != path.stat().st_size:
+            errors.append(f"{label}.bytes: measured file size drift")
+        return path, digest
+
+    for op_id, operator in operator_by_id.items():
+        op_claim = claim_by_id.get(op_id, {})
+        batch_key = op_claim.get("batch_key")
+        receipt_name = op_claim.get("receipt_artifact")
+        if not isinstance(batch_key, str) or batch_key not in batch_operators:
+            errors.append(f"{where}.operators[{op_id}].batch_key: unknown batch row")
+            continue
+        if not isinstance(receipt_name, str) or receipt_name not in supplemental_artifacts:
+            errors.append(
+                f"{where}.operators[{op_id}].receipt_artifact: unknown supplemental artifact"
+            )
+            continue
+        required_refs.add(receipt_name)
+        batch_op = _as_dict(
+            batch_operators.get(batch_key), f"{where}.batch.operators.{batch_key}", errors
+        )
+        receipt_item = _as_dict(
+            supplemental_artifacts.get(receipt_name),
+            f"{where}.operators[{op_id}].receipt_artifact",
+            errors,
+        )
+        receipt_path_raw = receipt_item.get("path")
+        if not isinstance(receipt_path_raw, str) or not os.path.isabs(receipt_path_raw):
+            errors.append(f"{where}.operators[{op_id}].receipt_artifact.path: invalid")
+            continue
+        receipt_path = Path(receipt_path_raw)
+        receipt_root = receipt_path.parent
+        if (
+            batch_op.get("receipt") != receipt_path_raw
+            or batch_op.get("receipt_sha256") != receipt_item.get("sha256")
+            or batch_op.get("root") != str(receipt_root)
+            or batch_op.get("all_passed") is not True
+            or batch_op.get("gate_returncodes") != {name: 0 for name in _N0_GATE_NAMES}
+        ):
+            errors.append(f"{where}.batch.operators.{batch_key}: receipt projection drift")
+        receipt = _supplemental_json(
+            supplemental_artifacts,
+            receipt_name,
+            f"{where}.operators[{op_id}].receipt_artifact",
+            errors,
+        )
+        if (
+            receipt.get("schema") != "oprunway.n0_static_operator_receipt"
+            or receipt.get("schema_version") != 1
+            or receipt.get("scope") != "static_only_no_build_no_dut"
+            or receipt.get("operator") != batch_key
+            or receipt.get("all_passed") is not True
+        ):
+            errors.append(f"{where}.operators[{op_id}].receipt_artifact: invalid receipt")
+
+        inputs = _as_dict(
+            receipt.get("inputs"), f"{where}.operators[{op_id}].inputs", errors
+        )
+        expected_inputs = {
+            "spec.json",
+            "source_facts.json",
+            "task_doc.md",
+            "taskdoc_validation.json",
+            "work/spec_change_receipt.json",
+        }
+        if set(inputs) != expected_inputs:
+            errors.append(f"{where}.operators[{op_id}].inputs: exact input set drift")
+        input_files: dict[str, tuple[Path, str]] = {}
+        for relative in expected_inputs:
+            measured = measured_file(
+                inputs.get(relative),
+                f"{where}.operators[{op_id}].inputs[{relative}]",
+                receipt_root,
+                expected_relative=relative,
+            )
+            if measured is not None:
+                input_files[relative] = measured
+        formal_artifacts = _as_dict(
+            operator.get("artifacts"), f"{where}.operators[{op_id}].formal", errors
+        )
+        for relative, formal_name in (
+            ("spec.json", "spec"),
+            ("source_facts.json", "source_facts"),
+            ("task_doc.md", "taskdoc_snapshot"),
+        ):
+            measured = input_files.get(relative)
+            formal = _as_dict(
+                formal_artifacts.get(formal_name),
+                f"{where}.operators[{op_id}].formal.{formal_name}",
+                errors,
+            )
+            if measured is not None and measured[1] != formal.get("sha256"):
+                errors.append(
+                    f"{where}.operators[{op_id}].inputs[{relative}]: formal artifact SHA drift"
+                )
+
+        gates = _as_dict(
+            receipt.get("gates"), f"{where}.operators[{op_id}].gates", errors
+        )
+        if set(gates) != _N0_GATE_NAMES:
+            errors.append(f"{where}.operators[{op_id}].gates: exact gate set drift")
+        gate_outputs: dict[str, Path] = {}
+        for gate_name in _N0_GATE_NAMES:
+            gate_where = f"{where}.operators[{op_id}].gates.{gate_name}"
+            gate = _as_dict(gates.get(gate_name), gate_where, errors)
+            if (
+                gate.get("schema") != "oprunway.n0_static_gate_execution"
+                or gate.get("schema_version") != 1
+                or gate.get("gate") != gate_name
+                or gate.get("returncode") != 0
+                or gate.get("passed") is not True
+            ):
+                errors.append(f"{gate_where}: invalid measured gate receipt")
+            command = _as_list(gate.get("command"), f"{gate_where}.command", errors)
+            if (
+                len(command) < 2
+                or Path(str(command[1])).name != _N0_GATE_SCRIPTS[gate_name]
+            ):
+                errors.append(f"{gate_where}.command: producer script drift")
+            expected_args = {
+                "validate_taskdoc_input": [
+                    "--root",
+                    str(receipt_root),
+                    "--out",
+                    "taskdoc-validation-receipt.json",
+                ],
+                "gen_cases_dry_run": [
+                    str(receipt_root / "spec.json"),
+                    "--dry-run",
+                    "--ledger-out",
+                    str(receipt_root / "dry-run-ledger.json"),
+                ],
+                "spec_change_gate_check": [
+                    "--spec",
+                    str(receipt_root / "spec.json"),
+                    "--out",
+                    str(receipt_root),
+                    "--check",
+                ],
+            }[gate_name]
+            if command[2:] != expected_args:
+                errors.append(f"{gate_where}.command: gate argv drift")
+            measured_file(gate.get("log"), f"{gate_where}.log", receipt_root)
+            rc_measured = measured_file(
+                gate.get("rc_artifact"), f"{gate_where}.rc_artifact", receipt_root
+            )
+            if rc_measured is not None:
+                try:
+                    if rc_measured[0].read_text(encoding="ascii").strip() != "0":
+                        errors.append(f"{gate_where}.rc_artifact: expected measured rc0")
+                except OSError as exc:
+                    errors.append(f"{gate_where}.rc_artifact: {exc}")
+            outputs = _as_list(gate.get("outputs"), f"{gate_where}.outputs", errors)
+            if len(outputs) != 1:
+                errors.append(f"{gate_where}.outputs: expected one gate output")
+            else:
+                expected_output = {
+                    "validate_taskdoc_input": "taskdoc-validation-receipt.json",
+                    "gen_cases_dry_run": "dry-run-ledger.json",
+                    "spec_change_gate_check": "work/spec_change_receipt.json",
+                }[gate_name]
+                output = measured_file(
+                    outputs[0],
+                    f"{gate_where}.outputs[0]",
+                    receipt_root,
+                    expected_relative=expected_output,
+                )
+                if output is not None:
+                    gate_outputs[gate_name] = output[0]
+                    if _as_dict(outputs[0], f"{gate_where}.outputs[0]", errors).get(
+                        "exists"
+                    ) is not True:
+                        errors.append(f"{gate_where}.outputs[0].exists: expected true")
+            execution = _as_dict(
+                gate.get("execution_receipt"), f"{gate_where}.execution_receipt", errors
+            )
+            execution_measured = measured_file(
+                execution, f"{gate_where}.execution_receipt", receipt_root
+            )
+            if execution_measured is not None:
+                saved_execution = _load_json(
+                    execution_measured[0], f"{gate_where}.execution_receipt", errors
+                )
+                expected_execution = dict(gate)
+                expected_execution.pop("execution_receipt", None)
+                if saved_execution != expected_execution:
+                    errors.append(f"{gate_where}.execution_receipt: exact receipt drift")
+
+        taskdoc_path = gate_outputs.get("validate_taskdoc_input")
+        if taskdoc_path is not None:
+            taskdoc_receipt = _load_json(
+                taskdoc_path, f"{where}.operators[{op_id}].taskdoc_output", errors
+            )
+            payload = _as_dict(
+                taskdoc_receipt.get("payload"),
+                f"{where}.operators[{op_id}].taskdoc_output.payload",
+                errors,
+            )
+            try:
+                taskdoc_digest = content_address.content_digest(
+                    "oprunway/taskdoc-validation-receipt/v1", payload
+                )
+            except content_address.ContentAddressError as exc:
+                errors.append(f"{where}.operators[{op_id}].taskdoc_output: {exc}")
+                taskdoc_digest = None
+            if (
+                taskdoc_receipt.get("domain")
+                != "oprunway/taskdoc-validation-receipt/v1"
+                or taskdoc_receipt.get("schema_version") != 1
+                or taskdoc_receipt.get("digest") != taskdoc_digest
+                or payload.get("status") != "PASSED"
+                or payload.get("blocking_items") != []
+                or payload.get("errors") != []
+            ):
+                errors.append(f"{where}.operators[{op_id}].taskdoc_output: semantic drift")
+            bindings = _as_dict(
+                payload.get("bindings"),
+                f"{where}.operators[{op_id}].taskdoc_output.payload.bindings",
+                errors,
+            )
+            facts = _load_json(
+                input_files.get("source_facts.json", (Path("/"), ""))[0],
+                f"{where}.operators[{op_id}].source_facts",
+                errors,
+            )
+            if (
+                bindings.get("taskdoc_bytes_sha256")
+                != input_files.get("task_doc.md", (None, None))[1]
+                or bindings.get("source_facts_digest") != facts.get("digest")
+            ):
+                errors.append(f"{where}.operators[{op_id}].taskdoc_output: input binding drift")
+
+        dry_path = gate_outputs.get("gen_cases_dry_run")
+        if dry_path is not None:
+            dry = _load_json(dry_path, f"{where}.operators[{op_id}].dry_run", errors)
+            core = dict(dry)
+            digest = core.pop("ledger_digest", None)
+            try:
+                expected_digest = content_address.content_digest(
+                    "oprunway/case-plan/v1", core
+                )
+            except content_address.ContentAddressError as exc:
+                errors.append(f"{where}.operators[{op_id}].dry_run: {exc}")
+                expected_digest = None
+            spec_path = input_files.get("spec.json", (Path("/"), ""))[0]
+            spec = _load_json(spec_path, f"{where}.operators[{op_id}].spec", errors)
+            if (
+                dry.get("schema") != "oprunway.gen_cases.dry_run_ledger"
+                or dry.get("schema_version") != 1
+                or digest != expected_digest
+                or _as_dict(dry.get("spec_binding"), "dry.spec_binding", errors).get(
+                    "sha256"
+                )
+                != _canonical_sha256(spec)
+                or _as_dict(dry.get("planner_binding"), "dry.planner_binding", errors).get(
+                    "gen_cases_py_sha256"
+                )
+                != plugin_files.get("gen_cases.py")
+                or _as_dict(dry.get("planning"), "dry.planning", errors).get(
+                    "case_target"
+                )
+                != operator.get("required", {}).get("case_target")
+                or _as_dict(dry.get("summary"), "dry.summary", errors).get("emitted")
+                != operator.get("generated", {}).get("case_count")
+            ):
+                errors.append(f"{where}.operators[{op_id}].dry_run: semantic projection drift")
+
+        spec_change_path = gate_outputs.get("spec_change_gate_check")
+        if spec_change_path is not None:
+            spec_change = _load_json(
+                spec_change_path, f"{where}.operators[{op_id}].spec_change", errors
+            )
+            if (
+                spec_change.get("schema") != "oprunway.spec_change_receipt"
+                or spec_change.get("schema_version") != 1
+                or spec_change.get("spec_sha256")
+                != input_files.get("spec.json", (None, None))[1]
+            ):
+                errors.append(f"{where}.operators[{op_id}].spec_change: semantic drift")
+
+    if set(batch_operators) != {
+        claim.get("batch_key") for claim in claim_by_id.values()
+    }:
+        errors.append(f"{where}.batch.operators: unclaimed or duplicate batch rows")
+    if not isinstance(batch_path_raw, str) or batch_path.name != "n0-static-batch-receipt.json":
+        errors.append(f"{where}.batch_artifact.path: unexpected batch filename")
+    return required_refs
+
+
+def _validate_n2_tensor_format(
+    work: Path,
+    manifest: dict[str, Any],
+    receipt: dict[str, Any],
+    where: str,
+    errors: list[str],
+) -> None:
+    """Re-project N2 from manifest + driver receipt + generated C++ bytes.
+
+    The human-facing ``format: nd`` spelling is only the requested semantic
+    format.  N2 is complete only when the producer also records the effective
+    ACL enum and the generated ``aclCreateTensor`` call uses that enum.
+    """
+
+    explicit = manifest.get("tensor_format_receipt")
+    multi = manifest.get("multi_input_receipt")
+    if explicit is not None:
+        expected = {
+            "requested": "nd",
+            "effective_acl_format": "ACL_FORMAT_ND",
+            "source": "spec_declared",
+        }
+        if explicit != expected or receipt.get("tensor_format_receipt") != expected:
+            errors.append(f"{where}: explicit ND format receipt drift")
+    elif multi is not None:
+        if receipt.get("multi_input_receipt") != multi:
+            errors.append(f"{where}: multi-input format receipt is not mirrored")
+        tensors = _as_list(
+            _as_dict(multi, f"{where}.multi_input_receipt", errors).get(
+                "tensor_parameters"
+            ),
+            f"{where}.multi_input_receipt.tensor_parameters",
+            errors,
+        )
+        if not tensors:
+            errors.append(f"{where}.multi_input_receipt.tensor_parameters: empty")
+        for index, raw in enumerate(tensors):
+            item = _as_dict(
+                raw, f"{where}.multi_input_receipt.tensor_parameters[{index}]", errors
+            )
+            expected = {
+                "format": "nd",
+                "requested_format": "nd",
+                "effective_acl_format": "ACL_FORMAT_ND",
+                "format_source": "spec_parameter_contract",
+            }
+            if any(item.get(key) != value for key, value in expected.items()):
+                errors.append(
+                    f"{where}.multi_input_receipt.tensor_parameters[{index}]: "
+                    "requested/effective ACL_FORMAT_ND projection drift"
+                )
+    else:
+        errors.append(f"{where}: N2 has no explicit tensor format receipt")
+
+    source_path = work / "cpp_extension/csrc/oprunway_extension.cpp"
+    source = _load_text(source_path, f"{where}.generated_cpp", errors)
+    if re.search(
+        r"return\s+aclCreateTensorFunc\([\s\S]*?ACL_FORMAT_ND\s*,", source
+    ) is None:
+        errors.append(
+            f"{where}.generated_cpp: aclCreateTensor call does not use ACL_FORMAT_ND"
+        )
+
+
+def _validate_multicard_projection(
     record: dict[str, Any],
     operator: dict[str, Any],
     inventory: Any,
@@ -576,21 +1044,26 @@ def _validate_multicard_v3_projection(
     verify_artifacts: bool,
     errors: list[str],
 ) -> None:
-    """Re-project a formal v3 multi-card run from its complete on-disk closure."""
+    """Re-project the current formal multi-card run from its on-disk closure."""
 
     row = _as_dict(inventory, f"{where}.inventory", errors)
     if row.get("schema") != _MULTICARD_INVENTORY_SCHEMA \
             or row.get("schema_version") != _MULTICARD_INVENTORY_VERSION:
-        errors.append(f"{where}.inventory: expected v3 multi-card inventory")
+        errors.append(
+            f"{where}.inventory: expected multi-card inventory schema v4"
+        )
         return
     if row.get("generated_from") != {
         "task2_gate_replay_entry": "validate_acceptance_state._gate_multi_card_receipt",
+        "equivalence_replay_entry":
+            "multi_card_verdict_equivalence.build_equivalence",
         "inventory_scope": "precision_task2_transitive_closure",
     }:
         errors.append(f"{where}.inventory.generated_from: unsupported producer contract")
     expected_inventory_keys = {
         "schema", "schema_version", "artifact_root", "generated_from", "artifacts",
         "top_work_artifacts", "shards", "single_work", "single_artifacts",
+        "single_root", "single_root_artifacts", "single_equivalence_inputs",
         "external_artifacts",
     }
     if set(row) != expected_inventory_keys:
@@ -608,9 +1081,12 @@ def _validate_multicard_v3_projection(
         errors.append(f"{where}.inventory.artifact_root: must be an existing canonical directory")
         return
     if Path(os.path.realpath(inventory_path.parent)) != root_real \
-            or inventory_path.name != "artifact-inventory-v3.json" \
+            or inventory_path.name != _MULTICARD_INVENTORY_FILENAME \
             or inventory_path.is_symlink():
-        errors.append(f"{where}.inventory: file must be artifact_root/artifact-inventory-v3.json")
+        errors.append(
+            f"{where}.inventory: file must be artifact_root/"
+            f"{_MULTICARD_INVENTORY_FILENAME}"
+        )
 
     top, _top_paths = _v3_inventory_rows(
         row.get("artifacts"), root, f"{where}.inventory.artifacts",
@@ -665,15 +1141,13 @@ def _validate_multicard_v3_projection(
     formal_caseset = _json_artifact(formal_artifacts, "caseset", where, errors)
     formal_source = _json_artifact(formal_artifacts, "source_facts", where, errors)
     formal_build = _json_artifact(formal_artifacts, "vendor_build_receipt", where, errors)
-    single_verdict = _json_artifact(formal_artifacts, "verdict", where, errors)
-    single_evidence = _json_artifact(formal_artifacts, "precision_evidence", where, errors)
-    single_receipt = _json_artifact(formal_artifacts, "extension_receipt", where, errors)
+    formal_verdict = _json_artifact(formal_artifacts, "verdict", where, errors)
     for name, actual, expected in (
         ("spec", spec, formal_spec), ("parent_caseset", parent_caseset, formal_caseset),
         ("staged_caseset", caseset, formal_caseset),
         ("source_facts", source_facts, formal_source),
         ("vendor_build_receipt", vendor_receipt, formal_build),
-        ("verdict", multi_verdict, single_verdict),
+        ("verdict", multi_verdict, formal_verdict),
     ):
         if actual != expected:
             errors.append(f"{where}.{name}: multi/single formal projection drift")
@@ -686,21 +1160,99 @@ def _validate_multicard_v3_projection(
     except multi_card_shards.ShardContractError as exc:
         errors.append(f"{where}.manifest: deterministic validation failed: {exc}")
 
+    single_root_raw = row.get("single_root")
+    if not isinstance(single_root_raw, str) or not os.path.isabs(single_root_raw):
+        errors.append(f"{where}.inventory.single_root: expected absolute path")
+        single_root = Path("/")
+    else:
+        single_root = Path(single_root_raw)
+        if (
+            single_root.is_symlink()
+            or not single_root.is_dir()
+            or Path(os.path.realpath(single_root)) != single_root
+        ):
+            errors.append(
+                f"{where}.inventory.single_root: expected canonical non-symlink directory"
+            )
+    _single_root_rows, single_root_paths = _v3_inventory_rows(
+        row.get("single_root_artifacts"),
+        single_root,
+        f"{where}.inventory.single_root_artifacts",
+        verify_artifacts,
+        errors,
+    )
+    _validate_exact_work_closure(
+        single_root,
+        single_root_paths,
+        frozenset(_MULTICARD_SINGLE_INPUT_PATHS.values()),
+        f"{where}.inventory.single_root",
+        errors,
+    )
+    single_inputs, _single_input_paths = _v3_inventory_rows(
+        row.get("single_equivalence_inputs"),
+        single_root,
+        f"{where}.inventory.single_equivalence_inputs",
+        verify_artifacts,
+        errors,
+    )
+    if set(single_inputs) != set(_MULTICARD_SINGLE_INPUT_PATHS):
+        errors.append(
+            f"{where}.inventory.single_equivalence_inputs: exact role set drift"
+        )
+    for role, relative in _MULTICARD_SINGLE_INPUT_PATHS.items():
+        item = single_inputs.get(role)
+        if not isinstance(item, dict) or item.get("path") != relative:
+            errors.append(
+                f"{where}.inventory.single_equivalence_inputs[{role}].path: "
+                f"expected {relative!r}"
+            )
+            continue
+        effective = item.get("effective_path")
+        effective_key = str(effective) if isinstance(effective, Path) else ""
+        root_item = single_root_paths.get(effective_key)
+        if not isinstance(root_item, dict) or any(
+            root_item.get(key) != item.get(key) for key in ("path", "sha256", "bytes")
+        ):
+            errors.append(
+                f"{where}.inventory.single_equivalence_inputs[{role}]: "
+                "not identical to registered single-root closure"
+            )
+
+    single_spec = _v3_json(single_inputs.get("single_spec"), f"{where}.single_spec", errors)
+    single_caseset = _v3_json(
+        single_inputs.get("single_caseset"), f"{where}.single_caseset", errors
+    )
+    single_source = _v3_json(
+        single_inputs.get("single_source_facts"), f"{where}.single_source_facts", errors
+    )
+    single_evidence = _v3_json(
+        single_inputs.get("single_evidence"), f"{where}.single_evidence", errors
+    )
+    single_verdict = _v3_json(
+        single_inputs.get("single_verdict"), f"{where}.single_verdict", errors
+    )
+    single_receipt = _v3_json(
+        single_inputs.get("single_receipt"), f"{where}.single_receipt", errors
+    )
+    for name, actual, expected in (
+        ("spec", single_spec, formal_spec),
+        ("caseset", single_caseset, formal_caseset),
+        ("source_facts", single_source, formal_source),
+        ("verdict", single_verdict, formal_verdict),
+    ):
+        if actual != expected:
+            errors.append(f"{where}.single_{name}: fresh/formal projection drift")
+
     single_work_raw = row.get("single_work")
-    receipt_path_raw = formal_artifacts.get("extension_receipt", {}).get("path")
-    expected_single_work = (
-        Path(os.path.realpath(Path(receipt_path_raw).parent))
-        if isinstance(receipt_path_raw, str) and os.path.isabs(receipt_path_raw)
-        else None)
     if not isinstance(single_work_raw, str) or not os.path.isabs(single_work_raw):
         errors.append(f"{where}.inventory.single_work: expected absolute path")
         single_work = Path("/")
     else:
         single_work = Path(single_work_raw)
         if single_work.is_symlink() or Path(os.path.realpath(single_work)) != single_work \
-                or expected_single_work != single_work:
+                or single_work != single_root / "work":
             errors.append(
-                f"{where}.inventory.single_work: must equal formal extension receipt work root")
+                f"{where}.inventory.single_work: must equal fresh single_root/work")
     single_rows, single_paths = _v3_inventory_rows(
         row.get("single_artifacts"), single_work,
         f"{where}.inventory.single_artifacts", verify_artifacts, errors)
@@ -710,17 +1262,46 @@ def _validate_multicard_v3_projection(
                    "cpp_extension_receipt.json",
                    "cpp_extension/extension_manifest.json"}),
         f"{where}.inventory.single_work", errors)
-    if isinstance(receipt_path_raw, str) and str(single_work / "cpp_extension_receipt.json") \
-            != receipt_path_raw:
-        errors.append(f"{where}.inventory.single_work: receipt path is not canonical")
+    receipt_input = single_inputs.get("single_receipt")
+    if isinstance(receipt_input, dict) and receipt_input.get("effective_path") \
+            != single_work / "cpp_extension_receipt.json":
+        errors.append(f"{where}.inventory.single_work: receipt input path is not canonical")
     try:
         validated_single = cpp_extension_adapter.validate_receipt(
-            str(single_work), formal_caseset)
+            str(single_work), single_caseset)
         if validated_single != single_receipt \
                 or single_evidence.get("cpp_extension_receipt") != validated_single:
             errors.append(f"{where}.single_work: adapter receipt/evidence projection drift")
+        single_manifest = _load_json(
+            single_work / "cpp_extension/extension_manifest.json",
+            f"{where}.single_work.manifest",
+            errors,
+        )
+        _validate_n2_tensor_format(
+            single_work,
+            single_manifest,
+            validated_single,
+            f"{where}.single_work.tensor_format",
+            errors,
+        )
     except (OSError, ValueError, cpp_extension_adapter.CppExtensionAdapterError) as exc:
         errors.append(f"{where}.single_work: adapter validation failed: {exc}")
+
+    single_gate_errors: list[str] = []
+    single_source_item = single_inputs.get("single_source_facts")
+    single_source_path = (
+        single_source_item.get("effective_path")
+        if isinstance(single_source_item, dict)
+        else None
+    )
+    try:
+        validate_acceptance_state.gate_task2(
+            str(single_root), single_gate_errors, single_source_path
+        )
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        single_gate_errors.append(f"unexpected gate exception: {exc}")
+    if single_gate_errors:
+        errors.append(f"{where}.single_task2_replay: " + "; ".join(single_gate_errors))
 
     shard_rows = _as_list(row.get("shards"), f"{where}.inventory.shards", errors)
     manifest_shards_raw = _as_list(manifest.get("shards"), f"{where}.manifest.shards", errors)
@@ -790,6 +1371,18 @@ def _validate_multicard_v3_projection(
         smoke_receipt = _v3_json(
             artifact("cpp_extension_receipt.json", smoke=True),
             f"{shard_where}.smoke_receipt", errors)
+        shard_manifest = _v3_json(
+            artifact("cpp_extension/extension_manifest.json"),
+            f"{shard_where}.manifest", errors)
+        smoke_manifest = _v3_json(
+            artifact("cpp_extension/extension_manifest.json", smoke=True),
+            f"{shard_where}.smoke_manifest", errors)
+        _validate_n2_tensor_format(
+            formal_work, shard_manifest, shard_receipt,
+            f"{shard_where}.formal_tensor_format", errors)
+        _validate_n2_tensor_format(
+            smoke_work, smoke_manifest, smoke_receipt,
+            f"{shard_where}.smoke_tensor_format", errors)
         if shard_caseset != cpp_caseset:
             errors.append(f"{shard_where}: caseset snapshots differ")
         if shard_envelope.get("cpp_extension_receipt") != shard_receipt:
@@ -885,7 +1478,13 @@ def _validate_multicard_v3_projection(
         ("merged_total", len(manifest.get("case_order", []))),
         ("single_verdict_sha256", single_sha), ("multi_verdict_sha256", multi_sha),
     ):
-        _same(actual, record.get(key), f"{where}.{key}", errors, message="v3 projection drift")
+        _same(
+            actual,
+            record.get(key),
+            f"{where}.{key}",
+            errors,
+            message="multi-card projection drift",
+        )
     accuracy = _as_dict(
         multi_verdict.get("accuracy_summary"), f"{where}.verdict.accuracy_summary", errors)
     _same(accuracy.get("passed"), record.get("merged_passed"),
@@ -2099,6 +2698,12 @@ def validation_errors(ledger: Any, *, verify_artifacts: bool = False) -> list[st
         for op in operators
         if isinstance(op.get("operator_id"), str)
     }
+    n0_supplemental = _validate_n0_static_projection(
+        root.get("n0_static_gate_evidence"),
+        operator_by_id,
+        supplemental_artifacts,
+        errors,
+    )
     runtime_cann = _as_dict(
         authority.get("runtime_cann"), "ledger.authority.runtime_cann", errors
     )
@@ -2255,6 +2860,14 @@ def validation_errors(ledger: Any, *, verify_artifacts: bool = False) -> list[st
     if tuple(seen_phases) != _PLAN_PHASES:
         errors.append(
             "ledger.workflow_plan_evidence: phases must be exactly ordered N0 through N10"
+        )
+    missing_n0_supplemental = sorted(
+        n0_supplemental - phase_ref_index.get("N0", {}).get("supplemental", set())
+    )
+    if missing_n0_supplemental:
+        errors.append(
+            "ledger.workflow_plan_evidence[N0]: missing static-gate evidence refs "
+            f"{missing_n0_supplemental}"
         )
 
     online_intakes_raw = _as_list(
@@ -2585,11 +3198,11 @@ def validation_errors(ledger: Any, *, verify_artifacts: bool = False) -> list[st
             inventory_path = (
                 Path(inventory_path_raw)
                 if isinstance(inventory_path_raw, str) and os.path.isabs(inventory_path_raw)
-                else Path("/missing-artifact-inventory-v3.json"))
+                else Path(f"/missing-{_MULTICARD_INVENTORY_FILENAME}"))
             inventory = _supplemental_json(
                 supplemental_artifacts, inventory_name,
                 f"{record_where}.inventory_artifact", errors)
-            _validate_multicard_v3_projection(
+            _validate_multicard_projection(
                 record, operator, inventory, inventory_path, record_where,
                 verify_artifacts, errors)
     if len(multicard_operator_ids) != len(set(multicard_operator_ids)):

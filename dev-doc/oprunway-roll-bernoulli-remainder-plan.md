@@ -1,10 +1,16 @@
 # Roll / Bernoulli / Remainder 统一实施计划
 
 **日期**：2026-08-07
-**状态**：待实施
+**状态**：已实施并完成 N0–N9 机械验收；N10 `PARTIALLY_VERIFIED`（2026-08-07 收口）
 **取代关系**：本文取代 `oprunway-bernoulli-remainder-plan.md` 作为后续实施顺序的当前入口；旧文保留为历史裁定与 gap provenance，不删除、不改写。
 
 **用例来源裁定**：三个算子的正式 caseset 与 golden 均由 OpRunway 根据任务书与被测事实自行生成。任务书附带 case/golden 和源码自测只作 coverage/reference evidence，不作为 caseset component，不决定 `case_target`，不消费其执行结果形成裁决。
+
+**实施状态入口**：逐阶段机读状态、三算子单卡裁决、多卡 v4 等价复验、N0 三静态门与 N2 生成
+C++/receipt 重投影见 `dev-doc/oprunway-roll-bernoulli-remainder-validation-2026-08-07.md` 及 ignored R/G/E
+总账。N0–N9 的机械完成判据已闭合；N10 未宣称完成：Roll exact 在线 PR intake 已闭合，Bernoulli 缺 exact
+在线身份，Remainder MR 4249 的 private fork head 无法形成 complete intake。三算子本地来源正式验收均已实测，
+未完成的双来源部分继续以结构化 gap 保留。
 
 ## 0 · 目标与边界
 
