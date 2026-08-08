@@ -18,13 +18,6 @@
   renderer 从确定性性能产物投影所有 blocked/exception 等未通过行；存在未通过性能 case 时必须生成明细，
   不存在时不得留下链接或旧文件；补 measure-only 行为测试及 stale-file 清理测试。
 
-## P2 · 当前回归阻塞
-
-- [ ] **迁移剩余 legacy receipt 测试夹具**：当前无排除全量测试共 2642 项，其中 21 failure、3 error、
-  18 skipped。24 个失败/错误集中在旧测试仍构造 extension receipt v1 / vendor receipt v2，被 fresh
-  anti-downgrade 门提前拒绝。完成判据：只升级测试夹具与断言到 current outer receipt + vendor receipt
-  v3，不放宽产品门；A3 无排除全量测试零 failure/error，skip 逐项有明确原因。
-
 ## P3 · 通用验收能力缺口
 
 | 能力 | 当前边界 | 完成判据 |

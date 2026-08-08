@@ -18,7 +18,9 @@
 ELF 不会被改写。
 """
 import json
+import multiprocessing
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -969,6 +971,317 @@ class OutPathGuardTest(_Fixture):
         self.assertFalse(os.path.exists(out))
         self.assertEqual([n for n in os.listdir(self.d)
                           if n.startswith(V._TMP_PREFIX)], [])
+
+
+class FailureAttemptCliTest(_Fixture):
+    """emit 失败仍返回 rc2 语义，但可留下受控且不可发布的机器工件。"""
+
+    def _digest(self):
+        path = os.path.join(self.d, "failure-prebuild.json")
+        V.main(["snapshot-digest", "--source-root", self.root,
+                "--subtree-scope", _OP, "--out", path])
+        return path
+
+    def _emit(self, argv, *, receipt=None, failure=None, delivery_cli=None):
+        receipt = receipt or os.path.join(self.d, "receipt.json")
+        failure = failure or os.path.join(self.d, "vendor-attempt.json")
+        return V.main([
+            "emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
+            "--snapshot-digest", self._digest(), "--library", self.elf,
+            "--build-cwd", self.root,
+        ] + (delivery_cli or self._delivery_cli())
+          + [f"--build-argv={arg}" for arg in argv]
+          + ["--failure-out", failure, "--out", receipt])
+
+    def test_failure_out_requires_fresh_snapshot_before_build(self):
+        receipt = os.path.join(self.d, "no-snapshot-receipt.json")
+        failure = os.path.join(self.d, "no-snapshot-attempt.json")
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "snapshot-digest"):
+            V.main([
+                "emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
+                "--library", self.elf, "--build-cwd", self.root,
+            ] + self._delivery_cli()
+              + [f"--build-argv={arg}" for arg in self._argv()]
+              + ["--failure-out", failure, "--out", receipt])
+        self.assertFalse(os.path.exists(self.sentinel))
+        self.assertFalse(os.path.lexists(receipt))
+        self.assertFalse(os.path.lexists(failure))
+
+    def test_output_parent_inode_is_rechecked_after_build(self):
+        terminal = os.path.join(self.d, "terminal")
+        moved = os.path.join(self.d, "terminal-before-swap")
+        os.makedirs(terminal)
+        receipt = os.path.join(terminal, "receipt.json")
+        failure = os.path.join(terminal, "attempt.json")
+        measured = {
+            "argv": ["build"], "cwd": self.root, "returncode": 7,
+            "returncode_source": "measured",
+            "execution": {
+                "started_at": "2026-08-08T00:00:00Z",
+                "ended_at": "2026-08-08T00:00:01Z", "duration_s": 1.0,
+                "library_path": self.elf,
+                "library_before": {"mtime_ns": 1, "size": 1, "sha256": "a" * 64},
+                "library_after": {"mtime_ns": 1, "size": 1, "sha256": "a" * 64},
+            },
+        }
+
+        def swap_parent(*_args, **_kwargs):
+            os.rename(terminal, moved)
+            os.mkdir(terminal)
+            raise V.VendorBuildReceiptError(
+                "redacted", code="BUILD_NONZERO", stage="build",
+                build_result=measured)
+
+        with mock.patch.object(V, "run_build", side_effect=swap_parent), \
+                self.assertRaisesRegex(V.VendorBuildReceiptError, "失稳|替换"):
+            self._emit(
+                self._argv(rc=7), receipt=receipt, failure=failure)
+        self.assertFalse(os.path.lexists(receipt))
+        self.assertFalse(os.path.lexists(failure))
+
+    def test_build_nonzero_is_persisted_but_verified_receipt_is_absent(self):
+        receipt = os.path.join(self.d, "nonzero-receipt.json")
+        failure = os.path.join(self.d, "nonzero-attempt.json")
+        private_arg = "token-like-value-must-not-be-persisted"
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "returncode=7"):
+            self._emit(
+                self._argv(rc=7, extra=(private_arg,)),
+                receipt=receipt, failure=failure)
+        with open(failure, encoding="utf-8") as src:
+            attempt = json.load(src)
+        self.assertEqual(attempt["schema"], "oprunway.vendor_build_attempt")
+        self.assertEqual(attempt["failure"]["error_code"], "BUILD_NONZERO")
+        self.assertEqual(attempt["build"]["returncode"], 7)
+        self.assertRegex(attempt["build"]["argv_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(attempt["build"]["argument_count"], len(self._argv(
+            rc=7, extra=(private_arg,))))
+        raw = json.dumps(attempt, ensure_ascii=False)
+        self.assertNotIn(private_arg, raw)
+        self.assertNotIn('"argv"', raw)
+        self.assertNotIn('"env"', raw)
+        self.assertIs(attempt["formal_eligible"], False)
+        self.assertIsNone(attempt["acceptance_verdict"])
+        self.assertFalse(os.path.lexists(receipt))
+
+    def test_absent_and_unchanged_elf_preserve_measured_facts(self):
+        cases = (("absent", "ELF_ABSENT", True),
+                 ("unchanged", "ELF_UNCHANGED", False))
+        for label, code, remove_library in cases:
+            with self.subTest(label=label):
+                if remove_library and os.path.exists(self.elf):
+                    os.remove(self.elf)
+                receipt = os.path.join(self.d, f"{label}-receipt.json")
+                failure = os.path.join(self.d, f"{label}-attempt.json")
+                with self.assertRaises(V.VendorBuildReceiptError):
+                    self._emit(self._noop_argv(), receipt=receipt, failure=failure)
+                with open(failure, encoding="utf-8") as src:
+                    attempt = json.load(src)
+                self.assertEqual(attempt["failure"]["error_code"], code)
+                self.assertEqual(attempt["build"]["returncode"], 0)
+                self.assertEqual(
+                    attempt["build"]["returncode_source"], "measured")
+                self.assertFalse(os.path.lexists(receipt))
+                if remove_library:
+                    with open(self.elf, "wb") as out:
+                        out.write(b"restored-library")
+
+    def test_closure_failure_is_persisted_after_successful_build(self):
+        for opp in (self.installed_opp, self.package_opp):
+            info = os.path.join(opp, "op_impl", "ai_core", "tbe", "config", _SOC,
+                                f"aic-{_SOC}-ops-info.json")
+            with open(info, "w", encoding="utf-8") as out:
+                json.dump({"SomeOtherOp": {"opFile": _SELECTED_OP}}, out)
+        receipt = os.path.join(self.d, "closure-receipt.json")
+        failure = os.path.join(self.d, "closure-attempt.json")
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "OPS_INFO_MISSING"):
+            self._emit(self._argv(), receipt=receipt, failure=failure)
+        with open(failure, encoding="utf-8") as src:
+            attempt = json.load(src)
+        self.assertEqual(attempt["failure"]["stage"], "target_closure")
+        self.assertEqual(attempt["failure"]["error_code"], "OPS_INFO_MISSING")
+        self.assertEqual(attempt["build"]["returncode"], 0)
+        self.assertFalse(os.path.lexists(receipt))
+
+    def test_package_zero_and_multi_are_typed_measured_failure_attempts(self):
+        for label, candidates, expected in (
+                ("zero", 0, "PACKAGE_ROOT_NOT_FOUND"),
+                ("multi", 2, "PACKAGE_ROOT_AMBIGUOUS")):
+            with self.subTest(label=label):
+                search = os.path.join(self.d, f"package-search-{label}")
+                os.makedirs(search)
+                for index in range(candidates):
+                    candidate = os.path.join(
+                        search, str(index), "packages", "vendors", "fixture")
+                    shutil.copytree(self.package_opp, candidate)
+                    os.makedirs(os.path.join(candidate, "op_api", "lib"))
+                delivery = [
+                    "--requested-soc", _SOC, "--selected-op", _SELECTED_OP,
+                    "--expected-op-type", _OP_TYPE,
+                    "--installed-opp-root", self.installed_opp,
+                    "--package-search-root", search,
+                    "--cmake-cache", self.cache,
+                ]
+                receipt = os.path.join(self.d, f"package-{label}-receipt.json")
+                failure = os.path.join(self.d, f"package-{label}-attempt.json")
+                with self.assertRaises(V.VendorBuildReceiptError):
+                    self._emit(
+                        self._argv(), receipt=receipt, failure=failure,
+                        delivery_cli=delivery)
+                with open(failure, encoding="utf-8") as src:
+                    attempt = json.load(src)
+                self.assertEqual(attempt["failure"]["error_code"], expected)
+                self.assertEqual(attempt["failure"]["stage"], "package_resolution")
+                self.assertEqual(attempt["build"]["returncode"], 0)
+                self.assertFalse(os.path.lexists(receipt))
+
+    def test_source_subtree_drift_is_a_typed_failure_attempt(self):
+        mutated = os.path.join(self.root, _OP, "op_host", "generated_drift.cpp")
+        argv = self._argv()
+        argv[2] = argv[2].replace(
+            "sys.exit(rc)\n",
+            "open(sys.argv[-1], 'w').write('// drift')\nsys.exit(rc)\n")
+        argv.append(mutated)
+        receipt = os.path.join(self.d, "drift-receipt.json")
+        failure = os.path.join(self.d, "drift-attempt.json")
+        with self.assertRaises(V.VendorBuildReceiptError):
+            self._emit(argv, receipt=receipt, failure=failure)
+        with open(failure, encoding="utf-8") as src:
+            attempt = json.load(src)
+        self.assertEqual(
+            attempt["failure"], {
+                "stage": "source_post_build",
+                "error_code": "SOURCE_SUBTREE_DRIFT",
+                "error_text": attempt["failure"]["error_text"],
+            })
+        self.assertEqual(attempt["build"]["returncode"], 0)
+        self.assertFalse(os.path.lexists(receipt))
+
+    def test_cmake_soc_and_op_drift_are_typed_failure_attempts(self):
+        for label, soc, selected, expected in (
+                ("soc", "ascend910b", _SELECTED_OP, "TARGET_SOC_MISMATCH"),
+                ("op", _SOC, "different_op", "TARGET_OP_MISMATCH")):
+            with self.subTest(label=label):
+                with open(self.cache, "w", encoding="utf-8") as out:
+                    out.write(f"ASCEND_COMPUTE_UNIT:STRING={soc}\n"
+                              f"ASCEND_OP_NAME:STRING={selected}\n")
+                receipt = os.path.join(self.d, f"cmake-{label}-receipt.json")
+                failure = os.path.join(self.d, f"cmake-{label}-attempt.json")
+                with self.assertRaises(V.VendorBuildReceiptError):
+                    self._emit(self._argv(), receipt=receipt, failure=failure)
+                with open(failure, encoding="utf-8") as src:
+                    attempt = json.load(src)
+                self.assertEqual(attempt["failure"]["error_code"], expected)
+                self.assertEqual(attempt["failure"]["stage"], "target_closure")
+                self.assertEqual(attempt["build"]["returncode"], 0)
+                self.assertFalse(os.path.lexists(receipt))
+
+    def test_success_invalidates_stale_failure_attempt_and_writes_only_receipt(self):
+        receipt = os.path.join(self.d, "success-receipt.json")
+        failure = os.path.join(self.d, "stale-attempt.json")
+        with open(failure, "w", encoding="utf-8") as out:
+            out.write("stale")
+        self._emit(self._argv(), receipt=receipt, failure=failure)
+        self.assertTrue(os.path.isfile(receipt))
+        self.assertFalse(os.path.lexists(failure))
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.d, V.VENDOR_TERMINAL_LOCK_FILE)))
+
+    def test_failure_out_collision_or_symlink_is_rejected_before_build(self):
+        digest = self._digest()
+        receipt = os.path.join(self.d, "same.json")
+        argv = self._argv()
+        base = [
+            "emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
+            "--snapshot-digest", digest, "--library", self.elf,
+            "--build-cwd", self.root,
+        ] + self._delivery_cli() + [f"--build-argv={arg}" for arg in argv]
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "failure-out|互斥|冲突"):
+            V.main(base + ["--failure-out", receipt, "--out", receipt])
+        self.assertFalse(os.path.isfile(self.sentinel))
+        target = os.path.join(self.d, "outside.json")
+        link = os.path.join(self.d, "failure-link.json")
+        os.symlink(target, link)
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "符号链接"):
+            V.main(base + ["--failure-out", link, "--out", receipt])
+        self.assertFalse(os.path.exists(target))
+
+        outside_dir = os.path.join(self.d, "outside-parent")
+        os.makedirs(outside_dir)
+        linked_parent = os.path.join(self.d, "linked-parent")
+        os.symlink(outside_dir, linked_parent)
+        with self.assertRaises(V.VendorBuildReceiptError):
+            V.main(base + [
+                "--failure-out", os.path.join(linked_parent, "attempt.json"),
+                "--out", receipt])
+        self.assertEqual(os.listdir(outside_dir), [])
+        self.assertFalse(os.path.exists(self.sentinel))
+
+    def test_terminal_lock_covers_cleanup_build_and_publish_as_one_generation(self):
+        ctx = multiprocessing.get_context("fork")
+        digest = self._digest()
+        receipt = os.path.join(self.d, "generation-receipt.json")
+        failure = os.path.join(self.d, "generation-attempt.json")
+        base = [
+            "emit", "--declared-source-form", V.FORM_LOCAL_SOURCE,
+            "--snapshot-digest", digest, "--library", self.elf,
+            "--build-cwd", self.root,
+        ] + self._delivery_cli() + ["--failure-out", failure, "--out", receipt]
+        old_entered = ctx.Event()
+        release_old = ctx.Event()
+        new_entered = ctx.Event()
+        errors = ctx.Queue()
+
+        def measured(tag):
+            state = {"mtime_ns": 1, "size": 1, "sha256": "a" * 64}
+            return {
+                "argv": [tag], "cwd": self.root, "returncode": 7,
+                "returncode_source": "measured",
+                "execution": {
+                    "started_at": "2026-08-08T00:00:00Z",
+                    "ended_at": "2026-08-08T00:00:01Z", "duration_s": 1.0,
+                    "library_path": self.elf, "library_before": state,
+                    "library_after": state,
+                },
+            }
+
+        def fake_run(argv, *_args, **_kwargs):
+            tag = argv[0]
+            if tag == "old":
+                old_entered.set()
+                release_old.wait(3)
+            else:
+                new_entered.set()
+            result = measured(tag)
+            raise V.VendorBuildReceiptError(
+                "redacted", code="BUILD_NONZERO", stage="build",
+                build_result=result)
+
+        def invoke(tag):
+            try:
+                V.main(base + [f"--build-argv={tag}"])
+            except V.VendorBuildReceiptError as ex:
+                errors.put(ex.code)
+
+        with mock.patch.object(V, "run_build", side_effect=fake_run):
+            old = ctx.Process(target=invoke, args=("old",))
+            new = ctx.Process(target=invoke, args=("new",))
+            old.start()
+            self.assertTrue(old_entered.wait(2))
+            new.start()
+            self.assertFalse(new_entered.wait(0.2),
+                             "第二代 build 不得越过第一代尚未提交的整轮锁")
+            release_old.set()
+            old.join(3); new.join(3)
+        self.assertEqual((old.exitcode, new.exitcode), (0, 0))
+        self.assertEqual(
+            sorted((errors.get(timeout=1), errors.get(timeout=1))),
+            ["BUILD_NONZERO", "BUILD_NONZERO"])
+        with open(failure, encoding="utf-8") as src:
+            final_attempt = json.load(src)
+        self.assertEqual(
+            final_attempt["build"]["argv_sha256"],
+            V.pre_execution_failure._canonical_sha(["new"]),
+            "晚启动的新 generation 必须成为最终唯一终态")
 
 
 if __name__ == "__main__":

@@ -50,6 +50,11 @@ CP-D `run_npu` 重跑性能，不重新抽 spec/生成 case/golden。
 - **CP-C package 根不在 wrapper 里猜**：只把本轮 CPack staging 的有界绝对根交
   `vendor_build_receipt.py emit --package-search-root`；共享 `package_layout.py` 负责 exact vendor/op 的唯一解析。
   禁止临时 `find`/glob/first-match、按 `build`/`build_out` 猜父层级或复制目录冒充 package 根。
+- **CP-C 失败只有一个标准收口**：`emit` 同时给互斥的 receipt `--out` 与 `--failure-out`；受控失败的
+  vendor attempt 仍是 producer 事实，不是验收裁决。primary 必须把它连同原始 CP-A `source_facts.json` 和
+  spec 交 `pre_execution_failure.py` 严格对账并收口；`run_workflow` 的 live receipt preflight 失败也复用
+  同一 finalizer。标准结果只有 schema-v2 `attempt_record.json` + durable terminal marker + 中文非正式明细，
+  不启动 Task1/driver/DUT/profiler，也不得进入 CP-E 或正式 renderer。
 - **不做 NL 生成 durable 工件**：spec 派 `acc-spec-extractor`；**`golden.py` 与 `runner.cpp` 都派 `acc-runner-dev`**（前者 `gen_golden`、后者 `gen_runner`）——**不自己手写 `spec.json` / `golden.py` / `runner.cpp`**。
 - **不自行判 pass/fail**：判定唯一归**确定性脚本链**（`validator.py` 精度 + `perf_compare.py` 性能 + `validate_acceptance_state.py` 三级门）；本 agent **只逐字引用确定性产物的裁决并标来源**——不是「绝不提 pass/fail」。验收路径的总结工件只按 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一；开发级路径落 `dev_*`。三者不能互相顶替。
 - **首响应先加载 `acceptance-workflow` skill**，再按 CP-A..E 状态机调度；**禁裸调 subagent**（不脱离状态机直接 fan-out）。

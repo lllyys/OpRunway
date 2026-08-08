@@ -2,6 +2,22 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-08 · CP-C 构建/交付失败统一为不可发布 attempt
+
+- `vendor_build_receipt emit` 新增互斥 `--failure-out`：受控 build、ELF、package、target closure 与源码子树
+  失败保留 typed stage/code 和能取得的实测 safe facts，仍返回 rc=2，绝不写 `VERIFIED` receipt。
+- 新增唯一 pre-execution finalizer，把 producer attempt 与原始 CP-A facts、spec public/internal identity、
+  content anchor、source snapshot、target request 与当前 plugin producer 严格对账；同一报告根锁内清旧 downstream，
+  先写 vendor attempt、中文非正式明细和 schema-v2 workflow attempt，最后写绑定三者摘要的 durable commit
+  marker；父链无跟随校验、提交前目录 inode 复核、父目录 fsync 与 cleanup→build→publish 整代锁防止越界、
+  半提交和并发旧代覆盖。路径守卫允许受信 base 上方的系统 alias，但拒绝其下用户软链；marker 前 orphan
+  payload 同样阻断正式 publisher/finalize/renderer，renderer check→write 持同一锁，marker consumer 解析并
+  交叉核三件套，并从 vendor source fact 重建严格 execution identity、逐字段复核 stage/error/subject。
+  safe facts 严校且只保存稳定脱敏错误。Task1、golden/cases、driver、DUT、profiler 和正式 renderer 均不会
+  进入；live receipt preflight 复用同一路径。
+- A3 最终相关集 231 项全绿，关键模块 trace coverage 为 74%–96%，19 个定向 mutant 全部被行为测试杀死；
+  无排除 full 2791 项全绿（18 skip），compileall 通过。本批没有运行任何算子或 DUT。
+
 ## 2026-08-08 · current 报告强制闭合来源内容锚
 
 - standalone renderer 与三级门共用唯一 current source/build binding 校验：caller-trusted facts、v3 receipt

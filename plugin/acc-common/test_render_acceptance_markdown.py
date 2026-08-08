@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -143,6 +144,59 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
         docs["acceptance.json"]["execution_identity"] = K.resolve(spec, facts)
         docs["spec.json"] = spec
         return docs, facts
+
+    def test_orphan_pre_execution_payload_blocks_renderer(self):
+        with tempfile.TemporaryDirectory() as root:
+            _write_docs(root, _docs(_receipt(_pr_source())))
+            with open(os.path.join(root, "vendor_build_attempt.json"),
+                      "w", encoding="utf-8") as out:
+                out.write("{}")
+            with self.assertRaisesRegex(R.acceptance_artifacts.FormalAcceptanceError,
+                                        "incomplete"):
+                R.write_report(root, allow_historical_read_only=True)
+            self.assertFalse(os.path.lexists(os.path.join(root, "验收报告.md")))
+
+    def test_renderer_lock_covers_terminal_check_through_physical_write(self):
+        with tempfile.TemporaryDirectory() as root:
+            _write_docs(root, _docs(_receipt(_pr_source())))
+            rendering = threading.Event()
+            release = threading.Event()
+            terminal_entered = threading.Event()
+            errors = []
+            real_render = R._render_locked
+
+            def paused_render(*args, **kwargs):
+                rendering.set()
+                release.wait(3)
+                return real_render(*args, **kwargs)
+
+            def write_report():
+                try:
+                    R.write_report(root, allow_historical_read_only=True)
+                except Exception as ex:  # pragma: no cover - 断言队列负责暴露
+                    errors.append(ex)
+
+            def commit_terminal_payload():
+                with R.acceptance_artifacts.artifact_transaction(root):
+                    terminal_entered.set()
+                    with open(os.path.join(root, "vendor_build_attempt.json"),
+                              "w", encoding="utf-8") as out:
+                        out.write("{}")
+
+            with mock.patch.object(R, "_render_locked", side_effect=paused_render):
+                renderer = threading.Thread(target=write_report)
+                terminal = threading.Thread(target=commit_terminal_payload)
+                renderer.start()
+                self.assertTrue(rendering.wait(2))
+                terminal.start()
+                self.assertFalse(terminal_entered.wait(0.2),
+                                 "terminal finalizer 不得插入 renderer check→write 窗口")
+                release.set()
+                renderer.join(3); terminal.join(3)
+            self.assertEqual(errors, [])
+            self.assertTrue(os.path.isfile(os.path.join(
+                root, R.HISTORICAL_REPORT_FILENAME)))
+            self.assertTrue(terminal_entered.is_set())
 
     def test_renders_public_and_internal_operator_identities_separately(self):
         with tempfile.TemporaryDirectory() as root:

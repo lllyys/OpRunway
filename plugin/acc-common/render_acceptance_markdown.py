@@ -8,6 +8,8 @@ import json
 import os
 
 import acceptance_artifacts
+import artifact_path_guard
+import pre_execution_failure
 import cann_version
 import kernel_identity
 # 来源对照物（`source_facts.json`）的发现规则在 `source_facts_lookup`，本文件一条都不自建。
@@ -516,8 +518,12 @@ def _performance_failure_detail(non_passing, caseset):
 HISTORICAL_REPORT_FILENAME = "历史验收报告（只读）.md"
 
 
-def render(report_root, source_facts_path=None, *, allow_historical_read_only=False):
-    report_root = os.path.realpath(report_root)
+def _render_locked(report_root, source_facts_path=None, *, allow_historical_read_only=False):
+    if os.path.lexists(os.path.join(
+            report_root, acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE)):
+        pre_execution_failure.validate_terminal_marker(report_root)
+        raise acceptance_artifacts.FormalAcceptanceError(
+            "报告根存在 durable pre-execution terminal marker；不得渲染正式验收报告")
     acceptance = _load(report_root, "acceptance.json")
     # renderer 可被 CLI 单独调用，不能假定文件一定来自 run_workflow。正式命名的发布门须在
     # 读取其它诊断件之前执行：blocked/未过门候选即使目录里缺其它文件，也应明确按产物边界拒绝。
@@ -768,11 +774,41 @@ def render(report_root, source_facts_path=None, *, allow_historical_read_only=Fa
     return "\n".join(lines)
 
 
+def render(report_root, source_facts_path=None, *, allow_historical_read_only=False):
+    try:
+        guard = artifact_path_guard.prepare_existing_directory(report_root)
+    except artifact_path_guard.ArtifactPathError as ex:
+        raise acceptance_artifacts.FormalAcceptanceError(
+            f"正式 renderer 报告根不可信：{ex}") from ex
+    with acceptance_artifacts.artifact_transaction(guard["path"]):
+        artifact_path_guard.assert_stable(guard)
+        acceptance_artifacts.assert_no_pre_execution_artifacts(guard["path"])
+        return _render_locked(
+            guard["path"], source_facts_path=source_facts_path,
+            allow_historical_read_only=allow_historical_read_only)
+
+
 def write_report(
         report_root, filename="验收报告.md", source_facts_path=None, *,
         allow_historical_read_only=False):
-    report_root = os.path.realpath(report_root)
-    text = render(
+    try:
+        guard = artifact_path_guard.prepare_existing_directory(report_root)
+    except artifact_path_guard.ArtifactPathError as ex:
+        raise acceptance_artifacts.FormalAcceptanceError(
+            f"正式 renderer 报告根不可信：{ex}") from ex
+    report_root = guard["path"]
+    with acceptance_artifacts.artifact_transaction(report_root):
+        artifact_path_guard.assert_stable(guard)
+        acceptance_artifacts.assert_no_pre_execution_artifacts(report_root)
+        return _write_report_locked(
+            report_root, filename, source_facts_path,
+            allow_historical_read_only=allow_historical_read_only)
+
+
+def _write_report_locked(
+        report_root, filename, source_facts_path, *,
+        allow_historical_read_only=False):
+    text = _render_locked(
         report_root, source_facts_path=source_facts_path,
         allow_historical_read_only=allow_historical_read_only)
     historical_render = bool(

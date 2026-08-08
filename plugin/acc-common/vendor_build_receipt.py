@@ -158,6 +158,8 @@ URL 给出不同答案，那时门就是摆设。⚠ **报错刻意不回显原�
 """
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -168,14 +170,79 @@ import tempfile
 import time
 
 import package_layout
+import artifact_path_guard
 import kernel_identity
 import source_provenance
 import target_kernel_delivery
 import url_credentials
+import pre_execution_failure
 
 
 class VendorBuildReceiptError(ValueError):
     """收据不可接受；调用方按自身约定收敛（raise 自己的异常 / 累计成 errs）。"""
+
+    def __init__(self, message, *, code="VENDOR_BUILD_RECEIPT_FAILED",
+                 stage="vendor_receipt", build_result=None):
+        super().__init__(message)
+        self.code = code
+        self.stage = stage
+        self.build_result = build_result
+
+
+VENDOR_TERMINAL_LOCK_FILE = ".oprunway-vendor-build.lock"
+
+
+@contextlib.contextmanager
+def _terminal_artifact_transaction(*paths):
+    """以确定顺序锁住成功/失败终态所在目录，避免并发 emit 产生双终态。"""
+    try:
+        guards = [artifact_path_guard.prepare_parent(path)
+                  for path in paths if path is not None]
+    except artifact_path_guard.ArtifactPathError as ex:
+        raise VendorBuildReceiptError(f"产物落点写不进去：{ex}") from ex
+    parents = sorted({guard["path"] for guard in guards})
+    with contextlib.ExitStack() as stack:
+        locks = []
+        for parent in parents:
+            lock = stack.enter_context(open(
+                os.path.join(parent, VENDOR_TERMINAL_LOCK_FILE),
+                "a+", encoding="utf-8"))
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            locks.append(lock)
+        try:
+            def recheck():
+                try:
+                    for guard in guards:
+                        artifact_path_guard.assert_stable(guard)
+                except artifact_path_guard.ArtifactPathError as ex:
+                    raise VendorBuildReceiptError(
+                        f"产物目录在构建事务期间失稳：{ex}") from ex
+            recheck()
+            yield recheck
+        finally:
+            for lock in reversed(locks):
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _remove_terminal_artifact(path):
+    if not os.path.lexists(path):
+        return
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise VendorBuildReceiptError(
+            f"成功/失败终态落点已有非普通文件：{path!r}")
+    os.remove(path)
+
+
+def _publish_terminal_pair(*, receipt_path, failure_path, payload, failed):
+    """调用方已持有整轮锁；清相反终态并原子发布本轮唯一终态。"""
+    for path in (receipt_path, failure_path):
+        if path is not None:
+            _remove_terminal_artifact(path)
+    if failed:
+        pre_execution_failure.write_vendor_attempt(failure_path, payload)
+        return failure_path
+    atomic_write(receipt_path, payload)
+    return receipt_path
 
 
 SCHEMA = "oprunway.vendor_build_receipt"
@@ -200,7 +267,8 @@ def build_target_kernel_delivery_closure(**kwargs):
         return target_kernel_delivery.build_closure(
             **kwargs, symbol_inspector=_global_defined_symbols)
     except target_kernel_delivery.TargetKernelDeliveryError as ex:
-        raise VendorBuildReceiptError(str(ex)) from ex
+        raise VendorBuildReceiptError(
+            str(ex), code=ex.code, stage="target_closure") from ex
 
 
 def validate_target_kernel_delivery_closure(closure, *, build_argv, live=False):
@@ -210,7 +278,8 @@ def validate_target_kernel_delivery_closure(closure, *, build_argv, live=False):
             closure, build_argv=build_argv, live=live,
             symbol_inspector=_global_defined_symbols)
     except target_kernel_delivery.TargetKernelDeliveryError as ex:
-        raise VendorBuildReceiptError(str(ex)) from ex
+        raise VendorBuildReceiptError(
+            str(ex), code=ex.code, stage="receipt_preflight") from ex
 
 #: 收据侧取源形态词表 —— **逐字复用 intake 侧常量**，不另起名字。
 PROVENANCE_GIT_PR = source_provenance.PROVENANCE_GIT_PR
@@ -1195,7 +1264,8 @@ def run_build(build_argv, build_cwd, library_path, *, requested_soc=None,
             target_assets_before = target_kernel_delivery.target_manifest(
                 installed_opp_root, requested_soc, allow_missing=True)
         except target_kernel_delivery.TargetKernelDeliveryError as ex:
-            raise VendorBuildReceiptError(str(ex)) from ex
+            raise VendorBuildReceiptError(
+                str(ex), code=ex.code, stage="target_preflight") from ex
     else:
         requested = None
         target_assets_before = None
@@ -1206,30 +1276,10 @@ def run_build(build_argv, build_cwd, library_path, *, requested_soc=None,
         run = subprocess.run(argv, cwd=build_cwd, check=False)
     except (OSError, subprocess.SubprocessError) as ex:
         raise VendorBuildReceiptError(
-            f"构建命令没能执行起来：{argv!r}（cwd={build_cwd!r}；{ex}）") from ex
+            f"构建命令没能执行起来（cwd={build_cwd!r}；{ex}）",
+            code="BUILD_EXECUTION_ERROR", stage="build") from ex
     ended = time.time()
     after = _library_state(target)
-    if after is None:
-        raise VendorBuildReceiptError(
-            f"构建结束后 vendor ELF 仍不存在或不是普通文件：{target}"
-            f"（实测 returncode={run.returncode}）——build 与 install 是两步时要并进同一条命令"
-            "（`bash -c \"./build.sh … && ./build_out/*.run --install-path=…\"`），"
-            "否则这里根本没有文件可摘")
-    if before is not None and before == after:
-        raise VendorBuildReceiptError(
-            f"vendor ELF 在这次构建窗口内一个字节都没变：{target}"
-            "（mtime_ns / size / sha256 三项全同）——这份收据要证明的正是「这个 .so 由这次 build "
-            "产出」，对着一个预先存在、构建根本没碰过的文件出收据 = 宣称有门其实没门（fail-closed）")
-    if target_assets_before is not None and package_search_root is not None \
-            and run.returncode == 0:
-        expected_vendor_dir = os.path.basename(
-            os.path.realpath(requested_common["installed_opp_root"]))
-        try:
-            requested["package_opp_root"] = package_layout.resolve_package_opp_root(
-                package_search_root, expected_vendor_dir,
-                requested_common["expected_op_type"])
-        except package_layout.PackageLayoutError as ex:
-            raise VendorBuildReceiptError(str(ex)) from ex
     result = {
         "argv": argv,
         "cwd": build_cwd,
@@ -1247,6 +1297,33 @@ def run_build(build_argv, build_cwd, library_path, *, requested_soc=None,
     if target_assets_before is not None:
         result["target_delivery_request"] = requested
         result["target_assets_before"] = target_assets_before
+    if after is None:
+        raise VendorBuildReceiptError(
+            f"构建结束后 vendor ELF 仍不存在或不是普通文件：{target}"
+            f"（实测 returncode={run.returncode}）——build 与 install 是两步时要并进同一条命令"
+            "（`bash -c \"./build.sh … && ./build_out/*.run --install-path=…\"`），"
+            "否则这里根本没有文件可摘",
+            code="ELF_ABSENT", stage="build", build_result=result)
+    if before is not None and before == after:
+        raise VendorBuildReceiptError(
+            f"vendor ELF 在这次构建窗口内一个字节都没变：{target}"
+            "（mtime_ns / size / sha256 三项全同）——这份收据要证明的正是「这个 .so 由这次 build "
+            "产出」，对着一个预先存在、构建根本没碰过的文件出收据 = 宣称有门其实没门（fail-closed）",
+            code="ELF_UNCHANGED", stage="build", build_result=result)
+    if target_assets_before is not None and package_search_root is not None \
+            and run.returncode == 0:
+        expected_vendor_dir = os.path.basename(
+            os.path.realpath(requested_common["installed_opp_root"]))
+        try:
+            requested["package_opp_root"] = package_layout.resolve_package_opp_root(
+                package_search_root, expected_vendor_dir,
+                requested_common["expected_op_type"])
+        except package_layout.PackageLayoutError as ex:
+            raise VendorBuildReceiptError(
+                str(ex), code=ex.code, stage="package_resolution",
+                build_result=result) from ex
+    if target_assets_before is not None:
+        result["target_delivery_request"] = requested
     return result
 
 
@@ -1277,7 +1354,8 @@ def _validate_build_result(build_result):
 
 
 def produce_receipt(*, build_result, declared_source_form=None,
-                    repo=None, snapshot_digest=None, pr_head_sha=None):
+                    repo=None, snapshot_digest=None, pr_head_sha=None,
+                    prebuild_tree_matched=False):
     """据 build 现场事实产一份**已自过 validate()** 的 vendor build receipt。
 
     三条路由与 :mod:`source_provenance` 一一对应：
@@ -1311,7 +1389,8 @@ def produce_receipt(*, build_result, declared_source_form=None,
     if returncode != 0:
         raise VendorBuildReceiptError(
             f"build returncode={returncode!r}（实测）：构建没成功就没有「这个 so 是这么来的」可言，"
-            "不产收据（fail-closed）")
+            "不产收据（fail-closed）", code="BUILD_NONZERO", stage="build",
+            build_result=result)
     elf = result["execution"]["library_path"]
     elf_sha = result["execution"]["library_after"]["sha256"]
 
@@ -1319,7 +1398,14 @@ def produce_receipt(*, build_result, declared_source_form=None,
              RETURNCODE_SOURCE_KEY: RETURNCODE_SOURCE_MEASURED,
              "execution": dict(result["execution"])}
     if snapshot_digest is not None:
-        root, scope, whole, subtree = _validate_snapshot_digest(snapshot_digest)
+        try:
+            root, scope, whole, subtree = _validate_snapshot_digest(snapshot_digest)
+        except VendorBuildReceiptError as ex:
+            if not prebuild_tree_matched:
+                raise
+            raise VendorBuildReceiptError(
+                str(ex), code="SOURCE_SUBTREE_DRIFT", stage="source_post_build",
+                build_result=result) from ex
         # 结构性的一道：CLI 在 build 之前已核过一次（那次还能省下整轮构建），但直接调本函数的
         # 人绕不过这里——「在 A 目录摘树、在 B 目录 build」的收据是空绑定，落盘前必须拦住。
         _assert_build_cwd_within(root, build_cwd)
@@ -1358,7 +1444,13 @@ def produce_receipt(*, build_result, declared_source_form=None,
             "subtree_skipped_symlink_count": snapshot_digest.get(
                 "subtree_skipped_symlink_count"),
         }
-        build["tree_state_at_emit"] = _tree_state_at_emit(root, scope, whole, subtree)
+        try:
+            build["tree_state_at_emit"] = _tree_state_at_emit(
+                root, scope, whole, subtree)
+        except VendorBuildReceiptError as ex:
+            raise VendorBuildReceiptError(
+                str(ex), code="SOURCE_SUBTREE_DRIFT", stage="source_post_build",
+                build_result=result) from ex
     else:
         kind = PROVENANCE_GIT_PR
         if not isinstance(pr_head_sha, str) or not _HEX40.fullmatch(pr_head_sha):
@@ -1386,10 +1478,15 @@ def produce_receipt(*, build_result, declared_source_form=None,
             or os.path.realpath(declared_opp) != derived_opp):
         raise VendorBuildReceiptError(
             "installed_opp_root 与本轮 artifact.library_path 反推的 custom OPP 根不一致")
-    closure = build_target_kernel_delivery_closure(
-        **delivery, build_argv=argv,
-        build_cwd=(snapshot_digest or {}).get("source_root", build_cwd),
-        target_assets_before=target_assets_before)
+    try:
+        closure = build_target_kernel_delivery_closure(
+            **delivery, build_argv=argv,
+            build_cwd=(snapshot_digest or {}).get("source_root", build_cwd),
+            target_assets_before=target_assets_before)
+    except VendorBuildReceiptError as ex:
+        raise VendorBuildReceiptError(
+            str(ex), code=ex.code, stage=ex.stage,
+            build_result=result) from ex
     receipt = {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
@@ -1522,6 +1619,11 @@ def atomic_write(path, payload):
             os.fsync(out.fileno())
         os.replace(tmp, path)
         tmp = None
+        dir_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     except (OSError, ValueError, TypeError) as ex:
         # ⚠ 不只接 OSError：`allow_nan=False` 或不可序列化的载重会抛 ValueError/TypeError，
         #   放它裸奔出去就绕过了本模块的错误契约（调用方按 VendorBuildReceiptError 收敛），
@@ -1533,6 +1635,55 @@ def atomic_write(path, payload):
         if tmp is not None and os.path.exists(tmp):
             os.unlink(tmp)
     return path
+
+
+def _emit_generation(args, digest, target_request, *, recheck=lambda: None):
+    """调用方持有成功/失败终态整轮锁；覆盖 cleanup→build→publish。"""
+    if args.failure_out is not None:
+        recheck()
+        for path in (args.out, args.failure_out):
+            _remove_terminal_artifact(path)
+    result = None
+    try:
+        result = run_build(
+            args.build_argv, args.build_cwd, args.library,
+            requested_soc=args.requested_soc, selected_op=args.selected_op,
+            expected_op_type=args.expected_op_type,
+            installed_opp_root=args.installed_opp_root,
+            package_opp_root=args.package_opp_root,
+            package_search_root=args.package_search_root,
+            cmake_cache_path=args.cmake_cache)
+        if args.returncode is not None and args.returncode != result["returncode"]:
+            raise VendorBuildReceiptError(
+                f"--returncode 期望 {args.returncode}，实测 {result['returncode']}——"
+                "以实测为准，不产收据（fail-closed）",
+                code="EXPECTED_RETURNCODE_MISMATCH", stage="build",
+                build_result=result)
+        receipt = produce_receipt(
+            declared_source_form=args.declared_source_form,
+            build_result=result, repo=args.repo, snapshot_digest=digest,
+            pr_head_sha=args.pr_head_sha, prebuild_tree_matched=True)
+    except VendorBuildReceiptError as ex:
+        if args.failure_out is not None and digest is not None:
+            recheck()
+            attempt = pre_execution_failure.build_vendor_attempt(
+                snapshot_digest=digest, target_request=target_request,
+                failure_stage=ex.stage, error_code=ex.code,
+                error_text=str(ex), declared_source_form=args.declared_source_form,
+                build_result=(ex.build_result if ex.build_result is not None
+                              else result))
+            _publish_terminal_pair(
+                receipt_path=args.out, failure_path=args.failure_out,
+                payload=attempt, failed=True)
+        raise
+    if args.failure_out is not None:
+        recheck()
+        _publish_terminal_pair(
+            receipt_path=args.out, failure_path=args.failure_out,
+            payload=receipt, failed=False)
+    else:
+        atomic_write(args.out, receipt)
+    return receipt
 
 
 def main(argv=None):
@@ -1589,6 +1740,10 @@ def main(argv=None):
                         "分开写会被 argparse 当成另一个选项、当场报 `expected one argument`。"
                         "而真实构建命令的实参几乎全是 `--xxx` / `-jN`，故等号形式基本是常态。")
     e.add_argument("--out", required=True, help="收据落盘路径")
+    e.add_argument(
+        "--failure-out", default=None,
+        help="可选：build/package/closure 受控失败时原子写不可发布的 "
+             "oprunway.vendor_build_attempt；仍返回 rc2，绝不伪造 VERIFIED receipt")
 
     args = ap.parse_args(argv)
     if args.cmd == "snapshot-digest":
@@ -1615,6 +1770,14 @@ def main(argv=None):
             "没有「只给一个 returncode、不执行」的模式（模块 docstring 说明了为什么）")
     # ⚠ 以下三项**全部前置到跑 build 之前**：build 动辄几十分钟，跑完才发现参数错是纯浪费，
     #    而且失败点会落在「已经改了机器状态之后」。三项各自都能让整轮白跑。
+    try:
+        artifact_path_guard.prepare_parent(args.out)
+        artifact_path_guard.assert_leaf_safe(args.out)
+        if args.failure_out is not None:
+            artifact_path_guard.prepare_parent(args.failure_out)
+            artifact_path_guard.assert_leaf_safe(args.failure_out)
+    except artifact_path_guard.ArtifactPathError as ex:
+        raise VendorBuildReceiptError(f"产物落点写不进去：{ex}") from ex
     assert_out_is_writable(args.out, conflicts=(
         ("--library", args.library,
          "被测 ELF 会被一份 JSON 原子替换掉，这一轮直接没有 DUT 了"),
@@ -1623,30 +1786,47 @@ def main(argv=None):
         ("--cmake-cache", args.cmake_cache,
          "目标 SoC/op 的机器校验凭据会被覆盖，target kernel closure 失效"),
     ))
+    if args.failure_out is not None:
+        if digest is None:
+            raise VendorBuildReceiptError(
+                "--failure-out 只接受已绑定 build 前 source snapshot 的 fresh emit；"
+                "必须显式提供 --snapshot-digest")
+        if os.path.lexists(args.failure_out) and os.path.islink(args.failure_out):
+            raise VendorBuildReceiptError("--failure-out 不得是符号链接")
+        if os.path.lexists(args.out) and os.path.islink(args.out):
+            raise VendorBuildReceiptError("--out 不得是符号链接")
+        failure_real = assert_out_is_writable(args.failure_out, conflicts=(
+            ("--out", args.out, "成功 receipt 与失败 attempt 必须互斥"),
+            ("--library", args.library, "失败 attempt 不得覆盖被测 ELF"),
+            ("--snapshot-digest", args.snapshot_digest, "失败 attempt 不得覆盖来源凭据"),
+            ("--cmake-cache", args.cmake_cache, "失败 attempt 不得覆盖目标选择凭据"),
+        ))
+        if failure_real == os.path.realpath(args.out):
+            raise VendorBuildReceiptError(
+                "--failure-out 与 --out 冲突：成功 receipt 与失败 attempt 必须物理互斥")
     if args.repo is not None:
         assert_repo_has_no_credentials(args.repo, "--repo")
     if digest is not None:
         # 构建前对账：build 的这棵树必须就是刚被摘过指纹的那棵，且此刻字节未变。
         # PR 通路（只给 --pr-head-sha）没有 source_root 这个对照物，做不了这一步。
         assert_build_tree_matches_digest(digest, args.build_cwd)
-    # ⚠ 顺序：先真跑 build，再产收据。`--returncode` 只是期望值断言，不是被记录的那个值。
-    result = run_build(
-        args.build_argv, args.build_cwd, args.library,
-        requested_soc=args.requested_soc, selected_op=args.selected_op,
-        expected_op_type=args.expected_op_type,
-        installed_opp_root=args.installed_opp_root,
-        package_opp_root=args.package_opp_root,
-        package_search_root=args.package_search_root,
-        cmake_cache_path=args.cmake_cache)
-    if args.returncode is not None and args.returncode != result["returncode"]:
-        raise VendorBuildReceiptError(
-            f"--returncode 期望 {args.returncode}，实测 {result['returncode']}——"
-            "以实测为准，不产收据（fail-closed）")
-    receipt = produce_receipt(
-        declared_source_form=args.declared_source_form,
-        build_result=result,
-        repo=args.repo, snapshot_digest=digest, pr_head_sha=args.pr_head_sha)
-    atomic_write(args.out, receipt)
+    target_request = {
+        "requested_soc": args.requested_soc,
+        "selected_op": args.selected_op,
+        "expected_op_type": args.expected_op_type,
+        "installed_opp_root": args.installed_opp_root,
+        "cmake_cache_path": args.cmake_cache,
+    }
+    if args.package_opp_root is not None:
+        target_request["package_opp_root"] = args.package_opp_root
+    if args.package_search_root is not None:
+        target_request["package_search_root"] = args.package_search_root
+    if args.failure_out is not None:
+        with _terminal_artifact_transaction(args.out, args.failure_out) as recheck:
+            receipt = _emit_generation(
+                args, digest, target_request, recheck=recheck)
+    else:
+        receipt = _emit_generation(args, digest, target_request)
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
     return 0
 

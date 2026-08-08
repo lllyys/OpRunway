@@ -30,6 +30,7 @@ import cpp_extension_adapter  # noqa: E402
 import repro_artifacts  # noqa: E402
 import render_acceptance_markdown  # noqa: E402
 import acceptance_artifacts  # noqa: E402
+import artifact_path_guard  # noqa: E402
 import validate_acceptance_state as gate  # noqa: E402
 import source_facts_lookup  # noqa: E402
 import spec_change_gate  # noqa: E402
@@ -38,6 +39,7 @@ import content_address  # noqa: E402
 import kernel_identity  # noqa: E402
 import perf_mode  # noqa: E402
 import perf_evidence_contract  # noqa: E402
+import pre_execution_failure  # noqa: E402
 
 # —— C5 · 验收 / 非验收两套产物的口径（唯一定义处）——————————————————————————
 _DEV_GRADE = "development"              # 照 catlass_adapter.run_catlass_mock
@@ -72,7 +74,7 @@ _DEV_SUMMARY_FILE = "dev_run_summary.json"     # ← 取代 acceptance.json
 _DEV_VERDICT_FILE = "dev_precision_check.json"  # ← 取代 verdict.json
 _ATTEMPT_RECORD_FILE = acceptance_artifacts.ATTEMPT_RECORD_FILE
 _MARKDOWN_REPORT_ERROR_FILE = "markdown_report_error.json"
-_TARGET_KERNEL_FAILURE_MD = "目标内核交付失败明细.md"
+_TARGET_KERNEL_FAILURE_MD = pre_execution_failure.DETAIL_REPORT_FILE
 _ACCEPTANCE_FILES = ("acceptance.json", "verdict.json")
 _DEV_FILES = (_DEV_SUMMARY_FILE, _DEV_VERDICT_FILE)
 #: 人读交付物：`render_acceptance_markdown.write_report` 落进报告目录的三份 Markdown。
@@ -86,7 +88,9 @@ _REPORT_MD_FILES = ("验收报告.md", "精度失败明细.md", "性能失败明
 #:   acceptance.json 会与本轮 dev_* 并存——正是这套机制要堵的洞。
 _RESULT_FILES = (_ACCEPTANCE_FILES + _DEV_FILES
                  + (_ATTEMPT_RECORD_FILE, "perf_report.json", _MARKDOWN_REPORT_ERROR_FILE)
-                 + (_TARGET_KERNEL_FAILURE_MD,)
+                 + (_TARGET_KERNEL_FAILURE_MD,
+                    acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE,
+                    pre_execution_failure.VENDOR_ATTEMPT_FILE)
                  + _REPORT_MD_FILES)
 #: 同上，只是要按通配清（T6 小 shape 仿真图，防 stale SVG 让「有图」门误过；codex H7）。
 _RESULT_GLOBS = ("perf_sim_*.svg",)
@@ -730,7 +734,16 @@ def _invalidate_stale_results(out_dir):
     ⚠ **也不清 `_STAGED_FILES`**：那三份是**输入**副本，清早了会把「复跑时 `--source-facts`
     指向上一轮的副本」变成假 BLOCKED。它们的清理点在读完原件之后，见 `run()` 里那段。
     """
-    return invalidate_results(out_dir, _RESULT_FILES, _RESULT_GLOBS)
+    if not os.path.lexists(out_dir):
+        return []
+    try:
+        guard = artifact_path_guard.prepare_existing_directory(out_dir)
+    except artifact_path_guard.ArtifactPathError as ex:
+        raise SystemExit(f"[产物隔离] 报告根父链不可信：{ex}") from ex
+    with acceptance_artifacts.artifact_transaction(guard["path"]):
+        artifact_path_guard.assert_stable(guard)
+        return invalidate_results(
+            guard["path"], _RESULT_FILES, _RESULT_GLOBS)
 
 
 def invalidate_results(out_dir, names, globs=(), error_cls=SystemExit):
@@ -867,10 +880,12 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
                        if is_acceptance else None)
     execution_identity = None
     acceptance_source_facts = None
+    source_facts_envelope_digest = None
     if staged_payloads is not None:
         try:
             facts_doc = json.loads(staged_payloads[_STAGED_SOURCE_FACTS_FILE])
             acceptance_source_facts = facts_doc.get("payload")
+            source_facts_envelope_digest = facts_doc.get("digest")
             if (not isinstance(facts_doc, dict)
                     or facts_doc.get("domain") != source_facts_lookup.SOURCE_FACTS_DOMAIN
                     or not isinstance(acceptance_source_facts, dict)
@@ -918,7 +933,17 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
                 f"[new_example] 真机跑测无法启动——真机配置缺失或无效：\n{ex}\n"
                 f"  · 只想本地自检用例链（非验收）→ 显式加 --mode mock。\n"
                 f"  · 要真机跑测 → 先按上面提示设好 OPRUNWAY_* 环境变量（真值不写进仓）。")
-    os.makedirs(out_dir, exist_ok=True)
+    try:
+        if os.path.lexists(out_dir):
+            report_guard = artifact_path_guard.prepare_existing_directory(out_dir)
+        else:
+            trusted_inputs = (spec_path,) + ((source_facts,)
+                                              if source_facts is not None else ())
+            report_guard = artifact_path_guard.prepare_report_root(
+                out_dir, trusted_inputs)
+    except artifact_path_guard.ArtifactPathError as ex:
+        raise SystemExit(f"[报告根] 路径不可信：{ex}") from ex
+    out_dir = report_guard["path"]
     work = os.path.join(out_dir, "work")
     def _dump(obj, name):
         p = os.path.join(out_dir, name)
@@ -982,41 +1007,29 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
                 expected_content_anchor=expected_anchor)
         except cpp_extension_adapter.CppExtensionAdapterError as ex:
             detail = str(ex)
-            # 这里还没生成本轮 caseset/evidence；若同一 out_dir 有同名文件，只可能来自上轮。
-            # 保留它们会让 attempt 看起来像已执行过本轮 Task1/DUT，故与旧裁决一起作废。
-            for stale in ("caseset.json", "evidence.json"):
-                stale_path = os.path.join(out_dir, stale)
-                if os.path.lexists(stale_path):
-                    os.remove(stale_path)
-            candidate = {
-                "op": spec.get("op"),
-                "execution_identity": execution_identity,
-                "repo_mode": mode,
-                "overall": "BLOCKED(target kernel delivery closure 未通过)",
-                "state": "BLOCKED_TARGET_KERNEL_DELIVERY_CLOSURE",
-                "exit_code": 1,
-                "requires_human_cp": False,
-                "gate": {"passed": False,
-                         "errors": {"pre_execution": [detail]}},
-                "diagnostic_sources": {
-                    "target_kernel_delivery": _TARGET_KERNEL_FAILURE_MD,
-                },
-            }
-            final_file = acceptance_artifacts.write_attempt_record(out_dir, candidate)
-            md_path = os.path.join(out_dir, _TARGET_KERNEL_FAILURE_MD)
-            with open(md_path, "w", encoding="utf-8") as report:
-                report.write(
-                    "# 目标内核交付失败明细（非正式验收报告）\n\n"
-                    "本轮在 Task1、外部 driver、DUT 调用和性能采集之前停止。\n\n"
-                    "- `acceptance_verdict = null`\n"
-                    "- 本文件不得命名、引用或渲染为正式验收报告。\n"
-                    f"- 失败详情：{detail}\n")
+            receipt_path = os.environ.get(
+                "OPRUNWAY_CPP_EXTENSION_VENDOR_BUILD_RECEIPT")
+            vendor_attempt = pre_execution_failure.build_live_preflight_attempt(
+                source_facts=acceptance_source_facts,
+                target_request={
+                    "expected_op_type": execution_identity["kernel_op_type"]},
+                error_text=detail,
+                failed_claim=pre_execution_failure.failed_claim_from_path(receipt_path))
+            finalized = pre_execution_failure.finalize(
+                out_dir=out_dir, spec=spec, spec_sha256=entry_spec_sha256,
+                source_facts=acceptance_source_facts,
+                source_facts_digest=source_facts_envelope_digest,
+                vendor_attempt=vendor_attempt,
+                trusted_paths=(spec_path, source_facts))
+            final_file = finalized["attempt_record"]
             print("[CP-C target kernel delivery] FAILED；仅写 attempt_record.json 与"
                   f" {_TARGET_KERNEL_FAILURE_MD}，不产 acceptance.json")
             return {
                 "verdict": None, "perf_report": None,
-                "gate": candidate["gate"], "overall": candidate["overall"],
-                "state": candidate["state"], "exit_code": 1,
+                "gate": {"passed": False, "errors": {
+                    "pre_execution": [detail]}},
+                "overall": finalized["overall"],
+                "state": finalized["state"], "exit_code": 1,
                 "requires_human_cp": False, "is_acceptance": True,
                 "evidence_grade": None,
                 "summary_file": os.path.basename(final_file),

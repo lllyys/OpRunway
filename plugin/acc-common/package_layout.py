@@ -23,6 +23,10 @@ import os
 class PackageLayoutError(ValueError):
     """package staging 布局无法唯一、可信地解析。"""
 
+    def __init__(self, message, *, code="PACKAGE_RESOLUTION_FAILED"):
+        super().__init__(message)
+        self.code = code
+
 
 def _text(value, where, code):
     if not isinstance(value, str) or not value.strip():
@@ -160,9 +164,11 @@ def resolve_package_opp_root(package_search_root, expected_vendor_dir,
     if not exact:
         raise PackageLayoutError(
             "PACKAGE_OPP_ROOT_MISSING: 有界搜索根中没有同时匹配 exact vendor/op 的 "
-            f"package OPP root（vendor={vendor!r}, op_type={op_type!r}）")
+            f"package OPP root（vendor={vendor!r}, op_type={op_type!r}）",
+            code="PACKAGE_ROOT_NOT_FOUND")
     if len(exact) != 1:
         raise PackageLayoutError(
             "PACKAGE_OPP_ROOT_AMBIGUOUS: 有界搜索根中存在多个 exact vendor/op 候选；"
-            "拒绝 first-match：" + json.dumps(exact, ensure_ascii=False))
+            "拒绝 first-match：" + json.dumps(exact, ensure_ascii=False),
+            code="PACKAGE_ROOT_AMBIGUOUS")
     return exact[0]

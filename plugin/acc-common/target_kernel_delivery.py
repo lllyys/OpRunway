@@ -26,6 +26,10 @@ _CACHE_LINE = re.compile(r"^([^#/:=]+)(?::[^=]+)?=(.*)$")
 class TargetKernelDeliveryError(ValueError):
     """目标 kernel 交付闭环不成立。"""
 
+    def __init__(self, message, *, code="TARGET_CLOSURE_FAILED"):
+        super().__init__(message)
+        self.code = code
+
 
 def _is_hex64(value):
     return isinstance(value, str) and _HEX64.fullmatch(value) is not None
@@ -169,16 +173,20 @@ def _assert_selection(argv, soc, selected_op, cache_values):
     op_values = _argv_values(argv, "--ops", "ASCEND_OP_NAME")
     if not soc_values or set(soc_values) != {soc}:
         raise TargetKernelDeliveryError(
-            f"TARGET_SOC_MISMATCH: build argv 未唯一绑定 requested SoC={soc!r}，实得 {soc_values!r}")
+            f"TARGET_SOC_MISMATCH: build argv 未唯一绑定 requested SoC={soc!r}，实得 {soc_values!r}",
+            code="TARGET_SOC_MISMATCH")
     if not op_values or set(op_values) != {selected_op}:
         raise TargetKernelDeliveryError(
-            f"TARGET_OP_MISMATCH: build argv 未唯一绑定 selected op={selected_op!r}，实得 {op_values!r}")
+            f"TARGET_OP_MISMATCH: build argv 未唯一绑定 selected op={selected_op!r}，实得 {op_values!r}",
+            code="TARGET_OP_MISMATCH")
     if cache_values.get("ASCEND_COMPUTE_UNIT") != soc:
         raise TargetKernelDeliveryError(
-            "TARGET_SOC_MISMATCH: CMakeCache.ASCEND_COMPUTE_UNIT 与 requested SoC 不一致")
+            "TARGET_SOC_MISMATCH: CMakeCache.ASCEND_COMPUTE_UNIT 与 requested SoC 不一致",
+            code="TARGET_SOC_MISMATCH")
     if cache_values.get("ASCEND_OP_NAME") != selected_op:
         raise TargetKernelDeliveryError(
-            "TARGET_OP_MISMATCH: CMakeCache.ASCEND_OP_NAME 与 selected op 不一致")
+            "TARGET_OP_MISMATCH: CMakeCache.ASCEND_OP_NAME 与 selected op 不一致",
+            code="TARGET_OP_MISMATCH")
 
 
 def _kernel_names(row):
@@ -383,7 +391,8 @@ def build_closure(*, requested_soc, selected_op, expected_op_type,
 
     config_root = os.path.join(installed, "op_impl", "ai_core", "tbe", "config", soc)
     if not os.path.isdir(config_root) or os.path.islink(config_root):
-        raise TargetKernelDeliveryError("OPS_INFO_MISSING: exact target config 根不存在")
+        raise TargetKernelDeliveryError(
+            "OPS_INFO_MISSING: exact target config 根不存在", code="OPS_INFO_MISSING")
     configs = []
     for path in _walk_files(config_root):
         if not path.endswith(".json"):
@@ -398,7 +407,8 @@ def build_closure(*, requested_soc, selected_op, expected_op_type,
                             installed_root=installed)})
     if not configs:
         raise TargetKernelDeliveryError(
-            f"OPS_INFO_MISSING: exact target={soc!r} 的非空 ops-info 不含 op type={op_type!r}")
+            f"OPS_INFO_MISSING: exact target={soc!r} 的非空 ops-info 不含 op type={op_type!r}",
+            code="OPS_INFO_MISSING")
 
     kernel_root = os.path.join(installed, "op_impl", "ai_core", "tbe", "kernel", soc)
     if not os.path.isdir(kernel_root) or os.path.islink(kernel_root):
@@ -528,7 +538,9 @@ def validate_closure(closure, *, build_argv, live=False, symbol_inspector=None):
     cache_values = selection.get("cache_values")
     if cache_values != {
             "ASCEND_COMPUTE_UNIT": soc, "ASCEND_OP_NAME": selected}:
-        raise TargetKernelDeliveryError("TARGET_SOC_MISMATCH: closure cache_values 与 request 不一致")
+        raise TargetKernelDeliveryError(
+            "TARGET_SOC_MISMATCH: closure cache_values 与 request 不一致",
+            code="TARGET_SOC_MISMATCH")
     _assert_selection(build_argv, soc, selected, cache_values)
     if live:
         cache_path, _, live_cache_values = _cache(cache_path, os.path.dirname(cache_path))
@@ -539,7 +551,8 @@ def validate_closure(closure, *, build_argv, live=False, symbol_inspector=None):
     configs = target_config.get("files") if isinstance(target_config, dict) else None
     assets = closure.get("kernel_assets")
     if not isinstance(configs, list) or not configs:
-        raise TargetKernelDeliveryError("OPS_INFO_MISSING: closure target config 为空")
+        raise TargetKernelDeliveryError(
+            "OPS_INFO_MISSING: closure target config 为空", code="OPS_INFO_MISSING")
     if not isinstance(assets, list) or not assets:
         raise TargetKernelDeliveryError("OBJECT_MISSING: closure kernel assets 为空")
     manifest = _manifest_map(closure.get("target_manifest"))

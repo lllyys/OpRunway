@@ -39,6 +39,7 @@ import json
 import os
 
 import acceptance_artifacts
+import artifact_path_guard
 import kernel_identity
 import repo_adapter
 import run_workflow
@@ -248,7 +249,7 @@ def build_clean_acceptance(
     return acceptance
 
 
-def finalize_directory(out_dir, spec_path, source_facts_path):
+def _finalize_directory_locked(out_dir, spec_path, source_facts_path):
     """对 `out_dir` 里已落盘的验收证据生成干净 PASS `acceptance.json`。
 
     步骤顺序**本身就是判据**，别重排：
@@ -260,7 +261,18 @@ def finalize_directory(out_dir, spec_path, source_facts_path):
       4. 读证据 → 三级门（**显式**喂 source facts）→ `build_clean_acceptance`；
       5. spec 变更门 · 出口（写盘前再校一次）→ 原子写。
     """
-    out_dir = os.path.realpath(out_dir)
+    terminal = os.path.join(
+        out_dir, acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE)
+    if os.path.lexists(terminal):
+        try:
+            run_workflow.pre_execution_failure.validate_terminal_marker(out_dir)
+        except run_workflow.pre_execution_failure.PreExecutionFailureError as ex:
+            raise FinalizeError(
+                f"pre-execution terminal commit manifest 非法：{ex}") from ex
+        raise FinalizeError(
+            "报告根存在 durable pre-execution terminal marker；本轮在 Task1/DUT 前已终止，"
+            "finalize_clean_acceptance 不得删除 marker 后读取旧 evidence/verdict/perf 重新发布。"
+            "必须由一次新的完整 workflow 显式失效该 marker 并重跑。")
 
     # ★ **第一件事**：让 `--dir` 里上一轮的最终裁决立刻不可消费。位置就是要在**所有**读取和
     #   校验之前——下面每一道门都会早退，而每一次早退都曾把旧 PASS 原样留在原地
@@ -301,8 +313,33 @@ def finalize_directory(out_dir, spec_path, source_facts_path):
     _assert_spec_change_confirmed(spec_path, out_dir, _SPEC_GATE_EXIT)
 
     # 与主入口共用同一个正式发布断言与原子写原语；以后状态门收紧只改一处。
-    acceptance_artifacts.publish_acceptance_json(out_dir, acceptance)
+    acceptance_artifacts.publish_acceptance_json_locked(out_dir, acceptance)
     return acceptance
+
+
+def finalize_directory(out_dir, spec_path, source_facts_path):
+    """报告根锁覆盖 terminal/orphan 检查、证据读取、门控与正式发布。"""
+    try:
+        guard = artifact_path_guard.prepare_existing_directory(out_dir)
+    except artifact_path_guard.ArtifactPathError as ex:
+        raise FinalizeError(f"正式报告根不可信：{ex}") from ex
+    with acceptance_artifacts.artifact_transaction(guard["path"]):
+        artifact_path_guard.assert_stable(guard)
+        try:
+            acceptance_artifacts.assert_no_pre_execution_artifacts(guard["path"])
+        except acceptance_artifacts.ArtifactNameConflictError as ex:
+            terminal = os.path.join(
+                guard["path"], acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE)
+            if os.path.lexists(terminal):
+                try:
+                    run_workflow.pre_execution_failure.validate_terminal_marker(
+                        guard["path"])
+                except run_workflow.pre_execution_failure.PreExecutionFailureError as marker_ex:
+                    raise FinalizeError(
+                        f"pre-execution terminal commit manifest 非法：{marker_ex}") from marker_ex
+            raise FinalizeError(str(ex)) from ex
+        return _finalize_directory_locked(
+            guard["path"], spec_path, source_facts_path)
 
 
 def main(argv=None):

@@ -12,12 +12,23 @@ import json
 import os
 import re
 import tempfile
+from contextlib import contextmanager
+
+import fcntl
+import artifact_path_guard
 
 
 ATTEMPT_RECORD_FILE = "attempt_record.json"
 FORMAL_ACCEPTANCE_FILE = "acceptance.json"
 ATTEMPT_RECORD_SCHEMA = "oprunway.workflow_attempt_record"
-ATTEMPT_RECORD_SCHEMA_VERSION = 1
+ATTEMPT_RECORD_SCHEMA_VERSION = 2
+PRE_EXECUTION_TERMINAL_FILE = "pre_execution_terminal.json"
+PRE_EXECUTION_RESERVED_FILES = (
+    PRE_EXECUTION_TERMINAL_FILE,
+    "vendor_build_attempt.json",
+    "前置执行失败明细.md",
+)
+ARTIFACT_LOCK_FILE = ".oprunway-artifacts.lock"
 
 # 既有 run_workflow 人读 overall → canonical state 实现的唯一真源。公开常量供 workflow
 # 保留兼容别名；正式发布门与 workflow 由此使用同一张关系表，而不是各维护一份白名单。
@@ -50,7 +61,7 @@ class FormalAcceptanceError(RuntimeError):
     """候选状态不允许使用正式验收产物名。"""
 
 
-class ArtifactNameConflictError(RuntimeError):
+class ArtifactNameConflictError(FormalAcceptanceError):
     """正式总结与 attempt 总结本应互斥，但目标目录已有另一种文件名。"""
 
 
@@ -165,6 +176,17 @@ def _assert_opposite_summary_absent(out_dir, filename):
             "请由 workflow 的统一失效步骤先处理上一轮总结。")
 
 
+def assert_no_pre_execution_artifacts(out_dir):
+    """marker 或任一 pre-execution payload 均代表终态/半提交，正式路径不得忽略。"""
+    present = [name for name in PRE_EXECUTION_RESERVED_FILES
+               if os.path.lexists(os.path.join(out_dir, name))]
+    if present:
+        raise ArtifactNameConflictError(
+            "报告根存在 pre-execution terminal/incomplete 工件："
+            + ", ".join(present)
+            + "；只有一次新的完整 workflow 能在同一工件锁内显式失效后重跑")
+
+
 def _atomic_write_json(out_dir, filename, payload):
     """在既有报告根内原子写一份 JSON；不创建或猜测报告根。"""
     fd, tmp = tempfile.mkstemp(prefix=f".{filename}.", suffix=".tmp", dir=out_dir)
@@ -175,18 +197,53 @@ def _atomic_write_json(out_dir, filename, payload):
             os.fsync(out.fileno())
         path = os.path.join(out_dir, filename)
         os.replace(tmp, path)
+        dir_fd = os.open(out_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
         return path
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
 
 
+@contextmanager
+def artifact_transaction(out_dir):
+    """序列化同一报告根的正式/attempt 终态切换。
+
+    lock 文件只负责并发互斥，不承载状态；崩溃后的 durable 状态由正式总结或
+    ``pre_execution_terminal.json`` 表达。调用方必须先创建报告根。
+    """
+    lock_path = os.path.join(out_dir, ARTIFACT_LOCK_FILE)
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def publish_acceptance_json_locked(out_dir, acceptance):
+    """调用方已持有报告根锁时发布正式 acceptance。"""
+    assert_formal_acceptance_allowed(acceptance)
+    _assert_execution_identity(acceptance)
+    _assert_opposite_summary_absent(out_dir, FORMAL_ACCEPTANCE_FILE)
+    assert_no_pre_execution_artifacts(out_dir)
+    return _atomic_write_json(out_dir, FORMAL_ACCEPTANCE_FILE, acceptance)
+
+
 def publish_acceptance_json(out_dir, acceptance):
     """正式 ``acceptance.json`` 的唯一写出原语。"""
     assert_formal_acceptance_allowed(acceptance)
     _assert_execution_identity(acceptance)
-    _assert_opposite_summary_absent(out_dir, FORMAL_ACCEPTANCE_FILE)
-    return _atomic_write_json(out_dir, FORMAL_ACCEPTANCE_FILE, acceptance)
+    try:
+        guard = artifact_path_guard.prepare_existing_directory(out_dir)
+    except artifact_path_guard.ArtifactPathError as ex:
+        raise ArtifactNameConflictError(f"正式报告根不可信：{ex}") from ex
+    with artifact_transaction(guard["path"]):
+        artifact_path_guard.assert_stable(guard)
+        return publish_acceptance_json_locked(guard["path"], acceptance)
 
 
 def build_attempt_record(acceptance):
@@ -199,6 +256,7 @@ def build_attempt_record(acceptance):
         "schema": ATTEMPT_RECORD_SCHEMA,
         "schema_version": ATTEMPT_RECORD_SCHEMA_VERSION,
         "status": "not_publishable",
+        "formal_eligible": False,
         "acceptance_verdict": None,
         "op": acceptance.get("op"),
         "execution_identity": acceptance.get("execution_identity"),
@@ -213,6 +271,7 @@ def build_attempt_record(acceptance):
             "performance": "perf_report.json",
             "evidence": "evidence.json",
         },
+        "pre_execution_failure": acceptance.get("pre_execution_failure"),
         "note": (
             "本工件只记录未完成/阻塞的 workflow attempt；acceptance_verdict 恒为 null，"
             "不得命名、引用或渲染为正式验收裁决。"),
@@ -222,5 +281,12 @@ def build_attempt_record(acceptance):
 def write_attempt_record(out_dir, acceptance):
     """原子写未完成 attempt；正式终态会被 ``build_attempt_record`` 拒绝。"""
     record = build_attempt_record(acceptance)
-    _assert_opposite_summary_absent(out_dir, ATTEMPT_RECORD_FILE)
-    return _atomic_write_json(out_dir, ATTEMPT_RECORD_FILE, record)
+    try:
+        guard = artifact_path_guard.prepare_existing_directory(out_dir)
+    except artifact_path_guard.ArtifactPathError as ex:
+        raise ArtifactNameConflictError(f"attempt 报告根不可信：{ex}") from ex
+    with artifact_transaction(guard["path"]):
+        artifact_path_guard.assert_stable(guard)
+        _assert_opposite_summary_absent(guard["path"], ATTEMPT_RECORD_FILE)
+        assert_no_pre_execution_artifacts(guard["path"])
+        return _atomic_write_json(guard["path"], ATTEMPT_RECORD_FILE, record)

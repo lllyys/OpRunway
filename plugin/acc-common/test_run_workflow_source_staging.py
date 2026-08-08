@@ -274,6 +274,21 @@ class AcceptanceRunTest(unittest.TestCase):
             self.assertFalse(os.path.exists(out_dir),
                              "identity preflight 必须先于报告目录与 DUT")
 
+    def test_fresh_report_under_a_symlink_parent_is_rejected_before_create(self):
+        with tempfile.TemporaryDirectory() as root, _env(root):
+            facts = _write_source_facts(os.path.join(root, "fetch", "source_facts.json"))
+            spec = _write_spec(root)
+            outside = os.path.join(root, "outside")
+            os.mkdir(outside)
+            linked = os.path.join(root, "linked")
+            os.symlink(outside, linked)
+            out_dir = os.path.join(linked, "fresh-report")
+            with mock.patch.object(W.spec_change_gate, "assert_confirmed"), \
+                    self.assertRaisesRegex(SystemExit, "报告根|符号链接"):
+                W.run(spec, mode="cpp_extension", out_dir=out_dir,
+                      source_facts=facts)
+            self.assertEqual(os.listdir(outside), [])
+
     @staticmethod
     def _caseset(op=_OP):
         return {"op": op, "cases": [{
@@ -374,7 +389,9 @@ class AcceptanceRunTest(unittest.TestCase):
             with open(os.path.join(out_dir, "attempt_record.json"), encoding="utf-8") as fh:
                 attempt = json.load(fh)
             self.assertEqual(attempt["schema"], "oprunway.workflow_attempt_record")
-            self.assertEqual(attempt["schema_version"], 1)
+            self.assertEqual(
+                attempt["schema_version"],
+                W.acceptance_artifacts.ATTEMPT_RECORD_SCHEMA_VERSION)
             self.assertEqual(attempt["status"], "not_publishable")
             self.assertIsNone(attempt["acceptance_verdict"])
             self.assertEqual(attempt["pipeline_result"], "BLOCKED(验收门未过)")
@@ -424,16 +441,53 @@ class AcceptanceRunTest(unittest.TestCase):
             with open(os.path.join(out_dir, "attempt_record.json"), encoding="utf-8") as src:
                 attempt = json.load(src)
             self.assertIsNone(attempt["acceptance_verdict"])
+            sources = attempt["diagnostic_sources"]
             self.assertEqual(
-                attempt["diagnostic_sources"],
-                {"target_kernel_delivery": W._TARGET_KERNEL_FAILURE_MD})
+                sources["pre_execution_failure"]["kind"],
+                "non_formal_chinese_detail")
+            self.assertEqual(
+                sources["pre_execution_failure"]["path"],
+                W._TARGET_KERNEL_FAILURE_MD)
+            self.assertRegex(
+                sources["pre_execution_failure"]["sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                sources["vendor_build_attempt"]["kind"],
+                "vendor_build_attempt")
+            self.assertEqual(
+                sources["vendor_build_attempt"]["path"],
+                W.pre_execution_failure.VENDOR_ATTEMPT_FILE)
+            self.assertRegex(
+                sources["vendor_build_attempt"]["sha256"], r"^[0-9a-f]{64}$")
+            self.assertTrue(os.path.isfile(os.path.join(
+                out_dir, W.acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE)))
+            self.assertIs(attempt["formal_eligible"], False)
+            self.assertEqual(
+                attempt["pre_execution_failure"]["error_code"],
+                "LIVE_RECEIPT_PREFLIGHT_FAILED")
+            with open(os.path.join(
+                    out_dir, W.pre_execution_failure.VENDOR_ATTEMPT_FILE),
+                    encoding="utf-8") as src:
+                vendor_attempt = json.load(src)
+            self.assertIs(
+                vendor_attempt["trusted_context"]
+                ["failed_receipt_claim_trusted"], False)
+            self.assertIs(vendor_attempt["failed_claim"]["trusted"], False)
+            self.assertNotIn(
+                "selected_op", vendor_attempt["target_request"],
+                "live failed receipt 不可信时不得从 public/internal 身份猜 build selected_op")
+            self.assertEqual(
+                vendor_attempt["target_request"]["expected_op_type"],
+                "InternalWidget")
             detail_path = os.path.join(out_dir, W._TARGET_KERNEL_FAILURE_MD)
             with open(detail_path, encoding="utf-8") as src:
                 detail = src.read()
             self.assertIn("非正式验收报告", detail)
             self.assertIn("acceptance_verdict = null", detail)
             self.assertIn("Task1", detail)
-            self.assertIn("TARGET_ASSETS_EMPTY", detail)
+            self.assertIn("LIVE_RECEIPT_PREFLIGHT_FAILED", detail)
+            self.assertNotIn(
+                "TARGET_ASSETS_EMPTY", detail,
+                "可转发失败明细不得泄漏下游异常原文")
 
     def test_gate_passed_but_blocked_state_is_still_attempt_only(self):
         """完整性门通过不等于 blocked 业务状态已完成；正式命名仍须等 canonical 终态。"""

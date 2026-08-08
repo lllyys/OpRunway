@@ -165,18 +165,20 @@ class TargetKernelDeliveryClosureTest(unittest.TestCase):
                     self._build(target_assets_before=before)
 
     def test_wrong_soc_op_or_cmake_binding_is_fatal(self):
-        for kwargs in (
-                {"requested_soc": "ascend910b"},
-                {"selected_op": "remainder"},
-                {"expected_op_type": "Remainder"}):
+        for kwargs, code in (
+                ({"requested_soc": "ascend910b"}, "TARGET_SOC_MISMATCH"),
+                ({"selected_op": "remainder"}, "TARGET_OP_MISMATCH"),
+                ({"expected_op_type": "Remainder"}, "OPS_INFO_MISSING")):
             with self.subTest(kwargs=kwargs):
-                with self.assertRaises(V.VendorBuildReceiptError):
+                with self.assertRaises(V.VendorBuildReceiptError) as caught:
                     self._build(**kwargs)
+                self.assertEqual(caught.exception.code, code)
         with open(self.cache, "w", encoding="utf-8") as out:
             out.write("ASCEND_COMPUTE_UNIT:STRING=ascend910b\n"
                       f"ASCEND_OP_NAME:STRING={SELECTED_OP}\n")
-        with self.assertRaisesRegex(V.VendorBuildReceiptError, "CMakeCache"):
+        with self.assertRaisesRegex(V.VendorBuildReceiptError, "CMakeCache") as caught:
             self._build()
+        self.assertEqual(caught.exception.code, "TARGET_SOC_MISMATCH")
 
     def test_op_type_mentioned_only_in_unrelated_config_value_is_not_an_op_entry(self):
         unrelated = {"Unrelated": {"note": OP_TYPE}}

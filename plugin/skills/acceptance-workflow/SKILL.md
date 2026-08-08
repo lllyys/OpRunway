@@ -331,9 +331,16 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
       --cmake-cache <本轮 CMakeCache.txt，须绝对路径> \
       --build-argv=bash --build-argv=-c \
       --build-argv='./build.sh … && ./build_out/*.run --install-path=…' \
+      --failure-out <vendor-build-attempt.json> \
       --out <vendor-build-receipt.json>
     ```
     current schema v3 **一律要求 `--snapshot-digest`**；在线定位器也须先把目标字节物化成快照再 build。head-only 不能产 fresh receipt。
+    `--failure-out` 与 `--out` 是同一轮互斥终态：成功只留 `VERIFIED` receipt 并清 stale failure；
+    build/package/closure 的受控失败仍返回 rc=2，只原子写
+    `oprunway.vendor_build_attempt`（`formal_eligible=false`、`acceptance_verdict=null`）并清 stale receipt。
+    attempt 只记录实测 safe facts（argv 摘要、可执行文件 basename/参数个数、实测 rc、构建窗口和 ELF
+    前后状态），不持久化完整 argv/env。参数/落点等发生在 snapshot 与 build 前树对账之前的错误不得升级成
+    workflow attempt。
     `--package-search-root` 是 current 编排的默认入口：`emit` 在 build **结束后**调用共享
     `package_layout.resolve_package_opp_root`，以 installed OPP 根的 exact vendor basename +
     `--expected-op-type` 在这个有界根内要求唯一候选；父目录叫 `build`、`build_out` 还是其它名字不属于契约。
@@ -360,8 +367,16 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
       `emit` 同时对账 build argv 与 CMakeCache 的 SoC/op 选择，只扫描 exact SoC 的非空 ops-info 与目标 op
       metadata；逐 `.o` 拒绝缺失、符号链接和越界，逐摘要闭合 installed↔package，并用 readelf/nm 证明
       metadata 的 kernel symbol 属于对应 ELF。build rc=0 但目标资产为零或未改变照样 fatal。正式 workflow
-      在 Task1 和外部 driver/DUT 之前 live 重放本门；失败只写 `attempt_record.json`
-      (`acceptance_verdict=null`) 与中文非正式失败明细，不产 `acceptance.json`。
+      在 Task1 和外部 driver/DUT 之前 live 重放本门；失败与外层 producer 失败都交给唯一
+      `pre_execution_failure.py` finalizer。finalizer 严格对账原始 CP-A facts、spec public/internal identity、
+      content anchor、source snapshot、target request、plugin producer 后，在同一报告根锁内清 stale downstream，
+      先原子写 `vendor_build_attempt.json`、统一中文非正式明细和 schema-v2 `attempt_record.json`，最后以
+      durable `pre_execution_terminal.json` 作为 commit manifest，并绑定前三者 SHA。输出父链逐段拒绝软链，
+      提交前复核目录 inode；vendor 成功/失败终态锁覆盖 cleanup→build→publish 整代。safe facts 用 exact schema
+      严校且不落完整 argv/env/原始异常文本。父链校验从调用方受信稳定 base 向下开始，允许 base 之上的系统
+      alias；marker 前崩溃留下的任一 pre-execution 保留 payload 也阻断正式 publisher/finalize/renderer，
+      renderer 的 terminal 检查到 Markdown 写盘全程持同一报告根锁。这条路径不需要也不生成 golden/caseset，
+      不调用 Task1、driver、DUT 或 profiler；消费方验 marker 三件套交叉绑定后必须拒绝正式发布。
     - **两个 merkle 必须在 build 之前取**（这就是 ① 单独成一步的全部理由）：build 会往源码树里写产物，事后再摘就摘到
       「源码 + 产物」，与 CP-A 记的那份字节永远对不上。`emit` **不会自己去摘源码树**，只接受 ① 落下的凭据——
       错法被结构性杜绝。它会在产出时刻另摘一次当前树，记进 `build.tree_state_at_emit`（含 `matches_pre_build`）。
@@ -396,7 +411,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
       没人核过就沿用默认并如实挂账，**谁都不猜**（AGENTS.md 5.1）。
 - **产出**：**无手写 runner 源**——codegen 的官方 bundle + invocation plan +
   `vendor_build_receipt.py`（`snapshot-digest` → `emit` 两步）产的 `vendor-build-receipt.json`（上条）。
-- **路由**：**vendor 构建收据不满足 → 停在 CP-C、不上正式 Task2/Task3**；域内 scope 不成立（非标准 aclnn 两段式 / 有 opaque descriptor / 未支持的接口能力）→ 停在 CP-C，出程序结论（转 P3 / 需扩 adapter），不进 CP-D。`cpp_extension` 的 `vendor_build_receipt` **产不出来**（build 退出码非 0 / `--library` 在构建窗口内没被动过 / `snapshot-digest` 凭据缺失或摘要算法已漂 / 构建后 ELF 状态与磁盘现状对不上）同样**停在 CP-C**，不带着一份说不清来源的 ELF 上真机。⚠ 「构建树 ↔ 取材锚对不上」**不在**这份清单里——产出方不读 `source_facts`，那条要到三级门才 BLOCK（见上）。构建收据是代码硬门，不是 agent 口头纪律；算子 acceptance 裁决仍只来自 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py`（ADR 0007）。
+- **路由**：**vendor 构建收据不满足 → 停在 CP-C、不上正式 Task2/Task3**；域内 scope 不成立（非标准 aclnn 两段式 / 有 opaque descriptor / 未支持的接口能力）→ 停在 CP-C，出程序结论（转 P3 / 需扩 adapter），不进 CP-D。`cpp_extension` 的 `vendor_build_receipt` **产不出来**（build 退出码非 0 / `--library` 在构建窗口内没被动过 / package 零/多候选 / target closure 不闭合 / build 后源码子树漂移）同样**停在 CP-C**，不带着一份说不清来源的 ELF 上真机。producer 本身不读取 CP-A facts；因此其 failure artifact 只有在唯一 finalizer 再与原始 facts/spec 严格对账后，才能成为标准 workflow attempt。构建收据与 failure attempt 都是代码硬门，不是 agent 口头纪律；算子 acceptance 裁决仍只来自 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py`（ADR 0007）。
 
 <!-- oprunway:retired-begin -->
 #### CP-C 历史区：`cpp` / `aclnn_py` 的旧分流

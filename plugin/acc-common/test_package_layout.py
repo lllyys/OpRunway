@@ -45,8 +45,9 @@ class PackageOppRootResolverTest(unittest.TestCase):
             os.path.realpath(candidate))
 
     def test_zero_exact_candidate_fails_closed(self):
-        with self.assertRaisesRegex(P.PackageLayoutError, "PACKAGE_OPP_ROOT_MISSING"):
+        with self.assertRaisesRegex(P.PackageLayoutError, "PACKAGE_OPP_ROOT_MISSING") as caught:
             P.resolve_package_opp_root(self.root, VENDOR, OP_TYPE)
+        self.assertEqual(caught.exception.code, "PACKAGE_ROOT_NOT_FOUND")
 
     def test_multiple_exact_candidates_fail_with_sorted_evidence(self):
         second = self._candidate("z/run")
@@ -54,6 +55,7 @@ class PackageOppRootResolverTest(unittest.TestCase):
         with self.assertRaises(P.PackageLayoutError) as caught:
             P.resolve_package_opp_root(self.root, VENDOR, OP_TYPE)
         message = str(caught.exception)
+        self.assertEqual(caught.exception.code, "PACKAGE_ROOT_AMBIGUOUS")
         self.assertIn("PACKAGE_OPP_ROOT_AMBIGUOUS", message)
         self.assertLess(message.index(os.path.realpath(first)),
                         message.index(os.path.realpath(second)))

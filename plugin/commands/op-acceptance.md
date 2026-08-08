@@ -50,6 +50,11 @@ vendor ELF 构建收据，接入成本更高，这是已知账单），而不是
   ⚠ **能力边界**：dry-run **plan-only**：不调 `golden_fn`、不落 `.npy`、不产任何裁决；会加载执行 `golden.py` 取 `out_shape`（缺文件只记「未核」，文件在但坏了则当场抛）；**验不了**来源契约（那是 `check_golden.py`）/ validator 链 / 三级门，那些只有 CP-D 才验得到。
   dry-run 报错或账本异常 → `refine_spec`。
 - **CP-C runner**（真机路径、需 NPU）：**不再按 form 分流，只有 `cpp_extension` 一条路由**：dispatch `acc-runner-dev` 生成官方 `NpuExtension` bundle；真机 build/load/执行由显式 driver 完成并回传专属内容寻址收据（须绑定精确 PR head / 构建命令 / 实际加载的 vendor ELF），收据不齐或漂移即停在 CP-C。
+  vendor `emit` 必须同时给互斥的成功 `--out` 与失败 `--failure-out`。build/package/closure 受控失败仍保持 rc=2，
+  由唯一 pre-execution finalizer 把 producer attempt 与原始 CP-A facts/spec/source snapshot/identity/plugin
+  严格对账后，原子收口成 schema-v2 `attempt_record.json`、durable terminal marker 与统一中文非正式明细；
+  不生成 golden/caseset，不调用 Task1/driver/DUT/profiler，不产正式工件。`run_workflow` 的 live receipt preflight
+  失败走同一 finalizer，失败 receipt claim 显式不可信。
   ⚠ spec 写着 `cpp` / `aclnn_py` 时 **CP-C 无事可做**——回 CP-B 迁 `cpp_extension`；旧分流的机制描述见紧随其后的历史区，**不得据它 dispatch**。
 <!-- oprunway:retired-begin -->
   ⛔ 历史留档 · 不得 dispatch · 不要照做（`cpp` / `aclnn_py` 已停止准入、无真机入口，编排层不会再走到）：`cpp` 才 dispatch `acc-runner-dev:gen_runner`（先过 scope gate）→ `verify_runner`；`aclnn_py` 不派这两个 mode，以报告根运行 `preflight_aclnn.py --source work/source_facts.json --pr-facts work/pr_facts.json --spec ops/<Op>/<Op>.spec.json`，成功也只标 `READY_WAIT_NPU_TRUST_GATE`。随后 dispatch `acc-verify-rootcause:verify_aclnn_harness`：正式生成完整 caseset/golden，运行 `verify_aclnn_harness.py` 的确定性小见证，产内容寻址 `work/aclnn_harness_trust.json`。该收据绑定见证数据字节、golden 源码、PR/build/toolkit/SoC/符号与执行逻辑，只证 harness、不裁决算子、不裁剪正式用例；`run_workflow` 在正式 adapter 前按当前环境硬复核。任一自检证据未满足或漂移则停在 CP-C、不进 CP-D。（acceptance 裁决只逐字引用 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py` 产物，ADR 0007。）

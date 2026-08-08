@@ -212,6 +212,29 @@ class FinalizeDirectoryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             yield _Bed(root)
 
+    def test_pre_execution_terminal_marker_blocks_shortcut_before_cleanup(self):
+        with self._bed() as bed:
+            bed.seed_previous_pass()
+            marker = bed.path(F.acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE)
+            _write_json(marker, {"schema": "oprunway.pre_execution_terminal",
+                                 "formal_eligible": False})
+            with self.assertRaisesRegex(F.FinalizeError, "pre-execution terminal"):
+                bed.run()
+            self.assertTrue(os.path.isfile(marker),
+                            "拒绝时 durable marker 不得被清掉")
+            self.assertTrue(os.path.isfile(bed.path("acceptance.json")),
+                            "marker 必须在任何 stale cleanup/read 之前拒绝")
+
+    def test_orphan_pre_execution_payload_blocks_shortcut_before_cleanup(self):
+        with self._bed() as bed:
+            bed.seed_previous_pass()
+            orphan = bed.path(W.pre_execution_failure.VENDOR_ATTEMPT_FILE)
+            _write_json(orphan, {})
+            with self.assertRaisesRegex(F.FinalizeError, "incomplete"):
+                bed.run()
+            self.assertTrue(os.path.isfile(orphan))
+            self.assertTrue(os.path.isfile(bed.path("acceptance.json")))
+
     # —— 正面：收紧之后这条旁路仍然能对**合法**目录出裁决 ——————————————————————
     def test_clean_hardened_directory_still_finalizes(self):
         with self._bed() as bed, _stub_gates() as seen:
@@ -422,9 +445,11 @@ class InvalidationPrimitiveTest(unittest.TestCase):
         self.assertIn("acceptance.json", W._FINAL_VERDICT_FILES)
         self.assertIn("attempt_record.json", W._FINAL_VERDICT_FILES)
         self.assertTrue(set(W._REPORT_MD_FILES) <= set(W._FINAL_VERDICT_FILES))
-        # 差集恰好是这条旁路的**输入**——多一件少一件都说明清单漂了。
+        # 差集是旁路输入，加上由 CP-C 失败 finalizer 独占的 durable 终态工件。
         self.assertEqual(set(W._RESULT_FILES) - set(W._FINAL_VERDICT_FILES),
-                         {"verdict.json", "perf_report.json"})
+                         {"verdict.json", "perf_report.json",
+                          W.acceptance_artifacts.PRE_EXECUTION_TERMINAL_FILE,
+                          W.pre_execution_failure.VENDOR_ATTEMPT_FILE})
 
     def test_the_main_entrypoint_still_clears_its_own_full_set(self):
         """抽原语不得改动主入口的行为：它清的仍是 `_RESULT_FILES` + `_RESULT_GLOBS` 全集。"""

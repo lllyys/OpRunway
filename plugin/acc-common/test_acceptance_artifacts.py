@@ -101,12 +101,52 @@ class FormalAcceptanceBoundaryTest(unittest.TestCase):
             "public_op": "Widget", "kernel_op_type": "InternalWidget"}
         record = A.build_attempt_record(candidate)
         self.assertEqual(record["schema"], "oprunway.workflow_attempt_record")
-        self.assertEqual(record["schema_version"], 1)
+        self.assertEqual(record["schema_version"], A.ATTEMPT_RECORD_SCHEMA_VERSION)
         self.assertEqual(record["status"], "not_publishable")
         self.assertIsNone(record["acceptance_verdict"])
         self.assertEqual(record["pipeline_state"], "BLOCKED_WAIT_EXTERNAL")
         self.assertEqual(record["execution_identity"], candidate["execution_identity"])
         self.assertNotIn("precision_verdict", record)
+
+    def test_pre_execution_failure_metadata_is_preserved_without_verdict_semantics(self):
+        candidate = _candidate("BLOCKED(pre-execution)", "BLOCKED_PRE_EXECUTION", False)
+        candidate["pre_execution_failure"] = {
+            "stage": "target_closure", "error_code": "OPS_INFO_MISSING",
+            "vendor_attempt_sha256": "a" * 64,
+        }
+        record = A.build_attempt_record(candidate)
+        self.assertIs(record["formal_eligible"], False)
+        self.assertIsNone(record["acceptance_verdict"])
+        self.assertEqual(record["pre_execution_failure"],
+                         candidate["pre_execution_failure"])
+
+    def test_generic_attempt_writer_cannot_overwrite_pre_execution_terminal(self):
+        candidate = _candidate("BLOCKED(pre-execution)", "BLOCKED_PRE_EXECUTION", False)
+        with tempfile.TemporaryDirectory() as out_dir:
+            with open(os.path.join(out_dir, A.PRE_EXECUTION_TERMINAL_FILE),
+                      "w", encoding="utf-8") as marker:
+                marker.write("{}")
+            with self.assertRaises(A.ArtifactNameConflictError):
+                A.write_attempt_record(out_dir, candidate)
+
+    def test_orphan_pre_execution_payload_blocks_formal_publish(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            with open(os.path.join(out_dir, "vendor_build_attempt.json"),
+                      "w", encoding="utf-8") as out:
+                out.write("{}")
+            with self.assertRaisesRegex(A.ArtifactNameConflictError, "incomplete"):
+                A.publish_acceptance_json(out_dir, _candidate())
+            self.assertFalse(os.path.lexists(os.path.join(out_dir, "acceptance.json")))
+
+    def test_public_writers_reject_a_symlink_report_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            real = os.path.join(root, "real")
+            os.mkdir(real)
+            link = os.path.join(root, "report-link")
+            os.symlink(real, link)
+            with self.assertRaisesRegex(A.ArtifactNameConflictError, "符号链接"):
+                A.publish_acceptance_json(link, _candidate())
+            self.assertEqual(os.listdir(real), [])
 
     def test_formal_publisher_rejects_missing_execution_identity(self):
         with tempfile.TemporaryDirectory() as root:

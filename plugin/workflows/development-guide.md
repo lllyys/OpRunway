@@ -33,6 +33,13 @@
   ⚠ **别问「mock 还是真机」、也别问「走哪条 runner form」**（对齐 `acceptance-workflow/SKILL.md` §0.5）：验收统一按 `cpp_extension` 走——`--mode` 据 `spec.runner_form` 派生（受控词表 `{cpp, aclnn_py, cpp_extension}`，**缺省 = `cpp_extension`**），不是让用户挑的选项；`mock`/`catlass*` 派生不出、只能显式指定，且不产验收裁决。spec 若写着 `cpp` / `aclnn_py`，正确处置是**迁到 `cpp_extension`**（需 torch.ops 调用桥 + vendor ELF 构建收据，接入成本更高，这是已知账单），**不是**回头问用户要不要换条路。
 - **CP-B Task1 用例**：dispatch `acc-spec-extractor` 产 spec；primary inline `gen_cases.py <spec> --dry-run --ledger-out <case_plan.json> --source-facts <source_facts.json> --correspondence <correspondence.json>` 做用例计划契约自检并把事实包/用户确认绑定进 durable 账本，再由 `validate_preparation_state.py` 复核非真机断点（C5 起不再跑 mock 出裁决）。
 - **CP-C runner**（需 NPU）：dispatch `acc-runner-dev`（先过 scope gate）→ 自证门满足才允许上真机。**验收路径 `cpp_extension`** 核的是 build/load/vendor receipt 齐备且绑定来源锚。⛔ `cpp` 的 `verify_runner` 与 `aclnn_py` 的 harness 真机信任门已随两条形态停止准入，**不再 dispatch**；机制描述见 `acceptance-workflow/SKILL.md` CP-C 历史区。
+  `vendor_build_receipt.py emit` 必须同时给互斥的成功 `--out` 与失败 `--failure-out`：受控 build、ELF、
+  package 或 target closure 失败仍以 rc=2 停在 CP-C，只留下 `formal_eligible=false` 的 producer attempt，
+  绝不伪造 `VERIFIED` receipt。只有唯一 `pre_execution_failure.py` finalizer 将它与原始 CP-A facts、显式
+  spec、source snapshot/content anchor 和 public/internal identity 严格对账后，才可在报告根锁内提交标准
+  `attempt_record.json`、中文非正式明细及最后写入的 durable marker；marker 或任一孤儿 payload 都阻断
+  formal publisher、clean-finalize 与 renderer。该收口发生在 Task1、golden/cases、driver、DUT 和 profiler
+  之前；连接、容器、代理和传输故障不属于这个 workflow 契约。
 - **CP-D 真机跑测**（一次原子）：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`（⚠ `--source-facts` 验收通路必给、缺席直接拒跑，路径是 CP-A 取材 `--out` 那份、与报告目录不同；非验收通路不强制。**`<mode>` 据 `spec.runner_form` 定，而派得出的只剩一条**：`cpp_extension`（或未声明）→ `cpp_extension`，须 `OPRUNWAY_CPP_EXTENSION_REAL=1` 且过 build/load/vendor receipt 门；`cpp` / `aclnn_py` ⛔ 停止准入，派生表里没有条目、显式指定真机 mode 也被拒），Task2+3+三级门一次成；FAIL → `rootcause`。
   ⚠ **验收裁决当前只出自 `cpp_extension`**（`run_workflow._ACCEPTANCE_RUNNER_FORMS = frozenset({"cpp_extension"})`，入口门 `_resolve_mode` + 出口门 `_assert_acceptance_form_allowed` 两道；理由见仓根 `AGENTS.md` §4）。⛔ `cpp` / `aclnn_py` 自 2026-08-06 **停止准入、连真机入口都没有**（逃生阀已删）。只想本地自检用例链 → 显式 `--mode mock`，那条路物理上只产 `dev_run_summary.json` / `dev_precision_check.json`（`evidence_grade="development"` + NON-ACCEPTANCE 标记），**不写** `acceptance.json` / `verdict.json`——「加了逃生阀跑绿了」不得写成验收通过、不得进报告的裁决栏。mode 只从 `spec.runner_form` 派生；性能 baseline 仍由任务书/spec 决定，不能从 form 反推。
 - **CP-E 报告**（primary）：只在正式 `acceptance.json` 已存在且 renderer 调用 `acceptance_artifacts` 的共享发布谓词通过时，逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + `task_pr_gaps` + 各维度通过数；primary 不另抄字段判断，只有 `attempt_record.json` 时不产正式报告。
