@@ -1,5 +1,18 @@
 # golden.py 产出手册（`gen_golden` 用）
 
+## 预期异常是一等结果
+
+generated golden 必须自行捕获已知语义异常，并显式返回
+`oprunway.golden_expected_exception_marker`；`gen_cases` 绝不自动捕获或提升普通异常。marker 与 golden
+源码一起受 SHA 绑定，并声明参考异常类/消息、允许的真实调用返回类别和 `output_written=false`。该 case
+还必须有可用于安全分配 NPU 输出的 `out_shape()`；生成器随后保留输入与 case 身份，将其收敛为
+`dims=["功能"]`、`compare=na`。未标记的 `ZeroDivisionError`、`KeyError` 或其它异常一律原样传播。
+
+这项能力不改变执行隔离：每条 case 仍在独立 subprocess 中运行。正式匹配只使用已校验 isolation record
+里的两段式 `call_status` 派生 `stage1_nonzero` / `executor_null`；`stage2_nonzero` 当前因无法证明
+输出完全未写而不允许进入 marker。failed manifest 的
+错误类、阶段和消息只作诊断，不参与 PASS。invocation plan、driver receipt 与正式 gate 绑定同一 ledger。
+
 `acc-runner-dev` 的 `gen_golden` 模式据**任务书**为一个算子产出 `<ops_root>/<op>/golden.py`。
 
 **为什么这个 mode 存在**：`gen_cases.load_golden` 缺 golden.py 就 fail-closed，而在批 6 之前

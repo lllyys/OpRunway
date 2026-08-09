@@ -2,6 +2,18 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-09 · Expected-exception 契约适配逐 case 进程隔离
+
+- 恢复通用 expected-exception 一等功能结果：只有受 SHA 绑定的 generated golden 显式返回严格 marker，
+  且声明了 `out_shape()`，才保留输入与 case 身份并生成契约；未标记的任何异常原样传播，不能把 golden bug
+  自动升级成正式结果，marker 缺输出形状继续 fail-closed。
+- 契约摘要贯穿 caseset、invocation plan 与 current driver receipt；逐 case 子进程仍是唯一执行边界，只有
+  可信 observed exception 只由闭合后的 `call_status` 派生返回类别与未写输出状态；当前只授权
+  `stage1_nonzero` / `executor_null`，stage2 失败因无法证明输出完全未写而 fail-closed；
+  child `failed[]` 的错误类、阶段和消息仅供诊断，不能影响 PASS。validator 与三级门独立重算匹配；
+  DUT 成功或返回类别不符均不能冒充通过。实现和测试均无算子特判，
+  未恢复旧单进程执行，也未夹带历史 strict-empty 改动。
+
 ## 2026-08-08 · CP-C 构建/交付失败统一为不可发布 attempt
 
 - 修复 pre-execution finalizer 对标准 `<out>/work/` 布局的误拒：只有显式声明完整根级 mutation 集后才允许

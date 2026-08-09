@@ -29,6 +29,7 @@ import content_address  # noqa: E402
 import cpp_extension_adapter  # noqa: E402
 import cpp_extension_identity  # noqa: E402
 import dtype_requirement_sets  # noqa: E402
+import expected_exception_contract  # noqa: E402
 import kernel_identity  # noqa: E402
 import multi_card_shards  # noqa: E402
 import perf_mode  # noqa: E402
@@ -1416,6 +1417,10 @@ def gate_task1(d, errs, source_facts_path=None):
     except cpp_extension_adapter.CppExtensionAdapterError as ex:
         errs.append(f"caseset layout ledger/receipt 契约非法：{ex}")
     try:
+        cpp_extension_adapter.validate_caseset_expected_exceptions(cs)
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        errs.append(f"caseset expected exception ledger 契约非法：{ex}")
+    try:
         cpp_extension_adapter.validate_caseset_tensor_shape_attr_contract(cs)
     except cpp_extension_adapter.CppExtensionAdapterError as ex:
         errs.append(f"caseset tensor shape/attr ledger 契约非法：{ex}")
@@ -1469,12 +1474,25 @@ def gate_task1(d, errs, source_facts_path=None):
             if not c.get("dims"):
                 errs.append(f"{cid}: 无 dims（功能/精度/性能维度）")
             continue
-        if not exp.get("golden_path"):
+        expected_exception = exp.get("expected_exception")
+        if expected_exception is not None:
+            try:
+                expected_exception_contract.normalize_contract(
+                    expected_exception, where=f"{cid}.expected.expected_exception")
+            except ValueError as ex:
+                errs.append(str(ex))
+            if c.get("dims") != ["功能"] or exp.get("golden_path") is not None:
+                errs.append(
+                    f"{cid}: expected_exception 须绑定 dims=['功能'] 且 golden_path=null")
+        elif not exp.get("golden_path"):
             errs.append(f"{cid}: 无 golden_path")
         # §1.4 空 Tensor 功能用例（compare=na，numel=0）：无精度口径可判 → 豁免阈值/标准/policy 完整性
         #  （validator 判 na）；防伪造：na 仅对真空 Tensor（某 input shape 含 0）合法，否则记 error。
         if exp.get("compare") == "na":
-            if not _case_strict_empty(c):    # codex #4：严格真空（拒 shape:[false]/[0.0] 伪造）
+            if expected_exception is not None:
+                if exp.get("standard") != "na":
+                    errs.append(f"{cid}: expected_exception 的 standard 须为 na")
+            elif not _case_strict_empty(c):    # codex #4：严格真空（拒 shape:[false]/[0.0] 伪造）
                 errs.append(f"{cid}: expected.compare=na 但非严格真空 Tensor（伪造 na 跳精度门，拒绝）")
         else:
             if exp.get("threshold") is None:
@@ -2447,6 +2465,34 @@ def _gate_task2_unjudgeable(cases, ev_list, vd, errs):
     return ids
 
 
+def _gate_expected_exceptions(cases, ev_list, vd, errs):
+    ev_by_id = {row.get("case_id"): row for row in ev_list if isinstance(row, dict)}
+    verdict_by_id = {row.get("case_id"): row for row in (vd.get("per_case") or [])
+                     if isinstance(row, dict)}
+    ids = set()
+    for case in cases:
+        exp = case.get("expected") if isinstance(case, dict) else None
+        contract = exp.get("expected_exception") if isinstance(exp, dict) else None
+        if contract is None:
+            continue
+        cid = case.get("id")
+        ids.add(cid)
+        ev = ev_by_id.get(cid)
+        observed = (ev.get("exception") if isinstance(ev, dict)
+                    and ev.get("status") == "expected_exception" else None)
+        try:
+            matched, why = expected_exception_contract.compare(contract, observed)
+        except ValueError as ex:
+            matched, why = False, str(ex)
+        row = verdict_by_id.get(cid)
+        if not matched:
+            if isinstance(row, dict) and row.get("功能") != "fail":
+                errs.append(f"{cid}: expected exception 不匹配({why})，verdict 却未判功能 fail")
+        elif not isinstance(row, dict) or row.get("功能") != "pass" or row.get("精度") != "na":
+            errs.append(f"{cid}: expected exception 已匹配，但 verdict 未落功能 pass/精度 na")
+    return ids
+
+
 def _gate_multi_card_receipt(d, caseset, evidence, errs, source_facts_path):
     """存在 multi-card 产物时，按父输入重建 manifest/projection/result；不存在则保持单卡路径。"""
     names = ("multi_card_manifest.json", "multi_card_merged_evidence.json")
@@ -2889,7 +2935,8 @@ def gate_task2(d, errs, source_facts_path=None):
     #  不豁免 → 下方精度证据完整性照校、因缺字段被门 FAILED。
     na_ids = {c["id"] for c in cases if isinstance(c, dict) and c.get("id")
               and isinstance(c.get("expected"), dict) and c["expected"].get("compare") == "na"
-              and _case_strict_empty(c)}
+              and (_case_strict_empty(c)
+                   or c["expected"].get("expected_exception") is not None)}
     stochastic_ids = {
         c["id"] for c in cases
         if isinstance(c, dict) and c.get("id")
@@ -2901,6 +2948,8 @@ def gate_task2(d, errs, source_facts_path=None):
     # 跑挂 / 无 golden 的 case：同样无精度证据可校，但豁免只给「证据完整性」这一项——
     # 结论侧由 `_gate_task2_unjudgeable` 逐条反向核（必须在 verdict 里落成失败）。
     unjudgeable_ids = _gate_task2_unjudgeable(cases, ev_list, vd, errs)
+    expected_exception_ids = _gate_expected_exceptions(cases, ev_list, vd, errs)
+    na_ids.update(expected_exception_ids)
     skip_precision_ids = na_ids | unjudgeable_ids | stochastic_ids
     # Q9 oracle_source 门校用 precision_policy（纯 stdlib：ORACLE_SOURCES + oracle_source_from_golden，不拉 numpy）。
     # import 失败（几乎不会）→ 记 error、oracle 校跳过（但门 FAILED），不静默放过。

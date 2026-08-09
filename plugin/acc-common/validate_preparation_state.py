@@ -37,6 +37,7 @@ _PLANNER_DEPENDENCIES = (
     "gen_cases.py",
     "repo_adapter.py",
     "precision_policy.py",
+    "expected_exception_contract.py",
     "tensor_shape_attrs.py",
 )
 _PLANNER_CAPABILITY_DEPENDENCIES = (

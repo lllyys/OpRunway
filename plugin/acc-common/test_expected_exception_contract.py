@@ -1,0 +1,216 @@
+import copy
+import json
+import os
+import tempfile
+import unittest
+
+import expected_exception_contract as E
+import cpp_extension_adapter
+import cpp_extension_codegen
+import repo_adapter
+import validate_acceptance_state
+import validator
+
+
+def _marker(*categories):
+    return {
+        "schema": E.MARKER_SCHEMA,
+        "schema_version": E.MARKER_VERSION,
+        "reference": {
+            "class": "ZeroDivisionError",
+            "phase": "golden",
+            "message": "integer division or modulo by zero",
+        },
+        "expected": {
+            "phase": "execute",
+            "return_categories": list(categories or ("stage1_nonzero",)),
+            "output_written": False,
+        },
+    }
+
+
+def _contract(*categories):
+    return E.contract_from_marker(_marker(*categories))
+
+
+def _case(*categories):
+    return {
+        "id": "zero",
+        "dims": ["功能"],
+        "inputs": [{"name": "x", "dtype": "int32", "shape": [1],
+                    "path": "zero/x.bin"}],
+        "expected": {
+            "compare": "na", "standard": "na", "golden_path": None,
+            "expected_exception": _contract(*categories),
+        },
+    }
+
+
+def _call_status(*, stage1=7, executor_null=False,
+                 stage2_called=False, stage2_ret=None):
+    return {
+        "schema": "oprunway.cpp_extension_call_status", "schema_version": 1,
+        "stage1_ret": stage1, "workspace_size": 0,
+        "executor_null": executor_null, "stage2_called": stage2_called,
+        "stage2_ret": stage2_ret,
+    }
+
+
+def _isolation(call_status):
+    return {
+        "schema": cpp_extension_adapter.EXECUTION_ISOLATION_SCHEMA,
+        "schema_version": 1,
+        "mode": "subprocess_per_case_v1",
+        "records": [{
+            "case_id": "zero", "launch_id": "fresh-zero",
+            "isolation_mode": "subprocess_per_case_v1",
+            "termination_kind": "normal", "returncode": 0,
+            "parent_pid": 101, "child_pid": 101, "outcome": "failed",
+            "call_status": call_status,
+        }],
+    }
+
+
+def _evidence(case, isolation, *, error_type="ForgedError", error="forged text"):
+    with tempfile.TemporaryDirectory() as work:
+        out = os.path.join(work, "cpp_extension_out")
+        os.makedirs(out)
+        with open(os.path.join(out, "out_manifest.json"), "w", encoding="utf-8") as fh:
+            json.dump({"produced": [], "failed": [{
+                "case_id": "zero", "phase": "execute",
+                "error_kind": "execution_failed",
+                "error_type": error_type, "error": error,
+            }]}, fh)
+        rows = repo_adapter.build_multi_output_evidence(
+            {"cases": [case]}, work, out)
+    cpp_extension_adapter.validate_execution_isolation(
+        {"cases": [{"case_id": "zero"}]}, isolation)
+    cpp_extension_adapter.bind_execution_isolation_evidence(rows, isolation)
+    return rows
+
+
+class ExpectedExceptionContractTest(unittest.TestCase):
+    def test_explicit_marker_authorizes_and_content_binds_contract(self):
+        contract = _contract("stage1_nonzero")
+        self.assertEqual(contract["authorization"]["kind"],
+                         "golden_explicit_marker_v1")
+        self.assertEqual(len(contract["authorization"]["marker_sha256"]), 64)
+        observed = E.observed_from_call_status(
+            _call_status(), output_written=False)
+        self.assertEqual(E.compare(contract, observed),
+                         (True, "expected_exception_matched"))
+
+    def test_success_or_different_return_category_does_not_match(self):
+        self.assertEqual(E.compare(_contract(), None)[0], False)
+        observed = E.observed_from_call_status(
+            _call_status(stage1=0, stage2_called=True, stage2_ret=9),
+            output_written=False)
+        self.assertEqual(E.compare(_contract("stage1_nonzero"), observed)[0], False)
+
+    def test_marker_schema_and_return_category_are_strict(self):
+        for mutate in (
+            lambda x: x.update(extra=True),
+            lambda x: x["expected"].update(return_categories=[]),
+            lambda x: x["expected"].update(return_categories=["failed_text_match"]),
+            lambda x: x["expected"].update(return_categories=["stage2_nonzero"]),
+            lambda x: x["expected"].update(output_written=True),
+            lambda x: x["reference"].update(phase="execute"),
+        ):
+            bad = copy.deepcopy(_marker())
+            mutate(bad)
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    E.contract_from_marker(bad)
+
+
+class ValidatorExpectedExceptionTest(unittest.TestCase):
+    def test_call_status_match_is_functional_pass_precision_na(self):
+        row = validator._empty_row("zero")
+        observed = E.observed_from_call_status(_call_status(), output_written=False)
+        validator._judge_expected_exception(row, _contract(), observed)
+        self.assertEqual((row["功能"], row["精度"]), ("pass", "na"))
+
+    def test_failed_text_cannot_forge_a_different_call_status_category(self):
+        case = _case("executor_null")
+        rows = _evidence(
+            case, _isolation(_call_status()),
+            error_type="ZeroDivisionError",
+            error="integer division or modulo by zero",
+        )
+        row = validator._empty_row("zero")
+        validator._judge_expected_exception(
+            row, case["expected"]["expected_exception"], rows[0]["exception"])
+        self.assertEqual(row["功能"], "fail")
+        self.assertEqual(rows[0]["exception"]["return_category"], "stage1_nonzero")
+
+
+class AdapterExpectedExceptionTest(unittest.TestCase):
+    def test_ledger_binds_contract_and_rejects_policy_mutation(self):
+        caseset = {"cases": [_case()]}
+        ledger = cpp_extension_adapter.validate_caseset_expected_exceptions(caseset)
+        self.assertEqual(ledger["case_count"], 1)
+        bad = copy.deepcopy(caseset)
+        bad["cases"][0]["expected"]["expected_exception"]["expected"][
+            "return_categories"] = ["failed_text_match"]
+        with self.assertRaises(cpp_extension_adapter.CppExtensionAdapterError):
+            cpp_extension_adapter.validate_caseset_expected_exceptions(bad)
+
+    def test_invocation_plan_content_binds_expected_exception_ledger(self):
+        spec = {
+            "op": "Witness", "runner_form": "cpp_extension",
+            "params": [
+                {"name": "x", "io": "in", "dtype": ["int32"]},
+                {"name": "out", "io": "out", "dtype": ["<from_input>"]},
+            ],
+            "call_variants": [{
+                "symbol": "Witness", "active_attrs": [],
+                "active_outputs": ["out"],
+            }],
+        }
+        case = _case()
+        case["aclnn_call"] = {
+            "symbol": "Witness",
+            "slots": [
+                {"role": "in", "name": "x", "input_idx": 0},
+                {"role": "out", "name": "out", "output_idx": 0},
+            ],
+        }
+        caseset = {"op": "Witness", "cases": [case]}
+        ledger = cpp_extension_adapter.validate_caseset_expected_exceptions(caseset)
+        with tempfile.TemporaryDirectory() as root:
+            manifest = cpp_extension_codegen.generate(spec, root)
+        plan = cpp_extension_adapter.build_invocation_plan(caseset, manifest)
+        self.assertEqual(
+            plan["expected_exception_ledger_sha256"],
+            cpp_extension_adapter._canonical_sha(ledger),
+        )
+
+    def test_per_case_subprocess_observation_ignores_failed_text(self):
+        case = _case("stage1_nonzero")
+        rows = _evidence(case, _isolation(_call_status()))
+        self.assertEqual(rows[0]["status"], "expected_exception")
+        self.assertEqual(rows[0]["exception"]["return_category"], "stage1_nonzero")
+        self.assertEqual(rows[0]["execution_isolation_mode"],
+                         "subprocess_per_case_v1")
+        self.assertNotIn("ForgedError", json.dumps(rows[0]["exception"]))
+
+
+class FormalGateExpectedExceptionTest(unittest.TestCase):
+    def test_gate_recomputes_match_and_rejects_forged_verdict(self):
+        cases = [_case()]
+        evidence = _evidence(cases[0], _isolation(_call_status()))
+        verdict = {"per_case": [{"case_id": "zero", "功能": "pass", "精度": "na"}]}
+        errors = []
+        self.assertEqual(validate_acceptance_state._gate_expected_exceptions(
+            cases, evidence, verdict, errors), {"zero"})
+        self.assertEqual(errors, [])
+        forged = copy.deepcopy(verdict)
+        forged["per_case"][0]["功能"] = "fail"
+        errors = []
+        validate_acceptance_state._gate_expected_exceptions(
+            cases, evidence, forged, errors)
+        self.assertTrue(errors)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -185,6 +185,7 @@ import content_address
 import dtype_requirement_sets as DRS
 import perf_mode
 import precision_policy
+import expected_exception_contract
 import source_provenance
 import tensor_shape_attrs as TSA
 
@@ -1073,6 +1074,7 @@ _PLANNER_DEPENDENCIES = (
     "gen_cases.py",
     "repo_adapter.py",
     "precision_policy.py",
+    "expected_exception_contract.py",
     "tensor_shape_attrs.py",
 )
 # 未声明时的缺省档 = 现行造例规则（向后兼容硬约束：老算子 caseset 逐字节不变）。
@@ -5432,6 +5434,48 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                 golden_unavailable.append({"case_id": cid, "reason": unavailable_reason,
                                            "case_origin": entry["case_origin"]})
                 continue
+        marker = expected_exception_contract.marker_or_none(golden)
+        if marker is not None:
+            if out_shape_fn is None:
+                raise ValueError(
+                    f"{cid}: golden 返回 expected-exception marker，但 golden.py 未声明 out_shape；"
+                    "NPU 调用无法安全分配输出，拒绝生成正式异常结果")
+            declared = _declared_out_shape(out_shape_fn, inputs, attrs, cid)
+            input_dtns = _case_context_input_dtypes(
+                entry, inputs, in_params, dtn, cid)
+            logical_output_dtype = precision_policy.derive_output_dtype(
+                spec, [(param["name"], input_dtns[index])
+                       for index, param in enumerate(in_params)])
+            if (input_profile is not None
+                    and logical_output_dtype != input_profile["output"]["dtype"]):
+                raise ValueError(
+                    f"{cid}: expected exception 输出 dtype 与 multi-input profile 漂移")
+            in_items = _save_case_tensor_inputs(
+                cdir, cid, inputs, in_params, input_dtns)
+            output_names = _active_output_names(spec, variant, cid)
+            if len(output_names) != 1:
+                raise ValueError(
+                    f"{cid}: expected exception 当前要求恰有一个 active output")
+            expected = {
+                "golden_source": golden_source, "golden_tier": _tier,
+                "golden_path": None, "verify_mode": vmode,
+                "compare": "na", "standard": "na",
+                "compare_dtype": logical_output_dtype,
+                "out_shape": list(declared), "out_shape_source": "golden.out_shape",
+                "expected_exception": expected_exception_contract.contract_from_marker(marker),
+                "case_origin": entry["case_origin"], "rule_ref": entry["rule_ref"],
+            }
+            case = {"id": cid, "dims": ["功能"],
+                    "tags": list(entry["tags"]) + ["预期异常"],
+                    "inputs": in_items, "attrs": attrs, "expected": expected}
+            if needs_aclnn_call:
+                case["aclnn_call"] = _build_aclnn_call(
+                    spec, variant, attrs, output_names, cid)
+                _bind_layout_to_aclnn_call(case, cid)
+            _attach_entry_contract_bindings(case, entry)
+            _attach_golden_case_context(case, case_context)
+            cases.append(case)
+            continue
         # C1：算子声明了 out_shape → **与 golden_fn 实际返回的形状对账**，不一致即 fail-closed。
         # 两者打架时既不信声明也不信实测：下游 runner 按 caseset 的形状收发、validator 按 golden 判，
         # 谁静默胜出都会产出「看起来对」的结果。out_shape_source 如实记这形状是「声明并已核」还是「实测」。

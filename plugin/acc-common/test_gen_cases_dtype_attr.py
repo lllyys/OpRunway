@@ -1002,6 +1002,71 @@ class OutShapeDefaultSemanticsTest(_FakeOpCase):
                             for c in cs["cases"]), "缺省通路的 source 应是 golden_fn_actual")
 
 
+class ExpectedExceptionGenerationTest(_FakeOpCase):
+    """golden 的受控异常是一等功能结果，不能把整轮 caseset 生成带走。"""
+
+    def test_integer_divide_by_zero_becomes_case_contract(self):
+        self.place(
+            "FakeIntegerDivideByZero",
+            "def golden_fn(inputs, attrs):\n"
+            "    try:\n"
+            "        return 1 // 0\n"
+            "    except ZeroDivisionError as ex:\n"
+            "        return {\n"
+            "            'schema': 'oprunway.golden_expected_exception_marker',\n"
+            "            'schema_version': 1,\n"
+            "            'reference': {\n"
+            "                'class': type(ex).__name__, 'phase': 'golden',\n"
+            "                'message': str(ex),\n"
+            "            },\n"
+            "            'expected': {\n"
+            "                'phase': 'execute',\n"
+            "                'return_categories': ['stage1_nonzero'],\n"
+            "                'output_written': False,\n"
+            "            },\n"
+            "        }\n"
+            "\n"
+            "def out_shape(in_shapes, attrs):\n"
+            "    return tuple(in_shapes[0])\n",
+        )
+        caseset = GC.gen_cases(
+            _fake_spec("FakeIntegerDivideByZero", case_target=1), self.work())
+
+        self.assertTrue(caseset["cases"])
+        for case in caseset["cases"]:
+            with self.subTest(case_id=case["id"]):
+                expected = case["expected"]
+                self.assertEqual(case["dims"], ["功能"])
+                self.assertEqual(expected["compare"], "na")
+                self.assertEqual(expected["standard"], "na")
+                self.assertIsNone(expected["golden_path"])
+                self.assertEqual(
+                    expected["expected_exception"]["reference"],
+                    {"class": "ZeroDivisionError", "phase": "golden",
+                     "message": "integer division or modulo by zero"},
+                )
+                self.assertTrue(all(
+                    os.path.isfile(os.path.join(self._dirs[-1], item["path"]))
+                    for item in case["inputs"]), case["id"])
+
+    def test_unmarked_golden_exceptions_are_never_promoted(self):
+        for index, (error, statement) in enumerate((
+                (ZeroDivisionError, "return 1 // 0"),
+                (KeyError, "raise KeyError('golden bug')"))):
+            op = f"FakeUnmarkedGoldenError{index}"
+            self.place(
+                op,
+                "def golden_fn(inputs, attrs):\n"
+                f"    {statement}\n"
+                "\n"
+                "def out_shape(in_shapes, attrs):\n"
+                "    return tuple(in_shapes[0])\n",
+            )
+            with self.subTest(error=error.__name__):
+                with self.assertRaises(error):
+                    GC.gen_cases(_fake_spec(op, case_target=1), self.work())
+
+
 class OutShapeContractTest(_FakeOpCase):
     """C1：out_shape 由 per-op golden.py 可选导出；未导出=同形；声明与实测打架→fail-closed。"""
 

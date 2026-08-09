@@ -14,6 +14,7 @@
 import hashlib, json, math, numbers, os, posixpath, re, shlex, shutil, subprocess, sys, uuid
 import numpy as np
 import precision_policy
+import expected_exception_contract
 import gen_cases  # T7：复用 bf16 位级 codec（_f32_to_bf16_uint16/_bf16_uint16_to_f32）+ 原生 dtype 表
 import cpp_extension_identity
 
@@ -547,6 +548,25 @@ def build_multi_output_evidence(caseset, work_dir, out_dir, perf_by_case=None):
         # 在 np.load(None) 之类的地方炸掉整轮（正是本轮要修的那种「一条挂、全轮零产物」）。
         _failed = failed_by_cid.get(cid)
         if _failed is not None:
+            expected_exception = exp.get("expected_exception")
+            if expected_exception is not None:
+                expected_exception_contract.normalize_contract(
+                    expected_exception, where=f"{cid}.expected.expected_exception")
+                ev.append({
+                    "case_id": cid,
+                    "status": "expected_exception",
+                    # 仅作诊断展示；不得参与 expected-exception PASS。
+                    # 可信 observation 由 adapter 在校过 subprocess receipt 后据 call_status 派生。
+                    "exception": None,
+                    "exception_diagnostic": {
+                        "error_kind": _failed.get("error_kind"),
+                        "error_type": _failed.get("error_type"),
+                        "phase": _failed.get("phase"),
+                        "message": _failed["error"],
+                    },
+                    "perf": _perf_entry(cid, perf_by_case),
+                })
+                continue
             failed_ev = {"case_id": cid, "status": EV_STATUS_EXECUTION_FAILED,
                          "error_kind": _failed.get("error_kind") or EV_STATUS_EXECUTION_FAILED,
                          "error_phase": _failed.get("phase"),
@@ -555,6 +575,13 @@ def build_multi_output_evidence(caseset, work_dir, out_dir, perf_by_case=None):
                          "perf": _perf_entry(cid, perf_by_case)}
             _copy_output_written_evidence(failed_ev, _failed, produced=False)
             ev.append(failed_ev)
+            continue
+        if exp.get("expected_exception") is not None:
+            expected_exception_contract.normalize_contract(
+                exp["expected_exception"], where=f"{cid}.expected.expected_exception")
+            # DUT succeeded while CPU reference declared a controlled exception.
+            ev.append({"case_id": cid, "status": "ok", "exception": None,
+                       "perf": _perf_entry(cid, perf_by_case)})
             continue
         if exp.get("golden_status") == EV_STATUS_GOLDEN_UNAVAILABLE:
             ev.append({"case_id": cid, "status": EV_STATUS_GOLDEN_UNAVAILABLE,

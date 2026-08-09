@@ -47,6 +47,7 @@ judge_* 入口做 metric **schema 校验**（计数=非负整数、numel=正整�
 """
 import json, math, operator as _operator, re, sys
 import precision_policy
+import expected_exception_contract
 import stochastic_collector
 import stochastic_contract
 
@@ -1043,6 +1044,22 @@ def _empty_row(cid):
             "判据": "", "evidence_ref": cid}
 
 
+def _judge_expected_exception(row, contract, observed):
+    """Expected exception is a functional result; it has no numerical axis."""
+    try:
+        matched, why = expected_exception_contract.compare(contract, observed)
+    except ValueError as ex:
+        matched, why = False, f"expected_exception contract 非法：{ex}"
+    row["功能"] = "pass" if matched else "fail"
+    row["精度"] = "na"
+    row["性能"] = "na"
+    row["catlass_compare_pass"] = "na"
+    row["standard_profile_pass"] = "na"
+    row["acceptance_precision_pass"] = "na"
+    row["判据"] = why
+    return row
+
+
 def _verdict(op, vm, spec_standard, problems, per, gaps=None, scaled=None, golden_tiers=None,
              golden_judged_from="caseset_self_declared", accuracy_summary=None,
              golden_unavailable_ids=None):
@@ -1295,6 +1312,16 @@ def validate(spec, caseset, evidence):
         e = ev_by_id.get(cid)
         if e is None:
             row.update(功能="fail", 判据="evidence 缺此 case")
+            per.append(row); continue
+        expected_exception = exp.get("expected_exception")
+        if expected_exception is not None:
+            dim_err = _dims_contract(dims, vm, allow_na=True)
+            if dim_err or set(dims) != {"功能"}:
+                row.update(功能="fail", 判据=(
+                    f"expected_exception case 的 dims 须恰为 ['功能']：{dim_err or dims!r}"))
+                per.append(row); continue
+            observed = e.get("exception") if e.get("status") == "expected_exception" else None
+            _judge_expected_exception(row, expected_exception, observed)
             per.append(row); continue
         # 证据自报「这条没有可比结果」（driver 逐 case 跑挂 = `execution_failed`；任务书用例算不出
         # golden = `golden_unavailable`）→ 功能维直接 fail，不再往下走**口径**校验。

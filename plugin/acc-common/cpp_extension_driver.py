@@ -1400,6 +1400,19 @@ def run(bundle, work):
                 != golden_invocation_receipt_sha256:
             raise cpp_extension_adapter.CppExtensionAdapterError(
                 "invocation plan 的 golden invocation receipt 摘要与 caseset 漂移")
+        expected_exception_ledger = (
+            cpp_extension_adapter.validate_caseset_expected_exceptions(caseset))
+        expected_exception_ledger_sha256 = (
+            _canonical_sha(expected_exception_ledger)
+            if expected_exception_ledger is not None else None)
+        if expected_exception_ledger_sha256 is None:
+            if "expected_exception_ledger_sha256" in plan:
+                raise cpp_extension_adapter.CppExtensionAdapterError(
+                    "legacy invocation plan 不得凭空声明 expected exception ledger")
+        elif plan.get("expected_exception_ledger_sha256") \
+                != expected_exception_ledger_sha256:
+            raise cpp_extension_adapter.CppExtensionAdapterError(
+                "invocation plan 的 expected exception ledger 摘要与 caseset 漂移")
     except cpp_extension_adapter.CppExtensionAdapterError as ex:
         raise DriverError(f"golden invocation contract/receipt 非法：{ex}") from ex
     try:
@@ -1463,6 +1476,9 @@ def run(bundle, work):
             **({"golden_invocation_receipt_sha256":
                 golden_invocation_receipt_sha256}
                if golden_invocation_receipt_sha256 is not None else {}),
+            **({"expected_exception_ledger_sha256":
+                expected_exception_ledger_sha256}
+               if expected_exception_ledger_sha256 is not None else {}),
         },
         "runtime": runtime,
         # 本轮逐 case 执行的分母台账：`failed > 0` 时 receipt 自己就说得出「哪些没跑成」，
