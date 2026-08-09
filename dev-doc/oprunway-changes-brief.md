@@ -11,6 +11,8 @@
   逻辑。A3 RED 精确复现，修复后 renderer 57/57、相关 358/358，合并集 415/415 全绿。
   限定 review 又发现 NA 行不应进入只针对原 FAIL 的 `audit_case.sh`；补 RED 后把混合明细统一改为
   按 `case_id` 的 `show_case.sh` / `run_case.sh` 非裁决入口，fresh 合并集 415/415 再次全绿。
+  A3 从不可变 v24b JSON 仅重跑 renderer 后，canonical 报告更新为 `82e4fbbf…`，旧 `8995393`
+  renderer 报告以 `6008d150…` 留存；新 manifest 为 `55ff298d…`，161/161 校验通过。
 
 ## 2026-08-09 · Remainder current workflow 129-case 正式验收打通
 

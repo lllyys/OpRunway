@@ -488,4 +488,6 @@ formal final2 根没有独立 `验收报告.md`，本记录不虚构该文件。
 | `rem.v24b.verdict` | `reports/remainder-v24b/verdict.json` | `d086c8ffdcd321d547ce7d83746692f80a5d64a090c76400fd4ad3e461a7700b` |
 | `rem.v24b.perf` | `reports/remainder-v24b/perf_report.json` | `b6b31aaae13b0e75283a754a59cd4517d24e6802ba6f655615fb95aede612499` |
 | `rem.v24b.acceptance` | `reports/remainder-v24b/acceptance.json` | `1c9033f3a8d01e3a818d6da56cbd0e10f7b82c35a192e1c8c856be8742b84eb2` |
-| `rem.v24b.report` | `reports/remainder-v24b/验收报告.md` | `6008d150ab688deaabb059d5bfddeb2c76ffdfb4b6d34a2e3cd1c11c8bbd4d1b` |
+| `rem.v24b.report` | `reports/remainder-v24b/验收报告.md` | `82e4fbbfcc517c3395565f44c8b8d1e3ea2abe79f6398f74b491546a79c5f176` |
+| `rem.v24b.report.renderer-8995393` | `reports/remainder-v24b/验收报告.renderer-8995393.md` | `6008d150ab688deaabb059d5bfddeb2c76ffdfb4b6d34a2e3cd1c11c8bbd4d1b` |
+| `rem.v24b.manifest` | `reports/remainder-v24b/sha256sums.txt` | `55ff298df86a98315af3cfb42602e188231a7f33d6fde315576a5daf72019ee7`（161/161 校验通过） |
