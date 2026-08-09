@@ -422,3 +422,59 @@ formal final2 根没有独立 `验收报告.md`，本记录不虚构该文件。
 - **未实测**：多卡 msprof/完整 acceptance、Atlas A2/A5 产品覆盖、三个性能保持条款的 baseline。
 - **禁止外推**：不能把 Roll A/B 归因套到 Bernoulli；不能把在线任务书 fetch 说成在线 PR DUT；
   不能把 gate passed 或有 msprof 数字写成算子整体通过。
+
+## 10 · Remainder current workflow formal v24b（2026-08-09）
+
+本节记录 current workflow HEAD `899539312c82f9270b8bedaa8b79d806595ed099` 的 fresh 129-case 正式实测，
+取代 §6 那份旧 18-case caseset 作为**当前 workflow**结果；两份 caseset 不同，不作逐 case 复现宣称。
+
+### 10.1 Fresh 执行链与裁决
+
+- fresh A3 card15 clean container/root，镜像 digest `e42777223ec8…`；任务书 SHA-256
+  `b8487ce4160d33712c4cf148ccde8e9b542415967f5e417b5cec3559dfdf3a71`。
+- 为目标 SoC 增加的 `AddConfig("ascend910_93", aicoreConfig)` 在 CP-A **之前**进入本轮隔离源码快照，
+  因而被 source content anchor、build tree 与 receipt 共同绑定；原用户 checkout 未修改。
+- CP-A `completeness=complete`，source content anchor
+  `90a5e8c72dfb6f410f7a04def36274abc8632f558cf5edde5a49255dc1051449`，目标子树 29 文件。
+- Taskdoc gate `PASSED`；Task1 dry-run `129`、actual `129`；CP-C0 静态状态
+  `READY_WAIT_NPU_TRUST_GATE`；唯一 vendor build/emit 实测 returncode=0，DUT ELF SHA-256
+  `8c0149165cbab4d509fd1981158f869f0a0ddf817d1472364ed2e5d1a53483d8`。
+- 真实 precision execution 129/129：`ok=45`、`expected_exception=25`、`execution_failed=59`；
+  transport outcome 为 `45 produced / 84 failed`。首个 DUT 失败是
+  `int32.small.lhs_broadcast` 的 GetWorkspaceSize `stage1_ret=561103`、executor null、stage2 未调用；
+  `int32.small.same` 的 stage1/stage2 均为 0。
+- `validator.py` 的确定性裁决：129 例中 `fail=71`，`uncertain=0`、`risk=0`、`gaps=0`；
+  Task1/Task2 证据门均 `PASSED`。
+- 性能为真实 NPU msprof kernel-only：12 个性能候选中 5 measured、7 因对应 DUT case 不可执行而
+  structured blocked。实测值为 int32 `4.64 μs`、int64 `4.78 μs`、fp16 `5.38 μs`、
+  fp32 `5.64 μs`、bf16 `5.36 μs`；无 baseline，不产达标宣称。
+- 最终 `acceptance.json.overall = "FAIL(精度)"`，workflow exit 1；外层 runbook 在确认
+  `acceptance.json` 与中文报告存在后 exit 0。正式产物已落本地 ignored
+  `reports/remainder-v24b/`。
+
+### 10.2 本轮偏离与处理
+
+1. 首次 v24 在 build 前停于 runbook 把静态 preflight 状态误断言为 `READY`；确定性产物实际正确为
+   `READY_WAIT_NPU_TRUST_GATE`。反问：这是泛化性差导致的吗？**是，runbook 混淆了静态状态与后续真机
+   trust 闭环。** 选择做减法：只修正该外层断言，不增加状态、不修改 workflow；废弃该 partial formal，
+   fresh v24b 从 CP-A 重跑。
+2. 启动前发现宿主 `/tmp` 仅余 49,602 inode。反问：这是泛化性差导致的吗？**不是算子或 workflow
+   语义问题，是执行根容量问题。** 仍选择做减法：不清理任何旧现场、不扩 workflow，把 fresh root 放到
+   未登记保护的根盘用户目录；根盘有 3.6 亿可用 inode。
+3. v24b 未再修改 workflow；真实 FAIL 没有触发“继续加审计/重构”，而是让现有确定性链完成精度、性能、
+   acceptance 与报告。该策略同时减少特判、保持 caller-trusted 内容锚，并把问题限定在 DUT 实测结果。
+
+### 10.3 Current formal 工件
+
+| Artifact ID | 本地相对路径 | SHA-256 |
+|---|---|---|
+| `rem.v24b.source` | `reports/remainder-v24b/source_facts.json` | `4c90b1a7365ed5831a683c87c91acfc18f588fc602a0485c69709a9384658eb7` |
+| `rem.v24b.spec` | `reports/remainder-v24b/remainder.spec.json` | `c57d11e9a4f4707257533f58c03ea48d71a51dd680a7186b3aaf0ced97faa3ad` |
+| `rem.v24b.cases` | `reports/remainder-v24b/caseset.json` | `ab9947e3b528e5446ae2da77283cddcdbbfeca9ecb79235acedf94f0baa895dc` |
+| `rem.v24b.build` | `reports/remainder-v24b/vendor-build-receipt.json` | `86e0e08c7b6a8fac759eb191c0a9e241f70a196c9b0243f686b25e644e179fea` |
+| `rem.v24b.extension` | `reports/remainder-v24b/work/cpp_extension_receipt.json` | `d3a04eec333a42da4f837ea141737adc56ce4c76771746f8c255c7c2c261ff85` |
+| `rem.v24b.evidence` | `reports/remainder-v24b/evidence.json` | `dab0bcf8a45449fbb44724d560caf42e50d4eb9463bafb1ca675428d1a75ed9a` |
+| `rem.v24b.verdict` | `reports/remainder-v24b/verdict.json` | `d086c8ffdcd321d547ce7d83746692f80a5d64a090c76400fd4ad3e461a7700b` |
+| `rem.v24b.perf` | `reports/remainder-v24b/perf_report.json` | `b6b31aaae13b0e75283a754a59cd4517d24e6802ba6f655615fb95aede612499` |
+| `rem.v24b.acceptance` | `reports/remainder-v24b/acceptance.json` | `1c9033f3a8d01e3a818d6da56cbd0e10f7b82c35a192e1c8c856be8742b84eb2` |
+| `rem.v24b.report` | `reports/remainder-v24b/验收报告.md` | `6008d150ab688deaabb059d5bfddeb2c76ffdfb4b6d34a2e3cd1c11c8bbd4d1b` |

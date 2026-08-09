@@ -2,6 +2,15 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-09 · Remainder current workflow 129-case 正式验收打通
+
+- HEAD `8995393` 在 fresh A3 card15 完成 CP-A、129-case 真实精度、5 个 eligible case 的真实 msprof、
+  确定性裁决与中文报告：execution 为 45 produced / 84 failed，validator 为 71 fail、0 uncertain，
+  性能 5 measured / 7 structured blocked，Task1/Task2 gate 均 PASSED，最终 `FAIL(精度)`。本轮冻结
+  workflow，不因 DUT FAIL 扩审计或重构；只修正外层 runbook 对 CP-C0 静态状态的错误断言，并因 `/tmp`
+  inode 紧张把 fresh root 放到未保护的根盘用户目录。详情及工件 SHA 见
+  `dev-doc/oprunway-roll-bernoulli-remainder-validation-2026-08-07.md` §10。
+
 ## 2026-08-09 · Multi-input plan 只保留规范化执行 slots
 
 - Remainder v15 的 37 个 marker case 已生成动态 input shape/dtype，但 plan 仍复制原始最小 slots，driver
