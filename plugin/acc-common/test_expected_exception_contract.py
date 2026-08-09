@@ -3,13 +3,16 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import expected_exception_contract as E
 import cpp_extension_adapter
 import cpp_extension_codegen
+import gen_cases
 import repo_adapter
 import validate_acceptance_state
 import validator
+from test_gen_cases_multi_input import _binary_spec
 
 
 def _marker(*categories):
@@ -210,6 +213,50 @@ class FormalGateExpectedExceptionTest(unittest.TestCase):
         validate_acceptance_state._gate_expected_exceptions(
             cases, evidence, forged, errors)
         self.assertTrue(errors)
+
+
+class GeneratedMultiInputExpectedExceptionTest(unittest.TestCase):
+    """压住 multi-input + golden context + expected marker 的真实组合接缝。"""
+
+    def test_parameter_identity_order_survives_expected_exception_generation(self):
+        spec = _binary_spec()
+        spec["multi_input_contract"]["profiles"] = [
+            spec["multi_input_contract"]["profiles"][0]]
+        spec["multi_input_contract"].pop("required_coverage")
+        spec["precision"]["case_target"] = 1
+        invocation = {
+            "schema": "oprunway.golden_invocation",
+            "schema_version": 1,
+            "mode": "keyword_case_context_v1",
+        }
+
+        def golden_fn(inputs, attrs, *, case_context):
+            self.assertEqual(
+                [row["name"] for row in case_context["inputs"]],
+                ["left", "right"],
+            )
+            return _marker("stage1_nonzero", "executor_null")
+
+        golden = gen_cases.Golden(
+            golden_fn,
+            "torch fixture",
+            "multi-input expected-exception regression",
+            lambda in_shapes, attrs: (2, 3, 4),
+            {
+                "source": "single_api",
+                "method_kind": "torch_cpu",
+                "authorization": {"kind": "impl_reference"},
+                "invocation": invocation,
+            },
+        )
+        with tempfile.TemporaryDirectory() as work, mock.patch.object(
+                gen_cases, "load_golden", return_value=golden):
+            caseset = gen_cases.gen_cases(spec, work)
+
+        self.assertEqual(len(caseset["cases"]), 1)
+        case = caseset["cases"][0]
+        self.assertEqual([item["name"] for item in case["inputs"]], ["left", "right"])
+        self.assertIsNotNone(case["expected"]["expected_exception"])
 
 
 if __name__ == "__main__":

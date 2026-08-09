@@ -2,6 +2,14 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-09 · 修复多输入 expected-exception 生成接缝
+
+- RemainderTensorTensor 的 129-case 真机 CP-B 首次命中整数零除 marker 时，坐实
+  `gen_cases` 在 expected-exception 分支把 `in_params` 与物化 `inputs` 反序传入逻辑 dtype
+  解析器，导致 ndarray 被当参数描述调用 `.get()`、整轮生成中断。修正为与普通 golden invocation
+  分支相同的参数顺序，并补“多输入 + logical case context + expected marker”集成回归；A3 RED 精确复现，
+  GREEN 后相关 14 项通过，原 129-profile 用例实产 129 条（含 37 条显式预期异常）。
+
 ## 2026-08-09 · Expected-exception 契约适配逐 case 进程隔离
 
 - 恢复通用 expected-exception 一等功能结果：只有受 SHA 绑定的 generated golden 显式返回严格 marker，

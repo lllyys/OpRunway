@@ -5442,7 +5442,7 @@ def gen_cases(spec, work_dir, taskdoc_caseset=None):
                     "NPU 调用无法安全分配输出，拒绝生成正式异常结果")
             declared = _declared_out_shape(out_shape_fn, inputs, attrs, cid)
             input_dtns = _case_context_input_dtypes(
-                entry, inputs, in_params, dtn, cid)
+                entry, in_params, inputs, dtn, cid)
             logical_output_dtype = precision_policy.derive_output_dtype(
                 spec, [(param["name"], input_dtns[index])
                        for index, param in enumerate(in_params)])
