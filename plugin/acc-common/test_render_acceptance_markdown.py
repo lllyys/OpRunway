@@ -554,6 +554,13 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
                         "overall_pass_rate": 0.5,
                         "by_dtype": [{"dtype": "float32", "count": 2, "passed": 1,
                                       "failed": 1, "uncertain": 0, "pass_rate": 0.5}],
+                        "report": {
+                            "overall": {"total": 2, "passed": 1, "failed": 1,
+                                        "needs_review": 0, "na": 0},
+                            "by_dtype": [{"dtype": "float32", "total": 2,
+                                          "passed": 1, "failed": 1,
+                                          "needs_review": 0, "na": 0}],
+                        },
                     },
                     "overall": {"counts": {"total": 2, "fail": 1}},
                     "per_case": [
@@ -591,10 +598,83 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
             self.assertTrue(os.path.isfile(detail))
             with open(detail, encoding="utf-8") as src:
                 detail_text = src.read()
-            self.assertIn("./repro/review.sh show 1", detail_text)
-            self.assertIn("./repro/audit_case.sh 1", detail_text)
+            self.assertIn("./repro/show_case.sh b", detail_text)
+            self.assertIn("./repro/run_case.sh b", detail_text)
             self.assertIn("`b`", detail_text)
             self.assertFalse(os.path.exists(os.path.join(root, "性能失败明细.md")))
+
+    def test_precision_report_uses_canonical_report_view_and_separates_na(self):
+        """renderer 只消费 validator 的 report 投影，不把 raw NA 全叫成失败。"""
+        with tempfile.TemporaryDirectory() as root:
+            per_case = [
+                {"case_id": f"pass-{i}", "功能": "pass", "精度": "pass", "判据": "ok"}
+                for i in range(33)
+            ] + [
+                {"case_id": f"fail-{i}", "功能": "fail", "精度": "na",
+                 "判据": "execution failed"}
+                for i in range(71)
+            ] + [
+                {"case_id": f"na-{i}", "功能": "pass", "精度": "na",
+                 "判据": "expected exception has no numeric axis"}
+                for i in range(25)
+            ]
+            docs = _docs({})
+            docs["acceptance.json"].update({
+                "overall": "FAIL(精度)", "state": "FAILED_PRECISION",
+                "precision_verdict": "fail", "perf_status": "skipped_precision_gate",
+            })
+            docs["verdict.json"] = {
+                "op": "X", "standard": "ascendoptest_default",
+                # raw 视图故意保留正式现场的口径差异；报告不得读它。
+                "accuracy_summary": {
+                    "total": 129, "passed": 33, "failed": 0, "errored": 71,
+                    "uncertain": 0, "na": 25, "overall_pass_rate": 33 / 129,
+                    "by_dtype": [{"dtype": "WRONG_RAW", "count": 129, "passed": 33,
+                                  "failed": 0, "uncertain": 0, "na": 25,
+                                  "pass_rate": 33 / 129}],
+                    "report": {
+                        "overall": {"total": 104, "passed": 33, "failed": 71,
+                                    "needs_review": 0, "na": 25},
+                        "by_dtype": [
+                            {"dtype": "int32", "total": 52, "passed": 17,
+                             "failed": 35, "needs_review": 0, "na": 13},
+                            {"dtype": "int64", "total": 52, "passed": 16,
+                             "failed": 36, "needs_review": 0, "na": 12},
+                        ],
+                    },
+                },
+                "overall": {"counts": {"total": 129, "fail": 71}},
+                "per_case": per_case,
+            }
+            docs["perf_report.json"] = {
+                "summary": {"status": "skipped_precision_gate", "planned_cases": 0,
+                            "perf_cases": 0, "cases_scored": 0, "达标": 0},
+                "by_shape_class": [], "non_passing_cases": [],
+            }
+            _write_docs(root, docs)
+
+            path = R.write_report(root, allow_historical_read_only=True)
+            with open(path, encoding="utf-8") as src:
+                text = src.read()
+            self.assertIn(
+                "全量：129 条；可判：104 条（通过 33，失败 71，待复核 0）；NA：25 条。",
+                text)
+            self.assertIn("| `int32` | 52 | 17 | 35 | 0 | 13 |", text)
+            self.assertIn("| `int64` | 52 | 16 | 36 | 0 | 12 |", text)
+            self.assertNotIn("WRONG_RAW", text)
+            self.assertNotIn("33/129 通过", text)
+            self.assertIn("## 精度失败/待复核/NA 明细", text)
+            self.assertIn("失败 **71** 条；待复核 **0** 条；NA **25** 条", text)
+
+            with open(os.path.join(root, "精度失败明细.md"), encoding="utf-8") as src:
+                detail = src.read()
+            self.assertIn("# 精度失败/待复核/NA 明细", detail)
+            self.assertIn("失败：**71**；待复核：**0**；NA：**25**", detail)
+            self.assertNotIn("失败总数：**96**", detail)
+            na_line = next(line for line in detail.splitlines() if "`na-0`" in line)
+            self.assertIn("./repro/show_case.sh na-0", na_line)
+            self.assertIn("./repro/run_case.sh na-0", na_line)
+            self.assertNotIn("audit_case.sh", na_line)
 
     def test_refuses_to_render_gate_failed_or_blocked_acceptance_as_formal_report(self):
         """renderer 是可单独调用的入口，不能绕过 workflow 的正式发布门。"""

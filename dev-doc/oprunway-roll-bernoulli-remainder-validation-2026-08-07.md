@@ -463,6 +463,17 @@ formal final2 根没有独立 `验收报告.md`，本记录不虚构该文件。
    未登记保护的根盘用户目录；根盘有 3.6 亿可用 inode。
 3. v24b 未再修改 workflow；真实 FAIL 没有触发“继续加审计/重构”，而是让现有确定性链完成精度、性能、
    acceptance 与报告。该策略同时减少特判、保持 caller-trusted 内容锚，并把问题限定在 DUT 实测结果。
+4. v24b 的确定性 JSON 已给出 `accuracy_summary.report.overall = 104 可判 / 33 pass /
+   71 fail / 25 NA`，旧 renderer 却另读 raw 五桶并自行拼统计，将页首写成
+   `33/129 通过、0 失败`，又把逐 case 的 96 个 `精度 != pass` 全叫成“精度失败”。
+   反问：这是泛化性差导致的吗？**是，renderer 复制了 validator 的口径。** 选择做减法：
+   不改 validator/acceptance JSON，不按算子或 dtype 分支；页首和 dtype 表只消费
+   `accuracy_summary.report.overall/by_dtype` 唯一投影，明细保留原功能/精度状态并显式并列
+   `71 fail / 0 needs_review / 25 NA`。A3 真实 RED 1/1 精确复现错误；修复后定向 1/1、
+   renderer 57/57、精度聚合/三级门/finalize/workflow 相关集 358/358，合并运行 415/415 全绿。
+   限定 review 另发现混合明细曾让 NA 行误用只针对原 FAIL 的 `audit_case.sh`；审修 RED
+   1/1 精确命中 `na-0`，做减法后所有明细行只按 `case_id` 提供非裁决 `show_case.sh` /
+   `run_case.sh`，targeted 1/1 与 fresh 合并集 415/415 再次全绿。
 
 ### 10.3 Current formal 工件
 

@@ -410,24 +410,32 @@ def _atomic_write(transaction, filename, text):
     return transaction.atomic_write_bytes(filename, text.encode("utf-8"))
 
 
-def _precision_failure_detail(failed):
+def _precision_nonpass_detail(rows, report_overall):
     lines = [
-        "# 精度失败明细",
+        "# 精度失败/待复核/NA 明细",
         "",
-        "> 本文件由 `verdict.json` 确定性渲染，只展示既有裁决，不重新判断 pass/fail。",
+        ("> 本文件由 `verdict.json` 确定性渲染；汇总数只引用 "
+         "`accuracy_summary.report.overall`，逐 case 只展示既有功能/精度状态，"
+         "不重新判断 pass/fail。"),
         "",
-        f"- 失败总数：**{len(failed)}**",
+        (f"- 确定性 report 汇总：失败：**{report_overall.get('failed', '—')}**；"
+         f"待复核：**{report_overall.get('needs_review', '—')}**；"
+         f"NA：**{report_overall.get('na', '—')}**"),
+        f"- 明细收录总数：**{len(rows)}**",
         "- 返回主报告：[验收报告.md](验收报告.md)",
-        "- 审核主入口：`./repro/audit_case.sh <序号>`（一次显示接入、输入、接口、差异和阈值）",
+        "- 查看与重放均按 `case_id` 进入，不借用只针对原 FAIL 的序号索引。",
         "",
-        "| 序号 | case_id | 判据 | 查看用例 | 重放复现 |",
-        "|---:|---|---|---|---|",
+        "| 序号 | case_id | 功能 | 精度 | 判据 | 查看用例 | 重放复现 |",
+        "|---:|---|---|---|---|---|---|",
     ]
-    for index, row in enumerate(failed, 1):
+    for index, row in enumerate(rows, 1):
         case_id = row.get("case_id")
+        show_command = _code_cell(f"./repro/show_case.sh {case_id}")
+        run_command = _code_cell(f"./repro/run_case.sh {case_id}")
         lines.append(
-            f"| {index} | `{_cell(case_id)}` | {_cell(row.get('判据'))} | "
-            f"`./repro/review.sh show {index}` | `./repro/audit_case.sh {index}` |")
+            f"| {index} | `{_cell(case_id)}` | `{_cell(row.get('功能'))}` | "
+            f"`{_cell(row.get('精度'))}` | {_cell(row.get('判据'))} | "
+            f"{show_command} | {run_command} |")
     lines += [
         "",
         "也可按 case_id 操作：",
@@ -591,7 +599,15 @@ def _render_locked(
 
     op = acceptance.get("op") or verdict.get("op") or caseset.get("op") or "?"
     accuracy = verdict.get("accuracy_summary") or {}
-    counts = (verdict.get("overall") or {}).get("counts") or {}
+    # 精度报表口径的唯一真源是 validator 已投影好的 report 块。
+    # 不再读 raw total/passed/failed/by_dtype：那五桶是内部诊断视图，
+    # 直接渲染会把 errored 漏出 failed，并把 NA 混入可判分母。
+    accuracy_report = (accuracy.get("report")
+                       if isinstance(accuracy.get("report"), dict) else {})
+    accuracy_overall = (accuracy_report.get("overall")
+                        if isinstance(accuracy_report.get("overall"), dict) else {})
+    accuracy_by_dtype = (accuracy_report.get("by_dtype")
+                         if isinstance(accuracy_report.get("by_dtype"), list) else [])
     receipt = evidence.get("cpp_extension_receipt") or {}
     runtime = receipt.get("runtime") or {}
     vendor = receipt.get("vendor") or {}
@@ -708,35 +724,42 @@ def _render_locked(
         "",
         "## 精度汇总",
         "",
-        f"- 合计：{accuracy.get('passed', counts.get('total', 0) - counts.get('fail', 0))}/"
-        f"{accuracy.get('total', counts.get('total', 0))} 通过；"
-        f"失败 {accuracy.get('failed', counts.get('fail', 0))}；"
-        f"通过率 {_pct(accuracy.get('overall_pass_rate'))}。",
+        (f"- 全量：{accuracy_overall.get('total', 0) + accuracy_overall.get('na', 0)} 条；"
+         f"可判：{accuracy_overall.get('total', 0)} 条（"
+         f"通过 {accuracy_overall.get('passed', 0)}，"
+         f"失败 {accuracy_overall.get('failed', 0)}，"
+         f"待复核 {accuracy_overall.get('needs_review', 0)}）；"
+         f"NA：{accuracy_overall.get('na', 0)} 条。"),
         f"- 精度标准：`{_cell(verdict.get('standard'))}`。",
         "",
-        "| dtype | 总数 | 通过 | 失败 | uncertain | 通过率 |",
+        "| dtype | 可判 | 通过 | 失败 | 待复核 | NA |",
         "|---|---:|---:|---:|---:|---:|",
     ]
-    for row in accuracy.get("by_dtype") or []:
+    for row in accuracy_by_dtype:
         lines.append(
-            f"| `{_cell(row.get('dtype'))}` | {row.get('count', 0)} | "
+            f"| `{_cell(row.get('dtype'))}` | {row.get('total', 0)} | "
             f"{row.get('passed', 0)} | {row.get('failed', 0)} | "
-            f"{row.get('uncertain', 0)} | {_pct(row.get('pass_rate'))} |")
+            f"{row.get('needs_review', 0)} | {row.get('na', 0)} |")
 
-    failed = [
+    precision_nonpass = [
         row for row in (verdict.get("per_case") or [])
-        if row.get("精度") != "pass"
+        if row.get("精度") != "pass" or row.get("功能") == "fail"
     ]
-    lines += ["", "## 精度失败明细", ""]
-    if failed:
+    lines += ["", "## 精度失败/待复核/NA 明细", ""]
+    if precision_nonpass:
         lines += [
-            f"共 **{len(failed)}** 条，逐项判据和复现入口见 "
-            "[精度失败明细.md](精度失败明细.md)。",
+            (f"确定性 report 汇总：失败 **{accuracy_overall.get('failed', '—')}** 条；"
+             f"待复核 **{accuracy_overall.get('needs_review', '—')}** 条；"
+             f"NA **{accuracy_overall.get('na', '—')}** 条。"),
+            (f"逐项原始状态和复现入口见 "
+             "[精度失败明细.md](精度失败明细.md)"
+             "（文件名为兼容旧入口保留）。"),
             "",
-            "快速复核：`./repro/audit_case.sh 1`。",
+            "复核时按明细中的 `case_id` 调用 `show_case.sh` / `run_case.sh`；"
+            "NA 与待复核项不进入只针对原 FAIL 的 `audit_case.sh`。",
         ]
     else:
-        lines.append("无精度失败。")
+        lines.append("无精度失败、待复核或 NA 项。")
 
     ps = perf.get("summary") or {}
     if perf.get("perf_mode") == "measure_only":
@@ -812,7 +835,7 @@ def _render_locked(
         "",
         "- `acceptance.json`：最终确定性裁决。",
         "- `verdict.json`：逐 case 精度裁决与 dtype 汇总。",
-        "- `精度失败明细.md`：存在精度失败时生成的逐项复现索引。",
+        "- `精度失败明细.md`：存在精度失败、待复核或 NA 时生成的逐项复现索引。",
         "- `evidence.json`：逐 case 实测 metrics 和构建/加载收据。",
         "- `perf_report.json`：性能计划、采集和大小 shape 汇总。",
         "- `性能失败明细.md`：存在性能未通过 case 时生成的逐项状态索引。",
@@ -876,13 +899,19 @@ def _write_report_locked(
     path = _atomic_write(transaction, filename, text)
 
     verdict = _load(transaction, "verdict.json")
-    failed = [
+    precision_nonpass = [
         row for row in (verdict.get("per_case") or [])
-        if row.get("精度") != "pass"
+        if row.get("精度") != "pass" or row.get("功能") == "fail"
     ]
-    if failed:
+    accuracy = verdict.get("accuracy_summary") or {}
+    accuracy_report = (accuracy.get("report")
+                       if isinstance(accuracy.get("report"), dict) else {})
+    accuracy_overall = (accuracy_report.get("overall")
+                        if isinstance(accuracy_report.get("overall"), dict) else {})
+    if precision_nonpass:
         _atomic_write(
-            transaction, "精度失败明细.md", _precision_failure_detail(failed))
+            transaction, "精度失败明细.md",
+            _precision_nonpass_detail(precision_nonpass, accuracy_overall))
     elif transaction.lexists("精度失败明细.md"):
         transaction.unlink("精度失败明细.md")
 

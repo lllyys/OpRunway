@@ -2,6 +2,16 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-09 · 精度报告统一消费 validator report SSOT
+
+- Remainder v24b 的 JSON 已确定为全量 129、可判 104（33 pass / 71 fail）、NA 25，
+  旧 renderer 却直读 raw 五桶，写成 `33/129 通过、0 失败`，并把 96 条全称精度失败。
+  现做减法：页首与 dtype 表只消费 `accuracy_summary.report.overall/by_dtype`，明细并列
+  fail / needs-review / NA 并保留原逐 case 状态；不改 validator、acceptance JSON 或任何算子/dtype
+  逻辑。A3 RED 精确复现，修复后 renderer 57/57、相关 358/358，合并集 415/415 全绿。
+  限定 review 又发现 NA 行不应进入只针对原 FAIL 的 `audit_case.sh`；补 RED 后把混合明细统一改为
+  按 `case_id` 的 `show_case.sh` / `run_case.sh` 非裁决入口，fresh 合并集 415/415 再次全绿。
+
 ## 2026-08-09 · Remainder current workflow 129-case 正式验收打通
 
 - HEAD `8995393` 在 fresh A3 card15 完成 CP-A、129-case 真实精度、5 个 eligible case 的真实 msprof、
