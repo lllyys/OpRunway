@@ -1,5 +1,33 @@
 # Roll、Bernoulli、Remainder 三算子统一实测记录（2026-08-07）
 
+## 0 · Remainder current workflow v10–v14 问题记录（2026-08-09）
+
+本节只记录本轮 current workflow 的偏离、修复和遗留项。它不读取或复用下文 2026-08-07 的旧
+Remainder 验收产物；下文旧裁决继续只作 historical-read-only。这里的 A3 测试是 workflow/plugin
+回归证据，不是 DUT 精度或性能结论；没有实际用例证据与正式报告时，不能称本轮算子验收成功。
+
+| 轮次 | 暴露的偏离/根因 | 是否是泛化问题 | 加法/减法选择 | 修复与证据 |
+|---|---|---|---|---|
+| v10 | 被测源码未声明 exact A3 SoC，曾探索在 staged tree 追加 target 的 execution adaptation；该方向会把“原源码能力缺口”和“实际适配 DUT”混在同一正式身份中，偏离原验收边界。 | 是，缺口来自 source/build 能力表达边界，不是 Remainder 名称。 | **减法**：停止 adaptation v4 生产集成，不合并、不伪装原 PR 能力；保留隔离实验只作诊断。 | adaptation worktree 作废；正式 workflow 仍以原始 source gap fail-closed。 |
+| v11 | `fdfd5bc` 的逐 case 进程隔离删除了旧 expected-exception 能力，整数除零在 CPU golden 阶段以 `ZeroDivisionError` 中断，无法形成用例结果。 | 是，任意带合法预期异常语义的算子都会受影响。 | **最小受控加法**：只接受受 golden SHA 绑定的显式 marker；未标记异常继续传播，真实观察只从 `call_status` 派生。 | `c96fc6f` 恢复安全契约，`7ebf71e` 同步 planner 测试依赖；fresh A3 full 为 2822 tests、0 fail、0 error，compileall 通过。 |
+| v12 | 冻结回归第一次只打包 `plugin/`，缺仓根 `AGENTS.md`；同时 dry-run planner 的依赖期望漏记 `expected_exception_contract.py`。前者是测试分发闭包问题，后者是 fixture 未同步，不是 DUT 问题。 | 是，影响所有 plugin-only 冻结回归。 | **减法**：不改生产逻辑；冻结根 `AGENTS.md + plugin`，fixture 只补唯一依赖项。 | `7ebf71e`；定向 10/10，随后 full 2822/2822、compileall 通过。 |
+| v13 | multi-input expected-exception 分支调用 `_case_context_input_dtypes` 时把 `in_params` 与物化 `inputs` 反序，ndarray 被当参数描述调用 `.get()`，Task1 中断。 | 是，所有 multi-input + invocation context + marker 组合都会触发。 | **减法**：与普通分支统一参数顺序，不引入新 schema。 | `6ebff92`；多输入 marker 定向 RED 后 GREEN，原 129-profile caseset 实产 129 条。 |
+| v14 | expected-exception case 按最小形态不重复保存 `parameter_contract`，adapter 却把该冗余副本当准入必填，首 case 在 prepare 阶段被拒；其后还发现 plan 顶层 contract SHA 未核、共享 shard 门漏复算、staged host scalar value 可协同漂移。 | 是，根因是消费者依赖重复字段及单卡/多卡门不一致。 | **减法**：不向每 case 复制 profile；中央按现有 case/slot/manifest 生成 ordered binding digest，driver/evidence/共享门重算，staged profile 提供语义权威；显式旧 contract 仅作额外严格校验。 | 本记录所在提交；A3 RED 3/3（3 fail、0 error），GREEN 3/3，相关 329/329。日志 SHA-256：RED `6da35c03e19dd1a7e1928cd6e525cb02f1c733d7b26947cc2bfad16b9bcf4443`，GREEN `acfaf940ee9fe414867500fc53811687ef084a569529dbf144c895579ed60f97`，相关集 `2d6a95aa0106463c70ad456c255a318058a6f0f281cc63a3d90a0d4f77c7a7c0`。 |
+
+### 0.1 尚未修复：prepare failure 没有 committed attempt
+
+v14 的 adapter prepare 异常发生在正式 Task2 执行前，进程退出时没有生成 `attempt_record.json` 或统一中文
+失败明细。这是 workflow 的通用发布状态机缺口，不能因本轮 adapter 根因已修就视为关闭。后续应让 CP-B
+后的 prepare/codegen/adapter/driver 前置异常统一走现有 pre-execution finalizer，绑定 source/spec/build 与
+typed stage/error、清理旧正式产物，且绝不能包装为 PASS 或声称用例已执行。该项已进入唯一 TODO；本提交
+不扩展修复范围。
+
+### 0.2 外部 runner/transport 边界
+
+本轮出现过 SSH/SCP 传输、容器镜像缺 `torch`、只复制 `acc-common` 导致缺 sibling `samples`、shell 引号
+`NameError` 等外部执行器问题。它们影响实验周转效率，但不属于 workflow 产品契约；本轮没有把主机名、
+容器名、代理或传输重试写进通用 workflow。正式产品修复只覆盖上表中能由 Layer 0/1 确定性重放的接缝。
+
 ## 1 · 结论先行
 
 本轮以三份任务书和三个本地源码 checkout 为输入，在 Atlas A3 的三张独立卡上完成了三次正式

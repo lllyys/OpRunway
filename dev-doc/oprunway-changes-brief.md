@@ -2,6 +2,17 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-09 · 多输入 expected-exception 去除逐 case 重复契约
+
+- Remainder v14 的 129-case caseset 中，expected-exception case 没有重复保存完整
+  `parameter_contract`，旧 adapter 因此在 prepare 阶段拒绝首例。修复没有给每个 case 增字段：统一从
+  `case.inputs`、`expected`、有序 `aclnn_call.slots` 与 manifest `multi_input_receipt` 生成临时 ordered
+  binding 摘要，plan、driver、evidence、单卡/多卡共享三级门共同重算；staged spec profile 仍是 shape、
+  dtype 与 host scalar value 的语义权威，已有显式 `parameter_contract` 继续作额外严格校验。
+- A3 行为测试先取得 3 项 RED（plan 顶层 contract SHA、host scalar value、共享 shard 门均未拒绝），
+  再取得 3/3 GREEN；expected-exception、multi-input、adapter、driver、golden authority 与正式门相关
+  329 项全绿。实现没有算子特判，也没有复制 profile 全文；本批未运行 DUT。
+
 ## 2026-08-09 · 修复多输入 expected-exception 生成接缝
 
 - RemainderTensorTensor 的 129-case 真机 CP-B 首次命中整数零除 marker 时，坐实

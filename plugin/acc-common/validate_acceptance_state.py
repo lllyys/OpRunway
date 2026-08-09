@@ -1374,16 +1374,19 @@ def _gate_golden_invocation_spec_authority(caseset, staged_spec, errs):
                     "logical_dtype": dtype,
                 })
         else:
-            parameter_contract = case.get("parameter_contract")
-            profile_id = (parameter_contract.get("profile_id")
-                          if isinstance(parameter_contract, dict) else None)
+            try:
+                profile_id = cpp_extension_adapter._multi_input_profile_id(case)
+            except cpp_extension_adapter.CppExtensionAdapterError as ex:
+                errs.append(f"{cid}: golden invocation profile 身份非法：{ex}")
+                continue
             expected_profile = profile_by_id.get(profile_id)
             if expected_profile is None:
                 errs.append(
-                    f"{cid}: golden invocation parameter_contract.profile_id={profile_id!r} "
+                    f"{cid}: golden invocation profile_id={profile_id!r} "
                     "不属于 staged spec multi-input profiles")
                 continue
-            if parameter_contract != expected_profile:
+            parameter_contract = case.get("parameter_contract")
+            if parameter_contract is not None and parameter_contract != expected_profile:
                 errs.append(
                     f"{cid}: golden invocation parameter_contract 与 staged spec profile "
                     f"{profile_id!r} 漂移")
@@ -1391,6 +1394,73 @@ def _gate_golden_invocation_spec_authority(caseset, staged_spec, errs):
                 item for item in expected_profile.get("inputs") or []
                 if isinstance(item, dict) and item.get("kind") == "tensor"
             ]
+            receipt = {
+                "tensor_parameters": [
+                    {"name": item["name"], "io": "in", "kind": item["kind"],
+                     "binding": item["binding"], "format": item["format"]}
+                    for item in tensors
+                ] + [{
+                    "name": expected_profile["output"]["name"], "io": "out",
+                    "kind": expected_profile["output"]["kind"],
+                    "binding": expected_profile["output"]["binding"],
+                    "format": expected_profile["output"]["format"],
+                }],
+                "host_scalar_parameters": [
+                    {"name": item["name"], "dtypes": [item["dtype"]]}
+                    for item in expected_profile.get("inputs") or []
+                    if isinstance(item, dict) and item.get("kind") == "scalar"
+                ],
+            }
+            call = case.get("aclnn_call")
+            try:
+                slots = call.get("slots") if isinstance(call, dict) else None
+                actual_binding = cpp_extension_adapter._derived_case_parameter_contract(
+                    case, slots, receipt)
+                cpp_extension_adapter._validate_case_parameter_contract(
+                    case, slots, receipt)
+                authority_case = copy.deepcopy(case)
+                authority_case.pop("parameter_contract", None)
+                actual_inputs = authority_case.get("inputs") or []
+                authority_case["inputs"] = [
+                    {**actual_inputs[index], **{key: item[key] for key in (
+                        "name", "kind", "binding", "shape", "dtype", "format")}}
+                    for index, item in enumerate(tensors)
+                ]
+                scalar_by_name = {
+                    item["name"]: item for item in expected_profile.get("inputs") or []
+                    if isinstance(item, dict) and item.get("kind") == "scalar"
+                }
+                authority_case.setdefault("attrs", {}).update(
+                    {name: item["value"] for name, item in scalar_by_name.items()})
+                expected_output = expected_profile["output"]
+                authority_case.setdefault("expected", {}).update({
+                    "out_shape": expected_output["shape"],
+                    "compare_dtype": expected_output["dtype"],
+                })
+                authority_slots = copy.deepcopy(slots)
+                for slot in authority_slots:
+                    if slot.get("role") == "in":
+                        item = tensors[slot["input_idx"]]
+                        slot.update({key: item[key] for key in (
+                            "name", "kind", "binding", "shape", "dtype", "format")})
+                    elif slot.get("role") == "attr" \
+                            and slot.get("name") in scalar_by_name:
+                        item = scalar_by_name[slot["name"]]
+                        slot.update({key: item[key] for key in (
+                            "name", "kind", "binding", "dtype", "value")})
+                    elif slot.get("role") == "out":
+                        slot.update({key: expected_output[key] for key in (
+                            "name", "kind", "binding", "shape", "dtype", "format")})
+                authority_binding = (
+                    cpp_extension_adapter._derived_case_parameter_contract(
+                        authority_case, authority_slots, receipt))
+                if actual_binding != authority_binding:
+                    raise cpp_extension_adapter.CppExtensionAdapterError(
+                        "case ordered binding 与 staged profile 权威漂移")
+            except (cpp_extension_adapter.CppExtensionAdapterError, IndexError,
+                    KeyError, TypeError, ValueError) as ex:
+                errs.append(f"{cid}: staged profile 与 multi_input ordered binding 漂移：{ex}")
+                continue
             expected = [
                 {"index": input_index, "name": item.get("name"),
                  "logical_dtype": item.get("dtype")}
@@ -1867,6 +1937,11 @@ def _gate_precision_work_dir(report_root, work, caseset, envelope, staged_spec,
     _gate_cpp_extension_layout(caseset, receipt, rows, errs, manifest=manifest, plan=plan)
     _gate_cpp_extension_tensor_shape_attrs(caseset, receipt, rows, errs, plan=plan)
     _gate_cpp_extension_invocation_accounting(plan, receipt, rows, errs)
+    try:
+        cpp_extension_adapter.validate_multi_input_evidence_bindings(
+            caseset, plan, rows, receipt)
+    except cpp_extension_adapter.CppExtensionAdapterError as ex:
+        errs.append(f"precision work multi_input plan/evidence binding 非法：{ex}")
     _gate_cpp_extension_stage2_evidence(manifest, errs)
     authority_caseset = caseset if authority_caseset is None else authority_caseset
     _gate_dtype_requirement_sets_authority(authority_caseset, staged_spec, errs)

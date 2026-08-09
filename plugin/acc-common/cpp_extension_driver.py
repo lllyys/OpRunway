@@ -678,7 +678,7 @@ def _dump_output(torch, np, tensor, dtype, path):
     return disk_dtype, list(arr.shape)
 
 
-def materialize_invocation(torch, np, work, case, row):
+def materialize_invocation(torch, np, work, case, row, *, multi_input_receipt=None):
     """按已冻结 invocation-plan 物化一次 Extension 调用；供精度与性能共用。"""
     cid = case.get("id")
     parameter_contract = case.get("parameter_contract")
@@ -688,6 +688,19 @@ def materialize_invocation(torch, np, work, case, row):
             f"{cid}: case.parameter_contract 与 plan.parameter_contract_sha256 在场性不一致")
     if parameter_digest is not None and _canonical_sha(parameter_contract) != parameter_digest:
         raise DriverError(f"{cid}: parameter_contract 摘要与 invocation plan 漂移")
+    binding_digest = row.get("multi_input_case_binding_sha256")
+    profile_id = row.get("multi_input_profile_id")
+    if (binding_digest is None) != (profile_id is None):
+        raise DriverError(f"{cid}: multi_input profile/binding 在场性不一致")
+    if binding_digest is not None:
+        try:
+            derived = cpp_extension_adapter._derived_case_parameter_contract(
+                case, row["slots"], multi_input_receipt)
+        except cpp_extension_adapter.CppExtensionAdapterError as ex:
+            raise DriverError(f"{cid}: multi_input case binding 非法: {ex}") from ex
+        if derived["profile_id"] != profile_id \
+                or _canonical_sha(derived) != binding_digest:
+            raise DriverError(f"{cid}: multi_input case binding 与 invocation plan 漂移")
     input_slots = {}
     for slot in row["slots"]:
         if slot.get("role") != "in":
@@ -703,7 +716,8 @@ def materialize_invocation(torch, np, work, case, row):
     inputs = [
         _input_tensor(
             torch, np, work, item,
-            slot=(input_slots[index] if parameter_digest is not None
+            slot=(input_slots[index] if binding_digest is not None
+                  or parameter_digest is not None
                   or item.get("storage_representation") is not None else None),
             case_id=cid)
         for index, item in enumerate(case["inputs"])
@@ -1061,7 +1075,8 @@ def _invoke_all(bundle, work, manifest, plan, caseset, artifact, *, layout_contr
         phase = "materialize"
         try:
             args, outputs, output_contracts = materialize_invocation(
-                torch, np, work, case, row)
+                torch, np, work, case, row,
+                multi_input_receipt=manifest.get("multi_input_receipt"))
             layout_record = _capture_layout_before(
                 case, row, args, outputs, output_contracts)
             phase = "execute"

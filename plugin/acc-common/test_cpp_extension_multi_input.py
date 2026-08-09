@@ -167,8 +167,9 @@ class MultiInputAdapterTest(unittest.TestCase):
         work, caseset = _caseset(spec, _binary_golden)
         try:
             evidence = [{"case_id": case["id"]} for case in caseset["cases"]]
-            receipt = {"multi_input_receipt": {
-                "contract_sha256": caseset["multi_input_ledger"]["contract_sha256"]}}
+            with tempfile.TemporaryDirectory() as out:
+                manifest = C.generate(spec, out)
+            receipt = {"multi_input_receipt": manifest["multi_input_receipt"]}
             A._bind_multi_input_evidence(caseset, evidence, receipt)
         finally:
             work.cleanup()

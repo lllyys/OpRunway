@@ -631,18 +631,27 @@ class GoldenInvocationEndToEndBindingTest(unittest.TestCase):
             self.assertTrue(self._formal_errors(
                 root, caseset, envelope, bad_evidence))
 
-    def test_consistently_rehashed_profile_order_tamper_fails_staged_spec_gate(self):
+    def test_shared_precision_work_gate_rechecks_multi_input_evidence_binding(self):
         with tempfile.TemporaryDirectory() as root:
-            _spec, caseset, _manifest, _plan, _receipt, evidence, envelope = (
-                self._fixture(root, consistent_profile_tamper=True))
-            # 中间层完全自洽：若正式门没有回到 staged spec 重放 profile，这里会假绿。
-            self.assertEqual(
-                envelope["cpp_extension_receipt"],
-                A.validate_receipt(os.path.join(root, "work"), caseset),
-            )
-            errors = self._formal_errors(root, caseset, envelope, evidence)
-            self.assertTrue(any("golden" in error and "staged spec" in error
-                                for error in errors), errors)
+            spec, caseset, _manifest, _plan, _receipt, evidence, envelope = (
+                self._fixture(root))
+            work = os.path.join(root, "work")
+            bad_evidence = copy.deepcopy(evidence)
+            del bad_evidence[0]["multi_input_case_binding_sha256"]
+            bad_envelope = {**envelope, "evidence": bad_evidence}
+            _write_json(os.path.join(work, "caseset.json"), caseset)
+            _write_json(os.path.join(work, "evidence.json"), bad_envelope)
+            errors = []
+            VAS._gate_precision_work_dir(
+                root, work, caseset, bad_envelope, spec, errors)
+            self.assertTrue(any("multi_input" in item and "binding" in item
+                                for item in errors), errors)
+
+    def test_consistently_rehashed_profile_order_tamper_fails_static_manifest_gate(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(
+                    A.CppExtensionAdapterError, "manifest.*顺序|顺序.*manifest"):
+                self._fixture(root, consistent_profile_tamper=True)
 
 if __name__ == "__main__":
     unittest.main()

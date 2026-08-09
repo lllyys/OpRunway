@@ -8,11 +8,17 @@ from unittest import mock
 import expected_exception_contract as E
 import cpp_extension_adapter
 import cpp_extension_codegen
+import cpp_extension_driver
 import gen_cases
 import repo_adapter
 import validate_acceptance_state
 import validator
-from test_gen_cases_multi_input import _binary_spec
+from test_gen_cases_multi_input import (
+    _binary_golden,
+    _binary_spec,
+    _golden,
+    _host_scalar_spec,
+)
 
 
 def _marker(*categories):
@@ -250,13 +256,153 @@ class GeneratedMultiInputExpectedExceptionTest(unittest.TestCase):
             },
         )
         with tempfile.TemporaryDirectory() as work, mock.patch.object(
-                gen_cases, "load_golden", return_value=golden):
+                gen_cases, "load_golden", return_value=golden), mock.patch.dict(
+                    os.environ, {"OPRUNWAY_OPS_DIR": os.path.join(work, "ops")}):
             caseset = gen_cases.gen_cases(spec, work)
 
         self.assertEqual(len(caseset["cases"]), 1)
         case = caseset["cases"][0]
         self.assertEqual([item["name"] for item in case["inputs"]], ["left", "right"])
         self.assertIsNotNone(case["expected"]["expected_exception"])
+
+    def _marker_fixture(self, work):
+        spec = _binary_spec()
+        spec["multi_input_contract"]["profiles"] = [
+            spec["multi_input_contract"]["profiles"][0]]
+        spec["multi_input_contract"].pop("required_coverage")
+        spec["precision"]["case_target"] = 1
+        golden = gen_cases.Golden(
+            lambda inputs, attrs, *, case_context: _marker(),
+            "torch fixture", "derived binding fixture",
+            lambda in_shapes, attrs: (2, 3, 4),
+            {"source": "single_api", "method_kind": "torch_cpu",
+             "authorization": {"kind": "impl_reference"},
+             "invocation": {"schema": "oprunway.golden_invocation",
+                            "schema_version": 1,
+                            "mode": "keyword_case_context_v1"}},
+        )
+        with mock.patch.object(gen_cases, "load_golden", return_value=golden), \
+                mock.patch.dict(os.environ, {
+                    "OPRUNWAY_OPS_DIR": os.path.join(work, "ops")}):
+            caseset = gen_cases.gen_cases(spec, work)
+        manifest = cpp_extension_codegen.generate(
+            spec, os.path.join(work, "cpp_extension"))
+        return spec, caseset, manifest
+
+    def _explicit_fixture(self, work):
+        spec = _binary_spec()
+        with mock.patch.object(
+                gen_cases, "load_golden", return_value=_golden(_binary_golden)):
+            caseset = gen_cases.gen_cases(spec, work)
+        manifest = cpp_extension_codegen.generate(
+            spec, os.path.join(work, "cpp_extension"))
+        return spec, caseset, manifest
+
+    def _host_scalar_marker_fixture(self, work):
+        spec = _host_scalar_spec()
+        golden = gen_cases.Golden(
+            lambda inputs, attrs, *, case_context: inputs[0] * attrs["prob"],
+            "torch fixture", "host scalar authority fixture",
+            lambda in_shapes, attrs: (2, 3),
+            {"source": "single_api", "method_kind": "torch_cpu",
+             "authorization": {"kind": "impl_reference"},
+             "invocation": {"schema": "oprunway.golden_invocation",
+                            "schema_version": 1,
+                            "mode": "keyword_case_context_v1"}},
+        )
+        with mock.patch.object(gen_cases, "load_golden", return_value=golden), \
+                mock.patch.dict(os.environ, {
+                    "OPRUNWAY_OPS_DIR": os.path.join(work, "ops")}):
+            caseset = gen_cases.gen_cases(spec, work)
+        manifest = cpp_extension_codegen.generate(
+            spec, os.path.join(work, "cpp_extension"))
+        return spec, caseset, manifest
+
+    def test_slot_order_is_bound_independently_of_parameter_contract_digest(self):
+        with tempfile.TemporaryDirectory() as work:
+            _spec, caseset, manifest = self._explicit_fixture(work)
+            original = cpp_extension_adapter.build_invocation_plan(caseset, manifest)
+            changed = copy.deepcopy(caseset)
+            changed["cases"][0]["aclnn_call"]["slots"].reverse()
+            with self.assertRaises(cpp_extension_adapter.CppExtensionAdapterError):
+                cpp_extension_adapter.build_invocation_plan(changed, manifest)
+        self.assertEqual(
+            len(original["cases"][0]["multi_input_case_binding_sha256"]), 64)
+
+    def test_missing_contract_still_checks_output_static_identity(self):
+        with tempfile.TemporaryDirectory() as work:
+            _spec, caseset, manifest = self._marker_fixture(work)
+            slot = next(row for row in caseset["cases"][0]["aclnn_call"]["slots"]
+                        if row["role"] == "out")
+            slot.update({"kind": "tensor", "binding": "device_tensor",
+                         "format": "torch_npu_rank_default"})
+            with self.assertRaisesRegex(
+                    cpp_extension_adapter.CppExtensionAdapterError,
+                    "output.*manifest|manifest.*output"):
+                cpp_extension_adapter.build_invocation_plan(caseset, manifest)
+
+    def test_evidence_binding_tamper_is_rejected_against_frozen_plan(self):
+        with tempfile.TemporaryDirectory() as work:
+            _spec, caseset, manifest = self._marker_fixture(work)
+            plan = cpp_extension_adapter.build_invocation_plan(caseset, manifest)
+            evidence = [{"case_id": caseset["cases"][0]["id"]}]
+            receipt = {"multi_input_receipt": manifest["multi_input_receipt"]}
+            cpp_extension_adapter._bind_multi_input_evidence(
+                caseset, evidence, receipt)
+            del evidence[0]["multi_input_case_binding_sha256"]
+            with self.assertRaises(cpp_extension_adapter.CppExtensionAdapterError):
+                cpp_extension_adapter.validate_multi_input_evidence_bindings(
+                    caseset, plan, evidence, receipt)
+
+    def test_plan_top_level_multi_input_contract_digest_is_checked(self):
+        with tempfile.TemporaryDirectory() as work:
+            _spec, caseset, manifest = self._marker_fixture(work)
+            plan = cpp_extension_adapter.build_invocation_plan(caseset, manifest)
+            evidence = [{"case_id": caseset["cases"][0]["id"]}]
+            receipt = {"multi_input_receipt": manifest["multi_input_receipt"]}
+            cpp_extension_adapter._bind_multi_input_evidence(
+                caseset, evidence, receipt)
+            plan["multi_input_contract_sha256"] = "0" * 64
+            with self.assertRaisesRegex(
+                    cpp_extension_adapter.CppExtensionAdapterError,
+                    "plan.*contract|contract.*plan"):
+                cpp_extension_adapter.validate_multi_input_evidence_bindings(
+                    caseset, plan, evidence, receipt)
+
+    def test_formal_gate_accepts_marker_case_without_repeated_contract(self):
+        with tempfile.TemporaryDirectory() as work:
+            spec, caseset, _manifest = self._marker_fixture(work)
+        errors = []
+        validate_acceptance_state._gate_golden_invocation_spec_authority(
+            caseset, spec, errors)
+        self.assertEqual(errors, [])
+
+    def test_formal_gate_rejects_absent_contract_host_scalar_value_drift(self):
+        with tempfile.TemporaryDirectory() as work:
+            spec, caseset, _manifest = self._host_scalar_marker_fixture(work)
+        case = caseset["cases"][0]
+        case.pop("parameter_contract")
+        self.assertNotIn("parameter_contract", case)
+        case["attrs"]["prob"] = 0.75
+        scalar = next(row for row in case["aclnn_call"]["slots"]
+                      if row["role"] == "attr" and row["name"] == "prob")
+        scalar["value"] = 0.75
+        errors = []
+        validate_acceptance_state._gate_golden_invocation_spec_authority(
+            caseset, spec, errors)
+        self.assertTrue(any("scalar" in item or "profile" in item
+                            for item in errors), errors)
+
+    def test_explicit_contract_rejects_extra_profile_input(self):
+        with tempfile.TemporaryDirectory() as work:
+            _spec, caseset, manifest = self._explicit_fixture(work)
+            bad = copy.deepcopy(caseset)
+            bad["cases"][0]["parameter_contract"]["inputs"].append({
+                "name": "forged", "kind": "scalar", "binding": "host_scalar",
+                "dtype": "float32", "value": 1.0,
+            })
+            with self.assertRaises(cpp_extension_adapter.CppExtensionAdapterError):
+                cpp_extension_adapter.build_invocation_plan(bad, manifest)
 
 
 if __name__ == "__main__":
