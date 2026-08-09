@@ -2,6 +2,16 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-09 · Multi-input plan 只保留规范化执行 slots
+
+- Remainder v15 的 37 个 marker case 已生成动态 input shape/dtype，但 plan 仍复制原始最小 slots，driver
+  因 kind/binding/format/shape/dtype 缺失在 input materialization 阶段失败，未到 DUT。现由中央 derived
+  binding 直接产出有序、扁平的 driver slots，plan 的唯一 `slots` 与 binding digest 使用同一份字节；
+  不再保留 raw/derived 双执行身份，也不向 case 新增字段。driver 对 caseset 明示字段继续严格对账，
+  caseset 缺失的静态身份只接受已被 manifest/plan 绑定的规范值；driver 与 gate 从 raw case slots 重算后
+  逐字核 plan slots，不能把 ordinal/output 篡改覆盖“修回”。A3 RED 精确停在缺 `ordinal`，最终 GREEN
+  定向 6/6，相关 352 项全绿（2 skip）；无算子特判，本批未运行 DUT。
+
 ## 2026-08-09 · Expected-exception 与 invocation accounting 统一语义映射
 
 - Remainder v15 已真实执行 129/129 后，receipt 正确把 expected-exception 调用记为传输层 `failed`，

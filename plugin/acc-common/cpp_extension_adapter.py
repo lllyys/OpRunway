@@ -322,6 +322,13 @@ def _multi_item_projection(item):
     return {key: item.get(key) for key in keys}
 
 
+def _execution_slot_parameter(slot):
+    if slot.get("kind") == "scalar":
+        return {key: slot.get(key) for key in (
+            "name", "kind", "binding", "dtype", "value")}
+    return _multi_item_projection(slot)
+
+
 def _layout_error(message, ex=None):
     error = CppExtensionAdapterError(message)
     if ex is not None:
@@ -1550,24 +1557,33 @@ def _derived_case_parameter_contract(case, slots, manifest_receipt):
     ordered_slots = []
     for ordinal, slot in enumerate(slots):
         role = slot.get("role")
-        row = {"ordinal": ordinal, "role": role, "name": slot.get("name")}
+        row = {**slot, "ordinal": ordinal}
         if role == "in":
-            row.update({"input_idx": slot.get("input_idx"),
-                        "value": tensor_inputs[slot["input_idx"]]})
+            row.update(tensor_inputs[slot["input_idx"]])
         elif role == "out":
-            row.update({"output_idx": slot.get("output_idx"), "value": output})
+            row.update(output)
         elif role == "attr" and slot.get("name") in scalar_inputs:
-            row.update({"ctype": slot.get("ctype"),
-                        "value": scalar_inputs[slot["name"]]})
-        elif role == "attr":
-            row.update({"ctype": slot.get("ctype"), "value": slot.get("value")})
+            row.update(scalar_inputs[slot["name"]])
         elif role != "out_null":
-            raise CppExtensionAdapterError(f"{cid}: multi_input slot role={role!r} 非法")
+            if role != "attr":
+                raise CppExtensionAdapterError(
+                    f"{cid}: multi_input slot role={role!r} 非法")
         ordered_slots.append(row)
     return {
         "profile_id": _multi_input_profile_id(case),
         "ordered_slots": ordered_slots,
     }
+
+
+def _derived_case_execution_binding(case, manifest_receipt):
+    """只从 caseset 的 raw call slots 与 manifest 生成唯一执行 binding。"""
+    call = case.get("aclnn_call") if isinstance(case, dict) else None
+    slots = call.get("slots") if isinstance(call, dict) else None
+    if not isinstance(slots, list):
+        raise CppExtensionAdapterError(
+            f"{case.get('id') if isinstance(case, dict) else None}: "
+            "multi_input case 缺 raw aclnn_call.slots")
+    return _derived_case_parameter_contract(case, slots, manifest_receipt)
 
 
 def _validate_case_parameter_contract(case, slots, manifest_receipt):
@@ -1581,16 +1597,16 @@ def _validate_case_parameter_contract(case, slots, manifest_receipt):
     derived = _derived_case_parameter_contract(case, slots, manifest_receipt)
     if not contract_present:
         scalar_dtypes = {
-            row["name"]: row["value"]["dtype"]
+            row["name"]: row["dtype"]
             for row in derived["ordered_slots"]
-            if row["role"] == "attr" and isinstance(row.get("value"), dict)
-            and row["value"].get("kind") == "scalar"
+            if row["role"] == "attr" and row.get("kind") == "scalar"
         }
         return {
             "parameter_contract_sha256": None,
             "case_binding_sha256": _canonical_sha(derived),
             "profile_id": derived["profile_id"],
             "scalar_dtypes": scalar_dtypes,
+            "execution_slots": derived["ordered_slots"],
         }
     elif not isinstance(contract, dict):
         raise CppExtensionAdapterError(f"{cid}: parameter_contract 须为 object")
@@ -1678,13 +1694,13 @@ def _validate_case_parameter_contract(case, slots, manifest_receipt):
         raise CppExtensionAdapterError(
             f"{cid}: parameter_contract.profile_id 与 expected.case_origin 漂移")
     derived_inputs = [
-        row["value"] for row in derived["ordered_slots"]
+        _execution_slot_parameter(row) for row in derived["ordered_slots"]
         if row["role"] == "in"
-        or (row["role"] == "attr" and isinstance(row.get("value"), dict)
-            and row["value"].get("kind") == "scalar")
+        or (row["role"] == "attr" and row.get("kind") == "scalar")
     ]
     derived_outputs = [
-        row["value"] for row in derived["ordered_slots"] if row["role"] == "out"
+        _execution_slot_parameter(row) for row in derived["ordered_slots"]
+        if row["role"] == "out"
     ]
     if contract_present and (
             contract.get("inputs") != derived_inputs
@@ -1697,6 +1713,7 @@ def _validate_case_parameter_contract(case, slots, manifest_receipt):
         "case_binding_sha256": _canonical_sha(derived),
         "profile_id": derived["profile_id"],
         "scalar_dtypes": scalar_dtypes,
+        "execution_slots": derived["ordered_slots"],
     }
 
 
@@ -1805,7 +1822,8 @@ def build_invocation_plan(caseset, manifest):
             "case_id": cid,
             "symbol": symbol,
             "entrypoint": variant["entrypoint"],
-            "slots": slots,
+            "slots": (multi_binding["execution_slots"]
+                      if multi_binding is not None else slots),
         }
         if multi_binding is not None:
             plan_row["multi_input_profile_id"] = multi_binding["profile_id"]
@@ -2836,6 +2854,9 @@ def validate_multi_input_evidence_bindings(caseset, plan, evidence, receipt):
             "multi_input_case_binding_sha256": binding["case_binding_sha256"],
         }
         plan_row = plans.get(cid)
+        if plan_row is not None and plan_row.get("slots") != binding["execution_slots"]:
+            raise CppExtensionAdapterError(
+                f"{cid}: invocation plan normalized execution slots 漂移")
         if plan_row is not None and any(
                 plan_row.get(key) != value for key, value in expected.items()
                 if key != "multi_input_contract_sha256"):

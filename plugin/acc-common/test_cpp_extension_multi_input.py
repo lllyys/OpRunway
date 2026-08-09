@@ -213,6 +213,23 @@ class MultiInputDriverTest(unittest.TestCase):
         with self.assertRaisesRegex(D.DriverError, "slot.*input"):
             D._validate_input_slot(item, slot, "rank0")
 
+    def test_invalid_layout_storage_is_a_typed_driver_error(self):
+        item = {
+            "name": "left", "shape": [2], "dtype": "float16",
+            "kind": "tensor", "binding": "device_tensor", "format": "nd",
+            "storage_representation": "forged_storage_v0",
+            "base_storage_path": "unused.bin",
+        }
+        slot = {
+            "role": "in", "name": "left", "input_idx": 0,
+            "shape": [2], "dtype": "float16", "kind": "tensor",
+            "binding": "device_tensor", "format": "nd",
+            "storage_representation": "forged_storage_v0",
+        }
+        with self.assertRaisesRegex(
+                D.LayoutContractError, "left.*storage representation"):
+            D._validate_input_slot(item, slot, "layout-invalid")
+
 
 if __name__ == "__main__":
     unittest.main()

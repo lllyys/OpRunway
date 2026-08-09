@@ -359,25 +359,29 @@ def _bind_vendor(plan):
 def _validate_input_slot(item, slot, case_id):
     if not isinstance(item, dict) or not isinstance(slot, dict):
         raise DriverError(f"{case_id}: input item/slot 须为 object")
-    expected = {
-        key: item.get(key)
-        for key in ("name", "kind", "binding", "shape", "dtype", "format")
-    }
-    actual = {key: slot.get(key) for key in expected}
-    if actual != expected:
+    dynamic_keys = ("name", "shape", "dtype")
+    expected_dynamic = {key: item.get(key) for key in dynamic_keys}
+    actual_dynamic = {key: slot.get(key) for key in dynamic_keys}
+    if actual_dynamic != expected_dynamic:
         raise DriverError(
-            f"{case_id}: plan slot 与 caseset input 契约不一致：slot={actual}, input={expected}")
-    if expected["kind"] != "tensor" or expected["binding"] != "device_tensor":
+            f"{case_id}: plan slot 与 caseset input 动态契约不一致："
+            f"slot={actual_dynamic}, input={expected_dynamic}")
+    for key in ("kind", "binding", "format"):
+        if item.get(key) is not None and slot.get(key) != item.get(key):
+            raise DriverError(
+                f"{case_id}: plan slot.{key} 与 caseset input 显式契约不一致")
+    if slot.get("kind") != "tensor" or slot.get("binding") != "device_tensor":
         raise DriverError(
-            f"{case_id}: input {expected['name']!r} 非 tensor/device_tensor")
-    shape = expected["shape"]
+            f"{case_id}: input {expected_dynamic['name']!r} 非 tensor/device_tensor")
+    shape = expected_dynamic["shape"]
     if not isinstance(shape, list) or any(
             isinstance(dim, bool) or not isinstance(dim, int) or dim < 0 for dim in shape):
         raise DriverError(
-            f"{case_id}: input {expected['name']!r} shape={shape!r} 非非负整数数组")
-    if expected["format"] not in ("nd", "torch_npu_rank_default"):
+            f"{case_id}: input {expected_dynamic['name']!r} shape={shape!r} 非非负整数数组")
+    if slot.get("format") not in ("nd", "torch_npu_rank_default"):
         raise DriverError(
-            f"{case_id}: input {expected['name']!r} format={expected['format']!r} 非受控值")
+            f"{case_id}: input {expected_dynamic['name']!r} "
+            f"format={slot.get('format')!r} 非受控值")
     layout_fields = (
         "storage_representation", "layout_requirement_id", "layout_receipt_sha256")
     layout_enabled = any(key in item for key in (
@@ -386,7 +390,8 @@ def _validate_input_slot(item, slot, case_id):
     if layout_enabled:
         if item.get("storage_representation") != cpp_extension_adapter.BASE_STORAGE_V1:
             raise LayoutContractError(
-                f"{case_id}: input {expected['name']!r} storage representation 非 base_storage_v1")
+                f"{case_id}: input {expected_dynamic['name']!r} "
+                "storage representation 非 base_storage_v1")
         if "path" in item:
             raise LayoutContractError(
                 f"{case_id}: base_storage_v1 input 不得同时携带 legacy path")
@@ -395,7 +400,7 @@ def _validate_input_slot(item, slot, case_id):
         if actual_layout != expected_layout:
             raise LayoutContractError(
                 f"{case_id}: plan slot 与 caseset input layout/requirement/digest 不一致")
-        if expected["format"] != tensor_shape_attrs.TENSOR_FORMAT_ND:
+        if slot.get("format") != tensor_shape_attrs.TENSOR_FORMAT_ND:
             raise LayoutContractError(
                 f"{case_id}: N7 v1 layout input 只支持 format=nd")
     elif any(key in slot for key in layout_fields):
@@ -694,10 +699,13 @@ def materialize_invocation(torch, np, work, case, row, *, multi_input_receipt=No
         raise DriverError(f"{cid}: multi_input profile/binding 在场性不一致")
     if binding_digest is not None:
         try:
-            derived = cpp_extension_adapter._derived_case_parameter_contract(
-                case, row["slots"], multi_input_receipt)
+            derived = cpp_extension_adapter._derived_case_execution_binding(
+                case, multi_input_receipt)
         except cpp_extension_adapter.CppExtensionAdapterError as ex:
             raise DriverError(f"{cid}: multi_input case binding 非法: {ex}") from ex
+        if row.get("slots") != derived["ordered_slots"]:
+            raise DriverError(
+                f"{cid}: invocation plan normalized execution slots 漂移")
         if derived["profile_id"] != profile_id \
                 or _canonical_sha(derived) != binding_digest:
             raise DriverError(f"{cid}: multi_input case binding 与 invocation plan 漂移")

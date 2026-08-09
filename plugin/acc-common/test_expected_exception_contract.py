@@ -329,6 +329,42 @@ class GeneratedMultiInputExpectedExceptionTest(unittest.TestCase):
         self.assertEqual(
             len(original["cases"][0]["multi_input_case_binding_sha256"]), 64)
 
+    def test_marker_plan_uses_one_normalized_execution_slot_identity(self):
+        with tempfile.TemporaryDirectory() as work:
+            _spec, caseset, manifest = self._marker_fixture(work)
+            plan = cpp_extension_adapter.build_invocation_plan(caseset, manifest)
+        case = caseset["cases"][0]
+        plan_slots = plan["cases"][0]["slots"]
+        raw_slots = case["aclnn_call"]["slots"]
+        self.assertEqual(
+            [(row["ordinal"], row["role"], row["name"])
+             for row in plan_slots],
+            [(index, row["role"], row["name"])
+             for index, row in enumerate(raw_slots)],
+        )
+        input_slots = {
+            row["input_idx"]: row for row in plan_slots if row["role"] == "in"
+        }
+        for index, item in enumerate(case["inputs"]):
+            cpp_extension_driver._validate_input_slot(
+                item, input_slots[index], case["id"])
+        output_slot = next(row for row in plan_slots if row["role"] == "out")
+        declared_output = next(
+            row for row in manifest["multi_input_receipt"]["tensor_parameters"]
+            if row["io"] == "out")
+        self.assertEqual(
+            {key: output_slot[key] for key in (
+                "name", "kind", "binding", "shape", "dtype", "format")},
+            {
+                "name": declared_output["name"],
+                "kind": declared_output["kind"],
+                "binding": declared_output["binding"],
+                "shape": case["expected"]["out_shape"],
+                "dtype": case["expected"]["compare_dtype"],
+                "format": declared_output["format"],
+            },
+        )
+
     def test_missing_contract_still_checks_output_static_identity(self):
         with tempfile.TemporaryDirectory() as work:
             _spec, caseset, manifest = self._marker_fixture(work)
@@ -368,6 +404,34 @@ class GeneratedMultiInputExpectedExceptionTest(unittest.TestCase):
                     "plan.*contract|contract.*plan"):
                 cpp_extension_adapter.validate_multi_input_evidence_bindings(
                     caseset, plan, evidence, receipt)
+
+    def test_normalized_plan_slot_tamper_is_never_repaired_from_case(self):
+        with tempfile.TemporaryDirectory() as work:
+            _spec, caseset, manifest = self._marker_fixture(work)
+            plan = cpp_extension_adapter.build_invocation_plan(caseset, manifest)
+            receipt = {"multi_input_receipt": manifest["multi_input_receipt"]}
+            evidence = [{"case_id": caseset["cases"][0]["id"]}]
+            cpp_extension_adapter._bind_multi_input_evidence(
+                caseset, evidence, receipt)
+        mutations = {}
+        bad = copy.deepcopy(plan)
+        bad["cases"][0]["slots"][0]["ordinal"] = 99
+        mutations["ordinal"] = bad
+        bad = copy.deepcopy(plan)
+        output = next(row for row in bad["cases"][0]["slots"]
+                      if row["role"] == "out")
+        del output["format"]
+        mutations["output_missing_static"] = bad
+        bad = copy.deepcopy(plan)
+        output = next(row for row in bad["cases"][0]["slots"]
+                      if row["role"] == "out")
+        output["shape"] = [999]
+        mutations["output_dynamic_drift"] = bad
+        for label, bad_plan in mutations.items():
+            with self.subTest(label=label), self.assertRaises(
+                    cpp_extension_adapter.CppExtensionAdapterError):
+                cpp_extension_adapter.validate_multi_input_evidence_bindings(
+                    caseset, bad_plan, evidence, receipt)
 
     def test_formal_gate_accepts_marker_case_without_repeated_contract(self):
         with tempfile.TemporaryDirectory() as work:
