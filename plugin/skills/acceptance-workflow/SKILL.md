@@ -22,7 +22,7 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 
 3. **subagent 边界**：每个 subagent **单轮、禁内部循环、禁跨阶段、不自行判定，只回结构化摘要给 orchestrator**。循环由 primary 控（如 dry-run 契约自检异常 → 再派 `refine_spec`），subagent 自己不多轮迭代。
 
-4. **三级门在 `run_workflow.py` 内部**：`run_workflow.py` **一次性串 Task1→2→3**，末尾**统一校门**（`validate_acceptance_state` 的 task1/task2/task3 三级，读**落盘** evidence 独立复核）——是**批量驱动、非阶段间实时阻断**，**不是** orchestrator 分阶段单独调度的 stage。门结果随候选交给 `acceptance_artifacts.formal_acceptance_allowed`，由该唯一谓词决定 formal / attempt 二选一；本 skill 不展开命名条件。「不推进下一 Task / 停在当前阶段」是 **agent 编排纪律**，不是脚本里的实时闸。
+4. **内部证据门在 `run_workflow.py` 内部**：`run_workflow.py` **一次性串 Task1→Task2（精度+性能）**，末尾**统一校门**（`validate_acceptance_state` 的历史 schema 键 `task1/task2/task3`，读**落盘** evidence 独立复核；这些键不代表产品 Task3）——是**批量驱动、非阶段间实时阻断**，**不是** orchestrator 分阶段单独调度的 stage。门结果随候选交给 `acceptance_artifacts.formal_acceptance_allowed`，由该唯一谓词决定 formal / attempt 二选一；本 skill 不展开命名条件。「不推进下一 Task / 停在当前阶段」是 **agent 编排纪律**，不是脚本里的实时闸。
 
 5. **对外单一对话入口、脚本幕后**（canon conversational-agent-sole-delivery-form·proposed·未 settle，载重前需核）：用户给出调用方已配对的“任务书 + 被测来源”；二者关联由调用方断言。输入的在线/本地形态及 URL/repo/fork/ref/head 只作 transport 诊断，不另行追问身份。脚本幕后执行；缺执行环境事实时再问，副作用照常先确认。
 
@@ -110,7 +110,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 ## 3. CP-A..E 状态机
 
-五个 CP 是**对话暂停点 + 工件门**，不是 run_workflow 内部的 stage。真机执行合并成**一个原子 CP-D**（Task2+Task3+三级门一次成）。
+五个 CP 是**对话暂停点 + 工件门**，不是 run_workflow 内部的 stage。真机执行合并成**一个原子 CP-D**（Task2（精度+性能）+三级门一次成）。
 
 ### CP-A 前置（primary 亲自，不派 subagent）
 
@@ -423,7 +423,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
       没人核过就沿用默认并如实挂账，**谁都不猜**（AGENTS.md 5.1）。
 - **产出**：**无手写 runner 源**——codegen 的官方 bundle + invocation plan +
   `vendor_build_receipt.py`（`snapshot-digest` → `emit` 两步）产的 `vendor-build-receipt.json`（上条）。
-- **路由**：**vendor 构建收据不满足 → 停在 CP-C、不上正式 Task2/Task3**；域内 scope 不成立（非标准 aclnn 两段式 / 有 opaque descriptor / 未支持的接口能力）→ 停在 CP-C，出程序结论（转 P3 / 需扩 adapter），不进 CP-D。`cpp_extension` 的 `vendor_build_receipt` **产不出来**（build 退出码非 0 / `--library` 在构建窗口内没被动过 / package 零/多候选 / target closure 不闭合 / build 后源码子树漂移）同样**停在 CP-C**，不带着一份说不清来源的 ELF 上真机。producer 本身不读取 CP-A facts；因此其 failure artifact 只有在唯一 finalizer 再与原始 facts/spec 严格对账后，才能成为标准 workflow attempt。构建收据与 failure attempt 都是代码硬门，不是 agent 口头纪律；算子 acceptance 裁决仍只来自 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py`（ADR 0007）。
+- **路由**：**vendor 构建收据不满足 → 停在 CP-C、不上正式 Task2**；域内 scope 不成立（非标准 aclnn 两段式 / 有 opaque descriptor / 未支持的接口能力）→ 停在 CP-C，出程序结论（转 P3 / 需扩 adapter），不进 CP-D。`cpp_extension` 的 `vendor_build_receipt` **产不出来**（build 退出码非 0 / `--library` 在构建窗口内没被动过 / package 零/多候选 / target closure 不闭合 / build 后源码子树漂移）同样**停在 CP-C**，不带着一份说不清来源的 ELF 上真机。producer 本身不读取 CP-A facts；因此其 failure artifact 只有在唯一 finalizer 再与原始 facts/spec 严格对账后，才能成为标准 workflow attempt。构建收据与 failure attempt 都是代码硬门，不是 agent 口头纪律；算子 acceptance 裁决仍只来自 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py`（ADR 0007）。
 
 <!-- oprunway:retired-begin -->
 #### CP-C 历史区：`cpp` / `aclnn_py` 的旧分流
@@ -462,7 +462,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 ### CP-D 真机跑测（一次原子；dispatch）
 
-**目的**：一次原子跑完 Task2 精度 + Task3 性能 + 三级门；总结工件按 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一。
+**目的**：一次原子跑完 Task2 的精度 + 性能 + 三级门；总结工件按 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一。
 
 - **dispatch** `acc-verify-rootcause`，`dispatch_mode = run_npu`：`python3 ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py <spec> --mode <mode> --out reports/<op>/ --source-facts <CP-A 取材目录>/source_facts.json [--taskdoc-caseset <work>/taskdoc_caseset.json]`（`OPRUNWAY_*` 指真实机器/路径，不写进仓；⚠ `--out` 决定 work 口径，CP-A/B 产物必须已在 `<--out>/work` 下，见 §1.1；`--taskdoc-caseset` **仅 `precision.case_source=taskdoc` 时给，且这一档必须给**，两向不匹配由 `gen_cases` fail-closed）。
   - **⚠ `--source-facts` 在验收通路上必给，缺席直接拒跑**（不是可选参数）。三级门要拿它与 vendor build receipt 的来源锚逐字对账；没有对照物时 `git_pr` 档会沿用旧行为放过，「收据自称 `gitcode_pr`、事实其实是 `local_snapshot`」这类伪装就查不出来。传的就是 CP-A `fetch_source.py --out` 产的那份 `source_facts.json`（`completeness.status` 必须是 `complete`；`blocked`/半成品只供诊断，会被 fail-closed 拒）。
@@ -568,14 +568,18 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
     功能维照样 fail。改的只是「第一条 case 被 DUT 拒就整轮零产物」这个工程缺陷。
   - **cpp_extension 性能次序**：先完成全量 Extension 精度 readback，用 validator 同源规则筛出精度通过且来自同一 caseset 的性能 case；再显式给 `OPRUNWAY_CPP_EXTENSION_DEVICE`，复用第一阶段内容寻址 ELF/vendor receipt，custom 与任务书 baseline 双侧统一走 `msprof --ai-core=off + ctypes MSTX + CSV` 的 kernel-only 采集。性能 collect 必须完整覆盖计划 case 序列并回绑同一 Extension provenance；partial/stale/换 ELF 一律拒。
   ⚠ **下面这条讲的是已停止准入的 `aclnn_py`**（⛔ 无真机入口，本状态机跑不到）——留着是因为**采集口径与判定纪律仍然通用**（msprof kernel-only、MSTX 圈窗、行为五分类、精度先筛、双边 scope 校验），`cpp_extension` 照用；但**别把它读成一条可选通路**。
-  ⚠ **`aclnn_py` 的 perf 通路：代码已接通、真机也跑过一次，但一个耗时数都没产出（仍 BLOCKED）**（2026-07-24 两次更正——① 此前本节写「采集端尚未接入 / `parse_torch_npu_baseline` 仅 schema 占位 / Task3 必须 pending」已被落地的 perf 代码推翻；② 随后写的「一次真机都没跑过」也已被 median 首跑推翻：跑是跑了、**结果是 BLOCKED**。勿再照任一旧文办事）。现状：
+  ⚠ **`aclnn_py` 的 perf 通路：代码已接通、真机也跑过一次，但一个耗时数都没产出（仍 BLOCKED）**（2026-07-24 两次更正——① 此前本节写「采集端尚未接入 / `parse_torch_npu_baseline` 仅 schema 占位 / 性能证据必须 pending」已被落地的 perf 代码推翻；② 随后写的「一次真机都没跑过」也已被 median 首跑推翻：跑是跑了、**结果是 BLOCKED**。勿再照任一旧文办事）。现状：
     - **已落地**：`aclnn_runtime/perf_msprof.py` 做 msprof kernel-only 采集（`--task-time/--ascendcl/--msproftx`，**MSTX range 圈测量窗、缺 MSTX 证据即 fail-closed**；只累加 device 计算 kernel，MEMCPY_ASYNC 不计入；warmup 5 / repeat 20 取中位数）；基线 = **同机 `torch_npu` 跑同一份 torch reference**，行为五分类（`npu`/`cpu_fallback`/`hybrid_host_device`/`execution_failed`/`no_device_kernel_observed`）**只有 `npu` 才计时**；`repo_adapter.parse_torch_npu_baseline` 已从占位改成**真消费口**（scope / us / 重复 case_id 全 fail-closed，非 npu 行为进 `excluded`）；**精度先筛**（只测已过精度的 case，其余记 `skipped_accuracy_failed`）；双边 `timing_scope` 校验 + speedup 由 `perf_compare` 出（源无关、判定逻辑一行未改）。
     - **最新状态（2026-07-26）**：用户已确认 Median 任务书里的 `aclnnMedian` / `aclnnMedianDim` 小算子拼接版本等价于 Torch 对应接口，故 spec 基线为同机 `torch_npu:torch.median`，无需再证明等价、也不改为直调单个 ACLNN。已有 custom 50/50、baseline 48/50 有效数据；2 个 BF16 case 基线失败，性能整体仍 BLOCKED。
     - **执行口径**：有 spec 指定来源的有效真实基线、且双边 scope 同为 `kernel_only` 时，才引用 `perf_report.json` 裁决；无有效基线 / provenance 缺失 / 缺 MSTX / scope 不可比 → BLOCKED，绝不自己算比值。功能/精度 oracle 与性能 baseline 分开解释。
     - **最短证据链**：任务书已明确或用户已确认实际对照语义时，直接按该事实配置 baseline，不另造证明层。性能 case 通用地从精度 caseset 选择；A3 按全部输入物理载荷之和 `<=256 KiB` 为小 shape、其余为大 shape，分类不免测。Median 的 `target_ratio=1.0` 仍逐字来自“不劣化”，非参考仓默认 0.6。
-- **run_workflow 内部一次成**（不是 orchestrator 分三段调度）：Task2 真 NPU 精度 vs numpy golden（`validator.py`）+ Task3 msprof 真 kernel-only 性能 vs 基线（`perf_compare.py`）+ **末尾统一校三级门**（`validate_acceptance_state` task1/task2/task3，读落盘 evidence 独立复核：防跑子集报 100%、防放宽阈值、防混 e2e 墙钟；三级都由编排层**显式**传 staging 出来的 `source_facts.json`，不走自动发现）。随后只调用 `acceptance_artifacts` 的唯一发布谓词，不在编排文档复刻其 schema 检查；通过才写 `acceptance.json`，否则写 `attempt_record.json`（exit 与原 deterministic state 不改）。
+- **run_workflow 内部一次成**（不是 orchestrator 分段调度）：Task2 同时完成真 NPU 精度 vs numpy golden
+  （`validator.py`）与 NPU `msprof` kernel-only 性能实测（`perf_compare.py`），随后统一校内部证据门。
+  `validate_acceptance_state` 的 `task1/task2/task3` 是历史 schema 键名，不代表产品 Task3；各门均读取落盘
+  evidence 独立复核，并显式消费 staging 的 `source_facts.json`。随后只调用 `acceptance_artifacts` 的唯一
+  发布谓词；通过才写 `acceptance.json`，否则写 `attempt_record.json`。
 - **产出**：共有诊断件 `evidence.json` / `verdict.json` / `baseline.json`（仅有基线时）/ `perf_report.json`；`acceptance_artifacts.formal_acceptance_allowed` 为 true 时产 `acceptance.json` + Markdown，为 false 时产 `attempt_record.json`（`acceptance_verdict=null`，无 Markdown），两者互斥。另有 staging 输入副本 `spec.json` / `golden.py` / `source_facts.json`（三者是**输入**不是裁决，只有正式 `acceptance.json` 的目录才能作为 CP-F base）。
-- **路由**：任何 FAIL → **dispatch** `acc-verify-rootcause`，`dispatch_mode = rootcause`：先「被测物自 build + 声明支持的 dtype + 手算 golden」**独立复现，解耦『被测算子 vs 我的 harness』再归因**——技术判定与官方口径分开、不外发、不臆断、不来回改口（Equal 血教训）。Task3 缺外部 GPU 标杆 / 口径不可比 → 走 §6 的 BLOCKED 路由，不出 pass。
+- **路由**：任何 FAIL → **dispatch** `acc-verify-rootcause`，`dispatch_mode = rootcause`：先「被测物自 build + 声明支持的 dtype + 手算 golden」**独立复现，解耦『被测算子 vs 我的 harness』再归因**——技术判定与官方口径分开、不外发、不臆断、不来回改口（Equal 血教训）。Task2 性能缺 NPU `msprof` 有效证据或计时口径不可核 → BLOCKED，不出 pass；缺 GPU 数据不构成 blocker。
   - 多输出 index 场景先读 evidence 的结构化 metrics：`index_value_consistency` 已允许 tie 时不同合法位置；
     `invalid_index_count>0` 表示 DUT 给出负数/越界下标，不得再以“重复中位数、设备可选不同位置”为由放宽。
     反之仅下标不同且 gather 后值一致，才是该语义判据允许的合法 tie。
@@ -729,7 +733,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 ## 5. 三级门与 BLOCKED 路由（在 `run_workflow.py` 内部）
 
-- **门在哪跑**：`run_workflow.py` 串完 Task1→2→3 后，内部按 `gate_stages`（`task1`、`task2`，若有性能用例或 `spec.perf.baseline` 再加 `task3`）统一调 `validate_acceptance_state._GATES[st]` 读**落盘产物**独立复核 → 打 `STATUS: PASSED|FAILED`。**批量驱动、非阶段间实时阻断。**
+- **门在哪跑**：`run_workflow.py` 串完 Task1→Task2（精度+性能） 后，内部按 `gate_stages`（历史 schema 键 `task1`、`task2`，若有性能用例或 `spec.perf.baseline` 再加性能门键 `task3`；不代表产品 Task3）统一调 `validate_acceptance_state._GATES[st]` 读**落盘产物**独立复核 → 打 `STATUS: PASSED|FAILED`。**批量驱动、非阶段间实时阻断。**
 - **门管什么**：只管「证据可信 + 完整」（全覆盖防跑子集、阈值三处一致防放宽、scope=kernel_only 防混 e2e）。**精度/性能 pass-fail 不由门判**——那是 `validator.py` / `perf_compare.py` 的活，门不重判（合法的精度 fail 不该被门当 BLOCKED）。
 - **正式命名边界**：门结果随候选交给 `acceptance_artifacts.formal_acceptance_allowed`；true 为 formal，false 为 attempt，两者互斥。本 skill 不展开何种状态命中，primary 只逐字回报确定性产物。
 - **本 skill 只调这三级门、不重实现判定**：编排层不复刻门逻辑、不复刻 validator/perf_compare，只读它们落盘的裁决。
@@ -766,27 +770,24 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 ---
 
-## 6. Task3 基线来源与 blocked 路由
+## 6. Task2 性能取证与 blocked 路由
 
 - **基线来源按任务书参考源**（`spec.perf.baseline` 驱动；canon perf-baseline-by-reference-source·proposed·未 settle，载重前需核）：
   - **重写类** → `tbe`（无劣化 / `target_ratio` 按任务书；当前接入的 aclnn 重写类 isclose/sign/equal/neg 均 `perf.baseline=tbe`，catlass matmul 属对标类·synthetic demo·未定基线——「均」勿外推为全局，见 `samples/specs/`）；
-  - **移植类** → GPU（如 A100，比例区间）；
+  - **移植类任务书中的 GPU 比值** → 只作待验收条款记录，不进入 workflow 输入；
   - **加 dtype 类** → 同 op 不劣化；
   - **框架级 Torch 或已确认等价于 Torch 接口的小算子拼接 baseline**（`perf.baseline=="torch_npu"`）→ 同机 `torch_npu` kernel-only；
   - **实际要求直接 ACLNN baseline**（`perf.baseline=="aclnn_builtin"`）→ 按 spec `aclnn_baseline.variants` 从 CANN `libopapi.so` 直接调用。两者均须来自任务书事实或用户确认，不凭 API 名猜。
   基线口径以 `spec.perf.baseline` 为准，不写死。
-- **⚠ 缺省口径先看 AGENTS.md §5.10：只测 msprof 实测，不比 GPU**。任务书**即使写了**「与 GPU 比对」
-  （如「以 OpenCV CUDA A100 为参考，ratio ≥ 0.45×」），默认**同样只用 msprof 采 NPU 实测性能**——
-  **只有用户明确要求做 GPU 对比时**才真去取标杆、才走下面那条 blocked 路由。落地三条：
-  - **不因缺 GPU 数据把结论落到 `BLOCKED_WAIT_GPU_BENCHMARK`**；
+- **⚠ 当前唯一口径见 AGENTS.md §6.1：只测 msprof 实测，不比 GPU**。任务书**即使写了**「与 GPU 比对」
+  （如「以 OpenCV CUDA A100 为参考，ratio ≥ 0.45×」），也只用 msprof 采 NPU 实测性能。workflow
+  不连接、不运行、不采集、不接收或消费 GPU 数据。落地三条：
+  - 缺 GPU 数据不构成 blocker；该历史终态当前不得产生；
   - 性能维产出 = msprof 实测 kernel 耗时 + 分档说明，**不是比值裁决**；报告须如实写
     「按用户口径只做 NPU msprof 实测，未做 GPU 标杆对比」，**不得**包装成「已达标 0.45×」（5.8）；
   - **任务书的 GPU 比值条款按「未验收」记账**进 `task_pr_gaps`——不是「已通过」也不是「不适用」，
     最终裁决**不得**因为 NPU 侧有实测数就宣称整体通过。
-  ⚠ **别和 §5.11 混**：5.11 讲的是**精度真值口径**（任务书写 GPU → 解析为同族 CPU，条款**已被满足**、
+  ⚠ **别和 §6.2 混**：6.2 讲的是**精度真值口径**（任务书写 GPU → 解析为同族 CPU，条款**已被满足**、
   **不产生** gap）；这里讲的是**性能**（取消比较，条款按「未验收」挂账）。两者性质不同，别互相照搬。
-- **Task3 blocked 状态路由**（task3-state-machine）：
-  - `BLOCKED_WAIT_GPU_BENCHMARK`：**仅在用户明确要求做 GPU 对比**、却缺外部 GPU 标杆数据时 → BLOCKED、不出 pass。
-    默认口径下这条不该出现（见上一条）；
-  - `BLOCKED_INCOMPARABLE_TIMING_SCOPE`：计时**口径不可比**（如一边 kernel-only 一边含 H2D/D2H 墙钟）→ BLOCKED、不出 pass。
-- **GPU external 对比层：consumer 侧已接入 pipeline，缺的是真实数据**。`run_workflow --gpu-baseline <json>` → `gpu_baseline.parse_gpu_baseline`（按字段契约严格校验 + `case_id` 与完整输入签名交叉核对）→ `perf_compare` 出 NPU↔GPU 对比。**真实 GPU 标杆数据仍待外部方提供**。本 skill 只写路由文本、不产数据。
+- **性能证据 blocked 状态**：NPU `msprof` 证据缺失、无有效 kernel-only 样本或同一 NPU 证据内部的
+  timing scope 不可核时 → BLOCKED、不出 pass。旧工件中的等待 GPU 终态只作历史解释，当前流程不得产生。

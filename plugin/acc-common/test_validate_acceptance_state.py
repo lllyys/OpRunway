@@ -1194,12 +1194,12 @@ class RunWorkflowPerfPackageTest(unittest.TestCase):
         self.assertEqual(pr["summary"]["cases_scored"], pr["summary"]["perf_cases"])
         self.assertEqual(self._gate("task3").returncode, 0)
 
-    def test_gpu_wait_blocked_not_fail(self):
-        r = self._run("testdata/gpu_demo.spec.json")            # spec.perf.baseline=gpu_external, 无 --gpu-baseline
-        acc = self._json("dev_run_summary.json")               # C5：mock 不产 acceptance.json
-        self.assertEqual(acc["pipeline_result"], "BLOCKED_WAIT_GPU_BENCHMARK")
-        self.assertNotEqual(r.returncode, 0)                   # 非 PASS
-        self.assertNotIn("PASS", acc["pipeline_result"])       # 缺 GPU 数据绝不显 PASS
+    def test_gpu_ratio_spec_is_rejected_before_workflow_outputs(self):
+        r = self._run("testdata/gpu_demo.spec.json")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("measure_only", r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "dev_run_summary.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.d, "perf_report.json")))
 
 
 # ===== gt3 CONFIRMED 绕过负例（gate_task3 零证据/wait 绕过/坏输入/空转/bool计数/空壳证据）=====

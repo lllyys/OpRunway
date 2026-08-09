@@ -13,6 +13,7 @@ import artifact_path_guard
 import pre_execution_failure
 import cann_version
 import kernel_identity
+import validator
 # 来源对照物（`source_facts.json`）的发现规则在 `source_facts_lookup`，本文件一条都不自建。
 # ⚠ 发现规则曾是 `validate_acceptance_state._find_source_facts`，由本模块跨模块引用那个
 #   **私有**名。复用方向是对的（两处各写一份查找规则的话，报告说的 facts 和三级门校的
@@ -598,16 +599,18 @@ def _render_locked(
     caseset = _load(transaction, "caseset.json")
 
     op = acceptance.get("op") or verdict.get("op") or caseset.get("op") or "?"
-    accuracy = verdict.get("accuracy_summary") or {}
+    accuracy = verdict.get("accuracy_summary")
     # 精度报表口径的唯一真源是 validator 已投影好的 report 块。
     # 不再读 raw total/passed/failed/by_dtype：那五桶是内部诊断视图，
     # 直接渲染会把 errored 漏出 failed，并把 NA 混入可判分母。
-    accuracy_report = (accuracy.get("report")
-                       if isinstance(accuracy.get("report"), dict) else {})
-    accuracy_overall = (accuracy_report.get("overall")
-                        if isinstance(accuracy_report.get("overall"), dict) else {})
-    accuracy_by_dtype = (accuracy_report.get("by_dtype")
-                         if isinstance(accuracy_report.get("by_dtype"), list) else [])
+    try:
+        accuracy_report = validator.validate_accuracy_report_view(
+            accuracy, verdict.get("per_case"))
+    except ValueError as ex:
+        raise acceptance_artifacts.FormalAcceptanceError(
+            f"精度报表 accuracy_summary.report 非 canonical：{ex}") from ex
+    accuracy_overall = accuracy_report["overall"]
+    accuracy_by_dtype = accuracy_report["by_dtype"]
     receipt = evidence.get("cpp_extension_receipt") or {}
     runtime = receipt.get("runtime") or {}
     vendor = receipt.get("vendor") or {}

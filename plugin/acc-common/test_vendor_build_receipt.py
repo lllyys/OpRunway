@@ -963,6 +963,26 @@ class OutPathGuardTest(_Fixture):
                      if n.startswith(V._TMP_PREFIX) or n.startswith(V._PROBE_PREFIX)]
         self.assertEqual(leftovers, [])
 
+    def test_single_output_parent_inode_is_pinned_across_build(self):
+        digest_path = self._digest()
+        terminal = os.path.join(self.d, "single-terminal")
+        moved = os.path.join(self.d, "single-terminal-before-swap")
+        os.makedirs(terminal)
+        receipt = os.path.join(terminal, "receipt.json")
+        real_run = V.run_build
+
+        def swap_after_build(*args, **kwargs):
+            result = real_run(*args, **kwargs)
+            os.rename(terminal, moved)
+            os.mkdir(terminal)
+            return result
+
+        with mock.patch.object(V, "run_build", side_effect=swap_after_build), \
+                self.assertRaisesRegex(V.VendorBuildReceiptError, "失稳|替换"):
+            self._emit(digest_path, out=receipt)
+        self.assertFalse(os.path.lexists(receipt))
+        self.assertFalse(os.path.lexists(os.path.join(moved, "receipt.json")))
+
     def test_a_failed_write_leaves_no_half_receipt(self):
         """半截收据比没有更坏——它看着像一份真的。"""
         out = os.path.join(self.d, "half.json")

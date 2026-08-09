@@ -90,8 +90,8 @@ dispatch_mode: run_npu
             mode 只从 spec.runner_form 派生，不问用户走哪条 form（验收统一按 cpp_extension）。
           ⚠ 历史机制边界仍作记录：cpp 路真机 dtype 白名单只有 fp32/fp16/bf16
             （int32 等落 DEFERRED_NP_BY_FORM["cpp"]、真机 fail-closed）→ 覆盖缺一块；
-            性能基线由任务书/spec 逐字决定、不能从 form 反推（new_example 的缺省对照物才是内置 TBE）。
-          Task2 真 NPU 精度 vs numpy golden + Task3 msprof kernel-only 性能 vs 基线 + 末尾统一校三级门，一次原子跑完。
+            当前性能取证只做同轮 NPU msprof kernel-only 绝对耗时；不从 form 反推基线，也不消费 GPU 数据。
+          Task2 一次完成真 NPU 精度 vs numpy golden 与 NPU msprof kernel-only 性能实测，末尾统一校内部证据门。
 本次产出: evidence.json / verdict.json / baseline.json（有基线时）/ perf_report.json / acceptance.json；
           摘要回：acceptance.json.overall + 各维度通过数（逐字引用，不自判）。
 ```

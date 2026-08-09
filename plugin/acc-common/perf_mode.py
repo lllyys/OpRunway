@@ -120,6 +120,14 @@ RUNNER_FORM_CPP_EXTENSION = "cpp_extension"
 #: measure_only 下 `baseline` 必须缺席，故那时这一支只能读已锚定的 `measure_only_authorization`。
 _GPU_BASELINE_VALUES = ("gpu", "gpu_external")
 
+
+def has_gpu_comparison_baseline(spec):
+    """正式 workflow 不消费 GPU 数据；只识别旧 spec 信号以便在入口 fail-closed。"""
+    if not isinstance(spec, dict):
+        return False
+    perf = spec.get("perf")
+    return isinstance(perf, dict) and perf.get("baseline") in _GPU_BASELINE_VALUES
+
 #: 授权事实的必填字段。与 `golden.authorization` 同一套锚（cite + quote + 任务书快照指纹），
 #: 让「本轮为什么可以只测不比」成为**可机核**的事实，而不是 spec 的一句自报。
 _AUTH_REQUIRED = ("taskdoc_requirement", "cite", "quote", "taskdoc_snapshot_sha256")
@@ -458,7 +466,7 @@ def derive_mode(spec):
         raw = declared.get("taskdoc_requirement")
         if raw in (GROUND_NO_PERF_REQUIREMENT, GROUND_GPU_COMPARISON):
             clause_ground, clause_signal = raw, "perf.measure_only_authorization.taskdoc_requirement"
-    if clause_ground is None and perf.get("baseline") in _GPU_BASELINE_VALUES:
+    if clause_ground is None and has_gpu_comparison_baseline(spec):
         clause_ground, clause_signal = GROUND_GPU_COMPARISON, "perf.baseline"
     clause_branch = {
         "source": "任务书（经 spec 已锚定的转述）",

@@ -59,12 +59,14 @@ vendor ELF 构建收据，接入成本更高，这是已知账单），而不是
 <!-- oprunway:retired-begin -->
   ⛔ 历史留档 · 不得 dispatch · 不要照做（`cpp` / `aclnn_py` 已停止准入、无真机入口，编排层不会再走到）：`cpp` 才 dispatch `acc-runner-dev:gen_runner`（先过 scope gate）→ `verify_runner`；`aclnn_py` 不派这两个 mode，以报告根运行 `preflight_aclnn.py --source work/source_facts.json --pr-facts work/pr_facts.json --spec ops/<Op>/<Op>.spec.json`，成功也只标 `READY_WAIT_NPU_TRUST_GATE`。随后 dispatch `acc-verify-rootcause:verify_aclnn_harness`：正式生成完整 caseset/golden，运行 `verify_aclnn_harness.py` 的确定性小见证，产内容寻址 `work/aclnn_harness_trust.json`。该收据绑定见证数据字节、golden 源码、PR/build/toolkit/SoC/符号与执行逻辑，只证 harness、不裁决算子、不裁剪正式用例；`run_workflow` 在正式 adapter 前按当前环境硬复核。任一自检证据未满足或漂移则停在 CP-C、不进 CP-D。（acceptance 裁决只逐字引用 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py` 产物，ADR 0007。）
 <!-- oprunway:retired-end -->
-- **CP-D 真机跑测**（一次原子）：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`（⚠ **`--source-facts` 在验收通路上必给、缺席直接拒跑**——路径就是 CP-A `fetch_source.py --out <取材目录>` 产的那份，由编排层随 dispatch 交给 subagent，**与 `--out reports/<op>/` 不是同一个目录**；三级门要拿它与 vendor build receipt 的来源锚逐字对账。非验收通路（显式 `--mode mock` / `catlass*`）**不受此强制**）（**`<mode>` 据 `spec.runner_form` 定**：`cpp_extension`（缺省）→ `--mode cpp_extension`，须 `OPRUNWAY_CPP_EXTENSION_REAL=1` + 过 build/load/vendor receipt 门——**这是当前唯一能产验收裁决的通路**；`cpp` / `aclnn_py` ⛔ **已停止准入**：派不出 mode、显式指定也被拒；`mock`/`catlass*` 派生不出、只能显式指定）（Task2 精度 + Task3 性能 + 末尾统一校门一次成）。
+- **CP-D 真机跑测**（一次原子）：dispatch `acc-verify-rootcause:run_npu` → `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`（⚠ **`--source-facts` 在验收通路上必给、缺席直接拒跑**——路径就是 CP-A `fetch_source.py --out <取材目录>` 产的那份，由编排层随 dispatch 交给 subagent，**与 `--out reports/<op>/` 不是同一个目录**；三级门要拿它与 vendor build receipt 的来源锚逐字对账。非验收通路（显式 `--mode mock` / `catlass*`）**不受此强制**）（**`<mode>` 据 `spec.runner_form` 定**：`cpp_extension`（缺省）→ `--mode cpp_extension`，须 `OPRUNWAY_CPP_EXTENSION_REAL=1` + 过 build/load/vendor receipt 门——**这是当前唯一能产验收裁决的通路**；`cpp` / `aclnn_py` ⛔ **已停止准入**：派不出 mode、显式指定也被拒；`mock`/`catlass*` 派生不出、只能显式指定）（Task2 的精度 + 性能 + 末尾统一校门一次成）。
   - **产出按路径与正式发布门分叉**（三种总结名不并存；对开发级或 attempt 路径而言缺 `acceptance.json` 不是缺件）：
     - **验收路径 `cpp_extension` · formal**：`acceptance_artifacts.formal_acceptance_allowed` 为 true → `evidence.json` / `verdict.json` / `baseline.json`（有基线时）/ `perf_report.json` / `acceptance.json` + Markdown 验收报告。
     - **验收路径 `cpp_extension` · attempt**：同一谓词为 false → 保留 `evidence.json` / raw `verdict.json` / `perf_report.json`，另产 `attempt_record.json`（`acceptance_verdict=null`）；**不产** `acceptance.json` / Markdown，不进 CP-E。
-    - **非验收路径**（显式 `--mode mock` / `catlass*`）→ `evidence.json` / `dev_precision_check.json` / `baseline.json`（有基线时）/ `perf_report.json`（带 NON-ACCEPTANCE 戳）/ `dev_run_summary.json`（字段是 `pipeline_result` / `precision_check` / `selfcheck`）；**不产** `verdict.json` / `acceptance.json` / Markdown 验收报告。门只跑 task1（+条件性 task3）的**管路自检**（task2 门读 `verdict.json`，那条路无此文件），`selfcheck.passed=true` **不等于**验收门过。
-  - **Task3 性能**：基线来源=`spec.perf.baseline`（perf-baseline-by-reference-source，proposed·未 settle，载重前需核）；缺外部 GPU 标杆 → 路由 `BLOCKED_WAIT_GPU_BENCHMARK`，口径不可比 → `BLOCKED_INCOMPARABLE_TIMING_SCOPE`；**GPU external 对比层 consumer 侧已接入 pipeline，缺的是外部真实数据**。FAIL → primary 再 dispatch `acc-verify-rootcause:rootcause`（先解耦再归因）。
+    - **非验收路径**（显式 `--mode mock` / `catlass*`）→ `evidence.json` / `dev_precision_check.json` / `baseline.json`（有基线时）/ `perf_report.json`（带 NON-ACCEPTANCE 戳）/ `dev_run_summary.json`（字段是 `pipeline_result` / `precision_check` / `selfcheck`）；**不产** `verdict.json` / `acceptance.json` / Markdown 验收报告。管路自检只用内部历史门键 `task1`（必要时再用性能门键 `task3`；`task2` 门读 `verdict.json`，那条路无此文件），`selfcheck.passed=true` **不等于**验收门过。
+  - **Task2 性能维**：只消费同轮 NPU `msprof` kernel-only 实测；不接收、不运行、不等待 GPU 标杆。
+    任务书中的 GPU 比值条款进入 `task_pr_gaps` 记为未验收。FAIL → primary 再 dispatch
+    `acc-verify-rootcause:rootcause`（先解耦再归因）。
 - **CP-E 报告**（primary，**只对已有正式 `acceptance.json` 的 `cpp_extension` 终态成立**）：由 renderer 调用 `acceptance_artifacts` 的共享发布谓词，primary 不另抄字段判断；通过后再逐字引用 `acceptance.json`/`verdict.json`/`perf_report.json` 裁决 + `task_pr_gaps` + 各维度出中文报告。只有 `attempt_record.json` 时停在 CP-D，如实回报 blocker，禁止生成或命名为正式报告。
   - ⚠ **非验收路径（显式 `--mode mock` / `catlass*`）不进 CP-E**：无 `acceptance.json` / `verdict.json` 可引，**别卡在这里等文件，也别拿 `dev_run_summary.json` / `dev_precision_check.json` 顶上去出验收报告**。正确处置是回到 CP-B 把 spec **迁到 `cpp_extension`** 重走验收，不是回头问用户换条路。若本就只做局部开发验证，则输出**开发级说明**（逐字引 `dev_*` + `evidence_grade="development"` + NON-ACCEPTANCE + 「本轮无验收裁决」），明确它**不是**验收报告、不填裁决栏。
 
@@ -98,9 +100,10 @@ vendor ELF 构建收据，接入成本更高，这是已知账单），而不是
 > ⚠ **能力表 ≠ 准入表**：`repo_adapter.SUPPORTED_NP_BY_FORM` / `DEFERRED_NP_BY_FORM` 里 `cpp` / `aclnn_py` 的条目照旧保留，
 > 那张表回答「这条通路支持哪些 dtype」，准入白名单回答「这条通路能不能出裁决」——两个问题，别互相反推。
 
-## 性能对比（Task 3，待散文门）
-- **GPU 标杆 consumer（T8）**：`run_workflow.py --gpu-baseline <外部 GPU 标杆 JSON>` 或 `spec.perf.baseline∈{gpu,gpu_external}` → 解析外部 GPU 标杆(按 case_id+完整输入签名对齐)出 NPU↔GPU 对比。缺标杆 → `BLOCKED_WAIT_GPU_BENCHMARK`（正规挂起、非 fail、绝不显 PASS）；双边 timing_scope 不一致 → `BLOCKED_INCOMPARABLE_TIMING_SCOPE`。真 GPU 数据待外部方给。
-- **小 shape 例外（T6）**：任务书『<Nus 差 Nus→仿真图』条款 → 达标记 False + 出仿真图证据；**须先过 `gate_task3`**（图齐备+例外行↔图交叉一致+SVG sha 钉死）才 → `PASSED_WITH_RISK`（挂人工 CP，退出码 2）；**门未过 → `BLOCKED(验收门未过)`（exit 1）、非 PASSED_WITH_RISK**。
+## 性能实测（Task 2 性能维）
+- 当前只做同轮 NPU `msprof` kernel-only 实测；GPU 数据不属于 workflow 输入或输出。任务书即使写了 GPU
+  比值，也不连接、不消费外部 GPU 标杆，不因缺 GPU 数据阻塞；该比值条款进入 `task_pr_gaps` 记为未验收。
+- **小 shape 例外（T6）**：任务书『<Nus 差 Nus→仿真图』条款 → 达标记 False + 出仿真图证据；**须先过内部历史性能门键 `gate_task3`**（图齐备+例外行↔图交叉一致+SVG sha 钉死）才 → `PASSED_WITH_RISK`（挂人工 CP，退出码 2）；**门未过 → `BLOCKED(验收门未过)`（exit 1）、非 PASSED_WITH_RISK**。
 
 ## 约束
 - 全程中文；副作用（真机 clone/build/跑测）先确认；正式命名只认 `acceptance_artifacts.formal_acceptance_allowed`，formal / attempt 二选一，只有 attempt 时不产正式 acceptance/report。

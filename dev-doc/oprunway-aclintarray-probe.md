@@ -40,7 +40,7 @@ Roll 的另一条 dtype 缺口仍在——`repo_adapter.SUPPORTED_NP_BY_FORM["cp
 
 ### 被测事实：aclnnRoll 的真实签名
 
-证据锚：`/Users/ll/Desktop/workspace-ascend/op_ascendc_cudac/ops-math/conversion/roll/op_api/aclnn_roll.h`
+证据锚：`conversion/roll/op_api/aclnn_roll.h`（既有 detached checkout 内的仓内相对路径）
 的 `:35-37`（**本轮直接读的这份文件；它是工作区里的一份既有 checkout，不是本轮取材产物——
 本轮没跑 `fetch_source.py`，所以没有 `source_facts.json` 可作独立复核锚**）：
 

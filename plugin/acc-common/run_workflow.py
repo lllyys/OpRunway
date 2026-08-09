@@ -1,6 +1,6 @@
-"""OpRunway 顶层编排（Layer 2 薄壳的本地驱动版）——串 Task 1→2→3。
+"""OpRunway 顶层编排（Layer 2 薄壳的本地驱动版）——串 Task 1→Task 2（精度+性能）。
 
-Task 1 gen_cases → Task 2 repo_adapter + validator → Task 3 perf_compare。
+Task 1 gen_cases → Task 2 repo_adapter + validator + perf_compare。
 stage 间只经 JSON/数据文件交接。CC/Codex/Antigravity 的薄壳只需换调用方式，核心不动。
 
 用法：python run_workflow.py <spec.json> [--mode cpp_extension|mock] [--out <dir>]
@@ -312,14 +312,14 @@ def _real_baseline_or_blocked(spec, work):
     src = (spec.get("perf") or {}).get("baseline")
     entry = _REAL_BASELINE_SOURCES.get(src)
     if entry is None:
-        print(f"[Task3] ⚠ 验收通路缺真实基线：spec.perf.baseline={src!r} 未在真实基线取数登记表 "
+        print(f"[Task2 性能] ⚠ 验收通路缺真实基线：spec.perf.baseline={src!r} 未在真实基线取数登记表 "
               f"{sorted(_REAL_BASELINE_SOURCES)} 中，且 work/_real_baseline.json 不存在 → 挂起"
               f"（**不 mock 兜底**：mock 基线在验收通路上等于冒充达标）")
         return None, _BLOCKED_WAIT_REAL_BASELINE
     fname, parse = entry
     path = os.path.join(work, fname)
     if not os.path.exists(path):
-        print(f"[Task3] ⚠ 验收通路缺真实基线：{src} 采集端未接通（缺 work/{fname}）→ 挂起"
+        print(f"[Task2 性能] ⚠ 验收通路缺真实基线：{src} 采集端未接通（缺 work/{fname}）→ 挂起"
               f"（**不 mock 兜底**）")
         return None, _BLOCKED_WAIT_REAL_BASELINE
     return parse(path), None
@@ -781,8 +781,8 @@ def invalidate_results(out_dir, names, globs=(), error_cls=SystemExit):
 
 
 def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=None,
-        gpu_baseline=None, source_facts=None, taskdoc_caseset=None):
-    """跑一遍 Task1→2→3。
+        source_facts=None, taskdoc_caseset=None):
+    """跑一遍 Task1→Task2（精度+性能）。
 
     `taskdoc_caseset` = 规范化任务书用例集（`taskdoc_caseset.json`）的路径，只在 spec 声明
     `precision.case_source='taskdoc'` 时需要；两向不匹配由 `gen_cases` fail-closed（编排层不做第二套判定）。
@@ -832,15 +832,16 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
     except ValueError as ex:
         raise SystemExit(f"spec.perf 配置非法：{ex}")
     measure_only = perf_mode.is_measure_only(perf_mode_name)
+    if perf_mode.has_gpu_comparison_baseline(spec):
+        raise SystemExit(
+            "spec.perf.baseline 声明了 GPU 对比，但当前 workflow 不接收或消费 GPU 数据。"
+            "请在 spec 生成阶段按 AGENTS.md §5.10 转成带任务书引文授权的 "
+            "perf.mode='measure_only'，并把 GPU 比值条款记入 task_pr_gaps=unvalidated。")
     measure_only_requirement_gaps = []
     if measure_only:
         measure_only_requirement_gaps = (
             perf_evidence_contract.validate_measure_only_requirement_gaps(
                 spec, perf_mode.measure_only_authorization(spec["perf"])))
-    if measure_only and gpu_baseline is not None:
-        raise SystemExit(
-            "perf.mode='measure_only' 与 --gpu-baseline 自相矛盾："
-            "只测不比的口径下不消费任何外部标杆。要做 GPU 对比请改回 ratio_gated。")
     mode = _resolve_mode(spec, mode)
     if mode not in repo_adapter.MODES:  # 先校验，避免 Task1 已跑再 KeyError、留半产物
         raise SystemExit(f"unknown mode {mode!r}, supported={list(repo_adapter.MODES)}")
@@ -1049,7 +1050,7 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
               "build/load/NPU 见证由显式外部 driver 回传收据后复核")
     # aclnn_py 无 per-op runner 源，因此 CP-C 由真机 harness 信任门接住。这里在正式 adapter
     # 启动前复核内容寻址收据与**本轮重新生成的完整 caseset**、当前 spec 及 harness 执行逻辑
-    # 全部仍绑定；缺失/漂移一律停在 CP-C。收据只验证 harness，不改变或裁剪下方 Task2/Task3。
+    # 全部仍绑定；缺失/漂移一律停在 CP-C。收据只验证 harness，不改变或裁剪下方 Task2。
     if mode == "aclnn_py":
         try:
             trust = verify_aclnn_harness.validate_receipt(
@@ -1062,7 +1063,7 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
                 "[aclnn_py] CP-C harness 真机信任门未通过或收据已漂移：\n"
                 f"{ex}\n"
                 "请先运行 verify_aclnn_harness.py 生成 "
-                "work/aclnn_harness_trust.json；正式 Task2/Task3 未启动。")
+                "work/aclnn_harness_trust.json；正式 Task2 未启动。")
         print("[CP-C harness trust] "
               f"{trust['status']} · 见证 {trust['coverage']['selected_count']}/"
               f"{trust['coverage']['full_case_count']}（正式用例仍全量执行）")
@@ -1130,12 +1131,11 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
                 "note": "复现制品生成失败，不改变验收裁决",
             }, "repro_generation_error.json")
             print(f"[Task2 repro] 生成失败（不改变验收裁决）：{type(ex).__name__}: {ex}")
-    gpu_prov = None
-    # §精度门前置 + fail-fast（用户 2026-07-15，评审 #4）：精度非全过（pass/passed_with_risk）→ **跳过 Task3 性能**、
+    # §精度门前置 + fail-fast（用户 2026-07-15，评审 #4）：精度非全过（pass/passed_with_risk）→ **跳过 Task2 性能维**、
     # 提前结束。**不 early-return**——照走下方统一 overall/门流程（gate/runner_source 优先级不变、prec==fail 自然
     # 落 FAIL(精度)），只是不跑 perf_compare、不把 task3 加入门。fail-fast 粒度=跑完精度再判（精度已在 Task2 全跑）。
     # passed_with_gaps（C4：任务书要求的 dtype 算子 op_def 不支持、差额挂 task_pr_gaps）**精度本身是全过的**，
-    # 必须与 pass 同样继续跑 Task3——漏掉它会静默跳过性能、且归因错成「无性能用例」。
+    # 必须与 pass 同样继续跑 Task2 性能维——漏掉它会静默跳过性能、且归因错成「无性能用例」。
     precision_ok = o["verdict"] in ("pass", "passed_with_risk", "passed_with_gaps")
     # §5.10 · 第二层性能总门的 measure_only 分流（C3/C4）。
     # 病灶：上面这道 fail-fast 是为 **ratio_gated** 设计的——精度没全过时，比值裁决确实没有意义
@@ -1155,7 +1155,7 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         _gb = o.get("golden_blocked") or []
         _why = "; ".join(f"tier{t.get('tier')}:{t.get('blocked_reason')}" for t in _gb) or "?"
         print(f"[Task2] golden 授权核不实 → BLOCKED（{_why}）——"
-              f"真值来路不明，基于它的精度判定不成立；跳过 Task3。")
+              f"真值来路不明，基于它的精度判定不成立；跳过 Task2 性能维。")
     if perf_skipped_by_precision:
         report = {"op": spec["op"], "baseline_source": None, "target_ratio": None, "per_case": [],
                   "notes": [f"精度未全过（{o['verdict']}）→ 跳过性能测试（fail-fast，精度已全跑再判）"],
@@ -1164,34 +1164,19 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
         report = perf_compare.attach_skipped_shape_plan(report, caseset)
         _dump(_stamp_dev(report, is_acceptance, grade, non_acceptance_note),
               "perf_report.json")
-        print(f"[Task3 perf_compare] 跳过（精度={o['verdict']} 未全过 → fail-fast）")
+        print(f"[Task2 perf_compare] 跳过（精度={o['verdict']} 未全过 → fail-fast）")
     else:
-        # Task 3（new_example 会写真基线 _real_baseline.json；否则 mock；T8：--gpu-baseline / spec gpu_external）
+        # Task2 性能维：只消费本轮 NPU 侧实测；workflow 没有 GPU baseline 输入面。
         real_bl = os.path.join(work, "_real_baseline.json")
-        expect_gpu = (gpu_baseline is not None
-                      or spec.get("perf", {}).get("baseline") in ("gpu", "gpu_external"))
-        expect_source = "gpu_external" if expect_gpu else None
+        expect_source = None
         baseline_blocked_status = None  # gb-9：标杆被判废时携专门挂起码（区分「口径不可比」vs「标杆无效」vs「缺标杆」）
         if measure_only:
             # §5.10 只测不比：**一条基线取数路径都不走**（不读 _real_baseline.json、不解析 GPU
             # 标杆、不落 mock、更不进 _real_baseline_or_blocked）。baseline 恒 None 是这条路的
             # **正常态**，不是「缺标杆」——所以必须排在下面所有取基线分支之前。
-            baseline = None       # gpu_baseline 冲突已在函数入口 fail-closed 拒过（零副作用处）
-        elif gpu_baseline is not None:  # T8：解析外部 GPU 标杆(consumer 侧)；hard error→baseline None→挂起(非 PASS)
-            import gpu_baseline as gpubl
-            baseline, parse_report = gpubl.parse_gpu_baseline(gpu_baseline, caseset)
-            _dump(parse_report, "gpu_baseline_parse_report.json")
-            if baseline is None:  # gb-9：别把「有硬错的 baseline=None」等同「缺标杆」——据 parse 落正确挂起码
-                baseline_blocked_status = parse_report.get("blocked_status") or "blocked_gpu_baseline_invalid"
-            gpu_prov = {"source": expect_source, "path": gpu_baseline,
-                        "contract_version": parse_report.get("contract_version"),
-                        "parse_report": "gpu_baseline_parse_report.json",
-                        "hard_errors": parse_report.get("hard_errors", 0),
-                        "blocked_status": baseline_blocked_status}
+            baseline = None
         elif os.path.exists(real_bl):
             baseline = json.load(open(real_bl, encoding="utf-8"))
-        elif expect_gpu:  # 期待 GPU 标杆但没给 → 正规挂起（perf_compare 产 blocked_wait_gpu_benchmark）
-            baseline = None
         elif not is_acceptance:
             # 非验收通路（mock / catlass_mock / 被 adapter 降级的任何一轮）：mock 基线仍可用——
             # 这条路**物理上不写** acceptance.json / verdict.json，且 perf_compare + _stamp_dev 会给
@@ -1224,13 +1209,13 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
             report["simulation_plot"] = {"file": svg_name, "sha256": perf_sim_plot.sha256_of(svg_path)}
         _dump(_stamp_dev(report, is_acceptance, grade, non_acceptance_note),
               "perf_report.json")
-        print(f"[Task3 perf_compare] {report['summary']} (基线={report['baseline_source']})")
+        print(f"[Task2 perf_compare] {report['summary']} (基线={report['baseline_source']})")
         if report.get("acceptance_note"):
-            print(f"[Task3 perf_compare] ⚠ {report['acceptance_note']}")
+            print(f"[Task2 perf_compare] ⚠ {report['acceptance_note']}")
 
     ps = report["summary"]
     # 验收门（硬 blocker）：三级机器门读**落盘产物**独立复核（防跑子集/放宽阈值/混 e2e）。
-    # 无性能要求的算子不跑 task3 门（免因缺性能用例误挡）；精度未全过跳了 Task3 → 也不加 task3 门（评审 #4）。
+    # 无性能要求的算子不跑 task3 门（免因缺性能用例误挡）；精度未全过跳了 Task2 性能维 → 也不加 task3 门（评审 #4）。
     #
     # C5：非验收通路降级为**管路自检**，且只跑 task1（+task3）。两条理由，缺一不可：
     #   ① task2 门读 `verdict.json`，而该文件在非验收通路上物理不产 → 这级本来就无从跑起；
@@ -1307,12 +1292,8 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
             overall = _MEASURE_INCOMPLETE_OVERALL
         elif st == "exception":                          # T6 小shape例外：门已过(有图+交叉一致)→放行需人核
             overall, requires_human_cp = "PASSED_WITH_RISK", True
-        elif st == "blocked_wait_gpu_benchmark":         # T8 缺外部 GPU 标杆：正规挂起、非 fail
-            overall = "BLOCKED_WAIT_GPU_BENCHMARK"
-        elif st == "blocked_incomparable_timing_scope":  # T8 双边口径不可比（含 GPU 标杆内部混合 scope，gb-9）
+        elif st == "blocked_incomparable_timing_scope":
             overall = "BLOCKED_INCOMPARABLE_TIMING_SCOPE"
-        elif st == "blocked_gpu_baseline_invalid":       # gb-9 外部 GPU 标杆有硬错被判废（≠缺标杆）
-            overall = "BLOCKED_GPU_BASELINE_INVALID"
         elif st == _BLOCKED_WAIT_REAL_BASELINE:          # High#2 验收通路缺真实基线：正规挂起、非 fail 非 pass
             overall = _BLOCKED_WAIT_REAL_BASELINE_STATE
         elif ps.get("perf_cases"):
@@ -1374,11 +1355,9 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
             acc["perf_note"] = perf_mode.MEASURE_ONLY_NOTE
         if human_cp is not None:
             acc["human_cp"] = human_cp
-        if gpu_prov is not None:
-            acc["gpu_baseline"] = gpu_prov
         _assert_acceptance_form_allowed(spec, mode)     # ② 出口门（acceptance.json 侧），见该函数的 ⚠
         # spec 变更门 · ② 出口门（acceptance.json 侧）。同准入门口径：两处产物各校一次，
-        # 且**两次都带同一个入口锚**——Task3 与三级门跑在两次出口之间，那段时间同样够换 spec。
+        # 且**两次都带同一个入口锚**——Task2 性能与内部证据门跑在两次出口之间，那段时间同样够换 spec。
         spec_change_gate.assert_confirmed(spec_path, out_dir, _SPEC_GATE_EXIT,
                                           expected_sha256=entry_spec_sha256)
         _assert_staged_spec_matches_entry(out_dir, entry_spec_sha256)
@@ -1420,8 +1399,6 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
                "three_layer": three_layer}
         if human_cp is not None:
             dev["human_cp"] = human_cp
-        if gpu_prov is not None:
-            dev["gpu_baseline"] = gpu_prov
         final_file = _dump(dev, _DEV_SUMMARY_FILE)
     print(f"--- 产物在 {out_dir}/ ---（本次总结: {os.path.basename(final_file)}）")
     if not is_acceptance:
@@ -1466,7 +1443,6 @@ def main():
                          "「收据自称 gitcode_pr、事实其实是 local_snapshot」查不出来。"
                          "本次会把它按字节 staging 进 --out（连同 spec.json / golden.py），"
                          "CP-F 与事后单独复跑三级门都直接消费该副本。非验收通路（mock 等）不需要")
-    ap.add_argument("--gpu-baseline", default=None, help="外部 GPU 标杆 JSON（Task3 consumer 侧对比）")
     # ⚠ **别把 `--allow-experimental-form` 加回来。** 它 2026-08-06 随通路收敛删除：
     #   逃生阀放行的是「跑起来」，而 aclnnRoll 试跑实测——能跑起来的死路就会有人走进去
     #   （编排层把 runner_form 改成 cpp、跑满 1h47m，物理上不可能产出裁决）。
@@ -1475,8 +1451,7 @@ def main():
                     help="规范化任务书用例集 taskdoc_caseset.json；"
                          "仅 spec.precision.case_source='taskdoc' 时需要（两向不匹配由 gen_cases fail-closed）")
     a = ap.parse_args()
-    result = run(a.spec, a.mode, a.out, gpu_baseline=a.gpu_baseline,
-                 source_facts=a.source_facts,
+    result = run(a.spec, a.mode, a.out, source_facts=a.source_facts,
                  taskdoc_caseset=a.taskdoc_caseset)
     # CLI 退出码：0 干净 PASS / 2 PASSED_WITH_RISK(挂起转人工) / 1 其余（门未过/精度fail/性能未达/BLOCKED/needs_review）
     sys.exit(result["exit_code"])

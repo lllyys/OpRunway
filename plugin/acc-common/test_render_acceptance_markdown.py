@@ -83,7 +83,19 @@ def _docs(receipt):
         "verdict.json": {
             "op": "X", "standard": "s",
             "accuracy_summary": {"total": 1, "passed": 1, "failed": 0,
-                                 "overall_pass_rate": 1.0, "by_dtype": []},
+                                 "errored": 0, "uncertain": 0, "na": 0,
+                                 "overall_pass_rate": 1.0,
+                                 "by_dtype": [{"dtype": "float32", "count": 1,
+                                               "passed": 1, "failed": 0,
+                                               "errored": 0, "uncertain": 0,
+                                               "na": 0}],
+                                 "report": {
+                                     "overall": {"total": 1, "passed": 1,
+                                                 "failed": 0, "needs_review": 0,
+                                                 "na": 0},
+                                     "by_dtype": [{"dtype": "float32", "total": 1,
+                                                   "passed": 1, "failed": 0,
+                                                   "needs_review": 0, "na": 0}]}},
             "per_case": [{"case_id": "a", "精度": "pass", "判据": "ok"}],
         },
         "perf_report.json": {
@@ -676,6 +688,24 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
             self.assertIn("./repro/run_case.sh na-0", na_line)
             self.assertNotIn("audit_case.sh", na_line)
 
+    def test_precision_report_projection_is_required_and_self_consistent(self):
+        mutations = {
+            "missing report": lambda summary: summary.pop("report"),
+            "wrong report type": lambda summary: summary.__setitem__("report", []),
+            "drifted overall": lambda summary: summary["report"]["overall"].__setitem__(
+                "failed", 1),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as root:
+                docs = _docs(_receipt(_pr_source()))
+                mutate(docs["verdict.json"]["accuracy_summary"])
+                _write_docs(root, docs)
+                with self.assertRaisesRegex(
+                        R.acceptance_artifacts.FormalAcceptanceError,
+                        "accuracy_summary.report|精度报表"):
+                    R.write_report(root, allow_historical_read_only=True)
+                self.assertFalse(os.path.lexists(os.path.join(root, "验收报告.md")))
+
     def test_refuses_to_render_gate_failed_or_blocked_acceptance_as_formal_report(self):
         """renderer 是可单独调用的入口，不能绕过 workflow 的正式发布门。"""
         candidates = (
@@ -733,7 +763,14 @@ class RenderAcceptanceMarkdownTest(unittest.TestCase):
                 "verdict.json": {
                     "op": "X", "standard": "s",
                     "accuracy_summary": {"total": 1, "passed": 1, "failed": 0,
-                                         "overall_pass_rate": 1.0, "by_dtype": []},
+                                         "overall_pass_rate": 1.0, "by_dtype": [],
+                                         "report": {
+                                             "overall": {"total": 1, "passed": 1,
+                                                         "failed": 0,
+                                                         "needs_review": 0, "na": 0},
+                                             "by_dtype": [{"dtype": "float16", "total": 1,
+                                                           "passed": 1, "failed": 0,
+                                                           "needs_review": 0, "na": 0}]}},
                     "per_case": [{"case_id": "p0", "精度": "pass", "判据": "ok"}],
                 },
                 "perf_report.json": {

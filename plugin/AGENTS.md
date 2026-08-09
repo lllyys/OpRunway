@@ -80,13 +80,13 @@ _RUNNER_FORM_TO_MODE = {"cpp_extension": "cpp_extension"}
 > 的条目**照旧保留**——那张表回答「这条通路支持哪些 dtype」，准入白名单回答「这条通路能不能出裁决」，两个问题。
 > ⚠ **runner form 不决定性能基线**：`new_example` 那条路的默认对照物是**同法测的内置 TBE**
 > （见 `acc-common/new_example/run_on_npu.sh` 头注），`aclnn_py` / `cpp_extension` 则逐字按任务书配置；
-> 每份任务书的 baseline 仍须单独核实，别拿 form 反推（另见下文「编排硬约束」的 Task3 条）。
+> 每份任务书的性能取证口径仍须单独核实，别拿 form 反推（另见下文「编排硬约束」）。
 
 ## 硬门（最高规则）
 
 出**任何 pass 裁决前**，**必须**先过机器可校验验收门 `acc-common/validate_acceptance_state.py`
-（三级 `--stage task1|task2|task3`，读**落盘** `evidence.json` 独立复核：**防跑子集报 100%、防放宽阈值、防混 e2e 墙钟**）。
-验收门 `validate_acceptance_state.py` 已内嵌在 `run_workflow.py`（Task1→2→3 **全跑完后统一校门**；
+（三个内部证据门键 `--stage task1|task2|task3`（历史键名，不代表产品 Task3），读**落盘** `evidence.json` 独立复核：**防跑子集报 100%、防放宽阈值、防混 e2e 墙钟**）。
+验收门 `validate_acceptance_state.py` 已内嵌在 `run_workflow.py`（Task1→Task2（精度+性能） **全跑完后统一校门**；
 **注：批量驱动、非阶段间实时阻断**）。总结工件只按
 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一；只有 attempt 时不写
 `acceptance.json` 或 Markdown 验收报告。
@@ -188,7 +188,7 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   （须 `OPRUNWAY_CPP_EXTENSION_REAL=1` + 过 build/load/vendor receipt 门，✅ **当前唯一能产验收裁决的通路**）；
   `cpp` / `aclnn_py` ⛔ **已停止准入、派不出 mode，显式指定同样被拒**；
   `mock` / `catlass` / `catlass_mock` 派生不出、须显式指定，见上文「跑测 mode 的唯一真源」）
-  （**Task2 精度 + Task3 性能 + 三级门 task1/2/3 一次成**）→ `evidence.json`/`verdict.json`/`baseline.json`（有基线时）/`perf_report.json`，总结工件按 `acceptance_artifacts.formal_acceptance_allowed` 在 `acceptance.json` / `attempt_record.json` 间二选一；
+  （**Task2 的精度 + 性能 + 内部证据门一次成**；`task1/task2/task3` 只是历史 schema 键名）→ `evidence.json`/`verdict.json`/`baseline.json`（有基线时）/`perf_report.json`，总结工件按 `acceptance_artifacts.formal_acceptance_allowed` 在 `acceptance.json` / `attempt_record.json` 间二选一；
   FAIL → dispatch `rootcause`（先解耦「被测算子 vs harness」再归因）。
   ⚠ **正式验收不得按 `cpp` / `aclnn_py` 直接派生运行**：入口门 `_resolve_mode` 会当场拦下，加了逃生阀也只拿到开发级产物
   （无 `acceptance.json` / `verdict.json` 可引，上面那串产物根本不存在）。正确处置是**回 CP-B 把 spec 迁到 `cpp_extension`**
@@ -217,7 +217,7 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
 |---|---|---|---|---|
 | `acc-spec-extractor` | subagent | `acc-spec` | `extract_spec` / `refine_spec` | `extract_spec`：`task_doc`+`pr_facts` → `<op>.spec.json` + `task_pr_gaps`（多算子多 spec）；`refine_spec`：mock 门失败据 gate error 修 spec |
 | `acc-runner-dev` | subagent | `acc-runner` | `gen_golden` / `gen_runner` / `verify_runner` | **`gen_golden`：据任务书产 `<ops_root>/<op>/golden.py`（真值口径按两档链定、`GOLDEN_CONTRACT` 带引文锚；⚠ **PR/仓里的参考实现一律禁止作 golden 源**）——批 6 补上的「产出者」，此前 golden.py 全仓无人产**；`gen_runner`：据 spec + 算子自带 example 生成 `oprunway_<op>_runner.cpp` + 选构建路径（**锚定 example 不猜**，含 **scope gate**：ops-<族> 仓·aclnn 两段式·opp 安装型（含非 experimental 子树）；catlass（换构建体系）/ 非 aclnn 接口 / 双实现 / 未支持 dtype → BLOCKED/转 P3、不硬塞；⚠ **只对显式 `spec.runner_form == "cpp"` 派发**——`cpp_extension`（含未声明的缺省）走 `cpp_extension_codegen.py` 的官方 `NpuExtension` bundle、`aclnn_py` 无 per-op runner 源，两者都不派本 mode；⛔ 且 `cpp` 已停止准入（2026-08-06），`run_workflow` 连入口都不给，本 mode 实际已无下游，机制描述仅作历史保留）；`verify_runner`：验证-才-信，手算 golden 小用例逐元素比，未过不上真机（⚠ 同为**只对显式 `cpp`** 的历史路径；`aclnn_py` 形态无源可自检 → 跳过本 mode，改走 CP-C 的 harness 真机信任门，非免验证） |
-| `acc-verify-rootcause` | subagent | （无 atomic skill） | `verify_aclnn_harness` / `run_npu` / `rootcause` | `verify_aclnn_harness`：仅 `aclnn_py`（⛔ 已停止准入，本 mode 已无下游、仅作历史保留）的 CP-C 真机 harness 确定性小见证，产内容寻址收据、不产 acceptance 裁决；`run_npu`：真机 `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`（⚠ `--source-facts` 验收通路必给、缺席拒跑，路径由编排层随 dispatch 交下来；非验收通路不强制。`<mode>` **据 `spec.runner_form` 派生**，受控词表仍是 `{cpp, aclnn_py, cpp_extension}`（词表 ≠ 准入表）、**缺省 `cpp_extension`**：`cpp_extension`（或未声明）→ `cpp_extension`（✅ **唯一产验收裁决、也是唯一派得出 mode 的通路**）；`cpp` / `aclnn_py` ⛔ 已停止准入，派不出 mode、显式指定也被拒；`mock`/`catlass*` 派生不出、须显式指定），一次原子跑 Task2+3+三级门；`rootcause`：任何 FAIL 先「被测物自 build + 声明 dtype + 手算 golden」独立复现，解耦 op vs harness 再归因（不外发、不替 PR 作者修到底） |
+| `acc-verify-rootcause` | subagent | （无 atomic skill） | `verify_aclnn_harness` / `run_npu` / `rootcause` | `verify_aclnn_harness`：仅 `aclnn_py`（⛔ 已停止准入，本 mode 已无下游、仅作历史保留）的 CP-C 真机 harness 确定性小见证，产内容寻址收据、不产 acceptance 裁决；`run_npu`：真机 `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`（⚠ `--source-facts` 验收通路必给、缺席拒跑，路径由编排层随 dispatch 交下来；非验收通路不强制。`<mode>` **据 `spec.runner_form` 派生**，受控词表仍是 `{cpp, aclnn_py, cpp_extension}`（词表 ≠ 准入表）、**缺省 `cpp_extension`**：`cpp_extension`（或未声明）→ `cpp_extension`（✅ **唯一产验收裁决、也是唯一派得出 mode 的通路**）；`cpp` / `aclnn_py` ⛔ 已停止准入，派不出 mode、显式指定也被拒；`mock`/`catlass*` 派生不出、须显式指定），一次原子跑 Task2（精度+性能）并校内部证据门；`rootcause`：任何 FAIL 先「被测物自 build + 声明 dtype + 手算 golden」独立复现，解耦 op vs harness 再归因（不外发、不替 PR 作者修到底） |
 
 ### 编排硬约束（措辞与 3 subagent / SKILL 一致）
 
@@ -228,13 +228,14 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
 - **primary**：**可直接跑「无 NL 生成、无判定」的确定性脚本**（`fetch_source` / `validate_taskdoc_input` / `gen_cases --dry-run --ledger-out` /
   `validate_preparation_state` / `preflight_aclnn` / `validate_acceptance_state` / `check_manifest_sync`）；**不做 NL 生成 durable 工件**（spec / **golden.py** / runner 一律派 subagent）；
   **不自行判 pass/fail**；**首响应先加载 `acceptance-workflow` skill、禁裸调 subagent**。
-- **三级门是 `run_workflow.py` 内部**（一次性串 Task1→2→3、末尾统一校门，是**批量驱动、非阶段间实时阻断**），
+- **三级门是 `run_workflow.py` 内部**（一次性串 Task1→Task2（精度+性能）、末尾统一校门，是**批量驱动、非阶段间实时阻断**），
   **不是** orchestrator 分阶段单独调度；门 `FAILED` → 总体 `BLOCKED`、不出 pass 裁决。「不推进下一 Task/停在当前阶段」是 **agent 编排纪律**。
-- **Task3 blocked 路由**：`BLOCKED_WAIT_GPU_BENCHMARK`（缺外部 GPU 标杆）/ `BLOCKED_INCOMPARABLE_TIMING_SCOPE`（口径不可比）；
-  基线来源按任务书参考源（`spec.perf.baseline` 驱动，当前 aclnn 重写类 isclose/sign/equal/neg = `tbe`（`--mode new_example` 那条路，同法测的**内置 TBE**；⛔ 该 mode 已停止准入、无真机入口，其历史数据不进验收裁决）；
+- **Task2 性能取证**：当前 workflow 只接受同轮 NPU `msprof` kernel-only 实测；任务书中的 GPU 比值条款进入
+  `task_pr_gaps` 记为未验收，不等待、不接收也不消费 GPU 数据。基线来源字段只作任务书事实与历史工件解释
+  （当前 aclnn 重写类 isclose/sign/equal/neg 的旧 `new_example` 路径曾使用同法测的内置 TBE；⛔ 该 mode
+  已停止准入，其历史数据不进当前验收裁决）；
   **runner form 一律不决定 baseline**（`aclnn_py`、`cpp_extension` 都不）：实际对照物由任务书事实与用户确认共同落进 spec。框架级 Torch 或已确认“小算子拼接等价于 Torch 对应接口”走 `torch_npu`；任务书确实要求直接调用某 ACLNN 实现时才走 `aclnn_builtin`，从 CANN `libopapi.so` 直接调用并记录符号/库 provenance。不能只凭 API 名猜等价，也不重复证明用户已确认的事实；
-  所有 form 的性能 case 都必须来自同一份精度 caseset；A3 按全部输入物理载荷之和 `<=256 KiB` / `>256 KiB` 分小/大 shape，分类只分组、不免测；
-  catlass matmul 属对标类·synthetic·未定基线；proposed·未 settle，载重前需核）；GPU external 对比层 **consumer 侧已接入 pipeline**（`run_workflow --gpu-baseline` → `gpu_baseline` 校验 → `perf_compare` 对比），但**真实 GPU 标杆数据待外部提供**，缺数据即走 `BLOCKED_WAIT_GPU_BENCHMARK`。
+  所有 form 的性能 case 都必须来自同一份精度 caseset；A3 按全部输入物理载荷之和 `<=256 KiB` / `>256 KiB` 分小/大 shape，分类只分组、不免测。
 
 ## 约束
 

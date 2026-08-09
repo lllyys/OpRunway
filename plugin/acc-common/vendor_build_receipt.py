@@ -164,6 +164,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -192,36 +193,128 @@ class VendorBuildReceiptError(ValueError):
 VENDOR_TERMINAL_LOCK_FILE = ".oprunway-vendor-build.lock"
 
 
+class _TerminalArtifactTransaction:
+    """持有父目录 fd 的唯一终态发布器；路径复核与写入使用同一 inode。"""
+
+    def __init__(self, entries, guards):
+        self._entries = entries
+        self._guards = guards
+
+    def recheck(self):
+        try:
+            for guard in self._guards:
+                artifact_path_guard.assert_stable(guard)
+        except artifact_path_guard.ArtifactPathError as ex:
+            raise VendorBuildReceiptError(
+                f"产物目录在构建事务期间失稳：{ex}") from ex
+
+    def _entry(self, path):
+        try:
+            return self._entries[os.path.abspath(path)]
+        except KeyError as ex:  # pragma: no cover - 仅保护内部调用约束
+            raise VendorBuildReceiptError(f"终态路径未纳入事务：{path!r}") from ex
+
+    @staticmethod
+    def _assert_leaf(fd, leaf, path):
+        try:
+            st = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise VendorBuildReceiptError(
+                f"成功/失败终态落点已有符号链接或非普通文件：{path!r}")
+
+    def remove(self, path):
+        fd, leaf = self._entry(path)
+        self.recheck()
+        self._assert_leaf(fd, leaf, path)
+        try:
+            os.unlink(leaf, dir_fd=fd)
+        except FileNotFoundError:
+            return
+
+    def write(self, path, payload):
+        fd, leaf = self._entry(path)
+        try:
+            raw = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True,
+                              allow_nan=False) + "\n").encode("utf-8")
+        except (ValueError, TypeError) as ex:
+            raise VendorBuildReceiptError(f"写文件失败：{path}（{ex}）") from ex
+        tmp_leaf = f"{_TMP_PREFIX}{os.getpid()}-{os.urandom(8).hex()}"
+        tmp_fd = -1
+        published = False
+        try:
+            tmp_fd = os.open(
+                tmp_leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=fd)
+            with os.fdopen(tmp_fd, "wb") as out:
+                tmp_fd = -1
+                out.write(raw)
+                out.flush()
+                os.fsync(out.fileno())
+            self.recheck()
+            self._assert_leaf(fd, leaf, path)
+            os.replace(tmp_leaf, leaf, src_dir_fd=fd, dst_dir_fd=fd)
+            published = True
+            os.fsync(fd)
+            try:
+                self.recheck()
+            except VendorBuildReceiptError:
+                os.unlink(leaf, dir_fd=fd)
+                os.fsync(fd)
+                published = False
+                raise
+        except (OSError, VendorBuildReceiptError) as ex:
+            if isinstance(ex, VendorBuildReceiptError):
+                raise
+            raise VendorBuildReceiptError(f"写文件失败：{path}（{ex}）") from ex
+        finally:
+            if tmp_fd != -1:
+                os.close(tmp_fd)
+            if not published:
+                try:
+                    os.unlink(tmp_leaf, dir_fd=fd)
+                except FileNotFoundError:
+                    pass
+        return path
+
+
 @contextlib.contextmanager
 def _terminal_artifact_transaction(*paths):
     """以确定顺序锁住成功/失败终态所在目录，避免并发 emit 产生双终态。"""
     try:
-        guards = [artifact_path_guard.prepare_parent(path)
-                  for path in paths if path is not None]
+        pairs = [(os.path.abspath(path), artifact_path_guard.prepare_parent(path))
+                 for path in paths if path is not None]
     except artifact_path_guard.ArtifactPathError as ex:
         raise VendorBuildReceiptError(f"产物落点写不进去：{ex}") from ex
-    parents = sorted({guard["path"] for guard in guards})
+    guards_by_parent = {guard["path"]: guard for _path, guard in pairs}
+    guards = [guards_by_parent[parent] for parent in sorted(guards_by_parent)]
     with contextlib.ExitStack() as stack:
+        parent_fds = {}
         locks = []
-        for parent in parents:
-            lock = stack.enter_context(open(
-                os.path.join(parent, VENDOR_TERMINAL_LOCK_FILE),
-                "a+", encoding="utf-8"))
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            locks.append(lock)
+        for guard in guards:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            parent_fd = os.open(guard["path"], flags)
+            stack.callback(os.close, parent_fd)
+            parent_fds[guard["path"]] = parent_fd
+            lock_fd = os.open(
+                VENDOR_TERMINAL_LOCK_FILE,
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                0o600, dir_fd=parent_fd)
+            stack.callback(os.close, lock_fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            locks.append(lock_fd)
+        entries = {
+            path: (parent_fds[guard["path"]], os.path.basename(path))
+            for path, guard in pairs
+        }
+        transaction = _TerminalArtifactTransaction(entries, guards)
         try:
-            def recheck():
-                try:
-                    for guard in guards:
-                        artifact_path_guard.assert_stable(guard)
-                except artifact_path_guard.ArtifactPathError as ex:
-                    raise VendorBuildReceiptError(
-                        f"产物目录在构建事务期间失稳：{ex}") from ex
-            recheck()
-            yield recheck
+            transaction.recheck()
+            yield transaction
         finally:
             for lock in reversed(locks):
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def _remove_terminal_artifact(path):
@@ -233,15 +326,16 @@ def _remove_terminal_artifact(path):
     os.remove(path)
 
 
-def _publish_terminal_pair(*, receipt_path, failure_path, payload, failed):
+def _publish_terminal_pair(*, transaction, receipt_path, failure_path, payload, failed):
     """调用方已持有整轮锁；清相反终态并原子发布本轮唯一终态。"""
     for path in (receipt_path, failure_path):
         if path is not None:
-            _remove_terminal_artifact(path)
+            transaction.remove(path)
     if failed:
-        pre_execution_failure.write_vendor_attempt(failure_path, payload)
+        pre_execution_failure.validate_vendor_attempt(payload)
+        transaction.write(failure_path, payload)
         return failure_path
-    atomic_write(receipt_path, payload)
+    transaction.write(receipt_path, payload)
     return receipt_path
 
 
@@ -1637,12 +1731,12 @@ def atomic_write(path, payload):
     return path
 
 
-def _emit_generation(args, digest, target_request, *, recheck=lambda: None):
+def _emit_generation(args, digest, target_request, *, transaction):
     """调用方持有成功/失败终态整轮锁；覆盖 cleanup→build→publish。"""
-    if args.failure_out is not None:
-        recheck()
-        for path in (args.out, args.failure_out):
-            _remove_terminal_artifact(path)
+    transaction.recheck()
+    for path in (args.out, args.failure_out):
+        if path is not None:
+            transaction.remove(path)
     result = None
     try:
         result = run_build(
@@ -1665,7 +1759,7 @@ def _emit_generation(args, digest, target_request, *, recheck=lambda: None):
             pr_head_sha=args.pr_head_sha, prebuild_tree_matched=True)
     except VendorBuildReceiptError as ex:
         if args.failure_out is not None and digest is not None:
-            recheck()
+            transaction.recheck()
             attempt = pre_execution_failure.build_vendor_attempt(
                 snapshot_digest=digest, target_request=target_request,
                 failure_stage=ex.stage, error_code=ex.code,
@@ -1673,16 +1767,15 @@ def _emit_generation(args, digest, target_request, *, recheck=lambda: None):
                 build_result=(ex.build_result if ex.build_result is not None
                               else result))
             _publish_terminal_pair(
+                transaction=transaction,
                 receipt_path=args.out, failure_path=args.failure_out,
                 payload=attempt, failed=True)
         raise
-    if args.failure_out is not None:
-        recheck()
-        _publish_terminal_pair(
-            receipt_path=args.out, failure_path=args.failure_out,
-            payload=receipt, failed=False)
-    else:
-        atomic_write(args.out, receipt)
+    transaction.recheck()
+    _publish_terminal_pair(
+        transaction=transaction,
+        receipt_path=args.out, failure_path=args.failure_out,
+        payload=receipt, failed=False)
     return receipt
 
 
@@ -1821,12 +1914,9 @@ def main(argv=None):
         target_request["package_opp_root"] = args.package_opp_root
     if args.package_search_root is not None:
         target_request["package_search_root"] = args.package_search_root
-    if args.failure_out is not None:
-        with _terminal_artifact_transaction(args.out, args.failure_out) as recheck:
-            receipt = _emit_generation(
-                args, digest, target_request, recheck=recheck)
-    else:
-        receipt = _emit_generation(args, digest, target_request)
+    with _terminal_artifact_transaction(args.out, args.failure_out) as transaction:
+        receipt = _emit_generation(
+            args, digest, target_request, transaction=transaction)
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
     return 0
 

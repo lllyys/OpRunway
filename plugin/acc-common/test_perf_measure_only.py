@@ -14,8 +14,11 @@
 import copy
 import hashlib
 import json
+import inspect
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -610,11 +613,16 @@ class MeasureOnlyWorkflowTest(unittest.TestCase):
             W.run(path, mode="mock", out_dir=out)
         self.assertFalse(os.path.exists(out), "配置自相矛盾须停在零副作用处")
 
-    def test_gpu_baseline_argument_is_refused_under_measure_only(self):
-        path = _spec_file(self.d, "mo2.spec.json", _to_measure_only)
-        with self.assertRaisesRegex(SystemExit, "自相矛盾"):
-            W.run(path, mode="mock", out_dir=os.path.join(self.d, "out2"),
-                  gpu_baseline=os.path.join(self.d, "nope.json"))
+    def test_live_workflow_has_no_gpu_baseline_input_surface(self):
+        self.assertNotIn("gpu_baseline", inspect.signature(W.run).parameters)
+        proc = subprocess.run(
+            [sys.executable, W.__file__, _spec_file(self.d, "mo2.spec.json", _to_measure_only),
+             "--mode", "mock", "--out", os.path.join(self.d, "out2"),
+             "--gpu-baseline", os.path.join(self.d, "nope.json")],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("unrecognized arguments", proc.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "out2")))
 
 
 class RatioGatedUnaffectedTest(unittest.TestCase):

@@ -881,6 +881,56 @@ def _accuracy_report_view(rows, agg):
             "by_dtype": [one(row, row.get("dtype", _ACC_UNKNOWN_DTYPE)) for row in rows]}
 
 
+def validate_accuracy_report_view(summary, per_case=None):
+    """严格复核 renderer 消费的 canonical report 投影；缺失或漂移一律拒绝。"""
+    if not isinstance(summary, dict):
+        raise ValueError("accuracy_summary 须为 object")
+
+    def count(obj, key, where):
+        value = obj.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{where}.{key} 须为非负整数")
+        return value
+
+    report = summary.get("report")
+    if not isinstance(report, dict) or set(report) != {"overall", "by_dtype"}:
+        raise ValueError("accuracy_summary.report 缺失或字段集合非法")
+    overall = report.get("overall")
+    rows = report.get("by_dtype")
+    if not isinstance(overall, dict) or not isinstance(rows, list):
+        raise ValueError("accuracy_summary.report.overall/by_dtype 类型非法")
+    required = {"total", "passed", "failed", "needs_review", "na"}
+    if set(overall) != required:
+        raise ValueError("accuracy_summary.report.overall 字段集合非法")
+    overall_counts = {key: count(overall, key, "accuracy_summary.report.overall")
+                      for key in required}
+    if overall_counts["total"] != (overall_counts["passed"]
+                                    + overall_counts["failed"]
+                                    + overall_counts["needs_review"]):
+        raise ValueError("accuracy_summary.report.overall 可判桶计数不守恒")
+    row_sums = {key: 0 for key in required}
+    for idx, row in enumerate(rows):
+        where = f"accuracy_summary.report.by_dtype[{idx}]"
+        if not isinstance(row, dict):
+            raise ValueError(f"{where} 须为 object")
+        if set(row) != required | {"dtype"}:
+            raise ValueError(f"{where} 字段集合非法")
+        if not isinstance(row.get("dtype"), str) or not row["dtype"].strip():
+            raise ValueError(f"{where}.dtype 须为非空字符串")
+        item = {key: count(row, key, where) for key in required}
+        if item["total"] != item["passed"] + item["failed"] + item["needs_review"]:
+            raise ValueError(f"{where} 可判桶计数不守恒")
+        for key, value in item.items():
+            row_sums[key] += value
+    if row_sums != overall_counts:
+        raise ValueError("accuracy_summary.report.by_dtype 与 overall 计数不一致")
+    if per_case is not None:
+        if (not isinstance(per_case, list)
+                or len(per_case) != overall_counts["total"] + overall_counts["na"]):
+            raise ValueError("accuracy_summary.report 全量计数与 verdict.per_case 数量不一致")
+    return report
+
+
 def _acc_tol_of(policy):
     """从 canonical policy 取回显用 `(rtol, atol)`；非 allclose 类口径 → `(None, None)`。
 

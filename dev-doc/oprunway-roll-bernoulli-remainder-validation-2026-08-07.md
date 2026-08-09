@@ -1,6 +1,6 @@
 # Roll、Bernoulli、Remainder 三算子统一实测记录（2026-08-07）
 
-## 0 · Remainder current workflow v10–v14 问题记录（2026-08-09）
+## 0 · Remainder current workflow v10–v24b 问题记录（2026-08-09）
 
 本节只记录本轮 current workflow 的偏离、修复和遗留项。它不读取或复用下文 2026-08-07 的旧
 Remainder 验收产物；下文旧裁决继续只作 historical-read-only。这里的 A3 测试是 workflow/plugin
@@ -491,3 +491,14 @@ formal final2 根没有独立 `验收报告.md`，本记录不虚构该文件。
 | `rem.v24b.report` | `reports/remainder-v24b/验收报告.md` | `82e4fbbfcc517c3395565f44c8b8d1e3ea2abe79f6398f74b491546a79c5f176` |
 | `rem.v24b.report.renderer-8995393` | `reports/remainder-v24b/验收报告.renderer-8995393.md` | `6008d150ab688deaabb059d5bfddeb2c76ffdfb4b6d34a2e3cd1c11c8bbd4d1b` |
 | `rem.v24b.manifest` | `reports/remainder-v24b/sha256sums.txt` | `55ff298df86a98315af3cfb42602e188231a7f33d6fde315576a5daf72019ee7`（161/161 校验通过） |
+
+### 10.4 Push 前审修记录
+
+独立 push-gate 审计发现三处与算子身份无关的 workflow 缺口：live `--gpu-baseline` 仍可让正式路径
+消费外部 GPU 数据并产生等待 GPU 终态；renderer 对 canonical 精度 report 缺失或漂移会静默回落空统计；
+vendor build receipt 在只给单 `--out` 时绕过双终态事务，构建期间父目录被替换可能重定向提交。
+
+逐项反问：是不是泛化性差导致的？**是，三处都是同一事实存在两条入口或两套表达。** 应该做减法：
+删除 live GPU 输入和 consumer，任务书 GPU 比值只走已锚定 `measure_only` + unvalidated gap；renderer
+只接受 validator 同源且守恒的 `accuracy_summary.report`；所有 emit 统一使用固定父目录 fd 的终态事务。
+修复不增加 Remainder、dtype、shape、SoC 或目录特判，也不改 v24b 不可变 JSON 与正式 DUT 裁决。

@@ -2,6 +2,14 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-09 · push 前审修收敛 GPU 输入、报表投影与 vendor 终态事务
+
+- 独立代码审计发现三处通用接缝：正式 workflow 仍保留外部 GPU baseline 活入口；renderer 对
+  `accuracy_summary.report` 缺失/漂移会静默渲染 0；vendor receipt 单 `--out` 未复用持锁终态事务。
+  本轮都做减法：删除 live GPU CLI/consumer/终态，GPU 条款只准受控 `measure_only` + unvalidated gap；
+  renderer 调 validator 同源投影校验并 fail-closed；所有 vendor emit 共用固定父目录 fd 的原子发布。
+  未增加算子、dtype、SoC 或目录特判。
+
 ## 2026-08-09 · 精度报告统一消费 validator report SSOT
 
 - Remainder v24b 的 JSON 已确定为全量 129、可判 104（33 pass / 71 fail）、NA 25，
