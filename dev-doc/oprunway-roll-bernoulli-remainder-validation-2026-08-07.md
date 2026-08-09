@@ -13,6 +13,14 @@ Remainder 验收产物；下文旧裁决继续只作 historical-read-only。这�
 | v12 | 冻结回归第一次只打包 `plugin/`，缺仓根 `AGENTS.md`；同时 dry-run planner 的依赖期望漏记 `expected_exception_contract.py`。前者是测试分发闭包问题，后者是 fixture 未同步，不是 DUT 问题。 | 是，影响所有 plugin-only 冻结回归。 | **减法**：不改生产逻辑；冻结根 `AGENTS.md + plugin`，fixture 只补唯一依赖项。 | `7ebf71e`；定向 10/10，随后 full 2822/2822、compileall 通过。 |
 | v13 | multi-input expected-exception 分支调用 `_case_context_input_dtypes` 时把 `in_params` 与物化 `inputs` 反序，ndarray 被当参数描述调用 `.get()`，Task1 中断。 | 是，所有 multi-input + invocation context + marker 组合都会触发。 | **减法**：与普通分支统一参数顺序，不引入新 schema。 | `6ebff92`；多输入 marker 定向 RED 后 GREEN，原 129-profile caseset 实产 129 条。 |
 | v14 | expected-exception case 按最小形态不重复保存 `parameter_contract`，adapter 却把该冗余副本当准入必填，首 case 在 prepare 阶段被拒；其后还发现 plan 顶层 contract SHA 未核、共享 shard 门漏复算、staged host scalar value 可协同漂移。 | 是，根因是消费者依赖重复字段及单卡/多卡门不一致。 | **减法**：不向每 case 复制 profile；中央按现有 case/slot/manifest 生成 ordered binding digest，driver/evidence/共享门重算，staged profile 提供语义权威；显式旧 contract 仅作额外严格校验。 | 本记录所在提交；A3 RED 3/3（3 fail、0 error），GREEN 3/3，相关 329/329。日志 SHA-256：RED `6da35c03e19dd1a7e1928cd6e525cb02f1c733d7b26947cc2bfad16b9bcf4443`，GREEN `acfaf940ee9fe414867500fc53811687ef084a569529dbf144c895579ed60f97`，相关集 `2d6a95aa0106463c70ad456c255a318058a6f0f281cc63a3d90a0d4f77c7a7c0`。 |
+| v15 | 129/129 实际调用结束后，receipt 的执行隔离与 invocation accounting 正确记 33 produced/96 failed；语义 evidence 为 33 ok、37 expected_exception、59 execution_failed。旧 accounting 把语义 `expected_exception` 与传输 `failed` 当同层枚举逐字比较，首例即拒。 | 是，任何“预期失败即功能通过”的受控契约都会命中，和算子身份无关。 | **减法**：不新增逐 case plan 字段；accounting 复用 caseset 显式 contract 与 plan 已有顶层 ledger SHA，由唯一 normalize 对 contract、call_status、observed exception 做逐字校验后映射到 `failed`；caseset 在场时无条件双向核 ledger，不能借普通 `execution_failed` 状态跳过。 | 本记录所在提交；初始 A3 RED Ran 8、2 errors；审查补充 RED 为 1 test/2 subtest failures；最终 GREEN 9/9，相关 316/316。最终日志 SHA-256：补充 RED `e24eb38aa7c1def0e0f0102c45511288651e705ca624a808ad31e271907f6fe3`，GREEN `766372fca7f756188ca87260f2eec63c8ca98892d3c516ddea07c07ed0b2d23b`，相关集 `196fee2dee2dfdb05622cbb3d29fb68f32a63e129f5a3a3d20fe4de13a1bb584`。 |
+
+v15 accounting 修复后的独立正式顺序诊断还暴露了下一项、尚未混入本提交的 workflow bug：marker case
+在 input materialization 前失败，隔离 receipt 的 `call_status=null`；raw invocation plan slot 的
+shape/dtype 为 `null`，而 caseset 的对应输入已有实际 shape/dtype。此时 accounting 继续拒绝是正确的，
+不能放宽为“看到 expected_exception 字样就通过”。后续须单独 TDD，把执行 plan slots 从既有中央 ordered
+binding 规范化生成，并让 driver/materialization 消费同一投影；不得给 case 复制第二份契约，也不得按
+Remainder 特判。
 
 ### 0.1 尚未修复：prepare failure 没有 committed attempt
 

@@ -553,7 +553,7 @@ def build_invocation_accounting(plan, *, produced_case_ids, failed_case_ids):
     }
 
 
-def validate_invocation_accounting(plan, value, *, evidence=None):
+def validate_invocation_accounting(plan, value, *, evidence=None, caseset=None):
     """重放 plan.cases∪excluded 分母，并可与最终 evidence outcome 交叉。"""
     _layout_exact_keys(value, {
         "schema", "schema_version", "total", "planned", "produced", "failed",
@@ -627,16 +627,44 @@ def validate_invocation_accounting(plan, value, *, evidence=None):
     if set(evidence_by_id) != expected_ids:
         raise CppExtensionAdapterError(
             "evidence 未完整且唯一覆盖 receipt.invocation.case_records")
-    status_outcomes = {
-        "ok": "produced",
-        "execution_failed": "failed",
-        GOLDEN_UNAVAILABLE: "excluded",
-    }
-    for record in records:
-        status = evidence_by_id[record["case_id"]].get("status")
-        if status_outcomes.get(status) != record["outcome"]:
+    contracts_by_id = {}
+    has_expected_exception = any(
+        row.get("status") == "expected_exception"
+        for row in evidence_by_id.values())
+    if caseset is not None:
+        if not isinstance(caseset, dict):
             raise CppExtensionAdapterError(
-                f"{record['case_id']}: evidence.status={status!r} 与 "
+                "invocation accounting caseset 契约权威须为 object")
+        ledger = validate_caseset_expected_exceptions(caseset)
+        expected_ledger_sha = _canonical_sha(ledger) if ledger is not None else None
+        actual_ledger_sha = plan.get("expected_exception_ledger_sha256")
+        if ((ledger is None and "expected_exception_ledger_sha256" in plan)
+                or (ledger is not None and actual_ledger_sha != expected_ledger_sha)):
+            raise CppExtensionAdapterError(
+                "expected_exception accounting 的 plan ledger 与 caseset 漂移")
+        contracts_by_id = {
+            case.get("id"): (case.get("expected") or {}).get("expected_exception")
+            for case in caseset.get("cases") or [] if isinstance(case, dict)
+            and (case.get("expected") or {}).get("expected_exception") is not None
+        }
+    elif has_expected_exception:
+        raise CppExtensionAdapterError(
+            "expected_exception accounting 缺 caseset 契约权威")
+    for record in records:
+        cid = record["case_id"]
+        evidence_row = evidence_by_id[cid]
+        try:
+            normalized_outcome = expected_exception_contract.invocation_outcome(
+                evidence_row.get("status"),
+                contract=contracts_by_id.get(cid),
+                call_status=evidence_row.get("call_status"),
+                observed=evidence_row.get("exception"),
+            )
+        except ValueError as ex:
+            raise CppExtensionAdapterError(f"{cid}: {ex}") from ex
+        if normalized_outcome != record["outcome"]:
+            raise CppExtensionAdapterError(
+                f"{cid}: evidence.status={evidence_row.get('status')!r} 与 "
                 f"receipt invocation outcome={record['outcome']!r} 不一致")
     return value
 
@@ -2981,7 +3009,8 @@ def run_cpp_extension(caseset, work, defect_cases=None):
     _bind_layout_evidence(caseset, evidence, receipt)
     bind_execution_isolation_evidence(evidence, receipt["execution_isolation"])
     validate_invocation_accounting(
-        _strict_json(plan), receipt.get("invocation"), evidence=evidence)
+        _strict_json(plan), receipt.get("invocation"), evidence=evidence,
+        caseset=caseset)
     perf_plan, skipped = _write_perf_plan(caseset, work, evidence, receipt)
     perf_collection = None
     if perf_plan is not None:
@@ -3004,7 +3033,8 @@ def run_cpp_extension(caseset, work, defect_cases=None):
         _bind_layout_evidence(caseset, evidence, receipt)
         bind_execution_isolation_evidence(evidence, receipt["execution_isolation"])
         validate_invocation_accounting(
-            _strict_json(plan), receipt.get("invocation"), evidence=evidence)
+            _strict_json(plan), receipt.get("invocation"), evidence=evidence,
+            caseset=caseset)
         if not perf_mode.is_measure_only(perf_plan.get("mode", perf_mode.DEFAULT_MODE)):
             baseline = PM.build_baseline_document(
                 records, op=caseset.get("op"),
@@ -3091,7 +3121,8 @@ def run_cpp_extension_precision_only(caseset, work):
     _bind_layout_evidence(caseset, evidence, receipt)
     bind_execution_isolation_evidence(evidence, receipt["execution_isolation"])
     validate_invocation_accounting(
-        _strict_json(plan), receipt.get("invocation"), evidence=evidence)
+        _strict_json(plan), receipt.get("invocation"), evidence=evidence,
+        caseset=caseset)
     digest = _canonical_sha(receipt)
     for row in evidence:
         row["cpp_extension_receipt_sha256"] = digest

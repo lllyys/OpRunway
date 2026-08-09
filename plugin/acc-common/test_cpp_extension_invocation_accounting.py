@@ -6,11 +6,35 @@ import unittest
 
 import cann_version
 import cpp_extension_adapter as A
+import expected_exception_contract as E
 import validate_acceptance_state as G
 
 
-def _plan():
+def _expected_contract():
+    return E.contract_from_marker({
+        "schema": E.MARKER_SCHEMA,
+        "schema_version": E.MARKER_VERSION,
+        "reference": {
+            "class": "ZeroDivisionError", "phase": "golden",
+            "message": "integer division or modulo by zero",
+        },
+        "expected": {
+            "phase": "execute", "return_categories": ["stage1_nonzero"],
+            "output_written": False,
+        },
+    })
+
+
+def _call_status(stage1_ret=7):
     return {
+        "schema": "oprunway.cpp_extension_call_status", "schema_version": 1,
+        "stage1_ret": stage1_ret, "workspace_size": 0,
+        "executor_null": False, "stage2_called": False, "stage2_ret": None,
+    }
+
+
+def _plan(*, expected_exception=False):
+    plan = {
         "schema": "oprunway.cpp_extension_invocation_plan",
         "schema_version": 1,
         "cases": [
@@ -22,12 +46,35 @@ def _plan():
             "contract_bindings_sha256": "1" * 64,
         }],
     }
+    if expected_exception:
+        plan["expected_exception_ledger_sha256"] = A._canonical_sha(
+            A.validate_caseset_expected_exceptions(_caseset()))
+    return plan
 
 
-def _evidence():
+def _caseset(*, with_contract=True):
+    expected = {
+        "compare": "na", "standard": "na", "golden_path": None,
+    }
+    if with_contract:
+        expected["expected_exception"] = _expected_contract()
+    return {"cases": [{"id": "failed", "dims": ["功能"],
+                       "expected": expected}]}
+
+
+def _evidence(*, expected_exception=False):
+    failed = {"case_id": "failed", "status": "execution_failed"}
+    if expected_exception:
+        status = _call_status()
+        failed = {
+            "case_id": "failed", "status": "expected_exception",
+            "call_status": status,
+            "exception": E.observed_from_call_status(
+                status, output_written=False),
+        }
     return [
         {"case_id": "produced", "status": "ok"},
-        {"case_id": "failed", "status": "execution_failed"},
+        failed,
         {"case_id": "no-golden", "status": "golden_unavailable"},
     ]
 
@@ -109,6 +156,58 @@ class InvocationAccountingContractTest(unittest.TestCase):
                 A.validate_invocation_accounting(
                     _plan(), value, evidence=evidence)
 
+    def test_expected_exception_normalizes_to_failed_transport_outcome(self):
+        plan = _plan(expected_exception=True)
+        value = A.build_invocation_accounting(
+            plan, produced_case_ids=["produced"], failed_case_ids=["failed"])
+        A.validate_invocation_accounting(
+            plan, value, evidence=_evidence(expected_exception=True),
+            caseset=_caseset())
+
+    def test_expected_exception_forgery_is_rejected(self):
+        plan = _plan(expected_exception=True)
+        for label in ("receipt_produced", "missing_caseset", "missing_contract",
+                      "ledger_drift", "bad_call_status"):
+            current_plan = copy.deepcopy(plan)
+            produced, failed = ["produced"], ["failed"]
+            evidence = _evidence(expected_exception=True)
+            caseset = _caseset()
+            if label == "receipt_produced":
+                produced, failed = ["produced", "failed"], []
+            elif label == "missing_caseset":
+                caseset = None
+            elif label == "missing_contract":
+                caseset = _caseset(with_contract=False)
+            elif label == "ledger_drift":
+                current_plan["expected_exception_ledger_sha256"] = "0" * 64
+            else:
+                evidence[1]["call_status"]["stage2_called"] = True
+            value = A.build_invocation_accounting(
+                current_plan, produced_case_ids=produced, failed_case_ids=failed)
+            with self.subTest(label=label), self.assertRaises(
+                    A.CppExtensionAdapterError):
+                A.validate_invocation_accounting(
+                    current_plan, value, evidence=evidence, caseset=caseset)
+
+    def test_caseset_ledger_is_bound_even_for_execution_failed_evidence(self):
+        plan = _plan(expected_exception=True)
+        value = A.build_invocation_accounting(
+            plan, produced_case_ids=["produced"], failed_case_ids=["failed"])
+        A.validate_invocation_accounting(
+            plan, value, evidence=_evidence(), caseset=_caseset())
+        for mutation in ("missing", "drift"):
+            bad = copy.deepcopy(plan)
+            if mutation == "missing":
+                bad.pop("expected_exception_ledger_sha256")
+            else:
+                bad["expected_exception_ledger_sha256"] = "0" * 64
+            bad_value = A.build_invocation_accounting(
+                bad, produced_case_ids=["produced"], failed_case_ids=["failed"])
+            with self.subTest(mutation=mutation), self.assertRaises(
+                    A.CppExtensionAdapterError):
+                A.validate_invocation_accounting(
+                    bad, bad_value, evidence=_evidence(), caseset=_caseset())
+
 
 class InvocationAccountingAcceptanceGateTest(unittest.TestCase):
     def test_current_receipt_is_replayed_against_plan_and_evidence(self):
@@ -120,7 +219,7 @@ class InvocationAccountingAcceptanceGateTest(unittest.TestCase):
         }
         errors = []
         G._gate_cpp_extension_invocation_accounting(
-            _plan(), receipt, _evidence(), errors)
+            _caseset(with_contract=False), _plan(), receipt, _evidence(), errors)
         self.assertEqual(errors, [])
 
         for mutation in ("receipt", "evidence"):
@@ -133,13 +232,15 @@ class InvocationAccountingAcceptanceGateTest(unittest.TestCase):
                 bad_evidence[1]["status"] = "ok"
             errors = []
             G._gate_cpp_extension_invocation_accounting(
-                _plan(), bad_receipt, bad_evidence, errors)
+                _caseset(with_contract=False), _plan(), bad_receipt,
+                bad_evidence, errors)
             self.assertTrue(errors, mutation)
 
     def test_historical_v1_receipt_does_not_invent_invocation_fields(self):
         errors = []
         G._gate_cpp_extension_invocation_accounting(
-            _plan(), {"schema_version": 1}, _evidence(), errors)
+            _caseset(with_contract=False), _plan(), {"schema_version": 1},
+            _evidence(), errors)
         self.assertEqual(errors, [])
 
 

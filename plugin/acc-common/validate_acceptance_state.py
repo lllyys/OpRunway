@@ -1855,7 +1855,8 @@ def _gate_cpp_extension_tensor_shape_attrs(caseset, receipt, ev_list, errs, *, p
             errs.append(f"{cid}: 非 structure case 不得冒领 structure evidence")
 
 
-def _gate_cpp_extension_invocation_accounting(plan, receipt, ev_list, errs):
+def _gate_cpp_extension_invocation_accounting(
+        caseset, plan, receipt, ev_list, errs):
     """当前 receipt 必须把 plan.cases∪excluded 分母逐 case 接到 evidence outcome。"""
     if not isinstance(receipt, dict):
         errs.append("cpp_extension receipt 非 object，无法核 invocation 分母账")
@@ -1866,7 +1867,8 @@ def _gate_cpp_extension_invocation_accounting(plan, receipt, ev_list, errs):
         return  # schema 主门负责报错。
     try:
         cpp_extension_adapter.validate_invocation_accounting(
-            plan, receipt.get("invocation"), evidence=ev_list)
+            plan, receipt.get("invocation"), evidence=ev_list,
+            caseset=caseset)
     except cpp_extension_adapter.CppExtensionAdapterError as ex:
         errs.append(f"cpp_extension receipt.invocation 分母账未闭合：{ex}")
 
@@ -1936,7 +1938,8 @@ def _gate_precision_work_dir(report_root, work, caseset, envelope, staged_spec,
         return receipt
     _gate_cpp_extension_layout(caseset, receipt, rows, errs, manifest=manifest, plan=plan)
     _gate_cpp_extension_tensor_shape_attrs(caseset, receipt, rows, errs, plan=plan)
-    _gate_cpp_extension_invocation_accounting(plan, receipt, rows, errs)
+    _gate_cpp_extension_invocation_accounting(
+        caseset, plan, receipt, rows, errs)
     try:
         cpp_extension_adapter.validate_multi_input_evidence_bindings(
             caseset, plan, rows, receipt)
@@ -2115,7 +2118,8 @@ def _gate_cpp_extension_receipt(d, caseset, envelope, ev_list, errs, source_fact
         caseset, receipt, ev_list, errs, manifest=manifest, plan=plan)
     _gate_cpp_extension_tensor_shape_attrs(
         caseset, receipt, ev_list, errs, plan=plan)
-    _gate_cpp_extension_invocation_accounting(plan, receipt, ev_list, errs)
+    _gate_cpp_extension_invocation_accounting(
+        caseset, plan, receipt, ev_list, errs)
     try:
         isolation = cpp_extension_adapter.validate_execution_isolation(
             plan, receipt.get("execution_isolation"))
@@ -2832,6 +2836,7 @@ def _gate_multi_card_receipt(d, caseset, evidence, errs, source_facts_path):
                 raise multi_card_shards.ShardContractError(
                     f"{sid}: evidence cpp_extension receipt 摘要漂移")
             _gate_cpp_extension_invocation_accounting(
+                projected,
                 _load_json_file(os.path.join(work, "cpp_extension_invocation_plan.json")),
                 validated, envelope.get("evidence"), shard_errors)
             plan = _load_json_file(os.path.join(work, "cpp_extension_invocation_plan.json"))

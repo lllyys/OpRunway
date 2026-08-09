@@ -165,6 +165,31 @@ def normalize_observed(value, where="observed_exception"):
     return rebuilt
 
 
+def invocation_outcome(status, *, contract=None, call_status=None,
+                       observed=None):
+    """把语义 evidence 状态唯一映射为 driver 传输 outcome。"""
+    static = {
+        "ok": "produced",
+        "execution_failed": "failed",
+        "golden_unavailable": "excluded",
+    }
+    if status in static:
+        return static[status]
+    if status != "expected_exception":
+        raise ValueError(f"evidence.status={status!r} 非受控值")
+    if contract is None:
+        raise ValueError("expected_exception 缺 caseset 受信 contract")
+    actual = normalize_observed(observed)
+    rebuilt = observed_from_call_status(
+        call_status, output_written=actual["output_written"])
+    if actual != rebuilt:
+        raise ValueError("expected_exception observed 与 call_status 漂移")
+    matched, reason = compare(contract, actual)
+    if not matched:
+        raise ValueError(f"expected_exception contract 不匹配：{reason}")
+    return "failed"
+
+
 def compare(contract, observed):
     expected = normalize_contract(contract)["expected"]
     if observed is None:

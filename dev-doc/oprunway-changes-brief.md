@@ -2,6 +2,16 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-09 · Expected-exception 与 invocation accounting 统一语义映射
+
+- Remainder v15 已真实执行 129/129 后，receipt 正确把 expected-exception 调用记为传输层 `failed`，
+  evidence 则正确保留语义状态 `expected_exception`，旧 accounting 把两个枚举逐字比较而阻断首例。
+  现由唯一中央映射复用 caseset 的显式 expected-exception contract 与 plan 顶层 ledger SHA；只有 contract、
+  `call_status` 和 observed exception 逐字自洽时，语义状态才规范化为传输层 `failed`。未新增逐 case 契约副本，
+  caseset 在场时即使 evidence 仍是普通执行失败，也会双向校 plan 顶层 ledger 的缺失/漂移。
+  未改 driver、gen_cases 或算子。A3 初始 RED 为 2 errors，审查补充 RED 为 2 个 subtest failures，
+  最终 GREEN 9/9、相关 316/316；本批未运行 DUT。
+
 ## 2026-08-09 · 多输入 expected-exception 去除逐 case 重复契约
 
 - Remainder v14 的 129-case caseset 中，expected-exception case 没有重复保存完整
