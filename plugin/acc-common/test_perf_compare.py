@@ -7,7 +7,7 @@ import perf_compare as pc
 import gen_cases
 import gpu_baseline as gb
 import _golden_fixture as _gf
-setUpModule = _gf.install        # golden 去引擎化：gen_cases 需 <ops_root>/<op>/golden.py（ADR 0011）
+setUpModule = _gf.install        # gen_cases 需 <ops_root>/<op>/golden.py
 tearDownModule = _gf.uninstall
 
 

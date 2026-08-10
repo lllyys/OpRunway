@@ -11,7 +11,7 @@
 # ⚠ 副作用先确认（CLAUDE.md #1/#3）：build/run/msprof 改 catlass 工作副本、写 run 子目录 → **须显式
 #    OPRUNWAY_CATLASS_REAL=1 opt-in**，否则 fail-fast、零副作用。rm 只限受控前缀内的专属 run 子目录。
 # ⚠ 假通过零容忍：BIN/msprof 关键步失败一律非零退出并打印 OPRUNWAY_NPU_FAILED，**绝不 || true 吞失败后照报 DONE**。
-# ⚠ catlass **无 builtin-TBE 分母** → 不测内置基线、不写 _real_baseline；perf 分母走外部 GPU（gpu_external，ADR0006）。
+# ⚠ catlass **无 builtin-TBE 分母** → 不测内置基线、不写 _real_baseline；正式 workflow 不消费外部 GPU 数据。
 #
 # 入参经环境变量（零硬编码，私有路径不入仓）：
 #   OPRUNWAY_CATLASS_REAL 必须 =1（副作用 opt-in 门）

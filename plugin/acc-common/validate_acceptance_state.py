@@ -3623,7 +3623,7 @@ def _recompute_case_multi(np, precision_policy, d, cid, case, exp, prec, errs):
 
 def _gate_precision_provenance(d, ev_list, exp_by_id, errs, case_by_id=None):
     """A 方案总入口：证明 evidence.precision.metrics **确实从磁盘产物算出**（属**证据可信**，不重判 verdict——
-    canon 定「门只管证据可信完整、pass/fail 归 validator」，重算校验的是「evidence 声称的数字是否真从产物算出」，
+    当前契约规定「门只管证据可信完整、pass/fail 归 validator」，重算校验的是「evidence 声称的数字是否真从产物算出」，
     仍属证据可信，pass/fail 由 validator 依阈值裁）。
 
     硬纪律：numpy 缺失 / 产物缺失 / sha 不符 / 重算不符 一律 FAILED（mock 也不放宽），**绝不静默 skip**——否则

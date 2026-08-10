@@ -1,20 +1,19 @@
 """P3 · catlass repo-adapter —— CatlassBasicMatmul：spec → NPU 精度+性能 evidence（纯采集、不判定）。
 
-canon 归属（trust tier 已核）：
-- 这是 repo-adapter.md【canonical】三接入模式里的 **generated_harness**（我们自造 bin-IO 调用壳去包
-  catlass 自带 example 的 kernel），非新造第 4 种模式；代码以 `harness_kind="generated_harness"` 落字段。
-- 落 generated-harness-responsibilities.md【canonical】4 职责：bin-IO shim / layout 字节契约（X_logical 喂
+当前实现归属：
+- 这是 repo adapter 的 **generated_harness**（我们自造 bin-IO 调用壳去包 catlass 自带 example 的
+  kernel）；代码以 `harness_kind="generated_harness"` 落字段。
+- generated harness 承担 4 项职责：bin-IO shim / layout 字节契约（X_logical 喂
   golden、X_bin 按声明 layout 摆物理字节，分两份造·禁共用 reshape）/ 固定 seed 数据注入 golden 同源 /
   性能测量栈双边同 timing_scope。
-- 机制依 catlass-acceptance-mechanics.md【canonical/verified】：`build.sh <example> -DCATLASS_ARCH` →
+- 机制由当前 adapter 实现：`build.sh <example> -DCATLASS_ARCH` →
   `./output/bin/<example> m n k deviceId` 打印 `Compare success/failed`（**只是仓内 smoke，非验收结论**）；
   golden=CPU host float32；性能=msprof op kernel-only Task Duration(us)。msTuner 是调优、非验收。
-- ADR0002【canonical】：精度=真 NPU out vs 我们 numpy golden；性能=msprof kernel-only；catlass 自带对比只作 smoke。
-- ADR0009【canonical】：一套泛化 workflow + 每仓一薄 adapter；catlass 差异是「数据」（CATLASS_PROFILE 承载）。
-- 路线 A/B（catlass-to-aclnn-bridge.md）本 todo **不落真桥**，走「复用 example 工程 + 换入 bin-IO runner」最低风险路径。
+- 精度=真 NPU out vs 我们 numpy golden；性能=msprof kernel-only；catlass 自带对比只作 smoke。
+- 一套泛化 workflow + 每仓一薄 adapter；catlass 差异是「数据」（CATLASS_PROFILE 承载）。
 
 ⚠ 边界（诚实）：
-- 判定不归本模块 —— adapter 只产 evidence，pass/fail 归 validator/perf_compare/validate_acceptance_state（ADR0007）。
+- 判定不归本模块 —— adapter 只产 evidence，pass/fail 归 validator/perf_compare/validate_acceptance_state。
 - CatlassBasicMatmul 是 catlass **库自带 example**，无真实任务书↔PR → demo spec 为 **synthetic**，本模块产的一切
   「PASS」仅证明管路/门接通，**非 NPU 验收裁决**（acceptance BLOCKED-on-real-NPU / BLOCKED-on-real-provenance）。
 - **C5 non-acceptance 不变量（2026-07-22 落地）**：上一条以前只是**注释 + 返回字典里的两个字面量**，谁删掉都
@@ -477,8 +476,7 @@ _VERDICT_SHAPED_KEYS = ("verdict", "overall", "state", "exit_code", "acceptance"
 def assert_non_acceptance(ev, mode="catlass_mock"):
     """C5 不变量：catlass envelope 必须自带 non-acceptance 标记，否则 **fail-closed 拒绝往下走**。
 
-    为什么要有这个函数：canon 页 [[Synthetic catlass demo cannot forge a PASS acceptance]]（`proposed`）
-    的两条依据里，「mock 只产 development-grade」以前**仅体现为 run_catlass_mock 返回字典里的两个字面量**
+    为什么要有这个函数：「mock 只产 development-grade」以前**仅体现为 run_catlass_mock 返回字典里的两个字面量**
     ——将来谁把标记删掉、或改成 acceptance_candidate，没有任何东西会喊。本函数把那句文本承诺升成代码断言，
     mock 通路自身（返回前）与 CLI 落盘出口（写文件前）各复核一次。
     ⚠ **两条 CLI 出口共用本函数**：`catlass_adapter.main` 与 `repo_adapter.main`（后者的 MODES 里同样有
@@ -487,10 +485,10 @@ def assert_non_acceptance(ev, mode="catlass_mock"):
     校验三条（任一不满足即 raise，绝不落一份「看起来像验收」的产物）：
     ① `evidence_grade` ∈ 已知枚举；`NON_ACCEPTANCE_MODES` 里的通路恒 `development`；
     ② development 级必须带 `NON-ACCEPTANCE` 的 `acceptance_note`（人读一眼就知道不是验收结论）；
-    ③ envelope 不得出现裁决形状的键（verdict/overall/state/exit_code/…）——adapter 只采集、不裁决（ADR0007）。
+    ③ envelope 不得出现裁决形状的键（verdict/overall/state/exit_code/…）——adapter 只采集、不裁决。
 
     ⚠ 边界：本函数只保证「envelope 不冒充裁决」，**不**保证 evidence 来自真 NPU（那归 provenance/门），
-    也**不**替下游三级门做 evidence_grade 纵深校验（那仍是未决的设计取舍，见同一 canon 页末段）。
+    也**不**替下游三级门做 evidence_grade 纵深校验。
     """
     if not isinstance(ev, dict):
         raise ValueError(f"catlass evidence envelope 非对象（{type(ev).__name__}）——拒绝落盘")
@@ -510,7 +508,7 @@ def assert_non_acceptance(ev, mode="catlass_mock"):
     forged = [k for k in _VERDICT_SHAPED_KEYS if k in ev]
     if forged:
         raise ValueError(
-            f"catlass envelope 出现裁决形状的键 {forged}——adapter 只采集不裁决（ADR0007），拒绝落盘")
+            f"catlass envelope 出现裁决形状的键 {forged}——adapter 只采集不裁决，拒绝落盘")
     return ev
 
 
@@ -580,7 +578,7 @@ def run_catlass(caseset, work_dir, defect_cases=None):
     ⚠⚠ **本轮不跑真机**（CLAUDE.md #1/#3 副作用门 + generated_harness 高风险首跑须人工确认）。
     本地可跑的部分（arch 探测 / materialize / manifest）已就绪；真正 build/run/msprof 硬阻塞于
     950 真机(arch3510)+VPN+人工确认。为防误触发 ssh，默认 fail-fast，须显式 OPRUNWAY_CATLASS_REAL=1 opt-in。
-    catlass **无 builtin-TBE 分母** → 不写 _real_baseline，perf 分母走外部 GPU（gpu_external，ADR0006）。
+    catlass **无 builtin-TBE 分母** → 不写 _real_baseline；历史 GPU parser 仅作非正式兼容，正式 workflow 不消费其数据。
     evidence_grade=acceptance_candidate（真机 evidence 就绪后才谈裁决）。
     """
     ctx = discover(caseset, work_dir)
@@ -607,9 +605,9 @@ def _run_catlass_real(ctx):
         "③首跑 generated_harness 人工确认。届时用 catlass/run_on_catlass_npu.sh + catlass_parse 解析真 CSV。")
 
 
-# ============================================================ 子任务⑥：外部 GPU 基线 schema 对齐（对接点）
-# 注：gpu_baseline.py 由并行任务建，本模块**不建同名文件**，只定义 adapter 侧对接点 load_external_baseline。
-# GPU 标杆最小字段契约（ADR0006，供外部 Task 3 产数据时对齐）：
+# ============================================================ 历史兼容：外部 GPU 基线 schema
+# 注：本 parser 不属于正式 workflow；正式 workflow 按仓根 AGENTS.md §6.1 不消费 GPU 数据。
+# 历史 GPU 标杆最小字段契约：
 GPU_BASELINE_CONTRACT = [
     "case_id", "device", "dtype", "shape", "attrs", "timing_scope", "warmup", "iters",
     "sync", "statistic", "unit", "value", "tool", "clock", "power", "data_transfer_included"]
@@ -618,7 +616,7 @@ GPU_BASELINE_CONTRACT = [
 def load_external_baseline(path, perf_case_ids):
     """校验外部 GPU 基线并转成 perf_compare 可吃的 baseline（子任务⑥）。
 
-    校验：source 存在、scope==kernel_only（不符→blocked，ADR0006）、per_case 每项 case_id+us 有限>0；
+    校验：source 存在、scope==kernel_only（不符→blocked）、per_case 每项 case_id+us 有限>0；
     **规则可机检**：全部性能用例必须有 baseline（缺→blocked）；extras 忽略并告警。
     成功 → {source, scope, per_case:[{case_id,us,env}]}（perf_compare 同 schema）；
     失败 → 抛 BaselineBlocked（带 reason），绝不静默放过。
@@ -633,7 +631,7 @@ def load_external_baseline(path, perf_case_ids):
     if not src:
         raise BaselineBlocked("外部 GPU 基线缺 source")
     scope = bl.get("scope")
-    if scope != "kernel_only":       # scope 不符即 blocked（ADR0006：双边同 scope）
+    if scope != "kernel_only":       # scope 不符即 blocked（双边同 scope）
         raise BaselineBlocked(f"BLOCKED_INCOMPARABLE_SCOPE：baseline scope={scope!r} ≠ kernel_only")
     per_in = bl.get("per_case")
     if not isinstance(per_in, list):

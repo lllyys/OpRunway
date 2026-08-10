@@ -1,23 +1,22 @@
 # acc-rootcause 详规 · FAIL 解耦纪律
 
-> **定位 guard**：acc-rootcause 是 P2 规划的**纪律 skill**，**尚未接入 live 流、无脚本判定、不产 verdict**（裁决唯一归确定性脚本链，ADR 0007）。本文件只装归因纪律。载重前逐个 Read 引用页并**按 tier**（两页均 proposed·未 settle → 存疑、先核，勿当事实）。
+> **定位 guard**：acc-rootcause 是 P2 规划的**纪律 skill**，**尚未接入 live 流、无脚本判定、不产 verdict**（裁决唯一归确定性脚本链）。本文件只装归因纪律。
 
-## 0. canon 依据（按 tier）
+## 0. 当前实施依据
 
-| 页 | tier | 承载 |
+| 来源 | 承载 |
 |---|---|---|
-| `decisions/verify-spec-pr-correspondence-before-acceptance.md` | **proposed·未 settle** | 最上游前提：先验证任务书↔PR 对应本身（issue 号 + 落点目录，非名字面匹配） |
-| `decisions/root-cause-decoupling-before-attribution.md` | **proposed·未 settle** | 归因前先用被测物自己的东西解耦「被测物 vs harness」 |
-| `decisions/task-spec-authoritative-over-pr.md` | （按 tier 载重前核） | 任务书权威（前提是先确认它对应被测 PR） |
-
-> ⚠ 两页均 proposed：作方法论指针可用，但**不当已 settle 事实**；若与后续 review 冲突以 review 为准。
+| 仓根 `AGENTS.md` §1 | 调用方断言任务书与源码对应；任务书是语义与验收权威，源码/op_def 是 ABI 与被测事实 |
+| 仓根 `AGENTS.md` §5.8、§7 | FAIL 归因前复核内容锚、build、ELF、加载对象、调用和输出写入，再解耦 DUT 与 harness |
+| `source_provenance.py`、`vendor_build_receipt.py` | caller-trusted 输入与 current build receipt 的确定性契约 |
+| `validate_acceptance_state.py` | facts → build → ELF → execution 的正式复核门 |
 
 ## 1. 归因层级（从上游到下游，逐层不可跳）
 
 ```
-① 任务书↔PR 对应本身对不对?        ← 最上游（Equal 血教训：漏这层，下游全废）
-   ├─ 配错 / 空任务 → 裁决作废，停；识别并跳过「未验收空任务」
-   └─ 对应成立 → 进 ②
+① 本轮内容与执行绑定是否闭合?        ← 任务书摘要 / content_anchor / build / ELF / 调用 / 输出
+   ├─ 缺失或漂移 → 停止归因，按证据门产物报告
+   └─ 绑定成立 → 进 ②
 ② 被测物 vs 我们的 harness（解耦）  ← 别凭 signature 猜
    ├─ 换内置 op 对照 / 跑自带 example / 查 vendor 制品 / dtype 逐个测 / 自 build+手算 golden
    └─ 定位到「被测物缺陷」或「harness 缺陷」
@@ -25,12 +24,12 @@
 ④ 程序口径（是否算官方验收失败/上报） ← 未确认前留口、不外发
 ```
 
-## 2. 对应校验的三条证据（①层）
+## 2. 内容绑定的三组证据（①层）
 
-1. **改动落点目录**：PR 的 `target_dir` 对上任务书声明的算子目录（机器可比）；
-2. **issue / 追踪号**：NL 读任务书与 PR title 的追踪号（**非算子名字面匹配**）；
-3. **用户确认**：证据摆给用户拍板。
-三者合断 → `confirmed` 才进解耦；`mismatch`/`empty_task` → 停、出程序结论（非 pass/fail）。
+1. **输入绑定**：任务书摘要、源码 `content_anchor` 与 CP-A `source_facts.json` 一致；
+2. **构建与加载绑定**：build 前重算 anchor、current vendor receipt、实际 ELF 与双符号 owner 一致；
+3. **执行绑定**：调用、case、输出写入和 evidence 能闭合到同一轮内容链。
+调用方给定的任务书/源码关联不再由 workflow 重新鉴权；locator 元数据只作 transport observation。
 
 ## 3. 解耦四对照（②层）· 全 0 输出决策树
 
@@ -51,7 +50,7 @@
 - **源码「一行诊断」须真机重编坐实**：读源码得「一处即修」是假设；补上重编可能暴露更深缺陷（「一行修好」被证伪）。
 - **技术判定 vs 程序口径分开记**：技术判定可下（实测缺陷）；程序口径（官方验收/上报）未确认前留口、不外发、**不来回改口**。
 - **职责边界**：把缺陷定性清楚即可，不替 PR 作者修到底。
-- **裁决归脚本**：解耦结论供理解；pass/fail 仍由 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py` 出（ADR 0007）。
+- **裁决归脚本**：解耦结论供理解；pass/fail 仍由 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py` 出。
 
 ## 5. 反面教训
 

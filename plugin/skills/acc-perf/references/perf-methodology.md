@@ -1,16 +1,15 @@
 # acc-perf 详规 · 性能验收方法论
 
-> **定位 guard**：acc-perf 是 P2 规划的原子能力 skill，**尚未接入 live 流、不落盘、不算达标**（比值/裁决/仿真块唯一归 `perf_compare.py`；渲染归 `perf_sim_plot.py`，只画不判）。本文件只装方法论；**不复制阈值**（`target_ratio` / 小 shape 阈值取自 spec）。载重前逐个 Read 引用页并**按 tier**。
+> **定位 guard**：acc-perf 是 P2 规划的原子能力 skill，**尚未接入 live 流、不落盘、不算达标**（比值/裁决/仿真块唯一归 `perf_compare.py`；渲染归 `perf_sim_plot.py`，只画不判）。本文件只装方法论；**不复制阈值**（`target_ratio` / 小 shape 阈值取自 spec）。
 
-## 0. canon 依据（按 tier）
+## 0. 当前实施依据
 
-| 页 | tier | 承载 |
+| 来源 | 承载 |
 |---|---|---|
-| `decisions/0006-performance-timing-scope.md`（ADR 0006） | **proposed·未 settle** | timing_scope 必填枚举、双边同口径、默认 kernel-only、msprof op |
-| `decisions/0007-deterministic-validator.md`（ADR 0007） | **canonical** | 比值/达标只从确定性脚本出 |
-| `architecture/task3-state-machine.md` | **canonical** | 结论态：`PASSED / FAILED_PERFORMANCE / BLOCKED_WAIT_GPU_BENCHMARK`（边角 `PASSED_WITH_RISK` / `BLOCKED_INCOMPARABLE_TIMING_SCOPE`） |
-| `architecture/perf-baseline-by-reference-source.md` | **proposed·未 settle** | 基线随任务书参考源（TBE/GPU/同 op），非固定 gpu_external；载重前必核 |
-| `architecture/generated-harness-responsibilities.md` | **canonical** | 性能测量栈职责#4：双边同 scope、warmup/iters/median 自实现、比值归 validator |
+| 仓根 `AGENTS.md` §6.1、§6.3 | workflow 只做 NPU 性能取证；不运行或消费 GPU 数据；未实测条款结构化挂账 |
+| `acc-common/perf_compare.py` | timing_scope、比值、例外和性能裁决的确定性实现 |
+| `acc-common/perf_evidence_contract.py` | 性能证据字段与 scope 契约 |
+| `acc-common/run_workflow.py`、`validate_acceptance_state.py` | 正式工件生成与证据完整性门 |
 
 ## 1. timing_scope 枚举与不可比路由
 
@@ -24,11 +23,11 @@
 | 改动类型 | 基线 | 备注 |
 |---|---|---|
 | 重写类（参考内置 TBE） | TBE，任务书给定比例（无劣化 / ≥ 给定百分比） | 当前接入 aclnn 类算子 isclose/sign/equal/neg 均 `baseline=tbe`；catlass matmul 属对标类(synthetic demo、未定基线)——「均」仅限这批重写类 |
-| 移植类（对标 GPU 库 cuSPARSE/cuBLAS…） | GPU（A100，任务书给定比例区间） | GPU 标杆数据由外部 Task 3 给 |
+| 移植类（任务书以 GPU 库作比较口径） | NPU msprof 实测；GPU 比值条款记 `UNVALIDATED` | workflow 不连接、运行或消费 GPU 数据，不等待 GPU 标杆 |
 | 加 dtype 类 | 同 op 其他 dtype 不劣化 | 新 dtype 不劣于同宽既有 dtype |
 | ACLNN / 小算子拼接 | 按任务书事实或用户确认选 `aclnn_builtin` 或 `torch_npu` | 直接 ACLNN 才用前者；已确认等价于 Torch 接口则用后者，不重复证明 |
 
-> ⚠ canon 张力（待 review 裁）：`acceptance-contract-evidence-chain` 的 `perf_baseline_source` 当前默认 `gpu_external`，与「基线随任务书参考源」有张力；真机三算子任务书原文均写 TBE、GPU 非必需 → 建议 review 裁定这批社区任务 GPU 对比层为可选。本 skill 只陈述、**不单方改 canonical**。
+任务书中的比值、绝对门限或吞吐条款未实测时，必须进入 `task_pr_gaps` 标 `UNVALIDATED`；有 NPU 绝对耗时不等于这些条款达标。
 
 ## 3. 小 shape 例外门（T6 已实现，数据驱动）
 
@@ -56,14 +55,13 @@
 - **仿真图**：`report['simulation']` 由 `perf_compare` **独家产**（唯一事实源）；`perf_sim_plot.py` 只据此渲染 SVG（阈值线/容差带数据驱动 + XML escape），**不二次推断**。`gate_task3` 强制「有图 + 例外行↔simulation 交叉一致 + SVG sha256 + 路径钉死」才放行；删图/篡改/对不上 → FAILED。
 - **映射（有门前置）**：status=exception 且 **`gate_task3` 过**（图齐备 + 例外行↔simulation 交叉一致 + SVG sha 钉死）→ 编排层 `PASSED_WITH_RISK` + 挂人工 CP，**绝不偷偷把达标置 True**；**门未过 → `BLOCKED(验收门未过)`、不 PASSED_WITH_RISK**（run_workflow 先判门、后判例外态）。
 
-## 4. Task3 blocked 路由（GPU consumer，T8 已实现）
+## 4. 性能 gap 与不可比路由
 
-- `BLOCKED_WAIT_GPU_BENCHMARK`：任务书要 GPU 基线但缺外部 GPU 标杆 → 正规挂起、**非 fail**、`baseline=None` 不崩。触发 = `--gpu-baseline` 或 `spec.perf.baseline∈{gpu,gpu_external}`。
 - `BLOCKED_INCOMPARABLE_TIMING_SCOPE`：双边 scope 不一致 → 不可比、不出结论。
-- **GPU external 对比层**：`gpu_baseline.py` + `gpu_baseline_contract.json`（15 字段）解析外部标杆，按 case_id + 完整输入签名交叉核对、集合恰好覆盖；真数据由外部给，NPU↔GPU 对比在拿到数据前走 wait，**绝不显 PASS**。
+- **GPU 比值条款**：不进入 workflow 输入或产物；未实测时写入 `task_pr_gaps` 标 `UNVALIDATED`，不得据 NPU 绝对耗时宣称已满足，也不得因缺 GPU 数据阻塞 NPU 侧执行。
 
 ## 5. ⚠ 能力边界与待办（诚实）
 
-- **可判·已实现**：ratio+达标、scope 一致性门、小 shape 例外（T6）、GPU 标杆 consumer（T8）。
-- **未有真值**：真机小 shape 真值、真 GPU 标杆数据——mock/占位仅证管路接通，**非真验收数字**。
+- **可判·已实现**：可执行 NPU 基线的 ratio+达标、scope 一致性门、小 shape 例外（T6）。
+- **未有真值**：真机小 shape 数据——mock/占位仅证管路接通，**非真验收数字**。
 - **红线**：本 skill 只描述口径；比值/达标/blocked 态归 `perf_compare.py`。`exception`（PASSED_WITH_RISK）**不当 pass**、blocked **不当 fail**。

@@ -3,7 +3,7 @@
 Layer 1 确定性脚本（工具中立、op 驱动）。据 spec（参数 arity/attrs、verify_mode、dtype 集、可选 attr_matrix）
 × dtype × shape × 泛化生成用例，用参考实现算 golden（逐算子分发；golden_source 记来源，不设全局假设）。
 支持 IsClose/Sign/Equal/Neg（样例 golden 在 `samples/golden/<op>/golden.py`）。**加算子 = 用户侧 `<ops_root>/<op>/golden.py`**——**elementwise 通路**不含内置 golden 值、按算子加载
-（ADR 0011：golden 去引擎化，`proposed`）。⚠ 非「引擎零内置算子」：catlass_adapter 的 matmul golden 与本文件
+（golden 外置）。⚠ 非「引擎零内置算子」：catlass_adapter 的 matmul golden 与本文件
 `_BF16_EXACT_OPS` 是两处已知例外。
 确定性：固定种子 SEED，无时间/系统随机。
 
@@ -623,7 +623,7 @@ def _assert_equal_nan_effective(golden_impl, inputs, attrs, cid, case_context=No
 
 
 # ---- golden 参考实现（逐算子；inputs=按 spec 顺序的**逻辑**输入数组，attrs=属性字典） ----
-# ADR 0011（golden 去引擎化，proposed）：**本 elementwise 通路**不含内置 golden 值——按算子从用户侧
+# **本 elementwise 通路**不含内置 golden 值——按算子从用户侧
 # `<ops_root>/<op>/golden.py` 加载。⚠ 非「引擎零内置算子」：catlass_adapter 的 matmul golden 与上面的
 # `_BF16_EXACT_OPS` 仍是引擎里的算子知识（两处已知例外，如实记账）。
 # 4 个历史内置 golden（IsClose/Sign/Equal/Neg）迁 `samples/golden/<op>/golden.py` 作只读参考（非运行时回退靶）。
@@ -646,7 +646,7 @@ def load_golden(op):
     刻意改 arity 而非另开函数：老式 `a, b, c = load_golden(op)` 会当场 ValueError 炸掉，
     **不会**静默丢掉输出形状声明（fail-closed 优于静默降级）。
 
-    **本加载路径不含内置 golden 值、绝不回退内置/样例**（ADR 0011 决策 1/2）：缺 golden.py → **fail-closed** 报错。
+    **本加载路径不含内置 golden 值、绝不回退内置/样例**：缺 golden.py → **fail-closed** 报错。
     （⚠ 仅指 elementwise 通路；catlass 通路与 `_BF16_EXACT_OPS` 仍是引擎里的算子知识。）
     golden.py 须导出 legacy `golden_fn(inputs, attrs) -> ndarray`，或在 `GOLDEN_CONTRACT.invocation`
     显式声明受控 ABI 后导出 `golden_fn(inputs, attrs, *, case_context) -> ndarray`；另须导出
@@ -662,7 +662,7 @@ def load_golden(op):
     现有 7 份样例里 **4 份 elementwise 不导出**（IsClose/Sign/Equal/Neg，走缺省同形语义）、
     **3 份形变类导出**（Im2col / UpsampleNearest3d / UpsampleNearestExact2d）——后者是 C1 的正例，可照抄。
 
-    安全（golden.py 会被 import 执行 = 执行用户/生成的 Python，性质同 runner.cpp、同信任级，ADR 0011 决策 6）：
+    安全（golden.py 会被 import 执行 = 执行用户/生成的 Python，性质同 runner.cpp、同信任级）：
     `op` 经 `_check_id` 校验、路径由已校验 op 名定死；**软链分两层挡**——`<ops_root>/<op>` **目录段**由
     `repo_adapter.op_dir()` 的 `_reject_symlink_segments` 逐段拒，`golden.py` **最终文件**那一层由本函数
     `os.path.islink` 拒（⚠ 旧注释只写「拒符号链接」，读起来像已全防住：`islink` 只看最终组件，目录段软链
@@ -5166,7 +5166,7 @@ def _attach_entry_contract_bindings(case, entry):
 def gen_cases(spec, work_dir, taskdoc_caseset=None):
     op = spec["op"]
     # golden 按算子从用户侧 <ops_root>/<op>/golden.py 加载（elementwise 通路不内置 golden 值、缺则 fail-closed；
-    # ADR 0011 决策 1/2/5，proposed）。⚠ 非「引擎零内置算子」——catlass_adapter 的 matmul golden 与本文件 :34
+    # 缺则 fail-closed）。⚠ 非「引擎零内置算子」——catlass_adapter 的 matmul golden 与本文件 :34
     # 的 _BF16_EXACT_OPS 是两处已知例外，仍是引擎里的算子知识。
     # golden_source 来自加载的 GOLDEN_SOURCE 元数据（决策 5），下游门继续校 oracle_source==映射(golden_source)。
     in_params = [p for p in spec["params"] if p["io"] == "in"]

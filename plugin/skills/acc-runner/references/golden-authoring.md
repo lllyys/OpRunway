@@ -18,8 +18,8 @@ generated golden 必须自行捕获已知语义异常，并显式返回
 **为什么这个 mode 存在**：`gen_cases.load_golden` 缺 golden.py 就 fail-closed，而在批 6 之前
 **全流程没有任何一环产它**——`gen_cases` 的报错文本、`acc-casegen` skill 都写着「由 acc-spec/acc-runner-dev 产」，
 但那两个 agent 的 dispatch 表里都没有这件事。Pdist 首跑撞的就是这个洞（人肉补 golden.py 才走得下去）。
-批 6 把产出者钉在本 agent：golden.py **是 Python 代码**、性质同 runner.cpp（会被 import 执行、同信任级，
-ADR 0011 决策 6），归产代码的 agent；`acc-spec-extractor` 产的是 JSON 数据、且带禁读纪律，不承担这件事。
+批 6 把产出者钉在本 agent：golden.py **是 Python 代码**、性质同 runner.cpp（会被 import 执行、同信任级），
+归产代码的 agent；`acc-spec-extractor` 产的是 JSON 数据、且带禁读纪律，不承担这件事。
 
 ---
 
@@ -122,7 +122,7 @@ def _require_torch():
         raise RuntimeError(
             "golden 需 torch(CPU) 作 CPU 标杆参考、但未安装/不可用。请安装 CPU 版："
             "pip install torch --index-url https://download.pytorch.org/whl/cpu。"
-            "不静默回退——确定性红线（ADR 0011 决策 4）。") from e
+            "不静默回退——确定性红线。") from e
 
 GOLDEN_SOURCE = "torch torch.<api>"            # 首 token 供 oracle_source 映射（torch→torch_ref）
 

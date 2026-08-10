@@ -16,7 +16,7 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 
 ## 0. 铁律（贯穿全流程，每段都受约束）
 
-1. **判定唯一归确定性脚本链**：`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）；正式命名只认 `acceptance_artifacts.formal_acceptance_allowed`，不在 skill/agent 展开条件。谓词为 true 时写正式 `acceptance.json`，为 false 时只写 `attempt_record.json`（`acceptance_verdict=null`），两者互斥。**编排层（primary）与 subagent 都不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**（ADR 0007）——这是「不得自行判定、只能引用」，**不是「绝不提 pass/fail」**：可以复述脚本判出的 pass/fail，但不能自己判。
+1. **判定唯一归确定性脚本链**：`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）；正式命名只认 `acceptance_artifacts.formal_acceptance_allowed`，不在 skill/agent 展开条件。谓词为 true 时写正式 `acceptance.json`，为 false 时只写 `attempt_record.json`（`acceptance_verdict=null`），两者互斥。**编排层（primary）与 subagent 都不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**——这是「不得自行判定、只能引用」，**不是「绝不提 pass/fail」**：可以复述脚本判出的 pass/fail，但不能自己判。
 
 2. **primary 边界**：primary **可直接跑「无 NL 生成、无判定」的确定性脚本**——`fetch_source.py`（取材 + `source_facts.json`）、`validate_taskdoc_input.py`（只复核任务书输入校验工件的结构与绑定、机械派生阻断清单）、`gen_cases.py --dry-run --ledger-out <case_plan.json>`（契约自检 + durable 计划账本）、`validate_preparation_state.py`（只判非真机准备是否可复用）、`preflight_aclnn.py`（只做 PR header↔spec slots 静态对账）、`validate_acceptance_state.py`（复核门）、`check_manifest_sync.py`（漂移门），用 Bash 幕后跑。primary **不做 NL 生成的 durable 工件**（spec / runner 一律派 subagent），**不自行判 pass/fail**（归确定性脚本链），首响应先加载本 skill、**禁裸调 subagent**。
 
@@ -24,7 +24,7 @@ description: OpRunway 算子验收编排的 CP-A..E 检查点状态机——定�
 
 4. **内部证据门在 `run_workflow.py` 内部**：`run_workflow.py` **一次性串 Task1→Task2（精度+性能）**，末尾**统一校门**（`validate_acceptance_state` 的历史 schema 键 `task1/task2/task3`，读**落盘** evidence 独立复核；这些键不代表产品 Task3）——是**批量驱动、非阶段间实时阻断**，**不是** orchestrator 分阶段单独调度的 stage。门结果随候选交给 `acceptance_artifacts.formal_acceptance_allowed`，由该唯一谓词决定 formal / attempt 二选一；本 skill 不展开命名条件。「不推进下一 Task / 停在当前阶段」是 **agent 编排纪律**，不是脚本里的实时闸。
 
-5. **对外单一对话入口、脚本幕后**（canon conversational-agent-sole-delivery-form·proposed·未 settle，载重前需核）：用户给出调用方已配对的“任务书 + 被测来源”；二者关联由调用方断言。输入的在线/本地形态及 URL/repo/fork/ref/head 只作 transport 诊断，不另行追问身份。脚本幕后执行；缺执行环境事实时再问，副作用照常先确认。
+5. **对外单一对话入口、脚本幕后**：用户给出调用方已配对的“任务书 + 被测来源”；二者关联由调用方断言。输入的在线/本地形态及 URL/repo/fork/ref/head 只作 transport 诊断，不另行追问身份。脚本幕后执行；缺执行环境事实时再问，副作用照常先确认。
 
 ---
 
@@ -423,7 +423,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
       没人核过就沿用默认并如实挂账，**谁都不猜**（AGENTS.md 5.1）。
 - **产出**：**无手写 runner 源**——codegen 的官方 bundle + invocation plan +
   `vendor_build_receipt.py`（`snapshot-digest` → `emit` 两步）产的 `vendor-build-receipt.json`（上条）。
-- **路由**：**vendor 构建收据不满足 → 停在 CP-C、不上正式 Task2**；域内 scope 不成立（非标准 aclnn 两段式 / 有 opaque descriptor / 未支持的接口能力）→ 停在 CP-C，出程序结论（转 P3 / 需扩 adapter），不进 CP-D。`cpp_extension` 的 `vendor_build_receipt` **产不出来**（build 退出码非 0 / `--library` 在构建窗口内没被动过 / package 零/多候选 / target closure 不闭合 / build 后源码子树漂移）同样**停在 CP-C**，不带着一份说不清来源的 ELF 上真机。producer 本身不读取 CP-A facts；因此其 failure artifact 只有在唯一 finalizer 再与原始 facts/spec 严格对账后，才能成为标准 workflow attempt。构建收据与 failure attempt 都是代码硬门，不是 agent 口头纪律；算子 acceptance 裁决仍只来自 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py`（ADR 0007）。
+- **路由**：**vendor 构建收据不满足 → 停在 CP-C、不上正式 Task2**；域内 scope 不成立（非标准 aclnn 两段式 / 有 opaque descriptor / 未支持的接口能力）→ 停在 CP-C，出程序结论（转 P3 / 需扩 adapter），不进 CP-D。`cpp_extension` 的 `vendor_build_receipt` **产不出来**（build 退出码非 0 / `--library` 在构建窗口内没被动过 / package 零/多候选 / target closure 不闭合 / build 后源码子树漂移）同样**停在 CP-C**，不带着一份说不清来源的 ELF 上真机。producer 本身不读取 CP-A facts；因此其 failure artifact 只有在唯一 finalizer 再与原始 facts/spec 严格对账后，才能成为标准 workflow attempt。构建收据与 failure attempt 都是代码硬门，不是 agent 口头纪律；算子 acceptance 裁决仍只来自 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py`。
 
 <!-- oprunway:retired-begin -->
 #### CP-C 历史区：`cpp` / `aclnn_py` 的旧分流
@@ -772,7 +772,7 @@ primary 每次派 subagent，都按此六段给全，**不省略**（subagent �
 
 ## 6. Task2 性能取证与 blocked 路由
 
-- **基线来源按任务书参考源**（`spec.perf.baseline` 驱动；canon perf-baseline-by-reference-source·proposed·未 settle，载重前需核）：
+- **基线来源按任务书与正式 spec**（`spec.perf.baseline` 驱动；同时遵守仓根 `AGENTS.md` §6 的 NPU-only 口径）：
   - **重写类** → `tbe`（无劣化 / `target_ratio` 按任务书；当前接入的 aclnn 重写类 isclose/sign/equal/neg 均 `perf.baseline=tbe`，catlass matmul 属对标类·synthetic demo·未定基线——「均」勿外推为全局，见 `samples/specs/`）；
   - **移植类任务书中的 GPU 比值** → 只作待验收条款记录，不进入 workflow 输入；
   - **加 dtype 类** → 同 op 不劣化；

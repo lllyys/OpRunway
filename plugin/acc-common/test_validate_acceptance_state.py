@@ -10,7 +10,7 @@ import validate_acceptance_state as G
 import validator as V              # C1 输出形状对账 / C4 dtype 冲突裁决在 validator，与本门配套钉死
 import _golden_fixture as _gf
 import _spec_fixture as SF         # 样例/夹具 spec 已无 case_target（2026-08-06 删历史沿用值）→ 测试侧注预算
-setUpModule = _gf.install        # golden 去引擎化：gen_cases/run_workflow 需 <ops_root>/<op>/golden.py（ADR 0011）
+setUpModule = _gf.install        # gen_cases/run_workflow 需 <ops_root>/<op>/golden.py
 tearDownModule = _gf.uninstall
 
 
@@ -391,7 +391,7 @@ class GateTest(unittest.TestCase):
         self.assertTrue(any("dtype_tested" in e and "不符" in e for e in self._errs("task1")))
 
     def test_task1_dtype_bad_type_errors_not_crash(self):
-        """抗坏输入（codex#1）：case 的 dtype 为非字符串(dict) → 记 error、不 TypeError 崩（canon 抗坏输入门不崩）。"""
+        """抗坏输入（codex#1）：case 的 dtype 为非字符串(dict) → 记 error、不 TypeError 崩。"""
         cs = json.loads(json.dumps(CASESET))
         cs["cases"][0]["inputs"][0]["dtype"] = {"bad": 1}
         cs["dtype_required"] = ["float32", "float16"]

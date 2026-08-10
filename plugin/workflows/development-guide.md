@@ -2,23 +2,23 @@
 
 > **这是材料仓，不是 skill。** `plugin/workflows/` 无 `SKILL.md`（判据 = 有无 SKILL.md）——它装「怎么把一个 NPU 算子从『任务书+PR』走到验收裁决」的人读蓝图、分阶段 dispatch 模板（`task-prompts.md`）、已验证算子案例（`archive_ops/`），供人 / subagent 组合参考。**承载状态机的单数 workflow 是 skill `skills/acceptance-workflow/SKILL.md`**（CP-A..E 状态机脑子），本蓝图是它的人读伴侣、不重复其权威。
 >
-> **判定唯一归确定性脚本链**（`validator.py` 精度 + `perf_compare.py` 性能 + `validate_acceptance_state.py` 三级完整性门，ADR 0007）；正式发布边界随后决定写 `acceptance.json` 还是无裁决语义的 `attempt_record.json`。本蓝图与所有原子 skill 都**不自行判 pass/fail**，只描述怎么做。
+> **判定唯一归确定性脚本链**（`validator.py` 精度 + `perf_compare.py` 性能 + `validate_acceptance_state.py` 三级完整性门）；正式发布边界随后决定写 `acceptance.json` 还是无裁决语义的 `attempt_record.json`。本蓝图与所有原子 skill 都**不自行判 pass/fail**，只描述怎么做。
 
 ## 0. 输入 / 输出
 
 - **输入**：算子任务书（md 本地路径或链接）+ PR 链接。
-- **输出**：`reports/<op>/` 下共有 `correspondence.json` / `<op>.spec.json` / `caseset.json` / `evidence.json` / raw `verdict.json` / `baseline.json`（**仅有基线时**）/ `perf_report.json`；总结工件只按 `acceptance_artifacts.formal_acceptance_allowed` 二选一：true 产 `acceptance.json` + 中文报告，false 产 `attempt_record.json`（`acceptance_verdict=null`）。
+- **输出**：`reports/<op>/` 下共有 `source_facts.json` / `<op>.spec.json` / `caseset.json` / `evidence.json` / raw `verdict.json` / `baseline.json`（**仅有基线时**）/ `perf_report.json`；总结工件只按 `acceptance_artifacts.formal_acceptance_allowed` 二选一：true 产 `acceptance.json` + 中文报告，false 产 `attempt_record.json`（`acceptance_verdict=null`）。
 - **产物只落用户 CWD 的 `reports/`**；私有主机名 / 目标机路径（远程连时即远端路径）走 `OPRUNWAY_*` 环境变量、**不入仓**；副作用（clone/build/真机跑测/对外动作）先列计划、点头再做。
 
 ## 1. 六步验收流水线（对齐 AGENTS.md 硬门 + design §2）
 
 ```
-①取材+对应校验 → ②任务书→spec → ③spec→用例集(ST) → ④runner 锚定+自检 → ⑤真机跑测(精度+性能) → ⑥三级门+裁决+报告
+①取材+内容锚定 → ②任务书→spec → ③spec→用例集(ST) → ④runner 锚定+自检 → ⑤真机跑测(精度+性能) → ⑥三级门+裁决+报告
 ```
 
 | 步 | 干什么 | 确定性脚本 / 原子 skill（方法论） | 关键纪律 |
 |---|---|---|---|
-| ① 取材 + 对应校验 | 任务书/PR → 中立 JSON；验证「任务书↔PR 对应」本身 | `fetch_source.py`；方法论 `acc-rootcause`§0 | **配错/空任务 → 下游作废**（Equal 血教训）；对应靠 issue 号+落点目录、非名字面匹配 |
+| ① 取材 + 内容锚定 | 任务书/源码 → 中立 JSON；绑定 caller-trusted 声明、任务书摘要与源码 `content_anchor` | `fetch_source.py`、`source_provenance.py` | 调用方断言二者对应；locator 只作 transport observation，不重新鉴权 |
 | ② 任务书 → spec | 抽 `<op>.spec.json` + `task_pr_gaps` | `acc-spec` skill（NL）+ `fetch_source.py`（取材） | 缺项落 gaps 不臆造；dtype 只填支持子集、余入 gaps |
 | ③ spec → 用例集 | 产覆盖「功能/精度/性能」的 caseset | `acc-casegen`（展开规则）+ `gen_cases.py`（确定性落盘，仅注册算子） | 无原语匹配 → `UNCOVERED_PRIMITIVE`，禁静默归并 |
 | ④ 调用侧锚定 + 自检 | 产被测调用侧代码，验证-才-信（`cpp_extension`（缺省·验收路径）= codegen 官方 Extension bundle + build/load/vendor 收据；`cpp` = 手写 per-op runner；`aclnn_py` = 无 per-op 源、走 harness 信任门） | `acc-runner`（NL 锚定 example）+ `run_on_npu.sh` | aclnn 入口/dtype/顺序**抠 example 不猜**；自检不满足停在此、不上真机 |
@@ -29,9 +29,9 @@
 
 蓝图层面的 CP 语义（权威状态机在 `skills/acceptance-workflow/SKILL.md`，此处只作导航）：
 
-- **CP-A 前置**（primary 亲自）：取材 + 对应校验（落 `correspondence.json`）+ 环境确认（**执行形态：就地跑还是远程连** / NPU 通不通 / 目标机按任务书 `适配硬件` × op_def `AddConfig` 双源定）。⚠ 两种执行形态平级：就地跑（会话本身已在目标机或其 NPU 容器里）设 `OPRUNWAY_TARGET=local`、`OPRUNWAY_SSH_HOST` 免填、`.oprunway/real-machine.env` **不需要存在**；远程连才从该文件取 SSH alias / 容器名 / 远端工作根。**不得**以缺该文件为由拒绝启动验收；它**存在时**必须读 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`（只读保留现场，未登记 ≠ 可随意清理）。⚠ `OPRUNWAY_TARGET` 只管 `repo_adapter` / `aclnn_adapter` 的传输层，**不是验收通路的形态门**——`cpp_extension` 的传输就是 `OPRUNWAY_CPP_EXTENSION_DRIVER_JSON` 那串 argv 本身，声明就地跑时须由编排层自己核它不带 `ssh` / `docker exec -H` 等跨机前缀。详见仓根 `AGENTS.md` §5.3 与 `skills/acceptance-workflow/SKILL.md` CP-A（权威在那两处）。`status=confirmed` 才进 CP-B；`mismatch`/`empty_task` → 出程序结论、停跑。
+- **CP-A 前置**（primary 亲自）：取材 + caller-trusted 声明/任务书摘要/源码 `content_anchor` 校验 + 环境确认（**执行形态：就地跑还是远程连** / NPU 通不通 / 目标机按任务书 `适配硬件` × op_def `AddConfig` 双源定）。调用方给定任务书与源码即断言二者对应，URL/repo/fork/ref/head 只作 transport observation，不按 issue、目录或 head 再鉴权。⚠ 两种执行形态平级：就地跑（会话本身已在目标机或其 NPU 容器里）设 `OPRUNWAY_TARGET=local`、`OPRUNWAY_SSH_HOST` 免填、`.oprunway/real-machine.env` **不需要存在**；远程连才从该文件取 SSH alias / 容器名 / 远端工作根。**不得**以缺该文件为由拒绝启动验收；它**存在时**必须读 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`（只读保留现场，未登记 ≠ 可随意清理）。⚠ `OPRUNWAY_TARGET` 只管 `repo_adapter` / `aclnn_adapter` 的传输层，**不是验收通路的形态门**——`cpp_extension` 的传输就是 `OPRUNWAY_CPP_EXTENSION_DRIVER_JSON` 那串 argv 本身，声明就地跑时须由编排层自己核它不带 `ssh` / `docker exec -H` 等跨机前缀。详见仓根 `AGENTS.md` §5.3 与 `skills/acceptance-workflow/SKILL.md` CP-A。
   ⚠ **别问「mock 还是真机」、也别问「走哪条 runner form」**（对齐 `acceptance-workflow/SKILL.md` §0.5）：验收统一按 `cpp_extension` 走——`--mode` 据 `spec.runner_form` 派生（受控词表 `{cpp, aclnn_py, cpp_extension}`，**缺省 = `cpp_extension`**），不是让用户挑的选项；`mock`/`catlass*` 派生不出、只能显式指定，且不产验收裁决。spec 若写着 `cpp` / `aclnn_py`，正确处置是**迁到 `cpp_extension`**（需 torch.ops 调用桥 + vendor ELF 构建收据，接入成本更高，这是已知账单），**不是**回头问用户要不要换条路。
-- **CP-B Task1 用例**：dispatch `acc-spec-extractor` 产 spec；primary inline `gen_cases.py <spec> --dry-run --ledger-out <case_plan.json> --source-facts <source_facts.json> --correspondence <correspondence.json>` 做用例计划契约自检并把事实包/用户确认绑定进 durable 账本，再由 `validate_preparation_state.py` 复核非真机断点（C5 起不再跑 mock 出裁决）。
+- **CP-B Task1 用例**：dispatch `acc-spec-extractor` 产 spec；primary inline `gen_cases.py <spec> --dry-run --ledger-out <case_plan.json> --source-facts <source_facts.json>` 做用例计划契约自检并把事实包绑定进账本，再由 `validate_preparation_state.py` 复核非真机断点（C5 起不再跑 mock 出裁决）。
 - **CP-C runner**（需 NPU）：dispatch `acc-runner-dev`（先过 scope gate）→ 自证门满足才允许上真机。**验收路径 `cpp_extension`** 核的是 build/load/vendor receipt 齐备且绑定来源锚。⛔ `cpp` 的 `verify_runner` 与 `aclnn_py` 的 harness 真机信任门已随两条形态停止准入，**不再 dispatch**；机制描述见 `acceptance-workflow/SKILL.md` CP-C 历史区。
   `vendor_build_receipt.py emit` 必须同时给互斥的成功 `--out` 与失败 `--failure-out`：受控 build、ELF、
   package 或 target closure 失败仍以 rc=2 停在 CP-C，只留下 `formal_eligible=false` 的 producer attempt，
@@ -46,11 +46,11 @@
 
 ## 3. 铁律（每步都受约束）
 
-1. **判定唯一归确定性脚本链**，编排层/skill 只引用不自判（ADR 0007）。
+1. **判定唯一归确定性脚本链**，编排层/skill 只引用不自判。
 2. **验收权威 = 任务书**；「PR 有测试」≠「验收过了」。
 3. **够不着 NPU → 最多走到非真机准备阶段**（远程连时 VPN / 跳板没通，或就地跑但本机无可用设备；`cpp_extension` / `cpp` 到 CP-B 的准备收据，`aclnn_py` 再到 CP-C0 静态 preflight），明确告知「真机跑测待环境就绪」、不假装真机；dry-run/preflight 都不产验收裁决。⚠ 「够不着 NPU」指**设备真的不可达**，**不是**「读不到 `.oprunway/real-machine.env`」——缺那个文件不构成阻塞。
 4. **零硬编码**：仓名/路径/SOC/阈值不写死，运行时探测或问用户；`OPRUNWAY_*` 不入仓。
-5. **FAIL 先解耦再归因**：先验对应（①）、再解耦「被测物 vs harness」（`acc-rootcause`），别凭 signature 猜、别来回改口。
+5. **FAIL 先解耦再归因**：先核任务书摘要与 source→build→ELF→加载→调用→输出绑定（①），再解耦「被测物 vs harness」（`acc-rootcause`），别凭 signature 猜、别来回改口。
 
 ## 4. 加一个新算子要几步
 

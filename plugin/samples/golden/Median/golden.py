@@ -19,7 +19,7 @@ elementwise 样例不同的形态，都**据字段驱动、非按算子名特判
     那是「算子该怎么实现」，不是「真值该由谁算」。真值口径由任务书**另行**指定为 torch.median。
 档位判定的**唯一**实现是 `precision_policy.derive_golden_tier`；此处只抄录判定结果，不复述其逻辑。
 
-后端（ADR 0011 决策 4 · R6「torch 优先，**生成期**选型并写死」）：生成期选定 **torch**，且此处 torch
+后端（「torch 优先，**生成期**选型并写死」）：生成期选定 **torch**，且此处 torch
 **不是可换的偏好、是硬要求**——任务书把真值口径本身指定为 torch.median（「与torch.median功能完全对齐」），
 换 numpy 就不再是「任务书指定的那个口径」了。运行时不兜底：torch 缺失即 fail-closed（确定性红线）。
 """
@@ -73,7 +73,7 @@ def _require_torch():
         raise RuntimeError(
             "golden 需 torch(CPU) 作 CPU 标杆参考、但未安装/不可用。请安装 CPU 版："
             "pip install torch --index-url https://download.pytorch.org/whl/cpu。"
-            "不静默回退——确定性红线（ADR 0011 决策 4）；任务书把真值口径指定为 torch.median，不可换 numpy。") from e
+            "不静默回退——确定性红线；任务书把真值口径指定为 torch.median，不可换 numpy。") from e
 
 
 def _resolve_dim(dim, ndim, where):

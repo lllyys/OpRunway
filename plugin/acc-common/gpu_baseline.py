@@ -1,7 +1,7 @@
 """Task 3 · gpu_baseline — 外部 GPU 标杆 JSON 解析+校验（consumer 侧，T8）。
 
 `parse_gpu_baseline(path, caseset) -> (baseline|None, parse_report)`：
-- 按 canon 字段契约（gpu_baseline_contract.json）逐字段**严格 isinstance** 校验（gb-4）；device 用**正向白名单**
+- 按 `gpu_baseline_contract.json` 字段契约逐字段**严格 isinstance** 校验（gb-4）；device 用**正向白名单**
   （device_type=='gpu' 或 nvidia/amd 等型号命中才放行，未命中即 hard error；ascend/npu/tpu/cpu 黑名单兜底，gb-2）；
   timing_scope ∈ 3 枚举；unit→us 归一（换算不过早 round、断言 us>0，gb-6）；data_transfer_included 与 scope 自洽；
 - 按 case_id + **完整输入签名**(case_fingerprint = sorted inputs(name,dtype,shape)+sorted attrs)交叉核对，

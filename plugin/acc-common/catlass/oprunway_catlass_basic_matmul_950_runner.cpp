@@ -9,7 +9,7 @@
  *   1) 读 manifest（cid m n k）+ per-case A.bin/B.bin（物理字节由 adapter 按声明 layout 摆好，此处直接读）；
  *   2) H2D → launch **device kernel（extern C 钉死符号，msprof -k 可命中）** → D2H → 写 out.bin；
  *   3) 逐 case 打印 `[OPRUNWAY_CASE <cid>] Compare success./failed.`（仓内 smoke 信号，**非验收结论**）+ 收尾 OPRUNWAY_CATLASS_DONE。
- *   精度验收在 Python 侧（真 NPU out.bin vs numpy golden，ADR0002）；本 runner 的 Compare 只作 smoke。
+ *   精度验收在 Python 侧（真 NPU out.bin vs numpy golden）；本 runner 的 Compare 只作 smoke。
  *
  * 唯一 op 专属边界（换算子时改这两处）：<<< using 链 >>> 与 <<< launch 段 >>>。
  */

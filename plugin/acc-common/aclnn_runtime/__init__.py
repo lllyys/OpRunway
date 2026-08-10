@@ -13,7 +13,7 @@
                       （多输出、任意 dtype 的 ctypes 执行体）。**从 header 正则推 arity，绝不按算子名分派。**
 - ``aclnn_driver``  : 容器内执行的驱动脚本——读 caseset + 各 case storage .bin → 逐 case 调
                       ``AclnnRunner.run`` → 落 ``out_k.bin``。**只产原始输出、绝不判定**
-                      （判定唯一归 OpRunway 确定性脚本链，ADR 0007）。
+                      （判定唯一归 OpRunway 确定性脚本链）。
 
 泛化边界（律令#0）：本子包的一切分派据 **spec / caseset / header 字段**（scenario / runner_form /
 out_role / 输出个数 / dtype），代码里**绝不出现按算子名的分支**。median 只是首程见证，换任意「域内」

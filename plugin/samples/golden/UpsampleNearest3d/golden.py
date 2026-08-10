@@ -20,7 +20,7 @@
   `scale_d`/`scale_h`/`scale_w`(Float, 0.0)。⚠ 属性名是 `scale_*`（单数），不是 3d 文档/aclnn 签名里的
   `scalesD/scalesH/scalesW`，也不是 2d op 的 `scales_h/scales_w` —— 本文件按 **op_def 名**建模。
 
-后端（ADR 0011 决策 4 · R6）：golden 恒 CPU，本文件生成期已选定 torch；运行时不兜底——torch 缺失即
+后端（生成期已选型并写死）：golden 恒 CPU，本文件生成期已选定 torch；运行时不兜底——torch 缺失即
 fail-closed（确定性红线）。选 torch 而非 numpy 的硬理由同 UpsampleNearestExact2d：numpy 无最近邻上采样
 现成 API，torch 的 `nn.functional.interpolate(mode="nearest")` 是**单调一次调用**的现成 API。
 """
@@ -61,7 +61,7 @@ def _require_torch():
         raise RuntimeError(
             "golden 需 torch(CPU) 作 CPU 标杆参考、但未安装/不可用。请安装 CPU 版："
             "pip install torch --index-url https://download.pytorch.org/whl/cpu。"
-            "不静默回退——确定性红线（ADR 0011 决策 4）。") from e
+            "不静默回退——确定性红线。") from e
 
 
 def _output_size(attrs):

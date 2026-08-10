@@ -2,7 +2,7 @@
 落成机器可校验的 dev/CI meta-lint，避免 subagent「单轮 / 禁内部循环 / 不自行判定」等纪律**只靠散文门**。
 
 本脚本与 `check_manifest_sync.py` 同类：**只读、stdlib、抗坏输入**，**不进 `run_workflow.py` 的判定/执行链**、
-不违 ADR 0007（判定唯一归确定性脚本链 validator/perf_compare/acceptance gate；本 lint 只管「结构合规」）。
+不参与验收判定（判定唯一归确定性脚本链 validator/perf_compare/acceptance gate；本 lint 只管「结构合规」）。
 （注：与 `check_manifest_sync.py` 各自内含一个受限 frontmatter 解析器——两者语义已分叉；将来若要统一，
 应抽一个同目录共享 parser 并给两脚本共用坏输入用例。此为 codex 审的 LOW 项，暂不动稳定的 check_manifest_sync。）
 

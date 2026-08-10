@@ -76,7 +76,7 @@ OpRunway/
 ├── AGENTS.md       # 唯一现行仓规
 ├── plugin/         # agent、skills、确定性脚本、契约与样例
 ├── dev-doc/        # 当前 TODO、环境说明、实测记录与历史流水
-├── canon/          # 经 capture → compile → review 管理的 durable knowledge
+├── canon/          # 保留的历史记录；默认不参与项目实施
 └── reports/        # ignored 的本地验收产物
 ```
 

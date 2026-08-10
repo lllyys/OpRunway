@@ -25,7 +25,7 @@ description: OpRunway 验收的代码产出 skill，两件事：(a) gen_golden�
 ⚠ **`spec.runner_form == "cpp_extension"`（缺省 · ✅ 当前唯一能产验收裁决的准入形态）同样不生成手写 per-op runner**：由 `cpp_extension_codegen.py` 按 params/call_variants 生成官方 Extension bundle，`cpp_extension_adapter.py` 生成逐 case invocation plan。CP-C 必须核 build/load receipt（spec/caseset/source/setup/ELF/runtime/namespace/schema/vendor symbol ownership）；缺显式 driver 或任一绑定漂移均 fail-closed。不得把它别名成 cpp/new_example，也不得复用 aclnn_py ctypes 收据。性能必须在全量精度 readback 后用同一 validator 判定先筛 case，再以精确 ELF/vendor receipt 进入现有 `msprof --ai-core=off + ctypes MSTX + CSV` kernel-only 双边采集；禁止 wall time 或另造 Extension 专用性能口径。
 runner 是引擎的**输出**、非组件；样例只供参照生成（照 §2 四槽拷），绝不作运行时兜底。
 **当前范围（诚实）**：代码闭环 = **ops-<族> 仓 · opp 安装型产物 · aclnn 两段式接口**（引擎目录/后缀已生成化、不再硬编码 experimental/math，2026-07-23 批 6b 调研更正；真闸=build.sh 家族命令+opp 布局+aclnn 链接）；catlass/双实现待扩（`dev-doc/oprunway-batch6b-design.md`）。**runner 自检证据满足/不满足 纪律当前非代码强制 sidecar 硬门、待补**（`repo_adapter` 只查文件在不在，不识别 unverified；ref §4）。
-**核心纪律（Equal 教训固化）**：aclnn 入口/dtype/参数顺序**从算子自带 example 抠、不猜**；**runner 自检证据不满足则停在 CP-C、不上真机**（靠 agent/人自觉，直到 sidecar 门落地）；acceptance 裁决只逐字引用 validator.py / perf_compare.py / validate_acceptance_state.py 产物（ADR 0007）。
+**核心纪律（Equal 教训固化）**：aclnn 入口/dtype/参数顺序**从算子自带 example 抠、不猜**；**runner 自检证据不满足则停在 CP-C、不上真机**（靠 agent/人自觉，直到 sidecar 门落地）；acceptance 裁决只逐字引用 validator.py / perf_compare.py / validate_acceptance_state.py 产物。
 **调用者**：本 skill 由 acc-runner-dev subagent 以 `dispatch_mode=gen_golden`/`gen_runner`/`verify_runner` 调用；单轮 / 禁内部循环 / 不自行判定等纪律以该 agent 为准（指针，不在此复制）。
 
 ## 步骤
@@ -61,7 +61,7 @@ runner 是引擎的**输出**、非组件；样例只供参照生成（照 §2 �
    attr 是 `list[int]` 时编成**逗号连接的单 token**（`[3,4]`→`3,4`）。格式的唯一真相源在 `repo_adapter.run_new_example`——
    写 `ParseLine` 前**实读一次**再动手（skeleton §0 + §6.2）；遇到引擎明确 fail-closed 的形态（空数组/嵌套/dict attr）→ 记 gap、返回 BLOCKED，**不自造编码**。
 
-3. **runner 自检证据满足/不满足**（真机·**当前非代码强制 sidecar 硬门、待补**，skeleton §4）：编出 runner → 造**手算 golden 的小用例** → 喂 **custom exe** 跑 → 检查 rc/`OPRUNWAY_DONE`/out.bin 字节 + 值**逐元素等于手算 golden** 即自检证据满足。不一致 → **custom vs builtin exe 同 case 对照**解耦 root-cause（runner 错 vs 算子错），**别产假裁决**、显式暴露。自检证据不满足 → 停在 CP-C、不上真机、不接 `run_new_example`（靠自觉，直到 sidecar 门落地）；acceptance 裁决只逐字引用 validator.py / perf_compare.py / validate_acceptance_state.py 产物（ADR 0007）。
+3. **runner 自检证据满足/不满足**（真机·**当前非代码强制 sidecar 硬门、待补**，skeleton §4）：编出 runner → 造**手算 golden 的小用例** → 喂 **custom exe** 跑 → 检查 rc/`OPRUNWAY_DONE`/out.bin 字节 + 值**逐元素等于手算 golden** 即自检证据满足。不一致 → **custom vs builtin exe 同 case 对照**解耦 root-cause（runner 错 vs 算子错），**别产假裁决**、显式暴露。自检证据不满足 → 停在 CP-C、不上真机、不接 `run_new_example`（靠自觉，直到 sidecar 门落地）；acceptance 裁决只逐字引用 validator.py / perf_compare.py / validate_acceptance_state.py 产物。
 
 4. **交付**：自检证据满足 → runner 落 **`<用户 CWD>/.oprunway/ops/<op>/`**（不是插件目录），把构建路径配置（`OPRUNWAY_OPS_REPO/SOC/VENDOR/OP` 等）交 `repo_adapter.run_new_example`（④）跑全量用例 + msprof。
 

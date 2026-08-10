@@ -1,17 +1,16 @@
 # acc-precision 详规 · 精度验收方法论
 
-> **定位 guard**：acc-precision 是 P2 规划的原子能力 skill，**尚未接入 live 流、不落盘、不判 pass/fail**（判定唯一归 `precision_policy.py` + `validator.py`，ADR 0007 canonical）。本文件只装方法论；**不复制阈值数字**（阈值 SSOT 在 `precision_policy.py` + canon 页）。载重前逐个 Read 下列引用页并**按 tier**（canonical 当事实；proposed 存疑、先核）。
+> **定位 guard**：acc-precision 是 P2 规划的原子能力 skill，**尚未接入 live 流、不落盘、不判 pass/fail**（判定唯一归 `precision_policy.py` + `validator.py`）。本文件只装方法论；**不复制阈值数字**（阈值 SSOT 在 `precision_policy.py`）。
 
-## 0. canon 依据（按 tier）
+## 0. 当前实施依据
 
-| 页 | tier | 承载 |
+| 来源 | 承载 |
 |---|---|---|
-| `decisions/0005-precision-three-layer.md`（ADR 0005） | **canonical** | 三层口径、非三选一；放行只看 `acceptance_precision_pass`；宽于底线→`PASSED_WITH_RISK`+人工 CP |
-| `decisions/0007-deterministic-validator.md`（ADR 0007） | **canonical** | 判定只从确定性 validator 出；agent 只发现/解释、不宣告通过 |
-| `architecture/ascendoptest-precision-thresholds.md` | **canonical** | 平台层「实体」：AscendOpTest 默认阈值 + 掩码语义（rel/abs 混合、坏点占比、inf/NaN） |
-| `architecture/ecosystem-precision-standard.md` | **proposed·未 settle** | 平台层候选：MERE/MARE 逐 dtype Th；**载重前必核、勿当事实** |
-| `architecture/primitive-to-case-rule-library.md` | **canonical** | golden 元规则（中间精度、compare 分支归属、数据同源） |
-| `architecture/task3-state-machine.md` | **canonical** | `PASSED / FAILED_PRECISION / PASSED_WITH_RISK` 等结论态 |
+| 仓根 `AGENTS.md` §6.2、§6.3 | 精度真值解析与两维验收边界 |
+| `acc-common/precision_policy.py` | 标准选择、阈值、指标与 `NOT_SETTLED` 标记的唯一实现 |
+| `acc-common/validator.py` | 精度裁决与三层结果的确定性实现 |
+| `acc-common/run_workflow.py`、`acceptance_artifacts.py` | 终态与正式工件边界 |
+| `acc-common/gen_cases.py` | caseset、golden 与精度证据的生成契约 |
 
 ## 1. 三层口径决策树（放行只看 acceptance）
 
@@ -23,7 +22,7 @@
      verify_mode=exact                      → exact（bool/逐位）
      verify_mode=behavioral                 → behavioral（行为等价）
      numerical + oracle∈{ascendoptest,缺}   → ascendoptest_default
-     numerical + oracle∈{mere_mare,atk_double} → ecosystem_mere_mare（proposed）
+     numerical + oracle∈{mere_mare,atk_double} → ecosystem_mere_mare（当前常量标 `NOT_SETTLED`）
   三层 pass 同出: catlass_compare_pass / standard_profile_pass / acceptance_precision_pass
   放行 = acceptance_precision_pass；acceptance 过 & standard(平台底线) 不过 → 该 case risk、overall passed_with_risk
 ```
@@ -40,8 +39,8 @@
 
 ## 3. 逐 dtype 标准（阈值 SSOT 在 precision_policy.py，此处只指口径）
 
-- **ascendoptest_default**（canonical 实体）：逐 dtype `tolerance`+`error_rate`；`|golden|≥1` 用相对误差、`<1` 用绝对误差（**共用同一 tolerance**）；`inf → finfo.max`、`NaN==NaN` 视为通过；仅当**坏点数 > numel × error_rate** 才整体 fail。数值常量逐 dtype 快照在 `precision_policy.py`（15 dtype，`accuracy_config.py` 内容指纹已记 `_verify.json`）。
-- **ecosystem_mere_mare**（**proposed·未 settle**）：MERE = 平均相对误差、MARE = 最大相对误差（**MERE=平均、MARE=最大，勿对调**）；通过 = `MERE < Th 且 MARE < 10 × Th`，Th 逐 dtype（2⁻ᵏ，SSOT 在 `precision_policy.py`）。**全常量标 `NOT_SETTLED`**。
+- **ascendoptest_default**：逐 dtype `tolerance`+`error_rate`；`|golden|≥1` 用相对误差、`<1` 用绝对误差（**共用同一 tolerance**）；`inf → finfo.max`、`NaN==NaN` 视为通过；仅当**坏点数 > numel × error_rate** 才整体 fail。数值常量逐 dtype 快照在 `precision_policy.py`（15 dtype，`accuracy_config.py` 内容指纹已记 `_verify.json`）。
+- **ecosystem_mere_mare**（当前实现标 `NOT_SETTLED`）：MERE = 平均相对误差、MARE = 最大相对误差（**MERE=平均、MARE=最大，勿对调**）；候选判据 = `MERE < Th 且 MARE < 10 × Th`，Th 逐 dtype（2⁻ᵏ，SSOT 在 `precision_policy.py`）。
 - **exact**：bool / 逐位精确，`exact_mismatch ≤ 0` 才过。
 - **behavioral**：行为等价（输出满足语义约束，非逐元素数值）。
 
@@ -50,7 +49,7 @@
 据代码核实（`validator.py` / `precision_policy.py` HEAD 现状）：
 
 - **可判·settled**：`ascendoptest_default`、`exact`（`judge_ascendoptest` / `judge_exact` 已实现并 settled）。
-- **已实现但未 settle**：`ecosystem_mere_mare`——`judge_mere_mare` 已能算 MERE/MARE 指标，但全常量 `NOT_SETTLED`（源页 proposed）；**单标杆不过 → `uncertain`/needs_review、不自动 fail**；`standard` 或 `acceptance` 任一 `uncertain` → 至少 `needs_review`（不被 acceptance pass 吞）。
+- **已实现但未启用为自动 fail 判据**：`ecosystem_mere_mare`——`judge_mere_mare` 已能算 MERE/MARE 指标，但全常量 `NOT_SETTLED`；**单标杆不过 → `uncertain`/needs_review、不自动 fail**；`standard` 或 `acceptance` 任一 `uncertain` → 至少 `needs_review`（不被 acceptance pass 吞）。
 - **未实现·out-of-scope**：**ATK 双标杆 fallback**（`cv_fused_double_benchmark`）—— precision_policy 未实现，本 skill **不声称可据双标杆判定**。
 - **待办**（若要把 MERE/MARE 升为可自动 fail 的放行判据，或加 ATK 双标杆）→ 属 `precision_policy.py` / `validator.py` 的**独立后续 todo**（带自己的代码 + test 门），**不在本 P2 库交付范围**。
 

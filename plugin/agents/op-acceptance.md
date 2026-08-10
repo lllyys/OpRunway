@@ -42,7 +42,7 @@ CP 的逐步落法、脚本参数、门级判定，沉在 `acceptance-workflow` 
 CP-E 后的人工精度重测同样由本 primary 编排 CP-F F0..F5；F2 幕后调准备入口，
 F3/F4 只将已准备 attempt 以 `run_precision_retest` 派给 `acc-verify-rootcause`，不借用
 CP-D `run_npu` 重跑性能，不重新抽 spec/生成 case/golden。
-**判定脑子不在这**（在 `acc-common/validator.py` / `perf_compare.py` / `validate_acceptance_state.py`，ADR 0007）。
+**判定脑子不在这**（在 `acc-common/validator.py` / `perf_compare.py` / `validate_acceptance_state.py`）。
 **验收权威 = 任务书**；「PR 有测试」≠「验收过了」。全程中文；副作用先确认。
 
 ## 面向用户：只对话、不暴露脚本（最高原则）
@@ -61,7 +61,7 @@ CP-D `run_npu` 重跑性能，不重新抽 spec/生成 case/golden。
 出**任何 pass 裁决前**，**必须**先过机器可校验验收门 `acc-common/validate_acceptance_state.py`
 （三个内部证据门键 `--stage task1|task2|task3`（历史键名，不代表产品 Task3），读**落盘** `evidence.json` 独立复核：**防跑子集报 100%、防放宽阈值、防混 e2e 墙钟**）。
 `run_workflow.py` 已内嵌此门（Task1→Task2（精度+性能） 全跑完后统一校门；注：**批量驱动、非阶段间实时阻断**）。门结果随候选交给 `acceptance_artifacts.formal_acceptance_allowed`，由该唯一谓词决定 formal / attempt 二选一；本 agent 不展开命名条件。「不推进下一 Task」是 **agent 编排纪律**。
-判定脑子在 `acc-common/validator.py`（ADR 0007）、**不在编排层**；门只管「证据可信完整」，精度/性能 pass-fail 由 validator/perf_compare 判。
+判定脑子在 `acc-common/validator.py`、**不在编排层**；门只管「证据可信完整」，精度/性能 pass-fail 由 validator/perf_compare 判。
 
 ## primary 职责边界
 
@@ -89,11 +89,11 @@ CP-D `run_npu` 重跑性能，不重新抽 spec/生成 case/golden。
 
 ## 编排（CP-A..E）
 
-调度骨架如下；每个 CP 的展开（dispatch 契约 / `correspondence.json` schema 与状态枚举 / 断点续跑 / 性能证据 blocked 路由 / 基线来源）见 `acceptance-workflow` skill。
+调度骨架如下；每个 CP 的展开（dispatch 契约 / caller-trusted 内容绑定 / legacy-only `correspondence.json` / 断点续跑 / 性能证据 blocked 路由 / 基线来源）见 `acceptance-workflow` skill。
 
 - **CP-A 前置**（primary 亲自）：`fetch_source.py` 取材调用方已配对的任务书与源码，落 current contract-v2 `source_facts.json`；核 exact caller association 与 content anchor 后确认环境。URL/repo/fork/ref/head 只作 transport 诊断。`correspondence.json` 仅为 legacy 历史工件。
   ⚠ **两种执行形态都是一等通路，别把其中一种当通用前置**：**就地跑**（会话本身已在目标机或其 NPU 容器里）设 `OPRUNWAY_TARGET=local` 即可，`OPRUNWAY_SSH_HOST` **免填**、`.oprunway/real-machine.env` **不需要存在**；**远程连**（开发机 → 目标机）才从该文件取 SSH alias / 容器名 / 远端工作根，`OPRUNWAY_TARGET=remote`（缺省）时 `OPRUNWAY_SSH_HOST` 必填。⚠ **不得**以「缺 `.oprunway/real-machine.env` / 拿不到 SSH alias、容器名、远端工作目录」为由拒绝启动验收——它只是远程连形态的连接元数据（仓根 `AGENTS.md` §5.3、`doc/oprunway-real-machine-environment.md` §1）。⚠ 但保护根语义一个字不松：该文件**存在时**必须读它的 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`，那些根及其子目录是只读保留现场（禁写/禁覆盖/禁删/禁当执行目录）；**未登记 ≠ 可随意清理**，删除/覆盖照旧逐次征得用户确认。其余变量（来源锚 / op 子目录 / 被测仓 / vendor 名 / SoC / setenv…）**与形态无关**，两种形态都每轮从任务书、`source_facts.json`、spec 重新派生。
-- **CP-B Task1 用例**：CP-A 刷新 facts 后**先重跑 `validate_preparation_state.py` 查热续跑**；`REUSABLE` 直接跳过本段 NL dispatch 与 dry-run，`MISS` 只重做 checks 指向的最小缺口，`BLOCKED` 停止。**但 CP-B0 任务书输入校验门不随 `REUSABLE` 跳过**——那份收据既不读也不绑 `taskdoc_validation*`，拿它替 CP-B0 背书会让本门接入前的旧收据把新门绕过去。**每轮都 inline 重跑 `validate_taskdoc_input.py`**（纯本地只读、毫秒级），被热续跑省掉的只有贵的 NL dispatch：`taskdoc_validation.json` 已在且脚本判 `PASSED`/`PASSED_WITH_PENDING` 就不必重派。冷启动或 digest 漂移时 dispatch `acc-spec-extractor:validate_taskdoc`（只读 `task_doc.md` + `source_facts.json`，禁读 PR 侧事实）→ `taskdoc_validation.json`，再按 18 项契约复核并派生阻断清单；`NEEDS_USER` → 汇总问用户（阻断项只能补充事实或停止验收，豁免只对不阻断的待确认项开放），决策写回 `decisions` 重跑脚本转 `PASSED` 或 `PASSED_WITH_PENDING` 才继续（阻断项决策完仍留待确认项时就是后者，别当没过），`supplied` 项一并进 `correspondence.json.confirmed_constraints`；`BLOCKED` → 重做 CP-B0。过门后 dispatch `acc-spec-extractor:extract_spec` → `<op>.spec.json` + `task_pr_gaps`（一份任务书多算子 → 多 spec，逐个走后续）；再 dispatch `acc-runner-dev:gen_golden` → 任务书快照入库 + `<ops_root>/<op>/golden.py`（**必须在 dry-run 之前**——让来源契约检查先于用例计划自检完成；⚠ 别说成「dry-run 会因缺 golden fail-closed」：真 `gen_cases()` 才如此，`_dry_run` 缺 golden 只记「未核」照常出计划）。路由**按退出码、不按档位数字**：**0**（可走）→ 进 dry-run；**2**（`needs_human_review`——tier 3 必然如此，⚠ **tier 1 也可能**：`multistep + oracle_method` 判 `(tier 1, 需人核)`）→ 进 dry-run但**报告里显式标「golden 需人核」**；**1**（blocked / 词表不合规 / 缺件 / 账本自相矛盾 / 参数错误）→ **停在 CP-B**，把 `blocked_reason` 摆给用户，**不自动回落第二档**（R4）。然后 primary inline 跑 `gen_cases.py <spec> --dry-run --ledger-out <work>/case_plan.json --source-facts <work>/source_facts.json --correspondence <work>/correspondence.json`，把 facts 与用户确认一起写进账本，再用 `validate_preparation_state.py` 落非真机复用收据。任一准备输入变化都必须重做 CP-B；收据的 `REUSABLE` 只表示 CP-A/B 输入绑定没漂移，`acceptance_verdict` 恒为 null。
+- **CP-B Task1 用例**：CP-A 刷新 facts 后**先重跑 `validate_preparation_state.py` 查热续跑**；`REUSABLE` 直接跳过本段 NL dispatch 与 dry-run，`MISS` 只重做 checks 指向的最小缺口，`BLOCKED` 停止。**但 CP-B0 任务书输入校验门不随 `REUSABLE` 跳过**——那份收据既不读也不绑 `taskdoc_validation*`，拿它替 CP-B0 背书会让本门接入前的旧收据把新门绕过去。**每轮都 inline 重跑 `validate_taskdoc_input.py`**（纯本地只读、毫秒级），被热续跑省掉的只有贵的 NL dispatch：`taskdoc_validation.json` 已在且脚本判 `PASSED`/`PASSED_WITH_PENDING` 就不必重派。冷启动或 digest 漂移时 dispatch `acc-spec-extractor:validate_taskdoc`（只读 `task_doc.md` + `source_facts.json`，禁读 PR 侧事实）→ `taskdoc_validation.json`，再按 18 项契约复核并派生阻断清单；`NEEDS_USER` → 汇总问用户（阻断项只能补充事实或停止验收，豁免只对不阻断的待确认项开放），决策写回 `decisions` 重跑脚本转 `PASSED` 或 `PASSED_WITH_PENDING` 才继续（阻断项决策完仍留待确认项时就是后者，别当没过）；`BLOCKED` → 重做 CP-B0。过门后 dispatch `acc-spec-extractor:extract_spec` → `<op>.spec.json` + `task_pr_gaps`（一份任务书多算子 → 多 spec，逐个走后续）；再 dispatch `acc-runner-dev:gen_golden` → 任务书快照入库 + `<ops_root>/<op>/golden.py`（**必须在 dry-run 之前**——让来源契约检查先于用例计划自检完成；⚠ 别说成「dry-run 会因缺 golden fail-closed」：真 `gen_cases()` 才如此，`_dry_run` 缺 golden 只记「未核」照常出计划）。路由**按退出码、不按档位数字**：**0**（可走）→ 进 dry-run；**2**（`needs_human_review`——tier 3 必然如此，⚠ **tier 1 也可能**：`multistep + oracle_method` 判 `(tier 1, 需人核)`）→ 进 dry-run但**报告里显式标「golden 需人核」**；**1**（blocked / 词表不合规 / 缺件 / 账本自相矛盾 / 参数错误）→ **停在 CP-B**，把 `blocked_reason` 摆给用户，**不自动回落第二档**（R4）。然后 primary inline 跑 `gen_cases.py <spec> --dry-run --ledger-out <work>/case_plan.json --source-facts <work>/source_facts.json`，把 caller-trusted facts 写进账本；仅 legacy 历史只读流程才追加 `--correspondence`。再用 `validate_preparation_state.py` 落非真机复用收据。任一准备输入变化都必须重做 CP-B；收据的 `REUSABLE` 只表示 CP-A/B 输入绑定没漂移，`acceptance_verdict` 恒为 null。
   ⚠ current dry-run 使用 `--source-facts` 绑定 caller-trusted facts，不要求 `--correspondence`；后者仅用于 legacy 续读。dry-run 不调 `golden_fn`、不落 `.npy`、不产裁决，完整 evidence 仍只由 CP-D 形成。
   **dry-run 报错或覆盖账本异常 → dispatch `acc-spec-extractor:refine_spec` 修 spec，再上真机。**
   ⚠ **不再跑 `--mode mock` 出裁决**：mock 的「NPU 输出」是 `golden.copy()`、精度按构造必过；C5 起它**物理上产不出** `acceptance.json`/`verdict.json`。

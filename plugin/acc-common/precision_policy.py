@@ -1,6 +1,6 @@
 """精度口径 SSOT（T5）——三标准（AscendOpTest 默认 / 生态 MERE·MARE / exact）唯一真源。
 
-ADR 0005（canonical）：精度验收是**三层口径、非三选一**——放行只看 acceptance。
+当前精度契约：精度验收是**三层口径、非三选一**——放行只看 acceptance。
 本文件只承载「标准常量 + 路由 + 误差分布复算（compute_metrics，用 numpy）」；
 **judge（比阈值出 pass/fail）在 validator.py 用纯算术**（保 validator stdlib-only）。
 `compute_metrics` 里的 numpy 为**惰性 import**（函数体内），故 `import precision_policy` 本身不拉 numpy，
@@ -44,10 +44,10 @@ error_rate 是**第 2 位**、逐 dtype 变；第 3 位 legacy=0.1 代码不读�
     **本项目 bool 输出统一走 `exact` 标准**（见下），default 表仅作完整快照。
 
 --------------------------------------------------------------------------------
-标准二 · ecosystem_mere_mare —— 生态《算子开源精度标准》(proposed / NOT_SETTLED)
+标准二 · ecosystem_mere_mare —— 生态《算子开源精度标准》(NOT_SETTLED)
 --------------------------------------------------------------------------------
-⚠ 来自 `canon/architecture/ecosystem-precision-standard.md`（status=proposed，**非事实、未 settle**），
-一手出自 cann/opbase `experimental_standard.md`。全部常量打 NOT_SETTLED=True。
+一手出自 cann/opbase `experimental_standard.md`；当前实现未把它启用为自动 fail 依据，
+全部常量打 NOT_SETTLED=True。
   - MERE = 平均相对误差 = avg( |actual-golden| / (|golden|+1e-7) )   —— **平均**
   - MARE = 最大相对误差 = max( |actual-golden| / (|golden|+1e-7) )   —— **最大**
     （⚠ MERE=平均、MARE=最大，务必**不对调**）
@@ -149,7 +149,7 @@ _AOT_TABLE = {                         # dtype: [tolerance, error_rate, legacy]
     "complex128": [0.0001, 0.0001, 0.1],
 }
 
-# ---- 生态 MERE/MARE 常量（proposed，全 NOT_SETTLED） ----
+# ---- 生态 MERE/MARE 常量（全 NOT_SETTLED） ----
 _MM_NOT_SETTLED = True
 _MM_STATUS = "proposed"
 _MM_MAX_RATIO = 10          # MARE < 10 × Th
@@ -158,8 +158,8 @@ _MM_TH_EXP = {             # Th = 2 ** -exp
     "float16": 10, "bfloat16": 7, "float32": 13,
     "hfloat32": 11, "fp8_e4m3": 3, "fp8_e5m2": 2,
 }
-_MM_PROVENANCE = ("canon/architecture/ecosystem-precision-standard.md (proposed) · "
-                  "cann/opbase experimental_standard.md")
+_MM_PROVENANCE = ("cann/opbase experimental_standard.md · "
+                  "precision_policy.py current implementation (NOT_SETTLED)")
 
 # ---- torch_allclose 逐 dtype 容差 (rtol, atol) ----
 # provenance（adapt，勿凭记忆改）：抄自参考仓 cannbot-ops-input
@@ -922,7 +922,7 @@ def oracle_source_from_golden(golden_source):
 #   R12 任务书**全文快照入库** → 授权锚才可机器核（见 verify_authorization）。
 #
 # ⚠ 边界：本节**不判 pass/fail**，只判「golden 来源可不可信、够不够格往下跑」。
-#    验收裁决仍归 validator（精度）+ perf_compare（性能）+ validate_acceptance_state（三级门），ADR 0007。
+#    验收裁决仍归 validator（精度）+ perf_compare（性能）+ validate_acceptance_state（三级门）。
 
 # 可**产出**的 oracle_source 子集（≠ 合法集）。ORACLE_SOURCES 六枚举是 canonical 契约（见上），本节不动它；
 # 这里收窄的是「谁能被产出来」：

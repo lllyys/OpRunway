@@ -20,7 +20,7 @@
   第二档 → "第二档（tier 2）·任务书未指定真值口径（仅 <impl_reference 内容>）→ 回落 CPU 现成 API <backend>.<api>"
 档位判定的**唯一**实现是 `precision_policy.derive_golden_tier`；此处只抄录判定结果，不复述其逻辑。
 
-后端（ADR 0011 决策 4 · R6「torch 优先、numpy 兜底，**生成期**选型并写死」）：生成期选定 **torch**，
+后端（「torch 优先、numpy 兜底，**生成期**选型并写死」）：生成期选定 **torch**，
 且此处 torch **不是可换的偏好、是硬要求**——`torch.nn.functional.unfold` 就是 im2col 本身
 （**单 API 单调** → R5 一级、不需人核）；换 numpy 就只能 `pad + sliding_window_view + transpose + reshape`
 自拼多步，按 `derive_golden_tier` 规则 ⑧（impl_reference + multistep = 无授权却自拼）会直接判
@@ -148,7 +148,7 @@ def _require_torch():
         raise RuntimeError(
             "golden 需 torch(CPU) 作 CPU 标杆参考、但未安装/不可用。请安装 CPU 版："
             "pip install torch --index-url https://download.pytorch.org/whl/cpu。"
-            "不静默回退——确定性红线（ADR 0011 决策 4）；本算子尤其不可换 numpy 自拼"
+            "不静默回退——确定性红线；本算子尤其不可换 numpy 自拼"
             "（无授权 + 多步自拼 = derive_golden_tier 规则 ⑧ 判 tier 4 blocked）。") from e
 
 

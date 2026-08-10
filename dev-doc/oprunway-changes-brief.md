@@ -2,6 +2,15 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-10 · bureau/canon 退出普通项目实施链
+
+- 根仓规、插件清单、agents、skills、commands 与当前 workflow 文档统一改为：普通架构、代码、测试、
+  验收、FAIL 归因和文档实施不读取、不查询、不依赖 bureau/canon，也不以其状态作事实源、审批门、
+  阻塞条件或裁决依据；只有用户明确发起记录、整理、查询、审阅或维护任务时才读取或调用。
+- 保留 `canon/`、`BUREAU.md`、既有历史流水和 trust tier，不删除、不改写、不升降级。本轮同时把活跃
+  提示中的旧 correspondence 身份鉴权改回 caller-trusted 内容绑定，把旧 GPU 等待描述对齐 NPU-only
+  现行口径；Layer 0/1 schema 与裁决逻辑、确定性裁决链、来源锚、build receipt、NPU 门与权限边界不变。
+
 ## 2026-08-10 · nlpm 只读体检 + 4 个 agent 补触发示例
 
 - 对 `plugin/` 跑 nlpm 体检（13 个制品）：引用完整性 41 条全通，无断链。均分 90。

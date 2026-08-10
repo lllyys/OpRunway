@@ -1,6 +1,6 @@
 """OpRunway 精度 golden 样例 · Sign —— 只读参考 / 生成器骨架种子（非引擎组件、非运行时回退靶）。
 
-引擎按算子从用户侧 `<ops_root>/<op>/golden.py` 加载；本样例迁自引擎内置 `GOLDEN` 表（ADR 0011）。
+引擎按算子从用户侧 `<ops_root>/<op>/golden.py` 加载；本样例迁自引擎内置 `GOLDEN` 表。
 须导出 `golden_fn(inputs, attrs) -> ndarray` + `GOLDEN_SOURCE` + `GOLDEN_PROVENANCE`。
 
 ⚠ **本文件的措辞会被后续 agent 照抄**去产新算子的 golden.py —— `GOLDEN_PROVENANCE` 必须逐字属实、不许含糊。
@@ -15,7 +15,7 @@
 torch / numpy / 公式，只说「参考内置 TBE 实现」——那是 impl_reference、不构成授权。**golden 函数本身没错**
 （第二档回落 torch.sign 正当、不需人核，R5 一级：现成 API 单调），错的只是把回落说成了「任务书指定」。
 
-后端（ADR 0011 决策 4 · 本轮裁定 R6「torch 优先、numpy 兜底，**生成期**选型并写死」）：golden 恒 CPU，本样例
+后端（「torch 优先、numpy 兜底，**生成期**选型并写死」）：golden 恒 CPU，本样例
 生成期已选定 torch；**运行时**不兜底——torch 缺失即 fail-closed（确定性红线）。
 """
 import numpy as np
@@ -42,7 +42,7 @@ def _require_torch():
         raise RuntimeError(
             "golden 需 torch(CPU) 作 CPU 标杆参考、但未安装/不可用。请安装 CPU 版："
             "pip install torch --index-url https://download.pytorch.org/whl/cpu。"
-            "不静默回退——确定性红线（ADR 0011 决策 4）。") from e
+            "不静默回退——确定性红线。") from e
 
 
 def golden_fn(inputs, attrs):

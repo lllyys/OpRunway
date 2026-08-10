@@ -2,7 +2,7 @@
 
 > **定位 guard**：acc-casegen 是落地设计 **P2 规划**、**尚未接入 live 流、不落盘 `caseset.json`、不调用/不替代 `gen_cases.py`**；本库只描述展开规则（live 用例生成由确定性 `gen_cases.py` 负责，判定归确定性 validator）。
 > acc-casegen 的知识库：**「算子含某原语 → 必须生成哪些测试用例」**。跨算子复用。
-> canon 设计页：`Primitive-to-case rule library`。种子：夹具 LayerNormGroupedMatmulBiasSilu 评审 + rule-catalog v1 对 catlass 74 example 的对抗评审（`dev-doc/oprunway-task1-cases-critique.md` / `dev-doc/oprunway-rule-catalog-critique.md`）。
+> 历史种子：夹具 LayerNormGroupedMatmulBiasSilu 评审 + rule-catalog v1 对 catlass 74 example 的对抗评审（`dev-doc/oprunway-task1-cases-critique.md` / `dev-doc/oprunway-rule-catalog-critique.md`）。这些出处只用于追溯，不构成实施门；当前执行以 `gen_cases.py` 与正式 spec 为准。
 > 本文件是**清单**；「拆原语→查库→实例化→去重→元规则」的展开逻辑见 [`../SKILL.md`](../SKILL.md)（acc-casegen skill）。**阈值/口径不在此（在 policy）；本库只管「测什么形状/什么数据/为什么」。**
 
 ## 怎么用（展开算法）
@@ -296,7 +296,7 @@ composition:
     - "并保留一条『单原语独立』case 兜底该边界"
   dedup: "同 shape/data 命中多原语→合一条（kind 并集、policy 最严、case_origin 记全部）"
   precision_promotion: "从 functional 挑数值最硬(large_K/near_constant/mixedsign/低比特/round_mode)升级 precision，绑 tolerance_policy"
-  performance_selection: "另选真实负载目标 shape 作 performance，绑 timing_policy + spec.perf.baseline（基线来源=spec.perf.baseline；perf-baseline-by-reference-source 属 proposed·未 settle，载重前需核）；GPU external 对比层 consumer 侧已接入 pipeline，但真实 GPU 标杆数据待外部提供——缺数据走 BLOCKED_WAIT_GPU_BENCHMARK、口径不可比走 BLOCKED_INCOMPARABLE_TIMING_SCOPE；补一条 launch-bound(多组/小K)专测融合省 launch"
+  performance_selection: "另选真实负载目标 shape 作 performance，绑 timing_policy + spec.perf.baseline；按仓根 AGENTS.md §6 只做 NPU 侧可执行取证，GPU 比值条款未实测时写 task_pr_gaps=UNVALIDATED，不等待也不消费 GPU 数据；补一条 launch-bound(多组/小K)专测融合省 launch"
   minimal_degenerate: "始终保留全最小(各维=1)冒烟"
 coverage_report:
   dims: "原语 × mandatory tag × 三轴(dtype/特殊值/layout)"

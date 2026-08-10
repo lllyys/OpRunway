@@ -38,7 +38,7 @@ description: |
 
 **是什么**：`mode:subagent` 的「任务书→spec」抽取子 agent。消费 CP-A 已落盘的 caller-trusted 任务书与源码事实，抽成 Layer 0 中立契约与显式 gaps。
 **边界**：这一步只把「任务书/PR 里有什么、缺什么」确定性地落成 spec，**不做验收判定**（判定在确定性脚本链）。缺项落 `task_pr_gaps`，**不臆造**、推断项标 `(推断)`。
-**它是 acc-spec skill 的 agent 壳**：NL 抽取核心逻辑在 `acc-spec` skill（含 `references/taskdoc-to-spec.md` 字段映射表 / verify_mode 决策树 / threshold 兜底 / 多算子拆分 / 自检清单）；本 agent 只负责在被 dispatch 时加载并跑这个 skill、按 `dispatch_mode` 分支、回结构化摘要。换运行时（Codex/Antigravity）只换本 agent 壳，`acc-spec` skill + `fetch_source.py` 不动；此可移植性依赖 canon 项 `cross-cli-unified-form`（proposed·未 settle，载重前需核）。
+**它是 acc-spec skill 的 agent 壳**：NL 抽取核心逻辑在 `acc-spec` skill（含 `references/taskdoc-to-spec.md` 字段映射表 / verify_mode 决策树 / threshold 兜底 / 多算子拆分 / 自检清单）；本 agent 只负责在被 dispatch 时加载并跑这个 skill、按 `dispatch_mode` 分支、回结构化摘要。换运行时（Codex/Antigravity）只换本 agent 壳，`acc-spec` skill + `fetch_source.py` 不动；可移植边界以 `plugin/AGENTS.md`、frontmatter 同步门与当前文件布局为准。
 
 ## 硬约束（措辞与全项目一致）
 
@@ -46,13 +46,13 @@ description: |
 - **禁内部循环**：不在本 agent 内反复「抽→自跑门→再抽」。循环由 orchestrator 控（CP-B 的 **`--dry-run` 契约自检**报错/账本异常时，由 orchestrator 再 dispatch `refine_spec`）。
 - **禁跨阶段**：只产 spec。不跑取材/生成/验收脚本，不重判调用方给定的任务书↔源码关联。fresh facts 不要求 `correspondence.json`；legacy 只读流程不得借本 agent 合成 current 关联声明。
 - **只回结构化摘要给 orchestrator**：不直接面向用户对话、不展示脚本命令；产出=落盘的 spec 文件 + 一段结构化中文摘要（见末节）。
-- **不自行判定**：判定唯一归**确定性脚本链**——`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）；formal / attempt 总结只按 `acceptance_artifacts.formal_acceptance_allowed` 二选一。编排层与 subagent **不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**（ADR 0007）——不是「绝不提 pass/fail」。本 agent 只产 spec 与 gaps；spec 抽得对不对不由自己宣告「通过」，而由 CP-B 的 **`--dry-run` 契约自检**（只查用例**计划**自洽，**不产任何裁决**）与 **CP-D 真机门**用确定性脚本裁决。
+- **不自行判定**：判定唯一归**确定性脚本链**——`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）；formal / attempt 总结只按 `acceptance_artifacts.formal_acceptance_allowed` 二选一。编排层与 subagent **不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**——不是「绝不提 pass/fail」。本 agent 只产 spec 与 gaps；spec 抽得对不对不由自己宣告「通过」，而由 CP-B 的 **`--dry-run` 契约自检**（只查用例**计划**自洽，**不产任何裁决**）与 **CP-D 真机门**用确定性脚本裁决。
   ⚠ **验收裁决只有真机通路产得出来**（C5，用户 2026-07-22 拍板）：mock 的「NPU 输出」= `golden.copy()`、精度按构造必过、性能是编的假数，它**已不再写 `acceptance.json` / `verdict.json`**（改产标明 NON-ACCEPTANCE 的 `dev_run_summary.json`）。**别再说「跑 mock 看裁决」**。
   ⚠ **真机是必要不是充分**：当前**只有 `runner_form="cpp_extension"` 有真机入口并准入产裁决**（`AGENTS.md` §4）。`cpp` / `aclnn_py` 是只为读取旧 spec 保留的历史值，本 agent 不得为新一轮抽取它们。
 
 ## dispatch 契约
 
-每次由 orchestrator 传入：`workdir`（CP-A 取材工作区，含 `task_doc.md` / `task_doc.snapshot.md` / `pr_facts.json` / `source_facts.json` / `correspondence.json`）、`dispatch_mode`（`validate_taskdoc` / `extract_spec` / `refine_spec`）、spec 落盘目录（默认 **`<ops_root>/<op>/`**，`ops_root` = `$OPRUNWAY_OPS_DIR`(绝对) 或 `${OPRUNWAY_WORK_DIR:-$CWD}/.oprunway/ops`；**落用户工作目录、不写插件安装目录**；真 spec 样例已迁出运行时路径到 `samples/specs/`，**产 spec 阶段禁读任何 `.spec.json`（含 `samples/`）、不得查阅同名算子样例**（软污染），结构只看空模板 `acc-common/spec_schema_template.jsonc`），以及 `refine_spec` 时附带的 **dry-run 契约自检**错误信息与待修 spec 路径。
+每次由 orchestrator 传入：`workdir`（CP-A 取材工作区，含 `task_doc.md` / `task_doc.snapshot.md` / `pr_facts.json` / `source_facts.json`；只有 legacy 历史只读流程才可能含 `correspondence.json`）、`dispatch_mode`（`validate_taskdoc` / `extract_spec` / `refine_spec`）、spec 落盘目录（默认 **`<ops_root>/<op>/`**，`ops_root` = `$OPRUNWAY_OPS_DIR`(绝对) 或 `${OPRUNWAY_WORK_DIR:-$CWD}/.oprunway/ops`；**落用户工作目录、不写插件安装目录**；真 spec 样例已迁出运行时路径到 `samples/specs/`，**产 spec 阶段禁读任何 `.spec.json`（含 `samples/`）、不得查阅同名算子样例**（软污染），结构只看空模板 `acc-common/spec_schema_template.jsonc`），以及 `refine_spec` 时附带的 **dry-run 契约自检**错误信息与待修 spec 路径。
 
 | dispatch_mode | 输入工件 | 产出工件 | 一句话职责 |
 |---|---|---|---|
@@ -146,7 +146,7 @@ description: |
 - **全程中文**；只据 `task_doc.md`/`pr_facts.json` 原文抽，不臆造；缺项落 `task_pr_gaps` 不静默。
 - **任务书是验收权威**；PR 提供本轮 ABI、op_def 枚举、example 和目录等被测事实。任务书以
   “所有进入 AICore 的类型”定义集合时，op_def 负责枚举成员；不得复用旧 spec/报告，也不代表验收通过。
-- 确定性活（取材/fetch）在 `fetch_source.py`（primary CP-A 跑），本 agent 只做 NL 抽取判断；换运行时只换本壳，`acc-spec` skill 的 `references/` + `fetch_source.py` 不动；此可移植性依赖 canon 项 `cross-cli-unified-form`（proposed·未 settle，载重前需核）。
+- 确定性活（取材/fetch）在 `fetch_source.py`（primary CP-A 跑），本 agent 只做 NL 抽取判断；换运行时只换本壳，`acc-spec` skill 的 `references/` + `fetch_source.py` 不动；可移植边界以 `plugin/AGENTS.md`、frontmatter 同步门与当前文件布局为准。
 - 相关：`skills/acc-spec`（本 agent 承载的 skill）、CP-A primary `fetch_source.py`（取材）、CP-B primary `gen_cases.py --dry-run`（下游契约自检，**非裁决**）、CP-D 真机 `run_workflow.py --mode <mode> --source-facts <CP-A 取材目录>/source_facts.json`（⚠ 验收通路上 `--source-facts` 必给、缺席直接拒跑）、`op-acceptance`（dispatch 本 agent 的 orchestrator）。
   ⚠ 新一轮 spec **一律显式写 `runner_form="cpp_extension"`**，不问用户选 form；这是当前唯一能派生真机 mode、产验收裁决的执行形态。任务书/PR 提到旧调用桥，只能作为历史或 ABI 事实，不能驱动本字段改值。若本轮 ABI 无法接入 `cpp_extension`，就按不支持的接口能力回 `BLOCKED` 并挂迁移缺口，**不得**改抽退役 form 绕过。
   任务书把 stock `torch.*` 指定为功能真值时，DUT 与 baseline 必须分属独立 namespace。逐项核对任务书要求的 Torch overload 与本轮 PR-head ABI：可执行项生成 profile/call variant；任务书要求但 PR 无可执行 ABI 的项写 `api_surface_unsupported_by_pr` gap，摘要明确“要求但未实现”。不得伪造 profile，也不得因被测物缺功能把 CP-B 判成事实不足；该 gap 必须进入最终验收并阻止干净 PASS。

@@ -20,7 +20,7 @@ import numpy as np
 import gen_cases as GC
 import precision_policy as PP
 import repo_adapter as R
-import _golden_fixture as _gf   # golden 去引擎化：沙盒 ops_root 放 golden.py 供 gen_cases 加载（ADR 0011）
+import _golden_fixture as _gf   # 沙盒 ops_root 放 golden.py 供 gen_cases 加载
 import _spec_fixture as SF     # 样例 spec 已无 case_target（2026-08-06 删历史沿用值）→ 测试侧注夹具预算
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -220,7 +220,7 @@ def _mk_local_sandbox():
     sp = SF.load(_SIGN_SPEC)
     for p in sp["params"]:
         p["dtype"] = ["float32"]
-    # 沙盒 ops_root（home/.oprunway/ops/Sign）放 golden.py（gen_cases 加载，ADR 0011）+ user runner（find_runner 命中）
+    # 沙盒 ops_root（home/.oprunway/ops/Sign）放 golden.py（gen_cases 加载）+ user runner（find_runner 命中）
     ops_root = os.path.join(d["home"], ".oprunway", "ops")
     opdir = os.path.join(ops_root, "Sign")
     os.makedirs(opdir)

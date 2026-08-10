@@ -19,10 +19,10 @@ agents:
 
 # OpRunway 算子验收 — 跨 CLI 编排清单（AGENTS.md）
 
-> 本文件是 OpRunway 验收体系的 **plugin 级注册清单**，并**拟**作为跨 CLI 单一事实源（后者属 proposed·未 settle，
+> 本文件是 OpRunway 验收体系的 **plugin 级注册清单**，也是当前跨 CLI 的插件级事实源，
 > 见文末「跨 CLI 单一源」）：Claude Code 按约定目录自动发现 `agents/*.md`（**不读本文件**），**Codex 等读本文件**
 > （`AGENTS.md` 是 Codex 原生约定，plugin 根搭车）。编排 / 依赖 / 硬门以此为准。
-> **脚本是内部实现——用户全程只对话、不碰脚本、不被要求手敲命令**（proposed·未 settle，载重前需核）。
+> **脚本是内部实现——用户全程只对话、不碰脚本、不被要求手敲命令**。
 
 **输入**：调用方给定的一对“算子任务书 + 被测源码”；任务书与源码各自可为本地路径或在线 URL，二者关联由调用方断言。
 **产出**（**验收裁决当前只出自 `--mode cpp_extension`**，见下节与仓根 `AGENTS.md` §4）：`reports/<op>/` 下共有 `source_facts.json` / `caseset.json` / `evidence.json` / raw `verdict.json` / `baseline.json`（有基线时）/ `perf_report.json`；总结工件只按 `acceptance_artifacts.formal_acceptance_allowed` 二选一：true 产 `acceptance.json` 并进入报告渲染，false 产 `attempt_record.json`（`acceptance_verdict=null`），两者互斥。`cpp_extension` 另产与裁决解耦的 `repro/` 全量人工复现入口。
@@ -91,11 +91,11 @@ _RUNNER_FORM_TO_MODE = {"cpp_extension": "cpp_extension"}
 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一；只有 attempt 时不写
 `acceptance.json` 或 Markdown 验收报告。
 **「不推进下一 Task」是 agent 编排纪律**。
-判定脑子在 `acc-common/validator.py`（ADR 0007）、**不在编排层**；门只管「证据可信完整」，精度/性能 pass-fail 由 `validator`/`perf_compare` 判。
+判定脑子在 `acc-common/validator.py`、**不在编排层**；门只管「证据可信完整」，精度/性能 pass-fail 由 `validator`/`perf_compare` 判。
 
 ## 编排（CP-A..E · 薄 orchestrator + 3 subagent 状态机）
 
-胖 agent 已改薄为 `mode:primary` 编排器：只做**调度 + 检查点(CP)状态机 + 工件门禁 + 对应校验前置**；
+胖 agent 已改薄为 `mode:primary` 编排器：只做**调度 + 检查点(CP)状态机 + 工件门禁 + caller-trusted 内容绑定前置**；
 NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 个 `mode:subagent`**。CP 状态机文本承载在
 `skills/acceptance-workflow/SKILL.md`（primary 首响应先加载此 skill、禁裸调 subagent）。
 
@@ -161,7 +161,7 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   以下 `cpp` / `aclnn_py` 两条分流的机制描述**作为历史记录保留**（解释旧产物是怎么来的），
   但 2026-08-06 起这两条形态已停止准入、`run_workflow` 连入口都不再给，**编排层不会再走到它们**：
   `cpp` 才 dispatch `acc-runner-dev:gen_runner`（**先过 scope gate**）→ `verify_runner`；
-  未满足则停在 CP-C、不上正式跑测；acceptance 裁决只逐字引用 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py` 产物（ADR 0007）。
+  未满足则停在 CP-C、不上正式跑测；acceptance 裁决只逐字引用 `validator.py` / `perf_compare.py` / `validate_acceptance_state.py` 产物。
   ⚠ **`spec.runner_form == "aclnn_py"` 例外**（⛔ 已停止准入，本段机制仅作历史保留）：此形态**无 per-op runner 源**（op 工程即 DUT）→ **不派 `gen_runner`、跳过 per-op `verify_runner`**；
   但**不等于免验证**——dispatch `acc-verify-rootcause:verify_aclnn_harness`，由
   `verify_aclnn_harness.py` 从完整 caseset 确定性选择小见证集（每种实际输入 dtype + 每个签名/slot 变体；本接口存在时覆盖标量 attr / 多输出），
@@ -223,7 +223,7 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
 
 - **判定唯一归确定性脚本链**：`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`
   （三级完整性门）；总结工件只按 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一。**编排层与 subagent 不自行判 pass/fail，只逐字引用确定性产物的裁决并标来源**
-  （ADR 0007）——不是「绝不提 pass/fail」。
+  ——不是「绝不提 pass/fail」。
 - **subagent**：**单轮、禁内部循环、禁跨阶段、只回结构化摘要给 orchestrator、不自行判定**。
 - **primary**：**可直接跑「无 NL 生成、无判定」的确定性脚本**（`fetch_source` / `validate_taskdoc_input` / `gen_cases --dry-run --ledger-out` /
   `validate_preparation_state` / `preflight_aclnn` / `validate_acceptance_state` / `check_manifest_sync`）；**不做 NL 生成 durable 工件**（spec / **golden.py** / runner 一律派 subagent）；
@@ -249,7 +249,7 @@ NL 生成 durable 工件（spec / runner）与真机跑测 / 归因**下沉 3 �
   （或跑一遍 `init.sh`，它同样以 `OPRUNWAY_PLUGIN_ROOT` 为主、`CLAUDE_PLUGIN_ROOT` 为兼容别名）。
   **可执行命令里**统一写自兜底形式 `${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`——两种运行时都能跑，且不依赖谁先记得 export；
   两个都没设即路径为空、当场报错（fail-closed），不静默跑错。
-- **跨 CLI 单一源**（proposed·未 settle，载重前需核）：本 `AGENTS.md` 为事实源，`CLAUDE.md` 与之**手工同步**，由
+- **跨 CLI 单一源**：本 `AGENTS.md` 为事实源，`CLAUDE.md` 与之**手工同步**，由
   `acc-common/check_manifest_sync.py` 做**机器校验漂移门**——**与文件系统两方集合比对**：本 frontmatter `agents` ↔
   `agents/*.md`、本 frontmatter `skills` ↔ `skills/*/SKILL.md`（多登记 / 漏登记都报 DRIFT）；外加**硬拒**
   `.claude-plugin/plugin.json` 声明 `agents` 字段。`plugin.json` **不参与 agents 同步**（见上文：它一声明反而全不加载）。

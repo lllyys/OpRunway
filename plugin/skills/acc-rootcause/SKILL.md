@@ -1,25 +1,26 @@
 ---
 name: acc-rootcause
-description: OpRunway 验收里任何 FAIL 归因前的解耦纪律薄壳——先验证「任务书↔PR 对应」本身，再用被测物自己的东西（自 build + 声明 dtype + 手算 golden + custom↔builtin 对照）解耦「被测物 vs 我们的 harness」，才下归因。P2 规划的原子能力 skill：尚未接入 op-acceptance live 流、勿自动触发、无脚本判定（纪律 skill，不产 verdict）。真机 FAIL 要归因、或复盘一次归因翻案时阅读。
+description: OpRunway 验收里任何 FAIL 归因前的解耦纪律薄壳——先复核任务书摘要、源码 content_anchor、build receipt、实际 ELF/符号、调用与输出写入，再用自 build、声明 dtype、手算 golden 与 custom↔builtin 对照解耦 DUT 与 harness。P2 规划的原子能力 skill：尚未接入 op-acceptance live 流、勿自动触发、无脚本判定（纪律 skill，不产 verdict）。真机 FAIL 要归因时阅读。
 ---
 
 # acc-rootcause — FAIL 解耦纪律（原子能力 skill）
 
-**定位（诚实，P2 边界）**：本 skill 是 P2 规划的**纪律 skill**——只装「FAIL 该怎么归因、什么前提下才能下结论」的**推理纪律**，**无脚本判定、不产 verdict、不落盘**。裁决仍唯一归确定性脚本链（`validator.py` / `perf_compare.py` / `validate_acceptance_state.py`，ADR 0007 canonical）；本 skill 只约束「下结论前先做什么解耦」。
+**定位（诚实，P2 边界）**：本 skill 是 P2 规划的**纪律 skill**——只装「FAIL 该怎么归因、什么前提下才能下结论」的**推理纪律**，**无脚本判定、不产 verdict、不落盘**。裁决仍唯一归确定性脚本链（`validator.py` / `perf_compare.py` / `validate_acceptance_state.py`）；本 skill 只约束「下结论前先做什么解耦」。
 
 - **未登记进 AGENTS.md（诚实先例）**：本 skill **不列入** `plugin/AGENTS.md` 的 `skills:` 清单——登记 = 声称已接入 live 流，而本 skill 未接入（live 归因由 `acc-verify-rootcause` subagent（P1，`dispatch_mode=rootcause`）承载）。分发 / 发现由 `init.sh` 扇出保证（symlink `plugin/skills/` 下**全部** skill 目录、**不依赖 AGENTS.md 登记**）。待 P1 / 后续真接线再登记；本 skill 勿被自动触发。
-- 血教训来源：Equal（2026-07-08→07-09 三度翻案），见 canon `Verify spec-PR correspondence before acceptance`（proposed）+ `Root-cause decoupling before attribution`（proposed）。
+- 历史误配案例只作非规范性背景；当前归因纪律以仓根 `AGENTS.md` §5.8、§7 和本轮确定性证据链为准。
 
-## 0. 更上游前提（比解耦更早）· 先验证「任务书↔PR 对应」本身
+## 0. 更上游前提（比解耦更早）· 先复核本轮输入与执行绑定
 
-**任何 FAIL 归因、乃至任何验收裁决之前**，先确认：
+调用方传入任务书与源码即断言二者对应；不得再按 issue、仓、fork、ref、head 或目录重新鉴权。**任何 FAIL 归因之前**，先确认：
 
-1. **这个 PR 确是这份任务书的交付 PR**（靠 **issue/追踪号 + 改动落点目录**，**不靠算子名字面匹配**——名字常是常见子串、易误配）；
-2. **该任务确有已验收的交付**（不是「任务书要了但未落地/未验收」的空任务）。
+1. 任务书摘要和源码 `content_anchor` 与 CP-A `source_facts.json` 绑定；
+2. build 前源码锚、current vendor receipt、实际加载 ELF 与双符号 owner 逐字一致；
+3. 本轮调用、输入、输出写入和 evidence 能闭合到同一内容链。
 
-配错对应、或对应的其实是空任务 → **下游一切裁决作废**，哪怕精度/性能门再严、解耦做得再干净。识别并跳过「未验收空任务」正是 OpRunway 的应有能力。（Equal：#2890 系误配、Equal 社区任务未验收，前「A3 真阳性」结论整体作废——refine 了三遍归因，却始终没质疑最上游。）
+任一绑定缺失或漂移 → 证据链不完整，停止归因并按确定性门产物报告；不得用 locator 身份判断替代内容绑定。
 
-## 1. 解耦纪律（对应确认后，归因前）· 被测物 vs 我们的 harness
+## 1. 解耦纪律（绑定确认后，归因前）· 被测物 vs 我们的 harness
 
 **「输出全 0 / 未被写」既可能是 harness 没绑定/没回写，也可能是被测 kernel 压根没执行/没写**——区分靠对照，不靠直觉：
 
@@ -44,6 +45,6 @@ description: OpRunway 验收里任何 FAIL 归因前的解耦纪律薄壳——�
 - **源码「一行诊断」须经真机重编坐实范围**：读源码得「缺一行、一处即修」是**假设**、非结论——补上重编后可能暴露更深缺陷（补一处、另一处仍炸）。范围以真机复现为准。
 - **技术判定 与 官方/程序口径 分开记**：「实测是被测物缺陷」是技术判定、可下；「是否算官方验收失败 / 该不该对外上报」是程序口径，未确认前留口、不外发、不来回改口。
 - **验收职责边界**：把缺陷**定性**清楚即可，**不替被测 PR 作者把算子修到底**。
-- **裁决归脚本**：本 skill 不产 pass/fail；解耦结论供人/编排理解，最终 verdict 仍由确定性脚本链出（ADR 0007）。
+- **裁决归脚本**：本 skill 不产 pass/fail；解耦结论供人/编排理解，最终 verdict 仍由确定性脚本链出。
 
-**详规见** `references/rootcause-decoupling.md`（对应校验三证据 · 解耦四对照 · 全 0 决策树 · 归因红线，按 canon tier 引）。
+**详规见** `references/rootcause-decoupling.md`（内容绑定证据 · 解耦四对照 · 全 0 决策树 · 归因红线）。

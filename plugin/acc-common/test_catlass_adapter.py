@@ -9,7 +9,7 @@ failed/崩溃/空日志·坏输入不崩）、msprof kernel-only 解析（真实
 mock 端到端 + defect 翻 FAIL、外部 GPU 基线校验（scope 不符/缺用例 blocked）、profile 命中门、下游门兼容。
 
 另含 **C5 负向门 `NonAcceptanceInvariantTest`**：断言 catlass_mock **产不出**干净 PASS 的验收产物
-（canon 页 [[Synthetic catlass demo cannot forge a PASS acceptance]] 点名要、一直缺的那条自动化负向测试）。
+（直接验证 synthetic catlass demo 不能伪造正式 PASS 的自动化负向测试）。
 
 再含 **C5 收口三组（2026-07-22）**，堵的都是「一边堵了、另一边没堵」：
 - `CliExitSymmetryTest` —— `repo_adapter` 的 CLI 出口与 `catlass_adapter` 的**同一套**守卫（真走一遍
@@ -457,9 +457,7 @@ class DownstreamCompatTest(unittest.TestCase):
 class NonAcceptanceInvariantTest(unittest.TestCase):
     """C5 负向门：catlass_mock **无法**产出干净 PASS 的验收产物。
 
-    这就是 canon 页 [[Synthetic catlass demo cannot forge a PASS acceptance]]（`proposed`）自己点名要、
-    但一直缺的那条自动化负向测试（「要升 verified，须补一条自动化负向测试，实际断言 catlass_mock
-    无法生成干净 PASS 的 acceptance.json」）。
+    这是直接验证 catlass_mock 无法生成干净 PASS `acceptance.json` 的自动化负向测试。
 
     写法要求（别写成永远绿的假测试）：每条都**真的把「有人让它伪造验收」演一遍**——改 CATLASS_MODES 里的
     实现让它吐干净 PASS、给 CLI 递 acceptance.json 当输出名、把 envelope 洗白——再断言被挡住 + 不落盘。

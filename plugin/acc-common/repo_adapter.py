@@ -5,7 +5,7 @@
                   一律自带 `evidence_grade="development"` + `acceptance_note` 标 NON-ACCEPTANCE（C5，
                   2026-07-22 用户拍板）。缺陷注入降级为**测试专用夹具**、CLI 不可达。无需 NPU。
 - new_example   : 真机 build/run（`evidence_grade="acceptance_candidate"`）。
-证据只记「测到什么」（metric value / us / 路径），pass/fail 交给 validator（ADR 0007）。
+证据只记「测到什么」（metric value / us / 路径），pass/fail 交给 validator。
 
 ⚠ 本模块的 CLI（`main()`）落盘前过两道 C5 守卫——产物名不得冒充裁决（`refuse_reserved_out`）、envelope
 须自带 non-acceptance 标记（`assert_non_acceptance`）——**实现直接取自 `catlass_adapter`、不另抄一份**：
@@ -153,7 +153,7 @@ def _precision_evidence(case, out, golden, out_path, work_dir, ascendoptest_bool
 
 # ══ 多输出契约 readback + 逐输出 evidence（torch 对标 median 见证；OpRunway 侧 compute_metrics）══════
 # 蓝图 §2.3：aclnn_py form 的 collect 拉回 out_k.bin 后，evidence 组装（含误差复算 compute_metrics）在
-# **OpRunway 侧**（判定唯一归确定性脚本链，ADR 0007）。aclnn_adapter 只做 deploy/build/exec/collect，
+# **OpRunway 侧**（判定唯一归确定性脚本链）。aclnn_adapter 只做 deploy/build/exec/collect，
 # 不算 metrics、不下 pass/fail。本组函数即那条「OpRunway 侧 readback+复算」通路，**全程 op-中立**：
 # 逐输出据 caseset `expected.outputs[]` 的 role/policy/out_shape 字段驱动，**绝无按算子名分支**（律令#0）。
 
@@ -1591,7 +1591,7 @@ except Exception as _ex:  # 缺 catlass_adapter/其依赖时**不影响库用法
 # --- torch 对标 · aclnn_py adapter（ctypes-aclnn runner form）注册：实现在 aclnn_adapter.py，此处加法接入 ---
 # 比照 CATLASS_MODES 的接入范式（按**能力/形态**扩、非按算子身份）。aclnn_adapter 只做 deploy/build/exec/
 # collect；evidence 组装（含 compute_metrics 误差复算）走本模块 build_multi_output_evidence（判定唯一归
-# 确定性脚本链，ADR 0007）。缺 aclnn_runtime/其依赖时不影响 MODES 的 mock/new_example/catlass_* 照跑。
+# 确定性脚本链）。缺 aclnn_runtime/其依赖时不影响 MODES 的 mock/new_example/catlass_* 照跑。
 _ACLNN_IMPORT_ERR = None
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

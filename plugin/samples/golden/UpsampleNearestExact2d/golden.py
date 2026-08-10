@@ -21,7 +21,7 @@
   `op_host/op_api/aclnn_upsample_nearest_exact2d.cpp:257,270` 调 l0op 时 `exactMode` **恒传 true**
   → 走 aclnnUpsampleNearestExact2d 这个入口时 exact_mode 不是可变参数，故本 golden 不建模该 attr。
 
-后端（ADR 0011 决策 4 · R6「torch 优先、numpy 兜底，**生成期**选型并写死」）：golden 恒 CPU，本文件
+后端（「torch 优先、numpy 兜底，**生成期**选型并写死」）：golden 恒 CPU，本文件
 生成期已选定 torch；**运行时**不兜底——torch 缺失即 fail-closed（确定性红线）。选 torch 而非 numpy 的
 硬理由：numpy **没有**最近邻上采样的现成 API（`np.repeat` 只能整数倍、且不是 nearest-exact 的半像素规则），
 而 torch 的 `nn.functional.interpolate(mode="nearest-exact")` 正是**单调一次调用**的现成 API。
@@ -62,7 +62,7 @@ def _require_torch():
         raise RuntimeError(
             "golden 需 torch(CPU) 作 CPU 标杆参考、但未安装/不可用。请安装 CPU 版："
             "pip install torch --index-url https://download.pytorch.org/whl/cpu。"
-            "不静默回退——确定性红线（ADR 0011 决策 4）。") from e
+            "不静默回退——确定性红线。") from e
 
 
 def _output_size(attrs):

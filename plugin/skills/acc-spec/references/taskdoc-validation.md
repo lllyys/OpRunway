@@ -169,7 +169,7 @@ dtype 允许两种明确形态：**逐字枚举**，或**给出可绑定的集�
 ### Golden 标杆（must）
 明确 = 真值来源 + **准确的 API/overload** + 运行环境 + **组合实现是否允许**。
 四要素缺一即 `ambiguous`。「用 torch 对拍」缺 API 和环境；「参考实现见 PR」是**无效来源**
-（canon: PR 不能当 golden 源），判 `ambiguous` 而不是 satisfied。
+（仓规：PR 不能当 golden 源），判 `ambiguous` 而不是 satisfied。
 
 ### 精度额外要求（optional）
 未声明 → `missing`，走 workflow 标准精度口径，不阻断。

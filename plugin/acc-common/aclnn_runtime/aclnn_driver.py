@@ -2,7 +2,7 @@
 
 职责边界（**只产原始输出、绝不判定**）：读 caseset + 各 case 的输入张量文件 → 取该 case **已解析好的**
 ``aclnn_call`` → 调 ``AclnnRunner.run(symbol, slots, signature=...)`` → 把每个输出落 ``out_k.bin``。
-**判定/精度比对/pass-fail 唯一归 OpRunway 确定性脚本链**（validator / precision_policy，ADR 0007）
+**判定/精度比对/pass-fail 唯一归 OpRunway 确定性脚本链**（validator / precision_policy）
 ——本脚本一律不算 metrics、不下结论。
 
 泛化（律令#0）：一切据 caseset 字段驱动，**绝无按算子名的分支**。

@@ -111,7 +111,7 @@ def _target(socs):
     tgt = "a3_and_a5" if (has_a3 and has_a5) else ("a3" if has_a3 else ("a5" if has_a5 else None))
     th = {"opdef_addconfig": socs, "state": "agreed" if tgt else "contested",
           "source": {"source": "op_def", "state": "resolved", "fail_closed": False,
-                     "conflict_resolution": "⚠ 权威是**任务书**：prober 只抠 op_def socs。若任务书『适配硬件』不在此 socs 集内 → **可能选错了 PR**（硬约束 #1 Equal 血教训 / canon task-spec-authoritative-over-pr）或该任务在目标平台未落地——须先验证『任务书↔PR 对应』、**绝不按 op_def 自动定机**（task#7 人裁）"}}
+                     "conflict_resolution": "⚠ 权威是**任务书**：prober 只抠 op_def socs。若任务书『适配硬件』不在此 socs 集内，记录任务书与被测源码能力冲突并请用户补充事实；调用方给定的任务书/源码关联不重新鉴权，且**绝不按 op_def 自动定机**（task#7 人裁）"}}
     if tgt:
         th["resolved_target"] = tgt
     return th

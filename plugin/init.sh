@@ -7,7 +7,7 @@
 # cursor/copilot）→ AGENTS.md + 各自目录。skills/agents 走 **symlink 发现**（保相对
 # 拓扑），symlink 不可用时 materialize-with-provenance 兜底。
 #
-# 设计红线（对齐 canon cross-cli-unified-form-agents-md·proposed / CLAUDE.md 工程约定）：
+# 设计红线（对齐当前 AGENTS.md / CLAUDE.md 工程约定）：
 #   - 主变量 OPRUNWAY_PLUGIN_ROOT（默认=脚本自身目录），Claude 分支兼容别名 ${CLAUDE_PLUGIN_ROOT}
 #   - 不 sed 私有/绝对路径进任何制品；不照搬 cannbot 的 external-directory 白名单反模式
 #   - 不写 ~/.config、不改 shell rc；产物只落目标 project/global 的 CLI 约定目录

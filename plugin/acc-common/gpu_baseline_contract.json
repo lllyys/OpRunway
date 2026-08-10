@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "contract_version": "0.1.0-provisional",
   "待散文门": true,
-  "provenance": "canon/decisions/0006-performance-timing-scope.md (proposed·未 settle) + acceptance-contract-evidence-chain.md (canonical: GPU 只作性能标杆非精度 oracle)",
+  "provenance": "historical compatibility contract; current workflow policy is AGENTS.md §6.1 (NPU-only, GPU data is not consumed)",
   "note": "外部 GPU 标杆最小字段契约 15 项（codex M1）。枚举取值 provisional，待外部方真数据按 contract_version 迭代；旧 parser 保留、变更走版本递增不覆盖历史（codex L2）。本文件为 data-driven 版本源，解析规则内嵌于 gpu_baseline.py（缺此文件时用内嵌默认，仅 contract_version 记为 unknown）。",
   "top_level_optional": ["device", "device_type", "tool", "timing_scope", "sync_policy", "statistic", "unit", "clock_power_state", "data_transfer_included"],
   "per_case_fields": {

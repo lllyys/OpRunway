@@ -1,6 +1,6 @@
 """torch 对标 · aclnn_py repo-adapter —— ctypes-aclnn runner form 的 fetch/build/install/exec/collect 编排。
 
-canon 归属（trust tier 待 bureau:review）：这是 repo-adapter 的**新 harness form / adapter mode**
+实现归属：这是 repo-adapter 的**新 harness form / adapter mode**
 （按能力/仓/框架扩，同 catlass `generated_harness` 先例；蓝图 §6），注册进 `repo_adapter.MODES["aclnn_py"]`。
 **无 per-op runner 源**——op 工程（PR checkout）即 DUT，`aclnn_runtime` 的 ctypes runner 完全 op-中立
 （从 header 正则拿 op 名、从签名推 arity）。换任意「域内」aclnn 算子（无状态 / 标准两段式 / 无 opaque
@@ -9,7 +9,7 @@ descriptor）工具零改即跑。
 ⚠ 边界（诚实，承 catlass_adapter 同款纪律）：
 - **判定不在此**：本模块只做 fetch/build/install/exec/collect（产 out_k.bin），evidence 组装含
   `compute_metrics` 误差复算走 `repo_adapter.build_multi_output_evidence`（OpRunway 侧），pass/fail 归
-  validator/perf_compare（ADR 0007）。本模块一律不算 metrics、不下结论。
+  validator/perf_compare。本模块一律不算 metrics、不下结论。
 - **真机全部待验**（承 golden-branch-handoff「covered≠真机绿」）：build.sh install / ctypes 在 9.0.1
   运行时 / 多输出 arity / bf16 窄化 —— 均须 a3 专用容器 容器实证。real 通路默认 fail-closed，须显式
   `OPRUNWAY_ACLNN_REAL=1` + 人工确认副作用（build install 写用户态 vendor 目录）才跑（同 catlass `OPRUNWAY_CATLASS_REAL`）。
@@ -714,7 +714,7 @@ def _prov_prefix(cfg, symbols):
 
     审计 High#1：旧幂等门只看 `libcust_opapi.so` **在不在**——不绑仓 / PR commit / op / SoC / 构建参数，
     于是「复用工作目录验收新 PR」会实际跑**上一个 PR 的 .so**，却照产 BUILD_DONE 与验收证据。
-    对齐本项目 canon 已有的「opp provenance-bound + fail-closed 门」先例：指纹不符即清理重建。"""
+    对齐本项目现有的「opp provenance-bound + fail-closed 门」实现：指纹不符即清理重建。"""
     # 改动⑯：取源形态与快照 merkle 一并进指纹——否则换一份快照会复用上一份的 .so。
     return ("src=" + cfg.get("source_mode", _SOURCE_MODE_GIT)
             + "|repo=" + cfg["base_repo"] + "|ref=" + cfg["pr_ref"] + "|sha=" + cfg["head_sha"]

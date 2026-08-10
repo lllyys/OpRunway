@@ -23,7 +23,7 @@ agent 内部完成六步（取材 → 任务书→spec → 生成并验证 runne
 | **skills** `acc-spec`(任务书→spec)、`acc-runner`(生成 runner) | NL 判断规则（`references/`）| 内部 |
 | **scripts** `acc-common/*.py` | 取材 / 造用例 / 裁决 / 性能（确定性核心）| 内部（agent 幕后跑，**不暴露给用户**）|
 
-**跨 CLI 统一**：脚本 + JSON 契约 + skill `references/` 工具中立、一份到处用；换运行时（Codex / Antigravity）只换 agent/skill 的注册薄壳，核心不动。判定脑子在 `acc-common/validator.py`（ADR 0007），不在 agent。
+**跨 CLI 统一**：脚本 + JSON 契约 + skill `references/` 工具中立、一份到处用；换运行时（Codex / Antigravity）只换 agent/skill 的注册薄壳，核心不动。判定脑子在 `acc-common/validator.py`，不在 agent。
 
 ## 现状（诚实）
 

@@ -27,12 +27,12 @@
     "standard_source": "显式声明平台层标准（fp32 matmul numerical 走 AscendOpTest 默认阈值）；oracle=numpy-f32-matmul 非 select_standard 白名单值，须显式 standard 才不被 fail-closed 拒",
     "dtype": "float32",
     "threshold": 0.001,
-    "threshold_source": "占位默认 max_rel_err=1e-3（fp32 matmul）—— 大 K 累积误差阈值待真机/任务书校准；ADR0005 三层口径（MERE/MARE）是 validator 级独立 todo，本 adapter 暂用单阈值 numerical 路径",
-    "acceptance_note": "catlass 自带 Compare success/failed 只是仓内 smoke 信号，非本 spec 的验收精度结论（精度=真 NPU out vs numpy golden，ADR0002）"
+    "threshold_source": "占位默认 max_rel_err=1e-3（fp32 matmul）—— 大 K 累积误差阈值待真机/任务书校准；三层口径（MERE/MARE）是 validator 级独立 todo，本 adapter 暂用单阈值 numerical 路径",
+    "acceptance_note": "catlass 自带 Compare success/failed 只是仓内 smoke 信号，非本 spec 的验收精度结论（精度=真 NPU out vs numpy golden）"
   },
   "perf": {
     "baseline_source": "gpu_external",
-    "baseline_source_note": "catlass 无 builtin-TBE 分母 → perf 分母走外部 GPU 标杆（Task 3 提供），ADR0006 默认；run_catlass 不写 _real_baseline",
+    "baseline_source_note": "历史 synthetic fixture：catlass 无 builtin-TBE 分母，run_catlass 不写 _real_baseline；正式 workflow 不消费外部 GPU 标杆",
     "target_ratio": 1.0,
     "target_ratio_source": "占位默认（NPU↔GPU 不劣化）；真实目标待任务书",
     "case_source": "precision_cases",

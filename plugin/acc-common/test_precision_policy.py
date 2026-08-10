@@ -14,7 +14,7 @@ import numpy as np
 import precision_policy as P
 import validator as V
 import _golden_fixture as _gf
-setUpModule = _gf.install        # golden 去引擎化：gen_cases/run_workflow 需 <ops_root>/<op>/golden.py（ADR 0011）
+setUpModule = _gf.install        # gen_cases/run_workflow 需 <ops_root>/<op>/golden.py
 tearDownModule = _gf.uninstall
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -998,7 +998,7 @@ class GoldenTierDerivationTest(unittest.TestCase):
 
     def test_producible_subset_excludes_repo_and_pr_refs(self):
         """R2：可产集里**没有** cpu_ref（含「PR 的 CPU 参考」）与 catlass_existing_ref 的格子；
-        但 canonical 六枚举定义本身不动（改它须走 bureau review）。"""
+        但受控的六枚举定义本身不动。"""
         self.assertNotIn("cpu_ref", P.PRODUCIBLE_ORACLE_SOURCES)
         self.assertNotIn("catlass_existing_ref", P.PRODUCIBLE_ORACLE_SOURCES)
         self.assertTrue(set(P.PRODUCIBLE_ORACLE_SOURCES) < set(P.ORACLE_SOURCES))

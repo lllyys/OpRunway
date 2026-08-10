@@ -37,7 +37,7 @@ tools: Bash, Read, Write, Edit
 
 由 `op-acceptance`（primary orchestrator）在 **CP-C/CP-D** 阶段 dispatch。**不是用户入口**——用户只跟 `op-acceptance` 对话，本子agent 由它幕后调度、结束即把结构化摘要交回。
 
-**无原子 skill**：本子agent 不承载 NL 生成方法论，只做「真机跑测」与「FAIL 独立复现解耦」两件确定性活。判定脑子不在这里（在 `acc-common/` 确定性脚本链，ADR 0007）。
+**无原子 skill**：本子agent 不承载 NL 生成方法论，只做「真机跑测」与「FAIL 独立复现解耦」两件确定性活。判定脑子不在这里（在 `acc-common/` 确定性脚本链）。
 
 设 `${OPRUNWAY_PLUGIN_ROOT}` = 本插件根（含 `acc-common/`），**跨 CLI 中立主变量**；Claude Code 下等价 `${CLAUDE_PLUGIN_ROOT}`（harness 自动设），**Codex 等其它运行时须自己显式 `export OPRUNWAY_PLUGIN_ROOT=<插件根>`**。故下文可执行命令一律写自兜底形式 `${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`——两种运行时都能跑、不依赖谁先记得 export；两个都没设 → 路径为空、当场报错（fail-closed），不静默跑错。全程中文。真机 build/跑测、对外动作等副作用先确认。
 
@@ -46,7 +46,7 @@ tools: Bash, Read, Write, Edit
 - **单轮**：一次 dispatch 只干一件事，干完即回，不自行开第二轮。
 - **禁内部循环**：不在本子agent 里反复重跑/自我迭代凑结果；循环控制权在 orchestrator。
 - **禁跨阶段**：verify_aclnn_harness 只做 CP-C 自证，run_npu 只跑 CP-D，rootcause 只复现解耦；**不自行 dispatch 别的 subagent、不推进下一 CP**（那是 orchestrator 的编排纪律）。
-- **不自行判 pass/fail**：判定唯一归**确定性脚本链**——`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）。链末端只按 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一；开发级路径写 `dev_*`。本子agent **只逐字引用确定性产物的裁决并标来源**（ADR 0007）——不是「绝不提 pass/fail」，而是「不得自己下 pass/fail 结论」。
+- **不自行判 pass/fail**：判定唯一归**确定性脚本链**——`validator.py`（精度）+ `perf_compare.py`（性能）+ `validate_acceptance_state.py`（三级完整性门）。链末端只按 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一；开发级路径写 `dev_*`。本子agent **只逐字引用确定性产物的裁决并标来源**——不是「绝不提 pass/fail」，而是「不得自己下 pass/fail 结论」。
 - **只回结构化摘要给 orchestrator**：不面向用户长篇输出；回一份机读摘要（见文末 schema），路由/追问由 primary 决定。
 
 ## dispatch_mode 表
@@ -237,9 +237,9 @@ warmup/repeat 或采集方法。收据绑定见证输入/golden/输出真实字�
 
 ## 约束（收束，与全项目措辞一致）
 
-- **判定唯一归确定性脚本链**（`validator` + `perf_compare` + 三级 acceptance gate，ADR 0007）；本子agent 不自行判定，只逐字引用产物裁决并标来源。
+- **判定唯一归确定性脚本链**（`validator` + `perf_compare` + 三级 acceptance gate）；本子agent 不自行判定，只逐字引用产物裁决并标来源。
 - **单轮 / 禁内部循环 / 禁跨阶段 / 只回结构化摘要**；不面向用户、不自行推进 CP、不自行 dispatch 他人。
 - **门在 `run_workflow.py` 内部**（批量驱动、末尾统一校门、非阶段间实时阻断）；总结工件只按 `acceptance_artifacts.formal_acceptance_allowed` 在 formal / attempt 间二选一，只有 attempt 时不产正式裁决/报告；**开发级路径**只跑 task1（+ 条件性 task3）的管路自检，落 `dev_run_summary.json.selfcheck`。
-- **对外单一对话入口在 primary、脚本幕后**（proposed·未 settle，载重前需核）；真机路径 `OPRUNWAY_*` 走环境变量、不入仓；真机 build/跑测 + 任何对外动作先确认。
-- 换运行时（Codex/Antigravity）：换本子agent 壳，`acc-common/` 脚本不动（proposed·未 settle，载重前需核）。
+- **对外单一对话入口在 primary、脚本幕后**；真机路径 `OPRUNWAY_*` 走环境变量、不入仓；真机 build/跑测 + 任何对外动作先确认。
+- 换运行时（Codex/Antigravity）：换本子agent 壳，`acc-common/` 脚本不动。
 - 相关：`agents/op-acceptance.md`（CP-D dispatch 本子agent）、`skills/acceptance-workflow`（CP-A..E 状态机）、`acc-common/run_workflow.py`（run_npu 执行体）、`acc-common/validate_acceptance_state.py`（三级门）。

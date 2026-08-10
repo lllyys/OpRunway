@@ -27,7 +27,7 @@
   这几个数值与 OpenCV 的 `cv2.BORDER_*` **完全同值**，故 `border_type` **直传 cv2、不建映射表**
   （建表反而要维护一份可能与 DUT 漂移的第二真源）。
 
-后端（ADR 0011 决策 4 · R6「生成期选型并写死」）：生成期选定 **OpenCV CPU**，这不是可换的偏好——
+后端（「生成期选型并写死」）：生成期选定 **OpenCV CPU**，这不是可换的偏好——
 任务书把功能比对标杆写成 OpenCV（用户口径 P2：**只对 OpenCV CPU**）。运行时不兜底：cv2 缺失即
 fail-closed（确定性红线），**不静默换 torch/numpy 自拼一个高斯核**（那是无授权多步自拼，按
 `derive_golden_tier` 规则 ⑧ 直接 tier 4 blocked）。
@@ -120,7 +120,7 @@ def _require_cv2():
         raise RuntimeError(
             "golden 需 OpenCV(CPU) 作真值标杆、但未安装/不可用。请装 CPU 版："
             "pip install opencv-python-headless。"
-            "不静默回退——确定性红线（ADR 0011 决策 4）；本算子尤其不可换 torch/numpy 自拼高斯核"
+            "不静默回退——确定性红线；本算子尤其不可换 torch/numpy 自拼高斯核"
             "（无授权 + 多步自拼 = derive_golden_tier 规则 ⑧ 判 tier 4 blocked）。") from e
     ver = getattr(cv2, "__version__", "")
     if _parse_version(ver) < _MIN_CV2_VERSION:

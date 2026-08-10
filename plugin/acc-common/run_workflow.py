@@ -1247,7 +1247,7 @@ def run(spec_path, mode=None, out_dir="reports/_run", defect=None, perf_slow=Non
           + ("" if gate_passed else f" · {gate_errs}"))
 
     # 总体口径：精度(放行看 acceptance) + 性能 + 验收门都要过（门 FAILED 一票否决，不出 pass）。
-    # 精度 verdict ∈ {pass, fail, needs_review, passed_with_risk}；放行只看 acceptance（ADR 0005）。
+    # 精度 verdict ∈ {pass, fail, needs_review, passed_with_risk}；放行只看 acceptance。
     perf_pass = (ps.get("status") == "ok" and ps.get("blocked", 0) == 0
                  and ps.get("perf_cases", 0) == ps.get("达标", 0))
     # §5.10：measure_only 的「性能维完成」= 每条性能 case 都真有 msprof 实测，**与达标无关**

@@ -1,6 +1,6 @@
 """Task 3 · perf_compare — evidence + baseline.json -> perf_report.json。
 
-对比双方 scope 必须一致（默认 kernel-only，ADR 0006·proposed·未 settle）；不一致 →
+对比双方 scope 必须一致（默认 kernel-only）；不一致 →
 blocked_incomparable_timing_scope、不出结论。ratio = baseline_us / npu_us（>1 表示 NPU 更快）；
 达标 = ratio ≥ spec.perf.target_ratio。缺证据/基线 → blocked；无性能用例 → 显式 no_perf_cases。
 

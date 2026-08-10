@@ -5,7 +5,7 @@
 > **⚠ 前向声明 / 诚实边界**：
 > - 这些模板**面向 P1 的 3 个 subagent**（`acc-spec-extractor` / `acc-runner-dev` / `acc-verify-rootcause`，`plugin/agents/*.md`）。**P1 已建这 3 个 subagent**；但**本 task-prompts.md 只是材料仓参考、不是 live dispatch 路径**——真正的 live 编排契约在 `skills/acceptance-workflow/SKILL.md`（CP-A..E 状态机 + §2 dispatch 六段契约），primary 首响应加载它、按它派 subagent。
 > - 本文件**不被自动加载、不改变运行路径**；它是「人读/新 CLI 移植时抄的模板」，若与 `acceptance-workflow` skill 冲突，**以 skill 为权威**。
-> - **判定唯一归确定性脚本链**（ADR 0007）：所有模板都强调 subagent「单轮 / 禁内部循环 / 不自行判 pass/fail、只回结构化摘要」。
+> - **判定唯一归确定性脚本链**：所有模板都强调 subagent「单轮 / 禁内部循环 / 不自行判 pass/fail、只回结构化摘要」。
 
 ## 0. dispatch 六段契约（每次派都给全，缺一段 subagent 就做不了）
 
@@ -24,8 +24,8 @@
 ```
 工作区: reports/<op>/  · ${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}   # 插件根：Claude 走别名兜底；Codex 等先 export OPRUNWAY_PLUGIN_ROOT
 dispatch_mode: extract_spec
-输入工件: work/task_doc.md + work/task_doc.snapshot.md + work/pr_facts.json + work/source_facts.json + work/correspondence.json（①fetch_source/CP-A 产）
-已确认约束: correspondence.json.confirmed_constraints（没有则 []）；逐项原样采用，不重复研究
+输入工件: work/task_doc.md + work/task_doc.snapshot.md + work/pr_facts.json + work/source_facts.json（①fetch_source/CP-A 产）
+已确认约束: 调用方明确给出的约束（没有则 []）；逐项原样采用，不重复研究
 验收标准: 按 acc-spec references/taskdoc-to-spec.md 字段映射逐字段抽；verify_mode 合法；
           numerical 有 threshold；dtype 只填 pipeline 支持子集、余入 task_pr_gaps；缺项落 gaps 不臆造。
           一份任务书含 N 算子 → N 份 spec。
@@ -100,7 +100,7 @@ dispatch_mode: run_npu
 ```
 dispatch_mode: rootcause
 输入工件: FAIL 的 verdict.json / perf_report.json / acceptance.json + evidence
-验收标准: 先验「任务书↔PR 对应」本身（acc-rootcause §0），再「被测物自 build + 声明 dtype + 手算 golden」
+验收标准: 先复核任务书摘要、源码 content_anchor、build receipt、实际 ELF/符号、调用与输出写入，再以「被测物自 build + 声明 dtype + 手算 golden」
           独立复现、custom↔builtin 对照，解耦「被测算子 vs harness」再归因（acc-rootcause §1）。
           技术判定与官方口径分开、不外发、不臆断、不来回改口（Equal 血教训）。
 本次产出: 解耦结论 + 缺陷定性（非 pass/fail 裁决——裁决归脚本）；摘要回：根因归属 + 证据 + 残留不确定。
@@ -108,4 +108,4 @@ dispatch_mode: rootcause
 
 ## 4. 移植到新 CLI 时
 
-把上面模板按目标 CLI 的 subagent 机制翻译即可；**Layer 0/1（数据契约 + 确定性脚本）不动**，只换 Layer 2 薄壳（`workflow-three-layer-architecture`·proposed·未 settle，载重前需核）。
+把上面模板按目标 CLI 的 subagent 机制翻译即可；**Layer 0/1（数据契约 + 确定性脚本）不动**，只换 Layer 2 薄壳；边界以 `plugin/AGENTS.md` 和 frontmatter 同步门为准。

@@ -61,7 +61,7 @@
 职责边界
 --------
 本模块**只产计时数与行为分类**，一律不下「性能达标」结论——裁决唯一归 `perf_compare.py`
-（ADR 0007「判定只归确定性脚本链」）。产出经 `aclnn_adapter` 落成两份数据：
+（判定只归确定性脚本链）。产出经 `aclnn_adapter` 落成两份数据：
   · custom 侧 us → evidence `perf.{scope,us}`；
   · baseline 侧 us → `work/_torch_npu_baseline.json` → `repo_adapter.parse_torch_npu_baseline`
     → `perf_compare`（**perf_compare 判定逻辑零改、源无关**，只读 us + scope + ratio）。

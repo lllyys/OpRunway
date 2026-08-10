@@ -1,7 +1,7 @@
 """P3 catlass adapter · 解析层（stdlib-only、纯解析不判定）——加固版（堵 15 条对抗门）。
 
 只把真机 raw log / msprof CSV 解析成结构化字段，**pass/fail 一律不归这里**
-（裁决交 validator / perf_compare，ADR 0007；catlass `Compare success.` 只是仓内 smoke 信号）。
+（裁决交 validator / perf_compare；catlass `Compare success.` 只是仓内 smoke 信号）。
 
 本模块是 catlass 线 evidence 的**源头**，因此对「被喂伪造/污染输入」做了系统加固：
 
@@ -355,7 +355,7 @@ def parse_msprof_text(text, require_scope="kernel_only", kernel_name=None, kerne
                           if any(m in n for n in norm_set)})
         if hit_e2e:
             return _blank_result(
-                f"非 kernel-only 口径：CSV 含 e2e 判据列 {hit_e2e}（拒混 H2D/D2H，ADR 0006）",
+                f"非 kernel-only 口径：CSV 含 e2e 判据列 {hit_e2e}（拒混 H2D/D2H）",
                 scope="e2e_suspected")
 
     dur_idx = _find_col(header, _KERNEL_DUR_KEYS)

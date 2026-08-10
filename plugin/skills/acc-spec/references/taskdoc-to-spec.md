@@ -75,7 +75,7 @@
                 "case_target_source":"<可选但强烈建议：这个数是怎么来的（矩阵怎么乘 / 沿用了什么既有事实）>"},
   // T6/T8（待散文门）：perf.small_shape_exception 升为对象——机读阈值供 perf_compare 判小shape例外
   //   (<when_us_below 且 |差|≤abs_gap_us_within → 出仿真图挂人核)；legacy 纯字符串 perf_compare 正则兜底。
-  // §4.1（AGENTS.md §5.10）：只测不比档。**写了 mode=measure_only 就不得再写 baseline/target_ratio
+  // §4.1（AGENTS.md §6.1）：只测不比档。**写了 mode=measure_only 就不得再写 baseline/target_ratio
   //   /small_shape_exception/torch_baseline/aclnn_baseline**（五项必须缺席），且必须给全授权四件套。
   "perf": {"mode":"<可选：ratio_gated（缺省，= 比值裁决）| measure_only（只测不比，须授权）>",
            "measure_only_authorization":{"taskdoc_requirement":"<no_perf_requirement|gpu_comparison|change_class_no_perf_comparison>",
@@ -175,7 +175,7 @@ attr 笛卡尔、§1.4 特殊场景、白名单必覆盖 + 1-wise 采样）铺�
 | `precision.taskdoc_caseset`（可选，仅 taskdoc 档）| — | `{"sha256": "<64 位小写 hex>"}` 或显式 `null`（表示本轮未绑定）。spec 侧对那份 caseset 的**逻辑身份声明**，供跨轮对账 |
 | `precision.threshold` | 见 §3 | 数字：exact→0；behavioral→省略；numerical→AscendOpTest 主 dtype 默认值 |
 | `precision.threshold_source` | 必填，记数字依据+推断链 | 自由文本 |
-| `perf.mode`（§4.1，可选）| 本轮性能维**要不要做比值裁决**（AGENTS.md §5.10 三种情形）| 受控两值。整字段省略 = `ratio_gated` = 现行为（要 baseline + target_ratio）。属 §5.10 三种情形之一 → 写 `measure_only`，并**同时**给 `measure_only_authorization`；此时 `baseline` / `target_ratio` / `small_shape_exception` / `torch_baseline` / `aclnn_baseline` **五项必须缺席**，`perf` 块字段走白名单（`mode` / `measure_only_authorization` / `case_source` / `case_selection` / `shape_classification` / `warmup` / `repeat` / `side_timeout_s`），词表外一律 fail-closed |
+| `perf.mode`（§4.1，可选）| 本轮性能维**要不要做比值裁决**（AGENTS.md §6.1 指定场景）| 受控两值。整字段省略 = `ratio_gated` = 现行为（要 baseline + target_ratio）。属 §6.1 指定场景之一 → 写 `measure_only`，并**同时**给 `measure_only_authorization`；此时 `baseline` / `target_ratio` / `small_shape_exception` / `torch_baseline` / `aclnn_baseline` **五项必须缺席**，`perf` 块字段走白名单（`mode` / `measure_only_authorization` / `case_source` / `case_selection` / `shape_classification` / `warmup` / `repeat` / `side_timeout_s`），词表外一律 fail-closed |
 | `perf.measure_only_authorization`（§4.1，`mode=measure_only` 时**必填**）| 任务书原文（或本轮改动类别）+ CP-A 任务书快照 | `{taskdoc_requirement ∈ {no_perf_requirement, gpu_comparison, change_class_no_perf_comparison}, cite, quote, taskdoc_snapshot_sha256}` **四项缺一即 fail-closed**；走 `change_class_no_perf_comparison` 还要与 `spec.change.kind ∈ {add_dtype, extend_shape, new_op, memory_optimization}` 机器对账，且内存优化必须由任务书原文明确授权 |
 | `perf.baseline` | 『性能要求-基线』（**仅 `ratio_gated` 档**）| tbe / self_fp16 / small_op_concat / gpu / theoretical / none / **torch_npu** / **aclnn_builtin**。框架级 Torch 或已确认“小算子拼接等价于 Torch 接口”用 `torch_npu`；实际要求直接 ACLNN 才用 `aclnn_builtin` |
 | `perf.torch_baseline`（§1.3.5）| aclnn 签名的形参名（= slot name）↔ torch API 形参名 | `{api: "torch.*", positional: [slot…], keyword: {slot: torch形参}}`。`positional` 缺任一 slot → fail-closed；`keyword` 里某 slot 在该 case 不存在 → 该 kwarg 自然缺席（变体自动跟随）|
@@ -211,16 +211,16 @@ attr 笛卡尔、§1.4 特殊场景、白名单必覆盖 + 1-wise 采样）铺�
 **其余 oracle（如 `scipy` / `std_exact`）一律 raise**、拒绝静默降级 → 抽到它们必须显式写 `precision.standard`
 或停下问用户。
 
-⚠ `ecosystem_mere_mare` 是 **proposed / NOT_SETTLED**（来自 `canon/architecture/ecosystem-precision-standard.md`
-status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事实、未 settle**）：其常量与判据都打 `NOT_SETTLED`，
+⚠ `ecosystem_mere_mare` 在当前 `precision_policy.py` 中标为 **`NOT_SETTLED`**；方法的一手出处是 cann/opbase
+`experimental_standard.md`。其常量与判据尚未启用为自动 fail 依据，
 **单标杆不过不自动 fail、记 `needs_review`**（ATK 双标杆 fallback 本轮不实现、out-of-scope）。抽到它时在 `task_pr_gaps`
-显式标注「生态标准 proposed / 单标杆 needs_review」。缺省不确定就退回 `ascendoptest_default`（平台底线）。
+显式标注「生态标准 `NOT_SETTLED` / 单标杆 needs_review」。缺省不确定就退回 `ascendoptest_default`（平台底线）。
 
 ## 1.2 dtype 冲突以**任务书**为准（C4 · 用户 2026-07-22 拍板）
 
 **规则**：任务书声明的 dtype 全集 = **需求**（写进 `dtype_required`）；算子 `op_def` 支持不了的差额
 **入 `task_pr_gaps`**、裁决落 `passed_with_gaps`。**「没实现」是发现、不是借口**
-（承 canon `task-spec-authoritative-over-pr`）。
+（见仓根 `AGENTS.md` §1、§5.1）。
 
 ⚠ 这是既有红线的延伸：任务书明确枚举时不得由 PR 改写；任务书若以“所有进入 AICore 的类型”
 定义实现域集合，则同一 PR head 的 op_def 是集合成员的本轮枚举事实，不属于用 PR 覆盖任务书语义。
@@ -357,7 +357,7 @@ status=proposed，一手出自 cann/opbase `experimental_standard.md`，**非事
   `passed_with_gaps`，须先补 `validator` 侧对该 kind 的识别（本批未做）。落 spec 前知悉这一状态差。
 
 ⚠ 早前一版记「`precision_ok` 不认 `passed_with_gaps`、会跳过 Task3」——那是 C4 接线前的实况、现已过时。
-一律**逐字引用确定性产物的实际字段并标来源**（ADR 0007），不自行宣告裁决。
+一律**逐字引用确定性产物的实际字段并标来源**，不自行宣告裁决。
 
 ## 1.3 torch 对标 / 多输出 / aclnn 两段式被测物怎么填
 
@@ -868,7 +868,7 @@ exact 走 mismatch），再要求 spec/caseset/evidence 三处一致。所以 th
 
 ### 4.1 「本轮不做比值裁决」的**唯一**合法写法：`perf.mode=measure_only` + 授权
 
-AGENTS.md §5.10 列了三种情形，**授权强度完全相同**（都要 ground + cite + quote + `taskdoc_snapshot_sha256`）：
+AGENTS.md §6.1 列出受控情形，**授权强度完全相同**（都要 ground + cite + quote + `taskdoc_snapshot_sha256`）：
 
 | ground（`taskdoc_requirement`）| 什么时候用 | 判据从哪来 |
 |---|---|---|

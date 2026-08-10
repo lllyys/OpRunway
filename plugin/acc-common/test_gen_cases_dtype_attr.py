@@ -78,7 +78,7 @@ def _symlink_supported():
         return False
 
 
-# ===== golden 去引擎化（ADR 0011）：elementwise 通路不含内置 golden 值、按算子从 <ops_root>/<op>/golden.py 加载。 =====
+# ===== golden 外置：elementwise 通路不含内置 golden 值、按算子从 <ops_root>/<op>/golden.py 加载。 =====
 # 共享 fixture 建临时 ops_root（拷 samples/golden 的 4 算子）+ 设 OPRUNWAY_OPS_DIR，令本模块 gen_cases 调用能
 # 加载到 golden（缺则 fail-closed）；子进程继承 os.environ。假算子测试用 _place_golden(_GOLDEN_ROOT, op, body) 另落。
 import _golden_fixture as _gf
@@ -818,7 +818,7 @@ class GoldenTorchPreferredTest(unittest.TestCase):
 
 
 class LoadGoldenTest(unittest.TestCase):
-    """golden 加载器（ADR 0011 决策 1/6）：只查 <ops_root>/<op>/golden.py、缺则 fail-closed 不回退、
+    """golden 加载器：只查 <ops_root>/<op>/golden.py、缺则 fail-closed 不回退、
     **软链分两层拒**（最终文件 islink + 目录段逐段，见 repo_adapter._reject_symlink_segments）、缺元数据拒。"""
 
     def _ops(self, d):

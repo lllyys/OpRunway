@@ -1,6 +1,6 @@
 """Task 2 · validator — spec + caseset + evidence.json -> verdict.json（确定性裁决）。
 
-ADR 0007：裁决只从这里出。ADR 0005：精度三层口径、放行只看 acceptance。职责：
+当前契约：裁决只从这里出；精度采用三层口径、放行只看 acceptance。职责：
 0) **算子身份 + IO schema 锚定**（effective-standard-security finding #5）——`spec.op == caseset.op ==
    evidence.op`；每个 case 的 inputs(name/dtype)/attrs 须符合 spec IO 矩阵。防「另一算子/另一 dtype 的
    真通过 caseset+evidence 冒充」。
@@ -698,7 +698,7 @@ def _judge_empty_output(policy, metrics, expected, observed, written, compare_dt
 
 # ==================================== C4 · dtype 冲突（任务书 vs op_def），2026-07-22 ========
 # 用户拍板：**任务书为准**——任务书声明的 dtype 全集是需求，算子 `op_def` 支持不了的差额入 `task_pr_gaps`、
-# 裁决落 `passed_with_gaps`。「没实现」是**发现**、不是借口（承 canon `task-spec-authoritative-over-pr`）。
+# 裁决落 `passed_with_gaps`。「没实现」是**发现**、不是借口（见仓根 AGENTS.md §1、§5.1）。
 DTYPE_GAP_KIND = "dtype_unsupported_by_op_def"
 API_SURFACE_GAP_KIND = "api_surface_unsupported_by_pr"
 

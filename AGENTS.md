@@ -152,13 +152,13 @@ Fresh 构建必须先 `snapshot-digest`，再由 `emit` 真正执行构建并生
 - FAIL 归因前先复核输入摘要及源码 → build → ELF →加载对象绑定，再解耦 DUT 与 harness。
 - 最终裁决只认确定性脚本链；任务书仍是验收权威。
 
-### 5.9 Canon
+### 5.9 记录系统边界
 
-- Durable 知识遵循 capture → compile → review；不手改 cabinet 页，不自行升 canonical。
-- 只有 canonical 可作已定事实；proposed、verified、stale、contested 按 trust tier 对待。
-- 开始 durable 设计、组件建设、bureau 写入或 FAIL 归因前，先读 `canon/architecture/`、
-  `canon/decisions/` 与 `canon/lint/findings.md`，并按需 query。
-- 当前仓规与未 settle canon 冲突时显式记录张力，以本文件的现行执行规则为准。
+- `canon/` 与 bureau 相关记录继续保留为历史记录；普通项目实施不读取、不查询、不依赖这些内容。
+- 它们不得作为架构设计、代码修改、测试、验收、FAIL 归因或文档实施的事实源、审批门、阻塞条件或
+  裁决依据；本文件、任务书、调用方输入与当前确定性代码/产物才是实施依据。
+- 只有用户明确要求执行记录、整理、查询、审阅或维护 bureau/canon 时，才读取或调用相应内容与工具。
+- 记录系统中的状态、tier 与冲突不改变当前实现，也不要求实施流程同步、回写或等待记录侧处理。
 
 ## 6 · 验收口径
 
@@ -244,7 +244,7 @@ OpRunway/
 ├── dev-doc/
 │   ├── oprunway-todo.md         # 当前活 backlog
 │   └── oprunway-changes-brief.md# 历史流水
-├── canon/                       # durable knowledge，受 review 门控制
+├── canon/                       # 历史记录；默认不参与项目实施
 ├── reports/                     # ignored 验收产物
 └── .oprunway/                   # ignored 机器本地配置
 ```
@@ -257,7 +257,7 @@ OpRunway/
 | 当前 TODO | `dev-doc/oprunway-todo.md` |
 | 改动流水 | `dev-doc/oprunway-changes-brief.md` |
 | 真机环境 | `dev-doc/oprunway-real-machine-environment.md` |
-| Canon 状态 | `canon/decisions/` + `canon/lint/findings.md` |
+| 记录维护（仅用户显式发起） | `canon/` 与相应 bureau 工具 |
 
 ## 10 · 当前诚实边界
 

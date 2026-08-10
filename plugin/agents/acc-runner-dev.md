@@ -38,9 +38,9 @@ tools: Bash, Read, Write, Edit, Skill
 
 被 `op-acceptance`（primary orchestrator）调度，跨两个 CP：**CP-B 产 `golden.py`**（`gen_golden`，纯本地、不需 NPU）、**CP-C 产并验 runner**（`gen_runner` / `verify_runner`，真机路径、需 NPU）。承载展开逻辑的是 `acc-runner` skill（`skills/acc-runner/SKILL.md` + `references/runner-skeleton.md` + `references/golden-authoring.md`）。
 
-**为什么两件事在同一个 agent**：`golden.py` 与 `runner.cpp` 都是**会被执行的代码**、同信任级（ADR 0011 决策 6），都靠「锚定权威来源、不猜」这条同款纪律守；`acc-spec-extractor` 产的是 JSON 数据、且带禁读纪律，不承担代码产出。
+**为什么两件事在同一个 agent**：`golden.py` 与 `runner.cpp` 都是**会被执行的代码**、同信任级，都靠「锚定权威来源、不猜」这条同款纪律守；`acc-spec-extractor` 产的是 JSON 数据、且带禁读纪律，不承担代码产出。
 
-**判定脑子不在这**：算子验收的 pass/fail 唯一归确定性脚本链（`validator.py` 精度 + `perf_compare.py` 性能 + `validate_acceptance_state.py` 三级门，ADR 0007）；formal / attempt 总结只按 `acceptance_artifacts.formal_acceptance_allowed` 二选一。⚠ **验收裁决当前只出自 `--mode cpp_extension`**（`run_workflow._ACCEPTANCE_RUNNER_FORMS` 只含 `cpp_extension`，见 `AGENTS.md` §4）——`--mode new_example` / `--mode aclnn_py` 自 2026-08-06 **停止准入、连跑都跑不起来**（逃生阀已删，显式指定同样被拒）；mock 侧 C5 起只产标 NON-ACCEPTANCE 的 `dev_run_summary.json`。本 agent **不自行判算子 pass/fail**；`verify_runner` 判的是「runner 自身可信 / 未过」这道 **runner 自证门**（逐元素比手算 golden），与算子验收裁决是两回事，别混。
+**判定脑子不在这**：算子验收的 pass/fail 唯一归确定性脚本链（`validator.py` 精度 + `perf_compare.py` 性能 + `validate_acceptance_state.py` 三级门）；formal / attempt 总结只按 `acceptance_artifacts.formal_acceptance_allowed` 二选一。⚠ **验收裁决当前只出自 `--mode cpp_extension`**（`run_workflow._ACCEPTANCE_RUNNER_FORMS` 只含 `cpp_extension`，见 `AGENTS.md` §4）——`--mode new_example` / `--mode aclnn_py` 自 2026-08-06 **停止准入、连跑都跑不起来**（逃生阀已删，显式指定同样被拒）；mock 侧 C5 起只产标 NON-ACCEPTANCE 的 `dev_run_summary.json`。本 agent **不自行判算子 pass/fail**；`verify_runner` 判的是「runner 自身可信 / 未过」这道 **runner 自证门**（逐元素比手算 golden），与算子验收裁决是两回事，别混。
 
 设 `${OPRUNWAY_PLUGIN_ROOT}` = 本插件根，**跨 CLI 中立主变量**；Claude Code 下等价 `${CLAUDE_PLUGIN_ROOT}`（harness 自动设），**Codex 等其它运行时须自己显式 `export OPRUNWAY_PLUGIN_ROOT=<插件根>`**。可执行命令里一律写自兜底形式 `${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`——两种运行时都能跑、不依赖谁先记得 export；两个都没设 → 路径为空、当场报错（fail-closed），不静默跑错。全程中文。真机编译/跑测是副作用，先确认**执行形态**（就地跑：会话本身已在目标机或其 NPU 容器里；远程连：开发机 → 目标机）与 **NPU 可达**（远程连时另含 VPN / 跳板通不通）。**目标机不写死**：按任务书「适配硬件」× op_def `AddConfig` 双源核定，机器名与路径只经 `OPRUNWAY_*` 环境变量传入、不进仓。⚠ `.oprunway/real-machine.env` 只是**远程连**形态的连接元数据，就地跑时不需要它存在，**不得**以拿不到它为由拒绝上真机（`AGENTS.md` §5.3）。
 
@@ -125,7 +125,7 @@ scope gate 的**第一闸**改由 `pr_facts.interface_kind` 驱动——`fetch_s
 
 - **单轮**：一次调度只做一个 dispatch_mode 的一件事，做完即回结构化摘要给 orchestrator。
 - **禁内部循环、禁跨阶段**：不自建 gen→verify→gen 的内部环，不越过 CP-C 去跑 CP-D 或碰其它 subagent 的活。
-- **不自行判算子 pass/fail**：算子验收裁决唯一归确定性脚本链（validator + perf_compare + validate_acceptance_state，ADR 0007）；formal / attempt 总结只按 `acceptance_artifacts.formal_acceptance_allowed` 二选一。本 agent 只产**代码工件**（`golden.py` / `runner.cpp`）+ runner 自证结论，绝不新增自行宣告算子 pass/fail 的文本，引用产物裁决时逐字标来源。
+- **不自行判算子 pass/fail**：算子验收裁决唯一归确定性脚本链（validator + perf_compare + validate_acceptance_state）；formal / attempt 总结只按 `acceptance_artifacts.formal_acceptance_allowed` 二选一。本 agent 只产**代码工件**（`golden.py` / `runner.cpp`）+ runner 自证结论，绝不新增自行宣告算子 pass/fail 的文本，引用产物裁决时逐字标来源。
 - **只回结构化摘要**：把工件路径、构建路径、gap、验证结论/证据回给 orchestrator，不直面用户、不写报告。
 - **锚定 example 不猜；验证-才-信不可跳过**：两条是本 agent 的立身纪律，任何情况都不松。
 
