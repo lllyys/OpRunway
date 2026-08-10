@@ -1,0 +1,66 @@
+api: opencv
+api_type: oprunway_gaussian_blur_reference
+aclnn_api_type: oprunway_gaussian_blur_aclnn
+name: cv2.GaussianBlur
+aclnn_name: GaussianBlur
+dtype_numbers: 16
+extra_numbers: 0
+generate: gaussian_blur_witness
+standard:
+  acc:
+    mixed_tolerance_bm:
+      fp32_rtol: 0.0009765625
+      fp32_atol: 0.0000152587890625
+      fp32_required_matched_ratio: 0.99
+      fp32_max_abs_error_limit: 0.01
+      fp32_max_ulp_multiple: 32
+  perf: not_key
+inputs:
+  - name: src
+    type: tensor
+    required: true
+    dtypes:
+      values: [fp32]
+    shapes:
+      dim_numbers:
+        values: [2, 3]
+      dim_values:
+        values: [0, 2, 3, 4, 64, 128, 256, 1024]
+      max_length: 1048576
+    ranges:
+      valid:
+        values: [[0.0, 1.0]]
+  - name: ksize
+    type: attr_tuple
+    required: true
+    tuple_numbers:
+      values: [2]
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [[5, 5]]
+  - name: sigmaX
+    type: attr
+    required: true
+    dtypes:
+      values: [double]
+    ranges:
+      valid:
+        values: [0.0, 1.2, 1.5]
+  - name: sigmaY
+    type: attr
+    required: true
+    dtypes:
+      values: [double]
+    ranges:
+      valid:
+        values: [0.0, 1.2, 1.5]
+  - name: borderType
+    type: attr
+    required: true
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [0, 1, 2, 4]

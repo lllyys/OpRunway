@@ -1,0 +1,60 @@
+{
+  "schema": "oprunway.acceptance_spec",
+  "schema_version": 1,
+  "operator": {
+    "name": "GaussianBlur",
+    "aclnn_name": "GaussianBlur",
+    "op_type": "GaussianBlur",
+    "build_token": "gaussian_blur",
+    "source_subdir": "gaussian_blur"
+  },
+  "task": {
+    "taskdoc_sha256": "4c4d53143a59fccb5f1256814e2634121989df413c4d48972451d64f1ff4fb99",
+    "hardware": ["ascend950"],
+    "dimensions": {"precision": true, "performance": "measure"},
+    "precision": {
+      "atk_accuracy": {
+        "mixed_tolerance_bm": {
+          "fp32_rtol": 0.0009765625,
+          "fp32_atol": 0.0000152587890625,
+          "fp32_required_matched_ratio": 0.99,
+          "fp32_max_abs_error_limit": 0.01,
+          "fp32_max_ulp_multiple": 32
+        }
+      }
+    },
+    "unvalidated_requirements": [
+      "OpenCV CUDA（A100）或 OCL GPU 性能基线及 0.45× 比值：workflow 不运行或消费 GPU 数据。",
+      "ATK A100 双标杆比例：按项目 GPU 禁用边界改用同版本 OpenCV CPU 真值，未执行 A100 双标杆。",
+      "OpenCV C++ 适配层、HAL、in-place、ROI step 与 AlgorithmHint 行为不属于本 ACLNN runner 的调用面。",
+      "BORDER_ISOLATED：任务书要求该场景，但被测 ACLNN 文档明确声明不支持；需在 Ascend 950 环境单独归因。"
+    ],
+    "required_cases": [
+      {"inputs": [{"index": 0, "dtype": "fp32", "shape": [128, 256]}]},
+      {"inputs": [{"index": 0, "dtype": "fp32", "shape": [128, 256, 2]}]},
+      {"inputs": [{"index": 0, "dtype": "fp32", "shape": [128, 256, 3]}]},
+      {"inputs": [{"index": 0, "dtype": "fp32", "shape": [128, 256, 4]}]},
+      {"inputs": [{"index": 4, "value": 0}]},
+      {"inputs": [{"index": 4, "value": 1}]},
+      {"inputs": [{"index": 4, "value": 2}]},
+      {"inputs": [{"index": 4, "value": 4}]},
+      {"inputs": [{"index": 0, "shape": [0, 0]}]},
+      {"inputs": [{"index": 1, "value": [0, 0]}, {"index": 2, "value": 1.5}]},
+      {"inputs": [{"index": 0, "shape": [1024, 1024]}, {"index": 1, "value": [5, 5]}]},
+      {"inputs": [{"index": 1, "value": [1, 1]}, {"index": 2, "value": 0.0}]},
+      {"inputs": [{"index": 1, "value": [3, 5]}]},
+      {"inputs": [{"index": 0, "shape": [64, 64, 3]}]}
+    ],
+    "performance_required_cases": [10]
+  },
+  "runner": {
+    "form": "atk_aclnn",
+    "atk_version": "26.5.14",
+    "device": 1,
+    "case_timeout_seconds": 600,
+    "stage_timeout_seconds": 3600,
+    "workflow_timeout_seconds": 7200,
+    "seed": 17
+  },
+  "build": {"profile": "cann_ops_package_v1", "vendor_name": "oprunway", "jobs": 16}
+}

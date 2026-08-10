@@ -1,0 +1,46 @@
+api: pytorch
+api_type: oprunway_roll_reference
+aclnn_api_type: oprunway_roll_aclnn
+name: torch.roll
+aclnn_name: Roll
+dtype_numbers: 4
+extra_numbers: 0
+generate: roll_witness
+standard:
+  acc: single_bm
+  perf: not_key
+inputs:
+  - name: null
+    type: tensor
+    required: true
+    dtypes:
+      values: [bool, uint8, int8, bf16, fp16, fp32, int32, uint32, complex64]
+    shapes:
+      dim_numbers:
+        values: [0, 1, 2, 3, 8]
+      dim_values:
+        values: [0, 1, 2, 3, 4, 8, 33]
+      max_length: 4096
+    ranges:
+      valid:
+        values: [[-8, 8]]
+  - name: null
+    type: attr_tuple
+    required: true
+    tuple_numbers:
+      values: [0, 1, 2]
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [[1]]
+  - name: null
+    type: attr_tuple
+    required: true
+    tuple_numbers:
+      values: [0, 1, 2]
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [[0]]

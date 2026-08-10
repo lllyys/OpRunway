@@ -1,8 +1,0 @@
-{
-  "source": "gpu-A100-cublas",
-  "scope": "e2e",
-  "note": "历史兼容 parser 的错误口径样例：scope=e2e（含 H2D/D2H）→ load_external_baseline 必须 blocked（双边同 scope）",
-  "per_case": [
-    {"case_id": "catlassbasicmatmul_002", "us": 150.7, "value": 150.7}
-  ]
-}

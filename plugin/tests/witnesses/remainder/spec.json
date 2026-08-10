@@ -1,0 +1,43 @@
+{
+  "schema": "oprunway.acceptance_spec",
+  "schema_version": 1,
+  "operator": {
+    "name": "RemainderTensorTensor",
+    "aclnn_name": "RemainderTensorTensor",
+    "op_type": "FloorMod",
+    "build_token": "floor_mod",
+    "source_subdir": "experimental/math/floor_mod"
+  },
+  "task": {
+    "taskdoc_sha256": "b8487ce4160d33712c4cf148ccde8e9b542415967f5e417b5cec3559dfdf3a71",
+    "hardware": ["ascend910b", "ascend910_93"],
+    "dimensions": {"precision": true, "performance": "measure"},
+    "precision": {"atk_accuracy": "single_bm"},
+    "unvalidated_requirements": [
+      "内存占用与 GPU 差距 5% 以下：workflow 不运行或消费 GPU/资源数据。",
+      "性能不低于原算子：仅采集本轮 NPU kernel 时间，未执行同口径原算子基线。"
+    ],
+    "required_cases": [
+      {"inputs": [{"index": 0, "dtype": "bf16"}, {"index": 1, "dtype": "bf16"}]},
+      {"inputs": [{"index": 0, "dtype": "fp16"}, {"index": 1, "dtype": "fp16"}]},
+      {"inputs": [{"index": 0, "dtype": "fp32"}, {"index": 1, "dtype": "fp32"}]},
+      {"inputs": [{"index": 0, "dtype": "fp64"}, {"index": 1, "dtype": "fp64"}]},
+      {"inputs": [{"index": 0, "dtype": "int32"}, {"index": 1, "dtype": "int32"}]},
+      {"inputs": [{"index": 0, "dtype": "int64"}, {"index": 1, "dtype": "int64"}]},
+      {"inputs": [{"index": 0, "shape": [2, 8]}, {"index": 1, "shape": [1, 8]}]},
+      {"inputs": [{"index": 0, "shape": [2, 3, 4]}, {"index": 1, "shape": [1, 3, 1]}]},
+      {"inputs": [{"index": 0, "shape": [2, 1, 2, 1, 2, 1, 2, 1]}, {"index": 1, "shape": [1, 1, 2, 1, 1, 1, 2, 1]}]}
+    ],
+    "performance_required_cases": [6, 7]
+  },
+  "runner": {
+    "form": "atk_aclnn",
+    "atk_version": "26.5.14",
+    "device": 1,
+    "case_timeout_seconds": 300,
+    "stage_timeout_seconds": 3600,
+    "workflow_timeout_seconds": 7200,
+    "seed": 17
+  },
+  "build": {"profile": "cann_ops_package_v1", "vendor_name": "oprunway", "jobs": 16}
+}

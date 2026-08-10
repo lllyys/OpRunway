@@ -2,6 +2,70 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-10 · ATK 单路径最终冻结与四算子正式验收
+
+- 最终 plugin 只读快照保持 33 个活跃文件，aggregate SHA-256 为
+  `ef38cc13e4264a9476d053fab52118418a763c41a5634728ba172fcdc37368e1`。同一字节在 A3、A5
+  分别完成 73/73 零跳过回归，耗时 64.063 秒、39.080 秒；四份 witness 都实际运行 ATK 26.5.14
+  casegen。前后 manifest 均为 33/33，无 bytecode 或残留执行进程。
+- 外部命令增加每次调用唯一 token、Linux pidfd 绑定和 `/proc` 精确排空；即使 ATK worker 脱离原进程组，
+  命令也只能在 worker 清零后返回。Casegen、两次 ATK probe、build/install、accuracy/performance 的
+  return code、timeout、`processes_drained` 与最终日志哈希都进入正式重放门；GaussianBlur 实测证明
+  accuracy 超时排空后 performance 会独立启动，迟写日志不再造成收据漂移。
+- Bernoulli A3 正式 `PASS / ALL_REQUIRED_EVIDENCE_PASSED`：19/19 精度、3/3 性能通过，性能为
+  3.3612/3.32615/3.33205 us，主动耗时 233.857614 秒；fresh ELF、双符号、实际加载库、38 份输出和
+  6 份 profiler CSV 均绑定。
+- Roll A3 正式 `PASS / ALL_REQUIRED_EVIDENCE_PASSED`：20/20 通过，主动耗时 196.140172 秒。ATK 对
+  空 `attr_tuple` 的 marker 只作 caseset 身份，执行侧把精确 marker 映射为直接 `aclIntArray` ABI 参数；
+  两个空 dims case 均真实到达 CPU 与 fresh DUT，输出逐字一致。
+- RemainderTensorTensor A3 主动耗时 125.072402 秒，确定性 artifact 保持
+  `PLUGIN_ERROR / BUILD_TARGET_UNPROVEN`，不生成 `acceptance.json`。独立对照证明 DUT 只声明和交付
+  `ascend910b`，任务书要求的 `ascend910_93` build 明确报不支持且 A3 delivery 为零；这是 DUT A3
+  交付缺陷，不是 plugin、ATK、环境或 host ABI 缺失。
+- GaussianBlur A5 主动耗时 3244.620814 秒，确定性 artifact 保持
+  `BLOCKED / ATK_EXECUTION_TIMEOUT`，不生成 DUT verdict。Accuracy 自然超时并排空后，performance
+  仍独立执行但 case 13 超时，故性能保持 `UNVALIDATED`。独立内容链证明任务书的 FP32
+  `ksize=[0,0], sigma=1.5` 必须推导 K13，而 fresh DUT 与源码白名单均排除 K13；这是 DUT 能力缺陷。
+  GPU、资源条款和未取得的性能基线仍如实列为未验证，未被 NPU 绝对耗时替代。
+
+## 2026-08-10 · A3/A5 ATK 实测与精度/性能解耦
+
+- A3、A5 各用全新 `-03` 预检目录加载同一 plugin 快照，四套 witness 的真实 `atk case` 覆盖门均通过；
+  A3 用时 52.783 秒，A5 用时 30.710 秒。环境准备仍是外部前置，plugin 只依赖 `PATH` 中的 `atk` 或
+  显式 `--atk-bin`，不要求验收环境存在 venv。
+- GaussianBlur 改到任务书引用的 opbase `experimental_standard.md` §2.2：FP32 使用 ATK
+  `mixed_tolerance_bm`，显式绑定 `rtol=2^-10`、`atol=2^-16`、matched ratio 0.99、最大绝对误差
+  `1e-2 or 32×ULP`。所有 spec 现在显式绑定 ATK 精度比较器，生成 caseset 逐 case 对账，防止 design
+  与执行口径漂移。
+- 精度与性能改为独立取证，不因精度执行不完整自动跳过性能。A3 Remainder 全新开发 `session-09` 完整
+  workflow 用时 203.099 秒（casegen 13.055、fresh build 134.812、ATK 执行 51.668）；精度 12/12
+  执行失败后性能 2/2 仍实际运行并失败，确定性终态为 `PLUGIN_ERROR / FAILURE_NOT_ATTRIBUTED_TO_DUT`，
+  未把执行/流程问题误判为 DUT 缺陷。
+- Fresh build 试跑还修正了三项通用问题：忽略 macOS transport metadata、相同内容的 CPack 重复包只算
+  一个身份、安装 SoC 从 ops-info 数据派生而不是把请求 token 当安装目录；ATK 执行显式钉住本轮 fresh
+  `libcust_opapi.so`。旧试跑目录全部只读保留，不拼接成 current 证据。
+
+## 2026-08-10 · ATK 单路径减法重构
+
+- 删除旧 `acc-common` 平行 casegen/golden/runner/状态机/裁决器、历史 samples/workflows、3 个分工 agent、
+  6 个拆分 skill 和旧安装脚本；活跃面收敛为一个 agent、一个 skill、一个 command、一个 Python 包和
+  `oprunway_cli.py accept` 唯一正式入口。
+- ATK 26.5.14 已在 A3 的一次性可删除环境完成 casegen、accuracy、performance_device 与原始 CANN
+  profiler 健康检查；该次采用 venv 只属安装记录，不是 plugin 或其它验收环境要求。安装仍是环境前置，
+  plugin 只从 `PATH` 解析公开命令并校验版本。新路径绑定 caller-trusted 输入、源码锚、fresh package、
+  vendor ELF/双符号/实际加载库、ATK caseset、完整分母、CPU/DUT 输出和 profiler，再由唯一终结器裁决。
+- 每个验收使用新建 ASCII session，主动预算最多 7200 秒；生产代码没有四个见证算子的名称分支。
+  此条记录时四算子正式 session 尚待同一冻结版本执行；最终结果已由本页顶部 `ef38cc13…` 冻结批次完成。
+- ATK 预检只调用公开 `atk --version`，不假设 venv；CLI 删除阶段近路，仅保留 `accept`。Spec 的
+  `required_cases` 会逐项匹配不同 ATK case，防止“非空 caseset”掩盖 dtype/shape/属性漏测；GPU、资源和
+  未跑相对基线逐项进入 `unvalidated_requirements`。意外第三方异常统一留 `UNEXPECTED_PLUGIN_ERROR` 收据。
+- `accept` 默认从目标环境 `PATH` 解析 `atk`，不要求调用者暴露安装目录；全量 case 跑 accuracy，仅由 spec
+  选择代表 case 跑 performance/profile。四个见证 spec/design/generator 已纳入回归，复杂随机口径或非标准
+  二段 ABI 才附薄 execution plugin；正常 case 绑定 CPU/DUT 输出，预期报错 case 绑定 ATK 工作簿结果。
+- 冻结前审查修复两处会被纯 mock 漏过的流程缺陷：ATK 身份漂移校验从 casegen 移回 execution，避免引用
+  尚不存在的收据；性能完整性现在同时复核子集分母、逐 case SUCCESS、有限正 device 时间和原始 profiler，
+  不再允许“执行失败但表中残留时间值”放行。SoC 校验改为安全 CANN token，而非固定硬件白名单。
+
 ## 2026-08-10 · bureau/canon 退出普通项目实施链
 
 - 根仓规、插件清单、agents、skills、commands 与当前 workflow 文档统一改为：普通架构、代码、测试、

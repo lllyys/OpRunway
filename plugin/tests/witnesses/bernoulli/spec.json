@@ -1,0 +1,53 @@
+{
+  "schema": "oprunway.acceptance_spec",
+  "schema_version": 1,
+  "operator": {
+    "name": "Bernoulli",
+    "aclnn_name": "Bernoulli",
+    "op_type": "Bernoulli",
+    "build_token": "bernoulli",
+    "source_subdir": "experimental/random/bernoulli"
+  },
+  "task": {
+    "taskdoc_sha256": "e9c1b1722f49c8cbc800a99cf936caee3662707781abd4e64399e81eba29cde4",
+    "hardware": ["ascend910b", "ascend910_93"],
+    "dimensions": {"precision": true, "performance": "measure"},
+    "precision": {"atk_accuracy": "oprunway_binary_distribution_bm"},
+    "unvalidated_requirements": [
+      "内存占用与 GPU 差距 5% 以下：workflow 不运行或消费 GPU/资源数据。",
+      "性能不低于原算子：仅采集本轮 NPU kernel 时间，未执行同口径原算子基线。"
+    ],
+    "required_cases": [
+      {"inputs": [{"index": 0, "dtype": "bf16"}]},
+      {"inputs": [{"index": 0, "dtype": "fp16"}]},
+      {"inputs": [{"index": 0, "dtype": "fp32"}]},
+      {"inputs": [{"index": 0, "dtype": "fp64"}]},
+      {"inputs": [{"index": 0, "dtype": "uint8"}]},
+      {"inputs": [{"index": 0, "dtype": "int8"}]},
+      {"inputs": [{"index": 0, "dtype": "int16"}]},
+      {"inputs": [{"index": 0, "dtype": "int32"}]},
+      {"inputs": [{"index": 0, "dtype": "int64"}]},
+      {"inputs": [{"index": 0, "dtype": "bool"}]},
+      {"inputs": [{"index": 0, "shape": [257]}, {"index": 1, "value": 0.0}]},
+      {"inputs": [{"index": 0, "shape": [257]}, {"index": 1, "value": 1.0}]},
+      {"inputs": [{"index": 0, "shape": [65536]}, {"index": 1, "value": 0.25}]},
+      {"inputs": [{"index": 0, "shape": [65536]}, {"index": 1, "value": 0.5}]},
+      {"inputs": [{"index": 0, "shape": [65536]}, {"index": 1, "value": 0.75}]},
+      {"inputs": [{"index": 0, "shape": [0, 3]}]},
+      {"inputs": [{"index": 0, "shape": []}]},
+      {"inputs": [{"index": 0, "shape": [2, 1, 2, 1, 2, 1, 2, 1]}]},
+      {"inputs": [{"index": 0, "shape": [64, 64]}]}
+    ],
+    "performance_required_cases": [12, 13, 14]
+  },
+  "runner": {
+    "form": "atk_aclnn",
+    "atk_version": "26.5.14",
+    "device": 1,
+    "case_timeout_seconds": 300,
+    "stage_timeout_seconds": 3600,
+    "workflow_timeout_seconds": 7200,
+    "seed": 17
+  },
+  "build": {"profile": "cann_ops_package_v1", "vendor_name": "oprunway", "jobs": 16}
+}

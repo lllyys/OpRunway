@@ -1,0 +1,118 @@
+{
+  "schema": "oprunway.atk_install_receipt",
+  "schema_version": 1,
+  "observed_at": "2026-08-10T20:11:30-04:00",
+  "scope": "prepared A3 and A5 target environments; disposable as a whole and read-only during acceptance sessions",
+  "installation_is_plugin_capability": false,
+  "source": {
+    "repository": "https://gitcode.com/Ascend/ATK",
+    "commit": "7220f27e83740cd43b300ed2d4362e12d6cc0d42",
+    "version": "26.5.14",
+    "archive_sha256": "d5a1f359574ec411b57ba80697b1637094492bc18cc318a1acbac7306a50b1d6"
+  },
+  "environment": {
+    "installation_form_for_this_health_check": "disposable Python virtual environment",
+    "required_installation_form_for_plugin": false,
+    "plugin_runtime_contract": "an executable named atk resolvable on PATH, or an explicit --atk-bin override",
+    "system_site_packages": true,
+    "disposable": true,
+    "shared_read_only_by_acceptance_sessions": true,
+    "install_argv": null,
+    "install_argv_evidence_status": "UNAVAILABLE",
+    "install_argv_note": "pip metadata proves the installer and local source URL, but no surviving log proves the original argv, cwd or flags; no command was inferred"
+  },
+  "target_preparations": [
+    {
+      "target": "A3",
+      "status": "READY",
+      "form": "disposable isolated environment",
+      "tracked_path": false,
+      "soc_token": "ascend910_93",
+      "observed_device": "Ascend910_9382",
+      "cann": "9.0.1",
+      "python": "3.12.13",
+      "environment_identity": {
+        "atk_executable_sha256": "87436e3d6c8aad823a733e638ebd554a02cf0ee12fee49555e51f4a2b4295e0b",
+        "installer": "pip",
+        "direct_url": "file:///<untracked-a3-atk-source>",
+        "venv_creation_argv": "/usr/local/python3.12.13/bin/python3 -m venv --system-site-packages <untracked-a3-venv>"
+      },
+      "install_argv": null,
+      "install_argv_evidence_status": "UNAVAILABLE",
+      "verified_versions": {
+        "atk": "26.5.14",
+        "numpy": "1.26.4",
+        "torch": "2.10.0+cpu",
+        "openpyxl": "3.1.5"
+      }
+    },
+    {
+      "target": "A5",
+      "status": "READY",
+      "form": "disposable isolated environment",
+      "tracked_path": false,
+      "soc_token": "ascend950",
+      "observed_device": "Ascend950PR",
+      "cann": "9.0.0",
+      "python": "3.11.15",
+      "environment_identity": {
+        "atk_executable_sha256": "8aa52f6d57ec0b0adb4eb76a3aef2cf5dfdb3af49d38bd2e6f67bcf584b7a375",
+        "installer": "pip",
+        "direct_url": "file:///<untracked-a5-atk-source>",
+        "setup_py_sha256": "ffd062c2932703116d7c3237fe468850aa384b27521d69235de9bb589253d3ed"
+      },
+      "install_argv": null,
+      "install_argv_evidence_status": "UNAVAILABLE",
+      "verified_versions": {
+        "atk": "26.5.14",
+        "numpy": "1.26.4",
+        "opencv": "4.11.0",
+        "torch": "2.10.0+cpu",
+        "openpyxl": "3.1.5"
+      }
+    }
+  ],
+  "setup_summary": "ATK and its direct dependencies were installed only for this disposable health check; installation is not performed or prescribed by the plugin.",
+  "direct_dependency_versions": {
+    "celery": "5.3.6",
+    "click": "8.4.2",
+    "coloredlogs": "15.0.1",
+    "kombu": "5.6.2",
+    "numpy": "1.26.4",
+    "openpyxl": "3.1.5",
+    "pandas": "2.2.3",
+    "prettytable": "3.18.0",
+    "psutil": "7.2.2",
+    "pydantic": "2.6.3",
+    "pylint": "4.0.7",
+    "pytest": "9.1.1",
+    "pytz": "2026.3.post1",
+    "scipy": "1.13.1",
+    "sqlalchemy": "2.0.51",
+    "tqdm": "4.70.0"
+  },
+  "installed_metadata": {
+    "metadata_sha256": "0a66175374f49ad47eb5f8d33597e4249a07e70928e176456c13f0c76887cd24",
+    "direct_url_sha256": "faf1e3940f074f506162e1c82e595008f975c447171803cb3f628766d1489bea"
+  },
+  "health_checks": {
+    "case_generation": {
+      "status": "PASS",
+      "generated_case_count": 612,
+      "cases_sha256": "64739cbdb791fa4c73a57ab771f7e1d69723d1027a5be43d80348fc3bae3f209"
+    },
+    "a3_accuracy_and_device_performance": {
+      "status": "PASS",
+      "case_count": 1,
+      "device": 1,
+      "report_sha256": "e8f0e29b77943398ae238f70f5817049926ec75023e76190b0aecf796f177b08"
+    },
+    "four_witness_case_generation": {
+      "status": "PASS",
+      "a3_elapsed_seconds": 52.783,
+      "a5_elapsed_seconds": 30.710,
+      "precision_comparator_bound_per_case": true
+    }
+  },
+  "dependency_check_note": "ATK direct dependencies and its health path are usable. pip check still reports optional dependencies missing from inherited CANN packages; they are not imported by the verified ATK aclnn path and were not installed into the shared system environment."
+}

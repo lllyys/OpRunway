@@ -1,0 +1,40 @@
+api: pytorch
+api_type: function
+aclnn_api_type: aclnn_function
+name: torch.remainder
+aclnn_name: RemainderTensorTensor
+dtype_numbers: 2
+extra_numbers: 0
+generate: remainder_witness
+standard:
+  acc: single_bm
+  perf: not_key
+inputs:
+  - name: null
+    type: tensor
+    required: true
+    dtypes:
+      values: [bf16, fp16, fp32, fp64, int32, int64]
+    shapes:
+      dim_numbers:
+        values: [2, 3, 8]
+      dim_values:
+        values: [1, 2, 4, 8]
+      max_length: 4096
+    ranges:
+      valid:
+        values: [[-8, 8]]
+  - name: null
+    type: tensor
+    required: true
+    dtypes:
+      values: [bf16, fp16, fp32, fp64, int32, int64]
+    shapes:
+      dim_numbers:
+        values: [2, 3, 8]
+      dim_values:
+        values: [1, 2, 4, 8]
+      max_length: 4096
+    ranges:
+      valid:
+        values: [[1, 8]]
