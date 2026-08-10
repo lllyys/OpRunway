@@ -22,6 +22,11 @@ oprunway-canon-gazette.zip
 __pycache__/
 *.pyc
 
+# nlpm 制品质量 lint 的派生产物：HTML 报告与打分历史，重跑即可再生，不入库。
+# 必须带 **/ 前缀：含中间斜杠的模式会被锚到仓根，挡不住 plugin/.claude/ 下的落点。
+**/.claude/nlpm-reports/
+**/.claude/nlpm-history.json
+
 # 系统
 .DS_Store
 

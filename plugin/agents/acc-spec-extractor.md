@@ -3,7 +3,35 @@ name: acc-spec-extractor
 mode: subagent
 skills: [acc-spec]
 tools: Bash, Read, Write, Edit, Skill
-description: OpRunway 验收 CP-B 子 agent——校验任务书输入，再把调用方配对的任务书与源码事实抽成中立 spec + task_pr_gaps；不自行判定 pass/fail。
+description: |
+  OpRunway 验收 CP-B 子 agent——校验任务书输入，再把调用方配对的任务书与源码事实抽成中立 spec + task_pr_gaps；不自行判定 pass/fail。
+
+  <example>
+  Context: op-acceptance 已跑完 CP-A，source_facts.json 落盘且 completeness=complete，要进 CP-B 抽 spec。
+  user: "取材好了，接着往下走"
+  assistant: "CP-A 事实包齐了，我按 dispatch_mode=extract_spec 派 acc-spec-extractor，让它跑任务书输入校验门再抽出 spec 与 task_pr_gaps。"
+  <commentary>
+  标准 CP-B 入口：消费已落盘的 caller-trusted 事实，产 Layer 0 中立契约。缺项落 task_pr_gaps，不臆造。
+  </commentary>
+  </example>
+
+  <example>
+  Context: gen_cases.py --dry-run 报 spec 字段错误，orchestrator 要定向修。
+  user: "dry-run 挂了，把 spec 修一下"
+  assistant: "我按 dispatch_mode=refine_spec 再派一次 acc-spec-extractor，只让它改 gate error 直接指向的字段。"
+  <commentary>
+  循环控制权在 orchestrator：本 agent 单轮、禁内部循环，「抽→跑门→再抽」的第二轮必须由外面重新 dispatch。
+  </commentary>
+  </example>
+
+  <example>
+  Context: 任务书还没取材，source_facts.json 尚未落盘。
+  user: "先别管取材了，直接把 spec 抽出来"
+  assistant: "先不派 acc-spec-extractor——它禁跨阶段、不联网取材。得先跑 CP-A 的 fetch_source.py 落 source_facts，再进 CP-B。"
+  <commentary>
+  负例：本 agent 只读点名输入，不承担取材。缺事实包时派它只会拿到一份 needs_user 摘要。
+  </commentary>
+  </example>
 ---
 
 # acc-spec-extractor — 任务书→spec 子 agent（acc-spec skill 的 agent 壳）

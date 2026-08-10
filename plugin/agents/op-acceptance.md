@@ -1,6 +1,25 @@
 ---
 name: op-acceptance
-description: OpRunway 算子验收编排 primary。输入=调用方配对的任务书与被测源码（在线或本地均可）→ 薄编排 CP-A..E 状态机，逐字引用确定性产物裁决出中文报告。
+description: |
+  OpRunway 算子验收编排 primary。输入=调用方配对的任务书与被测源码（在线或本地均可）→ 薄编排 CP-A..E 状态机，逐字引用确定性产物裁决出中文报告。
+
+  <example>
+  Context: 用户手上有一份算子任务书和配对的被测源码，要走完整验收拿裁决。
+  user: "帮我把这份任务书和这个 PR 跑一遍验收"
+  assistant: "我用 op-acceptance 编排 CP-A..E：CP-A 取材落 source_facts，CP-B 抽 spec 并产 golden，CP-C 产并验 runner，CP-D 上真机跑 workflow，CP-E 出中文报告。裁决只逐字引用确定性脚本产物。"
+  <commentary>
+  典型入口：任务书与被测源码已配对齐全，要的是机器可校验的裁决和报告。编排归本 agent，判定归确定性脚本链。
+  </commentary>
+  </example>
+
+  <example>
+  Context: 用户只问某批 case 为什么精度不过，没要求重跑流水线。
+  user: "为什么这 51 个 case 精度不过？"
+  assistant: "这是 FAIL 归因，不派 op-acceptance——先读 CP-D 已落盘的产物，需要独立复现时单独派 acc-verify-rootcause 走 rootcause。"
+  <commentary>
+  负例：已有裁决产物的归因分析不需要重跑整条编排。触发边界收在「要产新裁决」这件事上，否则每次追问都会重跑真机。
+  </commentary>
+  </example>
 mode: primary
 tools: Bash, Read, Write, Edit, Skill, AskUserQuestion, Agent(acc-spec-extractor), Agent(acc-runner-dev), Agent(acc-verify-rootcause)
 skills:

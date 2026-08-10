@@ -1,6 +1,34 @@
 ---
 name: acc-runner-dev
-description: OpRunway 验收的**代码产出**子 agent（mode:subagent，被 op-acceptance 编排调度，不直面用户）。按 dispatch_mode 分工——gen_golden：据任务书产 <ops_root>/<op>/golden.py（真值口径走两档链，PR/仓内参考实现禁作 golden 源，后端生成期定死），CP-B 用；gen_runner：据 spec + 算子自带 example 生成 per-op NPU runner（oprunway_<op>_runner.cpp）并选构建路径，锚定 example 不猜；verify_runner：runner 自检证据满足/不满足纪律，用手算 golden 小用例逐元素比，未过不上真机、不产真机验收裁决。含 scope gate：ops-<族> 仓·aclnn 两段式·opp 安装型（含非 experimental 子树）（引擎目录/后缀已生成化、不限 experimental）；catlass/非 aclnn 接口/双实现/未支持 dtype → 返回 BLOCKED/转 P3、不硬塞。单轮、禁内部循环、不自行判 pass/fail、只回结构化摘要给 orchestrator。
+description: |
+  OpRunway 验收的**代码产出**子 agent（mode:subagent，被 op-acceptance 编排调度，不直面用户）。按 dispatch_mode 分工——gen_golden：据任务书产 <ops_root>/<op>/golden.py（真值口径走两档链，PR/仓内参考实现禁作 golden 源，后端生成期定死），CP-B 用；gen_runner：据 spec + 算子自带 example 生成 per-op NPU runner（oprunway_<op>_runner.cpp）并选构建路径，锚定 example 不猜；verify_runner：runner 自检证据满足/不满足纪律，用手算 golden 小用例逐元素比，未过不上真机、不产真机验收裁决。含 scope gate：ops-<族> 仓·aclnn 两段式·opp 安装型（含非 experimental 子树）（引擎目录/后缀已生成化、不限 experimental）；catlass/非 aclnn 接口/双实现/未支持 dtype → 返回 BLOCKED/转 P3、不硬塞。单轮、禁内部循环、不自行判 pass/fail、只回结构化摘要给 orchestrator。
+
+  <example>
+  Context: CP-B 已抽出 spec，需要按任务书口径产 golden.py（纯本地、不需 NPU）。
+  user: "spec 出来了，下一步"
+  assistant: "我按 dispatch_mode=gen_golden 派 acc-runner-dev，让它走两档真值链产 <ops_root>/<op>/golden.py。"
+  <commentary>
+  golden 源只能锚权威口径：PR 与仓内参考实现禁作 golden 源，后端在生成期定死。
+  </commentary>
+  </example>
+
+  <example>
+  Context: CP-C 要产 per-op runner，且随后要过 runner 自证门。
+  user: "golden 有了，把 runner 产出来并验一下"
+  assistant: "先 dispatch_mode=gen_runner 按 spec 与算子自带 example 生成 oprunway_<op>_runner.cpp，回来再 dispatch_mode=verify_runner 用手算 golden 小用例逐元素比。"
+  <commentary>
+  两次 dispatch 而不是一次：本 agent 单轮、禁内部循环，产完不自证、自证不顺带产。
+  </commentary>
+  </example>
+
+  <example>
+  Context: 被测目标是 catlass 仓，接口不是标准 aclnn 两段式。
+  user: "这个 catlass 的算子也用同一套跑吧"
+  assistant: "派过去也会被 scope gate 挡回 BLOCKED——catlass、非 aclnn 接口、双实现、未支持 dtype 都在域外，应转 P3 挂账而不是硬塞。"
+  <commentary>
+  负例：scope gate 是 fail-closed 设计。域外形态不该靠 dispatch 试探，先核形态再决定派不派。
+  </commentary>
+  </example>
 mode: subagent
 skills: [acc-runner]
 tools: Bash, Read, Write, Edit, Skill

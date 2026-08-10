@@ -2,6 +2,16 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-10 · nlpm 只读体检 + 4 个 agent 补触发示例
+
+- 对 `plugin/` 跑 nlpm 体检（13 个制品）：引用完整性 41 条全通，无断链。均分 90。
+  按报告给 4 个 agent 的 description 补齐 `<example>` 触发示例（含负例），均分升到 94；
+  frontmatter 改为 YAML block scalar，改前改后各验一次解析，键位未变。
+  `model:` 与 793 行 skill 拆分刻意未动，留人判断。
+- 体检另记 6 条要人判断的跨制品问题，其中两条要紧：四份 SKILL.md 自称「未登记进
+  plugin/AGENTS.md」而实际已被登记；`plugin.json` 的 description 仍在描述已废止的
+  NPU↔GPU 对比阶段，与 `AGENTS.md` §1「不建立 Task 3」相反。两条都未修。
+
 ## 2026-08-09 · push 前审修收敛 GPU 输入、报表投影与 vendor 终态事务
 
 - 独立代码审计发现三处通用接缝：正式 workflow 仍保留外部 GPU baseline 活入口；renderer 对
