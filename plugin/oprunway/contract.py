@@ -25,6 +25,16 @@ _TOKEN = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _SOC = re.compile(r"^ascend[0-9][a-z0-9_]{0,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CASE_INPUT_KEYS = {"index", "dtype", "shape", "value"}
+_CASE_BUNDLE_KEYS = {
+    "schema",
+    "schema_version",
+    "source_locator",
+    "case_count",
+    "expected_generated_case_count",
+    "generated_projection_sha256",
+    "files",
+}
+_CASE_BUNDLE_FILE_KEYS = {"path", "sha256"}
 
 
 def _mapping(value: Any, label: str) -> dict[str, Any]:
@@ -88,6 +98,46 @@ def _required_cases(value: Any) -> int:
     return len(value)
 
 
+def _case_bundle(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    bundle = _mapping(value, "task.case_bundle")
+    if set(bundle) != _CASE_BUNDLE_KEYS \
+            or bundle.get("schema") != "oprunway.task_case_bundle" \
+            or bundle.get("schema_version") != 1:
+        raise WorkflowError("INVALID_SPEC", "task.case_bundle must use the exact v1 schema")
+    _string(bundle.get("source_locator"), "task.case_bundle.source_locator")
+    case_count = _integer(bundle.get("case_count"), "task.case_bundle.case_count", 1, 10000)
+    generated_count = _integer(
+        bundle.get("expected_generated_case_count"),
+        "task.case_bundle.expected_generated_case_count",
+        case_count,
+        10000,
+    )
+    projection = _string(
+        bundle.get("generated_projection_sha256"),
+        "task.case_bundle.generated_projection_sha256",
+    )
+    if not _SHA256.fullmatch(projection):
+        raise WorkflowError(
+            "INVALID_SPEC", "task.case_bundle.generated_projection_sha256 must be lowercase SHA-256"
+        )
+    files = bundle.get("files")
+    if not isinstance(files, list) or not files or len(files) > 32:
+        raise WorkflowError("INVALID_SPEC", "task.case_bundle.files must be a non-empty bounded list")
+    paths: set[str] = set()
+    for index, item in enumerate(files):
+        item = _mapping(item, f"task.case_bundle.files[{index}]")
+        if set(item) != _CASE_BUNDLE_FILE_KEYS:
+            raise WorkflowError("INVALID_SPEC", "task.case_bundle file identity has unexpected fields")
+        path = _relative_scope(item.get("path"), f"task.case_bundle.files[{index}].path")
+        digest = _string(item.get("sha256"), f"task.case_bundle.files[{index}].sha256")
+        if path in paths or not _SHA256.fullmatch(digest):
+            raise WorkflowError("INVALID_SPEC", "task.case_bundle file identities are invalid")
+        paths.add(path)
+    return bundle
+
+
 def validate_spec(value: Any) -> dict[str, Any]:
     spec = _mapping(value, "spec")
     if spec.get("schema") != SCHEMA or spec.get("schema_version") != SCHEMA_VERSION:
@@ -137,6 +187,11 @@ def validate_spec(value: Any) -> dict[str, Any]:
     ) or len(limitations) != len(set(limitations)):
         raise WorkflowError("INVALID_SPEC", "task.unvalidated_requirements must be a unique string list")
     required_count = _required_cases(task.get("required_cases"))
+    case_bundle = _case_bundle(task.get("case_bundle"))
+    if case_bundle is not None and case_bundle["expected_generated_case_count"] < required_count:
+        raise WorkflowError(
+            "INVALID_SPEC", "task.case_bundle generated count is smaller than required-case coverage"
+        )
     performance_cases = task.get("performance_required_cases")
     if not isinstance(performance_cases, list) or len(performance_cases) != len(set(performance_cases)) or any(
         isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < required_count
@@ -153,7 +208,12 @@ def validate_spec(value: Any) -> dict[str, Any]:
     if runner.get("form") != "atk_aclnn":
         raise WorkflowError("INVALID_SPEC", "runner.form must be atk_aclnn")
     _string(runner.get("atk_version"), "runner.atk_version")
-    _integer(runner.get("device"), "runner.device", 0, 255)
+    logical_device = _integer(runner.get("device"), "runner.device", 0, 255)
+    if logical_device != 0:
+        raise WorkflowError(
+            "INVALID_SPEC",
+            "runner.device must be logical device 0; the caller selects the physical device",
+        )
     _integer(runner.get("case_timeout_seconds"), "runner.case_timeout_seconds", 1, 1800)
     _integer(runner.get("stage_timeout_seconds"), "runner.stage_timeout_seconds", 1, 7200)
     _integer(runner.get("workflow_timeout_seconds"), "runner.workflow_timeout_seconds", 60, 7200)

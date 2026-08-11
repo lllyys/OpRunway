@@ -14,7 +14,7 @@ import zipfile
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 from posixpath import normpath
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from .build import _target_delivery, _vendor_root
 from .contract import spec_digest, validate_spec
@@ -24,11 +24,16 @@ from .util import (
     WorkflowError,
     atomic_write_json,
     load_json,
+    require_directory,
     require_plain_file,
     run_command,
+    digest_json,
     sha256_file,
     utc_now,
 )
+
+
+_TASK_CASES_ENV = "OPRUNWAY_TASK_CASES_ROOT"
 
 
 def _ascii_path(path: os.PathLike[str] | str, label: str, *, file: bool = True) -> Path:
@@ -206,6 +211,86 @@ def _coverage(cases: list[dict[str, Any]], required: list[dict[str, Any]]) -> li
     return [cases[by_required[index]]["id"] for index in range(len(required))]
 
 
+def _task_case_bundle_evidence(
+    checked: dict[str, Any], root: os.PathLike[str] | str | None
+) -> dict[str, Any] | None:
+    declared = checked["task"].get("case_bundle")
+    if declared is None:
+        if root is not None:
+            raise WorkflowError("INVALID_INPUT", "task cases root was provided without a case-bundle spec")
+        return None
+    if root is None:
+        raise WorkflowError("INVALID_INPUT", "task.case_bundle requires --task-cases-root")
+    bundle_root = require_directory(root, "task case bundle root")
+    if not str(bundle_root).isascii():
+        raise WorkflowError("ATK_PATH_UNSUPPORTED", "task case bundle root must use an ASCII path")
+    actual: dict[str, Path] = {}
+    for path in bundle_root.rglob("*"):
+        relative = path.relative_to(bundle_root).as_posix()
+        if path.is_symlink():
+            raise WorkflowError("INVALID_INPUT", f"task case bundle contains a symlink: {relative}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise WorkflowError("INVALID_INPUT", f"task case bundle contains a non-file: {relative}")
+        actual[relative] = path.resolve()
+    expected = {item["path"]: item["sha256"] for item in declared["files"]}
+    if set(actual) != set(expected):
+        raise WorkflowError(
+            "TASK_CASE_BUNDLE_MISMATCH",
+            f"task case bundle files differ: expected {sorted(expected)}, got {sorted(actual)}",
+        )
+    identities: list[dict[str, Any]] = []
+    for relative in sorted(expected):
+        path = actual[relative]
+        digest = sha256_file(path)
+        if digest != expected[relative]:
+            raise WorkflowError("TASK_CASE_BUNDLE_DRIFT", f"task case file changed: {relative}")
+        identities.append(
+            {
+                "relative_path": relative,
+                "path": str(path),
+                "size": path.stat().st_size,
+                "sha256": digest,
+            }
+        )
+    return {
+        "schema": declared["schema"],
+        "schema_version": declared["schema_version"],
+        "source_locator": declared["source_locator"],
+        "root": str(bundle_root),
+        "case_count": declared["case_count"],
+        "expected_generated_case_count": declared["expected_generated_case_count"],
+        "generated_projection_sha256": declared["generated_projection_sha256"],
+        "files": identities,
+    }
+
+
+def _generated_case_projection(cases: list[dict[str, Any]]) -> str:
+    projected: list[dict[str, Any]] = []
+    names: set[str] = set()
+    for case in cases:
+        name = case.get("name")
+        if not isinstance(name, str) or not name:
+            raise WorkflowError("ATK_CASESET_INVALID", "bundle-generated case lacks a stable name")
+        if name in names:
+            raise WorkflowError("ATK_CASESET_INVALID", f"bundle-generated case name is duplicated: {name}")
+        names.add(name)
+        inputs: list[dict[str, Any]] = []
+        for actual in case["inputs"]:
+            projection = _coverage_projection(actual)
+            if projection is None:
+                raise WorkflowError("ATK_CASESET_INVALID", f"case {name} has an invalid projected input")
+            dtype, shape, value, has_value = projection
+            item: dict[str, Any] = {"dtype": dtype, "shape": shape}
+            if has_value:
+                item["value"] = value
+            inputs.append(item)
+        projected.append({"name": name, "inputs": inputs})
+    projected.sort(key=lambda item: item["name"])
+    return digest_json(projected)
+
+
 def generate_cases(
     *,
     spec: dict[str, Any],
@@ -214,11 +299,13 @@ def generate_cases(
     work_dir: os.PathLike[str] | str,
     out_path: os.PathLike[str] | str,
     generator_path: os.PathLike[str] | str | None = None,
+    task_cases_root: os.PathLike[str] | str | None = None,
     timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     checked = validate_spec(spec)
     design = _ascii_path(design_path, "ATK design file")
     generator = _ascii_path(generator_path, "ATK generator plugin") if generator_path else None
+    bundle = _task_case_bundle_evidence(checked, task_cases_root)
     work = Path(work_dir)
     if work.exists():
         raise WorkflowError("DIRTY_SESSION", f"ATK casegen work directory already exists: {work}")
@@ -237,12 +324,17 @@ def generate_cases(
         argv.extend(["--plugin_path", str(generator)])
     if sha256_file(preflight["path"]) != preflight["sha256"]:
         raise WorkflowError("ATK_IDENTITY_DRIFT", "ATK executable changed before case generation")
+    env = None
+    if bundle is not None:
+        env = os.environ.copy()
+        env[_TASK_CASES_ENV] = bundle["root"]
     command = run_command(
         argv,
         cwd=work,
         timeout_seconds=timeout_seconds or checked["runner"]["stage_timeout_seconds"],
         stdout_path=work / "atk-case.stdout.log",
         stderr_path=work / "atk-case.stderr.log",
+        env=env,
     )
     if sha256_file(preflight["path"]) != preflight["sha256"]:
         raise WorkflowError("ATK_IDENTITY_DRIFT", "ATK executable changed during case generation")
@@ -259,6 +351,17 @@ def generate_cases(
         checked["operator"]["aclnn_name"],
         checked["task"]["precision"]["atk_accuracy"],
     )
+    if bundle is not None:
+        if len(cases) != bundle["expected_generated_case_count"]:
+            raise WorkflowError(
+                "ATK_CASESET_INVALID",
+                "generated case count differs from the task case-bundle contract",
+            )
+        if _generated_case_projection(cases) != bundle["generated_projection_sha256"]:
+            raise WorkflowError(
+                "ATK_CASESET_INVALID",
+                "generated case projection differs from the task case-bundle contract",
+            )
     coverage_ids = _coverage(cases, checked["task"]["required_cases"])
     performance_ids = [coverage_ids[index] for index in checked["task"]["performance_required_cases"]]
     receipt = {
@@ -272,6 +375,7 @@ def generate_cases(
         "generator": (
             {"path": str(generator), "sha256": sha256_file(generator)} if generator else None
         ),
+        "task_case_bundle": bundle,
         "command": command.to_dict(),
         "cases": {
             "path": str(cases_path),
@@ -421,13 +525,27 @@ def _case_filter(case_ids: list[int]) -> str:
     return json.dumps(case_ids, separators=(",", ":"))
 
 
-def _execution_environment(library: Path, custom_opp_root: str) -> dict[str, str]:
+def _execution_environment(
+    library: Path, custom_opp_root: str, task_cases_root: str | None = None,
+    runtime_environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     env = os.environ.copy()
+    for name in tuple(env):
+        if name == "ASCEND_RT_VISIBLE_DEVICES" or name.startswith("OPRUNWAY_DEVICE_"):
+            env.pop(name)
     env["ATK_CUSTOM_OPP_PATH"] = str(library)
     env["ASCEND_CUSTOM_OPP_PATH"] = custom_opp_root
     library_dir = str(library.parent)
     inherited = env.get("LD_LIBRARY_PATH")
     env["LD_LIBRARY_PATH"] = f"{library_dir}:{inherited}" if inherited else library_dir
+    if task_cases_root is not None:
+        env[_TASK_CASES_ENV] = task_cases_root
+    if runtime_environment is not None:
+        if set(runtime_environment) != {"ASCEND_RT_VISIBLE_DEVICES"} \
+                or any(not isinstance(value, str) or not value
+                       for value in runtime_environment.values()):
+            raise WorkflowError("INVALID_DEVICE_BINDING", "device runtime environment is invalid")
+        env.update(runtime_environment)
     return env
 
 
@@ -723,6 +841,9 @@ def run_cases(
     work_dir: os.PathLike[str] | str,
     out_path: os.PathLike[str] | str,
     execution_plugin: os.PathLike[str] | str | None = None,
+    task_cases_root: os.PathLike[str] | str | None = None,
+    physical_device: int,
+    runtime_environment: Mapping[str, str],
     timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     checked = validate_spec(spec)
@@ -731,6 +852,23 @@ def run_cases(
     if not isinstance(case_receipt, dict) or not isinstance(build_receipt, dict):
         raise WorkflowError("EVIDENCE_MISMATCH", "case/build receipt must be objects")
     expected_spec = spec_digest(checked)
+    if isinstance(physical_device, bool) or not isinstance(physical_device, int) \
+            or not 0 <= physical_device <= 255:
+        raise WorkflowError("INVALID_DEVICE", "physical_device must be an integer in [0, 255]")
+    expected_runtime_environment = {
+        "ASCEND_RT_VISIBLE_DEVICES": str(physical_device),
+    }
+    if not isinstance(runtime_environment, Mapping) \
+            or dict(runtime_environment) != expected_runtime_environment:
+        raise WorkflowError(
+            "INVALID_DEVICE_BINDING",
+            "device runtime environment must map the requested physical device exactly",
+        )
+    device_binding = {
+        "physical_device": physical_device,
+        "logical_device": checked["runner"]["device"],
+        "runtime_environment": expected_runtime_environment,
+    }
     if case_receipt.get("spec_sha256") != expected_spec or build_receipt.get("spec_sha256") != expected_spec:
         raise WorkflowError("EVIDENCE_MISMATCH", "case/build receipt is not bound to this spec")
     staged_source_root = build_receipt.get("staged_source_root")
@@ -753,6 +891,14 @@ def run_cases(
     coverage_ids = _coverage(cases, checked["task"]["required_cases"])
     if coverage_ids != case_data.get("required_case_ids"):
         raise WorkflowError("EVIDENCE_DRIFT", "ATK required-case coverage differs from case receipt")
+    bundle = _task_case_bundle_evidence(checked, task_cases_root)
+    if bundle != case_receipt.get("task_case_bundle"):
+        raise WorkflowError("EVIDENCE_DRIFT", "task case bundle differs from the case receipt")
+    if bundle is not None and (
+        len(cases) != bundle["expected_generated_case_count"]
+        or _generated_case_projection(cases) != bundle["generated_projection_sha256"]
+    ):
+        raise WorkflowError("EVIDENCE_DRIFT", "task case-bundle projection changed before execution")
     vendor = build_receipt.get("vendor")
     if not isinstance(vendor, dict):
         raise WorkflowError("EVIDENCE_MISMATCH", "build receipt lacks vendor identity")
@@ -800,7 +946,12 @@ def run_cases(
     require_performance = bool(performance_ids)
     if not isinstance(vendor.get("custom_opp_root"), str):
         raise WorkflowError("EVIDENCE_MISMATCH", "build receipt lacks custom OPP root")
-    env = _execution_environment(library, vendor["custom_opp_root"])
+    env = _execution_environment(
+        library,
+        vendor["custom_opp_root"],
+        bundle["root"] if bundle is not None else None,
+        runtime_environment,
+    )
     stage_budget = timeout_seconds or checked["runner"]["stage_timeout_seconds"]
     stage_started = time.monotonic()
 
@@ -1032,9 +1183,11 @@ def run_cases(
             "schema_version": 1,
             "status": "INCOMPLETE",
             "created_at": utc_now(),
+            "work_dir": str(work),
             "spec_sha256": expected_spec,
             "case_receipt_sha256": case_receipt_sha256,
             "build_receipt_sha256": build_receipt_sha256,
+            "device": device_binding,
             "atk": preflight,
             "commands": {
                 "accuracy": accuracy_command.to_dict() if accuracy_command else None,
@@ -1079,6 +1232,7 @@ def run_cases(
             ),
             "loaded_vendor": loaded,
             "execution_plugin": plugin_identity,
+            "task_case_bundle": bundle,
         }
         atomic_write_json(out_path, incomplete)
         phase_error = accuracy_error or performance_error or profile_error or evidence_error
@@ -1104,9 +1258,11 @@ def run_cases(
         "schema_version": 1,
         "status": "COMPLETE",
         "created_at": utc_now(),
+        "work_dir": str(work),
         "spec_sha256": expected_spec,
         "case_receipt_sha256": case_receipt_sha256,
         "build_receipt_sha256": build_receipt_sha256,
+        "device": device_binding,
         "atk": preflight,
         "commands": {
             "accuracy": accuracy_command.to_dict(),
@@ -1134,6 +1290,7 @@ def run_cases(
         },
         "loaded_vendor": loaded,
         "execution_plugin": plugin_identity,
+        "task_case_bundle": bundle,
         "outputs": outputs,
         "profiles": profiles,
     }

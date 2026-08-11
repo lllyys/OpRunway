@@ -4,25 +4,52 @@
 环境，然后在全新 session 中完成来源绑定、ATK 用例生成、fresh build、ATK 执行和确定性裁决。默认从
 目标环境的 `PATH` 查找公开 `atk` 命令，不要求或探测 venv；多版本并存时才显式传 `--atk-bin`。
 
+当前能力边界是 `atk_aclnn + cann_ops_package_v1`：它在该 runner form 与仓库 build profile 内按算子数据
+泛化，不承诺接入任意仓形态。第二种真实仓形态出现后应新增独立 build profile adapter，不能在现有 profile
+里堆仓名或路径分支。
+
 ```bash
 export OPRUNWAY_PLUGIN_ROOT="$(git rev-parse --show-toplevel)/plugin"
+PHYSICAL_DEVICE=1  # 已由外部调度检查、加锁并在锁内复核
 python3 "$OPRUNWAY_PLUGIN_ROOT/oprunway_cli.py" accept \
   --spec /path/op.spec.json \
   --taskdoc /path/task.md \
   --source-root /path/read-only-source \
   --design /path/atk-design.yaml \
+  --task-cases-root /path/official-self-test-case \
   --target-soc ascend910_93 \
+  --physical-device "$PHYSICAL_DEVICE" \
   --session-dir /new/ascii/session
 ```
 
-复杂 ABI 可额外传 `--generator` 或 `--execution-plugin`；它们是 session 输入，会被复制和哈希绑定，不是
+Spec 声明 `task.case_bundle` 时必须传 `--task-cases-root`；官方 cases/prototype/golden 会完整复制、逐文件
+验 hash，并作为完整 accuracy 分母。复杂 ABI 可额外传 `--generator` 或 `--execution-plugin`；它们是 session 输入，会被复制和哈希绑定，不是
 平行 runner。正式产物位于 `<session>/receipts/` 与 `<session>/reports/`。
+
+物理 NPU 的发现与调度是 agent/目标环境的操作协议，不是 acceptance core。启动前，agent 读取当前目标的
+完整 `npu-smi info`，依据健康项和进程事实选择实际空闲卡；随后在 plugin 外对该卡取得预置机器共享路径上的
+非阻塞 `flock`，在锁内紧邻启动前再次读取 `npu-smi`，并把锁保持到整个正式 CLI 退出。已有进程、异常卡或
+已持锁卡只能跳过，绝不 kill、reset、抢占或覆盖锁。不同 A3 物理卡可运行不同 fresh session 并行；同一卡
+由外部锁互斥。
+
+Plugin 不枚举候选卡、不解析 `npu-smi`、不创建 machine-domain marker、不申请机器 lease，也不产生设备分配
+receipt。Formal CLI 只接收显式 `--physical-device N`，将该物理卡映射为 ATK 逻辑 device 0，并在 execution
+receipt 中记录实际 child environment（包括 `ASCEND_RT_VISIBLE_DEVICES=<N>`）。物理编号是本轮运行时输入，
+不得写进 tracked spec。
+
+若没有卡同时满足健康、空闲和外部锁条件，agent 报告 `DEVICE_UNAVAILABLE`，逐项列出候选卡的健康、占用或
+锁冲突事实，然后等待 Mr.0 指定物理卡；此时不启动正式 CLI，也不伪造 workflow/device receipt。收到指定后
+仍须使用不存在的新 session，重新读取 `npu-smi`、取得该卡外部锁并在锁内复核；指定绝不构成强占授权。
 
 正式 `acceptance.json` verdict 只有 `PASS`、`DUT_FAIL`、`UNSUPPORTED`。未形成正式裁决时，
 `workflow.json` 与可写入时的 `attempt.json` 使用 `PLUGIN_ERROR`、`NEEDS_INPUT` 或 `BLOCKED` 描述本轮尝试；
 这些状态不是 DUT 结论。ATK 控制台文字、返回码、单测或局部证据都不是验收结论。
 Spec 必须显式绑定 ATK 精度比较器，caseset 会逐 case 对账。精度与性能独立取证：声明了性能维度时，精度
-执行不完整也不自动跳过性能；两者的执行错误均先保持 `PLUGIN_ERROR`，不会直接归因到 DUT。
+执行不完整也不自动跳过性能；执行错误一律保持非 DUT workflow 状态，其中超时、环境或进程隔离阻塞为
+`BLOCKED`，其它流程实现错误为 `PLUGIN_ERROR`，都不会直接归因到 DUT。
+任务书准入的目标 SoC 在 fresh build/install 后仍缺该算子的设备侧 ops-info/binary/kernel delivery，且请求
+cache 与 host ACLNN ABI 已完整绑定时，唯一 finalizer 输出 `DUT_FAIL / TARGET_DELIVERY_MISSING`；普通构建失败
+或证据不完整不适用该结论。
 
 开发测试必须在 NPU 目标环境执行：
 
@@ -30,5 +57,6 @@ Spec 必须显式绑定 ATK 精度比较器，caseset 会逐 case 对账。精�
 cd "$OPRUNWAY_PLUGIN_ROOT"
 OPRUNWAY_ATK_BIN="$(command -v atk)" \
 OPRUNWAY_TASKDOC_ROOT=/path/to/taskdocs \
+OPRUNWAY_GAUSSIAN_BLUR_CASES_ROOT=/path/to/gaussian_blur/self_test_case \
 python3 -m unittest discover -s tests -v
 ```

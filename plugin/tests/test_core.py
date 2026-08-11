@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -21,19 +23,29 @@ from oprunway.atk import (
     _coverage,
     _coverage_projection,
     _execution_environment,
+    _generated_case_projection,
     _normalize_rows,
     _profile_evidence,
     _raw_profile_evidence,
     _run_independent_phases,
     _saved_outputs,
     _settled_command_receipt,
+    _task_case_bundle_evidence,
     _validate_cases,
     _workbook_rows,
     atk_preflight,
     generate_cases,
     run_cases,
 )
-from oprunway.build import _find_cache, _select_package, _target_delivery, _vendor_root, build_operator
+from oprunway.build import (
+    _cache_matches_request,
+    _find_cache,
+    _find_requested_cache,
+    _select_package,
+    _target_delivery,
+    _vendor_root,
+    build_operator,
+)
 from oprunway.cli import build_parser, main
 from oprunway.contract import spec_digest, validate_spec
 from oprunway.source import (
@@ -52,7 +64,7 @@ from oprunway.util import (
     sha256_file,
 )
 from oprunway.verdict import finalize
-from oprunway.workflow import _stage_source, run_acceptance
+from oprunway.workflow import _copy_case_bundle, _stage_source, run_acceptance
 
 
 def sample_spec(*, performance: str = "none") -> dict:
@@ -127,6 +139,39 @@ class ContractTests(unittest.TestCase):
         with self.assertRaises(WorkflowError):
             validate_spec(spec)
 
+    def test_runner_device_is_logical_zero_for_runtime_physical_mapping(self):
+        spec = sample_spec()
+        spec["runner"]["device"] = 1
+        with self.assertRaises(WorkflowError) as raised:
+            validate_spec(spec)
+        self.assertEqual(raised.exception.code, "INVALID_SPEC")
+
+    def test_task_case_bundle_contract_is_exact_and_fail_closed(self):
+        spec = sample_spec()
+        spec["task"]["case_bundle"] = {
+            "schema": "oprunway.task_case_bundle",
+            "schema_version": 1,
+            "source_locator": "https://example.invalid/cases/",
+            "case_count": 1,
+            "expected_generated_case_count": 1,
+            "generated_projection_sha256": "b" * 64,
+            "files": [{"path": "cases.json", "sha256": "c" * 64}],
+        }
+        self.assertEqual(validate_spec(spec)["task"]["case_bundle"]["case_count"], 1)
+        for mutation in ("extra", "bad_hash", "bad_count", "bad_path"):
+            with self.subTest(mutation=mutation):
+                invalid = json.loads(json.dumps(spec))
+                if mutation == "extra":
+                    invalid["task"]["case_bundle"]["unexpected"] = True
+                elif mutation == "bad_hash":
+                    invalid["task"]["case_bundle"]["files"][0]["sha256"] = "short"
+                elif mutation == "bad_count":
+                    invalid["task"]["case_bundle"]["expected_generated_case_count"] = 0
+                else:
+                    invalid["task"]["case_bundle"]["files"][0]["path"] = "../cases.json"
+                with self.assertRaises(WorkflowError):
+                    validate_spec(invalid)
+
     def test_future_safe_soc_token_does_not_require_code_change(self):
         spec = sample_spec()
         spec["task"]["hardware"] = ["ascend1234_next"]
@@ -159,6 +204,12 @@ class CliTests(unittest.TestCase):
         accept = subparsers.choices["accept"]
         atk = next(action for action in accept._actions if action.dest == "atk_bin")
         self.assertEqual(atk.default, "atk")
+        physical = next(action for action in accept._actions if action.dest == "physical_device")
+        self.assertTrue(physical.required)
+        self.assertEqual(physical.type("2"), 2)
+        for invalid in ("-1", "256", "not-an-integer"):
+            with self.subTest(invalid=invalid), self.assertRaises(argparse.ArgumentTypeError):
+                physical.type(invalid)
 
     def test_dirty_session_is_not_modified(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -180,7 +231,7 @@ class CliTests(unittest.TestCase):
                 "accept", "--spec", str(spec_path), "--taskdoc", str(taskdoc),
                 "--source-root", str(source), "--design", str(design),
                 "--atk-bin", str(marker), "--target-soc", "ascend910b",
-                "--session-dir", str(session),
+                "--session-dir", str(session), "--physical-device", "2",
             ])
             self.assertEqual(rc, 2)
             self.assertEqual(marker.read_text(encoding="utf-8"), "unchanged")
@@ -217,6 +268,9 @@ class AnchorTests(unittest.TestCase):
             (source / "__MACOSX").mkdir()
             (source / ".git").mkdir()
             (source / ".git" / "config").write_text("metadata", encoding="utf-8")
+            nested_git = source / "third_party" / "opbase" / ".git"
+            nested_git.mkdir(parents=True)
+            (nested_git / "index").write_text("nested metadata", encoding="utf-8")
             (source / "build").mkdir()
             (source / "build" / "old.o").write_bytes(b"old")
             scope = source / "math" / "example"
@@ -232,10 +286,15 @@ class AnchorTests(unittest.TestCase):
             self.assertFalse((root / "staged" / ".DS_Store").exists())
             self.assertFalse((root / "staged" / "__MACOSX").exists())
             self.assertFalse((root / "staged" / ".git").exists())
+            self.assertFalse((root / "staged" / "third_party" / "opbase" / ".git").exists())
             self.assertFalse((root / "staged" / "build").exists())
             self.assertFalse((root / "staged" / "math" / "example" / "__pycache__").exists())
             self.assertEqual(before, build_input_anchor(root / "staged"))
             self.assertEqual(operator_before, content_anchor(root / "staged", "math/example"))
+
+            snapshot = build_input_snapshot(source)
+            (nested_git / "index").write_text("build-updated metadata", encoding="utf-8")
+            self.assertEqual(snapshot, build_input_snapshot(source))
 
     def test_post_build_snapshot_allows_new_outputs_but_not_input_changes(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -334,6 +393,7 @@ class AnchorTests(unittest.TestCase):
             cache.parent.mkdir()
             cache.write_text(
                 "ASCEND_COMPUTE_UNIT:STRING=ascend910_93\n"
+                "ASCEND_OP_NAME:STRING=example\n"
                 "OP_CACHE_example_ascend910_93:INTERNAL=Example\n"
                 "VENDOR_NAME:STRING=oprunway\n"
                 "vendor_name:STRING=customize\n",
@@ -342,6 +402,17 @@ class AnchorTests(unittest.TestCase):
             self.assertEqual(
                 _find_cache(source, {}, "ascend910_93", "example", "Example", "oprunway"),
                 cache.resolve(),
+            )
+            requested, values = _find_requested_cache(
+                source, {}, "ascend910_93", "example", "oprunway"
+            )
+            self.assertEqual(requested, cache.resolve())
+            self.assertEqual(values["ASCEND_OP_NAME"], "example")
+            self.assertTrue(
+                _cache_matches_request(values, "ascend910_93", "example", "oprunway")
+            )
+            self.assertFalse(
+                _cache_matches_request(values, "ascend910b", "example", "oprunway")
             )
             cache.write_text(cache.read_text(encoding="utf-8").replace("Example", "Other"), encoding="utf-8")
             with self.assertRaises(WorkflowError):
@@ -400,7 +471,12 @@ class AnchorTests(unittest.TestCase):
 
             with patch("oprunway.build.run_command", side_effect=fake_run), \
                     patch("oprunway.build._discover_library", return_value=(library, nm_log)), \
-                    patch("oprunway.build._find_cache", return_value=cache), \
+                    patch("oprunway.build._find_requested_cache", return_value=(cache, {
+                        "ASCEND_COMPUTE_UNIT": "ascend910b",
+                        "ASCEND_OP_NAME": "example",
+                        "VENDOR_NAME": "oprunway",
+                        "OP_CACHE_example_ascend910b": "Example",
+                    })), \
                     patch("oprunway.build._target_delivery", return_value=[{"verified": True}]):
                 with self.assertRaises(WorkflowError) as raised:
                     build_operator(
@@ -409,6 +485,87 @@ class AnchorTests(unittest.TestCase):
                         out_path=root / "build.json", evidence_dir=root / "evidence",
                     )
             self.assertEqual(raised.exception.code, "SOURCE_MUTATED")
+
+    def test_build_records_missing_requested_target_delivery_for_deterministic_verdict(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            scope = source / "math" / "example"
+            scope.mkdir(parents=True)
+            (scope / "kernel.cpp").write_text("kernel", encoding="utf-8")
+            build_script = source / "build.sh"
+            build_script.write_text("#!/bin/sh\n", encoding="utf-8")
+            spec = sample_spec()
+            facts = {
+                "schema": "oprunway.source_facts", "schema_version": 1,
+                "status": "READY", "spec_sha256": spec_digest(spec),
+                "target": {"requested_soc": "ascend910b"},
+                "source": {
+                    "content_anchor": content_anchor(source, "math/example"),
+                    "build_input_anchor": build_input_anchor(source),
+                },
+            }
+            facts_path = root / "facts.json"
+            atomic_write_json(facts_path, facts)
+            install = root / "install"
+            package = source / "build_out" / "fresh.run"
+            cache = source / "build" / "CMakeCache.txt"
+            library = install / "vendors" / "v" / "op_api" / "lib" / "libdut.so"
+            nm_log = root / "nm.log"
+            calls = 0
+
+            def fake_run(argv, *, cwd, timeout_seconds, stdout_path, stderr_path, env=None):
+                nonlocal calls
+                calls += 1
+                Path(stdout_path).write_text("ok\n", encoding="utf-8")
+                Path(stderr_path).write_text("", encoding="utf-8")
+                if calls == 1:
+                    package.parent.mkdir()
+                    package.write_bytes(b"package")
+                    cache.parent.mkdir()
+                    cache.write_text(
+                        "ASCEND_COMPUTE_UNIT:STRING=ascend910b\n"
+                        "ASCEND_OP_NAME:STRING=example\n"
+                        "VENDOR_NAME:STRING=oprunway\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    library.parent.mkdir(parents=True)
+                    library.write_bytes(b"elf")
+                    nm_log.write_text(
+                        "0000 T aclnnExampleGetWorkspaceSize\n0000 T aclnnExample\n",
+                        encoding="utf-8",
+                    )
+                return CommandReceipt(
+                    argv=list(argv), cwd=str(cwd), started_at="2026-08-10T00:00:00+00:00",
+                    elapsed_seconds=0.1, returncode=0, timed_out=False,
+                    stdout_path=str(Path(stdout_path)), stderr_path=str(Path(stderr_path)),
+                    stdout_sha256=sha256_file(stdout_path), stderr_sha256=sha256_file(stderr_path),
+                    processes_drained=True,
+                )
+
+            values = {
+                "ASCEND_COMPUTE_UNIT": "ascend910b",
+                "ASCEND_OP_NAME": "example",
+                "VENDOR_NAME": "oprunway",
+            }
+            missing = WorkflowError(
+                "TARGET_KERNEL_MISSING",
+                "expected one exact ascend910b ops-info binding example/Example, found 0",
+            )
+            with patch("oprunway.build.run_command", side_effect=fake_run), \
+                    patch("oprunway.build._discover_library", return_value=(library, nm_log)), \
+                    patch("oprunway.build._find_requested_cache", return_value=(cache, values)), \
+                    patch("oprunway.build._target_delivery", side_effect=missing):
+                receipt = build_operator(
+                    spec=spec, facts_path=facts_path, source_root=source,
+                    install_root=install, target_soc="ascend910b",
+                    out_path=root / "build.json", evidence_dir=root / "evidence",
+                )
+            self.assertEqual(receipt["status"], "TARGET_DELIVERY_MISSING")
+            self.assertEqual(receipt["target_delivery"], [])
+            self.assertEqual(receipt["target_binding"]["actual"], None)
+            self.assertEqual(receipt["target_delivery_error"]["code"], "TARGET_KERNEL_MISSING")
 
 
 class AtkNormalizationTests(unittest.TestCase):
@@ -458,6 +615,7 @@ class AtkNormalizationTests(unittest.TestCase):
             case_receipt = root / "case-receipt.json"
             build_receipt = root / "build-receipt.json"
             out = root / "execution.json"
+            device_environment = {"ASCEND_RT_VISIBLE_DEVICES": "2"}
             atomic_write_json(case_receipt, {
                 "spec_sha256": spec_sha,
                 "atk": {"path": str(atk), "version": "26.5.14", "sha256": sha256_file(atk)},
@@ -483,6 +641,7 @@ class AtkNormalizationTests(unittest.TestCase):
             commands = []
 
             def fake_run(argv, *, cwd, timeout_seconds, stdout_path, stderr_path, env=None):
+                self.assertEqual(env["ASCEND_RT_VISIBLE_DEVICES"], "2")
                 destination = Path(stdout_path).parent
                 destination.mkdir(parents=True, exist_ok=True)
                 is_accuracy = "accuracy" in argv
@@ -510,6 +669,7 @@ class AtkNormalizationTests(unittest.TestCase):
                     timed_out=False, stdout_path=str(stdout_path), stderr_path=str(stderr_path),
                     stdout_sha256=sha256_file(stdout_path), stderr_sha256=sha256_file(stderr_path),
                     processes_drained=True,
+                    environment={"ASCEND_RT_VISIBLE_DEVICES": "2"},
                 )
                 commands.append(receipt)
                 return receipt
@@ -556,6 +716,7 @@ class AtkNormalizationTests(unittest.TestCase):
                 "编号": 0, "pyaclnn_0_Device性能（us）": 2.5,
                 "运行结果": "SUCCESS", "失败原因": None, "用例json信息": "{}",
             }]
+
             with patch("oprunway.atk.build_input_anchor", return_value={"sha256": "b" * 64}), \
                     patch("oprunway.atk._vendor_root", return_value=vendor_root), \
                     patch("oprunway.atk._target_delivery", return_value=delivery), \
@@ -571,8 +732,10 @@ class AtkNormalizationTests(unittest.TestCase):
                         spec=spec, atk_bin=atk, case_receipt_path=case_receipt,
                         build_receipt_path=build_receipt, work_dir=root / "run", out_path=out,
                         execution_plugin=execution_plugin,
+                        physical_device=2,
+                        runtime_environment=device_environment,
                     )
-            return raised.exception.code, load_json(out), len(commands)
+            return raised.exception.code, load_json(out) if out.exists() else None, len(commands)
 
     def test_incomplete_accuracy_still_records_attributable_performance(self):
         code, receipt, command_count = self._run_incomplete_execution()
@@ -784,14 +947,23 @@ class AtkNormalizationTests(unittest.TestCase):
         library = Path("/session/install/vendors/v/op_api/lib/libcust_opapi.so")
         with patch.dict(
             os.environ,
-            {"LD_LIBRARY_PATH": "/system/lib", "PYTHONPATH": "/cann/python/site-packages"},
+            {
+                "LD_LIBRARY_PATH": "/system/lib",
+                "PYTHONPATH": "/cann/python/site-packages",
+                "ASCEND_RT_VISIBLE_DEVICES": "7",
+            },
             clear=False,
         ):
-            env = _execution_environment(library, "/session/install/vendors/v")
+            env = _execution_environment(
+                library, "/session/install/vendors/v", "/session/inputs/task-cases",
+                {"ASCEND_RT_VISIBLE_DEVICES": "3"},
+            )
         self.assertEqual(env["ATK_CUSTOM_OPP_PATH"], str(library))
         self.assertEqual(env["ASCEND_CUSTOM_OPP_PATH"], "/session/install/vendors/v")
         self.assertEqual(env["LD_LIBRARY_PATH"], f"{library.parent}:/system/lib")
         self.assertEqual(env["PYTHONPATH"], "/cann/python/site-packages")
+        self.assertEqual(env["OPRUNWAY_TASK_CASES_ROOT"], "/session/inputs/task-cases")
+        self.assertEqual(env["ASCEND_RT_VISIBLE_DEVICES"], "3")
 
     def test_required_cases_are_matched_to_distinct_generated_cases(self):
         cases = [
@@ -932,6 +1104,70 @@ class AtkNormalizationTests(unittest.TestCase):
                 out_path=root / "receipt.json",
             )
             self.assertEqual(receipt["cases"]["ids"], [1])
+
+    def test_casegen_binds_and_propagates_exact_task_case_bundle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle_root = root / "bundle"
+            bundle_root.mkdir()
+            bundle_file = bundle_root / "cases.json"
+            bundle_file.write_text("{}\n", encoding="utf-8")
+            projection = [{
+                "name": "BoundCase",
+                "inputs": [{"dtype": "fp32", "shape": [2], "value": [-1, 1]}],
+            }]
+            spec = sample_spec()
+            spec["task"]["case_bundle"] = {
+                "schema": "oprunway.task_case_bundle",
+                "schema_version": 1,
+                "source_locator": "https://example.invalid/cases/",
+                "case_count": 1,
+                "expected_generated_case_count": 1,
+                "generated_projection_sha256": digest_json(projection),
+                "files": [{"path": "cases.json", "sha256": sha256_file(bundle_file)}],
+            }
+            atk = root / "atk"
+            atk.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = --version ]; then printf '%s\\n' 26.5.14; exit 0; fi\n"
+                f"[ \"$OPRUNWAY_TASK_CASES_ROOT\" = {str(bundle_root)!r} ] || exit 97\n"
+                "mkdir -p result/generated/json\n"
+                "printf '%s\\n' '[{\"id\":1,\"name\":\"BoundCase\","
+                "\"aclnn_name\":\"Example\",\"standard\":{\"acc\":\"single_bm\"},"
+                "\"inputs\":[{\"dtype\":\"fp32\",\"shape\":[2],"
+                "\"range_values\":[-1,1]}]}]' > result/generated/json/cases.json\n",
+                encoding="utf-8",
+            )
+            atk.chmod(0o755)
+            design = root / "design.yaml"
+            design.write_text("operator: Example\n", encoding="utf-8")
+            receipt = generate_cases(
+                spec=spec,
+                atk_bin=atk,
+                design_path=design,
+                task_cases_root=bundle_root,
+                work_dir=root / "casegen",
+                out_path=root / "receipt.json",
+            )
+            self.assertEqual(receipt["task_case_bundle"]["case_count"], 1)
+            self.assertEqual(
+                receipt["task_case_bundle"],
+                _task_case_bundle_evidence(validate_spec(spec), bundle_root),
+            )
+            generated = json.loads(Path(receipt["cases"]["path"]).read_text(encoding="utf-8"))
+            self.assertEqual(_generated_case_projection(generated), digest_json(projection))
+            with self.assertRaises(WorkflowError):
+                _generated_case_projection([generated[0], dict(generated[0], id=2)])
+
+            copied = root / "copied"
+            self.assertEqual(
+                _copy_case_bundle(bundle_root, copied, spec["task"]["case_bundle"]),
+                copied.resolve(),
+            )
+            (bundle_root / "extra.txt").write_text("extra", encoding="utf-8")
+            with self.assertRaises(WorkflowError) as raised:
+                _copy_case_bundle(bundle_root, root / "rejected", spec["task"]["case_bundle"])
+            self.assertEqual(raised.exception.code, "TASK_CASE_BUNDLE_MISMATCH")
 
     def test_denominator_accuracy_and_performance_are_explicit(self):
         rows = [
@@ -1118,6 +1354,28 @@ class TimeoutTests(unittest.TestCase):
             self.assertTrue(receipt.timed_out)
             self.assertLess(receipt.elapsed_seconds, 5)
 
+    def test_command_receipt_binds_safe_device_environment_projection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = os.environ.copy()
+            environment["ASCEND_RT_VISIBLE_DEVICES"] = "7"
+            receipt = run_command(
+                [
+                    sys.executable, "-c",
+                    "import os; "
+                    "assert os.environ['ASCEND_RT_VISIBLE_DEVICES'] == '7'; "
+                    "print('child-env-ok')",
+                ], cwd=root, timeout_seconds=5,
+                stdout_path=root / "stdout.log", stderr_path=root / "stderr.log",
+                env=environment,
+            )
+            self.assertEqual(receipt.environment, {"ASCEND_RT_VISIBLE_DEVICES": "7"})
+            self.assertNotIn("OPRUNWAY_COMMAND_TOKEN", receipt.environment)
+            self.assertEqual(
+                (root / "stdout.log").read_text(encoding="utf-8").strip(),
+                "child-env-ok",
+            )
+
     def test_timeout_drains_worker_that_detaches_into_a_new_session(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1187,6 +1445,7 @@ class WorkflowTests(unittest.TestCase):
                 atk_bin=root / "missing-atk",
                 target_soc="ascend950",
                 session_dir=session,
+                physical_device=2,
             )
             self.assertEqual(result["acceptance"]["verdict"]["status"], "UNSUPPORTED")
             self.assertTrue((session / "receipts" / "workflow.json").is_file())
@@ -1198,7 +1457,7 @@ class WorkflowTests(unittest.TestCase):
                 run_acceptance(
                     spec=spec, taskdoc_path=taskdoc, source_root=source,
                     design_path=design, atk_bin=root / "missing-atk",
-                    target_soc="ascend950", session_dir=session,
+                    target_soc="ascend950", session_dir=session, physical_device=2,
                 )
 
     def test_unexpected_dependency_error_is_recorded_as_plugin_error(self):
@@ -1225,6 +1484,7 @@ class WorkflowTests(unittest.TestCase):
                         atk_bin=design,
                         target_soc="ascend910b",
                         session_dir=session,
+                        physical_device=2,
                     )
             self.assertEqual(raised.exception.code, "UNEXPECTED_PLUGIN_ERROR")
             receipt = json.loads((session / "receipts" / "workflow.json").read_text(encoding="utf-8"))
@@ -1251,18 +1511,68 @@ class WorkflowTests(unittest.TestCase):
             }
             with patch("oprunway.workflow.generate_cases"), \
                     patch("oprunway.workflow.build_operator"), \
-                    patch("oprunway.workflow.run_cases"), \
+                    patch("oprunway.workflow.run_cases") as execution, \
                     patch("oprunway.workflow.finalize", return_value=plugin_result):
                 with self.assertRaises(WorkflowError) as raised:
                     run_acceptance(
                         spec=spec, taskdoc_path=taskdoc, source_root=source,
                         design_path=design, atk_bin=design, target_soc="ascend910b",
-                        session_dir=session,
+                        session_dir=session, physical_device=2,
                     )
-            self.assertEqual(raised.exception.code, "NON_DUT_EXECUTION_FAILURE")
             workflow = json.loads((session / "receipts" / "workflow.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                raised.exception.code, "NON_DUT_EXECUTION_FAILURE", msg=workflow["error"]
+            )
             self.assertEqual(workflow["status"], "ERROR")
             self.assertFalse((session / "reports" / "acceptance.json").exists())
+            self.assertEqual(execution.call_args.kwargs["physical_device"], 2)
+            self.assertEqual(
+                execution.call_args.kwargs["runtime_environment"],
+                {"ASCEND_RT_VISIBLE_DEVICES": "2"},
+            )
+
+    def test_missing_target_delivery_skips_execution_and_publishes_dut_fail(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            scope = source / "math" / "example"
+            scope.mkdir(parents=True)
+            (scope / "op.cpp").write_text("x", encoding="utf-8")
+            taskdoc = root / "task.md"
+            taskdoc.write_text("task", encoding="utf-8")
+            design = root / "design.yaml"
+            design.write_text("design", encoding="utf-8")
+            spec = sample_spec()
+            spec["task"]["taskdoc_sha256"] = sha256_file(taskdoc)
+            session = root / "session"
+            dut_fail = {
+                "verdict": {
+                    "status": "DUT_FAIL",
+                    "reason_code": "TARGET_DELIVERY_MISSING",
+                    "message": "missing target",
+                }
+            }
+            def fake_finalize(**kwargs):
+                atomic_write_json(kwargs["out_path"], dut_fail)
+                Path(kwargs["out_path"]).with_suffix(".md").write_text(
+                    "# deterministic DUT_FAIL\n", encoding="utf-8"
+                )
+                return dut_fail
+
+            with patch("oprunway.workflow.generate_cases"), \
+                    patch(
+                        "oprunway.workflow.build_operator",
+                        return_value={"status": "TARGET_DELIVERY_MISSING"},
+                    ), patch("oprunway.workflow.run_cases") as execution, \
+                    patch("oprunway.workflow.finalize", side_effect=fake_finalize) as finalizer:
+                result = run_acceptance(
+                    spec=spec, taskdoc_path=taskdoc, source_root=source,
+                    design_path=design, atk_bin=design, target_soc="ascend910b",
+                    session_dir=session, physical_device=2,
+                )
+            self.assertEqual(result["acceptance"]["verdict"]["status"], "DUT_FAIL")
+            execution.assert_not_called()
+            self.assertIsNone(finalizer.call_args.kwargs.get("execution_receipt_path"))
 
 
 class VerdictTests(unittest.TestCase):
@@ -1298,22 +1608,37 @@ class VerdictTests(unittest.TestCase):
         package = root / "fresh-package.run"
         package.write_bytes(b"package")
         cache = root / "CMakeCache.txt"
-        cache.write_text("ASCEND_COMPUTE_UNIT:STRING=ascend910b\n", encoding="utf-8")
+        cache.write_text(
+            "ASCEND_COMPUTE_UNIT:STRING=ascend910b\n"
+            "ASCEND_OP_NAME:STRING=example\n"
+            "VENDOR_NAME:STRING=oprunway\n"
+            "OP_CACHE_example_ascend910b:INTERNAL=Example\n",
+            encoding="utf-8",
+        )
         nm_log = root / "nm.log"
         symbols = ["aclnnExampleGetWorkspaceSize", "aclnnExample"]
         nm_log.write_text("\n".join(f"00000000 T {symbol}" for symbol in symbols) + "\n", encoding="utf-8")
+        atk = root / "atk"
+        atk.write_bytes(b"prepared-atk")
 
-        def command_receipt(name: str) -> dict:
-            stdout = root / f"{name}.stdout.log"
-            stderr = root / f"{name}.stderr.log"
-            stdout.write_text(f"{name} ok\n", encoding="utf-8")
+        def command_receipt(
+            name: str, *, argv: list[str] | None = None, stdout_text: str | None = None,
+            cwd: Path | None = None, stdout_path: Path | None = None,
+            stderr_path: Path | None = None, environment: dict[str, str] | None = None,
+        ) -> dict:
+            stdout = stdout_path or root / f"{name}.stdout.log"
+            stderr = stderr_path or root / f"{name}.stderr.log"
+            stdout.parent.mkdir(parents=True, exist_ok=True)
+            stderr.parent.mkdir(parents=True, exist_ok=True)
+            stdout.write_text(stdout_text if stdout_text is not None else f"{name} ok\n", encoding="utf-8")
             stderr.write_text("", encoding="utf-8")
             return {
-                "argv": [name], "cwd": str(root), "started_at": "2026-08-10T00:00:00+00:00",
+                "argv": argv if argv is not None else [name],
+                "cwd": str(cwd or root), "started_at": "2026-08-10T00:00:00+00:00",
                 "elapsed_seconds": 1.0, "returncode": 0, "timed_out": False,
                 "stdout_path": str(stdout), "stderr_path": str(stderr),
                 "stdout_sha256": sha256_file(stdout), "stderr_sha256": sha256_file(stderr),
-                "processes_drained": True,
+                "processes_drained": True, "environment": environment or {},
             }
 
         anchor = {"schema": "oprunway.source_content_anchor", "schema_version": 1, "sha256": "b" * 64}
@@ -1325,6 +1650,11 @@ class VerdictTests(unittest.TestCase):
             "schema": "oprunway.source_facts", "schema_version": 1, "status": "READY",
             "spec_sha256": spec_sha,
             "source": {"content_anchor": anchor, "build_input_anchor": build_anchor},
+            "target": {
+                "requested_soc": "ascend910b",
+                "declared_hardware": ["ascend910b"],
+                "supported": True,
+            },
         }
         build = {
             "schema": "oprunway.build_receipt", "schema_version": 1, "status": "VERIFIED",
@@ -1340,6 +1670,9 @@ class VerdictTests(unittest.TestCase):
                 "sha256": sha256_file(package), "equivalent_paths": [],
             },
             "cmake_cache": {"path": str(cache), "sha256": sha256_file(cache)},
+            "target_binding": {
+                "key": "OP_CACHE_example_ascend910b", "expected": "Example", "actual": "Example",
+            },
             "vendor": {
                 "package_install_root": str(install),
                 "custom_opp_root": str(vendor_root),
@@ -1350,21 +1683,28 @@ class VerdictTests(unittest.TestCase):
                 "nm_log_sha256": sha256_file(nm_log),
             },
             "target_delivery": target_delivery,
+            "target_delivery_error": None,
         }
         caseset = root / "generated-cases.json"
         atomic_write_json(
             caseset,
             [
-                {"id": 0, "aclnn_name": "Example", "inputs": [{"dtype": "fp32"}]},
-                {"id": 1, "aclnn_name": "Example", "inputs": [{"dtype": "fp32"}]},
+                {
+                    "id": 0, "name": "case-0", "aclnn_name": "Example",
+                    "standard": {"acc": "single_bm"}, "inputs": [{"dtype": "fp32"}],
+                },
+                {
+                    "id": 1, "name": "case-1", "aclnn_name": "Example",
+                    "standard": {"acc": "single_bm"}, "inputs": [{"dtype": "fp32"}],
+                },
             ],
         )
         cases_atk = {
-            "version": "26.5.14", "sha256": "c" * 64,
+            "path": str(atk), "version": "26.5.14", "sha256": sha256_file(atk),
             "probe": command_receipt("case-atk-probe"),
         }
         execution_atk = {
-            "version": "26.5.14", "sha256": "c" * 64,
+            "path": str(atk), "version": "26.5.14", "sha256": sha256_file(atk),
             "probe": command_receipt("execution-atk-probe"),
         }
         cases = {
@@ -1374,12 +1714,18 @@ class VerdictTests(unittest.TestCase):
             "cases": {
                 "path": str(caseset), "sha256": sha256_file(caseset),
                 "count": 2, "ids": [0, 1],
+                "required_case_ids": [0],
                 "performance_case_ids": [0] if performance == "measure" else [],
             },
         }
-        paths = [root / name for name in ("facts.json", "build.json", "cases.json", "execution.json")]
+        paths = [
+            root / name for name in
+            ("facts.json", "build.json", "cases.json", "execution.json")
+        ]
         for path, value in zip(paths[:3], (facts, build, cases)):
             atomic_write_json(path, value)
+        execution_work = root / "execution-work"
+        execution_work.mkdir()
         workbook = root / "accuracy.xlsx"
         workbook.write_bytes(b"workbook-evidence")
         performance_workbook = None
@@ -1412,16 +1758,44 @@ class VerdictTests(unittest.TestCase):
                         "size": output.stat().st_size, "sha256": sha256_file(output),
                     }
                 )
+        command_environment = {"ASCEND_RT_VISIBLE_DEVICES": "2"}
+
+        def execution_command(task: str) -> dict:
+            performance_command = task == "performance_device"
+            destination = execution_work / ("performance" if performance_command else "accuracy")
+            argv = [
+                str(atk.resolve()), "aclnn", str(caseset.resolve()),
+                "--devices", "0", "--task", task,
+                "--output", str(destination), "--timeout", "60",
+                "--concurrency", "1", "--save_data",
+                "profile:bin" if performance_command else "output:bin",
+            ]
+            if performance_command:
+                argv.extend(["--white_list", "[0]"])
+            return command_receipt(
+                task, argv=argv, cwd=execution_work,
+                stdout_path=destination / "atk-run.stdout.log",
+                stderr_path=destination / "atk-run.stderr.log",
+                environment=command_environment,
+            )
+
         execution = {
             "schema": "oprunway.atk_execution_receipt", "schema_version": 1, "status": "COMPLETE",
+            "work_dir": str(execution_work),
             "spec_sha256": spec_sha,
             "case_receipt_sha256": sha256_file(paths[2]),
             "build_receipt_sha256": sha256_file(paths[1]),
+            "device": {
+                "physical_device": 2,
+                "logical_device": 0,
+                "runtime_environment": {"ASCEND_RT_VISIBLE_DEVICES": "2"},
+            },
             "atk": execution_atk,
             "commands": {
-                "accuracy": command_receipt("accuracy"),
+                "accuracy": execution_command("accuracy"),
                 "performance": (
-                    command_receipt("performance") if performance == "measure" else None
+                    execution_command("performance_device")
+                    if performance == "measure" else None
                 ),
             },
             "loaded_vendor": {
@@ -1453,16 +1827,78 @@ class VerdictTests(unittest.TestCase):
         atomic_write_json(paths[3], execution)
         return spec, paths
 
-    def test_only_complete_numerical_mismatch_is_dut_fail(self):
+    def test_complete_numerical_mismatch_is_dut_fail(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             spec, paths = self._write_chain(root, execution_failed=0, accuracy_failed=1)
             result = finalize(
                 spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
                 case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                requested_physical_device=2,
                 out_path=root / "acceptance.json",
             )
             self.assertEqual(result["verdict"]["status"], "DUT_FAIL")
+
+    def test_missing_taskdoc_required_target_delivery_is_deterministic_dut_fail(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            spec, paths = self._write_chain(root, execution_failed=0, accuracy_failed=0)
+            build = json.loads(paths[1].read_text(encoding="utf-8"))
+            install = Path(build["vendor"]["package_install_root"])
+            ops_info = install / build["target_delivery"][0]["ops_info"]["path"]
+            ops_info.unlink()
+            with self.assertRaises(WorkflowError) as missing:
+                _target_delivery(
+                    install,
+                    Path(build["vendor"]["custom_opp_root"]),
+                    "ascend910b",
+                    "example",
+                    "Example",
+                )
+            self.assertEqual(missing.exception.code, "TARGET_KERNEL_MISSING")
+            build["status"] = "TARGET_DELIVERY_MISSING"
+            build["target_delivery"] = []
+            build["target_delivery_error"] = {
+                "code": missing.exception.code,
+                "message": str(missing.exception),
+            }
+            atomic_write_json(paths[1], build)
+            result = finalize(
+                spec=spec,
+                facts_path=paths[0],
+                build_receipt_path=paths[1],
+                case_receipt_path=paths[2],
+                requested_physical_device=2,
+                out_path=root / "acceptance.json",
+            )
+            self.assertEqual(result["verdict"]["status"], "DUT_FAIL")
+            self.assertEqual(result["verdict"]["reason_code"], "TARGET_DELIVERY_MISSING")
+            with self.assertRaises(WorkflowError) as contaminated:
+                finalize(
+                    spec=spec,
+                    facts_path=paths[0],
+                    build_receipt_path=paths[1],
+                    case_receipt_path=paths[2],
+                    execution_receipt_path=paths[3],
+                    requested_physical_device=2,
+                    out_path=root / "rejected.json",
+                )
+            self.assertEqual(contaminated.exception.code, "EVIDENCE_MISMATCH")
+
+            facts = json.loads(paths[0].read_text(encoding="utf-8"))
+            facts["target"]["requested_soc"] = "ascend950"
+            facts["target"]["supported"] = False
+            atomic_write_json(paths[0], facts)
+            with self.assertRaises(WorkflowError) as target_drift:
+                finalize(
+                    spec=spec,
+                    facts_path=paths[0],
+                    build_receipt_path=paths[1],
+                    case_receipt_path=paths[2],
+                    requested_physical_device=2,
+                    out_path=root / "target-drift.json",
+                )
+            self.assertEqual(target_drift.exception.code, "EVIDENCE_MISMATCH")
 
     def test_fresh_build_chain_fields_are_mandatory(self):
         missing_paths = [
@@ -1487,6 +1923,7 @@ class VerdictTests(unittest.TestCase):
                     finalize(
                         spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
                         case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                        requested_physical_device=2,
                         out_path=root / "acceptance.json",
                     )
 
@@ -1502,9 +1939,146 @@ class VerdictTests(unittest.TestCase):
                 finalize(
                     spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
                     case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                    requested_physical_device=2,
                     out_path=root / "acceptance.json",
                 )
             self.assertEqual(raised.exception.code, "EVIDENCE_DRIFT")
+
+    def test_explicit_device_binding_and_atk_command_contract_are_replayed(self):
+        mutations = (
+            "binding_physical", "binding_logical", "binding_environment",
+            "wrong_executable", "argv_logical_device", "wrong_task", "wrong_cases",
+            "wrong_output", "wrong_timeout", "wrong_concurrency", "wrong_save_data",
+            "wrong_environment",
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                spec, paths = self._write_chain(root, execution_failed=0, accuracy_failed=0)
+                execution = load_json(paths[3])
+                if mutation == "binding_physical":
+                    execution["device"]["physical_device"] = 1
+                    atomic_write_json(paths[3], execution)
+                elif mutation == "binding_logical":
+                    execution["device"]["logical_device"] = 1
+                    atomic_write_json(paths[3], execution)
+                elif mutation == "binding_environment":
+                    execution["device"]["runtime_environment"][
+                        "ASCEND_RT_VISIBLE_DEVICES"
+                    ] = "1"
+                    atomic_write_json(paths[3], execution)
+                elif mutation == "wrong_environment":
+                    execution["commands"]["accuracy"]["environment"][
+                        "ASCEND_RT_VISIBLE_DEVICES"
+                    ] = "1"
+                    atomic_write_json(paths[3], execution)
+                else:
+                    argv = execution["commands"]["accuracy"]["argv"]
+                    if mutation == "argv_logical_device":
+                        argv[argv.index("--devices") + 1] = "1"
+                    elif mutation == "wrong_executable":
+                        argv[0] = str(root / "wrong-atk")
+                    elif mutation == "wrong_task":
+                        argv[argv.index("--task") + 1] = "performance_device"
+                    elif mutation == "wrong_cases":
+                        argv[2] = str(root / "wrong-cases.json")
+                    elif mutation == "wrong_output":
+                        argv[argv.index("--output") + 1] = str(root / "wrong-output")
+                    elif mutation == "wrong_timeout":
+                        argv[argv.index("--timeout") + 1] = "61"
+                    elif mutation == "wrong_concurrency":
+                        argv[argv.index("--concurrency") + 1] = "2"
+                    else:
+                        argv[argv.index("--save_data") + 1] = "profile:bin"
+                    atomic_write_json(paths[3], execution)
+                with self.assertRaises(WorkflowError) as raised:
+                    finalize(
+                        spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
+                        case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                        requested_physical_device=2,
+                        out_path=root / "acceptance.json",
+                    )
+                self.assertEqual(raised.exception.code, "EVIDENCE_MISMATCH")
+
+    def test_performance_white_list_command_contract_is_replayed(self):
+        for mutation in ("missing", "wrong", "extra"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                spec, paths = self._write_chain(
+                    root, execution_failed=0, accuracy_failed=0, performance="measure"
+                )
+                execution = load_json(paths[3])
+                argv = execution["commands"]["performance"]["argv"]
+                index = argv.index("--white_list")
+                if mutation == "missing":
+                    del argv[index:index + 2]
+                elif mutation == "wrong":
+                    argv[index + 1] = "[1]"
+                else:
+                    argv.extend(["--white_list", "[0]"])
+                atomic_write_json(paths[3], execution)
+                with self.assertRaises(WorkflowError) as raised:
+                    finalize(
+                        spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
+                        case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                        requested_physical_device=2,
+                        out_path=root / "acceptance.json",
+                    )
+                self.assertEqual(raised.exception.code, "EVIDENCE_MISMATCH")
+
+    def test_execution_plugin_file_identity_is_replayed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            spec, paths = self._write_chain(root, execution_failed=0, accuracy_failed=0)
+            plugin = root / "execution-plugin.py"
+            plugin.write_text("# immutable execution adapter\n", encoding="utf-8")
+            execution = load_json(paths[3])
+            execution["execution_plugin"] = {
+                "path": str(plugin), "sha256": sha256_file(plugin),
+            }
+            execution["commands"]["accuracy"]["argv"].extend([
+                "--plugin", str(plugin.resolve()),
+            ])
+            atomic_write_json(paths[3], execution)
+            plugin.write_text("# drifted execution adapter\n", encoding="utf-8")
+            with self.assertRaises(WorkflowError) as raised:
+                finalize(
+                    spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
+                    case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                    requested_physical_device=2,
+                    out_path=root / "acceptance.json",
+                )
+            self.assertEqual(raised.exception.code, "EVIDENCE_DRIFT")
+
+    def test_execution_plugin_command_argument_is_replayed_exactly(self):
+        for mutation in ("missing", "wrong", "extra"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                spec, paths = self._write_chain(root, execution_failed=0, accuracy_failed=0)
+                plugin = root / "execution-plugin.py"
+                plugin.write_text("# immutable execution adapter\n", encoding="utf-8")
+                execution = load_json(paths[3])
+                execution["execution_plugin"] = {
+                    "path": str(plugin), "sha256": sha256_file(plugin),
+                }
+                argv = execution["commands"]["accuracy"]["argv"]
+                argv.extend(["--plugin", str(plugin.resolve())])
+                index = argv.index("--plugin")
+                if mutation == "missing":
+                    del argv[index:index + 2]
+                elif mutation == "wrong":
+                    argv[index + 1] = str((root / "wrong-plugin.py").resolve())
+                else:
+                    argv.extend(["--plugin", str(plugin.resolve())])
+                atomic_write_json(paths[3], execution)
+                with self.assertRaises(WorkflowError) as raised:
+                    finalize(
+                        spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
+                        case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                        requested_physical_device=2,
+                        out_path=root / "acceptance.json",
+                    )
+                self.assertEqual(raised.exception.code, "EVIDENCE_MISMATCH")
 
     def test_execution_command_requires_process_drain_proof(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1517,9 +2091,22 @@ class VerdictTests(unittest.TestCase):
                 finalize(
                     spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
                     case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                    requested_physical_device=2,
                     out_path=root / "acceptance.json",
                 )
             self.assertEqual(raised.exception.code, "EVIDENCE_INCOMPLETE")
+
+    def test_requested_physical_device_is_bound_to_finalizer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            spec, paths = self._write_chain(root, execution_failed=0, accuracy_failed=0)
+            with self.assertRaises(WorkflowError) as raised:
+                finalize(
+                    spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
+                    case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                    requested_physical_device=1, out_path=root / "acceptance.json",
+                )
+            self.assertEqual(raised.exception.code, "EVIDENCE_MISMATCH")
 
     def test_casegen_command_logs_and_process_drain_are_replayed(self):
         for mutation in ("late_log", "missing_drain"):
@@ -1543,6 +2130,7 @@ class VerdictTests(unittest.TestCase):
                     finalize(
                         spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
                         case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                        requested_physical_device=2,
                         out_path=root / "acceptance.json",
                     )
                 self.assertEqual(raised.exception.code, expected)
@@ -1560,6 +2148,7 @@ class VerdictTests(unittest.TestCase):
                 finalize(
                     spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
                     case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                    requested_physical_device=2,
                     out_path=root / "acceptance.json",
                 )
             self.assertEqual(raised.exception.code, "EVIDENCE_DRIFT")
@@ -1585,6 +2174,7 @@ class VerdictTests(unittest.TestCase):
                 finalize(
                     spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
                     case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                    requested_physical_device=2,
                     out_path=root / "acceptance.json",
                 )
             self.assertEqual(raised.exception.code, "EVIDENCE_MISMATCH")
@@ -1596,6 +2186,7 @@ class VerdictTests(unittest.TestCase):
             result = finalize(
                 spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
                 case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                requested_physical_device=2,
                 out_path=root / "acceptance.json",
             )
             self.assertEqual(result["verdict"]["status"], "PLUGIN_ERROR")
@@ -1609,6 +2200,7 @@ class VerdictTests(unittest.TestCase):
             result = finalize(
                 spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
                 case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                requested_physical_device=2,
                 out_path=root / "acceptance.json",
             )
             self.assertEqual(result["verdict"]["status"], "PLUGIN_ERROR")
@@ -1636,6 +2228,7 @@ class VerdictTests(unittest.TestCase):
             result = finalize(
                 spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
                 case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                requested_physical_device=2,
                 out_path=root / "acceptance.json",
             )
             self.assertEqual(result["verdict"]["status"], "PLUGIN_ERROR")
@@ -1653,6 +2246,7 @@ class VerdictTests(unittest.TestCase):
                 finalize(
                     spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
                     case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                    requested_physical_device=2,
                     out_path=root / "acceptance.json",
                 )
             self.assertEqual(raised.exception.code, "EVIDENCE_INCOMPLETE")
@@ -1666,6 +2260,7 @@ class VerdictTests(unittest.TestCase):
             result = finalize(
                 spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
                 case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                requested_physical_device=2,
                 out_path=root / "acceptance.json",
             )
             self.assertEqual(result["verdict"]["status"], "PLUGIN_ERROR")
@@ -1682,6 +2277,7 @@ class VerdictTests(unittest.TestCase):
                 finalize(
                     spec=spec, facts_path=paths[0], build_receipt_path=paths[1],
                     case_receipt_path=paths[2], execution_receipt_path=paths[3],
+                    requested_physical_device=2,
                     out_path=root / "acceptance.json",
                 )
 

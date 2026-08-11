@@ -7,10 +7,28 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .build import _target_delivery, _vendor_root
+from .atk import (
+    _case_filter,
+    _coverage,
+    _generated_case_projection,
+    _task_case_bundle_evidence,
+    _validate_cases,
+)
+from .build import _cache_matches_request, _cache_values, _target_delivery, _vendor_root
 from .contract import spec_digest, validate_spec
 from .source import build_input_anchor
-from .util import WorkflowError, atomic_write_json, load_json, require_plain_file, sha256_file, utc_now
+from .util import (
+    WorkflowError,
+    atomic_write_json,
+    load_json,
+    require_directory,
+    require_plain_file,
+    sha256_file,
+    utc_now,
+)
+
+
+_NO_EXECUTION_BUNDLE = object()
 
 
 def _receipt(path: os.PathLike[str] | str, schema: str) -> tuple[dict[str, Any], str]:
@@ -65,6 +83,269 @@ def _successful_command(value: Any, label: str) -> dict[str, Any]:
     return command
 
 
+def _validated_device_binding(
+    checked: dict[str, Any],
+    cases: dict[str, Any],
+    execution: dict[str, Any],
+    requested_physical_device: int,
+) -> None:
+    binding = _object(execution.get("device"), "execution device binding")
+    expected_binding = {
+        "physical_device": requested_physical_device,
+        "logical_device": checked["runner"]["device"],
+        "runtime_environment": {
+            "ASCEND_RT_VISIBLE_DEVICES": str(requested_physical_device),
+        },
+    }
+    if binding != expected_binding:
+        raise WorkflowError(
+            "EVIDENCE_MISMATCH",
+            "execution device binding differs from the requested physical/logical mapping",
+        )
+
+    commands = _object(execution.get("commands"), "ATK execution commands")
+    if set(commands) != {"accuracy", "performance"}:
+        raise WorkflowError("EVIDENCE_INCOMPLETE", "ATK execution command set is invalid")
+    execution_atk = _object(execution.get("atk"), "execution ATK identity")
+    atk_path = execution_atk.get("path")
+    atk_sha = execution_atk.get("sha256")
+    if not isinstance(atk_path, str) or not isinstance(atk_sha, str):
+        raise WorkflowError("EVIDENCE_INCOMPLETE", "execution ATK file identity is missing")
+    _evidence_file({"path": atk_path, "sha256": atk_sha}, "execution ATK executable")
+    case_data = _object(cases.get("cases"), "ATK caseset identity")
+    cases_path = case_data.get("path")
+    if not isinstance(cases_path, str):
+        raise WorkflowError("EVIDENCE_INCOMPLETE", "ATK caseset path is missing")
+    work_dir = execution.get("work_dir")
+    if not isinstance(work_dir, str) or not work_dir:
+        raise WorkflowError("EVIDENCE_INCOMPLETE", "ATK execution work directory is missing")
+    work = require_directory(work_dir, "ATK execution work directory")
+    plugin_identity = execution.get("execution_plugin")
+    plugin_path: str | None = None
+    if plugin_identity is not None:
+        plugin_path = str(_evidence_file(plugin_identity, "ATK execution plugin"))
+    performance_ids = case_data.get("performance_case_ids")
+    if not isinstance(performance_ids, list) \
+            or any(isinstance(item, bool) or not isinstance(item, int) for item in performance_ids):
+        raise WorkflowError("EVIDENCE_INCOMPLETE", "ATK performance case identities are invalid")
+    expected_environment = {
+        "ASCEND_RT_VISIBLE_DEVICES": str(requested_physical_device),
+    }
+    for key in ("accuracy", "performance"):
+        command = commands.get(key)
+        if key == "performance" and not performance_ids:
+            if command is not None:
+                raise WorkflowError("EVIDENCE_MISMATCH", "unexpected ATK performance command")
+            continue
+        command = _successful_command(command, f"ATK {key}")
+        task = "accuracy" if key == "accuracy" else "performance_device"
+        destination = work / ("accuracy" if key == "accuracy" else "performance")
+        expected_argv = [
+            atk_path, "aclnn", cases_path,
+            "--devices", str(checked["runner"]["device"]),
+            "--task", task, "--output", str(destination),
+            "--timeout", str(checked["runner"]["case_timeout_seconds"]),
+            "--concurrency", "1", "--save_data",
+            "output:bin" if key == "accuracy" else "profile:bin",
+        ]
+        if key == "performance":
+            expected_argv.extend(["--white_list", _case_filter(performance_ids)])
+        if plugin_path is not None:
+            expected_argv.extend(["--plugin", str(Path(plugin_path).resolve())])
+        if command.get("argv") != expected_argv \
+                or command.get("cwd") != str(work) \
+                or command.get("stdout_path") != str(destination / "atk-run.stdout.log") \
+                or command.get("stderr_path") != str(destination / "atk-run.stderr.log"):
+            raise WorkflowError("EVIDENCE_MISMATCH", f"ATK {key} command contract differs")
+        if command.get("environment") != expected_environment:
+            raise WorkflowError("EVIDENCE_MISMATCH", f"ATK {key} child environment differs")
+
+
+def _validated_build_common(
+    checked: dict[str, Any], facts_source: dict[str, Any], build: dict[str, Any]
+) -> dict[str, Any]:
+    if build.get("source_content_anchor") != facts_source.get("content_anchor"):
+        raise WorkflowError("EVIDENCE_MISMATCH", "build source anchor differs from source facts")
+    if build.get("build_input_anchor") != facts_source.get("build_input_anchor"):
+        raise WorkflowError("EVIDENCE_MISMATCH", "build input anchor differs from source facts")
+    staged_source_root = build.get("staged_source_root")
+    if not isinstance(staged_source_root, str) \
+            or build_input_anchor(staged_source_root) != build.get("post_build_input_anchor"):
+        raise WorkflowError("EVIDENCE_DRIFT", "post-build input tree changed after build receipt")
+    _successful_command(build.get("build"), "fresh build")
+    _successful_command(build.get("install"), "fresh package install")
+    package = _object(build.get("package"), "fresh package evidence")
+    package_path = _evidence_file(package, "fresh package")
+    if package_path.stat().st_size <= 0:
+        raise WorkflowError("EVIDENCE_INCOMPLETE", "fresh package is empty")
+    equivalent_paths = package.get("equivalent_paths")
+    if not isinstance(equivalent_paths, list):
+        raise WorkflowError("EVIDENCE_INCOMPLETE", "fresh package equivalent paths are invalid")
+    for index, equivalent in enumerate(equivalent_paths):
+        _evidence_file(equivalent, f"fresh package equivalent {index}")
+        if equivalent.get("sha256") != package.get("sha256"):
+            raise WorkflowError("EVIDENCE_MISMATCH", "fresh package copies differ")
+    cache_path = _evidence_file(build.get("cmake_cache"), "fresh CMake cache")
+    if cache_path.stat().st_size <= 0:
+        raise WorkflowError("EVIDENCE_INCOMPLETE", "fresh CMake cache is empty")
+    try:
+        cache_values = _cache_values(cache_path)
+    except (OSError, UnicodeDecodeError, WorkflowError) as exc:
+        raise WorkflowError("EVIDENCE_INCOMPLETE", "fresh CMake cache is unreadable") from exc
+    vendor = _object(build.get("vendor"), "build vendor evidence")
+    expected_symbols = [
+        f"aclnn{checked['operator']['aclnn_name']}GetWorkspaceSize",
+        f"aclnn{checked['operator']['aclnn_name']}",
+    ]
+    if vendor.get("symbols") != expected_symbols:
+        raise WorkflowError("EVIDENCE_MISMATCH", "fresh vendor symbol binding is invalid")
+    nm_log = _evidence_file(
+        {"path": vendor.get("nm_log_path"), "sha256": vendor.get("nm_log_sha256")},
+        "fresh vendor nm log",
+    )
+    try:
+        nm_symbols = {
+            line.split()[-1]
+            for line in nm_log.read_text(encoding="utf-8", errors="strict").splitlines()
+            if line.split()
+        }
+    except (OSError, UnicodeDecodeError) as exc:
+        raise WorkflowError("EVIDENCE_INCOMPLETE", "fresh vendor nm log is unreadable") from exc
+    if not set(expected_symbols).issubset(nm_symbols):
+        raise WorkflowError("EVIDENCE_MISMATCH", "fresh vendor nm log lacks required symbols")
+    library = _evidence_file(
+        {"path": vendor.get("library_path"), "sha256": vendor.get("library_sha256")},
+        "fresh vendor ELF",
+    )
+    build_target = _object(build.get("target"), "build target evidence")
+    install_root = vendor.get("package_install_root")
+    custom_opp_root = vendor.get("custom_opp_root")
+    if not isinstance(install_root, str) or not isinstance(custom_opp_root, str) \
+            or build_target.get("soc") not in checked["task"]["hardware"] \
+            or build_target.get("build_token") != checked["operator"]["build_token"]:
+        raise WorkflowError("EVIDENCE_MISMATCH", "build target identity is invalid")
+    if _vendor_root(Path(install_root), library) != Path(custom_opp_root).resolve():
+        raise WorkflowError(
+            "EVIDENCE_MISMATCH", "fresh vendor ELF and target delivery use different vendors"
+        )
+    return {
+        "cache_values": cache_values,
+        "vendor": vendor,
+        "library": library,
+        "target": build_target,
+        "install_root": Path(install_root),
+        "custom_opp_root": Path(custom_opp_root),
+    }
+
+
+def _validated_caseset(
+    checked: dict[str, Any],
+    cases: dict[str, Any],
+    execution_bundle: Any = _NO_EXECUTION_BUNDLE,
+) -> dict[str, Any]:
+    case_data = _object(cases.get("cases"), "ATK caseset receipt")
+    cases_path = _evidence_file(case_data, "ATK caseset")
+    generated, ids = _validate_cases(
+        cases_path,
+        checked["operator"]["aclnn_name"],
+        checked["task"]["precision"]["atk_accuracy"],
+    )
+    if ids != case_data.get("ids") or case_data.get("count") != len(generated):
+        raise WorkflowError("EVIDENCE_DRIFT", "generated case identities differ from receipt")
+    coverage_ids = _coverage(generated, checked["task"]["required_cases"])
+    if coverage_ids != case_data.get("required_case_ids"):
+        raise WorkflowError("EVIDENCE_DRIFT", "required-case coverage differs from receipt")
+    performance_ids = [
+        coverage_ids[index] for index in checked["task"]["performance_required_cases"]
+    ]
+    if performance_ids != case_data.get("performance_case_ids"):
+        raise WorkflowError("EVIDENCE_DRIFT", "performance-case coverage differs from receipt")
+    recorded_bundle = cases.get("task_case_bundle")
+    declared_bundle = checked["task"].get("case_bundle")
+    if declared_bundle is None:
+        if recorded_bundle is not None or (
+            execution_bundle is not _NO_EXECUTION_BUNDLE and execution_bundle is not None
+        ):
+            raise WorkflowError("EVIDENCE_MISMATCH", "unexpected task case-bundle evidence")
+    else:
+        recorded_bundle = _object(recorded_bundle, "task case-bundle evidence")
+        root = recorded_bundle.get("root")
+        if not isinstance(root, str):
+            raise WorkflowError("EVIDENCE_INCOMPLETE", "task case-bundle root is missing")
+        actual_bundle = _task_case_bundle_evidence(checked, root)
+        if actual_bundle != recorded_bundle or (
+            execution_bundle is not _NO_EXECUTION_BUNDLE and execution_bundle != recorded_bundle
+        ):
+            raise WorkflowError("EVIDENCE_DRIFT", "task case-bundle evidence changed")
+        if len(generated) != declared_bundle["expected_generated_case_count"] \
+                or _generated_case_projection(generated) \
+                != declared_bundle["generated_projection_sha256"]:
+            raise WorkflowError("EVIDENCE_DRIFT", "task case-bundle projection changed")
+    return case_data
+
+
+def _validated_target_delivery_failure(
+    checked: dict[str, Any],
+    expected_spec: str,
+    facts_source: dict[str, Any],
+    build_receipt_path: os.PathLike[str] | str,
+    case_receipt_path: os.PathLike[str] | str,
+) -> tuple[str, str]:
+    build, build_sha = _receipt(build_receipt_path, "oprunway.build_receipt")
+    cases, cases_sha = _receipt(case_receipt_path, "oprunway.atk_case_receipt")
+    if build.get("spec_sha256") != expected_spec or cases.get("spec_sha256") != expected_spec:
+        raise WorkflowError("EVIDENCE_MISMATCH", "target failure receipts are not bound to this spec")
+    if build.get("status") != "TARGET_DELIVERY_MISSING" or cases.get("status") != "VERIFIED":
+        raise WorkflowError("EVIDENCE_INCOMPLETE", "target failure receipt status is not publishable")
+    case_atk = _object(cases.get("atk"), "casegen ATK identity")
+    if not all(isinstance(case_atk.get(field), str) and case_atk[field]
+               for field in ("version", "sha256")):
+        raise WorkflowError("EVIDENCE_INCOMPLETE", "casegen ATK identity is incomplete")
+    _successful_command(case_atk.get("probe"), "casegen ATK version probe")
+    _successful_command(cases.get("command"), "ATK case generation")
+    case_data = _validated_caseset(checked, cases)
+    count = case_data.get("count")
+    case_ids = case_data.get("ids")
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0 \
+            or not isinstance(case_ids, list) or len(case_ids) != count \
+            or len(case_ids) != len(set(case_ids)) \
+            or any(isinstance(item, bool) or not isinstance(item, int) for item in case_ids):
+        raise WorkflowError("EVIDENCE_INCOMPLETE", "generated case identities are invalid")
+
+    common = _validated_build_common(checked, facts_source, build)
+    target = common["target"]
+    if not _cache_matches_request(
+        common["cache_values"], target["soc"], target["build_token"], checked["build"]["vendor_name"]
+    ):
+        raise WorkflowError("EVIDENCE_MISMATCH", "fresh CMake cache request binding is invalid")
+    binding = _object(build.get("target_binding"), "build target binding evidence")
+    expected_key = f"OP_CACHE_{target['build_token']}_{target['soc']}"
+    expected_type = checked["operator"]["op_type"]
+    actual_binding = common["cache_values"].get(expected_key)
+    if binding.get("key") != expected_key or binding.get("expected") != expected_type \
+            or binding.get("actual") != actual_binding \
+            or actual_binding not in {None, expected_type}:
+        raise WorkflowError("EVIDENCE_MISMATCH", "missing target binding evidence is invalid")
+    if build.get("target_delivery") != []:
+        raise WorkflowError("EVIDENCE_MISMATCH", "missing target receipt contains delivery evidence")
+    recorded_error = _object(build.get("target_delivery_error"), "target delivery error")
+    if recorded_error.get("code") != "TARGET_KERNEL_MISSING" \
+            or not isinstance(recorded_error.get("message"), str) \
+            or not recorded_error["message"]:
+        raise WorkflowError("EVIDENCE_INCOMPLETE", "target delivery error is invalid")
+    try:
+        _target_delivery(
+            common["install_root"], common["custom_opp_root"], target["soc"],
+            target["build_token"], expected_type,
+        )
+    except WorkflowError as exc:
+        if exc.code != "TARGET_KERNEL_MISSING" or str(exc) != recorded_error["message"]:
+            raise WorkflowError("EVIDENCE_DRIFT", "target delivery failure changed after receipt") from exc
+    else:
+        raise WorkflowError("EVIDENCE_DRIFT", "target delivery appeared after failure receipt")
+    return build_sha, cases_sha
+
+
 def _write_markdown(path: Path, acceptance: dict[str, Any]) -> None:
     verdict = acceptance["verdict"]
     evidence = acceptance.get("evidence", {})
@@ -95,11 +376,19 @@ def finalize(
     spec: dict[str, Any],
     facts_path: os.PathLike[str] | str,
     out_path: os.PathLike[str] | str,
+    requested_physical_device: int,
     build_receipt_path: os.PathLike[str] | str | None = None,
     case_receipt_path: os.PathLike[str] | str | None = None,
     execution_receipt_path: os.PathLike[str] | str | None = None,
 ) -> dict[str, Any]:
     checked = validate_spec(spec)
+    if isinstance(requested_physical_device, bool) \
+            or not isinstance(requested_physical_device, int) \
+            or not 0 <= requested_physical_device <= 255:
+        raise WorkflowError(
+            "INVALID_DEVICE",
+            "requested_physical_device must be an integer in [0, 255]",
+        )
     expected_spec = spec_digest(checked)
     facts, facts_sha = _receipt(facts_path, "oprunway.source_facts")
     if facts.get("spec_sha256") != expected_spec:
@@ -112,25 +401,86 @@ def finalize(
     facts_status = facts.get("status")
     if facts_status not in {"READY", "UNSUPPORTED"}:
         raise WorkflowError("EVIDENCE_INCOMPLETE", "source facts status is invalid")
+    facts_target = _object(facts.get("target"), "source facts target")
+    requested_soc = facts_target.get("requested_soc")
+    declared_hardware = facts_target.get("declared_hardware")
+    supported = facts_target.get("supported")
+    if declared_hardware != checked["task"]["hardware"] \
+            or not isinstance(requested_soc, str) or not requested_soc \
+            or type(supported) is not bool \
+            or supported is not (requested_soc in checked["task"]["hardware"]) \
+            or (facts_status == "READY") is not supported:
+        raise WorkflowError("EVIDENCE_MISMATCH", "source facts target admission is invalid")
     if facts_status == "UNSUPPORTED":
         status = "UNSUPPORTED"
         reason = "TARGET_OUTSIDE_TASKDOC"
         message = "请求的 SoC 不在任务书声明硬件集合内；未执行 DUT。"
     else:
-        if not build_receipt_path or not case_receipt_path or not execution_receipt_path:
-            raise WorkflowError("EVIDENCE_INCOMPLETE", "READY target requires build, cases and execution receipts")
+        if not build_receipt_path or not case_receipt_path:
+            raise WorkflowError("EVIDENCE_INCOMPLETE", "READY target requires build and cases receipts")
+        build_preview, _ = _receipt(build_receipt_path, "oprunway.build_receipt")
+        if build_preview.get("target", {}).get("soc") != requested_soc:
+            raise WorkflowError("EVIDENCE_MISMATCH", "build target differs from source facts")
+        if build_preview.get("status") == "TARGET_DELIVERY_MISSING":
+            if execution_receipt_path is not None:
+                raise WorkflowError(
+                    "EVIDENCE_MISMATCH",
+                    "target-delivery failure must stop before ATK execution",
+                )
+            build_sha, cases_sha = _validated_target_delivery_failure(
+                checked, expected_spec, facts_source, build_receipt_path, case_receipt_path
+            )
+            evidence.update(
+                {
+                    "build_receipt": {
+                        "path": str(Path(build_receipt_path).resolve()),
+                        "sha256": build_sha,
+                    },
+                    "case_receipt": {
+                        "path": str(Path(case_receipt_path).resolve()),
+                        "sha256": cases_sha,
+                    },
+                }
+            )
+            status = "DUT_FAIL"
+            reason = "TARGET_DELIVERY_MISSING"
+            message = "任务书要求的目标 SoC fresh build 未产生该算子的设备侧 target delivery。"
+            acceptance = {
+                "schema": "oprunway.acceptance",
+                "schema_version": 1,
+                "created_at": utc_now(),
+                "operator": checked["operator"]["name"],
+                "spec_sha256": expected_spec,
+                "requested_physical_device": requested_physical_device,
+                "verdict": {"status": status, "reason_code": reason, "message": message},
+                "unvalidated_requirements": checked["task"]["unvalidated_requirements"],
+                "evidence": evidence,
+            }
+            target = atomic_write_json(out_path, acceptance)
+            _write_markdown(target.with_suffix(".md"), acceptance)
+            return acceptance
+        if not execution_receipt_path:
+            raise WorkflowError("EVIDENCE_INCOMPLETE", "verified build requires an execution receipt")
         build, build_sha = _receipt(build_receipt_path, "oprunway.build_receipt")
         cases, cases_sha = _receipt(case_receipt_path, "oprunway.atk_case_receipt")
         execution, execution_sha = _receipt(execution_receipt_path, "oprunway.atk_execution_receipt")
+        _validated_device_binding(
+            checked, cases, execution, requested_physical_device
+        )
         for name, value in (("build", build), ("cases", cases), ("execution", execution)):
             if value.get("spec_sha256") != expected_spec:
                 raise WorkflowError("EVIDENCE_MISMATCH", f"{name} receipt is not bound to this spec")
         case_atk = _object(cases.get("atk"), "casegen ATK identity")
         execution_atk = _object(execution.get("atk"), "execution ATK identity")
-        if any(case_atk.get(field) != execution_atk.get(field) for field in ("version", "sha256")) \
+        if any(case_atk.get(field) != execution_atk.get(field)
+               for field in ("path", "version", "sha256")) \
                 or not all(isinstance(case_atk.get(field), str) and case_atk[field]
-                           for field in ("version", "sha256")):
+                           for field in ("path", "version", "sha256")):
             raise WorkflowError("EVIDENCE_MISMATCH", "casegen and execution used different ATK identities")
+        _evidence_file(
+            {"path": case_atk["path"], "sha256": case_atk["sha256"]},
+            "casegen ATK executable",
+        )
         _successful_command(case_atk.get("probe"), "casegen ATK version probe")
         _successful_command(execution_atk.get("probe"), "execution ATK version probe")
         if build.get("status") != "VERIFIED" or cases.get("status") != "VERIFIED" \
@@ -143,67 +493,12 @@ def finalize(
             _successful_command(execution_commands.get("performance"), "ATK performance")
         elif execution_commands.get("performance") is not None:
             raise WorkflowError("EVIDENCE_MISMATCH", "unexpected ATK performance command")
-        if build.get("source_content_anchor") != facts_source.get("content_anchor"):
-            raise WorkflowError("EVIDENCE_MISMATCH", "build source anchor differs from source facts")
-        if build.get("build_input_anchor") != facts_source.get("build_input_anchor"):
-            raise WorkflowError("EVIDENCE_MISMATCH", "build input anchor differs from source facts")
-        staged_source_root = build.get("staged_source_root")
-        if not isinstance(staged_source_root, str) \
-                or build_input_anchor(staged_source_root) != build.get("post_build_input_anchor"):
-            raise WorkflowError("EVIDENCE_DRIFT", "post-build input tree changed after build receipt")
-        _successful_command(build.get("build"), "fresh build")
-        _successful_command(build.get("install"), "fresh package install")
-        package = _object(build.get("package"), "fresh package evidence")
-        package_path = _evidence_file(package, "fresh package")
-        if package_path.stat().st_size <= 0:
-            raise WorkflowError("EVIDENCE_INCOMPLETE", "fresh package is empty")
-        equivalent_paths = package.get("equivalent_paths")
-        if not isinstance(equivalent_paths, list):
-            raise WorkflowError("EVIDENCE_INCOMPLETE", "fresh package equivalent paths are invalid")
-        for index, equivalent in enumerate(equivalent_paths):
-            _evidence_file(equivalent, f"fresh package equivalent {index}")
-            if equivalent.get("sha256") != package.get("sha256"):
-                raise WorkflowError("EVIDENCE_MISMATCH", "fresh package copies differ")
-        cache_path = _evidence_file(build.get("cmake_cache"), "fresh CMake cache")
-        if cache_path.stat().st_size <= 0:
-            raise WorkflowError("EVIDENCE_INCOMPLETE", "fresh CMake cache is empty")
-        vendor = _object(build.get("vendor"), "build vendor evidence")
-        expected_symbols = [
-            f"aclnn{checked['operator']['aclnn_name']}GetWorkspaceSize",
-            f"aclnn{checked['operator']['aclnn_name']}",
-        ]
-        if vendor.get("symbols") != expected_symbols:
-            raise WorkflowError("EVIDENCE_MISMATCH", "fresh vendor symbol binding is invalid")
-        nm_log = _evidence_file(
-            {"path": vendor.get("nm_log_path"), "sha256": vendor.get("nm_log_sha256")},
-            "fresh vendor nm log",
-        )
-        try:
-            nm_symbols = {line.split()[-1] for line in nm_log.read_text(
-                encoding="utf-8", errors="strict"
-            ).splitlines() if line.split()}
-        except (OSError, UnicodeDecodeError) as exc:
-            raise WorkflowError("EVIDENCE_INCOMPLETE", "fresh vendor nm log is unreadable") from exc
-        if not set(expected_symbols).issubset(nm_symbols):
-            raise WorkflowError("EVIDENCE_MISMATCH", "fresh vendor nm log lacks required symbols")
-        library = _evidence_file(
-            {"path": vendor.get("library_path"), "sha256": vendor.get("library_sha256")},
-            "fresh vendor ELF",
-        )
-        build_target = _object(build.get("target"), "build target evidence")
-        install_root = vendor.get("package_install_root")
-        custom_opp_root = vendor.get("custom_opp_root")
-        if not isinstance(install_root, str) or not isinstance(custom_opp_root, str) \
-                or build_target.get("soc") not in checked["task"]["hardware"] \
-                or build_target.get("build_token") != checked["operator"]["build_token"]:
-            raise WorkflowError("EVIDENCE_MISMATCH", "build target identity is invalid")
-        if _vendor_root(Path(install_root), library) != Path(custom_opp_root).resolve():
-            raise WorkflowError(
-                "EVIDENCE_MISMATCH", "fresh vendor ELF and target delivery use different vendors"
-            )
+        common = _validated_build_common(checked, facts_source, build)
+        vendor = common["vendor"]
+        build_target = common["target"]
         actual_delivery = _target_delivery(
-            Path(install_root),
-            Path(custom_opp_root),
+            common["install_root"],
+            common["custom_opp_root"],
             build_target["soc"],
             build_target["build_token"],
             checked["operator"]["op_type"],
@@ -215,8 +510,7 @@ def finalize(
             raise WorkflowError("EVIDENCE_MISMATCH", "executed ELF differs from fresh build ELF")
         if execution.get("case_receipt_sha256") != cases_sha or execution.get("build_receipt_sha256") != build_sha:
             raise WorkflowError("EVIDENCE_MISMATCH", "execution input receipt hashes differ")
-        case_data = _object(cases.get("cases"), "ATK caseset receipt")
-        _evidence_file(case_data, "ATK caseset")
+        case_data = _validated_caseset(checked, cases, execution.get("task_case_bundle"))
         report = _object(execution.get("report"), "ATK execution report")
         _evidence_file(report, "ATK accuracy workbook")
         count = report.get("count")
@@ -372,6 +666,7 @@ def finalize(
         "created_at": utc_now(),
         "operator": checked["operator"]["name"],
         "spec_sha256": expected_spec,
+        "requested_physical_device": requested_physical_device,
         "verdict": {"status": status, "reason_code": reason, "message": message},
         "unvalidated_requirements": checked["task"]["unvalidated_requirements"],
         "evidence": evidence,

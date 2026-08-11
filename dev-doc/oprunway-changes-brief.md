@@ -2,6 +2,80 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-11 · 设备调度下沉到 agent/环境边界
+
+- 文档与 NL 编排契约删除 plugin 自动枚举设备、解析 `npu-smi`、管理 machine lease-domain 和生成设备分配
+  receipt 的职责。Agent 改为在当前目标读取完整 `npu-smi`，选择实际健康空闲卡，在 plugin 外取得预置共享
+  `flock`，锁内紧邻启动前复核，并持锁覆盖整个 formal CLI；全程不 kill、reset、preempt 或覆盖锁。
+- Formal CLI 的公开边界改为显式 `--physical-device N`：只负责映射到逻辑 device 0，并把实际 ATK child
+  environment 写入 execution receipt。不同 A3 空闲卡继续允许并行，同一卡由外部锁互斥；每个算子仍使用
+  独立 fresh session。
+- 无可用卡时不启动 formal CLI；agent 逐候选报告健康、占用或锁冲突事实，等待 Mr.0 指定物理卡。指定不构成
+  强占授权，后续仍须重新检查、加锁、锁内复核并换全新 session。
+- Production 与测试已同步完成减法：CLI/workflow/run_cases/finalizer 只保留单个显式物理卡与 child environment
+  绑定，旧自动候选、`npu-smi` parser、lease-domain、device receipt/runtime check 路径及 `device.py` 均已移除；
+  测试改为覆盖显式参数、逻辑 0 映射、环境净化与 finalizer 重放。
+- 当前 ignored `real-machine.env` 明确把 A3、A5 的 input-cache 配置值分别列入对应 protected roots，故两者只作
+  只读 source 输入并复制进 fresh session，禁止原位 checkout/build/写入；本记录不暴露私有绝对路径，也不把
+  该属性外推到未被配置保护的其它 cache。
+
+## 2026-08-11 · A3 target delivery 正式裁决与官方 GaussianBlur 用例
+
+- 确定性 build receipt 新增严格的 `TARGET_DELIVERY_MISSING` 状态：只有 fresh build/install
+  成功、request cache 精确绑定任务书目标 SoC/算子/vendor、host ACLNN ELF 及双符号存在，
+  但该 SoC 的 device ops-info/binary/kernel delivery 为空时，唯一 finalizer 才能生成
+  `DUT_FAIL / TARGET_DELIVERY_MISSING`。普通构建失败、请求绑定不明或证据不完整仍保持非 DUT
+  workflow error。
+- 同一 plugin 冻结快照为 33 个文件，aggregate SHA-256
+  `5fffcb6d34f5203e3f3989bd2d1bc489e424ffe6f78ffb04312352f4bc8e4c7a`。A3、A5 完整目标回归均为
+  80/80、零跳过，分别用时 63.139 秒、39.543 秒；冻结前后均为 33/33，无残留进程。
+- RemainderTensorTensor A3 fresh formal 已由确定性链生成正式
+  `DUT_FAIL / TARGET_DELIVERY_MISSING`，说明为“任务书要求的目标 SoC fresh build 未产生该算子的
+  设备侧 target delivery。”。Fresh build/install 均成功，cache 绑定
+  `ascend910_93 + floor_mod + oprunway`，host ELF 包含双符号，但 A3 `target_delivery=[]`。
+  Workflow 在 execution 前依契约停止，active 146.19194 秒，acceptance SHA-256 为
+  `63f6e2e8aed322f4762cfb1443bebbe507d728a71038b5f160bc064551bd89de`。
+- Bernoulli A3 在同一冻结版本上正式 `PASS / ALL_REQUIRED_EVIDENCE_PASSED`：19/19 完整
+  通过，性能 3.3351/3.3901/3.3212 us，active 247.294853 秒，acceptance SHA-256 为
+  `d36a311e8b7745307f724db62c60f88d2d18c03068d66d3349b1f2ab985270b6`。
+- GaussianBlur 本轮精确绑定官方 `self_test_case/gaussian_blur` 三文件，调度
+  `Test_001..Test_169` 全部官方 case，并只附加任务书性能 S1；未额外添加 K13。A5 formal
+  中 165/170 执行且精度全通过，S1 为 61.4277 us；官方 CPU golden 对 5 个末维超过
+  OpenCV 512-channel 上限的三维 case 先行失败，因而确定性结果保持
+  `PLUGIN_ERROR / FAILURE_NOT_ATTRIBUTED_TO_DUT`，未冒充 DUT 失败。
+- Roll A3 本轮 Task 1 生成 20/20，但 build 改写了被 build-input anchor 误收录的
+  `third_party/opbase/.git/index`，强门因此正确停为 `PLUGIN_ERROR / SOURCE_MUTATED`。该轮未进入
+  execution、未生成 acceptance，不复用或改写为算子结果。
+
+## 2026-08-10 · 任务书用例冻结与四算子正式验收
+
+- 最终 plugin 只读快照保持 33 个活跃文件，aggregate SHA-256 为
+  `d9afe7c1c7029fc623727897bf9f3766e56e02a5590e8e205a875f256e397cf7`。同一字节在 A3、A5
+  分别完成 74/74 零跳过回归，耗时 62.975 秒、38.909 秒；日志 SHA-256 分别为
+  `6bf11fc82a0e7619938e9bfa031932da458876d74c415a0caa4aa53fb4d2949a` 与
+  `7ca8aaf5b2d23d004e0f1b49426a3c31d865369a969f36ce50cc403415fbe324`。前后 manifest 均为
+  33/33，无 bytecode 或残留进程。
+- GaussianBlur 只使用任务书提供的用例：14 个 required case 覆盖 TC-03～TC-09 及任务书 ROI/step
+  见证，性能只跑 S1（1024×1024、K5、sigma 1.2）；TC-10/TC-11 因当前 ACLNN 调用面不可表达而保持
+  `UNVALIDATED`。`Size() + sigma=1.5` 推导 K13 来自任务书 TC-06 公式，不是源码 example 或额外自拟用例。
+- Bernoulli A3 正式 `PASS / ALL_REQUIRED_EVIDENCE_PASSED`：19/19 完整通过，性能
+  3.32015/3.37815/3.3681 us，主动耗时 248.450111 秒，acceptance SHA-256 为
+  `f110f1a0b319987ae996e93320755ced4e061a9f587f98f5c5b65acd09c6252b`。
+- Roll A3 正式 `PASS / ALL_REQUIRED_EVIDENCE_PASSED`：20/20 完整通过，两个 empty-dims case 均
+  实际到达 fresh DUT，主动耗时 195.845435 秒，acceptance SHA-256 为
+  `3a57f31a3d582787a452f857191c9c0890d2bf843eed9c3167f159cbde022767`。
+- RemainderTensorTensor A3 确定性 artifact 为 `PLUGIN_ERROR / BUILD_TARGET_UNPROVEN`，主动耗时
+  137.557022 秒；源码只声明 `ascend910b`，fresh A3 build 找不到 `ascend910_93/floor_mod` target
+  binding，因此没有 build/execution receipt 或正式 acceptance，未人工升级为 DUT_FAIL。
+- GaussianBlur A5 确定性 artifact 为 `PLUGIN_ERROR / FAILURE_NOT_ATTRIBUTED_TO_DUT`，主动耗时
+  262.881483 秒；TC-06 推导的 K13 返回 ACL 161002 且支持列表不含 13，任务书 S1 K5 性能则成功取得
+  61.09605 us 与成对 profiler CSV。确定性链未独立归因该 execution failure，因此没有正式
+  acceptance，也未人工升级为 DUT_FAIL。
+- 调用方 header 的 `aclnnGaussianBlur` 是十参数 ABI，而 ATK 26.5.14 会按同名符号复用标准四参数
+  stage-2 cache；修复只留在 GaussianBlur witness 边界，以固定 header ABI 从已加载 vendor 库独立绑定，
+  未改通用 core、ATK 或 DUT。Agent/skill 同时补齐任务书权威、声明式优先、witness 优先、第二个独立实例
+  才晋升，以及 `atk_aclnn + cann_ops_package_v1` 的公开能力边界。用户明确停止 Grok 校验，模型输出未应用。
+
 ## 2026-08-10 · ATK 单路径最终冻结与四算子正式验收
 
 - 最终 plugin 只读快照保持 33 个活跃文件，aggregate SHA-256 为

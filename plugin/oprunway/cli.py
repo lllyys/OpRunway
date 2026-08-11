@@ -17,6 +17,16 @@ def _spec(path: str) -> dict[str, Any]:
     return validate_spec(load_json(path))
 
 
+def _physical_device(value: str) -> int:
+    try:
+        device = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("physical device must be an integer in [0, 255]") from exc
+    if not 0 <= device <= 255:
+        raise argparse.ArgumentTypeError("physical device must be an integer in [0, 255]")
+    return device
+
+
 def _attempt(args: argparse.Namespace, exc: WorkflowError, spec_sha256: str | None) -> None:
     out = getattr(args, "out", None)
     if not out and getattr(args, "session_dir", None):
@@ -27,7 +37,12 @@ def _attempt(args: argparse.Namespace, exc: WorkflowError, spec_sha256: str | No
             out = str(session / "reports" / "attempt.json")
     if not out:
         return
-    if exc.code.startswith("INVALID_") or exc.code in {"TASKDOC_DRIFT", "SESSION_PATH_UNSUPPORTED"}:
+    if exc.code.startswith("INVALID_") or exc.code in {
+        "TASKDOC_DRIFT",
+        "TASK_CASE_BUNDLE_MISMATCH",
+        "TASK_CASE_BUNDLE_DRIFT",
+        "SESSION_PATH_UNSUPPORTED",
+    }:
         status = "NEEDS_INPUT"
     elif exc.code == "UNSUPPORTED_TARGET":
         status = "UNSUPPORTED"
@@ -70,9 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
     accept.add_argument("--design", required=True)
     accept.add_argument("--generator")
     accept.add_argument("--execution-plugin")
+    accept.add_argument("--task-cases-root")
     accept.add_argument("--atk-bin", default="atk")
     accept.add_argument("--target-soc", required=True)
     accept.add_argument("--session-dir", required=True)
+    accept.add_argument("--physical-device", required=True, type=_physical_device)
     return parser
 
 
@@ -90,9 +107,11 @@ def main(argv: list[str] | None = None) -> int:
             design_path=args.design,
             generator_path=args.generator,
             execution_plugin=args.execution_plugin,
+            task_cases_root=args.task_cases_root,
             atk_bin=args.atk_bin,
             target_soc=args.target_soc,
             session_dir=args.session_dir,
+            physical_device=args.physical_device,
         )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         status = result["acceptance"]["verdict"]["status"]

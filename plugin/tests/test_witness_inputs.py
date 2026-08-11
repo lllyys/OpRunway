@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import importlib.util
 import json
 import os
@@ -14,7 +15,7 @@ from unittest.mock import patch
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT))
 
-from oprunway.atk import _coverage_projection, generate_cases
+from oprunway.atk import _coverage_projection, _generated_case_projection, generate_cases
 from oprunway.contract import validate_spec
 from oprunway.util import sha256_file
 
@@ -26,6 +27,7 @@ TASKDOC_NAMES = {
     "roll": "aclnnRoll_task_doc.md",
     "gaussian_blur": "GaussianBlur_task_doc.md",
 }
+GAUSSIAN_CASES_ENV = "OPRUNWAY_GAUSSIAN_BLUR_CASES_ROOT"
 
 
 class WitnessInputTests(unittest.TestCase):
@@ -52,6 +54,20 @@ class WitnessInputTests(unittest.TestCase):
         for name, filename in TASKDOC_NAMES.items():
             spec = json.loads((WITNESSES / name / "spec.json").read_text(encoding="utf-8"))
             self.assertEqual(sha256_file(taskdocs / filename), spec["task"]["taskdoc_sha256"])
+
+    @unittest.skipUnless(os.environ.get(GAUSSIAN_CASES_ENV), "requires official GaussianBlur cases")
+    def test_gaussian_official_case_bundle_matches_bound_hashes(self):
+        root = Path(os.environ[GAUSSIAN_CASES_ENV])
+        spec = json.loads((WITNESSES / "gaussian_blur" / "spec.json").read_text(encoding="utf-8"))
+        bundle = spec["task"]["case_bundle"]
+        self.assertEqual(bundle["case_count"], 169)
+        self.assertEqual(bundle["expected_generated_case_count"], 170)
+        self.assertEqual(
+            {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()},
+            {item["path"] for item in bundle["files"]},
+        )
+        for item in bundle["files"]:
+            self.assertEqual(sha256_file(root / item["path"]), item["sha256"])
 
     @unittest.skipUnless(os.environ.get("OPRUNWAY_ATK_BIN"), "requires prepared ATK target environment")
     def test_bernoulli_reference_restores_declared_dtype_after_benchmark_promotion(self):
@@ -201,6 +217,122 @@ class WitnessInputTests(unittest.TestCase):
         original_destroy(destroyed[0])
 
     @unittest.skipUnless(os.environ.get("OPRUNWAY_ATK_BIN"), "requires prepared ATK target environment")
+    def test_gaussian_stage2_binding_bypasses_atk_four_argument_cache(self):
+        plugin_path = WITNESSES / "gaussian_blur" / "execution_plugin.py"
+        module_spec = importlib.util.spec_from_file_location("oprunway_gaussian_witness_test", plugin_path)
+        self.assertIsNotNone(module_spec)
+        self.assertIsNotNone(module_spec.loader)
+        module = importlib.util.module_from_spec(module_spec)
+        with patch.dict(sys.modules, {"cv2": SimpleNamespace()}):
+            module_spec.loader.exec_module(module)
+
+        tensor_pointer = ctypes.POINTER(module.acl_wrapper.AclTensor)()
+        int_array_pointer = ctypes.POINTER(module.acl_wrapper.AclIntArray)()
+        raw_args = [
+            tensor_pointer,
+            int_array_pointer,
+            ctypes.c_double(1.5),
+            ctypes.c_double(1.5),
+            ctypes.c_int64(1),
+            tensor_pointer,
+        ]
+        wide_stream = 0x123456789ABC
+        observed_streams = []
+        callback_type = ctypes.CFUNCTYPE(ctypes.c_int, *module._GAUSSIAN_BLUR_STAGE2_TYPES)
+
+        @callback_type
+        def stage2(_workspace, _size, _executor, _src, _ksize, _sigma_x, _sigma_y, _border, _dst, stream):
+            observed_streams.append(stream)
+            return 0
+
+        def forbidden_bind(*_args, **_kwargs):
+            raise AssertionError("ATK's name-keyed binding cache must not be reused")
+
+        library = SimpleNamespace(aclnnGaussianBlur=stage2)
+        manager = SimpleNamespace(
+            lib_name="fresh-vendor",
+            get_lib=lambda name: library if name == "fresh-vendor" else None,
+            bind_function=forbidden_bind,
+        )
+        with patch.object(module.acl_wrapper, "aclnn", manager):
+            function = module._bind_stage2(raw_args)
+            result = function(
+                ctypes.c_void_p(),
+                ctypes.c_uint64(0),
+                ctypes.POINTER(module.OpExecutor)(),
+                *raw_args,
+                ctypes.c_void_p(wide_stream),
+            )
+            self.assertEqual(result.value, module.AclnnStatus.ACLNN_SUCCESS)
+            self.assertEqual(observed_streams, [wide_stream])
+            with self.assertRaisesRegex(TypeError, "exactly six"):
+                module._bind_stage2(raw_args[:-1])
+            with self.assertRaisesRegex(TypeError, "argument 2"):
+                module._bind_stage2([*raw_args[:2], ctypes.c_float(1.5), *raw_args[3:]])
+
+            class Backend:
+                def __init__(self):
+                    self.workspace = ctypes.c_void_p()
+                    self.workspace_size = ctypes.c_uint64(0)
+                    self.executor = ctypes.POINTER(module.OpExecutor)()
+                    self.stream = ctypes.c_void_p(wide_stream)
+                    self.workspace_called = False
+                    self.input_args = [
+                        module.AclTensorStruct(tensor_pointer, 0, None, 0),
+                        int_array_pointer,
+                        ctypes.c_double(1.5),
+                        ctypes.c_double(1.5),
+                        ctypes.c_int64(1),
+                        module.AclTensorStruct(tensor_pointer, 0, None, 0),
+                    ]
+
+                def aclnn_x_get_workspace_size(self):
+                    self.workspace_called = True
+
+            aclnn = module.GaussianBlurAclnn.__new__(module.GaussianBlurAclnn)
+            aclnn.backend = Backend()
+            aclnn()
+            self.assertTrue(aclnn.backend.workspace_called)
+            self.assertEqual(observed_streams, [wide_stream, wide_stream])
+
+        null_manager = SimpleNamespace(
+            lib_name="null-vendor",
+            get_lib=lambda _name: SimpleNamespace(aclnnGaussianBlur=ctypes.c_void_p()),
+            bind_function=forbidden_bind,
+        )
+        with patch.object(module.acl_wrapper, "aclnn", null_manager):
+            with self.assertRaisesRegex(AttributeError, "null aclnnGaussianBlur"):
+                module._bind_stage2(raw_args)
+
+        observed = []
+
+        def golden(image, kx, ky, sigma_x, sigma_y):
+            observed.append((image.shape, kx, ky, sigma_x, sigma_y))
+            return [image + 1.0]
+
+        module._OFFICIAL_GOLDEN = golden
+        image = module.np.zeros((2, 3, 1025), dtype=module.np.float32)
+        output = module._official_reference(image, 5, 3, 1.2, 0.8)
+        self.assertEqual(
+            observed,
+            [
+                ((2, 3, 512), 5, 3, 1.2, 0.8),
+                ((2, 3, 512), 5, 3, 1.2, 0.8),
+                ((2, 3, 1), 5, 3, 1.2, 0.8),
+            ],
+        )
+        self.assertEqual(output.shape, image.shape)
+        self.assertTrue(module.np.array_equal(output, image + 1.0))
+
+        observed.clear()
+        planar = module.np.zeros((4, 7), dtype=module.np.float32)
+        self.assertTrue(module.np.array_equal(
+            module._official_reference(planar, 3, 3, 0.0, 0.0),
+            planar + 1.0,
+        ))
+        self.assertEqual(observed, [((4, 7), 3, 3, 0.0, 0.0)])
+
+    @unittest.skipUnless(os.environ.get("OPRUNWAY_ATK_BIN"), "requires prepared ATK target environment")
     def test_atk_generates_complete_cases_for_all_witnesses(self):
         with tempfile.TemporaryDirectory() as temporary:
             out = Path(temporary)
@@ -212,6 +344,9 @@ class WitnessInputTests(unittest.TestCase):
                     atk_bin=os.environ["OPRUNWAY_ATK_BIN"],
                     design_path=root / "design.yaml",
                     generator_path=root / "generator.py",
+                    task_cases_root=(
+                        os.environ.get(GAUSSIAN_CASES_ENV) if name == "gaussian_blur" else None
+                    ),
                     work_dir=out / f"{name}-work",
                     out_path=out / f"{name}.json",
                 )
@@ -222,6 +357,19 @@ class WitnessInputTests(unittest.TestCase):
                 )
                 cases = json.loads(Path(receipt["cases"]["path"]).read_text(encoding="utf-8"))
                 if name == "gaussian_blur":
+                    bundle = spec["task"]["case_bundle"]
+                    self.assertEqual(len(cases), 170)
+                    by_name = {case["name"]: case for case in cases}
+                    self.assertEqual(len(by_name), 170)
+                    self.assertEqual(
+                        set(by_name),
+                        {f"Test_{index:03d}" for index in range(1, 170)} | {"Taskdoc_S1"},
+                    )
+                    self.assertEqual(by_name["Taskdoc_S1"]["inputs"][0]["shape"], [1024, 1024])
+                    self.assertEqual(
+                        _generated_case_projection(cases),
+                        bundle["generated_projection_sha256"],
+                    )
                     self.assertTrue(all(
                         isinstance(case["inputs"][1], list) and len(case["inputs"][1]) == 2
                         for case in cases

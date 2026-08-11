@@ -41,6 +41,45 @@ def _copy_input(source: os.PathLike[str] | str, destination: Path, label: str) -
     return destination.resolve()
 
 
+def _copy_case_bundle(
+    source: os.PathLike[str] | str | None,
+    destination: Path,
+    declaration: dict[str, Any] | None,
+) -> Path | None:
+    if declaration is None:
+        if source is not None:
+            raise WorkflowError("INVALID_INPUT", "task cases root was provided without a case-bundle spec")
+        return None
+    if source is None:
+        raise WorkflowError("INVALID_INPUT", "task.case_bundle requires --task-cases-root")
+    origin = require_directory(source, "task case bundle root")
+    actual: dict[str, Path] = {}
+    for path in origin.rglob("*"):
+        relative = path.relative_to(origin).as_posix()
+        if path.is_symlink():
+            raise WorkflowError("INVALID_INPUT", f"task case bundle contains a symlink: {relative}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise WorkflowError("INVALID_INPUT", f"task case bundle contains a non-file: {relative}")
+        actual[relative] = path
+    expected = {item["path"]: item["sha256"] for item in declaration["files"]}
+    if set(actual) != set(expected):
+        raise WorkflowError(
+            "TASK_CASE_BUNDLE_MISMATCH",
+            f"task case bundle files differ: expected {sorted(expected)}, got {sorted(actual)}",
+        )
+    destination.mkdir(parents=True)
+    for relative in sorted(expected):
+        source_path = require_plain_file(actual[relative], f"task case file {relative}")
+        if sha256_file(source_path) != expected[relative]:
+            raise WorkflowError("TASK_CASE_BUNDLE_DRIFT", f"task case file changed: {relative}")
+        copied = _copy_input(source_path, destination / relative, f"task case file {relative}")
+        if sha256_file(copied) != expected[relative]:
+            raise WorkflowError("TASK_CASE_BUNDLE_DRIFT", f"copied task case file changed: {relative}")
+    return destination.resolve()
+
+
 def run_acceptance(
     *,
     spec: dict[str, Any],
@@ -50,11 +89,16 @@ def run_acceptance(
     atk_bin: os.PathLike[str] | str,
     target_soc: str,
     session_dir: os.PathLike[str] | str,
+    physical_device: int,
     generator_path: os.PathLike[str] | str | None = None,
     execution_plugin: os.PathLike[str] | str | None = None,
+    task_cases_root: os.PathLike[str] | str | None = None,
 ) -> dict[str, Any]:
     checked = validate_spec(spec)
     target_soc = validate_soc(target_soc)
+    if isinstance(physical_device, bool) or not isinstance(physical_device, int) \
+            or not 0 <= physical_device <= 255:
+        raise WorkflowError("INVALID_DEVICE", "physical_device must be an integer in [0, 255]")
     origin = require_directory(source_root, "caller source root")
     session = Path(session_dir)
     if session.exists():
@@ -120,7 +164,7 @@ def run_acceptance(
                     pass
 
     try:
-        def materialize_inputs() -> tuple[Path, Path, Path | None, Path | None]:
+        def materialize_inputs() -> tuple[Path, Path, Path | None, Path | None, Path | None]:
             taskdoc_copy = _copy_input(taskdoc_path, inputs / "taskdoc.md", "task document")
             original_design = require_plain_file(design_path, "ATK design file")
             design_suffix = original_design.suffix or ".yaml"
@@ -137,9 +181,16 @@ def run_acceptance(
                 _copy_input(execution_plugin, inputs / "execution_plugin.py", "ATK execution plugin")
                 if execution_plugin else None
             )
-            return taskdoc_copy, design_copy, generator_copy, plugin_copy
+            task_cases_copy = _copy_case_bundle(
+                task_cases_root,
+                inputs / "task-cases",
+                checked["task"].get("case_bundle"),
+            )
+            return taskdoc_copy, design_copy, generator_copy, plugin_copy, task_cases_copy
 
-        taskdoc, design, generator, plugin = timed("materialize_inputs", materialize_inputs)
+        taskdoc, design, generator, plugin, task_cases = timed(
+            "materialize_inputs", materialize_inputs
+        )
 
         facts_path = receipts / "source_facts.json"
         facts = timed(
@@ -158,7 +209,12 @@ def run_acceptance(
             remaining()
             acceptance = timed(
                 "verdict",
-                lambda: finalize(spec=checked, facts_path=facts_path, out_path=pending_acceptance_path),
+                lambda: finalize(
+                    spec=checked,
+                    facts_path=facts_path,
+                    requested_physical_device=physical_device,
+                    out_path=pending_acceptance_path,
+                ),
             )
         else:
             staged = session / "staging" / "source"
@@ -176,13 +232,14 @@ def run_acceptance(
                     atk_bin=atk_bin,
                     design_path=design,
                     generator_path=generator,
+                    task_cases_root=task_cases,
                     work_dir=session / "atk-casegen",
                     out_path=case_path,
                     timeout_seconds=stage_timeout(),
                 ),
             )
             build_path = receipts / "build.json"
-            timed(
+            build_receipt = timed(
                 "build",
                 lambda: build_operator(
                     spec=checked,
@@ -195,32 +252,53 @@ def run_acceptance(
                     timeout_seconds=stage_timeout(),
                 ),
             )
-            execution_path = receipts / "execution.json"
-            timed(
-                "atk_execution",
-                lambda: run_cases(
-                    spec=checked,
-                    atk_bin=atk_bin,
-                    case_receipt_path=case_path,
-                    build_receipt_path=build_path,
-                    execution_plugin=plugin,
-                    work_dir=session / "atk-execution",
-                    out_path=execution_path,
-                    timeout_seconds=stage_timeout(),
-                ),
-            )
-            remaining()
-            acceptance = timed(
-                "verdict",
-                lambda: finalize(
-                    spec=checked,
-                    facts_path=facts_path,
-                    build_receipt_path=build_path,
-                    case_receipt_path=case_path,
-                    execution_receipt_path=execution_path,
-                    out_path=pending_acceptance_path,
-                ),
-            )
+            if build_receipt.get("status") == "TARGET_DELIVERY_MISSING":
+                remaining()
+                acceptance = timed(
+                    "verdict",
+                    lambda: finalize(
+                        spec=checked,
+                        facts_path=facts_path,
+                        build_receipt_path=build_path,
+                        case_receipt_path=case_path,
+                        requested_physical_device=physical_device,
+                        out_path=pending_acceptance_path,
+                    ),
+                )
+            else:
+                execution_path = receipts / "execution.json"
+                runtime_environment = {
+                    "ASCEND_RT_VISIBLE_DEVICES": str(physical_device),
+                }
+                timed(
+                    "atk_execution",
+                    lambda: run_cases(
+                        spec=checked,
+                        atk_bin=atk_bin,
+                        case_receipt_path=case_path,
+                        build_receipt_path=build_path,
+                        execution_plugin=plugin,
+                        task_cases_root=task_cases,
+                        physical_device=physical_device,
+                        runtime_environment=runtime_environment,
+                        work_dir=session / "atk-execution",
+                        out_path=execution_path,
+                        timeout_seconds=stage_timeout(),
+                    ),
+                )
+                remaining()
+                acceptance = timed(
+                    "verdict",
+                    lambda: finalize(
+                        spec=checked,
+                        facts_path=facts_path,
+                        build_receipt_path=build_path,
+                        case_receipt_path=case_path,
+                        execution_receipt_path=execution_path,
+                        requested_physical_device=physical_device,
+                        out_path=pending_acceptance_path,
+                    ),
+                )
         verdict_status = acceptance.get("verdict", {}).get("status")
         if verdict_status not in _FORMAL_VERDICTS:
             raise WorkflowError(
@@ -253,8 +331,10 @@ def run_acceptance(
                 "design_sha256": sha256_file(design),
                 "generator_sha256": sha256_file(generator) if generator else None,
                 "execution_plugin_sha256": sha256_file(plugin) if plugin else None,
+                "task_case_bundle": checked["task"].get("case_bundle"),
             },
             "timings_seconds": timings,
+            "requested_physical_device": physical_device,
             "acceptance": {
                 "path": str(acceptance_path),
                 "sha256": sha256_file(acceptance_path),
@@ -279,6 +359,7 @@ def run_acceptance(
                 "failed_stage": current_stage,
                 "error": {"code": exc.code, "message": str(exc)},
                 "timings_seconds": timings,
+                "requested_physical_device": physical_device,
             },
         )
         raise
@@ -299,6 +380,7 @@ def run_acceptance(
                 "failed_stage": current_stage,
                 "error": {"code": wrapped.code, "message": str(wrapped)},
                 "timings_seconds": timings,
+                "requested_physical_device": physical_device,
             },
         )
         raise wrapped from exc

@@ -140,6 +140,47 @@ def _cache_values(path: Path) -> dict[str, str]:
     return values
 
 
+def _cache_matches_request(
+    values: dict[str, str], soc: str, token: str, vendor: str
+) -> bool:
+    selected_tokens = {
+        item.strip()
+        for field in ("ASCEND_OP_NAME", "COMPILED_OPS", "NEED_COMPILE_OPS")
+        for item in re.split(r"[;,]", values.get(field, ""))
+        if item.strip()
+    }
+    return (
+        values.get("ASCEND_COMPUTE_UNIT") == soc
+        and values.get("VENDOR_NAME") == vendor
+        and token in selected_tokens
+    )
+
+
+def _find_requested_cache(
+    source_root: Path,
+    before: dict[str, tuple[int, int, str]],
+    soc: str,
+    token: str,
+    vendor: str,
+) -> tuple[Path, dict[str, str]]:
+    after = _snapshot_files(source_root, "CMakeCache.txt")
+    candidates = _changed_files(before, after)
+    accepted: list[tuple[Path, dict[str, str]]] = []
+    for candidate in candidates:
+        try:
+            values = _cache_values(candidate)
+        except (OSError, UnicodeDecodeError, WorkflowError):
+            continue
+        if _cache_matches_request(values, soc, token, vendor):
+            accepted.append((candidate.resolve(), values))
+    if len(accepted) != 1:
+        raise WorkflowError(
+            "BUILD_TARGET_UNPROVEN",
+            f"expected one changed CMakeCache request soc={soc} op={token}, found {len(accepted)}",
+        )
+    return accepted[0]
+
+
 def _find_cache(
     source_root: Path,
     before: dict[str, tuple[int, int, str]],
@@ -148,26 +189,13 @@ def _find_cache(
     op_type: str,
     vendor: str,
 ) -> Path:
-    after = _snapshot_files(source_root, "CMakeCache.txt")
-    candidates = _changed_files(before, after)
-    accepted: list[Path] = []
-    for candidate in candidates:
-        try:
-            values = _cache_values(candidate)
-        except (OSError, UnicodeDecodeError, WorkflowError):
-            continue
-        if (
-            values.get("ASCEND_COMPUTE_UNIT") == soc
-            and values.get(f"OP_CACHE_{token}_{soc}") == op_type
-            and values.get("VENDOR_NAME") == vendor
-        ):
-            accepted.append(candidate.resolve())
-    if len(accepted) != 1:
+    cache, values = _find_requested_cache(source_root, before, soc, token, vendor)
+    if values.get(f"OP_CACHE_{token}_{soc}") != op_type:
         raise WorkflowError(
             "BUILD_TARGET_UNPROVEN",
-            f"expected one changed CMakeCache binding soc={soc} op={token}, found {len(accepted)}",
+            f"expected one changed CMakeCache binding soc={soc} op={token}, found 0",
         )
-    return accepted[0]
+    return cache
 
 
 def _target_delivery(
@@ -359,17 +387,31 @@ def build_operator(
     symbols = [f"aclnn{operator['aclnn_name']}GetWorkspaceSize", f"aclnn{operator['aclnn_name']}"]
     library, nm_log = _discover_library(destination, symbols, evidence, deadline)
     custom_opp_root = _vendor_root(destination, library)
-    cache = _find_cache(
+    cache, cache_values = _find_requested_cache(
         source,
         caches_before,
         target_soc,
         operator["build_token"],
-        operator["op_type"],
         build["vendor_name"],
     )
-    delivery = _target_delivery(
-        destination, custom_opp_root, target_soc, operator["build_token"], operator["op_type"]
-    )
+    binding_key = f"OP_CACHE_{operator['build_token']}_{target_soc}"
+    binding_value = cache_values.get(binding_key)
+    delivery_error: dict[str, str] | None = None
+    try:
+        delivery = _target_delivery(
+            destination, custom_opp_root, target_soc, operator["build_token"], operator["op_type"]
+        )
+    except WorkflowError as exc:
+        if exc.code != "TARGET_KERNEL_MISSING" or binding_value not in {None, operator["op_type"]}:
+            raise
+        delivery = []
+        delivery_error = {"code": exc.code, "message": str(exc)}
+    if delivery_error is None and binding_value != operator["op_type"]:
+        raise WorkflowError(
+            "BUILD_TARGET_UNPROVEN",
+            f"expected one changed CMakeCache binding soc={target_soc} "
+            f"op={operator['build_token']}, found 0",
+        )
     source_anchor_after = content_anchor(source, operator["source_subdir"])
     if source_anchor_after != source_anchor_before:
         raise WorkflowError("SOURCE_MUTATED", "build changed bytes inside the DUT source scope")
@@ -382,7 +424,7 @@ def build_operator(
     receipt = {
         "schema": "oprunway.build_receipt",
         "schema_version": 1,
-        "status": "VERIFIED",
+        "status": "TARGET_DELIVERY_MISSING" if delivery_error else "VERIFIED",
         "created_at": utc_now(),
         "spec_sha256": spec_digest(checked),
         "source_content_anchor": source_anchor_before,
@@ -401,6 +443,11 @@ def build_operator(
             ],
         },
         "cmake_cache": {"path": str(cache), "sha256": sha256_file(cache)},
+        "target_binding": {
+            "key": binding_key,
+            "expected": operator["op_type"],
+            "actual": binding_value,
+        },
         "vendor": {
             "package_install_root": str(destination),
             "custom_opp_root": str(custom_opp_root),
@@ -411,6 +458,7 @@ def build_operator(
             "nm_log_sha256": sha256_file(nm_log),
         },
         "target_delivery": delivery,
+        "target_delivery_error": delivery_error,
     }
     atomic_write_json(out_path, receipt)
     return receipt

@@ -22,8 +22,8 @@ from .util import (
 ANCHOR_SCHEMA = "oprunway.source_content_anchor"
 ANCHOR_VERSION = 1
 BUILD_ANCHOR_SCHEMA = "oprunway.build_input_anchor"
-STAGING_ROOT_IGNORES = frozenset({".git", ".oprunway", "build", "build_out", "reports"})
-STAGING_ANYWHERE_IGNORES = frozenset({"__pycache__", ".pytest_cache"})
+STAGING_ROOT_IGNORES = frozenset({".oprunway", "build", "build_out", "reports"})
+STAGING_ANYWHERE_IGNORES = frozenset({".git", "__pycache__", ".pytest_cache"})
 
 
 def is_transport_artifact(name: str) -> bool:

@@ -10,13 +10,14 @@ import secrets
 import subprocess
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
 _COMMAND_TOKEN_ENV = "OPRUNWAY_COMMAND_TOKEN"
+_RECEIPT_ENV_KEYS = ("ASCEND_RT_VISIBLE_DEVICES",)
 
 
 class WorkflowError(RuntimeError):
@@ -120,6 +121,7 @@ class CommandReceipt:
     stdout_sha256: str
     stderr_sha256: str
     processes_drained: bool
+    environment: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -281,6 +283,10 @@ def run_command(
     command_token = secrets.token_hex(16)
     child_env = os.environ.copy() if env is None else dict(env)
     child_env[_COMMAND_TOKEN_ENV] = command_token
+    environment_projection = {
+        key: child_env[key] for key in _RECEIPT_ENV_KEYS
+        if isinstance(child_env.get(key), str) and child_env[key]
+    }
     _require_command_isolation(command_token)
     processes_drained = False
     termination_error: WorkflowError | None = None
@@ -357,4 +363,5 @@ def run_command(
         stdout_sha256=sha256_file(stdout_file),
         stderr_sha256=sha256_file(stderr_file),
         processes_drained=processes_drained,
+        environment=environment_projection,
     )
