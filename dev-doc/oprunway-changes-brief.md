@@ -2,6 +2,30 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-11 · 显式设备边界与四算子 r6 正式终态
+
+- 已推送 checkpoint `a47c484` 到 `origin/worktree-oprunway22`。正式冻结包含 33 个活跃文件，MANIFEST
+  SHA-256 为 `d5357d7347fb7db518203bf393c58f947371581f6fbdd3ed42be52b0f89cca84`；active plugin 与冻结内容
+  逐文件一致。A3/A5 分别完成 87/87 零跳过目标回归，耗时 63.530/38.104 秒，结束后残留进程均为 0。
+- 四轮 formal 均使用上述同一冻结版本、fresh session、只读内容寻址 source cache、prepared ATK 26.5.14
+  和外部非阻塞 `flock`。不同 A3 物理卡并行执行；每轮在锁内紧邻启动前复核健康与进程，CLI 只接收显式
+  physical device 并映射到 logical 0，结束后锁均释放且无残留 NPU/ATK 进程。
+- Bernoulli A3 physical 1 正式 `PASS / ALL_REQUIRED_EVIDENCE_PASSED`：19/19 accuracy 完整通过，性能
+  3.32615/3.3531/3.32825 us，active 251.539394 秒；acceptance SHA-256 为
+  `605e2bfcf2d80b2b7781f8dc1124bee58a1a0bfe7ea4bce7797d9469a109a0da`。
+- Roll A3 physical 2 正式 `PASS / ALL_REQUIRED_EVIDENCE_PASSED`：20/20 完整通过，active 192.824173 秒；
+  acceptance SHA-256 为 `4e55cb21f505b3f08e4757892c3d107d86e7e8e39d012ee3636cdec6a689a02c`。
+- RemainderTensorTensor A3 physical 2 正式 `DUT_FAIL / TARGET_DELIVERY_MISSING`：fresh build/install 与 host
+  ACLNN 双符号成立，但 `ascend910_93` target delivery 为空；active 140.625876 秒，acceptance SHA-256 为
+  `ca9aadb9da5dfe2588e7427f23ffae9855ee41a293ae7c69b7127f7ffb0de63a`。它按门在 execution 前停止，未把
+  build/adapter/环境问题伪装成运行时 DUT 输出失败。
+- GaussianBlur A5 physical 1 正式 `PASS / ALL_REQUIRED_EVIDENCE_PASSED`：任务书官方
+  `Test_001..Test_169 + Taskdoc_S1` 共 170/170 完整通过，五个末维大于 512 的 case 都有 CPU/DUT 输出并
+  精度通过；S1 为 61.405600 us，active 592.630569 秒，acceptance SHA-256 为
+  `86004de648e619d6acd034ae1753ce8f962c461e2ceda769040602985f958c99`。
+- 用户明确要求本轮不运行 audit-fix；因此没有用模型审查结果替代目标机回归或正式证据。语法检查、补丁格式
+  检查、双目标回归、冻结清单和四份 finalizer 产物均已完成。
+
 ## 2026-08-11 · 设备调度下沉到 agent/环境边界
 
 - 文档与 NL 编排契约删除 plugin 自动枚举设备、解析 `npu-smi`、管理 machine lease-domain 和生成设备分配
