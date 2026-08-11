@@ -25,6 +25,8 @@
   `86004de648e619d6acd034ae1753ce8f962c461e2ceda769040602985f958c99`。
 - 用户明确要求本轮不运行 audit-fix；因此没有用模型审查结果替代目标机回归或正式证据。语法检查、补丁格式
   检查、双目标回归、冻结清单和四份 finalizer 产物均已完成。
+- ATK 安装收据已从原始 Codex 会话日志恢复 A3/A5 的实际 venv、依赖安装、build-isolation 回退与源码安装
+  argv；tracked JSON 只保留脱敏后的 executable/flags/order，机器私有路径与代理端点仍不入库。
 
 ## 2026-08-11 · 设备调度下沉到 agent/环境边界
 

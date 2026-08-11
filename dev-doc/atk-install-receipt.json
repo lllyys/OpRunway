@@ -17,9 +17,11 @@
     "system_site_packages": true,
     "disposable": true,
     "shared_read_only_by_acceptance_sessions": true,
-    "install_argv": null,
-    "install_argv_evidence_status": "UNAVAILABLE",
-    "install_argv_note": "pip metadata proves the installer and local source URL, but no surviving log proves the original argv, cwd or flags; no command was inferred"
+    "install_command_evidence_status": "RECOVERED_FROM_ORIGINAL_SESSION_LOG",
+    "install_command_evidence_source": {
+      "codex_session_id": "019fe9a1-778b-7593-b847-9a31ef34a1ca",
+      "privacy": "tracked argv projections preserve executable, flags and ordering while replacing machine-private paths and proxy endpoints with angle-bracket placeholders"
+    }
   },
   "target_preparations": [
     {
@@ -37,8 +39,25 @@
         "direct_url": "file:///<untracked-a3-atk-source>",
         "venv_creation_argv": "/usr/local/python3.12.13/bin/python3 -m venv --system-site-packages <untracked-a3-venv>"
       },
-      "install_argv": null,
-      "install_argv_evidence_status": "UNAVAILABLE",
+      "install_argv": [
+        ["python3", "-m", "venv", "--system-site-packages", "<a3-venv>"],
+        ["<a3-venv>/bin/python", "-m", "pip", "install", "-r", "<a3-source>/requirements.txt"],
+        ["<a3-venv>/bin/python", "-m", "pip", "install", "--no-build-isolation", "<a3-source>"],
+        ["<a3-venv>/bin/python", "-m", "pip", "install", "pytz"],
+        ["<a3-venv>/bin/pip", "install", "pandas==2.2.3"]
+      ],
+      "install_environment_projection": {
+        "HTTP_PROXY": "<configured-container-local-proxy>",
+        "HTTPS_PROXY": "<configured-container-local-proxy>"
+      },
+      "install_argv_evidence_status": "RECOVERED_FROM_ORIGINAL_SESSION_LOG",
+      "install_evidence_call_ids": [
+        "call_5UOCiFJNBVoAyo1uS3LG3Iry",
+        "call_1NwI60jdHlFpEBT7WatcOWkX",
+        "call_vz1pRMB4c8px0pW84giC0Scg",
+        "call_ngqtpjF9ZTFoexeavqfm4RYz"
+      ],
+      "install_note": "The first direct source install attempted PEP 517 build isolation and failed; the recorded --no-build-isolation source install then completed successfully. The requirements install, ATK install and two compatibility adjustments are all present in the original tool-call/output chain.",
       "verified_versions": {
         "atk": "26.5.14",
         "numpy": "1.26.4",
@@ -61,8 +80,23 @@
         "direct_url": "file:///<untracked-a5-atk-source>",
         "setup_py_sha256": "ffd062c2932703116d7c3237fe468850aa384b27521d69235de9bb589253d3ed"
       },
-      "install_argv": null,
-      "install_argv_evidence_status": "UNAVAILABLE",
+      "install_argv": [
+        ["python3", "-m", "venv", "--system-site-packages", "<a5-venv>"],
+        [
+          "<a5-venv>/bin/pip", "install", "--proxy", "<configured-container-local-proxy>",
+          "celery==5.3.6", "click==8.4.2", "coloredlogs==15.0.1", "kombu==5.6.2",
+          "numpy==1.26.4", "openpyxl==3.1.5", "pandas==2.2.3", "prettytable==3.18.0",
+          "psutil==7.2.2", "pydantic==2.6.3", "pylint==4.0.7", "pytest==9.1.1",
+          "pytz==2026.3.post1", "scipy==1.13.1", "sqlalchemy==2.0.51", "tqdm==4.70.0"
+        ],
+        ["<a5-venv>/bin/pip", "install", "--no-build-isolation", "--no-deps", "<a5-source>"]
+      ],
+      "install_argv_evidence_status": "RECOVERED_FROM_ORIGINAL_SESSION_LOG",
+      "install_evidence_call_ids": [
+        "call_AziWrcZdzdJ5agedY41X8vbS",
+        "call_SuDDVNciBJNqnv0BCK4diGnR"
+      ],
+      "install_note": "Venv creation and pinned dependency installation completed before the first source-install attempt failed in PEP 517 build isolation; the recorded --no-build-isolation --no-deps source install then built and installed ATK 26.5.14 successfully.",
       "verified_versions": {
         "atk": "26.5.14",
         "numpy": "1.26.4",
