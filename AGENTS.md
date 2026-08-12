@@ -101,6 +101,9 @@ fail-closed。ATK 的进程返回码和“task success”文字不能单独作�
   只允许读取并复制到 fresh session，不得在原位 checkout、build、安装、写日志或修改内容。配置关系不成立
   时不得自行假定其它 cache 也是只读权威输入。
 - 私有主机、容器和路径只放 ignored `.oprunway/real-machine.env`；秘密不得写入仓库。
+- 该文件只在主 checkout 维护一份，worktree 不各自复制、也不各自新建。读取路径一律解析为
+  `"$(dirname "$(git rev-parse --git-common-dir)")/.oprunway/real-machine.env"`，在主 checkout 与任意 worktree 中都指向同一份。
+- 该文件同时登记每个已在真机落地的算子输入：任务书与被测源码分别标注，并把其所在的根逐字列入 protected roots。
 - 该文件存在时，远端操作先读取 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`；保护根及子目录永远只读。
 - Clone、checkout、build、真机执行、删除/覆盖、远端环境修改和发布须有用户授权。授权不扩张到其它目标。
 - 不 push、不 merge，除非用户明示；commit 不加 AI 署名或 trailer。

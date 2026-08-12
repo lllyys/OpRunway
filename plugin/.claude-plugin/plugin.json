@@ -3,5 +3,6 @@
   "version": "1.0.0",
   "description": "ATK-backed NPU operator acceptance with fresh-build evidence and deterministic verdicts.",
   "author": {"name": "lys"},
+  "repository": "https://github.com/lllyys/OpRunway",
   "keywords": ["ascend", "npu", "operator", "acceptance", "atk"]
 }

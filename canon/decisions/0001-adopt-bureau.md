@@ -18,3 +18,5 @@ low-authority but faithful; the cabinets are authoritative for current truth and
 
 **Consequences.** Drift is fought structurally: one owned layer, mechanical render,
 every claim traceable to its origin session.
+
+**Sources.** [[session f0c36755-189d-4c2c-b321-c0d2ec5c4b1b · 2026-06-29]]

@@ -33,13 +33,11 @@ claude plugin install oprunway@oprunway --scope project
 启用。插件文件本身始终共享存放在 `~/.claude/plugins/cache/`，scope 只决定在哪里启用，不影响文件位置。
 `claude plugin list` 列出的是全局注册表，不按当前目录过滤。
 
-加载后插件暴露三个入口：
+加载后插件只暴露一个入口：
 
 | 类型 | 名称 | 用途 |
 |---|---|---|
-| agent | `op-acceptance` | 主 agent，验收一对任务书与算子源码 |
-| skill | `oprunway:acceptance-workflow` | 在全新 session 内执行 ATK 用例生成、fresh build、NPU 测试与确定性裁决 |
-| command | `/oprunway:op-acceptance <任务书路径或URL> <源码路径或locator>` | 人工触发的薄壳 |
+| skill | `/oprunway:acceptance-workflow` | 唯一编排层，验收一对任务书与算子源码：在全新 session 内执行 ATK 用例生成、fresh build、NPU 测试与确定性裁决 |
 
 加载插件**不会**安装 ATK、CANN 或任何 Python 依赖，也不修改系统 Python、shell rc 或共享 CANN 安装——那些属于
 目标环境的前置准备，插件只做版本与路径 preflight。真正的验收执行仍发生在 NPU 目标环境，用法见下节。

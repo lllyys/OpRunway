@@ -4,14 +4,14 @@
     "name": "lys"
   },
   "metadata": {
-    "description": "OpRunway —— NPU 算子验收（acceptance）插件。判定归工具中立的确定性脚本（ADR 0007）。早期阶段，能力有边界，见各 skill 说明。",
-    "version": "0.1.0"
+    "description": "OpRunway —— 昇腾 NPU 算子验收插件的 marketplace。只有一条 ATK 驱动的验收通路，终态由确定性代码生成，证据不完整绝不 PASS。",
+    "version": "1.0.0"
   },
   "plugins": [
     {
       "name": "oprunway",
       "source": "./plugin",
-      "description": "NPU 算子验收 agent+skill 体系：任务书(md/链接)+PR → 编排 spec/runner 生成与验证、在已支持路径上真机跑测、出确定性裁决与报告；判定脚本按跨运行时复用设计（ADR 0007）。⚠ 早期阶段、能力有边界：用例生成已去引擎化（加算子 = 落一份 <ops_root>/<op>/golden.py，非改工具代码），样例 golden 现 8 份；经真 NPU 验收裁决的是 IsClose/Sign/Median(A3)、Elu/Silu(A5-950)。dtype 边界按 spec.runner_form 分派：cpp（--mode new_example）= fp32/fp16/bf16（int16/int32 属挂账集，真机 fail-closed）；aclnn_py（ctypes 两段式）= fp32/fp16/bf16/int64/int32/int16/int8/uint8/bool。catlass 通路与 bf16 精确表仍是引擎里的算子知识（已知例外）。"
+      "description": "ATK 驱动的昇腾 NPU 算子验收。调用方给出一份任务书与配对的算子源码，插件唯一入口 skill `/oprunway:acceptance-workflow` 据此编排 spec 与 ATK design，并在 NPU 目标环境上通过 `oprunway_cli.py accept` 于全新 session 内完成来源绑定、ATK 生成 caseset、fresh build 与 ATK 执行取证。终态只由 `oprunway.verdict.finalize` 生成，`acceptance.json` 的 verdict 只有 `PASS`、`DUT_FAIL`、`UNSUPPORTED`，证据不完整绝不 PASS。当前能力边界是 runner form `atk_aclnn` 与 build profile `cann_ops_package_v1`；插件不安装 ATK/CANN，也不连接或消费 GPU 数据。"
     }
   ]
 }

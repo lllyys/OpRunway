@@ -17,7 +17,9 @@ Mac 上重放用例、重算精度或重新构建 DUT。为避免每次传输大
 取材目录，所以 `source_facts.json` 常常不在包里——`dut_source=local_checkout` 时缺了它，
 `local_root_digest` 根本没有对照物。
 **任一缺失即标 `PROVENANCE_INCOMPLETE`，不得据此复核来源或裁决。** 要审 provenance，
-收件时把本轮 `source_facts.json` 显式加进来（`validate_acceptance_state --source-facts` 也吃它）。
+收件时把本轮 `source_facts.json`（现固定落在 session 的 `receipts/source_facts.json`）显式加进来。
+当前没有可在本地对收件包重跑的复核命令：来源锚对账由 `oprunway.verdict.finalize` 在 `accept` 的同一
+session 内完成，并把绑定结果写进 `reports/acceptance.json`；收回后只能阅读这些收据，不能重新验证绑定。
 
 ## 2. 默认复制内容
 

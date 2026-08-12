@@ -178,9 +178,11 @@ ssh "$OPRUNWAY_MACHINE_SSH_HOST" \
 ```bash
 python3 "$OPRUNWAY_PLUGIN_ROOT/oprunway_cli.py" accept \
   --spec "$SPEC" --taskdoc "$TASKDOC" --source-root "$SOURCE" \
-  --design "$ATK_DESIGN" --target-soc "$SOC" --session-dir "$NEW_SESSION"
+  --design "$ATK_DESIGN" --target-soc "$SOC" --session-dir "$NEW_SESSION" \
+  --physical-device "$PHYSICAL_DEVICE"
 ```
 
+`--physical-device` 是必填项，取本轮已在 plugin 外取得锁的物理卡号；CLI 不自动选卡，缺它直接被 argparse 拒绝。
 默认从 `PATH` 解析 `atk`；多版本并存时才传 `--atk-bin`。`NEW_SESSION` 必须不存在，fresh build、caseset、
 执行证据和终态不得与旧 session 复用。机器 profile 中的历史 op/vendor 变量不是验收输入，也不能覆盖 spec。
 
