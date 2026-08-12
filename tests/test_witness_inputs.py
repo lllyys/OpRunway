@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugin"
 sys.path.insert(0, str(PLUGIN_ROOT))
 
 from oprunway.atk import _coverage_projection, _generated_case_projection, generate_cases
@@ -20,7 +20,7 @@ from oprunway.contract import validate_spec
 from oprunway.util import sha256_file
 
 
-WITNESSES = PLUGIN_ROOT / "tests" / "witnesses"
+WITNESSES = Path(__file__).resolve().parent / "witnesses"
 TASKDOC_NAMES = {
     "bernoulli": "aclnnBernoulli_task_doc.md",
     "remainder": "aclnnRemainderTensorTensor_task_doc.md",

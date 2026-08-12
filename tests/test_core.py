@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugin"
 sys.path.insert(0, str(PLUGIN_ROOT))
 
 from oprunway.atk import (
@@ -107,11 +107,11 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(manifest["version"], "1.0.0")
         self.assertEqual(
             [path.relative_to(PLUGIN_ROOT).as_posix() for path in (PLUGIN_ROOT / "agents").glob("*.md")],
-            ["agents/op-acceptance.md"],
+            [],
         )
         self.assertEqual(
             [path.relative_to(PLUGIN_ROOT).as_posix() for path in (PLUGIN_ROOT / "commands").glob("*.md")],
-            ["commands/op-acceptance.md"],
+            [],
         )
         self.assertEqual(
             [path.relative_to(PLUGIN_ROOT).as_posix() for path in (PLUGIN_ROOT / "skills").glob("*/SKILL.md")],
@@ -120,7 +120,7 @@ class ContractTests(unittest.TestCase):
 
     def test_gaussian_witness_pins_the_taskdoc_mixed_tolerance_values(self):
         witness = json.loads(
-            (PLUGIN_ROOT / "tests" / "witnesses" / "gaussian_blur" / "spec.json").read_text(
+            (Path(__file__).resolve().parent / "witnesses" / "gaussian_blur" / "spec.json").read_text(
                 encoding="utf-8"
             )
         )

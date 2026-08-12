@@ -2,6 +2,24 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-12 · tests 移出 plugin，Roll 在隔离会话里 225/225
+
+- `plugin/tests/` 整体移到仓根 `tests/`（`git mv`，含 4 个算子的 witness 夹具）。起因是真机实测：夹具会随
+  plugin 一起部署到目标机，被验收会话当成合法输入直接复用——`design.yaml`、`generator.py`、
+  `execution_plugin.py` 三个文件逐字节相同，等于跳过了「从任务书推导 spec 与 design」这一环，而那是全链上
+  唯一无工具、无校验的环节。`tests/` 本来也不属于 Claude Code plugin 的官方结构。
+- 同时修好清册测试：`agents/`、`commands/` 两个目录早已删除，`test_plugin_manifest_and_active_entry_inventory`
+  的期望值还停在旧值。真机上现在 81 passed / 0 failed（macOS 上那批失败是 `/tmp` → `/private/tmp` 符号链接
+  造成的既有噪声，与本次改动无关）。`.cc-suite.md` 的测试命令同步改到新路径。
+- 拿掉夹具后重跑 Roll：会话自己从任务书、ABI 与 ATK 源码推出 225 个用例（此前抄夹具时是 20 个），
+  终态 `PASS` / `ALL_REQUIRED_EVIDENCE_PASSED`，`225/225`，主动耗时 588.9 秒 / 预算 7200，端到端 49 分 23 秒。
+  未验证条款从 5 条增到 7 条且具体得多，新增「非连续 Tensor 未取证」与「dims 传空数组未取证」两条 ATK
+  能力边界。
+- 本轮暴露的待办已建 9 条任务，未执行。较硬的几条：性能非回归无法表达（plugin 只有 `none`/`measure`
+  二元开关，且 `--source-root` 单数，没有基线 build 通路）；无头会话会在正式 CLI 跑完前 `end_turn` 结束
+  （步骤 8 没规定必须前台阻塞调用）；spec 原文没复制进 session，`spec_sha256` 与磁盘字节哈希不一致，
+  待查是否为规范化哈希。
+
 ## 2026-08-11 · canon 剪枝到 13 页并接入 recursion engine
 
 - canon 的 dossier 从 73 页删到 13 页（删 61、新建 2），已推 `359f485` 到 `origin/worktree-oprunway22`。
