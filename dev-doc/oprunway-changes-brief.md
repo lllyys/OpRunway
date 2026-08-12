@@ -2,6 +2,26 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-11 · canon 剪枝到 13 页并接入 recursion engine
+
+- canon 的 dossier 从 73 页删到 13 页（删 61、新建 2），已推 `359f485` 到 `origin/worktree-oprunway22`。
+  删除判据是 ledger 指纹指向已不存在的文件：收敛到单一 ATK 路径时移除的 `plugin/acc-common` 与 `samples`，
+  以及 gitignored 的 `repos/` 外部克隆——后者在干净 checkout 上永远无法复核。31 条 verified 指纹只剩 2 条成立。
+- 一次性接入 recursion engine：全部页面补 `id` 与 `^claim` 锚点并提议 `rests_on` 边；清空 compile 水位
+  （54 条未编译里 52 条是 SessionEnd 写的空 stub）；补上 `_config.json` 的 `meta.provenance`，此前
+  `unsourced` 检查从未武装，报 0 是因为这条 lane 没开而不是真的没有无出处页面。
+- 精度页按上游 opbase 现行文本重写：§2 已由 MERE/MARE 改成混合容差（`matched_ratio ≥ 0.99` 且
+  `max_abs_error` 不超硬上限），据此更正 §1 页、删掉整页过时的 MERE/MARE dossier，并把上游文档缓存到
+  `.oprunway/cache/`（ignored）、页内记 SHA-256。0.99 是单用例内部的元素通过率，不是用例级通过比例；
+  标准全篇没规定整套允许挂几条，该问题只能由任务书回答。
+- `AGENTS.md` §3 首句收窄为「`CLAUDE.md` 除路由外还承载仅 Claude 需读取的操作规则」；`CLAUDE.md` 新增
+  写入通路一节：仓内文件写入一律经 `/cc-suite:implement` 交 Codex 落盘。README 补 `--plugin-dir` 临时加载。
+- logbook 一字未动：55 条 dangling 与 7 条 orphan 是删页对 append-only 历史的必然代价。schema 违规、
+  ledger drift 与 gate broken 全程为 0。用户豁免了本次 push 前的 §9 audit；本轮代码零改动。
+- 一轮只读一致性 fanout 中途叫停（38 条 finding、20 条完成验证、11 条成立），下轮待处理：
+  `marketplace.json` 整段描述过时、唯一 agent 用非命名空间 skill id 预载、`dev-doc` 里的正式调用示例
+  漏了必填 `--physical-device`。
+
 ## 2026-08-11 · 显式设备边界与四算子 r6 正式终态
 
 - 已推送 checkpoint `a47c484` 到 `origin/worktree-oprunway22`。正式冻结包含 33 个活跃文件，MANIFEST

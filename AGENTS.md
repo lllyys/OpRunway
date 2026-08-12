@@ -27,9 +27,7 @@ export OPRUNWAY_PLUGIN_ROOT="$(git rev-parse --show-toplevel)/plugin"
 
 - `plugin/oprunway/`：唯一确定性实现；
 - `plugin/oprunway_cli.py accept`：唯一正式入口；
-- `plugin/agents/op-acceptance.md`：唯一 agent；
-- `plugin/skills/acceptance-workflow/SKILL.md`：唯一 skill；
-- `plugin/commands/op-acceptance.md`：唯一人工命令薄壳。
+- `plugin/skills/acceptance-workflow/SKILL.md`：唯一 skill，也是唯一编排层。
 
 不得恢复另一套 case generator、golden engine、runner、状态机、裁决器或兼容通路。ATK 缺失能力只能放在
 调用方提供且被收据哈希绑定的最薄 execution/generator plugin；通用生产代码不得按具体算子名分支。
@@ -42,7 +40,7 @@ export OPRUNWAY_PLUGIN_ROOT="$(git rev-parse --show-toplevel)/plugin"
 
 ## 3. 确定性事实链
 
-`oprunway.verdict.finalize` 是唯一终态生产者；agent、skill、命令和报告不得重判。正式 PASS 至少绑定：
+`oprunway.verdict.finalize` 是唯一终态生产者；skill 和报告不得重判。正式 PASS 至少绑定：
 
 - 任务书 SHA-256 与 caller-trusted 关联声明；
 - 目标源码子树内容锚，且原始输入、clean staging、build 前后逐字一致；另以同一 staging 忽略规则绑定包含
