@@ -19,6 +19,17 @@
   二元开关，且 `--source-root` 单数，没有基线 build 通路）；无头会话会在正式 CLI 跑完前 `end_turn` 结束
   （步骤 8 没规定必须前台阻塞调用）；spec 原文没复制进 session，`spec_sha256` 与磁盘字节哈希不一致，
   待查是否为规范化哈希。
+- 两份 skill 各补一处真机跑出来的缺口。`acceptance-workflow` 步骤 8 新增「怎么等它跑完」：accept 可能跑到
+  7200 秒而驱动方单次命令有时长上限，且停止动作可能被判定为已完成——所以要让 accept 脱离驱动进程、再反复做
+  有界检查。`isolated-acceptance` 步骤 9 新增「会话结束不等于验收结束」：必须复核 CLI 进程已退出、设备锁已
+  释放、终态文件已生成。顺带修 `--atk-bin` 的触发条件（两处），原文写「多版本并存」，实际触发是不在 `PATH` 上。
+- 新增 `dev-doc/oprunway-original-operator-baseline-design.md`：原算子非回归验收设计，代码未动。起因是四个
+  witness 里三个声明 `performance: measure`，三个都在未验证条款里写着真正的要求没验——`measure` 产出绝对
+  kernel 时间，而任务书的性能要求全是相对的（不低于原算子、0.45× GPU）。查证时发现同类缺口还有功能侧：Roll
+  的原算子 `conversion/roll` 支持 INT64，目标 `experimental/math/roll` 不支持，任务书参数表也没列，而任务书
+  散文要求「保持原有 dtype 功能不变」——三方不一致，第四轮照常 PASS，没有任何一道门发现。设计裁定：引入
+  `task.baseline` 声明原算子子目录（同一棵源码树，不加第二个源码入口），做 op_def 集合差集与同卡同 caseset
+  的双边 profiler 对比；有同口径基线且容差来自任务书时才出裁决，否则只测不判；GPU 标杆永远 UNVALIDATED。
 
 ## 2026-08-11 · canon 剪枝到 13 页并接入 recursion engine
 
