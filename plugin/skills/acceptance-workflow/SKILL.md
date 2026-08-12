@@ -160,7 +160,8 @@ capability adapter；提升也不得携带算子名、仓名、shape、dtype、S
 
 ## 步骤 6　环境前置检查
 
-- 目标环境的 `PATH` 可解析公开的 `atk` 命令；多版本并存时在步骤 8 用 `--atk-bin` 显式覆盖。
+- 目标环境有可用的公开 `atk` 命令。它不在 `PATH` 上（例如装在某个虚拟环境目录里）或存在多个版本时，
+  记下要用的那个可执行的绝对路径，在步骤 8 用 `--atk-bin` 显式指定。
 - CANN 环境与目标 NPU 就绪。不要求 venv，也不关心 ATK 由系统、镜像、用户目录还是虚拟环境提供。
 - 准备一个**不存在**的全新 ASCII session 路径。
 - `real-machine.env` 把某路径列为 protected root 时，该路径只作只读输入源：允许复制 caller source 到 fresh
@@ -207,7 +208,7 @@ python3 "$OPRUNWAY_PLUGIN_ROOT/oprunway_cli.py" accept \
 |---|---|
 | `--task-cases-root` | 步骤 4 声明了 `task.case_bundle` |
 | `--generator` / `--execution-plugin` | 步骤 5 选出了对应 plugin |
-| `--atk-bin` | 步骤 6 发现多版本 ATK 并存 |
+| `--atk-bin` | 步骤 6 发现 `atk` 不在 `PATH` 上，或需要指定某个具体可执行 |
 
 每个 plugin 文件都会复制到 session 并写入 SHA-256 收据；bundle 会先完整复制到 fresh session，再把同一只读
 副本传给 casegen 与 execution plugin。不要手工拼子命令绕过正式入口。
@@ -219,6 +220,19 @@ CLI 把物理卡映射为逻辑 device 0，accuracy/performance 的 ATK child �
 入口内部依次完成：只读输入锚定 → clean staging → ATK casegen → fresh package build/install → ELF 双符号
 验证 → ATK accuracy/performance execution → 完整分母、实际加载 ELF、CPU/DUT 输出和 profiler 校验 →
 确定性终态。全程最多 7200 秒，超时杀整个进程组。
+
+### 怎么等它跑完
+
+这一次调用可能跑到 7200 秒，远长于驱动方单次命令通常允许的时长；而驱动方在你停止动作时可能判定你已
+做完。等待方式由这两条决定，与具体在什么环境里驱动无关：
+
+- **不要指望一次调用把它等完。** 时间一长就会被单次命令的时长上限截断。
+- **不要交给后台再干等。** 停止动作可能被判定为已完成；驱动进程退出时，它启动的进程会被一并终止。
+- **让 accept 脱离驱动进程运行**，把 PID 与返回码写进日志，这样驱动方即使中断，这一次执行仍能自己跑完。
+- **然后反复做有界的检查。** 每次检查都是一次动作，等待期间因此始终有进展可见；每次都在时长上限内返回，
+  因此不会被截断。检查到进程退出或终态文件出现就停止，再进入步骤 9。
+
+轮询期间不要重复调用 accept，也不要因为等得久就改判。锁在整个等待期间必须继续持有。
 
 ## 步骤 9　核对终态判据
 
