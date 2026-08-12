@@ -35,7 +35,6 @@
 |---|---|---|
 | [[Golden and precision standard come only from the task-doc-specified method]] | proposed（最高律令） | **约束决策 3**——⚠ **该页记的是写窄了的旧口径**（「只能来自任务书指定方法」、**漏了第二档**）；用户 2026-07-22 重定为**两档链**（见决策 3），canon 页**待走 capture→compile→review 更正**，在此之前以决策 3 为准 |
 | [[Golden is fixed to torch on CPU for determinism]] | proposed | **被决策 4 更新**（「恒 torch 单后端」→「按算子 torch>numpy 定档」）；compile 时标 superseded、留 proposed 待 review |
-| [[AscendOpTest precision thresholds]] | canonical | golden 由 `expect_func` 提供、输出 dtype 须与算子一致——加载器契约照此 |
 | [[oracle_source is a hardcoded constant not a recorded fact]] | proposed（Q9 已止血） | **决策 5 承接**：oracle_source 已据实映射 + 门校；loader 侧补「按算子记录」 |
 | [[ADR 0002 — Acceptance grounded in catlass and the spec]] | canonical | 只说「跨仓 golden 会变」、**未规定 golden 归属**——**决策 2 补这个洞** |
 | [[OpRunway component breakdown]] | canonical | 「acc-common 核心不放 runner」——golden 同理（本 ADR 把「不放算子 golden」补上） |

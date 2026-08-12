@@ -8,6 +8,44 @@
 泛化，不承诺接入任意仓形态。第二种真实仓形态出现后应新增独立 build profile adapter，不能在现有 profile
 里堆仓名或路径分支。
 
+## 作为 Claude Code plugin 加载
+
+插件清单在 `plugin/.claude-plugin/plugin.json`，插件名 `oprunway`。
+
+**临时加载 —— 只对当前这一次 session 生效**，不写任何配置、不改全局状态，试用时优先用这种方式：
+
+```bash
+claude --plugin-dir /path/to/OpRunway/plugin
+```
+
+`--plugin-dir` 可重复传入多个，参数也可以是一个 `.zip`。插件包放在网上时改用 `--plugin-url <url>` 拉取 zip，
+同样只对本次 session 生效。
+
+**从 marketplace 安装 —— 持久生效。** 仓库根的 `.claude-plugin/marketplace.json` 把本仓注册为名为 `oprunway`
+的 marketplace：
+
+```bash
+claude plugin marketplace add /path/to/OpRunway
+claude plugin install oprunway@oprunway --scope project
+```
+
+`--scope project` 只在当前项目启用，启用状态写进该项目的 `.claude/settings.json`；`--scope user` 则对所有项目
+启用。插件文件本身始终共享存放在 `~/.claude/plugins/cache/`，scope 只决定在哪里启用，不影响文件位置。
+`claude plugin list` 列出的是全局注册表，不按当前目录过滤。
+
+加载后插件暴露三个入口：
+
+| 类型 | 名称 | 用途 |
+|---|---|---|
+| agent | `op-acceptance` | 主 agent，验收一对任务书与算子源码 |
+| skill | `oprunway:acceptance-workflow` | 在全新 session 内执行 ATK 用例生成、fresh build、NPU 测试与确定性裁决 |
+| command | `/oprunway:op-acceptance <任务书路径或URL> <源码路径或locator>` | 人工触发的薄壳 |
+
+加载插件**不会**安装 ATK、CANN 或任何 Python 依赖，也不修改系统 Python、shell rc 或共享 CANN 安装——那些属于
+目标环境的前置准备，插件只做版本与路径 preflight。真正的验收执行仍发生在 NPU 目标环境，用法见下节。
+
+## 直接调用 CLI
+
 ```bash
 export OPRUNWAY_PLUGIN_ROOT="$(git rev-parse --show-toplevel)/plugin"
 PHYSICAL_DEVICE=1  # 已由外部调度检查、加锁并在锁内复核

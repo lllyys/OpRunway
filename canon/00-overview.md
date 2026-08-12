@@ -1,11 +1,12 @@
 ---
+id: pg-00-overview
 title: Overview
 updated: 2026-06-29
 ---
 
 # Overview
 
-This is a **bureau** workspace — the durable canon distilled from your AI sessions.
+This is a **bureau** workspace — the durable canon distilled from your AI sessions. ^claim
 
 - **Cabinets** are the memory drawers (this folder's siblings: `decisions/`, and whatever
   topic drawers you add — `architecture/`, `characters/`, `timeline/`, …). They are the SSOT,

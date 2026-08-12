@@ -32,4 +32,6 @@ python3 "$OPRUNWAY_PLUGIN_ROOT/oprunway_cli.py" accept \
 ATK 的薄适配输入，不是第二套 runner。最终只认 `<session>/reports/acceptance.json`，状态为 `PASS`、
 `DUT_FAIL` 或 `UNSUPPORTED`。若入口未能形成正式裁决，`workflow.json` 与可写入时的 `attempt.json` 会记录
 `PLUGIN_ERROR`、`NEEDS_INPUT` 或 `BLOCKED`；这些不是 `acceptance.json` verdict。完整说明见
-[`plugin/README.md`](plugin/README.md) 与 [`AGENTS.md`](AGENTS.md)。
+[`plugin/README.md`](plugin/README.md) 与 [`AGENTS.md`](AGENTS.md)。想先在一次会话里试用而不做任何持久安装，
+用 `claude --plugin-dir "$(git rev-parse --show-toplevel)/plugin"` 临时加载，插件入口与安装方式见
+[`plugin/README.md`](plugin/README.md#作为-claude-code-plugin-加载)。

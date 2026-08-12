@@ -1,4 +1,5 @@
 ---
+id: pg-claude-code-plugin-agent-discovery
 title: Claude Code plugin agents load by directory discovery
 updated: 2026-07-10
 status: proposed
@@ -7,7 +8,7 @@ status: proposed
 # Claude Code plugin agents load by directory discovery
 
 **在 Claude Code `2.1.206`、当前 OpRunway 插件结构下**：agent 靠**约定目录自动发现**（`agents/*.md`），
-`.claude-plugin/plugin.json` **不得声明 `agents` 字段**。四种写法实测：
+`.claude-plugin/plugin.json` **不得声明 `agents` 字段**。四种写法实测： ^claim
 
 | `plugin.json` 的 `agents` | 插件本身 | agent 注册 |
 |---|---|---|
@@ -21,7 +22,7 @@ status: proposed
 （该字段并非「完全不被读取」：另两种写法能让整个插件加载失败，说明它被读了、只是不据以注册 agent。）
 
 `acc-common/check_manifest_sync.py` 设**反向门**：`plugin.json` 一出现 `agents` 字段即 `STATUS: DRIFT`。
-本页只讲加载机制；「注册面 ↔ 磁盘」的比对基准见 [[A gate must validate the object that actually takes effect]]。
+本页只讲加载机制；「注册面 ↔ 磁盘」的比对基准见 A gate must validate the object that actually takes effect。
 
 **待验证的旁支**（未固化证据，勿据以载重）：`commands/` 与 `skills/` 疑似同样靠约定目录发现，且 `plugin details`
 似把 command 计入 Skills 计数；`grill` 等能正常加载 agent 的第三方插件，其 `plugin.json` 观察到也不写 `agents`。

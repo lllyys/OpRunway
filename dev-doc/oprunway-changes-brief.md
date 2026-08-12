@@ -1942,7 +1942,7 @@ verify 轮（codex 复核修复本身）又逮出 5 条：digest 自洽证明不
 - `canon/architecture/repo-adapter.md`（更新，proposed）— purpose：generated_harness 补 aclnn 桥引用。
 - `canon/_verify.json` / minute — purpose：精度页指纹 + provenance。
 
-**规矩**：新页一律 proposed/verified，tier 提升只走 `bureau:review`（用户）；`catlass acceptance mechanics` 上轮被手改+自盖 reviewed，需补进 review 队列复核。
+**规矩**：新页一律 proposed/verified，tier 提升只走 `bureau:review`（用户）。
 
 ---
 

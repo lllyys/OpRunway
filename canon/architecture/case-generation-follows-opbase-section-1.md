@@ -1,25 +1,35 @@
 ---
+id: pg-case-generation-follows-opbase-section-1
 title: Case generation follows opbase ecosystem precision standard section 1
-updated: 2026-07-16
+updated: 2026-08-11
 status: proposed
 ---
 
 # Case generation follows opbase ecosystem precision standard section 1
 
 浮点计算类算子的**精度用例生成规则**取自 `cann/opbase` `docs/zh/ops_precision_standard/experimental_standard.md`
-**§1「用例生成规则」**（pin commit `f69d4e4e3f2626ddd37855a8d05063a1764ac4c9`），用户 2026-07-15 指定为权威。
-整型/搬运类算子另定，不套本页。
+**§1「用例生成规则」**，用户 2026-07-15 指定为权威。整型计算类与搬运类算子按 §0 明确排除在本标准之外，另定，不套本页。 ^claim
 
-**§1 采纳、§2 不采纳（分工明确）.** §1 只定**怎么生成用例**：dtype × 格式 × 维度 × attr 正交覆盖 + §1.4 特殊场景
-（空 Tensor / 标量 / 边界 / inf·nan）+ 值域 50% 均匀 + 50% 正态 + 维度取 2ᵏ / 2ᵏ−1。§2 的**误差指标（MERE/MARE）
-不用**——阈值口径仍走 AscendOpTest（见 [[AscendOpTest precision thresholds]]、现有 `precision_policy` 快照零改）。
-§0 印证 bool/符号类逐位精确。与 [[Ecosystem precision standard MERE MARE]] 是**同一份 opbase 文档的不同节**：那页记
-§2 的 MERE/MARE 口径、本页记 §1 的生成规则。本页是 [[Golden and precision standard come only from the task-doc-specified method]] 的**生成侧**具体化——任务书指定的测试方法（opbase §1）定生成规则、AscendOpTest 定阈值。
+**上游快照.** 2026-08-11 自 `https://raw.gitcode.com/cann/opbase/raw/master/docs/zh/ops_precision_standard/experimental_standard.md`
+取得，内容 SHA-256 `5423b15643d0f08b0470cd1c07c0a80c1a9f2b18a046c1d2172fc5ad0eb9290c`，本地只读缓存在
+`.oprunway/cache/opbase-experimental_standard.md`（gitignored）。本页据该快照写成。早前引用的 pin commit
+`f69d4e4e3f2626ddd37855a8d05063a1764ac4c9` 已不代表现行文本。
 
-**数量以用户为准、默认 50、运行时问用户.** `spec.precision.case_target` 承载数量；acc-spec 用 `AskUserQuestion` 问
-（先 `gen_cases --dry-run` 拿 `[强制下限 S, pool_max]` 区间呈现）。用户明示「数量以我为准」——**覆盖 §1.1「不设固定
-下限、覆盖优先、非机械凑数」**。50 封顶下 §1.1 的「100% 正交联合」**不可达**，故采「**白名单强制必覆盖组合**（key
-dtype × attr × 大 shape、§1.4 特殊场景）+ 常规联合 **1-wise 边际采样**」，并导出**覆盖账本**
-（`coverage_strength` / `dropped_combo_classes`），把「覆盖到什么程度、丢了哪些组合类」显式记账、不假装全覆盖。
+**§1 现行内容.**
 
-**Sources.** [[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]（2026-07-15：opbase §1 生成规则 + case_target 默认 50/问用户 + 覆盖账本）
+- §1.1 覆盖目标是**全组合覆盖**：对算子支持的数据类型、数据格式、数据维度、属性取值范围，要求所有有效组合
+  **100% 覆盖**；用例数量**不设固定下限**，强调输入组合的遍历式覆盖而非机械要求数量。
+- §1.2 张量：覆盖 1~8 维，维度值在 1 到 2 的 20 次方内取「2 的幂次」与「2 的幂次减一」两种取值，总元素数不超过
+  2 的 31 次方；覆盖所有支持的数据格式（ND、NCHW 等）；各参数类型之间正交组合遍历；值域 50% 均匀分布（-5 到 5）
+  ＋ 50% 正态分布（μ 在 -5 到 5、σ 在 0.1 到 2）。
+- §1.3 属性：标量参数覆盖所有等价类场景，布尔参数覆盖 True 与 False，枚举参数覆盖所有支持的枚举值，各类参数
+  组合遍历。
+- §1.4 特殊场景：空 Tensor（某维为 0，每种 dtype 每个 tensor 至少覆盖一次）、标量 Tensor（shape 为 1，每种 dtype
+  覆盖）、边界测试（下边界各维均为 1、上边界某维取最大值，全部覆盖）、INF/-INF/NAN（输入元素值遍历 nan、inf、
+  -inf 及其区间，每种 dtype 每种值生成不同 shape 用例）。**特殊场景用例不与常规用例正交组合。**
+
+**§2 不由本页承载，且上游已改口径.** 现行 §2 采用**混合容差**：逐元素判据为绝对容差加相对容差
+（`|actual − golden| ≤ atol + rtol × |golden|`），用例级要求 `matched_ratio ≥ required_matched_ratio` 且
+`max_abs_error ≤ max_abs_error_limit` 同时成立。**现行文本中已无 MERE/MARE 指标**。
+
+**Sources.** [[session 2488e031-5814-4c61-a723-56aeeb1e6029 · 2026-07-13]]（2026-07-15：opbase §1 生成规则）
