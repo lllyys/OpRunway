@@ -17,9 +17,8 @@ description: 对一对任务书与昇腾算子源码执行正式验收——在�
 1. 任务书权威高于源码实现便利；调用方给定的任务书/源码关联无需再次鉴权。
 2. 完整、可重放的证据高于尽快出结果；证据缺失时 fail-closed。
 3. 声明式 spec/design 高于自定义代码。
-4. 单一算子缺口留在被哈希绑定的 witness plugin，高于污染通用 core。
-5. 第二个独立实例出现前不提前抽象；具体落点遵循步骤 5 的矩阵。
-6. 正式终态逐字引用，不自行归因或改写。
+4. 单一算子缺口留在被哈希绑定的 witness plugin，高于污染通用 core；本轮不做跨算子抽象。
+5. 正式终态逐字引用，不自行归因或改写。
 
 ## 验收流程
 
@@ -102,7 +101,7 @@ ATK、CANN 或 NPU 未准备好时停在 `BLOCKED`，ABI 或任务书事实不�
 | `required_cases` | 任务书最低覆盖契约，按 ACLNN 参数顺序列出必须生成的 dtype/shape/属性子集 | 不同条目必须匹配不同 case | 缺任一条在 fresh build 前停止；非空 caseset 不构成放行理由 |
 | `performance_required_cases` | 按 `required_cases` 下标选代表场景 | `measure` 时必须非空，`none` 时必须为空 | 流程错误 |
 | `precision.atk_accuracy` | ATK 精度比较器 | 与 ATK design 的 `standard.acc` 逐字一致 | 生成后逐 case 对账，不一致即拦截 |
-| `runner.device` | 隔离容器内的逻辑 device | 恒为 0；物理卡不是 spec 事实，不得写入 tracked 输入 | — |
+| `runner.device` | 运行环境内的逻辑 device | 恒为 0；物理卡不是 spec 事实，不得写入 tracked 输入 | — |
 
 全量 caseset 跑 accuracy，只有 `performance_required_cases` 选中的子集另跑 `performance_device` 与
 profiler。空 Tensor 等无 kernel 用例因此仍纳入功能/精度，但不会伪造 profiler。
@@ -144,24 +143,20 @@ cases/prototype/golden 每个文件的相对路径和 SHA-256。步骤 8 必须�
 Bundle 未包含但任务书单独要求的性能场景作为 supplemental case 追加，并只由 `performance_required_cases`
 选择；不得用它替换官方 accuracy 分母。
 
-已绑定的具体算子 bundle 见 [reference/witnesses.md](reference/witnesses.md)。
-
 ## 步骤 5　选择能力落点
 
-先选择最小的已声明能力，不因一个见证算子的缺口改通用 core：
+先选择最小的已声明能力：
 
 | 已确认事实 | 落点 |
 |---|---|
 | ATK design 原生可表达 | 只写 spec 与 design，本步无产出 |
-| 仅 case 组合或生成顺序无法表达 | generator plugin |
-| CPU 真值、统计比较或 ACLNN ABI 与 ATK 通用桥不兼容 | execution/accuracy plugin |
-| 第二个独立算子再次出现同一稳定缺口 | 才评估提升为按能力建模的 core adapter |
+| 仅 case 组合或生成顺序无法表达 | generator plugin，作为 session 输入哈希绑定 |
+| CPU 真值、统计比较或 ACLNN ABI 与 ATK 通用桥不兼容 | execution/accuracy plugin，同上 |
+| 新仓构建形态不属于 `cann_ops_package_v1` | 停在 `BLOCKED`；不自行新增 build profile |
 | ABI、任务书事实缺失或输入内部冲突 | `NEEDS_INPUT`，不猜测、不补特判 |
-| 新仓构建形态不属于 `cann_ops_package_v1` | 新 build profile adapter，不在旧 profile 加分支 |
 
-首个实例始终留在被哈希绑定的 witness 边界。只有第二个独立实例证明接口族稳定后，才讨论把共同机制提升为
-capability adapter；提升也不得携带算子名、仓名、shape、dtype、SoC 或阈值白名单。正式范围只覆盖
-`atk_aclnn + cann_ops_package_v1`，是算子泛化，不是任意 repository build profile 泛化。
+缺口一律留在被哈希绑定的 witness 边界，作为本轮 session 的输入，不进仓库。**本轮绝不修改 `plugin/` 下的
+通用代码。**
 
 本步选出的 plugin 在步骤 8 用 `--generator` 或 `--execution-plugin` 传入。
 
@@ -181,8 +176,8 @@ ATK 26.5.14 上会 `TypeError`，只可作为接口概念的参考，不要照�
   记下要用的那个可执行的绝对路径，在步骤 8 用 `--atk-bin` 显式指定。
 - CANN 环境与目标 NPU 就绪。不要求 venv，也不关心 ATK 由系统、镜像、用户目录还是虚拟环境提供。
 - 准备一个**不存在**的全新 ASCII session 路径。
-- `real-machine.env` 把某路径列为 protected root 时，该路径只作只读输入源：允许复制 caller source 到 fresh
-  session，禁止在原位 checkout、build、安装或写入产物。不得把这一约束外推到未配置保护的其它路径。
+- **调用方给的任务书与源码一律只读。** 由本轮 session 自己复制一份进来使用，不在原位 checkout、build、
+  安装或写入任何产物。部分目标环境还会另行指定若干只读根，给了就一并遵守；**没有给不等于可以就地写入**。
 
 任一项不满足即停在 `BLOCKED`，不要继续到步骤 7。
 

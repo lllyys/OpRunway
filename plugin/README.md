@@ -1,8 +1,9 @@
 # OpRunway plugin
 
 一个 ATK 驱动的昇腾 NPU 算子验收入口。Plugin 不安装 ATK/CANN，也不提供 GPU workflow；它只校验已准备
-环境，然后在全新 session 中完成来源绑定、ATK 用例生成、fresh build、ATK 执行和确定性裁决。默认从
-目标环境的 `PATH` 查找公开 `atk` 命令，不要求或探测 venv；多版本并存时才显式传 `--atk-bin`。
+环境，然后在全新 session 中完成来源绑定、ATK 用例生成、fresh build、ATK 执行和确定性裁决。默认使用
+目标环境的公开 `atk` 命令，不要求或探测 venv；`atk` 不在 `PATH` 上或存在多个版本时，显式传 `--atk-bin`
+指定要用的那个可执行的绝对路径。
 
 当前能力边界是 `atk_aclnn + cann_ops_package_v1`：它在该 runner form 与仓库 build profile 内按算子数据
 泛化，不承诺接入任意仓形态。第二种真实仓形态出现后应新增独立 build profile adapter，不能在现有 profile
@@ -86,13 +87,3 @@ Spec 必须显式绑定 ATK 精度比较器，caseset 会逐 case 对账。精�
 任务书准入的目标 SoC 在 fresh build/install 后仍缺该算子的设备侧 ops-info/binary/kernel delivery，且请求
 cache 与 host ACLNN ABI 已完整绑定时，唯一 finalizer 输出 `DUT_FAIL / TARGET_DELIVERY_MISSING`；普通构建失败
 或证据不完整不适用该结论。
-
-开发测试必须在 NPU 目标环境执行：
-
-```bash
-cd "$OPRUNWAY_PLUGIN_ROOT"
-OPRUNWAY_ATK_BIN="$(command -v atk)" \
-OPRUNWAY_TASKDOC_ROOT=/path/to/taskdocs \
-OPRUNWAY_GAUSSIAN_BLUR_CASES_ROOT=/path/to/gaussian_blur/self_test_case \
-python3 -m unittest discover -s tests -v
-```

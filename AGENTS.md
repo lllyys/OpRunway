@@ -29,6 +29,13 @@ export OPRUNWAY_PLUGIN_ROOT="$(git rev-parse --show-toplevel)/plugin"
 - `plugin/oprunway_cli.py accept`：唯一正式入口；
 - `plugin/skills/acceptance-workflow/SKILL.md`：唯一 skill，也是唯一编排层。
 
+`plugin/` 的全部内容只服务于执行一次验收，不承载开发期的设计、取舍与维护判断。判据是：一个只拿到
+`plugin/`、要验收一个算子的执行者，需不需要读这条内容？不需要就不该放在里面。据此排除的典型内容有——
+何时把 witness 提升为通用能力、如何新增 build profile、如何运行本仓测试、开发期私有配置的位置与文件名、
+具体算子的一次性输入绑定。这些放 `AGENTS.md`、`dev-doc/` 或 canon。验收运行时不得修改 `plugin/` 下的任何
+通用代码：是否值得把某个缺口提升为通用能力，运行时既无从判断（不知道别的算子是否撞过同一缺口，且每轮都是
+全新 session），也无法留痕（收据不绑定 plugin 自身身份）。
+
 不得恢复另一套 case generator、golden engine、runner、状态机、裁决器或兼容通路。ATK 缺失能力只能放在
 调用方提供且被收据哈希绑定的最薄 execution/generator plugin；通用生产代码不得按具体算子名分支。
 
