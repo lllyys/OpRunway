@@ -246,8 +246,12 @@ fresh build/install 成功、请求 cache 与 host ACLNN 双符号已绑定，�
 ops-info/binary/kernel delivery。此时停止 execution 并由唯一 finalizer 输出 `DUT_FAIL`；普通 build 失败或
 证据不完整仍是流程错误。
 
-终态是 `PLUGIN_ERROR`、`UNSUPPORTED`、`NEEDS_INPUT` 或 `BLOCKED` 时，**修复流程后回到步骤 6 并使用全新
-session 重跑**。旧 session 只读保留，不覆盖、不拼接证据。
+终态是 `PLUGIN_ERROR`、`NEEDS_INPUT` 或 `BLOCKED` 时，**修复流程后回到步骤 6 并使用全新 session 重跑**。
+旧 session 只读保留，不覆盖、不拼接证据。
+
+`UNSUPPORTED` 不在此列。它与 `PASS`、`DUT_FAIL` 一样是正式终态：目标 SoC 不在任务书硬件集合时没有流程
+可修，重跑也不会改变结果。按步骤 10 逐字汇报后停止。更换目标 SoC 只能由调用方决定；不得为绕开这个终态
+去改 spec 的 `task.hardware`，它来自任务书。
 
 ## 步骤 10　读取收据并逐字汇报
 
