@@ -11,7 +11,7 @@
     {
       "name": "oprunway",
       "source": "./plugin",
-      "description": "ATK 驱动的昇腾 NPU 算子验收。调用方给出一份任务书与配对的算子源码，插件唯一入口 skill `/oprunway:acceptance-workflow` 据此编排 spec 与 ATK design，并在 NPU 目标环境上通过 `oprunway_cli.py accept` 于全新 session 内完成来源绑定、ATK 生成 caseset、fresh build 与 ATK 执行取证。终态只由 `oprunway.verdict.finalize` 生成，`acceptance.json` 的 verdict 只有 `PASS`、`DUT_FAIL`、`UNSUPPORTED`，证据不完整绝不 PASS。当前能力边界是 runner form `atk_aclnn` 与 build profile `cann_ops_package_v1`；插件不安装 ATK/CANN，也不连接或消费 GPU 数据。"
+      "description": "ATK 驱动的昇腾 NPU 算子验收。调用方给出一份任务书与配对的算子源码，插件唯一入口 skill `/oprunway:acceptance-workflow` 据此编排 spec 与 ATK 用例设计，并在 NPU 目标环境的全新 session 内完成来源绑定、ATK 生成 caseset、fresh build 与 ATK 执行取证。终态由该 skill 的判据一次产出，`acceptance.json` 的 verdict 只有 `PASS`、`DUT_FAIL`、`UNSUPPORTED`，证据不完整绝不 PASS。当前能力边界是 runner form `atk_aclnn` 与 build profile `cann_ops_package_v1`；插件不安装 ATK/CANN，也不连接或消费 GPU 数据。"
     }
   ]
 }

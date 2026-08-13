@@ -24,6 +24,7 @@ skill，前置不就绪时停下说明。
 - **`--plugin-dir` 会泄露仓库路径。** 把参数指向仓内的 `plugin/`，等于把仓库地图交给会话——它可以
   `cd ..` 读到任何东西。实测中会话据此读了 `tests/witnesses/<算子>/design.yaml`（验收参考答案）、
   ignored 的私有机器配置，并在仓根 `ls` 了一遍。cwd 在仓外只挡住 `CLAUDE.md` 的自动加载，挡不住路径遍历。
+  （`tests/` 已在后续改动中整体删除，那条具体路径不复存在；但路径遍历这一风险与结论不变。）
 
 `--plugin-dir` 解决前两点。官方文档：*"When a `--plugin-dir` plugin has the same name as an installed
 marketplace plugin, the local copy takes precedence for that session."* 第三点要靠**指向仓外的中性副本**
@@ -106,7 +107,9 @@ cd "$W/plugin" && find . -type f -not -path '*__pycache__*' | sed 's|^\./||' | s
 # 目标机同理，用 sha256sum
 ```
 
-再确认远端能导入：`cd $ROOT/plugin && python3 -c "from oprunway.cli import main"`。
+再确认远端结构完整：`ls $ROOT/plugin/.claude-plugin/plugin.json
+$ROOT/plugin/skills/acceptance-workflow/SKILL.md` 两个文件都在。plugin 已不含 Python 模块，
+没有可导入的入口，也不做导入自检。
 
 ## 步骤 6　定位 atk
 
@@ -140,7 +143,8 @@ COPYFILE_DISABLE=1 tar cf - --exclude='__pycache__' --exclude='._*' --exclude='.
 
 按摘要命名有个副作用是好的：本地这份和步骤 5 发到目标机的那份内容相同，摘要天然对齐，省一次核对。
 
-复制前先清掉本地 `plugin/` 下的 `.pytest_cache` 与 `__pycache__`——它们会混进摘要，让两侧对不上。
+复制前先确认本地 `plugin/` 下没有 `.pytest_cache`、`__pycache__` 或编辑器临时文件——它们会混进摘要，
+让两侧对不上。
 
 ## 步骤 8　启动无头会话
 

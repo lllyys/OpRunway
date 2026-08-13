@@ -37,7 +37,8 @@ spec 给出，不能固化在机器 profile 中。
 ### 1.2 就地跑：不读它，直接调用唯一入口
 
 没有「怎么连过去」这一层——目标机就是本机。按 §4 完成只读探测并加载官方 CANN 环境后，确认公开
-`atk` 命令可用，再调用 `plugin/oprunway_cli.py accept`。输入只有 spec、taskdoc、只读源码、ATK design、
+`atk` 命令可用，再通过 skill `/oprunway:acceptance-workflow` 执行。
+输入只有 spec、taskdoc、只读源码、ATK design、
 目标 SoC 与一个不存在的新 ASCII session；复杂 ABI 才增加 generator/execution plugin。环境中可以使用
 系统 Python、容器 Python 或任意已准备的隔离环境，plugin 不要求 venv。
 
@@ -173,14 +174,8 @@ ssh "$OPRUNWAY_MACHINE_SSH_HOST" \
 
 ## 5 · 目标环境内的正式调用
 
-外层机器 profile（如果有）只负责找到执行环境。进入目标环境并加载 CANN 后，使用唯一入口：
-
-```bash
-python3 "$OPRUNWAY_PLUGIN_ROOT/oprunway_cli.py" accept \
-  --spec "$SPEC" --taskdoc "$TASKDOC" --source-root "$SOURCE" \
-  --design "$ATK_DESIGN" --target-soc "$SOC" --session-dir "$NEW_SESSION" \
-  --physical-device "$PHYSICAL_DEVICE"
-```
+外层机器 profile（如果有）只负责找到执行环境。进入目标环境并加载 CANN 后，通过 skill
+`/oprunway:acceptance-workflow` 执行。
 
 `--physical-device` 是必填项，取本轮已在 plugin 外取得锁的物理卡号；CLI 不自动选卡，缺它直接被 argparse 拒绝。
 默认从 `PATH` 解析 `atk`；`atk` 不在 `PATH` 上（例如装在虚拟环境目录里）或存在多个版本时，传

@@ -79,7 +79,7 @@ Copyright (c) 2025 Huawei Technologies Co.,Ltd.
 | `atk_user_guide.md:17-43` | ATK 不可用时「降级」，只生成产物再移交别的环境执行 | SKILL 步骤 1/6：停 `BLOCKED`，不降级；AGENTS.md §3：caseset 与执行须在同一 fresh session 内哈希绑定 |
 | `atk_user_guide.md:399-471`、`590-601` | 手工依次跑 `atk case` / `atk aclnn`，示例还带 `-s 0 -e 1` 只跑一条 | SKILL 步骤 8：不得手工拼子命令绕过正式入口；AGENTS.md §3：完整分母 |
 | `atk_user_guide.md:508` | 「`success 1, failed 0` 即可」 | AGENTS.md §3：ATK 的返回码与 task success 文字不能单独作为成功依据 |
-| `atk_user_guide.md:603-622` | 看 ATK 报告表格与 `atk.log` 自行判断是否通过 | AGENTS.md §4：`oprunway.verdict.finalize` 是唯一终态生产者；SKILL 步骤 10：只逐字引用终态 |
+| `atk_user_guide.md:603-622` | 看 ATK 报告表格与 `atk.log` 自行判断是否通过 | AGENTS.md §4 与 SKILL 步骤 9：终态由本流程的判据产出；步骤 10 只逐字引用，不重判 |
 | `atk_user_guide.md:559-587` | 装 `sitecustomize.py` 注入解释器 hook | AGENTS.md §2：绝不安装依赖、修改系统 Python 或 shell rc |
 | `自定义执行方式.md:66` | 执行器模板里的 `elif self.device == "gpu":` 分支 | AGENTS.md §1：不连接、不运行、不采集、不消费 GPU 数据。**照抄模板时删掉该分支** |
 | `任务执行参数说明.md:30`、`50`、`66-68`、`79` | `--compare-backend npu`、`accuracy_load`、`--white_list`/`--black_list`/`--random`、`--input-data` | 分别违反「由 CPU 真值裁决」「同轮取证」「完整分母」「不复用旧产物」。这些参数由 CLI 控制，agent 不应自行使用 |
@@ -102,6 +102,7 @@ Copyright (c) 2025 Huawei Technologies Co.,Ltd.
 | `atk_user_guide.md:109` | `sdtype_numbers` | 笔误，应为 `dtype_numbers` |
 | `atk_user_guide.md:448` | 同目录只有一个 `execute_*.py` 时可省略 `-p` | 自动加载匹配的是 `function_*.py`。本仓 CLI 总是显式传 `--plugin`，不影响正式路径，但会误导排错 |
 | `自定义执行方式.md:167-181` | 示例用 `torch.ones` 但该代码块未 import torch | 照抄即 `NameError` |
+| `任务执行参数说明.md:53-55` | 任务类型表列出 `performance_device_pta`、`memory_device`、`performance_camodel` | 26.5.14 的 `TaskType` 只有 `accuracy`、`performance_e2e`、`performance_device`、`accuracy_load`、`accuracy_dc`、`run` 六项（`atk/configs/base_config.py:50-57`）；这三个名字在上游全仓 `*.py` 中零命中，照抄即报错 |
 
 `-dt` 在两处含义不同：`atk case` 下是 `--dtype_numbers`，task 与 `atk pytorch|aclnn` 下是
 `--db_timeout`。各自都对，拼命令时不要串。

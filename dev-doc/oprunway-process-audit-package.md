@@ -18,8 +18,8 @@ Mac 上重放用例、重算精度或重新构建 DUT。为避免每次传输大
 `local_root_digest` 根本没有对照物。
 **任一缺失即标 `PROVENANCE_INCOMPLETE`，不得据此复核来源或裁决。** 要审 provenance，
 收件时把本轮 `source_facts.json`（现固定落在 session 的 `receipts/source_facts.json`）显式加进来。
-当前没有可在本地对收件包重跑的复核命令：来源锚对账由 `oprunway.verdict.finalize` 在 `accept` 的同一
-session 内完成，并把绑定结果写进 `reports/acceptance.json`；收回后只能阅读这些收据，不能重新验证绑定。
+当前没有可在本地对收件包重跑的复核命令：来源锚对账在 SKILL 步骤 8 的同一轮执行内完成，
+没有独立入口进程；因此收件人侧的复核依赖交付包内随包命令，而不是重跑某个入口。
 
 ## 2. 默认复制内容
 

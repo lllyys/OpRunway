@@ -12,22 +12,15 @@ fork、ref 或 head 鉴权。任务书是语义、硬件和验收要求权威；
 
 1. 从任务书和源码形成 spec 与 ATK 设计，由 ATK 实际生成 caseset；
 2. 在 NPU 上 fresh build，使用 ATK 执行同一 caseset，采集精度、NPU profiler、加载 ELF 和输出证据，
-   再由确定性代码生成终态。
+   再按 skill 的判据产出终态。
 
 Workflow 不连接、不运行、不采集、不消费 GPU 数据。GPU 精度表述只可解析为同库族 CPU 真值；GPU
 性能或资源对比必须记为未验证限制，不能伪造，也不能据 NPU 绝对时间宣称达标。
 
 ## 2. 唯一实现与入口
 
-设置：
-
-```bash
-export OPRUNWAY_PLUGIN_ROOT="$(git rev-parse --show-toplevel)/plugin"
-```
-
-- `plugin/oprunway/`：唯一确定性实现；
-- `plugin/oprunway_cli.py accept`：唯一正式入口；
-- `plugin/skills/acceptance-workflow/SKILL.md`：唯一 skill，也是唯一编排层。
+- `plugin/skills/acceptance-workflow/SKILL.md`：唯一 skill、唯一编排层，也是唯一判据来源；
+- `plugin/skills/acceptance-workflow/reference/`：随包分发的工具事实，`atk/` 下为上游逐字副本。
 
 `plugin/` 的全部内容只服务于执行一次验收，不承载开发期的设计、取舍与维护判断。判据是：一个只拿到
 `plugin/`、要验收一个算子的执行者，需不需要读这条内容？不需要就不该放在里面。据此排除的典型内容有——
@@ -35,6 +28,11 @@ export OPRUNWAY_PLUGIN_ROOT="$(git rev-parse --show-toplevel)/plugin"
 具体算子的一次性输入绑定。这些放 `AGENTS.md`、`dev-doc/` 或 canon。验收运行时不得修改 `plugin/` 下的任何
 通用代码：是否值得把某个缺口提升为通用能力，运行时既无从判断（不知道别的算子是否撞过同一缺口，且每轮都是
 全新 session），也无法留痕（收据不绑定 plugin 自身身份）。
+
+本仓不再保留确定性 Python 实现。原 `plugin/oprunway/` 与 `plugin/oprunway_cli.py` 已删除，它们强制的
+证据门、收据结构、终态归因与外部命令调用方式全部由该 skill 以中文规则承接。因此不存在会自动拦截违规的
+运行时代码：一切约束只存在于产物的形状、执行环境里有什么没有什么，以及 skill 文字本身。任何声称通过的
+终态都必须显式披露这一信任面。
 
 不得恢复另一套 case generator、golden engine、runner、状态机、裁决器或兼容通路。ATK 缺失能力只能放在
 调用方提供且被收据哈希绑定的最薄 execution/generator plugin；通用生产代码不得按具体算子名分支。
@@ -47,7 +45,7 @@ export OPRUNWAY_PLUGIN_ROOT="$(git rev-parse --show-toplevel)/plugin"
 
 ## 3. 确定性事实链
 
-`oprunway.verdict.finalize` 是唯一终态生产者；skill 和报告不得重判。正式 PASS 至少绑定：
+终态由 skill 第 9 步的判据一次产出，不得在别处重判、改写或软化。正式 PASS 至少绑定：
 
 - 任务书 SHA-256 与 caller-trusted 关联声明；
 - 目标源码子树内容锚，且原始输入、clean staging、build 前后逐字一致；另以同一 staging 忽略规则绑定包含
@@ -78,7 +76,8 @@ fail-closed。ATK 的进程返回码和“task success”文字不能单独作�
 - 依赖/NPU/外部服务不可用可为 `BLOCKED`；
 - 其余流程实现问题为 `PLUGIN_ERROR`。
 
-证据不完整绝不 PASS。`acceptance.json` 与中文 Markdown 只由确定性终结器生成。
+证据不完整绝不 PASS。`acceptance.json` 与中文 Markdown 只按 skill 第 9 步的判据产出，不在别处重判、
+改写或软化。
 
 ## 5. 验收口径
 
@@ -94,14 +93,15 @@ fail-closed。ATK 的进程返回码和“task success”文字不能单独作�
 - Build、用例生成、测试、golden、profiler 和正式裁决都在 NPU 目标环境执行；本机只编辑、Git、只读探测。
 - 物理 NPU 的发现、健康/空闲判断和互斥调度属于 agent 与目标环境的操作边界，不属于 plugin 的验收核心。
   Agent 必须读取当前目标的完整 `npu-smi info`，依据健康项和进程事实选择实际空闲卡；不得只看利用率。
-- 启动正式 CLI 前，agent 必须在 plugin 外对所选物理卡取得预置机器共享路径上的非阻塞 `flock`，持锁覆盖
-  整个正式 CLI，并在锁内紧邻启动前再次读取 `npu-smi` 复核。已有进程、异常卡或已持锁卡只能拒绝；禁止
-  kill、reset、抢占或覆盖锁。同一 A3 上不同空闲卡可以并行，同一卡由外部锁互斥。
-- Formal CLI 只接收显式 `--physical-device N`，把它隔离映射为逻辑 device 0，并在 execution receipt 中记录
-  实际 child environment；CLI 不自动选卡、不解析 `npu-smi`、不创建或裁决机器 lease-domain receipt。
+- 启动正式执行前，agent 必须在 plugin 外对所选物理卡取得预置机器共享路径上的非阻塞 `flock`，持锁覆盖
+  skill 步骤 8 的全过程，并在锁内紧邻启动前再次读取 `npu-smi` 复核。已有进程、异常卡或已持锁卡只能
+  拒绝；禁止 kill、reset、抢占或覆盖锁。同一 A3 上不同空闲卡可以并行，同一卡由外部锁互斥。
+- 正式执行只接收由本节流程选定并加锁的那一张物理卡，显式传给 ATK child 并在 execution receipt 中记录
+  实际 child environment；skill 内部不自动选卡、不解析 `npu-smi`、不管理 machine lease-domain，也不产生
+  设备分配 receipt——选卡与加锁是 agent 在 plugin 外的职责。
 - 没有可用卡时，agent 必须向 Mr.0 列出每张候选卡的健康、占用或锁冲突事实并等待指定物理卡；指定不等于
   强占，后续仍须使用全新 session，重新检查并取得同一外部锁。
-- 每次 `accept` 必须使用不存在的新 ASCII session 目录。源码 staging、build、安装、ATK 缓存、输出、日志和
+- 每次正式执行必须使用不存在的新 ASCII session 目录。源码 staging、build、安装、ATK 缓存、输出、日志和
   报告全部位于该目录；不同算子不得复用可变产物。
 - 可共享只读的 ATK 安装和内容寻址依赖缓存。正式 session 自己复制 caller source，外部源码与任务书只读。
 - 当前 ignored `real-machine.env` 中，A3/A5 的 input-cache 配置值均逐字列入各自 protected roots；这些 cache
@@ -133,4 +133,4 @@ bureau/canon 的记录、整理、查询、审阅或维护任务；此例外不�
 ## 9. 发布前检查
 
 Push 前对自上次 push 以来的代码做一轮 audit → fix → verify；散文规则单独审阅。一轮即停，剩余问题如实
-报告。测试、代码接通、ATK 可导入或局部 evidence 都不得描述成算子正式通过。
+报告。局部 evidence、环境就绪或单个阶段跑通都不得描述成算子正式通过。
