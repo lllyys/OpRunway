@@ -121,9 +121,9 @@ YAML 或 CSV，覆盖任务书要求的 dtype、shape、边界、属性组合与
 - 任务书引用生态算子混合容差标准时用 ATK `mixed_tolerance_bm`，并把任务书要求的 dtype 阈值显式写入该
   对象；不得用 ATK 的无版本隐式默认值替代任务书。
 
-design 文件的字段语义见 [reference/atk/用例设计文件说明.md](reference/atk/用例设计文件说明.md)；参数之间
-的耦合约束（例如某个属性必须落在输入 rank 范围内）有官方机制，见
-[reference/atk/自定义参数约束.md](reference/atk/自定义参数约束.md)，不必自行发明。
+**动手写 design 之前**读 [reference/atk/用例设计文件说明.md](reference/atk/用例设计文件说明.md)，
+不要先写再对照——字段名与取值形态靠猜会反复返工。参数之间的耦合约束（例如某个属性必须落在输入 rank
+范围内）有官方机制，见 [reference/atk/自定义参数约束.md](reference/atk/自定义参数约束.md)，不必自行发明。
 
 design 的 `standard.acc` 必须与步骤 2 的 `task.precision.atk_accuracy` 逐字一致。不一致就回到步骤 2 改齐，
 不要靠执行期对账去发现。
@@ -165,9 +165,10 @@ capability adapter；提升也不得携带算子名、仓名、shape、dtype、S
 
 本步选出的 plugin 在步骤 8 用 `--generator` 或 `--execution-plugin` 传入。
 
-generator 与 execution plugin 的官方写法见
-[reference/atk/自定义参数约束.md](reference/atk/自定义参数约束.md) 与
-[reference/atk/自定义执行方式.md](reference/atk/自定义执行方式.md)。
+**选定落点之后、动手写插件之前**读对应那篇：generator 见
+[reference/atk/自定义参数约束.md](reference/atk/自定义参数约束.md)，execution plugin 见
+[reference/atk/自定义执行方式.md](reference/atk/自定义执行方式.md)。两篇都给了可直接套用的最小模板；
+自己从 ATK 源码反推出来的写法即使能跑，也容易漏掉框架约定。
 
 ## 步骤 6　环境前置检查
 
