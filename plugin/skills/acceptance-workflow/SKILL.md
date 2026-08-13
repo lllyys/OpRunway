@@ -107,6 +107,9 @@ ATK、CANN 或 NPU 未准备好时停在 `BLOCKED`，ABI 或任务书事实不�
 全量 caseset 跑 accuracy，只有 `performance_required_cases` 选中的子集另跑 `performance_device` 与
 profiler。空 Tensor 等无 kernel 用例因此仍纳入功能/精度，但不会伪造 profiler。
 
+ATK 侧字段的权威说明见 [reference/atk/](reference/atk/)（上游逐字副本）。动手前先读那里，不要读 ATK 源码
+反推；副本答不上或版本不匹配时才逆向，并把结论连同实测 ATK 版本写进本轮记录。
+
 ## 步骤 3　生成 ATK design
 
 YAML 或 CSV，覆盖任务书要求的 dtype、shape、边界、属性组合与精度策略。
@@ -117,6 +120,10 @@ YAML 或 CSV，覆盖任务书要求的 dtype、shape、边界、属性组合与
   比较冒充统计验收。
 - 任务书引用生态算子混合容差标准时用 ATK `mixed_tolerance_bm`，并把任务书要求的 dtype 阈值显式写入该
   对象；不得用 ATK 的无版本隐式默认值替代任务书。
+
+design 文件的字段语义见 [reference/atk/用例设计文件说明.md](reference/atk/用例设计文件说明.md)；参数之间
+的耦合约束（例如某个属性必须落在输入 rank 范围内）有官方机制，见
+[reference/atk/自定义参数约束.md](reference/atk/自定义参数约束.md)，不必自行发明。
 
 design 的 `standard.acc` 必须与步骤 2 的 `task.precision.atk_accuracy` 逐字一致。不一致就回到步骤 2 改齐，
 不要靠执行期对账去发现。
@@ -157,6 +164,10 @@ capability adapter；提升也不得携带算子名、仓名、shape、dtype、S
 `atk_aclnn + cann_ops_package_v1`，是算子泛化，不是任意 repository build profile 泛化。
 
 本步选出的 plugin 在步骤 8 用 `--generator` 或 `--execution-plugin` 传入。
+
+generator 与 execution plugin 的官方写法见
+[reference/atk/自定义参数约束.md](reference/atk/自定义参数约束.md) 与
+[reference/atk/自定义执行方式.md](reference/atk/自定义执行方式.md)。
 
 ## 步骤 6　环境前置检查
 
