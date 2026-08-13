@@ -165,10 +165,15 @@ capability adapter；提升也不得携带算子名、仓名、shape、dtype、S
 
 本步选出的 plugin 在步骤 8 用 `--generator` 或 `--execution-plugin` 传入。
 
-**选定落点之后、动手写插件之前**读对应那篇：generator 见
-[reference/atk/自定义参数约束.md](reference/atk/自定义参数约束.md)，execution plugin 见
-[reference/atk/自定义执行方式.md](reference/atk/自定义执行方式.md)。两篇都给了可直接套用的最小模板；
-自己从 ATK 源码反推出来的写法即使能跑，也容易漏掉框架约定。
+**选定落点之后、动手写插件之前**读对应那篇。generator 见
+[reference/atk/自定义参数约束.md](reference/atk/自定义参数约束.md)。
+
+execution plugin 以 [reference/atk/atk_user_guide.md](reference/atk/atk_user_guide.md) 第 338 行起的
+「pyaclnn 最小接口」为准——它继承 `AclnnBaseApi`，与本仓固定的 `atk_aclnn` runner 匹配。
+[reference/atk/自定义执行方式.md](reference/atk/自定义执行方式.md) 里的 ACLNN 示例继承 `BaseApi`，在
+ATK 26.5.14 上会 `TypeError`，只可作为接口概念的参考，不要照抄；其执行器模板里的 GPU 分支也必须删掉。
+
+照抄模板前先读 [reference/atk/README.md](reference/atk/README.md) 的「读之前必看」与「本仓适用性」两节。
 
 ## 步骤 6　环境前置检查
 
