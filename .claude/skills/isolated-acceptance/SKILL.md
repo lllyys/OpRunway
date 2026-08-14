@@ -198,7 +198,7 @@ python3 "$(dirname "$0")/watch.py" "$ISO/run.jsonl" --brief   # 只看人话
 python3 "$(dirname "$0")/watch.py" "$ISO/run.jsonl" --full    # 结果不截断
 ```
 
-它把事件流归成步骤条加人话加真实命令与结果：走到第几步、步骤 8 内部走到哪个环节（输入锚定 / staging /
+它把事件流归成步骤条加人话加真实命令与结果：走到第几步、步骤 5 内部走到哪个环节（输入锚定 / staging /
 用例生成 / build / 安装 / 双符号 / ATK 执行 / 裁决）、说了什么、跑了哪些命令、哪些是真失败。只读，
 Ctrl-C 不影响会话继续跑。
 

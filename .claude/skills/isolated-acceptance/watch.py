@@ -10,7 +10,7 @@
     --width N       命令/结果每条最多显示的字符数（默认 700）
     --replay        从头快速回放已有内容后再跟随（默认就是这样）
 
-步骤 8 是最长的一段（输入锚定 → staging → 用例生成 → build → 安装 → 双符号 → 执行 → 裁决），
+步骤 5 是最长的一段（输入锚定 → staging → 用例生成 → build → 安装 → 双符号 → 执行 → 裁决），
 进入该步后会另出一条子进度条。
 
 ✓ 只表示模型自己在回复里勾掉了该步；▶ 是按当前动作的关键词推测，不代表真的完成。
@@ -31,42 +31,41 @@ PATH = paths[0]
 
 COLS = min(shutil.get_terminal_size((120, 40)).columns, 140)
 
-STEPS = ["确认适用", "生成 op.spec.json", "生成 ATK design", "绑定官方 bundle",
-         "选择能力落点", "环境前置检查", "选定并锁定物理卡", "在锁内执行验收",
-         "核对终态判据", "产出收据与终态"]
+STEPS = ["生成 op.spec.json", "生成 ATK design", "选择能力落点", "环境前置检查",
+         "在锁内执行验收", "核对终态判据", "产出收据与终态"]
 
-# 步骤 8 内部的八个环节
+# 步骤 5 内部的八个环节
 SUB = ["输入锚定", "staging", "用例生成", "build", "安装", "双符号", "ATK 执行", "裁决"]
 
 B, D, G, Y, R, C, M, BL, O = ("\033[1m", "\033[2m", "\033[32m", "\033[33m", "\033[31m",
                               "\033[36m", "\033[35m", "\033[34m", "\033[0m")
 
-# (正则, 主步骤, 子环节序号, 人话)
+# (正则, 主步骤, 子环节序号, 人话)。主步骤为 None 表示只打印、不推进进度条。
 GLOSS = [
     (r"task_doc|taskdoc|任务书",                    1, None, "读任务书（语义/硬件/阈值权威）"),
     (r"_def\.cpp|op_def",                           1, None, "读 op_def（dtype 与 SoC 能力交叉验证）"),
     (r"aclnn_\w+\.h\b",                             1, None, "读 header（ABI 事实）"),
     (r"examples?/.*\.(cpp|py)",                     1, None, "读 example（调用形态）"),
     (r"docs?/.*\.md",                               1, None, "读接口文档"),
-    (r"witnesses|参考答案",                          4, None, "⚠ 接触 witness 夹具"),
-    (r"selftest|self_test|self-test",               4, None, "查源码自带 self-test"),
-    (r"spec\.json",                                 2, None, "写 / 校验 op.spec.json"),
-    (r"design.*\.(yaml|yml|csv)|\bdesign\b",        3, None, "写 / 校验 ATK design"),
-    (r"generator|execution_plugin|_plugin\.py",     5, None, "处理 generator / execution plugin"),
-    (r"atk[^|;]*--version|--version[^|;]*atk",      6, None, "探测 ATK 版本"),
-    (r"npu-smi",                                    7, None, "读 NPU 全卡健康与占用"),
-    (r"\bflock\b",                                  7, None, "对物理卡加互斥锁"),
-    (r"\bcp -|\brsync\b|tar .*-C .*inputs",         8, 1,    "把调用方输入复制进 session"),
-    (r"staging",                                    8, 2,    "建 clean staging"),
-    (r"\batk\b[^|;]*\bcase\b",                      8, 3,    "★ ATK 生成 caseset"),
-    (r"build\.sh|\bcmake\b|\bninja\b",              8, 4,    "★ fresh build（最长）"),
-    (r"\.run\b[^|;]*--install|--install[^|;]*\.run|--quiet.*--install", 8, 5, "★ 安装自定义算子包"),
-    (r"\bnm\b\s+-|GetWorkspaceSize",                8, 6,    "★ vendor ELF 双符号验证"),
-    (r"\batk\b[^|;]*\baclnn\b[^|;]*performance",    8, 7,    "★ ATK 性能执行"),
-    (r"\batk\b[^|;]*\baclnn\b",                     8, 7,    "★ ATK 精度执行"),
-    (r"op_statistic|op_summary|PROF_|msprof",       8, 7,    "采集 profiler kernel 数据"),
-    (r"acceptance\.(json|md)",                      9, 8,    "终态文件"),
-    (r"receipts?/",                                10, None, "读 / 写收据"),
+    (r"witnesses|参考答案",                       None, None, "⚠ 接触 witness 夹具"),
+    (r"selftest|self_test|self-test",             None, None, "查源码自带 self-test"),
+    (r"spec\.json",                                 1, None, "写 / 校验 op.spec.json"),
+    (r"design.*\.(yaml|yml|csv)|\bdesign\b",        2, None, "写 / 校验 ATK design"),
+    (r"generator|execution_plugin|_plugin\.py",     3, None, "处理 generator / execution plugin"),
+    (r"atk[^|;]*--version|--version[^|;]*atk",      4, None, "探测 ATK 版本"),
+    (r"npu-smi",                                 None, None, "读 NPU 全卡健康与占用（skill 外）"),
+    (r"\bflock\b",                               None, None, "对物理卡加互斥锁（skill 外）"),
+    (r"\bcp -|\brsync\b|tar .*-C .*inputs",         5, 1,    "把调用方输入复制进 session"),
+    (r"staging",                                    5, 2,    "建 clean staging"),
+    (r"\batk\b[^|;]*\bcase\b",                      5, 3,    "★ ATK 生成 caseset"),
+    (r"build\.sh|\bcmake\b|\bninja\b",              5, 4,    "★ fresh build（最长）"),
+    (r"\.run\b[^|;]*--install|--install[^|;]*\.run|--quiet.*--install", 5, 5, "★ 安装自定义算子包"),
+    (r"\bnm\b\s+-|GetWorkspaceSize",                5, 6,    "★ vendor ELF 双符号验证"),
+    (r"\batk\b[^|;]*\baclnn\b[^|;]*performance",    5, 7,    "★ ATK 性能执行"),
+    (r"\batk\b[^|;]*\baclnn\b",                     5, 7,    "★ ATK 精度执行"),
+    (r"op_statistic|op_summary|PROF_|msprof",       5, 7,    "采集 profiler kernel 数据"),
+    (r"acceptance\.(json|md)",                      6, 8,    "终态文件"),
+    (r"receipts?/",                                 7, None, "读 / 写收据"),
     (r"sha256sum|shasum",                        None, None, "算哈希（锚定 / 核验）"),
     (r"python3?\s+-c|\bimport\b",                None, None, "探测 Python / 依赖"),
     (r"find .*-type f|\bls -",                   None, None, "清点文件"),
@@ -119,7 +118,7 @@ def stamp():
 
 def bar():
     cells = []
-    for i in range(1, 11):
+    for i in range(1, 8):
         if i in state["done"]:
             cells.append(f"{G}{i}✓{O}")
         elif i == state["step"]:
@@ -139,7 +138,7 @@ def subbar():
             cells.append(f"{Y}{B}{nm}{O}")
         else:
             cells.append(f"{D}{nm}{O}")
-    print(f"{B}└─ 步骤8: {D}·{O} ".rstrip() + f" {D}·{O} ".join(cells))
+    print(f"{B}└─ 步骤5: {D}·{O} ".rstrip() + f" {D}·{O} ".join(cells))
 
 
 def setstep(n, sub=None, forced=False):

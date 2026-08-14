@@ -75,6 +75,6 @@ Spec 必须显式绑定 ATK 精度比较器，caseset 会逐 case 对账。精�
 执行不完整也不自动跳过性能；执行错误一律保持非 DUT workflow 状态，其中超时、环境或进程隔离阻塞为
 `BLOCKED`，其它流程实现错误为 `PLUGIN_ERROR`，都不会直接归因到 DUT。
 任务书准入的目标 SoC 在 fresh build/install 后仍缺该算子的设备侧 ops-info/binary/kernel delivery，且请求
-cache 与 host ACLNN ABI 已完整绑定时，由 skill 第 9 步的判据一次产出
+cache 与 host ACLNN ABI 已完整绑定时，由 skill 第 6 步的判据一次产出
 `DUT_FAIL / TARGET_DELIVERY_MISSING`；普通构建失败
 或证据不完整不适用该结论。

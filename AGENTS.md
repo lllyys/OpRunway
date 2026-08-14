@@ -45,7 +45,7 @@ Workflow 不连接、不运行、不采集、不消费 GPU 数据。GPU 精度�
 
 ## 3. 确定性事实链
 
-终态由 skill 第 9 步的判据一次产出，不得在别处重判、改写或软化。正式 PASS 至少绑定：
+终态由 skill 第 6 步的判据一次产出，不得在别处重判、改写或软化。正式 PASS 至少绑定：
 
 - 任务书 SHA-256 与 caller-trusted 关联声明；
 - 目标源码子树内容锚，且原始输入、clean staging、build 前后逐字一致；另以同一 staging 忽略规则绑定包含
@@ -76,7 +76,7 @@ fail-closed。ATK 的进程返回码和“task success”文字不能单独作�
 - 依赖/NPU/外部服务不可用可为 `BLOCKED`；
 - 其余流程实现问题为 `PLUGIN_ERROR`。
 
-证据不完整绝不 PASS。`acceptance.json` 与中文 Markdown 只按 skill 第 9 步的判据产出，不在别处重判、
+证据不完整绝不 PASS。`acceptance.json` 与中文 Markdown 只按 skill 第 6 步的判据产出，不在别处重判、
 改写或软化。
 
 ## 5. 验收口径
@@ -94,7 +94,7 @@ fail-closed。ATK 的进程返回码和“task success”文字不能单独作�
 - 物理 NPU 的发现、健康/空闲判断和互斥调度属于 agent 与目标环境的操作边界，不属于 plugin 的验收核心。
   Agent 必须读取当前目标的完整 `npu-smi info`，依据健康项和进程事实选择实际空闲卡；不得只看利用率。
 - 启动正式执行前，agent 必须在 plugin 外对所选物理卡取得预置机器共享路径上的非阻塞 `flock`，持锁覆盖
-  skill 步骤 8 的全过程，并在锁内紧邻启动前再次读取 `npu-smi` 复核。已有进程、异常卡或已持锁卡只能
+  skill 步骤 5 的全过程，并在锁内紧邻启动前再次读取 `npu-smi` 复核。已有进程、异常卡或已持锁卡只能
   拒绝；禁止 kill、reset、抢占或覆盖锁。同一 A3 上不同空闲卡可以并行，同一卡由外部锁互斥。
 - 正式执行只接收由本节流程选定并加锁的那一张物理卡，显式传给 ATK child 并在 execution receipt 中记录
   实际 child environment；skill 内部不自动选卡、不解析 `npu-smi`、不管理 machine lease-domain，也不产生

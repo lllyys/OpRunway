@@ -2,6 +2,24 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-14 · 删掉 skill 的步骤 1 / 4 / 7，十步收为七步
+
+- `plugin/skills/acceptance-workflow/SKILL.md` 272 行改为 238 行。整节删除三步：「确认适用」（入口判据，
+  与「何时使用」重复）、「绑定官方 self-test bundle」（连同 `task.case_bundle` 字段与步骤 8 里那句
+  bundle 同一只读副本的要求）、「选定并锁定物理卡」（`npu-smi` 巡检、`flock`、`DEVICE_UNAVAILABLE`
+  上报，整套连同 Mr.0 指定卡的规则）。
+- 其余七步整体重编号 `2→1 3→2 5→3 6→4 8→5 9→6 10→7`，正文除交叉引用的数字外一字未动。唯一的措辞改动
+  是执行步骤里的物理卡来源：「把步骤 7 锁定的物理卡」改为「把调用方已选定并加锁的物理卡」，结尾
+  「那些是步骤 7 的事」改为「选卡与加锁在本 skill 之外完成」。
+- 跟着改了三个跨文件引用：`AGENTS.md` 两处「skill 第 9 步」改「第 6 步」、一处「skill 步骤 8 的全过程」
+  改「步骤 5」；`plugin/README.md` 一处「skill 第 9 步」改「第 6 步」。
+- **验收 agent 因此看不到的规则**：选卡健康判据、非阻塞 `flock`、禁止 kill/reset/抢占、无可用卡时的
+  `DEVICE_UNAVAILABLE` 上报，现在只剩 `AGENTS.md` §6 一处，而 `AGENTS.md` 不随 plugin 分发、隔离会话
+  刻意不加载它；官方 self-test bundle 优先于现场推导、必须成为完整分母这条规则，删除后仓内已无任何
+  载体。两处都是有意为之的删除，不是遗漏。
+- `.claude/skills/isolated-acceptance/watch.py` 的十步进度条与「步骤 8 子进度条」尚未跟改，下轮观察会
+  显示旧步骤名。
+
 ## 2026-08-13 · 删除全部确定性实现，skill 只改不符合现状的地方
 
 - 删 `plugin/oprunway/` 与 `plugin/oprunway_cli.py` 共 3800 行，删 `tests/` 共 3318 行（9 个 py 文件与四组
