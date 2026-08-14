@@ -3,6 +3,19 @@
 本目录是 ATK 上游文档的**逐字副本**，不是转述，也不是提炼。逐字的理由是可比对：副本能和上游 diff，
 提炼版不能。
 
+## 同级的三份派生事实
+
+本目录（`atk/`）只放上游文档的逐字副本。与本目录平级的三份是**从源码读出来的事实**，不是文档的转述：
+
+| 文件 | 内容 |
+|---|---|
+| `../atk-source-facts.md` | 十条会影响判定的 ATK 实际行为：阈值键写入不生效、标杆含 nan/inf 时直接判过、出参 buffer 按标杆分配、异常时退出码仍为 0 等 |
+| `../atk-interface-facts.md` | 调用侧与产物侧的字面量：子命令与开关的取值范围和默认值、设计文件字段、工作簿表名与列名、日志命中模式、profiler 落盘文件 |
+| `../build-layout-facts.md` | 被测仓族的构建脚本形态、安装包行为、以及安装树的交付布局 |
+
+三份都绑定具体版本，开头写明失效条件。**与本目录的关系是互补不是覆盖**：副本说「文档怎么说」，
+它们说「代码实际怎么做」，两者不一致时以源码事实为准，并在上面的勘误表登记。
+
 ## 为什么要副本
 
 ATK 的文档**不随安装分发**。上游仓库有 `docs/` 与 `skill/`，但 `MANIFEST.in` 只包含
@@ -103,6 +116,7 @@ Copyright (c) 2025 Huawei Technologies Co.,Ltd.
 | `atk_user_guide.md:448` | 同目录只有一个 `execute_*.py` 时可省略 `-p` | 自动加载匹配的是 `function_*.py`。本仓 CLI 总是显式传 `--plugin`，不影响正式路径，但会误导排错 |
 | `自定义执行方式.md:167-181` | 示例用 `torch.ones` 但该代码块未 import torch | 照抄即 `NameError` |
 | `任务执行参数说明.md:53-55` | 任务类型表列出 `performance_device_pta`、`memory_device`、`performance_camodel` | 26.5.14 的 `TaskType` 只有 `accuracy`、`performance_e2e`、`performance_device`、`accuracy_load`、`accuracy_dc`、`run` 六项（`atk/configs/base_config.py:50-57`）；这三个名字在上游全仓 `*.py` 中零命中，照抄即报错 |
+| `任务执行参数说明.md:19` | `atk aclnn` 的默认待测后端写作 `aclnn` | 实际是 `pyaclnn`（`atk/bin/op_alias.py:33`；`NodeType` 只有 `npu`/`cpu`/`pyaclnn`）。该值决定输出目录前缀与工作簿列前缀为 `pyaclnn_0`，照抄会按错误的前缀去找产物 |
 
 `-dt` 在两处含义不同：`atk case` 下是 `--dtype_numbers`，task 与 `atk pytorch|aclnn` 下是
 `--db_timeout`。各自都对，拼命令时不要串。
