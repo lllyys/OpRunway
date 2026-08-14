@@ -1,0 +1,11 @@
+skill-best-practices.md — 上游逐字副本，勿改
+
+来源  https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
+      （旧域名 docs.claude.com 的同路径 302 跳到此处）
+标题  Skill authoring best practices
+取得  2026-08-11
+校验  sha256 53512972e5a2302d2f0003c66f635a20963e7d121443db5809a17f6909cfe0b4
+      1179 行
+
+与 plugin/skills/acceptance-workflow/reference/atk/ 同一规矩：逐字保留，便于日后与上游 diff。
+要加本仓的判断或勘误，另起文件，不要改这一份。

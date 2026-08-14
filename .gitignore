@@ -45,12 +45,15 @@ __pycache__/
 .claude/settings.local.json
 .claude/CLAUDE.local.md
 .claude/*.local.*
+# skill 改动门的运行时收据，每次放行覆盖一次
+.claude/.skill-gate-receipt.json
 CLAUDE.local.md
 
 # Codex CLI — local files, keep checked-in subdirs
 .codex/*
 !.codex/skills/
 !.codex/prompts/
+!.codex/hooks/
 !.codex/hooks.json
 !.codex/hooks.cc-suite.json
 !.codex/config.toml

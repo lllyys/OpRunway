@@ -1,0 +1,16 @@
+{
+  "description": "改 skill 需要上游收据（见 .codex/hooks/skill-gate-codex.py）。需一次性 hook trust 才生效。",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .codex/hooks/skill-gate-codex.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

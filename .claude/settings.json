@@ -1,0 +1,23 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|Skill|mcp__codex-cli__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill-edit-gate.py\"",
+            "statusMessage": "Checking skill-edit gate...",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(claude --plugin-dir:*)",
+      "Bash(bash /private/tmp/claude-501/:*)"
+    ]
+  }
+}
