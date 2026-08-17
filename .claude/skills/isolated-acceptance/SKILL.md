@@ -41,6 +41,7 @@ marketplace plugin, the local copy takes precedence for that session."* 第三�
 - [ ] 步骤 1  确定算子、任务书来源、被测源码来源
 - [ ] 步骤 2  读私有机器配置
 - [ ] 步骤 3  在目标机建本轮工作根
+- [ ] 步骤 3a 打通目标机的网络出口
 - [ ] 步骤 4  拷入输入并核验
 - [ ] 步骤 5  部署 plugin 并双侧比对摘要
 - [ ] 步骤 6  定位目标机上的 atk 可执行
@@ -69,6 +70,34 @@ set -a; . "$(dirname "$(git -C "$W" rev-parse --git-common-dir)")/.oprunway/real
 
 在目标机新建一个本轮专用目录 `$ROOT`。它**不得落在 `OPRUNWAY_MACHINE_PROTECTED_ROOTS` 的任何条目
 之下**，也不得复用既有目录。已存在就换名，不覆盖。
+
+## 步骤 3a　打通目标机的网络出口
+
+目标机没有直连外网，而 build 会拉第三方依赖——实测撞到 `git clone https://gitcode.com/cann/cmake.git`，
+拉不到就卡在那里。本机 7897 是本地代理端口，用反向隧道送到目标机的 58231：
+
+```bash
+autossh -M 0 -N -R 58231:localhost:7897 \
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes \
+  "$OPRUNWAY_MACHINE_SSH_HOST" &
+```
+
+隧道可能已经在了，先查再建，不要重复起：`pgrep -f 'ssh.*-R 58231'`。
+
+**建完必须验证**，容器内跑一次，拿到状态行才算通：
+
+```bash
+docker exec "$OPRUNWAY_MACHINE_CONTAINER" bash -lc \
+  'curl -sI -x http://127.0.0.1:58231 https://gitcode.com | head -1'
+```
+
+隧道只是通路，不会自动生效——目标机上凡是要联网的命令都得显式带代理，容器内同样：
+
+```bash
+http_proxy=http://127.0.0.1:58231 https_proxy=http://127.0.0.1:58231 <命令>
+```
+
+所以这两个变量要写进步骤 8 的提示词环境项。验不通就停下说明，不要让会话自己去摸。
 
 ## 步骤 4　拷入输入并核验
 
@@ -176,6 +205,7 @@ claude --plugin-dir "$PLUGIN" \
 - SoC：$OPRUNWAY_MACHINE_SOC
 - ATK：<步骤 6 得到的绝对路径>
 - 物理卡：<上面选定的卡号，会话必须用它，不要自己另选>
+- 联网：目标机无直连外网。需要联网的命令（例如 build 拉第三方依赖）前面加 http_proxy=http://127.0.0.1:58231 https_proxy=http://127.0.0.1:58231
 - plugin：$ROOT/plugin
 - 执行目录：${ROOT}，在其下新建本轮 session
 
@@ -194,8 +224,9 @@ PROMPT
 仓规、不规定 spec 从哪来、不规定汇报格式。这些要么在被加载的 skill 里，要么就该由它自己判断——判不
 出来正是要暴露的。
 
-环境项里 SoC、物理卡号与「CANN 由 login profile 加载」这半句是执行必需而它无法自行发现的：目标 SoC 是
-正式入口的必填项；被加载的 skill 把选卡放在它之外、拿不到卡号就停；用 `sh` 进容器加载不了环境。
+环境项里 SoC、物理卡号、代理变量与「CANN 由 login profile 加载」这半句，是执行必需而它无法自行发现的：
+目标 SoC 是正式入口的必填项；被加载的 skill 把选卡放在它之外、拿不到卡号就停；不给代理它会在 build 拉
+第三方依赖时卡住；用 `sh` 进容器加载不了环境。
 
 ## 步骤 9　盯日志
 
