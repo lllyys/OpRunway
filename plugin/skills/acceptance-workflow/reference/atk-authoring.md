@@ -100,12 +100,20 @@ inputs:
       has_lower_border: true
 ```
 
-三条 design 规则：
+design 规则：
 
-- 普通确定性算子用 `single_bm` 或任务书阈值。
+- **精度判据一律取自随包的《生态算子开源精度标准》**（`reference/experimental_standard.md`，从 SKILL.md
+  直接进）。任务书里凡引用 AscendOpTest 之处都读作这份。用 `mixed_tolerance_bm`，把该 dtype 的 `rtol`、
+  `atol`、`required_matched_ratio`、`max_abs_error_limit` 从该标准 §2.2 逐字抄进 design 对象，不得用
+  ATK 的隐式默认值。
+- `complex64` 用 FLOAT32 那一列，实部与虚部各自按该列判定。
+- §2.2 只覆盖 6 种浮点。**表外的整型与 bool 不在该标准范围内**（其 §0 写明需按算子实际业务场景单独
+  制定）。这些 dtype 精确可表示、不存在舍入，容差没有意义，所以默认判据就是**逐位相等**，spec 里写明
+  这条依据即可。例外：算子语义本身允许整型结果有差异时（饱和或舍入策略、归约顺序影响溢出等）不能用
+  相等，须按任务书单独声明。不得把浮点表里的某一列套到表外 dtype。
 - 随机算子必须用任务书授权的固定种子或统计策略；不得用逐元素比较冒充统计验收。
-- 任务书引用生态算子混合容差标准时用 `mixed_tolerance_bm`，并把任务书要求的 dtype 阈值显式写入该对象；
-  不得用 ATK 的无版本隐式默认值替代任务书。
+- 该标准 §1.4 要求 INF/-INF/NAN 对每种 dtype 都覆盖，因此 `has_infnan` 不能关。注意 `single_bm` 在 CPU
+  真值含 nan/inf 时会无条件判过（见 atk-source-facts.md），走那条通路这些用例不具判别力。
 
 ## boundary 的五个开关
 

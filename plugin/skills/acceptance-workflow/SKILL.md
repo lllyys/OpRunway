@@ -16,6 +16,13 @@ description: 对一对任务书与昇腾算子源码执行正式验收——冻�
 
 - [reference/atk-authoring.md](reference/atk-authoring.md)　`op.spec.json` 与 design 的形状、字段约束、
   能力落点、实测通过的 ATK 命令。**步骤 2 与步骤 4 之前必读。**
+- [reference/atk-design-template.yaml](reference/atk-design-template.yaml)　可直接照填的 design 模版，
+  阈值已按标准写死。**写 design 从它开始，不要从零起稿。**
+- [reference/atk-internals.md](reference/atk-internals.md)　ATK 内部注册表事实：阈值通路与键名白名单、
+  内建默认值与标准不符的三种 dtype、两个比较器相反的 nan/inf 行为、边界生成的硬编码、执行桥的三个坑。
+  **写 design 或插件前读它，别再去逆向源码。**
+- [reference/experimental_standard.md](reference/experimental_standard.md)　《生态算子开源精度标准》，
+  精度判据的唯一来源。**任务书里凡引用 AscendOpTest 之处都读作这份。** 步骤 2 必读。
 - [reference/atk-source-facts.md](reference/atk-source-facts.md)　ATK 26.5.14 源码里几个会造成**假通过**
   的行为。写 design 之前必读。
 - [reference/atk/](reference/atk/)　上游文档逐字副本，字段含义与完整取值以它为准：

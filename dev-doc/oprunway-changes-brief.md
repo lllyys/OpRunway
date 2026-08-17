@@ -2,6 +2,39 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-17 · 精度判据锁定生态算子开源精度标准；补 design 模版与 ATK 内部事实；iso 补网络出口
+
+- **精度口径统一。** Mr.0 裁定：任务书里凡引用 AscendOpTest 之处，一律读作 opbase 的《生态算子开源
+  精度标准》。该标准作为上游逐字副本收进 `reference/experimental_standard.md`（sha256 `5423b156…`，
+  与被测仓 ops-math-roll 里 vendored 的那份逐字节相同）。`complex64` 用 FLOAT32 那一列、实虚部各自
+  判定；表外的整型与 bool 默认逐位相等（精确可表示、无舍入，容差无意义），spec 写明依据即可，算子
+  语义允许整型结果有差异时才须单独声明。AGENTS §5 与 SKILL、atk-authoring 同步。
+- **不采用 ATK 随包的那份标准**：`skill/atk-quality-guard/references/experimental_standard.md` 已被
+  改动——总元素数上限 2^31 写成 2^34，忽略空白后 26 行差异。也不把上游两份 skill 注册为可调用 skill：
+  它写死「精度标准为 mixed_tolerance_bm」并附祈使式 NEVER 清单，与本仓「任务书权威」是两套判据来源，
+  而 AGENTS §2 要求唯一判据来源。
+- **新增 `reference/atk-design-template.yaml`（89 行）**：照填即可的 design 模版，六种浮点的
+  rtol/atol/required_matched_ratio/max_abs_error_limit 逐字抄自标准 §2.2。24 个阈值键已用 ATK 自己的
+  白名单校验通过，零个会 raise。
+- **新增 `reference/atk-internals.md`（126 行）**：把一次真机验收里花掉 11 分钟逆向出来的结论固化，
+  条条带文件行号。四条要点——① 阈值写在 design 的 `standard.acc` 字典里，值原样展开成比较器 kwargs
+  （`compare_excutor.py:176`），键名写错会 raise 而非静默失效；② ATK 内建默认值有三种与标准不符
+  （hf32、fp8e4m3、fp8e5m2），而 fp16/bf16/fp32 恰好一致，所以这坑极难发现；③ `complex64` ATK 内部
+  就归到 fp32 列并把实虚部分别判定，无需自行拆分；④ `has_upper_border` 硬编码
+  `shape[i] = 2**31 + 1`（`parameter_extra_tensor.py:177`），不看 `max_length`，标准 §1.2 的上边界
+  覆盖在本工具上落不了地，只能关掉并记 UNVALIDATED。另坐实执行桥两条：`TORCH_TO_ACLTYPE` 有 uint16/
+  uint64/complex32 却漏 `torch.uint32`（而 `ACL_UINT32` 存在，是映射表漏行不是能力缺失）；
+  `bind_function` 按 lib+符号名全局缓存，命中即返回旧绑定、忽略新 arg_types。
+- **两条相反的 nan/inf 行为**：`single_bm` 是 CPU 真值含 nan/inf 就无条件判过；`mixed_tolerance_bm`
+  是 NPU 结果含 nan/inf 就判不过。标准 §1.4 要求 INF/NAN 必测，这条只有在后者下才真正成立。
+- 依据：上游 docs 与 skill 都不写内部注册表——27 项关键词在 `docs/` 与 `skill/` 里 0 命中，只在 `atk/`
+  代码里有。所以搬文档解决不了步骤 2 的耗时，只有从代码抽事实才行。全部对 ATK `7220f27` 核实，该
+  commit 与目标机上运行的版本相同。
+- **`isolated-acceptance` 补「步骤 3a 打通目标机的网络出口」**：目标机无直连外网，build 拉第三方依赖
+  （实测 `git clone gitcode.com/cann/cmake.git`）会挂死，第三轮为此白等 14 分钟。用
+  `autossh -R 58231:localhost:7897` 反向隧道，先 pgrep 查再建，容器内 `curl -x` 验证，并把
+  `http_proxy`/`https_proxy` 写进提示词环境项。
+
 ## 2026-08-17 · 真机实测暴露选卡缺口：去锁后无人选卡，执行者自己挑中了别人正在用的卡
 
 - 七步框架第一次上真机（Roll）。步骤 1–6 全部跑通：204 case、ID 集合对齐、201 过 3 挂、408 份输出、
