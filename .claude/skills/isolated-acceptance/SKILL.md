@@ -45,7 +45,7 @@ marketplace plugin, the local copy takes precedence for that session."* 第三�
 - [ ] 步骤 5  部署 plugin 并双侧比对摘要
 - [ ] 步骤 6  定位目标机上的 atk 可执行
 - [ ] 步骤 7  建仓外隔离目录
-- [ ] 步骤 8  后台启动无头会话
+- [ ] 步骤 8  选定物理卡，后台启动无头会话
 - [ ] 步骤 9  盯日志，出问题即上报
 - [ ] 步骤 10 收结果
 ```
@@ -148,6 +148,18 @@ COPYFILE_DISABLE=1 tar cf - --exclude='__pycache__' --exclude='._*' --exclude='.
 
 ## 步骤 8　启动无头会话
 
+### 先选一张真空闲的卡
+
+被加载的 skill 明确把选卡放在它之外，没拿到卡号会停在 `NEEDS_INPUT`。所以这一步由本 skill 选定并
+在提示词里给出。
+
+读**完整**的 `npu-smi info`——不是 `-t usages`，也不是只看头几张卡。逐卡看两样：健康项是否 OK，
+以及底部进程表里这张卡有没有进程。**只有两样同时成立才算空闲。** 利用率 0% 不算证据：实测遇到过
+一张卡挂着五个他人进程而 `Aicore Usage Rate` 为 0，据此选中会与人共卡，性能数据作废。
+
+已有进程或异常的卡只能跳过，绝不 kill、reset 或抢占。没有任何卡同时满足健康与空闲时，逐张列出事实
+向用户报告并停下，等用户指定；指定不构成强占授权。
+
 ```bash
 cd "$ISO"
 claude --plugin-dir "$PLUGIN" \
@@ -163,6 +175,7 @@ claude --plugin-dir "$PLUGIN" \
 - 容器：${OPRUNWAY_MACHINE_CONTAINER}，进容器用 docker exec ${OPRUNWAY_MACHINE_CONTAINER} bash -lc "…"（CANN 环境由 login profile 加载）
 - SoC：$OPRUNWAY_MACHINE_SOC
 - ATK：<步骤 6 得到的绝对路径>
+- 物理卡：<上面选定的卡号，会话必须用它，不要自己另选>
 - plugin：$ROOT/plugin
 - 执行目录：${ROOT}，在其下新建本轮 session
 
@@ -181,8 +194,8 @@ PROMPT
 仓规、不规定 spec 从哪来、不规定汇报格式。这些要么在被加载的 skill 里，要么就该由它自己判断——判不
 出来正是要暴露的。
 
-环境项里 SoC 与「CANN 由 login profile 加载」这半句是执行必需而它无法自行发现的：目标 SoC 是正式入口的
-必填项；用 `sh` 进容器加载不了环境。
+环境项里 SoC、物理卡号与「CANN 由 login profile 加载」这半句是执行必需而它无法自行发现的：目标 SoC 是
+正式入口的必填项；被加载的 skill 把选卡放在它之外、拿不到卡号就停；用 `sh` 进容器加载不了环境。
 
 ## 步骤 9　盯日志
 
