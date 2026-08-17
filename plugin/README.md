@@ -54,19 +54,17 @@ Spec 声明 `task.case_bundle` 时，须把官方 cases/prototype/golden 作为�
 输入，会被复制和哈希绑定，不是平行 runner。正式产物位于 `<session>/receipts/` 与 `<session>/reports/`。
 
 物理 NPU 的发现与调度是 agent/目标环境的操作协议，不是 acceptance core。启动前，agent 读取当前目标的
-完整 `npu-smi info`，依据健康项和进程事实选择实际空闲卡；随后在 plugin 外对该卡取得预置机器共享路径上的
-非阻塞 `flock`，在锁内紧邻启动前再次读取 `npu-smi`，并把锁保持到整个正式流程退出。已有进程、异常卡或
-已持锁卡只能跳过，绝不 kill、reset、抢占或覆盖锁。不同 A3 物理卡可运行不同 fresh session 并行；同一卡
-由外部锁互斥。
+完整 `npu-smi info`，依据健康项和进程事实选择实际空闲卡，并在紧邻启动前再复核一次。已有进程或异常的卡
+只能跳过，绝不 kill、reset 或抢占。不同 A3 物理卡可运行不同 fresh session 并行；当前不做互斥调度，同一
+卡上的并发只能靠选卡时的检查规避。
 
-Plugin 不枚举候选卡、不解析 `npu-smi`、不创建 machine-domain marker、不申请机器 lease，也不产生设备分配
-receipt。正式流程只接收已由外部调度确认的物理卡号 N，将该物理卡映射为 ATK 逻辑 device 0，并在 execution
-receipt 中记录实际 child environment（包括 `ASCEND_RT_VISIBLE_DEVICES=<N>`）。物理编号是本轮运行时输入，
-不得写进 tracked spec。
+Plugin 不枚举候选卡、不解析 `npu-smi`，也不产生设备分配 receipt。正式流程只接收已由外部选定的物理卡号
+N，将该物理卡映射为 ATK 逻辑 device 0，并在 execution receipt 中记录实际 child environment（包括
+`ASCEND_RT_VISIBLE_DEVICES=<N>`）。物理编号是本轮运行时输入，不得写进 tracked spec。
 
-若没有卡同时满足健康、空闲和外部锁条件，agent 报告 `DEVICE_UNAVAILABLE`，逐项列出候选卡的健康、占用或
-锁冲突事实，然后等待 Mr.0 指定物理卡；此时不启动正式流程，也不伪造 workflow/device receipt。收到指定后
-仍须使用不存在的新 session，重新读取 `npu-smi`、取得该卡外部锁并在锁内复核；指定绝不构成强占授权。
+若没有卡同时满足健康与空闲，agent 报告 `DEVICE_UNAVAILABLE`，逐项列出候选卡的健康与占用事实，然后等待
+Mr.0 指定物理卡；此时不启动正式流程，也不伪造 workflow/device receipt。收到指定后仍须使用不存在的新
+session 并重新读取 `npu-smi`；指定绝不构成强占授权。
 
 正式 `acceptance.json` verdict 只有 `PASS`、`DUT_FAIL`、`UNSUPPORTED`。未形成正式裁决时，
 `workflow.json` 与可写入时的 `attempt.json` 使用 `PLUGIN_ERROR`、`NEEDS_INPUT` 或 `BLOCKED` 描述本轮尝试；

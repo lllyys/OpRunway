@@ -83,24 +83,24 @@ fail-closed。ATK 的进程返回码和“task success”文字不能单独作�
 
 - 精度是必选维度；默认由 ATK 在 NPU DUT 与任务书授权的 CPU 真值之间裁决。
 - 随机算子必须在 spec/ATK 设计中声明任务书要求的统计或固定种子策略；不能用普通逐元素比较替代。
-- 性能模式只有 `none` 与 `measure`。`measure` 使用 ATK `performance_device` 及其保存的 CANN profiler
-  kernel 数据，明确 timing scope；GPU/原算子比值未同法实测时列为 `UNVALIDATED`。
+- 性能测量恒做：每轮都用 ATK `performance_device` 采集 device 时间与原始 CANN profiler kernel 数据，并
+  写清 timing scope。是否构成终态判据由任务书决定；任务书未提出性能要求时数值仅为实测值，采集失败只记
+  `UNVALIDATED`，不改变精度结论。GPU/原算子比值未同法实测时一律 `UNVALIDATED`，不得用 NPU 绝对时间顶替。
 - 内存、显存、workspace、带宽等资源不是第三验收维度；报告说明未评估，不宣称资源条款达标。
 - 单 session 主动墙钟预算不得超过 7200 秒；不得靠缩减任务书覆盖、复用旧 build 或放宽判据提速。
 
 ## 6. 隔离、环境与权限
 
 - Build、用例生成、测试、golden、profiler 和正式裁决都在 NPU 目标环境执行；本机只编辑、Git、只读探测。
-- 物理 NPU 的发现、健康/空闲判断和互斥调度属于 agent 与目标环境的操作边界，不属于 plugin 的验收核心。
-  Agent 必须读取当前目标的完整 `npu-smi info`，依据健康项和进程事实选择实际空闲卡；不得只看利用率。
-- 启动正式执行前，agent 必须在 plugin 外对所选物理卡取得预置机器共享路径上的非阻塞 `flock`，持锁覆盖
-  skill 步骤 5 的全过程，并在锁内紧邻启动前再次读取 `npu-smi` 复核。已有进程、异常卡或已持锁卡只能
-  拒绝；禁止 kill、reset、抢占或覆盖锁。同一 A3 上不同空闲卡可以并行，同一卡由外部锁互斥。
-- 正式执行只接收由本节流程选定并加锁的那一张物理卡，显式传给 ATK child 并在 execution receipt 中记录
-  实际 child environment；skill 内部不自动选卡、不解析 `npu-smi`、不管理 machine lease-domain，也不产生
-  设备分配 receipt——选卡与加锁是 agent 在 plugin 外的职责。
-- 没有可用卡时，agent 必须向 Mr.0 列出每张候选卡的健康、占用或锁冲突事实并等待指定物理卡；指定不等于
-  强占，后续仍须使用全新 session，重新检查并取得同一外部锁。
+- 物理 NPU 的发现与健康/空闲判断属于 agent 与目标环境的操作边界，不属于 plugin 的验收核心。Agent 必须
+  读取当前目标的完整 `npu-smi info`，依据健康项和进程事实选择实际空闲卡；不得只看利用率。已有进程或
+  异常的卡只能跳过；禁止 kill、reset 或抢占他人进程。紧邻启动前再读一次 `npu-smi` 复核，状态有变就换卡。
+- 正式执行只接收由 agent 选定的那一张物理卡，显式传给 ATK child 并在 execution receipt 中记录实际 child
+  environment；skill 内部不自动选卡、不解析 `npu-smi`，也不产生设备分配 receipt——选卡是 agent 在 plugin
+  外的职责。同一目标上不同空闲卡可以并行。当前不做互斥调度：并发的两轮有可能选中同一张卡，启动前那次
+  复核只缩小这个窗口，不消除它。
+- 没有可用卡时，agent 必须向 Mr.0 列出每张候选卡的健康与占用事实并等待指定物理卡；指定不等于强占，
+  后续仍须使用全新 session 并重新检查。
 - 每次正式执行必须使用不存在的新 ASCII session 目录。源码 staging、build、安装、ATK 缓存、输出、日志和
   报告全部位于该目录；不同算子不得复用可变产物。
 - 可共享只读的 ATK 安装和内容寻址依赖缓存。正式 session 自己复制 caller source，外部源码与任务书只读。

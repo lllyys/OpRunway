@@ -2,6 +2,40 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-16 · 验收 skill 重写为七步框架，去锁、去强制冷启、性能恒做，主干瘦 20%
+
+- 由用户给出的七步框架重写 `plugin/skills/acceptance-workflow/SKILL.md`：锚定输入与环境准入 / 冻结
+  spec 与 ATK design / 编译安装与验证装载身份 / 生成 ATK case / 精度测试 / 性能测试 / 证据闭合与报告。
+  原「提取信息」与「生成 yaml」合并为一个冻结门，且必须在编译之前完成——Codex 评审指出先看见实现再
+  设计 case 会照着实现裁剪 case，对缩水的任务宣布 PASS；我原先认同「编译放第 2 位」，据此修正。
+- **去掉一次执行之内的强制换 session。** 原规则「改了被哈希绑定的输入即整轮作废、另开 session 从头走」
+  是开发期用来反复验证冷启动的脚手架。改为「从第一个消费该输入的步骤起重做，对应收据整份重写，同一
+  session 即可」，原则由「换目录」改述为**没有过期的证据活下来**。步骤 6 里已形成非 DUT 终态后的重跑
+  同样不再换目录，只要求先清空会重新产出的目录。每次正式执行一个新 session 目录这条不变——作用域是
+  每次 skill 执行，不是执行内部。
+- **去掉全部设备锁。** `flock`、锁目录、持锁覆盖、锁内复核、锁冲突上报、lease-domain 从 SKILL、
+  AGENTS §6、`plugin/README.md`、`isolated-acceptance` 全部移除。保留不依赖锁的两类：读完整
+  `npu-smi info` 选实际空闲卡并在启动前复核；已有进程或异常的卡只能跳过，禁止 kill/reset/抢占。
+  AGENTS §6 与 README 各明写一句「当前不做互斥调度，并发两轮可能选中同一张卡」，不装作没有。
+- **性能测量改为恒做。** 原 `dimensions.performance` 的 `none`/`measure` 换成
+  `task.performance_is_verdict`：测量无条件做，是否构成终态判据由任务书决定；任务书未要求时数值仅为
+  实测值，采集失败只记 `UNVALIDATED`，不改变精度结论。任务书未指定代表场景时按固定规则选——每个 dtype
+  取最小与最大各一个（只测最大会漏掉小 shape 的启动开销回退，Codex 提出）。AGENTS §5 同步改写。
+- **按 skill-best-practices 精简，264 → 210 行。** 规则一条没删，把「形态」整体搬进新增的
+  `reference/atk-authoring.md`（164 行、带目录）：spec JSON、字段约束表、design 骨架、`boundary` 五个
+  开关、能力落点、Roll 那轮实测通过的 ATK 命令。步骤 2 从 71 行降到 11。删掉整节「价值顺序」——五条里
+  四条在别处已有具体规则，只是摘要。所有 reference 从 SKILL.md 直接链、新文件内部零相对链接，遵守
+  「引用只能一层深」；主干不留摘要，避免本仓踩过的同一规则多副本漂移。
+- 另采纳 Codex 评审四条：对账改为 case ID 集合而非数量（漏一个边界 case、另一个重复生成，计数一样）；
+  casegen 与执行必须用同一个 ATK 绝对路径与版本；「结果分析」改名「证据闭合与报告」（同一次超时被
+  「分析」成两种终态等于没有判据）；`op.spec.json` 拆掉环境执行参数，顺带修掉原步骤 1 要求填
+  `atk_version` 而探测 ATK 在步骤 4 的自相矛盾。
+- 未实测项如实标注：`--task performance_device` 只在 `--help` 中存在，本仓从未真跑；`--save_data
+  output` 实跑生效但 `atk aclnn --help` 里没有该选项。
+- `isolated-acceptance` 的 `watch.py` 跟随改为七步并删掉子进度条（不再有嵌套步骤），顺带修两处误判：
+  `atk case` 曾被 `design` 模式抢走，`ATK_CUSTOM_OPP_PATH` 出现在每条 ATK 命令上会把精度执行误判成
+  编译步。十一个典型命令逐条实测。
+
 ## 2026-08-14 · 删掉 skill 的步骤 1 / 4 / 7，十步收为七步
 
 - `plugin/skills/acceptance-workflow/SKILL.md` 272 行改为 238 行。整节删除三步：「确认适用」（入口判据，

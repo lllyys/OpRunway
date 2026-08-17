@@ -1,6 +1,6 @@
 ---
 name: acceptance-workflow
-description: 对一对任务书与昇腾算子源码执行正式验收——在全新 session 内做 ATK 用例生成、NPU 上 fresh build、精度与性能取证，并按本文判据产出裁决。当调用方给出任务书加算子源码要求做 NPU 算子验收，或提到 ATK、acceptance.json、DUT_FAIL、TARGET_DELIVERY_MISSING 时使用。本 skill 不安装 ATK、CANN 或任何依赖，环境未就绪时停在 BLOCKED。
+description: 对一对任务书与昇腾算子源码执行正式验收——冻结 spec 与 ATK design，在 NPU 上 fresh build，用 ATK 生成用例并取证精度与性能，按本文判据产出裁决。当调用方给出任务书加算子源码要求做 NPU 算子验收，或提到 ATK、acceptance.json、DUT_FAIL、TARGET_DELIVERY_MISSING 时使用。本 skill 不安装 ATK、CANN 或任何依赖，环境未就绪时停在 BLOCKED。
 ---
 
 # Acceptance workflow
@@ -10,229 +10,202 @@ description: 对一对任务书与昇腾算子源码执行正式验收——在�
 调用方给出任务书和对应源码，要求做 NPU 算子验收时使用。安装依赖、建立代理隧道或准备 CANN/NPU 不属于
 本 skill；这些前置不就绪时停止并标 `BLOCKED`。
 
-## 价值顺序
+## 参考资料
 
-只编排一次干净验收，不自行裁决。取舍时按以下顺序决定：
+写 spec、写 design、调 ATK 之前先读对应那篇，不要靠猜，也不要读 ATK 源码反推：
 
-1. 任务书权威高于源码实现便利；调用方给定的任务书/源码关联无需再次鉴权。
-2. 完整、可重放的证据高于尽快出结果；证据缺失时 fail-closed。
-3. 声明式 spec/design 高于自定义代码。
-4. 单一算子缺口留在被哈希绑定的 witness plugin，高于污染通用 core；本轮不做跨算子抽象。
-5. 正式终态逐字引用，不自行归因或改写。
+- [reference/atk-authoring.md](reference/atk-authoring.md)　`op.spec.json` 与 design 的形状、字段约束、
+  能力落点、实测通过的 ATK 命令。**步骤 2 与步骤 4 之前必读。**
+- [reference/atk-source-facts.md](reference/atk-source-facts.md)　ATK 26.5.14 源码里几个会造成**假通过**
+  的行为。写 design 之前必读。
+- [reference/atk/](reference/atk/)　上游文档逐字副本，字段含义与完整取值以它为准：
+  [用例设计文件说明.md](reference/atk/用例设计文件说明.md) 讲 design 字段，
+  [自定义参数约束.md](reference/atk/自定义参数约束.md) 讲 generator plugin，
+  [atk_user_guide.md](reference/atk/atk_user_guide.md) 的「pyaclnn 最小接口」讲 execution plugin。
+  照抄任何模板前先看 [README.md](reference/atk/README.md) 的「读之前必看」与「本仓适用性」——
+  [自定义执行方式.md](reference/atk/自定义执行方式.md) 的 ACLNN 示例继承 `BaseApi`，26.5.14 上会
+  `TypeError`。
 
 ## 验收流程
 
 复制这份清单到回复里，逐项勾掉再往下走：
 
 ```
-- [ ] 步骤 1  生成 op.spec.json
-- [ ] 步骤 2  生成 ATK design
-- [ ] 步骤 3  选择能力落点
-- [ ] 步骤 4  环境前置检查
-- [ ] 步骤 5  在锁内执行验收（只走一遍）
-- [ ] 步骤 6  核对终态判据
-- [ ] 步骤 7  产出收据与终态，逐字汇报
+- [ ] 步骤 1  锚定输入与环境准入
+- [ ] 步骤 2  冻结 spec 与 ATK design
+- [ ] 步骤 3  编译、安装、验证装载身份
+- [ ] 步骤 4  生成 ATK case
+- [ ] 步骤 5  精度测试
+- [ ] 步骤 6  性能测试
+- [ ] 步骤 7  证据闭合与报告
 ```
 
-## 步骤 1　生成 op.spec.json
+另有三节贯穿性规则在步骤 7 之后——「贯穿全程」「失败与修复的处置」「怎么等长命令跑完」，动手前先读。
 
-从任务书抽取语义、硬件和验收维度，从 header/example 抽 ABI，从 op\_def 交叉 dtype 与 SoC。只放稳定字段，
-不写机器路径。
+**步骤 2 必须在步骤 3 之前完成并冻结。** 先看见实现再设计 case，就会照着实现裁剪 case：任务书要求的
+边界跑不通就从 design 里省掉，剩下的全过，于是对一个缩了水的任务宣布 PASS。
 
-```json
-{
-  "schema": "oprunway.acceptance_spec",
-  "schema_version": 1,
-  "operator": {
-    "name": "Example",
-    "aclnn_name": "Example",
-    "op_type": "Example",
-    "build_token": "example",
-    "source_subdir": "domain/example"
-  },
-  "task": {
-    "taskdoc_sha256": "<64 hex>",
-    "hardware": ["ascend910_93"],
-    "dimensions": {"precision": true, "performance": "none"},
-    "precision": {"atk_accuracy": "single_bm"},
-    "unvalidated_requirements": ["无法由本 NPU workflow 取证的任务书原文条款"],
-    "required_cases": [
-      {"inputs": [{"index": 0, "dtype": "fp32", "shape": [2, 3]}]}
-    ],
-    "performance_required_cases": []
-  },
-  "runner": {
-    "form": "atk_aclnn",
-    "atk_version": "<preflight 探测到的 ATK 版本>",
-    "device": 0,
-    "case_timeout_seconds": 300,
-    "stage_timeout_seconds": 3600,
-    "workflow_timeout_seconds": 7200,
-    "seed": 17
-  },
-  "build": {
-    "profile": "cann_ops_package_v1",
-    "vendor_name": "oprunway",
-    "jobs": 8
-  }
-}
-```
+## 步骤 1　锚定输入与环境准入
 
-字段约束：
+- **调用方给的任务书与源码一律只读。** 复制一份进本轮 session，此后一切校验、哈希与执行只用副本；不在
+  原位 checkout、build、安装或写入任何产物。部分目标环境还会另行指定若干只读根，给了就一并遵守；没有给
+  不等于可以就地写入。
+- 记录任务书 SHA-256 与算子源码子树的内容锚。这两个锚是「测的到底是哪一份」的唯一证据，缺了就不成其为
+  验收。
+- session 目录必须是一个**不存在**的全新 ASCII 路径。
+- 找到 `atk` 可执行文件，记下**绝对路径**、公开版本与 SHA-256。它常不在 `PATH` 上（例如装在某个虚拟
+  环境目录里）。此后生成 case 与执行一律用这一个绝对路径：两处用了不同版本，生成语义可能不同，而报告
+  只会写一句「ATK 就绪」。
+- CANN 环境与目标 NPU 就绪。不关心 ATK 由系统、镜像、用户目录还是虚拟环境提供。
 
-| 字段                           | 含义                                                                           | 约束                                                       | 违反时                                      |
-| ---------------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------- |
-| `task.hardware`              | CANN 规范 SoC token，如 A2 `ascend910b`、A3 `ascend910_93`、Ascend 950 `ascend950` | 新硬件无需改 plugin 白名单                                        | 目标 SoC 不在集合内判 `UNSUPPORTED`              |
-| `dimensions.performance`     | 只有 `none` 与 `measure`                                                        | `measure` 保存 ATK device 时间与代表 case 的原始 CANN profiler CSV | —                                        |
-| `unvalidated_requirements`   | 本 workflow 无法取证的任务书条款                                                        | GPU/原算子比值不得用 NPU 绝对时间替代，须逐项写入并由报告原样保留；无条款时用空列表           | 报告中不得宣称达标                                |
-| `required_cases`             | 任务书最低覆盖契约，按 ACLNN 参数顺序列出必须生成的 dtype/shape/属性子集                               | 不同条目必须匹配不同 case                                          | 缺任一条在 fresh build 前停止；非空 caseset 不构成放行理由 |
-| `performance_required_cases` | 按 `required_cases` 下标选代表场景                                                   | `measure` 时必须非空，`none` 时必须为空                             | 流程错误                                     |
-| `precision.atk_accuracy`     | ATK 精度比较器                                                                    | 与 ATK design 的 `standard.acc` 逐字一致                       | 生成后逐 case 对账，不一致即拦截                      |
-| `runner.device`              | 运行环境内的逻辑 device                                                              | 恒为 0；物理卡不是 spec 事实，不得写入 tracked 输入                       | —                                        |
+目标 SoC 不在任务书的硬件集合内即 `UNSUPPORTED`，不执行 DUT。**这个判断先于环境检查**：SoC 不匹配是确定
+的结论，不该被「ATK 没装」这类可修复的问题遮住。其余任一项不满足停在 `BLOCKED`。
 
-全量 caseset 跑 accuracy，只有 `performance_required_cases` 选中的子集另跑 `performance_device` 与
-profiler。空 Tensor 等无 kernel 用例因此仍纳入功能/精度，但不会伪造 profiler。
+## 步骤 2　冻结 spec 与 ATK design
 
-ATK 侧字段的权威说明见 [reference/atk/](reference/atk/)（上游逐字副本）。动手前先读那里，不要读 ATK 源码
-反推；副本答不上或版本不匹配时才逆向，并把结论连同实测 ATK 版本写进本轮记录。
+从任务书抽语义、硬件、验收维度与阈值；从 header/example 抽 ABI；用 op\_def 交叉验证 dtype 与 SoC 能力。
+本步产出 `op.spec.json`、ATK design，以及 design 表达不了时的 plugin，离开本步时全部冻结。
 
-## 步骤 2　生成 ATK design
+形状、字段约束与能力落点见 [reference/atk-authoring.md](reference/atk-authoring.md)。写 design 之前另读
+[reference/atk-source-facts.md](reference/atk-source-facts.md)：`boundary` 有两个默认值会造成假通过，
+必须显式覆盖。
 
-YAML 或 CSV，覆盖任务书要求的 dtype、shape、边界、属性组合与精度策略。
+任务书事实、ABI 或精度口径不足时停在 `NEEDS_INPUT`，不猜测、不补特判。仓的构建形态不属于
+`cann_ops_package_v1` 时停在 `BLOCKED`，不自行新增 build profile。
 
-- 普通确定性算子用 ATK `single_bm` 或任务书阈值。
-- 随机算子必须用任务书授权的固定种子或统计策略。ATK 不能表达该策略时，提供一个通用能力型
-  execution/accuracy plugin 并作为 session 输入哈希绑定；不得退回旧 golden/runner 引擎，也不得用逐元素
-  比较冒充统计验收。
-- 任务书引用生态算子混合容差标准时用 ATK `mixed_tolerance_bm`，并把任务书要求的 dtype 阈值显式写入该
-  对象；不得用 ATK 的无版本隐式默认值替代任务书。
+## 步骤 3　编译、安装、验证装载身份
 
-**动手写 design 之前**读 [reference/atk/用例设计文件说明.md](reference/atk/用例设计文件说明.md)，
-不要先写再对照——字段名与取值形态靠猜会反复返工。参数之间的耦合约束（例如某个属性必须落在输入 rank
-范围内）有官方机制，见 [reference/atk/自定义参数约束.md](reference/atk/自定义参数约束.md)，不必自行发明。
+1. 从 session 内的源码副本建 clean staging，记录完整 build 输入锚（含 `build.sh` 与共享构建文件）。
+2. fresh build（长命令）。
+3. 安装到本轮 session 自己的安装树。
+4. **验证装载身份。** 记录 vendor ELF 的 SHA-256，用 `nm` 证明它同时导出 `aclnnXxxGetWorkspaceSize` 与
+   `aclnnXxx`，并把 `ATK_CUSTOM_OPP_PATH` 钉到本轮安装树。CANN 自带的 `libopapi.so` 可能本身就导出同名
+   `aclnnXxx`——不钉路径、不验来源，测的可能是系统实现而不是被测代码，而且完全无声。这是**最容易产生假
+   PASS 的一处**。
+5. 检查该 SoC 的算子交付（ops-info / binary / kernel）。任务书准入的 SoC、build 与 install 均成功、双符号
+   已绑定，但安装树里没有该 SoC 的交付 → 直接判 `DUT_FAIL / TARGET_DELIVERY_MISSING` 并停止后续。**这是
+   执行前唯一允许成立的 DUT 结论**；普通 build 失败是流程错误，不是 DUT 失败。
 
-design 的 `standard.acc` 必须与步骤 1 的 `task.precision.atk_accuracy` 逐字一致。不一致就回到步骤 1 改齐，
-不要靠执行期对账去发现。
+## 步骤 4　生成 ATK case
 
-## 步骤 3　选择能力落点
+用步骤 2 冻结的 design（和 generator plugin）调用 ATK 生成 caseset，命令见
+[reference/atk-authoring.md](reference/atk-authoring.md)。
 
-先选择最小的已声明能力：
+生成后与 `required_cases` 逐条对账，**对的是 case ID 集合，不是数量**：任务书每一条必测覆盖都要映射到一个
+不同的实际 case ID。数量对得上不代表覆盖到了——漏掉一个边界 case、另一个重复生成，计数完全一样。
 
-| 已确认事实                               | 落点                                 |
-| ----------------------------------- | ---------------------------------- |
-| ATK design 原生可表达                    | 只写 spec 与 design，本步无产出             |
-| 仅 case 组合或生成顺序无法表达                  | generator plugin，作为 session 输入哈希绑定 |
-| CPU 真值、统计比较或 ACLNN ABI 与 ATK 通用桥不兼容 | execution/accuracy plugin，同上       |
-| 新仓构建形态不属于 `cann_ops_package_v1`     | 停在 `BLOCKED`；不自行新增 build profile   |
-| ABI、任务书事实缺失或输入内部冲突                  | `NEEDS_INPUT`，不猜测、不补特判             |
+这份 caseset 就是本轮的完整分母，此后不再增删。
 
-缺口一律留在被哈希绑定的 witness 边界，作为本轮 session 的输入，不进仓库。**本轮绝不修改 `plugin/` 下的
-通用代码。**
+## 步骤 5　精度测试
 
-本步选出的 plugin 在步骤 5 作为本轮 session 输入使用。
+全量 caseset 跑 ATK accuracy，保存 DUT 与 CPU 两侧输出、完整命令回执与返回码。
 
-**选定落点之后、动手写插件之前**读对应那篇。generator 见
-[reference/atk/自定义参数约束.md](reference/atk/自定义参数约束.md)。
+执行前 `source` 安装树里的 `set_env.bash`——CANN 的脚本会读未定义变量，`set -u` 要临时关掉。ATK 的 `-o`
+目录只校验存在、不会创建，先 `mkdir -p`。
 
-execution plugin 以 [reference/atk/atk\_user\_guide.md](reference/atk/atk_user_guide.md) 第 338 行起的
-「pyaclnn 最小接口」为准——它继承 `AclnnBaseApi`，与本仓固定的 `atk_aclnn` runner 匹配。
-[reference/atk/自定义执行方式.md](reference/atk/自定义执行方式.md) 里的 ACLNN 示例继承 `BaseApi`，在
-ATK 26.5.14 上会 `TypeError`，只可作为接口概念的参考，不要照抄；其执行器模板里的 GPU 分支也必须删掉。
+ATK 的进程返回码和「task success」文字不能单独作为成功依据：要逐 case 看工作簿结果，核对每个正常 case
+都有 DUT 与 CPU 输出，预期报错的 case 有对应的报错匹配结果。
 
-照抄模板前先读 [reference/atk/README.md](reference/atk/README.md) 的「读之前必看」与「本仓适用性」两节。
+## 步骤 6　性能测试
 
-## 步骤 4　环境前置检查
+**测量恒做**，与任务书是否提出性能要求无关。跑 ATK `performance_device`，保存 device 时间与原始 CANN
+profiler 数据（`op_statistic` / `op_summary`）。
 
-- 目标环境有可用的公开 `atk` 命令。它不在 `PATH` 上（例如装在某个虚拟环境目录里）或存在多个版本时，
-  记下要用的那个可执行的绝对路径，在步骤 5 用该绝对路径调用。
-- CANN 环境与目标 NPU 就绪。不要求 venv，也不关心 ATK 由系统、镜像、用户目录还是虚拟环境提供。
-- 准备一个**不存在**的全新 ASCII session 路径。
-- **调用方给的任务书与源码一律只读。** 由本轮 session 自己复制一份进来使用，不在原位 checkout、build、
-  安装或写入任何产物。部分目标环境还会另行指定若干只读根，给了就一并遵守；**没有给不等于可以就地写入**。
+**是否构成判据由任务书决定**，即 `task.performance_is_verdict`：
 
-任一项不满足即停在 `BLOCKED`，不要继续到步骤 5。
+- 任务书有性能要求：数值参与终态，采集失败是真缺口。
+- 任务书没有要求：数值照进报告，明确标「任务书未提出性能要求，此处仅为实测值，不构成达标声明」；采集
+  失败只记 `UNVALIDATED`，**不改变精度结论**。把测量变成无条件的，不等于给每一轮多加一个失败面。
 
-## 步骤 5　在锁内执行验收
+跑哪些 case：任务书指定了代表场景就用它的；没指定时按固定规则选——**每个 dtype 取最小与最大各一个**。
+只测最大 shape 会漏掉小 shape 上的启动开销回退，两端都要。不产生 kernel 的 case（空 Tensor 等）排除在
+profiler 分母之外并记下排除原因；没有 kernel 是事实不是故障，不得因此伪造数据。
 
-在锁内只走一遍，依次完成：只读输入锚定 → clean staging → ATK casegen → fresh package build/install →
-ELF 双符号验证 → ATK accuracy/performance execution → 完整分母、实际加载 ELF、CPU/DUT 输出和 profiler
-校验 → 终态。不得跳过任一环节，也不得在后续环节完成之后回头重跑某个已完成的环节再把证据拼进来；
-失败后从失败点向前继续不属此列，处置见本步末尾。
+两条措辞纪律：ATK 的 `avg_time` 是 profiler 窗口内所有行之和，不等于被测 kernel 的单独耗时，报告必须写清
+timing scope；没有同法实测的 GPU 或原算子基线时，任何比值一律记 `UNVALIDATED`，NPU 绝对时间不能顶替。
 
-调用方给的每份输入先复制进本轮 session，此后一切校验、哈希与执行只用副本。每个 plugin 文件都要复制到
-session 并记录 SHA-256。
+预算不够跑完选中的子集时：任务书要求性能就停在 `NEEDS_INPUT`，请调用方指定代表场景；只是观测性采集就
+停止采集并记 `UNVALIDATED`，不得偷偷缩减后宣称达标。
 
-步骤 4 若记下了 `atk` 可执行的绝对路径，本步一律用该绝对路径调用，不依赖 `PATH` 解析。
+## 步骤 7　证据闭合与报告
 
-ATK 执行是两次独立调用，不是一次。全量 caseset 跑 accuracy，并保存 DUT 与 CPU 两侧输出；
-`performance_required_cases` 选中的子集另跑 `performance_device`，并保存原始 CANN profiler 数据。
-`dimensions.performance` 为 `none` 时不跑第二次，也不得产出任何性能证据。两次各自留下完整的命令回执与
-返回码，一次失败不跳过另一次（判据见步骤 6）。任务类型名以随包
-[reference/atk/README.md](reference/atk/README.md) 的勘误为准，不要照抄副本正文里的清单。
+先闭合证据，再产出终态。本步不做开放式「分析」——同一次 ATK 超时，一个人分析成 `DUT_FAIL`、另一个分析成
+`BLOCKED`，那就等于没有判据。
 
-把调用方已选定并加锁的物理卡显式传给 ATK child 并记录同一个 `ASCEND_RT_VISIBLE_DEVICES=<N>`；本步不
-枚举候选、不解析 `npu-smi`、不管理 machine lease-domain，也不产生设备分配 receipt——选卡与加锁在本
-skill 之外完成。
+**闭合检查**，任一不成立即不得 `PASS`：
 
-全程最多 7200 秒主动墙钟，超时即终止本轮并清理整个进程组；不得延长预算后把重试结果当作本轮结果，也不得
-靠缩减任务书覆盖、复用旧 build 或放宽判据提速。
+- caseset 的 case ID 集合 = ATK 工作簿实际执行到的 ID 集合 = 有输出证据的 ID 集合；
+- `required_cases` 每条都映射到一个不同的实际 case ID；
+- ATK 实际加载的 vendor ELF 就是步骤 3 那一份；
+- 每个正常 case 都有 DUT 与 CPU 输出，每个预期报错 case 有工作簿结果；
+- 显式 null、坏类型、缺失 case、缺失输出、ATK 返回码异常或超时，一律 fail-closed。
 
-任一环节失败先停下判断修复的性质，再决定是就地修还是作废重开。修复若不改变任何已写收据所绑定的对象，
-就地修完**从失败的那一环节继续**，不重开 session、也不回头重跑已经完成的环节；若改变了被哈希绑定的
-session 输入（spec、用例设计、生成器、执行插件、已锚定的输入），或改变了任何已写进收据的摘要，当前
-session 立即作废，另开全新 session 从头走。
+**终态词表。** 正式 `acceptance.json` 的 verdict 只有 `PASS`、`DUT_FAIL`、`UNSUPPORTED`。
+`PLUGIN_ERROR`、`NEEDS_INPUT`、`BLOCKED` 描述的是本轮没有形成 DUT 结论，它们不是 DUT 结论。
 
-每次就地修复都要记进本环节的回执：时刻、改了哪个文件、为什么改。一次执行里发生过几次就地修复，必须
-能从收据上数出来；藏起来的修复等同于伪造过程。
+**归因。**
 
-判据本身不在可修之列。阈值、用例分母、必测覆盖、通过条件，以及任何会让原本不通过的结果变成通过的改动，
-无论是否已写收据，一律作废重开，不得就地调整后继续。
+- `DUT_FAIL` 只用于同轮完整执行、证据明确的数值不匹配，或步骤 3 已证据闭合的 `TARGET_DELIVERY_MISSING`；
+- harness、ATK、adapter、环境、超时或证据缺失一律不得归为 DUT 失败；
+- 未知 ABI/精度口径或输入内部事实不足 → `NEEDS_INPUT`；依赖或 NPU 不可用 → `BLOCKED`；其余流程实现问题
+  → `PLUGIN_ERROR`。
 
-### 怎么等长命令跑完
+精度与性能独立取证：性能采集失败不影响精度结论，反之亦然。`UNSUPPORTED` 与 `PASS`、`DUT_FAIL` 一样是
+正式终态，重跑不会改变结果；不得为绕开它去改 spec 的 `task.hardware`，那来自任务书。
 
-fresh build 与 ATK execution 可能各自跑很久，远长于驱动方单次命令通常允许的时长；而驱动方在你停止动作时
-可能判定你已做完。等待方式由这两条决定，与具体在什么环境里驱动无关：
+终态是 `PLUGIN_ERROR`、`NEEDS_INPUT` 或 `BLOCKED` 时，修复流程后回到步骤 1 重跑，同一 session 内即可；
+重跑前先清空会被重新产出的目录（staging、安装树、ATK 输出），再把对应收据整份重写。
 
-- **不要指望一次调用把它等完。** 时间一长就会被单次命令的时长上限截断。
-- **不要交给后台再干等。** 停止动作可能被判定为已完成；驱动进程退出时，它启动的进程会被一并终止。
-- **让长命令脱离驱动进程运行**，把 PID 与返回码写进日志，这样驱动方即使中断，这一次执行仍能自己跑完。
-- **然后反复做有界的检查。** 每次检查都是一次动作，等待期间因此始终有进展可见；每次都在时长上限内返回，
-  因此不会被截断。检查到进程退出或产物出现就停止，再进入下一环节。
-
-轮询期间不要重复启动同一条命令，也不要因为等得久就改判。锁在整个等待期间必须继续持有。
-
-## 步骤 6　核对终态判据
-
-精度与性能独立取证：只要性能维度已声明、目标仍可运行且总预算未耗尽，即使精度执行不完整也继续执行
-performance/profile。
-
-任一阶段的执行失败均保留为非 DUT 流程状态，不能据此直接生成 `DUT_FAIL`。
-
-唯一在 build 阶段允许成立的 DUT 终态是强证据闭合的 `TARGET_DELIVERY_MISSING`：任务书准入目标 SoC、
-fresh build/install 成功、请求 cache 与 host ACLNN 双符号已绑定，但安装树没有该 SoC 的算子
-ops-info/binary/kernel delivery。此时停止 execution 并直接判 `DUT_FAIL`；普通 build 失败或
-证据不完整仍是流程错误。
-
-终态是 `PLUGIN_ERROR`、`NEEDS_INPUT` 或 `BLOCKED` 时，**修复流程后回到步骤 4 并使用全新 session 重跑**。
-旧 session 只读保留，不覆盖、不拼接证据。这三个词描述的是已经形成的终态；步骤 5 执行途中尚未形成终态的
-失败，按该步末尾的判据决定就地修还是作废重开，不必先声明一个终态再重来。
-
-`UNSUPPORTED` 不在此列。它与 `PASS`、`DUT_FAIL` 一样是正式终态：目标 SoC 不在任务书硬件集合时没有流程
-可修，重跑也不会改变结果。按步骤 7 逐字汇报后停止。更换目标 SoC 只能由调用方决定；不得为绕开这个终态
-去改 spec 的 `task.hardware`，它来自任务书。
-
-## 步骤 7　产出收据与终态，逐字汇报
-
-本轮必须产出下列收据与终态文件，缺其一即本轮终态不成立：
+**必须产出的文件**，缺其一即本轮终态不成立：
 
 - `receipts/source_facts.json`：任务书、caller-trusted 关联、算子源码锚、完整 build 输入锚和 SoC 准入；
-- `receipts/cases.json`：ATK 版本与可执行文件 SHA-256、design/generator 摘要、实际生成 caseset；
-- `receipts/build.json`：完整 build 输入锚、fresh build/package、install、ELF、符号和 target delivery；
-- `receipts/execution.json`：显式物理卡到逻辑 device 0 的映射、ATK child environment、ATK 工作簿、完整
-  分母、加载 ELF、CPU/DUT 输出和 profiler；
+- `receipts/cases.json`：ATK 绝对路径、版本与可执行文件 SHA-256、design/generator 摘要、生成的 caseset；
+- `receipts/build.json`：build 输入锚、fresh build/package、install、vendor ELF、双符号和 target delivery；
+- `receipts/execution.json`：物理卡到逻辑 device 0 的映射、ATK child environment、工作簿、完整分母、实际
+  加载的 ELF、CPU/DUT 输出和 profiler；
 - `receipts/workflow.json`：主动总耗时和各阶段耗时；
 - `reports/acceptance.json` / `.md`：唯一正式终态。
 
 只逐字引用终态，不自行归因或改写。向用户汇报时输出 `reports/acceptance.json` 与
-`receipts/workflow.json` 的状态、分阶段耗时和结构化未验证限制；所选物理卡作为环境调度事实单独报告，
-不冒充 formal verdict。
+`receipts/workflow.json` 的状态、分阶段耗时和结构化未验证限制；所选物理卡作为环境调度事实单独报告，不
+冒充 formal verdict。
+
+## 贯穿全程
+
+- ATK 一律用步骤 1 记下的绝对路径调用，不依赖 `PATH` 解析。
+- 把调用方选定的物理卡显式传给每个 ATK child 并记录同一个 `ASCEND_RT_VISIBLE_DEVICES=<N>`；ATK 侧恒为
+  逻辑 `--devices 0`。本 skill 不枚举候选、不解析 `npu-smi`，也不产生设备分配 receipt——选卡在本 skill
+  之外完成。
+- 最多 7200 秒主动墙钟，超时即终止本轮并清理整个进程组；不得延长预算后把重试结果当作本轮结果，也不得靠
+  缩减任务书覆盖、复用旧 build 或放宽判据提速。
+- 缺口一律留在被哈希绑定的 witness plugin，作为本轮 session 的输入，不进仓库。**本轮绝不修改 `plugin/`
+  下的通用代码。**
+
+## 失败与修复的处置
+
+任一步失败先停下判断修复的性质，再决定从哪里继续。要守的只有一条：**没有过期的证据活下来**——交出去的
+那套收据必须描述同一次执行，而不是几次尝试里各取一段拼成的。按这条推：
+
+- 修复没有改变任何已写收据所绑定的对象：就地修完**从失败的那一步继续**，前面已完成的步骤不动。
+- 修复改变了被哈希绑定的 session 输入（spec、design、generator、execution plugin）：从第一个消费该输入的
+  步骤起，其后每一步全部重做，对应收据整份重写，旧值不得留下任何一个字段。同一个 session 里重做即可。
+- 被锚定的源码变了：那不是修复，是换了被测对象，本轮到此为止。
+
+每次就地修复都要记进当步的回执：时刻、改了哪个文件、为什么改。一次执行里发生过几次就地修复，必须能从
+收据上数出来；藏起来的修复等同于伪造过程。重做下游同理，要能看出哪些收据是重写过的。
+
+判据不在可修之列。阈值、case 分母、必测覆盖、通过条件，以及任何会让原本不通过的结果变成通过的改动，本轮
+内都不能动——中途放宽判据再往下走，产出的已经不是这一轮的验收结论。若发现判据本身就是错的，那是重新
+发起一次验收，不是修复。
+
+## 怎么等长命令跑完
+
+步骤 3 的 build 与步骤 5、6 的 ATK 执行可能各自跑很久，远长于驱动方单次命令允许的时长；而驱动方在你停止
+动作时可能判定你已做完。两头都要避开：
+
+- **让长命令脱离驱动进程运行**，把 PID 与返回码写进日志，驱动方即使中断这一次执行仍能自己跑完。指望一次
+  调用等完会被时长上限截断；交给后台再干等，则停止动作可能被判定为已完成，且驱动进程退出时它启动的进程
+  会被一并终止。
+- **然后反复做有界的检查。** 每次检查都是一次动作，等待期间因此始终有进展可见，且每次都在时长上限内
+  返回。检查到进程退出或产物出现就停止。轮询期间不要重复启动同一条命令，也不要因为等得久就改判。
+
