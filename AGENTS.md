@@ -10,17 +10,22 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
 
 ## 2. 结构与镜像
 
-- `plugin/skill/repo-task-atk-test/` 是上游 `skill/` 的逐字镜像；`plugin/.claude-plugin/` 是本仓
-  overlay（manifest 与 upstream 基线记录），上游永不占用该路径。
-- 上游完整 clone 在 ignored `repos/repo-task-atk-test/`（含 ATK submodule 源码与 docs/），只读参考；
-  上游 `CLAUDE.md` 是他们的开发期仓规，不 import、不构成本仓规则。
+- `plugin/` 是上游根的逐字镜像（`skill/`、`docs/`、`CLAUDE.md`、`README.md`；`third_party/` 与
+  git 元文件除外）；`plugin/.claude-plugin/` 是本仓 overlay（manifest 与 upstream 基线记录），
+  上游永不占用该路径。
+- 上游完整 clone 在 ignored `repos/repo-task-atk-test/`（含 ATK submodule 源码），只读参考。
+  上游开发期红线与设计原则随镜像分发：修改 `plugin/` 前先读 `plugin/CLAUDE.md` 与
+  `plugin/docs/development/`；本仓内读写 `plugin/**` 时 `plugin/CLAUDE.md` 会作为子目录记忆自动
+  进入上下文。这些原则约束 skill 开发；与本文件冲突时以本文件为准并记录张力。插件安装态不加载
+  plugin 根 `CLAUDE.md`，`claude plugin validate` 对此的警告是预期行为。
 - 判据的确定性由 skill 自带 `scripts/`（机械门）与 `tests/` 承担；agent 不得绕过机械门，也不得在
   `plugin/` 外另建一套生成或裁决实现。
 - 同步上游：`git -C repos/repo-task-atk-test fetch` 后，用
-  `git diff --binary <旧基线> <新基线> -- skill/ | git apply --3way --directory=plugin`，
+  `git diff --binary <旧基线> <新基线> -- skill/ docs/ CLAUDE.md README.md | git apply --3way --directory=plugin`，
   再更新 `plugin/.claude-plugin/upstream.json` 里的基线。
 - 提 PR：`git diff --binary --relative=plugin <导入基线提交> HEAD -- plugin/skill/` 得到 patch，
-  在 fork（届时再建）里从上游基线切分支应用；`plugin/skill/` 路径限定即公私边界。
+  在 fork（届时再建）里从上游基线切分支应用；`plugin/skill/` 路径限定即公私边界。需要向上游提 docs
+  改动时，把路径限定相应加上 `plugin/docs/` 等。
 
 ## 3. 环境与权限
 

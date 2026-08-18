@@ -9,6 +9,8 @@
 - AGENTS.md 全文重写为薄仓规：仓定位、镜像/同步/提 PR 机制、环境权限、文档纪律、发布前检查；旧 skill 操作性条款随 skill 退役。
 - README、.cc-suite.md、isolated-acceptance 路径断言同步到新 skill；todo 瘦身并挂上 S1–S5 适配与同步演练两项收尾。
 - 删除 12 份已被 ignore 规则覆盖的 tracked 旧审计文件（.cc-suite/audits、.codex-suite/audits）。
+- 镜像范围加宽至上游根（skill/、docs/、CLAUDE.md、README.md），上游红线与设计原则随树分发并借
+  子目录记忆在开发时自动加载；validate 对 plugin 根 CLAUDE.md 的警告属预期。
 
 ## 2026-08-18 · 归档迁移前开发文档并收紧现行文档边界
 
