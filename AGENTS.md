@@ -13,6 +13,8 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
 - `plugin/` 是上游根的逐字镜像（`skill/`、`docs/`、`CLAUDE.md`、`README.md`；`third_party/` 与
   git 元文件除外）；`plugin/.claude-plugin/` 是本仓 overlay（manifest 与 upstream 基线记录），
   上游永不占用该路径。
+- 发布切片：`skill/` 加 overlay manifest 是唯一测试/部署发布物；`docs/`、`CLAUDE.md`、`README.md`
+  是开发件，不进任何测试部署。隔离验收只分发 `plugin/.claude-plugin/` 与 `plugin/skill/`。
 - 上游完整 clone 在 ignored `repos/repo-task-atk-test/`（含 ATK submodule 源码），只读参考。
   上游开发期红线与设计原则随镜像分发：修改 `plugin/` 前先读 `plugin/CLAUDE.md` 与
   `plugin/docs/development/`；本仓内读写 `plugin/**` 时 `plugin/CLAUDE.md` 会作为子目录记忆自动
@@ -23,9 +25,8 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
 - 同步上游：`git -C repos/repo-task-atk-test fetch` 后，用
   `git diff --binary <旧基线> <新基线> -- skill/ docs/ CLAUDE.md README.md | git apply --3way --directory=plugin`，
   再更新 `plugin/.claude-plugin/upstream.json` 里的基线。
-- 提 PR：`git diff --binary --relative=plugin <导入基线提交> HEAD -- plugin/skill/` 得到 patch，
-  在 fork（届时再建）里从上游基线切分支应用；`plugin/skill/` 路径限定即公私边界。需要向上游提 docs
-  改动时，把路径限定相应加上 `plugin/docs/` 等。
+- 提 PR：`git diff --binary --relative=plugin <导入基线提交> HEAD -- plugin/skill/ plugin/docs/ plugin/CLAUDE.md plugin/README.md`
+  得到 patch，在 fork（届时再建）里从上游基线切分支应用；该 pathspec 即公私边界。
 
 ## 3. 环境与权限
 

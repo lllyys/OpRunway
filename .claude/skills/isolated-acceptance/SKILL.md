@@ -122,7 +122,7 @@ git -C "$W" rev-parse --short HEAD           # 记下，作为本轮 plugin 版�
 送过去，排除构建产物：
 
 ```bash
-COPYFILE_DISABLE=1 tar czf - --exclude='__pycache__' --exclude='._*' -C "$W/plugin" . \
+COPYFILE_DISABLE=1 tar czf - --exclude='__pycache__' --exclude='._*' -C "$W/plugin" .claude-plugin skill \
   | ssh "$OPRUNWAY_MACHINE_SSH_HOST" \
     "docker exec -i $OPRUNWAY_MACHINE_CONTAINER bash -lc 'mkdir -p $ROOT/plugin && tar xzf - -C $ROOT/plugin'"
 ```
@@ -131,14 +131,16 @@ COPYFILE_DISABLE=1 tar czf - --exclude='__pycache__' --exclude='._*' -C "$W/plug
 
 ```bash
 # 本地
-cd "$W/plugin" && find . -type f -not -path '*__pycache__*' | sed 's|^\./||' | sort \
+cd "$W/plugin" && find .claude-plugin skill -type f -not -path '*__pycache__*' | sed 's|^\./||' | sort \
   | while read f; do shasum -a 256 "$f" | cut -d' ' -f1; done | shasum -a 256
-# 目标机同理，用 sha256sum
+# 目标机同理，find 同样收窄到 .claude-plugin skill，用 sha256sum
 ```
 
 再确认远端结构完整：`ls $ROOT/plugin/.claude-plugin/plugin.json
 $ROOT/plugin/skill/repo-task-atk-test/SKILL.md` 两个文件都在。plugin 的判据脚本随 skill 位于其 scripts/ 目录，
 没有可导入的入口，也不做导入自检。
+
+开发件（`CLAUDE.md`、`README.md`、`docs/`）不随部署分发——隔离会话物理接触不到它们，测到的才是 skill 自身的零上下文自足性。
 
 ## 步骤 6　定位 atk
 

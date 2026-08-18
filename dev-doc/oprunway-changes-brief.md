@@ -13,6 +13,8 @@
   子目录记忆在开发时自动加载；validate 对 plugin 根 CLAUDE.md 的警告属预期。
 - 定案：测试/验收零上下文，只加载 skill 本体；plugin/CLAUDE.md 仅在本仓开发 plugin/** 时经子目录记忆注入，不进任何验收运行上下文。
 - 镜像健康实证：本机回归 22 failed / 752 passed / 16 skipped（排除缺 openpyxl 的 test_cli_chain.py），failed 集合与上游自报基线 22/756/13 逐类一致，差额全部由本机缺 openpyxl/torch 解释；跑测运行时产物（evidence/ 等）已入 .gitignore。
+- 定案发布切片三态：开发=全镜像可读可改；测试=isolated-acceptance 只分发 .claude-plugin 与 skill/，
+  开发件物理不上机；提 PR=全镜像 pathspec 一条 diff 覆盖 skill/docs/CLAUDE.md/README。
 
 ## 2026-08-18 · 归档迁移前开发文档并收紧现行文档边界
 
