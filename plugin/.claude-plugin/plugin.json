@@ -1,8 +1,9 @@
 {
   "name": "oprunway",
-  "version": "1.0.0",
-  "description": "ATK-backed NPU operator acceptance with fresh-build evidence and deterministic verdicts.",
+  "version": "2.0.0",
+  "description": "上游 repo-task-atk-test 社区算子验收 skill 的镜像发行：用 ATK 验收社区算子，S1–S5 五阶段，判据由 skill 自带机械门脚本承担。",
   "author": {"name": "lys"},
   "repository": "https://github.com/lllyys/OpRunway",
-  "keywords": ["ascend", "npu", "operator", "acceptance", "atk"]
+  "keywords": ["ascend", "npu", "operator", "acceptance", "atk"],
+  "skills": ["./skill/repo-task-atk-test"]
 }

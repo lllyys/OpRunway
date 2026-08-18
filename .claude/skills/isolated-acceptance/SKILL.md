@@ -137,7 +137,7 @@ cd "$W/plugin" && find . -type f -not -path '*__pycache__*' | sed 's|^\./||' | s
 ```
 
 再确认远端结构完整：`ls $ROOT/plugin/.claude-plugin/plugin.json
-$ROOT/plugin/skills/acceptance-workflow/SKILL.md` 两个文件都在。plugin 已不含 Python 模块，
+$ROOT/plugin/skill/repo-task-atk-test/SKILL.md` 两个文件都在。plugin 的判据脚本随 skill 位于其 scripts/ 目录，
 没有可导入的入口，也不做导入自检。
 
 ## 步骤 6　定位 atk

@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "interface_modes": {
+    "pytorch": {
+      "backends": ["npu"],
+      "acceptance_enabled": true,
+      "required_yaml_field": "name"
+    },
+    "aclnn": {
+      "backends": ["pyaclnn"],
+      "acceptance_enabled": true,
+      "required_yaml_field": "aclnn_name"
+    },
+    "kernel": {
+      "backends": ["kernel"],
+      "acceptance_enabled": true,
+      "required_yaml_field": "kernel_name"
+    },
+    "triton": {
+      "backends": ["triton"],
+      "acceptance_enabled": false,
+      "required_yaml_field": "triton_name"
+    },
+    "atb": {
+      "backends": ["atb"],
+      "acceptance_enabled": false,
+      "required_yaml_field": null
+    }
+  },
+  "accuracy": {
+    "allowed_comparators": ["default", "equal", "mixed_tolerance_bm"],
+    "forbidden_override_prefixes": [
+      "fp16_",
+      "bf16_",
+      "fp32_",
+      "hf32_",
+      "fp8e4m3_",
+      "fp8e5m2_"
+    ],
+    "forbidden_override_keys": ["output_dtype_overrides"]
+  },
+  "case_exclusions": {
+    "allowed_causes": ["invalid_case_data", "resource_budget"]
+  },
+  "failure_attribution": [
+    {
+      "id": "operator_defect",
+      "markers": [
+        "aic-error",
+        "aicore error",
+        "aicerror",
+        "ddr address out of range",
+        "trap exception"
+      ],
+      "attribution": "developer",
+      "message": "设备侧核内异常"
+    },
+    {
+      "id": "env_or_builtin",
+      "markers": [
+        "not supported yet",
+        "unimplemented",
+        "aicpu exception"
+      ],
+      "attribution": "pending_recheck",
+      "message": "环境或 CANN 内置路径不支持"
+    },
+    {
+      "id": "case_design",
+      "markers": [
+        "out of memory",
+        "outofmemory",
+        "cannot allocate",
+        "分配内存失败",
+        "bad_alloc"
+      ],
+      "attribution": "pending_recheck",
+      "message": "用例资源需求超出预算"
+    },
+    {
+      "id": "cascade",
+      "markers": [
+        "507018",
+        "stream synchronize failed",
+        "synchronizedevice"
+      ],
+      "attribution": "pending_recheck",
+      "message": "设备异常后的连带失败"
+    }
+  ],
+  "conclusion_causes": ["operator_defect", "accuracy_gap"]
+}

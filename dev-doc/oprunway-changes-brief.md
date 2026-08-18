@@ -2,6 +2,14 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-18 · plugin 换脊柱：自研 acceptance-workflow 退役，镜像上游 ATK 验收 skill
+- plugin/ 旧 skill（219 行 SKILL.md + 14 份 reference）与旧 manifest 全部移除；磁盘残留 acc-common、samples 清理。
+- 上游 Justbin/repo-task-atk-test 锁定基线 179bcec（ATK gitlink a0dfc9a），skill/ 逐字镜像至 plugin/skill/，与基线 commit 校验逐字一致。
+- overlay 落 plugin/.claude-plugin/{plugin.json,upstream.json}，skills 数组指向 ./skill/repo-task-atk-test；marketplace 描述同步至 2.0.0。
+- AGENTS.md 全文重写为薄仓规：仓定位、镜像/同步/提 PR 机制、环境权限、文档纪律、发布前检查；旧 skill 操作性条款随 skill 退役。
+- README、.cc-suite.md、isolated-acceptance 路径断言同步到新 skill；todo 瘦身并挂上 S1–S5 适配与同步演练两项收尾。
+- 删除 12 份已被 ignore 规则覆盖的 tracked 旧审计文件（.cc-suite/audits、.codex-suite/audits）。
+
 ## 2026-08-18 · 归档迁移前开发文档并收紧现行文档边界
 
 - 旧开发期文档 25 份移入 `archive/dev-doc/`；`dev-doc/` 只保留
