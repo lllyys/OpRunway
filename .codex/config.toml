@@ -4,6 +4,7 @@
 
 # Uncomment to also read CLAUDE.md as a fallback instruction source:
 # project_doc_fallback_filenames = ["CLAUDE.md"]
+service_tier = "fast"
 
 # MCP servers mirrored from .mcp.json are added below by /cc-suite:bridge-mcp.
 

@@ -22,21 +22,38 @@ oprunway-canon-gazette.zip
 __pycache__/
 *.pyc
 
+# nlpm 制品质量 lint 的派生产物：HTML 报告与打分历史，重跑即可再生，不入库。
+# 必须带 **/ 前缀：含中间斜杠的模式会被锚到仓根，挡不住 plugin/.claude/ 下的落点。
+**/.claude/nlpm-reports/
+**/.claude/nlpm-history.json
+
 # 系统
 .DS_Store
 
+# Codex CLI 每次调用会在 cwd 落的诊断日志，含 ChatGPT account id，不入库
+/error.log
+
+# cc-suite 由 .mcp.json 派生给 grok 的 MCP 投影，机器本地产物，不入库
+/.grok/
+
+# 上游标准文档的本地缓存（外部素材，只读参照，不入库）
+/.oprunway/cache/
+
 # >>> cc-suite >>>
-# cc-suite-schema: 6
+# cc-suite-schema: 7
 # AI assistant local state
 .claude/settings.local.json
 .claude/CLAUDE.local.md
 .claude/*.local.*
+# skill 改动门的运行时收据，每次放行覆盖一次
+.claude/.skill-gate-receipt.json
 CLAUDE.local.md
 
 # Codex CLI — local files, keep checked-in subdirs
 .codex/*
 !.codex/skills/
 !.codex/prompts/
+!.codex/hooks/
 !.codex/hooks.json
 !.codex/hooks.cc-suite.json
 !.codex/config.toml
@@ -53,4 +70,13 @@ CLAUDE.local.md
 # cc-suite tool-profile bridge (grok/opencode/qwen) — derived provenance
 # sidecars tracking which MCP servers cc-suite owns. Not authored.
 .cc-suite-*.provenance.json
+
+# cc-suite local state — what init created, and the pre-bridge CLAUDE.md backup.
+# Machine-local bookkeeping, not shared. Listed file-by-file on purpose:
+# .cc-suite/agents/ holds declared advisors and IS meant to be committed.
+.cc-suite/provenance
+.cc-suite/original-claude.md
+# Audit findings files written by /cc-suite:audit and the audit-fix loop —
+# per-run working state (findings + fix statuses), not authored content.
+.cc-suite/audits/
 # <<< cc-suite <<<

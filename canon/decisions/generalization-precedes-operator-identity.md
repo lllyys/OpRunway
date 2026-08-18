@@ -1,4 +1,5 @@
 ---
+id: pg-generalization-precedes-operator-identity
 title: Generalization precedes operator identity
 updated: 2026-07-26
 status: proposed
@@ -11,6 +12,6 @@ op_def、header/example 等事实源按字段派生；通用代码不得按具�
 并集包装成通用机制。
 
 具体算子只作为见证和测试输入。域内算子应在工具零改的前提下由 spec/IR/adapter 数据驱动；域外或未知
-接口能力必须 fail-closed 标明不支持，不能猜测归类或硬塞进现有 runner。
+接口能力必须 fail-closed 标明不支持，不能猜测归类或硬塞进现有 runner。 ^claim
 
 **Sources.** [[session 9f5c778e-cdf9-4c84-bb4f-f0ab8c49a99d · 2026-07-24]]

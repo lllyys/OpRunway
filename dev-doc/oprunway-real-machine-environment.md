@@ -1,8 +1,19 @@
 # OpRunway 真机环境入口
 
-> 本文跟踪可共享、可复核的环境能力与使用纪律。实际 SSH alias、容器名和远端路径放在仓根 `.oprunway/real-machine.env`；该文件已被 `.gitignore` 忽略。脱敏字段模板见 `.oprunway/real-machine.env.example`。
+> 本文跟踪可共享、可复核的环境能力与使用纪律。「远程连」形态下的实际 SSH alias、容器名和远端路径放在仓根 `.oprunway/real-machine.env`；该文件已被 `.gitignore` 忽略。脱敏字段模板见 `.oprunway/real-machine.env.example`。**「就地跑」形态不需要这份文件**（见 §1）。
 
-## 1 · 读取本地机器配置
+## 1 · 两种执行形态：先认清自己在哪一种
+
+| 形态 | 什么时候是它 | 要 `.oprunway/real-machine.env` 吗 |
+|---|---|---|
+| **远程连** | 会话在开发机上，得 SSH 到目标机/容器才够得着 NPU | **要**——SSH alias、容器名、远端工作根都在里面 |
+| **就地跑** | 会话本身已在目标机（或其 NPU 容器）里，`npu-smi info` 在本机就能跑 | **不要** |
+
+⚠ 这份文件是**「远程连」的连接元数据，不是跑验收的通用前置**。就地跑时它不存在完全正常：
+**不得**以「缺 `.oprunway/real-machine.env` / 没有 SSH alias、容器名、远端工作目录」为由拒绝启动验收
+（见根 `AGENTS.md` 的 compute 与目标环境规则）。保护根纪律与形态无关，两种形态都按本文 §6 执行。
+
+### 1.1 远程连：先读本地机器配置
 
 在仓根执行：
 
@@ -20,24 +31,34 @@ set +a
 - `OPRUNWAY_A5_*`：950 真机的入口元数据。
 - `OPRUNWAY_MACHINE_PROTECTED_ROOTS`：逗号分隔的远端只读保护根。真实值只在 ignored env 中保存。
 
-它们不是 `run_workflow.py` 的完整运行配置。算子相关的 PR head、op 子目录、被测仓、vendor 名等必须每次从任务书、`pr_facts.json` 和 spec 重新派生，不能固化在机器 profile 中。
+它们不是 plugin 的验收输入。算子、源码目录、SoC、device、阈值和 session 必须每轮由任务书、源码事实与
+spec 给出，不能固化在机器 profile 中。
+
+### 1.2 就地跑：不读它，直接调用唯一入口
+
+没有「怎么连过去」这一层——目标机就是本机。按 §4 完成只读探测并加载官方 CANN 环境后，确认公开
+`atk` 命令可用，再通过 skill `/oprunway:acceptance-workflow` 执行。
+输入只有 spec、taskdoc、只读源码、ATK design、
+目标 SoC 与一个不存在的新 ASCII session；复杂 ABI 才增加 generator/execution plugin。环境中可以使用
+系统 Python、容器 Python 或任意已准备的隔离环境，plugin 不要求 venv。
 
 ## 2 · A2/A3 环境：最近一次验证状态
 
-最近验证日期：2026-07-26。
+最近验证日期：2026-08-10。
 
 | 项 | 已验证事实 |
 |---|---|
 | 目标硬件 | A2/A3 系任务使用；当前 SoC 配置为 `ascend910_93` |
 | 执行形态 | SSH 进入目标机后，在专用容器内执行 build、pytest、用例生成和验收 |
 | Python | 3.12.13 |
-| numpy | 2.5.1 |
+| ATK | 26.5.14；公开 CLI、四 witness casegen、accuracy/performance 路径已验证 |
+| numpy | ATK 前置环境为 1.26.4；新 session 仍须探测 |
 | torch | 2.10.0+cpu |
 | torch_npu | 2.10.0 |
 | pytest | 9.1.1 |
 | jsonschema | 4.26.0 |
 | 性能采集 | `msprof CLI + libms_tools_ext.so ctypes MSTX + task_time CSV` 已真机产出 kernel-only 数据 |
-| Median 最新结果 | `cpp_extension` torch-parity 精度 1152 例：1101 PASS、51 FAIL；`gate.passed=true`，确定性裁决 `FAIL(精度)`；上一轮 1344-case 结果仅作历史记录 |
+| 本轮 workflow 见证 | Remainder 开发 session 完整执行 203.099 秒，确定性终态 `PLUGIN_ERROR`；不作为正式算子结论 |
 
 注意：
 
@@ -48,7 +69,7 @@ set +a
 
 ## 3 · 950 环境：最近一次验证状态
 
-最近完整验证日期：**2026-08-03**（本轮重探，取代 2026-07-02 快照）；开始新任务前仍须重新探测。
+最近完整验证日期：**2026-08-10**；开始新任务前仍须重新探测。
 
 | 项 | 已验证事实 |
 |---|---|
@@ -62,6 +83,7 @@ set +a
 | 驱动 / npu-smi | npu-smi 25.7.rc1 |
 | 编译工具链 | gcc/g++ 11.4.0、cmake 3.22.1、make 4.3、msprof 可用；**ninja 缺失** |
 | Python 包 | **numpy 1.26.4** · scipy 1.17.1 · torch 2.10.0+cpu · torch_npu 2.10.0 · **cv2 4.11.0** · pytest 9.1.1 · protobuf 3.20.0 |
+| ATK | 26.5.14；公开 CLI 与四 witness casegen 已验证，安装形态不是 plugin 契约 |
 | NPU 可用性硬证据 | 容器内 `acl.init() -> 0`、`acl.rt.set_device(7) -> 0`；`torch.randn(3,4).npu()` 实算返回 `device='npu:0'` |
 
 ### 3.1 建容器时的两个已知坑
@@ -115,7 +137,7 @@ set +a
 另有一条 950 侧的 dtype 事实：`torch_npu` 会给出
 `Device do not support double dtype now, dtype cast replace with float` 警告——
 **float64 在该硬件上被降为 float32**（`torch_npu` 会打印上述警告，不是无声发生；
-但计算结果确实按 fp32 走，凡用 torch 侧构造 fp64 中间量的做法都要挂账）。凡是用 torch 侧构造 fp64 中间量的做法都要挂账。
+但计算结果确实按 fp32 走，凡用 torch 侧构造 fp64 中间量的做法都要挂账）。
 
 ---
 
@@ -123,7 +145,8 @@ A2/A3 与 950 没有主备关系。目标机必须由任务书“适配硬件”
 
 ## 4 · 每次真机工作前的只读探测
 
-以下命令只展示探测项；实际 host/container 从忽略文件取：
+以下命令按**远程连**形态写，只展示探测项；实际 host/container 从忽略文件取。
+**就地跑**形态把 `ssh …` / `docker exec …` 外壳去掉、在本机直接执行同样的探测项即可，探测项与核对清单完全一致：
 
 ```bash
 ssh "$OPRUNWAY_MACHINE_SSH_HOST" \
@@ -145,34 +168,28 @@ ssh "$OPRUNWAY_MACHINE_SSH_HOST" \
 2. SoC、CANN、Python、torch/torch_npu 与上次快照是否漂移；
 3. runtime env、setenv、用户态 vendor 目录存在且不可被同组/其他用户写；
 4. NPU 当前是否空闲；
-5. PR head、op 子目录和 DUT build provenance 与本轮 `pr_facts.json` 一致。
-6. 展开 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`，确认本轮新工作根不等于其中任一根、也不位于其子目录。
+5. `atk --version` 与 spec 一致，taskdoc/source 内容摘要、目标子树和本轮 spec 对应。
+6. `.oprunway/real-machine.env` 存在时，展开 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`，确认本轮新工作根不等于其中任一根、
+   也不位于其子目录；文件或该变量缺席只表示**当前未登记保护根**，不构成阻塞，也不等于授权清理任何目录。
 
-## 5 · 进入容器后的流水线变量
+## 5 · 目标环境内的正式调用
 
-外层机器 profile 只负责找到执行环境。进入容器后，再从远端 runtime env 加载本轮真实变量；至少包括：
+外层机器 profile（如果有）只负责找到执行环境。进入目标环境并加载 CANN 后，通过 skill
+`/oprunway:acceptance-workflow` 执行。
 
-- `OPRUNWAY_TARGET=local`
-- `OPRUNWAY_REMOTE_DIR`
-- `OPRUNWAY_ACLNN_OPS_DIR`
-- `OPRUNWAY_ACLNN_OP_SUBDIR`
-- `OPRUNWAY_ACLNN_PR_REF`
-- `OPRUNWAY_ACLNN_PR_HEAD_SHA`
-- `OPRUNWAY_ACLNN_BASE_REPO`
-- `OPRUNWAY_ACLNN_VENDOR_DIR`
-- `OPRUNWAY_ACLNN_VENDOR_NAME`
-- `OPRUNWAY_ACLNN_SOC`
-- `OPRUNWAY_NPU_DEVICE`
-- `OPRUNWAY_SETENV`
-- `OPRUNWAY_ACLNN_REAL=1`
-
-其中 PR、op、repo 与 vendor 字段属于“本轮任务配置”，不得因为机器 profile 已存在就复用旧值。`OPRUNWAY_ACLNN_REUSE_BUILD=1` 也只允许在 provenance stamp 全部匹配时复用。
+`--physical-device` 是必填项，取本轮已在 plugin 外取得锁的物理卡号；CLI 不自动选卡，缺它直接被 argparse 拒绝。
+默认从 `PATH` 解析 `atk`；`atk` 不在 `PATH` 上（例如装在虚拟环境目录里）或存在多个版本时，传
+`--atk-bin` 指定绝对路径。`NEW_SESSION` 必须不存在，fresh build、caseset、
+执行证据和终态不得与旧 session 复用。机器 profile 中的历史 op/vendor 变量不是验收输入，也不能覆盖 spec。
 
 ## 6 · 副作用与安全边界
 
-- build、pytest、用例生成、验收和 profiler compute 全在远程 NPU 环境执行，本地只编辑、维护 Git 与知识记录。
+- build、pytest、用例生成、验收和 profiler compute 全在 NPU 目标环境执行；没有 NPU 的开发机上只编辑、维护 Git 与知识记录。
 - `OPRUNWAY_MACHINE_PROTECTED_ROOTS` 中每个目录及其子目录均为只读保留现场；新 session 不得在其中
   生成文件、覆盖、移动、删除或复用为工作目录。需要调查时默认只读，任何变更须由用户针对具体目录重新授权。
-- clone、checkout、build、真机跑测、删除/覆盖远端目录前仍须用户确认；本文件不构成长期授权。
-- `.oprunway/real-machine.env` 可以保存实际 alias/path，但不得保存凭据。
-- 需要新增机器时，先扩展 `.env.example` 的字段，再在本地忽略文件填实际值；不要把私有默认值写进 Python、shell、spec 或 tracked 文档。
+  该变量**未登记（文件不存在或没设它）不构成阻塞**，但也**不等于**任何目录可以随意写入或清理——
+  未登记只是「本机没有登记过保留现场」，删除/覆盖照旧逐次征得用户确认。
+- clone、checkout、build、真机跑测、删除/覆盖目标机目录前仍须用户确认；本文件不构成长期授权。
+- `.oprunway/real-machine.env` 可以保存实际 alias/path，但不得保存凭据；它只服务「远程连」形态，
+  就地跑时不需要它存在。
+- 需要新增机器时，先扩展 `.oprunway/real-machine.env.example` 的字段，再在本地忽略文件填实际值；不要把私有默认值写进 Python、shell、spec 或 tracked 文档。

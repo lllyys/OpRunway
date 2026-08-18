@@ -1,378 +1,141 @@
-# AGENTS.md — OpRunway 仓根唯一指令入口
-
-**全程中文。** 本文件是 Codex、Claude Code 及其它运行时共同使用的**唯一仓规源**。
-仓根 `CLAUDE.md` 只保留 `@AGENTS.md` 路由，不再维护第二份规则；规则、状态和环境入口只在这里更新。
-
----
-
-## 1 · 这个仓是什么
-
-**OpRunway = NPU（昇腾）算子验收工作区**：输入是“算子任务书 + PR 链接”，输出是机器可校验的验收裁决和中文验收报告。
-
-```
-任务书 + PR ──① 用例生成（ST）──▶ 测试用例集 ──② NPU 跑测──▶ NPU 精度 + 性能
-                                      │
-                                      └──③ 同一份用例喂外部 GPU 标杆──▶ NPU↔GPU 性能报告
-```
-
-用例集是整条流水线的脊柱：
-
-- Task 1：从任务书与 PR 生成覆盖功能、精度、性能的用例集；
-- Task 2：同一份用例在 NPU 上生成精度证据和性能数据；
-- Task 3：消费外部 GPU 数据，按同一 case 身份生成跨设备性能报告。
-  ⚠ **Task 3 是按需能力，不是每轮必做**：按 5.10，任务书即使写了「与 GPU 比对」也默认只做
-  NPU msprof 实测；**只有用户明确要求做 GPU 对比时**才走 Task 3。
-
-任务书是验收权威；PR 和 op_def 是被测事实与能力证据，不能反过来覆盖任务书。
-
----
-
-## 2 · 先接插件根变量
-
-制品里的脚本路径统一使用中立变量。Claude harness 通常只提供 `CLAUDE_PLUGIN_ROOT`；Codex 等运行时须显式设置主变量：
-
-```bash
-export OPRUNWAY_PLUGIN_ROOT="$(git rev-parse --show-toplevel)/plugin"
-```
-
-- 主变量：`OPRUNWAY_PLUGIN_ROOT`；
-- Claude 兼容别名：`CLAUDE_PLUGIN_ROOT`；
-- 可执行命令统一写 `${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`；
-- 私有主机名、容器名、真实远端路径不得进入 Git tracked 文件；
-- 机器本地值只允许写入被 `.gitignore` 忽略的 `.oprunway/real-machine.env`；
-- token、密码、私钥连该本地文件也不得写。
-
----
-
-## 3 · 三层架构与确定性裁决
-
-`plugin/acc-common/` 的 JSON 契约（Layer 0）和确定性 Python 脚本（Layer 1）不依赖任何 agent/CLI 框架；`plugin/agents/`、`plugin/skills/`、`plugin/commands/` 是 Layer 2 薄壳。
-
-**判定的脑子在脚本里，不在 agent：**
-
-- `validator.py`：精度裁决；
-- `perf_compare.py`：性能裁决；
-- `validate_acceptance_state.py`：三级证据完整性门；
-- `run_workflow.py`：门控后写 `acceptance.json`。
-
-任何 agent 或编排层都不得自行重判 pass/fail，只能逐字引用确定性产物并标明来源。
-
-主入口：
-
-```bash
-python3 "${OPRUNWAY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/acc-common/run_workflow.py" \
-  <spec.json> --mode <mode> --out <报告目录>
-```
-
-常用脚本：
-
-- `fetch_source.py`：任务书/PR → 中立事实包；
-- `validate_taskdoc_input.py`：任务书输入校验门（18 项 + 交付件清单，抽 spec 之前）；
-- `reconcile_deliverables.py`：任务书必选交付件 ↔ PR 实际交付物对账（不做模糊名字匹配，认不出即落缺口）；
-- `gen_cases.py <spec> --dry-run`：plan-only 用例计划自检，不产裁决；
-- `check_golden.py`：golden 来源契约；
-- `preflight_aclnn.py`：`aclnn_py` 静态接口预检；
-- `verify_aclnn_harness.py`：真机 harness 信任门；
-- `validate_preparation_state.py`：非真机复用收据；
-- `validate_acceptance_state.py`：验收证据复核门。
-
-跑测信号按“退出码 → 强失败信号 → 强成功信号 → 待复核”分层读取；`UNCERTAIN`、`needs_review` 和证据不完整都不能静默升级为 pass。
-
----
-
-## 4 · `--mode` 只由 `spec.runner_form` 派生
-
-`spec.runner_form` 是唯一真源，受控词表为 `{cpp, aclnn_py, cpp_extension}`：
-
-| `runner_form` | `--mode` | 执行形态 | 默认性能对照物 |
-|---|---|---|---|
-| `cpp` 或未声明 | `new_example` | 编译 per-op C++ runner | 同法测的内置 TBE |
-| `aclnn_py` | `aclnn_py` | 通用 ctypes 调标准 aclnn 两段式 `.so` | 逐字按任务书配置；可为同机 `torch_npu`，也可直接调用 CANN 内置 ACLNN |
-| `cpp_extension` | `cpp_extension` | 按官方 `NpuExtension` / `EXEC_NPU_CMD_EXT` 生成独立 `torch.ops` 调用桥；DUT 仍是指定 PR 构建的 vendor `.so` | 逐字按任务书配置；runner form 不决定 baseline |
-
-- 三条都是真机验收通路、都能产验收裁决；
-- `cpp_extension` 不重编 op-plugin，也不把 op-plugin 当 DUT；它只复用官方 C++ Extension 接入机制，
-  并须以独立构建收据机校绑定完整 PR head、构建命令和实际加载的 vendor ELF；
-- Median + PR6429 当前真机精度基线为 `cpp_extension` 的 torch-parity 完整矩阵：
-  1152 例中 1101 PASS、51 FAIL，`gate.passed=true`，确定性裁决为 `FAIL(精度)`；
-  此结果取代上一轮 1344 例中 1286 PASS、58 FAIL 的历史 checkpoint；
-- `mock`、`catlass`、`catlass_mock` 不能从 `runner_form` 派生，只能显式用于局部开发或对应通路；
-- mock 通路物理上不产 `acceptance.json` 或 `verdict.json`；
-- argparse 的 `new_example` 默认值不是编排依据，编排层必须按 spec 派生；
-- `cpp` 当前真机 dtype 闭环主要是 fp32/fp16/bf16；能力表以 `repo_adapter.SUPPORTED_NP_BY_FORM` 为准，int 等未支持项落 `DEFERRED_NP_BY_FORM`，必须显式挂账并 fail-closed；
-- runner form 只决定执行形态，**不能反推任务书指定的实际性能标杆**；每份任务书的 baseline 仍须单独核实。
-
----
-
-## 5 · 最高纪律
-
-### 5.1 泛化优先，绝不按算子身份特判
-
-这是最高原则：
-
-- 接口、目标目录、shape、dtype、硬件从“任务书 × op_def × header/example”按字段分源探测；
-- 代码里不得出现 `if op == "<具体算子>"` 一类身份分派；
-- 允许按稳定的接口能力、仓形态或框架扩通用 adapter；
-- per-op spec、golden、IR、gap、目标机是通用 schema 消费的数据，合法；
-- 手写 per-op runner 或为某算子修改通用判定逻辑，违规；
-- 具体算子只能作为见证/测试输入，不能成为通用机制的隐藏特例；
-- 建通用能力时优先用能压满结构轴的见证，最小见证只用于冒烟、隔离故障或 baseline；
-- 域内定义以 `plugin/acc-common/contract_ir/` 为准；无状态、标准 aclnn 两段式、无 opaque descriptor 的形态应工具零改可跑；
-- 域外或未知接口能力一律 fail-closed 标“不支持的接口能力”，不硬塞、不自动归类；
-- ABI 以 header/example 为事实源；语义、dtype、硬件以任务书和 op_def 交叉；
-- 三源缺失或冲突仍无法确定时，停下询问用户，绝不静默猜测。
-
-### 5.2 方案、权限与副作用
-
-- 构建新 skill/agent/workflow 或做超出既有方案的架构改动前，先给方案、取舍和边界，经用户同意再实施；
-- clone、checkout、build、真机跑测、删除/覆盖、改远端环境、对外发布前先确认；
-- 支持的脚本优先提供 `*_DRY_RUN=1` 或等价 dry-run；
-- 用户授权某项动作不自动扩张到其它仓、其它远端或其它副作用；
-- 本地只做编辑、Git、只读探测和知识记录。
-
-### 5.3 一切 compute 在远程 NPU 环境
-
-- build、pytest、用例生成、golden 生成、验收、profiler 全在远程 NPU 容器/目标环境执行；
-- 本地不建 venv、不跑 pytest、不 import torch/numpy 做验收 compute；
-- 真机环境统一入口：`dev-doc/oprunway-real-machine-environment.md`；
-- 实际连接元数据：本地忽略文件 `.oprunway/real-machine.env`；
-- 每次新 session 做任何远端 clone/build/跑测/清理前，必须读取
-  `.oprunway/real-machine.env` 的 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`。其中每个根及其全部子目录均为
-  **只读保留现场**：禁止写入、覆盖、移动、删除或作为新执行目录；只允许经用户明确要求的只读核验。
-  未设置表示当前未登记保护根，不得据此猜测或清理其它目录；
-- 机器 profile 只负责找到执行环境，不能替代任务书硬件核定和本轮 PR provenance。
-
-### 5.4 零硬编码与本地配置
-
-- 仓名、路径、SoC、目标算子、阈值、PR head 不写死在通用代码；
-- 运行时探测、从 spec/pr_facts 派生或询问用户；
-- 不碰 `~/.config`、不改 shell rc；
-- 验收产物只落用户 CWD 的 `reports/`；
-- `.oprunway/real-machine.env` 是机器连接元数据的唯一仓内本地例外，必须保持 ignored。
-
-### 5.5 Git、发布与署名
-
-- 不 push、不 merge，除非用户明示；
-- 对非本用户仓的 issue、PR、comment 必须先获同意；
-- commit 可以按开发检查点进行，不要求每个 commit 单独审；
-- 人类署名使用 `lys` / `lllyys`；
-- commit、PR body、报告和其它对外产出不得带任何 AI 署名、trailer 或生成标识；
-- 历史遗留 trailer 不重写，只约束新产出。
-
-### 5.6 文档落点与改动简表
-
-- 项目 Markdown、图、SVG 等**开发过程产物**统一放仓根 `dev-doc/`；
-  这里放的是设计稿、TODO、handoff、实测记录、环境说明——是**开发者写给自己和后来者看的**，
-  不是面向使用者的产品文档（那类若将来要有，另立目录，别混进来）；
-- 不写到工作区上层的 `markdown/`；
-- 每次落地后在 `dev-doc/oprunway-changes-brief.md` 顶部追加一两句倒序摘要；
-- 当前交接以 `dev-doc/oprunway-session-handoff-2026-08-05.md` 为准，旧 handoff 只作历史材料。
-
-### 5.7 push 前审修门
-
-push 前，对自上次 push 以来将要发布的全部改动统一做一轮审修；不逐 commit 审：
-
-- 代码/脚本：走 `cc-suite:audit-fix` 的 audit → fix → verify，一轮即停；
-- 散文/设计/仓规：走独立 Codex 散文审；
-- 散文审默认使用 `gpt-5.6-sol`、reasoning `low`；
-- 当前 CLI 形式为 `codex exec -m gpt-5.6-sol -c model_reasoning_effort=low`；
-- verify 剩余 finding 如实交用户，不自动无限迭代；
-- `nlpm` 是 NL 制品质量 lint，不替代本门；
-- 旧 `mcp__plugin_nlpm_codex-cli__codex` 已退役，散文审走 `codex exec` CLI；
-- ADR 0010 当前存在历史触发点张力；在 `bureau:review` settle 前，以本节“push 前统一审修”为现行规则。
-
-### 5.8 不捏造、不越权判定
-
-- 报告数字、错误和耗时必须来自真实日志/产物；
-- 推断项显式标“推断”；
-- `needs_review` 不当 pass；
-- “PR 有测试”“代码接通”“covered”“collector 有数据”都不等于验收通过；
-- FAIL 归因前先核任务书↔PR 对应，再解耦 DUT 与 harness；
-- 验收权威只认任务书，最终裁决只认确定性脚本链。
-
-### 5.9 canon 写门与开工 grounding
-
-- durable 知识遵循 capture → compile → review；
-- 不手改 cabinet 页，不自行把状态升为 canonical；
-- 只有 canonical 可当已定事实，proposed/verified/stale/contested 均须按 trust tier 对待；
-- 开始 durable 设计、组件建设、bureau 写入或 FAIL 归因前，先读 `canon/architecture/`、`canon/decisions/` 和 `canon/lint/findings.md`；
-- canon 过大时至少读 overview，并用 bureau query 按需查证；
-- 通读与 query 并用；未读或未 settle 页面不得冒充门禁依据；
-- 当前运行规则与未 review canon 冲突时，显式记录张力，不静默覆盖。
-
-### 5.10 性能口径：只测 msprof 实测，不比 GPU
-
-用户 2026-08-03 明示的**全局原则，适用于所有类型的任务书**：
-
-- 任务书**对性能没有要求** → 只用 msprof 采 NPU 实测性能即可；
-- 任务书要求的是**与 GPU 比对**（如“以 OpenCV CUDA A100 为参考，ratio ≥ 0.45×”）→ **同样只用 msprof 测实测性能**，
-  不必真的去对比 GPU、不必获取 GPU 标杆数据；
-- 本轮改动属**对原算子新增 dtype 支持 / 扩展 shape·rank / 开发新算子**三类之一（用户 2026-08-05 明示）
-  → **同样只用 msprof 测实测性能**，不做任何同机比值对比。
-
-理由：GPU 标杆（A100 / OpenCV CUDA / ATK 双标杆）要么拿不到环境，要么获取成本远高于它带来的验收价值；
-卡在等 GPU 数据上会把整条流水线阻塞住。而 NPU 侧 msprof kernel-only 数据在**真机实跑、
-与 case 及本轮 provenance 绑定、采样与有效性检查都做过**的前提下，是可信、可复现的性能证据
-（这三个前提缺一条就不成立——「kernel-only」只说明计时范围，本身不构成可信性）。
-
-落地约束：
-
-- 不因缺 GPU 数据把结论落到 `BLOCKED_WAIT_GPU_BENCHMARK`；该终态只在用户明确要求做 GPU 对比时才用；
-- 性能维产出 = msprof 实测 kernel 耗时 + 分档说明，不是比值裁决；
-- 三种情形（`no_perf_requirement` / `gpu_comparison` / `change_class_no_perf_comparison`）**授权强度相同**：
-  都须在 spec 的 `perf.measure_only_authorization` 里给出 ground + cite + quote + `taskdoc_snapshot_sha256`，
-  缺一 fail-closed（受控词表见 `plugin/acc-common/perf_mode.py`）；
-- 走**改动类别**这一条时，任务书**若另写了比值 / 绝对门限 / 吞吐条款，该条款照旧强制进 `task_pr_gaps`
-  标「未验收」**，本轮仍只产 msprof 绝对耗时，禁止取 baseline、禁止算 ratio、禁止任何达标宣称
-  ——与上面 GPU 条款的处置逐字同形；改的是取证方式，不是条款可以不算数；
-- 报告须如实写“按用户口径只做 NPU msprof 实测，未做 GPU 标杆对比”，
-  **不得把它包装成“已达标 0.45×”**——没测的比值不能编（5.8）；
-- msprof 数据仍须真机真跑，不接受推算（5.3）；
-- **任务书的 GPU 比值条款按「未验收」记账**，不是「已通过」也不是「不适用」：
-  该条进 `task_pr_gaps`，最终裁决**不得**因为 NPU 侧有实测数就宣称整体通过。
-  任务书仍是验收权威（5.8）——本节改的是「怎么取证」，不是「条款可以不算数」。
-
-### 5.11 精度真值口径：任务书写 GPU 一律解析为同族 CPU
-
-用户 2026-08-05 明示的**全局解析规则，适用于所有任务书**：
-
-> 任务书里指定 GPU 真值口径的（如「以 OpenCV GPU / CUDA 为标杆」），
-> **就应该被解析成同族的 CPU 实现**。这是一类问题的统一读法，不是逐份的例外处理。
-
-⚠ **它与 5.10 是两件不同性质的事，别照搬**：
-
-| | 5.10（性能） | 5.11（精度真值） |
-|---|---|---|
-| 做什么 | **取消比较**——不取标杆、不算比值、不产达标结论 | **解析口径**——把 GPU 写法读成同族 CPU |
-| 任务书条款 | 仍然成立，按「未验收」进 `task_pr_gaps` | **已被满足**（CPU 就是它的正确读法） |
-| 报告怎么写 | 「未做 GPU 标杆对比」 | 「任务书写 GPU，按 §5.11 解析为同族 CPU」 |
-
-因此 5.11 下**不产生**「GPU 口径未验收」这类 gap——那是把解析规则误当成降级取证。
-反过来也不许含糊：报告须留**解析记录**（原文怎么写的、解析成了什么、依据本节），
-不得直接写成「任务书要求 CPU」把解析这一步抹掉（5.8：事实与推断分开）。
-
-落地约束：
-
-- 映射是**数据**（受控表，如 `opencv_cuda` → `opencv_cpu`），按**具体库**判，
-  绝不按算子身份分支（5.1）；**该库无 CPU 对应 → 仍 fail-closed**，不硬凑；
-- ⚠ **粗粒度声明解析不了，也不许猜**：`gpu_lib` 这类兜底值底下同时装着 OpenCV-CUDA、cuSPARSE、
-  cuDNN……把整族映射到某一个 CPU 库，等于把「任务书点名 cuSPARSE」悄悄换成 OpenCV CPU，
-  那不是「同族」而是换了个不相干的实现。任务书写得太泛时如实落 `gpu_lib` 并 **fail-closed**，
-  要人把真值口径细化到具体库后重判；
-- 解析后的 `method_kind` 必须落在 `precision_policy.RUNNABLE_METHOD_KINDS` 内，否则照旧 fail-closed；
-- ⚠ **阈值不随口径自动搬家**：任务书阈值若是按 NPU↔GPU 误差预算给的，套到 CPU↔NPU 上未必成立
-  （同一库的 CPU 与 GPU 实现并非逐位一致）。阈值来源与真值口径**不同源**时，
-  报告须标明该维「阈值来源与真值口径不同源」，由人确认；本轮 GaussianBlur 的阈值走
-  workflow 默认口径、与该风险无关。
-
----
-
-## 6 · 仓目录
-
-```text
-OpRunway/
-├── AGENTS.md                         # 唯一仓规源
-├── CLAUDE.md                         # 仅 @AGENTS.md 路由
-├── BUREAU.md                         # bureau 入口
-├── .oprunway/
-│   ├── real-machine.env.example      # tracked 脱敏模板
-│   └── real-machine.env              # ignored 本地真实值
-├── dev-doc/                          # 开发过程产物：设计、TODO、handoff、实测记录、环境说明
-├── plugin/
-│   ├── acc-common/                   # Layer 0/1 契约与确定性脚本
-│   ├── agents/                       # Layer 2 agent 薄壳
-│   ├── skills/                       # Layer 2 skills
-│   ├── commands/                     # Layer 2 入口
-│   └── samples/                      # spec/golden/runner 样例数据
-├── canon/                            # bureau durable knowledge
-├── reports/                          # ignored 验收产物
-└── repos/                            # ignored 外部被测/参考仓
-```
-
----
-
-## 7 · 外部仓与复用边界
-
-涉及仓会随任务变化，已知范围包括但不限于：
-
-- `cann/catlass`
-- `cann/ops-nn`
-- `cann/ops-math`
-- `cann/ops-sparse`
-- `cann/ops-blas`
-- `cann/ops-cv`
-- `cann/asc-devkit`
-- `cann/catccos`
-- `cann/shmem`
-- `cann/oam-tools`
-- `cann/amct`
-- `cann/hixl`
-- `cann/cann-recipes-infer`（重点子目录 `ops/tilelang`）
-
-复用边界：
-
-- `repos/` 下的外部仓是被测对象或方法论参考，不进入本仓 Git；
-- 浅克隆不能冒充指定 tag/commit 已核实，需要特定版本时单独 fetch 并记录 provenance；
-- `cannbot-ops-input`/cannbot 只作 case、精度、性能方法参考，不成为运行时依赖；
-- catlass、ops-*、稀疏/通信等不同仓形态通过通用能力或 per-repo adapter 接入，不互相硬套；
-- 姊妹项目的环境搭建经验可复用，“跑没跑崩”式判定不能替代本仓精度/性能验收；
-- 具体任务始终以正确的任务书、对应 PR 和本轮事实包为准。
-
----
-
-## 8 · 深挖入口
-
-| 目标 | 入口 |
-|---|---|
-| CP-A..E 状态机、硬门、subagent 契约 | `plugin/AGENTS.md` + `plugin/skills/acceptance-workflow/SKILL.md` |
-| 设计与数据契约 | `dev-doc/oprunway-design.md` |
-| 最新交接 | `dev-doc/oprunway-session-handoff-2026-08-05.md` |
-| 当前 TODO | `dev-doc/oprunway-todo.md` |
-| 改动流水 | `dev-doc/oprunway-changes-brief.md` |
-| 真机环境 | `dev-doc/oprunway-real-machine-environment.md` + `.oprunway/real-machine.env` |
-| 已定决策 | `canon/decisions/`，先看 status/trust tier |
-| 人读蓝图/历史案例 | `plugin/workflows/`，冲突时以 acceptance-workflow skill 为准 |
-
----
-
-## 9 · 当前能力边界
-
-- 真 NPU 已坐实：IsClose、Sign；Median PR6429 当前为 1152 例中 1101 PASS、51 FAIL，
-  `gate.passed=true`、确定性裁决 `FAIL(精度)`；上一轮 1344-case 结果仅作历史记录；
-  Elu/Silu 在 A5-950 有 18/18 非空例证据；
-- **GaussianBlur（ops-cv，2026-08-05，干净现场端到端）**：`runner_form=cpp_extension`、
-  `declared_source_form=local_source`（本地代码，非 PR）、`precision.case_source=taskdoc`
-  （用任务书自带的 169 条自测用例与 OpenCV CPU golden）。终态
-  `BLOCKED_GOLDEN_UNAVAILABLE`、`gate.passed=true`、`gate.errors={}`；
-  169 例中 164 例可判且**数值失败 0**，5 例因通道数超 OpenCV `CV_CN_MAX` 算不出真值 →
-  记为**结论空白**（非算子失败）；性能 16 条真实 kernel-only `npu_us`（`measure_only`，无标杆对比）。
-  ⚠ 这条**不是** PASS，是「能判的部分没查出问题、有一部分判不了」；
-- **本地代码是一等输入形态**（5.11 之外的另一条 2026-08-05 口径）：`--pr-snapshot` 即声明
-  `local_source`，`completeness=complete`、**无需**任何降级授权环境变量；
-  「声称测 PR 却只拿到快照」仍是降级、仍要显式授权，**未声明按最严的 `git_pr` 对待**；
-- **任务书自带用例集/golden 通路已闭环**：`taskdoc_links.py`（链接取材）→ `taskdoc_caseset.py`
-  （识别 + 接口映射 IR + golden wrapper）→ `gen_cases --taskdoc-caseset`。
-  任务书给了 case 就用它的，**识别不到即 BLOCKED，绝不回退自生成**；
-- Median 性能数据不是零数据：custom 50/50、`torch_npu` baseline 48/50 有效，48 对评分、35 对达到 `ratio >= 1.0`；
-- 2 个 BF16、`dim=1` baseline case 报 161002、custom 成功，按 baseline limitation 挂起，不归因 DUT；
-- 用户已确认 Median 任务书所称 `aclnnMedian` / `aclnnMedianDim` 小算子拼接版本等价于 Torch 对应接口，故性能 baseline 为同机 `torch_npu` 的 `torch.median`，无需另证等价、也不改为直调单个 ACLNN 接口；
-- **通用性能 case 规则**：性能 case 必须从同一份精度 caseset 选择；A3 按全部输入物理载荷之和 `<= 256 KiB` 为小 shape、`> 256 KiB` 为大 shape。硬件边界写入 spec，不按算子身份分支；大小分类只用于分组，所有性能 case 仍须真实采集；
-- `aclnn_py` perf collector 已真机产出同口径 kernel-only 数据，但“通路有数据”不等于“任务书条款通过”；
-- mock/catlass_mock 只产带 `evidence_grade="development"` 和 NON-ACCEPTANCE 标记的 `dev_run_summary.json` / `dev_precision_check.json`，不产 `acceptance.json` / `verdict.json`；
-- ops-<族>、标准 aclnn 两段式、用户态 opp 安装型是当前主要闭环；域外形态 fail-closed；
-- 外部 GPU consumer 已接入，真实 GPU 数据仍待提供；**仅当用户明确要求做 GPU 对比**时，
-  缺数据才走 `BLOCKED_WAIT_GPU_BENCHMARK`——默认口径见 5.10，不因缺 GPU 数据挂起。
-
----
-
-## 10 · 发布形态
-
-- OpRunway 继续作为本仓 `plugin/` 子目录维护，不拆独立 repo；
-- scripts、JSON 契约和 skill references 保持工具中立；
-- 各运行时只维护注册/入口薄壳；
-- skills 外部同步属于后续发布事项，不是当前验收阻塞项；
-- `CLAUDE.md` 不再复制规则，只路由到本文件。
-
-<!-- bureau:start -->
-@BUREAU.md
-<!-- bureau:end -->
+# AGENTS.md — OpRunway 唯一仓级规则
+
+**全程中文。** 仓根 `CLAUDE.md` 路由到本文件，并只承载仅 Claude 需要读取的操作规则；面向所有 agent 的共享仓规一律在本文件维护，不设第二套。
+
+## 1. 目标与权威
+
+OpRunway 验收调用方配对的“任务书 + 被测源码”。调用方给出二者即断言关联成立，不再按 PR、issue、
+fork、ref 或 head 鉴权。任务书是语义、硬件和验收要求权威；源码、header、example 与 op_def 是 ABI、
+能力和被测事实。
+
+正式路径只有两段：
+
+1. 从任务书和源码形成 spec 与 ATK 设计，由 ATK 实际生成 caseset；
+2. 在 NPU 上 fresh build，使用 ATK 执行同一 caseset，采集精度、NPU profiler、加载 ELF 和输出证据，
+   再按 skill 的判据产出终态。
+
+Workflow 不连接、不运行、不采集、不消费 GPU 数据。GPU 精度表述只可解析为同库族 CPU 真值；GPU
+性能或资源对比必须记为未验证限制，不能伪造，也不能据 NPU 绝对时间宣称达标。
+
+## 2. 唯一实现与入口
+
+- `plugin/skills/acceptance-workflow/SKILL.md`：唯一 skill、唯一编排层，也是唯一判据来源；
+- `plugin/skills/acceptance-workflow/reference/`：随包分发的工具事实，`atk/` 下为上游逐字副本。
+
+`plugin/` 的全部内容只服务于执行一次验收，不承载开发期的设计、取舍与维护判断。判据是：一个只拿到
+`plugin/`、要验收一个算子的执行者，需不需要读这条内容？不需要就不该放在里面。据此排除的典型内容有——
+何时把 witness 提升为通用能力、如何新增 build profile、如何运行本仓测试、开发期私有配置的位置与文件名、
+具体算子的一次性输入绑定。这些放 `AGENTS.md`、`dev-doc/` 或 canon。验收运行时不得修改 `plugin/` 下的任何
+通用代码：是否值得把某个缺口提升为通用能力，运行时既无从判断（不知道别的算子是否撞过同一缺口，且每轮都是
+全新 session），也无法留痕（收据不绑定 plugin 自身身份）。
+
+本仓不再保留确定性 Python 实现。原 `plugin/oprunway/` 与 `plugin/oprunway_cli.py` 已删除，它们强制的
+证据门、收据结构、终态归因与外部命令调用方式全部由该 skill 以中文规则承接。因此不存在会自动拦截违规的
+运行时代码：一切约束只存在于产物的形状、执行环境里有什么没有什么，以及 skill 文字本身。任何声称通过的
+终态都必须显式披露这一信任面。
+
+不得恢复另一套 case generator、golden engine、runner、状态机、裁决器或兼容通路。ATK 缺失能力只能放在
+调用方提供且被收据哈希绑定的最薄 execution/generator plugin；通用生产代码不得按具体算子名分支。
+
+正式 runner form 固定为 `atk_aclnn`。安装 ATK、CANN、Python 依赖和建立网络隧道属于环境前置准备，
+不是 plugin 能力。Plugin 只做版本/路径 preflight，绝不安装依赖、修改系统 Python、shell rc 或共享 CANN。
+当前 build 能力固定为 `cann_ops_package_v1`：只在该 profile 内对算子泛化，不承诺任意仓形态。第二种真实
+仓形态出现后新增独立 build profile adapter，不在旧 profile 中堆仓名或路径分支。单一算子暴露的 ATK
+缺口留在被哈希绑定的 witness；第二个独立算子复现同一稳定缺口后，才评估提升为 capability adapter。
+
+## 3. 确定性事实链
+
+终态由 skill 第 6 步的判据一次产出，不得在别处重判、改写或软化。正式 PASS 至少绑定：
+
+- 任务书 SHA-256 与 caller-trusted 关联声明；
+- 目标源码子树内容锚，且原始输入、clean staging、build 前后逐字一致；另以同一 staging 忽略规则绑定包含
+  `build.sh` 和共享构建文件的完整 build 输入锚；
+- fresh build 命令、目标 SoC、fresh package、安装树与 CMake target 证据；
+- fresh vendor ELF SHA-256、`GetWorkspaceSize`/执行双符号和 `nm` 证据；
+- ATK 公开版本探测、可执行文件摘要、设计文件、生成 caseset、case 完整分母；
+- ATK 实际加载的 vendor ELF、每个正常 case 的 DUT/CPU 输出及预期报错 case 的工作簿结果；
+- 需要性能时，每个 case 的 ATK NPU device 时间以及原始 CANN profiler `op_statistic`/`op_summary` CSV；
+- 最终 receipts 的互相哈希绑定。
+
+任何显式 null、坏类型、漂移、软链目标、缺失 case、缺失输出、缺失 profiler、ATK 返回码异常或超时都
+fail-closed。ATK 的进程返回码和“task success”文字不能单独作为成功依据。
+
+## 4. 终态与归因
+
+对外状态词表只有：`PASS`、`DUT_FAIL`、`PLUGIN_ERROR`、`UNSUPPORTED`、`NEEDS_INPUT`、`BLOCKED`。
+其中正式 `acceptance.json` verdict 只有 `PASS`、`DUT_FAIL`、`UNSUPPORTED`；其余三项只描述未形成正式
+裁决的 workflow/attempt，不是 DUT 结论。
+
+- `DUT_FAIL` 用于同轮完整执行且证据明确的数值不匹配，或确定性门已独立证明的 DUT 能力缺失；
+- 唯一允许在 execution 前形成的 DUT 能力缺失是 `TARGET_DELIVERY_MISSING`：任务书准入目标 SoC、fresh
+  build/install 成功、请求 cache 与 host ACLNN 双符号已绑定，但安装树没有该 SoC 的算子
+  ops-info/binary/kernel delivery；
+- 普通 build 失败以及 ATK、adapter、harness、环境、超时或证据缺失不得归为 DUT 失败；
+- 目标 SoC 不在任务书硬件集合为 `UNSUPPORTED`，不得执行 DUT；
+- 未知 ABI/精度能力或输入内部事实不足为 `NEEDS_INPUT`；
+- 依赖/NPU/外部服务不可用可为 `BLOCKED`；
+- 其余流程实现问题为 `PLUGIN_ERROR`。
+
+证据不完整绝不 PASS。`acceptance.json` 与中文 Markdown 只按 skill 第 6 步的判据产出，不在别处重判、
+改写或软化。
+
+## 5. 验收口径
+
+- 精度是必选维度；默认由 ATK 在 NPU DUT 与任务书授权的 CPU 真值之间裁决。
+- 精度标准唯一采用随包的《生态算子开源精度标准》（`reference/experimental_standard.md`）。**任务书中
+  凡引用 AscendOpTest 之处，一律读作这份标准。** `complex64` 用 FLOAT32 那一列，实部与虚部各自判定。
+  该标准的阈值表只覆盖 6 种浮点；表外的整型与 bool 按其 §0 不在范围内，默认判据是逐位相等（精确可表示、
+  不存在舍入，容差无意义），spec 仍须写明这条依据。算子语义本身允许整型结果有差异时（饱和或舍入策略、
+  归约顺序影响溢出等）不得用相等，须按任务书单独声明。任何情况下都不得把浮点表里的某一列套到表外 dtype。
+- 随机算子必须在 spec/ATK 设计中声明任务书要求的统计或固定种子策略；不能用普通逐元素比较替代。
+- 性能测量恒做：每轮都用 ATK `performance_device` 采集 device 时间与原始 CANN profiler kernel 数据，并
+  写清 timing scope。是否构成终态判据由任务书决定；任务书未提出性能要求时数值仅为实测值，采集失败只记
+  `UNVALIDATED`，不改变精度结论。GPU/原算子比值未同法实测时一律 `UNVALIDATED`，不得用 NPU 绝对时间顶替。
+- 内存、显存、workspace、带宽等资源不是第三验收维度；报告说明未评估，不宣称资源条款达标。
+- 单 session 主动墙钟预算不得超过 7200 秒；不得靠缩减任务书覆盖、复用旧 build 或放宽判据提速。
+
+## 6. 隔离、环境与权限
+
+- Build、用例生成、测试、golden、profiler 和正式裁决都在 NPU 目标环境执行；本机只编辑、Git、只读探测。
+- 物理 NPU 的发现与健康/空闲判断属于 agent 与目标环境的操作边界，不属于 plugin 的验收核心。Agent 必须
+  读取当前目标的完整 `npu-smi info`，依据健康项和进程事实选择实际空闲卡；不得只看利用率。已有进程或
+  异常的卡只能跳过；禁止 kill、reset 或抢占他人进程。紧邻启动前再读一次 `npu-smi` 复核，状态有变就换卡。
+- 正式执行只接收由 agent 选定的那一张物理卡，显式传给 ATK child 并在 execution receipt 中记录实际 child
+  environment；skill 内部不自动选卡、不解析 `npu-smi`，也不产生设备分配 receipt——选卡是 agent 在 plugin
+  外的职责。同一目标上不同空闲卡可以并行。当前不做互斥调度：并发的两轮有可能选中同一张卡，启动前那次
+  复核只缩小这个窗口，不消除它。
+- 没有可用卡时，agent 必须向 Mr.0 列出每张候选卡的健康与占用事实并等待指定物理卡；指定不等于强占，
+  后续仍须使用全新 session 并重新检查。
+- 每次正式执行必须使用不存在的新 ASCII session 目录。源码 staging、build、安装、ATK 缓存、输出、日志和
+  报告全部位于该目录；不同算子不得复用可变产物。
+- 可共享只读的 ATK 安装和内容寻址依赖缓存。正式 session 自己复制 caller source，外部源码与任务书只读。
+- 当前 ignored `real-machine.env` 中，A3/A5 的 input-cache 配置值均逐字列入各自 protected roots；这些 cache
+  只允许读取并复制到 fresh session，不得在原位 checkout、build、安装、写日志或修改内容。配置关系不成立
+  时不得自行假定其它 cache 也是只读权威输入。
+- 私有主机、容器和路径只放 ignored `.oprunway/real-machine.env`；秘密不得写入仓库。
+- 该文件只在主 checkout 维护一份，worktree 不各自复制、也不各自新建。读取路径一律解析为
+  `"$(dirname "$(git rev-parse --git-common-dir)")/.oprunway/real-machine.env"`，在主 checkout 与任意 worktree 中都指向同一份。
+- 该文件同时登记每个已在真机落地的算子输入：任务书与被测源码分别标注，并把其所在的根逐字列入 protected roots。
+- 该文件存在时，远端操作先读取 `OPRUNWAY_MACHINE_PROTECTED_ROOTS`；保护根及子目录永远只读。
+- Clone、checkout、build、真机执行、删除/覆盖、远端环境修改和发布须有用户授权。授权不扩张到其它目标。
+- 不 push、不 merge，除非用户明示；commit 不加 AI 署名或 trailer。
+
+## 7. 输入、泛化与文档
+
+- 仓名、算子名、路径、SoC、shape、dtype、阈值、URL/ref/head 不得硬编码在通用代码。
+- 字段来源：语义/硬件/阈值来自任务书；ABI 来自 header/example；能力与 dtype 用 op_def 交叉验证。
+- 新接口族只能通过稳定能力扩展；未知能力 fail-closed，不自动归类。
+- 外部仓、任务书和样例保持 ignored，不成为 tracked 运行时依赖。
+- 开发记录只写 `dev-doc/`；每次落地在 `dev-doc/oprunway-changes-brief.md` 顶部追加倒序摘要。
+- 当前待办唯一入口为 `dev-doc/oprunway-todo.md`。
+
+## 8. 记录系统边界
+
+`canon/` 与 bureau 内容只作为保留的历史记录。普通架构、代码、测试、验收、FAIL 归因和文档实施不得读取、
+查询、依赖或等待它们，也不得把它们当事实源、审批门、阻塞条件或裁决依据。唯一例外是用户明确发起
+bureau/canon 的记录、整理、查询、审阅或维护任务；此例外不改变其 trust tier 或历史内容。
+
+## 9. 发布前检查
+
+Push 前对自上次 push 以来的代码做一轮 audit → fix → verify；散文规则单独审阅。一轮即停，剩余问题如实
+报告。局部 evidence、环境就绪或单个阶段跑通都不得描述成算子正式通过。

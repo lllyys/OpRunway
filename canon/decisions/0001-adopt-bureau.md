@@ -1,4 +1,5 @@
 ---
+id: pg-0001-adopt-bureau
 title: ADR 0001 — Adopt bureau
 updated: 2026-06-29
 status: canonical
@@ -13,7 +14,9 @@ and contradict each other. We want one consistency-checked canon a human can ins
 **Decision.** Capture each session to an append-only [[Logbook]]; compile it into
 consistency-checked dossiers (the SSOT); render with the press. The logbook is
 low-authority but faithful; the cabinets are authoritative for current truth and carry
-provenance back to the logbook.
+  provenance back to the logbook. ^claim
 
 **Consequences.** Drift is fought structurally: one owned layer, mechanical render,
 every claim traceable to its origin session.
+
+**Sources.** [[session f0c36755-189d-4c2c-b321-c0d2ec5c4b1b · 2026-06-29]]

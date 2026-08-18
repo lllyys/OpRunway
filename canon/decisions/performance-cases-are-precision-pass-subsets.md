@@ -1,8 +1,8 @@
 ---
+id: pg-performance-cases-are-precision-pass-subsets
 title: Performance cases are precision-pass subsets
 updated: 2026-07-27
 status: proposed
-contradicts: [[Performance reuses precision inputs with a trivial-met exemption]]
 ---
 
 # Performance cases are precision-pass subsets
@@ -11,7 +11,7 @@ contradicts: [[Performance reuses precision inputs with a trivial-met exemption]
 才能进入性能比较。性能阶段仍可因 ratio 不达标而 FAIL，或因 baseline、profiler 等证据缺失而
 BLOCKED。
 
-该规则不允许 `trivial-met`、按 numel 免测或因 shape 小而自动放宽阈值。
+该规则不允许 `trivial-met`、按 numel 免测或因 shape 小而自动放宽阈值。 ^claim
 
 **Sources.** [[session perf-case-source-shape-rule-20260726 · 2026-07-26]]，
 [[session 019fa119-cf94-7993-bd18-dae28be83cf8 · 2026-07-27]]

@@ -263,7 +263,7 @@ spec 加字段（**名字待定**）：
 | `repo_adapter.py` | golden 归属上移；`oracle_source` 透传；runner 查找路径；去 op 默认值 |
 | `catlass_adapter.py` | `oracle_source` 透传 |
 | `validate_acceptance_state.py` | 增 `oracle_source` 一致性校验（S3） |
-| spec schema | 增 `precision.output_exact_on_grid`；`dev-doc/oprunway-spec-schema.md` 同步 |
+| spec schema | 增 `precision.output_exact_on_grid`；以 `plugin/acc-common/spec_schema_template.jsonc` 为唯一模板 |
 | `acc-spec` / `acc-runner` / `acc-runner-dev` | 落点改用户 CWD；acc-spec 需产 `spec_clause_ref` 锚点 |
 | 单测 | 现有测试大量依赖 `GOLDEN["Sign"]` 等 → 改用 fixture golden，不依赖「内置算子」 |
 | canon | 本轮发现应走 `bureau:capture` → `compile`；D2 值得追加进 `gate-must-check-the-effective-object.md` 作第三例 |

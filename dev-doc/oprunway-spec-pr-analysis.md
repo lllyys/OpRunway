@@ -78,4 +78,5 @@
 | UpsampleExact1d&2d | ops-cv | 加 uint8 | torch | AscendOpTest | uint8 vs fp16 ≤5% | 标准GE(SOC 分门) | st(ATK)+ut(torch golden) |
 | TrsmBatched | ops-blas | 新算子(2 dtype) | cuBLAS | python 一致(PR 用 scipy) | **0.8×A100** | experimental 库式(算子级 run.sh) | test+perf(μs)+报告 |
 
-> **核验说明**：`ops-sparse` / `ops-cv` 已 clone、本地核过（SPMV=库式、upsample=标准 GE 属实）。**`ops-math` / `ops-nn` / `ops-collections` 未 clone，`ops-blas` 的 `experimental` 本地为空（#243 open）→ 这些行的 PR 细节来自 agent + gitcode API，非本地可核。** 另：upsample uint8 在本地 `ops-cv` master 未见（`image/upsample_nearest` 仅 fp32/fp16/bf16）→ **交付状态存疑**（主 PR #1012 已 closed，见 `oprunway-task-pr-map.md`）。
+> **历史核验说明**：本表记录的是当时的外部仓观察，不是 current 输入身份门。当前验收以调用方给定源码的
+> `content_anchor` 为准；旧 PR 状态与 locator 不决定验收资格。
