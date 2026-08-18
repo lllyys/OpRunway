@@ -128,6 +128,7 @@ fail-closed。ATK 的进程返回码和“task success”文字不能单独作�
 - 外部仓、任务书和样例保持 ignored，不成为 tracked 运行时依赖。
 - 开发记录只写 `dev-doc/`；每次落地在 `dev-doc/oprunway-changes-brief.md` 顶部追加倒序摘要。
 - 当前待办唯一入口为 `dev-doc/oprunway-todo.md`。
+- `archive/` 只存历史文档，不作现行依据。
 
 ## 8. 发布前检查
 

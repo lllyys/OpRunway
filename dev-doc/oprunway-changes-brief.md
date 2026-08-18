@@ -2,6 +2,15 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-18 · 归档迁移前开发文档并收紧现行文档边界
+
+- 旧开发期文档 25 份移入 `archive/dev-doc/`；`dev-doc/` 只保留
+  `oprunway-changes-brief.md` 与 `oprunway-todo.md` 两个活文件；数据流图三件套
+  （`.drawio`/`.graph.json`/`.png`，约 1.2 MB）未保留，已删除。
+- 删除只含 `.DS_Store` 的空壳 `doc/` 目录，以及未跟踪的 `spec/`（一份 catlass 任务书）。
+- `AGENTS.md` §7 新增一条：`archive/` 只存历史文档，不作现行依据。
+- `plugin/skills/acceptance-workflow/reference/` 未动，`SKILL.md` 仍在引用其中多份。
+
 ## 2026-08-18 · 移除 bureau/canon 记录系统并清理悬空引用
 
 - 删除 `canon/`（110 个文件）与 `BUREAU.md`，并删除未跟踪的 `gazette/` 和
