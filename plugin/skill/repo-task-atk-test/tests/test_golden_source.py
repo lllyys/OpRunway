@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 
 import check_golden_source as gs  # noqa: E402
@@ -196,14 +197,20 @@ class CliTest(unittest.TestCase):
             f"from {candidate.get('path')} success!\n", encoding="utf-8")
 
     def _run(self, tmp):
+        # --output 显式指到 tmp，cwd 也钉在 tmp：量具的产物路径是相对默认值
+        # （--output 与 _stage_card 的 evidence/timeline.jsonl），不钉住就按
+        # 子进程继承来的 CWD 解析，把测试产物写进仓库根。
+        # 两道一起上：--output 说清这条用例要的产物在哪，cwd 兜住所有
+        # 我们没显式覆盖的默认值。
         return subprocess.run(
             [sys.executable, str(SKILL_ROOT / "scripts" / "check_golden_source.py"),
              "--provenance", str(tmp / "prov.json"),
              "--builtin", str(tmp / "b.json"),
              "--candidate", str(tmp / "c.json"),
              "--case-json", str(tmp / "cases.json"),
-             "--candidate-log", str(tmp / "accuracy.log")],
-            capture_output=True, text=True)
+             "--candidate-log", str(tmp / "accuracy.log"),
+             "--output", str(tmp / "golden_source.json")],
+            capture_output=True, text=True, cwd=str(tmp))
 
     def _prepare(self, tmp, builtin=BUILTIN, candidate=CANDIDATE, prov=None,
                  cases=None):
@@ -213,6 +220,52 @@ class CliTest(unittest.TestCase):
         self._write(tmp, prov, builtin, candidate, cases)
         prov["case_json_sha256"] = gs.sha256_file(str(tmp / "cases.json"))
         (tmp / "prov.json").write_text(json.dumps(prov), encoding="utf-8")
+
+    def test_giving_output_does_not_create_evidence_beside_the_caller(self):
+        """给了 --output 就不该在 CWD 边上再造一个 evidence/。
+
+        这是泄漏的根：--output 的默认值 `evidence/golden_source.json` 是相对
+        路径，按 CWD 解析。子进程继承 pytest 的 CWD（仓库根），于是量具在
+        仓库里造出 evidence/ 并写进去。造出来之后还有二段伤害——_stage_card
+        原本有「evidence/ 不存在就闭嘴」的自保（见 _stage_card.py:60），
+        目录被造出来了，它的自保条件就失效，打卡也跟着写进仓库。
+
+        用一次性的干净目录扮演调用方的 CWD，不看仓库根：看仓库根的断言
+        依赖用例执行顺序——同模块前面的用例先漏了，后面这条比对前后快照
+        就看不出差别，会因为「已经脏了」而通过。
+        """
+        tmp = temp_dir(self)
+        self._prepare(tmp)
+        work = temp_dir(self)
+        proc = subprocess.run(
+            [sys.executable, str(SKILL_ROOT / "scripts" / "check_golden_source.py"),
+             "--provenance", str(tmp / "prov.json"),
+             "--builtin", str(tmp / "b.json"),
+             "--candidate", str(tmp / "c.json"),
+             "--case-json", str(tmp / "cases.json"),
+             "--candidate-log", str(tmp / "accuracy.log"),
+             "--output", str(tmp / "golden_source.json")],
+            capture_output=True, text=True, cwd=str(work))
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertFalse((work / "evidence").exists(),
+                         "指定了 --output，量具仍在 CWD 边上造了 evidence/")
+
+    def test_run_writes_the_verdict_to_the_requested_path(self):
+        """顺带补上一直没测的事：这个量具到底有没有写出裁决产物。
+
+        原来的用例只断言退出码，写文件这件事既没被测、又在往仓库根漏——
+        同一个洞的两面。
+        """
+        tmp = temp_dir(self)
+        self._prepare(tmp)
+        proc = self._run(tmp)
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        written = json.loads((tmp / "golden_source.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual("ok", written["verdict"])
+        self.assertEqual(BUILTIN["sha256"], written["builtin_library"]["sha256"])
+        self.assertEqual(CANDIDATE["sha256"],
+                         written["candidate_library"]["sha256"])
 
     def test_clean_run_exits_zero(self):
         tmp = temp_dir(self)
@@ -242,8 +295,9 @@ class CliTest(unittest.TestCase):
              "--builtin", str(tmp / "b.json"),
              "--candidate", str(tmp / "c.json"),
              "--case-json", str(tmp / "cases.json"),
-             "--candidate-log", str(tmp / "accuracy.log")],
-            capture_output=True, text=True)
+             "--candidate-log", str(tmp / "accuracy.log"),
+             "--output", str(tmp / "golden_source.json")],
+            capture_output=True, text=True, cwd=str(tmp))
         self.assertEqual(3, proc.returncode)
 
     def test_second_round_loading_the_builtin_exits_two(self):

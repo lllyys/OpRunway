@@ -1,0 +1,289 @@
+{
+  "1.background": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 任务背景",
+    "state": "human_supplied"
+  },
+  "1.language": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 开发语言与工程",
+    "state": "human_supplied"
+  },
+  "1.repo": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 算子相关代码仓",
+    "state": "human_supplied"
+  },
+  "2.1.operator_name": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 算子名与接口名",
+    "state": "human_supplied"
+  },
+  "2.1.formula": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 数学公式",
+    "state": "human_supplied"
+  },
+  "2.1.algorithm": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 算法说明",
+    "state": "human_supplied"
+  },
+  "2.1.baseline": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 对标基线接口",
+    "state": "human_supplied"
+  },
+  "2.2.project_mode": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 算子工程模式",
+    "state": "human_supplied"
+  },
+  "2.3.signature": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 接口定义",
+    "state": "human_supplied"
+  },
+  "2.4.param_name": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 参数名",
+    "state": "human_supplied"
+  },
+  "2.4.direction": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 输入／输出/属性",
+    "state": "human_supplied"
+  },
+  "2.4.description": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 描述",
+    "state": "human_supplied"
+  },
+  "2.4.data_type": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 数据类型",
+    "state": "human_supplied"
+  },
+  "2.4.dtype": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · dtype类型",
+    "state": "human_supplied"
+  },
+  "2.4.format": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 数据排布格式",
+    "state": "human_supplied"
+  },
+  "2.4.shape": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 维度(shape)",
+    "state": "human_supplied"
+  },
+  "2.4.value_range": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 值域范围",
+    "state": "human_supplied"
+  },
+  "2.4.error_behavior": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 异常行为",
+    "state": "human_supplied"
+  },
+  "2.5.non_contiguous": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 非连续 Tensor 支持",
+    "state": "human_supplied"
+  },
+  "2.5.broadcast": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · broadcast 规则",
+    "state": "human_supplied"
+  },
+  "2.5.dynamic_shape": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · dynamic shape 要求",
+    "state": "human_supplied"
+  },
+  "2.5.inplace_view": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 原地与视图语义",
+    "state": "human_supplied"
+  },
+  "2.5.deterministic": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 确定性计算要求",
+    "state": "human_supplied"
+  },
+  "2.5.empty_tensor": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 空 Tensor 与 0 维处理",
+    "state": "human_supplied"
+  },
+  "3.1.hardware": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 适配硬件与具体型号",
+    "state": "human_supplied"
+  },
+  "3.1.cann_version": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · CANN 版本",
+    "state": "human_supplied"
+  },
+  "3.1.third_party": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 三方软件版本",
+    "state": "human_supplied"
+  },
+  "3.2.reference_api": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 精度对标接口",
+    "state": "human_supplied"
+  },
+  "3.2.threshold_table": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 逐 dtype 阈值表",
+    "state": "human_supplied"
+  },
+  "3.2.verdict_formula": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 精度判定公式",
+    "state": "human_supplied"
+  },
+  "3.2.random_strategy": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 随机算子精度对比策略",
+    "state": "human_supplied"
+  },
+  "3.3.baseline_env": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 性能标杆接口与环境",
+    "state": "human_supplied"
+  },
+  "3.3.criterion": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 性能判据",
+    "state": "human_supplied"
+  },
+  "3.3.case_table": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 性能 case 与标杆数据",
+    "state": "human_supplied"
+  },
+  "3.4.memory": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 内存要求",
+    "state": "human_supplied"
+  },
+  "3.5.tooling": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 自验工具与策略",
+    "state": "human_supplied"
+  },
+  "3.5.param_mapping": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 参数序列对应关系",
+    "state": "human_supplied"
+  },
+  "3.5.generation_rules": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 入参生成规则表",
+    "state": "human_supplied"
+  },
+  "4.deliverables": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 验收交付件",
+    "state": "human_supplied"
+  },
+  "5.pr_target": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · PR 合入目录",
+    "state": "human_supplied"
+  },
+  "7.notes": {
+    "agent_proposal": "",
+    "provenance": "user_supplied",
+    "rationale": "需求方直接给出",
+    "human_reply": "确认 · 特别注意事项",
+    "state": "human_supplied"
+  }
+}

@@ -17,6 +17,7 @@ from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SKILL_FILE = SKILL_ROOT / "SKILL.md"
+CLAUDE_FILE = SKILL_ROOT / "CLAUDE.md"
 REFERENCES = SKILL_ROOT / "references"
 
 
@@ -38,6 +39,106 @@ def prose_lines(path):
         if line.startswith(("#", "|", "---")):
             continue
         yield number, line
+
+
+LIST_ITEM = re.compile(r"^(?:[-*+]\s|\d+[.)]\s)")
+
+# 规则正文在 .claude/rules/prose-style.md，随仓根 CLAUDE.md 自动导入。
+# 这里只实现其中可判定的四条，判断「并列还是递进」的责任在写字的人。
+#
+# 存量基线按每文件违规计数记，不按行号——行号随每次编辑漂移，计数不会。
+# 改好一处把数字减一，减到 0 就删掉那一行。基线只减不增，这是棘轮。
+PROSE_BASELINE = {
+    "SKILL.md": 17,
+    "case-design.md": 14,
+    "plugin-authoring.md": 10,
+    "atk-parameter-capabilities.md": 8,
+    "build-deploy.md": 8,
+    "intake.md": 6,
+    "reporting.md": 6,
+    "execution.md": 5,
+    "experimental_standard.md": 5,
+    "performance.md": 5,
+    "yaml-schema.md": 5,
+    "atk-cli.md": 4,
+    "atk-pitfalls.md": 4,
+    "builtin-baseline.md": 3,
+    "decision-points.md": 1,
+    "gate-inventory.md": 1,
+}
+
+
+def prose_blocks(path):
+    """按空行切自然段，跳过代码块与 HTML 注释。产出 (起始行号, [行])。"""
+    in_code = in_comment = False
+    current, start = [], 0
+    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.strip()
+        if line.startswith("<!--"):
+            in_comment = True
+        if in_comment:
+            if line.endswith("-->"):
+                in_comment = False
+            continue
+        if line.startswith("```"):
+            in_code = not in_code
+            if current:
+                yield start, current
+                current = []
+            continue
+        if in_code:
+            continue
+        if not line:
+            if current:
+                yield start, current
+                current = []
+            continue
+        if not current:
+            start = number
+        current.append(line)
+    if current:
+        yield start, current
+
+
+def is_structural(block):
+    """表格、标题、引用、分隔线和整块列表不受行文规则约束。"""
+    if any(line.startswith(("|", "#", ">", "!")) or line.startswith("---")
+           for line in block):
+        return True
+    return all(LIST_ITEM.match(line) for line in block)
+
+
+def prose_violations(path):
+    """返回 (规则号, 行号, 说明)。规则号对应 .claude/rules/prose-style.md 的编号。"""
+    found, streak = [], []
+    for start, block in prose_blocks(path):
+        structural = is_structural(block)
+        lone = (not structural and len(block) == 1
+                and block[0].endswith("。") and block[0].count("。") == 1)
+        if lone:
+            streak.append(start)
+        else:
+            if len(streak) >= 3:
+                found.append((3, streak[0], f"{len(streak)} 个连续单句自然段"))
+            streak = []
+        if structural:
+            continue
+        run = []
+        for offset, line in enumerate(block):
+            if line.endswith("。") and not LIST_ITEM.match(line):
+                run.append(start + offset)
+            else:
+                if len(run) >= 3:
+                    found.append((1, run[0], f"段内 {len(run)} 行独立并列句"))
+                run = []
+        if len(run) >= 3 and len(block) > 1:
+            found.append((1, run[0], f"段内 {len(run)} 行独立并列句"))
+        count = sum(line.count("。") for line in block)
+        if count > 5:
+            found.append((7, start, f"自然段 {count} 句"))
+    if len(streak) >= 3:
+        found.append((3, streak[0], f"{len(streak)} 个连续单句自然段"))
+    return found
 
 
 class DocumentStyleTest(unittest.TestCase):
@@ -181,14 +282,44 @@ class DocumentStyleTest(unittest.TestCase):
                 if len(text.splitlines()) > 100:
                     self.assertIn("## 目录", text)
 
-    def test_prose_lines_hold_one_short_viewpoint(self):
-        paths = [SKILL_FILE, *REFERENCES.glob("*.md")]
+    def test_prose_lines_stay_within_width(self):
+        # 「每行至多一个句号」在 2026-08-18 删除：它把段落层级压没了，
+        # 823 个正文自然段里 726 个只剩一句话。宽度上限保留，防单行溢出。
+        paths = [SKILL_FILE, CLAUDE_FILE, *REFERENCES.glob("*.md")]
         failures = []
         for path in paths:
             for number, line in prose_lines(path):
-                if len(line) > 100 or line.count("。") > 1:
-                    failures.append(f"{path.name}:{number}: {line}")
+                if len(line) > 100:
+                    failures.append(f"{path.name}:{number}: {len(line)} 字符")
         self.assertEqual([], failures)
+
+    def test_prose_structure_debt_does_not_grow(self):
+        # 棘轮：每文件违规数不得超过基线。新文件基线为 0，写进来就必须合规。
+        paths = [SKILL_FILE, CLAUDE_FILE, *sorted(REFERENCES.glob("*.md"))]
+        regressions = []
+        for path in paths:
+            found = prose_violations(path)
+            budget = PROSE_BASELINE.get(path.name, 0)
+            if len(found) > budget:
+                sample = "; ".join(
+                    f"规则{rule}@{line}({note})" for rule, line, note in found[:3])
+                regressions.append(
+                    f"{path.name}: {len(found)} 处 > 基线 {budget} —— {sample}")
+        self.assertEqual([], regressions)
+
+    def test_prose_baseline_has_no_stale_entries(self):
+        # 基线只减不增：某文件已经改干净了，基线行要删掉，否则棘轮松一格。
+        paths = {p.name: p for p in [SKILL_FILE, *REFERENCES.glob("*.md")]}
+        stale = []
+        for name, budget in PROSE_BASELINE.items():
+            path = paths.get(name)
+            if path is None:
+                stale.append(f"{name}: 基线里有但文件不存在")
+                continue
+            actual = len(prose_violations(path))
+            if actual < budget:
+                stale.append(f"{name}: 实际 {actual} < 基线 {budget}，把基线降到 {actual}")
+        self.assertEqual([], stale)
 
     def test_references_do_not_link_other_references(self):
         failures = []

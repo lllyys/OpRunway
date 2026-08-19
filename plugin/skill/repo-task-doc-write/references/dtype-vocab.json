@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "_purpose": "§2.4 三个枚举列的取值域。独立维护，不绑 ATK 的类型系统——任务书是发给开发者的，不该被验收工具的内部类型系统绑架。",
+  "_atk_note": "出现 ATK 表达不了的类型时门禁给警告不阻塞，留给验收阶段处理。",
+  "project_mode": ["kernel直调", "aclnn算子工程化开发", "torch接口"],
+  "direction": ["输入", "输出(独立输出)", "输出(元组输出)", "输出(原地输出)", "属性"],
+  "data_type": ["tensor", "scalar", "attr", "string",
+                "list_int", "list_float", "list_bool", "list_list_int"],
+  "dtype": ["FLOAT16", "BFLOAT16", "FLOAT32", "FLOAT64", "INT8", "UINT8",
+            "INT16", "INT32", "INT64", "BOOL", "COMPLEX64", "COMPLEX128",
+            "int", "float", "bool", "-"],
+  "format": ["ND", "NZ", "NCHW", "NHWC", "NCDHW", "BNSD", "BSND", "-"],
+  "atk_expressible_data_type": ["tensor", "scalar", "attr",
+                                "list_int", "list_float", "list_bool"]
+}
