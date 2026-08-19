@@ -13,8 +13,13 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
 - `plugin/` 是上游根的逐字镜像（`skill/`、`docs/`、`CLAUDE.md`、`README.md`；`third_party/` 与
   git 元文件除外）；`plugin/.claude-plugin/` 是本仓 overlay（manifest 与 upstream 基线记录），
   上游永不占用该路径。
-- 发布切片：`skill/` 加 overlay manifest 是唯一测试/部署发布物；`docs/`、`CLAUDE.md`、`README.md`
-  是开发件，不进任何测试部署。隔离验收只分发 `plugin/.claude-plugin/` 与 `plugin/skill/`。
+- 发布切片：`plugin/.claude-plugin/` 与 `plugin/skill/` 是唯一测试/部署发布物；`docs/`、`CLAUDE.md`、
+  `README.md` 是开发件，不进任何测试部署。
+- 两个 `.claude-plugin/` 身份不同，别混：仓根那个装 `marketplace.json`，是本机发行清单，不上测试机；
+  `plugin/` 下那个装 `plugin.json` 与 `upstream.json`，是加载器的硬依赖，必须随部署分发——缺 manifest
+  时 `--plugin-dir` 直接报 "No manifest found"，且上游用单数 `skill/` 而非 Claude 约定的复数 `skills/`，
+  只有 manifest 里的 `skills` 数组能指到 skill。`upstream.json` 只含上游 URL 与两个公开 SHA，无私有信息，
+  随包分发同时给测试机留下派生基线的 provenance。
 - 上游完整 clone 在 ignored `repos/repo-task-atk-test/`（含 ATK submodule 源码），只读参考。
   上游开发期红线与设计原则随镜像分发：修改 `plugin/` 前先读 `plugin/CLAUDE.md` 与
   `plugin/docs/development/`；本仓内读写 `plugin/**` 时 `plugin/CLAUDE.md` 会作为子目录记忆自动

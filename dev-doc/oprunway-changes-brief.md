@@ -15,6 +15,8 @@
 - 镜像健康实证：本机回归 22 failed / 752 passed / 16 skipped（排除缺 openpyxl 的 test_cli_chain.py），failed 集合与上游自报基线 22/756/13 逐类一致，差额全部由本机缺 openpyxl/torch 解释；跑测运行时产物（evidence/ 等）已入 .gitignore。
 - 定案发布切片三态：开发=全镜像可读可改；测试=isolated-acceptance 只分发 .claude-plugin 与 skill/，
   开发件物理不上机；提 PR=全镜像 pathspec 一条 diff 覆盖 skill/docs/CLAUDE.md/README。
+- 明文区分两个 .claude-plugin：仓根 marketplace.json 是本机发行清单不上机；plugin/ 下 plugin.json 与
+  upstream.json 是加载器硬依赖（非标准单数 skill/ 布局只能靠 manifest 的 skills 数组指路），必须随部署走。
 
 ## 2026-08-18 · 归档迁移前开发文档并收紧现行文档边界
 
