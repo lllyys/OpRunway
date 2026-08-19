@@ -15,6 +15,11 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
   上游永不占用该路径。
 - 发布切片：`plugin/.claude-plugin/` 与 `plugin/skill/` 是唯一测试/部署发布物；`docs/`、`CLAUDE.md`、
   `README.md` 是开发件，不进任何测试部署。
+- 验收零上下文：一次验收的完整契约就是 `SKILL.md` 加 `references/` 加 `scripts/`，不多一个字。
+  `plugin/CLAUDE.md` 与 `plugin/docs/` 是开发件，任何跑测或验收都不得读取、引用或据以判断——
+  隔离通路靠不分发做到物理隔离；在本仓内直接发起验收时子目录记忆会注入 `plugin/CLAUDE.md`，
+  此时必须当它不存在。正式验收一律走 `isolated-acceptance` 的无头通路，不在本仓 session 里跑。
+  若一次验收非读开发件不可，那是 `SKILL.md` 自足性有缺口，应修 skill 并提 PR 回上游，不是补喂上下文。
 - 两个 `.claude-plugin/` 身份不同，别混：仓根那个装 `marketplace.json`，是本机发行清单，不上测试机；
   `plugin/` 下那个装 `plugin.json` 与 `upstream.json`，是加载器的硬依赖，必须随部署分发——缺 manifest
   时 `--plugin-dir` 直接报 "No manifest found"，且上游用单数 `skill/` 而非 Claude 约定的复数 `skills/`，

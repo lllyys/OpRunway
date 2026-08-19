@@ -17,6 +17,8 @@
   开发件物理不上机；提 PR=全镜像 pathspec 一条 diff 覆盖 skill/docs/CLAUDE.md/README。
 - 明文区分两个 .claude-plugin：仓根 marketplace.json 是本机发行清单不上机；plugin/ 下 plugin.json 与
   upstream.json 是加载器硬依赖（非标准单数 skill/ 布局只能靠 manifest 的 skills 数组指路），必须随部署走。
+- 补明文「验收零上下文」：契约仅 SKILL.md + references/ + scripts/；开发件在任何跑测中不得读取或引用，
+  正式验收一律走 isolated-acceptance 无头通路；非读开发件不可即视为 skill 自足性缺口，修 skill 提 PR。
 
 ## 2026-08-18 · 归档迁移前开发文档并收紧现行文档边界
 
