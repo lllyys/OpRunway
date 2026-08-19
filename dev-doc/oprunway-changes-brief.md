@@ -2,6 +2,13 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-19 · 镜像同步 47fcefc：上游新增任务书撰写 skill，pathspec 扩到 .claude/rules
+- 上游 179bcec→47fcefc（40 提交）逐字同步进 plugin/，diff -r 校验与上游树逐字一致；ATK gitlink 未动（a0dfc9a）。
+- 上游新增第二个 skill repo-task-doc-write（任务书撰写：模板、要素表、L0–L4 质量门脚本与测试），manifest skills 数组两个都纳入，版本 2.0.0→2.1.0。
+- 镜像 pathspec 扩到 .claude/rules/（上游新增 prose-style.md）；同步命令、提 PR 命令、镜像范围三处仓规同步更新。发布切片不变（.claude-plugin/ 与 skill/，skill/ 天然覆盖两个 skill）。
+- 上游根新增的 pytest.ini 与根 tests/ 不在 pathspec 内，未镜像。
+- 上游 clone 里发现三个文件的未提交格式化噪声（表格对齐、下划线转义），已 stash 保存未丢弃。
+
 ## 2026-08-18 · plugin 换脊柱：自研 acceptance-workflow 退役，镜像上游 ATK 验收 skill
 - plugin/ 旧 skill（219 行 SKILL.md + 14 份 reference）与旧 manifest 全部移除；磁盘残留 acc-common、samples 清理。
 - 上游 Justbin/repo-task-atk-test 锁定基线 179bcec（ATK gitlink a0dfc9a），skill/ 逐字镜像至 plugin/skill/，与基线 commit 校验逐字一致。
