@@ -4,5 +4,7 @@
   "baseline_date": "2026-08-18",
   "atk_gitlink": "a0dfc9ad4d306a8a73e7dc62d81baebbd508e70e",
   "mirror_prefix": "plugin/",
-  "upstream_subtree": "skill/"
+  "upstream_paths": ["skill/", "docs/", "CLAUDE.md", "README.md"],
+  "published_paths": [".claude-plugin/", "skill/"],
+  "mirror_commit": "d24c289"
 }

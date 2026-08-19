@@ -19,6 +19,10 @@
   upstream.json 是加载器硬依赖（非标准单数 skill/ 布局只能靠 manifest 的 skills 数组指路），必须随部署走。
 - 补明文「验收零上下文」：契约仅 SKILL.md + references/ + scripts/；开发件在任何跑测中不得读取或引用，
   正式验收一律走 isolated-acceptance 无头通路；非读开发件不可即视为 skill 自足性缺口，修 skill 提 PR。
+- push 前审修门修掉 6 处：同步命令基线所在仓错误；isolated-acceptance 步骤 7a 的中性副本仍复制整个
+  plugin（开发件会进隔离会话，是切片规则的真实漏洞）；双侧摘要不含路径无法证明结构一致；步骤 5/7a
+  摘要口径不一致却声称天然对齐；.cc-suite.md 测试命令指向不存在的 tests/；upstream.json 补
+  upstream_paths/published_paths/mirror_commit。
 
 ## 2026-08-18 · 归档迁移前开发文档并收紧现行文档边界
 

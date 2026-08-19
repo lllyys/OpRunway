@@ -131,10 +131,12 @@ COPYFILE_DISABLE=1 tar czf - --exclude='__pycache__' --exclude='._*' -C "$W/plug
 
 ```bash
 # 本地
-cd "$W/plugin" && find .claude-plugin skill -type f -not -path '*__pycache__*' | sed 's|^\./||' | sort \
-  | while read f; do shasum -a 256 "$f" | cut -d' ' -f1; done | shasum -a 256
+cd "$W/plugin" && find .claude-plugin skill -type f -not -path '*__pycache__*' | sort \
+  | while read -r f; do printf '%s  %s\n' "$(shasum -a 256 "$f" | cut -d' ' -f1)" "$f"; done | shasum -a 256
 # 目标机同理，find 同样收窄到 .claude-plugin skill，用 sha256sum
 ```
+
+步骤 5 与步骤 7a 使用同一条摘要命令与同一组排除项，三处（本地、目标机、中性副本）可互相对照。
 
 再确认远端结构完整：`ls $ROOT/plugin/.claude-plugin/plugin.json
 $ROOT/plugin/skill/repo-task-atk-test/SKILL.md` 两个文件都在。plugin 的判据脚本随 skill 位于其 scripts/ 目录，
@@ -159,20 +161,23 @@ mkdir -p "$ISO"
 **每轮换新目录。** 复用会让上一轮残留进下一轮视野，与「干净工作目录」是同一条规矩。必须在仓外，否则
 仓规仍会被加载，隔离失效。
 
-## 步骤 7a　把 plugin 复制到中性目录
+## 步骤 7a　把 plugin 发布切片复制到中性目录
 
 `--plugin-dir` 不能指向仓内路径，否则会话顺着它就能翻整个仓库。复制一份到仓外，用内容摘要命名：
 
 ```bash
-D=$(cd "$W/plugin" && find . -type f -not -path '*__pycache__*' | sed 's|^\./||' | sort \
-  | while read -r f; do shasum -a 256 "$f" | cut -d' ' -f1; done | shasum -a 256 | cut -c1-12)
+D=$(cd "$W/plugin" && find .claude-plugin skill -type f -not -path '*__pycache__*' \
+  | sort | while read -r f; do printf '%s  %s\n' "$(shasum -a 256 "$f" | cut -d' ' -f1)" "$f"; done \
+  | shasum -a 256 | cut -c1-12)
 PLUGIN=/private/tmp/oprw-plugin-$D
 rm -rf "$PLUGIN"; mkdir -p "$PLUGIN"
 COPYFILE_DISABLE=1 tar cf - --exclude='__pycache__' --exclude='._*' --exclude='.pytest_cache' \
-  -C "$W/plugin" . | tar xf - -C "$PLUGIN"
+  -C "$W/plugin" .claude-plugin skill | tar xf - -C "$PLUGIN"
 ```
 
-按摘要命名有个副作用是好的：本地这份和步骤 5 发到目标机的那份内容相同，摘要天然对齐，省一次核对。
+按摘要命名有个副作用是好的：这份中性副本与步骤 5 发到目标机的那份用同一条发布切片摘要命令，
+输入集合与算法完全一致，摘要可直接对照。开发件（`CLAUDE.md`、`README.md`、`docs/`）不进中性副本，
+隔离会话顺着 `--plugin-dir` 也接触不到它们。
 
 复制前先确认本地 `plugin/` 下没有 `.pytest_cache`、`__pycache__` 或编辑器临时文件——它们会混进摘要，
 让两侧对不上。

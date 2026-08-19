@@ -32,11 +32,13 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
   plugin 根 `CLAUDE.md`，`claude plugin validate` 对此的警告是预期行为。
 - 判据的确定性由 skill 自带 `scripts/`（机械门）与 `tests/` 承担；agent 不得绕过机械门，也不得在
   `plugin/` 外另建一套生成或裁决实现。
-- 同步上游：`git -C repos/repo-task-atk-test fetch` 后，用
-  `git diff --binary <旧基线> <新基线> -- skill/ docs/ CLAUDE.md README.md | git apply --3way --directory=plugin`，
-  再更新 `plugin/.claude-plugin/upstream.json` 里的基线。
-- 提 PR：`git diff --binary --relative=plugin <导入基线提交> HEAD -- plugin/skill/ plugin/docs/ plugin/CLAUDE.md plugin/README.md`
-  得到 patch，在 fork（届时再建）里从上游基线切分支应用；该 pathspec 即公私边界。
+- 同步上游：先 `git -C repos/repo-task-atk-test fetch`，再在仓根执行
+  `git -C repos/repo-task-atk-test diff --binary <旧基线> <新基线> -- skill/ docs/ CLAUDE.md README.md | git apply --3way --directory=plugin`
+  ——`git diff` 在上游 clone 里跑（基线是上游 commit），`git apply` 在本仓根跑。完成后更新
+  `plugin/.claude-plugin/upstream.json` 的 `baseline` 与 `mirror_commit`。
+- 提 PR：以 `plugin/.claude-plugin/upstream.json` 的 `mirror_commit`（本仓镜像与上游基线完整一致的那个提交）
+  为基线，`git diff --binary --relative=plugin <mirror_commit> HEAD -- plugin/skill/ plugin/docs/ plugin/CLAUDE.md plugin/README.md`
+  得到 patch，在 fork（届时再建）里从上游 `baseline` 切分支应用；该 pathspec 即公私边界。
 
 ## 3. 环境与权限
 
