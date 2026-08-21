@@ -10,6 +10,8 @@
   `render_views.py --check` 报派生视图与骨架一致。
 - 本机全量仍是 `22 failed / 980 passed / 19 skipped / 1036 subtests passed`，失败集合无新增；
   本次未改 scripts、骨架、三份 SKILL.md 或 references。
+- Claude Code 2.1.238 目录扫描实测只看一层，故加两个顶层别名；用户截图实测 opencode
+  递归扫描时三个入口都在，故递归安装只装真身；manifest 不列别名，避免同名重复注册。
 
 ## 2026-08-21 · 验收 skill 拆分 Task 1–10 落地：嵌套子 skill、交接包封印/接收门、文档与 manifest
 

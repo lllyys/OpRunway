@@ -14,6 +14,8 @@
 - 生成侧 `repo-task-case-gen` 负责 S1–S2
 - 验收侧 `repo-task-atk-accept` 负责 S0 与 S3–S5
 
+`skill/` 下另有两个只含指针的顶层别名目录，测试锁住其 frontmatter 与对应子页一致。
+
 两侧共用一份 `scripts/` 与 `references/`。交接包是两侧唯一接口，规范在
 `references/handoff.md`；agent 运行时看对应子 `SKILL.md`，使用者看
 `docs/skills/repo-task-atk-test/design.md`，改阶段只改骨架。

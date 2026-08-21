@@ -1,4 +1,4 @@
-"""三份 SKILL.md 的路由、frontmatter、阶段边界与下游注册。"""
+"""三份主 SKILL.md 与两个顶层别名的路由、frontmatter、阶段边界与注册。"""
 
 import json
 import re
@@ -22,6 +22,10 @@ PLUGIN_SKILLS = {
     "./skill/repo-task-atk-test",
     "./skill/repo-task-atk-test/case-gen",
     "./skill/repo-task-atk-test/acceptance",
+}
+TOP_LEVEL_ALIASES = {
+    "repo-task-case-gen": "case-gen",
+    "repo-task-atk-accept": "acceptance",
 }
 
 
@@ -179,6 +183,57 @@ class SkillRoutingTest(unittest.TestCase):
             with self.subTest(relative=relative):
                 skill_file = plugin_root / relative.removeprefix("./") / "SKILL.md"
                 self.assertTrue(skill_file.is_file(), f"注册路径缺 SKILL.md：{relative}")
+
+
+class TopLevelSkillAliasTest(unittest.TestCase):
+    def test_alias_directories_exist_and_only_contain_skill_file(self):
+        for alias_name in TOP_LEVEL_ALIASES:
+            alias_dir = SKILL_ROOT.parent / alias_name
+            with self.subTest(alias=alias_name):
+                if not alias_dir.is_dir():
+                    self.fail(f"缺少顶层别名目录：{alias_dir}")
+                contents = sorted(path.name for path in alias_dir.iterdir())
+                self.assertEqual(["SKILL.md"], contents)
+
+    def test_alias_frontmatter_matches_nested_skill(self):
+        for alias_name, nested_dir in TOP_LEVEL_ALIASES.items():
+            alias_path = SKILL_ROOT.parent / alias_name / "SKILL.md"
+            nested_path = SKILL_ROOT / nested_dir / "SKILL.md"
+            with self.subTest(alias=alias_name):
+                self.assertTrue(alias_path.is_file(), f"缺少顶层别名：{alias_path}")
+                alias_frontmatter, _ = parse_frontmatter(alias_path)
+                nested_frontmatter, _ = parse_frontmatter(nested_path)
+                self.assertEqual(
+                    nested_frontmatter.get("name"), alias_frontmatter.get("name")
+                )
+                self.assertEqual(
+                    nested_frontmatter.get("description"),
+                    alias_frontmatter.get("description"),
+                )
+
+    def test_alias_body_points_to_existing_nested_skill(self):
+        for alias_name, nested_dir in TOP_LEVEL_ALIASES.items():
+            alias_dir = SKILL_ROOT.parent / alias_name
+            alias_path = alias_dir / "SKILL.md"
+            pointer = f"../repo-task-atk-test/{nested_dir}/SKILL.md"
+            with self.subTest(alias=alias_name):
+                self.assertTrue(alias_path.is_file(), f"缺少顶层别名：{alias_path}")
+                _, body = parse_frontmatter(alias_path)
+                self.assertIn(pointer, body)
+                self.assertTrue((alias_dir / pointer).is_file())
+
+    def test_alias_body_stays_a_short_pointer(self):
+        for alias_name in TOP_LEVEL_ALIASES:
+            alias_path = SKILL_ROOT.parent / alias_name / "SKILL.md"
+            with self.subTest(alias=alias_name):
+                self.assertTrue(alias_path.is_file(), f"缺少顶层别名：{alias_path}")
+                _, body = parse_frontmatter(alias_path)
+                self.assertLessEqual(len(body.strip().splitlines()), 8)
+                self.assertNotIn("mark_step.py", body)
+                self.assertEqual([], STAGE_ROW.findall(body))
+                self.assertNotIn("| 阶段 |", body)
+                for line in alias_path.read_text(encoding="utf-8").splitlines():
+                    self.assertLessEqual(len(line), 100)
 
 
 if __name__ == "__main__":

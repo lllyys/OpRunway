@@ -24,20 +24,20 @@ cd repo-task-atk-test
 
 ### 装 skill
 
-三选一，`<name>` 换成 `repo-task-atk-test` 或 `repo-task-doc-write`，两个都要就各装一次。
+普通 skill 三选一，`<name>` 换成目录名；验收 skill 再按下方扫描方式安装。
 
 ```bash
-# 软链接：跟着仓库更新，路径必须绝对
+# 软链接 / 用户目录 / 项目目录（三选一）
 ln -s "$PWD/skill/<name>" ~/.claude/skills/<name>
-
-# 用户目录：所有项目可用
 cp -r skill/<name> ~/.claude/skills/
-
-# 项目目录：只对该项目生效，可随项目提交
 cp -r skill/<name> <你的项目>/.claude/skills/
 ```
 
-安装 `repo-task-atk-test` 会带上两个子流程，父入口按输入路由；plugin manifest 也可分别注册三个入口。
+- Claude Code 目录安装只扫一层，需把三个目录一起复制：
+  `cp -r skill/{repo-task-atk-test,repo-task-case-gen,repo-task-atk-accept} ~/.claude/skills/`；
+  两个别名依赖真身并列安装。
+- Plugin 安装只用 manifest 注册真身及嵌套子目录，不安装别名，否则会同名重复注册。
+- 递归扫描工具（如 opencode）只装真身；装别名会重复显示两个子入口。
 
 ### repo-task-atk-test 还要装 ATK
 

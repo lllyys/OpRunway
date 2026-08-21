@@ -35,7 +35,7 @@ skill 专属的红线、阶段、架构理念，全在各自目录的 `CLAUDE.md
 repo-task-atk-test/           # 本仓（远程 gitcode.com/Justbin/repo-task-atk-test）
 ├── CLAUDE.md                 # 本文件，仓级共同规范
 ├── README.md                 # 仓门面：两个 skill 是什么 + 安装
-├── skill/                    # 两个 skill 本体，唯一发布物
+├── skill/                    # 两个 skill 本体 + 两个别名目录，唯一发布物
 │   └── repo-task-atk-test/  # 含 case-gen/ 与 acceptance/ 两个子 skill 目录
 ├── docs/                     # 不随 skill 发布
 │   ├── skills/<name>/        # 使用者视角：design.md + quickstart.md
