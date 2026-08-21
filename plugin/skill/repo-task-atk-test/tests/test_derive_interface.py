@@ -2,7 +2,7 @@
 
 roll 那轮在 S4 卡死：manifest 声明 execution_backend=aclnn，报告实测 pyaclnn。
 成因不是填错，是 skill 把一个可推导的事实做成了选择题——
-acceptance-policy 里 aclnn 的 backends 写着 ["pyaclnn", "aclnn"]，
+interface-policy 里 aclnn 的 backends 写着 ["pyaclnn", "aclnn"]，
 agent 没有任何依据知道该填哪个。
 """
 
@@ -148,7 +148,7 @@ class BackendDerivationTest(unittest.TestCase):
 
     def test_policy_no_longer_offers_a_choice(self):
         policy = json.loads(
-            (SKILL_ROOT / "references" / "acceptance-policy.json")
+            (SKILL_ROOT / "references" / "interface-policy.json")
             .read_text(encoding="utf-8"))
         for mode, block in policy["interface_modes"].items():
             if not block.get("acceptance_enabled"):
@@ -159,7 +159,7 @@ class BackendDerivationTest(unittest.TestCase):
 
     def test_policy_and_script_agree(self):
         policy = json.loads(
-            (SKILL_ROOT / "references" / "acceptance-policy.json")
+            (SKILL_ROOT / "references" / "interface-policy.json")
             .read_text(encoding="utf-8"))
         for mode, block in policy["interface_modes"].items():
             if not block.get("acceptance_enabled"):

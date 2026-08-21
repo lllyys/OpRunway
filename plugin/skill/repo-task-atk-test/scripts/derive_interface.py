@@ -35,7 +35,7 @@ import _taskdoc
 from _policy import load_policy
 import _stage_card
 
-# 接口模式 → 执行后端。真源是 references/acceptance-policy.json，
+# 接口模式 → 执行后端。真源是 references/interface-policy.json，
 # 这里的常量由 tests/test_derive_interface.py 钉住与它一致。
 BACKEND_BY_MODE = {
     "aclnn": "pyaclnn",

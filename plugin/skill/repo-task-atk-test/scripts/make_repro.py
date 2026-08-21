@@ -13,7 +13,12 @@ import tarfile
 import time
 from pathlib import Path
 
-from _policy import default_policy_path, load_policy, policy_sha256
+from _policy import (
+    interface_policy_path,
+    load_policy,
+    policy_sha256,
+    verdict_policy_path,
+)
 import _stage_card
 
 
@@ -24,6 +29,7 @@ def load(path):
 
 def build_readme(interface, verdict, cmd_log_name, members):
     policy = load_policy()
+    policy_digests = policy_sha256()
 
     lines = [
         f"# {verdict.get('op') or '未声明'} 验收复现包",
@@ -38,7 +44,8 @@ def build_readme(interface, verdict, cmd_log_name, members):
         f"- 精度基线接口：{interface.get('baseline_api') or '未声明'}",
         f"- 模式与基线的依据：{interface.get('mode_source') or '未声明'}",
         f"- 验收政策版本：{policy.get('schema_version')}",
-        f"- 验收政策摘要：{policy_sha256()}",
+        f"- 接口政策摘要：{policy_digests['interface']}",
+        f"- 裁决政策摘要：{policy_digests['verdict']}",
         "",
         "接口模式决定待验收对象。换一个后端跑，ATK 不会报错，但测的可能是 CANN 内置实现",
         "而不是本工程——复跑时请保持 " + cmd_log_name + " 里的后端参数不变。",
@@ -152,7 +159,8 @@ def main():
     add(args.excluded_cases, "excluded_cases.json", required=False, label="无效用例记录")
     add(args.interface, "interface.json", label="接口事实")
     add(args.verdict, "verdict.json", label="裁决结论")
-    add(str(default_policy_path()), "acceptance-policy.json", label="验收政策")
+    add(str(interface_policy_path()), "interface-policy.json", label="接口政策")
+    add(str(verdict_policy_path()), "verdict-policy.json", label="裁决政策")
     add(args.case_json, f"cases/{os.path.basename(args.case_json)}", label="用例集")
 
     for path in args.extra:

@@ -73,7 +73,7 @@ PROSE_BASELINE = {
     "references/build-deploy.md": 23,
     "references/atk-parameter-capabilities.md": 20,
     "references/atk-cli.md": 20,
-    "references/reporting.md": 17,
+    "references/reporting.md": 15,
     "references/intake.md": 15,
     "references/execution.md": 14,
     "references/experimental_standard.md": 11,

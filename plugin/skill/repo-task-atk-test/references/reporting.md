@@ -42,7 +42,8 @@
 
 归因只使用报告失败原因、运行结果和精度详情。
 
-规则由 `references/acceptance-policy.json` 定义。
+接口模式规则由 `references/interface-policy.json` 定义；精度、用例排除、失败归因和结论原因由
+`references/verdict-policy.json` 定义。
 
 证据不足时使用 `unknown`。
 

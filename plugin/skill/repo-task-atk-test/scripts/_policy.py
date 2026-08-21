@@ -9,17 +9,29 @@ class PolicyError(ValueError):
     """验收政策无法安全使用。"""
 
 
-def default_policy_path():
+def interface_policy_path():
     return (
         Path(__file__).resolve().parents[1]
         / "references"
-        / "acceptance-policy.json"
+        / "interface-policy.json"
     )
 
 
-def validate_policy(policy):
+def verdict_policy_path():
+    return (
+        Path(__file__).resolve().parents[1]
+        / "references"
+        / "verdict-policy.json"
+    )
+
+
+def _validate_schema(policy):
     if policy.get("schema_version") != 1:
         raise PolicyError("[POLICY_SCHEMA] schema_version 必须为 1")
+
+
+def validate_interface_policy(policy):
+    _validate_schema(policy)
 
     modes = policy.get("interface_modes")
     if not isinstance(modes, dict) or not modes:
@@ -39,6 +51,10 @@ def validate_policy(policy):
             raise PolicyError(
                 f"[POLICY_ENABLED] {name} 的 acceptance_enabled 必须为布尔值"
             )
+
+
+def validate_verdict_policy(policy):
+    _validate_schema(policy)
 
     accuracy = policy.get("accuracy")
     comparators = (
@@ -100,17 +116,52 @@ def validate_policy(policy):
         )
 
 
-def load_policy(path=None):
-    policy_path = Path(path) if path else default_policy_path()
+def validate_policy(policy):
+    validate_interface_policy(policy)
+    validate_verdict_policy(policy)
+
+
+def _load(policy_path):
     try:
         with policy_path.open(encoding="utf-8") as stream:
-            policy = json.load(stream)
+            return json.load(stream)
     except (OSError, json.JSONDecodeError) as error:
         raise PolicyError(f"[POLICY_LOAD] 无法加载验收政策：{error}") from error
+
+
+def load_interface_policy(path=None):
+    policy_path = Path(path) if path else interface_policy_path()
+    policy = _load(policy_path)
+    validate_interface_policy(policy)
+    return policy
+
+
+def load_verdict_policy(path=None):
+    policy_path = Path(path) if path else verdict_policy_path()
+    policy = _load(policy_path)
+    validate_verdict_policy(policy)
+    return policy
+
+
+def load_policy(path=None):
+    if path:
+        policy = _load(Path(path))
+        validate_policy(policy)
+        return policy
+
+    interface = load_interface_policy()
+    verdict = load_verdict_policy()
+    policy = {**interface, **verdict}
     validate_policy(policy)
     return policy
 
 
-def policy_sha256(path=None):
-    policy_path = Path(path) if path else default_policy_path()
-    return hashlib.sha256(policy_path.read_bytes()).hexdigest()
+def policy_sha256():
+    return {
+        "interface": hashlib.sha256(
+            interface_policy_path().read_bytes()
+        ).hexdigest(),
+        "verdict": hashlib.sha256(
+            verdict_policy_path().read_bytes()
+        ).hexdigest(),
+    }
