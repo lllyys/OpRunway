@@ -19,7 +19,7 @@ import json
 import re
 import sys
 
-from _opapi_binding import _symbol_prefix
+from _aclnn_names import _symbol_prefix
 from _runtime_guard import runtime_imports
 import _stage_card
 import _taskdoc

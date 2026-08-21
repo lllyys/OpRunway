@@ -1,5 +1,203 @@
 {
   "schema_version": 1,
+  "scripts": {
+    "make_must_cover.py": {
+      "skill": "case-gen",
+      "role": "从任务书声明生成必测组合"
+    },
+    "make_yaml.py": {
+      "skill": "case-gen",
+      "role": "从必测集推导 ATK YAML"
+    },
+    "check_coverage.py": {
+      "skill": "case-gen",
+      "role": "核对用例覆盖必测集"
+    },
+    "check_signature_contract.py": {
+      "skill": "case-gen",
+      "role": "核对接口签名契约"
+    },
+    "check_adapter_binding.py": {
+      "skill": "case-gen",
+      "role": "核对适配器绑定"
+    },
+    "seal_bundle.py": {
+      "skill": "case-gen",
+      "role": "封印交接包并记录摘要"
+    },
+    "atk_lookup.py": {
+      "skill": "case-gen",
+      "role": "按主题查询 ATK 知识"
+    },
+    "probe_atk_capabilities.py": {
+      "skill": "case-gen",
+      "role": "探测 ATK 参数能力"
+    },
+    "derive_interface.py": {
+      "skill": "case-gen",
+      "role": "从任务书派生接口模式"
+    },
+    "validate_cases.py": {
+      "skill": "case-gen",
+      "role": "校验生成用例结构与能力"
+    },
+    "_axis_binding.py": {
+      "skill": "case-gen",
+      "role": "解析语义轴与 dtype 绑定"
+    },
+    "_coverage_strategy.py": {
+      "skill": "case-gen",
+      "role": "实现覆盖组合策略"
+    },
+    "_expressibility.py": {
+      "skill": "case-gen",
+      "role": "判断契约能否由 ATK 表达"
+    },
+    "_shapes.py": {
+      "skill": "case-gen",
+      "role": "解析与校验 shape"
+    },
+    "_atk_capabilities.py": {
+      "skill": "case-gen",
+      "role": "加载并核对 ATK 能力矩阵"
+    },
+    "check_bundle.py": {
+      "skill": "acceptance",
+      "role": "重算并核对交接包"
+    },
+    "check_soc_binding.py": {
+      "skill": "acceptance",
+      "role": "核对 SoC 与构建族绑定"
+    },
+    "check_opapi_binding.py": {
+      "skill": "acceptance",
+      "role": "核对 op_api 库与运行日志"
+    },
+    "resolve_opp_library.py": {
+      "skill": "acceptance",
+      "role": "解析指定侧算子库"
+    },
+    "capture_reference.py": {
+      "skill": "acceptance",
+      "role": "捕获内置实现参考输出"
+    },
+    "check_golden_source.py": {
+      "skill": "acceptance",
+      "role": "核对真值来源与反证实验"
+    },
+    "parse_atk_report.py": {
+      "skill": "acceptance",
+      "role": "解析 ATK 精度与性能报告"
+    },
+    "select_perf_cases.py": {
+      "skill": "acceptance",
+      "role": "选择性能代表用例"
+    },
+    "save_failed_cases.py": {
+      "skill": "acceptance",
+      "role": "保存失败用例清单"
+    },
+    "verdict.py": {
+      "skill": "acceptance",
+      "role": "从证据推导验收裁决"
+    },
+    "make_repro.py": {
+      "skill": "acceptance",
+      "role": "生成可复现证据包"
+    },
+    "rewire_adapter.py": {
+      "skill": "acceptance",
+      "role": "受控改写封印后接线"
+    },
+    "_opapi_binding.py": {
+      "skill": "acceptance",
+      "role": "实现 op_api 绑定核验"
+    },
+    "_opp_library.py": {
+      "skill": "acceptance",
+      "role": "实现算子库路径解析"
+    },
+    "_report_reader.py": {
+      "skill": "acceptance",
+      "role": "读取并归一化 ATK 报告"
+    },
+    "_contracts.py": {
+      "skill": "shared",
+      "role": "加载骨架并渲染派生视图"
+    },
+    "_stage_card.py": {
+      "skill": "shared",
+      "role": "在量具入口补送阶段作战卡"
+    },
+    "mark_step.py": {
+      "skill": "shared",
+      "role": "记录阶段并输出作战卡"
+    },
+    "probe_progress.py": {
+      "skill": "shared",
+      "role": "从落盘产物反推进度"
+    },
+    "gate_lookup.py": {
+      "skill": "shared",
+      "role": "按量具或门名查询检查点"
+    },
+    "render_views.py": {
+      "skill": "shared",
+      "role": "生成并校验骨架派生视图"
+    },
+    "_case_utils.py": {
+      "skill": "shared",
+      "role": "提供用例摘要与通用读写"
+    },
+    "_policy.py": {
+      "skill": "shared",
+      "role": "提供跨阶段裁决策略"
+    },
+    "_runtime_guard.py": {
+      "skill": "shared",
+      "role": "隔离运行期重依赖导入"
+    },
+    "run_atk_task.py": {
+      "skill": "shared",
+      "role": "统一拉起 ATK 任务"
+    },
+    "probe_env.py": {
+      "skill": "shared",
+      "role": "探测并记录运行环境"
+    },
+    "align_signatures.py": {
+      "skill": "shared",
+      "role": "对齐基线与 ACLNN 签名"
+    },
+    "freeze_inputs.py": {
+      "skill": "shared",
+      "role": "生成并冻结输入数据"
+    },
+    "_taskdoc.py": {
+      "skill": "shared",
+      "role": "提供任务书解析薄封装"
+    },
+    "_taskdoc_parser.py": {
+      "skill": "shared",
+      "role": "解析任务书结构化内容"
+    },
+    "_signature.py": {
+      "skill": "shared",
+      "role": "解析公开接口签名"
+    },
+    "_soc_binding.py": {
+      "skill": "shared",
+      "role": "推导设备与构建族映射"
+    },
+    "_aclnn_names.py": {
+      "skill": "shared",
+      "role": "规范化 ACLNN 接口名"
+    },
+    "_dtype_vocab.py": {
+      "skill": "shared",
+      "role": "提供 dtype 名称映射词表"
+    }
+  },
   "stages": {
     "S0": {
       "name": "接收与环境",

@@ -14,6 +14,8 @@
 - 生成侧 `repo-task-case-gen` 负责 S1–S2
 - 验收侧 `repo-task-atk-accept` 负责 S0 与 S3–S5
 
+每个脚本的归属在骨架 `scripts` 表中，由 `test_script_ownership.py` 锁住。
+
 `skill/` 下另有两个只含指针的顶层别名目录，测试锁住其 frontmatter 与对应子页一致。
 
 两侧共用一份 `scripts/` 与 `references/`。交接包是两侧唯一接口，规范在

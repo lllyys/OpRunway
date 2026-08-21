@@ -2,8 +2,8 @@
 
 import re
 
-from _axis_binding import DTYPE_SOURCE_ALIASES
 from _case_utils import file_sha256
+from _dtype_vocab import DTYPE_SOURCE_ALIASES
 from _signature import parameter_names as _parameter_names
 from _taskdoc_parser import ParseError, parse
 

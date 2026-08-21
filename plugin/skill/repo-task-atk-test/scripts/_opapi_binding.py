@@ -5,6 +5,9 @@ import hashlib
 import re
 from pathlib import Path
 
+from _aclnn_names import BindingError
+from _aclnn_names import _symbol_prefix
+
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -17,17 +20,6 @@ SIGNATURE_REPAIRED = (
     "参数数量不匹配",
     "参数类型不匹配",
 )
-
-
-class BindingError(ValueError):
-    """The candidate library cannot provide an attributable execution."""
-
-
-def _symbol_prefix(aclnn_name):
-    if not isinstance(aclnn_name, str) or not aclnn_name.strip():
-        raise BindingError("aclnn_name 必须是非空字符串")
-    name = aclnn_name.strip()
-    return name if name.startswith("aclnn") else f"aclnn{name}"
 
 
 def _sha256(path):

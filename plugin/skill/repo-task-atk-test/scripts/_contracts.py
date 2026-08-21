@@ -24,6 +24,9 @@ OWNERS = frozenset({"agent", "script", "atk"})
 # 共用一份骨架的两个运行侧。阶段归属只允许从这里取值。
 SKILLS = frozenset({"case-gen", "acceptance"})
 
+# scripts 表的归属域；shared 表示两侧都会调用或依赖。
+SCRIPT_SKILLS = frozenset({"case-gen", "acceptance", "shared"})
+
 # 一道检查点为什么存在，只有这四种答案。
 #
 # 分类不是给文档做目录用的，是为了看清「这么多检查点是不是都有必要」：

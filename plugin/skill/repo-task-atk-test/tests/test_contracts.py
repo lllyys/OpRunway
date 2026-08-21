@@ -36,6 +36,13 @@ class SpineStructureTest(unittest.TestCase):
                 self.assertIn("skill", block, f"{stage} 缺 skill")
                 self.assertIn(block["skill"], _contracts.SKILLS)
 
+    def test_spine_declares_script_ownership_skills(self):
+        self.assertIn("scripts", self.data)
+        self.assertEqual(
+            frozenset({"case-gen", "acceptance", "shared"}),
+            _contracts.SCRIPT_SKILLS,
+        )
+
     def test_stages_of_returns_each_skill_stage_in_spine_order(self):
         self.assertEqual(["S1", "S2"],
                          _contracts.stages_of(self.data, "case-gen"))
