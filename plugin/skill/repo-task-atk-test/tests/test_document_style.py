@@ -76,7 +76,8 @@ PROSE_BASELINE = {
     "references/atk-cli.md": 16,
     "references/reporting.md": 15,
     "references/intake.md": 15,
-    "references/execution.md": 14,
+    "references/environment.md": 7,
+    "references/execution.md": 7,
     "references/experimental_standard.md": 11,
     "references/performance.md": 9,
     "references/builtin-baseline.md": 9,
@@ -172,6 +173,18 @@ def prose_violations(path):
 
 
 class DocumentStyleTest(unittest.TestCase):
+    def test_execution_reference_is_split_by_stage(self):
+        expected = {
+            "environment.md": ["环境", "阶段归属"],
+            "workdir-freeze.md": ["工作目录", "冻结输入", "无效用例"],
+            "execution.md": ["目录", "无效用例", "部署门禁", "中止"],
+        }
+        for name, headings in expected.items():
+            with self.subTest(reference=name):
+                text = (REFERENCES / name).read_text(encoding="utf-8")
+                actual = re.findall(r"^## (.+)$", text, flags=re.MULTILINE)
+                self.assertEqual(headings, actual)
+
     def test_main_skill_stays_compact(self):
         limits = {
             "SKILL.md": 80,

@@ -240,6 +240,9 @@
     "random-operator-signals.json": {
       "skill": "case-gen"
     },
+    "workdir-freeze.md": {
+      "skill": "case-gen"
+    },
     "atk-cli.md": {
       "skill": "acceptance"
     },
@@ -250,6 +253,9 @@
       "skill": "acceptance"
     },
     "performance.md": {
+      "skill": "acceptance"
+    },
+    "execution.md": {
       "skill": "acceptance"
     },
     "artifact-contracts.json": {
@@ -267,7 +273,7 @@
     "glossary.md": {
       "skill": "shared"
     },
-    "execution.md": {
+    "environment.md": {
       "skill": "shared"
     },
     "builtin-baseline.md": {
@@ -819,7 +825,7 @@
     "evidence/env.json": {
       "stage": "S1",
       "owner": "script",
-      "spec": "references/execution.md#环境",
+      "spec": "references/environment.md#环境",
       "template": null,
       "producer": "probe_env.py",
       "consumed_by": [
@@ -831,7 +837,7 @@
     "evidence/env.sh": {
       "stage": "S1",
       "owner": "script",
-      "spec": "references/execution.md#环境",
+      "spec": "references/environment.md#环境",
       "template": null,
       "producer": "probe_env.py",
       "consumed_by": [
@@ -1131,7 +1137,7 @@
     "冻结输入": {
       "stage": "S2",
       "owner": "script",
-      "spec": "references/execution.md#冻结输入",
+      "spec": "references/workdir-freeze.md#冻结输入",
       "template": null,
       "producer": "freeze_inputs.py",
       "consumed_by": [

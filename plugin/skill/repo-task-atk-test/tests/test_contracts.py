@@ -76,6 +76,17 @@ class SpineStructureTest(unittest.TestCase):
             with self.subTest(artifact=name):
                 self.assertTrue(spec.get("spec"), f"{name} 没有规范锚点")
 
+    def test_environment_and_frozen_inputs_use_split_reference_anchors(self):
+        artifacts = self.data["artifacts"]
+        expected = {
+            "evidence/env.json": "references/environment.md#环境",
+            "evidence/env.sh": "references/environment.md#环境",
+            "冻结输入": "references/workdir-freeze.md#冻结输入",
+        }
+        for name, anchor in expected.items():
+            with self.subTest(artifact=name):
+                self.assertEqual(anchor, artifacts[name]["spec"])
+
     def test_fields_are_either_detailed_or_explicitly_waived(self):
         # 日志一类的产物没有字段可登记，但必须写明理由，
         # 否则「没写字段」和「不需要字段」分不开，完备性就不可判定。

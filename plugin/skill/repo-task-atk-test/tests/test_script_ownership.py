@@ -114,6 +114,28 @@ class ScriptOwnershipTest(unittest.TestCase):
                         self.assertIn(
                             ownership[name]["skill"], {skill, "shared"})
 
+    def test_execution_references_are_routed_to_their_consuming_side(self):
+        ownership = self.data.get("references") or {}
+        expected = {
+            "environment.md": "shared",
+            "workdir-freeze.md": "case-gen",
+            "execution.md": "acceptance",
+        }
+        for name, skill in expected.items():
+            with self.subTest(reference=name):
+                self.assertEqual(skill, ownership.get(name, {}).get("skill"))
+
+        case_gen = (SKILL_ROOT / "case-gen" / "SKILL.md").read_text(
+            encoding="utf-8")
+        acceptance = (SKILL_ROOT / "acceptance" / "SKILL.md").read_text(
+            encoding="utf-8")
+        for name in ("environment.md", "workdir-freeze.md"):
+            self.assertIn(name, case_gen)
+        self.assertNotIn("execution.md", case_gen)
+        for name in ("environment.md", "execution.md"):
+            self.assertIn(name, acceptance)
+        self.assertNotIn("workdir-freeze.md", acceptance)
+
     def test_router_only_names_shared_scripts(self):
         path = SKILL_ROOT / "SKILL.md"
         names = SCRIPT_REF.findall(path.read_text(encoding="utf-8"))
