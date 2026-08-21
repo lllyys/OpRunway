@@ -374,18 +374,6 @@ class TaskDocSignatureModeTest(unittest.TestCase):
         self.assertIn("repo-task-doc-write", done.stderr)
         self.assertIsNone(report)
 
-    def test_multiline_declaration_keeps_every_business_parameter(self):
-        done, report = run_taskdoc(task_doc(MULTILINE_TAIL_OUTPUT))
-
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(
-            [row["c_name"] for row in report["aclnn"]["inputs"]],
-            ["self", "shifts", "dims"])
-        self.assertEqual(
-            [row["c_name"] for row in report["aclnn"]["outputs"]],
-            ["out"])
-
-
 class AlignSignaturesTest(unittest.TestCase):
     def test_output_not_at_tail_requires_adapter(self):
         done, report = run_align("torch.matmul", MATMUL)
@@ -487,148 +475,10 @@ class AlignSignaturesTest(unittest.TestCase):
         self.assertIsNone(names)
         self.assertIsNone(used)
 
-    def test_signature_without_atk_trailing_is_rejected(self):
-        done, report = run_align("torch.matmul",
-                                 "aclnnStatus aclnnMatmul(const aclTensor *self)")
-        self.assertEqual(done.returncode, 2)
-        self.assertIn("GetWorkspaceSize", done.stderr)
-        self.assertIsNone(report)
-
     def test_unresolvable_baseline_is_rejected(self):
         done, _ = run_align("numpy.roll", TAIL_OUTPUT)
         self.assertEqual(done.returncode, 2)
         self.assertIn("torch", done.stderr)
-
-
-class RejectInstalledHeaderTest(unittest.TestCase):
-    """真机事故（median，2026-08-16）：`--header` 抓了 CANN 装机头文件，不是
-    待验收算子自己工程目录下的头文件——两者同名但签名不同（装机版本 4 参无
-    dim，待验收算子 7 参带 dim），S2 冻结了错的签名，直到 S3 构建安装完才
-    发现，白跑一整轮构建。"""
-
-    def _env(self, tmp, cann_home):
-        path = tmp / "env.json"
-        path.write_text(json.dumps({"cann": {"ASCEND_TOOLKIT_HOME": str(cann_home)}}),
-                        encoding="utf-8")
-        return path
-
-    def test_header_under_cann_toolkit_home_is_rejected(self):
-        sys.path.insert(0, str(SCRIPT.parent))
-        import align_signatures
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            cann_home = tmp / "cann-9.0.0-beta.1"
-            include = cann_home / "include" / "aclnnop"
-            include.mkdir(parents=True)
-            header = include / "aclnn_median.h"
-            header.write_text("", encoding="utf-8")
-            env = self._env(tmp, cann_home)
-            with self.assertRaises(align_signatures.AlignError) as ctx:
-                align_signatures.reject_installed_header(str(header), str(env))
-            self.assertIn("装机", str(ctx.exception))
-
-    def test_header_under_default_ascend_root_is_rejected_even_without_env(self):
-        sys.path.insert(0, str(SCRIPT.parent))
-        import align_signatures
-        # /usr/local/Ascend 是默认装机根，不传 --env 也要挡。
-        with self.assertRaises(align_signatures.AlignError):
-            align_signatures.reject_installed_header(
-                "/usr/local/Ascend/cann-9.0.0-beta.1/include/aclnnop/aclnn_median.h",
-                None)
-
-    def test_header_under_operator_project_is_accepted(self):
-        sys.path.insert(0, str(SCRIPT.parent))
-        import align_signatures
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            cann_home = tmp / "cann-9.0.0-beta.1"
-            cann_home.mkdir()
-            project = tmp / "ops-nn-master-experimental-index-median"
-            header_dir = project / "op_host" / "op_api"
-            header_dir.mkdir(parents=True)
-            header = header_dir / "aclnn_median.h"
-            header.write_text("", encoding="utf-8")
-            env = self._env(tmp, cann_home)
-            align_signatures.reject_installed_header(str(header), str(env))  # 不应抛异常
-
-    def test_header_outside_any_known_cann_root_is_accepted_without_env(self):
-        sys.path.insert(0, str(SCRIPT.parent))
-        import align_signatures
-        align_signatures.reject_installed_header("/tmp/whatever.h", None)  # 不应抛异常
-
-
-class RequireProjectSourceTest(unittest.TestCase):
-    """黑名单挡的是已知的 CANN 装机根，白名单正过来说：签名出处只能是
-    `evidence/env.json` 的 `operator_project.path` 那棵树。
-
-    同一台真机上还有别队的 vendor 目录、上一轮的构建产物、`find` 出来的
-    同名头文件，任何一处都能给出同名不同签的声明，黑名单枚举不完。
-    """
-
-    def _env(self, tmp, project=None, cann_home=None):
-        payload = {}
-        if project is not None:
-            payload["operator_project"] = {"path": str(project)}
-        if cann_home is not None:
-            payload["cann"] = {"ASCEND_TOOLKIT_HOME": str(cann_home)}
-        path = tmp / "env.json"
-        path.write_text(json.dumps(payload), encoding="utf-8")
-        return path
-
-    def setUp(self):
-        sys.path.insert(0, str(SCRIPT.parent))
-        import align_signatures
-        self.mod = align_signatures
-
-    def test_nonexistent_source_inside_project_is_rejected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            project = tmp / "ops-nn-median"
-            project.mkdir()
-            env = self._env(tmp, project=project)
-            with self.assertRaises(self.mod.AlignError) as ctx:
-                self.mod.require_project_source(
-                    str(project / "never_written.h"), str(env), "--signature-source")
-            self.assertIn("不存在", str(ctx.exception))
-
-    def test_source_inside_project_is_accepted(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            project = tmp / "ops-nn-median"
-            (project / "op_host" / "op_api").mkdir(parents=True)
-            header = project / "op_host" / "op_api" / "aclnn_median.h"
-            header.write_text("", encoding="utf-8")
-            env = self._env(tmp, project=project)
-            self.assertEqual(
-                self.mod.require_project_source(str(header), str(env), "--header"),
-                str(header.resolve()))
-
-    def test_other_vendor_dir_is_rejected_though_no_cann_root_matches(self):
-        # 别队的 vendor 目录不在任何 CANN 装机根下，黑名单放行，白名单必须挡住。
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            project = tmp / "ops-nn-median"
-            project.mkdir()
-            stray = tmp / "other-team-vendor" / "aclnn_median.h"
-            stray.parent.mkdir()
-            stray.write_text("", encoding="utf-8")
-            env = self._env(tmp, project=project)
-            self.mod.reject_installed_header(str(stray), str(env))  # 黑名单放行
-            with self.assertRaises(self.mod.AlignError) as ctx:
-                self.mod.require_project_source(str(stray), str(env), "--header")
-            self.assertIn("待验收算子工程目录", str(ctx.exception))
-
-    def test_missing_operator_project_is_not_a_pass(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            env = self._env(tmp, cann_home=tmp / "cann")
-            with self.assertRaises(self.mod.AlignError) as ctx:
-                self.mod.require_project_source("/tmp/x.h", str(env), "--header")
-            self.assertIn("--op-repo", str(ctx.exception))
-
-    def test_unreadable_env_is_not_a_pass(self):
-        with self.assertRaises(self.mod.AlignError):
-            self.mod.require_project_source("/tmp/x.h", "/tmp/no-such-env.json", "--header")
 
 
 class SignatureProvenanceTest(unittest.TestCase):
@@ -682,44 +532,6 @@ class SignatureProvenanceTest(unittest.TestCase):
         self.assertTrue(report["signature_source"].endswith("op_project/aclnn_roll.h"))
         self.assertEqual(report["source"], {
             "kind": "manual", "path": report["signature_source"]})
-
-
-class AclnnNameNormalisationTest(unittest.TestCase):
-    """`aclnn_name` 在两个门禁里必须是同一个语义。
-
-    模板与 make_yaml 写的都是不带前缀的 `Roll`，op_api 绑定门禁会补成
-    `aclnnRoll`；签名对齐这一侧以前直接拼 `RollGetWorkspaceSize`，
-    于是同一个字段一个门禁过、另一个挂，真机上白跑一轮。
-    """
-
-    def _header(self):
-        handle = tempfile.NamedTemporaryFile("w", suffix=".h", delete=False)
-        handle.write(TAIL_OUTPUT + ";\n")
-        handle.close()
-        return handle.name
-
-    def test_bare_name_finds_the_prefixed_symbol(self):
-        from align_signatures import read_header_signature
-
-        signature, _ = read_header_signature(self._header(), "Roll")
-        self.assertIn("aclnnRollGetWorkspaceSize", signature)
-
-    def test_prefixed_name_still_works(self):
-        from align_signatures import read_header_signature
-
-        signature, _ = read_header_signature(self._header(), "aclnnRoll")
-        self.assertIn("aclnnRollGetWorkspaceSize", signature)
-
-    def test_both_spellings_agree_with_the_binding_gate(self):
-        from _opapi_binding import _symbol_prefix
-        from align_signatures import read_header_signature
-
-        header = self._header()
-        for spelling in ("Roll", "aclnnRoll"):
-            with self.subTest(aclnn_name=spelling):
-                signature, _ = read_header_signature(header, spelling)
-                self.assertIn(f"{_symbol_prefix(spelling)}GetWorkspaceSize",
-                              signature)
 
 
 if __name__ == "__main__":

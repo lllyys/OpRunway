@@ -1,8 +1,8 @@
 """S0 入口：核验生成侧交接包、任务书、ATK 版本与 PR 接口。
 
 量具只在交接包副本中运行。它重算封印清单登记文件的 SHA256，核对本次任务书与
-验收机环境，并在 aclnn 模式下调用 align_signatures.py 读取 PR 头文件。四项检查
-互不短路，结论统一写入 ``evidence/bundle_intake.json``。
+验收机环境，并在 aclnn 模式下进程内解析 PR 头文件。四项检查互不短路，结论统一
+写入 ``evidence/bundle_intake.json``。
 
 退出码：0 表示全部适用项通过；2 表示至少一项不满足；3 表示清单或必需输入不可用。
 """
@@ -10,13 +10,19 @@
 import argparse
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from _case_utils import file_sha256
+from _signature_parse import (
+    AlignError,
+    parse_signature,
+    read_header_signature,
+    reject_installed_header,
+    require_project_source,
+)
 import _stage_card
 import _taskdoc
 
@@ -69,13 +75,6 @@ def parser():
         help="aclnn 模式下待验收 PR 的头文件或头文件目录",
     )
     cli.add_argument("--aclnn-name", metavar="<名>", help="YAML 使用的 aclnn_name")
-    cli.add_argument(
-        "--baseline", metavar="<接口>",
-        help=(
-            "可选提示；实际以 bundle.json 的 interface.baseline_api 为准，"
-            "与清单不同时按清单执行并记录 note"
-        ),
-    )
     cli.add_argument(
         "-o", "--output", default="evidence/bundle_intake.json", metavar="<json>",
         help="接收结果路径，默认 evidence/bundle_intake.json",
@@ -274,29 +273,36 @@ def check_atk_version(env, manifest):
     }
 
 
-def alignment_inputs(report, label):
-    """从对齐报告取有序的 aclnn 入参名与 C 类型。"""
-    aclnn = report.get("aclnn")
-    rows = aclnn.get("inputs") if isinstance(aclnn, dict) else None
+def signature_parameters(parsed, label):
+    """从解析结果取有序业务参数及包含 const 与指针层数的 C 类型。"""
+    rows = parsed.get("parameters") if isinstance(parsed, dict) else None
     if not isinstance(rows, list):
-        raise ValueError(f"{label} 缺 aclnn.inputs 列表")
+        raise ValueError(f"{label} 缺 parameters 列表")
     result = []
     names = set()
     for index, row in enumerate(rows):
-        if not isinstance(row, dict) or not row.get("c_name") or not row.get("c_type"):
-            raise ValueError(f"{label} 的 aclnn.inputs[{index}] 缺 c_name 或 c_type")
+        if (
+            not isinstance(row, dict)
+            or not row.get("c_name")
+            or not row.get("c_type")
+            or not isinstance(row.get("pointer_depth"), int)
+            or not isinstance(row.get("is_const"), bool)
+        ):
+            raise ValueError(f"{label} 的 parameters[{index}] 缺完整参数类型")
         name = row["c_name"]
         if name in names:
-            raise ValueError(f"{label} 的 aclnn.inputs 有重复参数 {name}")
+            raise ValueError(f"{label} 的 parameters 有重复参数 {name}")
         names.add(name)
-        result.append((name, row["c_type"]))
+        qualifiers = "const " if row["is_const"] else ""
+        pointers = " " + "*" * row["pointer_depth"] if row["pointer_depth"] else ""
+        result.append((name, f"{qualifiers}{row['c_type']}{pointers}"))
     return result
 
 
-def signature_differences(expected_report, actual_report):
+def signature_differences(expected_parsed, actual_parsed):
     """按名称集合、共有项相对顺序与 C 类型生成四类差异。"""
-    expected = alignment_inputs(expected_report, "任务书签名对齐报告")
-    actual = alignment_inputs(actual_report, "PR 签名对齐报告")
+    expected = signature_parameters(expected_parsed, "任务书签名")
+    actual = signature_parameters(actual_parsed, "PR 签名")
     expected_names = [name for name, _ in expected]
     actual_names = [name for name, _ in actual]
     expected_set = set(expected_names)
@@ -339,95 +345,54 @@ def not_applicable_interface(reason, note=None):
     }
 
 
-def check_interface(root, env_path, manifest, header, aclnn_name, cli_baseline):
-    """在适用时调用现有头文件模式，并与任务书派生报告比较。"""
+def check_interface(root, env_path, manifest, header, aclnn_name):
+    """在适用时进程内解析 PR 头文件，并与任务书声明比较。"""
     mode = manifest["interface"].get("interface_mode")
     if mode != "aclnn":
         return not_applicable_interface(f"接口模式是 {mode!r}，没有 aclnn C 头文件可比")
 
     baseline = manifest["interface"].get("baseline_api")
-    note = None
-    if cli_baseline and baseline and cli_baseline != baseline:
-        note = (
-            f"调用方给的 --baseline {cli_baseline!r} 与清单 interface.baseline_api "
-            f"{baseline!r} 不一致，已按清单"
-        )
     supplied = {
         "--header": header,
         "--aclnn-name": aclnn_name,
-        "bundle.interface.baseline_api": baseline,
     }
     missing_args = [name for name, value in supplied.items() if not value]
     if missing_args:
         return not_applicable_interface(
-            "未给头文件三件套：缺 " + "、".join(missing_args),
-            note,
+            "未给头文件参数：缺 " + "、".join(missing_args),
         )
 
-    note_evidence = {"note": note} if note else {}
-
-    output = root / "evidence" / "signature_alignment_pr.json"
-    command = [
-        sys.executable,
-        str(Path(__file__).resolve().with_name("align_signatures.py")),
-        "--header",
-        str(Path(header).expanduser().resolve()),
-        "--aclnn-name",
-        aclnn_name,
-        "--baseline",
-        baseline,
-        "--env",
-        str(env_path),
-        "-o",
-        str(output),
-    ]
     try:
-        done = subprocess.run(
-            command,
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=120,
+        reject_installed_header(header, env_path)
+        checked_header = require_project_source(header, env_path, "--header")
+        actual_signature, source = read_header_signature(
+            checked_header, aclnn_name
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {
-            "passed": False,
-            "applicable": True,
-            "evidence": {
-                **note_evidence,
-                "reason": f"align_signatures.py 启动失败：{exc}",
-                "missing": [],
-                "extra": [],
-                "reordered": [],
-                "type_mismatch": [],
+        actual_parsed = parse_signature(actual_signature)
+        output = root / "evidence" / "pr_signature.json"
+        write_json_atomic(
+            output,
+            {
+                "source": {"kind": "header", "path": source},
+                "signature": actual_signature,
+                "parameters": actual_parsed["parameters"],
             },
-        }
-    if done.returncode != 0:
+        )
+        expected_report = read_json_object(
+            root / "evidence" / "signature_alignment.json",
+            "evidence/signature_alignment.json",
+        )
+        expected_signature = expected_report.get("signature")
+        if not isinstance(expected_signature, str) or not expected_signature.strip():
+            raise ValueError("evidence/signature_alignment.json 缺 signature 声明原文")
+        expected_parsed = parse_signature(expected_signature)
+        differences = signature_differences(expected_parsed, actual_parsed)
+    except (AlignError, IntakeFailure, ValueError) as exc:
         return {
             "passed": False,
             "applicable": True,
             "evidence": {
-                **note_evidence,
-                "reason": done.stderr.strip(),
-                "align_exit_code": done.returncode,
-                "missing": [],
-                "extra": [],
-                "reordered": [],
-                "type_mismatch": [],
-            },
-        }
-
-    expected_path = root / "evidence" / "signature_alignment.json"
-    try:
-        expected = read_json_object(expected_path, "evidence/signature_alignment.json")
-        actual = read_json_object(output, "evidence/signature_alignment_pr.json")
-        differences = signature_differences(expected, actual)
-    except (IntakeFailure, ValueError) as exc:
-        return {
-            "passed": False,
-            "applicable": True,
-            "evidence": {
-                **note_evidence,
+                "baseline_api": baseline,
                 "reason": str(exc),
                 "missing": [],
                 "extra": [],
@@ -436,10 +401,10 @@ def check_interface(root, env_path, manifest, header, aclnn_name, cli_baseline):
             },
         }
     evidence = {
-        **note_evidence,
+        "baseline_api": baseline,
         **differences,
         "expected_report": "evidence/signature_alignment.json",
-        "actual_report": "evidence/signature_alignment_pr.json",
+        "actual_report": "evidence/pr_signature.json",
     }
     return {
         "passed": not any(differences.values()),
@@ -532,7 +497,6 @@ def build_report(root, manifest_path, manifest, task_path, env_path, env, args):
             manifest,
             args.header,
             args.aclnn_name,
-            args.baseline,
         ),
     }
     blocked = any(

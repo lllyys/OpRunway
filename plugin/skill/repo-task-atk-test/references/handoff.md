@@ -59,8 +59,9 @@ atk-case-<op>/
 └── frozen_<分面>/
 ```
 
-验收侧把整个目录复制为自己的工作副本，再追加 `evidence/bundle_intake.json`、构建证据、
-跑测结果与结论。S2 的相对路径一个不改，跨阶段消费者无需猜新位置或接受路径参数改写。
+验收侧把整个目录复制为自己的工作副本，再追加 `evidence/pr_signature.json`、
+`evidence/bundle_intake.json`、构建证据、跑测结果与结论。S2 的相对路径一个不改，
+跨阶段消费者无需猜新位置或接受路径参数改写。
 
 目录名可以随复制动作变化，清单内的文件键不带顶层目录名。所有文件键都以交接包根为
 起点，并使用正斜杠分隔的相对路径。
@@ -206,12 +207,12 @@ aclnn 模式另接收 PR 的 GetWorkspaceSize 头文件和接口名。
 
 ```text
 check_bundle.py [-C <交接包副本>] --task-doc <md> --env <env.json>
-  [--header <PR 头文件或目录> --aclnn-name <名>] [--baseline <torch.xxx>]
+  [--header <PR 头文件或目录> --aclnn-name <名>]
   [-o evidence/bundle_intake.json]
 ```
 
-`--baseline` 只是可选提示；接口门以清单的 `interface.baseline_api` 为准。两者不同时按
-清单执行并在接口证据写 `note`，清单也没有该字段时才把接口项判为不适用。
+清单的 `interface.baseline_api` 仍记进接口证据，供后续复现，但不参与 PR 头文件与
+任务书声明的机械比对。
 
 脚本一次执行完七步，把能判断的项目全部写入同一份接收结果：
 
@@ -219,7 +220,7 @@ check_bundle.py [-C <交接包副本>] --task-doc <md> --env <env.json>
 2. 重算 `files` 中每个文件的 SHA256，同时检查清单文件没有缺失。
 3. 比较本次任务书全文 SHA256 与 `task_doc.sha256`。
 4. 比较验收机 `env.json` 的 ATK 版本与清单里的 `atk.version`。
-5. 在 aclnn 前提成立时，对比 PR 头文件与任务书签名的名称、顺序和 C 类型。
+5. 在 aclnn 前提成立时写出 `evidence/pr_signature.json`，并核对含出参的完整参数声明。
 6. 写出 `evidence/bundle_intake.json`，逐项保留结论与证据。
 7. 按全部判据汇总退出码，不因第一项失败而跳过其余可执行检查。
 
@@ -260,11 +261,12 @@ check_bundle.py [-C <交接包副本>] --task-doc <md> --env <env.json>
 
 ## 接口一致性
 
-接口模式为 aclnn 且工程里有 GetWorkspaceSize 头文件时，接收门必须核对三项：
+接口模式为 aclnn 且工程里有 GetWorkspaceSize 头文件时，接收门必须核对全部业务参数，
+包括入参与出参：
 
 - PR 头文件的参数名集合等于任务书签名的参数名集合。
 - 两边共有参数的相对顺序一致。
-- 每个参数的 C 类型一致。
+- 每个参数的 C 类型、指针层数与 `const` 一致。
 
 三项任一失败都单列为“PR 接口与任务书不一致”，并在证据中列出缺失、多出、乱序或
 类型不同的参数。它属于 PR 偏离任务书，不得与交接包摘要损坏混写，也不得回 S2 改考卷。
@@ -274,15 +276,29 @@ check_bundle.py [-C <交接包副本>] --task-doc <md> --env <env.json>
 - `missing`：任务书签名有、PR 头文件没有的参数名。
 - `extra`：PR 头文件有、任务书签名没有的参数名。
 - `reordered`：两边共有参数的预期顺序与实际顺序。
-- `type_mismatch`：参数名及任务书预期 C 类型、PR 实际 C 类型。
+- `type_mismatch`：参数名及任务书预期完整 C 类型、PR 实际完整 C 类型；完整类型包含
+  指针层数与 `const`。
+
+头文件解析成功后写出 `evidence/pr_signature.json`，形态固定如下：
+
+```json
+{
+  "source": {"kind": "header", "path": "<实际命中的工程头文件>"},
+  "signature": "<PR 声明原文>",
+  "parameters": []
+}
+```
+
+`parameters` 保存同一解析器得到的全部业务参数，不含 ATK 自动补齐的 `workspaceSize` 与
+`executor`。旧产物 `evidence/signature_alignment_pr.json` 不再生成。
 
 pytorch 或 kernel 模式没有可比较的 C 头文件。此时 `interface.applicable` 为 `false`，
 `interface.passed` 为 `null`，`interface.evidence.reason` 说明接口模式；不适用不计失败。
 
-aclnn 模式下，调用方必须给 `--header` 与 `--aclnn-name`，基线接口从清单读取。头文件参数
-少给任一项，或清单缺 `interface.baseline_api` 时，接口项写为不适用，`reason` 写明
-“未给头文件”及所缺内容，整体退出码只由其余适用项决定。stdout 必须提示 S0 接口一致性门
-没有执行，进入 S3 前必须补跑；这个临时不适用不能当作已经通过接口门。
+aclnn 模式下，调用方必须给 `--header` 与 `--aclnn-name`。头文件参数少给任一项时，
+接口项写为不适用，`reason` 写明“未给头文件”及所缺内容，整体退出码只由其余适用项决定。
+stdout 必须提示 S0 接口一致性门没有执行，进入 S3 前必须补跑；这个临时不适用不能当作
+已经通过接口门。
 
 ## 接收结果
 
@@ -314,12 +330,11 @@ aclnn 模式下，调用方必须给 `--header` 与 `--aclnn-name`，基线接�
 | `integrity` | `missing`、`mismatched`、`unexpected`、`manifest_problems`、`registered_files` |
 | `task_doc` | `path`、`expected_sha256`、`actual_sha256`、`missing` |
 | `atk_version` | `expected`、`actual`、`missing` |
-| `interface` 适用 | `missing`、`extra`、`reordered`、`type_mismatch`、`expected_report`、`actual_report`、可选 `note` |
+| `interface` 适用 | `baseline_api`、`missing`、`extra`、`reordered`、`type_mismatch`、`expected_report`、`actual_report` |
 | `interface` 不适用 | `reason` |
 
-接口子量具无法启动、头文件解析失败或报告结构不可读时，`interface` 仍是适用项且判失败。
-此时 `evidence` 用 `reason` 保存错误，并保留四类差异字段为空数组；子量具非零退出时另记
-`align_exit_code`。
+头文件来源不合规、声明解析失败或任务书对齐报告缺少声明原文时，`interface` 仍是适用项且
+判失败。此时 `evidence` 用 `reason` 保存错误，并保留四类差异字段为空数组。
 
 任一适用项失败，整体结论就是阻塞·未验收 @S0，不进入 S3。接口不一致必须保留独立
 分类，使最终报告能区分 PR 偏离任务书、交接包损坏、任务书拿错和环境版本不符。

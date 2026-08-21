@@ -104,9 +104,9 @@
 
 量具 `check_bundle.py`　类别 `transcription`
 
-- PR 头文件的参数名集合等于任务书签名的参数名集合
-- 两边参数的相对顺序一致
-- 两边参数的 C 类型一致
+- PR 头文件的全部业务参数（含出参）名称集合等于任务书签名的参数名集合
+- 两边全部业务参数（含出参）的相对顺序一致
+- 两边全部业务参数（含出参）的 C 类型、指针层数与 const 一致
 
 **为什么存在：** 签名本来从 PR 抄，抄什么过什么，PR 偏离任务书现在测不出来。
 任务书才是接口契约，PR 的公开声明必须在 S0 单独与它核对
@@ -117,7 +117,6 @@
 　证据键 `interface`
 
 **注：** pytorch / kernel 模式及未给 --header、--aclnn-name 的 aclnn 模式没有 C 头文件可比。
-清单缺 interface.baseline_api 时也不适用，进 S3 前必须补跑；--baseline 只是提示，始终以清单为准，
 结论写进 bundle_intake.json 的 interface 项
 
 ## S2 用例生成

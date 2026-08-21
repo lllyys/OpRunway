@@ -35,8 +35,8 @@ description: >-
 `probe_env.py --custom-opp` 锁定、`check_opapi_binding.py` 裁决，机制写在
 [build-deploy.md](../references/build-deploy.md#签名自检搜的是磁盘上的同名头文件)。
 
-`align_signatures.py` 的 `--env` 会强制核对签名是从哪个文件读的，详见
-[plugin-authoring.md](../references/plugin-authoring.md)。
+`check_bundle.py` 会用 `--env` 里的工程根核对 PR 头文件的来源——白名单与装机目录拒绝的
+规则见 [plugin-authoring.md](../references/plugin-authoring.md)，与生成侧签名对齐用的是同一套判据。
 
 精度分母由 `verdict.py` 算，包含全部有效执行用例；证据不足时使用 `unknown`。
 

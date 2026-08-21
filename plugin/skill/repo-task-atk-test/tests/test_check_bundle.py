@@ -1,12 +1,10 @@
 """check_bundle.py 的交接包接收与接口一致性回归测试。"""
 
 import json
-import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import textwrap
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -62,61 +60,6 @@ def header_signature(params=DEFAULT_PARAMS):
     )
 
 
-def write_stub_packages(root):
-    """写出 align_signatures.py 需要的真实可导入桩包。"""
-    files = {
-        "torch/__init__.py": """
-            def roll(input, shifts, dims=None):
-                return input
-        """,
-        "atk/__init__.py": "",
-        "atk/tasks/__init__.py": "",
-        "atk/tasks/backends/__init__.py": "",
-        "atk/tasks/backends/lib_interface/__init__.py": "",
-        "atk/tasks/backends/lib_interface/acl_wrapper.py": """
-            import ctypes
-
-            class AclTensor(ctypes.Structure):
-                pass
-
-            class AclIntArray(ctypes.Structure):
-                pass
-
-            class OpExecutor(ctypes.Structure):
-                pass
-
-            CPP_TO_PYTHON_TYPE = {
-                "aclTensor": AclTensor,
-                "aclIntArray": AclIntArray,
-                "aclOpExecutor": OpExecutor,
-                "int8_t": ctypes.c_int8,
-                "int64_t": ctypes.c_int64,
-                "bool": ctypes.c_bool,
-                "uint64_t": ctypes.c_uint64,
-                "float": ctypes.c_float,
-                "char*": ctypes.c_char_p,
-            }
-        """,
-        "atk/tasks/backends/pyaclnn_backend.py": """
-            import ctypes
-
-            PYTYPE_TO_CTYPE = {
-                "int": ctypes.c_int64,
-                "int8_t": ctypes.c_int8,
-                "int64_t": ctypes.c_int64,
-                "bool": ctypes.c_bool,
-                "attr_bool": ctypes.c_bool,
-                "float": ctypes.c_float,
-                "string": ctypes.c_char_p,
-            }
-        """,
-    }
-    for name, source in files.items():
-        path = Path(root) / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(textwrap.dedent(source), encoding="utf-8")
-
-
 class CheckBundleTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -125,7 +68,6 @@ class CheckBundleTest(unittest.TestCase):
         self.original = self.root / "original"
         self.copy = self.root / "copy"
         self.project = self.root / "operator_project"
-        self.stubs = self.root / "stubs"
         self.task_doc = self.root / "task.md"
         self.header = self.project / "op_host" / "aclnn_roll.h"
 
@@ -133,7 +75,6 @@ class CheckBundleTest(unittest.TestCase):
         self.header.parent.mkdir(parents=True)
         self.header.write_text(header_signature(), encoding="utf-8")
         self.task_doc.write_text(TASK_DOC, encoding="utf-8")
-        write_stub_packages(self.stubs)
 
         make_bundle(self.original)
         interface_path = self.original / "evidence" / "interface.json"
@@ -155,6 +96,7 @@ class CheckBundleTest(unittest.TestCase):
         write_json(
             self.original / "evidence" / "signature_alignment.json",
             {
+                "signature": header_signature().strip().rstrip(";"),
                 "aclnn": {
                     "inputs": [
                         {"c_name": "self", "c_type": "aclTensor"},
@@ -182,7 +124,7 @@ class CheckBundleTest(unittest.TestCase):
         self.env_path = self.copy / "evidence" / "env.json"
         self.intake_path = self.copy / "evidence" / "bundle_intake.json"
 
-    def run_check(self, *extra, with_interface=True, baseline="torch.roll"):
+    def run_check(self, *extra, with_interface=True):
         command = [
             sys.executable,
             str(SCRIPT),
@@ -202,15 +144,12 @@ class CheckBundleTest(unittest.TestCase):
                     "Roll",
                 ]
             )
-            if baseline is not None:
-                command.extend(["--baseline", baseline])
         command.extend(str(item) for item in extra)
         return subprocess.run(
             command,
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PYTHONPATH": str(self.stubs)},
         )
 
     def intake(self):
@@ -232,23 +171,34 @@ class CheckBundleTest(unittest.TestCase):
                 self.assertTrue(report[key]["applicable"])
                 self.assertTrue(report[key]["passed"])
                 self.assertIsInstance(report[key]["evidence"], dict)
+        pr_signature_path = self.copy / "evidence" / "pr_signature.json"
+        self.assertTrue(pr_signature_path.is_file())
+        pr_signature = read_json(pr_signature_path)
+        self.assertEqual(
+            {"kind": "header", "path": str(self.header.resolve())},
+            pr_signature["source"],
+        )
+        self.assertEqual(
+            header_signature().strip().rstrip(";"),
+            pr_signature["signature"],
+        )
+        self.assertEqual(
+            ["self", "shifts", "dims", "out"],
+            [item["c_name"] for item in pr_signature["parameters"]],
+        )
+        self.assertFalse(
+            (self.copy / "evidence" / "signature_alignment_pr.json").exists()
+        )
 
-    def test_manifest_baseline_is_used_when_cli_baseline_is_omitted(self):
-        done = self.run_check(baseline=None)
+    def test_manifest_baseline_is_recorded_as_interface_evidence(self):
+        done = self.run_check()
         self.assertEqual(0, done.returncode, done.stderr)
         item = self.intake()["interface"]
         self.assertTrue(item["applicable"])
         self.assertTrue(item["passed"])
+        self.assertEqual("torch.roll", item["evidence"]["baseline_api"])
 
-    def test_manifest_baseline_overrides_a_different_cli_value(self):
-        done = self.run_check(baseline="torch.not_the_manifest_baseline")
-        self.assertEqual(0, done.returncode, done.stderr)
-        item = self.intake()["interface"]
-        self.assertTrue(item["passed"])
-        self.assertIn("torch.not_the_manifest_baseline", item["evidence"]["note"])
-        self.assertIn("torch.roll", item["evidence"]["note"])
-
-    def test_cli_baseline_cannot_replace_a_missing_manifest_baseline(self):
+    def test_missing_manifest_baseline_is_recorded_but_does_not_skip_comparison(self):
         manifest_path = self.copy / "evidence" / "bundle.json"
         manifest = read_json(manifest_path)
         manifest["interface"].pop("baseline_api")
@@ -256,8 +206,9 @@ class CheckBundleTest(unittest.TestCase):
         done = self.run_check()
         self.assertEqual(0, done.returncode, done.stderr)
         item = self.intake()["interface"]
-        self.assertFalse(item["applicable"])
-        self.assertIn("interface.baseline_api", item["evidence"]["reason"])
+        self.assertTrue(item["applicable"])
+        self.assertTrue(item["passed"])
+        self.assertIsNone(item["evidence"]["baseline_api"])
 
     def test_changed_file_is_reported_as_mismatched(self):
         path = self.copy / "must_cover.json"
@@ -369,6 +320,25 @@ class CheckBundleTest(unittest.TestCase):
         self.assertIn("shifts", [item["name"] for item in mismatches])
         self.assertIn("PR 接口与任务书 §2.3 不一致", done.stdout)
 
+    def test_pr_header_output_type_mismatch_is_reported(self):
+        signature = header_signature().replace("aclTensor *out", "aclIntArray *out")
+        self.header.write_text(signature, encoding="utf-8")
+        done = self.run_check()
+        self.assertEqual(2, done.returncode, done.stderr)
+        mismatches = self.intake()["interface"]["evidence"]["type_mismatch"]
+        self.assertIn("out", [item["name"] for item in mismatches])
+        self.assertIn("PR 接口与任务书 §2.3 不一致", done.stdout)
+
+    def test_pr_header_const_or_pointer_depth_mismatch_is_reported(self):
+        self.rewrite_header(
+            "aclTensor **self, const aclIntArray *shifts, "
+            "const aclIntArray *dims"
+        )
+        done = self.run_check()
+        self.assertEqual(2, done.returncode, done.stderr)
+        mismatches = self.intake()["interface"]["evidence"]["type_mismatch"]
+        self.assertIn("self", [item["name"] for item in mismatches])
+
     def test_non_aclnn_mode_makes_interface_not_applicable(self):
         manifest_path = self.copy / "evidence" / "bundle.json"
         manifest = read_json(manifest_path)
@@ -452,6 +422,7 @@ class CheckBundleTest(unittest.TestCase):
         )
         self.assertEqual(0, done.returncode, done.stderr)
         self.assertTrue(done.stdout.strip())
+        self.assertNotIn("--baseline", done.stdout)
 
 
 if __name__ == "__main__":
