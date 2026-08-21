@@ -173,6 +173,7 @@ class WiringTest(unittest.TestCase):
     def test_cross_stage_gauges_are_not_guessed(self):
         # 跨阶段的量具不猜阶段:猜错就是在 S3 打出一张 S1 的卡。
         self.assertIsNone(_stage_card.stage_of("mark_step.py"))
+        self.assertIsNone(_stage_card.stage_of("probe_env.py"))
         self.assertEqual("S2", _stage_card.stage_of("make_yaml.py"))
 
 

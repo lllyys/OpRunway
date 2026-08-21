@@ -178,7 +178,10 @@ class FlashRunKnowledgeGapsTest(unittest.TestCase):
 
     def _text(self, name):
         if name == "SKILL.md":
-            return (REFERENCES.parent / "SKILL.md").read_text(encoding="utf-8")
+            paths = [REFERENCES.parent / "SKILL.md",
+                     REFERENCES.parent / "case-gen" / "SKILL.md",
+                     REFERENCES.parent / "acceptance" / "SKILL.md"]
+            return "\n".join(path.read_text(encoding="utf-8") for path in paths)
         return (REFERENCES / name).read_text(encoding="utf-8")
 
     def test_multi_output_declaration_is_documented(self):

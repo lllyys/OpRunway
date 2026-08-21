@@ -17,7 +17,7 @@
 | skill | 做什么 | 开发规则 |
 | --- | --- | --- |
 | `skill/repo-task-doc-write/` | 开发前，把需求写成可验收的任务书 | 它自己的 `CLAUDE.md` |
-| `skill/repo-task-atk-test/` | 开发后，用 ATK 验收精度与性能 | 它自己的 `CLAUDE.md` |
+| `skill/repo-task-atk-test/` | 开发后，用 ATK 验收精度与性能；内含生成用例与测试验收两个子流程 | 它自己的 `CLAUDE.md` |
 
 面向使用者的说明在 `docs/skills/<name>/`，`README.md` 是仓门面。
 
@@ -36,6 +36,7 @@ repo-task-atk-test/           # 本仓（远程 gitcode.com/Justbin/repo-task-at
 ├── CLAUDE.md                 # 本文件，仓级共同规范
 ├── README.md                 # 仓门面：两个 skill 是什么 + 安装
 ├── skill/                    # 两个 skill 本体，唯一发布物
+│   └── repo-task-atk-test/  # 含 case-gen/ 与 acceptance/ 两个子 skill 目录
 ├── docs/                     # 不随 skill 发布
 │   ├── skills/<name>/        # 使用者视角：design.md + quickstart.md
 │   ├── atk-facts.md          # ATK 事实基线，按需读
@@ -71,8 +72,11 @@ repo-task-atk-test/           # 本仓（远程 gitcode.com/Justbin/repo-task-at
 **ATK 没有被 pip 安装，跑回归必须显式给 `PYTHONPATH`：**
 
 ```bash
-PYTHONPATH=third_party/ATK python3 -m pytest skill/ tests/ -q
+PYTHONPATH=third_party/ATK python3 -m pytest skill/ tests/ -q --import-mode=importlib
 ```
+
+两个 skill 各有同名 `test_document_style.py`，不加 `--import-mode=importlib` 会在收集期报
+import 冲突。
 
 迁出前 skill 寄生在 ATK 仓根里，`import atk` 只是 CWD 巧合命中了 `./atk/`。
 本仓 ATK 在 `third_party/ATK/atk`，巧合不再成立。
@@ -87,9 +91,9 @@ skip，于是不给 PYTHONPATH 跑出来的"全绿"比真实覆盖少了一块�
 
 ## 当前状态
 
-本仓实测 22 failed, 890 passed, 13 skipped（跑法见上一节）。
+本仓实测 22 failed, 980 passed, 19 skipped（跑法见上一节）。
 
 22 条既存失败 = 20 条依赖 torch（本机未安装）+ 2 条行文门禁红
 （`experimental_standard.md` 168/178 行超长、176 行用了「符号」）。
 
-**最后更新：** 2026-08-19（文档按 skill 重组，CLAUDE.md 拆三层）
+**最后更新：** 2026-08-21（验收 skill 拆成 case-gen 与 acceptance 两个子 skill）

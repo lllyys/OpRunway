@@ -18,7 +18,7 @@ sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 
 import _contracts  # noqa: E402
 
-STAGES = ("S1", "S2", "S3", "S4", "S5")
+STAGES = ("S0", "S1", "S2", "S3", "S4", "S5")
 RENDER_VIEWS = SKILL_ROOT / "scripts" / "render_views.py"
 MARK_STEP = SKILL_ROOT / "scripts" / "mark_step.py"
 
@@ -29,6 +29,27 @@ class SpineStructureTest(unittest.TestCase):
 
     def test_every_stage_is_declared(self):
         self.assertEqual(tuple(self.data["stages"]), STAGES)
+
+    def test_every_stage_declares_a_known_skill(self):
+        for stage, block in self.data["stages"].items():
+            with self.subTest(stage=stage):
+                self.assertIn("skill", block, f"{stage} 缺 skill")
+                self.assertIn(block["skill"], _contracts.SKILLS)
+
+    def test_stages_of_returns_each_skill_stage_in_spine_order(self):
+        self.assertEqual(["S1", "S2"],
+                         _contracts.stages_of(self.data, "case-gen"))
+        self.assertEqual(["S0", "S3", "S4", "S5"],
+                         _contracts.stages_of(self.data, "acceptance"))
+
+    def test_s2_ends_with_the_seal_gate(self):
+        self.assertEqual("封印", self.data["stages"]["S2"]["gates"][-1])
+
+    def test_s0_carries_the_five_card_slots(self):
+        block = self.data["stages"]["S0"]
+        for slot in ("name", "core", "lookup_topics", "gates", "forbidden"):
+            with self.subTest(slot=slot):
+                self.assertIn(slot, block, f"S0 缺卡槽位 {slot}")
 
     def test_every_stage_carries_the_five_card_slots(self):
         for stage, block in self.data["stages"].items():
@@ -201,7 +222,14 @@ class CardCoverageTest(unittest.TestCase):
 
     def setUp(self):
         self.data = _contracts.load()
-        self.skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        paths = [SKILL_ROOT / "SKILL.md",
+                 SKILL_ROOT / "case-gen" / "SKILL.md",
+                 SKILL_ROOT / "acceptance" / "SKILL.md"]
+        self.skills = {
+            path.relative_to(SKILL_ROOT).as_posix():
+                path.read_text(encoding="utf-8")
+            for path in paths
+        }
 
     def test_card_artifacts_equal_spine_artifacts(self):
         for stage in STAGES:
@@ -235,14 +263,17 @@ class CardCoverageTest(unittest.TestCase):
 
     def test_skill_entry_does_not_carry_a_second_copy_of_the_cards(self):
         # 防回退：卡贴回 SKILL.md 不会有任何东西红，只会每次调用多烧 2.4K token。
-        for stage in STAGES:
-            with self.subTest(stage=stage):
-                self.assertNotIn(f"### {stage} ", self.skill,
-                                 f"{stage} 的卡又被贴回 SKILL.md，"
-                                 "它由 mark_step.py 在阶段入口渲染，不要留副本")
+        for path, text in self.skills.items():
+            for stage in STAGES:
+                with self.subTest(path=path, stage=stage):
+                    self.assertNotIn(f"### {stage} ", text,
+                                     f"{stage} 的卡又被贴回 {path}，"
+                                     "它由 mark_step.py 在阶段入口渲染，不要留副本")
 
     def test_skill_entry_tells_how_to_get_the_card(self):
-        self.assertIn("mark_step.py", self.skill)
+        for path in ("case-gen/SKILL.md", "acceptance/SKILL.md"):
+            with self.subTest(path=path):
+                self.assertIn("mark_step.py", self.skills[path])
 
     def test_card_carries_every_gate_of_its_stage(self):
         """有哪些门必须随卡送到，不能靠 agent 想起来去查。

@@ -31,6 +31,7 @@ import re
 import sys
 from pathlib import Path
 
+import _taskdoc
 from _policy import load_policy
 import _stage_card
 
@@ -315,8 +316,10 @@ def main():
     args = parser.parse_args()
     _stage_card.announce(__file__)
 
+    task_doc_path = Path(args.task_doc)
     try:
-        task_doc_text = Path(args.task_doc).read_text(encoding="utf-8")
+        task_doc_text = task_doc_path.read_text(encoding="utf-8")
+        task_doc_digest = _taskdoc.sha256(task_doc_path)
     except OSError as exc:
         print(f"接口事实不成立：任务书读取失败：{exc}", file=sys.stderr)
         return 2
@@ -333,6 +336,10 @@ def main():
         print(f"接口事实不成立：{exc}", file=sys.stderr)
         return 2
 
+    payload["task_doc"] = {
+        "name": task_doc_path.name,
+        "sha256": task_doc_digest,
+    }
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),

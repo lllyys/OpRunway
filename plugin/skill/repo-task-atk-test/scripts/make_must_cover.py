@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from _axis_binding import (check_axis_vocabulary, check_dtype_source,
+                           check_dtype_text, dtype_inventory_text,
                            dtype_source_inventory, structural_infeasible)
 from align_signatures import AlignError, require_project_source
 from _coverage_strategy import (SIZE_AXIS, SIZE_TARGET, CoveragePolicyError,
@@ -30,6 +31,7 @@ from _coverage_strategy import (SIZE_AXIS, SIZE_TARGET, CoveragePolicyError,
 from _expressibility import (check_axis_values, check_contracts,
                              check_value_ranges)
 import _stage_card
+import _taskdoc
 
 PASS_THROUGH = ("axes", "extract", "parameters", "infeasible", "yaml",
                 "comparator")
@@ -116,10 +118,64 @@ def build_combos(dims, policy, infeasible, seed=0, operator_class=None,
     return rows, added
 
 
-def _dtype_source_problems(dims, args, excludes):
-    """dtype 轴要指明照哪份文件写的，那份文件必须在待验收算子工程目录里。
+def _project_dtype_source(dtype_values, args, excludes):
+    """按既有工程白名单核对 dtype 来源。"""
+    try:
+        resolved = require_project_source(
+            args.dtype_source, args.env, "--dtype-source")
+    except AlignError as exc:
+        return [str(exc)], None
+    problems = check_dtype_source(dtype_values, Path(resolved), excludes)
+    if problems:
+        return problems, None
+    return [], {
+        "kind": "project",
+        "source": str(resolved),
+        "declared_in_source": dtype_source_inventory(Path(resolved)),
+        "excluded": [str((entry or {}).get("dtype", ""))
+                     for entry in (excludes or ())],
+    }
 
-    这道核对沿用签名对齐的白名单（`require_project_source`）：CANN 装机目录里
+
+def _taskdoc_dtype_source(dtype_values, source_path, digest, excludes, doc):
+    """只取任务书 §2.4 张量行的 dtype 列核对轴取值。"""
+    try:
+        text = _taskdoc.tensor_dtype_text(doc)
+    except _taskdoc.TaskDocError as exc:
+        return [str(exc)], None
+    label = f"任务书 {source_path.name} §2.4 张量参数的 dtype 列"
+    problems = check_dtype_text(dtype_values, text, label, excludes)
+    if problems:
+        return problems, None
+    return [], {
+        "kind": "taskdoc",
+        "source": str(source_path),
+        "sha256": digest,
+        "declared_in_source": dtype_inventory_text(text),
+        "excluded": [str((entry or {}).get("dtype", ""))
+                     for entry in (excludes or ())],
+    }
+
+
+def _load_dtype_taskdoc(source_path):
+    """若 Markdown 含标准 §2.4 dtype 表则返回解析结果，否则返回 None。"""
+    try:
+        doc = _taskdoc.load(source_path)
+    except (_taskdoc.TaskDocError, OSError, UnicodeError):
+        return None
+    section = doc.section("2.4")
+    required = ("参数名", "数据类型", "dtype类型")
+    if section is None or not any(
+            all(column in table.header for column in required)
+            for table in section.tables):
+        return None
+    return doc
+
+
+def _dtype_source_problems(dims, args, excludes):
+    """dtype 轴要指明照哪份任务书或工程声明写的。
+
+    工程模式沿用签名对齐的白名单（`require_project_source`）：CANN 装机目录里
     有同名算子的另一份文档，指过去会拿到另一份 dtype 表。没有 dtype 轴的
     分面（纯搬运类）不需要指这份文件。
     """
@@ -128,25 +184,42 @@ def _dtype_source_problems(dims, args, excludes):
         return [], None
     if not args.dtype_source:
         return ["dims 有 dtype 轴但没给 --dtype-source。\n"
-                "    dtype 只能照待验收算子工程声明的数据类型表写——任务书通常"
-                "只写「支持所有走入 aicore 的数据类型」，列不出具体名字。"], None
+                "    生成侧给派生 interface.json 的同一份任务书；"
+                "验收侧或旧流程给工程声明的 README 或头文件。"], None
+
+    source_path = Path(args.dtype_source)
+    if source_path.suffix.casefold() != ".md":
+        return _project_dtype_source(values, args, excludes)
+
+    # README 也是 Markdown：只有解析出任务书 §2.4 的标准 dtype 表头才按任务书
+    # 处理。认定后不再回落工程白名单，避免过期任务书静默变成整文匹配。
+    doc = _load_dtype_taskdoc(source_path)
+    if doc is None:
+        return _project_dtype_source(values, args, excludes)
+
     try:
-        resolved = require_project_source(
-            args.dtype_source, args.env, "--dtype-source")
-    except AlignError as exc:
-        return [str(exc)], None
-    problems = check_dtype_source(values, Path(resolved), excludes)
-    if problems:
-        return problems, None
-    # 这份文件核对过了才记进 must_cover：下游的浮点判据要拿它换判法，
-    # 记一份没核对过的文件等于把判据建在没验过的事实上。
-    binding = {
-        "source": str(resolved),
-        "declared_in_source": dtype_source_inventory(Path(resolved)),
-        "excluded": [str((entry or {}).get("dtype", ""))
-                     for entry in (excludes or ())],
-    }
-    return [], binding
+        with open(args.interface, encoding="utf-8") as handle:
+            interface = json.load(handle)
+    except (OSError, ValueError) as exc:
+        return [f"读不出 {args.interface} 的 task_doc 记录：{exc}；"
+                "重跑 derive_interface.py 再取任务书 dtype"], None
+
+    task_doc = interface.get("task_doc") if isinstance(interface, dict) else None
+    expected = task_doc.get("sha256") if isinstance(task_doc, dict) else None
+    if not expected:
+        return [f"{args.interface} 没有 task_doc.sha256；"
+                "重跑 derive_interface.py，从同一份任务书派生接口事实"], None
+
+    try:
+        digest = _taskdoc.sha256(source_path)
+    except OSError as exc:
+        return [f"读不出数据类型表 {source_path}：{exc}"], None
+    if digest == expected:
+        return _taskdoc_dtype_source(
+            values, source_path, digest, excludes, doc)
+
+    return ["--dtype-source 是任务书但与 interface.json 记录的不是同一份"
+            "（摘要不同）；dtype 只能照 S1 派生接口事实时的那份任务书取"], None
 
 
 def report_structural_infeasible(dims, infeasible):
@@ -190,8 +263,10 @@ def main():
     parser.add_argument("-o", "--output", required=True, help="must_cover.json")
     parser.add_argument("--seed", type=int, default=0, help="覆盖阵列随机种子")
     parser.add_argument("--dtype-source",
-                        help="dtype 轴照哪份文件写：待验收算子工程里声明数据类型的"
-                             "README 或头文件。dims 有 dtype 轴时必填")
+                        help="dtype 轴照哪份文件写：生成侧给任务书（须与 "
+                             "interface.json 记录的同一份）；验收侧或旧流程给"
+                             "工程里声明数据类型的 README 或头文件。"
+                             "dims 有 dtype 轴时必填")
     parser.add_argument("--interface", default="evidence/interface.json",
                         help="derive_interface.py 的产物；读 baseline_kind，"
                              "它决定比较器判据走哪一支")

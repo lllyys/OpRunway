@@ -51,6 +51,7 @@
 
 | 检查点 | 挂在 | 不成立时 |
 | --- | --- | --- |
+| `check_bundle.interface_conformance` | `interface_mode` | `not_applicable` |
 | `make_must_cover.dtype_source` | `operator_class` | `delegate` |
 | `expressibility.value_ranges` | `parameter_kind` | `retarget` |
 | `make_yaml.baseline_binding` | `baseline_kind` | `delegate` |
@@ -60,6 +61,64 @@
 | `validate_cases.runtime_structure` | `atk_version` | `retarget` |
 | `validate_cases.seed_pinned` | `operator_class` | `not_applicable` |
 | `freeze_inputs.constant_tensor` | `operator_class` | `not_applicable` |
+
+## S0 接收与环境
+
+### `check_bundle.integrity`
+
+量具 `check_bundle.py`　类别 `structural`
+
+- bundle.json 存在且 schema_version 是量具认识的版本
+- 逐文件重算 sha256，结果与 files 登记一致
+- files 登记文件没有缺失，excluded 与 ignored_dirs 没有被扩张
+- 新增文件只在 frozen_*/、result/ 与根目录冻结产物类型下判红
+
+**为什么存在：** 交接包是生成侧与验收侧的唯一接口。
+冻结纪律必须靠验收侧重算摘要落实，不能相信清单自述或 agent 声称文件没动
+
+**前提：** 无，任何算子都适用。
+
+### `check_bundle.task_doc`
+
+量具 `check_bundle.py`　类别 `transcription`
+
+- 交接包的 task_doc.sha256 等于本次给定任务书的 sha256
+
+**为什么存在：** 一份任务书生成的交接包可以验收多个 PR，但不能挪给另一份任务书。
+文件名相同不代表内容相同，必须按全文 sha256 绑定
+
+**前提：** 无，任何算子都适用。
+
+### `check_bundle.atk_version`
+
+量具 `check_bundle.py`　类别 `structural`
+
+- 验收机 env.json 的 ATK 版本等于 bundle.json 的 atk.version
+
+**为什么存在：** 用例的可表达性判定绑定生成侧的 ATK 版本。
+验收侧版本不同，能力矩阵与生成结果的成立前提就不再可靠
+
+**前提：** 无，任何算子都适用。
+
+### `check_bundle.interface_conformance`
+
+量具 `check_bundle.py`　类别 `transcription`
+
+- PR 头文件的参数名集合等于任务书签名的参数名集合
+- 两边参数的相对顺序一致
+- 两边参数的 C 类型一致
+
+**为什么存在：** 签名本来从 PR 抄，抄什么过什么，PR 偏离任务书现在测不出来。
+任务书才是接口契约，PR 的公开声明必须在 S0 单独与它核对
+
+**前提：** 接口模式是 aclnn，工程里有 GetWorkspaceSize 头文件可读（挂在 `interface_mode`）
+
+**不成立时：** `not_applicable`
+　证据键 `interface`
+
+**注：** pytorch / kernel 模式及未给 --header、--aclnn-name 的 aclnn 模式没有 C 头文件可比。
+清单缺 interface.baseline_api 时也不适用，进 S3 前必须补跑；--baseline 只是提示，始终以清单为准，
+结论写进 bundle_intake.json 的 interface 项
 
 ## S2 用例生成
 
@@ -90,16 +149,17 @@ median 验收七次 rank 写过三种取值，用例数 76~500，而每次覆盖
 
 量具 `make_must_cover.py`　类别 `self_referential`
 
-- dtype 轴声明的每种类型都要在 --dtype-source 文件里按词边界找得到
-- 反向再扫一遍：文件里有而没声明的报出来，漏写同样拦
+- dtype 轴声明的每种类型都要在任务书 §2.4 张量 dtype 列或工程 --dtype-source 里按词边界找得到
+- 反向再扫对应来源：任务书张量 dtype 列或工程声明里有而没声明的报出来，漏写同样拦
 - 误报走 dtype_source_excludes，每条附 why；豁免文件里没出现的 dtype 会被拒
 
-**前提：** 待验收算子工程有一份文字形态的数据类型表（README 或头文件）（挂在 `operator_class`）
+**前提：** 生成侧任务书 §2.4 写明张量 dtype，或验收侧工程有文字形态的数据类型表（README 或头文件）（挂在 `operator_class`）
 
 **不成立时：** `delegate`
 　交给 `check_signature_contract.py`
 
-**注：** 取不到 --dtype-source 时回落到「浮点占比 ≥70%」的老判据，dtype 与签名的一致性由签名契约三判承担
+**注：** 生成侧任务书缺具体 dtype 时先用 repo-task-doc-write 补齐；旧流程取不到 --dtype-source 时回落到「浮点占比 ≥70%」的老判据，
+dtype 与签名的一致性由签名契约三判承担
 
 ### `expressibility.contracts`
 
@@ -321,3 +381,16 @@ roll 那轮判断「S3 冒烟再说」，正撞上冻结纪律
 **注：** 真机摩擦 F4 不是前提问题：atk node 入口不自动加载 function_*.py（只有 atk aclnn / atk pytorch 别名入口会），
 155 条基线全挂而诊断指向 YAML 输入名。
 要修的是 reference 的事实错误与诊断指向
+
+### `seal_bundle.completeness`
+
+量具 `seal_bundle.py`　类别 `structural`
+
+- S1、S2 登记的产物全部在盘上，条件产物按 interface.json 与 signature_alignment.json 判定，核对时排除清单自身
+- 每个 YAML 分面按用例集摘要恰好配到一份覆盖、冻结、校验与适配器报告，签名契约报告全局通过
+- 清单覆盖五个排除文件与 __pycache__ 目录之外的全部普通文件
+
+**为什么存在：** 交接包把用例生成与 PR 验收解耦，生成侧必须一次交齐可直接消费的 S1、S2 产物。
+缺件后再补会破坏封印，验收侧也不得回头重新生成
+
+**前提：** 无，任何算子都适用。

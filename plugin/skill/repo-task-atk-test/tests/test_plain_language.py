@@ -35,7 +35,12 @@ ALLOWED_CONTEXTS = {
     "符号": ("符号前缀", "无符号", "_symbol_prefix"),
 }
 
-SCANNED = [SKILL_ROOT / "SKILL.md", *sorted((SKILL_ROOT / "references").glob("*.md"))]
+SCANNED = [
+    SKILL_ROOT / "SKILL.md",
+    SKILL_ROOT / "case-gen" / "SKILL.md",
+    SKILL_ROOT / "acceptance" / "SKILL.md",
+    *sorted((SKILL_ROOT / "references").glob("*.md")),
+]
 SCANNED += sorted((SKILL_ROOT / "scripts").glob("*.py"))
 
 

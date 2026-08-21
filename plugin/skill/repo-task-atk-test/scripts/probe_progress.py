@@ -1,4 +1,4 @@
-"""从工作目录已落盘的产物反推当前阶段，并把当阶段的卡再打一遍。
+"""从工作目录已落盘的产物反推当前子 skill 与阶段，并重打当阶段的卡。
 
 一轮验收要几十次工具调用，中途上下文会被压缩。压缩之后 SKILL.md 和读过的
 reference 都不在上下文里了，agent 只剩一份摘要，于是二选一：把 reference
@@ -8,7 +8,9 @@ reference 都不在上下文里了，agent 只剩一份摘要，于是二选一�
 本脚本不读任何声明、不信任何「我做过了」，只看文件存不存在。
 
 用法：
-    probe_progress.py [-C <工作目录>]
+    probe_progress.py [-C <工作目录>] [--skill {case-gen,acceptance}]
+
+不指定 --skill 时，根据交接包封印与接收证据自动判断运行侧。
 
 退出码：0 推出了当前阶段；2 工作目录不存在；3 骨架不可用。
 """
@@ -18,9 +20,7 @@ import json
 import sys
 from pathlib import Path
 
-from _contracts import ContractError, artifacts_of, load, render_card
-
-STAGES = ("S1", "S2", "S3", "S4", "S5")
+from _contracts import ContractError, artifacts_of, load, render_card, stages_of
 
 # 骨架里的产物名是给人读的形态，`<op>` 这类占位要换成能 glob 的写法。
 PLACEHOLDERS = (("<op>", "*"), ("<side>", "*"), ("<接口分面>", "*"))
@@ -31,6 +31,9 @@ MANUAL = {"验收报告", "复现包"}
 
 # 名字不是路径，但盘上有固定形态的产物。
 SPECIAL = {"冻结输入": "frozen_*"}
+
+# 自动判断时，封印已落盘但接收证据尚未落盘是两个子 skill 之间的交接态。
+SEALED_HANDOFF = "sealed-handoff"
 
 
 def pattern_of(name):
@@ -74,10 +77,22 @@ def condition_holds(root, spec):
     return None
 
 
-def survey(root, data):
+def infer_skill(root):
+    """从交接证据判断当前运行侧；封印后、接收前返回交接特殊态。"""
+    evidence = root / "evidence"
+    if (evidence / "bundle_intake.json").exists():
+        return "acceptance"
+    if (evidence / "bundle.json").exists():
+        return SEALED_HANDOFF
+    return "case-gen"
+
+
+def survey(root, data, stages=None):
     """逐阶段核对产物在不在，返回 {阶段: (齐的, 缺的, 判不了的, 人工确认的)}。"""
+    if stages is None:
+        stages = stages_of(data, "case-gen")
     result = {}
-    for stage in STAGES:
+    for stage in stages:
         have, missing, undecided, manual = [], [], [], []
         for name, spec in artifacts_of(data, stage).items():
             if name in MANUAL:
@@ -99,22 +114,23 @@ def survey(root, data):
     return result
 
 
-def current_stage(data, table):
+def current_stage(data, table, stages):
     """第一个还有产物没落盘的阶段就是当前阶段。
 
     往前找而不是往后找：S3 失败退回时 S4 目录可能有上一轮的残留，
     按「最后一个有产物的阶段」判会把人送到还没到的阶段去。
     """
-    for stage in STAGES:
+    for stage in stages:
         have, missing, _, manual = table[stage]
         if missing or (not have and not manual):
             return stage
-    return STAGES[-1]
+    return stages[-1]
 
 
-def report(root, data, table, stage):
-    lines = [f"工作目录：{root}", ""]
-    for name in STAGES:
+def report(root, data, table, stage, skill, stages, sealed=False):
+    status = "（已封印）" if sealed else ""
+    lines = [f"子 skill：{skill}{status}　工作目录：{root}", ""]
+    for name in stages:
         have, missing, undecided, manual = table[name]
         total = len(have) + len(missing)
         head = f"{name} {data['stages'][name]['name']}　{len(have)}/{total} 齐"
@@ -137,10 +153,21 @@ def report(root, data, table, stage):
     return "\n".join(lines)
 
 
+def sealed_handoff_report(root, data):
+    """生成侧封印后只交付验收侧 S0 卡，不再把后续产物报成缺失。"""
+    lines = ["子 skill：acceptance　case-gen 已完成（已封印），验收侧当前 S0",
+             f"工作目录：{root}", "", render_card(data, "S0")]
+    return "\n".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="从已落盘的产物反推当前阶段，并重打当阶段作战卡")
-    parser.add_argument("-C", "--dir", default=".", help="验收工作目录，默认当前目录")
+        description="从已落盘的产物反推当前子 skill 与阶段，并重打当阶段作战卡")
+    parser.add_argument("-C", "--dir", default=".", help="运行工作目录，默认当前目录")
+    parser.add_argument(
+        "--skill", choices=("case-gen", "acceptance"),
+        help="显式选择子 skill；默认根据 bundle.json 与 bundle_intake.json 自动判断",
+    )
     args = parser.parse_args()
 
     root = Path(args.dir).resolve()
@@ -153,8 +180,18 @@ def main():
         print(f"骨架不可用：{exc}", file=sys.stderr)
         return 3
 
-    table = survey(root, data)
-    print(report(root, data, table, current_stage(data, table)))
+    if args.skill is None:
+        skill = infer_skill(root)
+        if skill == SEALED_HANDOFF:
+            print(sealed_handoff_report(root, data))
+            return 0
+    else:
+        skill = args.skill
+    stages = stages_of(data, skill)
+    table = survey(root, data, stages)
+    stage = current_stage(data, table, stages)
+    sealed = skill == "case-gen" and (root / "evidence" / "bundle.json").exists()
+    print(report(root, data, table, stage, skill, stages, sealed))
     return 0
 
 

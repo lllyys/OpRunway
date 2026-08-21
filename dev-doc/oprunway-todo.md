@@ -11,8 +11,8 @@
 
 ## P1 · 迁移收尾
 
-- [ ] `.claude/skills/isolated-acceptance/`：`watch.py` 的阶段表仍按旧 skill 七步编排，需按上游 S1–S5
-  重排，并真机试跑一轮镜像 skill。
+- [ ] Task 11：完成父路由与两个子 skill 的触发评测和真机验证；
+  `.claude/skills/isolated-acceptance/` 按双子 skill 重排，并验证无 NPU 生成、真机接收及 S3–S5。
 - [ ] 演练一次上游同步（fetch → `git diff --binary | git apply --3way --directory=plugin` → 更新
   `plugin/.claude-plugin/upstream.json` 基线）。
 

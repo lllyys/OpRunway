@@ -17,7 +17,11 @@ import validate_cases  # noqa: E402
 DOC = SKILL_ROOT / "references" / "builtin-baseline.md"
 CASE_DESIGN = SKILL_ROOT / "references" / "case-design.md"
 ATK_CLI = SKILL_ROOT / "references" / "atk-cli.md"
-SKILL_FILE = SKILL_ROOT / "SKILL.md"
+SKILL_FILES = [
+    SKILL_ROOT / "SKILL.md",
+    SKILL_ROOT / "case-gen" / "SKILL.md",
+    SKILL_ROOT / "acceptance" / "SKILL.md",
+]
 
 
 class BuiltinBaselineKnowledgeTest(unittest.TestCase):
@@ -25,7 +29,8 @@ class BuiltinBaselineKnowledgeTest(unittest.TestCase):
         self.text = DOC.read_text(encoding="utf-8")
 
     def test_doc_exists_and_is_reachable_from_the_main_skill(self):
-        self.assertIn("builtin-baseline.md", SKILL_FILE.read_text(encoding="utf-8"))
+        text = "\n".join(path.read_text(encoding="utf-8") for path in SKILL_FILES)
+        self.assertIn("builtin-baseline.md", text)
 
     def test_atk_cli_no_longer_carries_the_two_broken_commands(self):
         # 旧写法：单个 pyaclnn 节点 + `-tk run --save_data`，前者任务建不起来，

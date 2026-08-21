@@ -1,4 +1,4 @@
-"""dims 声明的取值从哪来：轴取值词表，以及 dtype 轴要对上工程声明的数据类型表。
+"""dims 声明的取值从哪来：轴取值词表，以及 dtype 轴要对上公开声明。
 
 覆盖率的分母是 `dims`，而 `dims` 一直是 agent 手写的——门禁拿这份声明当分母
 去核对 combos，等于自己出题自己答，永远 100%。真机上因此发生过：同一个算子
@@ -9,10 +9,11 @@
 只能稳住声明。这里管两件事：
 
 - 语义轴的取值是**策略层约定**，换个名字不带来任何信息，钉死词表；
-- dtype 轴的取值是**工程事实**，必须能在待验收算子工程的公开声明里找到。
+- dtype 轴的取值是**接口事实**：生成侧对任务书 §2.4 张量 dtype 列，
+  验收侧或旧流程对待验收算子工程的公开声明。
 
-任务书通常不列 dtype（median 的任务书只写「所有走入 aicore 的数据类型」），
-所以这张表要去工程的 README 或头文件里读，不是任务书。
+没过 repo-task-doc-write 门禁的存量任务书常常不列具体 dtype。生成侧遇到这种情况
+停在待确认，旧流程才去工程的 README 或头文件里读公开声明。
 """
 
 import re
@@ -151,6 +152,12 @@ def _found_in(text, dtype):
         for alias in aliases)
 
 
+def dtype_inventory_text(text):
+    """一段数据类型声明文本里出现了哪些 dtype。"""
+    text = str(text).upper()
+    return [dtype for dtype in DTYPE_SOURCE_ALIASES if _found_in(text, dtype)[1]]
+
+
 def dtype_source_inventory(source_path):
     """工程声明的数据类型表里出现了哪些 dtype。
 
@@ -162,15 +169,13 @@ def dtype_source_inventory(source_path):
         text = _source_text(source_path)
     except OSError:
         return []
-    return [dtype for dtype in DTYPE_SOURCE_ALIASES if _found_in(text, dtype)[1]]
+    return dtype_inventory_text(text)
 
 
-def check_dtype_source(dtype_values, source_path, excludes=()):
-    """dtype 轴与待验收算子工程的公开声明**双向**对齐。
+def check_dtype_text(dtype_values, text, label, excludes=()):
+    """dtype 轴与一段公开的数据类型声明文本**双向**对齐。
 
-    工程声明（README 的数据类型表、头文件注释）是唯一能读这张表的地方：
-    任务书通常只写「支持所有走入 aicore 的数据类型」，列不出具体名字，
-    照它写就只能靠猜，猜出来的表每轮都不一样。
+    `label` 是这段文本的可读来源名，所有问题都用它定位来源。
 
     两个方向都要查，只查一头挡不住漂移：
     - 声明了却找不到 → 凭空写的 dtype；
@@ -185,10 +190,7 @@ def check_dtype_source(dtype_values, source_path, excludes=()):
     按词边界匹配：`UINT8` 里含 `INT8`、`FLOAT16` 里含 `FLOAT`，
     子串命中会把没声明的 dtype 放行。
     """
-    try:
-        text = _source_text(source_path)
-    except OSError as exc:
-        return [f"读不出数据类型表 {source_path}：{exc}"]
+    text = str(text).upper()
 
     def found(dtype):
         return _found_in(text, dtype)
@@ -200,7 +202,7 @@ def check_dtype_source(dtype_values, source_path, excludes=()):
         if hit:
             continue
         problems.append(
-            f"dtype 取值 {dtype} 在 {source_path} 里找不到（查的是 "
+            f"dtype 取值 {dtype} 在 {label} 里找不到（查的是 "
             f"{'、'.join(aliases)}）。\n"
             "    dtype 轴只能照工程声明的数据类型表写，不能凭空加。")
 
@@ -217,7 +219,7 @@ def check_dtype_source(dtype_values, source_path, excludes=()):
             continue
         if not found(dtype)[1]:
             problems.append(
-                f"dtype_source_excludes 里的 {dtype} 在 {source_path} 里本来就"
+                f"dtype_source_excludes 里的 {dtype} 在 {label} 里本来就"
                 "没出现，这条豁免没有对象。\n"
                 "    豁免只用来解释这类误报（如属性的类型名被当成输入 "
                 "dtype），不是给声明开的后门。")
@@ -229,8 +231,22 @@ def check_dtype_source(dtype_values, source_path, excludes=()):
                and found(dtype)[1]]
     if omitted:
         problems.append(
-            f"{source_path} 里出现了 {'、'.join(omitted)}，但 dtype 轴没声明。\n"
+            f"{label} 里出现了 {'、'.join(omitted)}，但 dtype 轴没声明。\n"
             "    工程声明支持的类型都要测，漏掉的那几种覆盖率看不出来。\n"
             "    确实不是输入 dtype（比如属性或输出的类型名）就写进声明的 "
             "dtype_source_excludes，每条附 why。")
     return problems
+
+
+def check_dtype_source(dtype_values, source_path, excludes=()):
+    """dtype 轴与待验收算子工程的公开声明**双向**对齐。
+
+    没过 repo-task-doc-write 门禁的存量任务书常只写「支持所有走入 aicore 的
+    数据类型」，列不出具体名字。生成侧遇到这种情况停在待确认，旧流程才从
+    工程声明（README 的数据类型表或头文件注释）读取。
+    """
+    try:
+        text = _source_text(source_path)
+    except OSError as exc:
+        return [f"读不出数据类型表 {source_path}：{exc}"]
+    return check_dtype_text(dtype_values, text, source_path, excludes)

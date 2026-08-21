@@ -11,6 +11,7 @@
 """
 
 import ctypes
+import hashlib
 import json
 import subprocess
 import sys
@@ -30,6 +31,20 @@ MATMUL = ("aclnnStatus aclnnMatmulGetWorkspaceSize(const aclTensor *self, "
 TAIL_OUTPUT = ("aclnnStatus aclnnRollGetWorkspaceSize(const aclTensor *self, "
                "const aclIntArray *shifts, const aclIntArray *dims, aclTensor *out, "
                "uint64_t *workspaceSize, aclOpExecutor **executor)")
+
+MULTILINE_TAIL_OUTPUT = """aclnnStatus aclnnRollGetWorkspaceSize(
+    const aclTensor   *self,
+    const aclIntArray *shifts,
+    const aclIntArray *dims,
+    aclTensor         *out,
+    uint64_t          *workspaceSize,
+    aclOpExecutor    **executor)"""
+
+ROLL_EXECUTE = """aclnnStatus aclnnRoll(
+    void          *workspace,
+    uint64_t       workspaceSize,
+    aclOpExecutor *executor,
+    aclrtStream    stream)"""
 
 INPLACE = ("aclnnStatus aclnnInplaceAddGetWorkspaceSize(aclTensor *selfRef, "
            "const aclTensor *other, uint64_t *workspaceSize, aclOpExecutor **executor)")
@@ -99,6 +114,56 @@ def run_align(baseline, signature):
                               capture_output=True, text=True, timeout=60)
         report = json.loads(out.read_text(encoding="utf-8")) if out.exists() else None
         return done, report
+
+
+def _run_stubbed(temp, argv):
+    """用真实 CLI 参数跑脚本，只把 torch 与 ATK 的运行时边界换成桩。"""
+    out = temp / "alignment.json"
+    driver = temp / "driver.py"
+    command = ["align", "--baseline", "torch.roll", *argv,
+               "-o", str(out)]
+    driver.write_text(
+        STUB + textwrap.dedent(f'''
+            sys.path.insert(0, {str(SCRIPT.parent)!r})
+            sys.argv = {command!r}
+            import align_signatures
+            sys.exit(align_signatures.main())
+        '''), encoding="utf-8")
+    done = subprocess.run([sys.executable, str(driver)],
+                          capture_output=True, text=True, timeout=60)
+    report = json.loads(out.read_text(encoding="utf-8")) if out.exists() else None
+    return done, report
+
+
+def task_doc(signature=TAIL_OUTPUT):
+    return ("# Roll 算子任务书\n\n### 2.3 接口定义\n\n```\n"
+            f"{signature}\n\n{ROLL_EXECUTE}\n```\n")
+
+
+def run_taskdoc(text, extra_argv=()):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp = Path(temp_dir)
+        path = temp / "task.md"
+        path.write_text(text, encoding="utf-8")
+        return _run_stubbed(
+            temp, ["--task-doc", str(path), *extra_argv])
+
+
+def run_header(include_env=True):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp = Path(temp_dir)
+        project = temp / "op_project"
+        project.mkdir()
+        header = project / "aclnn_roll.h"
+        header.write_text(TAIL_OUTPUT + ";\n", encoding="utf-8")
+        argv = ["--header", str(header), "--aclnn-name", "Roll"]
+        if include_env:
+            env = temp / "env.json"
+            env.write_text(
+                json.dumps({"operator_project": {"path": str(project)}}),
+                encoding="utf-8")
+            argv.extend(["--env", str(env)])
+        return _run_stubbed(temp, argv)
 
 
 def run_build(baseline, signature):
@@ -223,6 +288,102 @@ class BuiltinBaselineAlignmentTest(unittest.TestCase):
         self.assertNotIn("取不到基线形参名", review)
         # 可空指针那条与基线是谁无关，仍然要报
         self.assertIn("aclScalar", review)
+
+
+class TaskDocSignatureModeTest(unittest.TestCase):
+    def test_manual_and_taskdoc_routes_produce_the_same_alignment(self):
+        manual_done, manual = run_align("torch.roll", TAIL_OUTPUT)
+        task_done, from_task = run_taskdoc(task_doc())
+
+        self.assertEqual(manual_done.returncode, 0, manual_done.stderr)
+        self.assertEqual(task_done.returncode, 0, task_done.stderr)
+        for key in ("aclnn", "aclnn_adapter", "baseline_adapter"):
+            self.assertEqual(manual[key], from_task[key], key)
+        without_provenance = lambda report: {
+            key: value for key, value in report.items()
+            if key not in {"source", "signature_source"}
+        }
+        self.assertEqual(without_provenance(manual),
+                         without_provenance(from_task))
+        self.assertNotEqual(manual["source"], from_task["source"])
+        self.assertNotEqual(manual["signature_source"],
+                            from_task["signature_source"])
+
+    def test_taskdoc_route_needs_no_env_and_records_the_original_file_hash(self):
+        text = task_doc()
+        done, report = run_taskdoc(text)
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(report["source"]["kind"], "taskdoc")
+        self.assertTrue(report["source"]["path"].endswith("task.md"))
+        self.assertEqual(report["source"]["path"], report["signature_source"])
+        self.assertEqual(
+            report["source"]["sha256"],
+            hashlib.sha256(text.encode("utf-8")).hexdigest())
+        self.assertNotIn("aclnnRoll(", report["signature"])
+
+    def test_taskdoc_route_ignores_env_even_when_the_path_is_unreadable(self):
+        done, report = run_taskdoc(
+            task_doc(), ("--env", "/definitely/not/an/env.json"))
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(report["source"]["kind"], "taskdoc")
+
+    def test_manual_route_still_requires_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            source = temp / "aclnn_roll.h"
+            source.write_text(TAIL_OUTPUT + ";\n", encoding="utf-8")
+            done, report = _run_stubbed(
+                temp, ["--signature", TAIL_OUTPUT,
+                       "--signature-source", str(source)])
+
+        self.assertEqual(done.returncode, 2)
+        self.assertRegex(done.stderr, r"env|probe_env")
+        self.assertIsNone(report)
+
+    def test_header_route_still_requires_env(self):
+        done, report = run_header(include_env=False)
+
+        self.assertEqual(done.returncode, 2)
+        self.assertRegex(done.stderr, r"env|probe_env")
+        self.assertIsNone(report)
+
+    def test_header_route_records_its_source_kind_and_path(self):
+        done, report = run_header()
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(report["source"]["kind"], "header")
+        self.assertEqual(report["source"]["path"], report["signature_source"])
+        self.assertTrue(report["source"]["path"].endswith("aclnn_roll.h"))
+
+    def test_two_signature_routes_are_rejected_before_partial_route_checks(self):
+        done, report = run_taskdoc(
+            task_doc(), ("--signature", TAIL_OUTPUT))
+
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("只能选一条", done.stderr)
+        self.assertIsNone(report)
+
+    def test_missing_section_2_3_keeps_the_taskdoc_actionable_error(self):
+        done, report = run_taskdoc(
+            "# Roll 算子任务书\n\n### 2.4 参数说明\n\n正文\n")
+
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("§2.3", done.stderr)
+        self.assertIn("repo-task-doc-write", done.stderr)
+        self.assertIsNone(report)
+
+    def test_multiline_declaration_keeps_every_business_parameter(self):
+        done, report = run_taskdoc(task_doc(MULTILINE_TAIL_OUTPUT))
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(
+            [row["c_name"] for row in report["aclnn"]["inputs"]],
+            ["self", "shifts", "dims"])
+        self.assertEqual(
+            [row["c_name"] for row in report["aclnn"]["outputs"]],
+            ["out"])
 
 
 class AlignSignaturesTest(unittest.TestCase):
@@ -519,6 +680,8 @@ class SignatureProvenanceTest(unittest.TestCase):
         done, report = self._run(["--signature-source", "<TMP>/op_project/aclnn_roll.h"])
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertTrue(report["signature_source"].endswith("op_project/aclnn_roll.h"))
+        self.assertEqual(report["source"], {
+            "kind": "manual", "path": report["signature_source"]})
 
 
 class AclnnNameNormalisationTest(unittest.TestCase):

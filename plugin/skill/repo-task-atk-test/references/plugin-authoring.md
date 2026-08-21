@@ -134,6 +134,15 @@ optional pointer 的构造方式必须来自运行时契约表。
 
 ### 签名只能从工程目录里读
 
+生成侧与验收侧拿签名的依据不同：
+
+- **生成侧（只有任务书）：** 用 `--task-doc` 读取任务书 §2.3 的接口定义。任务书就是契约，
+  不需要也不允许去找工程目录。
+- **验收侧（已有 PR）：** 仍从待验收算子工程的头文件读取签名，下面的白名单规则不变。
+  PR 头文件与任务书签名的一致性由 S0 的 `check_bundle.py` 核对。
+
+下面的工程目录规则只约束验收侧。
+
 **待验收算子工程目录，别处都不行。** 具体说是 `evidence/env.json` 的
 `operator_project.path` 那棵树，头文件构建前就在源码树里，不用等 S3 构建安装。
 
@@ -148,10 +157,22 @@ S3 构建安装完才发现，白跑一整轮构建。别队的 vendor 目录、
 
 脚本强制核对，两条路都堵死：
 
-- `--env evidence/env.json` 现在是必填，脚本据此拿 `operator_project.path` 做白名单
+- 头文件与手抄声明两条路必须给 `--env evidence/env.json`，脚本据此拿
+  `operator_project.path` 做白名单
 - `--header` 必须落在这棵树下；落在 CANN 装机根下另有一条更具体的报错
 - `--signature`（手抄声明）必须同时给 `--signature-source`，指向这棵树里真实存在的文件
 - `env.json` 里没有 `operator_project` 就不放行：重跑 `probe_env.py --op-repo <工程目录>`
+
+生成侧只用任务书：
+
+```bash
+<python> scripts/align_signatures.py \
+  --baseline <yaml-name> \
+  --task-doc <任务书.md> \
+  -o evidence/signature_alignment.json
+```
+
+验收侧用 PR 工程里的头文件：
 
 ```bash
 <python> scripts/align_signatures.py \
@@ -161,7 +182,8 @@ S3 构建安装完才发现，白跑一整轮构建。别队的 vendor 目录、
   -o evidence/signature_alignment.json
 ```
 
-读的是哪个文件会记进 `signature_alignment.json` 的 `signature_source`，报告引用它说明签名从哪来。
+读的是哪个文件会继续记进 `signature_alignment.json` 的 `signature_source`。新增的 `source`
+会记录模式与路径；任务书模式还会记录任务书全文的 SHA256，供 S0 核对。
 
 任务书点名的接口数量不是判据。
 
@@ -257,6 +279,8 @@ ATK 从 `case_config.api_type` / `aclnn_api_type` 取执行器，用例里没写
 ```
 
 它 patch 接线字段、重跑生成、逐条用例逐字段比对，只有接线变了才放行。
+
+改写成功会同步 `bundle.json`；改了文件不改清单或只改清单不改文件都不算成功。
 
 退出码 2 表示用例语义也变了，那不属于接线改写，回 S2 重做整轮。
 

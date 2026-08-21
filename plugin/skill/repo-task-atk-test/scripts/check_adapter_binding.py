@@ -21,7 +21,7 @@ import argparse
 import json
 import sys
 
-from _case_utils import iter_cases, iter_input_specs, load_json
+from _case_utils import file_sha256, iter_cases, iter_input_specs, load_json
 import _stage_card
 
 # ATK 的 CaseConfig 默认值。用例里没写这个键不等于「没绑」，
@@ -134,6 +134,7 @@ def main():
 
     report, problems = judge(alignment, cases)
     report["case_json"] = args.case_json
+    report["case_file_sha256"] = file_sha256(args.case_json)
     report["alignment"] = args.alignment
     report["problems"] = problems
     with open(args.output, "w", encoding="utf-8") as sink:

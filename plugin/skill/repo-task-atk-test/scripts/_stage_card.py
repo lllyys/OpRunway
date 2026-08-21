@@ -21,6 +21,10 @@ from pathlib import Path
 DEFAULT_TIMELINE = "evidence/timeline.jsonl"
 HELP_FLAGS = {"-h", "--help"}
 
+# probe_env.py 在接收、用例生成和部署后复测都会运行，不能从骨架里的
+# S1 环境产物登记推断它只属于 S1。
+CROSS_STAGE_SCRIPTS = {"probe_env.py"}
+
 
 def stage_of(script_name):
     """从骨架反查这个量具属于哪一阶段,查不出或跨阶段就返回 None。
@@ -28,6 +32,9 @@ def stage_of(script_name):
     映射不硬编码:骨架已经写明每件产物由谁产出、属于哪一阶段,
     再抄一份到这里就是第二张要手工同步的表。
     """
+    if script_name in CROSS_STAGE_SCRIPTS:
+        return None
+
     from _contracts import load
 
     data = load()

@@ -14,8 +14,8 @@ agent 在验收过程中必须自己判断的字段全集。
 | --- | --- | --- | --- | --- |
 | `<op>_decl.json` 的 `operator_class` | S2 | 任务书的算子类别，取值开放 | _coverage_strategy 据此选默认轴与默认交互组 | 不在已固化类别里且没写 class_profile → make_must_cover.py 退出码 2 |
 | `<op>_decl.json` 的 `class_profile` | S2 | 任务书 / 基线接口语义 / 生态标准，不从待验收算子实现反推 | _coverage_strategy 拿它当该类算子的必需轴、默认三轴组和精度配比依据 | 四项（axes/group/arithmetic/why）缺一或轴名不合法 → make_must_cover.py 退出码 2 |
-| `<op>_decl.json` 的 `dims` | S2 | 钉死的轴取 _axis_binding.PINNED_AXIS_VALUES；dtype 轴取待验收算子工程声明的数据类型表（--dtype-source）；其余轴取任务书与签名 | make_must_cover.py 的覆盖分母 | 钉死的轴取子集或改名 → make_must_cover.py 退出码 2；dtype 轴的取值在 --dtype-source 里找不到 → 同样退出码 2 |
-| `<op>_decl.json` 的 `dtype_source_excludes` | S2 | 文件里那处误报的上下文（属性或输出的类型名），每条附 why | make_must_cover.py 的 dtype 漏写检测 | 缺 why 或豁免的 dtype 在那份文件里根本没出现 → make_must_cover.py 退出码 2 |
+| `<op>_decl.json` 的 `dims` | S2 | 钉死的轴取 _axis_binding.PINNED_AXIS_VALUES；生成侧 dtype 轴取任务书 §2.4 张量 dtype 列，验收侧或旧流程取工程声明表（均用 --dtype-source）；其余轴取任务书与签名 | make_must_cover.py 的覆盖分母 | 钉死的轴取子集或改名 → make_must_cover.py 退出码 2；dtype 轴的取值在 --dtype-source 里找不到 → 同样退出码 2 |
+| `<op>_decl.json` 的 `dtype_source_excludes` | S2 | 来源里那处误报的上下文；工程声明中的属性或输出类型等每条附 why，任务书模式只读取张量行 | make_must_cover.py 的 dtype 漏写检测 | 缺 why 或豁免的 dtype 在那份文件里根本没出现 → make_must_cover.py 退出码 2 |
 | `<op>_decl.json` 的 `coverage_policy` | S2 | references/case-design.md#策略 | make_must_cover.py 据此挑组合、控预算 | 轴不在 dims 里 → make_must_cover.py 退出码 2 |
 | `<op>_decl.json` 的 `axes` | S2 | 能从用例 JSON 读回来的轴才能放 | check_coverage.py 的覆盖签名 | 签名区分度不足 → 多条 combo 碰撞，覆盖率虚高或命中不上 |
 | `<op>_decl.json` 的 `extract` | S2 | _case_utils 提供的读取函数 | check_coverage.py 从用例回读轴值 | 缺规则 → check_coverage.py 报 missing_rules |

@@ -2,10 +2,16 @@
 
 两个供 AI 编程助手使用的 skill，覆盖社区算子任务的两端。
 
-| skill | 做什么 | 需要 NPU | 详细 |
-| --- | --- | --- | --- |
-| [`repo-task-doc-write`](docs/skills/repo-task-doc-write/design.md) | 开发前，把需求写成可验收的任务书 | 否 | [上手](docs/skills/repo-task-doc-write/quickstart.md) |
-| [`repo-task-atk-test`](docs/skills/repo-task-atk-test/design.md) | 开发后，用 ATK 验收精度与性能 | 是 | [上手](docs/skills/repo-task-atk-test/quickstart.md) |
+| skill | 子流程 | 做什么 | 需要 NPU | 详细 |
+| --- | --- | --- | --- | --- |
+| `repo-task-doc-write` | — | 开发前写任务书 | 否 | [设计][doc-design] / [上手][doc-quick] |
+| `repo-task-atk-test` | `repo-task-case-gen` | 生成并封印用例 | 否 | [设计][atk-design] / [上手][atk-quick] |
+| `repo-task-atk-test` | `repo-task-atk-accept` | 验收精度与性能 | 是 | [设计][atk-design] / [上手][atk-quick] |
+
+[doc-design]: docs/skills/repo-task-doc-write/design.md
+[doc-quick]: docs/skills/repo-task-doc-write/quickstart.md
+[atk-design]: docs/skills/repo-task-atk-test/design.md
+[atk-quick]: docs/skills/repo-task-atk-test/quickstart.md
 
 任务书是前者的产物、后者的唯一输入，两个 skill 因此同仓。
 
@@ -33,11 +39,15 @@ cp -r skill/<name> ~/.claude/skills/
 cp -r skill/<name> <你的项目>/.claude/skills/
 ```
 
+`cp -r skill/repo-task-atk-test` 会一次装齐两个子流程，父 `SKILL.md` 按现有输入路由。
+用 plugin 方式加载时，manifest 可以把父目录与两个子目录分别列进 `skills`。
+
 `repo-task-doc-write` 到此装完，它只依赖 python3 标准库。
 
 ### repo-task-atk-test 还要装 ATK
 
-前提：机器有 NPU，CANN 已装好且 `set_env.sh` 可以 source。
+生成用例只需 Python、ATK 与 CPU 版 torch，不需要 NPU 或 CANN。测试验收还要求机器有 NPU，
+CANN 已装好且 `set_env.sh` 可以 source。
 
 ```bash
 git submodule update --init

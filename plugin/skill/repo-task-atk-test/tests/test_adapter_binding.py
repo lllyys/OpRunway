@@ -7,6 +7,7 @@
 预警成不成立不需要问 agent——用例集就在手上。
 """
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -154,6 +155,14 @@ class CliTest(unittest.TestCase):
         result, report = self._run(CLEAN, [case(0, [tensor("x")])])
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("verdicts", report)
+
+    def test_report_binds_to_the_exact_case_file_bytes(self):
+        cases = [case(0, [tensor("x")])]
+        result, report = self._run(CLEAN, cases)
+        expected = hashlib.sha256(json.dumps(cases).encode()).hexdigest()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(expected, report["case_file_sha256"])
 
     def test_failure_exits_two_and_still_writes_the_report(self):
         alignment = json.loads(json.dumps(CLEAN))

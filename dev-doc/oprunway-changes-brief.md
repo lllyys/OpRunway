@@ -2,6 +2,45 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-21 · 验收 skill 拆分 Task 1–10 落地：嵌套子 skill、交接包封印/接收门、文档与 manifest
+
+- Task 1–10 已落地：骨架阶段归属、任务书解析、封印/接收门、清单同步、分侧作战卡、父路由、
+  两个子 `SKILL.md`、使用者文档与下游 manifest 全部接通。
+- 本机全量从计划基线 `22 failed / 890 passed / 13 skipped` 到
+  `22 failed / 980 passed / 19 skipped / 1036 subtests passed`；Task 1–9 新增 99 个测试方法，
+  Task 10 再加 1 个，failed 集合无新增。
+- 无头会话在 Claude 侧已登录环境实测四个 skill 名全部注册：
+  `oprunway:repo-task-atk-test`、`oprunway:repo-task-case-gen`、
+  `oprunway:repo-task-atk-accept`、`oprunway:repo-task-doc-write`。本次 Codex 沙箱未登录，
+  无法在本地复现模型输出。
+- 四条行为不变量核对通过，设计改动与有意微调均已逐项核对：
+  - 行为不变量：判据与标准文件零改动
+  - 行为不变量：既有行为测试零删行
+  - 行为不变量：退出码语义不变
+  - 行为不变量：产物 schema 只增不改
+  - 按设计改变：签名来源改为任务书 §2.3
+  - 按设计改变：dtype 来源改为任务书 §2.4 的张量行
+  - 按设计改变：S2 多一道封印门
+  - 有意微调：rewire 留痕的 `at` 改为带时区的 ISO 8601
+  - 有意微调：`probe_env.py` 不再补打 S1 卡
+  - 有意微调：工作目录改为进入 S1 前建立
+- 待办：Task 11 触发评测与真机验证未做，`isolated-acceptance` 需按双子 skill 重排。
+
+## 2026-08-20 · 定案验收 skill 拆分设计：嵌套两个子 skill，用交接包解耦生成与验收
+- 新增 spec `plugin/docs/superpowers/specs/2026-08-20-atk-skill-split-design.md` 与 plan
+  `plugin/docs/superpowers/plans/2026-08-20-atk-skill-split.md`，本轮只写文档，skill 本体未动。
+- 拆法定为嵌套：`skill/repo-task-atk-test/` 下新增 `case-gen/SKILL.md`（S1→S2→封印）与
+  `acceptance/SKILL.md`（S0→S3→S4→S5），父 SKILL.md 改路由页；scripts/references 单份不挪，
+  骨架一份、stage 加 skill 归属。放弃「平行两目录 + 副本同步」。
+- 两条安装通路实测：plugin manifest 列子目录时三个 skill 各自注册（官方文档未记载，当前版本行为）；
+  `~/.claude/skills/` 目录扫描只认一层。设计以父路由为保底，子 skill 独立注册为附加收益。
+- 生成侧只读任务书：签名从 §2.3 解析、dtype 从 §2.4 取，不读工程目录；环境前提降到
+  Python + ATK + torch（依据：ATK 非测试代码零处 import torch_npu，S2 链只需 CPU）。
+- 交接包契约：`seal_bundle.py` 在生成侧出口写 `evidence/bundle.json`（全文件 sha256、任务书 sha256、
+  ATK 版本），`check_bundle.py` 在验收侧入口重算核对，并新增「PR 头文件 vs 任务书签名」一致性门。
+- 仓外核查：skill 改动门两个前置已满足（Read 权威参考、调用 skill-creator）；`.cc-suite.md` 与
+  codex 在位，落盘走 Codex 通路。
+
 ## 2026-08-19 · 镜像同步 47fcefc：上游新增任务书撰写 skill，pathspec 扩到 .claude/rules
 - 上游 179bcec→47fcefc（40 提交）逐字同步进 plugin/，diff -r 校验与上游树逐字一致；ATK gitlink 未动（a0dfc9a）。
 - 上游新增第二个 skill repo-task-doc-write（任务书撰写：模板、要素表、L0–L4 质量门脚本与测试），manifest skills 数组两个都纳入，版本 2.0.0→2.1.0。

@@ -14,8 +14,8 @@ import sys
 
 import check_coverage as cc
 from _atk_capabilities import check_cases, load_capabilities
-from _case_utils import (extract_axis, iter_cases, iter_input_specs, load_json,
-                         numel, signature)
+from _case_utils import (extract_axis, file_sha256, iter_cases, iter_input_specs,
+                         load_json, numel, signature)
 import _stage_card
 
 # 与 atk/common/registry.py:165 的 Generate 模式正则保持一致：registry 就是用它数装饰器的
@@ -461,6 +461,7 @@ def main():
 
     report = {
         "generate": generate_name,
+        "case_file_sha256": file_sha256(args.case_json),
         "must_cover_total": len(wanted),
         "must_cover_hit": len(wanted) - len(missing),
         "missing": missing,

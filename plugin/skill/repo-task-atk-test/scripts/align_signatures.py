@@ -22,6 +22,7 @@ import sys
 from _opapi_binding import _symbol_prefix
 from _runtime_guard import runtime_imports
 import _stage_card
+import _taskdoc
 
 # aclnn 一段式签名末尾这两个参数由 ATK 在 before_call 自动补齐，
 # 不出现在用例里，也不该出现在适配器构造的 input_args 中。
@@ -153,6 +154,24 @@ def parse_signature(text):
         "parameters": params,
         "trailing": [p["c_declaration"] for p in trailing],
     }
+
+
+def taskdoc_workspace_signature(text):
+    """从任务书代码块截出第一段 GetWorkspaceSize 声明。"""
+    found = re.search(
+        r"\baclnnStatus\s+[A-Za-z_]\w*GetWorkspaceSize\s*\(", text)
+    if found is None:
+        raise AlignError("任务书 §2.3 解析不出 GetWorkspaceSize 声明")
+
+    depth = 0
+    for index in range(found.end() - 1, len(text)):
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[found.start():index + 1].strip()
+    raise AlignError("任务书 §2.3 的 GetWorkspaceSize 声明缺少右括号")
 
 
 def read_header_signature(header, aclnn_name):
@@ -558,14 +577,16 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--baseline", required=True, help="YAML 的 name 字段，如 torch.median")
-    ap.add_argument("--signature", help="一段式 GetWorkspaceSize 的完整 C 声明；"
+    ap.add_argument("--signature", help="验收侧手抄的一段式 GetWorkspaceSize 完整 C 声明；"
                                         "必须与 --signature-source 一起给")
     ap.add_argument("--signature-source",
                     help="--signature 抄自哪个文件；必须是待验收算子工程目录下的路径")
-    ap.add_argument("--header", help="待验收算子工程目录下的头文件路径或目录，与 --aclnn-name 配合")
+    ap.add_argument("--header", help="验收侧待验收算子工程目录下的头文件路径或目录；"
+                                     "与 --aclnn-name 配合")
     ap.add_argument("--aclnn-name", help="YAML 的 aclnn_name 字段")
-    ap.add_argument("--env", required=True,
-                    help="evidence/env.json 路径；据此核对签名是从待验收算子工程目录里读的")
+    ap.add_argument("--task-doc", help="生成侧用；签名以任务书 §2.3 接口定义为准")
+    ap.add_argument("--env",
+                    help="头文件与手抄声明模式必需；据此核对签名是否来自待验收算子工程")
     ap.add_argument("--interface",
                     help="derive_interface.py 的产物；读 baseline_kind。"
                          "cann_builtin 时基线是 C 接口名、没有可反射的形参名，"
@@ -584,20 +605,56 @@ def main():
             return 3
 
     try:
-        signature = args.signature
-        if signature:
-            # 手抄的声明也要说得出抄自哪一行代码：核对不了从哪抄的，就等于没核对。
-            if not args.signature_source:
+        manual_mode = bool(args.signature or args.signature_source)
+        header_mode = bool(args.header or args.aclnn_name)
+        taskdoc_mode = bool(args.task_doc)
+        mode_count = sum((manual_mode, header_mode, taskdoc_mode))
+        if mode_count > 1:
+            raise AlignError(
+                "签名读取方式只能选一条：--signature/--signature-source、"
+                "--header/--aclnn-name 或 --task-doc")
+        if mode_count == 0:
+            raise AlignError(
+                "需要 --signature 加 --signature-source、--header 加 --aclnn-name，"
+                "或 --task-doc")
+
+        if manual_mode:
+            if not (args.signature and args.signature_source):
                 raise AlignError(
                     "--signature 必须同时给 --signature-source（抄自待验收算子工程里的哪个文件）")
+            if not args.env:
+                raise AlignError(
+                    "手抄声明模式必须给 --env；签名对齐必须核对签名是从哪个文件读的，"
+                    "先跑 probe_env.py")
+            signature = args.signature
             source = require_project_source(
                 args.signature_source, args.env, "--signature-source")
-        else:
+            source_info = {"kind": "manual", "path": source}
+        elif header_mode:
             if not (args.header and args.aclnn_name):
-                raise AlignError("需要 --signature 加 --signature-source，或 --header 加 --aclnn-name")
+                raise AlignError("--header 必须同时给 --aclnn-name")
+            if not args.env:
+                raise AlignError(
+                    "头文件模式必须给 --env；签名对齐必须核对签名是从哪个文件读的，"
+                    "先跑 probe_env.py")
             reject_installed_header(args.header, args.env)
             require_project_source(args.header, args.env, "--header")
             signature, source = read_header_signature(args.header, args.aclnn_name)
+            source_info = {"kind": "header", "path": source}
+        else:
+            try:
+                doc = _taskdoc.load(args.task_doc)
+                block = _taskdoc.signature_block(doc)
+            except _taskdoc.TaskDocError as exc:
+                raise AlignError(str(exc)) from exc
+            signature = taskdoc_workspace_signature(block)
+            source = args.task_doc
+            source_info = {
+                "kind": "taskdoc",
+                "path": source,
+                "sha256": _taskdoc.sha256(args.task_doc),
+            }
+
         profile = (builtin_baseline_signature(args.baseline)
                    if baseline_kind == "cann_builtin"
                    else baseline_signature(args.baseline))
@@ -607,6 +664,7 @@ def main():
         return 2
 
     report["signature_source"] = source
+    report["source"] = source_info
     report["signature"] = signature
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)

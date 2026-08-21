@@ -9,10 +9,14 @@
 
 ## 验收流程
 
-阶段定义的真相在 `references/artifact-contracts.json` 的 `stages`，量具从那里读。
+阶段归属的真相在 `references/artifact-contracts.json` 的 `stages[*].skill`，量具从那里读：
 
-这里不再抄一份阶段表：agent 运行时看 `SKILL.md`，使用者看
-`docs/skills/repo-task-atk-test/design.md`，改阶段改骨架。
+- 生成侧 `repo-task-case-gen` 负责 S1–S2
+- 验收侧 `repo-task-atk-accept` 负责 S0 与 S3–S5
+
+两侧共用一份 `scripts/` 与 `references/`。交接包是两侧唯一接口，规范在
+`references/handoff.md`；agent 运行时看对应子 `SKILL.md`，使用者看
+`docs/skills/repo-task-atk-test/design.md`，改阶段只改骨架。
 
 ## 四条红线（不可退让）
 
@@ -46,6 +50,8 @@ S3 或 S4 失败都不得回到 S2 重新生成。
 ### 红线 4：Agent 声明不可信
 
 判据从数据推导，不允许 agent 声称"我检查过了"就放行。
+
+四条红线在两侧的具体形态见拆分设计 §2.6；这里不复制那张两侧对照表。
 
 ## 核心架构理念
 
@@ -114,18 +120,26 @@ ATK 框架知识（`atk-cli.md`、`case-design.md`）、约束器生成规则
 
 ```
 skill/repo-task-atk-test/
+├── case-gen/
+│   └── SKILL.md          # 生成侧入口：S1–S2
+├── acceptance/
+│   └── SKILL.md          # 验收侧入口：S0、S3–S5
 ├── scripts/              # 量具层
 │   ├── _*.py             # 内部模块（无CLI）
+│   ├── _taskdoc.py       # 任务书解析薄封装
 │   ├── check_*.py        # 门禁（退出码0/2/3）
+│   ├── check_bundle.py   # 交接包接收门
 │   ├── make_*.py         # 生成器
 │   ├── probe_env.py      # S0环境探测
 │   ├── probe_progress.py # 压缩后从盘上产物反推进度并重打卡
 │   ├── gate_lookup.py    # 按量具名查检查点（替代通读清单）
 │   ├── _axis_binding.py  # 轴取值词表与dtype出处
+│   ├── seal_bundle.py    # 交接包封印门
 │   └── rewire_adapter.py # 接线改写唯一出口
 ├── references/           # 运行时知识
 │   ├── artifact-contracts.json       # 唯一骨架（量具读，验收时不打开）
 │   ├── decision-points.md            # Agent决策清单（从骨架派生）
+│   ├── handoff.md                    # 交接包规范
 │   ├── atk-parameter-capabilities.json
 │   ├── atk-cli.md
 │   ├── case-design.md
@@ -157,6 +171,10 @@ gitlink 变化，藏不住。
 | 约束器 | `constraint.py`（参数取值规则） |
 | 适配器 | `plugin.py`（处理None等类型） |
 | 冻结 | S2 结束时锁定输入 SHA256 |
+| 交接包 | 生成侧封印后交给验收侧的完整工作目录 |
+| 封印 | `seal_bundle.py` 核齐产物并写入文件摘要清单 |
+| 接收门 | `check_bundle.py` 重算摘要并核对任务书、ATK 版本与接口 |
+| 子 skill | 共用父目录量具与知识、分别承接生成或验收阶段的入口 |
 | 接线字段 | `api_type`, `aclnn_api_type` |
 | L0-L3 | 知识分层：事实/推导/策略/模板 |
 
@@ -178,13 +196,13 @@ A: 走 `rewire_adapter.py`，它会校验语义不变（只改接线）。不满
 
 ## 行文结构化欠账
 
-2026-08-18 定了行文规则（`.claude/rules/prose-style.md`），本 skill 有 **102 处
+2026-08-18 定了行文规则（`.claude/rules/prose-style.md`），本 skill 有 **88 处
 存量违规**未改，由 `test_document_style.py` 的 `PROSE_BASELINE` 棘轮兜住，
 不阻塞新工作。
 
-按规则分：87 处连续单句自然段、13 处段内并列句未列表化、2 处自然段超 5 句。欠账最重的
-四个文件是 `SKILL.md` 17 处、`case-design.md` 14 处、`plugin-authoring.md` 10 处、
-`atk-parameter-capabilities.md` 与 `build-deploy.md` 各 8 处。
+按规则分：85 处连续单句自然段、3 处段内并列句未列表化。三份入口的基线分别是父
+`SKILL.md` 0 处、`case-gen/SKILL.md` 2 处、`acceptance/SKILL.md` 1 处；欠账最重的
+reference 是 `case-design.md` 14 处与 `plugin-authoring.md` 10 处。
 
 改法是把连续的孤立单句合并成段，或按并列关系提成列表。每改完一个文件把
 `PROSE_BASELINE` 里对应的数字降下去，降到 0 就删掉那一行。基线只减不增，
@@ -199,3 +217,7 @@ A: 走 `rewire_adapter.py`，它会校验语义不变（只改接线）。不满
 - **Plan A：** `docs/superpowers/plans/2026-08-16-atk-gate-simplification.md`
 - **Plan B：** `docs/superpowers/plans/2026-08-15-atk-contract-spine.md`
 - **Plan C：** `docs/superpowers/plans/2026-08-16-atk-defect-closure.md`
+- **拆分 spec：** `docs/superpowers/specs/2026-08-20-atk-skill-split-design.md`
+- **拆分 plan：** `docs/superpowers/plans/2026-08-20-atk-skill-split.md`
+
+**最后更新：** 2026-08-20（拆成生成用例与测试验收两个子 skill，父入口只负责路由）

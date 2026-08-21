@@ -21,6 +21,9 @@ CONTRACTS_PATH = Path(__file__).resolve().parents[1] / "references" / \
 # 谁产出这样东西。agent 的那些就是它必须自己判断的决策全集。
 OWNERS = frozenset({"agent", "script", "atk"})
 
+# 共用一份骨架的两个运行侧。阶段归属只允许从这里取值。
+SKILLS = frozenset({"case-gen", "acceptance"})
+
 # 一道检查点为什么存在，只有这四种答案。
 #
 # 分类不是给文档做目录用的，是为了看清「这么多检查点是不是都有必要」：
@@ -45,6 +48,7 @@ PREMISE_KEYS = frozenset({
     "baseline_kind",    # 有没有 torch 基线可以反射形参名
     "operator_class",   # 输出是否由输入算出
     "atk_version",      # 装机 ATK 与能力矩阵是否同版本
+    "interface_mode",   # 第五种前提键：接口模式决定有没有 C 头文件可比
 })
 
 # 前提不成立时的处置。判别标准只有一句：
@@ -54,6 +58,11 @@ DISPOSITIONS = frozenset({
     "delegate",         # 还可能。这一侧判不了 → 明确交给另一道门，必须点名
     "not_applicable",   # 结构上不可能 → 才允许跳过，且必须落进证据
 })
+
+# S0 里会以退出码 2 拦下 agent 的量具。清单必须覆盖它们。
+S0_BLOCKING_SCRIPTS = (
+    "check_bundle.py",
+)
 
 # S2 里会以退出码 2 拦下 agent 的量具。清单必须覆盖它们，
 # 否则 agent 还是只能被逐个拦下才知道有这道门。
@@ -65,6 +74,7 @@ S2_BLOCKING_SCRIPTS = (
     "check_coverage.py",
     "validate_cases.py",
     "freeze_inputs.py",
+    "seal_bundle.py",
 )
 
 
@@ -73,6 +83,12 @@ def gates_of(data, stage):
     return {gate_id: spec
             for gate_id, spec in (data.get("gate_inventory") or {}).items()
             if spec["stage"] == stage}
+
+
+def stages_of(data, skill):
+    """按骨架键序返回属于某个运行侧的阶段。"""
+    return [stage for stage, block in (data.get("stages") or {}).items()
+            if block.get("skill") == skill]
 
 
 def conditional_gates(data):

@@ -5,6 +5,7 @@
 combos 之后，那道断言变成恒等式，留下的是两组独立度量：两两覆盖率和规模配比。
 """
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -19,6 +20,9 @@ from _coverage_strategy import (  # noqa: E402
     CoveragePolicyError, _matching_rules, audit_coverage)
 from _decl_fixture import project_for  # noqa: E402
 from make_must_cover import build_combos  # noqa: E402
+
+GOLDEN_TASK_DOC = (
+    SKILL_ROOT.parent / "repo-task-doc-write" / "references" / "golden-task-doc.md")
 
 DIMS = {
     "dtype": ["fp16", "fp32", "complex64"],
@@ -117,8 +121,119 @@ class MakeMustCoverTest(unittest.TestCase):
             spec = json.loads(out.read_text(encoding="utf-8"))
             binding = spec["dtype_binding"]
             self.assertTrue(binding["source"])
+            self.assertEqual(binding["kind"], "project")
             for dtype in DIMS["dtype"]:
                 self.assertIn(dtype, binding["declared_in_source"])
+
+    def _run_with_task_doc(self, dtypes, task_doc_entry, *,
+                           inside_project=False, source_text=None):
+        if not GOLDEN_TASK_DOC.is_file():
+            self.skipTest("doc-write 黄金任务书不在当前发布切片")
+        with tempfile.TemporaryDirectory() as tmp:
+            decl = Path(tmp) / "decl.json"
+            out = Path(tmp) / "must_cover.json"
+            interface = Path(tmp) / "interface.json"
+            decl.write_text(json.dumps({
+                "dims": {"dtype": dtypes},
+                "coverage_policy": {
+                    "strategy": "anchored_interactions",
+                    "baseline": {"dtype": dtypes[0]},
+                    "interaction_groups": [],
+                    "targeted": [],
+                    "max_cases": 20,
+                },
+            }), encoding="utf-8")
+            payload = {"baseline_kind": "torch"}
+            if task_doc_entry is not None:
+                payload["task_doc"] = task_doc_entry
+            interface.write_text(json.dumps(payload), encoding="utf-8")
+            source = GOLDEN_TASK_DOC
+            env_args = []
+            if inside_project:
+                project = Path(tmp) / "op_project"
+                project.mkdir()
+                source = project / "source.md"
+                source.write_text(
+                    source_text if source_text is not None
+                    else GOLDEN_TASK_DOC.read_text(encoding="utf-8"),
+                    encoding="utf-8")
+                env = Path(tmp) / "env.json"
+                env.write_text(json.dumps({
+                    "operator_project": {"path": str(project)}}),
+                    encoding="utf-8")
+                env_args = ["--env", str(env)]
+            done = subprocess.run(
+                [sys.executable, str(SKILL_ROOT / "scripts" / "make_must_cover.py"),
+                 "-d", str(decl), "-o", str(out),
+                 "--dtype-source", str(source),
+                 "--interface", str(interface), *env_args],
+                capture_output=True, text=True, timeout=120)
+            result = json.loads(out.read_text(encoding="utf-8")) \
+                if out.is_file() else None
+        return done, result
+
+    @staticmethod
+    def _golden_task_doc_entry():
+        digest = hashlib.sha256(GOLDEN_TASK_DOC.read_bytes()).hexdigest()
+        return {"name": GOLDEN_TASK_DOC.name, "sha256": digest}
+
+    def test_task_doc_dtype_source_records_only_tensor_dtypes(self):
+        done, spec = self._run_with_task_doc(
+            ["fp16", "bf16"], self._golden_task_doc_entry())
+        self.assertEqual(done.returncode, 0, done.stderr)
+        binding = spec["dtype_binding"]
+        self.assertEqual(binding["kind"], "taskdoc")
+        self.assertEqual(binding["declared_in_source"], ["fp16", "bf16"])
+        self.assertEqual(binding["excluded"], [])
+        self.assertEqual(binding["sha256"], self._golden_task_doc_entry()["sha256"])
+
+    def test_task_doc_dtype_source_rejects_an_omitted_dtype(self):
+        done, _ = self._run_with_task_doc(
+            ["fp16"], self._golden_task_doc_entry())
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("bf16", done.stderr)
+        self.assertIn("没声明", done.stderr)
+
+    def test_task_doc_dtype_source_rejects_an_invented_dtype(self):
+        done, _ = self._run_with_task_doc(
+            ["fp16", "bf16", "fp32"], self._golden_task_doc_entry())
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("fp32", done.stderr)
+        self.assertIn("找不到", done.stderr)
+
+    def test_task_doc_dtype_source_rejects_a_different_digest(self):
+        entry = self._golden_task_doc_entry()
+        entry["sha256"] = "0" * 64
+        done, _ = self._run_with_task_doc(["fp16", "bf16"], entry)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("同一份", done.stderr)
+
+    def test_task_doc_dtype_source_requires_interface_task_doc_metadata(self):
+        done, _ = self._run_with_task_doc(["fp16", "bf16"], None)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("derive_interface", done.stderr)
+
+    def test_stale_task_doc_inside_project_is_not_treated_as_a_readme(self):
+        stale = GOLDEN_TASK_DOC.read_text(encoding="utf-8") + "\n<!-- stale -->\n"
+        done, _ = self._run_with_task_doc(
+            ["fp16", "bf16", "bool"], self._golden_task_doc_entry(),
+            inside_project=True, source_text=stale)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("同一份", done.stderr)
+
+    def test_plain_readme_inside_project_still_uses_project_mode(self):
+        done, spec = self._run_with_task_doc(
+            ["fp16", "bf16"], {"name": "task.md", "sha256": "0" * 64},
+            inside_project=True,
+            source_text="| 数据类型 | FLOAT16、BFLOAT16 |")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(spec["dtype_binding"]["kind"], "project")
+
+    def test_structured_task_doc_inside_project_requires_task_doc_metadata(self):
+        done, _ = self._run_with_task_doc(
+            ["fp16", "bf16", "bool"], None, inside_project=True)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("derive_interface", done.stderr)
 
     def test_unknown_declaration_key_is_rejected(self):
         import subprocess

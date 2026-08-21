@@ -28,11 +28,14 @@ S2_ARTIFACTS = ("med_decl.json", "med_materialize.py", "must_cover.json",
                 "med.yaml", "med_constraint.py",
                 "evidence/signature_alignment.json",
                 "evidence/signature_contract.json",
-                "evidence/adapter_binding.json")
+                "evidence/adapter_binding.json", "evidence/bundle.json")
+S3_ARTIFACTS = ("evidence/soc_binding.json", "evidence/opapi_binding.json",
+                "evidence/smoke_1.log")
 
 
-def probe(work):
-    result = subprocess.run([sys.executable, str(SCRIPT), "-C", str(work)],
+def probe(work, *args):
+    result = subprocess.run([sys.executable, str(SCRIPT), *args,
+                             "-C", str(work)],
                             capture_output=True, text=True, timeout=30)
     return result
 
@@ -56,6 +59,7 @@ class CurrentStageTest(unittest.TestCase):
         with TemporaryDirectory() as work:
             result = probe(work)
             self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("子 skill：case-gen", result.stdout.splitlines()[0])
             self.assertIn("当前阶段：S1", result.stdout)
 
     def test_finished_s1_moves_to_s2(self):
@@ -70,8 +74,8 @@ class CurrentStageTest(unittest.TestCase):
             touch(work, *S1_ARTIFACTS, *S2_ARTIFACTS)
             (Path(work) / "frozen_med").mkdir()
             write_interface(work, "torch")
-            out = probe(work).stdout
-            self.assertIn("当前阶段：S3", out)
+            out = probe(work, "--skill", "case-gen").stdout
+            self.assertIn("当前阶段：S2", out)
             for name in ("<op>_decl.json", "<op>.yaml", "冻结输入"):
                 self.assertNotIn(f"缺 {name}", out)
 
@@ -80,6 +84,7 @@ class CurrentStageTest(unittest.TestCase):
         # S5 就永远到不了，而 S5 恰恰是要写报告的那一步。
         with TemporaryDirectory() as work:
             touch(work, *S1_ARTIFACTS, *S2_ARTIFACTS,
+                  "evidence/bundle_intake.json",
                   "evidence/soc_binding.json", "evidence/opapi_binding.json",
                   "evidence/smoke_1.log", "conclusion/accuracy_results.json",
                   "conclusion/performance_results.json",
@@ -98,12 +103,65 @@ class CurrentStageTest(unittest.TestCase):
             self.assertEqual(2, result.returncode)
 
 
+class SkillInferenceTest(unittest.TestCase):
+    def make_sealed_case_gen(self, work):
+        touch(work, *S1_ARTIFACTS, *S2_ARTIFACTS)
+        (Path(work) / "frozen_med").mkdir()
+        write_interface(work, "torch")
+
+    def test_sealed_case_gen_hands_off_at_s0(self):
+        with TemporaryDirectory() as work:
+            self.make_sealed_case_gen(work)
+            result = probe(work)
+            self.assertEqual(0, result.returncode, result.stderr)
+            first = result.stdout.splitlines()[0]
+            self.assertIn("已封印", first)
+            self.assertIn("S0", first)
+            self.assertIn(_contracts.render_card(_contracts.load(), "S0").strip(),
+                          result.stdout)
+            self.assertNotIn("\nS1 任务书解读", result.stdout)
+
+    def test_intake_manifest_switches_to_acceptance_at_s3(self):
+        with TemporaryDirectory() as work:
+            self.make_sealed_case_gen(work)
+            touch(work, "evidence/bundle_intake.json")
+            out = probe(work).stdout
+            summary = out[:out.index("当前阶段：")]
+            self.assertIn("子 skill：acceptance", out.splitlines()[0])
+            self.assertIn("当前阶段：S3", out)
+            self.assertNotIn("\nS1 ", summary)
+            self.assertNotIn("\nS2 ", summary)
+
+    def test_finished_s3_moves_acceptance_to_s4(self):
+        with TemporaryDirectory() as work:
+            self.make_sealed_case_gen(work)
+            touch(work, "evidence/bundle_intake.json", *S3_ARTIFACTS)
+            self.assertIn("当前阶段：S4", probe(work).stdout)
+
+    def test_explicit_acceptance_starts_an_empty_directory_at_s0(self):
+        with TemporaryDirectory() as work:
+            out = probe(work, "--skill", "acceptance").stdout
+            self.assertIn("子 skill：acceptance", out.splitlines()[0])
+            self.assertIn("当前阶段：S0", out)
+
+    def test_explicit_case_gen_can_review_a_sealed_directory(self):
+        with TemporaryDirectory() as work:
+            self.make_sealed_case_gen(work)
+            out = probe(work, "--skill", "case-gen").stdout
+            summary = out[:out.index("当前阶段：")]
+            self.assertIn("已封印", out.splitlines()[0])
+            self.assertIn("\nS1 ", summary)
+            self.assertIn("\nS2 ", summary)
+            self.assertNotIn("\nS0 ", summary)
+            self.assertNotIn("\nS3 ", summary)
+
+
 class ConditionalArtifactTest(unittest.TestCase):
     """条件产物三种状态：要产出、不产出、判不了，各有各的说法。"""
 
     def test_undecided_when_the_evidence_itself_is_not_on_disk(self):
         with TemporaryDirectory() as work:
-            out = probe(work).stdout
+            out = probe(work, "--skill", "acceptance").stdout
             self.assertIn("条件未定 evidence/golden_source.json", out)
             self.assertNotIn("缺 evidence/golden_source.json", out)
 
@@ -112,7 +170,7 @@ class ConditionalArtifactTest(unittest.TestCase):
             touch(work, "evidence/constraints.md", "evidence/env.json",
                   "evidence/env.sh")
             write_interface(work, "cann_builtin")
-            out = probe(work).stdout
+            out = probe(work, "--skill", "acceptance").stdout
             self.assertIn("evidence/golden_provenance.json", out)
             self.assertNotIn("条件未定 evidence/golden_provenance.json", out)
 
@@ -123,7 +181,7 @@ class ConditionalArtifactTest(unittest.TestCase):
             touch(work, "evidence/constraints.md", "evidence/env.json",
                   "evidence/env.sh")
             write_interface(work, "torch")
-            out = probe(work).stdout
+            out = probe(work, "--skill", "acceptance").stdout
             self.assertNotIn("evidence/golden_provenance.json", out)
             self.assertNotIn("evidence/opp_library", out)
 
@@ -148,7 +206,7 @@ class ConditionalArtifactTest(unittest.TestCase):
             path = Path(work) / "evidence" / "interface.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{不是 json", encoding="utf-8")
-            result = probe(work)
+            result = probe(work, "--skill", "acceptance")
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn("条件未定", result.stdout)
 

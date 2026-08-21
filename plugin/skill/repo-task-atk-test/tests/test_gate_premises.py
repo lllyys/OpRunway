@@ -26,6 +26,7 @@
 
 import sys
 import unittest
+from collections import Counter
 from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +34,7 @@ sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 
 import _contracts  # noqa: E402
 
-STAGES = ("S1", "S2", "S3", "S4", "S5")
+STAGES = ("S0", "S1", "S2", "S3", "S4", "S5")
 
 
 class GateInventoryStructureTest(unittest.TestCase):
@@ -229,6 +230,13 @@ class GateInventoryCoverageTest(unittest.TestCase):
                 self.assertIn(script, inventoried,
                               f"{script} 会拦下 agent，但检查点清单里没有它")
 
+    def test_every_s0_blocking_script_is_inventoried(self):
+        inventoried = {spec["script"] for spec in self.gates.values()}
+        for script in _contracts.S0_BLOCKING_SCRIPTS:
+            with self.subTest(script=script):
+                self.assertIn(script, inventoried,
+                              f"{script} 会拦下 agent，但检查点清单里没有它")
+
     def test_atk_pitfall_gates_point_at_a_reference(self):
         """编码 ATK 反直觉行为的检查点，必须指向可读的规范。
 
@@ -284,20 +292,32 @@ class GateInventoryViewTest(unittest.TestCase):
                 self.assertIn(spec["premise"]["holds_when"], rendered)
 
     def test_skill_entry_states_the_right_count_and_stage(self):
-        """SKILL.md 把「多少道门、在哪个阶段」写成了具体数字。
+        """两个子 SKILL.md 把「多少道门、在哪个阶段」写成具体数字。
 
         它替代的是「通读全文」，所以这句话本身必须准：加了一道 S3 的门
         而这句没改，agent 就会以为 S3 不必查门，而它已经不再读清单全文了。
         """
-        skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        stages = {spec["stage"] for spec in self.data["gate_inventory"].values()}
-        self.assertEqual({"S2"}, stages,
-                         "门不再只在 S2，SKILL.md 那句「全在 S2」要改")
-        self.assertIn(f"有 {len(self.data['gate_inventory'])} 道", skill)
+        counts = Counter(
+            spec["stage"] for spec in self.data["gate_inventory"].values()
+        )
+        pages = {
+            "case-gen": SKILL_ROOT / "case-gen" / "SKILL.md",
+            "acceptance": SKILL_ROOT / "acceptance" / "SKILL.md",
+        }
+        for skill_name, path in pages.items():
+            text = path.read_text(encoding="utf-8")
+            for stage in _contracts.stages_of(self.data, skill_name):
+                if stage not in counts:
+                    continue
+                with self.subTest(skill=skill_name, stage=stage):
+                    self.assertIn(f"{stage} 有 {counts[stage]} 道", text)
 
     def test_view_is_reachable_from_the_skill_entry(self):
         # 视图不被入口指到就等于不存在。
-        skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        paths = [SKILL_ROOT / "SKILL.md",
+                 SKILL_ROOT / "case-gen" / "SKILL.md",
+                 SKILL_ROOT / "acceptance" / "SKILL.md"]
+        skill = "\n".join(path.read_text(encoding="utf-8") for path in paths)
         self.assertIn("gate-inventory.md", skill)
 
 

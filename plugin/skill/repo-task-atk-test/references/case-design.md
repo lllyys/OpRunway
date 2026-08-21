@@ -59,10 +59,16 @@ combos，等于自己出题自己答——真机上同一个算子验收七次�
 个别取值确实测不了写进 `infeasible` 并给 `why`，那条会从分母里扣掉且留痕；
 直接把轴缩短是把分母悄悄改小，缩完照样 100%。
 
-`dtype` 轴的取值来自**待验收算子工程声明的数据类型表**（README 或头文件），
-用 `--dtype-source` 指过去，`--env` 里的 `operator_project.path` 负责核对这份文件
-确实在工程目录里。任务书通常给不出这张表（median 的任务书只写「支持所有走入
-aicore 的数据类型」），照任务书写就只能猜。
+生成侧的 `dtype` 轴照任务书 §2.4 中「数据类型」为 `tensor` 的参数所列 dtype 写，
+`--dtype-source` 给这份任务书；它的 sha256 必须与 `interface.json` 记录的摘要一致。
+
+```bash
+<python> scripts/make_must_cover.py -d <op>_decl.json -o <op>_must_cover.json \
+  --dtype-source <任务书>.md --interface evidence/interface.json
+```
+
+验收侧或旧流程仍照待验收算子工程声明的数据类型表写，可给 README 或头文件。
+`--env` 里的 `operator_project.path` 负责核对这份文件确实在工程目录里：
 
 ```bash
 <python> scripts/make_must_cover.py -d <op>_decl.json -o <op>_must_cover.json \
@@ -99,7 +105,7 @@ aicore 的数据类型」），照任务书写就只能猜。
 | --- | --- | --- |
 | 两两覆盖 ≥ 90% | `dims` 的全部轴对，分母扣掉 `infeasible` 明确禁掉的组合 | 无 |
 | 规模配比 40/30/30 ±12pp | combos 的 `size_class` 取值分布 | combos 少于 20 条时不核算 |
-| 浮点一种都不能漏 | 给了 `--dtype-source` 时：工程声明表里的每种浮点，要么在 `dtype` 轴上，要么写进 `dtype_source_excludes`；轴上的每个浮点还要至少被一条 combo 命中 | 没有 `dtype` 轴，或轴里一个浮点取值都没有 |
+| 浮点一种都不能漏 | 给了 `--dtype-source` 时：任务书张量 dtype 列或工程声明表里的每种浮点，要么在 `dtype` 轴上，要么写进 `dtype_source_excludes`；轴上的每个浮点还要至少被一条 combo 命中 | 没有 `dtype` 轴，或轴里一个浮点取值都没有 |
 | 浮点占比 ≥ 70% ±12pp | 没给 `--dtype-source` 时的老判据，按 **`dtype` 轴声明的取值**算，不看比较器声明 | 同上，或已按上一行判过 |
 | 定向标签 | `coverage_policy.targeted` 的每个标签都要在某条 combo 的 `coverage_tags` 里出现 | 没声明 `targeted` |
 | 重复 combo | 全部 `dims` 键的取值组合逐条比对 | 无 |
@@ -107,7 +113,7 @@ aicore 的数据类型」），照任务书写就只能猜。
 浮点判据分两套，是因为 `dtype` 轴的性质变了。
 
 比例门禁写在 `dtype` 轴还是设计自由度的年代：能自己挑取值，才谈得上按比例挑。
-现在 `dtype` 轴照工程声明的数据类型表抄，浮点几种、整型几种是**工程的事实**。
+现在 `dtype` 轴照任务书张量 dtype 列或工程声明表抄，浮点几种、整型几种是**接口事实**。
 对事实提比例要求，唯一的满足办法就是把整型拆到另一份分面去——真机上两个算子
 的声明表都是 3 种浮点对 5 种整型，混排分面的占比是 37%~43%，结构上到不了 70%，
 两轮跑测各因此多拆出一份本不该存在的分面。
@@ -176,7 +182,7 @@ dtype 轴里出现浮点却声明逐元素相等，两套判据下都直接报�
 
 矩阵类暂不开放；不要用没有依据的组合凑数。
 
-`arithmetic` 为真的类别要过浮点判据：给了 `--dtype-source` 时判「工程声明的浮点
+`arithmetic` 为真的类别要过浮点判据：给了 `--dtype-source` 时判「来源声明的浮点
 一种都不能漏」，没给时才回落到「浮点占比至少 70%，容差 12 个百分点」。两套判据
 的完整说明见本文「轴取值与门禁判据」一节。
 

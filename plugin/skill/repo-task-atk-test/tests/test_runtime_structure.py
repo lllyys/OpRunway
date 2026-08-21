@@ -1,4 +1,8 @@
+import hashlib
+import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -107,6 +111,79 @@ class RuntimeStructureTest(unittest.TestCase):
 
         self.assertEqual([], notes)
         self.assertIn("heterogeneous_attr_dtypes", failures[0])
+
+
+class ValidateReportDigestTest(unittest.TestCase):
+    def test_report_binds_to_the_exact_case_file_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            design = root / "med.yaml"
+            design.write_text("generate: med_constraint\n", encoding="utf-8")
+            plugin = root / "med_constraint.py"
+            plugin.write_text("# --skip-static 不导入该文件\n", encoding="utf-8")
+            must_cover = root / "med_materialized.json"
+            must_cover.write_text(
+                json.dumps(
+                    {
+                        "dims": {"dtype": ["fp32"]},
+                        "axes": ["dtype"],
+                        "extract": {"dtype": {"from": "input_dtype", "index": 0}},
+                        "combos": [{"dtype": "fp32"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cases = root / "all_med.json"
+            cases.write_text(
+                json.dumps(
+                    {
+                        "cases": [
+                            {
+                                "id": "0",
+                                "inputs": [
+                                    {
+                                        "name": "input",
+                                        "type": "tensor",
+                                        "dtype": "fp32",
+                                        "shape": [2],
+                                        "range_values": [-1, 1],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report = root / "validate.json"
+
+            done = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "validate_cases.py"),
+                    "-y",
+                    str(design),
+                    "-p",
+                    str(plugin),
+                    "-m",
+                    str(must_cover),
+                    "-j",
+                    str(cases),
+                    "-o",
+                    str(report),
+                    "--skip-static",
+                    "--backend",
+                    "torch",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertEqual(0, done.returncode, done.stderr)
+            payload = json.loads(report.read_text(encoding="utf-8"))
+            expected = hashlib.sha256(cases.read_bytes()).hexdigest()
+            self.assertEqual(expected, payload["case_file_sha256"])
 
 
 if __name__ == "__main__":

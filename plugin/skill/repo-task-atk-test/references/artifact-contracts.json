@@ -1,8 +1,29 @@
 {
   "schema_version": 1,
   "stages": {
+    "S0": {
+      "name": "接收与环境",
+      "skill": "acceptance",
+      "core": "核对交接包没被动过、对得上这份任务书，并拿到真机环境指纹",
+      "lookup_topics": [
+        "backends"
+      ],
+      "gates": [
+        "交接包完整",
+        "任务书一致",
+        "ATK 版本一致",
+        "接口一致",
+        "环境指纹可用"
+      ],
+      "forbidden": [
+        "重新生成用例",
+        "改交接包里任何 S2 产物",
+        "拿不到卡号就自己选卡"
+      ]
+    },
     "S1": {
       "name": "任务书解读",
+      "skill": "case-gen",
       "core": "把任务书变成可核验的事实约束，并拿到本机环境指纹",
       "lookup_topics": [
         "backends",
@@ -20,6 +41,7 @@
     },
     "S2": {
       "name": "用例生成",
+      "skill": "case-gen",
       "core": "把 S1 的事实约束变成 ATK 能吃下去的一组文件，并冻结",
       "lookup_topics": [
         "group_types",
@@ -33,7 +55,8 @@
         "签名",
         "结构",
         "覆盖",
-        "适配器"
+        "适配器",
+        "封印"
       ],
       "forbidden": [
         "碰构建与安装",
@@ -43,6 +66,7 @@
     },
     "S3": {
       "name": "编译安装部署",
+      "skill": "acceptance",
       "core": "用公开构建面产出并安装待验收算子包，直到一条冒烟真的跑通",
       "lookup_topics": [
         "backends",
@@ -63,6 +87,7 @@
     },
     "S4": {
       "name": "精度性能测试",
+      "skill": "acceptance",
       "core": "跑全量并裁决，数字全部由脚本产出",
       "lookup_topics": [
         "comparator_semantics"
@@ -79,6 +104,7 @@
     },
     "S5": {
       "name": "输出测试结果",
+      "skill": "acceptance",
       "core": "把证据组织成可复现的验收结论",
       "lookup_topics": [],
       "gates": [
@@ -93,6 +119,70 @@
     }
   },
   "gate_inventory": {
+    "check_bundle.integrity": {
+      "stage": "S0",
+      "script": "check_bundle.py",
+      "purpose": "structural",
+      "spec": "references/handoff.md#接收门",
+      "checks": [
+        "bundle.json 存在且 schema_version 是量具认识的版本",
+        "逐文件重算 sha256，结果与 files 登记一致",
+        "files 登记文件没有缺失，excluded 与 ignored_dirs 没有被扩张",
+        "新增文件只在 frozen_*/、result/ 与根目录冻结产物类型下判红"
+      ],
+      "premise": {
+        "holds_when": null,
+        "when_broken": null
+      },
+      "why_it_exists": "交接包是生成侧与验收侧的唯一接口。冻结纪律必须靠验收侧重算摘要落实，不能相信清单自述或 agent 声称文件没动"
+    },
+    "check_bundle.task_doc": {
+      "stage": "S0",
+      "script": "check_bundle.py",
+      "purpose": "transcription",
+      "spec": "references/handoff.md#任务书一致性",
+      "checks": [
+        "交接包的 task_doc.sha256 等于本次给定任务书的 sha256"
+      ],
+      "premise": {
+        "holds_when": null,
+        "when_broken": null
+      },
+      "why_it_exists": "一份任务书生成的交接包可以验收多个 PR，但不能挪给另一份任务书。文件名相同不代表内容相同，必须按全文 sha256 绑定"
+    },
+    "check_bundle.atk_version": {
+      "stage": "S0",
+      "script": "check_bundle.py",
+      "purpose": "structural",
+      "spec": "references/handoff.md#ATK 版本一致性",
+      "checks": [
+        "验收机 env.json 的 ATK 版本等于 bundle.json 的 atk.version"
+      ],
+      "premise": {
+        "holds_when": null,
+        "when_broken": null
+      },
+      "why_it_exists": "用例的可表达性判定绑定生成侧的 ATK 版本。验收侧版本不同，能力矩阵与生成结果的成立前提就不再可靠"
+    },
+    "check_bundle.interface_conformance": {
+      "stage": "S0",
+      "script": "check_bundle.py",
+      "purpose": "transcription",
+      "spec": "references/handoff.md#接口一致性",
+      "checks": [
+        "PR 头文件的参数名集合等于任务书签名的参数名集合",
+        "两边参数的相对顺序一致",
+        "两边参数的 C 类型一致"
+      ],
+      "premise": {
+        "holds_when": "接口模式是 aclnn，工程里有 GetWorkspaceSize 头文件可读",
+        "bound_to": "interface_mode",
+        "when_broken": "not_applicable",
+        "evidence_key": "interface",
+        "note": "pytorch / kernel 模式及未给 --header、--aclnn-name 的 aclnn 模式没有 C 头文件可比。清单缺 interface.baseline_api 时也不适用，进 S3 前必须补跑；--baseline 只是提示，始终以清单为准，结论写进 bundle_intake.json 的 interface 项"
+      },
+      "why_it_exists": "签名本来从 PR 抄，抄什么过什么，PR 偏离任务书现在测不出来。任务书才是接口契约，PR 的公开声明必须在 S0 单独与它核对"
+    },
     "make_must_cover.operator_class": {
       "stage": "S2",
       "script": "make_must_cover.py",
@@ -130,16 +220,16 @@
       "purpose": "self_referential",
       "spec": "references/case-design.md#轴取值与门禁判据",
       "checks": [
-        "dtype 轴声明的每种类型都要在 --dtype-source 文件里按词边界找得到",
-        "反向再扫一遍：文件里有而没声明的报出来，漏写同样拦",
+        "dtype 轴声明的每种类型都要在任务书 §2.4 张量 dtype 列或工程 --dtype-source 里按词边界找得到",
+        "反向再扫对应来源：任务书张量 dtype 列或工程声明里有而没声明的报出来，漏写同样拦",
         "误报走 dtype_source_excludes，每条附 why；豁免文件里没出现的 dtype 会被拒"
       ],
       "premise": {
-        "holds_when": "待验收算子工程有一份文字形态的数据类型表（README 或头文件）",
+        "holds_when": "生成侧任务书 §2.4 写明张量 dtype，或验收侧工程有文字形态的数据类型表（README 或头文件）",
         "bound_to": "operator_class",
         "when_broken": "delegate",
         "delegated_to": "check_signature_contract.py",
-        "note": "取不到 --dtype-source 时回落到「浮点占比 ≥70%」的老判据，dtype 与签名的一致性由签名契约三判承担"
+        "note": "生成侧任务书缺具体 dtype 时先用 repo-task-doc-write 补齐；旧流程取不到 --dtype-source 时回落到「浮点占比 ≥70%」的老判据，dtype 与签名的一致性由签名契约三判承担"
       }
     },
     "expressibility.contracts": {
@@ -406,9 +496,37 @@
         "when_broken": null,
         "note": "真机摩擦 F4 不是前提问题：atk node 入口不自动加载 function_*.py（只有 atk aclnn / atk pytorch 别名入口会），155 条基线全挂而诊断指向 YAML 输入名。要修的是 reference 的事实错误与诊断指向"
       }
+    },
+    "seal_bundle.completeness": {
+      "stage": "S2",
+      "script": "seal_bundle.py",
+      "purpose": "structural",
+      "spec": "references/handoff.md#封印门",
+      "checks": [
+        "S1、S2 登记的产物全部在盘上，条件产物按 interface.json 与 signature_alignment.json 判定，核对时排除清单自身",
+        "每个 YAML 分面按用例集摘要恰好配到一份覆盖、冻结、校验与适配器报告，签名契约报告全局通过",
+        "清单覆盖五个排除文件与 __pycache__ 目录之外的全部普通文件"
+      ],
+      "premise": {
+        "holds_when": null,
+        "when_broken": null
+      },
+      "why_it_exists": "交接包把用例生成与 PR 验收解耦，生成侧必须一次交齐可直接消费的 S1、S2 产物。缺件后再补会破坏封印，验收侧也不得回头重新生成"
     }
   },
   "artifacts": {
+    "evidence/bundle_intake.json": {
+      "stage": "S0",
+      "owner": "script",
+      "spec": "references/handoff.md#接收结果",
+      "template": null,
+      "producer": "check_bundle.py",
+      "consumed_by": [
+        "S5 证据链"
+      ],
+      "risk": "任一项失败就是阻塞·未验收 @S0，不进 S3；接口不一致要单列为 PR 偏离任务书，不与交接包损坏混写",
+      "fields_not_applicable": "字段由 check_bundle.py 从盘上产物派生，不由 agent 填写"
+    },
     "evidence/constraints.md": {
       "stage": "S1",
       "owner": "agent",
@@ -484,14 +602,14 @@
         },
         "dims": {
           "owner": "agent",
-          "source": "钉死的轴取 _axis_binding.PINNED_AXIS_VALUES；dtype 轴取待验收算子工程声明的数据类型表（--dtype-source）；其余轴取任务书与签名",
+          "source": "钉死的轴取 _axis_binding.PINNED_AXIS_VALUES；生成侧 dtype 轴取任务书 §2.4 张量 dtype 列，验收侧或旧流程取工程声明表（均用 --dtype-source）；其余轴取任务书与签名",
           "consumer": "make_must_cover.py 的覆盖分母",
           "failure": "钉死的轴取子集或改名 → make_must_cover.py 退出码 2；dtype 轴的取值在 --dtype-source 里找不到 → 同样退出码 2"
         },
         "dtype_source_excludes": {
           "owner": "agent",
           "condition": "--dtype-source 里出现了不是输入 dtype 的类型名时才需要",
-          "source": "文件里那处误报的上下文（属性或输出的类型名），每条附 why",
+          "source": "来源里那处误报的上下文；工程声明中的属性或输出类型等每条附 why，任务书模式只读取张量行",
           "consumer": "make_must_cover.py 的 dtype 漏写检测",
           "failure": "缺 why 或豁免的 dtype 在那份文件里根本没出现 → make_must_cover.py 退出码 2"
         },
@@ -746,6 +864,19 @@
       ],
       "risk": "整张只有一个取值的输入测不出错；基线插件挂了也要在这里当场炸，不能推到 S3",
       "fields_not_applicable": "落盘的张量数据与摘要，字段由 freeze_inputs.py 自身担保"
+    },
+    "evidence/bundle.json": {
+      "stage": "S2",
+      "owner": "script",
+      "spec": "references/handoff.md#封印清单",
+      "template": null,
+      "producer": "seal_bundle.py",
+      "consumed_by": [
+        "check_bundle.py",
+        "rewire_adapter.py"
+      ],
+      "risk": "封印后再跑任何 S2 量具，验收侧 check_bundle.py 会按 sha256 判成篡改",
+      "fields_not_applicable": "字段由 seal_bundle.py 从盘上产物派生，不由 agent 填写"
     },
     "evidence/soc_binding.json": {
       "stage": "S3",

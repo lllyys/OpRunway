@@ -7,6 +7,7 @@
 本脚本把那十次变成一条命令，并且把判据钉死：
 patch YAML 接线字段 → 重跑 atk case → 逐条比对新旧用例 →
 除接线键外必须逐字段相同 → 重新绑定冻结输入 → 写留痕。
+若工作目录已有封印清单，核对通过后还会同步被改文件摘要与接线改写记录。
 
 不满足即退出码 2，视为需要回 S2 重做，没有第二条通道。
 
@@ -24,7 +25,9 @@ import re
 import shutil
 import subprocess
 import sys
-import time
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
 
 from _case_utils import file_sha256, iter_cases, load_json
 
@@ -34,6 +37,10 @@ WIRING_KEYS = frozenset({"api_type", "aclnn_api_type"})
 
 SAVED_CASE = re.compile(r"save case json file:\s*(\S+)")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+class BundleUpdateError(ValueError):
+    """封印清单无法可靠读取、更新或写回。"""
 
 
 def parse_set(items):
@@ -91,6 +98,132 @@ def patch_yaml(path, patch):
     return before
 
 
+def _bundle_relative(root, path, label):
+    """把路径约束到交接包根内并转成正斜杠相对路径。"""
+    root = Path(root).resolve()
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    candidate = candidate.resolve()
+    try:
+        return candidate.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise BundleUpdateError(f"{label} 越出交接包根：{candidate}") from exc
+
+
+def update_bundle(bundle_path, root, touched, record):
+    """重算改写文件摘要，追加接线记录，再原子写回封印清单。"""
+    bundle_path = Path(bundle_path)
+    root = Path(root).resolve()
+    try:
+        manifest = json.loads(bundle_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise BundleUpdateError(f"读不出封印清单 {bundle_path}：{exc}") from exc
+    if not isinstance(manifest, dict):
+        raise BundleUpdateError("封印清单必须是 JSON 对象")
+    files = manifest.get("files")
+    if not isinstance(files, dict):
+        raise BundleUpdateError("封印清单缺 files 对象")
+    rewires = manifest.get("rewires")
+    if rewires is None:
+        rewires = []
+        manifest["rewires"] = rewires
+    elif not isinstance(rewires, list):
+        raise BundleUpdateError("封印清单的 rewires 必须是列表")
+
+    paths = {}
+    for item in touched:
+        path = Path(item)
+        if path.is_symlink() or not path.is_file():
+            raise BundleUpdateError(f"改写文件不是普通文件：{path}")
+        relative = _bundle_relative(root, path, "改写文件")
+        paths[relative] = path
+
+    changes = []
+    for relative in sorted(paths):
+        try:
+            after = file_sha256(paths[relative])
+        except OSError as exc:
+            raise BundleUpdateError(
+                f"无法计算 {relative} 的 SHA256：{exc}"
+            ) from exc
+        before = files.get(relative)
+        if before == after:
+            continue
+        files[relative] = after
+        changes.append({"file": relative, "before": before, "after": after})
+
+    patched = record.get("patched")
+    if not isinstance(patched, dict) or not patched:
+        raise BundleUpdateError("接线留痕缺 patched 对象")
+    try:
+        yaml_path = record["yaml"]
+        record_path = record["record"]
+        backup_path = record["backup"]
+    except KeyError as exc:
+        raise BundleUpdateError(f"接线留痕缺字段 {exc.args[0]}") from exc
+    at = record.get("at") or datetime.now(timezone.utc).isoformat()
+    try:
+        parsed_at = datetime.fromisoformat(at)
+    except (TypeError, ValueError) as exc:
+        raise BundleUpdateError("接线留痕 at 不是 ISO 8601 时间") from exc
+    if parsed_at.utcoffset() is None:
+        raise BundleUpdateError("接线留痕 at 必须带时区")
+
+    entry = {
+        "at": at,
+        "yaml": _bundle_relative(root, yaml_path, "YAML"),
+        "fields": list(patched),
+        "record": _bundle_relative(root, record_path, "留痕"),
+        "backup": _bundle_relative(root, backup_path, "备份"),
+        "changes": changes,
+    }
+    rewires.append(entry)
+
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=bundle_path.parent,
+            prefix=".bundle-rewire.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(manifest, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, bundle_path)
+    except OSError as exc:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise BundleUpdateError(f"写不回封印清单 {bundle_path}：{exc}") from exc
+    return entry
+
+
+def collect_touched(root, yaml_path, frozen_path=None):
+    """列出接线改写会改变的全部已封印普通文件。"""
+    root = Path(root).resolve()
+    yaml_path = Path(yaml_path).expanduser().resolve()
+    touched = [yaml_path]
+    result_dir = root / "result" / yaml_path.stem
+    if result_dir.is_dir():
+        for path in sorted(result_dir.rglob("*")):
+            relative = path.relative_to(result_dir)
+            if "__pycache__" in relative.parts:
+                continue
+            if path.is_file() and not path.is_symlink():
+                touched.append(path)
+    if frozen_path:
+        touched.append(Path(frozen_path).expanduser().resolve())
+    return touched
+
+
 def regenerate(atk_cli, yaml_path, plugin, timeout):
     """重跑 atk case，返回新用例 JSON 的路径。"""
     command = [atk_cli, "case", "-f", os.path.abspath(yaml_path)]
@@ -121,6 +254,11 @@ def main():
     parser.add_argument("-p", "--plugin", help="生成器插件路径，与首次生成保持一致")
     parser.add_argument("--frozen",
                         help="evidence/frozen_inputs.json；给了就重新绑定到新用例集")
+    parser.add_argument(
+        "--bundle", default="evidence/bundle.json",
+        help=("封印清单路径，默认 evidence/bundle.json；存在时同步摘要与改写记录，"
+              "不存在时按未封印流程处理"),
+    )
     parser.add_argument("-o", "--output", required=True,
                         help="留痕落盘路径，如 evidence/rewire.json")
     parser.add_argument("--timeout", type=int, default=1800)
@@ -134,6 +272,14 @@ def main():
     if not os.path.exists(args.yaml) or not os.path.exists(args.case_json):
         print(f"找不到 {args.yaml} 或 {args.case_json}", file=sys.stderr)
         return 3
+
+    bundle_path = Path(args.bundle).expanduser()
+    if not bundle_path.is_absolute():
+        bundle_path = Path.cwd() / bundle_path
+    bundle_path = bundle_path.resolve()
+    bundle_exists = bundle_path.exists()
+    if not bundle_exists:
+        print(f"未找到封印清单，按未封印流程处理：{bundle_path}")
 
     old_cases = list(iter_cases(load_json(args.case_json)))
     old_sha = file_sha256(args.case_json)
@@ -151,10 +297,12 @@ def main():
     problems = diff_cases(old_cases, new_cases)
 
     record = {
-        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "at": datetime.now(timezone.utc).isoformat(),
         "yaml": os.path.abspath(args.yaml),
         "patched": {key: {"from": before.get(key), "to": value}
                     for key, value in patch.items()},
+        "record": os.path.abspath(args.output),
+        "backup": os.path.abspath(f"{args.yaml}.pre_rewire"),
         "old_case_json": os.path.abspath(args.case_json),
         "old_case_json_sha256": old_sha,
         "new_case_json": os.path.abspath(new_path),
@@ -178,6 +326,18 @@ def main():
 
     with open(args.output, "w", encoding="utf-8") as sink:
         json.dump(record, sink, ensure_ascii=False, indent=2)
+
+    if not problems and bundle_exists:
+        root = bundle_path.parent.parent.resolve()
+        try:
+            touched = collect_touched(root, args.yaml, args.frozen)
+            update_bundle(bundle_path, root, touched, record)
+        except BundleUpdateError as exc:
+            print(f"封印清单同步失败：{exc}", file=sys.stderr)
+            print(f"  → YAML 原文已备份在 {args.yaml}.pre_rewire", file=sys.stderr)
+            print("  → 文件已改写但清单未同步，交接包此刻不再满足封印一致性；"
+                  "先恢复或修复清单，不能继续验收。", file=sys.stderr)
+            return 3
 
     for key, change in record["patched"].items():
         print(f"{key}：{change['from']} → {change['to']}")

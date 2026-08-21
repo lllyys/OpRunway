@@ -6,5 +6,8 @@
   "mirror_prefix": "plugin/",
   "upstream_paths": ["skill/", "docs/", "CLAUDE.md", "README.md", ".claude/rules/"],
   "published_paths": [".claude-plugin/", "skill/"],
-  "mirror_commit": "803bbd0"
+  "mirror_commit": "803bbd0",
+  "notes": [
+    "子 skill 独立注册依赖 manifest 列出嵌套子目录，这是当前 Claude Code 的未文档化行为；父 SKILL.md 路由是保底通路"
+  ]
 }

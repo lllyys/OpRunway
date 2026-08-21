@@ -6,6 +6,7 @@ acceptance-policy 里 aclnn 的 backends 写着 ["pyaclnn", "aclnn"]，
 agent 没有任何依据知道该填哪个。
 """
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -129,6 +130,12 @@ class BaselineShapeTest(unittest.TestCase):
 
 
 class BackendDerivationTest(unittest.TestCase):
+    def test_pure_derive_does_not_require_or_record_a_task_doc_path(self):
+        payload = derive_interface.derive(
+            "aclnn", "aclnnRoll", "torch.roll", "任务书 §2",
+            derive_interface.load_policy(), "roll 算子开发任务书")
+        self.assertNotIn("task_doc", payload)
+
     def test_aclnn_interface_always_runs_on_pyaclnn(self):
         # AclnnBackend 要 aclnnTest C++ 扩展并逐算子绑定，社区算子验收用不了。
         self.assertEqual(derive_interface.BACKEND_BY_MODE["aclnn"], "pyaclnn")
@@ -196,6 +203,18 @@ class DeriveCliTest(unittest.TestCase):
         self.assertEqual(payload["baseline_backend"], "cpu")
         self.assertEqual(payload["interface_mode"], "aclnn")
         self.assertFalse(payload["random_operator"]["detected"])
+
+    def test_records_task_doc_name_and_sha256(self):
+        result, payload = self._run(
+            "--mode", "aclnn", "--candidate", "aclnnRoll",
+            "--baseline", "torch.roll", "--mode-source", "任务书 §2")
+        expected = hashlib.sha256(self.task_doc.read_bytes()).hexdigest()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["task_doc"]["sha256"], expected)
+        self.assertEqual(payload["task_doc"]["name"], self.task_doc.name)
+        self.assertNotIn("/", payload["task_doc"]["name"])
+        self.assertNotIn("\\", payload["task_doc"]["name"])
 
     def test_candidate_and_baseline_must_differ(self):
         # 任务书常同时写「对标 aclnnXxx」和「等价于 torch.xxx」，把 aclnnXxx

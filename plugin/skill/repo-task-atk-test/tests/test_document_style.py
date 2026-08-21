@@ -16,9 +16,21 @@ from pathlib import Path
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-SKILL_FILE = SKILL_ROOT / "SKILL.md"
+SKILL_FILES = [
+    SKILL_ROOT / "SKILL.md",
+    SKILL_ROOT / "case-gen" / "SKILL.md",
+    SKILL_ROOT / "acceptance" / "SKILL.md",
+]
 CLAUDE_FILE = SKILL_ROOT / "CLAUDE.md"
 REFERENCES = SKILL_ROOT / "references"
+
+
+def relative_path(path):
+    return path.relative_to(SKILL_ROOT).as_posix()
+
+
+def skill_text():
+    return "\n".join(path.read_text(encoding="utf-8") for path in SKILL_FILES)
 
 
 def prose_lines(path):
@@ -49,22 +61,23 @@ LIST_ITEM = re.compile(r"^(?:[-*+]\s|\d+[.)]\s)")
 # 存量基线按每文件违规计数记，不按行号——行号随每次编辑漂移，计数不会。
 # 改好一处把数字减一，减到 0 就删掉那一行。基线只减不增，这是棘轮。
 PROSE_BASELINE = {
-    "SKILL.md": 17,
-    "case-design.md": 14,
-    "plugin-authoring.md": 10,
-    "atk-parameter-capabilities.md": 8,
-    "build-deploy.md": 8,
-    "intake.md": 6,
-    "reporting.md": 6,
-    "execution.md": 5,
-    "experimental_standard.md": 5,
-    "performance.md": 5,
-    "yaml-schema.md": 5,
-    "atk-cli.md": 4,
-    "atk-pitfalls.md": 4,
-    "builtin-baseline.md": 3,
-    "decision-points.md": 1,
-    "gate-inventory.md": 1,
+    "case-gen/SKILL.md": 2,
+    "acceptance/SKILL.md": 1,
+    "references/case-design.md": 14,
+    "references/plugin-authoring.md": 10,
+    "references/atk-parameter-capabilities.md": 8,
+    "references/build-deploy.md": 8,
+    "references/intake.md": 6,
+    "references/reporting.md": 6,
+    "references/execution.md": 5,
+    "references/experimental_standard.md": 5,
+    "references/performance.md": 5,
+    "references/yaml-schema.md": 5,
+    "references/atk-cli.md": 4,
+    "references/atk-pitfalls.md": 4,
+    "references/builtin-baseline.md": 3,
+    "references/decision-points.md": 1,
+    "references/gate-inventory.md": 1,
 }
 
 
@@ -143,11 +156,15 @@ def prose_violations(path):
 
 class DocumentStyleTest(unittest.TestCase):
     def test_main_skill_stays_compact(self):
-        # 上限来自 CLAUDE.md §3.3 的分层预算：正文 500 行是硬顶，预算线留余量。
-        # 360 → 375：内置真值那条路给 S3 卡加了三条条件产物（库指纹、真值目录、
-        # 取证），卡是从骨架渲染的，不能手工压。加的是一条真实验收路径，不是注水。
-        lines = SKILL_FILE.read_text(encoding="utf-8").splitlines()
-        self.assertLessEqual(len(lines), 375)
+        limits = {
+            "SKILL.md": 80,
+            "case-gen/SKILL.md": 300,
+            "acceptance/SKILL.md": 300,
+        }
+        for path in SKILL_FILES:
+            with self.subTest(path=relative_path(path)):
+                lines = path.read_text(encoding="utf-8").splitlines()
+                self.assertLessEqual(len(lines), limits[relative_path(path)])
 
     def test_skill_source_contains_no_tracked_python_bytecode(self):
         # skill 部署到跑测机后就是一个普通目录，不在 git 工作区里。
@@ -172,7 +189,7 @@ class DocumentStyleTest(unittest.TestCase):
     def test_every_script_has_a_documentation_route(self):
         # 反向核对：脚本存在但没有任何文档入口，零上下文 agent 就产不出
         # SKILL.md 点名的那件产物。下划线开头的是内部模块，不需要入口。
-        paths = [SKILL_FILE, *REFERENCES.glob("*.md")]
+        paths = [*SKILL_FILES, *REFERENCES.glob("*.md")]
         text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
         orphans = sorted(
             path.name
@@ -191,7 +208,7 @@ class DocumentStyleTest(unittest.TestCase):
         disclosure_markers = ("未产出", "不存在", "尚未")
         scripts_dir = SKILL_ROOT / "scripts"
         missing = []
-        for path in (SKILL_FILE, *REFERENCES.glob("*.md")):
+        for path in (*SKILL_FILES, *REFERENCES.glob("*.md")):
             for number, line in prose_lines(path):
                 for match in script_ref.finditer(line):
                     name = match.group(1)
@@ -285,7 +302,7 @@ class DocumentStyleTest(unittest.TestCase):
     def test_prose_lines_stay_within_width(self):
         # 「每行至多一个句号」在 2026-08-18 删除：它把段落层级压没了，
         # 823 个正文自然段里 726 个只剩一句话。宽度上限保留，防单行溢出。
-        paths = [SKILL_FILE, CLAUDE_FILE, *REFERENCES.glob("*.md")]
+        paths = [*SKILL_FILES, CLAUDE_FILE, *REFERENCES.glob("*.md")]
         failures = []
         for path in paths:
             for number, line in prose_lines(path):
@@ -295,21 +312,23 @@ class DocumentStyleTest(unittest.TestCase):
 
     def test_prose_structure_debt_does_not_grow(self):
         # 棘轮：每文件违规数不得超过基线。新文件基线为 0，写进来就必须合规。
-        paths = [SKILL_FILE, CLAUDE_FILE, *sorted(REFERENCES.glob("*.md"))]
+        paths = [*SKILL_FILES, CLAUDE_FILE, *sorted(REFERENCES.glob("*.md"))]
         regressions = []
         for path in paths:
             found = prose_violations(path)
-            budget = PROSE_BASELINE.get(path.name, 0)
+            key = relative_path(path)
+            budget = PROSE_BASELINE.get(key, 0)
             if len(found) > budget:
                 sample = "; ".join(
                     f"规则{rule}@{line}({note})" for rule, line, note in found[:3])
                 regressions.append(
-                    f"{path.name}: {len(found)} 处 > 基线 {budget} —— {sample}")
+                    f"{key}: {len(found)} 处 > 基线 {budget} —— {sample}")
         self.assertEqual([], regressions)
 
     def test_prose_baseline_has_no_stale_entries(self):
         # 基线只减不增：某文件已经改干净了，基线行要删掉，否则棘轮松一格。
-        paths = {p.name: p for p in [SKILL_FILE, *REFERENCES.glob("*.md")]}
+        all_paths = [*SKILL_FILES, *REFERENCES.glob("*.md")]
+        paths = {relative_path(path): path for path in all_paths}
         stale = []
         for name, budget in PROSE_BASELINE.items():
             path = paths.get(name)
@@ -340,7 +359,7 @@ class DocumentStyleTest(unittest.TestCase):
         self.assertNotIn("preflight_cases.py", text)
 
     def test_interface_facets_keep_once_only_generation_rule(self):
-        skill = SKILL_FILE.read_text(encoding="utf-8")
+        skill = skill_text()
         design = (REFERENCES / "case-design.md").read_text(encoding="utf-8")
         self.assertIn("每个接口分面仍只运行一次 `atk case`", skill)
         self.assertIn("每个分面只运行一次 `atk case`", design)
@@ -367,14 +386,14 @@ class DocumentStyleTest(unittest.TestCase):
         self.assertIn("-o evidence/soc_binding.json", execution)
 
     def test_adapter_repair_is_bounded_and_evidence_backed(self):
-        skill = SKILL_FILE.read_text(encoding="utf-8")
+        skill = skill_text()
         plugin = (REFERENCES / "plugin-authoring.md").read_text(encoding="utf-8")
         self.assertIn("修正一次适配器", skill)
         self.assertIn("不得枚举常量、空指针或参数顺序", skill)
         self.assertIn("最多修正一次适配器", plugin)
 
     def test_adapter_guidance_separates_c_abi_from_atk_object_contract(self):
-        skill = SKILL_FILE.read_text(encoding="utf-8")
+        skill = skill_text()
         plugin = (REFERENCES / "plugin-authoring.md").read_text(encoding="utf-8")
         self.assertIn("运行时契约表", skill)
         self.assertIn("不能替代 ATK 运行时契约表", skill)
@@ -384,7 +403,7 @@ class DocumentStyleTest(unittest.TestCase):
         self.assertIn("typed pointer alias 或 factory", plugin)
 
     def test_adapter_guidance_requires_runtime_contract_and_semantic_smoke(self):
-        skill = SKILL_FILE.read_text(encoding="utf-8")
+        skill = skill_text()
         plugin = (REFERENCES / "plugin-authoring.md").read_text(encoding="utf-8")
         capability = (REFERENCES / "atk-parameter-capabilities.md").read_text(
             encoding="utf-8"
@@ -417,7 +436,7 @@ class DocumentStyleTest(unittest.TestCase):
         # 不能只存在于开发者文档里。
         glossary = (REFERENCES / "glossary.md").read_text(encoding="utf-8")
         text = "\n".join(path.read_text(encoding="utf-8")
-                         for path in [SKILL_FILE, *REFERENCES.glob("*.md")]
+                         for path in [*SKILL_FILES, *REFERENCES.glob("*.md")]
                          if path.name != "glossary.md")
         missing = [word for word in
                    ("分面", "物化", "组合表", "投影", "定位字段", "接线字段",
@@ -454,13 +473,17 @@ class DocumentStyleTest(unittest.TestCase):
         # 文档写了「indicesOut 传空是全局中位数」，agent 就把这两种形态都拆成
         # 分面，一轮验收 4 份 YAML、141 条用例、4 轮冻结与冒烟。任务书的精度
         # 性能目标一条也没多覆盖。范围必须由目标划定，形态默认不构造。
-        for path in (SKILL_FILE,
-                     REFERENCES / "intake.md",
+        paths = [*SKILL_FILES,
+                 REFERENCES / "intake.md",
                      REFERENCES / "case-design.md",
-                     REFERENCES / "glossary.md"):
+                 REFERENCES / "glossary.md"]
+        for path in paths:
             text = path.read_text(encoding="utf-8")
+            if path in SKILL_FILES:
+                continue
             self.assertIn("语义形态", text, path.name)
-        skill = SKILL_FILE.read_text(encoding="utf-8")
+        skill = skill_text()
+        self.assertIn("语义形态", skill)
         self.assertIn("验收范围由任务书的精度与性能目标划定", skill)
         self.assertIn("一份签名，一份用例集", skill)
         self.assertIn("必须用户明确说了要", skill)
