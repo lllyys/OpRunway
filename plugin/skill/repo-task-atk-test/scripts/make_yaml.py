@@ -293,7 +293,7 @@ def build_design(must_cover, baseline_names=None):
              "baseline_kind 是 cann_builtin，yaml 块必须写 api_type："
              "CPU 节点没有可调用的 torch 基线，只能由 function_<op>.py 供"
              "出参的形状与 dtype，注册名要和 api_type 一字不差"
-             "（references/builtin-baseline.md#没有-torch-基线s2-怎么写）")
+             "（references/builtin-baseline-design.md#没有-torch-基线s2-怎么写）")
 
     design = dict(header)
     # 生成器插件按 must_cover 逐条产出用例，这三个字段只是让 ATK 的

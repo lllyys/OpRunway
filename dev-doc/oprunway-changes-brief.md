@@ -2,6 +2,21 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-21 · 共用件拆分 S1–S5c：脚本归属、政策与 reference 按侧切开，签名来源统一到任务书
+
+- 六步本地落地（S1 `b572546`、S2 `6496dd8`、S3 `78fb2d3`、S4 `56e2559`、S5a `628ca61`、
+  S5b `3dfba82`、S5c 本次）：骨架登记每个脚本与每份 reference 的子 skill 归属并由
+  `test_script_ownership.py` 锁住两侧边界；`freeze_golden.py`、`_signature_parse.py` 抽出；
+  验收政策拆成 `interface-policy.json` 与 `verdict-policy.json`。
+- reference 按侧切开：`atk-cli.md` → `atk-case.md`（生成）+ `atk-cli.md`（验收）；
+  `execution.md` → `environment.md`（共用）+ `workdir-freeze.md`（生成）+ `execution.md`（验收）；
+  `builtin-baseline.md` → `builtin-baseline-design.md`（生成）+ `builtin-baseline.md`（验收）。
+- 每步都用段落级不变量核过：旧文件每个正文段在新文件集合里恰好出现一次。S5c 有三处按设计改写，
+  全是「生成侧签名来源改任务书 §2.3」的直接后果：种子问题改读任务书接口声明、内置真值的
+  `align_signatures.py` 命令改 `--task-doc`、glossary「验收范围」改按任务书签名走。
+- 本机全量 `22 failed / 1014 passed / 19 skipped / 1249 subtests passed`，22 条失败集合自拆分
+  以来逐字不变；`render_views.py --check` 与仓级文档门均绿。S4 起按要求只留本地，未推远程。
+
 ## 2026-08-21 · 同步上游 71ddf5f，并把使用者文档裁回仓级预算
 
 - 上游 47fcefc→71ddf5f 已应用在拆分提交之上；两处冲突保留了拆分后的三入口扫描范围，

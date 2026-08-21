@@ -276,8 +276,11 @@
     "environment.md": {
       "skill": "shared"
     },
+    "builtin-baseline-design.md": {
+      "skill": "case-gen"
+    },
     "builtin-baseline.md": {
-      "skill": "shared"
+      "skill": "acceptance"
     },
     "experimental_standard.md": {
       "skill": "shared"

@@ -15,7 +15,9 @@ sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 import validate_cases  # noqa: E402
 
 DOC = SKILL_ROOT / "references" / "builtin-baseline.md"
+DESIGN_DOC = SKILL_ROOT / "references" / "builtin-baseline-design.md"
 CASE_DESIGN = SKILL_ROOT / "references" / "case-design.md"
+GLOSSARY = SKILL_ROOT / "references" / "glossary.md"
 ATK_CLI = SKILL_ROOT / "references" / "atk-cli.md"
 SKILL_FILES = [
     SKILL_ROOT / "SKILL.md",
@@ -29,8 +31,56 @@ class BuiltinBaselineKnowledgeTest(unittest.TestCase):
         self.text = DOC.read_text(encoding="utf-8")
 
     def test_doc_exists_and_is_reachable_from_the_main_skill(self):
-        text = "\n".join(path.read_text(encoding="utf-8") for path in SKILL_FILES)
-        self.assertIn("builtin-baseline.md", text)
+        case_gen = SKILL_FILES[1].read_text(encoding="utf-8")
+        acceptance = SKILL_FILES[2].read_text(encoding="utf-8")
+        self.assertIn("builtin-baseline-design.md", case_gen)
+        self.assertNotIn("builtin-baseline.md", case_gen)
+        self.assertIn("builtin-baseline.md", acceptance)
+        self.assertNotIn("builtin-baseline-design.md", acceptance)
+
+    def test_generation_rules_live_in_the_design_reference(self):
+        design = DESIGN_DOC.read_text(encoding="utf-8")
+        for heading in ("没有 torch 基线，S2 怎么写", "种子必须钉死", "比较器"):
+            with self.subTest(heading=heading):
+                self.assertIn(f"## {heading}", design)
+                self.assertNotIn(f"## {heading}", self.text)
+
+    def test_design_reference_states_when_to_read_and_where_to_run(self):
+        design = DESIGN_DOC.read_text(encoding="utf-8")
+        self.assertIn("interface.json.baseline_kind", design)
+        self.assertIn("cann_builtin", design)
+        self.assertIn("builtin-baseline.md", design)
+
+    def test_seed_signature_source_is_the_task_document(self):
+        design = DESIGN_DOC.read_text(encoding="utf-8")
+        self.assertIn("只能读任务书 §2.3 的接口声明回答", design)
+        self.assertIn("声明里没有种子入参就当作否", design)
+        self.assertNotIn("只能读待验收算子工程目录里的头文件回答", design)
+
+    def test_signature_alignment_uses_the_task_document_mode(self):
+        design = DESIGN_DOC.read_text(encoding="utf-8")
+        self.assertIn("--task-doc", design)
+        self.assertNotIn("--header", design)
+        self.assertNotIn("--aclnn-name", design)
+        self.assertNotIn("--env", design)
+
+    def test_glossary_uses_the_same_signature_source(self):
+        glossary = GLOSSARY.read_text(encoding="utf-8")
+        self.assertIn("默认只按任务书 §2.3 声明的那一份接口签名走", glossary)
+        self.assertNotIn("默认只按工程声明的那一份接口签名走", glossary)
+
+    def test_moved_heading_references_follow_the_design_doc(self):
+        paths = [
+            SKILL_ROOT / "scripts" / "make_yaml.py",
+            SKILL_ROOT / "scripts" / "_coverage_strategy.py",
+            SKILL_ROOT / "scripts" / "verdict.py",
+            SKILL_ROOT / "references" / "experimental_standard.md",
+        ]
+        text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+        for heading in ("没有-torch-基线s2-怎么写", "比较器"):
+            with self.subTest(heading=heading):
+                self.assertNotIn(f"builtin-baseline.md#{heading}", text)
+                self.assertIn(f"builtin-baseline-design.md#{heading}", text)
 
     def test_atk_cli_no_longer_carries_the_two_broken_commands(self):
         # 旧写法：单个 pyaclnn 节点 + `-tk run --save_data`，前者任务建不起来，
@@ -187,7 +237,7 @@ class SeedPinningTest(unittest.TestCase):
         text = CASE_DESIGN.read_text(encoding="utf-8")
         self.assertIn("## 种子类参数", text)
         self.assertIn("default_seed", text)
-        self.assertIn("builtin-baseline.md", text)
+        self.assertIn("builtin-baseline-design.md", text)
 
 
 class SpineRegistrationTest(unittest.TestCase):
@@ -198,11 +248,12 @@ class SpineRegistrationTest(unittest.TestCase):
             (SKILL_ROOT / "references" / "artifact-contracts.json")
             .read_text(encoding="utf-8"))["artifacts"]
 
-    def test_three_builtin_artifacts_are_registered(self):
+    def test_four_builtin_artifacts_are_registered(self):
         for name, producer, stage in (
                 ("evidence/opp_library_<side>.json", "resolve_opp_library.py", "S3"),
                 ("evidence/golden_builtin/", "capture_reference.py", "S3"),
-                ("evidence/golden_provenance.json", "capture_reference.py", "S3")):
+                ("evidence/golden_provenance.json", "capture_reference.py", "S3"),
+                ("evidence/golden_source.json", "check_golden_source.py", "S4")):
             with self.subTest(artifact=name):
                 self.assertIn(name, self.data)
                 self.assertEqual(producer, self.data[name]["producer"])
@@ -210,13 +261,13 @@ class SpineRegistrationTest(unittest.TestCase):
 
     def test_they_are_conditional_on_the_baseline_kind(self):
         for name in ("evidence/opp_library_<side>.json", "evidence/golden_builtin/",
-                     "evidence/golden_provenance.json"):
+                     "evidence/golden_provenance.json", "evidence/golden_source.json"):
             with self.subTest(artifact=name):
                 self.assertIn("cann_builtin", self.data[name]["condition"])
 
     def test_they_point_at_the_new_reference(self):
         for name in ("evidence/opp_library_<side>.json", "evidence/golden_builtin/",
-                     "evidence/golden_provenance.json"):
+                     "evidence/golden_provenance.json", "evidence/golden_source.json"):
             with self.subTest(artifact=name):
                 self.assertTrue(
                     self.data[name]["spec"].startswith("references/builtin-baseline.md"))

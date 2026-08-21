@@ -112,7 +112,7 @@ def check_builtin_comparator(interface, results):
             "     容差比较器会把差异吞掉，而结论仍会写成「与内置逐位一致」——"
             "那是假的。\n"
             "     改 YAML 的 standard.acc 后重跑，见 "
-            "references/builtin-baseline.md#比较器。")
+            "references/builtin-baseline-design.md#比较器。")
 
 
 def check_builtin_evidence(interface, provenance, golden_source=None):

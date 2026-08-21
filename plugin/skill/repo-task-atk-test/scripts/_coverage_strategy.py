@@ -478,7 +478,7 @@ def comparator_failures(must_cover, profile):
             f"真值来自 CANN 内置实现时比较器只能是 equal，声明的却是 {declared}。\n"
             "    两侧都在 NPU 上跑同一个 aclnn 接口，比的是「改动有没有改变输出」，\n"
             "    不是「算得对不对」；任何一位不同都是要抓的东西。\n"
-            "    见 references/builtin-baseline.md#比较器。"]
+            "    见 references/builtin-baseline-design.md#比较器。"]
     hint = ("    搬运类的输出是输入元素的精确拷贝，不做算术，每种 dtype 都该逐元素\n"
             "    相等；整份用 equal，int8 不必单独拆一份分面。\n"
             "    注意 ATK 的 equal 走 torch.equal，只在**整张都是 NaN** 时特判；\n"

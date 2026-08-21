@@ -100,7 +100,7 @@ S1 入口读 [intake.md](../references/intake.md)、
 - [workdir-freeze.md](../references/workdir-freeze.md)
 
 `interface.json` 的 `baseline_kind` 是 `cann_builtin` 时，S2 额外读
-[builtin-baseline.md](../references/builtin-baseline.md)：真值来自先跑一轮 CANN 内置实现存盘再读回来，
+[builtin-baseline-design.md](../references/builtin-baseline-design.md)：真值来自先跑一轮 CANN 内置实现存盘再读回来，
 跑测形态与上表默认路径不同。
 
 S1 的两道门性质不同：任务书解读没有脚本，环境探测有脚本。
