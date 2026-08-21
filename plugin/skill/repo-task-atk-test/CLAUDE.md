@@ -139,6 +139,7 @@ skill/repo-task-atk-test/
 │   ├── gate_lookup.py    # 按量具名查检查点（替代通读清单）
 │   ├── _axis_binding.py  # 轴取值词表与dtype出处
 │   ├── seal_bundle.py    # 交接包封印门
+│   ├── freeze_golden.py  # S3真实拓扑golden冻结
 │   └── rewire_adapter.py # 接线改写唯一出口
 ├── references/           # 运行时知识
 │   ├── artifact-contracts.json       # 唯一骨架（量具读，验收时不打开）

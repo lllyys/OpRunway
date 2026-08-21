@@ -120,30 +120,23 @@ class FrozenDirOwnershipTest(unittest.TestCase):
         self.assertIn("每个接口分面必须用各自的目录", result.stdout)
 
 
-class BuiltinGoldenIsNotFrozenHereTest(unittest.TestCase):
-    """真值来自内置实现时不走 freeze_inputs --golden。
-
-    两条路的产物形状不同：常规 golden 是基线节点当场算的 output_info 摘要，
-    内置真值是先单独跑一轮存盘再搬过去的目录。混用会冻出一份没人消费的摘要，
-    然后拿它当真值来历写进报告。
-    """
-
-    def setUp(self):
-        sys.path.insert(0, str(SKILL_ROOT / "scripts"))
-
-    def test_builtin_baseline_is_refused_and_points_at_the_right_script(self):
-        import freeze_inputs
-        problem = freeze_inputs.golden_path_conflict("cann_builtin")
-        self.assertIn("capture_reference.py", problem)
-        self.assertIn("builtin-baseline.md", problem)
-
-    def test_torch_baseline_is_unaffected(self):
-        import freeze_inputs
-        self.assertIsNone(freeze_inputs.golden_path_conflict("torch"))
-
-    def test_absent_baseline_kind_behaves_like_torch(self):
-        import freeze_inputs
-        self.assertIsNone(freeze_inputs.golden_path_conflict(None))
+class GoldenCompatibilityEntryTest(unittest.TestCase):
+    def test_old_golden_entry_points_at_the_new_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            case_json = Path(tmp) / "cases.json"
+            case_json.write_text(
+                json.dumps([{"id": 0, "name": "torch.roll", "inputs": []}]),
+                encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(FREEZE), "--golden",
+                 "-j", str(case_json), "--atk-cli", "/unused/atk"],
+                capture_output=True, text=True, timeout=300,
+                cwd=tmp, env={**os.environ, "PYTHONPATH": str(
+                    SKILL_ROOT / "scripts")})
+        self.assertEqual(3, result.returncode)
+        self.assertEqual(
+            "golden 冻结已移至 scripts/freeze_golden.py，参数相同",
+            result.stderr.strip())
 
 
 if __name__ == "__main__":

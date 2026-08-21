@@ -170,8 +170,12 @@
       "role": "对齐基线与 ACLNN 签名"
     },
     "freeze_inputs.py": {
-      "skill": "shared",
+      "skill": "case-gen",
       "role": "生成并冻结输入数据"
+    },
+    "freeze_golden.py": {
+      "skill": "acceptance",
+      "role": "冻结首轮真实拓扑的 golden"
     },
     "_taskdoc.py": {
       "skill": "shared",

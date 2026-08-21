@@ -132,7 +132,7 @@
 `output_info.json` 不在时 ATK 会 glob `output_*.pt` 把出参的 dtype 和 shape 重建出来
 （`atk/tasks/opp_tasks.py:496-506`）。所以要搬的是内置那一轮的 **`pyaclnn_0`** 目录，
 不是 `cpu_0` 目录——CPU 侧的出参信息是上调过精度的，拿它复跑 fp16/bf16
-会在 GetWorkspaceSize 阶段被算子拒绝（同一个坑在 `freeze_inputs.py:250-256` 记过）。
+会在 GetWorkspaceSize 阶段被算子拒绝（同一个坑由 `freeze_golden.py` 的拓扑校验拦截）。
 
 ## 没有 torch 基线，S2 怎么写
 
@@ -396,7 +396,7 @@ experimental_standard.md 里「浮点的位级相等在 NPU 上不成立」那�
 | 第一步只挂一个 pyaclnn 节点 | 直接 `RuntimeError: not other task, please check node config`，任务建不起来 | `atk/tasks/task_creator/aclnn_task.py:54` |
 | 第一步用 `-tk run` 存输出 | 一个 `.pt` 都存不下来。`run` 走的分支拿到输出就丢，不落盘 | `atk/tasks/executors/opp_executor.py:574-576` |
 | 以为 `--save_data` 决定存不存 | 它只是收尾时的目录保留过滤器，决定存不存的是任务类型 | `atk/tasks/main.py:283` |
-| 搬 `cpu_0` 目录当真值 | 出参 dtype 被上调过，复跑时 fp16/bf16 用例在 GetWorkspaceSize 被算子拒绝 | `freeze_inputs.py:250-256` |
+| 搬 `cpu_0` 目录当真值 | 出参 dtype 被上调过，复跑时 fp16/bf16 用例在 GetWorkspaceSize 被算子拒绝 | `freeze_golden.py` |
 
 load 节点也可以声明成 `-b pyaclnn --name builtin`（真值目录相应改叫 `pyaclnn_builtin`），
 但建执行任务时只跳过 `bm_file` 节点、不跳过 `accuracy_load` 节点

@@ -1,24 +1,4 @@
-"""物化并冻结输入数据，以及首轮跑测的 golden。
-
-两个阶段用途不同，冻结拓扑也不同，不能互换：
-
-输入冻结（默认模式）在 Phase A 做，用 CPU 单节点即可。
-上调只发生在 `load_dataset` 之后的内存里，`input.bin` 不受影响。
-
-golden 冻结（`--golden`）必须挂在**真实执行拓扑**的那次跑测上。
-`opp_tasks.py:316-323` 在主节点是 aclnn 时会把 `is_save_output_info` 置 False，
-刻意不保存被上调过的 output_info。用 CPU 单节点冻结会绕过这个保护，
-把 fp16/bf16 上调后的 `torch.float32` 存进 output_info，
-复跑时 pyaclnn 据此分配输出张量，算子在 GetWorkspaceSize 阶段就会拒绝：
-`Tensor valuesOut expected dtype is DT_BFLOAT16 but found DT_FLOAT`。
-
-因此 `--golden` 会检查产物里确实存在待验收算子后端的输出目录，拓扑不对就拒绝冻结。
-
-冻结之后的复跑用 `--input_data` 加 `node -b cpu --task accuracy_load --output_path`，
-CPU 不再执行，只提供 golden 与 output_info。
-
-
-原始说明：Phase A 物化并冻结输入数据。
+"""在 Phase A 物化并冻结输入数据。
 
 `atk case` 产出的是规格不是数据：张量只有分布描述符，真实张量要到执行期
 由 `celery_create_dataset` 现算。这带来两个问题：
@@ -53,7 +33,7 @@ import sys
 import tempfile
 import time
 
-from _case_utils import iter_cases, load_json, tensor_inputs
+from _case_utils import find_input_root, iter_cases, load_json, tensor_inputs
 from _runtime_guard import runtime_imports
 import _stage_card
 
@@ -226,109 +206,6 @@ def sha256_bytes(path):
         return hashlib.sha256(handle.read()).hexdigest()
 
 
-def find_input_root(atk_output, since):
-    """定位本轮跑测产出的输入目录。
-
-    ATK 的布局是 <run>/input/<yaml名>/<case_id>/input.bin，
-    而 --input_data 期望的正是 <yaml名> 这一层。
-    """
-    candidates = []
-    for root, dirs, files in os.walk(atk_output):
-        if "input.bin" not in files:
-            continue
-        case_dir = os.path.dirname(root) if False else root
-        parent = os.path.dirname(case_dir)
-        if os.path.getmtime(case_dir) >= since:
-            candidates.append(parent)
-    if not candidates:
-        return None
-    # 同一轮的 case 目录共享同一个父目录，取出现次数最多的那个
-    return max(set(candidates), key=candidates.count)
-
-
-def golden_path_conflict(baseline_kind):
-    """真值来自 CANN 内置实现时，golden 不在这一步冻。
-
-    两条路的产物形状不同：常规验收的 golden 是基线节点当场算出来的，
-    冻的是 output_info 的摘要；内置真值是先单独跑一轮存盘再搬过去的目录。
-    混用会冻出一份没人消费的摘要，然后拿它当真值来历写进报告。
-    """
-    if baseline_kind != "cann_builtin":
-        return None
-    return ("baseline_kind 是 cann_builtin，真值不由这一步产生。\n"
-            "  → 走 capture_reference.py：内置那一轮跑完之后取证并搬运，\n"
-            "     命令见 references/builtin-baseline.md#两步跑测。")
-
-
-def freeze_golden(args, wanted, log):
-    """冻结首轮跑测的 golden，并校验冻结拓扑正确。"""
-    stage = os.path.abspath(args.frozen_dir)
-    runs = [os.path.join(stage, "atk_output", name)
-            for name in os.listdir(os.path.join(stage, "atk_output"))] \
-        if os.path.isdir(os.path.join(stage, "atk_output")) else []
-    runs = [path for path in runs if os.path.isdir(os.path.join(path, "output"))]
-    if not runs:
-        fail("没找到本轮的 output 产物。\n"
-             "  → 确认命令里保留了 --save_data output:bin，且跑测确实执行到了比对阶段。", 3)
-    output_root = os.path.join(max(runs, key=os.path.getmtime), "output")
-
-    backends = sorted(os.listdir(output_root))
-    baseline = [name for name in backends if name.startswith("cpu")]
-    candidate = [name for name in backends if not name.startswith("cpu")]
-    if not baseline:
-        fail(f"output 下没有 cpu 节点目录（现有 {backends}），没有可用的 golden。", 3)
-    if not candidate:
-        fail(
-            f"output 下只有 {backends}，说明这次冻结**不是**真实执行拓扑。\n"
-            "  → 主节点不是 aclnn 时，ATK 会把被上调过的 output_info 一并保存"
-            "（`opp_tasks.py:316-323` 的 is_save_output_info 保护不生效）。\n"
-            "     用这份 golden 复跑，fp16/bf16 用例会在 GetWorkspaceSize 阶段被算子拒绝。\n"
-            "     正确做法是把 --golden 挂在待验收算子后端与 cpu 同时在场的那次跑测上。", 2)
-
-    node = baseline[0]
-    case_root = os.path.join(output_root, node)
-    frozen, missing, upcast = {}, [], []
-    for case_id in wanted:
-        found = None
-        for save_name in os.listdir(case_root):
-            probe = os.path.join(case_root, save_name, case_id, "output_info.json")
-            if os.path.exists(probe):
-                found = probe
-                break
-        if not found:
-            missing.append(case_id)
-            continue
-        info = load_json(found)
-        first = info[0][0] if isinstance(info[0], list) else info[0]
-        frozen[case_id] = {"output_info_sha256": sha256_bytes(found),
-                           "dtype": first.get("dtype")}
-
-    report = {
-        "mode": "golden",
-        "case_json": args.case_json,
-        "case_json_sha256": sha256_bytes(args.case_json),
-        "golden_dir": output_root,
-        "baseline_node": node,
-        "candidate_nodes": candidate,
-        "total": len(wanted),
-        "frozen": len(frozen),
-        "missing_ids": missing,
-        "cases": frozen,
-    }
-    with open(args.output, "w", encoding="utf-8") as handle:
-        json.dump(report, handle, ensure_ascii=False, indent=2)
-
-    print(f"已冻结 golden {len(frozen)}/{len(wanted)} 条（标杆节点 {node}，"
-          f"待验收算子节点 {candidate}）→ {output_root}")
-    print(f"摘要写入 {args.output}")
-    print("复跑时加：node -b cpu --task accuracy_load --output_path " + output_root)
-
-    if missing:
-        print(f"\n✗ {len(missing)} 条用例没有 golden：{missing[:12]}", file=sys.stderr)
-        return 2
-    return 0
-
-
 OWNER_FILE = ".frozen_owner.json"
 
 
@@ -376,7 +253,7 @@ def claim_frozen_dir(frozen_dir, case_json):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="物化并冻结输入或 golden")
+    parser = argparse.ArgumentParser(description="物化并冻结输入数据")
     parser.add_argument("-j", "--case-json", required=True)
     parser.add_argument("--atk-cli", required=True, help="probe_env.py 探出的绝对路径")
     parser.add_argument("-d", "--frozen-dir", default="frozen_inputs",
@@ -388,21 +265,23 @@ def main():
                         help="执行插件路径。CPU 基线接口名与 torch 不一致时必须传，"
                              "否则物化会在基线调用处失败")
     parser.add_argument("--golden", action="store_true",
-                        help="冻结 golden。必须配合 --device 用真实执行拓扑跑一次")
-    parser.add_argument("--device", help="--golden 时待验收算子节点使用的 device")
-    parser.add_argument("--backend", default="pyaclnn", help="--golden 时的待验收算子后端")
-    parser.add_argument("--input-data", help="--golden 时消费的已冻结输入目录")
+                        help="兼容入口；golden 冻结已移至 scripts/freeze_golden.py")
+    parser.add_argument("--device", help=argparse.SUPPRESS)
+    parser.add_argument("--backend", default="pyaclnn", help=argparse.SUPPRESS)
+    parser.add_argument("--input-data", help=argparse.SUPPRESS)
     parser.add_argument("--budget-bytes", type=int, default=DEFAULT_BUDGET_BYTES,
                         help=f"单条用例总输入字节预算，默认 {DEFAULT_BUDGET_BYTES}（2GiB）")
     parser.add_argument("--interface", default="evidence/interface.json",
-                        help="derive_interface.py 的产物；读 baseline_kind，"
-                             "内置真值那条路不在这一步冻 golden")
+                        help=argparse.SUPPRESS)
     parser.add_argument("--must-cover",
                         help="物化后的组合表（*_materialized.json）；读 operator_class。"
                              "generation 类的输出不由输入算出，常量输入不构成「测不出错」")
     parser.add_argument("-o", "--output", default="frozen_inputs.json")
     parser.add_argument("--timeout", type=int, default=3600)
     args = parser.parse_args()
+
+    if args.golden:
+        fail("golden 冻结已移至 scripts/freeze_golden.py，参数相同", 3)
     _stage_card.announce(__file__)
 
     cases = list(iter_cases(load_json(args.case_json)))
@@ -411,32 +290,9 @@ def main():
     wanted = [str(case.get("id")) for case in cases]
 
     started = time.time() - 1
-    if args.golden:
-        baseline_kind = "torch"
-        if os.path.exists(args.interface):
-            with open(args.interface, encoding="utf-8") as handle:
-                baseline_kind = json.load(handle).get("baseline_kind", "torch")
-        conflict = golden_path_conflict(baseline_kind)
-        if conflict:
-            fail(conflict, 2)
-        if not args.device:
-            fail("--golden 需要 --device：golden 必须在真实执行拓扑下冻结。", 3)
-        if not args.input_data:
-            fail("--golden 需要 --input-data：golden 要与已冻结的输入配对。", 3)
-        stage_dir = os.path.abspath(args.frozen_dir)
-        shutil.rmtree(stage_dir, ignore_errors=True)
-        os.makedirs(stage_dir, exist_ok=True)
-        command = [args.atk_cli,
-                   "node", "-b", args.backend, "--devices", str(args.device),
-                   "-o", stage_dir,
-                   "node", "-b", "cpu", "-o", stage_dir,
-                   "task", "-c", args.case_json, "-tk", "accuracy",
-                   "--input_data", args.input_data,
-                   "--save_data", "output:bin"]
-    else:
-        command = [args.atk_cli, "node", "-b", "cpu",
-                   "task", "-c", args.case_json, "-tk", "accuracy",
-                   "--save_data", "input:bin"]
+    command = [args.atk_cli, "node", "-b", "cpu",
+               "task", "-c", args.case_json, "-tk", "accuracy",
+               "--save_data", "input:bin"]
     if args.plugin:
         command += ["-p", args.plugin]
     print(f"物化 {len(wanted)} 条用例，只用 CPU 后端，不判精度：")
@@ -466,9 +322,6 @@ def main():
             shutil.rmtree(shim_dir, ignore_errors=True)
 
     log = re.sub(r"\x1b\[[0-9;]*m", "", done.stdout + done.stderr)
-
-    if args.golden:
-        return freeze_golden(args, wanted, log)
 
     input_root = find_input_root(args.atk_output, started)
     if input_root is None:

@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 
 
@@ -26,6 +27,20 @@ def file_sha256(path):
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def find_input_root(atk_output, since):
+    """定位本轮跑测产出的、可直接传给 --input_data 的输入目录。"""
+    candidates = []
+    for root, _dirs, files in os.walk(atk_output):
+        if "input.bin" not in files:
+            continue
+        parent = os.path.dirname(root)
+        if os.path.getmtime(root) >= since:
+            candidates.append(parent)
+    if not candidates:
+        return None
+    return max(set(candidates), key=candidates.count)
 
 
 def iter_cases(case_data):
