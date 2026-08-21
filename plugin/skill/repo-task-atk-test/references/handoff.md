@@ -261,6 +261,11 @@ check_bundle.py [-C <交接包副本>] --task-doc <md> --env <env.json>
 
 ## 接口一致性
 
+- PR 头文件只能来自 `--env` 所指 `env.json` 的 `operator_project.path` 工程树，这是来源白名单。
+- 路径落在 `/usr/local/Ascend` 或 `env.json` 记录的 `ASCEND_TOOLKIT_HOME` 之下一律拒绝，
+  因为那里是官方已发布的同名接口，同名不代表同签名。
+- 工程树里找不到声明就停下来问用户，不要换目录找。
+
 接口模式为 aclnn 且工程里有 GetWorkspaceSize 头文件时，接收门必须核对全部业务参数，
 包括入参与出参：
 

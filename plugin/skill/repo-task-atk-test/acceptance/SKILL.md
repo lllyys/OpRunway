@@ -35,8 +35,8 @@ description: >-
 `probe_env.py --custom-opp` 锁定、`check_opapi_binding.py` 裁决，机制写在
 [build-deploy.md](../references/build-deploy.md#签名自检搜的是磁盘上的同名头文件)。
 
-`check_bundle.py` 会用 `--env` 里的工程根核对 PR 头文件的来源——白名单与装机目录拒绝的
-规则见 [plugin-authoring.md](../references/plugin-authoring.md)，与生成侧签名对齐用的是同一套判据。
+`check_bundle.py` 会用 `--env` 里的工程根核对 PR 头文件的来源，规则见
+[handoff.md](../references/handoff.md)。
 
 精度分母由 `verdict.py` 算，包含全部有效执行用例；证据不足时使用 `unknown`。
 
@@ -94,9 +94,9 @@ description: >-
 | S5 输出测试结果 | 摘要 / 政策摘要 / 证据链 | 报告 / 结论 / 复现包 | 见作战卡 | 同 S4 |
 
 S0 入口读 [handoff.md](../references/handoff.md) 与
-[execution.md](../references/execution.md)。S3 读 [build-deploy.md](../references/build-deploy.md)
-与 [execution.md](../references/execution.md)；S4、S5 读 [reporting.md](../references/reporting.md)
-与 [performance.md](../references/performance.md)。
+[execution.md](../references/execution.md)。S3 读 [build-deploy.md](../references/build-deploy.md)、
+[execution.md](../references/execution.md) 与 [atk-cli.md](../references/atk-cli.md)；S4、S5 读
+[reporting.md](../references/reporting.md) 与 [performance.md](../references/performance.md)。
 
 `interface.json` 的 `baseline_kind` 是 `cann_builtin` 时，S3 到 S4 额外读
 [builtin-baseline.md](../references/builtin-baseline.md)：真值来自先跑一轮 CANN 内置实现存盘再读回来，

@@ -94,7 +94,7 @@ S1 入口读 [intake.md](../references/intake.md) 与
 - [yaml-schema.md](../references/yaml-schema.md)
 - [atk-parameter-capabilities.md](../references/atk-parameter-capabilities.md)
 - [plugin-authoring.md](../references/plugin-authoring.md)
-- [atk-cli.md](../references/atk-cli.md)
+- [atk-case.md](../references/atk-case.md)
 - [handoff.md](../references/handoff.md)
 
 `interface.json` 的 `baseline_kind` 是 `cann_builtin` 时，S2 额外读

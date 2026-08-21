@@ -72,7 +72,8 @@ PROSE_BASELINE = {
     "references/yaml-schema.md": 33,
     "references/build-deploy.md": 23,
     "references/atk-parameter-capabilities.md": 20,
-    "references/atk-cli.md": 20,
+    "references/atk-case.md": 4,
+    "references/atk-cli.md": 16,
     "references/reporting.md": 15,
     "references/intake.md": 15,
     "references/execution.md": 14,
@@ -283,7 +284,7 @@ class DocumentStyleTest(unittest.TestCase):
 
     def test_case_output_path_is_documented(self):
         # 产物路径只在 ATK 日志里，猜 atk_output/ 必然落空。
-        text = (REFERENCES / "atk-cli.md").read_text(encoding="utf-8")
+        text = (REFERENCES / "atk-case.md").read_text(encoding="utf-8")
         self.assertIn("save case json file:", text)
         self.assertIn("result/<yaml 文件名>/json/", text)
 
@@ -392,6 +393,17 @@ class DocumentStyleTest(unittest.TestCase):
         self.assertIn("ATK CLI 退出码为 0 不代表冒烟通过", execution)
         self.assertIn("加载路径必须属于本轮安装的 vendor", execution)
         self.assertIn("执行成功数必须为 1", cli)
+
+    def test_acceptance_header_source_rules_are_self_contained(self):
+        handoff = (REFERENCES / "handoff.md").read_text(encoding="utf-8")
+        acceptance = (SKILL_ROOT / "acceptance" / "SKILL.md").read_text(
+            encoding="utf-8")
+        for fact in ("operator_project.path", "/usr/local/Ascend",
+                     "ASCEND_TOOLKIT_HOME", "同名不代表同签名", "不要换目录"):
+            with self.subTest(fact=fact):
+                self.assertIn(fact, handoff)
+        normalized = re.sub(r"\s+", " ", acceptance)
+        self.assertIn("规则见 [handoff.md](../references/handoff.md)", normalized)
 
     def test_pyaclnn_flow_keeps_abi_and_soc_gates(self):
         execution = (REFERENCES / "execution.md").read_text(encoding="utf-8")

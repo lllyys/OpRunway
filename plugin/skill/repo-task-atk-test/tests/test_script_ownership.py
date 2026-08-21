@@ -16,7 +16,9 @@ import _contracts  # noqa: E402
 
 
 SCRIPT_REF = re.compile(r"`(\w+\.py)`")
+REFERENCE_REF = re.compile(r"\.\./references/([\w.-]+\.(?:md|json))")
 CARD_GAUGE = re.compile(r"量具 (\w+\.py)")
+REFERENCE_SKILLS = frozenset({"case-gen", "acceptance", "shared"})
 
 
 def local_imports(path, module_files):
@@ -38,6 +40,12 @@ class ScriptOwnershipTest(unittest.TestCase):
         self.data = _contracts.load()
         self.ownership = self.data.get("scripts") or {}
         self.script_paths = {path.name: path for path in SCRIPTS.glob("*.py")}
+        references = SKILL_ROOT / "references"
+        self.reference_paths = {
+            path.name: path
+            for pattern in ("*.md", "*.json")
+            for path in references.glob(pattern)
+        }
 
     def test_inventory_covers_every_python_script(self):
         self.assertEqual(set(self.script_paths), set(self.ownership))
@@ -83,6 +91,28 @@ class ScriptOwnershipTest(unittest.TestCase):
                     if name in self.ownership:
                         self.assertIn(
                             self.ownership[name]["skill"], {skill, "shared"})
+
+    def test_skill_pages_only_name_references_on_their_side(self):
+        ownership = self.data.get("references") or {}
+        self.assertEqual(set(self.reference_paths), set(ownership))
+        for name, spec in ownership.items():
+            with self.subTest(reference=name):
+                self.assertIn(spec.get("skill"), REFERENCE_SKILLS)
+
+        pages = {
+            "case-gen": SKILL_ROOT / "case-gen" / "SKILL.md",
+            "acceptance": SKILL_ROOT / "acceptance" / "SKILL.md",
+        }
+        for skill, path in pages.items():
+            text = path.read_text(encoding="utf-8")
+            names = set(REFERENCE_REF.findall(text))
+            names.update(name for name in ownership if name in text)
+            for name in sorted(names):
+                with self.subTest(skill=skill, reference=name):
+                    self.assertIn(name, ownership, f"{path} 点名未登记 reference {name}")
+                    if name in ownership:
+                        self.assertIn(
+                            ownership[name]["skill"], {skill, "shared"})
 
     def test_router_only_names_shared_scripts(self):
         path = SKILL_ROOT / "SKILL.md"

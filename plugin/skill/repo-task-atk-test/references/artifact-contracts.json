@@ -206,6 +206,77 @@
       "role": "提供 dtype 名称映射词表"
     }
   },
+  "references": {
+    "atk-case.md": {
+      "skill": "case-gen"
+    },
+    "case-design.md": {
+      "skill": "case-gen"
+    },
+    "yaml-schema.md": {
+      "skill": "case-gen"
+    },
+    "atk-parameter-capabilities.md": {
+      "skill": "case-gen"
+    },
+    "atk-parameter-capabilities.json": {
+      "skill": "case-gen"
+    },
+    "plugin-authoring.md": {
+      "skill": "case-gen"
+    },
+    "atk-pitfalls.md": {
+      "skill": "case-gen"
+    },
+    "gate-inventory.md": {
+      "skill": "case-gen"
+    },
+    "decision-points.md": {
+      "skill": "case-gen"
+    },
+    "intake.md": {
+      "skill": "case-gen"
+    },
+    "random-operator-signals.json": {
+      "skill": "case-gen"
+    },
+    "atk-cli.md": {
+      "skill": "acceptance"
+    },
+    "build-deploy.md": {
+      "skill": "acceptance"
+    },
+    "reporting.md": {
+      "skill": "acceptance"
+    },
+    "performance.md": {
+      "skill": "acceptance"
+    },
+    "artifact-contracts.json": {
+      "skill": "shared"
+    },
+    "interface-policy.json": {
+      "skill": "shared"
+    },
+    "verdict-policy.json": {
+      "skill": "shared"
+    },
+    "handoff.md": {
+      "skill": "shared"
+    },
+    "glossary.md": {
+      "skill": "shared"
+    },
+    "execution.md": {
+      "skill": "shared"
+    },
+    "builtin-baseline.md": {
+      "skill": "shared"
+    },
+    "experimental_standard.md": {
+      "skill": "shared"
+    }
+  },
   "stages": {
     "S0": {
       "name": "接收与环境",
