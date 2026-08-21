@@ -1,6 +1,6 @@
 {
   "upstream": "https://gitcode.com/Justbin/repo-task-atk-test.git",
-  "baseline": "47fcefc8cf8d0121a9d5e9d3dd3d2d8b6c85873c",
+  "baseline": "71ddf5f22cb8976c0c36a76c43c4b88de5f0ddd3",
   "baseline_date": "2026-08-19",
   "atk_gitlink": "a0dfc9ad4d306a8a73e7dc62d81baebbd508e70e",
   "mirror_prefix": "plugin/",
@@ -8,6 +8,7 @@
   "published_paths": [".claude-plugin/", "skill/"],
   "mirror_commit": "803bbd0",
   "notes": [
-    "子 skill 独立注册依赖 manifest 列出嵌套子目录，这是当前 Claude Code 的未文档化行为；父 SKILL.md 路由是保底通路"
+    "子 skill 独立注册依赖 manifest 列出嵌套子目录，这是当前 Claude Code 的未文档化行为；父 SKILL.md 路由是保底通路",
+    "71ddf5f 的同步应用在拆分之上，本仓没有与该基线逐字一致的纯镜像提交；提 PR 用树移植而非 patch"
   ]
 }

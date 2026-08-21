@@ -60,23 +60,27 @@ LIST_ITEM = re.compile(r"^(?:[-*+]\s|\d+[.)]\s)")
 #
 # 存量基线按每文件违规计数记，不按行号——行号随每次编辑漂移，计数不会。
 # 改好一处把数字减一，减到 0 就删掉那一行。基线只减不增，这是棘轮。
+#
+# 2026-08-19 合计从 88 变 276：数字变大不是欠债变多，是计数单位从「一串」
+# 换成「一段」（见 _flush_streak）。原先一串不管多长都只记 1 处，于是每一处
+# 存量都是一个能免费加段的口子。
 PROSE_BASELINE = {
     "case-gen/SKILL.md": 2,
     "acceptance/SKILL.md": 1,
-    "references/case-design.md": 14,
-    "references/plugin-authoring.md": 10,
-    "references/atk-parameter-capabilities.md": 8,
-    "references/build-deploy.md": 8,
-    "references/intake.md": 6,
-    "references/reporting.md": 6,
-    "references/execution.md": 5,
-    "references/experimental_standard.md": 5,
-    "references/performance.md": 5,
-    "references/yaml-schema.md": 5,
-    "references/atk-cli.md": 4,
-    "references/atk-pitfalls.md": 4,
-    "references/builtin-baseline.md": 3,
-    "references/decision-points.md": 1,
+    "references/plugin-authoring.md": 49,
+    "references/case-design.md": 45,
+    "references/yaml-schema.md": 33,
+    "references/build-deploy.md": 23,
+    "references/atk-parameter-capabilities.md": 20,
+    "references/atk-cli.md": 20,
+    "references/reporting.md": 17,
+    "references/intake.md": 15,
+    "references/execution.md": 14,
+    "references/experimental_standard.md": 11,
+    "references/performance.md": 9,
+    "references/builtin-baseline.md": 9,
+    "references/atk-pitfalls.md": 5,
+    "references/decision-points.md": 2,
     "references/gate-inventory.md": 1,
 }
 
@@ -121,6 +125,20 @@ def is_structural(block):
     return all(LIST_ITEM.match(line) for line in block)
 
 
+def _flush_streak(streak, found):
+    """一串 N 个连续单句自然段记 N-2 处，从第三个起每段一处，各带自己的行号。
+
+    2026-08-19 从「整串记 1 处」改过来。原先的记法有个洞：往一串已有的里面
+    继续加单句段，串变长而处数不变，棘轮不红。实测 `case-design.md` 末尾
+    追加三个单句段，计数仍是 14 —— 102 处存量里每一处都是这样一个能免费
+    长大的口子。按段记之后每加一段就多一处，加不进去了。
+
+    减 2 是因为规则 3 判的是「连续三个以上」，前两个不算违规。
+    """
+    for position, start in enumerate(streak[2:], 3):
+        found.append((3, start, f"第 {position}/{len(streak)} 个连续单句自然段"))
+
+
 def prose_violations(path):
     """返回 (规则号, 行号, 说明)。规则号对应 .claude/rules/prose-style.md 的编号。"""
     found, streak = [], []
@@ -131,8 +149,7 @@ def prose_violations(path):
         if lone:
             streak.append(start)
         else:
-            if len(streak) >= 3:
-                found.append((3, streak[0], f"{len(streak)} 个连续单句自然段"))
+            _flush_streak(streak, found)
             streak = []
         if structural:
             continue
@@ -149,8 +166,7 @@ def prose_violations(path):
         count = sum(line.count("。") for line in block)
         if count > 5:
             found.append((7, start, f"自然段 {count} 句"))
-    if len(streak) >= 3:
-        found.append((3, streak[0], f"{len(streak)} 个连续单句自然段"))
+    _flush_streak(streak, found)
     return found
 
 

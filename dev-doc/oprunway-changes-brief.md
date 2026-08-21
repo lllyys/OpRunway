@@ -2,6 +2,15 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-21 · 同步上游 71ddf5f，并把使用者文档裁回仓级预算
+
+- 上游 47fcefc→71ddf5f 已应用在拆分提交之上；两处冲突保留了拆分后的三入口扫描范围，
+  同时接入按段计数的行文棘轮，实测基线从旧口径 88 处换算为新口径 276 处。
+- README、design、quickstart 分别裁到 70、60、50 行，仓级文档门打印 `repo docs gate: OK`；
+  `render_views.py --check` 报派生视图与骨架一致。
+- 本机全量仍是 `22 failed / 980 passed / 19 skipped / 1036 subtests passed`，失败集合无新增；
+  本次未改 scripts、骨架、三份 SKILL.md 或 references。
+
 ## 2026-08-21 · 验收 skill 拆分 Task 1–10 落地：嵌套子 skill、交接包封印/接收门、文档与 manifest
 
 - Task 1–10 已落地：骨架阶段归属、任务书解析、封印/接收门、清单同步、分侧作战卡、父路由、

@@ -4,14 +4,12 @@
 
 | skill | 子流程 | 做什么 | 需要 NPU | 详细 |
 | --- | --- | --- | --- | --- |
-| `repo-task-doc-write` | — | 开发前写任务书 | 否 | [设计][doc-design] / [上手][doc-quick] |
-| `repo-task-atk-test` | `repo-task-case-gen` | 生成并封印用例 | 否 | [设计][atk-design] / [上手][atk-quick] |
-| `repo-task-atk-test` | `repo-task-atk-accept` | 验收精度与性能 | 是 | [设计][atk-design] / [上手][atk-quick] |
+| `repo-task-doc-write` | — | 开发前写任务书 | 否 | [文档][doc-design] |
+| `repo-task-atk-test` | `repo-task-case-gen` | 生成并封印用例 | 否 | [文档][atk-design] |
+| `repo-task-atk-test` | `repo-task-atk-accept` | 验收精度与性能 | 是 | [文档][atk-design] |
 
 [doc-design]: docs/skills/repo-task-doc-write/design.md
-[doc-quick]: docs/skills/repo-task-doc-write/quickstart.md
 [atk-design]: docs/skills/repo-task-atk-test/design.md
-[atk-quick]: docs/skills/repo-task-atk-test/quickstart.md
 
 任务书是前者的产物、后者的唯一输入，两个 skill 因此同仓。
 
@@ -39,15 +37,11 @@ cp -r skill/<name> ~/.claude/skills/
 cp -r skill/<name> <你的项目>/.claude/skills/
 ```
 
-`cp -r skill/repo-task-atk-test` 会一次装齐两个子流程，父 `SKILL.md` 按现有输入路由。
-用 plugin 方式加载时，manifest 可以把父目录与两个子目录分别列进 `skills`。
-
-`repo-task-doc-write` 到此装完，它只依赖 python3 标准库。
+安装 `repo-task-atk-test` 会带上两个子流程，父入口按输入路由；plugin manifest 也可分别注册三个入口。
 
 ### repo-task-atk-test 还要装 ATK
 
-生成用例只需 Python、ATK 与 CPU 版 torch，不需要 NPU 或 CANN。测试验收还要求机器有 NPU，
-CANN 已装好且 `set_env.sh` 可以 source。
+生成侧只需 Python、ATK 和 CPU 版 torch；验收侧还需 NPU 与可 source 的 CANN `set_env.sh`。
 
 ```bash
 git submodule update --init
