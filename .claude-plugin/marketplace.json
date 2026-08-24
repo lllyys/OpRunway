@@ -11,7 +11,7 @@
     {
       "name": "oprunway",
       "source": "./plugin",
-      "description": "ATK 驱动的社区算子验收（上游 repo-task-atk-test 镜像）。入口 skill `/oprunway:repo-task-atk-test`：S1 任务书解读 → S2 用例生成 → S3 编译安装部署 → S4 精度性能测试 → S5 输出测试结果；四条红线与机械门脚本随包分发；ATK/CANN 属环境前置，插件不安装依赖。"
+      "description": "ATK 驱动的社区算子验收（上游 repo-task-atk-test 镜像）。只有任务书时走 `/oprunway:repo-task-case-gen`，已有封印交接包、工程目录和任务书时走 `/oprunway:repo-task-atk-accept`；两个平级 skill 串起 S1–S5，四条红线与机械门脚本随包分发；ATK/CANN 属环境前置，插件不安装依赖。"
     }
   ]
 }

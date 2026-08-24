@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "interface_modes": {
+    "pytorch": {
+      "backends": ["npu"],
+      "acceptance_enabled": true,
+      "required_yaml_field": "name"
+    },
+    "aclnn": {
+      "backends": ["pyaclnn"],
+      "acceptance_enabled": true,
+      "required_yaml_field": "aclnn_name"
+    },
+    "kernel": {
+      "backends": ["kernel"],
+      "acceptance_enabled": true,
+      "required_yaml_field": "kernel_name"
+    },
+    "triton": {
+      "backends": ["triton"],
+      "acceptance_enabled": false,
+      "required_yaml_field": "triton_name"
+    },
+    "atb": {
+      "backends": ["atb"],
+      "acceptance_enabled": false,
+      "required_yaml_field": null
+    }
+  }
+}

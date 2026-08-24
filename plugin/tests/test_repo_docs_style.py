@@ -17,9 +17,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # 判据实现复用验收 skill 的测试模块，与 repo-task-doc-write 的做法一致：
 # 抄一份会漂，而 tests/ 本来就不参与发布。按路径加载并起别名，避开同名
 # 文件在同一次 pytest 收集里撞 sys.modules 的坑（见 pytest.ini）。
-_ATK_TESTS = REPO_ROOT / "skill" / "repo-task-atk-test" / "tests"
+_ATK_TESTS = REPO_ROOT / "skill" / "repo-task-case-gen" / "tests"
 sys.path.insert(0, str(_ATK_TESTS))
-_ATK_STYLE_MODULE = _ATK_TESTS / "shared" / "test_document_style.py"
+_ATK_STYLE_MODULE = _ATK_TESTS / "test_document_style.py"
 _spec = importlib.util.spec_from_file_location(
     "_repo_docs_atk_style", _ATK_STYLE_MODULE)
 _atk_style = importlib.util.module_from_spec(_spec)

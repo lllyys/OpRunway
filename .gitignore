@@ -17,7 +17,6 @@
 
 # 生成物：验收跑测产物 / pycache
 /reports/
-/plugin/skill/repo-task-atk-test/dist/
 __pycache__/
 *.pyc
 .pytest_cache/

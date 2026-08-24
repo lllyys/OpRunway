@@ -1,0 +1,351 @@
+{
+  "contract_version": 1,
+  "schema_version": 1,
+  "manifest": {
+    "shapes": {
+      "schema_version": "integer",
+      "operator": "string",
+      "sealed_at": "string",
+      "task_doc": "object",
+      "generator": "object",
+      "atk": "object",
+      "interface": "object",
+      "facets": "array",
+      "files": "object",
+      "excluded": "array",
+      "ignored_dirs": "array"
+    },
+    "excluded": [
+      "evidence/timeline.jsonl",
+      "evidence/repro.sh",
+      "evidence/bundle.json",
+      "evidence/env.json",
+      "evidence/env.sh"
+    ],
+    "ignored_dirs": [
+      "__pycache__"
+    ],
+    "interface_fields": [
+      "interface_mode",
+      "candidate_symbol",
+      "baseline_api",
+      "baseline_kind",
+      "execution_backend",
+      "baseline_backend",
+      "mode_source"
+    ],
+    "task_doc_fields": [
+      "name",
+      "sha256"
+    ],
+    "env_fields": [
+      "fingerprint.atk",
+      "selected_python",
+      "phase_supported"
+    ],
+    "example": {
+      "schema_version": 1,
+      "operator": "<op>",
+      "sealed_at": "<ISO 8601>",
+      "task_doc": {
+        "name": "<文件名>",
+        "sha256": "<全文摘要>"
+      },
+      "generator": {
+        "skill": "repo-task-case-gen",
+        "phase_supported": "仅 Phase A"
+      },
+      "atk": {
+        "version": "<ATK 版本>",
+        "python": "<解释器>"
+      },
+      "interface": {
+        "interface_mode": "aclnn",
+        "candidate_symbol": "aclnnXxx",
+        "baseline_api": "torch.xxx",
+        "baseline_kind": "torch",
+        "execution_backend": "npu",
+        "baseline_backend": "cpu",
+        "mode_source": "任务书 §2.3"
+      },
+      "facets": [],
+      "files": {},
+      "excluded": [
+        "evidence/timeline.jsonl",
+        "evidence/repro.sh",
+        "evidence/bundle.json",
+        "evidence/env.json",
+        "evidence/env.sh"
+      ],
+      "ignored_dirs": [
+        "__pycache__"
+      ]
+    }
+  },
+  "tree": {
+    "root": "atk-case-<op>/",
+    "entries": [
+      {
+        "path": "evidence/",
+        "parent": null,
+        "required": true,
+        "conditional": null,
+        "producer": "agent",
+        "readers": [],
+        "in_files": false
+      },
+      {
+        "path": "evidence/constraints.md",
+        "parent": "evidence/",
+        "required": true,
+        "conditional": null,
+        "producer": "agent",
+        "readers": [],
+        "in_files": true
+      },
+      {
+        "path": "evidence/interface.json",
+        "parent": "evidence/",
+        "required": true,
+        "conditional": null,
+        "producer": "derive_interface.py",
+        "readers": [
+          "verdict.py",
+          "make_repro.py",
+          "freeze_golden.py"
+        ],
+        "in_files": true
+      },
+      {
+        "path": "evidence/env.json",
+        "parent": "evidence/",
+        "required": true,
+        "conditional": null,
+        "producer": "probe_env.py",
+        "readers": [],
+        "in_files": false
+      },
+      {
+        "path": "evidence/env.sh",
+        "parent": "evidence/",
+        "required": true,
+        "conditional": null,
+        "producer": "probe_env.py",
+        "readers": [],
+        "in_files": false
+      },
+      {
+        "path": "evidence/signature_alignment.json",
+        "parent": "evidence/",
+        "required": true,
+        "conditional": null,
+        "producer": "align_signatures.py",
+        "readers": [
+          "check_bundle.py"
+        ],
+        "in_files": true
+      },
+      {
+        "path": "evidence/signature_contract.json",
+        "parent": "evidence/",
+        "required": true,
+        "conditional": null,
+        "producer": "check_signature_contract.py",
+        "readers": [],
+        "in_files": true
+      },
+      {
+        "path": "evidence/<各量具报告>.json",
+        "parent": "evidence/",
+        "required": true,
+        "conditional": null,
+        "producer": [
+          "check_coverage.py",
+          "freeze_inputs.py",
+          "validate_cases.py",
+          "check_adapter_binding.py"
+        ],
+        "readers": [
+          "verdict.py"
+        ],
+        "in_files": true
+      },
+      {
+        "path": "evidence/timeline.jsonl",
+        "parent": "evidence/",
+        "required": true,
+        "conditional": null,
+        "producer": "mark_step.py",
+        "readers": [],
+        "in_files": false
+      },
+      {
+        "path": "evidence/bundle.json",
+        "parent": "evidence/",
+        "required": true,
+        "conditional": null,
+        "producer": "seal_bundle.py",
+        "readers": [
+          "check_bundle.py",
+          "rewire_adapter.py"
+        ],
+        "in_files": false
+      },
+      {
+        "path": "<op>_decl.json",
+        "parent": null,
+        "required": true,
+        "conditional": null,
+        "producer": "agent",
+        "readers": [],
+        "in_files": true
+      },
+      {
+        "path": "<op>_materialize.py",
+        "parent": null,
+        "required": true,
+        "conditional": null,
+        "producer": "agent",
+        "readers": [],
+        "in_files": true
+      },
+      {
+        "path": "must_cover.json",
+        "parent": null,
+        "required": true,
+        "conditional": null,
+        "producer": "make_must_cover.py",
+        "readers": [
+          "make_repro.py"
+        ],
+        "in_files": true
+      },
+      {
+        "path": "<op>_materialized.json",
+        "parent": null,
+        "required": true,
+        "conditional": null,
+        "producer": "<op>_materialize.py",
+        "readers": [],
+        "in_files": true
+      },
+      {
+        "path": "<op>.yaml",
+        "parent": null,
+        "required": true,
+        "conditional": null,
+        "producer": "make_yaml.py",
+        "readers": [
+          "make_repro.py",
+          "rewire_adapter.py"
+        ],
+        "in_files": true
+      },
+      {
+        "path": "<op>_constraint.py",
+        "parent": null,
+        "required": true,
+        "conditional": null,
+        "producer": "agent",
+        "readers": [
+          "make_repro.py"
+        ],
+        "in_files": true
+      },
+      {
+        "path": "function_<op>.py",
+        "parent": null,
+        "required": false,
+        "conditional": "signature_alignment.json 中任一适配器 required=true",
+        "producer": "agent",
+        "readers": [
+          "make_repro.py"
+        ],
+        "in_files": true
+      },
+      {
+        "path": "result/<yaml>/json/all_<yaml>.json",
+        "parent": null,
+        "required": true,
+        "conditional": null,
+        "producer": "agent",
+        "readers": [
+          "verdict.py",
+          "make_repro.py",
+          "freeze_golden.py",
+          "select_perf_cases.py",
+          "save_failed_cases.py"
+        ],
+        "in_files": true
+      },
+      {
+        "path": "frozen_<分面>/",
+        "parent": null,
+        "required": true,
+        "conditional": null,
+        "producer": "freeze_inputs.py",
+        "readers": [
+          "freeze_golden.py"
+        ],
+        "in_files": false
+      }
+    ]
+  },
+  "consumers": {
+    "evidence/interface.json": {
+      "interface_mode": [
+        "verdict.py",
+        "make_repro.py"
+      ],
+      "candidate_symbol": [
+        "verdict.py",
+        "make_repro.py"
+      ],
+      "baseline_api": [
+        "verdict.py",
+        "make_repro.py"
+      ],
+      "baseline_kind": [
+        "verdict.py",
+        "freeze_golden.py"
+      ],
+      "execution_backend": [
+        "verdict.py",
+        "make_repro.py"
+      ],
+      "baseline_backend": [
+        "verdict.py"
+      ],
+      "mode_source": [
+        "verdict.py",
+        "make_repro.py"
+      ]
+    },
+    "evidence/bundle.json": {
+      "files": [
+        "check_bundle.py",
+        "rewire_adapter.py"
+      ],
+      "rewires": [
+        "check_bundle.py",
+        "rewire_adapter.py"
+      ],
+      "task_doc.sha256": [
+        "check_bundle.py"
+      ],
+      "atk.version": [
+        "check_bundle.py"
+      ],
+      "interface.*": [
+        "check_bundle.py"
+      ]
+    },
+    "evidence/env.json": {
+      "handoff_input": false,
+      "description": "验收侧 S0 重新探测，不作交接输入，仅 fingerprint.atk 与封印比对",
+      "fingerprint.atk": [
+        "check_bundle.py"
+      ]
+    }
+  }
+}

@@ -10,13 +10,15 @@ from openpyxl import Workbook
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-SKILL_ROOT = PLUGIN_ROOT / "skill" / "repo-task-atk-test"
-SCRIPTS = SKILL_ROOT / "scripts"
+CASE_GEN_ROOT = PLUGIN_ROOT / "skill" / "repo-task-case-gen"
+ATK_ACCEPT_ROOT = PLUGIN_ROOT / "skill" / "repo-task-atk-accept"
+CASE_GEN_SCRIPTS = CASE_GEN_ROOT / "scripts"
+ATK_ACCEPT_SCRIPTS = ATK_ACCEPT_ROOT / "scripts"
 
 
 class CliChainTest(unittest.TestCase):
-    def run_script(self, name, *args):
-        command = [sys.executable, str(SCRIPTS / name), *map(str, args)]
+    def run_script(self, scripts, name, *args):
+        command = [sys.executable, str(scripts / name), *map(str, args)]
         return subprocess.run(command, check=True, capture_output=True, text=True)
 
     def test_minimal_accuracy_chain(self):
@@ -153,12 +155,14 @@ class CliChainTest(unittest.TestCase):
             (soc_kernel / "Add.json").write_text("{}", encoding="utf-8")
 
             self.run_script(
+                CASE_GEN_SCRIPTS,
                 "check_coverage.py",
                 "-m", must_cover,
                 "-j", cases,
                 "-o", coverage,
             )
             self.run_script(
+                ATK_ACCEPT_SCRIPTS,
                 "check_soc_binding.py",
                 "--env", env_fingerprint,
                 "--vendor-root", vendor_root,
@@ -166,6 +170,7 @@ class CliChainTest(unittest.TestCase):
             )
             task_doc.write_text("add 算子开发任务书：逐元素加法。", encoding="utf-8")
             self.run_script(
+                CASE_GEN_SCRIPTS,
                 "derive_interface.py",
                 "--mode", "aclnn",
                 "--candidate", "aclnnAdd",
@@ -188,6 +193,7 @@ class CliChainTest(unittest.TestCase):
             workbook.save(report)
 
             self.run_script(
+                ATK_ACCEPT_SCRIPTS,
                 "parse_atk_report.py",
                 "-i", report,
                 "-c", cases,
@@ -195,7 +201,7 @@ class CliChainTest(unittest.TestCase):
             )
             # 精度通过却没有性能产物时必须拒绝裁决：无对比基线也要采集绝对耗时。
             refused = subprocess.run(
-                [sys.executable, str(SCRIPTS / "verdict.py"),
+                [sys.executable, str(ATK_ACCEPT_SCRIPTS / "verdict.py"),
                  "--interface", str(interface), "-c", str(coverage),
                  "-r", str(results), "--op", "add",
                  "--env", str(env_fingerprint), "-o", str(verdict)],
@@ -211,6 +217,7 @@ class CliChainTest(unittest.TestCase):
             }), encoding="utf-8")
 
             self.run_script(
+                ATK_ACCEPT_SCRIPTS,
                 "verdict.py",
                 "--interface", interface,
                 "-c", coverage,

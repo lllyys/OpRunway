@@ -139,8 +139,8 @@ cd "$W/plugin" && find .claude-plugin skill -type f -not -path '*__pycache__*' |
 步骤 5 与步骤 7a 使用同一条摘要命令与同一组排除项，三处（本地、目标机、中性副本）可互相对照。
 
 再确认远端结构完整：`ls $ROOT/plugin/.claude-plugin/plugin.json
-$ROOT/plugin/skill/repo-task-atk-test/SKILL.md` 两个文件都在。plugin 的判据脚本随 skill 位于其 scripts/ 目录，
-没有可导入的入口，也不做导入自检。
+$ROOT/plugin/skill/repo-task-case-gen/SKILL.md $ROOT/plugin/skill/repo-task-atk-accept/SKILL.md` 三个文件都在。
+plugin 的判据脚本随各 skill 位于其 scripts/ 目录，没有可导入的入口，也不做导入自检。
 
 开发件（`CLAUDE.md`、`README.md`、`docs/`）不随部署分发——隔离会话物理接触不到它们，测到的才是 skill 自身的零上下文自足性。
 
