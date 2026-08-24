@@ -210,6 +210,7 @@ class ScriptOwnershipTest(unittest.TestCase):
         self.assertNotIn("workdir-freeze.md", acceptance)
 
     def test_handoff_references_are_routed_to_their_consuming_side(self):
+        require_nested_source(self, "跨侧交接 reference 路由")
         ownership = self.data.get("references") or {}
         expected = {
             "handoff.md": "shared",

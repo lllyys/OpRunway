@@ -1,5 +1,7 @@
 """测试唯一的路径解析入口，兼容嵌套源与按侧展开的产物。"""
 
+import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -14,6 +16,7 @@ ENTRY_PAGES = frozenset({
     "case-gen/SKILL.md",
     "acceptance/SKILL.md",
 })
+TEST_SIDE_ENV = "OPRUNWAY_TEST_SIDE"
 
 
 def skill_root(start=None):
@@ -53,6 +56,19 @@ def layout_side(root=None):
         if actual == name:
             return side
     raise ValueError(f"展开产物入口 name 未登记：{actual}")
+
+
+def requested_test_side():
+    """返回源/产物对照子进程要求模拟的发布侧。"""
+    side = os.environ.get(TEST_SIDE_ENV)
+    if side is not None and side not in SIDE_NAMES:
+        raise ValueError(f"{TEST_SIDE_ENV} 不是已知侧：{side}")
+    return side
+
+
+def active_side(root=None):
+    """返回产物自身侧，或源树对照测试显式指定的侧。"""
+    return layout_side(root) or requested_test_side()
 
 
 def _frontmatter_name(page):
@@ -99,6 +115,39 @@ def entry_pages(root=None):
     return [root / "SKILL.md"]
 
 
+def runtime_entry_pages(root=None):
+    """返回当前发布切片实际携带的入口页。"""
+    root = Path(root or SKILL_ROOT)
+    side = active_side(root)
+    if is_nested_source(root) and side is not None:
+        return [root / side / "SKILL.md"]
+    return entry_pages(root)
+
+
+def _runtime_inventory_files(directory, table, pattern):
+    paths = sorted(directory.glob(pattern))
+    side = active_side()
+    if side is None:
+        return paths
+    data = json.loads(
+        (REFERENCES / "artifact-contracts.json").read_text(encoding="utf-8"))
+    allowed = {
+        name for name, spec in (data.get(table) or {}).items()
+        if spec.get("skill") in {side, "shared"}
+    }
+    return [path for path in paths if path.name in allowed]
+
+
+def runtime_reference_files(pattern="*.md"):
+    """返回当前发布切片登记的 reference。"""
+    return _runtime_inventory_files(REFERENCES, "references", pattern)
+
+
+def runtime_script_files(pattern="*.py"):
+    """返回当前发布切片登记的脚本。"""
+    return _runtime_inventory_files(SCRIPTS, "scripts", pattern)
+
+
 def side_page_for(case, side):
     """展开产物缺少所测侧时跳过该条测试。"""
     try:
@@ -116,5 +165,5 @@ def add_tests_to_path():
 
 def require_nested_source(case, reason):
     """展开产物中跳过只验证嵌套源边界的测试。"""
-    if not is_nested_source():
+    if not is_nested_source() or requested_test_side() is not None:
         case.skipTest(f"仅嵌套源适用：{reason}")

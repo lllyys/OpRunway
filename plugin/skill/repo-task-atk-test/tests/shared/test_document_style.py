@@ -15,11 +15,12 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from _paths import (REFERENCES, SKILL_ROOT, entry_pages, layout_side,
-                    require_nested_source, side_page_for)
+from _paths import (REFERENCES, SKILL_ROOT, layout_side, require_nested_source,
+                    runtime_entry_pages, runtime_reference_files,
+                    runtime_script_files, side_page_for)
 
 
-SKILL_FILES = entry_pages()
+SKILL_FILES = runtime_entry_pages()
 CLAUDE_FILE = SKILL_ROOT / "CLAUDE.md"
 
 
@@ -37,14 +38,14 @@ def skill_text():
 
 def reference_text(case, name):
     path = REFERENCES / name
-    if not path.is_file():
+    if not path.is_file() or path not in runtime_reference_files("*"):
         case.skipTest(f"展开产物不含 {name}")
     return path.read_text(encoding="utf-8")
 
 
 def script_text(case, name):
     path = SKILL_ROOT / "scripts" / name
-    if not path.is_file():
+    if not path.is_file() or path not in runtime_script_files():
         case.skipTest(f"展开产物不含 {name}")
     return path.read_text(encoding="utf-8")
 
@@ -253,7 +254,7 @@ class DocumentStyleTest(unittest.TestCase):
         require_nested_source(self, "父入口与两侧 reference 的完整文档路由")
         # 反向核对：脚本存在但没有任何文档入口，零上下文 agent 就产不出
         # SKILL.md 点名的那件产物。下划线开头的是内部模块，不需要入口。
-        paths = [*SKILL_FILES, *REFERENCES.glob("*.md")]
+        paths = [*SKILL_FILES, *runtime_reference_files()]
         text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
         orphans = sorted(
             path.name
@@ -276,7 +277,7 @@ class DocumentStyleTest(unittest.TestCase):
         ownership = contracts.get("scripts") or {}
         side = layout_side()
         missing = []
-        for path in (*SKILL_FILES, *REFERENCES.glob("*.md")):
+        for path in (*SKILL_FILES, *runtime_reference_files()):
             for number, line in prose_lines(path):
                 for match in script_ref.finditer(line):
                     name = match.group(1)
@@ -364,7 +365,7 @@ class DocumentStyleTest(unittest.TestCase):
         self.assertIn("`max_length` 是单张量的**字节**预算", text)
 
     def test_long_references_have_toc(self):
-        for path in REFERENCES.glob("*.md"):
+        for path in runtime_reference_files():
             with self.subTest(path=path.name):
                 text = path.read_text(encoding="utf-8")
                 if len(text.splitlines()) > 100:
@@ -375,7 +376,7 @@ class DocumentStyleTest(unittest.TestCase):
         # 823 个正文自然段里 726 个只剩一句话。宽度上限保留，防单行溢出。
         paths = [*SKILL_FILES,
                  *([CLAUDE_FILE] if CLAUDE_FILE.is_file() else []),
-                 *REFERENCES.glob("*.md")]
+                 *runtime_reference_files()]
         failures = []
         for path in paths:
             for number, line in prose_lines(path):
@@ -387,7 +388,7 @@ class DocumentStyleTest(unittest.TestCase):
         # 棘轮：每文件违规数不得超过基线。新文件基线为 0，写进来就必须合规。
         paths = [*SKILL_FILES,
                  *([CLAUDE_FILE] if CLAUDE_FILE.is_file() else []),
-                 *sorted(REFERENCES.glob("*.md"))]
+                 *runtime_reference_files()]
         regressions = []
         for path in paths:
             found = prose_violations(path)
@@ -402,7 +403,7 @@ class DocumentStyleTest(unittest.TestCase):
 
     def test_prose_baseline_has_no_stale_entries(self):
         # 基线只减不增：某文件已经改干净了，基线行要删掉，否则棘轮松一格。
-        all_paths = [*SKILL_FILES, *REFERENCES.glob("*.md")]
+        all_paths = [*SKILL_FILES, *runtime_reference_files()]
         paths = {relative_path(path): path for path in all_paths}
         contracts = json.loads(
             reference_text(self, "artifact-contracts.json"))
@@ -418,7 +419,7 @@ class DocumentStyleTest(unittest.TestCase):
 
     def test_references_do_not_link_other_references(self):
         failures = []
-        for path in REFERENCES.glob("*.md"):
+        for path in runtime_reference_files():
             text = path.read_text(encoding="utf-8")
             if re.search(r"\]\([^):]+\.md(?:#[^)]+)?\)", text):
                 failures.append(path.name)
@@ -430,6 +431,9 @@ class DocumentStyleTest(unittest.TestCase):
             for path in SKILL_ROOT.rglob("*")
             if path.is_file()
             and path != Path(__file__)
+            and "dist" not in path.parts
+            and "__pycache__" not in path.parts
+            and ".pytest_cache" not in path.parts
             and path.suffix in {".md", ".py", ".json"}
         )
         self.assertNotIn("preflight_cases.py", text)
@@ -462,8 +466,9 @@ class DocumentStyleTest(unittest.TestCase):
             with self.subTest(fact=fact):
                 self.assertIn(fact, handoff)
         normalized = re.sub(r"\s+", " ", acceptance)
+        prefix = "" if layout_side() is not None else "../"
         self.assertIn(
-            "规则见 [handoff-intake.md](../references/handoff-intake.md)",
+            f"规则见 [handoff-intake.md]({prefix}references/handoff-intake.md)",
             normalized,
         )
 
@@ -522,7 +527,7 @@ class DocumentStyleTest(unittest.TestCase):
         # 不能只存在于开发者文档里。
         glossary = reference_text(self, "glossary.md")
         text = "\n".join(path.read_text(encoding="utf-8")
-                         for path in [*SKILL_FILES, *REFERENCES.glob("*.md")]
+                         for path in [*SKILL_FILES, *runtime_reference_files()]
                          if path.name != "glossary.md")
         missing = [word for word in
                    ("分面", "物化", "组合表", "投影", "定位字段", "接线字段",

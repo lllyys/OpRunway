@@ -13,18 +13,10 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
+from _paths import REFERENCES, SCRIPTS, SKILL_ROOT
 
-def find_skill_root():
-    """兼容当前平铺测试与 S9 合并后的 tests/shared/ 布局。"""
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "references" / "artifact-contracts.json").exists():
-            return parent
-    raise RuntimeError("找不到 repo-task-atk-test skill 根目录")
-
-
-SKILL_ROOT = find_skill_root()
-SCRIPT = SKILL_ROOT / "scripts" / "build_skills.py"
-CONTRACTS = SKILL_ROOT / "references" / "artifact-contracts.json"
+SCRIPT = SCRIPTS / "build_skills.py"
+CONTRACTS = REFERENCES / "artifact-contracts.json"
 PRODUCTS = {
     "case-gen": "repo-task-case-gen",
     "acceptance": "repo-task-atk-accept",
@@ -199,6 +191,13 @@ class BuildSkillsTest(unittest.TestCase):
                 self.assertTrue(private_scripts.isdisjoint(actual_scripts))
                 self.assertTrue(private_references.isdisjoint(actual_references))
 
+    def test_only_case_gen_product_carries_runtime_templates(self):
+        source_assets = tree_files(SKILL_ROOT / "assets")
+        self.assertTrue(source_assets)
+        case_assets = self.product("case-gen") / "assets"
+        self.assertEqual(source_assets, tree_files(case_assets))
+        self.assertFalse((self.product("acceptance") / "assets").exists())
+
     def test_manifest_describes_and_hashes_every_materialized_file(self):
         commit = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -241,33 +240,61 @@ class BuildSkillsTest(unittest.TestCase):
                     path.name for path in (SKILL_ROOT / "tests").iterdir()
                     if path.is_file()
                 }
-                expected.update(path.name for path in group.rglob("*") if path.is_file())
-                expected.update(path.name for path in shared.rglob("*") if path.is_file())
+                expected.update(
+                    path.name for path in group.rglob("*")
+                    if (path.is_file() and path.name != "__init__.py"
+                        and "__pycache__" not in path.parts
+                        and ".pytest_cache" not in path.parts))
+                expected.update(
+                    path.name for path in shared.rglob("*")
+                    if (path.is_file() and path.name != "__init__.py"
+                        and "__pycache__" not in path.parts
+                        and ".pytest_cache" not in path.parts))
                 actual = {path.name for path in (product / "tests").rglob("*")
-                          if path.is_file()}
+                          if (path.is_file()
+                              and "__pycache__" not in path.parts
+                              and ".pytest_cache" not in path.parts)}
                 self.assertEqual(expected, actual)
+
+    def test_only_root_initializer_is_materialized(self):
+        root_initializer = SKILL_ROOT / "tests" / "__init__.py"
+        self.assertTrue(root_initializer.is_file())
+        for side in PRODUCTS:
+            product_tests = self.product(side) / "tests"
+            initializers = list(product_tests.rglob("__init__.py"))
+            with self.subTest(side=side):
+                self.assertEqual([product_tests / "__init__.py"], initializers)
+                self.assertEqual(
+                    root_initializer.read_bytes(),
+                    initializers[0].read_bytes(),
+                )
 
     def test_materialized_tests_keep_the_same_failed_set(self):
         if not (SKILL_ROOT / "tests" / "shared").is_dir():
             self.skipTest("S9 测试分侧布局尚未合并，产物没有可运行的 tests/")
         for side in PRODUCTS:
+            source_env = os.environ.copy()
+            source_env["OPRUNWAY_TEST_SIDE"] = side
             source = subprocess.run(
                 [sys.executable, "-m", "pytest",
                  str(SKILL_ROOT / "tests" / TEST_GROUPS[side]),
                  str(SKILL_ROOT / "tests" / "shared"),
-                 "-q", "--import-mode=importlib"],
+                 "-q", "--import-mode=importlib",
+                 f"--ignore={Path(__file__).resolve()}"],
                 cwd=SKILL_ROOT,
                 capture_output=True,
                 text=True,
-                env=os.environ.copy(),
+                env=source_env,
             )
+            product_env = os.environ.copy()
+            product_env.pop("OPRUNWAY_TEST_SIDE", None)
             product = subprocess.run(
                 [sys.executable, "-m", "pytest", "tests/", "-q",
                  "--import-mode=importlib"],
                 cwd=self.product(side),
                 capture_output=True,
                 text=True,
-                env=os.environ.copy(),
+                env=product_env,
             )
             with self.subTest(side=side):
                 self.assertEqual(
@@ -298,6 +325,18 @@ class BuildSkillsTest(unittest.TestCase):
             result = run_builder(copied, Path(tmp) / "out", "--side", "case-gen")
         self.assertEqual(2, result.returncode, result.stdout + result.stderr)
         self.assertIn("case-design.md", result.stderr)
+
+    def test_non_initializer_name_collision_still_exits_two(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            copied = source_copy(Path(tmp) / "source")
+            name = "test_flattening_collision.py"
+            (copied / "tests" / "case_gen" / name).write_text(
+                "# case-gen\n", encoding="utf-8")
+            (copied / "tests" / "shared" / name).write_text(
+                "# shared\n", encoding="utf-8")
+            result = run_builder(copied, Path(tmp) / "out", "--side", "case-gen")
+        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+        self.assertIn(name, result.stderr)
 
     def test_unusable_skeleton_exits_three(self):
         with tempfile.TemporaryDirectory() as tmp:

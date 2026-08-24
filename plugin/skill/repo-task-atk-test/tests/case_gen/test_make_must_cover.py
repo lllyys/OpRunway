@@ -13,9 +13,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _paths import SKILL_ROOT
+from _paths import SKILL_ROOT, add_tests_to_path
 
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
+add_tests_to_path()
 
 from _coverage_strategy import (  # noqa: E402
     CoveragePolicyError, _matching_rules, audit_coverage)
@@ -173,8 +174,9 @@ class MakeMustCoverTest(unittest.TestCase):
                 if out.is_file() else None
         return done, result
 
-    @staticmethod
-    def _golden_task_doc_entry():
+    def _golden_task_doc_entry(self):
+        if not GOLDEN_TASK_DOC.is_file():
+            self.skipTest("doc-write 黄金任务书不在当前发布切片")
         digest = hashlib.sha256(GOLDEN_TASK_DOC.read_bytes()).hexdigest()
         return {"name": GOLDEN_TASK_DOC.name, "sha256": digest}
 
@@ -215,9 +217,10 @@ class MakeMustCoverTest(unittest.TestCase):
         self.assertIn("derive_interface", done.stderr)
 
     def test_stale_task_doc_inside_project_is_not_treated_as_a_readme(self):
+        task_doc_entry = self._golden_task_doc_entry()
         stale = GOLDEN_TASK_DOC.read_text(encoding="utf-8") + "\n<!-- stale -->\n"
         done, _ = self._run_with_task_doc(
-            ["fp16", "bf16", "bool"], self._golden_task_doc_entry(),
+            ["fp16", "bf16", "bool"], task_doc_entry,
             inside_project=True, source_text=stale)
         self.assertEqual(done.returncode, 2)
         self.assertIn("同一份", done.stderr)

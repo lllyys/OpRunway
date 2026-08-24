@@ -29,7 +29,7 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
-from _paths import (SKILL_ROOT, entry_pages, is_nested_source,
+from _paths import (SKILL_ROOT, entry_pages, is_nested_source, layout_side,
                     nested_side_page, side_page)
 
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
@@ -62,6 +62,10 @@ class GateInventoryStructureTest(unittest.TestCase):
 
     def test_every_gate_script_exists(self):
         for gate_id, spec in self.gates.items():
+            side = layout_side()
+            owner = self.data["scripts"][spec["script"]]["skill"]
+            if side is not None and owner not in {side, "shared"}:
+                continue
             with self.subTest(gate=gate_id):
                 self.assertTrue((SKILL_ROOT / "scripts" / spec["script"]).exists(),
                                 f"{gate_id} 指向不存在的量具 {spec['script']}")

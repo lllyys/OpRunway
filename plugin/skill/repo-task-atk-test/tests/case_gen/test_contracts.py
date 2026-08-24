@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _paths import SKILL_ROOT, entry_pages, is_nested_source
+from _paths import SKILL_ROOT, entry_pages, is_nested_source, layout_side
 
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 
@@ -134,13 +134,22 @@ class SpecAnchorTest(unittest.TestCase):
     def setUp(self):
         self.data = _contracts.load()
 
+    def artifact_is_local(self, spec):
+        side = layout_side()
+        return (side is None
+                or self.data["stages"][spec["stage"]]["skill"] == side)
+
     def test_every_artifact_spec_anchor_resolves(self):
         for name, spec in self.data["artifacts"].items():
+            if not self.artifact_is_local(spec):
+                continue
             with self.subTest(artifact=name):
                 _contracts.resolve_anchor(spec["spec"])
 
     def test_declared_template_exists(self):
         for name, spec in self.data["artifacts"].items():
+            if not self.artifact_is_local(spec):
+                continue
             template = spec.get("template")
             if not template:
                 continue
@@ -150,6 +159,8 @@ class SpecAnchorTest(unittest.TestCase):
 
     def test_declared_producer_exists(self):
         for name, spec in self.data["artifacts"].items():
+            if not self.artifact_is_local(spec):
+                continue
             producer = spec.get("producer")
             if not producer:
                 continue
@@ -169,6 +180,10 @@ class SpecAnchorTest(unittest.TestCase):
         # 只锁 producer，两条都看不到 consumed_by——于是 S3 卡上「出口门禁：…/manifest」
         # 指着一个不存在的脚本挂了一轮。这条把量具引用的两个位置一起锁住。
         for artifact, field, script in _contracts.script_refs(self.data):
+            side = layout_side()
+            owner = self.data["scripts"][script]["skill"]
+            if side is not None and owner not in {side, "shared"}:
+                continue
             with self.subTest(artifact=artifact, field=field, script=script):
                 self.assertTrue((SKILL_ROOT / "scripts" / script).exists(),
                                 f"{artifact}.{field} 指向不存在的量具 {script}")

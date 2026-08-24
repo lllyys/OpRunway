@@ -1,7 +1,7 @@
 """把嵌套源展开成两个可单独安装的 skill 目录。
 
-脚本与 reference 清单只从 artifact-contracts.json 读取。测试已按 S9
-分侧时一并物化；当前平铺布局没有 tests/shared/，清单明确记为 absent。
+脚本与 reference 清单只从 artifact-contracts.json 读取。测试按 S9
+分侧布局一并物化；子目录的包初始化文件不参与平铺。
 
 退出码：0 展开完成；2 源文件缺失、测试冲突或 import 闭包不全；
 3 骨架缺失、损坏或结构不可用。
@@ -121,6 +121,20 @@ def copy_inventory(paths, destination):
         shutil.copy2(source, destination / source.name)
 
 
+def copy_assets(side, destination):
+    """生成侧携带运行时模板；验收侧不需要这些生成输入。"""
+    if side != "case-gen":
+        return
+    source = SOURCE_ROOT / "assets"
+    if not source.is_dir():
+        raise BuildFailure(2, "源文件缺失：\n  - assets/")
+    shutil.copytree(
+        source,
+        destination,
+        ignore=shutil.ignore_patterns(*IGNORED_PARTS),
+    )
+
+
 def local_imports(path, module_files):
     """返回脚本 import 的同目录本仓模块。"""
     try:
@@ -163,7 +177,8 @@ def test_sources(side):
     group = tests / TEST_GROUPS[side]
     roots = [path for path in tests.iterdir() if path.is_file()]
     nested = [path for base in (group, shared) for path in base.rglob("*")
-              if path.is_file() and not IGNORED_PARTS.intersection(path.parts)]
+              if (path.is_file() and path.name != "__init__.py"
+                  and not IGNORED_PARTS.intersection(path.parts))]
     return [*roots, *nested]
 
 
@@ -234,6 +249,7 @@ def build_side(data, out, side):
     copy_skill_page(page, target / "SKILL.md")
     copy_inventory(scripts, target / "scripts")
     copy_inventory(references, target / "references")
+    copy_assets(side, target / "assets")
     check_import_closure(target / "scripts")
     tests_status = copy_tests(side, target / "tests")
     count = write_manifest(target, side, tests_status)

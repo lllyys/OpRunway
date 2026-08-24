@@ -18,7 +18,8 @@
 import unittest
 from pathlib import Path
 
-from _paths import REFERENCES, SCRIPTS, SKILL_ROOT, entry_pages
+from _paths import (REFERENCES, SKILL_ROOT, runtime_entry_pages,
+                    runtime_reference_files, runtime_script_files)
 
 
 # 禁用词 → 该怎么写。替换项要能指向一个具体的东西或动作。
@@ -37,10 +38,10 @@ ALLOWED_CONTEXTS = {
 }
 
 SCANNED = [
-    *entry_pages(),
-    *sorted(REFERENCES.glob("*.md")),
+    *runtime_entry_pages(),
+    *runtime_reference_files(),
 ]
-SCANNED += sorted(SCRIPTS.glob("*.py"))
+SCANNED += runtime_script_files()
 
 
 # 术语表末尾那节就是这张禁用清单本身，它必须写出这些词才说得清要改什么。

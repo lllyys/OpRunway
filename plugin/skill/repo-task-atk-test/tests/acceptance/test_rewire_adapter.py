@@ -255,6 +255,9 @@ class BundleCliTest(unittest.TestCase):
                         "candidate_symbol": "x",
                         "baseline_api": "torch.x",
                         "baseline_kind": "torch",
+                        "execution_backend": "npu",
+                        "baseline_backend": "cpu",
+                        "mode_source": "测试夹具",
                     },
                     "facets": [],
                     "files": {

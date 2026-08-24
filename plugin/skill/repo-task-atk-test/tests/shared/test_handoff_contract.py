@@ -11,7 +11,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _paths import REFERENCES, SCRIPTS, add_tests_to_path
+from _paths import REFERENCES, SCRIPTS, add_tests_to_path, is_nested_source
+
+if not is_nested_source():
+    raise unittest.SkipTest("交接契约往返测试需要生成侧与验收侧量具同时存在")
 
 HANDOFF_PATH = REFERENCES / "handoff.md"
 HANDOFF_SEAL_PATH = REFERENCES / "handoff-seal.md"

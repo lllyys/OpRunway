@@ -16,7 +16,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from _paths import REFERENCES, SKILL_ROOT, entry_pages
+from _paths import REFERENCES, SKILL_ROOT, entry_pages, require_nested_source
 
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 
@@ -191,6 +191,7 @@ class FlashRunKnowledgeGapsTest(unittest.TestCase):
 
     def test_name_collision_with_builtin_is_declared_normal(self):
         # 缺它：agent 会去 nm -D 装机的 libopapi.so 求证一件不改变任何决定的事。
+        require_nested_source(self, "生成侧与验收侧入口的跨侧事实")
         text = self._text("SKILL.md")
         self.assertIn("重名是常态", text)
         self.assertIn("nm -D", text)

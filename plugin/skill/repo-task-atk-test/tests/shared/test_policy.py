@@ -4,7 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _paths import SCRIPTS
+from _paths import SCRIPTS, is_nested_source
+
+if not is_nested_source():
+    raise unittest.SkipTest("合并 policy 的测试需要两侧配置与消费者同时存在")
 
 
 sys.path.insert(0, str(SCRIPTS))
