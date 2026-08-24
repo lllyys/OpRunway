@@ -11,6 +11,15 @@
 
 ## P1 · 迁移收尾
 
+- [ ] c_api 真机端到端：用 isolated-acceptance 无头通路跑 aclblasTrsmBatched 完整
+  S1–S5。完成条件：accuracy/performance 证据齐全、verdict 产出，并把现场摩擦回填
+  reference。
+- [ ] 把验收 skill 拆成两个独立 skill：用例生成 S1–S2 与测试验收 S3–S5，零共享文件。
+  拆分时两侧各自复制 `_soc_binding`、`_stage_card`、`artifact-contracts.json` 骨架
+  （跨五阶段，需一分为二）、`mark_step`、`probe_progress`、`timeline.jsonl`、
+  `probe_env`、`env.sh`、`glossary.md`、`experimental_standard.md`。现行防漂移纪律要求
+  共享模块禁止局部副本，拆分后改为各自持有并允许各自演化。完成条件：两个 skill
+  各自独立通过回归与一轮真机验收。
 - [ ] `.claude/skills/isolated-acceptance/`：`watch.py` 的阶段表仍按旧 skill 七步编排，需按上游 S1–S5
   重排，并真机试跑一轮镜像 skill。
 - [ ] 演练一次上游同步（fetch → `git diff --binary | git apply --3way --directory=plugin` → 更新
