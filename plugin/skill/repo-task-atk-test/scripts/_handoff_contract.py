@@ -289,7 +289,7 @@ def render_tree(contract=None):
 
 
 def render_manifest_example(contract=None):
-    """渲染 handoff.md 中保持紧凑布局的封印清单样例。"""
+    """渲染 handoff-seal.md 中保持紧凑布局的封印清单样例。"""
     contract = contract or load()
     example = contract["manifest"]["example"]
     lines = ["{"]

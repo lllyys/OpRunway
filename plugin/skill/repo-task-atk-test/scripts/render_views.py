@@ -19,13 +19,14 @@ REFERENCES = Path(__file__).resolve().parents[1] / "references"
 DECISION_POINTS = REFERENCES / "decision-points.md"
 GATE_INVENTORY = REFERENCES / "gate-inventory.md"
 HANDOFF = REFERENCES / "handoff.md"
+HANDOFF_SEAL = REFERENCES / "handoff-seal.md"
 
 # 每份视图：签入路径 + 从骨架渲染它的函数。
 VIEWS = ((DECISION_POINTS, render_decision_points),
          (GATE_INVENTORY, render_gate_inventory))
 FENCED_VIEWS = (
     (HANDOFF, "交接包目录", _handoff_contract.render_tree),
-    (HANDOFF, "封印清单", _handoff_contract.render_manifest_example),
+    (HANDOFF_SEAL, "封印清单", _handoff_contract.render_manifest_example),
 )
 
 

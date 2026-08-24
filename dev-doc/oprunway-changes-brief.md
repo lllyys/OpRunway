@@ -2,6 +2,16 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-23 · S8 交接 reference 按共用、封印、接收拆页
+
+- `handoff.md` 只留目录树、字段来源与排除名单；生成侧封印规范移到 `handoff-seal.md`，验收侧
+  接收规范移到 `handoff-intake.md`，两侧入口与骨架锚点按实际读者接通。
+- `render_views.py` 仍把交接包目录渲染到共用页，封印清单改渲染到生成侧页；两份新 reference
+  分别登记为 `case-gen` 与 `acceptance`，跨侧边界测试锁住。
+- 逐句不变量为旧版 76 / 新版 76 个正文块、偏差 0；三页行文欠账均为 0，不写
+  `PROSE_BASELINE`。本机全量 `22 failed / 1031 passed / 19 skipped / 1282 subtests passed`，
+  failed 集合逐字不变。
+
 ## 2026-08-23 · S6 交接契约：两侧唯一共享门从散文变成机读契约
 
 - 新建 `references/handoff-contract.json` 与加载器 `scripts/_handoff_contract.py`：清单 schema、11 个

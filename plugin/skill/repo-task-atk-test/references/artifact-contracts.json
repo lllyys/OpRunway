@@ -274,6 +274,12 @@
     "handoff.md": {
       "skill": "shared"
     },
+    "handoff-seal.md": {
+      "skill": "case-gen"
+    },
+    "handoff-intake.md": {
+      "skill": "acceptance"
+    },
     "handoff-contract.json": {
       "skill": "shared"
     },
@@ -416,7 +422,7 @@
       "stage": "S0",
       "script": "check_bundle.py",
       "purpose": "structural",
-      "spec": "references/handoff.md#接收门",
+      "spec": "references/handoff-intake.md#接收门",
       "checks": [
         "bundle.json 存在且 schema_version 是量具认识的版本",
         "逐文件重算 sha256，结果与 files 登记一致",
@@ -433,7 +439,7 @@
       "stage": "S0",
       "script": "check_bundle.py",
       "purpose": "transcription",
-      "spec": "references/handoff.md#任务书一致性",
+      "spec": "references/handoff-intake.md#任务书一致性",
       "checks": [
         "交接包的 task_doc.sha256 等于本次给定任务书的 sha256"
       ],
@@ -447,7 +453,7 @@
       "stage": "S0",
       "script": "check_bundle.py",
       "purpose": "structural",
-      "spec": "references/handoff.md#ATK 版本一致性",
+      "spec": "references/handoff-intake.md#ATK 版本一致性",
       "checks": [
         "验收机 env.json 的 ATK 版本等于 bundle.json 的 atk.version"
       ],
@@ -461,7 +467,7 @@
       "stage": "S0",
       "script": "check_bundle.py",
       "purpose": "transcription",
-      "spec": "references/handoff.md#接口一致性",
+      "spec": "references/handoff-intake.md#接口一致性",
       "checks": [
         "PR 头文件的全部业务参数（含出参）名称集合等于任务书签名的参数名集合",
         "两边全部业务参数（含出参）的相对顺序一致",
@@ -794,7 +800,7 @@
       "stage": "S2",
       "script": "seal_bundle.py",
       "purpose": "structural",
-      "spec": "references/handoff.md#封印门",
+      "spec": "references/handoff-seal.md#封印门",
       "checks": [
         "S1、S2 登记的产物全部在盘上，条件产物按 interface.json 与 signature_alignment.json 判定，核对时排除清单自身",
         "每个 YAML 分面按用例集摘要恰好配到一份覆盖、冻结、校验与适配器报告，签名契约报告全局通过",
@@ -811,7 +817,7 @@
     "evidence/bundle_intake.json": {
       "stage": "S0",
       "owner": "script",
-      "spec": "references/handoff.md#接收结果",
+      "spec": "references/handoff-intake.md#接收结果",
       "template": null,
       "producer": "check_bundle.py",
       "consumed_by": [
@@ -1161,7 +1167,7 @@
     "evidence/bundle.json": {
       "stage": "S2",
       "owner": "script",
-      "spec": "references/handoff.md#封印清单",
+      "spec": "references/handoff-seal.md#封印清单",
       "template": null,
       "producer": "seal_bundle.py",
       "consumed_by": [

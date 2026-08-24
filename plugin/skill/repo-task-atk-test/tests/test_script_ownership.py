@@ -106,7 +106,14 @@ class ScriptOwnershipTest(unittest.TestCase):
         for skill, path in pages.items():
             text = path.read_text(encoding="utf-8")
             names = set(REFERENCE_REF.findall(text))
-            names.update(name for name in ownership if name in text)
+            names.update(
+                name
+                for name in ownership
+                if re.search(
+                    rf"(?<![\w.-]){re.escape(name)}(?![\w.-])",
+                    text,
+                )
+            )
             for name in sorted(names):
                 with self.subTest(skill=skill, reference=name):
                     self.assertIn(name, ownership, f"{path} 点名未登记 reference {name}")
@@ -135,6 +142,28 @@ class ScriptOwnershipTest(unittest.TestCase):
         for name in ("environment.md", "execution.md"):
             self.assertIn(name, acceptance)
         self.assertNotIn("workdir-freeze.md", acceptance)
+
+    def test_handoff_references_are_routed_to_their_consuming_side(self):
+        ownership = self.data.get("references") or {}
+        expected = {
+            "handoff.md": "shared",
+            "handoff-seal.md": "case-gen",
+            "handoff-intake.md": "acceptance",
+        }
+        for name, skill in expected.items():
+            with self.subTest(reference=name):
+                self.assertEqual(skill, ownership.get(name, {}).get("skill"))
+
+        case_gen = (SKILL_ROOT / "case-gen" / "SKILL.md").read_text(
+            encoding="utf-8")
+        acceptance = (SKILL_ROOT / "acceptance" / "SKILL.md").read_text(
+            encoding="utf-8")
+        for name in ("handoff.md", "handoff-seal.md"):
+            self.assertIn(name, case_gen)
+        self.assertNotIn("handoff-intake.md", case_gen)
+        for name in ("handoff.md", "handoff-intake.md"):
+            self.assertIn(name, acceptance)
+        self.assertNotIn("handoff-seal.md", acceptance)
 
     def test_builtin_references_are_routed_to_their_consuming_side(self):
         ownership = self.data.get("references") or {}

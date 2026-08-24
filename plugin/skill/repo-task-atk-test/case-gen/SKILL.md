@@ -85,7 +85,7 @@ ATK 的实际行为时再读 ATK 源码，不要靠猜。读过就在证据里�
 | 阶段 | 出口门禁 | 冻结产物 | 量具 | 入口 reference |
 | --- | --- | --- | --- | --- |
 | S1 任务书解读 | 待确认项清零 / 环境指纹可用 / 接口事实已派生 | 约束表 / `env.json` / `interface.json` | `probe_env.py` | `intake.md` / `experimental_standard.md` / `environment.md` |
-| S2 用例生成 | 签名 / 结构 / 覆盖 / 适配器 / 封印 | 必测集 / YAML / 插件 / 用例 JSON / 冻结输入 / `bundle.json` | `seal_bundle.py` | `case-design.md` / `handoff.md` / `workdir-freeze.md` |
+| S2 用例生成 | 签名 / 结构 / 覆盖 / 适配器 / 封印 | 必测集 / YAML / 插件 / 用例 JSON / 冻结输入 / `bundle.json` | `seal_bundle.py` | `case-design.md` / `handoff.md` / `handoff-seal.md` / `workdir-freeze.md` |
 
 S1 入口读 [intake.md](../references/intake.md)、
 [experimental_standard.md](../references/experimental_standard.md) 与
@@ -97,6 +97,7 @@ S1 入口读 [intake.md](../references/intake.md)、
 - [plugin-authoring.md](../references/plugin-authoring.md)
 - [atk-case.md](../references/atk-case.md)
 - [handoff.md](../references/handoff.md)
+- [handoff-seal.md](../references/handoff-seal.md)
 - [workdir-freeze.md](../references/workdir-freeze.md)
 
 `interface.json` 的 `baseline_kind` 是 `cann_builtin` 时，S2 额外读

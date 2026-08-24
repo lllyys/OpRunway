@@ -18,6 +18,7 @@ REFERENCES = SKILL_ROOT / "references"
 TESTS = Path(__file__).resolve().parent
 CONTRACT_PATH = REFERENCES / "handoff-contract.json"
 HANDOFF_PATH = REFERENCES / "handoff.md"
+HANDOFF_SEAL_PATH = REFERENCES / "handoff-seal.md"
 SEAL_SCRIPT = SCRIPTS / "seal_bundle.py"
 CHECK_SCRIPT = SCRIPTS / "check_bundle.py"
 CHECK_KEYS = {"integrity", "task_doc", "atk_version", "interface"}
@@ -232,7 +233,8 @@ class DerivedContractTest(unittest.TestCase):
 
     def test_manifest_example_is_the_checked_in_fenced_view(self):
         rendered = _handoff_contract.render_manifest_example()
-        checked_in = section_fence(HANDOFF_PATH.read_text(encoding="utf-8"), "封印清单")
+        checked_in = section_fence(
+            HANDOFF_SEAL_PATH.read_text(encoding="utf-8"), "封印清单")
         self.assertEqual(rendered, checked_in)
         example = json.loads(rendered)
         self.assertEqual(
@@ -255,7 +257,7 @@ class DerivedContractTest(unittest.TestCase):
         )
 
     def test_exit_gate_report_names_match_seal_labels(self):
-        text = HANDOFF_PATH.read_text(encoding="utf-8")
+        text = HANDOFF_SEAL_PATH.read_text(encoding="utf-8")
         section = text.split("## 出口门字段表\n", 1)[1].split("\n## ", 1)[0]
         first_cells = []
         for line in section.splitlines():

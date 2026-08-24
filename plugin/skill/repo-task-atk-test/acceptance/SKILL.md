@@ -36,7 +36,7 @@ description: >-
 [build-deploy.md](../references/build-deploy.md#签名自检搜的是磁盘上的同名头文件)。
 
 `check_bundle.py` 会用 `--env` 里的工程根核对 PR 头文件的来源，规则见
-[handoff.md](../references/handoff.md)。
+[handoff-intake.md](../references/handoff-intake.md)。
 
 精度分母由 `verdict.py` 算，包含全部有效执行用例；证据不足时使用 `unknown`。
 
@@ -88,12 +88,13 @@ description: >-
 
 | 阶段 | 出口门禁 | 冻结产物 | 量具 | 入口 reference |
 | --- | --- | --- | --- | --- |
-| S0 接收与环境 | 交接包完整 / 任务书一致 / ATK 版本一致 / 接口一致 / 环境指纹可用 | `bundle_intake.json` / `env.json` | `check_bundle.py` / `probe_env.py` | `handoff.md` / `environment.md` / `execution.md` |
+| S0 接收与环境 | 交接包完整 / 任务书一致 / ATK 版本一致 / 接口一致 / 环境指纹可用 | `bundle_intake.json` / `env.json` | `check_bundle.py` / `probe_env.py` | `handoff.md` / `handoff-intake.md` / `environment.md` / `execution.md` |
 | S3 编译安装部署 | 构建 / 安装 / SoC / op_api / ABI 绑定 / 冒烟 | 绑定报告 / 冒烟日志 | 见作战卡 | `build-deploy.md` / `execution.md` |
 | S4 精度性能测试 | 精度已裁决 / 性能状态非空 | accuracy / performance results / verdict | 见作战卡 | `reporting.md` / `performance.md` |
 | S5 输出测试结果 | 摘要 / 政策摘要 / 证据链 | 报告 / 结论 / 复现包 | 见作战卡 | 同 S4 |
 
 S0 入口读 [handoff.md](../references/handoff.md)、
+[handoff-intake.md](../references/handoff-intake.md)、
 [environment.md](../references/environment.md) 与
 [execution.md](../references/execution.md)。S3 读 [build-deploy.md](../references/build-deploy.md)、
 [execution.md](../references/execution.md) 与 [atk-cli.md](../references/atk-cli.md)；S4、S5 读

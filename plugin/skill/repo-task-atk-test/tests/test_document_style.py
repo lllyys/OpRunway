@@ -408,7 +408,7 @@ class DocumentStyleTest(unittest.TestCase):
         self.assertIn("执行成功数必须为 1", cli)
 
     def test_acceptance_header_source_rules_are_self_contained(self):
-        handoff = (REFERENCES / "handoff.md").read_text(encoding="utf-8")
+        handoff = (REFERENCES / "handoff-intake.md").read_text(encoding="utf-8")
         acceptance = (SKILL_ROOT / "acceptance" / "SKILL.md").read_text(
             encoding="utf-8")
         for fact in ("operator_project.path", "/usr/local/Ascend",
@@ -416,7 +416,10 @@ class DocumentStyleTest(unittest.TestCase):
             with self.subTest(fact=fact):
                 self.assertIn(fact, handoff)
         normalized = re.sub(r"\s+", " ", acceptance)
-        self.assertIn("规则见 [handoff.md](../references/handoff.md)", normalized)
+        self.assertIn(
+            "规则见 [handoff-intake.md](../references/handoff-intake.md)",
+            normalized,
+        )
 
     def test_pyaclnn_flow_keeps_abi_and_soc_gates(self):
         execution = (REFERENCES / "execution.md").read_text(encoding="utf-8")
