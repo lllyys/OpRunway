@@ -208,6 +208,10 @@
     "_dtype_vocab.py": {
       "skill": "shared",
       "role": "提供 dtype 名称映射词表"
+    },
+    "build_skills.py": {
+      "skill": "shared",
+      "role": "把嵌套源展开成两个独立 skill 目录"
     }
   },
   "references": {

@@ -24,20 +24,20 @@ cd repo-task-atk-test
 
 ### 装 skill
 
-普通 skill 三选一，`<name>` 换成目录名；验收 skill 再按下方扫描方式安装。
+任务书 skill 可直接复制；验收 skill 的目录安装使用下方展开产物。
 
 ```bash
-# 软链接 / 用户目录 / 项目目录（三选一）
-ln -s "$PWD/skill/<name>" ~/.claude/skills/<name>
-cp -r skill/<name> ~/.claude/skills/
-cp -r skill/<name> <你的项目>/.claude/skills/
+cp -r skill/repo-task-doc-write ~/.claude/skills/
 ```
 
-- Claude Code 目录安装只扫一层，需把三个目录一起复制：
-  `cp -r skill/{repo-task-atk-test,repo-task-case-gen,repo-task-atk-accept} ~/.claude/skills/`；
-  两个别名依赖真身并列安装。
-- Plugin 安装只用 manifest 注册真身及嵌套子目录，不安装别名，否则会同名重复注册。
-- 递归扫描工具（如 opencode）只装真身；装别名会重复显示两个子入口。
+只扫一层的目录安装器看不到嵌套子 skill，先展开再把两个自足目录放进 `.claude/skills/`：
+
+```bash
+(cd skill/repo-task-atk-test && python3 scripts/build_skills.py --out dist/)
+cp -r skill/repo-task-atk-test/dist/{repo-task-case-gen,repo-task-atk-accept} ~/.claude/skills/
+```
+
+Plugin 安装与递归扫描安装器仍装嵌套源 `skill/repo-task-atk-test/`，不装展开产物或别名。
 
 ### repo-task-atk-test 还要装 ATK
 

@@ -2,6 +2,15 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-23 · S10 嵌套源展开：两个独立 skill 目录可从骨架生成
+
+- 新增 `build_skills.py`，按骨架归属展开两侧的脚本与 reference，核 import 闭包并写逐文件
+  SHA256 清单；`dist/` 是可重建发布物，已用仓根完整路径规则忽略。
+- 12 条行为测试覆盖链接、自足 import、分侧边界、清单摘要、退出码与清理语义；S9 尚未合并时，
+  产物按约定记 `tests=absent`，产物内测试对照用例明确 skip。
+- 全量从 `22 failed / 1016 passed / 19 skipped / 1261 subtests passed` 到
+  `22 failed / 1027 passed / 20 skipped / 1429 subtests passed`，22 条失败集合逐字不变。
+
 ## 2026-08-23 · S9 测试按侧归位，路径解析兼容展开产物
 
 - 验收 skill 的回归测试归入 `case_gen/`、`acceptance/`、`shared/`，真机端到端

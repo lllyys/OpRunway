@@ -37,7 +37,8 @@ repo-task-atk-test/           # 本仓（远程 gitcode.com/Justbin/repo-task-at
 ├── README.md                 # 仓门面：两个 skill 是什么 + 安装
 ├── skill/                    # 两个 skill 本体 + 两个别名目录，唯一发布物
 │   └── repo-task-atk-test/   # 含 case-gen/ 与 acceptance/ 两个子 skill 目录
-│       └── tests/            # 按 case_gen/、acceptance/、shared/ 归侧
+│       ├── tests/            # 按 case_gen/、acceptance/、shared/ 归侧
+│       └── dist/             # 两个独立 skill 的展开发布物（生成，不入库）
 ├── docs/                     # 不随 skill 发布
 │   ├── skills/<name>/        # 使用者视角：design.md + quickstart.md
 │   ├── atk-facts.md          # ATK 事实基线，按需读

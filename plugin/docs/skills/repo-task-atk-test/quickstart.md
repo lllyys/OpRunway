@@ -4,8 +4,8 @@
 
 ## 前提
 
-- 两侧都已按 [README 的安装](../../../README.md#安装) 装好 skill 与 ATK
-- 生成侧有 Python 与 torch（CPU），不需要 NPU 或 CANN
+- 目录安装按 [README](../../../README.md#安装) 使用展开产物；plugin 与递归扫描使用嵌套源
+- 两侧都已装好 ATK；生成侧有 Python 与 torch（CPU），不需要 NPU 或 CANN
 - 验收侧有 NPU，CANN 已装好且 `set_env.sh` 可以 source
 - 验收侧的算子工程已下载到本地，收到的是 PR 时先归约成本地工程
 
