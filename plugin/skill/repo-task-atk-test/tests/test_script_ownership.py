@@ -184,6 +184,35 @@ class ScriptOwnershipTest(unittest.TestCase):
         self.assertIn("builtin-baseline.md", acceptance)
         self.assertNotIn("builtin-baseline-design.md", acceptance)
 
+    def test_single_side_runtime_assets_are_not_marked_shared(self):
+        expected_scripts = {
+            "_runtime_guard.py": "case-gen",
+            "run_atk_task.py": "acceptance",
+            "_policy.py": "shared",
+        }
+        for name, skill in expected_scripts.items():
+            with self.subTest(script=name):
+                self.assertEqual(skill, self.ownership.get(name, {}).get("skill"))
+
+        ownership = self.data.get("references") or {}
+        expected_references = {
+            "experimental_standard.md": "case-gen",
+            "verdict-policy.json": "acceptance",
+            "interface-policy.json": "shared",
+        }
+        for name, skill in expected_references.items():
+            with self.subTest(reference=name):
+                self.assertEqual(skill, ownership.get(name, {}).get("skill"))
+
+        parent = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        case_gen = (SKILL_ROOT / "case-gen" / "SKILL.md").read_text(
+            encoding="utf-8")
+        acceptance = (SKILL_ROOT / "acceptance" / "SKILL.md").read_text(
+            encoding="utf-8")
+        self.assertNotIn("experimental_standard.md", acceptance)
+        self.assertNotIn("run_atk_task.py", case_gen)
+        self.assertNotIn("run_atk_task.py", parent)
+
     def test_router_only_names_shared_scripts(self):
         path = SKILL_ROOT / "SKILL.md"
         names = SCRIPT_REF.findall(path.read_text(encoding="utf-8"))

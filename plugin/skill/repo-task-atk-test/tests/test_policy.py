@@ -67,6 +67,29 @@ class PolicyTest(unittest.TestCase):
             for key, value in part.items():
                 self.assertEqual(merged[key], value, key)
 
+    def test_policy_consumers_load_only_the_policy_side_they_use(self):
+        sources = {
+            name: (SCRIPTS / name).read_text(encoding="utf-8")
+            for name in (
+                "derive_interface.py",
+                "parse_atk_report.py",
+                "select_perf_cases.py",
+                "verdict.py",
+                "make_repro.py",
+            )
+        }
+
+        self.assertNotIn("load_policy(", sources["derive_interface.py"])
+        self.assertNotIn("load_verdict_policy", sources["derive_interface.py"])
+        for name in ("parse_atk_report.py", "select_perf_cases.py"):
+            with self.subTest(script=name):
+                self.assertNotIn("load_policy(", sources[name])
+                self.assertNotIn("load_interface_policy", sources[name])
+
+        for name in ("verdict.py", "make_repro.py"):
+            with self.subTest(script=name):
+                self.assertIn("load_policy(", sources[name])
+
     def test_rejects_missing_interface_modes(self):
         path = self.write_policy({"schema_version": 1})
         with self.assertRaises(PolicyError):

@@ -158,11 +158,11 @@
       "role": "提供跨阶段裁决策略"
     },
     "_runtime_guard.py": {
-      "skill": "shared",
+      "skill": "case-gen",
       "role": "隔离运行期重依赖导入"
     },
     "run_atk_task.py": {
-      "skill": "shared",
+      "skill": "acceptance",
       "role": "统一拉起 ATK 任务"
     },
     "probe_env.py": {
@@ -269,7 +269,7 @@
       "skill": "shared"
     },
     "verdict-policy.json": {
-      "skill": "shared"
+      "skill": "acceptance"
     },
     "handoff.md": {
       "skill": "shared"
@@ -296,7 +296,7 @@
       "skill": "acceptance"
     },
     "experimental_standard.md": {
-      "skill": "shared"
+      "skill": "case-gen"
     }
   },
   "stages": {

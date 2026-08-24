@@ -2,6 +2,14 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-23 · S7 归属收口：四处标 shared 的单侧件归位，政策加载按侧
+
+- `_runtime_guard.py`、`experimental_standard.md` 归生成侧，`run_atk_task.py`、`verdict-policy.json`
+  归验收侧；`derive_interface` 只读接口政策，`parse_atk_report`、`select_perf_cases` 只读裁决政策。
+- `verdict.py` 与 `make_repro.py` 仍读两份：前者要 `acceptance_enabled`，后者记两份摘要作溯源，
+  所以 `interface-policy.json` 与 `_policy.py` 仍是共用件。
+- 纯账本修正，零代码路径移动；边界测试与政策加载测试各加一条锁住，failed 集合不变。
+
 ## 2026-08-23 · S8 交接 reference 按共用、封印、接收拆页
 
 - `handoff.md` 只留目录树、字段来源与排除名单；生成侧封印规范移到 `handoff-seal.md`，验收侧

@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 import _taskdoc
-from _policy import load_policy
+from _policy import load_interface_policy
 import _stage_card
 
 # 接口模式 → 执行后端。真源是 references/interface-policy.json，
@@ -326,7 +326,7 @@ def main():
 
     try:
         payload = derive(args.mode, args.candidate, args.baseline,
-                         args.mode_source, load_policy(), task_doc_text,
+                         args.mode_source, load_interface_policy(), task_doc_text,
                          args.random_strategy, args.random_strategy_source,
                          baseline_kind=args.baseline_kind,
                          baseline_device=args.baseline_device,

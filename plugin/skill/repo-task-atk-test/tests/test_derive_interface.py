@@ -133,7 +133,7 @@ class BackendDerivationTest(unittest.TestCase):
     def test_pure_derive_does_not_require_or_record_a_task_doc_path(self):
         payload = derive_interface.derive(
             "aclnn", "aclnnRoll", "torch.roll", "任务书 §2",
-            derive_interface.load_policy(), "roll 算子开发任务书")
+            derive_interface.load_interface_policy(), "roll 算子开发任务书")
         self.assertNotIn("task_doc", payload)
 
     def test_aclnn_interface_always_runs_on_pyaclnn(self):

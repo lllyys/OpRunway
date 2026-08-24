@@ -13,7 +13,7 @@ NON_FINITE_MARKERS = ("nan", "inf")
 
 
 from _case_utils import file_sha256, iter_cases, load_json, tensor_inputs
-from _policy import PolicyError, load_policy
+from _policy import PolicyError, load_verdict_policy
 from _report_reader import (
     ACC_DETAIL,
     ACC_PASS,
@@ -357,7 +357,7 @@ def main():
     _stage_card.announce(__file__)
 
     try:
-        policy = load_policy()
+        policy = load_verdict_policy()
     except PolicyError as error:
         print(error, file=sys.stderr)
         return 2

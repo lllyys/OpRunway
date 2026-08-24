@@ -13,7 +13,7 @@ import os
 import sys
 
 from _case_utils import extract_axis, iter_cases, load_json, numel, tensor_inputs
-from _policy import PolicyError, load_policy
+from _policy import PolicyError, load_verdict_policy
 
 BORDER_MARKS = ("nan", "inf", "-inf", "null")
 
@@ -92,7 +92,8 @@ def main():
 
     spec = load_json(args.grid)
     try:
-        allowed_causes = set(load_policy()["case_exclusions"]["allowed_causes"])
+        allowed_causes = set(
+            load_verdict_policy()["case_exclusions"]["allowed_causes"])
     except PolicyError as error:
         sys.exit(str(error))
     excluded_reasons = {}
