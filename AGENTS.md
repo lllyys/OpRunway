@@ -4,7 +4,7 @@
 
 ## 1. 这个仓是什么
 
-OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-test`）的开发与运行工作区。
+OpRunway 是上游社区算子验收 skill（`gitcode.com/brian66237/repo-task-atk-test`）的开发与运行工作区。
 验收怎么跑、判据是什么，以 `plugin/skill/repo-task-case-gen/` 与
 `plugin/skill/repo-task-atk-accept/` 各自的 `SKILL.md`、`references/`、`scripts/` 为准；
 本文件只管仓的组织、同步与纪律，不重复也不改写 skill 内规则。

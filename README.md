@@ -1,6 +1,6 @@
 # OpRunway
 
-上游社区算子验收 skill [repo-task-atk-test](https://gitcode.com/Justbin/repo-task-atk-test) 的开发与运行工作区。
+上游社区算子验收 skill [repo-task-atk-test](https://gitcode.com/brian66237/repo-task-atk-test) 的开发与运行工作区。
 
 - `plugin/skill/repo-task-case-gen/` —— 生成并封印 ATK 验收用例的独立 skill 源码。
 - `plugin/skill/repo-task-atk-accept/` —— 接收交接包并完成 NPU 验收的独立 skill 源码。

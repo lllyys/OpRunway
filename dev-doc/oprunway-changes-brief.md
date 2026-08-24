@@ -150,7 +150,7 @@
 
 ## 2026-08-18 · plugin 换脊柱：自研 acceptance-workflow 退役，镜像上游 ATK 验收 skill
 - plugin/ 旧 skill（219 行 SKILL.md + 14 份 reference）与旧 manifest 全部移除；磁盘残留 acc-common、samples 清理。
-- 上游 Justbin/repo-task-atk-test 锁定基线 179bcec（ATK gitlink a0dfc9a），skill/ 逐字镜像至 plugin/skill/，与基线 commit 校验逐字一致。
+- 上游 repo-task-atk-test 锁定基线 179bcec（ATK gitlink a0dfc9a），skill/ 逐字镜像至 plugin/skill/，与基线 commit 校验逐字一致。
 - overlay 落 plugin/.claude-plugin/{plugin.json,upstream.json}，skills 数组指向 ./skill/repo-task-atk-test；marketplace 描述同步至 2.0.0。
 - AGENTS.md 全文重写为薄仓规：仓定位、镜像/同步/提 PR 机制、环境权限、文档纪律、发布前检查；旧 skill 操作性条款随 skill 退役。
 - README、.cc-suite.md、isolated-acceptance 路径断言同步到新 skill；todo 瘦身并挂上 S1–S5 适配与同步演练两项收尾。
@@ -1946,7 +1946,7 @@ verify 轮（codex 复核修复本身）又逮出 5 条：digest 自洽证明不
 - **堵上「dlsym 沿依赖树查找」这个更隐蔽的假 PASS 洞（a3 实测）**：`getattr(CDLL(libcust_opapi.so), sym)` 底下的 POSIX dlsym **会沿该 so 的 DT_NEEDED 依赖树继续找**——实测 `libcust_opapi.so` 依赖 CANN 内置的 `libopapi_math.so`，而后者定义了 `aclnnAbs/aclnnIsClose/aclnnSign/aclnnSort…` 整个 elementwise/math 家族 → 严格档对这些算子**根本没 fail-closed**，provenance 还把出处记成了 custom vendor（比没证据更危险；median 躲过纯属运气）。现在 dlsym 命中后**必用 dladdr 反查定义方 so**、按 realpath 与已加载的 vendor lib 集合比对：不属于（含反查不出）→ 严格档 raise、宽松档如实记 `dependency_of_custom_vendor`。provenance 载重字段改为 `defining_lib`（+ `defining_lib_verified`），dlsym 走的 handle 另记 `resolved_via`；写明 **`global_conflict` 不能单独当 DUT 证据**（两边可能都是内置）。
 - **性能通路补上同一道门**：perf wrapper 原来是裸 `AclnnRunner(device=...)`（宽松档）且从不 close ——「精度验 custom vendor、性能测 CANN 内置同名实现」是同一个假 PASS 缺口的性能版本。现改为默认严格档（开关 = perf plan 的 `allow_builtin_symbols`，与 driver 的 `--allow-builtin-symbols` 同语义）并走 `with`（跑完销毁自建 stream）。另修 `close()` 后 `runtime_provenance()` 的 `custom_opapi_libs` 变空（证据丢半条）——close 前留指纹快照。
 - **修 aclnn scope gate 钉死一层的目录形态断言**（dogfood CP-C 硬阻塞）：旧判据要求 `<op_subdir>/op_api/aclnn_*.h`，但 PR6429 真实布局是 `<op_subdir>/op_host/op_api/aclnn_median.h`（`experimental/index/median/` 下压根没有 `op_api/`）→ 真 PR 被判「非域内」跑不动。改成**在 `<op_subdir>` 下有界递归**（深度≤3、目录数≤256、全程不跟随软链）找 `aclnn_*.h`（剔 `*_impl.h`），各种落点都认、不预设层级；找不到才 fail-closed，且报错里列出**实际扫过的目录 / 扫到的 .h / 跳过的软链**（原来只说「缺签名件」，用户猜不到头该放哪）。同步订正三处 md（acc-runner-dev / op-acceptance / acceptance-workflow）+ 设计文档 §4/§9.4 里被我写错的同一条路径。
-- 用户定新规则：「任务书对标 torch」场景参考 gitcode `Justbin/cannbot-ops-input` 仓的 case 生成/测试/torch 封装法，改造 OpRunway + 对 median(PR6429) 端到端验收。见证=median（双输出、reduce、tie、int dtype）。
+- 用户定新规则：「任务书对标 torch」场景参考 gitcode `cannbot-ops-input` 仓的 case 生成/测试/torch 封装法，改造 OpRunway + 对 median(PR6429) 端到端验收。见证=median（双输出、reduce、tie、int dtype）。
 - 三份调研到位：参考仓（六轴 case-gen + 逐 dtype allclose 判据 + **ctypes-aclnn Python runner**）、median 任务书+PR6429（对标 torch.median、双输出、A2/A3→a3、PR open 未合）、a3 环境（torch_npu 在专用容器里现成、根盘曾 100% 满）。
 - 架构经用户拍板 Option A（adapt/vendor 参考仓进 OpRunway）；出 `dev-doc/oprunway-torch-baseline-design.md` 可执行蓝图：新增面仅 4 块（ctypes-aclnn runner / torch_allclose 标准 / torch golden / 多输出契约），判定仍归确定性脚本链。
 - a3 磁盘排查：根盘 3.5T 满非我方所致（大头是别人退出的容器，765GB 等）；只清我方专用容器 `/tmp` 旧残渣 36GB → 根盘腾到 44G 可用。
