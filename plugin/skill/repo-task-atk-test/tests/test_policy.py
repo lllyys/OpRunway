@@ -25,6 +25,18 @@ class PolicyTest(unittest.TestCase):
         self.assertIn("aclnn", policy["interface_modes"])
         self.assertEqual(len(policy_sha256()), 64)
 
+    def test_c_api_policy_is_open_and_complete(self):
+        mode = load_policy()["interface_modes"]["c_api"]
+        self.assertEqual(mode["backends"], ["npu"])
+        self.assertIs(mode["acceptance_enabled"], True)
+        self.assertEqual(mode["required_yaml_field"], "name")
+        self.assertEqual(mode["sequence_steps_enabled"],
+                         ["context", "execute"])
+        self.assertEqual(mode["build_forms"], {
+            "experimental_wrapper": "enabled",
+            "project_build": "enabled",
+        })
+
     def test_rejects_missing_interface_modes(self):
         path = self.write_policy({"schema_version": 1})
         with self.assertRaises(PolicyError):

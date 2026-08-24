@@ -3,6 +3,7 @@
 ## 目录
 
 - 构建
+- c_api 构建与绑定
 - SoC 声明门禁
 - 安装
 - SoC 和 op_api
@@ -54,6 +55,56 @@ README 指向上级仓的构建脚本时按 README 走，不要在工程目录�
 构建脚本可能调用裸 `python3`，那不一定是环境指纹里的解释器。
 
 失败原因是构建脚本自己的解释器缺模块时，把 `selected_python` 所在目录前置到 `PATH` 重试一次，并在证据里记下这次重试。
+
+## c_api 构建与绑定
+
+`c_api` 有两种构建形态，按工程公开交付方式选择：
+
+1. experimental wrapper：先用 `make_c_api_build.py` 生成 CMake，再在已加载 CANN
+   环境的 shell 中执行 `cmake` 与 `make`；
+2. project_build：运行 `bash build.sh --pkg --soc=<build_soc> --ops=<op>`，再运行
+   `<pkg>.run --install --install-path=<dir>`。
+
+wrapper 的生成命令如下，输入都必须位于待验收算子工程目录：
+
+```bash
+<python> scripts/make_c_api_build.py --env evidence/env.json \
+  --op-dir <experimental 算子目录> --project-root <工程根目录> \
+  --build-cmake <算子 test/CMakeLists.txt> -o evidence/c_api_build
+```
+
+真机构建已确认三项环境事实：
+
+- `--ops` 会隐含 `BUILD_TEST=ON`，环境要预装 `libblas-dev` 与 `liblapack-dev`；
+- 打包会从网络下载 makeself，构建命令必须继承可用的代理环境；
+- 导出函数名随 SoC 架构变化，必须检查本轮真正构建的 `.so`。
+
+第三项的实际案例是：handle 形态 `aclblasScopy` 只在 arch35 提供，A3 的 arch22
+只导出 `aclblasScopy_legacy`。因此不得拿头文件里的函数集合代替动态库检查。
+
+构建后运行导出函数名门禁；C++ mangled 形态必须唯一匹配：
+
+```bash
+<python> scripts/check_c_api_binding.py --library <绝对 .so 路径> \
+  --call-sequence <op>_call_sequence.json \
+  -o evidence/c_api_binding.pre.json
+```
+
+设置执行器的两个环境变量后跑最小冒烟，再用日志核对真实加载路径：
+
+```bash
+export ATK_C_API_LIBRARY=<绝对 .so 路径>
+export ATK_C_API_CALL_SEQUENCE=<绝对调用序列表路径>
+<python> scripts/check_c_api_binding.py --library "$ATK_C_API_LIBRARY" \
+  --call-sequence "$ATK_C_API_CALL_SEQUENCE" --executor-log evidence/smoke.log \
+  -o evidence/c_api_binding.runtime.json
+```
+
+执行器必须原样打印这条合同记录：
+
+```text
+[c_api_executor] loaded_library=<absolute realpath> exported_name=<resolved name>
+```
 
 ## SoC 声明门禁
 

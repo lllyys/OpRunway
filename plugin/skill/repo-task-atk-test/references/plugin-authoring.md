@@ -6,6 +6,7 @@
 - 运行时对象
 - 注册约束
 - 执行器
+- c_api 执行器
 - ACLNN 适配
 - 适配器判定在 S2 完成
 - CPU golden
@@ -107,6 +108,26 @@ mixin 必须位于基类列表最前面。
 不要把 C/C++ 函数签名直接当成 ATK Python 对象签名。
 
 输出参数由 ATK 按执行器契约追加，不要在输入列表中重复声明。
+
+## c_api 执行器
+
+可抄的双节点样例是 `assets/example/c_api_executor.py`。它只读取两类数据：
+
+- `ATK_C_API_LIBRARY` 指向的绝对 `.so` 路径；
+- `ATK_C_API_CALL_SEQUENCE` 指向的 `<op>_call_sequence.json`。
+
+执行器不得导入生成侧模块。调用序列表跨过技能拆分边界后，验收侧必须自行核对
+版本、步骤、参数类别和布局；`layout.order` 仍为空就停止。
+
+同一个 `@register("example_c_api")` 服务两个节点。两侧都由
+`case_config.api_type` 选择注册类，依据是 `atk/tasks/backends/backend.py:60`；类内按
+`self.device` 分流，`npu` 直调动态库，其余后端执行 torch 基线翻译。
+
+NPU 分支不得含 torch 计算算子。性能窗口会汇总其中每个算子的 Task Duration，
+所以这里只允许设备选择、当前 stream、`data_ptr()`、动态库调用和同步。
+
+C 返回状态不等于调用序列表的 `status_ok` 时抛
+`RuntimeError(f"c_api status {code}")`。错误用例的 `expected_error_msg` 按这一格式写。
 
 ## ACLNN 执行器
 

@@ -21,6 +21,10 @@ interface.json 是每个算子 S1 都必须产出、后面全部只读的唯一�
 哪怕落在 ATK 能力域内也没有声明出口，只能被挡住或被 agent 手写探针绕过去。
 这里把三者都摊开成可声明字段，默认值保持旧行为，存量算子零影响。
 
+c_api 表示待验收算子是可直接调用的 C 宿主函数，例如
+aclblasStrsmBatched；它在 npu 后端执行。基线规则不变：仍须是 torch 根名表达式，
+且 c_api 不是 pytorch 的同名例外，待验收接口名与基线同名时仍拒绝自比。
+
 退出码：0 完成；2 输入不成立（模式未开放、待验收算子与基线填成了同一个接口名、缺依据、
 随机算子未给出具体精度策略、基线三维度组合不成立）。
 """
@@ -38,6 +42,7 @@ import _stage_card
 # 这里的常量由 tests/test_derive_interface.py 钉住与它一致。
 BACKEND_BY_MODE = {
     "aclnn": "pyaclnn",
+    "c_api": "npu",
     "pytorch": "npu",
     "kernel": "kernel",
 }
@@ -225,6 +230,8 @@ def derive(mode, candidate, baseline, mode_source, policy, task_doc_text,
         raise ValueError(f"接口模式 {mode!r} 不在验收政策里")
     if not block.get("acceptance_enabled"):
         raise ValueError(f"接口模式 {mode!r} 暂停验收，不出结论")
+    if mode == "c_api" and baseline_kind != "torch":
+        raise ValueError("c_api 的精度基线只接受 torch 表达式")
     problem = check_baseline_shape(baseline_kind, baseline_device, baseline_source)
     if problem:
         raise ValueError(problem)
@@ -273,7 +280,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="从 S1 的接口确认结果派生执行后端，产出 evidence/interface.json")
     parser.add_argument("--mode", required=True,
-                        help="任务书说待验收算子是什么接口：aclnn / pytorch / kernel")
+                        help="任务书说待验收算子是什么接口：aclnn / pytorch / "
+                             "kernel / c_api；c_api 是可直接调用的 C 宿主函数，"
+                             "例如 aclblasStrsmBatched，在 npu 后端执行")
     parser.add_argument("--seed-parameters",
                         type=lambda s: [x.strip() for x in s.split(",") if x.strip()],
                         default=[],

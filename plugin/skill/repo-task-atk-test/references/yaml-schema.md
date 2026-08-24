@@ -33,6 +33,7 @@ YAML 由 `make_yaml.py` 从物化后的 `must_cover.json` 推导。
 | --- | --- | --- |
 | pytorch | name | npu |
 | aclnn | aclnn_name | pyaclnn |
+| c_api | name | npu |
 | kernel | kernel_name | kernel |
 
 ## 输入契约

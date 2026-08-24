@@ -49,7 +49,7 @@ LIST_ITEM = re.compile(r"^(?:[-*+]\s|\d+[.)]\s)")
 # 存量基线按每文件违规计数记，不按行号——行号随每次编辑漂移，计数不会。
 # 改好一处把数字减一，减到 0 就删掉那一行。基线只减不增，这是棘轮。
 PROSE_BASELINE = {
-    "SKILL.md": 17,
+    "SKILL.md": 16,
     "case-design.md": 14,
     "plugin-authoring.md": 10,
     "atk-parameter-capabilities.md": 8,

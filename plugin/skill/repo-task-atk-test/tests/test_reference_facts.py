@@ -25,6 +25,8 @@ import _coverage_strategy  # noqa: E402
 REFERENCES = SKILL_ROOT / "references"
 CAPABILITY = json.loads(
     (REFERENCES / "atk-parameter-capabilities.json").read_text(encoding="utf-8"))
+POLICY = json.loads(
+    (REFERENCES / "acceptance-policy.json").read_text(encoding="utf-8"))
 
 
 def table_rows(path, header_cell):
@@ -168,6 +170,33 @@ class ComparatorSelectionTableTest(unittest.TestCase):
                          "探针结果变了，比较器选择表的 int8 例外要一起改")
         text = (REFERENCES / "experimental_standard.md").read_text(encoding="utf-8")
         self.assertIn("int8 要先判它是不是量化输出", text)
+
+
+class CApiBackendSelectionTest(unittest.TestCase):
+    """C 宿主函数模式必须记录 ATK 选择执行器的机制。"""
+
+    def test_c_api_uses_registered_api_type_on_npu(self):
+        selection = CAPABILITY["backend_selection"]["c_api"]
+        self.assertEqual(set(selection), {
+            "execution_backend", "baseline_backend", "why", "evidence",
+        })
+        self.assertEqual(selection["execution_backend"], "npu")
+        self.assertEqual(selection["baseline_backend"], "cpu")
+        self.assertIn("api_type", selection["why"])
+        self.assertIn("atk/tasks/backends/backend.py:60",
+                      selection["evidence"])
+
+    def test_yaml_mode_table_matches_the_policy(self):
+        rows = table_rows(REFERENCES / "yaml-schema.md", "模式")
+        documented = {cells[0]: cells[1:3] for cells in rows}
+        mode = POLICY["interface_modes"]["c_api"]
+        self.assertEqual(documented["c_api"], [
+            mode["required_yaml_field"], mode["backends"][0],
+        ])
+
+    def test_skill_backend_derivation_names_c_api(self):
+        text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("`c_api → npu`", text)
 
 
 class FlashRunKnowledgeGapsTest(unittest.TestCase):

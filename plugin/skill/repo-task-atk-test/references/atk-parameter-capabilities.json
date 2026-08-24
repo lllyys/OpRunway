@@ -127,6 +127,14 @@
         "atk/tests/nodes_aclnn_Accu.yaml:2"
       ]
     },
+    "c_api": {
+      "execution_backend": "npu",
+      "baseline_backend": "cpu",
+      "why": "npu 与 cpu 后端都按 case_config.api_type 选择执行器；注册对应 api_type 的执行器后，两侧节点都通过同一机制调用，c_api 借此在 npu 后端执行 C 宿主函数。",
+      "evidence": [
+        "atk/tasks/backends/backend.py:60"
+      ]
+    },
     "pytorch": {
       "execution_backend": "npu",
       "baseline_backend": "cpu",

@@ -458,6 +458,19 @@
       "risk": "执行后端由接口模式唯一推导；跑测命令 -b 用了别的后端，S4 才会被 verdict 抓到；随机算子未给出已确认精度策略，S2 白设计一整轮",
       "fields_not_applicable": "由 derive_interface.py 从 S1 确认结果派生，字段是推导结果不是决策"
     },
+    "evidence/c_api_applicability.json": {
+      "stage": "S1",
+      "owner": "script",
+      "condition": "evidence/interface.json 的 interface_mode 为 c_api；其余情况不产出",
+      "spec": "references/c-api-mode.md#接受什么接口",
+      "template": null,
+      "producer": "check_c_api_applicability.py",
+      "consumed_by": [
+        "S1 退出复核"
+      ],
+      "risk": "不适用的工程形态放进 S2，用例与构建全部白做",
+      "fields_not_applicable": "门禁报告，字段由 check_c_api_applicability.py 自身担保"
+    },
     "<op>_decl.json": {
       "stage": "S2",
       "owner": "agent",
@@ -709,6 +722,20 @@
       "risk": "签名不是从待验收算子工程目录里读的时候，冻结的是另一份代码的签名，S3 才炸",
       "fields_not_applicable": "对齐报告，字段由 align_signatures.py 自身担保"
     },
+    "<op>_call_sequence.json": {
+      "stage": "S2",
+      "owner": "script",
+      "condition": "evidence/interface.json 的 interface_mode 为 c_api；其余情况不产出",
+      "spec": "references/plugin-authoring.md#c_api 执行器",
+      "template": null,
+      "producer": "align_signatures.py",
+      "consumed_by": [
+        "c_api 执行器插件（运行期，只读 JSON）",
+        "check_c_api_binding.py"
+      ],
+      "risk": "执行器按错表装参，轻则报错重则错值",
+      "fields_not_applicable": "调用序列表由 align_signatures.py --call-convention c_api 自身担保"
+    },
     "evidence/signature_contract.json": {
       "stage": "S2",
       "owner": "script",
@@ -746,6 +773,45 @@
       ],
       "risk": "整张只有一个取值的输入测不出错；基线插件挂了也要在这里当场炸，不能推到 S3",
       "fields_not_applicable": "落盘的张量数据与摘要，字段由 freeze_inputs.py 自身担保"
+    },
+    "evidence/c_api_build/CMakeLists.txt": {
+      "stage": "S3",
+      "owner": "script",
+      "condition": "interface_mode 为 c_api 且采用 experimental wrapper 构建形态；project_build 时不产出",
+      "spec": "references/build-deploy.md#c_api 构建与绑定",
+      "template": null,
+      "producer": "make_c_api_build.py",
+      "consumed_by": [
+        "构建执行与证据链"
+      ],
+      "risk": "包装构建不可复现，符合门禁的 .so 无从产生",
+      "fields_not_applicable": "生成的 CMake 构建文件，内容由 make_c_api_build.py 自身担保"
+    },
+    "evidence/c_api_build/render_report.json": {
+      "stage": "S3",
+      "owner": "script",
+      "condition": "interface_mode 为 c_api 且采用 experimental wrapper 构建形态；project_build 时不产出",
+      "spec": "references/build-deploy.md#c_api 构建与绑定",
+      "template": null,
+      "producer": "make_c_api_build.py",
+      "consumed_by": [
+        "构建执行与证据链"
+      ],
+      "risk": "包装构建不可复现，符合门禁的 .so 无从产生",
+      "fields_not_applicable": "渲染报告，字段由 make_c_api_build.py 自身担保"
+    },
+    "evidence/c_api_binding.json": {
+      "stage": "S3",
+      "owner": "script",
+      "condition": "evidence/interface.json 的 interface_mode 为 c_api；其余情况不产出",
+      "spec": "references/build-deploy.md#c_api 构建与绑定",
+      "template": null,
+      "producer": "check_c_api_binding.py",
+      "consumed_by": [
+        "S3 退出"
+      ],
+      "risk": "加载了别的库，测的不是本轮工程",
+      "fields_not_applicable": "门禁报告，字段由 check_c_api_binding.py 自身担保"
     },
     "evidence/soc_binding.json": {
       "stage": "S3",

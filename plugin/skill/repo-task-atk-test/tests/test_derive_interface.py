@@ -133,6 +133,9 @@ class BackendDerivationTest(unittest.TestCase):
         # AclnnBackend 要 aclnnTest C++ 扩展并逐算子绑定，社区算子验收用不了。
         self.assertEqual(derive_interface.BACKEND_BY_MODE["aclnn"], "pyaclnn")
 
+    def test_c_api_interface_runs_on_npu(self):
+        self.assertEqual(derive_interface.BACKEND_BY_MODE["c_api"], "npu")
+
     def test_every_open_mode_maps_to_exactly_one_backend(self):
         for mode, backend in derive_interface.BACKEND_BY_MODE.items():
             with self.subTest(mode=mode):
@@ -160,6 +163,50 @@ class BackendDerivationTest(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.assertEqual(derive_interface.BACKEND_BY_MODE[mode],
                                  block["backends"][0])
+
+
+class CApiDerivationTest(unittest.TestCase):
+    def setUp(self):
+        self.policy = json.loads(
+            (SKILL_ROOT / "references" / "acceptance-policy.json")
+            .read_text(encoding="utf-8"))
+
+    def derive(self, baseline):
+        return derive_interface.derive(
+            mode="c_api",
+            candidate="aclblasStrsmBatched",
+            baseline=baseline,
+            mode_source="任务书 §X",
+            policy=self.policy,
+            task_doc_text="批量求解三角矩阵方程。",
+        )
+
+    def test_c_api_derives_npu_execution_with_cpu_baseline(self):
+        payload = self.derive("torch.linalg.solve_triangular")
+        self.assertEqual(payload["interface_mode"], "c_api")
+        self.assertEqual(payload["execution_backend"], "npu")
+        self.assertEqual(payload["baseline_backend"], "cpu")
+
+    def test_c_api_rejects_self_comparison(self):
+        with self.assertRaisesRegex(ValueError, "自己当标杆"):
+            self.derive("aclblasStrsmBatched")
+
+    def test_c_api_rejects_baseline_outside_execution_scope(self):
+        with self.assertRaisesRegex(ValueError, "不在基线执行作用域里"):
+            self.derive("numpy.linalg.solve")
+
+    def test_c_api_rejects_non_torch_baseline_kind(self):
+        with self.assertRaisesRegex(ValueError, "只接受 torch 表达式"):
+            derive_interface.derive(
+                mode="c_api",
+                candidate="aclblasStrsmBatched",
+                baseline="aclblasStrsmBatched",
+                mode_source="任务书 §X",
+                policy=self.policy,
+                task_doc_text="批量求解三角矩阵方程。",
+                baseline_kind="cann_builtin",
+                baseline_source="任务书 §Y",
+            )
 
 
 class DeriveCliTest(unittest.TestCase):

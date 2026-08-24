@@ -6,6 +6,7 @@
 - 基线
 - 选样
 - 执行
+- c_api 模式的口径边界
 - 报告
 
 ## 前置条件
@@ -117,6 +118,18 @@ S4 必须给出性能状态，取值只有三种：
 对比模式的性能标杆必须是 NPU。
 
 不使用 `performance_e2e` 作为判据。
+
+## c_api 模式的口径边界
+
+`performance_device` 的 device 口径是裁决数字，ctypes 只发生在 host 侧，不改变这个
+口径。执行器的 NPU 分支不得调用 torch 计算算子，因为 profiling 窗口会把每个算子的
+Task Duration 都加进结果。
+
+host wall clock 混有 Python 与 ctypes 开销，不能作为性能证据。任务书若要求 host
+latency，本轮能力不足，按能力边界报告，不自行换口径测量。
+
+动态库内部的 `aclrtMalloc` 不经过 PyTorch 分配器，ATK 的 memory 列看不到。
+这种情况报告写“统计不到”，不能把显示的 `0 MB` 解释成零内存占用。
 
 呈现选中数、每格可用/选中数、排除数、device 耗时、性能比和波动结果。
 

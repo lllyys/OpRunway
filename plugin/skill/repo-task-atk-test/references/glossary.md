@@ -25,6 +25,8 @@ reference 和作战卡里反复出现、但不解释就会理解错的词。
 | 替身 | `torch.overrides.get_testing_overrides()` 给出的纯 Python 假函数，PyTorch 为测试 `__torch_function__` 写的桩。**只保证参数位置大致对得上，不保证形参齐全**，不可单独当真值 |
 | 兜底 | 前面所有依据都解释不了时才用的最后一手，比如读 ATK 源码。用了要在证据里留痕 |
 | 量具 | `scripts/` 下的脚本。验收期不改，发现缺陷按 SKILL.md 的规则处理 |
+| 宿主入口 | 可被任何调用者以任意合法实参调用的导出 C 函数；校验、tiling、launch 和同步都在函数体内 |
+| 调用序列表 | `<op>_call_sequence.json`，把“怎么调这个接口”降成数据，验收侧只读它 |
 
 ## 怎么写才算说清了
 

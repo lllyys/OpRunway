@@ -152,6 +152,9 @@ ATK 框架源码是兜底证据，不是首选。
 S2 到 S4 额外读 [builtin-baseline.md](references/builtin-baseline.md)：
 真值来自先跑一轮 CANN 内置实现存盘再读回来，跑测形态与上表默认路径不同。
 
+接口模式是 `c_api` 时，S1 先读 [references/c-api-mode.md](references/c-api-mode.md) 判适用范围；
+构建与绑定走 build-deploy.md 的 c_api 一节。
+
 S1 的两道门性质不同：任务书解读没有脚本，环境探测有脚本。
 `env.json` 生成不等于 S1 通过，待确认项清零才算。
 
@@ -216,7 +219,8 @@ S5 输出测试结果 · 证据链 3/3
 
 执行后端由接口模式唯一推导，不是选择题，S1 跑 `derive_interface.py` 一次定死。
 
-`aclnn → pyaclnn`、`pytorch → npu`、`kernel → kernel`，基线节点恒为 `cpu`；`triton` 和 `atb` 暂停验收。
+`aclnn → pyaclnn`、`pytorch → npu`、`c_api → npu`、`kernel → kernel`，基线节点恒为
+`cpu`；`triton` 和 `atb` 暂停验收。
 
 `atk node -b aclnn` 要为每个算子写 C++ 绑定并编译 aclnnTest，不在本 skill 范围，不要用它。
 

@@ -1,4 +1,4 @@
-"""对齐基线接口签名与 aclnn C 签名，产出参数对齐表。
+"""生成 aclnn 参数对齐表或 c_api 调用序列表。
 
 一份用例要同时喂两个接口：基线节点按**参数名**绑定（`eval(name)(**kwargs)`），
 待验收算子节点按**声明顺序**绑定（逐个 convert_input_data）。两边对不上的部分就是适配器。
@@ -10,7 +10,10 @@
 tensor）、dtype 要不要提升、in-place 参数怎么处理，都写进 semantic_review
 交给使用者推断。本脚本对拿不准的一律降低 confidence 并列进去，不猜。
 
-退出码：0 完成；2 签名无法解析或基线接口无法解析。
+c_api 模式只读取工程公开头文件，记录后续执行器需要的上下文与执行参数；
+本轮不加载动态库，也不运行待验收算子。
+
+退出码：0 完成；2 声明、参数或基线接口无法解析。
 """
 
 import argparse
@@ -554,9 +557,108 @@ def build(baseline, signature):
     }
 
 
+def _named_reasons(values, flag):
+    """把重复的 NAME=JUSTIFICATION 参数转成映射，并拒绝空依据。"""
+    result = {}
+    for value in values or []:
+        if "=" not in value:
+            raise AlignError(f"{flag} 必须写成 NAME=JUSTIFICATION")
+        name, reason = value.split("=", 1)
+        name, reason = name.strip(), reason.strip()
+        if not name or not reason:
+            raise AlignError(f"{flag} 必须包含参数名和非空书面依据")
+        if name in result:
+            raise AlignError(f"{flag} 重复声明了参数 {name}")
+        result[name] = reason
+    return result
+
+
+def _c_api_table(args):
+    """读取工程公开头文件并生成 c_api v1 调用序列表。"""
+    from _c_api_signature import (
+        CApiSignatureError,
+        build_sequence,
+        classify as classify_c_api,
+        context_shape,
+        infer_context,
+        parse_declaration,
+        scan_enum_typedefs,
+        struct_name_for_context,
+    )
+
+    if not args.header:
+        raise AlignError("c_api 模式需要 --header")
+    if not args.candidate_name:
+        raise AlignError("c_api 模式需要 --candidate-name")
+    if not args.in_place_output:
+        raise AlignError("c_api 模式需要 --output NAME=JUSTIFICATION")
+
+    header_path = require_project_source(args.header, args.env, "--header")
+    try:
+        with open(header_path, encoding="utf-8", errors="ignore") as handle:
+            header_text = handle.read()
+    except OSError as exc:
+        raise AlignError(f"读不出 --header {header_path}：{exc}") from exc
+
+    common_texts = []
+    for path in args.common_header or []:
+        resolved = require_project_source(path, args.env, "--common-header")
+        try:
+            with open(resolved, encoding="utf-8", errors="ignore") as handle:
+                common_texts.append(handle.read())
+        except OSError as exc:
+            raise AlignError(f"读不出 --common-header {resolved}：{exc}") from exc
+
+    try:
+        declaration = parse_declaration(header_text, args.candidate_name)
+        context_param = infer_context(declaration["parameters"], args.context_type)
+        host_scalars = _named_reasons(args.host_scalar, "--host-scalar")
+        device_pointers = _named_reasons(args.device_pointer, "--device-pointer")
+        outputs = _named_reasons([args.in_place_output], "--output")
+        output = next(iter(outputs.items()))
+        enum_types = scan_enum_typedefs([header_text, *common_texts])
+        call_args = classify_c_api(
+            declaration["parameters"], host_scalars, output, context_param,
+            enum_types=enum_types, device_pointer_names=device_pointers)
+        all_headers = "\n".join([header_text, *common_texts])
+        context = context_shape(
+            all_headers, context_param["type"], args.context_shape)
+        if context["shape"] == "struct_handle":
+            struct_name = struct_name_for_context(all_headers, context_param["type"])
+            context["struct"] = struct_name
+        table = build_sequence(
+            declaration, call_args, output=output, context=context,
+            baseline=args.baseline, header_text=all_headers)
+    except CApiSignatureError as exc:
+        raise AlignError(str(exc)) from exc
+    return table
+
+
+def _argv_with_legacy_output_alias(argv):
+    """aclnn 继续接受旧的 --output 路径；c_api 把该参数留给原地输出声明。"""
+    c_api = any(
+        value == "c_api"
+        for index, value in enumerate(argv)
+        if index and argv[index - 1] == "--call-convention")
+    c_api = c_api or any(value == "--call-convention=c_api" for value in argv)
+    if c_api:
+        return argv
+    rewritten = []
+    for value in argv:
+        if value == "--output":
+            rewritten.append("-o")
+        elif value.startswith("--output="):
+            rewritten.append("-o=" + value.split("=", 1)[1])
+        else:
+            rewritten.append(value)
+    return rewritten
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--call-convention", choices=("aclnn", "c_api"), default="aclnn",
+                    help="调用约定；默认 aclnn")
     ap.add_argument("--baseline", required=True, help="YAML 的 name 字段，如 torch.median")
     ap.add_argument("--signature", help="一段式 GetWorkspaceSize 的完整 C 声明；"
                                         "必须与 --signature-source 一起给")
@@ -564,15 +666,42 @@ def main():
                     help="--signature 抄自哪个文件；必须是待验收算子工程目录下的路径")
     ap.add_argument("--header", help="待验收算子工程目录下的头文件路径或目录，与 --aclnn-name 配合")
     ap.add_argument("--aclnn-name", help="YAML 的 aclnn_name 字段")
+    ap.add_argument("--candidate-name", help="c_api 的公开 C 函数名")
+    ap.add_argument("--common-header", action="append", default=[],
+                    help="补充 enum 或上下文定义的公开头文件；可重复")
+    ap.add_argument("--host-scalar", action="append", default=[], metavar="NAME=JUSTIFICATION",
+                    help="c_api 主机侧标量及书面依据；可重复")
+    ap.add_argument("--device-pointer", action="append", default=[],
+                    metavar="NAME=JUSTIFICATION",
+                    help="c_api 设备指针及书面依据；可重复")
+    ap.add_argument("--output", dest="in_place_output", metavar="NAME=JUSTIFICATION",
+                    help="c_api 原地输出参数及书面依据")
+    ap.add_argument("--context-type", help="c_api 上下文类型名")
+    ap.add_argument("--context-shape", choices=("opaque_functions", "struct_handle"),
+                    help="c_api 上下文构造形态；默认按公开声明判定")
     ap.add_argument("--env", required=True,
                     help="evidence/env.json 路径；据此核对签名是从待验收算子工程目录里读的")
     ap.add_argument("--interface",
                     help="derive_interface.py 的产物；读 baseline_kind。"
                          "cann_builtin 时基线是 C 接口名、没有可反射的形参名，"
                          "对齐改走内置分支（YAML 输入名取 aclnn 自己的形参名）")
-    ap.add_argument("-o", "--output", required=True)
-    args = ap.parse_args()
+    ap.add_argument("-o", dest="output_path", required=True)
+    args = ap.parse_args(_argv_with_legacy_output_alias(sys.argv[1:]))
     _stage_card.announce(__file__)
+
+    if args.call_convention == "c_api":
+        try:
+            table = _c_api_table(args)
+        except AlignError as exc:
+            print(f"对齐失败：{exc}", file=sys.stderr)
+            return 2
+        with open(args.output_path, "w", encoding="utf-8") as handle:
+            json.dump(table, handle, ensure_ascii=False, indent=2)
+        print(
+            f"c_api 调用序列表：{table['symbol']}，"
+            f"参数 {len(table['sequence'][1]['args'])} 个，"
+            f"上下文 {table['sequence'][0]['shape']}")
+        return 0
 
     baseline_kind = "torch"
     if args.interface:
@@ -608,7 +737,7 @@ def main():
 
     report["signature_source"] = source
     report["signature"] = signature
-    with open(args.output, "w", encoding="utf-8") as f:
+    with open(args.output_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
 
     print(f"基线 {args.baseline} / aclnn {report['aclnn']['symbol']}")

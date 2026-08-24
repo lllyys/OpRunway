@@ -11,6 +11,17 @@
       "acceptance_enabled": true,
       "required_yaml_field": "aclnn_name"
     },
+    "c_api": {
+      "backends": ["npu"],
+      "acceptance_enabled": true,
+      "required_yaml_field": "name",
+      "call_convention": "c_api",
+      "sequence_steps_enabled": ["context", "execute"],
+      "build_forms": {
+        "experimental_wrapper": "enabled",
+        "project_build": "enabled"
+      }
+    },
     "kernel": {
       "backends": ["kernel"],
       "acceptance_enabled": true,
