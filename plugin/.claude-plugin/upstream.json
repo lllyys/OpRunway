@@ -8,7 +8,7 @@
   "published_paths": [".claude-plugin/", "skill/"],
   "mirror_commit": "803bbd0",
   "notes": [
-    "子 skill 独立注册依赖 manifest 列出嵌套子目录，这是当前 Claude Code 的未文档化行为；父 SKILL.md 路由是保底通路",
+    "自 S11 起 skill/ 为两个平级目录，与上游单树不再同构；同步上游改动需按骨架归属映射进两个目录（共用件两份都改）；回上游的 PR 是结构提案",
     "71ddf5f 的同步应用在拆分之上，本仓没有与该基线逐字一致的纯镜像提交；提 PR 用树移植而非 patch",
     "tests/ 自 S9 起纳入镜像；基线里的 tests/test_repo_docs_style.py 逐字镜像，只跟改 S9 移动的路径"
   ]

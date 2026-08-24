@@ -11,8 +11,10 @@
 
 ## P1 · 迁移收尾
 
-- [ ] Task 11：完成父路由与两个子 skill 的触发评测和真机验证；
-  `.claude/skills/isolated-acceptance/` 按双子 skill 重排，并验证无 NPU 生成、真机接收及 S3–S5。
+- [ ] `repo-task-doc-write` 的 `test_document_style.py` 与 `test_shared_facts_sync.py` 仍写旧验收路径；
+  保持该目录零接触，待任务书 skill 自身维护时迁到两个平级目录。
+- [ ] `.claude/skills/isolated-acceptance/` 的无头流程按两个平级 skill 重排，并验证无 NPU
+  生成、真机接收及 S3–S5；本轮只收口 plugin 镜像，不改私有运行通路。
 - [ ] 演练一次上游同步（fetch → `git diff --binary | git apply --3way --directory=plugin` → 更新
   `plugin/.claude-plugin/upstream.json` 基线）。
 

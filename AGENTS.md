@@ -5,14 +5,16 @@
 ## 1. 这个仓是什么
 
 OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-test`）的开发与运行工作区。
-验收怎么跑、判据是什么，以 `plugin/skill/repo-task-atk-test/SKILL.md` 及其 `references/`、`scripts/`
-为准；本文件只管仓的组织、同步与纪律，不重复也不改写 skill 内规则。
+验收怎么跑、判据是什么，以 `plugin/skill/repo-task-case-gen/` 与
+`plugin/skill/repo-task-atk-accept/` 各自的 `SKILL.md`、`references/`、`scripts/` 为准；
+本文件只管仓的组织、同步与纪律，不重复也不改写 skill 内规则。
 
 ## 2. 结构与镜像
 
-- `plugin/` 是上游根的逐字镜像（`skill/`、`docs/`、`CLAUDE.md`、`README.md`、`.claude/rules/`、`tests/`；`third_party/` 与
-  git 元文件除外）；`plugin/.claude-plugin/` 是本仓 overlay（manifest 与 upstream 基线记录），
-  上游永不占用该路径。
+- `plugin/` 的 `docs/`、`CLAUDE.md`、`README.md`、`.claude/rules/`、`tests/` 与任务书 skill
+  延续上游镜像边界；自 S11 起，上游验收单树按骨架归属映射为 `repo-task-case-gen/` 与
+  `repo-task-atk-accept/` 两个平级目录，`skill/` 不再逐字同构。`plugin/.claude-plugin/` 是本仓
+  overlay（manifest 与 upstream 基线记录），上游永不占用该路径。
 - 发布切片：`plugin/.claude-plugin/` 与 `plugin/skill/` 是唯一测试/部署发布物；`docs/`、`CLAUDE.md`、
   `README.md` 是开发件，不进任何测试部署。
 - 验收零上下文：一次验收的完整契约就是 `SKILL.md` 加 `references/` 加 `scripts/`，不多一个字。
@@ -32,13 +34,32 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
   plugin 根 `CLAUDE.md`，`claude plugin validate` 对此的警告是预期行为。
 - 判据的确定性由 skill 自带 `scripts/`（机械门）与 `tests/` 承担；agent 不得绕过机械门，也不得在
   `plugin/` 外另建一套生成或裁决实现。
-- 同步上游：先 `git -C repos/repo-task-atk-test fetch`，再在仓根执行
-  `git -C repos/repo-task-atk-test diff --binary <旧基线> <新基线> -- skill/ docs/ CLAUDE.md README.md .claude/rules/ tests/ | git apply --3way --directory=plugin`
-  ——`git diff` 在上游 clone 里跑（基线是上游 commit），`git apply` 在本仓根跑。完成后更新
-  `plugin/.claude-plugin/upstream.json` 的 `baseline` 与 `mirror_commit`。
-- 提 PR：以 `plugin/.claude-plugin/upstream.json` 的 `mirror_commit`（本仓镜像与上游基线完整一致的那个提交）
-  为基线，`git diff --binary --relative=plugin <mirror_commit> HEAD -- plugin/skill/ plugin/docs/ plugin/CLAUDE.md plugin/README.md plugin/.claude/rules/ plugin/tests/`
-  得到 patch，在 fork（届时再建）里从上游 `baseline` 切分支应用；该 pathspec 即公私边界。
+- 同步上游：先 `git -C repos/repo-task-atk-test fetch`。同构部分在仓根执行：
+
+  ```bash
+  git -C repos/repo-task-atk-test diff --binary <旧基线> <新基线> -- \
+    skill/repo-task-doc-write/ docs/ CLAUDE.md README.md .claude/rules/ tests/ \
+    | git apply --3way --directory=plugin
+  ```
+
+  验收单树先用以下命令列出改动，再按两份骨架的 `skill` 归属映射，`shared` 文件两侧都改：
+
+  ```bash
+  git -C repos/repo-task-atk-test diff --name-status <旧基线> <新基线> -- \
+    skill/repo-task-atk-test/
+  ```
+
+  门禁通过后更新 `plugin/.claude-plugin/upstream.json` 的 `baseline` 与 `mirror_commit`。
+- 提 PR：以 `plugin/.claude-plugin/upstream.json` 的 `mirror_commit` 为派生基线，执行：
+
+  ```bash
+  git diff --binary --relative=plugin <mirror_commit> HEAD -- \
+    plugin/skill/ plugin/docs/ plugin/CLAUDE.md plugin/README.md \
+    plugin/.claude/rules/ plugin/tests/
+  ```
+
+  该 pathspec 保持不变，仍是完整公私边界。得到的是结构提案 patch；在 fork 里从上游
+  `baseline` 切分支应用，并处理路径变更。
 
 ## 3. 环境与权限
 

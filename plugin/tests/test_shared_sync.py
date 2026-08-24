@@ -8,16 +8,19 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 CASE_GEN = PLUGIN_ROOT / "skill" / "repo-task-case-gen"
 ATK_ACCEPT = PLUGIN_ROOT / "skill" / "repo-task-atk-accept"
-SHARED_TREES = ("scripts", "references", "tests")
+SIDE_SPECIFIC_SAME_RELATIVE = {
+    Path("SKILL.md"),
+    Path("CLAUDE.md"),
+}
 
 
 def inventory(root):
     """返回需要跨目录防漂移的相对文件路径。"""
     return {
         path.relative_to(root)
-        for tree in SHARED_TREES
-        for path in (root / tree).rglob("*")
+        for path in root.rglob("*")
         if path.is_file() and "__pycache__" not in path.parts
+        and path.relative_to(root) not in SIDE_SPECIFIC_SAME_RELATIVE
     }
 
 
@@ -26,6 +29,19 @@ def copy_hint(source, destination):
 
 
 class SharedSyncTest(unittest.TestCase):
+    def test_side_specific_same_relative_files_exist_on_both_sides(self):
+        failures = []
+        for relative in sorted(SIDE_SPECIFIC_SAME_RELATIVE):
+            for root in (CASE_GEN, ATK_ACCEPT):
+                path = root / relative
+                if not path.is_file():
+                    failures.append(str(path))
+        self.assertEqual(
+            [], failures,
+            "设计内不同的同相对路径文件必须两侧都存在：\n"
+            + "\n".join(failures),
+        )
+
     def test_same_relative_files_are_byte_identical(self):
         common = inventory(CASE_GEN) & inventory(ATK_ACCEPT)
         self.assertTrue(common, "两个 skill 没有任何同相对路径文件")

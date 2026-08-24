@@ -34,20 +34,23 @@ SCANNED = [REPO_ROOT / "README.md", REPO_ROOT / "CLAUDE.md",
 LINE_BUDGET = {
     "README.md": 70,
     "CLAUDE.md": 100,
-    "design.md": 60,
-    "quickstart.md": 50,
+    "docs/skills/repo-task-doc-write/design.md": 60,
+    "docs/skills/repo-task-doc-write/quickstart.md": 50,
+    "docs/skills/repo-task-case-gen/design.md": 60,
+    "docs/skills/repo-task-case-gen/quickstart.md": 50,
+    "docs/skills/repo-task-atk-accept/design.md": 60,
+    "docs/skills/repo-task-atk-accept/quickstart.md": 50,
 }
+EXPECTED_SKILL_DOCS = set(LINE_BUDGET) - {"README.md", "CLAUDE.md"}
 
 
 class RepoDocsStyleTest(unittest.TestCase):
     def test_scanned_set_is_not_empty(self):
         """docs/skills/ 被改名或搬走时，别让门禁静悄悄地扫了个空。"""
-        names = {p.name for p in SCANNED}
-        self.assertIn("README.md", names)
-        self.assertIn("CLAUDE.md", names)
-        self.assertGreaterEqual(
-            len([p for p in SCANNED if p.name == "design.md"]), 2,
-            "每个 skill 都该有一份 docs/skills/<name>/design.md")
+        relative = {p.relative_to(REPO_ROOT).as_posix() for p in SCANNED}
+        self.assertIn("README.md", relative)
+        self.assertIn("CLAUDE.md", relative)
+        self.assertEqual(EXPECTED_SKILL_DOCS, relative - {"README.md", "CLAUDE.md"})
 
     def test_no_prose_violations(self):
         failures = []
@@ -73,13 +76,13 @@ class RepoDocsStyleTest(unittest.TestCase):
     def test_within_line_budget(self):
         failures = []
         for path in SCANNED:
-            budget = LINE_BUDGET.get(path.name)
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            budget = LINE_BUDGET.get(relative)
             if budget is None:
                 continue
             actual = len(path.read_text(encoding="utf-8").splitlines())
             if actual > budget:
-                rel = path.relative_to(REPO_ROOT)
-                failures.append(f"{rel} 共 {actual} 行，预算 {budget}")
+                failures.append(f"{relative} 共 {actual} 行，预算 {budget}")
         self.assertEqual(
             [], failures,
             "超预算就是没筛干净，删内容而不是抬预算：\n" + "\n".join(failures))
