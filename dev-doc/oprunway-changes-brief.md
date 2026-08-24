@@ -2,6 +2,14 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-24 · S9b 仓级 tests 纳入上游镜像边界
+
+- 从 71ddf5f 基线镜像仓级文档门，并按 S9 新布局接到 `tests/shared/test_document_style.py`；
+  `upstream_paths`、同步命令与提 PR pathspec 同步纳入 `tests/`。
+- `plugin/CLAUDE.md` 的 tests/dist 目录说明合为一行，101 行裁到 100 行且规则句未删；仓级门
+  `4 passed`，全量从 `22 failed / 1054 passed / 19 skipped / 1568 subtests passed` 到
+  `22 failed / 1058 passed / 19 skipped / 1568 subtests passed`，失败集合不变。
+
 ## 2026-08-23 · S10 嵌套源展开：两个独立 skill 目录可从骨架生成
 
 - 新增 `build_skills.py`，按骨架归属展开两侧的脚本与 reference，核 import 闭包并写逐文件

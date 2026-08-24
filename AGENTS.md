@@ -10,7 +10,7 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
 
 ## 2. 结构与镜像
 
-- `plugin/` 是上游根的逐字镜像（`skill/`、`docs/`、`CLAUDE.md`、`README.md`、`.claude/rules/`；`third_party/` 与
+- `plugin/` 是上游根的逐字镜像（`skill/`、`docs/`、`CLAUDE.md`、`README.md`、`.claude/rules/`、`tests/`；`third_party/` 与
   git 元文件除外）；`plugin/.claude-plugin/` 是本仓 overlay（manifest 与 upstream 基线记录），
   上游永不占用该路径。
 - 发布切片：`plugin/.claude-plugin/` 与 `plugin/skill/` 是唯一测试/部署发布物；`docs/`、`CLAUDE.md`、
@@ -33,11 +33,11 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
 - 判据的确定性由 skill 自带 `scripts/`（机械门）与 `tests/` 承担；agent 不得绕过机械门，也不得在
   `plugin/` 外另建一套生成或裁决实现。
 - 同步上游：先 `git -C repos/repo-task-atk-test fetch`，再在仓根执行
-  `git -C repos/repo-task-atk-test diff --binary <旧基线> <新基线> -- skill/ docs/ CLAUDE.md README.md .claude/rules/ | git apply --3way --directory=plugin`
+  `git -C repos/repo-task-atk-test diff --binary <旧基线> <新基线> -- skill/ docs/ CLAUDE.md README.md .claude/rules/ tests/ | git apply --3way --directory=plugin`
   ——`git diff` 在上游 clone 里跑（基线是上游 commit），`git apply` 在本仓根跑。完成后更新
   `plugin/.claude-plugin/upstream.json` 的 `baseline` 与 `mirror_commit`。
 - 提 PR：以 `plugin/.claude-plugin/upstream.json` 的 `mirror_commit`（本仓镜像与上游基线完整一致的那个提交）
-  为基线，`git diff --binary --relative=plugin <mirror_commit> HEAD -- plugin/skill/ plugin/docs/ plugin/CLAUDE.md plugin/README.md plugin/.claude/rules/`
+  为基线，`git diff --binary --relative=plugin <mirror_commit> HEAD -- plugin/skill/ plugin/docs/ plugin/CLAUDE.md plugin/README.md plugin/.claude/rules/ plugin/tests/`
   得到 patch，在 fork（届时再建）里从上游 `baseline` 切分支应用；该 pathspec 即公私边界。
 
 ## 3. 环境与权限
