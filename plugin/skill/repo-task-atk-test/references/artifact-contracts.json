@@ -731,6 +731,9 @@
       "producer": "align_signatures.py",
       "consumed_by": [
         "c_api 执行器插件（运行期，只读 JSON）",
+        "make_yaml.py",
+        "check_signature_contract.py",
+        "check_adapter_binding.py",
         "check_c_api_binding.py"
       ],
       "risk": "执行器按错表装参，轻则报错重则错值",

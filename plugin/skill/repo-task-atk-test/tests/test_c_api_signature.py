@@ -246,6 +246,99 @@ class PodStructTest(unittest.TestCase):
         })
 
 
+class BareAliasHandleTest(unittest.TestCase):
+    """裸 void 指针句柄与独立命名的公开结构体也能生成上下文描述。"""
+
+    HEADER = textwrap.dedent("""
+        typedef void* aclblasHandle_t;
+        struct _aclblas_handle {
+            aclrtStream stream = nullptr;
+            void* default_workspace = nullptr;
+            size_t default_workspace_size = 0;
+            bool use_user_workspace = false;
+        };
+        extern "C" int aclblasRun(aclblasHandle_t handle, float* out);
+    """)
+
+    def test_default_initializers_keep_the_struct_pod_eligible(self):
+        mod = load_module()
+        ok, reason, fields = mod._inspect_trivial_pod_struct(
+            self.HEADER, "_aclblas_handle")
+        self.assertTrue(ok, reason)
+        self.assertEqual(fields, [
+            {"name": "stream", "ctype": "c_void_p"},
+            {"name": "default_workspace", "ctype": "c_void_p"},
+            {"name": "default_workspace_size", "ctype": "c_size_t"},
+            {"name": "use_user_workspace", "ctype": "c_bool"},
+        ])
+
+    def test_only_the_open_acl_stream_alias_is_known(self):
+        mod = load_module()
+        self.assertEqual({"aclrtStream": "void*"}, mod._PUBLIC_ACL_ALIASES)
+        ok, reason, _ = mod._inspect_trivial_pod_struct(
+            "struct H { aclrtEvent event; };", "H")
+        self.assertFalse(ok)
+        self.assertIn("aclrtEvent", reason)
+
+    def test_bare_alias_requires_an_explicit_struct_name(self):
+        mod = load_module()
+        with self.assertRaises(mod.CApiSignatureError):
+            mod.struct_name_for_context(self.HEADER, "aclblasHandle_t")
+        self.assertEqual(
+            "_aclblas_handle",
+            mod.struct_name_for_context(
+                self.HEADER, "aclblasHandle_t", explicit="_aclblas_handle"))
+
+    def test_explicit_struct_must_exist_in_the_public_header(self):
+        mod = load_module()
+        with self.assertRaises(mod.CApiSignatureError) as caught:
+            mod.struct_name_for_context(
+                self.HEADER, "aclblasHandle_t", explicit="_missing_handle")
+        self.assertIn("_missing_handle", str(caught.exception))
+
+    def test_cli_records_the_struct_choice_and_justification(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            project = temp / "operator_project"
+            project.mkdir()
+            header = project / "aclblas_minimal.h"
+            header.write_text(self.HEADER, encoding="utf-8")
+            env = temp / "env.json"
+            env.write_text(
+                json.dumps({"operator_project": {"path": str(project)}}),
+                encoding="utf-8")
+            output = temp / "run_call_sequence.json"
+            base = [
+                sys.executable, str(ALIGN), "--call-convention", "c_api",
+                "--env", str(env), "--header", str(header),
+                "--candidate-name", "aclblasRun", "--baseline", "torch.add",
+                "--output", "out=公开 API 文档说明 out 原地写回",
+                "-o", str(output),
+            ]
+            refused = subprocess.run(
+                base, capture_output=True, text=True, timeout=60)
+            self.assertEqual(2, refused.returncode, refused.stderr)
+            self.assertIn("aclblasHandle_t", refused.stderr)
+
+            done = subprocess.run(
+                base + [
+                    "--context-struct",
+                    "_aclblas_handle=任务书 §7.2 写明调用方构造公开结构体",
+                ],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(0, done.returncode, done.stderr)
+            table = json.loads(output.read_text(encoding="utf-8"))
+
+        context = table["sequence"][0]
+        self.assertEqual("struct_handle", context["shape"])
+        self.assertEqual("_aclblas_handle", context["struct"]["name"])
+        self.assertIn("任务书 §7.2", context["struct_source"])
+        self.assertEqual(
+            {"name": "stream", "ctype": "c_void_p"},
+            context["struct"]["fields"][0])
+        self.assertTrue(table["signature_source"].endswith("aclblas_minimal.h"))
+
+
 class OpaqueContextFunctionsTest(unittest.TestCase):
     def test_context_records_create_optional_set_stream_and_destroy(self):
         mod = load_module()

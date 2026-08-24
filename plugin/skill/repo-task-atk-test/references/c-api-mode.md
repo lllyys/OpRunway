@@ -23,9 +23,12 @@ tiling、kernel 拉起与必要同步。入口必须能由任意调用者用合�
 <python> scripts/check_c_api_applicability.py \
   --env evidence/env.json --candidate <公开 C 函数名> \
   --header <公开头文件> --op-dir <算子目录> \
-  --arch-dir <archXX> --arch-dir-basis '<工程写明映射的位置>' \
+  --layout arch_dirs --arch-dir <archXX> --arch-dir-basis '<工程写明映射的位置>' \
   -o evidence/c_api_applicability.json
 ```
+
+experimental 布局改用 `--layout experimental`，并传入算子目录下的
+`--build-cmake <算子目录>/test/CMakeLists.txt`，门禁会自行读取 `--npu-arch`。
 
 ## 四层准入门
 

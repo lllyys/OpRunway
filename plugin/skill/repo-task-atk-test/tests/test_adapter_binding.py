@@ -38,6 +38,59 @@ CLEAN = {"aclnn_adapter": {"required": False, "reasons": [],
          "semantic_review": []}
 
 
+C_API_TABLE = {
+    "schema_version": 1, "symbol": "aclblasStrsmBatched",
+    "sequence": [{"step": "context", "shape": "struct_handle"},
+                 {"step": "execute", "args": []}],
+    "output": {"in_place": "B"},
+}
+
+
+class CApiWiringTest(unittest.TestCase):
+    def test_api_type_must_be_present_on_every_case(self):
+        cases = [case(0, [tensor("A")], api_type="strsm_batched_c_api"),
+                 case(1, [tensor("A")])]
+        report, problems = gate.judge(C_API_TABLE, cases)
+        self.assertEqual("c_api", report["call_convention"])
+        self.assertEqual([1], report["verdicts"]["api_type"]["missing_case_ids"])
+        self.assertTrue(any("每条用例" in item for item in problems))
+
+    def test_explicit_default_api_type_is_rejected(self):
+        for value in ("function", " function "):
+            with self.subTest(value=value):
+                report, problems = gate.judge(
+                    C_API_TABLE, [case(0, [tensor("A")], api_type=value)])
+                self.assertFalse(report["verdicts"]["api_type"]["adapted"])
+                self.assertTrue(any("function" in item for item in problems))
+
+    def test_one_custom_executor_on_every_case_passes(self):
+        cases = [case(index, [tensor("A")], api_type="strsm_batched_c_api")
+                 for index in range(3)]
+        report, problems = gate.judge(C_API_TABLE, cases)
+        self.assertEqual([], problems)
+        self.assertEqual(["strsm_batched_c_api"],
+                         report["verdicts"]["api_type"]["bound"])
+
+    def test_mixed_custom_executors_are_rejected(self):
+        cases = [case(0, [tensor("A")], api_type="strsm_batched_c_api"),
+                 case(1, [tensor("A")], api_type="another_exec")]
+        _, problems = gate.judge(C_API_TABLE, cases)
+        self.assertTrue(any("不唯一" in item for item in problems))
+
+    def test_aclnn_null_rules_do_not_run_for_c_api(self):
+        table = json.loads(json.dumps(C_API_TABLE))
+        table["semantic_review"] = [
+            {"parameter": "dims", "issue": "可空指针"}]
+        cases = [case(0, [tensor("dims", "null")],
+                      api_type="strsm_batched_c_api")]
+        report, problems = gate.judge(table, cases)
+        self.assertEqual([], problems)
+        self.assertEqual([], report["reviews"])
+
+    def test_aclnn_alignment_still_uses_the_existing_path(self):
+        self.assertFalse(gate.is_c_api_table(CLEAN))
+
+
 class WiringTest(unittest.TestCase):
     def test_default_is_assumed_when_the_case_omits_the_key(self):
         # ATK 的 CaseConfig 默认就是 function / aclnn_function，
@@ -162,6 +215,13 @@ class CliTest(unittest.TestCase):
         result, report = self._run(alignment, [case(0, [tensor("x")])])
         self.assertEqual(2, result.returncode)
         self.assertIsNotNone(report, "判不过也要留下证据，S5 证据链要引用它")
+
+    def test_c_api_passes_via_the_cli(self):
+        result, report = self._run(
+            C_API_TABLE,
+            [case(0, [tensor("A")], api_type="strsm_batched_c_api")])
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("c_api", report["call_convention"])
 
     def test_missing_input_exits_three(self):
         result = subprocess.run(

@@ -9,7 +9,9 @@ check_atk_capabilities.py 单独校验一遍，但那个脚本查的是本文件
 """
 
 import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -17,6 +19,8 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 
 from make_yaml import DeclarationError, build_design  # noqa: E402
+
+SCRIPT = SKILL_ROOT / "scripts" / "make_yaml.py"
 
 HEADER = {
     "name": "torch.roll", "aclnn_name": "Roll", "version": "v1",
@@ -40,6 +44,111 @@ COMBOS = [
     {"dtype": "fp16", "shape": [2, 3], "dims": [0]},
     {"dtype": "fp32", "shape": [4, 5, 6], "dims": [0, 1, 2]},
 ]
+
+C_API_HEADER = {
+    "name": "torch.linalg.solve_triangular", "version": "v1", "api": "c_api",
+    "api_type": "strsm_batched_c_api", "outputs": "B",
+    "generate": "strsm_batched_constraint",
+    "standard": {"acc": "mixed_tolerance_bm", "perf": "not_key"},
+}
+
+
+def c_api_spec(parameters=None, header=None):
+    parameters = parameters or {
+        "side": {"element_kind": "attr", "runtime_container": "single",
+                 "dtype": "int32_t", "combo_key": "side"},
+        "A": {"element_kind": "tensor", "runtime_container": "single",
+              "shape_key": "A_shape"},
+        "B": {"element_kind": "tensor", "runtime_container": "single",
+              "shape_key": "B_shape"},
+    }
+    spec = must_cover(parameters, [{
+        "dtype": "fp32", "side": 141,
+        "A_shape": [1, 16, 16], "B_shape": [1, 16, 8],
+    }], header=header or C_API_HEADER)
+    spec["interface_mode"] = "c_api"
+    return spec
+
+
+def c_api_table(names=("side", "A", "B")):
+    classes = {"side": "enum", "A": "device_ptr", "B": "device_ptr"}
+    args = [{"position": 0, "name": "handle", "class": "context"}]
+    args.extend({"position": index, "name": name, "class": classes[name]}
+                for index, name in enumerate(names, 1))
+    return {
+        "schema_version": 1,
+        "sequence": [{"step": "context", "shape": "struct_handle"},
+                     {"step": "execute", "args": args}],
+        "output": {"in_place": "B"},
+    }
+
+
+class TestCApiBinding(unittest.TestCase):
+    def test_names_are_checked_against_the_call_sequence(self):
+        design = build_design(c_api_spec(), call_sequence=c_api_table())
+        self.assertEqual(["side", "A", "B"],
+                         [item["name"] for item in design["inputs"]])
+        self.assertEqual("strsm_batched_c_api", design["api_type"])
+        self.assertEqual("B", design["outputs"])
+
+    def test_call_sequence_is_required(self):
+        with self.assertRaises(DeclarationError) as caught:
+            build_design(c_api_spec())
+        self.assertIn("调用序列表", str(caught.exception))
+
+    def test_missing_yaml_input_names_are_reported(self):
+        spec = c_api_spec()
+        spec["parameters"].pop("A")
+        with self.assertRaises(DeclarationError) as caught:
+            build_design(spec, call_sequence=c_api_table())
+        self.assertIn("缺少", str(caught.exception))
+        self.assertIn("A", str(caught.exception))
+
+    def test_extra_yaml_input_names_are_reported(self):
+        spec = c_api_spec()
+        spec["parameters"]["alpha"] = {
+            "element_kind": "attr", "runtime_container": "single",
+            "dtype": "float", "combo_key": "alpha",
+        }
+        spec["combos"][0]["alpha"] = 1.0
+        with self.assertRaises(DeclarationError) as caught:
+            build_design(spec, call_sequence=c_api_table())
+        self.assertIn("多出", str(caught.exception))
+        self.assertIn("alpha", str(caught.exception))
+
+    def test_default_executor_is_rejected(self):
+        header = dict(C_API_HEADER, api_type="function")
+        with self.assertRaises(DeclarationError) as caught:
+            build_design(c_api_spec(header=header), call_sequence=c_api_table())
+        self.assertIn("function", str(caught.exception))
+
+    def test_other_modes_keep_the_torch_name_check(self):
+        spec = must_cover(
+            {"side": {"element_kind": "attr", "runtime_container": "single",
+                      "dtype": "int", "combo_key": "side"}},
+            [{"side": 1}], header=HEADER)
+        with self.assertRaises(DeclarationError) as caught:
+            build_design(spec, baseline_names=["input"],
+                         call_sequence=c_api_table())
+        self.assertIn("side", str(caught.exception))
+
+    def test_cli_loads_the_required_call_sequence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            materialized = temp / "must_cover.json"
+            materialized.write_text(
+                json.dumps(c_api_spec(), ensure_ascii=False), encoding="utf-8")
+            table = temp / "strsm_call_sequence.json"
+            table.write_text(
+                json.dumps(c_api_table(), ensure_ascii=False), encoding="utf-8")
+            output = temp / "strsm.yaml"
+            done = subprocess.run(
+                [sys.executable, str(SCRIPT), "-m", str(materialized),
+                 "--call-sequence", str(table), "-o", str(output)],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(0, done.returncode, done.stderr)
+            self.assertIn("api_type: strsm_batched_c_api",
+                          output.read_text(encoding="utf-8"))
 
 
 class TestTypeDerivation(unittest.TestCase):

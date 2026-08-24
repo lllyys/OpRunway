@@ -36,6 +36,70 @@ def parameters(*names):
             for name in names}
 
 
+def c_api_table(names=("m", "n", "B")):
+    classes = {"m": "dim", "n": "dim", "B": "device_ptr"}
+    args = [{"position": 0, "name": "handle", "class": "context"}]
+    args.extend({"position": index, "name": name, "class": classes[name]}
+                for index, name in enumerate(names, 1))
+    return {
+        "schema_version": 1, "symbol": "aclblasStrsmBatched",
+        "sequence": [{"step": "context", "shape": "struct_handle"},
+                     {"step": "execute", "args": args}],
+        "output": {"in_place": "B"},
+        "signature_source": "/proj/experimental/aclblas_minimal.h",
+    }
+
+
+class CApiTableTest(unittest.TestCase):
+    def test_c_api_table_is_recognised(self):
+        self.assertTrue(gate.is_c_api_table(c_api_table()))
+        self.assertFalse(gate.is_c_api_table(alignment(["input"])))
+
+    def test_context_is_derived_and_the_other_args_align(self):
+        report, problems = gate.judge(
+            parameters("m", "n", "B"), c_api_table(), {"outputs": "B"})
+        self.assertEqual([], problems)
+        self.assertEqual("c_api", report["call_convention"])
+        self.assertEqual(["m", "n", "B"], report["execute_inputs"])
+
+    def test_missing_execute_arg_is_rejected(self):
+        report, problems = gate.judge(
+            parameters("m", "B"), c_api_table(), {"outputs": "B"})
+        self.assertEqual(["n"], report["missing"])
+        self.assertTrue(any("n" in item for item in problems))
+
+    def test_extra_contract_arg_is_rejected(self):
+        _, problems = gate.judge(
+            parameters("m", "n", "B", "alpha"), c_api_table(),
+            {"outputs": "B"})
+        self.assertTrue(any("alpha" in item for item in problems))
+
+    def test_swapped_order_is_rejected(self):
+        report, problems = gate.judge(
+            parameters("n", "m", "B"), c_api_table(), {"outputs": "B"})
+        self.assertFalse(report["order_ok"])
+        self.assertTrue(any("顺序" in item for item in problems))
+
+    def test_named_in_place_output_matches_the_baseline_convention(self):
+        report, problems = gate.judge(
+            parameters("m", "n", "B"), c_api_table(), {"outputs": "B"})
+        self.assertEqual([], problems)
+        self.assertTrue(report["output_position_ok"])
+
+    def test_numeric_in_place_output_position_is_also_supported(self):
+        _, problems = gate.judge(
+            parameters("m", "n", "B"), c_api_table(), {"outputs": 2})
+        self.assertEqual([], problems)
+
+    def test_missing_or_wrong_output_position_is_rejected(self):
+        for yaml in ({}, {"outputs": "n"}, {"outputs": 1}):
+            with self.subTest(yaml=yaml):
+                report, problems = gate.judge(
+                    parameters("m", "n", "B"), c_api_table(), yaml)
+                self.assertFalse(report["output_position_ok"])
+                self.assertTrue(any("B" in item for item in problems))
+
+
 class MissingParameterTest(unittest.TestCase):
     """median 的原始形态：签名少一个入参，契约跟着少，全链路无人说话。"""
 
@@ -128,11 +192,14 @@ class UndecidableTest(unittest.TestCase):
 
 
 class CliTest(unittest.TestCase):
-    def _run(self, params, align):
+    def _run(self, params, align, yaml=None):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             decl = tmp / "decl.json"
-            decl.write_text(json.dumps({"parameters": params}), encoding="utf-8")
+            payload = {"parameters": params}
+            if yaml is not None:
+                payload["yaml"] = yaml
+            decl.write_text(json.dumps(payload), encoding="utf-8")
             align_path = tmp / "signature_alignment.json"
             align_path.write_text(json.dumps(align), encoding="utf-8")
             out = tmp / "signature_contract.json"
@@ -148,7 +215,16 @@ class CliTest(unittest.TestCase):
                                  alignment(["input", "dim", "keepdim"]))
         self.assertEqual(0, done.returncode, done.stderr)
         self.assertEqual("pass", report["verdict"])
-        self.assertEqual("/proj/op_host/op_api/aclnn_median.h", report["signature_source"])
+        self.assertEqual("/proj/op_host/op_api/aclnn_median.h",
+                         report["signature_source"])
+
+    def test_c_api_cli_reads_the_baseline_output_position(self):
+        done, report = self._run(
+            parameters("m", "n", "B"), c_api_table(), {"outputs": "B"})
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertTrue(report["output_position_ok"])
+        self.assertEqual("/proj/experimental/aclblas_minimal.h",
+                         report["signature_source"])
 
     def test_missing_parameter_exits_two(self):
         done, report = self._run(parameters("input", "keepdim"),

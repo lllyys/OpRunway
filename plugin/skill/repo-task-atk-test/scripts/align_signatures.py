@@ -624,11 +624,18 @@ def _c_api_table(args):
         context = context_shape(
             all_headers, context_param["type"], args.context_shape)
         if context["shape"] == "struct_handle":
-            struct_name = struct_name_for_context(all_headers, context_param["type"])
+            explicit_struct = None
+            if args.context_struct:
+                named = _named_reasons([args.context_struct], "--context-struct")
+                explicit_struct, struct_reason = next(iter(named.items()))
+                context["struct_source"] = struct_reason
+            struct_name = struct_name_for_context(
+                all_headers, context_param["type"], explicit_struct)
             context["struct"] = struct_name
         table = build_sequence(
             declaration, call_args, output=output, context=context,
             baseline=args.baseline, header_text=all_headers)
+        table["signature_source"] = str(header_path)
     except CApiSignatureError as exc:
         raise AlignError(str(exc)) from exc
     return table
@@ -677,6 +684,8 @@ def main():
     ap.add_argument("--output", dest="in_place_output", metavar="NAME=JUSTIFICATION",
                     help="c_api 原地输出参数及书面依据")
     ap.add_argument("--context-type", help="c_api 上下文类型名")
+    ap.add_argument("--context-struct", metavar="NAME=JUSTIFICATION",
+                    help="c_api 句柄是 void* 裸别名时，公开头文件里的 struct 名及书面依据")
     ap.add_argument("--context-shape", choices=("opaque_functions", "struct_handle"),
                     help="c_api 上下文构造形态；默认按公开声明判定")
     ap.add_argument("--env", required=True,

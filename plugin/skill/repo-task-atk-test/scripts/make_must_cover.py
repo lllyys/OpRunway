@@ -261,9 +261,12 @@ def main():
               "     换个工作目录跑的话，用 --interface 指过去。", file=sys.stderr)
         return 3
     with open(args.interface, encoding="utf-8") as handle:
-        baseline_kind = json.load(handle).get("baseline_kind", "torch")
+        interface = json.load(handle)
+    baseline_kind = interface.get("baseline_kind", "torch")
     must_cover = {"dims": dims, "coverage_policy": policy,
                   "baseline_kind": baseline_kind}
+    if "interface_mode" in interface:
+        must_cover["interface_mode"] = interface["interface_mode"]
     for field in ("operator_class", "class_profile"):
         if field in spec:
             must_cover[field] = spec[field]

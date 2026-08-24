@@ -91,9 +91,33 @@ class MakeMustCoverTest(unittest.TestCase):
             self.assertEqual(done.returncode, 0, done.stderr)
             spec = json.loads(out.read_text(encoding="utf-8"))
             self.assertEqual(spec["axes"], ["dtype", "rank"])   # 透传字段保留
+            self.assertNotIn("interface_mode", spec)
             self.assertTrue(spec["combos"])
             # 物化字段留空，由算子脚本填
             self.assertEqual(spec["combos"][0]["coverage_tags"], [])
+
+    def test_interface_mode_is_recorded_for_make_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decl = Path(tmp) / "decl.json"
+            out = Path(tmp) / "must_cover.json"
+            decl.write_text(json.dumps(
+                {"dims": DIMS, "operator_class": "movement",
+                 "coverage_policy": POLICY, "infeasible": INFEASIBLE},
+                ensure_ascii=False), encoding="utf-8")
+            args = project_for(tmp, DIMS)
+            interface = Path(tmp) / "interface.json"
+            interface.write_text(json.dumps(
+                {"baseline_kind": "torch", "interface_mode": "c_api"}),
+                encoding="utf-8")
+            done = subprocess.run(
+                [sys.executable,
+                 str(SKILL_ROOT / "scripts" / "make_must_cover.py"),
+                 "-d", str(decl), "-o", str(out), *args],
+                capture_output=True, text=True, timeout=120)
+            self.assertEqual(0, done.returncode, done.stderr)
+            spec = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual("c_api", spec["interface_mode"])
+            self.assertEqual("torch", spec["baseline_kind"])
 
     def test_dtype_binding_is_recorded_for_the_downstream_gate(self):
         """出处核对过之后要把这张表记进 must_cover，下游才换得了判据。

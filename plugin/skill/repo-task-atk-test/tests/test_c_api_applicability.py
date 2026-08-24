@@ -33,6 +33,22 @@ class CApiApplicabilityTest(unittest.TestCase):
             "float* x, float* y) { return 0; }\n",
             encoding="utf-8",
         )
+        self.op_host = self.op_dir / "op_host"
+        self.op_kernel = self.op_dir / "op_kernel"
+        self.op_host.mkdir()
+        self.op_kernel.mkdir()
+        self.host_impl = self.op_host / "aclblas_saxpy.cpp"
+        self.host_impl.write_text(
+            "int aclblasSaxpy(fooHandle_t handle) { return 0; }\n",
+            encoding="utf-8",
+        )
+        self.build_cmake = self.op_dir / "test" / "CMakeLists.txt"
+        self.build_cmake.parent.mkdir()
+        self.build_cmake.write_text(
+            'target_compile_options(saxpy PRIVATE '
+            '"$<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-2201>")\n',
+            encoding="utf-8",
+        )
         self.env = self.temp / "env.json"
         self.env.write_text(json.dumps({
             "operator_project": {"path": str(self.project)},
@@ -48,8 +64,19 @@ class CApiApplicabilityTest(unittest.TestCase):
             [sys.executable, str(SCRIPT), "--env", str(self.env),
              "--candidate", "aclblasSaxpy", "--header",
              str(header or self.header), "--op-dir", str(self.op_dir),
+             "--layout", "arch_dirs",
              "--arch-dir", arch_dir, "--arch-dir-basis",
              "ops-blas 根 CMakeLists 将本机型号映射到该目录",
+             "-o", str(self.output), *extra],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def run_experimental(self, *extra):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--env", str(self.env),
+             "--candidate", "aclblasSaxpy", "--header", str(self.header),
+             "--op-dir", str(self.op_dir), "--layout", "experimental",
+             "--build-cmake", str(self.build_cmake),
              "-o", str(self.output), *extra],
             capture_output=True, text=True, timeout=30,
         )
@@ -61,6 +88,7 @@ class CApiApplicabilityTest(unittest.TestCase):
         done = self.run_gate()
         self.assertEqual(0, done.returncode, done.stderr + done.stdout)
         report = self.report()
+        self.assertEqual("arch_dirs", report["layout"])
         self.assertTrue(report["checks"]["declaration"]["passed"])
         self.assertTrue(report["checks"]["representability"]["passed"])
         self.assertTrue(report["checks"]["arch_implementation"]["passed"])
@@ -131,12 +159,66 @@ class CApiApplicabilityTest(unittest.TestCase):
         done = subprocess.run(
             [sys.executable, str(SCRIPT), "--env", str(self.env),
              "--candidate", "aclblasSaxpy", "--header", str(self.header),
-             "--op-dir", str(self.op_dir), "--arch-dir", "arch22",
+             "--op-dir", str(self.op_dir), "--layout", "arch_dirs",
+             "--arch-dir", "arch22",
              "--arch-dir-basis", "   ", "-o", str(self.output)],
             capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(2, done.returncode)
         self.assertIn("arch-dir-basis", "\n".join(self.report()["failures"]))
+
+    def test_experimental_layout_records_verified_npu_arch(self):
+        done = self.run_experimental()
+        self.assertEqual(0, done.returncode, done.stderr + done.stdout)
+        report = self.report()
+        self.assertEqual("experimental", report["layout"])
+        self.assertEqual("dav-2201", report["npu_arch"])
+        self.assertEqual(str(self.host_impl.resolve()), report["matched_file"])
+        self.assertTrue(report["checks"]["arch_implementation"]["passed"])
+
+    def test_experimental_layout_requires_both_implementation_dirs(self):
+        self.op_kernel.rmdir()
+        done = self.run_experimental()
+        self.assertEqual(3, done.returncode)
+        report = self.report()
+        self.assertFalse(report["checks"]["arch_implementation"]["passed"])
+        self.assertIn("op_kernel", "\n".join(report["failures"]))
+
+    def test_experimental_layout_requires_npu_arch_in_named_cmake(self):
+        self.build_cmake.write_text("add_library(saxpy SHARED x.cpp)\n",
+                                    encoding="utf-8")
+        done = self.run_experimental()
+        self.assertEqual(2, done.returncode)
+        failures = "\n".join(self.report()["failures"])
+        self.assertIn("npu-arch", failures)
+        self.assertIn(str(self.build_cmake.resolve()), failures)
+
+    def test_experimental_layout_rejects_conflicting_npu_arch_values(self):
+        self.build_cmake.write_text(
+            "--npu-arch=dav-2201\n--npu-arch=dav-9999\n",
+            encoding="utf-8",
+        )
+        done = self.run_experimental()
+        self.assertEqual(2, done.returncode)
+        failures = "\n".join(self.report()["failures"])
+        self.assertIn("互相冲突", failures)
+        self.assertIn(str(self.build_cmake.resolve()), failures)
+
+    def test_unverified_soc_npu_arch_pair_requires_acknowledgement(self):
+        self.build_cmake.write_text("--npu-arch=dav-9999\n", encoding="utf-8")
+        done = self.run_experimental()
+        self.assertEqual(2, done.returncode)
+        self.assertIn("无法判定，需用户确认", "\n".join(self.report()["pending"]))
+
+        allowed = self.run_experimental("--allow-pending")
+        self.assertEqual(0, allowed.returncode, allowed.stderr + allowed.stdout)
+        self.assertTrue(self.report()["pending"])
+
+    def test_experimental_layout_rejects_arch_dir(self):
+        done = self.run_experimental("--arch-dir", "arch22")
+        self.assertEqual(2, done.returncode)
+        self.assertIn("--arch-dir", "\n".join(self.report()["failures"]))
+        self.assertIn("按 SKILL.md 的量具规则停止本轮并记录", done.stdout)
 
 
 if __name__ == "__main__":

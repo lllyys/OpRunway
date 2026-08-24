@@ -373,6 +373,14 @@ class RandomOperatorGateTest(unittest.TestCase):
         "特别注意事项：\n"
         "4. 随机采样算子精度比对需采用合理的统计/固定种子策略。\n"
     )
+    TEMPLATE_TASK_DOC = (
+        "### 3.2 随机类算子的精度对比判定策略\n"
+        "1. 与内置实现按固定 seed 逐位比对。\n"
+        "2. 只测确定性边界值。\n"
+        "3. 对随机采样做统计分布检验。\n"
+        "4. 同一台 device 同种子两次跑测自洽。\n"
+        "随机类算子的精度对比判定策略：不涉及（本算子无随机数生成）。\n"
+    )
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -412,11 +420,59 @@ class RandomOperatorGateTest(unittest.TestCase):
             .read_text(encoding="utf-8"))
         self.assertIn("bernoulli", signals["signal_keywords"])
 
+    def test_strategy_catalog_matches_the_controlled_values(self):
+        signals = json.loads(
+            (SKILL_ROOT / "references" / "random-operator-signals.json")
+            .read_text(encoding="utf-8"))
+        self.assertEqual(set(derive_interface.RANDOM_STRATEGIES),
+                         set(signals["strategies"]))
+
     def test_random_operator_without_strategy_is_refused(self):
         result, _ = self._run([], self.BERNOULLI_TASK_DOC)
         self.assertEqual(result.returncode, 2)
         self.assertIn("未给出精度对比策略", result.stderr)
         self.assertIn("不要自己写探针脚本", result.stderr)
+
+    def test_template_non_random_operator_accepts_not_applicable(self):
+        result, payload = self._run(
+            ["--random-strategy", "not_applicable",
+             "--random-strategy-source", "任务书 §3.2"],
+            self.TEMPLATE_TASK_DOC)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        block = payload["random_operator"]
+        self.assertFalse(block["detected"])
+        self.assertEqual("not_applicable", block["strategy"])
+        self.assertEqual("任务书 §3.2", block["strategy_source"])
+        self.assertEqual(
+            "随机类算子的精度对比判定策略：不涉及（本算子无随机数生成）",
+            block["negation_sentence"],
+        )
+
+    def test_template_without_negation_rejects_not_applicable(self):
+        task_doc = self.TEMPLATE_TASK_DOC.rsplit("随机类算子的精度", 1)[0]
+        result, _ = self._run(
+            ["--random-strategy", "not_applicable",
+             "--random-strategy-source", "任务书 §3.2"],
+            task_doc)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("随机或随机数", result.stderr)
+        self.assertIn("不涉及或无随机数生成", result.stderr)
+        self.assertIn("按 SKILL.md 的量具规则停止本轮并记录", result.stderr)
+
+    def test_genuinely_random_doc_rejects_not_applicable(self):
+        result, _ = self._run(
+            ["--random-strategy", "not_applicable",
+             "--random-strategy-source", "agent 判断"],
+            self.BERNOULLI_TASK_DOC)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("任务书里没有", result.stderr)
+
+    def test_not_applicable_still_requires_source(self):
+        result, _ = self._run(
+            ["--random-strategy", "not_applicable"],
+            self.TEMPLATE_TASK_DOC)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("缺依据", result.stderr)
 
     def test_strategy_without_source_is_refused(self):
         result, _ = self._run(
@@ -493,6 +549,16 @@ class RandomOperatorGateTest(unittest.TestCase):
             self.BERNOULLI_TASK_DOC)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([], payload["seed_parameters"])
+
+    def test_self_consistency_strategy_is_unchanged(self):
+        result, payload = self._run(
+            ["--random-strategy", "self_consistency",
+             "--random-strategy-source", "用户 2026-08-17 指定",
+             "--seed-parameters", "seed"],
+            self.BERNOULLI_TASK_DOC)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(payload["random_operator"]["detected"])
+        self.assertEqual(["seed"], payload["seed_parameters"])
 
     def test_non_random_operator_is_not_gated(self):
         result, payload = self._run([], "roll 算子开发任务书：沿轴滚动张量。")

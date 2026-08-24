@@ -115,5 +115,73 @@ class CApiBuildRendererTest(unittest.TestCase):
         self.assertIn("npu-arch", done.stderr + done.stdout)
 
 
+class CMakeSourceDirTest(unittest.TestCase):
+    CMAKE = """
+        set(TRSM_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/trsm_test.cpp
+            ${CMAKE_SOURCE_DIR}/op_host/trsm_host.cpp
+            ${CMAKE_SOURCE_DIR}/op_kernel/trsm_kernel.cpp)
+        add_executable(trsm_test ${TRSM_SOURCES})
+        target_include_directories(trsm_test PRIVATE
+            ${CMAKE_SOURCE_DIR}/op_kernel
+            ${CMAKE_SOURCE_DIR}/../../include)
+        target_link_libraries(trsm_test PRIVATE tiling_api dl)
+        target_compile_options(trsm_test PRIVATE
+            "$<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-2201>")
+    """
+
+    def _project(self, temp_dir, with_op_root_cmake):
+        project = Path(temp_dir) / "ops-blas"
+        op_dir = project / "experimental" / "aclblasTrsmBatched"
+        for relative in ("op_host/trsm_host.cpp", "op_kernel/trsm_kernel.cpp",
+                         "test/trsm_test.cpp"):
+            path = op_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("// stub\n", encoding="utf-8")
+        (project / "include").mkdir()
+        cmake = op_dir / "test" / "CMakeLists.txt"
+        cmake.write_text(self.CMAKE, encoding="utf-8")
+        if with_op_root_cmake:
+            (op_dir / "CMakeLists.txt").write_text(
+                "project(trsm LANGUAGES ASC CXX)\nadd_subdirectory(test)\n",
+                encoding="utf-8")
+        env = Path(temp_dir) / "env.json"
+        env.write_text(
+            json.dumps({"operator_project": {"path": str(project)}}),
+            encoding="utf-8")
+        return project, op_dir, cmake, env
+
+    def _render(self, temp_dir, with_op_root_cmake):
+        project, op_dir, cmake, env = self._project(
+            temp_dir, with_op_root_cmake)
+        out = Path(temp_dir) / "c_api_build"
+        done = subprocess.run(
+            [sys.executable, str(SCRIPT), "--env", str(env),
+             "--op-dir", str(op_dir), "--project-root", str(project),
+             "--build-cmake", str(cmake), "-o", str(out)],
+            capture_output=True, text=True, timeout=60)
+        report = json.loads(
+            (out / "render_report.json").read_text(encoding="utf-8"))
+        return done, report, op_dir
+
+    def test_op_root_cmake_makes_the_op_dir_the_cmake_source_dir(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            done, report, op_dir = self._render(temp_dir, True)
+            self.assertEqual(0, done.returncode, done.stderr + done.stdout)
+            self.assertEqual(str(op_dir.resolve()), report["cmake_source_dir"])
+            self.assertEqual(
+                [str((op_dir / "op_host/trsm_host.cpp").resolve()),
+                 str((op_dir / "op_kernel/trsm_kernel.cpp").resolve())],
+                report["sources"])
+            self.assertIn(
+                str((op_dir / "op_kernel").resolve()), report["includes"])
+
+    def test_without_op_root_cmake_the_project_root_still_applies(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            done, report, _ = self._render(temp_dir, False)
+            self.assertEqual(2, done.returncode)
+            self.assertIn("op_host", report["failures"][0])
+
+
 if __name__ == "__main__":
     unittest.main()

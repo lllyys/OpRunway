@@ -35,6 +35,12 @@ CHANNELS = ("inputs", "method_inputs", "tensor_input")
 YAML_HEADER_KEYS = frozenset({
     "name", "aclnn_name", "kernel_name", "version", "api",
     "api_type", "aclnn_api_type", "generate", "standard"})
+C_API_HEADER_KEYS = YAML_HEADER_KEYS | {"outputs"}
+C_API_ARG_CLASSES = frozenset({
+    "enum", "dim", "layout_param", "host_scalar", "device_ptr",
+    "device_ptr_array",
+})
+DEFAULT_API_TYPE = "function"
 
 # make_yaml 固定写死的三个键，作用是让 ATK 的默认展开退化成恒等。
 DERIVED_KEYS = ("dtype_numbers", "extra_numbers", "shape_distributions")
@@ -270,7 +276,50 @@ def _check_semantic_axes(must_cover, contracts):
     return check_axis_values(projection, contracts, must_cover.get("extract"))
 
 
-def build_design(must_cover, baseline_names=None):
+def _c_api_input_names(call_sequence):
+    """读取调用序列表中必须由 YAML 提供的 execute 参数名。"""
+    _require(isinstance(call_sequence, dict),
+             "c_api 必须给出调用序列表（--call-sequence <op>_call_sequence.json）")
+    sequence = call_sequence.get("sequence")
+    _require(isinstance(sequence, list), "调用序列表缺 sequence")
+    execute = next((item for item in sequence
+                    if isinstance(item, dict) and item.get("step") == "execute"), None)
+    _require(execute is not None and isinstance(execute.get("args"), list),
+             "调用序列表缺 execute.args")
+
+    names = []
+    for index, arg in enumerate(execute["args"]):
+        _require(isinstance(arg, dict), f"execute.args[{index}] 不是对象")
+        arg_class = arg.get("class")
+        if arg_class == "context":
+            continue
+        _require(arg_class in C_API_ARG_CLASSES,
+                 f"execute.args[{index}] 的类别 {arg_class!r} 不是 c_api v1 输入类别")
+        name = arg.get("name")
+        _require(isinstance(name, str) and name,
+                 f"execute.args[{index}] 缺非空 name")
+        names.append(name)
+    _require(len(names) == len(set(names)), f"execute.args 输入名有重复：{names}")
+    return names
+
+
+def check_c_api_binding(call_sequence, input_names):
+    expected = _c_api_input_names(call_sequence)
+    missing = [name for name in expected if name not in input_names]
+    extra = [name for name in input_names if name not in expected]
+    problems = []
+    if missing:
+        problems.append(
+            f"YAML inputs 缺少调用序列表 execute.args 中的参数 {missing}；"
+            f"表内输入：{expected}，YAML inputs：{input_names}")
+    if extra:
+        problems.append(
+            f"YAML inputs 多出调用序列表 execute.args 中没有的参数 {extra}；"
+            f"表内输入：{expected}，YAML inputs：{input_names}")
+    return problems
+
+
+def build_design(must_cover, baseline_names=None, call_sequence=None):
     header = must_cover.get("yaml")
     _require(isinstance(header, dict) and header,
              "声明缺 yaml 头部块（name / aclnn_name / api / generate / standard 等）")
@@ -279,11 +328,22 @@ def build_design(must_cover, baseline_names=None):
     combos = must_cover.get("combos") or []
     _require(combos, "must_cover 缺 combos")
 
-    unknown = sorted(set(header) - YAML_HEADER_KEYS)
+    c_api = must_cover.get("interface_mode") == "c_api"
+    allowed_header_keys = C_API_HEADER_KEYS if c_api else YAML_HEADER_KEYS
+    unknown = sorted(set(header) - allowed_header_keys)
     _require(not unknown,
              f"yaml 块有未知头部键：{', '.join(unknown)}；"
              "拼错的接线键会静默走 ATK 默认路径。若确属合法字段，"
              "登记进 knowledge_gaps 并补进 artifact-contracts.json")
+    if c_api:
+        api_type = header.get("api_type")
+        _require(isinstance(api_type, str) and api_type.strip(),
+                 "interface_mode 是 c_api，yaml 块必须写 api_type")
+        _require(api_type.strip() != DEFAULT_API_TYPE,
+                 f"c_api 的 api_type 不能用默认执行器 {DEFAULT_API_TYPE!r}；"
+                 "必须写已注册的双节点执行器名")
+        _require(call_sequence is not None,
+                 "c_api 必须给出调用序列表（--call-sequence <op>_call_sequence.json）")
     # 内置真值这条路上 `name` 只是 CPU 节点的标签：真正执行的是 `api_type`
     # 指到的那个插件。不写 api_type，ATK 走内置 function 执行器去 eval(name)，
     # 而 YAML 的输入名是 aclnn 的形参名，喂给任何 torch 函数都是
@@ -345,7 +405,9 @@ def build_design(must_cover, baseline_names=None):
     # bernoulli 的 prob / seed / offset 在任何 torch 重载里都不存在，这道门禁会
     # 把唯一正确的写法判成违规。这一侧的核对由 check_signature_contract.py 做，
     # 判据更强（集合、顺序、多余项三判，不是子集判定）。
-    if must_cover.get("baseline_kind") != "cann_builtin":
+    if c_api:
+        problems.extend(check_c_api_binding(call_sequence, names))
+    elif must_cover.get("baseline_kind") != "cann_builtin":
         if baseline_names:
             resolved, trusted = baseline_names, True
         else:
@@ -373,6 +435,8 @@ def main():
     parser.add_argument("--baseline-names", type=lambda s: [x.strip() for x in s.split(",") if x.strip()],
                         help="基线完整形参名，逗号分隔；只在 torch 替身给不全、"
                              "且已从官方文档确认并把依据写进证据时使用")
+    parser.add_argument("--call-sequence",
+                        help="c_api 必填：align_signatures.py 产出的 <op>_call_sequence.json")
     args = parser.parse_args()
     _stage_card.announce(__file__)
 
@@ -381,8 +445,17 @@ def main():
     except ImportError as exc:
         raise SystemExit("需要 pyyaml 才能写设计 YAML") from exc
 
+    call_sequence = None
+    if args.call_sequence:
+        try:
+            call_sequence = load_json(args.call_sequence)
+        except (OSError, ValueError) as exc:
+            print(f"读不出 --call-sequence：{exc}", file=sys.stderr)
+            return 3
+
     try:
-        design = build_design(load_json(args.must_cover), args.baseline_names)
+        design = build_design(
+            load_json(args.must_cover), args.baseline_names, call_sequence)
     except DeclarationError as exc:
         print(f"推导失败：{exc}", file=sys.stderr)
         return 2

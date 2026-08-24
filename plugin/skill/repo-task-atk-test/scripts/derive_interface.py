@@ -75,10 +75,21 @@ RANDOM_STRATEGIES = {
         "统计分布检验。前提：判定公式与阈值已经写明",
     "self_consistency":
         "同一台 device 同种子两次跑测自洽。前提：种子是显式入参",
+    "not_applicable":
+        "不涉及随机数生成。前提：任务书同一句同时包含随机词与否定词",
 }
+
+# not_applicable 的成立前提必须来自任务书同一句，不能由 agent 口头声明。
+RANDOM_WORDS = ("随机", "随机数")
+RANDOM_NEGATIONS = ("不涉及", "无随机数生成")
 
 # 这两档要求两次跑测拿到同一条随机数流，只有种子是显式入参才做得到。
 SEED_REQUIRED_STRATEGIES = ("equal_vs_builtin_pinned_seed", "self_consistency")
+
+GAUGE_DEFECT_PROTOCOL = (
+    "若你判断是门禁自身误判：按 SKILL.md 的量具规则停止本轮并记录，"
+    "不要修改量具续跑。"
+)
 
 RANDOM_SIGNALS_PATH = (
     Path(__file__).resolve().parents[1]
@@ -106,6 +117,15 @@ def _sentences(text):
     return [re.sub(r"^[0-9]+[.、)]\s*", "", s) for s in raw]
 
 
+def find_random_negation_sentence(task_doc_text):
+    """返回任务书中同时包含随机词与否定词的句子，没有则返回 None。"""
+    for sentence in _sentences(task_doc_text):
+        if (any(word in sentence for word in RANDOM_WORDS)
+                and any(word in sentence for word in RANDOM_NEGATIONS)):
+            return sentence
+    return None
+
+
 def check_random_strategy(matched_keywords, strategy, strategy_source,
                           task_doc_text, ask_template, seed_parameters=(),
                           baseline_kind=DEFAULT_BASELINE_KIND):
@@ -114,6 +134,19 @@ def check_random_strategy(matched_keywords, strategy, strategy_source,
     早先这里判的是「不许原样转述任务书」，靠字符串比对。那挡不住换个说法的
     转述，也说不出该填什么。改成受控词表：填不进词表的直接把菜单列出来。
     """
+    if strategy == "not_applicable":
+        if not (strategy_source or "").strip():
+            return (
+                "随机算子精度策略缺依据，必须写明谁确认的、何时确认的"
+                "（如「任务书 §3.2」），否则结论不可追溯。")
+        if find_random_negation_sentence(task_doc_text) is None:
+            return (
+                "随机判据填了 not_applicable，但任务书里没有符合条件的否定句。\n"
+                "  → 搜索条件：随机或随机数；不涉及或无随机数生成；"
+                "两组词必须出现在同一句。\n"
+                f"  → 命中的随机数信号词是 {matched_keywords}；"
+                "agent 声明不算任务书依据。")
+        return None
     if not matched_keywords:
         return None
     if not (strategy or "").strip():
@@ -249,7 +282,13 @@ def derive(mode, candidate, baseline, mode_source, policy, task_doc_text,
                                     signals["ask_template"], seed_parameters,
                                     baseline_kind)
     if problem:
-        raise ValueError(problem)
+        raise ValueError(f"{problem}\n{GAUGE_DEFECT_PROTOCOL}")
+
+    negation_sentence = (
+        find_random_negation_sentence(task_doc_text)
+        if random_strategy == "not_applicable" else None
+    )
+    strategy_recorded = bool(matched) or negation_sentence is not None
 
     return {
         "schema_version": 1,
@@ -262,10 +301,12 @@ def derive(mode, candidate, baseline, mode_source, policy, task_doc_text,
         "baseline_backend": baseline_device,
         "mode_source": mode_source.strip(),
         "random_operator": {
-            "detected": bool(matched),
+            "detected": bool(matched) and random_strategy != "not_applicable",
             "matched_keywords": matched,
-            "strategy": random_strategy.strip() if matched else None,
-            "strategy_source": random_strategy_source.strip() if matched else None,
+            "strategy": random_strategy.strip() if strategy_recorded else None,
+            "strategy_source": (random_strategy_source.strip()
+                                if strategy_recorded else None),
+            "negation_sentence": negation_sentence,
         },
         # 种子参数名要落盘：validate_cases.py 的 C7 拿它补词表判不出来的名字
         # （philoxState 之类），核对用例数据里这些参数是不是钉成了同一个常量。
@@ -317,7 +358,8 @@ def main():
     parser.add_argument("--random-strategy", default="",
                         help="随机算子的精度判据，信号词命中时必填。"
                              "取值见 references/random-operator-signals.json "
-                             "的 strategies")
+                             "的 strategies；任务书明确否定随机数生成时填 "
+                             "not_applicable")
     parser.add_argument("--random-strategy-source", default="",
                         help="随机算子精度策略的依据，如「S1 用户裁决 2026-08-16」")
     parser.add_argument("-o", "--output", default="evidence/interface.json")

@@ -57,6 +57,8 @@ _POINTER_CTYPE = {
 _LAYOUT_NAME = re.compile(r"(?i)^(?:lda|ldb|ldc|incx|incy|stride\w*)$")
 _AMBIGUOUS_SCALAR_NAME = {"alpha", "beta"}
 _TYPE_QUALIFIERS = {"const", "volatile", "restrict", "__restrict", "__restrict__"}
+_PUBLIC_ACL_ALIASES = {"aclrtStream": "void*"}
+_DEFAULT_INITIALIZER = re.compile(r"\s*=\s*[^=;]+$")
 _STRUCT_FIELD_CTYPES = {
     "size_t": "c_size_t",
     "bool": "c_bool",
@@ -611,9 +613,10 @@ def _typedef_aliases(header_text):
 def _resolve_field_type(type_text, aliases):
     value = _normalise_space(type_text)
     seen = set()
-    while value in aliases and value not in seen:
+    while value not in seen and (value in aliases or value in _PUBLIC_ACL_ALIASES):
         seen.add(value)
-        value = _normalise_space(aliases[value])
+        target = aliases[value] if value in aliases else _PUBLIC_ACL_ALIASES[value]
+        value = _normalise_space(target)
     return value
 
 
@@ -635,6 +638,7 @@ def _inspect_trivial_pod_struct(header_text, struct_name):
     aliases = _typedef_aliases(header_text)
     described = []
     for field in fields:
+        field = _DEFAULT_INITIALIZER.sub("", field).strip()
         if re.search(r"\b(?:public|protected|private)\s*:", field):
             return False, f"struct {struct_name} 含访问控制段", []
         if "(" in field or ")" in field:
@@ -729,9 +733,14 @@ def context_shape(header_text, context_type, explicit_shape=None):
     return result
 
 
-def struct_name_for_context(header_text, context_type):
+def struct_name_for_context(header_text, context_type, explicit=None):
     """从 typedef 关系中找出上下文类型对应的 struct 名。"""
     clean = _without_comments(header_text)
+    if explicit:
+        if _struct_block(header_text, explicit) is not None:
+            return explicit
+        raise CApiSignatureError(
+            f"--context-struct 指定的 {explicit} 在公开头文件里没有 struct 定义")
     patterns = (
         rf"\btypedef\s+struct\s+([A-Za-z_]\w*)\s*\{{.*?\}}\s*{re.escape(context_type)}\s*;",
         rf"\btypedef\s+struct\s+([A-Za-z_]\w*)\s*\*?\s*{re.escape(context_type)}\s*;",

@@ -36,6 +36,10 @@ YAML 由 `make_yaml.py` 从物化后的 `must_cover.json` 推导。
 | c_api | name | npu |
 | kernel | kernel_name | kernel |
 
+c_api 是下面输出规则的例外：`make_yaml.py` 必须读取 `<op>_call_sequence.json`，
+`inputs` 与 `execute.args` 的非上下文参数名双向一致，原地输出保留在 `inputs`，
+并由 `yaml.outputs` 写参数名或从零开始的位置；`api_type` 必须是非默认注册名。
+
 ## 输入契约
 
 每个 YAML 输入在 `must_cover.parameters` 中有同名契约：

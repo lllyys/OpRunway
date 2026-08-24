@@ -37,6 +37,10 @@ import _stage_card
 # pyaclnn 只转换 inputs 通道（L0 `binding.pyaclnn_native_conversion`）。
 # method_inputs / tensor_input 是基线侧对象构造，不进 aclnn 调用。
 ACLNN_CHANNEL = "inputs"
+C_API_ARG_CLASSES = frozenset({
+    "enum", "dim", "layout_param", "host_scalar", "device_ptr",
+    "device_ptr_array",
+})
 
 
 class ContractMismatch(ValueError):
@@ -81,8 +85,95 @@ def aclnn_input_names(alignment):
     return [row["yaml_key"] for row in rows]
 
 
-def judge(parameters, alignment):
+def is_c_api_table(alignment):
+    return (isinstance(alignment, dict)
+            and alignment.get("schema_version") == 1
+            and isinstance(alignment.get("sequence"), list)
+            and "aclnn" not in alignment)
+
+
+def c_api_input_names(table):
+    execute = next((step for step in table["sequence"]
+                    if isinstance(step, dict) and step.get("step") == "execute"),
+                   None)
+    if execute is None or not isinstance(execute.get("args"), list):
+        raise ContractMismatch("调用序列表里没有 execute.args，先重跑 align_signatures.py")
+    names = []
+    for index, arg in enumerate(execute["args"]):
+        if not isinstance(arg, dict):
+            raise ContractMismatch(f"execute.args[{index}] 不是对象")
+        arg_class = arg.get("class")
+        if arg_class == "context":
+            continue
+        if arg_class not in C_API_ARG_CLASSES:
+            raise ContractMismatch(
+                f"execute.args[{index}] 的类别 {arg_class!r} 不是 c_api v1 输入类别")
+        name = arg.get("name")
+        if not isinstance(name, str) or not name:
+            raise ContractMismatch(f"execute.args[{index}] 缺非空 name")
+        names.append(name)
+    if len(names) != len(set(names)):
+        raise ContractMismatch(f"execute.args 输入名有重复：{names}")
+    return names
+
+
+def _judge_c_api(parameters, table, yaml):
+    expected = c_api_input_names(table)
+    actual = contract_input_names(parameters)
+    problems = []
+    missing = [name for name in expected if name not in actual]
+    if missing:
+        problems.append(
+            f"契约缺少 execute.args 中的入参 {missing}"
+            f"（表内入参：{expected}；契约：{actual}）")
+    extra = [name for name in actual if name not in expected]
+    if extra:
+        problems.append(
+            f"契约多出 execute.args 中没有的入参 {extra}；"
+            "c_api 执行器按名取值，没有适配器会丢掉这些输入")
+    paired = [name for name in actual if name in expected]
+    ordered = [name for name in expected if name in actual]
+    if paired != ordered:
+        problems.append(
+            f"入参顺序与 execute.args 不一致：契约 {paired}，表内 {ordered}")
+
+    output_name = ((table.get("output") or {}).get("in_place"))
+    if not isinstance(output_name, str) or not output_name:
+        raise ContractMismatch("调用序列表缺 output.in_place")
+    output_index = actual.index(output_name) if output_name in actual else None
+    baseline_output = (yaml or {}).get("outputs")
+    output_position_ok = output_index is not None and (
+        baseline_output == output_name
+        if isinstance(baseline_output, str)
+        else isinstance(baseline_output, int)
+        and not isinstance(baseline_output, bool)
+        and baseline_output == output_index
+    )
+    if not output_position_ok:
+        problems.append(
+            f"原地输出 {output_name!r} 在基线入参中的位置是 {output_index}，"
+            f"yaml.outputs 却是 {baseline_output!r}；可写参数名或从 0 开始的位置")
+
+    report = {
+        "call_convention": "c_api",
+        "symbol": table.get("symbol"),
+        "execute_inputs": expected,
+        "contract_inputs": actual,
+        "missing": missing,
+        "extra": extra,
+        "order_ok": paired == ordered,
+        "in_place_output": output_name,
+        "baseline_output": baseline_output,
+        "output_position_ok": output_position_ok,
+        "signature_source": table.get("signature_source"),
+    }
+    return report, problems
+
+
+def judge(parameters, alignment, yaml=None):
     """返回 (报告, 问题列表)。问题列表非空即判不过。"""
+    if is_c_api_table(alignment):
+        return _judge_c_api(parameters, alignment, yaml)
     expected = aclnn_input_names(alignment)
     actual = contract_input_names(parameters)
     adapter = (alignment.get("aclnn_adapter") or {})
@@ -145,7 +236,7 @@ def main():
         return 3
 
     try:
-        report, problems = judge(parameters, alignment)
+        report, problems = judge(parameters, alignment, decl.get("yaml"))
     except ContractMismatch as exc:
         print(f"判不了：{exc}", file=sys.stderr)
         return 2
@@ -160,8 +251,12 @@ def main():
             print(f"{index}. {text}", file=sys.stderr)
         return 2
 
-    print(f"参数契约与 aclnn 签名一致（{len(report['aclnn_inputs'])} 个入参）"
-          f" → {args.output}")
+    if report.get("call_convention") == "c_api":
+        print(f"参数契约与 c_api 调用序列表一致（{len(report['execute_inputs'])} 个入参）"
+              f" → {args.output}")
+    else:
+        print(f"参数契约与 aclnn 签名一致（{len(report['aclnn_inputs'])} 个入参）"
+              f" → {args.output}")
     return 0
 
 

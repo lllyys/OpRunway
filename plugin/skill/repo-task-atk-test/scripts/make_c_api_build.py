@@ -115,10 +115,19 @@ def _expand_tokens(tokens, variables, stack=()):
     return expanded
 
 
-def _replace_known_dirs(token, project_root, cmake_dir):
+def cmake_source_dir_for(op_dir, project_root):
+    """按本次 CMake 配置入口确定 CMAKE_SOURCE_DIR。"""
+    if (Path(op_dir) / "CMakeLists.txt").is_file():
+        return (Path(op_dir),
+                "算子目录自带根 CMakeLists.txt，按算子目录配置")
+    return Path(project_root), "算子目录没有根 CMakeLists.txt，按工程根配置"
+
+
+def _replace_known_dirs(token, project_root, cmake_dir, cmake_source_dir=None):
+    source_dir = cmake_source_dir or project_root
     replacements = {
-        "${PROJECT_SOURCE_DIR}": str(project_root),
-        "${CMAKE_SOURCE_DIR}": str(project_root),
+        "${PROJECT_SOURCE_DIR}": str(source_dir),
+        "${CMAKE_SOURCE_DIR}": str(source_dir),
         "${CMAKE_CURRENT_SOURCE_DIR}": str(cmake_dir),
         "${CMAKE_CURRENT_LIST_DIR}": str(cmake_dir),
     }
@@ -128,8 +137,9 @@ def _replace_known_dirs(token, project_root, cmake_dir):
     return value
 
 
-def _resolve_local_path(token, project_root, cmake_dir):
-    value = _replace_known_dirs(token, project_root, cmake_dir)
+def _resolve_local_path(token, project_root, cmake_dir, cmake_source_dir=None):
+    value = _replace_known_dirs(
+        token, project_root, cmake_dir, cmake_source_dir)
     if "${" in value or "$<" in value:
         return value
     path = Path(value).expanduser()
@@ -167,11 +177,14 @@ def parse_build_facts(text, *, op_dir, project_root, cmake_path):
     cmake_dir = cmake_path.parent
     project_resolved = project_root.resolve()
     op_resolved = op_dir.resolve()
+    cmake_source_dir, cmake_source_basis = cmake_source_dir_for(
+        op_dir, project_root)
     sources = []
     for token in build_tokens:
         if not token.endswith(".cpp"):
             continue
-        resolved_text = _resolve_local_path(token, project_root, cmake_dir)
+        resolved_text = _resolve_local_path(
+            token, project_root, cmake_dir, cmake_source_dir)
         if "${" in resolved_text or "$<" in resolved_text:
             continue
         resolved = Path(resolved_text)
@@ -184,7 +197,7 @@ def parse_build_facts(text, *, op_dir, project_root, cmake_path):
             sources.append(str(resolved))
 
     includes = _stable_unique(
-        _resolve_local_path(token, project_root, cmake_dir)
+        _resolve_local_path(token, project_root, cmake_dir, cmake_source_dir)
         for token in include_tokens if token)
     libraries = _stable_unique(token for token in library_tokens if token)
     arch_flags = _stable_unique(re.findall(
@@ -212,6 +225,8 @@ def parse_build_facts(text, *, op_dir, project_root, cmake_path):
         "includes": includes,
         "libraries": libraries,
         "npu_arch": arch_flags[0],
+        "cmake_source_dir": str(cmake_source_dir.resolve()),
+        "cmake_source_dir_basis": cmake_source_basis,
     }
 
 

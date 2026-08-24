@@ -27,6 +27,7 @@
     "equal_vs_builtin_pinned_seed": "与 CANN 内置实现逐位比对。前提：种子是显式入参且在用例数据里钉死。跑法见 builtin-baseline.md",
     "deterministic_boundary_only": "只测确定性边界值（如概率取 0 或 1）。前提：任务书认这样的覆盖够用",
     "distribution_test": "统计分布检验。前提：判定公式与阈值已经写明，如 |mean-prob|≤z·sqrt(prob(1-prob)/N)",
-    "self_consistency": "同一台 device 同种子两次跑测自洽。前提：种子是显式入参"
+    "self_consistency": "同一台 device 同种子两次跑测自洽。前提：种子是显式入参",
+    "not_applicable": "不涉及随机数生成。前提：任务书同一句同时包含「随机」或「随机数」，以及「不涉及」或「无随机数生成」"
   }
 }

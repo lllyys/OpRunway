@@ -55,8 +55,58 @@ def nulled_parameters(cases):
     return hits
 
 
+def is_c_api_table(alignment):
+    return (isinstance(alignment, dict)
+            and alignment.get("schema_version") == 1
+            and isinstance(alignment.get("sequence"), list)
+            and "aclnn" not in alignment)
+
+
+def _judge_c_api(cases):
+    report = {"total_cases": len(cases), "verdicts": {}, "reviews": [],
+              "call_convention": "c_api"}
+    problems = []
+    missing_case_ids = [
+        case.get("id") for case in cases
+        if not isinstance(case.get("api_type"), str)
+        or not case["api_type"].strip()
+    ]
+    bound = {
+        case["api_type"].strip() for case in cases
+        if isinstance(case.get("api_type"), str) and case["api_type"].strip()
+    }
+    default_cases = [
+        case.get("id") for case in cases
+        if isinstance(case.get("api_type"), str)
+        and case["api_type"].strip() == DEFAULT_WIRING["api_type"]
+    ]
+    adapted = (not missing_case_ids and not default_cases and len(bound) == 1)
+    report["verdicts"]["api_type"] = {
+        "required": True,
+        "determinable": True,
+        "bound": sorted(bound),
+        "adapted": adapted,
+        "missing_case_ids": missing_case_ids,
+        "default_case_ids": default_cases,
+        "why": "c_api 的 npu 与 cpu 节点都由 api_type 选择同一个执行器",
+    }
+    if missing_case_ids:
+        problems.append(
+            f"c_api 的每条用例都必须显式设置 api_type；缺失用例：{missing_case_ids}")
+    if default_cases:
+        problems.append(
+            f"c_api 不能绑定默认执行器 {DEFAULT_WIRING['api_type']}；"
+            f"仍使用默认值的用例：{default_cases}")
+    if len(bound) > 1:
+        problems.append(
+            f"用例集里 api_type 不唯一：{sorted(bound)}；一个分面只能有一个执行器")
+    return report, problems
+
+
 def judge(alignment, cases):
     """返回 (报告, 问题列表)。问题列表非空即判不过。"""
+    if is_c_api_table(alignment):
+        return _judge_c_api(cases)
     report = {"total_cases": len(cases), "verdicts": {}, "reviews": []}
     problems = []
 
