@@ -2,6 +2,18 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-23 · S6 交接契约：两侧唯一共享门从散文变成机读契约
+
+- 新建 `references/handoff-contract.json` 与加载器 `scripts/_handoff_contract.py`：清单 schema、11 个
+  顶层字段形状、5 条固定排除、`interface.json` 的 7 个键、交接包目录树、验收侧消费者。`seal_bundle`
+  与 `check_bundle` 的常量全部从契约派生，契约不可用走退出码 3。
+- 封印核的接口键 4 → 7；接收门在 S0 对缺键判 `manifest_problems` 退出码 2，同时保留接口比对结果。
+  这是唯一一处改动既有断言的地方：`check_bundle.py` 是拆分新建的量具，`verdict.py` 本就在 S4 拒绝缺
+  `baseline_api`，S0 先拦只是把同一失败提前三个阶段。
+- `handoff.md` 的封印清单样例与字段来源段按契约改列 7 键，其余 74 个正文段逐字不变；新增契约派生视图
+  由 `render_views.py` 渲染并由 `--check` 锁住。
+- 本机全量 `22 failed / 1030 passed / 19 skipped / 1273 subtests passed`，failed 集合逐字不变。
+
 ## 2026-08-21 · 共用件拆分 S1–S5c：脚本归属、政策与 reference 按侧切开，签名来源统一到任务书
 
 - 六步本地落地（S1 `b572546`、S2 `6496dd8`、S3 `78fb2d3`、S4 `56e2559`、S5a `628ca61`、

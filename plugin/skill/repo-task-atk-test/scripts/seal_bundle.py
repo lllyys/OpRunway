@@ -18,39 +18,41 @@ from pathlib import Path
 
 from _case_utils import file_sha256
 from _contracts import ContractError, artifacts_of, load
+import _handoff_contract
 import _stage_card
 from probe_progress import survey
 
 
-SCHEMA_VERSION = 1
-EXCLUDED = (
-    "evidence/timeline.jsonl",
-    "evidence/repro.sh",
-    "evidence/bundle.json",
-    "evidence/env.json",
-    "evidence/env.sh",
-)
-IGNORED_DIRS = ("__pycache__",)
+_HANDOFF_CONTRACT_ERROR = None
+try:
+    SCHEMA_VERSION = _handoff_contract.schema_version()
+    EXCLUDED = _handoff_contract.excluded()
+    IGNORED_DIRS = _handoff_contract.ignored_dirs()
+    INTERFACE_FIELDS = _handoff_contract.interface_fields()
+except _handoff_contract.HandoffContractError as exc:
+    _HANDOFF_CONTRACT_ERROR = exc
+    SCHEMA_VERSION = None
+    EXCLUDED = ()
+    IGNORED_DIRS = ()
+    INTERFACE_FIELDS = ()
 REPORT_LABELS = {
     "coverage": "覆盖",
     "freeze": "冻结",
     "validate": "用例校验",
     "adapter": "适配器",
 }
-INTERFACE_FIELDS = (
-    "interface_mode",
-    "candidate_symbol",
-    "baseline_api",
-    "baseline_kind",
-)
-
-
 class SealFailure(RuntimeError):
     """封印失败，带约定的退出码。"""
 
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+def require_handoff_contract():
+    """把共享契约的加载错误转成封印门约定的结构错误。"""
+    if _HANDOFF_CONTRACT_ERROR is not None:
+        raise SealFailure(3, f"交接契约不可用：{_HANDOFF_CONTRACT_ERROR}")
 
 
 def parser():
@@ -479,6 +481,7 @@ def announce_at_root(root):
 
 def seal(root):
     """完成检查、配对、门禁和封印。"""
+    require_handoff_contract()
     if not root.is_dir():
         raise SealFailure(3, f"工作目录不存在：{root}")
     evidence = root / "evidence"

@@ -74,6 +74,8 @@ atk-case-<op>/
 `evidence/bundle.json` 是交接包的封印清单。它记录生成条件、任务书指纹、接口选择、
 分面入口和文件摘要，不记录 agent 的通过声明。
 
+目录树与清单样例由 `render_views.py` 从 `handoff-contract.json` 渲染，改交接面先改契约。
+
 清单的顶层形态如下：
 
 ```json
@@ -88,7 +90,10 @@ atk-case-<op>/
     "interface_mode": "aclnn",
     "candidate_symbol": "aclnnXxx",
     "baseline_api": "torch.xxx",
-    "baseline_kind": "torch"
+    "baseline_kind": "torch",
+    "execution_backend": "npu",
+    "baseline_backend": "cpu",
+    "mode_source": "任务书 §2.3"
   },
   "facets": [],
   "files": {},
@@ -130,7 +135,8 @@ atk-case-<op>/
 时存在；普通文件路径还必须同时出现在 `files` 中。
 
 `interface` 逐项复制 `evidence/interface.json` 的 `interface_mode`、`candidate_symbol`、
-`baseline_api` 与 `baseline_kind`，清单不得自行推导第二套接口决定。
+`baseline_api`、`baseline_kind`、`execution_backend`、`baseline_backend` 与 `mode_source`，
+清单不得自行推导第二套接口决定。
 
 ## 排除名单
 

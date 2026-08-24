@@ -16,15 +16,10 @@ SCRIPT = SCRIPTS / "seal_bundle.py"
 sys.path.insert(0, str(SCRIPTS))
 
 from _case_utils import file_sha256  # noqa: E402
+from _handoff_contract import excluded  # noqa: E402
 
 
-EXCLUDED = [
-    "evidence/timeline.jsonl",
-    "evidence/repro.sh",
-    "evidence/bundle.json",
-    "evidence/env.json",
-    "evidence/env.sh",
-]
+EXCLUDED = list(excluded())
 FACET_PATHS = (
     "yaml",
     "case_json",
@@ -73,6 +68,9 @@ def make_bundle(work):
             "candidate_symbol": "aclnnMedian",
             "baseline_api": "torch.median",
             "baseline_kind": "torch",
+            "execution_backend": "npu",
+            "baseline_backend": "cpu",
+            "mode_source": "任务书 §2.3",
             "task_doc": {"name": "median.md", "sha256": "d" * 64},
         },
     )

@@ -125,6 +125,10 @@
       "skill": "shared",
       "role": "加载骨架并渲染派生视图"
     },
+    "_handoff_contract.py": {
+      "skill": "shared",
+      "role": "加载交接契约并渲染视图"
+    },
     "_stage_card.py": {
       "skill": "shared",
       "role": "在量具入口补送阶段作战卡"
@@ -268,6 +272,9 @@
       "skill": "shared"
     },
     "handoff.md": {
+      "skill": "shared"
+    },
+    "handoff-contract.json": {
       "skill": "shared"
     },
     "glossary.md": {

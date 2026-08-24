@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from _case_utils import file_sha256
+import _handoff_contract
 from _signature_parse import (
     AlignError,
     parse_signature,
@@ -27,15 +28,20 @@ import _stage_card
 import _taskdoc
 
 
-SUPPORTED_SCHEMA_VERSIONS = (1,)
-EXPECTED_EXCLUDED = (
-    "evidence/timeline.jsonl",
-    "evidence/repro.sh",
-    "evidence/bundle.json",
-    "evidence/env.json",
-    "evidence/env.sh",
-)
-EXPECTED_IGNORED_DIRS = ("__pycache__",)
+_HANDOFF_CONTRACT_ERROR = None
+try:
+    SUPPORTED_SCHEMA_VERSIONS = (_handoff_contract.schema_version(),)
+    EXPECTED_EXCLUDED = _handoff_contract.excluded()
+    EXPECTED_IGNORED_DIRS = _handoff_contract.ignored_dirs()
+    EXPECTED_INTERFACE_FIELDS = _handoff_contract.interface_fields()
+    EXPECTED_SHAPES = _handoff_contract.manifest_shapes()
+except _handoff_contract.HandoffContractError as exc:
+    _HANDOFF_CONTRACT_ERROR = exc
+    SUPPORTED_SCHEMA_VERSIONS = ()
+    EXPECTED_EXCLUDED = ()
+    EXPECTED_IGNORED_DIRS = ()
+    EXPECTED_INTERFACE_FIELDS = ()
+    EXPECTED_SHAPES = {}
 ROOT_FROZEN_SUFFIXES = (
     "_decl.json",
     "_constraint.py",
@@ -46,6 +52,12 @@ ROOT_FROZEN_SUFFIXES = (
 
 class IntakeFailure(RuntimeError):
     """清单或必需输入无法可靠读取。"""
+
+
+def require_handoff_contract():
+    """把共享契约的加载错误转成接收门约定的输入错误。"""
+    if _HANDOFF_CONTRACT_ERROR is not None:
+        raise IntakeFailure(f"交接契约不可用：{_HANDOFF_CONTRACT_ERROR}")
 
 
 def parser():
@@ -115,17 +127,9 @@ def require_manifest(root):
             f"bundle.json schema_version={version!r} 不认识；当前认识的版本：{known}"
         )
 
-    expected_shapes = {
-        "files": dict,
-        "task_doc": dict,
-        "atk": dict,
-        "interface": dict,
-        "excluded": list,
-        "ignored_dirs": list,
-    }
     malformed = [
-        name for name, kind in expected_shapes.items()
-        if not isinstance(manifest.get(name), kind)
+        name for name, kind in EXPECTED_SHAPES.items()
+        if type(manifest.get(name)) is not kind
     ]
     if malformed:
         raise IntakeFailure("bundle.json 字段类型不对：" + "、".join(malformed))
@@ -181,6 +185,10 @@ def check_integrity(root, manifest):
         manifest_problems.append("excluded 不是约定的五个固定路径")
     if manifest.get("ignored_dirs") != list(EXPECTED_IGNORED_DIRS):
         manifest_problems.append("ignored_dirs 不是 ['__pycache__']")
+    interface = manifest["interface"]
+    for field in EXPECTED_INTERFACE_FIELDS:
+        if field not in interface or interface[field] is None:
+            manifest_problems.append(f"interface 缺字段 {field}")
 
     for relative, expected in sorted(manifest["files"].items(), key=lambda item: str(item[0])):
         try:
@@ -517,6 +525,7 @@ def main(argv=None):
     root = Path(args.dir).expanduser().resolve()
     announce_at_root(root)
     try:
+        require_handoff_contract()
         if not root.is_dir():
             raise IntakeFailure(f"交接包副本目录不存在：{root}")
         manifest_path, manifest = require_manifest(root)

@@ -198,13 +198,17 @@ class CheckBundleTest(unittest.TestCase):
         self.assertTrue(item["passed"])
         self.assertEqual("torch.roll", item["evidence"]["baseline_api"])
 
-    def test_missing_manifest_baseline_is_recorded_but_does_not_skip_comparison(self):
+    def test_missing_manifest_baseline_blocks_but_does_not_skip_comparison(self):
         manifest_path = self.copy / "evidence" / "bundle.json"
         manifest = read_json(manifest_path)
         manifest["interface"].pop("baseline_api")
         write_json(manifest_path, manifest)
         done = self.run_check()
-        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertEqual(2, done.returncode, done.stderr)
+        self.assertTrue(any(
+            "baseline_api" in problem
+            for problem in self.intake()["integrity"]["evidence"]["manifest_problems"]
+        ))
         item = self.intake()["interface"]
         self.assertTrue(item["applicable"])
         self.assertTrue(item["passed"])
