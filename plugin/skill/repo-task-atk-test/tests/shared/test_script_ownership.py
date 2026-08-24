@@ -1,0 +1,336 @@
+"""脚本归属与两个子 skill 的边界。"""
+
+import ast
+import re
+import sys
+import unittest
+from collections import defaultdict
+from pathlib import Path
+
+from _paths import (REFERENCES, SCRIPTS, SKILL_ROOT, TESTS_ROOT,
+                    layout_side, nested_side_page, require_nested_source)
+
+
+sys.path.insert(0, str(SCRIPTS))
+
+import _contracts  # noqa: E402
+
+
+SCRIPT_REF = re.compile(r"`(\w+\.py)`")
+REFERENCE_REF = re.compile(r"\.\./references/([\w.-]+\.(?:md|json))")
+CARD_GAUGE = re.compile(r"量具 (\w+\.py)")
+REFERENCE_SKILLS = frozenset({"case-gen", "acceptance", "shared"})
+TEST_DIRECTORIES = {
+    "case_gen": "case-gen",
+    "acceptance": "acceptance",
+    "shared": "shared",
+}
+
+
+def local_imports(path, module_files):
+    """返回脚本对同目录模块的 import，包含函数内的惰性 import。"""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        modules = []
+        if isinstance(node, ast.Import):
+            modules = [alias.name.split(".")[0] for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules = [node.module.split(".")[0]]
+        for module in modules:
+            if module in module_files:
+                yield module_files[module], node.lineno
+
+
+def referenced_test_ownership(path, script_ownership, reference_ownership):
+    """按 import 与源码里的文件名返回测试触及的归属。"""
+    text = path.read_text(encoding="utf-8")
+    found = set()
+    module_ownership = {
+        Path(name).stem: spec["skill"]
+        for name, spec in script_ownership.items()
+    }
+    tree = ast.parse(text, filename=str(path))
+    for node in ast.walk(tree):
+        modules = []
+        if isinstance(node, ast.Import):
+            modules = [alias.name.split(".")[0] for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules = [node.module.split(".")[0]]
+        found.update(module_ownership[name]
+                     for name in modules if name in module_ownership)
+    found.update(spec["skill"] for name, spec in script_ownership.items()
+                 if name in text)
+    found.update(spec["skill"] for name, spec in reference_ownership.items()
+                 if name in text)
+    return found
+
+
+def ownership_violations(tests_root, script_ownership,
+                         reference_ownership):
+    """返回测试目录与所引用量具/reference 不一致的清单。"""
+    violations = []
+    for path in sorted(tests_root.rglob("test_*.py")):
+        directory = path.parent.name
+        if directory not in TEST_DIRECTORIES:
+            violations.append(f"{path.name}: 不在 case_gen/acceptance/shared 目录")
+            continue
+        expected = TEST_DIRECTORIES[directory]
+        owners = referenced_test_ownership(
+            path, script_ownership, reference_ownership)
+        if expected == "shared":
+            # shared/ 承担骨架、行文、路由、别名与跨侧边界测试。
+            continue
+        disallowed = owners - {expected, "shared"}
+        if disallowed:
+            violations.append(
+                f"{path.relative_to(tests_root)}: {expected} 测试引用了 "
+                f"{', '.join(sorted(disallowed))}")
+        elif expected not in owners:
+            violations.append(
+                f"{path.relative_to(tests_root)}: 只引用 shared，应放 shared/")
+    return violations
+
+
+class ScriptOwnershipTest(unittest.TestCase):
+    def setUp(self):
+        self.data = _contracts.load()
+        self.ownership = self.data.get("scripts") or {}
+        self.script_paths = {path.name: path for path in SCRIPTS.glob("*.py")}
+        references = SKILL_ROOT / "references"
+        self.reference_paths = {
+            path.name: path
+            for pattern in ("*.md", "*.json")
+            for path in references.glob(pattern)
+        }
+
+    def test_inventory_covers_every_python_script(self):
+        side = layout_side()
+        if side is None:
+            self.assertEqual(set(self.script_paths), set(self.ownership))
+            expected = self.ownership
+        else:
+            expected = {
+                name: spec for name, spec in self.ownership.items()
+                if spec["skill"] in {side, "shared"}
+            }
+            self.assertEqual(set(self.script_paths), set(expected))
+        for name, spec in expected.items():
+            with self.subTest(script=name):
+                self.assertIn(spec.get("skill"), _contracts.SCRIPT_SKILLS)
+                role = spec.get("role")
+                self.assertIsInstance(role, str)
+                self.assertTrue(role.strip(), f"{name} 缺 role")
+                self.assertLessEqual(len(role), 40, f"{name} 的 role 超过 40 字")
+
+    def test_ownership_matches_artifact_and_gate_stages(self):
+        stage_skills = defaultdict(set)
+        for spec in self.data["artifacts"].values():
+            producer = spec.get("producer")
+            if producer:
+                stage_skills[producer].add(
+                    self.data["stages"][spec["stage"]]["skill"])
+        for spec in self.data["gate_inventory"].values():
+            stage_skills[spec["script"]].add(
+                self.data["stages"][spec["stage"]]["skill"])
+
+        for name, spec in self.ownership.items():
+            if spec["skill"] == "shared":
+                continue
+            with self.subTest(script=name):
+                self.assertLessEqual(
+                    stage_skills[name], {spec["skill"]},
+                    f"{name} 出现在 {sorted(stage_skills[name])}，"
+                    f"却标成 {spec['skill']}",
+                )
+
+    def test_skill_pages_only_name_scripts_on_their_side(self):
+        require_nested_source(self, "跨侧入口边界")
+        pages = {
+            "case-gen": nested_side_page("case-gen"),
+            "acceptance": nested_side_page("acceptance"),
+        }
+        for skill, path in pages.items():
+            names = SCRIPT_REF.findall(path.read_text(encoding="utf-8"))
+            for name in names:
+                with self.subTest(skill=skill, script=name):
+                    self.assertIn(name, self.ownership, f"{path} 点名未登记脚本 {name}")
+                    if name in self.ownership:
+                        self.assertIn(
+                            self.ownership[name]["skill"], {skill, "shared"})
+
+    def test_skill_pages_only_name_references_on_their_side(self):
+        require_nested_source(self, "跨侧入口边界")
+        ownership = self.data.get("references") or {}
+        self.assertEqual(set(self.reference_paths), set(ownership))
+        for name, spec in ownership.items():
+            with self.subTest(reference=name):
+                self.assertIn(spec.get("skill"), REFERENCE_SKILLS)
+
+        pages = {
+            "case-gen": nested_side_page("case-gen"),
+            "acceptance": nested_side_page("acceptance"),
+        }
+        for skill, path in pages.items():
+            text = path.read_text(encoding="utf-8")
+            names = set(REFERENCE_REF.findall(text))
+            names.update(
+                name
+                for name in ownership
+                if re.search(
+                    rf"(?<![\w.-]){re.escape(name)}(?![\w.-])",
+                    text,
+                )
+            )
+            for name in sorted(names):
+                with self.subTest(skill=skill, reference=name):
+                    self.assertIn(name, ownership, f"{path} 点名未登记 reference {name}")
+                    if name in ownership:
+                        self.assertIn(
+                            ownership[name]["skill"], {skill, "shared"})
+
+    def test_execution_references_are_routed_to_their_consuming_side(self):
+        require_nested_source(self, "跨侧 reference 路由")
+        ownership = self.data.get("references") or {}
+        expected = {
+            "environment.md": "shared",
+            "workdir-freeze.md": "case-gen",
+            "execution.md": "acceptance",
+        }
+        for name, skill in expected.items():
+            with self.subTest(reference=name):
+                self.assertEqual(skill, ownership.get(name, {}).get("skill"))
+
+        case_gen = nested_side_page("case-gen").read_text(encoding="utf-8")
+        acceptance = nested_side_page("acceptance").read_text(encoding="utf-8")
+        for name in ("environment.md", "workdir-freeze.md"):
+            self.assertIn(name, case_gen)
+        self.assertNotIn("execution.md", case_gen)
+        for name in ("environment.md", "execution.md"):
+            self.assertIn(name, acceptance)
+        self.assertNotIn("workdir-freeze.md", acceptance)
+
+    def test_handoff_references_are_routed_to_their_consuming_side(self):
+        ownership = self.data.get("references") or {}
+        expected = {
+            "handoff.md": "shared",
+            "handoff-seal.md": "case-gen",
+            "handoff-intake.md": "acceptance",
+        }
+        for name, skill in expected.items():
+            with self.subTest(reference=name):
+                self.assertEqual(skill, ownership.get(name, {}).get("skill"))
+
+        case_gen = (SKILL_ROOT / "case-gen" / "SKILL.md").read_text(
+            encoding="utf-8")
+        acceptance = (SKILL_ROOT / "acceptance" / "SKILL.md").read_text(
+            encoding="utf-8")
+        for name in ("handoff.md", "handoff-seal.md"):
+            self.assertIn(name, case_gen)
+        self.assertNotIn("handoff-intake.md", case_gen)
+        for name in ("handoff.md", "handoff-intake.md"):
+            self.assertIn(name, acceptance)
+        self.assertNotIn("handoff-seal.md", acceptance)
+
+    def test_builtin_references_are_routed_to_their_consuming_side(self):
+        require_nested_source(self, "跨侧 reference 路由")
+        ownership = self.data.get("references") or {}
+        expected = {
+            "builtin-baseline-design.md": "case-gen",
+            "builtin-baseline.md": "acceptance",
+        }
+        for name, skill in expected.items():
+            with self.subTest(reference=name):
+                self.assertEqual(skill, ownership.get(name, {}).get("skill"))
+
+        case_gen = nested_side_page("case-gen").read_text(encoding="utf-8")
+        acceptance = nested_side_page("acceptance").read_text(encoding="utf-8")
+        self.assertIn("builtin-baseline-design.md", case_gen)
+        self.assertNotIn("builtin-baseline.md", case_gen)
+        self.assertIn("builtin-baseline.md", acceptance)
+        self.assertNotIn("builtin-baseline-design.md", acceptance)
+
+    def test_single_side_runtime_assets_are_not_marked_shared(self):
+        require_nested_source(self, "跨侧运行时边界")
+        expected_scripts = {
+            "_runtime_guard.py": "case-gen",
+            "run_atk_task.py": "acceptance",
+            "_policy.py": "shared",
+        }
+        for name, skill in expected_scripts.items():
+            with self.subTest(script=name):
+                self.assertEqual(skill, self.ownership.get(name, {}).get("skill"))
+
+        ownership = self.data.get("references") or {}
+        expected_references = {
+            "experimental_standard.md": "case-gen",
+            "verdict-policy.json": "acceptance",
+            "interface-policy.json": "shared",
+        }
+        for name, skill in expected_references.items():
+            with self.subTest(reference=name):
+                self.assertEqual(skill, ownership.get(name, {}).get("skill"))
+
+        parent = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        case_gen = nested_side_page("case-gen").read_text(encoding="utf-8")
+        acceptance = nested_side_page("acceptance").read_text(encoding="utf-8")
+        self.assertNotIn("experimental_standard.md", acceptance)
+        self.assertNotIn("run_atk_task.py", case_gen)
+        self.assertNotIn("run_atk_task.py", parent)
+
+    def test_router_only_names_shared_scripts(self):
+        require_nested_source(self, "父入口路由")
+        path = SKILL_ROOT / "SKILL.md"
+        names = SCRIPT_REF.findall(path.read_text(encoding="utf-8"))
+        for name in names:
+            with self.subTest(script=name):
+                self.assertIn(name, self.ownership, f"{path} 点名未登记脚本 {name}")
+                if name in self.ownership:
+                    self.assertEqual("shared", self.ownership[name]["skill"])
+
+    def test_stage_cards_only_name_gauges_on_their_side(self):
+        for skill in _contracts.SKILLS:
+            for stage in _contracts.stages_of(self.data, skill):
+                card = _contracts.render_card(self.data, stage)
+                for name in CARD_GAUGE.findall(card):
+                    with self.subTest(skill=skill, stage=stage, script=name):
+                        self.assertIn(
+                            name, self.ownership,
+                            f"{stage} 作战卡点名未登记量具 {name}",
+                        )
+                        if name in self.ownership:
+                            self.assertIn(
+                                self.ownership[name]["skill"], {skill, "shared"})
+
+    def test_imports_do_not_cross_ownership_boundaries(self):
+        module_files = {path.stem: path.name for path in self.script_paths.values()}
+        violations = []
+        for source, path in sorted(self.script_paths.items()):
+            if source not in self.ownership:
+                continue
+            source_skill = self.ownership[source]["skill"]
+            allowed = {"shared"} if source_skill == "shared" else {
+                source_skill, "shared"
+            }
+            for target, line in local_imports(path, module_files):
+                if target not in self.ownership:
+                    continue
+                target_skill = self.ownership[target]["skill"]
+                if target_skill not in allowed:
+                    violations.append(
+                        f"{source}:{line} ({source_skill}) -> "
+                        f"{target} ({target_skill})"
+                    )
+        self.assertEqual([], violations)
+
+    def test_each_test_file_matches_referenced_ownership(self):
+        require_nested_source(self, "tests/ 子目录的按侧归属")
+        violations = ownership_violations(
+            TESTS_ROOT,
+            self.ownership,
+            self.data.get("references") or {},
+        )
+        self.assertEqual([], violations)
+
+
+if __name__ == "__main__":
+    unittest.main()

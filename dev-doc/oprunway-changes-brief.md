@@ -2,6 +2,15 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+## 2026-08-23 · S9 测试按侧归位，路径解析兼容展开产物
+
+- 验收 skill 的回归测试归入 `case_gen/`、`acceptance/`、`shared/`，真机端到端
+  `test_cli_chain.py` 上移仓级 `plugin/tests/`；横跨文件按方法拆分，既有断言不删。
+- 新增唯一 `_paths.py`，测试不再用 `Path(__file__).parents[N]` 猜 skill 根；展开后另一侧
+  文件缺席时，行文基线与仅嵌套源边界测试按布局跳过，不把裁剪产物误判成损坏。
+- `test_script_ownership.py` 新增目录归属机械门，按骨架的 `scripts` / `references` 表核对
+  单侧测试没有越界引用；骨架本身不新增 tests 表，目录就是归属。
+
 ## 2026-08-23 · S7 归属收口：四处标 shared 的单侧件归位，政策加载按侧
 
 - `_runtime_guard.py`、`experimental_standard.md` 归生成侧，`run_atk_task.py`、`verdict-policy.json`

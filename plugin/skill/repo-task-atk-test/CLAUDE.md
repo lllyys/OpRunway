@@ -152,8 +152,11 @@ skill/repo-task-atk-test/
 │   ├── build-deploy.md
 │   └── ...
 ├── tests/                # 测试层
-│   ├── test_contracts.py # 四条不变量
-│   └── test_*.py         # 62+回归测试
+│   ├── _paths.py         # 嵌套源与展开产物的唯一路径解析
+│   ├── _decl_fixture.py  # 两侧共用夹具
+│   ├── case_gen/         # 只测生成侧量具与知识
+│   ├── acceptance/       # 只测验收侧量具与知识
+│   └── shared/           # 共用件、骨架、行文、路由与跨侧边界
 └── SKILL.md              # 入口
 ```
 

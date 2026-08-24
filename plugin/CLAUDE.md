@@ -36,13 +36,14 @@ repo-task-atk-test/           # 本仓（远程 gitcode.com/Justbin/repo-task-at
 ├── CLAUDE.md                 # 本文件，仓级共同规范
 ├── README.md                 # 仓门面：两个 skill 是什么 + 安装
 ├── skill/                    # 两个 skill 本体 + 两个别名目录，唯一发布物
-│   └── repo-task-atk-test/  # 含 case-gen/ 与 acceptance/ 两个子 skill 目录
+│   └── repo-task-atk-test/   # 含 case-gen/ 与 acceptance/ 两个子 skill 目录
+│       └── tests/            # 按 case_gen/、acceptance/、shared/ 归侧
 ├── docs/                     # 不随 skill 发布
 │   ├── skills/<name>/        # 使用者视角：design.md + quickstart.md
 │   ├── atk-facts.md          # ATK 事实基线，按需读
 │   ├── development/          # 开发规则 + 架构演进 + 素材归档
 │   └── superpowers/          # specs/ 与 plans/
-├── tests/test_repo_docs_style.py  # 仓级行文门禁
+├── tests/                    # 仓级测试（含跨两侧的真机 CLI 链）
 └── third_party/ATK/          # submodule → gitcode.com/Ascend/ATK（只读）
 ```
 

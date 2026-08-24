@@ -4,6 +4,7 @@
 """
 
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
@@ -18,8 +19,9 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 # 在同一个 pytest 会话里撞名——要么拿到自己这个正在初始化的模块（自我
 # 循环导入），要么被 pytest 判成「import file mismatch」直接收集失败。
 # 用 importlib 按路径加载并起一个不会撞名的别名，绕开这个坑。
-_ATK_STYLE_MODULE = (REPO_ROOT / "skill" / "repo-task-atk-test"
-                      / "tests" / "test_document_style.py")
+_ATK_TESTS = REPO_ROOT / "skill" / "repo-task-atk-test" / "tests"
+sys.path.insert(0, str(_ATK_TESTS))
+_ATK_STYLE_MODULE = _ATK_TESTS / "shared" / "test_document_style.py"
 _spec = importlib.util.spec_from_file_location(
     "_atk_test_document_style", _ATK_STYLE_MODULE)
 _atk_style = importlib.util.module_from_spec(_spec)
