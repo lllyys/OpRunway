@@ -23,6 +23,13 @@
 - [ ] 演练一次上游同步（fetch → `git diff --binary | git apply --3way --directory=plugin` → 更新
   `plugin/.claude-plugin/upstream.json` 基线）。
 
+## P1 · 矩阵乘系列验收（新方向）
+
+- [ ] 真机跑通 ops-blas 已有算子测试作为事实基线（锚点候选 sasum 与 cherk），记录结论后
+  再决定 skill 如何承接三职责。心智模型与公私边界见
+  `dev-doc/matmul-series-acceptance-mental-model.md`。完成条件：至少一个已有算子在目标机上
+  build + GTest 全流程有据可查，结论回填该文档。
+
 ## 维护规则
 
 - 只新增有真实失败证据与完成判据的条目；不为假想未来预建架构。
