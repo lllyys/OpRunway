@@ -41,6 +41,14 @@ C_API_ARG_CLASSES = frozenset({
     "enum", "dim", "layout_param", "host_scalar", "device_ptr",
     "device_ptr_array",
 })
+C_API_DECLARED_KIND = {
+    "enum": "attr",
+    "dim": "attr",
+    "layout_param": "attr",
+    "host_scalar": "scalar",
+    "device_ptr": "tensor",
+    "device_ptr_array": "tensor",
+}
 
 
 class ContractMismatch(ValueError):
@@ -137,6 +145,32 @@ def _judge_c_api(parameters, table, yaml):
         problems.append(
             f"入参顺序与 execute.args 不一致：契约 {paired}，表内 {ordered}")
 
+    contracts = {}
+    for key, contract in (parameters or {}).items():
+        channel, _, bare = key.rpartition(".")
+        channel = channel or (contract or {}).get("channel") or "inputs"
+        if channel == ACLNN_CHANNEL and not (contract or {}).get("omitted"):
+            contracts[bare] = contract or {}
+    execute = next(step for step in table["sequence"]
+                   if isinstance(step, dict) and step.get("step") == "execute")
+    class_kind_mismatches = []
+    for arg in execute["args"]:
+        name = arg.get("name")
+        if arg.get("class") == "context" or name not in contracts:
+            continue
+        table_class = arg.get("class")
+        expected_kind = C_API_DECLARED_KIND[table_class]
+        declared_kind = contracts[name].get("element_kind")
+        if declared_kind != expected_kind:
+            mismatch = {
+                "name": name, "table_class": table_class,
+                "declared_kind": declared_kind, "expected_kind": expected_kind,
+            }
+            class_kind_mismatches.append(mismatch)
+            problems.append(
+                f"参数 {name} 的调用序列表类别是 {table_class}，"
+                f"契约声明类别却是 {declared_kind}；应为 {expected_kind}")
+
     output_name = ((table.get("output") or {}).get("in_place"))
     if not isinstance(output_name, str) or not output_name:
         raise ContractMismatch("调用序列表缺 output.in_place")
@@ -165,6 +199,7 @@ def _judge_c_api(parameters, table, yaml):
         "in_place_output": output_name,
         "baseline_output": baseline_output,
         "output_position_ok": output_position_ok,
+        "class_kind_mismatches": class_kind_mismatches,
         "signature_source": table.get("signature_source"),
     }
     return report, problems

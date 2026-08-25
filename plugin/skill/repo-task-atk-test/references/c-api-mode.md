@@ -29,6 +29,7 @@ tiling、kernel 拉起与必要同步。入口必须能由任意调用者用合�
 
 experimental 布局改用 `--layout experimental`，并传入算子目录下的
 `--build-cmake <算子目录>/test/CMakeLists.txt`，门禁会自行读取 `--npu-arch`。
+这项 S1 检查只是存在性启发式；权威判断是构建后对 `.so` 执行的 S3 导出函数名门禁。
 
 ## 四层准入门
 
@@ -78,4 +79,6 @@ v1 只开放 `context` 与 `execute` 两步，以及 enum、整数维度、布�
 cuBLAS 同类约定常见列主序；若按惯例猜，合法 shape、leading dimension 与基线都会错。
 
 必须阅读项目公开文档，把 `order` 和依据（谁要求的、写在哪）写进
-`evidence/constraints.md`。确认前调用序列表的 `layout.order` 保持 `null`，不得进入执行。
+`evidence/constraints.md`，再把同一结论通过 `--layout-order` 与 `--layout-source` 写入调用
+序列表。两个参数必须同时给出；省略时 `layout.order` 保持 `null`，表示 S1 尚未确认，
+不得进入执行。

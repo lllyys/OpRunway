@@ -109,6 +109,7 @@ def main():
         },
         "pending": pending,
         "pending_allowed": bool(args.allow_pending),
+        "note": "S1 此项只是存在性启发式；权威判断是构建后对 .so 执行的 S3 导出函数名门禁。",
         "failures": failures,
     }
     if args.layout == "experimental":

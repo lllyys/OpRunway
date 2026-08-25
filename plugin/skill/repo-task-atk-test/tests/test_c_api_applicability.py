@@ -91,6 +91,8 @@ class CApiApplicabilityTest(unittest.TestCase):
         self.assertEqual("arch_dirs", report["layout"])
         self.assertTrue(report["checks"]["declaration"]["passed"])
         self.assertTrue(report["checks"]["representability"]["passed"])
+        self.assertIn("存在性启发式", report["note"])
+        self.assertIn("S3 导出函数名门禁", report["note"])
         self.assertTrue(report["checks"]["arch_implementation"]["passed"])
         self.assertTrue(report["declaration"]["extern_c"])
         self.assertFalse(report["declaration"]["mangled"])

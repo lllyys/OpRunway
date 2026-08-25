@@ -31,6 +31,9 @@ class CApiExecutorContractTest(unittest.TestCase):
     def test_sample_marks_the_npu_purity_boundary(self):
         self.assertIn("# NPU 分支禁止 torch 计算算子", self.text)
 
+    def test_sample_names_the_mangled_name_handoff_variable(self):
+        self.assertIn("ATK_C_API_EXPORTED_NAME", self.text)
+
 
 if __name__ == "__main__":
     unittest.main()

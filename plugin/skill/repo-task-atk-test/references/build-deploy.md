@@ -58,6 +58,10 @@ README 指向上级仓的构建脚本时按 README 走，不要在工程目录�
 
 ## c_api 构建与绑定
 
+```bash
+<python> scripts/align_signatures.py ... --layout-order row_major --layout-source '<依据>'
+```
+
 `c_api` 有两种构建形态，按工程公开交付方式选择：
 
 1. experimental wrapper：先用 `make_c_api_build.py` 生成 CMake，再在已加载 CANN
@@ -90,11 +94,16 @@ wrapper 的生成命令如下，输入都必须位于待验收算子工程目录
   -o evidence/c_api_binding.pre.json
 ```
 
+C++ mangled 形态先运行上面的门禁，读取其最后一行
+`resolved_exported_name=<name>`，把 `<name>` 导出为 `ATK_C_API_EXPORTED_NAME` 后再跑冒烟；
+该值由 `check_c_api_binding.py` 产生，不能从普通接口名猜。
+
 设置执行器的两个环境变量后跑最小冒烟，再用日志核对真实加载路径：
 
 ```bash
 export ATK_C_API_LIBRARY=<绝对 .so 路径>
 export ATK_C_API_CALL_SEQUENCE=<绝对调用序列表路径>
+export ATK_C_API_EXPORTED_NAME=<resolved_exported_name>
 <python> scripts/check_c_api_binding.py --library "$ATK_C_API_LIBRARY" \
   --call-sequence "$ATK_C_API_CALL_SEQUENCE" --executor-log evidence/smoke.log \
   -o evidence/c_api_binding.runtime.json

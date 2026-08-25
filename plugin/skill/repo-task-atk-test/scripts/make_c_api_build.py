@@ -15,6 +15,23 @@ class BuildRenderError(ValueError):
 
 
 _SCOPE = {"PRIVATE", "PUBLIC", "INTERFACE"}
+_SAFE_ATOM = re.compile(r"^[A-Za-z0-9_.+-]+$")
+_CMAKE_SIGNIFICANT = frozenset('${}();"\n')
+
+
+def _require_under_root(path, root, flag, *, shown=None, require_exists=False):
+    """统一执行 realpath 后的工程根白名单检查。"""
+    resolved = Path(path).expanduser().resolve()
+    root = Path(root).expanduser().resolve()
+    display = shown if shown is not None else resolved
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise BuildRenderError(
+            f"{flag} 指向的 {display} 不在待验收算子工程目录（{root}）下") from exc
+    if require_exists and not resolved.exists():
+        raise BuildRenderError(f"{flag} 指向的 {display} 不存在")
+    return resolved
 
 
 def _require_project_source(path, env_path, flag):
@@ -30,16 +47,9 @@ def _require_project_source(path, env_path, flag):
         raise BuildRenderError(
             f"{env_path} 里没有 operator_project.path，无法核对 {flag}")
 
-    resolved = Path(path).expanduser().resolve()
     root = Path(project).expanduser().resolve()
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise BuildRenderError(
-            f"{flag} 指向的 {resolved} 不在待验收算子工程目录（{root}）下") from exc
-    if not resolved.exists():
-        raise BuildRenderError(f"{flag} 指向的 {resolved} 不存在")
-    return resolved
+    return _require_under_root(
+        path, root, flag, require_exists=True)
 
 
 def _without_comments(text):
@@ -148,6 +158,26 @@ def _resolve_local_path(token, project_root, cmake_dir, cmake_source_dir=None):
     return str(path.resolve())
 
 
+def _validated_project_path(token, project_root, cmake_dir, cmake_source_dir, kind):
+    """展开路径后限制在工程根内，并拒绝能改变 CMake 语义的字符。"""
+    resolved_text = _resolve_local_path(
+        token, project_root, cmake_dir, cmake_source_dir)
+    if any(char in _CMAKE_SIGNIFICANT for char in resolved_text):
+        raise BuildRenderError(f"{kind} 含 CMake 特殊字符：{token}")
+    try:
+        resolved = _require_under_root(
+            resolved_text, project_root, kind, shown=token)
+    except BuildRenderError as exc:
+        raise BuildRenderError(f"{kind} 越过待验收算子工程目录：{token}") from exc
+    return str(resolved)
+
+
+def _validated_atom(token, kind):
+    if not _SAFE_ATOM.fullmatch(token):
+        raise BuildRenderError(f"{kind} 含未开放字符：{token}")
+    return token
+
+
 def _stable_unique(items):
     return list(dict.fromkeys(items))
 
@@ -183,10 +213,8 @@ def parse_build_facts(text, *, op_dir, project_root, cmake_path):
     for token in build_tokens:
         if not token.endswith(".cpp"):
             continue
-        resolved_text = _resolve_local_path(
-            token, project_root, cmake_dir, cmake_source_dir)
-        if "${" in resolved_text or "$<" in resolved_text:
-            continue
+        resolved_text = _validated_project_path(
+            token, project_resolved, cmake_dir, cmake_source_dir, "源码路径")
         resolved = Path(resolved_text)
         try:
             relative = resolved.relative_to(op_resolved)
@@ -197,11 +225,14 @@ def parse_build_facts(text, *, op_dir, project_root, cmake_path):
             sources.append(str(resolved))
 
     includes = _stable_unique(
-        _resolve_local_path(token, project_root, cmake_dir, cmake_source_dir)
+        _validated_project_path(
+            token, project_resolved, cmake_dir, cmake_source_dir, "包含目录")
         for token in include_tokens if token)
-    libraries = _stable_unique(token for token in library_tokens if token)
-    arch_flags = _stable_unique(re.findall(
-        r"--npu-arch=([A-Za-z0-9_-]+)", _without_comments(text)))
+    libraries = _stable_unique(
+        _validated_atom(token, "链接库") for token in library_tokens if token)
+    arch_flags = _stable_unique(
+        _validated_atom(token, "npu-arch") for token in re.findall(
+            r"--npu-arch=([^\s\"'>]+)", _without_comments(text)))
 
     failures = []
     if not sources:
@@ -217,9 +248,6 @@ def parse_build_facts(text, *, op_dir, project_root, cmake_path):
     if failures:
         raise BuildRenderError("；".join(failures))
 
-    for source in sources:
-        if not Path(source).is_relative_to(project_resolved):
-            raise BuildRenderError(f"源码路径越过待验收算子工程目录：{source}")
     return {
         "sources": _stable_unique(sources),
         "includes": includes,

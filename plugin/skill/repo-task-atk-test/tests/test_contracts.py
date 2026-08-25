@@ -158,7 +158,7 @@ class GaugeReflectionTest(unittest.TestCase):
     def test_yaml_keys_match_the_spine(self):
         import make_yaml
         registered = set(self.data["artifacts"]["<op>.yaml"]["fields"])
-        exported = (set(make_yaml.YAML_HEADER_KEYS)
+        exported = (set(make_yaml.C_API_HEADER_KEYS)
                     | set(make_yaml.DERIVED_KEYS)
                     | set(make_yaml.CHANNELS))
         self.assertEqual(exported, registered)

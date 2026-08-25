@@ -20,8 +20,6 @@
   `probe_env`、`env.sh`、`glossary.md`、`experimental_standard.md`。现行防漂移纪律要求
   共享模块禁止局部副本，拆分后改为各自持有并允许各自演化。完成条件：两个 skill
   各自独立通过回归与一轮真机验收。
-- [ ] `.claude/skills/isolated-acceptance/`：`watch.py` 的阶段表仍按旧 skill 七步编排，需按上游 S1–S5
-  重排，并真机试跑一轮镜像 skill。
 - [ ] 演练一次上游同步（fetch → `git diff --binary | git apply --3way --directory=plugin` → 更新
   `plugin/.claude-plugin/upstream.json` 基线）。
 

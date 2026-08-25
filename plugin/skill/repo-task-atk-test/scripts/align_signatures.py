@@ -611,7 +611,9 @@ def _c_api_table(args):
 
     try:
         declaration = parse_declaration(header_text, args.candidate_name)
-        context_param = infer_context(declaration["parameters"], args.context_type)
+        all_headers = "\n".join([header_text, *common_texts])
+        context_param = infer_context(
+            declaration["parameters"], args.context_type, all_headers)
         host_scalars = _named_reasons(args.host_scalar, "--host-scalar")
         device_pointers = _named_reasons(args.device_pointer, "--device-pointer")
         outputs = _named_reasons([args.in_place_output], "--output")
@@ -620,7 +622,6 @@ def _c_api_table(args):
         call_args = classify_c_api(
             declaration["parameters"], host_scalars, output, context_param,
             enum_types=enum_types, device_pointer_names=device_pointers)
-        all_headers = "\n".join([header_text, *common_texts])
         context = context_shape(
             all_headers, context_param["type"], args.context_shape)
         if context["shape"] == "struct_handle":
@@ -634,7 +635,8 @@ def _c_api_table(args):
             context["struct"] = struct_name
         table = build_sequence(
             declaration, call_args, output=output, context=context,
-            baseline=args.baseline, header_text=all_headers)
+            baseline=args.baseline, header_text=all_headers,
+            layout_order=args.layout_order, layout_source=args.layout_source)
         table["signature_source"] = str(header_path)
     except CApiSignatureError as exc:
         raise AlignError(str(exc)) from exc
@@ -688,6 +690,10 @@ def main():
                     help="c_api 句柄是 void* 裸别名时，公开头文件里的 struct 名及书面依据")
     ap.add_argument("--context-shape", choices=("opaque_functions", "struct_handle"),
                     help="c_api 上下文构造形态；默认按公开声明判定")
+    ap.add_argument("--layout-order", choices=("row_major", "col_major"),
+                    help="c_api 已确认的内存顺序；须与 --layout-source 同时给出")
+    ap.add_argument("--layout-source",
+                    help="c_api 内存顺序的书面依据；须与 --layout-order 同时给出")
     ap.add_argument("--env", required=True,
                     help="evidence/env.json 路径；据此核对签名是从待验收算子工程目录里读的")
     ap.add_argument("--interface",

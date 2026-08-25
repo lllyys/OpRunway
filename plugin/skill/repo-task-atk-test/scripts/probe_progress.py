@@ -61,6 +61,20 @@ def condition_holds(root, spec):
     返回 True 要产出、False 不产出、None 判不了（依据本身还没落盘）。
     """
     condition = spec.get("condition") or ""
+    if "experimental wrapper" in condition:
+        interface = read_json(root, "evidence/interface.json")
+        if interface is None:
+            return None
+        if interface.get("interface_mode") != "c_api":
+            return False
+        if exists(root, "evidence/c_api_build/render_report.json"):
+            return True
+        return None
+    if "interface_mode" in condition and "c_api" in condition:
+        interface = read_json(root, "evidence/interface.json")
+        if interface is None:
+            return None
+        return interface.get("interface_mode") == "c_api"
     if "cann_builtin" in condition:
         interface = read_json(root, "evidence/interface.json")
         if interface is None:

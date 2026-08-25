@@ -114,6 +114,16 @@ class CApiBuildRendererTest(unittest.TestCase):
         self.assertEqual(2, done.returncode)
         self.assertIn("npu-arch", done.stderr + done.stdout)
 
+    def test_link_library_cmake_injection_is_rejected_verbatim(self):
+        malicious = ")\nexecute_process(COMMAND ignored)\n("
+        text = self.fixture_cmake().replace(
+            "tiling_api register", f'tiling_api "{malicious}" register')
+        self.cmake.write_text(text, encoding="utf-8")
+        done = self.run_renderer()
+        self.assertEqual(2, done.returncode)
+        self.assertIn(malicious, done.stderr + done.stdout)
+        self.assertFalse((self.outdir / "CMakeLists.txt").exists())
+
 
 class CMakeSourceDirTest(unittest.TestCase):
     CMAKE = """
@@ -180,7 +190,7 @@ class CMakeSourceDirTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             done, report, _ = self._render(temp_dir, False)
             self.assertEqual(2, done.returncode)
-            self.assertIn("op_host", report["failures"][0])
+            self.assertIn("越过待验收算子工程目录", report["failures"][0])
 
 
 if __name__ == "__main__":

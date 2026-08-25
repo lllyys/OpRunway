@@ -152,9 +152,11 @@ class MangledDeclarationTest(unittest.TestCase):
                          "std::complex<float>")
         args = mod.classify(
             declaration["parameters"],
-            {"alpha": "项目公开 API 文档说明 alpha 是主机侧标量"},
+            {},
             ("bArray", "项目公开 API 文档说明 bArray 原地写回"),
             {"name": "handle", "type": "aclblasHandle_t", "rule": "显式指定"},
+            device_pointer_names={
+                "alpha": "项目公开 API 文档说明 alpha 位于设备内存"},
         )
         table = mod.build_sequence(
             declaration, args,
@@ -164,6 +166,22 @@ class MangledDeclarationTest(unittest.TestCase):
         )
         self.assertTrue(table["mangled"])
         self.assertIsNone(table["exported_name"])
+
+    def test_complex_host_scalar_is_rejected_by_the_executor_closed_set(self):
+        mod = load_module()
+        declaration = mod.parse_declaration(textwrap.dedent("""
+            int aclblasCtrsmBatched(
+                aclblasHandle_t handle, const std::complex<float>* alpha,
+                std::complex<float>* const bArray[]);
+        """))
+        with self.assertRaises(mod.CApiSignatureError) as caught:
+            mod.classify(
+                declaration["parameters"],
+                {"alpha": "任务书说明 alpha 是主机侧标量"},
+                ("bArray", "任务书说明 bArray 原地写回"),
+                {"name": "handle", "type": "aclblasHandle_t", "rule": "显式指定"},
+            )
+        self.assertIn("v1 未开放复数主机标量", str(caught.exception))
 
 
 class ClosedTierTest(unittest.TestCase):
@@ -181,6 +199,19 @@ class ClosedTierTest(unittest.TestCase):
         self.assertIn("descriptor", message)
         self.assertIn("sequence step tier", message)
         self.assertIn("未开放", message)
+
+    def test_output_must_be_a_device_pointer_class(self):
+        mod = load_module()
+        declaration = mod.parse_declaration(
+            "int run(fooHandle_t handle, int n, float* out);")
+        with self.assertRaises(mod.CApiSignatureError) as caught:
+            mod.classify(
+                declaration["parameters"], {},
+                ("n", "任务书误把维度写成原地输出"),
+                {"name": "handle", "type": "fooHandle_t", "rule": "显式指定"},
+            )
+        self.assertIn("dim", str(caught.exception))
+        self.assertIn("n", str(caught.exception))
 
 
 class PodStructTest(unittest.TestCase):
@@ -360,6 +391,43 @@ class OpaqueContextFunctionsTest(unittest.TestCase):
         """), "aclblasHandle_t")
         self.assertIsNone(context["set_stream"])
 
+    def test_create_with_an_extra_parameter_is_rejected_and_recorded(self):
+        mod = load_module()
+        context = mod.context_shape(textwrap.dedent("""
+            struct aclblasHandle_t { void* stream; };
+            int aclblasCreate(aclblasHandle_t* handle, int flags);
+            int aclblasDestroy(aclblasHandle_t handle);
+        """), "aclblasHandle_t")
+        self.assertEqual("struct_handle", context["shape"])
+        rejected = context["rejected_candidates"]
+        self.assertTrue(any(item["name"] == "aclblasCreate" for item in rejected))
+        self.assertTrue(any("1" in item["reason"] for item in rejected))
+
+
+class ContextPointerShapeTest(unittest.TestCase):
+    def test_by_value_struct_context_is_rejected(self):
+        mod = load_module()
+        header = textwrap.dedent("""
+            struct PublicHandle_t { void* stream; };
+            int publicRun(PublicHandle_t handle, float* out);
+        """)
+        declaration = mod.parse_declaration(header, "publicRun")
+        with self.assertRaises(mod.CApiSignatureError) as caught:
+            mod.infer_context(declaration["parameters"], header_text=header)
+        message = str(caught.exception)
+        self.assertIn("handle", message)
+        self.assertIn("v1 未开放按值传递的上下文参数", message)
+
+    def test_pointer_typedef_context_is_accepted(self):
+        mod = load_module()
+        header = textwrap.dedent("""
+            typedef struct PublicHandleImpl* PublicHandle_t;
+            int publicRun(PublicHandle_t handle, float* out);
+        """)
+        declaration = mod.parse_declaration(header, "publicRun")
+        context = mod.infer_context(declaration["parameters"], header_text=header)
+        self.assertEqual("handle", context["name"])
+
 
 class CApiCliTest(unittest.TestCase):
     def test_cli_writes_a_call_sequence_table(self):
@@ -425,7 +493,7 @@ class CApiCliTest(unittest.TestCase):
                 size_t workspace_size;
                 bool enabled;
             } PublicHandle_t;
-            extern "C" int publicRun(PublicHandle_t handle, float* out);
+            extern "C" int publicRun(PublicHandle_t* handle, float* out);
         """)
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -457,6 +525,60 @@ class CApiCliTest(unittest.TestCase):
                 {"name": "enabled", "ctype": "c_bool"},
             ],
         })
+
+
+class LayoutCliTest(unittest.TestCase):
+    HEADER = textwrap.dedent("""
+        typedef struct HandleImpl* DemoHandle_t;
+        int demoCreate(DemoHandle_t* handle);
+        int demoDestroy(DemoHandle_t handle);
+        extern "C" int demoRun(DemoHandle_t handle, float* out);
+    """)
+
+    def _run(self, *layout_args):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        temp = Path(temp_dir.name)
+        project = temp / "operator_project"
+        project.mkdir()
+        header = project / "demo.h"
+        header.write_text(self.HEADER, encoding="utf-8")
+        env = temp / "env.json"
+        env.write_text(json.dumps({"operator_project": {"path": str(project)}}),
+                       encoding="utf-8")
+        output = temp / "demo_call_sequence.json"
+        done = subprocess.run(
+            [sys.executable, str(ALIGN), "--call-convention", "c_api",
+             "--env", str(env), "--header", str(header),
+             "--candidate-name", "demoRun", "--baseline", "torch.clone",
+             "--output", "out=任务书说明 out 原地写回",
+             *layout_args, "-o", str(output)],
+            capture_output=True, text=True, timeout=60)
+        table = json.loads(output.read_text(encoding="utf-8")) if output.exists() else None
+        return done, table
+
+    def test_confirmed_layout_is_written_to_the_table(self):
+        done, table = self._run(
+            "--layout-order", "row_major",
+            "--layout-source", "任务书 §4 明确采用行主序")
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertEqual(
+            {"order": "row_major", "confirmed_by": "任务书 §4 明确采用行主序"},
+            table["layout"])
+
+    def test_layout_flags_must_be_given_as_a_pair(self):
+        for args in (("--layout-order", "row_major"),
+                     ("--layout-source", "任务书 §4")):
+            with self.subTest(args=args):
+                done, _ = self._run(*args)
+                self.assertEqual(2, done.returncode)
+                self.assertIn("layout", done.stderr + done.stdout)
+
+    def test_bad_layout_order_is_rejected(self):
+        done, _ = self._run(
+            "--layout-order", "diagonal", "--layout-source", "任务书 §4")
+        self.assertEqual(2, done.returncode)
+        self.assertIn("invalid choice", done.stderr)
 
 
 if __name__ == "__main__":

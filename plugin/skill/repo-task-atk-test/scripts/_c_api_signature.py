@@ -73,6 +73,12 @@ _STRUCT_FIELD_CTYPES = {
     "float": "c_float",
     "double": "c_double",
 }
+# 与 assets/example/c_api_executor.py 的 _POINTEE_CTYPES 刻意重复；生成侧与
+# 执行侧隔着数据边界，只允许这组主机标量跨过去。
+_HOST_SCALAR_CTYPES = frozenset({
+    "bool", "int8", "uint8", "int16", "uint16", "int32", "uint32",
+    "int64", "uint64", "size_t", "float32", "float64",
+})
 
 
 def _without_comments(text):
@@ -381,7 +387,27 @@ def _decision_pair(value, flag):
     return str(name), str(reason).strip()
 
 
-def infer_context(params, context_type=None):
+def _type_resolves_to_pointer(type_name, header_text):
+    aliases = _typedef_aliases(header_text or "")
+    value = type_name
+    seen = set()
+    while value not in seen:
+        seen.add(value)
+        target = aliases.get(value, _PUBLIC_ACL_ALIASES.get(value))
+        if target is None:
+            return False
+        if "*" in target:
+            return True
+        value = _normalise_space(target)
+    return False
+
+
+def _param_is_pointer_like(param, header_text):
+    return param["is_pointer"] or _type_resolves_to_pointer(
+        param["base_type"], header_text)
+
+
+def infer_context(params, context_type=None, header_text=None):
     """按显式类型或 Handle_t 后缀确定首个上下文参数。"""
     if context_type:
         candidates = [param for param in params if param["base_type"] == context_type]
@@ -397,6 +423,9 @@ def infer_context(params, context_type=None):
     if selected["position"] != 0:
         raise CApiSignatureError(
             f"上下文参数 {selected['name']} 不在首位，v1 只接受首参数上下文约定")
+    if not _param_is_pointer_like(selected, header_text):
+        raise CApiSignatureError(
+            f"参数 {selected['name']}：v1 未开放按值传递的上下文参数")
     return {"name": selected["name"], "type": selected["base_type"], "rule": rule}
 
 
@@ -527,8 +556,15 @@ def classify(params, host_scalar_names, output_name, context_param, *,
                     or not _is_arithmetic(base)):
                 raise CApiSignatureError(
                     f"参数 {name} 不能用 --host-scalar：必须是指向算术类型的单层指针")
+            pointee_ctype = _pointee_ctype(base)
+            if pointee_ctype in {"complex64", "complex128"}:
+                raise CApiSignatureError(
+                    f"参数 {name}：v1 未开放复数主机标量")
+            if pointee_ctype not in _HOST_SCALAR_CTYPES:
+                raise CApiSignatureError(
+                    f"参数 {name} 的主机标量类型 {base} 不在 v1 开放集合")
             item = _base_arg(param, "host_scalar", "void_p", "--host-scalar 显式声明")
-            item["pointee_ctype"] = _pointee_ctype(base)
+            item["pointee_ctype"] = pointee_ctype
             item["source"] = str(host_scalar_names[name]).strip()
             if not item["source"]:
                 raise CApiSignatureError(f"参数 {name} 的 --host-scalar 书面依据为空")
@@ -571,6 +607,10 @@ def classify(params, host_scalar_names, output_name, context_param, *,
                 f"参数 {name} 分类为 {item['class']}，但 v1 sequence step tier "
                 f"未开放 {item['class']}；不能生成调用序列")
         if name == output:
+            if item["class"] not in {"device_ptr", "device_ptr_array"}:
+                raise CApiSignatureError(
+                    f"--output 参数 {name} 的类别是 {item['class']}，"
+                    "只接受 device_ptr 或 device_ptr_array")
             item["output_source"] = output_reason
         classified.append(item)
     return classified
@@ -673,8 +713,9 @@ def is_trivial_pod_struct(header_text, struct_name):
 
 
 def _context_functions(header_text, context_type):
-    """按上下文出参与首参数识别公开的生命周期函数。"""
+    """只接受执行器固定调用形态能覆盖的生命周期函数。"""
     found = {"create": [], "set_stream": [], "destroy": []}
+    rejected = []
     clean = _without_comments(header_text)
     function_pattern = re.compile(r"\b([A-Za-z_]\w*)\s*\(([^;{}]*)\)\s*;", re.S)
     for match in function_pattern.finditer(clean):
@@ -685,22 +726,37 @@ def _context_functions(header_text, context_type):
                 parsed = _parse_param(raw, position)
                 if parsed is not None:
                     params.append(parsed)
-        except CApiSignatureError:
+        except CApiSignatureError as exc:
+            if re.search(r"(?i)(?:Create|SetStream|Destroy)$", name):
+                rejected.append({"name": name, "reason": f"参数列表无法解析：{exc}"})
             continue
-        if not params:
+        role = next((candidate for candidate in found
+                     if re.search(rf"(?i){candidate.replace('_', '')}$", name)), None)
+        if role is None:
             continue
-        first = params[0]
-        out_context = any(
-            param["base_type"] == context_type and param["is_pointer"]
-            for param in params)
-        if re.search(r"(?i)Create$", name) and out_context:
-            found["create"].append(name)
-        elif (re.search(r"(?i)SetStream$", name)
-              and first["base_type"] == context_type):
-            found["set_stream"].append(name)
-        elif (re.search(r"(?i)Destroy$", name)
-              and first["base_type"] == context_type):
-            found["destroy"].append(name)
+        reason = None
+        if role == "create":
+            if len(params) != 1:
+                reason = f"create 必须恰有 1 个参数，实际 {len(params)} 个"
+            elif not (params[0]["base_type"] == context_type
+                      and params[0]["is_pointer"]):
+                reason = f"create 参数必须是 {context_type} 的指针"
+        elif role == "set_stream":
+            if len(params) != 2:
+                reason = f"set_stream 必须恰有 2 个参数，实际 {len(params)} 个"
+            elif params[0]["base_type"] != context_type:
+                reason = f"set_stream 首参数必须是 {context_type}"
+            elif not _param_is_pointer_like(params[1], header_text):
+                reason = "set_stream 第二个参数必须是指针形态的 stream"
+        else:
+            if len(params) != 1:
+                reason = f"destroy 必须恰有 1 个参数，实际 {len(params)} 个"
+            elif params[0]["base_type"] != context_type:
+                reason = f"destroy 参数必须是 {context_type}"
+        if reason:
+            rejected.append({"name": name, "reason": reason})
+        else:
+            found[role].append(name)
     result = {}
     for role, names in found.items():
         names = list(dict.fromkeys(names))
@@ -708,6 +764,7 @@ def _context_functions(header_text, context_type):
             raise CApiSignatureError(
                 f"上下文 {role} 函数有多个匹配：{', '.join(names)}")
         result[role] = names[0] if names else None
+    result["rejected_candidates"] = rejected
     return result
 
 
@@ -724,12 +781,14 @@ def context_shape(header_text, context_type, explicit_shape=None):
     else:
         shape = "struct_handle"
         rule = "未找到配对的 Create/Destroy，按公开 struct 构造"
-    result = {"shape": shape, "type": context_type, "rule": rule}
+    result = {"shape": shape, "type": context_type, "rule": rule,
+              "rejected_candidates": functions["rejected_candidates"]}
     if shape == "opaque_functions":
         if not functions["create"] or not functions["destroy"]:
             raise CApiSignatureError(
                 "opaque_functions 需要公开的 Create 与 Destroy 函数")
-        result.update(functions)
+        result.update({key: functions[key]
+                       for key in ("create", "set_stream", "destroy")})
     return result
 
 
@@ -759,11 +818,21 @@ def struct_name_for_context(header_text, context_type, explicit=None):
 
 
 def build_sequence(declaration, args, *, output, context, baseline=None,
-                   header_text=None):
+                   header_text=None, layout_order=None, layout_source=None):
     """组装 schema_version=1 的 context/execute 调用序列表。"""
     output_name, output_reason = _decision_pair(output, "--output")
     if output_name not in {item["name"] for item in args}:
         raise CApiSignatureError(f"--output 指定了未知参数 {output_name}")
+    output_arg = next(item for item in args if item["name"] == output_name)
+    if output_arg.get("class") not in {"device_ptr", "device_ptr_array"}:
+        raise CApiSignatureError(
+            f"--output 参数 {output_name} 的类别是 {output_arg.get('class')}，"
+            "只接受 device_ptr 或 device_ptr_array")
+    if (layout_order is None) != (layout_source is None):
+        raise CApiSignatureError(
+            "--layout-order 与 --layout-source 必须同时给出")
+    if layout_source is not None and not str(layout_source).strip():
+        raise CApiSignatureError("--layout-source 不能为空")
     context_step = {"step": "context", **context}
     if context_step.get("shape") == "struct_handle":
         struct_value = context_step.get("struct")
@@ -794,7 +863,9 @@ def build_sequence(declaration, args, *, output, context, baseline=None,
         "sequence": [context_step, execute],
         "output": {"in_place": output_name, "source": output_reason},
         # 内存顺序必须由 S1 约束表确认；本轮不从接口声明猜测。
-        "layout": {"order": None, "confirmed_by": None},
+        "layout": {"order": layout_order,
+                   "confirmed_by": (str(layout_source).strip()
+                                    if layout_source is not None else None)},
     }
     if baseline is not None:
         table["baseline"] = baseline

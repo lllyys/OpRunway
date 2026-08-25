@@ -302,7 +302,14 @@ class ExampleCApi(BaseApi):
         if self._function is not None:
             return self._function
         self._library = ctypes.CDLL(self._library_path, mode=ctypes.RTLD_GLOBAL)
-        resolved_name = self._table.get("exported_name") or self._table["symbol"]
+        resolved_name = self._table.get("exported_name")
+        if resolved_name is None and self._table.get("mangled") is True:
+            resolved_name = os.environ.get("ATK_C_API_EXPORTED_NAME")
+            _require(
+                resolved_name,
+                "mangled 调用序列表必须设置 ATK_C_API_EXPORTED_NAME；"
+                "先运行 check_c_api_binding.py 取得 resolved_exported_name")
+        resolved_name = resolved_name or self._table["symbol"]
         try:
             self._function = getattr(self._library, resolved_name)
         except AttributeError as exc:
@@ -332,6 +339,8 @@ class ExampleCApi(BaseApi):
             return pointer, context, None
 
         handle = ctypes.c_void_p()
+        # 生成器只记录 create(handle*) / set_stream(handle, stream) /
+        # destroy(handle) 的精确形态，因此这里的固定 ctypes 参数个数有前置保证。
         create = getattr(self._library, spec["create"])
         create.restype = ctypes.c_int
         create.argtypes = [ctypes.POINTER(ctypes.c_void_p)]

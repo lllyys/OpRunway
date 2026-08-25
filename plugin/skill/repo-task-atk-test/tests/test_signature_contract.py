@@ -36,8 +36,16 @@ def parameters(*names):
             for name in names}
 
 
-def c_api_table(names=("m", "n", "B")):
-    classes = {"m": "dim", "n": "dim", "B": "device_ptr"}
+def c_api_parameters():
+    return {
+        "m": {"element_kind": "attr", "runtime_container": "single"},
+        "n": {"element_kind": "attr", "runtime_container": "single"},
+        "B": {"element_kind": "tensor", "runtime_container": "single"},
+    }
+
+
+def c_api_table(names=("m", "n", "B"), classes=None):
+    classes = classes or {"m": "dim", "n": "dim", "B": "device_ptr"}
     args = [{"position": 0, "name": "handle", "class": "context"}]
     args.extend({"position": index, "name": name, "class": classes[name]}
                 for index, name in enumerate(names, 1))
@@ -57,47 +65,77 @@ class CApiTableTest(unittest.TestCase):
 
     def test_context_is_derived_and_the_other_args_align(self):
         report, problems = gate.judge(
-            parameters("m", "n", "B"), c_api_table(), {"outputs": "B"})
+            c_api_parameters(), c_api_table(), {"outputs": "B"})
         self.assertEqual([], problems)
         self.assertEqual("c_api", report["call_convention"])
         self.assertEqual(["m", "n", "B"], report["execute_inputs"])
 
     def test_missing_execute_arg_is_rejected(self):
         report, problems = gate.judge(
-            parameters("m", "B"), c_api_table(), {"outputs": "B"})
+            {key: value for key, value in c_api_parameters().items() if key != "n"},
+            c_api_table(), {"outputs": "B"})
         self.assertEqual(["n"], report["missing"])
         self.assertTrue(any("n" in item for item in problems))
 
     def test_extra_contract_arg_is_rejected(self):
         _, problems = gate.judge(
-            parameters("m", "n", "B", "alpha"), c_api_table(),
+            {**c_api_parameters(),
+             "alpha": {"element_kind": "scalar", "runtime_container": "single"}},
+            c_api_table(),
             {"outputs": "B"})
         self.assertTrue(any("alpha" in item for item in problems))
 
     def test_swapped_order_is_rejected(self):
         report, problems = gate.judge(
-            parameters("n", "m", "B"), c_api_table(), {"outputs": "B"})
+            {"n": c_api_parameters()["n"], "m": c_api_parameters()["m"],
+             "B": c_api_parameters()["B"]},
+            c_api_table(), {"outputs": "B"})
         self.assertFalse(report["order_ok"])
         self.assertTrue(any("顺序" in item for item in problems))
 
     def test_named_in_place_output_matches_the_baseline_convention(self):
         report, problems = gate.judge(
-            parameters("m", "n", "B"), c_api_table(), {"outputs": "B"})
+            c_api_parameters(), c_api_table(), {"outputs": "B"})
         self.assertEqual([], problems)
         self.assertTrue(report["output_position_ok"])
 
     def test_numeric_in_place_output_position_is_also_supported(self):
         _, problems = gate.judge(
-            parameters("m", "n", "B"), c_api_table(), {"outputs": 2})
+            c_api_parameters(), c_api_table(), {"outputs": 2})
         self.assertEqual([], problems)
 
     def test_missing_or_wrong_output_position_is_rejected(self):
         for yaml in ({}, {"outputs": "n"}, {"outputs": 1}):
             with self.subTest(yaml=yaml):
                 report, problems = gate.judge(
-                    parameters("m", "n", "B"), c_api_table(), yaml)
+                    c_api_parameters(), c_api_table(), yaml)
                 self.assertFalse(report["output_position_ok"])
                 self.assertTrue(any("B" in item for item in problems))
+
+    def test_attr_family_class_mismatch_is_rejected(self):
+        params = c_api_parameters()
+        params["m"] = {"element_kind": "tensor", "runtime_container": "single"}
+        _, problems = gate.judge(params, c_api_table(), {"outputs": "B"})
+        self.assertTrue(any("m" in item and "dim" in item and "tensor" in item
+                            for item in problems))
+
+    def test_scalar_family_class_mismatch_is_rejected(self):
+        params = c_api_parameters()
+        params["alpha"] = {"element_kind": "attr", "runtime_container": "single"}
+        table = c_api_table(
+            names=("m", "n", "alpha", "B"),
+            classes={"m": "dim", "n": "dim", "alpha": "host_scalar",
+                     "B": "device_ptr"})
+        _, problems = gate.judge(params, table, {"outputs": "B"})
+        self.assertTrue(any("alpha" in item and "host_scalar" in item and "attr" in item
+                            for item in problems))
+
+    def test_tensor_family_class_mismatch_is_rejected(self):
+        params = c_api_parameters()
+        params["B"] = {"element_kind": "attr", "runtime_container": "single"}
+        _, problems = gate.judge(params, c_api_table(), {"outputs": "B"})
+        self.assertTrue(any("B" in item and "device_ptr" in item and "attr" in item
+                            for item in problems))
 
 
 class MissingParameterTest(unittest.TestCase):
@@ -220,7 +258,7 @@ class CliTest(unittest.TestCase):
 
     def test_c_api_cli_reads_the_baseline_output_position(self):
         done, report = self._run(
-            parameters("m", "n", "B"), c_api_table(), {"outputs": "B"})
+            c_api_parameters(), c_api_table(), {"outputs": "B"})
         self.assertEqual(0, done.returncode, done.stderr)
         self.assertTrue(report["output_position_ok"])
         self.assertEqual("/proj/experimental/aclblas_minimal.h",

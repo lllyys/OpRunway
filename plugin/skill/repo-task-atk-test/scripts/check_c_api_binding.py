@@ -171,6 +171,7 @@ def main():
             print(f"✗ {failure}")
         return 2
     print(f"c_api 动态库绑定检查通过 → {args.output}")
+    print(f"resolved_exported_name={report['resolved_exported_name']}")
     return 0
 
 

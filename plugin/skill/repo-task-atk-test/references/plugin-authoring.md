@@ -111,10 +111,15 @@ mixin 必须位于基类列表最前面。
 
 ## c_api 执行器
 
+```bash
+<python> scripts/align_signatures.py ... --layout-order row_major --layout-source '<依据>'
+```
+
 可抄的双节点样例是 `assets/example/c_api_executor.py`。它只读取两类数据：
 
 - `ATK_C_API_LIBRARY` 指向的绝对 `.so` 路径；
 - `ATK_C_API_CALL_SEQUENCE` 指向的 `<op>_call_sequence.json`。
+- mangled 形态还要设置 `ATK_C_API_EXPORTED_NAME`，值由 S3 绑定门禁给出。
 
 执行器不得导入生成侧模块。调用序列表跨过技能拆分边界后，验收侧必须自行核对
 版本、步骤、参数类别和布局；`layout.order` 仍为空就停止。

@@ -72,6 +72,8 @@ class CApiBindingTest(unittest.TestCase):
         report = self.report()
         self.assertEqual(mangled, report["resolved_exported_name"])
         self.assertTrue(report["s2_exported_name_pending"])
+        self.assertEqual(f"resolved_exported_name={mangled}",
+                         done.stdout.strip().splitlines()[-1])
 
     def test_two_mangled_matches_are_ambiguous(self):
         self.write_table(mangled=True, exported_name=None)

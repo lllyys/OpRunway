@@ -644,6 +644,13 @@
           "consumer": "ATK 选择调用通路",
           "failure": "与实际后端不符 → 绑定到错误通路"
         },
+        "outputs": {
+          "owner": "agent",
+          "condition": "evidence/interface.json 的 interface_mode 为 c_api 时必需；其余模式不写",
+          "source": "调用序列表的 output.in_place 及基线函数的原地输出位置",
+          "consumer": "check_signature_contract.py 核对基线输出位置",
+          "failure": "缺失或位置不一致 → check_signature_contract.py 退出码 2"
+        },
         "dtype_numbers": {
           "owner": "script",
           "source": "make_yaml.py 固定写 1",
@@ -803,7 +810,21 @@
       "risk": "包装构建不可复现，符合门禁的 .so 无从产生",
       "fields_not_applicable": "渲染报告，字段由 make_c_api_build.py 自身担保"
     },
-    "evidence/c_api_binding.json": {
+    "evidence/c_api_binding.pre.json": {
+      "stage": "S3",
+      "owner": "script",
+      "condition": "evidence/interface.json 的 interface_mode 为 c_api；其余情况不产出",
+      "spec": "references/build-deploy.md#c_api 构建与绑定",
+      "template": null,
+      "producer": "check_c_api_binding.py",
+      "consumed_by": [
+        "C++ mangled 导出函数名交接",
+        "S3 最小冒烟"
+      ],
+      "risk": "构建库没有唯一的目标导出函数名，执行器无法可靠查找入口",
+      "fields_not_applicable": "预检报告，字段由 check_c_api_binding.py 自身担保"
+    },
+    "evidence/c_api_binding.runtime.json": {
       "stage": "S3",
       "owner": "script",
       "condition": "evidence/interface.json 的 interface_mode 为 c_api；其余情况不产出",
@@ -813,8 +834,8 @@
       "consumed_by": [
         "S3 退出"
       ],
-      "risk": "加载了别的库，测的不是本轮工程",
-      "fields_not_applicable": "门禁报告，字段由 check_c_api_binding.py 自身担保"
+      "risk": "执行器加载了别的库或导出函数名，测的不是本轮工程",
+      "fields_not_applicable": "运行期核对报告，字段由 check_c_api_binding.py 自身担保"
     },
     "evidence/soc_binding.json": {
       "stage": "S3",

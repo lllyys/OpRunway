@@ -44,10 +44,11 @@ def touch(work, *relatives):
         path.write_text("", encoding="utf-8")
 
 
-def write_interface(work, baseline_kind):
+def write_interface(work, baseline_kind, interface_mode="aclnn"):
     path = Path(work) / "evidence" / "interface.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"baseline_kind": baseline_kind}),
+    path.write_text(json.dumps({"baseline_kind": baseline_kind,
+                                "interface_mode": interface_mode}),
                     encoding="utf-8")
 
 
@@ -151,6 +152,22 @@ class ConditionalArtifactTest(unittest.TestCase):
             result = probe(work)
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn("条件未定", result.stdout)
+
+    def test_c_api_mode_requires_the_call_sequence(self):
+        with TemporaryDirectory() as work:
+            touch(work, "evidence/constraints.md", "evidence/env.json",
+                  "evidence/env.sh", "evidence/c_api_applicability.json")
+            write_interface(work, "torch", "c_api")
+            summary = probe(work).stdout.split("当前阶段：", 1)[0]
+            self.assertIn("<op>_call_sequence.json", summary)
+            self.assertNotIn("条件未定 <op>_call_sequence.json", summary)
+
+    def test_non_c_api_mode_omits_c_api_artifacts_from_the_summary(self):
+        with TemporaryDirectory() as work:
+            touch(work, *S1_ARTIFACTS)
+            write_interface(work, "torch", "aclnn")
+            summary = probe(work).stdout.split("当前阶段：", 1)[0]
+            self.assertNotIn("c_api", summary)
 
 
 class OutputTest(unittest.TestCase):

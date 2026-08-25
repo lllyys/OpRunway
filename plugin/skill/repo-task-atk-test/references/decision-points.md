@@ -32,3 +32,4 @@ agent 在验收过程中必须自己判断的字段全集。
 | `<op>.yaml` 的 `standard` | S2 | references/experimental_standard.md#选哪个比较器 | 精度判定与性能对比模式 | int8 输出声明 mixed_tolerance_bm → 走量化标准，差一判过；dtype 轴有浮点却声明 equal → 覆盖门禁拒绝 |
 | `<op>.yaml` 的 `version` | S2 | 固定 v1 | ATK 用例版本 | 缺失 → ATK 解析失败 |
 | `<op>.yaml` 的 `api` | S2 | 接口模式 | ATK 选择调用通路 | 与实际后端不符 → 绑定到错误通路 |
+| `<op>.yaml` 的 `outputs` | S2 | 调用序列表的 output.in_place 及基线函数的原地输出位置 | check_signature_contract.py 核对基线输出位置 | 缺失或位置不一致 → check_signature_contract.py 退出码 2 |

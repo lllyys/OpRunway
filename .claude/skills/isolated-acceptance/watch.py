@@ -9,7 +9,9 @@
     --full          结果不截断（很长，配合 less 用）
     --width N       命令/结果每条最多显示的字符数（默认 700）
 
-最长的两段是 S3 的构建与 S4 的 ATK 跑测，那里会安静很久，属正常。
+    最长的两段是 S3 的构建与 S4 的 ATK 跑测，那里会安静很久，属正常。
+
+    历史事件显示 --:--；实时计时从观察器追到文件末尾、开始跟随新事件时算起。
 
 ✓ 表示已越过的阶段；▶ 表示当前阶段。
 """
@@ -63,7 +65,7 @@ GLOSS = [
     (r"check_soc_binding\.py",                       3, "SoC 绑定门"),
     (r"check_opapi_binding\.py",                     3, "op_api 绑定门"),
     (r"make_c_api_build\.py",                        3, "渲染 c_api 构建"),
-    (r"check_c_api_binding\.py",                     3, "c_api 符号与路径门"),
+    (r"check_c_api_binding\.py",                     3, "c_api 导出函数名与路径门"),
     (r"\bnm\b\s+-",                                  3, "查导出函数名"),
     (r"ATK_C_API_",                                  3, "设置 c_api 执行器环境"),
     (r"performance_device|performance",              4, "★ 性能执行"),
@@ -147,7 +149,7 @@ def setstep(n, forced=False):
         return
     done = set(range(1, n))
     changed = done != state["done"]
-    if forced or n > state["step"]:
+    if forced:
         state["done"] = done
     if n != state["step"]:
         state["step"] = n
