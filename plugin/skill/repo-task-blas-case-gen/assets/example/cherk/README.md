@@ -142,11 +142,11 @@ caseName = require("case_name");
 | 块 | 条数 | 规则 |
 | --- | --- | --- |
 | L0 | 8 | op enum 全组合与 4/8 快速覆盖 |
-| PW | 41 | 确定性 pairwise 且通过 constraints/footprint |
+| PW | 169 | 确定性 pairwise 且通过 constraints/footprint |
 | ED | 2 | 逐条 edge_cases.set 物化 |
 | PF | 4 | perf.rows 与可选 sweep |
 
-pairs 覆盖 572/572，infeasible 0 对，search_exhausted 0 对。
+pairs 覆盖 1041/1041，infeasible 0 对。
 精度集 = 非 `TC_PF_` 前缀。开发者自加的 `TEST_F` 不在验收集内。
 
 ## 精度验收

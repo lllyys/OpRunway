@@ -123,18 +123,17 @@ ROLE_KEYS = {
     "out_scalar": {"dtype", "dtype_from", "mem", "nullable"},
     "vector": {
         "dtype", "dtype_from", "dir", "len", "inc", "nullable", "batch",
-        "alias", "producer",
+        "producer",
     },
     "fixed_vector": {"dtype", "dtype_from", "dir", "len", "nullable", "samples"},
     "matrix": {
         "dtype", "dtype_from", "dir", "rows", "cols", "ld", "order",
         "storage", "uplo", "diag", "kl", "ku", "conditioning", "nullable",
-        "batch", "alias", "producer",
+        "batch", "producer",
     },
     "int_array": {"dtype", "dir", "len", "producer", "nullable"},
 }
 BUFFER_ROLES = {"vector", "fixed_vector", "matrix", "int_array"}
-ALIAS_ROLES = {"vector", "matrix"}
 SCALAR_ROLES = {"scalar", "inout_scalar", "out_scalar"}
 
 
@@ -623,8 +622,6 @@ def _check_param_shape(problems, index, param):
     if role in {"vector", "matrix"}:
         if "batch" in param:
             _check_batch_shape(problems, f"{where}.batch", param["batch"])
-        if "alias" in param and not _is_identifier(param["alias"]):
-            _err(problems, f"{where}.alias 必须是参数名")
     if role in {"vector", "matrix", "int_array"} and "producer" in param:
         _check_producer_syntax(problems, f"{where}.producer", param["producer"])
 
@@ -719,11 +716,6 @@ def _check_cross_references(problems, params, ordered):
                     target = params.get(param[field])
                     if target is None or target.get("role") != "dim":
                         _err(problems, f"{where}.{field} 必须引用 dim 参数")
-        if role in {"vector", "matrix"} and "alias" in param:
-            target = params.get(param["alias"])
-            if (target is None or target.get("role") not in ALIAS_ROLES
-                    or param["alias"] == name):
-                _err(problems, f"{where}.alias 必须引用另一个 vector/matrix 参数")
         if role in {"vector", "matrix", "int_array"} and "producer" in param:
             match = PRODUCER_RE.fullmatch(str(param["producer"]))
             if match and match.group(2).strip():
@@ -1286,123 +1278,21 @@ def _load_generator():
     return module
 
 
-def _row_dicts(header, rows):
-    return [dict(zip(header, row)) for row in rows]
 
-
-def _check_csv_shape(problems, facts, header, rows, generator):
-    expected_header = _header_columns(facts)
-    if header != expected_header:
-        _err(problems, "CSV 表头与事实表 FACTS 投影不一致")
-        return
-    params = {param["name"]: param for param in facts["params"]}
-    null_columns, batch_columns = _control_columns(params)
-    enum_params = [param for param in facts["params"] if param["role"] == "enum"]
-    typed_enums = [
-        param
-        for param in enum_params
-        if param.get("enum_kind", "op") in {"dtype", "compute"}
-    ]
-    plain_enums = [param for param in enum_params if param not in typed_enums]
-    matrix_types = {
-        f"{name}_matrix_type": param["conditioning"]
-        for name, param in params.items()
-        if param.get("role") == "matrix" and param.get("conditioning")
-    }
-    case_names = set()
-    seeds = set()
-    profiles = facts.get("dtype_profiles", [])
-    fill_tiers = generator._case_options(facts)["fill_tiers"]
-    for row_index, row in enumerate(rows, 2):
-        where = f"CSV 第 {row_index} 行"
-        if len(row) != len(header):
-            _err(problems, f"{where}列数与表头不一致")
-            continue
-        if any(value == "" for value in row):
-            _err(problems, f"{where}含空单元格")
-        data = dict(zip(header, row))
-        case_name = data["case_name"]
-        for param in plain_enums:
-            if data[param["name"]] not in param["values"]:
-                _err(problems, f"{where} enum 列 {param['name']} 取值不合法")
-        if not case_name.startswith("TC_ED_") and typed_enums and not any(
-            all(
-                profile.get("assign", {}).get(param["name"]) == data[param["name"]]
-                for param in typed_enums
-            )
-            for profile in profiles
-        ):
-            _err(problems, f"{where} dtype/compute enum 组合不在 profile 中")
-        for column in header:
-            if column.endswith("_fill") and data[column] not in fill_tiers:
-                _err(problems, f"{where} {column} 不在 fill 词表")
-        for column, values in matrix_types.items():
-            if data[column] not in values:
-                _err(problems, f"{where} {column} 不在 conditioning 中")
-        for column in batch_columns:
-            value = data[column]
-            if value not in BATCH_PATTERNS and not NULL_ELEMENT_RE.fullmatch(value):
-                _err(problems, f"{where} {column} 的 batch pattern 不合法")
-        if data["expect_result"] not in STATUS_VALUES:
-            _err(problems, f"{where} expect_result 不在状态码词表")
-        for column in null_columns:
-            if data[column] not in {"0", "1"}:
-                _err(problems, f"{where} {column} 必须是 0 或 1")
-        if case_name in case_names:
-            _err(problems, f"{where} case_name={case_name!r} 重复")
-        case_names.add(case_name)
-        if not re.fullmatch(r"TC_(L0|PW|ED|PF)_\d{3,}", case_name):
-            _err(problems, f"{where} case_name 前缀不合法")
-        seed = data["random_seed"]
-        if seed in seeds:
-            _err(problems, f"{where} random_seed={seed!r} 重复")
-        seeds.add(seed)
-
-
-def _pin_expected_rows(problems, facts, disk_rows, expected_rows):
-    disk_l0 = Counter(
-        (row["description"], row["expect_result"])
-        for row in disk_rows
-        if row["case_name"].startswith("TC_L0_")
+def _render_derived(target_dir, facts, generator, generated):
+    """把五件派生物渲染进 target_dir。gen_csv.py 是输入，不在此渲染。"""
+    target = Path(target_dir)
+    csv_path = target / f"{facts['op']}_test.csv"
+    generator.write_csv(csv_path, generated["header"], generated["rows"])
+    csv_hash = hashlib.sha256(csv_path.read_bytes()).hexdigest()
+    _render_script(
+        ACCURACY_TEMPLATE_PATH, target / "verify_accuracy.py", facts, csv_hash
     )
-    expected_l0 = Counter(
-        (row["description"], row["expect_result"])
-        for row in expected_rows
-        if row["case_name"].startswith("TC_L0_")
+    _render_script(
+        PERFORMANCE_TEMPLATE_PATH, target / "verify_performance.py", facts, csv_hash
     )
-    if expected_l0 - disk_l0:
-        _err(problems, "CSV 缺少 L0 组合")
-    for edge in facts.get("edge_cases", []):
-        if not any(
-            row["description"] == edge["name"]
-            and row["expect_result"] == edge["expect"]
-            for row in disk_rows
-        ):
-            _err(problems, f"CSV 缺少 edge_case {edge['name']!r}")
-    perf = facts.get("perf")
-    if perf:
-        for perf_row in perf["rows"]:
-            description = "pf " + " ".join(
-                f"{key}={perf_row[key]}" for key in perf["key"]
-            )
-            if not any(row["description"] == description for row in disk_rows):
-                _err(problems, f"CSV 缺少 perf.row {description!r}")
-
-
-def _check_regeneration(problems, path, facts, generator, generated):
-    second = generator.generate(facts)
-    if generated != second:
-        _err(problems, "同一事实表 FACTS 两次 generate 结果不一致")
-        return
-    with tempfile.TemporaryDirectory(prefix="blas-case-check-") as directory:
-        regenerated_path = Path(directory) / path.name
-        generator.write_csv(
-            regenerated_path,
-            generated["header"],
-            generated["rows"],
-        )
-        if regenerated_path.read_bytes() != path.read_bytes():
-            _err(problems, "磁盘 CSV 与重生成结果不一致")
+    _render_gpu_baseline(target / "gpu_baseline.csv", facts)
+    _render_readme(target / "README.md", facts, generator, generated)
 
 
 def _package_names(facts):
@@ -1794,8 +1684,7 @@ def _render_readme(path, facts, generator, generated):
         "BLOCK_TABLE": _block_table(report),
         "PAIR_SUMMARY": (
             f"pairs 覆盖 {report['pairs_covered']}/{report['pairs_total']}，"
-            f"infeasible {len(report['pairs_infeasible'])} 对，"
-            f"search_exhausted {len(report['pairs_search_exhausted'])} 对。"
+            f"infeasible {len(report['pairs_infeasible'])} 对。"
         ),
         "GPU_BASELINE": _gpu_baseline_section(facts),
         "PERF_KEY": ", ".join(facts.get("perf", {}).get("key", [])) or "无",
@@ -1821,130 +1710,10 @@ def _render_gpu_baseline(path, facts):
             )
 
 
-def _assignment_value(node):
-    try:
-        return ast.literal_eval(node)
-    except (ValueError, TypeError):
-        pass
-    if (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id in {"int", "float"}
-        and len(node.args) == 1
-        and not node.keywords
-        and isinstance(node.args[0], ast.Constant)
-    ):
-        converter = int if node.func.id == "int" else float
-        return converter(node.args[0].value)
-    raise ValueError("渲染常量不是字面量")
-
-
-def _script_constants(path):
-    text = Path(path).read_text(encoding="utf-8")
-    section = text.split(RENDER_CONSTANTS_START, 1)[1]
-    section = section.split(RENDER_CONSTANTS_END, 1)[0]
-    tree = ast.parse(section, filename=str(path))
-    result = {}
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target = node.targets[0]
-            if isinstance(target, ast.Name):
-                result[target.id] = _assignment_value(node.value)
-    return result
-
-
-def _check_readme(problems, path, facts):
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        _err(problems, f"README.md 读不出来：{exc}")
-        return
-    expected = ",".join(_header_columns(facts))
-    match = re.search(r"完整表头（各行直接拼接）：\n\n```text\n(.*?)\n```", text, re.S)
-    actual = None if match is None else "".join(match.group(1).splitlines())
-    if actual != expected:
-        _err(problems, "README.md 的完整表头代码块与投影不一致")
-    try:
-        section = text.split("## 列契约", 1)[1].split("完整表头（各行直接拼接）：", 1)[0]
-        table_lines = [line for line in section.splitlines() if line.startswith("|")]
-        row_count = max(0, len(table_lines) - 2)
-    except (IndexError, ValueError):
-        row_count = -1
-    if row_count != len(_header_columns(facts)):
-        _err(problems, "README.md 列契约表行数与 CSV 表头列数不一致")
-
-
-def _check_script_constants(problems, path, facts, csv_hash):
-    expected = {
-        "OP": facts["op"],
-        "FAMILY": facts["family"],
-        "CSV_NAME": f"{facts['op']}_test.csv",
-        "PACKAGE_CSV_SHA256": csv_hash,
-        "GENERATOR_VERSION": facts["generator_version"],
-    }
-    if path.name == "verify_performance.py":
-        keys = facts.get("perf", {}).get("key", [])
-        expected["PERF_KEY"] = keys or [""]
-        expected["PROFILE_ASSIGNS_JSON"] = json.dumps(
-            {
-                profile["name"]: profile["assign"]
-                for profile in facts.get("dtype_profiles", [])
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        expected["PERF_THRESHOLD"] = facts.get("perf", {}).get("threshold", 0.8)
-    try:
-        actual = _script_constants(path)
-    except (OSError, UnicodeError, SyntaxError, ValueError, IndexError) as exc:
-        _err(problems, f"{path.name} 常量区读不出来：{exc}")
-        return
-    for key, value in expected.items():
-        if actual.get(key) != value:
-            _err(problems, f"{path.name} 的 {key} 与事实表 FACTS 或 CSV 不一致")
-
-
-def _gpu_data_rows(path):
-    with Path(path).open(encoding="utf-8", newline="") as stream:
-        lines = [line for line in stream if line.strip() and not line.lstrip().startswith("#")]
-    if not lines:
-        return -1
-    return max(0, len(list(csv.reader(lines))) - 1)
-
-
-def _check_rendered_package(problems, directory, facts, csv_path):
-    paths = {name: directory / name for name in _package_names(facts)}
-    missing = [name for name, path in paths.items() if not path.is_file()]
-    for name in missing:
-        _err(problems, f"六件缺少 {name}")
-    if missing:
-        return
-    for name, path in paths.items():
-        try:
-            if b"@@" in path.read_bytes():
-                _err(problems, f"{name} 仍含未替换 token '@@'")
-        except OSError as exc:
-            _err(problems, f"{name} 读取失败：{exc}")
-    csv_hash = hashlib.sha256(csv_path.read_bytes()).hexdigest()
-    _check_readme(problems, paths["README.md"], facts)
-    for name in ("verify_accuracy.py", "verify_performance.py"):
-        _check_script_constants(problems, paths[name], facts, csv_hash)
-    try:
-        row_count = _gpu_data_rows(paths["gpu_baseline.csv"])
-    except (OSError, UnicodeError, csv.Error) as exc:
-        _err(problems, f"gpu_baseline.csv 读不出来：{exc}")
-    else:
-        expected = len(facts.get("perf", {}).get("rows", []))
-        if row_count != expected:
-            _err(problems, "gpu_baseline.csv 行数与 perf.rows 不一致")
-
-
 def _check_generation_report(problems, facts, generated):
     if generated.get("header") != _header_columns(facts):
         _err(problems, "generate 输出的 header 与 package.py 投影不一致")
     report = generated.get("report", {})
-    for pair in report.get("pairs_search_exhausted", []):
-        _err(problems, f"pairwise search_exhausted: {pair}")
     blocks = report.get("blocks", {})
     if blocks.get("L0", 0) < 1:
         _err(problems, "L0 行数必须至少为 1")
@@ -1957,41 +1726,32 @@ def _check_generation_report(problems, facts, generated):
 
 def _check_package(facts_path, facts):
     problems = []
-    csv_path = facts_path.parent / f"{facts['op']}_test.csv"
-    if not csv_path.exists():
+    package_dir = facts_path.parent
+    op_csv = package_dir / f"{facts['op']}_test.csv"
+    if not op_csv.exists():
         return problems, None
     try:
         generator = _load_generator()
         generated = generator.generate(facts)
+        second = generator.generate(facts)
     except Exception as exc:
         _err(problems, f"重生成失败：{exc}")
         return problems, None
-    _check_generation_report(problems, facts, generated)
-    report = generated.get("report", {})
-    try:
-        with csv_path.open(encoding="utf-8", newline="") as handle:
-            reader = csv.reader(handle)
-            header = next(reader, [])
-            rows = list(reader)
-    except (OSError, UnicodeError, csv.Error) as exc:
-        _err(problems, f"CSV 读取失败：{exc}")
+    if generated != second:
+        _err(problems, "同一事实表 FACTS 两次 generate 结果不一致")
         return problems, generated.get("report")
-    _check_csv_shape(problems, facts, header, rows, generator)
-    if header == _header_columns(facts):
-        disk_rows = _row_dicts(header, rows)
-        expected_rows = _row_dicts(generated["header"], generated["rows"])
-        expected_names = {row["case_name"] for row in expected_rows}
-        for row in disk_rows:
-            if row["case_name"].startswith("TC_ED_"):
-                continue
-            if row["case_name"] not in expected_names:
-                _err(
-                    problems,
-                    f"非 ED 行 {row['case_name']!r} 未通过 constraints/footprint 合法性核",
-                )
-        _pin_expected_rows(problems, facts, disk_rows, expected_rows)
-    _check_regeneration(problems, csv_path, facts, generator, generated)
-    _check_rendered_package(problems, facts_path.parent, facts, csv_path)
+    _check_generation_report(problems, facts, generated)
+    # 五件派生物必须与从同一 FACTS 重新渲染的结果逐字节一致：任何差异都表明包被改动。
+    # 这一条通用规则取代逐文件的语义校验——更简单，且没有语义子集能被绕过。
+    with tempfile.TemporaryDirectory(prefix="blas-case-check-") as directory:
+        _render_derived(directory, facts, generator, generated)
+        for name in _package_names(facts)[1:]:
+            deployed = package_dir / name
+            fresh = Path(directory) / name
+            if not deployed.is_file():
+                _err(problems, f"任务包缺文件：{name}")
+            elif deployed.read_bytes() != fresh.read_bytes():
+                _err(problems, f"{name} 与从 FACTS 重新渲染的结果不一致，可能被改动")
     return problems, generated["report"]
 
 
@@ -2065,8 +1825,7 @@ def _run_check(args):
     if report is not None:
         print(
             f"pairs 覆盖 {report['pairs_covered']}/{report['pairs_total']}，"
-            f"infeasible {len(report['pairs_infeasible'])} 对，"
-            f"search_exhausted {len(report['pairs_search_exhausted'])} 对"
+            f"infeasible {len(report['pairs_infeasible'])} 对"
         )
         print(f"rows_dropped {report['rows_dropped']}")
         print("六件        " + "、".join(_package_names(facts)))
@@ -2100,26 +1859,9 @@ def _run_render(args):
         if generation_problems:
             _print_problems(generation_problems)
             return 2
-        generator.write_csv(csv_path, generated["header"], generated["rows"])
+        _render_derived(facts_path.parent, facts, generator, generated)
         print(f"{csv_path.name}: {len(generated['rows'])} rows")
         print(f"解释器：{Path(sys.executable).resolve()}")
-        csv_hash = hashlib.sha256(csv_path.read_bytes()).hexdigest()
-        _render_script(
-            ACCURACY_TEMPLATE_PATH,
-            facts_path.parent / "verify_accuracy.py",
-            facts,
-            csv_hash,
-        )
-        _render_script(
-            PERFORMANCE_TEMPLATE_PATH,
-            facts_path.parent / "verify_performance.py",
-            facts,
-            csv_hash,
-        )
-        _render_gpu_baseline(facts_path.parent / "gpu_baseline.csv", facts)
-        _render_readme(
-            facts_path.parent / "README.md", facts, generator, generated
-        )
     except Exception as exc:
         print(f"六件渲染失败：{exc}", file=sys.stderr)
         return 2

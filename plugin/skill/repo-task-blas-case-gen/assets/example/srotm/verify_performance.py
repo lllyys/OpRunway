@@ -5,7 +5,7 @@
 OP = "srotm"
 FAMILY = "rotm"
 CSV_NAME = "srotm_test.csv"
-PACKAGE_CSV_SHA256 = "818a4f94f06e066076b7edee4b90942a585a28532dbfa71d2f4a3bb411c62f57"
+PACKAGE_CSV_SHA256 = "f250d915f7912ab6453287ac61e03b3cecda1378bba19e47fa9070877160ddf8"
 GENERATOR_VERSION = int("1")
 PERF_KEY = [""]
 PROFILE_ASSIGNS_JSON = '''{}'''
@@ -482,6 +482,21 @@ def _measure_case(args, binary, msprof, row, gtest_name, references, profile_roo
             record["status"] = "CRASH"
             record["verdict"] = "CRASH"
             record["message"] = f"第 {repeat} 次 msprof 退出码 {code}"
+            return record
+        # 采集只产 task_time 与 sqlite；op_summary 由 export 生成，必须显式导出。
+        export = [str(msprof), "--export=on", f"--output={output_dir}"]
+        code, output, problem = _run_process(export, args.timeout)
+        _write_log(profile_root / safe_name / f"r{repeat}.export.log", output)
+        if problem:
+            record["status"] = problem
+            record["verdict"] = problem
+            record["message"] = f"第 {repeat} 次 msprof export 未完成"
+            return record
+        if code != 0:
+            # export 是分析工具失败，不是被测算子崩溃：归入拿不到 kernel 证据。
+            record["status"] = "NO_KERNEL"
+            record["verdict"] = "NO_KERNEL"
+            record["message"] = f"第 {repeat} 次 msprof export 退出码 {code}，未生成 op_summary"
             return record
         try:
             kernel_us, launches = parse_op_summary(output_dir)

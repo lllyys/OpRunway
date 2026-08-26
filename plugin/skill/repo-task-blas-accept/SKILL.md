@@ -13,27 +13,27 @@ description: >-
 
 ## 入口参数
 
-| 参数 | 含义 | 要求 |
-| --- | --- | --- |
-| `任务包目录` | case-gen 生成的目录 | 含固定六件 |
-| `工程目录` | 开发者 ops-blas 检出 | 含 `build.sh`、`include/`、`test/` |
-| `soc` | 目标 SoC | 与 `build.sh --soc` 一致 |
-| `device` | NPU 设备号 | 非负整数，默认 0；编译期固定 |
-| `python` | 执行量具的解释器 | Python 3.8 或更高版本 |
-| `工作目录` | 日志、检查结果和结论目录 | 绝对路径，先创建再进入 |
+| 参数       | 含义              | 要求                              |
+| -------- | --------------- | ------------------------------- |
+| `任务包目录`  | case-gen 生成的目录  | 含固定六件                           |
+| `工程目录`   | 开发者 ops-blas 检出 | 含 `build.sh`、`include/`、`test/` |
+| `soc`    | 目标 SoC          | 与 `build.sh --soc` 一致           |
+| `device` | NPU 设备号         | 非负整数，默认 0；编译期固定                 |
+| `python` | 执行量具的解释器        | Python 3.8 或更高版本                |
+| `工作目录`   | 日志、检查结果和结论目录    | 绝对路径，先创建再进入                     |
 
 每条命令都必须带 `cd <工作目录> &&`。shell 调用之间不继承当前目录。
 
 ## 主流程
 
-| 阶段 | 输入与处理 | 产物 | 出口与去向 |
-| --- | --- | --- | --- |
-| A1 环境 | 检查工具链、工程、CANN 与设备 | `env.json` | 0 进 A2；非 0 停止 |
-| A2 契约 | 检查六件、声明、部署 CSV 与构建清单 | `check.json` | 0 进 A2′；2 停止 |
-| A2′ 审阅 | 对照 README 审阅三份 C++ 文件 | 审阅记录 | 记录进入 A5 报告 |
-| A3 精度 | 构建并运行非 `TC_PF_` 用例 | `accuracy_<id>.json` | 通过进 A4 |
-| A4 性能 | 逐例用 msprof 采集 `TC_PF_` | `performance_<id>.json` | 证据进入 A5 |
-| A5 结论 | 校验证据集合与哈希，机械裁决 | `verdict.json`、`report.md` | 0/1/2 |
+| 阶段     | 输入与处理                  | 产物                         | 出口与去向         |
+| ------ | ---------------------- | -------------------------- | ------------- |
+| A1 环境  | 检查工具链、工程、CANN 与设备      | `env.json`                 | 0 进 A2；非 0 停止 |
+| A2 契约  | 检查六件、声明、部署 CSV 与构建清单   | `check.json`               | 0 进 A2′；2 停止  |
+| A2′ 审阅 | 对照 README 审阅三份 C\++ 文件 | 审阅记录                       | 记录进入 A5 报告    |
+| A3 精度  | 构建并运行非 `TC_PF_` 用例     | `accuracy_<id>.json`       | 通过进 A4        |
+| A4 性能  | 逐例用 msprof 采集 `TC_PF_` | `performance_<id>.json`    | 证据进入 A5       |
+| A5 结论  | 校验证据集合与哈希，机械裁决         | `verdict.json`、`report.md` | 0/1/2         |
 
 完整参数、退出码和路径规则见
 [run-chain.md](references/run-chain.md)。性能字段与状态见
@@ -131,3 +131,4 @@ cd <工作目录> && <python> <skill>/scripts/accept.py verdict \
 - [run-chain.md](references/run-chain.md) — A1–A5 命令、产物、退出码与复跑链
 - [troubleshooting.md](references/troubleshooting.md) — 常见失败的现象、原因与处置
 - [perf-protocol.md](references/perf-protocol.md) — msprof kernel 耗时协议与待实测边界
+

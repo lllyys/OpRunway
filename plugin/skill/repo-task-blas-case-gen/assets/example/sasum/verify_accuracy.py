@@ -5,7 +5,7 @@
 OP = "sasum"
 FAMILY = "asum"
 CSV_NAME = "sasum_test.csv"
-PACKAGE_CSV_SHA256 = "2e61cd7821dbe14f92b1eda5f5bca54d0e2b5148ab7e075f82f206886c9d4131"
+PACKAGE_CSV_SHA256 = "1f5eab3860442a47027e9cbb31474d5bceb9ac42dadc70b715a996177a1823b6"
 GENERATOR_VERSION = int("1")
 ACCURACY_FILTER = "*TC_*:-*TC_PF_*"
 # ===== 渲染常量区结束 =====

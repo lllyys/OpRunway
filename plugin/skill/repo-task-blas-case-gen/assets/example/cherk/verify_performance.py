@@ -5,7 +5,7 @@
 OP = "cherk"
 FAMILY = "herk"
 CSV_NAME = "cherk_test.csv"
-PACKAGE_CSV_SHA256 = "7b2e7ec392b488984cadc937c9e8d74eb7ab6d14d1e6d6d9822ecbc9bd571564"
+PACKAGE_CSV_SHA256 = "cea6cad093868f1364ddce46fd1ccaba462978f1678f1b442d36b26851f69b8f"
 GENERATOR_VERSION = int("1")
 PERF_KEY = ["n", "k", "uplo", "trans"]
 PROFILE_ASSIGNS_JSON = '''{}'''
@@ -482,6 +482,21 @@ def _measure_case(args, binary, msprof, row, gtest_name, references, profile_roo
             record["status"] = "CRASH"
             record["verdict"] = "CRASH"
             record["message"] = f"第 {repeat} 次 msprof 退出码 {code}"
+            return record
+        # 采集只产 task_time 与 sqlite；op_summary 由 export 生成，必须显式导出。
+        export = [str(msprof), "--export=on", f"--output={output_dir}"]
+        code, output, problem = _run_process(export, args.timeout)
+        _write_log(profile_root / safe_name / f"r{repeat}.export.log", output)
+        if problem:
+            record["status"] = problem
+            record["verdict"] = problem
+            record["message"] = f"第 {repeat} 次 msprof export 未完成"
+            return record
+        if code != 0:
+            # export 是分析工具失败，不是被测算子崩溃：归入拿不到 kernel 证据。
+            record["status"] = "NO_KERNEL"
+            record["verdict"] = "NO_KERNEL"
+            record["message"] = f"第 {repeat} 次 msprof export 退出码 {code}，未生成 op_summary"
             return record
         try:
             kernel_us, launches = parse_op_summary(output_dir)

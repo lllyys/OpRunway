@@ -2,94 +2,122 @@
 """按事实表 FACTS 生成 CSV 驱动 GTest 用例。只编辑 FACTS 区；通用代码区禁止修改。"""
 
 # ===== FACTS 区开始 =====
-FACTS = {'schema_version': 1,
- 'generator_version': 1,
- 'op': 'cherk',
- 'family': 'herk',
- 'symbol': 'aclblasCherk',
- 'returns': 'aclblasStatus_t',
- 'params': [{'name': 'handle', 'ctype': 'aclblasHandle_t', 'role': 'handle'},
-            {'name': 'uplo',
-             'ctype': 'aclblasFillMode_t',
-             'role': 'enum',
-             'values': ['UPPER', 'LOWER']},
-            {'name': 'trans',
-             'ctype': 'aclblasOperation_t',
-             'role': 'enum',
-             'values': ['N', 'C']},
-            {'name': 'n', 'ctype': 'int', 'role': 'dim'},
-            {'name': 'k', 'ctype': 'int', 'role': 'dim'},
-            {'name': 'alpha',
-             'ctype': 'const float*',
-             'role': 'scalar',
-             'dtype': 'float32',
-             'mem': 'device',
-             'nullable': True},
-            {'name': 'A',
-             'ctype': 'const aclblasComplex*',
-             'role': 'matrix',
-             'dtype': 'complex64',
-             'dir': 'in',
-             'rows': "n if trans == 'N' else k",
-             'cols': "k if trans == 'N' else n",
-             'ld': 'lda',
-             'nullable': True},
-            {'name': 'lda', 'ctype': 'int', 'role': 'layout', 'kind': 'ld', 'of': 'A'},
-            {'name': 'beta',
-             'ctype': 'const float*',
-             'role': 'scalar',
-             'dtype': 'float32',
-             'mem': 'device',
-             'nullable': True},
-            {'name': 'C',
-             'ctype': 'aclblasComplex*',
-             'role': 'matrix',
-             'dtype': 'complex64',
-             'dir': 'inout',
-             'rows': 'n',
-             'cols': 'n',
-             'ld': 'ldc',
-             'storage': 'hermitian',
-             'uplo': 'uplo',
-             'nullable': True},
-            {'name': 'ldc', 'ctype': 'int', 'role': 'layout', 'kind': 'ld', 'of': 'C'}],
- 'constraints': ['n >= 0',
-                 'k >= 0',
-                 'lda >= max(1, rows(A))',
-                 'ldc >= max(1, rows(C))'],
- 'golden': {'kind': 'cblas', 'symbol': 'cblas_cherk'},
- 'verify': ['uplo_triangle', 'non_uplo_exact', 'hermitian_diag'],
- 'edge_cases': [{'name': 'zero_n',
-                 'set': {'n': 0},
-                 'expect': 'ACLBLAS_STATUS_SUCCESS',
-                 'source': '任务书 §2.4 的 n 边界'},
-                {'name': 'null_a',
-                 'set': {'nullA': True},
-                 'expect': 'ACLBLAS_STATUS_INVALID_VALUE',
-                 'source': '任务书 §2.4 的空指针规则'}],
- 'perf': {'key': ['n', 'k', 'uplo', 'trans'],
-          'rows': [{'n': 1024,
-                    'k': 1024,
-                    'uplo': 'UPPER',
-                    'trans': 'N',
-                    'gpu_ms': 0.314},
-                   {'n': 2048,
-                    'k': 2048,
-                    'uplo': 'UPPER',
-                    'trans': 'N',
-                    'gpu_ms': 1.929},
-                   {'n': 1024,
-                    'k': 1024,
-                    'uplo': 'LOWER',
-                    'trans': 'C',
-                    'gpu_ms': 0.25},
-                   {'n': 2048,
-                    'k': 2048,
-                    'uplo': 'LOWER',
-                    'trans': 'C',
-                    'gpu_ms': 2.024}],
-          'sweep': False},
- 'sources': {'params': '任务书 §2.3 与 §2.4', 'golden': '任务书 §3.2', 'perf': '任务书 §3.3'}}
+FACTS = {
+    "schema_version": 1,
+    "generator_version": 1,
+    "op": "cherk",
+    "family": "herk",
+    "symbol": "aclblasCherk",
+    "returns": "aclblasStatus_t",
+    "params": [
+        {"name": "handle", "ctype": "aclblasHandle_t", "role": "handle"},
+        {
+            "name": "uplo",
+            "ctype": "aclblasFillMode_t",
+            "role": "enum",
+            "values": ["UPPER", "LOWER"],
+        },
+        {
+            "name": "trans",
+            "ctype": "aclblasOperation_t",
+            "role": "enum",
+            "values": ["N", "C"],
+        },
+        {"name": "n", "ctype": "int", "role": "dim"},
+        {"name": "k", "ctype": "int", "role": "dim"},
+        {
+            "name": "alpha",
+            "ctype": "const float*",
+            "role": "scalar",
+            "dtype": "float32",
+            "mem": "device",
+            "nullable": True,
+        },
+        {
+            "name": "A",
+            "ctype": "const aclblasComplex*",
+            "role": "matrix",
+            "dtype": "complex64",
+            "dir": "in",
+            "rows": "n if trans == 'N' else k",
+            "cols": "k if trans == 'N' else n",
+            "ld": "lda",
+            "nullable": True,
+        },
+        {
+            "name": "lda",
+            "ctype": "int",
+            "role": "layout",
+            "kind": "ld",
+            "of": "A",
+        },
+        {
+            "name": "beta",
+            "ctype": "const float*",
+            "role": "scalar",
+            "dtype": "float32",
+            "mem": "device",
+            "nullable": True,
+        },
+        {
+            "name": "C",
+            "ctype": "aclblasComplex*",
+            "role": "matrix",
+            "dtype": "complex64",
+            "dir": "inout",
+            "rows": "n",
+            "cols": "n",
+            "ld": "ldc",
+            "storage": "hermitian",
+            "uplo": "uplo",
+            "nullable": True,
+        },
+        {
+            "name": "ldc",
+            "ctype": "int",
+            "role": "layout",
+            "kind": "ld",
+            "of": "C",
+        },
+    ],
+    "constraints": [
+        "n >= 0",
+        "k >= 0",
+        "lda >= max(1, rows(A))",
+        "ldc >= max(1, rows(C))",
+    ],
+    "golden": {"kind": "cblas", "symbol": "cblas_cherk"},
+    "verify": ["uplo_triangle", "non_uplo_exact", "hermitian_diag"],
+    "edge_cases": [
+        {
+            "name": "zero_n",
+            "set": {"n": 0},
+            "expect": "ACLBLAS_STATUS_SUCCESS",
+            "source": "任务书 §2.4 的 n 边界",
+        },
+        {
+            "name": "null_a",
+            "set": {"nullA": True},
+            "expect": "ACLBLAS_STATUS_INVALID_VALUE",
+            "source": "任务书 §2.4 的空指针规则",
+        },
+    ],
+    "perf": {
+        "key": ["n", "k", "uplo", "trans"],
+        "rows": [
+            {"n": 1024, "k": 1024, "uplo": "UPPER", "trans": "N", "gpu_ms": 0.314},
+            {"n": 2048, "k": 2048, "uplo": "UPPER", "trans": "N", "gpu_ms": 1.929},
+            {"n": 1024, "k": 1024, "uplo": "LOWER", "trans": "C", "gpu_ms": 0.25},
+            {"n": 2048, "k": 2048, "uplo": "LOWER", "trans": "C", "gpu_ms": 2.024},
+        ],
+        "sweep": False,
+    },
+    "sources": {
+        "params": "任务书 §2.3 与 §2.4",
+        "golden": "任务书 §3.2",
+        "perf": "任务书 §3.3",
+    },
+}
 # ===== FACTS 区结束 =====
 # ===== 通用代码区（由 repo-task-blas-case-gen 渲染，禁止修改）=====
 
@@ -102,10 +130,11 @@ import sys
 
 GENERATOR_VERSION = 1
 
-# 边界 1、小奇数、对齐、非对齐、中等和大尺寸。
-MAT_DIM_TIERS = [1, 3, 16, 63, 256, 1024]
-# 纯向量长度可更大，用于覆盖归约路径。
-VEC_DIM_TIERS = [1, 3, 16, 63, 4096, 100003]
+# 每个 2^n 处给出 (2^n-1, 2^n, 2^n+1) 三元组，夹住 tiling 的「差一个/刚好一块/多一个」。
+# 加退化 1、2、3 与一个大尺寸。文档写了维度上限就在 cases.dim_tiers 里裁剪。
+MAT_DIM_TIERS = [1, 2, 3, 15, 16, 17, 63, 64, 65, 255, 256, 257, 1024]
+# 纯向量长度再加一个大值，覆盖归约累加路径。
+VEC_DIM_TIERS = [1, 2, 3, 15, 16, 17, 63, 64, 65, 255, 256, 257, 1024, 100003]
 # 覆盖单批、双批和小奇数批量。
 BATCH_TIERS = [1, 2, 5]
 # min 使用最小合法值，pad 制造非对齐的额外间隔。
@@ -773,19 +802,16 @@ def _pairwise_rows(facts, axes, report):
                 "right": variable_axes[right]["name"],
                 "right_value": variable_axes[right]["values"][right_value],
             }
-            report[
-                "pairs_search_exhausted"
-                if outcome == "search_exhausted"
-                else "pairs_infeasible"
-            ].append(pair)
             if outcome == "search_exhausted":
-                break
+                # 搜索预算耗尽 ≠ 已证明不可行；不静默降级，直接失败。
+                raise GeneratorError(f"pairwise 搜索预算耗尽，未能判定值对：{pair}")
+            report["pairs_infeasible"].append(pair)
             continue
         selection, body = candidate
         covered = _selection_pairs(selection, variable_axes) & uncovered
         uncovered.difference_update(covered)
         rows.append((_description(variable_axes, selection), body))
-    unresolved = len(report["pairs_infeasible"]) + len(report["pairs_search_exhausted"])
+    unresolved = len(report["pairs_infeasible"])
     report["pairs_covered"] = report["pairs_total"] - len(uncovered) - unresolved
     return rows
 
@@ -881,7 +907,6 @@ def generate(facts):
         "pairs_total": 0,
         "pairs_covered": 0,
         "pairs_infeasible": [],
-        "pairs_search_exhausted": [],
         "rows_dropped": 0,
         "blocks": {},
     }

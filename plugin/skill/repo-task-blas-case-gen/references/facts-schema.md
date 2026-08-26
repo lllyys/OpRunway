@@ -6,7 +6,7 @@
 - [顶层键](#顶层键)
 - [参数角色与属性](#参数角色与属性)
 - [layout 双向引用](#layout-双向引用)
-- [batch、alias 与 producer](#batchalias-与-producer)
+- [batch 与 producer](#batch-与-producer)
 - [dtype 与 profiles](#dtype-与-profiles)
 - [表达式白名单](#表达式白名单)
 - [verify 词表](#verify-词表)
@@ -101,7 +101,7 @@ msprof kernel 采集、统计、scope caveat 与退出码见
 | `scalar` | `dtype/dtype_from`、`mem`、`nullable`、`values` | 方向固定为 in |
 | `inout_scalar` | 同 `scalar` | 方向固定为 inout |
 | `out_scalar` | 同 `scalar` | 方向固定为 out，不写 `dir` |
-| `vector` | dtype、`dir`、`len`、`inc`、nullable、batch、alias、producer | dir 默认 in |
+| `vector` | dtype、`dir`、`len`、`inc`、nullable、batch、producer | dir 默认 in |
 | `fixed_vector` | dtype、`dir`、`len`、`nullable`、`samples` | len 是正整数字面量 |
 | `matrix` | dtype、dir、形状、布局、结构与控制属性 | 见下文 |
 | `int_array` | `dtype`、`dir`、`len`、`producer`、`nullable` | dtype 默认 int32 |
@@ -168,7 +168,7 @@ producer 负责说明输入整数数组由哪个前置调用产生。
 
 双向检查防止生成器只看一侧时把布局参数绑定到错误的 buffer。
 
-## batch、alias 与 producer
+## batch 与 producer
 
 `batch` 的结构如下：
 
@@ -185,7 +185,7 @@ producer 负责说明输入整数数组由哪个前置调用产生。
 并引用 `kind=stride` 的 layout；`table_mem` 只允许用于 `ptr_array`。内存字段都只能
 取 `host` 或 `device`。
 
-`alias` 引用另一个 `vector` 或 `matrix` 参数。`producer` 是非空调用描述，例如
+`producer` 是非空调用描述，例如
 `lapacke_sgetrf(A)`；括号中的每个名字必须是已声明参数。
 
 ## dtype 与 profiles

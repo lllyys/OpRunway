@@ -23,8 +23,8 @@ pairwise 配对。
 | op enum | `<name>` | `values` 声明顺序 |
 | dtype/compute enum | 无独立轴 | 由 profile.assign 决定 |
 | 存在 profiles | `profile` | profile 名，插在首个 dtype/compute enum 处 |
-| matrix 维度 | `<name>` | `1,3,16,63,256,1024` |
-| 纯 vector/int_array 长度 | `<name>` | `1,3,16,63,4096,100003` |
+| matrix 维度 | `<name>` | 2^n±1 边界阶梯，见 case-strategy.md |
+| 纯 vector/int_array 长度 | `<name>` | 同上加大值 `100003` |
 | batch count | `<name>` | `1,2,5` |
 | ld/stride | `<name>` | `min,pad` |
 | inc | `<name>` | `1,3` |
@@ -90,8 +90,8 @@ PF 与 PW 即使出现相同的性能键也都保留。PW 证明组合覆盖，P
 未覆盖对作种子。其余轴优先选能覆盖最多未覆盖对的值，平局选先声明的值。
 
 候选行不合法时按轴顺序回溯，每个种子最多试 2000 个完整候选。穷举完整空间仍找不到
-合法行才记为 `pairs_infeasible`；到达预算则记为 `pairs_search_exhausted`，不能冒充不可行。
-实现只以整数索引排序，不依赖 set 迭代顺序。
+合法行才记为 `pairs_infeasible`；到达搜索预算却未判定的直接失败（`GeneratorError`），
+不冒充不可行。实现只以整数索引排序，不依赖 set 迭代顺序。
 
 ## report
 
@@ -102,25 +102,19 @@ PF 与 PW 即使出现相同的性能键也都保留。PW 证明组合覆盖，P
 | `axes` | 每个轴的名称与取值数 |
 | `pairs_total` | 所有必覆盖值对数 |
 | `pairs_covered` | 已被合法 PW 行覆盖的值对数 |
-| `pairs_infeasible` | 无合法行的值对明细 |
-| `pairs_search_exhausted` | 搜索预算耗尽、尚未证明不可行的值对 |
+| `pairs_infeasible` | 穷举证明无合法行的值对明细 |
 | `rows_dropped` | constraints 或 footprint 丢弃的候选数 |
 | `blocks` | L0/PW/ED/PF 各块行数 |
 
 ## 包级校验
 
-CSV 存在时，`package.py check` 执行以下机械门：
+CSV 存在时，`package.py check` 执行以下机械门。核心是一条通用规则：**五件派生物必须与
+从同一 FACTS 重新渲染的结果逐字节一致**——它取代了逐文件的语义校验，且没有语义子集能被绕过。
 
-- 通用代码区 SHA-256 与模板一致。
-- generate header 、磁盘 header 和 package.py 投影逐字一致。
-- 每行列数一致且无空值。
-- enum、profile 组合、fill、matrix type、batch pattern 和状态值合法。
-- dtype/compute profile 组合只约束非 ED 行。
-- null 列是 `0/1`，seed 不重复，case_name 不重复且前缀合法。
-- L0 至少一行；存在可变轴时 PW 至少一行。
-- `pairs_search_exhausted` 必须为空，否则列出值对并退出 2。
-- 非 ED 行存在于重生成的合法集合中。
-- 每个 L0 组合、edge 和 perf.row 都存在。
-- 两次 generate 结果相同，且重生成 CSV 与磁盘文件逐字节相同。
+- `gen_csv.py` 通用代码区 SHA-256 与模板一致；FACTS 区只允许字面量赋值。
+- 同一 FACTS 两次 `generate` 结果一致。
+- `<op>_test.csv`、`README.md`、`verify_accuracy.py`、`verify_performance.py`、
+  `gpu_baseline.csv` 各自与从 FACTS 重新渲染的结果逐字节一致。
+- generate 输出的 header 与 package.py 投影一致；L0 至少一行，存在可变轴时 PW 至少一行。
 
-全部通过后打印覆盖数、`infeasible`、`search_exhausted` 与 `rows_dropped`。
+全部通过后打印覆盖数、`infeasible` 与 `rows_dropped`。

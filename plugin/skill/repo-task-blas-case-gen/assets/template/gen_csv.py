@@ -26,10 +26,11 @@ import sys
 
 GENERATOR_VERSION = 1
 
-# 边界 1、小奇数、对齐、非对齐、中等和大尺寸。
-MAT_DIM_TIERS = [1, 3, 16, 63, 256, 1024]
-# 纯向量长度可更大，用于覆盖归约路径。
-VEC_DIM_TIERS = [1, 3, 16, 63, 4096, 100003]
+# 每个 2^n 处给出 (2^n-1, 2^n, 2^n+1) 三元组，夹住 tiling 的「差一个/刚好一块/多一个」。
+# 加退化 1、2、3 与一个大尺寸。文档写了维度上限就在 cases.dim_tiers 里裁剪。
+MAT_DIM_TIERS = [1, 2, 3, 15, 16, 17, 63, 64, 65, 255, 256, 257, 1024]
+# 纯向量长度再加一个大值，覆盖归约累加路径。
+VEC_DIM_TIERS = [1, 2, 3, 15, 16, 17, 63, 64, 65, 255, 256, 257, 1024, 100003]
 # 覆盖单批、双批和小奇数批量。
 BATCH_TIERS = [1, 2, 5]
 # min 使用最小合法值，pad 制造非对齐的额外间隔。
@@ -697,19 +698,16 @@ def _pairwise_rows(facts, axes, report):
                 "right": variable_axes[right]["name"],
                 "right_value": variable_axes[right]["values"][right_value],
             }
-            report[
-                "pairs_search_exhausted"
-                if outcome == "search_exhausted"
-                else "pairs_infeasible"
-            ].append(pair)
             if outcome == "search_exhausted":
-                break
+                # 搜索预算耗尽 ≠ 已证明不可行；不静默降级，直接失败。
+                raise GeneratorError(f"pairwise 搜索预算耗尽，未能判定值对：{pair}")
+            report["pairs_infeasible"].append(pair)
             continue
         selection, body = candidate
         covered = _selection_pairs(selection, variable_axes) & uncovered
         uncovered.difference_update(covered)
         rows.append((_description(variable_axes, selection), body))
-    unresolved = len(report["pairs_infeasible"]) + len(report["pairs_search_exhausted"])
+    unresolved = len(report["pairs_infeasible"])
     report["pairs_covered"] = report["pairs_total"] - len(uncovered) - unresolved
     return rows
 
@@ -805,7 +803,6 @@ def generate(facts):
         "pairs_total": 0,
         "pairs_covered": 0,
         "pairs_infeasible": [],
-        "pairs_search_exhausted": [],
         "rows_dropped": 0,
         "blocks": {},
     }

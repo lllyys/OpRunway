@@ -14,13 +14,13 @@ description: >-
 
 ## 入口参数
 
-| 参数 | 含义 | 取值约束 | 初值推断 |
-| --- | --- | --- | --- |
-| `任务书` | 社区算子任务书 | 含接口签名与参数表所在的节 | 用户给出 |
-| `op` | 算子短名 | 小写标识符，如 `cherk` | 从接口名推断 |
-| `family` | 工程族目录名 | 同时用于 test 与 blas 目录 | 见下方推断规则 |
-| `工作目录` | 绝对路径 | 工作区的 `test_script/<op>` | S0 建立后进入 |
-| `<python>` | 执行量具的解释器 | Python 3 | 优先用 `python3` |
+| 参数         | 含义       | 取值约束                    | 初值推断          |
+| ---------- | -------- | ----------------------- | ------------- |
+| `任务书`      | 社区算子任务书  | 含接口签名与参数表所在的节           | 用户给出          |
+| `op`       | 算子短名     | 小写标识符，如 `cherk`         | 从接口名推断        |
+| `family`   | 工程族目录名   | 同时用于 test 与 blas 目录     | 见下方推断规则       |
+| `工作目录`     | 绝对路径     | 工作区的 `test_script/<op>` | S0 建立后进入      |
+| `<python>` | 执行量具的解释器 | Python 3                | 优先用 `python3` |
 
 每条命令都必须带 `cd <工作目录> &&`。shell 调用之间不继承当前目录。
 
@@ -40,11 +40,11 @@ mkdir -p <工作目录> && cd <工作目录> && <python> --version
 
 各阶段按顺序执行：
 
-| 阶段 | 输入与处理 | 产物 | 出口与去向 |
-| --- | --- | --- | --- |
+| 阶段         | 输入与处理                    | 产物           | 出口与去向  |
+| ---------- | ------------------------ | ------------ | ------ |
 | S1 填 FACTS | 复制模板，按任务书接口签名与参数表填 FACTS | `gen_csv.py` | 0 进 S2 |
-| S2 渲染六件 | 校验 FACTS，独立运行生成器并投影契约 | 固定六件 | 0 进 S3 |
-| S3 校验 | 对事实表 FACTS 与六件运行包级 check | 覆盖与六件摘要 | 0 完成 |
+| S2 渲染六件    | 校验 FACTS，独立运行生成器并投影契约    | 固定六件         | 0 进 S3 |
+| S3 校验      | 对事实表 FACTS 与六件运行包级 check | 覆盖与六件摘要      | 0 完成   |
 
 ```text
 进度：
@@ -109,9 +109,11 @@ check 逐行校验 CSV、其余模板投影，并与重生成结果逐字节比�
 
 - [facts-schema.md](references/facts-schema.md) — 事实表 FACTS 字段、引用、表达式与投影规则
 - [aclblas-conventions.md](references/aclblas-conventions.md) — enum、状态码与参数推断约定
+- [case-strategy.md](references/case-strategy.md) — 覆盖轴、2^n±1 边界、规模与必构造场景
 - [csv-and-blocks.md](references/csv-and-blocks.md) — 轴、行物化、四块、pairwise 与包级校验
 - [readme-contract.md](references/readme-contract.md) — README 章节来源与开发者落地约束
 - [perf-protocol.md](references/perf-protocol.md) — msprof kernel 采集、比对与证据协议
 - `assets/example/cherk/` — 矩阵乘任务书提取的完整六件示例
 - `assets/example/sasum/` — ops-blas README 提取的示例，不代表存在 sasum 任务书
 - `assets/example/srotm/` — 公开头文件提取的示例
+
