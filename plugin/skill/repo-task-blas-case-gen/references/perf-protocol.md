@@ -25,9 +25,11 @@
    依据：项目策略。
 2. warm-up 非 0 退出时，该例记 `FAIL(warmup)`，不再采样。依据：项目策略。
 3. 默认独立执行五次 msprof，每次使用独立输出目录。依据：项目策略。
-4. 采样命令是
-   `msprof --application="<bin> --gtest_filter=<完整名>" --output=<目录>`。
-   依据：Ascend CANN msProf 用户指南；版本、章节与参数组合待核、待实测。
+4. 每次采样先采集再导出，两条命令共用同一输出目录：
+   `msprof --application="<bin> --gtest_filter=<完整名>" --output=<目录>` 只产
+   `task_time_*.csv` 与 `device_0/sqlite/*.db`，随后
+   `msprof --export=on --output=<目录>` 才生成 `op_summary_*.csv`。
+   依据：实测（A3，CANN 9.0.1，ascend910_93）。
 5. `--repeats` 可覆盖五次采样数；每次仍保持进程隔离。依据：项目策略。
 6. 原始目录默认保留，便于复核；`--keep-prof` 预留关闭策略。依据：项目策略。
 
@@ -43,15 +45,15 @@ msprof 查找顺序如下，均要求文件存在且可执行。依据：项目�
 
 ## op_summary 解析
 
-脚本把下列未实测信息集中在表驱动常量中。
-目标机 spike 后只改已证伪的常量，不改采集与裁决结构。
+脚本把下列信息集中在表驱动常量中，换机型只改常量不改采集与裁决结构。
+下表四项已在 A3（CANN 9.0.1，ascend910_93）用 sger 实测确认。
 
 | 常量 | 当前值 | 依据 |
 | --- | --- | --- |
-| `OP_SUMMARY_GLOB` | `PROF_*/mindstudio_profiler_output/op_summary_*.csv` | CANN 指南；待核、待实测 |
-| task type 列 | `Task Type` | CANN 指南；待核、待实测 |
-| duration 列 | `Task Duration(us)` | CANN 指南；待核、待实测 |
-| kernel task 类型 | `AI_CORE/AI_VECTOR_CORE/MIX_AIC/MIX_AIV` | CANN 指南；待核、待实测 |
+| `OP_SUMMARY_GLOB` | `PROF_*/mindstudio_profiler_output/op_summary_*.csv` | 实测（export 后生成） |
+| task type 列 | `Task Type` | 实测（第 8 列） |
+| duration 列 | `Task Duration(us)` | 实测（第 10 列） |
+| kernel task 类型 | `AI_CORE/AI_VECTOR_CORE/MIX_AIC/MIX_AIV` | 实测（sger 出 AI_VECTOR_CORE） |
 
 `parse_op_summary(dir)` 遍历匹配文件，只保留 kernel task 类型。
 每行的 duration 相加为
@@ -102,14 +104,15 @@ summary 记录计数、`status`、`timing_scope`、`threshold` 与 `scope_caveat
 
 证据不足优先于数值失败，因为存在未完成的期望用例。依据：项目策略。
 
-这里的“CANN 指南”指 Ascend CANN msProf 用户指南。当前仓未冻结文档版本与章节，
-因此相关字段均保留“待核”，不能据此消除目标机“待实测”标记。
+## 已实测与待实测边界
 
-## 待实测边界
+在 A3（CANN 9.0.1，ascend910_93）用 sger 实测确认：采集与导出分两步、
+`op_summary_*.csv` 由 `--export=on` 生成、`PROF_*/mindstudio_profiler_output/` 层级、
+`Task Type` 与 `Task Duration(us)` 列名、duration 单位为微秒、向量算子出 `AI_VECTOR_CORE`。
 
-- msprof 是否接受当前 `--application` 引号与 `--output` 组合。依据：待实测。
-- `PROF_*` 子目录相对 `--output` 的实际层级。依据：待实测。
-- op_summary 文件名是否稳定使用当前 glob。依据：待实测。
-- task type 与 duration 的列名、大小写及 duration 单位。依据：待实测。
+以下仍待在更多机型与算子上确认：
+
+- Cube 类算子（gemm/herk）的 `Task Type` 是否为 `AI_CORE` 或 `MIX_AIC/MIX_AIV`。依据：待实测。
 - MIX task 是否同时产生需去重的明细行。依据：待实测。
 - 多设备或多 stream 时一个 case 是否产生多个 op_summary 文件。依据：待实测。
+- ascend950（arch35）上文件名与列是否一致。依据：待实测。

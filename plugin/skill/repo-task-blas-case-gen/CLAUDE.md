@@ -10,4 +10,8 @@
 
 | 事实 | 出处 |
 | --- | --- |
-| 待第一次真机验收回填 | 本轮只有静态 check、render 与零上下文 eval，不冒充真机证据 |
+| `build.sh --soc=ascend910_93 --ops=<op>` 编出 `build/test/<family>/<op>/<op>_test` | 实测（A3，sger） |
+| `--gtest_list_tests` 名字形如 `<Suite>/<Suite>.CsvDriven/TC_*` | 实测（sger） |
+| msprof 采集与导出分两步：先 `--application`，再 `--export=on` 才出 op_summary | 实测（A3，CANN 9.0.1） |
+| op_summary 列 `Task Type`(8)、`Task Duration(us)`(10)；向量算子出 `AI_VECTOR_CORE` | 实测（sger） |
+| 精度轮阈值、Cube 类 kernel 类型、A5 全链尚未真机回填 | 待第一次算子真机验收 |
