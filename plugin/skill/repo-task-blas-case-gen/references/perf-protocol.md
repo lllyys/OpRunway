@@ -109,6 +109,8 @@ summary 记录计数、`status`、`timing_scope`、`threshold` 与 `scope_caveat
 在 A3（CANN 9.0.1，ascend910_93）用 sger 实测确认：采集与导出分两步、
 `op_summary_*.csv` 由 `--export=on` 生成、`PROF_*/mindstudio_profiler_output/` 层级、
 `Task Type` 与 `Task Duration(us)` 列名、duration 单位为微秒、向量算子出 `AI_VECTOR_CORE`。
+整条 `verify_performance.py` 流水线（warmup + 5 次采样 + 解析 + 中位数）也实测跑通，
+kernel_us 中位数在 5 次独立采样上 spread 1.3–2.4%，随尺寸单调。
 
 以下仍待在更多机型与算子上确认：
 

@@ -13,4 +13,9 @@
 | --- | --- |
 | `--device` 写入编译期 `TEST_DEVICE_ID` | `build.sh:17,80-81,276` |
 | CSV 从 `__FILE__` 同目录的同名文件加载 | `test/frame/csv_loader.h:115-122` |
-| msprof 列名、目录、task type 与 A3 运行链 | 待第一次真机验收回填 |
+| A1 env 正确检出真机工具链（cmake/g++/build.sh/frame/header/CANN/msprof/cblas） | 实测（A3，sger） |
+| npu-smi 在容器内解析不出设备（记"未知"，非门禁）——探针脆弱，待改 | 实测（A3） |
+| 精度 harness 真机通:build-skip→list→名字映射→gtest json→结果 JSON | 实测（A3，sger TC_L0 全 PASS） |
+| 性能 msprof 流水线真机通:warmup + 5 次 collect+export + 解析 + 中位数 | 实测（A3，sger） |
+| kernel_us 可复现:5 次独立采样中位数 spread 1.3–2.4% | 实测（sger 1024²=613μs、512×2048=1139μs、256²=197μs） |
+| accept 运行链用现成算子只验机械,不验真算子正确性（需契约 C++ test） | 设计边界 |

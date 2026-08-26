@@ -2,6 +2,12 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-08-26 · accept 运行链真机验证（走1）：** A1 env 正确检出 A3 工具链;
+  精度 harness（list→名字映射→gtest json→结果 JSON）与性能 msprof 流水线（warmup + 5 次
+  collect+export + 解析 + 中位数）在真 sger build 上跑通,kernel_us 可复现（spread 1.3–2.4%,
+  1024²=613μs / 512×2048=1139μs / 256²=197μs）。现成算子只验运行链机械,不验真算子正确性
+  （需开发者按契约写的 C++ test）。发现 npu-smi 容器内探针脆弱、精度阈值/Cube kernel 类型待补。
+
 - **2026-08-26 · ops-blas 原生验收车道 prototype 落地：** 新增
   `repo-task-blas-case-gen`（任务书 → FACTS → 六件任务包）与
   `repo-task-blas-accept`（任务包 + 开发者工程 → NPU 结论），第 1–5 步全部完成；21 个
