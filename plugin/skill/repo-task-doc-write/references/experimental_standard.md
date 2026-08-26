@@ -46,7 +46,7 @@ comparator_semantics`，真源是 `probe_atk_capabilities.py` 的差一探针，
 两侧都在 NPU 上跑同一个 aclnn 接口，比的是「改动有没有改变输出」，不是
 「算得对不对」，任何一位不同都是要抓的东西。
 
-见 builtin-baseline.md#比较器。
+见 builtin-baseline-design.md#比较器。
 
 由此得到三条：
 

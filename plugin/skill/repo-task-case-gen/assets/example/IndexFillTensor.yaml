@@ -1,0 +1,54 @@
+api: pytorch
+api_type: function_index_fill_cpu
+aclnn_api_type: aclnn_function
+version: v2.1
+name: torch.index_fill
+aclnn_name: IndexFillTensor
+generate: IndexFillTensor_constraint
+dtype_numbers: 20
+extra_numbers: 0
+standard:
+  acc: default
+  perf: not_key
+inputs:
+  - name: null
+    type: tensor
+    required: true
+    dtypes:
+      values: [fp16, fp32, fp64, int8, uint8, int16, int32, int64, bool, bf16]
+    ranges:
+      valid:
+        values: [[-5, 5]]
+    shapes:
+      dim_numbers:
+        values: [1, 2, 3, 4]
+      dim_values:
+        values: [1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257]
+      max_length: 262144
+  - name: null
+    type: attr
+    required: true
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [[-4, 4]]
+  - name: null
+    type: attrs
+    required: true
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [[0, 8]]
+    tuple_numbers:
+      values: [1, 2, 3, 4]
+  - name: null
+    type: scalar
+    required: true
+    dtypes:
+      values: [fp32]
+    ranges:
+      valid:
+        values: [[-5, 5]]
+outputs: null

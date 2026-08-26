@@ -20,9 +20,7 @@
 
 ### 有人依赖：删了没人红，但下一个人查不到
 
-- `docs/development/skill-development-principles.md` —— 开发规则详解，CLAUDE.md §5 指向
 - `docs/development/architecture-log.md` —— 架构演进，CLAUDE.md §8 指向
-- `docs/atk-facts.md` —— ATK 事实基线，从 CLAUDE.md 抽出来的参考数据
 - `docs/skills/<name>/` —— 每个 skill 的 design 与 quickstart，README 指向
 - `docs/superpowers/specs/` 与 `plans/` —— 设计与实施计划，CLAUDE.md §9 指向
 

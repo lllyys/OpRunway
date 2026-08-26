@@ -1,0 +1,44 @@
+api: pytorch
+api_type: function_median_cpu
+aclnn_api_type: aclnn_function
+version: v2.1
+name: torch.median
+aclnn_name: Median
+generate: Median_constraint
+dtype_numbers: 25
+extra_numbers: 0
+standard:
+  acc: default
+  perf: not_key
+inputs:
+  - name: null
+    type: tensor
+    required: true
+    dtypes:
+      values: [fp16, fp32, int32, bf16, int64, int16, uint8, int8]
+    ranges:
+      valid:
+        values: [[-5, 5]]
+    shapes:
+      dim_numbers:
+        values: [1, 2, 3, 4]
+      dim_values:
+        values: [1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257]
+      max_length: 262144
+  - name: null
+    type: attr
+    required: true
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [[-4, 4]]
+  - name: null
+    type: attr
+    required: true
+    dtypes:
+      values: [attr_bool]
+    ranges:
+      valid:
+        values: [true, false]
+outputs: null

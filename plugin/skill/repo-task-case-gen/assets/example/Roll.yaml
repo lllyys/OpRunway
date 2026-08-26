@@ -1,0 +1,48 @@
+api: pytorch
+api_type: function
+aclnn_api_type: aclnn_function
+version: v2.1
+name: torch.roll
+aclnn_name: Roll
+generate: Roll_constraint
+dtype_numbers: 20
+extra_numbers: 0
+standard:
+  acc: default
+  perf: not_key
+inputs:
+  - name: null
+    type: tensor
+    required: true
+    dtypes:
+      values: [bool, uint8, int8, bf16, fp16, fp32, int32, uint32, complex64]
+    ranges:
+      valid:
+        values: [[-5, 5]]
+    shapes:
+      dim_numbers:
+        values: [1, 2, 3, 4]
+      dim_values:
+        values: [1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257]
+      max_length: 262144
+  - name: null
+    type: attrs
+    required: true
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [[-8, 8]]
+    tuple_numbers:
+      values: [1, 2, 3, 4]
+  - name: null
+    type: attrs
+    required: true
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [[-4, 4]]
+    tuple_numbers:
+      values: [1, 2, 3, 4]
+outputs: null

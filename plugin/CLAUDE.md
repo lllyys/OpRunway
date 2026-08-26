@@ -1,95 +1,90 @@
 # CLAUDE.md — 社区算子 Skill 仓
 
-每次会话自动加载。只写经过源码验证的事实，只写两个 skill 共用的规范。
+每次会话自动全量加载。**这里只放所有 skill 共用的开发约束和最简背景**，
+任何只服务一个 skill 的东西都下沉到那个 skill 的 `CLAUDE.md`，
+任何只在特定场景用到的东西都下沉到 `docs/development/`。
 
-写本仓任何 skill 文档前，行文规则已随下面这行导入常驻上下文，不需要主动去读：
+写本仓任何 skill 文档前，形式规范已随下面这行导入常驻上下文，不需要主动去读：
 
-@.claude/rules/prose-style.md
+@.claude/rules/skill-style.md
 
-一句话摘要：并列观点成列表、连贯论证成段、单句独占段只留给判据和禁令。
-机械判据在各 `test_document_style.py` 与仓级 `tests/test_repo_docs_style.py`，
-但它们只抓子集，脚本没红不等于合规。
+一句话摘要：`SKILL.md` 是路由器不是知识库，知识放 `references/`，指令必须具体到
+能直接执行。规范取自 `cannAgent/cannbot-skills`，不做机械判定——文风不可机检，
+自检清单在规范末尾。
 
 ## 本仓是什么
 
-两个 skill，覆盖社区算子任务的两端。任务书是前者的产物、后者的唯一输入。
-
 | skill | 做什么 | 开发规则 |
 | --- | --- | --- |
-| `skill/repo-task-doc-write/` | 开发前，把需求写成可验收的任务书 | 它自己的 `CLAUDE.md` |
-| `skill/repo-task-atk-test/` | 开发后，用 ATK 验收精度与性能 | 它自己的 `CLAUDE.md` |
+| `repo-task-case-gen` | 按社区任务书生成 ATK 用例并冻结 golden | [CLAUDE.md](skill/repo-task-case-gen/CLAUDE.md) |
+| `repo-task-atk-accept` | 编译部署算子工程，跑精度与性能，出验收结论 | [CLAUDE.md](skill/repo-task-atk-accept/CLAUDE.md) |
+| `repo-task-doc-write` | 把需求写成可验收的任务书 | [CLAUDE.md](skill/repo-task-doc-write/CLAUDE.md) |
 
-面向使用者的说明在 `docs/skills/<name>/`，`README.md` 是仓门面。
+**使用态解耦，开发态不解耦。** 三个 skill 单独都能用，`SKILL.md` 里不许写
+「先去跑另一个 skill」这种前置；但生成侧与跑测侧在开发态靠**用例包**有硬契约，
+改它要两侧同时动、两侧都在真机上复跑。契约清单与纪律见
+[docs/development/case-package-contract.md](docs/development/case-package-contract.md)。
 
-### 改哪个 skill 读哪份 CLAUDE.md
-
-skill 专属的红线、阶段、架构理念，全在各自目录的 `CLAUDE.md` 里，本文件不重复。
-
-**目录级 `CLAUDE.md` 由 Claude Code 按需加载**——碰到某个 skill 目录下的文件时它才
-进上下文，不需要在这里写 `@import`。写进本文件的东西每次会话都全量加载，所以这里只
-留两个 skill 共用的部分。
+**目录级 `CLAUDE.md` 由 Claude Code 按需加载**，写进本文件的每一行则是每次会话
+都要付的常驻成本。所以这里只留所有 skill 共用的东西，**具体到某个 skill 的
+一律下沉**——脚本名、行号、字段名都不该出现在本文件里。
 
 ## 文件结构
 
 ```
-repo-task-atk-test/           # 本仓（远程 gitcode.com/Justbin/repo-task-atk-test）
-├── CLAUDE.md                 # 本文件，仓级共同规范
-├── README.md                 # 仓门面：两个 skill 是什么 + 安装
-├── skill/                    # 两个 skill 本体，唯一发布物
-├── docs/                     # 不随 skill 发布
-│   ├── skills/<name>/        # 使用者视角：design.md + quickstart.md
-│   ├── atk-facts.md          # ATK 事实基线，按需读
-│   ├── development/          # 开发规则 + 架构演进 + 素材归档
-│   └── superpowers/          # specs/ 与 plans/
-├── tests/test_repo_docs_style.py  # 仓级行文门禁
-└── third_party/ATK/          # submodule → gitcode.com/Ascend/ATK（只读）
+repo-task-atk-test/
+├── CLAUDE.md                    # 本文件：仓级共用约束
+├── .claude/rules/skill-style.md # skill 形式规范，被本文件 @ 导入
+├── README.md                    # 三个 skill 的门面与安装
+├── skill/<name>/                # 一个 skill 一个目录，结构见 skill-style.md
+├── docs/
+│   ├── skills/<name>/           # 使用者设计与上手文档
+│   └── development/             # 开发环境、架构演进、仓库卫生
+└── third_party/ATK/             # 只读 submodule
 ```
-
-什么进仓什么不进仓，判断标准与两处不在根 `.gitignore` 里的忽略规则，
-见 `docs/development/repo-hygiene.md`。
-
-仓库根出现 `evidence/` 一律当 bug 查：那是验收工作区的产物目录，
-`.gitignore` 盖住了它，所以泄漏不会让 `git status` 变脏，也不会有测试红。
 
 ## 开发流程
 
-修改任一 skill 的标准流程：
+**不做 TDD。** 改动的验证标准是**在真机上跑通**，不是单元测试通过。
+本仓不建 `tests/`，也不为脚本补单测——上一版 950 个单测没拦住任何一个
+真机上暴露的缺陷，因为那些缺陷全在环境、路径耦合和 ATK 行为上。
 
-1. **骨架先行：** 新产物进该 skill 的骨架 JSON
-2. **知识前置：** 在 `references/` 补充规范，不是在脚本里写注释
-3. **TDD 实施：** 写失败测试 → 实现 → 测试通过
-4. **派生视图：** `render_views.py --write`
-5. **验收：** 结构不变量 + 防漂移测试
+1. 改 `SKILL.md` 或 `references/` 前先回答：**没有它，零上下文 agent 会在哪一步卡住？**
+   答不上来就不加
+2. 改脚本后推到远程实跑，用真实算子验证，不靠本地 mock
+3. 真机跑出来的事实写进对应 skill 的 `CLAUDE.md` 的「真机验证过的事实」表，
+   带出处（源码路径行号，或标「实测」）
 
-**遇到问题时的查找顺序：** 先读 `docs/development/skill-development-principles.md`，
-再读该 skill 的 `references/`，最后读源码。
+远程机地址、conda 路径、CANN 与 ATK 版本核对方式见
+[docs/development/dev-environment.md](docs/development/dev-environment.md)，
+**跑第一条远程命令前必读**。
 
-## 开发态启动（先跑通这一步，否则回归会假绿）
+## 新增一个 skill
 
-克隆漏了 `--recursive` 会拿到空的 `third_party/ATK/`，补救是 `git submodule update --init`。
+四步，缺第 3 步 skill 装不上而且不报错：
 
-**ATK 没有被 pip 安装，跑回归必须显式给 `PYTHONPATH`：**
+1. 建 `skill/<kebab-case-name>/`。目录名必须与 `SKILL.md` frontmatter 的 `name`
+   逐字相同，不同名 Claude Code 不认
+2. 按 `.claude/rules/skill-style.md` 的骨架写 `SKILL.md`，写完过一遍它末尾的自检清单
+3. 在 `.claude-plugin/plugin.json` 的 `skills` 数组加一行 `"./skill/<name>"`，
+   并在 `README.md` 首表加一行。**漏了 plugin.json 这行，skill 静默不加载**，
+   表现是 `/` 列表里看不到它，没有任何报错
+4. 有专属红线、设计取舍或真机事实时才建 `skill/<name>/CLAUDE.md`；
+   只有一两条规则就写进 `SKILL.md`，不建空壳
+
+登记完对一下数，两个数不等就是漏了：
 
 ```bash
-PYTHONPATH=third_party/ATK python3 -m pytest skill/ tests/ -q
+grep -c '"\./skill/' .claude-plugin/plugin.json   # plugin.json 登记数
+ls -d skill/*/ | wc -l                            # 实际目录数
 ```
 
-迁出前 skill 寄生在 ATK 仓根里，`import atk` 只是 CWD 巧合命中了 `./atk/`。
-本仓 ATK 在 `third_party/ATK/atk`，巧合不再成立。
-
-量具本身不会因此假通过——它们都响亮失败：`validate_cases.py` 退出码 3、
-`capture_reference.py` 抛 `CaptureError`、`align_signatures.py` 让 ImportError 冒出来。
-**会假绿的是回归测试**：`test_override_effective` 的 C2b 在 import 不到 ATK 时自行
-skip，于是不给 PYTHONPATH 跑出来的"全绿"比真实覆盖少了一块，而计数看不出来。
-
-不要图省事跑 `pip install -e third_party/ATK`：本机是 homebrew python3.14 且无 venv，
-装下去会污染全局 site-packages。要装先建 venv。子模块的版本锁与升级后果见验收 skill 的 `CLAUDE.md`。
+新 skill 的 `CLAUDE.md` **不要复制仓根这份的任何内容**。同一条规则在上下文里
+出现两次，agent 要花预算判断两处是否冲突。它只写这个 skill 独有的部分。
 
 ## 当前状态
 
-本仓实测 22 failed, 890 passed, 13 skipped（跑法见上一节）。
+三个算子的真机跑通结果记在
+[docs/development/architecture-log.md](docs/development/architecture-log.md)。
 
-22 条既存失败 = 20 条依赖 torch（本机未安装）+ 2 条行文门禁红
-（`experimental_standard.md` 168/178 行超长、176 行用了「符号」）。
-
-**最后更新：** 2026-08-19（文档按 skill 重组，CLAUDE.md 拆三层）
+**最后更新：** 2026-08-25（仓根只留共用约束，契约与环境下沉 docs/development）

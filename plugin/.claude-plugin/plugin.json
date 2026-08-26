@@ -1,9 +1,14 @@
 {
-  "name": "oprunway",
-  "version": "2.1.0",
-  "description": "上游 repo-task-atk-test 两个 skill 的镜像发行：ATK 社区算子验收（S1–S5 五阶段，机械门判据）与算子任务书撰写。",
-  "author": {"name": "lys"},
-  "repository": "https://github.com/lllyys/OpRunway",
-  "keywords": ["ascend", "npu", "operator", "acceptance", "atk"],
-  "skills": ["./skill/repo-task-atk-test", "./skill/repo-task-doc-write"]
+  "name": "repo-task-atk-test",
+  "description": "社区算子任务的三个平级 skill：按任务书生成带 golden 的 ATK 用例、在 NPU 上编译部署并跑精度与性能验收、把需求写成可验收的任务书。",
+  "version": "0.2.0",
+  "author": {
+    "name": "justbin-coder",
+    "url": "https://gitcode.com/Justbin/repo-task-atk-test"
+  },
+  "skills": [
+    "./skill/repo-task-case-gen",
+    "./skill/repo-task-atk-accept",
+    "./skill/repo-task-doc-write"
+  ]
 }
