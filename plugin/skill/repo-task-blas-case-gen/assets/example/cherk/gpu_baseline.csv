@@ -1,0 +1,11 @@
+# timing_scope=unspecified
+# device=unspecified
+# library=unspecified
+# warmup=unspecified
+# statistic=unspecified
+# source=unspecified
+id,n,k,uplo,trans,gpu_ms
+cherk-base-001,1024,1024,UPPER,N,0.314
+cherk-base-002,2048,2048,UPPER,N,1.929
+cherk-base-003,1024,1024,LOWER,C,0.25
+cherk-base-004,2048,2048,LOWER,C,2.024

@@ -2,6 +2,14 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-08-26 · ops-blas 原生验收车道 prototype 落地：** 新增
+  `repo-task-blas-case-gen`（任务书 → FACTS → 六件任务包）与
+  `repo-task-blas-accept`（任务包 + 开发者工程 → NPU 结论），第 1–5 步全部完成；21 个
+  主干锚点均通过 `check → render → check`，六件可逐字节重生成，声明、部署 CSV 与运行 JSON
+  由机械门闭合。三场零上下文 eval 跑两轮，with-skill 从 95.8% 修到 100%，baseline 为
+  13.7%。msprof 真机 spike 与 A3 运行链因目标机 sshd 在 kex 阶段拒连尚未执行，所有未实测
+  字段已列入两侧 `perf-protocol.md`，不得写成真机结论。
+
 - **2026-08-25 · 矩阵乘系列验收方向定调：** 明确 skill 三职责（出任务书 / 出脚本与用例 /
   收开发者工程做验收）与公私边界；盘点 ops-blas 现状（cherk 已落地、chemm/cher2k 全新家族、
   csymm/csyrk 补 c 变体）；心智模型与交接记录落 `dev-doc/matmul-series-acceptance-mental-model.md`；

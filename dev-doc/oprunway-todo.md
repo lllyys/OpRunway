@@ -25,10 +25,14 @@
 
 ## P1 · 矩阵乘系列验收（新方向）
 
-- [ ] 真机跑通 ops-blas 已有算子测试作为事实基线（锚点候选 sasum 与 cherk），记录结论后
-  再决定 skill 如何承接三职责。心智模型与公私边界见
-  `dev-doc/matmul-series-acceptance-mental-model.md`。完成条件：至少一个已有算子在目标机上
-  build + GTest 全流程有据可查，结论回填该文档。
+- [ ] msprof 真机 spike：用 sger 的精确 `--gtest_filter` 确认 op_summary 目录、列名、
+  kernel task 类型、duration 单位与五次中位数；完成后同步两侧 `perf-protocol.md` 的
+  “待实测”项。阻塞：目标机 sshd 在 kex 阶段拒连。
+- [ ] A3 运行链：用 cdgmm、sger、srotg、srotm、ssymm、strsv 的现成 arch22 CSV 跑
+  A3–A5，记录构建、GTest 映射、精度 JSON、性能 JSON 与 verdict；本轮只为现场事实基线，
+  可跳过因任务包 CSV 不同而必然失败的 A2。
+- [ ] 第一个真实矩阵乘系列 PR 走完 A1–A5 后，把现场摩擦回填两个 skill 的 CLAUDE.md；
+  在此之前保留 prototype 标记，不把静态门与零上下文 eval 描述成正式验收通过。
 
 ## 维护规则
 

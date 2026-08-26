@@ -1,6 +1,6 @@
 {
   "name": "repo-task-atk-test",
-  "description": "社区算子任务的三个平级 skill：按任务书生成带 golden 的 ATK 用例、在 NPU 上编译部署并跑精度与性能验收、把需求写成可验收的任务书。",
+  "description": "社区算子任务的五个平级 skill：覆盖 ATK 与 ops-blas 的用例生成、NPU 验收和任务书编写。",
   "version": "0.2.0",
   "author": {
     "name": "justbin-coder",
@@ -9,6 +9,8 @@
   "skills": [
     "./skill/repo-task-case-gen",
     "./skill/repo-task-atk-accept",
-    "./skill/repo-task-doc-write"
+    "./skill/repo-task-doc-write",
+    "./skill/repo-task-blas-case-gen",
+    "./skill/repo-task-blas-accept"
   ]
 }

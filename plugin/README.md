@@ -1,14 +1,20 @@
 # 社区算子任务 Skill 仓
 
-三个平级的 Claude Code skill，覆盖社区算子任务从任务书到验收结论的链路。
+五个平级的 Claude Code skill，覆盖社区算子任务从任务书到验收结论的链路。
 
 | skill | 输入 | 输出 |
 | --- | --- | --- |
 | `repo-task-case-gen` | 社区算子任务书（任意结构）+ 算子工程 | 带冻结 golden 的 ATK 用例包 |
 | `repo-task-atk-accept` | 用例包 + 算子工程 + 母仓 | 精度与性能验收结论 |
 | `repo-task-doc-write` | 需求 | 可验收的算子任务书 |
+| [`repo-task-blas-case-gen`][blas-case-gen] | 有 ops-blas 任务书、要生成用例时 | 固定六件 GTest 任务包 |
+| [`repo-task-blas-accept`][blas-accept] | 有 BLAS 任务包、要上 NPU 验收时 | 精度与性能结论 |
 
-前两个组成一条完整链路，第三个独立使用，与前两个无耦合。
+[blas-case-gen]: docs/skills/repo-task-blas-case-gen/quickstart.md
+[blas-accept]: docs/skills/repo-task-blas-accept/quickstart.md
+
+前两个组成 ATK 链路，后两个组成 ops-blas 链路；任务书 skill 独立使用。
+两条验收链互不作为对方的前置。
 
 ## 一条链路长什么样
 
@@ -24,15 +30,19 @@ python <skill>/repo-task-case-gen/scripts/freeze_golden.py
 
 # 跑测侧：用例包 + 工程 → 结论（需要 NPU）
 cp -r atk-case-Roll atk-verify-Roll && cd atk-verify-Roll
-python <skill>/repo-task-atk-accept/scripts/probe_env.py --op Roll -o env.json --write-env-sh evidence/env.sh
+python <skill>/repo-task-atk-accept/scripts/probe_env.py --op Roll -o env.json \
+    --write-env-sh evidence/env.sh
 source evidence/env.sh
 python <skill>/repo-task-atk-accept/scripts/build_install.py --op Roll \
     --project <算子工程> --parent-repo <母仓> --soc ascend910_93 -o install.json
 source evidence/env.sh
 python <skill>/repo-task-atk-accept/scripts/sample_smoke.py -i cases.json -o smoke -n 30
-python <skill>/repo-task-atk-accept/scripts/run_atk.py --mode smoke -c smoke/cases.json -o smoke_result.json
-python <skill>/repo-task-atk-accept/scripts/run_atk.py --mode accuracy -c cases.json -o accuracy.json
-python <skill>/repo-task-atk-accept/scripts/run_atk.py --mode performance -c cases.json -o performance.json
+python <skill>/repo-task-atk-accept/scripts/run_atk.py --mode smoke \
+    -c smoke/cases.json -o smoke_result.json
+python <skill>/repo-task-atk-accept/scripts/run_atk.py --mode accuracy \
+    -c cases.json -o accuracy.json
+python <skill>/repo-task-atk-accept/scripts/run_atk.py --mode performance \
+    -c cases.json -o performance.json
 python <skill>/repo-task-atk-accept/scripts/verdict.py -o verdict.json --report report.md
 ```
 
@@ -62,7 +72,7 @@ python <skill>/repo-task-atk-accept/scripts/verdict.py -o verdict.json --report 
 
 ## 安装
 
-本仓是 Claude Code plugin，`.claude-plugin/plugin.json` 已登记三个 skill。
+本仓是 Claude Code plugin，`.claude-plugin/plugin.json` 已登记五个 skill。
 把仓库目录加进 Claude Code 的 plugin 路径即可。
 
 ATK 是只读 submodule：

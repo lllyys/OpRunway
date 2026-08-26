@@ -1,0 +1,510 @@
+# 事实表 FACTS 规范
+
+## Contents
+
+- [校验入口](#校验入口)
+- [顶层键](#顶层键)
+- [参数角色与属性](#参数角色与属性)
+- [layout 双向引用](#layout-双向引用)
+- [batch、alias 与 producer](#batchalias-与-producer)
+- [dtype 与 profiles](#dtype-与-profiles)
+- [表达式白名单](#表达式白名单)
+- [verify 词表](#verify-词表)
+- [edge_cases](#edge_cases)
+- [用例生成配置](#用例生成配置)
+- [CSV 表头投影](#csv-表头投影)
+- [常见报错与改法](#常见报错与改法)
+- [完整示例](#完整示例)
+
+事实表 FACTS 是 BLAS 任务包的唯一结构化输入。零上下文 agent 先把任务书中的接口事实
+写进 `gen_csv.py` 顶部的 `FACTS = {...}`，再让 `package.py` 校验。脚本只解析顶层赋值，
+不会执行 `gen_csv.py`。
+
+## 校验入口
+
+在工作目录运行以下命令：
+
+```bash
+python3 <skill>/scripts/package.py check --facts gen_csv.py --print-header
+```
+
+退出码含义如下：
+
+| 退出码 | 含义 | 处理 |
+| --- | --- | --- |
+| 0 | 事实表 FACTS 合法 | 进入渲染阶段 |
+| 2 | 字段、引用或表达式不合法 | 按 stderr 的字段路径逐条修正 |
+| 3 | 文件或字面量读不出来 | 修文件路径或语法，不要改校验器 |
+
+`--facts` 也接受 `.json`。Python 文件只接受一个顶层 `FACTS` 赋值，右侧必须能由
+`ast.literal_eval` 解析，不能包含变量求值或函数调用。
+
+## 顶层键
+
+事实表 FACTS 的顶层只开放以下键：
+
+| 键 | 必填 | 取值 |
+| --- | --- | --- |
+| `schema_version` | 是 | 整数，当前只能是 `1` |
+| `generator_version` | 是 | 整数，必须等于模板的 `GENERATOR_VERSION` |
+| `op` | 是 | 小写标识符 |
+| `family` | 是 | 标识符，同时是 `test/<family>/` 与 `blas/<family>/` 的目录名 |
+| `symbol` | 是 | 公开 C 函数名 |
+| `returns` | 是 | 非空返回类型字符串 |
+| `params` | 是 | 按公开签名顺序排列的非空参数列表 |
+| `constraints` | 否 | 表达式字符串列表，默认 `[]` |
+| `golden` | 是 | `{kind, symbol?, formula?}` |
+| `verify` | 是 | 不重复的非空校验策略列表 |
+| `edge_cases` | 否 | 边界用例列表，默认 `[]` |
+| `perf` | 否 | 性能基线字典 |
+| `dtype_profiles` | 条件 | 有参数使用 `dtype_from` 时必填，否则禁止出现 |
+| `cases` | 否 | 用例轴和单行 footprint 上限的可选覆盖 |
+| `sources` | 是 | 自由的 str→str 字典；至少含 `params` |
+
+`sources` 的键由事实类别命名，值必须是非空字符串。`params` 可写任务书位置、
+`header:include/cann_ops_blas.h`，或用 `inferred:<模板符号>` 标记同族或同前缀推断。
+
+`golden.kind` 只能是 `cblas`、`lapacke`、`loop` 或 `composed`。前三种必须给
+`symbol`，`composed` 必须给 `formula`。
+
+`perf` 的结构是
+`{key: [参数名...], rows: [...], sweep: bool, meta: {...}, threshold: number}`。
+`key` 必须非空，每项引用 `enum`、`dim` 或 `layout` 参数；每行必须含全部 key。
+`gpu_ms` 可选，缺省表示该行只采集不评判。`sweep` 默认是 `False`。
+`threshold` 可选，必须大于 0，默认 `0.8`；性能通过条件是
+`gpu_ms / npu_ms >= threshold`。
+
+`perf.meta` 可省略；存在时必须是字符串到字符串的字典，只开放以下六个键：
+
+```text
+timing_scope, device, library, warmup, statistic, source
+```
+
+未填写的元数据在 `gpu_baseline.csv` 中写成 `unspecified`，不由渲染器猜测。
+msprof kernel 采集、统计、scope caveat 与退出码见
+[perf-protocol.md](perf-protocol.md)。
+
+## 参数角色与属性
+
+每个参数都必须有唯一标识符 `name`、非空字符串 `ctype` 和 `role`。基础键之外，
+每个 role 只开放表中的属性：
+
+| role | 开放属性 | 必要规则 |
+| --- | --- | --- |
+| `handle` | 无 | 必须是首参，ctype 必须是 `aclblasHandle_t` |
+| `enum` | `values`、`enum_kind` | kind 是 `op/dtype/compute/algo`，默认 `op` |
+| `dim` | 无 | 用于维度表达式 |
+| `layout` | `kind`、`of` | kind 是 `ld/inc/stride/batch`；batch 可省 `of` |
+| `scalar` | `dtype/dtype_from`、`mem`、`nullable`、`values` | 方向固定为 in |
+| `inout_scalar` | 同 `scalar` | 方向固定为 inout |
+| `out_scalar` | 同 `scalar` | 方向固定为 out，不写 `dir` |
+| `vector` | dtype、`dir`、`len`、`inc`、nullable、batch、alias、producer | dir 默认 in |
+| `fixed_vector` | dtype、`dir`、`len`、`nullable`、`samples` | len 是正整数字面量 |
+| `matrix` | dtype、dir、形状、布局、结构与控制属性 | 见下文 |
+| `int_array` | `dtype`、`dir`、`len`、`producer`、`nullable` | dtype 默认 int32 |
+
+表中的“dtype”表示 `dtype` 与 `dtype_from` 必须且只能出现一个。`mem` 只能是
+`host` 或 `device`，默认 `device`；`nullable` 必须是 bool，默认 `False`。
+
+`enum_kind` 的含义和事实出处如下；校验器实际开放四种值，不是三种：
+
+| kind | 含义 | 值的权威来源 |
+| --- | --- | --- |
+| `op` | 转置、填充、左右侧等操作选择 | 任务书或公开签名；已知 ctype 受 CSV 词表约束 |
+| `dtype` | 决定 buffer 或标量存储 dtype | `csv_loader.h` 的 DataType 解析表 |
+| `compute` | 决定计算或 execution 精度 | `csv_loader.h` 的 ComputeType/DataType 解析表 |
+| `algo` | 选择公开算法枚举，不决定 dtype | 任务书、公开头文件或 README |
+
+`scalar` 和 `inout_scalar` 的 `values` 是可选非空列表；实数 dtype 的元素是 int
+或 float，复数 dtype 的元素是 `[re, im]`。
+`dtype_from` 标量的每个值必须与
+所有 profile 的 `scalar_dtype` 都匹配。
+
+`fixed_vector` 在 `dir=in/inout` 时必须给 `samples`，每个 sample 都是长度等于
+`len` 的 int/float 列表；`dir=out` 时禁止出现 `samples`。
+这两条共同保证输入样本
+可物化，而输出不携带伪输入。
+
+`vector.inc` 必须引用 `kind=inc` 的 layout，或直接写整数字面量 `1`。`matrix.ld`
+必须引用 `kind=ld` 的 layout；只有 `storage=packed` 禁止写 `ld`。
+`dir` 只能是 `in`、`inout` 或 `out`，其他方向没有生成语义。
+
+矩阵还受以下结构规则约束：
+
+- `order` 只能是 `col_major` 或 `row_major`，默认 `col_major`。
+- `storage` 默认 `full`。
+- 其他 storage 是 `upper/lower/symmetric/hermitian/triangular/banded/packed/lu_factorized`。
+- `symmetric`、`hermitian`、`triangular` 必须给引用 enum 参数的 `uplo`。
+- `triangular` 还必须给引用 enum 参数的 `diag`。
+- `banded` 必须给引用 dim 参数的 `kl` 与 `ku`。
+- `conditioning` 是字符串列表；存在时会投影矩阵构造类型列。
+
+`int_array.dir` 必填。方向是 `in` 或 `inout` 时，必须给 `producer`；方向为 `out`
+时可省。
+producer 负责说明输入整数数组由哪个前置调用产生。
+
+事实表 FACTS 至少声明一个输出，可以是 `out_scalar`、`inout_scalar`，也可以是
+`out` 或 `inout` 的 buffer。
+没有可观察输出时，调用成功不能构成精度验证。
+
+已知 aclblas enum 的 `ctype` 与 `values` 必须符合
+[aclblas-conventions.md](aclblas-conventions.md) 的短记号表。
+`enum_kind=dtype` 的 ctype 必须是 `aclDataType`；`enum_kind=compute` 通常使用
+`aclblasComputeType_t`，头文件明确把
+`executionType` 声明为 `aclDataType` 的接口保留该 ctype。
+
+## layout 双向引用
+
+`layout.of` 接受一个参数名或参数名列表。它只能引用 `vector`、`matrix`、
+`fixed_vector` 或 `int_array`，并且两侧必须互相指向：
+
+- `kind=inc` 对应目标参数的 `inc`。
+- `kind=ld` 对应目标参数的 `ld`。
+- `kind=stride` 对应目标参数的 `batch.stride`。
+- `kind=batch` 对应目标参数的 `batch.count`；这类 layout 可省 `of`。
+
+双向检查防止生成器只看一侧时把布局参数绑定到错误的 buffer。
+
+## batch、alias 与 producer
+
+`batch` 的结构如下：
+
+```python
+{
+    "model": "ptr_array",  # ptr_array / strided / contiguous_implicit
+    "count": "batch_count",
+    "table_mem": "host",
+    "element_mem": "device",
+}
+```
+
+`count` 引用 dim 或 `kind=batch` 的 layout。`model=strided` 时必须增加 `stride`，
+并引用 `kind=stride` 的 layout；`table_mem` 只允许用于 `ptr_array`。内存字段都只能
+取 `host` 或 `device`。
+
+`alias` 引用另一个 `vector` 或 `matrix` 参数。`producer` 是非空调用描述，例如
+`lapacke_sgetrf(A)`；括号中的每个名字必须是已声明参数。
+
+## dtype 与 profiles
+
+dtype 只能从以下词表中选：
+
+```text
+float32, float64, float16, bfloat16, complex64, complex128,
+int8, uint8, int16, uint16, int32, int64
+```
+
+buffer 角色的 `dtype_from` 必须引用 `role=enum` 且 `enum_kind=dtype` 的参数。
+`scalar`、`inout_scalar` 和 `out_scalar` 也可引用 `enum_kind=compute`；此时具体
+dtype 取每个 profile 的 `scalar_dtype`。只要使用了 `dtype_from`，就必须提供非空
+`dtype_profiles`；否则禁止出现 profiles。
+
+每个 profile 的结构如下：
+
+| 键 | 必填 | 规则 |
+| --- | --- | --- |
+| `name` | 是 | 唯一标识符 |
+| `assign` | 是 | enum 参数与其 values 中一个值的对应关系 |
+| `scalar_dtype` | 是 | 动态标量的 dtype；引用 compute enum 时据此确定类型 |
+| `golden_dtype` | 是 | dtype 词表值 |
+| `precision_row` | 是 | `FLOAT32/FLOAT16/BFLOAT16/HIFLOAT32/FLOAT64` |
+| `soc` | 否 | 字符串列表 |
+| `expect` | 否 | 状态串，默认 `ACLBLAS_STATUS_SUCCESS` |
+
+`assign` 的键只能引用 `enum_kind=dtype/compute/algo` 的 enum。每个 profile 都必须覆盖
+所有被 `dtype_from` 引用的 enum，避免一个 profile 留下未确定类型。
+
+混合精度 profile 的 `precision_row` 取输出 dtype 对应的生态阈值行，不取输入 dtype、
+compute dtype 或 golden dtype。输出有多个 dtype 时，任务书必须先给出统一验收口径；
+没有口径就报告能力边界。
+
+## 表达式白名单
+
+`rows`、`cols`、`len` 和 `constraints` 使用 Python 表达式字符串，只开放以下节点：
+
+- 名字：dim、enum、layout 参数；buffer 只能直接作为 `rows/cols/len` 的实参。
+- 常量：整数；字符串只能在 Compare 中与 enum 参数比较。
+- 算术：`+`、`-`、`*`、`//`、`%` 和一元负号。
+- 比较：`==`、`!=`、`<`、`<=`、`>`、`>=`。
+- 逻辑：`and`、`or`、`not`。
+- 条件表达式：`a if condition else b`。
+- 调用：只允许 `max`、`min`、`rows`、`cols`、`len`，参数递归遵守同一规则。
+
+属性访问、下标、lambda、推导式、函数定义、关键字参数和其他节点都拒绝。报错会列出
+原表达式与 AST 节点类型，便于定位。
+
+## verify 词表
+
+`verify` 必须非空且不得重复，只能使用以下 token：
+
+```text
+full, uplo_triangle, non_uplo_exact, hermitian_diag, vector_inc, scalar,
+inout_scalars, index_exact, solution_residual, lu_reconstruction,
+inverse_residual, qr_reconstruction, orthogonality, pivot_validity,
+info_exact, batch_each
+```
+
+## edge_cases
+
+每个 edge case 都必须给唯一 `name`、字典 `set`、`expect` 和非空 `source`。
+`expect` 必须匹配 `^ACLBLAS_STATUS_[A-Z_]+$`。
+
+`set` 只允许以下键：
+
+- role 是 `enum/dim/layout/scalar/inout_scalar` 的参数名；值类型由渲染阶段解释。
+- nullable 参数的 `null<Name>`；`Name` 是参数名首字母大写后的结果。
+- 带 batch 参数的 `<name>_batch_pattern`。
+- `dir=in/inout` 且 `len` 为整数字面量的 fixed_vector 元素列 `<name><i>`。
+
+fixed_vector 元素的下标范围是 `0 <= i < len`，值必须是 int 或 float。本轮不支持
+`dtype=complex64/complex128` 的 fixed_vector 元素。
+不支持时校验器直接报能力边界，不把复数拆成隐式列。
+
+batch pattern 可取 `UNIFORM`、`NULL_TABLE`、`MIXED_SINGULAR`，也可取
+`NULL_ELEMENT_i`，其中 `i` 是非负整数。
+每个值都直接进入 CSV 控制列。
+
+ED 的 `set` 对 layout 参数直接写最终整数，不写 `min/pad` tier；enum 只能写该参数
+`values` 中的声明值。
+dtype/compute enum 可借此表达不支持组合，且 ED 行不要求组合属于
+某个 profile；其他块仍必须使用 profile 中完整声明的组合。
+
+## 用例生成配置
+
+`cases` 只开放以下可选键：
+
+| 键 | 取值 |
+| --- | --- |
+| `dim_tiers` | 非空正整数列表，覆盖矩阵维度轴 |
+| `vec_dim_tiers` | 非空正整数列表，覆盖纯向量长度轴 |
+| `batch_tiers` | 非空正整数列表，覆盖 batch 轴 |
+| `inc_tiers` | 非空、非零整数列表，覆盖 inc 轴 |
+| `fill_tiers` | 非空 METHOD_PATTERN_VAL 字符串列表，不接受 NULLPTR |
+| `max_footprint_bytes` | 正整数，覆盖单行 host 侧缓冲上限 |
+
+`fill_tiers` 的语法来自 `test/frame/fill.h` 36–44 行：METHOD 只能是
+`INDEX/RANDOM/VALUE`，后接可选 PATTERN 与值片段。
+NULLPTR 只能由空指针控制列表达。
+
+合法负步长放进 `cases.inc_tiers`，让它参与普通轴和 pairwise。只有任务书同时给出失败
+状态码的非法步长，才写进 `edge_cases[].set`。
+轴表达合法值，edge 表达带状态码的负例。
+
+轴派生、四块生成、pairwise 和包级校验见
+[csv-and-blocks.md](csv-and-blocks.md)。
+
+## CSV 表头投影
+
+`--print-header` 先投影两个固定列，再按 params 顺序处理参数：
+
+| role 与条件 | 投影列 |
+| --- | --- |
+| handle、out_scalar、int_array | 不投影 |
+| fixed_vector/vector/matrix 且 `dir=out` | 不投影 |
+| enum、dim、layout | `<name>` |
+| scalar/inout_scalar，dtype 是复数 | `<name>_re, <name>_im` |
+| scalar/inout_scalar，其他固定 dtype | `<name>` |
+| scalar/inout_scalar，dtype_from 的任一 `scalar_dtype` 为复数 | `<name>_re, <name>_im` |
+| scalar/inout_scalar，dtype_from 的 `scalar_dtype` 全为实数 | `<name>` |
+| vector/matrix，方向为 in/inout 且没有 producer | `<name>_fill` |
+| 上一行的 matrix 有 conditioning | 再加 `<name>_matrix_type` |
+| vector/matrix 有 producer | 不投影 |
+| fixed_vector，方向为 in/inout | `<name>0` 到 `<name>{len-1}` |
+
+参数列后依次加入 `expect_result`、控制列和 `random_seed`。控制列按 params 顺序生成：
+每个 nullable 参数加 `null<Name>`。
+每个带 batch 的参数加
+`<name>_batch_pattern`。
+
+## 常见报错与改法
+
+### `params[0] 必须是 role=handle`
+
+按公开签名把 `aclblasHandle_t handle` 放到 params 首位。
+不要省略 handle，也不要把它
+写成 enum 或普通指针参数。
+
+### `未开放的顶层键`
+
+删除该键，或把事实移到已有字段。
+顶层键是脚本与模板之间的版本契约；近似键若静默
+通过，会让事实看似存在却永远不参与生成。
+
+### `role=X 未开放属性 Y`
+
+按 role 表删除或重新分类属性。
+每种参数只有一套生成语义；跨 role 携带属性会让字段
+出现两种解释。
+
+### `dtype 与 dtype_from 必须且只能出现一个`
+
+固定类型写 `dtype`，由 enum 决定类型时只写 `dtype_from`。
+同时给两者无法确定权威，
+两者都不给则无法选择数据生成器。
+
+### `dtype_from 必须引用 enum_kind=dtype`
+
+把 buffer 的 `dtype_from` 指向 dtype enum。
+标量角色也可指向 compute enum，但每个
+profile 必须用 `scalar_dtype` 给出具体类型，且 `assign` 必须覆盖该 compute enum。
+
+### `layout.of 未反向包含` 或 `该参数未反向引用`
+
+同时修 layout 的 `of` 和 buffer 的 `inc/ld/batch` 字段。
+双向引用可独立确认绑定，
+避免列顺序变化后布局参数误配。
+
+### `表达式 ... 含不允许的 Subscript`
+
+把下标逻辑改写为白名单表达式，或先抽成 dim/layout 参数。
+表达式会进入生成代码，收窄 AST
+节点可以阻止属性读取、任意求值和隐式状态依赖。
+
+### `dtype_profiles 必填` 或 `assign 未覆盖`
+
+为每种合法类型组合补 profile，并覆盖所有被 `dtype_from` 引用的 enum。
+profile
+记录动态 dtype、scalar、golden 和精度标准的完整对应关系，缺一项就无法生成
+可比较结果。
+
+### `edge_cases[*].set 含未知键`
+
+改成开放参数名、派生控制列或合法的 fixed_vector 元素列。元素列只允许
+`dir=in/inout`、整数字面量 `len`、实数 dtype 和 `0 <= i < len`；越界时修正下标。
+set 会直接投影到 CSV；保留其他未知列只会产生没有生效的伪覆盖。
+
+### `params 至少要有一个输出或 inout 参数`
+
+按公开签名把结果参数标成输出角色或 `dir=out/inout`。
+无可观察结果就无法做精度验证，
+即使调用返回成功也不构成有效测试。
+
+### `values 含 ...` 或 `enum_kind=... 时 ctype 必须是 ...`
+
+先按约定表把全名或单字母缩写改成 CSV 短记号，再核对 enum 的 C 类型。
+比如
+`ACL_FLOAT` 写成 `FP32`，`ACLBLAS_UPPER` 或 `U` 写成 `UPPER`。
+
+## 完整示例
+
+enum、状态码与参数记号以 [aclblas-conventions.md](aclblas-conventions.md) 为准。
+示例只是完整字段组合，不覆盖约定表的事实优先级。
+
+```python
+FACTS = {
+    "schema_version": 1,
+    "generator_version": 1,
+    "op": "cherk",
+    "family": "herk",
+    "symbol": "aclblasCherk",
+    "returns": "aclblasStatus_t",
+    "params": [
+        {"name": "handle", "ctype": "aclblasHandle_t", "role": "handle"},
+        {
+            "name": "uplo",
+            "ctype": "aclblasFillMode_t",
+            "role": "enum",
+            "values": ["UPPER", "LOWER"],
+        },
+        {
+            "name": "trans",
+            "ctype": "aclblasOperation_t",
+            "role": "enum",
+            "values": ["N", "C"],
+        },
+        {"name": "n", "ctype": "int", "role": "dim"},
+        {"name": "k", "ctype": "int", "role": "dim"},
+        {
+            "name": "alpha",
+            "ctype": "const float*",
+            "role": "scalar",
+            "dtype": "float32",
+            "mem": "device",
+            "nullable": True,
+        },
+        {
+            "name": "A",
+            "ctype": "const aclblasComplex*",
+            "role": "matrix",
+            "dtype": "complex64",
+            "dir": "in",
+            "rows": "n if trans == 'N' else k",
+            "cols": "k if trans == 'N' else n",
+            "ld": "lda",
+            "nullable": True,
+        },
+        {
+            "name": "lda",
+            "ctype": "int",
+            "role": "layout",
+            "kind": "ld",
+            "of": "A",
+        },
+        {
+            "name": "beta",
+            "ctype": "const float*",
+            "role": "scalar",
+            "dtype": "float32",
+            "mem": "device",
+            "nullable": True,
+        },
+        {
+            "name": "C",
+            "ctype": "aclblasComplex*",
+            "role": "matrix",
+            "dtype": "complex64",
+            "dir": "inout",
+            "rows": "n",
+            "cols": "n",
+            "ld": "ldc",
+            "storage": "hermitian",
+            "uplo": "uplo",
+            "nullable": True,
+        },
+        {
+            "name": "ldc",
+            "ctype": "int",
+            "role": "layout",
+            "kind": "ld",
+            "of": "C",
+        },
+    ],
+    "constraints": [
+        "n >= 0",
+        "k >= 0",
+        "lda >= max(1, rows(A))",
+        "ldc >= max(1, rows(C))",
+    ],
+    "golden": {"kind": "cblas", "symbol": "cblas_cherk"},
+    "verify": ["uplo_triangle", "non_uplo_exact", "hermitian_diag"],
+    "edge_cases": [
+        {
+            "name": "zero_n",
+            "set": {"n": 0},
+            "expect": "ACLBLAS_STATUS_SUCCESS",
+            "source": "任务书里 n 参数边界所在的节",
+        },
+        {
+            "name": "null_a",
+            "set": {"nullA": True},
+            "expect": "ACLBLAS_STATUS_INVALID_VALUE",
+            "source": "任务书里空指针规则所在的节",
+        },
+    ],
+    "perf": {
+        "key": ["n", "k", "uplo", "trans"],
+        "rows": [
+            {"n": 1024, "k": 1024, "uplo": "UPPER", "trans": "N", "gpu_ms": 0.314},
+            {"n": 2048, "k": 2048, "uplo": "UPPER", "trans": "N", "gpu_ms": 1.929},
+            {"n": 1024, "k": 1024, "uplo": "LOWER", "trans": "C", "gpu_ms": 0.250},
+            {"n": 2048, "k": 2048, "uplo": "LOWER", "trans": "C", "gpu_ms": 2.024},
+        ],
+        "sweep": False,
+    },
+    "sources": {
+        "params": "任务书里接口签名与参数表所在的节",
+        "golden": "任务书里 golden 定义所在的节",
+        "perf": "任务书里性能基线所在的节",
+    },
+}
+```
