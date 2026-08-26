@@ -217,6 +217,15 @@ def _load_python_facts(path):
         assignment = node.value
     if assignment is None:
         raise ValueError("没有找到顶层 FACTS = {...} 赋值")
+    for node in ast.walk(assignment):
+        if isinstance(node, ast.Dict):
+            literals = [
+                key.value for key in node.keys if isinstance(key, ast.Constant)
+            ]
+            if len(literals) != len(set(literals)):
+                raise FactsPolicyError(
+                    f"FACTS 字典含重复键（第 {node.lineno} 行附近）"
+                )
     value = ast.literal_eval(assignment)
     if not isinstance(value, dict):
         raise ValueError("顶层 FACTS 必须是字典字面量")
@@ -939,10 +948,15 @@ def _check_edge_cases(problems, edge_cases, params):
         for key, value in settings.items():
             if key in direct:
                 param = params[key]
-                if param.get("role") == "enum" and value not in param.get("values", []):
+                role = param.get("role")
+                if role == "enum" and value not in param.get("values", []):
                     _err(problems, f"{where}.set[{key!r}] 不在该 enum 的声明 values 中")
-                elif param.get("role") == "layout" and not _is_int(value):
-                    _err(problems, f"{where}.set[{key!r}] 必须是最终整数")
+                elif role in {"layout", "dim"} and not _is_int(value):
+                    _err(problems, f"{where}.set[{key!r}] 必须是整数")
+                elif role in {"scalar", "inout_scalar"} and not _scalar_value_matches(
+                    value, param.get("dtype")
+                ):
+                    _err(problems, f"{where}.set[{key!r}] 与标量取值类型不符")
                 continue
             if key in null_columns:
                 if value not in {0, 1, False, True}:
@@ -1742,7 +1756,8 @@ def _check_package(facts_path, facts):
         return problems, generated.get("report")
     _check_generation_report(problems, facts, generated)
     # 五件派生物必须与从同一 FACTS 重新渲染的结果逐字节一致：任何差异都表明包被改动。
-    # 这一条通用规则取代逐文件的语义校验——更简单，且没有语义子集能被绕过。
+    # 这一条通用规则封住派生物对可信渲染器的任何字节偏离；生成器输出的语义正确性
+    # 另由 schema 与生成器内的几条不变量保证，不在此重复逐文件校验。
     with tempfile.TemporaryDirectory(prefix="blas-case-check-") as directory:
         _render_derived(directory, facts, generator, generated)
         for name in _package_names(facts)[1:]:

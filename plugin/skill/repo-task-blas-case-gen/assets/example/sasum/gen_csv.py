@@ -39,8 +39,9 @@ GENERATOR_VERSION = 1
 # 每个 2^n 处给出 (2^n-1, 2^n, 2^n+1) 三元组，夹住 tiling 的「差一个/刚好一块/多一个」。
 # 加退化 1、2、3 与一个大尺寸。文档写了维度上限就在 cases.dim_tiers 里裁剪。
 MAT_DIM_TIERS = [1, 2, 3, 15, 16, 17, 63, 64, 65, 255, 256, 257, 1024]
-# 纯向量长度再加一个大值，覆盖归约累加路径。
-VEC_DIM_TIERS = [1, 2, 3, 15, 16, 17, 63, 64, 65, 255, 256, 257, 1024, 100003]
+# 纯向量长度再加中、大两个大值：100003 约 fp32 400 KB（medium），1050001 约 fp32 4 MB、
+# fp16 2 MB（large），让归约类算子的规模覆盖真正落进 medium 与 large 两档。
+VEC_DIM_TIERS = [1, 2, 3, 15, 16, 17, 63, 64, 65, 255, 256, 257, 1024, 100003, 1050001]
 # 覆盖单批、双批和小奇数批量。
 BATCH_TIERS = [1, 2, 5]
 # min 使用最小合法值，pad 制造非对齐的额外间隔。
@@ -229,6 +230,11 @@ def build_axes(facts):
                     "kind": "fixed_vector",
                 }
             )
+    # 一条不变量覆盖所有轴来源：轴取值必须唯一，否则 pairwise 用索引配对会不收敛。
+    for axis in axes:
+        hashable = [tuple(v) if isinstance(v, list) else v for v in axis["values"]]
+        if len(hashable) != len(set(hashable)):
+            raise GeneratorError(f"轴 {axis['name']!r} 含重复取值：{axis['values']}")
     return axes
 
 
@@ -762,8 +768,10 @@ def _perf_rows(facts, axes, report):
         partial.update({key: perf_row[key] for key in perf["key"]})
         _, _, _, body, valid = _make_body(facts, axes, partial)
         if not valid:
-            report["rows_dropped"] += 1
-            continue
+            # 显式声明的 perf 行不能被静默丢；它是声明，不是"尽量生成"。
+            raise GeneratorError(
+                f"perf.rows 显式行不满足 constraints 或 footprint：{perf_row}"
+            )
         description = "pf " + " ".join(
             f"{key}={perf_row[key]}" for key in perf["key"]
         )
