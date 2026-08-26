@@ -35,6 +35,10 @@ ACCURACY_STATUSES = {
     "MISSING",
 }
 PERFORMANCE_STATUSES = {"通过", "不通过", "NO_REF", "证据不足"}
+PERFORMANCE_CASE_STATUSES = {
+    "PASS", "FAIL", "NO_REF", "NO_KERNEL", "CRASH", "TIMEOUT", "MISSING",
+}
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
 def _timestamp():
@@ -55,7 +59,8 @@ def _atomic_text(path, text):
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(target.name + ".tmp")
-    temporary.write_text(text, encoding="utf-8", newline="\n")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(text)
     os.replace(temporary, target)
 
 
@@ -165,11 +170,22 @@ def _load_package_facts(package):
     if not path.is_file():
         raise ValueError(f"任务包缺文件：{path.name}")
     try:
-        facts = module._load_python_facts(path)
+        result = module.check_package(path, require_rendered=True)
     except (OSError, UnicodeError, SyntaxError, ValueError) as exc:
         raise ValueError(f"gen_csv.py 的 FACTS 读不出来：{exc}") from exc
-    problems = module.validate(facts)
-    return module, facts, problems
+    return module, result["facts"], result["problems"], result.get("report")
+
+
+def _evidence_id(payload):
+    identity = {
+        key: payload.get(key)
+        for key in (
+            "command", "package", "repo", "op", "family", "soc", "device",
+            "package_gen_sha256", "package_csv_sha256", "deployed_csv_sha256",
+        )
+    }
+    encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _status_line(label, status, detail):
@@ -283,6 +299,7 @@ def command_env(args):
         "python3 >= 3.8",
         "OK" if python_ok else "缺失",
         sys.version.split()[0],
+        hard=True,
     )
     for program in ("cmake", "g++"):
         path = shutil.which(program)
@@ -383,16 +400,18 @@ def _split_parameters(text):
     return result
 
 
-def _remove_parameter_name(declaration):
-    pattern = re.compile(r"\b[A-Za-z_]\w*\s*((?:\[[^\]]*\]\s*)*)$")
+def _parameter_parts(declaration):
+    pattern = re.compile(r"\b([A-Za-z_]\w*)\s*((?:\[[^\]]*\]\s*)*)$")
     match = pattern.search(declaration)
-    if match is None:
-        return declaration.strip()
-    suffix = match.group(1)
-    return (declaration[:match.start()] + suffix).strip()
+    if match is None or match.group(1) in {"const", "volatile", "restrict"}:
+        return declaration.strip(), None
+    suffix = match.group(2)
+    param_type = (declaration[:match.start()] + suffix).strip()
+    return param_type, match.group(1)
 
 
 def _normalize_type(raw):
+    raw = re.sub(r"\baclblasHandle\b", "aclblasHandle_t", raw)
     text = re.sub(r"\[[^\]]*\]", "*", raw.strip())
     first_star = text.find("*")
     prefix = text if first_star < 0 else text[:first_star]
@@ -432,6 +451,7 @@ def _compare_declaration(repo, facts):
             break
     expected_return = facts["returns"]
     expected_params = [param["ctype"] for param in facts["params"]]
+    expected_names = [param["name"] for param in facts["params"]]
     if found is None:
         return {
             "status": "DECL_NOT_FOUND",
@@ -439,12 +459,16 @@ def _compare_declaration(repo, facts):
             "source": None,
             "expected_return": expected_return,
             "expected_params": expected_params,
+            "expected_names": expected_names,
             "actual_return": None,
             "actual_params": None,
+            "actual_names": None,
             "mismatches": [f"DECL_NOT_FOUND: 找不到 {symbol} 的声明"],
         }
     actual_return, raw_params = found
-    actual_params = [_remove_parameter_name(item) for item in _split_parameters(raw_params)]
+    parts = [_parameter_parts(item) for item in _split_parameters(raw_params)]
+    actual_params = [item[0] for item in parts]
+    actual_names = [item[1] for item in parts]
     mismatches = []
     if _normalize_type(expected_return) != _normalize_type(actual_return):
         mismatches.append(
@@ -462,14 +486,22 @@ def _compare_declaration(repo, facts):
             mismatches.append(
                 f"params[{index}]({name}): FACTS={expected!r}，声明={actual!r}"
             )
+        actual_name = actual_names[index]
+        if actual_name is not None and expected_names[index] != actual_name:
+            mismatches.append(
+                f"params[{index}] 参数名: FACTS={expected_names[index]!r}，"
+                f"声明={actual_name!r}"
+            )
     return {
         "status": "MATCH" if not mismatches else "DECL_MISMATCH",
         "symbol": symbol,
         "source": str(found_path),
         "expected_return": expected_return,
         "expected_params": expected_params,
+        "expected_names": expected_names,
         "actual_return": actual_return.strip(),
         "actual_params": actual_params,
+        "actual_names": actual_names,
         "mismatches": mismatches,
     }
 
@@ -520,7 +552,7 @@ def command_check(args):
         "generated_at": _timestamp(),
     }
     try:
-        module, facts, fact_problems = _load_package_facts(package)
+        module, facts, fact_problems, package_report = _load_package_facts(package)
     except FileNotFoundError as exc:
         print(f"CASE_GEN_NOT_FOUND: {exc}", file=sys.stderr)
         payload["errors"].append(f"CASE_GEN_NOT_FOUND: {exc}")
@@ -533,6 +565,7 @@ def command_check(args):
         facts = None
         module = None
         fact_problems = []
+        package_report = None
     if facts is None:
         payload["exit_code"] = CONTRACT_EXIT
         _atomic_json(out_path, payload)
@@ -547,9 +580,11 @@ def command_check(args):
         "status": "OK" if not fact_problems else "INVALID",
         "header": module._header_columns(facts) if not fact_problems else None,
         "problems": fact_problems,
+        "report": package_report,
     }
     errors.extend(f"FACTS: {message}" for message in fact_problems)
     op = facts.get("op", "")
+    payload["package_gen_sha256"] = _sha256(package / "gen_csv.py")
     required = [*PACKAGE_FILES, f"{op}_test.csv"]
     missing = [name for name in required if not (package / name).is_file()]
     payload["checks"]["six_files"] = {
@@ -558,6 +593,16 @@ def command_check(args):
         "missing": missing,
     }
     errors.extend(f"任务包缺文件：{name}" for name in missing)
+    if fact_problems:
+        payload["exit_code"] = CONTRACT_EXIT
+        payload["evidence_id"] = _evidence_id(payload)
+        _atomic_json(out_path, payload)
+        print("FACTS: INVALID")
+        print(f"六件: {payload['checks']['six_files']['status']}")
+        for message in errors:
+            print(message, file=sys.stderr)
+        print(f"check.json: {out_path}")
+        return CONTRACT_EXIT
     declaration = _compare_declaration(repo, facts)
     payload["checks"]["declaration"] = declaration
     errors.extend(declaration["mismatches"])
@@ -574,6 +619,7 @@ def command_check(args):
             "path": str(package_csv),
             "sha256": _sha256(package_csv),
         }
+        payload["package_csv_sha256"] = csv_check["package"]["sha256"]
         matches = _source_csv_matches(repo, op, arch)
         if not matches:
             csv_check["status"] = "CSV_NOT_DEPLOYED"
@@ -586,6 +632,7 @@ def command_check(args):
             deployed = matches[0]
             deployed_sha = _sha256(deployed)
             csv_check["deployed"] = {"path": str(deployed), "sha256": deployed_sha}
+            payload["deployed_csv_sha256"] = deployed_sha
             if deployed_sha != csv_check["package"]["sha256"]:
                 csv_check["status"] = "CSV_MISMATCH"
                 errors.append("CSV_MISMATCH: 部署 CSV 与任务包 CSV 的 SHA-256 不一致")
@@ -600,6 +647,7 @@ def command_check(args):
         warnings.append("未编译：A3 将调用 build.sh 生成构建清单")
     exit_code = CONTRACT_EXIT if errors else 0
     payload["exit_code"] = exit_code
+    payload["evidence_id"] = _evidence_id(payload)
     _atomic_json(out_path, payload)
     print(f"FACTS: {payload['checks']['facts']['status']}")
     print(f"六件: {payload['checks']['six_files']['status']}")
@@ -618,6 +666,8 @@ def command_check(args):
 
 def _accuracy_structure(payload, expected, identity):
     problems = []
+    if not isinstance(payload, dict):
+        return None, ["accuracy JSON 顶层不是对象"]
     required = ("run_id", "op", "soc", "device", "cases", "summary", "exit_code")
     for key in required:
         if key not in payload:
@@ -672,6 +722,20 @@ def _accuracy_structure(payload, expected, identity):
         problems.append(
             "accuracy summary.expected="
             f"{summary.get('expected')!r}，期望 {len(expected)}"
+        )
+    counts = {
+        status.lower(): sum(item.get("status") == status for item in records.values())
+        for status in ACCURACY_STATUSES
+    }
+    for name, value in counts.items():
+        if summary.get(name) != value:
+            problems.append(
+                f"accuracy summary.{name}={summary.get(name)!r}，按 cases 应为 {value}"
+            )
+    expected_exit = 0 if counts["pass"] == len(expected) else FAILURE_EXIT
+    if payload.get("exit_code") != expected_exit:
+        problems.append(
+            f"accuracy exit_code={payload.get('exit_code')!r}，按 cases 应为 {expected_exit}"
         )
     return records, problems
 
@@ -762,7 +826,15 @@ def _accuracy_result(payload, expected, identity, rerun_path, deployed_sha):
     }
 
 
-def _performance_result(path, expected_count, accuracy_status):
+def _performance_result(
+    path,
+    expected,
+    accuracy_status,
+    identity,
+    deployed_sha,
+    accuracy_binary_sha,
+):
+    expected_count = len(expected)
     if accuracy_status == "精度不通过":
         return {
             "status": "未执行(精度未通过)",
@@ -805,23 +877,102 @@ def _performance_result(path, expected_count, accuracy_status):
             "scope_caveat": False,
             "reason": str(exc),
         }
+    problems = []
+    if not isinstance(payload, dict):
+        problems.append("performance JSON 顶层不是对象")
+        payload = {}
+    for key, value in identity.items():
+        if payload.get(key) != value:
+            problems.append(
+                f"performance JSON 的 {key}={payload.get(key)!r}，期望 {value!r}"
+            )
     summary = payload.get("summary")
+    cases = payload.get("cases")
     if not isinstance(summary, dict):
-        return {
-            "status": "证据不足",
-            "expected": expected_count,
-            "timing_scope": None,
-            "scope_caveat": False,
-            "reason": "performance JSON 缺 summary",
-        }
+        problems.append("performance JSON 的 summary 不是对象")
+        summary = {}
+    if not isinstance(cases, list):
+        problems.append("performance JSON 的 cases 不是列表")
+        cases = []
+    if not payload.get("binary_sha256"):
+        problems.append("performance JSON 的 binary_sha256 为空")
+    elif payload.get("binary_sha256") != accuracy_binary_sha:
+        problems.append("A3/A4 binary_sha256 不一致")
+    if not payload.get("csv_sha256"):
+        problems.append("performance JSON 的 csv_sha256 为空")
+    elif payload.get("csv_sha256") != deployed_sha:
+        problems.append("performance JSON 的 csv_sha256 与部署 CSV 不一致")
+    records = {}
+    counts = {status: 0 for status in PERFORMANCE_CASE_STATUSES}
+    for index, item in enumerate(cases):
+        if not isinstance(item, dict):
+            problems.append(f"performance cases[{index}] 不是对象")
+            continue
+        name = item.get("name")
+        status = item.get("status")
+        if not isinstance(name, str) or not name:
+            problems.append(f"performance cases[{index}] 缺有效 name")
+            continue
+        if name in records:
+            problems.append(f"performance cases 的 name 重复：{name}")
+        records[name] = item
+        if status not in PERFORMANCE_CASE_STATUSES:
+            problems.append(f"performance cases[{index}] 的 status={status!r} 非法")
+        else:
+            counts[status] += 1
+    missing = sorted(set(expected) - set(records))
+    unknown = sorted(set(records) - set(expected))
+    if missing:
+        problems.append("performance cases 缺期望用例：" + ", ".join(missing))
+    if unknown:
+        problems.append("performance cases 含未知用例：" + ", ".join(unknown))
+    if expected and not cases:
+        problems.append("A4 零用例")
+    summary_keys = {
+        "pass": "PASS",
+        "fail": "FAIL",
+        "no_ref": "NO_REF",
+        "no_kernel": "NO_KERNEL",
+        "crash": "CRASH",
+        "timeout": "TIMEOUT",
+        "missing": "MISSING",
+    }
+    if summary.get("expected") != expected_count:
+        problems.append(
+            f"performance summary.expected={summary.get('expected')!r}，"
+            f"期望 {expected_count}"
+        )
+    for key, status in summary_keys.items():
+        if summary.get(key) != counts[status]:
+            problems.append(
+                f"performance summary.{key}={summary.get(key)!r}，"
+                f"按 cases 应为 {counts[status]}"
+            )
+    insufficient = sum(counts[name] for name in ("NO_KERNEL", "CRASH", "TIMEOUT", "MISSING"))
+    if insufficient:
+        computed_status, expected_exit = "证据不足", INSUFFICIENT_EXIT
+    elif counts["FAIL"]:
+        computed_status, expected_exit = "不通过", FAILURE_EXIT
+    elif counts["NO_REF"] or not cases:
+        computed_status, expected_exit = "NO_REF", 0
+    else:
+        computed_status, expected_exit = "通过", 0
     base_status = summary.get("status")
     timing_scope = summary.get("timing_scope")
     scope_caveat = bool(summary.get("scope_caveat")) or timing_scope != "kernel"
     if base_status not in PERFORMANCE_STATUSES:
+        problems.append("performance summary.status 非法")
+    elif base_status != computed_status:
+        problems.append(
+            f"performance summary.status={base_status!r}，按 cases 应为 {computed_status!r}"
+        )
+    if payload.get("exit_code") != expected_exit:
+        problems.append(
+            f"performance exit_code={payload.get('exit_code')!r}，按 cases 应为 {expected_exit}"
+        )
+    if problems:
         base_status = "证据不足"
-        reason = "performance summary.status 非法"
-    else:
-        reason = summary.get("reason")
+    reason = "；".join(problems) or summary.get("reason")
     display = base_status
     if scope_caveat:
         display += " (scope caveat)"
@@ -829,34 +980,73 @@ def _performance_result(path, expected_count, accuracy_status):
         "status": display,
         "base_status": base_status,
         "expected": expected_count,
-        "executed": len(payload.get("cases", [])),
+        "executed": len(records),
         "timing_scope": timing_scope,
         "scope_caveat": scope_caveat,
         "threshold": summary.get("threshold"),
         "reason": reason,
+        "problems": problems,
     }
 
 
-def _contract_summary(out_dir):
+def _contract_summary(out_dir, expected):
     candidates = [Path.cwd() / "check.json", out_dir.parent / "check.json"]
-    for path in _unique_files(candidates):
-        try:
-            payload = _load_json(path)
-        except ValueError:
-            continue
+    matches = _unique_files(candidates)
+    if not matches:
         return {
-            "status": "通过" if payload.get("exit_code") == 0 else "不通过",
-            "path": str(path),
-            "exit_code": payload.get("exit_code"),
-            "declaration": payload.get("checks", {}).get("declaration", {}).get("status"),
-            "csv": payload.get("checks", {}).get("csv", {}).get("status"),
-            "errors": payload.get("errors", []),
+            "status": "证据不足",
+            "path": None,
+            "errors": ["缺 check.json"],
         }
-    return {"status": "未提供", "path": None, "errors": []}
+    if len(matches) > 1:
+        return {
+            "status": "证据不足",
+            "path": None,
+            "errors": ["找到多份 check.json，无法确定 A2 证据"],
+        }
+    path = matches[0]
+    try:
+        payload = _load_json(path)
+    except ValueError as exc:
+        return {"status": "证据不足", "path": str(path), "errors": [str(exc)]}
+    problems = []
+    if not isinstance(payload, dict):
+        problems.append("check.json 顶层不是对象")
+        payload = {}
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            problems.append(f"check.json 的 {key}={payload.get(key)!r}，期望 {value!r}")
+    checks = payload.get("checks")
+    if not isinstance(checks, dict):
+        problems.append("check.json 的 checks 不是对象")
+        checks = {}
+    if payload.get("command") != "check":
+        problems.append("check.json 的 command 不是 check")
+    if payload.get("evidence_id") != _evidence_id(payload):
+        problems.append("check.json 的 evidence_id 与内容不一致")
+    if problems:
+        status = "证据不足"
+    else:
+        status = "通过" if payload.get("exit_code") == 0 else "不通过"
+    declaration = checks.get("declaration")
+    csv_check = checks.get("csv")
+    return {
+        "status": status,
+        "path": str(path),
+        "exit_code": payload.get("exit_code"),
+        "evidence_id": payload.get("evidence_id"),
+        "declaration": (
+            declaration.get("status") if isinstance(declaration, dict) else None
+        ),
+        "csv": csv_check.get("status") if isinstance(csv_check, dict) else None,
+        "errors": problems + (
+            payload.get("errors", []) if isinstance(payload.get("errors"), list) else []
+        ),
+    }
 
 
 def _overall_verdict(accuracy, performance, contract):
-    if accuracy["status"] == "证据不足":
+    if accuracy["status"] == "证据不足" or contract.get("status") == "证据不足":
         return "证据不足", INSUFFICIENT_EXIT
     if contract.get("status") == "不通过":
         return "不通过", FAILURE_EXIT
@@ -930,6 +1120,9 @@ def _report_markdown(payload):
 
 
 def command_verdict(args):
+    if not RUN_ID_RE.fullmatch(args.run_id):
+        print("证据不足: run-id 格式不合法", file=sys.stderr)
+        return INSUFFICIENT_EXIT
     package = args.package.resolve()
     repo = args.repo.resolve()
     out_dir = args.out.resolve()
@@ -937,7 +1130,7 @@ def command_verdict(args):
     rerun_path = package / "results" / f"accuracy_{args.run_id}-rerun.json"
     performance_path = package / "results" / f"performance_{args.run_id}.json"
     try:
-        _, facts, fact_problems = _load_package_facts(package)
+        _, facts, fact_problems, _ = _load_package_facts(package)
         if fact_problems:
             raise ValueError("FACTS 不合法：" + "；".join(fact_problems))
         accuracy_payload = _load_json(accuracy_path)
@@ -962,7 +1155,11 @@ def command_verdict(args):
                 "problems": [str(exc)],
             },
             "performance": {"status": "证据不足", "reason": "精度证据缺失"},
-            "contract": _contract_summary(out_dir),
+            "contract": {
+                "status": "证据不足",
+                "path": None,
+                "errors": ["无法在 FACTS/accuracy 门之前绑定 check.json"],
+            },
             "evidence": {"accuracy_json": str(accuracy_path)},
             "verdict": "证据不足",
         }
@@ -1001,8 +1198,10 @@ def command_verdict(args):
     identity = {
         "run_id": args.run_id,
         "op": op,
+        "family": facts["family"],
         "soc": args.soc,
         "device": args.device,
+        "repo": str(repo),
     }
     accuracy = _accuracy_result(
         accuracy_payload,
@@ -1016,10 +1215,26 @@ def command_verdict(args):
         accuracy["status"] = "证据不足"
     performance = _performance_result(
         performance_path,
-        len(performance_expected),
+        performance_expected,
         accuracy["status"],
+        identity,
+        deployed_sha,
+        accuracy_payload.get("binary_sha256"),
     )
-    contract = _contract_summary(out_dir)
+    contract_expected = {
+        "package": str(package),
+        "repo": str(repo),
+        "op": op,
+        "family": facts["family"],
+        "soc": args.soc,
+        "device": args.device,
+        "package_gen_sha256": _sha256(package / "gen_csv.py"),
+        "package_csv_sha256": (
+            _sha256(package_csv) if package_csv.is_file() else None
+        ),
+        "deployed_csv_sha256": deployed_sha,
+    }
+    contract = _contract_summary(out_dir, contract_expected)
     verdict, exit_code = _overall_verdict(accuracy, performance, contract)
     payload = {
         "run_id": args.run_id,

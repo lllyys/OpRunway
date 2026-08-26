@@ -8,6 +8,7 @@ CSV_NAME = "srotm_test.csv"
 PACKAGE_CSV_SHA256 = "818a4f94f06e066076b7edee4b90942a585a28532dbfa71d2f4a3bb411c62f57"
 GENERATOR_VERSION = int("1")
 PERF_KEY = [""]
+PROFILE_ASSIGNS_JSON = '''{}'''
 PERF_THRESHOLD = float("0.8")
 PERF_FILTER = "*TC_PF_*"
 # ===== 渲染常量区结束 =====
@@ -40,7 +41,9 @@ OP_SUMMARY_COLUMNS = {
 }
 KERNEL_TASK_TYPES = frozenset({"AI_CORE", "AI_VECTOR_CORE", "MIX_AIC", "MIX_AIV"})
 INTEGER_RE = re.compile(r"^[+-]?\d+$")
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 PERF_KEY = [key for key in PERF_KEY if key]
+PROFILE_ASSIGNS = json.loads(PROFILE_ASSIGNS_JSON)
 
 
 class ProfileParseError(ValueError):
@@ -279,10 +282,23 @@ def _normalize_key_value(value):
 
 
 def _key_for_row(row):
-    missing = [key for key in PERF_KEY if key not in row]
+    missing = [key for key in PERF_KEY if key != "profile" and key not in row]
     if missing:
         raise ValueError("缺少性能键：" + ", ".join(missing))
-    return tuple(_normalize_key_value(row[key]) for key in PERF_KEY)
+    values = []
+    for key in PERF_KEY:
+        if key != "profile" or key in row:
+            values.append(_normalize_key_value(row[key]))
+            continue
+        matches = [
+            name
+            for name, assign in PROFILE_ASSIGNS.items()
+            if all(row.get(enum_name) == enum_value for enum_name, enum_value in assign.items())
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"性能行无法唯一映射 profile：{matches}")
+        values.append(matches[0])
+    return tuple(values)
 
 
 def _load_gpu_baseline(path):
@@ -597,9 +613,19 @@ def main(argv=None):
     if args.build_timeout <= 0 or args.timeout <= 0 or args.repeats <= 0:
         parser.error("timeout 与 repeats 必须为正整数")
     results = Path(__file__).resolve().parent / "results"
+    if not RUN_ID_RE.fullmatch(args.run_id):
+        print("RUN_ID_INVALID: run-id 只能含字母、数字、点、下划线和连字符", file=sys.stderr)
+        return ENVIRONMENT_EXIT
     out_path = args.out or results / f"performance_{args.run_id}.json"
     arch = _arch_for_soc(args.soc)
     payload = _base_result(args, arch, _timestamp())
+    run_dir = results / args.run_id / "performance"
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        return _environment_error(
+            payload, out_path, "RUN_ID_EXISTS", f"运行目录已存在：{run_dir}"
+        )
     if arch is None:
         return _environment_error(
             payload, out_path, "CSV_NOT_DEPLOYED", "SoC 无 arch 映射"
@@ -622,7 +648,7 @@ def main(argv=None):
         if device_explicit:
             print("设备号在编译期固定（-DTEST_DEVICE_ID），跳过编译时以上次编译为准")
     else:
-        build_log = results / f"build_{args.run_id}.log"
+        build_log = run_dir / "build.log"
         if _run_build(args, build_log) != 0:
             return _environment_error(
                 payload, out_path, "BUILD_FAILED", f"见 {build_log}"
@@ -663,7 +689,7 @@ def main(argv=None):
             payload, out_path, "MSPROF_NOT_FOUND", "找不到可执行的 msprof"
         )
     payload["msprof"] = None if msprof is None else str(msprof)
-    profile_root = results / "prof"
+    profile_root = run_dir / "prof"
     cases = []
     scope_caveat = timing_scope != "kernel"
     for row in expected_rows:

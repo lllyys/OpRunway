@@ -55,8 +55,9 @@ cd <工作目录> && <python> <skill>/scripts/accept.py check \
 | 2 | 契约不一致 | 停止并修包或开发者工程 |
 | 3 | 同插件 case-gen 量具缺失 | 恢复完整插件后重跑 |
 
-`check.json` 保存每个门的状态和完整差异。头文件尚未出现目标符号时明确记
-`DECL_NOT_FOUND`。
+`check.json` 保存每个门的状态、完整差异和 `evidence_id`。A5 强制核 package、repo、op、
+family、soc、device、任务包哈希和部署 CSV 哈希；缺失或错轮证据一律判证据不足。
+头文件尚未出现目标符号时明确记 `DECL_NOT_FOUND`。
 不能把任务包里的事实表当作开发者声明的替代品。
 
 ## A2′ 人工审阅
@@ -70,6 +71,11 @@ cd <工作目录> && <python> <skill>/scripts/accept.py check \
 - 无法从源码证明的条款及所需材料。
 
 ## A3 精度
+
+开发者工程的 tracked 源文件保持只读。`build.sh` 允许在工程内产生 `build/`、
+`build_out/` 与 `out/`；这些目录是构建副产物，不是源文件修改授权。
+每个脚本在 `results/<run-id>/<accuracy|performance>/` 独占阶段目录。目录已存在时拒绝复用，
+避免旧 GTest JSON 或 msprof 文件污染新轮次。
 
 ```bash
 cd <工作目录> && cd <任务包目录> && <python> verify_accuracy.py \

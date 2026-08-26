@@ -47,7 +47,8 @@ FACTS 是六件的唯一结构化事实源，按公开 C 签名顺序保存参�
 profiles、edge、perf、sources 与词表不在本页复制，运行态权威是
 `repo-task-blas-case-gen/references/facts-schema.md`。
 
-`package.py validate` 是机械门。新增或改变 FACTS 字段时，至少同步以下消费面：
+`package.py check` 是 CLI 机械门；内部 `validate()` 只校 FACTS schema。新增或改变 FACTS
+字段时，至少同步以下消费面：
 
 - `validate`、表头投影和生成模板。
 - README 渲染、六件包级 check 与示例。
@@ -104,7 +105,8 @@ CSV 表头由 params 顺序确定，参数角色投影、控制列、轴、footp
 | `verdict` | 单例状态及可选 `(scope caveat)` 后缀 |
 
 summary 含状态计数、`status`、`timing_scope`、`threshold` 与 `scope_caveat`。
-status 只取 `通过/不通过/NO_REF/证据不足`，验收侧直接消费，不重算 kernel 数据。
+status 只取 `通过/不通过/NO_REF/证据不足`。验收侧不重算 kernel 数据，但会重算状态计数，
+并闭合期望集、身份、CSV/binary SHA、summary 和退出码。
 
 性能协议与退出码的运行态权威是两侧 `references/perf-protocol.md`。msprof 目标机 spike
 尚未完成，目录模式、列名、task type 与命令组合仍标为“待实测”；本地解析成功不能消掉标记。
@@ -128,6 +130,10 @@ CSV 三条规则同时命中多份时是 `CSV_AMBIGUOUS`，没有命中是 `CSV_
 文件的 SHA-256 必须与任务包 CSV 一致。二进制名固定为 `<op>_test`。
 
 ## 运行态归属
+
+A5 必须读取同一工作目录的 `check.json`，并校验其 `evidence_id`、package、repo、op、family、
+soc、device、任务包哈希和部署 CSV 哈希。缺失、畸形或身份不一致都判为证据不足，不能由
+精度与性能 PASS 覆盖。
 
 开发契约的每个部分在运行态有唯一讲解位置：
 

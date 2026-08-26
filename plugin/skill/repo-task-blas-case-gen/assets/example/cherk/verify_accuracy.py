@@ -17,12 +17,14 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
 
 ENVIRONMENT_EXIT = 3
 TEST_FAILURE_EXIT = 1
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
 def _timestamp():
@@ -395,10 +397,20 @@ def main(argv=None):
     if args.build_timeout <= 0 or args.timeout <= 0:
         _parser().error("timeout 必须为正整数")
     script_results = Path(__file__).resolve().parent / "results"
+    if not RUN_ID_RE.fullmatch(args.run_id):
+        print("RUN_ID_INVALID: run-id 只能含字母、数字、点、下划线和连字符", file=sys.stderr)
+        return ENVIRONMENT_EXIT
     out_path = args.out or script_results / f"accuracy_{args.run_id}.json"
     started = _timestamp()
     arch = _arch_for_soc(args.soc)
     payload = _base_result(args, arch, started)
+    run_dir = script_results / args.run_id / "accuracy"
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        return _environment_error(
+            payload, out_path, "RUN_ID_EXISTS", f"运行目录已存在：{run_dir}"
+        )
     if arch is None:
         return _environment_error(
             payload, out_path, "CSV_NOT_DEPLOYED", f"SoC {args.soc!r} 无 arch 映射"
@@ -421,7 +433,7 @@ def main(argv=None):
         if device_explicit:
             print("设备号在编译期固定（-DTEST_DEVICE_ID），跳过编译时以上次编译为准")
     else:
-        build_log = script_results / f"build_{args.run_id}.log"
+        build_log = run_dir / "build.log"
         if _run_build(args, build_log) != 0:
             return _environment_error(
                 payload, out_path, "BUILD_FAILED", f"构建失败，见 {build_log}"
@@ -441,16 +453,24 @@ def main(argv=None):
         return _environment_error(payload, out_path, reason, message)
     expected = _selected_cases(csv_path, args)
     full_names = [mapping[name] for name in expected if name in mapping]
-    gtest_json = script_results / f"gtest_{args.run_id}.json"
-    gtest_json.parent.mkdir(parents=True, exist_ok=True)
+    gtest_json = run_dir / "gtest.json"
     process_code, timed_out, gtest_filter = _run_tests(
         binary, full_names, gtest_json, args.timeout
     )
     payload["gtest_filter"] = gtest_filter
     records = _gtest_records(gtest_json)
+    expected_records = [records[name] for name in expected if name in records]
+    if process_code != 0 and expected_records and all(
+        record.get("status") == "PASS" for record in expected_records
+    ):
+        records = {}
     cases = _case_results(expected, mapping, records, timed_out, process_code)
     summary = _summary(cases)
-    exit_code = 0 if summary["pass"] == summary["expected"] else TEST_FAILURE_EXIT
+    exit_code = (
+        0
+        if summary["expected"] > 0 and summary["pass"] == summary["expected"]
+        else TEST_FAILURE_EXIT
+    )
     payload["cases"] = cases
     payload["summary"] = summary
     payload["exit_code"] = exit_code

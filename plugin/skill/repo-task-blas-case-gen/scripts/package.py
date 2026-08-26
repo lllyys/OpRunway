@@ -15,7 +15,6 @@ import json
 import keyword
 from pathlib import Path
 import re
-import subprocess
 import sys
 import tempfile
 
@@ -46,7 +45,7 @@ MATRIX_STORAGE = {
     "full", "upper", "lower", "symmetric", "hermitian", "triangular",
     "banded", "packed", "lu_factorized",
 }
-PRECISION_ROWS = {"FLOAT32", "FLOAT16", "BFLOAT16", "HIFLOAT32", "FLOAT64"}
+PRECISION_ROWS = {"FLOAT32", "FLOAT16", "BFLOAT16"}
 VERIFY_TOKENS = {
     "full", "uplo_triangle", "non_uplo_exact", "hermitian_diag", "vector_inc",
     "scalar", "inout_scalars", "index_exact", "solution_residual",
@@ -57,11 +56,15 @@ GOLDEN_KINDS = {"cblas", "lapacke", "loop", "composed"}
 BATCH_MODELS = {"ptr_array", "strided", "contiguous_implicit"}
 MEMORIES = {"host", "device"}
 BATCH_PATTERNS = {"UNIFORM", "NULL_TABLE", "MIXED_SINGULAR"}
-STATUS_RE = re.compile(r"^ACLBLAS_STATUS_[A-Z_]+$")
 NULL_ELEMENT_RE = re.compile(r"^NULL_ELEMENT_\d+$")
-FILL_TIER_RE = re.compile(
-    r"^(INDEX|RANDOM|VALUE)(_(NORM|UPPER|LOWER|DIAG|ALTER|EXTREME|ILLCOND|BANDED))?"
-    r"(_[A-Z0-9]+)*$"
+FILL_METHODS = {"INDEX", "RANDOM", "VALUE"}
+FILL_PATTERNS = {
+    "NORM", "UPPER", "LOWER", "DIAG", "ALTER", "EXTREME", "ILLCOND",
+    "BANDED",
+}
+FILL_NUMBER_RE = re.compile(
+    r"^(?:N|P)?(?:INF|NAN|ALTER|EXTREME|ILLCOND|"
+    r"(?:\d+(?:\.\d*)?|\.\d+)(?:E(?:N|P|[+-])?\d+(?:\.\d*)?)?)$"
 )
 PRODUCER_RE = re.compile(r"^([A-Za-z_]\w*)\((.*)\)$")
 TOKEN_RE = re.compile(r"@@[A-Z0-9_]+@@")
@@ -93,6 +96,11 @@ ENUM_VALUES_BY_CTYPE = {
 RESIDUAL_VERIFY_TOKENS = {
     "solution_residual", "lu_reconstruction", "inverse_residual",
     "qr_reconstruction", "orthogonality",
+}
+TOLERANCE_ROWS = {
+    "FLOAT16": ("2^-9", "2^-9", "1e-1", 10, -14),
+    "BFLOAT16": ("2^-6", "2^-6", "1e-0", 7, -126),
+    "FLOAT32": ("2^-10", "2^-16", "1e-2", 23, -126),
 }
 
 TOP_KEYS = {
@@ -128,6 +136,10 @@ ROLE_KEYS = {
 BUFFER_ROLES = {"vector", "fixed_vector", "matrix", "int_array"}
 ALIAS_ROLES = {"vector", "matrix"}
 SCALAR_ROLES = {"scalar", "inout_scalar", "out_scalar"}
+
+
+class FactsPolicyError(ValueError):
+    """表示 FACTS 区违反 AST 白名单。"""
 
 
 def _err(problems, text):
@@ -177,21 +189,58 @@ def _string_list(problems, where, value, nonempty=False, unique=False):
 
 def _load_python_facts(path):
     source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(path))
-    values = []
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            if any(isinstance(target, ast.Name) and target.id == "FACTS"
-                   for target in node.targets):
-                values.append(node.value)
-        elif isinstance(node, ast.AnnAssign):
-            if isinstance(node.target, ast.Name) and node.target.id == "FACTS":
-                values.append(node.value)
-    if not values:
+    marker = source.find(COMMON_CODE_PREFIX.decode("utf-8"))
+    facts_source = source if marker < 0 else source[:marker]
+    tree = ast.parse(facts_source, filename=str(path))
+    assignment = None
+    for index, node in enumerate(tree.body):
+        is_docstring = (
+            index == 0
+            and isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        )
+        if is_docstring:
+            continue
+        is_facts = (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "FACTS"
+        )
+        if not is_facts:
+            raise FactsPolicyError(
+                f"FACTS 区第 {node.lineno} 行含不允许的语句 "
+                f"{type(node).__name__}"
+            )
+        if assignment is not None:
+            raise FactsPolicyError(f"FACTS 区第 {node.lineno} 行重复赋值 FACTS")
+        assignment = node.value
+    if assignment is None:
         raise ValueError("没有找到顶层 FACTS = {...} 赋值")
-    if len(values) != 1:
-        raise ValueError("顶层 FACTS 只能赋值一次")
-    return ast.literal_eval(values[0])
+    value = ast.literal_eval(assignment)
+    if not isinstance(value, dict):
+        raise ValueError("顶层 FACTS 必须是字典字面量")
+    return value
+
+
+def _valid_fill_tier(value):
+    if not isinstance(value, str):
+        return False
+    parts = value.split("_")
+    if not parts or parts[0] not in FILL_METHODS:
+        return False
+    index = 1
+    pattern = "NORM"
+    if index < len(parts) and parts[index] in FILL_PATTERNS:
+        pattern = parts[index]
+        index += 1
+    structural = 2 if pattern == "BANDED" else 0
+    remaining = parts[index:]
+    # fill.h 允许从任一后续位置省略，未给的结构参数和数值沿用默认值。
+    if len(remaining) > structural + 2:
+        return False
+    return all(FILL_NUMBER_RE.fullmatch(item) for item in remaining)
 
 
 def _load_facts(filename):
@@ -203,6 +252,8 @@ def _load_facts(filename):
             with path.open(encoding="utf-8") as handle:
                 return json.load(handle)
         raise ValueError("只接受 .py 或 .json 文件")
+    except FactsPolicyError:
+        raise
     except (OSError, UnicodeError, SyntaxError, ValueError, json.JSONDecodeError) as exc:
         print(f"{filename} 读不出来：{exc}", file=sys.stderr)
         return None
@@ -743,10 +794,7 @@ def _check_profiles(problems, facts, params, dtype_sources):
         _err(problems, "dtype_profiles 必须是非空列表")
         return
     names = set()
-    allowed = {
-        "name", "assign", "scalar_dtype", "golden_dtype", "precision_row", "soc",
-        "expect",
-    }
+    allowed = {"name", "assign", "scalar_dtype", "golden_dtype", "precision_row"}
     required = {"name", "assign", "golden_dtype", "precision_row"}
     if dtype_sources:
         required.add("scalar_dtype")
@@ -770,10 +818,6 @@ def _check_profiles(problems, facts, params, dtype_sources):
                 _err(problems, f"{where}.{field}={profile.get(field)!r} 不在 dtype 词表")
         if profile.get("precision_row") not in PRECISION_ROWS:
             _err(problems, f"{where}.precision_row={profile.get('precision_row')!r} 不合法")
-        if "soc" in profile:
-            _string_list(problems, f"{where}.soc", profile["soc"])
-        if "expect" in profile:
-            _nonempty_string(problems, f"{where}.expect", profile["expect"])
         assign = profile.get("assign")
         if not isinstance(assign, dict):
             _err(problems, f"{where}.assign 必须是字典")
@@ -782,8 +826,11 @@ def _check_profiles(problems, facts, params, dtype_sources):
             _err(problems, f"{where}.assign 未覆盖 dtype_from 参数 {source!r}")
         for enum_name, value in assign.items():
             enum = params.get(enum_name)
-            if (enum is None or enum.get("role") != "enum"
-                    or enum.get("enum_kind", "op") not in {"dtype", "compute", "algo"}):
+            if (
+                enum is None
+                or enum.get("role") != "enum"
+                or enum.get("enum_kind", "op") not in {"dtype", "compute"}
+            ):
                 _err(problems, f"{where}.assign 的键 {enum_name!r} 不是可赋值 enum 参数")
             elif value not in enum.get("values", []):
                 _err(problems, f"{where}.assign[{enum_name!r}]={value!r} 不在 enum.values")
@@ -890,15 +937,24 @@ def _check_edge_cases(problems, edge_cases, params):
             _err(problems, f"{where}.name={name!r} 重复")
         else:
             names.add(name)
-        if not isinstance(case.get("expect"), str) or not STATUS_RE.fullmatch(case["expect"]):
-            _err(problems, f"{where}.expect 必须匹配 ^ACLBLAS_STATUS_[A-Z_]+$")
+        if case.get("expect") not in STATUS_VALUES:
+            _err(problems, f"{where}.expect={case.get('expect')!r} 不在状态码词表")
         _nonempty_string(problems, f"{where}.source", case.get("source"))
         settings = case.get("set")
         if not isinstance(settings, dict):
             _err(problems, f"{where}.set 必须是字典")
             continue
         for key, value in settings.items():
-            if key in direct or key in null_columns:
+            if key in direct:
+                param = params[key]
+                if param.get("role") == "enum" and value not in param.get("values", []):
+                    _err(problems, f"{where}.set[{key!r}] 不在该 enum 的声明 values 中")
+                elif param.get("role") == "layout" and not _is_int(value):
+                    _err(problems, f"{where}.set[{key!r}] 必须是最终整数")
+                continue
+            if key in null_columns:
+                if value not in {0, 1, False, True}:
+                    _err(problems, f"{where}.set[{key!r}] 必须是 0 或 1")
                 continue
             if key in batch_columns:
                 valid = value in BATCH_PATTERNS or (
@@ -919,7 +975,7 @@ def _check_edge_cases(problems, edge_cases, params):
             _err(problems, f"{where}.set 含未知键 {key!r}")
 
 
-def _check_perf(problems, perf, params):
+def _check_perf(problems, facts, perf, params):
     if not isinstance(perf, dict):
         _err(problems, "perf 必须是字典")
         return
@@ -937,10 +993,21 @@ def _check_perf(problems, perf, params):
         _err(problems, "perf.key 必须只含参数名")
     elif len(keys) != len(set(keys)):
         _err(problems, "perf.key 不得重复")
+    profile_names = {
+        profile.get("name")
+        for profile in facts.get("dtype_profiles", [])
+        if isinstance(profile, dict)
+    }
     for name in keys:
+        if name == "profile":
+            if not profile_names:
+                _err(problems, "perf.key 含 'profile'，但 dtype_profiles 不存在")
+            continue
         param = params.get(name)
         if param is None or param.get("role") not in {"enum", "dim", "layout"}:
             _err(problems, f"perf.key 的 {name!r} 不是 enum/dim/layout 参数")
+        elif param.get("enum_kind", "op") in {"dtype", "compute"}:
+            _err(problems, f"perf.key 的类型参数 {name!r} 必须改用虚拟键 'profile'")
     rows = perf.get("rows")
     if not isinstance(rows, list):
         _err(problems, "perf.rows 必须是列表")
@@ -950,9 +1017,18 @@ def _check_perf(problems, perf, params):
         if not isinstance(row, dict):
             _err(problems, f"{where} 必须是字典")
             continue
+        _unknown_keys(problems, where, row, set(keys) | {"gpu_ms"})
         for key in keys:
             if key not in row:
                 _err(problems, f"{where} 缺 key 参数 {key!r}")
+            elif key == "profile" and row[key] not in profile_names:
+                _err(problems, f"{where}.profile={row[key]!r} 不在 dtype_profiles 中")
+            elif key != "profile":
+                param = params.get(key, {})
+                if param.get("role") == "enum" and row[key] not in param.get("values", []):
+                    _err(problems, f"{where}.{key} 不在 enum.values 中")
+                elif param.get("role") in {"dim", "layout"} and not _is_int(row[key]):
+                    _err(problems, f"{where}.{key} 必须是整数")
         if "gpu_ms" in row and not _is_number(row["gpu_ms"]):
             _err(problems, f"{where}.gpu_ms 必须是数值")
     if "sweep" in perf and not isinstance(perf["sweep"], bool):
@@ -1004,7 +1080,7 @@ def _check_cases(problems, cases):
         if (
             not isinstance(values, list)
             or not values
-            or any(not isinstance(value, str) or not FILL_TIER_RE.fullmatch(value)
+            or any(not _valid_fill_tier(value)
                    for value in values)
         ):
             _err(problems, "cases.fill_tiers 含不符合 METHOD_PATTERN_VAL 的值")
@@ -1106,7 +1182,7 @@ def validate(facts):
     _check_verify(problems, facts.get("verify"))
     _check_edge_cases(problems, facts.get("edge_cases", []), params)
     if "perf" in facts:
-        _check_perf(problems, facts["perf"], params)
+        _check_perf(problems, facts, facts["perf"], params)
     if "cases" in facts:
         _check_cases(problems, facts["cases"])
     sources = facts.get("sources")
@@ -1194,12 +1270,12 @@ def _check_source_integrity(problems, path):
         return False
 
 
-def _load_generator(path):
-    digest = hashlib.sha256(str(Path(path).resolve()).encode("utf-8")).hexdigest()
-    name = f"_blas_case_generator_{digest}"
-    module_spec = importlib.util.spec_from_file_location(name, path)
+def _load_generator():
+    module_spec = importlib.util.spec_from_file_location(
+        "_repo_task_blas_case_generator", TEMPLATE_PATH
+    )
     if module_spec is None or module_spec.loader is None:
-        raise RuntimeError("无法按路径加载 gen_csv.py")
+        raise RuntimeError("无法加载 skill 自带的生成模板")
     module = importlib.util.module_from_spec(module_spec)
     previous = sys.dont_write_bytecode
     sys.dont_write_bytecode = True
@@ -1267,8 +1343,8 @@ def _check_csv_shape(problems, facts, header, rows, generator):
             value = data[column]
             if value not in BATCH_PATTERNS and not NULL_ELEMENT_RE.fullmatch(value):
                 _err(problems, f"{where} {column} 的 batch pattern 不合法")
-        if not STATUS_RE.fullmatch(data["expect_result"]):
-            _err(problems, f"{where} expect_result 不合法")
+        if data["expect_result"] not in STATUS_VALUES:
+            _err(problems, f"{where} expect_result 不在状态码词表")
         for column in null_columns:
             if data[column] not in {"0", "1"}:
                 _err(problems, f"{where} {column} 必须是 0 或 1")
@@ -1568,20 +1644,37 @@ def _verify_table(facts):
 
 
 def _tolerance_text(facts):
+    selected = {
+        profile["precision_row"] for profile in facts.get("dtype_profiles", [])
+    }
+    if not selected:
+        dtype_rows = {
+            "float16": "FLOAT16",
+            "bfloat16": "BFLOAT16",
+            "float32": "FLOAT32",
+            "complex64": "FLOAT32",
+        }
+        selected = {
+            dtype_rows[param.get("dtype")]
+            for param in facts["params"]
+            if _is_output(param) and param.get("dtype") in dtype_rows
+        }
+    if not selected:
+        selected = {"FLOAT32"}
     table = _markdown_table(
-        ("dtype", "rtol", "atol", "max_abs_error_limit"),
+        ("precision_row", "rtol", "atol", "fixed_limit", "mantissa_bits", "emin"),
         (
-            ("FLOAT16", "2^-9", "2^-14", "1e-1"),
-            ("BFLOAT16", "2^-6", "2^-10", "1e-0"),
-            ("FLOAT32", "2^-10", "2^-16", "1e-2"),
+            (name, *TOLERANCE_ROWS[name])
+            for name in ("FLOAT16", "BFLOAT16", "FLOAT32")
+            if name in selected
         ),
     )
     first = (
         "通过条件：逐元素 `|actual - golden| <= atol + rtol * |golden|`，\n"
-        "`matched_ratio >= 0.99` 且 `max_abs_error <= limit`。FLOAT32 与\n"
-        "`applyMixedTolerance(cfg, ACL_FLOAT)` 一致。FLOAT16/BFLOAT16 的\n"
-        "`getMixedToleranceDefaults` 默认 atol 与本表不同，必须显式设置\n"
-        "`cfg.mixedAtol`。"
+        "`matched_ratio >= 0.99`，且每个元素都满足 `abs_error <= max(fixed_limit,\n"
+        "32 * ULP_at_|golden|)`。ULP 使用表中的 mantissa_bits 与 emin。表值逐项来自\n"
+        "`test/frame/verify.h` 的 `getMixedToleranceDefaults` 与\n"
+        "`MixedToleranceStrategy::processElement`。"
     )
     if not RESIDUAL_VERIFY_TOKENS.intersection(facts["verify"]):
         return table + "\n\n" + first
@@ -1653,6 +1746,14 @@ def _render_script(template_path, output_path, facts, csv_hash):
             "PACKAGE_CSV_SHA256": csv_hash,
             "GENERATOR_VERSION": facts["generator_version"],
             "PERF_KEY": "\", \"".join(perf.get("key", [])),
+            "PROFILE_ASSIGNS": json.dumps(
+                {
+                    profile["name"]: profile["assign"]
+                    for profile in facts.get("dtype_profiles", [])
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
             "PERF_THRESHOLD": perf.get("threshold", 0.8),
         },
     )
@@ -1660,7 +1761,18 @@ def _render_script(template_path, output_path, facts, csv_hash):
 
 
 def _render_readme(path, facts, generator, generated):
-    header = ",".join(_header_columns(facts))
+    header_parts = _header_columns(facts)
+    header_lines = []
+    current = ""
+    for index, column in enumerate(header_parts):
+        token = column + ("," if index + 1 < len(header_parts) else "")
+        if current and len(current) + len(token) > 96:
+            header_lines.append(current)
+            current = token
+        else:
+            current += token
+    header_lines.append(current)
+    header = "\n".join(header_lines)
     report = generated["report"]
     values = {
         "OP": facts["op"],
@@ -1682,7 +1794,8 @@ def _render_readme(path, facts, generator, generated):
         "BLOCK_TABLE": _block_table(report),
         "PAIR_SUMMARY": (
             f"pairs 覆盖 {report['pairs_covered']}/{report['pairs_total']}，"
-            f"infeasible {len(report['pairs_infeasible'])} 对。"
+            f"infeasible {len(report['pairs_infeasible'])} 对，"
+            f"search_exhausted {len(report['pairs_search_exhausted'])} 对。"
         ),
         "GPU_BASELINE": _gpu_baseline_section(facts),
         "PERF_KEY": ", ".join(facts.get("perf", {}).get("key", [])) or "无",
@@ -1747,11 +1860,12 @@ def _check_readme(problems, path, facts):
         _err(problems, f"README.md 读不出来：{exc}")
         return
     expected = ",".join(_header_columns(facts))
-    match = re.search(r"完整表头：\n\n```text\n([^\n]*)\n```", text)
-    if match is None or match.group(1) != expected:
+    match = re.search(r"完整表头（各行直接拼接）：\n\n```text\n(.*?)\n```", text, re.S)
+    actual = None if match is None else "".join(match.group(1).splitlines())
+    if actual != expected:
         _err(problems, "README.md 的完整表头代码块与投影不一致")
     try:
-        section = text.split("## 列契约", 1)[1].split("完整表头：", 1)[0]
+        section = text.split("## 列契约", 1)[1].split("完整表头（各行直接拼接）：", 1)[0]
         table_lines = [line for line in section.splitlines() if line.startswith("|")]
         row_count = max(0, len(table_lines) - 2)
     except (IndexError, ValueError):
@@ -1771,6 +1885,14 @@ def _check_script_constants(problems, path, facts, csv_hash):
     if path.name == "verify_performance.py":
         keys = facts.get("perf", {}).get("key", [])
         expected["PERF_KEY"] = keys or [""]
+        expected["PROFILE_ASSIGNS_JSON"] = json.dumps(
+            {
+                profile["name"]: profile["assign"]
+                for profile in facts.get("dtype_profiles", [])
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         expected["PERF_THRESHOLD"] = facts.get("perf", {}).get("threshold", 0.8)
     try:
         actual = _script_constants(path)
@@ -1817,26 +1939,35 @@ def _check_rendered_package(problems, directory, facts, csv_path):
             _err(problems, "gpu_baseline.csv 行数与 perf.rows 不一致")
 
 
+def _check_generation_report(problems, facts, generated):
+    if generated.get("header") != _header_columns(facts):
+        _err(problems, "generate 输出的 header 与 package.py 投影不一致")
+    report = generated.get("report", {})
+    for pair in report.get("pairs_search_exhausted", []):
+        _err(problems, f"pairwise search_exhausted: {pair}")
+    blocks = report.get("blocks", {})
+    if blocks.get("L0", 0) < 1:
+        _err(problems, "L0 行数必须至少为 1")
+    has_variable_axis = any(
+        axis.get("values", 0) > 1 for axis in report.get("axes", [])
+    )
+    if has_variable_axis and blocks.get("PW", 0) < 1:
+        _err(problems, "存在可变轴时 PW 行数必须至少为 1")
+
+
 def _check_package(facts_path, facts):
     problems = []
     csv_path = facts_path.parent / f"{facts['op']}_test.csv"
     if not csv_path.exists():
         return problems, None
     try:
-        generator = _load_generator(facts_path)
+        generator = _load_generator()
         generated = generator.generate(facts)
     except Exception as exc:
         _err(problems, f"重生成失败：{exc}")
         return problems, None
-    if generated.get("header") != _header_columns(facts):
-        _err(problems, "generate 输出的 header 与 package.py 投影不一致")
+    _check_generation_report(problems, facts, generated)
     report = generated.get("report", {})
-    blocks = report.get("blocks", {})
-    if blocks.get("L0", 0) < 1:
-        _err(problems, "L0 行数必须至少为 1")
-    has_variable_axis = any(axis.get("values", 0) > 1 for axis in report.get("axes", []))
-    if has_variable_axis and blocks.get("PW", 0) < 1:
-        _err(problems, "存在可变轴时 PW 行数必须至少为 1")
     try:
         with csv_path.open(encoding="utf-8", newline="") as handle:
             reader = csv.reader(handle)
@@ -1864,6 +1995,29 @@ def _check_package(facts_path, facts):
     return problems, generated["report"]
 
 
+def check_package(facts_path, require_rendered=True):
+    """安全校验任务包；不导入或执行任务包内的 Python 文件。"""
+    path = Path(facts_path).resolve()
+    facts = _load_python_facts(path)
+    problems = validate(facts)
+    has_common_code = _check_source_integrity(problems, path)
+    if not has_common_code:
+        _err(problems, "gen_csv.py 缺通用代码区")
+    csv_path = path.parent / f"{facts.get('op', '')}_test.csv"
+    report = None
+    if require_rendered and not csv_path.is_file():
+        _err(problems, f"任务包缺文件：{csv_path.name}")
+    if not problems and csv_path.is_file():
+        package_problems, report = _check_package(path, facts)
+        problems.extend(package_problems)
+    return {
+        "facts": facts,
+        "header": _header_columns(facts) if not problems else None,
+        "problems": problems,
+        "report": report,
+    }
+
+
 def _print_problems(problems):
     print(f"事实表 FACTS 或任务包有 {len(problems)} 处不合格：", file=sys.stderr)
     for problem in problems:
@@ -1871,7 +2025,11 @@ def _print_problems(problems):
 
 
 def _run_check(args):
-    facts = _load_facts(args.facts)
+    try:
+        facts = _load_facts(args.facts)
+    except FactsPolicyError as exc:
+        _print_problems([str(exc)])
+        return 2
     if facts is None:
         return 3
     facts_path = Path(args.facts).resolve()
@@ -1884,17 +2042,31 @@ def _run_check(args):
         return 2
     report = None
     if has_common_code:
-        package_problems, report = _check_package(facts_path, facts)
-        if package_problems:
-            _print_problems(package_problems)
+        generator = _load_generator()
+        try:
+            generated = generator.generate(facts)
+        except Exception as exc:
+            _print_problems([f"生成失败：{exc}"])
             return 2
+        generation_problems = []
+        _check_generation_report(generation_problems, facts, generated)
+        report = generated.get("report")
+        if generation_problems:
+            _print_problems(generation_problems)
+            return 2
+        if (facts_path.parent / f"{facts['op']}_test.csv").is_file():
+            package_problems, report = _check_package(facts_path, facts)
+            if package_problems:
+                _print_problems(package_problems)
+                return 2
     _print_summary(facts)
     if args.print_header:
         print(",".join(_header_columns(facts)))
     if report is not None:
         print(
             f"pairs 覆盖 {report['pairs_covered']}/{report['pairs_total']}，"
-            f"infeasible {len(report['pairs_infeasible'])} 对"
+            f"infeasible {len(report['pairs_infeasible'])} 对，"
+            f"search_exhausted {len(report['pairs_search_exhausted'])} 对"
         )
         print(f"rows_dropped {report['rows_dropped']}")
         print("六件        " + "、".join(_package_names(facts)))
@@ -1902,7 +2074,11 @@ def _run_check(args):
 
 
 def _run_render(args):
-    facts = _load_facts(args.facts)
+    try:
+        facts = _load_facts(args.facts)
+    except FactsPolicyError as exc:
+        _print_problems([str(exc)])
+        return 2
     if facts is None:
         return 3
     facts_path = Path(args.facts).resolve()
@@ -1915,27 +2091,18 @@ def _run_render(args):
     if problems:
         _print_problems(problems)
         return 2
-    result = subprocess.run(
-        ["python3", facts_path.name],
-        cwd=str(facts_path.parent),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.stdout:
-        print(result.stdout, end="")
-    if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
-    if result.returncode != 0:
-        print(f"gen_csv.py 退出码 {result.returncode}", file=sys.stderr)
-        return 2
     csv_path = facts_path.parent / f"{facts['op']}_test.csv"
-    if not csv_path.is_file():
-        print(f"未生成 {csv_path.name}", file=sys.stderr)
-        return 2
     try:
-        generator = _load_generator(facts_path)
+        generator = _load_generator()
         generated = generator.generate(facts)
+        generation_problems = []
+        _check_generation_report(generation_problems, facts, generated)
+        if generation_problems:
+            _print_problems(generation_problems)
+            return 2
+        generator.write_csv(csv_path, generated["header"], generated["rows"])
+        print(f"{csv_path.name}: {len(generated['rows'])} rows")
+        print(f"解释器：{Path(sys.executable).resolve()}")
         csv_hash = hashlib.sha256(csv_path.read_bytes()).hexdigest()
         _render_script(
             ACCURACY_TEMPLATE_PATH,

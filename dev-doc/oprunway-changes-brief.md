@@ -8,7 +8,8 @@
   主干锚点均通过 `check → render → check`，六件可逐字节重生成，声明、部署 CSV 与运行 JSON
   由机械门闭合。三场零上下文 eval 跑两轮，with-skill 从 95.8% 修到 100%，baseline 为
   13.7%。msprof 真机 spike 与 A3 运行链因目标机 sshd 在 kex 阶段拒连尚未执行，所有未实测
-  字段已列入两侧 `perf-protocol.md`，不得写成真机结论。
+  字段已列入两侧 `perf-protocol.md`，不得写成真机结论。push 前独立审计的一轮修复已闭合
+  FACTS 安全加载、pairwise 搜索耗尽、A2/A5 证据身份和 strided/packed footprint 等问题。
 
 - **2026-08-25 · 矩阵乘系列验收方向定调：** 明确 skill 三职责（出任务书 / 出脚本与用例 /
   收开发者工程做验收）与公私边界；盘点 ops-blas 现状（cherk 已落地、chemm/cher2k 全新家族、

@@ -251,8 +251,15 @@ class _Evaluator:
             if isinstance(node.op, ast.Not):
                 return not self._visit(node.operand)
         if isinstance(node, ast.BoolOp):
-            values = [bool(self._visit(value)) for value in node.values]
-            return all(values) if isinstance(node.op, ast.And) else any(values)
+            if isinstance(node.op, ast.And):
+                for value in node.values:
+                    if not self._visit(value):
+                        return False
+                return True
+            for value in node.values:
+                if self._visit(value):
+                    return True
+            return False
         if isinstance(node, ast.Compare):
             values = [self._visit(node.left)] + [self._visit(item) for item in node.comparators]
             for left, operation, right in zip(values, node.ops, values[1:]):
@@ -339,7 +346,7 @@ def _materialize(facts, axes, partial, overrides=None):
     for param in facts["params"]:
         name = param["name"]
         role = param["role"]
-        if role == "enum" and param.get("enum_kind", "op") == "op":
+        if role == "enum" and param.get("enum_kind", "op") in {"op", "algo"}:
             state[name] = selection[name]
         elif role == "dim":
             state[name] = selection[name]
@@ -391,7 +398,7 @@ def _materialize(facts, axes, partial, overrides=None):
             state[name] = overrides[name]
             continue
         target = params[_first_target(param)]
-        minimum = state[target["ld"]] * evaluator.evaluate(target["cols"])
+        minimum = _buffer_base_elements(target, state, evaluator)
         state[name] = minimum if selection[name] == "min" else minimum + 7
     for key, value in overrides.items():
         if key in state or key in params:
@@ -407,6 +414,24 @@ def _materialize(facts, axes, partial, overrides=None):
     return selection, state, profile
 
 
+def _buffer_base_elements(param, state, evaluator):
+    role = param["role"]
+    if role == "matrix":
+        if param.get("storage", "full") == "packed":
+            rows = evaluator.evaluate(param["rows"])
+            return max(0, rows * (rows + 1) // 2)
+        return max(0, state[param["ld"]] * evaluator.evaluate(param["cols"]))
+    if role == "vector":
+        length = evaluator.evaluate(param["len"])
+        if length <= 0:
+            return 0
+        increment = param["inc"]
+        inc = increment if isinstance(increment, int) else state[increment]
+        return 1 + (length - 1) * abs(inc)
+    length = param["len"]
+    return length if isinstance(length, int) else evaluator.evaluate(length)
+
+
 def _footprint(facts, state, profile):
     evaluator = _Evaluator(facts, state)
     total = 0
@@ -415,17 +440,14 @@ def _footprint(facts, state, profile):
         if role not in BUFFER_ROLES:
             continue
         dtype = _param_dtype(param, profile) if role != "int_array" else param.get("dtype", "int32")
-        if role == "matrix":
-            elements = state[param["ld"]] * evaluator.evaluate(param["cols"])
-        elif role == "vector":
-            length = evaluator.evaluate(param["len"])
-            elements = 0 if length <= 0 else 1 + (length - 1) * abs(state[param["inc"]])
-        else:
-            length = param["len"]
-            elements = length if isinstance(length, int) else evaluator.evaluate(length)
+        elements = _buffer_base_elements(param, state, evaluator)
         batch = param.get("batch")
         if batch:
-            elements *= state[batch["count"]]
+            count = state[batch["count"]]
+            if batch["model"] == "strided" and count > 0:
+                elements += (count - 1) * state[batch["stride"]]
+            else:
+                elements *= count
         total += DTYPE_BYTES[dtype] * max(0, elements)
     return total
 
@@ -611,8 +633,11 @@ def _candidate_for_seed(facts, axes, variable_axes, uncovered, seed, report):
             scores.append((-score, value_index))
         return [value for _, value in sorted(scores)]
 
+    exhausted = [False]
+
     def search(position, current):
         if attempts[0] >= 2000:
+            exhausted[0] = True
             return None
         if position == len(remaining):
             attempts[0] += 1
@@ -634,7 +659,10 @@ def _candidate_for_seed(facts, axes, variable_axes, uncovered, seed, report):
         current.pop(axis_index, None)
         return None
 
-    return search(0, dict(assigned))
+    candidate = search(0, dict(assigned))
+    if candidate is not None:
+        return candidate, "found"
+    return None, "search_exhausted" if exhausted[0] else "infeasible"
 
 
 def _pairwise_rows(facts, axes, report):
@@ -657,27 +685,32 @@ def _pairwise_rows(facts, axes, report):
     rows = []
     while uncovered:
         seed = min(uncovered)
-        candidate = _candidate_for_seed(
+        candidate, outcome = _candidate_for_seed(
             facts, axes, variable_axes, uncovered, seed, report
         )
         if candidate is None:
             uncovered.remove(seed)
             left, left_value, right, right_value = seed
-            report["pairs_infeasible"].append(
-                {
-                    "left": variable_axes[left]["name"],
-                    "left_value": variable_axes[left]["values"][left_value],
-                    "right": variable_axes[right]["name"],
-                    "right_value": variable_axes[right]["values"][right_value],
-                }
-            )
+            pair = {
+                "left": variable_axes[left]["name"],
+                "left_value": variable_axes[left]["values"][left_value],
+                "right": variable_axes[right]["name"],
+                "right_value": variable_axes[right]["values"][right_value],
+            }
+            report[
+                "pairs_search_exhausted"
+                if outcome == "search_exhausted"
+                else "pairs_infeasible"
+            ].append(pair)
+            if outcome == "search_exhausted":
+                break
             continue
         selection, body = candidate
         covered = _selection_pairs(selection, variable_axes) & uncovered
         uncovered.difference_update(covered)
         rows.append((_description(variable_axes, selection), body))
-    infeasible = len(report["pairs_infeasible"])
-    report["pairs_covered"] = report["pairs_total"] - infeasible
+    unresolved = len(report["pairs_infeasible"]) + len(report["pairs_search_exhausted"])
+    report["pairs_covered"] = report["pairs_total"] - len(uncovered) - unresolved
     return rows
 
 
@@ -772,6 +805,7 @@ def generate(facts):
         "pairs_total": 0,
         "pairs_covered": 0,
         "pairs_infeasible": [],
+        "pairs_search_exhausted": [],
         "rows_dropped": 0,
         "blocks": {},
     }

@@ -20,7 +20,7 @@
 
 @@COLUMN_CONTRACT@@
 
-完整表头：
+完整表头（各行直接拼接）：
 
 ```text
 @@HEADER@@
@@ -57,7 +57,6 @@ caseName = require("case_name");
 @@BLOCK_TABLE@@
 
 @@PAIR_SUMMARY@@
-
 精度集 = 非 `TC_PF_` 前缀。开发者自加的 `TEST_F` 不在验收集内。
 
 ## 精度验收
@@ -71,11 +70,13 @@ python3 verify_accuracy.py --repo <ops-blas-root> --soc <soc> --device 0
 | 退出码 | 含义 |
 | --- | --- |
 | 0 | 期望用例全部 PASS |
-| 1 | 存在 FAIL、TIMEOUT、CRASH 或 MISSING |
+| 1 | 存在 FAIL、SKIP、TIMEOUT、CRASH 或 MISSING |
 | 3 | CSV、构建、二进制或 GTest 列举环境问题 |
 
 设备号由 `build.sh --device=N` 在编译期写入 `-DTEST_DEVICE_ID`。使用 `--skip-build`
 时沿用上次编译的设备号。
+GTest JSON 与构建日志写入 `results/<run_id>/accuracy/`；阶段目录必须是新目录，
+重复 run-id 会退出 3，避免旧结果污染。
 
 ## 性能验收
 
@@ -108,6 +109,7 @@ GPU 基线的 `timing_scope` 不是 `kernel` 时，每例 verdict 带 `(scope ca
 
 msprof 输出目录模式、列名和 task 类型集合尚待目标机实测。当前表驱动常量及变更边界见
 skill 的 `references/perf-protocol.md`。
+原始 profile 与构建日志写入 `results/<run_id>/performance/`；重复 run-id 会退出 3。
 
 ## GPU 基线
 

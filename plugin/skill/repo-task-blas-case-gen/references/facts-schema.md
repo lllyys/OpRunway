@@ -12,6 +12,7 @@
 - [verify 词表](#verify-词表)
 - [edge_cases](#edge_cases)
 - [用例生成配置](#用例生成配置)
+- [能力边界](#能力边界)
 - [CSV 表头投影](#csv-表头投影)
 - [常见报错与改法](#常见报错与改法)
 - [完整示例](#完整示例)
@@ -36,8 +37,9 @@ python3 <skill>/scripts/package.py check --facts gen_csv.py --print-header
 | 2 | 字段、引用或表达式不合法 | 按 stderr 的字段路径逐条修正 |
 | 3 | 文件或字面量读不出来 | 修文件路径或语法，不要改校验器 |
 
-`--facts` 也接受 `.json`。Python 文件只接受一个顶层 `FACTS` 赋值，右侧必须能由
-`ast.literal_eval` 解析，不能包含变量求值或函数调用。
+`--facts` 也接受 `.json`。Python 文件的 FACTS 区只允许可选 shebang、编码注释、
+可选模块 docstring、注释和唯一的 `FACTS = {...}` 字面量赋值。其他 AST 语句按行拒绝；
+`check/render` 不导入或执行任务包文件，只把解析结果传给 skill 自带模板。
 
 ## 顶层键
 
@@ -69,7 +71,8 @@ python3 <skill>/scripts/package.py check --facts gen_csv.py --print-header
 
 `perf` 的结构是
 `{key: [参数名...], rows: [...], sweep: bool, meta: {...}, threshold: number}`。
-`key` 必须非空，每项引用 `enum`、`dim` 或 `layout` 参数；每行必须含全部 key。
+`key` 必须非空，每项引用普通 `enum`、`dim`、`layout` 参数或虚拟键 `profile`。
+dtype/compute 参数不能直接作 key；混合精度 PF 行用 profile 名选择完整类型组合。
 `gpu_ms` 可选，缺省表示该行只采集不评判。`sweep` 默认是 `False`。
 `threshold` 可选，必须大于 0，默认 `0.8`；性能通过条件是
 `gpu_ms / npu_ms >= threshold`。
@@ -207,12 +210,10 @@ dtype 取每个 profile 的 `scalar_dtype`。只要使用了 `dtype_from`，就�
 | `assign` | 是 | enum 参数与其 values 中一个值的对应关系 |
 | `scalar_dtype` | 是 | 动态标量的 dtype；引用 compute enum 时据此确定类型 |
 | `golden_dtype` | 是 | dtype 词表值 |
-| `precision_row` | 是 | `FLOAT32/FLOAT16/BFLOAT16/HIFLOAT32/FLOAT64` |
-| `soc` | 否 | 字符串列表 |
-| `expect` | 否 | 状态串，默认 `ACLBLAS_STATUS_SUCCESS` |
+| `precision_row` | 是 | `FLOAT32/FLOAT16/BFLOAT16` |
 
-`assign` 的键只能引用 `enum_kind=dtype/compute/algo` 的 enum。每个 profile 都必须覆盖
-所有被 `dtype_from` 引用的 enum，避免一个 profile 留下未确定类型。
+`assign` 的键只能引用 `enum_kind=dtype/compute` 的 enum。`algo` 是独立轴，禁止由 profile
+覆盖。每个 profile 都必须覆盖所有被 `dtype_from` 引用的 enum，避免类型未确定。
 
 混合精度 profile 的 `precision_row` 取输出 dtype 对应的生态阈值行，不取输入 dtype、
 compute dtype 或 golden dtype。输出有多个 dtype 时，任务书必须先给出统一验收口径；
@@ -247,7 +248,7 @@ info_exact, batch_each
 ## edge_cases
 
 每个 edge case 都必须给唯一 `name`、字典 `set`、`expect` 和非空 `source`。
-`expect` 必须匹配 `^ACLBLAS_STATUS_[A-Z_]+$`。
+`expect` 必须属于状态码词表；仅有 `ACLBLAS_STATUS_` 前缀不能证明它可解析。
 
 `set` 只允许以下键：
 
@@ -284,7 +285,8 @@ dtype/compute enum 可借此表达不支持组合，且 ED 行不要求组合属
 
 `fill_tiers` 的语法来自 `test/frame/fill.h` 36–44 行：METHOD 只能是
 `INDEX/RANDOM/VALUE`，后接可选 PATTERN 与值片段。
-NULLPTR 只能由空指针控制列表达。
+数值片段接受小数和指数写法，例如 `RANDOM_0.1_0.1`；解析器要求所有片段被完整消费，
+未知 pattern 或多余值会被拒绝。NULLPTR 只能由空指针控制列表达。
 
 合法负步长放进 `cases.inc_tiers`，让它参与普通轴和 pairwise。只有任务书同时给出失败
 状态码的非法步长，才写进 `edge_cases[].set`。
@@ -292,6 +294,17 @@ NULLPTR 只能由空指针控制列表达。
 
 轴派生、四块生成、pairwise 和包级校验见
 [csv-and-blocks.md](csv-and-blocks.md)。
+
+## 能力边界
+
+下列接口形态不在当前 FACTS v1 的可生成范围内：
+
+- GroupedBatched 需要按 group 变化的 enum、shape、ld 和 scalar 数组；固定长度角色无法表达。
+- blasLt 的 descriptor、attribute buffer、heuristic 结果与 workspace 不符合首参 handle 模型。
+- LAPACK producer 链目前只保存调用描述，尚不能机械验证跨调用 dtype、长度、batch 对齐和顺序。
+
+strided vector 与 packed matrix 已支持 footprint 和最小 stride。遇到上述未支持形态时停止，
+记录能力边界，不把变长结构压进 fixed_vector 或自由文本后继续声称可生成。
 
 ## CSV 表头投影
 

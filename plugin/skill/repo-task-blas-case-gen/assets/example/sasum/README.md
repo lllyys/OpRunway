@@ -72,7 +72,7 @@ fill 词表（语法见 `fill.h` 的 `METHOD_PATTERN_VAL`）：
 - `ACLBLAS_STATUS_INVALID_ENUM`
 - `ACLBLAS_STATUS_UNKNOWN`
 
-完整表头：
+完整表头（各行直接拼接）：
 
 ```text
 case_name,description,n,x_fill,incx,expect_result,nullX,nullResult,random_seed
@@ -106,17 +106,15 @@ caseName = require("case_name");
 | --- | --- | --- |
 | scalar | 标量输出 | Verifier::verifyScalar |
 
-| dtype | rtol | atol | max_abs_error_limit |
-| --- | --- | --- | --- |
-| FLOAT16 | 2^-9 | 2^-14 | 1e-1 |
-| BFLOAT16 | 2^-6 | 2^-10 | 1e-0 |
-| FLOAT32 | 2^-10 | 2^-16 | 1e-2 |
+| precision_row | rtol | atol | fixed_limit | mantissa_bits | emin |
+| --- | --- | --- | --- | --- | --- |
+| FLOAT32 | 2^-10 | 2^-16 | 1e-2 | 23 | -126 |
 
 通过条件：逐元素 `|actual - golden| <= atol + rtol * |golden|`，
-`matched_ratio >= 0.99` 且 `max_abs_error <= limit`。FLOAT32 与
-`applyMixedTolerance(cfg, ACL_FLOAT)` 一致。FLOAT16/BFLOAT16 的
-`getMixedToleranceDefaults` 默认 atol 与本表不同，必须显式设置
-`cfg.mixedAtol`。
+`matched_ratio >= 0.99`，且每个元素都满足 `abs_error <= max(fixed_limit,
+32 * ULP_at_|golden|)`。ULP 使用表中的 mantissa_bits 与 emin。表值逐项来自
+`test/frame/verify.h` 的 `getMixedToleranceDefaults` 与
+`MixedToleranceStrategy::processElement`。
 
 ## 用例块与覆盖
 
@@ -127,8 +125,7 @@ caseName = require("case_name");
 | ED | 5 | 逐条 edge_cases.set 物化 |
 | PF | 0 | perf.rows 与可选 sweep |
 
-pairs 覆盖 44/44，infeasible 0 对。
-
+pairs 覆盖 44/44，infeasible 0 对，search_exhausted 0 对。
 精度集 = 非 `TC_PF_` 前缀。开发者自加的 `TEST_F` 不在验收集内。
 
 ## 精度验收
@@ -142,11 +139,13 @@ python3 verify_accuracy.py --repo <ops-blas-root> --soc <soc> --device 0
 | 退出码 | 含义 |
 | --- | --- |
 | 0 | 期望用例全部 PASS |
-| 1 | 存在 FAIL、TIMEOUT、CRASH 或 MISSING |
+| 1 | 存在 FAIL、SKIP、TIMEOUT、CRASH 或 MISSING |
 | 3 | CSV、构建、二进制或 GTest 列举环境问题 |
 
 设备号由 `build.sh --device=N` 在编译期写入 `-DTEST_DEVICE_ID`。使用 `--skip-build`
 时沿用上次编译的设备号。
+GTest JSON 与构建日志写入 `results/<run_id>/accuracy/`；阶段目录必须是新目录，
+重复 run-id 会退出 3，避免旧结果污染。
 
 ## 性能验收
 
@@ -179,6 +178,7 @@ GPU 基线的 `timing_scope` 不是 `kernel` 时，每例 verdict 带 `(scope ca
 
 msprof 输出目录模式、列名和 task 类型集合尚待目标机实测。当前表驱动常量及变更边界见
 skill 的 `references/perf-protocol.md`。
+原始 profile 与构建日志写入 `results/<run_id>/performance/`；重复 run-id 会退出 3。
 
 ## GPU 基线
 

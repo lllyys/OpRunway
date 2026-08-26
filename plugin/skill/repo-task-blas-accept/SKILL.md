@@ -63,7 +63,9 @@ case-gen 量具缺失，先恢复完整插件。
 
 ### A2′ 审阅
 
-只读开发者工程中的 `param.h`、`test.cpp`、`npu_wrapper.h`。逐项对照任务包 README：
+只读开发者工程的 tracked 源文件。`build.sh` 可在工程内写入 `build/`、`build_out/`、
+`out/` 构建副产物，但不得改 tracked 文件。审阅 `param.h`、`test.cpp`、
+`npu_wrapper.h` 时逐项对照任务包 README：
 
 1. 每个 CSV 投影列是否显式读取，缺列或空值是否抛错。
 2. golden 来源、dtype、producer 与 in-place 快照是否落实。

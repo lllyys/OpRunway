@@ -33,6 +33,8 @@
   可跳过因任务包 CSV 不同而必然失败的 A2。
 - [ ] 第一个真实矩阵乘系列 PR 走完 A1–A5 后，把现场摩擦回填两个 skill 的 CLAUDE.md；
   在此之前保留 prototype 标记，不把静态门与零上下文 eval 描述成正式验收通过。
+- [ ] LAPACK producer 链机械门：验证跨调用参数的 dtype、长度、batch 对齐与调用顺序；当前
+  FACTS 只保存自由文本调用描述，不能据此证明 batched 链闭合。
 
 ## 维护规则
 

@@ -83,10 +83,12 @@ git submodule update --init --recursive
 
 ## 运行环境
 
-| 侧 | 需要 |
+| 链路与阶段 | 需要 |
 | --- | --- |
-| 生成侧 | Python + atk + CPU 版 torch，**不需要 NPU** |
-| 跑测侧 | 上述 + torch_npu + CANN 工具链 + 健康 NPU |
+| ATK 生成 | Python、ATK、CPU 版 torch；不需要 NPU |
+| ATK 验收 | Python、ATK、torch_npu、CANN 工具链与健康 NPU |
+| ops-blas 生成 | Python 3.8 或更高版本的标准库；不需要 NPU |
+| ops-blas 验收 | ops-blas、CANN、GTest、msprof 与健康 NPU |
 
 ## 文档
 
