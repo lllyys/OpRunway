@@ -16,6 +16,6 @@
     ".claude-plugin/",
     "skill/"
   ],
-  "mirror_commit": "待提交后回填",
+  "mirror_commit": "bd8e48d",
   "baseline_branch": "dev/skills-v0.2.0"
 }
