@@ -197,7 +197,8 @@ python3 verify_performance.py --repo <ops-blas-root> --soc <soc> --device 0
 GPU 基线的 `timing_scope` 不是 `kernel` 时，每例 verdict 带 `(scope caveat)`，汇总的
 `scope_caveat` 也为 true。GTest 自带的 ms 含 host 准备与 golden，不作性能依据。
 
-msprof 输出目录模式、列名和 task 类型集合尚待目标机实测。当前表驱动常量及变更边界见
+msprof 采集与导出两步、`op_summary_*.csv` 目录模式、列名与 kernel task 类型已在 A3
+（CANN 9.0.1，ascend910_93）实测确认；表驱动常量与仍待其他机型确认的边界见
 skill 的 `references/perf-protocol.md`。
 原始 profile 与构建日志写入 `results/<run_id>/performance/`；重复 run-id 会退出 3。
 
