@@ -1,6 +1,6 @@
 # 事实表 FACTS 规范
 
-## Contents
+## 目录
 
 - [校验入口](#校验入口)
 - [顶层键](#顶层键)
@@ -17,7 +17,7 @@
 - [常见报错与改法](#常见报错与改法)
 - [完整示例](#完整示例)
 
-事实表 FACTS 是 BLAS 任务包的唯一结构化输入。零上下文 agent 先把任务书中的接口事实
+事实表 FACTS 是任务包的唯一结构化输入。执行者先把任务书中的接口事实
 写进 `gen_csv.py` 顶部的 `FACTS = {...}`，再让 `package.py` 校验。脚本只解析顶层赋值，
 不会执行 `gen_csv.py`。
 
@@ -95,9 +95,9 @@ msprof kernel 采集、统计、scope caveat 与退出码见
 | role | 开放属性 | 必要规则 |
 | --- | --- | --- |
 | `handle` | 无 | 必须是首参，ctype 必须是 `aclblasHandle_t` |
-| `enum` | `values`、`enum_kind` | kind 是 `op/dtype/compute/algo`，默认 `op` |
+| `enum` | `values`、`enum_kind` | `enum_kind` 取 `op/dtype/compute/algo`，默认 `op` |
 | `dim` | 无 | 用于维度表达式 |
-| `layout` | `kind`、`of` | kind 是 `ld/inc/stride/batch`；batch 可省 `of` |
+| `layout` | `kind`、`of` | `kind` 取 `ld/inc/stride/batch`；`kind=batch` 可省 `of` |
 | `scalar` | `dtype/dtype_from`、`mem`、`nullable`、`values` | 方向固定为 in |
 | `inout_scalar` | 同 `scalar` | 方向固定为 inout |
 | `out_scalar` | 同 `scalar` | 方向固定为 out，不写 `dir` |

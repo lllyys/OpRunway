@@ -1,12 +1,12 @@
-# README 与六件契约
+# README 投影与六个交付文件
 
-## Contents
+## 目录
 
 - [章节来源](#章节来源)
 - [开发者约束](#开发者约束)
 - [同步修改规则](#同步修改规则)
 
-README 是事实表 FACTS 的人读投影，不是独立事实来源。
+README 是事实表 FACTS 供人阅读的投影，不是独立的事实来源。
 `package.py render` 每次都从模板
 重建它，`package.py check` 机械核对表头、列数和六件的一致性。
 
