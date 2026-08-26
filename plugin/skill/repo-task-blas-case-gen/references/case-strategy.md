@@ -98,7 +98,7 @@ fill 词表（见 [aclblas-conventions.md](aclblas-conventions.md)）要在正�
 等价类的重复。维度档变宽后 pairwise 行数自然上升；某算子偏少时，先扩 `cases.dim_tiers` 或补
 `edge_cases`，不要靠缩档把数字做小。
 
-这个条数只约束**精度全量**（非 `TC_PF_` 前缀）。性能子集由 `perf.rows` 单独给出，不计入。
+这个条数只约束**精度全量**（非 `TC_PF_` 前缀；`TC_PF_` 是性能用例块前缀，四块见 csv-and-blocks.md）。性能子集由 `perf.rows` 单独给出，不计入。
 
 | 用途 | 条数 | 前缀 |
 | --- | --- | --- |

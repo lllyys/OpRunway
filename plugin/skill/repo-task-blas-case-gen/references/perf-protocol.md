@@ -19,6 +19,8 @@
 | 计时口径 | 只使用 msprof 的 kernel task duration | 依据：CANN 指南，待核 |
 | 排除口径 | GTest 的 ms 含 host 准备与 golden，不作性能依据 | 依据：项目策略 |
 
+`TC_PF_` 是性能用例块的前缀；四块命名见 [csv-and-blocks.md](csv-and-blocks.md) 的「四块」。
+
 ## 执行序列
 
 1. 直接运行一次 `<bin> --gtest_filter=<完整名>`，作为不计分 warm-up。
