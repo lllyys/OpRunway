@@ -1,6 +1,6 @@
 {
   "upstream": "https://gitcode.com/Justbin/repo-task-atk-test.git",
-  "baseline": "e7da8b7a1c92fae17720a7820ee4fceb71d29770",
+  "baseline": "90e28ff",
   "baseline_date": "2026-08-25",
   "atk_gitlink": "bac1aa7b77687f4dc9876abb489515f2cbcd9dca",
   "mirror_prefix": "plugin/",
@@ -16,6 +16,7 @@
     ".claude-plugin/",
     "skill/"
   ],
-  "mirror_commit": "bd8e48d",
-  "baseline_branch": "dev/skills-v0.2.0"
+  "mirror_commit": "e523d60",
+  "baseline_branch": "dev/skills-v0.2.0",
+  "branch": "dev/skills-v0.2.0"
 }

@@ -46,7 +46,7 @@ golden/
 ```
 
 这就是冒烟子集要写成 `smoke/cases.json`（放子目录、保住文件名）而不是
-`smoke.json` 的原因。`sample_smoke.py` 已经按这个规则写。
+`smoke.json` 的原因。`run_atk.py` 挑冒烟子集与生成侧抽性能子集都按这个规则写。
 
 ## 报告怎么读
 

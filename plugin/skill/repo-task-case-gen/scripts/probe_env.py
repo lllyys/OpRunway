@@ -12,6 +12,11 @@ import subprocess
 import sys
 
 
+
+# 生成侧只要 CPU 版 torch。装了 torch_npu 的机器上 `import torch` 会去自动加载
+# 它，没 source CANN 时抛 RuntimeError，连带 atk 也起不来。关掉自动加载，
+# 让「生成侧不需要 NPU 与 CANN」这句话成立。必须在任何 torch 导入之前设。
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
 def _module(name):
     try:
         mod = __import__(name)

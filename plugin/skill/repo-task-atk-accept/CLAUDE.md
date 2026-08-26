@@ -8,8 +8,8 @@
 ## 上游是生成侧
 
 吃的用例包由 `repo-task-case-gen` 产出。使用态上不要求它必须来自生成侧——
-任何符合结构的目录都收；**开发态上有四项硬契约**，本侧的 `sample_smoke.py`、
-`run_atk.py`、`verdict.py` 都在读它们。动到之前读
+任何符合结构的目录都收；**开发态上有四项硬契约**，本侧的 `run_atk.py` 与
+`verdict.py` 都在读它们。动到之前读
 [用例包契约](../../docs/development/case-package-contract.md)，那里也有归因表。
 
 ### 不就地 patch 用例包
@@ -58,6 +58,17 @@ ATK 在 `ASCEND_CUSTOM_OPP_PATH` 下只认十种固定 vendor 名
 顺带解决了另一件事：它的祖父目录就是 vendor 目录，pyaclnn 的签名自检只会
 搜到本算子的头文件，不会撞上 CANN 装机目录里同名的官方接口。
 
+### 为什么抽样在生成侧，冒烟在跑测侧
+
+性能子集的分层用**规模档**，那是用例设计的知识（`case-strategy.md`），而且
+「某一档抽不够」的修法是回生成侧调 `max_length` 重新生成——只有在那边做得到。
+所以 `perf/cases.json` 由 `gen_cases.py` 产出，本侧只消费。
+
+冒烟不一样：它验部署，与用例设计无关，`run_atk.py` 自己等距挑 5 条就够。
+
+早先 `sample_smoke.py` 放在本侧，导致规模档阈值要在两个 skill 里各存一份，
+真机上就出过两套阈值不一致（元素数 vs 字节数）。**不要把抽样搬回来。**
+
 ### 为什么冒烟子集要放子目录
 
 ATK 用**用例文件基名**当 golden 的子目录名（`atk/tasks/result_process.py:67`
@@ -66,10 +77,13 @@ ATK 用**用例文件基名**当 golden 的子目录名（`atk/tasks/result_proc
 
 所以冒烟子集写成 `smoke/cases.json`——换目录不换文件名。
 
-### 为什么冒烟挂了不许跑全量
+### 为什么冒烟只挑 5 条
 
-同一个部署问题重复 180 遍不产生新信息，只消耗时间和日志空间。
-冒烟 30 条按 dtype × shape 档位分层抽，覆盖到全部分层，挂了一定是共性问题。
+冒烟验的是**部署通没通**，不是用例设计。部署坏了第一条就挂，挑 30 条只是
+把同一个错误重复 30 遍。覆盖面由生成侧的全量与 `perf/cases.json` 负责。
+
+判据随之从「失败率 > 20%」改成「**全部**执行失败」：5 条的样本按比例判没有
+意义，挂 1 条就是 20%，而挂 1 条恰恰说明部署是好的。
 
 ### 为什么性能要精度先过
 
@@ -110,7 +124,7 @@ ATK 用**用例文件基名**当 golden 的子目录名（`atk/tasks/result_proc
 skill/repo-task-atk-accept/
 ├── SKILL.md              入口：A1–A6
 ├── references/           4 份按需加载的知识
-└── scripts/              5 个量具
+└── scripts/              4 个量具
 ```
 
 脚本之间只有一处 import：`build_install.py` 装完包后调

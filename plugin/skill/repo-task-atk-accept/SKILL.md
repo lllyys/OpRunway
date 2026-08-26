@@ -14,7 +14,7 @@ description: >-
 
 | 参数 | 含义 | 取值约束 | 初值推断 |
 | --- | --- | --- | --- |
-| `用例包` | 生成侧的 `atk-case-<op>/` | 含 `cases.json` 与 `golden/` | 用户给出 |
+| `用例包` | 生成侧的 `atk-case-<op>/` | 含 `cases.json`、`perf/cases.json` 与 `golden/` | 用户给出 |
 | `工程目录` | 待验收算子目录 | 含 `op_kernel/`、`op_host/` 与 `docs/` | 用户给出 |
 | `母仓` | 算子所属的开源仓根 | 含 `build.sh` 与 `experimental/` | 用户给出；见 build-deploy.md「母仓对照」 |
 | `工作目录` | 本轮验收现场 | `atk-verify-<op>/`，从用例包复制 | A1 第 1 步建立 |
@@ -44,9 +44,9 @@ mkdir -p atk-verify-<op> && cp -r <用例包>/* atk-verify-<op>/ && cd atk-verif
 | --- | --- | --- | --- |
 | A1 接收与环境 | 复制用例包，探环境，生成 `env.sh` | `env.json` `env.sh` | `probe_env.py` 退出码 0 |
 | A2 编译安装 | 算子目录合进母仓、构建、装包、验证生效 | `install.json` | `build_install.py` 退出码 0 |
-| A3 冒烟 | 抽 30 条跑一轮，确认调的是自定义算子 | `smoke/cases.json` `smoke_result.json` | 执行失败率 ≤ 20% |
+| A3 冒烟 | 等距挑 5 条跑一轮，确认调的是自定义算子 | `smoke/cases.json` `smoke_result.json` | 不是全部执行失败 |
 | A4 精度 | 全量跑 `accuracy_load` 比对 golden，有失败则隔离复验 | `accuracy.json` `isolate.json` | 已裁决（通过或不通过都算过关） |
-| A5 性能 | 按 `facts.json` 的性能形态跑 | `performance.json` | 状态非空 |
+| A5 性能 | 消费生成侧的 `perf/cases.json`，按性能形态跑 | `performance.json` | 状态非空 |
 | A6 结论 | 汇总裁决与证据链 | `verdict.json` `report.md` | 三段齐全 |
 
 **A2 或 A3 失败不得回生成侧重新出用例。** 那是部署问题，不是用例问题。
@@ -75,23 +75,24 @@ cd <工作目录> && source evidence/env.sh && <python> <skill>/scripts/build_in
 
 ```bash
 cd <工作目录> && source evidence/env.sh
-<python> <skill>/scripts/sample_smoke.py -i cases.json -o smoke -n 30
-<python> <skill>/scripts/run_atk.py --mode smoke -c smoke/cases.json --golden golden -o smoke_result.json
+<python> <skill>/scripts/run_atk.py --mode smoke -c cases.json --golden golden -o smoke_result.json
 ```
+
+它自己从全量里等距挑 5 条写成 `smoke/cases.json`，不用先抽样。
+`-n` 可调，但**冒烟验的是部署通没通，不是用例设计**——部署坏了第一条就挂，
+挑多了只是把同一个错误重复几十遍。覆盖面由生成侧的全量与 `perf/cases.json` 负责。
 
 **冒烟看的是执行成功数，不是精度通过数。**
 
 | 冒烟结果 | 含义 | 去向 |
 | --- | --- | --- |
-| 执行失败率 > 20% | 部署或适配坏了 | 停在 A3，`run_atk.py` 退出码 2 |
-| 执行失败率 ≤ 20% | 部署是好的，个别用例触发算子缺陷 | 进 A4 测准，再 `--mode isolate` 复验 |
+| **全部**执行失败 | 部署或适配坏了 | 停在 A3，`run_atk.py` 退出码 2 |
+| 挂几条，其余跑通 | 部署是好的，个别用例触发算子缺陷 | 进 A4 测准，再 `--mode isolate` 复验 |
 | 只是精度不通过 | 真实发现 | 进 A4 |
 
-**按失败率判，不按有没有失败判。** 部署坏了会让绝大多数用例都跑不起来；
-只挂零星几条说明部署没问题，那几条是算子缺陷——正是要在 A4 测准的东西，
+**只有一条都没跑起来才拦。** 5 条的样本按比例判没有意义（挂 1 条就是 20%）；
+而只挂零星几条说明部署没问题，那几条是算子缺陷——正是要在 A4 测准的东西，
 在这里拦死就永远出不了验收结论。
-
-同一个部署问题重复 180 遍不产生新信息，所以高失败率才拦。
 
 执行失败按 [troubleshooting.md](references/troubleshooting.md) 定位，改的是部署不是用例。
 
@@ -136,12 +137,18 @@ aicore 异常会把设备打到异常状态，同批次后面的用例跟着全�
 
 ```bash
 cd <工作目录> && source evidence/env.sh
-<python> <skill>/scripts/sample_smoke.py -i cases.json -o perf -n 50
 <python> <skill>/scripts/run_atk.py --mode performance \
     -c perf/cases.json --golden golden --facts facts.json -o performance.json
 ```
 
-**性能轮先抽样再跑**，全量 200 条要二十多分钟且多数是重复等价类。
+**`perf/cases.json` 由生成侧抽好，这里只消费。** 全量 200 条跑性能要二十多分钟
+且多数是重复等价类，子集是 50 条、按 dtype × 规模档分层。
+
+用例包里没有 `perf/cases.json` 时，是生成侧用的旧版本。**不要在这里补抽样**——
+分层用的规模档是用例设计的知识，回生成侧重跑 `gen_cases.py` 补出来。
+
+生成侧报过「抽不够」的规模档（多半是 `large`），在验收报告的「不覆盖的范围」
+里要写明：性能结论不覆盖那一档的切分路径。
 
 **精度没通过就不评级性能。** 一个算错的算子跑得快没有意义。
 
@@ -179,8 +186,8 @@ cd <工作目录> && <python> <skill>/scripts/verdict.py -o verdict.json --repor
 
 - A1 `probe_env.py` 退出码非 0
 - A2 构建失败，或装完符号不可见
-- A3 冒烟执行失败率超过 20%（低于此不拦，精度不通过也不拦，都要进 A4 测准）
-- 用例包缺 `cases.json`、`golden/` 或 `facts.json`
+- A3 冒烟 5 条全部执行失败（只挂几条不拦，精度不通过也不拦，都要进 A4 测准）
+- 用例包缺 `cases.json`、`golden/` 或 `facts.json`（缺 `perf/cases.json` 只影响 A5，回生成侧补）
 
 **不要强跑全量、改动待验收工程、或用人工结论绕过判据。**
 

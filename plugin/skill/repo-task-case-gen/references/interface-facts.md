@@ -101,7 +101,33 @@ ls <工程目录>/docs/aclnn*.md
 | `shape.rank` | `[最小, 最大]` | 决定 YAML 的 `dim_numbers` |
 | `constraints[]` | 自然语言约束 | 逐条要在 YAML 或约束器里有落点 |
 | `output.kind` | `single` / `multi` / `inplace` | 决定要不要写执行器 |
+| `output.outputs[]` | **`kind=multi` 时必填** | 按签名顺序逐个列，见下 |
 | `accuracy.acc` | `default` | 任务书说「AscendOpTest 默认阈值」时就是 `default` |
+
+### 多输出算子的 outputs
+
+`kind=multi` 时按签名顺序逐个声明，`freeze_golden.py` 靠它查输出有没有摊反：
+
+```json
+"output": {
+  "kind": "multi",
+  "position": "valuesOut,indicesOut",
+  "outputs": [
+    {"name": "valuesOut", "dtype": "same_as_input"},
+    {"name": "indicesOut", "dtype": "int64"}
+  ],
+  "source": "opdoc"
+}
+```
+
+`dtype` 填 ATK 词表里的值，或 `same_as_input`（与第一个输入张量同 dtype）。
+
+**为什么要这个字段。** 执行器把两个输出摊反时 golden 照样全绿——它跑得出来，
+只是 `output_0` 装的是本该在 `output_1` 的那个张量。到 NPU 侧才全部比对失败，
+而报告会把它归成算子缺陷，结论完全反向。dtype 一比就抓到了。
+
+**它的盲区**：两个输出 dtype 恰好相同时(比如都是 `int64`)摊反查不出来，
+值算错更查不出来——这个字段只挡结构错，不挡值错。
 | `performance.kind` | `none` / `builtin` / `cross_dtype` | 三种形态见下 |
 
 ### C 类型到 ATK 类型的映射

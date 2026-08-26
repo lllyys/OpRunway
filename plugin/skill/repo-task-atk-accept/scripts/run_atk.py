@@ -23,7 +23,10 @@ from pathlib import Path
 TIMEOUT = 7200
 
 # 冒烟执行失败率超过它就判部署有问题，拦在 A3；低于它说明部署好，个别用例是算子缺陷。
-SMOKE_BLOCK_RATE = 0.2
+# 冒烟验的是**部署通没通**，不是用例设计。部署坏了第一条就挂，5 条足够；
+# 挑多了只是把同一个错误重复几十遍。用例设计的覆盖面由生成侧的全量与
+# 性能子集负责，不在这里补。
+SMOKE_CASES = 5
 
 
 def _node_command(mode, cases, golden, devices, plugin):
@@ -175,6 +178,70 @@ def _run_subset(ids, cases, golden, devices, plugin, work_dir):
     return _parse_report(report, "smoke") if report else None
 
 
+def _filter_cases(cases_path, dtypes, exclude_ids):
+    """按 dtype 或 id 过滤本轮要跑的用例，写成 <mode 目录>/cases.json。
+
+    只给性能基线轮用：CANN 内置实现常常不支持任务书新增的那几种 dtype，
+    也可能有跑不动的用例，两轮要在**同一批**用例上比才有意义。
+    过滤掉哪些，报告里必须写进「不覆盖的范围」。
+
+    **文件名固定叫 cases.json**，理由同 `_pick_smoke`。
+    """
+    with open(cases_path, encoding="utf-8") as handle:
+        cases = json.load(handle)
+    if exclude_ids:
+        before = len(cases)
+        dropped = {int(i) for i in exclude_ids.split(",") if i.strip()}
+        cases = [c for c in cases if c["id"] not in dropped]
+        print(f"id 剔除    {before} → {len(cases)} 条")
+    if dtypes:
+        before = len(cases)
+        wanted = {d.strip() for d in dtypes.split(",") if d.strip()}
+        cases = [c for c in cases if _case_dtype(c) in wanted]
+        print(f"dtype 过滤 {before} → {len(cases)} 条，只留 {'、'.join(sorted(wanted))}")
+    if not cases:
+        print("过滤后一条不剩，检查 --dtypes 是否写成了 ATK 词表里的名字。",
+              file=sys.stderr)
+        return None
+    out_dir = Path("subset")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / "cases.json"
+    with open(out_file, "w", encoding="utf-8") as handle:
+        json.dump(cases, handle, ensure_ascii=False)
+    print(f"本轮用例  {len(cases)} 条 -> {out_file}")
+    return out_file
+
+
+def _case_dtype(case):
+    for item in case.get("inputs", []):
+        if isinstance(item, dict) and item.get("type") == "tensor":
+            return item.get("dtype")
+    return None
+
+
+def _pick_smoke(cases_path, number):
+    """从全量里等距挑几条写成 smoke/cases.json，返回新路径。
+
+    等距不随机：冒烟只验部署通没通，挑哪几条不影响结论，等距还能跨轮次复现。
+    覆盖面由生成侧的全量与 perf/cases.json 负责，不在这里补。
+
+    **文件名固定叫 cases.json，换目录不换名。** ATK 拿用例文件基名当 golden 的
+    子目录名（`atk/tasks/result_process.py:67`），改名后找不到 golden。
+    """
+    with open(cases_path, encoding="utf-8") as handle:
+        cases = json.load(handle)
+    step = max(1, len(cases) // number)
+    picked = cases[::step][:number] or cases[:number]
+    out_dir = Path("smoke")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / "cases.json"
+    with open(out_file, "w", encoding="utf-8") as handle:
+        json.dump(picked, handle, ensure_ascii=False)
+    print(f"冒烟用例  从 {len(cases)} 条里等距挑 {len(picked)} 条 -> {out_file}")
+    print(f"          id {[case['id'] for case in picked]}")
+    return out_file
+
+
 def _isolate(args, cases, golden, plugin):
     """aicore 异常会让同批次后续用例连带失败。逐条单独重跑才知道哪些是真的。"""
     source = Path(args.ids_from)
@@ -230,6 +297,15 @@ def main():
     parser.add_argument("--max-isolate", type=int, default=60,
                         help="isolate 模式最多逐条复验多少条")
     parser.add_argument("-c", "--cases", required=True)
+    parser.add_argument("-n", "--smoke-cases", type=int, default=SMOKE_CASES,
+                        help="smoke 模式从 -c 里等距挑几条，默认 5")
+    parser.add_argument("--dtypes", default="",
+                        help="逗号分隔，只跑这些 dtype 的用例。基线轮用："
+                             "CANN 内置实现不支持的新增 dtype 没有基线可比，"
+                             "过滤后要在报告里写明覆盖范围。")
+    parser.add_argument("--exclude-ids", default="",
+                        help="逗号分隔的用例 id，从本轮剔除。基线轮用："
+                             "内置实现跑不动的用例没法比。")
     parser.add_argument("--golden", default="golden")
     parser.add_argument("--facts", default="facts.json")
     parser.add_argument("--devices", default="0")
@@ -265,6 +341,13 @@ def main():
     if plugin is None:
         matches = sorted(Path(".").glob("function_*.py"))
         plugin = str(matches[0]) if len(matches) == 1 else None
+
+    if args.mode == "smoke":
+        cases = _pick_smoke(cases, args.smoke_cases)
+    elif args.dtypes or args.exclude_ids:
+        cases = _filter_cases(cases, args.dtypes, args.exclude_ids)
+        if cases is None:
+            return 3
 
     if args.mode == "isolate":
         return _isolate(args, cases, golden, plugin)
@@ -334,16 +417,15 @@ def main():
         print(f"失败用例  {head}{more}")
 
     if args.mode == "smoke" and result["failed"]:
-        # 部署或适配坏了会让绝大多数用例都跑不起来；只挂零星几条说明部署是好的，
+        # 只有**一条都没跑起来**才是部署问题。挂零星几条说明部署是好的，
         # 是个别用例触发了算子缺陷——那要进 A4 测准，不能在这里拦死。
-        rate = result["failed"] / result["total"] if result["total"] else 1.0
-        if rate > SMOKE_BLOCK_RATE:
-            print(f"\n阻塞·未验收 @A3：冒烟 {result['failed']}/{result['total']} 条执行失败"
-                  f"（{rate:.0%} > {SMOKE_BLOCK_RATE:.0%}）。部署或适配有问题，"
-                  f"按 troubleshooting.md 定位，不要跑全量。", file=sys.stderr)
+        # 条数只有 5 条，按比例判没有意义（挂 1 条就是 20%）。
+        if result["failed"] >= result["total"]:
+            print(f"\n阻塞·未验收 @A3：冒烟 {result['total']} 条**全部**执行失败。"
+                  f"部署或适配有问题，按 troubleshooting.md 定位，不要跑全量。",
+                  file=sys.stderr)
             return 2
-        print(f"\n冒烟有 {result['failed']}/{result['total']} 条执行失败"
-              f"（{rate:.0%}，未超 {SMOKE_BLOCK_RATE:.0%}）。"
+        print(f"\n冒烟有 {result['failed']}/{result['total']} 条执行失败，其余跑通了。"
               f"部署是好的，这几条是算子缺陷，进 A4 测准后用 --mode isolate 复验。")
     return 0
 

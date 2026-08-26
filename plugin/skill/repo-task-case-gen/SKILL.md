@@ -42,7 +42,7 @@ mkdir -p atk-case-<op> && cd atk-case-<op> && <python> <skill>/scripts/probe_env
 | --- | --- | --- | --- |
 | S1 事实表 | 读任务书与工程 `docs/aclnn*.md`，填 `facts.json` | `facts.json` | `check_facts.py` 退出码 0 |
 | S2 用例设计 | 写 `<op>.yaml`，需要时写 `<op>_constraint.py` / `function_<op>.py` | yaml + 插件 | `gen_cases.py --dry-run` 退出码 0 |
-| S3 生成用例 | 正式跑 `atk case` | `cases.json` | 用例数 ≥ 100 |
+| S3 生成用例 | 正式跑 `atk case`，同时抽性能子集 | `cases.json` `perf/cases.json` | 用例数 ≥ 100 |
 | S4 冻结 golden | 跑 CPU 标杆存盘 | `golden/` | `freeze_golden.py` 退出码 0 |
 
 ### S1 事实表
@@ -57,6 +57,9 @@ cd <工作目录> && <python> <skill>/scripts/check_facts.py facts.json
 ```
 
 退出码 2 是字段缺失或 dtype 不在 ATK 词表里，照它打印的字段名补；退出码 3 是 JSON 语法错。
+
+**它末尾会打印「CPU 执行器 需要 / 不需要 / 待定」**，那是 S2 要不要写执行器的结论，
+不用自己再判。判据与三种结论的去向见 [plugin-authoring.md](references/plugin-authoring.md)。
 
 **约束只从公开接口面取**：工程的 `docs/aclnn*.md`、`README.md`、`op_api/*.h` 的函数声明、
 任务书。**不读 `op_kernel/`、`op_host/*_tiling.cpp` 与内部断言**——用被测算子自己的断言生成用例，
@@ -85,23 +88,34 @@ dry-run 过了再回填 `dtype_numbers`（算法见 case-strategy.md「用例规
 cd <工作目录> && <python> <skill>/scripts/gen_cases.py
 ```
 
-它跑 `atk case`，把结果收敛到 `cases.json`，打印用例数与 dtype 分布。
+它跑 `atk case`，把结果收敛到 `cases.json`，再按 dtype × 规模档分层抽 50 条写成
+`perf/cases.json` 给跑测侧的性能轮用。**抽样在这里做，不在跑测侧**：分层用的规模档
+是用例设计的知识，而且「某一档抽不够」的修法也只有回这里改 YAML 才做得到。
+
+它会打印性能子集的规模档分布，某一档少于 3 条时报「抽不够」并给出全量里的条数——
+那说明 YAML 生成不出那一档，调大 `--perf-number` 没用，回 S2 调 `max_length`
+与 `dim_values`。
 
 **用例数少于 100 就是 YAML 写窄了**，回 S2 加 `dim_values` 或 dtype，不要直接调大
 `dtype_numbers` 硬凑。
 
-**条数对不代表形态分布对。** 写了约束器就抽查一遍秩分布与轴的正负分布：
+**条数对不代表覆盖面对。** 跑一次量具看每根轴的分布、两两覆盖率与规模配比：
 
 ```bash
-cd <工作目录> && <python> -c "
-import json, collections
-cases = json.load(open('cases.json'))
-print('秩分布', collections.Counter(len(c['inputs'][0]['shape'] or []) for c in cases))
-"
+cd <工作目录> && <python> <skill>/scripts/check_coverage.py
 ```
 
-某一项只有一个取值就是约束器写死了——真机上撞过一次，200 条用例全落在同一种形态里，
-见 [plugin-authoring.md](references/plugin-authoring.md)「case_config.id 在约束器里恒为 0」。
+它是**纯度量，退出码固定 0**，读三处：
+
+| 看什么 | 不对劲长什么样 | 去哪改 |
+| --- | --- | --- |
+| 每根轴的取值分布 | 某根轴「只有一个取值」——约束器写死了 | 约束器，见 plugin-authoring.md「`case_config.id` 在约束器里恒为 0」 |
+| 两两覆盖率 | 低于 90%，或某个轴对低于 50% | S2 给覆盖最差的轴对加取值 |
+| 规模配比 | 全量偏离目标 | **全量不用追**，看 `gen_cases.py` 报的性能子集配比 |
+
+**要看的是性能子集那一行,不是全量。** `gen_cases.py` 抽子集时先按规模档配额，
+全量里有十几条 `large` 就够填满子集的 30%；追全量 30% 只会让 golden 涨到几百 MB。
+子集报「抽不够」才是问题，修法见 [case-strategy.md](references/case-strategy.md)「规模档」。
 
 ### S4 冻结 golden
 
@@ -132,8 +146,9 @@ atk-case-<op>/
 ├── <op>.yaml            用例设计
 ├── <op>_constraint.py   有才放
 ├── function_<op>.py     有才放
-├── cases.json           用例
-└── golden/              CPU 标杆输出 + manifest.json
+├── cases.json           精度全量
+├── perf/cases.json      性能子集，50 条，分层抽样
+└── golden/              CPU 标杆输出 + manifest.json，全量与子集共用
 ```
 
 不做 SHA256 封印，也不做只读锁。用例包的可靠性由 S1–S4 的出口判据保证。
@@ -167,7 +182,7 @@ atk-case-<op>/
 
 - [interface-facts.md](references/interface-facts.md) — 事实表字段与三跳来源规则
 - [yaml-authoring.md](references/yaml-authoring.md) — ATK YAML 字段与写法
-- [case-strategy.md](references/case-strategy.md) — 覆盖策略与用例规模
+- [case-strategy.md](references/case-strategy.md) — 覆盖策略、规模档与用例规模
 - [precision-standard.md](references/precision-standard.md) — 精度标准取值
 - [plugin-authoring.md](references/plugin-authoring.md) — 约束器与执行器判据和模板
 - `assets/example/` — Roll / IndexFillTensor / Median 三个算子的真机产物，可照抄

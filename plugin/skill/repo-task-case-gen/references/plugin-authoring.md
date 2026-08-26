@@ -1,9 +1,36 @@
 # 约束器与执行器
 
-**默认一个都不写。** pyaclnn 从用例 JSON 的输入列表自己拼 aclnn 调用，
-CPU 标杆用 `eval(name)(*args, **kwargs)`，标准算子两边都不需要人写代码。
+**默认一个都不写。** 只有下面的判据命中时才写，命中哪条写哪个。
 
-只有下面的判据命中时才写，命中哪条写哪个。
+## 为什么只有基线侧要适配
+
+ATK 有两条默认调用约定，一份用例被两边各消费一次。**两侧的自动适配投入完全不对等**，
+所以要写的执行器几乎全在基线侧：
+
+| 侧 | ATK 怎么调 | 自动类型转换 |
+| --- | --- | --- |
+| 待验收（aclnn） | 输入按序转 C 类型，**自动追加** out、`workspaceSize`、`executor`，跑两段式接口 | **有**，`pyaclnn_backend.py:287` 的 `convert_input_data`：list→`aclIntArray`/`aclTensorList`、Tensor→`aclTensor`、标量→`aclScalar` 或 ctypes |
+| 基线（cpu） | `eval(name)(*args, **kwargs)`，`args` 就是 `inputs` 按序 | **没有**，`cpu_backend.py` 里根本没有这个函数 |
+
+**标准二段式 aclnn 算子，NPU 侧零工作量。** `aclnn_function` 是个空壳，三个方法
+全部 `super()` 直通 `AclnnBaseApi`（`atk/tasks/api_execute/function_api.py:61`）。
+
+要写 NPU 执行器只有基类三条假设不成立时，社区算子基本都符合，三个目标算子命中 0 次：
+
+| 基类假设 | 破了的样子 |
+| --- | --- |
+| 输出追加在入参尾部 | 输出在参数中间某个位置 |
+| 标准两段式 `GetWorkspaceSize` + 本体 | 单段式或多段式 |
+| 输出能转回 `torch.Tensor` | 输出是自定义结构 |
+
+基线侧相反，`aclIntArray*` 在用例里是 python list，而 torch 对同一个概念没有统一约定：
+
+| torch 接口 | 同一个概念收什么 |
+| --- | --- |
+| `torch.roll` 的 `shifts` | list |
+| `torch.index_fill` 的 `index` | int64 Tensor |
+
+**这条不对称不会消失**，torch 侧没有可机械映射的单一类型系统。
 
 ## 判据表
 
@@ -24,17 +51,30 @@ CPU 标杆用 `eval(name)(*args, **kwargs)`，标准算子两边都不需要人�
 | indexfill | `index` 元素值 < `self` 在 `dim` 维的长度 | **`torch.index_fill` 的 index 只收 int64 Tensor，收不了 list** | 单输出，常规 | 约束器 + CPU 执行器 |
 | median | `dim` 取值随秩变 | **`torch.median` 返回具名元组，要摊成两个输出** | 双输出 | 约束器 + CPU 执行器 |
 
-三个算子有两个要写 CPU 执行器，起因都一样：**`aclIntArray*` 在 ATK 里是 python
-list，而 torch 的对应参数常常要 Tensor**；以及**多输出算子的 torch 返回值是
-具名元组，ATK 要普通元组或 tuple 才能拆成多个输出张量**。
+三个算子有两个要写 CPU 执行器，起因只有两种：
 
-判断办法不是看文档，是直接试一次：
+| 起因 | 命中的算子 |
+| --- | --- |
+| `aclIntArray*` 是 python list，torch 对应参数要 Tensor | indexfill |
+| 多输出算子的 torch 返回值是具名元组，ATK 要普通元组 | median |
 
-```bash
-python -c "import torch; print(torch.index_fill(torch.rand(3,3), 0, [0,2], 0.0))"
+**不用自己判，`check_facts.py` 已经判过了。** 它在 S1 出口按 `signature` 的 C 类型
+造一组实参真的 eval 一次基线，结论打印在末尾：
+
+```text
+CPU 执行器  需要
+           torch.index_fill(Tensor, int, list, float) 报 TypeError：...
 ```
 
-报 `TypeError: received an invalid combination of arguments` 就是要写执行器。
+三种结论对应三种去向：
+
+| 结论 | 去向 |
+| --- | --- |
+| `不需要` | `api_type` 留 `function`，不写 CPU 执行器 |
+| `需要` | 照下面的模板写，YAML 接 `api_type: function_<op>_cpu` |
+| `待定` | 探针没结论（多输出以外的异常、torch 装不上、签名对不上），按上面的判据表自己判 |
+
+探针只验**类型形态**，不验 dtype 支持面，也不验算得对不对。
 
 ## 约束器
 
@@ -181,16 +221,8 @@ def after_case_config(self, case_config):
     return case_config
 ```
 
-**改完一定要抽查生成结果，别只看用例条数。** 条数对不代表形态分布对：
-
-```bash
-python -c "
-import json, collections
-cases = json.load(open('cases.json'))
-print(collections.Counter(len(c['inputs'][0]['shape'] or []) for c in cases))
-print(collections.Counter(c['inputs'][1]['range_values'] >= 0 for c in cases))
-"
-```
+**改完一定要跑 `check_coverage.py`，别只看用例条数。** 条数对不代表形态分布对——
+某根轴报「只有一个取值」就是约束器写死了。
 
 哪些场景要点名构造见 case-strategy.md「必须单独构造的场景」。
 

@@ -40,8 +40,7 @@ python <skill>/scripts/build_install.py --op Roll \
 
 ```bash
 source evidence/env.sh
-python <skill>/scripts/sample_smoke.py -i cases.json -o smoke -n 30
-python <skill>/scripts/run_atk.py --mode smoke -c smoke/cases.json --golden golden -o smoke_result.json
+python <skill>/scripts/run_atk.py --mode smoke -c cases.json --golden golden -o smoke_result.json
 ```
 
 **看的是执行成功数**：30/30 执行成功就进下一步，哪怕精度有几条没过。
@@ -68,7 +67,6 @@ IndexFillTensor 真机上就是这样：47 条执行失败，逐条重跑后只�
 先抽样再跑，全量太慢：
 
 ```bash
-python <skill>/scripts/sample_smoke.py -i cases.json -o perf -n 50
 python <skill>/scripts/run_atk.py --mode performance -c perf/cases.json \
     --golden golden --facts facts.json -o performance.json
 ```

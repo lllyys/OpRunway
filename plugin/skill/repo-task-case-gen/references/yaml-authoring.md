@@ -134,7 +134,7 @@ CPU 标杆是 `eval(name)(*args, **kwargs)`，所以 **`name` 要么全填 `null
 | 字段 | 说明 |
 | --- | --- |
 | `dtypes.values` | ATK dtype 词表里的名字，来自 `facts.json` |
-| `ranges.valid.values` | 值域，列表的列表。整型算子也写 `[[-5, 5]]`，ATK 会按 dtype 取整 |
+| `ranges.valid.values` | 值域，列表的列表，ATK 在里面均匀随机挑一项。**含整型 dtype 时不能只写 `[[-5, 5]]`**，见 case-strategy.md「张量取值」 |
 | `shapes.dim_numbers.values` | 秩的取值，来自 `facts.json` 的 `shape.rank` |
 | `shapes.dim_values.values` | 每一维的候选值，**必须是离散列表** |
 | `shapes.max_length` | 单个输入的最大元素数，控制用例体积 |

@@ -26,7 +26,8 @@ atk-case-<op>/
 ├── <op>.yaml            用例设计
 ├── <op>_constraint.py   有才放
 ├── function_<op>.py     有才放
-├── cases.json           用例
+├── cases.json           精度全量
+├── perf/cases.json      性能子集，生成侧抽好
 └── golden/              CPU 标杆输出 + manifest.json
 ```
 
@@ -36,7 +37,7 @@ atk-case-<op>/
 
 | 契约项 | 跑测侧谁在读 | 破坏后的表现 |
 | --- | --- | --- |
-| `cases.json` 这个文件名 | `sample_smoke.py`、`run_atk.py` 隔离复验 | ATK 拿用例文件基名当 golden 子目录名（`atk/tasks/result_process.py:67`），改名后报「标杆输出为空」 |
+| `cases.json` 这个文件名（全量与 `perf/` 子集同名） | `run_atk.py` 的冒烟挑样、性能轮与隔离复验 | ATK 拿用例文件基名当 golden 子目录名（`atk/tasks/result_process.py:67`），改名后报「标杆输出为空」 |
 | `golden/` 目录布局 `<根>/<backend>/<用例文件基名>/<id>/` | `run_atk.py` 的 `accuracy_load` | 同上。**不报错，只是一条都匹配不上** |
 | `facts.json` 的 `performance.kind` | `verdict.py:57` 选性能裁决分支 | 取值不在 `none`/`builtin`/`cross_dtype` 里就退回 `none`，性能永远不评级 |
 | `function_<op>.py` 这个命名 | `run_atk.py:266` 的 `glob("function_*.py")` | 自动挂不上，CPU 标杆执行器找不到 |

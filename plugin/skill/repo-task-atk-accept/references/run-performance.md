@@ -44,12 +44,23 @@
 用同一个分层抽样脚本抽 50 条：
 
 ```bash
-<python> <skill>/scripts/sample_smoke.py -i cases.json -o perf -n 50
 <python> <skill>/scripts/run_atk.py --mode performance \
     -c perf/cases.json --golden golden --facts facts.json -o performance.json
 ```
 
-抽样按 dtype × shape 档位分层，先保证每层至少一条，再随机补齐到 50。
+抽样按 dtype × 规模档分层，先保证每层至少一条，再随机补齐到 50。
+规模档按**字节数**分（`scalar` / `small` <32KB / `medium` <2MB / `large` ≥2MB），
+与生成侧 `case-strategy.md`「规模档」同一套阈值。
+
+脚本会打印抽到的规模档分布。**某一档少于 3 条时它报「抽不够」并给出全量里的条数**：
+
+| 全量里有 | 含义 | 去向 |
+| --- | --- | --- |
+| 也少 | 源用例集就没有这一档 | 回生成侧调 `max_length` 与 `dim_values` 重新生成 |
+| 够多 | 抽样没抽到 | `-n` 调大 |
+
+**大多数情况是前者。** 三个目标算子首轮的 `large` 档全量都是 0 条，
+调 `-n` 没有用。这时性能结论只覆盖小中张量，报告里要写明不覆盖多核切分路径。
 `kind` 是 `cross_dtype` 时把 `-n` 调到 80——每个 dtype 要够分组比较。
 
 **输出目录换、文件名不换。** `perf/cases.json` 而不是 `perf_cases.json`，
@@ -116,15 +127,23 @@ nm -D $ASCEND_OPP_PATH/../lib64/libopapi_nn.so | grep aclnnMedianGetWorkspaceSiz
 社区任务多半是「给已有算子扩展支持某几种 dtype」，那些新增 dtype 内置实现
 按定义就不支持——**它们没有基线可比，比较只能在内置支持的 dtype 上做。**
 
-用 `--dtypes` 过滤出一份两轮共用的子集：
+`run_atk.py` 的 `--dtypes` 过滤本轮用例，**两轮要带同一个过滤条件**，
+否则比的不是同一批：
 
 ```bash
-<python> <skill>/scripts/sample_smoke.py -i cases.json -o perfbase -n 40 \
-    --dtypes fp16,fp32,bf16,int32,int64
+# 被测轮
+<python> <skill>/scripts/run_atk.py --mode performance -c perf/cases.json \
+    --golden golden --facts facts.json --dtypes fp16,fp32,int32 -o performance.json
+
+# 基线轮，同一个 --dtypes
+<python> <skill>/scripts/run_atk.py --mode performance -c perf/cases.json \
+    --golden golden --facts facts.json --dtypes fp16,fp32,int32 \
+    --builtin-baseline -o performance_builtin.json
 ```
 
-然后两轮都用 `perfbase/cases.json`。报告里要写明比较只覆盖了哪几种 dtype，
-新增 dtype 的性能结论是 `unknown`。
+`--exclude-ids` 同理，用来剔掉内置实现跑不动的具体用例。
+
+报告里要写明比较只覆盖了哪几种 dtype，新增 dtype 的性能结论是 `unknown`。
 
 ### 内置实现挂死时怎么定位
 
@@ -156,8 +175,6 @@ cases = json.load(open('cases.json'))
 print(','.join(str(c['id']) for c in cases if c['inputs'][2]['range_values'] is True))
 "
 # 用这批 id 做排除
-<python> <skill>/scripts/sample_smoke.py -i cases.json -o perfbase -n 40 \
-    --dtypes fp16,fp32,bf16,int32,int64 --exclude-ids "<上面的输出>"
 ```
 
 **这条不能算「待验收实现更快」。** 它是内置实现的缺陷，写进报告备注，

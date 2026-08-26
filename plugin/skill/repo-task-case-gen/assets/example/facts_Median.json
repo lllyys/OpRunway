@@ -8,28 +8,125 @@
     "text": "aclnnStatus aclnnMedianGetWorkspaceSize(const aclTensor *self, int64_t dim, bool keepDim, aclTensor *valuesOut, aclTensor *indicesOut, uint64_t *workspaceSize, aclOpExecutor **executor)"
   },
   "params": [
-    {"name": "self", "role": "input", "atk_type": "tensor",
-     "dtypes": ["fp16", "fp32", "int32", "bf16", "int64", "int16", "uint8", "int8"],
-     "source": "opdoc"},
-    {"name": "dim", "role": "input", "atk_type": "attr", "dtypes": ["int"], "source": "opdoc"},
-    {"name": "keepDim", "role": "input", "atk_type": "attr", "dtypes": ["attr_bool"], "source": "opdoc"},
-    {"name": "valuesOut", "role": "output", "atk_type": "tensor",
-     "dtypes": ["fp16", "fp32", "int32", "bf16", "int64", "int16", "uint8", "int8"],
-     "source": "opdoc"},
-    {"name": "indicesOut", "role": "output", "atk_type": "tensor",
-     "dtypes": ["int32", "int64"], "source": "opdoc"}
+    {
+      "name": "self",
+      "role": "input",
+      "atk_type": "tensor",
+      "dtypes": [
+        "fp16",
+        "fp32",
+        "int32",
+        "bf16",
+        "int64",
+        "int16",
+        "uint8",
+        "int8"
+      ],
+      "source": "opdoc"
+    },
+    {
+      "name": "dim",
+      "role": "input",
+      "atk_type": "attr",
+      "dtypes": [
+        "int"
+      ],
+      "source": "opdoc"
+    },
+    {
+      "name": "keepDim",
+      "role": "input",
+      "atk_type": "attr",
+      "dtypes": [
+        "attr_bool"
+      ],
+      "source": "opdoc"
+    },
+    {
+      "name": "valuesOut",
+      "role": "output",
+      "atk_type": "tensor",
+      "dtypes": [
+        "fp16",
+        "fp32",
+        "int32",
+        "bf16",
+        "int64",
+        "int16",
+        "uint8",
+        "int8"
+      ],
+      "source": "opdoc"
+    },
+    {
+      "name": "indicesOut",
+      "role": "output",
+      "atk_type": "tensor",
+      "dtypes": [
+        "int32",
+        "int64"
+      ],
+      "source": "opdoc"
+    }
   ],
-  "shape": {"rank": [1, 8], "source": "opdoc"},
+  "shape": {
+    "rank": [
+      1,
+      8
+    ],
+    "source": "opdoc"
+  },
   "constraints": [
-    {"text": "dim 取值范围 [-self.dimNum, self.dimNum)", "source": "opdoc"},
-    {"text": "self 与 valuesOut 数据类型须一致", "source": "opdoc"},
-    {"text": "indicesOut 仅支持 INT32 / INT64", "source": "opdoc"},
-    {"text": "不支持空张量，self 元素个数为 0 时返回 ACLNN_ERR_PARAM_INVALID", "source": "opdoc"},
-    {"text": "dim 维长度支持为 1，退化场景 values 即原值、indices 恒为 0", "source": "opdoc"},
-    {"text": "偶数长度取较小的中间值，与 NumPy 取均值不同；indices 取首个出现位置", "source": "opdoc"},
-    {"text": "indicesOut 为 nullptr 时切换为全局中位数语义，本轮不覆盖", "source": "opdoc"}
+    {
+      "text": "dim 取值范围 [-self.dimNum, self.dimNum)",
+      "source": "opdoc"
+    },
+    {
+      "text": "self 与 valuesOut 数据类型须一致",
+      "source": "opdoc"
+    },
+    {
+      "text": "indicesOut 仅支持 INT32 / INT64",
+      "source": "opdoc"
+    },
+    {
+      "text": "不支持空张量，self 元素个数为 0 时返回 ACLNN_ERR_PARAM_INVALID",
+      "source": "opdoc"
+    },
+    {
+      "text": "dim 维长度支持为 1，退化场景 values 即原值、indices 恒为 0",
+      "source": "opdoc"
+    },
+    {
+      "text": "偶数长度取较小的中间值，与 NumPy 取均值不同；indices 取首个出现位置",
+      "source": "opdoc"
+    },
+    {
+      "text": "indicesOut 为 nullptr 时切换为全局中位数语义，本轮不覆盖",
+      "source": "opdoc"
+    }
   ],
-  "output": {"kind": "multi", "position": "valuesOut,indicesOut", "source": "opdoc"},
-  "accuracy": {"acc": "default", "source": "taskdoc"},
-  "performance": {"kind": "builtin", "source": "taskdoc"}
+  "output": {
+    "kind": "multi",
+    "position": "valuesOut,indicesOut",
+    "outputs": [
+      {
+        "name": "valuesOut",
+        "dtype": "same_as_input"
+      },
+      {
+        "name": "indicesOut",
+        "dtype": "int64"
+      }
+    ],
+    "source": "opdoc"
+  },
+  "accuracy": {
+    "acc": "default",
+    "source": "taskdoc"
+  },
+  "performance": {
+    "kind": "builtin",
+    "source": "taskdoc"
+  }
 }

@@ -84,6 +84,32 @@ median 连参数表都没有。写正则去解析必然挂——这正是上一�
 | 单 cpu 节点跑 accuracy + `--save_data output` 能产出 golden | 实测，180/180 |
 | golden 路径是 `<根>/<backend>/<用例文件基名>/<id>/` | `atk/common/utils.py:259` + `atk/tasks/result_process.py:67` |
 | 输入数据由 `default_seed` 决定，同一份 cases.json 两次跑输入相同 | `atk/tasks/dataset/base_dataset.py:85` |
+| aclnn 侧有完整自动类型转换，cpu 侧一行都没有——要写的执行器几乎全在基线侧 | `pyaclnn_backend.py:287` 有 `convert_input_data`，`cpu_backend.py` 里没有 |
+| `aclnn_function` 是空壳，三个方法全 `super()` 直通基类 | `atk/tasks/api_execute/function_api.py:61` |
+| golden 的 `output_info.json` 是 `[{"dtype": "torch.float32", "shape": [], "stride": []}, ...]`，每输出一项 | 实测 |
+| 装了 torch_npu 的机器上没 source CANN 时 `import torch` 抛 **RuntimeError** 不是 ImportError | 实测，见下方「探针不能只 catch ImportError」 |
+| 三个算子首轮的两两覆盖率 91.3% / 98.5% / 94.0%，`large` 规模档全是 0 条 | `check_coverage.py` 实测 |
+
+### 四个脚本都要关掉 torch 后端自动加载
+
+真机的 conda 环境里装了 `torch_npu`，`import torch` 会去自动加载它，没 source
+CANN 时抛 `RuntimeError: Failed to load the backend extension: torch_npu`——
+**不是 `ImportError`**。
+
+这一条打穿了「生成侧不需要 NPU 与 CANN」那句话：
+
+| 脚本 | 不设时的表现 |
+| --- | --- |
+| `probe_env.py` | torch 报不可用 → 退 2 → **S0 直接阻塞** |
+| `gen_cases.py` / `freeze_golden.py` | 子进程 `atk` 起不来 |
+| `check_facts.py` | 只 catch `ImportError` 时脚本崩，退 1，拿不到任何结论 |
+
+四个脚本现在都在 import 段之后立刻
+`os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")`，`check_facts.py`
+再加一层宽 `except Exception` 降级成「待定」。
+
+**必须设在任何 torch 导入之前，也不要把那层宽 catch 收窄。** 实测不 source CANN
+时 `probe_env.py` 退 0，atk 26.8.8 与 torch 2.10.0+cpu 都探得到。
 
 ## 目录结构
 
@@ -91,7 +117,7 @@ median 连参数表都没有。写正则去解析必然挂——这正是上一�
 skill/repo-task-case-gen/
 ├── SKILL.md              入口：S0–S4
 ├── references/           5 份按需加载的知识
-├── scripts/              4 个量具
+├── scripts/              5 个量具
 └── assets/example/       Roll 的真实产物，可照抄
 ```
 

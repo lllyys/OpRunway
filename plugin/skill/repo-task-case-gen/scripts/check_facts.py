@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """校验 facts.json：字段齐备、dtype 在 ATK 词表内、每项带 source。
 
+顺带判定要不要写 CPU 执行器（见 `_probe_baseline`），结论打印在末尾。
+**这一项不影响退出码**：要不要写执行器是 S2 的活儿，不是 facts.json 的缺陷。
+
 退出码 0 通过，2 内容不合格，3 JSON 读不出来。
 """
 
 import argparse
 import json
+import os
 import sys
 
 TENSOR_DTYPES = {
@@ -35,6 +39,13 @@ PERF_KINDS = {"none", "builtin", "cross_dtype"}
 OUTPUT_KINDS = {"single", "multi", "inplace"}
 
 DROP_PARAMS = {"workspacesize", "executor", "workspace", "stream"}
+
+# ATK dtype -> torch dtype 名。只给探针造张量用，不是完整映射。
+PROBE_TORCH_DTYPE = {
+    "fp64": "float64", "fp32": "float32", "fp16": "float16", "bf16": "bfloat16",
+    "int64": "int64", "int32": "int32", "int16": "int16", "int8": "int8",
+    "uint8": "uint8", "bool": "bool", "complex64": "complex64",
+}
 
 
 def _err(problems, text):
@@ -101,6 +112,30 @@ def _check_params(problems, facts):
         _check_source(problems, where, param)
 
 
+def _check_multi_outputs(problems, output):
+    """多输出算子必须逐个声明 dtype，`freeze_golden.py` 靠它查输出有没有摊反。
+
+    dtype 写 ATK 词表里的值，或 `same_as_input`（与第一个输入张量同 dtype）。
+    """
+    outputs = output.get("outputs")
+    if not isinstance(outputs, list) or len(outputs) < 2:
+        _err(problems, "output.kind=multi 时必须给 outputs，按签名顺序逐个列，"
+                       "形如 [{\"name\": \"valuesOut\", \"dtype\": \"same_as_input\"}, "
+                       "{\"name\": \"indicesOut\", \"dtype\": \"int64\"}]")
+        return
+    for index, item in enumerate(outputs):
+        where = f"output.outputs[{index}]"
+        if not isinstance(item, dict) or not item.get("name"):
+            _err(problems, f"{where} 缺 name")
+            continue
+        dtype = item.get("dtype")
+        if dtype == "same_as_input":
+            continue
+        if dtype not in TENSOR_DTYPES:
+            _err(problems, f"{where}({item['name']}) 的 dtype={dtype!r} 既不在 ATK 词表里，"
+                           f"也不是 same_as_input")
+
+
 def _check_perf(problems, facts):
     perf = facts.get("performance")
     if not isinstance(perf, dict):
@@ -164,6 +199,8 @@ def _check_top(problems, facts):
         if output.get("kind") not in OUTPUT_KINDS:
             _err(problems, f"output.kind={output.get('kind')!r} 不合法，"
                            f"只能是 {'/'.join(sorted(OUTPUT_KINDS))}")
+        elif output.get("kind") == "multi":
+            _check_multi_outputs(problems, output)
         _check_source(problems, "output", output)
 
     accuracy = facts.get("accuracy")
@@ -181,6 +218,101 @@ def _check_top(problems, facts):
                 _err(problems, f"constraints[{index}] 缺 text")
             else:
                 _check_source(problems, f"constraints[{index}]", item)
+
+
+def _parse_c_params(text):
+    """从 signature.text 里取每个参数的 C 类型，键是参数名。
+
+    两种写法都要收：`const aclTensor* x` 与 `const aclTensor *self`。
+    """
+    try:
+        inner = text[text.index("(") + 1:text.rindex(")")]
+    except ValueError:
+        return {}
+    table = {}
+    for piece in inner.split(","):
+        tokens = piece.replace("const", " ").replace("*", " ").split()
+        if len(tokens) < 2:
+            continue
+        table[tokens[-1]] = " ".join(tokens[:-1])
+    return table
+
+
+def _probe_value(torch, ctype, dtypes):
+    """按 C 类型造一个探针实参。造不出来就抛 KeyError，由调用方降级为「待定」。"""
+    if ctype == "aclTensor":
+        name = next((PROBE_TORCH_DTYPE[d] for d in dtypes
+                     if d in PROBE_TORCH_DTYPE), "float32")
+        dtype = getattr(torch, name)
+        if dtype == torch.bool:
+            return torch.zeros(3, 3, dtype=dtype)
+        if not dtype.is_floating_point and not dtype.is_complex:
+            return torch.ones(3, 3, dtype=dtype)
+        return torch.rand(3, 3).to(dtype)
+    if ctype == "aclTensorList":
+        return [torch.rand(3, 3)]
+    if ctype in {"aclIntArray", "aclBoolArray", "aclFloatArray"}:
+        return [0]
+    if ctype == "aclScalar":
+        return 0.0
+    if ctype in {"int64_t", "int32_t", "int", "uint64_t", "uint32_t", "int16_t"}:
+        return 0
+    if ctype == "bool":
+        return False
+    if ctype in {"float", "double"}:
+        return 0.0
+    raise KeyError(ctype)
+
+
+def _probe_baseline(facts):
+    """判定要不要写 CPU 执行器。返回 (结论, 说明)。
+
+    两条判据，第一条静态、第二条实测：
+
+    1. 多输出算子必写——torch 返回具名元组，ATK 要普通元组才能拆成多个输出
+       张量（`atk/tasks/api_execute/aclnn_base_api.py`）。
+    2. 其余算子按 signature 的 C 类型造一组实参，真的 eval 一次基线。
+       `TypeError` 就是 ATK 默认的 `eval(name)(*args)` 调不动它。
+
+    探针只验**类型形态**，不验 dtype 支持面，也不验算得对不对。
+    非 TypeError 的异常一律报「待定」，因为多半是探针入参取值不合适，
+    不能据此下结论。
+    """
+    if (facts.get("output") or {}).get("kind") == "multi":
+        return "需要", "多输出算子：torch 返回具名元组，ATK 要普通元组才能拆开"
+
+    # 装了 torch_npu 的机器上，没 source CANN 时 `import torch` 会去自动加载
+    # torch_npu 后端并抛 RuntimeError（不是 ImportError）。生成侧只要 CPU 版
+    # torch，关掉自动加载即可，不该因此要求 CANN 环境。
+    os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+    try:
+        import torch  # noqa: F401
+    except Exception as exc:  # noqa: BLE001  装没装、装坏没坏都只降级不中断
+        return "待定", f"import torch 失败（{type(exc).__name__}：{exc}），探针跑不了"
+
+    baseline = facts.get("baseline", "")
+    ctypes_by_name = _parse_c_params((facts.get("signature") or {}).get("text", ""))
+    args = []
+    for param in facts.get("params", []):
+        if param.get("role") != "input":
+            continue
+        name = param.get("name", "")
+        ctype = ctypes_by_name.get(name)
+        if ctype is None:
+            return "待定", f"signature 里找不到参数 {name!r}，两者对不上，探针跳过"
+        try:
+            args.append(_probe_value(torch, ctype, param.get("dtypes", [])))
+        except KeyError:
+            return "待定", f"参数 {name!r} 的 C 类型 {ctype!r} 探针不认识，手动试一次"
+
+    call = f"{baseline}({', '.join(type(a).__name__ for a in args)})"
+    try:
+        eval(baseline)(*args)  # noqa: S307  探针，baseline 已校验为 torch.*
+    except TypeError as exc:
+        return "需要", f"{call} 报 TypeError：{exc}"
+    except Exception as exc:  # noqa: BLE001  非类型问题不下结论
+        return "待定", f"{call} 报 {type(exc).__name__}：{exc}。多半是探针取值不合适，手动试一次。"
+    return "不需要", f"{call} 直接跑通，ATK 默认执行器够用"
 
 
 def main():
@@ -220,6 +352,16 @@ def main():
     print(f"秩        {facts['shape']['rank'][0]}–{facts['shape']['rank'][1]}")
     print(f"约束      {len(facts['constraints'])} 条")
     print(f"性能      {facts['performance']['kind']}")
+
+    verdict, detail = _probe_baseline(facts)
+    print(f"\nCPU 执行器  {verdict}")
+    print(f"           {detail}")
+    if verdict == "需要":
+        print("           写法见 references/plugin-authoring.md「执行器」，"
+              "YAML 里接 api_type: function_<op>_cpu")
+    elif verdict == "待定":
+        print("           探针没结论，按 plugin-authoring.md 的判据表自己判一次")
+
     if inferred:
         print(f"\n推断项    {'、'.join(inferred)} —— 这些没有文档依据，报告里要单列。")
     return 0

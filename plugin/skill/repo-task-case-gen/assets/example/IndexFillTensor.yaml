@@ -7,6 +7,13 @@ aclnn_name: IndexFillTensor
 generate: IndexFillTensor_constraint
 dtype_numbers: 20
 extra_numbers: 0
+size_distributions:
+  - values: [[0, 0.03125]]
+    ratio: 0.4
+  - values: [[0.03125, 2]]
+    ratio: 0.3
+  - values: [[2, 16]]
+    ratio: 0.3
 standard:
   acc: default
   perf: not_key
@@ -18,13 +25,15 @@ inputs:
       values: [fp16, fp32, fp64, int8, uint8, int16, int32, int64, bool, bf16]
     ranges:
       valid:
-        values: [[-5, 5]]
+        values: [[-5, 5], [0, 127], [-128, 127]]
     shapes:
       dim_numbers:
         values: [1, 2, 3, 4]
       dim_values:
-        values: [1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257]
-      max_length: 262144
+        values: [1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129,
+                 255, 256, 257, 511, 512, 513, 1023, 1024,
+                 4095, 4096, 16384, 65536, 262144, 1048576]
+      max_length: 2097152
   - name: null
     type: attr
     required: true
