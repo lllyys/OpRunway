@@ -85,6 +85,25 @@ GPU 基线按 `PERF_KEY` 匹配：整数文本按 int 比较，其他值按原�
 summary 写
 `scope_caveat=true`，但不改变基础状态或退出码。依据：项目契约。
 
+## 逐例状态与 verdict
+
+每个用例先落一个 `status`，再由 `status` 派生对外的 `verdict`。`status` 只取下表七个值，
+依据来自 `verify_performance.py`：
+
+| status | 触发 | 计分归属 |
+| --- | --- | --- |
+| `PASS` | `ratio >= threshold`，用例可比较且达标 | 通过 |
+| `FAIL` | `ratio < threshold`，用例可比较但不达标 | 数值失败 |
+| `NO_REF` | 基线无匹配行或该行 `gpu_ms` 为空 | 只采集不评判 |
+| `NO_KERNEL` | op_summary 无 kernel 行 | 证据不足 |
+| `CRASH` | 采样子进程异常或非 0 退出 | 证据不足 |
+| `TIMEOUT` | 采样子进程超过超时 | 证据不足 |
+| `MISSING` | 部署 CSV 里的期望用例不在 `--gtest_list_tests` | 证据不足 |
+
+`verdict` 默认等于 `status`，只有两处不同：warm-up 非 0 退出时 `status=FAIL`、
+`verdict=FAIL(warmup)`；基线 `timing_scope` 不是 `kernel` 时 `verdict` 追加 `(scope caveat)`。
+证据不足（`NO_KERNEL/CRASH/TIMEOUT/MISSING` 任一非零）优先于数值失败决定 summary 状态。
+
 ## 结果与退出码
 
 结果原子写入 `results/performance_<run_id>.json`。依据：项目策略。

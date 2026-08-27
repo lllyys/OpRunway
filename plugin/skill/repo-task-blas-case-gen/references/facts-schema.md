@@ -53,7 +53,7 @@ python3 <skill>/scripts/package.py check --facts gen_csv.py --print-header
 | `family` | 是 | 标识符，同时是 `test/<family>/` 与 `blas/<family>/` 的目录名 |
 | `symbol` | 是 | 公开 C 函数名 |
 | `returns` | 是 | 非空返回类型字符串 |
-| `params` | 是 | 按公开签名顺序排列的非空参数列表 |
+| `params` | 是 | 按任务书 C 原型的顺序排列的非空参数列表 |
 | `constraints` | 否 | 表达式字符串列表，默认 `[]` |
 | `golden` | 是 | `{kind, symbol?, formula?}` |
 | `verify` | 是 | 不重复的非空校验策略列表 |
@@ -63,8 +63,8 @@ python3 <skill>/scripts/package.py check --facts gen_csv.py --print-header
 | `cases` | 否 | 用例轴和单行 footprint 上限的可选覆盖 |
 | `sources` | 是 | 自由的 str→str 字典；至少含 `params` |
 
-`sources` 的键由事实类别命名，值必须是非空字符串。`params` 可写任务书位置、
-`header:include/cann_ops_blas.h`，或用 `inferred:<模板符号>` 标记同族或同前缀推断。
+`sources` 的键由事实类别命名，值必须是非空字符串。`params` 写任务书里参数表或签名
+所在的位置，例如 `任务书 §2.3`；case-gen 只从任务书取事实，不写 header/inferred 来源。
 
 `golden.kind` 只能是 `cblas`、`lapacke`、`loop` 或 `composed`。前三种必须给
 `symbol`，`composed` 必须给 `formula`。
@@ -113,10 +113,10 @@ msprof kernel 采集、统计、scope caveat 与退出码见
 
 | kind | 含义 | 值的权威来源 |
 | --- | --- | --- |
-| `op` | 转置、填充、左右侧等操作选择 | 任务书或公开签名；已知 ctype 受 CSV 词表约束 |
+| `op` | 转置、填充、左右侧等操作选择 | 任务书；已知 ctype 受 CSV 词表约束 |
 | `dtype` | 决定 buffer 或标量存储 dtype | `csv_loader.h` 的 DataType 解析表 |
 | `compute` | 决定计算或 execution 精度 | `csv_loader.h` 的 ComputeType/DataType 解析表 |
-| `algo` | 选择公开算法枚举，不决定 dtype | 任务书、公开头文件或 README |
+| `algo` | 选择公开算法枚举，不决定 dtype | 任务书 |
 
 `scalar` 和 `inout_scalar` 的 `values` 是可选非空列表；实数 dtype 的元素是 int
 或 float，复数 dtype 的元素是 `[re, im]`。
@@ -153,7 +153,7 @@ producer 负责说明输入整数数组由哪个前置调用产生。
 已知 aclblas enum 的 `ctype` 与 `values` 必须符合
 [aclblas-conventions.md](aclblas-conventions.md) 的短记号表。
 `enum_kind=dtype` 的 ctype 必须是 `aclDataType`；`enum_kind=compute` 通常使用
-`aclblasComputeType_t`，头文件明确把
+`aclblasComputeType_t`，任务书明确把
 `executionType` 声明为 `aclDataType` 的接口保留该 ctype。
 
 ## layout 双向引用
@@ -333,7 +333,7 @@ strided vector 与 packed matrix 已支持 footprint 和最小 stride。遇到�
 
 ### `params[0] 必须是 role=handle`
 
-按公开签名把 `aclblasHandle_t handle` 放到 params 首位。
+按任务书 C 原型把 `aclblasHandle_t handle` 放到 params 首位。
 不要省略 handle，也不要把它
 写成 enum 或普通指针参数。
 
@@ -388,7 +388,7 @@ set 会直接投影到 CSV；保留其他未知列只会产生没有生效的伪
 
 ### `params 至少要有一个输出或 inout 参数`
 
-按公开签名把结果参数标成输出角色或 `dir=out/inout`。
+按任务书 C 原型把结果参数标成输出角色或 `dir=out/inout`。
 无可观察结果就无法做精度验证，
 即使调用返回成功也不构成有效测试。
 

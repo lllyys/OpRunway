@@ -552,7 +552,7 @@ def _check_param_shape(problems, index, param):
             _err(
                 problems,
                 f"{where} 的 enum_kind=compute 时 ctype 必须是 aclblasComputeType_t；"
-                "只有头文件声明为 aclDataType 的 executionType 兼容该 ctype",
+                "只有任务书声明为 aclDataType 的 executionType 兼容该 ctype",
             )
     elif role == "layout":
         if param.get("kind") not in LAYOUT_KINDS:

@@ -2,6 +2,12 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-08-27 · case-gen 输入契约收敛为「运行时只任务书」：** references/SKILL 去掉"读头文件/代码推断接口事实"的说法（enum/fill/status 约定表仍是建 skill 时的 authoring 出处）；
+  停止条件与 family 塌成单一通则、删 Ex 特判；撤掉 package.py 的 sources 机械门（自由出处不上
+  机械裁决）、删多余 authoring 元声明；sasum 示例按其任务书重建（§3.5 的 25 个 n、incx=1、
+  fill 限 [-10,10]、补 perf 采集 NO_REF、null/edge 全删、constraints 补上下界）；删无任务书的
+  srotm 示例、evals 去 AxpyEx 头文件用例。四轮 Codex 六维复核收敛（简单性/复杂度 4.8/5），净减机制。
+
 - **2026-08-26 · accept 运行链真机验证（走1）：** A1 env 正确检出 A3 工具链;
   精度 harness（list→名字映射→gtest json→结果 JSON）与性能 msprof 流水线（warmup + 5 次
   collect+export + 解析 + 中位数）在真 sger build 上跑通,kernel_us 可复现（spread 1.3–2.4%,

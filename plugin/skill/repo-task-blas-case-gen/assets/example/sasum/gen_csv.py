@@ -8,21 +8,30 @@ FACTS = {
   "params": [
     {"name": "handle", "ctype": "aclblasHandle_t", "role": "handle"},
     {"name": "n", "ctype": "int", "role": "dim"},
-    {"name": "x", "ctype": "const float*", "role": "vector", "dtype": "float32", "dir": "in", "len": "n", "inc": "incx", "nullable": True},
+    {"name": "x", "ctype": "const float*", "role": "vector", "dtype": "float32", "dir": "in", "len": "n", "inc": "incx"},
     {"name": "incx", "ctype": "int", "role": "layout", "kind": "inc", "of": "x"},
-    {"name": "result", "ctype": "float*", "role": "out_scalar", "dtype": "float32", "mem": "device", "nullable": True},
+    {"name": "result", "ctype": "float*", "role": "out_scalar", "dtype": "float32", "mem": "device"},
   ],
-  "constraints": ["n >= 0"],
+  "constraints": ["n >= 1", "n <= 134217728", "incx == 1"],
   "golden": {"kind": "cblas", "symbol": "cblas_sasum"},
   "verify": ["scalar"],
-  "edge_cases": [
-    {"name": "n0", "set": {"n": 0}, "expect": "ACLBLAS_STATUS_SUCCESS", "source": "readme:blas/asum 约束说明"},
-    {"name": "incx0", "set": {"incx": 0}, "expect": "ACLBLAS_STATUS_SUCCESS", "source": "readme:blas/asum 约束说明"},
-    {"name": "null_x", "set": {"nullX": 1}, "expect": "ACLBLAS_STATUS_INVALID_VALUE", "source": "test/asum/sasum arch35 CSV"},
-    {"name": "null_result", "set": {"nullResult": 1}, "expect": "ACLBLAS_STATUS_INVALID_VALUE", "source": "test/asum/sasum arch35 CSV"},
-    {"name": "n0_null_x", "set": {"n": 0, "nullX": 1}, "expect": "ACLBLAS_STATUS_SUCCESS", "source": "test/asum/sasum arch35 CSV"},
-  ],
-  "sources": {"params": "taskdoc:§2.3/§2.4"},
+  "edge_cases": [],
+  "cases": {
+    "vec_dim_tiers": [1, 2, 3, 4, 5, 7, 8, 9, 16, 17, 32, 33, 64, 100, 128, 256, 512, 1000, 1024, 8192, 10000, 65536, 1048576, 16777216, 134217728],
+    "inc_tiers": [1],
+    "fill_tiers": ["RANDOM_NORM_10", "VALUE_NORM_0", "VALUE_NORM_2.0"],
+  },
+  "perf": {
+    "key": ["n"], "sweep": False,
+    "rows": [{"n": 1}, {"n": 2}, {"n": 3}, {"n": 4}, {"n": 5}, {"n": 7}, {"n": 8}, {"n": 9}, {"n": 16}, {"n": 17}, {"n": 32}, {"n": 33}, {"n": 64}, {"n": 100}, {"n": 128}, {"n": 256}, {"n": 512}, {"n": 1000}, {"n": 1024}, {"n": 8192}, {"n": 10000}, {"n": 65536}, {"n": 1048576}, {"n": 16777216}, {"n": 134217728}],
+    "meta": {"source": "taskdoc:§3.1 无 GPU 对标，在 §3.5 的 n 上采 device 耗时上报"},
+  },
+  "sources": {
+    "params": "taskdoc:§2.3/§2.4",
+    "cases": "taskdoc:§3.5 n 集、§2.4 incx=1、§3.5 fill（[-10,10] 均匀/全零/常数 2.0）",
+    "fill_boundary": "taskdoc:§3.5 全负与有界交替符号图样超出 fill.h 词表，记为能力边界",
+    "perf": "taskdoc:§3.1/§3.5 无 GPU 基线，NO_REF 只采集",
+  },
 }
 # ===== FACTS 区结束 =====
 # ===== 通用代码区（由 repo-task-blas-case-gen 渲染，禁止修改）=====

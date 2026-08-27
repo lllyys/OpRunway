@@ -3,5 +3,30 @@
 # library=unspecified
 # warmup=unspecified
 # statistic=unspecified
-# source=unspecified
-id,gpu_ms
+# source=taskdoc:§3.1 无 GPU 对标，在 §3.5 的 n 上采 device 耗时上报
+id,n,gpu_ms
+sasum-base-001,1,
+sasum-base-002,2,
+sasum-base-003,3,
+sasum-base-004,4,
+sasum-base-005,5,
+sasum-base-006,7,
+sasum-base-007,8,
+sasum-base-008,9,
+sasum-base-009,16,
+sasum-base-010,17,
+sasum-base-011,32,
+sasum-base-012,33,
+sasum-base-013,64,
+sasum-base-014,100,
+sasum-base-015,128,
+sasum-base-016,256,
+sasum-base-017,512,
+sasum-base-018,1000,
+sasum-base-019,1024,
+sasum-base-020,8192,
+sasum-base-021,10000,
+sasum-base-022,65536,
+sasum-base-023,1048576,
+sasum-base-024,16777216,
+sasum-base-025,134217728,

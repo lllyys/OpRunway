@@ -10,6 +10,9 @@
 | schema_version | 1 |
 | generator_version | 1 |
 | sources.params | taskdoc:§2.3/§2.4 |
+| sources.cases | taskdoc:§3.5 n 集、§2.4 incx=1、§3.5 fill（[-10,10] 均匀/全零/常数 2.0） |
+| sources.fill_boundary | taskdoc:§3.5 全负与有界交替符号图样超出 fill.h 词表，记为能力边界 |
+| sources.perf | taskdoc:§3.1/§3.5 无 GPU 基线，NO_REF 只采集 |
 
 ## 接口签名
 
@@ -46,16 +49,13 @@ aclblasStatus_t aclblasSasum(
 | x_fill | x | 见下方 fill 词表 | x（in）的数据填充方式 |
 | incx | incx | 整数 | x 的步长 |
 | expect_result | 控制列 | 见下方状态词表 | 使用 csv_loader.h parseStatus 支持的全名 |
-| nullX | x | 0, 1 | 1 时传 nullptr 且不分配该参数 |
-| nullResult | result | 0, 1 | 1 时传 nullptr 且不分配该参数 |
 | random_seed | 控制列 | 正整数 | 各缓冲依次使用 seed、seed+1……派生随机填充 |
 
 fill 词表（语法见 `fill.h` 的 `METHOD_PATTERN_VAL`）：
 
-- `RANDOM_NORM_1`
+- `RANDOM_NORM_10`
 - `VALUE_NORM_0`
-- `RANDOM_ALTER`
-- `RANDOM_EXTREME`
+- `VALUE_NORM_2.0`
 
 `expect_result` 状态词表（`parseStatus` 全名）：
 
@@ -75,7 +75,7 @@ fill 词表（语法见 `fill.h` 的 `METHOD_PATTERN_VAL`）：
 完整表头（各行直接拼接）：
 
 ```text
-case_name,description,n,x_fill,incx,expect_result,nullX,nullResult,random_seed
+case_name,description,n,x_fill,incx,expect_result,random_seed
 ```
 
 ## param.h 读列要求
@@ -121,11 +121,11 @@ caseName = require("case_name");
 | 块 | 条数 | 规则 |
 | --- | --- | --- |
 | L0 | 2 | op enum 全组合与 4/8 快速覆盖 |
-| PW | 60 | 确定性 pairwise 且通过 constraints/footprint |
-| ED | 5 | 逐条 edge_cases.set 物化 |
-| PF | 0 | perf.rows 与可选 sweep |
+| PW | 75 | 确定性 pairwise 且通过 constraints/footprint |
+| ED | 0 | 逐条 edge_cases.set 物化 |
+| PF | 25 | perf.rows 与可选 sweep |
 
-pairs 覆盖 98/98，infeasible 0 对。
+pairs 覆盖 75/75，infeasible 0 对。
 精度集 = 非 `TC_PF_` 前缀。开发者自加的 `TEST_F` 不在验收集内。
 
 ## 精度验收
@@ -158,7 +158,7 @@ python3 verify_performance.py --repo <ops-blas-root> --soc <soc> --device 0
 `Task Duration(us)` 求和。最终 `kernel_us` 取五次和的中位数，`spread` 为
 `(max-min)/median`。
 
-性能键为 `无`。`npu_ms = kernel_us/1000`，有 GPU 基线时计算
+性能键为 `n`。`npu_ms = kernel_us/1000`，有 GPU 基线时计算
 `ratio = gpu_ms/npu_ms`；`ratio >= 0.8` 才判 PASS。无匹配基线时记
 `NO_REF`，只采集不评判；某次没有 kernel 行时记 `NO_KERNEL`，不能把耗时写成 0。
 
@@ -183,4 +183,43 @@ skill 的 `references/perf-protocol.md`。
 
 ## GPU 基线
 
-本算子无 GPU 基线，性能只采集不评判。
+元数据：
+
+| 键 | 值 |
+| --- | --- |
+| timing_scope | unspecified |
+| device | unspecified |
+| library | unspecified |
+| warmup | unspecified |
+| statistic | unspecified |
+| source | taskdoc:§3.1 无 GPU 对标，在 §3.5 的 n 上采 device 耗时上报 |
+
+基线行：
+
+| id | n | gpu_ms |
+| --- | --- | --- |
+| sasum-base-001 | 1 | 只采集不评判 |
+| sasum-base-002 | 2 | 只采集不评判 |
+| sasum-base-003 | 3 | 只采集不评判 |
+| sasum-base-004 | 4 | 只采集不评判 |
+| sasum-base-005 | 5 | 只采集不评判 |
+| sasum-base-006 | 7 | 只采集不评判 |
+| sasum-base-007 | 8 | 只采集不评判 |
+| sasum-base-008 | 9 | 只采集不评判 |
+| sasum-base-009 | 16 | 只采集不评判 |
+| sasum-base-010 | 17 | 只采集不评判 |
+| sasum-base-011 | 32 | 只采集不评判 |
+| sasum-base-012 | 33 | 只采集不评判 |
+| sasum-base-013 | 64 | 只采集不评判 |
+| sasum-base-014 | 100 | 只采集不评判 |
+| sasum-base-015 | 128 | 只采集不评判 |
+| sasum-base-016 | 256 | 只采集不评判 |
+| sasum-base-017 | 512 | 只采集不评判 |
+| sasum-base-018 | 1000 | 只采集不评判 |
+| sasum-base-019 | 1024 | 只采集不评判 |
+| sasum-base-020 | 8192 | 只采集不评判 |
+| sasum-base-021 | 10000 | 只采集不评判 |
+| sasum-base-022 | 65536 | 只采集不评判 |
+| sasum-base-023 | 1048576 | 只采集不评判 |
+| sasum-base-024 | 16777216 | 只采集不评判 |
+| sasum-base-025 | 134217728 | 只采集不评判 |

@@ -37,8 +37,10 @@ description: >-
 
 ## 前置检查
 
-`family` 优先取头文件同族目录名；没有头文件时，取算子名去掉 `s/d/c/z` 类型前缀后的
-名称。生成侧只需要 Python 3.8 或更高，不需要 NPU、CANN 或 ATK。S0 先运行：
+`family` 优先取任务书写明的工程族名；任务书没写时，对符合 typed-BLAS 命名（`s/d/c/z`
+类型前缀）的算子去前缀，不符合该模式或有歧义时停止。case-gen 的输入只有任务书，
+接口事实全部取自任务书。生成侧只需要 Python 3.8 或更高，
+不需要 NPU、CANN 或 ATK。S0 先运行：
 
 ```bash
 mkdir -p <工作目录> && cd <工作目录> && <python> --version
@@ -112,19 +114,19 @@ check 逐行校验 CSV 与其余模板投影，并与重新生成的结果逐字
 
 出现以下任一情形就停止，并报告阶段、缺失事实与解除阻塞所需材料：
 
-- 任务书没有 C 原型，且头文件里没有同族或同前缀接口可供推断，无法确认参数顺序与类型。
+- 任务书不足以唯一确定完成本任务所需的任一 FACTS——签名（symbol/returns/参数顺序/ctype）、
+  family、golden、verify，以及任务书要求的 cases、constraints、perf——无法填。
 - 事实表 FACTS 出现 role 和属性词表无法表达的“未分类参数”。报告能力边界，不把它
   硬塞进相近 role。
 
 ## 参考资料
 
 - [facts-schema.md](references/facts-schema.md) — 事实表 FACTS 字段、引用、表达式与投影规则
-- [aclblas-conventions.md](references/aclblas-conventions.md) — enum、状态码与参数推断约定
+- [aclblas-conventions.md](references/aclblas-conventions.md) — enum、状态码与参数约定
 - [case-strategy.md](references/case-strategy.md) — 覆盖轴、2^n±1 边界、规模与必构造场景
 - [csv-and-blocks.md](references/csv-and-blocks.md) — 轴、行物化、四块、pairwise 与包级校验
 - [readme-contract.md](references/readme-contract.md) — README 章节来源与开发者落地约束
 - [perf-protocol.md](references/perf-protocol.md) — msprof kernel 采集、比对与证据协议
 - `assets/example/cherk/` — 矩阵乘任务书提取的完整示例（六个文件）
-- `assets/example/sasum/` — ops-blas README 提取的示例，不代表存在 sasum 任务书
-- `assets/example/srotm/` — 公开头文件提取的示例
+- `assets/example/sasum/` — 从 sasum 任务书提取的完整示例（六个文件）
 
