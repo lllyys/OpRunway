@@ -29,9 +29,12 @@ pairwise 配对。
 | ld/stride | `<name>` | `min,pad` |
 | inc | `<name>` | `1,3` |
 | 标量 | `<name>` | 声明的 values，否则是实数或复数标量 tiers |
-| 无 producer 的输入 buffer | `<name>_fill` | fill 词表 |
+| 无 producer 的输入 buffer | `<name 小写>_fill` | fill 词表 |
 | 有 conditioning 的 matrix | `<name>_matrix_type` | conditioning 列表 |
 | 输入 fixed_vector | `<name>` | samples 的下标 |
+
+fill 轴的列名取参数名的小写，`A` 的填充列是 `a_fill`，与开发者 `param.h` 读列的写法一致；
+`_matrix_type`、`_re/_im` 与 `null<Name>` 仍用原参数名。
 
 `cases.dim_tiers`、`vec_dim_tiers`、`batch_tiers`、`inc_tiers` 与 `fill_tiers`
 可覆盖对应默认轴。

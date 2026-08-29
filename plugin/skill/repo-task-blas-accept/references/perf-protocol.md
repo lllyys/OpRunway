@@ -14,11 +14,16 @@
 
 | 规则 | 规定 | 依据 |
 | --- | --- | --- |
-| 性能集 | 部署 CSV 中 `TC_PF_` 前缀的行 | 依据：项目策略 |
+| 性能期望集 | 任务包 CSV 中 `TC_PF_` 前缀且能配到非空 `gpu_ms` 基线的行 | 依据：项目策略 |
+| 无基线的行 | 不跑，只把用例名写进 JSON 的 `ignored_no_ref` | 依据：项目策略 |
 | 进程隔离 | 每个 case 的 warm-up 与每次采样都是独立进程 | 依据：项目策略 |
 | 名字映射 | `--gtest_list_tests` 建 case_name 到完整名的映射 | 依据：项目策略 |
 | 计时口径 | 只使用 msprof 的 kernel task duration | 依据：CANN 指南，待核 |
 | 排除口径 | GTest 的 ms 含 host 准备与 golden，不作性能依据 | 依据：项目策略 |
+
+`TC_PF_` 是 `case_name` 前缀，标记性能用例；其余 `TC_` 用例是精度用例。**期望集**是本轮
+必须出结果的用例名集合，基线按**基线键**（`gpu_baseline.csv` 表头去掉 `id`、`gpu_ms`
+后与 CSV 共有且非空的列）匹配。
 
 ## 执行序列
 
@@ -30,8 +35,11 @@
    `msprof --application="<bin> --gtest_filter=<完整名>" --output=<目录>` 只产
    `task_time_*.csv` 与 sqlite，随后 `msprof --export=on --output=<目录>` 才生成
    `op_summary_*.csv`。依据：实测（A3，CANN 9.0.1，ascend910_93）。
-5. `--repeats` 可覆盖五次采样数；每次仍保持进程隔离。依据：项目策略。
-6. 原始目录默认保留，便于复核；`--keep-prof` 预留关闭策略。依据：项目策略。
+5. 每次采到的 kernel 总时长除以 `--calls-per-case N`（默认 1）才记为本次样本。
+   N 是 harness 一条 GTest 用例调用被测接口的次数：按 README 契约写的新 harness 只调一次，
+   填 1；固定先 warm-up 一次再调一次的旧 harness 填 2。依据：项目策略。
+6. `--repeats` 可覆盖五次采样数；每次仍保持进程隔离。依据：项目策略。
+7. 原始目录默认保留，便于复核；`--keep-prof` 预留关闭策略。依据：项目策略。
 
 msprof 查找顺序如下，均要求文件存在且可执行。依据：项目策略。
 
@@ -67,17 +75,19 @@ msprof 查找顺序如下，均要求文件存在且可执行。依据：项目�
 
 | 项 | 计算 | 依据 |
 | --- | --- | --- |
-| `samples` | 保存每次采样的 kernel duration 总和 | 依据：项目策略 |
+| `samples` | 每次采样的 kernel duration 总和 ÷ `calls_per_case` | 依据：项目策略 |
 | `kernel_us` | 所有 samples 的中位数 | 依据：项目策略 |
 | `spread` | `(max(samples)-min(samples))/median` | 依据：项目策略 |
 | `npu_ms` | `kernel_us/1000` | 依据：单位换算 |
-| `ratio` | `gpu_ms/npu_ms` | 依据：项目策略；任务书可覆盖 |
-| PASS | `ratio >= perf.threshold` | 依据：项目策略；任务书可覆盖 |
+| `ratio` | `gpu_ms/npu_ms` | 依据：项目策略 |
+| PASS | `ratio >= 0.8` | 依据：项目策略 |
 
-`perf.threshold` 默认 `0.8` 是项目策略，不是外部事实；FACTS 可按任务书覆盖。
+阈值固定 `0.8`，由 accept 渲染进脚本并写入 `manifest.json` 的 `threshold`；
+它是项目策略，不是外部事实，任务包不能覆盖。
 
-GPU 基线按 `PERF_KEY` 匹配：整数文本按 int 比较，其他值按原字符串比较。
-没有匹配行或该行 `gpu_ms` 为空时记 `NO_REF`，只采集不评判。依据：项目策略。
+GPU 基线按基线键匹配：整数文本按 int 比较，其他值按原字符串比较。期望集里每行都有基线，
+所以逐例 `NO_REF` 正常不会出现；期望集为空（`TC_PF_` 全无基线，或被 `--case/--filter`
+收窄成空）时 summary 记 `NO_REF`，退出 0。依据：项目策略。
 
 基线 `timing_scope` 不是 `kernel` 时，每例 verdict 加 `(scope caveat)`。
 summary 写
@@ -88,16 +98,16 @@ summary 写
 结果原子写入 `results/performance_<run_id>.json`。依据：项目策略。
 临时文件成功关闭后才替换目标文件。
 
-每例除身份字段外，还记录 `kernel_us`、`samples`、`launches`、`gpu_ms`、`ratio`、
-`spread`、`status`、`verdict` 与诊断消息。
-这些字段共同保留原始样本、统计值和最终判定。依据：项目契约。
+顶层记录 `calls_per_case` 与 `ignored_no_ref`（无基线被忽略的用例名）。每例除身份字段外，
+还记录 `kernel_us`、`samples`、`launches`、`gpu_ms`、`ratio`、`spread`、`status`、`verdict`
+与诊断消息。这些字段共同保留原始样本、统计值和最终判定。依据：项目契约。
 
 summary 记录计数、`status`、`timing_scope`、`threshold` 与 `scope_caveat`。
 `status` 只取 `通过/不通过/NO_REF/证据不足`。依据：项目契约。
 
 | 退出码 | 条件 | 依据 |
 | --- | --- | --- |
-| 0 | 无失败和证据缺口；有 NO_REF 时 summary 为 NO_REF | 依据：项目策略 |
+| 0 | 无失败和证据缺口；期望集为空时 summary 为 NO_REF | 依据：项目策略 |
 | 1 | 至少一个可比较用例 FAIL，且没有证据缺口 | 依据：项目策略 |
 | 2 | 任一 NO_KERNEL、CRASH、TIMEOUT 或 MISSING | 依据：项目策略 |
 | 3 | CSV、构建、二进制、列表、基线或 msprof 环境问题 | 依据：项目策略 |
@@ -107,9 +117,10 @@ summary 记录计数、`status`、`timing_scope`、`threshold` 与 `scope_caveat
 ## 验收消费规则
 
 `accept.py verdict` 不重算 kernel 耗时或比值，但会重算 cases 状态计数，并校验期望集、
-run-id、op、repo、soc、device、CSV SHA、binary SHA、summary 与退出码。
-`NO_REF` 不能证明性能达标，因此总体结论为 `证据不足`；部署 CSV 没有 `TC_PF_` 行时不要求
-性能 JSON。
+run-id、op、family、repo、soc、device、summary 与退出码，以及 A3/A4 两份 JSON 的
+`csv_sha256`、`binary_sha256` 相同。期望集由 verdict 从运行时包的 CSV 与规范化基线重新算出，
+与脚本口径一致。`NO_REF` 不能证明性能达标，总体结论为 `证据不足`；
+`check.json` 的 `checks.perf.comparable_pf` 为 0 时不跑 A4、不要求性能 JSON，性能记 `通过`。
 
 ## 已实测与待实测边界
 

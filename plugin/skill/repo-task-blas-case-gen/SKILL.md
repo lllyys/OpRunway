@@ -95,7 +95,8 @@ cd <工作目录> && <python> <skill>/scripts/package.py render --facts gen_csv.
 
 render 先重做事实表和通用代码区校验，再在工作目录独立运行
 `python3 gen_csv.py`。成功时打印 `<op>_test.csv: N rows` 与各文件路径，退出码为 0。
-不得手写这些文件绕过渲染器。
+不得手写这些文件绕过渲染器。渲染出的 CSV 里，输入 buffer 的填充列 `*_fill` 用小写参数名
+（`A` 对应 `a_fill`），列名规则见 [csv-and-blocks.md](references/csv-and-blocks.md)。
 
 ### S3 校验
 

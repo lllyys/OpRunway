@@ -319,7 +319,7 @@ strided vector 与 packed matrix 已支持 footprint 和最小 stride。遇到�
 | scalar/inout_scalar，其他固定 dtype | `<name>` |
 | scalar/inout_scalar，dtype_from 的任一 `scalar_dtype` 为复数 | `<name>_re, <name>_im` |
 | scalar/inout_scalar，dtype_from 的 `scalar_dtype` 全为实数 | `<name>` |
-| vector/matrix，方向为 in/inout 且没有 producer | `<name>_fill` |
+| vector/matrix，方向为 in/inout 且没有 producer | `<name 小写>_fill`，如 `A` 投影 `a_fill` |
 | 上一行的 matrix 有 conditioning | 再加 `<name>_matrix_type` |
 | vector/matrix 有 producer | 不投影 |
 | fixed_vector，方向为 in/inout | `<name>0` 到 `<name>{len-1}` |

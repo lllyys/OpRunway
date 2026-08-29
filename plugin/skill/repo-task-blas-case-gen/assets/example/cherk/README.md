@@ -55,10 +55,10 @@ aclblasStatus_t aclblasCherk(
 | n | n | 整数 | 维度 |
 | k | k | 整数 | 维度 |
 | alpha | alpha | 实数 | 实数标量 |
-| A_fill | A | 见下方 fill 词表 | A（in）的数据填充方式 |
+| a_fill | A | 见下方 fill 词表 | A（in）的数据填充方式 |
 | lda | lda | 整数 | A 的前导维度，≥ max(1, rows) |
 | beta | beta | 实数 | 实数标量 |
-| C_fill | C | 见下方 fill 词表 | C（inout）的数据填充方式 |
+| c_fill | C | 见下方 fill 词表 | C（inout）的数据填充方式 |
 | ldc | ldc | 整数 | C 的前导维度，≥ max(1, rows) |
 | expect_result | 控制列 | 见下方状态词表 | 使用 csv_loader.h parseStatus 支持的全名 |
 | nullAlpha | alpha | 0, 1 | 1 时传 nullptr 且不分配该参数 |
@@ -92,7 +92,7 @@ fill 词表（语法见 `fill.h` 的 `METHOD_PATTERN_VAL`）：
 完整表头（各行直接拼接）：
 
 ```text
-case_name,description,uplo,trans,n,k,alpha,A_fill,lda,beta,C_fill,ldc,expect_result,nullAlpha,
+case_name,description,uplo,trans,n,k,alpha,a_fill,lda,beta,c_fill,ldc,expect_result,nullAlpha,
 nullA,nullBeta,nullC,random_seed
 ```
 
@@ -174,10 +174,13 @@ GTest JSON 与构建日志写入 `results/<run_id>/accuracy/`；阶段目录必�
 python3 verify_performance.py --repo <ops-blas-root> --soc <soc> --device 0
 ```
 
-性能集只含部署 CSV 的 `TC_PF_` 行，每例单独执行。每例先直接运行一次 GTest warm-up，
-再独立运行 5 次 msprof；每次把 `AI_CORE/AI_VECTOR_CORE/MIX_AIC/MIX_AIV` 的
-`Task Duration(us)` 求和。最终 `kernel_us` 取五次和的中位数，`spread` 为
-`(max-min)/median`。
+一条 gtest 用例只调用被测接口一次，用例里不自行预热、不重复调用；预热与重复采样由
+`verify_performance.py` 负责。msprof 采到的是整条用例的全部 kernel，多调一次就多算一次。
+
+性能集只含本任务包 CSV 中能配到 GPU 基线的 `TC_PF_` 行，无基线的行不跑、只计数；每例
+单独执行。每例先直接运行一次 GTest warm-up，再独立运行 5 次 msprof；每次把
+`AI_CORE/AI_VECTOR_CORE/MIX_AIC/MIX_AIV` 的 `Task Duration(us)` 求和。最终 `kernel_us`
+取五次和的中位数，`spread` 为 `(max-min)/median`。
 
 性能键为 `n, k, uplo, trans`。`npu_ms = kernel_us/1000`，有 GPU 基线时计算
 `ratio = gpu_ms/npu_ms`；`ratio >= 0.8` 才判 PASS。无匹配基线时记

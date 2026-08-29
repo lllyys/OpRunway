@@ -3,6 +3,7 @@
 ## 目录
 
 - [适用范围](#适用范围)
+- [期望集与调用次数](#期望集与调用次数)
 - [执行序列](#执行序列)
 - [op_summary 解析](#op_summary-解析)
 - [统计与比对](#统计与比对)
@@ -13,13 +14,25 @@
 
 | 规则 | 规定 | 依据 |
 | --- | --- | --- |
-| 性能集 | 部署 CSV 中 `TC_PF_` 前缀的行 | 依据：项目策略 |
+| 性能集 | 任务包 CSV 中能配到非空 `gpu_ms` 基线的 `TC_PF_` 行 | 依据：项目策略 |
 | 进程隔离 | 每个 case 的 warm-up 与每次采样都是独立进程 | 依据：项目策略 |
 | 名字映射 | `--gtest_list_tests` 建 case_name 到完整名的映射 | 依据：项目策略 |
 | 计时口径 | 只使用 msprof 的 kernel task duration | 依据：CANN 指南，待核 |
 | 排除口径 | GTest 的 ms 含 host 准备与 golden，不作性能依据 | 依据：项目策略 |
 
 `TC_PF_` 是性能用例块的前缀；四块命名见 [csv-and-blocks.md](csv-and-blocks.md) 的「四块」。
+
+## 期望集与调用次数
+
+两条规则决定哪些行进入采样、每次采样的时长怎么归一：
+
+1. 性能期望集 = 任务包 `<op>_test.csv` 里能在 `gpu_baseline.csv` 配到非空 `gpu_ms` 的
+   `TC_PF_` 行。配不到基线的 `TC_PF_` 行不跑，只把用例名计入结果 JSON 的
+   `ignored_no_ref`。依据：项目策略。
+2. `--calls-per-case N`（默认 `1`）是 harness 在一条 gtest 用例里调用被测接口的次数。
+   msprof 采到的是整条用例的全部 kernel，每次采样的 kernel 总时长除以 N 才是单次调用耗时；
+   N 写入结果 JSON 的 `calls_per_case`。README 契约要求一条用例只调一次，取默认值；
+   旧 harness 固定预热一次时填 `2`。依据：项目策略。
 
 ## 执行序列
 
@@ -69,7 +82,7 @@ msprof 查找顺序如下，均要求文件存在且可执行。依据：项目�
 
 | 项 | 计算 | 依据 |
 | --- | --- | --- |
-| `samples` | 保存每次采样的 kernel duration 总和 | 依据：项目策略 |
+| `samples` | 每次采样的 kernel duration 总和除以 `--calls-per-case` | 依据：项目策略 |
 | `kernel_us` | 所有 samples 的中位数 | 依据：项目策略 |
 | `spread` | `(max(samples)-min(samples))/median` | 依据：项目策略 |
 | `npu_ms` | `kernel_us/1000` | 依据：单位换算 |

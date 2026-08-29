@@ -19,13 +19,16 @@ ENVIRONMENT_EXIT = 3
 CONTRACT_EXIT = 2
 INSUFFICIENT_EXIT = 2
 FAILURE_EXIT = 1
-PACKAGE_FILES = (
-    "gen_csv.py",
-    "verify_accuracy.py",
-    "verify_performance.py",
-    "README.md",
-    "gpu_baseline.csv",
-)
+# 任务包只需要两件：恰好一个 <op>_test.csv（契约用例集）和 gpu_baseline.csv（GPU 基线）。
+# 其余文件（gen_csv.py、README、包内 verify 脚本）accept 一概不读，量具由 accept 自己渲染。
+RUNTIME_DIR = "runtime"
+PERF_THRESHOLD = 0.8
+# 由 test/frame 基类读取的列，不要求 harness 的 param.h 显式读取。
+BASE_COLUMNS = frozenset({
+    "case_name", "description", "expect_result", "random_seed",
+    "mere_threshold", "mare_multiplier",
+})
+INTEGER_RE = re.compile(r"^[+-]?\d+$")
 ACCURACY_STATUSES = {
     "PASS",
     "FAIL",
@@ -164,16 +167,172 @@ def _load_case_gen():
     return module
 
 
-def _load_package_facts(package):
-    module = _load_case_gen()
-    path = package / "gen_csv.py"
-    if not path.is_file():
-        raise ValueError(f"任务包缺文件：{path.name}")
-    try:
-        result = module.check_package(path, require_rendered=True)
-    except (OSError, UnicodeError, SyntaxError, ValueError) as exc:
-        raise ValueError(f"gen_csv.py 的 FACTS 读不出来：{exc}") from exc
-    return module, result["facts"], result["problems"], result.get("report")
+def _package_csv(package):
+    """任务包里恰好一个 <op>_test.csv；返回 (op, 路径)。"""
+    matches = sorted(Path(package).glob("*_test.csv"))
+    if len(matches) != 1:
+        raise ValueError(f"任务包须恰好含一个 <op>_test.csv，找到 {len(matches)} 个")
+    path = matches[0]
+    return path.name[: -len("_test.csv")], path
+
+
+def _csv_header(path):
+    with Path(path).open(encoding="utf-8", newline="") as stream:
+        for raw in stream:
+            if raw.strip() and not raw.startswith("#"):
+                return next(csv.reader([raw]))
+    raise ValueError(f"{path} 没有表头")
+
+
+def _read_csv_rows(path):
+    header = None
+    rows = []
+    with Path(path).open(encoding="utf-8", newline="") as stream:
+        for raw in stream:
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            values = next(csv.reader([raw]))
+            if header is None:
+                header = values
+                continue
+            rows.append(dict(zip(header, values)))
+    return header or [], rows
+
+
+def _family_from_deployed(repo, deployed):
+    """test/<family>/<op>/<arch>/<op>_test.csv 取 <family>；test/<op>/<arch>/… 时首段就是它。"""
+    parts = deployed.resolve().relative_to((repo / "test").resolve()).parts
+    return parts[0]
+
+
+def _normalize_key_value(value):
+    text = str(value).strip()
+    return int(text) if INTEGER_RE.fullmatch(text) else text
+
+
+def _load_baseline(path, csv_header):
+    """读 gpu_baseline.csv。键列 = 表头去掉 id/gpu_ms，再去掉 CSV 表头没有或整列为空的列。
+
+    返回 (meta 行, 键列, 原始行, {键: gpu_ms})；gpu_ms 为空或非数值记 None（不可比）。
+    """
+    meta = []
+    data = []
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            meta.append(stripped)
+        else:
+            data.append(raw)
+    if not data:
+        raise ValueError("gpu_baseline.csv 缺表头")
+    rows = list(csv.DictReader(data))
+    header = next(csv.reader([data[0]]))
+    keys = [column for column in header if column not in ("id", "gpu_ms")]
+    keys = [
+        column for column in keys
+        if column in csv_header and any((row.get(column) or "").strip() for row in rows)
+    ]
+    references = {}
+    for row in rows:
+        key = tuple(_normalize_key_value(row.get(column, "")) for column in keys)
+        raw_ms = (row.get("gpu_ms") or "").strip()
+        try:
+            references[key] = float(raw_ms) if raw_ms else None
+        except ValueError:
+            references[key] = None
+    return meta, keys, rows, references
+
+
+def _write_normalized_baseline(path, op, meta, keys, rows):
+    """按键列投影后的基线副本，表头严格为 id,<keys>,gpu_ms，供渲染出的性能脚本读取。"""
+    with Path(path).open("w", encoding="utf-8", newline="") as stream:
+        for line in meta:
+            if "=" in line:
+                stream.write(line + "\n")
+        writer = csv.writer(stream, lineterminator="\n")
+        writer.writerow(["id", *keys, "gpu_ms"])
+        for index, row in enumerate(rows, 1):
+            identifier = (row.get("id") or "").strip() or f"{op}-base-{index:03d}"
+            writer.writerow([identifier, *(row.get(k, "") for k in keys), row.get("gpu_ms", "")])
+
+
+def _comparable_pf_names(csv_path, keys, references):
+    """任务包 CSV 里有可比 GPU 基线的 TC_PF_ 用例名（性能期望集），以及没有基线被忽略的名单。"""
+    _, rows = _read_csv_rows(csv_path)
+    expected = []
+    ignored = []
+    for row in rows:
+        name = row.get("case_name", "")
+        if not name.startswith("TC_PF_"):
+            continue
+        key = tuple(_normalize_key_value(row.get(column, "")) for column in keys)
+        if references.get(key) is None:
+            ignored.append(name)
+        else:
+            expected.append(name)
+    return expected, ignored
+
+
+def _harness_sources(harness_dir):
+    return sorted(
+        path for path in Path(harness_dir).rglob("*")
+        if path.suffix in {".h", ".hpp", ".cpp", ".cc"} and path.is_file()
+    )
+
+
+def _column_read_report(csv_header, harness_dir):
+    """CSV 每个非基座列名是否在 harness 源码里以字符串字面量出现（没出现 = ReadMap 静默取默认值）。"""
+    sources = _harness_sources(harness_dir)
+    text = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in sources)
+    not_read = [
+        column for column in csv_header
+        if column not in BASE_COLUMNS and f'"{column}"' not in text
+    ]
+    return {"sources": [str(path) for path in sources], "columns_not_read": not_read}
+
+
+def _harness_files(harness_dir, op):
+    """A2′ 只看三个文件有无：<op>_param.h、<op>_test.cpp、<op>_npu_wrapper.h。"""
+    wanted = {
+        "param.h": f"{op}_param.h",
+        "test.cpp": f"{op}_test.cpp",
+        "npu_wrapper.h": f"{op}_npu_wrapper.h",
+    }
+    return {
+        label: sorted(str(path) for path in Path(harness_dir).rglob(name))
+        for label, name in wanted.items()
+    }
+
+
+def _write_runtime(runtime, package, package_csv, op, family, keys, meta, rows, module,
+                   calls_per_case, threshold):
+    """把任意任务包变成运行时包：CSV 副本、规范化基线、渲染出的两个 verify 脚本、manifest。"""
+    runtime = Path(runtime)
+    runtime.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(package_csv, runtime / package_csv.name)
+    baseline = runtime / "gpu_baseline.csv"
+    _write_normalized_baseline(baseline, op, meta, keys, rows)
+    csv_sha = _sha256(package_csv)
+    scripts = module.render_runtime(op, family, keys, runtime, csv_sha, threshold)
+    manifest = {
+        "op": op,
+        "family": family,
+        "perf_key": keys,
+        "threshold": threshold,
+        "calls_per_case": calls_per_case,
+        "package": str(package),
+        "package_csv": package_csv.name,
+        "package_csv_sha256": csv_sha,
+        "baseline_sha256": _sha256(package / "gpu_baseline.csv"),
+        "normalized_baseline_sha256": _sha256(baseline),
+        "scripts": {path.name: _sha256(path) for path in scripts},
+        "generated_at": _timestamp(),
+    }
+    _atomic_json(runtime / "manifest.json", manifest)
+    return manifest
 
 
 def _evidence_id(payload):
@@ -181,7 +340,7 @@ def _evidence_id(payload):
         key: payload.get(key)
         for key in (
             "command", "package", "repo", "op", "family", "soc", "device",
-            "package_gen_sha256", "package_csv_sha256", "deployed_csv_sha256",
+            "package_csv_sha256", "baseline_sha256", "calls_per_case",
         )
     }
     encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -349,163 +508,6 @@ def command_env(args):
     return exit_code
 
 
-def _strip_comments(source):
-    without_blocks = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
-    return re.sub(r"//[^\n]*", "", without_blocks)
-
-
-def _declaration_from_source(source, symbol):
-    cleaned = _strip_comments(source)
-    pattern = re.compile(
-        rf"(?m)^[ \t]*(?P<returns>[A-Za-z_]\w*(?:[ \t*]+[A-Za-z_]\w*)*)"
-        rf"[ \t]+{re.escape(symbol)}[ \t]*\("
-    )
-    for match in pattern.finditer(cleaned):
-        open_index = cleaned.find("(", match.start())
-        depth = 0
-        close_index = None
-        for index in range(open_index, len(cleaned)):
-            character = cleaned[index]
-            if character == "(":
-                depth += 1
-            elif character == ")":
-                depth -= 1
-                if depth == 0:
-                    close_index = index
-                    break
-        if close_index is None:
-            continue
-        tail = cleaned[close_index + 1:]
-        if re.match(r"\s*;", tail) is None:
-            continue
-        return match.group("returns"), cleaned[open_index + 1:close_index]
-    return None
-
-
-def _split_parameters(text):
-    if not text.strip() or text.strip() == "void":
-        return []
-    result = []
-    start = 0
-    depth = 0
-    for index, character in enumerate(text):
-        if character in "([":
-            depth += 1
-        elif character in ")]":
-            depth -= 1
-        elif character == "," and depth == 0:
-            result.append(text[start:index].strip())
-            start = index + 1
-    result.append(text[start:].strip())
-    return result
-
-
-def _parameter_parts(declaration):
-    pattern = re.compile(r"\b([A-Za-z_]\w*)\s*((?:\[[^\]]*\]\s*)*)$")
-    match = pattern.search(declaration)
-    if match is None or match.group(1) in {"const", "volatile", "restrict"}:
-        return declaration.strip(), None
-    suffix = match.group(2)
-    param_type = (declaration[:match.start()] + suffix).strip()
-    return param_type, match.group(1)
-
-
-def _normalize_type(raw):
-    raw = re.sub(r"\baclblasHandle\b", "aclblasHandle_t", raw)
-    text = re.sub(r"\[[^\]]*\]", "*", raw.strip())
-    first_star = text.find("*")
-    prefix = text if first_star < 0 else text[:first_star]
-    suffix = "" if first_star < 0 else text[first_star:]
-    if re.search(r"\bconst\b", prefix) and not prefix.lstrip().startswith("const "):
-        prefix = re.sub(r"\bconst\b", "", prefix)
-        prefix = "const " + prefix.strip()
-    text = prefix + suffix
-    return re.sub(r"\s+", "", text)
-
-
-def _declaration_candidates(repo, facts):
-    main = repo / "include" / "cann_ops_blas.h"
-    candidates = [main]
-    family_root = repo / "blas" / facts["family"] / facts["op"]
-    if family_root.is_dir():
-        candidates.extend(sorted(family_root.rglob("*.h")))
-    include = repo / "include"
-    if include.is_dir():
-        candidates.extend(sorted(include.rglob("*.h")))
-    return _unique_files(candidates)
-
-
-def _compare_declaration(repo, facts):
-    symbol = facts["symbol"]
-    found = None
-    found_path = None
-    for path in _declaration_candidates(repo, facts):
-        try:
-            source = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        declaration = _declaration_from_source(source, symbol)
-        if declaration is not None:
-            found = declaration
-            found_path = path
-            break
-    expected_return = facts["returns"]
-    expected_params = [param["ctype"] for param in facts["params"]]
-    expected_names = [param["name"] for param in facts["params"]]
-    if found is None:
-        return {
-            "status": "DECL_NOT_FOUND",
-            "symbol": symbol,
-            "source": None,
-            "expected_return": expected_return,
-            "expected_params": expected_params,
-            "expected_names": expected_names,
-            "actual_return": None,
-            "actual_params": None,
-            "actual_names": None,
-            "mismatches": [f"DECL_NOT_FOUND: 找不到 {symbol} 的声明"],
-        }
-    actual_return, raw_params = found
-    parts = [_parameter_parts(item) for item in _split_parameters(raw_params)]
-    actual_params = [item[0] for item in parts]
-    actual_names = [item[1] for item in parts]
-    mismatches = []
-    if _normalize_type(expected_return) != _normalize_type(actual_return):
-        mismatches.append(
-            f"returns: FACTS={expected_return!r}，声明={actual_return.strip()!r}"
-        )
-    limit = max(len(expected_params), len(actual_params))
-    for index in range(limit):
-        expected = expected_params[index] if index < len(expected_params) else None
-        actual = actual_params[index] if index < len(actual_params) else None
-        if expected is None or actual is None:
-            mismatches.append(f"params[{index}]: FACTS={expected!r}，声明={actual!r}")
-            continue
-        if _normalize_type(expected) != _normalize_type(actual):
-            name = facts["params"][index]["name"]
-            mismatches.append(
-                f"params[{index}]({name}): FACTS={expected!r}，声明={actual!r}"
-            )
-        actual_name = actual_names[index]
-        if actual_name is not None and expected_names[index] != actual_name:
-            mismatches.append(
-                f"params[{index}] 参数名: FACTS={expected_names[index]!r}，"
-                f"声明={actual_name!r}"
-            )
-    return {
-        "status": "MATCH" if not mismatches else "DECL_MISMATCH",
-        "symbol": symbol,
-        "source": str(found_path),
-        "expected_return": expected_return,
-        "expected_params": expected_params,
-        "expected_names": expected_names,
-        "actual_return": actual_return.strip(),
-        "actual_params": actual_params,
-        "actual_names": actual_names,
-        "mismatches": mismatches,
-    }
-
-
 def _read_nonempty_lines(path):
     try:
         return [line.strip() for line in Path(path).read_text().splitlines() if line.strip()]
@@ -534,9 +536,11 @@ def _build_state(repo, op):
 
 
 def command_check(args):
+    """A2：只以文件有无裁决；内容差异记 warnings，A5 据此判证据不足。同时生成运行时包。"""
     package = args.package.resolve()
     repo = args.repo.resolve()
     out_path = args.out.resolve() if args.out else Path.cwd() / "check.json"
+    runtime = out_path.parent / RUNTIME_DIR
     errors = []
     warnings = []
     payload = {
@@ -545,123 +549,122 @@ def command_check(args):
         "repo": str(repo),
         "soc": args.soc,
         "device": args.device,
+        "calls_per_case": args.calls_per_case,
         "checks": {},
         "errors": errors,
         "warnings": warnings,
         "exit_code": None,
         "generated_at": _timestamp(),
     }
-    try:
-        module, facts, fact_problems, package_report = _load_package_facts(package)
-    except FileNotFoundError as exc:
-        print(f"CASE_GEN_NOT_FOUND: {exc}", file=sys.stderr)
-        payload["errors"].append(f"CASE_GEN_NOT_FOUND: {exc}")
-        payload["exit_code"] = ENVIRONMENT_EXIT
-        _atomic_json(out_path, payload)
-        print(f"check.json: {out_path}")
-        return ENVIRONMENT_EXIT
-    except (ImportError, ValueError, KeyError) as exc:
-        errors.append(str(exc))
-        facts = None
-        module = None
-        fact_problems = []
-        package_report = None
-    if facts is None:
-        payload["exit_code"] = CONTRACT_EXIT
-        _atomic_json(out_path, payload)
-        for message in errors:
-            print(message, file=sys.stderr)
-        print(f"check.json: {out_path}")
-        return CONTRACT_EXIT
-    payload["op"] = facts.get("op")
-    payload["family"] = facts.get("family")
-    payload["symbol"] = facts.get("symbol")
-    payload["checks"]["facts"] = {
-        "status": "OK" if not fact_problems else "INVALID",
-        "header": module._header_columns(facts) if not fact_problems else None,
-        "problems": fact_problems,
-        "report": package_report,
-    }
-    errors.extend(f"FACTS: {message}" for message in fact_problems)
-    op = facts.get("op", "")
-    payload["package_gen_sha256"] = _sha256(package / "gen_csv.py")
-    required = [*PACKAGE_FILES, f"{op}_test.csv"]
-    missing = [name for name in required if not (package / name).is_file()]
-    payload["checks"]["six_files"] = {
-        "status": "OK" if not missing else "MISSING",
-        "files": required,
-        "missing": missing,
-    }
-    errors.extend(f"任务包缺文件：{name}" for name in missing)
-    if fact_problems:
-        payload["exit_code"] = CONTRACT_EXIT
+
+    def finish(code):
+        payload["exit_code"] = code
         payload["evidence_id"] = _evidence_id(payload)
         _atomic_json(out_path, payload)
-        print("FACTS: INVALID")
-        print(f"六件: {payload['checks']['six_files']['status']}")
+        for message in warnings:
+            print(f"警告: {message}")
         for message in errors:
             print(message, file=sys.stderr)
         print(f"check.json: {out_path}")
-        return CONTRACT_EXIT
-    declaration = _compare_declaration(repo, facts)
-    payload["checks"]["declaration"] = declaration
-    errors.extend(declaration["mismatches"])
+        return code
+
+    # 包：恰好一个 <op>_test.csv，加 gpu_baseline.csv
+    try:
+        op, package_csv = _package_csv(package)
+    except ValueError as exc:
+        errors.append(f"PACKAGE_INVALID: {exc}")
+        return finish(CONTRACT_EXIT)
+    baseline_path = package / "gpu_baseline.csv"
+    if not baseline_path.is_file():
+        errors.append("PACKAGE_INVALID: 任务包缺 gpu_baseline.csv")
+        return finish(CONTRACT_EXIT)
+    payload["op"] = op
+    payload["package_csv_sha256"] = _sha256(package_csv)
+    payload["baseline_sha256"] = _sha256(baseline_path)
+    payload["checks"]["package"] = {"csv": str(package_csv), "baseline": str(baseline_path)}
+
+    # 量具：同插件 case-gen 的模板
+    try:
+        module = _load_case_gen()
+    except (FileNotFoundError, ImportError) as exc:
+        errors.append(f"CASE_GEN_NOT_FOUND: {exc}")
+        return finish(ENVIRONMENT_EXIT)
+
+    # 工程：部署 CSV 按三条规则恰好命中一份
     arch = _arch_for_soc(args.soc)
-    csv_check = {"status": None, "arch": arch, "package": None, "deployed": None}
-    package_csv = package / f"{op}_test.csv"
     if arch is None:
-        csv_check["status"] = "CSV_NOT_DEPLOYED"
         errors.append(f"CSV_NOT_DEPLOYED: SoC {args.soc!r} 无 arch 映射")
-    elif not package_csv.is_file():
-        csv_check["status"] = "PACKAGE_CSV_MISSING"
-    else:
-        csv_check["package"] = {
-            "path": str(package_csv),
-            "sha256": _sha256(package_csv),
+        return finish(CONTRACT_EXIT)
+    matches = _source_csv_matches(repo, op, arch)
+    if len(matches) != 1:
+        status = "CSV_NOT_DEPLOYED" if not matches else "CSV_AMBIGUOUS"
+        payload["checks"]["csv"] = {
+            "status": status, "arch": arch, "matches": [str(path) for path in matches],
         }
-        payload["package_csv_sha256"] = csv_check["package"]["sha256"]
-        matches = _source_csv_matches(repo, op, arch)
-        if not matches:
-            csv_check["status"] = "CSV_NOT_DEPLOYED"
-            errors.append("CSV_NOT_DEPLOYED: 三条源码目录规则均找不到部署 CSV")
-        elif len(matches) > 1:
-            csv_check["status"] = "CSV_AMBIGUOUS"
-            csv_check["matches"] = [str(path) for path in matches]
-            errors.append("CSV_AMBIGUOUS: 三条源码目录规则命中多份部署 CSV")
-        else:
-            deployed = matches[0]
-            deployed_sha = _sha256(deployed)
-            csv_check["deployed"] = {"path": str(deployed), "sha256": deployed_sha}
-            payload["deployed_csv_sha256"] = deployed_sha
-            if deployed_sha != csv_check["package"]["sha256"]:
-                csv_check["status"] = "CSV_MISMATCH"
-                errors.append("CSV_MISMATCH: 部署 CSV 与任务包 CSV 的 SHA-256 不一致")
-            else:
-                csv_check["status"] = "MATCH"
-    payload["checks"]["csv"] = csv_check
+        errors.append(f"{status}: 三条源码目录规则命中 {len(matches)} 份部署 CSV")
+        return finish(CONTRACT_EXIT)
+    deployed = matches[0]
+    payload["deployed_csv_sha256"] = _sha256(deployed)
+    family = _family_from_deployed(repo, deployed)
+    payload["family"] = family
+    csv_status = "OK"
+    payload["checks"]["csv"] = {
+        "status": csv_status, "arch": arch, "deployed": str(deployed),
+        "deployed_sha256": payload["deployed_csv_sha256"],
+    }
+
+    # 构建清单：有清单才核，未编译只提示
     build = _build_state(repo, op)
     payload["checks"]["build"] = build
     if build["hard"]:
         errors.append(f"{build['status']}: {build['detail']}")
     elif build["status"] == "未编译":
         warnings.append("未编译：A3 将调用 build.sh 生成构建清单")
-    exit_code = CONTRACT_EXIT if errors else 0
-    payload["exit_code"] = exit_code
-    payload["evidence_id"] = _evidence_id(payload)
-    _atomic_json(out_path, payload)
-    print(f"FACTS: {payload['checks']['facts']['status']}")
-    print(f"六件: {payload['checks']['six_files']['status']}")
-    print(f"声明: {declaration['status']}")
-    if declaration["source"]:
-        print(f"声明来源: {declaration['source']}")
-    print(f"CSV: {csv_check['status']}")
+
+    # harness：三个文件有无（A2′）+ CSV 列名是否被源码读取
+    harness_dir = deployed.parent.parent
+    csv_header = _csv_header(package_csv)
+    files = _harness_files(harness_dir, op)
+    missing = [label for label, paths in files.items() if not paths]
+    payload["checks"]["harness"] = {"dir": str(harness_dir), "files": files, "missing": missing}
+    if missing:
+        warnings.append("HARNESS_FILE_MISSING: " + ", ".join(missing))
+    columns = _column_read_report(csv_header, harness_dir)
+    payload["checks"]["columns"] = columns
+    if columns["columns_not_read"]:
+        warnings.append("COLUMN_NOT_READ: " + ", ".join(columns["columns_not_read"]))
+
+    # 基线与性能期望集
+    try:
+        meta, keys, rows, references = _load_baseline(baseline_path, csv_header)
+    except ValueError as exc:
+        errors.append(f"BASELINE_INVALID: {exc}")
+        return finish(CONTRACT_EXIT)
+    expected_pf, ignored_pf = _comparable_pf_names(package_csv, keys, references)
+    payload["checks"]["perf"] = {
+        "key": keys,
+        "comparable_pf": len(expected_pf),
+        "ignored_pf": len(ignored_pf),
+        "baseline_rows": len(rows),
+    }
+    if ignored_pf:
+        warnings.append(f"NO_REF: {len(ignored_pf)} 条 TC_PF_ 无可比基线，不进入性能期望集")
+    if errors:
+        return finish(CONTRACT_EXIT)
+
+    # 运行时包：CSV 副本 + 规范化基线 + 渲染的两个 verify 脚本 + manifest
+    payload["runtime"] = _write_runtime(
+        runtime, package, package_csv, op, family, keys, meta, rows, module,
+        args.calls_per_case, PERF_THRESHOLD,
+    )
+    print(f"包: {op}（family={family}）")
+    print(f"CSV: {csv_status}")
     print(f"构建: {build['status']}")
-    for warning in warnings:
-        print(f"警告: {warning}")
-    for message in errors:
-        print(message, file=sys.stderr)
-    print(f"check.json: {out_path}")
-    return exit_code
+    print(f"harness 缺件: {', '.join(missing) or '无'}")
+    print(f"列名未读取: {', '.join(columns['columns_not_read']) or '无'}")
+    print(f"性能期望集: {len(expected_pf)} 条（忽略 {len(ignored_pf)} 条无基线）")
+    print(f"runtime: {runtime}")
+    return finish(0)
 
 
 def _accuracy_structure(payload, expected, identity):
@@ -953,7 +956,7 @@ def _performance_result(
         computed_status, expected_exit = "证据不足", INSUFFICIENT_EXIT
     elif counts["FAIL"]:
         computed_status, expected_exit = "不通过", FAILURE_EXIT
-    elif counts["NO_REF"] or not cases:
+    elif not (counts["PASS"] or counts["FAIL"]):
         computed_status, expected_exit = "NO_REF", 0
     else:
         computed_status, expected_exit = "通过", 0
@@ -1024,21 +1027,22 @@ def _contract_summary(out_dir, expected):
         problems.append("check.json 的 command 不是 check")
     if payload.get("evidence_id") != _evidence_id(payload):
         problems.append("check.json 的 evidence_id 与内容不一致")
+    columns = checks.get("columns") if isinstance(checks.get("columns"), dict) else {}
     if problems:
         status = "证据不足"
     else:
         status = "通过" if payload.get("exit_code") == 0 else "不通过"
-    declaration = checks.get("declaration")
     csv_check = checks.get("csv")
+    harness = checks.get("harness") if isinstance(checks.get("harness"), dict) else {}
     return {
         "status": status,
         "path": str(path),
         "exit_code": payload.get("exit_code"),
         "evidence_id": payload.get("evidence_id"),
-        "declaration": (
-            declaration.get("status") if isinstance(declaration, dict) else None
-        ),
         "csv": csv_check.get("status") if isinstance(csv_check, dict) else None,
+        "columns_not_read": columns.get("columns_not_read") or [],
+        "harness_missing": harness.get("missing", []),
+        "warnings": payload.get("warnings", []) if isinstance(payload.get("warnings"), list) else [],
         "errors": problems + (
             payload.get("errors", []) if isinstance(payload.get("errors"), list) else []
         ),
@@ -1101,50 +1105,59 @@ def _report_markdown(payload):
     if accuracy["problems"]:
         lines.extend(["", "证据问题："])
         lines.extend(f"- {problem}" for problem in accuracy["problems"])
+    runtime = payload.get("runtime") or {}
     lines.extend([
+        "",
+        "## 运行时包",
+        "",
+        f"- 任务包：{runtime.get('package')}",
+        f"- 任务包 CSV SHA-256：{runtime.get('package_csv_sha256')}",
+        f"- 基线 SHA-256：{runtime.get('baseline_sha256')}",
+        f"- 性能键：{', '.join(runtime.get('perf_key') or []) or '无'}",
+        f"- 每例调用次数（calls_per_case）：{payload.get('evidence', {}).get('calls_per_case')}",
         "",
         "## 契约比对",
         "",
-        f"- 声明：{contract.get('declaration')}",
-        f"- CSV：{contract.get('csv')}",
+        f"- 部署 CSV：{contract.get('csv')}",
+        f"- 列名未被 harness 读取：{', '.join(contract.get('columns_not_read') or []) or '无'}",
+        f"- A2′ harness 文件缺件：{', '.join(contract.get('harness_missing') or []) or '无'}",
     ])
+    lines.extend(f"- 警告：{message}" for message in contract.get("warnings", []))
     lines.extend(f"- {message}" for message in contract.get("errors", []))
     lines.extend([
         "",
-        "## 审阅记录",
+        "## 审阅备注",
         "",
-        "<A2′ 记录由 agent 填>",
+        "<可选，由 agent 填>",
         "",
     ])
     return "\n".join(lines)
 
 
 def command_verdict(args):
+    """A5：从 <工作目录>/runtime 的 manifest 与 results 出结论；期望集来自任务包 CSV 副本。"""
     if not RUN_ID_RE.fullmatch(args.run_id):
         print("证据不足: run-id 格式不合法", file=sys.stderr)
         return INSUFFICIENT_EXIT
     package = args.package.resolve()
     repo = args.repo.resolve()
     out_dir = args.out.resolve()
-    accuracy_path = package / "results" / f"accuracy_{args.run_id}.json"
-    rerun_path = package / "results" / f"accuracy_{args.run_id}-rerun.json"
-    performance_path = package / "results" / f"performance_{args.run_id}.json"
+    runtime = Path.cwd() / RUNTIME_DIR
+    results = runtime / "results"
+    accuracy_path = results / f"accuracy_{args.run_id}.json"
+    rerun_path = results / f"accuracy_{args.run_id}-rerun.json"
+    performance_path = results / f"performance_{args.run_id}.json"
+    manifest = {}
     try:
-        _, facts, fact_problems, _ = _load_package_facts(package)
-        if fact_problems:
-            raise ValueError("FACTS 不合法：" + "；".join(fact_problems))
+        manifest = _load_json(runtime / "manifest.json")
         accuracy_payload = _load_json(accuracy_path)
-    except (FileNotFoundError, ImportError, KeyError, ValueError) as exc:
-        op = "unknown"
-        try:
-            op = facts.get("op", "unknown")
-        except UnboundLocalError:
-            pass
+    except ValueError as exc:
         payload = {
             "run_id": args.run_id,
-            "op": op,
+            "op": manifest.get("op", "unknown"),
             "soc": args.soc,
             "device": args.device,
+            "runtime": manifest,
             "accuracy": {
                 "status": "证据不足",
                 "expected": 0,
@@ -1158,7 +1171,7 @@ def command_verdict(args):
             "contract": {
                 "status": "证据不足",
                 "path": None,
-                "errors": ["无法在 FACTS/accuracy 门之前绑定 check.json"],
+                "errors": ["runtime/manifest.json 或精度 JSON 缺失，无法绑定 check.json"],
             },
             "evidence": {"accuracy_json": str(accuracy_path)},
             "verdict": "证据不足",
@@ -1169,36 +1182,24 @@ def command_verdict(args):
         print(f"verdict.json: {out_dir / 'verdict.json'}")
         print(f"report.md: {out_dir / 'report.md'}")
         return INSUFFICIENT_EXIT
-    op = facts["op"]
-    arch = _arch_for_soc(args.soc)
+    op = manifest["op"]
+    family = manifest["family"]
+    runtime_csv = runtime / manifest["package_csv"]
     evidence_problems = []
-    deployed = None
-    deployed_sha = None
     expected = []
     performance_expected = []
-    package_csv = package / f"{op}_test.csv"
-    if arch is None:
-        evidence_problems.append(f"SoC {args.soc!r} 无 arch 映射")
-    else:
-        matches = _source_csv_matches(repo, op, arch)
-        if len(matches) != 1:
-            evidence_problems.append(f"部署 CSV 命中数为 {len(matches)}，期望 1")
-        else:
-            deployed = matches[0]
-            deployed_sha = _sha256(deployed)
-            if not package_csv.is_file():
-                evidence_problems.append("任务包 CSV 不存在")
-            elif _sha256(package_csv) != deployed_sha:
-                evidence_problems.append("任务包 CSV 与部署 CSV 的 SHA-256 不一致")
-            try:
-                expected = _read_csv_case_names(deployed, performance=False)
-                performance_expected = _read_csv_case_names(deployed, performance=True)
-            except (OSError, UnicodeError, csv.Error, ValueError) as exc:
-                evidence_problems.append(str(exc))
+    try:
+        expected = _read_csv_case_names(runtime_csv, performance=False)
+        csv_header = _csv_header(runtime_csv)
+        _, keys, _, references = _load_baseline(runtime / "gpu_baseline.csv", csv_header)
+        performance_expected, _ = _comparable_pf_names(runtime_csv, keys, references)
+    except (OSError, UnicodeError, csv.Error, ValueError) as exc:
+        evidence_problems.append(str(exc))
+    deployed_sha = accuracy_payload.get("csv_sha256")
     identity = {
         "run_id": args.run_id,
         "op": op,
-        "family": facts["family"],
+        "family": family,
         "soc": args.soc,
         "device": args.device,
         "repo": str(repo),
@@ -1225,22 +1226,27 @@ def command_verdict(args):
         "package": str(package),
         "repo": str(repo),
         "op": op,
-        "family": facts["family"],
+        "family": family,
         "soc": args.soc,
         "device": args.device,
-        "package_gen_sha256": _sha256(package / "gen_csv.py"),
-        "package_csv_sha256": (
-            _sha256(package_csv) if package_csv.is_file() else None
-        ),
-        "deployed_csv_sha256": deployed_sha,
+        "package_csv_sha256": manifest.get("package_csv_sha256"),
+        "baseline_sha256": manifest.get("baseline_sha256"),
+        "calls_per_case": manifest.get("calls_per_case"),
     }
     contract = _contract_summary(out_dir, contract_expected)
     verdict, exit_code = _overall_verdict(accuracy, performance, contract)
+    calls_per_case = None
+    if performance_path.is_file():
+        try:
+            calls_per_case = _load_json(performance_path).get("calls_per_case")
+        except ValueError:
+            calls_per_case = None
     payload = {
         "run_id": args.run_id,
         "op": op,
         "soc": args.soc,
         "device": args.device,
+        "runtime": manifest,
         "accuracy": accuracy,
         "performance": performance,
         "contract": contract,
@@ -1250,9 +1256,10 @@ def command_verdict(args):
             "performance_json": (
                 str(performance_path) if performance_path.is_file() else None
             ),
-            "deployed_csv": str(deployed) if deployed else None,
+            "deployed_csv": accuracy_payload.get("csv_path"),
             "binary_sha256": accuracy_payload.get("binary_sha256"),
             "csv_sha256": accuracy_payload.get("csv_sha256"),
+            "calls_per_case": calls_per_case,
         },
         "verdict": verdict,
     }
@@ -1279,14 +1286,21 @@ def _parser():
     _add_common(env_parser)
     env_parser.add_argument("--out", type=Path, default=Path.cwd(), help="env.json 输出目录")
     env_parser.set_defaults(function=command_env)
-    check_parser = subparsers.add_parser("check", help="检查任务包与工程契约")
+    check_parser = subparsers.add_parser("check", help="检查任务包与工程契约，生成运行时包")
     _add_common(check_parser)
-    check_parser.add_argument("--package", required=True, type=Path, help="六件任务包目录")
-    check_parser.add_argument("--out", type=Path, help="check.json 输出路径")
+    check_parser.add_argument(
+        "--package", required=True, type=Path,
+        help="任务包目录：含恰好一个 <op>_test.csv 与 gpu_baseline.csv",
+    )
+    check_parser.add_argument(
+        "--calls-per-case", type=int, default=1,
+        help="harness 一条 gtest 用例调用被测接口的次数（固定 warm-up 一次则为 2）",
+    )
+    check_parser.add_argument("--out", type=Path, help="check.json 输出路径，默认当前目录")
     check_parser.set_defaults(function=command_check)
     verdict_parser = subparsers.add_parser("verdict", help="从运行证据生成结论")
     _add_common(verdict_parser)
-    verdict_parser.add_argument("--package", required=True, type=Path, help="六件任务包目录")
+    verdict_parser.add_argument("--package", required=True, type=Path, help="任务包目录")
     verdict_parser.add_argument("--run-id", required=True, help="精度与性能结果的运行标识")
     verdict_parser.add_argument("--out", required=True, type=Path, help="结论输出目录")
     verdict_parser.set_defaults(function=command_verdict)

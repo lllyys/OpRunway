@@ -136,6 +136,22 @@ def _selected_rows(csv_path, args):
     return rows
 
 
+def _comparable_rows(rows, references):
+    """只保留能在 gpu_baseline.csv 里配到非空 gpu_ms 的行；返回 (可比行, 被忽略的用例名)。"""
+    comparable = []
+    ignored = []
+    for row in rows:
+        try:
+            reference = references.get(_key_for_row(row))
+        except ValueError:
+            reference = None
+        if reference is None:
+            ignored.append(row["case_name"])
+        else:
+            comparable.append(row)
+    return comparable, ignored
+
+
 def _atomic_json(path, payload):
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -160,6 +176,8 @@ def _base_result(args, arch, started):
         "csv_path": None,
         "csv_sha256": None,
         "package_csv_sha256": PACKAGE_CSV_SHA256,
+        "calls_per_case": 1,
+        "ignored_no_ref": [],
         "gpu_baseline_path": None,
         "msprof": None,
         "gtest_filter": None,
@@ -510,7 +528,8 @@ def _measure_case(args, binary, msprof, row, gtest_name, references, profile_roo
             record["verdict"] = "NO_KERNEL"
             record["message"] = f"第 {repeat} 次采样没有 kernel 行"
             return record
-        record["samples"].append(kernel_us)
+        # 一条 gtest 用例里 harness 可能调用被测接口多次（如固定 warm-up 一次），按次数归一。
+        record["samples"].append(kernel_us / args.calls_per_case)
         record["launches"].append(launches)
 
     median_us = float(statistics.median(record["samples"]))
@@ -552,7 +571,8 @@ def _summarize(cases, timing_scope):
     elif counts["FAIL"]:
         status = "不通过"
         exit_code = FAILURE_EXIT
-    elif counts["NO_REF"] or not cases:
+    elif not (counts["PASS"] or counts["FAIL"]):
+        # 没有一条可比较的用例：有 PF 却无基线，或全被 --case/--filter 收窄掉。
         status = "NO_REF"
         exit_code = 0
     else:
@@ -603,6 +623,12 @@ def _parser():
     parser.add_argument("--build-timeout", type=int, default=1800, help="编译超时秒数")
     parser.add_argument("--timeout", type=int, default=3600, help="每个进程的超时秒数")
     parser.add_argument("--repeats", type=int, default=REPEATS, help="msprof 采样次数")
+    parser.add_argument(
+        "--calls-per-case",
+        type=int,
+        default=1,
+        help="一条 gtest 用例调用被测接口的次数；kernel 总时长除以它得单次调用耗时",
+    )
     parser.add_argument("--msprof", help="覆盖 msprof 可执行文件路径")
     parser.add_argument(
         "--keep-prof",
@@ -627,6 +653,8 @@ def main(argv=None):
     args = parser.parse_args(raw_argv)
     if args.build_timeout <= 0 or args.timeout <= 0 or args.repeats <= 0:
         parser.error("timeout 与 repeats 必须为正整数")
+    if args.calls_per_case <= 0:
+        parser.error("--calls-per-case 必须为正整数")
     results = Path(__file__).resolve().parent / "results"
     if not RUN_ID_RE.fullmatch(args.run_id):
         print("RUN_ID_INVALID: run-id 只能含字母、数字、点、下划线和连字符", file=sys.stderr)
@@ -652,10 +680,7 @@ def main(argv=None):
         )
     payload["csv_path"] = str(csv_path)
     payload["csv_sha256"] = _sha256(csv_path)
-    if payload["csv_sha256"] != PACKAGE_CSV_SHA256:
-        return _environment_error(
-            payload, out_path, "CSV_MISMATCH", "CSV SHA-256 不一致"
-        )
+    payload["calls_per_case"] = args.calls_per_case
     device_explicit = any(
         item == "--device" or item.startswith("--device=") for item in raw_argv
     )
@@ -681,21 +706,24 @@ def main(argv=None):
     mapping, message, reason = _list_tests(binary, args.timeout)
     if reason:
         return _environment_error(payload, out_path, reason, message)
-    try:
-        expected_rows = _selected_rows(csv_path, args)
-    except (OSError, UnicodeError, csv.Error, ValueError) as exc:
-        return _environment_error(payload, out_path, "CSV_INVALID", str(exc))
-    payload["gtest_filter"] = ":".join(
-        mapping[row["case_name"]]
-        for row in expected_rows
-        if row["case_name"] in mapping
-    )
     baseline_path = Path(__file__).resolve().parent / "gpu_baseline.csv"
     payload["gpu_baseline_path"] = str(baseline_path)
     try:
         metadata, references = _load_gpu_baseline(baseline_path)
     except (OSError, UnicodeError, csv.Error, ValueError) as exc:
         return _environment_error(payload, out_path, "BASELINE_INVALID", str(exc))
+    # 期望集 = 任务包 CSV 里有可比 GPU 基线的 TC_PF_ 行；没有基线的行不跑，只计数。
+    try:
+        package_rows = _selected_rows(Path(__file__).resolve().parent / CSV_NAME, args)
+        expected_rows, ignored = _comparable_rows(package_rows, references)
+    except (OSError, UnicodeError, csv.Error, ValueError) as exc:
+        return _environment_error(payload, out_path, "CSV_INVALID", str(exc))
+    payload["ignored_no_ref"] = ignored
+    payload["gtest_filter"] = ":".join(
+        mapping[row["case_name"]]
+        for row in expected_rows
+        if row["case_name"] in mapping
+    )
     timing_scope = metadata.get("timing_scope", "unspecified")
     mapped_rows = [row for row in expected_rows if row["case_name"] in mapping]
     msprof = _resolve_msprof(args.msprof) if mapped_rows else None

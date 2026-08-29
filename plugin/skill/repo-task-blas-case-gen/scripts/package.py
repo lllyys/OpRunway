@@ -1221,7 +1221,8 @@ def _header_columns(facts):
                 columns.append(name)
         elif role in {"vector", "matrix"}:
             if direction in {"in", "inout"} and "producer" not in param:
-                columns.append(f"{name}_fill")
+                # fill 列用小写参数名（a_fill），与社区旧任务包和开发者 param.h 的读法一致。
+                columns.append(f"{name.lower()}_fill")
                 if role == "matrix" and param.get("conditioning"):
                     columns.append(f"{name}_matrix_type")
         elif role == "fixed_vector" and direction in {"in", "inout"}:
@@ -1445,9 +1446,12 @@ def _column_contract_rows(facts, generator):
             values = "UNIFORM, NULL_TABLE, MIXED_SINGULAR, NULL_ELEMENT_i"
             note = "统一缓冲、空表、混合奇异或第 i 个元素为空"
         elif column.endswith("_fill"):
-            source = column[:-5]
+            # 列名是小写参数名，反查原参数
+            source = next(
+                (name for name in params if name.lower() == column[:-5]), column[:-5]
+            )
             values = "见下方 fill 词表"
-            direction = params[source].get("dir", "in")
+            direction = params.get(source, {}).get("dir", "in")
             note = f"{source}（{direction}）的数据填充方式"
         elif column.endswith("_matrix_type"):
             source = column[:-12]
@@ -1662,6 +1666,28 @@ def _render_script(template_path, output_path, facts, csv_hash):
         },
     )
     _write_text(output_path, rendered, executable=True)
+
+
+def render_runtime(op, family, perf_key, out_dir, csv_sha256, threshold=0.8):
+    """按最小事实把两个 verify 脚本渲染到 out_dir。
+
+    accept 用它把任何任务包（含社区旧包）变成运行时包：脚本只需要 op、family、性能键列，
+    这些都能从 CSV 文件名、工程目录和 gpu_baseline.csv 表头得到，不需要 FACTS。
+    """
+    facts = {
+        "op": op,
+        "family": family,
+        "generator_version": GENERATOR_VERSION,
+        "perf": {"key": list(perf_key), "threshold": threshold},
+        "dtype_profiles": [],
+    }
+    target = Path(out_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    _render_script(ACCURACY_TEMPLATE_PATH, target / "verify_accuracy.py", facts, csv_sha256)
+    _render_script(
+        PERFORMANCE_TEMPLATE_PATH, target / "verify_performance.py", facts, csv_sha256
+    )
+    return [target / "verify_accuracy.py", target / "verify_performance.py"]
 
 
 def _render_readme(path, facts, generator, generated):

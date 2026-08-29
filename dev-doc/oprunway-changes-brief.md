@@ -2,6 +2,28 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-08-29 · BLAS 验收链统一：accept 单一路径，case-gen 产出对标旧包。** accept 对任何任务包
+  只读 `<op>_test.csv` + `gpu_baseline.csv`：A2/A2′ 只判文件有无，从 CSV 名/部署路径/基线表头推断
+  op/family/基线键，生成运行时包（CSV 副本、规范化基线、渲染出的两个 verify 脚本、manifest），
+  A3–A5 在 runtime/ 里跑；删掉 FACTS 加载、声明比对、六件逐字节、CSV SHA 比对。case-gen 的 fill 列
+  改小写 `a_fill`、新增 `render_runtime()`、性能期望集按基线过滤、加 `--calls-per-case`。真机四个 PR
+  各跑两轮：旧包原样与 case-gen 新包都从 A2 走到 A5（cherk 用现成示例，csyrk/cher2k/csymm 新填 FACTS）。
+  两轮结论都「不通过」——旧包轮 n=8000 被 harness host 内存护栏 SKIP，新包轮多出的极值填充组合暴露
+  精度失败；性能默认构建 -O0 仍不达标。证据 `reports/pr-accept-20260828/skill-run/`。Codex 方案评审
+  记 MAJOR GAPS，按用户口径收敛后实施（见 `dev-doc/blas-accept-unification-plan.md` §0）。
+
+- **2026-08-29 · 四个 ops-blas 矩阵乘 PR 按旧包真机验收：** !347 cherk / !348 csyrk / !349 cher2k /
+  !350 csymm（arch22）在 A3 各自 worktree 编译，部署旧包完整 CSV。精度 0 失败，各 4 条 n=8000 被
+  开发者 host 内存护栏跳过未执行（旧脚本看不见 SKIPPED，靠 gtest JSON 核出）。性能默认构建（仓库
+  强制 Debug、设备侧 -O0，issue #363）16/16 不通过 ratio 0.05–0.10；Release 对照 16/16 通过
+  2.06–4.40×。报告与 msprof/gtest 证据在 `reports/pr-accept-20260828/`。同日核实：skill 的 A2 门
+  对 15 种外来/畸形六件包全部干净拒收（exit 2、无 traceback），skill 不参与旧包验收。
+
+- **2026-08-28 · skill-edit-gate 误报修复：** `CODEX_CMD` 第三支把 `.codex` 目录、`which codex`
+  后接操作符或重定向（`2>/dev/null`、`| head`）也当成派 Codex，只读探测一碰 `.cc-suite.md` 就被拦；
+  改为要求 `codex` 是独立命令词（前无 `.`，后不接 shell 操作符）。12 例模拟前后对照 7→12 通过，
+  派单形状与 `sed -i` 直改仍拦。Codex 侧门无此正则，不用动。
+
 - **2026-08-27 · case-gen 输入契约收敛为「运行时只任务书」：** references/SKILL 去掉"读头文件/代码推断接口事实"的说法（enum/fill/status 约定表仍是建 skill 时的 authoring 出处）；
   停止条件与 family 塌成单一通则、删 Ex 特判；撤掉 package.py 的 sources 机械门（自由出处不上
   机械裁决）、删多余 authoring 元声明；sasum 示例按其任务书重建（§3.5 的 25 个 n、incx=1、

@@ -311,7 +311,7 @@ def build_axes(facts):
             else:
                 axes.append(
                     {
-                        "name": f"{name}_fill",
+                        "name": f"{name.lower()}_fill",
                         "values": list(options["fill_tiers"]),
                         "kind": "fill",
                     }
@@ -478,10 +478,10 @@ def _materialize(facts, axes, partial, overrides=None):
             direction = param.get("dir", "in")
             if direction in {"in", "inout"} and "producer" not in param:
                 if role == "matrix" and param.get("conditioning"):
-                    state[f"{name}_fill"] = _case_options(facts)["fill_tiers"][0]
+                    state[f"{name.lower()}_fill"] = _case_options(facts)["fill_tiers"][0]
                     state[f"{name}_matrix_type"] = selection[f"{name}_matrix_type"]
                 else:
-                    state[f"{name}_fill"] = selection[f"{name}_fill"]
+                    state[f"{name.lower()}_fill"] = selection[f"{name.lower()}_fill"]
         elif role == "fixed_vector" and param.get("dir") in {"in", "inout"}:
             state[name] = list(param["samples"][selection[name]])
     for key, value in overrides.items():
@@ -594,7 +594,7 @@ def _header_columns(facts):
                 columns.append(name)
         elif role in {"vector", "matrix"}:
             if direction in {"in", "inout"} and "producer" not in param:
-                columns.append(f"{name}_fill")
+                columns.append(f"{name.lower()}_fill")
                 if role == "matrix" and param.get("conditioning"):
                     columns.append(f"{name}_matrix_type")
         elif role == "fixed_vector" and direction in {"in", "inout"}:
@@ -634,7 +634,7 @@ def _body_mapping(facts, state, profile, expect, control_overrides=None):
                 result[name] = value
         elif role in {"vector", "matrix"}:
             if direction in {"in", "inout"} and "producer" not in param:
-                result[f"{name}_fill"] = state[f"{name}_fill"]
+                result[f"{name.lower()}_fill"] = state[f"{name.lower()}_fill"]
                 if role == "matrix" and param.get("conditioning"):
                     result[f"{name}_matrix_type"] = state[f"{name}_matrix_type"]
         elif role == "fixed_vector" and direction in {"in", "inout"}:

@@ -422,10 +422,6 @@ def main(argv=None):
         )
     payload["csv_path"] = str(csv_path)
     payload["csv_sha256"] = _sha256(csv_path)
-    if payload["csv_sha256"] != PACKAGE_CSV_SHA256:
-        return _environment_error(
-            payload, out_path, "CSV_MISMATCH", "源码 CSV 与任务包 SHA-256 不一致"
-        )
     device_explicit = any(
         item == "--device" or item.startswith("--device=") for item in raw_argv
     )
@@ -451,7 +447,8 @@ def main(argv=None):
     mapping, message, reason = _list_tests(binary, args.timeout)
     if reason:
         return _environment_error(payload, out_path, reason, message)
-    expected = _selected_cases(csv_path, args)
+    # 期望集来自任务包自带的 CSV（契约），不是部署 CSV。
+    expected = _selected_cases(Path(__file__).resolve().parent / CSV_NAME, args)
     full_names = [mapping[name] for name in expected if name in mapping]
     gtest_json = run_dir / "gtest.json"
     process_code, timed_out, gtest_filter = _run_tests(
