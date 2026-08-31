@@ -5,7 +5,7 @@
 OP = "cherk"
 FAMILY = "herk"
 CSV_NAME = "cherk_test.csv"
-PACKAGE_CSV_SHA256 = "2f17f139c2093a9464a46ca30cc409fe4a7c60b9c6683e22b83f8eb098081b1d"
+PACKAGE_CSV_SHA256 = "f600fc7ed1038e6bf36f4d3e4f6c1e93826ad6434855df6380f808f2cbe67a3a"
 GENERATOR_VERSION = int("1")
 ACCURACY_FILTER = "*TC_*:-*TC_PF_*"
 # ===== 渲染常量区结束 =====

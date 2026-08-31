@@ -103,7 +103,7 @@ fill 词表（见 [aclblas-conventions.md](aclblas-conventions.md)）要在正�
 | 用途 | 条数 | 前缀 |
 | --- | --- | --- |
 | 精度全量 | 150–400 | 非 `TC_PF_` |
-| 性能子集 | 由 `perf.rows` 决定 | `TC_PF_` |
+| 性能子集 | 固定 200（`perf.rows` 恰 200 行，check 强制；点位设计见 facts-schema.md） | `TC_PF_` |
 
 ## 等价类剪枝 = pairwise
 

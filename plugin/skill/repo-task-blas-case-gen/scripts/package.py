@@ -21,6 +21,7 @@ import tempfile
 
 SCHEMA_VERSION = 1
 GENERATOR_VERSION = 1
+PERF_ROWS_REQUIRED = 200
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_PATH = SKILL_ROOT / "assets" / "template" / "gen_csv.py"
 ACCURACY_TEMPLATE_PATH = SKILL_ROOT / "assets" / "template" / "verify_accuracy.py"
@@ -1027,6 +1028,8 @@ def _check_perf(problems, facts, perf, params):
     if not isinstance(rows, list):
         _err(problems, "perf.rows 必须是列表")
         rows = []
+    elif len(rows) != PERF_ROWS_REQUIRED:
+        _err(problems, f"perf.rows 必须恰为 {PERF_ROWS_REQUIRED} 行（性能用例数固定），当前 {len(rows)} 行")
     seen_rows = {}
     for index, row in enumerate(rows):
         where = f"perf.rows[{index}]"
