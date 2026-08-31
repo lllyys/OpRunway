@@ -1018,11 +1018,18 @@ def _check_perf(problems, facts, perf, params):
     if not isinstance(rows, list):
         _err(problems, "perf.rows 必须是列表")
         rows = []
+    seen_rows = {}
     for index, row in enumerate(rows):
         where = f"perf.rows[{index}]"
         if not isinstance(row, dict):
             _err(problems, f"{where} 必须是字典")
             continue
+        if isinstance(keys, list) and keys:
+            ident = tuple(str(row.get(key)) for key in keys)
+            if ident in seen_rows:
+                _err(problems, f"{where} 与 perf.rows[{seen_rows[ident]}] 性能键重复")
+            else:
+                seen_rows[ident] = index
         _unknown_keys(problems, where, row, set(keys) | {"gpu_ms"})
         for key in keys:
             if key not in row:

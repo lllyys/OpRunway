@@ -2,6 +2,15 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-08-30 · 性能点位统一场景定为 200 点显式行 + 空基线待填表。** 机制本就支持：`perf.rows`
+  省略 `gpu_ms` 即渲染出键列齐全、`gpu_ms` 空置的 `gpu_baseline.csv`，GPU 侧回填后无需重渲染，
+  配上数的行自动进入性能期望集。端到端实证（cherk 200 行无 gpu_ms：render/check 全过、CSV 200 条
+  TC_PF_、空基线 200 行、量具 0 可比 200 ignored、填 3 行升级 3 条）。落盘两处：facts-schema.md
+  perf 节补规模与待填表工作流；`package.py check` 新增 perf.rows 性能键重复检测（此前重复键要到
+  验收时才被量具拒，200 行机器写点位下撞键是高概率笔误）。不加 grid 展开机制——FACTS 是 AST
+  白名单字面量、0826 真实点位含非规则尺寸，显式行是唯一通用形态。Codex 契约评审待跑（动了
+  facts-schema 与 check）。
+
 - **2026-08-29 · BLAS 验收链统一：accept 单一路径，case-gen 产出对标旧包。** accept 对任何任务包
   只读 `<op>_test.csv` + `gpu_baseline.csv`：A2/A2′ 只判文件有无，从 CSV 名/部署路径/基线表头推断
   op/family/基线键，生成运行时包（CSV 副本、规范化基线、渲染出的两个 verify 脚本、manifest），
