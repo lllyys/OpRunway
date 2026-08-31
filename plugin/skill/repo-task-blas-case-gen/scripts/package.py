@@ -154,6 +154,15 @@ def _is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+_KEY_INTEGER_RE = re.compile(r"^[+-]?\d+$")
+
+
+def _normalized_perf_key(value):
+    """必须与量具模板及 accept 的 _normalize_key_value 保持同一规则，否则两侧判重口径分叉。"""
+    text = str(value).strip()
+    return int(text) if _KEY_INTEGER_RE.fullmatch(text) else text
+
+
 def _is_identifier(value, lowercase=False):
     if not isinstance(value, str) or not value.isidentifier() or keyword.iskeyword(value):
         return False
@@ -1025,7 +1034,7 @@ def _check_perf(problems, facts, perf, params):
             _err(problems, f"{where} 必须是字典")
             continue
         if isinstance(keys, list) and keys:
-            ident = tuple(str(row.get(key)) for key in keys)
+            ident = tuple(_normalized_perf_key(row.get(key)) for key in keys)
             if ident in seen_rows:
                 _err(problems, f"{where} 与 perf.rows[{seen_rows[ident]}] 性能键重复")
             else:
