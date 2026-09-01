@@ -1,5 +1,8 @@
 # sparse R1 实施计划
 
+> **状态：已立项实施中**（2026-09-01 用户裁定开工，分支 `feature/sparse-r1`；
+> M0 为立项前预研）。编号与状态唯一源：
+> [sparse-gap-learning-map.md](sparse-gap-learning-map.md) §0。
 > 目标：case-gen 能为 frame 惯例的 sparse 算子造六件，开发者 harness 原样消费，
 > accept 出裁决（R1）。承接 [sparse-support-candidate-plan.md](sparse-support-candidate-plan.md)
 > 的 A 案与七条硬边界。2026-09-01 起草；同日经 Codex 计划评审（MAJOR GAPS，
@@ -7,9 +10,25 @@
 > 冻结 registry、IR 补全七消费者、版本策略改为 v2 + 确定性迁移、blas 专属校验
 > profile 化、NO_REF 终态显式化、tier 规范形收紧。
 
+**阅读约定**（本文与关联文档的自造术语，首次冷读先过这张表）：
+
+| 术语 | 含义 |
+| --- | --- |
+| 六件 | 任务包的六个文件：gen_csv.py、`<op>_test.csv`、两个 verify 脚本、README、gpu_baseline.csv |
+| S1–S3 / A1–A5 | 阶段号：S=case-gen 生成链（校验→渲染→check）；A=accept 验收链（A1 环境、A2 部署与运行时包、A3 精度、A4 性能、A5 结论） |
+| NO_REF | 性能汇总态：有性能用例但全部配不到基线，证据不足，不判 PASS/FAIL |
+| FACTS | 单算子事实字面量（AST 白名单、从不执行），见 facts-schema.md |
+| registry | skill 内版本化的有限 profile/词表数据集，装域级惯例 |
+| 投影 IR | FACTS+registry 编译出的中间表示（列/轴/键/物化四份 spec），列消费者的唯一输入 |
+| frame 惯例 | ops 仓 `test/frame/` 公共件之上的 CSV 驱动 gtest 写法（param.h 逐列读 CSV） |
+| npu-smi 命令桩 | 用可替换的假 `npu-smi` 输出喂判定逻辑的本地测试手段（无真机时用） |
+| ultracode | 多 agent 并行执行方式；可降级为串行，不构成对任何工具的硬依赖 |
+
 ## 0. 范围、终态与不变量
 
-**范围**：ops-sparse 仓 26/33 个 frame 惯例算子（CSV-gtest）。spgemm 950 任务书的
+**范围**：ops-sparse 仓 26/33 个 frame 惯例算子（CSV-gtest；成员清单与统计口径的
+唯一出处是 [sparse-r1-census.md](sparse-r1-census.md) §1）。E1（arch35 真机）不阻塞
+M0.5–M6 的本地实施，只阻塞 M7 真机验证与「正式支持」声明。spgemm 950 任务书的
 ATK/torch 形态按用户裁定为特例，不在本计划内。首个打通算子 **coo2csr**。
 
 **R1 的预期终态（显式写死，避免误报）**：本期 sparse 无 GPU 基线，200 个性能点
@@ -27,11 +46,20 @@ ultracode（Workflow fan-out），形态见 §1.5。测试用 ops-sparse 已有�
   gen_csv.py 因公共区更新而变，走 §3.4 确定性迁移。**M2 起**逐字节门只保 CSV/README/
   gpu_baseline 三件；verify 模板属预期变更，改为「变更文件 allowlist + blas 语义
   快照不变」（同一本地 ops-blas 树上，改前后 env/check/runtime manifest 规范化对照）。
-- **NPU 现场空闲门**（用户裁定）：skill 做实际 NPU 测试（A3 精度、A4 性能）起跑前，
-  必须**现场**检查目标卡空闲——npu-smi 查该 device 的利用率与占用进程，非空闲不得起跑。
-  忙卡对 A4 是直接污染（kernel 耗时混入他人负载），对 A3 是抢占风险。这道门沉入 accept
-  作机械检查，不靠操作者自觉；A1 的 npu-smi 记录只是环境快照，不替代起跑时刻的现场核查。
-  落点：M2 在 accept 侧实现（本地用探针桩验证判定逻辑），M7 真机验证实际行为。
+- **NPU 现场空闲门**（用户裁定）：skill 做实际 NPU 测试起跑前，必须**现场**检查目标卡
+  空闲。忙卡对 A4 是直接污染（kernel 耗时混入他人负载），对 A3 是抢占风险。落点是
+  **两个 verify 模板**（A3/A4 是独立运行的运行时脚本，只改 accept.py 保证不了起跑时刻）：
+  verify_accuracy 在首次 gtest 前、verify_performance 在首次 warm-up/msprof 前各查一次，
+  **不复用** A1 环境快照或对方的结果。判定表写死，fail-closed：
+
+  | 现场查询结果 | 判定 | 动作 |
+  | --- | --- | --- |
+  | npu-smi 查询失败或输出无法解析 | 阻塞 | 退出码 4，报「空闲门查询失败」 |
+  | 目标 device 有占用进程，或利用率非 0 | 忙 | 退出码 4，列出占用进程 |
+  | 明确空闲（无进程且利用率 0） | 放行 | 起跑 |
+
+  核查记录写入结果 payload 的 `npu_gate` 字段（device、时间戳、判定、原始输出摘要）。
+  M2 实现，本地用 npu-smi 命令桩验证三分支（含代表性原始输出样本），真机行为归 M7。
 - 裁决路径唯一；引擎零领域词（领域内容只进 registry 数据）。
 - `params` 逐字对应 C 原型；造数控制走 `case_controls`，不伪装成参数。
 - 消费者棘轮：任何列/轴/键的消费者不得绕开 IR 重新遍历 params 猜投影。
@@ -113,7 +141,8 @@ scratchpad 临时目录做渲染试验，临时产物不作为最终证据。
 4. **示例确定性迁移**：现有 cherk/sasum 的 gen_csv.py 只保留 FACTS 区，公共区
    从新模板整体替换，校验 FACTS AST 不变（版本号字段按 §0 版本策略同步），
    再重渲染对照逐字节门。旧包（新 checker 拒）按版本策略属预期，README 不改口径。
-5. 验收：逐字节门 12 项 + M0.5 投影矩阵 fixture 全项不变 + 负例回归
+5. 验收：逐字节门 10 项派生物（两个 gen_csv.py 是迁移前参考，见 digests 文件头）
+   + M0.5 投影矩阵 fixture 全项不变 + 负例回归
    （撞键/行数/未知键 v1 语义不变）。
 
 ## 4. M2 · accept A1/A2（依赖 M0.5 接口）
@@ -126,10 +155,15 @@ scratchpad 临时目录做渲染试验，临时产物不作为最终证据。
    0 或 >1 命中报错并列候选；README 模板与 CLI help 里硬编码的 ops-blas 措辞
    一并按 profile 渲染。探测出的 domain/profile 写入 runtime manifest（记录，
    不参与裁决）。accept 的 `BASE_COLUMNS` 列所有权改按 M0.5 的两个集合。
-3. NPU 现场空闲门（§0）：A3/A4 起跑前 npu-smi 现场核查目标 device 的利用率与
-   占用进程，非空闲报错退出并列出占用方；核查结果记入 runtime manifest。
-   本地无 NPU 时用探针桩验证判定逻辑（空闲/忙/查询失败三分支），真机行为归 M7。
-4. 验收（可操作版）：同一本地 ops-blas 树改前/改后各跑一次，规范化对比
+3. NPU 现场空闲门（判定表见 §0）：落在**两个 verify 模板**——verify_accuracy 首次
+   gtest 前、verify_performance 首次 warm-up/msprof 前各自现场核查，不复用早先结果；
+   三分支（空闲/忙/查询失败）按 §0 表执行，退出码 4，`npu_gate` 记录进结果 payload。
+   本地验收：npu-smi 命令桩喂三分支各一份代表性原始输出，断言退出码与 payload 字段。
+4. A5 空基线终态（评审抓到的现状缺口）：现行 verdict 在可比性能集为空时直接记
+   「性能通过（无性能用例）」，把「无 `TC_PF_` 行」与「有 `TC_PF_` 但基线全空」混为
+   一谈。改为：无 `TC_PF_` 行 → 通过（无性能要求）；有 `TC_PF_` 但可比集为空 →
+   性能 `NO_REF`、总体「证据不足」、退出码 2。回归：两种包各一探针。
+5. 验收（可操作版）：同一本地 ops-blas 树改前/改后各跑一次，规范化对比
    `env.json`/`check.json`/runtime manifest；量具寻址探针覆盖 0/1/>1 三种命中；
    对本地 ops-sparse 克隆跑 A2 布局推断探针。真机 A3/A4 归 M7。
 
@@ -148,6 +182,9 @@ M0.5 已冻结接口，本里程碑做实例化与校验：
 
 1. 校验：v2 才接受新键；name 合法且与 params/列名不冲突；kind ∈ {enum, tier}；
    values 非空、字符串、去重；tier 过 §5.5 规范形。sparse 正例负例齐全。
+   `footprint_policy` 一并实例化（registry-freeze §2 第 14 项）：sparse_frame 取
+   `runtime_only`，模板 `_row_is_valid` 按它跳过 `_footprint`；回归例一条——按稠密
+   公式会误拒、按 `runtime_only` 必须生成。
 2. 投影：control 经 ColumnSpec 产 `fixed_control` 列，进 AxisSpec 与 README。
 3. perf.key 可引用 control name，KeySpec 标 text 型。
 4. golden 新词表值 `{"kind": "harness"}`：validator `_golden_requirements`、

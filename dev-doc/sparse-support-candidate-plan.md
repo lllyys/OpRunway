@@ -1,13 +1,20 @@
 # sparse 支持候选方案（A 案：原 skill 内部分层 + 投影 IR）
 
-> **状态：候选，未立项。** 2026-09-01 记录。三案对比经 Codex 架构评审
+> **状态：已采纳并立项实施**（2026-09-01 用户裁定开工，分支 `feature/sparse-r1`，
+> 实施计划见 [sparse-r1-implementation-plan.md](sparse-r1-implementation-plan.md)；
+> 编号与状态唯一源见 [sparse-gap-learning-map.md](sparse-gap-learning-map.md) §0）。
+> 术语：**投影 IR** = 由 FACTS 与 registry 编译出的中间表示（列/轴/键/物化四份 spec），
+> 是所有列消费者的唯一输入；**registry** = skill 内版本化的有限 profile/词表集合（域级
+> 惯例数据）；**FACTS** = 单算子事实字面量，见
+> [facts-schema.md](../plugin/skill/repo-task-blas-case-gen/references/facts-schema.md)。
+> 原始记录：三案对比经 Codex 架构评审
 > （review-plan，gpt-5.6-sol/xhigh，thread `01a05afc-5d9c-7bb1-9374-df472164f970`），
 > 裁决 A 案；本文即该裁决与七条硬边界的完整落笔。
 > 差距全景与心智模型见 [sparse-gap-learning-map.md](sparse-gap-learning-map.md)。
 
 ## 1. 问题与三案
 
-让 repo-task-blas-case-gen / repo-task-blas-accept 支持 `cann/ops-sparse`（35 算子，
+让 repo-task-blas-case-gen / repo-task-blas-accept 支持 `cann/ops-sparse`（33 算子，
 descriptor 风格 API，`test/<op>/arch35/` 布局，全局结构参数列契约）。三个候选结构：
 
 | 案 | 结构 | Codex 加权分（复杂度 ×2，满分 35） |
@@ -43,7 +50,7 @@ FACTS
   唯一的 block/pairwise/render/check 引擎
 ```
 
-## 3. 七条硬边界（A 案成立的前提；violat 任何一条，复杂度评分作废）
+## 3. 七条硬边界（A 案成立的前提；违反任何一条，复杂度评分作废）
 
 1. **API 参数与造数控制分离**：`params` 只放 C 原型；不造伪参数、伪 family 迁就旧模型。
 2. **角色只映射有限投影原语**：不投影 / 直接列 / 复数拆列 / 定长展开 / 固定控制列 /
@@ -68,11 +75,10 @@ FACTS
 
 降险原则：先证明重构无害，再引入新域。
 
-1. E1 探明 arch35 真机 + 剩余事实核对。V2/V3/V5 已用本地 clone（HEAD 5b2a5ba）核完：
-   sparse wrapper 无 warm-up，`--calls-per-case` 填 1（blas 是 2，勿抄错）；`expect_result`
-   词表各算子不同（SUCCESS/success/singular），accept 不解析、无碍；build.sh 与 ops-blas
-   同款 `--ops=`。待核仅剩 V1（gtest 套件名生成器能否按 case_name 过滤）与 V4
-   （sparse kernel 的 Task Type）。
+1. E1 探明 arch35 真机（只阻塞真机验证与「正式支持」声明，不阻塞本地实施）。
+   事实核对 V1/V2/V3/V5 已完成（状态唯一源见 learning-map §0；V1 补核结论：gtest
+   name generator 直接返回 case_name，`--gtest_filter` 按名选单条与 blas 同构），
+   待真机仅剩 V4（sparse kernel 的 Task Type）。
 2. 钉回归基线（边界 7 的字节摘要）。
 3. IR 重构：现有 blas FACTS 完整编译到 IR，**全部派生产物逐字节不变**——这是
    第一个可验收里程碑。
@@ -97,5 +103,5 @@ FACTS
 
 待决（立项时处理）：G2 上游改名；G3 sparse 任务书完整性门槛（完整 C 原型含
 descriptor、结构参数语义、性能标杆口径——单位与是否已除 0.8）；G4 GPU 基线
-回填流程归属。重开 C 案的唯一条件：V1 核实发现 sparse 有不同的用例块生命周期、
-执行协议或终判语义——当前证据不支持。
+回填流程归属。重开 C 案的唯一条件曾定为「V1 核实发现不同的用例块生命周期、执行协议
+或终判语义」——V1 已核实无异常，条件未触发，**C 案就此关闭**。

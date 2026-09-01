@@ -2,25 +2,42 @@
 
 > 回答一个问题：两个 blas skill（repo-task-blas-case-gen / repo-task-blas-accept）距离支持
 > `cann/ops-sparse` 还差什么。面向心智模型与世界模型，不面向操作步骤。
-> 事实基线：2026-08-31 对 ops-sparse 仓的实探（35 算子、`test/<op>/arch35/` 布局、
+> 事实基线：2026-08-31 对 ops-sparse 仓的实探（33 个测试目录、`test/<op>/arch35/` 布局、
 > descriptor 风格 API、`fill_sparse.h`/`descriptor_manager.h` 框架件、`coo2csr_test.csv` 列契约）
-> 与本轮已定决策。
+> 与本轮已定决策。自造术语（六件、A1–A5、NO_REF、IR、registry 等）的定义见
+> [sparse-r1-implementation-plan.md](sparse-r1-implementation-plan.md) 的「阅读约定」表。
 
-## 0. 差距总表（TL;DR）
+## 0. 规范编号与状态表（全部 sparse 文档的唯一状态源）
 
-| 编号 | 差距                                                | 层次   | 状态                |
-| -- | ------------------------------------------------- | ---- | ----------------- |
-| A1 | accept 环境门写死 `cann_ops_blas.h`                    | 参数级  | 解法已清（硬编码变探测）      |
-| A2 | accept 路径模型：无 family 层、arch35 子目录、build 产物路径      | 参数级  | 解法已清（推断适配）        |
-| C1 | FACTS 本体：稀疏复合结构、descriptor 签名建模、verify/golden 词表  | 描述层  | 设计方向已清            |
-| C2 | 列投影：逐 buffer 填充范式 → 全局结构参数化范式                     | 接口层  | 统一方案已清（角色决定投影）    |
-| C3 | 浮点轴：连续量进不了组合引擎与性能键                                | 引擎层  | 解法已清（档位化 + 文本同一性） |
-| E1 | arch35 目标真机未探明                                    | 环境   | **最硬前置，未探明**      |
-| D1 | references 文档的 sparse 章节                          | 文档   | 随实现交付             |
-| V1 | 核对清单：gtest 套件名、warm-up 次数、状态词表、Task Type、build.sh | 事实核对 | 待真仓核对             |
+其它文档（candidate-plan、implementation-plan、todo）只引用本表，不复制状态。
+状态标注：待实施（Mx）= 归实施计划的哪个里程碑；✅ = 已核实；❌ CLOSED = 已关闭留号。
 
-已裁定、从清单划掉的：块命名统一用 `TC_<块>_`；sparse v1 不做 footprint 估算；
-任务发放物按六件；性能用例固定 200 条 + 空 `gpu_ms` 待填基线。
+| 编号 | 事项 | 层次 | 状态 |
+| --- | --- | --- | --- |
+| A1 | accept 环境门写死 `cann_ops_blas.h` | 参数级 | 待实施（M2，探测化） |
+| A2 | accept 路径模型：无 family 层、arch35、build 产物路径 | 参数级 | 待实施（M2） |
+| C1a | FACTS 本体·稀疏复合结构对象（nnz 耦合、内容不变量） | 描述层 | 本期不做，等首个 descriptor 任务 |
+| C1b | FACTS 本体·descriptor 签名指称 | 描述层 | 本期不做（同上） |
+| C1c | FACTS 本体·golden/状态/verify 词表方言 | 描述层 | 待实施（M3） |
+| C2 | 列投影方言：角色决定投影 | 接口层 | 待实施（M1 IR + M3 实例化） |
+| C3 | 浮点档位轴：离散化 + 文本同一性 | 引擎层 | 待实施（M4，并入 M3） |
+| E1 | arch35 目标真机未探明 | 环境 | 未探明；只阻塞 M7 真机与「正式支持」声明 |
+| D1 | references 的 sparse 章节 | 文档 | 随实现交付（M6） |
+| V1 | gtest 套件名与 `--gtest_filter` 按名过滤 | 事实核对 | ✅ name generator 返回 case_name |
+| V2 | wrapper warm-up 次数 | 事实核对 | ✅ 无 warm-up，calls-per-case=1 |
+| V3 | expect_result 状态词表 | 事实核对 | ✅ 按算子异；registry 闭合词表处理 |
+| V4 | sparse kernel 的 op_summary Task Type | 事实核对 | 待真机（M7） |
+| V5 | build.sh 参数与产物路径 | 事实核对 | ✅ 与 ops-blas 同款 `--ops=` |
+| G1 | spgemm 950 任务书 / ATK-torch 形态通路 | 方向 | ❌ CLOSED（用户裁定放弃跟进） |
+| G2 | 上游 `repo-task-blas-*` 改名 | 治理 | 待决（立项同场） |
+| G3 | sparse 任务书完整性门槛 | 治理 | 待决 |
+| G4 | GPU 基线回填流程归属 | 治理 | 待决 |
+
+已裁定、不再是差距的：块命名统一用 `TC_<块>_`；sparse v1 不做 footprint 估算
+（registry `footprint_policy=runtime_only`，见 registry-freeze §2）；任务发放物按六件；
+性能用例固定 200 条 + 空 `gpu_ms` 待填基线；架构 C 案已关闭（candidate-plan §6）。
+成员口径：33 个测试目录 = 26 csv_gtest + 7 self_contained，成员清单与统计方法见
+[sparse-r1-census.md](sparse-r1-census.md) §1。
 
 ## 1. 本质（Essence）
 
@@ -124,30 +141,30 @@ flowchart TD
 
 ## 4. 决策地图（Decision Map）
 
-**场景一：拿到一份 sparse 任务书，要发任务包**
-↓ 决策：检查 C1–C3 是否已落地；未落地则不能发（六件必须由 case-gen 生成，红线禁止手写）
-↓ 理由：六件之一就是生成器本身，check 靠它逐字节复核
-↓ 预期：C1–C3 落地后，发放物与 blas 完全同构
-
-**场景二：收到 sparse 算子 PR，要验收**
-↓ 决策：先确认 arch35 真机可用（E1），再做 A1/A2 两处小改
-↓ 理由：代码 gap 都能写，没有对的机器 A3–A5 一步走不了
-↓ 预期：机器就位后，accept 统一路径原样吃 sparse 六件包
-
-**场景三：任务书没给 GPU 性能数据**
-↓ 决策：照发六件——200 点位、`gpu_ms` 全空的待填表
-↓ 理由：基线是任务书的输入职责；「没要求」是通过，「有要求没秤」是证据不足，两种收敛都定义好了
-↓ 预期：GPU 侧任何时候回填，配上数的行自动升级为可裁决，免重渲染
-
-**场景四：验收结果出现批量 SKIP 或性能全 FAIL**
-↓ 决策：先查环境机制（内存护栏读 cgroup、构建类型），再谈算子缺陷；必要时做单变量对照
-↓ 理由：blas 实战两次教训——n=8000 SKIP 是护栏兜底 2 GB，性能 FAIL 是仓库写死 Debug/-O0
-↓ 预期：结论按契约如实记，归因作对照证据附上，两者不混
-
-**场景五：要改两 skill 的共享层（引擎、模板、accept 路径）**
-↓ 决策：blas 的机械回归门先行（cherk/sasum 示例 check 退出码 0），动核心裁决逻辑无条件过 Codex
-↓ 理由：blas 刚在真机验证过全链路，共享层改动的最大风险是打碎这份已验证性
-↓ 预期：sparse 支持不以 blas 回归为代价
+1. **拿到一份 sparse 任务书，要发任务包**
+   - 决策：检查 C2、C3、C1c 是否已落地（三者是发包的关键路径；C1a/C1b 本期不做，
+     等首个 descriptor 风格任务）；未落地不能发——六件必须由 case-gen 生成，红线禁止手写。
+   - 理由：六件之一就是生成器本身，check 靠它逐字节复核。
+   - 预期：三项落地后，发放物与 blas 完全同构。
+2. **收到 sparse 算子 PR，要验收**
+   - 决策：A1/A2 两处小改可先行本地实施；E1（arch35 真机）只阻塞 A3–A5 真机执行
+     与「正式支持」声明，不阻塞代码与文档工作。
+   - 理由：代码 gap 都能本地写完并静态验证，真机是执行前提不是实现前提。
+   - 预期：机器就位后，accept 统一路径原样吃 sparse 六件包。
+3. **任务书没给 GPU 性能数据**
+   - 决策：照发六件——200 点位、`gpu_ms` 全空的待填表。
+   - 理由：基线是任务书的输入职责；「没要求」是通过，「有要求没秤」是证据不足，
+     两种收敛都定义好了。
+   - 预期：GPU 侧任何时候回填，配上数的行自动升级为可裁决，免重渲染。
+4. **验收结果出现批量 SKIP 或性能全 FAIL**
+   - 决策：先查环境机制（内存护栏读 cgroup、构建类型），再谈算子缺陷；必要时做单变量对照。
+   - 理由：blas 实战两次教训——n=8000 SKIP 是护栏兜底 2 GB，性能 FAIL 是仓库写死 Debug/-O0。
+   - 预期：结论按契约如实记，归因作对照证据附上，两者不混。
+5. **要改两 skill 的共享层（引擎、模板、accept 路径）**
+   - 决策：blas 的机械回归门先行（cherk/sasum 示例 check 退出码 0），动核心裁决逻辑
+     无条件过 Codex。
+   - 理由：blas 刚在真机验证过全链路，共享层改动的最大风险是打碎这份已验证性。
+   - 预期：sparse 支持不以 blas 回归为代价。
 
 ## 5. 搜索空间扩展（Search Space Expansion）
 

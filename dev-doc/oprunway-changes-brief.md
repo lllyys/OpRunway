@@ -2,7 +2,18 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
-- **2026-09-01 · sparse R1 实施计划定稿（经一轮 Codex audit-fix）。** 首版计划送 Codex
+- **2026-09-01 · sparse R1 开工：M0.5 普查完成，六项记档文档过评审并修毕。** 用户裁定
+  立项，切分支 `feature/sparse-r1` 实施。普查 33 个 ops-sparse 测试目录全收齐
+  （`dev-doc/sparse-r1-census.md`）：26 个 frame 形态证实，但列契约按算子分化（种子列
+  四种、阈值列三档、expect 词表五变体）——registry 粒度随之修正为「仓级默认 + FACTS
+  显式覆盖」；投影矩阵盘点与 registry 字段面冻结落
+  `sparse-r1-projection-matrix.md` / `sparse-r1-registry-freeze.md`（新增
+  `footprint_policy` 字段）。六项记档文档（bbe29f4）另经 Codex 批量审判 FIX_NEEDED，
+  已修：编号状态唯一源收进 learning-map §0、A5 空基线终态与 footprint 绕行补成实施
+  任务、NPU 空闲门落点改两个 verify 模板并写死三分支判定表、digests 拆 10+2 并补
+  provenance、立项状态与术语表就位。
+
+- **2026-09-01 · sparse R1 实施计划定稿（经 Codex 评审重写，未独立复验）。** 首版计划送 Codex
   评审判 MAJOR GAPS，按结论重写：普查前移为 M0.5（冻结 registry 接口与现有 role
   投影矩阵后才动 M1）；M1 补全为 compile_facts→ProjectionIR 四 spec + 七消费者收编
   + 消费者棘轮；版本策略改 schema v2 + GENERATOR_VERSION 2 + 示例公共区确定性迁移
@@ -11,7 +22,7 @@
   S1；tier 规范形收紧为必须含小数点（免落 int 归一分支）；M5 改名「本地静态链闭合」
   且 warning 不许静默过；R1 预期终态显式写死为「精度通过、性能 NO_REF、总体证据
   不足」。计划落 `dev-doc/sparse-r1-implementation-plan.md`，基线摘要随迁
-  `dev-doc/sparse-r1-baseline-digests.txt`；实施移交主 session，并行段用 ultracode。
+  `dev-doc/sparse-r1-baseline-digests.txt`；交接件就绪，等用户立项指令。
 
 - **2026-09-01 · sparse 支持候选方案定稿（未立项）。** 对 cann/ops-sparse 实探出差距全景
   （accept 两处参数级、case-gen 三处范式级、arch35 环境前置），写成

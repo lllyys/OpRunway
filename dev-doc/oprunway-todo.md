@@ -2,13 +2,15 @@
 
 本页只保留尚未完成且有当前证据的工作。仓规以根 `AGENTS.md` 为准，已完成历史查 changes brief 与 Git。
 
-## 候选 · sparse 支持（未立项）
+## P0 · sparse R1（已立项，实施中 @ feature/sparse-r1）
 
-- [ ] 候选方案已定稿待立项：A 案（原 skill 内部分层 + 统一投影 IR），经 Codex 三案评审
-  裁决，七条硬边界与实施序见 [sparse-support-candidate-plan.md](sparse-support-candidate-plan.md)，
-  差距全景见 [sparse-gap-learning-map.md](sparse-gap-learning-map.md)。立项前置：
-  E1 探明 arch35 真机；V1–V5 事实核对（gtest 套件名、warm-up 次数、状态词表、
-  Task Type、build.sh）。立项时同场处理：G2 上游改名、G3 任务书完整性门槛、G4 基线回填归属。
+- [ ] 按 [sparse-r1-implementation-plan.md](sparse-r1-implementation-plan.md) 走
+  M0.5–M6；当前在 M0.5（普查已完成，见 [sparse-r1-census.md](sparse-r1-census.md)；
+  fixture 钉板与 registry 冻结进行中）。编号与状态唯一源是
+  [sparse-gap-learning-map.md](sparse-gap-learning-map.md) §0。
+- [ ] E1 探明 arch35 真机——不阻塞 M0.5–M6 本地实施，阻塞 M7 真机验证与「正式支持」
+  声明。事实核对仅剩 V4（sparse kernel 的 Task Type，需真机 msprof）。
+- [ ] 立项同场待决：G2 上游改名、G3 任务书完整性门槛、G4 基线回填归属。
 
 ## P0 · 已证明的 DUT 修复后复验
 
