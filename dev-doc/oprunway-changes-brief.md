@@ -2,6 +2,16 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-01 · role 投影矩阵 fixture 录毕（ProjectionIR 重构钉板就位）。** 按
+  `sparse-r1-projection-matrix.md` §D 建 `dev-doc/sparse-r1-projection-fixture/`：
+  五个正向合成 gen_csv.py（g1 profile/g2 batch/g3 fixed_vector+int_array/
+  g4 conditioning+packed+producer/g5 标量取值）全部 check=0 且 render 成功，§D 标 ✗
+  的缺口条件全部有落点；六个负例按 §D 清单如实录现状（trap2 的 perf.key ld 声明值
+  被静默重算、trap5 校验比生成器严、trap6 双 nullA 列全录进 fixture.json）。录制脚本
+  幂等（两跑逐字节一致，无绝对路径/时间戳），比对约定：重构前后 `results` 子树逐字节
+  一致即无行为变化；模板变更后先 `--refresh-common`。另实测：a/A 双 `a_fill` 轴让
+  pairwise 不收敛（>20s 不终止），故 trap6 用 nullable 碰撞变体，README 已记。
+
 - **2026-09-01 · sparse R1 开工：M0.5 普查完成，六项记档文档过评审并修毕。** 用户裁定
   立项，切分支 `feature/sparse-r1` 实施。普查 33 个 ops-sparse 测试目录全收齐
   （`dev-doc/sparse-r1-census.md`）：26 个 frame 形态证实，但列契约按算子分化（种子列

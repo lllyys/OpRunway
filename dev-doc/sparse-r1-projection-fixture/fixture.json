@@ -1,0 +1,573 @@
+{
+  "_meta": {
+    "compare_rule": "无行为变化 = 前后两份 fixture.json 的 results 子树逐字节一致",
+    "description": "role 投影矩阵 fixture 的现状快照（钉板）。results 是行为面；recorded_against 是录制时的代码与输入指纹，重构后允许变化。",
+    "recorded_against": {
+      "facts_sha256": {
+        "g1_profile": "ffc4658c19be1320f41bd2e3c224a6dbdcd95337596a433d17a61afd10878b73",
+        "g2_batch": "a2b6700821d16657c6f33304606d69eac6259561f5541c944e2830d0f6fb3fbf",
+        "g3_fixed": "818e078e9940bbd7a614dddc08e15b90cb381cbbf44ac15d5e00e9ac946a3338",
+        "g4_cond": "98fa690739390e6f6bf563ed8c8b07b8ebba7e4afb62e8c30ed58d4c2b364883",
+        "g5_scalar": "9a4eaaac12e04756aeef77e732fe076536c4c792d8ba9bf9bc991cd453cb556e",
+        "g6_trap_1_dtype_enum_unconsumed": "b77bfbf081eaa3991504b4bda9224dbc439f3ab44a0ecb957ac71bbdd9dc0a1d",
+        "g6_trap_2_perf_ld_key": "7e6ca6d96c8da82265e805eaed97f01531e0831964e2c3c822ed96eae35e7ddb",
+        "g6_trap_3_complex_profile_edge_scalar": "dbd9592f9d46db8c950acbd93a3296ac5c5f8b6218ff2f9ca053a2d5d201266b",
+        "g6_trap_4_dup_conditioning": "34daac1c85dc5247212db75bebc8041639be12297f4c35b2484498ee6f47dffd",
+        "g6_trap_5_edge_fill_key": "a42141a497363444122748a6791051c259d9cc824dabf634363bb5fad63e8ed0",
+        "g6_trap_6_name_case_collision": "292c49512bebf195288dead4b7811d20a033331aa225c1f934493e7f033bad44"
+      },
+      "package_py_sha256": "409c745d7fb1648b1a2222c8cffa6e1ac929b0b9623e8cf56421778a4e1e3ebd",
+      "template_common_sha256": "d3cf0138e66d2f318fc485e428d522dfc2e5df2ddc56ca107944f988ffee42d9"
+    }
+  },
+  "results": {
+    "g1_profile": {
+      "check": {
+        "exit": 0,
+        "stderr": "",
+        "stdout": "算子        g1_profile\n符号        aclblasG1Profile\n参数        11 个\n角色分布    handle=1、enum=3、dim=2、layout=2、scalar=1、matrix=2\n输出参数    C\nprofiles    2 个\nedge_cases  0 个\nperf        有\ncase_name,description,dtypeA,computeType,algo,m,n,alpha_re,alpha_im,a_fill,lda,c_fill,ldc,expect_result,random_seed\npairs 覆盖 857/857，infeasible 0 对\nrows_dropped 0\n六件        gen_csv.py、g1_profile_test.csv、verify_accuracy.py、verify_performance.py、README.md、gpu_baseline.csv"
+      },
+      "generate_inprocess": {
+        "axes": [
+          {
+            "name": "profile",
+            "values": 2
+          },
+          {
+            "name": "algo",
+            "values": 2
+          },
+          {
+            "name": "m",
+            "values": 13
+          },
+          {
+            "name": "n",
+            "values": 13
+          },
+          {
+            "name": "alpha",
+            "values": 4
+          },
+          {
+            "name": "a_fill",
+            "values": 4
+          },
+          {
+            "name": "lda",
+            "values": 2
+          },
+          {
+            "name": "c_fill",
+            "values": 4
+          },
+          {
+            "name": "ldc",
+            "values": 2
+          }
+        ],
+        "blocks": {
+          "ED": 0,
+          "L0": 8,
+          "PF": 207,
+          "PW": 169
+        },
+        "header_columns": 15,
+        "pairs_covered": 857,
+        "pairs_infeasible": 0,
+        "pairs_total": 857,
+        "rows_dropped": 0,
+        "status": "ok",
+        "total_rows": 384
+      },
+      "render": {
+        "csv_header_line": "case_name,description,dtypeA,computeType,algo,m,n,alpha_re,alpha_im,a_fill,lda,c_fill,ldc,expect_result,random_seed",
+        "csv_row_count": 384,
+        "derived_sha256": {
+          "README.md": "e7603c132bca85f8c647e29566b57d6fbf8fbbc4f16dd0cadbe2e926745095d7",
+          "g1_profile_test.csv": "94af1dba72de1bdd8f8068beb7defa954d0abe0ed888d1c0ef07ab1ed1bb1888",
+          "gpu_baseline.csv": "a4c2445456ead3631edc7663d682cc653c880ebc85b206ab2e1e586832044285",
+          "verify_accuracy.py": "81f5b064d2a10ccf8081a2de780483f61dd0fb71ee991767ac8728471afe0fa2",
+          "verify_performance.py": "5cf4d67ed7662ed423ef04058b0704e44f5eac4d9faeafdf176263d538f8e98d"
+        },
+        "exit": 0,
+        "stderr": "",
+        "stderr_first_line": null,
+        "stdout": "g1_profile_test.csv: 384 rows\n解释器：<PYTHON>\n六件：\n  <FIXTURE>/out/g1_profile/gen_csv.py\n  <FIXTURE>/out/g1_profile/g1_profile_test.csv\n  <FIXTURE>/out/g1_profile/verify_accuracy.py\n  <FIXTURE>/out/g1_profile/verify_performance.py\n  <FIXTURE>/out/g1_profile/README.md\n  <FIXTURE>/out/g1_profile/gpu_baseline.csv"
+      }
+    },
+    "g2_batch": {
+      "check": {
+        "exit": 0,
+        "stderr": "",
+        "stdout": "算子        g2_batch\n符号        aclblasG2Batch\n参数        13 个\n角色分布    handle=1、dim=3、layout=6、matrix=3\n输出参数    C\nprofiles    0 个\nedge_cases  2 个\nperf        无\ncase_name,description,m,n,batchCount,a_fill,lda,strideA,b_fill,ldb,bcB,c_fill,ldc,bcC,expect_result,A_batch_pattern,B_batch_pattern,C_batch_pattern,random_seed\npairs 覆盖 465/465，infeasible 0 对\nrows_dropped 0\n六件        gen_csv.py、g2_batch_test.csv、verify_accuracy.py、verify_performance.py、README.md、gpu_baseline.csv"
+      },
+      "generate_inprocess": {
+        "axes": [
+          {
+            "name": "m",
+            "values": 3
+          },
+          {
+            "name": "n",
+            "values": 3
+          },
+          {
+            "name": "batchCount",
+            "values": 2
+          },
+          {
+            "name": "a_fill",
+            "values": 4
+          },
+          {
+            "name": "lda",
+            "values": 2
+          },
+          {
+            "name": "strideA",
+            "values": 2
+          },
+          {
+            "name": "b_fill",
+            "values": 4
+          },
+          {
+            "name": "ldb",
+            "values": 2
+          },
+          {
+            "name": "bcB",
+            "values": 2
+          },
+          {
+            "name": "c_fill",
+            "values": 4
+          },
+          {
+            "name": "ldc",
+            "values": 2
+          },
+          {
+            "name": "bcC",
+            "values": 2
+          }
+        ],
+        "blocks": {
+          "ED": 2,
+          "L0": 2,
+          "PF": 0,
+          "PW": 24
+        },
+        "header_columns": 19,
+        "pairs_covered": 465,
+        "pairs_infeasible": 0,
+        "pairs_total": 465,
+        "rows_dropped": 0,
+        "status": "ok",
+        "total_rows": 28
+      },
+      "render": {
+        "csv_header_line": "case_name,description,m,n,batchCount,a_fill,lda,strideA,b_fill,ldb,bcB,c_fill,ldc,bcC,expect_result,A_batch_pattern,B_batch_pattern,C_batch_pattern,random_seed",
+        "csv_row_count": 28,
+        "derived_sha256": {
+          "README.md": "93f3ed5054e33a9217d6be078c773177078e9fd76f5b875a25899b785b02b0ba",
+          "g2_batch_test.csv": "423d2e76846d43bd39145d378f17f0c9cc3374cce14a5e138fda7661651ab343",
+          "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
+          "verify_accuracy.py": "e39a48c3f33e0eb59884a52f159447b8a610883b70fb31f2a98209d8a12adaa8",
+          "verify_performance.py": "53147cb95a7f8e9e20fee7d33bc396f1b9ed7e8c275adafe62f71d9078d8e68d"
+        },
+        "exit": 0,
+        "stderr": "",
+        "stderr_first_line": null,
+        "stdout": "g2_batch_test.csv: 28 rows\n解释器：<PYTHON>\n六件：\n  <FIXTURE>/out/g2_batch/gen_csv.py\n  <FIXTURE>/out/g2_batch/g2_batch_test.csv\n  <FIXTURE>/out/g2_batch/verify_accuracy.py\n  <FIXTURE>/out/g2_batch/verify_performance.py\n  <FIXTURE>/out/g2_batch/README.md\n  <FIXTURE>/out/g2_batch/gpu_baseline.csv"
+      }
+    },
+    "g3_fixed": {
+      "check": {
+        "exit": 0,
+        "stderr": "",
+        "stdout": "算子        g3_fixed\n符号        aclblasG3Fixed\n参数        6 个\n角色分布    handle=1、dim=1、fixed_vector=2、int_array=2\n输出参数    outv、ipiv、ib\nprofiles    0 个\nedge_cases  2 个\nperf        无\ncase_name,description,n,pv0,pv1,pv2,expect_result,random_seed\npairs 覆盖 30/30，infeasible 0 对\nrows_dropped 0\n六件        gen_csv.py、g3_fixed_test.csv、verify_accuracy.py、verify_performance.py、README.md、gpu_baseline.csv"
+      },
+      "generate_inprocess": {
+        "axes": [
+          {
+            "name": "n",
+            "values": 15
+          },
+          {
+            "name": "pv",
+            "values": 2
+          }
+        ],
+        "blocks": {
+          "ED": 2,
+          "L0": 2,
+          "PF": 0,
+          "PW": 30
+        },
+        "header_columns": 8,
+        "pairs_covered": 30,
+        "pairs_infeasible": 0,
+        "pairs_total": 30,
+        "rows_dropped": 0,
+        "status": "ok",
+        "total_rows": 34
+      },
+      "render": {
+        "csv_header_line": "case_name,description,n,pv0,pv1,pv2,expect_result,random_seed",
+        "csv_row_count": 34,
+        "derived_sha256": {
+          "README.md": "29c9e3d9810ddcdb30eb2b4a6188c1a813bddc47dee780de73312d182da752cd",
+          "g3_fixed_test.csv": "70014dfd6d07af5cf9955d054a6b0ac81df20178550508fda440247520159d09",
+          "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
+          "verify_accuracy.py": "5f5389f0d7f02117744065ad34ec1d2bd146424e3432bef591b19b27af0371c9",
+          "verify_performance.py": "cf2f79bcd91a807b76e5f9b5715b137a092e66d4060f09c0e8b4f0e658b981ae"
+        },
+        "exit": 0,
+        "stderr": "",
+        "stderr_first_line": null,
+        "stdout": "g3_fixed_test.csv: 34 rows\n解释器：<PYTHON>\n六件：\n  <FIXTURE>/out/g3_fixed/gen_csv.py\n  <FIXTURE>/out/g3_fixed/g3_fixed_test.csv\n  <FIXTURE>/out/g3_fixed/verify_accuracy.py\n  <FIXTURE>/out/g3_fixed/verify_performance.py\n  <FIXTURE>/out/g3_fixed/README.md\n  <FIXTURE>/out/g3_fixed/gpu_baseline.csv"
+      }
+    },
+    "g4_cond": {
+      "check": {
+        "exit": 0,
+        "stderr": "",
+        "stdout": "算子        g4_cond\n符号        aclblasG4Cond\n参数        9 个\n角色分布    handle=1、dim=2、layout=2、vector=1、matrix=3\n输出参数    v\nprofiles    0 个\nedge_cases  0 个\nperf        无\ncase_name,description,m,n,m_fill,M_matrix_type,ldshared,p_fill,incv,expect_result,random_seed\npairs 覆盖 465/465，infeasible 0 对\nrows_dropped 0\n六件        gen_csv.py、g4_cond_test.csv、verify_accuracy.py、verify_performance.py、README.md、gpu_baseline.csv"
+      },
+      "generate_inprocess": {
+        "axes": [
+          {
+            "name": "m",
+            "values": 13
+          },
+          {
+            "name": "n",
+            "values": 13
+          },
+          {
+            "name": "M_matrix_type",
+            "values": 2
+          },
+          {
+            "name": "ldshared",
+            "values": 2
+          },
+          {
+            "name": "p_fill",
+            "values": 4
+          },
+          {
+            "name": "incv",
+            "values": 2
+          }
+        ],
+        "blocks": {
+          "ED": 0,
+          "L0": 2,
+          "PF": 0,
+          "PW": 169
+        },
+        "header_columns": 11,
+        "pairs_covered": 465,
+        "pairs_infeasible": 0,
+        "pairs_total": 465,
+        "rows_dropped": 0,
+        "status": "ok",
+        "total_rows": 171
+      },
+      "render": {
+        "csv_header_line": "case_name,description,m,n,m_fill,M_matrix_type,ldshared,p_fill,incv,expect_result,random_seed",
+        "csv_row_count": 171,
+        "derived_sha256": {
+          "README.md": "86fdeb0737527efcbec013e26a72d586fc4099ec358d3da0d8ca61324a996482",
+          "g4_cond_test.csv": "0a46bbf6aa05dc8961e103dfa8c549c269b252eff066417515f6bfa3ed0b63a3",
+          "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
+          "verify_accuracy.py": "4785ac2df7f67576c1dbe8d0223d3f748b515d1c2c714640f33e501b6f2a942a",
+          "verify_performance.py": "7e5a5a0c264ee5e9339111b4a906d93d0804a5f8bf563087aefecb7bd68b56de"
+        },
+        "exit": 0,
+        "stderr": "",
+        "stderr_first_line": null,
+        "stdout": "g4_cond_test.csv: 171 rows\n解释器：<PYTHON>\n六件：\n  <FIXTURE>/out/g4_cond/gen_csv.py\n  <FIXTURE>/out/g4_cond/g4_cond_test.csv\n  <FIXTURE>/out/g4_cond/verify_accuracy.py\n  <FIXTURE>/out/g4_cond/verify_performance.py\n  <FIXTURE>/out/g4_cond/README.md\n  <FIXTURE>/out/g4_cond/gpu_baseline.csv"
+      }
+    },
+    "g5_scalar": {
+      "check": {
+        "exit": 0,
+        "stderr": "",
+        "stdout": "算子        g5_scalar\n符号        aclblasG5Scalar\n参数        11 个\n角色分布    handle=1、enum=2、dim=1、layout=1、scalar=3、inout_scalar=1、vector=2\n输出参数    c\nprofiles    2 个\nedge_cases  4 个\nperf        有\ncase_name,description,trans,dt,n,alpha,beta_re,beta_im,c,s_re,s_im,x_fill,y_fill,incy,expect_result,random_seed\npairs 覆盖 725/725，infeasible 0 对\nrows_dropped 0\n六件        gen_csv.py、g5_scalar_test.csv、verify_accuracy.py、verify_performance.py、README.md、gpu_baseline.csv"
+      },
+      "generate_inprocess": {
+        "axes": [
+          {
+            "name": "trans",
+            "values": 2
+          },
+          {
+            "name": "profile",
+            "values": 2
+          },
+          {
+            "name": "n",
+            "values": 15
+          },
+          {
+            "name": "alpha",
+            "values": 3
+          },
+          {
+            "name": "beta",
+            "values": 4
+          },
+          {
+            "name": "c",
+            "values": 4
+          },
+          {
+            "name": "s",
+            "values": 2
+          },
+          {
+            "name": "x_fill",
+            "values": 4
+          },
+          {
+            "name": "y_fill",
+            "values": 4
+          },
+          {
+            "name": "incy",
+            "values": 2
+          }
+        ],
+        "blocks": {
+          "ED": 4,
+          "L0": 8,
+          "PF": 200,
+          "PW": 65
+        },
+        "header_columns": 16,
+        "pairs_covered": 725,
+        "pairs_infeasible": 0,
+        "pairs_total": 725,
+        "rows_dropped": 0,
+        "status": "ok",
+        "total_rows": 277
+      },
+      "render": {
+        "csv_header_line": "case_name,description,trans,dt,n,alpha,beta_re,beta_im,c,s_re,s_im,x_fill,y_fill,incy,expect_result,random_seed",
+        "csv_row_count": 277,
+        "derived_sha256": {
+          "README.md": "b6cac3277e2e54a6c0639f414e6686b66ba8676a7a8370369c42c57332ace20e",
+          "g5_scalar_test.csv": "20ae8a920a69b1ebf039c6b6747603658f9be6a2d49f4290ac1c898483fcf419",
+          "gpu_baseline.csv": "17452d52d2ee73a39f4692fcf19c9d3fa7a8277b982c19c6f076a75f8111e600",
+          "verify_accuracy.py": "88a7b0c99432e20b66647f2e77408620853ef2ff63b2eabbffd8de4b1e1bf532",
+          "verify_performance.py": "f83447a9967531fcaba619fd921e03df1350024fea5ae672c85597bfa33bd3f2"
+        },
+        "exit": 0,
+        "stderr": "",
+        "stderr_first_line": null,
+        "stdout": "g5_scalar_test.csv: 277 rows\n解释器：<PYTHON>\n六件：\n  <FIXTURE>/out/g5_scalar/gen_csv.py\n  <FIXTURE>/out/g5_scalar/g5_scalar_test.csv\n  <FIXTURE>/out/g5_scalar/verify_accuracy.py\n  <FIXTURE>/out/g5_scalar/verify_performance.py\n  <FIXTURE>/out/g5_scalar/README.md\n  <FIXTURE>/out/g5_scalar/gpu_baseline.csv"
+      }
+    },
+    "g6_trap_1_dtype_enum_unconsumed": {
+      "check": {
+        "exit": 2,
+        "stderr": "事实表 FACTS 或任务包有 1 处不合格：\n  - 生成失败：L0: 'dt'",
+        "stdout": ""
+      },
+      "generate_inprocess": {
+        "cause_type": "KeyError",
+        "exception_type": "GeneratorError",
+        "message_first_line": "L0: 'dt'",
+        "status": "exception"
+      },
+      "render": {
+        "exit": 2,
+        "stderr": "六件渲染失败：L0: 'dt'",
+        "stderr_first_line": "六件渲染失败：L0: 'dt'",
+        "stdout": ""
+      }
+    },
+    "g6_trap_2_perf_ld_key": {
+      "check": {
+        "exit": 0,
+        "stderr": "",
+        "stdout": "算子        g6_trap2\n符号        aclblasG6Trap2\n参数        4 个\n角色分布    handle=1、dim=1、layout=1、matrix=1\n输出参数    A\nprofiles    0 个\nedge_cases  0 个\nperf        有\ncase_name,description,n,a_fill,lda,expect_result,random_seed\npairs 覆盖 86/86，infeasible 0 对\nrows_dropped 0\n六件        gen_csv.py、g6_trap2_test.csv、verify_accuracy.py、verify_performance.py、README.md、gpu_baseline.csv"
+      },
+      "generate_inprocess": {
+        "axes": [
+          {
+            "name": "n",
+            "values": 13
+          },
+          {
+            "name": "a_fill",
+            "values": 4
+          },
+          {
+            "name": "lda",
+            "values": 2
+          }
+        ],
+        "blocks": {
+          "ED": 0,
+          "L0": 2,
+          "PF": 200,
+          "PW": 52
+        },
+        "header_columns": 7,
+        "pairs_covered": 86,
+        "pairs_infeasible": 0,
+        "pairs_total": 86,
+        "rows_dropped": 0,
+        "status": "ok",
+        "total_rows": 254
+      },
+      "render": {
+        "csv_header_line": "case_name,description,n,a_fill,lda,expect_result,random_seed",
+        "csv_row_count": 254,
+        "derived_sha256": {
+          "README.md": "c535e610facf2d84663bcfb2d180ffcf213821dd4668884186248c2b635294fc",
+          "g6_trap2_test.csv": "2515b1ba3453dd7a700d832af362eeb12285bdc4b80586d90db141e3f16f5aa4",
+          "gpu_baseline.csv": "aad2ecb2cb582f4eb6bf8c7d268e03c8428a2b53327a7eb3acb0d5404c608eac",
+          "verify_accuracy.py": "404a6ba4220730f85ef420a77e0a239a252f7181ae053b0a88e72efb3656c5f8",
+          "verify_performance.py": "4284ddcc90bed11d0fbe45fa459e78a73462146cdab2b4be3626dee03476b493"
+        },
+        "exit": 0,
+        "stderr": "",
+        "stderr_first_line": null,
+        "stdout": "g6_trap2_test.csv: 254 rows\n解释器：<PYTHON>\n六件：\n  <FIXTURE>/out/g6_trap_2_perf_ld_key/gen_csv.py\n  <FIXTURE>/out/g6_trap_2_perf_ld_key/g6_trap2_test.csv\n  <FIXTURE>/out/g6_trap_2_perf_ld_key/verify_accuracy.py\n  <FIXTURE>/out/g6_trap_2_perf_ld_key/verify_performance.py\n  <FIXTURE>/out/g6_trap_2_perf_ld_key/README.md\n  <FIXTURE>/out/g6_trap_2_perf_ld_key/gpu_baseline.csv"
+      }
+    },
+    "g6_trap_3_complex_profile_edge_scalar": {
+      "check": {
+        "exit": 2,
+        "stderr": "事实表 FACTS 或任务包有 1 处不合格：\n  - 生成失败：ED: cannot unpack non-iterable float object",
+        "stdout": ""
+      },
+      "generate_inprocess": {
+        "cause_type": "TypeError",
+        "exception_type": "GeneratorError",
+        "message_first_line": "ED: cannot unpack non-iterable float object",
+        "status": "exception"
+      },
+      "render": {
+        "exit": 2,
+        "stderr": "六件渲染失败：ED: cannot unpack non-iterable float object",
+        "stderr_first_line": "六件渲染失败：ED: cannot unpack non-iterable float object",
+        "stdout": ""
+      }
+    },
+    "g6_trap_4_dup_conditioning": {
+      "check": {
+        "exit": 2,
+        "stderr": "事实表 FACTS 或任务包有 1 处不合格：\n  - 生成失败：轴 'M_matrix_type' 含重复取值：['SAME', 'SAME']",
+        "stdout": ""
+      },
+      "generate_inprocess": {
+        "cause_type": null,
+        "exception_type": "GeneratorError",
+        "message_first_line": "轴 'M_matrix_type' 含重复取值：['SAME', 'SAME']",
+        "status": "exception"
+      },
+      "render": {
+        "exit": 2,
+        "stderr": "六件渲染失败：轴 'M_matrix_type' 含重复取值：['SAME', 'SAME']",
+        "stderr_first_line": "六件渲染失败：轴 'M_matrix_type' 含重复取值：['SAME', 'SAME']",
+        "stdout": ""
+      }
+    },
+    "g6_trap_5_edge_fill_key": {
+      "check": {
+        "exit": 2,
+        "stderr": "事实表 FACTS 或任务包有 1 处不合格：\n  - edge_cases[0].set 含未知键 'x_fill'",
+        "stdout": ""
+      },
+      "generate_inprocess": {
+        "axes": [
+          {
+            "name": "n",
+            "values": 15
+          },
+          {
+            "name": "x_fill",
+            "values": 4
+          }
+        ],
+        "blocks": {
+          "ED": 1,
+          "L0": 2,
+          "PF": 0,
+          "PW": 60
+        },
+        "header_columns": 6,
+        "pairs_covered": 60,
+        "pairs_infeasible": 0,
+        "pairs_total": 60,
+        "rows_dropped": 0,
+        "status": "ok",
+        "total_rows": 63
+      },
+      "render": {
+        "exit": 2,
+        "stderr": "事实表 FACTS 或任务包有 1 处不合格：\n  - edge_cases[0].set 含未知键 'x_fill'",
+        "stderr_first_line": "事实表 FACTS 或任务包有 1 处不合格：",
+        "stdout": ""
+      }
+    },
+    "g6_trap_6_name_case_collision": {
+      "check": {
+        "exit": 0,
+        "stderr": "",
+        "stdout": "算子        g6_trap6\n符号        aclblasG6Trap6\n参数        5 个\n角色分布    handle=1、dim=1、layout=1、vector=1、matrix=1\n输出参数    A\nprofiles    0 个\nedge_cases  0 个\nperf        无\ncase_name,description,n,a_fill,lda,expect_result,nullA,nullA,random_seed\npairs 覆盖 86/86，infeasible 0 对\nrows_dropped 0\n六件        gen_csv.py、g6_trap6_test.csv、verify_accuracy.py、verify_performance.py、README.md、gpu_baseline.csv"
+      },
+      "generate_inprocess": {
+        "axes": [
+          {
+            "name": "n",
+            "values": 13
+          },
+          {
+            "name": "a_fill",
+            "values": 4
+          },
+          {
+            "name": "lda",
+            "values": 2
+          }
+        ],
+        "blocks": {
+          "ED": 0,
+          "L0": 2,
+          "PF": 0,
+          "PW": 52
+        },
+        "header_columns": 9,
+        "pairs_covered": 86,
+        "pairs_infeasible": 0,
+        "pairs_total": 86,
+        "rows_dropped": 0,
+        "status": "ok",
+        "total_rows": 54
+      },
+      "render": {
+        "csv_header_line": "case_name,description,n,a_fill,lda,expect_result,nullA,nullA,random_seed",
+        "csv_row_count": 54,
+        "derived_sha256": {
+          "README.md": "da885fe2d3d48f27861ee18478d3c21aa8595e4bf393bc082b720cec6c48aabd",
+          "g6_trap6_test.csv": "18a0d4f1b484c6e77e0d2633d71a3230ec5a65ca9c0c8b8eb332f0b9753505f6",
+          "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
+          "verify_accuracy.py": "9e51fc129d1b42b2877540d25bc0ba313275a8526d1d144d4ac9861df8fba559",
+          "verify_performance.py": "9b0ebf45357e46936cae0827658f86a53f3943b156e0734aaafb73a79d477c08"
+        },
+        "exit": 0,
+        "stderr": "",
+        "stderr_first_line": null,
+        "stdout": "g6_trap6_test.csv: 54 rows\n解释器：<PYTHON>\n六件：\n  <FIXTURE>/out/g6_trap_6_name_case_collision/gen_csv.py\n  <FIXTURE>/out/g6_trap_6_name_case_collision/g6_trap6_test.csv\n  <FIXTURE>/out/g6_trap_6_name_case_collision/verify_accuracy.py\n  <FIXTURE>/out/g6_trap_6_name_case_collision/verify_performance.py\n  <FIXTURE>/out/g6_trap_6_name_case_collision/README.md\n  <FIXTURE>/out/g6_trap_6_name_case_collision/gpu_baseline.csv"
+      }
+    }
+  }
+}
