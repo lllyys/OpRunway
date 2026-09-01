@@ -2,6 +2,25 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-01 · sparse R1 实施计划定稿（经一轮 Codex audit-fix）。** 首版计划送 Codex
+  评审判 MAJOR GAPS，按结论重写：普查前移为 M0.5（冻结 registry 接口与现有 role
+  投影矩阵后才动 M1）；M1 补全为 compile_facts→ProjectionIR 四 spec + 七消费者收编
+  + 消费者棘轮；版本策略改 schema v2 + GENERATOR_VERSION 2 + 示例公共区确定性迁移
+  （「不 bump」被证伪——旧校验器拒未知键，不是加法兼容）；blas 专属校验三处
+  （handle ctype/状态词表/默认 expect）纳入 profile 化，否则首个 sparse FACTS 过不了
+  S1；tier 规范形收紧为必须含小数点（免落 int 归一分支）；M5 改名「本地静态链闭合」
+  且 warning 不许静默过；R1 预期终态显式写死为「精度通过、性能 NO_REF、总体证据
+  不足」。计划落 `dev-doc/sparse-r1-implementation-plan.md`，基线摘要随迁
+  `dev-doc/sparse-r1-baseline-digests.txt`；实施移交主 session，并行段用 ultracode。
+
+- **2026-09-01 · sparse 支持候选方案定稿（未立项）。** 对 cann/ops-sparse 实探出差距全景
+  （accept 两处参数级、case-gen 三处范式级、arch35 环境前置），写成
+  `dev-doc/sparse-gap-learning-map.md`；三案（原地分层 / 新建 skill / 拆核心库）经 Codex
+  评审裁决 A 案——原 skill 内 FACTS 分四块（params/逻辑结构/case_controls/harness_profile）
+  规范化为统一投影 IR，唯一引擎消费，七条硬边界与「先 blas 逐字节不变、再接 sparse
+  profile」的迁移序记入 `dev-doc/sparse-support-candidate-plan.md`；todo 挂候选节。
+  评审纠正一处原始设计：造数控制（sparsity 等）不得伪装进 params。
+
 - **2026-08-31 · 性能用例数定死 200（用户裁定，推翻评审的「规模由任务书决定」）。** 三层落地：
   facts-schema 写死「`perf` 节存在时 rows 固定 200 行」；`package.py check` 机械强制
   （`PERF_ROWS_REQUIRED=200`，行数不符退出码 2）；两个示例扩成 200 点——cherk 25 尺寸档

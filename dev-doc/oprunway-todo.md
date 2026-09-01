@@ -2,6 +2,14 @@
 
 本页只保留尚未完成且有当前证据的工作。仓规以根 `AGENTS.md` 为准，已完成历史查 changes brief 与 Git。
 
+## 候选 · sparse 支持（未立项）
+
+- [ ] 候选方案已定稿待立项：A 案（原 skill 内部分层 + 统一投影 IR），经 Codex 三案评审
+  裁决，七条硬边界与实施序见 [sparse-support-candidate-plan.md](sparse-support-candidate-plan.md)，
+  差距全景见 [sparse-gap-learning-map.md](sparse-gap-learning-map.md)。立项前置：
+  E1 探明 arch35 真机；V1–V5 事实核对（gtest 套件名、warm-up 次数、状态词表、
+  Task Type、build.sh）。立项时同场处理：G2 上游改名、G3 任务书完整性门槛、G4 基线回填归属。
+
 ## P0 · 已证明的 DUT 修复后复验
 
 - [ ] RemainderTensorTensor：补齐 `ascend910_93` 的 kernel source、op_def config 与安装交付后，
