@@ -155,12 +155,45 @@ HARNESS_REGISTRY = {
         # dense_formula 走静态显存估算；no_static_check 只跳过静态判定。
         "footprint_policy": "dense_formula",
     },
+    "sparse_frame": {
+        # 值按 ops-sparse@5b2a5ba 普查实例化（仓级默认；逐算子偏差走 FACTS 覆盖）。
+        "seed_columns": ["seed"],
+        "description_column": None,
+        "expect_column": "expect_result",
+        "expect_default_token": "SUCCESS",
+        # 26 个 frame 算子 expect 词表的并集（Lt 家族除外），普查即出处；
+        # 含小写变体与算子私有 token，单算子在 FACTS 里声明精确子集。
+        "status_vocab_bound": [
+            "SUCCESS", "ACL_SPARSE_STATUS_SUCCESS", "SUCCESS_NO_OUTPUT",
+            "INVALID_VALUE", "NOT_SUPPORTED", "SINGULAR",
+            "success", "singular",
+        ],
+        # 仓级默认三件套；无阈值列的算子覆盖为空表。
+        "threshold_columns": [
+            "mere_threshold", "mare_multiplier", "abs_threshold",
+        ],
+        # 稀疏仓 handle 形态不一（含无 handle 的 accessor），不做首参断言。
+        "first_param_ctype": None,
+        "entry_headers": ["cann_ops_sparse.h"],
+        "footprint_policy": "no_static_check",
+    },
 }
 
 
 def _harness_profile(facts):
-    """本任务包适用的 profile。schema v1 隐式 blas；v2 由 FACTS 选（后续里程碑）。"""
+    """本任务包适用的 profile。schema v1 隐式 blas；v2 由 FACTS 的 harness_profile 选。"""
+    if facts.get("schema_version") == 2:
+        return HARNESS_REGISTRY[facts["harness_profile"]]
     return HARNESS_REGISTRY["blas"]
+
+
+def _resolved_profile(facts):
+    """profile 叠加 FACTS 的 harness_overrides（整键替换，恰四个可覆盖键）。
+    覆盖键合法性由 S1 校验把关，这里只做机械合并。"""
+    profile = dict(_harness_profile(facts))
+    if facts.get("schema_version") == 2:
+        profile.update(facts.get("harness_overrides", {}))
+    return profile
 
 
 class GeneratorError(Exception):

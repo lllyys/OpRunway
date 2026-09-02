@@ -1278,8 +1278,14 @@ def _harness_registry():
 
 
 def _harness_profile(facts):
-    """本任务包适用的 profile。schema v1 隐式 blas；v2 由 FACTS 选（后续里程碑）。
-    facts 必传：留隐式默认会变成第二套隐含接口，v2 选 profile 时静默落回 blas。"""
+    """本任务包适用的 profile。schema v1 隐式 blas；v2 由 FACTS 的 harness_profile 选。
+    facts 必传：留隐式默认会变成第二套隐含接口，v2 选 profile 时静默落回 blas。
+    v2 的 harness_profile 未知时落回 blas 继续校验——主错误由 v2 检查报出，
+    这里不再抛第二个异常。"""
+    if isinstance(facts, dict) and facts.get("schema_version") == 2:
+        profile = _harness_registry().get(facts.get("harness_profile"))
+        if profile is not None:
+            return profile
     return _harness_registry()["blas"]
 
 
