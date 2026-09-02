@@ -179,7 +179,9 @@ def _package_csv(package):
 def _csv_header(path):
     with Path(path).open(encoding="utf-8", newline="") as stream:
         for raw in stream:
-            if raw.strip() and not raw.startswith("#"):
+            stripped = raw.strip()
+            # 与其它读取器同一口径（全局词法规则）：行首含前导空白后为 # 即注释行。
+            if stripped and not stripped.startswith("#"):
                 return next(csv.reader([raw]))
     raise ValueError(f"{path} 没有表头")
 
@@ -308,7 +310,7 @@ def _harness_files(harness_dir, op):
 
 
 def _write_runtime(runtime, package, package_csv, op, family, keys, meta, rows, module,
-                   calls_per_case, threshold):
+                   calls_per_case, threshold, harness_profile=None):
     """把任意任务包变成运行时包：CSV 副本、规范化基线、渲染出的两个 verify 脚本、manifest。"""
     runtime = Path(runtime)
     runtime.mkdir(parents=True, exist_ok=True)
@@ -320,6 +322,7 @@ def _write_runtime(runtime, package, package_csv, op, family, keys, meta, rows, 
     manifest = {
         "op": op,
         "family": family,
+        "harness_profile": harness_profile,
         "perf_key": keys,
         "threshold": threshold,
         "calls_per_case": calls_per_case,
@@ -375,6 +378,24 @@ def _find_header(name):
         if candidate.is_file():
             return candidate.resolve()
     return None
+
+
+def _detect_profile(repo, registry):
+    """A1 域探测：按 registry 各 profile 的 entry_headers 在 <repo>/include 下探测。
+
+    返回 (hits, probed)：hits 是 {profile键: 命中头文件路径}；probed 是
+    {profile键: 探测过的头文件名列表}。恰一命中才可选定，0/多命中由调用方硬失败。"""
+    hits = {}
+    probed = {}
+    for key in sorted(registry):
+        headers = registry[key]["entry_headers"]
+        probed[key] = list(headers)
+        for name in headers:
+            candidate = Path(repo) / "include" / name
+            if candidate.is_file():
+                hits[key] = str(candidate)
+                break
+    return hits, probed
 
 
 def _find_cann():
@@ -474,6 +495,22 @@ def command_env(args):
     record("csv_loader.h", "OK" if frame.is_file() else "缺失", str(frame), hard=True)
     header = repo / "include" / "cann_ops_blas.h"
     record("cann_ops_blas.h", "OK" if header.is_file() else "缺失", str(header), hard=True)
+    # 影子记录：registry 驱动的域探测与上面硬编码判断并行跑，核对一致后替换。
+    try:
+        registry = _load_case_gen()._harness_registry()
+        hits, probed = _detect_profile(repo, registry)
+        if len(hits) == 1:
+            key = next(iter(hits))
+            record("harness_profile 探测", "OK", f"{key}（{hits[key]}）")
+        elif not hits:
+            probed_text = "; ".join(
+                f"{key}: {', '.join(names)}" for key, names in probed.items()
+            )
+            record("harness_profile 探测", "缺失", f"0 命中，探测过 {probed_text}")
+        else:
+            record("harness_profile 探测", "多命中", "、".join(sorted(hits)))
+    except (FileNotFoundError, ImportError) as exc:
+        record("harness_profile 探测", "缺失", f"registry 不可达：{exc}")
     cann_root, set_env = _find_cann()
     record(
         "CANN set_env.sh",
@@ -590,6 +627,21 @@ def command_check(args):
         errors.append(f"CASE_GEN_NOT_FOUND: {exc}")
         return finish(ENVIRONMENT_EXIT)
 
+    # A1 域探测：恰一命中把 profile 键名记入 runtime manifest（探测只记录不裁决）。
+    hits, probed = _detect_profile(repo, module._harness_registry())
+    if len(hits) != 1:
+        if not hits:
+            probed_text = "; ".join(
+                f"{key}: {', '.join(names)}" for key, names in probed.items()
+            )
+            errors.append(f"PROFILE_NOT_DETECTED: 0 命中，探测过 {probed_text}")
+        else:
+            errors.append("PROFILE_AMBIGUOUS: 多命中 " + "、".join(sorted(hits)))
+        return finish(ENVIRONMENT_EXIT)
+    harness_profile = next(iter(hits))
+    payload["harness_profile"] = harness_profile
+    payload["checks"]["profile"] = {"selected": harness_profile, "hits": hits}
+
     # 工程：部署 CSV 按三条规则恰好命中一份
     arch = _arch_for_soc(args.soc)
     if arch is None:
@@ -655,7 +707,7 @@ def command_check(args):
     # 运行时包：CSV 副本 + 规范化基线 + 渲染的两个 verify 脚本 + manifest
     payload["runtime"] = _write_runtime(
         runtime, package, package_csv, op, family, keys, meta, rows, module,
-        args.calls_per_case, PERF_THRESHOLD,
+        args.calls_per_case, PERF_THRESHOLD, harness_profile,
     )
     print(f"包: {op}（family={family}）")
     print(f"CSV: {csv_status}")
@@ -1218,7 +1270,8 @@ def command_verdict(args):
         performance_path,
         performance_expected,
         accuracy["status"],
-        identity,
+        # calls_per_case 以 manifest 为单一来源：性能证据里的值必须与之相等。
+        {**identity, "calls_per_case": manifest.get("calls_per_case")},
         deployed_sha,
         accuracy_payload.get("binary_sha256"),
     )
@@ -1274,7 +1327,10 @@ def command_verdict(args):
 
 
 def _add_common(parser):
-    parser.add_argument("--repo", required=True, type=Path, help="开发者 ops-blas 工程根目录")
+    parser.add_argument(
+        "--repo", required=True, type=Path,
+        help="开发者算子工程根目录（域由 include 入口头按 registry 探测）",
+    )
     parser.add_argument("--soc", required=True, help="目标 SoC，例如 ascend910b3")
     parser.add_argument("--device", type=int, default=0, help="编译期测试设备号，默认 0")
 
