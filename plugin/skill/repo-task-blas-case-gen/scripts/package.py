@@ -107,6 +107,10 @@ REQUIRED_TOP_KEYS = {
 }
 # schema v2 顶层新键与覆盖契约（冻结文档 §2.5：恰四个可覆盖键，整键替换）。
 SCHEMA_VERSIONS = (1, 2)
+# schema→generator 兼容矩阵（M3′ 落字）：两版 FACTS 都要求 generator_version 1。
+# 公共区行为对旧包不再逐字节兼容时才升某一行；届时预期差异面是对应包的
+# 两个 verify 脚本与 README（共六项被哈希派生物），须按重钉协议记录。
+GENERATOR_VERSION_BY_SCHEMA = {1: 1, 2: 1}
 TOP_KEYS_V2 = {"harness_profile", "harness_overrides", "case_controls", "status_vocab"}
 OVERRIDE_KEYS = {
     "seed_columns", "description_column", "expect_column", "threshold_columns",
@@ -925,10 +929,46 @@ def _check_v2_harness(problems, facts):
             if token not in bound:
                 _err(problems, f"status_vocab 的 {token!r} 超出 profile 上界")
 
+    # resolved 面上的三条不变量（profile 合法时才可判）。
+    if profile is not None:
+        resolved = dict(profile)
+        resolved.update({k: v for k, v in overrides.items() if k in OVERRIDE_KEYS})
+        if resolved.get("threshold_columns"):
+            # 阈值列值源契约未建：fail-closed，禁止 profile 暗示不存在的能力。
+            _err(
+                problems,
+                "阈值列值源未建：本版要求 harness_overrides.threshold_columns "
+                "覆盖为空表（等值源契约落地后放开）",
+            )
+        if (
+            resolved.get("expect_column") is not None
+            and isinstance(vocab, list)
+            and profile["expect_default_token"] not in vocab
+        ):
+            _err(
+                problems,
+                f"expect 默认 token {profile['expect_default_token']!r} "
+                "不在本算子精确词表 status_vocab 中",
+            )
+    else:
+        resolved = None
+
     controls = facts.get("case_controls", [])
     if not isinstance(controls, list):
         _err(problems, "case_controls 必须是列表")
         controls = []
+    param_names = {
+        param.get("name")
+        for param in facts.get("params", [])
+        if isinstance(param, dict)
+    }
+    reserved = param_names | {"profile", "case_name"}
+    if resolved is not None:
+        reserved |= set(resolved.get("seed_columns") or [])
+        reserved |= set(resolved.get("threshold_columns") or [])
+        for key in ("description_column", "expect_column"):
+            if resolved.get(key) is not None:
+                reserved.add(resolved[key])
     names = set()
     for index, control in enumerate(controls):
         where = f"case_controls[{index}]"
@@ -942,6 +982,12 @@ def _check_v2_harness(problems, facts):
             _err(problems, f"{where}.name 必须是标识符")
         elif name in names:
             _err(problems, f"{where}.name={name!r} 重复")
+        elif name in reserved:
+            _err(
+                problems,
+                f"{where}.name={name!r} 与参数名/保留名/基座列冲突"
+                "（不投影参数名也在禁用之列）",
+            )
         else:
             names.add(name)
         if control.get("kind") not in CONTROL_KINDS:
@@ -1056,6 +1102,15 @@ def _check_edge_cases(problems, facts, edge_cases, params):
         for key, value in settings.items():
             if key in direct:
                 param = params[key]
+                if (
+                    facts.get("schema_version") == 2
+                    and param.get("projection") == "none"
+                ):
+                    _err(
+                        problems,
+                        f"{where}.set 键 {key!r} 是不投影参数，设置不会进入 CSV",
+                    )
+                    continue
                 role = param.get("role")
                 if role == "enum" and value not in param.get("values", []):
                     _err(problems, f"{where}.set[{key!r}] 不在该 enum 的声明 values 中")
@@ -1264,11 +1319,12 @@ def _check_top(problems, facts):
         _err(problems, f"顶层 {key} 缺失")
     if not _is_int(version) or version not in SCHEMA_VERSIONS:
         _err(problems, "schema_version 只接受整数 1 或 2")
+    expected_generator = GENERATOR_VERSION_BY_SCHEMA.get(version, GENERATOR_VERSION)
     if (
         not _is_int(facts.get("generator_version"))
-        or facts.get("generator_version") != GENERATOR_VERSION
+        or facts.get("generator_version") != expected_generator
     ):
-        _err(problems, f"generator_version 必须等于模板版本 {GENERATOR_VERSION}")
+        _err(problems, f"generator_version 必须等于模板版本 {expected_generator}")
     if not _is_identifier(facts.get("op"), lowercase=True):
         _err(problems, "op 必须是小写标识符")
     for field in ("family", "symbol"):

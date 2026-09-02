@@ -200,6 +200,15 @@ class GeneratorError(Exception):
     """表示带生成阶段上下文的确定性错误。"""
 
 
+def _is_projected(facts, param):
+    """「不投影」原语的唯一判定：v2 且 projection=="none" 的参数在引擎侧
+    列/轴/state/控制列（null/batch）与维度种类推导全部静默。所有消费者都从
+    这里取答案，不得各自再看 projection 键。"""
+    return not (
+        facts.get("schema_version") == 2 and param.get("projection") == "none"
+    )
+
+
 def _param_map(facts):
     return {param["name"]: param for param in facts["params"]}
 
@@ -237,6 +246,8 @@ def _dimension_kinds(facts):
     vector_names = set()
     batch_names = set()
     for param in facts["params"]:
+        if not _is_projected(facts, param):
+            continue
         role = param["role"]
         if role == "matrix":
             for field in ("rows", "cols"):
@@ -267,7 +278,7 @@ def build_axes(facts):
     axes = []
     version = facts.get("schema_version")
     for param in facts["params"]:
-        if version == 2 and param.get("projection") == "none":
+        if not _is_projected(facts, param):
             continue
         name = param["name"]
         role = param["role"]
@@ -485,7 +496,7 @@ def _materialize(facts, axes, partial, overrides=None):
         state["profile"] = profile["name"]
     version = facts.get("schema_version")
     for param in facts["params"]:
-        if version == 2 and param.get("projection") == "none":
+        if not _is_projected(facts, param):
             continue
         name = param["name"]
         role = param["role"]
@@ -618,7 +629,7 @@ def _param_column_specs(facts, version):
     )
     specs = []
     for param in facts["params"]:
-        if version == 2 and param.get("projection") == "none":
+        if not _is_projected(facts, param):
             continue
         name = param["name"]
         role = param["role"]
@@ -671,6 +682,8 @@ def _flag_column_specs(facts):
     """nullable 与 batch 的控制列（两版共用，排在 expect 之后）。"""
     specs = []
     for param in facts["params"]:
+        if not _is_projected(facts, param):
+            continue
         name = param["name"]
         if param.get("nullable", False):
             specs.append(
@@ -698,6 +711,12 @@ def _column_specs(facts):
     """
     if facts.get("schema_version") == 2:
         resolved = _resolved_profile(facts)
+        if resolved["threshold_columns"]:
+            # 阈值列值源契约未建：先 fail-closed，禁止静默漏列。
+            raise GeneratorError(
+                "阈值列值源未建：本版要求 harness_overrides.threshold_columns "
+                "覆盖为空表"
+            )
         specs = [{"name": "case_name", "kind": "id", "source": None}]
         if resolved["description_column"] is not None:
             specs.append(
@@ -752,7 +771,7 @@ def _body_mapping(facts, state, profile, expect, control_overrides=None):
         for item in facts.get("dtype_profiles", [])
     )
     for param in facts["params"]:
-        if version == 2 and param.get("projection") == "none":
+        if not _is_projected(facts, param):
             continue
         name = param["name"]
         role = param["role"]
@@ -786,6 +805,8 @@ def _body_mapping(facts, state, profile, expect, control_overrides=None):
     else:
         result["expect_result"] = expect
     for param in facts["params"]:
+        if not _is_projected(facts, param):
+            continue
         name = param["name"]
         if param.get("nullable", False):
             result[f"null{name[:1].upper()}{name[1:]}"] = 0
