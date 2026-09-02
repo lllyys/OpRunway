@@ -2,6 +2,14 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-02 · E1 探明：950 真机容器可达，M7 解锁（用户授权探测，只读）。**
+  经 ssh 别名进既有 CANN 容器只读探测：8×Ascend950PR（卡 2 Critical 避用、卡 0 有他人
+  进程，首选卡 1）；CANN 9.0.0 set_env.sh 与 msprof 就绪；Ubuntu 22.04 x86_64、
+  Python 3.11/cmake/g++/git 满足 accept A1 硬前置；容器 host 网络，autossh 反向隧道
+  代理容器内连通（gitcode HEAD 200）；工作区挂 1.7T 卷余 636G。容器内无 ops-sparse
+  克隆——M7 开工需克隆授权。主机/容器/路径等私有信息只落 ignored
+  `.oprunway/real-machine.env`（含只读保护根与设备选择约定）。
+
 - **2026-09-02 · M2·5·6′ 完成：accept 纵向闭合 + 三类产物 + 文档随改（七维审 ADJUST→四项修毕）。**
   9 个提交（04a88e7..HEAD）。A1 换 registry 驱动的 harness_profile 探测（影子先行
   核对再替换，0/多命中硬失败，键名入 manifest）；两个 verify 模板二进制寻址改

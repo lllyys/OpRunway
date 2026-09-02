@@ -21,7 +21,7 @@
 | C1c | FACTS 本体·golden/状态/verify 词表方言 | 描述层 | ✅ 已实施：golden=harness + status_vocab（M3′） |
 | C2 | 列投影方言：角色决定投影 | 接口层 | ✅ 已实施：_column_specs 单源 + v2 分支（M1′/M3′） |
 | C3 | 浮点档位轴：离散化 + 文本同一性 | 引擎层 | ✅ 已实施：case_controls 原始字符串端到端（M3′） |
-| E1 | arch35 目标真机未探明 | 环境 | 未探明；只阻塞 M7 真机与「正式支持」声明 |
+| E1 | arch35 目标真机未探明 | 环境 | ✅ 已探明（2026-09-02）：950PR 真机容器可达，CANN 9.0.0 + msprof + 工具链齐；私有信息见 ignored real-machine.env。M7 解锁 |
 | D1 | references 的 sparse 章节 | 文档 | ✅ 已交付：facts-schema v2 节 + run-chain/SKILL 随改（M2·5·6′） |
 | V1 | gtest 套件名与 `--gtest_filter` 按名过滤 | 事实核对 | ✅ name generator 返回 case_name |
 | V2 | wrapper warm-up 次数 | 事实核对 | ✅ 无 warm-up，calls-per-case=1 |
