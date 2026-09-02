@@ -2,6 +2,18 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-01 · M1′ 完成：registry 落地、blas 三处硬编码参数化、列投影单源化（七维审 ADJUST→修毕）。**
+  四步九个提交（cc4d914..eb7ef7b）：HARNESS_REGISTRY 九字段落模板通用代码区（只填
+  blas 档）；首参断言/默认 expect token/状态词表逐个切查表（None 跳过、None 哨兵、
+  删 STATUS_VALUES 副本）；新增 _column_specs（name/kind/source 普通 dict）统一表头
+  与行序，README 契约表改按 kind 分派（fill/null 反查留作 v1 兼容层钉 trap_6 现状），
+  影子 oracle 陪跑三轮消费者切换后删 package.py 表头副本与漂移比对。每步三门零差异；
+  步骤 4 确定性重导出两示例零字节变化，仅重钉两行 gen_csv.py 参考摘要。checkpoint
+  （thread `01a06030`，ADJUST）三修已落：_harness_profile 必传 facts、契约表未知 kind
+  fail-closed、GENERATOR_VERSION 不升（升版与 v1/v2 兼容矩阵移 M3′ 裁定，plan 已改）。
+  另回收一处事故：编辑器自动格式化曾随 git add -A 混进 cc4d914（表格撑宽 + 行首
+  连接词「+」被改「-」），已整体恢复并改为显式点名路径提交。
+
 - **2026-09-01 · role 投影矩阵 fixture 录毕（ProjectionIR 重构钉板就位）。** 按
   `sparse-r1-projection-matrix.md` §D 建 `dev-doc/sparse-r1-projection-fixture/`：
   五个正向合成 gen_csv.py（g1 profile/g2 batch/g3 fixed_vector+int_array/

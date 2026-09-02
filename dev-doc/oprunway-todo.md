@@ -5,7 +5,7 @@
 ## P0 · sparse R1（已立项，实施中 @ feature/sparse-r1）
 
 - [ ] 按 [sparse-r1-implementation-plan.md](sparse-r1-implementation-plan.md) 走
-  M0.5–M6；当前在 M0.5（普查已完成，见 [sparse-r1-census.md](sparse-r1-census.md)；
+  里程碑序；M0/M0.5/M1′ 已完成，下一步 M3′（普查见 [sparse-r1-census.md](sparse-r1-census.md)；
   fixture 钉板与 registry 冻结进行中）。编号与状态唯一源是
   [sparse-gap-learning-map.md](sparse-gap-learning-map.md) §0。
 - [ ] E1 探明 arch35 真机——不阻塞 M0.5–M6 本地实施，阻塞 M7 真机验证与「正式支持」
