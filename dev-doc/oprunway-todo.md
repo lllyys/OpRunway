@@ -8,7 +8,7 @@
   checkpoint 非阻断观察）：改公开名或在冻结文档固定调用面。
 
 - [ ] 按 [sparse-r1-implementation-plan.md](sparse-r1-implementation-plan.md) 走
-  里程碑序；M0/M0.5/M1′/M3′/M2·5·6′ 已完成，剩 M7（E1 已探明 2026-09-02，真机容器可达，开工待克隆/部署授权；普查见 [sparse-r1-census.md](sparse-r1-census.md)；
+  里程碑序；M0/M0.5/M1′/M3′/M2·5·6′ 已完成，全部里程碑完成（M7 真机证据 2026-09-02，「正式通过」待 G4 基线回填复验；普查见 [sparse-r1-census.md](sparse-r1-census.md)；
   fixture 钉板与 registry 冻结进行中）。编号与状态唯一源是
   [sparse-gap-learning-map.md](sparse-gap-learning-map.md) §0。
 - [ ] E1 探明 arch35 真机——不阻塞 M0.5–M6 本地实施，阻塞 M7 真机验证与「正式支持」

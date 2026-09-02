@@ -2,6 +2,23 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-02 · M7 完成（真机证据，用户裁定「证路径可通即可」）：双链闭合 + 空闲门三分支 + 性能链实跑 + V4。**
+  在 950 容器内克隆 ops-sparse@5b2a5ba、装 GTest 后全链实跑。存量包链真证据全通：
+  A1 env=0、A2 check=0、A3 41/41 PASS、A5 总体通过退出 0。新包链精确复现 R1 预期
+  终态：A3 56/56 PASS（case-gen 造的组合用例全部过真机）、性能 NO_REF
+  （total_pf=200/可比 0）、总体证据不足退出 2。空闲门三分支实测：卡 1 IDLE 放行、
+  卡 0（他人进程）BUSY 退 4、卡 99 QUERY_FAILED（npu-smi 215）退 4。性能链以 4 条
+  填基线的临时包实跑（链路实证、非验收证据）：warmup→msprof 采集→export→
+  op_summary 解析→kernel_us 汇总→比对裁决→scope caveat 全程走通。V4 实测：
+  coo2csr_fused_kernel Task Type=AI_VECTOR_CORE；calls_per_case=1（API 层）下每调用
+  2–4 次 kernel launch 随规模变化，量具按 launch 求和口径正确。真机再敲出四处
+  blas 专属假设并修毕（重钉 ×3）：build.sh 无 --device（落 BUILD_CONVENTIONS
+  按 profile 查表：绑卡走 ASCEND_RT_VISIBLE_DEVICES、运行库路径、built_tests.list
+  有无）、GTest 缺失被 cmake 静默跳过且不进 skip 清单（容器内补装）、
+  _gtest_records 与 perf 映射里藏着第三、四道 /TC_ 硬筛（统一期望集精确匹配）。
+  repro 补齐 rerun.sh 与环境指纹。证据包落 ignored reports/m7-20260902/。
+  「正式通过」仍待 G4 基线回填后复验，未宣称。
+
 - **2026-09-02 · E1 探明：950 真机容器可达，M7 解锁（用户授权探测，只读）。**
   经 ssh 别名进既有 CANN 容器只读探测：8×Ascend950PR（卡 2 Critical 避用、卡 0 有他人
   进程，首选卡 1）；CANN 9.0.0 set_env.sh 与 msprof 就绪；Ubuntu 22.04 x86_64、
