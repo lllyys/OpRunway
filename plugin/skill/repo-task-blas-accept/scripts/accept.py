@@ -129,7 +129,8 @@ def _read_csv_case_names(path, performance):
                 raise ValueError("CSV 行列数与表头不一致")
             name = dict(zip(header, values)).get("case_name", "")
             is_performance = name.startswith("TC_PF_")
-            if name.startswith("TC_") and is_performance == performance:
+            # 期望集不筛命名前缀：精度集 = 除 TC_PF_ 外全部有效数据行（P0 修正）。
+            if name and is_performance == performance:
                 names.append(name)
     if header is None:
         raise ValueError("CSV 没有表头")
@@ -894,50 +895,58 @@ def _performance_result(
     identity,
     deployed_sha,
     accuracy_binary_sha,
+    total_pf=None,
 ):
     expected_count = len(expected)
+
+    def _with_pf_evidence(result):
+        # 证据先行：total_pf（CSV 的 TC_PF_ 行数）与 comparable_pf（可比集）分开记，
+        # 「有没有性能要求」只能看 total_pf，不能拿可比集大小当代理。
+        result.setdefault("total_pf", total_pf)
+        result.setdefault("comparable_pf", expected_count)
+        return result
     if accuracy_status == "精度不通过":
-        return {
+        return _with_pf_evidence({
             "status": "未执行(精度未通过)",
             "expected": expected_count,
             "timing_scope": None,
             "scope_caveat": False,
             "reason": "A3 首轮存在非 PASS 用例",
-        }
+        })
     if accuracy_status != "精度通过":
-        return {
+        return _with_pf_evidence({
             "status": "证据不足",
             "expected": expected_count,
             "timing_scope": None,
             "scope_caveat": False,
             "reason": "精度证据不足，不能进入 A4",
-        }
+        })
     if expected_count == 0 and not path.is_file():
-        return {
+        return _with_pf_evidence({
             "status": "通过",
             "expected": 0,
             "timing_scope": None,
             "scope_caveat": False,
             "reason": "部署 CSV 没有 TC_PF_ 用例",
-        }
+        })
     if not path.is_file():
-        return {
+        return _with_pf_evidence({
             "status": "证据不足",
             "expected": expected_count,
             "timing_scope": None,
             "scope_caveat": False,
             "reason": "缺 performance JSON",
-        }
+        })
     try:
         payload = _load_json(path)
     except ValueError as exc:
-        return {
+        return _with_pf_evidence({
             "status": "证据不足",
             "expected": expected_count,
             "timing_scope": None,
             "scope_caveat": False,
             "reason": str(exc),
-        }
+        })
     problems = []
     if not isinstance(payload, dict):
         problems.append("performance JSON 顶层不是对象")
@@ -1037,7 +1046,7 @@ def _performance_result(
     display = base_status
     if scope_caveat:
         display += " (scope caveat)"
-    return {
+    return _with_pf_evidence({
         "status": display,
         "base_status": base_status,
         "expected": expected_count,
@@ -1047,7 +1056,7 @@ def _performance_result(
         "threshold": summary.get("threshold"),
         "reason": reason,
         "problems": problems,
-    }
+    })
 
 
 def _contract_summary(out_dir, expected):
@@ -1246,8 +1255,10 @@ def command_verdict(args):
     evidence_problems = []
     expected = []
     performance_expected = []
+    total_pf = None
     try:
         expected = _read_csv_case_names(runtime_csv, performance=False)
+        total_pf = len(_read_csv_case_names(runtime_csv, performance=True))
         csv_header = _csv_header(runtime_csv)
         _, keys, _, references = _load_baseline(runtime / "gpu_baseline.csv", csv_header)
         performance_expected, _ = _comparable_pf_names(runtime_csv, keys, references)
@@ -1280,6 +1291,7 @@ def command_verdict(args):
         {**identity, "calls_per_case": manifest.get("calls_per_case")},
         deployed_sha,
         accuracy_payload.get("binary_sha256"),
+        total_pf=total_pf,
     )
     contract_expected = {
         "package": str(package),
