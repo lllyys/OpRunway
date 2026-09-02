@@ -4,6 +4,21 @@
 
 ## P0 · sparse R1（已立项，实施中 @ feature/sparse-r1）
 
+- [ ] push 前 audit 遗留（thread `01a0615a`，裁 FIX_NEEDED 无 P0，用户裁定本轮不修直接提）：
+  P1×4——rerun.sh 只给 check 传 `--device-pool`（A3/A4/A5 复跑静默用默认池）；
+  性能复跑无条件 `--skip-build`（编译期定卡域遇 auto 必中断）；device_pool 未入
+  evidence_id/A5 契约绑定（改池不改证据身份）；闭合校验不核 npu_gate 内部一致性、
+  且 npu_gate/final 为非字典时抛 AttributeError 而非裁证据不足。
+  P2×4——报告与 environment.json 缺 device_pool/device_resolved 贯穿；显式卡号也被
+  标「auto 定卡」；`--device-pool ''` 被静默扩成默认池、`--device -1` 被接受；
+  128 字符 run_id 加 `-rerun` 后超上限。修复时两模板与 accept 三处解析器须对称同改。
+  七维预警（修复时按此调整，勿照单全收）：pool 只入 evidence_id 与 A5 契约绑定，
+  不进 runtime manifest——manifest 是设备无关的包身份，塞运行参数破坏包跨卡复用
+  （通用性/爆炸半径）；attempts 有序前缀校验会把遍历实现细节升成契约（泛化性），
+  要么明写冻结要么不加；evidence_id 加键属对外契约变更，无条件过 checkpoint；
+  三处解析器无对称性机械门，重演 perf 模板漏块事故的温床，宜先补对称门再改。
+
+
 - [ ] accept 依赖 case-gen 私有名 `_harness_registry()`（跨 skill 隐式接口，M2·5·6′
   checkpoint 非阻断观察）：改公开名或在冻结文档固定调用面。
 

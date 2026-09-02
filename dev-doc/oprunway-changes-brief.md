@@ -2,6 +2,20 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-02 · push 前仓规一轮 audit（一轮即停）+ 首推 feature/sparse-r1。**
+  对 M7 checkpoint 后的 plugin 增量（报告增详、A1 快照、--device auto 实现、perf
+  补丁）做只读 audit（thread `01a0615a`）：裁 FIX_NEEDED、无 P0，4×P1 + 4×P2 集中在
+  rerun.sh 传参不全与 pool 身份链未贯穿 evidence_id/契约绑定。用户裁定本轮不修，
+  遗留清单全文入 todo（P0 sparse R1 节首条），修复时注意三处解析器对称同改。
+
+- **2026-09-02 · perf 模板 --device auto 缺口修复并 A4 真机验证（push 前快验）。**
+  事故：批量补丁脚本在写入前断言中止，性能模板漏掉解析/选卡两函数，argparse 仍是
+  int——桩测只测了精度模板没测性能模板，漏网。修复：把 58 行公共块按行切片回填
+  verify_performance.py，两模板逐字节对称，性能模块独立桩测补上；重钉后三门零差异。
+  a5 真机 A4 验证：`--device auto` 被接受，卡 0 忙（npu-smi 原始输出全量入证据）
+  跳过选卡 1，4 条 PF 用例全测得，身份链 device=auto/pool=0–7/resolved=1 完整。
+  教训入库：改成对渲染出的两个模块分别桩测，ast.parse 与单模块测试不足以兜底。
+
 - **2026-09-02 · 量具 --device auto 起跑门自愈选卡落地（方案 1，设计先过 Codex 再实现）。**
   设计审（thread `01a06149`）裁 ADJUST 五修全纳：单次有序遍历卡池（删预扫描与
   重试魔数）、pool 进身份链、resolved 与门终态入 A5 机械闭合校验（A3/A4 允许
