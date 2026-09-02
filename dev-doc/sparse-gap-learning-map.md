@@ -15,7 +15,7 @@
 | 编号 | 事项 | 层次 | 状态 |
 | --- | --- | --- | --- |
 | A1 | accept 环境门写死 `cann_ops_blas.h` | 参数级 | ✅ 已实施：registry 探测化（M2·5·6′） |
-| A2 | accept 路径模型：无 family 层、arch35、build 产物路径 | 参数级 | ✅ 已实施：二进制唯一裁决 + 存量包 smoke（M2·5·6′） |
+| A2 | accept 路径模型：无 family 层、arch35、build 产物路径 | 参数级 | ✅ 已实施（M2·5·6′） |
 | C1a | FACTS 本体·稀疏复合结构对象（nnz 耦合、内容不变量） | 描述层 | 本期不做，等首个 descriptor 任务 |
 | C1b | FACTS 本体·descriptor 签名指称 | 描述层 | 本期不做（同上） |
 | C1c | FACTS 本体·golden/状态/verify 词表方言 | 描述层 | ✅ 已实施：golden=harness + status_vocab（M3′） |
@@ -26,7 +26,7 @@
 | V1 | gtest 套件名与 `--gtest_filter` 按名过滤 | 事实核对 | ✅ name generator 返回 case_name |
 | V2 | wrapper warm-up 次数 | 事实核对 | ✅ 无 warm-up，calls-per-case=1 |
 | V3 | expect_result 状态词表 | 事实核对 | ✅ 按算子异；registry 闭合词表处理 |
-| V4 | sparse kernel 的 op_summary Task Type | 事实核对 | ✅ 950 实测：coo2csr_fused_kernel 为 AI_VECTOR_CORE；每 API 调用 2–4 次 kernel launch 随规模变化，量具按 launch 求和口径正确 |
+| V4 | sparse kernel 的 op_summary Task Type | 事实核对 | ✅ 950 实测 AI_VECTOR_CORE，launch 数详见 brief |
 | V5 | build.sh 参数与产物路径 | 事实核对 | ✅ 与 ops-blas 同款 `--ops=` |
 | G1 | spgemm 950 任务书 / ATK-torch 形态通路 | 方向 | ❌ CLOSED（用户裁定放弃跟进） |
 | G2 | 上游 `repo-task-blas-*` 改名 | 治理 | 待决（立项同场） |
