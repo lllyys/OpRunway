@@ -522,7 +522,8 @@ def main(argv=None):
         item == "--device" or item.startswith("--device=") for item in raw_argv
     )
     if args.skip_build:
-        if device_explicit:
+        if device_explicit and BUILD_CONVENTION["build_device_flag"]:
+            # 仅编译期定卡的域需要此提醒；运行时绑卡的域（visible_devices_env）不受影响。
             print("设备号在编译期固定（-DTEST_DEVICE_ID），跳过编译时以上次编译为准")
     else:
         build_log = run_dir / "build.log"

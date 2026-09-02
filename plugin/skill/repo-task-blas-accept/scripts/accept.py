@@ -569,7 +569,13 @@ def _build_state(repo, op):
     built_path = build_root / "built_tests.list"
     skipped_path = build_root / "skipped_tests.list"
     if not build_root.is_dir() or not built_path.is_file():
-        return {"status": "未编译", "hard": False, "detail": "build/test 尚无清单"}
+        # 有的仓（如 ops-sparse）构建不产 built_tests.list；清单缺失只提示，
+        # 二进制有无由量具寻址器裁决。
+        return {
+            "status": "未编译",
+            "hard": False,
+            "detail": "build/test 无 built_tests.list（未编译，或该仓不产清单；以量具寻址为准）",
+        }
     built = _read_nonempty_lines(built_path)
     skipped = _read_nonempty_lines(skipped_path)
     skip_matches = [line for line in skipped if line.split("|", 1)[0] == op]
