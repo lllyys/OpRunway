@@ -105,6 +105,13 @@ REQUIRED_TOP_KEYS = {
     "schema_version", "generator_version", "op", "family", "symbol", "returns",
     "params", "golden", "verify", "sources",
 }
+# schema v2 顶层新键与覆盖契约（冻结文档 §2.5：恰四个可覆盖键，整键替换）。
+SCHEMA_VERSIONS = (1, 2)
+TOP_KEYS_V2 = {"harness_profile", "harness_overrides", "case_controls", "status_vocab"}
+OVERRIDE_KEYS = {
+    "seed_columns", "description_column", "expect_column", "threshold_columns",
+}
+CONTROL_KINDS = {"enum", "tier"}
 BASE_PARAM_KEYS = {"name", "ctype", "role"}
 ROLE_KEYS = {
     "handle": set(),
@@ -501,7 +508,7 @@ def _check_batch_shape(problems, where, batch):
             _err(problems, f"{where}.{field}={batch[field]!r} 不合法，只能是 host/device")
 
 
-def _check_param_shape(problems, index, param):
+def _check_param_shape(problems, index, param, version=1):
     if not isinstance(param, dict):
         _err(problems, f"params[{index}] 必须是字典")
         return
@@ -515,8 +522,17 @@ def _check_param_shape(problems, index, param):
     if role not in ROLES:
         _err(problems, f"{where} 的 role={role!r} 不合法，只能是 {'/'.join(ROLES)}")
         return
-    for key in sorted(set(param) - BASE_PARAM_KEYS - ROLE_KEYS[role]):
+    extra = set()
+    if version == 2 and role in {"enum", "dim", "int_array"}:
+        # 「不投影」原语（候选方案硬边界 2）：原型参数由 harness 自行取值、派生或
+        # 造数，引擎不产列、不产轴、不进 state，也不要求数据源声明。目前对
+        # enum/dim/int_array 开放（coo2csr 的 idxBase/nnz/cooRowInd 形态），
+        # 其余角色出现该键按未开放属性拒绝。
+        extra = {"projection"}
+    for key in sorted(set(param) - BASE_PARAM_KEYS - ROLE_KEYS[role] - extra):
         _err(problems, f"{where} role={role} 未开放属性 {key}")
+    if "projection" in param and param.get("projection") != "none":
+        _err(problems, f"{where} 的 projection 只接受 \"none\"")
 
     if role == "enum":
         values = param.get("values")
@@ -627,7 +643,11 @@ def _check_param_shape(problems, index, param):
         if "len" not in param:
             _err(problems, f"{where} 缺 len")
         _check_nullable(problems, where, param)
-        if param.get("dir") in {"in", "inout"} and "producer" not in param:
+        if (
+            param.get("dir") in {"in", "inout"}
+            and "producer" not in param
+            and param.get("projection") != "none"
+        ):
             _err(problems, f"{where} 的 dir={param.get('dir')} 时 producer 必填")
 
     if role in {"vector", "matrix"}:
@@ -855,18 +875,99 @@ def _check_profiles(problems, facts, params, dtype_sources):
                     )
 
 
-def _check_golden(problems, golden):
+def _check_v2_harness(problems, facts):
+    """schema v2 的 harness 面：profile 选择、覆盖契约、精确词表、造数控制。
+
+    控制列与投影列的命名空间冲突检查随投影实现落在生成侧（引擎构轴时机械执行），
+    这里只管形状与上界。"""
+    registry = _harness_registry()
+    profile_key = facts.get("harness_profile")
+    profile = None
+    if not isinstance(profile_key, str) or profile_key not in registry:
+        _err(
+            problems,
+            f"harness_profile={profile_key!r} 不在 registry"
+            f"（可选：{'/'.join(sorted(registry))}）",
+        )
+    else:
+        profile = registry[profile_key]
+
+    overrides = facts.get("harness_overrides", {})
+    if not isinstance(overrides, dict):
+        _err(problems, "harness_overrides 必须是字典")
+        overrides = {}
+    for key in sorted(set(overrides) - OVERRIDE_KEYS):
+        _err(problems, f"harness_overrides 不可覆盖键 {key}")
+    if "seed_columns" in overrides:
+        _string_list(problems, "harness_overrides.seed_columns",
+                     overrides["seed_columns"], False, True)
+    for key in ("description_column", "expect_column"):
+        if key in overrides:
+            value = overrides[key]
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                _err(problems, f"harness_overrides.{key} 必须是非空字符串或 None")
+    if "threshold_columns" in overrides and profile is not None:
+        # 三档上界（冻结 §2 字段 6）：空表 / 前两件 / 三件套，以 profile 默认名为准。
+        value = overrides["threshold_columns"]
+        default = profile["threshold_columns"]
+        legal = ([], default[:2], default)
+        if value not in legal:
+            _err(
+                problems,
+                "harness_overrides.threshold_columns 必须是三档之一："
+                f"[] / {default[:2]} / {default}",
+            )
+
+    vocab = facts.get("status_vocab")
+    if _string_list(problems, "status_vocab", vocab, True, True) and profile is not None:
+        bound = profile["status_vocab_bound"]
+        for token in vocab:
+            if token not in bound:
+                _err(problems, f"status_vocab 的 {token!r} 超出 profile 上界")
+
+    controls = facts.get("case_controls", [])
+    if not isinstance(controls, list):
+        _err(problems, "case_controls 必须是列表")
+        controls = []
+    names = set()
+    for index, control in enumerate(controls):
+        where = f"case_controls[{index}]"
+        if not isinstance(control, dict):
+            _err(problems, f"{where} 必须是字典")
+            continue
+        for key in sorted(set(control) - {"name", "kind", "values"}):
+            _err(problems, f"{where} 未开放键 {key}")
+        name = control.get("name")
+        if not _is_identifier(name):
+            _err(problems, f"{where}.name 必须是标识符")
+        elif name in names:
+            _err(problems, f"{where}.name={name!r} 重复")
+        else:
+            names.add(name)
+        if control.get("kind") not in CONTROL_KINDS:
+            _err(problems, f"{where}.kind 只接受 enum 或 tier")
+        # 值为原始字符串端到端传递，判等即文本相等（不建规范形机制）。
+        _string_list(problems, f"{where}.values", control.get("values"), True, True)
+
+
+def _check_golden(problems, golden, version=1):
     if not isinstance(golden, dict):
         _err(problems, "golden 必须是字典")
         return
     _unknown_keys(problems, "golden", golden, {"kind", "symbol", "formula"})
     kind = golden.get("kind")
-    if kind not in GOLDEN_KINDS:
+    allowed = GOLDEN_KINDS | ({"harness"} if version == 2 else set())
+    if kind not in allowed:
         _err(problems, f"golden.kind={kind!r} 不合法")
     elif kind in {"cblas", "lapacke", "loop"}:
         _nonempty_string(problems, "golden.symbol", golden.get("symbol"))
     elif kind == "composed":
         _nonempty_string(problems, "golden.formula", golden.get("formula"))
+    elif kind == "harness":
+        # golden 由 harness 自带（仓内 golden.h），与外部 golden 声明互斥。
+        for key in ("symbol", "formula"):
+            if key in golden:
+                _err(problems, f"golden.kind=harness 不接受 {key}")
 
 
 def _check_verify(problems, verify):
@@ -940,7 +1041,12 @@ def _check_edge_cases(problems, facts, edge_cases, params):
             _err(problems, f"{where}.name={name!r} 重复")
         else:
             names.add(name)
-        if case.get("expect") not in _harness_profile(facts)["status_vocab_bound"]:
+        if facts.get("schema_version") == 2:
+            vocab = facts.get("status_vocab")
+            vocab = vocab if isinstance(vocab, list) else []
+        else:
+            vocab = _harness_profile(facts)["status_vocab_bound"]
+        if case.get("expect") not in vocab:
             _err(problems, f"{where}.expect={case.get('expect')!r} 不在状态码词表")
         _nonempty_string(problems, f"{where}.source", case.get("source"))
         settings = case.get("set")
@@ -1006,14 +1112,26 @@ def _check_perf(problems, facts, perf, params):
         for profile in facts.get("dtype_profiles", [])
         if isinstance(profile, dict)
     }
+    version = facts.get("schema_version")
+    controls = {}
+    if version == 2:
+        controls = {
+            control.get("name"): control
+            for control in facts.get("case_controls", [])
+            if isinstance(control, dict)
+        }
     for name in keys:
         if name == "profile":
             if not profile_names:
                 _err(problems, "perf.key 含 'profile'，但 dtype_profiles 不存在")
             continue
+        if name in controls:
+            continue
         param = params.get(name)
         if param is None or param.get("role") not in {"enum", "dim", "layout"}:
             _err(problems, f"perf.key 的 {name!r} 不是 enum/dim/layout 参数")
+        elif param.get("projection") == "none":
+            _err(problems, f"perf.key 的 {name!r} 是不投影参数，CSV 无此列")
         elif param.get("enum_kind", "op") in {"dtype", "compute"}:
             _err(problems, f"perf.key 的类型参数 {name!r} 必须改用虚拟键 'profile'")
     rows = perf.get("rows")
@@ -1040,6 +1158,10 @@ def _check_perf(problems, facts, perf, params):
                 _err(problems, f"{where} 缺 key 参数 {key!r}")
             elif key == "profile" and row[key] not in profile_names:
                 _err(problems, f"{where}.profile={row[key]!r} 不在 dtype_profiles 中")
+            elif key in controls:
+                control_values = controls[key].get("values", [])
+                if row[key] not in control_values:
+                    _err(problems, f"{where}.{key} 不在 case_controls 值表（文本相等）")
             elif key != "profile":
                 param = params.get(key, {})
                 if param.get("role") == "enum" and row[key] not in param.get("values", []):
@@ -1127,12 +1249,21 @@ def _check_top(problems, facts):
     if not isinstance(facts, dict):
         _err(problems, "事实表 FACTS 必须是字典")
         return {}, []
-    for key in sorted(set(facts) - TOP_KEYS):
+    version = facts.get("schema_version")
+    top_keys = TOP_KEYS | (TOP_KEYS_V2 if version == 2 else set())
+    for key in sorted(set(facts) - top_keys):
         _err(problems, f"未开放的顶层键 {key}")
-    for key in sorted(REQUIRED_TOP_KEYS - set(facts)):
+    required = set(REQUIRED_TOP_KEYS)
+    if version == 2:
+        required |= {"harness_profile", "status_vocab"}
+        golden = facts.get("golden")
+        if isinstance(golden, dict) and golden.get("kind") == "harness":
+            # golden=harness 的校验语义由 harness 自带，verify 键整个不适用。
+            required -= {"verify"}
+    for key in sorted(required - set(facts)):
         _err(problems, f"顶层 {key} 缺失")
-    if not _is_int(facts.get("schema_version")) or facts.get("schema_version") != SCHEMA_VERSION:
-        _err(problems, "schema_version 当前只接受整数 1")
+    if not _is_int(version) or version not in SCHEMA_VERSIONS:
+        _err(problems, "schema_version 只接受整数 1 或 2")
     if (
         not _is_int(facts.get("generator_version"))
         or facts.get("generator_version") != GENERATOR_VERSION
@@ -1150,7 +1281,7 @@ def _check_top(problems, facts):
         _err(problems, "params 必须是非空有序列表")
         raw_params = []
     for index, param in enumerate(raw_params):
-        _check_param_shape(problems, index, param)
+        _check_param_shape(problems, index, param, version if _is_int(version) else 1)
     params = _param_map(problems, raw_params)
     ordered = []
     for index, param in enumerate(raw_params):
@@ -1196,8 +1327,19 @@ def validate(facts):
         and isinstance(param["dtype_from"], str)
     }
     _check_profiles(problems, facts, params, dtype_sources)
-    _check_golden(problems, facts.get("golden"))
-    _check_verify(problems, facts.get("verify"))
+    version = facts.get("schema_version")
+    _check_golden(problems, facts.get("golden"), version if _is_int(version) else 1)
+    golden = facts.get("golden")
+    golden_is_harness = (
+        version == 2 and isinstance(golden, dict) and golden.get("kind") == "harness"
+    )
+    if golden_is_harness:
+        if "verify" in facts:
+            _err(problems, "golden.kind=harness 时校验由 harness 自带，不接受 verify 键")
+    else:
+        _check_verify(problems, facts.get("verify"))
+    if version == 2:
+        _check_v2_harness(problems, facts)
     _check_edge_cases(problems, facts, facts.get("edge_cases", []), params)
     if "perf" in facts:
         _check_perf(problems, facts, facts["perf"], params)
