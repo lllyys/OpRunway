@@ -2,6 +2,10 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-02 · 评审纪律扩面：audit 的 fix 段同受七维约束（用户裁定）。**
+  audit 修复清单不照单全收，每项落地前按七维评估，会退化的调整或明确遗留并记理由；
+  入 codex-review.md，AGENTS.md §5 过时的「六个维度」同步改七。
+
 - **2026-09-02 · push 前仓规一轮 audit（一轮即停）+ 首推 feature/sparse-r1。**
   对 M7 checkpoint 后的 plugin 增量（报告增详、A1 快照、--device auto 实现、perf
   补丁）做只读 audit（thread `01a0615a`）：裁 FIX_NEEDED、无 P0，4×P1 + 4×P2 集中在

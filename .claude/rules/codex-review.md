@@ -8,6 +8,11 @@
 `CLAUDE.md` 默认的「写入经 cc-suite implement 落盘」——用户已明确改成本条。评审用只读的
 `review-plan`（架构/简化类）；真机与正确性核查用 `audit`。
 
+audit → fix → verify 轮（含 push 前仓规一轮）的 fix 段同样受七维约束：audit 给出的
+修复清单不照单全收，每项落地前先按下述七维评估，会退化的项调整方案或明确遗留并记录
+理由（用户裁定 2026-09-02）。先例：pool 进 runtime manifest 会破坏包的设备无关身份
+（通用性/爆炸半径）；attempts 有序前缀校验把遍历实现细节升成契约（泛化性）。
+
 ## 触发条件
 
 出现以下任一情形，就做一次 checkpoint：提交一个逻辑完整的单元，并跑一次 Codex 评审。
