@@ -1885,9 +1885,11 @@ def _render_script(template_path, output_path, facts, csv_hash):
             "FAMILY": facts["family"],
             "HARNESS_PROFILE": facts.get("harness_profile", "blas"),
             # resolved 构建/绑卡惯例只注入选中 profile 的三个字段（权威在 registry）。
+            # 按键名直查：render_runtime 的合成 facts 无 schema_version，
+            # 走 _harness_profile 会静默落回 blas（真机复验抓出的回归）。
             "BUILD_CONVENTION": json.dumps(
                 {
-                    key: _harness_profile(facts)[key]
+                    key: _harness_registry()[facts.get("harness_profile", "blas")][key]
                     for key in (
                         "build_device_flag",
                         "visible_devices_env",
