@@ -73,14 +73,16 @@ def _find_source_csv(repo, arch):
 
 
 def _find_binary(repo):
+    """候选收集 + 唯一裁决：build/test 下递归找 <op>_test；0/多命中 fail-closed 报候选。"""
     test_root = repo / "build" / "test"
     name = f"{OP}_test"
-    candidates = [test_root / OP / name]
-    candidates.extend(sorted(test_root.glob(f"*/{OP}/{name}")))
-    if len(OP) > 1:
-        candidates.append(test_root / OP[1:] / name)
-    matches = _unique_existing(candidates)
-    return matches[0] if matches else None
+    matches = _unique_existing(sorted(test_root.glob(f"**/{name}")))
+    if len(matches) == 1:
+        return matches[0], None, None
+    if not matches:
+        return None, f"build/test 下未找到 {name}", "BINARY_NOT_FOUND"
+    listed = "、".join(str(path) for path in matches)
+    return None, f"测试二进制命中多个候选：{listed}", "BINARY_AMBIGUOUS"
 
 
 def _read_csv_cases(path, prefix):
@@ -205,7 +207,7 @@ def _check_build_lists(repo):
     return None, None
 
 
-def _list_tests(binary, timeout):
+def _list_tests(binary, timeout, expected):
     try:
         result = subprocess.run(
             [str(binary), "--gtest_list_tests"],
@@ -234,9 +236,9 @@ def _list_tests(binary, timeout):
             continue
         test_name = stripped
         full_name = suite + test_name
-        if "/TC_" not in full_name:
-            continue
         case_name = full_name.rsplit("/", 1)[-1]
+        if case_name not in expected:
+            continue
         if case_name in mapping:
             return None, f"case_name {case_name!r} 映射重复", "DUPLICATE_CASE"
         mapping[case_name] = full_name
@@ -244,8 +246,9 @@ def _list_tests(binary, timeout):
 
 
 def _selected_cases(csv_path, args):
-    names = _read_csv_cases(csv_path, "TC_")
-    names = [name for name in names if not name.startswith("TC_PF_")]
+    # 精度期望集 = 主 CSV 除 TC_PF_ 外全部有效数据行（不筛命名前缀）。
+    names = _read_csv_cases(csv_path, "")
+    names = [name for name in names if name and not name.startswith("TC_PF_")]
     if args.case:
         requested = set(args.case)
         names = [name for name in names if name in requested]
@@ -437,18 +440,17 @@ def main(argv=None):
         reason, message = _check_build_lists(args.repo)
         if reason:
             return _environment_error(payload, out_path, reason, message)
-    binary = _find_binary(args.repo)
+    binary, binary_message, binary_reason = _find_binary(args.repo)
     if binary is None:
-        return _environment_error(
-            payload, out_path, "BINARY_NOT_FOUND", "三条构建目录规则均无测试二进制"
-        )
+        return _environment_error(payload, out_path, binary_reason, binary_message)
     payload["binary"] = str(binary)
     payload["binary_sha256"] = _sha256(binary)
-    mapping, message, reason = _list_tests(binary, args.timeout)
+    # 期望集来自任务包自带的 CSV（契约），不是部署 CSV；先算期望集再建映射，
+    # gtest 名不筛前缀、按期望集精确匹配（社区旧包的 L0_/L1_ 命名一样可验）。
+    expected = _selected_cases(Path(__file__).resolve().parent / CSV_NAME, args)
+    mapping, message, reason = _list_tests(binary, args.timeout, set(expected))
     if reason:
         return _environment_error(payload, out_path, reason, message)
-    # 期望集来自任务包自带的 CSV（契约），不是部署 CSV。
-    expected = _selected_cases(Path(__file__).resolve().parent / CSV_NAME, args)
     full_names = [mapping[name] for name in expected if name in mapping]
     gtest_json = run_dir / "gtest.json"
     process_code, timed_out, gtest_filter = _run_tests(

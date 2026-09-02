@@ -96,14 +96,16 @@ def _find_source_csv(repo, arch):
 
 
 def _find_binary(repo):
+    """候选收集 + 唯一裁决：build/test 下递归找 <op>_test；0/多命中 fail-closed 报候选。"""
     test_root = repo / "build" / "test"
     name = f"{OP}_test"
-    candidates = [test_root / OP / name]
-    candidates.extend(sorted(test_root.glob(f"*/{OP}/{name}")))
-    if len(OP) > 1:
-        candidates.append(test_root / OP[1:] / name)
-    matches = _unique_existing(candidates)
-    return matches[0] if matches else None
+    matches = _unique_existing(sorted(test_root.glob(f"**/{name}")))
+    if len(matches) == 1:
+        return matches[0], None, None
+    if not matches:
+        return None, f"build/test 下未找到 {name}", "BINARY_NOT_FOUND"
+    listed = "、".join(str(path) for path in matches)
+    return None, f"测试二进制命中多个候选：{listed}", "BINARY_AMBIGUOUS"
 
 
 def _read_csv_rows(path, prefix):
@@ -696,11 +698,9 @@ def main(argv=None):
         reason, message = _check_build_lists(args.repo)
         if reason:
             return _environment_error(payload, out_path, reason, message)
-    binary = _find_binary(args.repo)
+    binary, binary_message, binary_reason = _find_binary(args.repo)
     if binary is None:
-        return _environment_error(
-            payload, out_path, "BINARY_NOT_FOUND", "找不到测试二进制"
-        )
+        return _environment_error(payload, out_path, binary_reason, binary_message)
     payload["binary"] = str(binary)
     payload["binary_sha256"] = _sha256(binary)
     mapping, message, reason = _list_tests(binary, args.timeout)

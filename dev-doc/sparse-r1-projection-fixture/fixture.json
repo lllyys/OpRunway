@@ -93,8 +93,8 @@
           "README.md": "e7603c132bca85f8c647e29566b57d6fbf8fbbc4f16dd0cadbe2e926745095d7",
           "g1_profile_test.csv": "94af1dba72de1bdd8f8068beb7defa954d0abe0ed888d1c0ef07ab1ed1bb1888",
           "gpu_baseline.csv": "a4c2445456ead3631edc7663d682cc653c880ebc85b206ab2e1e586832044285",
-          "verify_accuracy.py": "81f5b064d2a10ccf8081a2de780483f61dd0fb71ee991767ac8728471afe0fa2",
-          "verify_performance.py": "5cf4d67ed7662ed423ef04058b0704e44f5eac4d9faeafdf176263d538f8e98d"
+          "verify_accuracy.py": "f39ce670d2dbdde88cd3463ffa9077745b343585d290f7d0b3c7d6f654d2a105",
+          "verify_performance.py": "fc7b4491d33ed3ccebcd1af35b7660004a51b7f16f3f323d681fcc3bfa5bf038"
         },
         "exit": 0,
         "stderr": "",
@@ -181,8 +181,8 @@
           "README.md": "93f3ed5054e33a9217d6be078c773177078e9fd76f5b875a25899b785b02b0ba",
           "g2_batch_test.csv": "423d2e76846d43bd39145d378f17f0c9cc3374cce14a5e138fda7661651ab343",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "e39a48c3f33e0eb59884a52f159447b8a610883b70fb31f2a98209d8a12adaa8",
-          "verify_performance.py": "53147cb95a7f8e9e20fee7d33bc396f1b9ed7e8c275adafe62f71d9078d8e68d"
+          "verify_accuracy.py": "5f8b6b90430cd6c3f8292e10e94b5b1db3958bfabade6b46d51439f19e61e8ad",
+          "verify_performance.py": "4c629142308f047ea8d7ff114b984faedaa8591c735ef8da9bad4ec9cda30b05"
         },
         "exit": 0,
         "stderr": "",
@@ -229,8 +229,8 @@
           "README.md": "29c9e3d9810ddcdb30eb2b4a6188c1a813bddc47dee780de73312d182da752cd",
           "g3_fixed_test.csv": "70014dfd6d07af5cf9955d054a6b0ac81df20178550508fda440247520159d09",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "5f5389f0d7f02117744065ad34ec1d2bd146424e3432bef591b19b27af0371c9",
-          "verify_performance.py": "cf2f79bcd91a807b76e5f9b5715b137a092e66d4060f09c0e8b4f0e658b981ae"
+          "verify_accuracy.py": "90cf69ba880cfc46b2ac15ead040f35a1fa74396f995ac8e1231e2f3b7b79370",
+          "verify_performance.py": "46e1496db470e57ff6c77fa1c484ce3c81ff05a2c22a136921d2fe5af2e00259"
         },
         "exit": 0,
         "stderr": "",
@@ -293,8 +293,8 @@
           "README.md": "86fdeb0737527efcbec013e26a72d586fc4099ec358d3da0d8ca61324a996482",
           "g4_cond_test.csv": "0a46bbf6aa05dc8961e103dfa8c549c269b252eff066417515f6bfa3ed0b63a3",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "4785ac2df7f67576c1dbe8d0223d3f748b515d1c2c714640f33e501b6f2a942a",
-          "verify_performance.py": "7e5a5a0c264ee5e9339111b4a906d93d0804a5f8bf563087aefecb7bd68b56de"
+          "verify_accuracy.py": "cbd88eae3a55b3bce9b4ab198a2216cfa24dee7c8d2e58845da20fac57c6c82b",
+          "verify_performance.py": "6cbd7266b5bf437c7d2a6bedeedb0b439381b6902e49ee28b00891795f220a0c"
         },
         "exit": 0,
         "stderr": "",
@@ -373,8 +373,8 @@
           "README.md": "b6cac3277e2e54a6c0639f414e6686b66ba8676a7a8370369c42c57332ace20e",
           "g5_scalar_test.csv": "20ae8a920a69b1ebf039c6b6747603658f9be6a2d49f4290ac1c898483fcf419",
           "gpu_baseline.csv": "17452d52d2ee73a39f4692fcf19c9d3fa7a8277b982c19c6f076a75f8111e600",
-          "verify_accuracy.py": "88a7b0c99432e20b66647f2e77408620853ef2ff63b2eabbffd8de4b1e1bf532",
-          "verify_performance.py": "f83447a9967531fcaba619fd921e03df1350024fea5ae672c85597bfa33bd3f2"
+          "verify_accuracy.py": "d63343f8233b63c2c2498029aab9a308bade7d2aedb6bc0f3a4160ca7913a0a8",
+          "verify_performance.py": "d54cd08b357af49d40c9ccb7ee35730a3954e2919e80c30994d25751627ab603"
         },
         "exit": 0,
         "stderr": "",
@@ -445,8 +445,8 @@
           "README.md": "c535e610facf2d84663bcfb2d180ffcf213821dd4668884186248c2b635294fc",
           "g6_trap2_test.csv": "2515b1ba3453dd7a700d832af362eeb12285bdc4b80586d90db141e3f16f5aa4",
           "gpu_baseline.csv": "aad2ecb2cb582f4eb6bf8c7d268e03c8428a2b53327a7eb3acb0d5404c608eac",
-          "verify_accuracy.py": "404a6ba4220730f85ef420a77e0a239a252f7181ae053b0a88e72efb3656c5f8",
-          "verify_performance.py": "4284ddcc90bed11d0fbe45fa459e78a73462146cdab2b4be3626dee03476b493"
+          "verify_accuracy.py": "867f34cf91df9eaa0e6390a72d246f37618f321157eefb26fe155cb1a732e7f3",
+          "verify_performance.py": "8892030e71c65208d000f7e86abea6bd34c144460ddfb020bfd9cbd2fe652ad9"
         },
         "exit": 0,
         "stderr": "",
@@ -576,8 +576,8 @@
           "README.md": "da885fe2d3d48f27861ee18478d3c21aa8595e4bf393bc082b720cec6c48aabd",
           "g6_trap6_test.csv": "18a0d4f1b484c6e77e0d2633d71a3230ec5a65ca9c0c8b8eb332f0b9753505f6",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "9e51fc129d1b42b2877540d25bc0ba313275a8526d1d144d4ac9861df8fba559",
-          "verify_performance.py": "9b0ebf45357e46936cae0827658f86a53f3943b156e0734aaafb73a79d477c08"
+          "verify_accuracy.py": "d6197371c65e4cf2a10c8ff73102c5ea365ad7834e4ad69f6f0473c3e8379452",
+          "verify_performance.py": "d1d9d348757238a7a2d9c6c90ea3a33a6c8d7e4eef832df6a9922bc62dbbbfb1"
         },
         "exit": 0,
         "stderr": "",
@@ -691,8 +691,8 @@
           "README.md": "5ae81509fcdeb1f85fdf754e25a76d0ff49df2076b4c9ed8dce14bf20a877650",
           "g7op_test.csv": "6254f7e3c81eb9779ebf8d6ce869a7704bc6d960613342144729344d3f2d842f",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "fee429bff64ae83e839f20b54c890b8b20658e66ef4ca3b48a96aa3dfbc10900",
-          "verify_performance.py": "517a05b8a959fa26f0e251c3f92d00d68c79c6577546c23c8c9c19e7f2db1596"
+          "verify_accuracy.py": "aa3403e9976279ca822a23e497aeef04374a3eeb12e1226545aaeb08d85fc803",
+          "verify_performance.py": "a93e8481a0fe2af77faa42a06fc93027f3e6ed5009c33a645d7a21b4348125d2"
         },
         "exit": 0,
         "stderr": "",
