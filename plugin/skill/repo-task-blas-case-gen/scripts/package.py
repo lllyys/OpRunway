@@ -1595,10 +1595,18 @@ def _column_contract_rows(facts, generator):
             note = "轴取值、edge 名或性能键值"
         elif kind == "expect":
             values = "见下方状态词表"
-            note = "使用 csv_loader.h parseStatus 支持的全名"
+            note = (
+                "取值必须在下方本算子精确词表内"
+                if facts.get("schema_version") == 2
+                else "使用 csv_loader.h parseStatus 支持的全名"
+            )
         elif kind == "seed":
             values = "正整数"
-            note = "各缓冲依次使用 seed、seed+1……派生随机填充"
+            note = (
+                "harness 以该种子驱动本用例造数（派生细节由 harness 定义）"
+                if facts.get("schema_version") == 2
+                else "各缓冲依次使用 seed、seed+1……派生随机填充"
+            )
         elif kind == "enum":
             values = ", ".join(param["values"])
             note = f"枚举短记号：{values}"
@@ -1929,8 +1937,32 @@ def _render_readme(path, facts, generator, generated):
     header_lines.append(current)
     header = "\n".join(header_lines)
     report = generated["report"]
+    if facts.get("schema_version") == 2:
+        consumption_rules = (
+            "本仓惯例是 csv_loader.h 的 `fillCustom(csv_map)` 通路：param.h 逐列\n"
+            "`parseString/parseInt/parseDouble(row, \"列名\")`。本包发射的每一列都必须\n"
+            "被读取；param.h 解析但本包未发射的列（如阈值列）由 csv_loader 缺列回退\n"
+            "默认值（0/0.0/空串），这是仓内既有契约，不要求 throw。"
+        )
+    else:
+        consumption_rules = (
+            "每个投影列必须用 `ReadMap` 显式读取。框架的 `ReadMap` 会返回默认值，但本任务包契约要求\n"
+            "缺列或空值必须 `throw`，不得依赖默认值。\n"
+            "\n"
+            "```cpp\n"
+            "auto require = [&](const char* key) -> std::string {\n"
+            "    auto value = ReadMap(m, key);\n"
+            "    if (value.empty()) {\n"
+            "        throw std::runtime_error(std::string(\"missing or empty CSV column: \") + key);\n"
+            "    }\n"
+            "    return value;\n"
+            "};\n"
+            "caseName = require(\"case_name\");\n"
+            "```"
+        )
     values = {
         "OP": facts["op"],
+        "CONSUMPTION_RULES": consumption_rules,
         "SOURCE_TABLE": _source_table(facts),
         "SIGNATURE": _signature(facts),
         "SIX_FILES": _six_files_table(facts),

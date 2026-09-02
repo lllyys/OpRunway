@@ -11,7 +11,7 @@
 | generator_version | 1 |
 | sources.params | include/cann_ops_sparse.h aclsparseXcoo2csr（@5b2a5ba:2027） |
 | sources.cases | test/coo2csr/{param.h,arch35/coo2csr_test.csv} 列契约与取值词表 |
-| sources.perf | 无 GPU 对标（R1 预期 NO_REF），m 阶梯为 2^k±1 加大值 |
+| sources.perf | 无 GPU 对标（R1 预期 NO_REF），m 阶梯 2^k±1 加大值，nnz 上界见 case_controls 注 |
 
 ## 接口签名
 
@@ -50,8 +50,8 @@ aclsparseStatus_t aclsparseXcoo2csr(
 | empty_row_prob | 控制列 | 0.0, 0.5, 0.8 | harness 造数控制（档位），值为原始字符串 |
 | pattern | 控制列 | random, diag, allsame | harness 造数控制（枚举），值为原始字符串 |
 | idx_base | 控制列 | 0, 1 | harness 造数控制（枚举），值为原始字符串 |
-| expect_result | 控制列 | 见下方状态词表 | 使用 csv_loader.h parseStatus 支持的全名 |
-| seed | 控制列 | 正整数 | 各缓冲依次使用 seed、seed+1……派生随机填充 |
+| expect_result | 控制列 | 见下方状态词表 | 取值必须在下方本算子精确词表内 |
+| seed | 控制列 | 正整数 | harness 以该种子驱动本用例造数（派生细节由 harness 定义） |
 
 `expect_result` 状态词表（本算子精确词表）：
 
@@ -65,19 +65,10 @@ case_name,m,n,sparsity,empty_row_prob,pattern,idx_base,expect_result,seed
 
 ## param.h 读列要求
 
-每个投影列必须用 `ReadMap` 显式读取。框架的 `ReadMap` 会返回默认值，但本任务包契约要求
-缺列或空值必须 `throw`，不得依赖默认值。
-
-```cpp
-auto require = [&](const char* key) -> std::string {
-    auto value = ReadMap(m, key);
-    if (value.empty()) {
-        throw std::runtime_error(std::string("missing or empty CSV column: ") + key);
-    }
-    return value;
-};
-caseName = require("case_name");
-```
+本仓惯例是 csv_loader.h 的 `fillCustom(csv_map)` 通路：param.h 逐列
+`parseString/parseInt/parseDouble(row, "列名")`。本包发射的每一列都必须
+被读取；param.h 解析但本包未发射的列（如阈值列）由 csv_loader 缺列回退
+默认值（0/0.0/空串），这是仓内既有契约，不要求 throw。
 
 ## Golden 要求
 
@@ -170,7 +161,7 @@ skill 的 `references/perf-protocol.md`。
 | library | unspecified |
 | warmup | unspecified |
 | statistic | unspecified |
-| source | 任务书无 GPU 基线，200 点沿 m 阶梯×(n,sparsity) 8 组合铺开，全待填 |
+| source | 任务书无 GPU 基线，200 点按 m 三桶×(n,sparsity) 组合铺开（大 m 配小 n 封 nnz ≤ 2^24），全待填 |
 
 基线行：
 
@@ -320,59 +311,59 @@ skill 的 `references/perf-protocol.md`。
 | coo2csr-base-142 | 4097 | 16 | 0.0 | 只采集不评判 |
 | coo2csr-base-143 | 4097 | 256 | 0.995 | 只采集不评判 |
 | coo2csr-base-144 | 4097 | 4096 | 0.995 | 只采集不评判 |
-| coo2csr-base-145 | 16383 | 16 | 0.5 | 只采集不评判 |
-| coo2csr-base-146 | 16383 | 256 | 0.5 | 只采集不评判 |
-| coo2csr-base-147 | 16383 | 4096 | 0.5 | 只采集不评判 |
-| coo2csr-base-148 | 16383 | 256 | 0.9 | 只采集不评判 |
-| coo2csr-base-149 | 16383 | 4096 | 0.9 | 只采集不评判 |
-| coo2csr-base-150 | 16383 | 16 | 0.0 | 只采集不评判 |
-| coo2csr-base-151 | 16383 | 256 | 0.995 | 只采集不评判 |
-| coo2csr-base-152 | 16383 | 4096 | 0.995 | 只采集不评判 |
-| coo2csr-base-153 | 16384 | 16 | 0.5 | 只采集不评判 |
-| coo2csr-base-154 | 16384 | 256 | 0.5 | 只采集不评判 |
-| coo2csr-base-155 | 16384 | 4096 | 0.5 | 只采集不评判 |
-| coo2csr-base-156 | 16384 | 256 | 0.9 | 只采集不评判 |
-| coo2csr-base-157 | 16384 | 4096 | 0.9 | 只采集不评判 |
-| coo2csr-base-158 | 16384 | 16 | 0.0 | 只采集不评判 |
-| coo2csr-base-159 | 16384 | 256 | 0.995 | 只采集不评判 |
-| coo2csr-base-160 | 16384 | 4096 | 0.995 | 只采集不评判 |
-| coo2csr-base-161 | 16385 | 16 | 0.5 | 只采集不评判 |
-| coo2csr-base-162 | 16385 | 256 | 0.5 | 只采集不评判 |
-| coo2csr-base-163 | 16385 | 4096 | 0.5 | 只采集不评判 |
-| coo2csr-base-164 | 16385 | 256 | 0.9 | 只采集不评判 |
-| coo2csr-base-165 | 16385 | 4096 | 0.9 | 只采集不评判 |
-| coo2csr-base-166 | 16385 | 16 | 0.0 | 只采集不评判 |
-| coo2csr-base-167 | 16385 | 256 | 0.995 | 只采集不评判 |
-| coo2csr-base-168 | 16385 | 4096 | 0.995 | 只采集不评判 |
-| coo2csr-base-169 | 65535 | 16 | 0.5 | 只采集不评判 |
-| coo2csr-base-170 | 65535 | 256 | 0.5 | 只采集不评判 |
-| coo2csr-base-171 | 65535 | 4096 | 0.5 | 只采集不评判 |
-| coo2csr-base-172 | 65535 | 256 | 0.9 | 只采集不评判 |
-| coo2csr-base-173 | 65535 | 4096 | 0.9 | 只采集不评判 |
-| coo2csr-base-174 | 65535 | 16 | 0.0 | 只采集不评判 |
-| coo2csr-base-175 | 65535 | 256 | 0.995 | 只采集不评判 |
-| coo2csr-base-176 | 65535 | 4096 | 0.995 | 只采集不评判 |
-| coo2csr-base-177 | 65536 | 16 | 0.5 | 只采集不评判 |
-| coo2csr-base-178 | 65536 | 256 | 0.5 | 只采集不评判 |
-| coo2csr-base-179 | 65536 | 4096 | 0.5 | 只采集不评判 |
-| coo2csr-base-180 | 65536 | 256 | 0.9 | 只采集不评判 |
-| coo2csr-base-181 | 65536 | 4096 | 0.9 | 只采集不评判 |
-| coo2csr-base-182 | 65536 | 16 | 0.0 | 只采集不评判 |
-| coo2csr-base-183 | 65536 | 256 | 0.995 | 只采集不评判 |
-| coo2csr-base-184 | 65536 | 4096 | 0.995 | 只采集不评判 |
-| coo2csr-base-185 | 262144 | 16 | 0.5 | 只采集不评判 |
-| coo2csr-base-186 | 262144 | 256 | 0.5 | 只采集不评判 |
-| coo2csr-base-187 | 262144 | 4096 | 0.5 | 只采集不评判 |
-| coo2csr-base-188 | 262144 | 256 | 0.9 | 只采集不评判 |
-| coo2csr-base-189 | 262144 | 4096 | 0.9 | 只采集不评判 |
-| coo2csr-base-190 | 262144 | 16 | 0.0 | 只采集不评判 |
-| coo2csr-base-191 | 262144 | 256 | 0.995 | 只采集不评判 |
-| coo2csr-base-192 | 262144 | 4096 | 0.995 | 只采集不评判 |
-| coo2csr-base-193 | 1048576 | 16 | 0.5 | 只采集不评判 |
-| coo2csr-base-194 | 1048576 | 256 | 0.5 | 只采集不评判 |
-| coo2csr-base-195 | 1048576 | 4096 | 0.5 | 只采集不评判 |
-| coo2csr-base-196 | 1048576 | 256 | 0.9 | 只采集不评判 |
-| coo2csr-base-197 | 1048576 | 4096 | 0.9 | 只采集不评判 |
-| coo2csr-base-198 | 1048576 | 16 | 0.0 | 只采集不评判 |
-| coo2csr-base-199 | 1048576 | 256 | 0.995 | 只采集不评判 |
-| coo2csr-base-200 | 1048576 | 4096 | 0.995 | 只采集不评判 |
+| coo2csr-base-145 | 16383 | 16 | 0.0 | 只采集不评判 |
+| coo2csr-base-146 | 16383 | 16 | 0.5 | 只采集不评判 |
+| coo2csr-base-147 | 16383 | 16 | 0.9 | 只采集不评判 |
+| coo2csr-base-148 | 16383 | 16 | 0.995 | 只采集不评判 |
+| coo2csr-base-149 | 16383 | 256 | 0.0 | 只采集不评判 |
+| coo2csr-base-150 | 16383 | 256 | 0.5 | 只采集不评判 |
+| coo2csr-base-151 | 16383 | 256 | 0.9 | 只采集不评判 |
+| coo2csr-base-152 | 16383 | 256 | 0.995 | 只采集不评判 |
+| coo2csr-base-153 | 16384 | 16 | 0.0 | 只采集不评判 |
+| coo2csr-base-154 | 16384 | 16 | 0.5 | 只采集不评判 |
+| coo2csr-base-155 | 16384 | 16 | 0.9 | 只采集不评判 |
+| coo2csr-base-156 | 16384 | 16 | 0.995 | 只采集不评判 |
+| coo2csr-base-157 | 16384 | 256 | 0.0 | 只采集不评判 |
+| coo2csr-base-158 | 16384 | 256 | 0.5 | 只采集不评判 |
+| coo2csr-base-159 | 16384 | 256 | 0.9 | 只采集不评判 |
+| coo2csr-base-160 | 16384 | 256 | 0.995 | 只采集不评判 |
+| coo2csr-base-161 | 16385 | 16 | 0.0 | 只采集不评判 |
+| coo2csr-base-162 | 16385 | 16 | 0.5 | 只采集不评判 |
+| coo2csr-base-163 | 16385 | 16 | 0.9 | 只采集不评判 |
+| coo2csr-base-164 | 16385 | 16 | 0.995 | 只采集不评判 |
+| coo2csr-base-165 | 16385 | 256 | 0.0 | 只采集不评判 |
+| coo2csr-base-166 | 16385 | 256 | 0.5 | 只采集不评判 |
+| coo2csr-base-167 | 16385 | 256 | 0.9 | 只采集不评判 |
+| coo2csr-base-168 | 16385 | 256 | 0.995 | 只采集不评判 |
+| coo2csr-base-169 | 65535 | 16 | 0.0 | 只采集不评判 |
+| coo2csr-base-170 | 65535 | 16 | 0.5 | 只采集不评判 |
+| coo2csr-base-171 | 65535 | 16 | 0.9 | 只采集不评判 |
+| coo2csr-base-172 | 65535 | 16 | 0.995 | 只采集不评判 |
+| coo2csr-base-173 | 65535 | 256 | 0.0 | 只采集不评判 |
+| coo2csr-base-174 | 65535 | 256 | 0.5 | 只采集不评判 |
+| coo2csr-base-175 | 65535 | 256 | 0.9 | 只采集不评判 |
+| coo2csr-base-176 | 65535 | 256 | 0.995 | 只采集不评判 |
+| coo2csr-base-177 | 65536 | 16 | 0.0 | 只采集不评判 |
+| coo2csr-base-178 | 65536 | 16 | 0.5 | 只采集不评判 |
+| coo2csr-base-179 | 65536 | 16 | 0.9 | 只采集不评判 |
+| coo2csr-base-180 | 65536 | 16 | 0.995 | 只采集不评判 |
+| coo2csr-base-181 | 65536 | 256 | 0.0 | 只采集不评判 |
+| coo2csr-base-182 | 65536 | 256 | 0.5 | 只采集不评判 |
+| coo2csr-base-183 | 65536 | 256 | 0.9 | 只采集不评判 |
+| coo2csr-base-184 | 65536 | 256 | 0.995 | 只采集不评判 |
+| coo2csr-base-185 | 262144 | 1 | 0.0 | 只采集不评判 |
+| coo2csr-base-186 | 262144 | 1 | 0.5 | 只采集不评判 |
+| coo2csr-base-187 | 262144 | 1 | 0.9 | 只采集不评判 |
+| coo2csr-base-188 | 262144 | 1 | 0.995 | 只采集不评判 |
+| coo2csr-base-189 | 262144 | 16 | 0.0 | 只采集不评判 |
+| coo2csr-base-190 | 262144 | 16 | 0.5 | 只采集不评判 |
+| coo2csr-base-191 | 262144 | 16 | 0.9 | 只采集不评判 |
+| coo2csr-base-192 | 262144 | 16 | 0.995 | 只采集不评判 |
+| coo2csr-base-193 | 1048576 | 1 | 0.0 | 只采集不评判 |
+| coo2csr-base-194 | 1048576 | 1 | 0.5 | 只采集不评判 |
+| coo2csr-base-195 | 1048576 | 1 | 0.9 | 只采集不评判 |
+| coo2csr-base-196 | 1048576 | 1 | 0.995 | 只采集不评判 |
+| coo2csr-base-197 | 1048576 | 16 | 0.0 | 只采集不评判 |
+| coo2csr-base-198 | 1048576 | 16 | 0.5 | 只采集不评判 |
+| coo2csr-base-199 | 1048576 | 16 | 0.9 | 只采集不评判 |
+| coo2csr-base-200 | 1048576 | 16 | 0.995 | 只采集不评判 |

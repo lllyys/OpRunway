@@ -5,7 +5,7 @@
 OP = "coo2csr"
 FAMILY = "conversion"
 CSV_NAME = "coo2csr_test.csv"
-PACKAGE_CSV_SHA256 = "dcea37956379022ccd0639b67712074e6816550ab190f5a2922b4cb893c224cd"
+PACKAGE_CSV_SHA256 = "e3dd09d70cd071c6525f6fbca58edbdbb0549610dbd4466fdf5922e45db9aeab"
 GENERATOR_VERSION = int("1")
 PERF_KEY = ["m", "n", "sparsity"]
 PROFILE_ASSIGNS_JSON = '''{}'''

@@ -4,21 +4,25 @@
     "description": "role 投影矩阵 fixture 的现状快照（钉板）。results 是行为面；recorded_against 是录制时的代码与输入指纹，重构后允许变化。",
     "recorded_against": {
       "facts_sha256": {
-        "g1_profile": "ffc4658c19be1320f41bd2e3c224a6dbdcd95337596a433d17a61afd10878b73",
-        "g2_batch": "a2b6700821d16657c6f33304606d69eac6259561f5541c944e2830d0f6fb3fbf",
-        "g3_fixed": "818e078e9940bbd7a614dddc08e15b90cb381cbbf44ac15d5e00e9ac946a3338",
-        "g4_cond": "98fa690739390e6f6bf563ed8c8b07b8ebba7e4afb62e8c30ed58d4c2b364883",
-        "g5_scalar": "9a4eaaac12e04756aeef77e732fe076536c4c792d8ba9bf9bc991cd453cb556e",
-        "g6_trap_1_dtype_enum_unconsumed": "b77bfbf081eaa3991504b4bda9224dbc439f3ab44a0ecb957ac71bbdd9dc0a1d",
-        "g6_trap_2_perf_ld_key": "7e6ca6d96c8da82265e805eaed97f01531e0831964e2c3c822ed96eae35e7ddb",
-        "g6_trap_3_complex_profile_edge_scalar": "dbd9592f9d46db8c950acbd93a3296ac5c5f8b6218ff2f9ca053a2d5d201266b",
-        "g6_trap_4_dup_conditioning": "34daac1c85dc5247212db75bebc8041639be12297f4c35b2484498ee6f47dffd",
-        "g6_trap_5_edge_fill_key": "a42141a497363444122748a6791051c259d9cc824dabf634363bb5fad63e8ed0",
-        "g6_trap_6_name_case_collision": "292c49512bebf195288dead4b7811d20a033331aa225c1f934493e7f033bad44",
-        "g6_trap_oob": "351af0a55bcf985a5c085df575850b12c035b8678acd11ef4981732999c77e1c"
+        "g1_profile": "5f128e2ba1ccf997f85b96789963b10246b321babdcbdb898dd83ac972cab22d",
+        "g2_batch": "7e5eafd4c99d460ed69a3e79242419582c3f5bf7cb1cc9166626247ebe5c389c",
+        "g3_fixed": "8cfa9f4b81d64e61940ea7e14f2f86943373ae265fa26518865da31e7c38f6a0",
+        "g4_cond": "f31cb397a2c91c14c7dc96e8ede7f67b0e945f77a71fa514c0fc0c24d139c335",
+        "g5_scalar": "d2b6263adc7a205ba46bcc3f73857dc4d499bcfa3424d188f0a2026406cf86d0",
+        "g6_trap_1_dtype_enum_unconsumed": "8c6baa89cd48cd0d33cb25b74410b3fabdee2cfa14e98dfb0f25dd99648d92fe",
+        "g6_trap_2_perf_ld_key": "9f10ea4cf4ff4213508ce1e53315de96c1ab3a680e8ad0e0a0bd3db50a6028b2",
+        "g6_trap_3_complex_profile_edge_scalar": "4958280c35f7656ee191068cd90295bd1860a4f820135c1e2370bee508f2c5b1",
+        "g6_trap_4_dup_conditioning": "1d28dcbc86da9b0d9f19b9307c39f79693398a5f53618c8897beef2816e5eafb",
+        "g6_trap_5_edge_fill_key": "421088a4b01a637784ddd94058208bf1e614818b5424282078072f050cd76f30",
+        "g6_trap_6_name_case_collision": "38232462efc6bdf509eb8faf0bfcaf3d345fbf903b9aed793fcd2e68ba2d12d0",
+        "g6_trap_oob": "c1d609e1d217e8f284669b05a35a79df485c1f2bfa22c324ae1322eebc12ffbf",
+        "g7_v2_control_name_collision": "f41a6c27646c84339a4b397f9cc828937b9cd03d8509d399bb24c856bdf63eec",
+        "g7_v2_null_unprojected": "cdadf6ea0b1249071ab23da832784b68cd0d40da6233a061deadffd35befb61a",
+        "g7_v2_threshold_no_source": "040b5aee47ff4518ff0525862422890fecec4fd0773af4e4590922c3b7bfe52c",
+        "g7_v2_token_outside_vocab": "b0ca575e0cfb6e2ca9a3b18092331f97ab140bf5fabb01b322fcf2979bfe7e65"
       },
-      "package_py_sha256": "409c745d7fb1648b1a2222c8cffa6e1ac929b0b9623e8cf56421778a4e1e3ebd",
-      "template_common_sha256": "d3cf0138e66d2f318fc485e428d522dfc2e5df2ddc56ca107944f988ffee42d9"
+      "package_py_sha256": "a87793c7ee866b774e045061284df7a7a066fe5dc707314d067dd1ed23d80e53",
+      "template_common_sha256": "82bff91cee0595bda403e3f57105c88c29755bb0274bf8958a46625e2fe6616c"
     }
   },
   "results": {
@@ -597,6 +601,164 @@
       "render": {
         "exit": 2,
         "stderr": "事实表 FACTS 或任务包有 1 处不合格：\n  - edge_cases[0].set 键 'pv5' 越界（len=3）",
+        "stderr_first_line": "事实表 FACTS 或任务包有 1 处不合格：",
+        "stdout": ""
+      }
+    },
+    "g7_v2_control_name_collision": {
+      "check": {
+        "exit": 2,
+        "stderr": "事实表 FACTS 或任务包有 1 处不合格：\n  - case_controls[0].name='k' 与参数名/保留名/基座列冲突（不投影参数名也在禁用之列）",
+        "stdout": ""
+      },
+      "facts_semantic_sha256": "114d61d0efd3ab55c8215375d14dd78fe495ae8fcc59c5dd8d68a30a59b79be6",
+      "generate_inprocess": {
+        "axes": [
+          {
+            "name": "m",
+            "values": 3
+          },
+          {
+            "name": "k",
+            "values": 2
+          },
+          {
+            "name": "mode",
+            "values": 2
+          }
+        ],
+        "blocks": {
+          "ED": 0,
+          "L0": 2,
+          "PF": 0,
+          "PW": 6
+        },
+        "header_columns": 6,
+        "pairs_covered": 16,
+        "pairs_infeasible": 0,
+        "pairs_total": 16,
+        "rows_dropped": 0,
+        "status": "ok",
+        "total_rows": 8
+      },
+      "render": {
+        "exit": 2,
+        "stderr": "事实表 FACTS 或任务包有 1 处不合格：\n  - case_controls[0].name='k' 与参数名/保留名/基座列冲突（不投影参数名也在禁用之列）",
+        "stderr_first_line": "事实表 FACTS 或任务包有 1 处不合格：",
+        "stdout": ""
+      }
+    },
+    "g7_v2_null_unprojected": {
+      "check": {
+        "exit": 0,
+        "stderr": "",
+        "stdout": "算子        g7op\n符号        aclsparseG7\n参数        5 个\n角色分布    handle=1、dim=2、int_array=2\n输出参数    dst\nprofiles    0 个\nedge_cases  0 个\nperf        无\ncase_name,m,cols,mode,expect_result,seed\npairs 覆盖 16/16，infeasible 0 对\nrows_dropped 0\n六件        gen_csv.py、g7op_test.csv、verify_accuracy.py、verify_performance.py、README.md、gpu_baseline.csv"
+      },
+      "facts_semantic_sha256": "55685196dcdd7fc067a1a1e6fda3daf108aeebb5f36206ee6b3f20a7adad188a",
+      "generate_inprocess": {
+        "axes": [
+          {
+            "name": "m",
+            "values": 3
+          },
+          {
+            "name": "cols",
+            "values": 2
+          },
+          {
+            "name": "mode",
+            "values": 2
+          }
+        ],
+        "blocks": {
+          "ED": 0,
+          "L0": 2,
+          "PF": 0,
+          "PW": 6
+        },
+        "header_columns": 6,
+        "pairs_covered": 16,
+        "pairs_infeasible": 0,
+        "pairs_total": 16,
+        "rows_dropped": 0,
+        "status": "ok",
+        "total_rows": 8
+      },
+      "render": {
+        "csv_header_line": "case_name,m,cols,mode,expect_result,seed",
+        "csv_row_count": 8,
+        "derived_sha256": {
+          "README.md": "5ae81509fcdeb1f85fdf754e25a76d0ff49df2076b4c9ed8dce14bf20a877650",
+          "g7op_test.csv": "6254f7e3c81eb9779ebf8d6ce869a7704bc6d960613342144729344d3f2d842f",
+          "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
+          "verify_accuracy.py": "fee429bff64ae83e839f20b54c890b8b20658e66ef4ca3b48a96aa3dfbc10900",
+          "verify_performance.py": "517a05b8a959fa26f0e251c3f92d00d68c79c6577546c23c8c9c19e7f2db1596"
+        },
+        "exit": 0,
+        "stderr": "",
+        "stderr_first_line": null,
+        "stdout": "g7op_test.csv: 8 rows\n解释器：<PYTHON>\n六件：\n  <FIXTURE>/out/g7_v2_null_unprojected/gen_csv.py\n  <FIXTURE>/out/g7_v2_null_unprojected/g7op_test.csv\n  <FIXTURE>/out/g7_v2_null_unprojected/verify_accuracy.py\n  <FIXTURE>/out/g7_v2_null_unprojected/verify_performance.py\n  <FIXTURE>/out/g7_v2_null_unprojected/README.md\n  <FIXTURE>/out/g7_v2_null_unprojected/gpu_baseline.csv"
+      }
+    },
+    "g7_v2_threshold_no_source": {
+      "check": {
+        "exit": 2,
+        "stderr": "事实表 FACTS 或任务包有 1 处不合格：\n  - 阈值列值源未建：本版要求 harness_overrides.threshold_columns 覆盖为空表（等值源契约落地后放开）",
+        "stdout": ""
+      },
+      "facts_semantic_sha256": "1b737e78f6deca54c14a63187d7e405f2d378802e5a7cc9858997901d9b318d6",
+      "generate_inprocess": {
+        "cause_type": null,
+        "exception_type": "GeneratorError",
+        "message_first_line": "阈值列值源未建：本版要求 harness_overrides.threshold_columns 覆盖为空表",
+        "status": "exception"
+      },
+      "render": {
+        "exit": 2,
+        "stderr": "事实表 FACTS 或任务包有 1 处不合格：\n  - 阈值列值源未建：本版要求 harness_overrides.threshold_columns 覆盖为空表（等值源契约落地后放开）",
+        "stderr_first_line": "事实表 FACTS 或任务包有 1 处不合格：",
+        "stdout": ""
+      }
+    },
+    "g7_v2_token_outside_vocab": {
+      "check": {
+        "exit": 2,
+        "stderr": "事实表 FACTS 或任务包有 1 处不合格：\n  - expect 默认 token 'SUCCESS' 不在本算子精确词表 status_vocab 中",
+        "stdout": ""
+      },
+      "facts_semantic_sha256": "2cd8af319c026b56a4b4d2d2061336161213ad192bd10a11fa666dca62b582f1",
+      "generate_inprocess": {
+        "axes": [
+          {
+            "name": "m",
+            "values": 3
+          },
+          {
+            "name": "cols",
+            "values": 2
+          },
+          {
+            "name": "mode",
+            "values": 2
+          }
+        ],
+        "blocks": {
+          "ED": 0,
+          "L0": 2,
+          "PF": 0,
+          "PW": 6
+        },
+        "header_columns": 6,
+        "pairs_covered": 16,
+        "pairs_infeasible": 0,
+        "pairs_total": 16,
+        "rows_dropped": 0,
+        "status": "ok",
+        "total_rows": 8
+      },
+      "render": {
+        "exit": 2,
+        "stderr": "事实表 FACTS 或任务包有 1 处不合格：\n  - expect 默认 token 'SUCCESS' 不在本算子精确词表 status_vocab 中",
         "stderr_first_line": "事实表 FACTS 或任务包有 1 处不合格：",
         "stdout": ""
       }

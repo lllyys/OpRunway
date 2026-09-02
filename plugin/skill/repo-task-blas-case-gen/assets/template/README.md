@@ -28,19 +28,7 @@
 
 ## param.h 读列要求
 
-每个投影列必须用 `ReadMap` 显式读取。框架的 `ReadMap` 会返回默认值，但本任务包契约要求
-缺列或空值必须 `throw`，不得依赖默认值。
-
-```cpp
-auto require = [&](const char* key) -> std::string {
-    auto value = ReadMap(m, key);
-    if (value.empty()) {
-        throw std::runtime_error(std::string("missing or empty CSV column: ") + key);
-    }
-    return value;
-};
-caseName = require("case_name");
-```
+@@CONSUMPTION_RULES@@
 
 ## Golden 要求
 
