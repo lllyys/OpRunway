@@ -79,7 +79,8 @@ A1 只返回这两个值，其它值视同停止。硬前置五项：Python ≥ 
 **harness_profile 探测**按 registry 各 profile 的入口头在 `<工程目录>/include/` 下探测
 （blas=`cann_ops_blas.h`、sparse_frame=`cann_ops_sparse.h`）；0 命中或多命中都是硬失败并
 列出候选，恰一命中的键名会写进 A2 的 runtime manifest。`cmake`、`g++`、
-msprof、`npu-smi`、`cblas.h`、`lapacke.h` 是警告项，后续阶段会在实际使用点给出确定错误。
+msprof、`npu-smi`（目标卡忙闲快照，早报不裁决）、`cblas.h`、`lapacke.h` 是警告项，
+后续阶段会在实际使用点给出确定错误；卡空闲的裁决在 A3/A4 量具的起跑门。
 
 `env.json` 的 `checks[]` 记录每项的 `name/status/detail/hard`，`hard_failures` 列出未通过的
 硬前置，`exit_code` 是退出码。`name` 为 `CANN set_env.sh` 那项的 `detail` 就是 `set_env.sh`

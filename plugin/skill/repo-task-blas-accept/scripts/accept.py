@@ -438,12 +438,15 @@ def _find_msprof(cann_root):
 
 
 def _npu_state(device):
+    """A1 的目标卡忙闲快照：早报信息，不做裁决——空闲裁决权在量具起跑门
+    （TOCTOU：env 时空闲不代表起跑时空闲）。判定口径与起跑门同源：
+    proc-mem 输出含 "Process id:" 即忙、含 "No process in device" 即闲。"""
     executable = shutil.which("npu-smi")
     if executable is None:
         return "缺失", "PATH 中无 npu-smi"
     try:
         result = subprocess.run(
-            [executable, "info"],
+            [executable, "info", "-t", "proc-mem", "-i", str(device)],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -454,17 +457,13 @@ def _npu_state(device):
         return "未知", f"npu-smi 执行失败：{exc}"
     if result.returncode != 0:
         return "未知", f"npu-smi 退出码 {result.returncode}"
-    output = result.stdout
-    if re.search(rf"(?m)^\s*{device}\s+", output) is None:
-        return "未知", f"输出中无法确认设备 {device}"
-    process_lines = [
-        line for line in output.splitlines()
-        if re.search(r"\b\d{2,}\b", line)
-        and re.search(r"process|python|pytest|gtest", line, re.IGNORECASE)
-    ]
-    if process_lines:
-        return "未知", f"设备可见，但疑似有 {len(process_lines)} 条进程记录"
-    return "OK", f"设备 {device} 可见，未解析到占用进程"
+    output = result.stdout or ""
+    busy = output.count("Process id:")
+    if busy:
+        return "忙", f"目标卡 {device} 有 {busy} 条进程记录（起跑门届时会阻塞）"
+    if "No process in device" in output:
+        return "OK", f"目标卡 {device} 空闲（起跑瞬间以量具空闲门为准）"
+    return "未知", f"目标卡 {device} 输出无法判读"
 
 
 def command_env(args):
