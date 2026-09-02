@@ -2,6 +2,19 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-02 · M3′ 完成：schema v2 + case_controls + coo2csr 新包六件（七维审 ADJUST→六项修毕）。**
+  九个提交（ec39d70..abfdb92）。registry 实例化 sparse_frame 九字段（词表上界=普查
+  26 算子并集除 Lt）；v2 校验分派全按版本隔离（新顶层键、覆盖恰四键、控制形状、
+  golden 开放 harness、edge 词表切精确子集）；「不投影」原语 projection:none
+  （enum/dim/int_array）收敛为 _is_projected 单一判定接六处消费者；控制列→轴→
+  perf.key 全链接入、列/轴命名空间冲突机械拒绝；README 渲染 v2 面。coo2csr 新包
+  check=0：CSV 256 行（L0=2/PW=54 全覆盖/PF=200 全 TC_PF_）、发射列全命中 param.h
+  读列、基线 200 行全空（R1 预期 NO_REF）。checkpoint（thread `01a06080`，ADJUST）
+  六修全落：PF 网格封 targetNnz ≤ 2^24 消 int 溢出、S1 冲突集扩到不投影参数名、
+  阈值列值源未建 fail-closed、expect 默认 token ∈ 精确词表、schema→generator
+  兼容矩阵落字、README 读列段 token 化修事实错误；fixture 按重钉协议扩 4 个 v2
+  钉板（旧 12 键零变化），门升 16 项。facts-schema 契约文档随 M2·5·6′ 第 9 项落。
+
 - **2026-09-01 · M1′ 完成：registry 落地、blas 三处硬编码参数化、列投影单源化（七维审 ADJUST→修毕）。**
   四步九个提交（cc4d914..eb7ef7b）：HARNESS_REGISTRY 九字段落模板通用代码区（只填
   blas 档）；首参断言/默认 expect token/状态词表逐个切查表（None 跳过、None 哨兵、
