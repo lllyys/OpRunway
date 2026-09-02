@@ -921,15 +921,28 @@ def _performance_result(
             "scope_caveat": False,
             "reason": "精度证据不足，不能进入 A4",
         })
-    if expected_count == 0 and not path.is_file():
+    # 「有没有性能要求」的判据是 CSV 的 TC_PF_ 行数（total_pf），
+    # 不是可比集大小——新包 200 条 PF 而基线全空时可比集也是 0，
+    # 拿可比集当代理会把 NO_REF 误判成「没有性能要求」。
+    if (total_pf or 0) == 0 and not path.is_file():
         return _with_pf_evidence({
             "status": "通过",
+            "base_status": "通过",
             "expected": 0,
             "timing_scope": None,
             "scope_caveat": False,
             "reason": "部署 CSV 没有 TC_PF_ 用例",
         })
     if not path.is_file():
+        if expected_count == 0:
+            return _with_pf_evidence({
+                "status": "NO_REF",
+                "base_status": "NO_REF",
+                "expected": 0,
+                "timing_scope": None,
+                "scope_caveat": False,
+                "reason": f"{total_pf} 条 TC_PF_ 全无可比基线，证据不足以判 PASS/FAIL",
+            })
         return _with_pf_evidence({
             "status": "证据不足",
             "expected": expected_count,
