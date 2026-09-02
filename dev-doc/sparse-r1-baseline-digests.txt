@@ -13,6 +13,6 @@ d529e300a06dfc0aeff76d1827cb887d8c4a94711439b92dc3563d8966717eb5  sasum/verify_a
 1c814d347d76f86b5341fc57f9546b97d4bdda34c063eb554b14a1b03db8676f  sasum/verify_performance.py
 120676465bfdac1705646410e6bd1fd4a7ec06950cb784339396f1f4bb4f0fd8  sasum/README.md
 6b5fbe26edd271d2b7ee5fb2face3c8fc74df3da9de1eb6193432ba386a5f3a5  sasum/gpu_baseline.csv
-# --- 迁移前参考（不进 M1 逐字节门）---
-50b5b2ee053b1a445d88d0cf14d46c7d072165d2951222597d70766091f4dab1  cherk/gen_csv.py
-579190f86e825bc1d9a454f575bec979438e3506632c1ad2e3de3082ec45ec49  sasum/gen_csv.py
+# --- 公共区迁移后参考（M1′ 步骤 4 重钉；不进 M1 逐字节门）---
+7dd563093c6483176fcbe0170cd8c2bbdb4d94925d84c44373db4c7e6c140755  cherk/gen_csv.py
+86854f483d8bece143b7e260a7b6f6d9ba7b927f4ae5f754d6022035c99323e6  sasum/gen_csv.py
