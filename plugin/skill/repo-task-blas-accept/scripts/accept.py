@@ -1142,84 +1142,13 @@ def _overall_verdict(accuracy, performance, contract):
     return "通过", 0
 
 
-def _report_markdown(payload):
-    accuracy = payload["accuracy"]
-    performance = payload["performance"]
-    contract = payload["contract"]
-    lines = [
-        f"# {payload['op']} 验收报告",
-        "",
-        "## 结论",
-        "",
-        f"**{payload['verdict']}**",
-        "",
-        "## 证据表",
-        "",
-        "| 维度 | 状态 | 证据 |",
-        "| --- | --- | --- |",
-        f"| 契约 | {contract['status']} | {contract.get('path') or '未提供 check.json'} |",
-        (
-            f"| 精度 | {accuracy['status']} | {accuracy['pass']}/"
-            f"{accuracy['expected']} PASS |"
-        ),
-        (
-            f"| 性能 | {performance['status']} | "
-            f"timing_scope={performance.get('timing_scope')} |"
-        ),
-        "",
-        "## 失败逐条",
-        "",
-    ]
-    if accuracy["attribution"]:
-        lines.extend([
-            "| case_name | 首轮 | 复跑 | 归因 |",
-            "| --- | --- | --- | --- |",
-        ])
-        for item in accuracy["attribution"]:
-            lines.append(
-                f"| {item['name']} | {item['initial_status']} | "
-                f"{item['rerun_status']} | {item['attribution']} |"
-            )
-    else:
-        lines.append("无首轮失败。")
-    if accuracy["problems"]:
-        lines.extend(["", "证据问题："])
-        lines.extend(f"- {problem}" for problem in accuracy["problems"])
-    runtime = payload.get("runtime") or {}
-    lines.extend([
-        "",
-        "## 运行时包",
-        "",
-        f"- 任务包：{runtime.get('package')}",
-        f"- 任务包 CSV SHA-256：{runtime.get('package_csv_sha256')}",
-        f"- 基线 SHA-256：{runtime.get('baseline_sha256')}",
-        f"- 性能键：{', '.join(runtime.get('perf_key') or []) or '无'}",
-        f"- 每例调用次数（calls_per_case）：{payload.get('evidence', {}).get('calls_per_case')}",
-        "",
-        "## 契约比对",
-        "",
-        f"- 部署 CSV：{contract.get('csv')}",
-        f"- 列名未被 harness 读取：{', '.join(contract.get('columns_not_read') or []) or '无'}",
-        f"- A2′ harness 文件缺件：{', '.join(contract.get('harness_missing') or []) or '无'}",
-    ])
-    lines.extend(f"- 警告：{message}" for message in contract.get("warnings", []))
-    lines.extend(f"- {message}" for message in contract.get("errors", []))
-    lines.extend([
-        "",
-        "## 审阅备注",
-        "",
-        "<可选，由 agent 填>",
-        "",
-    ])
-    return "\n".join(lines)
-
-
 REPORT_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "assets" / "template" / "report.md"
 
 
 def _accuracy_section(accuracy):
     lines = [
-        f"- 状态：**{accuracy['status']}**（{accuracy['pass']}/{accuracy['expected']} PASS）",
+        f"- 状态：**{accuracy['status']}**"
+        f"（{accuracy.get('pass')}/{accuracy.get('expected')} PASS）",
         f"- 执行：{accuracy.get('executed')} 条",
     ]
     if accuracy.get("attribution"):
@@ -1260,10 +1189,10 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
         directory.mkdir(parents=True, exist_ok=True)
     template = REPORT_TEMPLATE_PATH.read_text(encoding="utf-8")
     values = {
-        "OP": payload["op"],
-        "VERDICT": payload["verdict"],
-        "RUN_ID": payload["run_id"],
-        "SOC": payload["soc"],
+        "OP": payload.get("op"),
+        "VERDICT": payload.get("verdict"),
+        "RUN_ID": payload.get("run_id"),
+        "SOC": payload.get("soc"),
         "ACCURACY_SECTION": _accuracy_section(payload["accuracy"]),
         "PERFORMANCE_SECTION": _performance_section(payload["performance"]),
     }
@@ -1339,11 +1268,15 @@ def command_verdict(args):
             "evidence": {"accuracy_json": str(accuracy_path)},
             "verdict": "证据不足",
         }
-        _atomic_json(out_dir / "verdict.json", payload)
-        _atomic_text(out_dir / "report.md", _report_markdown(payload))
+        layout = _write_layout(
+            out_dir, payload, package, runtime, accuracy_path, rerun_path,
+            performance_path,
+        )
+        payload["layout"] = layout
+        _atomic_json(out_dir / "intermediate" / "verdict.json", payload)
         print(f"证据不足: {exc}", file=sys.stderr)
-        print(f"verdict.json: {out_dir / 'verdict.json'}")
-        print(f"report.md: {out_dir / 'report.md'}")
+        print(f"verdict.json: {out_dir / 'intermediate' / 'verdict.json'}")
+        print(f"report.md: {out_dir / 'report' / 'report.md'}")
         return INSUFFICIENT_EXIT
     op = manifest["op"]
     family = manifest["family"]
@@ -1431,19 +1364,17 @@ def command_verdict(args):
         },
         "verdict": verdict,
     }
-    _atomic_json(out_dir / "verdict.json", payload)
-    _atomic_text(out_dir / "report.md", _report_markdown(payload))
     layout = _write_layout(
         out_dir, payload, package, runtime, accuracy_path, rerun_path,
         performance_path,
     )
     payload["layout"] = layout
-    _atomic_json(out_dir / "verdict.json", payload)
+    _atomic_json(out_dir / "intermediate" / "verdict.json", payload)
     print(f"精度: {accuracy['status']} ({accuracy['pass']}/{accuracy['expected']} PASS)")
     print(f"性能: {performance['status']}")
     print(f"结论: {verdict}")
-    print(f"verdict.json: {out_dir / 'verdict.json'}")
-    print(f"report.md: {out_dir / 'report.md'}")
+    print(f"verdict.json: {out_dir / 'intermediate' / 'verdict.json'}")
+    print(f"report.md: {out_dir / 'report' / 'report.md'}")
     return exit_code
 
 
