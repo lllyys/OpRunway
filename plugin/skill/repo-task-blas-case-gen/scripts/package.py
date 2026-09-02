@@ -1597,6 +1597,16 @@ def _column_contract_rows(facts, generator):
         elif kind == "batch_pattern":
             values = "UNIFORM, NULL_TABLE, MIXED_SINGULAR, NULL_ELEMENT_i"
             note = "统一缓冲、空表、混合奇异或第 i 个元素为空"
+        elif kind in {"control_enum", "control_tier"}:
+            source = "控制列"
+            control = next(
+                item
+                for item in facts.get("case_controls", [])
+                if item.get("name") == column
+            )
+            values = ", ".join(control["values"])
+            label = "枚举" if kind == "control_enum" else "档位"
+            note = f"harness 造数控制（{label}），值为原始字符串"
         elif kind == "fixed_vector_elem":
             values = "int 或 float"
             note = f"fixed_vector 第 {spec['index']} 个元素"
@@ -1607,22 +1617,40 @@ def _column_contract_rows(facts, generator):
 
 
 def _column_vocab(generator, facts):
-    fill_tiers = generator._case_options(facts)["fill_tiers"]
-    fill_values = "\n".join(f"- `{value}`" for value in fill_tiers)
-    status_values = "\n".join(
-        f"- `{value}`" for value in _harness_profile(facts)["status_vocab_bound"]
+    version = facts.get("schema_version")
+    sections = []
+    has_fill = version != 2 or any(
+        spec["kind"] == "fill" for spec in generator._column_specs(facts)
     )
-    return (
-        "fill 词表（语法见 `fill.h` 的 `METHOD_PATTERN_VAL`）：\n\n"
-        + fill_values
-        + "\n\n`expect_result` 状态词表（`parseStatus` 全名）：\n\n"
-        + status_values
-    )
+    if has_fill:
+        # v1 保持现状恒渲染；v2 只有存在 fill 列才渲染该节。
+        fill_tiers = generator._case_options(facts)["fill_tiers"]
+        fill_values = "\n".join(f"- `{value}`" for value in fill_tiers)
+        sections.append(
+            "fill 词表（语法见 `fill.h` 的 `METHOD_PATTERN_VAL`）：\n\n" + fill_values
+        )
+    if version == 2:
+        expect_column = generator._resolved_profile(facts)["expect_column"]
+        vocab = facts.get("status_vocab", [])
+    else:
+        expect_column = "expect_result"
+        vocab = _harness_profile(facts)["status_vocab_bound"]
+    if expect_column is not None:
+        status_values = "\n".join(f"- `{value}`" for value in vocab)
+        title = (
+            f"`{expect_column}` 状态词表（本算子精确词表）：\n\n"
+            if version == 2
+            else "`expect_result` 状态词表（`parseStatus` 全名）：\n\n"
+        )
+        sections.append(title + status_values)
+    return "\n\n".join(sections)
 
 
 def _golden_requirements(facts):
     golden = facts["golden"]
     details = [f"- `golden.kind`: `{golden['kind']}`"]
+    if golden["kind"] == "harness":
+        details.append("- golden 由开发者 harness 自带（golden.h），任务包不产外部 golden 实现")
     if "symbol" in golden:
         details.append(f"- `golden.symbol`: `{golden['symbol']}`")
     if "formula" in golden:
@@ -1677,6 +1705,9 @@ VERIFY_DESCRIPTIONS = {
 
 
 def _verify_table(facts):
+    if "verify" not in facts:
+        # golden=harness：校验面由 harness 自带，FACTS 不声明 verify。
+        return "校验由开发者 harness 自带（golden.h 与测试断言），任务包不声明 verify 面。"
     rows = [
         (token, *VERIFY_DESCRIPTIONS[token]) for token in facts["verify"]
     ]
@@ -1684,6 +1715,12 @@ def _verify_table(facts):
 
 
 def _tolerance_text(facts):
+    golden = facts.get("golden")
+    if isinstance(golden, dict) and golden.get("kind") == "harness":
+        return (
+            "精度判定由开发者 harness 自带（golden.h；阈值列若存在，语义也由 harness "
+            "定义）。任务包不附加容差表。"
+        )
     selected = {
         profile["precision_row"] for profile in facts.get("dtype_profiles", [])
     }
