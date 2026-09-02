@@ -27,9 +27,9 @@ Codex checkpoint 变更。依据：[census](sparse-r1-census.md) §2/§5、
 | 4 | `expect_default_token` | str 或 none | 生成侧 expect 列默认写值（原 #6/#10 合并）；无 expect 列时必须 none |
 | 5 | `status_vocab_bound` | list[str] | 域级闭合**上界**；FACTS 声明本算子精确子集，edge token 由子集派生 |
 | 6 | `threshold_columns` | list[str] | 三档合法取值：三件套 / mere+mare / 空表 |
-| 7 | `first_param_ctype` | str 或 none | **可选断言**：非 none 时 S1 断言 params[0].ctype 等于它；blas 保现值，sparse=none（首参不统一，不立错误不变量） |
+| 7 | `first_param_ctype` | str 或 none | 可选断言：非 none 时 S1 断言首参 ctype 等于它；blas 保现值，sparse=none |
 | 8 | `entry_headers` | list[str] | A1 入口头；blas=`cann_ops_blas.h`，sparse=`cann_ops_sparse.h` |
-| 9 | `footprint_policy` | str | `dense_formula`（blas 现状）或 `no_static_check`（sparse：只跳过静态判定，**不承诺**运行时护栏；极端 shape 由 FACTS `constraints` 约束） |
+| 9 | `footprint_policy` | str | `dense_formula`（blas）或 `no_static_check`（sparse：只跳过静态判定，不承诺运行时护栏） |
 
 对上半场审的字段裁定采纳情况：`domain` 删（与 profile 键名重复，manifest 记选中的键）；
 `id_column` 删（升为 §2.6 全局不变量）；`success_token`+`default_expect_token` 合并为 #4；
@@ -43,7 +43,8 @@ A1 判定规则（写死）：在 `<repo>/include/` 下按全部 profile 的 `en
 
 ## 2.5 FACTS 覆盖契约（冻结）
 
-FACTS v2 以 `harness_profile: "<profile键名>"` 选 profile。覆盖规则：
+FACTS v2 以 `harness_profile: "<profile键名>"` 选 profile——**v2 必填**（v1 隐式
+blas、行为不变；不留第二套隐含接口）。覆盖规则：
 
 - **允许覆盖的键恰四个**：`seed_columns`、`description_column`、`expect_column`、
   `threshold_columns`。写在 FACTS 顶层 `harness_overrides` 字典里。

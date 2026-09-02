@@ -112,18 +112,21 @@ stdout/stderr 全文）；拷入 `out/<name>/gen_csv.py` 后 `package.py render`
 蓝图 §C 的陷阱 6（`_scalar_is_complex` 死代码）不是 FACTS 可表达的行为，按 §D 的清单以
 「参数名 a 与 A 并存」顶替。下表的行为是录制时的实测现状，其中多数是蓝图预判的 bug。
 
-**处置纪律（checkpoint 下半场审裁定）：M1 不得更新任何负例期望；全部陷阱在 M3 按
-统一规则修复，届时按行为变更 allowlist 重录对应负例。** 处置表：
+**处置纪律（2026-09-01 精简令后的现行口径）：本期任何里程碑都不主动修陷阱、
+不更新负例期望。** 处置表：
 
-| 陷阱 | M1 | M3 修复方式（通用规则，不做逐陷阱特判） |
+| 陷阱 | 本期 | 归置 |
 | --- | --- | --- |
-| trap_1 | 原样保留 | dtype/compute enum 必须被 profile/`dtype_from` 消费，S1 确定性拒绝 |
-| trap_2 | 原样保留，**不得提前禁** | 「会被物化器派生重算的键不得作声明型 perf.key」通则，覆盖 ld/stride |
-| trap_3 | 原样保留 | 复标量 edge 值统一要求 `[re, im]`，schema 拒裸数字 |
-| trap_4 | 原样保留 | 「离散轴值必须唯一」一条通则覆盖 conditioning/values/tiers |
-| trap_5 | 原样保留（双通路分叉钉住） | 生成器对派生键改 fail-closed，与 checker 口径对齐 |
-| trap_6 | 原样保留（M1 消它违反逐字节门） | pairwise 前统一查列/轴/控制键命名空间冲突 + 迭代上限防御 |
-| trap_oob | 原样保留 | 越界拒绝属正确行为，M3 仅在消息措辞变化时按 allowlist 重录 |
+| trap_1 | 原样保留 | 存量 blas bug，挂 todo，本期不修 |
+| trap_2 | 原样保留，不提前禁 | 存量，挂 todo（修法通则：派生重算键不得作声明型 perf.key） |
+| trap_3 | 原样保留 | 存量，挂 todo |
+| trap_4 | 原样保留 | M3′ 给**新 control** 做唯一性检查时天然覆盖其 sparse 面；存量 blas 面挂 todo |
+| trap_5 | 原样保留（双通路分叉钉住） | 存量，挂 todo |
+| trap_6 | 原样保留 | M3′ 新 control 命名空间冲突检查覆盖其 sparse 面；存量面（含 pairwise 不收敛）挂 todo |
+| trap_oob | 原样保留 | 正确行为的钉板，无需修 |
+
+若某次实现顺带改变了某条负例的行为（如 M3′ 的 control 检查触到 trap4/6 路径），
+按 §「模板变更的重钉协议」（见实施计划 §0）核对差异恰为预期后重录该负例。
 
 - **trap_1**（enum_kind=dtype 但无人 dtype_from，此时 schema 禁给 profiles）：
   check=2、render=2，报 `生成失败：L0: 'dt'`；schema 校验本身通过，崩在物化。

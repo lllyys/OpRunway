@@ -1,291 +1,146 @@
-# sparse R1 实施计划
+# sparse R1 实施计划（v3·精简版）
 
-> **状态：已立项实施中**（2026-09-01 用户裁定开工，分支 `feature/sparse-r1`；
-> M0 为立项前预研）。编号与状态唯一源：
-> [sparse-gap-learning-map.md](sparse-gap-learning-map.md) §0。
+> **状态：已立项实施中**（分支 `feature/sparse-r1`；M0/M0.5 已完成）。
+> 编号与状态唯一源：[sparse-gap-learning-map.md](sparse-gap-learning-map.md) §0；
+> 接口唯一源：[sparse-r1-registry-freeze.md](sparse-r1-registry-freeze.md)（9 字段版）。
 > 目标：case-gen 能为 frame 惯例的 sparse 算子造六件，开发者 harness 原样消费，
-> accept 出裁决（R1）。承接 [sparse-support-candidate-plan.md](sparse-support-candidate-plan.md)
-> 的 A 案与七条硬边界。2026-09-01 起草；同日经 Codex 计划评审（MAJOR GAPS，
-> thread `01a05bf6-e8f7-7692-aaab-001b3366f73e`）修订为本版——主要修正：普查前移
-> 冻结 registry、IR 补全七消费者、版本策略改为 v2 + 确定性迁移、blas 专属校验
-> profile 化、NO_REF 终态显式化、tier 规范形收紧。
+> accept 出裁决（R1）。本版按用户精简令（2026-09-01「不要加太多的门，只做最精简的
+> 改动」）与 Codex 复审（TRIM_NEEDED，thread `01a05fde`）自 v2 裁剪而来；
+> 历史演进见 changes brief 与 Git。
 
-**阅读约定**（本文与关联文档的自造术语，首次冷读先过这张表）：
+**阅读约定**（自造术语，冷读先过）：
 
 | 术语 | 含义 |
 | --- | --- |
-| 六件 | 任务包的六个文件：gen_csv.py、`<op>_test.csv`、两个 verify 脚本、README、gpu_baseline.csv |
+| 六件 | 任务包六个文件：gen_csv.py、`<op>_test.csv`、两个 verify 脚本、README、gpu_baseline.csv |
 | S1–S3 / A1–A5 | 阶段号：S=case-gen 生成链（校验→渲染→check）；A=accept 验收链（A1 环境、A2 部署与运行时包、A3 精度、A4 性能、A5 结论） |
-| NO_REF | 性能汇总态：有性能用例但全部配不到基线，证据不足，不判 PASS/FAIL |
+| NO_REF | 性能汇总态：有性能用例但全配不到基线——证据不足，不判 PASS/FAIL |
 | FACTS | 单算子事实字面量（AST 白名单、从不执行），见 facts-schema.md |
-| registry | skill 内版本化的有限 profile/词表数据集，装域级惯例 |
-| 投影 IR | FACTS+registry 编译出的中间表示（列/轴/键/物化四份 spec），列消费者的唯一输入 |
+| registry | skill 内版本化的有限 profile/词表数据集，装域级惯例（9 字段，见冻结文档） |
 | frame 惯例 | ops 仓 `test/frame/` 公共件之上的 CSV 驱动 gtest 写法（param.h 逐列读 CSV） |
-| npu-smi 命令桩 | 用可替换的假 `npu-smi` 输出喂判定逻辑的本地测试手段（无真机时用） |
-| ultracode | 多 agent 并行执行方式；可降级为串行，不构成对任何工具的硬依赖 |
 
-## 0. 范围、终态与不变量
+## 0. 范围、终态与纪律
 
-**范围**：ops-sparse 仓 26/33 个 frame 惯例算子（CSV-gtest；成员清单与统计口径的
-唯一出处是 [sparse-r1-census.md](sparse-r1-census.md) §1）。E1（arch35 真机）不阻塞
-M0.5–M6 的本地实施，只阻塞 M7 真机验证与「正式支持」声明。辅助负例 CSV
-（densetosparse/sparse2dense 的 L2 套件）按 registry-freeze §2.6 裁定归 harness 自有，
-不在验收范围。spgemm 950 任务书的
-ATK/torch 形态按用户裁定为特例，不在本计划内。首个打通算子 **coo2csr**。
+**范围**：ops-sparse 仓 26/33 个 frame 惯例算子（成员清单唯一出处
+[sparse-r1-census.md](sparse-r1-census.md) §1）。首通算子 **coo2csr**。
+辅助负例 CSV 归 harness 自有（冻结 §2.6），不在验收范围；spgemm 950 ATK/torch
+形态是特例不做；E1（arch35 真机）只阻塞 M7，不阻塞本地实施。
 
-**R1 的预期终态（显式写死，避免误报）**：本期 sparse 无 GPU 基线，200 个性能点
-全待填，故 accept A5 的预期结论是**「精度通过、性能 NO_REF、总体证据不足」**，
-退出码非 0 属预期。追求「正式通过」的前置是 G4（GPU 基线回填），归 M7 之后另立。
-任何阶段不得把静态自洽描述成正式支持。
+**R1 预期终态（写死防误报）**：本期无 GPU 基线，200 性能点全待填，A5 预期结论
+**「精度通过、性能 NO_REF、总体证据不足」**，退出码非 0 属预期。「正式通过」
+前置是 G4 基线回填，M7 之后另立。静态自洽不得说成正式支持。
 
-**执行方式**：实施在主 session 进行，本文即交接件；并行阶段用 multi-agent
-ultracode（Workflow fan-out），形态见 §1.5。测试用 ops-sparse 已有算子实证。
-**精简纪律（用户裁定 2026-09-01）**：不再新增任何门/探针——回归只靠既有三道
-（10 项摘要、双示例 check、fixture `--check`）；每个里程碑取能达成目标的最小 diff，
-IR 用普通函数与字典，不引入类层次与新校验层。
+**精简纪律（用户裁定，本版执行基调）**：唯一门集合是**三道既有回归门 + 一次
+coo2csr 纵向首通**——10 项派生物摘要、cherk/sasum 双示例 check、fixture
+`record_fixture.py --check`。不再新增任何门/探针；每里程碑取最小 diff；一切用
+普通函数与字典，不引入类层次与新校验层。Codex 评审只在两处：**接口真变更**
+（registry 冻结面）与 **push 前仓规一轮**；不设逐里程碑 checkpoint。
 
-**不变量（每个里程碑都要守）**：
+**模板变更的重钉协议**（代替已砍的 allowlist/语义快照）：改模板必然改渲染物。
+协议是：跑 `--check`（先 `--refresh-common`），核对差异清单**恰好**是本次变更
+预期影响的条目，然后在同一 commit 里重录基线与受影响摘要——靠 diff 审查收口，
+不建新机制。
 
-- **M1 逐字节门**：cherk/sasum 五件派生物（CSV、README、gpu_baseline、两个 verify）
-  与 [sparse-r1-baseline-digests.txt](sparse-r1-baseline-digests.txt) 逐项相等；
-  gen_csv.py 因公共区更新而变，走 §3.4 确定性迁移。**M2 起**逐字节门只保 CSV/README/
-  gpu_baseline 三件；verify 模板属预期变更，改为「变更文件 allowlist + blas 语义
-  快照不变」（同一本地 ops-blas 树上，改前后 env/check/runtime manifest 规范化对照）。
-- **NPU 现场空闲门**（用户裁定）：skill 做实际 NPU 测试起跑前，必须**现场**检查目标卡
-  空闲。忙卡对 A4 是直接污染（kernel 耗时混入他人负载），对 A3 是抢占风险。落点是
-  **两个 verify 模板**（A3/A4 是独立运行的运行时脚本，只改 accept.py 保证不了起跑时刻）：
-  verify_accuracy 在首次 gtest 前、verify_performance 在首次 warm-up/msprof 前各查一次，
-  **不复用** A1 环境快照或对方的结果。判定表写死，fail-closed：
+**不变量**：裁决路径唯一；`params` 逐字对应 C 原型（造数控制走 case_controls）；
+版本策略 v2 承载新键（v1 隐式 blas、行为逐字节不变；**v2 必填 `harness_profile`**，
+不留第二套隐含接口）；`perf` 节存在时 rows 恰 200；产物三类划分（人读/中间产物/
+最小可复现）；**NPU 现场空闲门**（用户裁定）——A3/A4 起跑前在两个 verify 模板内
+现场核查目标卡空闲（fail-closed：查询失败/忙均阻塞、退出码 4、结果记 payload），
+**实现与三分支实测归 M7**（本地阶段无 NPU 链可跑）。
 
-  | 现场查询结果 | 判定 | 动作 |
-  | --- | --- | --- |
-  | npu-smi 查询失败或输出无法解析 | 阻塞 | 退出码 4，报「空闲门查询失败」 |
-  | 目标 device 有占用进程，或利用率非 0 | 忙 | 退出码 4，列出占用进程 |
-  | 明确空闲（无进程且利用率 0） | 放行 | 起跑 |
+## 1. 里程碑（最小序）
 
-  核查记录写入结果 payload 的 `npu_gate` 字段（device、时间戳、判定、原始输出摘要）。
-  M2 实现，本地用 npu-smi 命令桩验证三分支（含代表性原始输出样本），真机行为归 M7。
-- 裁决路径唯一；引擎零领域词（领域内容只进 registry 数据）。
-- `params` 逐字对应 C 原型；造数控制走 `case_controls`，不伪装成参数。
-- 消费者棘轮：任何列/轴/键的消费者不得绕开 IR 重新遍历 params 猜投影。
+| 里程碑 | 内容 | 完成线 |
+| --- | --- | --- |
+| M0/M0.5（已完成） | 普查、投影矩阵 fixture、registry 冻结（9 字段） | 已过 checkpoint |
+| M1′ | 最小生成基础：registry 落地 + blas 硬编码参数化 + 表头/行写入统一 | 三门全绿（重钉协议） |
+| M3′ | v2 首包能力：profile/overrides/case_controls/golden=harness + coo2csr 六件 | coo2csr check=0 + 三门 |
+| M2·5·6′ | accept 纵向闭合 + 三类产物 + 文档随改 | coo2csr 本地 smoke + 三门 |
+| M7（阻塞 E1） | 真机：空闲门实现、A3–A5、V4、calls_per_case 链、repro 补全、G4 复验 | 真机证据 |
 
-**版本策略（修订）**：新增 FACTS 键对旧校验器不是加法兼容（旧 checker 严格拒绝
-未知顶层键），所以：`schema_version=2` 承载新键（v1 FACTS 不含新键、行为不变；
-新 checker 同时读 v1/v2，旧 checker 拒 v2 属预期）；模板 `GENERATOR_VERSION=2`，
-现有示例经 §3.4 迁移到新公共区并同步改版本号。兼容方向单向：新读旧，旧不读新。
-**v1 兼容边界**：合法 v1 FACTS 的行为逐字节不变；fixture 已登记的非法/不收敛输入
-（六陷阱）只允许在 M3 按统一规则收紧并同步更新负例期望——M1 不得动它们。
+## 2. M1′ · 最小生成基础
 
-## 1. 里程碑总览
+1. registry（9 字段 × 2 profile，值按冻结文档与普查数据）作为普通字典进模板公共
+   代码区；package.py 经 `_load_generator()` 取用。
+2. blas 硬编码三处改查 registry，值与现状逐字节一致：S1 首参断言
+   （package.py:1169，改按 `first_param_ctype`，none 则跳过）、生成侧默认 expect
+   token（模板 :560）、状态/edge 词表（:75，改由 FACTS 精确子集派生，blas 示例的
+   子集即现词表）。
+3. 表头/行写入统一：一个普通函数产有序列描述（普通 dict），
+   模板 `_header_columns`、行物化、README 契约表、`--print-header` 都从它取；
+   删 package.py 的 `_header_columns` 副本（:1221）与漂移自检（:1773）。
+   轴/edge/perf 校验暂不动——case_controls 接入时（M3′）只做必要适配。
+4. 示例公共区确定性迁移（只保 FACTS 区、换公共区、GENERATOR_VERSION=2），
+   派生物 10 项逐字节不变；fixture 走重钉协议。
 
-| 里程碑 | 内容 | 验收线 | Codex checkpoint |
-| --- | --- | --- | --- |
-| M0（已完成） | 钉五件摘要；V1/V2/V3/V5 核对 | 摘要文件在案 | 不需要 |
-| M0.5 | 26 算子契约普查 + 现有 role 投影矩阵钉板 + registry 接口冻结 | 普查报告 + 投影矩阵 fixture | **是**（冻结接口） |
-| M1 | ProjectionIR：`compile_facts` 唯一源，七消费者收编 | 逐字节门 + 投影矩阵不变 | **是** |
-| M2 | accept A1/A2 参数化（依赖 M0.5 接口） | blas 语义快照 + 探针 | **是** |
-| M3 | FACTS v2：case_controls + harness_profile 实例化 | 负例齐全；v1 FACTS 不变 | **是** |
-| M4 | tier 规范形与文本同一性 | 三侧探针 | 并入 M3 |
-| M5 | 本地静态链闭合：coo2csr 首通 + 批量实证 | 见 §6 断言清单 | **是** |
-| M6 | 文档与收尾 | 冷读过 + 行长/棘轮 | 随 M5 |
-| M7（阻塞 E1） | 950 真机 A2–A5 + V4 + G4 基线回填后复验 | 真机证据 | 另排 |
+## 3. M3′ · v2 首包能力
 
-依赖序：M0.5 → M1 → M3 → M4 → M5；**M2 在 M0.5 冻结 registry 接口后**才与 M3
-并行（accept 是否消费 profile 在 M0.5 一并定：倾向 accept 保持 profile-agnostic，
-A1 探测到的 domain 只记入 runtime manifest，不参与裁决）。
+1. schema v2：新键 `harness_profile`（必填）、`harness_overrides`（恰四键，冻结
+   §2.5）、`case_controls`（`{name, kind: enum|tier, values}`；值为字符串、去重、
+   **原始字符串端到端传递，判等即文本相等**——不建规范形机制，原 M4 取消）、
+   `status_vocab`（必填，⊆ profile 上界）、`golden: {"kind": "harness"}`（与
+   symbol/formula 互斥）。v1 FACTS 行为不变（旧 checker 拒 v2 属预期）。
+2. 投影：case_controls 产直接列并进轴；`perf.key` 可引用 control 名（text 型）。
+   新 control 的列名/轴名唯一性与命名空间冲突检查随实现自带（这是 sparse 首包的
+   正确性需要，非新增门；顺带覆盖存量陷阱 trap4/6 的 sparse 面）。
+3. `footprint_policy` 生效：sparse_frame=`no_static_check`，模板 `_row_is_valid`
+   按它跳过 `_footprint`。
+4. 产出 coo2csr FACTS（schema v2、sparse_frame、case_controls 按仓内列契约、
+   200 PF 全待填）→ 六件 render → `check` 退出 0；warnings 空、列命中仓内源码、
+   TC_ 命名成立作为 check 的成功判读，不另立探针。
 
-## 1.5 ultracode fan-out 形态
+## 4. M2·5·6′ · accept 纵向闭合
 
-主干改动（M1 IR、M3 契约）串行精工；并行用在普查、批量实证、验证、文档四类。
-**写入纪律（修订）**：fan-out agent 一律只读仓与克隆，产出 schema 化结构（FACTS
-字面量、证据 JSON）返回主 loop；仓内与 dev-doc 落盘唯一由主 loop 执行；agent 可用
-scratchpad 临时目录做渲染试验，临时产物不作为最终证据。
+1. A1：按各 profile `entry_headers` 探测（0/多命中硬失败列候选，恰一命中把
+   profile 键名记入 runtime manifest）；CANN 缺失退出 3 属预期照实写。
+2. A2：两个 verify 模板的二进制寻址改 `build/test/**/<op>_test` glob 唯一命中
+   resolver（0/>1 fail-closed 报候选）；README 模板与 CLI help 的 ops-blas 措辞
+   随手改为 profile 渲染。
+3. 精度期望集修正：主 CSV 除 `TC_PF_` 外**全部有效数据行**进期望集（现状按 TC_
+   前缀收会漏光 coo2csr 41 行）；gtest 映射按 case_name 精确匹配。
+4. A5 空基线终态：无 `TC_PF_` → 通过（无性能要求）；有 `TC_PF_` 但可比集空 →
+   性能 NO_REF、总体证据不足、退出码 2。
+5. 三类产物最小布局（用户裁定）：`report/report.md`（模板是 skill 资产
+   `assets/template/report.md`，三节：精度、性能、备注说明；前两节 verdict 数据
+   填模板，备注归 agent）、`intermediate/`（全部执行期 JSON/日志/runtime）、
+   `repro/`（六件副本 + 用例清单含失败标注；`rerun.sh` 与环境指纹归 M7——本地
+   阶段没有真实执行可复现）。
+6. 两个小改随手带上（无探针）：CSV 注释行统一 strip 口径（accept.py:179）；
+   `calls_per_case` 以 manifest 为单一来源、量具只读它。
+7. coo2csr 单一纵向 smoke：对本地 ops-sparse 克隆走 A1 探测 + A2 布局推断 +
+   runtime 渲染 + 期望集构建（41 行全进），一次跑完当完成线；真机 A3/A4 归 M7。
+8. 文档随改：只更新实际变更的契约文档（facts-schema、run-chain、README 模板、
+   SKILL description 范围）+ changes brief；无独立文档里程碑、无冷读 agent。
 
-| 阶段 | fan-out | 每 agent 任务 | 汇合物 |
-| --- | --- | --- | --- |
-| M0.5 普查 | 26 算子并行 | 读 `test/<op>/` 三件套，产出契约摘要（见 §2.1 字段清单） | registry 冻结依据；离群清单 |
-| M5 批量实证 | 另选 3–5 算子 | 按普查摘要写 FACTS（返回字面量）→ 主 loop 渲染与 check | 「可造包」抽样证据 |
-| M5 验证 | 每包 2–3 个对抗 agent | 从「列契约命中」「TC_ 块结构」「tier 三侧同一性」证伪 | 幸存才算过 |
-| M6 文档 | 4 文档并行 + 1 零上下文冷读 | 各写一份；冷读只挑「用了没定义/先用后释」 | 冷读过才收 |
+## 5. M7 · 真机（阻塞 E1，单列）
 
-## 2. M0.5 · 普查、投影矩阵、registry 接口冻结
+E1 探明 950 环境；NPU 空闲门在两个 verify 模板实现 + 三分支实测（本地可用命令桩
+自检一次，不设回归门）；calls_per_case 性能链实跑；A3–A5 真机证据；V4（Task
+Type）核对；repro 补 `rerun.sh` 与环境指纹；G4 基线回填后复验「正式通过」。
 
-1. **26 算子契约普查**（fan-out，见 §1.5）：以本地只读克隆固定 SHA 为准。每算子
-   读 CSV 表头 + param.h + wrapper，摘要字段：列名序、种子列名、阈值列、
-   expect_result 词表、success token、handle ctype、有无 description/warm-up、
-   候选算子（gtsv2、gather、densetosparse、prune）的批量实证适配度。
-2. **现有 role 投影矩阵钉板**：构造覆盖每个现有 role×条件（复数标量、dtype_from、
-   conditioning、nullable、batch、fixed_vector、producer…）的合成 FACTS 集，机械
-   记录其 header/body/axes/edge 合法键/perf.key 的现状输出为 fixture——这是 M1
-   「无行为变化」的完备证明面，cherk/sasum 两例覆盖不了所有 role。
-3. **registry 接口冻结**：字段面的定稿以
-   [sparse-r1-registry-freeze.md](sparse-r1-registry-freeze.md) 为唯一出处（v2：
-   9 字段 + §2.5 FACTS 覆盖契约 + §2.6 全局不变量 + §3 所有权表；本条原先草拟的
-   `generated_base_columns`/`framework_owned_columns` 两集合已被该文 §3 的
-   「生成责任 × COLUMN_NOT_READ 排除」正交标注取代）。
+## 6. 明确不做（本期）
 
-## 3. M1 · ProjectionIR（唯一源进模板公共区）
+- 原 M4 tier 规范形/canonicalizer/三侧同一性探针——control 值原始字符串端到端。
+- 批量实证（3–5 算子）与对抗验证 fan-out——首通后按需另立。
+- 语义快照、变更 allowlist、report/repro 可移植探针、冷读 agent、prose 完成门、
+  逐里程碑 Codex checkpoint。
+- 存量陷阱 trap1/2/3/5 的修复——blas 现网同样带着跑，挂 todo 存量项；
+  fixture 负例照旧钉现状（trap4/6 的 sparse 面在 M3′ 顺带覆盖，届时按重钉协议
+  重录对应负例）。
+- descriptor/结构对象本体；ATK/torch 通路；sparse footprint 静态估算。
 
-1. **IR 定义**：模板公共代码区新增纯函数 `compile_facts(facts) -> ProjectionIR`，
-   含四份 spec：`ColumnSpec`（有序列描述符）、`AxisSpec`（离散轴：值集合、来源）、
-   `KeySpec`（perf/判重键及其类型——int 或 text）、`MaterializationSpec`
-   （case_name、可选 description、顺序种子写入哪列、expect 默认 token 的 writer）。
-   投影原语收敛为硬边界 2 的白名单：`omit`、`direct`、`complex_pair`、
-   `fixed_expand`、`fixed_control`；轴类别住 AxisSpec，角色/来源/README 文案是
-   描述符元数据，不扩充原语。registry 数据同住公共区——任务包因嵌同一公共区
-   而自含；package.py 先加载可信模板取 IR，再做 validate/render/check。
-2. **七个消费者逐项收编**（完成门，缺一不算完成）：模板 `_header_columns`、
-   `_body_mapping`/`_assemble_rows` 物化、`build_axes`、package.py edge 合法键
-   校验（:927）、perf.key 校验（:994）、`_column_contract_rows` README 契约表、
-   `--print-header`。package.py 删除自身 `_header_columns`（:1221）与漂移自检
-   （:1773）。棘轮：消费者不得再自行遍历 params。
-3. **blas 专属校验同步 profile 化**（否则首个 sparse FACTS 过不了 S1）：
-   首参 ctype 断言（package.py:1169 的 `aclblasHandle_t`）、默认成功 token
-   （模板 :560 的 `ACLBLAS_STATUS_SUCCESS`）、状态/edge 词表（:75）全部改查
-   registry；M1 内 blas profile 的值与现状逐字节一致。
-4. **示例确定性迁移**：现有 cherk/sasum 的 gen_csv.py 只保留 FACTS 区，公共区
-   从新模板整体替换，校验 FACTS AST 不变（版本号字段按 §0 版本策略同步），
-   再重渲染对照逐字节门。旧包（新 checker 拒）按版本策略属预期，README 不改口径。
-5. 验收：逐字节门 10 项派生物（两个 gen_csv.py 是迁移前参考，见 digests 文件头）
-   + `record_fixture.py --check` 全绿（fixture results 子树逐字节不变）+ 负例回归
-   （撞键/行数/未知键 v1 语义不变）。负例期望按 fixture README 的
-   **六陷阱处置表**执行——全部 M3 修，**M1 不得更新任何负例期望**。
+## 7. 交接清单
 
-## 4. M2 · accept A1/A2（依赖 M0.5 接口）
-
-1. A1：入口头探测按 M0.5 registry 的 domain 清单；`CANN set_env.sh` 仍是硬门
-   ——本地无 CANN 机器上 **A1 退出 3 属预期**，验收只断言 header/domain 检查项
-   的输出正确，不把 CANN 缺失说成软失败。
-2. A2/量具路径：**两个** verify 模板（accuracy resolver :75 与 performance
-   resolver :98）同步把二进制寻址改为 `build/test/**/<op>_test` glob 唯一命中，
-   0 或 >1 命中报错并列候选；README 模板与 CLI help 里硬编码的 ops-blas 措辞
-   一并按 profile 渲染。探测出的 domain/profile 写入 runtime manifest（记录，
-   不参与裁决）。accept 的 `BASE_COLUMNS` 列所有权改按 M0.5 的两个集合。
-3. NPU 现场空闲门（判定表见 §0）：落在**两个 verify 模板**——verify_accuracy 首次
-   gtest 前、verify_performance 首次 warm-up/msprof 前各自现场核查，不复用早先结果；
-   三分支（空闲/忙/查询失败）按 §0 表执行，退出码 4，`npu_gate` 记录进结果 payload。
-   本地验收：npu-smi 命令桩喂三分支各一份代表性原始输出，断言退出码与 payload 字段。
-4. A5 空基线终态（评审抓到的现状缺口）：现行 verdict 在可比性能集为空时直接记
-   「性能通过（无性能用例）」，把「无 `TC_PF_` 行」与「有 `TC_PF_` 但基线全空」混为
-   一谈。改为：无 `TC_PF_` 行 → 通过（无性能要求）；有 `TC_PF_` 但可比集为空 →
-   性能 `NO_REF`、总体「证据不足」、退出码 2。回归：两种包各一探针。
-5. 包内通用规则三修（checkpoint 上半场审的先决项，registry-freeze §4 列名）：
-   - 精度期望集规则：主 CSV 除 `TC_PF_` 外**全部有效数据行**都进精度期望集
-     （现状按 `TC_` 前缀收，coo2csr 的 41 条 L0_/L1_ 行会全漏；accept.py:114 与
-     verify_accuracy 模板 :237 同步改），gtest 映射按 case_name 精确匹配；
-   - `#` 注释行读取口径统一（`_csv_header` 的 `startswith` 与其它读取器的
-     strip 差异，accept.py:179）+ 前导空白注释探针；
-   - `calls_per_case` 去静默默认：显式必填或从 manifest 渲染，A5 核对
-     performance JSON 的值与 manifest 相等，不等即证据不一致报错。
-6. 产物按三类划分（用户裁定 2026-09-01，atk-accept 的其它机制——隔离复验、env.sh
-   前缀、evidence 目录、性能状态细分词表——均不引入）：
-   - `report/`：**人读的**。只有按模板渲染的 `report.md`；模板是 skill 资产
-     （accept 侧 `assets/template/report.md`，对外契约的一部分），主结构三节
-     **精度、性能、备注说明**——前两节由 verdict 数据填模板，备注节归 agent 填写。
-   - `intermediate/`：**中间产物**。env/check/verdict JSON、runtime 工作区、
-     results、日志等全部执行期产物收拢于此，机器消费，人不需要进来读。
-   - `repro/`：**最小可复现验收情况**。runtime 六件副本 + 用例清单（含失败标注）+
-     `rerun.sh`（一条命令复跑量具，默认失败子集、可全量）+ 环境指纹
-     （soc/device/CANN、binary/csv SHA，取自 manifest）；自包含，拷走即可复现。
-   run-chain.md 产物树与 report 模板同步落；属对外契约变更，随本里程碑
-   checkpoint 评审。
-7. 验收（可操作版）：同一本地 ops-blas 树改前/改后各跑一次，规范化对比
-   `env.json`/`check.json`/runtime manifest；量具寻址探针覆盖 0/1/>1 三种命中；
-   对本地 ops-sparse 克隆跑 A2 布局推断探针（含精度期望集规则探针：coo2csr CSV
-   41 行全进期望集）；report/repro 分层探针（三节齐全、repro 自包含可执行）。
-   真机 A3/A4 归 M7。
-
-## 5. M3 · FACTS v2：case_controls 与 harness_profile 实例化
-
-M0.5 已冻结接口，本里程碑做实例化与校验：
-
-```python
-"schema_version": 2,
-"harness_profile": "sparse_frame",   # 缺省 "blas"；键值来自 registry
-"case_controls": [
-    {"name": "sparsity", "kind": "tier", "values": ["0.0", "0.5", "0.9", "0.99"]},
-    {"name": "pattern", "kind": "enum", "values": ["random", "diag", "banded"]},
-],
-```
-
-1. 校验：v2 才接受新键；name 合法且与 params/列名不冲突；kind ∈ {enum, tier}；
-   values 非空、字符串、去重；tier 过 §5.5 规范形。sparse 正例负例齐全。
-   `footprint_policy` 一并实例化（registry-freeze §2 第 14 项）：sparse_frame 取
-   `runtime_only`，模板 `_row_is_valid` 按它跳过 `_footprint`；回归例一条——按稠密
-   公式会误拒、按 `runtime_only` 必须生成。
-2. 投影：control 经 ColumnSpec 产 `fixed_control` 列，进 AxisSpec 与 README。
-3. perf.key 可引用 control name，KeySpec 标 text 型。
-4. golden 新词表值 `{"kind": "harness"}`：validator `_golden_requirements`、
-   README 投影（package.py:1510）、readme-contract 同步；禁止 symbol/formula
-   字段共存；并加回归探针固化不变式「量具与 accept 均不读 golden」。
-5. **六陷阱统一修**（处置表见 fixture README；下半场审裁定全部落本里程碑，按通用
-   规则修、不做逐陷阱特判）：dtype/compute enum 必须被消费（trap1）；「会被物化器
-   派生重算的键不得作声明型 perf.key」通则覆盖 ld/stride（trap2，不做 sparse 特判）；
-   复标量 edge 值统一 `[re, im]`（trap3）；「离散轴值必须唯一」一条通则覆盖
-   conditioning/values/tiers（trap4）；生成器对派生键改 fail-closed 与 checker 对齐
-   （trap5）；pairwise 前统一查列/轴/控制键命名空间冲突 + 迭代上限防御（trap6）。
-   每修一条同步按行为变更 allowlist 重录对应负例期望。
-6. 红线：不新增角色；descriptor/结构对象本体（C1-full）不在本期。
-
-## 5.5 M4 · tier 规范形与文本同一性
-
-1. 唯一 canonicalizer：tier 文本必须匹配 `^-?\d+\.\d+$`（**必须含小数点**，整数档
-   写 `"1.0"`——确保永不落入现行 strip+int 归一的整数分支）；禁止 `-0.x` 之外的
-   负零形、前导零冗余（`"00.5"`）与尾零冗余（`"0.50"`）；给出规范形提示。
-2. KeySpec 带类型：tier 键永远按字符串比较；归一函数三处不改语义。
-3. 三侧探针（M5 断言）：同一 tier 在 package 判重、量具 `_normalize_key_value`、
-   accept `_load_baseline` 的键表示逐字符相同。
-
-## 6. M5 · 本地静态链闭合（coo2csr 首通 + 批量实证）
-
-改名自「端到端」：无真机时 A2 是静态兼容探针，真端到端归 M7。
-
-1. coo2csr FACTS（schema v2、sparse_frame profile、case_controls 按仓内列契约、
-   perf 固定 200 全待填、golden harness）→ 渲染六件 → `check` 退出 0。
-2. **断言清单（全部显式，warning 不许静默过）**：契约摘要 warnings 集为空；
-   列读取报告全命中仓内 `test/coo2csr/` 源码（含 `seed`/`idx_base`/阈值列）；
-   TC_ 块结构成立；tier 三侧同一性探针过；A2 推断链（op/family/runtime 渲染）成立。
-3. 批量实证与对抗验证按 §1.5 fan-out（3–5 个已有算子重复 1–2 步）。
-4. blas 回归全项重跑（§0 不变量）。
-
-## 7. M6 · 文档与收尾
-
-- `facts-schema.md`：schema v2、case_controls、harness_profile、tier 规范形、
-  golden "harness"；`case-strategy.md`：sparse 轴设计；`csv-and-blocks.md`：
-  基座列两集合与所有者表；accept 文档：calls-per-case 两族取值（blas 2 /
-  sparse frame 1）、A1 domain 探测语义、glob 寻址规则、R1 预期终态（NO_REF）。
-- `dev-doc/oprunway-changes-brief.md` 逐里程碑追加；todo 候选节改进行中。
-- 全部过 prose-style；M6 冷读 agent 零上下文验收。
-
-## 8. 风险对照（评审 Top 3 → 防线）
-
-| 风险 | 防线 |
-| --- | --- |
-| 假统一 IR（表头统一、轴/edge/键/物化各猜） | M1 完成门列七消费者 + 「不得重遍历 params」棘轮（§3.2） |
-| 首包穿不过现有契约（handle/状态词表/默认 expect 写死 blas） | M1.3 专项 profile 化 + M3 sparse 正负例（§3.3/§5.1） |
-| 假回归安全 | 版本策略显式化（§0）+ M1 投影矩阵完备面（§2.2）+ M2 语义快照（§4.3）+ NO_REF 终态写死（§0） |
-
-## 9. 主 session 交接清单
-
-- 文档四件：本文、candidate-plan、learning-map、baseline-digests。
-- 本地只读克隆（**绝对路径，不在 worktree 内**）：
-  `/Users/ll/Desktop/workspace-ascend/OpRunway/repos/ops-sparse`（HEAD `5b2a5ba`）；
-  开工门先确认可读；若需重 clone 按仓规另取用户授权。
+- 文档：本文、registry-freeze（9 字段版）、census、projection-matrix、fixture
+  （含 `--check` 门与 README 处置表）、baseline-digests、learning-map §0 状态表。
+- 本地只读克隆（绝对路径，不在 worktree 内）：
+  `/Users/ll/Desktop/workspace-ascend/OpRunway/repos/ops-sparse`（HEAD `5b2a5ba`）。
 - 关键坐标：模板/package 两份 `_header_columns`（gen_csv.py:470 / package.py:1221）、
   `_load_generator`（package.py:1299）、漂移自检（:1773）、blas 专属校验三处
-  （package.py:1169 handle、:75 状态词表、模板 :560 默认 expect）、量具双 resolver
-  （verify_accuracy.py:75 / verify_performance.py:98）、归一三处（package
-  `_normalized_perf_key`、量具 :299、accept :211）、edge/perf 校验（package.py:927/:994）。
-- 已消核对项：V1（gtest 按 case_name 过滤 ✓）、V2（sparse 无 warm-up，
-  calls-per-case=1）、V3（expect_result 词表按算子异→闭合 status_vocab 方案）、
-  V5（build.sh 同款 --ops）。待真机：V4、E1。
+  （package.py:1169 / 模板 :560 / :75）、量具双 resolver（verify_accuracy.py:75 /
+  verify_performance.py:98）、归一三处（package `_normalized_perf_key`、量具 :299、
+  accept :211）、edge/perf 校验（package.py:927/:994）、A5 性能结论
+  （accept.py:857 一带）、`_row_is_valid`/`_footprint`（模板 :462/:466）。
+- 已消核对项：V1/V2/V3/V5（见 learning-map §0）；待真机：V4、E1。
 - 纪律：skill-edit-gate（先读 skill-best-practices + 挂 /skill-creator）；
-  动核心无条件 Codex checkpoint；commit 不带 AI 署名；不 push 除非明示。
-
-## 10. 明确不做（本期）
-
-- descriptor/结构对象本体（C1-full）——等首个 descriptor 风格算子。
-- sparse footprint 估算——运行时护栏兜底（已裁定）。
-- per-dtype 性能阈值——本期无基线；出现带基线任务书再议。
-- ATK/torch 形态通路——特例，不建。
-- 真机验收与 G4 基线回填——M7，阻塞 E1，单列立项。
+  commit 不带 AI 署名；不 push 除非明示；接口变更过 Codex，push 前仓规一轮。

@@ -11,6 +11,10 @@
 - [ ] E1 探明 arch35 真机——不阻塞 M0.5–M6 本地实施，阻塞 M7 真机验证与「正式支持」
   声明。事实核对仅剩 V4（sparse kernel 的 Task Type，需真机 msprof）。
 - [ ] 立项同场待决：G2 上游改名、G3 任务书完整性门槛、G4 基线回填归属。
+- [ ] 存量陷阱（fixture 已钉现状，blas 现网带着跑，本期不修）：trap1 dtype enum
+  无消费者崩物化、trap2 perf.key 派生键静默重算、trap3 复标量 edge 裸数字崩、
+  trap5 生成器/校验器口径分叉、trap4/6 的 blas 存量面（重复轴值/命名空间碰撞与
+  pairwise 不收敛）。修法与通则见 fixture README 处置表。
 
 ## P0 · 已证明的 DUT 修复后复验
 
