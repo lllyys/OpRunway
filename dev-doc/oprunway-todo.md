@@ -4,8 +4,11 @@
 
 ## P0 · sparse R1（已立项，实施中 @ feature/sparse-r1）
 
+- [ ] accept 依赖 case-gen 私有名 `_harness_registry()`（跨 skill 隐式接口，M2·5·6′
+  checkpoint 非阻断观察）：改公开名或在冻结文档固定调用面。
+
 - [ ] 按 [sparse-r1-implementation-plan.md](sparse-r1-implementation-plan.md) 走
-  里程碑序；M0/M0.5/M1′ 已完成，下一步 M3′（普查见 [sparse-r1-census.md](sparse-r1-census.md)；
+  里程碑序；M0/M0.5/M1′/M3′/M2·5·6′ 已完成，剩 M7（阻塞 E1 真机；普查见 [sparse-r1-census.md](sparse-r1-census.md)；
   fixture 钉板与 registry 冻结进行中）。编号与状态唯一源是
   [sparse-gap-learning-map.md](sparse-gap-learning-map.md) §0。
 - [ ] E1 探明 arch35 真机——不阻塞 M0.5–M6 本地实施，阻塞 M7 真机验证与「正式支持」

@@ -2,6 +2,20 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-02 · M2·5·6′ 完成：accept 纵向闭合 + 三类产物 + 文档随改（七维审 ADJUST→四项修毕）。**
+  9 个提交（04a88e7..HEAD）。A1 换 registry 驱动的 harness_profile 探测（影子先行
+  核对再替换，0/多命中硬失败，键名入 manifest）；两个 verify 模板二进制寻址改
+  「候选收集+唯一裁决」（重钉协议收口，差异面恰为 16 fixture 的 verify 摘要）；
+  精度期望集两侧同改为「除 TC_PF_ 外全部有效数据行」；A5 空基线终态证据先行落
+  total_pf/comparable_pf 再切 verdict——total_pf==0 无条件通过（不受杂散 JSON
+  影响，checkpoint 修掉分叉）、有 PF 全无基线判 NO_REF/证据不足退出 2，六格状态
+  矩阵实测；三类产物布局（report 三节自动摘要/intermediate/repro 含三类用例清单）
+  先追加后切默认删旧；注释行口径、calls_per_case 单一来源随改。一次性 blas 回放：
+  cherk 不翻转、sasum 按预期「通过→NO_REF/证据不足」翻转；存量包纵向 smoke 达成
+  完成线（A1 探测 sparse_frame、41 行全进期望集、A5 性能通过无要求、总体通过）。
+  checkpoint（thread `01a0609a`，ADJUST）四修全落。**定性（评审口径）：本地可执行
+  静态链及主要 A5 分支已跑通，真机执行链待 M7；不得称正式验收通过。**
+
 - **2026-09-02 · M3′ 完成：schema v2 + case_controls + coo2csr 新包六件（七维审 ADJUST→六项修毕）。**
   九个提交（ec39d70..abfdb92）。registry 实例化 sparse_frame 九字段（词表上界=普查
   26 算子并集除 Lt）；v2 校验分派全按版本隔离（新顶层键、覆盖恰四键、控制形状、

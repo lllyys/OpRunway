@@ -14,15 +14,15 @@
 
 | 编号 | 事项 | 层次 | 状态 |
 | --- | --- | --- | --- |
-| A1 | accept 环境门写死 `cann_ops_blas.h` | 参数级 | 待实施（M2·5·6′，探测化） |
-| A2 | accept 路径模型：无 family 层、arch35、build 产物路径 | 参数级 | 待实施（M2·5·6′） |
+| A1 | accept 环境门写死 `cann_ops_blas.h` | 参数级 | ✅ 已实施：registry 探测化（M2·5·6′） |
+| A2 | accept 路径模型：无 family 层、arch35、build 产物路径 | 参数级 | ✅ 已实施：二进制唯一裁决 + 存量包 smoke（M2·5·6′） |
 | C1a | FACTS 本体·稀疏复合结构对象（nnz 耦合、内容不变量） | 描述层 | 本期不做，等首个 descriptor 任务 |
 | C1b | FACTS 本体·descriptor 签名指称 | 描述层 | 本期不做（同上） |
-| C1c | FACTS 本体·golden/状态/verify 词表方言 | 描述层 | 待实施（M3′） |
-| C2 | 列投影方言：角色决定投影 | 接口层 | 待实施（M1′ 表头/行统一 + M3′ 实例化） |
-| C3 | 浮点档位轴：离散化 + 文本同一性 | 引擎层 | 待实施（M3′，值按原始字符串端到端，规范形机制已裁撤） |
+| C1c | FACTS 本体·golden/状态/verify 词表方言 | 描述层 | ✅ 已实施：golden=harness + status_vocab（M3′） |
+| C2 | 列投影方言：角色决定投影 | 接口层 | ✅ 已实施：_column_specs 单源 + v2 分支（M1′/M3′） |
+| C3 | 浮点档位轴：离散化 + 文本同一性 | 引擎层 | ✅ 已实施：case_controls 原始字符串端到端（M3′） |
 | E1 | arch35 目标真机未探明 | 环境 | 未探明；只阻塞 M7 真机与「正式支持」声明 |
-| D1 | references 的 sparse 章节 | 文档 | 随实现交付（并入 M2·5·6′，只更新实际变更的契约文档） |
+| D1 | references 的 sparse 章节 | 文档 | ✅ 已交付：facts-schema v2 节 + run-chain/SKILL 随改（M2·5·6′） |
 | V1 | gtest 套件名与 `--gtest_filter` 按名过滤 | 事实核对 | ✅ name generator 返回 case_name |
 | V2 | wrapper warm-up 次数 | 事实核对 | ✅ 无 warm-up，calls-per-case=1 |
 | V3 | expect_result 状态词表 | 事实核对 | ✅ 按算子异；registry 闭合词表处理 |
