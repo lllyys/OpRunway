@@ -838,42 +838,7 @@ def _column_specs(facts):
 
 
 def _header_columns(facts):
-    profiles = facts.get("dtype_profiles", [])
-    profile_has_complex = any(
-        profile["scalar_dtype"] in COMPLEX_DTYPES for profile in profiles
-    )
-    columns = ["case_name", "description"]
-    for param in facts["params"]:
-        name = param["name"]
-        role = param["role"]
-        direction = param.get("dir", "in")
-        if role in {"handle", "out_scalar", "int_array"}:
-            continue
-        if role in {"enum", "dim", "layout"}:
-            columns.append(name)
-        elif role in {"scalar", "inout_scalar"}:
-            if param.get("dtype") in COMPLEX_DTYPES:
-                columns.extend([f"{name}_re", f"{name}_im"])
-            elif "dtype_from" in param and profile_has_complex:
-                columns.extend([f"{name}_re", f"{name}_im"])
-            else:
-                columns.append(name)
-        elif role in {"vector", "matrix"}:
-            if direction in {"in", "inout"} and "producer" not in param:
-                columns.append(f"{name.lower()}_fill")
-                if role == "matrix" and param.get("conditioning"):
-                    columns.append(f"{name}_matrix_type")
-        elif role == "fixed_vector" and direction in {"in", "inout"}:
-            columns.extend(f"{name}{index}" for index in range(param["len"]))
-    columns.append("expect_result")
-    for param in facts["params"]:
-        name = param["name"]
-        if param.get("nullable", False):
-            columns.append(f"null{name[:1].upper()}{name[1:]}")
-        if "batch" in param:
-            columns.append(f"{name}_batch_pattern")
-    columns.append("random_seed")
-    return columns
+    return [spec["name"] for spec in _column_specs(facts)]
 
 
 def _body_mapping(facts, state, profile, expect, control_overrides=None):
