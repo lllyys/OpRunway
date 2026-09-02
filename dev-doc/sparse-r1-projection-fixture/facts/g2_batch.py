@@ -466,7 +466,10 @@ def _materialize(facts, axes, partial, overrides=None):
     if profile:
         state.update(profile["assign"])
         state["profile"] = profile["name"]
+    version = facts.get("schema_version")
     for param in facts["params"]:
+        if version == 2 and param.get("projection") == "none":
+            continue
         name = param["name"]
         role = param["role"]
         if role == "enum" and param.get("enum_kind", "op") in {"op", "algo"}:
@@ -496,6 +499,10 @@ def _materialize(facts, axes, partial, overrides=None):
                     state[f"{name.lower()}_fill"] = selection[f"{name.lower()}_fill"]
         elif role == "fixed_vector" and param.get("dir") in {"in", "inout"}:
             state[name] = list(param["samples"][selection[name]])
+    if facts.get("schema_version") == 2:
+        for control in facts.get("case_controls", []):
+            # 控制值是原始字符串，从轴选值原样进 state，端到端不转型。
+            state[control["name"]] = selection[control["name"]]
     for key, value in overrides.items():
         if key in params and params[key]["role"] != "layout":
             state[key] = value
@@ -579,27 +586,23 @@ def _row_is_valid(facts, state, profile):
     evaluator = _Evaluator(facts, state)
     if any(not evaluator.evaluate(item) for item in facts.get("constraints", [])):
         return False
+    if _resolved_profile(facts)["footprint_policy"] == "no_static_check":
+        # 最窄分支：只跳过静态显存判定，不承诺任何运行时护栏（冻结字段 9）。
+        return True
     limit = _case_options(facts)["max_footprint_bytes"]
     return _footprint(facts, state, profile) <= limit
 
 
-def _column_specs(facts):
-    """主 CSV 的统一列描述，一处定列序，多处消费（表头、行写入、README 契约表）。
-
-    每列一个普通 dict：name 列名；kind 列类别（框架列 id/description/expect/seed，
-    参数列 enum/dim/layout/scalar/scalar_re/scalar_im/fill/matrix_type/
-    fixed_vector_elem/null_flag/batch_pattern）；source 派生自哪个参数，框架列为
-    None；fixed_vector 元素列另带 index。
-    """
+def _param_column_specs(facts, version):
+    """params 走出来的语义列（两版共用；v2 跳过不投影参数）。"""
     profiles = facts.get("dtype_profiles", [])
     profile_has_complex = any(
         profile["scalar_dtype"] in COMPLEX_DTYPES for profile in profiles
     )
-    specs = [
-        {"name": "case_name", "kind": "id", "source": None},
-        {"name": "description", "kind": "description", "source": None},
-    ]
+    specs = []
     for param in facts["params"]:
+        if version == 2 and param.get("projection") == "none":
+            continue
         name = param["name"]
         role = param["role"]
         direction = param.get("dir", "in")
@@ -644,7 +647,12 @@ def _column_specs(facts):
                 }
                 for index in range(param["len"])
             )
-    specs.append({"name": "expect_result", "kind": "expect", "source": None})
+    return specs
+
+
+def _flag_column_specs(facts):
+    """nullable 与 batch 的控制列（两版共用，排在 expect 之后）。"""
+    specs = []
     for param in facts["params"]:
         name = param["name"]
         if param.get("nullable", False):
@@ -659,6 +667,58 @@ def _column_specs(facts):
             specs.append(
                 {"name": f"{name}_batch_pattern", "kind": "batch_pattern", "source": name}
             )
+    return specs
+
+
+def _column_specs(facts):
+    """主 CSV 的统一列描述，一处定列序，多处消费（表头、行写入、README 契约表）。
+
+    每列一个普通 dict：name 列名；kind 列类别（框架列 id/description/expect/seed，
+    参数列 enum/dim/layout/scalar/scalar_re/scalar_im/fill/matrix_type/
+    fixed_vector_elem/null_flag/batch_pattern，v2 另有 control_enum/control_tier）；
+    source 派生自哪个参数，框架列与控制列为 None；fixed_vector 元素列另带 index。
+    v1 基座列名硬编码保持现状；v2 基座列名来自 resolved profile。
+    """
+    if facts.get("schema_version") == 2:
+        resolved = _resolved_profile(facts)
+        specs = [{"name": "case_name", "kind": "id", "source": None}]
+        if resolved["description_column"] is not None:
+            specs.append(
+                {
+                    "name": resolved["description_column"],
+                    "kind": "description",
+                    "source": None,
+                }
+            )
+        specs += _param_column_specs(facts, 2)
+        for control in facts.get("case_controls", []):
+            specs.append(
+                {
+                    "name": control["name"],
+                    "kind": f"control_{control['kind']}",
+                    "source": None,
+                }
+            )
+        if resolved["expect_column"] is not None:
+            specs.append(
+                {"name": resolved["expect_column"], "kind": "expect", "source": None}
+            )
+        specs += _flag_column_specs(facts)
+        for seed_name in resolved["seed_columns"]:
+            specs.append({"name": seed_name, "kind": "seed", "source": None})
+        # 命名空间冲突检查（冻结 §2.5）：控制列、参数投影列、覆盖出的基座列两两不重。
+        names = [spec["name"] for spec in specs]
+        duplicated = sorted({name for name in names if names.count(name) > 1})
+        if duplicated:
+            raise GeneratorError(f"v2 列名命名空间冲突：{duplicated}")
+        return specs
+    specs = [
+        {"name": "case_name", "kind": "id", "source": None},
+        {"name": "description", "kind": "description", "source": None},
+    ]
+    specs += _param_column_specs(facts, 1)
+    specs.append({"name": "expect_result", "kind": "expect", "source": None})
+    specs += _flag_column_specs(facts)
     specs.append({"name": "random_seed", "kind": "seed", "source": None})
     return specs
 
@@ -669,11 +729,14 @@ def _header_columns(facts):
 
 def _body_mapping(facts, state, profile, expect, control_overrides=None):
     result = {}
+    version = facts.get("schema_version")
     profile_has_complex = any(
         item["scalar_dtype"] in COMPLEX_DTYPES
         for item in facts.get("dtype_profiles", [])
     )
     for param in facts["params"]:
+        if version == 2 and param.get("projection") == "none":
+            continue
         name = param["name"]
         role = param["role"]
         direction = param.get("dir", "in")
@@ -697,7 +760,14 @@ def _body_mapping(facts, state, profile, expect, control_overrides=None):
         elif role == "fixed_vector" and direction in {"in", "inout"}:
             for index, value in enumerate(state[name]):
                 result[f"{name}{index}"] = value
-    result["expect_result"] = expect
+    if version == 2:
+        resolved = _resolved_profile(facts)
+        for control in facts.get("case_controls", []):
+            result[control["name"]] = state[control["name"]]
+        if resolved["expect_column"] is not None:
+            result[resolved["expect_column"]] = expect
+    else:
+        result["expect_result"] = expect
     for param in facts["params"]:
         name = param["name"]
         if param.get("nullable", False):
@@ -952,7 +1022,15 @@ def _stage(name, function, *args):
         raise GeneratorError(f"{name}: {exc}") from exc
 
 
-def _assemble_rows(header, blocks, report):
+def _assemble_rows(facts, header, blocks, report):
+    version = facts.get("schema_version")
+    if version == 2:
+        resolved = _resolved_profile(facts)
+        seed_columns = resolved["seed_columns"]
+        if len(seed_columns) > 1:
+            # 多种子列（csrgeam2 形态）的写值策略未定，进场算子时裁定；fail-closed。
+            raise GeneratorError(f"多种子列写值策略未定：{seed_columns}")
+        description_column = resolved["description_column"]
     rows = []
     global_index = 0
     for block_name, block_rows in blocks:
@@ -960,8 +1038,14 @@ def _assemble_rows(header, blocks, report):
         for block_index, (description, body) in enumerate(block_rows, 1):
             global_index += 1
             body["case_name"] = f"TC_{block_name}_{block_index:03d}"
-            body["description"] = description
-            body["random_seed"] = SEED_BASE + global_index
+            if version == 2:
+                if description_column is not None:
+                    body[description_column] = description
+                for seed_name in seed_columns:
+                    body[seed_name] = SEED_BASE + global_index
+            else:
+                body["description"] = description
+                body["random_seed"] = SEED_BASE + global_index
             rows.append([body[column] for column in header])
     return rows
 
@@ -986,7 +1070,7 @@ def generate(facts):
     ):
         blocks.append((name, _stage(name, function, *arguments)))
     header = _stage("表头投影", _header_columns, facts)
-    rows = _stage("行合并", _assemble_rows, header, blocks, report)
+    rows = _stage("行合并", _assemble_rows, facts, header, blocks, report)
     return {"header": header, "rows": rows, "report": report}
 
 
