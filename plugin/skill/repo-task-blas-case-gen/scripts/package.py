@@ -72,14 +72,6 @@ TOKEN_RE = re.compile(r"@@[A-Z0-9_]+@@")
 PERF_META_KEYS = (
     "timing_scope", "device", "library", "warmup", "statistic", "source",
 )
-STATUS_VALUES = (
-    "ACLBLAS_STATUS_SUCCESS", "ACLBLAS_STATUS_NOT_INITIALIZED",
-    "ACLBLAS_STATUS_ALLOC_FAILED", "ACLBLAS_STATUS_INVALID_VALUE",
-    "ACLBLAS_STATUS_MAPPING_ERROR", "ACLBLAS_STATUS_EXECUTION_FAILED",
-    "ACLBLAS_STATUS_INTERNAL_ERROR", "ACLBLAS_STATUS_NOT_SUPPORTED",
-    "ACLBLAS_STATUS_ARCH_MISMATCH", "ACLBLAS_STATUS_HANDLE_IS_NULLPTR",
-    "ACLBLAS_STATUS_INVALID_ENUM", "ACLBLAS_STATUS_UNKNOWN",
-)
 # csv_loader.h:249-343 的 parse 表；行号以当前 ops-blas 主干为准。
 ENUM_VALUES_BY_CTYPE = {
     "aclblasFillMode_t": ("UPPER", "LOWER"),
@@ -948,7 +940,7 @@ def _check_edge_cases(problems, edge_cases, params):
             _err(problems, f"{where}.name={name!r} 重复")
         else:
             names.add(name)
-        if case.get("expect") not in STATUS_VALUES:
+        if case.get("expect") not in _harness_profile()["status_vocab_bound"]:
             _err(problems, f"{where}.expect={case.get('expect')!r} 不在状态码词表")
         _nonempty_string(problems, f"{where}.source", case.get("source"))
         settings = case.get("set")
@@ -1515,7 +1507,9 @@ def _column_contract_rows(facts, generator):
 def _column_vocab(generator, facts):
     fill_tiers = generator._case_options(facts)["fill_tiers"]
     fill_values = "\n".join(f"- `{value}`" for value in fill_tiers)
-    status_values = "\n".join(f"- `{value}`" for value in STATUS_VALUES)
+    status_values = "\n".join(
+        f"- `{value}`" for value in _harness_profile(facts)["status_vocab_bound"]
+    )
     return (
         "fill 词表（语法见 `fill.h` 的 `METHOD_PATTERN_VAL`）：\n\n"
         + fill_values
