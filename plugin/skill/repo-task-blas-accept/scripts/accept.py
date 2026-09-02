@@ -1252,6 +1252,12 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
     for directory in (report_dir, inter_dir, repro_dir):
         directory.mkdir(parents=True, exist_ok=True)
     template = REPORT_TEMPLATE_PATH.read_text(encoding="utf-8")
+    # 模板里的整行 HTML 注释是维护者说明（token 展开形态），渲染时剥除。
+    template = "\n".join(
+        line
+        for line in template.splitlines()
+        if not (line.lstrip().startswith("<!--") and line.rstrip().endswith("-->"))
+    ) + "\n"
     contract = payload.get("contract") or {}
     summary_lines = []
     if payload.get("verdict") != "通过":
