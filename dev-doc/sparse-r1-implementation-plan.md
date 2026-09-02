@@ -163,15 +163,18 @@ scratchpad 临时目录做渲染试验，临时产物不作为最终证据。
    「性能通过（无性能用例）」，把「无 `TC_PF_` 行」与「有 `TC_PF_` 但基线全空」混为
    一谈。改为：无 `TC_PF_` 行 → 通过（无性能要求）；有 `TC_PF_` 但可比集为空 →
    性能 `NO_REF`、总体「证据不足」、退出码 2。回归：两种包各一探针。
-5. 产物按读者分层与最终交付（用户裁定 2026-09-01）：现状按阶段分目录、唯一人读件
-   report.md 混在 verdict/ 里。改为——
-   - `report/report.md`：人读终报告，主结构三节**精度、性能、备注说明**（前两节由
-     verdict.json 脚本渲染，备注节仍归 agent 填写）；
-   - `repro/`：**最小复现包**——runtime 六件副本 + 失败用例清单 + `rerun.sh`
-     （一条命令复跑失败用例）+ 环境指纹（soc/device/CANN、binary/csv SHA，取自
-     manifest）；自包含，拷走即可在同环境复现；
-   - 其余产物（env/check/verdict.json、results/）全部声明为机读，位置不动。
-   run-chain.md 产物树同步改；这是对外契约变更，随本里程碑 checkpoint 评审。
+5. 产物按三类划分（用户裁定 2026-09-01，atk-accept 的其它机制——隔离复验、env.sh
+   前缀、evidence 目录、性能状态细分词表——均不引入）：
+   - `report/`：**人读的**。只有按模板渲染的 `report.md`；模板是 skill 资产
+     （accept 侧 `assets/template/report.md`，对外契约的一部分），主结构三节
+     **精度、性能、备注说明**——前两节由 verdict 数据填模板，备注节归 agent 填写。
+   - `intermediate/`：**中间产物**。env/check/verdict JSON、runtime 工作区、
+     results、日志等全部执行期产物收拢于此，机器消费，人不需要进来读。
+   - `repro/`：**最小可复现验收情况**。runtime 六件副本 + 用例清单（含失败标注）+
+     `rerun.sh`（一条命令复跑量具，默认失败子集、可全量）+ 环境指纹
+     （soc/device/CANN、binary/csv SHA，取自 manifest）；自包含，拷走即可复现。
+   run-chain.md 产物树与 report 模板同步落；属对外契约变更，随本里程碑
+   checkpoint 评审。
 6. 验收（可操作版）：同一本地 ops-blas 树改前/改后各跑一次，规范化对比
    `env.json`/`check.json`/runtime manifest；量具寻址探针覆盖 0/1/>1 三种命中；
    对本地 ops-sparse 克隆跑 A2 布局推断探针；report/repro 分层探针（三节齐全、
