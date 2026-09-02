@@ -1883,6 +1883,7 @@ def _render_script(template_path, output_path, facts, csv_hash):
         {
             "OP": facts["op"],
             "FAMILY": facts["family"],
+            "HARNESS_PROFILE": facts.get("harness_profile", "blas"),
             "CSV_NAME": f"{facts['op']}_test.csv",
             "PACKAGE_CSV_SHA256": csv_hash,
             "GENERATOR_VERSION": facts["generator_version"],
@@ -1901,7 +1902,8 @@ def _render_script(template_path, output_path, facts, csv_hash):
     _write_text(output_path, rendered, executable=True)
 
 
-def render_runtime(op, family, perf_key, out_dir, csv_sha256, threshold=0.8):
+def render_runtime(op, family, perf_key, out_dir, csv_sha256, threshold=0.8,
+                   harness_profile="blas"):
     """按最小事实把两个 verify 脚本渲染到 out_dir。
 
     accept 用它把任何任务包（含社区旧包）变成运行时包：脚本只需要 op、family、性能键列，
@@ -1910,6 +1912,7 @@ def render_runtime(op, family, perf_key, out_dir, csv_sha256, threshold=0.8):
     facts = {
         "op": op,
         "family": family,
+        "harness_profile": harness_profile,
         "generator_version": GENERATOR_VERSION,
         "perf": {"key": list(perf_key), "threshold": threshold},
         "dtype_profiles": [],

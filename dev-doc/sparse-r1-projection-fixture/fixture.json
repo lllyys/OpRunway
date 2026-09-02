@@ -21,7 +21,7 @@
         "g7_v2_threshold_no_source": "040b5aee47ff4518ff0525862422890fecec4fd0773af4e4590922c3b7bfe52c",
         "g7_v2_token_outside_vocab": "b0ca575e0cfb6e2ca9a3b18092331f97ab140bf5fabb01b322fcf2979bfe7e65"
       },
-      "package_py_sha256": "a87793c7ee866b774e045061284df7a7a066fe5dc707314d067dd1ed23d80e53",
+      "package_py_sha256": "c058a7aee0c34588ebb9dfda455c76d877daba2171885683886094aecfe6054b",
       "template_common_sha256": "82bff91cee0595bda403e3f57105c88c29755bb0274bf8958a46625e2fe6616c"
     }
   },
@@ -93,8 +93,8 @@
           "README.md": "c8c48b4979abdd2186c3824983b44f87d11f32f3cf3e5c98e191d7a02d5bfe5b",
           "g1_profile_test.csv": "94af1dba72de1bdd8f8068beb7defa954d0abe0ed888d1c0ef07ab1ed1bb1888",
           "gpu_baseline.csv": "a4c2445456ead3631edc7663d682cc653c880ebc85b206ab2e1e586832044285",
-          "verify_accuracy.py": "a1c6d47d0d6758bff4c8f237fa61acca1f3d47d83b57a4930a5d5d1cd44b6934",
-          "verify_performance.py": "422afeb92480ddaf2ef11c9f76b57b8e0a12df4adbc258bb229ffdf3f852b062"
+          "verify_accuracy.py": "ed3023b660cbab863b9ad67820ab950fae4d6e5debc80cc225e96896c45126ea",
+          "verify_performance.py": "efb1017f5bc38c0f199760fdce89fcfbd3041afdc6cc4e987586670967c667c6"
         },
         "exit": 0,
         "stderr": "",
@@ -181,8 +181,8 @@
           "README.md": "843b022a0d01bc09ca8b8d6361f61f974ca6ec268bb2d8c45ab8d7aae6f010a9",
           "g2_batch_test.csv": "423d2e76846d43bd39145d378f17f0c9cc3374cce14a5e138fda7661651ab343",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "c5d57e0b2d6d1669b3454ef4138c604e2c21f252f5138440286c89747164423f",
-          "verify_performance.py": "912f1f5c81873fa3b18212c77d7b0c08effff1bca79b82b246ed68f9d86f44a9"
+          "verify_accuracy.py": "fd9d6fa1e647e18ebca3677c133856a7f4dea7617fdb456584b1c7bd1b8cfda1",
+          "verify_performance.py": "633d8647ca5a906bc524e6ce9fe906581086d0fca87d0b40a8a3bbcc3b90e492"
         },
         "exit": 0,
         "stderr": "",
@@ -229,8 +229,8 @@
           "README.md": "3fc75b4a251b822bff667a28af55c79695ac43dca0d21a0da81b0c8eb3b96577",
           "g3_fixed_test.csv": "70014dfd6d07af5cf9955d054a6b0ac81df20178550508fda440247520159d09",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "943da40cea7a1862425b8abec93295680c4e3b2daa7fc227d69bf038ac2e214d",
-          "verify_performance.py": "f96dbe3f2a0e75ff721031daea0ed48376e15d8f47750dc8b9414ba39fc2e149"
+          "verify_accuracy.py": "e7a1c7e0859c965c11c8331634a0f657b731367d2b5e873c68a4b95eafb51321",
+          "verify_performance.py": "e655309b30935a0714feae6df5445cb4ee39cb87ef9f04a4b7cb3356a8685d5e"
         },
         "exit": 0,
         "stderr": "",
@@ -293,8 +293,8 @@
           "README.md": "c6ea6e6bde5663bf107bbe23ebeed24c9e1a989118a1df10073b39afc0851a25",
           "g4_cond_test.csv": "0a46bbf6aa05dc8961e103dfa8c549c269b252eff066417515f6bfa3ed0b63a3",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "933a954041ac92b23ea2e558a16db34dfbb62aa4996f6a4c0dfa4df851ae991e",
-          "verify_performance.py": "78e7390dae9ca251cb9cd44c6b30e1f40e2090f4f066fd618bece5a6d266dc87"
+          "verify_accuracy.py": "3158020c073b704664cc199929d2c7de418bfdb2da737f1de98923e9ad48cba6",
+          "verify_performance.py": "c99cba3d43ab470f368c97aa69bd6333eed6ffb7747c7e756d3c03a6a8cba066"
         },
         "exit": 0,
         "stderr": "",
@@ -373,8 +373,8 @@
           "README.md": "1b275c3c84a2b37e04f100d0e722fede217a9fc51b6b118f564f568785cdfee0",
           "g5_scalar_test.csv": "20ae8a920a69b1ebf039c6b6747603658f9be6a2d49f4290ac1c898483fcf419",
           "gpu_baseline.csv": "17452d52d2ee73a39f4692fcf19c9d3fa7a8277b982c19c6f076a75f8111e600",
-          "verify_accuracy.py": "03c10217caeb441e691a3e933355b1cce8d96e2c833087a472f13f0803df7de3",
-          "verify_performance.py": "71bf7dd78e6154ca6a19e32d44e66924a9c284ad2e42cf46a407a05e7221bb9e"
+          "verify_accuracy.py": "afd5f69c69a9e8dd244145d7bfaeb4186a819688ad2922cf258c853a5ac57b20",
+          "verify_performance.py": "419fc362d2a473118beea5cc5081a639cfb0b20b972ab0b1dc2d3cfcb592f051"
         },
         "exit": 0,
         "stderr": "",
@@ -445,8 +445,8 @@
           "README.md": "11f6dbd3a065a695e2ee5552a6713f7dcbf038b5bbb89296649cb31d85b8c3ea",
           "g6_trap2_test.csv": "2515b1ba3453dd7a700d832af362eeb12285bdc4b80586d90db141e3f16f5aa4",
           "gpu_baseline.csv": "aad2ecb2cb582f4eb6bf8c7d268e03c8428a2b53327a7eb3acb0d5404c608eac",
-          "verify_accuracy.py": "9dd865282d6115c10896d3b23a4a11edaee1bc4170bc6625c0010dd472d40c39",
-          "verify_performance.py": "37acc4c6f7d3e0689663bb818c0df1d7bcefbe4921951767953d0bac96ce65ea"
+          "verify_accuracy.py": "8281ad2fa15870ae8d1c72ee494ed082c75e6199b3de7313a8e73c5e0be1b4c3",
+          "verify_performance.py": "5fd9bb7b6445dc6aaa371f394656ed3f728f5013db2a217f504d322ddf458eb2"
         },
         "exit": 0,
         "stderr": "",
@@ -576,8 +576,8 @@
           "README.md": "e8d37676a58bb866ab037d6144235e805185531cd7cfdfd6ded6368658d0287f",
           "g6_trap6_test.csv": "18a0d4f1b484c6e77e0d2633d71a3230ec5a65ca9c0c8b8eb332f0b9753505f6",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "a16d93cbae6ffa209063587db9a1d1df16532afecf70778ecec16c1bb74bb35f",
-          "verify_performance.py": "b6ae88e95fc570689169e978b3c9aac6a9d48b49eae7ed268a8539e3e13b9b45"
+          "verify_accuracy.py": "3201cef76e6076c9f6ebd03c5780f9f4c522284d5490ca33dd90e35f4f9cebec",
+          "verify_performance.py": "82ce759fa23770afb0d355856f8e0822dda970f75e1859cf69a1e64fa4cf7d88"
         },
         "exit": 0,
         "stderr": "",
@@ -691,8 +691,8 @@
           "README.md": "f6752a7a68637ffd17baf9c45ac19c43717066248836e390381765557bddd864",
           "g7op_test.csv": "6254f7e3c81eb9779ebf8d6ce869a7704bc6d960613342144729344d3f2d842f",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "96de67ade8a61b4ffaab7b217e8fba9a3eb27304df1d110a13857a0fe58d46aa",
-          "verify_performance.py": "a1f76596f345eb2cfd2191999079fe5c9e2c08690fa813a1f7d6a44d64867cb4"
+          "verify_accuracy.py": "c8c9f003af9982bf2b8f7c30f7083c54f9bbabc9d666ecd0c89e7c2a1bae0423",
+          "verify_performance.py": "c85489695d88b15ca2dbb4692d1abae701ef03dfdaa3e731e1ca9b6332fbcf1c"
         },
         "exit": 0,
         "stderr": "",

@@ -321,7 +321,10 @@ def _write_runtime(runtime, package, package_csv, op, family, keys, meta, rows, 
     baseline = runtime / "gpu_baseline.csv"
     _write_normalized_baseline(baseline, op, meta, keys, rows)
     csv_sha = _sha256(package_csv)
-    scripts = module.render_runtime(op, family, keys, runtime, csv_sha, threshold)
+    scripts = module.render_runtime(
+        op, family, keys, runtime, csv_sha, threshold,
+        harness_profile=harness_profile or "blas",
+    )
     manifest = {
         "op": op,
         "family": family,

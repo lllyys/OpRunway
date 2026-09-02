@@ -26,6 +26,46 @@ ENVIRONMENT_EXIT = 3
 
 IDLE_GATE_EXIT = 4
 
+HARNESS_PROFILE = "sparse_frame"
+# 域构建与绑卡惯例（按 profile 查表；950 真机实测差异，M7 记档）：
+# blas 的 build.sh 用 --device 编译期固定卡（-DTEST_DEVICE_ID）；ops-sparse 无该
+# 参数（TEST_DEVICE_ID 恒 0），跑测用 ASCEND_RT_VISIBLE_DEVICES 把目标物理卡映射
+# 为逻辑 0，测试二进制运行时需要 build_out/lib64，且构建只产 skipped_tests.list
+# 不产 built_tests.list（二进制有无由寻址器裁决）。
+BUILD_CONVENTIONS = {
+    "blas": {
+        "build_device_flag": True,
+        "visible_devices_env": None,
+        "runtime_library_dirs": (),
+        "has_built_list": True,
+    },
+    "sparse_frame": {
+        "build_device_flag": False,
+        "visible_devices_env": "ASCEND_RT_VISIBLE_DEVICES",
+        "runtime_library_dirs": ("build_out/lib64",),
+        "has_built_list": False,
+    },
+}
+BUILD_CONVENTION = BUILD_CONVENTIONS[HARNESS_PROFILE]
+
+
+def _run_environment(repo, device):
+    """gtest/msprof 子进程环境：按惯例注入绑卡变量与运行库路径。"""
+    env = dict(os.environ)
+    visible = BUILD_CONVENTION["visible_devices_env"]
+    if visible:
+        env[visible] = str(device)
+    lib_dirs = [
+        str(Path(repo) / item) for item in BUILD_CONVENTION["runtime_library_dirs"]
+    ]
+    if lib_dirs:
+        current = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(
+            lib_dirs + ([current] if current else [])
+        )
+    return env
+
+
 
 def _npu_idle_gate(device, timeout=20):
     """起跑前现场核查目标卡空闲（用户裁定，fail-closed 三分支）。
@@ -209,8 +249,9 @@ def _run_build(args, log_path):
         "build.sh",
         f"--soc={args.soc}",
         f"--ops={OP}",
-        f"--device={args.device}",
     ]
+    if BUILD_CONVENTION["build_device_flag"]:
+        command.append(f"--device={args.device}")
     try:
         result = subprocess.run(
             command,
@@ -248,12 +289,14 @@ def _check_build_lists(repo):
     skipped = _read_nonempty_lines(test_build / "skipped_tests.list")
     if any(line.split("|", 1)[0] == OP for line in skipped):
         return "OP_SKIPPED", "skipped_tests.list 标记该算子为跳过"
-    if OP not in built and f"{OP}_test" not in built:
+    if BUILD_CONVENTION["has_built_list"] and (
+        OP not in built and f"{OP}_test" not in built
+    ):
         return "BUILD_FAILED", "built_tests.list 不含目标算子"
     return None, None
 
 
-def _list_tests(binary, timeout, expected):
+def _list_tests(binary, timeout, expected, env=None):
     try:
         result = subprocess.run(
             [str(binary), "--gtest_list_tests"],
@@ -262,6 +305,7 @@ def _list_tests(binary, timeout, expected):
             stderr=subprocess.PIPE,
             timeout=timeout,
             check=False,
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, f"无法列出 GTest：{exc}", "LIST_FAILED"
@@ -356,7 +400,7 @@ def _gtest_records(path):
     return records
 
 
-def _run_tests(binary, full_names, json_path, timeout):
+def _run_tests(binary, full_names, json_path, timeout, env=None):
     gtest_filter = ":".join(full_names)
     command = [
         str(binary),
@@ -364,7 +408,7 @@ def _run_tests(binary, full_names, json_path, timeout):
         f"--gtest_output=json:{json_path}",
     ]
     try:
-        result = subprocess.run(command, timeout=timeout, check=False)
+        result = subprocess.run(command, timeout=timeout, check=False, env=env)
         return result.returncode, False, gtest_filter
     except subprocess.TimeoutExpired:
         return -1, True, gtest_filter
@@ -504,13 +548,14 @@ def main(argv=None):
     # 期望集来自任务包自带的 CSV（契约），不是部署 CSV；先算期望集再建映射，
     # gtest 名不筛前缀、按期望集精确匹配（社区旧包的 L0_/L1_ 命名一样可验）。
     expected = _selected_cases(Path(__file__).resolve().parent / CSV_NAME, args)
-    mapping, message, reason = _list_tests(binary, args.timeout, set(expected))
+    run_env = _run_environment(args.repo, args.device)
+    mapping, message, reason = _list_tests(binary, args.timeout, set(expected), run_env)
     if reason:
         return _environment_error(payload, out_path, reason, message)
     full_names = [mapping[name] for name in expected if name in mapping]
     gtest_json = run_dir / "gtest.json"
     process_code, timed_out, gtest_filter = _run_tests(
-        binary, full_names, gtest_json, args.timeout
+        binary, full_names, gtest_json, args.timeout, run_env
     )
     payload["gtest_filter"] = gtest_filter
     records = _gtest_records(gtest_json)

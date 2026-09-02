@@ -32,6 +32,46 @@ ENVIRONMENT_EXIT = 3
 
 IDLE_GATE_EXIT = 4
 
+HARNESS_PROFILE = "blas"
+# 域构建与绑卡惯例（按 profile 查表；950 真机实测差异，M7 记档）：
+# blas 的 build.sh 用 --device 编译期固定卡（-DTEST_DEVICE_ID）；ops-sparse 无该
+# 参数（TEST_DEVICE_ID 恒 0），跑测用 ASCEND_RT_VISIBLE_DEVICES 把目标物理卡映射
+# 为逻辑 0，测试二进制运行时需要 build_out/lib64，且构建只产 skipped_tests.list
+# 不产 built_tests.list（二进制有无由寻址器裁决）。
+BUILD_CONVENTIONS = {
+    "blas": {
+        "build_device_flag": True,
+        "visible_devices_env": None,
+        "runtime_library_dirs": (),
+        "has_built_list": True,
+    },
+    "sparse_frame": {
+        "build_device_flag": False,
+        "visible_devices_env": "ASCEND_RT_VISIBLE_DEVICES",
+        "runtime_library_dirs": ("build_out/lib64",),
+        "has_built_list": False,
+    },
+}
+BUILD_CONVENTION = BUILD_CONVENTIONS[HARNESS_PROFILE]
+
+
+def _run_environment(repo, device):
+    """gtest/msprof 子进程环境：按惯例注入绑卡变量与运行库路径。"""
+    env = dict(os.environ)
+    visible = BUILD_CONVENTION["visible_devices_env"]
+    if visible:
+        env[visible] = str(device)
+    lib_dirs = [
+        str(Path(repo) / item) for item in BUILD_CONVENTION["runtime_library_dirs"]
+    ]
+    if lib_dirs:
+        current = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(
+            lib_dirs + ([current] if current else [])
+        )
+    return env
+
+
 
 def _npu_idle_gate(device, timeout=20):
     """起跑前现场核查目标卡空闲（用户裁定，fail-closed 三分支）。
@@ -261,8 +301,9 @@ def _run_build(args, log_path):
         "build.sh",
         f"--soc={args.soc}",
         f"--ops={OP}",
-        f"--device={args.device}",
     ]
+    if BUILD_CONVENTION["build_device_flag"]:
+        command.append(f"--device={args.device}")
     try:
         result = subprocess.run(
             command,
@@ -300,12 +341,14 @@ def _check_build_lists(repo):
     skipped = _read_nonempty_lines(test_build / "skipped_tests.list")
     if any(line.split("|", 1)[0] == OP for line in skipped):
         return "OP_SKIPPED", "skipped_tests.list 标记该算子为跳过"
-    if OP not in built and f"{OP}_test" not in built:
+    if BUILD_CONVENTION["has_built_list"] and (
+        OP not in built and f"{OP}_test" not in built
+    ):
         return "BUILD_FAILED", "built_tests.list 不含目标算子"
     return None, None
 
 
-def _list_tests(binary, timeout):
+def _list_tests(binary, timeout, env=None):
     try:
         result = subprocess.run(
             [str(binary), "--gtest_list_tests"],
@@ -314,6 +357,7 @@ def _list_tests(binary, timeout):
             stderr=subprocess.PIPE,
             timeout=timeout,
             check=False,
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, f"无法列出 GTest：{exc}", "LIST_FAILED"
@@ -464,7 +508,7 @@ def parse_op_summary(output_dir):
     return kernel_us, launches
 
 
-def _run_process(command, timeout, cwd=None):
+def _run_process(command, timeout, cwd=None, env=None):
     try:
         result = subprocess.run(
             command,
@@ -472,6 +516,7 @@ def _run_process(command, timeout, cwd=None):
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            env=env,
             timeout=timeout,
             check=False,
         )
@@ -513,9 +558,10 @@ def _with_scope_caveat(verdict, scope_caveat):
 
 def _measure_case(args, binary, msprof, row, gtest_name, references, profile_root):
     record = _case_record(row, gtest_name)
+    run_env = _run_environment(args.repo, args.device)
     safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", row["case_name"])
     warmup = [str(binary), f"--gtest_filter={gtest_name}"]
-    code, output, problem = _run_process(warmup, args.timeout)
+    code, output, problem = _run_process(warmup, args.timeout, env=run_env)
     _write_log(profile_root / safe_name / "warmup.log", output)
     if problem:
         record["status"] = problem
@@ -537,7 +583,7 @@ def _measure_case(args, binary, msprof, row, gtest_name, references, profile_roo
             f"--application={application}",
             f"--output={output_dir}",
         ]
-        code, output, problem = _run_process(command, args.timeout)
+        code, output, problem = _run_process(command, args.timeout, env=run_env)
         _write_log(profile_root / safe_name / f"r{repeat}.log", output)
         if problem:
             record["status"] = problem
@@ -551,7 +597,7 @@ def _measure_case(args, binary, msprof, row, gtest_name, references, profile_roo
             return record
         # 采集只产 task_time 与 sqlite；op_summary 由 export 生成，必须显式导出。
         export = [str(msprof), "--export=on", f"--output={output_dir}"]
-        code, output, problem = _run_process(export, args.timeout)
+        code, output, problem = _run_process(export, args.timeout, env=run_env)
         _write_log(profile_root / safe_name / f"r{repeat}.export.log", output)
         if problem:
             record["status"] = problem
@@ -759,7 +805,9 @@ def main(argv=None):
             file=sys.stderr,
         )
         return IDLE_GATE_EXIT
-    mapping, message, reason = _list_tests(binary, args.timeout)
+    mapping, message, reason = _list_tests(
+        binary, args.timeout, _run_environment(args.repo, args.device)
+    )
     if reason:
         return _environment_error(payload, out_path, reason, message)
     baseline_path = Path(__file__).resolve().parent / "gpu_baseline.csv"
