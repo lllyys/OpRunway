@@ -493,12 +493,14 @@ def command_env(args):
     )
     frame = repo / "test" / "frame" / "csv_loader.h"
     record("csv_loader.h", "OK" if frame.is_file() else "缺失", str(frame), hard=True)
-    header = repo / "include" / "cann_ops_blas.h"
-    record("cann_ops_blas.h", "OK" if header.is_file() else "缺失", str(header), hard=True)
-    # 影子记录：registry 驱动的域探测与上面硬编码判断并行跑，核对一致后替换。
+    # A1 入口头：registry 驱动的域探测（影子期已核对与旧硬编码判断一致）。
     try:
         registry = _load_case_gen()._harness_registry()
         hits, probed = _detect_profile(repo, registry)
+    except (FileNotFoundError, ImportError) as exc:
+        hits, probed = {}, {}
+        record("harness_profile 探测", "缺失", f"registry 不可达：{exc}", hard=True)
+    else:
         if len(hits) == 1:
             key = next(iter(hits))
             record("harness_profile 探测", "OK", f"{key}（{hits[key]}）")
@@ -506,11 +508,15 @@ def command_env(args):
             probed_text = "; ".join(
                 f"{key}: {', '.join(names)}" for key, names in probed.items()
             )
-            record("harness_profile 探测", "缺失", f"0 命中，探测过 {probed_text}")
+            record(
+                "harness_profile 探测", "缺失",
+                f"0 命中，探测过 {probed_text}", hard=True,
+            )
         else:
-            record("harness_profile 探测", "多命中", "、".join(sorted(hits)))
-    except (FileNotFoundError, ImportError) as exc:
-        record("harness_profile 探测", "缺失", f"registry 不可达：{exc}")
+            record(
+                "harness_profile 探测", "多命中",
+                "、".join(sorted(hits)), hard=True,
+            )
     cann_root, set_env = _find_cann()
     record(
         "CANN set_env.sh",
