@@ -528,6 +528,86 @@ def _row_is_valid(facts, state, profile):
     return _footprint(facts, state, profile) <= limit
 
 
+def _column_specs(facts):
+    """主 CSV 的统一列描述，一处定列序，多处消费（表头、行写入、README 契约表）。
+
+    每列一个普通 dict：name 列名；kind 列类别（框架列 id/description/expect/seed，
+    参数列 enum/dim/layout/scalar/scalar_re/scalar_im/fill/matrix_type/
+    fixed_vector_elem/null_flag/batch_pattern）；source 派生自哪个参数，框架列为
+    None；fixed_vector 元素列另带 index。
+    """
+    profiles = facts.get("dtype_profiles", [])
+    profile_has_complex = any(
+        profile["scalar_dtype"] in COMPLEX_DTYPES for profile in profiles
+    )
+    specs = [
+        {"name": "case_name", "kind": "id", "source": None},
+        {"name": "description", "kind": "description", "source": None},
+    ]
+    for param in facts["params"]:
+        name = param["name"]
+        role = param["role"]
+        direction = param.get("dir", "in")
+        if role in {"handle", "out_scalar", "int_array"}:
+            continue
+        if role in {"enum", "dim", "layout"}:
+            specs.append({"name": name, "kind": role, "source": name})
+        elif role in {"scalar", "inout_scalar"}:
+            is_complex = param.get("dtype") in COMPLEX_DTYPES or (
+                "dtype_from" in param and profile_has_complex
+            )
+            if is_complex:
+                specs.append(
+                    {"name": f"{name}_re", "kind": "scalar_re", "source": name}
+                )
+                specs.append(
+                    {"name": f"{name}_im", "kind": "scalar_im", "source": name}
+                )
+            else:
+                specs.append({"name": name, "kind": "scalar", "source": name})
+        elif role in {"vector", "matrix"}:
+            if direction in {"in", "inout"} and "producer" not in param:
+                # fill 列用小写参数名（a_fill），与社区旧任务包和 param.h 的读法一致。
+                specs.append(
+                    {"name": f"{name.lower()}_fill", "kind": "fill", "source": name}
+                )
+                if role == "matrix" and param.get("conditioning"):
+                    specs.append(
+                        {
+                            "name": f"{name}_matrix_type",
+                            "kind": "matrix_type",
+                            "source": name,
+                        }
+                    )
+        elif role == "fixed_vector" and direction in {"in", "inout"}:
+            specs.extend(
+                {
+                    "name": f"{name}{index}",
+                    "kind": "fixed_vector_elem",
+                    "source": name,
+                    "index": index,
+                }
+                for index in range(param["len"])
+            )
+    specs.append({"name": "expect_result", "kind": "expect", "source": None})
+    for param in facts["params"]:
+        name = param["name"]
+        if param.get("nullable", False):
+            specs.append(
+                {
+                    "name": f"null{name[:1].upper()}{name[1:]}",
+                    "kind": "null_flag",
+                    "source": name,
+                }
+            )
+        if "batch" in param:
+            specs.append(
+                {"name": f"{name}_batch_pattern", "kind": "batch_pattern", "source": name}
+            )
+    specs.append({"name": "random_seed", "kind": "seed", "source": None})
+    return specs
+
+
 def _header_columns(facts):
     profiles = facts.get("dtype_profiles", [])
     profile_has_complex = any(
