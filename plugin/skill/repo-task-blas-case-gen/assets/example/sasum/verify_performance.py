@@ -348,7 +348,7 @@ def _check_build_lists(repo):
     return None, None
 
 
-def _list_tests(binary, timeout, env=None):
+def _list_tests(binary, timeout, expected, env=None):
     try:
         result = subprocess.run(
             [str(binary), "--gtest_list_tests"],
@@ -377,9 +377,10 @@ def _list_tests(binary, timeout, env=None):
         if suite is None or not content[:1].isspace():
             continue
         full_name = suite + stripped
-        if "/TC_" not in full_name:
-            continue
         case_name = full_name.rsplit("/", 1)[-1]
+        # 按期望集精确匹配，不筛命名前缀（与精度侧同一口径）。
+        if case_name not in expected:
+            continue
         if case_name in mapping:
             return None, f"case_name {case_name!r} 映射重复", "DUPLICATE_CASE"
         mapping[case_name] = full_name
@@ -805,8 +806,16 @@ def main(argv=None):
             file=sys.stderr,
         )
         return IDLE_GATE_EXIT
+    # 先读任务包 TC_PF_ 行：映射面用全集精确匹配（不筛命名前缀）。
+    try:
+        package_rows = _selected_rows(Path(__file__).resolve().parent / CSV_NAME, args)
+    except (OSError, UnicodeError, csv.Error, ValueError) as exc:
+        return _environment_error(payload, out_path, "CSV_INVALID", str(exc))
     mapping, message, reason = _list_tests(
-        binary, args.timeout, _run_environment(args.repo, args.device)
+        binary,
+        args.timeout,
+        {row["case_name"] for row in package_rows},
+        _run_environment(args.repo, args.device),
     )
     if reason:
         return _environment_error(payload, out_path, reason, message)
@@ -818,7 +827,6 @@ def main(argv=None):
         return _environment_error(payload, out_path, "BASELINE_INVALID", str(exc))
     # 期望集 = 任务包 CSV 里有可比 GPU 基线的 TC_PF_ 行；没有基线的行不跑，只计数。
     try:
-        package_rows = _selected_rows(Path(__file__).resolve().parent / CSV_NAME, args)
         expected_rows, ignored = _comparable_rows(package_rows, references)
     except (OSError, UnicodeError, csv.Error, ValueError) as exc:
         return _environment_error(payload, out_path, "CSV_INVALID", str(exc))

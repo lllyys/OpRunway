@@ -363,20 +363,23 @@ def _time_ms(value):
     return None
 
 
-def _gtest_records(path):
+def _gtest_records(path, expected):
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return {}
     records = {}
+    expected_set = set(expected)
     for suite in payload.get("testsuites", []):
         suite_name = suite.get("name", "")
         for test in suite.get("testsuite", []):
             test_name = test.get("name", "")
             full_name = f"{suite_name}.{test_name}" if suite_name else test_name
-            if "/TC_" not in full_name:
-                continue
             case_name = full_name.rsplit("/", 1)[-1]
+            # 按期望集精确匹配，不筛命名前缀（与映射同一口径；
+            # 真机实测抓出的第三道 /TC_ 硬筛，前两道见 M2·5·6′ 第 3 项）。
+            if case_name not in expected_set:
+                continue
             failures = test.get("failures", []) or []
             result = str(test.get("result", "")).upper()
             status = str(test.get("status", "")).upper()
@@ -558,7 +561,7 @@ def main(argv=None):
         binary, full_names, gtest_json, args.timeout, run_env
     )
     payload["gtest_filter"] = gtest_filter
-    records = _gtest_records(gtest_json)
+    records = _gtest_records(gtest_json, expected)
     expected_records = [records[name] for name in expected if name in records]
     if process_code != 0 and expected_records and all(
         record.get("status") == "PASS" for record in expected_records
