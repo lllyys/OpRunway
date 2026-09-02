@@ -2,6 +2,14 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-02 · 上游 PR !4：sparse R1 两 skill 增量提回 Justbin。**
+  发现 upstream.json 基线已过时（上游 dev/skills-v0.2.0 在 90e28ff 后并入了本仓
+  blas-native 线的工作并前进 36 提交），仓规 §2 的基线 patch 路径失效；核实上游
+  现有两个 blas 树分别精确等于本分支历史提交 78283e9/307662b（严格祖先，零覆盖
+  风险）后，PR 分支取 tip 3566d76 + 两 skill 目录整树替换（与本仓逐字节一致），
+  21 文件 +3189/−556，经 fork brian66237 提交，base dev/skills-v0.2.0。
+  遗留：upstream.json 的 baseline/mirror_commit 待做一轮同步上游后更新。
+
 - **2026-09-02 · 评审纪律扩面：audit 的 fix 段同受七维约束（用户裁定）。**
   audit 修复清单不照单全收，每项落地前按七维评估，会退化的调整或明确遗留并记理由；
   入 codex-review.md，AGENTS.md §5 过时的「六个维度」同步改七。
