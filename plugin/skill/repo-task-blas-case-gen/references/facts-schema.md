@@ -13,6 +13,7 @@
 - [edge_cases](#edge_cases)
 - [用例生成配置](#用例生成配置)
 - [能力边界](#能力边界)
+- [schema v2：harness 域包](#schema-v2harness-域包)
 - [CSV 表头投影](#csv-表头投影)
 - [常见报错与改法](#常见报错与改法)
 - [完整示例](#完整示例)
@@ -47,8 +48,8 @@ python3 <skill>/scripts/package.py check --facts gen_csv.py --print-header
 
 | 键 | 必填 | 取值 |
 | --- | --- | --- |
-| `schema_version` | 是 | 整数，当前只能是 `1` |
-| `generator_version` | 是 | 整数，必须等于模板的 `GENERATOR_VERSION` |
+| `schema_version` | 是 | 整数，`1` 或 `2`（v2 见「schema v2：harness 域包」一节） |
+| `generator_version` | 是 | 整数，按版本矩阵：schema 1 与 2 目前都要求 `1` |
 | `op` | 是 | 小写标识符 |
 | `family` | 是 | 标识符，同时是 `test/<family>/` 与 `blas/<family>/` 的目录名 |
 | `symbol` | 是 | 公开 C 函数名 |
@@ -56,7 +57,7 @@ python3 <skill>/scripts/package.py check --facts gen_csv.py --print-header
 | `params` | 是 | 按任务书 C 原型的顺序排列的非空参数列表 |
 | `constraints` | 否 | 表达式字符串列表，默认 `[]` |
 | `golden` | 是 | `{kind, symbol?, formula?}` |
-| `verify` | 是 | 不重复的非空校验策略列表 |
+| `verify` | 见注 | 不重复的非空校验策略列表；`golden.kind=harness` 时不接受此键 |
 | `edge_cases` | 否 | 边界用例列表，默认 `[]` |
 | `perf` | 否 | 性能基线字典 |
 | `dtype_profiles` | 条件 | 有参数使用 `dtype_from` 时必填，否则禁止出现 |
@@ -407,6 +408,50 @@ set 会直接投影到 CSV；保留其他未知列只会产生没有生效的伪
 先按约定表把全名或单字母缩写改成 CSV 短记号，再核对 enum 的 C 类型。
 比如
 `ACL_FLOAT` 写成 `FP32`，`ACLBLAS_UPPER` 或 `U` 写成 `UPPER`。
+
+## schema v2：harness 域包
+
+v2 面向「golden 与校验由开发者 harness 自带」的算子域（当前是 ops-sparse 的 frame
+惯例）。v1 的一切规则照旧且行为逐字节不变；下面只写 v2 新增或不同的部分。
+
+新增顶层键：
+
+| 键 | 必填 | 取值 |
+| --- | --- | --- |
+| `harness_profile` | 是 | registry 里的 profile 键名（如 `sparse_frame`）；域级列名与词表默认都从它取 |
+| `status_vocab` | 是 | 本算子 expect 列的精确词表，必须是 profile `status_vocab_bound` 的子集 |
+| `harness_overrides` | 否 | 可覆盖键恰四个，整键替换；键名见下方「覆盖上界」 |
+| `case_controls` | 否 | 造数控制列表，见下 |
+
+**registry** 是模板通用代码区里的 `HARNESS_REGISTRY` 数据表：每个域一档（profile），
+九个字段装仓级默认与闭合上界。域差异只进数据，引擎不按域开分枝。
+
+v2 的其它规则：
+
+- `golden` 开放 `{"kind": "harness"}`：golden 与校验由仓内 harness 自带（golden.h），
+  与 `symbol`/`formula` 互斥，且整个 `verify` 键不适用（写了就报错）。
+- **不投影参数**：`params` 仍逐字对应 C 原型；由 harness 自行取值、派生或造数的参数加
+  `"projection": "none"`（只对 `enum`/`dim`/`int_array` 开放）。引擎对它列、轴、state、
+  null/batch 控制列全静默；`int_array` 不投影时免 `producer`；这类参数不能作
+  `perf.key`，也不能出现在 `edge_cases` 的 `set` 里。
+- **case_controls**：`{name, kind: enum|tier, values}`。值是原始字符串端到端传递，判等即
+  文本相等；每个 control 产一个直接列并进轴，可作 `perf.key`。控制名不得与任何参数名
+  （含不投影参数）、`profile`、基座列或阈值列冲突，引擎在列与轴两侧都会机械拒绝。
+- **覆盖上界**：可覆盖键是 `seed_columns`、`description_column`、`expect_column`、
+  `threshold_columns`。`threshold_columns` 只能取三档（空表 / profile 默认前两件 / 三件套）；
+  `expect_default_token` 不可覆盖（改它就是改 profile，走 registry 评审）。本版阈值列
+  值源未建，要求覆盖为空表，非空即 fail-closed 拒绝。把 `expect_column` 覆盖为 `None`
+  时 profile 的 `expect_default_token` 闲置不消费，不视为违反「无 expect 列时 token 为
+  none」的 profile 级不变量。
+- **expect 默认 token**：resolved 后仍有 expect 列时，profile 的 `expect_default_token`
+  必须落在本算子 `status_vocab` 内；`edge_cases` 的 `expect` 也按 `status_vocab` 校验。
+- **版本矩阵**：`generator_version` 按 `GENERATOR_VERSION_BY_SCHEMA` 校验（schema 1→1、
+  schema 2→1）。某一行升版意味着公共代码区对该版包不再逐字节兼容，届时对应包的两个
+  verify 脚本与 README 摘要按重钉协议重录。
+- **`footprint_policy: no_static_check` 的作者责任**：引擎不做静态显存估算，用例规模
+  上界由作者在轴与 `perf.rows` 网格里自行封顶。写 FACTS 时先算 harness 派生量的最坏值
+  （如 coo2csr 的 `targetNnz = int(m*n*(1-sparsity))` 是 C 的 int），确保不溢出、不超设备
+  内存，并把封顶依据写进 FACTS 注释。
 
 ## 完整示例
 

@@ -1,9 +1,10 @@
 ---
 name: repo-task-blas-accept
 description: >-
-  使用 BLAS 任务包（一个 <op>_test.csv 加一张 gpu_baseline.csv）和开发者 ops-blas 工程，
-  在 NPU 上完成精度与性能验收并给出证据化结论。当用户提到 ops-blas、aclblas、任务包、
-  验收、GTest 或 NPU 跑测时使用；只需生成任务包时改用 repo-task-blas-case-gen。
+  使用任务包（一个 <op>_test.csv 加一张 gpu_baseline.csv）和开发者算子工程
+  （ops-blas / ops-sparse，域由 include 入口头按 registry 探测），在 NPU 上完成精度与
+  性能验收并给出证据化结论。当用户提到 ops-blas、ops-sparse、aclblas、aclsparse、
+  任务包、验收、GTest 或 NPU 跑测时使用；只需生成任务包时改用 repo-task-blas-case-gen。
 ---
 
 # BLAS 任务包验收
@@ -29,7 +30,7 @@ description: >-
 | 参数 | 含义 | 要求 |
 | --- | --- | --- |
 | `任务包目录` | 含上述两件的目录 | 绝对路径；`*_test.csv` 恰好一个 |
-| `工程目录` | 开发者 ops-blas 检出 | 含 `build.sh`、`include/`、`test/` |
+| `工程目录` | 开发者算子工程检出 | 含 `build.sh`、`include/`（入口头）、`test/` |
 | `soc` | 目标 SoC | 与 `build.sh --soc` 一致，如 `ascend910b3` |
 | `device` | NPU 设备号 | 非负整数，默认 0；编译期固定 |
 | `python` | 执行 accept 与量具的解释器 | Python 3.8 或更高版本 |

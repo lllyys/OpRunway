@@ -1,4 +1,4 @@
-# BLAS 验收运行链
+# 验收运行链
 
 ## Contents
 
@@ -52,9 +52,10 @@
 │       ├── accuracy_<id>-rerun.json
 │       ├── performance_<id>.json
 │       └── <id>/{accuracy,performance}/   # build.log、gtest.json、prof/
-└── verdict/                    # A5
-    ├── verdict.json
-    └── report.md
+└── verdict/                    # A5 三类产物布局
+    ├── report/report.md        # 人读报告（三节：精度、性能、备注说明）
+    ├── intermediate/           # 执行期 JSON：verdict/accuracy/performance/check/manifest
+    └── repro/                  # 最小可复现：任务包六件副本 + cases.csv 用例清单
 ```
 
 **运行时包**就是 `runtime/` 这个目录：accept 把任意任务包变成量具能直接消费的形态。
@@ -73,8 +74,11 @@ cd <工作目录> && <python> <skill>/scripts/accept.py env \
 | 3 | 硬前置至少一项缺失 | 停止 |
 
 A1 只返回这两个值，其它值视同停止。硬前置五项：Python ≥ 3.8、`<工程目录>/build.sh` 可读、
-`test/frame/csv_loader.h`、`include/cann_ops_blas.h`、CANN `set_env.sh`（按 `ASCEND_HOME`、
-`ASCEND_TOOLKIT_HOME`、`/usr/local/Ascend/ascend-toolkit/latest` 顺序找）。`cmake`、`g++`、
+`test/frame/csv_loader.h`、harness_profile 探测恰一命中、CANN `set_env.sh`（按 `ASCEND_HOME`、
+`ASCEND_TOOLKIT_HOME`、`/usr/local/Ascend/ascend-toolkit/latest` 顺序找）。
+**harness_profile 探测**按 registry 各 profile 的入口头在 `<工程目录>/include/` 下探测
+（blas=`cann_ops_blas.h`、sparse_frame=`cann_ops_sparse.h`）；0 命中或多命中都是硬失败并
+列出候选，恰一命中的键名会写进 A2 的 runtime manifest。`cmake`、`g++`、
 msprof、`npu-smi`、`cblas.h`、`lapacke.h` 是警告项，后续阶段会在实际使用点给出确定错误。
 
 `env.json` 的 `checks[]` 记录每项的 `name/status/detail/hard`，`hard_failures` 列出未通过的
@@ -153,14 +157,14 @@ cd <工作目录> && <python> -c \
   "import json; print(json.load(open('check.json'))['checks']['harness'])"
 ```
 
-`missing` 非空只是警告，A5 的 `report.md` 会列出。这一步同时核对 `calls_per_case`：
+`missing` 非空只是警告，A5 的报告会列出。这一步同时核对 `calls_per_case`：
 
 1. 打开 `<op>_npu_wrapper.h`，路径在 `checks.harness.files` 的 `npu_wrapper.h` 项。
 2. 数 `aclblas<Op>(` 被调用的次数，`<Op>` 是首字母大写的 `<op>`，如 `cherk` 对应
    `aclblasCherk(`；一条用例的总次数 = warm-up 调用次数 + 正式调用次数，只看这一个文件。
 3. 与 A2 所填不同时用正确值重跑 A2；文件缺失时按 1 计。
 
-把读过的路径与次数（或「wrapper 缺失，按 1 计」）写进 `report.md` 的 `审阅备注`。
+把读过的路径与次数（或「wrapper 缺失，按 1 计」）写进 `report/report.md` 的 `备注说明`。
 
 ## A3 精度
 
@@ -174,8 +178,9 @@ cd <工作目录>/runtime && <python> verify_accuracy.py \
 `<工程目录>/build/test/` 下找。脚本在 `results/<id>/accuracy/` 独占阶段目录，目录已存在时
 退出 3（`RUN_ID_EXISTS`），避免旧 GTest JSON 污染新轮次。
 
-**期望集**是本轮必须出结果的用例名集合。精度期望集 = 运行时包 CSV 里 `case_name` 以 `TC_`
-开头且不以 `TC_PF_` 开头的行；`--case` 与 `--filter` 只收窄，不新增。
+**期望集**是本轮必须出结果的用例名集合。精度期望集 = 运行时包 CSV 里除 `TC_PF_` 前缀外的
+全部有效数据行（不筛命名前缀，社区旧包的 `L0_/L1_` 命名一样进集合）；`--case` 与
+`--filter` 只收窄，不新增。
 
 `--repo/--soc/--device` 与入口参数同义，其余参数如下：
 
@@ -262,6 +267,9 @@ cd <工作目录> && <python> <skill>/scripts/accept.py verdict \
   --run-id <id> --out <工作目录>/verdict
 ```
 
+产物按三类落在 `--out` 下：`report/report.md`、`intermediate/verdict.json`（及各证据 JSON
+副本）、`repro/`。`rerun.sh` 与环境指纹在真机阶段补齐。
+
 verdict 从 `<工作目录>/runtime/manifest.json`、`runtime/<op>_test.csv`、
 `runtime/gpu_baseline.csv` 重新算出两个期望集，再核 `runtime/results/` 下本 run-id 的 JSON
 和 `<工作目录>/check.json`。核的是下面这些，任一不满足都是 `证据不足`：
@@ -274,15 +282,17 @@ verdict 从 `<工作目录>/runtime/manifest.json`、`runtime/<op>_test.csv`、
   `baseline_sha256/calls_per_case` 与 manifest 及本次参数一致，`evidence_id` 按 A2 的算法
   重算后与文件里的值相同。
 - 精度 JSON 的 `exit_code` 不是 3。
+- 性能 JSON 的 `calls_per_case` 与 manifest 相等（manifest 是唯一来源）。
 
 | 退出码 | `verdict` | 条件 |
 | --- | --- | --- |
-| 0 | 通过 | check 退出 0，精度全 PASS，性能 `通过` 或性能期望集为空 |
+| 0 | 通过 | check 退出 0，精度全 PASS，性能 `通过` 或 CSV 无 `TC_PF_` 行 |
 | 1 | 不通过 | check 退出非 0、精度首轮有非 PASS，或性能 `不通过` |
 | 2 | 证据不足 | 上面任一核不过、结果 JSON 缺失、性能 `证据不足` 或 `NO_REF` |
 
-**NO_REF** 是性能用例没有可比 GPU 基线时的状态；它不能证明性能达标，所以总结论是
-`证据不足`。A3 有非 PASS 时性能记 `未执行(精度未通过)`，总结论 `不通过`。
+「有没有性能要求」的判据是 CSV 的 `TC_PF_` 行数（证据字段 `total_pf`），不是可比集大小
+（`comparable_pf`）：无 `TC_PF_` 行才是「通过（无性能要求）」；有 `TC_PF_` 行而全配不到
+基线时是 `NO_REF`。**NO_REF** 不能证明性能达标，所以总结论是 `证据不足`。A3 有非 PASS 时性能记 `未执行(精度未通过)`，总结论 `不通过`。
 
 `timing_scope` 来自基线文件的元数据行 `# timing_scope=<值>`，说明 `gpu_ms` 的计时口径：
 `kernel` 与 msprof 的 kernel 口径同类，缺省记 `unspecified`。不是 `kernel` 时性能状态追加
