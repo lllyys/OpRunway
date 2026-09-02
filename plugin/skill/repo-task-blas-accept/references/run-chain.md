@@ -305,7 +305,9 @@ verdict 从 `<工作目录>/runtime/manifest.json`、`runtime/<op>_test.csv`、
 `problems/case_names`）、`performance`（`status/base_status/expected/executed/total_pf/`
 `comparable_pf/case_sets/timing_scope/scope_caveat/threshold/reason/problems`）、
 `contract`、`evidence`、`layout` 与 `verdict`。`report/report.md` 三节：`精度`、`性能`、
-`备注说明`；标题下的摘要块自动带总结论原因、契约状态、警告与运行时身份，只有
+`备注说明`；标题下的摘要块自动带总结论原因、契约状态、警告、完整身份链
+（包 CSV/基线/二进制 SHA-256、性能键）与证据指引，性能节含可比集逐用例表
+（kernel_us/gpu_ms/ratio/spread/verdict，超 30 条截断指向 JSON），只有
 `备注说明` 由 agent 填。`repro/cases.csv` 覆盖精度、可比 PF、无参考 PF 三类用例，
 标状态与是否执行。
 

@@ -915,6 +915,7 @@ def _performance_result(
         # 「有没有性能要求」只能看 total_pf，不能拿可比集大小当代理。
         result.setdefault("total_pf", total_pf)
         result.setdefault("comparable_pf", expected_count)
+        result.setdefault("case_rows", [])
         return result
     if accuracy_status == "精度不通过":
         return _with_pf_evidence({
@@ -1074,7 +1075,22 @@ def _performance_result(
     display = base_status
     if scope_caveat:
         display += " (scope caveat)"
+    case_rows = []
+    for name in expected:
+        item = records.get(name)
+        if not isinstance(item, dict):
+            continue
+        case_rows.append({
+            "name": name,
+            "status": item.get("status"),
+            "kernel_us": item.get("kernel_us"),
+            "gpu_ms": item.get("gpu_ms"),
+            "ratio": item.get("ratio"),
+            "spread": item.get("spread"),
+            "verdict": item.get("verdict"),
+        })
     return _with_pf_evidence({
+        "case_rows": case_rows,
         "status": display,
         "base_status": base_status,
         "expected": expected_count,
@@ -1187,8 +1203,41 @@ def _performance_section(performance):
         f"- 可比集（comparable_pf）：{performance.get('comparable_pf')}",
         f"- timing_scope：{performance.get('timing_scope')}",
     ]
+    no_ref = len((performance.get("case_sets") or {}).get("no_ref") or [])
+    if no_ref:
+        lines.append(f"- 无可比基线（NO_REF，不进期望集）：{no_ref} 条")
+    if performance.get("threshold") is not None:
+        lines.append(
+            f"- threshold：{performance['threshold']}（判据见 perf-protocol.md）"
+        )
+    if performance.get("scope_caveat"):
+        lines.append(
+            "- scope caveat：基线计时口径非 kernel，状态附加标注，不改结论"
+        )
     if performance.get("reason"):
         lines.append(f"- 说明：{performance['reason']}")
+    rows = performance.get("case_rows") or []
+    if rows:
+        shown = rows[:30]
+        lines += [
+            "",
+            "| case_name | status | kernel_us | gpu_ms | ratio | spread | verdict |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for row in shown:
+            def _fmt(value, digits):
+                return f"{value:.{digits}g}" if isinstance(value, (int, float)) else value
+            lines.append(
+                f"| {row['name']} | {row.get('status')} "
+                f"| {_fmt(row.get('kernel_us'), 6)} | {_fmt(row.get('gpu_ms'), 6)} "
+                f"| {_fmt(row.get('ratio'), 4)} | {_fmt(row.get('spread'), 3)} "
+                f"| {row.get('verdict')} |"
+            )
+        if len(rows) > len(shown):
+            lines.append(
+                f"| …其余 {len(rows) - len(shown)} 条见 intermediate/ 的 "
+                "performance JSON | | | | | | |"
+            )
     if performance.get("problems"):
         lines += ["", "证据问题："] + [f"- {x}" for x in performance["problems"]]
     return "\n".join(lines)
@@ -1223,11 +1272,30 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
     for message in contract.get("errors") or []:
         summary_lines.append(f"- 契约错误：{message}")
     runtime_info = payload.get("runtime") or {}
+    evidence_info = payload.get("evidence") or {}
     summary_lines.append(
         "- 运行时身份：op="
         f"{runtime_info.get('op')}，profile={runtime_info.get('harness_profile')}，"
-        f"包 CSV {str(runtime_info.get('package_csv_sha256'))[:12]}…，"
-        f"calls_per_case={runtime_info.get('calls_per_case')}"
+        f"calls_per_case={runtime_info.get('calls_per_case')}，"
+        f"性能键={', '.join(runtime_info.get('perf_key') or []) or '无'}"
+    )
+    summary_lines.append(
+        f"- 包 CSV SHA-256：{runtime_info.get('package_csv_sha256')}"
+    )
+    if evidence_info.get("csv_sha256") and (
+        evidence_info.get("csv_sha256") != runtime_info.get("package_csv_sha256")
+    ):
+        summary_lines.append(f"- 部署 CSV SHA-256：{evidence_info.get('csv_sha256')}")
+    summary_lines.append(
+        f"- 基线 SHA-256：{runtime_info.get('baseline_sha256')}"
+    )
+    if evidence_info.get("binary_sha256"):
+        summary_lines.append(
+            f"- 测试二进制 SHA-256：{evidence_info.get('binary_sha256')}"
+        )
+    summary_lines.append(
+        "- 证据：机器可读全量在 intermediate/（verdict.json 与各阶段 JSON），"
+        "复现材料在 repro/（rerun.sh、cases.csv、environment.json）"
     )
     values = {
         "OP": payload.get("op"),
