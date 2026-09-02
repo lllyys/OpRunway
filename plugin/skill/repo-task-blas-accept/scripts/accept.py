@@ -924,14 +924,18 @@ def _performance_result(
     # 「有没有性能要求」的判据是 CSV 的 TC_PF_ 行数（total_pf），
     # 不是可比集大小——新包 200 条 PF 而基线全空时可比集也是 0，
     # 拿可比集当代理会把 NO_REF 误判成「没有性能要求」。
-    if (total_pf or 0) == 0 and not path.is_file():
+    # 该判定不受性能 JSON 是否存在影响：无性能要求时杂散 JSON 只记录不改结论。
+    if (total_pf or 0) == 0:
+        reason = "部署 CSV 没有 TC_PF_ 用例"
+        if path.is_file():
+            reason += "；存在未预期的 performance JSON，已忽略（不参与裁决）"
         return _with_pf_evidence({
             "status": "通过",
             "base_status": "通过",
             "expected": 0,
             "timing_scope": None,
             "scope_caveat": False,
-            "reason": "部署 CSV 没有 TC_PF_ 用例",
+            "reason": reason,
         })
     if not path.is_file():
         if expected_count == 0:
@@ -1188,11 +1192,38 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
     for directory in (report_dir, inter_dir, repro_dir):
         directory.mkdir(parents=True, exist_ok=True)
     template = REPORT_TEMPLATE_PATH.read_text(encoding="utf-8")
+    contract = payload.get("contract") or {}
+    summary_lines = []
+    if payload.get("verdict") != "通过":
+        reasons = []
+        if (payload.get("accuracy") or {}).get("status") not in (None, "精度通过"):
+            reasons.append(f"精度 {payload['accuracy']['status']}")
+        perf_base = (payload.get("performance") or {}).get("base_status") or (
+            payload.get("performance") or {}
+        ).get("status")
+        if perf_base not in (None, "通过"):
+            reasons.append(f"性能 {perf_base}")
+        if contract.get("status") not in (None, "通过"):
+            reasons.append(f"契约 {contract.get('status')}")
+        summary_lines.append("- 结论原因：" + ("；".join(reasons) or "见证据问题"))
+    summary_lines.append(f"- 契约（check.json）：{contract.get('status')}")
+    for message in contract.get("warnings") or []:
+        summary_lines.append(f"- 警告：{message}")
+    for message in contract.get("errors") or []:
+        summary_lines.append(f"- 契约错误：{message}")
+    runtime_info = payload.get("runtime") or {}
+    summary_lines.append(
+        "- 运行时身份：op="
+        f"{runtime_info.get('op')}，profile={runtime_info.get('harness_profile')}，"
+        f"包 CSV {str(runtime_info.get('package_csv_sha256'))[:12]}…，"
+        f"calls_per_case={runtime_info.get('calls_per_case')}"
+    )
     values = {
         "OP": payload.get("op"),
         "VERDICT": payload.get("verdict"),
         "RUN_ID": payload.get("run_id"),
         "SOC": payload.get("soc"),
+        "SUMMARY": "\n".join(summary_lines),
         "ACCURACY_SECTION": _accuracy_section(payload["accuracy"]),
         "PERFORMANCE_SECTION": _performance_section(payload["performance"]),
     }
@@ -1215,12 +1246,23 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
         source = Path(package) / name
         if source.is_file():
             shutil.copyfile(source, repro_dir / name)
-    lines = ["case_name,block,status"]
+    lines = ["case_name,block,status,executed"]
     accuracy = payload["accuracy"]
+    performance = payload["performance"]
+    accuracy_executed = accuracy.get("executed") or 0
     failed = {item["name"]: item for item in accuracy.get("attribution", [])}
     for record in accuracy.get("case_names", []):
         status = failed.get(record, {}).get("initial_status", "PASS")
-        lines.append(f"{record},accuracy,{status}")
+        lines.append(f"{record},accuracy,{status},{'yes' if accuracy_executed else 'no'}")
+    perf_sets = performance.get("case_sets") or {}
+    perf_executed = performance.get("executed")
+    for name in perf_sets.get("comparable", []):
+        lines.append(
+            f"{name},perf_comparable,{performance.get('base_status') or performance.get('status')},"
+            f"{'yes' if perf_executed else 'no'}"
+        )
+    for name in perf_sets.get("no_ref", []):
+        lines.append(f"{name},perf_no_ref,NO_REF,no")
     _atomic_text(repro_dir / "cases.csv", "\n".join(lines) + "\n")
     return {"report": str(report_dir / "report.md"),
             "intermediate": str(inter_dir), "repro": str(repro_dir)}
@@ -1285,12 +1327,15 @@ def command_verdict(args):
     expected = []
     performance_expected = []
     total_pf = None
+    performance_ignored = []
     try:
         expected = _read_csv_case_names(runtime_csv, performance=False)
         total_pf = len(_read_csv_case_names(runtime_csv, performance=True))
         csv_header = _csv_header(runtime_csv)
         _, keys, _, references = _load_baseline(runtime / "gpu_baseline.csv", csv_header)
-        performance_expected, _ = _comparable_pf_names(runtime_csv, keys, references)
+        performance_expected, performance_ignored = _comparable_pf_names(
+            runtime_csv, keys, references
+        )
     except (OSError, UnicodeError, csv.Error, ValueError) as exc:
         evidence_problems.append(str(exc))
     deployed_sha = accuracy_payload.get("csv_sha256")
@@ -1311,6 +1356,10 @@ def command_verdict(args):
     )
     accuracy["case_names"] = list(expected)
     accuracy["problems"].extend(evidence_problems)
+    performance_sets = {
+        "comparable": list(performance_expected),
+        "no_ref": list(performance_ignored),
+    }
     if evidence_problems:
         accuracy["status"] = "证据不足"
     performance = _performance_result(
@@ -1323,6 +1372,7 @@ def command_verdict(args):
         accuracy_payload.get("binary_sha256"),
         total_pf=total_pf,
     )
+    performance["case_sets"] = performance_sets
     contract_expected = {
         "package": str(package),
         "repo": str(repo),

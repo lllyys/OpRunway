@@ -299,13 +299,14 @@ verdict 从 `<工作目录>/runtime/manifest.json`、`runtime/<op>_test.csv`、
 `(scope caveat)`，不改结论；`performance.base_status` 是未追加该后缀的原始状态。
 协议见 [perf-protocol.md](perf-protocol.md)。
 
-输出 `verdict/verdict.json` 与 `verdict/report.md`。`verdict.json` 顶层是 `run_id/op/soc/device`、
+输出落 `verdict/` 下的三类布局。`intermediate/verdict.json` 顶层是 `run_id/op/soc/device`、
 `runtime`（manifest 原样）、`accuracy`（`status/expected/executed/pass/fail/counts/attribution/`
-`problems`）、`performance`（`status/base_status/expected/executed/timing_scope/scope_caveat/`
-`threshold/reason/problems`）、`contract`（`status/path/exit_code/evidence_id/csv/`
-`columns_not_read/harness_missing/warnings/errors`）、`evidence`（各 JSON 路径、
-`binary_sha256/csv_sha256/calls_per_case`）与 `verdict`。`report.md` 依次是 `结论`、`证据表`、
-`失败逐条`、`运行时包`、`契约比对`、`审阅备注`；只有 `审阅备注` 由 agent 填。
+`problems/case_names`）、`performance`（`status/base_status/expected/executed/total_pf/`
+`comparable_pf/case_sets/timing_scope/scope_caveat/threshold/reason/problems`）、
+`contract`、`evidence`、`layout` 与 `verdict`。`report/report.md` 三节：`精度`、`性能`、
+`备注说明`；标题下的摘要块自动带总结论原因、契约状态、警告与运行时身份，只有
+`备注说明` 由 agent 填。`repro/cases.csv` 覆盖精度、可比 PF、无参考 PF 三类用例，
+标状态与是否执行。
 
 ## 工程查找规则
 

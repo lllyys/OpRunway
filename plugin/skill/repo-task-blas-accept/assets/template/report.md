@@ -2,6 +2,8 @@
 
 **结论：@@VERDICT@@**（run_id=@@RUN_ID@@，soc=@@SOC@@）
 
+@@SUMMARY@@
+
 ## 精度
 
 @@ACCURACY_SECTION@@

@@ -72,7 +72,7 @@ source <set_env.sh> && cd <工作目录>/runtime && <python> verify_accuracy.py 
 | 现象 | 原因 | 处置 |
 | --- | --- | --- |
 | A2 警告 `NO_REF: N 条 TC_PF_ 无可比基线` | 按基线键配不到行，或该行 `gpu_ms` 为空 | 只记录；这些用例不进期望集，不跑 |
-| `checks.perf.comparable_pf` 为 0 | 所有 `TC_PF_` 都无基线，或本就没有 `TC_PF_` | 不跑 A4，A5 记性能 `通过`（无性能用例） |
+| `checks.perf.comparable_pf` 为 0 | 全部无基线，或无 `TC_PF_` 行 | 不跑 A4；A5 按 `total_pf`：0 通过，>0 `NO_REF` |
 | `comparable_pf` 为 0 却跑了 A4，A4 状态 `NO_REF` | 期望集本来就空 | 删掉性能 JSON，A5 即记 `通过` |
 | `comparable_pf` 大于 0，A4 状态 `NO_REF` | `--case/--filter` 收窄成空 | 删掉 A4 两处产物，不带收窄参数同 id 重跑 A4 |
 
@@ -108,7 +108,7 @@ GTest 自报的 ms 不能替代 msprof，`NO_KERNEL` 也不能以 0 代替。
 
 | 现象 | 原因 | 处置 |
 | --- | --- | --- |
-| A2 警告 `COLUMN_NOT_READ: <列名…>` | 列名没在 harness 源码里以字面量出现 | 只记录，原样进 `report.md` |
+| A2 警告 `COLUMN_NOT_READ: <列名…>` | 列名没在 harness 源码里以字面量出现 | 只记录，原样进 `report/report.md` |
 
 harness 通过 `test/frame` 的 `ReadMap("列名")` 取列，列名不出现就静默取默认值。这是提示
 不是门：列名被静默忽略意味着该列的取值没有真正驱动测试，读报告的人要据此判断精度 PASS

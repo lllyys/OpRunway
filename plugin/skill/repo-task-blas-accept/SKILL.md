@@ -50,7 +50,7 @@ description: >-
 | A2′ 三文件 | 读 `check.json` 里 harness 三文件的有无，核对 `calls_per_case` | 同 `check.json` | 记录后进 A3 |
 | A3 精度 | 构建并运行全部精度用例 | `runtime/results/accuracy_<id>.json` | 0 进 A4；1 复跑后进 A5；3 修复后换 id 重跑 |
 | A4 性能 | 逐例用 msprof 采集有基线的性能用例 | `runtime/results/performance_<id>.json` | 0/1/2 进 A5；3 修复后重跑一次 |
-| A5 结论 | 校验集合、计数与哈希，机械裁决 | `verdict/verdict.json`、`verdict/report.md` | 0/1/2 |
+| A5 结论 | 校验集合、计数与哈希，机械裁决 | `verdict/` 下三类布局 | 0/1/2 |
 
 **运行时包**是 A2 在 `<工作目录>/runtime/` 生成的目录，装着任务包 CSV 副本、规范化的
 基线、渲染出的两个量具和 `manifest.json`，A3、A4 都在这个目录里执行。**有无门**只裁
@@ -137,8 +137,9 @@ cd <工作目录>/runtime && <python> verify_performance.py \
   --skip-build --calls-per-case <calls_per_case>
 ```
 
-A3 有失败时不运行，A5 会把性能记为 `未执行(精度未通过)`；`comparable_pf` 为 0 时也不运行，
-A5 记 `通过`（无性能用例）。GTest 自报 ms 不作性能依据。退出码 3 是环境失败：按
+A3 有失败时不运行，A5 会把性能记为 `未执行(精度未通过)`；`comparable_pf` 为 0 时也不运行。
+此时 A5 按 CSV 的 `TC_PF_` 行数（`total_pf`）裁决：无 `TC_PF_` 行记 `通过`（无性能要求），
+有 `TC_PF_` 行但全无可比基线记 `NO_REF`（总体证据不足）。GTest 自报 ms 不作性能依据。退出码 3 是环境失败：按
 troubleshooting.md 修复后删掉 `runtime/results/<id>/performance/` 与
 `runtime/results/performance_<id>.json`，用同一个 run-id 重跑一次（A5 只认与精度 JSON 同
 run-id 的性能 JSON）；仍 3 才进 A5，A5 记 `证据不足`。
