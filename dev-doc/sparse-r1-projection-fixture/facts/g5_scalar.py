@@ -491,7 +491,10 @@ def build_axes(facts):
     profiles = facts.get("dtype_profiles", [])
     profile_inserted = False
     axes = []
+    version = facts.get("schema_version")
     for param in facts["params"]:
+        if version == 2 and param.get("projection") == "none":
+            continue
         name = param["name"]
         role = param["role"]
         enum_kind = param.get("enum_kind", "op")
@@ -562,6 +565,20 @@ def build_axes(facts):
                     "kind": "fixed_vector",
                 }
             )
+    if version == 2:
+        for control in facts.get("case_controls", []):
+            axes.append(
+                {
+                    "name": control["name"],
+                    "values": list(control["values"]),
+                    "kind": f"control_{control['kind']}",
+                }
+            )
+        # 轴名命名空间冲突机械拒绝（覆盖 trap_6 的 sparse 面；v1 现状不动）。
+        names = [axis["name"] for axis in axes]
+        duplicated = sorted({name for name in names if names.count(name) > 1})
+        if duplicated:
+            raise GeneratorError(f"v2 轴名命名空间冲突：{duplicated}")
     # 一条不变量覆盖所有轴来源：轴取值必须唯一，否则 pairwise 用索引配对会不收敛。
     for axis in axes:
         hashable = [tuple(v) if isinstance(v, list) else v for v in axis["values"]]
