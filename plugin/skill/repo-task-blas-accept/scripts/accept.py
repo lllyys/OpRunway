@@ -1214,6 +1214,89 @@ def _report_markdown(payload):
     return "\n".join(lines)
 
 
+REPORT_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "assets" / "template" / "report.md"
+
+
+def _accuracy_section(accuracy):
+    lines = [
+        f"- 状态：**{accuracy['status']}**（{accuracy['pass']}/{accuracy['expected']} PASS）",
+        f"- 执行：{accuracy.get('executed')} 条",
+    ]
+    if accuracy.get("attribution"):
+        lines += ["", "| case_name | 首轮 | 复跑 | 归因 |", "| --- | --- | --- | --- |"]
+        lines += [
+            f"| {item['name']} | {item['initial_status']} | "
+            f"{item['rerun_status']} | {item['attribution']} |"
+            for item in accuracy["attribution"]
+        ]
+    else:
+        lines.append("- 无首轮失败。")
+    if accuracy.get("problems"):
+        lines += ["", "证据问题："] + [f"- {x}" for x in accuracy["problems"]]
+    return "\n".join(lines)
+
+
+def _performance_section(performance):
+    lines = [
+        f"- 状态：**{performance['status']}**",
+        f"- TC_PF_ 行数（total_pf）：{performance.get('total_pf')}",
+        f"- 可比集（comparable_pf）：{performance.get('comparable_pf')}",
+        f"- timing_scope：{performance.get('timing_scope')}",
+    ]
+    if performance.get("reason"):
+        lines.append(f"- 说明：{performance['reason']}")
+    if performance.get("problems"):
+        lines += ["", "证据问题："] + [f"- {x}" for x in performance["problems"]]
+    return "\n".join(lines)
+
+
+def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
+                  performance_path):
+    """三类产物最小布局：report/（人读）、intermediate/（执行期 JSON）、repro/（最小可复现）。"""
+    report_dir = out_dir / "report"
+    inter_dir = out_dir / "intermediate"
+    repro_dir = out_dir / "repro"
+    for directory in (report_dir, inter_dir, repro_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    template = REPORT_TEMPLATE_PATH.read_text(encoding="utf-8")
+    values = {
+        "OP": payload["op"],
+        "VERDICT": payload["verdict"],
+        "RUN_ID": payload["run_id"],
+        "SOC": payload["soc"],
+        "ACCURACY_SECTION": _accuracy_section(payload["accuracy"]),
+        "PERFORMANCE_SECTION": _performance_section(payload["performance"]),
+    }
+    text = template
+    for key, value in values.items():
+        text = text.replace(f"@@{key}@@", str(value))
+    _atomic_text(report_dir / "report.md", text)
+    _atomic_json(inter_dir / "verdict.json", payload)
+    for source in (accuracy_path, rerun_path, performance_path,
+                   runtime / "manifest.json", Path.cwd() / "check.json",
+                   out_dir.parent / "check.json"):
+        if source and Path(source).is_file():
+            shutil.copyfile(source, inter_dir / Path(source).name)
+    # repro：六件副本（存在即拷）+ 用例清单含失败标注
+    six = [
+        "gen_csv.py", f"{payload['op']}_test.csv", "verify_accuracy.py",
+        "verify_performance.py", "README.md", "gpu_baseline.csv",
+    ]
+    for name in six:
+        source = Path(package) / name
+        if source.is_file():
+            shutil.copyfile(source, repro_dir / name)
+    lines = ["case_name,block,status"]
+    accuracy = payload["accuracy"]
+    failed = {item["name"]: item for item in accuracy.get("attribution", [])}
+    for record in accuracy.get("case_names", []):
+        status = failed.get(record, {}).get("initial_status", "PASS")
+        lines.append(f"{record},accuracy,{status}")
+    _atomic_text(repro_dir / "cases.csv", "\n".join(lines) + "\n")
+    return {"report": str(report_dir / "report.md"),
+            "intermediate": str(inter_dir), "repro": str(repro_dir)}
+
+
 def command_verdict(args):
     """A5：从 <工作目录>/runtime 的 manifest 与 results 出结论；期望集来自任务包 CSV 副本。"""
     if not RUN_ID_RE.fullmatch(args.run_id):
@@ -1293,6 +1376,7 @@ def command_verdict(args):
         rerun_path,
         deployed_sha,
     )
+    accuracy["case_names"] = list(expected)
     accuracy["problems"].extend(evidence_problems)
     if evidence_problems:
         accuracy["status"] = "证据不足"
@@ -1349,6 +1433,12 @@ def command_verdict(args):
     }
     _atomic_json(out_dir / "verdict.json", payload)
     _atomic_text(out_dir / "report.md", _report_markdown(payload))
+    layout = _write_layout(
+        out_dir, payload, package, runtime, accuracy_path, rerun_path,
+        performance_path,
+    )
+    payload["layout"] = layout
+    _atomic_json(out_dir / "verdict.json", payload)
     print(f"精度: {accuracy['status']} ({accuracy['pass']}/{accuracy['expected']} PASS)")
     print(f"性能: {performance['status']}")
     print(f"结论: {verdict}")
