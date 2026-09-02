@@ -49,6 +49,7 @@ self_contained 7 个：coosort、cscsort、csrsort、cube_spmm、spmm、spmv、s
 | 算子 | 离群点 |
 | --- | --- |
 | densetosparse | 双 CSV：主表正例 + 独立 `l2_cases.csv` 负例（六列 mutation 契约）；无 expect_result |
+| sparse2dense | 双 CSV：主表 + 独立 L2 负例 CSV（与 densetosparse 同一模式，census-data 可查） |
 | coo_get | 无 handle（descriptor accessor）；CSV 表头后有 `#` 注释行；value_lo/hi 列解析但未使用 |
 | csr2coo | CSV 含 13 行 `#` 注释行；阈值列全 unused（整数位级比对） |
 | gtsv2 | expect 词表小写且判定不读该列（由 matrixType 与 n==0 在 cpp 内分支）；阈值内置按 dtype |

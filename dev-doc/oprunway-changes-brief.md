@@ -12,6 +12,15 @@
   一致即无行为变化；模板变更后先 `--refresh-common`。另实测：a/A 双 `a_fill` 轴让
   pairwise 不收敛（>20s 不终止），故 trap6 用 nullable 碰撞变体，README 已记。
 
+- **2026-09-01 · M0.5 checkpoint 过审（两半场均 FREEZE_WITH_FIXES→修毕），接口冻结。**
+  上半场（接口）：registry 从 14 字段收敛为 9 字段 + FACTS 覆盖契约 + 全局不变量
+  （合并 expect 两字段、删 domain/id_column/excluded_headers、handle 断言改可选、
+  `runtime_only` 改名 `no_static_check`）；双 CSV 裁归 harness 自有；accept 三修
+  （精度期望集收非 TC_ 行、注释行口径、calls_per_case 去静默默认）入 M2。
+  下半场（fixture）：recorder 加 `--check` 只读门 + 受保护 FACTS 语义摘要，新增
+  g6_trap_oob 负例，六陷阱处置表定「M1 全保留、M3 统一规则修」。回归门一键脚本
+  `sparse-r1-regression-gate.sh` 三道全绿，篡改探针双向验证过。M1 开工条件齐备。
+
 - **2026-09-01 · sparse R1 开工：M0.5 普查完成，六项记档文档过评审并修毕。** 用户裁定
   立项，切分支 `feature/sparse-r1` 实施。普查 33 个 ops-sparse 测试目录全收齐
   （`dev-doc/sparse-r1-census.md`）：26 个 frame 形态证实，但列契约按算子分化（种子列

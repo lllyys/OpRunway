@@ -22,7 +22,10 @@ FACTS 是 AST 白名单纯字面量，长列表（200 行 perf）由脚本生成
 
 ```bash
 python3 record_fixture.py                  # 录全部 11 个，重写 fixture.json
-python3 record_fixture.py g1_profile       # 只重录指定项
+python3 record_fixture.py --check          # ← 正式回归门（M1 判据），只此一条命令：
+                                           #   全量内存重录 + 与 fixture.json 的 results
+                                           #   比对，差异打印 JSON 路径、退出码 7
+python3 record_fixture.py g1_profile       # 子集重录——仅供诊断，不作回归门
 python3 record_fixture.py --refresh-common # 模板重构后先刷新 facts/*.py 的通用代码区再录
 ```
 
@@ -33,8 +36,10 @@ stdout/stderr 全文）；拷入 `out/<name>/gen_csv.py` 后 `package.py render`
 「校验拒但生成器接受」这类口径分叉显式钉住（见陷阱 5）。
 
 幂等性约定：fixture.json 不含绝对路径与时间戳（fixture 目录替换成 `<FIXTURE>`，
-解释器行替换成 `<PYTHON>`）；`_meta.recorded_against` 里的代码/输入哈希是录制指纹，
-重构后允许变化，比对只看 `results`。
+解释器行替换成 `<PYTHON>`）；`_meta.recorded_against` 里的代码哈希是录制指纹，
+重构后允许变化。比对由 `--check` 机械执行，只看 `results`——其中每项的
+`facts_semantic_sha256`（FACTS 区去掉版本字段后的摘要）是**受保护的输入指纹**：
+合成 FACTS 被意外改写会直接 GATE RED，只允许版本字段与通用代码区变化。
 
 ## 正向组覆盖（对照蓝图 §D 三张表的 ✗ 条目）
 
@@ -94,8 +99,9 @@ stdout/stderr 全文）；拷入 `out/<name>/gen_csv.py` 后 `package.py render`
 
 覆盖不到 / 有意不放进正向组的条目：
 
-- 蓝图组 3 提到的 fixed_vector 元素键「越界负例」没放进 g3：g1–g5 必须 check=0，而越界是
-  校验器的普通拒绝（`P:984`），不是口径分叉，不值得占一个负例名额。
+- 蓝图组 3 的 fixed_vector 元素键「越界负例」不能进 g3（g1–g5 必须 check=0），
+  按 checkpoint 审改立独立负例 **g6_trap_oob**（len=3 配 `pv5` 元素键），钉住越界拒绝的
+  退出码与诊断——M1 需要证明这种拒绝没有改变。
 - 「dtype_from + values」无法在 g1 覆盖：g1 的 profile 混合实/复，schema 规定 values 必须同时
   匹配所有 profile 的 scalar_dtype，混合下必然校验失败（蓝图 B 表已注明「只能同质」），
   故落在 g5 的同质复数 profile 上。
@@ -104,8 +110,20 @@ stdout/stderr 全文）；拷入 `out/<name>/gen_csv.py` 后 `package.py render`
 ## 负例组（现状快照，不是正确性背书）
 
 蓝图 §C 的陷阱 6（`_scalar_is_complex` 死代码）不是 FACTS 可表达的行为，按 §D 的清单以
-「参数名 a 与 A 并存」顶替。下表的行为是录制时的实测现状，其中多数是蓝图预判的 bug；
-重构修掉任何一条时，请同步更新此表并重录。
+「参数名 a 与 A 并存」顶替。下表的行为是录制时的实测现状，其中多数是蓝图预判的 bug。
+
+**处置纪律（checkpoint 下半场审裁定）：M1 不得更新任何负例期望；全部陷阱在 M3 按
+统一规则修复，届时按行为变更 allowlist 重录对应负例。** 处置表：
+
+| 陷阱 | M1 | M3 修复方式（通用规则，不做逐陷阱特判） |
+| --- | --- | --- |
+| trap_1 | 原样保留 | dtype/compute enum 必须被 profile/`dtype_from` 消费，S1 确定性拒绝 |
+| trap_2 | 原样保留，**不得提前禁** | 「会被物化器派生重算的键不得作声明型 perf.key」通则，覆盖 ld/stride |
+| trap_3 | 原样保留 | 复标量 edge 值统一要求 `[re, im]`，schema 拒裸数字 |
+| trap_4 | 原样保留 | 「离散轴值必须唯一」一条通则覆盖 conditioning/values/tiers |
+| trap_5 | 原样保留（双通路分叉钉住） | 生成器对派生键改 fail-closed，与 checker 口径对齐 |
+| trap_6 | 原样保留（M1 消它违反逐字节门） | pairwise 前统一查列/轴/控制键命名空间冲突 + 迭代上限防御 |
+| trap_oob | 原样保留 | 越界拒绝属正确行为，M3 仅在消息措辞变化时按 allowlist 重录 |
 
 - **trap_1**（enum_kind=dtype 但无人 dtype_from，此时 schema 禁给 profiles）：
   check=2、render=2，报 `生成失败：L0: 'dt'`；schema 校验本身通过，崩在物化。
@@ -126,8 +144,9 @@ stdout/stderr 全文）；拷入 `out/<name>/gen_csv.py` 后 `package.py render`
 
 陷阱 5 的 `profile` 键变体与 x_fill 同机制，未单独立文件。陷阱 6 用 nullable 碰撞而不用
 双 `a_fill` 碰撞，是因为后者让两根同名轴进入 pairwise：值不同的种子对永远无法被覆盖，
-`_pairwise_rows` 不收敛（实测 >20s 不终止、行数无限增长），录不出快照；这本身也是一个
-应由重构消灭的行为，先记录在此。
+`_pairwise_rows` 不收敛（实测 >20s 不终止、行数无限增长），录不出快照。
+**声明**：pairwise 不收敛没有可比较的字节，不是本 fixture 能逐字节证明的行为——它是
+「已知、M1 禁止改动」的例外，按上表在 M3 以命名空间冲突检查 + 迭代上限消灭。
 
 ## 与蓝图的行号对应
 

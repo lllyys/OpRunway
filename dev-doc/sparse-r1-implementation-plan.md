@@ -28,7 +28,9 @@
 
 **范围**：ops-sparse 仓 26/33 个 frame 惯例算子（CSV-gtest；成员清单与统计口径的
 唯一出处是 [sparse-r1-census.md](sparse-r1-census.md) §1）。E1（arch35 真机）不阻塞
-M0.5–M6 的本地实施，只阻塞 M7 真机验证与「正式支持」声明。spgemm 950 任务书的
+M0.5–M6 的本地实施，只阻塞 M7 真机验证与「正式支持」声明。辅助负例 CSV
+（densetosparse/sparse2dense 的 L2 套件）按 registry-freeze §2.6 裁定归 harness 自有，
+不在验收范围。spgemm 950 任务书的
 ATK/torch 形态按用户裁定为特例，不在本计划内。首个打通算子 **coo2csr**。
 
 **R1 的预期终态（显式写死，避免误报）**：本期 sparse 无 GPU 基线，200 个性能点
@@ -68,6 +70,8 @@ ultracode（Workflow fan-out），形态见 §1.5。测试用 ops-sparse 已有�
 未知顶层键），所以：`schema_version=2` 承载新键（v1 FACTS 不含新键、行为不变；
 新 checker 同时读 v1/v2，旧 checker 拒 v2 属预期）；模板 `GENERATOR_VERSION=2`，
 现有示例经 §3.4 迁移到新公共区并同步改版本号。兼容方向单向：新读旧，旧不读新。
+**v1 兼容边界**：合法 v1 FACTS 的行为逐字节不变；fixture 已登记的非法/不收敛输入
+（六陷阱）只允许在 M3 按统一规则收紧并同步更新负例期望——M1 不得动它们。
 
 ## 1. 里程碑总览
 
@@ -111,13 +115,11 @@ scratchpad 临时目录做渲染试验，临时产物不作为最终证据。
    conditioning、nullable、batch、fixed_vector、producer…）的合成 FACTS 集，机械
    记录其 header/body/axes/edge 合法键/perf.key 的现状输出为 fixture——这是 M1
    「无行为变化」的完备证明面，cherk/sasum 两例覆盖不了所有 role。
-3. **registry 接口冻结**：按普查定稿 harness_profile 的字段面——
-   `generated_base_columns`（生成器固定列及其物化 writer）、
-   `framework_owned_columns`（frame 读取、无需 param.h 命中，如阈值列）、
-   种子列名、是否投影 description、`handle_ctype`、`success_token`、
-   `status_vocab`（闭合词表，禁自由文本）、edge 允许 token、A1 的 domain 入口头
-   清单（显式列出，如 `cann_ops_blas.h`/`cann_ops_sparse.h`，排除 `*_common.h`；
-   0/1/多命中的判定都写死）。基座列的两种含义就此拆开，逐列标所有者。
+3. **registry 接口冻结**：字段面的定稿以
+   [sparse-r1-registry-freeze.md](sparse-r1-registry-freeze.md) 为唯一出处（v2：
+   9 字段 + §2.5 FACTS 覆盖契约 + §2.6 全局不变量 + §3 所有权表；本条原先草拟的
+   `generated_base_columns`/`framework_owned_columns` 两集合已被该文 §3 的
+   「生成责任 × COLUMN_NOT_READ 排除」正交标注取代）。
 
 ## 3. M1 · ProjectionIR（唯一源进模板公共区）
 
@@ -142,8 +144,9 @@ scratchpad 临时目录做渲染试验，临时产物不作为最终证据。
    从新模板整体替换，校验 FACTS AST 不变（版本号字段按 §0 版本策略同步），
    再重渲染对照逐字节门。旧包（新 checker 拒）按版本策略属预期，README 不改口径。
 5. 验收：逐字节门 10 项派生物（两个 gen_csv.py 是迁移前参考，见 digests 文件头）
-   + M0.5 投影矩阵 fixture 全项不变 + 负例回归
-   （撞键/行数/未知键 v1 语义不变）。
+   + `record_fixture.py --check` 全绿（fixture results 子树逐字节不变）+ 负例回归
+   （撞键/行数/未知键 v1 语义不变）。负例期望按 fixture README 的
+   **六陷阱处置表**执行——全部 M3 修，**M1 不得更新任何负例期望**。
 
 ## 4. M2 · accept A1/A2（依赖 M0.5 接口）
 
@@ -163,7 +166,15 @@ scratchpad 临时目录做渲染试验，临时产物不作为最终证据。
    「性能通过（无性能用例）」，把「无 `TC_PF_` 行」与「有 `TC_PF_` 但基线全空」混为
    一谈。改为：无 `TC_PF_` 行 → 通过（无性能要求）；有 `TC_PF_` 但可比集为空 →
    性能 `NO_REF`、总体「证据不足」、退出码 2。回归：两种包各一探针。
-5. 产物按三类划分（用户裁定 2026-09-01，atk-accept 的其它机制——隔离复验、env.sh
+5. 包内通用规则三修（checkpoint 上半场审的先决项，registry-freeze §4 列名）：
+   - 精度期望集规则：主 CSV 除 `TC_PF_` 外**全部有效数据行**都进精度期望集
+     （现状按 `TC_` 前缀收，coo2csr 的 41 条 L0_/L1_ 行会全漏；accept.py:114 与
+     verify_accuracy 模板 :237 同步改），gtest 映射按 case_name 精确匹配；
+   - `#` 注释行读取口径统一（`_csv_header` 的 `startswith` 与其它读取器的
+     strip 差异，accept.py:179）+ 前导空白注释探针；
+   - `calls_per_case` 去静默默认：显式必填或从 manifest 渲染，A5 核对
+     performance JSON 的值与 manifest 相等，不等即证据不一致报错。
+6. 产物按三类划分（用户裁定 2026-09-01，atk-accept 的其它机制——隔离复验、env.sh
    前缀、evidence 目录、性能状态细分词表——均不引入）：
    - `report/`：**人读的**。只有按模板渲染的 `report.md`；模板是 skill 资产
      （accept 侧 `assets/template/report.md`，对外契约的一部分），主结构三节
@@ -175,10 +186,11 @@ scratchpad 临时目录做渲染试验，临时产物不作为最终证据。
      （soc/device/CANN、binary/csv SHA，取自 manifest）；自包含，拷走即可复现。
    run-chain.md 产物树与 report 模板同步落；属对外契约变更，随本里程碑
    checkpoint 评审。
-6. 验收（可操作版）：同一本地 ops-blas 树改前/改后各跑一次，规范化对比
+7. 验收（可操作版）：同一本地 ops-blas 树改前/改后各跑一次，规范化对比
    `env.json`/`check.json`/runtime manifest；量具寻址探针覆盖 0/1/>1 三种命中；
-   对本地 ops-sparse 克隆跑 A2 布局推断探针；report/repro 分层探针（三节齐全、
-   repro 自包含可执行）。真机 A3/A4 归 M7。
+   对本地 ops-sparse 克隆跑 A2 布局推断探针（含精度期望集规则探针：coo2csr CSV
+   41 行全进期望集）；report/repro 分层探针（三节齐全、repro 自包含可执行）。
+   真机 A3/A4 归 M7。
 
 ## 5. M3 · FACTS v2：case_controls 与 harness_profile 实例化
 
@@ -203,7 +215,14 @@ M0.5 已冻结接口，本里程碑做实例化与校验：
 4. golden 新词表值 `{"kind": "harness"}`：validator `_golden_requirements`、
    README 投影（package.py:1510）、readme-contract 同步；禁止 symbol/formula
    字段共存；并加回归探针固化不变式「量具与 accept 均不读 golden」。
-5. 红线：不新增角色；descriptor/结构对象本体（C1-full）不在本期。
+5. **六陷阱统一修**（处置表见 fixture README；下半场审裁定全部落本里程碑，按通用
+   规则修、不做逐陷阱特判）：dtype/compute enum 必须被消费（trap1）；「会被物化器
+   派生重算的键不得作声明型 perf.key」通则覆盖 ld/stride（trap2，不做 sparse 特判）；
+   复标量 edge 值统一 `[re, im]`（trap3）；「离散轴值必须唯一」一条通则覆盖
+   conditioning/values/tiers（trap4）；生成器对派生键改 fail-closed 与 checker 对齐
+   （trap5）；pairwise 前统一查列/轴/控制键命名空间冲突 + 迭代上限防御（trap6）。
+   每修一条同步按行为变更 allowlist 重录对应负例期望。
+6. 红线：不新增角色；descriptor/结构对象本体（C1-full）不在本期。
 
 ## 5.5 M4 · tier 规范形与文本同一性
 

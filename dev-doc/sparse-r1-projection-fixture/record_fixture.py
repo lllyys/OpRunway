@@ -16,20 +16,27 @@
 逐字节一致。
 
 用法：
-    python3 record_fixture.py                    # 录制全部 fixture
-    python3 record_fixture.py g1_profile ...     # 只录制指定项
+    python3 record_fixture.py --check            # 回归门（正式判据）：全量在内存重录，
+                                                 # 与 fixture.json 的 results 比对；
+                                                 # 有差异打印 JSON 路径、退出码 7；
+                                                 # 不改写 fixture.json（out/ 仍会重建）
+    python3 record_fixture.py                    # 重录全部并改写 fixture.json
+    python3 record_fixture.py g1_profile ...     # 子集重录——仅供诊断，不作回归门
     python3 record_fixture.py --refresh-common   # 先把 facts/*.py 的通用代码区
                                                  # 替换为当前模板的通用代码区，再录制。
                                                  # 模板（重构后）变更时先跑这个。
 
-比对约定：ProjectionIR 重构的「无行为变化」判据是 fixture.json 的 "results" 子树
-逐字节一致；"_meta.recorded_against" 里的代码哈希允许（也应该）随重构变化。
+比对约定：ProjectionIR 重构的「无行为变化」判据 = `--check` 全绿（results 子树逐字节
+一致）。results 里每项含 facts_semantic_sha256——FACTS 区去掉版本字段后的受保护输入
+指纹，防止合成 FACTS 被意外改写；只允许版本字段与通用代码区变化。
+"_meta.recorded_against" 里的代码哈希允许（也应该）随重构变化。
 """
 
 import argparse
 import hashlib
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -52,6 +59,41 @@ DERIVED_NAMES = (
 
 def _sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+_VERSION_FIELD_RE = re.compile(r'^\s*"(schema_version|generator_version)"\s*:')
+
+
+def _facts_semantic_sha256(path):
+    """FACTS 区去掉版本字段后的受保护输入指纹——results 的一部分，--check 会比对。"""
+    text = path.read_text(encoding="utf-8")
+    marker = text.find(COMMON_MARKER)
+    if marker >= 0:
+        text = text[:marker]
+    kept = [line for line in text.splitlines() if not _VERSION_FIELD_RE.match(line)]
+    return hashlib.sha256("\n".join(kept).encode("utf-8")).hexdigest()
+
+
+def _short(value):
+    text = repr(value)
+    return text if len(text) <= 80 else text[:77] + "..."
+
+
+def _collect_diffs(expected, actual, prefix, diffs):
+    if type(expected) is not type(actual):
+        diffs.append(f"{prefix or '/'}: 类型 {type(expected).__name__} → {type(actual).__name__}")
+        return
+    if isinstance(expected, dict):
+        for key in sorted(set(expected) | set(actual)):
+            here = f"{prefix}/{key}"
+            if key not in expected:
+                diffs.append(f"{here}: 基线缺此键（现值新增）")
+            elif key not in actual:
+                diffs.append(f"{here}: 现值缺此键（相对基线丢失）")
+            else:
+                _collect_diffs(expected[key], actual[key], here, diffs)
+    elif expected != actual:
+        diffs.append(f"{prefix or '/'}: {_short(expected)} → {_short(actual)}")
 
 
 def _normalize(text):
@@ -118,7 +160,7 @@ def _inprocess_generate(package_module, facts_path):
 
 def _record_one(package_module, name):
     facts_path = FACTS_DIR / f"{name}.py"
-    entry = {}
+    entry = {"facts_semantic_sha256": _facts_semantic_sha256(facts_path)}
 
     check = _run(["check", "--facts", f"facts/{name}.py", "--print-header"])
     entry["check"] = check
@@ -177,12 +219,37 @@ def main():
     parser.add_argument(
         "--refresh-common", action="store_true",
         help="录制前把 facts/*.py 的通用代码区替换为当前模板版本")
+    parser.add_argument(
+        "--check", action="store_true",
+        help="回归门：全量内存重录并与 fixture.json 的 results 比对，"
+             "差异打印 JSON 路径、退出码 7；不改写 fixture.json")
     args = parser.parse_args()
+
+    all_names = sorted(path.stem for path in FACTS_DIR.glob("*.py"))
+
+    if args.check:
+        if args.names or args.refresh_common:
+            raise SystemExit("--check 是全量只读门，不接受子集或 --refresh-common")
+        if not RESULT_PATH.exists():
+            raise SystemExit("缺 fixture.json 基线，无法比对")
+        baseline = json.loads(RESULT_PATH.read_text(encoding="utf-8"))["results"]
+        package_module = _load_package_module()
+        current = {}
+        for name in all_names:
+            print(f"checking {name} ...", flush=True)
+            current[name] = _record_one(package_module, name)
+        diffs = []
+        _collect_diffs(baseline, current, "", diffs)
+        if diffs:
+            print(f"GATE RED: {len(diffs)} 处差异")
+            for path in diffs[:50]:
+                print("  " + path)
+            sys.exit(7)
+        print(f"GATE GREEN: {len(all_names)} fixtures，results 子树逐字节一致")
+        return
 
     if args.refresh_common:
         _refresh_common()
-
-    all_names = sorted(path.stem for path in FACTS_DIR.glob("*.py"))
     names = args.names or all_names
     unknown = [name for name in names if name not in all_names]
     if unknown:
