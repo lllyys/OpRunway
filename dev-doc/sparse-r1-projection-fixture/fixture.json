@@ -4,25 +4,25 @@
     "description": "role 投影矩阵 fixture 的现状快照（钉板）。results 是行为面；recorded_against 是录制时的代码与输入指纹，重构后允许变化。",
     "recorded_against": {
       "facts_sha256": {
-        "g1_profile": "5f128e2ba1ccf997f85b96789963b10246b321babdcbdb898dd83ac972cab22d",
-        "g2_batch": "7e5eafd4c99d460ed69a3e79242419582c3f5bf7cb1cc9166626247ebe5c389c",
-        "g3_fixed": "8cfa9f4b81d64e61940ea7e14f2f86943373ae265fa26518865da31e7c38f6a0",
-        "g4_cond": "f31cb397a2c91c14c7dc96e8ede7f67b0e945f77a71fa514c0fc0c24d139c335",
-        "g5_scalar": "d2b6263adc7a205ba46bcc3f73857dc4d499bcfa3424d188f0a2026406cf86d0",
-        "g6_trap_1_dtype_enum_unconsumed": "8c6baa89cd48cd0d33cb25b74410b3fabdee2cfa14e98dfb0f25dd99648d92fe",
-        "g6_trap_2_perf_ld_key": "9f10ea4cf4ff4213508ce1e53315de96c1ab3a680e8ad0e0a0bd3db50a6028b2",
-        "g6_trap_3_complex_profile_edge_scalar": "4958280c35f7656ee191068cd90295bd1860a4f820135c1e2370bee508f2c5b1",
-        "g6_trap_4_dup_conditioning": "1d28dcbc86da9b0d9f19b9307c39f79693398a5f53618c8897beef2816e5eafb",
-        "g6_trap_5_edge_fill_key": "421088a4b01a637784ddd94058208bf1e614818b5424282078072f050cd76f30",
-        "g6_trap_6_name_case_collision": "38232462efc6bdf509eb8faf0bfcaf3d345fbf903b9aed793fcd2e68ba2d12d0",
-        "g6_trap_oob": "c1d609e1d217e8f284669b05a35a79df485c1f2bfa22c324ae1322eebc12ffbf",
-        "g7_v2_control_name_collision": "f41a6c27646c84339a4b397f9cc828937b9cd03d8509d399bb24c856bdf63eec",
-        "g7_v2_null_unprojected": "cdadf6ea0b1249071ab23da832784b68cd0d40da6233a061deadffd35befb61a",
-        "g7_v2_threshold_no_source": "040b5aee47ff4518ff0525862422890fecec4fd0773af4e4590922c3b7bfe52c",
-        "g7_v2_token_outside_vocab": "b0ca575e0cfb6e2ca9a3b18092331f97ab140bf5fabb01b322fcf2979bfe7e65"
+        "g1_profile": "7dbc7ae985e92f96bc97be5d62be042fe69b9287305906e786de7f58a2be7f42",
+        "g2_batch": "575547897699a7369e0365f1da86b5e268dbe83ebb6ad7c8262cded2c5b22c6d",
+        "g3_fixed": "c8aa7a4eedf333a11fc3e4ea5784cf4d564959f1235223dca685c6dec80683cb",
+        "g4_cond": "505ed0a50b71d85747722424f4395513042573741b23b58efc9410ef240b7710",
+        "g5_scalar": "9d587210738b215038815da6c6b57eb6bc54b561efca3b35ee2a4a56522fff7e",
+        "g6_trap_1_dtype_enum_unconsumed": "92973844818ae86f0e6a9a4036f507d9587800772e4d53dd2ca303d3a2b2ad59",
+        "g6_trap_2_perf_ld_key": "51af80b0bb6a25ca8b6767048438cdd3b2570051a41cd7d17632ecefcf8ecee6",
+        "g6_trap_3_complex_profile_edge_scalar": "5d4900592f78579d5510c3c65ec97009d343b82619bc43fea21aadf2d398394b",
+        "g6_trap_4_dup_conditioning": "1547ff9e651bf9ddc679019919787ad35c55f99dda5423c4248592f2205813d1",
+        "g6_trap_5_edge_fill_key": "16c6f85a80c7755d3159b9cae0485b9b7b8ec2c449ba11be6865e002341166ea",
+        "g6_trap_6_name_case_collision": "eee32fc94110a1c5911ac05378229759596edc105c55205c662ab04d48ea21ca",
+        "g6_trap_oob": "a9598619759ff05752c433a00619708bad731cee4c375bd6f8b150b2b4f1fc25",
+        "g7_v2_control_name_collision": "4efb350b35f1832e706ae659a93a2b468ee6760fd008f94db1cc57c8d4cd7432",
+        "g7_v2_null_unprojected": "1ee741046ff1e7fb589ab7cad8ad3c19d370027380652766ea2b5c4e24aedfff",
+        "g7_v2_threshold_no_source": "a70c525a468425251e708ada0ea0cb6e6cfe6656ca110221489877b46e811073",
+        "g7_v2_token_outside_vocab": "a40919f34d6052b68bc64bd91480385197d5ba51ec0c2462c9b27e1b0f1b728e"
       },
-      "package_py_sha256": "c058a7aee0c34588ebb9dfda455c76d877daba2171885683886094aecfe6054b",
-      "template_common_sha256": "82bff91cee0595bda403e3f57105c88c29755bb0274bf8958a46625e2fe6616c"
+      "package_py_sha256": "12a622d65cf268d4d799c9d43de931840fa9b612eee84b03005db49217c3dac7",
+      "template_common_sha256": "8c90c6a895e9552b670e4d3d85a4c72a499a7a42ac005f80d38d5581de6088a1"
     }
   },
   "results": {
@@ -93,8 +93,8 @@
           "README.md": "c8c48b4979abdd2186c3824983b44f87d11f32f3cf3e5c98e191d7a02d5bfe5b",
           "g1_profile_test.csv": "94af1dba72de1bdd8f8068beb7defa954d0abe0ed888d1c0ef07ab1ed1bb1888",
           "gpu_baseline.csv": "a4c2445456ead3631edc7663d682cc653c880ebc85b206ab2e1e586832044285",
-          "verify_accuracy.py": "a27f73a37cfeb4448c5c9ed71b356d8d9b451346e39aed6c89a28a3c89123cde",
-          "verify_performance.py": "122caddb3ad135239408ca89a0ecf19bb9e40fd94bf6fa494330ebf6c7ddf296"
+          "verify_accuracy.py": "60d09f84931ab96edf69b94cb3c5718ac8ceab62416ec84aaa82b23ad1d7ee84",
+          "verify_performance.py": "8c99c10f603f8bd62449404d429c7b6d864026525850a803e5f952bc4b6cb19a"
         },
         "exit": 0,
         "stderr": "",
@@ -181,8 +181,8 @@
           "README.md": "843b022a0d01bc09ca8b8d6361f61f974ca6ec268bb2d8c45ab8d7aae6f010a9",
           "g2_batch_test.csv": "423d2e76846d43bd39145d378f17f0c9cc3374cce14a5e138fda7661651ab343",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "3adbf1d04fff912fd997d9bae2672dc4ba989f2827b0969bb1bf5bd73757e0a1",
-          "verify_performance.py": "3f2e2a42adead8c080b6541f938d75436efce551bbd3191c6f7ec2fb89858958"
+          "verify_accuracy.py": "02e438c14c5b92cf4831f3c0f5ff1857d09276913f22ecf8e4b14cc5ecbe587a",
+          "verify_performance.py": "9c931133bab320e45e47e420e855ce4959010656962a010ee6f3eeb7da3b0505"
         },
         "exit": 0,
         "stderr": "",
@@ -229,8 +229,8 @@
           "README.md": "3fc75b4a251b822bff667a28af55c79695ac43dca0d21a0da81b0c8eb3b96577",
           "g3_fixed_test.csv": "70014dfd6d07af5cf9955d054a6b0ac81df20178550508fda440247520159d09",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "921cd9ba38fde5f92b61d5c0c3d55aba4ad9f99b3bf62a25b0f76a1d8b32a801",
-          "verify_performance.py": "6cb2653afa71508beb18d5c22527b1f9e67c0bfa657612601a2d4b37447e4c73"
+          "verify_accuracy.py": "75c67d5e7d3be7bdaf8524885d7407d1c86f9c0a5dcbf1662c4f6b41f348d8a7",
+          "verify_performance.py": "4f6a4831ba865f50aaaf6c9a518dd80893d915322be97f02311ab339d9058d65"
         },
         "exit": 0,
         "stderr": "",
@@ -293,8 +293,8 @@
           "README.md": "c6ea6e6bde5663bf107bbe23ebeed24c9e1a989118a1df10073b39afc0851a25",
           "g4_cond_test.csv": "0a46bbf6aa05dc8961e103dfa8c549c269b252eff066417515f6bfa3ed0b63a3",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "2fca1669090900955cf3ef6437e32ca53015199c9efc47b5e1c0675fea2290a0",
-          "verify_performance.py": "3109038ea712fa5ae6be587b8e9679dc6eb6dd326081266dfec0a905f37773e5"
+          "verify_accuracy.py": "afed40976686d408f50a58bac8ad4f21828132661a8d5c3f36729fda9ed2f03a",
+          "verify_performance.py": "004a08551af67a4607acb7cbdfbcc7d21caa5e0e69eaf105974b8c1b81fa3538"
         },
         "exit": 0,
         "stderr": "",
@@ -373,8 +373,8 @@
           "README.md": "1b275c3c84a2b37e04f100d0e722fede217a9fc51b6b118f564f568785cdfee0",
           "g5_scalar_test.csv": "20ae8a920a69b1ebf039c6b6747603658f9be6a2d49f4290ac1c898483fcf419",
           "gpu_baseline.csv": "17452d52d2ee73a39f4692fcf19c9d3fa7a8277b982c19c6f076a75f8111e600",
-          "verify_accuracy.py": "c4b26e2fc5c21038166f5d5f58aa68a146a6d6055f193d84e48943652a1ac33f",
-          "verify_performance.py": "3a5fb540c1d7bed6a8de7d147955a52c6447603c3b341f095223ac00096fce90"
+          "verify_accuracy.py": "a9ea868feddaddba1a49f3a8477ca1a3a12dff1ba87d54c88778cbebc0275c42",
+          "verify_performance.py": "9afd16335033910aba71cf5ab9fef42e88c9dde38f39550b01b962ed4a549f48"
         },
         "exit": 0,
         "stderr": "",
@@ -445,8 +445,8 @@
           "README.md": "11f6dbd3a065a695e2ee5552a6713f7dcbf038b5bbb89296649cb31d85b8c3ea",
           "g6_trap2_test.csv": "2515b1ba3453dd7a700d832af362eeb12285bdc4b80586d90db141e3f16f5aa4",
           "gpu_baseline.csv": "aad2ecb2cb582f4eb6bf8c7d268e03c8428a2b53327a7eb3acb0d5404c608eac",
-          "verify_accuracy.py": "49d42b37a36a7e010f7168a8a60168355e3c3cb5adbecb501240a8f4cf25757e",
-          "verify_performance.py": "8515b24bc3bb28959b6c813974b02479972387bcb5ed3c557e8c06beb438d78b"
+          "verify_accuracy.py": "aa4906894287b853ba88c7cc9ece9d3d71c79b648a2df6d859ec7a3e50add0f6",
+          "verify_performance.py": "833d6e358c8d430800ca1485f2e8eeed806567c07a11d52b88ec91f7ccb90a22"
         },
         "exit": 0,
         "stderr": "",
@@ -576,8 +576,8 @@
           "README.md": "e8d37676a58bb866ab037d6144235e805185531cd7cfdfd6ded6368658d0287f",
           "g6_trap6_test.csv": "18a0d4f1b484c6e77e0d2633d71a3230ec5a65ca9c0c8b8eb332f0b9753505f6",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "15b0bac5c77897b8256d6a9c15efd468eaac1a237489696a6b9392835985d15c",
-          "verify_performance.py": "bc9b58f1bb44a539d21dc549eed93ab5175fa9537d0611970f8c54f1a0081869"
+          "verify_accuracy.py": "85bb666c71beaf840eaac939a5d050e9ea004057ec75d18c52f73ae1a407a4f9",
+          "verify_performance.py": "43a653a86ebd3008b9515621e444c4cbecaa8ce5a77b1f39843031e9800222d8"
         },
         "exit": 0,
         "stderr": "",
@@ -691,8 +691,8 @@
           "README.md": "f6752a7a68637ffd17baf9c45ac19c43717066248836e390381765557bddd864",
           "g7op_test.csv": "6254f7e3c81eb9779ebf8d6ce869a7704bc6d960613342144729344d3f2d842f",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
-          "verify_accuracy.py": "fbeaadd004857497e117bbb5e49e5bf6d925954cef493b4758473cc0b16aaad9",
-          "verify_performance.py": "6112f4d7e68c53ef48e9f03b49d00c0091996907620903bfcd1891dafac09d5b"
+          "verify_accuracy.py": "e4ba2faffa264d642427e61ca9fef0183c57342903b9a5480c4695ca1f85ee49",
+          "verify_performance.py": "37df91688e3839d3bc76b2d810998460b2afbe4e20b6fac6e551accb64f62c96"
         },
         "exit": 0,
         "stderr": "",

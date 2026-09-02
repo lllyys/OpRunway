@@ -17,7 +17,7 @@ Codex checkpoint 变更。依据：[census](sparse-r1-census.md) §2/§5、
 - **粒度裁定（普查驱动）**：profile 只装**仓级默认与闭合上界**；逐算子偏差由 FACTS
   按 §2.5 的覆盖契约显式声明。禁止为单个算子在 registry 里开洞。
 
-## 2. harness_profile 字段面（9 项，冻结）
+## 2. harness_profile 字段面（12 项，冻结）
 
 | # | 字段 | 类型 | 语义 |
 | --- | --- | --- | --- |
@@ -30,6 +30,9 @@ Codex checkpoint 变更。依据：[census](sparse-r1-census.md) §2/§5、
 | 7 | `first_param_ctype` | str 或 none | 可选断言：非 none 时 S1 断言首参 ctype 等于它；blas 保现值，sparse=none |
 | 8 | `entry_headers` | list[str] | A1 入口头；blas=`cann_ops_blas.h`，sparse=`cann_ops_sparse.h` |
 | 9 | `footprint_policy` | str | `dense_formula`（blas）或 `no_static_check`（sparse：只跳过静态判定，不承诺运行时护栏） |
+| 10 | `build_device_flag` | bool | build.sh 是否接受 `--device`（编译期定卡域为 True） |
+| 11 | `visible_devices_env` | str 或 none | 运行时绑卡环境变量（如 `ASCEND_RT_VISIBLE_DEVICES`）；none = 编译期定卡 |
+| 12 | `runtime_library_dirs` | list[str] | 跑测二进制所需库路径（相对工程根），空表合法 |
 
 对上半场审的字段裁定采纳情况：`domain` 删（与 profile 键名重复，manifest 记选中的键）；
 `id_column` 删（升为 §2.6 全局不变量）；`success_token`+`default_expect_token` 合并为 #4；
@@ -97,8 +100,10 @@ A5 核对证据值与 manifest 相等）。
 
 ## 5. 冻结状态
 
-- 冻结面：§2 九字段 + §2.5 覆盖契约 + §2.6 全局不变量 + §3 所有权表 + §4 裁定。
-  变更须过 Codex checkpoint。
+- 冻结面：§2 十二字段 + §2.5 覆盖契约 + §2.6 全局不变量 + §3 所有权表 + §4 裁定。
+  变更须过 Codex checkpoint。字段 10–12 是 M7 真机实测的构建/绑卡惯例，经 M7
+  checkpoint（thread `01a060de`）裁定入面；量具渲染时只注入选中 profile 的
+  resolved 值，唯一权威在 registry。这三个键不属 FACTS 覆盖面（§2.5 不变）。
 - 字段值分两步实例化（七维审对齐）：blas profile 的值在 M1′ 随硬编码参数化落地
   （与现状逐字节一致）；sparse_frame 的值在 M3′ 按 census-data.json 实例化。
 - 上半场审遗留到实施的项：三个 accept 修正（→M2）、`no_static_check` 下 sparse FACTS

@@ -36,6 +36,10 @@
    `task_time_*.csv` 与 sqlite，随后 `msprof --export=on --output=<目录>` 才生成
    `op_summary_*.csv`。依据：实测（A3，CANN 9.0.1，ascend910_93）。
 5. 每次采到的 kernel 总时长除以 `--calls-per-case N`（默认 1）才记为本次样本。
+   **`calls_per_case` 只计 harness 对被测 API 的调用次数，不计 kernel launch 数**：
+   一次 API 调用可产生多个 launch（950 实测 coo2csr 每调用 2–4 个，随规模变化），
+   样本 = 该用例全部保留 launch 的 duration 求和 ÷ `calls_per_case`，不得再除以
+   `launches`。
    N 是 harness 一条 GTest 用例调用被测接口的次数：按 README 契约写的新 harness 只调一次，
    填 1；固定先 warm-up 一次再调一次的旧 harness 填 2。依据：项目策略。
 6. `--repeats` 可覆盖五次采样数；每次仍保持进程隔离。依据：项目策略。

@@ -268,7 +268,8 @@ cd <工作目录> && <python> <skill>/scripts/accept.py verdict \
 ```
 
 产物按三类落在 `--out` 下：`report/report.md`、`intermediate/verdict.json`（及各证据 JSON
-副本）、`repro/`。`rerun.sh` 与环境指纹在真机阶段补齐。
+副本）、`repro/`。`repro/` 含 `rerun.sh`（同参复跑命令清单；verify/verdict 的非零退出
+是协议语义不中断脚本）与 `environment.json`（平台与身份链指纹）。
 
 verdict 从 `<工作目录>/runtime/manifest.json`、`runtime/<op>_test.csv`、
 `runtime/gpu_baseline.csv` 重新算出两个期望集，再核 `runtime/results/` 下本 run-id 的 JSON
@@ -321,12 +322,12 @@ SoC 到 arch 的映射与 `build.sh` 一致：`ascend910b*`、`ascend910_93` →
    名首字母 s/d/c/z（单精度/双精度/单复/双复），如 `sgemm` → `test/gemm/<arch>/sgemm_test.csv`。
 
 部署 CSV 多路径同时命中记 `CSV_AMBIGUOUS`。二进制 `<op>_test` 在 `<工程目录>/build/test/`
-下按同样三条规则找，只是没有 arch 一层，多路径命中时取规则顺序里的第一个；`build_out/`
-与 `out/` 与二进制查找无关。
+下**递归收集候选后唯一裁决**：0 命中记 `BINARY_NOT_FOUND`，多命中记 `BINARY_AMBIGUOUS`
+并列出全部候选；`build_out/` 与 `out/` 与二进制查找无关（但可作运行库路径，见构建惯例）。
 
 GTest 映射先运行 `--gtest_list_tests`：不缩进且以 `.` 结尾的行是 suite，后续缩进行是
-测试名，两者拼接为完整名；只保留含 `/TC_` 的完整名，最后一个 `/` 后的片段是 `case_name`。
-重复映射记 `DUPLICATE_CASE`，退出 3。
+测试名，两者拼接为完整名；最后一个 `/` 后的片段是 `case_name`，**按任务包期望集精确
+匹配保留，不筛命名前缀**（结果解析同一口径）。重复映射记 `DUPLICATE_CASE`，退出 3。
 
 ## 复跑与归因
 

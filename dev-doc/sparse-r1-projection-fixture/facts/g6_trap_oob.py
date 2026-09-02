@@ -132,6 +132,11 @@ HARNESS_REGISTRY = {
         "entry_headers": ["cann_ops_blas.h"],
         # dense_formula 走静态显存估算；no_static_check 只跳过静态判定。
         "footprint_policy": "dense_formula",
+        # 构建/绑卡惯例（M7 真机实测入面，checkpoint thread 01a060de）：
+        # blas 的 build.sh 用 --device 编译期定卡，无运行时绑卡变量与额外库路径。
+        "build_device_flag": True,
+        "visible_devices_env": None,
+        "runtime_library_dirs": [],
     },
     "sparse_frame": {
         # 值按 ops-sparse@5b2a5ba 普查实例化（仓级默认；逐算子偏差走 FACTS 覆盖）。
@@ -154,6 +159,12 @@ HARNESS_REGISTRY = {
         "first_param_ctype": None,
         "entry_headers": ["cann_ops_sparse.h"],
         "footprint_policy": "no_static_check",
+        # ops-sparse 的 build.sh 无 --device（TEST_DEVICE_ID 恒 0）：跑测用
+        # ASCEND_RT_VISIBLE_DEVICES 把目标物理卡映射为逻辑 0，且测试二进制
+        # 运行时需要 build_out/lib64。
+        "build_device_flag": False,
+        "visible_devices_env": "ASCEND_RT_VISIBLE_DEVICES",
+        "runtime_library_dirs": ["build_out/lib64"],
     },
 }
 

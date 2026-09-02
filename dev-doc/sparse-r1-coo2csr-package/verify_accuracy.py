@@ -27,26 +27,10 @@ ENVIRONMENT_EXIT = 3
 IDLE_GATE_EXIT = 4
 
 HARNESS_PROFILE = "sparse_frame"
-# 域构建与绑卡惯例（按 profile 查表；950 真机实测差异，M7 记档）：
-# blas 的 build.sh 用 --device 编译期固定卡（-DTEST_DEVICE_ID）；ops-sparse 无该
-# 参数（TEST_DEVICE_ID 恒 0），跑测用 ASCEND_RT_VISIBLE_DEVICES 把目标物理卡映射
-# 为逻辑 0，测试二进制运行时需要 build_out/lib64，且构建只产 skipped_tests.list
-# 不产 built_tests.list（二进制有无由寻址器裁决）。
-BUILD_CONVENTIONS = {
-    "blas": {
-        "build_device_flag": True,
-        "visible_devices_env": None,
-        "runtime_library_dirs": (),
-        "has_built_list": True,
-    },
-    "sparse_frame": {
-        "build_device_flag": False,
-        "visible_devices_env": "ASCEND_RT_VISIBLE_DEVICES",
-        "runtime_library_dirs": ("build_out/lib64",),
-        "has_built_list": False,
-    },
-}
-BUILD_CONVENTION = BUILD_CONVENTIONS[HARNESS_PROFILE]
+# 本 profile 的构建/绑卡惯例，渲染时自 registry 注入（唯一权威在 registry）：
+# build_device_flag（build.sh 是否吃 --device）、visible_devices_env（运行时绑卡
+# 变量，None 即编译期定卡）、runtime_library_dirs（跑测所需库路径，相对工程根）。
+BUILD_CONVENTION = json.loads("""{"build_device_flag": false, "runtime_library_dirs": ["build_out/lib64"], "visible_devices_env": "ASCEND_RT_VISIBLE_DEVICES"}""")
 
 
 def _run_environment(repo, device):
@@ -84,18 +68,22 @@ def _npu_idle_gate(device, timeout=20):
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
+        partial = getattr(exc, "stdout", None)
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", errors="replace")
         return False, {
             "status": "QUERY_FAILED",
             "command": " ".join(command),
             "detail": str(exc),
-            "output": None,
+            "output": partial,
         }
     output = result.stdout or ""
     payload = {
         "status": None,
         "command": " ".join(command),
         "detail": None,
-        "output": output[-2000:],
+        # 全量原始输出（proc-mem 输出量小，不截断）。
+        "output": output,
     }
     if result.returncode != 0:
         payload.update(status="QUERY_FAILED", detail=f"npu-smi 退出码 {result.returncode}")
@@ -289,9 +277,8 @@ def _check_build_lists(repo):
     skipped = _read_nonempty_lines(test_build / "skipped_tests.list")
     if any(line.split("|", 1)[0] == OP for line in skipped):
         return "OP_SKIPPED", "skipped_tests.list 标记该算子为跳过"
-    if BUILD_CONVENTION["has_built_list"] and (
-        OP not in built and f"{OP}_test" not in built
-    ):
+    # 清单存在才核验；不存在（有的仓不产 built_tests.list）由二进制寻址器裁决。
+    if built and OP not in built and f"{OP}_test" not in built:
         return "BUILD_FAILED", "built_tests.list 不含目标算子"
     return None, None
 

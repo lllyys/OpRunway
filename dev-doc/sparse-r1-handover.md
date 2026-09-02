@@ -29,7 +29,7 @@
 1. [sparse-r1-implementation-plan.md](sparse-r1-implementation-plan.md) —— 主文档。
    顶部有「阅读约定」术语表，§0 是纪律与不变量，§2 是你要做的 M1′。
 2. [sparse-r1-registry-freeze.md](sparse-r1-registry-freeze.md) —— registry 的
-   9 个字段面，**已冻结**，改它要过 Codex 评审。
+   12 个字段面，**已冻结**，改它要过 Codex 评审。
 3. [sparse-r1-projection-fixture/README.md](sparse-r1-projection-fixture/README.md)
    —— 三道回归门里最重要的那道怎么用。
 

@@ -1884,6 +1884,19 @@ def _render_script(template_path, output_path, facts, csv_hash):
             "OP": facts["op"],
             "FAMILY": facts["family"],
             "HARNESS_PROFILE": facts.get("harness_profile", "blas"),
+            # resolved 构建/绑卡惯例只注入选中 profile 的三个字段（权威在 registry）。
+            "BUILD_CONVENTION": json.dumps(
+                {
+                    key: _harness_profile(facts)[key]
+                    for key in (
+                        "build_device_flag",
+                        "visible_devices_env",
+                        "runtime_library_dirs",
+                    )
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
             "CSV_NAME": f"{facts['op']}_test.csv",
             "PACKAGE_CSV_SHA256": csv_hash,
             "GENERATOR_VERSION": facts["generator_version"],

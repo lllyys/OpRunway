@@ -10,16 +10,16 @@
 
 **阅读约定**（自造术语，冷读先过）：
 
-| 术语 | 含义 |
-| --- | --- |
-| 六件 | 任务包六个文件：gen_csv.py、`<op>_test.csv`、两个 verify 脚本、README、gpu_baseline.csv |
-| S1–S3 / A1–A5 | 阶段号：S=case-gen 生成链（校验→渲染→check）；A=accept 验收链（A1 环境、A2 部署与运行时包、A3 精度、A4 性能、A5 结论） |
-| NO_REF | 性能汇总态：有性能用例但全配不到基线——证据不足，不判 PASS/FAIL |
-| FACTS | 单算子事实字面量（AST 白名单、从不执行），见 facts-schema.md |
-| registry | skill 内版本化的有限 profile/词表数据集，装域级惯例（9 字段，见冻结文档） |
-| frame 惯例 | ops 仓 `test/frame/` 公共件之上的 CSV 驱动 gtest 写法（param.h 逐列读 CSV） |
-| V1–V5/E1/G1–G4 | 核对与治理编号，定义见 learning-map §0 状态表 |
-| 三道回归门 | 10 项派生物摘要（baseline-digests 文件）、双示例 check、fixture `--check`（fixture README） |
+| 术语             | 含义                                                                               |
+| -------------- | -------------------------------------------------------------------------------- |
+| 六件             | 任务包六个文件：gen_csv.py、`<op>_test.csv`、两个 verify 脚本、README、gpu_baseline.csv        |
+| S1–S3 / A1–A5  | 阶段号：S=case-gen 生成链（校验→渲染→check）；A=accept 验收链（A1 环境、A2 部署与运行时包、A3 精度、A4 性能、A5 结论） |
+| NO_REF        | 性能汇总态：有性能用例但全配不到基线——证据不足，不判 PASS/FAIL                                            |
+| FACTS          | 单算子事实字面量（AST 白名单、从不执行），见 facts-schema.md                                         |
+| registry       | skill 内版本化的有限 profile/词表数据集，装域级惯例（9 字段，见冻结文档）                                    |
+| frame 惯例       | ops 仓 `test/frame/` 公共件之上的 CSV 驱动 gtest 写法（param.h 逐列读 CSV）                      |
+| V1–V5/E1/G1–G4 | 核对与治理编号，定义见 learning-map §0 状态表                                                  |
+| 三道回归门          | 10 项派生物摘要（baseline-digests 文件）、双示例 check、fixture `--check`（fixture README）       |
 
 ## 0. 范围、终态与纪律
 
@@ -30,10 +30,10 @@
 
 **两个 coo2csr 包，别混**（本文凡出现「新包/存量包」按此）：
 
-| 包 | 来源与内容 | 用途 | A5 预期 |
-| --- | --- | --- | --- |
-| **存量包** | 仓内 `test/coo2csr/arch35/` 的 41 行，`L0_/L1_` 命名，无 PF 行 | 验 accept 吃旧包 | 性能**通过（无要求）** |
-| **新包** | M3′ 由 case-gen 造的六件，含 200 条 `TC_PF_` 全待填 | 验造包与吃新包 | 性能 **NO_REF**、证据不足 |
+| 包       | 来源与内容                                                | 用途           | A5 预期               |
+| ------- | ---------------------------------------------------- | ------------ | ------------------- |
+| **存量包** | 仓内 `test/coo2csr/arch35/` 的 41 行，`L0_/L1_` 命名，无 PF 行 | 验 accept 吃旧包 | 性能**通过（无要求）**       |
+| **新包**  | M3′ 由 case-gen 造的六件，含 200 条 `TC_PF_` 全待填             | 验造包与吃新包      | 性能 **NO_REF**、证据不足 |
 
 **R1 预期终态（写死防误报）**：新包这条链无 GPU 基线，A5 预期就是上表右列的
 NO_REF 与证据不足，退出码非 0 属预期；存量包那条链没有性能要求，判「通过」不是
@@ -67,13 +67,13 @@ coo2csr 纵向首通**——10 项派生物摘要、cherk/sasum 双示例 check�
 
 ## 1. 里程碑（最小序）
 
-| 里程碑 | 内容 | 完成线 |
-| --- | --- | --- |
-| M0/M0.5（已完成） | 普查、投影矩阵 fixture、registry 冻结（9 字段） | 已过 checkpoint |
-| M1′ | 最小生成基础：registry 落地 + blas 硬编码参数化 + 表头/行写入统一 | 三门**零差异**（仅步骤 4 允许两行参考摘要变） |
-| M3′ | v2 首包能力：profile/overrides/case_controls/golden=harness + **新包**六件 | 新包 check=0 + 三门 |
-| M2·5·6′ | accept 纵向闭合 + 三类产物 + 文档随改 | **存量包**本地 smoke + 三门 |
-| M7（阻塞 E1） | 真机：空闲门实现、A3–A5、V4、calls_per_case 链、repro 补全、G4 复验 | 真机证据 |
+| 里程碑          | 内容                                                                 | 完成线                        |
+| ------------ | ------------------------------------------------------------------ | -------------------------- |
+| M0/M0.5（已完成） | 普查、投影矩阵 fixture、registry 冻结（9 字段）                                  | 已过 checkpoint              |
+| M1′          | 最小生成基础：registry 落地 + blas 硬编码参数化 + 表头/行写入统一                        | 三门**零差异**（仅步骤 4 允许两行参考摘要变） |
+| M3′          | v2 首包能力：profile/overrides/case_controls/golden=harness + **新包**六件 | 新包 check=0 + 三门            |
+| M2·5·6′      | accept 纵向闭合 + 三类产物 + 文档随改                                          | **存量包**本地 smoke + 三门       |
+| M7（阻塞 E1）    | 真机：空闲门实现、A3–A5、V4、calls_per_case 链、repro 补全、G4 复验                | 真机证据                       |
 
 ## 2. M1′ · 最小生成基础
 
@@ -91,9 +91,9 @@ coo2csr 纵向首通**——10 项派生物摘要、cherk/sasum 双示例 check�
 3. 表头/行写入统一，**迁移序写死**：
    a. 追加共享列描述函数（普通 dict），先不接任何消费者；
    b. 旧 package.py 副本与漂移自检**临时留作影子 oracle**——`_check_generation_report`
-      （`package.py:1773` 一带）本就在比「模板产的 header」与「package 副本产的
-      header」，模板侧换成新函数后它自动变成新旧对照。**注意它只在 `check` 路径
-      跑，`render` 路径没有这层对照**，所以每步都要跑 check 而不能只 render；
+   （`package.py:1773` 一带）本就在比「模板产的 header」与「package 副本产的
+   header」，模板侧换成新函数后它自动变成新旧对照。**注意它只在 `check` 路径
+   跑，`render` 路径没有这层对照**，所以每步都要跑 check 而不能只 render；
    c. 逐消费者切换：行写入 → README 契约表 → `--print-header`，每切一处跑三门；
    d. 全部一致后**最后单独一步**删副本（`:1221`）与漂移自检（`:1773`），可独立回滚。
    轴/edge/perf 校验本里程碑不动。
@@ -174,7 +174,7 @@ coo2csr 纵向首通**——10 项派生物摘要、cherk/sasum 双示例 check�
    真机 A3/A4 一律归 M7。
 9. 文档随改：只更新实际变更的契约文档（facts-schema、run-chain、README 模板、
    SKILL description 范围、`no_static_check` 的 authoring 提示进 facts-schema）
-   + changes brief；无独立文档里程碑、无冷读 agent。
+   - changes brief；无独立文档里程碑、无冷读 agent。
 
 ## 5. M7 · 真机（阻塞 E1，单列）
 
@@ -211,3 +211,4 @@ Type）核对；repro 补 `rerun.sh` 与环境指纹；G4 基线回填后复验�
 - 已消核对项：V1/V2/V3/V5（见 learning-map §0）；待真机：V4、E1。
 - 纪律：skill-edit-gate（先读 skill-best-practices + 挂 /skill-creator）；
   commit 不带 AI 署名；不 push 除非明示；接口变更过 Codex，push 前仓规一轮。
+

@@ -1278,42 +1278,55 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
     if args is not None:
         manifest_cpc = (payload.get("runtime") or {}).get("calls_per_case")
         run_id = payload.get("run_id")
-        script = "\n".join([
-            "#!/bin/sh",
-            "# 由 accept verdict 生成：同参复跑本轮验收链。",
-            "# 在原工作目录执行；换新 run-id 复跑时把 RUN_ID 改掉即可。",
-            "set -e",
-            f"WORKDIR={shlex.quote(str(Path.cwd()))}",
-            f"ACCEPT={shlex.quote(str(Path(__file__).resolve()))}",
-            f"RUN_ID={shlex.quote(str(run_id))}-rerun",
-            'cd "$WORKDIR"',
-            (
-                f"python3 \"$ACCEPT\" check --package {shlex.quote(str(package))}"
-                f" --repo {shlex.quote(str(args.repo))} --soc {shlex.quote(args.soc)}"
-                f" --device {args.device} --calls-per-case {manifest_cpc}"
-            ),
-            'cd "$WORKDIR/runtime"',
-            (
-                f"python3 verify_accuracy.py --repo {shlex.quote(str(args.repo))}"
-                f" --soc {shlex.quote(args.soc)} --device {args.device}"
-                " --run-id \"$RUN_ID\""
-            ),
-            (
-                f"python3 verify_performance.py --repo {shlex.quote(str(args.repo))}"
-                f" --soc {shlex.quote(args.soc)} --device {args.device}"
-                f" --run-id \"$RUN_ID\" --skip-build --calls-per-case {manifest_cpc}"
-            ),
-            'cd "$WORKDIR"',
-            (
-                f"python3 \"$ACCEPT\" verdict --package {shlex.quote(str(package))}"
-                f" --repo {shlex.quote(str(args.repo))} --soc {shlex.quote(args.soc)}"
-                f" --device {args.device} --run-id \"$RUN_ID\""
-                f" --out {shlex.quote(str(out_dir))}-rerun"
-            ),
-            "",
-        ])
         rerun_sh = repro_dir / "rerun.sh"
-        _atomic_text(rerun_sh, script)
+        if manifest_cpc is None:
+            # 证据不足轮次可能没有完整 manifest：不生成似是而非的可执行命令。
+            _atomic_text(
+                rerun_sh,
+                "#!/bin/sh\n# 本轮缺完整 runtime manifest（证据不足），不生成复跑命令。\n"
+                "# 修复证据后重跑 accept check 起链，见 run-chain.md。\n",
+            )
+        else:
+            script = "\n".join([
+                "#!/bin/sh",
+                "# 由 accept verdict 生成：同参复跑本轮验收链。",
+                "# 注意：verify 与 verdict 的非零退出是协议语义（如精度失败、NO_REF、",
+                "# 空闲门阻塞退出 4），不是脚本错误；本脚本不因此中断，逐步打印退出码。",
+                "# 精度失败后的精确复跑与归因流程见 run-chain.md「复跑与归因」。",
+                f"WORKDIR={shlex.quote(str(Path.cwd()))}",
+                f"ACCEPT={shlex.quote(str(Path(__file__).resolve()))}",
+                f"RUN_ID={shlex.quote(str(run_id))}-rerun",
+                'cd "$WORKDIR" || exit 1',
+                (
+                    f"python3 \"$ACCEPT\" check --package {shlex.quote(str(package))}"
+                    f" --repo {shlex.quote(str(args.repo))} --soc {shlex.quote(args.soc)}"
+                    f" --device {args.device} --calls-per-case {manifest_cpc}"
+                ),
+                'echo "check exit=$?"',
+                'cd "$WORKDIR/runtime" || exit 1',
+                (
+                    f"python3 verify_accuracy.py --repo {shlex.quote(str(args.repo))}"
+                    f" --soc {shlex.quote(args.soc)} --device {args.device}"
+                    " --run-id \"$RUN_ID\""
+                ),
+                'echo "accuracy exit=$?"',
+                (
+                    f"python3 verify_performance.py --repo {shlex.quote(str(args.repo))}"
+                    f" --soc {shlex.quote(args.soc)} --device {args.device}"
+                    f" --run-id \"$RUN_ID\" --skip-build --calls-per-case {manifest_cpc}"
+                ),
+                'echo "performance exit=$?"',
+                'cd "$WORKDIR" || exit 1',
+                (
+                    f"python3 \"$ACCEPT\" verdict --package {shlex.quote(str(package))}"
+                    f" --repo {shlex.quote(str(args.repo))} --soc {shlex.quote(args.soc)}"
+                    f" --device {args.device} --run-id \"$RUN_ID\""
+                    f" --out {shlex.quote(str(out_dir))}-rerun"
+                ),
+                'echo "verdict exit=$?"',
+                "",
+            ])
+            _atomic_text(rerun_sh, script)
         rerun_sh.chmod(0o755)
         uname = platform.uname()
         fingerprint = {
