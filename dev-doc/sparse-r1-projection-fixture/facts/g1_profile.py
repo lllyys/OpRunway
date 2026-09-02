@@ -365,6 +365,11 @@ HARNESS_REGISTRY = {
 }
 
 
+def _harness_profile(facts):
+    """本任务包适用的 profile。schema v1 隐式 blas；v2 由 FACTS 选（后续里程碑）。"""
+    return HARNESS_REGISTRY["blas"]
+
+
 class GeneratorError(Exception):
     """表示带生成阶段上下文的确定性错误。"""
 
@@ -842,7 +847,9 @@ def _description(axes, selection):
     return " ".join(parts)
 
 
-def _make_body(facts, axes, partial, expect="ACLBLAS_STATUS_SUCCESS", overrides=None):
+def _make_body(facts, axes, partial, expect=None, overrides=None):
+    if expect is None:
+        expect = _harness_profile(facts)["expect_default_token"]
     selection, state, profile = _materialize(facts, axes, partial, overrides)
     valid = _row_is_valid(facts, state, profile)
     controls = {
