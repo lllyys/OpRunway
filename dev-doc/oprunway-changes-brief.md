@@ -2,6 +2,14 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-02 · 验收报告适度增详（用户指示）。** 三节骨架不变：头部摘要补完整身份链
+  （包 CSV/基线/二进制 SHA-256 全量、性能键；部署 CSV 仅在与包不一致时另列——
+  这行当场暴露了新包链测试后克隆里部署 CSV 未复原的状态，已恢复并以 r7 轮重出
+  一致证据）与「intermediate//repro/」证据指引；性能节补可比集逐用例表
+  （kernel_us/gpu_ms/ratio/spread/verdict，>30 条截断指向 JSON）、threshold、
+  scope caveat 解释、NO_REF 计数。回放 cherk 实渲染含 4 行逐用例表；存量链
+  r7 真机复验通过。证据包更新为 evidence-final-legacy-r7。
+
 - **2026-09-02 · M7 checkpoint（七维审 ADJUST→四项修毕）+ 真机复验回归一例。**
   评审（thread `01a060de`）裁定：构建/绑卡惯例应入 registry 冻结面——
   build_device_flag/visible_devices_env/runtime_library_dirs 三字段入面（9→12，
