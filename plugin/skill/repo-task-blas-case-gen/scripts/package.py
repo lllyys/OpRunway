@@ -1167,14 +1167,15 @@ def _check_top(problems, facts):
             copy["_index"] = index
             ordered.append((param["name"], copy))
     first = raw_params[0] if raw_params else None
-    if (
+    first_ctype = _harness_profile(facts)["first_param_ctype"]
+    if first_ctype is not None and (
         not isinstance(first, dict)
         or first.get("role") != "handle"
-        or first.get("ctype") != "aclblasHandle_t"
+        or first.get("ctype") != first_ctype
     ):
         _err(
             problems,
-            "params[0] 必须是 role=handle 的 aclblasHandle_t 参数"
+            f"params[0] 必须是 role=handle 的 {first_ctype} 参数"
             "（aclblas 全部接口首参为 handle）",
         )
     handles = [(name, param) for name, param in ordered if param.get("role") == "handle"]
@@ -1310,6 +1311,22 @@ def _load_generator():
     finally:
         sys.dont_write_bytecode = previous
     return module
+
+
+_REGISTRY_CACHE = None
+
+
+def _harness_registry():
+    """registry 的唯一来源是模板；惰性取一次，import 期不加载模板。"""
+    global _REGISTRY_CACHE
+    if _REGISTRY_CACHE is None:
+        _REGISTRY_CACHE = _load_generator().HARNESS_REGISTRY
+    return _REGISTRY_CACHE
+
+
+def _harness_profile(facts=None):
+    """本任务包适用的 profile。schema v1 隐式 blas；v2 由 FACTS 选（后续里程碑）。"""
+    return _harness_registry()["blas"]
 
 
 
