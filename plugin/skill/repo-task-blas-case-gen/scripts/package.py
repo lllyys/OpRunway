@@ -1416,49 +1416,62 @@ def _scalar_is_complex(param, facts):
 def _column_contract_rows(facts, generator):
     rows = []
     params = {param["name"]: param for param in facts["params"]}
-    header = _header_columns(facts)
-    for column in header:
-        source = "控制列"
-        values = "非空字符串"
-        note = "用例描述"
-        if column == "case_name":
+    for spec in generator._column_specs(facts):
+        column = spec["name"]
+        kind = spec["kind"]
+        source = spec["source"] if spec["source"] is not None else "控制列"
+        param = params.get(spec["source"], {})
+        if kind == "id":
             values = "TC_L0_/TC_PW_/TC_ED_/TC_PF_ 加块内编号"
             note = "GTest 参数名，任务包内唯一"
-        elif column == "description":
+        elif kind == "description":
             values = "非空字符串"
             note = "轴取值、edge 名或性能键值"
-        elif column == "expect_result":
+        elif kind == "expect":
             values = "见下方状态词表"
             note = "使用 csv_loader.h parseStatus 支持的全名"
-        elif column == "random_seed":
+        elif kind == "seed":
             values = "正整数"
             note = "各缓冲依次使用 seed、seed+1……派生随机填充"
-        elif column in params:
-            param = params[column]
-            source = column
-            role = param["role"]
-            if role == "enum":
-                values = ", ".join(param["values"])
-                note = f"枚举短记号：{values}"
-            elif role == "dim":
-                values = "整数"
-                note = "维度"
-            elif role == "layout":
-                values = "整数"
-                target = param.get("of", "目标 buffer")
-                if isinstance(target, list):
-                    target = "/".join(target)
-                notes = {
-                    "ld": f"{target} 的前导维度，≥ max(1, rows)",
-                    "inc": f"{target} 的步长",
-                    "stride": f"{target} 相邻 batch 的元素偏移",
-                    "batch": "batch 数",
-                }
-                note = notes[param["kind"]]
-            else:
-                values = "实数"
-                note = "实数标量"
-        elif column.startswith("null"):
+        elif kind == "enum":
+            values = ", ".join(param["values"])
+            note = f"枚举短记号：{values}"
+        elif kind == "dim":
+            values = "整数"
+            note = "维度"
+        elif kind == "layout":
+            values = "整数"
+            target = param.get("of", "目标 buffer")
+            if isinstance(target, list):
+                target = "/".join(target)
+            notes = {
+                "ld": f"{target} 的前导维度，≥ max(1, rows)",
+                "inc": f"{target} 的步长",
+                "stride": f"{target} 相邻 batch 的元素偏移",
+                "batch": "batch 数",
+            }
+            note = notes[param["kind"]]
+        elif kind == "scalar":
+            values = "实数"
+            note = "实数标量"
+        elif kind in {"scalar_re", "scalar_im"}:
+            values = "实数"
+            component = "实部" if kind == "scalar_re" else "虚部"
+            note = f"复标量{component}"
+        elif kind == "fill":
+            # source 沿用名字反查以钉住现状（同名不同 case 的碰撞语义，见 trap_6），
+            # 不用 spec 的精确 source；本里程碑不改行为。
+            source = next(
+                (name for name in params if name.lower() == column[:-5]), column[:-5]
+            )
+            values = "见下方 fill 词表"
+            direction = params.get(source, {}).get("dir", "in")
+            note = f"{source}（{direction}）的数据填充方式"
+        elif kind == "matrix_type":
+            values = ", ".join(param["conditioning"])
+            note = "fill.h 的 BlasLapackMatrixType 构造类型"
+        elif kind == "null_flag":
+            # 同上：反查取第一个命中的参数，双 nullA 两行同 source 是被钉住的现状。
             source = next(
                 (
                     name
@@ -1469,37 +1482,12 @@ def _column_contract_rows(facts, generator):
             )
             values = "0, 1"
             note = "1 时传 nullptr 且不分配该参数"
-        elif column.endswith("_batch_pattern"):
-            source = column[:-14]
+        elif kind == "batch_pattern":
             values = "UNIFORM, NULL_TABLE, MIXED_SINGULAR, NULL_ELEMENT_i"
             note = "统一缓冲、空表、混合奇异或第 i 个元素为空"
-        elif column.endswith("_fill"):
-            # 列名是小写参数名，反查原参数
-            source = next(
-                (name for name in params if name.lower() == column[:-5]), column[:-5]
-            )
-            values = "见下方 fill 词表"
-            direction = params.get(source, {}).get("dir", "in")
-            note = f"{source}（{direction}）的数据填充方式"
-        elif column.endswith("_matrix_type"):
-            source = column[:-12]
-            values = ", ".join(params[source]["conditioning"])
-            note = "fill.h 的 BlasLapackMatrixType 构造类型"
-        elif column.endswith("_re") or column.endswith("_im"):
-            source = column[:-3]
-            values = "实数"
-            component = "实部" if column.endswith("_re") else "虚部"
-            note = f"复标量{component}"
         else:
-            for name, param in params.items():
-                if param["role"] != "fixed_vector" or not column.startswith(name):
-                    continue
-                suffix = column[len(name):]
-                if suffix.isdigit():
-                    source = name
-                    values = "int 或 float"
-                    note = f"fixed_vector 第 {suffix} 个元素"
-                    break
+            values = "int 或 float"
+            note = f"fixed_vector 第 {spec['index']} 个元素"
         rows.append((column, source, values, note))
     return rows
 
@@ -1721,7 +1709,7 @@ def render_runtime(op, family, perf_key, out_dir, csv_sha256, threshold=0.8):
 
 
 def _render_readme(path, facts, generator, generated):
-    header_parts = _header_columns(facts)
+    header_parts = generator._header_columns(facts)
     header_lines = []
     current = ""
     for index, column in enumerate(header_parts):
