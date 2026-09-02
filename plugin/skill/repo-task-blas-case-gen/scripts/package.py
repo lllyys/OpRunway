@@ -916,7 +916,7 @@ def _fixed_vector_element(key, params):
     return param, element, length
 
 
-def _check_edge_cases(problems, edge_cases, params):
+def _check_edge_cases(problems, facts, edge_cases, params):
     if not isinstance(edge_cases, list):
         _err(problems, "edge_cases 必须是列表")
         return
@@ -940,7 +940,7 @@ def _check_edge_cases(problems, edge_cases, params):
             _err(problems, f"{where}.name={name!r} 重复")
         else:
             names.add(name)
-        if case.get("expect") not in _harness_profile()["status_vocab_bound"]:
+        if case.get("expect") not in _harness_profile(facts)["status_vocab_bound"]:
             _err(problems, f"{where}.expect={case.get('expect')!r} 不在状态码词表")
         _nonempty_string(problems, f"{where}.source", case.get("source"))
         settings = case.get("set")
@@ -1198,7 +1198,7 @@ def validate(facts):
     _check_profiles(problems, facts, params, dtype_sources)
     _check_golden(problems, facts.get("golden"))
     _check_verify(problems, facts.get("verify"))
-    _check_edge_cases(problems, facts.get("edge_cases", []), params)
+    _check_edge_cases(problems, facts, facts.get("edge_cases", []), params)
     if "perf" in facts:
         _check_perf(problems, facts, facts["perf"], params)
     if "cases" in facts:
@@ -1277,8 +1277,9 @@ def _harness_registry():
     return _REGISTRY_CACHE
 
 
-def _harness_profile(facts=None):
-    """本任务包适用的 profile。schema v1 隐式 blas；v2 由 FACTS 选（后续里程碑）。"""
+def _harness_profile(facts):
+    """本任务包适用的 profile。schema v1 隐式 blas；v2 由 FACTS 选（后续里程碑）。
+    facts 必传：留隐式默认会变成第二套隐含接口，v2 选 profile 时静默落回 blas。"""
     return _harness_registry()["blas"]
 
 
@@ -1420,8 +1421,9 @@ def _column_contract_rows(facts, generator):
             component = "实部" if kind == "scalar_re" else "虚部"
             note = f"复标量{component}"
         elif kind == "fill":
-            # source 沿用名字反查以钉住现状（同名不同 case 的碰撞语义，见 trap_6），
-            # 不用 spec 的精确 source；本里程碑不改行为。
+            # v1 输出兼容层：source 沿用名字反查，钉住现状的同名碰撞语义
+            # （两个只差大小写的参数会把列归到先声明者）。v2 路径必须只信
+            # spec["source"]，不得把这套反查带给新 profile。
             source = next(
                 (name for name in params if name.lower() == column[:-5]), column[:-5]
             )
@@ -1432,7 +1434,8 @@ def _column_contract_rows(facts, generator):
             values = ", ".join(param["conditioning"])
             note = "fill.h 的 BlasLapackMatrixType 构造类型"
         elif kind == "null_flag":
-            # 同上：反查取第一个命中的参数，双 nullA 两行同 source 是被钉住的现状。
+            # 同上（v1 输出兼容层）：反查取第一个命中的参数，
+            # 双 nullA 两行同 source 是被钉住的现状。
             source = next(
                 (
                     name
@@ -1446,9 +1449,11 @@ def _column_contract_rows(facts, generator):
         elif kind == "batch_pattern":
             values = "UNIFORM, NULL_TABLE, MIXED_SINGULAR, NULL_ELEMENT_i"
             note = "统一缓冲、空表、混合奇异或第 i 个元素为空"
-        else:
+        elif kind == "fixed_vector_elem":
             values = "int 或 float"
             note = f"fixed_vector 第 {spec['index']} 个元素"
+        else:
+            raise ValueError(f"未知列类别 {kind!r}：_column_specs 与契约表分派不同步")
         rows.append((column, source, values, note))
     return rows
 
