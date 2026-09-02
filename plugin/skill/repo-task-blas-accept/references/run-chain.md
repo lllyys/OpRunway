@@ -78,7 +78,16 @@ A1 只返回这两个值，其它值视同停止。硬前置五项：Python ≥ 
 `ASCEND_TOOLKIT_HOME`、`/usr/local/Ascend/ascend-toolkit/latest` 顺序找）。
 **harness_profile 探测**按 registry 各 profile 的入口头在 `<工程目录>/include/` 下探测
 （blas=`cann_ops_blas.h`、sparse_frame=`cann_ops_sparse.h`）；0 命中或多命中都是硬失败并
-列出候选，恰一命中的键名会写进 A2 的 runtime manifest。`cmake`、`g++`、
+列出候选，恰一命中的键名会写进 A2 的 runtime manifest。
+
+**设备选择**：`--device` 接受物理卡号（严格单卡：起跑门 BUSY/QUERY_FAILED 即退 4，
+不换卡）或 `auto`。auto 起跑时按 `--device-pool`（默认 0–7，逗号分隔）顺序对候选卡
+逐张过同一空闲门：候选忙或查询失败都跳过该卡，首张 IDLE 即选中并用
+`ASCEND_RT_VISIBLE_DEVICES` 把该物理卡映射为进程内逻辑卡 0（编译期定卡域在 auto 下
+以 `--device=0` 构建，且禁 `--skip-build`）；池尽无空闲退 4。证据面记
+`device`（原请求）、`device_pool`、`device_resolved`（实际物理卡）与逐候选探测；
+A5 机械校验 auto 的闭合（resolved ∈ pool、门终态 IDLE 且卡号一致），A3 与 A4 的
+resolved 允许不同（报告分别展示）。显式卡号时给 `--device-pool` 属参数错误。`cmake`、`g++`、
 msprof、`npu-smi`（目标卡忙闲快照，早报不裁决）、`cblas.h`、`lapacke.h` 是警告项，
 后续阶段会在实际使用点给出确定错误；卡空闲的裁决在 A3/A4 量具的起跑门。
 

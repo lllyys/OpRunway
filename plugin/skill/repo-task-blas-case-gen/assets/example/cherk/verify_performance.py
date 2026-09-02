@@ -39,11 +39,15 @@ HARNESS_PROFILE = "blas"
 BUILD_CONVENTION = json.loads("""{"build_device_flag": true, "runtime_library_dirs": [], "visible_devices_env": null}""")
 
 
-def _run_environment(repo, device):
-    """gtest/msprof 子进程环境：按惯例注入绑卡变量与运行库路径。"""
+def _run_environment(repo, device, auto=False):
+    """gtest/msprof 子进程环境：按惯例注入绑卡变量与运行库路径。
+    auto 模式统一用 ASCEND_RT_VISIBLE_DEVICES 把选中的物理卡映射为逻辑 0
+    （全局协议，非域特判；编译期定卡域的二进制在 auto 下按逻辑 0 构建）。"""
     env = dict(os.environ)
     visible = BUILD_CONVENTION["visible_devices_env"]
-    if visible:
+    if auto:
+        env["ASCEND_RT_VISIBLE_DEVICES"] = str(device)
+    elif visible:
         env[visible] = str(device)
     lib_dirs = [
         str(Path(repo) / item) for item in BUILD_CONVENTION["runtime_library_dirs"]
@@ -245,7 +249,8 @@ def _base_result(args, arch, started):
         "family": FAMILY,
         "soc": args.soc,
         "arch": arch,
-        "device": args.device,
+        "device": _parse_device_request(args.device, args.device_pool)[0],
+        "device_pool": _parse_device_request(args.device, args.device_pool)[1],
         "repo": str(args.repo.resolve()),
         "binary": None,
         "binary_sha256": None,
@@ -291,7 +296,8 @@ def _run_build(args, log_path):
         f"--ops={OP}",
     ]
     if BUILD_CONVENTION["build_device_flag"]:
-        command.append(f"--device={args.device}")
+        build_device = 0 if args.device == "auto" else args.device
+        command.append(f"--device={build_device}")
     try:
         result = subprocess.run(
             command,
@@ -544,9 +550,11 @@ def _with_scope_caveat(verdict, scope_caveat):
     return verdict + " (scope caveat)" if scope_caveat else verdict
 
 
-def _measure_case(args, binary, msprof, row, gtest_name, references, profile_root):
+def _measure_case(args, binary, msprof, row, gtest_name, references, profile_root,
+                  run_env=None):
     record = _case_record(row, gtest_name)
-    run_env = _run_environment(args.repo, args.device)
+    if run_env is None:
+        run_env = dict(os.environ)
     safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", row["case_name"])
     warmup = [str(binary), f"--gtest_filter={gtest_name}"]
     code, output, problem = _run_process(warmup, args.timeout, env=run_env)
@@ -733,6 +741,17 @@ def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = _parser()
     args = parser.parse_args(raw_argv)
+    requested_device, device_pool = _parse_device_request(args.device, args.device_pool)
+    if (
+        requested_device == "auto"
+        and args.skip_build
+        and BUILD_CONVENTION["build_device_flag"]
+    ):
+        # 守法（评审裁定）：编译期定卡域的 auto 依赖二进制按逻辑卡 0 构建，
+        # skip-build 无法证明这一点，直接拒绝，本次量具必须重建。
+        raise SystemExit(
+            "--device auto 在编译期定卡域不允许 --skip-build（须以 --device=0 重建）"
+        )
     if args.build_timeout <= 0 or args.timeout <= 0 or args.repeats <= 0:
         parser.error("timeout 与 repeats 必须为正整数")
     if args.calls_per_case <= 0:
@@ -784,13 +803,16 @@ def main(argv=None):
         return _environment_error(payload, out_path, binary_reason, binary_message)
     payload["binary"] = str(binary)
     payload["binary_sha256"] = _sha256(binary)
-    idle_ok, gate_payload = _npu_idle_gate(args.device)
+    resolved_device, gate_payload = _resolve_device(requested_device, device_pool)
     payload["npu_gate"] = gate_payload
-    if not idle_ok:
+    payload["device_resolved"] = resolved_device
+    if resolved_device is None:
         payload["exit_code"] = IDLE_GATE_EXIT
         _atomic_json(out_path, payload)
+        final = gate_payload.get("final") or {}
         print(
-            f"NPU_GATE_{gate_payload['status']}: {gate_payload['detail']}",
+            f"NPU_GATE_{final.get('status', 'BLOCKED')}: "
+            f"{final.get('detail', '无可用空闲卡')}（候选 {len(gate_payload['attempts'])} 张）",
             file=sys.stderr,
         )
         return IDLE_GATE_EXIT
@@ -799,11 +821,14 @@ def main(argv=None):
         package_rows = _selected_rows(Path(__file__).resolve().parent / CSV_NAME, args)
     except (OSError, UnicodeError, csv.Error, ValueError) as exc:
         return _environment_error(payload, out_path, "CSV_INVALID", str(exc))
+    run_env = _run_environment(
+        args.repo, resolved_device, auto=(requested_device == "auto")
+    )
     mapping, message, reason = _list_tests(
         binary,
         args.timeout,
         {row["case_name"] for row in package_rows},
-        _run_environment(args.repo, args.device),
+        run_env,
     )
     if reason:
         return _environment_error(payload, out_path, reason, message)
@@ -845,7 +870,8 @@ def main(argv=None):
             record["message"] = "部署 CSV 用例未出现在 --gtest_list_tests"
         else:
             record = _measure_case(
-                args, binary, msprof, row, gtest_name, references, profile_root
+                args, binary, msprof, row, gtest_name, references, profile_root,
+                run_env=run_env,
             )
         record["verdict"] = _with_scope_caveat(record["verdict"], scope_caveat)
         cases.append(record)

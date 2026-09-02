@@ -33,11 +33,15 @@ HARNESS_PROFILE = "sparse_frame"
 BUILD_CONVENTION = json.loads("""{"build_device_flag": false, "runtime_library_dirs": ["build_out/lib64"], "visible_devices_env": "ASCEND_RT_VISIBLE_DEVICES"}""")
 
 
-def _run_environment(repo, device):
-    """gtest/msprof 子进程环境：按惯例注入绑卡变量与运行库路径。"""
+def _run_environment(repo, device, auto=False):
+    """gtest/msprof 子进程环境：按惯例注入绑卡变量与运行库路径。
+    auto 模式统一用 ASCEND_RT_VISIBLE_DEVICES 把选中的物理卡映射为逻辑 0
+    （全局协议，非域特判；编译期定卡域的二进制在 auto 下按逻辑 0 构建）。"""
     env = dict(os.environ)
     visible = BUILD_CONVENTION["visible_devices_env"]
-    if visible:
+    if auto:
+        env["ASCEND_RT_VISIBLE_DEVICES"] = str(device)
+    elif visible:
         env[visible] = str(device)
     lib_dirs = [
         str(Path(repo) / item) for item in BUILD_CONVENTION["runtime_library_dirs"]
@@ -96,6 +100,63 @@ def _npu_idle_gate(device, timeout=20):
         return True, payload
     payload.update(status="QUERY_FAILED", detail="输出无法判读，按查询失败阻塞")
     return False, payload
+
+
+def _parse_device_request(raw_device, raw_pool):
+    """解析 --device/--device-pool（术语：物理卡=npu-smi 编号的真实设备；
+    逻辑卡=进程内 ACL 编号，受 ASCEND_RT_VISIBLE_DEVICES 映射）。
+
+    显式整数：严格单卡（既有裁定，行为不变），此时给 --device-pool 属参数错误。
+    "auto"：起跑时按 pool 序逐卡过空闲门，首张 IDLE 即选中并运行时映射为逻辑 0。
+    返回 (requested, pool)；requested 为 int 或 "auto"。"""
+    if raw_device == "auto":
+        pool = []
+        for item in (raw_pool or "0,1,2,3,4,5,6,7").split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if not item.isdigit():
+                raise SystemExit(f"--device-pool 含非法项 {item!r}（须为非负整数）")
+            value = int(item)
+            if value not in pool:
+                pool.append(value)
+        if not pool:
+            raise SystemExit("--device-pool 解析后为空")
+        return "auto", pool
+    if raw_pool is not None:
+        raise SystemExit("--device-pool 仅在 --device auto 时有效（显式卡号是严格单卡契约）")
+    try:
+        return int(raw_device), None
+    except ValueError:
+        raise SystemExit(f"--device 只接受非负整数或 auto，得到 {raw_device!r}")
+
+
+def _resolve_device(requested, pool):
+    """起跑时定卡：构建后单次有序遍历（评审裁定，无预扫描、无重试上限）。
+
+    显式整数：对该卡过一次空闲门，BUSY/QUERY_FAILED 即阻塞（行为与历史一致）。
+    auto：按 pool 序逐卡过同一空闲门；候选 BUSY 或 QUERY_FAILED 都跳过该卡
+    （该卡绝不被选中，fail-closed 逐卡成立），首张 IDLE 即选中；池尽无 IDLE
+    则整体阻塞。返回 (resolved 或 None, npu_gate payload)。"""
+    attempts = []
+    candidates = pool if requested == "auto" else [requested]
+    resolved = None
+    for candidate in candidates:
+        ok, probe = _npu_idle_gate(candidate)
+        probe = dict(probe)
+        probe["device"] = candidate
+        attempts.append(probe)
+        if ok:
+            resolved = candidate
+            break
+    gate = {
+        "requested": requested,
+        "pool": pool,
+        "attempts": attempts,
+        "final": attempts[-1] if attempts else None,
+        "resolved": resolved,
+    }
+    return resolved, gate
 
 TEST_FAILURE_EXIT = 1
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -195,7 +256,8 @@ def _base_result(args, arch, started):
         "family": FAMILY,
         "soc": args.soc,
         "arch": arch,
-        "device": args.device,
+        "device": _parse_device_request(args.device, args.device_pool)[0],
+        "device_pool": _parse_device_request(args.device, args.device_pool)[1],
         "repo": str(args.repo.resolve()),
         "binary": None,
         "binary_sha256": None,
@@ -239,7 +301,8 @@ def _run_build(args, log_path):
         f"--ops={OP}",
     ]
     if BUILD_CONVENTION["build_device_flag"]:
-        command.append(f"--device={args.device}")
+        build_device = 0 if args.device == "auto" else args.device
+        command.append(f"--device={build_device}")
     try:
         result = subprocess.run(
             command,
@@ -459,7 +522,14 @@ def _parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, type=Path, help="ops-blas 仓库根目录")
     parser.add_argument("--soc", required=True, help="目标 SoC，例如 ascend910b3")
-    parser.add_argument("--device", type=int, default=0, help="编译期测试设备号，默认 0")
+    parser.add_argument(
+        "--device", default="0",
+        help="目标物理卡号，或 auto（起跑时从 --device-pool 逐卡选首张空闲卡）",
+    )
+    parser.add_argument(
+        "--device-pool", default=None,
+        help="auto 的候选物理卡池，逗号分隔（默认 0-7）；显式卡号时给出即报错",
+    )
     parser.add_argument("--skip-build", action="store_true", help="复用上次编译产物")
     parser.add_argument("--build-timeout", type=int, default=1800, help="编译超时秒数")
     parser.add_argument("--timeout", type=int, default=3600, help="测试与列举超时秒数")
@@ -477,6 +547,17 @@ def _parser():
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = _parser().parse_args(raw_argv)
+    requested_device, device_pool = _parse_device_request(args.device, args.device_pool)
+    if (
+        requested_device == "auto"
+        and args.skip_build
+        and BUILD_CONVENTION["build_device_flag"]
+    ):
+        # 守法（评审裁定）：编译期定卡域的 auto 依赖二进制按逻辑卡 0 构建，
+        # skip-build 无法证明这一点，直接拒绝，本次量具必须重建。
+        raise SystemExit(
+            "--device auto 在编译期定卡域不允许 --skip-build（须以 --device=0 重建）"
+        )
     if args.build_timeout <= 0 or args.timeout <= 0:
         _parser().error("timeout 必须为正整数")
     script_results = Path(__file__).resolve().parent / "results"
@@ -526,20 +607,25 @@ def main(argv=None):
         return _environment_error(payload, out_path, binary_reason, binary_message)
     payload["binary"] = str(binary)
     payload["binary_sha256"] = _sha256(binary)
-    idle_ok, gate_payload = _npu_idle_gate(args.device)
+    resolved_device, gate_payload = _resolve_device(requested_device, device_pool)
     payload["npu_gate"] = gate_payload
-    if not idle_ok:
+    payload["device_resolved"] = resolved_device
+    if resolved_device is None:
         payload["exit_code"] = IDLE_GATE_EXIT
         _atomic_json(out_path, payload)
+        final = gate_payload.get("final") or {}
         print(
-            f"NPU_GATE_{gate_payload['status']}: {gate_payload['detail']}",
+            f"NPU_GATE_{final.get('status', 'BLOCKED')}: "
+            f"{final.get('detail', '无可用空闲卡')}（候选 {len(gate_payload['attempts'])} 张）",
             file=sys.stderr,
         )
         return IDLE_GATE_EXIT
     # 期望集来自任务包自带的 CSV（契约），不是部署 CSV；先算期望集再建映射，
     # gtest 名不筛前缀、按期望集精确匹配（社区旧包的 L0_/L1_ 命名一样可验）。
     expected = _selected_cases(Path(__file__).resolve().parent / CSV_NAME, args)
-    run_env = _run_environment(args.repo, args.device)
+    run_env = _run_environment(
+        args.repo, resolved_device, auto=(requested_device == "auto")
+    )
     mapping, message, reason = _list_tests(binary, args.timeout, set(expected), run_env)
     if reason:
         return _environment_error(payload, out_path, reason, message)

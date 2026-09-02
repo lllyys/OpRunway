@@ -46,6 +46,32 @@ PERFORMANCE_CASE_STATUSES = {
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
+def _parse_device_request(raw_device, raw_pool):
+    """与量具同一口径：显式整数 = 严格单卡（给 pool 报错）；auto = 起跑时
+    从规范化 pool（非负整数、去重保序）选首张空闲卡。返回 (requested, pool)。"""
+    raw_device = str(raw_device)
+    if raw_device == "auto":
+        pool = []
+        for item in (raw_pool or "0,1,2,3,4,5,6,7").split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if not item.isdigit():
+                raise SystemExit(f"--device-pool 含非法项 {item!r}（须为非负整数）")
+            value = int(item)
+            if value not in pool:
+                pool.append(value)
+        if not pool:
+            raise SystemExit("--device-pool 解析后为空")
+        return "auto", pool
+    if raw_pool is not None:
+        raise SystemExit("--device-pool 仅在 --device auto 时有效")
+    try:
+        return int(raw_device), None
+    except ValueError:
+        raise SystemExit(f"--device 只接受非负整数或 auto，得到 {raw_device!r}")
+
+
 def _timestamp():
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -531,8 +557,14 @@ def command_env(args):
     )
     msprof = _find_msprof(cann_root)
     record("msprof", "OK" if msprof else "缺失", str(msprof) if msprof else "未找到")
-    npu_status, npu_detail = _npu_state(args.device)
-    record("npu-smi", npu_status, npu_detail)
+    requested_device, device_pool = _parse_device_request(args.device, args.device_pool)
+    if requested_device == "auto":
+        for candidate in device_pool:
+            status_, detail_ = _npu_state(candidate)
+            record(f"npu-smi 卡 {candidate}", status_, detail_)
+    else:
+        npu_status, npu_detail = _npu_state(requested_device)
+        record("npu-smi", npu_status, npu_detail)
     for header_name in ("cblas.h", "lapacke.h"):
         found = _find_header(header_name)
         record(
@@ -545,7 +577,8 @@ def command_env(args):
         "command": "env",
         "repo": str(repo),
         "soc": args.soc,
-        "device": args.device,
+        "device": requested_device,
+        "device_pool": device_pool,
         "checks": checks,
         "hard_failures": hard_failures,
         "exit_code": exit_code,
@@ -597,12 +630,14 @@ def command_check(args):
     runtime = out_path.parent / RUNTIME_DIR
     errors = []
     warnings = []
+    requested_device, device_pool = _parse_device_request(args.device, args.device_pool)
     payload = {
         "command": "check",
         "package": str(package),
         "repo": str(repo),
         "soc": args.soc,
-        "device": args.device,
+        "device": requested_device,
+        "device_pool": device_pool,
         "calls_per_case": args.calls_per_case,
         "checks": {},
         "errors": errors,
@@ -734,6 +769,29 @@ def command_check(args):
     print(f"性能期望集: {len(expected_pf)} 条（忽略 {len(ignored_pf)} 条无基线）")
     print(f"runtime: {runtime}")
     return finish(0)
+
+
+def _device_closure_problems(payload, label):
+    """auto 定卡证据闭合（评审裁定）：resolved ∈ pool；门终态 IDLE 且卡号等于
+    resolved。显式卡号不做此检查（行为不变）；A3/A4 的 resolved 允许不同。"""
+    problems = []
+    if payload.get("device") != "auto":
+        return problems
+    pool = payload.get("device_pool")
+    resolved = payload.get("device_resolved")
+    gate = payload.get("npu_gate") or {}
+    final = gate.get("final") or {}
+    if not isinstance(resolved, int):
+        problems.append(f"{label} device_resolved 缺失或非整数（auto 必须落到具体物理卡）")
+        return problems
+    if not isinstance(pool, list) or resolved not in pool:
+        problems.append(f"{label} device_resolved={resolved} 不在 device_pool {pool}")
+    if final.get("status") != "IDLE" or final.get("device") != resolved:
+        problems.append(
+            f"{label} 空闲门终态与 resolved 不闭合"
+            f"（final={final.get('status')}@{final.get('device')}，resolved={resolved}）"
+        )
+    return problems
 
 
 def _accuracy_structure(payload, expected, identity):
@@ -1181,6 +1239,8 @@ def _accuracy_section(accuracy):
         f"（{accuracy.get('pass')}/{accuracy.get('expected')} PASS）",
         f"- 执行：{accuracy.get('executed')} 条",
     ]
+    if accuracy.get("device_resolved") is not None:
+        lines.append(f"- 实际物理卡：{accuracy['device_resolved']}（auto 定卡）")
     if accuracy.get("attribution"):
         lines += ["", "| case_name | 首轮 | 复跑 | 归因 |", "| --- | --- | --- | --- |"]
         lines += [
@@ -1202,6 +1262,8 @@ def _performance_section(performance):
         f"- 可比集（comparable_pf）：{performance.get('comparable_pf')}",
         f"- timing_scope：{performance.get('timing_scope')}",
     ]
+    if performance.get("device_resolved") is not None:
+        lines.append(f"- 实际物理卡：{performance['device_resolved']}（auto 定卡）")
     no_ref = len((performance.get("case_sets") or {}).get("no_ref") or [])
     if no_ref:
         lines.append(f"- 无可比基线（NO_REF，不进期望集）：{no_ref} 条")
@@ -1373,7 +1435,9 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
                 (
                     f"python3 \"$ACCEPT\" check --package {shlex.quote(str(package))}"
                     f" --repo {shlex.quote(str(args.repo))} --soc {shlex.quote(args.soc)}"
-                    f" --device {args.device} --calls-per-case {manifest_cpc}"
+                    f" --device {args.device}"
+                    + (f" --device-pool {args.device_pool}" if args.device_pool else "")
+                    + f" --calls-per-case {manifest_cpc}"
                 ),
                 'echo "check exit=$?"',
                 'cd "$WORKDIR/runtime" || exit 1',
@@ -1433,6 +1497,7 @@ def command_verdict(args):
     if not RUN_ID_RE.fullmatch(args.run_id):
         print("证据不足: run-id 格式不合法", file=sys.stderr)
         return INSUFFICIENT_EXIT
+    requested_device, device_pool = _parse_device_request(args.device, args.device_pool)
     package = args.package.resolve()
     repo = args.repo.resolve()
     out_dir = args.out.resolve()
@@ -1450,7 +1515,7 @@ def command_verdict(args):
             "run_id": args.run_id,
             "op": manifest.get("op", "unknown"),
             "soc": args.soc,
-            "device": args.device,
+            "device": requested_device,
             "runtime": manifest,
             "accuracy": {
                 "status": "证据不足",
@@ -1504,7 +1569,8 @@ def command_verdict(args):
         "op": op,
         "family": family,
         "soc": args.soc,
-        "device": args.device,
+        "device": requested_device,
+        "device_pool": device_pool,
         "repo": str(repo),
     }
     accuracy = _accuracy_result(
@@ -1516,6 +1582,11 @@ def command_verdict(args):
     )
     accuracy["case_names"] = list(expected)
     accuracy["problems"].extend(evidence_problems)
+    closure = _device_closure_problems(accuracy_payload, "精度")
+    if closure:
+        accuracy["problems"].extend(closure)
+        accuracy["status"] = "证据不足"
+    accuracy["device_resolved"] = accuracy_payload.get("device_resolved")
     performance_sets = {
         "comparable": list(performance_expected),
         "no_ref": list(performance_ignored),
@@ -1533,13 +1604,25 @@ def command_verdict(args):
         total_pf=total_pf,
     )
     performance["case_sets"] = performance_sets
+    if performance_path.is_file():
+        try:
+            perf_payload_head = _load_json(performance_path)
+        except ValueError:
+            perf_payload_head = {}
+        closure = _device_closure_problems(perf_payload_head, "性能")
+        if closure:
+            performance.setdefault("problems", []).extend(closure)
+            if performance.get("base_status") not in ("不通过",):
+                performance["status"] = "证据不足"
+                performance["base_status"] = "证据不足"
+        performance["device_resolved"] = perf_payload_head.get("device_resolved")
     contract_expected = {
         "package": str(package),
         "repo": str(repo),
         "op": op,
         "family": family,
         "soc": args.soc,
-        "device": args.device,
+        "device": requested_device,
         "package_csv_sha256": manifest.get("package_csv_sha256"),
         "baseline_sha256": manifest.get("baseline_sha256"),
         "calls_per_case": manifest.get("calls_per_case"),
@@ -1556,7 +1639,8 @@ def command_verdict(args):
         "run_id": args.run_id,
         "op": op,
         "soc": args.soc,
-        "device": args.device,
+        "device": requested_device,
+        "device_pool": device_pool,
         "runtime": manifest,
         "accuracy": accuracy,
         "performance": performance,
@@ -1594,7 +1678,14 @@ def _add_common(parser):
         help="开发者算子工程根目录（域由 include 入口头按 registry 探测）",
     )
     parser.add_argument("--soc", required=True, help="目标 SoC，例如 ascend910b3")
-    parser.add_argument("--device", type=int, default=0, help="编译期测试设备号，默认 0")
+    parser.add_argument(
+        "--device", default="0",
+        help="目标物理卡号，或 auto（量具起跑时从 --device-pool 选首张空闲卡）",
+    )
+    parser.add_argument(
+        "--device-pool", default=None,
+        help="auto 的候选物理卡池，逗号分隔（默认 0-7）；显式卡号时给出即报错",
+    )
 
 
 def _parser():
