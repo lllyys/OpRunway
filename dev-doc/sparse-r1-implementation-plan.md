@@ -18,6 +18,8 @@
 | FACTS | 单算子事实字面量（AST 白名单、从不执行），见 facts-schema.md |
 | registry | skill 内版本化的有限 profile/词表数据集，装域级惯例（9 字段，见冻结文档） |
 | frame 惯例 | ops 仓 `test/frame/` 公共件之上的 CSV 驱动 gtest 写法（param.h 逐列读 CSV） |
+| V1–V5/E1/G1–G4 | 核对与治理编号，定义见 learning-map §0 状态表 |
+| 三道回归门 | 10 项派生物摘要（baseline-digests 文件）、双示例 check、fixture `--check`（fixture README） |
 
 ## 0. 范围、终态与纪律
 
@@ -60,18 +62,24 @@ coo2csr 纵向首通**——10 项派生物摘要、cherk/sasum 双示例 check�
 
 ## 2. M1′ · 最小生成基础
 
-1. registry（9 字段 × 2 profile，值按冻结文档与普查数据）作为普通字典进模板公共
-   代码区；package.py 经 `_load_generator()` 取用。
-2. blas 硬编码三处改查 registry，值与现状逐字节一致：S1 首参断言
-   （package.py:1169，改按 `first_param_ctype`，none 则跳过）、生成侧默认 expect
-   token（模板 :560）、状态/edge 词表（:75，改由 FACTS 精确子集派生，blas 示例的
-   子集即现词表）。
-3. 表头/行写入统一：一个普通函数产有序列描述（普通 dict），
-   模板 `_header_columns`、行物化、README 契约表、`--print-header` 都从它取；
-   删 package.py 的 `_header_columns` 副本（:1221）与漂移自检（:1773）。
-   轴/edge/perf 校验暂不动——case_controls 接入时（M3′）只做必要适配。
-4. 示例公共区确定性迁移（只保 FACTS 区、换公共区、GENERATOR_VERSION=2），
-   派生物 10 项逐字节不变；fixture 走重钉协议。
+按七维审的裁定，本里程碑**终态由复杂度定、顺序由爆炸半径定**：追加式迁移，
+每步单独提交可回滚，不可逆动作排最后。
+
+1. **追加** registry 进模板公共代码区（普通字典）；本里程碑只实例化 **blas profile
+   的值**（sparse_frame 值归 M3′）；package.py 经 `_load_generator()` 取用。
+2. blas 硬编码三处**逐个**切为查 registry，值与现状逐字节一致、一处一验：
+   S1 首参断言（package.py:1169 → `first_param_ctype`，none 则跳过）、生成侧默认
+   expect token（模板 :560）、状态/edge 词表（:75）。**v1 词表策略**：v1 继续用
+   blas 完整词表（registry 上界即现词表）；「FACTS 精确子集」是 v2 的事，不倒置。
+3. 表头/行写入统一，**迁移序写死**：
+   a. 追加共享列描述函数（普通 dict），先不接任何消费者；
+   b. 旧 package.py 副本与漂移自检**临时留作影子 oracle**（新旧对照即现成校验）；
+   c. 逐消费者切换：行写入 → README 契约表 → `--print-header`，每切一处跑三门；
+   d. 全部一致后**最后单独一步**删副本（:1221）与漂移自检（:1773），可独立回滚。
+   轴/edge/perf 校验本里程碑不动。
+4. 示例公共区确定性迁移（只保 FACTS 区、换公共区、GENERATOR_VERSION=2）——
+   独立的最后一个机械提交；10 项派生物摘要不变，两个 gen_csv.py 摘要变化为预期
+   差异（重钉协议）。
 
 ## 3. M3′ · v2 首包能力
 
@@ -79,38 +87,57 @@ coo2csr 纵向首通**——10 项派生物摘要、cherk/sasum 双示例 check�
    §2.5）、`case_controls`（`{name, kind: enum|tier, values}`；值为字符串、去重、
    **原始字符串端到端传递，判等即文本相等**——不建规范形机制，原 M4 取消）、
    `status_vocab`（必填，⊆ profile 上界）、`golden: {"kind": "harness"}`（与
-   symbol/formula 互斥）。v1 FACTS 行为不变（旧 checker 拒 v2 属预期）。
-2. 投影：case_controls 产直接列并进轴；`perf.key` 可引用 control 名（text 型）。
-   新 control 的列名/轴名唯一性与命名空间冲突检查随实现自带（这是 sparse 首包的
-   正确性需要，非新增门；顺带覆盖存量陷阱 trap4/6 的 sparse 面）。
-3. `footprint_policy` 生效：sparse_frame=`no_static_check`，模板 `_row_is_valid`
-   按它跳过 `_footprint`。
+   symbol/formula 互斥）。校验按版本分派（v1/v2 各自路径），**v1 路径逐字节保持**，
+   v2 可整段回滚不牵动 blas；registry 的 sparse_frame 值在此实例化。
+2. 投影：case_controls 产直接列并进轴，接入顺序**列 → 轴 → perf.key** 逐步可撤；
+   control 逻辑只在 v2 且字段存在时进入，v1 不走任何新路径。新 control 的列名/
+   轴名唯一性与命名空间冲突检查随实现自带（sparse 首包的正确性需要，非新增门；
+   顺带覆盖存量陷阱 trap4/6 的 sparse 面）。
+3. `footprint_policy` 生效，**最窄分支**：仅 `no_static_check` 跳过 `_footprint`，
+   `dense_formula` 走完全未改的旧逻辑。
 4. 产出 coo2csr FACTS（schema v2、sparse_frame、case_controls 按仓内列契约、
-   200 PF 全待填）→ 六件 render → `check` 退出 0；warnings 空、列命中仓内源码、
-   TC_ 命名成立作为 check 的成功判读，不另立探针。
+   200 PF 全待填）→ 六件 render → `check` 退出 0；warnings 空、列命中仓内源码
+   作为 check 的成功判读。**命名口径**（消七维审指出的歧义）：生成包用 `TC_<块>_`
+   命名（用户既有裁定，V1 已证 gtest 按 case_name 全名过滤可跑任意名字）；存量包
+   的 `L0_/L1_` 命名由 M2·5·6′ 的映射修正保证可验——两者并存不矛盾。
 
 ## 4. M2·5·6′ · accept 纵向闭合
 
-1. A1：按各 profile `entry_headers` 探测（0/多命中硬失败列候选，恰一命中把
-   profile 键名记入 runtime manifest）；CANN 缺失退出 3 属预期照实写。
-2. A2：两个 verify 模板的二进制寻址改 `build/test/**/<op>_test` glob 唯一命中
-   resolver（0/>1 fail-closed 报候选）；README 模板与 CLI help 的 ops-blas 措辞
-   随手改为 profile 渲染。
-3. 精度期望集修正：主 CSV 除 `TC_PF_` 外**全部有效数据行**进期望集（现状按 TC_
-   前缀收会漏光 coo2csr 41 行）；gtest 映射按 case_name 精确匹配。
-4. A5 空基线终态：无 `TC_PF_` → 通过（无性能要求）；有 `TC_PF_` 但可比集空 →
-   性能 NO_REF、总体证据不足、退出码 2。
-5. 三类产物最小布局（用户裁定）：`report/report.md`（模板是 skill 资产
-   `assets/template/report.md`，三节：精度、性能、备注说明；前两节 verdict 数据
-   填模板，备注归 agent）、`intermediate/`（全部执行期 JSON/日志/runtime）、
-   `repro/`（六件副本 + 用例清单含失败标注；`rerun.sh` 与环境指纹归 M7——本地
-   阶段没有真实执行可复现）。
-6. 两个小改随手带上（无探针）：CSV 注释行统一 strip 口径（accept.py:179）；
-   `calls_per_case` 以 manifest 为单一来源、量具只读它。
-7. coo2csr 单一纵向 smoke：对本地 ops-sparse 克隆走 A1 探测 + A2 布局推断 +
+实施序按爆炸半径排：语义改动在前逐步可撤，**目录重排排最后**；每个改写型动作
+先追加影子、核对后再切换。
+
+1. A1：**先追加** profile 探测函数（按各 profile `entry_headers`，0/多命中硬失败
+   列候选）影子记录，确认 blas 仍唯一选中后再替换硬编码判断；恰一命中把 profile
+   键名记入 runtime manifest；CANN 缺失退出 3 属预期照实写。
+2. A2：两个 verify 模板的二进制寻址改「候选收集 + 唯一裁决」resolver
+   （`build/test/**/<op>_test` glob，0/>1 fail-closed 报候选——注意现状遇多路径
+   取首个，失败语义会变，blas 目录形态回放里核对三态）；README 模板与 CLI help
+   的 ops-blas 措辞随手改 profile 渲染。
+3. 精度期望集修正（P0）：**accept.py 与 verify 模板两侧同改**——期望集 = 主 CSV
+   除 `TC_PF_` 外全部有效数据行（现状按 TC_ 前缀收会漏光 coo2csr 41 行）；gtest
+   映射删除 `/TC_` 硬筛，按期望集中的 case_name **精确匹配**（只改 accept 不改
+   映射，41 行进了期望集也会在映射层被滤光）。
+4. A5 空基线终态：**证据先行**——先在性能证据里加 `total_pf/comparable_pf` 并
+   确认区分正确，**最后一步**才切 verdict：无 `TC_PF_` → 通过（无性能要求）；
+   有 `TC_PF_` 但可比集空 → 性能 NO_REF、总体证据不足、退出码 2。
+   本项动 accept 核心裁决，按仓规**无条件过一次 Codex checkpoint**（仓规既有
+   触发条件，非新增门）。
+5. **一次性 blas 兼容回放**（七维审 P0，一次性验证、不设常设门）：复用 cherk/
+   sasum 既有资产走 A1 → A2 → 期望集 → A5，覆盖两种 A5 状态（有可比 PF /
+   PF 全无基线）；注释行口径的验证并入本回放，不单设探针。
+6. 三类产物最小布局（用户裁定），**排本里程碑最后**：先向新布局追加/复制、验证
+   完整后切默认读取，旧路径删除单独提交可回滚。内容：`report/report.md`（模板是
+   skill 资产 `assets/template/report.md`，三节：精度、性能、备注说明；前两节
+   verdict 数据填模板，备注归 agent）、`intermediate/`（全部执行期 JSON/日志/
+   runtime）、`repro/`（六件副本 + 用例清单含失败标注；`rerun.sh` 与环境指纹归
+   M7）。
+7. 两个小改：CSV 注释行统一 strip 口径（accept.py:179）；`calls_per_case` 以
+   manifest 为单一来源——CLI 参数兼容期保留但必须与 manifest 相等，删除另议。
+8. coo2csr 单一纵向 smoke：对本地 ops-sparse 克隆走 A1 探测 + A2 布局推断 +
    runtime 渲染 + 期望集构建（41 行全进），一次跑完当完成线；真机 A3/A4 归 M7。
-8. 文档随改：只更新实际变更的契约文档（facts-schema、run-chain、README 模板、
-   SKILL description 范围）+ changes brief；无独立文档里程碑、无冷读 agent。
+9. 文档随改：只更新实际变更的契约文档（facts-schema、run-chain、README 模板、
+   SKILL description 范围、`no_static_check` 的 authoring 提示进 facts-schema）
+   + changes brief；无独立文档里程碑、无冷读 agent。
 
 ## 5. M7 · 真机（阻塞 E1，单列）
 

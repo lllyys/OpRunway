@@ -59,7 +59,8 @@ blas、行为不变；不留第二套隐含接口）。覆盖规则：
 
 - **id 列名 = `case_name`**：本期两域一致（`case_id` 仅 Lt 家族，已排除；Lt 进场时再议）。
 - **CSV `#` 注释行是全局词法规则**：行首（含前导空白后）为 `#` 的行不是数据行。
-  生成侧不产注释行；accept/量具读包侧统一按此规则跳过（M2 落地并配探针）。
+  生成侧不产注释行；accept/量具读包侧统一按此规则跳过（M2·5·6′ 落地，验证并入
+  一次性 blas 兼容回放，不单设探针）。
 - **辅助 CSV 所有权**：任务包只拥有主 `<op>_test.csv`；仓内个别算子的辅助负例 CSV
   （普查见 densetosparse 与 sparse2dense 的 L2 套件）属 harness 自有测试资产——
   case-gen 不生成、accept 不部署、不进本期期望集。若未来要求验收辅助套件，
@@ -98,6 +99,7 @@ A5 核对证据值与 manifest 相等）。
 
 - 冻结面：§2 九字段 + §2.5 覆盖契约 + §2.6 全局不变量 + §3 所有权表 + §4 裁定。
   变更须过 Codex checkpoint。
-- 字段值：M3 按 census-data.json 实例化，正负例齐全后生效。
+- 字段值分两步实例化（七维审对齐）：blas profile 的值在 M1′ 随硬编码参数化落地
+  （与现状逐字节一致）；sparse_frame 的值在 M3′ 按 census-data.json 实例化。
 - 上半场审遗留到实施的项：三个 accept 修正（→M2）、`no_static_check` 下 sparse FACTS
   的 constraints 约束纪律（→M3 的 authoring 指南）。
