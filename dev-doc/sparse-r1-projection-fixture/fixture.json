@@ -94,7 +94,7 @@
           "g1_profile_test.csv": "94af1dba72de1bdd8f8068beb7defa954d0abe0ed888d1c0ef07ab1ed1bb1888",
           "gpu_baseline.csv": "a4c2445456ead3631edc7663d682cc653c880ebc85b206ab2e1e586832044285",
           "verify_accuracy.py": "b0c8696edd0b29f6d3cbeb8600f413da1da70695f9545f8c0b881dda583f65e2",
-          "verify_performance.py": "87581966d5d958dd00ff61ff99ab8eb5735b135b860a3e5c66fd24915ce0dbc1"
+          "verify_performance.py": "d7ad33239dc3fd7a19e887f6fa304e9a2af86a27912976f1d4d8fcfac53fea22"
         },
         "exit": 0,
         "stderr": "",
@@ -182,7 +182,7 @@
           "g2_batch_test.csv": "423d2e76846d43bd39145d378f17f0c9cc3374cce14a5e138fda7661651ab343",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
           "verify_accuracy.py": "cfe03e4e0613a5e38078ef687707895498680993c5fb9e25eca8458c7c8bbd31",
-          "verify_performance.py": "207a448b56990bb8970dc4e3d1d04126ff055501bc094175919a8f0c69575184"
+          "verify_performance.py": "7ca1a5c68c4db49e8480eedeae7207930a7b42cbd6d85c5d6c4b3c5bf949ea17"
         },
         "exit": 0,
         "stderr": "",
@@ -230,7 +230,7 @@
           "g3_fixed_test.csv": "70014dfd6d07af5cf9955d054a6b0ac81df20178550508fda440247520159d09",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
           "verify_accuracy.py": "748d32a6b46bd905bed922e9ceb1f45f6a059cbc47f03f3b499fe8f20920a127",
-          "verify_performance.py": "8cdfc72a6cd305794e1a7e9d06a1d6a9ed18a32d8e234b7dc437e7dedd79f473"
+          "verify_performance.py": "182b7a31da11759e1d8441fc04baf94027d53f86138c9a7c77866a02bdaa1218"
         },
         "exit": 0,
         "stderr": "",
@@ -294,7 +294,7 @@
           "g4_cond_test.csv": "0a46bbf6aa05dc8961e103dfa8c549c269b252eff066417515f6bfa3ed0b63a3",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
           "verify_accuracy.py": "bbdfbcbc29b1cce6ab1143cec8af4ed90555d0e1ed266ec00e75bf66c8e4b512",
-          "verify_performance.py": "090ce182679eb8908e8eb7236b8679f696ab58ff983df30ce175159db010b301"
+          "verify_performance.py": "6340d4f70008c42c028987700a502ccd7427f056e03bccea6038353b8c9215eb"
         },
         "exit": 0,
         "stderr": "",
@@ -374,7 +374,7 @@
           "g5_scalar_test.csv": "20ae8a920a69b1ebf039c6b6747603658f9be6a2d49f4290ac1c898483fcf419",
           "gpu_baseline.csv": "17452d52d2ee73a39f4692fcf19c9d3fa7a8277b982c19c6f076a75f8111e600",
           "verify_accuracy.py": "fac8ea715f0fdbe03c33d24914d728a4e1bdb6033eebc21e66b11855945bd755",
-          "verify_performance.py": "b45e654e3275ac19ca30d5317c38831ddc5b73a1dc9b0ed30989033a0eda0cf3"
+          "verify_performance.py": "767ab7d3626bf484f708ac4b2eed96e1ac0125916fd29747a05aac4f45e49177"
         },
         "exit": 0,
         "stderr": "",
@@ -446,7 +446,7 @@
           "g6_trap2_test.csv": "2515b1ba3453dd7a700d832af362eeb12285bdc4b80586d90db141e3f16f5aa4",
           "gpu_baseline.csv": "aad2ecb2cb582f4eb6bf8c7d268e03c8428a2b53327a7eb3acb0d5404c608eac",
           "verify_accuracy.py": "d582b445be8e9a9051c53f6be514177246b7df377b1607aeb9e87634ead23391",
-          "verify_performance.py": "272b02b4d42028c3e84ea13aafacefc858574f20797d74d8c3ef787b0fe8ca79"
+          "verify_performance.py": "f7de7b2d7207360483d44e714e2257b8b30b05d5bf55f8bc77a3f436972ba25e"
         },
         "exit": 0,
         "stderr": "",
@@ -577,7 +577,7 @@
           "g6_trap6_test.csv": "18a0d4f1b484c6e77e0d2633d71a3230ec5a65ca9c0c8b8eb332f0b9753505f6",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
           "verify_accuracy.py": "ff3814b9967f7bbcd5f55aa2bb3b961c3f08caae48d50e0f67053d0f53b3ac09",
-          "verify_performance.py": "3c43625ff6c557f4435439c2aa94e301f35d4aa5e63f05b1d7b937eba4e9261d"
+          "verify_performance.py": "902f44b9bba264a8e866e60fdbaab6632b94213b5dd2c86ab2799d33ee7c34d6"
         },
         "exit": 0,
         "stderr": "",
@@ -692,7 +692,7 @@
           "g7op_test.csv": "6254f7e3c81eb9779ebf8d6ce869a7704bc6d960613342144729344d3f2d842f",
           "gpu_baseline.csv": "f4612173205018c095bf959595802369e56124542a6ea172d5ae6093526e4e40",
           "verify_accuracy.py": "2a75b4618ded718717537fb7d0787339a207c884ff5cbab3a962446a25e4393a",
-          "verify_performance.py": "3ea56d6fd70a58bfac2e17f712fa811929f4c8fe10104ac33e273d58932fae4c"
+          "verify_performance.py": "8762c0c8e740388b75a5569433a221bdce48b4682775038fe236cbf824fde9ed"
         },
         "exit": 0,
         "stderr": "",

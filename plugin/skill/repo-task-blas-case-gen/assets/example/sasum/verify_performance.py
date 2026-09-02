@@ -107,6 +107,69 @@ def _npu_idle_gate(device, timeout=20):
     payload.update(status="QUERY_FAILED", detail="输出无法判读，按查询失败阻塞")
     return False, payload
 
+
+def _parse_device_request(raw_device, raw_pool):
+    """解析 --device/--device-pool（术语：物理卡=npu-smi 编号的真实设备；
+    逻辑卡=进程内 ACL 编号，受 ASCEND_RT_VISIBLE_DEVICES 映射）。
+
+    显式整数：严格单卡（既有裁定，行为不变），此时给 --device-pool 属参数错误。
+    "auto"：起跑时按 pool 序逐卡过空闲门，首张 IDLE 即选中并运行时映射为逻辑 0。
+    返回 (requested, pool)；requested 为 int 或 "auto"。"""
+    if raw_device == "auto":
+        pool = []
+        for item in (raw_pool or "0,1,2,3,4,5,6,7").split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if not item.isdigit():
+                raise SystemExit(f"--device-pool 含非法项 {item!r}（须为非负整数）")
+            value = int(item)
+            if value not in pool:
+                pool.append(value)
+        if not pool:
+            raise SystemExit("--device-pool 解析后为空")
+        return "auto", pool
+    if raw_pool is not None:
+        raise SystemExit("--device-pool 仅在 --device auto 时有效（显式卡号是严格单卡契约）")
+    try:
+        return int(raw_device), None
+    except ValueError:
+        raise SystemExit(f"--device 只接受非负整数或 auto，得到 {raw_device!r}")
+
+
+def _resolve_device(requested, pool):
+    """起跑时定卡：构建后单次有序遍历（评审裁定，无预扫描、无重试上限）。
+
+    显式整数：对该卡过一次空闲门，BUSY/QUERY_FAILED 即阻塞（行为与历史一致）。
+    auto：按 pool 序逐卡过同一空闲门；候选 BUSY 或 QUERY_FAILED 都跳过该卡
+    （该卡绝不被选中，fail-closed 逐卡成立），首张 IDLE 即选中；池尽无 IDLE
+    则整体阻塞。返回 (resolved 或 None, npu_gate payload)。"""
+    attempts = []
+    candidates = pool if requested == "auto" else [requested]
+    resolved = None
+    for candidate in candidates:
+        ok, probe = _npu_idle_gate(candidate)
+        probe = dict(probe)
+        probe["device"] = candidate
+        attempts.append(probe)
+        if ok:
+            resolved = candidate
+            break
+    gate = {
+        "requested": requested,
+        "pool": pool,
+        "attempts": attempts,
+        "final": attempts[-1] if attempts else None,
+        "resolved": resolved,
+    }
+    return resolved, gate
+
+TEST_FAILURE_EXIT = 1
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+
+
 FAILURE_EXIT = 1
 INSUFFICIENT_EXIT = 2
 REPEATS = 5
@@ -708,7 +771,14 @@ def _parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, type=Path, help="ops-blas 仓库根目录")
     parser.add_argument("--soc", required=True, help="目标 SoC，例如 ascend910b3")
-    parser.add_argument("--device", type=int, default=0, help="编译期测试设备号，默认 0")
+    parser.add_argument(
+        "--device", default="0",
+        help="目标物理卡号，或 auto（起跑时从 --device-pool 逐卡选首张空闲卡）",
+    )
+    parser.add_argument(
+        "--device-pool", default=None,
+        help="auto 的候选物理卡池，逗号分隔（默认 0-7）；显式卡号时给出即报错",
+    )
     parser.add_argument("--skip-build", action="store_true", help="复用上次编译产物")
     parser.add_argument("--build-timeout", type=int, default=1800, help="编译超时秒数")
     parser.add_argument("--timeout", type=int, default=3600, help="每个进程的超时秒数")
