@@ -29,6 +29,52 @@ import sys
 
 
 ENVIRONMENT_EXIT = 3
+
+IDLE_GATE_EXIT = 4
+
+
+def _npu_idle_gate(device, timeout=20):
+    """起跑前现场核查目标卡空闲（用户裁定，fail-closed 三分支）。
+
+    返回 (ok, payload)。判定写死：输出含 "Process id:" → BUSY；
+    含 "No process in device" → IDLE；其余（含命令失败/超时/输出无法判读）
+    一律 QUERY_FAILED。BUSY 与 QUERY_FAILED 都阻塞，退出码 IDLE_GATE_EXIT。"""
+    command = ["npu-smi", "info", "-t", "proc-mem", "-i", str(device)]
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, {
+            "status": "QUERY_FAILED",
+            "command": " ".join(command),
+            "detail": str(exc),
+            "output": None,
+        }
+    output = result.stdout or ""
+    payload = {
+        "status": None,
+        "command": " ".join(command),
+        "detail": None,
+        "output": output[-2000:],
+    }
+    if result.returncode != 0:
+        payload.update(status="QUERY_FAILED", detail=f"npu-smi 退出码 {result.returncode}")
+        return False, payload
+    if "Process id:" in output:
+        payload.update(status="BUSY", detail="目标卡存在进程，拒绝起跑")
+        return False, payload
+    if "No process in device" in output:
+        payload.update(status="IDLE", detail="目标卡空闲")
+        return True, payload
+    payload.update(status="QUERY_FAILED", detail="输出无法判读，按查询失败阻塞")
+    return False, payload
+
 FAILURE_EXIT = 1
 INSUFFICIENT_EXIT = 2
 REPEATS = 5
@@ -703,6 +749,16 @@ def main(argv=None):
         return _environment_error(payload, out_path, binary_reason, binary_message)
     payload["binary"] = str(binary)
     payload["binary_sha256"] = _sha256(binary)
+    idle_ok, gate_payload = _npu_idle_gate(args.device)
+    payload["npu_gate"] = gate_payload
+    if not idle_ok:
+        payload["exit_code"] = IDLE_GATE_EXIT
+        _atomic_json(out_path, payload)
+        print(
+            f"NPU_GATE_{gate_payload['status']}: {gate_payload['detail']}",
+            file=sys.stderr,
+        )
+        return IDLE_GATE_EXIT
     mapping, message, reason = _list_tests(binary, args.timeout)
     if reason:
         return _environment_error(payload, out_path, reason, message)

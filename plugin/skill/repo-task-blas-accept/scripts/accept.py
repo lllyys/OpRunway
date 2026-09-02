@@ -8,6 +8,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import platform
+import shlex
 from pathlib import Path
 import re
 import shutil
@@ -1184,7 +1186,7 @@ def _performance_section(performance):
 
 
 def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
-                  performance_path):
+                  performance_path, args=None):
     """三类产物最小布局：report/（人读）、intermediate/（执行期 JSON）、repro/（最小可复现）。"""
     report_dir = out_dir / "report"
     inter_dir = out_dir / "intermediate"
@@ -1264,6 +1266,69 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
     for name in perf_sets.get("no_ref", []):
         lines.append(f"{name},perf_no_ref,NO_REF,no")
     _atomic_text(repro_dir / "cases.csv", "\n".join(lines) + "\n")
+    if args is not None:
+        manifest_cpc = (payload.get("runtime") or {}).get("calls_per_case")
+        run_id = payload.get("run_id")
+        script = "\n".join([
+            "#!/bin/sh",
+            "# 由 accept verdict 生成：同参复跑本轮验收链。",
+            "# 在原工作目录执行；换新 run-id 复跑时把 RUN_ID 改掉即可。",
+            "set -e",
+            f"WORKDIR={shlex.quote(str(Path.cwd()))}",
+            f"ACCEPT={shlex.quote(str(Path(__file__).resolve()))}",
+            f"RUN_ID={shlex.quote(str(run_id))}-rerun",
+            'cd "$WORKDIR"',
+            (
+                f"python3 \"$ACCEPT\" check --package {shlex.quote(str(package))}"
+                f" --repo {shlex.quote(str(args.repo))} --soc {shlex.quote(args.soc)}"
+                f" --device {args.device} --calls-per-case {manifest_cpc}"
+            ),
+            'cd "$WORKDIR/runtime"',
+            (
+                f"python3 verify_accuracy.py --repo {shlex.quote(str(args.repo))}"
+                f" --soc {shlex.quote(args.soc)} --device {args.device}"
+                " --run-id \"$RUN_ID\""
+            ),
+            (
+                f"python3 verify_performance.py --repo {shlex.quote(str(args.repo))}"
+                f" --soc {shlex.quote(args.soc)} --device {args.device}"
+                f" --run-id \"$RUN_ID\" --skip-build --calls-per-case {manifest_cpc}"
+            ),
+            'cd "$WORKDIR"',
+            (
+                f"python3 \"$ACCEPT\" verdict --package {shlex.quote(str(package))}"
+                f" --repo {shlex.quote(str(args.repo))} --soc {shlex.quote(args.soc)}"
+                f" --device {args.device} --run-id \"$RUN_ID\""
+                f" --out {shlex.quote(str(out_dir))}-rerun"
+            ),
+            "",
+        ])
+        rerun_sh = repro_dir / "rerun.sh"
+        _atomic_text(rerun_sh, script)
+        rerun_sh.chmod(0o755)
+        uname = platform.uname()
+        fingerprint = {
+            "generated_at": _timestamp(),
+            "platform": {
+                "system": uname.system, "release": uname.release,
+                "machine": uname.machine, "node": uname.node,
+            },
+            "python": sys.version.split()[0],
+            "ascend_env": {
+                key: os.environ.get(key)
+                for key in ("ASCEND_HOME", "ASCEND_TOOLKIT_HOME", "ASCEND_OPP_PATH")
+            },
+            "identity": {
+                "run_id": run_id,
+                "op": payload.get("op"),
+                "soc": payload.get("soc"),
+                "device": payload.get("device"),
+                "binary_sha256": (payload.get("evidence") or {}).get("binary_sha256"),
+                "csv_sha256": (payload.get("evidence") or {}).get("csv_sha256"),
+                "calls_per_case": manifest_cpc,
+            },
+        }
+        _atomic_json(repro_dir / "environment.json", fingerprint)
     return {"report": str(report_dir / "report.md"),
             "intermediate": str(inter_dir), "repro": str(repro_dir)}
 
@@ -1312,7 +1377,7 @@ def command_verdict(args):
         }
         layout = _write_layout(
             out_dir, payload, package, runtime, accuracy_path, rerun_path,
-            performance_path,
+            performance_path, args=args,
         )
         payload["layout"] = layout
         _atomic_json(out_dir / "intermediate" / "verdict.json", payload)
@@ -1416,7 +1481,7 @@ def command_verdict(args):
     }
     layout = _write_layout(
         out_dir, payload, package, runtime, accuracy_path, rerun_path,
-        performance_path,
+        performance_path, args=args,
     )
     payload["layout"] = layout
     _atomic_json(out_dir / "intermediate" / "verdict.json", payload)
