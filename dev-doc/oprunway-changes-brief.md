@@ -2,6 +2,16 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-02 · 量具 --device auto 起跑门自愈选卡落地（方案 1，设计先过 Codex 再实现）。**
+  设计审（thread `01a06149`）裁 ADJUST 五修全纳：单次有序遍历卡池（删预扫描与
+  重试魔数）、pool 进身份链、resolved 与门终态入 A5 机械闭合校验（A3/A4 允许
+  异卡并分别展示）、编译期定卡域 auto 禁 skip-build（逻辑 0 重建守法）、显式
+  卡号给 pool 即报错。auto 用 ASCEND_RT_VISIBLE_DEVICES 把选中物理卡映射为
+  逻辑 0（全局协议，matmul 回归中已实证对 blas 编译期定卡域有效）；显式卡号
+  行为一字不变。本地桩测全过；a5 真机验证抓到实战自愈：卡 0 正被他人占用，
+  auto 探测 BUSY 跳过选中卡 1，41/41 PASS、闭合校验过、报告标注实际物理卡。
+  跨 session 卡协调（租约）列为后续增量。重钉后三门零差异。
+
 - **2026-09-02 · matmul 四 PR 双通路回归（改版 skill，8/8 链全走通）。** 对 ops-blas
   PR!347–350（cherk/cher2k/csyrk/csymm，arch22）用当前 plugin 做「走/不走 casegen」
   双通路验收回归，a3 真机（910_93）容器内执行；casegen 三份新 FACTS 由 ultracode
