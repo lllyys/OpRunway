@@ -379,6 +379,37 @@ SCALAR_ROLES = {"scalar", "inout_scalar", "out_scalar"}
 BUFFER_ROLES = {"vector", "fixed_vector", "matrix", "int_array"}
 PF_SWEEP_SIZES = [64, 128, 256, 512, 1024, 2048, 4096]
 
+# harness_profile registry：算子域之间的惯例差异只进这张数据表，引擎代码不按域开分枝。
+# 字段面已冻结，加字段要过评审；本期只实例化 blas，稀疏域的值随 FACTS schema v2 落地。
+HARNESS_REGISTRY = {
+    "blas": {
+        # 以下取值与参数化之前的硬编码逐字节一致，改成查表不改变任何产物。
+        "seed_columns": ["random_seed"],
+        "description_column": "description",
+        "expect_column": "expect_result",
+        # 生成侧 expect 列的默认写值；没有 expect 列的域这里必须是 None。
+        "expect_default_token": "ACLBLAS_STATUS_SUCCESS",
+        # 域级闭合上界（parseStatus 全名）。单算子只能声明它的子集。
+        # 顺序即 README 状态词表小节的渲染顺序，重排会改产物。
+        "status_vocab_bound": [
+            "ACLBLAS_STATUS_SUCCESS", "ACLBLAS_STATUS_NOT_INITIALIZED",
+            "ACLBLAS_STATUS_ALLOC_FAILED", "ACLBLAS_STATUS_INVALID_VALUE",
+            "ACLBLAS_STATUS_MAPPING_ERROR", "ACLBLAS_STATUS_EXECUTION_FAILED",
+            "ACLBLAS_STATUS_INTERNAL_ERROR", "ACLBLAS_STATUS_NOT_SUPPORTED",
+            "ACLBLAS_STATUS_ARCH_MISMATCH", "ACLBLAS_STATUS_HANDLE_IS_NULLPTR",
+            "ACLBLAS_STATUS_INVALID_ENUM", "ACLBLAS_STATUS_UNKNOWN",
+        ],
+        # blas 的精度阈值写在 FACTS 里，主 CSV 不带阈值列。
+        "threshold_columns": [],
+        # aclblas 全部接口首参是 handle；None 表示该域不做这项断言。
+        "first_param_ctype": "aclblasHandle_t",
+        # 验收侧靠这些入口头文件认出算子仓属于哪个域。
+        "entry_headers": ["cann_ops_blas.h"],
+        # dense_formula 走静态显存估算；no_static_check 只跳过静态判定。
+        "footprint_policy": "dense_formula",
+    },
+}
+
 
 class GeneratorError(Exception):
     """表示带生成阶段上下文的确定性错误。"""
