@@ -1831,7 +1831,7 @@ def check_package(facts_path, require_rendered=True):
         problems.extend(package_problems)
     return {
         "facts": facts,
-        "header": _header_columns(facts) if not problems else None,
+        "header": _load_generator()._header_columns(facts) if not problems else None,
         "problems": problems,
         "report": report,
     }
@@ -1880,7 +1880,7 @@ def _run_check(args):
                 return 2
     _print_summary(facts)
     if args.print_header:
-        print(",".join(_header_columns(facts)))
+        print(",".join(_load_generator()._header_columns(facts)))
     if report is not None:
         print(
             f"pairs 覆盖 {report['pairs_covered']}/{report['pairs_total']}，"
