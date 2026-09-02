@@ -2,6 +2,19 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-02 · M7 checkpoint（七维审 ADJUST→四项修毕）+ 真机复验回归一例。**
+  评审（thread `01a060de`）裁定：构建/绑卡惯例应入 registry 冻结面——
+  build_device_flag/visible_devices_env/runtime_library_dirs 三字段入面（9→12，
+  该评审即冻结面变更 checkpoint），两模板删 BUILD_CONVENTIONS 本地副本改渲染注入
+  resolved 值；has_built_list 不入面，塌成「清单存在才核验，缺失由二进制寻址器
+  裁决」通用规则。rerun.sh 去 set -e（verify/verdict 非零退出是协议语义，逐步
+  打印不中断），缺 manifest 轮次不生成似是而非命令。run-chain 三处旧文同步、
+  perf-protocol 落字「calls_per_case 只计 API 调用，不计也不除 launch」。空闲门
+  payload 存全量输出。真机复验（legacy r5）抓出注入回归：render_runtime 合成
+  facts 无 schema_version，经 _harness_profile 静默落回 blas——正是此前评审警告
+  的隐含接口形态；改按 harness_profile 键直查 registry，r6 复验 sparse 惯例注入
+  正确、41/41 PASS、结论通过。证据补 evidence-final-legacy-r6。
+
 - **2026-09-02 · M7 完成（真机证据，用户裁定「证路径可通即可」）：双链闭合 + 空闲门三分支 + 性能链实跑 + V4。**
   在 950 容器内克隆 ops-sparse@5b2a5ba、装 GTest 后全链实跑。存量包链真证据全通：
   A1 env=0、A2 check=0、A3 41/41 PASS、A5 总体通过退出 0。新包链精确复现 R1 预期
