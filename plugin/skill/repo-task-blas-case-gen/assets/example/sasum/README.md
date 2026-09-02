@@ -131,7 +131,7 @@ pairs 覆盖 75/75，infeasible 0 对。
 ## 精度验收
 
 ```bash
-python3 verify_accuracy.py --repo <ops-blas-root> --soc <soc> --device 0
+python3 verify_accuracy.py --repo <repo-root> --soc <soc> --device 0
 ```
 
 结果写到 `results/accuracy_<run_id>.json`。退出码如下：
@@ -150,7 +150,7 @@ GTest JSON 与构建日志写入 `results/<run_id>/accuracy/`；阶段目录必�
 ## 性能验收
 
 ```bash
-python3 verify_performance.py --repo <ops-blas-root> --soc <soc> --device 0
+python3 verify_performance.py --repo <repo-root> --soc <soc> --device 0
 ```
 
 一条 gtest 用例只调用被测接口一次，用例里不自行预热、不重复调用；预热与重复采样由
