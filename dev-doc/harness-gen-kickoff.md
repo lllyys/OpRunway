@@ -42,8 +42,24 @@ case-gen 的 FACTS（`plugin/skill/repo-task-blas-case-gen/references/facts-sche
 - param.h 实样：`repos/ops-blas` 各 `test/<op>/`；PR 分支 feat/*-arch22 四算子
   （csymm/csyrk/cher2k/cherk）；plain ctrsm 的 18 列 CSV 样本（2026-09-02 微信两版本，
   表头同、数据行重掷，见当日核对结论）。
-- 旧 worktree `oprunway-blas-harness-gen`（blas-native 线 1486fc2）无本主题提交，其分支
-  已整体是本线祖先，可删。
+## 前身车道（重要：先读它，不要重新发明）
+
+worktree `oprunway-blas-harness-gen`（分支 feature/ops-blas-harness-gen，HEAD 1486fc2）里有
+一条**未 commit 的同主题车道**，2026-08-28/29 已走完 Increment 1+2：方案 v3 定稿
+（`dev-doc/harness-gen-plan.md`，四轮 Codex 七维评审；终局 = case-gen 编译 FACTS 出
+Contract IR → harness-gen 薄后端出 C++ → accept 拥有构建/运行；信任模型「如实、不过声」，
+`harness_source ∈ {generated, developer}`）、冷启动交接（`dev-doc/harness-gen-handoff.md`，
+含任何 session 可自跑的复验脚本）、`contract.py` + case-gen 首个 `tests/`（7 个行为测试）、
+package.py 列投影单源化（方案 C，Mr.0 拍板，thread `01a04b84`）。**那个 worktree 在移植完成前
+不许删**——工作全在未提交状态，强删即毁。
+
+本线第一个任务不是从零设计，而是**移植**：把前身车道的 Inc1+2（contract.py、tests、package.py
+单源化改造、plan/handoff 两文档、codex-review 的「半径与去重常冲突」原则段——本线缺此段）
+重放到本线的新基座上。注意冲突面：sparse R1 已把 package.py/模板大改（registry 12 字段、
+FACTS v2、v1/v2 分支），车道的 package.py 补丁是对旧基座写的，须按方案 C 的分层重做而非照抄；
+落完跑 handoff §7 复验脚本 + 三道回归门，过 Codex checkpoint（package.py check 属核心逻辑，
+无条件一轮），然后才可删前身 worktree。车道 plan 里「FACTS 升 v2」收尾项本线基座已交付，移植时
+把该项划掉。
 
 ## 纪律
 
