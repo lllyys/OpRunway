@@ -2,6 +2,18 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-03 · 双构建形态性能对照实验（PR!347 cherk，a3，用户指令）。** 问题：构建能否
+  交给开发者自备。同一量具/卡/参数测 TC_PF_132/164 三形态：Debug（旧）10421/56889µs；
+  Release-公共仓（build.sh，FORCE 行临时改 Release）310.1/1821.2µs；Release-开发者自建
+  （裸 cmake 同参）317.4/1789.6µs。结论三条：①物理性能一致（A/B 差 1.7–2.4%，落在
+  spread 0.6–5.2% 噪声内），Debug 失真乘数实测 31–34×，与 -O0 机制推断吻合；②开发者
+  自建两次踩 build.sh 隐藏契约（参数只认等号形式；一整块 export *_INCLUDE_PATH 不带则
+  98% 处 acl/acl.h 编译炸）——构建知识在脚本不在 CMake，自建不可复现；③阈值边界翻判：
+  TC_PF_132 在 0.8 线上 B=0.806 通过、A=0.788 失败，2.4% 抖动即可翻 PASS/FAIL。裁定
+  支持：验收锚定仓构建形态，修法是仓删 FORCE（#363），不接受开发者自备构建。现场：
+  wt-cherk 的 CMakeLists 已还原 Debug；wt-cherk-dev 留作实验树；证据 relA/B-*.log 与
+  performance_rel*.json 在 a3 stage。
+
 - **2026-09-02 · 上游 PR !4：sparse R1 两 skill 增量提回 Justbin。**
   发现 upstream.json 基线已过时（上游 dev/skills-v0.2.0 在 90e28ff 后并入了本仓
   blas-native 线的工作并前进 36 提交），仓规 §2 的基线 patch 路径失效；核实上游
