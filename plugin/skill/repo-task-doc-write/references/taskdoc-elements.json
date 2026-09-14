@@ -1,0 +1,1130 @@
+{
+  "schema_version": 1,
+  "template_version": "v3.0+",
+  "sections": [
+    "1",
+    "2.1",
+    "2.2",
+    "2.3",
+    "2.4",
+    "2.5",
+    "3.1",
+    "3.2",
+    "3.3",
+    "3.4",
+    "3.5",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8"
+  ],
+  "check_registry": [
+    "nonempty",
+    "section_present",
+    "no_placeholder",
+    "no_inline_link",
+    "table_header_matches",
+    "enum_value",
+    "signature_matches_param_table",
+    "range_matches_distribution",
+    "range_matches_algorithm",
+    "models_covered_by_perf_table",
+    "dtypes_covered_by_threshold_table",
+    "thresholds_match_standard",
+    "params_covered_by_generation_table",
+    "no_unbounded_range",
+    "no_vague_word",
+    "perf_criterion_has_comparator",
+    "error_column_not_uniform",
+    "per_dtype_threshold",
+    "env_lists_third_party_versions",
+    "random_strategy_when_signaled",
+    "human_reply_recorded",
+    "deliverables_complete",
+    "pr_target_is_a_path"
+  ],
+  "question_batches": [
+    {
+      "id": 1,
+      "name": "前提",
+      "elements": [
+        "2.2.project_mode",
+        "2.1.baseline",
+        "1.repo"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "接口",
+      "elements": [
+        "2.3.signature",
+        "2.1.operator_name"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "类型与排布",
+      "elements": [
+        "2.4.data_type",
+        "2.4.dtype",
+        "2.4.format"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "形状与值域",
+      "elements": [
+        "2.4.shape",
+        "2.4.value_range"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "异常行为",
+      "elements": [
+        "2.4.error_behavior"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "实现约束",
+      "elements": [
+        "2.5.non_contiguous",
+        "2.5.broadcast",
+        "2.5.dynamic_shape",
+        "2.5.inplace_view",
+        "2.5.deterministic",
+        "2.5.empty_tensor"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "精度",
+      "elements": [
+        "3.2.reference_api",
+        "3.2.threshold_table",
+        "3.2.verdict_formula",
+        "3.2.random_strategy"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "性能",
+      "elements": [
+        "3.3.baseline_env",
+        "3.3.criterion",
+        "3.3.case_table"
+      ]
+    }
+  ],
+  "elements": {
+    "1.background": {
+      "section": "1",
+      "name": "任务背景",
+      "form": "section_text",
+      "audience": [
+        "developer"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": false,
+      "checks": [
+        "nonempty",
+        "no_placeholder",
+        "no_inline_link",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        3
+      ],
+      "failure": "开发者不知道这个算子从哪来、为什么要做，无法判断实现取舍"
+    },
+    "1.language": {
+      "section": "1",
+      "name": "开发语言与工程",
+      "form": "section_text",
+      "audience": [
+        "developer"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": false,
+      "checks": [
+        "nonempty",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        3
+      ],
+      "failure": "开发者不知道用 Ascend C 还是别的，起手就可能选错技术栈"
+    },
+    "1.repo": {
+      "section": "1",
+      "name": "算子相关代码仓",
+      "form": "section_text",
+      "audience": [
+        "developer"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": false,
+      "checks": [
+        "nonempty",
+        "no_inline_link",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": false,
+      "checklist_items": [
+        3
+      ],
+      "failure": "开发者找不到参考实现与提交位置"
+    },
+    "2.1.operator_name": {
+      "section": "2.1",
+      "name": "算子名与接口名",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        2,
+        4
+      ],
+      "failure": "验收侧不知道要提交验收的是哪个接口名"
+    },
+    "2.1.formula": {
+      "section": "2.1",
+      "name": "数学公式",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "no_placeholder",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        4
+      ],
+      "failure": "开发者要去猜算子到底算什么，只写「参考 xxx」等于没写"
+    },
+    "2.1.algorithm": {
+      "section": "2.1",
+      "name": "算法说明",
+      "form": "section_text",
+      "audience": [
+        "developer"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        4
+      ],
+      "failure": "边界与分支行为没交代，开发者按自己的理解实现"
+    },
+    "2.1.baseline": {
+      "section": "2.1",
+      "name": "对标基线接口",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "no_inline_link",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        4
+      ],
+      "failure": "验收侧不知道拿什么当真值，只能自己挑一个"
+    },
+    "2.2.project_mode": {
+      "section": "2.2",
+      "name": "算子工程模式",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "enum_value:project_mode",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        5
+      ],
+      "failure": "验收侧的执行后端由工程模式唯一推导，模式不明就跑不起来"
+    },
+    "2.3.signature": {
+      "section": "2.3",
+      "name": "接口定义",
+      "form": "code_block",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "signature_matches_param_table",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": false,
+      "checklist_items": [
+        6,
+        7
+      ],
+      "failure": "签名不全或与参数表对不上，验收侧构造不出调用"
+    },
+    "2.4.param_name": {
+      "section": "2.4",
+      "name": "参数名",
+      "form": "table_column",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "signature_matches_param_table",
+        "table_header_matches",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": false,
+      "checklist_items": [
+        7
+      ],
+      "failure": "与接口定义对不上，开发者不知道实现哪个参数"
+    },
+    "2.4.direction": {
+      "section": "2.4",
+      "name": "输入／输出/属性",
+      "form": "table_column",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "enum_value:direction",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": false,
+      "checklist_items": [
+        7
+      ],
+      "failure": "输出是独立、元组还是原地不明，调用形态就错"
+    },
+    "2.4.description": {
+      "section": "2.4",
+      "name": "描述",
+      "form": "table_column",
+      "audience": [
+        "developer"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        7
+      ],
+      "failure": "参数含义靠猜，开发者按自己的理解实现"
+    },
+    "2.4.data_type": {
+      "section": "2.4",
+      "name": "数据类型",
+      "form": "table_column",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "enum_value:data_type",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": false,
+      "checklist_items": [
+        7
+      ],
+      "failure": "验收侧不知道该构造 tensor 还是 attr"
+    },
+    "2.4.dtype": {
+      "section": "2.4",
+      "name": "dtype类型",
+      "form": "table_column",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "enum_value:dtype",
+        "dtypes_covered_by_threshold_table",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": false,
+      "checklist_items": [
+        7
+      ],
+      "failure": "要测哪些 dtype 全凭猜，覆盖面无依据"
+    },
+    "2.4.format": {
+      "section": "2.4",
+      "name": "数据排布格式",
+      "form": "table_column",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "enum_value:format",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": false,
+      "checklist_items": [
+        7
+      ],
+      "failure": "排布不明，非连续与转置行为无从判断"
+    },
+    "2.4.shape": {
+      "section": "2.4",
+      "name": "维度(shape)",
+      "form": "table_column",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        7
+      ],
+      "failure": "shape 对齐约束与广播规则不明，用例造不出来"
+    },
+    "2.4.value_range": {
+      "section": "2.4",
+      "name": "值域范围",
+      "form": "table_column",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "no_unbounded_range",
+        "range_matches_distribution",
+        "range_matches_algorithm",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        7
+      ],
+      "failure": "开发者不知道要处理到什么范围，验收侧生成不出数据"
+    },
+    "2.4.error_behavior": {
+      "section": "2.4",
+      "name": "异常行为",
+      "form": "table_column",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "error_column_not_uniform",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        7
+      ],
+      "failure": "给不出具体非法输入，错误用例构造不出来"
+    },
+    "2.5.non_contiguous": {
+      "section": "2.5",
+      "name": "非连续 Tensor 支持",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "section_present:2.5",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        1
+      ],
+      "failure": "验收侧记为未声明，挂一个待确认项；开发者不知道要不要处理 stride"
+    },
+    "2.5.broadcast": {
+      "section": "2.5",
+      "name": "broadcast 规则",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "section_present:2.5",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        1
+      ],
+      "failure": "输入 shape 不等时的行为未定义"
+    },
+    "2.5.dynamic_shape": {
+      "section": "2.5",
+      "name": "dynamic shape 要求",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "section_present:2.5",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        1
+      ],
+      "failure": "开发者不知道要不要支持编译期未知 shape"
+    },
+    "2.5.inplace_view": {
+      "section": "2.5",
+      "name": "原地与视图语义",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "section_present:2.5",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        1
+      ],
+      "failure": "输出是否复用输入内存不明，调用方可能踩内存"
+    },
+    "2.5.deterministic": {
+      "section": "2.5",
+      "name": "确定性计算要求",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "section_present:2.5",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        1
+      ],
+      "failure": "同输入两次结果是否必须一致没交代，验收侧无从判定"
+    },
+    "2.5.empty_tensor": {
+      "section": "2.5",
+      "name": "空 Tensor 与 0 维处理",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "section_present:2.5",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        1
+      ],
+      "failure": "社区任务书最高频漏项，开发者不知道要不要处理，验收侧不知道该不该构造"
+    },
+    "3.1.hardware": {
+      "section": "3.1",
+      "name": "适配硬件与具体型号",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": false,
+      "checks": [
+        "nonempty",
+        "models_covered_by_perf_table",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        8
+      ],
+      "failure": "只写产品系列名，性能要求落不到具体型号上"
+    },
+    "3.1.cann_version": {
+      "section": "3.1",
+      "name": "CANN 版本",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": false,
+      "checks": [
+        "nonempty",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        8
+      ],
+      "failure": "开发者装错版本，接口对不上"
+    },
+    "3.1.third_party": {
+      "section": "3.1",
+      "name": "三方软件版本",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": false,
+      "checks": [
+        "nonempty",
+        "env_lists_third_party_versions",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        8
+      ],
+      "failure": "torch 与 torch_npu 版本不明，基线跑不出同样的数；GPU 标杆无驱动版本则性能对标不可复现"
+    },
+    "3.2.reference_api": {
+      "section": "3.2",
+      "name": "精度对标接口",
+      "form": "section_text",
+      "audience": [
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        9
+      ],
+      "failure": "验收侧不知道跟谁比"
+    },
+    "3.2.threshold_table": {
+      "section": "3.2",
+      "name": "逐 dtype 阈值表",
+      "form": "table",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "per_dtype_threshold",
+        "thresholds_match_standard",
+        "dtypes_covered_by_threshold_table",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        9
+      ],
+      "failure": "只写一句「满足生态标准」，验收侧要自己去翻标准并挑一档，挑错了算谁的"
+    },
+    "3.2.verdict_formula": {
+      "section": "3.2",
+      "name": "精度判定公式",
+      "form": "section_text",
+      "audience": [
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        9
+      ],
+      "failure": "有阈值但没说怎么算通过，逐用例还是整体通过率不明"
+    },
+    "3.2.random_strategy": {
+      "section": "3.2",
+      "name": "随机算子精度对比策略",
+      "form": "section_text",
+      "audience": [
+        "acceptance"
+      ],
+      "required": "conditional",
+      "condition": "random_signal_hit",
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "random_strategy_when_signaled",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        9
+      ],
+      "failure": "随机算子拿去验收会被 derive_interface.py 退出码 2 拦住，整轮验收开不了工"
+    },
+    "3.3.baseline_env": {
+      "section": "3.3",
+      "name": "性能标杆接口与环境",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": false,
+      "checks": [
+        "nonempty",
+        "env_lists_third_party_versions",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        10
+      ],
+      "failure": "标杆数据在什么机器什么版本上采的不明，复现不出来"
+    },
+    "3.3.criterion": {
+      "section": "3.3",
+      "name": "性能判据",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": false,
+      "checks": [
+        "nonempty",
+        "perf_criterion_has_comparator",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        10
+      ],
+      "failure": "「持平」这类写法读起来像判据，但没有任何一步能照它执行"
+    },
+    "3.3.case_table": {
+      "section": "3.3",
+      "name": "性能 case 与标杆数据",
+      "form": "table",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": false,
+      "checks": [
+        "nonempty",
+        "models_covered_by_perf_table",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        10
+      ],
+      "failure": "没有具体 case 和标杆数字，开发者不知道优化到什么程度算够"
+    },
+    "3.4.memory": {
+      "section": "3.4",
+      "name": "内存要求",
+      "form": "section_text",
+      "audience": [
+        "developer"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": false,
+      "checks": [
+        "nonempty",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        11
+      ],
+      "failure": "内存占用没有上界，开发者可能用空间换时间换到不可接受"
+    },
+    "3.5.tooling": {
+      "section": "3.5",
+      "name": "自验工具与策略",
+      "form": "section_text",
+      "audience": [
+        "developer"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "no_placeholder",
+        "no_inline_link",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        12
+      ],
+      "failure": "开发者不知道用什么工具自验，交上来的自测报告口径各不相同"
+    },
+    "3.5.param_mapping": {
+      "section": "3.5",
+      "name": "参数序列对应关系",
+      "form": "section_text",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "conditional",
+      "condition": "signature_differs_from_baseline",
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        12
+      ],
+      "failure": "参数顺序与标杆不一致却没说对应关系，基线调用会传错位置"
+    },
+    "3.5.generation_rules": {
+      "section": "3.5",
+      "name": "入参生成规则表",
+      "form": "table",
+      "audience": [
+        "developer",
+        "acceptance"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "params_covered_by_generation_table",
+        "range_matches_distribution",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        12
+      ],
+      "failure": "测试数据怎么造没规则，开发者和验收方造出来的分布不是一回事"
+    },
+    "4.deliverables": {
+      "section": "4",
+      "name": "验收交付件",
+      "form": "table",
+      "audience": [
+        "developer"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "deliverables_complete",
+        "no_inline_link",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        13
+      ],
+      "failure": "开发者交到一半才发现漏了设计文档或自测报告"
+    },
+    "5.pr_target": {
+      "section": "5",
+      "name": "PR 合入目录",
+      "form": "section_text",
+      "audience": [
+        "developer"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": false,
+      "checks": [
+        "nonempty",
+        "pr_target_is_a_path",
+        "no_inline_link",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        14
+      ],
+      "failure": "只写到仓不写到目录，PR 提错位置返工"
+    },
+    "6.references": {
+      "section": "6",
+      "name": "参考资料",
+      "form": "section_text",
+      "audience": [
+        "developer"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "agent",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "no_inline_link"
+      ],
+      "vague_forbidden": false,
+      "checklist_items": [
+        1
+      ],
+      "failure": "开发者没有入门材料，从零摸索"
+    },
+    "7.notes": {
+      "section": "7",
+      "name": "特别注意事项",
+      "form": "section_text",
+      "audience": [
+        "developer"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "human",
+      "agent_may_propose": true,
+      "checks": [
+        "nonempty",
+        "no_inline_link",
+        "no_vague_word",
+        "human_reply_recorded"
+      ],
+      "vague_forbidden": true,
+      "checklist_items": [
+        1
+      ],
+      "failure": "已知的坑没有预警，每个开发者重踩一遍"
+    },
+    "8.environment": {
+      "section": "8",
+      "name": "环境获取",
+      "form": "fixed",
+      "audience": [
+        "developer"
+      ],
+      "required": "always",
+      "condition": null,
+      "decision_owner": "template",
+      "agent_may_propose": false,
+      "checks": [
+        "section_present:8"
+      ],
+      "vague_forbidden": false,
+      "checklist_items": [
+        1
+      ],
+      "failure": "开发者不知道去哪申请算力"
+    }
+  }
+}

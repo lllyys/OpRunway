@@ -54,7 +54,9 @@ MUTATORS = [
 ]
 
 # 派 Codex 落盘的三条路径
-CODEX_CMD = re.compile(r"codex-runner\.mjs|codex\s+exec|\bcodex\b\s+[^-\s]")
+# 第三支要求 `codex` 是独立的命令词：前面不能是 `.`（那是 `.codex` 目录），后面不能直接接
+# shell 操作符或重定向——`ls .codex 2>/dev/null`、`which codex | head` 都不是派单。
+CODEX_CMD = re.compile(r"codex-runner\.mjs|codex\s+exec|(?<!\.)\bcodex\b\s+(?![-;&|<>]|\d+[<>])\S")
 CODEX_TOOLS = ("mcp__codex-cli__codex", "mcp__codex-cli__codex-reply")
 IMPLEMENT_SKILLS = ("cc-suite:implement", "cc-suite:continue", "cc-suite:audit-fix")
 

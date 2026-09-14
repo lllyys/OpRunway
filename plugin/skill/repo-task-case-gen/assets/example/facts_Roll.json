@@ -1,0 +1,31 @@
+{
+  "op": "Roll",
+  "aclnn_name": "Roll",
+  "baseline": "torch.roll",
+  "backend": "aclnn",
+  "signature": {
+    "source": "opdoc",
+    "text": "aclnnStatus aclnnRollGetWorkspaceSize(const aclTensor* x, const aclIntArray* shifts, const aclIntArray* dims, aclTensor* out, uint64_t* workspaceSize, aclOpExecutor** executor)"
+  },
+  "params": [
+    {"name": "x", "role": "input", "atk_type": "tensor",
+     "dtypes": ["bool", "uint8", "int8", "bf16", "fp16", "fp32", "int32", "uint32", "complex64"],
+     "source": "taskdoc"},
+    {"name": "shifts", "role": "input", "atk_type": "attrs", "dtypes": ["int"], "source": "opdoc"},
+    {"name": "dims", "role": "input", "atk_type": "attrs", "dtypes": ["int"], "source": "opdoc"},
+    {"name": "out", "role": "output", "atk_type": "tensor",
+     "dtypes": ["bool", "uint8", "int8", "bf16", "fp16", "fp32", "int32", "uint32", "complex64"],
+     "source": "opdoc"}
+  ],
+  "shape": {"rank": [0, 8], "source": "opdoc"},
+  "constraints": [
+    {"text": "dims 非空时 shifts 与 dims 长度必须一致", "source": "opdoc"},
+    {"text": "dims 为空时 shifts 长度必须为 1，按展平视图做一维 roll", "source": "opdoc"},
+    {"text": "dims 取值范围为 [-rank, rank)", "source": "opdoc"},
+    {"text": "输入与输出 dtype 必须一致，格式必须为 ND", "source": "opdoc"},
+    {"text": "complex64 为本任务新增支持，原有 dtype 不得回归", "source": "taskdoc"}
+  ],
+  "output": {"kind": "single", "position": "out", "source": "opdoc"},
+  "accuracy": {"acc": "default", "source": "taskdoc"},
+  "performance": {"kind": "none", "source": "taskdoc"}
+}

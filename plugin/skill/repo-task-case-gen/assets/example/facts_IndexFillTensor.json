@@ -1,0 +1,38 @@
+{
+  "op": "IndexFillTensor",
+  "aclnn_name": "IndexFillTensor",
+  "baseline": "torch.index_fill",
+  "backend": "aclnn",
+  "signature": {
+    "source": "opdoc",
+    "text": "aclnnStatus aclnnIndexFillTensorGetWorkspaceSize(const aclTensor* self, int64_t dim, const aclIntArray* index, const aclScalar* value, aclTensor* out, uint64_t* workspaceSize, aclOpExecutor** executor)"
+  },
+  "params": [
+    {"name": "self", "role": "input", "atk_type": "tensor",
+     "dtypes": ["fp16", "fp32", "fp64", "int8", "uint8", "int16", "int32", "int64", "bool", "bf16"],
+     "source": "opdoc"},
+    {"name": "dim", "role": "input", "atk_type": "attr", "dtypes": ["int"], "source": "opdoc"},
+    {"name": "index", "role": "input", "atk_type": "attrs", "dtypes": ["int"], "source": "opdoc"},
+    {"name": "value", "role": "input", "atk_type": "scalar",
+     "dtypes": ["fp16", "fp32", "fp64", "int8", "uint8", "int16", "int32", "int64", "bool", "bf16"],
+     "source": "opdoc"},
+    {"name": "out", "role": "output", "atk_type": "tensor",
+     "dtypes": ["fp16", "fp32", "fp64", "int8", "uint8", "int16", "int32", "int64", "bool", "bf16"],
+     "source": "opdoc"}
+  ],
+  "shape": {"rank": [1, 8], "source": "opdoc"},
+  "constraints": [
+    {"text": "self 1-8 维时 dim 取值范围 [-self.dim(), self.dim())", "source": "opdoc"},
+    {"text": "index 中的元素值必须小于 self 在 dim 维的大小", "source": "opdoc"},
+    {"text": "value 需可转化为 self 的数据类型", "source": "opdoc"},
+    {"text": "out 的 dtype 与 shape 与 self 一致", "source": "opdoc"},
+    {"text": "int16、int8、uint8、double 为本任务新增支持，原有 dtype 不得回归", "source": "taskdoc"}
+  ],
+  "output": {"kind": "single", "position": "out", "source": "opdoc"},
+  "accuracy": {"acc": "default", "source": "taskdoc"},
+  "performance": {
+    "kind": "cross_dtype",
+    "pairs": [["int16", "int32"], ["int8", "int32"], ["uint8", "int32"], ["fp64", "int64"]],
+    "source": "taskdoc"
+  }
+}

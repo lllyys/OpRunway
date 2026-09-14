@@ -122,7 +122,7 @@ git -C "$W" rev-parse --short HEAD           # 记下，作为本轮 plugin 版�
 送过去，排除构建产物：
 
 ```bash
-COPYFILE_DISABLE=1 tar czf - --exclude='__pycache__' --exclude='._*' -C "$W/plugin" . \
+COPYFILE_DISABLE=1 tar czf - --exclude='__pycache__' --exclude='._*' -C "$W/plugin" .claude-plugin skill \
   | ssh "$OPRUNWAY_MACHINE_SSH_HOST" \
     "docker exec -i $OPRUNWAY_MACHINE_CONTAINER bash -lc 'mkdir -p $ROOT/plugin && tar xzf - -C $ROOT/plugin'"
 ```
@@ -131,14 +131,18 @@ COPYFILE_DISABLE=1 tar czf - --exclude='__pycache__' --exclude='._*' -C "$W/plug
 
 ```bash
 # 本地
-cd "$W/plugin" && find . -type f -not -path '*__pycache__*' | sed 's|^\./||' | sort \
-  | while read f; do shasum -a 256 "$f" | cut -d' ' -f1; done | shasum -a 256
-# 目标机同理，用 sha256sum
+cd "$W/plugin" && find .claude-plugin skill -type f -not -path '*__pycache__*' | sort \
+  | while read -r f; do printf '%s  %s\n' "$(shasum -a 256 "$f" | cut -d' ' -f1)" "$f"; done | shasum -a 256
+# 目标机同理，find 同样收窄到 .claude-plugin skill，用 sha256sum
 ```
 
+步骤 5 与步骤 7a 使用同一条摘要命令与同一组排除项，三处（本地、目标机、中性副本）可互相对照。
+
 再确认远端结构完整：`ls $ROOT/plugin/.claude-plugin/plugin.json
-$ROOT/plugin/skills/acceptance-workflow/SKILL.md` 两个文件都在。plugin 已不含 Python 模块，
+$ROOT/plugin/skill/repo-task-atk-test/SKILL.md` 两个文件都在。plugin 的判据脚本随 skill 位于其 scripts/ 目录，
 没有可导入的入口，也不做导入自检。
+
+开发件（`CLAUDE.md`、`README.md`、`docs/`）不随部署分发——隔离会话物理接触不到它们，测到的才是 skill 自身的零上下文自足性。
 
 ## 步骤 6　定位 atk
 
@@ -157,20 +161,23 @@ mkdir -p "$ISO"
 **每轮换新目录。** 复用会让上一轮残留进下一轮视野，与「干净工作目录」是同一条规矩。必须在仓外，否则
 仓规仍会被加载，隔离失效。
 
-## 步骤 7a　把 plugin 复制到中性目录
+## 步骤 7a　把 plugin 发布切片复制到中性目录
 
 `--plugin-dir` 不能指向仓内路径，否则会话顺着它就能翻整个仓库。复制一份到仓外，用内容摘要命名：
 
 ```bash
-D=$(cd "$W/plugin" && find . -type f -not -path '*__pycache__*' | sed 's|^\./||' | sort \
-  | while read -r f; do shasum -a 256 "$f" | cut -d' ' -f1; done | shasum -a 256 | cut -c1-12)
+D=$(cd "$W/plugin" && find .claude-plugin skill -type f -not -path '*__pycache__*' \
+  | sort | while read -r f; do printf '%s  %s\n' "$(shasum -a 256 "$f" | cut -d' ' -f1)" "$f"; done \
+  | shasum -a 256 | cut -c1-12)
 PLUGIN=/private/tmp/oprw-plugin-$D
 rm -rf "$PLUGIN"; mkdir -p "$PLUGIN"
 COPYFILE_DISABLE=1 tar cf - --exclude='__pycache__' --exclude='._*' --exclude='.pytest_cache' \
-  -C "$W/plugin" . | tar xf - -C "$PLUGIN"
+  -C "$W/plugin" .claude-plugin skill | tar xf - -C "$PLUGIN"
 ```
 
-按摘要命名有个副作用是好的：本地这份和步骤 5 发到目标机的那份内容相同，摘要天然对齐，省一次核对。
+按摘要命名有个副作用是好的：这份中性副本与步骤 5 发到目标机的那份用同一条发布切片摘要命令，
+输入集合与算法完全一致，摘要可直接对照。开发件（`CLAUDE.md`、`README.md`、`docs/`）不进中性副本，
+隔离会话顺着 `--plugin-dir` 也接触不到它们。
 
 复制前先确认本地 `plugin/` 下没有 `.pytest_cache`、`__pycache__` 或编辑器临时文件——它们会混进摘要，
 让两侧对不上。
@@ -241,12 +248,12 @@ python3 "$(dirname "$0")/watch.py" "$ISO/run.jsonl" --brief   # 只看人话
 python3 "$(dirname "$0")/watch.py" "$ISO/run.jsonl" --full    # 结果不截断
 ```
 
-它把事件流归成步骤条加人话加真实命令与结果：走到第几步（锚定输入 / 冻结 spec 与 design / 编译安装与
-装载身份 / 生成 case / 精度 / 性能 / 证据闭合）、说了什么、跑了哪些命令、哪些是真失败。只读，
+它把事件流归成步骤条加人话加真实命令与结果：走到第几步（任务书解读 / 用例生成 / 编译安装部署 /
+精度性能测试 / 输出测试结果）、说了什么、跑了哪些命令、哪些是真失败。只读，
 Ctrl-C 不影响会话继续跑。
 
-两点判读注意。其一，事件流不带时间戳，所以已经写在文件里的历史事件不标时间，只有跟随期间新到的才标，
-总时长按文件创建时刻算。其二，会话摸索目标机环境时会大量出现路径不存在、grep 无命中一类的非零退出，
+两点判读注意。其一，事件流不带时间戳，所以已经写在文件里的历史事件不标时间；观察器追到文件末尾后，
+只给新到事件标从开始跟随算起的时长。其二，会话摸索目标机环境时会大量出现路径不存在、grep 无命中一类的非零退出，
 那些是探测不是故障，不要按故障上报。
 
 **会话结束不等于验收结束。** 无头会话可能在正式 CLI 还在跑时就结束——它一旦不再发出工具调用就会退出，

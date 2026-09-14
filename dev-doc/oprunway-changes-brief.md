@@ -2,6 +2,398 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-14 · msprof 性能通路修复已实现（wave 1-2 完成，待真机全量回归关闭）。**
+  分支 `fix/msprof-perf-pipeline`，S1∥S2∥S3 并行落地：模板量具改单次采样免 warmup、
+  去显式 export、补采集开关、基线重复键首行生效+warning、逐例进度行；四份契约文档同步
+  （另揪出计划外清扫漏项 troubleshooting.md 与 README 模板，已一并修）；accept
+  `_load_baseline` 统一首行生效（原实现实为**末行覆盖**，与计划所述 raise 都不合 C2）、
+  check.json 证据源钉死工作目录。V0 真机穿刺（A3/910_93，Mr.0 逐项授权）三项全有结论：
+  V-1 过（新形态 op_summary 恰一份、kernel 行恰 1，launches [2,…]→[1]）；V-2 过（ctpmv
+  Release 重建后三尺寸单采样 vs 去污染参照偏差 1.7%/0.6%/0.1%，无冷启动台阶——途中再踩
+  build.sh 默认 Debug 暗坑，Release 后才对齐）；V-3 **翻车出真相**：msprof 根本不透传
+  application 失败（exit 7/SIGSEGV 全吞、只要分析完成一律退 0），按 plan 预设分支改判
+  「gtest JSON 执行成功证据」（`--gtest_output=json:` 逐采样定址，判定 1-4），Codex 评审
+  NEEDS REVISION 12 条按七维全吸收成附录 A v2，S1/S2 补丁落地，修订版复验直证（判定
+  1 函数级四形态、判定 2/4 端到端、C2/C3/C4 全兑现，单例 ~6-7s→200 例 ~20min）。
+  example 两份重渲染零漂移。wave 3 checkpoint 已过：FIX_NEEDED（判定 1 完成标记二选一、
+  failures 畸形值、README 模板与 readme-contract.md 两处清扫漏项等 3P1+3P2）全部修复，
+  真机七形态复验过，Codex verify 六项 FIXED。**wave 4 真机回归完成**（Mr.0 授权 V-4 载具
+  cgeru→ctpmv）：V-4 ctpmv 200 例 23.4min 跑完，195 PASS/5 FAIL——5 例即 0911 已知小尺寸
+  窄面（待 aclrtEvent 复核那批），launches 全 [1] 双份计数零复发；V-5 三项全过（sger FACTS
+  升级包 A1→A5 全链、--out 外指 C5、无 summary→NO_KERNEL），四条判定线全部端到端直证；
+  旧事实表 613/1139/197µs 恰为新值 2×，旧「实测」即双份口径，两 skill CLAUDE.md 事实表
+  已重写。todo 三条关闭。全程记录 [msprof-perf-fix-plan.md](msprof-perf-fix-plan.md)
+  附录 A.1-A.11。isolated-acceptance 无头正式口径未走，不据此宣称任何算子正式通过。
+  本仓 commit 899c7e1 已推 origin/fix/msprof-perf-pipeline；**上游 PR !7 已提**
+  （Justbin/repo-task-atk-test，base main@febf529，经 fork brian66237，commit d1c9a3b，
+  两 skill 15 文件 +843/−254）：上游 main 两 blas 树与本仓 msprof 前基点 22e07a4 逐字节
+  一致（PR !4 已合入），patch 零冲突应用、与本仓 HEAD 逐字节核对通过；上游分支已由
+  dev/skills-v0.2.0 收敛为 main，upstream.json 的 baseline/mirror_commit 过时遗留仍在。
+
+- **2026-09-13 · msprof 性能通路修复立项（plan 已批，未动 skill）。** Mr.0 定案六件事：
+  每 case 单次采样免 warmup 不批量（A7 提速 ~6×）、去显式 `--export`（A1 源头消除）、补
+  `--ai-core/--task-time`（A2）、基线重复键首行生效不再崩（A3）、逐 case 进度反馈、独立
+  「产物目录」参数；不留运行时兜底。实施计划
+  [msprof-perf-fix-plan.md](msprof-perf-fix-plan.md)（交接版：冻结契约 C1-C7、S1∥S2∥S3
+  并行分工、真机验证矩阵 V-1~V-5），已过 Codex 七维评审（NEEDS REVISION→P1/P2 全吸收：
+  accept `_load_baseline` 末行生效须与模板统一、产物目录证据寻址须钉死工作目录、删 warmup
+  的 CRASH 迁移属有条件结论待 V-3）。范围硬边界：只动两个 BLAS skill。另:Ctpmv 8 条小尺寸
+  边界经 subagent 复核裁定「须 aclrtEvent 复核才给全 200 最终计数」，Mr.0 暂缓（文档未动）。
+  accept msprof 通路把同一次采集导两遍（`--application` 自动导 + 显式 `--export=on`），
+  两份 op_summary 落同一目录，`parse_op_summary` glob 后不去重全累加 → launches/kernel_us
+  翻倍 → 好算子假 FAIL。Ctpmv/910B3 实证：launches 全 200 例=[2,2,2,2,2]，kernel÷2 逐条
+  吻合 a3/910_93 单份值，去重后裁决 61→192 PASS；cgeru/950 同型（[2,2,2,2,2]→[1,1,1,1,1]）。
+  记 [dev-doc/msprof-op-summary-double-count.md](msprof-op-summary-double-count.md)，
+  修法（解析去重 / 不重复导出 / 补 launches 门）入 todo，实施须过 checkpoint。边界：
+  Ctpmv op_summary 原文未回传，「两遍导出→两份文件」这环是推断未逐字节验。
+
+- **2026-09-03 · 双构建形态性能对照实验（PR!347 cherk，a3，用户指令）。** 问题：构建能否
+  交给开发者自备。同一量具/卡/参数测 TC_PF_132/164 三形态：Debug（旧）10421/56889µs；
+  Release-公共仓（build.sh，FORCE 行临时改 Release）310.1/1821.2µs；Release-开发者自建
+  （裸 cmake 同参）317.4/1789.6µs。结论三条：①物理性能一致（A/B 差 1.7–2.4%，落在
+  spread 0.6–5.2% 噪声内），Debug 失真乘数实测 31–34×，与 -O0 机制推断吻合；②开发者
+  自建两次踩 build.sh 隐藏契约（参数只认等号形式；一整块 export *_INCLUDE_PATH 不带则
+  98% 处 acl/acl.h 编译炸）——构建知识在脚本不在 CMake，自建不可复现；③阈值边界翻判：
+  TC_PF_132 在 0.8 线上 B=0.806 通过、A=0.788 失败，2.4% 抖动即可翻 PASS/FAIL。裁定
+  支持：验收锚定仓构建形态，修法是仓删 FORCE（#363），不接受开发者自备构建。现场：
+  wt-cherk 的 CMakeLists 已还原 Debug；wt-cherk-dev 留作实验树；证据 relA/B-*.log 与
+  performance_rel*.json 在 a3 stage。
+
+- **2026-09-02 · 上游 PR !4：sparse R1 两 skill 增量提回 Justbin。**
+  发现 upstream.json 基线已过时（上游 dev/skills-v0.2.0 在 90e28ff 后并入了本仓
+  blas-native 线的工作并前进 36 提交），仓规 §2 的基线 patch 路径失效；核实上游
+  现有两个 blas 树分别精确等于本分支历史提交 78283e9/307662b（严格祖先，零覆盖
+  风险）后，PR 分支取 tip 3566d76 + 两 skill 目录整树替换（与本仓逐字节一致），
+  21 文件 +3189/−556，经 fork brian66237 提交，base dev/skills-v0.2.0。
+  遗留：upstream.json 的 baseline/mirror_commit 待做一轮同步上游后更新。
+
+- **2026-09-02 · 评审纪律扩面：audit 的 fix 段同受七维约束（用户裁定）。**
+  audit 修复清单不照单全收，每项落地前按七维评估，会退化的调整或明确遗留并记理由；
+  入 codex-review.md，AGENTS.md §5 过时的「六个维度」同步改七。
+
+- **2026-09-02 · push 前仓规一轮 audit（一轮即停）+ 首推 feature/sparse-r1。**
+  对 M7 checkpoint 后的 plugin 增量（报告增详、A1 快照、--device auto 实现、perf
+  补丁）做只读 audit（thread `01a0615a`）：裁 FIX_NEEDED、无 P0，4×P1 + 4×P2 集中在
+  rerun.sh 传参不全与 pool 身份链未贯穿 evidence_id/契约绑定。用户裁定本轮不修，
+  遗留清单全文入 todo（P0 sparse R1 节首条），修复时注意三处解析器对称同改。
+
+- **2026-09-02 · perf 模板 --device auto 缺口修复并 A4 真机验证（push 前快验）。**
+  事故：批量补丁脚本在写入前断言中止，性能模板漏掉解析/选卡两函数，argparse 仍是
+  int——桩测只测了精度模板没测性能模板，漏网。修复：把 58 行公共块按行切片回填
+  verify_performance.py，两模板逐字节对称，性能模块独立桩测补上；重钉后三门零差异。
+  a5 真机 A4 验证：`--device auto` 被接受，卡 0 忙（npu-smi 原始输出全量入证据）
+  跳过选卡 1，4 条 PF 用例全测得，身份链 device=auto/pool=0–7/resolved=1 完整。
+  教训入库：改成对渲染出的两个模块分别桩测，ast.parse 与单模块测试不足以兜底。
+
+- **2026-09-02 · 量具 --device auto 起跑门自愈选卡落地（方案 1，设计先过 Codex 再实现）。**
+  设计审（thread `01a06149`）裁 ADJUST 五修全纳：单次有序遍历卡池（删预扫描与
+  重试魔数）、pool 进身份链、resolved 与门终态入 A5 机械闭合校验（A3/A4 允许
+  异卡并分别展示）、编译期定卡域 auto 禁 skip-build（逻辑 0 重建守法）、显式
+  卡号给 pool 即报错。auto 用 ASCEND_RT_VISIBLE_DEVICES 把选中物理卡映射为
+  逻辑 0（全局协议，matmul 回归中已实证对 blas 编译期定卡域有效）；显式卡号
+  行为一字不变。本地桩测全过；a5 真机验证抓到实战自愈：卡 0 正被他人占用，
+  auto 探测 BUSY 跳过选中卡 1，41/41 PASS、闭合校验过、报告标注实际物理卡。
+  跨 session 卡协调（租约）列为后续增量。重钉后三门零差异。
+
+- **2026-09-02 · matmul 四 PR 双通路回归（改版 skill，8/8 链全走通）。** 对 ops-blas
+  PR!347–350（cherk/cher2k/csyrk/csymm，arch22）用当前 plugin 做「走/不走 casegen」
+  双通路验收回归，a3 真机（910_93）容器内执行；casegen 三份新 FACTS 由 ultracode
+  工作流并行授权（cherk 用现成示例）。结果矩阵：规格包链 4/4 到 A5——精度
+  204/208、223/227、212/216、214/218，各恰 4 条 n=8000 大方阵被 harness 按设计
+  SKIP（本机资源不及参考机 910b4），现版判非通过（旧版 08-28 把 SKIP 静默缩出
+  期望集判全过——口径差异，SKIP 裁决待用户定）；casegen 链 4/4 到 A5——pairwise
+  挖出 18 条规格包未覆盖的真精度 FAIL（签名一致：UPPER/N 或 LEFT/UPPER × 小
+  k/n × RANDOM_EXTREME/ALTER 填充）。性能面 14 条实测全 FAIL 系上游 #363 强制
+  Debug 构建（-O0）失真，照实记录不作数（用户裁定不做 Release 补充测量）。
+  过程发现并实证：ASCEND_RT_VISIBLE_DEVICES 运行时重映射对 blas 编译期定卡域
+  同样有效（物理空闲卡映射逻辑 0，免重编换卡）；共享机他人进程两次占卡被空闲
+  门正确阻断。证据落 ignored reports/blas-regress-20260902/。**回归结论：两条
+  通路的管线行为全部正常，改版 skill 无回归。**
+
+- **2026-09-02 · 验收报告适度增详（用户指示）。** 三节骨架不变：头部摘要补完整身份链
+  （包 CSV/基线/二进制 SHA-256 全量、性能键；部署 CSV 仅在与包不一致时另列——
+  这行当场暴露了新包链测试后克隆里部署 CSV 未复原的状态，已恢复并以 r7 轮重出
+  一致证据）与「intermediate//repro/」证据指引；性能节补可比集逐用例表
+  （kernel_us/gpu_ms/ratio/spread/verdict，>30 条截断指向 JSON）、threshold、
+  scope caveat 解释、NO_REF 计数。回放 cherk 实渲染含 4 行逐用例表；存量链
+  r7 真机复验通过。证据包更新为 evidence-final-legacy-r7。
+
+- **2026-09-02 · M7 checkpoint（七维审 ADJUST→四项修毕）+ 真机复验回归一例。**
+  评审（thread `01a060de`）裁定：构建/绑卡惯例应入 registry 冻结面——
+  build_device_flag/visible_devices_env/runtime_library_dirs 三字段入面（9→12，
+  该评审即冻结面变更 checkpoint），两模板删 BUILD_CONVENTIONS 本地副本改渲染注入
+  resolved 值；has_built_list 不入面，塌成「清单存在才核验，缺失由二进制寻址器
+  裁决」通用规则。rerun.sh 去 set -e（verify/verdict 非零退出是协议语义，逐步
+  打印不中断），缺 manifest 轮次不生成似是而非命令。run-chain 三处旧文同步、
+  perf-protocol 落字「calls_per_case 只计 API 调用，不计也不除 launch」。空闲门
+  payload 存全量输出。真机复验（legacy r5）抓出注入回归：render_runtime 合成
+  facts 无 schema_version，经 _harness_profile 静默落回 blas——正是此前评审警告
+  的隐含接口形态；改按 harness_profile 键直查 registry，r6 复验 sparse 惯例注入
+  正确、41/41 PASS、结论通过。证据补 evidence-final-legacy-r6。
+
+- **2026-09-02 · M7 完成（真机证据，用户裁定「证路径可通即可」）：双链闭合 + 空闲门三分支 + 性能链实跑 + V4。**
+  在 950 容器内克隆 ops-sparse@5b2a5ba、装 GTest 后全链实跑。存量包链真证据全通：
+  A1 env=0、A2 check=0、A3 41/41 PASS、A5 总体通过退出 0。新包链精确复现 R1 预期
+  终态：A3 56/56 PASS（case-gen 造的组合用例全部过真机）、性能 NO_REF
+  （total_pf=200/可比 0）、总体证据不足退出 2。空闲门三分支实测：卡 1 IDLE 放行、
+  卡 0（他人进程）BUSY 退 4、卡 99 QUERY_FAILED（npu-smi 215）退 4。性能链以 4 条
+  填基线的临时包实跑（链路实证、非验收证据）：warmup→msprof 采集→export→
+  op_summary 解析→kernel_us 汇总→比对裁决→scope caveat 全程走通。V4 实测：
+  coo2csr_fused_kernel Task Type=AI_VECTOR_CORE；calls_per_case=1（API 层）下每调用
+  2–4 次 kernel launch 随规模变化，量具按 launch 求和口径正确。真机再敲出四处
+  blas 专属假设并修毕（重钉 ×3）：build.sh 无 --device（落 BUILD_CONVENTIONS
+  按 profile 查表：绑卡走 ASCEND_RT_VISIBLE_DEVICES、运行库路径、built_tests.list
+  有无）、GTest 缺失被 cmake 静默跳过且不进 skip 清单（容器内补装）、
+  _gtest_records 与 perf 映射里藏着第三、四道 /TC_ 硬筛（统一期望集精确匹配）。
+  repro 补齐 rerun.sh 与环境指纹。证据包落 ignored reports/m7-20260902/。
+  「正式通过」仍待 G4 基线回填后复验，未宣称。
+
+- **2026-09-02 · E1 探明：950 真机容器可达，M7 解锁（用户授权探测，只读）。**
+  经 ssh 别名进既有 CANN 容器只读探测：8×Ascend950PR（卡 2 Critical 避用、卡 0 有他人
+  进程，首选卡 1）；CANN 9.0.0 set_env.sh 与 msprof 就绪；Ubuntu 22.04 x86_64、
+  Python 3.11/cmake/g++/git 满足 accept A1 硬前置；容器 host 网络，autossh 反向隧道
+  代理容器内连通（gitcode HEAD 200）；工作区挂 1.7T 卷余 636G。容器内无 ops-sparse
+  克隆——M7 开工需克隆授权。主机/容器/路径等私有信息只落 ignored
+  `.oprunway/real-machine.env`（含只读保护根与设备选择约定）。
+
+- **2026-09-02 · M2·5·6′ 完成：accept 纵向闭合 + 三类产物 + 文档随改（七维审 ADJUST→四项修毕）。**
+  9 个提交（04a88e7..HEAD）。A1 换 registry 驱动的 harness_profile 探测（影子先行
+  核对再替换，0/多命中硬失败，键名入 manifest）；两个 verify 模板二进制寻址改
+  「候选收集+唯一裁决」（重钉协议收口，差异面恰为 16 fixture 的 verify 摘要）；
+  精度期望集两侧同改为「除 TC_PF_ 外全部有效数据行」；A5 空基线终态证据先行落
+  total_pf/comparable_pf 再切 verdict——total_pf==0 无条件通过（不受杂散 JSON
+  影响，checkpoint 修掉分叉）、有 PF 全无基线判 NO_REF/证据不足退出 2，六格状态
+  矩阵实测；三类产物布局（report 三节自动摘要/intermediate/repro 含三类用例清单）
+  先追加后切默认删旧；注释行口径、calls_per_case 单一来源随改。一次性 blas 回放：
+  cherk 不翻转、sasum 按预期「通过→NO_REF/证据不足」翻转；存量包纵向 smoke 达成
+  完成线（A1 探测 sparse_frame、41 行全进期望集、A5 性能通过无要求、总体通过）。
+  checkpoint（thread `01a0609a`，ADJUST）四修全落。**定性（评审口径）：本地可执行
+  静态链及主要 A5 分支已跑通，真机执行链待 M7；不得称正式验收通过。**
+
+- **2026-09-02 · M3′ 完成：schema v2 + case_controls + coo2csr 新包六件（七维审 ADJUST→六项修毕）。**
+  九个提交（ec39d70..abfdb92）。registry 实例化 sparse_frame 九字段（词表上界=普查
+  26 算子并集除 Lt）；v2 校验分派全按版本隔离（新顶层键、覆盖恰四键、控制形状、
+  golden 开放 harness、edge 词表切精确子集）；「不投影」原语 projection:none
+  （enum/dim/int_array）收敛为 _is_projected 单一判定接六处消费者；控制列→轴→
+  perf.key 全链接入、列/轴命名空间冲突机械拒绝；README 渲染 v2 面。coo2csr 新包
+  check=0：CSV 256 行（L0=2/PW=54 全覆盖/PF=200 全 TC_PF_）、发射列全命中 param.h
+  读列、基线 200 行全空（R1 预期 NO_REF）。checkpoint（thread `01a06080`，ADJUST）
+  六修全落：PF 网格封 targetNnz ≤ 2^24 消 int 溢出、S1 冲突集扩到不投影参数名、
+  阈值列值源未建 fail-closed、expect 默认 token ∈ 精确词表、schema→generator
+  兼容矩阵落字、README 读列段 token 化修事实错误；fixture 按重钉协议扩 4 个 v2
+  钉板（旧 12 键零变化），门升 16 项。facts-schema 契约文档随 M2·5·6′ 第 9 项落。
+
+- **2026-09-01 · M1′ 完成：registry 落地、blas 三处硬编码参数化、列投影单源化（七维审 ADJUST→修毕）。**
+  四步九个提交（cc4d914..eb7ef7b）：HARNESS_REGISTRY 九字段落模板通用代码区（只填
+  blas 档）；首参断言/默认 expect token/状态词表逐个切查表（None 跳过、None 哨兵、
+  删 STATUS_VALUES 副本）；新增 _column_specs（name/kind/source 普通 dict）统一表头
+  与行序，README 契约表改按 kind 分派（fill/null 反查留作 v1 兼容层钉 trap_6 现状），
+  影子 oracle 陪跑三轮消费者切换后删 package.py 表头副本与漂移比对。每步三门零差异；
+  步骤 4 确定性重导出两示例零字节变化，仅重钉两行 gen_csv.py 参考摘要。checkpoint
+  （thread `01a06030`，ADJUST）三修已落：_harness_profile 必传 facts、契约表未知 kind
+  fail-closed、GENERATOR_VERSION 不升（升版与 v1/v2 兼容矩阵移 M3′ 裁定，plan 已改）。
+  另回收一处事故：编辑器自动格式化曾随 git add -A 混进 cc4d914（表格撑宽 + 行首
+  连接词「+」被改「-」），已整体恢复并改为显式点名路径提交。
+
+- **2026-09-01 · role 投影矩阵 fixture 录毕（ProjectionIR 重构钉板就位）。** 按
+  `sparse-r1-projection-matrix.md` §D 建 `dev-doc/sparse-r1-projection-fixture/`：
+  五个正向合成 gen_csv.py（g1 profile/g2 batch/g3 fixed_vector+int_array/
+  g4 conditioning+packed+producer/g5 标量取值）全部 check=0 且 render 成功，§D 标 ✗
+  的缺口条件全部有落点；六个负例按 §D 清单如实录现状（trap2 的 perf.key ld 声明值
+  被静默重算、trap5 校验比生成器严、trap6 双 nullA 列全录进 fixture.json）。录制脚本
+  幂等（两跑逐字节一致，无绝对路径/时间戳），比对约定：重构前后 `results` 子树逐字节
+  一致即无行为变化；模板变更后先 `--refresh-common`。另实测：a/A 双 `a_fill` 轴让
+  pairwise 不收敛（>20s 不终止），故 trap6 用 nullable 碰撞变体，README 已记。
+
+- **2026-09-01 · M0.5 checkpoint 过审（两半场均 FREEZE_WITH_FIXES→修毕），接口冻结。**
+  上半场（接口）：registry 从 14 字段收敛为 9 字段 + FACTS 覆盖契约 + 全局不变量
+  （合并 expect 两字段、删 domain/id_column/excluded_headers、handle 断言改可选、
+  `runtime_only` 改名 `no_static_check`）；双 CSV 裁归 harness 自有；accept 三修
+  （精度期望集收非 TC_ 行、注释行口径、calls_per_case 去静默默认）入 M2。
+  下半场（fixture）：recorder 加 `--check` 只读门 + 受保护 FACTS 语义摘要，新增
+  g6_trap_oob 负例，六陷阱处置表定「M1 全保留、M3 统一规则修」。回归门一键脚本
+  `sparse-r1-regression-gate.sh` 三道全绿，篡改探针双向验证过。M1 开工条件齐备。
+
+- **2026-09-01 · sparse R1 开工：M0.5 普查完成，六项记档文档过评审并修毕。** 用户裁定
+  立项，切分支 `feature/sparse-r1` 实施。普查 33 个 ops-sparse 测试目录全收齐
+  （`dev-doc/sparse-r1-census.md`）：26 个 frame 形态证实，但列契约按算子分化（种子列
+  四种、阈值列三档、expect 词表五变体）——registry 粒度随之修正为「仓级默认 + FACTS
+  显式覆盖」；投影矩阵盘点与 registry 字段面冻结落
+  `sparse-r1-projection-matrix.md` / `sparse-r1-registry-freeze.md`（新增
+  `footprint_policy` 字段）。六项记档文档（bbe29f4）另经 Codex 批量审判 FIX_NEEDED，
+  已修：编号状态唯一源收进 learning-map §0、A5 空基线终态与 footprint 绕行补成实施
+  任务、NPU 空闲门落点改两个 verify 模板并写死三分支判定表、digests 拆 10+2 并补
+  provenance、立项状态与术语表就位。
+
+- **2026-09-01 · sparse R1 实施计划定稿（经 Codex 评审重写，未独立复验）。** 首版计划送 Codex
+  评审判 MAJOR GAPS，按结论重写：普查前移为 M0.5（冻结 registry 接口与现有 role
+  投影矩阵后才动 M1）；M1 补全为 compile_facts→ProjectionIR 四 spec + 七消费者收编
+  + 消费者棘轮；版本策略改 schema v2 + GENERATOR_VERSION 2 + 示例公共区确定性迁移
+  （「不 bump」被证伪——旧校验器拒未知键，不是加法兼容）；blas 专属校验三处
+  （handle ctype/状态词表/默认 expect）纳入 profile 化，否则首个 sparse FACTS 过不了
+  S1；tier 规范形收紧为必须含小数点（免落 int 归一分支）；M5 改名「本地静态链闭合」
+  且 warning 不许静默过；R1 预期终态显式写死为「精度通过、性能 NO_REF、总体证据
+  不足」。计划落 `dev-doc/sparse-r1-implementation-plan.md`，基线摘要随迁
+  `dev-doc/sparse-r1-baseline-digests.txt`；交接件就绪，等用户立项指令。
+
+- **2026-09-01 · sparse 支持候选方案定稿（未立项）。** 对 cann/ops-sparse 实探出差距全景
+  （accept 两处参数级、case-gen 三处范式级、arch35 环境前置），写成
+  `dev-doc/sparse-gap-learning-map.md`；三案（原地分层 / 新建 skill / 拆核心库）经 Codex
+  评审裁决 A 案——原 skill 内 FACTS 分四块（params/逻辑结构/case_controls/harness_profile）
+  规范化为统一投影 IR，唯一引擎消费，七条硬边界与「先 blas 逐字节不变、再接 sparse
+  profile」的迁移序记入 `dev-doc/sparse-support-candidate-plan.md`；todo 挂候选节。
+  评审纠正一处原始设计：造数控制（sparsity 等）不得伪装进 params。
+
+- **2026-08-31 · 性能用例数定死 200（用户裁定，推翻评审的「规模由任务书决定」）。** 三层落地：
+  facts-schema 写死「`perf` 节存在时 rows 固定 200 行」；`package.py check` 机械强制
+  （`PERF_ROWS_REQUIRED=200`，行数不符退出码 2）；两个示例扩成 200 点——cherk 25 尺寸档
+  ×k∈{n,n/2}×uplo×trans 满交叉（任务书 4 个 GPU 点保留 gpu_ms，196 点待填），sasum 任务书
+  25 个 n 加 175 个补齐点（全待填）。case-strategy 用例规模表同步。sweep 不受此约束
+  （观测开关，不进基线表）。验证：两示例 render/check 均 0、CSV 恰 200 条 TC_PF_、基线
+  200 行（cherk 填 4、sasum 填 0）；5 行 FACTS 负例报「必须恰为 200 行」退出码 2。
+
+- **2026-08-30 · Codex 契约评审（FIX_NEEDED）已修复回归。** 三处采纳：check 判重归一对齐
+  量具同一规则（strip + 整数字符串转 int，此前 `"01"`/`"1"`、`" X "`/`"X"` 两侧判法分叉）；
+  facts-schema 定义「性能键」、去掉「统一场景 200 点」的硬约束表述（规模由任务书决定）；
+  补回填阶段边界（填回 FACTS 重渲染可继续 check，直填包内待填表则不再跑 check）。
+  两处按仓规不采纳：行为测试（上游明文不做 TDD、不建 tests/）；accept `_load_baseline`
+  静默覆盖重复键维持现状（量具侧会报错，accept 记录不裁决）。验证：py_compile 过、
+  归一探针 7/7、判重功能探针退出码 2 且双错并报、cherk/sasum 示例 check 均 0。
+
+- **2026-08-30 · 性能点位统一场景定为 200 点显式行 + 空基线待填表。** 机制本就支持：`perf.rows`
+  省略 `gpu_ms` 即渲染出键列齐全、`gpu_ms` 空置的 `gpu_baseline.csv`，GPU 侧回填后无需重渲染，
+  配上数的行自动进入性能期望集。端到端实证（cherk 200 行无 gpu_ms：render/check 全过、CSV 200 条
+  TC_PF_、空基线 200 行、量具 0 可比 200 ignored、填 3 行升级 3 条）。落盘两处：facts-schema.md
+  perf 节补规模与待填表工作流；`package.py check` 新增 perf.rows 性能键重复检测（此前重复键要到
+  验收时才被量具拒，200 行机器写点位下撞键是高概率笔误）。不加 grid 展开机制——FACTS 是 AST
+  白名单字面量、0826 真实点位含非规则尺寸，显式行是唯一通用形态。Codex 契约评审待跑（动了
+  facts-schema 与 check）。
+
+- **2026-08-29 · BLAS 验收链统一：accept 单一路径，case-gen 产出对标旧包。** accept 对任何任务包
+  只读 `<op>_test.csv` + `gpu_baseline.csv`：A2/A2′ 只判文件有无，从 CSV 名/部署路径/基线表头推断
+  op/family/基线键，生成运行时包（CSV 副本、规范化基线、渲染出的两个 verify 脚本、manifest），
+  A3–A5 在 runtime/ 里跑；删掉 FACTS 加载、声明比对、六件逐字节、CSV SHA 比对。case-gen 的 fill 列
+  改小写 `a_fill`、新增 `render_runtime()`、性能期望集按基线过滤、加 `--calls-per-case`。真机四个 PR
+  各跑两轮：旧包原样与 case-gen 新包都从 A2 走到 A5（cherk 用现成示例，csyrk/cher2k/csymm 新填 FACTS）。
+  两轮结论都「不通过」——旧包轮 n=8000 被 harness host 内存护栏 SKIP，新包轮多出的极值填充组合暴露
+  精度失败；性能默认构建 -O0 仍不达标。证据 `reports/pr-accept-20260828/skill-run/`。Codex 方案评审
+  记 MAJOR GAPS，按用户口径收敛后实施（见 `dev-doc/blas-accept-unification-plan.md` §0）。
+
+- **2026-08-29 · 四个 ops-blas 矩阵乘 PR 按旧包真机验收：** !347 cherk / !348 csyrk / !349 cher2k /
+  !350 csymm（arch22）在 A3 各自 worktree 编译，部署旧包完整 CSV。精度 0 失败，各 4 条 n=8000 被
+  开发者 host 内存护栏跳过未执行（旧脚本看不见 SKIPPED，靠 gtest JSON 核出）。性能默认构建（仓库
+  强制 Debug、设备侧 -O0，issue #363）16/16 不通过 ratio 0.05–0.10；Release 对照 16/16 通过
+  2.06–4.40×。报告与 msprof/gtest 证据在 `reports/pr-accept-20260828/`。同日核实：skill 的 A2 门
+  对 15 种外来/畸形六件包全部干净拒收（exit 2、无 traceback），skill 不参与旧包验收。
+
+- **2026-08-28 · skill-edit-gate 误报修复：** `CODEX_CMD` 第三支把 `.codex` 目录、`which codex`
+  后接操作符或重定向（`2>/dev/null`、`| head`）也当成派 Codex，只读探测一碰 `.cc-suite.md` 就被拦；
+  改为要求 `codex` 是独立命令词（前无 `.`，后不接 shell 操作符）。12 例模拟前后对照 7→12 通过，
+  派单形状与 `sed -i` 直改仍拦。Codex 侧门无此正则，不用动。
+
+- **2026-08-27 · case-gen 输入契约收敛为「运行时只任务书」：** references/SKILL 去掉"读头文件/代码推断接口事实"的说法（enum/fill/status 约定表仍是建 skill 时的 authoring 出处）；
+  停止条件与 family 塌成单一通则、删 Ex 特判；撤掉 package.py 的 sources 机械门（自由出处不上
+  机械裁决）、删多余 authoring 元声明；sasum 示例按其任务书重建（§3.5 的 25 个 n、incx=1、
+  fill 限 [-10,10]、补 perf 采集 NO_REF、null/edge 全删、constraints 补上下界）；删无任务书的
+  srotm 示例、evals 去 AxpyEx 头文件用例。四轮 Codex 六维复核收敛（简单性/复杂度 4.8/5），净减机制。
+
+- **2026-08-26 · accept 运行链真机验证（走1）：** A1 env 正确检出 A3 工具链;
+  精度 harness（list→名字映射→gtest json→结果 JSON）与性能 msprof 流水线（warmup + 5 次
+  collect+export + 解析 + 中位数）在真 sger build 上跑通,kernel_us 可复现（spread 1.3–2.4%,
+  1024²=613μs / 512×2048=1139μs / 256²=197μs）。现成算子只验运行链机械,不验真算子正确性
+  （需开发者按契约写的 C++ test）。发现 npu-smi 容器内探针脆弱、精度阈值/Cube kernel 类型待补。
+
+- **2026-08-26 · ops-blas 原生验收车道 prototype 落地：** 新增
+  `repo-task-blas-case-gen`（任务书 → FACTS → 六件任务包）与
+  `repo-task-blas-accept`（任务包 + 开发者工程 → NPU 结论），第 1–5 步全部完成；21 个
+  主干锚点均通过 `check → render → check`，六件可逐字节重生成，声明、部署 CSV 与运行 JSON
+  由机械门闭合。三场零上下文 eval 跑两轮，with-skill 从 95.8% 修到 100%，baseline 为
+  13.7%。msprof 真机 spike 与 A3 运行链因目标机 sshd 在 kex 阶段拒连尚未执行，所有未实测
+  字段已列入两侧 `perf-protocol.md`，不得写成真机结论。push 前独立审计的一轮修复已闭合
+  FACTS 安全加载、pairwise 搜索耗尽、A2/A5 证据身份和 strided/packed footprint 等问题。
+
+- **2026-08-25 · 矩阵乘系列验收方向定调：** 明确 skill 三职责（出任务书 / 出脚本与用例 /
+  收开发者工程做验收）与公私边界；盘点 ops-blas 现状（cherk 已落地、chemm/cher2k 全新家族、
+  csymm/csyrk 补 c 变体）；心智模型与交接记录落 `dev-doc/matmul-series-acceptance-mental-model.md`；
+  下一步先真机跑已有算子测试再作判断。
+
+- **2026-08-24 · push 前 16 项审修收口：** 补齐 c_api 构建输入白名单、上下文 ABI、布局确认、
+  参数类别、mangled 名交接、进度与产物契约；新增回归全绿，完整回归前后保持同一组 22 项
+  既有失败（872 passed / 16 skipped）。
+
+- **2026-08-23 · c_api 真机量具缺口收尾：** 补齐裸句柄结构体解析、调用序列表驱动的
+  YAML 双向参数核对与原地输出位置检查、逐用例执行器绑定，以及算子顶层 CMake 路径解析；
+  定向回归 154 项全绿，完整回归仍是同一组 22 项既有失败（851 passed / 16 skipped）。
+
+- **2026-08-23 · c_api 第七轮缺陷修复：** 随机策略新增任务书同句否定才能使用的
+  `not_applicable`，适用性门禁正式区分 arch_dirs 与 experimental 布局并自行核对
+  `--npu-arch`，执行规范禁止无头会话后台等待长跑测；定向、seam、前提门禁全绿，
+  全量回归保持原有 22 项失败集合不变（820 passed / 16 skipped）。
+
+- **2026-08-23 · watch.py 五阶段对齐：** 宿主侧隔离验收观察器改用当前 S1–S5 阶段、
+  进度行与 `mark_step.py` 入口信号，更新现行量具提示和阻塞高亮；py_compile 与五阶段
+  JSONL watchdog 烟测通过，可运行全量回归保持既有 22 项失败基线（807 passed / 16 skipped，
+  已按既有环境口径排除缺 openpyxl 的 `test_cli_chain.py`）；另补 c_api 入口提示并纠正整体验收
+  skill 拆分范围。
+
+- **2026-08-21 · c_api 第五轮：** 五轮完成适用性、调用序列表、执行器、
+  包装构建、动态库绑定与产物契约落地；新增拆分边界回归暴露一处跨侧导入，
+  登记量具后另暴露三处阶段卡未接入，两类问题均已修复，完整回归保持既有
+  22 项失败基线，结构不变量与固定 S2 门禁清单保持全绿。
+
+- **2026-08-21 · c_api 第四轮：** 补齐结构体与不透明上下文的解析、无生成侧依赖的双节点执行器样例、S1–S4 运行文档和三类契约测试；定向测试全绿，第三轮的脚本文档入口欠账清零，完整回归恢复既有 22 项失败基线。
+
+- **2026-08-21 · c_api 第三轮：** 新增接口适用性、实验目录共享库构建文件渲染和动态库绑定三把量具及 21 条回归测试；三份新测试、gate premises 与现有 aclnn 回归均通过，全量测试因本轮不改运行文档的约束新增 1 条“脚本无文档入口”失败（22→23）。
+
+## 2026-08-21 · c_api 第二轮：从公开 C 声明生成调用序列表
+- 新增独立 C 声明解析与分类模块，并给 `align_signatures.py` 增加 c_api 分支：显式区分主机标量、设备指针和原地输出，记录 enum 值、extern C、上下文构造形态及空布局项；新增 9 条回归测试，既有 22 条环境与行文失败未增加。
+
+## 2026-08-19 · 镜像同步 47fcefc：上游新增任务书撰写 skill，pathspec 扩到 .claude/rules
+- 上游 179bcec→47fcefc（40 提交）逐字同步进 plugin/，diff -r 校验与上游树逐字一致；ATK gitlink 未动（a0dfc9a）。
+- 上游新增第二个 skill repo-task-doc-write（任务书撰写：模板、要素表、L0–L4 质量门脚本与测试），manifest skills 数组两个都纳入，版本 2.0.0→2.1.0。
+- 镜像 pathspec 扩到 .claude/rules/（上游新增 prose-style.md）；同步命令、提 PR 命令、镜像范围三处仓规同步更新。发布切片不变（.claude-plugin/ 与 skill/，skill/ 天然覆盖两个 skill）。
+- 上游根新增的 pytest.ini 与根 tests/ 不在 pathspec 内，未镜像。
+- 上游 clone 里发现三个文件的未提交格式化噪声（表格对齐、下划线转义），已 stash 保存未丢弃。
+
+## 2026-08-18 · plugin 换脊柱：自研 acceptance-workflow 退役，镜像上游 ATK 验收 skill
+- plugin/ 旧 skill（219 行 SKILL.md + 14 份 reference）与旧 manifest 全部移除；磁盘残留 acc-common、samples 清理。
+- 上游 Justbin/repo-task-atk-test 锁定基线 179bcec（ATK gitlink a0dfc9a），skill/ 逐字镜像至 plugin/skill/，与基线 commit 校验逐字一致。
+- overlay 落 plugin/.claude-plugin/{plugin.json,upstream.json}，skills 数组指向 ./skill/repo-task-atk-test；marketplace 描述同步至 2.0.0。
+- AGENTS.md 全文重写为薄仓规：仓定位、镜像/同步/提 PR 机制、环境权限、文档纪律、发布前检查；旧 skill 操作性条款随 skill 退役。
+- README、.cc-suite.md、isolated-acceptance 路径断言同步到新 skill；todo 瘦身并挂上 S1–S5 适配与同步演练两项收尾。
+- 删除 12 份已被 ignore 规则覆盖的 tracked 旧审计文件（.cc-suite/audits、.codex-suite/audits）。
+- 镜像范围加宽至上游根（skill/、docs/、CLAUDE.md、README.md），上游红线与设计原则随树分发并借
+  子目录记忆在开发时自动加载；validate 对 plugin 根 CLAUDE.md 的警告属预期。
+- 定案：测试/验收零上下文，只加载 skill 本体；plugin/CLAUDE.md 仅在本仓开发 plugin/** 时经子目录记忆注入，不进任何验收运行上下文。
+- 镜像健康实证：本机回归 22 failed / 752 passed / 16 skipped（排除缺 openpyxl 的 test_cli_chain.py），failed 集合与上游自报基线 22/756/13 逐类一致，差额全部由本机缺 openpyxl/torch 解释；跑测运行时产物（evidence/ 等）已入 .gitignore。
+- 定案发布切片三态：开发=全镜像可读可改；测试=isolated-acceptance 只分发 .claude-plugin 与 skill/，
+  开发件物理不上机；提 PR=全镜像 pathspec 一条 diff 覆盖 skill/docs/CLAUDE.md/README。
+- 明文区分两个 .claude-plugin：仓根 marketplace.json 是本机发行清单不上机；plugin/ 下 plugin.json 与
+  upstream.json 是加载器硬依赖（非标准单数 skill/ 布局只能靠 manifest 的 skills 数组指路），必须随部署走。
+- 补明文「验收零上下文」：契约仅 SKILL.md + references/ + scripts/；开发件在任何跑测中不得读取或引用，
+  正式验收一律走 isolated-acceptance 无头通路；非读开发件不可即视为 skill 自足性缺口，修 skill 提 PR。
+- push 前审修门修掉 6 处：同步命令基线所在仓错误；isolated-acceptance 步骤 7a 的中性副本仍复制整个
+  plugin（开发件会进隔离会话，是切片规则的真实漏洞）；双侧摘要不含路径无法证明结构一致；步骤 5/7a
+  摘要口径不一致却声称天然对齐；.cc-suite.md 测试命令指向不存在的 tests/；upstream.json 补
+  upstream_paths/published_paths/mirror_commit。
+
+## 2026-08-18 · 归档迁移前开发文档并收紧现行文档边界
+
+- 旧开发期文档 25 份移入 `archive/dev-doc/`；`dev-doc/` 只保留
+  `oprunway-changes-brief.md` 与 `oprunway-todo.md` 两个活文件；数据流图三件套
+  （`.drawio`/`.graph.json`/`.png`，约 1.2 MB）未保留，已删除。
+- 删除只含 `.DS_Store` 的空壳 `doc/` 目录，以及未跟踪的 `spec/`（一份 catlass 任务书）。
+- `AGENTS.md` §7 新增一条：`archive/` 只存历史文档，不作现行依据。
+- `plugin/skills/acceptance-workflow/reference/` 未动，`SKILL.md` 仍在引用其中多份。
+
+## 2026-08-18 · 移除 bureau/canon 记录系统并清理悬空引用
+
+- 删除 `canon/`（110 个文件）与 `BUREAU.md`，并删除未跟踪的 `gazette/` 和
+  `oprunway-canon-gazette.zip` 生成物。
+- 同步清理悬空引用：AGENTS 删除“§8 记录系统边界”整节、原 §9 重编号为 §8，并去掉 §2 中“或 canon”
+  的落点表述；`.gitignore` 去掉 `/gazette/` 与 `oprunway-canon-gazette.zip` 两条规则。`dev-doc/` 下既有
+  文档对 canon 的历史性提及保持原样，不做改写。
+
 ## 2026-08-17 · 第四轮真机：耗时降 23%，但暴露我自己埋进模版的两个错
 
 - **第四轮 Roll 跑通七步，终态 `DUT_FAIL`**，主动耗时 2774s / 7200s（第三轮 3606s，**降 23%**）。

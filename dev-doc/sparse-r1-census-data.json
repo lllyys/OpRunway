@@ -1,0 +1,1330 @@
+{
+ "head": "5b2a5ba",
+ "ops": [
+  {
+   "op": "coo2csr",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "coo2csr_golden.h",
+    "coo2csr_param.h",
+    "arch35/coo2csr_test.csv",
+    "arch35/coo2csr_test.cpp",
+    "arch35/coo2csr_npu_wrapper.h"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,m,n,sparsity,empty_row_prob,seed,idx_base,pattern,mere_threshold,mare_multiplier,abs_threshold,expect_result",
+   "csv_row_count": 41,
+   "seed_column": "seed",
+   "threshold_columns": [
+    "mere_threshold",
+    "mare_multiplier",
+    "abs_threshold"
+   ],
+   "expect_vocab": [
+    "SUCCESS"
+   ],
+   "success_token": "\"SUCCESS\"（CSV expect_result 列取值；代码里不用该字符串裁决——成功判据是 computeRet == ACL_SPARSE_STATUS_SUCCESS 且 int32 bit-exact std::equal；param.h 注释明言\"所有用例 expect_result 均为 SUCCESS\"，为跨算子 CSV 一致性保留）",
+   "handle_ctype": "aclsparseHandle_t（经 sparse_test::HandleManager RAII 包装，调用为 handle.get()；类型名定义在 descriptor_manager.h，未在本目录内出现）",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "m",
+    "n",
+    "sparsity",
+    "empty_row_prob",
+    "seed",
+    "idx_base",
+    "pattern",
+    "mere_threshold",
+    "mare_multiplier",
+    "abs_threshold",
+    "expect_result"
+   ],
+   "tc_prefix": "L0_* 与 L1_* 混合（20 条 L0_、21 条 L1_；无 TC_ 前缀；异常用例硬编码在 TEST_F 中无 CSV 行，名如 NullHandle/InsufficientWorkspace）",
+   "batch_pilot_fit": null,
+   "notes": "离群点：(1) param.h 不用字面 ReadMap(...)，用 parseString/parseInt/parseDouble(row, \"列名\")（csv_loader.h 的 csv_map），readmap_columns 按这些字面量填。(2) 三个阈值列全为 0 且注释明言 coo2csr 不使用（纯整数变换，bit-exact 比较）。(3) CSV 与 test.cpp/wrapper 在 arch35/ 子目录，param.h/golden.h/CMakeLists 在上层，单 CSV。(4) 校验绕过框架 Verifier::verifyVector，自写 VerifyCsrRowPtrInt32（int32 直接 std::equal，注释解释 float 24 位尾数损失）。(5) wrapper 每用例仅调 aclsparseXcoo2csr 一次，无 warm-up、无性能计时。(6) wrapper 有大 m 工作区自动扩容（Coo2CsrEnsureWorkspace，默认 4 MiB），并有对应异常用例 InsufficientWorkspace 直接调 API 期望 ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES。(7) 无 description 列；expect_result 词表只有 SUCCESS。(8) main 由 test/frame/test_main.cpp 共享提供。"
+  },
+  {
+   "op": "coo_get",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "coo_get_param.h",
+    "arch35/coo_get_test.csv",
+    "arch35/coo_get_test.cpp",
+    "arch35/coo_get_npu_wrapper.h"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,rows,cols,nnz,dtype,idx_base,value_lo,value_hi,seed,expect_result",
+   "csv_row_count": 10,
+   "seed_column": "seed",
+   "threshold_columns": [],
+   "expect_vocab": [
+    "SUCCESS"
+   ],
+   "success_token": "ASSERT_EQ(p.expect_result, \"SUCCESS\")",
+   "handle_ctype": "aclsparseSpMatDescr_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "rows",
+    "cols",
+    "nnz",
+    "idx_base",
+    "dtype",
+    "value_lo",
+    "value_hi",
+    "seed",
+    "expect_result"
+   ],
+   "tc_prefix": "size-letter prefixes S_/M_/L_ plus descriptor suffix (e.g. S_fp32_idx0_square, M_fp16_idx1_nonsquare); no L0_/TC_ prefixes",
+   "batch_pilot_fit": null,
+   "notes": "param.h uses parseString/parseInt/parseDouble(row, \"col\") over a csv_map via fillCustom (base SparseTestParamBase in csv_loader.h), not a literal ReadMap() API — readmap_columns lists those literals. No handle: CooGet is a descriptor accessor; handle_ctype reports the descriptor type aclsparseSpMatDescr_t (first arg of aclsparseCooGet); no aclsparseHandle_t appears. CSV contains two '#' comment lines between header and data (documenting that exception paths live in TEST_F CooGetExceptionTest, non-CSV, 6 hardcoded cases E1-E6 — a hybrid: CSV success paths + self-contained exception paths). No threshold columns (accessor test, exact equality asserts only). value_lo/value_hi columns are parsed but unused by the wrapper (values buffer is alloc-only placeholder, data never generated). Each case calls CreateCoo and CooGet exactly once — no warm-up. CSV is per-arch under arch35/ while param.h is arch-shared at dir root."
+  },
+  {
+   "op": "coosort",
+   "form": "self_contained",
+   "files": [
+    "CMakeLists.txt",
+    "arch35/coosort_test.cpp",
+    "arch35/coosort_golden.h"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": null,
+   "csv_row_count": null,
+   "seed_column": null,
+   "threshold_columns": [],
+   "expect_vocab": [],
+   "success_token": "ACL_SPARSE_STATUS_SUCCESS",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [],
+   "tc_prefix": "TEST_F(CoosortTest, <描述性驼峰名>)——无 TC_/L0_ 前缀；如 ByRowBasic、ByRowRandom_seed42、LargeNnz_MultiCore_ByRow、BufferSizeExtNoP",
+   "batch_pilot_fit": null,
+   "notes": "无 CSV、无 param.h、无 npu_wrapper——文件头注释自述 \"Coosort is a single-step flow (no CSV / no param / no npu_wrapper)\"，27 个 TEST_F 用例硬编码在 coosort_test.cpp，自带 main()。裁决为 GTest 断言：状态码与 ACL_SPARSE_STATUS_SUCCESS 比较，结果与 host golden（coosort_golden.h 的 std::stable_sort 双键排序）逐元素精确比较，无浮点阈值列。种子以硬编码字面量出现在用例内（seed=42..46、100..105 等），非 CSV 列。每条成功用例走 RunSortAndVerify：bufferSizeExt 一次 + ByRow/ByColumn 一次，无 warm-up 重复调用。CMakeLists 按 SOC_ARCH_DIRS 挑第一个存在 <arch>/coosort_test.cpp 的目录编 coosort_test 可执行件，无 arch 源时跳过。"
+  },
+  {
+   "op": "cscsort",
+   "form": "self_contained",
+   "files": [
+    "CMakeLists.txt",
+    "arch35/cscsort_test.cpp",
+    "arch35/cscsort_golden.h"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": null,
+   "csv_row_count": null,
+   "seed_column": null,
+   "threshold_columns": [],
+   "expect_vocab": [],
+   "success_token": "ACL_SPARSE_STATUS_SUCCESS",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": true,
+   "readmap_columns": [],
+   "tc_prefix": "gtest 用例名无 TC_/L0_ 前缀，直接语义名（Basic、EmptyMatrix、Wb*、PERF_*）；注释里分层标 L0-1/L1-x/L2-x/M-x/Wb-x/PERF-x",
+   "batch_pilot_fit": null,
+   "notes": "无 CSV、无 param.h、无 wrapper——全部用例硬编码于 arch35/cscsort_test.cpp（gtest，自带 main）。csv_header/csv_row_count/seed 等 CSV 字段一律 null/空；种子以硬编码 std::mt19937 常量出现（99/123/2026/42/43/44/45/88/77/11/22/33/44/55）。判定成功用状态码 ACL_SPARSE_STATUS_SUCCESS（整型比较，非字符串匹配）。整数精确比对（AssertIntVecEq），无浮点阈值。has_warmup=true 仅指 PERF_* 用例（warmup=3、测量 5 次、报 median/min/max 与估算带宽）；功能用例每例只调 API 一次。golden 在本地头 cscsort_golden.h（cscsortGolden）计算。白盒用例依赖内核内部（CscsortTiling::FindMaxRunSize、UB 大小、AIV 核数）动态构造规模。"
+  },
+  {
+   "op": "csr2coo",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "csr2coo_golden.h",
+    "csr2coo_param.h",
+    "arch35/csr2coo_npu_wrapper.h",
+    "arch35/csr2coo_test.cpp",
+    "arch35/csr2coo_test.csv"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,m,n,sparsity,empty_row_prob,seed,idx_base,pattern,mere_threshold,mare_multiplier,abs_threshold,expect_result",
+   "csv_row_count": 58,
+   "seed_column": "seed",
+   "threshold_columns": [
+    "mere_threshold",
+    "mare_multiplier",
+    "abs_threshold"
+   ],
+   "expect_vocab": [
+    "SUCCESS"
+   ],
+   "success_token": "ASSERT_EQ(p.expect_result, \"SUCCESS\")",
+   "handle_ctype": "sparse_test::HandleManager",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "m",
+    "n",
+    "sparsity",
+    "empty_row_prob",
+    "seed",
+    "idx_base",
+    "pattern",
+    "mere_threshold",
+    "mare_multiplier",
+    "abs_threshold",
+    "expect_result"
+   ],
+   "tc_prefix": "CSV 用例为 L0_* / L1_* / L2_* 三级前缀混合（如 L0_4x4_z、L1_CSC_128x128、L2_simt_boundary_127）；cpp 内硬编码异常/边界用例另用 ERR_* / BND_* / ABN_* 打印名",
+   "batch_pilot_fit": null,
+   "notes": "离群点：(1) param.h 不用 ReadMap 字面量，而是 fillCustom(csv_map) 里 parseString/parseInt/parseDouble(\"列名\")——readmap_columns 记录的是这些 parse* 的列名字面量。(2) CSV 含 13 行 # 注释行（72 行 = 1 表头 + 58 数据 + 13 注释），注释解释多核切分/SIMT-SIMD 边界设计。(3) 三个阈值列全为 unused，注释标明 INTEGER mode，golden 用 VerifyInt32Bitwise 位级比对。(4) expect_result 数据行只有 SUCCESS；异常用例（expect_result != SUCCESS）不进 CSV，硬编码在 arch35/csr2coo_test.cpp 的 TEST_F(Csr2CooExceptionTest)（含 ERR_/BND_/ABN_ 系列）。(5) 每条用例只调 aclsparseXcsr2coo 一次，无 warm-up、无性能计时。(6) handle 经 HandleManager RAII 封装，wrapper 里传 handle.get()，aclsparseHandle_t 原始类型未在本目录源码出现。(7) golden 与 param 在算子根目录，wrapper/test/CSV 在 arch35/ 子目录；CMake 走 ops_sparse_add_gtest_tests 宏。"
+  },
+  {
+   "op": "csr2csc_ex2",
+   "form": "csv_gtest",
+   "files": [
+    "csr2csc_ex2_golden.h",
+    "CMakeLists.txt",
+    "csr2csc_ex2_param.h",
+    "arch35/csr2csc_ex2_test.csv",
+    "arch35/csr2csc_ex2_test.cpp",
+    "arch35/csr2csc_ex2_npu_wrapper.h"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,m,n,sparsity,empty_row_prob,seed,val_type,copy_values,idx_base,pattern,mere_threshold,mare_multiplier,abs_threshold,expect_result",
+   "csv_row_count": 50,
+   "seed_column": "seed",
+   "threshold_columns": [
+    "mere_threshold",
+    "mare_multiplier",
+    "abs_threshold"
+   ],
+   "expect_vocab": [
+    "SUCCESS"
+   ],
+   "success_token": "\"SUCCESS\"（test.cpp ParseExpectResult: `if (s == \"SUCCESS\") return ACL_SPARSE_STATUS_SUCCESS;`，随后 ASSERT_EQ(bufferSizeRet/computeRet, expectedStatus)）",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "m",
+    "n",
+    "sparsity",
+    "empty_row_prob",
+    "seed",
+    "val_type",
+    "copy_values",
+    "idx_base",
+    "pattern",
+    "mere_threshold",
+    "mare_multiplier",
+    "abs_threshold",
+    "expect_result"
+   ],
+   "tc_prefix": "L0_* / L1_* 混合（20 条 L0_，30 条 L1_；无 TC_ 前缀）",
+   "batch_pilot_fit": null,
+   "notes": "param.h 没有字面量 ReadMap()：读列机制是 fillCustom(const csv_map& row) + parseString/parseInt/parseDouble(\"列名\")（csv_loader.h 的 SparseTestParamBase），readmap_columns 填的是这些 parse* 字面量。CSV 在 arch35/ 子目录，param.h 与 golden.h 在算子根目录（跨 arch 共享）。三个阈值列全部数据行均为 0，实际比对用 PrecisionMode::EXACT（含把 dtype 字节 bit-cast 回 float 后精确比对），阈值列形同虚设。expect_result 词表只有 SUCCESS，但代码支持 INVALID_VALUE/NOT_SUPPORTED/INSUFFICIENT_RESOURCES；异常路径由 12 个硬编码 TEST_F（Csr2CscEx2ExceptionTest）覆盖，不走 CSV——即 csv_gtest 与 self_contained 混合形态。SYMBOLIC 用例用 0xDE magic 填充输出 buffer 检测算子误写。每用例算子 API 各调一次（bufferSize + compute），无 warm-up 重复调用。wrapper 里 handle 经 sparse_test::HandleManager RAII 包装，裸类型为 aclsparseHandle_t。golden.h 未逐行核读（模板 Csr2CscGolden<T>）。"
+  },
+  {
+   "op": "csr2gebsr",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "csr2gebsr_golden.h",
+    "csr2gebsr_param.h",
+    "dtype_utils.h",
+    "arch35/csr2gebsr_npu_wrapper.h",
+    "arch35/csr2gebsr_test.cpp",
+    "arch35/csr2gebsr_test.csv"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,m,n,sparsity,empty_row_prob,seed,dtype,row_block_dim,col_block_dim,dir,index_base_a,index_base_c",
+   "csv_row_count": 37,
+   "seed_column": "seed",
+   "threshold_columns": [],
+   "expect_vocab": [],
+   "success_token": "ACL_SPARSE_STATUS_SUCCESS",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "m",
+    "n",
+    "sparsity",
+    "empty_row_prob",
+    "seed",
+    "dtype",
+    "row_block_dim",
+    "col_block_dim",
+    "dir",
+    "index_base_a",
+    "index_base_c"
+   ],
+   "tc_prefix": "L0_* / L1_* 混合（首列前缀仅 L0、L1 两种）",
+   "batch_pilot_fit": null,
+   "notes": "CSV 读取不用 ReadMap：param.h 的 fillCustom(csv_map) 用 csv_loader.h 的 parseString/parseInt/parseDouble(\"列名\")，readmap_columns 里列的是这些字面量；实例化经 GetCasesFromCsv<Csr2GebsrTestParam>(\"csr2gebsr_test.csv\")。CSV 无 expect_result、无阈值列、无 description 列——CSV 全是成功路径参数；异常/边界用例硬编码在 test.cpp 的 Csr2GebsrExceptionTest TEST_F 里（NULL handle、负 m/n、非法 dir=99、null descr 等），即 CSV 驱动 + 自含异常测试的混合形态。算子是三步 Legacy API（bufferSize → Xcsr2gebsrNnz → convert），wrapper 每例每步只调一次，无 warm-up。handle 用 HandleManager 封装 aclsparseHandle_t；成功判定是 aclsparseStatus_t == ACL_SPARSE_STATUS_SUCCESS（非字符串 token）。dtype 词表 FP32/FP16/BF16/INT32，dir 词表 ROW/COLUMN；支持 device pointer mode 分支（useDevicePointerMode）。"
+  },
+  {
+   "op": "csrgeam2",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "csrgeam2_golden.h",
+    "csrgeam2_param.h",
+    "arch35/csrgeam2_npu_wrapper.h",
+    "arch35/csrgeam2_test.cpp",
+    "arch35/csrgeam2_test.csv"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,m,n,sparsity_a,sparsity_b,seed_a,seed_b,empty_row_prob_a,empty_row_prob_b,alpha,beta,pointer_mode,index_base_a,index_base_b,index_base_c,pattern,mere_threshold,mare_multiplier,abs_threshold,expect_result",
+   "csv_row_count": 50,
+   "seed_column": "seed_a",
+   "threshold_columns": [
+    "mere_threshold",
+    "mare_multiplier",
+    "abs_threshold"
+   ],
+   "expect_vocab": [
+    "SUCCESS"
+   ],
+   "success_token": "ACL_SPARSE_STATUS_SUCCESS",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "m",
+    "n",
+    "sparsity_a",
+    "sparsity_b",
+    "seed_a",
+    "seed_b",
+    "empty_row_prob_a",
+    "empty_row_prob_b",
+    "alpha",
+    "beta",
+    "pointer_mode",
+    "index_base_a",
+    "index_base_b",
+    "index_base_c",
+    "pattern",
+    "mere_threshold",
+    "mare_multiplier",
+    "abs_threshold",
+    "expect_result"
+   ],
+   "tc_prefix": "L0_* / L1_* 混合（CSV 全部 case_name 以 L0_ 或 L1_ 开头；另有非 CSV 的 TEST_F 异常用例 CsrGeam2ExceptionTest.*）",
+   "batch_pilot_fit": null,
+   "notes": "离群点：(1) param.h 不用 ReadMap，而是 csv_loader.h 的 SparseTestParamBase::fillCustom(csv_map) + parseString/parseInt/parseDouble/parseFloat(row,\"列名\")；readmap_columns 填的是这些 parse* 字面量，功能等价逐列读 CSV，仍归 csv_gtest。(2) 种子列是成对的 seed_a/seed_b（无单一 seed 列），seed_column 只填了 seed_a。(3) expect_result 与 abs_threshold 列在 CSV 里存在且被 param.h 解析，但 test.cpp 从不使用——expect_result 词表恒为 SUCCESS，成功由三步返回码 ASSERT_EQ(..., ACL_SPARSE_STATUS_SUCCESS) 硬断言；abs_threshold 未进入 VerifyConfig（只用 mere_threshold/mare_multiplier，MERE_MARE 模式）。(4) 每例算子链只调一次（bufferSizeExt → Xcsrgeam2Nnz → Scsrgeam2），无 warm-up、无性能计时。(5) handle 经 sparse_test::HandleManager 包装，底层类型 aclsparseHandle_t。(6) 整数输出 rowPtrC/colIndC 用 PrecisionMode::INTEGER 位精确比对，valuesC 用 MERE_MARE。(7) 无 description 列；CSV 在 arch35/ 子目录而 param.h/golden.h 在上层。"
+  },
+  {
+   "op": "csrsort",
+   "form": "self_contained",
+   "files": [
+    "CMakeLists.txt",
+    "arch35/csrsort_test.cpp",
+    "arch35/csrsort_golden.h"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": null,
+   "csv_row_count": null,
+   "seed_column": null,
+   "threshold_columns": [],
+   "expect_vocab": [],
+   "success_token": "ACL_SPARSE_STATUS_SUCCESS",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [],
+   "tc_prefix": "gtest 原生命名 CsrsortTest.<CamelCase>（如 Basic、EmptyRows、NullHandle），无 TC_/L0_ 前缀",
+   "batch_pilot_fit": null,
+   "notes": "无 CSV、无 param.h、无 wrapper——全部用例硬编码在 arch35/csrsort_test.cpp（789 行，self_contained）。用例分两段：成功路径约 22 个 TEST_F 经 RunSortAndVerify 与 csrsortGolden（csrsort_golden.h 内 host 端逐行稳定排序 golden）逐元素 int 比对，无精度阈值列概念；异常路径 12 个 TEST_F 断言 ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR / ACL_SPARSE_STATUS_INVALID_VALUE。随机种子硬编码于代码：mt19937 rng(99)、rng(123)、rng(2026)，makeSparseCsr(..., seed=77)。每用例算子 API 各调一次（bufferSizeExt + csrsort），无 warm-up 循环。依赖工程内共享测试基建 sparse_test.h / descriptor_manager.h / fill.h / csrsort_tiling_utils.h（目录外）。部分用例用 CsrsortTiling::FindMaxRunSize 依设备 UB 大小动态生成规模，nnz 由运行环境决定。"
+  },
+  {
+   "op": "cube_spmm",
+   "form": "self_contained",
+   "files": [
+    "CMakeLists.txt",
+    "README.md",
+    "cube_spmm_test.cpp"
+   ],
+   "arch_dirs": [],
+   "csv_header": null,
+   "csv_row_count": null,
+   "seed_column": null,
+   "threshold_columns": [],
+   "expect_vocab": [],
+   "success_token": "[Success] test case accuracy is verification passed.",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": true,
+   "readmap_columns": [],
+   "tc_prefix": null,
+   "batch_pilot_fit": null,
+   "notes": "目录无 arch35/ 等 archXX 子目录（README 说源码在 sparse/cube_spmm/arch22，但 test 目录本身扁平，仅 3 个文件）。无 CSV、无 param.h、无 ReadMap、非 gtest：单一 main() 可执行，用例硬编码（无参时内置随机 case M=512 K=512 N=1024 density=0.01 seed=12345，B 生成 seed=42；有参时读外部 .mtx 文件，argv 传 num_cores/device_id/N）——种子是 C++ 源码常量而非 CSV 列。精度阈值也是源码常量：kFp16MreThreshold=1/1024、kFp16MareThreshold=10/1024（MRE/MARE 双阈值）。成功输出两行：\"[Success] test case accuracy is verification passed.\" 与 \"[PASS] cube_spmm_test\"（失败为 [Failed]/[FAIL]），exit code 0/1。aclsparseCubeSpmm 每条 case 调两次，但第二次是清零 C 后的 reuse 一致性验证，不是性能 warm-up。CMake 门：SOC 非 ascend910b* 时整个测试跳过；README 说仅 arch22 平台交付。无 case_name/expect_result/description 概念。"
+  },
+  {
+   "op": "densetosparse",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "densetosparse_golden.h",
+    "densetosparse_param.h",
+    "arch35/densetosparse_l2_cases.csv",
+    "arch35/densetosparse_test.csv",
+    "arch35/densetosparse_test.cpp",
+    "arch35/densetosparse_npu_execution.h",
+    "arch35/densetosparse_npu_wrapper.h"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,level,mode,format,offset_type,index_type,base,value_type,order,m,n,ld,distribution,block_size,ell_cols,seed,repeat,non_default_stream",
+   "csv_row_count": 57,
+   "seed_column": "seed",
+   "threshold_columns": [],
+   "expect_vocab": [
+    "INVALID_VALUE",
+    "NOT_SUPPORTED"
+   ],
+   "success_token": "ACL_SPARSE_STATUS_SUCCESS",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "level",
+    "mode",
+    "format",
+    "offset_type",
+    "index_type",
+    "base",
+    "value_type",
+    "order",
+    "distribution",
+    "m",
+    "n",
+    "ld",
+    "block_size",
+    "ell_cols",
+    "seed",
+    "repeat",
+    "non_default_stream"
+   ],
+   "tc_prefix": "主 CSV 混合前缀：L0_* (12), L1_* (22), WB_* (17), TB_* (6，边界/拒绝用例如 TB_A01_m_int32max、TB_R01_m_over)；L2 独立 CSV 全部 L2_*（如 L2_01_null_handle）",
+   "batch_pilot_fit": "适配度中等偏低。参数复杂度高：18 列契约含四种稀疏格式（CSR/CSC/COO/BlockedEll）与三段式调用链（GetBufferSize/Analysis/Convert），比典型单核算子契约宽得多。dtype 面窄（数据行只见 FP32/FP16、索引 I32），但 format×order×base 组合爆炸由 CSV 承担。列契约非典型：无 expect_result/阈值列，正例判据是硬编码的五个状态字段全 SUCCESS 加 golden 比对；负例走独立 l2_cases.csv（target/mutation/expected_status/execution_scope 六列），与本仓 skill 假定的单 CSV + expect_result 词表模式不同，批量造包需要专门适配双 CSV 结构。",
+   "notes": "离群点：(1) 双 CSV——主 densetosparse_test.csv（57 数据行）驱动正例/边界，densetosparse_l2_cases.csv（32 数据行，表头 case_name,level,target,mutation,expected_status,execution_scope）驱动 API 异常注入。(2) 没有逐列 ReadMap(\"列名\") 图样：frame/csv_loader.h 的 ReadMap(path) 是整文件加载器，列取值走 parseString(row,\"列名\")（param.h 的 fillCustom）与 test.cpp:843 对 l2 CSV 的直接遍历；readmap_columns 字段填的是 parseString 列名。(3) 主 CSV level 列含 2 行 L2（TB 系），与独立 l2_cases.csv 的 L2 语义并存。(4) 无 expect_result、description、阈值列；精度用 golden.h 逐元素比对，成功判据是 result 结构五个 aclsparseStatus_t 字段 == ACL_SPARSE_STATUS_SUCCESS（test.cpp:63-64 等 ASSERT_EQ）。(5) repeat 列取值 1/2，test.cpp:120 for(run<p.repeat) 循环整条链，非专门 warm-up。(6) param.h 在目录根，CSV 与 test.cpp/wrapper 全在 arch35/ 子目录。"
+  },
+  {
+   "op": "gather (aclsparseGather)",
+   "form": "csv_gtest",
+   "files": [
+    "gather_param.h",
+    "gather_golden.h",
+    "CMakeLists.txt",
+    "arch35/gather_test.cpp",
+    "arch35/gather_test.csv",
+    "arch35/gather_npu_wrapper.h"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,vec_size,nnz,value_type,idx_base,idx_type,seed",
+   "csv_row_count": 97,
+   "seed_column": "seed",
+   "threshold_columns": [],
+   "expect_vocab": [],
+   "success_token": "Verifier::verifyVector(...) 返回 bool，EXPECT_TRUE(pass)；日志打印 \"[\" << p.case_name << \"] PASSED\\n\"（成功 token 为 \"PASSED\"）",
+   "handle_ctype": "HandleManager（wrapper 首参；handle.get() 传入 aclsparseGather，内部类型来自 aclsparse_handle_internal.h，未在本目录定义）",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "vec_size",
+    "nnz",
+    "value_type",
+    "idx_base",
+    "idx_type",
+    "seed"
+   ],
+   "tc_prefix": "L0_* / L1_* / L2_* 三档混合（如 L0_size4_nnz2_fp32_zero_32i），无 TC_ 前缀",
+   "batch_pilot_fit": "适配度高。参数面很小（vec_size、nnz、value_type、idx_base、idx_type、seed 共 6 个语义列），dtype 面为 FLOAT/FLOAT16/DOUBLE（param.h 映射表里还有 BF16 但 CSV 未使用，且 cpp 注明 host 无 bf16），索引类型 32I/64I、索引基 ZERO/ONE 是稀疏族典型正交轴。列契约是本仓 csv_gtest 的典型形态：CSV 逐列由 fillCustom 解析、case_name 作 gtest 实例名、seed 驱动随机生成、EXACT 精度模式无阈值列，批量造包脚本可直接按笛卡尔轴展开生成行。缺 expect_result / description / 阈值列意味着造包模板若假定这些列存在需降级处理。",
+   "notes": "离群点：1) 本目录不用任务书里说的 ReadMap(\"列名\") 机制，而是 SparseTestParamBase::fillCustom(csv_map) + parseString/parseInt 逐列取值——readmap_columns 字段填的是这些 parse 调用的列名字面量，全文无 \"ReadMap\" 字符串。2) CSV 无 expect_result、无阈值列、无 description 列；精度判定统一 PrecisionMode::EXACT，verifyVector 只支持 float32（fp16/double 输出先转 float 再比）。3) param.h 的 value_type 映射含 BF16 但测试 cpp 的 match_case 未展开 BF16 分支（注释 \"bf16 type don't exist on host\"），CSV 也无 BF16 行。4) 每用例只调 aclsparseGather 一次（无 warm-up），纯功能测试无性能测。5) param.h/golden.h 在父目录、cpp/csv/wrapper 在 arch35/，CSV 由 CMake 拷贝到 build 目录。6) 索引由测试内 mt19937(seed) 生成，允许重复索引；golden 为简单 gather 循环。"
+  },
+  {
+   "op": "gebsr2gebsc",
+   "form": "csv_gtest",
+   "files": [
+    "gebsr2gebsc_param.h",
+    "CMakeLists.txt",
+    "gebsr2gebsc_golden.h",
+    "arch35/gebsr2gebsc_npu_wrapper.h",
+    "arch35/gebsr2gebsc_test.csv",
+    "arch35/gebsr2gebsc_test.cpp"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,mb,nb,sparsity,empty_row_prob,seed,val_type,copy_values,idx_base,row_block_dim_a,col_block_dim_a,row_block_dim_c,col_block_dim_c,dir_a,pattern,expect_result",
+   "csv_row_count": 171,
+   "seed_column": "seed",
+   "threshold_columns": [],
+   "expect_vocab": [
+    "SUCCESS"
+   ],
+   "success_token": "ACL_SPARSE_STATUS_SUCCESS",
+   "handle_ctype": "sparse_test::HandleManager (wraps handle.get() passed to aclsparse APIs; underlying handle type not named in this dir)",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [],
+   "tc_prefix": "lowercase descriptive names, no TC_/L0_ prefix: 123 rows start \"s_\" (e.g. s_basic_4x4_direct_row), plus dtype-prefixed rows fp16_* / bf16_* / int32_* / int8_* (12 each)",
+   "batch_pilot_fit": null,
+   "notes": "Parsing is NOT ReadMap-style: gebsr2gebsc_param.h derives from SparseTestParamBase (csv_loader.h) with fillCustom() using parseString/parseInt/parseDouble(row, \"col\") over a csv_map; column strings are case_name, mb, nb, sparsity, empty_row_prob, seed, val_type, copy_values, idx_base, row_block_dim_a, col_block_dim_a, row_block_dim_c, col_block_dim_c, dir_a, pattern, expect_result. Classified csv_gtest per intent (CSV + GTest TEST_P via GetCasesFromCsv) despite no literal ReadMap. No thresholds: verification is exact bytewise/index equality (VerifyColPtr/RowInd/Val); SYMBOLIC cases check output vals untouched via 0xDE magic fill. expect_result column exists but only value SUCCESS appears and the test ignores it (asserts SUCCESS unconditionally). Error paths are hardcoded TEST_F Gebsr2GebscExceptionTest cases (expect ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR / INVALID_VALUE / NOT_SUPPORTED), not CSV-driven. param.h comment says val_type is \"S/D/C/Z\" but CSV uses FP32/FP16/BF16/INT32/INT8 — stale comment. Each case calls aclsparseGebsr2gebsc_bufferSize once then aclsparseGebsr2gebsc once (no warm-up loop, no perf timing). CSV lives under arch35/ while param.h/golden.h are arch-neutral at dir root. Wrapper uses aclsparseHandle via HandleManager::get(); aclsparseStatus_t, aclsparseAction_t, aclsparseIndexBase_t, aclsparseDirection_t, aclDataType from cann_ops_sparse.h/acl.h."
+  },
+  {
+   "op": "gpsv_interleaved_batch",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "gpsv_interleaved_batch_golden.h",
+    "gpsv_interleaved_batch_param.h",
+    "arch35/gpsv_interleaved_batch_test.csv",
+    "arch35/gpsv_interleaved_batch_test.cpp",
+    "arch35/gpsv_interleaved_batch_npu_wrapper.h"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,m,batch_count,algo,is_diag_dominant,seed,value_lo,value_hi,expect_result,mere_threshold,mare_multiplier",
+   "csv_row_count": 35,
+   "seed_column": "seed",
+   "threshold_columns": [
+    "mere_threshold",
+    "mare_multiplier"
+   ],
+   "expect_vocab": [
+    "ACL_SPARSE_STATUS_SUCCESS"
+   ],
+   "success_token": "ASSERT_EQ(p.expect_result, \"ACL_SPARSE_STATUS_SUCCESS\");",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "m",
+    "batch_count",
+    "algo",
+    "is_diag_dominant",
+    "seed",
+    "value_lo",
+    "value_hi",
+    "expect_result",
+    "mere_threshold",
+    "mare_multiplier"
+   ],
+   "tc_prefix": "L0_* / L1_* 混合（L0_ 12 条，L1_ 23 条），图样 L{0,1}_m<m>_b<batch>_<描述>；异常用例硬编码为 GpsvInterleavedBatchExceptionTest 固定 TEST_F，名如 NullPointerDw",
+   "batch_pilot_fit": null,
+   "notes": "param.h 不用 ReadMap 字面量，而是 csv_loader.h 的 parseString/parseInt/parseDouble(row, \"列名\")，逐列读同一 CSV，功能等价于 csv_gtest 形态；readmap_columns 即这些 parse* 字面量。CSV 只覆盖正例（expect_result 全为 SUCCESS 且被 ASSERT 断死），异常/空指针路径全部硬编码在 test.cpp 的 TEST_F 里，不走 CSV。无 description 列、无性能(TC_PF_)块。golden 为 CPU FP64 QR 五对角求解（gpsv 是五对角，非三对角），wrapper 每例只调 aclsparseSgpsvInterleavedBatch 一次（bufferSizeExt 查询 + 1 次求解，无 warm-up）。CSV 与 cpp/wrapper 在 arch35/ 下，param.h 与 golden.h 在上层共享。"
+  },
+  {
+   "op": "gtsv2",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "gtsv2_golden.h",
+    "gtsv2_param.h",
+    "arch35/gtsv2_npu_wrapper.h",
+    "arch35/gtsv2_test.csv",
+    "arch35/gtsv2_test.cpp"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,level,m,n,ldb,matrixType,value_lo,value_hi,seed,description,expect_result",
+   "csv_row_count": 48,
+   "seed_column": "seed",
+   "threshold_columns": [],
+   "expect_vocab": [
+    "success",
+    "singular"
+   ],
+   "success_token": "null — expect_result 在 cpp 里未被判定；成功判据是 EXPECT_EQ(...ret, ACL_SPARSE_STATUS_SUCCESS) 加 Verifier::verifyVector；奇异分支由 matrixType==SINGULAR 触发 HasInfOrNan 位置一致性校验，n==0 直接 SUCCEED",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": true,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "m",
+    "n",
+    "ldb",
+    "matrixType",
+    "value_lo",
+    "value_hi",
+    "seed",
+    "description",
+    "expect_result"
+   ],
+   "tc_prefix": "混合：\"L0_*\" / \"L1_*\" / \"L2_*\" / \"WB_*\"（无 TC_ 前缀；L2 用 L2_S1_/S2_/S3_ 子编号）",
+   "batch_pilot_fit": "适配度中上。参数面简单典型：4 个标量形状参 (m,n,ldb) 加 matrixType/value 区间/seed，单 dtype（float，aclsparseSgtsv2），列契约与其他 sparse 算子同构（case_name/seed/description/expect_result）。但有两处非典型：verdict 不读 expect_result 而由 matrixType 与 n==0 在 cpp 内分支决定；matrixType 词表含 10 种白盒构造策略，批量造包需携带该枚举语义。无阈值列（阈值由 applyMixedTolerance 按 dtype 内置），列面比带阈值列的算子更瘦，作为「无阈值列、状态由数据形态推断」一类的试点合适。",
+   "notes": "离群点：(1) CSV 有 level 列（L0/L1/L2/WB）但 fillCustom 不解析它，纯注释性；(2) expect_result 列存在且被解析进 param，但测试体从不读取——\"singular\" 判定实际靠 matrixType，列是死数据；(3) 框架用 csv_loader.h 的 parseString/parseInt/parseDouble(row,\"列名\") 而非字面 ReadMap()——readmap_columns 填的是这些解析字面量；(4) CSV 注释行以 # 开头并用逗号补齐列数；(5) wrapper 对 m<3 直接跳过不调 API，n=0 只调 bufferSizeExt；(6) 精度校验用 applyMixedTolerance(cfg, ACL_FLOAT, ...) 混合容差，无 CSV 阈值列；(7) 每用例 API 各调一次（bufferSizeExt + gtsv2），无 warm-up；(8) 另有 TEST_F 异常用例（空指针/非法参）硬编码在 cpp，不走 CSV。"
+  },
+  {
+   "op": "gtsv2_nopivot",
+   "form": "csv_gtest",
+   "files": [
+    "gtsv2_nopivot_param.h",
+    "CMakeLists.txt",
+    "gtsv2_nopivot_golden.h",
+    "arch35/gtsv2_nopivot_npu_wrapper.h",
+    "arch35/gtsv2_nopivot_test.cpp",
+    "arch35/gtsv2_nopivot_test.csv"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,m,n,ldb,is_diag_dominant,value_lo,value_hi,seed,expect_result,mere_threshold,mare_multiplier",
+   "csv_row_count": 29,
+   "seed_column": "seed",
+   "threshold_columns": [
+    "mere_threshold",
+    "mare_multiplier"
+   ],
+   "expect_vocab": [
+    "SUCCESS"
+   ],
+   "success_token": "ASSERT_EQ(p.expect_result, \"SUCCESS\")",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "m",
+    "n",
+    "ldb",
+    "is_diag_dominant",
+    "value_lo",
+    "value_hi",
+    "seed",
+    "expect_result",
+    "mere_threshold",
+    "mare_multiplier"
+   ],
+   "tc_prefix": "L0_* / L1_* 混合（8 条 L0_，21 条 L1_；无 TC_ 前缀）",
+   "batch_pilot_fit": null,
+   "notes": "param.h 不用字面量 ReadMap()，而是 fillCustom(csv_map) 里 parseString/parseInt/parseDouble(\"列名\")；readmap_columns 填的是这些 parse* 字面量。CSV 内含以 # 开头的注释行（分组说明），29 条数据行全部 expect_result=SUCCESS；异常路径不走 CSV，由 TEST_F Gtsv2NopivotExceptionTest 硬编码 15 个用例（E1-E15），成功/失败用 aclsparseStatus_t 状态码断言（ACL_SPARSE_STATUS_SUCCESS / _INVALID_VALUE / _HANDLE_IS_NULLPTR）。无 batch 列（gtsv2 非 batch API，矩阵生成沿用 gtsv_interleaved_batch 的 makeDiagDominantTridiag 等，batch 参数恒 1）。wrapper 每例只调 compute 一次，无 warm-up。精度用 MERE_MARE 双阈值模式，Verifier::verifyVector。CSV 与 wrapper/test 在 arch35/ 子目录，param.h、golden.h、CMakeLists 在根。wrapper 里 ldb 校验 \"ldb < m || ldb < 0\" 中第二条恒不可达（离群小点）；E13 LdbTooSmall 把 n 传成 m_-1（CallBufferSize(handle, m_, m_-1, ...) 疑似笔误，n 与 ldb 同为 m-1）。"
+  },
+  {
+   "op": "gtsv2_strided_batch",
+   "form": "csv_gtest",
+   "files": [
+    "gtsv2_strided_batch_param.h",
+    "CMakeLists.txt",
+    "gtsv2_strided_batch_golden.h",
+    "arch35/gtsv2_strided_batch_test.csv",
+    "arch35/gtsv2_strided_batch_test.cpp",
+    "arch35/gtsv2_strided_batch_npu_wrapper.h"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,m,batchCount,batchStride,pattern,seed,mere_threshold,mare_multiplier,abs_threshold,expect_result",
+   "csv_row_count": 66,
+   "seed_column": "seed",
+   "threshold_columns": [
+    "mere_threshold",
+    "mare_multiplier",
+    "abs_threshold"
+   ],
+   "expect_vocab": [
+    "SUCCESS",
+    "SUCCESS_NO_OUTPUT",
+    "SINGULAR"
+   ],
+   "success_token": "ACL_SPARSE_STATUS_SUCCESS",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [],
+   "tc_prefix": "L0_* / L1_* 混合（CSV 内 11 个 L0、55 个 L1；cpp 内另有自含 E2x 系列 gtest）",
+   "batch_pilot_fit": null,
+   "notes": "形式上是 CSV 驱动的 gtest，但 param.h 不用 ReadMap：继承 SparseTestParamBase，重写 fillCustom(const csv_map&) 并用 parseString/parseInt/parseDouble(row, \"列名\") 逐列取值（csv_loader.h 提供）；readmap_columns 因而为空，实际取值列即表头 10 列。CSV 内含大量 '#' 开头注释行（中文分块说明），数据行 66。expect_result 词表含非常规值 SUCCESS_NO_OUTPUT（batchCount=0 退化，只验返回码）与 SINGULAR（跳过精度，验 Inf/NaN）。abs_threshold 列在 param.h 注释中标明 'reserved column (unused in MERE_MARE mode)'。wrapper 对 batchCount<=0 || m<=0 || batchStride<m 在 host 侧短路返回 SUCCESS，不下发 NPU。每用例只调一次 compute API（外加一次 bufferSizeExt 查询），无 warm-up。test.cpp 除 CSV 参数化外还有硬编码的 E21/E24/E25 等自含用例（奇异矩阵、GM path、misalignment）。handle 经 frame/descriptor_manager.h 的 HandleManager 封装，get() 返回 aclsparseHandle_t。golden 在 gtsv2_strided_batch_golden.h（CPU 参考）。"
+  },
+  {
+   "op": "gtsv_interleaved_batch",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "gtsv_interleaved_batch_param.h",
+    "gtsv_interleaved_batch_golden.h",
+    "arch35/gtsv_interleaved_batch_npu_wrapper.h",
+    "arch35/gtsv_interleaved_batch_test.cpp",
+    "arch35/gtsv_interleaved_batch_test.csv"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,m,batch_count,algo,is_diag_dominant,seed,value_lo,value_hi,expect_result,mere_threshold,mare_multiplier",
+   "csv_row_count": 23,
+   "seed_column": "seed",
+   "threshold_columns": [
+    "mere_threshold",
+    "mare_multiplier"
+   ],
+   "expect_vocab": [
+    "ACL_SPARSE_STATUS_SUCCESS"
+   ],
+   "success_token": "ACL_SPARSE_STATUS_SUCCESS",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "m",
+    "batch_count",
+    "algo",
+    "is_diag_dominant",
+    "seed",
+    "value_lo",
+    "value_hi",
+    "expect_result",
+    "mere_threshold",
+    "mare_multiplier"
+   ],
+   "tc_prefix": "L0_* / L1_* / L2_* 混合（L0 8 条、L1 11 条、L2 4 条，L2 均为 L2_grid_stride_*）",
+   "batch_pilot_fit": null,
+   "notes": "param.h 不用 ReadMap 字面量，而是 fillCustom(csv_map) + parseString/parseInt/parseDouble(row, \"列名\")，继承 SparseTestParamBase（csv_loader.h）；readmap_columns 填的是这些 parse* 字面量。成功判定在 test.cpp：ASSERT_EQ(p.expect_result, \"ACL_SPARSE_STATUS_SUCCESS\")，CSV 全部行都是 SUCCESS——异常路径不走 CSV，而是 7 个硬编码 TEST_F（GtsvInterleavedBatchExceptionTest），故 form 是 CSV 参数化 + self-contained 异常测试的混合，主体判 csv_gtest。每条参数化用例调 bufferSizeExt 一次 + 主 API 一次，无 warm-up。Legacy API 无描述符；suite 级 Thomas FP64 golden 自检（ThomasGoldenSelfTest）失败会 FATAL。wrapper 有 CheckedInterleavedBatchTotal 溢出保护（引 issue #146）。"
+  },
+  {
+   "op": "ltmatmul (aclsparseLtMatmul)",
+   "form": "csv_gtest",
+   "files": [
+    "ltmatmul_golden_types.h",
+    "CMakeLists.txt",
+    "ltmatmul_param.h",
+    "ltmatmul_golden.h",
+    "ltmatmul_golden_int8.h",
+    "arch35/ltmatmul_test.cpp",
+    "arch35/ltmatmul_test.csv",
+    "arch35/ltmatmul_npu_wrapper.h",
+    "arch35/ltmatmul_test_utils.h",
+    "arch35/ltmatmul_exception_helper.h",
+    "arch35/ltmatmul_perf_test.cpp"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_id,m,k,n,dtype,output_dtype,matrix_type,alpha,beta,transA,transB,alg_config_id,split_k,split_k_mode,prune_alg,alpha_vector_scaling,beta_vector_scaling,range_low,range_high,level,note,order,sparse_side",
+   "csv_row_count": 63,
+   "seed_column": null,
+   "threshold_columns": [],
+   "expect_vocab": [],
+   "success_token": "ACL_SPARSE_STATUS_SUCCESS (ltmatmul_test.cpp:157 `ASSERT_EQ(npu.matmulRet, ACL_SPARSE_STATUS_SUCCESS) << p.caseId() << \" matmul failed\"`)",
+   "handle_ctype": "aclsparseLtHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [],
+   "tc_prefix": "TEST_P 用例名为 caseId() 生成的 \"case<case_id>_<level>\"（如 case1_L0），套件 MatmulTest/FunctionalPrecision；TEST_F 异常用例名前缀 \"L2_NN_\"（如 L2_01_NullPlan）",
+   "batch_pilot_fit": null,
+   "notes": "CSV 存在且 param.h 逐列读，但不是 ReadMap 机制：MatmulParam::fillCustom(const csv_map&) 用 parseInt/parseFloat/parseString(row, \"列名\")（来自公共 csv_loader.h 的 SparseTestParamBase），全仓无任何 ReadMap 字面量——按题目定义 form 严格说不是 ReadMap 版 csv_gtest，机制等价故仍归 csv_gtest。CSV 无 expect_result、无 seed、无阈值列、无 description（有 note 与 level 列，level 取值 L0/L1/L2）。param.h 注释自称 \"16 columns\" 但实际 CSV 为 23 列（多 range_low/range_high/level/note/order/sparse_side/output_dtype 等，fillCustom 全都解析）。成功判据来自 ACL_SPARSE_STATUS_SUCCESS + golden 精度比对（阈值硬编码在测试源码，不在 CSV）。功能测每例只调 aclsparseLtMatmul 一次（无 warmup）；另有独立 ltmatmul_perf_test.cpp，warmup=5 measure 若干（kWarmupIters=5），非 CSV 驱动。matrix_type 列值含非 ASCII 字符 ×（sparse×dense / dense×dense）。handle 经 SparseLtHandleGuard 包装（ltmatmul_test_utils.h:97，内部 aclsparseLtHandle_t）。"
+  },
+  {
+   "op": "prune (aclsparseLtSpMMAPrune)",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "prune_golden.h",
+    "prune_param.h",
+    "prune_test_util.h",
+    "arch35/prune_test.csv",
+    "arch35/prune_test.cpp",
+    "arch35/prune_npu_wrapper.h"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_id,m,k,dtype,alg_config_id,split_k,pruneAlg,op,order,sparse_side,range_low,range_high,level",
+   "csv_row_count": 57,
+   "seed_column": null,
+   "threshold_columns": [],
+   "expect_vocab": [],
+   "success_token": "ACL_SPARSE_STATUS_SUCCESS (ASSERT_EQ(npu.pruneRet, ACL_SPARSE_STATUS_SUCCESS))",
+   "handle_ctype": "aclsparseLtConstHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_id",
+    "m",
+    "k",
+    "dtype",
+    "alg_config_id",
+    "split_k",
+    "pruneAlg",
+    "range_low",
+    "range_high",
+    "op",
+    "order",
+    "sparse_side",
+    "level"
+   ],
+   "tc_prefix": "gtest 名 = 套件 PruneCases/PruneTest.FunctionalPrecision/case<case_id>_<level>（caseId() 产出 \"case1_L0\" 图样，无 TC_/L0_ 前缀）；另有 TEST_F 异常用例 PruneExceptionTest（注释编号 PE1..PE6）与 TILE 专项",
+   "batch_pilot_fit": "适配度中等偏好。参数面典型：13 列全是标量/枚举（m,k,dtype,枚举 op/order/pruneAlg/sparse_side,数值范围,level），dtype 覆盖 float32/float16/bfloat16/int8 四档，列契约清晰且 param.h 的 fillCustom 逐列映射一一对应，便于模板化批量造包。但有三点非典型：seed 不在 CSV 而是代码内定死（2000+case_id）；无 expect_result/阈值/description 列，成败仅由 API 返回码加 golden 逐元素比对判定；alg_config_id/split_k 是穿透参数不影响数值结果。作为 M5 试点可行，但其\"无期望列、无阈值列\"的极简契约与其它带 expect_result 的算子不同构，需注意契约不通用。",
+   "notes": "离群点：1) param.h 不直接调 ReadMap(\"列名\")——列读取走 frame/csv_loader.h 的 ReadMap(csvPath) 整表加载 + GetCasesFromCsv + fillCustom(row) 里 parseInt/parseString/parseFloat(row,\"列名\")，readmap_columns 填的是这些 parse* 字面量。2) CSV 无 seed/expect_result/threshold/description 列；种子由 SeedForCase(caseId)=2000+case_id 派生。3) case_id 不连续（1-96 间有跳号），57 个数据行。4) 顶层放共享头（param/golden/util），arch35/ 放 CSV+cpp+wrapper。5) 每用例只调一次 aclsparseLtSpMMAPrune（无 warm-up），用 EventGuard 事件计时并打印 perf 行。6) 验证为确定性精确比对（PruneToFloat 后 VerifyPruneMixedTolerance）。7) 兄弟目录约 33 个算子（coo2csr、spmm、sparseLt 等），frame/ 为共享框架。"
+  },
+  {
+   "op": "scatter",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "arch22/scatter_test.cpp",
+    "arch35/scatter_npu_wrapper.h",
+    "arch35/scatter_test.cpp",
+    "arch35/scatter_test.csv",
+    "scatter_golden.h",
+    "scatter_param.h"
+   ],
+   "arch_dirs": [
+    "arch22",
+    "arch35"
+   ],
+   "csv_header": "case_name,vec_size,vec_nnz,dn_size,val_type,idx_type,idx_base,idx_sorted,value_pattern,seed,expect_result",
+   "csv_row_count": 101,
+   "seed_column": "seed",
+   "threshold_columns": [],
+   "expect_vocab": [
+    "SUCCESS"
+   ],
+   "success_token": "if (s == \"SUCCESS\")        return ACL_SPARSE_STATUS_SUCCESS;",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "vec_size",
+    "vec_nnz",
+    "dn_size",
+    "val_type",
+    "idx_type",
+    "idx_base",
+    "idx_sorted",
+    "value_pattern",
+    "seed",
+    "expect_result"
+   ],
+   "tc_prefix": "混合前缀：L0_* (13), L1_* (38), WB_* (20), AUDIT_* (30)；无 TC_ 前缀",
+   "batch_pilot_fit": null,
+   "notes": "param.h 不用字面 ReadMap(\"...\")，而是 parseString/parseInt/parseBool(row, \"列名\")（基类 SparseTestParamBase + csv_loader.h），readmap_columns 记录的是这些解析字面量。CSV 无阈值列、无 description 列；expect_result 数据行全部为 SUCCESS，但注释与 ParseExpectResult 支持 INVALID_VALUE / NOT_SUPPORTED，异常路径由 arch35/scatter_test.cpp 内硬编码的 ScatterExceptionTest（E1 null handle 等）覆盖而非 CSV。arch22/scatter_test.cpp 为独立 self-contained 风格（硬编码单用例，直接调 aclsparseScatter），不读 CSV；CSV+param.h 通路仅服务 arch35。wrapper 每用例只调 aclsparseScatter 一次，无 warm-up。handle 经 HandleManager 包装，aclsparseScatter 首参为 handle.get() → aclsparseHandle_t。"
+  },
+  {
+   "op": "sddmm",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "sddmm/sddmm_param.h",
+    "sddmm/sddmm_golden.h",
+    "sddmm/arch22/sddmm_npu_wrapper.h",
+    "sddmm/arch22/sddmm_test.cpp",
+    "sddmm/arch22/sddmm_test.csv",
+    "sddmm/arch35/sddmm_perf.cpp",
+    "sddmm/arch35/sddmm_npu_wrapper.h",
+    "sddmm/arch35/sddmm_test.cpp",
+    "sddmm/arch35/sddmm_test.csv"
+   ],
+   "arch_dirs": [
+    "arch22",
+    "arch35"
+   ],
+   "csv_header": "case_name,description,m,k,n,sparsity_ratio,alpha,beta,dtype,compute_type,op_x,op_y,order_x,order_y,value_lo,value_hi,alg,mere_threshold,mare_multiplier,expect_result,random_seed",
+   "csv_row_count": 136,
+   "seed_column": "random_seed",
+   "threshold_columns": [
+    "mere_threshold",
+    "mare_multiplier"
+   ],
+   "expect_vocab": [
+    "ACL_SPARSE_STATUS_SUCCESS"
+   ],
+   "success_token": "\"ACL_SPARSE_STATUS_SUCCESS\" — test.cpp asserts ASSERT_EQ(npuResult.bufferSizeRet/preprocessRet/executeRet, ACL_SPARSE_STATUS_SUCCESS); expect_result is stored but not compared against (\"ACL_SPARSE_STATUS_SUCCESS\" for functional cases per param.h comment)",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": true,
+   "has_warmup": false,
+   "readmap_columns": [],
+   "tc_prefix": "arch22: \"A22_NN\" (A22_01..A22_61); arch35: mixed \"L0_/L1_/L2_NN\" (37), \"CM_RC_/CM_CR_/CM_CC_\" (18), \"TX_\" (12), \"WB_\" (8) — no TC_ prefix",
+   "batch_pilot_fit": null,
+   "notes": "Form is CSV+gtest but NOT the ReadMap idiom: sddmm_param.h uses csv_loader.h helpers parseString/parseInt/parseDouble(row, \"col\") inside fillCustom(), zero ReadMap literals — hence readmap_columns empty. Two CSVs (one per arch dir), identical headers; row counts 61 (arch22) + 75 (arch35). arch22/sddmm_npu_wrapper.h is a shim that just #includes ../arch35/sddmm_npu_wrapper.h. order_x/order_y default to ACL_SPARSE_ORDER_ROW when column absent/empty. API is 3-stage: aclsparseSDDMMBufferSize -> aclsparseSDDMMPreprocess -> aclsparseSDDMM, each called once per functional case (no warm-up); warm-up exists only in arch35/sddmm_perf.cpp (standalone perf binary, default --warmup 5 --iters 20, aclrtEvent timing, plus a bandwidth bench). arch35/sddmm_test.cpp also has non-CSV TEST_F error-injection cases expecting non-SUCCESS codes. expect_result column carries a status enum name, not pass/fail vocabulary. Handle wrapped in RAII HandleManager (frame/descriptor_manager.h), underlying type aclsparseHandle_t."
+  },
+  {
+   "op": "snnz (aclsparseSnnz)",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "snnz/snnz_golden.h",
+    "snnz/snnz_param.h",
+    "snnz/arch35/snnz_npu_wrapper.h",
+    "snnz/arch35/snnz_test.cpp",
+    "snnz/arch35/snnz_test.csv"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,m,n,dir,density,distribution,seed,pointer_mode",
+   "csv_row_count": 29,
+   "seed_column": "seed",
+   "threshold_columns": [],
+   "expect_vocab": [],
+   "success_token": "ASSERT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS); pass prints \"[case_name] PASSED (exact match, total=...)\"",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "m",
+    "n",
+    "dir",
+    "density",
+    "distribution",
+    "seed",
+    "pointer_mode"
+   ],
+   "tc_prefix": "L0_* / L1_* 混合（L0_ 14 条小规模含 HOST 变体，L1_ 15 条大规模与边界）",
+   "batch_pilot_fit": null,
+   "notes": "离群点：(1) param.h 不用字面 ReadMap()，用 parseString/parseInt/parseDouble(row,\"列名\") 覆写 fillCustom(csv_map)，readmap_columns 按这些字面量填。(2) CSV 不在 snnz/ 根而在 arch35/ 子目录，与 test.cpp、wrapper 同放；param.h 与 golden.h 在上一级共享。(3) 无 expect_result、无阈值列、无 description 列——验证走 Verifier INTEGER 精度模式逐元素比对 golden，不是 CSV 期望值驱动。(4) 每用例只调 aclsparseSnnz 一次，无 warm-up；m<=0 或 n<=0 的边界用例跳过 NPU 调用只验 golden 为 0。(5) CSV 由 GetCasesFromCsv<NnzTestParam>(\"snnz_test.csv\") 加载（相对路径，CMake 拷贝到 build 目录）；套件名 NnzCases，测试体 TEST_P(NnzTest, BitExact)。CMake 用 ops_sparse_add_gtest_tests(nnz ... VARIANT snnz)。"
+  },
+  {
+   "op": "sparse2dense",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "sparse2dense_param.h",
+    "sparse2dense_golden.h",
+    "arch35/sparse2dense_npu_execution.h",
+    "arch35/sparse2dense_npu_wrapper.h",
+    "arch35/sparse2dense_test.csv",
+    "arch35/sparse2dense_test.cpp",
+    "arch35/sparse2dense_l2_cases.csv"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,level,format,base,value_type,order,distribution,m,n,ld,seed",
+   "csv_row_count": 34,
+   "seed_column": "seed",
+   "threshold_columns": [],
+   "expect_vocab": [],
+   "success_token": "ACL_SPARSE_STATUS_SUCCESS",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "level",
+    "format",
+    "base",
+    "value_type",
+    "order",
+    "distribution",
+    "m",
+    "n",
+    "ld",
+    "seed",
+    "mutation",
+    "expected_status"
+   ],
+   "tc_prefix": "L0_* / L1_* (主 CSV，L<级>_<序号>_<描述>)；L2_* (负例 CSV)",
+   "batch_pilot_fit": null,
+   "notes": "双 CSV：主 CSV arch35/sparse2dense_test.csv (L0/L1 正例，34 数据行) 加负例 CSV arch35/sparse2dense_l2_cases.csv (17 数据行，表头 case_name,target,mutation,expected_status)。列读取不是 ReadMap(\"列名\") 逐列图样：param.h 的 fillCustom 用 parseString(row, \"列名\") 从 csv_map 取列（readmap_columns 里列的即这些字符串字面量，前 11 个在 param.h，后 2 个在 test.cpp 的 L2 加载器）；ReadMap 只在 test.cpp:241 以文件名参数出现一次 ReadMap(\"sparse2dense_l2_cases.csv\")。主 CSV 无 expect_result/description/阈值列——判定是 bitwise golden (EXPECT_EQ 字节向量) 加状态断言，L2 负例期望状态由 expected_status 列给出，词表 HANDLE_IS_NULLPTR/INVALID_VALUE/NOT_SUPPORTED，其它值 fail-closed 落到 INVALID_VALUE (ParseExpectedStatus)。L2 编号跳过 09/10 (L2_08 后是 L2_11)。每例只调一次 bufferSize+一次 execute，无 warm-up；另断言 workspaceSize==0。handle 由 HandleManager 封装，API 首参裸类型 aclsparseHandle_t (test.cpp:106)。m==0 或 n==0 的用例只查 executeStatus==SUCCESS，跳过 golden 比对。csv_loader.h/descriptor_manager.h (SparseTestParamBase/HandleManager/ReadMap 定义) 在目录外的公共件。"
+  },
+  {
+   "op": "sparseLt (aclsparseLt host-side init interfaces: matmulDescriptorInit + matmulPlanInit/algSelectionInit)",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "matmulDescriptorInit/CMakeLists.txt",
+    "matmulDescriptorInit/matmulDescriptorInit_param.h",
+    "matmulDescriptorInit/matmulDescriptorInit_test.csv",
+    "matmulDescriptorInit/matmulDescriptorInit_test.cpp",
+    "matmulDescriptorInit/matmulDescriptorInit_npu_wrapper.h",
+    "matmulPlanInit/CMakeLists.txt",
+    "matmulPlanInit/matmulPlanInit_param.h",
+    "matmulPlanInit/matmulPlanInit_test.cpp",
+    "matmulPlanInit/matmulPlanInit_test.csv",
+    "matmulPlanInit/matmulPlanInit_npu_wrapper.h"
+   ],
+   "arch_dirs": [],
+   "csv_header": "case_name,level,target,expect_status,verify_fields,a_rows,a_cols,a_ld,a_align,a_dtype,a_order,a_sparse,b_rows,b_cols,b_ld,b_align,b_dtype,b_order,b_sparse,c_rows,c_cols,c_ld,c_align,c_dtype,c_order,d_rows,d_cols,d_ld,d_align,d_dtype,d_order,op_a,op_b,compute_type",
+   "csv_row_count": 106,
+   "seed_column": null,
+   "threshold_columns": [],
+   "expect_vocab": [
+    "SUCCESS",
+    "INVALID_VALUE",
+    "NOT_SUPPORTED"
+   ],
+   "success_token": "\"SUCCESS\" (param.h ParseStatus: if (s == \"SUCCESS\") return static_cast<int64_t>(ACL_SPARSE_STATUS_SUCCESS);)",
+   "handle_ctype": "aclsparseLtHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "level",
+    "target",
+    "expect_status",
+    "verify_fields",
+    "op_a",
+    "op_b",
+    "compute_type",
+    "alg",
+    "<prefix>rows",
+    "<prefix>cols",
+    "<prefix>ld",
+    "<prefix>align",
+    "<prefix>dtype",
+    "<prefix>order",
+    "<prefix>sparse (prefix ∈ a_/b_/c_/d_)"
+   ],
+   "tc_prefix": "matmulDescriptorInit: 混合 \"L0-*\"/\"L1-*\"/\"L2-*\"/\"WB-*\"（如 L0-01、L1-18a、WB-M-rr-nn）；matmulPlanInit: 全部 \"L*-*\"。无 TC_ 前缀。INSTANTIATE 时 '-' 替换为 '_'",
+   "batch_pilot_fit": null,
+   "notes": "离群点集中在这些地方。(1) 目录含两个子目录（matmulDescriptorInit、matmulPlanInit），各自一套 CSV+param.h+wrapper+test.cpp，无 arch35 等 archXX 子目录——prompt 里提到的 arch35 不存在。(2) 不是数值算子测试：全部为 Host 侧描述符/plan 初始化接口测试，无 golden、无精度比对，因此无 seed 列、无阈值列、无 warm-up。(3) 期望列名是 expect_status 而非 expect_result；expect_vocab 按 expect_status 数据行取值给出（两 CSV 合并：SUCCESS/INVALID_VALUE/NOT_SUPPORTED；注释里还列出 HANDLE_IS_NULLPTR/ALLOC_FAILED/SKIP 但数据行未出现）。(4) param.h 不用 ReadMap(\"列名\") 图样，而是 csv_loader.h 的 parseString/parseInt/自写 parseInt64(row, key)；readmap_columns 按这些字面量给出，a/b/c/d 四组矩阵列由 prefix+\"rows\" 等前缀拼接。(5) 两 CSV 表头不同：matmulPlanInit 多一列 alg（在 verify_fields 之后），csv_header 字段给的是 matmulDescriptorInit 的；matmulPlanInit 数据行 20 行，csv_row_count 给的是 matmulDescriptorInit 的 106 行（均已剔除 # 注释行——CSV 内嵌 # 注释行本身也是离群点）。(6) CSV 单元格含非 int 大值（2097124）故有 parseInt64 + INT64_MIN 错误哨兵；非法枚举用哨兵 999。(7) 纯指针异常/Destroy 边界/ALLOC_FAILED 注入走 TEST_F 硬编码，不入 CSV；ALLOC_FAILED 用例须 -DSPARSELT_TEST_INJECT_ALLOC_FAIL 才编译。(8) 字段校验白盒 include aclsparselt_*_internal.h；入口 main 由 test/frame/test_main.cpp 提供。绝对根路径 /Users/ll/Desktop/workspace-ascend/OpRunway/repos/ops-sparse/test/sparseLt/。"
+  },
+  {
+   "op": "spgemm",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "spgemm_param.h",
+    "README.md",
+    "spgemm_golden.h",
+    "arch35/spgemm_npu_wrapper.h",
+    "arch35/spgemm_test.cpp",
+    "arch35/spgemm_test.csv"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,m,k,n,sparsity_a,sparsity_b,seed,alpha,beta,dtype,alg,mere_threshold,mare_multiplier,expect_result",
+   "csv_row_count": 40,
+   "seed_column": "seed",
+   "threshold_columns": [
+    "mere_threshold",
+    "mare_multiplier"
+   ],
+   "expect_vocab": [
+    "SUCCESS"
+   ],
+   "success_token": "expect_result == \"SUCCESS\"",
+   "handle_ctype": "HandleManager (RAII wrapper over aclsparse handle; literal aclsparseHandle_t typename not visible in this dir)",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "m",
+    "k",
+    "n",
+    "sparsity_a",
+    "sparsity_b",
+    "seed",
+    "alpha",
+    "beta",
+    "dtype",
+    "alg",
+    "mere_threshold",
+    "mare_multiplier",
+    "expect_result"
+   ],
+   "tc_prefix": "L0_* 与 L1_* 混合（27 条 L0_、13 条 L1_），无 TC_ 前缀",
+   "batch_pilot_fit": null,
+   "notes": "CSV 在 arch35/ 子目录而非 op 根目录；param.h 不用 ReadMap 字面量，而是 SparseTestParamBase::fillCustom(csv_map) 里 parseString/parseInt/parseDouble/parseFloat(\"列名\")——readmap_columns 记录的是这些 parse* 字面量。expect_result 全部 SUCCESS，且非 SUCCESS 行会被 GTEST_SKIP 而非做失败断言。每例只调一次 NPU 流程（7-interface：CreateDescr→WorkEstimation×2(先取 size 再执行)→GetNumProducts→Compute→Copy），无 warm-up。m/k/n=0 或 sparsity=1.0 的空矩阵用例在 wrapper 里 rows<=0/cols<=0 时短路返回空 CSR。fp16/bf16 golden 先做输入量化 round-trip（QuantizeCsrValues）。状态码成功值为 ACL_SPARSE_STATUS_SUCCESS（wrapper 的 SpgemmCheckStatus）。"
+  },
+  {
+   "op": "spmm",
+   "form": "self_contained",
+   "files": [
+    "CMakeLists.txt",
+    "README.md",
+    "arch22/spmm_test.cpp",
+    "arch35/spmm_test.cpp"
+   ],
+   "arch_dirs": [
+    "arch22",
+    "arch35"
+   ],
+   "csv_header": null,
+   "csv_row_count": null,
+   "seed_column": null,
+   "threshold_columns": [],
+   "expect_vocab": [],
+   "success_token": "\"Overall: PASS\" (arch35, printf; per-metric \"MERE=... PASS\"/\"MARE=... PASS\"); arch22 prints \"Total: %d failed\" and exits EXIT_SUCCESS when fail==0",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": true,
+   "readmap_columns": [],
+   "tc_prefix": "无 TC_/L0_ 图样。arch35 用描述性小写名（baseline_row_N_beta0 / opB_transpose / B_C_col_major / beta_nonzero / small_shape）；arch22 用例是无名结构体表 kTestCases[]（约 250 条 {M,K,N,nnz,alpha,beta,dist}），仅 dist_name 为 \"uniform\"/\"powerlaw\"",
+   "batch_pilot_fit": null,
+   "notes": "纯 self_contained，无任何 CSV、无 param.h、无 gtest（自写 main + printf 裁决）。两个 arch 目录互斥编译：CMake 按 SOC_VERSION 选 arch35（ascend950*）或 arch22（ascend910_93/910b），其它 SOC 写 skipped_tests.list 并跳过。has_warmup 仅对 arch22 为 true（setup_acl_and_warmup 中 warmup=3 次 aclsparseSpMM，再 repeat=10 次事件计时基准）；arch35 每 dtype 只调 aclsparseSpMM 一次（无 warmup），共 3 个调用点（FP32/FP16/INT8 各一）。种子硬编码：arch35 每 FP32 用例带 seed 字段（42u-46u）经 std::srand，FP16/INT8 用 srand(42)；arch22 用 thread_local std::mt19937 rng(42)。阈值也硬编码：arch35 mere/mareThreshold 为函数参数（调用点在文件中段，INT32 走逐元素精确匹配）；arch22 verify_result 用 1e-3f/1e-3f。arch35 用 ACL_SPARSE_SPMM_CSR_ALG1，arch22 用 ACL_SPARSE_SPMM_ALG_DEFAULT。README 目录结构一节只列 arch35，未提 arch22（与实际文件不一致）。成功 token 两个 arch 不同构，见 success_token。"
+  },
+  {
+   "op": "spmm_op",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "README.md",
+    "spmm_op_golden.h",
+    "spmm_op_param.h",
+    "arch35/spmm_op_perf.cpp",
+    "arch35/spmm_op_npu_wrapper.h",
+    "arch35/spmm_op_test.csv",
+    "arch35/spmm_op_test.cpp"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,description,m,k,n,sparsity_ratio,alpha,beta,dtype,compute_type,op_b,order_b,order_c,alg,pointer_mode,value_lo,value_hi,expect_result,random_seed,skip_precision,index_base,row_offset_type,unsorted",
+   "csv_row_count": 141,
+   "seed_column": "random_seed",
+   "threshold_columns": [],
+   "expect_vocab": [
+    "ACL_SPARSE_STATUS_SUCCESS"
+   ],
+   "success_token": "ACL_SPARSE_STATUS_SUCCESS",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": true,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "description",
+    "m",
+    "k",
+    "n",
+    "sparsity_ratio",
+    "alpha",
+    "beta",
+    "dtype",
+    "compute_type",
+    "op_b",
+    "order_b",
+    "order_c",
+    "alg",
+    "pointer_mode",
+    "value_lo",
+    "value_hi",
+    "expect_result",
+    "random_seed",
+    "skip_precision",
+    "index_base",
+    "row_offset_type",
+    "unsorted"
+   ],
+   "tc_prefix": "混合前缀：L0_NN(10)、L1_NN(43)、L2_NN(8)、P1_NN(15)、P2_NN(14)、WB_NN(16)、G NN(20)、I64_NN(4)、IB_NN(3)、KH_NN(4)、US_NN(4)——无 TC_ 前缀",
+   "batch_pilot_fit": null,
+   "notes": "1) 无字面 ReadMap：param.h 的 fillCustom(csv_map& row) 用 parseString/parseInt/parseDouble/parseBool(row, \"列名\") 逐列读，readmap_columns 列的是这些字面量；结构继承 SparseTestParamBase（frame/csv_loader.h）。2) 无阈值列；精度门用 MIXED_TOLERANCE 比对（test.cpp）加布尔 skip_precision 列（跳数值比对、仍断言返回码），spmm_op_golden.h 里的 threshold 只是稀疏度采样阈值，非精度阈值。3) expect_result 全 141 行只有 ACL_SPARSE_STATUS_SUCCESS；异常/错误码用例不走 CSV，而是 test.cpp 里 TEST_F 硬编码（E01-E16 等，注释「Tests are TEST_F (not CSV-driven); expect non-SUCCESS」）——CSV 与 self_contained 混合，主体按 CSV 定为 csv_gtest。4) 功能测试每用例调 Execute 一次（无 warm-up）；warm-up 只在独立 perf 二进制 arch35/spmm_op_perf.cpp（--warmup 默认 5 + aclrtEvent 计时）。5) handle 由 frame/descriptor_manager.h 的 HandleManager RAII 包装 aclsparseHandle_t。6) 空列有默认值回填：order_b/order_c→ROW，pointer_mode→DEVICE，index_base→BASE_ZERO，row_offset_type→32I。"
+  },
+  {
+   "op": "spmv",
+   "form": "self_contained",
+   "files": [
+    "CMakeLists.txt",
+    "README.md",
+    "arch22/spmv_test.cpp"
+   ],
+   "arch_dirs": [
+    "arch22"
+   ],
+   "csv_header": null,
+   "csv_row_count": null,
+   "seed_column": null,
+   "threshold_columns": [],
+   "expect_vocab": [],
+   "success_token": "\"====Test\" << label << \" case pass!====\"",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [],
+   "tc_prefix": "无 case_name 列；用例以字符串 tag 标识，图样为小写连字符标签，如 \"float-default\"、\"trans-int32-mix\"、\"f16-f32-alpha2\"、随机批次 \"float-rand-<n>\"/\"trans-int32-rand-<n>\"；无 L0_/TC_ 前缀",
+   "batch_pilot_fit": null,
+   "notes": "无 CSV、无 param.h、无 ReadMap，也非 gtest——单文件 main() 硬编码约 170 条用例（含每型 20-30 条随机用例）。任务提示的 arch35/ 不存在，只有 arch22/。用例数据全随机生成且种子取自 steady_clock，即不可复现（无固定 seed）。判定为混合容差（rtol/atol + matched_ratio>=0.99 + max_abs_error 上限，按输出类型分档；int32 精确比对）。每用例调 aclsparseSpMV 恰一次，无 warm-up、无性能测量。成功以 stdout 打印 \"case pass!\" 且进程退出码 0（stats.failed==0）表达。变量名 MARE/MERE 语义颠倒：MARE 实为 max abs error，MERE 实为 matched ratio。handle 链为 aclsparseCreate/aclsparseSetStream/aclsparseCreateCsr/aclsparseSpMV。csv_row_count/seed_column/csv_header 均为 null（无 CSV）。"
+  },
+  {
+   "op": "spmv_op",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "spmv_op_param.h",
+    "spmv_op_golden.h",
+    "arch35/spmv_op_npu_wrapper.h",
+    "arch35/spmv_op_test.cpp",
+    "arch35/spmv_op_test.csv"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,m,k,sparsity,empty_row_prob,seed,alpha,beta,pointer_mode,row_offset_type,alias_z_y,unsorted,alg,pattern,mere_threshold,mare_multiplier,abs_threshold,expect_result",
+   "csv_row_count": 70,
+   "seed_column": "seed",
+   "threshold_columns": [
+    "mere_threshold",
+    "mare_multiplier",
+    "abs_threshold"
+   ],
+   "expect_vocab": [
+    "SUCCESS"
+   ],
+   "success_token": "expect_result == \"SUCCESS\"",
+   "handle_ctype": "HandleManager",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "m",
+    "k",
+    "sparsity",
+    "empty_row_prob",
+    "seed",
+    "alpha",
+    "beta",
+    "pointer_mode",
+    "row_offset_type",
+    "alias_z_y",
+    "unsorted",
+    "alg",
+    "pattern",
+    "mere_threshold",
+    "mare_multiplier",
+    "abs_threshold",
+    "expect_result"
+   ],
+   "tc_prefix": "L0_* / L1_* 混合（25 行 L0_，45 行 L1_；无 TC_ 前缀）",
+   "batch_pilot_fit": null,
+   "notes": "该目录不用 ReadMap 图样：param.h 的 fillCustom(const csv_map& row) 用 parseString/parseInt/parseDouble/parseFloat(row, \"列名\") 逐列读，readmap_columns 记录的是这些字面量；CSV 装载走 GetCasesFromCsv<SpMVOpParam>(\"spmv_op_test.csv\")（csv_loader.h 在 test/frame，非本目录）。handle 无字面 aclsparseHandle_t：用 RAII 包装 HandleManager（descriptor_manager.h），wrapper 首参即 HandleManager&。abs_threshold 列被解析但 test.cpp 校验只 SetMERE/SetMARE，未使用 abs_threshold。expect_result 全为 SUCCESS，非 SUCCESS 分支存在但走 GTEST_SKIP（注释称 placeholder）。每用例只调一次 aclsparseSpMVOp，无 warm-up。无 description 列。param.h/golden.h 在算子根目录，wrapper/test/csv 在 arch35/ 下。"
+  },
+  {
+   "op": "spsm",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "spsm/spsm_param.h",
+    "spsm/spsm_fp16_util.h",
+    "spsm/spsm_golden.h",
+    "spsm/arch35/spsm_test.csv",
+    "spsm/arch35/spsm_test.cpp",
+    "spsm/arch35/spsm_npu_wrapper.h"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,m,n,ldb,dtype,uplo,trans,diag,order,alpha,value_lo,value_hi,density,seed,expect_result,b_zero,a_empty,inplace,unsorted,matrix_struct,bw,blk,singular,index_base,one_based_data,opB",
+   "csv_row_count": 94,
+   "seed_column": "seed",
+   "threshold_columns": [],
+   "expect_vocab": [
+    "SUCCESS",
+    "NOT_SUPPORTED"
+   ],
+   "success_token": "expect_result compared as `param_.expect_result == \"NOT_SUPPORTED\"` in spsm_test.cpp; success path is the else branch (expect_result \"SUCCESS\"), and NPU status token is ACL_SPARSE_STATUS_SUCCESS",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": false,
+   "readmap_columns": [],
+   "tc_prefix": "L-level pattern: L0_1..8, L1_01..30, L1_G1..G28, L2_S1..S10, L2_M1..M2, L3_B1_* (8 rows), L3_W1..W8; no TC_ prefix",
+   "batch_pilot_fit": null,
+   "notes": "CSV loading uses csv_loader.h with fillCustom(csv_map) + parseString/parseInt/parseFloat/parseDouble(row, \"col\") rather than a ReadMap() API — readmap_columns is empty but the effective column literals are exactly the 26 header columns (all consumed in spsm_param.h::fillCustom). No threshold or description columns in the CSV; expect_vocab only SUCCESS/NOT_SUPPORTED. Wrapper splits the call chain into aclsparseSpSMBufferSize -> aclsparseSpSMAnalysis -> aclsparseSpSM (each once per case; no warm-up repeat). Additionally spsm_test.cpp has a TEST_F SpsmExceptionTest block with ~20 hardcoded L2-X parameter-validation cases not in the CSV (mixed form: CSV-driven TEST_P plus hardcoded TEST_F). Handle managed via sparse_test::HandleManager (test/frame/descriptor_manager.h) wrapping aclsparseHandle_t. CSV has 95 lines = header + 94 data rows."
+  },
+  {
+   "op": "spsv",
+   "form": "csv_gtest",
+   "files": [
+    "CMakeLists.txt",
+    "spsv_golden.h",
+    "spsv_param.h",
+    "arch35/spsv_test.csv",
+    "arch35/spsv_test.cpp",
+    "arch35/spsv_npu_wrapper.h"
+   ],
+   "arch_dirs": [
+    "arch35"
+   ],
+   "csv_header": "case_name,level,slice_width,m,format,index_type,index_base,fill_mode,diag_type,op_type,alpha,sparsity,structure,in_place,unsorted,update_mode,null_vec,mere_threshold,mare_multiplier,description,expect_result,random_seed,rowptr_type,colind_type,force_permtype64",
+   "csv_row_count": 145,
+   "seed_column": "random_seed",
+   "threshold_columns": [
+    "mere_threshold",
+    "mare_multiplier"
+   ],
+   "expect_vocab": [
+    "ACL_SPARSE_STATUS_SUCCESS"
+   ],
+   "success_token": "ASSERT_EQ(p.expect_result, \"ACL_SPARSE_STATUS_SUCCESS\"); (spsv_test.cpp:201; param.h default expect_result = \"ACL_SPARSE_STATUS_SUCCESS\")",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": true,
+   "has_warmup": false,
+   "readmap_columns": [
+    "case_name",
+    "m",
+    "slice_width",
+    "format",
+    "index_type",
+    "index_base",
+    "rowptr_type",
+    "colind_type",
+    "force_permtype64",
+    "fill_mode",
+    "diag_type",
+    "op_type",
+    "alpha",
+    "sparsity",
+    "structure",
+    "in_place",
+    "unsorted",
+    "update_mode",
+    "null_vec",
+    "mere_threshold",
+    "mare_multiplier",
+    "description",
+    "expect_result",
+    "random_seed"
+   ],
+   "tc_prefix": "混合：L0_* / L1_* / WB_*（CSV 数据行）；另有 I64_FUNC_* / I32_XVAL_* / I64_PERM64_* / I64_BASE1_* / I32_I32_* / I64_I32_* / I64_I64_* 前缀（level 列仍标 L1）；cpp 内硬编码 TEST_F 用 L2_* / WB_* 名。无 TC_ 前缀。",
+   "batch_pilot_fit": null,
+   "notes": "1) param.h 不用字面量 \"ReadMap\"，而是 fillCustom(csv_map) + parseString/parseInt/parseFloat/parseDouble/parseBool(row, \"列名\")（csv_loader.h 提供）；readmap_columns 即这些字面量。CSV 加载入口是 GetCasesFromCsv<SpSVParam>(\"spsv_test.csv\")（spsv_test.cpp:255）。2) CSV 有 level 列但 fillCustom 不读它。3) 末尾若干行（139-146）带尾部空列或额外列值填 rowptr_type/colind_type/force_permtype64，早期行（2-138）只有 22 列（少 3 列，靠默认值）——列数不齐是离群点。4) expect_result 全部为 ACL_SPARSE_STATUS_SUCCESS；TEST_P GenericSuccess 直接 ASSERT expect_result 为该值，失败预期用例全部硬编码在 TEST_F（L2_*/WB_*，EXPECT_NE 判非 SUCCESS，无具体错误码词表）。5) wrapper 每用例 solve 一次（update_mode=GENERAL/DIAGONAL 时 updateMatrix 后再 solve 一次得 y2），无 warm-up。6) param.h/golden.h 在 spsv/ 根，csv/cpp/wrapper 在 arch35/。7) force_permtype64 通过 RAIIEnvGuard 设 SPSV_FORCE_PERMT_64=1 环境变量。8) batch/pilot 概念不存在，batch_pilot_fit=null。文件绝对路径根：/Users/ll/Desktop/workspace-ascend/OpRunway/repos/ops-sparse/test/spsv/"
+  },
+  {
+   "op": "spvv",
+   "form": "self_contained",
+   "files": [
+    "CMakeLists.txt",
+    "README.md",
+    "arch22/spvv_test.cpp"
+   ],
+   "arch_dirs": [
+    "arch22"
+   ],
+   "csv_header": null,
+   "csv_row_count": null,
+   "seed_column": null,
+   "threshold_columns": [],
+   "expect_vocab": [],
+   "success_token": "\"PASS\" — e.g. `pass ? \"PASS\" : \"FAIL\"` printed per case; process exit `failed > 0 ? 1 : 0`",
+   "handle_ctype": "aclsparseHandle_t",
+   "has_description_column": false,
+   "has_warmup": true,
+   "readmap_columns": [],
+   "tc_prefix": "无 TC_/L0_ 前缀；用例以短 tag 命名（\"tiny\"、\"zero-nnz\"、\"sparse-1M\"、\"small-4K\"、\"medium\"、\"large-10M\" 等），存于 SpvvCase.tag",
+   "batch_pilot_fit": null,
+   "notes": "目录无 CSV、无 param.h、无 gtest——单一 main() 自含 C++ 样例（表驱动正确性 10 例 ×FP32/FP16 + benchmark + 100 次随机 fuzz），故 form=self_contained。csv_header 等 CSV 字段均为 null（schema 要求字符串处已注明）。has_warmup=true 仅指 benchmark 路径：每配置先 5 次 warm-up 调 aclsparseSpvv 再计时 20 次迭代；正确性路径每例仅调一次（经 run_spvv 包装并同步 stream）。种子硬编码 std::mt19937 rng(42)（fuzz 部分未逐行核对种子）。容差硬编码在 cpp：FP32 1e-3、FP16 1e-2 相对误差，非 CSV 列。README 声明仅 arch22（910B/A3），A5/arch35 未适配——任务提示中提到的 arch35 子目录实际不存在。CMakeLists 仅一行 ops_sparse_add_test(spvv ${OPS_SPARSE})。"
+  }
+ ]
+}
