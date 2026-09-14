@@ -24,6 +24,11 @@
   旧事实表 613/1139/197µs 恰为新值 2×，旧「实测」即双份口径，两 skill CLAUDE.md 事实表
   已重写。todo 三条关闭。全程记录 [msprof-perf-fix-plan.md](msprof-perf-fix-plan.md)
   附录 A.1-A.11。isolated-acceptance 无头正式口径未走，不据此宣称任何算子正式通过。
+  本仓 commit 899c7e1 已推 origin/fix/msprof-perf-pipeline；**上游 PR !7 已提**
+  （Justbin/repo-task-atk-test，base main@febf529，经 fork brian66237，commit d1c9a3b，
+  两 skill 15 文件 +843/−254）：上游 main 两 blas 树与本仓 msprof 前基点 22e07a4 逐字节
+  一致（PR !4 已合入），patch 零冲突应用、与本仓 HEAD 逐字节核对通过；上游分支已由
+  dev/skills-v0.2.0 收敛为 main，upstream.json 的 baseline/mirror_commit 过时遗留仍在。
 
 - **2026-09-13 · msprof 性能通路修复立项（plan 已批，未动 skill）。** Mr.0 定案六件事：
   每 case 单次采样免 warmup 不批量（A7 提速 ~6×）、去显式 `--export`（A1 源头消除）、补
