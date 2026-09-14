@@ -18,7 +18,7 @@
     ".claude-plugin/",
     "skill/"
   ],
-  "mirror_commit": "e523d60",
+  "mirror_commit": "d2ddbc1",
   "baseline_branch": "main",
   "branch": "main"
 }

@@ -2,6 +2,18 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-14 · plugin 镜像整树对齐上游 main（d2ddbc1），blas-usage 迁 dev-doc。**
+  上游分支已收敛（dev/skills-v0.2.0 消失，只剩 main），基线 90e28ff→febf529
+  （2026-09-10，前进 36+ 提交）：13 个 skill（新增 8 个 cann-* 与 repo-task-atk-accept）、
+  新 docs 结构（guide/development/superpowers，无 skills/ 类目）、`.claude/hooks` 三量具
+  +doc-style 规则、上游自带 `.claude-plugin/plugin.json`（AGENTS「上游永不占用该路径」作废）、
+  conftest/pytest.ini。整树替换 273 文件 +40028/−7368；两个 blas skill 保留本仓 msprof 修复版
+  （=上游+PR !7 内容，上游两 blas 树与修复前基点逐字节一致已核）；`plugin/docs/skills/blas-usage.md`
+  转本仓开发件迁 `dev-doc/blas-usage.md`。AGENTS §2 镜像清单/同步流程（整树替换先例入文）/
+  PR pathspec 与事实对齐；upstream.json 基线更新、mirror_commit=d2ddbc1（注意:两 blas 目录
+  超前上游，PR !7 合入前据此出 PR diff 不会重复该内容）；marketplace 描述更新 13 skill。
+  PR !4 时代的「upstream.json 基线过时」遗留就此还清。**未 push。**
+
 - **2026-09-14 · msprof 性能通路修复已实现（wave 1-2 完成，待真机全量回归关闭）。**
   分支 `fix/msprof-perf-pipeline`，S1∥S2∥S3 并行落地：模板量具改单次采样免 warmup、
   去显式 export、补采集开关、基线重复键首行生效+warning、逐例进度行；四份契约文档同步
