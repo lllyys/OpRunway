@@ -1,0 +1,3 @@
+# cann-env-setup 的脚本只用 Python 标准库（subprocess/json/re/pathlib/shutil/os/argparse），
+# 无运行时第三方依赖。下面仅为跑单测用。
+pytest>=7.0

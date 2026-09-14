@@ -11,7 +11,7 @@ DEFECT_MAP = SOURCE / "defect-map.md"
 
 
 def ids_under(heading, prefix):
-    """只在指定小节里抽编号。
+    r"""只在指定小节里抽编号。
 
     全文扫 `| D\d\d |` 会把别处出现的编号一起捞进来：模板缺陷表里写一句
     「与 D05 同类」，样例缺陷表的断言就跟着红，而它根本没改。编号该属于

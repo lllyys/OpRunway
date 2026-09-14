@@ -45,7 +45,11 @@ def _npu():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-o", "--out", default="env.json", help="写到哪，默认 env.json")
+    # 默认名带 gen：跑测侧 A1 把用例包 `cp -r` 进验收工作区后，它自己的
+    # probe_env.py 会往同目录写 env.json。同名的话冻 golden 用的 atk / torch
+    # 版本当场被跑测机的指纹覆盖，且无痕。**不要改回 env.json。**
+    parser.add_argument("-o", "--out", default="env.gen.json",
+                        help="写到哪，默认 env.gen.json")
     args = parser.parse_args()
 
     report = {

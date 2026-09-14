@@ -1,0 +1,74 @@
+# ATK 用例设计骨架 —— cp 走改名即可，数值已按 case-strategy.md 的规则调好。
+#
+# 适用形态：一个 tensor 输入 + 若干 attr / scalar，ND 格式，标准两段式 aclnn。
+# 你的算子不长这样时：
+#   输入是 aclTensorList*（个数可变） -> yaml-authoring.md「动态输入」
+#   输出不在参数尾部 / 原地算子       -> plugin-authoring.md 判据表第三条
+#   格式不是 ND                       -> 生成侧管不了，facts.json 记下来交跑测侧
+#   这里没有的字段                    -> atk-surface.md 的能力清单
+#
+# 要改的地方标了 <>。改完先跑 gen_cases.py --dry-run。
+# **改本文件的任何数值，必须在真机上用它跑一遍 dry-run。**
+
+api: pytorch
+api_type: function              # 写了 CPU 执行器就填注册名 function_<op>_cpu
+aclnn_api_type: aclnn_function  # 标准两段式不用改
+version: v2.1
+name: <torch.xxx>               # facts.json 的 baseline
+aclnn_name: <Op>                # facts.json 的 aclnn_name，不带 aclnn 前缀
+generate: default               # 写了约束器就填注册名 <Op>_constraint
+dtype_numbers: 20               # dtype 数 > 8 填 20；4–8 填 30；≤3 填 60
+extra_numbers: 0                # 边界用例总闸。文档明写支持空张量才开
+
+# 规模档配比。large 门槛 2 MB，单位 MB。
+size_distributions:
+  - values: [[0, 0.03125]]      # small  < 32 KB
+    ratio: 0.4
+  - values: [[0.03125, 2]]      # medium 32 KB – 2 MB
+    ratio: 0.3
+  - values: [[2, 16]]           # large  ≥ 2 MB
+    ratio: 0.3
+
+standard:
+  acc: default
+  perf: not_key
+
+inputs:
+  - name: null
+    type: tensor
+    required: true
+    dtypes:
+      values: [<按 facts.json 的 params[0].dtypes 列全，任务书点名的新增 dtype 一个都不能少>]
+    ranges:
+      valid:
+        # 浮点守生态标准的 [-5,5]；整型要单独一段到极值；
+        # 有无符号 dtype 时必须有一段下界为 0，否则负值段被 clamp 成整块 0
+        values: [[-5, 5], [0, 127], [-128, 127]]
+    shapes:
+      dim_numbers:
+        # 只列 ≤4 的秩，按 facts.json 的 shape.rank 区间裁剪（下界不到 0 就删掉 0）。
+        # **≥5 的秩不要写在这里**：ATK 抽 shape 靠拒绝采样，接受率随秩指数下降，
+        # 高秩会一路重抽到 ATK 自己的 300s 守卫。要覆盖高秩就在约束器里显式写形状，
+        # 见 references/case-strategy.md「高秩不靠抽样」与 assets 里的约束器示例。
+        values: [0, 1, 2, 3, 4]
+      dim_values:
+        # 2^n 与 2^n±1 成对，卡住 tiling 的「刚好一块」「差一个」
+        # 上限 1048576 = 2^20，是生态标准的单轴上限，**不能再往上加**
+        # 不放 0：空张量归 boundary.has_empty 管，放这里会让每根轴都可能塌成空张量
+        values: [1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129,
+                 255, 256, 257, 511, 512, 513, 1023, 1024,
+                 4095, 4096, 16384, 65536, 262144, 1048576]
+      max_length: 4194304         # 字节预算 = large 门槛 × 2
+
+  # 下面按 facts.json 的 params 顺序逐个列，只列 role: input 的，out 不写。
+  # 轴类 attr 的值域要覆盖 [-rank, rank)，rank 上界 8 就写 [[-8, 8]]。
+  - name: null
+    type: attr
+    required: true
+    dtypes:
+      values: [int]
+    ranges:
+      valid:
+        values: [[-8, 8]]
+
+outputs: null

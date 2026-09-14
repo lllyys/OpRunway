@@ -1,6 +1,6 @@
 {
   "name": "repo-task-atk-test",
-  "description": "社区算子任务的五个平级 skill：覆盖 ATK 与 ops-blas 的用例生成、NPU 验收和任务书编写。",
+  "description": "社区算子任务与 CANN 生态巡检的 skill 合集：ATK 与 ops-blas 的用例生成与 NPU 验收、任务书编写、算子仓环境搭建与跑测闭环、文档体检、社区页面巡检。",
   "version": "0.2.0",
   "author": {
     "name": "justbin-coder",
@@ -11,6 +11,14 @@
     "./skill/repo-task-atk-accept",
     "./skill/repo-task-doc-write",
     "./skill/repo-task-blas-case-gen",
-    "./skill/repo-task-blas-accept"
+    "./skill/repo-task-blas-accept",
+    "./skill/cann-page-inspect",
+    "./skill/cann-env-setup",
+    "./skill/cann-950-feature-scan",
+    "./skill/cann-ops-run",
+    "./skill/cann-issue-report",
+    "./skill/cann-issue-track",
+    "./skill/cann-doc-quickstart-check",
+    "./skill/cann-doc-tutorial-review"
   ]
 }

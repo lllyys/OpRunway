@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill-md-gate.py\"",
+            "timeout": 10,
+            "statusMessage": "查 SKILL.md 门禁"
+          }
+        ]
+      }
+    ]
+  }
+}

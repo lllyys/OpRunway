@@ -1,0 +1,8 @@
+# tech-docs-guard 核心流程只用 Python 标准库 + 系统 grep,无第三方硬依赖。
+# (codecheck 用系统 grep;render/findings 纯 stdlib。API 签名级 AST 留作可选增强,默认不引 libclang。)
+#
+# 可选依赖——只影响 P5「导出仓库同名 Excel + 统计图」的形态,缺省自动降级(见 export_excel.py):
+#   openpyxl      提供真 .xlsx(问题明细 + 统计 + Excel 原生柱状图);缺 → <repo>.csv + stats.csv
+#   matplotlib    提供 statistics.png(柱状图,需系统有 CJK 字体);缺或无线体 → statistics.svg
+#
+# 安装(可选):pip install openpyxl matplotlib
