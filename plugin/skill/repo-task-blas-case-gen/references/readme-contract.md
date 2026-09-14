@@ -38,7 +38,8 @@ README 是事实表 FACTS 供人阅读的投影，不是独立的事实来源。
   - 每个 token 都实现 README 指定的对象、方法和阈值。
   - 不用单一全矩阵误差检查替代结构性或残差检查。
 - 被测调用：
-  - 一条 gtest 用例只调用被测接口一次；预热与重复由验收量具 `verify_performance.py` 负责。
+  - 一条 gtest 用例只调用被测接口一次；量具 `verify_performance.py` 不做外部预热，
+    重复采样仅在其 `--repeats` 显式启用时发生。
 - CSV：
   - 逐字节部署到 `test/<family>/<op>/<arch>/<op>_test.csv`。
   - 不在测试源码旁保留另一份手写 CSV。

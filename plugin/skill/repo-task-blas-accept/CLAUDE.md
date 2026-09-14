@@ -16,6 +16,8 @@
 | A1 env 正确检出真机工具链（cmake/g++/build.sh/frame/header/CANN/msprof/cblas） | 实测（A3，sger） |
 | npu-smi 在容器内解析不出设备（记"未知"，非门禁）——探针脆弱，待改 | 实测（A3） |
 | 精度 harness 真机通:build-skip→list→名字映射→gtest json→结果 JSON | 实测（A3，sger TC_L0 全 PASS） |
-| 性能 msprof 流水线真机通:warmup + 5 次 collect+export + 解析 + 中位数 | 实测（A3，sger） |
-| kernel_us 可复现:5 次独立采样中位数 spread 1.3–2.4% | 实测（sger 1024²=613μs、512×2048=1139μs、256²=197μs） |
+| 性能 msprof 流水线真机通:单次采集自动导出 + gtest JSON 执行证据 + 解析 | 实测（A3，sger 全链 + ctpmv 200 例，2026-09-14） |
+| kernel_us 单次采样可复现:同例跨进程偏差 ≤2%；launches 恒 [1]（旧两步导出下为 [2]，双份计数已消） | 实测（A3；新值 306/571/99µs≈旧值 613/1139/197µs 的一半，旧值为双份计数口径，作废） |
+| msprof 不透传 application 退出码；判定 1-3（证据缺失→CRASH、msprof 非 0→NO_KERNEL、无 summary→NO_KERNEL）均端到端直证 | 实测（A3，CANN 9.0.1） |
+| 基线重复键首行生效贯穿 A2/A4/A5（同键处处同选择）；verdict 只认 cwd 的 check.json，--out 外指不影响结论 | 实测（A3，sger 小包全链） |
 | accept 运行链用现成算子只验机械,不验真算子正确性（需契约 C++ test） | 设计边界 |

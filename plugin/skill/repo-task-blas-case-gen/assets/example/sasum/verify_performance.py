@@ -26,6 +26,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import time
 
 
 ENVIRONMENT_EXIT = 3
@@ -172,7 +173,12 @@ RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 FAILURE_EXIT = 1
 INSUFFICIENT_EXIT = 2
-REPEATS = 5
+# 默认单次采集:每次采样都是独立带 profiling 的进程,5 次带来 ~5x 时长,
+# 而中位数收益有限(历史实测样本间 spread 仅 1.3–2.4%);需要多样本时用 --repeats 覆盖。
+REPEATS = 1
+# 单例耗时预估(秒):真机实测单次 msprof 采集(含进程启动与落盘)约 10s/case(A3 机外推)。
+# 只用于开跑前的总时长预估提示,不参与任何判定。
+PER_CASE_ESTIMATE_S = 10
 
 # 公开文档给出 op_summary；目录和列名需在目标环境 spike 后只改这些常量。
 OP_SUMMARY_GLOB = "PROF_*/mindstudio_profiler_output/op_summary_*.csv"
@@ -323,6 +329,7 @@ def _base_result(args, arch, started):
         "calls_per_case": 1,
         "ignored_no_ref": [],
         "gpu_baseline_path": None,
+        "baseline_warnings": [],
         "msprof": None,
         "gtest_filter": None,
         "cases": [],
@@ -491,22 +498,27 @@ def _load_gpu_baseline(path):
     if not rows and next(csv.reader([data_lines[0]])) != expected:
         raise ValueError("gpu_baseline.csv 表头与 PERF_KEY 不一致")
     references = {}
+    warnings = []
     for index, row in enumerate(rows, 2):
         key = _key_for_row(row)
-        if key in references:
-            raise ValueError(f"gpu_baseline.csv 第 {index} 行性能键重复")
+        # 逐行既有校验(非数值/≤0)对所有行照常执行,重复键行也不例外。
         raw_gpu_ms = row.get("gpu_ms", "").strip()
-        if not raw_gpu_ms:
-            references[key] = None
+        if raw_gpu_ms:
+            try:
+                gpu_ms = float(raw_gpu_ms)
+            except ValueError as exc:
+                raise ValueError(f"gpu_baseline.csv 第 {index} 行 gpu_ms 非数值") from exc
+            if gpu_ms <= 0:
+                raise ValueError(f"gpu_baseline.csv 第 {index} 行 gpu_ms 必须大于 0")
+        else:
+            gpu_ms = None
+        # 重复键不再报错:按规范化键首行生效——首行 gpu_ms 为空即 NO_REF,
+        # 后续重复行不覆盖,只记 warning(所有基线读取点统一此选择规则)。
+        if key in references:
+            warnings.append(f"gpu_baseline.csv 第 {index} 行性能键重复,首行生效")
             continue
-        try:
-            gpu_ms = float(raw_gpu_ms)
-        except ValueError as exc:
-            raise ValueError(f"gpu_baseline.csv 第 {index} 行 gpu_ms 非数值") from exc
-        if gpu_ms <= 0:
-            raise ValueError(f"gpu_baseline.csv 第 {index} 行 gpu_ms 必须大于 0")
         references[key] = gpu_ms
-    return metadata, references
+    return metadata, references, warnings
 
 
 def _resolve_msprof(override):
@@ -565,6 +577,60 @@ def parse_op_summary(output_dir):
     return kernel_us, launches
 
 
+def _gtest_evidence(path, gtest_name):
+    """校验一次采样的执行成功证据 r<N>.gtest.json(gtest --gtest_output 写出)。
+
+    合格是正向条件:文件可读、可解析为 JSON 对象、目标完整 gtest 名的记录存在、
+    状态为已执行完成(非 SKIPPED/NOTRUN)、无 failure 记录。读取、解析、结构校验的
+    任何失败一律不合格,不对缺失字段按成功默认。返回 (合格?, 不合格原因)。
+    结构解析与精度侧 _gtest_records 同构(testsuites[].testsuite[],
+    全名 = "<suite名>.<test名>")。"""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return False, f"证据文件不可读或非 JSON({exc})"
+    if not isinstance(payload, dict):
+        return False, "证据文件顶层不是 JSON 对象"
+    suites = payload.get("testsuites")
+    if not isinstance(suites, list):
+        return False, "证据缺少 testsuites 列表"
+    target = None
+    for suite in suites:
+        if not isinstance(suite, dict):
+            continue
+        suite_name = suite.get("name", "")
+        tests = suite.get("testsuite")
+        if not isinstance(tests, list):
+            continue
+        for test in tests:
+            if not isinstance(test, dict):
+                continue
+            test_name = test.get("name", "")
+            full_name = f"{suite_name}.{test_name}" if suite_name else test_name
+            if full_name == gtest_name:
+                target = test
+                break
+        if target is not None:
+            break
+    if target is None:
+        return False, f"证据中无目标用例 {gtest_name!r} 的记录"
+    result = str(target.get("result", "")).upper()
+    status = str(target.get("status", "")).upper()
+    if result == "SKIPPED" or status in {"SKIPPED", "NOTRUN"}:
+        return False, "目标用例未执行(SKIPPED/NOTRUN)"
+    # 完成标记两字段同时要求(A3 机真机 JSON 直证并存);缺失或未知值一律不合格,
+    # 不按成功默认——旧版 gtest 若无 result 字段会在此显式 CRASH,fail-closed 方向。
+    if status != "RUN" or result != "COMPLETED":
+        return False, f"目标用例无已执行完成标记(status={status or '缺失'}, result={result or '缺失'})"
+    # gtest 成功记录正常省略 failures;字段存在时必须是数组,畸形值即结构失败。
+    failures = target.get("failures", [])
+    if not isinstance(failures, list):
+        return False, f"证据 failures 字段畸形(类型 {type(failures).__name__})"
+    if failures:
+        return False, f"目标用例含 {len(failures)} 条 failure 记录"
+    return True, None
+
+
 def _run_process(command, timeout, cwd=None, env=None):
     try:
         result = subprocess.run(
@@ -593,6 +659,12 @@ def _write_log(path, content):
         stream.write(content)
 
 
+def _progress(message):
+    """进度与 warning 通道:逐条打到 stderr 并立即 flush,便于实时观测;
+    判定面仍只看结果 JSON 与 stdout 表格。"""
+    print(message, file=sys.stderr, flush=True)
+
+
 def _case_record(row, gtest_name):
     return {
         "name": row["case_name"],
@@ -606,6 +678,9 @@ def _case_record(row, gtest_name):
         "spread": None,
         "verdict": None,
         "message": "",
+        # 逐例诊断 warning(与顶层 baseline_warnings 分开):判定 1-3 触发时记录,
+        # 文本含 repeat 序号、msprof 退出码、执行成功证据文件路径。
+        "warnings": [],
     }
 
 
@@ -619,64 +694,80 @@ def _measure_case(args, binary, msprof, row, gtest_name, references, profile_roo
     if run_env is None:
         run_env = dict(os.environ)
     safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", row["case_name"])
-    warmup = [str(binary), f"--gtest_filter={gtest_name}"]
-    code, output, problem = _run_process(warmup, args.timeout, env=run_env)
-    _write_log(profile_root / safe_name / "warmup.log", output)
-    if problem:
-        record["status"] = problem
-        record["verdict"] = problem
-        record["message"] = "warm-up 未完成"
-        return record
-    if code != 0:
-        record["status"] = "FAIL"
-        record["verdict"] = "FAIL(warmup)"
-        record["message"] = f"warm-up 退出码 {code}"
-        return record
-
-    application = shlex.join([str(binary), f"--gtest_filter={gtest_name}"])
+    case_dir = profile_root / safe_name
+    case_dir.mkdir(parents=True, exist_ok=True)
+    case_dir = case_dir.resolve()
     for repeat in range(1, args.repeats + 1):
-        output_dir = profile_root / safe_name / f"r{repeat}"
-        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        output_dir = case_dir / f"r{repeat}"
+        gtest_json = case_dir / f"r{repeat}.gtest.json"
+        # 每 case 恰一次采集;application 内追加 gtest 原生 --gtest_output,
+        # r<N>.gtest.json(绝对路径,按采样定址)是本次采样的「执行成功证据」,
+        # 由 gtest 在 RUN_ALL_TESTS 返回时写出。--ai-core=on --task-time=on 下
+        # op_summary 由 --application 自动导出,不做第二步 export(显式 export
+        # 会再产一份 op_summary,同一 glob 双份计入导致假 FAIL)。
+        application = shlex.join([
+            str(binary),
+            f"--gtest_filter={gtest_name}",
+            f"--gtest_output=json:{gtest_json}",
+        ])
         command = [
             str(msprof),
             f"--application={application}",
+            "--ai-core=on",
+            "--task-time=on",
             f"--output={output_dir}",
         ]
         code, output, problem = _run_process(command, args.timeout, env=run_env)
-        _write_log(profile_root / safe_name / f"r{repeat}.log", output)
+        _write_log(case_dir / f"r{repeat}.log", output)
         if problem:
             record["status"] = problem
             record["verdict"] = problem
             record["message"] = f"第 {repeat} 次 msprof 未完成"
             return record
-        if code != 0:
+        # 真机实测 msprof 不透传 application 失败(分析完成一律退 0),退出码不能作
+        # 崩溃判据;按执行成功证据逐次判定,任一次采样落入 1-3 即终止该 case:
+        # 1 证据不合格(含缺失)→CRASH;2 证据合格但 msprof 非 0→NO_KERNEL(不读
+        # op_summary,防部分导出的 CSV 少算耗时抬高 ratio);3 op_summary 缺失或
+        # 无 kernel 行→NO_KERNEL(既有路径);4 全合格→计分。
+        evidence_ok, evidence_detail = _gtest_evidence(gtest_json, gtest_name)
+        if not evidence_ok:
+            record["warnings"].append(
+                f"r{repeat} 执行成功证据缺失/不合格({evidence_detail});"
+                f"msprof 退出码 {code};证据文件 {gtest_json}"
+            )
             record["status"] = "CRASH"
             record["verdict"] = "CRASH"
-            record["message"] = f"第 {repeat} 次 msprof 退出码 {code}"
-            return record
-        # 采集只产 task_time 与 sqlite；op_summary 由 export 生成，必须显式导出。
-        export = [str(msprof), "--export=on", f"--output={output_dir}"]
-        code, output, problem = _run_process(export, args.timeout, env=run_env)
-        _write_log(profile_root / safe_name / f"r{repeat}.export.log", output)
-        if problem:
-            record["status"] = problem
-            record["verdict"] = problem
-            record["message"] = f"第 {repeat} 次 msprof export 未完成"
+            record["message"] = (
+                f"第 {repeat} 次执行成功证据缺失/不合格:{evidence_detail}"
+            )
             return record
         if code != 0:
-            # export 是分析工具失败，不是被测算子崩溃：归入拿不到 kernel 证据。
+            record["warnings"].append(
+                f"r{repeat} msprof 退出码 {code},产物不可信,不读 op_summary;"
+                f"证据文件 {gtest_json}"
+            )
             record["status"] = "NO_KERNEL"
             record["verdict"] = "NO_KERNEL"
-            record["message"] = f"第 {repeat} 次 msprof export 退出码 {code}，未生成 op_summary"
+            record["message"] = (
+                f"第 {repeat} 次 msprof 退出码 {code},采集或分析未完整,不计分"
+            )
             return record
         try:
             kernel_us, launches = parse_op_summary(output_dir)
         except (OSError, UnicodeError, csv.Error, ProfileParseError) as exc:
+            record["warnings"].append(
+                f"r{repeat} op_summary 解析失败;msprof 退出码 {code};"
+                f"证据文件 {gtest_json}"
+            )
             record["status"] = "NO_KERNEL"
             record["verdict"] = "NO_KERNEL"
             record["message"] = f"第 {repeat} 次解析失败：{exc}"
             return record
         if launches == 0:
+            record["warnings"].append(
+                f"r{repeat} op_summary 缺失或无 kernel 行;msprof 退出码 {code};"
+                f"证据文件 {gtest_json}"
+            )
             record["status"] = "NO_KERNEL"
             record["verdict"] = "NO_KERNEL"
             record["message"] = f"第 {repeat} 次采样没有 kernel 行"
@@ -692,6 +783,8 @@ def _measure_case(args, binary, msprof, row, gtest_name, references, profile_roo
         record["message"] = "kernel duration 中位数不大于 0"
         return record
     record["kernel_us"] = median_us
+    # repeats=1 时 median=该值、spread=0:spread=0 表示无样本间差异可算,
+    # 不是稳定性证明;字段结构不随 repeats 变。
     record["spread"] = (
         max(record["samples"]) - min(record["samples"])
     ) / median_us
@@ -782,7 +875,10 @@ def _parser():
     parser.add_argument("--skip-build", action="store_true", help="复用上次编译产物")
     parser.add_argument("--build-timeout", type=int, default=1800, help="编译超时秒数")
     parser.add_argument("--timeout", type=int, default=3600, help="每个进程的超时秒数")
-    parser.add_argument("--repeats", type=int, default=REPEATS, help="msprof 采样次数")
+    parser.add_argument(
+        "--repeats", type=int, default=REPEATS,
+        help="每例 msprof 采样次数(默认 1,单次采集;>1 时取中位数)",
+    )
     parser.add_argument(
         "--calls-per-case",
         type=int,
@@ -905,9 +1001,12 @@ def main(argv=None):
     baseline_path = Path(__file__).resolve().parent / "gpu_baseline.csv"
     payload["gpu_baseline_path"] = str(baseline_path)
     try:
-        metadata, references = _load_gpu_baseline(baseline_path)
+        metadata, references, baseline_warnings = _load_gpu_baseline(baseline_path)
     except (OSError, UnicodeError, csv.Error, ValueError) as exc:
         return _environment_error(payload, out_path, "BASELINE_INVALID", str(exc))
+    payload["baseline_warnings"] = baseline_warnings
+    for warning in baseline_warnings:
+        _progress(f"BASELINE_WARNING: {warning}")
     # 期望集 = 任务包 CSV 里有可比 GPU 基线的 TC_PF_ 行；没有基线的行不跑，只计数。
     try:
         expected_rows, ignored = _comparable_rows(package_rows, references)
@@ -930,7 +1029,14 @@ def main(argv=None):
     profile_root = run_dir / "prof"
     cases = []
     scope_caveat = timing_scope != "kernel"
+    total = len(expected_rows)
+    # 预估只是开跑提示:单例预估 × 每例采样次数;不参与判定。
+    estimate_min = (total * PER_CASE_ESTIMATE_S * args.repeats + 59) // 60
+    _progress(f"性能采样:{total} 例,预估 ~{estimate_min} min")
+    loop_started = time.monotonic()
+    done = 0
     for row in expected_rows:
+        case_started = time.monotonic()
         name = row["case_name"]
         gtest_name = mapping.get(name)
         if gtest_name is None:
@@ -945,6 +1051,22 @@ def main(argv=None):
             )
         record["verdict"] = _with_scope_caveat(record["verdict"], scope_caveat)
         cases.append(record)
+        done += 1
+        case_elapsed = time.monotonic() - case_started
+        cumulative = time.monotonic() - loop_started
+        # ETA 按已完成例的平均耗时外推;进度行在每例完成后打印,此时至少有
+        # 一例完成,「待估」只是无完成样本时的守护分支。
+        if done:
+            eta_text = f"ETA{(cumulative / done) * (total - done) / 60:.1f}m"
+        else:
+            eta_text = "ETA待估"
+        _progress(
+            f"[{done}/{total}] {name} {record['status']} "
+            f"{case_elapsed:.1f}s 累计{cumulative / 60:.1f}m {eta_text}"
+        )
+    _progress(
+        f"性能采样结束:{total} 例,累计{(time.monotonic() - loop_started) / 60:.1f}m"
+    )
     payload["cases"] = cases
     summary, exit_code = _summarize(cases, timing_scope)
     payload["summary"] = summary

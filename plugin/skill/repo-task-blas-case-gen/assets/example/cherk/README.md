@@ -174,19 +174,21 @@ GTest JSON 与构建日志写入 `results/<run_id>/accuracy/`；阶段目录必�
 python3 verify_performance.py --repo <repo-root> --soc <soc> --device 0
 ```
 
-一条 gtest 用例只调用被测接口一次，用例里不自行预热、不重复调用；预热与重复采样由
-`verify_performance.py` 负责。msprof 采到的是整条用例的全部 kernel，多调一次就多算一次。
+一条 gtest 用例只调用被测接口一次，用例里不自行预热、不重复调用；量具不做外部预热，
+重复采样仅在显式 `--repeats` 时发生。msprof 采到的是整条用例的全部 kernel，多调一次就多算一次。
 
 性能集只含本任务包 CSV 中能配到 GPU 基线的 `TC_PF_` 行，无基线的行不跑、只计数；每例
-单独执行。每例先直接运行一次 GTest warm-up，再独立运行 5 次 msprof；每次把
-`AI_CORE/AI_VECTOR_CORE/MIX_AIC/MIX_AIV` 的 `Task Duration(us)` 求和。最终 `kernel_us`
-取五次和的中位数，`spread` 为 `(max-min)/median`。
+单独执行。每例默认独立运行 1 次 msprof（`--repeats` 可增加次数），op_summary 由
+`--application` 采集自动导出；每次把 `AI_CORE/AI_VECTOR_CORE/MIX_AIC/MIX_AIV` 的
+`Task Duration(us)` 求和。`kernel_us` 取各次和的中位数（单次时即该值）；`spread` 为
+`(max-min)/median`，单次时为 0——表示无样本间差异可算，不是稳定性证明。
 
 性能键为 `n, k, uplo, trans`。`npu_ms = kernel_us/1000`，有 GPU 基线时计算
 `ratio = gpu_ms/npu_ms`；`ratio >= 0.8` 才判 PASS。无匹配基线时记
-`NO_REF`，只采集不评判；某次没有 kernel 行时记 `NO_KERNEL`，不能把耗时写成 0。
+`NO_REF`，只采集不评判。每次采样先验执行成功证据（gtest JSON，缺失或不合格记
+`CRASH`）；证据合格而 msprof 失败或没有 kernel 行时记 `NO_KERNEL`，不能把耗时写成 0。
 
-结果写到 `results/performance_<run_id>.json`。每例记录 `kernel_us`、五次 `samples`、
+结果写到 `results/performance_<run_id>.json`。每例记录 `kernel_us`、`samples`、
 各次 `launches`、`gpu_ms`、`ratio`、`spread` 和 `verdict`。汇总记录状态、
 `timing_scope` 与阈值。退出码如下：
 
@@ -200,8 +202,9 @@ python3 verify_performance.py --repo <repo-root> --soc <soc> --device 0
 GPU 基线的 `timing_scope` 不是 `kernel` 时，每例 verdict 带 `(scope caveat)`，汇总的
 `scope_caveat` 也为 true。GTest 自带的 ms 含 host 准备与 golden，不作性能依据。
 
-msprof 采集与导出两步、`op_summary_*.csv` 目录模式、列名与 kernel task 类型已在 A3
-（CANN 9.0.1，ascend910_93）实测确认；表驱动常量与仍待其他机型确认的边界见
+msprof 单命令自动导出 op_summary、`op_summary_*.csv` 目录模式、列名与 kernel task 类型
+已在 A3 机（CANN 9.0.1，ascend910_93）实测确认；每次采样的执行成功证据
+（`r<N>.gtest.json`，缺失或不合格记 CRASH）、表驱动常量与仍待其他机型确认的边界见
 skill 的 `references/perf-protocol.md`。
 原始 profile 与构建日志写入 `results/<run_id>/performance/`；重复 run-id 会退出 3。
 

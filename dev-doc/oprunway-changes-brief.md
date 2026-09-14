@@ -2,6 +2,46 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-14 · msprof 性能通路修复已实现（wave 1-2 完成，待真机全量回归关闭）。**
+  分支 `fix/msprof-perf-pipeline`，S1∥S2∥S3 并行落地：模板量具改单次采样免 warmup、
+  去显式 export、补采集开关、基线重复键首行生效+warning、逐例进度行；四份契约文档同步
+  （另揪出计划外清扫漏项 troubleshooting.md 与 README 模板，已一并修）；accept
+  `_load_baseline` 统一首行生效（原实现实为**末行覆盖**，与计划所述 raise 都不合 C2）、
+  check.json 证据源钉死工作目录。V0 真机穿刺（A3/910_93，Mr.0 逐项授权）三项全有结论：
+  V-1 过（新形态 op_summary 恰一份、kernel 行恰 1，launches [2,…]→[1]）；V-2 过（ctpmv
+  Release 重建后三尺寸单采样 vs 去污染参照偏差 1.7%/0.6%/0.1%，无冷启动台阶——途中再踩
+  build.sh 默认 Debug 暗坑，Release 后才对齐）；V-3 **翻车出真相**：msprof 根本不透传
+  application 失败（exit 7/SIGSEGV 全吞、只要分析完成一律退 0），按 plan 预设分支改判
+  「gtest JSON 执行成功证据」（`--gtest_output=json:` 逐采样定址，判定 1-4），Codex 评审
+  NEEDS REVISION 12 条按七维全吸收成附录 A v2，S1/S2 补丁落地，修订版复验直证（判定
+  1 函数级四形态、判定 2/4 端到端、C2/C3/C4 全兑现，单例 ~6-7s→200 例 ~20min）。
+  example 两份重渲染零漂移。wave 3 checkpoint 已过：FIX_NEEDED（判定 1 完成标记二选一、
+  failures 畸形值、README 模板与 readme-contract.md 两处清扫漏项等 3P1+3P2）全部修复，
+  真机七形态复验过，Codex verify 六项 FIXED。**wave 4 真机回归完成**（Mr.0 授权 V-4 载具
+  cgeru→ctpmv）：V-4 ctpmv 200 例 23.4min 跑完，195 PASS/5 FAIL——5 例即 0911 已知小尺寸
+  窄面（待 aclrtEvent 复核那批），launches 全 [1] 双份计数零复发；V-5 三项全过（sger FACTS
+  升级包 A1→A5 全链、--out 外指 C5、无 summary→NO_KERNEL），四条判定线全部端到端直证；
+  旧事实表 613/1139/197µs 恰为新值 2×，旧「实测」即双份口径，两 skill CLAUDE.md 事实表
+  已重写。todo 三条关闭。全程记录 [msprof-perf-fix-plan.md](msprof-perf-fix-plan.md)
+  附录 A.1-A.11。isolated-acceptance 无头正式口径未走，不据此宣称任何算子正式通过。
+
+- **2026-09-13 · msprof 性能通路修复立项（plan 已批，未动 skill）。** Mr.0 定案六件事：
+  每 case 单次采样免 warmup 不批量（A7 提速 ~6×）、去显式 `--export`（A1 源头消除）、补
+  `--ai-core/--task-time`（A2）、基线重复键首行生效不再崩（A3）、逐 case 进度反馈、独立
+  「产物目录」参数；不留运行时兜底。实施计划
+  [msprof-perf-fix-plan.md](msprof-perf-fix-plan.md)（交接版：冻结契约 C1-C7、S1∥S2∥S3
+  并行分工、真机验证矩阵 V-1~V-5），已过 Codex 七维评审（NEEDS REVISION→P1/P2 全吸收：
+  accept `_load_baseline` 末行生效须与模板统一、产物目录证据寻址须钉死工作目录、删 warmup
+  的 CRASH 迁移属有条件结论待 V-3）。范围硬边界：只动两个 BLAS skill。另:Ctpmv 8 条小尺寸
+  边界经 subagent 复核裁定「须 aclrtEvent 复核才给全 200 最终计数」，Mr.0 暂缓（文档未动）。
+  accept msprof 通路把同一次采集导两遍（`--application` 自动导 + 显式 `--export=on`），
+  两份 op_summary 落同一目录，`parse_op_summary` glob 后不去重全累加 → launches/kernel_us
+  翻倍 → 好算子假 FAIL。Ctpmv/910B3 实证：launches 全 200 例=[2,2,2,2,2]，kernel÷2 逐条
+  吻合 a3/910_93 单份值，去重后裁决 61→192 PASS；cgeru/950 同型（[2,2,2,2,2]→[1,1,1,1,1]）。
+  记 [dev-doc/msprof-op-summary-double-count.md](msprof-op-summary-double-count.md)，
+  修法（解析去重 / 不重复导出 / 补 launches 门）入 todo，实施须过 checkpoint。边界：
+  Ctpmv op_summary 原文未回传，「两遍导出→两份文件」这环是推断未逐字节验。
+
 - **2026-09-03 · 双构建形态性能对照实验（PR!347 cherk，a3，用户指令）。** 问题：构建能否
   交给开发者自备。同一量具/卡/参数测 TC_PF_132/164 三形态：Debug（旧）10421/56889µs；
   Release-公共仓（build.sh，FORCE 行临时改 Release）310.1/1821.2µs；Release-开发者自建

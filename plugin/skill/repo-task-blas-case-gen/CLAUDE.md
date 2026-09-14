@@ -12,7 +12,8 @@
 | --- | --- |
 | `build.sh --soc=ascend910_93 --ops=<op>` 编出 `build/test/<family>/<op>/<op>_test` | 实测（A3，sger） |
 | `--gtest_list_tests` 名字形如 `<Suite>/<Suite>.CsvDriven/TC_*` | 实测（sger） |
-| msprof 采集与导出分两步：先 `--application`，再 `--export=on` 才出 op_summary | 实测（A3，CANN 9.0.1） |
+| `--application` 带 `--ai-core=on --task-time=on` 时自动导出 op_summary 恰一份，无需第二步 export | 实测（A3，CANN 9.0.1，sger/ctpmv） |
+| msprof 不透传 application 退出码：exit 7 与 SIGSEGV 后仍退 0，仅 stderr WARNING | 实测（A3，CANN 9.0.1） |
 | op_summary 列 `Task Type`(8)、`Task Duration(us)`(10)；向量算子出 `AI_VECTOR_CORE` | 实测（sger） |
-| verify_performance 整条流水线可复现:5 次中位数 spread 1.3–2.4% | 实测（sger 1024²=613μs 等） |
-| 精度轮阈值、Cube 类 kernel 类型、A5 完整验收尚未真机回填 | 待第一次算子真机验收 |
+| 单次采样跨进程可复现：sger 同例两轮偏差 ≤2%（306/571/99µs）；单次不偏冷：ctpmv 三尺寸各 5 次独立单采样中位偏差 ≤1.7%，首例无台阶 | 实测（A3，Release 口径） |
+| 精度轮阈值、Cube 类 kernel 类型待回填；A5 完整验收链已真机通（sger 小包 A1→A5） | 实测（A3，2026-09-14） |

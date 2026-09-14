@@ -65,20 +65,27 @@ S0 前置检查 → S1 填 FACTS → S2 render → S3 check。`package.py check`
 
 ### 输入
 
-- **六件包**：case-gen 的产出目录。
+- **六件包**：case-gen 的产出目录。`gpu_baseline.csv` 里 `gpu_ms` 有值的 `TC_PF_` 行才进
+  性能期望集；同键重复行不报错，首行生效并记 warning。
 - **开发者工程**：ops-blas 检出，含 `build.sh`、`include/`、`test/`，以及该算子的实现和
   三份 C++ harness（见下方「开发者交付物」）。
 - `soc`（如 `ascend910_93`）、`device`（默认 0）、`python`（3.8+）。
+- `产物目录`（可选）：A5 三类产物的写入位置，缺省 `<工作目录>/verdict`，只辖 A5 产物。
 - 环境：CANN（`set_env.sh`、`msprof`）、cblas、一张空闲卡。
 
 ### 输出
 
-`verdict.json` 与 `report.md`，结论取 **通过 / 不通过 / 证据不足**。退出码 0 通过、
-1 不通过、2 证据不足。
+结论取 **通过 / 不通过 / 证据不足**，退出码 0/1/2。A5 产物落产物目录下三类布局：
+`report/report.md`（人读报告）、`intermediate/verdict.json` 等机械证据、`repro/` 复跑脚本。
+`runtime/` 与 profiling 原始数据仍在工作目录，不随产物目录走。
 
 ### 流程
 
 A1 环境 → A2 契约 → A2′ 人工审阅（对照 README 读三份 C++）→ A3 精度 → A4 性能 → A5 结论。
+
+A4 每个有基线的用例起一次 msprof 采样（单次、免预热，op_summary 自动导出），逐例进度行
+实时打印，200 例约 25 分钟。用例执行成功与否以每次采样的 gtest JSON 证据为准：证据缺失或
+不合格记 `CRASH`，msprof 失败或无 kernel 行记 `NO_KERNEL`，都归证据不足，不会误判 FAIL。
 
 ### 提示词模板
 
@@ -88,8 +95,10 @@ A1 环境 → A2 契约 → A2′ 人工审阅（对照 README 读三份 C++）�
 - 任务包目录：<case-gen 的六件包目录>
 - 工程目录：<开发者 ops-blas 检出>
 - soc=<如 ascend910_93>，device=0，python=python3，run-id 自取（如 t1）
+- 产物目录：<可省；缺省 <工作目录>/verdict>
 先 source <CANN 路径>/set_env.sh。A2′ 逐项核 param.h / test.cpp / npu_wrapper.h 对照 README。
-做完贴 A5 的 verdict.json 与 report.md。
+做完贴 A5 结论、<产物目录>/report/report.md 与 <产物目录>/intermediate/verdict.json 的
+绝对路径，以及 A1–A5 各阶段退出码。
 ```
 
 ## 开发者交付物（accept 的前提）

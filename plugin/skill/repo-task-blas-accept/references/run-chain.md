@@ -34,6 +34,7 @@
 | device | 传给 `build.sh --device`，由 `-DTEST_DEVICE_ID` 编译期固定 |
 | calls_per_case | harness 一条 GTest 用例调用被测接口的次数，数法见 A2′，A2 与 A4 填同一个值 |
 | run-id | 一轮运行的标识，串起精度、复跑、性能与结论；建议 `<op>-<YYYYMMDD-HHMM>` |
+| 产物目录 | A5 三类产物的写入位置；可选，缺省 `<工作目录>/verdict`，语义见 A5 |
 
 所有输入路径使用绝对路径，所有命令先进入工作目录。工作目录的布局固定如下：
 
@@ -52,7 +53,7 @@
 │       ├── accuracy_<id>-rerun.json
 │       ├── performance_<id>.json
 │       └── <id>/{accuracy,performance}/   # build.log、gtest.json、prof/
-└── verdict/                    # A5 三类产物布局
+└── verdict/                    # 缺省产物目录：A5 三类产物布局
     ├── report/report.md        # 人读报告（三节：精度、性能、备注说明）
     ├── intermediate/           # 执行期 JSON：verdict/accuracy/performance/check/manifest
     └── repro/                  # 最小可复现：任务包六件副本 + cases.csv 用例清单
@@ -244,7 +245,7 @@ cd <工作目录>/runtime && <python> verify_performance.py \
 | `--build-timeout <秒>` | 编译超时秒数 | 1800 |
 | `--timeout <秒>` | 每个进程的超时秒数 | 3600 |
 | `--msprof <路径>` | 覆盖 msprof 可执行文件路径 | 按 perf-protocol.md 的查找顺序 |
-| `--repeats <N>` | msprof 采样次数 | 5 |
+| `--repeats <N>` | msprof 采样次数 | 1 |
 | `--calls-per-case <N>` | 一条 gtest 用例调用被测接口的次数，kernel 总时长除以它 | 1 |
 | `--run-id <id>` | 结果运行标识 | 当前时间；验收必须与 A3 相同 |
 | `--out <路径>` | 结果 JSON 路径 | `runtime/results/performance_<id>.json` |
@@ -274,12 +275,16 @@ cd <工作目录>/runtime && <python> verify_performance.py \
 ```bash
 cd <工作目录> && <python> <skill>/scripts/accept.py verdict \
   --package <任务包目录> --repo <工程目录> --soc <soc> --device <device> \
-  --run-id <id> --out <工作目录>/verdict
+  --run-id <id> --out <产物目录>
 ```
 
 产物按三类落在 `--out` 下：`report/report.md`、`intermediate/verdict.json`（及各证据 JSON
 副本）、`repro/`。`repro/` 含 `rerun.sh`（同参复跑命令清单；verify/verdict 的非零退出
 是协议语义不中断脚本）与 `environment.json`（平台与身份链指纹）。
+
+**产物目录**就是 `--out` 指定的目录：可选，缺省 `<工作目录>/verdict`，可指向工作目录外；
+它只辖 A5 三类产物，`runtime/` 与 profiling 数据仍留在工作目录。写入位置不影响证据来源：
+verdict 校验读的 `check.json` 钉死为 `<工作目录>/check.json` 一处，归档也只复制这一份。
 
 verdict 从 `<工作目录>/runtime/manifest.json`、`runtime/<op>_test.csv`、
 `runtime/gpu_baseline.csv` 重新算出两个期望集，再核 `runtime/results/` 下本 run-id 的 JSON
@@ -310,7 +315,7 @@ verdict 从 `<工作目录>/runtime/manifest.json`、`runtime/<op>_test.csv`、
 `(scope caveat)`，不改结论；`performance.base_status` 是未追加该后缀的原始状态。
 协议见 [perf-protocol.md](perf-protocol.md)。
 
-输出落 `verdict/` 下的三类布局。`intermediate/verdict.json` 顶层是 `run_id/op/soc/device`、
+输出落产物目录下的三类布局。`intermediate/verdict.json` 顶层是 `run_id/op/soc/device`、
 `runtime`（manifest 原样）、`accuracy`（`status/expected/executed/pass/fail/counts/attribution/`
 `problems/case_names`）、`performance`（`status/base_status/expected/executed/total_pf/`
 `comparable_pf/case_sets/timing_scope/scope_caveat/threshold/reason/problems`）、

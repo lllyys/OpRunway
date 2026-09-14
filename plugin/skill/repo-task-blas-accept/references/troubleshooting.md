@@ -87,11 +87,13 @@ source <set_env.sh> && cd <工作目录>/runtime && <python> verify_accuracy.py 
 | --- | --- | --- |
 | A1 `msprof` 警告 | PATH 与 CANN 默认位置都没有 | 先不阻塞；A4 命令前加 `source <set_env.sh> &&` |
 | A4 `MSPROF_NOT_FOUND`，退出 3 | 期望集非空但找不到可执行的 msprof | 按下面命令带 `source` 或 `--msprof <路径>` 重跑 A4 |
-| 逐例 `NO_KERNEL` | msprof 导出失败或 `op_summary_*.csv` 无 kernel 行 | 看 `prof/<case>/` 下的日志 |
+| 逐例 `NO_KERNEL` | msprof 退非 0（不计分）、未产 `op_summary_*.csv` 或无 kernel 行 | 看 `prof/<case>/` 下的日志 |
 
-「导出」指 `msprof --export=on`，它从采集目录生成 `op_summary_*.csv`；`prof/<case>/` 在
-`runtime/results/<id>/performance/` 下，`r<N>.log` 与 `r<N>.export.log` 是第 N 次采集与
-导出的输出。msprof 的查找顺序与 op_summary 解析见 [perf-protocol.md](perf-protocol.md)。
+op_summary 由 `msprof --application` 采集结束时自动导出，没有第二步显式导出；`prof/<case>/` 在
+`runtime/results/<id>/performance/` 下，`r<N>.log` 是第 N 次采集的输出（默认单次采样，
+只有 `r1.log`），`r<N>.gtest.json` 是该次采样的执行成功证据——缺失或不合格时该例记
+`CRASH` 而非 `NO_KERNEL`。msprof 的查找顺序、执行成功证据与逐次判定见
+[perf-protocol.md](perf-protocol.md)。
 带 CANN 环境重跑 A4 的完整命令（`--msprof` 只在 `source` 后仍找不到时加）：
 
 ```bash

@@ -246,6 +246,8 @@ def _load_baseline(path, csv_header):
     """读 gpu_baseline.csv。键列 = 表头去掉 id/gpu_ms，再去掉 CSV 表头没有或整列为空的列。
 
     返回 (meta 行, 键列, 原始行, {键: gpu_ms})；gpu_ms 为空或非数值记 None（不可比）。
+    重复键按规范化键首行生效（首行 gpu_ms 为空即 NO_REF），后续重复行不覆盖，
+    只向 stderr 记 warning——与量具 _load_gpu_baseline 同一选择规则（同键处处同选择）。
     """
     meta = []
     data = []
@@ -267,13 +269,21 @@ def _load_baseline(path, csv_header):
         if column in csv_header and any((row.get(column) or "").strip() for row in rows)
     ]
     references = {}
-    for row in rows:
+    for index, row in enumerate(rows, 1):
         key = tuple(_normalize_key_value(row.get(column, "")) for column in keys)
+        # 每行既有校验照常执行（含重复行）：gpu_ms 空或非数值记 None（不可比）。
         raw_ms = (row.get("gpu_ms") or "").strip()
         try:
-            references[key] = float(raw_ms) if raw_ms else None
+            value = float(raw_ms) if raw_ms else None
         except ValueError:
-            references[key] = None
+            value = None
+        if key in references:
+            print(
+                f"警告: gpu_baseline.csv 第 {index} 数据行键重复，首行生效",
+                file=sys.stderr,
+            )
+            continue
+        references[key] = value
     return meta, keys, rows, references
 
 
@@ -1160,22 +1170,16 @@ def _performance_result(
     })
 
 
-def _contract_summary(out_dir, expected):
-    candidates = [Path.cwd() / "check.json", out_dir.parent / "check.json"]
-    matches = _unique_files(candidates)
-    if not matches:
+def _contract_summary(expected):
+    """A2 证据（check.json）来源钉死为工作目录一处：--out 只决定 A5 产物写到哪，
+    不改变证据从哪里读（输出位置不得影响证据来源）。"""
+    path = Path.cwd() / "check.json"
+    if not path.is_file():
         return {
             "status": "证据不足",
             "path": None,
-            "errors": ["缺 check.json"],
+            "errors": ["工作目录缺 check.json"],
         }
-    if len(matches) > 1:
-        return {
-            "status": "证据不足",
-            "path": None,
-            "errors": ["找到多份 check.json，无法确定 A2 证据"],
-        }
-    path = matches[0]
     try:
         payload = _load_json(path)
     except ValueError as exc:
@@ -1378,9 +1382,10 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
         text = text.replace(f"@@{key}@@", str(value))
     _atomic_text(report_dir / "report.md", text)
     _atomic_json(inter_dir / "verdict.json", payload)
+    # check.json 只归档工作目录这一份（与 _contract_summary 证据源同址），
+    # 不再收集产物目录侧同名文件，消除同名覆盖。
     for source in (accuracy_path, rerun_path, performance_path,
-                   runtime / "manifest.json", Path.cwd() / "check.json",
-                   out_dir.parent / "check.json"):
+                   runtime / "manifest.json", Path.cwd() / "check.json"):
         if source and Path(source).is_file():
             shutil.copyfile(source, inter_dir / Path(source).name)
     # repro：六件副本（存在即拷）+ 用例清单含失败标注
@@ -1627,7 +1632,7 @@ def command_verdict(args):
         "baseline_sha256": manifest.get("baseline_sha256"),
         "calls_per_case": manifest.get("calls_per_case"),
     }
-    contract = _contract_summary(out_dir, contract_expected)
+    contract = _contract_summary(contract_expected)
     verdict, exit_code = _overall_verdict(accuracy, performance, contract)
     calls_per_case = None
     if performance_path.is_file():

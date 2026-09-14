@@ -36,6 +36,7 @@ description: >-
 | `python` | 执行 accept 与量具的解释器 | Python 3.8 或更高版本 |
 | `工作目录` | 检查结果、运行时包和结论目录 | 绝对路径，先创建再进入 |
 | `calls_per_case` | harness 一条 GTest 用例调用被测接口的次数 | 正整数，初值 1；A2′ 核对，A2 与 A4 填同一个值 |
+| `产物目录` | A5 三类产物的写入位置 | 可选；缺省 `<工作目录>/verdict`，只辖 A5 产物 |
 
 命令里的 `<skill>` 是本 SKILL.md 所在目录的绝对路径，`<skill>/scripts/accept.py` 由它定位。
 每条命令都必须带 `cd <工作目录> &&`：shell 调用之间不继承当前目录，也不继承环境变量，
@@ -50,7 +51,7 @@ description: >-
 | A2′ 三文件 | 读 `check.json` 里 harness 三文件的有无，核对 `calls_per_case` | 同 `check.json` | 记录后进 A3 |
 | A3 精度 | 构建并运行全部精度用例 | `runtime/results/accuracy_<id>.json` | 0 进 A4；1 复跑后进 A5；3 修复后换 id 重跑 |
 | A4 性能 | 逐例用 msprof 采集有基线的性能用例 | `runtime/results/performance_<id>.json` | 0/1/2 进 A5；3 修复后重跑一次 |
-| A5 结论 | 校验集合、计数与哈希，机械裁决 | `verdict/` 下三类布局 | 0/1/2 |
+| A5 结论 | 校验集合、计数与哈希，机械裁决 | 产物目录下三类布局 | 0/1/2 |
 
 **运行时包**是 A2 在 `<工作目录>/runtime/` 生成的目录，装着任务包 CSV 副本、规范化的
 基线、渲染出的两个量具和 `manifest.json`，A3、A4 都在这个目录里执行。**有无门**只裁
@@ -102,7 +103,8 @@ cd <工作目录> && <python> -c \
    `aclblasCherk(`；一条用例的总次数 = warm-up 调用次数 + 正式调用次数，只看这一个文件。
 3. 与 A2 所填不同时用正确值重跑 A2；文件缺失时按 1 计。
 
-把读过的文件路径与调用次数（或「wrapper 缺失，按 1 计」）写进 `report.md` 的 `审阅备注`。
+把读过的文件路径与调用次数（或「wrapper 缺失，按 1 计」）写进 `report/report.md` 的
+`备注说明`。
 
 ### A3 精度
 
@@ -149,20 +151,22 @@ run-id 的性能 JSON）；仍 3 才进 A5，A5 记 `证据不足`。
 ```bash
 cd <工作目录> && <python> <skill>/scripts/accept.py verdict \
   --package <任务包目录> --repo <工程目录> --soc <soc> --device <device> \
-  --run-id <id> --out <工作目录>/verdict
+  --run-id <id> --out <产物目录>
 ```
 
-退出码 0 是 `通过`，1 是 `不通过`，2 是 `证据不足`。只把 A2′ 的记录填进 `report.md` 的
-`审阅备注`，不改 `verdict.json` 的机械结论。
+产物目录只辖 A5 三类产物（`report/`、`intermediate/`、`repro/`），缺省
+`<工作目录>/verdict`；`runtime/` 与 profiling 数据仍在工作目录。退出码 0 是 `通过`，
+1 是 `不通过`，2 是 `证据不足`。只把 A2′ 的记录填进 `report/report.md` 的 `备注说明`，
+不改 `verdict.json` 的机械结论。
 
 ## 结论报告
 
 A5 跑完后回给用户的内容固定四项：
 
 - `verdict.json` 的 `verdict` 字段值（`通过`/`不通过`/`证据不足`）。
-- `<工作目录>/verdict/report.md` 与 `verdict.json` 的绝对路径。
+- `<产物目录>/report/report.md` 与 `<产物目录>/intermediate/verdict.json` 的绝对路径。
 - A1–A5 各阶段退出码，A3 有复跑时一并列出。
-- `审阅备注` 摘要：读过的 wrapper 路径、`calls_per_case`、harness 缺件与列名未读取。
+- `备注说明` 摘要：读过的 wrapper 路径、`calls_per_case`、harness 缺件与列名未读取。
 
 ## 停止条件
 
