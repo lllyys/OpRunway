@@ -20,12 +20,23 @@
 
 ### 有人依赖：删了没人红，但下一个人查不到
 
-- `docs/development/architecture-log.md` —— 架构演进，CLAUDE.md §8 指向
-- `docs/skills/<name>/` —— 每个 skill 的 design 与 quickstart，README 指向
-- `docs/superpowers/specs/` 与 `plans/` —— 设计与实施计划，CLAUDE.md §9 指向
+- `docs/development/architecture-log.md` —— 架构演进，仓根 CLAUDE.md「当前状态」指向
+- `docs/README.md` —— 文档地图，三层按读者分。找不到东西时的入口
+- `docs/guide/` —— 使用指导，一个分类一份，README 指向。**不含命令**，
+  命令是 agent 执行的，写在各 skill 的 `SKILL.md`
+- `docs/install.md` —— 装 skill 与各 skill 的依赖
+- `docs/superpowers/specs/` —— 当时的设计方案。**仓根 CLAUDE.md 已不再指向它们**
+  （2026-08-25 精简掉了分节编号与这条链接），查当时为什么这么定就从这里进
 
-specs 与 plans 是历史快照，**不随代码更新**。读它们是为了知道当时为什么
-这么定，不是为了照着现状核对。名字对不上现在的实现是正常的。
+specs 是历史快照，**不随代码更新**。读它是为了知道当时为什么这么定，
+不是为了照着现状核对。名字对不上现在的实现是正常的。
+
+**实施计划不进仓。** `docs/superpowers/plans/` 两份共 187 KB 已于 2026-09-04 删除：
+它答的是「怎么一步步做」，不是「为什么」；实现落地之后代码就是真相，计划不再有读者，
+按本文开头那条判据它两样都不占。要看当时的步骤去 git 历史。
+
+**这是 specs 与 plans 的分界线**：同样无人引用、同样不更新，specs 留而 plans 删，
+差别只在「删了之后还说不说得清」。
 
 ## 不进仓
 
@@ -35,8 +46,26 @@ specs 与 plans 是历史快照，**不随代码更新**。读它们是为了知
 | --- | --- |
 | Python 构建与缓存 | `__pycache__/`、`*.py[cod]`、`*.egg-info/`、`build/`、`dist/`、`.pytest_cache/` |
 | macOS | `.DS_Store`、`._*` |
-| 跑测运行时产物 | `evidence/`、`atk_capabilities.json`、`SKILL_FRICTION_*.md` |
-| 本机私有 | `.claude/settings.local.json`、`.claude/RESUME.md` |
+| 跑测运行时产物 | `evidence/`、`cann-ops-report/`、`atk_capabilities.json`、`SKILL_FRICTION_*.md` |
+| **一次性材料** | `docs/development/scratch/` |
+| 本机私有 | `.claude/settings.local.json`、`.claude/RESUME.md`、机器档案（地址 / 账号 / 目录布局 / CANN 版本） |
+
+### 一次性材料为什么不进仓
+
+**上游 issue 文稿**：提交之后权威副本在上游，本地那份只会漂。仓里要留的是
+**指向 issue 的链接**，不是文稿正文。2026-09-04 删掉的 `atk-upstream-issues/`
+就是这种——三份文稿都已提交（ATK #28/#29/#30），本地留着是双份。
+
+**单算子复现程序、临时探查脚本**：为查一个具体问题写的，问题结案就没有下一个读者。
+它证明过的结论该沉淀进 skill 的 `references/` 或本目录的排障事实，程序本身不必留。
+
+**机器档案**：某台机器的地址、账号、目录布局、CANN 版本。这类信息**会漂而没有任何
+机制会发现**——机器升一次级，文档不改就错了。而且各 skill 的边界条款本来就写着
+「不写死任何机器的路径 / 版本 / 布局 / SOC」，开发文档不该反过来违反它。
+2026-09-04 从 `dev-environment.md` 移出的就是这类。
+
+两类都放 `docs/development/scratch/`，已进 `.gitignore`。**判断标准还是开头那条**：
+删了会不会有东西坏掉或说不清——结论已经写进别处的，删了说得清。
 
 `evidence/` 那条管的是**验收工作区**里的产物——skill 部署到跑测机后，
 agent 在工作目录里生成取证、封条、时间线，那些不是 skill 本体。

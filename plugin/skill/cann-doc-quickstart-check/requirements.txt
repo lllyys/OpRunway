@@ -1,0 +1,2 @@
+# cann-doc-quickstart-check 脚本只用 Python 标准库,无第三方依赖。
+# (刻意不引 jinja2 等:报告渲染走纯 stdlib,避免「SKILL 引用 requirements 但装不上」的坑。)

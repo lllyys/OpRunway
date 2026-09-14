@@ -10,9 +10,11 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
 
 ## 2. 结构与镜像
 
-- `plugin/` 是上游根的逐字镜像（`skill/`、`docs/`、`CLAUDE.md`、`README.md`、`.claude/rules/`；`third_party/` 与
-  git 元文件除外）；`plugin/.claude-plugin/` 是本仓 overlay（manifest 与 upstream 基线记录），
-  上游永不占用该路径。
+- `plugin/` 是上游根的逐字镜像（`skill/`、`docs/`、`CLAUDE.md`、`README.md`、`.claude/`、
+  `.claude-plugin/plugin.json`、`conftest.py`、`pytest.ini`；`third_party/` 与 git 元文件除外）。
+  `plugin/.claude-plugin/upstream.json` 是本仓 overlay（upstream 基线记录）；`plugin.json`
+  自上游在 `.claude-plugin/` 落了自己的 manifest 后随镜像同步，不再是本仓自维护件
+  （2026-09-14 同步 main 时对齐，旧文「上游永不占用该路径」自此作废）。
 - 发布切片：`plugin/.claude-plugin/` 与 `plugin/skill/` 是唯一测试/部署发布物；`docs/`、`CLAUDE.md`、
   `README.md` 是开发件，不进任何测试部署。
 - 验收零上下文：一次验收的完整契约就是 `SKILL.md` 加 `references/` 加 `scripts/`，不多一个字。
@@ -21,10 +23,11 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
   此时必须当它不存在。正式验收一律走 `isolated-acceptance` 的无头通路，不在本仓 session 里跑。
   若一次验收非读开发件不可，那是 `SKILL.md` 自足性有缺口，应修 skill 并提 PR 回上游，不是补喂上下文。
 - 两个 `.claude-plugin/` 身份不同，别混：仓根那个装 `marketplace.json`，是本机发行清单，不上测试机；
-  `plugin/` 下那个装 `plugin.json` 与 `upstream.json`，是加载器的硬依赖，必须随部署分发——缺 manifest
-  时 `--plugin-dir` 直接报 "No manifest found"，且上游用单数 `skill/` 而非 Claude 约定的复数 `skills/`，
-  只有 manifest 里的 `skills` 数组能指到 skill。`upstream.json` 只含上游 URL 与两个公开 SHA，无私有信息，
-  随包分发同时给测试机留下派生基线的 provenance。
+  `plugin/` 下那个装 `plugin.json`（随上游镜像）与 `upstream.json`（本仓 overlay），是加载器的
+  硬依赖，必须随部署分发——缺 manifest 时 `--plugin-dir` 直接报 "No manifest found"，且上游用单数
+  `skill/` 而非 Claude 约定的复数 `skills/`，只有 manifest 里的 `skills` 数组能指到 skill。
+  `upstream.json` 只含上游 URL 与两个公开 SHA，无私有信息，随包分发同时给测试机留下派生基线的
+  provenance。
 - 上游完整 clone 在 ignored `repos/repo-task-atk-test/`（含 ATK submodule 源码），只读参考。
   上游开发期红线与设计原则随镜像分发：修改 `plugin/` 前先读 `plugin/CLAUDE.md` 与
   `plugin/docs/development/`；本仓内读写 `plugin/**` 时 `plugin/CLAUDE.md` 会作为子目录记忆自动
@@ -33,12 +36,15 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
 - 判据的确定性由 skill 自带 `scripts/`（机械门）与 `tests/` 承担；agent 不得绕过机械门，也不得在
   `plugin/` 外另建一套生成或裁决实现。
 - 同步上游：先 `git -C repos/repo-task-atk-test fetch`，再在仓根执行
-  `git -C repos/repo-task-atk-test diff --binary <旧基线> <新基线> -- skill/ docs/ CLAUDE.md README.md .claude/rules/ | git apply --3way --directory=plugin`
+  `git -C repos/repo-task-atk-test diff --binary <旧基线> <新基线> -- skill/ docs/ CLAUDE.md README.md .claude/ .claude-plugin/plugin.json conftest.py pytest.ini | git apply --3way --directory=plugin`
   ——`git diff` 在上游 clone 里跑（基线是上游 commit），`git apply` 在本仓根跑。完成后更新
-  `plugin/.claude-plugin/upstream.json` 的 `baseline` 与 `mirror_commit`。
+  `plugin/.claude-plugin/upstream.json` 的 `baseline` 与 `mirror_commit`。基线差距过大、
+  3way 应用不可靠时按 2026-09-14 先例整树替换：镜像面全量换成上游新基线，再把本仓超前的
+  skill 目录（未合入上游的 PR 内容）checkout 回本仓版本，diff 核零漂移后落一个同步 commit。
 - 提 PR：以 `plugin/.claude-plugin/upstream.json` 的 `mirror_commit`（本仓镜像与上游基线完整一致的那个提交）
-  为基线，`git diff --binary --relative=plugin <mirror_commit> HEAD -- plugin/skill/ plugin/docs/ plugin/CLAUDE.md plugin/README.md plugin/.claude/rules/`
-  得到 patch，在 fork（届时再建）里从上游 `baseline` 切分支应用；该 pathspec 即公私边界。
+  为基线，`git diff --binary --relative=plugin <mirror_commit> HEAD -- plugin/skill/ plugin/docs/ plugin/CLAUDE.md plugin/README.md plugin/.claude/ plugin/conftest.py plugin/pytest.ini`
+  得到 patch，在 fork（brian66237）里从上游 `baseline` 切分支应用；该 pathspec 即公私边界
+  （`plugin.json` 虽随镜像但由上游维护 skills 登记，PR 不主动改它）。
 
 ## 3. 环境与权限
 

@@ -1,0 +1,84 @@
+# {{ repo }} / 950 硬件相关算子靶子清单
+
+> 扫描时间:{{ scanned_at }}
+> 全集 {{ stats.total_ops }} 个算子,**命中 {{ stats.target_count }} 个**
+
+---
+
+## 一、命中算子总表(多标签)
+
+| 算子 | 类别 | simt | hif8 | RegBase | README/950 |
+|------|------|:----:|:----:|:-------:|:----------:|
+{%- for op in operators if op.is_target %}
+| {{ op.name }}{% if op.get('is_delegated') %} [委托]{% endif %} | {{ op.category }} | {{ "✓" if op.rules_hit.simt else "" }} | {{ "✓" if op.rules_hit.hif8 else "" }} | {{ "✓" if op.rules_hit.regbase else "" }} | {{ {"yes":"✓","no":"×","unknown":"?","absent":"-"}[op.readme.support_950] }} |
+{%- endfor %}
+
+## 二、按规则分桶视图
+
+{% for rule_name, rule_label in [("simt","simt"),("hif8","hif8"),("regbase","RegBase")] %}
+### {{ rule_label }} 算子({{ stats.by_rule[rule_name] }})
+{%- for op in operators if op.rules_hit[rule_name] %}
+- {{ op.name }}
+{%- endfor %}
+
+{% endfor %}
+
+---
+
+## ⚠ 三、README 与代码不一致告警
+
+### 3.1 代码命中但 README 未声明 950
+| 算子 | README 状态 | 命中规则 | 建议 |
+|------|:-----------:|:--------:|------|
+{%- for op in operators if op.inconsistency in ("code_hit_but_readme_no","code_hit_readme_missing_row","code_hit_no_readme") %}
+{%- set hit_rules = [] %}
+{%- for r in ["simt","hif8","regbase"] %}
+{%- if op.rules_hit[r] %}{%- set _ = hit_rules.append(r) %}{%- endif %}
+{%- endfor %}
+| {{ op.name }} | {{ {"code_hit_but_readme_no":"标 ×","code_hit_readme_missing_row":"缺该行","code_hit_no_readme":"无 README"}[op.inconsistency] }} | {{ ", ".join(hit_rules) }} | 文档团队确认 |
+{%- endfor %}
+
+### 3.2 README 声明 950 但代码无证据
+| 算子 | 建议 |
+|------|------|
+{%- for op in operators if op.inconsistency == "readme_says_yes_no_code_evidence" %}
+| {{ op.name }} | 可能规则漏抽,或 README 误标,人工核查 |
+{%- endfor %}
+
+---
+
+## 四、附录
+
+### 4.1 op_list.md 全集但代码目录缺失
+{%- for op in operators if op.get("missing_dir") %}
+- {{ op.name }}
+{%- else %}
+(无)
+{%- endfor %}
+
+### 4.2 代码目录有但 op_list.md 未列(unlisted_ops)
+{%- for n in unlisted_ops %}
+- {{ n }}
+{%- else %}
+(无)
+{%- endfor %}
+
+### 4.3 扫描 warnings
+{%- for w in warnings %}
+- {{ w }}
+{%- else %}
+(无)
+{%- endfor %}
+
+### 4.4 委托模式算子
+
+以下算子缺少 op_kernel 但有 op_api 或 op_graph，说明它们委托给其他算子的 kernel 实现，本地无法检测 950 特性：
+
+{% set delegated_ops = operators | selectattr('is_delegated', 'equalto', true) | list %}
+{%- if delegated_ops %}
+{% for op in delegated_ops %}
+- {{ op.category }}/{{ op.name }}
+{% endfor %}
+{%- else %}
+(无)
+{%- endif %}

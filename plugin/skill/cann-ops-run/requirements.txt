@@ -1,0 +1,4 @@
+# cann-ops-run 的脚本只用 Python 标准库（subprocess/json/re/pathlib/argparse/
+# concurrent.futures），无运行时第三方依赖。真机上另需 CANN 环境的 python 能 import acl
+# （自动探测 SOC 时用）。下面仅为跑单测用。
+pytest>=7.0

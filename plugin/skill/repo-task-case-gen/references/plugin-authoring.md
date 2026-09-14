@@ -15,7 +15,7 @@ ATK 有两条默认调用约定，一份用例被两边各消费一次。**两�
 **标准二段式 aclnn 算子，NPU 侧零工作量。** `aclnn_function` 是个空壳，三个方法
 全部 `super()` 直通 `AclnnBaseApi`（`atk/tasks/api_execute/function_api.py:61`）。
 
-要写 NPU 执行器只有基类三条假设不成立时，社区算子基本都符合，三个目标算子命中 0 次：
+要写 NPU 执行器只有基类三条假设不成立时——标准两段式的社区算子三条都成立：
 
 | 基类假设 | 破了的样子 |
 | --- | --- |
@@ -37,13 +37,14 @@ ATK 有两条默认调用约定，一份用例被两边各消费一次。**两�
 | 判据 | 命中现象 | 写什么 | YAML 里怎么接 |
 | --- | --- | --- | --- |
 | 参数之间有依赖 | 一个参数的合法取值取决于另一个参数（长度一致、轴范围随秩变、dtype 要对齐） | 约束器 | `generate: <op>_constraint` |
+| **输入有 `type: tensors`** | 只要有张量列表参数就命中，无条件 | 约束器，照抄 `assets/tensors_constraint.py` | `generate: <op>_constraint` |
 | CPU 标杆不能直接 eval | `torch.<op>` 表达不出算子语义，或参数形态与 torch 不一致 | CPU 执行器 | `api_type: function_<op>_cpu` |
 | aclnn 调用形态特殊 | 原地输出、输出不在参数尾部、可选指针切换语义 | NPU 执行器 | `aclnn_api_type: function_<op>_npu` |
 
-**三条都不命中就什么都不写**，`generate` 留 `default`，`api_type` 留 `function`，
+**一条都不命中就什么都不写**，`generate` 留 `default`，`api_type` 留 `function`，
 `aclnn_api_type` 留 `aclnn_function`。
 
-### 三个目标算子的判定结果
+### 判定结果举例
 
 | 算子 | 参数依赖 | CPU 标杆 | aclnn 形态 | 结论 |
 | --- | --- | --- | --- | --- |
@@ -51,9 +52,9 @@ ATK 有两条默认调用约定，一份用例被两边各消费一次。**两�
 | indexfill | `index` 元素值 < `self` 在 `dim` 维的长度 | **`torch.index_fill` 的 index 只收 int64 Tensor，收不了 list** | 单输出，常规 | 约束器 + CPU 执行器 |
 | median | `dim` 取值随秩变 | **`torch.median` 返回具名元组，要摊成两个输出** | 双输出 | 约束器 + CPU 执行器 |
 
-三个算子有两个要写 CPU 执行器，起因只有两种：
+CPU 执行器的起因集中在两处：
 
-| 起因 | 命中的算子 |
+| 起因 | 例 |
 | --- | --- |
 | `aclIntArray*` 是 python list，torch 对应参数要 Tensor | indexfill |
 | 多输出算子的 torch 返回值是具名元组，ATK 要普通元组 | median |
@@ -131,7 +132,10 @@ for slot, value in zip(dims, [0, -1, 2]):
     slot.range_values = value
 ```
 
-改就地改，改完 `return case_config`。
+改就地改，改完 **`return case_config`**。漏掉这句报错在很远的地方——ATK 拿到
+`None` 会一路带到出报表那步才炸，报的是
+`AttributeError: 'NoneType' object has no attribute 'method_inputs'`
+（`case_generator/utils/reports.py:238`），看不出跟约束器有关。
 
 ### roll 的约束器（真机验证过，可照抄改名）
 
@@ -178,8 +182,7 @@ class RollConstraint(DefaultGenerator):
 ```
 
 **两个序列参数要等长时，长度取双方与秩的最小值。** 只按一方截断，另一方短了
-就补不齐——这条真机上踩过：180 条里有 34 条 `shifts` 比 `dims` 短，
-CPU 标杆全部跑不出来。
+就补不齐，那批用例的 CPU 标杆全部跑不出来。
 
 ### case_config.id 在约束器里恒为 0
 
@@ -192,8 +195,8 @@ if case_config.id % 8 == 0:
     shape[axis] = 1
 ```
 
-真机上这个写法让 Median 的 200 条用例**全部**变成退化维场景，
-dim 也全取了正轴——一整套用例集只覆盖了一种形态，而它看起来是 200 条。
+整套用例集只会覆盖一种形态，而条数、dtype 分布都看不出异常——dry-run、
+用例数下限、覆盖度量三关都不响。
 
 要按序号分批就在生成器实例上自己数：
 
@@ -220,6 +223,33 @@ def after_case_config(self, case_config):
         x.shape[-1] = 1
     return case_config
 ```
+
+### 一个约束器里的多个轮转周期必须两两互质
+
+同一个 `seq` 上挂两个 `%`，周期不互质时后一个分支在前一个的用例里恒为同一个取值：
+
+```python
+if seq % 10 == 0:                                   # ✗ 10 与 2 有公因数
+    shape[axis] = 1                                 #    退化维这一批
+dim.range_values = axis if seq % 2 == 0 else axis - rank   #    永远走正轴分支
+```
+
+`seq % 10 == 0` 蕴含 `seq % 2 == 0`，所以「退化维 × 负轴」这个组合一条都生不出来。
+周期改成互质的就行——`10` 换 `11`，`8` 换 `7`：
+
+```python
+if seq % 11 == 0:                                   # ✓ 11 与 2、3 都互质
+    shape[axis] = 1
+dim.range_values = axis if seq % 2 == 0 else axis - rank
+```
+
+**抄 `high_rank_constraint.py` 进已有约束器时尤其要核一遍。** 它自带一个 `EVERY`，
+与你原有的周期共用同一个 `self._seq`；两者不互质时高秩用例全部落进你那根轴的
+同一个取值，高秩下的别的形态一条没测。
+
+这类缺口**四条返工判据一条都不响**：条数对、dtype 分布对、秩覆盖对、规模档也对，
+每根轴单看都有多个取值，缺的是**组合**。而组合空缺明写了不是判据。所以只能在这里
+按周期核，事后量具查不出来。
 
 **改完一定要跑 `check_coverage.py`，别只看用例条数。** 条数对不代表形态分布对——
 某根轴报「只有一个取值」就是约束器写死了。
@@ -294,10 +324,49 @@ class FunctionMedianCpu(BaseApi):
 注册名要与 YAML 的 `api_type` 逐字相同。CPU 执行器写**数学语义与类型适配**，
 不写 aclnn 接口适配。
 
+### 执行器的边界：翻译形态，不改语义
+
+**aclnn 的每一个入参，执行器都要真的用上。** 上面两个真机版执行器都做到了：
+indexfill 的四个参数全用了，median 的三个也是。它们改的是**形态**——list 转
+Tensor、具名元组摊成普通元组——没有一个参数被扔掉。
+
+丢一个参数的代价不对称：ATK 那侧照样把它传给 aclnn，NPU 拿它参与计算，CPU 标杆
+不拿——golden 与被测算子算的不是同一件事，而 S1–S4 四道出口判据一道都发现不了。
+
+| 情形 | 这类事故会不会发生 | 你要做什么 |
+| --- | --- | --- |
+| 写了 CPU 执行器 | **会**，且全程零告警 | 逐个核对入参有没有被消费，见下 |
+| 没写执行器（`api_type: function`） | **不会**，ATK `eval(基线名)(*inputs)` 按序透传，结构上漏不掉 | 什么都不用做。**尤其不要另写脚本去验 golden 的数值**——那要把算子语义再实现一遍，实现错了就是假阳性 |
+
+`gen_cases.py` 跑 atk 之前会静态查一遍（`scripts/baseline_params.py`）。确实传不了
+的参数，在 `facts.json` 里写明理由：
+
+```json
+"baseline_params": {"scales": "torch 侧 size 与 scale_factor 二选一，给了 size 就传不了它"}
+```
+
+判定口径是**静态的**：从 `input_data.args` 解包出来的名字，在 `__call__` 里被读到
+一次就算消费，读了之后传不传给 torch 不看。所以「解包出来又扔掉」才是它抓的东西。
+
+写进 `baseline_params` 的理由跟着用例包交给跑测侧——丢一个 aclnn 会读的入参，跑测侧
+看到的是精度大面积失败，第一反应会去查算子，这行理由是唯一能把它拉回基线的线索。
+
+两种情况天然不用查，脚本自己跳过：
+
+| 情况 | 为什么不查 |
+| --- | --- |
+| 没写执行器（`api_type: function`） | ATK 直接 `eval(基线名)(*用例里的输入)` 按序透传，漏不掉 |
+| `accuracy.kind=builtin` | 那个 cpu 节点只给输出的 shape 与 dtype，值不参与比对，`assets/function_bernoulli.py` 就是这个形态 |
+
+**反过来看，突然需要写执行器往往是基线挑得不贴的信号。** 判据表里「参数形态与
+torch 不一致」说的是 torch 只有这一个接口、形态就是对不上（indexfill 的 index 只收
+Tensor），不是「我挑了一个形态对不上的接口」。挑基线时先找参数与 aclnn 逐位对应的
+那个，见 [interface-facts.md](interface-facts.md)。
+
 ### NPU 侧
 
-三个目标算子**都不需要**。`AclnnBaseApi` 已经处理 workspace 申请、executor
-传递、张量与 acl 结构互转，标准两段式接口不用人写。
+**标准两段式接口都不需要。** `AclnnBaseApi` 已经处理 workspace 申请、executor
+传递、张量与 acl 结构互转，不用人写。
 
 只有原地输出、输出不在参数尾部、可选指针切换语义这三种情况才要写：
 
@@ -317,6 +386,105 @@ class FunctionXxxNpu(AclnnBaseApi):
 
 注册名要与 YAML 的 `aclnn_api_type` 逐字相同。**先调 `super()` 再改**，
 不要从零重写。
+
+### npu 剖面的待测钩子
+
+`facts.json` 的 `backend` 是 `npu` 时执行器**必写**，而且待测侧与 CPU 标杆
+写在同一个类里：没有 aclnn 两段式接口，`AclnnBaseApi` 那套自动适配用不上，
+ATK 只知道「调这个 callable」，怎么调全在钩子里。
+
+**先定用例形态**——`facts.json` 的 `params[]` 里有没有张量入参，判据见
+[interface-facts.md](interface-facts.md)「用例形态」。两种形态的钩子只差
+「输入从哪来」这一段，别的都一样：
+
+| 用例形态 | 输入从哪来 | 谁在用 |
+| --- | --- | --- |
+| 真张量声明 | `input_data.args` 里就是张量，按序取 | 自产用例，缺省走这条 |
+| attr 编码 | `args` 是几个整数，张量按其中的 seed 现造 | 采纳任务方自带件时 |
+
+#### 真张量声明
+
+ATK 造好张量喂进来，钩子负责把它们拼成算子要的结构、按标杆需要换算值 dtype，
+再分设备调同一个接口：
+
+```python
+import torch
+
+from atk.configs.dataset_config import InputDataset
+from atk.tasks.api_execute import register
+from atk.tasks.api_execute.base_api import BaseApi
+
+# 标杆要算得比待测更准时，值 dtype 升一档。任务书通常直接规定这张表。
+GOLDEN_DTYPES = {torch.float16: torch.float32, torch.bfloat16: torch.float32,
+                 torch.float32: torch.float64, torch.complex64: torch.complex128}
+
+
+@register("<op>_public")          # 与用例的 api_type 逐字相同
+class OpApi(BaseApi):
+    @property
+    def golden(self) -> bool:
+        return self.device == "cpu"
+
+    def init_by_input_data(self, input_data: InputDataset):
+        crow, col, values, dense = input_data.args      # ATK 造的平张量，按序取
+        if self.golden:
+            values, dense = values.to(GOLDEN_DTYPES[values.dtype]), dense.to(...)
+        where = torch.device("cpu" if self.golden else f"npu:{self.device_id}")
+        mat1 = torch.sparse_csr_tensor(crow.to(where), col.to(where),
+                                       values.to(where), size=(...))
+        self.call_args = (mat1, dense.to(where))
+
+    def __call__(self, input_data: InputDataset, with_output: bool = False):
+        if not hasattr(self, "call_args"):
+            self.init_by_input_data(input_data)
+        out = torch.sparse.addmm(*self.call_args)       # 两侧同一个公开接口
+        return out if with_output else None
+```
+
+这一形态下**标杆仍是公开接口**，验收结论不降级，判据见
+[precision-standard.md](precision-standard.md)「标杆是谁决定结论说到哪一步」。
+输入字节由 S4 照常冻进 `inputs/`，非连续轮也照常跑。
+
+#### attr 编码
+
+用例参数全是整数，张量由钩子按其中的 seed 现造，两侧共用同一个造数函数：
+
+```python
+    def init_by_input_data(self, input_data: InputDataset):
+        fmt, dtype_id, seed = map(int, input_data.args)
+        self.case = {"format": fmt, "dtype": dtype_id, "seed": seed}
+
+    def __call__(self, input_data: InputDataset, with_output: bool = False):
+        if not hasattr(self, "case"):
+            self.init_by_input_data(input_data)
+        dense = _build(self.case)                      # 造数，两侧共用
+        if self.device == "cpu":
+            out = _reference(self.case, dense)         # CPU 标杆
+        else:
+            out = torch.ops.<ns>.<name>(dense.to(f"npu:{self.device_id}"), ...)
+        return out if with_output else None
+```
+
+多一条硬约束：**造数只依赖用例参数里的 seed，不依赖全局随机状态**——破了两侧
+造出不同的输入，比对全错且无痕。这一形态冻不出输入字节，两侧同不同批全靠这一条。
+
+#### 两种形态共有的三条硬约束
+
+| 约束 | 破了会怎样 |
+| --- | --- |
+| `self.device` 分叉，**同一个类管两侧** | 分两个类时 CPU 那侧拿不到同一份拼装或造数逻辑 |
+| 注册名与用例的 `api_type` 逐字相同 | ATK 静默走内置路径，测的不是这个钩子 |
+| 返回多输出用 `tuple`，个数与实际一致 | ATK 按实际返回的张量个数落盘比对，`outputs` 声明不截断 |
+
+待测侧那个 callable 由**算子工程**注册，不由本插件注册。两种注册形态见
+[interface-facts.md](interface-facts.md)「backend」：新建命名空间的调
+`torch.ops.<ns>.<name>`，注册进 ATen 键的调那个公开 torch API——**后者两侧
+调的是同一个函数名，靠 `self.device` 分流到 NPU 实现还是 CPU 实现**。
+
+它 import 不进来时是部署问题，回跑测侧的 A2，不要在这里加 try 兜底——兜住之后
+跑的是 CPU 标杆对 CPU 标杆，通过率 100% 而什么都没测。ATen 键那一档尤其要当心：
+待验收 so 没装进来时调用**不报错**，dispatcher 直接落到 CPU 实现。
+跑测侧的 `/proc/self/maps` 探针就是为这一条加的。
 
 ### 两侧写在同一个文件
 
