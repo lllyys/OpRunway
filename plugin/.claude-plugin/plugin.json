@@ -1,6 +1,6 @@
 {
   "name": "repo-task-atk-test",
-  "description": "社区算子任务的五个平级 skill：覆盖 ATK 与 ops-blas 的用例生成、NPU 验收和任务书编写。",
+  "description": "社区算子任务的六个平级 skill：覆盖 ATK 与 ops-blas 的用例生成、NPU 验收、任务书编写与 harness 生成。",
   "version": "0.2.0",
   "author": {
     "name": "justbin-coder",
@@ -11,6 +11,7 @@
     "./skill/repo-task-atk-accept",
     "./skill/repo-task-doc-write",
     "./skill/repo-task-blas-case-gen",
-    "./skill/repo-task-blas-accept"
+    "./skill/repo-task-blas-accept",
+    "./skill/repo-task-blas-harness-gen"
   ]
 }

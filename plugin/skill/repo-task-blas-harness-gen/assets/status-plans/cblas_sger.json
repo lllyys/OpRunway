@@ -1,0 +1,205 @@
+{
+ "_doc": "cblas_sger 受信状态策略侧车（方案乙）；声明式，无 kernel/C++；contract-ir.md §7。",
+ "format_version": 1,
+ "symbol": "cblas_sger",
+ "status_checks": [
+  {
+   "kind": "null_check",
+   "param": "handle",
+   "status": "ACLBLAS_STATUS_HANDLE_IS_NULLPTR"
+  },
+  {
+   "kind": "cond",
+   "cond_ast": [
+    "or",
+    [
+     "lt",
+     [
+      "ref",
+      "m"
+     ],
+     [
+      "int",
+      0
+     ]
+    ],
+    [
+     "lt",
+     [
+      "ref",
+      "n"
+     ],
+     [
+      "int",
+      0
+     ]
+    ]
+   ],
+   "status": "ACLBLAS_STATUS_INVALID_VALUE"
+  },
+  {
+   "kind": "cond",
+   "cond_ast": [
+    "or",
+    [
+     "eq",
+     [
+      "ref",
+      "incx"
+     ],
+     [
+      "int",
+      0
+     ]
+    ],
+    [
+     "eq",
+     [
+      "ref",
+      "incy"
+     ],
+     [
+      "int",
+      0
+     ]
+    ]
+   ],
+   "status": "ACLBLAS_STATUS_INVALID_VALUE"
+  },
+  {
+   "kind": "cond",
+   "cond_ast": [
+    "or",
+    [
+     "eq",
+     [
+      "ref",
+      "incx"
+     ],
+     [
+      "int",
+      -2147483648
+     ]
+    ],
+    [
+     "eq",
+     [
+      "ref",
+      "incy"
+     ],
+     [
+      "int",
+      -2147483648
+     ]
+    ]
+   ],
+   "status": "ACLBLAS_STATUS_INVALID_VALUE"
+  },
+  {
+   "kind": "null_check",
+   "param": "alpha",
+   "status": "ACLBLAS_STATUS_INVALID_VALUE"
+  },
+  {
+   "kind": "cond",
+   "cond_ast": [
+    "lt",
+    [
+     "ref",
+     "lda"
+    ],
+    [
+     "max",
+     [
+      "int",
+      1
+     ],
+     [
+      "ref",
+      "m"
+     ]
+    ]
+   ],
+   "status": "ACLBLAS_STATUS_INVALID_VALUE"
+  },
+  {
+   "kind": "quick_return",
+   "cond_ast": [
+    "or",
+    [
+     "eq",
+     [
+      "ref",
+      "m"
+     ],
+     [
+      "int",
+      0
+     ]
+    ],
+    [
+     "eq",
+     [
+      "ref",
+      "n"
+     ],
+     [
+      "int",
+      0
+     ]
+    ]
+   ],
+   "status": "ACLBLAS_STATUS_SUCCESS",
+   "writes_zero": false
+  },
+  {
+   "kind": "null_check",
+   "param": "x",
+   "status": "ACLBLAS_STATUS_INVALID_VALUE"
+  },
+  {
+   "kind": "null_check",
+   "param": "y",
+   "status": "ACLBLAS_STATUS_INVALID_VALUE"
+  },
+  {
+   "kind": "null_check",
+   "param": "A",
+   "status": "ACLBLAS_STATUS_INVALID_VALUE"
+  }
+ ],
+ "sync_fail_status": "ACLBLAS_STATUS_INTERNAL_ERROR",
+ "smoke": {
+  "null_handle": {
+   "expect": "ACLBLAS_STATUS_HANDLE_IS_NULLPTR",
+   "args": [
+    null,
+    [
+     "int",
+     5
+    ],
+    [
+     "int",
+     3
+    ],
+    null,
+    null,
+    [
+     "int",
+     1
+    ],
+    null,
+    [
+     "int",
+     1
+    ],
+    null,
+    [
+     "int",
+     5
+    ]
+   ]
+  }
+ },
+ "upload_guard": null
+}

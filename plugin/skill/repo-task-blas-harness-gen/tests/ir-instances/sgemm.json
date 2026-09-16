@@ -1,0 +1,728 @@
+{
+ "version": 3,
+ "facts_schema_version": 1,
+ "op": "sgemm",
+ "family": "gemm",
+ "symbol": "aclblasSgemm",
+ "returns": "aclblasStatus_t",
+ "params": [
+  {
+   "name": "handle",
+   "ctype": "aclblasHandle_t",
+   "role": "handle",
+   "dir": "in",
+   "mem": "host"
+  },
+  {
+   "name": "transa",
+   "ctype": "aclblasOperation_t",
+   "role": "enum",
+   "dir": "in",
+   "mem": "host",
+   "enum": {
+    "values": [
+     "N",
+     "T",
+     "C"
+    ],
+    "enum_kind": "op"
+   }
+  },
+  {
+   "name": "transb",
+   "ctype": "aclblasOperation_t",
+   "role": "enum",
+   "dir": "in",
+   "mem": "host",
+   "enum": {
+    "values": [
+     "N",
+     "T",
+     "C"
+    ],
+    "enum_kind": "op"
+   }
+  },
+  {
+   "name": "m",
+   "ctype": "int",
+   "role": "dim",
+   "dir": "in",
+   "mem": "host"
+  },
+  {
+   "name": "n",
+   "ctype": "int",
+   "role": "dim",
+   "dir": "in",
+   "mem": "host"
+  },
+  {
+   "name": "k",
+   "ctype": "int",
+   "role": "dim",
+   "dir": "in",
+   "mem": "host"
+  },
+  {
+   "name": "alpha",
+   "ctype": "const float*",
+   "role": "scalar",
+   "dir": "in",
+   "mem": "host",
+   "dtype": "float32"
+  },
+  {
+   "name": "A",
+   "ctype": "const float*",
+   "role": "matrix",
+   "dir": "in",
+   "mem": "device",
+   "dtype": "float32",
+   "order": "col_major",
+   "storage": "full",
+   "shape": {
+    "rows_ast": [
+     "cond",
+     [
+      "eq",
+      [
+       "ref",
+       "transa"
+      ],
+      [
+       "str",
+       "N"
+      ]
+     ],
+     [
+      "ref",
+      "m"
+     ],
+     [
+      "ref",
+      "k"
+     ]
+    ],
+    "cols_ast": [
+     "cond",
+     [
+      "eq",
+      [
+       "ref",
+       "transa"
+      ],
+      [
+       "str",
+       "N"
+      ]
+     ],
+     [
+      "ref",
+      "k"
+     ],
+     [
+      "ref",
+      "m"
+     ]
+    ],
+    "ld_ast": [
+     "ref",
+     "lda"
+    ]
+   }
+  },
+  {
+   "name": "lda",
+   "ctype": "int",
+   "role": "layout",
+   "dir": "in",
+   "mem": "host",
+   "layout": {
+    "kind": "ld",
+    "of": "A"
+   }
+  },
+  {
+   "name": "B",
+   "ctype": "const float*",
+   "role": "matrix",
+   "dir": "in",
+   "mem": "device",
+   "dtype": "float32",
+   "order": "col_major",
+   "storage": "full",
+   "shape": {
+    "rows_ast": [
+     "cond",
+     [
+      "eq",
+      [
+       "ref",
+       "transb"
+      ],
+      [
+       "str",
+       "N"
+      ]
+     ],
+     [
+      "ref",
+      "k"
+     ],
+     [
+      "ref",
+      "n"
+     ]
+    ],
+    "cols_ast": [
+     "cond",
+     [
+      "eq",
+      [
+       "ref",
+       "transb"
+      ],
+      [
+       "str",
+       "N"
+      ]
+     ],
+     [
+      "ref",
+      "n"
+     ],
+     [
+      "ref",
+      "k"
+     ]
+    ],
+    "ld_ast": [
+     "ref",
+     "ldb"
+    ]
+   }
+  },
+  {
+   "name": "ldb",
+   "ctype": "int",
+   "role": "layout",
+   "dir": "in",
+   "mem": "host",
+   "layout": {
+    "kind": "ld",
+    "of": "B"
+   }
+  },
+  {
+   "name": "beta",
+   "ctype": "const float*",
+   "role": "scalar",
+   "dir": "in",
+   "mem": "host",
+   "dtype": "float32"
+  },
+  {
+   "name": "C",
+   "ctype": "float*",
+   "role": "matrix",
+   "dir": "inout",
+   "mem": "device",
+   "dtype": "float32",
+   "order": "col_major",
+   "storage": "full",
+   "shape": {
+    "rows_ast": [
+     "ref",
+     "m"
+    ],
+    "cols_ast": [
+     "ref",
+     "n"
+    ],
+    "ld_ast": [
+     "ref",
+     "ldc"
+    ]
+   }
+  },
+  {
+   "name": "ldc",
+   "ctype": "int",
+   "role": "layout",
+   "dir": "in",
+   "mem": "host",
+   "layout": {
+    "kind": "ld",
+    "of": "C"
+   }
+  }
+ ],
+ "columns": [
+  {
+   "name": "case_name",
+   "kind": "case_name",
+   "binds": {
+    "base": "case_name"
+   },
+   "reader": "base"
+  },
+  {
+   "name": "description",
+   "kind": "description",
+   "binds": {
+    "base": "description"
+   },
+   "reader": "base"
+  },
+  {
+   "name": "transa",
+   "kind": "enum",
+   "binds": {
+    "param": "transa"
+   },
+   "reader": "enum"
+  },
+  {
+   "name": "transb",
+   "kind": "enum",
+   "binds": {
+    "param": "transb"
+   },
+   "reader": "enum"
+  },
+  {
+   "name": "m",
+   "kind": "dim",
+   "binds": {
+    "param": "m"
+   },
+   "reader": "int64"
+  },
+  {
+   "name": "n",
+   "kind": "dim",
+   "binds": {
+    "param": "n"
+   },
+   "reader": "int64"
+  },
+  {
+   "name": "k",
+   "kind": "dim",
+   "binds": {
+    "param": "k"
+   },
+   "reader": "int64"
+  },
+  {
+   "name": "alpha",
+   "kind": "scalar",
+   "binds": {
+    "param": "alpha"
+   },
+   "reader": "float"
+  },
+  {
+   "name": "a_fill",
+   "kind": "fill",
+   "binds": {
+    "param": "A"
+   },
+   "reader": "fill"
+  },
+  {
+   "name": "lda",
+   "kind": "layout",
+   "binds": {
+    "param": "lda"
+   },
+   "reader": "int64"
+  },
+  {
+   "name": "b_fill",
+   "kind": "fill",
+   "binds": {
+    "param": "B"
+   },
+   "reader": "fill"
+  },
+  {
+   "name": "ldb",
+   "kind": "layout",
+   "binds": {
+    "param": "ldb"
+   },
+   "reader": "int64"
+  },
+  {
+   "name": "beta",
+   "kind": "scalar",
+   "binds": {
+    "param": "beta"
+   },
+   "reader": "float"
+  },
+  {
+   "name": "c_fill",
+   "kind": "fill",
+   "binds": {
+    "param": "C"
+   },
+   "reader": "fill"
+  },
+  {
+   "name": "ldc",
+   "kind": "layout",
+   "binds": {
+    "param": "ldc"
+   },
+   "reader": "int64"
+  },
+  {
+   "name": "expect_result",
+   "kind": "expect_result",
+   "binds": {
+    "base": "expect_result"
+   },
+   "reader": "status"
+  },
+  {
+   "name": "random_seed",
+   "kind": "random_seed",
+   "binds": {
+    "seed": true
+   },
+   "reader": "base"
+  }
+ ],
+ "buffers": [
+  {
+   "param": "A",
+   "span_ast": [
+    "mul",
+    [
+     "max",
+     [
+      "int",
+      1
+     ],
+     [
+      "ref",
+      "lda"
+     ]
+    ],
+    [
+     "max",
+     [
+      "int",
+      1
+     ],
+     [
+      "cond",
+      [
+       "eq",
+       [
+        "ref",
+        "transa"
+       ],
+       [
+        "str",
+        "N"
+       ]
+      ],
+      [
+       "ref",
+       "k"
+      ],
+      [
+       "ref",
+       "m"
+      ]
+     ]
+    ]
+   ],
+   "dtype": "float32",
+   "mem": "device",
+   "dir": "in"
+  },
+  {
+   "param": "B",
+   "span_ast": [
+    "mul",
+    [
+     "max",
+     [
+      "int",
+      1
+     ],
+     [
+      "ref",
+      "ldb"
+     ]
+    ],
+    [
+     "max",
+     [
+      "int",
+      1
+     ],
+     [
+      "cond",
+      [
+       "eq",
+       [
+        "ref",
+        "transb"
+       ],
+       [
+        "str",
+        "N"
+       ]
+      ],
+      [
+       "ref",
+       "n"
+      ],
+      [
+       "ref",
+       "k"
+      ]
+     ]
+    ]
+   ],
+   "dtype": "float32",
+   "mem": "device",
+   "dir": "in"
+  },
+  {
+   "param": "C",
+   "span_ast": [
+    "mul",
+    [
+     "max",
+     [
+      "int",
+      1
+     ],
+     [
+      "ref",
+      "ldc"
+     ]
+    ],
+    [
+     "max",
+     [
+      "int",
+      1
+     ],
+     [
+      "ref",
+      "n"
+     ]
+    ]
+   ],
+   "dtype": "float32",
+   "mem": "device",
+   "dir": "inout"
+  }
+ ],
+ "movement": [
+  {
+   "param": "A",
+   "stage": "upload"
+  },
+  {
+   "param": "B",
+   "stage": "upload"
+  },
+  {
+   "param": "C",
+   "stage": "upload"
+  },
+  {
+   "param": "C",
+   "stage": "readback"
+  }
+ ],
+ "golden": {
+  "kind": "cblas",
+  "symbol": "cblas_sgemm",
+  "body": "cblas_call",
+  "accum": null,
+  "args": [
+   {
+    "const": "CblasColMajor"
+   },
+   {
+    "param": "transa",
+    "transform": "enum_map"
+   },
+   {
+    "param": "transb",
+    "transform": "enum_map"
+   },
+   {
+    "param": "m",
+    "transform": "cast_int"
+   },
+   {
+    "param": "n",
+    "transform": "cast_int"
+   },
+   {
+    "param": "k",
+    "transform": "cast_int"
+   },
+   {
+    "param": "alpha",
+    "transform": "deref"
+   },
+   {
+    "param": "A",
+    "transform": "pass"
+   },
+   {
+    "param": "lda",
+    "transform": "cast_int"
+   },
+   {
+    "param": "B",
+    "transform": "pass"
+   },
+   {
+    "param": "ldb",
+    "transform": "cast_int"
+   },
+   {
+    "param": "beta",
+    "transform": "deref"
+   },
+   {
+    "param": "C",
+    "transform": "pass"
+   },
+   {
+    "param": "ldc",
+    "transform": "cast_int"
+   }
+  ],
+  "ret": {
+   "kind": "out_param",
+   "param": "C"
+  }
+ },
+ "verify": [
+  [
+   "full",
+   "C"
+  ]
+ ],
+ "status_plan": {
+  "vocab": [
+   "ACLBLAS_STATUS_SUCCESS",
+   "ACLBLAS_STATUS_NOT_INITIALIZED",
+   "ACLBLAS_STATUS_ALLOC_FAILED",
+   "ACLBLAS_STATUS_INVALID_VALUE",
+   "ACLBLAS_STATUS_MAPPING_ERROR",
+   "ACLBLAS_STATUS_EXECUTION_FAILED",
+   "ACLBLAS_STATUS_INTERNAL_ERROR",
+   "ACLBLAS_STATUS_NOT_SUPPORTED",
+   "ACLBLAS_STATUS_ARCH_MISMATCH",
+   "ACLBLAS_STATUS_HANDLE_IS_NULLPTR",
+   "ACLBLAS_STATUS_INVALID_ENUM",
+   "ACLBLAS_STATUS_UNKNOWN"
+  ],
+  "checks": [
+   {
+    "kind": "null_check",
+    "param": "handle",
+    "status": "ACLBLAS_STATUS_HANDLE_IS_NULLPTR"
+   },
+   {
+    "kind": "cond",
+    "cond_ast": [
+     "or",
+     [
+      "or",
+      [
+       "lt",
+       [
+        "ref",
+        "m"
+       ],
+       [
+        "int",
+        0
+       ]
+      ],
+      [
+       "lt",
+       [
+        "ref",
+        "n"
+       ],
+       [
+        "int",
+        0
+       ]
+      ]
+     ],
+     [
+      "lt",
+      [
+       "ref",
+       "k"
+      ],
+      [
+       "int",
+       0
+      ]
+     ]
+    ],
+    "status": "ACLBLAS_STATUS_INVALID_VALUE"
+   },
+   {
+    "kind": "quick_return",
+    "cond_ast": [
+     "or",
+     [
+      "eq",
+      [
+       "ref",
+       "m"
+      ],
+      [
+       "int",
+       0
+      ]
+     ],
+     [
+      "eq",
+      [
+       "ref",
+       "n"
+      ],
+      [
+       "int",
+       0
+      ]
+     ]
+    ],
+    "status": "ACLBLAS_STATUS_SUCCESS",
+    "writes_zero": false
+   }
+  ],
+  "sync_fail_status": "ACLBLAS_STATUS_INTERNAL_ERROR"
+ },
+ "smoke": null,
+ "upload_guard": {
+  "kind": "k_positive",
+  "guarded_params": [
+   "A",
+   "B"
+  ],
+  "_src": "repos/ops-blas test/gemm/arch35/gemm_npu_wrapper.h:54-60",
+  "dim": "k"
+ }
+}

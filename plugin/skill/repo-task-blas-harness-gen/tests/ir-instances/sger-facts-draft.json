@@ -1,0 +1,86 @@
+{
+ "schema_version": 1,
+ "generator_version": 1,
+ "op": "sger",
+ "family": "ger",
+ "symbol": "aclblasSger",
+ "returns": "aclblasStatus_t",
+ "_provenance": "hypothetical draft（对上游 include/test/ger 推导；Step 5 零改动证伪用）",
+ "params": [
+  {
+   "name": "handle",
+   "ctype": "aclblasHandle_t",
+   "role": "handle"
+  },
+  {
+   "name": "m",
+   "ctype": "int",
+   "role": "dim"
+  },
+  {
+   "name": "n",
+   "ctype": "int",
+   "role": "dim"
+  },
+  {
+   "name": "alpha",
+   "ctype": "const float*",
+   "role": "scalar",
+   "dtype": "float32",
+   "mem": "host"
+  },
+  {
+   "name": "x",
+   "ctype": "const float*",
+   "role": "vector",
+   "dtype": "float32",
+   "dir": "in",
+   "len": "m",
+   "inc": "incx"
+  },
+  {
+   "name": "incx",
+   "ctype": "int",
+   "role": "layout",
+   "kind": "inc",
+   "of": "x"
+  },
+  {
+   "name": "y",
+   "ctype": "const float*",
+   "role": "vector",
+   "dtype": "float32",
+   "dir": "in",
+   "len": "n",
+   "inc": "incy"
+  },
+  {
+   "name": "incy",
+   "ctype": "int",
+   "role": "layout",
+   "kind": "inc",
+   "of": "y"
+  },
+  {
+   "name": "A",
+   "ctype": "float*",
+   "role": "matrix",
+   "dtype": "float32",
+   "dir": "inout",
+   "rows": "m",
+   "cols": "n",
+   "ld": "lda"
+  },
+  {
+   "name": "lda",
+   "ctype": "int",
+   "role": "layout",
+   "kind": "ld",
+   "of": "A"
+  }
+ ],
+ "golden": {
+  "kind": "cblas",
+  "symbol": "cblas_sger"
+ }
+}

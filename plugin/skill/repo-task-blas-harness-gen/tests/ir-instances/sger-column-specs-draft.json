@@ -1,0 +1,67 @@
+[
+ {
+  "name": "case_name",
+  "kind": "id",
+  "source": null
+ },
+ {
+  "name": "description",
+  "kind": "description",
+  "source": null
+ },
+ {
+  "name": "m",
+  "kind": "dim",
+  "source": "m"
+ },
+ {
+  "name": "n",
+  "kind": "dim",
+  "source": "n"
+ },
+ {
+  "name": "alpha",
+  "kind": "scalar",
+  "source": "alpha"
+ },
+ {
+  "name": "x_fill",
+  "kind": "fill",
+  "source": "x"
+ },
+ {
+  "name": "incx",
+  "kind": "layout",
+  "source": "incx"
+ },
+ {
+  "name": "y_fill",
+  "kind": "fill",
+  "source": "y"
+ },
+ {
+  "name": "incy",
+  "kind": "layout",
+  "source": "incy"
+ },
+ {
+  "name": "a_fill",
+  "kind": "fill",
+  "source": "A"
+ },
+ {
+  "name": "lda",
+  "kind": "layout",
+  "source": "lda"
+ },
+ {
+  "name": "expect_result",
+  "kind": "expect",
+  "source": null
+ },
+ {
+  "name": "random_seed",
+  "kind": "seed",
+  "source": null
+ }
+]

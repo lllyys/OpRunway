@@ -1,0 +1,47 @@
+{
+ "schema_version": 1,
+ "generator_version": 1,
+ "op": "sasum",
+ "family": "asum",
+ "symbol": "aclblasSasum",
+ "returns": "aclblasStatus_t",
+ "params": [
+  {
+   "name": "handle",
+   "ctype": "aclblasHandle_t",
+   "role": "handle"
+  },
+  {
+   "name": "n",
+   "ctype": "int",
+   "role": "dim"
+  },
+  {
+   "name": "x",
+   "ctype": "const float*",
+   "role": "vector",
+   "dtype": "complex64",
+   "dir": "in",
+   "len": "n",
+   "inc": "incx"
+  },
+  {
+   "name": "incx",
+   "ctype": "int",
+   "role": "layout",
+   "kind": "inc",
+   "of": "x"
+  },
+  {
+   "name": "result",
+   "ctype": "float*",
+   "role": "out_scalar",
+   "dtype": "float32",
+   "mem": "device"
+  }
+ ],
+ "golden": {
+  "kind": "cblas",
+  "symbol": "cblas_sasum"
+ }
+}

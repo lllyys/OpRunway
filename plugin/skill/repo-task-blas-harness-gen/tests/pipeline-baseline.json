@@ -1,0 +1,12 @@
+{
+ "_doc": "前向零改动门（不是历史证据）。这些是算子无关的流水线逻辑文件（FACTS/IR→C++ 的纯逻辑）。加新 cblas 算子应只增数据（侧车 assets/status-plans/、IR 实例、FACTS/column-specs、CSV），这些逻辑文件零改动。test_pipeline_baseline 重算 SHA 比对：任何改动即红。它锁的是**当前**逻辑状态、拦的是**未来**把算子特判写进逻辑；它不证明某次过去的算子接入未改动逻辑——那要看 git 历史/提交评审。有意的流水线修复（如本轮 Step 4/5 F-01/02 的 A′ 重写）在同一提交里跑 `python3 tests/test_pipeline_baseline.py --regen` 重生本清单，git 历史留痕。signature_table.json 不在此清单，故它随 builtin_kernel 合法增长不触发本门。",
+ "frozen_at": "2026-09-11 Step 4/5 A′ 重写后",
+ "files": {
+  "package_loader.py": "28b30fe616626fd5afb6891644f421987979040727548d038ca651e6c95421b9",
+  "contract.py": "6c64147095e65bfefe5932a198c9aa840694596a718cf261c34cbcffe1eafdfc",
+  "ir_validator.py": "bdcddfdb8297e11cef9fdba0f257d9870a0f28e6bf9dabf3b228935cc97f2c1d",
+  "renderer.py": "806ac0bcb21ec7ad4a028cfeca975df5933698eea1af202eb64ad96b46b4666b",
+  "harness.py": "ba653f6228bfbec9650af5e7473fb52dcedc275e0319c74e4bc6f04e11666f13",
+  "installer.py": "0110830e51c9d98227881357a5d8fd857f9a59a7d8496a983cf32c6edb2bc2f0"
+ }
+}

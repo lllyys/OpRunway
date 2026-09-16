@@ -1,5 +1,9 @@
 # C++ harness 生成 · 立项笔记（2026-09-03）
 
+> **2026-09-03 更新**：方案已定稿为 v4.1（`dev-doc/harness-gen-plan.md`）——用户裁定
+> case-gen/accept 零改动，新 skill 独立承载、边缘定位。本页「按方案 C 分层重放」的
+> 首任务表述作废，移植清单以 v4.1 §7 为准。
+
 本线（feature/harness-gen，基于 feature/sparse-r1 @ b0cb3ed）的任务：为算子生成 C++ 测试
 harness——`test/<op>/<op>_param.h`、`<op>_test.cpp` 与 CMake 注册，对标 ops-blas
 `test/frame/` 的 CSV 驱动 gtest 惯例。输入形态两种：

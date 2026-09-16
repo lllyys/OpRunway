@@ -35,6 +35,45 @@
   trap5 生成器/校验器口径分叉、trap4/6 的 blas 存量面（重复轴值/命名空间碰撞与
   pairwise 不收敛）。修法与通则见 fixture README 处置表。
 
+## P0 · harness-gen 独立生成 skill（本线 @ feature/harness-gen，方案 v4.1 已定稿）
+
+方案 `dev-doc/harness-gen-plan.md`，多 agent 编排 `dev-doc/harness-gen-orchestration.md`；
+硬约束：case-gen/accept 零改动，porcelain 全程为空。
+
+- [x] Step 0 · sasum 手写 overlay spike：2026-09-10 三轮真机 A1–A5 走通（r1 不通过/
+  r2 证据不足/r3 演练通过），产物 ABI 冻结实证；报告 reports/harness-spike-20260909/。
+- [ ] Step 2 吸收 spike 发现：IR schema 加 golden 累加精度策略字段；32ULP 钳位 ×
+  用例阶梯的耦合成为 FACTS 显式输入（frame float golden n≥2^24 停摆，证据在报告）。
+- [ ] preflight 遗留（Codex F5/F6/F8）：CSV 期望 SHA 入检查、manifest 三态恢复分支、
+  wrapper 收敛单调用点消 A2′ calls_per_case 歧义。
+- [ ] 测试债（V4 记账）：T3 全分支投影期望表未随迁，现仅 sasum 7 列被独立判据钉死、
+  cherk 只断列数；允许表收第二条目前须补回（package-abi.md 加行规则已含此门槛）。
+- [ ] frame float golden 大 n 缺陷是否回报上游 ops-blas：候选 issue/PR，须用户明示。
+- [x] Step 1 · 2026-09-10 落地：骨架+manifest（六项）、装载器三道门（三码停机模型）、
+  contract.py 迁入、29 测全绿；Codex 判修后可提交且 F1–F8 已关（thread `01a08a2e`）。
+- [ ] Step 1 遗留（Codex R1）：ast.parse/literal_eval 无输入大小上限；任务包边界扩到
+  不可信来源时再加文件与结构预算。
+- [x] Step 2 · IR schema v1 冻结（2026-09-10）：schema+compile_contract v2+ir_validator+
+  签名表+模板契约+正负实例，50 测绿，Codex 四轮判可冻结，/goal 授权。遗留随 Step 4：
+  sgemm 端到端 fixture、R-01 大 k 精度、R-02 padding、R-04 OP_C。
+- [x] Step 3 · sasum IR→C++ 纵切（2026-09-10）：renderer/installer/harness H1-H5，逐字节
+  复现 rev1、跨机确定性、真机 A3 精度 77/77，rev1 已验基准；installer 经 Codex 四轮加固
+  （M-01–M-08+符号链接目标全关，三破坏性风险消除），79 测绿。
+- [ ] Step 3 在案遗留（威胁模型外，不阻塞）：L-01 安装进程锁、L-02 两端树哈希清单归档、
+  L-03 注释宽度按 East Asian Width、真实 IO 故障下 rmtree/rename 深层原子性。
+- [x] Step 4/5（2026-09-10 起，2026-09-14 A′ 重写）：方案乙 L3 通用后端；Codex 二审打回后
+  按 A/B 审议采纳 A′（设备权威+哨兵降级搬运），三审再修 int ABI 域门/fail-closed/文档；
+  sger 零改动接入成立；本地桩编译（frame ABI 桩，-Wall -Wextra）sger/sgemm 零错零警；
+  100 测绿。Codex 五轮复核收敛,终审判「离线可证部分代码关闭条件已达到」(2026-09-14)。
+- [ ] Step 4/5 真机 A1–A5 运行（待 GPU 基线 + 设备窗口，Mr.0 裁定 2026-09-15 停在离线强状态）：
+  离线已到顶——Codex 判离线可证部分闭合；**真 frame ABI 离线编译 sger/sgemm 双 RC=0**（A3
+  容器 oprunway_prov、CANN 9.0.1、g++ 11.4，对真 test/frame+utils+include+CANN 头）。实测更正
+  前记：libops_blas.so 在 A3(9.0.1) 可重建、盘有余量——原「asc-devkit≥9.1/盘满」框定被直接观察
+  取代。真机 A1–A5 **运行**未做,两道真实闸:①共享机设备租约(/work/run/oprunway-device-leases,
+  勿扰他人);②sger GPU/cuBLAS 基线——无基线则 accuracy NO_REF→证据不足(同 sasum spike r2)。
+  待基线就绪 + 设备窗口再跑;链接/GTest 发现/null 返回码/数值等编译证不了的项随此腿闭合。
+- [ ] 移植完成后删前身 worktree oprunway-blas-harness-gen（未提交工作，删前逐项核对）。
+
 ## P0 · 已证明的 DUT 修复后复验
 
 - [ ] RemainderTensorTensor：补齐 `ascend910_93` 的 kernel source、op_def config 与安装交付后，

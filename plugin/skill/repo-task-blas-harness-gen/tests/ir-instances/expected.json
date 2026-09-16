@@ -1,0 +1,74 @@
+{
+ "negative-1": {
+  "code": "UNSUPPORTED_CONTRACT",
+  "gate": "pre_ir",
+  "field_path": "golden.kind",
+  "observed": "lapacke",
+  "allowed": [
+   "cblas"
+  ]
+ },
+ "negative-2": {
+  "code": "UNSUPPORTED_CONTRACT",
+  "gate": "param_gate",
+  "field_path": "returns",
+  "observed": "float",
+  "allowed": [
+   "aclblasStatus_t"
+  ]
+ },
+ "negative-3": {
+  "code": "UNSUPPORTED_CONTRACT",
+  "gate": "ast_gate",
+  "field_path": "shape_expr",
+  "observed": "n // 2",
+  "allowed": "文法：int/ident/()/+/-/*"
+ },
+ "negative-4": {
+  "code": "UNSUPPORTED_CONTRACT",
+  "gate": "param_gate",
+  "field_path": "params[2].dtype",
+  "observed": "complex64",
+  "allowed": [
+   "float32"
+  ]
+ },
+ "negative-5": {
+  "code": "UNSUPPORTED_CONTRACT",
+  "gate": "param_gate",
+  "field_path": "params[2].batch",
+  "observed": {
+   "count": "b",
+   "stride": "n"
+  },
+  "allowed": [
+   "ctype",
+   "dir",
+   "dtype",
+   "inc",
+   "len",
+   "name",
+   "nullable",
+   "role"
+  ]
+ },
+ "negative-6": {
+  "code": "UNSUPPORTED_CONTRACT",
+  "gate": "param_gate",
+  "field_path": "params[6].mem",
+  "observed": "device",
+  "allowed": [
+   "host"
+  ]
+ },
+ "negative-7": {
+  "code": "UNSUPPORTED_CONTRACT",
+  "gate": "signature_table",
+  "field_path": "golden.symbol",
+  "observed": "cblas_sdot",
+  "allowed": [
+   "cblas_sasum",
+   "cblas_sgemm"
+  ]
+ }
+}

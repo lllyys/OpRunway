@@ -1,0 +1,87 @@
+[
+ {
+  "name": "case_name",
+  "kind": "id",
+  "source": null
+ },
+ {
+  "name": "description",
+  "kind": "description",
+  "source": null
+ },
+ {
+  "name": "transa",
+  "kind": "enum",
+  "source": "transa"
+ },
+ {
+  "name": "transb",
+  "kind": "enum",
+  "source": "transb"
+ },
+ {
+  "name": "m",
+  "kind": "dim",
+  "source": "m"
+ },
+ {
+  "name": "n",
+  "kind": "dim",
+  "source": "n"
+ },
+ {
+  "name": "k",
+  "kind": "dim",
+  "source": "k"
+ },
+ {
+  "name": "alpha",
+  "kind": "scalar",
+  "source": "alpha"
+ },
+ {
+  "name": "a_fill",
+  "kind": "fill",
+  "source": "A"
+ },
+ {
+  "name": "lda",
+  "kind": "layout",
+  "source": "lda"
+ },
+ {
+  "name": "b_fill",
+  "kind": "fill",
+  "source": "B"
+ },
+ {
+  "name": "ldb",
+  "kind": "layout",
+  "source": "ldb"
+ },
+ {
+  "name": "beta",
+  "kind": "scalar",
+  "source": "beta"
+ },
+ {
+  "name": "c_fill",
+  "kind": "fill",
+  "source": "C"
+ },
+ {
+  "name": "ldc",
+  "kind": "layout",
+  "source": "ldc"
+ },
+ {
+  "name": "expect_result",
+  "kind": "expect",
+  "source": null
+ },
+ {
+  "name": "random_seed",
+  "kind": "seed",
+  "source": null
+ }
+]

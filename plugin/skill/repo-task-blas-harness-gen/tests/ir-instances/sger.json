@@ -1,0 +1,644 @@
+{
+ "version": 3,
+ "facts_schema_version": 1,
+ "op": "sger",
+ "family": "ger",
+ "symbol": "aclblasSger",
+ "returns": "aclblasStatus_t",
+ "params": [
+  {
+   "name": "handle",
+   "ctype": "aclblasHandle_t",
+   "role": "handle",
+   "dir": "in",
+   "mem": "host"
+  },
+  {
+   "name": "m",
+   "ctype": "int",
+   "role": "dim",
+   "dir": "in",
+   "mem": "host"
+  },
+  {
+   "name": "n",
+   "ctype": "int",
+   "role": "dim",
+   "dir": "in",
+   "mem": "host"
+  },
+  {
+   "name": "alpha",
+   "ctype": "const float*",
+   "role": "scalar",
+   "dir": "in",
+   "mem": "host",
+   "dtype": "float32"
+  },
+  {
+   "name": "x",
+   "ctype": "const float*",
+   "role": "vector",
+   "dir": "in",
+   "mem": "device",
+   "dtype": "float32",
+   "shape": {
+    "len_ast": [
+     "ref",
+     "m"
+    ]
+   }
+  },
+  {
+   "name": "incx",
+   "ctype": "int",
+   "role": "layout",
+   "dir": "in",
+   "mem": "host",
+   "layout": {
+    "kind": "inc",
+    "of": "x"
+   }
+  },
+  {
+   "name": "y",
+   "ctype": "const float*",
+   "role": "vector",
+   "dir": "in",
+   "mem": "device",
+   "dtype": "float32",
+   "shape": {
+    "len_ast": [
+     "ref",
+     "n"
+    ]
+   }
+  },
+  {
+   "name": "incy",
+   "ctype": "int",
+   "role": "layout",
+   "dir": "in",
+   "mem": "host",
+   "layout": {
+    "kind": "inc",
+    "of": "y"
+   }
+  },
+  {
+   "name": "A",
+   "ctype": "float*",
+   "role": "matrix",
+   "dir": "inout",
+   "mem": "device",
+   "dtype": "float32",
+   "order": "col_major",
+   "storage": "full",
+   "shape": {
+    "rows_ast": [
+     "ref",
+     "m"
+    ],
+    "cols_ast": [
+     "ref",
+     "n"
+    ],
+    "ld_ast": [
+     "ref",
+     "lda"
+    ]
+   }
+  },
+  {
+   "name": "lda",
+   "ctype": "int",
+   "role": "layout",
+   "dir": "in",
+   "mem": "host",
+   "layout": {
+    "kind": "ld",
+    "of": "A"
+   }
+  }
+ ],
+ "columns": [
+  {
+   "name": "case_name",
+   "kind": "case_name",
+   "binds": {
+    "base": "case_name"
+   },
+   "reader": "base"
+  },
+  {
+   "name": "description",
+   "kind": "description",
+   "binds": {
+    "base": "description"
+   },
+   "reader": "base"
+  },
+  {
+   "name": "m",
+   "kind": "dim",
+   "binds": {
+    "param": "m"
+   },
+   "reader": "int64"
+  },
+  {
+   "name": "n",
+   "kind": "dim",
+   "binds": {
+    "param": "n"
+   },
+   "reader": "int64"
+  },
+  {
+   "name": "alpha",
+   "kind": "scalar",
+   "binds": {
+    "param": "alpha"
+   },
+   "reader": "float"
+  },
+  {
+   "name": "x_fill",
+   "kind": "fill",
+   "binds": {
+    "param": "x"
+   },
+   "reader": "fill"
+  },
+  {
+   "name": "incx",
+   "kind": "layout",
+   "binds": {
+    "param": "incx"
+   },
+   "reader": "int64"
+  },
+  {
+   "name": "y_fill",
+   "kind": "fill",
+   "binds": {
+    "param": "y"
+   },
+   "reader": "fill"
+  },
+  {
+   "name": "incy",
+   "kind": "layout",
+   "binds": {
+    "param": "incy"
+   },
+   "reader": "int64"
+  },
+  {
+   "name": "a_fill",
+   "kind": "fill",
+   "binds": {
+    "param": "A"
+   },
+   "reader": "fill"
+  },
+  {
+   "name": "lda",
+   "kind": "layout",
+   "binds": {
+    "param": "lda"
+   },
+   "reader": "int64"
+  },
+  {
+   "name": "expect_result",
+   "kind": "expect_result",
+   "binds": {
+    "base": "expect_result"
+   },
+   "reader": "status"
+  },
+  {
+   "name": "random_seed",
+   "kind": "random_seed",
+   "binds": {
+    "seed": true
+   },
+   "reader": "base"
+  }
+ ],
+ "buffers": [
+  {
+   "param": "x",
+   "span_ast": [
+    "add",
+    [
+     "mul",
+     [
+      "sub",
+      [
+       "ref",
+       "m"
+      ],
+      [
+       "int",
+       1
+      ]
+     ],
+     [
+      "max",
+      [
+       "ref",
+       "incx"
+      ],
+      [
+       "sub",
+       [
+        "int",
+        0
+       ],
+       [
+        "ref",
+        "incx"
+       ]
+      ]
+     ]
+    ],
+    [
+     "int",
+     1
+    ]
+   ],
+   "dtype": "float32",
+   "mem": "device",
+   "dir": "in"
+  },
+  {
+   "param": "y",
+   "span_ast": [
+    "add",
+    [
+     "mul",
+     [
+      "sub",
+      [
+       "ref",
+       "n"
+      ],
+      [
+       "int",
+       1
+      ]
+     ],
+     [
+      "max",
+      [
+       "ref",
+       "incy"
+      ],
+      [
+       "sub",
+       [
+        "int",
+        0
+       ],
+       [
+        "ref",
+        "incy"
+       ]
+      ]
+     ]
+    ],
+    [
+     "int",
+     1
+    ]
+   ],
+   "dtype": "float32",
+   "mem": "device",
+   "dir": "in"
+  },
+  {
+   "param": "A",
+   "span_ast": [
+    "mul",
+    [
+     "max",
+     [
+      "int",
+      1
+     ],
+     [
+      "ref",
+      "lda"
+     ]
+    ],
+    [
+     "max",
+     [
+      "int",
+      1
+     ],
+     [
+      "ref",
+      "n"
+     ]
+    ]
+   ],
+   "dtype": "float32",
+   "mem": "device",
+   "dir": "inout"
+  }
+ ],
+ "movement": [
+  {
+   "param": "x",
+   "stage": "upload"
+  },
+  {
+   "param": "y",
+   "stage": "upload"
+  },
+  {
+   "param": "A",
+   "stage": "upload"
+  },
+  {
+   "param": "A",
+   "stage": "readback"
+  }
+ ],
+ "golden": {
+  "kind": "cblas",
+  "symbol": "cblas_sger",
+  "body": "cblas_call",
+  "accum": null,
+  "args": [
+   {
+    "const": "CblasColMajor"
+   },
+   {
+    "param": "m",
+    "transform": "cast_int"
+   },
+   {
+    "param": "n",
+    "transform": "cast_int"
+   },
+   {
+    "param": "alpha",
+    "transform": "deref"
+   },
+   {
+    "param": "x",
+    "transform": "pass"
+   },
+   {
+    "param": "incx",
+    "transform": "cast_int"
+   },
+   {
+    "param": "y",
+    "transform": "pass"
+   },
+   {
+    "param": "incy",
+    "transform": "cast_int"
+   },
+   {
+    "param": "A",
+    "transform": "pass"
+   },
+   {
+    "param": "lda",
+    "transform": "cast_int"
+   }
+  ],
+  "ret": {
+   "kind": "out_param",
+   "param": "A"
+  }
+ },
+ "verify": [
+  [
+   "full",
+   "A"
+  ]
+ ],
+ "status_plan": {
+  "vocab": [
+   "ACLBLAS_STATUS_SUCCESS",
+   "ACLBLAS_STATUS_NOT_INITIALIZED",
+   "ACLBLAS_STATUS_ALLOC_FAILED",
+   "ACLBLAS_STATUS_INVALID_VALUE",
+   "ACLBLAS_STATUS_MAPPING_ERROR",
+   "ACLBLAS_STATUS_EXECUTION_FAILED",
+   "ACLBLAS_STATUS_INTERNAL_ERROR",
+   "ACLBLAS_STATUS_NOT_SUPPORTED",
+   "ACLBLAS_STATUS_ARCH_MISMATCH",
+   "ACLBLAS_STATUS_HANDLE_IS_NULLPTR",
+   "ACLBLAS_STATUS_INVALID_ENUM",
+   "ACLBLAS_STATUS_UNKNOWN"
+  ],
+  "checks": [
+   {
+    "kind": "null_check",
+    "param": "handle",
+    "status": "ACLBLAS_STATUS_HANDLE_IS_NULLPTR"
+   },
+   {
+    "kind": "cond",
+    "cond_ast": [
+     "or",
+     [
+      "lt",
+      [
+       "ref",
+       "m"
+      ],
+      [
+       "int",
+       0
+      ]
+     ],
+     [
+      "lt",
+      [
+       "ref",
+       "n"
+      ],
+      [
+       "int",
+       0
+      ]
+     ]
+    ],
+    "status": "ACLBLAS_STATUS_INVALID_VALUE"
+   },
+   {
+    "kind": "cond",
+    "cond_ast": [
+     "or",
+     [
+      "eq",
+      [
+       "ref",
+       "incx"
+      ],
+      [
+       "int",
+       0
+      ]
+     ],
+     [
+      "eq",
+      [
+       "ref",
+       "incy"
+      ],
+      [
+       "int",
+       0
+      ]
+     ]
+    ],
+    "status": "ACLBLAS_STATUS_INVALID_VALUE"
+   },
+   {
+    "kind": "cond",
+    "cond_ast": [
+     "or",
+     [
+      "eq",
+      [
+       "ref",
+       "incx"
+      ],
+      [
+       "int",
+       -2147483648
+      ]
+     ],
+     [
+      "eq",
+      [
+       "ref",
+       "incy"
+      ],
+      [
+       "int",
+       -2147483648
+      ]
+     ]
+    ],
+    "status": "ACLBLAS_STATUS_INVALID_VALUE"
+   },
+   {
+    "kind": "null_check",
+    "param": "alpha",
+    "status": "ACLBLAS_STATUS_INVALID_VALUE"
+   },
+   {
+    "kind": "cond",
+    "cond_ast": [
+     "lt",
+     [
+      "ref",
+      "lda"
+     ],
+     [
+      "max",
+      [
+       "int",
+       1
+      ],
+      [
+       "ref",
+       "m"
+      ]
+     ]
+    ],
+    "status": "ACLBLAS_STATUS_INVALID_VALUE"
+   },
+   {
+    "kind": "quick_return",
+    "cond_ast": [
+     "or",
+     [
+      "eq",
+      [
+       "ref",
+       "m"
+      ],
+      [
+       "int",
+       0
+      ]
+     ],
+     [
+      "eq",
+      [
+       "ref",
+       "n"
+      ],
+      [
+       "int",
+       0
+      ]
+     ]
+    ],
+    "status": "ACLBLAS_STATUS_SUCCESS",
+    "writes_zero": false
+   },
+   {
+    "kind": "null_check",
+    "param": "x",
+    "status": "ACLBLAS_STATUS_INVALID_VALUE"
+   },
+   {
+    "kind": "null_check",
+    "param": "y",
+    "status": "ACLBLAS_STATUS_INVALID_VALUE"
+   },
+   {
+    "kind": "null_check",
+    "param": "A",
+    "status": "ACLBLAS_STATUS_INVALID_VALUE"
+   }
+  ],
+  "sync_fail_status": "ACLBLAS_STATUS_INTERNAL_ERROR"
+ },
+ "smoke": {
+  "null_handle": {
+   "expect": "ACLBLAS_STATUS_HANDLE_IS_NULLPTR",
+   "args": [
+    null,
+    [
+     "int",
+     5
+    ],
+    [
+     "int",
+     3
+    ],
+    null,
+    null,
+    [
+     "int",
+     1
+    ],
+    null,
+    [
+     "int",
+     1
+    ],
+    null,
+    [
+     "int",
+     5
+    ]
+   ]
+  }
+ },
+ "upload_guard": null
+}

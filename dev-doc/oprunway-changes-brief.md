@@ -2,6 +2,134 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-14 · 真 frame ABI 离线编译通过(sger+sgemm)——桩编译漏掉的 BlasFillMode.method bug 被抓修。**
+  在 A3 容器(oprunway_prov,CANN 9.0.1,g++ 11.4)对**真** ops-blas frame 头(test/frame、test/utils、
+  include)+ CANN 头做 g++ -fsyntax-only:sger 与 sgemm 的 test.cpp+wrapper+golden 均 RC=0。**真 frame
+  编译抓出本地桩与单测都漏的真 ABI bug**:frame 的 BlasFillMode 是结构体(含 .method 枚举),生成码
+  原写 `p.x != M_NULLPTR`(把它当扁平枚举,我的桩也这么写→假绿),真值须 `p.x.method != M_NULLPTR`;
+  已修 renderer 并把桩改成结构体+.method(令桩今后能抓此类)。这坐实:桩编译/单测必要不充分,真 frame
+  编译是 ABI 匹配的权威。100 测仍绿、冻结面空。仍缺:真机 A1–A5 运行(asc-devkit 9.0<9.1、盘满,
+  环境阻塞),及链接/GTest 发现/数值仍待可用机。
+
+- **2026-09-14 · Step 4/5 二次打回后按 A′ 重写通用 cblas 后端 + 域门/fail-closed 硬化。**
+  Codex 二审「仍有阻断」:通用 wrapper/test 运行语义非真数据驱动。经 Codex A/B 架构审议采纳
+  **A′(设备权威+语义保持降级搬运)**:wrapper 只留 handle 安全检查、恒一设备调用点、状态全由
+  设备裁决、仅全量搬运且成功才回读;错误/退化行走一元素哨兵、int64 checked span(abs(INT_MIN)
+  不溢出)、M_NULLPTR 保真 nullptr;test 探针/全量二分、快照仅 full 行。三审又抓出一 A′ 新回归
+  (int64 成员→int 形参窄化致 test/wrapper span 不一致越界)→加 **int ABI 域门**(超 int 域即报
+  基础设施错误,一并消解极端值溢出);补单/总缓冲量守卫、validator 逐段 dict/类型门(columns/
+  golden.ret/args 等不放 TypeError)、侧车加可选 matrix_phys(转置型仍只加数据)。文档 F-08:
+  template-contract.md 拆 L1/A′ 两路、contract-ir.md §6/§13 对齐 A′。本地 clang++ -fsyntax-only
+  -Wall -Wextra 对 frame ABI 桩编 sger/sgemm(test+wrapper+golden)零错零警(抓出并修真 bug
+  p.x_fill→p.x)。经 Codex 连续五轮复核收敛:二审打回→A′→三审(F-01/03/05/06/07 闭)→四审
+  (F-02/04/int ABI/哨兵取舍/F-07 闭,余 matrix_phys fail-open/总预算/文档)→五审(总预算/文档/
+  测试入口闭,matrix_phys 余非 str 值 TypeError)→终审(matrix_phys 非 str 守卫 + 注释)全闭:
+  **Codex 判「Step 4/5 离线可证部分代码关闭条件已达到」,无代码问题、无回退**。100 测绿、冻结
+  面 porcelain 空、sasum 逐字节、桩编译零错零警。诚实边界:桩编译非真 frame ABI;真机 A1–A5
+  仍环境阻塞(asc-devkit 9.0/盘满);标量空指针检查(sger alpha)当前不可驱动(已记 §14)。
+
+- **2026-09-10 · Step 4/5 F-07 收口：三道机械门把「零改动接入」从人工核对升为可复跑证据。**
+  （a）sger 纵切测试：从 sger-facts/column-specs 草案 compile_contract → 与冻结 sger.json 逐字段相等
+  → validate_ir → 渲染 6 件，断言 golden 用 cblas_sger、wrapper 状态码取自 status_plan、test.cpp
+  三路分派——证 FACTS→C++ 全链真数据驱动，非假 CSV。（b）侧车闭式模式门：往 cblas_sger.json 注入
+  未知键 kernel_block 被 load_status_plan_sidecar 拒（fail-closed，防手写 C++ 越过信任边界）。
+  （c）零改动 SHA 基线门：pipeline-baseline.json 钉六个算子无关逻辑文件（package_loader/contract/
+  ir_validator/renderer/harness/installer）的整文件 SHA，test_pipeline_baseline 重算比对——加新算子
+  若改动任一逻辑文件即红，比 name-scan 只抓已知三算子字面量更强；signature_table.json 不入清单
+  （它随 builtin_kernel 合法增长）。负向自证：注入一行注释门即变红，还原后复绿。85 测绿、冻结面
+  porcelain 空。
+
+- **2026-09-10 · Step 4/5：方案乙 L3 通用后端 + sger 零改动证伪（离线编译验证）。**
+  Codex review-plan 选方案乙（受信状态侧车 assets/status-plans/<symbol>.json，声明式禁
+  C++、每 symbol 恰一行为源、compile 物化 validator 复核 renderer 只消费已验 IR）。
+  实现：v3 schema（加 upload_guard，§7 行为源二分，cblas_call 的 device 签名/args/ret
+  从 params 自足派生）；renderer 两路（builtin→L1 逐字节 sasum；cblas_call→通用数据驱动
+  sgemm/sger，通用 AST 渲染 + 按角色派发 + movement/upload_guard/args/verify 遍历）；
+  代码零算子特判（测试断言）。sger 作新 cblas 算子只加新文件（侧车+IR+FACTS/specs+CSV），
+  renderer/signature_table/contract/ir_validator SHA 未变——零改动接入成立（§8 核心证伪）。
+  真机离线语法编译（g++ -fsyntax-only 对真 frame ABI+CANN 头）：sasum/sgemm/sger 三件
+  test.cpp 全 RC=0，抓出并修两个生成 bug（std::max int64_t、handle_）。81 测绿、sasum
+  仍逐字节、冻结面 porcelain 空。环境阻塞（外部、记录在案）：sgemm 真机需 asc-devkit≥9.1
+  而 A3/A5 均 9.0；sger 全库真机构建撞 A3 共享盘 100% 满——两者均以离线语法编译代偿验证。
+
+- **2026-09-10 · Step 3 installer 四轮加固收口：Codex M-01–M-08 + 符号链接目标完整性全关。**
+  三条破坏性风险经四轮定向 verify 确认全部消除：路径越界（含 .. 与符号链接组件）、
+  空树安装、rollback 先删后验。backup 完整性做到全条目集（文件 SHA / 目录 / 符号链接
+  含 readlink 目标）先验后 move-aside 恢复；install 写失败先删部分新树再复原、失败诚实
+  报需人工；staging 工件链精确文件集 + op/family/arch + 逐文件 SHA + containment。
+  79 测绿（含符号链接 backup 回滚、改指拒绝、写失败注入）。在案遗留（单写者受控目录
+  威胁模型外，不阻塞）：L-01 进程锁、L-02 两端哈希清单、L-03 宽度估计、真实 IO 故障下
+  rmtree/rename 深层原子性。Step 3 收口。
+
+- **2026-09-10 · Step 3 Codex 打回后加固：installer 事务安全、renderer L1 硬门、流水线重验。**
+  首审判打回（M-01 路径越界、M-02 renderer 崩于合法 sgemm、M-03 preflight 门可绕、
+  M-06/07 install/rollback 破坏性）。逐项修（fix 段过七维、全加固不退化）：installer
+  路径 containment + 先全量校验后动文件 + 原子备份 + rollback 先验安装树精确文件集与
+  backup 全树 SHA 再删；preflight 解析完整原型逐 ctype 比对 + 精确 soc 键 + 实现目录
+  在场 + family canonical 一致；renderer 加 L1 形硬门（矩阵/enum/full/cblas_call 以
+  UNSUPPORTED_CONTRACT 干净停机，真 raise 非 assert，合法 sgemm 不再崩）；harness 每
+  边界重验 IR + arch 贯通 + staging provenance 链（逐文件 SHA）+ 清旧 staging。70 测绿
+  （installer 14 门/事务测 + renderer 门测），冻结面 porcelain 空。待定向 verify。
+
+- **2026-09-10 · Step 3 sasum 纵切真机走通：IR→C++ 发射器 + 安装器，rev1 提升为已验基准。**
+  renderer.py 从 IR 确定性渲染五件，逐字节复现 rev1 且跨机（本机+A3 容器）双渲一致；
+  harness.py 接线 H2 compile/H3 render（双渲 RENDER_MISMATCH 门）/H4 preflight/H5
+  install/rollback；installer.py 七门 fail-closed + manifest 回滚；compat-config.json
+  绑 revision 与 10 个 frame 指纹。渲染 overlay 装进干净 ops-blas@621aafd 副本、arch22
+  构建零错、A3 精度 77/77、性能 NO_REF、结论证据不足——与手写 spike r2 一致，证发射器
+  产物真机可用，rev1 从候选提升为已验对拍基准（param.h 成员序、golden include 规整为
+  canonical 渲染形）。58 测绿、plugin validate 过、冻结面全程 porcelain 空。
+  证据 reports/harness-step3-20260910/。
+
+- **2026-09-10 · Step 2 冻结条件达成：Codex 四轮核验闭环，「可以冻结」。**
+  首轮判修后可冻结（F-01–F-12）→ 修复 → 定向 verify 判 6 关 6 半 → 再修（compile_contract
+  升 v2 全量编译器、FACTS 必填键、IR kind 闭集、签名表拼接单源、模板契约四来源口径、
+  AST/buffers 三洞收紧）→ 三核判只剩门序 → 门序重构（参数门→AST 预翻译→签名表门）加
+  双违规回归测 → 四核判 F-01 关闭、达冻结条件。两实例均由 compile_contract 逐字段复现
+  （sasum 真实包快照、sgemm 草案快照）；50 测全绿；冻结面 porcelain 全程为空。
+  评审 thread `01a08a8b`。等用户冻结裁定。
+
+- **2026-09-10 · Step 2 冻结材料闭合：IR schema v1.2 + 验证器机械门 + 模板契约。**
+  三路盘点→双竞争草案→29 分歧主会话裁决（对拍口径定逐字节、基准 rev1 单调用点修订）→
+  双盲实例对拍（sasum 1 分歧证良定、sgemm 36 分歧四簇归因）→18 项攻击 8×P0 全修→
+  Codex 判修后可冻结（12 必修全关：快照闭包、FACTS 逐角色键白名单冻结、kind 映射表、
+  签名表实体化二分、golden 拼接单源、rev1 同步门 F-09、跨段不变量）。子代理连环 stall
+  （watchdog 180/600s）后验证器与模板契约收回主会话手写：ir_validator 三入口 +
+  signature_table.json + 七负例重建（全部从可编译基线单翻一轴，逐字匹配五元组）+
+  sgemm FACTS 基线草案（全门通过，Step 4 fixture 雏形）；42 测全绿。待用户冻结裁定。
+
+- **2026-09-10 · Step 1 落地：新 skill repo-task-blas-harness-gen 骨架、装载器三道门、移植与注册。**
+  四路起草 fan-out（移植规格/基座复验实跑 ALL OK/骨架与 manifest/装载器三道门）→ 主会话落盘
+  （SKILL.md 218 行、package_loader 三码停机模型、contract.py 迁入改写、harness.py 分阶段 CLI、
+  package-abi.md、manifest 六项）→ 四路对抗验证（V3 抓 3×P1 契约如实性、V4 抓预筛归属矛盾，
+  裁定预筛留装载器防 fail-open、文档侧如实标 H1 预筛）→ Codex checkpoint（xhigh 超时 resume 收
+  结论，判修后可提交）：F1 快照闭包（含 FACTS）、F2 同字节摘要、F3 复数预筛收窄、F4 tokenize
+  验标记、F5/F6 归码修正、F7 补七类不变量测试、F8 文档收窄，全关；29 测全绿。张力记录：
+  tests/ 按 AGENTS 胜过 plugin/CLAUDE.md 不建 tests；README 首表行随上游 PR。冻结面 porcelain
+  全程为空。
+
+- **2026-09-10 · harness-gen Step 0 spike 端到端走通：手写 sasum overlay 真机 A1–A5 三态全览。**
+  五路侦察 fan-out → 冻结三草案 → 双盲手写对拍合成 → Codex checkpoint（NO-GO 抓漏 CSV，
+  修后条件 GO）→ A3 真机（ascend910_93/arch22）三轮链：r1 原 golden 73/77 判不通过；
+  查明四败全是 frame float 顺序累加 golden 在 n≥2^24 停摆（上游只测到 n=10000，从未露过），
+  r2 golden 改 double 累加 77/77、性能 NO_REF 判证据不足（任务书无 GPU 对标，规格正确终态）；
+  r3 合成基线演练（显式标注）全链通过退 0。冻结面 porcelain 全程为空。产出：产物 ABI 实证、
+  golden 精度策略与 32ULP 钳位两条设计输入（进 Step 2 IR schema）、preflight fail-closed
+  实战验证。报告与证据 reports/harness-spike-20260909/（REPORT.md 索引）。
+
+- **2026-09-03 · harness-gen 方案 v4.1 定稿：独立边缘 skill，冻结 case-gen/accept。**
+  用户裁定翻案 v3 的方案 C：两个主流 skill 一行不改，新 skill repo-task-blas-harness-gen
+  独立承载 FACTS→IR→C++，产物是开发者工程 overlay（accept 只读包内 CSV+基线，落包内必
+  空跑——评审抓出的致命错位）。v4 草案过 Codex review-plan（thread `01a06656`）判 MAJOR
+  GAPS，四门槛折入定稿：overlay 契约、直接消费包内 _column_specs 加 ABI 版本门（不重建
+  列 kind，伪命题）、MVP 收窄 schema v1 的 cblas 可映射子集、sasum 手写 overlay spike
+  先行冻结产物 ABI。「半径与去重常冲突」原则段移入本线 codex-review.md；立项笔记首任务
+  表述作废并注记。前身 worktree 移植完成前不删。追问裁决（同 thread，对 ops-blas 实树）：
+  生成阶段任务包唯一输入成立——revision 绑定工程兼容配置 + 安装 preflight 两阶段，
+  spike 降为构建验证，方案 §2 已改写；worktree 缺 repos/ 用相对符号链接指主 checkout。
+  执行模型改 ultracode fan-out（12-agent workflow 设计+对抗核查），编排定稿
+  harness-gen-orchestration.md；冻结面判据升级 porcelain，sger 留出纯度机械化。
+
 - **2026-09-02 · 上游 PR !4：sparse R1 两 skill 增量提回 Justbin。**
   发现 upstream.json 基线已过时（上游 dev/skills-v0.2.0 在 90e28ff 后并入了本仓
   blas-native 线的工作并前进 36 提交），仓规 §2 的基线 patch 路径失效；核实上游

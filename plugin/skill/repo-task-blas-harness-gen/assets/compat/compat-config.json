@@ -1,0 +1,26 @@
+{
+ "_doc": "工程兼容配置：绑定 ops-blas revision 的 frame ABI 指纹与 CMake helper（compat-config.md）。生成只对本 revision 负责；安装 preflight 逐项核实况。",
+ "revision": "621aafdbac67d19169b7ec2c589ee3efaf02c679",
+ "config_version": 1,
+ "soc_arch_map": {
+  "ascend910b": "arch22",
+  "ascend910_93": "arch22",
+  "ascend950": "arch35",
+  "ascend310p": "arch20"
+ },
+ "cmake_helper": "ops_blas_add_gtest_tests",
+ "cmake_helper_file": "cmake/test.cmake",
+ "entry_header": "include/cann_ops_blas.h",
+ "frame_fingerprints": {
+  "test/frame/blas_test.h": "d1213e090fac97ec3193ca7eca9c083154efe7c8b01e9f48676bd4e87b8e7dad",
+  "test/frame/csv_loader.h": "448ed292a7ceb2dfdb4a89a0dbc8fced65aee5ed9dffb8177732055b3b98b17b",
+  "test/frame/data.h": "0daa3bd5a1c73224424a3d43838cf4bcb2bf8be23e1ca936e809a57c577fd6dc",
+  "test/frame/device.h": "43f199d6c708ddab55bbd2409b6026bcebf7de1dec9c086605325caf8adafe23",
+  "test/frame/dtype_utils.h": "303d6b3d9475cb341af4270dec7909156c36436095914e1867ff2de8c7130a74",
+  "test/frame/fill.h": "daf0e352af0b814c4bf10a443713325e1c7442d32b17f302b8c51e67d633fd96",
+  "test/frame/test_main.cpp": "f4a315f4642ad4dffb6da5a89d88cedf14457d64ab6a679acb9f13a81667e40a",
+  "test/frame/types.h": "f2626c4cfe3c8872d7b5ee9a8b50c62feca5d724c48bc21a58699cc6429395ff",
+  "test/frame/verify.h": "ffe1b9475bbdea0e31fcd69d49a397ec2c0955df1fafbc7d723612f161f241d0",
+  "cmake/test.cmake": "75b5abd0ab5a12bfa697b40df1dcec9adadcc24db1f08f2b35cdfe37dc055fac"
+ }
+}

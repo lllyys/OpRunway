@@ -1,0 +1,288 @@
+{
+ "_doc": "签名表：唯一按名数据面（contract-ir.md §10）。纯数据=prototype/args/ret；行为=kernel/status_checks/quick_return/smoke，动行为须 CONTRACT_VERSION+1 加评审。 matrix_phys：矩阵参数的物理形状换位依赖（值=trans 枚举参数名；纯数据面）。",
+ "cblas_sasum": {
+  "device_symbol": "aclblasSasum",
+  "device_signature": [
+   "aclblasHandle_t",
+   "int",
+   "const float*",
+   "int",
+   "float*"
+  ],
+  "golden_body": "builtin_kernel",
+  "accum": {
+   "dtype": "float64",
+   "narrow_to": "float32"
+  },
+  "args": [
+   {
+    "param": "n",
+    "transform": "cast_int"
+   },
+   {
+    "param": "x",
+    "transform": "pass"
+   },
+   {
+    "param": "incx",
+    "transform": "cast_int"
+   }
+  ],
+  "ret": {
+   "kind": "return_value",
+   "param": "result"
+  },
+  "behavior": {
+   "kernel_block": "    // 参考实现用 double 累加后收窄到 float。float 顺序累加（cblas_sasum）在\n    // n >= 2^24 量级会停摆（加数落进半 ULP 以下被整批丢弃），参考值可低达 8 倍，\n    // 真机 spike sasum-spike-r1 实测证实（TC_PW_070/073/075）；上游自测 n<=10000\n    // 从未触及该区间。double 有 53 位尾数，本 CSV 阶梯（n<=2^27、|x|<=10）下\n    // 累加精确到远超 32 ULP 判据。\n    double acc = 0.0;\n    for (int64_t i = 0; i < n; ++i) {\n        acc += std::fabs(static_cast<double>(x[i * incx]));\n    }\n    *result = static_cast<float>(acc);\n",
+   "status_checks": [
+    {
+     "kind": "null_check",
+     "param": "handle",
+     "status": "ACLBLAS_STATUS_NOT_INITIALIZED"
+    },
+    {
+     "kind": "null_check",
+     "param": "result",
+     "status": "ACLBLAS_STATUS_INVALID_VALUE"
+    },
+    {
+     "kind": "quick_return",
+     "cond_ast": [
+      "or",
+      [
+       "le",
+       [
+        "ref",
+        "n"
+       ],
+       [
+        "int",
+        0
+       ]
+      ],
+      [
+       "le",
+       [
+        "ref",
+        "incx"
+       ],
+       [
+        "int",
+        0
+       ]
+      ]
+     ],
+     "status": "ACLBLAS_STATUS_SUCCESS",
+     "writes_zero": true
+    },
+    {
+     "kind": "null_check",
+     "param": "x",
+     "status": "ACLBLAS_STATUS_INVALID_VALUE"
+    }
+   ],
+   "sync_fail_status": "ACLBLAS_STATUS_INTERNAL_ERROR",
+   "smoke": {
+    "null_handle": {
+     "expect": "ACLBLAS_STATUS_NOT_INITIALIZED",
+     "args": [
+      null,
+      [
+       "int",
+       5
+      ],
+      null,
+      [
+       "int",
+       1
+      ],
+      "&local"
+     ]
+    }
+   },
+   "upload_guard": null
+  },
+  "matrix_phys": {}
+ },
+ "cblas_sgemm": {
+  "device_symbol": "aclblasSgemm",
+  "device_signature": [
+   "aclblasHandle_t",
+   "aclblasOperation_t",
+   "aclblasOperation_t",
+   "int",
+   "int",
+   "int",
+   "const float*",
+   "const float*",
+   "int",
+   "const float*",
+   "int",
+   "const float*",
+   "float*",
+   "int"
+  ],
+  "_device_signature_note": "以 include/cann_ops_blas.h:397 为准；Step 4 fixture 落地时机械核",
+  "golden_body": "cblas_call",
+  "accum": null,
+  "args": [
+   {
+    "const": "CblasColMajor"
+   },
+   {
+    "param": "transa",
+    "transform": "enum_map"
+   },
+   {
+    "param": "transb",
+    "transform": "enum_map"
+   },
+   {
+    "param": "m",
+    "transform": "cast_int"
+   },
+   {
+    "param": "n",
+    "transform": "cast_int"
+   },
+   {
+    "param": "k",
+    "transform": "cast_int"
+   },
+   {
+    "param": "alpha",
+    "transform": "deref"
+   },
+   {
+    "param": "A",
+    "transform": "pass"
+   },
+   {
+    "param": "lda",
+    "transform": "cast_int"
+   },
+   {
+    "param": "B",
+    "transform": "pass"
+   },
+   {
+    "param": "ldb",
+    "transform": "cast_int"
+   },
+   {
+    "param": "beta",
+    "transform": "deref"
+   },
+   {
+    "param": "C",
+    "transform": "pass"
+   },
+   {
+    "param": "ldc",
+    "transform": "cast_int"
+   }
+  ],
+  "ret": {
+   "kind": "out_param",
+   "param": "C"
+  },
+  "behavior": {
+   "kernel_block": null,
+   "status_checks": [
+    {
+     "kind": "null_check",
+     "param": "handle",
+     "status": "ACLBLAS_STATUS_HANDLE_IS_NULLPTR"
+    },
+    {
+     "kind": "cond",
+     "cond_ast": [
+      "or",
+      [
+       "or",
+       [
+        "lt",
+        [
+         "ref",
+         "m"
+        ],
+        [
+         "int",
+         0
+        ]
+       ],
+       [
+        "lt",
+        [
+         "ref",
+         "n"
+        ],
+        [
+         "int",
+         0
+        ]
+       ]
+      ],
+      [
+       "lt",
+       [
+        "ref",
+        "k"
+       ],
+       [
+        "int",
+        0
+       ]
+      ]
+     ],
+     "status": "ACLBLAS_STATUS_INVALID_VALUE"
+    },
+    {
+     "kind": "quick_return",
+     "cond_ast": [
+      "or",
+      [
+       "eq",
+       [
+        "ref",
+        "m"
+       ],
+       [
+        "int",
+        0
+       ]
+      ],
+      [
+       "eq",
+       [
+        "ref",
+        "n"
+       ],
+       [
+        "int",
+        0
+       ]
+      ]
+     ],
+     "status": "ACLBLAS_STATUS_SUCCESS",
+     "writes_zero": false
+    }
+   ],
+   "sync_fail_status": "ACLBLAS_STATUS_INTERNAL_ERROR",
+   "smoke": null,
+   "upload_guard": {
+    "kind": "k_positive",
+    "guarded_params": [
+     "A",
+     "B"
+    ],
+    "_src": "repos/ops-blas test/gemm/arch35/gemm_npu_wrapper.h:54-60",
+    "dim": "k"
+   }
+  },
+  "matrix_phys": {
+   "A": "transa",
+   "B": "transb"
+  }
+ }
+}
