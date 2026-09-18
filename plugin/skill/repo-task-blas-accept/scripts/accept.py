@@ -7,6 +7,7 @@ from datetime import datetime
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import platform
 import shlex
@@ -15,6 +16,13 @@ import re
 import shutil
 import subprocess
 import sys
+
+# 折叠核与其常量单源引用（plan F2.3/F2.5）：FOLD_PROTOCOL_VERSION 与状态集
+# 一律 import 自 retest_fold，本文件不另写字面量。
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+import retest_fold  # noqa: E402
 
 
 ENVIRONMENT_EXIT = 3
@@ -1234,6 +1242,625 @@ def _overall_verdict(accuracy, performance, contract):
     return "通过", 0
 
 
+# ---------- 复测（A4″）：run-id 解析、轮次盘点、上下文加载与轮次有效性 ----------
+
+RETEST_SCHEMA_VERSION = 1
+# 最右 -retest-<k> 后缀（k 正整数）；base 贪婪匹配保证嵌套后缀只剥最右一段。
+RETEST_SUFFIX_RE = re.compile(r"^(?P<base>.+)-retest-(?P<round>[1-9][0-9]*)$")
+# 测量轮绑定六字段：跨轮不变量，锚在首轮 JSON（retest-protocol.md「复测轮记录」）。
+RETEST_BINDING_KEYS = (
+    "binary_sha256", "csv_sha256", "normalized_baseline_sha256",
+    "threshold", "calls_per_case", "verifier_sha256",
+)
+# 复测支持的机械判据：首轮 JSON 顶层两个扩展锚字段齐全（缺即旧版量具产物）。
+RETEST_ANCHOR_KEYS = ("normalized_baseline_sha256", "verifier_sha256")
+RETEST_INVALID_NOTE = "该轮未生效"
+NOTES_PLACEHOLDER = "<由验收 agent 填写：环境备注、与任务书的偏差、复跑与归因说明>"
+
+
+def _split_retest_run_id(run_id):
+    """run-id 解析单点：取最右 -retest-<k> 后缀（k 正整数）；无后缀返回 (run_id, None)。"""
+    match = RETEST_SUFFIX_RE.match(run_id)
+    if match:
+        return match.group("base"), int(match.group("round"))
+    return run_id, None
+
+
+def _finite_number(value):
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _as_device_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _retest_inventory(results_dir, run_id):
+    """轮次盘点：完成轮（结果 JSON 在）、中断轮（阶段目录在而 JSON 缺）、占号全集。
+
+    轮号分配单点规则：下一轮号 = 已占用轮号最大值 +1（完成轮与中断轮都占号）。"""
+    completed = {}
+    stage_dirs = {}
+    results_dir = Path(results_dir)
+    if results_dir.is_dir():
+        for path in sorted(results_dir.iterdir()):
+            name = path.name
+            if path.is_file() and name.startswith("performance_") and name.endswith(".json"):
+                base, number = _split_retest_run_id(name[len("performance_"):-len(".json")])
+                if number is not None and base == run_id:
+                    completed[number] = path
+            elif path.is_dir():
+                base, number = _split_retest_run_id(name)
+                if number is not None and base == run_id:
+                    stage_dirs[number] = path
+    warnings = []
+    for number, path in sorted(stage_dirs.items()):
+        if number not in completed and not (path / "performance").is_dir():
+            warnings.append(
+                f"复测轮 {number} 的运行目录缺 performance/ 子目录（仍占号）：{path}"
+            )
+    occupied = sorted(set(completed) | set(stage_dirs))
+    interrupted = sorted(
+        number for number, path in stage_dirs.items()
+        if number not in completed and (path / "performance").is_dir()
+    )
+    if occupied:
+        holes = sorted(set(range(1, occupied[-1] + 1)) - set(occupied))
+        if holes:
+            warnings.append(
+                "复测轮号存在空缺（只记警告，不影响折叠）：" + ", ".join(map(str, holes))
+            )
+    return {
+        "completed": completed,
+        "interrupted": interrupted,
+        "occupied": occupied,
+        "next_round": (occupied[-1] + 1) if occupied else 1,
+        "warnings": warnings,
+    }
+
+
+def _retest_anchor_view(first_payload):
+    """从首轮 JSON 提取绑定锚、缺失锚清单与设备锚。
+
+    threshold 现行落在 summary.threshold，顶层出现时以顶层为准；设备锚按 v1 规则：
+    首轮显式卡号即锚，首轮 auto 以 device_resolved 为锚。返回
+    (anchors, missing_anchors, device, device_error)。"""
+    summary = first_payload.get("summary")
+    summary = summary if isinstance(summary, dict) else {}
+    anchors = {key: first_payload.get(key) for key in RETEST_BINDING_KEYS}
+    if anchors["threshold"] is None:
+        anchors["threshold"] = summary.get("threshold")
+    missing = [key for key in RETEST_ANCHOR_KEYS if not first_payload.get(key)]
+    device = first_payload.get("device")
+    device_error = None
+    if device == "auto":
+        resolved = first_payload.get("device_resolved")
+        if isinstance(resolved, int) and not isinstance(resolved, bool):
+            device = resolved
+        else:
+            device = None
+            device_error = "首轮 device=auto 但缺 device_resolved，推不出复测应使用的物理卡"
+    elif not isinstance(device, int) or isinstance(device, bool):
+        original = first_payload.get("device")
+        device = None
+        device_error = f"首轮 device={original!r} 不是显式卡号也不是 auto"
+    return anchors, missing, device, device_error
+
+
+def _waive_round_problems(payload, expected_set):
+    problems = []
+    waivers = payload.get("waivers")
+    if not isinstance(waivers, list):
+        return ["waivers 须为列表（豁免轮必填）"]
+    seen = set()
+    for index, item in enumerate(waivers):
+        if not isinstance(item, dict):
+            problems.append(f"waivers[{index}] 不是对象")
+            continue
+        case = item.get("case")
+        reason = item.get("reason")
+        if not isinstance(case, str) or not case:
+            problems.append(f"waivers[{index}] 缺非空 case")
+            continue
+        if case in seen:
+            problems.append(f"豁免 case {case} 轮内重复")
+        seen.add(case)
+        if case not in expected_set:
+            problems.append(f"豁免 case {case} 不在性能期望集")
+        if not isinstance(reason, str) or not reason.strip():
+            problems.append(f"豁免 case {case} 的 reason 必填非空")
+    return problems
+
+
+def _measure_round_problems(payload, expected_set, anchors, device_anchor):
+    problems = []
+    warmup = payload.get("warmup")
+    if not isinstance(warmup, int) or isinstance(warmup, bool) or warmup < 0:
+        problems.append(f"warmup={warmup!r} 须为 ≥0 的整数（测量轮必填）")
+    argv = payload.get("argv")
+    if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
+        problems.append("argv 须为非空字符串数组（测量轮必填）")
+    requested = payload.get("requested_cases")
+    requested_ok = isinstance(requested, list) and requested and all(
+        isinstance(x, str) and x for x in requested
+    )
+    if not requested_ok:
+        problems.append("requested_cases 须为非空用例名数组")
+        requested = []
+    else:
+        if len(set(requested)) != len(requested):
+            problems.append("requested_cases 有重复点名")
+        unknown = sorted(set(requested) - expected_set)
+        if unknown:
+            problems.append("点名不在性能期望集：" + ", ".join(unknown))
+    cases = payload.get("cases")
+    if not isinstance(cases, list):
+        problems.append("cases 须为列表")
+        cases = []
+    records = {}
+    for index, item in enumerate(cases):
+        if not isinstance(item, dict):
+            problems.append(f"cases[{index}] 不是对象")
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            problems.append(f"cases[{index}] 缺有效 name")
+            continue
+        if name in records:
+            problems.append(f"case {name} 记录重复（每个点名恰好一条）")
+        records[name] = item
+        status = item.get("status")
+        # 先判字符串再查集合：status 为 []/{} 等不可哈希值时，frozenset 成员
+        # 查询会抛 TypeError 炸穿三个入口；类型违规按无效轮处理，不炸裁决。
+        if not isinstance(status, str) or status not in retest_fold.MEASURE_STATUSES:
+            problems.append(
+                f"case {name} 的 status={status!r} 不在合法集合 "
+                + "/".join(sorted(retest_fold.MEASURE_STATUSES))
+            )
+            continue
+        ratio = item.get("ratio")
+        kernel_us = item.get("kernel_us")
+        if status in ("PASS", "FAIL"):
+            if not _finite_number(ratio) or not _finite_number(kernel_us):
+                problems.append(
+                    f"case {name}: PASS/FAIL 必须带有限数值 ratio 与 kernel_us"
+                )
+        elif ratio is not None:
+            problems.append(f"case {name}: 证据缺口状态必须无 ratio")
+        warmup_exit = item.get("warmup_exit")
+        if warmup_exit is not None and (
+            not isinstance(warmup_exit, int) or isinstance(warmup_exit, bool)
+        ):
+            problems.append(f"case {name}: warmup_exit 须为整数或 null")
+    if requested:
+        requested_set = set(requested)
+        missing = sorted(requested_set - set(records))
+        extra = sorted(set(records) - requested_set)
+        if missing:
+            problems.append("点名 case 缺记录：" + ", ".join(missing))
+        if extra:
+            problems.append("记录含未点名 case：" + ", ".join(extra))
+    if payload.get("device_requested") == "auto":
+        problems.append("复测轮不接受 device_requested=auto")
+    for key in ("device_requested", "device_resolved"):
+        value = _as_device_number(payload.get(key))
+        if device_anchor is None:
+            problems.append(f"{key} 无法与首轮设备锚比较（首轮设备信息不完整）")
+        elif value != device_anchor:
+            problems.append(
+                f"{key}={payload.get(key)!r} 不等于首轮锚定物理卡 {device_anchor}"
+            )
+    for key in RETEST_BINDING_KEYS:
+        if payload.get(key) != anchors.get(key):
+            problems.append(
+                f"绑定字段 {key}={payload.get(key)!r} 与首轮锚值 {anchors.get(key)!r} "
+                "不一致（测的不是同一对象，数值不可比）"
+            )
+    return problems
+
+
+def _retest_round_problems(payload, number, run_id, first_payload, expected, anchors,
+                           device_anchor):
+    """轮次有效性检查表（retest-protocol.md「轮次有效性」，分 kind）。
+
+    返回 (problems, warnings)：problems 非空即无效轮（跳过折叠、醒目告警）。"""
+    problems = []
+    warnings = []
+    if not isinstance(payload, dict):
+        return ["结果 JSON 顶层不是对象"], warnings
+    if payload.get("schema_version") != RETEST_SCHEMA_VERSION:
+        problems.append(
+            f"schema_version={payload.get('schema_version')!r} 不认识"
+            f"（本版只认 {RETEST_SCHEMA_VERSION}）"
+        )
+    kind = payload.get("kind")
+    if kind not in ("measure", "waive"):
+        problems.append(f"kind={kind!r} 非法（只认 measure/waive）")
+        return problems, warnings
+    for key in ("base_run_id", "op", "family", "soc", "repo", "started", "finished"):
+        if not payload.get(key):
+            problems.append(f"缺必填字段 {key}")
+    round_value = payload.get("round")
+    if not isinstance(round_value, int) or isinstance(round_value, bool):
+        problems.append(f"round={round_value!r} 须为整数")
+    elif round_value != number:
+        warnings.append(
+            f"复测轮 {number}: JSON 内 round={round_value} 与文件名不一致，按文件名裁"
+        )
+    if payload.get("base_run_id") and payload.get("base_run_id") != run_id:
+        problems.append(
+            f"base_run_id={payload.get('base_run_id')!r} 与本次 run-id {run_id!r} 不同"
+        )
+    for key in ("op", "family", "soc", "repo"):
+        if payload.get(key) and payload.get(key) != first_payload.get(key):
+            problems.append(
+                f"{key}={payload.get(key)!r} 与首轮 {first_payload.get(key)!r} 不一致"
+            )
+    expected_set = set(expected)
+    if kind == "waive":
+        problems.extend(_waive_round_problems(payload, expected_set))
+    else:
+        problems.extend(
+            _measure_round_problems(payload, expected_set, anchors, device_anchor)
+        )
+    return problems, warnings
+
+
+def _performance_expected_sets(runtime, manifest):
+    """性能期望集与无基线名单的单点计算：manifest + 任务包 CSV 副本 + 规范化
+    基线经 _comparable_pf_names 重算。A5 与复测上下文加载器共用这一处实现。"""
+    runtime = Path(runtime)
+    csv_path = runtime / manifest["package_csv"]
+    csv_header = _csv_header(csv_path)
+    _, keys, _, references = _load_baseline(runtime / "gpu_baseline.csv", csv_header)
+    return _comparable_pf_names(csv_path, keys, references)
+
+
+def load_retest_context(workdir, run_id, expected=None, expected_error=None):
+    """retest-preflight / waive / verdict 三个入口共用的复测上下文加载器。
+
+    纯读盘不写盘，统一产出：身份字段（check.json）、性能期望集
+    （_performance_expected_sets 单点重算；verdict 已算过时经参数注入，
+    不重复计算）、首轮锚字段与设备锚、轮次盘点、完成轮的有效/无效分类。
+    三处只消费这里的结果，不各自扫文件系统，轮号逻辑只在 _retest_inventory 一处。"""
+    workdir = Path(workdir)
+    runtime = workdir / RUNTIME_DIR
+    results_dir = runtime / "results"
+    first_path = results_dir / f"performance_{run_id}.json"
+    context = {
+        "run_id": run_id,
+        "workdir": str(workdir),
+        "results_dir": str(results_dir),
+        "identity": None,
+        "identity_error": None,
+        "expected": None,
+        "expected_error": None,
+        "first_round": {
+            "path": str(first_path),
+            "payload": None,
+            "error": None,
+            "anchors": None,
+            "missing_anchors": [],
+            "device": None,
+            "device_error": None,
+        },
+        "supported": False,
+        "refusal_reasons": [],
+        "inventory": None,
+        "valid_rounds": [],
+        "invalid_rounds": [],
+        "warnings": [],
+    }
+    try:
+        check = _load_json(workdir / "check.json")
+        if not isinstance(check, dict):
+            raise ValueError("check.json 顶层不是对象")
+        context["identity"] = {
+            key: check.get(key) for key in ("op", "family", "soc", "repo")
+        }
+    except ValueError as exc:
+        context["identity_error"] = str(exc)
+    if expected is None and expected_error is None:
+        try:
+            manifest = _load_json(runtime / "manifest.json")
+            expected, _ = _performance_expected_sets(runtime, manifest)
+        except (KeyError, TypeError, OSError, UnicodeError, csv.Error, ValueError) as exc:
+            expected_error = f"无法重算性能期望集：{exc}"
+    context["expected"] = expected
+    context["expected_error"] = expected_error
+    inventory = _retest_inventory(results_dir, run_id)
+    context["inventory"] = {
+        "occupied": inventory["occupied"],
+        "interrupted": inventory["interrupted"],
+        "next_round": inventory["next_round"],
+        "completed": {
+            number: str(path) for number, path in inventory["completed"].items()
+        },
+    }
+    context["warnings"].extend(inventory["warnings"])
+    refusal = []
+    first = context["first_round"]
+    first_payload = None
+    if not first_path.is_file():
+        first["error"] = "缺首轮 performance JSON"
+        refusal.append("缺首轮 performance JSON，无从绑定复测")
+    else:
+        try:
+            first_payload = _load_json(first_path)
+            if not isinstance(first_payload, dict):
+                raise ValueError("首轮 performance JSON 顶层不是对象")
+        except ValueError as exc:
+            first_payload = None
+            first["error"] = str(exc)
+            refusal.append(f"首轮 performance JSON 不可读：{exc}")
+    if first_payload is not None:
+        anchors, missing, device, device_error = _retest_anchor_view(first_payload)
+        first["payload"] = first_payload
+        first["anchors"] = anchors
+        first["missing_anchors"] = missing
+        first["device"] = device
+        first["device_error"] = device_error
+        if missing:
+            refusal.append(
+                "首轮 JSON 缺绑定锚字段 " + ", ".join(missing)
+                + "（旧版量具产物）：该工作目录不支持复测，不做迁移"
+            )
+    if context["expected_error"]:
+        refusal.append(context["expected_error"])
+    context["refusal_reasons"] = refusal
+    context["supported"] = not refusal
+    for number in sorted(inventory["completed"]):
+        path = inventory["completed"][number]
+        if refusal:
+            context["invalid_rounds"].append({
+                "round": number,
+                "reasons": list(refusal),
+                "note": RETEST_INVALID_NOTE,
+            })
+            continue
+        try:
+            payload = _load_json(path)
+        except ValueError as exc:
+            context["invalid_rounds"].append({
+                "round": number,
+                "reasons": [f"结果 JSON 不可解析：{exc}"],
+                "note": RETEST_INVALID_NOTE,
+            })
+            continue
+        problems, warnings = _retest_round_problems(
+            payload, number, run_id, first_payload, context["expected"],
+            first["anchors"], first["device"],
+        )
+        context["warnings"].extend(warnings)
+        if problems:
+            context["invalid_rounds"].append({
+                "round": number,
+                "reasons": problems,
+                "note": RETEST_INVALID_NOTE,
+            })
+        else:
+            context["valid_rounds"].append({
+                "round": number,
+                "kind": payload["kind"],
+                "path": str(path),
+                "payload": payload,
+            })
+    return context
+
+
+def _fold_round_from_payload(number, payload):
+    """把一份轮次 JSON（或首轮 JSON）规范化成折叠核的 Round 形状。
+
+    瘦接口：只喂裁决用得上的字段——round/kind/cases/waivers，折叠输入逐例只带
+    name/status/ratio。kernel_us 等 §4.2 逐例字段一致性由加载层的轮文件记录
+    校验（_measure_round_problems）把关；device/warmup/warmup_exit 等展示字段
+    不进折叠核，报告回查一律走原始记录。"""
+    if payload.get("kind") == "waive":
+        return {
+            "round": number,
+            "kind": "waive",
+            "cases": [],
+            "waivers": [
+                {"case": item.get("case"), "reason": item.get("reason")}
+                for item in payload.get("waivers") or []
+            ],
+        }
+    return {
+        "round": number,
+        "kind": "measure",
+        "cases": [
+            {
+                "name": record.get("name"),
+                "status": record.get("status"),
+                "ratio": record.get("ratio"),
+            }
+            for record in payload.get("cases") or []
+        ],
+        "waivers": [],
+    }
+
+
+def _integrate_retest(context, performance, first_path):
+    """A5 折叠集成（spec §6/§8/§9）：把有效轮折进性能结论。
+
+    无任何复测痕迹时不动 performance（零字节兼容）；仅中断/无效轮时只挂诊断清单，
+    裁决与现行一致；存在有效轮时改写有效状态、代表记录与总性能结论。
+    返回需要归档进 intermediate/ 的复测轮文件路径列表。"""
+    inventory = context["inventory"]
+    if not inventory["occupied"]:
+        return []
+    warnings = list(context["warnings"])
+    invalid = [dict(item) for item in context["invalid_rounds"]]
+    valid_rounds = context["valid_rounds"]
+    archive = [Path(path) for _, path in sorted(inventory["completed"].items())]
+    fold_result = None
+    fold_rounds_meta = []
+    if valid_rounds and performance.get("problems") == []:
+        first_payload = context["first_round"]["payload"]
+        rounds = [_fold_round_from_payload(0, first_payload)]
+        for item in valid_rounds:
+            rounds.append(_fold_round_from_payload(item["round"], item["payload"]))
+            fold_rounds_meta.append(item)
+        try:
+            fold_result = retest_fold.fold(rounds)
+        except ValueError as exc:
+            fold_result = None
+            for item in fold_rounds_meta:
+                invalid.append({
+                    "round": item["round"],
+                    "reasons": [f"折叠输入形状违规，折叠未执行：{exc}"],
+                    "note": RETEST_INVALID_NOTE,
+                })
+            invalid.sort(key=lambda entry: entry["round"])
+            warnings.append(f"折叠输入形状违规，复测折叠未执行：{exc}")
+            fold_rounds_meta = []
+    elif valid_rounds:
+        for item in valid_rounds:
+            invalid.append({
+                "round": item["round"],
+                "reasons": ["现行证据链未过校验（证据不足），复测轮不折叠"],
+                "note": RETEST_INVALID_NOTE,
+            })
+        invalid.sort(key=lambda entry: entry["round"])
+    if fold_result is None:
+        performance["retest"] = {
+            "interrupted_rounds": inventory["interrupted"],
+            "invalid_rounds": invalid,
+        }
+        performance["retest_warnings"] = warnings
+        return archive
+    per_case = fold_result["per_case"]
+    warnings.extend(fold_result["warnings"])
+    expected = context["expected"]
+    gap = retest_fold.GAP_STATUSES
+    effective = {
+        name: per_case[name]["effective_status"]
+        for name in expected if name in per_case
+    }
+    waived_names = [name for name in expected if effective.get(name) == "WAIVED"]
+    pending = [name for name in expected if effective.get(name) != "WAIVED"]
+    if not expected:
+        # 期望集为空：NO_REF/无性能要求分叉由现行规则裁决（汇总以待裁集合为
+        # 前提），折叠不改写性能结论，只输出记录与诊断——空豁免轮不得把
+        # NO_REF 空转成通过。
+        warnings.append(
+            "性能期望集为空，折叠不改写性能结论（保留 NO_REF/无性能要求分叉）"
+        )
+    else:
+        if not pending:
+            base_status = "证据不足"
+            warnings.append("性能期望集全部豁免，豁免不能空转出通过 → 证据不足")
+        elif any(effective.get(name) in gap for name in pending):
+            base_status = "证据不足"
+        elif any(effective.get(name) == "FAIL" for name in pending):
+            base_status = "不通过"
+        else:
+            base_status = "通过"
+        performance["base_status"] = base_status
+        display = base_status
+        if performance.get("scope_caveat"):
+            display += " (scope caveat)"
+        performance["status"] = display
+    # 逐例：主表数值切到代表记录；豁免例数值留空、以参考轮另行标注（spec §6 规则 1）。
+    sequence = [(0, context["first_round"]["payload"])] + [
+        (item["round"], item["payload"]) for item in fold_rounds_meta
+    ]
+    raw_records = {}
+    history = {}
+    for number, payload in sequence:
+        if payload.get("kind") == "waive":
+            for item in payload.get("waivers") or []:
+                history.setdefault(item.get("case"), []).append({
+                    "round": number,
+                    "kind": "waive",
+                    "reason": item.get("reason"),
+                })
+            continue
+        device = payload.get("device_resolved")
+        if device is None:
+            device = payload.get("device")
+        for record in payload.get("cases") or []:
+            name = record.get("name")
+            raw_records[(number, name)] = record
+            history.setdefault(name, []).append({
+                "round": number,
+                "kind": "measure",
+                "status": record.get("status"),
+                "ratio": record.get("ratio"),
+                "kernel_us": record.get("kernel_us"),
+                "warmup": payload.get("warmup"),
+                "device_resolved": None if device is None else str(device),
+            })
+    for row in performance.get("case_rows") or []:
+        name = row.get("name")
+        info = per_case.get(name)
+        if info is None:
+            continue
+        row["effective_status"] = info["effective_status"]
+        row["representative_round"] = info["representative_round"]
+        row["reference_round"] = info["reference_round"]
+        row["waive_reason"] = info["waive_reason"]
+        row["measure_count"] = info["measure_count"]
+        row["rounds"] = history.get(name, [])
+        if info["effective_status"] == "WAIVED":
+            row["status"] = "WAIVED"
+            for key in ("kernel_us", "gpu_ms", "ratio", "spread", "verdict"):
+                row[key] = None
+        else:
+            representative = raw_records.get((info["representative_round"], name))
+            if representative is not None:
+                row["status"] = info["effective_status"]
+                for key in ("kernel_us", "gpu_ms", "ratio", "spread", "verdict"):
+                    row[key] = representative.get(key)
+    inputs = [{
+        "path": str(first_path),
+        "sha256": _sha256(first_path),
+        "round": 0,
+        "kind": "measure",
+    }]
+    for item in fold_rounds_meta:
+        inputs.append({
+            "path": item["path"],
+            "sha256": _sha256(item["path"]),
+            "round": item["round"],
+            "kind": item["kind"],
+        })
+    performance["retest"] = {
+        "fold_protocol_version": retest_fold.FOLD_PROTOCOL_VERSION,
+        "inputs": inputs,
+        "invalid_rounds": invalid,
+        "interrupted_rounds": inventory["interrupted"],
+        "waived": [
+            {
+                "case": name,
+                "round": per_case[name]["representative_round"],
+                "reason": per_case[name]["waive_reason"],
+            }
+            for name in waived_names
+        ],
+        "pass_on_retest": fold_result["pass_on_retest"],
+    }
+    performance["retest_valid_rounds"] = len(fold_rounds_meta)
+    performance["retest_warnings"] = warnings
+    # rerun.sh 的注释性证据展示用：有效测量轮的 argv 原样保留，不做可执行命令。
+    performance["retest_commands"] = [
+        {"round": item["round"], "kind": item["kind"],
+         "argv": (item["payload"].get("argv")
+                  if item["kind"] == "measure" else None)}
+        for item in fold_rounds_meta
+    ]
+    return archive
+
+
 REPORT_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "assets" / "template" / "report.md"
 
 
@@ -1281,8 +1908,137 @@ def _performance_section(performance):
         )
     if performance.get("reason"):
         lines.append(f"- 说明：{performance['reason']}")
+    retest = performance.get("retest")
+    folded = bool(retest) and "fold_protocol_version" in retest
+    if retest is not None:
+        lines.append("")
+        if folded:
+            lines.append(
+                f"- 复测折叠：有效复测轮数 {performance.get('retest_valid_rounds')}"
+                "（含豁免轮，不含首轮、中断轮与无效轮），折叠规则版本 "
+                f"{retest['fold_protocol_version']}"
+            )
+            lines.append(
+                f"- PASS(复测)：{retest['pass_on_retest']}"
+                "（首轮非 PASS 而当前有效状态为 PASS 的 case 数）"
+            )
+        else:
+            lines.append(
+                "- 复测诊断：存在复测尝试但无有效轮，本次裁决与无复测口径一致"
+            )
+        if retest.get("interrupted_rounds"):
+            lines.append(
+                "- 中断轮（占用轮号，不参与折叠）："
+                + ", ".join(str(number) for number in retest["interrupted_rounds"])
+            )
+        for item in retest.get("invalid_rounds") or []:
+            lines.append(
+                f"- 无效轮 {item['round']}（{RETEST_INVALID_NOTE}）："
+                + "；".join(item["reasons"])
+            )
+        for message in performance.get("retest_warnings") or []:
+            lines.append(f"- 复测告警：{message}")
     rows = performance.get("case_rows") or []
-    if rows:
+    if folded:
+        def _cell(value, digits=6):
+            if value is None or isinstance(value, bool):
+                return "—"
+            if isinstance(value, (int, float)):
+                return f"{value:.{digits}g}"
+            return str(value)
+
+        def _involved(row):
+            # 复测涉入 = 有复测测量，或历史里除首轮外还有别的轮（含豁免声明）。
+            return bool(row.get("measure_count")) or len(row.get("rounds") or []) > 1
+
+        main_rows = [row for row in rows if row.get("effective_status") != "WAIVED"]
+        # 截断只作用于纯首轮例：复测涉入例的有效状态/代表轮/次数必须完整可见。
+        shown = []
+        plain_shown = 0
+        plain_truncated = 0
+        for row in main_rows:
+            if _involved(row):
+                shown.append(row)
+            elif plain_shown < 30:
+                shown.append(row)
+                plain_shown += 1
+            else:
+                plain_truncated += 1
+        lines += [
+            "",
+            "| case_name | 有效状态 | 代表轮 | 复测次数 | kernel_us | gpu_ms "
+            "| ratio | spread | verdict |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for row in shown:
+            lines.append(
+                f"| {row['name']} | {row.get('effective_status')} "
+                f"| {row.get('representative_round')} | {row.get('measure_count')} "
+                f"| {_cell(row.get('kernel_us'))} | {_cell(row.get('gpu_ms'))} "
+                f"| {_cell(row.get('ratio'), 4)} | {_cell(row.get('spread'), 3)} "
+                f"| {_cell(row.get('verdict'))} |"
+            )
+        if plain_truncated:
+            lines.append(
+                f"| …其余 {plain_truncated} 条纯首轮例见 intermediate/ 的 "
+                "performance JSON（复测涉入例已完整列出） | | | | | | | | |"
+            )
+        waived_rows = [row for row in rows if row.get("effective_status") == "WAIVED"]
+        if waived_rows:
+            lines += [
+                "",
+                "豁免（退出裁决分母；完整列出，不受 30 条截断）：",
+                "",
+                "| case_name | 豁免轮 | 理由 | 参考轮 | 参考状态 | 参考 ratio "
+                "| 复测次数 |",
+                "| --- | --- | --- | --- | --- | --- | --- |",
+            ]
+            for row in waived_rows:
+                reference = None
+                if row.get("reference_round") is not None:
+                    for item in row.get("rounds") or []:
+                        if (
+                            item.get("round") == row["reference_round"]
+                            and item.get("kind") == "measure"
+                        ):
+                            reference = item
+                            break
+                lines.append(
+                    f"| {row['name']} | {row.get('representative_round')} "
+                    f"| {row.get('waive_reason')} | {_cell(row.get('reference_round'))} "
+                    f"| {_cell((reference or {}).get('status'))} "
+                    f"| {_cell((reference or {}).get('ratio'), 4)} "
+                    f"| {row.get('measure_count')} |"
+                )
+        history_rows = [
+            row for row in rows
+            if row.get("measure_count")
+            or row.get("effective_status") == "WAIVED"
+            or len(row.get("rounds") or []) > 1
+        ]
+        if history_rows:
+            lines += [
+                "",
+                "复测史（每例尝试史，含首轮 round 0；完整列出，不受 30 条截断）：",
+                "",
+                "| case_name | 轮 | kind | device | warmup | status/理由 | ratio |",
+                "| --- | --- | --- | --- | --- | --- | --- |",
+            ]
+            for row in history_rows:
+                for item in row.get("rounds") or []:
+                    if item.get("kind") == "waive":
+                        lines.append(
+                            f"| {row['name']} | {item.get('round')} | waive | — | — "
+                            f"| {item.get('reason')} | — |"
+                        )
+                    else:
+                        lines.append(
+                            f"| {row['name']} | {item.get('round')} | measure "
+                            f"| {_cell(item.get('device_resolved'))} "
+                            f"| {_cell(item.get('warmup'))} | {item.get('status')} "
+                            f"| {_cell(item.get('ratio'), 4)} |"
+                        )
+    elif rows:
         shown = rows[:30]
         lines += [
             "",
@@ -1309,10 +2065,14 @@ def _performance_section(performance):
 
 
 def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
-                  performance_path, args=None):
-    """三类产物最小布局：report/（人读）、intermediate/（执行期 JSON）、repro/（最小可复现）。"""
+                  performance_path, args=None, inter_dir=None, extra_sources=()):
+    """三类产物最小布局：report/（人读）、intermediate/（执行期 JSON）、repro/（最小可复现）。
+
+    inter_dir 给出时归档写到该临时树（由 _publish_verdict 整树替换正式
+    intermediate/，消 stale）；report/ 与 repro/ 沿用原子文件写入。"""
     report_dir = out_dir / "report"
-    inter_dir = out_dir / "intermediate"
+    public_inter = out_dir / "intermediate"
+    inter_dir = Path(inter_dir) if inter_dir is not None else public_inter
     repro_dir = out_dir / "repro"
     for directory in (report_dir, inter_dir, repro_dir):
         directory.mkdir(parents=True, exist_ok=True)
@@ -1368,6 +2128,18 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
         "- 证据：机器可读全量在 intermediate/（verdict.json 与各阶段 JSON），"
         "复现材料在 repro/（rerun.sh、cases.csv、environment.json）"
     )
+    # A2′ 人工备注（<工作目录>/verdict_notes.md）原样并入备注说明；剥净副本只用来
+    # 判空，渲染的是原文。文件缺失或内容为空时渲染占位行，与无备注的现行报告
+    # 逐字节一致。
+    notes = None
+    notes_path = Path.cwd() / "verdict_notes.md"
+    if notes_path.is_file():
+        try:
+            raw_notes = notes_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            raw_notes = ""
+        if raw_notes.strip():
+            notes = raw_notes
     values = {
         "OP": payload.get("op"),
         "VERDICT": payload.get("verdict"),
@@ -1376,6 +2148,7 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
         "SUMMARY": "\n".join(summary_lines),
         "ACCURACY_SECTION": _accuracy_section(payload["accuracy"]),
         "PERFORMANCE_SECTION": _performance_section(payload["performance"]),
+        "NOTES": notes or NOTES_PLACEHOLDER,
     }
     text = template
     for key, value in values.items():
@@ -1383,9 +2156,11 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
     _atomic_text(report_dir / "report.md", text)
     _atomic_json(inter_dir / "verdict.json", payload)
     # check.json 只归档工作目录这一份（与 _contract_summary 证据源同址），
-    # 不再收集产物目录侧同名文件，消除同名覆盖。
+    # 不再收集产物目录侧同名文件，消除同名覆盖。extra_sources 是复测轮 JSON
+    # （含无效轮，作诊断证据），文件名互不相同。
     for source in (accuracy_path, rerun_path, performance_path,
-                   runtime / "manifest.json", Path.cwd() / "check.json"):
+                   runtime / "manifest.json", Path.cwd() / "check.json",
+                   *extra_sources):
         if source and Path(source).is_file():
             shutil.copyfile(source, inter_dir / Path(source).name)
     # repro：六件副本（存在即拷）+ 用例清单含失败标注
@@ -1419,12 +2194,28 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
         manifest_cpc = (payload.get("runtime") or {}).get("calls_per_case")
         run_id = payload.get("run_id")
         rerun_sh = repro_dir / "rerun.sh"
+        # 复测轮命令只作注释性证据展示（plan F2.4）：argv 原样引用，不进入可执行步骤。
+        retest_commands = (payload.get("performance") or {}).get("retest_commands") or []
+        retest_note = ""
+        if retest_commands:
+            note_lines = ["", "# ---- 复测轮命令（注释性证据展示，不作为可执行复跑步骤）----"]
+            for item in retest_commands:
+                if item.get("argv"):
+                    note_lines.append(
+                        f"# round {item['round']}: "
+                        + " ".join(shlex.quote(x) for x in item["argv"])
+                    )
+                else:
+                    note_lines.append(
+                        f"# round {item['round']}: waive（accept.py waive 写出，无量具命令）"
+                    )
+            retest_note = "\n".join(note_lines) + "\n"
         if manifest_cpc is None:
             # 证据不足轮次可能没有完整 manifest：不生成似是而非的可执行命令。
             _atomic_text(
                 rerun_sh,
                 "#!/bin/sh\n# 本轮缺完整 runtime manifest（证据不足），不生成复跑命令。\n"
-                "# 修复证据后重跑 accept check 起链，见 run-chain.md。\n",
+                "# 修复证据后重跑 accept check 起链，见 run-chain.md。\n" + retest_note,
             )
         else:
             script = "\n".join([
@@ -1468,7 +2259,7 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
                 'echo "verdict exit=$?"',
                 "",
             ])
-            _atomic_text(rerun_sh, script)
+            _atomic_text(rerun_sh, script + retest_note)
         rerun_sh.chmod(0o755)
         uname = platform.uname()
         fingerprint = {
@@ -1494,7 +2285,102 @@ def _write_layout(out_dir, payload, package, runtime, accuracy_path, rerun_path,
         }
         _atomic_json(repro_dir / "environment.json", fingerprint)
     return {"report": str(report_dir / "report.md"),
-            "intermediate": str(inter_dir), "repro": str(repro_dir)}
+            "intermediate": str(public_inter), "repro": str(repro_dir)}
+
+
+def _print_retest_warnings(performance):
+    """无效轮与复测告警的 stderr 醒目输出（正常与提前返回两条路径共用）。"""
+    retest_info = performance.get("retest")
+    if retest_info is None:
+        return
+    for item in retest_info.get("invalid_rounds") or []:
+        print(
+            f"警告: 复测轮 {item['round']} 无效（{RETEST_INVALID_NOTE}）："
+            + "；".join(item["reasons"]),
+            file=sys.stderr,
+        )
+    for message in performance.get("retest_warnings") or []:
+        print(f"警告: {message}", file=sys.stderr)
+
+
+def _recover_intermediate(out_dir):
+    """A5 启动时处理上次发布中断的残留：有临时树→删除；有备份无正式→先恢复。
+
+    正式目录已在而备份仍在（上次成功替换后清理被打断）时，补删备份完成收尾。"""
+    out_dir = Path(out_dir)
+    if not out_dir.is_dir():
+        return
+    official = out_dir / "intermediate"
+    for orphan in sorted(out_dir.glob("intermediate.tmp-*")):
+        shutil.rmtree(orphan, ignore_errors=True)
+    backups = sorted(out_dir.glob("intermediate.bak-*"))
+    if not backups:
+        return
+    if not official.exists():
+        newest = backups.pop()
+        os.rename(newest, official)
+        print(f"提示: 从 {newest.name} 恢复上次发布中断的 intermediate/", file=sys.stderr)
+    for stale in backups:
+        shutil.rmtree(stale, ignore_errors=True)
+        # 正式树在场时这些备份是上次替换成功后清理被打断的残留：删除要出声，
+        # 不静默吃掉一份曾经的旧版本。
+        print(f"警告: 已清理上次发布残留的备份树 {stale.name}", file=sys.stderr)
+
+
+def _swap_intermediate(out_dir, tmp_dir):
+    """归档目录替换事务：成功返回时正式路径是完整新版本；失败时从备份恢复旧版本，
+    复位也失败才保留备份并给出手工复位指令。"""
+    official = out_dir / "intermediate"
+    backup = None
+    if official.exists():
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        backup = out_dir / f"intermediate.bak-{stamp}"
+        index = 0
+        while backup.exists():
+            index += 1
+            backup = out_dir / f"intermediate.bak-{stamp}-{index}"
+        os.rename(official, backup)
+    try:
+        os.rename(tmp_dir, official)
+    except OSError as exc:
+        if backup is not None:
+            try:
+                os.rename(backup, official)
+            except OSError:
+                print(
+                    f"错误: intermediate/ 替换失败且备份复位失败，旧版本保留在 {backup}；"
+                    f"手工复位：mv {backup} {official}",
+                    file=sys.stderr,
+                )
+                raise RuntimeError(f"intermediate 发布失败：{exc}") from exc
+            raise RuntimeError(f"intermediate 发布失败（旧版本已复位）：{exc}") from exc
+        raise RuntimeError(f"intermediate 发布失败：{exc}") from exc
+    if backup is not None:
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+def _publish_verdict(out_dir, payload, package, runtime, accuracy_path, rerun_path,
+                     performance_path, args, extra_sources=()):
+    """A5 派生产物发布：report/、repro/ 沿用原子文件写入；intermediate/ 整树在
+    临时目录生成后替换（消 stale，perf-protocol.md「证据保护」的归档副本规则）。"""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _recover_intermediate(out_dir)
+    tmp_dir = out_dir / f"intermediate.tmp-{os.getpid()}"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    try:
+        layout = _write_layout(
+            out_dir, payload, package, runtime, accuracy_path, rerun_path,
+            performance_path, args=args, inter_dir=tmp_dir, extra_sources=extra_sources,
+        )
+        payload["layout"] = layout
+        _atomic_json(tmp_dir / "verdict.json", payload)
+        _swap_intermediate(out_dir, tmp_dir)
+    finally:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+    return layout
 
 
 def command_verdict(args):
@@ -1540,12 +2426,17 @@ def command_verdict(args):
             "evidence": {"accuracy_json": str(accuracy_path)},
             "verdict": "证据不足",
         }
-        layout = _write_layout(
-            out_dir, payload, package, runtime, accuracy_path, rerun_path,
-            performance_path, args=args,
+        # 提前返回也不吞复测诊断（失败的尝试不许从报告消失）：loader 照常盘点，
+        # 现行证据链未过校验 → 所有轮按诊断清单挂出，不折叠。
+        retest_context = load_retest_context(Path.cwd(), args.run_id)
+        retest_archive = _integrate_retest(
+            retest_context, payload["performance"], performance_path,
         )
-        payload["layout"] = layout
-        _atomic_json(out_dir / "intermediate" / "verdict.json", payload)
+        _publish_verdict(
+            out_dir, payload, package, runtime, accuracy_path, rerun_path,
+            performance_path, args, extra_sources=retest_archive,
+        )
+        _print_retest_warnings(payload["performance"])
         print(f"证据不足: {exc}", file=sys.stderr)
         print(f"verdict.json: {out_dir / 'intermediate' / 'verdict.json'}")
         print(f"report.md: {out_dir / 'report' / 'report.md'}")
@@ -1558,16 +2449,17 @@ def command_verdict(args):
     performance_expected = []
     total_pf = None
     performance_ignored = []
+    performance_expected_error = None
     try:
         expected = _read_csv_case_names(runtime_csv, performance=False)
         total_pf = len(_read_csv_case_names(runtime_csv, performance=True))
-        csv_header = _csv_header(runtime_csv)
-        _, keys, _, references = _load_baseline(runtime / "gpu_baseline.csv", csv_header)
-        performance_expected, performance_ignored = _comparable_pf_names(
-            runtime_csv, keys, references
+        # 可比期望集走单点实现（复测上下文加载器同源），A5 独立校验语义不变。
+        performance_expected, performance_ignored = _performance_expected_sets(
+            runtime, manifest
         )
     except (OSError, UnicodeError, csv.Error, ValueError) as exc:
         evidence_problems.append(str(exc))
+        performance_expected_error = f"无法重算性能期望集：{exc}"
     deployed_sha = accuracy_payload.get("csv_sha256")
     identity = {
         "run_id": args.run_id,
@@ -1621,6 +2513,14 @@ def command_verdict(args):
                 performance["status"] = "证据不足"
                 performance["base_status"] = "证据不足"
         performance["device_resolved"] = perf_payload_head.get("device_resolved")
+    # A4″ 复测折叠：无任何复测痕迹时 _integrate_retest 不动 performance（spec §9）。
+    # 期望集经参数注入复用上面的单点计算结果，loader 不再算第二遍。
+    retest_context = load_retest_context(
+        Path.cwd(), args.run_id,
+        expected=None if performance_expected_error else performance_expected,
+        expected_error=performance_expected_error,
+    )
+    retest_archive = _integrate_retest(retest_context, performance, performance_path)
     contract_expected = {
         "package": str(package),
         "repo": str(repo),
@@ -1663,18 +2563,159 @@ def command_verdict(args):
         },
         "verdict": verdict,
     }
-    layout = _write_layout(
+    _publish_verdict(
         out_dir, payload, package, runtime, accuracy_path, rerun_path,
-        performance_path, args=args,
+        performance_path, args, extra_sources=retest_archive,
     )
-    payload["layout"] = layout
-    _atomic_json(out_dir / "intermediate" / "verdict.json", payload)
+    _print_retest_warnings(performance)
     print(f"精度: {accuracy['status']} ({accuracy['pass']}/{accuracy['expected']} PASS)")
     print(f"性能: {performance['status']}")
     print(f"结论: {verdict}")
     print(f"verdict.json: {out_dir / 'intermediate' / 'verdict.json'}")
     print(f"report.md: {out_dir / 'report' / 'report.md'}")
     return exit_code
+
+
+def command_waive(args):
+    """写出豁免轮（retest-protocol.md「复测轮记录」的 waive kind）。
+
+    只做声明不做采集：身份取工作目录 check.json，期望集经 manifest+CSV+规范化
+    基线重算，轮号取已占用最大号 +1；目标文件已存在即拒绝（原始证据不可变）。"""
+    if not RUN_ID_RE.fullmatch(args.run_id):
+        print("参数错误: run-id 格式不合法", file=sys.stderr)
+        return CONTRACT_EXIT
+    if _split_retest_run_id(args.run_id)[1] is not None:
+        print("参数错误: --run-id 应为 base run-id，不带 -retest-<k> 后缀", file=sys.stderr)
+        return CONTRACT_EXIT
+    started = _timestamp()
+    context = load_retest_context(Path.cwd(), args.run_id)
+    if context["identity_error"]:
+        print(
+            f"证据不足: 读不到工作目录身份（check.json）：{context['identity_error']}",
+            file=sys.stderr,
+        )
+        return CONTRACT_EXIT
+    if not context["supported"]:
+        for reason in context["refusal_reasons"]:
+            print(f"拒绝复测: {reason}", file=sys.stderr)
+        return CONTRACT_EXIT
+    # 写轮前核身份：check.json 与首轮锚不一致说明工作目录状态被改写过
+    # （如重跑了别的算子的 A2），此时写出的豁免轮在 A5 必然无效——先拒绝，不落文件。
+    first_payload = context["first_round"]["payload"]
+    identity = context["identity"]
+    mismatches = [
+        f"{key}: check.json={identity.get(key)!r}，首轮={first_payload.get(key)!r}"
+        for key in ("op", "family", "soc", "repo")
+        if identity.get(key) != first_payload.get(key)
+    ]
+    if mismatches:
+        print(
+            "身份不一致: 拒绝写豁免轮（check.json 与首轮 JSON 不符）："
+            + "；".join(mismatches),
+            file=sys.stderr,
+        )
+        return CONTRACT_EXIT
+    expected_set = set(context["expected"])
+    waivers = []
+    seen = set()
+    problems = []
+    for case, reason in args.waive:
+        if not case:
+            problems.append("case 名不能为空")
+            continue
+        if case in seen:
+            problems.append(f"豁免 case {case} 重复点名（轮内无重复）")
+            continue
+        seen.add(case)
+        if case not in expected_set:
+            problems.append(f"豁免 case {case} 不在性能期望集")
+        if not reason or not reason.strip():
+            problems.append(f"豁免 case {case} 的理由必填非空")
+        waivers.append({"case": case, "reason": reason})
+    if problems:
+        for message in problems:
+            print(f"参数错误: {message}", file=sys.stderr)
+        return CONTRACT_EXIT
+    number = context["inventory"]["next_round"]
+    target = Path(context["results_dir"]) / f"performance_{args.run_id}-retest-{number}.json"
+    identity = context["identity"]
+    payload = {
+        "schema_version": RETEST_SCHEMA_VERSION,
+        "base_run_id": args.run_id,
+        "round": number,
+        "kind": "waive",
+        "op": identity.get("op"),
+        "family": identity.get("family"),
+        "soc": identity.get("soc"),
+        "repo": identity.get("repo"),
+        "started": started,
+        "finished": _timestamp(),
+        "waivers": waivers,
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with target.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2, sort_keys=True)
+            stream.write("\n")
+    except FileExistsError:
+        print(f"证据保护: {target} 已存在，拒绝覆盖（原始证据不可变）", file=sys.stderr)
+        return CONTRACT_EXIT
+    for message in context["warnings"]:
+        print(f"警告: {message}", file=sys.stderr)
+    print(f"豁免轮 {number}: {len(waivers)} 条 case 已声明豁免")
+    print(f"结果: {target}")
+    print("提醒: 必须重跑 A5（accept verdict）后该轮才折入报告")
+    return 0
+
+
+def command_retest_preflight(args):
+    """复测机械预检（plan F2.6）：load_retest_context 的 JSON 视图，不写任何文件。
+
+    输出下一轮号、锚字段齐否、复测应使用的 device 与轮次诊断；锚缺失即拒绝
+    （退出 2）并提示该工作目录不支持复测。"""
+    if not RUN_ID_RE.fullmatch(args.run_id):
+        print("参数错误: run-id 格式不合法", file=sys.stderr)
+        return CONTRACT_EXIT
+    if _split_retest_run_id(args.run_id)[1] is not None:
+        print("参数错误: --run-id 应为 base run-id，不带 -retest-<k> 后缀", file=sys.stderr)
+        return CONTRACT_EXIT
+    context = load_retest_context(Path.cwd(), args.run_id)
+    first = context["first_round"]
+    view = {
+        "run_id": args.run_id,
+        "supported": context["supported"],
+        "refusal_reasons": context["refusal_reasons"],
+        "next_round": context["inventory"]["next_round"],
+        "occupied_rounds": context["inventory"]["occupied"],
+        "interrupted_rounds": context["inventory"]["interrupted"],
+        "invalid_rounds": [
+            {"round": item["round"], "reasons": item["reasons"]}
+            for item in context["invalid_rounds"]
+        ],
+        "anchor_fields": {
+            key: bool((first["payload"] or {}).get(key)) for key in RETEST_ANCHOR_KEYS
+        },
+        "device": first["device"],
+        # 首轮 auto 时复测量具必须带 --map-device（显式卡号经
+        # ASCEND_RT_VISIBLE_DEVICES 映射到逻辑 0），SKILL 流程按此布尔翻译；
+        # 首轮不可读时为 null。
+        "needs_device_map": (
+            None if first["payload"] is None
+            else first["payload"].get("device") == "auto"
+        ),
+        "device_note": (
+            first["device_error"]
+            or "复测轮 --device 必须用该物理卡（首轮显式值，或首轮 auto 的 "
+               "device_resolved）；复测不接受 auto"
+        ),
+        "expected_cases": len(context["expected"] or []),
+        "warnings": context["warnings"],
+    }
+    print(json.dumps(view, ensure_ascii=False, indent=2, sort_keys=True))
+    if not context["supported"]:
+        print("拒绝复测: 该工作目录不支持复测（见 refusal_reasons）", file=sys.stderr)
+        return CONTRACT_EXIT
+    return 0
 
 
 def _add_common(parser):
@@ -1718,6 +2759,24 @@ def _parser():
     verdict_parser.add_argument("--run-id", required=True, help="精度与性能结果的运行标识")
     verdict_parser.add_argument("--out", required=True, type=Path, help="结论输出目录")
     verdict_parser.set_defaults(function=command_verdict)
+    # 复测入口不走 _add_common：最小输入只有 run-id（豁免另加逐例理由），
+    # 其余一律从工作目录盘上恢复（retest-protocol.md「启动与恢复」）。
+    waive_parser = subparsers.add_parser(
+        "waive", help="写出豁免轮：宣布点名 case 退出性能裁决分母（复测的一种）",
+    )
+    waive_parser.add_argument("--run-id", required=True, help="首轮（base）运行标识")
+    waive_parser.add_argument(
+        "--waive", action="append", nargs=2, required=True,
+        metavar=("CASE", "REASON"),
+        help="豁免一条 case 与其理由（两个参数），可重复；case 须在性能期望集内",
+    )
+    waive_parser.set_defaults(function=command_waive)
+    preflight_parser = subparsers.add_parser(
+        "retest-preflight",
+        help="复测机械预检：下一轮号、锚字段齐否与复测应使用的 device",
+    )
+    preflight_parser.add_argument("--run-id", required=True, help="首轮（base）运行标识")
+    preflight_parser.set_defaults(function=command_retest_preflight)
     return parser
 
 

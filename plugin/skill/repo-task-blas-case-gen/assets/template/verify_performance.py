@@ -301,18 +301,62 @@ def _comparable_rows(rows, references):
     return comparable, ignored
 
 
-def _atomic_json(path, payload):
-    target = Path(path)
+def _commit_result(out_path, payload):
+    """no-clobber 结果提交：目标结果 JSON 已存在即拒绝写入并返回 False。
+
+    证据保护(原始证据一经写出不可变)的防御性双保险——主检查在起跑前。
+    机制:先写同目录唯一临时文件,再 os.link 提交——目标已存在时内核抛
+    FileExistsError,检查与提交是同一个原子操作,无 TOCTOU 窗口,不引入
+    锁协议。写入成功返回 True。"""
+    target = Path(out_path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(target.name + ".tmp")
+    temporary = target.with_name(f"{target.name}.tmp.{os.getpid()}")
     with temporary.open("w", encoding="utf-8", newline="\n") as stream:
         json.dump(payload, stream, ensure_ascii=False, indent=2, sort_keys=True)
         stream.write("\n")
-    os.replace(temporary, target)
+    try:
+        os.link(temporary, target)
+    except FileExistsError:
+        print(
+            f"RUN_ID_EXISTS: 结果 JSON 在运行期间被外部创建,不写:{target}",
+            file=sys.stderr,
+        )
+        return False
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+    return True
+
+
+def _retest_footprint(run_dir, reason, message):
+    """复测轮环境失败的中断轮足迹:确保阶段目录存在并把原因追记进 fail.log,
+    使该轮占号、可发现、原因可读。追记不覆盖——目录可能属既占轮号的先前
+    尝试,不动其既有文件。复测模式下所有不写结果 JSON 的失败退出都要经过
+    这里(_fail 与各内联失败分支统一调用)。"""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with (run_dir / "fail.log").open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(f"{_timestamp()} {reason}: {message}\n")
+
+
+RETEST_RUN_ID_RE = re.compile(r"^(?P<base>.+)-retest-(?P<round>[1-9]\d*)$")
+
+
+def _parse_retest_mode(run_id):
+    """入口一次解析复测模式,此后执行链保持单一,不在各分支重复判断后缀。
+
+    run-id 以最右 `-retest-<k>`(k 正整数,无前导零)结尾即复测轮,返回
+    {"base_run_id", "round"};否则返回 None(首轮)。贪婪匹配保证嵌套后缀
+    取最右一段(如 a-retest-2-retest-3 → base=a-retest-2, round=3)。"""
+    match = RETEST_RUN_ID_RE.fullmatch(run_id)
+    if match is None:
+        return None
+    return {"base_run_id": match.group("base"), "round": int(match.group("round"))}
 
 
 def _base_result(args, arch, started):
-    return {
+    result = {
         "run_id": args.run_id,
         "op": OP,
         "family": FAMILY,
@@ -338,9 +382,19 @@ def _base_result(args, arch, started):
         "started": started,
         "finished": None,
     }
+    # warmup 序列化矩阵:首轮显式传参(含 N=0)才出现顶层 warmup;未传不出现
+    # (零复测兼容)。复测轮无条件出现——入口已把未传归一为 0。
+    if args.warmup is not None:
+        result["warmup"] = args.warmup
+    return result
 
 
-def _environment_error(payload, out_path, reason, message):
+def _environment_error(payload, out_path, reason, message, allow_error_json=True):
+    """环境失败退出。目标结果 JSON 已存在时任何路径都不写(证据保护)。
+
+    allow_error_json=False 即复测模式:环境失败一律不写 JSON,只留目录与日志,
+    该轮成为中断轮(弃号换下一号);首轮保持默认 True,目标不存在时照常写出
+    错误 JSON。"""
     payload["summary"] = {
         "expected": len(payload["cases"]),
         "status": "证据不足",
@@ -352,9 +406,10 @@ def _environment_error(payload, out_path, reason, message):
     }
     payload["exit_code"] = ENVIRONMENT_EXIT
     payload["finished"] = _timestamp()
-    _atomic_json(out_path, payload)
+    written = allow_error_json and _commit_result(out_path, payload)
     print(f"{reason}: {message}", file=sys.stderr)
-    print(f"result: {out_path}")
+    if written:
+        print(f"result: {out_path}")
     return ENVIRONMENT_EXIT
 
 
@@ -366,8 +421,10 @@ def _run_build(args, log_path):
         f"--ops={OP}",
     ]
     if BUILD_CONVENTION["build_device_flag"]:
-        build_device = 0 if args.device == "auto" else args.device
-        command.append(f"--device={build_device}")
+        # 运行时映射(auto 或 --map-device)按逻辑 0 构建,与 auto 定卡协议同款;
+        # 否则按显式卡号构建。
+        mapped = args.device == "auto" or args.map_device
+        command.append(f"--device={0 if mapped else args.device}")
     try:
         result = subprocess.run(
             command,
@@ -665,8 +722,8 @@ def _progress(message):
     print(message, file=sys.stderr, flush=True)
 
 
-def _case_record(row, gtest_name):
-    return {
+def _case_record(row, gtest_name, warmup=None):
+    record = {
         "name": row["case_name"],
         "gtest_name": gtest_name,
         "status": None,
@@ -682,6 +739,12 @@ def _case_record(row, gtest_name):
         # 文本含 repeat 序号、msprof 退出码、执行成功证据文件路径。
         "warnings": [],
     }
+    # warmup 显式传参(含 N=0)时逐例出现 warmup_exit;未传不出现(零复测兼容)。
+    # null 的三种情形(N=0 未预热、预热超时、启动异常)靠顶层 warmup 的 N 值
+    # 与 warnings 原因文本区分。
+    if warmup is not None:
+        record["warmup_exit"] = None
+    return record
 
 
 def _with_scope_caveat(verdict, scope_caveat):
@@ -690,13 +753,49 @@ def _with_scope_caveat(verdict, scope_caveat):
 
 def _measure_case(args, binary, msprof, row, gtest_name, references, profile_root,
                   run_env=None):
-    record = _case_record(row, gtest_name)
+    record = _case_record(row, gtest_name, warmup=args.warmup)
     if run_env is None:
         run_env = dict(os.environ)
     safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", row["case_name"])
     case_dir = profile_root / safe_name
     case_dir.mkdir(parents=True, exist_ok=True)
     case_dir = case_dir.resolve()
+    # warmup(默认不预热):采样序列开始前起一个裸 gtest 预热进程(不带 msprof),
+    # 跑完再进入采样;--repeats>1 时也只预热这一次。不产样本,不改 calls_per_case
+    # 除数,不参与计分。
+    if args.warmup:
+        warmup_log = case_dir / "warmup.log"
+        code, output, problem = _run_process(
+            [
+                str(binary),
+                f"--gtest_filter={gtest_name}",
+                f"--gtest_repeat={args.warmup}",
+            ],
+            args.timeout,
+            env=run_env,
+        )
+        _write_log(warmup_log, output)
+        if problem == "TIMEOUT":
+            # 预热超时按 --timeout 记单例终态,不再采样,避免一例吃双倍超时;
+            # warmup_exit 保持 null,原因落 warnings。
+            record["warnings"].append(
+                f"warmup 预热超时(--timeout={args.timeout}s),该例记 TIMEOUT,"
+                f"未进入采样;日志 {warmup_log}"
+            )
+            record["status"] = "TIMEOUT"
+            record["verdict"] = "TIMEOUT"
+            record["message"] = f"预热超时({args.timeout}s),未进入采样"
+            return record
+        if problem:
+            # 启动异常:warmup_exit 保持 null,记 warning 后照常采样计分——
+            # 裁决单源于采集轮证据链,预热进程起不来不构成对被测对象的判断。
+            record["warnings"].append(f"warmup 启动异常({output}),照常采样计分")
+        else:
+            record["warmup_exit"] = code
+            if code != 0:
+                record["warnings"].append(
+                    f"warmup 退出码 {code},照常采样计分;日志 {warmup_log}"
+                )
     for repeat in range(1, args.repeats + 1):
         output_dir = case_dir / f"r{repeat}"
         gtest_json = case_dir / f"r{repeat}.gtest.json"
@@ -872,6 +971,11 @@ def _parser():
         "--device-pool", default=None,
         help="auto 的候选物理卡池，逗号分隔（默认 0-7）；显式卡号时给出即报错",
     )
+    parser.add_argument(
+        "--map-device", action="store_true",
+        help="仅复测模式:对显式 --device K 走 auto 同款运行时映射(K 映射为逻辑 0,"
+             "构建号取 0)。首轮为 auto 的复测由启动方按首轮绑卡方式传入;首轮传入即参数错误",
+    )
     parser.add_argument("--skip-build", action="store_true", help="复用上次编译产物")
     parser.add_argument("--build-timeout", type=int, default=1800, help="编译超时秒数")
     parser.add_argument("--timeout", type=int, default=3600, help="每个进程的超时秒数")
@@ -884,6 +988,13 @@ def _parser():
         type=int,
         default=1,
         help="一条 gtest 用例调用被测接口的次数；kernel 总时长除以它得单次调用耗时",
+    )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=None,
+        help="采样前每例预热次数 N(0-100):起一个裸 gtest --gtest_repeat=N 进程,"
+             "跑完再采样;默认不预热。显式传入(含 0)时结果 JSON 出现 warmup 与逐例 warmup_exit",
     )
     parser.add_argument("--msprof", help="覆盖 msprof 可执行文件路径")
     parser.add_argument(
@@ -922,29 +1033,83 @@ def main(argv=None):
         parser.error("timeout 与 repeats 必须为正整数")
     if args.calls_per_case <= 0:
         parser.error("--calls-per-case 必须为正整数")
+    if args.warmup is not None and not 0 <= args.warmup <= 100:
+        parser.error("--warmup 合法范围 0-100")
     results = Path(__file__).resolve().parent / "results"
     if not RUN_ID_RE.fullmatch(args.run_id):
         print("RUN_ID_INVALID: run-id 只能含字母、数字、点、下划线和连字符", file=sys.stderr)
         return ENVIRONMENT_EXIT
+    # 复测模式入口一次解析;retest 为 None 即首轮。
+    retest = _parse_retest_mode(args.run_id)
+    if retest is not None:
+        if args.out is not None:
+            parser.error("复测模式不接受 --out(结果固定落 results/performance_<run-id>.json)")
+        if requested_device == "auto":
+            parser.error("复测模式不接受 --device auto(须显式指定物理卡)")
+        if args.filter is not None:
+            parser.error("复测模式不接受 --filter(逐例点名用 --case)")
+        if not args.case:
+            parser.error("复测模式必须用 --case 点名,不可为空")
+        if len(args.case) != len(set(args.case)):
+            parser.error("复测模式 --case 点名重复")
+        if args.warmup is None:
+            # 复测轮 warmup 与逐例 warmup_exit 无条件序列化:未传按 N=0(不预热)。
+            args.warmup = 0
+    elif args.map_device:
+        parser.error("--map-device 仅复测模式有效(由启动方按首轮绑卡方式传入)")
     out_path = args.out or results / f"performance_{args.run_id}.json"
+    # 证据保护(先决):目标结果 JSON 已存在即拒绝起跑——不写任何文件、不建目录、
+    # 不编译、不探卡。既有结果一经写出不可变,重复 run-id 不覆盖。
+    if out_path.exists():
+        print(
+            f"RUN_ID_EXISTS: 结果 JSON 已存在,不写任何文件:{out_path}",
+            file=sys.stderr,
+        )
+        return ENVIRONMENT_EXIT
     arch = _arch_for_soc(args.soc)
     payload = _base_result(args, arch, _timestamp())
     run_dir = results / args.run_id / "performance"
+
+    def _fail(reason, message):
+        # 环境失败统一出口(新增失败路径一律走这里)。首轮保持现行错误 JSON
+        # 行为;复测轮不写结果 JSON,改留中断轮足迹。
+        if retest is not None:
+            _retest_footprint(run_dir, reason, message)
+        return _environment_error(
+            payload, out_path, reason, message, allow_error_json=retest is None
+        )
+
+    if retest is not None:
+        # 复测 preflight:建目录/编译/探卡之前,从完整 CSV+基线算性能期望集
+        # (不受 --case 收窄),点名必须全部落在期望集内。
+        # 兜 AttributeError:短行(缺列)数据经 DictReader 出 None,加载器对它调
+        # 字符串方法会崩;preflight 发生在建目录前,不兜就是零足迹裸 traceback。
+        # 加载器本体不改——首轮同输入的现行行为保持原样(byte-compat)。
+        package_dir = Path(__file__).resolve().parent
+        try:
+            all_rows = _read_csv_rows(package_dir / CSV_NAME, "TC_PF_")
+        except (OSError, UnicodeError, csv.Error, ValueError, AttributeError) as exc:
+            return _fail("CSV_INVALID", str(exc))
+        try:
+            _, preflight_refs, _ = _load_gpu_baseline(package_dir / "gpu_baseline.csv")
+        except (OSError, UnicodeError, csv.Error, ValueError, AttributeError) as exc:
+            return _fail("BASELINE_INVALID", str(exc))
+        expected_names = {
+            row["case_name"] for row in _comparable_rows(all_rows, preflight_refs)[0]
+        }
+        unknown = [name for name in args.case if name not in expected_names]
+        if unknown:
+            # 参数类错误(spec:未知点名属参数错误):退 2,零副作用,不占轮号。
+            parser.error("UNKNOWN_CASE: 点名不在性能期望集:" + ", ".join(unknown))
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
     except FileExistsError:
-        return _environment_error(
-            payload, out_path, "RUN_ID_EXISTS", f"运行目录已存在：{run_dir}"
-        )
+        return _fail("RUN_ID_EXISTS", f"运行目录已存在：{run_dir}")
     if arch is None:
-        return _environment_error(
-            payload, out_path, "CSV_NOT_DEPLOYED", "SoC 无 arch 映射"
-        )
+        return _fail("CSV_NOT_DEPLOYED", "SoC 无 arch 映射")
     csv_path = _find_source_csv(args.repo, arch)
     if csv_path is None:
-        return _environment_error(
-            payload, out_path, "CSV_NOT_DEPLOYED", "找不到部署 CSV"
-        )
+        return _fail("CSV_NOT_DEPLOYED", "找不到部署 CSV")
     payload["csv_path"] = str(csv_path)
     payload["csv_sha256"] = _sha256(csv_path)
     payload["calls_per_case"] = args.calls_per_case
@@ -958,15 +1123,13 @@ def main(argv=None):
     else:
         build_log = run_dir / "build.log"
         if _run_build(args, build_log) != 0:
-            return _environment_error(
-                payload, out_path, "BUILD_FAILED", f"见 {build_log}"
-            )
+            return _fail("BUILD_FAILED", f"见 {build_log}")
         reason, message = _check_build_lists(args.repo)
         if reason:
-            return _environment_error(payload, out_path, reason, message)
+            return _fail(reason, message)
     binary, binary_message, binary_reason = _find_binary(args.repo)
     if binary is None:
-        return _environment_error(payload, out_path, binary_reason, binary_message)
+        return _fail(binary_reason, binary_message)
     payload["binary"] = str(binary)
     payload["binary_sha256"] = _sha256(binary)
     resolved_device, gate_payload = _resolve_device(requested_device, device_pool)
@@ -974,21 +1137,30 @@ def main(argv=None):
     payload["device_resolved"] = resolved_device
     if resolved_device is None:
         payload["exit_code"] = IDLE_GATE_EXIT
-        _atomic_json(out_path, payload)
         final = gate_payload.get("final") or {}
-        print(
-            f"NPU_GATE_{final.get('status', 'BLOCKED')}: "
-            f"{final.get('detail', '无可用空闲卡')}（候选 {len(gate_payload['attempts'])} 张）",
-            file=sys.stderr,
+        gate_reason = f"NPU_GATE_{final.get('status', 'BLOCKED')}"
+        gate_message = (
+            f"{final.get('detail', '无可用空闲卡')}（候选 {len(gate_payload['attempts'])} 张）"
         )
+        # 与环境失败同口径:首轮照写(目标已存在即不写,证据保护);复测轮不写
+        # JSON,留中断轮足迹(原因即空闲门 BUSY/QUERY_FAILED 判定)。
+        if retest is None:
+            _commit_result(out_path, payload)
+        else:
+            _retest_footprint(run_dir, gate_reason, gate_message)
+        print(f"{gate_reason}: {gate_message}", file=sys.stderr)
         return IDLE_GATE_EXIT
     # 先读任务包 TC_PF_ 行：映射面用全集精确匹配（不筛命名前缀）。
     try:
         package_rows = _selected_rows(Path(__file__).resolve().parent / CSV_NAME, args)
     except (OSError, UnicodeError, csv.Error, ValueError) as exc:
-        return _environment_error(payload, out_path, "CSV_INVALID", str(exc))
+        return _fail("CSV_INVALID", str(exc))
     run_env = _run_environment(
-        args.repo, resolved_device, auto=(requested_device == "auto")
+        args.repo,
+        resolved_device,
+        # --map-device:显式卡号走 auto 同款重映射(复测首轮为 auto 时由启动方
+        # 传入,否则编译逻辑 0 的二进制会落在卡 0 而记录却是显式卡号)。
+        auto=(requested_device == "auto" or args.map_device),
     )
     mapping, message, reason = _list_tests(
         binary,
@@ -997,13 +1169,16 @@ def main(argv=None):
         run_env,
     )
     if reason:
-        return _environment_error(payload, out_path, reason, message)
+        return _fail(reason, message)
     baseline_path = Path(__file__).resolve().parent / "gpu_baseline.csv"
     payload["gpu_baseline_path"] = str(baseline_path)
     try:
         metadata, references, baseline_warnings = _load_gpu_baseline(baseline_path)
     except (OSError, UnicodeError, csv.Error, ValueError) as exc:
-        return _environment_error(payload, out_path, "BASELINE_INVALID", str(exc))
+        return _fail("BASELINE_INVALID", str(exc))
+    # 锚字段:对实际读取的运行时规范化基线实算哈希(不从 manifest 抄值),
+    # 只随完整结果写出,供复测轮绑定校验取锚。
+    baseline_sha256 = _sha256(baseline_path)
     payload["baseline_warnings"] = baseline_warnings
     for warning in baseline_warnings:
         _progress(f"BASELINE_WARNING: {warning}")
@@ -1011,7 +1186,7 @@ def main(argv=None):
     try:
         expected_rows, ignored = _comparable_rows(package_rows, references)
     except (OSError, UnicodeError, csv.Error, ValueError) as exc:
-        return _environment_error(payload, out_path, "CSV_INVALID", str(exc))
+        return _fail("CSV_INVALID", str(exc))
     payload["ignored_no_ref"] = ignored
     payload["gtest_filter"] = ":".join(
         mapping[row["case_name"]]
@@ -1022,9 +1197,7 @@ def main(argv=None):
     mapped_rows = [row for row in expected_rows if row["case_name"] in mapping]
     msprof = _resolve_msprof(args.msprof) if mapped_rows else None
     if mapped_rows and msprof is None:
-        return _environment_error(
-            payload, out_path, "MSPROF_NOT_FOUND", "找不到可执行的 msprof"
-        )
+        return _fail("MSPROF_NOT_FOUND", "找不到可执行的 msprof")
     payload["msprof"] = None if msprof is None else str(msprof)
     profile_root = run_dir / "prof"
     cases = []
@@ -1040,7 +1213,7 @@ def main(argv=None):
         name = row["case_name"]
         gtest_name = mapping.get(name)
         if gtest_name is None:
-            record = _case_record(row, None)
+            record = _case_record(row, None, warmup=args.warmup)
             record["status"] = "MISSING"
             record["verdict"] = "MISSING"
             record["message"] = "部署 CSV 用例未出现在 --gtest_list_tests"
@@ -1071,8 +1244,32 @@ def main(argv=None):
     summary, exit_code = _summarize(cases, timing_scope)
     payload["summary"] = summary
     payload["exit_code"] = exit_code
+    # 锚字段(复测绑定锚点,顶层加法扩展):规范化基线与量具脚本自身的 SHA-256。
+    payload["normalized_baseline_sha256"] = baseline_sha256
+    payload["verifier_sha256"] = _sha256(Path(__file__).resolve())
+    if retest is not None:
+        # 复测轮记录(schema v1):身份与轮号、点名清单、设备两字段、绑定锚里
+        # 首轮顶层缺席的 threshold、存证 argv(仅参考,不作机械判定输入)。
+        # 其余绑定字段(binary/csv/normalized_baseline/verifier 四哈希与
+        # calls_per_case)已在顶层。
+        payload["schema_version"] = 1
+        payload["base_run_id"] = retest["base_run_id"]
+        payload["round"] = retest["round"]
+        payload["kind"] = "measure"
+        payload["requested_cases"] = list(args.case)
+        payload["device_requested"] = requested_device
+        payload["threshold"] = PERF_THRESHOLD
+        payload["argv"] = [sys.argv[0], *raw_argv]
     payload["finished"] = _timestamp()
-    _atomic_json(out_path, payload)
+    if not _commit_result(out_path, payload):
+        # 起跑后目标被外部创建:结果未落盘,按环境失败退出,不打成功表格;
+        # 复测轮留中断轮足迹(竞态措辞与 _commit_result 的 stderr 一致)。
+        if retest is not None:
+            _retest_footprint(
+                run_dir, "RUN_ID_EXISTS",
+                f"结果 JSON 在运行期间被外部创建,不写:{out_path}",
+            )
+        return ENVIRONMENT_EXIT
     _print_cases(cases, summary)
     print(f"result: {out_path}")
     return exit_code
