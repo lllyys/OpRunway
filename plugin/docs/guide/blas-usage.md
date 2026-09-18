@@ -174,7 +174,7 @@ A2′ 逐项核 param.h / test.cpp / npu_wrapper.h 对照 README。
 复测上次的验收结果。
 - 工作目录：<首轮工作目录>
 - run-id：<可省，自动从工作目录恢复；多个并存时才需指明>
-- 复测 case：<名，可多个>；预热 <N 次，可省>
+- 复测 case：<名，可多个>；预热 <N 次，可省>；用 <K> 号卡 <可省，默认沿用首轮那张>
 （或：豁免 <名>，理由：<一句话>）
 做完贴合并后的 A5 结论与 report.md 路径。
 ```
@@ -187,6 +187,16 @@ A2′ 逐项核 param.h / test.cpp / npu_wrapper.h 对照 README。
 - 工作目录：/home/dev/work/accept/sger
 - 复测 case：TC_PF_012；预热 10 次
 做完贴合并后的 A5 结论与 report.md 路径。
+```
+
+实际例子（怀疑首轮那张卡有问题，换一张复测）：
+
+```text
+/repo-task-blas-accept
+复测上次的验收结果。
+- 工作目录：/home/dev/work/accept/sger
+- 复测 case：TC_PF_012；用 4 号卡
+做完贴合并后的 A5 结论与 report.md 路径，另贴这一轮实际跑在哪张卡上。
 ```
 
 实际例子（豁免一个范围外用例）：
