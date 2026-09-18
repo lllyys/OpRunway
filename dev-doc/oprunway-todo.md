@@ -2,6 +2,16 @@
 
 本页只保留尚未完成且有当前证据的工作。仓规以根 `AGENTS.md` 为准，已完成历史查 changes brief 与 Git。
 
+## P1 · blas-accept 复测（已落地 @ worktree blas-accept-retest，见 brief 2026-09-18）
+
+- [ ] Mr.0 审 diff 与 commit（三笔拆分建议：①量具证据保护+锚 ②量具 warmup
+  ③复测全量——量具复测模式+accept+折叠核+测试+文档；回滚合法序仅逆序）。
+- [ ] P7 换卡门控版：差「显式非零编译卡完整链」真机形态 + Mr.0 裁定启用；
+  实施时 profile 绑卡推导走数据不走分支，附录 A 契约已在 spec §11。
+- [ ] 上游 PR 另立项（两 blas skill 的复测面）。
+- 已知不动项：首轮短行基线（数据行缺 gpu_ms 列）在运行时加载处裸 traceback，
+  存量行为，修它属首轮行为变更（动 byte-compat），本轮明确不做。
+
 ## P0 · sparse R1（已立项，实施中 @ feature/sparse-r1）
 
 - [ ] push 前 audit 遗留（thread `01a0615a`，裁 FIX_NEEDED 无 P0，用户裁定本轮不修直接提）：

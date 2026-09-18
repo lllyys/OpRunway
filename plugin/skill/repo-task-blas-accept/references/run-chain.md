@@ -8,6 +8,7 @@
 - [A2′ 三文件](#a2-三文件)
 - [A3 精度](#a3-精度)
 - [A4 性能](#a4-性能)
+- [A4″ 性能复测](#a4-性能复测)
 - [A5 结论](#a5-结论)
 - [工程查找规则](#工程查找规则)
 - [复跑与归因](#复跑与归因)
@@ -53,10 +54,7 @@
 │       ├── accuracy_<id>-rerun.json
 │       ├── performance_<id>.json
 │       └── <id>/{accuracy,performance}/   # build.log、gtest.json、prof/
-└── verdict/                    # 缺省产物目录：A5 三类产物布局
-    ├── report/report.md        # 人读报告（三节：精度、性能、备注说明）
-    ├── intermediate/           # 执行期 JSON：verdict/accuracy/performance/check/manifest
-    └── repro/                  # 最小可复现：任务包六件副本 + cases.csv 用例清单
+└── verdict/                    # 缺省产物目录：A5 三类产物，布局见 A5
 ```
 
 **运行时包**就是 `runtime/` 这个目录：accept 把任意任务包变成量具能直接消费的形态。
@@ -175,7 +173,8 @@ cd <工作目录> && <python> -c \
    `aclblasCherk(`；一条用例的总次数 = warm-up 调用次数 + 正式调用次数，只看这一个文件。
 3. 与 A2 所填不同时用正确值重跑 A2；文件缺失时按 1 计。
 
-把读过的路径与次数（或「wrapper 缺失，按 1 计」）写进 `report/report.md` 的 `备注说明`。
+把读过的路径与次数（或「wrapper 缺失，按 1 计」）写进 `<工作目录>/verdict_notes.md`，
+A5 每次重渲染报告时原样并入 `备注说明`（见「A5 结论」）。
 
 ## A3 精度
 
@@ -213,7 +212,7 @@ cd <工作目录>/runtime && <python> verify_accuracy.py \
 
 退出 3 的错误码有八个：`RUN_ID_INVALID`、`RUN_ID_EXISTS`、`CSV_NOT_DEPLOYED`、`BUILD_FAILED`、
 `OP_SKIPPED`、`BINARY_NOT_FOUND`、`LIST_FAILED`、`DUPLICATE_CASE`。修复后换一个新 run-id
-重跑一次，A2 产物不动，旧 id 的 JSON 留着不碍事；仍 3 就停止。
+重跑一次，A2 产物不动；仍 3 就停止。
 
 输出 `results/accuracy_<id>.json`：身份字段 `run_id/op/family/soc/arch/device/repo`，
 证据字段 `binary/binary_sha256/csv_path/csv_sha256/package_csv_sha256/gtest_filter`，
@@ -247,13 +246,13 @@ cd <工作目录>/runtime && <python> verify_performance.py \
 | `--msprof <路径>` | 覆盖 msprof 可执行文件路径 | 按 perf-protocol.md 的查找顺序 |
 | `--repeats <N>` | msprof 采样次数 | 1 |
 | `--calls-per-case <N>` | 一条 gtest 用例调用被测接口的次数，kernel 总时长除以它 | 1 |
+| `--warmup <N>` | 每例采样前起一个裸 gtest 预热进程跑 N 次，0 不起进程；见 perf-protocol.md「warmup」 | 0，合法 0–100 |
 | `--run-id <id>` | 结果运行标识 | 当前时间；验收必须与 A3 相同 |
 | `--out <路径>` | 结果 JSON 路径 | `runtime/results/performance_<id>.json` |
 
-通过判据：`npu_ms` 是 msprof 采到的 kernel 单次调用耗时的中位数（毫秒），
-`ratio = gpu_ms / npu_ms`，`ratio ≥ 0.8` 为 PASS。阈值 `0.8` 由 accept 固定写进量具与
-`manifest.json` 的 `threshold`，任务包不能覆盖；`--calls-per-case` 填的值原样写进 JSON 的
-`calls_per_case`。
+通过判据：`ratio = gpu_ms / npu_ms ≥ 0.8` 为 PASS（`npu_ms` 是 msprof 采到的 kernel
+单次调用耗时中位数，毫秒）。阈值由 accept 固定写进量具与 `manifest.json` 的
+`threshold`，任务包不能覆盖；`--calls-per-case` 原样写进 JSON 的 `calls_per_case`。
 
 | 退出码 | 含义 |
 | --- | --- |
@@ -264,11 +263,25 @@ cd <工作目录>/runtime && <python> verify_performance.py \
 
 `CSV_INVALID` 指运行时包 CSV 某行列数与表头不一致，或 `TC_PF_` 行缺基线键列。退出 3 修复后
 删掉 `results/<id>/performance/` 与 `results/performance_<id>.json`，用同一个 run-id 重跑
-一次——A5 只认与精度 JSON 同 run-id 的性能 JSON，换 id 会让 A5 找不到精度证据。仍 3 就
-进 A5，A5 记 `证据不足`。
+一次——A5 只认与精度 JSON 同 run-id 的性能 JSON。仍 3 就进 A5，A5 记 `证据不足`。
 
 输出 `results/performance_<id>.json`。A5 直接取 `summary.status`，不重算 kernel 数据；
 采集序列、字段与状态见 [perf-protocol.md](perf-protocol.md)。
+
+## A4″ 性能复测
+
+首轮验收出过 A5 结论后，按用户点名追加复测轮（测量或豁免）。记录 schema、有效性、
+折叠、命令与恢复见 [retest-protocol.md](retest-protocol.md)，要点：
+
+- 最小输入：测量复测 = 工作目录 + 点名 case（可选 `--warmup`）；豁免 = 工作目录 +
+  豁免 case + 逐例理由；其余从盘上恢复。
+- 起任何复测轮前必跑 `accept.py retest-preflight --run-id <id>`（不可跳过），输出
+  轮号、锚字段与 device，拒绝即不支持复测。
+- 轮号 = 已占用轮号最大值 +1，完成轮与中断轮都占号；未产结果 JSON 的轮（中断轮）
+  弃号换下一号、不删目录，有效轮不弃号。
+- 每个复测轮跑完必须重跑 A5，报告与 verdict 才折入该轮。
+- 恢复三分支：base run-id 多候选 → 列出问用户；产物目录在工作目录外且找不到 → 要求
+  显式给出；中断轮涉及的 case 不可得 → 由用户重新点名，不阻塞。
 
 ## A5 结论
 
@@ -309,6 +322,12 @@ verdict 从 `<工作目录>/runtime/manifest.json`、`runtime/<op>_test.csv`、
 「有没有性能要求」的判据是 CSV 的 `TC_PF_` 行数（证据字段 `total_pf`），不是可比集大小
 （`comparable_pf`）：无 `TC_PF_` 行才是「通过（无性能要求）」；有 `TC_PF_` 行而全配不到
 基线时是 `NO_REF`。**NO_REF** 不能证明性能达标，所以总结论是 `证据不足`。A3 有非 PASS 时性能记 `未执行(精度未通过)`，总结论 `不通过`。
+
+存在有效复测轮时，性能状态与逐例结果由折叠得出，`performance` 段增加 `retest` 键；
+字段表、报告增量与条件输出（无复测痕迹时输出与现行一致）见
+retest-protocol.md「verdict 与报告增量」。`<工作目录>/verdict_notes.md`
+是 A2′ 人工备注的落点（自由格式）：每次 A5 重渲染时原样并入 `report/report.md` 的
+`备注说明`，文件缺失按空处理。
 
 `timing_scope` 来自基线文件的元数据行 `# timing_scope=<值>`，说明 `gpu_ms` 的计时口径：
 `kernel` 与 msprof 的 kernel 口径同类，缺省记 `unspecified`。不是 `kernel` 时性能状态追加

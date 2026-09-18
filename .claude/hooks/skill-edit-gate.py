@@ -54,9 +54,19 @@ MUTATORS = [
 ]
 
 # 派 Codex 落盘的三条路径
-# 第三支要求 `codex` 是独立的命令词：前面不能是 `.`（那是 `.codex` 目录），后面不能直接接
-# shell 操作符或重定向——`ls .codex 2>/dev/null`、`which codex | head` 都不是派单。
-CODEX_CMD = re.compile(r"codex-runner\.mjs|codex\s+exec|(?<!\.)\bcodex\b\s+(?![-;&|<>]|\d+[<>])\S")
+# 第三支要求 `codex` 处在**命令位**（行首、`;&|(` 之后、nohup/sudo/exec 或 VAR=VAL 前缀之后），
+# 且后面跟真实参数词——`which codex`、`echo "codex NOT on PATH"`、`ls .codex` 里 codex 都是
+# 参数或字符串，不是派单（2026-09-17 实录误判修正）。
+CODEX_CMD = re.compile(
+    r"codex-runner\.mjs|codex\s+exec|"
+    r"(?:^|[;&|(`]\s*|\bnohup\s+|\bsudo\s+|\bexec\s+)(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+    r"codex\b\s+(?![-;&|<>]|\d+[<>])\S",
+    re.M,
+)
+
+# 只读派单写不了盘，按「只拦改，不拦看」放行：codex-runner 的 --sandbox read-only /
+# codex exec 的 -s read-only。sandbox 拼在命令文本里，直接文本判。
+READ_ONLY_DISPATCH = re.compile(r"(?:--sandbox[= ]|-s )read-only")
 CODEX_TOOLS = ("mcp__codex-cli__codex", "mcp__codex-cli__codex-reply")
 IMPLEMENT_SKILLS = ("cc-suite:implement", "cc-suite:continue", "cc-suite:audit-fix")
 
@@ -134,9 +144,13 @@ def is_skill_change(tool, inp, text):
     if tool == "Skill":
         return inp.get("skill") in IMPLEMENT_SKILLS and mentions_skill(text)
     if tool in CODEX_TOOLS:
+        if (inp.get("sandbox") or "") == "read-only":
+            return False
         return mentions_skill(text)
     if tool == "Bash":
         if CODEX_CMD.search(text):
+            if READ_ONLY_DISPATCH.search(text):
+                return False
             return mentions_skill(text)
         return bool(SKILL_PATH.search(text)) and any(m.search(text) for m in MUTATORS)
     # Edit / Write / MultiEdit / NotebookEdit
@@ -184,6 +198,10 @@ def main():
     tool = data.get("tool_name") or ""
     inp = data.get("tool_input") or {}
     text = target_text(tool, inp)
+    # 文档承诺的开关也要认命令前缀形式：`SKILL_GATE_OFF=1 cmd …` 的赋值只存在于
+    # 命令字符串里，hook 进程的环境变量看不见它（2026-09-17 实录失灵修正）。
+    if tool == "Bash" and re.search(r"(?:^|[;&|]\s*)SKILL_GATE_OFF=(?!0\b)\S+\s", text):
+        allow()
     if not is_skill_change(tool, inp, text):
         allow()
 
