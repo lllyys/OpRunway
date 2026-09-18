@@ -2,6 +2,24 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-18 · blas-accept 性能复测与 warmup 全量落地（worktree blas-accept-retest，
+  待 Mr.0 审 diff 与 commit）。** 机制一句话：用户点名 case 复测（pass-once：任一有效
+  轮 PASS 即 PASS）、豁免（退出分母、后测撤销、MISSING 占位同撤销）、A5 折叠合并出
+  最终报告；配 `--warmup`（默认 0）、`--map-device`（auto 首轮复测的映射）、
+  `retest-preflight`/`waive` 两个新子命令、证据保护（no-clobber+中断轮 fail.log）。
+  流程：spec 六版（闭环+零上下文冷读双 READY）→ plan 四版（七维重审 READY TO BUILD）
+  → W1–W4 四路并行实施 → C1–C3 三 checkpoint（audit→fix→verify 全闭）。评审纪律
+  升级：codex-review.md 增第八维「信任成本」（Mr.0 裁定无恶意信任模型），新增评审门
+  hook 机械保证派单带八维；skill-edit-gate 三处误判修复。真机证据（A3 机）：G2 warmup
+  实验关门（两临界 FAIL 例 19 试无效应→默认 0 定案）；G1 换卡链+耗时一致性过
+  （跨卡中位差 2.04%≤3%）；Gate 0 byte-compat 双文件 BYTE-IDENTICAL；远端容器
+  816 测试全绿（87 项新增：38 折叠+42 契约+7 真产物集成）；E2E 两条链全走通——
+  显式卡链（半价基线 2 FAIL→真 msprof+warmup10 复测→豁免两级→全豁免证据不足→
+  环境失败占号+fail.log；轮 5 kill 竞态意外直证「后测撤销豁免」）与 auto 链
+  （needs_device_map=true→--map-device 复测→A5 合并）。遗留：P7 换卡门控
+  （差显式非零编译卡形态+Mr.0 裁定）；首轮短行基线裸 traceback 属存量不动；
+  上游 PR 另立项。spec/plan 转历史件在 dev-doc。
+
 - **2026-09-14 · plugin 镜像整树对齐上游 main（d2ddbc1），blas-usage 迁 dev-doc。**
   上游分支已收敛（dev/skills-v0.2.0 消失，只剩 main），基线 90e28ff→febf529
   （2026-09-10，前进 36+ 提交）：13 个 skill（新增 8 个 cann-* 与 repo-task-atk-accept）、
