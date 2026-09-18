@@ -215,7 +215,6 @@ stderr；本轮它只进性能 JSON 与 stderr，不进 A5 报告渲染。
 还记录 `kernel_us`、`samples`、`launches`、`gpu_ms`、`ratio`、`spread`、`status`、`verdict`、
 `warnings` 与诊断消息。逐例 `warnings` 是告警文本数组，与顶层 `baseline_warnings` 分开，
 在逐次判定时写入，内容含 repeat 序号、msprof 退出码与执行成功证据路径。
-这些字段共同保留原始样本、统计值和最终判定。依据：项目契约。
 
 summary 记录计数、`status`、`timing_scope`、`threshold` 与 `scope_caveat`。
 `status` 只取 `通过/不通过/NO_REF/证据不足`。依据：项目契约。
@@ -226,7 +225,7 @@ summary 记录计数、`status`、`timing_scope`、`threshold` 与 `scope_caveat
 | 1 | 至少一个可比较用例 FAIL，且没有证据缺口 | 依据：项目策略 |
 | 2 | 任一 NO_KERNEL、CRASH、TIMEOUT 或 MISSING | 依据：项目策略 |
 | 3 | CSV、构建、二进制、列表、基线或 msprof 环境问题 | 依据：项目策略 |
-| 4 | 起跑门失败：目标卡忙或查询失败（见 run-chain.md「A1 环境」）；复测下按中断轮处理，见 retest-protocol.md「启动与恢复」 | 依据：项目策略 |
+| 4 | 起跑门失败：目标卡忙或查询失败（见 run-chain.md「A1 环境」）；只查目标卡，换卡映射串里的占位卡不查（占位卡被占用的后果见 retest-protocol.md「换卡复测」）；复测下按中断轮处理，见 retest-protocol.md「启动与恢复」 | 依据：项目策略 |
 
 证据不足优先于数值失败，因为存在未完成的期望用例。依据：项目策略。
 
@@ -258,11 +257,13 @@ summary 记录计数、`status`、`timing_scope`、`threshold` 与 `scope_caveat
 **首轮**（既有 A4 产出的 `performance_<id>.json`）之后，可绑定同一 run-id 追加
 **复测轮**：**测量轮**重新采集点名 case，**豁免轮**宣布 case 退出裁决分母。复测轮的
 记录 schema、轮次有效性、折叠规则、启动流程与 verdict 增量整体收在
-[retest-protocol.md](retest-protocol.md)。与本协议的衔接点有三：复测轮 run-id 形如
+[retest-protocol.md](retest-protocol.md)。与本协议的衔接点有四：复测轮 run-id 形如
 `<id>-retest-<k>` 且不接受 `--out`；量具不读任何历史 JSON，折叠只在 A5 实现；量具在
 首轮 JSON 顶层写出 `normalized_baseline_sha256` 与 `verifier_sha256` 两个绑定锚字段
 （`threshold`、`calls_per_case`、`binary_sha256`、`csv_sha256` 首轮已有），供复测轮
-校验「测的还是同一对象」。
+校验「测的还是同一对象」；复测轮可改用别的物理卡，量具按 `--compiled-device` 与
+`--map-device` 重映射并写出 `device_compiled`，A5 据此核对采集落点（见
+retest-protocol.md「换卡复测」）。
 
 ## 验收消费规则
 

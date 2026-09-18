@@ -40,14 +40,50 @@ HARNESS_PROFILE = "@@HARNESS_PROFILE@@"
 BUILD_CONVENTION = json.loads("""@@BUILD_CONVENTION@@""")
 
 
-def _run_environment(repo, device, auto=False):
+# 物理卡取值域。这是假设，不是探测结果：默认目标机有 0-7 共 8 张卡
+# （与 `--device-pool` 的默认池同源，改一处要同时改那里）。映射串共
+# device_compiled+1 位，每位都要一个互不相同、且在该机器上真实存在的物理卡号——
+# 占位位取 0..N-1（目标卡落在其中时顺延到 N）。由此 device_compiled 最大 7，
+# 与 accept 侧换卡门的上界一致。卡数不足 N+1 的机器上换卡不成立，改用同卡复测；
+# 量具不探测卡数，也不为此加探测。
+DEVICE_CARDS = tuple(range(8))
+MAX_COMPILED_DEVICE = len(DEVICE_CARDS) - 1
+
+
+def _visible_devices_map(target, compiled_device):
+    """构造 ASCEND_RT_VISIBLE_DEVICES 串：逗号分隔的物理卡号列表，第 i 项映射为
+    进程内逻辑卡 i（A3 机实测，2026-09-18）。
+
+    二进制的 TEST_DEVICE_ID 编译期固定在逻辑卡 `compiled_device` 上，所以把目标
+    物理卡 `target` 放到第 `compiled_device` 位，它就落到这张卡：
+    compiled_device=0 时串就是 target 本身；为 N 时前 N 位填占位真实卡号
+    （`DEVICE_CARDS` 里不等于 target 的最小 N 个，升序），第 N 位填 target。
+    占位位只为把 target 顶到第 N 位，二进制不会用到它们，但它们必须在该机器上真实
+    存在——这一点由 `DEVICE_CARDS` 的默认 8 卡假设兜着，量具不探测卡数。
+    例：N=3、target=6 → "0,1,2,6"；N=3、target=1 → "0,2,3,1"。"""
+    placeholders = [card for card in DEVICE_CARDS if card != target][:compiled_device]
+    if len(placeholders) < compiled_device:
+        # 参数面已把 compiled_device 限在 0-7，走到这里即调用约定被破坏；
+        # 与其发一串长度不足的映射串让二进制落到错卡，不如就地炸掉。
+        raise ValueError(
+            f"device_compiled={compiled_device} 需要 {compiled_device} 张占位卡，"
+            f"按默认 {len(DEVICE_CARDS)} 卡假设"
+            f"（{DEVICE_CARDS[0]}-{MAX_COMPILED_DEVICE}）去掉目标卡 {target} 后"
+            f"只剩 {len(placeholders)} 张"
+        )
+    return ",".join(str(card) for card in [*placeholders, target])
+
+
+def _run_environment(repo, device, auto=False, compiled_device=0):
     """gtest/msprof 子进程环境：按惯例注入绑卡变量与运行库路径。
-    auto 模式统一用 ASCEND_RT_VISIBLE_DEVICES 把选中的物理卡映射为逻辑 0
-    （全局协议，非域特判；编译期定卡域的二进制在 auto 下按逻辑 0 构建）。"""
+    auto 模式统一用 ASCEND_RT_VISIBLE_DEVICES 把选中的物理卡映射到二进制的编译
+    逻辑卡位（全局协议，非域特判；编译期定卡域的二进制在 auto 下按逻辑 0 构建，
+    故 compiled_device 默认 0，映射串退化成该物理卡号本身）。换卡复测由启动方
+    传入非 0 的 compiled_device，串的构造见 `_visible_devices_map`。"""
     env = dict(os.environ)
     visible = BUILD_CONVENTION["visible_devices_env"]
     if auto:
-        env["ASCEND_RT_VISIBLE_DEVICES"] = str(device)
+        env["ASCEND_RT_VISIBLE_DEVICES"] = _visible_devices_map(device, compiled_device)
     elif visible:
         env[visible] = str(device)
     lib_dirs = [
@@ -421,10 +457,10 @@ def _run_build(args, log_path):
         f"--ops={OP}",
     ]
     if BUILD_CONVENTION["build_device_flag"]:
-        # 运行时映射(auto 或 --map-device)按逻辑 0 构建,与 auto 定卡协议同款;
-        # 否则按显式卡号构建。
+        # 运行时映射(auto 或 --map-device)按编译逻辑卡号构建:auto 定卡协议的
+        # --compiled-device 默认 0,换卡复测由启动方传入非 0;否则按显式卡号构建。
         mapped = args.device == "auto" or args.map_device
-        command.append(f"--device={0 if mapped else args.device}")
+        command.append(f"--device={args.compiled_device if mapped else args.device}")
     try:
         result = subprocess.run(
             command,
@@ -973,8 +1009,16 @@ def _parser():
     )
     parser.add_argument(
         "--map-device", action="store_true",
-        help="仅复测模式:对显式 --device K 走 auto 同款运行时映射(K 映射为逻辑 0,"
-             "构建号取 0)。首轮为 auto 的复测由启动方按首轮绑卡方式传入;首轮传入即参数错误",
+        help="仅复测模式:对显式 --device K 走 auto 同款运行时映射(K 落到逻辑卡 "
+             "--compiled-device 位,构建号取 --compiled-device)。首轮为 auto 的复测由"
+             "启动方按首轮绑卡方式传入;首轮传入即参数错误",
+    )
+    parser.add_argument(
+        "--compiled-device", type=int, default=0,
+        help=f"被测二进制编译期固定的进程内逻辑卡号(0-{MAX_COMPILED_DEVICE},默认 0),"
+             "非 0 时须同时置位 --map-device。由启动方按 harness profile 推导后传入,"
+             "量具只按此值构造映射串与构建号,不读历史、不判断是否换卡;"
+             "首轮传非 0 即参数错误",
     )
     parser.add_argument("--skip-build", action="store_true", help="复用上次编译产物")
     parser.add_argument("--build-timeout", type=int, default=1800, help="编译超时秒数")
@@ -1035,6 +1079,12 @@ def main(argv=None):
         parser.error("--calls-per-case 必须为正整数")
     if args.warmup is not None and not 0 <= args.warmup <= 100:
         parser.error("--warmup 合法范围 0-100")
+    if not 0 <= args.compiled_device <= MAX_COMPILED_DEVICE:
+        parser.error(
+            f"--compiled-device 合法范围 0-{MAX_COMPILED_DEVICE}:映射串共 N+1 位,"
+            f"每位都要一个互不相同的真实卡号,超出默认 {len(DEVICE_CARDS)} 卡假设;"
+            "该机器卡数不足时换卡不成立,改用同卡复测"
+        )
     results = Path(__file__).resolve().parent / "results"
     if not RUN_ID_RE.fullmatch(args.run_id):
         print("RUN_ID_INVALID: run-id 只能含字母、数字、点、下划线和连字符", file=sys.stderr)
@@ -1052,11 +1102,19 @@ def main(argv=None):
             parser.error("复测模式必须用 --case 点名,不可为空")
         if len(args.case) != len(set(args.case)):
             parser.error("复测模式 --case 点名重复")
+        if args.compiled_device and not args.map_device:
+            # 依附关系(同 --device-pool 之于 --device auto):编译逻辑卡位只在
+            # 重映射下才用得上——不置位 --map-device 时它既不进映射串也不进构建号,
+            # 留着就是个静默失效的参数,不如当场报错。
+            parser.error("--compiled-device 非 0 时必须同时置位 --map-device")
         if args.warmup is None:
             # 复测轮 warmup 与逐例 warmup_exit 无条件序列化:未传按 N=0(不预热)。
             args.warmup = 0
-    elif args.map_device:
-        parser.error("--map-device 仅复测模式有效(由启动方按首轮绑卡方式传入)")
+    elif args.map_device or args.compiled_device:
+        parser.error(
+            "--map-device 与非 0 的 --compiled-device 仅复测模式有效"
+            "(由启动方按首轮绑卡方式传入)"
+        )
     out_path = args.out or results / f"performance_{args.run_id}.json"
     # 证据保护(先决):目标结果 JSON 已存在即拒绝起跑——不写任何文件、不建目录、
     # 不编译、不探卡。既有结果一经写出不可变,重复 run-id 不覆盖。
@@ -1159,8 +1217,10 @@ def main(argv=None):
         args.repo,
         resolved_device,
         # --map-device:显式卡号走 auto 同款重映射(复测首轮为 auto 时由启动方
-        # 传入,否则编译逻辑 0 的二进制会落在卡 0 而记录却是显式卡号)。
+        # 传入,否则编译逻辑 0 的二进制会落在卡 0 而记录却是显式卡号)。换卡轮
+        # --compiled-device 非 0 时目标卡被顶到第 N 位,二进制在逻辑 N 上落到它。
         auto=(requested_device == "auto" or args.map_device),
+        compiled_device=args.compiled_device,
     )
     mapping, message, reason = _list_tests(
         binary,
@@ -1248,7 +1308,7 @@ def main(argv=None):
     payload["normalized_baseline_sha256"] = baseline_sha256
     payload["verifier_sha256"] = _sha256(Path(__file__).resolve())
     if retest is not None:
-        # 复测轮记录(schema v1):身份与轮号、点名清单、设备两字段、绑定锚里
+        # 复测轮记录(schema v1):身份与轮号、点名清单、设备字段、绑定锚里
         # 首轮顶层缺席的 threshold、存证 argv(仅参考,不作机械判定输入)。
         # 其余绑定字段(binary/csv/normalized_baseline/verifier 四哈希与
         # calls_per_case)已在顶层。
@@ -1257,7 +1317,16 @@ def main(argv=None):
         payload["round"] = retest["round"]
         payload["kind"] = "measure"
         payload["requested_cases"] = list(args.case)
+        # device_requested 记 --device(目标物理卡),device_resolved 记实际执行卡
+        # (已在空闲门处落盘,显式卡号下两者相等)。
         payload["device_requested"] = requested_device
+        # device_compiled 记本轮映射用的编译逻辑卡位,只在 --map-device 置位时出现
+        # ——没有重映射就没有这个位,写个默认 0 会谎报编译期 TEST_DEVICE_ID(首轮显式
+        # 卡 N 的同卡复测里它其实是 N),accept 的轮次有效性会照此判该轮无效。
+        # 值是启动方按 harness profile 推导后声明的,量具原样记录,不反推也不与首轮
+        # 核对(核对在 accept 一侧)。
+        if args.map_device:
+            payload["device_compiled"] = args.compiled_device
         payload["threshold"] = PERF_THRESHOLD
         payload["argv"] = [sys.argv[0], *raw_argv]
     payload["finished"] = _timestamp()

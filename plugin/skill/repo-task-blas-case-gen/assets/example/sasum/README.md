@@ -153,8 +153,9 @@ GTest JSON 与构建日志写入 `results/<run_id>/accuracy/`；阶段目录必�
 python3 verify_performance.py --repo <repo-root> --soc <soc> --device 0
 ```
 
-一条 gtest 用例只调用被测接口一次，用例里不自行预热、不重复调用；量具不做外部预热，
-重复采样仅在显式 `--repeats` 时发生。msprof 采到的是整条用例的全部 kernel，多调一次就多算一次。
+一条 gtest 用例只调用被测接口一次，用例里不自行预热、不重复调用；量具默认不做外部
+预热（`--warmup N` 显式传入正数才在采样前另起一个不计分的裸 gtest 预热进程，显式 0
+只序列化字段不起进程），重复采样仅在显式 `--repeats` 时发生。msprof 采到的是整条用例的全部 kernel，多调一次就多算一次。
 
 性能集只含本任务包 CSV 中能配到 GPU 基线的 `TC_PF_` 行，无基线的行不跑、只计数；每例
 单独执行。每例默认独立运行 1 次 msprof（`--repeats` 可增加次数），op_summary 由

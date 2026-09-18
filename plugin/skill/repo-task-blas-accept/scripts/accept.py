@@ -1255,6 +1255,21 @@ RETEST_BINDING_KEYS = (
 # 复测支持的机械判据：首轮 JSON 顶层两个扩展锚字段齐全（缺即旧版量具产物）。
 RETEST_ANCHOR_KEYS = ("normalized_baseline_sha256", "verifier_sha256")
 RETEST_INVALID_NOTE = "该轮未生效"
+# harness profile → 编译期绑卡模式。换卡复测推导 device_compiled 的唯一数据表，
+# profile 键名由 A1 探测写进 runtime manifest 的 harness_profile。加一个域加一行，
+# 不在函数里按域开分枝；未登记的 profile 推不出编译卡号，拒绝换卡（不猜）。
+#   compile_bound：build.sh 用 --device 把卡号写进编译期 TEST_DEVICE_ID，二进制只在
+#     那个逻辑卡号上跑过；auto 定卡协议按 --device=0 构建，故首轮 auto → 0。
+#   runtime_bound：TEST_DEVICE_ID 恒 0，物理卡一律经运行时映射选择，故恒 0。
+DEVICE_BIND_MODES = {"blas": "compile_bound", "sparse_frame": "runtime_bound"}
+# 编译逻辑卡号的上界，与量具模板的 MAX_COMPILED_DEVICE 同源：重映射串共
+# device_compiled+1 位互不相同的真实物理卡，物理卡域 0-7 凑不出第 9 张。推导值超界
+# 即量具换不了卡，can_switch_device 直接给 false，不留「这边说能换、量具随后拒绝」。
+MAX_COMPILED_DEVICE = 7
+# PROF 落点：msprof 在每次采样的 --output 下建 PROF_*/device_<物理卡>/，
+# 目录名里的卡号即该次采集实际落到的物理卡（A3 机实测，CANN 9.0.1）。
+PROF_DEVICE_GLOB = "prof/*/r*/PROF_*/device_*"
+PROF_DEVICE_RE = re.compile(r"^device_(\d+)$")
 NOTES_PLACEHOLDER = "<由验收 agent 填写：环境备注、与任务书的偏差、复跑与归因说明>"
 
 
@@ -1282,6 +1297,62 @@ def _as_device_number(value):
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return None
+
+
+def _derive_device_compiled(profile, first_device):
+    """按 harness profile 的绑卡模式推导复测轮应写的 `device_compiled`。
+
+    `device_compiled` 是二进制编译期 `TEST_DEVICE_ID` 的进程内逻辑卡号；换卡轮据它
+    构造重映射串（目标物理卡落在第 `device_compiled` 位）。返回
+    (device_compiled, error)：推不出时前者 None、后者给原因，换卡随之被拒——
+    绑卡模式表里没有的 profile 不猜卡号。"""
+    # profile 从 manifest 读来，类型不受本侧控制：非字符串（含 list/dict 这类不可
+    # 哈希值）一律当未登记处理——直接拿它查字典会抛 TypeError，把同卡复测一起带崩。
+    if not isinstance(profile, str) or profile not in DEVICE_BIND_MODES:
+        return None, (
+            f"harness_profile={profile!r} 不在绑卡模式表"
+            f"（{'/'.join(sorted(DEVICE_BIND_MODES))}）：推不出编译逻辑卡号，拒绝换卡"
+        )
+    mode = DEVICE_BIND_MODES[profile]
+    if mode == "runtime_bound":
+        return 0, None
+    # 两个模式显式识别，认不出的一律推导失败：表里写错模式名时换卡就此关掉，
+    # 而不是静默落回 compile_bound 按首轮卡号猜一个。
+    if mode != "compile_bound":
+        return None, (
+            f"绑卡模式 {mode!r} 未实现（只认 compile_bound/runtime_bound）："
+            "推不出编译逻辑卡号，拒绝换卡"
+        )
+    if first_device == "auto":
+        return 0, None
+    number = _as_device_number(first_device)
+    if number is None or number < 0:
+        return None, (
+            f"首轮 device={first_device!r} 既不是显式卡号也不是 auto，推不出编译逻辑卡号"
+        )
+    if number > MAX_COMPILED_DEVICE:
+        return None, (
+            f"首轮 device={number} 超出编译逻辑卡号上界 {MAX_COMPILED_DEVICE}："
+            f"重映射串凑不出 {number + 1} 张互不相同的物理卡，量具换不了卡"
+        )
+    return number, None
+
+
+def _prof_device_cards(stage_dir):
+    """该轮阶段目录下实际产生的 PROF 落点物理卡号集合。
+
+    目录或某例的 PROF 目录不存在按空集处理：TIMEOUT/MISSING/CRASH/NO_KERNEL 等
+    合法单例终态本就不产生 PROF 目录，缺目录不是设备问题。名字不合
+    `device_<数字>` 形态的目录不在核对范围内，直接忽略。"""
+    cards = set()
+    root = Path(stage_dir) / "performance"
+    if not root.is_dir():
+        return cards
+    for path in root.glob(PROF_DEVICE_GLOB):
+        match = PROF_DEVICE_RE.match(path.name)
+        if match and path.is_dir():
+            cards.add(int(match.group(1)))
+    return cards
 
 
 def _retest_inventory(results_dir, run_id):
@@ -1381,8 +1452,10 @@ def _waive_round_problems(payload, expected_set):
     return problems
 
 
-def _measure_round_problems(payload, expected_set, anchors, device_anchor):
+def _measure_round_problems(payload, expected_set, anchors, device_rules, stage_dir):
+    """测量轮的 kind 专属检查，返回 (problems, warnings)。"""
     problems = []
+    warnings = []
     warmup = payload.get("warmup")
     if not isinstance(warmup, int) or isinstance(warmup, bool) or warmup < 0:
         problems.append(f"warmup={warmup!r} 须为 ≥0 的整数（测量轮必填）")
@@ -1449,27 +1522,70 @@ def _measure_round_problems(payload, expected_set, anchors, device_anchor):
             problems.append("点名 case 缺记录：" + ", ".join(missing))
         if extra:
             problems.append("记录含未点名 case：" + ", ".join(extra))
-    if payload.get("device_requested") == "auto":
-        problems.append("复测轮不接受 device_requested=auto")
+    # 设备：两个卡号字段必须是显式非负整数，允许不等于首轮。
+    # **是否换卡只看一条判据**——本轮 `device_resolved` 与首轮默认卡是否相等，
+    # 不看 `device_compiled` 字段在不在：带 `--map-device` 的同卡复测也会写出该字段，
+    # 拿字段存在性当判据两头都错（缺字段的换卡轮漏网，带字段的同卡轮被误判）。
+    # 换卡轮才要求编译逻辑卡号推得出、字段齐全且相等；同卡轮一律放行，该字段只作记录
+    # ——推不出编译卡号只挡换卡。默认卡推不出时无从确认是不是同卡，按换卡处理。
+    resolved = None
     for key in ("device_requested", "device_resolved"):
-        value = _as_device_number(payload.get(key))
-        if device_anchor is None:
-            problems.append(f"{key} 无法与首轮设备锚比较（首轮设备信息不完整）")
-        elif value != device_anchor:
+        raw = payload.get(key)
+        value = _as_device_number(raw)
+        if raw == "auto":
+            problems.append(f"复测轮不接受 {key}=auto")
+        elif value is None or value < 0:
+            problems.append(f"{key}={raw!r} 不是显式物理卡号")
+        if key == "device_resolved":
+            resolved = value
+    known_card = resolved is not None and resolved >= 0
+    default_card = device_rules.get("default_card")
+    if known_card and (default_card is None or resolved != default_card):
+        note = (
+            "首轮默认卡推不出，无从确认本轮是否换卡（按换卡处理）"
+            if default_card is None
+            else f"本轮物理卡 {resolved} 不是首轮默认卡 {default_card}（换卡轮）"
+        )
+        compiled = payload.get("device_compiled")
+        expected_compiled = device_rules.get("compiled")
+        if expected_compiled is None:
             problems.append(
-                f"{key}={payload.get(key)!r} 不等于首轮锚定物理卡 {device_anchor}"
+                f"{note}，而"
+                + (device_rules.get("compiled_error") or "推不出编译逻辑卡号")
             )
+        elif compiled is None:
+            problems.append(f"{note}，但缺 device_compiled（应为 {expected_compiled}）")
+        elif _as_device_number(compiled) != expected_compiled:
+            problems.append(
+                f"{note}，device_compiled={compiled!r} 不等于按 harness_profile 推导的 "
+                f"{expected_compiled}（该二进制的编译期 TEST_DEVICE_ID）"
+            )
+    if known_card:
+        cards = _prof_device_cards(stage_dir)
+        off_cards = sorted(card for card in cards if card != resolved)
+        if off_cards:
+            problems.append(
+                "PROF 落点 " + "、".join(f"device_{card}" for card in off_cards)
+                + f" 与 device_resolved={resolved} 不一致（该轮的采集实际落在别的物理卡）"
+            )
+        elif not cards and any(
+            record.get("status") in ("PASS", "FAIL") for record in records.values()
+        ):
+            # 计分轮必然跑过 msprof，一个 PROF 目录都没有说明落点无从查证。
+            # 只告警不改判：产物目录可能被清理，而数值证据本身仍在 JSON 里。
+            # 合法缺口终态（TIMEOUT/MISSING/CRASH/NO_KERNEL）本就不产生目录，不告警。
+            warnings.append("有计分用例却没有 PROF 落点目录，本轮未完成设备核对")
     for key in RETEST_BINDING_KEYS:
         if payload.get(key) != anchors.get(key):
             problems.append(
                 f"绑定字段 {key}={payload.get(key)!r} 与首轮锚值 {anchors.get(key)!r} "
                 "不一致（测的不是同一对象，数值不可比）"
             )
-    return problems
+    return problems, warnings
 
 
 def _retest_round_problems(payload, number, run_id, first_payload, expected, anchors,
-                           device_anchor):
+                           device_rules):
     """轮次有效性检查表（retest-protocol.md「轮次有效性」，分 kind）。
 
     返回 (problems, warnings)：problems 非空即无效轮（跳过折叠、醒目告警）。"""
@@ -1509,9 +1625,12 @@ def _retest_round_problems(payload, number, run_id, first_payload, expected, anc
     if kind == "waive":
         problems.extend(_waive_round_problems(payload, expected_set))
     else:
-        problems.extend(
-            _measure_round_problems(payload, expected_set, anchors, device_anchor)
+        stage_dir = Path(device_rules["results_dir"]) / f"{run_id}-retest-{number}"
+        measure_problems, measure_warnings = _measure_round_problems(
+            payload, expected_set, anchors, device_rules, stage_dir
         )
+        problems.extend(measure_problems)
+        warnings.extend(f"复测轮 {number}: {text}" for text in measure_warnings)
     return problems, warnings
 
 
@@ -1544,6 +1663,8 @@ def load_retest_context(workdir, run_id, expected=None, expected_error=None):
         "identity_error": None,
         "expected": None,
         "expected_error": None,
+        "harness_profile": None,
+        "can_switch_device": False,
         "first_round": {
             "path": str(first_path),
             "payload": None,
@@ -1552,6 +1673,8 @@ def load_retest_context(workdir, run_id, expected=None, expected_error=None):
             "missing_anchors": [],
             "device": None,
             "device_error": None,
+            "device_compiled": None,
+            "device_compiled_error": None,
         },
         "supported": False,
         "refusal_reasons": [],
@@ -1569,14 +1692,31 @@ def load_retest_context(workdir, run_id, expected=None, expected_error=None):
         }
     except ValueError as exc:
         context["identity_error"] = str(exc)
+    # manifest 无条件读一次：期望集可由调用方注入，harness_profile（换卡推导的输入）
+    # 只有这一处来源。
+    manifest = None
+    manifest_error = None
+    try:
+        manifest = _load_json(runtime / "manifest.json")
+        if not isinstance(manifest, dict):
+            raise ValueError("runtime/manifest.json 顶层不是对象")
+    except ValueError as exc:
+        # 类型不符时也要把变量归 None：只记 error 会把 [] 之类留在 manifest 里，
+        # 后面的 .get() 当场抛 traceback，而不是走既有的拒绝输出。
+        manifest = None
+        manifest_error = str(exc)
     if expected is None and expected_error is None:
-        try:
-            manifest = _load_json(runtime / "manifest.json")
-            expected, _ = _performance_expected_sets(runtime, manifest)
-        except (KeyError, TypeError, OSError, UnicodeError, csv.Error, ValueError) as exc:
-            expected_error = f"无法重算性能期望集：{exc}"
+        if manifest is None:
+            expected_error = f"无法重算性能期望集：{manifest_error}"
+        else:
+            try:
+                expected, _ = _performance_expected_sets(runtime, manifest)
+            except (KeyError, TypeError, OSError, UnicodeError, csv.Error,
+                    ValueError) as exc:
+                expected_error = f"无法重算性能期望集：{exc}"
     context["expected"] = expected
     context["expected_error"] = expected_error
+    context["harness_profile"] = (manifest or {}).get("harness_profile")
     inventory = _retest_inventory(results_dir, run_id)
     context["inventory"] = {
         "occupied": inventory["occupied"],
@@ -1614,6 +1754,20 @@ def load_retest_context(workdir, run_id, expected=None, expected_error=None):
                 "首轮 JSON 缺绑定锚字段 " + ", ".join(missing)
                 + "（旧版量具产物）：该工作目录不支持复测，不做迁移"
             )
+    # 换卡能力：编译逻辑卡号推得出才允许换卡；推不出只挡换卡，不挡同卡复测。
+    if first_payload is None:
+        first["device_compiled_error"] = "首轮 JSON 不可读，推不出编译逻辑卡号"
+    elif manifest is None:
+        first["device_compiled_error"] = (
+            f"读不到 runtime/manifest.json 的 harness_profile：{manifest_error}"
+        )
+    else:
+        first["device_compiled"], first["device_compiled_error"] = (
+            _derive_device_compiled(
+                context["harness_profile"], first_payload.get("device")
+            )
+        )
+    context["can_switch_device"] = first["device_compiled"] is not None
     if context["expected_error"]:
         refusal.append(context["expected_error"])
     context["refusal_reasons"] = refusal
@@ -1638,7 +1792,12 @@ def load_retest_context(workdir, run_id, expected=None, expected_error=None):
             continue
         problems, warnings = _retest_round_problems(
             payload, number, run_id, first_payload, context["expected"],
-            first["anchors"], first["device"],
+            first["anchors"], {
+                "default_card": first["device"],
+                "compiled": first["device_compiled"],
+                "compiled_error": first["device_compiled_error"],
+                "results_dir": results_dir,
+            },
         )
         context["warnings"].extend(warnings)
         if problems:
@@ -2681,6 +2840,16 @@ def command_retest_preflight(args):
         return CONTRACT_EXIT
     context = load_retest_context(Path.cwd(), args.run_id)
     first = context["first_round"]
+    device_note = [
+        "device 是默认卡（不换卡时复测用它：首轮显式卡号，或首轮 auto 实际选中的 "
+        "device_resolved）；复测不接受 auto",
+        "换卡时 --device 给目标物理卡，另加 --map-device 与 --compiled-device "
+        "<device_compiled>；can_switch_device 为 false 时不得换卡",
+    ]
+    if first["device_error"]:
+        device_note.append(first["device_error"])
+    if first["device_compiled_error"]:
+        device_note.append(first["device_compiled_error"])
     view = {
         "run_id": args.run_id,
         "supported": context["supported"],
@@ -2696,18 +2865,18 @@ def command_retest_preflight(args):
             key: bool((first["payload"] or {}).get(key)) for key in RETEST_ANCHOR_KEYS
         },
         "device": first["device"],
-        # 首轮 auto 时复测量具必须带 --map-device（显式卡号经
-        # ASCEND_RT_VISIBLE_DEVICES 映射到逻辑 0），SKILL 流程按此布尔翻译；
+        # 二进制编译期 TEST_DEVICE_ID 的逻辑卡号，换卡时量具用它定重映射位；
+        # 推不出时为 null，此时 can_switch_device 为 false（不猜卡号）。
+        "device_compiled": first["device_compiled"],
+        "can_switch_device": context["can_switch_device"],
+        # 用默认卡时是否要带 --map-device（首轮 auto 的物理卡经
+        # ASCEND_RT_VISIBLE_DEVICES 映射到逻辑 0）；换卡轮一律要带，见 device_note。
         # 首轮不可读时为 null。
         "needs_device_map": (
             None if first["payload"] is None
             else first["payload"].get("device") == "auto"
         ),
-        "device_note": (
-            first["device_error"]
-            or "复测轮 --device 必须用该物理卡（首轮显式值，或首轮 auto 的 "
-               "device_resolved）；复测不接受 auto"
-        ),
+        "device_note": "；".join(device_note),
         "expected_cases": len(context["expected"] or []),
         "warnings": context["warnings"],
     }
