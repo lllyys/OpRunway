@@ -221,9 +221,8 @@ summary 写
 | `TIMEOUT` | 采样子进程超过超时 | 证据不足 |
 | `MISSING` | 部署 CSV 里的期望用例不在 `--gtest_list_tests` | 证据不足 |
 
-`verdict` 默认等于 `status`，只有一处不同：基线 `timing_scope` 不是 `kernel` 时
-`verdict` 追加 `(scope caveat)`。
-证据不足（`NO_KERNEL/CRASH/TIMEOUT/MISSING` 任一非零）优先于数值失败决定 summary 状态。
+`verdict` 默认等于 `status`，唯一的例外是上面那条 scope caveat。
+证据不足（`NO_KERNEL/CRASH/TIMEOUT/MISSING` 任一非零）优先于数值失败决定 summary 状态——期望用例没跑完。
 
 ## 结果与退出码
 
@@ -238,7 +237,6 @@ JSON 与 stderr，不进验收报告渲染。
 `spread`、`status`、`verdict`、`warnings` 与诊断消息。逐例 `warnings` 是告警文本数组，
 与顶层 `baseline_warnings` 分开，在逐次判定时写入，内容含 repeat 序号、msprof 退出码
 与执行成功证据路径。
-这些字段共同保留原始样本、统计值和最终判定。依据：项目契约。
 
 summary 记录计数、`status`、`timing_scope`、`threshold` 与 `scope_caveat`。
 `status` 只取 `通过/不通过/NO_REF/证据不足`。依据：项目契约。
@@ -249,9 +247,8 @@ summary 记录计数、`status`、`timing_scope`、`threshold` 与 `scope_caveat
 | 1 | 至少一个可比较用例 FAIL，且没有证据缺口 | 依据：项目策略 |
 | 2 | 任一 NO_KERNEL、CRASH、TIMEOUT 或 MISSING | 依据：项目策略 |
 | 3 | CSV、构建、二进制、列表、基线或 msprof 环境问题 | 依据：项目策略 |
-| 4 | 起跑门失败：目标卡忙或查询失败，阻塞不换卡；复测下按中断轮处理，见「复测与豁免」 | 依据：项目策略 |
+| 4 | 起跑门失败：目标卡忙或查询失败，阻塞不自动改卡；复测下按中断轮处理，见「复测与豁免」 | 依据：项目策略 |
 
-证据不足优先于数值失败，因为存在未完成的期望用例。依据：项目策略。
 
 ## 证据保护
 
@@ -303,13 +300,15 @@ k 不一致时记 warning，按文件名裁。复测轮不接受 `--out`。
   `PASS/FAIL/NO_KERNEL/CRASH/TIMEOUT/MISSING`——复测集全在性能期望集内，`NO_REF`
   出现即属工具缺陷。
 - `warmup`：本轮预热次数 N（整数 ≥0）。
-- `device_requested`（本轮请求值，不接受 `auto`）与 `device_resolved`（实际物理卡）。
-  比较基准是首轮 JSON 的既有字段：首轮 `device`（原请求）为显式卡号时，两个字段都
-  必须等于它；首轮 `device` 为 `auto` 时，两个字段必须等于首轮的 `device_resolved`
-  （auto 模式下实际选定的物理卡），量具按首轮 auto 的同一机制执行（该物理卡经
-  `ASCEND_RT_VISIBLE_DEVICES` 映射为逻辑 0）。映射由复测限定布尔参数 `--map-device`
-  触发：首轮 `auto` 时复测必须带，显式卡号时不传，首轮模式传入属参数错误。
-  不支持指定与首轮不同的物理卡。
+- `device_requested`（本轮请求的物理卡，不接受 `auto`）与 `device_resolved`（实际
+  执行卡）：允许不等于首轮的卡——复测可换卡。不换卡时用**默认卡**，即首轮 `device` 的
+  显式值，或首轮 `auto` 实际选中的 `device_resolved`；**换卡轮的判据是
+  `device_resolved` 不等于默认卡**，与带不带下个字段无关。
+- `device_compiled`（整数，`--map-device` 置位时写出）：二进制编译期
+  `TEST_DEVICE_ID` 的逻辑卡号，
+  取自 `--compiled-device N`（默认 0）。复测限定布尔参数 `--map-device` 把
+  `--device K` 映射到逻辑位 N：`ASCEND_RT_VISIBLE_DEVICES` 第 i 项即逻辑卡 i，前 N 位
+  填占位卡号、第 N 位填 K；占位卡须存在且空闲。首轮模式传 `--map-device` 属参数错误。
 - 绑定字段（跨轮不变量，必须与首轮 JSON 的对应字段一致）：`binary_sha256`、
   `csv_sha256`、`normalized_baseline_sha256`（规范化基线的哈希）、`threshold`、
   `calls_per_case`、`verifier_sha256`（量具脚本自身的 SHA-256）。
@@ -340,7 +339,7 @@ reason 逐 case 必填非空。豁免轮不含设备、绑定与 `requested_case
 | 结构 | 两者 | `schema_version` 认识、该 kind 必填字段齐全、逐例字段一致、逐例状态在合法集合内 |
 | 身份 | 两者 | `base_run_id` 与本次 run-id 相同；op/family/soc/repo 与首轮一致 |
 | 绑定 | measure | 六个绑定字段与首轮锚值一致（不一致说明测的不是同一对象，数值不可比） |
-| 设备 | measure | 两个设备字段符合「复测轮记录」的设备规则 |
+| 设备 | measure | 两个卡号字段是显式卡号；换卡轮的 `device_compiled` 在且等于推导值；PROF 输出目录名 `device_<物理卡>` 与 `device_resolved` 一致 |
 | 点名 | measure | `requested_cases` 合规，且每个点名 case 在 `cases[]` 恰好一条记录 |
 | 豁免 | waive | `waivers[]` 合规 |
 
@@ -349,7 +348,7 @@ reason 逐 case 必填非空。豁免轮不含设备、绑定与 `requested_case
 
 ### 折叠与裁决
 
-折叠由验收侧执行：把首轮与全部有效轮合并为逐例**有效状态**，报告与总结论只认它。
+折叠把首轮与全部有效轮合并为逐例**有效状态**，报告与总结论只认它。
 逐例规则：
 
 1. **豁免态**：取涉及该 case 的最后一个声明（按轮号序）——豁免轮列入即豁免，记

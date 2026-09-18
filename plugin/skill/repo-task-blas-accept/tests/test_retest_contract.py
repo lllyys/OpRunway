@@ -19,10 +19,15 @@ from unittest import mock
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = SKILL_ROOT / "scripts"
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
+TESTS_DIR = Path(__file__).resolve().parent
+for _path in (SCRIPTS, TESTS_DIR):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 import retest_fold  # noqa: E402
+# 跨 lane 往返（本文件末尾那个类）借用集成测试的真渲染脚手架，不另铺一套假 repo：
+# 那边的 RetestIntegrationCase 是纯夹具类（无 test_ 方法），继承它不会重跑它的用例。
+import test_retest_integration as integration  # noqa: E402
 
 
 def _load_accept():
@@ -140,7 +145,8 @@ class RetestContractCase(unittest.TestCase):
     # ---- 工作目录铺设 ----
 
     def build_workdir(self, pf_statuses=None, anchors=True, first_device=0,
-                      pf=None, baseline_gpu_ms="10.0", first_override=None):
+                      pf=None, baseline_gpu_ms="10.0", first_override=None,
+                      profile="blas"):
         self.pf = list(pf or DEFAULT_PF)
         pf_names = [name for name, _, _ in self.pf]
         pf_statuses = pf_statuses or {
@@ -167,7 +173,7 @@ class RetestContractCase(unittest.TestCase):
         manifest = {
             "op": OP,
             "family": FAMILY,
-            "harness_profile": "blas",
+            "harness_profile": profile,
             "perf_key": ["m", "n"],
             "threshold": 0.8,
             "calls_per_case": 1,
@@ -185,8 +191,8 @@ class RetestContractCase(unittest.TestCase):
             "package": str(self.pkg),
             "repo": str(self.repo),
             "soc": SOC,
-            "device": 0,
-            "device_pool": None,
+            "device": first_device,
+            "device_pool": None if first_device != "auto" else [0, 5],
             "calls_per_case": 1,
             "op": OP,
             "family": FAMILY,
@@ -206,8 +212,10 @@ class RetestContractCase(unittest.TestCase):
             "family": FAMILY,
             "soc": SOC,
             "arch": "arch22",
-            "device": 0,
-            "device_pool": None,
+            # 设备字段跟着首轮走：auto 首轮的工作目录里 A3/A4 都是 auto 口径，
+            # 否则 A5 的 auto 定卡闭合检查会在精度侧就判证据不足。
+            "device": first_device,
+            "device_pool": None if first_device != "auto" else [0, 5],
             "repo": str(self.repo),
             "binary_sha256": BIN_SHA,
             "csv_path": "/x/deploy.csv",
@@ -225,6 +233,9 @@ class RetestContractCase(unittest.TestCase):
             "started": TS,
             "finished": TS,
         }
+        if first_device == "auto":
+            accuracy["device_resolved"] = 5
+            accuracy["npu_gate"] = {"final": {"status": "IDLE", "device": 5}}
         accept._atomic_json(results / f"accuracy_{RUN}.json", accuracy)
         cases = []
         for name in pf_names:
@@ -314,6 +325,15 @@ class RetestContractCase(unittest.TestCase):
     def write_stage_dir(self, number):
         (self.results / f"{RUN}-retest-{number}" / "performance").mkdir(parents=True)
 
+    def write_prof_dirs(self, number, cards, case="TC_PF_1002", repeat=1):
+        """铺该轮的 PROF 落点：<阶段目录>/performance/prof/<case>/r<N>/PROF_*/device_<卡>。"""
+        stage = self.results / f"{RUN}-retest-{number}" / "performance"
+        for index, card in enumerate(cards, 1):
+            target = (stage / "prof" / case / f"r{repeat}"
+                      / f"PROF_{index:06d}_x" / f"device_{card}")
+            target.mkdir(parents=True, exist_ok=True)
+        return stage
+
     def write_waive_round(self, number, waivers):
         payload = {
             "schema_version": 1,
@@ -341,12 +361,15 @@ class RetestContractCase(unittest.TestCase):
             code = accept.main(argv)
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def run_verdict(self, out=None):
+    def run_verdict(self, out=None, device="0", device_pool=None):
         out = Path(out) if out else self.root / "verdict-out"
-        code, stdout, stderr = self.run_cli([
+        argv = [
             "verdict", "--package", str(self.pkg), "--repo", str(self.repo),
-            "--soc", SOC, "--device", "0", "--run-id", RUN, "--out", str(out),
-        ])
+            "--soc", SOC, "--device", device, "--run-id", RUN, "--out", str(out),
+        ]
+        if device_pool is not None:
+            argv += ["--device-pool", device_pool]
+        code, stdout, stderr = self.run_cli(argv)
         verdict = json.loads((out / "intermediate" / "verdict.json").read_text(encoding="utf-8"))
         report = (out / "report" / "report.md").read_text(encoding="utf-8")
         return code, verdict, report, stderr, out
@@ -356,6 +379,15 @@ class RetestContractCase(unittest.TestCase):
             if row["name"] == name:
                 return row
         raise AssertionError(f"case_rows 缺 {name}")
+
+    def _assert_diag_only(self, verdict, fragment):
+        """无效轮口径：retest 段只剩诊断两键，且原因里含给定片段。"""
+        retest = verdict["performance"]["retest"]
+        self.assertEqual(set(retest), {"interrupted_rounds", "invalid_rounds"})
+        reasons = "；".join(
+            reason for item in retest["invalid_rounds"] for reason in item["reasons"]
+        )
+        self.assertIn(fragment, reasons)
 
 
 class TestConditionalOutputMatrix(RetestContractCase):
@@ -466,14 +498,6 @@ class TestConditionalOutputMatrix(RetestContractCase):
 class TestValidityChecks(RetestContractCase):
     """轮次有效性检查表：坏轮跳过 + 醒目告警，整体裁决不翻车。"""
 
-    def _assert_diag_only(self, verdict, fragment):
-        retest = verdict["performance"]["retest"]
-        self.assertEqual(set(retest), {"interrupted_rounds", "invalid_rounds"})
-        reasons = "；".join(
-            reason for item in retest["invalid_rounds"] for reason in item["reasons"]
-        )
-        self.assertIn(fragment, reasons)
-
     def test_binding_mismatch_invalidates(self):
         self.build_workdir()
         self.write_measure_round(
@@ -484,12 +508,24 @@ class TestValidityChecks(RetestContractCase):
         self.assertEqual(verdict["verdict"], "不通过")
         self._assert_diag_only(verdict, "csv_sha256")
 
-    def test_device_mismatch_invalidates(self):
+    def test_device_auto_invalidates(self):
+        """复测轮不接受 auto：卡号必须是显式物理卡号。"""
         self.build_workdir()
-        self.write_measure_round(1, [_passed("TC_PF_1002")], device=3)
+        self.write_measure_round(
+            1, [_passed("TC_PF_1002")], overrides={"device_requested": "auto"},
+        )
         code, verdict, _, _, _ = self.run_verdict()
         self.assertEqual(code, 1)
-        self._assert_diag_only(verdict, "不等于首轮锚定物理卡")
+        self._assert_diag_only(verdict, "复测轮不接受 device_requested=auto")
+
+    def test_device_not_a_card_number_invalidates(self):
+        self.build_workdir()
+        self.write_measure_round(
+            1, [_passed("TC_PF_1002")], overrides={"device_resolved": -1},
+        )
+        code, verdict, _, _, _ = self.run_verdict()
+        self.assertEqual(code, 1)
+        self._assert_diag_only(verdict, "不是显式物理卡号")
 
     def test_rollcall_record_mismatch_invalidates(self):
         self.build_workdir()
@@ -555,6 +591,248 @@ class TestValidityChecks(RetestContractCase):
         self.assertEqual(verdict["performance"]["retest"]["pass_on_retest"], 2)
         warnings = "；".join(verdict["performance"]["retest_warnings"])
         self.assertIn("空缺", warnings)
+
+
+class TestDeviceSwitch(RetestContractCase):
+    """换卡复测：物理卡可变、device_compiled 按 profile 推导、PROF 落点核对。"""
+
+    def _preflight(self):
+        code, stdout, _ = self.run_cli(["retest-preflight", "--run-id", RUN])
+        return code, json.loads(stdout)
+
+    def test_derive_device_compiled_is_table_driven(self):
+        """推导只查 DEVICE_BIND_MODES：编译期定卡域跟首轮，运行时定卡域恒 0。"""
+        derive = accept._derive_device_compiled
+        self.assertEqual(derive("blas", "auto"), (0, None))
+        self.assertEqual(derive("blas", 6), (6, None))
+        self.assertEqual(derive("sparse_frame", 6), (0, None))
+        self.assertEqual(derive("sparse_frame", "auto"), (0, None))
+        compiled, error = derive("mystery", 6)
+        self.assertIsNone(compiled)
+        self.assertIn("绑卡模式表", error)
+        compiled, error = derive("blas", None)
+        self.assertIsNone(compiled)
+        self.assertIn("推不出编译逻辑卡号", error)
+
+    def test_switched_device_round_folds_and_shows_card(self):
+        """换卡轮照常折叠，复测史逐轮显示实际执行卡。"""
+        self.build_workdir()
+        self.write_measure_round(
+            1, [_passed("TC_PF_1002"), _passed("TC_PF_1003")],
+            device=6, overrides={"device_compiled": 0},
+        )
+        self.write_prof_dirs(1, [6], case="TC_PF_1002")
+        self.write_prof_dirs(1, [6], case="TC_PF_1003")
+        code, verdict, report, _, _ = self.run_verdict()
+        self.assertEqual(code, 0)
+        self.assertEqual(verdict["performance"]["retest"]["pass_on_retest"], 2)
+        row = self.case_row(verdict, "TC_PF_1002")
+        self.assertEqual(row["representative_round"], 1)
+        self.assertEqual(
+            [item["device_resolved"] for item in row["rounds"]], ["0", "6"],
+        )
+        self.assertIn("| TC_PF_1002 | 1 | measure | 6 | 0 | PASS", report)
+
+    def test_device_compiled_mismatch_invalidates(self):
+        """blas + 首轮显式卡 0 → 编译逻辑卡号 0；轮里写 3 即无效。"""
+        self.build_workdir()
+        self.write_measure_round(
+            1, [_passed("TC_PF_1002")], device=6, overrides={"device_compiled": 3},
+        )
+        self.write_prof_dirs(1, [6])
+        code, verdict, _, _, _ = self.run_verdict()
+        self.assertEqual(code, 1)
+        self._assert_diag_only(verdict, "不等于按 harness_profile 推导的 0")
+
+    def test_prof_landing_mismatch_invalidates(self):
+        self.build_workdir()
+        self.write_measure_round(
+            1, [_passed("TC_PF_1002")], device=6, overrides={"device_compiled": 0},
+        )
+        self.write_prof_dirs(1, [0])
+        code, verdict, _, _, _ = self.run_verdict()
+        self.assertEqual(code, 1)
+        self._assert_diag_only(
+            verdict, "PROF 落点 device_0 与 device_resolved=6 不一致",
+        )
+
+    def test_missing_prof_dir_keeps_round_valid(self):
+        """合法单例终态不产生 PROF 目录，缺目录不改判该轮无效。"""
+        self.build_workdir()
+        self.write_measure_round(
+            1, [_pf_case("TC_PF_1002", "TIMEOUT")], device=6,
+            overrides={"device_compiled": 0},
+        )
+        self.write_stage_dir(1)
+        _, verdict, _, _, _ = self.run_verdict()
+        retest = verdict["performance"]["retest"]
+        self.assertEqual(retest["invalid_rounds"], [])
+        self.assertIn("fold_protocol_version", retest)
+        self.assertEqual(self.case_row(verdict, "TC_PF_1002")["measure_count"], 1)
+        # 缺口终态本就不产生 PROF 目录，不告警。
+        self.assertNotIn(
+            "未完成设备核对", "；".join(verdict["performance"]["retest_warnings"]),
+        )
+
+    def test_preflight_compiled_from_explicit_first_card(self):
+        self.build_workdir(first_device=3)
+        code, view = self._preflight()
+        self.assertEqual(code, 0)
+        self.assertEqual(view["device"], 3)
+        self.assertEqual(view["device_compiled"], 3)
+        self.assertIs(view["can_switch_device"], True)
+        self.assertIn("默认卡", view["device_note"])
+
+    def test_preflight_compiled_zero_when_first_auto(self):
+        self.build_workdir(first_device="auto")
+        _, view = self._preflight()
+        self.assertEqual(view["device"], 5)
+        self.assertEqual(view["device_compiled"], 0)
+        self.assertIs(view["can_switch_device"], True)
+
+    def test_preflight_sparse_frame_compiled_always_zero(self):
+        self.build_workdir(first_device=3, profile="sparse_frame")
+        _, view = self._preflight()
+        self.assertEqual(view["device"], 3)
+        self.assertEqual(view["device_compiled"], 0)
+
+    def test_unknown_profile_refuses_switch(self):
+        """未登记 profile：换卡轮判无效（推不出编译卡号），preflight 说不能换。"""
+        self.build_workdir(profile="mystery")
+        code, view = self._preflight()
+        self.assertEqual(code, 0)
+        self.assertIsNone(view["device_compiled"])
+        self.assertIs(view["can_switch_device"], False)
+        self.assertIn("拒绝换卡", view["device_note"])
+        self.write_measure_round(
+            1, [_passed("TC_PF_1002")], device=6, overrides={"device_compiled": 0},
+        )
+        self.write_prof_dirs(1, [6])
+        code, verdict, _, _, _ = self.run_verdict()
+        self.assertEqual(code, 1)
+        self._assert_diag_only(verdict, "推不出编译逻辑卡号")
+
+    def test_unknown_profile_same_card_round_stays_valid(self):
+        """推不出编译卡号只挡换卡：首轮 auto→5 的同卡轮带 device_compiled 照样有效。
+
+        量具按 preflight 的 needs_device_map 带了 --map-device，于是无条件写出
+        device_compiled=0。判据看的是「卡有没有换」，不是「字段在不在」。"""
+        self.build_workdir(first_device="auto", profile="mystery")
+        _, view = self._preflight()
+        self.assertIs(view["can_switch_device"], False)
+        self.assertIs(view["needs_device_map"], True)
+        self.assertEqual(view["device"], 5)
+        self.write_measure_round(
+            1, [_passed("TC_PF_1002"), _passed("TC_PF_1003")],
+            device=5, overrides={"device_compiled": 0},
+        )
+        self.write_prof_dirs(1, [5], case="TC_PF_1002")
+        self.write_prof_dirs(1, [5], case="TC_PF_1003")
+        # 首轮 auto 的工作目录，A5 也要按 auto 口径跑（设备闭合检查在别处）。
+        code, verdict, _, _, _ = self.run_verdict(device="auto", device_pool="0,5")
+        self.assertEqual(code, 0)
+        retest = verdict["performance"]["retest"]
+        self.assertEqual(retest["invalid_rounds"], [])
+        self.assertEqual(retest["pass_on_retest"], 2)
+
+    def test_switch_without_compiled_field_invalidates(self):
+        """换卡轮缺 device_compiled 不许漏网——判据是卡换没换，不是字段在不在。"""
+        self.build_workdir(profile="mystery")
+        self.write_measure_round(1, [_passed("TC_PF_1002")], device=6)
+        self.write_prof_dirs(1, [6])
+        code, verdict, _, _, _ = self.run_verdict()
+        self.assertEqual(code, 1)
+        self._assert_diag_only(verdict, "推不出编译逻辑卡号")
+
+    def test_switch_without_compiled_field_invalidates_known_profile(self):
+        self.build_workdir()
+        self.write_measure_round(1, [_passed("TC_PF_1002")], device=6)
+        self.write_prof_dirs(1, [6])
+        code, verdict, _, _, _ = self.run_verdict()
+        self.assertEqual(code, 1)
+        self._assert_diag_only(verdict, "缺 device_compiled（应为 0）")
+
+    def test_same_card_round_ignores_compiled_mismatch(self):
+        """同卡轮不做推导校验：device_compiled 只作记录，不因它判无效。"""
+        self.build_workdir()
+        self.write_measure_round(
+            1, [_passed("TC_PF_1002")], device=0, overrides={"device_compiled": 5},
+        )
+        self.write_prof_dirs(1, [0])
+        code, verdict, _, _, _ = self.run_verdict()
+        self.assertEqual(code, 1)  # TC_PF_1003 仍 FAIL
+        self.assertEqual(verdict["performance"]["retest"]["invalid_rounds"], [])
+
+    def test_compiled_device_over_upper_bound_blocks_switch(self):
+        """首轮卡号超过量具映射串能表达的上界 → can_switch_device 为 false。"""
+        self.assertEqual(accept.MAX_COMPILED_DEVICE, 7)
+        compiled, error = accept._derive_device_compiled(
+            "blas", accept.MAX_COMPILED_DEVICE + 1,
+        )
+        self.assertIsNone(compiled)
+        self.assertIn("上界 7", error)
+        self.build_workdir(first_device=8)
+        code, view = self._preflight()
+        self.assertEqual(code, 0)
+        self.assertEqual(view["device"], 8)
+        self.assertIsNone(view["device_compiled"])
+        self.assertIs(view["can_switch_device"], False)
+
+    def test_non_string_profile_does_not_crash(self):
+        """manifest 里 harness_profile 是 list/dict：当未登记处理，同卡复测照跑。
+
+        直接拿不可哈希值查绑卡模式表会抛 TypeError，把同卡复测一起带崩。"""
+        for bad in ([], {}, 7, None):
+            compiled, error = accept._derive_device_compiled(bad, 0)
+            self.assertIsNone(compiled)
+            self.assertIn("不在绑卡模式表", error)
+        self.build_workdir()
+        manifest_path = self.workdir / "runtime" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["harness_profile"] = []
+        accept._atomic_json(manifest_path, manifest)
+        self.write_measure_round(1, [_passed("TC_PF_1002")], device=0)
+        self.write_prof_dirs(1, [0])
+        code, view = self._preflight()
+        self.assertEqual(code, 0)
+        self.assertIs(view["can_switch_device"], False)
+        code, verdict, _, _, _ = self.run_verdict()
+        self.assertEqual(code, 1)  # TC_PF_1003 仍 FAIL
+        self.assertEqual(verdict["performance"]["retest"]["invalid_rounds"], [])
+        self.assertEqual(verdict["performance"]["retest"]["pass_on_retest"], 1)
+
+    def test_unimplemented_bind_mode_refuses_switch(self):
+        """绑卡模式表里写错模式名时换卡关掉，不静默落回编译期定卡。"""
+        with mock.patch.dict(accept.DEVICE_BIND_MODES, {"blas": "compil_bound"}):
+            compiled, error = accept._derive_device_compiled("blas", 3)
+        self.assertIsNone(compiled)
+        self.assertIn("未实现", error)
+
+    def test_broken_manifest_does_not_crash_loader(self):
+        """manifest 顶层类型不符：归 None 走既有拒绝输出，不抛 traceback。"""
+        self.build_workdir()
+        (self.workdir / "runtime" / "manifest.json").write_text(
+            "[{}]", encoding="utf-8",
+        )
+        context = accept.load_retest_context(self.workdir, RUN)
+        self.assertFalse(context["supported"])
+        self.assertIsNone(context["harness_profile"])
+        self.assertIs(context["can_switch_device"], False)
+        code, view = self._preflight()
+        self.assertEqual(code, 2)
+        self.assertIn("顶层不是对象", "；".join(view["refusal_reasons"]))
+
+    def test_scored_round_without_prof_dir_warns_only(self):
+        """计分轮缺 PROF 落点：记一条未完成设备核对的告警，不改判。"""
+        self.build_workdir()
+        self.write_measure_round(1, [_passed("TC_PF_1002")], device=0)
+        code, verdict, report, _, _ = self.run_verdict()
+        self.assertEqual(code, 1)
+        retest = verdict["performance"]["retest"]
+        self.assertEqual(retest["invalid_rounds"], [])
+        warnings = "；".join(verdict["performance"]["retest_warnings"])
+        self.assertIn("未完成设备核对", warnings)
+        self.assertIn("未完成设备核对", report)
 
 
 NO_REF_SUMMARY = {
@@ -1019,6 +1297,205 @@ class TestLoaderRoundtrip(RetestContractCase):
         )
         self.assertEqual(accept._split_retest_run_id("a-retest-0"), ("a-retest-0", None))
         self.assertEqual(accept._split_retest_run_id("plain"), ("plain", None))
+
+
+class TestCrossLaneDeviceSwitch(integration.RetestIntegrationCase):
+    """跨 lane 往返：case-gen 真渲染的量具跑出真轮 JSON，再由本侧加载/校验/折叠消费。
+
+    手写 JSON 测不到的三件事只有在这里才拦得住：量具真实的重映射串、
+    `device_compiled` 的条件序列化（只有 `--map-device` 才写），以及阶段目录里
+    PROF 落点的真实层级与本侧扫描 glob 是否对得上。"""
+
+    # 首轮物理卡。blas 是 compile_bound，编译逻辑卡号随首轮显式卡号，取非 0 才
+    # 测得到「目标卡要顶到第 N 位」那条——首轮 0 时映射串退化成目标卡本身。
+    CARD = "3"
+
+    def run_cli(self, argv, cwd=None):
+        """把 accept 侧命令行的 --device 统一改到 CARD（check 与 verdict 共用）。"""
+        patched = list(argv)
+        for index, item in enumerate(patched[:-1]):
+            if item == "--device":
+                patched[index + 1] = self.CARD
+        return super().run_cli(patched, cwd)
+
+    # ---- 量具侧 ----
+
+    def run_gauge_argv(self, gauge, argv):
+        os.chdir(self.workdir)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = gauge.main(argv)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def retest_argv(self, run_id, case, device, extra=()):
+        return [
+            "--repo", str(self.repo), "--soc", integration.SOC,
+            "--device", str(device), "--run-id", run_id, "--skip-build",
+            "--calls-per-case", "1", "--case", case, *extra,
+        ]
+
+    def first_round_on_card(self):
+        """首轮跑在 CARD 上（基类的 run_gauge 写死 --device 0，这里另起一条）。"""
+        gauge = self.load_gauge(integration.FIRST_KERNELS)
+        code, _, stderr = self.run_gauge_argv(gauge, [
+            "--repo", str(self.repo), "--soc", integration.SOC,
+            "--device", self.CARD, "--run-id", integration.RUN,
+            "--skip-build", "--calls-per-case", "1",
+        ])
+        self.assertEqual(code, 1, f"首轮应为不通过（1002/1003 FAIL）：{stderr}")
+        self.first_path = self.results / f"performance_{integration.RUN}.json"
+        self.first = json.loads(self.first_path.read_text(encoding="utf-8"))
+        self.assertEqual(self.first["device"], int(self.CARD))
+        self.write_accuracy()
+        path = self.results / f"accuracy_{integration.RUN}.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["device"] = int(self.CARD)
+        accept._atomic_json(path, payload)
+
+    # ---- 产物回读 ----
+
+    def round_payload(self, number):
+        path = self.results / f"performance_{integration.RUN}-retest-{number}.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def stage_case_dirs(self, number):
+        """该轮阶段目录下量具真建的逐例采样目录 `prof/<case>/`。
+
+        `r<N>/` 由 msprof 按 `--output` 自己建，subprocess 打桩后不存在，量具只
+        在这一层留下 `r<N>.log`；落点由 plant_prof_dirs 照真实层级补齐。"""
+        stage = self.results / f"{integration.RUN}-retest-{number}" / "performance"
+        cases = sorted(path for path in stage.glob("prof/*") if path.is_dir())
+        self.assertTrue(cases, f"量具应已建出逐例采样目录：{stage}")
+        return cases
+
+    def plant_prof_dirs(self, number, card, repeat=1):
+        """补 msprof 的落点：`prof/<case>/r<N>/PROF_*/device_<卡>`。"""
+        for index, case_dir in enumerate(self.stage_case_dirs(number), 1):
+            (case_dir / f"r{repeat}" / f"PROF_{index:06d}_x"
+             / f"device_{card}").mkdir(parents=True)
+        return self.stage_case_dirs(number)
+
+    def set_profile(self, profile):
+        """改写真 manifest 的 harness_profile，模拟绑卡模式未登记的算子域。"""
+        path = self.runtime / "manifest.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["harness_profile"] = profile
+        accept._atomic_json(path, payload)
+
+    # ---- 用例 ----
+
+    def test_switch_with_nonzero_compiled_device(self):
+        """首轮卡 3 → 换到卡 6：量具真写 device_compiled=3，本侧判有效并折叠。"""
+        self.build_real_workdir()
+        self.first_round_on_card()
+        _, stdout, _ = self.run_cli(["retest-preflight", "--run-id", integration.RUN])
+        view = json.loads(stdout)
+        self.assertEqual(view["device"], 3)
+        self.assertEqual(view["device_compiled"], 3)
+        self.assertIs(view["can_switch_device"], True)
+        gauge = self.load_gauge({"TC_PF_1002": 9000.0}, mapped=("TC_PF_1002",))
+        # 编译逻辑卡号上界在两侧各有一份常量：本侧靠它把 can_switch_device 关掉，
+        # 量具靠它报参数错误。两个数走开就会出现「这边说能换、量具随后拒绝」。
+        self.assertEqual(accept.MAX_COMPILED_DEVICE, gauge.MAX_COMPILED_DEVICE)
+        # 量具自己的构造函数：目标卡顶到第 3 位，前三位是占位卡。
+        self.assertEqual(
+            gauge._visible_devices_map(6, view["device_compiled"]), "0,1,2,6",
+        )
+        code, _, stderr = self.run_gauge_argv(gauge, self.retest_argv(
+            f"{integration.RUN}-retest-1", "TC_PF_1002", 6,
+            extra=("--map-device", "--compiled-device", str(view["device_compiled"])),
+        ))
+        self.assertEqual(code, 0, stderr)
+        payload = self.round_payload(1)
+        self.assertEqual(payload["device_requested"], 6)
+        self.assertEqual(payload["device_resolved"], 6)
+        self.assertEqual(payload["device_compiled"], 3)
+        self.plant_prof_dirs(1, 6)
+        context = accept.load_retest_context(self.workdir, integration.RUN)
+        self.assertEqual([item["round"] for item in context["valid_rounds"]], [1])
+        code, verdict, report, _ = self.run_verdict()
+        self.assertEqual(verdict["performance"]["retest"]["pass_on_retest"], 1)
+        self.assertEqual(self.case_row(verdict, "TC_PF_1002")["effective_status"], "PASS")
+        self.assertIn("| TC_PF_1002 | 1 | measure | 6 |", report)
+
+    def test_target_card_inside_placeholder_range(self):
+        """目标卡 2 小于编译卡号 3：占位集合跳过目标卡，串仍把它顶到第 3 位。"""
+        self.build_real_workdir()
+        self.first_round_on_card()
+        gauge = self.load_gauge({"TC_PF_1002": 9000.0}, mapped=("TC_PF_1002",))
+        self.assertEqual(gauge._visible_devices_map(2, 3), "0,1,3,2")
+        code, _, stderr = self.run_gauge_argv(gauge, self.retest_argv(
+            f"{integration.RUN}-retest-1", "TC_PF_1002", 2,
+            extra=("--map-device", "--compiled-device", "3"),
+        ))
+        self.assertEqual(code, 0, stderr)
+        payload = self.round_payload(1)
+        self.assertEqual(payload["device_resolved"], 2)
+        self.assertEqual(payload["device_compiled"], 3)
+        self.plant_prof_dirs(1, 2)
+        context = accept.load_retest_context(self.workdir, integration.RUN)
+        self.assertEqual([item["round"] for item in context["valid_rounds"]], [1])
+        # 落点核对认物理卡，不认映射串里的位置：同一份 JSON，阶段目录里多出别的
+        # 卡的落点就转为无效（有效性不只由 JSON 决定，见 retest-protocol 的重演边界）。
+        self.stage_case_dirs(1)[0].joinpath("r1", "PROF_000009_x", "device_5").mkdir(
+            parents=True,
+        )
+        context = accept.load_retest_context(self.workdir, integration.RUN)
+        self.assertEqual(context["valid_rounds"], [])
+        self.assertIn(
+            "PROF 落点 device_5",
+            "；".join(context["invalid_rounds"][0]["reasons"]),
+        )
+
+    def test_unknown_profile_same_card_valid_switch_invalid(self):
+        """未登记 profile 两路：同卡轮照常有效，换卡轮因推不出编译卡号判无效。"""
+        self.build_real_workdir()
+        self.first_round_on_card()
+        self.set_profile("mystery")
+        gauge = self.load_gauge({"TC_PF_1002": 9000.0}, mapped=("TC_PF_1002",))
+        code, _, stderr = self.run_gauge_argv(gauge, self.retest_argv(
+            f"{integration.RUN}-retest-1", "TC_PF_1002", self.CARD,
+        ))
+        self.assertEqual(code, 0, stderr)
+        self.assertNotIn("device_compiled", self.round_payload(1))
+        self.plant_prof_dirs(1, int(self.CARD))
+        context = accept.load_retest_context(self.workdir, integration.RUN)
+        self.assertIs(context["can_switch_device"], False)
+        self.assertEqual([item["round"] for item in context["valid_rounds"]], [1])
+        gauge2 = self.load_gauge({"TC_PF_1003": 9000.0}, mapped=("TC_PF_1003",))
+        code, _, stderr = self.run_gauge_argv(gauge2, self.retest_argv(
+            f"{integration.RUN}-retest-2", "TC_PF_1003", 6,
+            extra=("--map-device", "--compiled-device", "0"),
+        ))
+        self.assertEqual(code, 0, stderr)
+        self.plant_prof_dirs(2, 6)
+        context = accept.load_retest_context(self.workdir, integration.RUN)
+        self.assertEqual([item["round"] for item in context["valid_rounds"]], [1])
+        self.assertEqual([item["round"] for item in context["invalid_rounds"]], [2])
+        self.assertIn(
+            "推不出编译逻辑卡号",
+            "；".join(context["invalid_rounds"][0]["reasons"]),
+        )
+
+    def test_switch_without_map_device_is_caught(self):
+        """真量具不带 --map-device 换卡时不写 device_compiled，本侧照样判无效。"""
+        self.build_real_workdir()
+        self.first_round_on_card()
+        gauge = self.load_gauge({"TC_PF_1002": 9000.0}, mapped=("TC_PF_1002",))
+        code, _, stderr = self.run_gauge_argv(gauge, self.retest_argv(
+            f"{integration.RUN}-retest-1", "TC_PF_1002", 6,
+        ))
+        self.assertEqual(code, 0, stderr)
+        payload = self.round_payload(1)
+        self.assertNotIn("device_compiled", payload)
+        self.assertEqual(payload["device_resolved"], 6)
+        self.plant_prof_dirs(1, 6)
+        context = accept.load_retest_context(self.workdir, integration.RUN)
+        self.assertEqual(context["valid_rounds"], [])
+        self.assertIn(
+            "缺 device_compiled（应为 3）",
+            "；".join(context["invalid_rounds"][0]["reasons"]),
+        )
 
 
 if __name__ == "__main__":
