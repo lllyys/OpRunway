@@ -27,17 +27,17 @@ description: 当需要为社区算子开发任务撰写任务书、检查已有�
 
 | 阶段 | 做什么 | 出口 |
 | --- | --- | --- |
-| T1 受理 | 收算子名与已有材料，判定工程模式、对标基线、是否随机算子 | 前提三项已拍板 |
+| T1 受理 | [intake 表](assets/intake-template.md) 一次收材料、前提与已知项 | 必填面已拍板 |
 | T2 推断 | 基于对标接口给出候选：签名、dtype 面、值域、错误场景、实现约束 | 候选成文，标注 provenance |
-| T3 拍板 | 按批次追问，答复原话入 `decisions.json` | `next_questions.py` 报 done |
+| T3 拍板 | 总审或按批追问，记录与失效见 [格式](references/decisions-format.md) | `next_questions.py` 报 done |
 | T4 落稿 | 渲染脚手架，按 decisions 填内容 | md 全部章节非空 |
 | T5 质量门 | `check_taskdoc.py` 跑到退出码 0 | 封条 sha256 匹配交付的 md |
 
 ## 命令
 
 ```bash
-# T3：看下一批该问什么
-python3 scripts/next_questions.py --decisions evidence/decisions.json --doc <md>
+# T3：--all 总审全量缺口，总审文件传 --candidates（逐批模式两参均省）
+python3 scripts/next_questions.py --decisions evidence/decisions.json --all --candidates <总审文件>
 
 # T4：一次性渲染脚手架
 python3 scripts/make_taskdoc.py --op <算子名> --out <工作目录>/<Op>_task_doc.md
