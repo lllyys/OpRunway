@@ -46,6 +46,11 @@ class SourceArchiveTest(unittest.TestCase):
         ids = ids_under("## 模板缺陷", "T")
         self.assertEqual([f"T{n:02d}" for n in range(1, 6)], ids)
 
+    def test_defect_map_covers_gate_and_scheduler_defects(self):
+        # D14–D17：cgeru 真机走查与评审实证的判据/调度器缺陷，编号接续样例段。
+        ids = ids_under("## 判据与调度器缺陷", "D")
+        self.assertEqual([f"D{n:02d}" for n in range(14, 18)], ids)
+
     def test_every_defect_names_a_gate_or_repair(self):
         # 最后一列不得为空：缺陷必须指向一条判据或一个修复方向。
         text = DEFECT_MAP.read_text(encoding="utf-8")

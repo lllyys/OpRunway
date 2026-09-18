@@ -25,7 +25,12 @@ Codex 自己的会话里永远不会有 skill-creator 调用，它只能凭这�
 失败开放：脚本自身出任何异常都放行。门坏了不该把所有编辑一起锁死——这里的代价是一次质量较差的
 skill 改动，不是不可逆的破坏，与 nas-audit-gate 的 fail-closed 取向不同，是有意为之。
 
-关掉一次：SKILL_GATE_OFF=1
+只拦「改」也体现在派单上：sandbox 为 read-only 的 Codex 派单落不了盘，属「看」，放行。
+runner resume 时不带 -s（沙箱继承原会话），此处匹配不到只读标志，门照常拦——宁严勿松。
+
+关掉一次：在 Bash 命令前加 `SKILL_GATE_OFF=1 `（hook 只认前缀位；藏在引号串里的不算），
+或给 hook 进程本身设该环境变量。hook 是 PreToolUse 时刻的独立进程，命令里的环境赋值
+要到执行时才生效，所以必须由 hook 自己解析前缀，不能指望 os.environ。
 """
 import json
 import os
@@ -57,6 +62,17 @@ MUTATORS = [
 # 第三支要求 `codex` 是独立的命令词：前面不能是 `.`（那是 `.codex` 目录），后面不能直接接
 # shell 操作符或重定向——`ls .codex 2>/dev/null`、`which codex | head` 都不是派单。
 CODEX_CMD = re.compile(r"codex-runner\.mjs|codex\s+exec|(?<!\.)\bcodex\b\s+(?![-;&|<>]|\d+[<>])\S")
+# 只读沙箱的派单：落不了盘，属「看」不属「改」。
+READONLY_SANDBOX = re.compile(r"(?:--sandbox|-s)[=\s]+['\"]?read-only")
+# 文档化的「关掉一次」：只认命令前缀位（行首或 ;/&&/|| 之后），藏在引号串里的不算。
+GATE_OFF_PREFIX = re.compile(r"(?:^|[;&|]\s*)\s*SKILL_GATE_OFF=(?:1|true)\s+\S")
+# 引号内容是数据不是命令：判旁路/只读标志前先剥掉引号段，防止提示词里的
+# `-s read-only` 或 `; SKILL_GATE_OFF=1` 被当成命令语法（2026-09-17 审计 #8）。
+_QUOTED = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'')
+
+
+def unquoted(text):
+    return _QUOTED.sub(" ", text)
 CODEX_TOOLS = ("mcp__codex-cli__codex", "mcp__codex-cli__codex-reply")
 IMPLEMENT_SKILLS = ("cc-suite:implement", "cc-suite:continue", "cc-suite:audit-fix")
 
@@ -134,9 +150,17 @@ def is_skill_change(tool, inp, text):
     if tool == "Skill":
         return inp.get("skill") in IMPLEMENT_SKILLS and mentions_skill(text)
     if tool in CODEX_TOOLS:
+        if inp.get("sandbox") == "read-only":
+            return False
         return mentions_skill(text)
     if tool == "Bash":
+        bare = unquoted(text)
         if CODEX_CMD.search(text):
+            # 只读豁免要在剥引号后的命令面上成立，且同一调用里不得再有
+            # 任何写动作——「只读派单; 再改文件」不算只读。
+            if (READONLY_SANDBOX.search(bare)
+                    and not any(m.search(bare) for m in MUTATORS)):
+                return False
             return mentions_skill(text)
         return bool(SKILL_PATH.search(text)) and any(m.search(text) for m in MUTATORS)
     # Edit / Write / MultiEdit / NotebookEdit
@@ -184,6 +208,8 @@ def main():
     tool = data.get("tool_name") or ""
     inp = data.get("tool_input") or {}
     text = target_text(tool, inp)
+    if tool == "Bash" and GATE_OFF_PREFIX.search(unquoted(text)):
+        allow()
     if not is_skill_change(tool, inp, text):
         allow()
 
@@ -195,7 +221,7 @@ def main():
             "skill 改动门装坏了：找不到它要求读的那份参考。\n"
             f"  期望位置：{BEST_PRACTICES}\n\n"
             "这份文件必须和 hook 放在同一目录。补回去再改 skill；\n"
-            "确需跳过时用 SKILL_GATE_OFF=1，并在回复里说明这一轮没走这道门。"
+            "确需跳过时在命令前加 SKILL_GATE_OFF=1，并在回复里说明这一轮没走这道门。"
         )
 
     missing = []
@@ -223,8 +249,8 @@ def main():
     lines += [
         "",
         "这是 Mr.0 定的规矩：改任何 skill 都要先过那份权威参考，并且经由 skill-creator 来改。",
-        "派 Codex 落盘同样算改——门卡的就是派单这一刻。",
-        "确需跳过时用 SKILL_GATE_OFF=1，并在回复里说明这一轮没走这道门。",
+        "派 Codex 落盘同样算改——门卡的就是派单这一刻（sandbox read-only 的只读派单不算）。",
+        "确需跳过时在命令前加 SKILL_GATE_OFF=1，并在回复里说明这一轮没走这道门。",
     ]
     deny("\n".join(lines))
 

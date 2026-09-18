@@ -56,14 +56,27 @@
     },
     {
       "id": 2,
-      "name": "接口",
+      "name": "概述",
       "elements": [
-        "2.3.signature",
-        "2.1.operator_name"
+        "1.background",
+        "1.language",
+        "2.1.formula",
+        "2.1.algorithm"
       ]
     },
     {
       "id": 3,
+      "name": "接口",
+      "elements": [
+        "2.3.signature",
+        "2.1.operator_name",
+        "2.4.param_name",
+        "2.4.direction",
+        "2.4.description"
+      ]
+    },
+    {
+      "id": 4,
       "name": "类型与排布",
       "elements": [
         "2.4.data_type",
@@ -72,7 +85,7 @@
       ]
     },
     {
-      "id": 4,
+      "id": 5,
       "name": "形状与值域",
       "elements": [
         "2.4.shape",
@@ -80,14 +93,14 @@
       ]
     },
     {
-      "id": 5,
+      "id": 6,
       "name": "异常行为",
       "elements": [
         "2.4.error_behavior"
       ]
     },
     {
-      "id": 6,
+      "id": 7,
       "name": "实现约束",
       "elements": [
         "2.5.non_contiguous",
@@ -99,7 +112,7 @@
       ]
     },
     {
-      "id": 7,
+      "id": 8,
       "name": "精度",
       "elements": [
         "3.2.reference_api",
@@ -109,12 +122,40 @@
       ]
     },
     {
-      "id": 8,
+      "id": 9,
       "name": "性能",
       "elements": [
         "3.3.baseline_env",
         "3.3.criterion",
         "3.3.case_table"
+      ]
+    },
+    {
+      "id": 10,
+      "name": "验收环境",
+      "elements": [
+        "3.1.hardware",
+        "3.1.cann_version",
+        "3.1.third_party"
+      ]
+    },
+    {
+      "id": 11,
+      "name": "自验",
+      "elements": [
+        "3.5.tooling",
+        "3.5.param_mapping",
+        "3.5.generation_rules"
+      ]
+    },
+    {
+      "id": 12,
+      "name": "交付",
+      "elements": [
+        "3.4.memory",
+        "4.deliverables",
+        "5.pr_target",
+        "7.notes"
       ]
     }
   ],
