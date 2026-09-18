@@ -24,6 +24,18 @@
 | D12 | 样例 §3.5 | 写了「(0,1)正态分布」，命中随机算子信号词，但无对比策略 | 验收侧 `derive_interface.py` 会退出码 2 拦住 | `random_strategy_when_signaled` |
 | D13 | 样例 §3.5 | seqShape 的 a、b、c 与 textLength 各自独立均匀采样，与 §2.1/§2.4 钉死的 `S = textLength + T×H×W` 矛盾 | 「内部一致」与「可执行」是两回事：`range_matches_distribution` 只查 §2.4 与 §3.5 两处数字是否互相对得上，不问任何一边照字面执行是否构造得出算子会接受的输入；这一行是从上游样例逐字带过来的，与已修的 D05 同一缺陷类，是评审找到的唯一一处「黄金样例被塑造得刚好通过判据」 | 无判据覆盖，靠改写黄金样例 §3.5 的采样顺序与依赖规避（见 repair-log.md） |
 
+## 判据与调度器缺陷
+
+不来自上游样例，来自本仓判据与调度器自身的实证缺陷（2026-09-16/17，
+cgeru 真机走查与 Codex 评审发现），编号接续样例段。
+
+| 编号 | 出处 | 缺陷 | 不修会怎样 | 对应判据/修复 |
+| --- | --- | --- | --- | --- |
+| D14 | 判据自身（cgeru 走查实证） | `env_lists_third_party_versions` 无条件要求 §3.1 出现 torch 后再强制驱动/CUDA 版本 | golden 由 cblas 生成、无 GPU 对标的任务说真话写不出能过门的 §3.1 | 判据改声明契约：出现 GPU 记号即要求版本，唯一豁免是明确声明句式；回归 `test_gate_env_check.py` 16 例，既有 10 目标零漂移 |
+| D15 | 调度器（分类分析实证） | `question_batches` 只收 24/43 要素，17 条人拍板项批次外裸打 key | 40% 追问面漏出批次机制，轮数与提问质量不可控 | 骨架批次重排 12 批全覆盖 + `test_batches_ratchet.py` 唯一归属 ratchet |
+| D16 | 调度器（同上） | `needed()` 对未实现的条件一律静默 False，`signature_differs_from_baseline` 从不触发 | 该问的条件项不问，问题拖到 T5 才爆红；门禁侧覆盖也有限 | 条件三态求值（未知不豁免）+ 严格解析器 `_review_signature.py`；`test_next_questions.py` A3/A4 组 |
+| D17 | 调度器（Codex 评审发现，动态复现） | 批内全答、批外欠答时 `next_batch=None` 直接 `TypeError` 崩溃 | 批外项没有可执行的收尾路径 | 收尾兜底：逐项完整 detail + 记录后重跑指引，退出码 0；A2 旧骨架 fixture 验证可推进 |
+
 ## 模板缺陷
 
 | 编号 | 位置 | 原文 | 为什么是缺陷 | 修复方向 |

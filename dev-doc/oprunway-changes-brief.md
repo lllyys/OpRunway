@@ -2,6 +2,8 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
+  T2 候选对照 golden 自检的改进项落地。
 - **2026-09-18 · blas-accept 性能复测与 warmup 全量落地（worktree blas-accept-retest，
   待 Mr.0 审 diff 与 commit）。** 机制一句话：用户点名 case 复测（pass-once：任一有效
   轮 PASS 即 PASS）、豁免（退出分母、后测撤销、MISSING 占位同撤销）、A5 折叠合并出
@@ -19,7 +21,40 @@
   （needs_device_map=true→--map-device 复测→A5 合并）。遗留：P7 换卡门控
   （差显式非零编译卡形态+Mr.0 裁定）；首轮短行基线裸 traceback 属存量不动；
   上游 PR 另立项。spec/plan 转历史件在 dev-doc。
-
+- **2026-09-17b · checkpoint 终审 FIX_NEEDED（4P1+6P2+1P3）→ fix 轮完成，
+  #10 记待办。** 要点：D14 判据改声明契约（GPU 记号即要求版本，唯一豁免三种
+  明确句式，16 例矩阵 + 零漂移）；解析器补类型核与尾随拒收（限定词≠类型）；
+  依赖表补前提与签名→参数表两类上游；契约新增「呈现前对账」补同轮闭环；
+  候选解析改状态机（畸形退 2）；hook 剥引号再判豁免；b1 走 r4 修零维边界与
+  占比口径拿新封条 796f524c，r3 原话归位；报告口径改「缺口路径已证、快速路径
+  未证」；spec/plan 记 D14 例外，5 条遗留入 todo。196 测全绿。
+  **verify 轮（同 thread）**：3 FIXED / 7 PARTIAL / 1 NOT_FIXED + 3 新点
+  （豁免作用域、对账命令缺参、unquoted 副作用），201 unittest 全过、10 目标
+  零漂移、封条 796f524c 复核匹配；按「一轮即停」收束，残余精确面全部入
+  todo「doc-write 改造收尾」节。评审纪律自本日起按八维执行
+  （blas-accept-retest 分支版 codex-review.md，新增信任成本维）。
+- **2026-09-17 · doc-write 交互改造实施完成并以真实任务走通端到端（版本可交）。**
+  P0–P2 全落：契约 decisions-format.md（3,040B）、骨架 12 批 + ratchet、严格签名
+  解析器 `_review_signature.py`（16 测）、intake 模板三轮按 Mr.0 反馈迭代（逐段
+  围栏答题块 + 逐项示例 + case_table 降可选）、调度器三态条件/`--all`/`--candidates`
+  /D3 兜底重写（24 测）、SKILL' 3,323B 恰压预算线。**B1 走查用真实任务
+  aclblasCgeru 走通 T1–T5 取得封条**（人输入 4 次，实录见
+  reports/walkthrough-20260916/report.md）；走查实证并修复门禁判据缺陷 D14
+  （torch/CUDA 无条件要求，条件化后既有 10 目标零漂移 + 回归 12 例，
+  **撤销 INV3「_checks.py 零改动」并记账**）；D15–D17（批次缺口/条件失效/收尾
+  崩溃）修复随改造落地，defect-map 已补四条。全量 pytest 180 绿 + 走查产物核验
+  5/5。Codex 评审累计 9 轮（含微修裁定与判据缺陷裁定）。测试本机例外由 Mr.0
+  裁定（2026-09-16）。checkpoint 终审见下一条记录（发出时）。
+- **2026-09-16 · doc-write 交互改造文档链闭环（spec→plan→并行方案，各过 Codex
+  评审至 READY TO BUILD）。** 四分类（provided 13/inferred 28/mechanical 候选 1/
+  fixed 1）落 `doc-write-element-classification.md`；spec v3（快速路径 2 次输入、
+  条件三态收敛门禁准绳、有效拍板与确认内容分离）、plan v3（decisions 增量载体
+  `_premises`/`_superseded`、严格签名解析器独立模块、总审文件三合一、预算回退
+  口径 SKILL'≤3,323）、并行方案 v2（P0 契约冻结→P1 三包并行→P2-A/B→P3 走查，
+  含 skill 门 per-session 前置与越界残余风险声明）。评审共 7 轮（2 冷读 + 5 闭环），
+  实证缺陷 D1/D2/D3（批次缺口/条件失效/收尾崩溃，D3 动态复现）。顺带：修
+  `skill-edit-gate.py` 两 bug（SKILL_GATE_OFF 前缀失效、误拦只读派单，7 场景
+  回归绿）；golden-task-doc.md 被编辑器格式化损坏（门禁判红）已恢复并复验退 0。
 - **2026-09-14 · plugin 镜像整树对齐上游 main（d2ddbc1），blas-usage 迁 dev-doc。**
   上游分支已收敛（dev/skills-v0.2.0 消失，只剩 main），基线 90e28ff→febf529
   （2026-09-10，前进 36+ 提交）：13 个 skill（新增 8 个 cann-* 与 repo-task-atk-accept）、

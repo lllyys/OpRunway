@@ -2,6 +2,36 @@
 
 本页只保留尚未完成且有当前证据的工作。仓规以根 `AGENTS.md` 为准，已完成历史查 changes brief 与 Git。
 
+## P1 · doc-write 改造收尾（checkpoint 终审 + verify 轮遗留，2026-09-17）
+
+verify 判定（thread 01a0b230）：3 FIXED / 7 PARTIAL / 1 NOT_FIXED，一轮即停。
+PARTIAL 与新点的精确面：
+
+- [ ] D14 判据两处残余：豁免短语应按**节**作用域生效（现任一节豁免取消全部 GPU
+  要求，精度句可误豁免性能对标）；GPU 记号面补 RTX 系列等（现仅 GPU/A100/H100/V100）。
+- [ ] 解析器两处残余：`int a[8 +]` 非法数组表达式仍判 complete（两侧相同时会跳过
+  映射确认）；C 尾随检查放过 `; garbage`（`;` 后不应再有非空白残片）。
+- [ ] 依赖表残余：`2.3.signature` 变化未使 `2.4.data_type/dtype/format/shape/
+  value_range/error_behavior` 失效（现只失效三列 + param_mapping）。
+- [ ] decisions-format「呈现前对账」示例命令缺必填 `--decisions`，照抄实跑退 2。
+- [ ] 走查产物核验再强化：intake 逐 key 核对（非全文包含）、review 原话来源核验、
+  intake 记录缺 confirmed_content 的基线补齐。
+- [ ] hook `unquoted()` 两处副作用：`-s "read-only"`（引号参数值）被误删失去豁免；
+  引号重定向目标被删导致「只读派单后接引号重定向写」漏拦；前缀旁路仍豁免整条
+  复合命令。
+
+- [ ] 语义走查补走：独立 B1/B2 快速路径（呈现前对账契约生效后验「恰 2 次输入」
+  与条件同轮闭环）；B3 拒绝→重生成→再确认与「除 X 外同意」；B5 四类上游变更
+  与不失效反例。走查报告与 manifest 留中间状态。
+- [ ] T2 候选生成对照 golden 与 `_checks.py` 机械口径自检（cgeru 走查 10 判红
+  中 6 处 A 类的根因），落进 SKILL/decisions-format 的成文步骤。
+- [ ] 走查产物核验的干净仓入口：`WALKTHROUGH_DIR` 缺省时五例必失败（有意，
+  不许 skip 得通过），干净 checkout 无法复现——补脱敏样例工件或在 README
+  声明专用入口（终审 #10）。
+- [ ] skill-edit-gate 残余风险：引号剥离是近似解析（嵌套/转义边界未覆盖），
+  自报+抽查仍是软约束；需要硬保证时升级独立 worktree（并行方案 §7 既记）。
+- [ ] plan §5 预算表数字复核：终审实测 T4 载入 25,060B 与表内 32,768 压线
+  依据不符，按实测更新（不影响达标结论）。
 ## P1 · blas-accept 复测（已落地 @ worktree blas-accept-retest，见 brief 2026-09-18）
 
 - [ ] Mr.0 审 diff 与 commit（三笔拆分建议：①量具证据保护+锚 ②量具 warmup

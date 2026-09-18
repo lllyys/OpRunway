@@ -583,6 +583,23 @@ _VERSIONED = re.compile(r"\d+\.\d+")
 # CUDA 版本」。
 _DRIVER_VERSIONED = re.compile(r"驱动\D{0,6}\d+(?:\.\d+){1,3}")
 _CUDA_VERSIONED = re.compile(r"CUDA\D{0,6}\d+(?:\.\d+){1,3}", re.IGNORECASE)
+# GPU 对标适用性是声明契约，不是自然语言猜测（2026-09-17 cgeru 走查实证，
+# defect-map D14；terminal audit 复审后由近邻/否定启发式改为声明式）：
+# §3.1/§3.3 出现任何 GPU 记号（大小写不限，含型号）即适用，除非同两节里有
+# 明确的豁免声明。无法判断时不豁免——fail-closed。
+_GPU_TOKEN = re.compile(r"GPU|A100|H100|V100", re.IGNORECASE)
+_GPU_WAIVER = re.compile(
+    r"无\s*GPU\s*(?:实测)?对标|GPU\s*对标[：:]?\s*不涉及|不涉及\s*GPU\s*对标")
+
+
+def _gpu_baseline_intended(doc):
+    """性能对标是否按 GPU 标杆要求驱动/CUDA 版本。出现 GPU 记号即要求，
+    唯一豁免是 §3.1/§3.3 里的明确声明（_GPU_WAIVER 三种句式之一）。"""
+    texts = [(_section_text(doc, sid) or "") for sid in ("3.1", "3.3")]
+    combined = "\n".join(texts)
+    if not _GPU_TOKEN.search(combined):
+        return False
+    return not _GPU_WAIVER.search(combined)
 
 
 def check_env_lists_third_party_versions(doc, key, element, context):
@@ -597,7 +614,8 @@ def check_env_lists_third_party_versions(doc, key, element, context):
                             section.start_line,
                             f"§3.1 未写三方软件版本（缺 {missing}） · "
                             f"{element['failure']}")]
-        if not (_DRIVER_VERSIONED.search(text)
+        if _gpu_baseline_intended(doc) and not (
+                _DRIVER_VERSIONED.search(text)
                 and _CUDA_VERSIONED.search(text)):
             return [Finding("env_lists_third_party_versions", key, "3.1",
                             section.start_line,
