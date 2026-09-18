@@ -95,7 +95,8 @@ cd <工作目录>/runtime && <python> verify_accuracy.py \
 ```
 
 **run-id**（一轮运行的标识，串起精度、复跑、性能与结论）只含字母、数字、点、下划线、
-连字符，建议 `<op>-<YYYYMMDD-HHMM>`。首轮出现 `FAIL/SKIP/TIMEOUT/CRASH/MISSING` 时，
+连字符，且不得以 `-retest-<数字>` 结尾（该形态保留给复测轮，见 A4″）；
+建议 `<op>-<YYYYMMDD-HHMM>`。首轮出现 `FAIL/SKIP/TIMEOUT/CRASH/MISSING` 时，
 每个失败 case 加 `--run-id <id>-rerun --case <case_name> --skip-build` 精确复跑一次
 （完整命令见 run-chain.md 的「复跑与归因」）。复跑 id 必须恰为 `<id>-rerun`，A5 只认
 这个名字；多例复跑时重复 `--case`，仍只产生一份 `<id>-rerun` JSON。首轮失败不因复跑

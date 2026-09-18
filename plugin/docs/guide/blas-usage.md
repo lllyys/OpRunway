@@ -129,7 +129,8 @@ A4 每个有基线的用例起一次 msprof 采样（单次采集、默认无预
 验收算子 <op>。
 - 任务包目录：<case-gen 的六件包目录>
 - 工程目录：<开发者 ops-blas 检出>
-- soc=<如 ascend910_93>，device=0，python=python3，run-id 自取（如 t1）
+- soc=<如 ascend910_93>，device=0，python=python3，run-id 自取（如
+  sger-20260918-1；不得以 -retest-数字 结尾，那是复测轮保留形态）
 - 产物目录：<可省；缺省 <工作目录>/verdict>
 先 source <CANN 路径>/set_env.sh。A2′ 逐项核 param.h / test.cpp / npu_wrapper.h 对照 README。
 做完贴 A5 结论、<产物目录>/report/report.md 与 <产物目录>/intermediate/verdict.json 的
