@@ -111,8 +111,11 @@ A4 每个有基线的用例起一次 msprof 采样（单次采集、默认无预
 - **判据三句话**：复测按 pass-once 裁——一个 case 在任一有效轮 PASS 即 PASS，永久有效；
   豁免把 case 移出裁决分母（逐例理由必填），之后再测同 case 即撤销豁免；每个复测轮跑完
   必须重跑 A5，否则不构成最终报告。
-- **最小输入**：首轮工作目录 + 点名的 case；其余参数（轮号、设备、是否需要设备映射）由
-  skill 的复测路由自动恢复。预热次数是复测旋钮（如 `--warmup 10`），默认 0。
+- **最小输入**：首轮工作目录 + 点名的 case；其余参数（run-id、轮号、设备、是否需要
+  设备映射）由 skill 的复测路由从盘上自动恢复。run-id 是首轮验收时自己取的名，
+  不记得也不用找——它在 `<产物目录>/intermediate/verdict.json` 的 `run_id` 字段与
+  `runtime/results/` 的文件名里，同一工作目录多个 run-id 并存时助手才会列出来问。
+  预热次数是复测旋钮（如 `--warmup 10`），默认 0。
 - **报告样貌**：合并报告逐例展示首轮值、各轮摘要与有效状态；豁免例单列理由；未生效的
   轮（无效/中断）醒目列出，不会静默消失。
 - 流程细节与完整契约（轮次、有效性、折叠规则、恢复）见
@@ -151,18 +154,19 @@ A2′ 逐项核 param.h / test.cpp / npu_wrapper.h 对照 README。
 
 ```text
 /repo-task-blas-accept
-对 run-id <id> 的验收结果复测。
+复测上次的验收结果。
 - 工作目录：<首轮工作目录>
+- run-id：<可省，自动从工作目录恢复；多个并存时才需指明>
 - 复测 case：<名，可多个>；预热 <N 次，可省>
 （或：豁免 <名>，理由：<一句话>）
 做完贴合并后的 A5 结论与 report.md 路径。
 ```
 
-实际例子（复测一个可疑 FAIL 例，预热 10 次）：
+实际例子（复测一个可疑 FAIL 例，预热 10 次；run-id 交给助手恢复）：
 
 ```text
 /repo-task-blas-accept
-对 run-id sger-20260918-1 的验收结果复测。
+复测上次的验收结果。
 - 工作目录：/home/dev/work/accept/sger
 - 复测 case：TC_PF_012；预热 10 次
 做完贴合并后的 A5 结论与 report.md 路径。
@@ -172,7 +176,7 @@ A2′ 逐项核 param.h / test.cpp / npu_wrapper.h 对照 README。
 
 ```text
 /repo-task-blas-accept
-对 run-id sger-20260918-1 的验收结果复测。
+复测上次的验收结果。
 - 工作目录：/home/dev/work/accept/sger
 - 豁免 TC_PF_007，理由：任务方确认该尺寸不在性能承诺范围
 做完贴合并后的 A5 结论与 report.md 路径。
