@@ -81,11 +81,32 @@ S0 前置检查 → S1 填 FACTS → S2 render → S3 check。`package.py check`
 
 ### 流程
 
-A1 环境 → A2 契约 → A2′ 人工审阅（对照 README 读三份 C++）→ A3 精度 → A4 性能 → A5 结论。
+A1 环境 → A2 契约 → A2′ 人工审阅（对照 README 读三份 C++）→ A3 精度 → A4 性能 →
+A5 结论（→ 按需 A4″ 复测，见下节）。
 
-A4 每个有基线的用例起一次 msprof 采样（单次、免预热，op_summary 自动导出），逐例进度行
-实时打印，200 例约 25 分钟。用例执行成功与否以每次采样的 gtest JSON 证据为准：证据缺失或
-不合格记 `CRASH`，msprof 失败或无 kernel 行记 `NO_KERNEL`，都归证据不足，不会误判 FAIL。
+A4 每个有基线的用例起一次 msprof 采样（单次采集、默认无预热，op_summary 自动导出），
+逐例进度行实时打印，200 例约 25 分钟。用例执行成功与否以每次采样的 gtest JSON 证据为准：
+证据缺失或不合格记 `CRASH`，msprof 失败或无 kernel 行记 `NO_KERNEL`，都归证据不足，
+不会误判 FAIL。预热可用 `--warmup N` 显式开启：采样前另起一个不计分的裸 GTest 预热进程；
+默认 0——实测预热不改变 kernel 测量（见 perf-protocol 的「已实测与待实测边界」），
+开与不开都不影响判据。
+
+### 验收后复测与豁免
+
+对个别用例的结论有疑问时不必重跑全量：验收支持按 case 复测与豁免，结果由 A5 折叠进
+最终报告，首轮证据原样保留、每轮参数入档，被认可而不属篡改。
+
+- **何时用**：首轮个别用例 FAIL 或证据不足，怀疑偶发波动、采样偏冷或属已知范围外问题。
+- **判据三句话**：复测按 pass-once 裁——一个 case 在任一有效轮 PASS 即 PASS，永久有效；
+  豁免把 case 移出裁决分母（逐例理由必填），之后再测同 case 即撤销豁免；每个复测轮跑完
+  必须重跑 A5，否则不构成最终报告。
+- **最小输入**：首轮工作目录 + 点名的 case；其余参数（轮号、设备、是否需要设备映射）由
+  skill 的复测路由自动恢复。预热次数是复测旋钮（如 `--warmup 10`），默认 0。
+- **报告样貌**：合并报告逐例展示首轮值、各轮摘要与有效状态；豁免例单列理由；未生效的
+  轮（无效/中断）醒目列出，不会静默消失。
+- 流程细节与完整契约（轮次、有效性、折叠规则、恢复）见
+  [SKILL.md](../../skill/repo-task-blas-accept/SKILL.md) 的「A4″ 性能复测」与
+  [retest-protocol.md](../../skill/repo-task-blas-accept/references/retest-protocol.md)。
 
 ### 提示词模板
 
@@ -99,6 +120,17 @@ A4 每个有基线的用例起一次 msprof 采样（单次、免预热，op_sum
 先 source <CANN 路径>/set_env.sh。A2′ 逐项核 param.h / test.cpp / npu_wrapper.h 对照 README。
 做完贴 A5 结论、<产物目录>/report/report.md 与 <产物目录>/intermediate/verdict.json 的
 绝对路径，以及 A1–A5 各阶段退出码。
+```
+
+复测时：
+
+```text
+/repo-task-blas-accept
+对 run-id <id> 的验收结果复测。
+- 工作目录：<首轮工作目录>
+- 复测 case：<名，可多个>；预热 <N 次，可省>
+（或：豁免 <名>，理由：<一句话>）
+做完贴合并后的 A5 结论与 report.md 路径。
 ```
 
 ## 开发者交付物（accept 的前提）
