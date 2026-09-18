@@ -34,7 +34,7 @@
 | SoC | 决定部署 CSV 的 arch 目录 |
 | device | 传给 `build.sh --device`，由 `-DTEST_DEVICE_ID` 编译期固定 |
 | calls_per_case | harness 一条 GTest 用例调用被测接口的次数，数法见 A2′，A2 与 A4 填同一个值 |
-| run-id | 一轮运行的标识，串起精度、复跑、性能与结论；建议 `<op>-<YYYYMMDD-HHMM>`，不得以 `-retest-<数字>` 结尾（保留给复测轮） |
+| run-id | 一轮运行的标识，串起精度、复跑、性能与结论；建议 `<op>-<YYYYMMDD-HHMM>` |
 | 产物目录 | A5 三类产物的写入位置；可选，缺省 `<工作目录>/verdict`，语义见 A5 |
 
 所有输入路径使用绝对路径，所有命令先进入工作目录。工作目录的布局固定如下：

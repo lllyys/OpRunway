@@ -94,20 +94,20 @@ cd <工作目录>/runtime && <python> verify_accuracy.py \
   --repo <工程目录> --soc <soc> --device <device> --run-id <id>
 ```
 
-**run-id**（一轮运行的标识，串起精度、复跑、性能与结论）只含字母、数字、点、下划线、
-连字符，且不得以 `-retest-<数字>` 结尾（该形态保留给复测轮，见 A4″）；
-建议 `<op>-<YYYYMMDD-HHMM>`。首轮出现 `FAIL/SKIP/TIMEOUT/CRASH/MISSING` 时，
+**run-id**（一轮运行的标识）只含字母、数字、点、下划线、连字符，不得以
+`-retest-<数字>` 结尾（复测轮保留，见 A4″）。用户未指定时按
+`<op>-<YYYYMMDD-HHMM>` 自动取名，A3/A4/A5 沿用同一值。首轮出现 `FAIL/SKIP/TIMEOUT/CRASH/MISSING` 时，
 每个失败 case 加 `--run-id <id>-rerun --case <case_name> --skip-build` 精确复跑一次
-（完整命令见 run-chain.md 的「复跑与归因」）。复跑 id 必须恰为 `<id>-rerun`，A5 只认
-这个名字；多例复跑时重复 `--case`，仍只产生一份 `<id>-rerun` JSON。首轮失败不因复跑
+（完整命令见 run-chain.md「复跑与归因」）。复跑 id 必须恰为 `<id>-rerun`（A5 只认它）；
+多例复跑重复 `--case`，仍只产生一份 JSON。首轮失败不因复跑
 PASS 被抹除，归因四值见同节。
-退出码 3 是环境失败：按 troubleshooting.md 修复后换一个新 run-id 重跑一次，仍 3 就
+退出码 3 是环境失败：按 troubleshooting.md 修复后换新 run-id 重跑一次，仍 3 就
 停止并报 `证据不足 @A3`。
 
 ### A4 性能
 
-A3 退出码 0 且 `check.json` 的 `checks.perf.comparable_pf` 大于 0 才运行。msprof 是
-CANN 自带的性能采集命令，采集协议与通过判据见 [perf-protocol.md](references/perf-protocol.md)：
+A3 退出码 0 且 `check.json` 的 `checks.perf.comparable_pf` 大于 0 才运行。msprof
+采集协议与通过判据见 [perf-protocol.md](references/perf-protocol.md)：
 
 ```bash
 cd <工作目录>/runtime && <python> verify_performance.py \
