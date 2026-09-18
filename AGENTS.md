@@ -67,5 +67,5 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
 Push 前对自上次 push 以来的改动做一轮 audit → fix → verify；一轮即停，剩余问题如实报告。
 局部证据或单阶段跑通不得描述成算子正式通过。
 
-评审的工作流、七个维度与触发条件见 `.claude/rules/codex-review.md`；audit 的
-fix 段同受七维约束（见该文件）。
+评审的工作流、八个维度与触发条件见 `.claude/rules/codex-review.md`；audit 的
+fix 段同受八维约束（见该文件）。

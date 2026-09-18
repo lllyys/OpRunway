@@ -59,10 +59,16 @@ MUTATORS = [
 ]
 
 # 派 Codex 落盘的三条路径
-# 第三支要求 `codex` 是独立的命令词：前面不能是 `.`（那是 `.codex` 目录），后面不能直接接
-# shell 操作符或重定向——`ls .codex 2>/dev/null`、`which codex | head` 都不是派单。
-CODEX_CMD = re.compile(r"codex-runner\.mjs|codex\s+exec|(?<!\.)\bcodex\b\s+(?![-;&|<>]|\d+[<>])\S")
-# 只读沙箱的派单：落不了盘，属「看」不属「改」。
+# 第三支要求 `codex` 处在**命令位**（行首、`;&|(` 之后、nohup/sudo/exec 或 VAR=VAL 前缀之后），
+# 且后面跟真实参数词——`which codex`、`echo "codex NOT on PATH"`、`ls .codex` 里 codex 都是
+# 参数或字符串，不是派单（2026-09-17 实录误判修正）。
+CODEX_CMD = re.compile(
+    r"codex-runner\.mjs|codex\s+exec|"
+    r"(?:^|[;&|(`]\s*|\bnohup\s+|\bsudo\s+|\bexec\s+)(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+    r"codex\b\s+(?![-;&|<>]|\d+[<>])\S",
+    re.M,
+)
+# 只读沙箱的派单：落不了盘，属「看」不属「改」。判定在剥引号后的命令面上做。
 READONLY_SANDBOX = re.compile(r"(?:--sandbox|-s)[=\s]+['\"]?read-only")
 # 文档化的「关掉一次」：只认命令前缀位（行首或 ;/&&/|| 之后），藏在引号串里的不算。
 GATE_OFF_PREFIX = re.compile(r"(?:^|[;&|]\s*)\s*SKILL_GATE_OFF=(?:1|true)\s+\S")
@@ -73,6 +79,8 @@ _QUOTED = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'')
 
 def unquoted(text):
     return _QUOTED.sub(" ", text)
+
+
 CODEX_TOOLS = ("mcp__codex-cli__codex", "mcp__codex-cli__codex-reply")
 IMPLEMENT_SKILLS = ("cc-suite:implement", "cc-suite:continue", "cc-suite:audit-fix")
 
@@ -150,14 +158,14 @@ def is_skill_change(tool, inp, text):
     if tool == "Skill":
         return inp.get("skill") in IMPLEMENT_SKILLS and mentions_skill(text)
     if tool in CODEX_TOOLS:
-        if inp.get("sandbox") == "read-only":
+        if (inp.get("sandbox") or "") == "read-only":
             return False
         return mentions_skill(text)
     if tool == "Bash":
         bare = unquoted(text)
         if CODEX_CMD.search(text):
             # 只读豁免要在剥引号后的命令面上成立，且同一调用里不得再有
-            # 任何写动作——「只读派单; 再改文件」不算只读。
+            # 任何写动作——「只读派单; 再改文件」不算只读（2026-09-17 审计 #8）。
             if (READONLY_SANDBOX.search(bare)
                     and not any(m.search(bare) for m in MUTATORS)):
                 return False
@@ -208,6 +216,9 @@ def main():
     tool = data.get("tool_name") or ""
     inp = data.get("tool_input") or {}
     text = target_text(tool, inp)
+    # 文档承诺的开关也要认命令前缀形式：`SKILL_GATE_OFF=1 cmd …` 的赋值只存在于
+    # 命令字符串里，hook 进程的环境变量看不见它（2026-09-17 实录失灵修正）；
+    # 剥引号后再判，藏在字符串里的不算旁路（审计 #8）。
     if tool == "Bash" and GATE_OFF_PREFIX.search(unquoted(text)):
         allow()
     if not is_skill_change(tool, inp, text):

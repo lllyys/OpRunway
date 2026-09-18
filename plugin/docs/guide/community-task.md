@@ -10,7 +10,8 @@
 | `repo-task-case-gen` | 任务书 | 测试用例 + CPU 标准答案 | 无 |
 | `repo-task-atk-accept` | 上两者的产物 + 算子工程 | 验收结论报告 | NPU |
 
-BLAS 类算子把后两个换成 `repo-task-blas-case-gen` 与 `repo-task-blas-accept`，形态一致。
+BLAS 类算子把后两个换成 `repo-task-blas-case-gen` 与 `repo-task-blas-accept`，形态一致；
+该分支的细则（输入产物、验收后复测与豁免）见 [blas-usage.md](blas-usage.md)。
 
 **任务书自带跑测件时跳过中间那步。** 部分社区任务（sparse 系列如此）随任务书交付
 一整套用例与执行器脚本，验收直接拿它跑，`repo-task-case-gen` 不参与。

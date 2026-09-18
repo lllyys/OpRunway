@@ -32,6 +32,15 @@ PARTIAL 与新点的精确面：
   自报+抽查仍是软约束；需要硬保证时升级独立 worktree（并行方案 §7 既记）。
 - [ ] plan §5 预算表数字复核：终审实测 T4 载入 25,060B 与表内 32,768 压线
   依据不符，按实测更新（不影响达标结论）。
+## P1 · blas-accept 复测（已落地 @ worktree blas-accept-retest，见 brief 2026-09-18）
+
+- [ ] Mr.0 审 diff 与 commit（三笔拆分建议：①量具证据保护+锚 ②量具 warmup
+  ③复测全量——量具复测模式+accept+折叠核+测试+文档；回滚合法序仅逆序）。
+- [ ] P7 换卡门控版：差「显式非零编译卡完整链」真机形态 + Mr.0 裁定启用；
+  实施时 profile 绑卡推导走数据不走分支，附录 A 契约已在 spec §11。
+- [ ] 上游 PR 另立项（两 blas skill 的复测面）。
+- 已知不动项：首轮短行基线（数据行缺 gpu_ms 列）在运行时加载处裸 traceback，
+  存量行为，修它属首轮行为变更（动 byte-compat），本轮明确不做。
 
 ## P0 · sparse R1（已立项，实施中 @ feature/sparse-r1）
 
