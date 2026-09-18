@@ -55,6 +55,17 @@ S0 前置检查 → S1 填 FACTS → S2 render → S3 check。`package.py check`
 只依据任务书填 FACTS。做完贴 S3 的 check 输出。
 ```
 
+实际例子（sger）：
+
+```text
+/repo-task-blas-case-gen
+为算子 sger 生成用例与脚本。
+- 任务书：/home/dev/tasks/aclblasSger_task_doc.md
+- 工作目录：/home/dev/work/test_script/sger
+- python 用 python3
+只依据任务书填 FACTS。做完贴 S3 的 check 输出。
+```
+
 ## 2. repo-task-blas-accept — 在 NPU 上验收
 
 拿六件包和开发者的 ops-blas 工程，在 NPU 上过环境、契约、精度、性能几道门，给出证据化结论。
@@ -122,6 +133,20 @@ A4 每个有基线的用例起一次 msprof 采样（单次采集、默认无预
 绝对路径，以及 A1–A5 各阶段退出码。
 ```
 
+实际例子（sger 首轮）：
+
+```text
+/repo-task-blas-accept
+验收算子 sger。
+- 任务包目录：/home/dev/work/test_script/sger
+- 工程目录：/home/dev/ops-blas
+- soc=ascend910_93，device=0，python=python3，run-id 用 sger-20260918-1
+- 产物目录：省略，用缺省
+先 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh。
+A2′ 逐项核 param.h / test.cpp / npu_wrapper.h 对照 README。
+做完贴 A5 结论、report.md 与 verdict.json 的绝对路径，以及 A1–A5 各阶段退出码。
+```
+
 复测时：
 
 ```text
@@ -130,6 +155,26 @@ A4 每个有基线的用例起一次 msprof 采样（单次采集、默认无预
 - 工作目录：<首轮工作目录>
 - 复测 case：<名，可多个>；预热 <N 次，可省>
 （或：豁免 <名>，理由：<一句话>）
+做完贴合并后的 A5 结论与 report.md 路径。
+```
+
+实际例子（复测一个可疑 FAIL 例，预热 10 次）：
+
+```text
+/repo-task-blas-accept
+对 run-id sger-20260918-1 的验收结果复测。
+- 工作目录：/home/dev/work/accept/sger
+- 复测 case：TC_PF_012；预热 10 次
+做完贴合并后的 A5 结论与 report.md 路径。
+```
+
+实际例子（豁免一个范围外用例）：
+
+```text
+/repo-task-blas-accept
+对 run-id sger-20260918-1 的验收结果复测。
+- 工作目录：/home/dev/work/accept/sger
+- 豁免 TC_PF_007，理由：任务方确认该尺寸不在性能承诺范围
 做完贴合并后的 A5 结论与 report.md 路径。
 ```
 
