@@ -2,6 +2,25 @@
 
 本页只保留尚未完成且有当前证据的工作。仓规以根 `AGENTS.md` 为准，已完成历史查 changes brief 与 Git。
 
+## P1 · 0923 solver 批次（立项中 @ worktree solver-accept-0923，2026-09-21）
+
+背景与全部证据见 `dev-doc/solver-0923-context.md`。
+
+- [ ] **决策点：走哪条验收线。** 三选一——① 给 ops-solver 补 CSV+GTest harness 走
+  BLAS 线（半径最大，模型缺口仍在）；② ATK 线 + `external-perf`（半径最小，已有
+  `run_cxx.py` 与 `matched_ratio`/`max_abs_error` 字段）；③ 新起
+  `repo-task-solver-accept`（不污染现有两线，多养一条）。定了才谈实施。
+- [ ] 竞品基线可用性裁定：H100 采的数据能不能当 `T_A100`，还是标「基线缺失」留白。
+  连带口径差（5 预热/25 采样/min-avg vs 10/30/中位数）要么重采要么在报告里写明。
+- [ ] 歧义定死后才能开跑：`matinvBatched` 的 n 边界四说不一（P-12 恰在争议点且零基线）；
+  分解类「自洽重构 vs golden 比较」优先级；Cholesky/QR 缺输出不唯一的豁免条款。
+- [ ] 外部输入体检门（新想法，未立项）：0923 这类「任务书、用例、harness 全由别人填」的
+  场景，现有 A2 只裁文件有无，缺内容体检——标杆出处、采集口径、用例覆不覆盖判据表、
+  判据自身自相矛盾。产物是逐槽位可信度表（可用 / 可用但标注 / 不可用）。
+  方法论见 `accept-line-adoption-method.md` 第四节。
+- [ ] `community_task` 本地 clone 落后（`b8e6d22` vs 远端 `ae3c7e0`），拉取前需授权。
+- [ ] 上游卫生 issue 另议：`cunmqr/改动报告_20260907.md` 在公开仓引用带员工账号的内部路径。
+
 ## P1 · doc-write 改造收尾（checkpoint 终审 + verify 轮遗留，2026-09-17）
 
 verify 判定（thread 01a0b230）：3 FIXED / 7 PARTIAL / 1 NOT_FIXED，一轮即停。
