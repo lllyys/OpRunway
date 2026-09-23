@@ -3,7 +3,195 @@
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
-  T2 候选对照 golden 自检的改进项落地；0923 solver 批次走哪条验收线（三选一，见下条）。
+  T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
+  （见 context 第 8′ 节末）。
+- **2026-09-23l · S1-Cholesky 工作流收官，代码过门搬入 `plugin/skill/`。** 多 agent
+  端到端执行完成（三轮：首轮撞 skill-edit-gate 与授权转述缺失、次轮被「查进度」消息
+  劫持任务卡、第三轮修 spec 1.1/1.2 与指令优先级后 9 agent 零失败）。战果：canonical
+  584 条冻结；criteria 三层判定内核（任务书还原主判/potri 双目标/T3T4 双套显携）远程
+  pytest 54/54；24 npz 双跑逐位一致 + A32==cast(A64)；ratio_cpu 24/24 回填且画像对上
+  README（potrs n=512 实测 4.31 vs 参考 4.585）；渲染 124 断言过、副本与 judge 逐字段
+  一致；accept 骨架 64/64（七类期望集、删证据→族级不得通过、指纹分级）；三包装配
+  36 断言过、三份 report 数值 PASS/formal 恒待裁、负例整腿字节级复现。执行于 a3 容器
+  （CPU 侧与平台无关，版本已录 manifest）。声明边界见 `reports/solver-s1/run-record.md`
+  （8 可声明/9 不可声明）。搬移：主会话补齐 skill-edit-gate 两前置（读最佳实践 +
+  调 skill-creator）后过门，tree→`plugin/skill/repo-task-solver-{accept,case-gen}` diff
+  零差异。偏差记录：首轮 A 卡曾本机跑测试（超 py_compile 白名单，正式判定以远程为准）；
+  B1 迁移时抓出 F 序落盘 bug 已修（scipy LAPACK 返回 F 序，直接 savez 违反行主序契约）。
+  未 commit。下一片：SKILL.md + plugin.json 登记（走 skill-creator 评测闭环）、S2 冷读、
+  复数与 batched。
+- **2026-09-23k · S1-Cholesky spec 出炉、过评审、升 v2；solver 文档归拢进
+  `dev-doc/solver/`。** spec v1（接口契约+三波任务卡）经 Codex 冷读评审（thread
+  `01a0cd5e`）：架构可不改，11 条必须改全部采纳——最重的三条：T4 被我写成「双解释
+  交集」等于自选语义，v2 改为 numeric/formal 分离、formal 本片恒为待裁；case 清单
+  未冻结致 B/C 各自发明身份，v2 加波 0 冻结 canonical_cases；残差实现有被复制两份的
+  循环依赖，v2 提纯 residual_ratio 公共接口、B 的 ratio_cpu 收尾后置。另并入 Mr.0
+  指示：**脚本执行一律远程容器，本机只编辑**（同时解掉评审点出的仓规冲突）；ε 固定
+  2⁻²⁴、golden64/32 双存、指纹分级（数据错配阻断/副本漂移告警）。七份 solver-*
+  文档移入 `dev-doc/solver/`，交叉链接已修，断链清零。下一步：按 spec v2 启
+  multi-agent 端到端执行（Mr.0 已指示）。
+- **2026-09-23j · 标准指涉钉死用最新版。** solver_tasks-main 文中「开源生态标准/现行
+  标准」一律代换为最新 mixed_tolerance_standard.md（原引 experimental 已 404）；T3 默认
+  升级：按最新标准表（FP32 2⁻¹³）计算、任务书数值并列展示疑为旧版残留、正式结论留
+  任务方确认。设计 v2 与 supplement 23h 已同步。
+- **2026-09-23i · 裁定订正：solver_tasks-main 三层判定就是 solver 精度标准。** 原混合
+  容差标准不完全适用 solver，其角色是三层判定第一层的逐元素判（嵌套非替代）；兜底默认
+  启用，23h 的「不默认启用」作废。连锁：ratio_cpu 基线进包契约（case-gen 逐 case 实测
+  随包冻结）；标准留档空档升级为我们的空档（T8：Cholesky batched、gels、getrs 大 n、
+  geev R2）。设计 v2 与 supplement 23g 已同步。
+- **2026-09-23h · verify_accuracy 实现参考 solver_tasks-main。** 判定标准仍是混合容差
+  （不采三层制不变），实现机制取其定稿件：还原目标构造、ipiv 正序回放、复数 z 前缀、
+  半三角范数口径、冻结三档；LAPACK 残差兜底不默认启用，仅作首包实测误报时向任务方
+  提标准诉求的备选。设计 v2 3.3 节与 supplement 23f 已同步。
+- **2026-09-23g · verify_perf 判据数据源定：逐 case 取 bench_result 对应条目。** 按
+  n/batch/lda/uplo 参数精确匹配，case-gen 产 `perf_baseline` 时匹配并去重（cases.json
+  有重复行），无对应条目标证据不足。T1 收窄为：达标公式、统计口径（avg vs 中位数）、
+  硬边界 10 改写方式。设计 v2 与 supplement 23e 已同步。
+- **2026-09-23f · 双 verify 入包契约。** Mr.0 裁定包内自测件拆两个：`verify_accuracy.py`
+  （混合容差双门+还原目标）与 `verify_perf.py`（对 `perf_baseline` 出逐 P 项比值，受 T1
+  语义约束）；均为 accept `criteria/` 渲染副本、输出不构成验收证据；criteria 内核扩为
+  精度判据+性能采样协议与基线比较规则。设计 v2 第 2、3.3 节与 supplement 23d 已同步。
+- **2026-09-23e · S0 评审回执与处置：设计升 v2。** Codex 冷读评审（thread `01a0cd2a`）
+  判「架构保留、契约未闭合」：两 skill/一算子一包/裁决主权/T6 方向均可不改；八条必须改
+  全部采纳落 v2——族级期望集入 accept（硬边界 9 结构缺口）、构建隔离与内容差分由「或」
+  改互补（硬边界 2 错误替代）、T1–T5 补未裁定运行语义并新增 T7（复数口径）、criteria
+  版本参照与 S1 前置最小判据内核（解依赖倒置）、数据契约与复测/报告职责补齐、硬边界
+  逐条落点表、S1–S4 完成条件重写成可机械判定、过度承诺与术语订正（seed 概括实测核实：
+  getrf 族 149 非 42）。评审报的 T6 状态冲突方向相反：滞后的是 supplement，已订正。
+  T1/T2 采纳为默认仍待 Mr.0 正式裁定。
+- **2026-09-23d · 裁决主权定稿：判定标准、执行、裁决全在 accept skill 侧。** 判据内核
+  住 accept `criteria/`；包内 `verify.py` 降格为 case-gen 渲染的自测辅助件，输出不构成
+  验收证据；验收不执行包内或开发者环境脚本出结论；重渲染逐字节核对拦无意漂移（警告级，
+  不做防人）。设计 v1 第 6 节「权威在包内」的旧表述据此订正；T6 建议 v1 不统一，待确认。
+- **2026-09-23c · 盘点 ops-solver 既有测试范式，包与开发者测试的关系入设计 v1 第 6 节。**
+  六算子五件套（CMake/test.cpp 调用器/gen_data seed=42/verify np.allclose/README），判据
+  非验收标准、test.cpp 无判据无计时、test 目录可污染被测构建（cheevj 先例）。定位三条：
+  验收判据唯一权威在包内；自测用包、仓测试归仓（维护者域，与验收解耦）；accept 构建
+  被测隔离 test 副作用。新增张力 T6：case-gen 是否同源渲染仓测试骨架，待裁。
+- **2026-09-23b · 环节设计 v1 落 `solver-pipeline-design.md`，两处当场落定。** Mr.0 定调
+  「先设计好整个环节再打通」：E1–E4 泳道（发布素材→case-gen 产包→开发者自测→accept
+  验收）、任务包八件契约、两 skill 契约、张力 T1–T5、S0–S4 薄垂直切片打通计划（S2 用
+  ops-solver 既有 cmatinv_batched 充当模拟开发者，试金石是冷读开发者只凭包内 README
+  自测走通）。落定两处：**调用点归 case-gen**（测试脚本随包）；**交付形态由档③改档②**
+  （自产·随包交付——开发者自测需要同一套测试件），乙内核不变。待 S0 Codex 评审。
+- **2026-09-23a · Mr.0 七点补充落档 `solver-skill-supplement.md`，精度标准原文到手。**
+  要点：任务包（case+脚本）由我们提供，case-gen 先行、开发者拿产物自测；case-gen 是
+  「生成器的生成器」（读 cases.json + 竞品 cu → 产 python 数据构造脚本 + 数据集，
+  cu 的合法输入构造逻辑升格为权威来源，需转写成带 seed 可落盘版）；精度用 opbase
+  最新混合容差标准（已拉原文存 `repos/opbase-precision-standard/`，旧 experimental
+  已 404），**不采 solver_tasks-main 三层制**，其降级为参考；性能与精度同输入，性能
+  基线读 bench_result.json。**三处张力待裁**：① bench_result（竞品 avg 口径）当基线
+  与硬边界 10 相撞；② 性能/精度用例集合不重合时「同输入」怎么落；③ 标准表 FP32
+  rtol=atol=2⁻¹³ 与任务书 rtol 2⁻¹⁰/atol 2⁻¹⁶ 不一致。
+- **2026-09-22i · `community_task` 拉到 `05a8c04`（Mr.0 授权），0923 任务书零漂移。**
+  自基线 `b8e6d22` 起 0923 目录 105 处变更全是新增：发放方往批次里补了一批 aclblas 任务
+  （A2 目标，与 solver 无关，按 Mr.0 指示不展开），solver 七个目录只多了 `pics/` 报名
+  引导图。**六份任务书正文一字未动，context 里已核的行号全部有效**，todo 该项已勾。
+- **2026-09-22h · `solver_tasks-main`（微信收的精度标准交接工程，792K）拷入
+  `repos/solver_tasks-main`，做 case-gen 参考。** 内容：四族 precision 目录
+  （lu/qr/cholesky/geev，各带 README + 可复现脚本 + GPU 复验日志）加一份 2026-09-16
+  交接文档。**它直接命中三处悬案**：① §9 的「重构 vs 比对优先级」——标准侧答案是
+  三层判定（还原/真值直审 → 不满足 → LAPACK ε 归一化残差兜底，`ratio = 残差₁范数 /
+  (维度·‖A‖·ε)`，阈值挂 LAPACK THRESH=30 契约并按 ratio_cpu 分治收紧/上浮）；
+  ② golden 探针留下的 ipiv 盲点——**正序回放（k=0→n-1）得 P·A=L·U** 已定稿（探针+
+  50-shape 双证）；③ `experimental_standard.md` 有了出处 URL 与「为何不适用 solver
+  分解类」的两条实证理由（解不唯一 / n·κ·ε 放大致参考实现自判 FAIL）。另给了 case-gen
+  可直接抄的数据生成规约（50% U(-5,5) + 50% 正态、seed=20250912+n、四族 shape 集
+  50/14/16/16）与四族 GPU 复验全量 ratio 表。**注意两点**：这是标准侧交接件不是任务书，
+  三层判定与 0923 任务书的固定容差（rtol 2⁻¹⁰ 等）谁管验收还要对齐，getrs DGET02、
+  geev R2 两处越线也明说了「留档待标准决策」；故 §9 歧义只算「有候选答案」不算已定。
+- **2026-09-22g · 上游 `.claude/` 的 rules 与 hooks 挪进仓根（clone 快进
+  71ddf5f→13b3f88；Mr.0：「挪，冲突按你说的裁」）。** 挪了两份规则（`skill-authoring.md`
+  SA-01～17、`zh-writing.md` ZH 词表与术语表）与四个 hook（`doc_style_lint.py`、
+  `jargon_scan.py`、`skill_budget_lint.py`、`skill-md-gate.py`）加两份测试。两处裁定：
+  规则 frontmatter 只指 `plugin/skill/**` 与 `plugin/docs/guide/`——**ZH 词表只管发布件，
+  `dev-doc/` 不受「判据/量具」禁用约束**；`skill-md-gate` 与既有 `skill-edit-gate` **并存**，
+  前者拦「规则未读就新建 skill 文档」并在写后报 lint 与载入预算，后者拦「未读最佳实践、
+  未走 skill-creator」，职责不同不合并。适配用双前缀并存：hook 的 glob 同时认 `skill/*`
+  与 `plugin/skill/*`，仓根没有顶层 `skill/` 两处不会同时非空，上游测试夹具零改动，
+  回同步是纯增量；gate 正则本就不带锚点，零改动命中 `plugin/` 路径。settings.json 接线
+  Pre+PostToolUse（Edit|Write）。验证实测：82/82 测试过（uvx 隔离跑 pytest，唯一测试改动
+  是预算用例指向 `plugin/` 真实文件）；`skill_budget_lint` 全仓 13 个 skill 都在预算内
+  （blas-accept 32760 B 与此前实测一致）；`doc_style_lint` 强制模式退 1、378 处拦截，
+  主因是镜像还在旧基线而上游把 `repo-task-case-gen` 清干净后才进 MIGRATED——**不单独修，
+  镜像同步到 13b3f88 时自然消解**。顺带：clone 的 `CLAUDE.md` 有表格对齐空格的格式化噪音
+  挡住快进，已丢弃恢复镜像纯净。
+- **2026-09-22f · `community_task`（cszhangyong 的任务发放仓）自工作区根挪入 ignored
+  `repos/`（Mr.0 授权）。** 位置：`repos/community_task`，HEAD 仍是 `b8e6d22`@09-15，
+  远端已到 `05a8c04d`，**落后未拉**（拉取待授权，拉后要 diff 0923 目录复核已核行号）。
+  context 参考物一节与 todo 的路径引用已同步。
+- **2026-09-22e · 路线定了：Mr.0 裁定走乙——新起 `repo-task-solver-accept`，自产 harness
+  留在验收现场（context 572 行，新增第 8′ 节；todo 决策点已勾）。** 裁决依据是**改动成本与
+  维护成本两轴**，不是八维总分：改动成本乙 ~4600–7100 < 丙 ~5100–7600 < 甲 ~6800–9950，
+  且**甲 贵出的部分主要不在 accept，在 case-gen 被六件契约拉高了成熟度门槛**
+  （4000–6000 对 1400–2300）；入场费乙丙 为 0 而甲 实测 A1 退 3；维护上甲 是**永久耦合**
+  （每次任一域改动要跨域回归，而 blas 线正在改采集），乙 是独立但重复，丙 再加一项
+  「跟目标仓测试树结构」。丙 唯一的理由是产物形态贴近开发者交付件，但按角色模型
+  **那是开发者的交付件不是我们的**，理由不成立。**乙 是唯一不依赖别人先做什么的路。**
+  同轮把甲 的评分重算了一遍，**仍是 29**：简单性的理由整个换掉（采集那块既有线自己要改，
+  从减分变中性；case-gen 被六件契约锁死是新的减分），爆炸半径**差点被我重复计分**——
+  通用化让半径「一次性」，但爆炸半径量的是**足迹**不是值不值，通用化该进整体权衡而非这一维。
+  另订正：「改包定义」那项去掉（12 条 P 按接口正好分完 3+3+2+2+2，族级只在 accept 聚合）。
+  裁决同时按方法论第四节钉了硬边界：采用 `solver-plan-v3.md` 第 5 节十二条，**要落进
+  skill 的 scripts/ 与 tests/ 不是人工清单**；其中三条被违反即评分作废。两条翻案条件记明。
+- **2026-09-22d · 方法论 3.1 加第三条判词：适配改动分特判化与通用化，只有前者自噬复用
+  （283 行）。** 起因是我先下了「凡是让适配方案更贴合新域的改动都在削弱它的复用理由」这个
+  结论，Mr.0 反问「能不能改成更通用、尽管爆炸半径比较大」——**这个反问是对的，我下得太快**。
+  区分补上：**特判化**（为手头这域加分支，对既有域无益，半径反复付，自噬复用）vs
+  **通用化**（把一维从硬编码变成数据/profile，既有域同样受益，**半径是一次性投入，复用面
+  反而扩大**）。判别不另起判据，就用本节已有的四个机械问法。三条操作要点：①通用化时
+  **爆炸半径不该单独算否决理由**，要算「一次性投入 ÷ 受益域数」；②打分前做复用面清点，
+  把剩余分成「必须同 skill 才能复用」与「照抄思路就能拿到」两类，后者**不记在适配方案头上**；
+  ③**既有线本来就要改的部分，新域蹭上去不算额外半径**——先问「这块是不是它自己也要动」。
+  据此订正对 0923 的判断：golden 落位与 harness 形态两维**都有现成扩展点**
+  （`golden.kind`、A2′ 文件名表可下沉成 profile），属通用化而非特判化，**半径大但一次性**；
+  采样除数模型那块既有线自己也要改，不记在新域账上。所以先前「甲′ 两头更差」的结论撤回。
+- **2026-09-22c · 甲乙丙 三条路上真机实测，排序依据从估算换成实测（context 529 行，
+  新增 11.1/11.2 两节）。** 目标机 A5 / Ascend950PR / CANN 9.0.0，容器内作业，宿主机未动。
+  **乙 与丙 都走通了精度与性能两条路**：输入按 0923 的 `cases.json` 格式，被测是现有的
+  `aclsolverCmatinvBatched`（七个算子里唯一在 950PR 上跑得起来的），自写三件共 366 行
+  （gen_data 68 / harness 182 / verify 116），按任务书判据裁——rtol 2⁻¹⁰、atol 2⁻¹⁶、
+  ratio 0.99、复数实虚分判、golden 走 complex128。**两条都 5/5 PASS 且数值逐位相同**；
+  乙 全链 ~16s（编译一条 g++ 0.462s），丙 全链 21.8s（多 17 行 CMakeLists、走 build.sh
+  全库重建）。**甲 没走通**：`accept.py env` 对 ops-solver 退出码 **3**，两项硬失败
+  `csv_loader.h` 与 `harness_profile` 探测，十项里六项免费通过。
+  **三条订正**：①「overlay 污染被测库构建」是**写法问题不是形态问题**——本次 overlay 的
+  CMakeLists 只建可执行文件，装入后既有文件零改动；cheevj 那份污染是它主动改库；
+  **乙 的爆炸半径优势因此收窄**。②甲 与乙丙 不是同一量级——乙丙 是"写 366 行就跑通"，
+  甲 是"先改两道硬门才谈得上开始"。③先前评分（甲 29/丙 33/乙 34）基础是估算，已在
+  第 8 节标注早于本次实测。
+  **两个新发现**：现有六个算子只声明 A2/A3、在 950PR 上挂 `aclrtGetHardwareSyncAddr`
+  (207000)，仓自己的测试同样挂——**平台不匹配，非我方问题**；`msprof op`(msopprof) 的
+  `--kernel-name`/`--launch-skip-before-match`/`--warm-up`/`--launch-count` 在工具层直接
+  支持"只采目标调用、跳过准备段"，不必走 op_summary 求和再除 calls_per_case。
+  另记：0923 的 batch 上到 1000 万而现有接口写死 `batchSize ∈ (0,3000]`。
+- **2026-09-22b · 重评与六件差异记进 context（366 行，新增第 7 节，原 7–10 顺延）。**
+  **重评**：本仓只动甲，两次反向调整后净下调一分——爆炸半径 3→4（BLAS 只服务 blas 一个
+  真实消费者，sparse 走 ATK 自带件路，sparse-r1 已废无 rebase）、简单性 3→2（采集层正在改
+  且不与 solver 捆绑，要么等要么绑移动目标）、**爆炸半径 4→3**（Mr.0 裁定：甲动的不是普通
+  接口，是 blas 的**三道防假通过的门**——A1 的 `csv_loader.h` 硬检查 `accept.py:543-544`、
+  A2′ 三文件 `accept.py:346`、空跑检测 `_column_read_report` `accept.py:335`；solver 无 frame
+  且非 CSV 驱动，三道都得改成按域可开关）。结果 **甲 29 / 丙 33 / 乙 34**，且**结论形状变了**：
+  甲的条件分支（采集重做连协议一起改）最好只到 33，追平丙仍落后乙一分，因为那三道门跟采集
+  层怎么改无关——**「先问采集重做范围」这条建议据此降级，它不再能翻转排序**。
+  **六件差异**：逐件列出与 blas 的不同；最硬一处是**包粒度**（六件契约定义单算子包，0923
+  是族级不可拆，要么拆五包加跨包聚合要么改契约），与采集协议无关，是契约层结构冲突。
+  并定死两条：`gpu_baseline.csv` **只填开发者实测的门禁 `T_A100`**，随包 4944 条参考耗时
+  不得填入（口径/出处/覆盖三条全不合），未交前按契约留空表头；随包 `build_run.sh` 与
+  `*_bench.cu` **验收侧不跑**——那是派给开发者的采集手段，我们要做的是核他交的数怎么来的。
+  连带：开发者交件前性能侧只能出摸底结论，精度侧不受影响（golden 自产）。
+- **2026-09-22 · harness / overlay / harness-gen 用语统一（Mr.0 要求）。** 病灶是
+  `harness` 在仓里的既有定义**本就含 golden**（harness-gen-plan §1：参数解析、golden 参考、
+  device 调用适配、测试驱动、构建注册），而我另引了「调用器/判据器」，写着写着就把它们
+  当成 harness 的兄弟词用，档位名也变成「注入 overlay vs 独立执行器」——一个是交付形态、
+  一个是东西，范畴混了。定案：**harness 是实体、调用器/判据器是它的两半、overlay 是交付
+  形态、harness-gen 是工具**，四词各在一层；两条规矩——overlay 是形态不是东西（说
+  「overlay 交付」），说「自产 harness」即含 golden 自产。三档改名为 **① 消费开发者的 /
+  ② 自产·overlay 交付 / ③ 自产·现场交付**（自产与否 × 交付形态两轴）。定义落在方法论
+  第 3.2 节为唯一源，roles、context、v2、v3 四份改为引用它。历史件不动：brief 的旧条目与
+  已派发的 v1 决策包保持原样。顺带查实 **harness-gen 对 solver 一行用不上**——支持矩阵限
+  FACTS schema v1、`golden.kind=cblas`、不支持复数与 nullable、要绑目标工程兼容配置，
+  solver 四条全不满足，且它明写拒绝 schema v2（「对自带 golden 的包反向生成 harness 是悖论」）。
 - **2026-09-21j · 「A100 基线不存在」是错的，订正（Mr.0 指出）。** 数下来：27 份
   `bench_result.json` 共 5520 条结果，**4944 条带实测耗时（89%），25/27 个算子有数据**，
   只有两个 getriBatched 是零、两个 gels 各 106/243。错在混了两样东西——**竞品套件的逐用例
@@ -85,7 +273,7 @@
   与 Source directories（旧值同样指向已不存在的路径），新值按 `plugin/pytest.ini` 的
   `testpaths` 与根 conftest 位置静态推出——**本机无任何解释器装 pytest，没能实跑验证**。
   另：0923 线路与 harness 档位的八维评审已派给 Codex（gpt-6-astra/xhigh，只读，后台
-  job `review-plan-muazmi3g-hzpx2y`），派单用的自足决策包是 `dev-doc/solver-route-decision-packet.md`。
+  job `review-plan-muazmi3g-hzpx2y`），派单用的自足决策包是 `dev-doc/solver/solver-route-decision-packet.md`。
 - **2026-09-21c · 四个角色成文：`dev-doc/acceptance-roles.md`。** 任务发布者 / 开发者 /
   验收者 / skill 构建者，各自拿到什么、交出什么、可能用哪些 skill。三条主结论：
   ①**产物身份由角色定**——判据来自发布者（权威但数据待核）、被测物来自开发者
@@ -123,7 +311,7 @@
   另建议给外部填槽的场景加一道内容体检门（现 A2 只裁有无）。查证到
   `repo-task-blas-harness-gen` 已建成（8239 行 @ `feature/harness-gen`，未合入）。
 - **2026-09-21 · 0923 solver 批次开工：建 worktree `solver-accept-0923`，前期分析
-  落成 `dev-doc/solver-0923-context.md`。** 这批是 ops-solver 稠密线性代数：7 个包、
+  落成 `dev-doc/solver/solver-0923-context.md`。** 这批是 ops-solver 稠密线性代数：7 个包、
   6 份任务书（第七包 xgeev 无任务书）、29 个核心接口 + 17 个 `_bufferSize`，交付形态
   是 Kernel 直调（原文「非 aclnn 两段式、非 PyTorch 接口」），验收粒度是族不是接口——不许拆、
   12 条 `P-xx` 全达标才收。包里只给了竞品 cuSolver bench（27 套、5638 条用例），

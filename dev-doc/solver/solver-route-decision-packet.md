@@ -4,7 +4,7 @@
 > **正文保持发出时的原样**，以便与评审结论对照。评审与后续复核推翻了其中若干判断
 > （性能口径、标杆性质、档② 的「塞进别人的仓」说法、路线 1 的权限定位等），
 > 现行结论以 [solver-0923-context.md](solver-0923-context.md) 与
-> [accept-line-adoption-method.md](accept-line-adoption-method.md) 为准。
+> [accept-line-adoption-method.md](../accept-line-adoption-method.md) 为准。
 
 ## 0. 请评什么
 
