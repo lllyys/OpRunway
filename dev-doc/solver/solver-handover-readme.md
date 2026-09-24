@@ -47,4 +47,4 @@ sim_dut 冒烟都本地跑。只有真机 NPU 执行与性能实采需要昇腾�
 - 悬置/裁定类问题找 Mr.0，不自行拍板；
 - 不 push、不 merge、不发对外 PR/issue/评论，除非 Mr.0 明示；
 - 验收私集种子不入包、不入公开仓（看板「Mr.0 补充描述」第 3 条）；
-- commit 不加 AI 署名；对外署名 liangyuansheng / lllyys。
+- commit 不加 AI 署名；对外署名用交接者自己的身份，**不署 liangyuansheng / lllyys**。
