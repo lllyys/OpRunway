@@ -18,6 +18,9 @@
 
 - shell 调用之间不继承环境变量。要 CANN 环境时把 `source <set_env.sh> &&` 写在同一条命令
   最前面；`<set_env.sh>` 取 `env.json` 里 `name` 为 `CANN set_env.sh` 那项的 `detail`。
+- 用 A1 探到的那份 `set_env.sh`，不要改用别的脚本。`msprof op` 按
+  `$ASCEND_TOOLKIT_HOME` 找真身，该变量被改写到不含 `tools/msopprof/bin/msopprof`
+  的 toolkit 时转发失败，而它仍然退 0、产物为空——看起来像算子没起 kernel。
 - A3 退出 3 修复后换新 run-id 重跑；A4 退出 3 修复后删掉 `runtime/results/<id>/performance/`
   与 `runtime/results/performance_<id>.json`，用同一个 run-id 重跑。细则见 run-chain.md。
 - 验收不改工程 tracked 文件；部署 CSV、harness 与源码改动都由开发者做。
@@ -92,8 +95,11 @@ profiler 主入口，在 PATH 里的把握比子工具 `msopprof` 大。
 | --- | --- | --- |
 | A1 `msprof` 项记缺失 | PATH 与 CANN 默认位置都没有该二进制 | 先不阻塞；A4 命令前加 `source <set_env.sh> &&` |
 | A4 `MSPROF_NOT_FOUND`，退出 3 | 期望集非空但找不到可执行的 `msprof` | 按下面命令带 `source` 或 `--msprof <路径>` 重跑 A4 |
-| A4 `MSPROF_UNUSABLE`，退出 3 | `msprof op` 转发不到真身 | 多半是 `ASCEND_TOOLKIT_HOME` 指向的 toolkit 下没有 `tools/msopprof/bin/msopprof`；按报错把该变量指对，或 `--msprof <路径>` |
+| A4 `MSPROF_UNUSABLE`，退出 3 | `msprof op` 转发不到真身 | 按报错把 `ASCEND_TOOLKIT_HOME` 指对，或 `--msprof <路径>` |
 | 逐例 `NO_KERNEL` | 扫不到 `OpBasicInfo*.csv`、无数据行、缺列或值非有限正数 | 看 `prof/<case>/` 下的日志 |
+
+`MSPROF_UNUSABLE` 的常见原因是 `ASCEND_TOOLKIT_HOME` 指向的 toolkit 下没有
+`tools/msopprof/bin/msopprof`，报错文本会写出当时的取值。
 
 A1 探测项名与查找目标都是 `msprof`，与 A4 实际要用的一致。A1 只判文件存在且可执行，
 不探 `op` 子命令，所以 A1 记 OK 仍不代表 A4 采得到——以 A4 自己报的错误码为准。

@@ -124,10 +124,12 @@ msopprof --output=<采样目录> --aic-metrics=BasicInfo --launch-count=<N> \
 文件时转发失败，而它**仍然退 0**、只打一行 `[ERROR] The file ... does not exist`、产物
 为空——按失败判定会落到「无数据行」判 NO_KERNEL，把环境问题说成算子没起 kernel。
 
-本仓自己的 `/opt/oprw/median_setenv.sh` 就会触发这条：它为控制 `LD_LIBRARY_PATH` 把
-`ASCEND_TOOLKIT_HOME` 指向影子 toolkit `/work/run/median_tk`，那底下连 `tools/` 都没有。
-这是环境配置问题，不是工具缺陷——指向真 toolkit 时 `msprof op` 工作正常（实测对照：
-影子 toolkit 产 0 份 CSV，真 toolkit 产 1 份）。
+本轮验证时踩到过一次：我在 ATK 线的容器里做 BLAS 验证，手动 source 了那条线的 setenv
+包装，它把 `ASCEND_TOOLKIT_HOME` 改指到一个影子 toolkit，于是转发失败。**BLAS 不在那个
+环境里跑**，这是我的验证现场污染，不是 BLAS 通路的问题。
+
+记它是因为失败形状值得记：指向真 toolkit 时 `msprof op` 产 1 份 CSV，指向没有
+`tools/msopprof/` 的 toolkit 时产 0 份**且仍然退 0**。这是环境配置问题，不是工具缺陷。
 
 **可执行不等于可用。** 自动发现到的二进制还要跑一次 `msprof op --help`，帮助文本里有
 `--launch-count` 才算可用。这个判据比退出码可靠——转发失败时退出码仍是 0，而帮助因为
