@@ -34,13 +34,15 @@
     指出缺口（见下条），备齐后一次跑通。
     注：该轮工程是 **Debug 构建**（`CMAKE_BUILD_TYPE=Debug`），读数比 Release 高约四倍，
     机制有效但数值不可与 Release 对照，不能当算子结论读。
-- [ ] **blas 两个 skill 里的 sparse 机制面待清理**（Mr.0 2026-09-24 裁定 sparse 不归
-  本 skill 管，本轮只收了 `description` 触发面）。留着的有：`accept.py` 的
-  `DEVICE_BIND_MODES["sparse_frame"]`、`run-chain.md` 的 `cann_ops_sparse.h` 入口头映射、
-  `retest-protocol.md` 的 `sparse_frame` 绑卡行、`facts-schema.md` 的 `harness_profile`
-  字段与 v2 schema、两个示例 `gen_csv.py` 的 registry 条目。
-  **动它之前先和 `feature/sparse-r1` 对齐**——那条线在用这套机制；另有四条测试依赖，
-  示例要重渲。
+- [x] **blas 两个 skill 的 sparse 机制面：经评估不清理**（Mr.0 2026-09-24 拍板留着）。
+  触发面已收（两个 `description` 里的 ops-sparse/aclsparse 已摘，那是唯一有行为后果的
+  部分——`description` 决定 skill 被不被 sparse 请求选中）。机制面留着的理由不是
+  `feature/sparse-r1`（该分支已弃），而是：`harness_profile` 是 profile 机制本身而非
+  sparse 专有，`blas` 也靠它取入口头与绑卡约定；删掉 `sparse_frame` 那一条会让
+  `DEVICE_BIND_MODES` 只剩一档、registry 只剩一条、FACTS 字段只能取一个值，
+  整套机制反而更像为单一情形的过度设计（泛化性维）。而留着的代价只有约 1 KB 数据
+  加一个字典行——已机械证明两个 profile 渲染出的量具只差两个常量、采集通路逐字节相同，
+  不引入任何代码分支。
 - [ ] **零上下文实跑抓到的两个既有文档缺口**（2026-09-24，isolated-acceptance 无头会话，
   非本轮引入，但确实卡住验收者）：
   - **skill 怎么到目标机没写。** 文档里的 `<skill>` 指的是本机上放 `SKILL.md` 的目录，
