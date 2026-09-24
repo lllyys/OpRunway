@@ -49,3 +49,17 @@
 | repos/community_task（分支 pr-44） | 任务书 PR #44 增量 |
 | repos/opbase | 生态精度标准（mixed_tolerance_standard.md） |
 | repos/solver_tasks-main | solver 精度标准参考工程（残差链蓝本） |
+
+## 零环境自举（交接者只有上游 PR 代码时）
+
+交接包自足，不依赖我们的工作区与远程容器：
+
+- **代码真源**：上游 PR（Justbin/repo-task-atk-test#15）= plugin 两 skill 现状；
+  交接包 `trees/solver-s3-tree`、`trees/solver-s4-tree` = 待归并的批量与纯脚本实现
+  （plan 阶段 2 的归并源，工作区不可得时以包内这两份为准）；
+- **契约真源**：`taskbooks/` 两份 0924 任务书、`standards/` opbase 混合容差标准
+  （a5e8e71 快照）与 cholesky_precision 残差链蓝本 README、`frozen/` 批量 canonical
+  冻结件、`delivered-packages/` 已交付十包（按任务书分装）；
+- **最小环境**：python3.10+ 与 numpy/scipy/pytest——criteria 全部测试、造数、装包、
+  自检、sim_dut 冒烟都可本地跑；只有真机 NPU 执行与性能实采需要昇腾环境，
+  没有环境时这两类按 plan 记「待真机」即可，不阻塞其余全部工作。

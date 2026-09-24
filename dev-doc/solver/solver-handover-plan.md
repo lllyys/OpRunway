@@ -16,6 +16,7 @@ pr-44）——**产包前核对上游 main 是否已合入，未合入问 Mr.0**
 - 首次改 plugin/skill 前按 skill-edit-gate 提示读 skill-best-practices 并调用
   skill-creator，md 改动过 doc_style_lint 退 0；
 - 测试用带 scipy 的 venv（无则自建 numpy/scipy/pytest）；真机与大规格在远程容器；
+  **无昇腾环境时**：除真机执行与性能实采外全部工作可本地完成，真机项记「待真机」；
 - 悬置项不替 Mr.0 拍板；不 push/merge/对外发布，除非明示；
 - 「绿」的判据是行为覆盖+全通过，不是测试数量不降（拆双轨可合法删旧断言）。
 
@@ -42,9 +43,9 @@ cards_cholesky}.py、criteria/tests/、scripts/{accept_run,sim_dut,expectations}
 
 ## 阶段 2：树归并（批量与纯脚本通路入 plugin）
 
-现状：plugin 无批量判定通路、无纯脚本装包通路——都在 reports/solver-s3/tree
+现状：plugin 无批量判定通路、无纯脚本装包通路——在 reports/solver-s3/tree
 （批量+gen 并行修复）与 reports/solver-s4/tree（非批量纯脚本 build_purescript、
-renderer s4-D5）。
+renderer s4-D5）；**无工作区时以交接包 trees/ 下两份为准**。
 
 1. [ ] 三方逐文件 diff（s3 树、s4 树、plugin），列差异清单再动手；取舍原则：
    保留 plugin 的 0924 裁定成果（阶段 1 产物），移植树上的独立功能段。
