@@ -26,7 +26,7 @@ spotrf/spotrs/spotri 数据通路、perf_baseline、verify 双件渲染、accept
 
 **执行环境（仓规 + Mr.0 2026-09-23）**：本机只编辑；**一切脚本执行（生成、测试、
 装包、演练）在远程容器**（先读保护根，容器内补装 scipy 并记录版本）。机器信息文件
-在**主检出根** `/Users/ll/Desktop/workspace-ascend/OpRunway/.oprunway/real-machine.env`
+在**主检出根** `<主检出根>/.oprunway/real-machine.env`
 （worktree 内只有 example，不要在 worktree 找）。产物落远程 session 目录后回传本仓
 ignored `reports/`。uvx 仅允许本机语法自检（`python -m py_compile`），不跑逻辑。
 
@@ -177,7 +177,7 @@ versions, 声明边界: [...]}`。族级期望集含全部五类项——本片�
 - 远程操作先读 `.oprunway/real-machine.env` 与保护根；全部在容器内执行；
   scipy 只装容器内并记版本。
 - 判据数值只从本 spec 与 `repos/solver_tasks-main/cholesky_precision/README.md` 取
-  （该 repos 路径基准是主检出根 `/Users/ll/Desktop/workspace-ascend/OpRunway/`）；
+  （该 repos 路径基准是主检出根 主检出根（非 worktree））；
   冲突停下报告。
 - skill-edit-gate 受阻即停报告，不用 SKILL_GATE_OFF 硬闯。
 
