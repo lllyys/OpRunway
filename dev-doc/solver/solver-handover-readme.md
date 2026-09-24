@@ -12,7 +12,7 @@
 1. `solver-handover-todo.md` —— 看板：20 条待办的状态、来源、背景指引；
 2. `solver-handover-plan.md` —— 操作手册：六阶段执行序，每步带完成判据；
    **每完成一步回看板标 ✅ 填落点**；
-3. `solver-skill-supplement.md` —— Mr.0 裁定原话（24a-24i 是 0924 裁定群）；
+3. `solver-skill-supplement.md` —— 已裁定原话（24a-24i 是 0924 裁定群）；
 4. `review-bundle-issues-0924.md` —— 验收方 issue 清单原文 + 我方追注。
 
 ## 产物地图（对着你手里的东西）
@@ -34,17 +34,17 @@
   delivered-packages/；与改造后口径的差异由 todo HT-19（v3 重渲）收口。
 - **代码**：PR #15 = 现状；批量与纯脚本两条通路等待从本包 trees/ 归并（plan 阶段 2）。
 - **对外未决**：任务书反馈清单（ε、容差表、URL、batchSize、potrf 残差基）待
-  Mr.0 路由；HT-15 等任务侧补字。
+  原负责人 路由；HT-15 等任务侧补字。
 
 ## 环境
 
 python3.10+ 与 numpy/scipy/pytest 即可开工：criteria 全部测试、造数、装包、自检、
 sim_dut 冒烟都本地跑。只有真机 NPU 执行与性能实采需要昇腾环境——没有就按 plan
-记「待真机」，不阻塞其余全部工作；真机信息届时找 Mr.0 取。
+记「待真机」，不阻塞其余全部工作；真机信息届时向任务侧申请。
 
 ## 授权边界（红线）
 
-- 悬置/裁定类问题找 Mr.0，不自行拍板；
-- 不 push、不 merge、不发对外 PR/issue/评论，除非 Mr.0 明示；
-- 验收私集种子不入包、不入公开仓（看板「Mr.0 补充描述」第 3 条）；
+- 悬置/裁定类问题与任务侧确认，不自行拍板；
+- 不 push、不 merge、不发对外 PR/issue/评论，除非获得明确授权；
+- 验收私集种子不入包、不入公开仓（看板「原负责人补充描述」第 3 条）；
 - commit 不加 AI 署名；对外署名用交接者自己的身份，**不署 liangyuansheng / lllyys**。

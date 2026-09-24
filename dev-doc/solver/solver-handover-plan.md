@@ -9,7 +9,7 @@ skill 产出两任务书全部 10 包 → 按任务书分文件夹交付。
 
 口径基准：精度章按 0924 版任务书（repos/new_task_doc-0924，与 PR #44 精度章逐字同）；
 性能门 0.35 与批量范围 n≤4096/batch≤30000 按 PR #44（repos/community_task 分支
-pr-44）——**产包前核对上游 main 是否已合入，未合入问 Mr.0**。裁定原话在
+pr-44）——**产包前核对上游 main 是否已合入，未合入与任务侧确认**。裁定原话在
 `solver-skill-supplement.md` 24a-24i，与 plan 冲突时以裁定为准。
 
 执行纪律（背景规则会自动注入，此处只列会踩的门）：
@@ -17,7 +17,7 @@ pr-44）——**产包前核对上游 main 是否已合入，未合入问 Mr.0**
   skill-creator，md 改动过 doc_style_lint 退 0；
 - 测试用带 scipy 的 venv（无则自建 numpy/scipy/pytest）；真机与大规格在远程容器；
   **无昇腾环境时**：除真机执行与性能实采外全部工作可本地完成，真机项记「待真机」；
-- 悬置项不替 Mr.0 拍板；不 push/merge/对外发布，除非明示；
+- 悬置项不替 原负责人 拍板；不 push/merge/对外发布，除非明示；
 - 「绿」的判据是行为覆盖+全通过，不是测试数量不降（拆双轨可合法删旧断言）。
 
 ## 阶段 1：criteria 快批（HT-5→14→7→3，串行，每步全量 pytest 绿再进）
@@ -66,7 +66,7 @@ build_package,freeze_canonical,fill_ratio_cpu}.py、assets/、references/。
    case seed 派生（禁独立播种）；sample_map={content_idx:{rep_slot,slots[]}} 固化；
    **不落 npz，流式现场构造现场使用**（stream_check 型 DUT 挂钩）；accept 侧先余槽
    bit-wise 一致性（out32+info，potrs 的同内容=A、B 都同）后 rep_slot 三层判定；
-   无 sample_map 旧包走全遍历兼容分支。三条硬约束原话见看板「Mr.0 补充描述」。
+   无 sample_map 旧包走全遍历兼容分支。三条硬约束原话见看板「原负责人补充描述」。
 2. [ ] **HT-8** 非批量 info 用例与支路：每族 3 个中等规模非正定变体（第 k 阶对角
    减大数，k_min 构造即知）+ potri 奇异因子 + potrs 非法参数路径（info=-i）；
    k_expected 与 case_purpose 入 index；judge 按 case_purpose 分流（info 用例只比
@@ -107,7 +107,7 @@ build_package,freeze_canonical,fill_ratio_cpu}.py、assets/、references/。
 4. [ ] 冒烟矩阵覆盖四轴：实/复 × 非批量/批量 × 精度正例负例 × info/确定性支路，
    至少各轴命中一次；逐包自检+指纹入对账表。
 
-## 阶段 6：对外项（须 Mr.0 授权）
+## 阶段 6：对外项（须任务侧确认）
 
 1. [ ] 任务书反馈清单路由：ε 2⁻²⁴（6 处）、容差表按新版、失效 URL、batchSize
    3000/30000 对齐、potrf 节补残差基口径。
@@ -116,5 +116,5 @@ build_package,freeze_canonical,fill_ratio_cpu}.py、assets/、references/。
 
 ## 完成定义
 
-看板 20 条全 ✅（或 Mr.0 明示搁置）；十包按任务书分文件夹、指纹对账齐；
+看板 20 条全 ✅（或 已明示搁置）；十包按任务书分文件夹、指纹对账齐；
 两 skill tests 全绿、渲染确定性与行为一致性成立；checkpoint 无阻断级发现。
