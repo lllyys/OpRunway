@@ -100,7 +100,7 @@ build_package,freeze_canonical,fill_ratio_cpu}.py、assets/、references/。
 1. [ ] 用改造后两 skill 正式流程产 10 包（远程容器；批量 4 包 A0 抽样形态）。
 2. [ ] 按任务书分文件夹：`cholesky-real-950/`（spotrf/spotrs/spotri/spotrfbatched/
    spotrsbatched）、`cholesky-complex-950/`（c 族同构），各含交付说明+对账表+
-   性能采集说明；结构先例 reports/solver-delivery-0923-v2/by-task/。
+   性能采集说明；结构先例见交接包 delivered-packages/ 两个 tar。
 3. [ ] 验收私集：与公开集同规格网格、异种子；独立固化 ratio_cpu/mean/sample_map；
    只存验收侧（ignored 区或远端保护区），消费方式与公开集同接口，防误用公开集
    统计量。

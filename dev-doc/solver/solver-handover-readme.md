@@ -4,31 +4,43 @@
 （repo-task-solver-accept 判定与验收、repo-task-solver-case-gen 造数与装包）、
 已交付的十个任务包、以及一套进行中的对标改造。
 
+**你手里有两样东西**：上游 PR（https://gitcode.com/Justbin/repo-task-atk-test/pull/15，
+两 skill 代码现状）+ 本交接包（其余一切）。不依赖原工作区与远程容器。
+
 ## 先读什么（顺序即优先级）
 
 1. `solver-handover-todo.md` —— 看板：20 条待办的状态、来源、背景指引；
 2. `solver-handover-plan.md` —— 操作手册：六阶段执行序，每步带完成判据；
    **每完成一步回看板标 ✅ 填落点**；
 3. `solver-skill-supplement.md` —— Mr.0 裁定原话（24a-24i 是 0924 裁定群）；
-4. `review-bundle-issues-0924.md` —— 验收方 issue 清单原文 + 我方追注；
-5. `taskbook-0924-diff.md` —— 新旧任务书与 PR #44 的对照。
+4. `review-bundle-issues-0924.md` —— 验收方 issue 清单原文 + 我方追注。
+
+## 产物地图（对着你手里的东西）
+
+| 你有什么 | 内容 |
+| --- | --- |
+| PR #15 的 skill/ 下两目录 | 两 skill 本体：criteria s1-A5、tests 86/86 绿；**尚无批量判定与纯脚本装包通路** |
+| 本包 trees/solver-s3-tree/ | 批量通路 + gen 并行修复（plan 阶段 2 归并源） |
+| 本包 trees/solver-s4-tree/ | 非批量纯脚本装包通路（同上） |
+| 本包 taskbooks/ | 两份 0924 任务书（契约真源，issue 的评审基准） |
+| 本包 standards/ | opbase 混合容差标准 a5e8e71 快照 + cholesky_precision 残差链蓝本 README |
+| 本包 frozen/canonical_batched.json | 批量用例冻结件（种子与规格，公开自测域） |
+| 本包 delivered-packages/ | 已交付十包（两个 tar，按任务书分装）——v3 产包结构先例 + 旧包兼容分支测试对象 |
+| 本包 solver-s3-batched-spec.md | 批量 spec（归并与 T8 标题改写的对象） |
 
 ## 当前状态一页
 
-- **已交付**：十包 v2（六非批量 + 四批量，纯脚本零数组）在
-  `reports/solver-delivery-0923-v2/`，按任务书分装的两个 tar 在其 `by-task/`；
-  指纹对账见 DELIVERY_LEDGER.md。判定口径为交付时点（s1-A2/旧阈值），
-  与改造后口径的差异由 todo HT-19（v3 重渲）收口。
-- **代码**：plugin 两 skill；accept criteria 在 s1-A5、tests 86/86 绿；
-  **plugin 尚无批量判定通路与纯脚本装包通路**——在 `reports/solver-s3/tree`
-  （批量 + gen 并行修复）与 `reports/solver-s4/tree`（非批量纯脚本）两棵树上，
-  归并是 plan 阶段 2。
-- **仓与分支**：本仓分支 `worktree-solver-accept-0923` 已推 origin；上游 PR 分支
-  `solver-skills-0924` 已推 fork（brian66237），PR 待在 gitcode 网页创建。
-- **环境**：本机只编辑与只读探测；一切执行在远程容器（机器信息在主检出根
-  `.oprunway/real-machine.env`，保护根只读）；本地测试用带 scipy 的 venv。
+- **已交付**：十包 v2（判定口径为交付时点 s1-A2/旧阈值），副本即本包
+  delivered-packages/；与改造后口径的差异由 todo HT-19（v3 重渲）收口。
+- **代码**：PR #15 = 现状；批量与纯脚本两条通路等待从本包 trees/ 归并（plan 阶段 2）。
 - **对外未决**：任务书反馈清单（ε、容差表、URL、batchSize、potrf 残差基）待
   Mr.0 路由；HT-15 等任务侧补字。
+
+## 环境
+
+python3.10+ 与 numpy/scipy/pytest 即可开工：criteria 全部测试、造数、装包、自检、
+sim_dut 冒烟都本地跑。只有真机 NPU 执行与性能实采需要昇腾环境——没有就按 plan
+记「待真机」，不阻塞其余全部工作；真机信息届时找 Mr.0 取。
 
 ## 授权边界（红线）
 
@@ -36,30 +48,3 @@
 - 不 push、不 merge、不发对外 PR/issue/评论，除非 Mr.0 明示；
 - 验收私集种子不入包、不入公开仓（看板「Mr.0 补充描述」第 3 条）；
 - commit 不加 AI 署名；对外署名 liangyuansheng / lllyys。
-
-## 产物地图
-
-| 位置 | 内容 |
-| --- | --- |
-| plugin/skill/repo-task-solver-{accept,case-gen}/ | 两 skill 本体（发布物） |
-| dev-doc/solver/ | 全部设计与裁定文档（本目录） |
-| reports/solver-delivery-0923-v2/ | 已交付十包与对账 |
-| reports/solver-s3/tree、solver-s4/tree | 待归并的批量/纯脚本实现 |
-| repos/new_task_doc-0924/ | 0924 版任务书（issue 的评审基准） |
-| repos/community_task（分支 pr-44） | 任务书 PR #44 增量 |
-| repos/opbase | 生态精度标准（mixed_tolerance_standard.md） |
-| repos/solver_tasks-main | solver 精度标准参考工程（残差链蓝本） |
-
-## 零环境自举（交接者只有上游 PR 代码时）
-
-交接包自足，不依赖我们的工作区与远程容器：
-
-- **代码真源**：上游 PR（Justbin/repo-task-atk-test#15）= plugin 两 skill 现状；
-  交接包 `trees/solver-s3-tree`、`trees/solver-s4-tree` = 待归并的批量与纯脚本实现
-  （plan 阶段 2 的归并源，工作区不可得时以包内这两份为准）；
-- **契约真源**：`taskbooks/` 两份 0924 任务书、`standards/` opbase 混合容差标准
-  （a5e8e71 快照）与 cholesky_precision 残差链蓝本 README、`frozen/` 批量 canonical
-  冻结件、`delivered-packages/` 已交付十包（按任务书分装）；
-- **最小环境**：python3.10+ 与 numpy/scipy/pytest——criteria 全部测试、造数、装包、
-  自检、sim_dut 冒烟都可本地跑；只有真机 NPU 执行与性能实采需要昇腾环境，
-  没有环境时这两类按 plan 记「待真机」即可，不阻塞其余全部工作。
