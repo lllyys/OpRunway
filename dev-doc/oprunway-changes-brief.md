@@ -5,6 +5,122 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-09-24h · 0924 对标裁定群落地 + 交接待办簿建立。** issue 清单（验收方回球）归档并逐条裁定：C1 用新版标准（容差 2⁻¹³）、C2/HT-1 采 opbase 动态锚点（已施工：max_abs 门单口径+±inf/NaN 收窄，86/86）、A5 选项①两步结构（golden 直审主判，待施工）、主判基准 golden64、A4 我方侧 ε 标注与 eps 披露（已施工）、C3 摘 T7（已施工）、C4 确认维持、B1 构造性正定声明（纯文档已落）、HT-20 申诉句（已落）、HT-15 potrf 残差基暂维持 A64 等任务侧补字。交接待办簿 dev-doc/solver/solver-handover-todo.md 建立（20 条带来源标记）；发现 plugin 无批量判定通路（在 s3/s4 树未归并），T8 摘除转挂树归并。CRITERIA_VER 至 s1-A5。
+- **2026-09-24g · 十包统一交付成件 + gen 并行断链根因修复（开发树）。** 六 v2 纯脚本包（criteria 104/104、六包冒烟全过）+ 四 batched 包（selfcheck 各 9/9、单包冒烟过、快线与 driver wave2 同 sha 合流、内嵌 gen_data.py 同版 01769d9bcb1f）汇入 `reports/solver-delivery-0923-v2/`，DELIVERY_NOTE/LEDGER/指纹全表齐。装包 40 分钟串行根因实证：并行通路 PCG64.advance 假设「一次 integers 抽取=一个 64 位输出」，实测 numpy 小范围 integers 走 32 位缓冲采样（N 次约推进 N/2 步+半缓冲跨界+拒绝重抽），链校验必断、全 case serial-fallback 还白算一遍并行；修复为边界态预扫描，落 s3 树，三条验收全过（复现翻 parallel、selftest 全绿、串并行逐字节同），10⁶ 档预扫描仅 2–7s。修复不入本批（四包同版红线），移植 plugin/ 待 Codex 评审，且 s3 树与 plugin/ 的 gen 在修复前已有在途差异，移植前先对账。
+- **2026-09-24f · 容量预探收官（四档满规模实测）+ 并行裁定注入工作流。** 画像：10⁶×n=2
+  串行 3–6.5 分钟/case（瓶颈是 numpy 每调用开销非 LAPACK）、大 n 档 35s 但**工作集
+  放大 ×11**（5.3GB）；「大 n 下 T4 分歧→兜底 PASS 是常态」入演练预期。Mr.0 裁「拆吧
+  并行」：B3/D3 注入进程级分块（PCG64.advance 精确快进、并行==串行逐位断言、worker≤64），
+  A3 改收卡轮（733 行成品保留不重写），V3 加并行断言与四包并行演练。向量化提速路径
+  （einsum 10–30×）按预探建议不采——等价风险换不需要的余量。两条实操修正（CHUNK ×11
+  记账、T4 常态预期）随修复轮/合并落入。证据 `reports/solver-s3/capprobe/`。
+- **2026-09-24e · 数据策收束：新包一律纯脚本、全都现场造（Mr.0 裁定，无论大小）。**
+  batched 四包零数据数组（KB 级）：index 全 materialize:"gen"，开发者「先造数后测」，
+  verify 判定时自行现场重生成（同环境逐位；batched 全 cu 配方无 BLAS 末位差风险，
+  抽查已证跨环境逐位稳）。ratio_cpu 不入包、判定时逐矩阵现场重算。S3 spec 升 v2.1、
+  supplement 24a 记档；工作流停车换卡续跑（A3 缓存保留）。已交付六包维持原形。
+- **2026-09-24d · 范围升级：两书全部 10 算子（batched 4 个入线）；S3 spec 过评审升
+  v2；文本评测复验 3 保持 1 提升。** Mr.0 推翻 batched 留空：后补包形式交付，旧六包
+  不动。S3 v1 评审（thread `01a0d22c`）抓四条真伤全采纳：**info 契约按接口角色分型**
+  （potrfBatched=infoArray、potrsBatched=标量仅报参数错——任务书 69 行明文，我的
+  batched=数组划分错）；**逐矩阵配对判定**（max 聚合有数学缺陷：差矩阵放宽他家阈值，
+  评审给出 c=[0.01,3] 反例）；**容量档补漏**（LOWER 侧 n=8192·batch=5 → 8–16GB，
+  引入 CHUNK_BYTES 分块 + 超 256MB case 走 materialize:"gen" 按需生成，与不落盘裁定
+  对齐）；改动面补至十三处（accept_run int(info) 会炸、expectations 声明、baseline
+  未核 batch、SKILL/README）。T8 映射钉死：数值可展示、正式精度项仍证据不足。评测
+  复验：S4 修订让 iteration-1 答错的题翻转答对，其余保持；S4 行再补一句细节。施工
+  待 s2-D3 复核回执后开（同 S2c 工作流模式）。
+- **2026-09-24c · 流式实证 5/5 全过 + 三笔修复落地，收尾复核在跑。** 流式战果：双册
+  全量 n≤1024 共 448 case 全 PASS **零落盘**（session 快照 diff 为空留证）、spotrf 全量
+  197 条含 n=8192 仅 6.2 分钟/峰值 6GiB——132GiB 问题被流式彻底消解；负例双腿 8/8
+  FAIL；--dump 逐位自证。白捡真 bug：ru_maxrss 单位 Linux=KB 少报 1024 倍→
+  stream_check s2d-r2 平台感知修复。渲染器升 s2-D3：render() 出口表驱动去内部指称
+  （spec §→包内可解指称）+ fail-closed 兜底断言；README 模板按冷读 8 条升级（退出码
+  精确语义、npz 契约、--perturb、flags 释义、版本指路）；accept SKILL 加「流式全量
+  运行」节（lint/预算全绿）。已派收尾双 agent：远程复核（pytest/s2-D3 双跑与零 spec §/
+  r2 冒烟/与交付包 diff 归类）与文本评测复验（iteration-2）。
+- **2026-09-24b · 冷读演练收官：四断言全过，guess_list 8 条全部有主。** 零上下文者
+  凭包 README 走通正/负/无效三型运行（包原件逐字节未动）。8 条发现分级处置：已交付
+  六包走补充页 `SELFTEST_SUPPLEMENT.md`（退出码精确语义含「退 2 不落报告」CI 崩点、
+  --perturb 现成负例工具、目标 case 定义、npz 三键字段契约、flags/formal 释义、内部
+  引用说明、版本指路、扩量指引）；README 模板与渲染器横幅修订排队待流式实证 agent
+  收工后动（避免同步竞态，只影响未来包）。T4 包内无定义的发现再添催裁弹药。
+- **2026-09-24a · 按 Mr.0 指令开工两项：流式驱动与 skill 成熟度尾巴。** ① 流式：
+  `stream_check.py` 落 accept/scripts（生成即测同进程闭环、逐 case 即弃、--dump 调试
+  后门、峰值 RSS 上报；生成/ratio/sim/judge 全复用既有模块零平行副本），远程实证段
+  已派（双册全量 n≤1024 零落盘、大 n 画像、负例腿）；gen 侧 build_case_arrays 早已
+  模块化无需改。② 尾巴：三份 references 落地并从 SKILL 正确步骤链出（verdict-mechanism
+  / perf-collection / package-contract），双 lint 含报数级全清，载入预算 5.5/5.9KB；
+  冷读演练 agent 已派（交付 spotrf 包只读副本、四断言、guess_list 为主产物）。
+  性能采集补发页制成 `reports/solver-delivery-0923/PERF_COLLECTION_SUPPLEMENT.md`
+  候 Mr.0 渠道补发。
+- **2026-09-23u · cu 转写逐值抽查 5/5 位级全等——配方层零偏差坐实。** 方法：glibc
+  rand() 冷启同流喂两条算路（cu 循环原样编译 dump vs 按注释配方重放），float32 位级
+  比对；覆盖实/复、对称/Hermitian 镜像、RHS 同流续抽。声明差异（FP64 母本 vs cu
+  float32 现场算）已量化留档（最大 1802 ULP 于近零相消处）。两枝节修 plugin 源不动
+  已交付包：docstring 行号差一行、±0 符号位细节补声明。证据
+  `reports/solver-s2/cu-transcription-spotcheck/spotcheck.md`。
+- **2026-09-23t · Mr.0 已转交——交付生效，六包自此不可更改。** 六包指纹以 23s 与
+  `reports/solver-delivery-0923/delivery_manifest.json` 为准冻结存证。进入等待态：
+  ① 开发者自测反馈（包内 README 反馈通道）；② solver 维护者对评审包 8 问题的答复
+  ——T3/T4/T8 落裁后按 accept-package-compat 机制发「阈值裁定通知」，包零改动。
+  后续变更只走「新包追加」（batched 补包、其余算子族），已交付实体永不重装。
+- **2026-09-23s · 六包交付就绪，八项清单全过，候 Mr.0 点头。** 交付段 44 步退出码全 0：
+  双册冻结同构 195/188/195；**实数 24 npz 与 S1 冻结 sha256 全等（零漂移留证）**；复数
+  双跑逐位一致；六包自检全过（含 ratio_cpu 非空）+ 自测配套件齐；十二次演练正例 6/6
+  PASS、负例 6/6 FAIL；回传 120/120 sha256 复核。产物 `reports/solver-delivery-0923/`
+  （162MB/185 文件，delivery_log 逐项打钩）。披露三笔：frozen_at 记 09-24（容器时钟
+  过零点，数据面以 sha256 为准）；criteria 版本串停 s1-A2 未随复数 bump（工具 sha256
+  入 manifest 可追溯，版本纪律下一片补）；正例族级「不得通过：证据不足」属设计行为。
+  评审包（六算子完整版：README_review + criteria 全量含 tests + samples）同候转交。
+- **2026-09-23r · 复数通路全绿并合并回 plugin；六包交付装包段开跑。** S2c 工作流实现轮
+  33/33 具名断言过：pytest 76（实数 54 零漂移 + 复数 22）、复数 gen 双跑逐位一致、
+  ratio_cpu 复数画像与参考同构（cpotrs 上浮两个量级）、cpotrf 试装包自检 10 项全过、
+  纯虚部/漏共轭扰动 8/8 正确 FAIL。合并 9 文件 + 复数测试入 plugin（py_compile 全过），
+  两份 SKILL 支持范围扩六算子（双 lint 退 0）。工具版本 s2-F3/s2-D2/s2-E2/s2c-b2c-r1。
+  B2c 声明的裁量：std 构造随蓝本 B·Bᴴ+nI（spec §4 笔误 BᴴB 已由 docstring 注明）。
+  交付段（单 agent 清单化）执行中：双册 freeze/gen/ratio/baseline → 六包 selfcheck →
+  **实数 npz 与 S1 冻结 sha256 全等对照** → 逐包 sim 正例+负例演练 → delivery_manifest
+  回传 reports/solver-delivery-0923/。DELIVERY_NOTE（batched 后补、结论口径、阈值待裁
+  告知）已备。
+- **2026-09-23q · 维护者评审包出炉（加急）。** 应 Mr.0 指示组装 Cholesky 精度验证
+  评审包给 ops-solver 维护者确认验证方式：核心是一页 README_review（三层流程、逐算子
+  比对目标、阈值与出处、结论分层口径、**8 个待答问题**——含 T3/T4 带实证、batched
+  T8、复数拆实虚、残差终审认可）+ 判定代码三件（纯 numpy 自含）+ 渲染版
+  verify_accuracy 样例 + 演练报告样例。落 `reports/solver-review-bundle-cholesky/`
+  与同名 tar.gz（24KB），待 Mr.0 转交或授权提 gitcode。
+- **2026-09-23p · 当日重排：只评一轮；今天交付两 Cholesky 任务书的任务包（batched
+  留空，Mr.0 裁定），复数通路提前落地。** 评测 12/12 收官（单轮）：with 组按契约产出
+  可被 accept 消费的 spotrs 包；对照组能自造自洽包但与契约不兼容、无三层与 ratio_cpu
+  ——skill 增量清晰。评测揪出四处真缺陷已交付前修死：S5 命令退 2（criteria 兄弟目录
+  回退）、**ratio_cpu 全空仍自检绿的假绿陷阱**（cases 源按已回填 index 优先 + 装包
+  加非空断言）、S4 完成条件过严改降级语义、算子集参数与 README 退 1 语义订正。
+  战略数据：对照组实证 **T4 结构性**（32·ULP 解释下 8/8 落兜底）——催裁有据。batched
+  留空影响评估：包粒度隔离使后补新包不违「不可更改」，族级在补齐前正确地不判通过。
+  复数工作流已启（A2c/B2c/D2c 并行 + 远程验证，契约=S2 spec §4 冻结表）；accept
+  兼容记要落 `dev-doc/solver/accept-package-compat.md`（五机制：裁决面外置、版本三元
+  组、期望集独立、契约面收窄三样、逐包/聚合分离）。
+- **2026-09-23o · S2 子片 a 机械面落定：两份 SKILL.md + 双登记，全部门禁绿。** 走完
+  skill-md-gate 前置（Read 两规则）与 skill-creator 调用；`freeze_canonical.py` 参数化
+  （去绝对路径，SA-16）入 case-gen scripts；两份 SKILL.md（3.7KB/3.0KB，路由器体裁、
+  命令写死、检查条件表、范围之外如实）上游/仓根双 lint 退 0 且报数级命中清零（裁决→
+  判定、落盘→写入文件等按词表替换，报告枚举 `info 契约` 行内代码豁免）；plugin.json
+  与 README 首表登记、集合对账双向空差集；`claude plugin validate` 过（根 CLAUDE.md
+  警告属预期）。待做：skill-creator 评测闭环（3 prompt × with/without）、包缺件回填
+  （gen_data/sim/README 随包）、流式驱动。
+- **2026-09-23n · 数据形态裁定：不落盘，流式测试。** 全量估算 132.34 GiB 触发 50GB
+  护栏后 Mr.0 裁定：包不装大数据（只留脚本+清单+KB 级小表），测试改流式（现场生成→
+  喂被测→判定→丢弃）；确定性从字节冻结换成 seed+环境版本记录+同进程闭环。S1 子集包
+  留存档；全量落盘取消，替代项=流式驱动模式。gen_data_cholesky.py 已加 --select
+  {s1,all} 开关（默认 s1 行为不变）。supplement 23i 与设计 v2 §2 已同步。
+- **2026-09-23m · 三笔提交落库（.claude 移植 fd0920d / S1 骨架 282fb1b / 供给线文档
+  9332f2b）；S2 spec 出炉过评审升 v2；全量生成后台开跑。** S2 顺序 Mr.0 钉定：SKILL.md
+  登记（skill-creator 闭环）→ 冷读演练 → 复数三算子。评审（thread `01a0d0e6`）九条
+  必须改全采纳：包契约第三缺口是 **gen_data.py 未随包交付**（对照环节设计 §2 十类盘出，
+  README 之外）；b 冷读的模拟输出来源裁定 sim 随包；复数契约冻结成表（现有实现五处
+  实数硬编码，c 改动面含 renderer/sim/装包与实数全量回归）；两套写作规则五处真冲突
+  预裁定（判据→检查条件、模板进 assets/ 等）。全量 584 条生成派后台 agent 远程执行
+  （50GB 护栏、抽样验证、产 reports/solver-packages-full/，S1 子集包只读保护）。
 - **2026-09-23l · S1-Cholesky 工作流收官，代码过门搬入 `plugin/skill/`。** 多 agent
   端到端执行完成（三轮：首轮撞 skill-edit-gate 与授权转述缺失、次轮被「查进度」消息
   劫持任务卡、第三轮修 spec 1.1/1.2 与指令优先级后 9 agent 零失败）。战果：canonical

@@ -5,6 +5,7 @@
 ## P1 · 0923 solver 批次（立项中 @ worktree solver-accept-0923，2026-09-21）
 
 背景与全部证据见 `dev-doc/solver/solver-0923-context.md`。
+**solver 线交接待办细目见 `dev-doc/solver/solver-handover-todo.md`（唯一细目账）。**
 
 - [x] ~~决策点：走哪条验收线~~ → **2026-09-22 Mr.0 裁定走乙：新起
   `repo-task-solver-accept`，自产 harness 留在验收现场。** 依据与两条翻案条件见
