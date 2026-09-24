@@ -7,7 +7,7 @@
 - [未编译或构建失败](#未编译或构建失败)
 - [用例缺失 MISSING](#用例缺失-missing)
 - [无基线 NO_REF](#无基线-no_ref)
-- [msopprof 缺失或不可用](#msopprof-缺失或不可用)
+- [msprof op 不可用](#msprof-op-不可用)
 - [采集环境失败](#采集环境失败)
 - [采集截断 NO_KERNEL](#采集截断-no_kernel)
 - [列名未被读取](#列名未被读取)
@@ -83,22 +83,23 @@ source <set_env.sh> && cd <工作目录>/runtime && <python> verify_accuracy.py 
 基线键的推断规则见 [run-chain.md](run-chain.md) 的 A2。要让某条 `TC_PF_` 参与评判，
 只能由任务包提供者补 `gpu_baseline.csv`，验收不代填 `gpu_ms`。
 
-## msopprof 缺失或不可用
+## msprof op 不可用
 
-性能采集用 `msprof op`（独立可执行文件 `msopprof`），不是 `msprof`。
+性能采集走 `msprof` 的 `op` 子命令。查找目标是 `msprof` 本身——它是 CANN 的
+profiler 主入口，在 PATH 里的把握比子工具 `msopprof` 大。
 
 | 现象 | 原因 | 处置 |
 | --- | --- | --- |
-| A1 `msopprof` 项记缺失 | PATH 与 CANN 默认位置都没有该二进制 | 先不阻塞；A4 命令前加 `source <set_env.sh> &&` |
-| A4 `MSPROF_NOT_FOUND`，退出 3 | 期望集非空但找不到可执行的 `msopprof` | 按下面命令带 `source` 或 `--msprof <路径>` 重跑 A4 |
-| A4 `MSPROF_UNUSABLE`，退出 3 | 找到了 `msopprof`，但版本不认 `--launch-count` | 换装支持 `msprof op` 的 CANN |
+| A1 `msprof` 项记缺失 | PATH 与 CANN 默认位置都没有该二进制 | 先不阻塞；A4 命令前加 `source <set_env.sh> &&` |
+| A4 `MSPROF_NOT_FOUND`，退出 3 | 期望集非空但找不到可执行的 `msprof` | 按下面命令带 `source` 或 `--msprof <路径>` 重跑 A4 |
+| A4 `MSPROF_UNUSABLE`，退出 3 | `msprof op` 转发不到真身 | 多半是 `ASCEND_TOOLKIT_HOME` 指向的 toolkit 下没有 `tools/msopprof/bin/msopprof`；按报错把该变量指对，或 `--msprof <路径>` |
 | 逐例 `NO_KERNEL` | 扫不到 `OpBasicInfo*.csv`、无数据行、缺列或值非有限正数 | 看 `prof/<case>/` 下的日志 |
 
-A1 探测项名与查找目标都是 `msopprof`，与 A4 实际要用的一致。A1 只判文件存在且可执行，
-不探版本，所以 A1 记 OK 仍不代表 A4 采得到——以 A4 自己报的错误码为准。
+A1 探测项名与查找目标都是 `msprof`，与 A4 实际要用的一致。A1 只判文件存在且可执行，
+不探 `op` 子命令，所以 A1 记 OK 仍不代表 A4 采得到——以 A4 自己报的错误码为准。
 
-`--msprof` 参数名沿用旧后端不改，查找目标是 `msopprof`。可执行不等于可用：自动发现的
-二进制要再跑一次 `msopprof --help`，起不来、退非零或帮助文本里没有 `--launch-count`
+`--msprof` 参数名与查找目标都不变。可执行不等于可用：自动发现的二进制要再跑一次
+`msprof op --help`，起不来、退非零（旧 CANN 没有 `op` 子命令）或帮助文本里没有 `--launch-count`
 都判 `MSPROF_UNUSABLE`；显式传 `--msprof` 时不探这一下。
 
 采集产物在 `runtime/results/<id>/performance/prof/<case>/` 下：`r<N>` 是第 N 次采集的

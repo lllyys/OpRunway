@@ -115,12 +115,24 @@ msopprof --output=<采样目录> --aic-metrics=BasicInfo --launch-count=<N> \
 
 选 `--aic-metrics=BasicInfo` 而不用默认档的理由是耗时与文件数都更低，读数不变。
 
-二进制查找顺序沿用现行四级（`--msprof` 覆盖 → PATH → `$ASCEND_TOOLKIT_HOME` 下 →
-`/usr/local/Ascend` 下），查找目标名改为 `msopprof`。**CLI 参数名 `--msprof` 保留不改**，
-只更新帮助文本与查找目标——改参数名会扩大对外接口足迹，收益只是名字好看。
+二进制查找目标是 **`msprof`**，采集走它的 `op` 子命令（Mr.0 裁定 2026-09-24）。
+顺序沿用现行四级：`--msprof` 覆盖 → PATH → `$ASCEND_TOOLKIT_HOME` 下 →
+`/usr/local/Ascend` 下。CLI 参数名 `--msprof` 不变。
 
-**可执行不等于可用。** 预检除判可执行位外，还要跑一次 `msopprof --help` 确认退 0；
-不退 0 时报环境错误而不是采集失败，否则旧 CANN 上会表现成每一例都是算子问题。
+**`msprof op` 有一条环境前置：它是转发壳，真身在
+`$ASCEND_TOOLKIT_HOME/tools/msopprof/bin/msopprof`。** 该变量指向的 toolkit 里没有这个
+文件时转发失败，而它**仍然退 0**、只打一行 `[ERROR] The file ... does not exist`、产物
+为空——按失败判定会落到「无数据行」判 NO_KERNEL，把环境问题说成算子没起 kernel。
+
+本仓自己的 `/opt/oprw/median_setenv.sh` 就会触发这条：它为控制 `LD_LIBRARY_PATH` 把
+`ASCEND_TOOLKIT_HOME` 指向影子 toolkit `/work/run/median_tk`，那底下连 `tools/` 都没有。
+这是环境配置问题，不是工具缺陷——指向真 toolkit 时 `msprof op` 工作正常（实测对照：
+影子 toolkit 产 0 份 CSV，真 toolkit 产 1 份）。
+
+**可执行不等于可用。** 自动发现到的二进制还要跑一次 `msprof op --help`，帮助文本里有
+`--launch-count` 才算可用。这个判据比退出码可靠——转发失败时退出码仍是 0，而帮助因为
+取不到真身自然没有那些选项。不可用时报 `MSPROF_UNUSABLE`，**诊断指向
+`ASCEND_TOOLKIT_HOME` 而不是 CANN 版本**：指错时使用者该改环境变量，不是去换 CANN。
 
 ### 4.2 产物布局有两种
 

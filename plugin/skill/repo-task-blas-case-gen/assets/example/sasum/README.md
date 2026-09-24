@@ -161,7 +161,7 @@ python3 verify_performance.py --repo <repo-root> --soc <soc> --device 0
 结果 JSON 的 `ignored_no_ref`。每例单独执行，默认独立采集 1 次，进程形态是：
 
 ```text
-msopprof --output=<采样目录> --aic-metrics=BasicInfo --launch-count=512 \
+msprof op --output=<采样目录> --aic-metrics=BasicInfo --launch-count=512 \
          <被测二进制> --gtest_filter=<用例> --gtest_output=json:<证据路径>
 ```
 
@@ -214,7 +214,7 @@ NO_REF、NO_KERNEL、CRASH、TIMEOUT、MISSING 七个。
 GPU 基线的 `timing_scope` 不是 `kernel` 时，每例 verdict 带 `(scope caveat)`，汇总的
 `scope_caveat` 也为 true。GTest 自带的 ms 含 host 准备与 golden，不作性能依据。
 
-采集后端从 `msprof` 换成 `msprof op`（`msopprof`）后读数系统性偏低：同机同用例实测
+采集后端从 `msprof` 换成 `msprof op`（`msprof op`）后读数系统性偏低：同机同用例实测
 0.64 到 0.84 倍，绝对差 8.5 到 11 us。新后端重放 kernel，量的是稳态，旧后端量的是含
 首次调用惩罚的单次冷调用，两者不可比，跨后端的两轮数不能放在一起看。
 

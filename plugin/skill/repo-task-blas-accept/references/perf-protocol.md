@@ -1,4 +1,4 @@
-# msopprof kernel 性能协议
+# msprof op kernel 性能协议
 
 正式性能验收的唯一权威：采集、解析、统计口径、失败判定与验收消费都以本文件为准。
 复测轮与豁免的记录、有效性与折叠规则在 [retest-protocol.md](retest-protocol.md)。
@@ -31,7 +31,7 @@
 
 `TC_PF_` 是 `case_name` 前缀，标记性能用例；其余 `TC_` 用例是精度用例。**期望集**是本轮
 必须出结果的用例名集合，基线按**基线键**（`gpu_baseline.csv` 表头去掉 `id`、`gpu_ms`
-后与 CSV 共有且非空的列）匹配。msopprof 以重放方式量 kernel，读数是稳态耗时、不含首次
+后与 CSV 共有且非空的列）匹配。`msprof op` 以重放方式量 kernel，读数是稳态耗时、不含首次
 调用开销，与旧 msprof 口径不可比，差值见「已实测与待实测边界」。
 
 ## 采集命令与产物
@@ -39,7 +39,7 @@
 每个 case 的每次采样恰好执行下面这一条命令，无第二步导出，无预热进程：
 
 ```
-msopprof --output=<采样目录> --aic-metrics=BasicInfo --launch-count=<上限> \
+msprof op --output=<采样目录> --aic-metrics=BasicInfo --launch-count=<上限> \
          <被测二进制> --gtest_filter=<完整名> --gtest_output=json:<case_dir>/r<次序>.gtest.json
 ```
 
@@ -57,20 +57,29 @@ case 产物目录的**绝对路径**。五条约束进契约：
 
 选 `--aic-metrics=BasicInfo` 而不用默认档的原因是耗时与文件数都更低，读数不变。
 
-采集二进制按下列顺序查找，均要求文件存在且可执行。**CLI 参数名 `--msprof` 保留不改**，
-只有查找目标是 `msopprof`。
+采集走 `msprof` 的 `op` 子命令，查找目标是 `msprof` 本身而不是子工具 `msopprof`：
+`msprof` 是 CANN 的 profiler 主入口，在 PATH 里的把握大；`msopprof` 的实体在
+`tools/msopprof/bin/` 下，`bin/` 里那个同名文件只是转发壳，是否每个安装都导出没有证据。
+
+按下列顺序查找，均要求文件存在且可执行：
 
 1. `--msprof` 显式覆盖。
-2. PATH 中的 `msopprof`。
-3. `$ASCEND_TOOLKIT_HOME` 下的 `tools/msopprof/bin/msopprof` 与 `bin/msopprof`。
-4. `/usr/local/Ascend/ascend-toolkit/latest/bin/msopprof`。
+2. PATH 中的 `msprof`。
+3. `$ASCEND_TOOLKIT_HOME` 下的 `tools/profiler/bin/msprof` 与 `bin/msprof`。
+4. `/usr/local/Ascend/ascend-toolkit/latest/tools/profiler/bin/msprof`。
 
 全部找不到时退出 3，写 `summary.reason=MSPROF_NOT_FOUND`，不进入任何性能采样。
 
-**可执行不等于可用。** 自动发现到的二进制还要跑一次 `msopprof --help`：退 0 且帮助文本
-里有 `--launch-count` 才算可用，否则退出 3 并写 `MSPROF_UNUSABLE`；显式传 `--msprof` 时
-不探测。这道探测把「旧 CANN 上有同名文件而不支持本协议」报成版本问题，而不是让每一例都
-表现成算子失败。
+**`msprof op` 有一条环境前置。** 它只是转发壳，真身是
+`$ASCEND_TOOLKIT_HOME/tools/msopprof/bin/msopprof`。该变量指向的 toolkit 里没有这个文件
+时转发失败——而它**仍然退 0**，只打一行 `[ERROR] The file ... does not exist`，产物为空。
+按失败判定这会落到「无数据行」那一档判 NO_KERNEL，把环境问题说成算子没起 kernel。
+
+**可执行不等于可用。** 自动发现到的二进制还要跑一次 `msprof op --help`：帮助文本里有
+`--launch-count` 才算可用。这个判据比退出码可靠——转发失败时退出码仍是 0，而帮助文本
+因为取不到真身自然没有那些选项（A3 实测，CANN 9.0.1）。不可用时退出 3 并写
+`MSPROF_UNUSABLE`，诊断指向 `ASCEND_TOOLKIT_HOME` 而不是 CANN 版本；显式传 `--msprof`
+时不探测。
 
 产物布局有两种，取决于**实际采到的 launch 数**，不取决于 `--launch-count` 的取值：
 
@@ -301,17 +310,17 @@ CSV 的 `TC_PF_` 行数裁决：无 `TC_PF_` 行记 `通过（无性能要求）
 
 ### 口径变更记录
 
-采集后端从 msprof 换成 msopprof 是**口径变更，不是等价替换**。同机同用例双跑，三例都是
+采集后端从旧 `msprof` 换成 `msprof op` 是**口径变更，不是等价替换**。同机同用例双跑，三例都是
 单 launch 用例，与 launch 计数无关：
 
-| 用例 | msprof | msopprof | 比值 | 绝对差 |
+| 用例 | 旧 msprof | msprof op | 比值 | 绝对差 |
 | --- | --- | --- | --- | --- |
 | TC_PF_1001 | 23.78 us | 15.30 us | 0.64x | 8.48 us |
 | TC_PF_1002 | 45.40 us | 35.72 us | 0.79x | 9.68 us |
 | TC_PF_1003 | 68.50 us | 57.26 us | 0.84x | 11.24 us |
 
 **新后端系统性读低。** 绝对差基本恒定在 8.5 到 11 us，是固定的单次调用开销被重放绕过的
-特征，规模越小受影响越大。msprof 量的是含首次调用惩罚的单次冷调用，msopprof 量的是重放
+特征，规模越小受影响越大。旧 `msprof` 量的是含首次调用惩罚的单次冷调用，`msprof op` 量的是重放
 稳态。NPU 侧读数变小会让 ratio 变好，卡在阈值 `0.8` 附近的用例可能从 FAIL 翻成 PASS。
 
 哪一种更接近 GPU 基线的口径**无法判定**：基线的 `perf.meta` 六个键当前全是 `unspecified`，

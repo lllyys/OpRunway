@@ -242,7 +242,7 @@ cd <工作目录>/runtime && <python> verify_performance.py \
 | `--skip-build` | 复用上次编译产物，不调用 `build.sh` | 不带则先编译；验收固定带 |
 | `--build-timeout <秒>` | 编译超时秒数 | 1800 |
 | `--timeout <秒>` | 每个进程的超时秒数 | 3600 |
-| `--msprof <路径>` | 覆盖 msopprof 可执行文件路径（参数名不变） | 按 perf-protocol.md 的查找顺序 |
+| `--msprof <路径>` | 覆盖 `msprof` 可执行文件路径（采集走 `op` 子命令） | 按 perf-protocol.md 的查找顺序 |
 | `--repeats <N>` | 每例采样次数，大于 1 时取样本中位数 | 1 |
 | `--launch-count <N>` | 单次采集的 kernel launch 上限，合法 1–5000；采到的行数等于它即判截断、不计分 | 512 |
 | `--calls-per-case <N>` | 一条 gtest 用例调用被测接口的次数，当前只接受 1 | 1 |
@@ -320,7 +320,7 @@ retest-protocol.md「verdict 与报告增量」。`<工作目录>/verdict_notes.
 `备注说明`，文件缺失按空处理。
 
 `timing_scope` 来自基线文件的元数据行 `# timing_scope=<值>`，说明 `gpu_ms` 的计时口径：
-`kernel` 与 msopprof 的 kernel 口径同类，缺省记 `unspecified`。不是 `kernel` 时性能状态追加
+`kernel` 与 `msprof op` 的 kernel 口径同类，缺省记 `unspecified`。不是 `kernel` 时性能状态追加
 `(scope caveat)`，不改结论；`performance.base_status` 是未追加该后缀的原始状态。
 协议见 [perf-protocol.md](perf-protocol.md)。
 

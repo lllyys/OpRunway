@@ -16,7 +16,7 @@
 | 采集选项必须排在被测二进制之前，其后一律当作被测程序的参数 | 实测（A3，CANN 9.0.1） |
 | `--application=` 已废弃，改用位置参数；`--ai-core`、`--task-time` 退 255 | 实测（A3，CANN 9.0.1） |
 | `--aic-metrics=BasicInfo` 档单 launch 用例 4.6s、1.8 MB；默认档 6.2s、2.1 MB | 实测（A3，ctpmv） |
-| msopprof 不透传被测程序失败：不存在的 gtest 用例照样退 0 且不产 CSV；工具自身参数错误退非零 | 实测（A3，CANN 9.0.1） |
+| `msprof op` 不透传被测程序失败：不存在的 gtest 用例照样退 0 且不产 CSV；工具自身参数错误退非零 | 实测（A3，CANN 9.0.1） |
 | `OpBasicInfo.csv` 九列，**没有 `Task Type` 列**，旧的 kernel task 类型过滤整体作废 | 实测（A3，ctpmv/sasum） |
 | `Device Id` 记物理卡号：`ASCEND_RT_VISIBLE_DEVICES=3` 时报 3，不是进程内逻辑 0 | 实测（A3，ctpmv） |
 | 采到 1 个 launch 时产物扁平：`OPPROF_*/OpBasicInfo.csv` | 实测（A3，ctpmv） |
@@ -27,8 +27,8 @@
 | ssymm LEFT 在 m=1280 n=128 下 105 个 launch：row 与 k 按 256 分块 | 源码 `blas/symm/arch22/ssymm_host.cpp` |
 | `gemm_strided_batched` 每批一次 launch，batchCount 只校验非负，无上界 | 源码 `blas/gemm_strided_batched/arch35/` |
 | 预热无效：`--warm-up` 取 0/5/50 得 26.70/27.34/27.16 us，噪声级；重放模式本身绕开首次调用惩罚 | 实测（A3，ctpmv） |
-| 换后端读数系统性偏低：TC_PF_1001–1003 三例 0.64/0.79/0.84 倍，绝对差 8.5–11 us | 实测（A3，msprof 与 msopprof 双跑） |
-| 磁盘写满时 msopprof 仍退 0，只在日志刷 `Copy failed` 且不产 CSV | 实测（A3，容器 `/dev/shm` 仅 64 M） |
+| 换后端读数系统性偏低：TC_PF_1001–1003 三例 0.64/0.79/0.84 倍，绝对差 8.5–11 us | 实测（A3，旧 msprof 与 msprof op 双跑） |
+| 磁盘写满时 `msprof op` 仍退 0，只在日志刷 `Copy failed` 且不产 CSV | 实测（A3，容器 `/dev/shm` 仅 64 M） |
 | 单次采样跨进程可复现：sger 同例两轮偏差 ≤2%（306/571/99µs） | 实测（A3，旧 msprof 口径，数值不可比） |
 | 单次不偏冷：ctpmv 三尺寸各 5 次独立单采样中位偏差 ≤1.7%，首例无台阶 | 实测（A3，旧 msprof 口径，数值不可比） |
 | 精度轮阈值待回填；A5 完整验收链已真机通（sger 小包 A1→A5） | 实测（A3，2026-09-14） |

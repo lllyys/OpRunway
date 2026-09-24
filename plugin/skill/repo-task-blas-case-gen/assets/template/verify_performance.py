@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""用 msprof op（msopprof）kernel 耗时验收 CSV 驱动的性能用例。"""
+"""用 msprof op kernel 耗时验收 CSV 驱动的性能用例。"""
 
 # ===== 渲染常量区开始 =====
 OP = "@@OP@@"
@@ -216,7 +216,7 @@ REPEATS = 1
 # 实际 launch 数上升,这个数只用于开跑前的总时长提示,不参与任何判定。
 PER_CASE_ESTIMATE_S = 6
 
-# msopprof 产物。布局取决于**实际采到的 launch 数**,不取决于 --launch-count 取值:
+# msprof op 产物。布局取决于**实际采到的 launch 数**,不取决于 --launch-count 取值:
 #   采到 1 个   → OPPROF_<时间戳>_<随机串>/OpBasicInfo.csv
 #   采到多个   → OPPROF_*/<kernel 符号名>/<序号>/OpBasicInfo_<时间戳>.csv
 # 所以 glob 必须递归覆盖两种。只写扁平那条会在多 launch 算子上扫空,表现为每例
@@ -256,7 +256,7 @@ PROFILE_ASSIGNS = json.loads(PROFILE_ASSIGNS_JSON)
 
 
 class ProfileParseError(ValueError):
-    """表示 msopprof 的 OpBasicInfo.csv 无法按当前表驱动协议解析。"""
+    """表示 msprof op 的 OpBasicInfo.csv 无法按当前表驱动协议解析。"""
 
 
 class EnvironmentAbort(RuntimeError):
@@ -713,46 +713,73 @@ def _check_free_space(output_dir, launch_count):
 
 
 def _resolve_msprof(override):
-    """定位 msopprof。参数名沿用 --msprof 不改,只换查找目标与帮助文本。
+    """定位 msprof。采集走它的 op 子命令(msprof op),不直接找 msopprof。
 
-    可执行不等于可用:旧 CANN 上可能有同名文件却不支持本协议,所以命中后还要
-    _msopprof_usable 探一次。探不过按环境问题报,不要让它表现成每一例都失败。"""
+    找主入口而不是子工具:msprof 是 CANN 的 profiler 主入口,在 PATH 里的把握大;
+    msopprof 的实体在 tools/msopprof/bin/ 下,bin/ 里那个同名文件只是转发壳,
+    是否每个 CANN 安装都导出没有证据。
+
+    可执行不等于可用:旧 CANN 的 msprof 没有 op 子命令,所以命中后还要
+    _msprof_op_usable 探一次。探不过按环境问题报,不要让它表现成每一例都失败。"""
     if override is not None:
         candidate = shutil.which(str(override))
         if candidate:
             return Path(candidate).resolve()
         path = Path(override).expanduser()
         return path.resolve() if path.is_file() and os.access(path, os.X_OK) else None
-    found = shutil.which("msopprof")
+    found = shutil.which("msprof")
     if found:
         return Path(found).resolve()
     toolkit = os.environ.get("ASCEND_TOOLKIT_HOME")
     candidates = []
     if toolkit:
-        candidates.append(Path(toolkit) / "tools" / "msopprof" / "bin" / "msopprof")
-        candidates.append(Path(toolkit) / "bin" / "msopprof")
-    candidates.append(Path("/usr/local/Ascend/ascend-toolkit/latest/bin/msopprof"))
+        candidates.append(Path(toolkit) / "tools" / "profiler" / "bin" / "msprof")
+        candidates.append(Path(toolkit) / "bin" / "msprof")
+    candidates.append(
+        Path("/usr/local/Ascend/ascend-toolkit/latest/tools/profiler/bin/msprof")
+    )
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate.resolve()
     return None
 
 
-def _msopprof_usable(binary):
-    """跑一次 --help 确认是支持本协议的 msopprof。返回 (可用?, 说明)。"""
+def _msprof_op_usable(binary):
+    """跑一次 `msprof op --help` 确认算子采集这条路通。返回 (可用?, 说明)。
+
+    `msprof op` 只是转发壳,真身是 `$ASCEND_TOOLKIT_HOME/tools/msopprof/bin/msopprof`。
+    转发失败时它**退 0** 并打一行 `[ERROR] The file ... does not exist`,帮助文本里
+    自然也没有真身的选项——所以「帮助里有没有 --launch-count」恰好是「转发通没通」
+    的信号,比退出码可靠(A3 实测,CANN 9.0.1)。
+
+    诊断要指对方向:最常见的原因是 ASCEND_TOOLKIT_HOME 指向了一个没装 msopprof 的
+    toolkit,而不是 CANN 版本旧。指错时使用者该改环境变量,不是去换 CANN。"""
     try:
         result = subprocess.run(
-            [str(binary), "--help"], stdout=subprocess.PIPE,
+            [str(binary), "op", "--help"], stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, timeout=60, check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"{binary} --help 起不来：{exc}"
-    if result.returncode != 0:
-        return False, f"{binary} --help 退出码 {result.returncode}"
+        return False, f"{binary} op --help 起不来：{exc}"
     text = (result.stdout or b"").decode("utf-8", "replace")
-    if "--launch-count" not in text:
-        return False, f"{binary} 不认 --launch-count，版本过旧"
-    return True, ""
+    if result.returncode != 0:
+        return False, f"{binary} op --help 退出码 {result.returncode}；输出：{text[:200]}"
+    if "--launch-count" in text:
+        return True, ""
+    toolkit = os.environ.get("ASCEND_TOOLKIT_HOME")
+    forwarded = (
+        Path(toolkit) / "tools" / "msopprof" / "bin" / "msopprof" if toolkit else None
+    )
+    if forwarded is not None and not forwarded.is_file():
+        return False, (
+            f"`msprof op` 转发失败：ASCEND_TOOLKIT_HOME={toolkit} 下没有 "
+            f"tools/msopprof/bin/msopprof。把该变量指向装了 msopprof 的 toolkit，"
+            f"或用 --msprof 显式指定一个转发得通的 msprof"
+        )
+    return False, (
+        f"{binary} op 的帮助里没有 --launch-count，算子采集这条路不通；"
+        f"输出首行：{text.splitlines()[0][:120] if text.strip() else '（空）'}"
+    )
 
 
 def parse_op_summary(output_dir, launch_limit=None):
@@ -944,7 +971,7 @@ def _measure_case(args, binary, msprof, row, gtest_name, references, profile_roo
     for repeat in range(1, args.repeats + 1):
         output_dir = case_dir / f"r{repeat}"
         gtest_json = case_dir / f"r{repeat}.gtest.json"
-        # 每 case 恰一次采集。新语法是 msopprof [options] <app> [app args]:
+        # 每 case 恰一次采集。新语法是 msprof op [options] <app> [app args]:
         # --output 及其余选项必须排在被测二进制之前,其后一律视为被测程序的参数
         # (放错位置会报 "output dir is not writable",错误信息有误导性)。
         # --application= 已废弃;--ai-core/--task-time 在新命令下是硬错误(退 255)。
@@ -954,7 +981,7 @@ def _measure_case(args, binary, msprof, row, gtest_name, references, profile_roo
         if space_problem:
             raise EnvironmentAbort("DISK_SPACE", space_problem)
         command = [
-            str(msprof),
+            str(msprof), "op",
             # **必须用 = 形式**:空格分隔会报 "argument --output miss value"
             # (A3 实测,CANN 9.0.1)。错误信息不提示形式问题,容易误判成路径不可写。
             f"--output={output_dir}",
@@ -1038,7 +1065,7 @@ def _measure_case(args, binary, msprof, row, gtest_name, references, profile_roo
             record["message"] = f"第 {repeat} 次采样没有 kernel 行"
             return record
         # 读数即该次进程全部 kernel launch 的 duration 之和,不再按 calls_per_case
-        # 归一——msopprof 采的就是这次调用实际发生的 launch,没有重复计入。
+        # 归一——msprof op 采的就是这次调用实际发生的 launch,没有重复计入。
         record["samples"].append(kernel_us)
         record["launches"].append(launches)
 
@@ -1171,7 +1198,7 @@ def _parser():
         help=f"单次采集的 kernel launch 上限(1-5000,默认 {DEFAULT_LAUNCH_COUNT})；"
              "采到的行数等于它即判截断、不计分",
     )
-    parser.add_argument("--msprof", help="覆盖 msopprof 可执行文件路径")
+    parser.add_argument("--msprof", help="覆盖 msprof 可执行文件路径（采集走 op 子命令）")
     parser.add_argument(
         "--keep-prof",
         action="store_true",
@@ -1388,12 +1415,12 @@ def main(argv=None):
     mapped_rows = [row for row in expected_rows if row["case_name"] in mapping]
     msprof = _resolve_msprof(args.msprof) if mapped_rows else None
     if mapped_rows and msprof is None:
-        return _fail("MSPROF_NOT_FOUND", "找不到可执行的 msopprof")
+        return _fail("MSPROF_NOT_FOUND", "找不到可执行的 msprof")
     if msprof is not None and args.msprof is None:
         # 只在自动发现时探。显式传 --msprof 是使用者的覆盖,不二次猜疑——
         # 这道探测防的是「旧 CANN 上自动找到了不支持本协议的同名文件」,
         # 不是防使用者给错路径。
-        usable, why = _msopprof_usable(msprof)
+        usable, why = _msprof_op_usable(msprof)
         if not usable:
             # 可执行不等于可用:旧 CANN 上有同名文件却不支持本协议时,不报成
             # 「找不到」——那会让人去查 PATH,而真正的原因是版本。

@@ -156,7 +156,7 @@ class RetestIntegrationCase(unittest.TestCase):
         gauge._list_tests = fake_list_tests
         gauge._resolve_msprof = lambda override: Path("/stub/msprof")
         # 桩掉可用性探测与空间检查:两者都打真实文件系统,属真机边界。
-        gauge._msopprof_usable = lambda binary: (True, "")
+        gauge._msprof_op_usable = lambda binary: (True, "")
         gauge._check_free_space = lambda output_dir, launch_count: None
         gauge._run_process = lambda command, timeout, cwd=None, env=None: (0, "stub", None)
         gauge._gtest_evidence = lambda path, gtest_name: (True, "桩:证据合格")

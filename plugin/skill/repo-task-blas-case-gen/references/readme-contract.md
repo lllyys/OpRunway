@@ -23,7 +23,7 @@ README 是事实表 FACTS 供人阅读的投影，不是独立的事实来源。
 | 校验形态与阈值 | `verify` token 与固定 dtype 阈值表 |
 | 用例块与覆盖 | `generate()` 的 blocks 与 pairwise report |
 | 精度验收 | 固定命令、结果路径和退出码 |
-| 性能验收 | `perf.key/threshold`、固定 msopprof kernel 协议与单次调用条款 |
+| 性能验收 | `perf.key/threshold`、固定 `msprof op` kernel 协议与单次调用条款 |
 | GPU 基线 | `perf.key/rows/meta`，无 perf 时写不评判 |
 
 ## 开发者约束

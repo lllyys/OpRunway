@@ -45,7 +45,7 @@ description: >-
 | A2 有无门 | 任务包两件、部署 CSV、构建清单、量具模板；生成运行时包 | `check.json`、`runtime/` | 0 进 A2′；2/3 停止 |
 | A2′ 三文件 | 读 `check.json` 里 harness 三文件的有无 | 同 `check.json` | 记录后进 A3 |
 | A3 精度 | 构建并运行全部精度用例 | `runtime/results/accuracy_<id>.json` | 0 进 A4；1 复跑后进 A5；3 修复后换 id 重跑 |
-| A4 性能 | 逐例用 msopprof 采集有基线的性能用例 | `runtime/results/performance_<id>.json` | 0/1/2 进 A5；3 修复后重跑一次 |
+| A4 性能 | 逐例用 `msprof op` 采集有基线的性能用例 | `runtime/results/performance_<id>.json` | 0/1/2 进 A5；3 修复后重跑一次 |
 | A5 结论 | 校验集合、计数与哈希，机械裁决 | 产物目录下三类布局 | 0/1/2 |
 
 **运行时包**是 A2 生成的 `<工作目录>/runtime/`（CSV 副本、规范化基线、两个量具与
@@ -105,7 +105,7 @@ PASS 被抹除，归因四值见同节。
 
 ### A4 性能
 
-A3 退出码 0 且 `check.json` 的 `checks.perf.comparable_pf` 大于 0 才运行。msopprof
+A3 退出码 0 且 `check.json` 的 `checks.perf.comparable_pf` 大于 0 才运行。`msprof op`
 采集协议与通过判据见 [perf-protocol.md](references/perf-protocol.md)：
 
 ```bash
@@ -176,5 +176,5 @@ A5 跑完后回给用户的内容固定三项：
 
 - [run-chain.md](references/run-chain.md) — A1–A5 命令、参数、产物、退出码、JSON 字段与复跑链
 - [troubleshooting.md](references/troubleshooting.md) — 常见失败的现象、原因与处置
-- [perf-protocol.md](references/perf-protocol.md) — msopprof kernel 耗时协议、证据保护与待实测边界
+- [perf-protocol.md](references/perf-protocol.md) — `msprof op` kernel 耗时协议、证据保护与待实测边界
 - [retest-protocol.md](references/retest-protocol.md) — 复测轮记录、有效性、折叠、豁免与恢复

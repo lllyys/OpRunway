@@ -1,4 +1,4 @@
-"""msopprof 产物解析器的单元测试：每条用例真铺目录、真写 CSV，不打桩绕过。
+"""msprof op 产物解析器的单元测试：每条用例真铺目录、真写 CSV，不打桩绕过。
 
 被测对象是 `assets/template/verify_performance.py` 里的 `parse_op_summary`，
 外加采集前后的两个环境判据 helper（`_collection_failure_marker`、`_check_free_space`）。

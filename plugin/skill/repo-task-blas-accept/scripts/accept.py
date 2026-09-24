@@ -471,18 +471,17 @@ def _find_cann():
 
 
 def _find_msprof(cann_root):
-    """A1 环境预检:找 A4 采集实际要用的 msopprof,不是旧的 msprof。
+    """A1 环境预检:找 msprof,采集走它的 op 子命令。
 
-    两者不是一回事——A1 记 msprof OK 而 A4 要 msopprof 时,预检会通过、
-    每一例却在采集阶段失败,报错指向被测算子而不是环境。"""
-    found = shutil.which("msopprof")
+    只判文件存在且可执行,不探 op 子命令——A1 是软预检。旧 CANN 的 msprof 没有
+    op 子命令时 A1 仍记 OK,由 A4 的 MSPROF_UNUSABLE 兜住。"""
+    found = shutil.which("msprof")
     if found:
         return Path(found).resolve()
     if cann_root is not None:
-        for rel in (("tools", "msopprof", "bin", "msopprof"), ("bin", "msopprof")):
-            candidate = cann_root.joinpath(*rel)
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                return candidate.resolve()
+        candidate = cann_root / "tools" / "profiler" / "bin" / "msprof"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate.resolve()
     return None
 
 
@@ -579,7 +578,7 @@ def command_env(args):
         hard=True,
     )
     msprof = _find_msprof(cann_root)
-    record("msopprof", "OK" if msprof else "缺失", str(msprof) if msprof else "未找到")
+    record("msprof", "OK" if msprof else "缺失", str(msprof) if msprof else "未找到")
     requested_device, device_pool = _parse_device_request(args.device, args.device_pool)
     if requested_device == "auto":
         for candidate in device_pool:
