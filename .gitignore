@@ -50,6 +50,9 @@ SKILL_FRICTION_*.md
 .claude/*.local.*
 # skill 改动门的运行时收据，每次放行覆盖一次
 .claude/.skill-gate-receipt.json
+# 上面那条只匹配仓根。钩子在 plugin/.claude/ 下也会落一份，内容含本机绝对路径与
+# session id，不该入库——用 ** 匹配任意层级。
+**/.skill-gate-receipt.json
 CLAUDE.local.md
 
 # Codex CLI — local files, keep checked-in subdirs

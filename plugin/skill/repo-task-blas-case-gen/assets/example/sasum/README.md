@@ -161,7 +161,7 @@ python3 verify_performance.py --repo <repo-root> --soc <soc> --device 0
 结果 JSON 的 `ignored_no_ref`。每例单独执行，默认独立采集 1 次，进程形态是：
 
 ```text
-msopprof --output <采样目录> --aic-metrics=BasicInfo --launch-count 512 \
+msopprof --output=<采样目录> --aic-metrics=BasicInfo --launch-count=512 \
          <被测二进制> --gtest_filter=<用例> --gtest_output=json:<证据路径>
 ```
 

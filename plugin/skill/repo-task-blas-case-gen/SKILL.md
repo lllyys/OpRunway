@@ -2,7 +2,7 @@
 name: repo-task-blas-case-gen
 description: >-
   根据 ops-blas（aclblas）社区算子任务书，生成由 CSV 驱动的
-  GTest 用例和配套脚本。需要产出题库 CSV、自测脚本或设计 BLAS/稀疏接口用例时使用
+  GTest 用例和配套脚本。需要产出题库 CSV、自测脚本或设计 BLAS 接口用例时使用
   本 skill；需要在 NPU 上验收已有用例和脚本时，改用 repo-task-blas-accept。
 ---
 

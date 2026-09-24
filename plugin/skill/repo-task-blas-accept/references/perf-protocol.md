@@ -39,18 +39,20 @@
 每个 case 的每次采样恰好执行下面这一条命令，无第二步导出，无预热进程：
 
 ```
-msopprof --output <采样目录> --aic-metrics=BasicInfo --launch-count <上限> \
+msopprof --output=<采样目录> --aic-metrics=BasicInfo --launch-count=<上限> \
          <被测二进制> --gtest_filter=<完整名> --gtest_output=json:<case_dir>/r<次序>.gtest.json
 ```
 
 `<完整名>` 由名字映射得到，`<采样目录>` 是该例本次采样的独立输出目录，`<case_dir>` 是该
-case 产物目录的**绝对路径**。四条约束进契约：
+case 产物目录的**绝对路径**。五条约束进契约：
 
 1. `--output` 与其余选项排在被测二进制之前，其后的参数一律透传给被测程序。放错位置报
    `output dir is not writable`，该报错文本与实际原因无关。
-2. 不拼 `--application=`：该写法已废弃，被测程序及其参数作为 argv 尾原样传递。
-3. 不传 `--ai-core` 与 `--task-time`：两者在新命令下是硬错误，工具退 255。
-4. `--launch-count` 默认 512，允许区间 1 到 5000。超额指定不报错、不增加耗时与体积，
+2. **工具选项一律写成 `--key=value`。** 用空格分隔取值报 `argument --output miss value`，
+   该报错同样不提示是形式问题，容易被当成目录不可写。
+3. 不拼 `--application=`：该写法已废弃，被测程序及其参数作为 argv 尾原样传递。
+4. 不传 `--ai-core` 与 `--task-time`：两者在新命令下是硬错误，工具退 255。
+5. `--launch-count` 默认 512，允许区间 1 到 5000。超额指定不报错、不增加耗时与体积，
    采到的就是进程实际发生的全部 launch。
 
 选 `--aic-metrics=BasicInfo` 而不用默认档的原因是耗时与文件数都更低，读数不变。

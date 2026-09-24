@@ -2891,6 +2891,7 @@ def _parser():
     )
     check_parser.add_argument(
         "--calls-per-case", type=int, default=1,
+        choices=(1,),
         help="harness 一条 gtest 用例调用被测接口的次数；当前只接受 1",
     )
     check_parser.add_argument("--out", type=Path, help="check.json 输出路径，默认当前目录")

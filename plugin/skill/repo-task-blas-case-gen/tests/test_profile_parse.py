@@ -1,7 +1,7 @@
 """msopprof 产物解析器的单元测试：每条用例真铺目录、真写 CSV，不打桩绕过。
 
 被测对象是 `assets/template/verify_performance.py` 里的 `parse_op_summary`，
-外加采集前后的两个环境判据 helper（`_disk_failure_marker`、`_check_free_space`）。
+外加采集前后的两个环境判据 helper（`_collection_failure_marker`、`_check_free_space`）。
 模板顶部有 `@@OP@@` 这类渲染占位符，不能直接 import，所以先用 `package.render_runtime()`
 渲染出一份可执行副本再按路径加载——与 repo-task-blas-accept 的
 `tests/test_retest_integration.py` 同一套加载做法。
@@ -126,10 +126,17 @@ class TestLayouts(ProfileDirCase):
         """一份产物都没有：返回 0 让调用方判 NO_KERNEL，不抛异常。"""
         self.assertEqual(GAUGE.parse_op_summary(self.out), (0.0, 0))
 
-    def test_header_only(self):
-        """只有表头没有数据行，与零文件同一去向。"""
+    def test_header_only_is_rejected(self):
+        """只有表头的 CSV 是产物异常，不与零文件同一去向。
+
+        零文件意味着这一次根本没采到，判 NO_KERNEL 正确；CSV 在而数据行不在，
+        意味着工具建了文件却没写进去——那一次 launch 的耗时丢了。把它当零行放过，
+        多文件场景下剩余的行会被当成完整读数，少算的部分直接抬高 ratio。
+        （push 前 audit 抓到，2026-09-24）"""
         self.flat([])
-        self.assertEqual(GAUGE.parse_op_summary(self.out), (0.0, 0))
+        with self.assertRaises(GAUGE.ProfileParseError) as ctx:
+            GAUGE.parse_op_summary(self.out)
+        self.assertIn("只有表头", str(ctx.exception))
 
 
 class TestMalformedRows(ProfileDirCase):
@@ -203,22 +210,22 @@ class TestTruncation(ProfileDirCase):
         self.assertEqual(GAUGE.parse_op_summary(self.out), (6.0, 3))
 
 
-class TestDiskFailureMarker(unittest.TestCase):
+class TestCollectionFailureMarker(unittest.TestCase):
     """磁盘满时工具仍退 0 且不产 CSV，只有日志里这几个串能把它与 NO_KERNEL 分开。"""
 
     def test_markers_hit(self):
         for marker in ("Copy failed", "Failed to save", "No space left"):
             with self.subTest(marker=marker):
                 log = f"[INFO] profiling start\n[WARN] {marker}: /home/prof\n[INFO] done\n"
-                self.assertEqual(GAUGE._disk_failure_marker(log), marker)
+                self.assertEqual(GAUGE._collection_failure_marker(log), marker)
 
     def test_clean_log(self):
         log = "[INFO] profiling start\n[INFO] Profiling data has been saved\n"
-        self.assertIsNone(GAUGE._disk_failure_marker(log))
+        self.assertIsNone(GAUGE._collection_failure_marker(log))
 
     def test_empty_input(self):
-        self.assertIsNone(GAUGE._disk_failure_marker(""))
-        self.assertIsNone(GAUGE._disk_failure_marker(None))
+        self.assertIsNone(GAUGE._collection_failure_marker(""))
+        self.assertIsNone(GAUGE._collection_failure_marker(None))
 
 
 Usage = collections.namedtuple("Usage", "total used free")
@@ -302,3 +309,83 @@ class ProfileSharedCollectionTest(unittest.TestCase):
             len(differing), len(self.PROFILE_CONSTANTS),
             "差异行数应当恰好等于允许分叉的常量数",
         )
+
+
+class AuditRegressionTest(unittest.TestCase):
+    """push 前 audit 抓到的两条 FAIL→PASS 路径的定向回归。
+
+    两条都是「工具退 0、CSV 合法、gtest 证据合格，但耗时少算」——少算直接抬高
+    ratio，是本协议唯一会把不通过写成通过的形状。
+    """
+
+    def _gauge(self, tmp):
+        root = Path(tmp)
+        package.render_runtime(op="x", family="y", perf_key=["n"],
+                               out_dir=root / "r", csv_sha256="0" * 64)
+        spec = importlib.util.spec_from_file_location(
+            "g_audit", root / "r" / "verify_performance.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod, root
+
+    def test_header_only_file_mixed_in_is_rejected(self):
+        """混入只有表头的 CSV → 拒绝，不是把剩下的行照常求和。
+
+        改之前这里返回 (10.0, 1)：丢掉的那次 launch 的耗时被静默抹掉。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            g, root = self._gauge(tmp)
+            d = root / "out"
+            (d / "OPPROF_a" / "k1" / "0").mkdir(parents=True)
+            (d / "OPPROF_a" / "k1" / "0" / "OpBasicInfo_1.csv").write_text(
+                "Op Name,Task Duration(us)\nk1,10.0\n", encoding="utf-8")
+            (d / "OPPROF_a" / "k1" / "1").mkdir(parents=True)
+            (d / "OPPROF_a" / "k1" / "1" / "OpBasicInfo_2.csv").write_text(
+                "Op Name,Task Duration(us)\n", encoding="utf-8")
+            with self.assertRaises(g.ProfileParseError) as cm:
+                g.parse_op_summary(d, 512)
+            self.assertIn("只有表头", str(cm.exception))
+
+    def test_launch_dir_without_csv_is_rejected(self):
+        """采集目录在而 CSV 不在 → 拒绝。只数读到的行数发现不了这种缺口。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            g, root = self._gauge(tmp)
+            d = root / "out"
+            (d / "OPPROF_a" / "k1" / "0").mkdir(parents=True)
+            (d / "OPPROF_a" / "k1" / "0" / "OpBasicInfo_1.csv").write_text(
+                "Op Name,Task Duration(us)\nk1,10.0\n", encoding="utf-8")
+            (d / "OPPROF_a" / "k1" / "1").mkdir(parents=True)   # 目录在，CSV 没落
+            with self.assertRaises(g.ProfileParseError) as cm:
+                g.parse_op_summary(d, 512)
+            self.assertIn("没有 OpBasicInfo", str(cm.exception))
+
+    def test_partial_failure_log_is_a_collection_failure(self):
+        """工具打「N success, M failed」后仍退 0 → 按采集失败处理。
+
+        msopprof 在部分 kernel 解析失败时只打 WARN 并照常返回
+        （op_prof_data_parse.cpp:114）。不认这句，剩下的行会被当成完整读数。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            g, _ = self._gauge(tmp)
+            hit = g._collection_failure_marker(
+                "[WARN]  Profiling kernels result is: 1 success, 1 failed. Please check")
+            self.assertIsNotNone(hit)
+            self.assertIn("1", hit)
+
+    def test_all_success_summary_is_not_a_failure(self):
+        """「N success, 0 failed」是正常完成的汇总行，不能误判成失败。
+
+        这条守住上一条不要退化成 WARN 黑名单。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            g, _ = self._gauge(tmp)
+            self.assertIsNone(g._collection_failure_marker(
+                "[INFO]  Profiling kernels result is: 6 success, 0 failed. Please check"))
+            self.assertIsNone(g._collection_failure_marker(
+                "[WARN]  The option \"--application\" will be deprecated"))
+
+    def test_launch_failure_is_not_a_case_crash(self):
+        """采集进程起不来 → LAUNCH_FAILED（调用方转环境中止），不是逐例 CRASH。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            g, _ = self._gauge(tmp)
+            code, output, problem = g._run_process(
+                ["/nonexistent/msopprof-does-not-exist"], timeout=5)
+            self.assertIsNone(code)
+            self.assertEqual(problem, "LAUNCH_FAILED")

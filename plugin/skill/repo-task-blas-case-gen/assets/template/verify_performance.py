@@ -231,9 +231,24 @@ OP_BASIC_INFO_COLUMNS = {
 # 反例(ops-blas 源码):ssymm/arch22 在 m=1280 n=128 下 105 个 launch;
 # sgemm_strided_batched/arch35 由 batchCount 驱动,参数校验只判 >= 0,无上界。
 DEFAULT_LAUNCH_COUNT = 512
-# 写盘失败的日志表述。命中即判环境错误,不判 NO_KERNEL——磁盘满时工具仍退 0、
-# 只刷 WARN 且不产 CSV,不认这些串就会把环境问题说成算子没起 kernel(A3 实测)。
-DISK_FAILURE_MARKERS = ("Copy failed", "Failed to save", "No space left")
+# 工具自报采集/解析失败的日志表述。命中即判环境失败并整轮中止。
+#
+# **这不是 WARN 黑名单**,只收工具明确说「这次采集或解析没成功」的那几句。工具退 0
+# 不代表采到了:磁盘满时它只刷 Copy failed;部分 kernel 解析失败时它打
+# 「N success, M failed」后照常返回(msopprof 源码 op_prof_data_parse.cpp:114)。
+# 不认这些串,少算的耗时会让 ratio 虚高——这是会把 FAIL 写成 PASS 的路径之一。
+COLLECTION_FAILURE_MARKERS = (
+    "Copy failed",                    # 写盘失败(磁盘满实测)
+    "Failed to save",                 # 同上,另一种表述
+    "No space left",                  # 同上
+    "Get profiling data failed",      # 采集阶段失败
+    "Profiling data parse failed",    # 解析阶段失败
+    "No profiling data dumped",       # 落盘为空
+)
+# 「N success, M failed」只在 M 非零时算失败:M 为 0 是正常完成的汇总行。
+PARTIAL_FAILURE_RE = re.compile(
+    r"Profiling kernels result is:\s*\d+\s*success,\s*(\d+)\s*failed"
+)
 INTEGER_RE = re.compile(r"^[+-]?\d+$")
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 PERF_KEY = [key for key in PERF_KEY if key]
@@ -642,15 +657,34 @@ def _load_gpu_baseline(path):
     return metadata, references, warnings
 
 
-def _disk_failure_marker(output):
-    """采集日志里有没有写盘失败的迹象。返回命中的那一条,没有则 None。
+def _launch_dirs_without_csv(root, seen):
+    """嵌套布局下,建了采集目录却没落 CSV 的那些 launch。返回相对路径列表。
 
-    磁盘满时工具仍退 0、只刷 WARN 且不产 CSV。不认这些串就会落到「无数据行」
-    那一档判 NO_KERNEL,把环境问题说成算子没起 kernel,排错方向完全相反。"""
+    工具为每次 launch 建一个 <kernel>/<序号>/ 目录。目录在而 CSV 不在,说明那一次
+    的耗时丢了;只数读到的行数发现不了这种缺口。"""
+    missing = []
+    for prof in sorted(Path(root).glob("OPPROF_*")):
+        for index_dir in sorted(prof.glob("*/[0-9]*")):
+            if not index_dir.is_dir():
+                continue
+            if not any(f.resolve() in seen for f in index_dir.glob("OpBasicInfo*.csv")):
+                missing.append(str(index_dir.relative_to(root)))
+    return missing
+
+
+def _collection_failure_marker(output):
+    """采集日志里有没有工具自报的失败。返回命中的那一条,没有则 None。
+
+    工具退 0 不代表采到了。不认这些串,失败会落到「无数据行」那一档判 NO_KERNEL,
+    把环境问题说成算子没起 kernel;部分失败更糟——剩下的行照常求和,少算的耗时
+    直接抬高 ratio。"""
     text = output or ""
-    for marker in DISK_FAILURE_MARKERS:
+    for marker in COLLECTION_FAILURE_MARKERS:
         if marker in text:
             return marker
+    match = PARTIAL_FAILURE_RE.search(text)
+    if match and match.group(1) != "0":
+        return f"{match.group(1)} 个 kernel 采集失败"
     return None
 
 
@@ -744,6 +778,7 @@ def parse_op_summary(output_dir, launch_limit=None):
         if resolved in seen:      # 两个 glob 在扁平布局上会重叠
             continue
         seen.add(resolved)
+        rows_here = 0
         with path.open(encoding="utf-8-sig", newline="") as stream:
             reader = csv.DictReader(stream)
             columns = set(reader.fieldnames or [])
@@ -765,6 +800,17 @@ def parse_op_summary(output_dir, launch_limit=None):
                     )
                 kernel_us += duration
                 launches += 1
+                rows_here += 1
+        if rows_here == 0:
+            # 只有表头的 CSV 意味着那一次 launch 的耗时没落盘。放它过去,剩下的行
+            # 照常求和,少算的部分直接抬高 ratio——按产物异常拒绝,不当零行忽略。
+            raise ProfileParseError(f"{path.name} 只有表头,没有数据行")
+    missing = _launch_dirs_without_csv(root, seen)
+    if missing:
+        raise ProfileParseError(
+            "以下采集目录没有 OpBasicInfo CSV，该次 launch 的耗时缺失："
+            + "、".join(missing[:5]) + (" 等" if len(missing) > 5 else "")
+        )
     if launch_limit is not None and launches >= launch_limit:
         raise ProfileTruncatedError(
             f"采到 {launches} 个 launch，等于 --launch-count 上限 {launch_limit}，"
@@ -846,7 +892,8 @@ def _run_process(command, timeout, cwd=None, env=None):
             output = output.decode("utf-8", errors="replace")
         return None, output, "TIMEOUT"
     except OSError as exc:
-        return None, str(exc), "CRASH"
+        # 进程起不来是环境问题,不是被测对象崩了。调用方据此走 EnvironmentAbort。
+        return None, str(exc), "LAUNCH_FAILED"
 
 
 def _write_log(path, content):
@@ -926,17 +973,22 @@ def _measure_case(args, binary, msprof, row, gtest_name, references, profile_roo
         # 第 2 条不恢复旧的「非零 → NO_KERNEL」:工具失败是环境问题,记成算子问题
         # 会让排错方向完全相反。磁盘满可能先让 gtest JSON 写不出而撞第 3 条,
         # 所以日志检查必须排在证据检查之前。
+        if problem == "LAUNCH_FAILED":
+            raise EnvironmentAbort(
+                "PROFILER_FAILED",
+                f"{row['case_name']} 第 {repeat} 次采集进程起不来：{output}",
+            )
         if problem:
             record["status"] = problem
             record["verdict"] = problem
             record["message"] = f"第 {repeat} 次采集未完成"
             return record
-        disk_hit = _disk_failure_marker(output)
-        if code != 0 or disk_hit:
-            reason = "DISK_WRITE_FAILED" if disk_hit else "PROFILER_FAILED"
+        failure_hit = _collection_failure_marker(output)
+        if code != 0 or failure_hit:
+            reason = "COLLECTION_FAILED" if failure_hit else "PROFILER_FAILED"
             detail = (
                 f"{row['case_name']} 第 {repeat} 次采集："
-                + (f"日志出现「{disk_hit}」，写盘失败" if disk_hit
+                + (f"日志出现「{failure_hit}」" if failure_hit
                    else f"采集工具退出码 {code}")
                 + f"；日志 {case_dir / f'r{repeat}.log'}"
             )
