@@ -174,20 +174,48 @@ GTest JSON 与构建日志写入 `results/<run_id>/accuracy/`；阶段目录必�
 python3 verify_performance.py --repo <repo-root> --soc <soc> --device 0
 ```
 
-一条 gtest 用例只调用被测接口一次，用例里不自行预热、不重复调用；量具默认不做外部
-预热（`--warmup N` 显式传入正数才在采样前另起一个不计分的裸 gtest 预热进程，显式 0
-只序列化字段不起进程），重复采样仅在显式 `--repeats` 时发生。msprof 采到的是整条用例的全部 kernel，多调一次就多算一次。
+一条 gtest 用例只调用被测接口一次，用例里不自行预热、不重复调用。`verify_performance.py`
+不另起预热进程，重复采样仅在显式 `--repeats` 时发生。一次采样采到的是该次进程实际发生的
+全部 kernel launch，多调一次就多算一次。
 
-性能集只含本任务包 CSV 中能配到 GPU 基线的 `TC_PF_` 行，无基线的行不跑、只计数；每例
-单独执行。每例默认独立运行 1 次 msprof（`--repeats` 可增加次数），op_summary 由
-`--application` 采集自动导出；每次把 `AI_CORE/AI_VECTOR_CORE/MIX_AIC/MIX_AIV` 的
-`Task Duration(us)` 求和。`kernel_us` 取各次和的中位数（单次时即该值）；`spread` 为
-`(max-min)/median`，单次时为 0——表示无样本间差异可算，不是稳定性证明。
+性能集只含本任务包 CSV 中能配到 GPU 基线的 `TC_PF_` 行；配不到基线的行不执行，只记进
+结果 JSON 的 `ignored_no_ref`。每例单独执行，默认独立采集 1 次，进程形态是：
+
+```text
+msopprof --output <采样目录> --aic-metrics=BasicInfo --launch-count 512 \
+         <被测二进制> --gtest_filter=<用例> --gtest_output=json:<证据路径>
+```
+
+选项必须排在被测二进制之前，其后一律当作被测程序的参数。产物布局取决于实际采到的
+launch 数：采到 1 个是 `OPPROF_*/OpBasicInfo.csv`，采到多个是
+`OPPROF_*/<kernel 符号名>/<序号>/OpBasicInfo_<时间戳>.csv`。
+
+一次采样的读数是递归命中的全部 `OpBasicInfo*.csv`、全部数据行的 `Task Duration(us)`
+之和。`kernel_us` 取各次读数的中位数（单次时即该值）；`spread` 为 `(max-min)/median`，
+单次时为 0——表示无样本间差异可算，不是稳定性证明。
+
+`--launch-count` 是单次采集的 kernel launch 上限，默认 512，合法区间 1 到 5000。采到的
+行数达到该上限时无法区分「恰好这么多」与「被截断」，该例记 `NO_KERNEL`，措辞落在
+「当前采集口径不支持该用例的 launch 规模」，不是算子失败。调大它可以解决，但产物体积
+随实际 launch 数线性增长，约 2.2 MB 每 launch。
 
 性能键为 `n, k, uplo, trans`。`npu_ms = kernel_us/1000`，有 GPU 基线时计算
-`ratio = gpu_ms/npu_ms`；`ratio >= 0.8` 才判 PASS。无匹配基线时记
-`NO_REF`，只采集不评判。每次采样先验执行成功证据（gtest JSON，缺失或不合格记
-`CRASH`）；证据合格而 msprof 失败或没有 kernel 行时记 `NO_KERNEL`，不能把耗时写成 0。
+`ratio = gpu_ms/npu_ms`；`ratio >= 0.8` 才判 PASS。采样后仍配不到基线的
+用例记 `NO_REF`，只采集不评判。
+
+失败判定按固定顺序走，先到先定：
+
+| 顺序 | 条件 | 结果 |
+| --- | --- | --- |
+| 1 | 采集进程超时 | `TIMEOUT` |
+| 2 | 采集工具退出非零，或日志出现 `Copy failed`、`Failed to save`、`No space left` | 整轮中止，退 3 |
+| 3 | 执行成功证据 `r<N>.gtest.json` 缺失或不合格 | `CRASH` |
+| 4 | 无 CSV、无数据行、缺 `Task Duration(us)` 列、值非有限正数 | `NO_KERNEL` |
+| 5 | 采到的行数达到 `--launch-count` | `NO_KERNEL` |
+
+第 2 条排在证据检查之前：磁盘写满时采集工具仍退 0、只刷 WARN 且不产 CSV，按算子问题
+记会把排错方向带反。每次采样前按本次上限（`--launch-count` × 2.2 MB × 1.5）检查可用
+空间，不足即整轮中止；采集目录不要落在 `/dev/shm` 这类小容量文件系统上。
 
 结果写到 `results/performance_<run_id>.json`。每例记录 `kernel_us`、`samples`、
 各次 `launches`、`gpu_ms`、`ratio`、`spread` 和 `verdict`。汇总记录状态、
@@ -198,16 +226,22 @@ python3 verify_performance.py --repo <repo-root> --soc <soc> --device 0
 | 0 | 全部 PASS，或没有可比较的 GPU 基线 |
 | 1 | 至少一个有基线用例 FAIL |
 | 2 | 出现 NO_KERNEL、CRASH、TIMEOUT 或 MISSING，证据不足 |
-| 3 | CSV、构建、二进制、GTest 列举、基线或 msprof 环境问题 |
+| 3 | CSV、构建、二进制、GTest 列举、基线或采集环境问题 |
+
+退 3 时汇总的 `reason` 记具体原因：`DISK_SPACE`、`DISK_WRITE_FAILED`、`PROFILER_FAILED`、
+`MSPROF_NOT_FOUND`、`MSPROF_UNUSABLE`。逐例状态词表不因此扩张，仍是 PASS、FAIL、
+NO_REF、NO_KERNEL、CRASH、TIMEOUT、MISSING 七个。
 
 GPU 基线的 `timing_scope` 不是 `kernel` 时，每例 verdict 带 `(scope caveat)`，汇总的
 `scope_caveat` 也为 true。GTest 自带的 ms 含 host 准备与 golden，不作性能依据。
 
-msprof 单命令自动导出 op_summary、`op_summary_*.csv` 目录模式、列名与 kernel task 类型
-已在 A3 机（CANN 9.0.1，ascend910_93）实测确认；每次采样的执行成功证据
-（`r<N>.gtest.json`，缺失或不合格记 CRASH）、表驱动常量与仍待其他机型确认的边界见
-skill 的 `references/perf-protocol.md`。
-原始 profile 与构建日志写入 `results/<run_id>/performance/`；重复 run-id 会退出 3。
+采集后端从 `msprof` 换成 `msprof op`（`msopprof`）后读数系统性偏低：同机同用例实测
+0.64 到 0.84 倍，绝对差 8.5 到 11 us。新后端重放 kernel，量的是稳态，旧后端量的是含
+首次调用惩罚的单次冷调用，两者不可比，跨后端的两轮数不能放在一起看。
+
+命令形态、两种产物布局、`OpBasicInfo.csv` 九列（无 `Task Type` 列）与截断判据已在 A3 机
+（CANN 9.0.1，ascend910_93）实测确认，其他机型的边界尚未核对。原始 profile 与构建日志
+写入 `results/<run_id>/performance/`；重复 run-id 会退出 3。
 
 ## GPU 基线
 

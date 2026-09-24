@@ -6,14 +6,14 @@
 - [复测轮记录](#复测轮记录)
 - [换卡复测](#换卡复测)
 - [轮次有效性](#轮次有效性)
+- [更换采集后端后的复测](#更换采集后端后的复测)
 - [折叠](#折叠)
 - [启动与恢复](#启动与恢复)
 - [verdict 与报告增量](#verdict-与报告增量)
 
 本协议只改性能侧：精度量具、精度侧 `-rerun` 复跑与首轮闭合要求（见 run-chain.md
 「A5 结论」的集合闭合）都不变。证据写入的不可变规则见 perf-protocol.md「证据保护」，
-warmup 语义见 perf-protocol.md「warmup」，性能期望集定义见 perf-protocol.md
-「适用范围」。
+性能期望集定义见 perf-protocol.md「适用范围」。
 
 ## 术语与信任模型
 
@@ -54,10 +54,9 @@ JSON 内 `round` 与 k 不一致时记 warning，按文件名裁。复测轮不�
 - `requested_cases`：用户点名清单，非空、无重复、每项 ∈ 性能期望集，未知点名在起跑前
   报参数错误（不建目录不探卡）。每个点名 case 在 `cases[]` 恰好一条记录，跑不出的用
   `MISSING` 占位，不缺不多不重复。逐例记录以 `name` 为用例名，其余字段与首轮相同
-  （见 perf-protocol.md「结果与退出码」），另加 `warmup_exit`。逐例状态合法集合是
+  （见 perf-protocol.md「结果与退出码」）。逐例状态合法集合是
   `PASS/FAIL/NO_KERNEL/CRASH/TIMEOUT/MISSING`——复测集全在性能期望集内，`NO_REF`
   出现即属工具缺陷。
-- `warmup`：本轮预热次数 N（整数 ≥0）。
 - `device_requested`（本轮请求的物理卡，不接受 `auto`）与 `device_resolved`（实际
   执行卡）：两者都是显式卡号，允许不等于首轮的卡（见「换卡复测」）。用默认卡时是否带
   复测限定布尔参数 `--map-device`，以 preflight 的 `needs_device_map` 为判据——首轮为
@@ -122,12 +121,12 @@ reason 逐 case 必填非空。豁免轮不含设备、绑定与 `requested_case
 - 卡数不足或占位卡被别的进程占用时，换卡轮整轮失败，改用同卡复测，或换一张目标卡，
   使它对应的那组占位卡全空闲。
 - 起跑门只查目标卡忙闲，不查占位卡，所以这类失败在起跑时不报，要到采集才暴露。
-- 症状（A3 机实测，CANN 9.0.1）：编译卡号 3、目标卡 2，占位因此顺延成 0、1、3
-  （跳过目标卡 2），串 `0,1,3,2`；占位里的卡 3 被别的进程独占时整轮 `CRASH` 且不产生
-  PROF 目录——**算子本身算对了**（gtest 内部 PASSED、MERE/MARE 均 0），但 msprof 报
-  `Operation not permitted` 拿不到 profiling 数据。换成目标卡 4 后占位回到 0、1、2
-  （串 `0,1,2,4`）、三张全空，同一轮正常出数。看到「CRASH 且无 PROF 目录」先查占位卡，
-  不要先怀疑算子。
+- 症状（A3 机实测，CANN 9.0.1，旧 msprof 后端）：编译卡号 3、目标卡 2，占位因此顺延成
+  0、1、3（跳过目标卡 2），串 `0,1,3,2`；占位里的卡 3 被别的进程独占时整轮 `CRASH`
+  且不产生采集目录——**算子本身算对了**（gtest 内部 PASSED、MERE/MARE 均 0），但采集
+  工具报 `Operation not permitted` 拿不到 profiling 数据。换成目标卡 4 后占位回到
+  0、1、2（串 `0,1,2,4`）、三张全空，同一轮正常出数。看到「CRASH 且无采集目录」先查
+  占位卡，不要先怀疑算子。
 
 换卡轮在「启动与恢复」那条量具命令上改三处——`--device` 改填目标卡，固定加
 `--map-device`，另加 `--compiled-device`：
@@ -149,12 +148,15 @@ A5 判一个测量轮是不是换卡轮，**只看本轮 `device_resolved` 与�
   推得出，`device_compiled` 必须在且等于推导值，否则该轮无效。
 - 同卡轮：一律放行，`device_compiled` 只作记录，推不出编译逻辑卡号也不影响。
 
-另有一项 **PROF 落点核对**，对每个测量轮都做：msprof 在每次采集的输出目录下建
-`PROF_*/device_<物理卡>/`，目录名里的卡号直证该次采集落到的卡，必须与
-`device_resolved` 一致，不一致即无效轮。核对范围限定为该轮实际产生的目录——某例因
-`TIMEOUT/MISSING/CRASH/NO_KERNEL` 等合法单例终态没产生 PROF 目录时，缺目录不改判该轮
-无效；一个落点目录都没有而该轮有 PASS/FAIL 计分用例时记一条「未完成设备核对」的
-告警，同样不改判（数值证据在 JSON 里，产物目录可能被清理过）。
+**落卡核对已整条撤除。** 旧后端在每次采集的输出目录下建 `PROF_*/device_<物理卡>/`，
+目录名里的卡号直证该次采集落到的卡；新后端的 `OPPROF_*` 目录没有这一层，核对失去数据
+源。A5 改为对每个含 PASS/FAIL 计分用例的测量轮输出一条告警，不据此改判该轮有效性：
+`device_resolved=<卡号> 来自量具记录，实际落点未独立核对`。换卡轮的有效性从此只靠
+身份、绑定校验与量具自报的 `device_resolved`。
+
+恢复独立核对的退路已经备好，不必重新做实验：`OpBasicInfo.csv` 的 `Device Id` 列记的是
+物理卡号（A3 机实测，CANN 9.0.1，`ASCEND_RT_VISIBLE_DEVICES=3` 时该列报 3 而不是逻辑
+0），让 A5 读这一列与 `device_resolved` 比对即可把核对接回来。
 
 身份与绑定校验不因换卡放松：换的只是卡，测的仍须是同一个二进制与同一份基线。
 
@@ -170,12 +172,28 @@ A5 判一个测量轮是不是换卡轮，**只看本轮 `device_resolved` 与�
 | 结构 | 两者 | `schema_version` 认识、该 kind 必填字段齐全、逐例字段一致、逐例状态在合法集合内 |
 | 身份 | 两者 | `base_run_id` 与本次 run-id 相同；op/family/soc/repo 与首轮一致 |
 | 绑定 | measure | 六个绑定字段与首轮锚值一致（不一致说明测的不是同一对象，数值不可比） |
-| 设备 | measure | 两个设备字段是显式卡号；换卡轮的 `device_compiled` 在且等于推导值；PROF 落点与 `device_resolved` 一致（判据见「换卡复测」） |
+| 设备 | measure | 两个设备字段是显式卡号；换卡轮的 `device_compiled` 在且等于推导值（判据见「换卡复测」） |
 | 点名 | measure | `requested_cases` 合规，且每个点名 case 在 `cases[]` 恰好一条记录 |
 | 豁免 | waive | `waivers[]` 合规 |
 
 轮号占用：完成轮与中断轮都占号，下一轮号 = 已占用轮号最大值 +1；轮号空缺只记
 warning，不影响折叠。复测轮一次跑一个（串行是使用约定，不是机械校验）。
+
+## 更换采集后端后的复测
+
+性能采集后端从 msprof 换成 msopprof 之后，两件容易混的事要分开看：
+
+| 组合 | 结果 | 原因 |
+| --- | --- | --- |
+| 旧首轮 + 该首轮已有的旧复测轮 | 照常折叠 | 绑定锚比的是复测轮与它自己的首轮，不是与当前量具 |
+| 旧首轮 + 新量具新跑的测量复测轮 | 该轮无效，跳过并告警 | `verifier_sha256` 是量具脚本自身的哈希，换后端就是换脚本 |
+
+拒绝是正确行为，不是缺陷：两个后端的计时口径不同，msopprof 重放 kernel 量的是稳态，
+读数系统性低于 msprof 的冷调用口径，折叠两种口径的轮次会让复测轮天然占优。要对旧首轮
+复测，先用新量具重跑首轮，再在新首轮上复测。
+
+被拒的症状是「复测跑完了、报告却没变」：无效轮只在诊断区列轮号与原因，不进折叠，
+逐例有效状态一字不动。豁免轮不受这条影响，它不含绑定字段，也不做任何采集。
 
 ## 折叠
 
@@ -236,7 +254,7 @@ warning，不影响折叠。复测轮一次跑一个（串行是使用约定，�
 两种入口的最小输入——其余一律从盘上恢复（`check.json`、`runtime/manifest.json`、
 `runtime/results/` 文件名、`<产物目录>/intermediate/verdict.json`）：
 
-- 测量复测：工作目录 + 点名 case + 可选 `--warmup`。
+- 测量复测：工作目录 + 点名 case。
 - 豁免：工作目录 + 豁免 case + 逐例理由。
 
 起任何复测轮前必须先跑机械 preflight，不可跳过：
@@ -267,7 +285,7 @@ null）、`can_switch_device`（布尔，推不出编译逻辑卡号或超上界
 cd <工作目录>/runtime && <python> verify_performance.py \
   --repo <工程目录> --soc <soc> --device <device> --run-id <id>-retest-<k> \
   --case <case_name> --skip-build --calls-per-case <calls_per_case> \
-  [--warmup <N>] [--map-device] [--compiled-device <device_compiled>]
+  [--map-device] [--compiled-device <device_compiled>]
 ```
 
 豁免轮由 accept 写出，`--waive` 取 case 与理由两个参数、每个 case 一组、可重复：
@@ -307,7 +325,7 @@ retest-preflight 取下一轮号，不删目录、不复用轮号。每个复测
 | `pass_on_retest` | 首轮非 PASS 而当前有效状态为 PASS 的 case 数 |
 
 报告（A5 重跑后的当前投影）在性能节逐例展示：首轮状态与数值、各轮摘要（轮号/kind/
-device_resolved/warmup/状态/ratio）、有效状态与代表轮（`WAIVED` 例另列参考轮）、
+device_resolved/状态/ratio）、有效状态与代表轮（`WAIVED` 例另列参考轮）、
 逐例的有效复测测量次数（有效测量轮中含该例的次数，不含首轮；证据缺口轮也计入——
 它计「测过几次」，不是「测出数值几次」）。汇总处列：有效复测轮数（有效轮总数，含
 豁免轮，不含首轮、中断轮与无效轮）、中断轮号、无效轮号及原因、豁免清单与理由、
@@ -319,15 +337,15 @@ device_resolved/warmup/状态/ratio）、有效状态与代表轮（`WAIVED` 例
 失败的尝试不允许从最终报告消失。
 
 可重演边界收窄为性能折叠可重演：同一组输入重跑折叠，得到相同的逐例有效状态、
-性能计数与性能结论。这组输入有五件，比轮次 JSON 本身多出两件：
+性能计数与性能结论。这组输入有四件，比轮次 JSON 本身多出三件：
 
 - 首轮与各轮结果 JSON。
 - 运行时包 CSV 与规范化基线（性能期望集由这两件重算）。
 - 折叠规则版本。
 - `runtime/manifest.json` 的 `harness_profile`——编译逻辑卡号按它推导，profile
   变了，换卡轮的有效性跟着变。
-- 各复测轮的阶段目录内容——PROF 落点核对读的是目录。**同一份轮次 JSON，落点目录
-  里有错卡时该轮无效，目录缺失时该轮有效**，所以阶段目录被清理过的工作目录重演不出
-  原判。本协议不为此加签名或哈希机制：信任模型是无主观恶意，记下这条边界即可。
+
+阶段目录的内容不在这组输入里：落卡核对撤除后，折叠不再读任何采集产物目录，
+目录被清理过的工作目录照样重演得出原判。
 
 完整 A5 verdict 的重演还依赖 run-chain.md「A5 结论」列明的其余输入。

@@ -7,7 +7,9 @@
 - [未编译或构建失败](#未编译或构建失败)
 - [用例缺失 MISSING](#用例缺失-missing)
 - [无基线 NO_REF](#无基线-no_ref)
-- [msprof 缺失](#msprof-缺失)
+- [msopprof 缺失或不可用](#msopprof-缺失或不可用)
+- [采集环境失败](#采集环境失败)
+- [采集截断 NO_KERNEL](#采集截断-no_kernel)
 - [列名未被读取](#列名未被读取)
 
 ## 通用规则
@@ -81,19 +83,30 @@ source <set_env.sh> && cd <工作目录>/runtime && <python> verify_accuracy.py 
 基线键的推断规则见 [run-chain.md](run-chain.md) 的 A2。要让某条 `TC_PF_` 参与评判，
 只能由任务包提供者补 `gpu_baseline.csv`，验收不代填 `gpu_ms`。
 
-## msprof 缺失
+## msopprof 缺失或不可用
+
+性能采集用 `msprof op`（独立可执行文件 `msopprof`），不是 `msprof`。
 
 | 现象 | 原因 | 处置 |
 | --- | --- | --- |
-| A1 `msprof` 警告 | PATH 与 CANN 默认位置都没有 | 先不阻塞；A4 命令前加 `source <set_env.sh> &&` |
-| A4 `MSPROF_NOT_FOUND`，退出 3 | 期望集非空但找不到可执行的 msprof | 按下面命令带 `source` 或 `--msprof <路径>` 重跑 A4 |
-| 逐例 `NO_KERNEL` | msprof 退非 0（不计分）、未产 `op_summary_*.csv` 或无 kernel 行 | 看 `prof/<case>/` 下的日志 |
+| A1 `msopprof` 项记缺失 | PATH 与 CANN 默认位置都没有该二进制 | 先不阻塞；A4 命令前加 `source <set_env.sh> &&` |
+| A4 `MSPROF_NOT_FOUND`，退出 3 | 期望集非空但找不到可执行的 `msopprof` | 按下面命令带 `source` 或 `--msprof <路径>` 重跑 A4 |
+| A4 `MSPROF_UNUSABLE`，退出 3 | 找到了 `msopprof`，但版本不认 `--launch-count` | 换装支持 `msprof op` 的 CANN |
+| 逐例 `NO_KERNEL` | 扫不到 `OpBasicInfo*.csv`、无数据行、缺列或值非有限正数 | 看 `prof/<case>/` 下的日志 |
 
-op_summary 由 `msprof --application` 采集结束时自动导出，没有第二步显式导出；`prof/<case>/` 在
-`runtime/results/<id>/performance/` 下，`r<N>.log` 是第 N 次采集的输出（默认单次采样，
-只有 `r1.log`），`r<N>.gtest.json` 是该次采样的执行成功证据——缺失或不合格时该例记
-`CRASH` 而非 `NO_KERNEL`。msprof 的查找顺序、执行成功证据与逐次判定见
-[perf-protocol.md](perf-protocol.md)。
+A1 探测项名与查找目标都是 `msopprof`，与 A4 实际要用的一致。A1 只判文件存在且可执行，
+不探版本，所以 A1 记 OK 仍不代表 A4 采得到——以 A4 自己报的错误码为准。
+
+`--msprof` 参数名沿用旧后端不改，查找目标是 `msopprof`。可执行不等于可用：自动发现的
+二进制要再跑一次 `msopprof --help`，起不来、退非零或帮助文本里没有 `--launch-count`
+都判 `MSPROF_UNUSABLE`；显式传 `--msprof` 时不探这一下。
+
+采集产物在 `runtime/results/<id>/performance/prof/<case>/` 下：`r<N>` 是第 N 次采集的
+输出目录（默认单次采样，只有 `r1`），`r<N>.log` 是该次采集的日志，`r<N>.gtest.json` 是
+执行成功证据——缺失或不合格时该例记 `CRASH` 而非 `NO_KERNEL`。CSV 的位置随实际采到的
+launch 数变：采到 1 个是 `OPPROF_*/OpBasicInfo.csv`，采到多个是
+`OPPROF_*/<kernel 符号名>/<序号>/OpBasicInfo_<时间戳>.csv`，两种都由递归 glob 覆盖。
+查找顺序、执行成功证据与逐次判定见 [perf-protocol.md](perf-protocol.md)。
 带 CANN 环境重跑 A4 的完整命令（`--msprof` 只在 `source` 后仍找不到时加）：
 
 ```bash
@@ -101,10 +114,45 @@ source <set_env.sh> && cd <工作目录>/runtime && \
   rm -rf results/<id>/performance results/performance_<id>.json && \
   <python> verify_performance.py \
   --repo <工程目录> --soc <soc> --device <device> --run-id <id> \
-  --skip-build --calls-per-case <calls_per_case> [--msprof <路径>]
+  --skip-build --calls-per-case <calls_per_case> [--launch-count <N>] [--msprof <路径>]
 ```
 
-GTest 自报的 ms 不能替代 msprof，`NO_KERNEL` 也不能以 0 代替。
+GTest 自报的 ms 不能替代采集读数，`NO_KERNEL` 也不能以 0 代替。
+
+## 采集环境失败
+
+采集环境出问题时整轮中止，不逐例记状态：结果 JSON 的 `summary.status` 记 `证据不足`、
+`summary.reason` 记下表的值，退出码 3。这类失败是环境问题，不是算子问题。
+
+| `reason` | 现象 | 处置 |
+| --- | --- | --- |
+| `DISK_SPACE` | 采样前的空间预检不过，报可用与所需各多少 MB | 调小 `--launch-count`，或换容量够的盘 |
+| `DISK_WRITE_FAILED` | 采集日志出现 `Copy failed`、`Failed to save` 或 `No space left` | 同上 |
+| `PROFILER_FAILED` | 采集工具退出码非零 | 读 `prof/<case>/r<N>.log` 的首条错误 |
+
+写盘失败单独认日志，是因为磁盘满时采集工具仍退 0、只刷 WARN 且不产 CSV：不认这三条
+串就会落到「无数据行」那一档记 `NO_KERNEL`，把环境问题说成算子没起 kernel。
+
+空间预检按**本次采集上限**估，不按上一例的实际占用外推：`--launch-count × 2.2 MB
+× 1.5`，产物体积实测约 2.2 MB 每 launch。按默认上限 512 算，阈值是 1 GB 出头——这是
+检查阈值不是实际占用，单 launch 用例的实际产物仍是个位数 MB。采集目录不落 `/dev/shm`：
+容器里它常只有几十 MB，占满后就是上面那条写盘失败。
+
+复测轮的环境失败不写结果 JSON，留阶段目录并把原因追记进其中的 `fail.log`，该轮成为
+中断轮：按 retest-protocol.md「启动与恢复」重跑 preflight 取下一轮号，不复用原轮号。
+
+## 采集截断 NO_KERNEL
+
+| 现象 | 原因 | 处置 |
+| --- | --- | --- |
+| 逐例 `NO_KERNEL`，说采到的 launch 数等于上限 | 撞上 `--launch-count`，完整性未证实 | 提高 `--launch-count`（1-5000）后重采 |
+
+撞上限时无法区分「恰好这么多」与「被截断」，而截断的后果是求和少算、ratio 虚高、
+假 PASS，所以这一档 fail-closed、不计分。措辞落在「当前采集口径不支持该用例的 launch
+规模」上：算子本身可能是好的，是这一例的 launch 规模超出当前采集能力。
+
+提高上限有代价：产物体积随实际 launch 数线性增长，空间预检的阈值也按上限算，
+调得过大会先撞 `DISK_SPACE`。
 
 ## 列名未被读取
 

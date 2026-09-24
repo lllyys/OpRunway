@@ -108,8 +108,10 @@ summary 含状态计数、`status`、`timing_scope`、`threshold` 与 `scope_cav
 status 只取 `通过/不通过/NO_REF/证据不足`。验收侧不重算 kernel 数据，但会重算状态计数，
 并闭合期望集、身份、CSV/binary SHA、summary 和退出码。
 
-性能协议与退出码的运行态权威是两侧 `references/perf-protocol.md`。msprof 目标机 spike
-尚未完成，目录模式、列名、task type 与命令组合仍标为“待实测”；本地解析成功不能消掉标记。
+性能协议与退出码的运行态权威是 accept 一侧的 `references/perf-protocol.md`；case-gen
+那一份已收缩成渲染契约，只管 FACTS 到脚本常量的映射（2026-09-23 按 Codex 八维评审
+取方案 C）。采集后端为 `msprof op`（独立可执行文件 `msopprof`），目录模式、列名与
+命令组合已在 A3 机实测钉死，见 accept 那份的「已实测与待实测边界」。
 
 ## 部署与查找规则
 
@@ -143,7 +145,7 @@ soc、device、任务包哈希和部署 CSV 哈希。缺失、畸形或身份不
 | FACTS 模型与词表 | case-gen `references/facts-schema.md`、`aclblas-conventions.md` |
 | CSV 投影与四块 | case-gen `references/csv-and-blocks.md` |
 | 精度脚本与 JSON | case-gen 渲染 README、accept `references/run-chain.md` |
-| 性能协议与 JSON | 两侧 `references/perf-protocol.md` |
+| 性能协议与 JSON | accept `references/perf-protocol.md`（权威）；case-gen 那份只剩渲染契约 |
 | 部署、二进制与复跑 | accept `SKILL.md`、`references/run-chain.md` |
 | 常见运行错误 | accept `references/troubleshooting.md` |
 

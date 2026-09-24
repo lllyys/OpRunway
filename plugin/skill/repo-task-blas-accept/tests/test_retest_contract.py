@@ -631,7 +631,7 @@ class TestDeviceSwitch(RetestContractCase):
         self.assertEqual(
             [item["device_resolved"] for item in row["rounds"]], ["0", "6"],
         )
-        self.assertIn("| TC_PF_1002 | 1 | measure | 6 | 0 | PASS", report)
+        self.assertIn("| TC_PF_1002 | 1 | measure | 6 | PASS", report)
 
     def test_device_compiled_mismatch_invalidates(self):
         """blas + 首轮显式卡 0 → 编译逻辑卡号 0；轮里写 3 即无效。"""
@@ -644,17 +644,39 @@ class TestDeviceSwitch(RetestContractCase):
         self.assertEqual(code, 1)
         self._assert_diag_only(verdict, "不等于按 harness_profile 推导的 0")
 
-    def test_prof_landing_mismatch_invalidates(self):
+    def test_reads_rounds_with_and_without_warmup(self):
+        """V0：撤掉 warmup 消费后，带该字段的旧记录与不带的新记录都能读。
+
+        中间态要能安全停留——量具还没改时产的是旧形态，改完产的是新形态，
+        两种都不能让轮判无效。`drop` 掉 warmup 即模拟新量具的产物。"""
+        self.build_workdir()
+        self.write_measure_round(1, [_passed("TC_PF_1002")], device=0)
+        self.write_measure_round(
+            2, [_passed("TC_PF_1003")], device=0, drop=("warmup",),
+        )
+        _, verdict, _, _, _ = self.run_verdict()
+        retest = verdict["performance"]["retest"]
+        self.assertEqual(retest["invalid_rounds"], [])
+        self.assertEqual(retest["pass_on_retest"], 2)
+
+    def test_prof_landing_no_longer_checked(self):
+        """落卡核对已撤除：阶段目录里出现别的卡的落点也不再使轮无效。
+
+        这条断言的是「核对不在了」，不是「核对没报问题」——后者在常量改了而
+        fixture 没跟着改时会假绿（glob 扫空走的是缺目录不告警的合法分支）。"""
         self.build_workdir()
         self.write_measure_round(
             1, [_passed("TC_PF_1002")], device=6, overrides={"device_compiled": 0},
         )
         self.write_prof_dirs(1, [0])
-        code, verdict, _, _, _ = self.run_verdict()
-        self.assertEqual(code, 1)
-        self._assert_diag_only(
-            verdict, "PROF 落点 device_0 与 device_resolved=6 不一致",
+        _, verdict, _, _, _ = self.run_verdict()
+        retest = verdict["performance"]["retest"]
+        self.assertEqual(retest["invalid_rounds"], [])
+        self.assertNotIn(
+            "PROF 落点", "；".join(verdict["performance"]["retest_warnings"]),
         )
+        self.assertFalse(hasattr(accept, "_prof_device_cards"))
+        self.assertFalse(hasattr(accept, "PROF_DEVICE_GLOB"))
 
     def test_missing_prof_dir_keeps_round_valid(self):
         """合法单例终态不产生 PROF 目录，缺目录不改判该轮无效。"""
@@ -822,8 +844,8 @@ class TestDeviceSwitch(RetestContractCase):
         self.assertEqual(code, 2)
         self.assertIn("顶层不是对象", "；".join(view["refusal_reasons"]))
 
-    def test_scored_round_without_prof_dir_warns_only(self):
-        """计分轮缺 PROF 落点：记一条未完成设备核对的告警，不改判。"""
+    def test_scored_round_emits_landing_not_verified_warning(self):
+        """计分轮出一条替代告警：设备号来自量具自报，实际落点未独立核对。"""
         self.build_workdir()
         self.write_measure_round(1, [_passed("TC_PF_1002")], device=0)
         code, verdict, report, _, _ = self.run_verdict()
@@ -831,8 +853,8 @@ class TestDeviceSwitch(RetestContractCase):
         retest = verdict["performance"]["retest"]
         self.assertEqual(retest["invalid_rounds"], [])
         warnings = "；".join(verdict["performance"]["retest_warnings"])
-        self.assertIn("未完成设备核对", warnings)
-        self.assertIn("未完成设备核对", report)
+        self.assertIn("实际落点未独立核对", warnings)
+        self.assertIn("实际落点未独立核对", report)
 
 
 NO_REF_SUMMARY = {
@@ -1435,17 +1457,14 @@ class TestCrossLaneDeviceSwitch(integration.RetestIntegrationCase):
         self.plant_prof_dirs(1, 2)
         context = accept.load_retest_context(self.workdir, integration.RUN)
         self.assertEqual([item["round"] for item in context["valid_rounds"]], [1])
-        # 落点核对认物理卡，不认映射串里的位置：同一份 JSON，阶段目录里多出别的
-        # 卡的落点就转为无效（有效性不只由 JSON 决定，见 retest-protocol 的重演边界）。
+        # 落卡核对已撤除：阶段目录里多出别的卡的落点也不再影响轮有效性。
+        # 换卡是否真落在目标卡，从此只有量具自报的 device_resolved 一个来源。
         self.stage_case_dirs(1)[0].joinpath("r1", "PROF_000009_x", "device_5").mkdir(
             parents=True,
         )
         context = accept.load_retest_context(self.workdir, integration.RUN)
-        self.assertEqual(context["valid_rounds"], [])
-        self.assertIn(
-            "PROF 落点 device_5",
-            "；".join(context["invalid_rounds"][0]["reasons"]),
-        )
+        self.assertEqual([item["round"] for item in context["valid_rounds"]], [1])
+        self.assertEqual(context["invalid_rounds"], [])
 
     def test_unknown_profile_same_card_valid_switch_invalid(self):
         """未登记 profile 两路：同卡轮照常有效，换卡轮因推不出编译卡号判无效。"""

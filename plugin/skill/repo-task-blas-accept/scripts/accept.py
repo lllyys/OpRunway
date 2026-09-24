@@ -471,13 +471,18 @@ def _find_cann():
 
 
 def _find_msprof(cann_root):
-    found = shutil.which("msprof")
+    """A1 环境预检:找 A4 采集实际要用的 msopprof,不是旧的 msprof。
+
+    两者不是一回事——A1 记 msprof OK 而 A4 要 msopprof 时,预检会通过、
+    每一例却在采集阶段失败,报错指向被测算子而不是环境。"""
+    found = shutil.which("msopprof")
     if found:
         return Path(found).resolve()
     if cann_root is not None:
-        candidate = cann_root / "tools" / "profiler" / "bin" / "msprof"
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate.resolve()
+        for rel in (("tools", "msopprof", "bin", "msopprof"), ("bin", "msopprof")):
+            candidate = cann_root.joinpath(*rel)
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate.resolve()
     return None
 
 
@@ -574,7 +579,7 @@ def command_env(args):
         hard=True,
     )
     msprof = _find_msprof(cann_root)
-    record("msprof", "OK" if msprof else "缺失", str(msprof) if msprof else "未找到")
+    record("msopprof", "OK" if msprof else "缺失", str(msprof) if msprof else "未找到")
     requested_device, device_pool = _parse_device_request(args.device, args.device_pool)
     if requested_device == "auto":
         for candidate in device_pool:
@@ -1266,10 +1271,10 @@ DEVICE_BIND_MODES = {"blas": "compile_bound", "sparse_frame": "runtime_bound"}
 # device_compiled+1 位互不相同的真实物理卡，物理卡域 0-7 凑不出第 9 张。推导值超界
 # 即量具换不了卡，can_switch_device 直接给 false，不留「这边说能换、量具随后拒绝」。
 MAX_COMPILED_DEVICE = 7
-# PROF 落点：msprof 在每次采样的 --output 下建 PROF_*/device_<物理卡>/，
-# 目录名里的卡号即该次采集实际落到的物理卡（A3 机实测，CANN 9.0.1）。
-PROF_DEVICE_GLOB = "prof/*/r*/PROF_*/device_*"
-PROF_DEVICE_RE = re.compile(r"^device_(\d+)$")
+# 落卡核对已撤除（2026-09-23，Mr.0 裁定）。旧 msprof 在采样目录下建
+# PROF_*/device_<物理卡>/，目录名即该次采集实际落到的卡；换成 msprof op 后产物是
+# OPPROF_*，没有这一层，核对失去数据源。退路：OpBasicInfo.csv 的 Device Id 列记的
+# 是物理卡号（A3 实测），想恢复独立核对时读这一列即可，不必重做实验。
 NOTES_PLACEHOLDER = "<由验收 agent 填写：环境备注、与任务书的偏差、复跑与归因说明>"
 
 
@@ -1336,23 +1341,6 @@ def _derive_device_compiled(profile, first_device):
             f"重映射串凑不出 {number + 1} 张互不相同的物理卡，量具换不了卡"
         )
     return number, None
-
-
-def _prof_device_cards(stage_dir):
-    """该轮阶段目录下实际产生的 PROF 落点物理卡号集合。
-
-    目录或某例的 PROF 目录不存在按空集处理：TIMEOUT/MISSING/CRASH/NO_KERNEL 等
-    合法单例终态本就不产生 PROF 目录，缺目录不是设备问题。名字不合
-    `device_<数字>` 形态的目录不在核对范围内，直接忽略。"""
-    cards = set()
-    root = Path(stage_dir) / "performance"
-    if not root.is_dir():
-        return cards
-    for path in root.glob(PROF_DEVICE_GLOB):
-        match = PROF_DEVICE_RE.match(path.name)
-        if match and path.is_dir():
-            cards.add(int(match.group(1)))
-    return cards
 
 
 def _retest_inventory(results_dir, run_id):
@@ -1456,9 +1444,6 @@ def _measure_round_problems(payload, expected_set, anchors, device_rules, stage_
     """测量轮的 kind 专属检查，返回 (problems, warnings)。"""
     problems = []
     warnings = []
-    warmup = payload.get("warmup")
-    if not isinstance(warmup, int) or isinstance(warmup, bool) or warmup < 0:
-        problems.append(f"warmup={warmup!r} 须为 ≥0 的整数（测量轮必填）")
     argv = payload.get("argv")
     if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
         problems.append("argv 须为非空字符串数组（测量轮必填）")
@@ -1509,11 +1494,6 @@ def _measure_round_problems(payload, expected_set, anchors, device_rules, stage_
                 )
         elif ratio is not None:
             problems.append(f"case {name}: 证据缺口状态必须无 ratio")
-        warmup_exit = item.get("warmup_exit")
-        if warmup_exit is not None and (
-            not isinstance(warmup_exit, int) or isinstance(warmup_exit, bool)
-        ):
-            problems.append(f"case {name}: warmup_exit 须为整数或 null")
     if requested:
         requested_set = set(requested)
         missing = sorted(requested_set - set(records))
@@ -1560,21 +1540,15 @@ def _measure_round_problems(payload, expected_set, anchors, device_rules, stage_
                 f"{note}，device_compiled={compiled!r} 不等于按 harness_profile 推导的 "
                 f"{expected_compiled}（该二进制的编译期 TEST_DEVICE_ID）"
             )
-    if known_card:
-        cards = _prof_device_cards(stage_dir)
-        off_cards = sorted(card for card in cards if card != resolved)
-        if off_cards:
-            problems.append(
-                "PROF 落点 " + "、".join(f"device_{card}" for card in off_cards)
-                + f" 与 device_resolved={resolved} 不一致（该轮的采集实际落在别的物理卡）"
-            )
-        elif not cards and any(
-            record.get("status") in ("PASS", "FAIL") for record in records.values()
-        ):
-            # 计分轮必然跑过 msprof，一个 PROF 目录都没有说明落点无从查证。
-            # 只告警不改判：产物目录可能被清理，而数值证据本身仍在 JSON 里。
-            # 合法缺口终态（TIMEOUT/MISSING/CRASH/NO_KERNEL）本就不产生目录，不告警。
-            warnings.append("有计分用例却没有 PROF 落点目录，本轮未完成设备核对")
+    if known_card and any(
+        record.get("status") in ("PASS", "FAIL") for record in records.values()
+    ):
+        # 落卡核对已撤除（见 PROF_DEVICE 常量处的说明）。采集产物里不再有能独立佐证
+        # 「这次落在哪张卡」的东西，device_resolved 从此是量具自报值，不是核对结果。
+        # 只在有计分用例时告警：合法缺口终态本就没有采集产物，告警没有意义。
+        warnings.append(
+            f"device_resolved={resolved} 来自量具记录，实际落点未独立核对"
+        )
     for key in RETEST_BINDING_KEYS:
         if payload.get(key) != anchors.get(key):
             problems.append(
@@ -1821,8 +1795,8 @@ def _fold_round_from_payload(number, payload):
 
     瘦接口：只喂裁决用得上的字段——round/kind/cases/waivers，折叠输入逐例只带
     name/status/ratio。kernel_us 等 §4.2 逐例字段一致性由加载层的轮文件记录
-    校验（_measure_round_problems）把关；device/warmup/warmup_exit 等展示字段
-    不进折叠核，报告回查一律走原始记录。"""
+    校验（_measure_round_problems）把关；device 等展示字段不进折叠核，
+    报告回查一律走原始记录。"""
     if payload.get("kind") == "waive":
         return {
             "round": number,
@@ -1956,7 +1930,6 @@ def _integrate_retest(context, performance, first_path):
                 "status": record.get("status"),
                 "ratio": record.get("ratio"),
                 "kernel_us": record.get("kernel_us"),
-                "warmup": payload.get("warmup"),
                 "device_resolved": None if device is None else str(device),
             })
     for row in performance.get("case_rows") or []:
@@ -2180,21 +2153,21 @@ def _performance_section(performance):
                 "",
                 "复测史（每例尝试史，含首轮 round 0；完整列出，不受 30 条截断）：",
                 "",
-                "| case_name | 轮 | kind | device | warmup | status/理由 | ratio |",
-                "| --- | --- | --- | --- | --- | --- | --- |",
+                "| case_name | 轮 | kind | device | status/理由 | ratio |",
+                "| --- | --- | --- | --- | --- | --- |",
             ]
             for row in history_rows:
                 for item in row.get("rounds") or []:
                     if item.get("kind") == "waive":
                         lines.append(
-                            f"| {row['name']} | {item.get('round')} | waive | — | — "
+                            f"| {row['name']} | {item.get('round')} | waive | — "
                             f"| {item.get('reason')} | — |"
                         )
                     else:
                         lines.append(
                             f"| {row['name']} | {item.get('round')} | measure "
                             f"| {_cell(item.get('device_resolved'))} "
-                            f"| {_cell(item.get('warmup'))} | {item.get('status')} "
+                            f"| {item.get('status')} "
                             f"| {_cell(item.get('ratio'), 4)} |"
                         )
     elif rows:
@@ -2918,7 +2891,7 @@ def _parser():
     )
     check_parser.add_argument(
         "--calls-per-case", type=int, default=1,
-        help="harness 一条 gtest 用例调用被测接口的次数（固定 warm-up 一次则为 2）",
+        help="harness 一条 gtest 用例调用被测接口的次数；当前只接受 1",
     )
     check_parser.add_argument("--out", type=Path, help="check.json 输出路径，默认当前目录")
     check_parser.set_defaults(function=command_check)

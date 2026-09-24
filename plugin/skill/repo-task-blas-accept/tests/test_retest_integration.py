@@ -148,27 +148,28 @@ class RetestIntegrationCase(unittest.TestCase):
             }
             return mapping, None, None
 
-        def fake_parse_op_summary(output_dir):
+        def fake_parse_op_summary(output_dir, launch_limit=None):
             case_name = Path(output_dir).parent.name
             return kernels[case_name], 1
 
         gauge._resolve_device = fake_resolve_device
         gauge._list_tests = fake_list_tests
         gauge._resolve_msprof = lambda override: Path("/stub/msprof")
+        # 桩掉可用性探测与空间检查:两者都打真实文件系统,属真机边界。
+        gauge._msopprof_usable = lambda binary: (True, "")
+        gauge._check_free_space = lambda output_dir, launch_count: None
         gauge._run_process = lambda command, timeout, cwd=None, env=None: (0, "stub", None)
         gauge._gtest_evidence = lambda path, gtest_name: (True, "桩:证据合格")
         gauge.parse_op_summary = fake_parse_op_summary
         return gauge
 
-    def run_gauge(self, gauge, run_id, cases=(), warmup=None):
+    def run_gauge(self, gauge, run_id, cases=()):
         argv = [
             "--repo", str(self.repo), "--soc", SOC, "--device", "0",
             "--run-id", run_id, "--skip-build", "--calls-per-case", "1",
         ]
         for case in cases:
             argv += ["--case", case]
-        if warmup is not None:
-            argv += ["--warmup", str(warmup)]
         os.chdir(self.workdir)
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -243,7 +244,7 @@ class TestRealFirstRound(RetestIntegrationCase):
             first["verifier_sha256"],
             accept._sha256(self.runtime / "verify_performance.py"),
         )
-        # 首轮未传 --warmup：顶层 warmup 与逐例 warmup_exit 都不出现（零复测兼容）。
+        # 预热设计已整体撤除：顶层 warmup 与逐例 warmup_exit 都不再存在。
         self.assertNotIn("warmup", first)
         for record in first["cases"]:
             self.assertNotIn("warmup_exit", record)
@@ -282,7 +283,7 @@ class TestRealMeasureRound(RetestIntegrationCase):
         self.assertEqual(code, 2, f"MISSING → 证据不足退 2：{stderr}")
         round_path = self.results / f"performance_{RUN}-retest-1.json"
         payload = json.loads(round_path.read_text(encoding="utf-8"))
-        # 复测轮 schema：身份、点名、设备、绑定、argv、warmup 无条件序列化。
+        # 复测轮 schema：身份、点名、设备、绑定、argv 无条件序列化。
         self.assertEqual(payload["schema_version"], 1)
         self.assertEqual(payload["base_run_id"], RUN)
         self.assertEqual(payload["round"], 1)
@@ -290,10 +291,10 @@ class TestRealMeasureRound(RetestIntegrationCase):
         self.assertEqual(payload["requested_cases"], ["TC_PF_1002", "TC_PF_1003"])
         self.assertEqual(payload["device_requested"], 0)
         self.assertEqual(payload["threshold"], 0.8)
-        self.assertEqual(payload["warmup"], 0)
+        self.assertNotIn("warmup", payload)
         by_name = {record["name"]: record for record in payload["cases"]}
         self.assertEqual(by_name["TC_PF_1002"]["status"], "PASS")
-        self.assertIsNone(by_name["TC_PF_1002"]["warmup_exit"])
+        self.assertNotIn("warmup_exit", by_name["TC_PF_1002"])
         self.assertEqual(by_name["TC_PF_1003"]["status"], "MISSING")
         # 加载层：真产物过全部有效性检查。
         context = accept.load_retest_context(self.workdir, RUN)

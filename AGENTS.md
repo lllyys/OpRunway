@@ -29,10 +29,10 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
   `upstream.json` 只含上游 URL 与两个公开 SHA，无私有信息，随包分发同时给测试机留下派生基线的
   provenance。
 - 上游完整 clone 在 ignored `repos/repo-task-atk-test/`（含 ATK submodule 源码），只读参考。
-- 第三方工具源码也 clone 在 ignored `repos/` 下只读参考，查工具行为先读源码再推断：
-  `repos/msopprof/`（`msprof op` 的实现，`gitcode.com/Ascend/msopprof`，基线 `75abaeb`
-  @2026-09-21）——性能采集口径的疑问多半能在它的 `csrc/op_profiling/` 与
-  `docs/zh/user_guide/` 里查到定论。记基线是因为工具行为随版本变，无基线的断言会过期而不自知。
+- 算子仓、任务书仓、工具源码也都 clone 在 ignored `repos/` 下只读参考（已有二十余个，
+  含 ops-blas / ops-sparse / ops-solver / msopprof / cann-ops-competitions）。
+  **查上游仓、算子工程或工具的行为时先读源码再推断**，清单与各仓用途见
+  [dev-doc/reference-repos.md](dev-doc/reference-repos.md)；新增 clone 按该文件末节的约定登记。
   上游开发期红线与设计原则随镜像分发：修改 `plugin/` 前先读 `plugin/CLAUDE.md` 与
   `plugin/docs/development/`；本仓内读写 `plugin/**` 时 `plugin/CLAUDE.md` 会作为子目录记忆自动
   进入上下文。这些原则约束 skill 开发；与本文件冲突时以本文件为准并记录张力。插件安装态不加载

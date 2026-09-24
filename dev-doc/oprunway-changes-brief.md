@@ -2,6 +2,44 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-24 · blas 采集后端换成 `msprof op`（msopprof），端到端完工。**
+  量具命令改 `msopprof --output=<目录> --aic-metrics=BasicInfo --launch-count=<N> <二进制> ...`
+  （选项必须用 `=` 形式且排在二进制前，空格分隔报 `argument --output miss value`，
+  V1 实跑踩到）；产物 glob 递归 `OPPROF_*/**/OpBasicInfo*.csv` 覆盖扁平与嵌套两种布局；
+  读数改成全部数据行 `Task Duration(us)` **求和**，撤掉 `÷calls_per_case`（字段冻结为 1，
+  保留绑定锚身份）；`Task Type` 过滤整体作废（新 CSV 无该列）。**截断 fail-closed**：
+  采到行数等于 `--launch-count` 即判 NO_KERNEL，措辞落在「采集口径不支持该 launch 规模」——
+  工具撞上限后静默停采只记 debug 日志，是唯一会把 FAIL 写成 PASS 的路径。
+  预热设计整体撤除；落卡核对撤除并换成「实际落点未独立核对」告警（`Device Id` 是物理卡号，
+  退路写进复测协议）。环境失败**整轮中止**走 `ENVIRONMENT_EXIT`，不往封闭状态词表里加值。
+  两份 `perf-protocol.md` 按 Codex 评审取方案 C：accept 那份成唯一权威，case-gen 收缩成
+  渲染契约（26227→5897 B），顺手修掉一处同文自相矛盾的漂移。
+  **真机实跑**：ctpmv 三例 16.00/35.52/57.22 us，与独立测量逐例吻合；复测轮折叠通过、
+  替代告警出现在真实产物上；截断与参数校验三道门实测生效。
+  预算 lint 退 0（accept 32760→32568 B、case-gen 32728→32363 B），blas 两 skill 行文
+  零拦截，测试 110→131 全绿，两个示例逐字节一致。
+  Codex 三轮评审 11 条必须改全部落实，其中两条推翻前提：BLAS 不都是单 launch
+  （cherk 6 个、ssymm 105 个、`gemm_strided_batched` 无上界），sparse 共用同一份量具模板。
+
+- **2026-09-23 · blas 换 msprof op 后端：spec/plan 定稿，L0 与 L3 落地。**
+  采集后端从 `msprof` 换成 `msopprof`、整体撤除 warmup 设计（Mr.0 裁定）。契约见
+  `blas-msopprof-spec.md`（v2），实施见 `blas-msopprof-plan.md`（v2），真机事实见
+  scratchpad 的 `msopprof-facts.md`。三轮 a3 实测钉死命令形态、两种产物布局、
+  `Device Id` 是物理卡号、退出码不透传被测程序失败。**口径变更不是等价替换**：
+  新后端系统性读低（0.64x–0.84x，绝对差恒定 8.5–11 us，重放绕开首调惩罚），
+  GPU 基线的 `perf.meta` 全是 `unspecified` 所以无法判定谁更准；跨后端折叠的洞由
+  既有 `verifier_sha256` 绑定锚天然堵住。Codex 三轮评审（一轮协议归属、一轮全面、
+  一轮确认）共 11 条必须改全部落实，其中两条推翻了我的前提：**BLAS 不都是单 launch**
+  （cherk 每次调用 6 个 kernel，ssymm 可达 105，`gemm_strided_batched` 由 batchCount
+  驱动无上界），**sparse 共用同一份量具模板**。据此把「每算子探测」改成
+  `--launch-count=512` 加递归 glob 求和，并加**截断 fail-closed**——工具撞上限后静默
+  停采只记 debug 日志，是唯一会把 FAIL 写成 PASS 的路径。本轮已落地 L0（accept 撤
+  warmup 消费五处）与 L3（撤落卡核对，补「实际落点未独立核对」替代告警），
+  测试 110→111 全通过。顺带：上游 rules/hooks 移植进仓根（`doc_style_lint`、
+  `jargon_scan`、`skill-md-gate`、`skill_budget_lint` 加两份规则），核出
+  `prose-style.md` 里 `tests/test_document_style.py` 是悬空引用（该文件从未存在）。
+  **剩余 L1/L2/L4/L5/L6 未动。**
+
 - **2026-09-18 · blas-accept 性能复测与 warmup 全量落地（worktree blas-accept-retest，
   待 Mr.0 审 diff 与 commit）。** 机制一句话：用户点名 case 复测（pass-once：任一有效
   轮 PASS 即 PASS）、豁免（退出分母、后测撤销、MISSING 占位同撤销）、A5 折叠合并出

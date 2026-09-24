@@ -23,7 +23,7 @@ README 是事实表 FACTS 供人阅读的投影，不是独立的事实来源。
 | 校验形态与阈值 | `verify` token 与固定 dtype 阈值表 |
 | 用例块与覆盖 | `generate()` 的 blocks 与 pairwise report |
 | 精度验收 | 固定命令、结果路径和退出码 |
-| 性能验收 | `perf.key/threshold`、固定 msprof kernel 协议与单次调用条款 |
+| 性能验收 | `perf.key/threshold`、固定 msopprof kernel 协议与单次调用条款 |
 | GPU 基线 | `perf.key/rows/meta`，无 perf 时写不评判 |
 
 ## 开发者约束
@@ -38,9 +38,10 @@ README 是事实表 FACTS 供人阅读的投影，不是独立的事实来源。
   - 每个 token 都实现 README 指定的对象、方法和阈值。
   - 不用单一全矩阵误差检查替代结构性或残差检查。
 - 被测调用：
-  - 一条 gtest 用例只调用被测接口一次；量具 `verify_performance.py` 默认不做外部预热
-    （`--warmup` 显式传入正数才在采样前另起不计分的预热进程，显式 0 只序列化字段不起
-    进程），重复采样仅在其 `--repeats` 显式启用时发生。
+  - 一条 gtest 用例只调用被测接口一次，量具 `verify_performance.py` 的
+    `--calls-per-case` 固定为 1，用例里不自行预热、不重复调用。
+  - 读数是该次进程全部 kernel launch 的耗时之和，量具不另起预热进程；
+    重复采样仅在其 `--repeats` 显式启用时发生。
 - CSV：
   - 逐字节部署到 `test/<family>/<op>/<arch>/<op>_test.csv`。
   - 不在测试源码旁保留另一份手写 CSV。

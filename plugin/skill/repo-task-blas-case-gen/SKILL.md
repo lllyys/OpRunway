@@ -127,7 +127,7 @@ check 逐行校验 CSV 与其余模板投影，并与重新生成的结果逐字
 - [case-strategy.md](references/case-strategy.md) — 覆盖轴、2^n±1 边界、规模与必构造场景
 - [csv-and-blocks.md](references/csv-and-blocks.md) — 轴、行物化、四块、pairwise 与包级校验
 - [readme-contract.md](references/readme-contract.md) — README 章节来源与开发者落地约束
-- [perf-protocol.md](references/perf-protocol.md) — msprof kernel 采集、比对与证据协议
+- [perf-protocol.md](references/perf-protocol.md) — msopprof kernel 采集、比对与证据协议
 - `assets/example/cherk/` — 矩阵乘任务书提取的完整示例（六个文件）
 - `assets/example/sasum/` — 从 sasum 任务书提取的完整示例（六个文件）
 

@@ -30,7 +30,7 @@ description: >-
 | `device` | NPU 设备号 | 非负整数，默认 0；编译期固定 |
 | `python` | 执行 accept 与量具的解释器 | ≥ 3.8 |
 | `工作目录` | 检查结果、运行时包和结论目录 | 绝对路径，先创建再进入 |
-| `calls_per_case` | harness 一条 GTest 用例调用被测接口的次数 | 正整数，初值 1；A2′ 核对，A2 与 A4 填同一个值 |
+| `calls_per_case` | harness 一条 GTest 用例调用被测接口的次数 | 固定 1；读数不按它折算 |
 | `产物目录` | A5 三类产物的写入位置 | 可选；缺省 `<工作目录>/verdict` |
 
 命令里的 `<skill>` 是本 SKILL.md 所在目录的绝对路径，`<skill>/scripts/accept.py` 由它定位。
@@ -43,9 +43,9 @@ description: >-
 | --- | --- | --- | --- |
 | A1 环境 | 检查工具链、工程、CANN 与设备 | `env.json` | 0 进 A2；3 停止 |
 | A2 有无门 | 任务包两件、部署 CSV、构建清单、量具模板；生成运行时包 | `check.json`、`runtime/` | 0 进 A2′；2/3 停止 |
-| A2′ 三文件 | 读 `check.json` 里 harness 三文件的有无，核对 `calls_per_case` | 同 `check.json` | 记录后进 A3 |
+| A2′ 三文件 | 读 `check.json` 里 harness 三文件的有无 | 同 `check.json` | 记录后进 A3 |
 | A3 精度 | 构建并运行全部精度用例 | `runtime/results/accuracy_<id>.json` | 0 进 A4；1 复跑后进 A5；3 修复后换 id 重跑 |
-| A4 性能 | 逐例用 msprof 采集有基线的性能用例 | `runtime/results/performance_<id>.json` | 0/1/2 进 A5；3 修复后重跑一次 |
+| A4 性能 | 逐例用 msopprof 采集有基线的性能用例 | `runtime/results/performance_<id>.json` | 0/1/2 进 A5；3 修复后重跑一次 |
 | A5 结论 | 校验集合、计数与哈希，机械裁决 | 产物目录下三类布局 | 0/1/2 |
 
 **运行时包**是 A2 生成的 `<工作目录>/runtime/`（CSV 副本、规范化基线、两个量具与
@@ -71,7 +71,7 @@ mkdir -p <工作目录> && cd <工作目录> && \
 ```bash
 cd <工作目录> && <python> <skill>/scripts/accept.py check \
   --package <任务包目录> --repo <工程目录> --soc <soc> --device <device> \
-  --calls-per-case <calls_per_case>
+  --calls-per-case 1
 ```
 
 退出码只有 0、2、3，其它值视同停止。0 进 A2′（`runtime/` 已生成）；
@@ -82,10 +82,9 @@ cd <工作目录> && <python> <skill>/scripts/accept.py check \
 ### A2′ 三文件
 
 A2 已把 harness 三文件的有无写进 `check.json` 的 `checks.harness`（读取命令见
-run-chain.md 的「A2′ 三文件」），`missing` 非空只记警告，不停止。接着核对
-`calls_per_case`：三步数法见同节，与 A2 所填不同时用正确值重跑 A2，wrapper 缺失按
-1 计。把读过的文件路径与调用次数写进 `<工作目录>/verdict_notes.md`（自由格式），
-A5 每次重渲染报告时原样并入 `备注说明`。
+run-chain.md 的「A2′ 三文件」），`missing` 非空只记警告，不停止。`calls_per_case`
+固定 1，A2 与 A4 都传 1。把 `checks.harness.files` 的路径写进
+`<工作目录>/verdict_notes.md`（自由格式），A5 每次重渲染报告时原样并入 `备注说明`。
 
 ### A3 精度
 
@@ -106,14 +105,17 @@ PASS 被抹除，归因四值见同节。
 
 ### A4 性能
 
-A3 退出码 0 且 `check.json` 的 `checks.perf.comparable_pf` 大于 0 才运行。msprof
+A3 退出码 0 且 `check.json` 的 `checks.perf.comparable_pf` 大于 0 才运行。msopprof
 采集协议与通过判据见 [perf-protocol.md](references/perf-protocol.md)：
 
 ```bash
 cd <工作目录>/runtime && <python> verify_performance.py \
   --repo <工程目录> --soc <soc> --device <device> --run-id <id> \
-  --skip-build --calls-per-case <calls_per_case>
+  --skip-build --calls-per-case 1
 ```
+
+单次采集的 kernel launch 上限由 `--launch-count` 定，默认 512；逐例报 launch 规模
+不支持时才加大，产物体积随实际 launch 数线性增长。
 
 A3 有失败时不运行，A5 把性能记为 `未执行(精度未通过)`；`comparable_pf` 为 0 时也不
 运行，A5 按 CSV 的 `TC_PF_` 行数裁决（见 run-chain.md 的「A5 结论」）。GTest 自报 ms
@@ -136,7 +138,7 @@ cd <工作目录> && <python> <skill>/scripts/accept.py verdict \
 ### A4″ 性能复测（按需）
 
 首轮验收出过 A5 结论后，用户点名性能 case 复测或豁免时走本段。最小输入：测量
-复测 = 工作目录 + 点名 case（可选 `--warmup`）；豁免 = 工作目录 + 豁免 case +
+复测 = 工作目录 + 点名 case；豁免 = 工作目录 + 豁免 case +
 逐例理由。五步：
 
 1. 跑 `accept.py retest-preflight`（必调）拿下一轮号与 device；拒绝即停。
@@ -174,5 +176,5 @@ A5 跑完后回给用户的内容固定三项：
 
 - [run-chain.md](references/run-chain.md) — A1–A5 命令、参数、产物、退出码、JSON 字段与复跑链
 - [troubleshooting.md](references/troubleshooting.md) — 常见失败的现象、原因与处置
-- [perf-protocol.md](references/perf-protocol.md) — msprof kernel 耗时协议、warmup、证据保护与待实测边界
+- [perf-protocol.md](references/perf-protocol.md) — msopprof kernel 耗时协议、证据保护与待实测边界
 - [retest-protocol.md](references/retest-protocol.md) — 复测轮记录、有效性、折叠、豁免与恢复

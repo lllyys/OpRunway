@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""用 msprof kernel 耗时验收 CSV 驱动的性能用例。"""
+"""用 msprof op（msopprof）kernel 耗时验收 CSV 驱动的性能用例。"""
 
 # ===== 渲染常量区开始 =====
 OP = "@@OP@@"
@@ -18,10 +18,10 @@ import csv
 from datetime import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
-import shlex
 import shutil
 import statistics
 import subprocess
@@ -75,7 +75,7 @@ def _visible_devices_map(target, compiled_device):
 
 
 def _run_environment(repo, device, auto=False, compiled_device=0):
-    """gtest/msprof 子进程环境：按惯例注入绑卡变量与运行库路径。
+    """gtest/采集子进程环境：按惯例注入绑卡变量与运行库路径。
     auto 模式统一用 ASCEND_RT_VISIBLE_DEVICES 把选中的物理卡映射到二进制的编译
     逻辑卡位（全局协议，非域特判；编译期定卡域的二进制在 auto 下按逻辑 0 构建，
     故 compiled_device 默认 0，映射串退化成该物理卡号本身）。换卡复测由启动方
@@ -212,17 +212,28 @@ INSUFFICIENT_EXIT = 2
 # 默认单次采集:每次采样都是独立带 profiling 的进程,5 次带来 ~5x 时长,
 # 而中位数收益有限(历史实测样本间 spread 仅 1.3–2.4%);需要多样本时用 --repeats 覆盖。
 REPEATS = 1
-# 单例耗时预估(秒):真机实测单次 msprof 采集(含进程启动与落盘)约 10s/case(A3 机外推)。
-# 只用于开跑前的总时长预估提示,不参与任何判定。
-PER_CASE_ESTIMATE_S = 10
+# 单例耗时预估(秒):单 launch 用例实测 4.6-6.2s(A3,CANN 9.0.1)。多 launch 算子随
+# 实际 launch 数上升,这个数只用于开跑前的总时长提示,不参与任何判定。
+PER_CASE_ESTIMATE_S = 6
 
-# 公开文档给出 op_summary；目录和列名需在目标环境 spike 后只改这些常量。
-OP_SUMMARY_GLOB = "PROF_*/mindstudio_profiler_output/op_summary_*.csv"
-OP_SUMMARY_COLUMNS = {
-    "task_type": "Task Type",
+# msopprof 产物。布局取决于**实际采到的 launch 数**,不取决于 --launch-count 取值:
+#   采到 1 个   → OPPROF_<时间戳>_<随机串>/OpBasicInfo.csv
+#   采到多个   → OPPROF_*/<kernel 符号名>/<序号>/OpBasicInfo_<时间戳>.csv
+# 所以 glob 必须递归覆盖两种。只写扁平那条会在多 launch 算子上扫空,表现为每例
+# NO_KERNEL,与「算子没跑起来」无法区分(A3 实测,2026-09-23)。
+OP_BASIC_INFO_GLOB = "OPPROF_*/**/OpBasicInfo*.csv"
+# OpBasicInfo.csv 九列,**没有 Task Type 列**,所以旧的 kernel task 类型过滤整体作废。
+OP_BASIC_INFO_COLUMNS = {
     "duration_us": "Task Duration(us)",
 }
-KERNEL_TASK_TYPES = frozenset({"AI_CORE", "AI_VECTOR_CORE", "MIX_AIC", "MIX_AIV"})
+# --launch-count 默认值。工具允许 1-5000;超额指定安全、不增加耗时与体积。
+# 取 512 是基于已知反例留的余量,不是「必然够」的保证——保证来自 _parse_truncated。
+# 反例(ops-blas 源码):ssymm/arch22 在 m=1280 n=128 下 105 个 launch;
+# sgemm_strided_batched/arch35 由 batchCount 驱动,参数校验只判 >= 0,无上界。
+DEFAULT_LAUNCH_COUNT = 512
+# 写盘失败的日志表述。命中即判环境错误,不判 NO_KERNEL——磁盘满时工具仍退 0、
+# 只刷 WARN 且不产 CSV,不认这些串就会把环境问题说成算子没起 kernel(A3 实测)。
+DISK_FAILURE_MARKERS = ("Copy failed", "Failed to save", "No space left")
 INTEGER_RE = re.compile(r"^[+-]?\d+$")
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 PERF_KEY = [key for key in PERF_KEY if key]
@@ -230,7 +241,28 @@ PROFILE_ASSIGNS = json.loads(PROFILE_ASSIGNS_JSON)
 
 
 class ProfileParseError(ValueError):
-    """表示 msprof op_summary 结构无法按当前表驱动协议解析。"""
+    """表示 msopprof 的 OpBasicInfo.csv 无法按当前表驱动协议解析。"""
+
+
+class EnvironmentAbort(RuntimeError):
+    """采集环境出了问题,整轮中止而不是逐例记状态。
+
+    磁盘满、工具自身失败这类条件不是单例属性:对着满盘继续跑二百例只会产出
+    二百个假 NO_KERNEL,把环境问题说成算子问题。走 _fail 的环境失败出口,
+    退 ENVIRONMENT_EXIT,不动 PASS/FAIL/NO_KERNEL/CRASH/TIMEOUT/MISSING 这个
+    封闭状态词表——往词表里加一个值是对外契约扩张,折叠核会把不认识的状态判无效轮。"""
+
+    def __init__(self, reason, message):
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+
+
+class ProfileTruncatedError(ProfileParseError):
+    """采到的 launch 数撞上 --launch-count 上限,完整性未证实。
+
+    单列一类是因为去向不同:普通解析失败是产物坏了,截断是「这个用例的 launch
+    规模超出当前采集口径」——措辞不能说成算子失败。"""
 
 
 def _timestamp():
@@ -418,10 +450,6 @@ def _base_result(args, arch, started):
         "started": started,
         "finished": None,
     }
-    # warmup 序列化矩阵:首轮显式传参(含 N=0)才出现顶层 warmup;未传不出现
-    # (零复测兼容)。复测轮无条件出现——入口已把未传归一为 0。
-    if args.warmup is not None:
-        result["warmup"] = args.warmup
     return result
 
 
@@ -614,59 +642,134 @@ def _load_gpu_baseline(path):
     return metadata, references, warnings
 
 
+def _disk_failure_marker(output):
+    """采集日志里有没有写盘失败的迹象。返回命中的那一条,没有则 None。
+
+    磁盘满时工具仍退 0、只刷 WARN 且不产 CSV。不认这些串就会落到「无数据行」
+    那一档判 NO_KERNEL,把环境问题说成算子没起 kernel,排错方向完全相反。"""
+    text = output or ""
+    for marker in DISK_FAILURE_MARKERS:
+        if marker in text:
+            return marker
+    return None
+
+
+def _check_free_space(output_dir, launch_count):
+    """采样前按**本次采集上限**估所需空间。够则 None,不够返回说明。
+
+    按上限算而不按上一例的实际占用算:上一例可能只有一个 launch,下一例可能有
+    一百个,用上一例外推必然漏算。上限是唯一在跑之前可知的量。
+    峰值系数 >1 是因为工具先复制目录再删原目录,有两份数据同时在盘的阶段。"""
+    per_launch_bytes = 2.2 * 1024 * 1024        # A3 实测,约 2.2 MB/launch
+    peak_factor = 1.5
+    need = int(per_launch_bytes * launch_count * peak_factor)
+    target = Path(output_dir)
+    probe = target if target.exists() else target.parent
+    try:
+        usage = shutil.disk_usage(probe)
+    except OSError as exc:
+        return f"{probe} 可用空间查不到：{exc}"
+    if usage.free < need:
+        return (
+            f"{probe} 可用 {usage.free // (1024 * 1024)} MB，"
+            f"按 --launch-count={launch_count} 需要约 {need // (1024 * 1024)} MB；"
+            "调小 --launch-count 或换一块盘"
+        )
+    return None
+
+
 def _resolve_msprof(override):
+    """定位 msopprof。参数名沿用 --msprof 不改,只换查找目标与帮助文本。
+
+    可执行不等于可用:旧 CANN 上可能有同名文件却不支持本协议,所以命中后还要
+    _msopprof_usable 探一次。探不过按环境问题报,不要让它表现成每一例都失败。"""
     if override is not None:
         candidate = shutil.which(str(override))
         if candidate:
             return Path(candidate).resolve()
         path = Path(override).expanduser()
         return path.resolve() if path.is_file() and os.access(path, os.X_OK) else None
-    found = shutil.which("msprof")
+    found = shutil.which("msopprof")
     if found:
         return Path(found).resolve()
     toolkit = os.environ.get("ASCEND_TOOLKIT_HOME")
     candidates = []
     if toolkit:
-        candidates.append(Path(toolkit) / "tools" / "profiler" / "bin" / "msprof")
-    candidates.append(
-        Path("/usr/local/Ascend/ascend-toolkit/latest/tools/profiler/bin/msprof")
-    )
+        candidates.append(Path(toolkit) / "tools" / "msopprof" / "bin" / "msopprof")
+        candidates.append(Path(toolkit) / "bin" / "msopprof")
+    candidates.append(Path("/usr/local/Ascend/ascend-toolkit/latest/bin/msopprof"))
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate.resolve()
     return None
 
 
-def parse_op_summary(output_dir):
-    """返回指定 msprof 输出目录内 kernel duration 总和与 kernel 行数。"""
-    files = sorted(Path(output_dir).glob(OP_SUMMARY_GLOB))
+def _msopprof_usable(binary):
+    """跑一次 --help 确认是支持本协议的 msopprof。返回 (可用?, 说明)。"""
+    try:
+        result = subprocess.run(
+            [str(binary), "--help"], stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, timeout=60, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"{binary} --help 起不来：{exc}"
+    if result.returncode != 0:
+        return False, f"{binary} --help 退出码 {result.returncode}"
+    text = (result.stdout or b"").decode("utf-8", "replace")
+    if "--launch-count" not in text:
+        return False, f"{binary} 不认 --launch-count，版本过旧"
+    return True, ""
+
+
+def parse_op_summary(output_dir, launch_limit=None):
+    """汇总一次采样的 kernel 耗时。返回 (duration 之和, launch 数)。
+
+    读数是递归 glob 命中的**全部文件、全部数据行**的 Task Duration(us) 之和。
+    多份多行是多 launch 算子的正常形态,不是异常——cherk 每次 API 调用发 6 个
+    kernel(1 反交织 + 4 GEMM + 1 合并)。行数即该次进程实际发生的 launch 数。
+
+    launch_limit 给出本次的 --launch-count。行数等于它时抛 ProfileTruncatedError:
+    工具撞上限后静默停止给后续 kernel 分配采集路径、只记 debug 日志,这时无法区分
+    「恰好这么多」与「被截断」,而截断的后果是求和少算、ratio 虚高、假 PASS。
+    这是本协议唯一会把 FAIL 写成 PASS 的路径,必须 fail-closed。"""
+    root = Path(output_dir)
+    files = sorted(root.glob(OP_BASIC_INFO_GLOB)) + sorted(
+        root.glob("OPPROF_*/OpBasicInfo*.csv")
+    )
+    seen = set()
     kernel_us = 0.0
     launches = 0
     for path in files:
+        resolved = path.resolve()
+        if resolved in seen:      # 两个 glob 在扁平布局上会重叠
+            continue
+        seen.add(resolved)
         with path.open(encoding="utf-8-sig", newline="") as stream:
             reader = csv.DictReader(stream)
             columns = set(reader.fieldnames or [])
-            required = set(OP_SUMMARY_COLUMNS.values())
+            required = set(OP_BASIC_INFO_COLUMNS.values())
             if not required.issubset(columns):
                 missing = ", ".join(sorted(required - columns))
                 raise ProfileParseError(f"{path.name} 缺列：{missing}")
             for row_index, row in enumerate(reader, 2):
-                task_type = row[OP_SUMMARY_COLUMNS["task_type"]].strip()
-                if task_type not in KERNEL_TASK_TYPES:
-                    continue
-                raw_duration = row[OP_SUMMARY_COLUMNS["duration_us"]].strip()
+                raw_duration = (row.get(OP_BASIC_INFO_COLUMNS["duration_us"]) or "").strip()
                 try:
                     duration = float(raw_duration)
                 except ValueError as exc:
                     raise ProfileParseError(
                         f"{path.name} 第 {row_index} 行 duration 非数值"
                     ) from exc
-                if duration < 0:
+                if not math.isfinite(duration) or duration <= 0:
                     raise ProfileParseError(
-                        f"{path.name} 第 {row_index} 行 duration 为负"
+                        f"{path.name} 第 {row_index} 行 duration 须为有限正数"
                     )
                 kernel_us += duration
                 launches += 1
+    if launch_limit is not None and launches >= launch_limit:
+        raise ProfileTruncatedError(
+            f"采到 {launches} 个 launch，等于 --launch-count 上限 {launch_limit}，"
+            "无法确认是否被截断；当前采集口径不支持该用例的 launch 规模"
+        )
     return kernel_us, launches
 
 
@@ -758,7 +861,7 @@ def _progress(message):
     print(message, file=sys.stderr, flush=True)
 
 
-def _case_record(row, gtest_name, warmup=None):
+def _case_record(row, gtest_name):
     record = {
         "name": row["case_name"],
         "gtest_name": gtest_name,
@@ -771,15 +874,10 @@ def _case_record(row, gtest_name, warmup=None):
         "spread": None,
         "verdict": None,
         "message": "",
-        # 逐例诊断 warning(与顶层 baseline_warnings 分开):判定 1-3 触发时记录,
-        # 文本含 repeat 序号、msprof 退出码、执行成功证据文件路径。
+        # 逐例诊断 warning(与顶层 baseline_warnings 分开):判定触发时记录,
+        # 文本含 repeat 序号、采集工具退出码、执行成功证据文件路径。
         "warnings": [],
     }
-    # warmup 显式传参(含 N=0)时逐例出现 warmup_exit;未传不出现(零复测兼容)。
-    # null 的三种情形(N=0 未预热、预热超时、启动异常)靠顶层 warmup 的 N 值
-    # 与 warnings 原因文本区分。
-    if warmup is not None:
-        record["warmup_exit"] = None
     return record
 
 
@@ -789,86 +887,65 @@ def _with_scope_caveat(verdict, scope_caveat):
 
 def _measure_case(args, binary, msprof, row, gtest_name, references, profile_root,
                   run_env=None):
-    record = _case_record(row, gtest_name, warmup=args.warmup)
+    record = _case_record(row, gtest_name)
     if run_env is None:
         run_env = dict(os.environ)
     safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", row["case_name"])
     case_dir = profile_root / safe_name
     case_dir.mkdir(parents=True, exist_ok=True)
     case_dir = case_dir.resolve()
-    # warmup(默认不预热):采样序列开始前起一个裸 gtest 预热进程(不带 msprof),
-    # 跑完再进入采样;--repeats>1 时也只预热这一次。不产样本,不改 calls_per_case
-    # 除数,不参与计分。
-    if args.warmup:
-        warmup_log = case_dir / "warmup.log"
-        code, output, problem = _run_process(
-            [
-                str(binary),
-                f"--gtest_filter={gtest_name}",
-                f"--gtest_repeat={args.warmup}",
-            ],
-            args.timeout,
-            env=run_env,
-        )
-        _write_log(warmup_log, output)
-        if problem == "TIMEOUT":
-            # 预热超时按 --timeout 记单例终态,不再采样,避免一例吃双倍超时;
-            # warmup_exit 保持 null,原因落 warnings。
-            record["warnings"].append(
-                f"warmup 预热超时(--timeout={args.timeout}s),该例记 TIMEOUT,"
-                f"未进入采样;日志 {warmup_log}"
-            )
-            record["status"] = "TIMEOUT"
-            record["verdict"] = "TIMEOUT"
-            record["message"] = f"预热超时({args.timeout}s),未进入采样"
-            return record
-        if problem:
-            # 启动异常:warmup_exit 保持 null,记 warning 后照常采样计分——
-            # 裁决单源于采集轮证据链,预热进程起不来不构成对被测对象的判断。
-            record["warnings"].append(f"warmup 启动异常({output}),照常采样计分")
-        else:
-            record["warmup_exit"] = code
-            if code != 0:
-                record["warnings"].append(
-                    f"warmup 退出码 {code},照常采样计分;日志 {warmup_log}"
-                )
     for repeat in range(1, args.repeats + 1):
         output_dir = case_dir / f"r{repeat}"
         gtest_json = case_dir / f"r{repeat}.gtest.json"
-        # 每 case 恰一次采集;application 内追加 gtest 原生 --gtest_output,
-        # r<N>.gtest.json(绝对路径,按采样定址)是本次采样的「执行成功证据」,
-        # 由 gtest 在 RUN_ALL_TESTS 返回时写出。--ai-core=on --task-time=on 下
-        # op_summary 由 --application 自动导出,不做第二步 export(显式 export
-        # 会再产一份 op_summary,同一 glob 双份计入导致假 FAIL)。
-        application = shlex.join([
+        # 每 case 恰一次采集。新语法是 msopprof [options] <app> [app args]:
+        # --output 及其余选项必须排在被测二进制之前,其后一律视为被测程序的参数
+        # (放错位置会报 "output dir is not writable",错误信息有误导性)。
+        # --application= 已废弃;--ai-core/--task-time 在新命令下是硬错误(退 255)。
+        # r<N>.gtest.json 仍是本次采样的「执行成功证据」,由 gtest 在 RUN_ALL_TESTS
+        # 返回时写出,证据链与旧后端一致。
+        space_problem = _check_free_space(output_dir, args.launch_count)
+        if space_problem:
+            raise EnvironmentAbort("DISK_SPACE", space_problem)
+        command = [
+            str(msprof),
+            # **必须用 = 形式**:空格分隔会报 "argument --output miss value"
+            # (A3 实测,CANN 9.0.1)。错误信息不提示形式问题,容易误判成路径不可写。
+            f"--output={output_dir}",
+            "--aic-metrics=BasicInfo",
+            f"--launch-count={args.launch_count}",
             str(binary),
             f"--gtest_filter={gtest_name}",
             f"--gtest_output=json:{gtest_json}",
-        ])
-        command = [
-            str(msprof),
-            f"--application={application}",
-            "--ai-core=on",
-            "--task-time=on",
-            f"--output={output_dir}",
         ]
         code, output, problem = _run_process(command, args.timeout, env=run_env)
         _write_log(case_dir / f"r{repeat}.log", output)
+        # 判定顺序固定,先到先定,**环境问题必须排在算子证据之前**:
+        # 1 超时 → TIMEOUT;2 工具自身非零退出或日志显示写盘失败 → 整轮中止
+        # (EnvironmentAbort,退 ENVIRONMENT_EXIT);3 gtest 证据不合格 → CRASH;
+        # 4 无文件/无行/缺列/值非有限正数 → NO_KERNEL;5 截断 → NO_KERNEL;6 计分。
+        # 第 2 条不恢复旧的「非零 → NO_KERNEL」:工具失败是环境问题,记成算子问题
+        # 会让排错方向完全相反。磁盘满可能先让 gtest JSON 写不出而撞第 3 条,
+        # 所以日志检查必须排在证据检查之前。
         if problem:
             record["status"] = problem
             record["verdict"] = problem
-            record["message"] = f"第 {repeat} 次 msprof 未完成"
+            record["message"] = f"第 {repeat} 次采集未完成"
             return record
-        # 真机实测 msprof 不透传 application 失败(分析完成一律退 0),退出码不能作
-        # 崩溃判据;按执行成功证据逐次判定,任一次采样落入 1-3 即终止该 case:
-        # 1 证据不合格(含缺失)→CRASH;2 证据合格但 msprof 非 0→NO_KERNEL(不读
-        # op_summary,防部分导出的 CSV 少算耗时抬高 ratio);3 op_summary 缺失或
-        # 无 kernel 行→NO_KERNEL(既有路径);4 全合格→计分。
+        disk_hit = _disk_failure_marker(output)
+        if code != 0 or disk_hit:
+            reason = "DISK_WRITE_FAILED" if disk_hit else "PROFILER_FAILED"
+            detail = (
+                f"{row['case_name']} 第 {repeat} 次采集："
+                + (f"日志出现「{disk_hit}」，写盘失败" if disk_hit
+                   else f"采集工具退出码 {code}")
+                + f"；日志 {case_dir / f'r{repeat}.log'}"
+            )
+            raise EnvironmentAbort(reason, detail)
         evidence_ok, evidence_detail = _gtest_evidence(gtest_json, gtest_name)
         if not evidence_ok:
             record["warnings"].append(
                 f"r{repeat} 执行成功证据缺失/不合格({evidence_detail});"
-                f"msprof 退出码 {code};证据文件 {gtest_json}"
+                f"采集工具退出码 {code};证据文件 {gtest_json}"
             )
             record["status"] = "CRASH"
             record["verdict"] = "CRASH"
@@ -876,22 +953,23 @@ def _measure_case(args, binary, msprof, row, gtest_name, references, profile_roo
                 f"第 {repeat} 次执行成功证据缺失/不合格:{evidence_detail}"
             )
             return record
-        if code != 0:
+        try:
+            kernel_us, launches = parse_op_summary(output_dir, args.launch_count)
+        except ProfileTruncatedError as exc:
+            # 截断是单例属性(大规模用例撞上限而别的用例不会),所以逐例记而不是
+            # 整轮中止。状态用词表里的 NO_KERNEL,措辞必须落在采集口径上——
+            # 这不是算子没起 kernel,是这一例的 launch 规模超出当前采集能力。
             record["warnings"].append(
-                f"r{repeat} msprof 退出码 {code},产物不可信,不读 op_summary;"
-                f"证据文件 {gtest_json}"
+                f"r{repeat} {exc};提高 --launch-count 后重采可解，"
+                f"但产物体积随 launch 数线性增长;证据文件 {gtest_json}"
             )
             record["status"] = "NO_KERNEL"
             record["verdict"] = "NO_KERNEL"
-            record["message"] = (
-                f"第 {repeat} 次 msprof 退出码 {code},采集或分析未完整,不计分"
-            )
+            record["message"] = f"第 {repeat} 次{exc}"
             return record
-        try:
-            kernel_us, launches = parse_op_summary(output_dir)
         except (OSError, UnicodeError, csv.Error, ProfileParseError) as exc:
             record["warnings"].append(
-                f"r{repeat} op_summary 解析失败;msprof 退出码 {code};"
+                f"r{repeat} OpBasicInfo 解析失败;采集工具退出码 {code};"
                 f"证据文件 {gtest_json}"
             )
             record["status"] = "NO_KERNEL"
@@ -900,15 +978,16 @@ def _measure_case(args, binary, msprof, row, gtest_name, references, profile_roo
             return record
         if launches == 0:
             record["warnings"].append(
-                f"r{repeat} op_summary 缺失或无 kernel 行;msprof 退出码 {code};"
+                f"r{repeat} OpBasicInfo 缺失或无数据行;采集工具退出码 {code};"
                 f"证据文件 {gtest_json}"
             )
             record["status"] = "NO_KERNEL"
             record["verdict"] = "NO_KERNEL"
             record["message"] = f"第 {repeat} 次采样没有 kernel 行"
             return record
-        # 一条 gtest 用例里 harness 可能调用被测接口多次（如固定 warm-up 一次），按次数归一。
-        record["samples"].append(kernel_us / args.calls_per_case)
+        # 读数即该次进程全部 kernel launch 的 duration 之和,不再按 calls_per_case
+        # 归一——msopprof 采的就是这次调用实际发生的 launch,没有重复计入。
+        record["samples"].append(kernel_us)
         record["launches"].append(launches)
 
     median_us = float(statistics.median(record["samples"]))
@@ -1025,27 +1104,27 @@ def _parser():
     parser.add_argument("--timeout", type=int, default=3600, help="每个进程的超时秒数")
     parser.add_argument(
         "--repeats", type=int, default=REPEATS,
-        help="每例 msprof 采样次数(默认 1,单次采集;>1 时取中位数)",
+        help="每例采样次数(默认 1,单次采集;>1 时取中位数)",
     )
     parser.add_argument(
         "--calls-per-case",
         type=int,
         default=1,
-        help="一条 gtest 用例调用被测接口的次数；kernel 总时长除以它得单次调用耗时",
+        help="一条 gtest 用例调用被测接口的次数；当前只接受 1（读数不再按它归一）",
     )
     parser.add_argument(
-        "--warmup",
+        "--launch-count",
         type=int,
-        default=None,
-        help="采样前每例预热次数 N(0-100):起一个裸 gtest --gtest_repeat=N 进程,"
-             "跑完再采样;默认不预热。显式传入(含 0)时结果 JSON 出现 warmup 与逐例 warmup_exit",
+        default=DEFAULT_LAUNCH_COUNT,
+        help=f"单次采集的 kernel launch 上限(1-5000,默认 {DEFAULT_LAUNCH_COUNT})；"
+             "采到的行数等于它即判截断、不计分",
     )
-    parser.add_argument("--msprof", help="覆盖 msprof 可执行文件路径")
+    parser.add_argument("--msprof", help="覆盖 msopprof 可执行文件路径")
     parser.add_argument(
         "--keep-prof",
         action="store_true",
         default=True,
-        help="保留 msprof 原始目录；当前默认保留",
+        help="保留采集原始目录；当前默认保留",
     )
     parser.add_argument("--case", action="append", help="精确复跑 case_name，可重复")
     parser.add_argument("--filter", help="按 case_name 子串收窄性能集")
@@ -1075,10 +1154,13 @@ def main(argv=None):
         )
     if args.build_timeout <= 0 or args.timeout <= 0 or args.repeats <= 0:
         parser.error("timeout 与 repeats 必须为正整数")
-    if args.calls_per_case <= 0:
-        parser.error("--calls-per-case 必须为正整数")
-    if args.warmup is not None and not 0 <= args.warmup <= 100:
-        parser.error("--warmup 合法范围 0-100")
+    if args.calls_per_case != 1:
+        # 冻结为 1:读数已是该次进程全部 launch 之和,再归一就是二次归一。
+        # 字段保留是因为它同时是复测绑定锚、evidence_id 哈希输入与 check.json
+        # 契约比对项,删字段会让已在盘的全部 check.json 自检失败。
+        parser.error("--calls-per-case 当前只接受 1（读数不再按它归一）")
+    if not 1 <= args.launch_count <= 5000:
+        parser.error("--launch-count 合法范围 1-5000")
     if not 0 <= args.compiled_device <= MAX_COMPILED_DEVICE:
         parser.error(
             f"--compiled-device 合法范围 0-{MAX_COMPILED_DEVICE}:映射串共 N+1 位,"
@@ -1107,9 +1189,6 @@ def main(argv=None):
             # 重映射下才用得上——不置位 --map-device 时它既不进映射串也不进构建号,
             # 留着就是个静默失效的参数,不如当场报错。
             parser.error("--compiled-device 非 0 时必须同时置位 --map-device")
-        if args.warmup is None:
-            # 复测轮 warmup 与逐例 warmup_exit 无条件序列化:未传按 N=0(不预热)。
-            args.warmup = 0
     elif args.map_device or args.compiled_device:
         parser.error(
             "--map-device 与非 0 的 --compiled-device 仅复测模式有效"
@@ -1257,7 +1336,16 @@ def main(argv=None):
     mapped_rows = [row for row in expected_rows if row["case_name"] in mapping]
     msprof = _resolve_msprof(args.msprof) if mapped_rows else None
     if mapped_rows and msprof is None:
-        return _fail("MSPROF_NOT_FOUND", "找不到可执行的 msprof")
+        return _fail("MSPROF_NOT_FOUND", "找不到可执行的 msopprof")
+    if msprof is not None and args.msprof is None:
+        # 只在自动发现时探。显式传 --msprof 是使用者的覆盖,不二次猜疑——
+        # 这道探测防的是「旧 CANN 上自动找到了不支持本协议的同名文件」,
+        # 不是防使用者给错路径。
+        usable, why = _msopprof_usable(msprof)
+        if not usable:
+            # 可执行不等于可用:旧 CANN 上有同名文件却不支持本协议时,不报成
+            # 「找不到」——那会让人去查 PATH,而真正的原因是版本。
+            return _fail("MSPROF_UNUSABLE", why)
     payload["msprof"] = None if msprof is None else str(msprof)
     profile_root = run_dir / "prof"
     cases = []
@@ -1273,15 +1361,21 @@ def main(argv=None):
         name = row["case_name"]
         gtest_name = mapping.get(name)
         if gtest_name is None:
-            record = _case_record(row, None, warmup=args.warmup)
+            record = _case_record(row, None)
             record["status"] = "MISSING"
             record["verdict"] = "MISSING"
             record["message"] = "部署 CSV 用例未出现在 --gtest_list_tests"
         else:
-            record = _measure_case(
-                args, binary, msprof, row, gtest_name, references, profile_root,
-                run_env=run_env,
-            )
+            try:
+                record = _measure_case(
+                    args, binary, msprof, row, gtest_name, references, profile_root,
+                    run_env=run_env,
+                )
+            except EnvironmentAbort as abort:
+                # 采集环境坏了就地中止:继续跑只会把同一个环境问题记成一串
+                # 算子失败。已完成的例保留在现场目录里,重跑时不用从头来。
+                _progress(f"采集环境失败，中止本轮：{abort.message}")
+                return _fail(abort.reason, abort.message)
         record["verdict"] = _with_scope_caveat(record["verdict"], scope_caveat)
         cases.append(record)
         done += 1
