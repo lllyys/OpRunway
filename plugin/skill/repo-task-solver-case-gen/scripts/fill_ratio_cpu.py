@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""fill_ratio_cpu.py —— S1-Cholesky B2 卡（波 1.5）：index.json 的 ratio_cpu 回填。
+"""fill_ratio_cpu.py —— S1-Cholesky B2 卡（波 1.5；S2c B2c 卡扩入复数三算子）：
+index.json 的 ratio_cpu 回填。
 
 契约：dev-doc/solver/solver-s1-cholesky-spec.md §2.4（ratio_cpu 语义）、§2.2（index
 schema）、第 3 节波 1.5 行。B1 的 gen_data_cholesky.py 生成 npz 与 index.json 骨架
-（ratio_cpu/ratio_cpu_status 留 null），本脚本对同一冻结输入跑 FP32 s 前缀完整准备链
-回填这两个字段，产出填充后的 index.json 副本与逐 case 报告；npz 一概不改不重生成
+（ratio_cpu/ratio_cpu_status 留 null），本脚本对同一冻结输入跑低精度同前缀完整准备链
+（实数 FP32 s 前缀 / 复数 complex64 c 前缀）回填这两个字段，产出填充后的 index.json 副本与逐 case 报告；npz 一概不改不重生成
 （B 冻结产物由 F 逐字节装包，spec 第 3 节）。
 
 ratio_cpu 语义（spec §2.4）：FP32 s 前缀链路对同一冻结输入跑完整准备链
@@ -37,6 +38,12 @@ potrf/potri 底噪 <1 是硬断言（不满足即退出码 3）；potrs 上浮�
 给出布尔判读（本片 case 规模 16~512、cu 构造对角占优 κ 小，上浮幅度预期小于 README
 的 128~8192 全量表，故不设硬倍数线，如实报数）。
 
+S2c 复数增量（s2 spec §4 + B2c 任务卡）：算子册扩入 cpotrf/cpotrs/cpotri，准备链
+用 c 前缀完整链路（cpotrs/cpotri 前置 cpotrf 同精度，complex64）；残差仍唯一取
+criteria 的 residual_ratio（DPOT01/02/03 形状不变，复模与升精度由 criteria 侧实现）。
+复数画像不设硬门——实数区间不得盲目继承（B2c 任务卡），统计如实输出、判读交
+验证段；prep_failed 自测 s/c 两前缀各走一条非正定用例。
+
 CLI：
     fill_ratio_cpu.py --cases <dir> --out <dir> [--criteria <dir>] [--ops s1,s2]
 --cases 指含 index.json 与 *.npz 的目录（B1 产物的 cases/）；--criteria 指
@@ -53,9 +60,21 @@ from pathlib import Path
 import numpy as np
 
 TOOL = "fill_ratio_cpu.py"
-TOOL_VER = "s1-b2-r1"
-SUPPORTED_OPS = ("spotrf", "spotrs", "spotri")
+TOOL_VER = "s2c-b2c-r1"  # S2c：复数三算子入册（c 前缀准备链）；承 s1-b2-r1
+REAL_OPS = ("spotrf", "spotrs", "spotri")
+COMPLEX_OPS = ("cpotrf", "cpotrs", "cpotri")
+SUPPORTED_OPS = REAL_OPS + COMPLEX_OPS
 F32 = np.float32
+C64 = np.complex64
+ACCEPTED_INDEX_SCHEMAS = ("solver-s1/cases-index@1",)  # 两册字段形状相同，共用一个 schema
+
+
+def prep_kinds(op):
+    """准备链数值域：复数走 c 前缀（s2 spec §4：potrs/potri 前置 cpotrf 同精度，
+    complex64），实数走 s 前缀（float32）。"""
+    if op in COMPLEX_OPS:
+        return C64, "c"
+    return F32, "s"
 
 
 class ContractError(RuntimeError):
@@ -63,7 +82,7 @@ class ContractError(RuntimeError):
 
 
 class PrepFailed(RuntimeError):
-    """FP32 准备链失败（info≠0 或输出非有限）——按 spec §2.4 记 prep_failed。"""
+    """低精度准备链失败（info≠0 或输出非有限）——按 spec §2.4 记 prep_failed。"""
 
 
 # ---------------------------------------------------------------------------
@@ -90,59 +109,67 @@ def _lapack():
         from scipy.linalg import lapack
     except ImportError as exc:
         raise ContractError(
-            "缺 scipy：FP32 准备链走 scipy.linalg.lapack 的 s 前缀例程，"
+            "缺 scipy：低精度准备链走 scipy.linalg.lapack 的 s/c 前缀例程，"
             "按 spec §1 应在远程容器内补装 scipy 并记录版本后再运行本脚本"
         ) from exc
     return lapack
 
 
 # ---------------------------------------------------------------------------
-# FP32 s 前缀准备链（spec §2.4；被测精度参考实现，scipy→LAPACK）
+# 低精度准备链（实数 s 前缀 spec §2.4 / 复数 c 前缀 s2 spec §4；被测精度参考实现，scipy→LAPACK）
 # ---------------------------------------------------------------------------
 
-def _check_f32(name, arr, case_id):
-    """s 例程输出必须仍是 FP32 且有限——README 1.5 条 7 的降型自检 + 非有限拦截。"""
-    if arr.dtype != F32:
+def _check_low(name, arr, case_id, dt32):
+    """低精度例程输出必须仍是该精度（实数 float32 / 复数 complex64）且有限——
+    README 1.5 条 7 的降型自检 + 非有限拦截。"""
+    if arr.dtype != dt32:
         raise ContractError(
-            f"{case_id}: {name} dtype={arr.dtype}，s 前缀链路输出应为 float32"
+            f"{case_id}: {name} dtype={arr.dtype}，低精度链路输出应为 {np.dtype(dt32).name}"
             "（scipy 静默降型坑，README 1.5 条 7）"
         )
     if not np.isfinite(arr).all():
         raise PrepFailed(f"{case_id}: {name} 含 NaN/Inf")
 
 
-def _s_potrf(lapack, a32, uplo, case_id):
-    f32, info = lapack.spotrf(a32, lower=(uplo == "L"), clean=1)
+def _low_potrf(lapack, a32, uplo, case_id, prefix, dt32):
+    f32, info = getattr(lapack, prefix + "potrf")(a32, lower=(uplo == "L"), clean=1)
     if info != 0:
-        raise PrepFailed(f"{case_id}: spotrf info={info}")
-    _check_f32("F32", f32, case_id)
+        raise PrepFailed(f"{case_id}: {prefix}potrf info={info}")
+    _check_low("F32", f32, case_id, dt32)
     return f32
 
 
 def run_chain(verdict_mod, lapack, case, arrays):
-    """跑该 case 的 FP32 完整准备链并返回 residual_ratio 值。
+    """跑该 case 的低精度完整准备链（实数 FP32 s 前缀 / 复数 complex64 c 前缀）
+    并返回 residual_ratio 值。
 
     抛 PrepFailed 表示准备失败（调用方记 prep_failed）；其余异常是脚本或数据错误，
     照常向上抛（fail-closed，不吞进 prep_failed）。
     """
     cid, op, uplo = case["case_id"], case["op"], case["uplo"]
+    dt32, prefix = prep_kinds(op)
     a32 = np.ascontiguousarray(arrays["A32"])
-    f32 = _s_potrf(lapack, a32, uplo, cid)
-    if op == "spotrf":
+    if a32.dtype != dt32:
+        raise ContractError(
+            f"{cid}: A32 dtype={a32.dtype}，{op} 的准备链输入应为 {np.dtype(dt32).name}"
+            "（npz 与算子册不匹配？）")
+    f32 = _low_potrf(lapack, a32, uplo, cid, prefix, dt32)
+    base = op[1:]                                       # potrf/potrs/potri（s/c 前缀共路）
+    if base == "potrf":
         return verdict_mod.residual_ratio(
             "DPOT01", a=arrays["A64"], factor=f32, uplo=uplo)
-    if op == "spotrs":
+    if base == "potrs":
         b32 = np.ascontiguousarray(arrays["B32"])
-        x32, info = lapack.spotrs(f32, b32, lower=(uplo == "L"))
+        x32, info = getattr(lapack, prefix + "potrs")(f32, b32, lower=(uplo == "L"))
         if info != 0:
-            raise PrepFailed(f"{cid}: spotrs info={info}")
-        _check_f32("X32", x32, cid)
+            raise PrepFailed(f"{cid}: {prefix}potrs info={info}")
+        _check_low("X32", x32, cid, dt32)
         return verdict_mod.residual_ratio("DPOT02", a=a32, b=b32, x=x32)
-    if op == "spotri":
-        c32, info = lapack.spotri(f32, lower=(uplo == "L"))
+    if base == "potri":
+        c32, info = getattr(lapack, prefix + "potri")(f32, lower=(uplo == "L"))
         if info != 0:
-            raise PrepFailed(f"{cid}: spotri info={info}")
-        _check_f32("C32", c32, cid)
+            raise PrepFailed(f"{cid}: {prefix}potri info={info}")
+        _check_low("C32", c32, cid, dt32)
         return verdict_mod.residual_ratio("DPOT03", a=a32, ainv=c32, uplo=uplo)
     raise ContractError(f"{cid}: op={op!r} 不在 {SUPPORTED_OPS}")
 
@@ -152,25 +179,38 @@ def run_chain(verdict_mod, lapack, case, arrays):
 # ---------------------------------------------------------------------------
 
 def prep_failed_selftest(verdict_mod, lapack):
-    """人工非正定阵走同一条链路，必须落 prep_failed（spotrf info>0）。
+    """人工非正定阵走同一条链路，必须落 prep_failed（potrf info>0）；s/c 两前缀
+    各验一条（复数探针在 cpotrf 步即触发，不依赖 criteria 的复数残差支持）。
 
-    A = [[1,2],[2,1]]（特征值 3 与 -1，对称但非正定）：合法 SPD 前提被故意破坏，
-    spotrf 应报 info=2（第 2 个主子式非正）。自测用与真实 case 完全相同的
-    run_chain 入口，不另写第二条路径。
+    实数 A = [[1,2],[2,1]]（特征值 3 与 -1，对称非正定，spotrf 应报 info=2）；
+    复数 A = [[1,2-i],[2+i,1]]（Hermitian 非正定，特征值 1±√5）。自测用与真实
+    case 完全相同的 run_chain 入口，不另写第二条路径。返回逐探针结果列表。
     """
-    a64 = np.array([[1.0, 2.0], [2.0, 1.0]])
-    case = {"case_id": "selftest-nonspd", "op": "spotrf", "uplo": "L"}
-    arrays = {"A64": a64, "A32": a64.astype(F32)}
-    try:
-        ratio = run_chain(verdict_mod, lapack, case, arrays)
-    except PrepFailed as exc:
-        return {"case": "A=[[1,2],[2,1]]（对称非正定，特征值 3/-1）",
-                "chain": "run_chain 同一入口", "outcome": str(exc),
-                "status": "prep_failed", "passed": True}
-    raise ContractError(
-        f"prep_failed 自测未触发：非正定阵竟返回 ratio={ratio}——"
-        "准备链的 info 检查失效，停止回填"
-    )
+    probes = [
+        ("selftest-nonspd", "spotrf",
+         np.array([[1.0, 2.0], [2.0, 1.0]]),
+         "A=[[1,2],[2,1]]（对称非正定，特征值 3/-1）"),
+        ("selftest-nonhpd", "cpotrf",
+         np.array([[1.0, 2.0 - 1.0j], [2.0 + 1.0j, 1.0]]),
+         "A=[[1,2-i],[2+i,1]]（Hermitian 非正定，特征值 1±√5）"),
+    ]
+    results = []
+    for cid, op, a64, desc in probes:
+        dt32, _ = prep_kinds(op)
+        case = {"case_id": cid, "op": op, "uplo": "L"}
+        arrays = {"A64": a64, "A32": a64.astype(dt32)}
+        try:
+            ratio = run_chain(verdict_mod, lapack, case, arrays)
+        except PrepFailed as exc:
+            results.append({"case": desc, "chain": "run_chain 同一入口",
+                            "outcome": str(exc), "status": "prep_failed",
+                            "passed": True})
+            continue
+        raise ContractError(
+            f"prep_failed 自测未触发（{op}）：非正定阵竟返回 ratio={ratio}——"
+            "准备链的 info 检查失效，停止回填"
+        )
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -185,32 +225,45 @@ def _stats(vals):
             "median": float(np.median(v))}
 
 
-def profile_check(rows):
-    """逐算子统计 + 三条判读。potrf/potri 底噪 <1 是硬断言；potrs 上浮给布尔判读。"""
-    by_op = {op: [r["ratio_cpu"] for r in rows
-                  if r["op"] == op and r["ratio_cpu_status"] == "ok"]
-             for op in SUPPORTED_OPS}
-    stats = {op: _stats(vals) for op, vals in by_op.items()}
+def profile_check(rows, ops):
+    """逐算子统计 + 判读。实数沿 S1：potrf/potri 底噪 <1 硬断言、potrs 上浮布尔
+    判读；复数三算子只输出画像统计，不设硬门——实数区间不得盲目继承（B2c 任务
+    卡），判读交验证段。本次回填面没有 case 的算子不参与判读（单册回填的常态）；
+    有 case 但全 prep_failed 的实数算子仍触发硬断言（沿 S1 语义）。"""
+    rows_by_op = {op: [r for r in rows if r["op"] == op] for op in ops}
+    by_op = {op: [r["ratio_cpu"] for r in rs if r["ratio_cpu_status"] == "ok"]
+             for op, rs in rows_by_op.items()}
+    stats = {op: _stats(by_op[op]) for op in ops if rows_by_op[op]}
     hard_fail = []
     for op in ("spotrf", "spotri"):
+        if not rows_by_op.get(op):
+            continue                    # 该算子不在本次回填面——底噪门不适用
         bad = [v for v in by_op[op] if not v < 1.0]
         if bad or not by_op[op]:
             hard_fail.append(f"{op} 底噪断言不满足（应全部 <1，越界值 {bad}）")
-    potrf_max = stats["spotrf"]["max"] if stats["spotrf"] else None
-    potrs_min = stats["spotrs"]["min"] if stats["spotrs"] else None
-    uplift = (potrs_min is not None and potrf_max is not None
-              and stats["spotrs"]["max"] > potrf_max)
-    checks = {
-        "potrf_noise_below_1": not any("spotrf" in m for m in hard_fail),
-        "potri_noise_below_1": not any("spotri" in m for m in hard_fail),
-        "potrs_uplift_over_potrf_max": bool(uplift),
-        "potrs_all_below_floor_30": bool(potrs_min is not None
-                                         and stats["spotrs"]["max"] < 30.0),
-        "readme_reference": {
-            "potrf": "README 1.6 ratio_cpu32 实测 0.000~0.008 ulp（平坦底噪）",
-            "potrs": "README 2.4 ratio_cpu 实测 0.118~5.748 ulp（上浮，随规模/病态度涨）",
-            "spotri": "README 3.4 DPOT03(FP32) 实测 0.000~0.009 ulp（平坦底噪）",
-        },
+    s_potrf = stats.get("spotrf")
+    s_potrs = stats.get("spotrs")
+    checks = {}
+    if rows_by_op.get("spotrf"):
+        checks["potrf_noise_below_1"] = not any("spotrf" in m for m in hard_fail)
+    if rows_by_op.get("spotri"):
+        checks["potri_noise_below_1"] = not any("spotri" in m for m in hard_fail)
+    if rows_by_op.get("spotrs"):
+        checks["potrs_uplift_over_potrf_max"] = bool(
+            s_potrs and s_potrf and s_potrs["max"] > s_potrf["max"])
+        checks["potrs_all_below_floor_30"] = bool(s_potrs and s_potrs["max"] < 30.0)
+    complex_present = [op for op in COMPLEX_OPS if rows_by_op.get(op)]
+    if complex_present:
+        checks["complex_profile"] = {
+            "ops": complex_present,
+            "hard_gate": None,
+            "note": "复数画像不设硬门（实数区间不得盲目继承，B2c 任务卡）；"
+                    "统计如实输出，判读交验证段",
+        }
+    checks["readme_reference"] = {
+        "potrf": "README 1.6 ratio_cpu32 实测 0.000~0.008 ulp（平坦底噪，实数）",
+        "potrs": "README 2.4 ratio_cpu 实测 0.118~5.748 ulp（上浮，随规模/病态度涨，实数）",
+        "spotri": "README 3.4 DPOT03(FP32) 实测 0.000~0.009 ulp（平坦底噪，实数）",
     }
     return stats, checks, hard_fail
 
@@ -236,7 +289,7 @@ def main(argv=None):
     parser.add_argument("--criteria", default=None,
                         help="repo-task-solver-accept 的 criteria 目录（缺省按镜像树相对布局解析）")
     parser.add_argument("--ops", default=",".join(SUPPORTED_OPS),
-                        help="逗号分隔的算子子集，默认全部三算子")
+                        help="逗号分隔的算子子集，默认两册六算子（与 index 实际所含取交集）")
     args = parser.parse_args(argv)
 
     ops = tuple(s.strip() for s in args.ops.split(",") if s.strip())
@@ -249,7 +302,8 @@ def main(argv=None):
     lapack = _lapack()
 
     selftest = prep_failed_selftest(verdict_mod, lapack)
-    print(f"[b2] prep_failed 自测通过：{selftest['outcome']}")
+    for st in selftest:
+        print(f"[b2] prep_failed 自测通过：{st['outcome']}")
 
     cases_dir = Path(args.cases)
     index_path = cases_dir / "index.json"
@@ -257,8 +311,9 @@ def main(argv=None):
         raise ContractError(f"{cases_dir} 下没有 index.json（应指向 B1 产物 cases/ 目录）")
     with index_path.open(encoding="utf-8") as fh:
         index = json.load(fh)
-    if index.get("schema") != "solver-s1/cases-index@1":
-        raise ContractError(f"index schema={index.get('schema')!r} 不是 solver-s1/cases-index@1")
+    if index.get("schema") not in ACCEPTED_INDEX_SCHEMAS:
+        raise ContractError(
+            f"index schema={index.get('schema')!r} 不在 {ACCEPTED_INDEX_SCHEMAS}")
 
     rows = []
     n_ok = n_prep_failed = 0
@@ -270,7 +325,7 @@ def main(argv=None):
         with np.load(npz_path) as npz:
             arrays = {k: npz[k] for k in npz.files}
         missing = {"A64", "A32"} - set(arrays)
-        if entry["op"] == "spotrs":
+        if entry["op"].endswith("potrs"):
             missing |= {"B64", "B32"} - set(arrays)
         if missing:
             raise ContractError(f"{cid}: npz 缺数组 {sorted(missing)}（spec §2.2）")
@@ -294,13 +349,14 @@ def main(argv=None):
     if not rows:
         raise ContractError(f"index.json 里没有 ops={','.join(ops)} 的 case")
 
-    stats, checks, hard_fail = profile_check(rows)
+    stats, checks, hard_fail = profile_check(rows, ops)
 
     import scipy
     index["ratio_cpu_fill"] = {
         "tool": {"name": TOOL, "ver": TOOL_VER},
         "spec": "dev-doc/solver/solver-s1-cholesky-spec.md#2.4",
-        "chain": "FP32 s 前缀完整准备链（potrs/potri 先 spotrf），scipy.linalg.lapack",
+        "chain": "低精度完整准备链（实数 FP32 s 前缀 / 复数 complex64 c 前缀；"
+                 "potrs/potri 先同前缀 potrf），scipy.linalg.lapack",
         "residual_impl": "repo-task-solver-accept/criteria/verdict.residual_ratio（唯一实现）",
         "env": {"numpy": np.__version__, "scipy": scipy.__version__},
     }

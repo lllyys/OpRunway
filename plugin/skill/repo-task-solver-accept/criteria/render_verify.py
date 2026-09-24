@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
 """verify 双件确定性渲染入口（D 卡，spec §2.5；设计 v2 §3.3「同一个确定性渲染入口」）。
 
-用法：``render_verify.py --op <spotrf|spotrs|spotri> --out <dir>``。向 <dir> 渲染两个
-独立可运行的自测辅助件：``verify_accuracy.py``（三层判定的渲染副本：layer1 混合容差
-双门 → LAPACK 残差兜底）与 ``verify_perf.py``（perf_baseline 逐 case 比值，方向 =
-被测/基线）。
+用法：``render_verify.py --op <spotrf|spotrs|spotri|cpotrf|cpotrs|cpotri> --out <dir>``。
+向 <dir> 渲染两个独立可运行的自测辅助件：``verify_accuracy.py``（三层判定的渲染副本：
+layer1 混合容差双门 → LAPACK 残差兜底）与 ``verify_perf.py``（perf_baseline 逐 case
+比值，方向 = 被测/基线）。
+
+S2c 复数增量（dev-doc/solver/solver-s2-spec.md §4 契约增量表）：c 前缀三算子的
+精度副本与 criteria 复数通路同语义——layer1 比对目标拆实/虚两个实数目标各过双门
+（不合并成 2N 元素互相稀释）、残差先升 complex128 再取复模、recon/镜像取共轭
+（Hermitian）、复数裁决恒记 flag T7；公式形状、ε 与阈值数值同实数书。
 
 三条渲染契约（spec 波 2 D 行）：
 
@@ -34,7 +39,23 @@ except ImportError:  # criteria 目录直接挂 sys.path 或作为脚本运行�
     import thresholds
 
 # 渲染格式版本，供 manifest.renderer_ver（spec §2.2）消费。
-RENDERER_VER = "s1-D1"
+# s2-D2：复数三算子（cpotrf/cpotrs/cpotri）渲染支持（S2 spec §4）。
+RENDERER_VER = "s2-D4"
+# s2-D3：渲染产物去内部指称（2026-09-24 冷读演练发现 6：包内查无 spec/accept 可解处）。
+# 只作用于渲染输出，skill 内部注释不受影响；表驱动便于核对与增删。
+_PKG_LOCAL_SUBS = (
+    # s2-D4：补两族漏项（复核实测 fail-closed 闸出：spec §2.4 与 S2 spec §4）。
+    # 长串在前，避免被短串先替换截断。
+    ("S2 spec §4", "复数任务书 §3.2 契约"),
+    ("spec §2.4", "包内 ratio_cpu 约定"),
+    ("spec §2.3/§2.3′", "任务书 §3.2"),
+    ("spec §2.3′", "任务书 §3.2"),
+    ("spec §2.2/§2.5", "包契约（README 与 manifest）"),
+    ("spec §2.2", "包契约"),
+    ("spec §2.5", "包契约"),
+    ("spec §0", "包约定"),
+    ("在 accept 执行", "由验收流程执行"),
+)
 
 # ---- 嵌入常量块（渲染进副本；_check_constants 逐项与 thresholds 核对）----
 _CONSTANTS_BLOCK = '''EPS32 = 2.0 ** -24                     # 残差 ε（spec §0：固定 2^-24，README 口径）
@@ -241,6 +262,254 @@ def fallback_kwargs(case_arrays, dut_out):
         "uplo": normalize_uplo(_get(case_arrays, "uplo")),
     }'''
 
+# S2c 复数三块（S2 spec §4）：criteria/verdict 复数通路 + cards_cholesky 复数卡的
+# 转写。实数三块不动（追加不改写）；复数公共件作为前缀拼进每个复数算子块。
+_COMPLEX_COMMON = r'''# ---------------------------------------------------------------------------
+# 复数公共件（criteria/verdict 复数通路 + criteria/cards_cholesky 复数卡的渲染副本）
+# ---------------------------------------------------------------------------
+
+
+def _as_c128(name, arr):
+    """严校验升型（复数残差接口用）：先升 complex128 再进任何取模/范数（S2 spec §4，
+    防 astype 直转实数丢虚部的坑）；非 2 维、NaN/Inf 一律抛异常。本副本只含复数
+    通路，实数阵在此 fail-closed 拒绝（criteria 侧由 dtype 分流承担同一语义）。"""
+    a = np.asarray(arr)
+    if not np.issubdtype(a.dtype, np.complexfloating):
+        raise TypeError(f"{name}: 复数卡要求复数 dtype（S2 spec §4），得到 {a.dtype}")
+    a = a.astype(np.complex128)
+    if a.ndim != 2:
+        raise ValueError(f"{name}: 期望 2 维数组，得到 shape={a.shape}")
+    if not np.isfinite(a).all():
+        raise ValueError(f"{name}: 含 NaN/Inf")
+    return a
+
+
+def _to_c128(name, arr):
+    """宽松升型（复数 layer1 取数用）：先升 complex128 再拆实/虚（S2 spec §4）；
+    不查有限性（NaN/Inf 流进统计计为不符），实数阵 fail-closed 拒绝。"""
+    a = np.asarray(arr)
+    if not np.issubdtype(a.dtype, np.complexfloating):
+        raise TypeError(f"{name}: 复数卡要求复数 dtype（S2 spec §4），得到 {a.dtype}")
+    return a.astype(np.complex128)
+
+
+def _check_diag_real(name, a):
+    """Hermitian 存储不变量校验（S2 spec §4：对角虚部按 0 处理并校验），
+    只抓无意错喂；被测输出不做此校验，其偏差由 layer1 拆实/虚如实计不符。"""
+    if np.any(np.diagonal(a).imag != 0.0):
+        raise ValueError(f"{name}: Hermitian 对角虚部非 0（S2 spec §4）")
+
+
+def _reim(name, actual, golden):
+    """把一个复数比对目标拆成实/虚两个实数目标（复数任务书 §3.2 第 3 条：实部、
+    虚部各自作为 FLOAT32 判定，双侧同时达标才过——多目标聚合取 AND/min/max，
+    天然不合并成 2N 元素互相稀释）。golden 允许是实数阵（如单位阵目标），
+    其 .imag 即全 0 期望。"""
+    actual = np.asarray(actual)
+    golden = np.asarray(golden)
+    return [(f"{name}_re", actual.real, golden.real),
+            (f"{name}_im", actual.imag, golden.imag)]
+
+
+def _c_tri_pair(case_arrays, dut_out):
+    """存储侧半三角逐元素对的复数版（vs golden32，升 complex128）：只取 uplo 侧
+    n(n+1)/2 个元素，另侧（golden 置 0 侧 / 被测输入残留侧）不进统计。"""
+    golden = _to_c128("golden32", _get(case_arrays, "golden32"))
+    out = _to_c128("out32", dut_out["out32"])
+    n = _square_like("out32", "golden32", golden, out)
+    uplo = normalize_uplo(_get(case_arrays, "uplo"))
+    idx = np.tril_indices(n) if uplo == "L" else np.triu_indices(n)
+    return out[idx], golden[idx]'''
+
+_CPOTRF_BLOCK = _COMPLEX_COMMON + "\n\n\n" + r'''# ---------------------------------------------------------------------------
+# cpotrf 专属件（criteria/cards_cholesky cpotrf 卡 + verdict._dpot01 复数通路的渲染副本）
+# ---------------------------------------------------------------------------
+
+
+def fallback_threshold(ratio_cpu):
+    """收紧式阈值（DPOT01，数值同实数书，S2 spec §4）：min(30, max(10*ratio_cpu, 1))。"""
+    r = _check_ratio_cpu(ratio_cpu)
+    return min(30.0, max(10.0 * r, 1.0))
+
+
+def residual_ratio(a, factor, uplo):
+    """DPOT01 复数通路（S2 spec §4）：ratio = ‖recon−A‖₁ / (n·‖A‖₁·ε)，
+    L 侧 recon=L·Lᴴ、U 侧 recon=Uᴴ·U，范数与绝对值取复模，先升 complex128。
+
+    a 传 A64（README 1.3 参考链路口径），对角虚部须为 0（Hermitian 存储校验）；
+    因子与差值只用存储侧，范数按半三角共轭镜像（DLANHE('1')）口径。
+    NaN/Inf、实数阵、shape 错、零分母 → 抛异常，不返回数值。
+    """
+    uplo = normalize_uplo(uplo)
+    a = _as_c128("a", a)
+    f = _as_c128("factor", factor)
+    _check_diag_real("a", a)
+    n = _square("a", a)
+    if f.shape != a.shape:
+        raise ValueError(f"shape 不匹配: a{a.shape} vs factor{f.shape}")
+    fh = _half(f, uplo)
+    recon = fh @ fh.conj().T if uplo == "L" else fh.conj().T @ fh
+    num = _sym_norm1_from_half(_half(recon - a, uplo))
+    anorm = _sym_norm1_from_half(_half(a, uplo))
+    if anorm <= 0.0:
+        raise ValueError("零分母：‖A‖₁ = 0")
+    return float(num / (n * anorm * EPS32))
+
+
+def layer1_targets(case_arrays, dut_out):
+    """cpotrf 主判目标（S2 spec §4）：还原 recon = L·Lᴴ（L 侧）/ Uᴴ·U（U 侧）
+    后取指定三角对原 A（A64=complex128），实/虚各自成目标。"""
+    a64 = _to_c128("A64", _get(case_arrays, "A64"))
+    out = _to_c128("out32", dut_out["out32"])
+    n = _square_like("out32", "A64", a64, out)
+    uplo = normalize_uplo(_get(case_arrays, "uplo"))
+    if uplo == "L":
+        fh = np.tril(out)
+        recon = fh @ fh.conj().T
+        idx = np.tril_indices(n)
+    else:
+        fh = np.triu(out)
+        recon = fh.conj().T @ fh
+        idx = np.triu_indices(n)
+    return _reim("recon_vs_A", recon[idx], a64[idx])
+
+
+def layer1_diagnostics(case_arrays, dut_out):
+    """cpotrf 诊断项：F vs golden F 直审（拆实/虚），并报不主判。"""
+    actual, golden = _c_tri_pair(case_arrays, dut_out)
+    return _reim("factor_vs_golden", actual, golden)
+
+
+def fallback_kwargs(case_arrays, dut_out):
+    return {
+        "a": _get(case_arrays, "A64"),
+        "factor": dut_out["out32"],
+        "uplo": normalize_uplo(_get(case_arrays, "uplo")),
+    }'''
+
+_CPOTRS_BLOCK = _COMPLEX_COMMON + "\n\n\n" + r'''# ---------------------------------------------------------------------------
+# cpotrs 专属件（criteria/cards_cholesky cpotrs 卡 + verdict._dpot02 复数通路的渲染副本）
+# ---------------------------------------------------------------------------
+
+
+def fallback_threshold(ratio_cpu):
+    """上浮式阈值（DPOT02，数值同实数书，S2 spec §4）：max(2*ratio_cpu, 30)。"""
+    r = _check_ratio_cpu(ratio_cpu)
+    return max(2.0 * r, 30.0)
+
+
+def residual_ratio(a, b, x):
+    """DPOT02 复数通路（S2 spec §4）：ratio = max_j ‖B_j−A·X_j‖₁ / (‖A‖₁·‖X_j‖₁·ε)，
+    逐 RHS 列取 max，范数取复模，先升 complex128。
+
+    分母无 n（README 2.3）；a/b 传 A32/B32（complex64），内部统一升 complex128；
+    a 的对角虚部须为 0。NaN/Inf、实数阵、shape 错、零分母 → 抛异常，不返回数值。
+    """
+    a = _as_c128("a", a)
+    b = _as_c128("b", b)
+    x = _as_c128("x", x)
+    _check_diag_real("a", a)
+    n = _square("a", a)
+    if b.shape != x.shape or b.shape[0] != n or b.shape[1] < 1:
+        raise ValueError(f"shape 不匹配: a{a.shape}, b{b.shape}, x{x.shape}")
+    anorm = float(np.max(np.sum(np.abs(a), axis=0)))
+    if anorm <= 0.0:
+        raise ValueError("零分母：‖A‖₁ = 0")
+    resid = b - a @ x
+    ratio = 0.0
+    for j in range(b.shape[1]):
+        xnorm = float(np.sum(np.abs(x[:, j])))
+        if xnorm <= 0.0:
+            raise ValueError(f"零分母：x 第 {j} 列 1-范数为 0")
+        bnorm = float(np.sum(np.abs(resid[:, j])))
+        ratio = max(ratio, bnorm / (anorm * xnorm * EPS32))
+    return float(ratio)
+
+
+def layer1_targets(case_arrays, dut_out):
+    """cpotrs 主判目标：解矩阵 X 全量逐元素 vs golden32，实/虚各自成目标
+    （S2 spec §4）。"""
+    golden = _to_c128("golden32", _get(case_arrays, "golden32"))
+    out = _to_c128("out32", dut_out["out32"])
+    if out.shape != golden.shape:
+        raise ValueError(f"shape 不匹配: out32{out.shape} vs golden32{golden.shape}")
+    return _reim("x_vs_golden", out.ravel(), golden.ravel())
+
+
+def layer1_diagnostics(case_arrays, dut_out):
+    """cpotrs 无诊断项。"""
+    return []
+
+
+def fallback_kwargs(case_arrays, dut_out):
+    return {
+        "a": _get(case_arrays, "A32"),
+        "b": _get(case_arrays, "B32"),
+        "x": dut_out["out32"],
+    }'''
+
+_CPOTRI_BLOCK = _COMPLEX_COMMON + "\n\n\n" + r'''# ---------------------------------------------------------------------------
+# cpotri 专属件（criteria/cards_cholesky cpotri 卡 + verdict._dpot03 复数通路的渲染副本）
+# ---------------------------------------------------------------------------
+
+
+def fallback_threshold(ratio_cpu):
+    """收紧式阈值（DPOT03，数值同实数书，S2 spec §4）：min(30, max(10*ratio_cpu, 1))。"""
+    r = _check_ratio_cpu(ratio_cpu)
+    return min(30.0, max(10.0 * r, 1.0))
+
+
+def residual_ratio(a, ainv, uplo):
+    """DPOT03 复数通路（S2 spec §4）：ratio = ‖I−A·C‖₁ / (n·‖A‖₁·‖C‖₁·ε)，
+    双半三角口径，Hermitian 共轭镜像，范数取复模，先升 complex128。
+
+    a 传 A32（README 3.3：A 用实现实际输入升精度），对角虚部须为 0；a 与 ainv
+    各取存储侧镜像成全阵再相乘。NaN/Inf、实数阵、shape 错、零分母 → 抛异常。
+    """
+    uplo = normalize_uplo(uplo)
+    a = _as_c128("a", a)
+    c = _as_c128("ainv", ainv)
+    _check_diag_real("a", a)
+    n = _square("a", a)
+    if c.shape != a.shape:
+        raise ValueError(f"shape 不匹配: a{a.shape} vs ainv{c.shape}")
+    a_half = _half(a, uplo)
+    c_half = _half(c, uplo)
+    anorm = _sym_norm1_from_half(a_half)
+    cnorm = _sym_norm1_from_half(c_half)
+    if anorm <= 0.0 or cnorm <= 0.0:
+        raise ValueError("零分母：‖A‖₁ 或 ‖C‖₁ 为 0")
+    w = np.eye(n) - _mirror_half(a_half) @ _mirror_half(c_half)
+    num = float(np.max(np.sum(np.abs(w), axis=0)))
+    return float(num / (n * anorm * cnorm * EPS32))
+
+
+def layer1_targets(case_arrays, dut_out):
+    """cpotri 主判双目标各拆实/虚，共 4 目标全过才过（S2 spec §4）：
+    ① A⁻¹ 直审（存储侧半三角 vs golden32）；② A·A⁻¹ 对 I——两阵各按存储侧
+    Hermitian 共轭镜像成全阵后相乘，对单位阵（虚部期望全 0）。"""
+    direct_actual, direct_golden = _c_tri_pair(case_arrays, dut_out)
+    a32 = _to_c128("A32", _get(case_arrays, "A32"))
+    out = _to_c128("out32", dut_out["out32"])
+    n = _square_like("out32", "A32", a32, out)
+    uplo = normalize_uplo(_get(case_arrays, "uplo"))
+    prod = mirror_storage_side(a32, uplo) @ mirror_storage_side(out, uplo)
+    return (_reim("ainv_vs_golden", direct_actual, direct_golden)
+            + _reim("a_ainv_vs_identity", prod.ravel(), np.eye(n).ravel()))
+
+
+def layer1_diagnostics(case_arrays, dut_out):
+    """cpotri 无诊断项。"""
+    return []
+
+
+def fallback_kwargs(case_arrays, dut_out):
+    return {
+        "a": _get(case_arrays, "A32"),
+        "ainv": dut_out["out32"],
+        "uplo": normalize_uplo(_get(case_arrays, "uplo")),
+    }'''
+
 
 # --8<-- ACCURACY-TEMPLATE-BEGIN
 _ACCURACY_TEMPLATE = r'''#!/usr/bin/env python3
@@ -312,10 +581,10 @@ def _check_ratio_cpu(ratio_cpu):
 
 
 def _as_f64(name, arr):
-    """严校验升型（残差接口用）：复数、非数值、非 2 维、NaN/Inf 一律抛异常。"""
+    """严校验升型（实数残差接口用）：复数、非数值、非 2 维、NaN/Inf 一律抛异常。"""
     a = np.asarray(arr)
     if np.issubdtype(a.dtype, np.complexfloating):
-        raise TypeError(f"{name}: 复数不在本片范围（spec §1 不做复数）")
+        raise TypeError(f"{name}: 复数不得进实数通路（S2 spec §4：实/复按 dtype 分流）")
     if not (np.issubdtype(a.dtype, np.floating) or np.issubdtype(a.dtype, np.integer)):
         raise TypeError(f"{name}: 非数值 dtype {a.dtype}")
     if a.ndim != 2:
@@ -327,10 +596,10 @@ def _as_f64(name, arr):
 
 
 def _to_f64(name, arr):
-    """宽松升型（layer1 取数用）：不查有限性（NaN/Inf 流进统计计为不符）。"""
+    """宽松升型（实数 layer1 取数用）：不查有限性（NaN/Inf 流进统计计为不符）。"""
     a = np.asarray(arr)
     if np.issubdtype(a.dtype, np.complexfloating):
-        raise TypeError(f"{name}: 复数不在本片范围（spec §1 不做复数）")
+        raise TypeError(f"{name}: 复数须走复数卡（S2 spec §4：实/复按 dtype 分流）")
     if not (np.issubdtype(a.dtype, np.floating) or np.issubdtype(a.dtype, np.integer)):
         raise TypeError(f"{name}: 非数值 dtype {a.dtype}")
     return a.astype(np.float64)
@@ -356,17 +625,24 @@ def _half(a, uplo):
 
 
 def _mirror_half(half):
-    """半三角镜像成全对称阵（输入必须是另侧已置 0 的半三角，含对角）。"""
-    return half + half.T - np.diag(np.diag(half))
+    """半三角镜像成全阵（输入必须是另侧已置 0 的半三角，含对角）。
+
+    实数镜像成对称阵；复数按 Hermitian 共轭镜像、对角虚部按 0 处理
+    （S2 spec §4）。实数路径与原对称实现逐位等价（conj/.real 对实数恒等）。
+    """
+    return half + half.conj().T - np.diag(np.diag(half).real)
 
 
 def mirror_storage_side(a, uplo):
-    """按 uplo 取存储侧半三角并镜像成全对称阵（对侧 stale 不能用的统一口径）。"""
+    """按 uplo 取存储侧半三角并镜像成全阵（对侧 stale 不能用的统一口径）；
+    复数输入按 Hermitian 共轭镜像（S2 spec §4）。"""
     return _mirror_half(_half(np.asarray(a), uplo))
 
 
 def _sym_norm1_from_half(half):
-    """DLANSY('1') 口径的对称 1-范数：半三角镜像后取最大列绝对和。"""
+    """DLANSY('1') 口径的 1-范数：半三角镜像后取最大列绝对和。
+
+    复数输入即 DLANHE('1') 口径（Hermitian 共轭镜像，绝对值取复模）。"""
     full = _mirror_half(half)
     return float(np.max(np.sum(np.abs(full), axis=0)))
 
@@ -504,6 +780,11 @@ def _judge_inner(case_arrays, dut_out):
         return _error_verdict("layer1 无比对目标（卡给出空目标清单）")
     entries = []
     for name, actual, golden in targets:
+        if (np.issubdtype(np.asarray(actual).dtype, np.complexfloating)
+                or np.issubdtype(np.asarray(golden).dtype, np.complexfloating)):
+            return _error_verdict(
+                f"layer1 目标 {name} 含复数数组：复数须由卡拆成实/虚目标再进统计"
+                "（S2 spec §4 不合并稀释）")
         if actual.size == 0:
             return _error_verdict(f"layer1 对比集为空: {name}")
         entries.append(_target_entry(name, actual, golden))
@@ -534,6 +815,9 @@ def _judge_inner(case_arrays, dut_out):
         flags.append("T3")
     if any(e["pass_fixed"] != e["pass_ulp"] for e in entries):
         flags.append("T4")
+    # T7：复数口径收束为拆实/虚执行，歧义 flag 保留至任务方确认（S2 spec §4）。
+    if np.issubdtype(np.asarray(dut_out["out32"]).dtype, np.complexfloating):
+        flags.append("T7")
 
     if pass_fixed and pass_ulp:
         fallback, numeric, error = _null_fallback(), "PASS", None
@@ -882,6 +1166,32 @@ _OP_SPECS = {
         "target_doc": "双目标——A⁻¹ 直审（存储侧 vs golden32）及 A·A⁻¹ 对 I，全部通过才算过。",
         "block": _SPOTRI_BLOCK,
     },
+    # S2c 复数三算子（S2 spec §4）：kind、阈值公式与数值同实数书；复数语义
+    # （复模/共轭/拆实虚）在各自 block 与复数公共件内，复数裁决恒记 flag T7。
+    "cpotrf": {
+        "kind": "DPOT01",
+        "formula": thresholds.TIGHTEN_FORMULA,
+        "threshold_fn": thresholds.tighten_threshold,
+        "target_doc": "还原 recon（L·Lᴴ/Uᴴ·U）取指定三角对原 A（A64），实/虚各自成目标、"
+                      "双侧同时达标（S2 spec §4）；诊断并报 F vs golden F（拆实/虚）。",
+        "block": _CPOTRF_BLOCK,
+    },
+    "cpotrs": {
+        "kind": "DPOT02",
+        "formula": thresholds.FLOATUP_FORMULA,
+        "threshold_fn": thresholds.floatup_threshold,
+        "target_doc": "解矩阵 X 全量逐元素 vs golden32，实/虚各自成目标、双侧同时达标"
+                      "（S2 spec §4）。",
+        "block": _CPOTRS_BLOCK,
+    },
+    "cpotri": {
+        "kind": "DPOT03",
+        "formula": thresholds.TIGHTEN_FORMULA,
+        "threshold_fn": thresholds.tighten_threshold,
+        "target_doc": "双目标各拆实/虚共 4 目标——A⁻¹ 直审（存储侧 vs golden32）及 "
+                      "A·A⁻¹ 对 I，全部通过才算过（S2 spec §4）。",
+        "block": _CPOTRI_BLOCK,
+    },
 }
 
 _LEFTOVER_TOKEN = re.compile(r"__[A-Z][A-Z_]*__")
@@ -904,7 +1214,8 @@ def render(op):
     """渲染一个算子的两个副本，返回 {文件名: 文本}；输出是输入的纯函数（确定性）。"""
     spec = _OP_SPECS.get(op)
     if spec is None:
-        raise ValueError(f"未知算子 {op!r}，本片只支持 {tuple(_OP_SPECS)}（spec §1）")
+        raise ValueError(
+            f"未知算子 {op!r}，只支持 {tuple(_OP_SPECS)}（S1 spec §1 + S2 spec §4）")
     _check_constants()
     _check_op_spec(op, spec)
     subs = [
@@ -926,6 +1237,10 @@ def render(op):
         leftover = _LEFTOVER_TOKEN.search(text)
         if leftover:
             raise AssertionError(f"{fname}: 模板残留未替换 token {leftover.group(0)!r}")
+        for src, dst in _PKG_LOCAL_SUBS:          # s2-D3 去内部指称（确定性纯替换）
+            text = text.replace(src, dst)
+        if "spec §" in text:
+            raise AssertionError(f"{fname}: 渲染产物仍含内部指称 spec §，替换表需补条目")
         files[fname] = text
     return files
 
@@ -933,7 +1248,7 @@ def render(op):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="verify 双件确定性渲染入口（spec §2.5）")
     ap.add_argument("--op", required=True, choices=sorted(_OP_SPECS),
-                    help="算子名（canonical s 前缀）")
+                    help="算子名（canonical 前缀：实数 s / 复数 c，S2 spec §0）")
     ap.add_argument("--out", required=True,
                     help="输出目录（写 verify_accuracy.py 与 verify_perf.py）")
     args = ap.parse_args(argv)

@@ -23,10 +23,22 @@ def test_taskbook_primary_and_standard_reference_tables():
     assert thresholds.REQUIRED_MATCHED_RATIO == 0.99   # 任务书 §3.2 表
 
 
-def test_max_abs_two_interpretations():
-    """max_abs 上限两种解释：固定 1e-2 与 32·ULP=2^-19（任务书 or 语义待裁 → T4）。"""
+def test_max_abs_limit_dynamic_anchor():
+    """max_abs 上限 = max(兜底 1e-2, 32·ULP(g_low))（HT-1 裁定，标准 §2.1.2）。
+
+    g_low=1 时 32·ULP=32·2^-23≈3.8e-6 ≪ 1e-2 → 兜底主导；g_low=1e4 时
+    ULP(1e4)=2^-10 → 32·2^-10=3.125e-2 > 1e-2 → ULP 项主导。锚点取绝对值，
+    正负对称；None（无有限比对点）与 0（次正规间距）都落在兜底值。
+    """
     assert thresholds.MAX_ABS_FIXED == 1e-2
-    assert thresholds.MAX_ABS_ULP32 == 32 * 2.0 ** -24 == 2.0 ** -19
+    assert thresholds.ULP_MULT == 32
+    assert thresholds.max_abs_limit(None) == 1e-2
+    assert thresholds.max_abs_limit(0.0) == 1e-2
+    assert thresholds.max_abs_limit(1.0) == 1e-2
+    assert thresholds.max_abs_limit(1.0) == max(1e-2, 32 * float(np.spacing(np.float32(1.0))))
+    assert thresholds.max_abs_limit(1e4) == 32 * 2.0 ** -10 == 0.03125
+    assert thresholds.max_abs_limit(-1e4) == thresholds.max_abs_limit(1e4)
+    assert not hasattr(thresholds, "MAX_ABS_ULP32")        # 双解释常数已随 HT-1 退役
 
 
 def test_tighten_threshold_floor_and_cap():
@@ -54,3 +66,13 @@ def test_invalid_ratio_cpu_raises():
             thresholds.tighten_threshold(bad)
         with pytest.raises(ValueError):
             thresholds.floatup_threshold(bad)
+
+
+def test_fallback_eps_disclosure_matches_eps32():
+    """fallback 报告 eps 披露字段与 EPS32 同口径（issue A4，防两处漂移）。"""
+    import verdict
+
+    eps_str = verdict._null_fallback()["eps"]
+    assert eps_str == "2^-24"
+    base, exp = eps_str.split("^")
+    assert float(base) ** float(exp) == thresholds.EPS32 == 2.0 ** -24

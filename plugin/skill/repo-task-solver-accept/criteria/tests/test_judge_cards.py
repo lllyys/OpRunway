@@ -127,7 +127,7 @@ def test_spotri_fallback_hand_value():
     case = {"A64": a.copy(), "A32": a.copy(), "golden32": golden, "uplo": "L",
             "ratio_cpu": 0.0, "ratio_cpu_status": "ok"}
     v = verdict.judge(POTRI, case, _dut(out))
-    assert v["layer1"]["pass_fixed"] is False and v["layer1"]["pass_ulp"] is False
+    assert v["layer1"]["pass"] is False
     assert v["layer1"]["matched_ratio"] == pytest.approx(2 / 3)   # 最差目标聚合
     fb = v["fallback"]
     assert fb["ran"] is True
@@ -140,7 +140,7 @@ def test_spotri_dual_target_identity_fails_direct_passes():
     """2.3′ 双目标 AND（方向 1）：直审过、A·A⁻¹ 对 I 挂 → layer1 整体不过。
 
     A=diag(2,65536)，golden 逆 diag(0.5,2^-16)；dut 把 (1,1) 加 1e-6：
-    直审误差 1e-6 双解释都过（< 32·ULP=1.907e-6）；单位阵目标 (1,1) 误差
+    直审误差 1e-6 远低于上限（g_low=2^-16 → 兜底 1e-2 主导）；单位阵目标 (1,1) 误差
     65536·1e-6 ≈ 0.0655 → 挂。兜底手算：ratio = 0.065536/(2·65536·0.5·2^-24)
     = 1e-6·2^24 ≈ 16.777 > 地板 1 → 数值 FAIL。"""
     a = np.array([[2.0, 0.0], [0.0, 65536.0]])
@@ -152,11 +152,11 @@ def test_spotri_dual_target_identity_fails_direct_passes():
     v = verdict.judge(POTRI, case, _dut(out))
     direct, identity = v["layer1"]["targets"]
     assert direct["name"] == "ainv_vs_golden"
-    assert direct["pass_fixed"] is True and direct["pass_ulp"] is True
+    assert direct["pass"] is True
     assert identity["name"] == "a_ainv_vs_identity"
     assert identity["matched_ratio"] == pytest.approx(0.75)   # 4 元素挂 1 个
-    assert identity["pass_fixed"] is False
-    assert v["layer1"]["pass_fixed"] is False                 # AND 聚合
+    assert identity["pass"] is False
+    assert v["layer1"]["pass"] is False                       # AND 聚合
     assert v["flags"] == []
     fb = v["fallback"]
     assert fb["ran"] is True
@@ -170,7 +170,7 @@ def test_spotri_dual_target_direct_fails_identity_passes():
 
     A=diag(1e-3,1e-3)，golden 逆 diag(1000,1000)；dut 存储侧 (1,0) 塞 1e-3：
     直审 golden 为 0 处误差 1e-3 » atol → 挂（matched 2/3）；单位阵目标
-    误差 1e-3·1e-3 = 1e-6 < atol 且 < 32·ULP → 过。兜底 DPOT03 手算：
+    误差 1e-3·1e-3 = 1e-6 < atol 且远低于上限 → 过。兜底 DPOT03 手算：
     ratio = 1e-6/(2·1e-3·1000.001·2^-24) ≈ 8.389 > 地板 1 → 数值 FAIL。"""
     a = np.array([[1e-3, 0.0], [0.0, 1e-3]])
     golden = np.array([[1000.0, 0.0], [0.0, 1000.0]])
@@ -181,10 +181,10 @@ def test_spotri_dual_target_direct_fails_identity_passes():
     v = verdict.judge(POTRI, case, _dut(out))
     direct, identity = v["layer1"]["targets"]
     assert direct["matched_ratio"] == pytest.approx(2 / 3)
-    assert direct["pass_fixed"] is False
+    assert direct["pass"] is False
     assert identity["matched_ratio"] == 1.0
-    assert identity["pass_fixed"] is True and identity["pass_ulp"] is True
-    assert v["layer1"]["pass_fixed"] is False                 # AND 聚合
+    assert identity["pass"] is True
+    assert v["layer1"]["pass"] is False                       # AND 聚合
     assert v["flags"] == []
     fb = v["fallback"]
     assert fb["ran"] is True

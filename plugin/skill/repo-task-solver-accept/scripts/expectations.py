@@ -33,6 +33,8 @@ judge verdict → 接口精度状态的映射（spec §2.3 数值判定流转 + 
 
 formal 恒 PENDING_RULING（spec §2.3：T1/T3/T4 未裁），随每个接口精度 item 的
 evidence 携带；族级结论由 family_conclusion 给出且在本片恒为「不得通过」类。
+残差超阈致数值FAIL 的接口精度项，evidence 另附任务书 §3.2.2 注的申诉指引
+（APPEAL_NOTE，纯静态句，不参与判定与状态流转）。
 """
 
 from collections import OrderedDict
@@ -58,6 +60,11 @@ ST_PENDING = "待裁"
 STATUSES = (ST_PASS, ST_FAIL, ST_NO_EVIDENCE, ST_PENDING)
 
 FORMAL_PENDING = "PENDING_RULING"
+
+# 申诉通道指引（任务书 §3.2.2 各节注文）：纯静态句，只随 evidence 展示，
+# 不参与任何判定或状态流转。
+APPEAL_NOTE = ("任务书 §3.2.2 注：残差超阈值判定不通过时，可举证算子实现无 bug "
+               "并分析误差产生的原因；申诉时随本报告提交该分析")
 
 
 def make_item(kind, item, status, evidence):
@@ -132,6 +139,10 @@ def accuracy_item_from_verdict(case_id, verdict):
         "formal": verdict.get("formal", FORMAL_PENDING),
         "error": error,
     }
+    # 只在「fallback 算出 ratio 且超阈」的数值FAIL 上附申诉指引——任务书注文只覆盖
+    # 残差超阈情形；残差不可计算的 FAIL（ratio 为 None）不属申诉通道。
+    if status == ST_FAIL and fallback.get("ratio") is not None:
+        evidence["appeal"] = APPEAL_NOTE
     return make_item(KIND_ACCURACY, _accuracy_name(case_id), status, evidence)
 
 
@@ -165,7 +176,10 @@ def fixed_insufficient_items(operator):
     reasons = (
         (KIND_BUFFER, "bufferSize 查询证据未交付（本片模拟被测，未实现该通路）"),
         (KIND_MEMORY, "内存证据未交付（本片模拟被测，未实现该通路）"),
-        (KIND_BATCHED, "batched 判据本片不做（spec §1），无证据"),
+        (KIND_BATCHED,
+         "batched 判据本片不做（spec §1），无证据；判定口径已由任务书 §3.2.2 官方定案"
+         "（逐矩阵按同式判定，任一矩阵超阈该用例不过；ratio_cpu_mean 取 case 内均值），"
+         "不再待标准确认"),
         (KIND_DETERMINISM,
          "任务书 §3.2 要求合法 SPD 复跑 bit-wise 一致；本片模拟被测，无独立复跑证据"),
         (KIND_INFO,

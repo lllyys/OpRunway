@@ -5,13 +5,21 @@ residual_ratio 无阈值、无 ratio_cpu 依赖——B 卡算基线、E 卡判�
 不得在别处另建第二套残差实现（AGENTS.md §2 机械门纪律）。
 
 judge 只出「数值判定」（numeric: PASS/FAIL）；正式结论层 formal 本片恒为
-PENDING_RULING（T1/T3/T4 未裁，spec §0/§2.3），任何调用方不得把 numeric
+PENDING_RULING（T1/T3 未裁，spec §0/§2.3；max_abs 门已按 2026-09-24 HT-1 裁定
+收成动态锚点单口径），任何调用方不得把 numeric
 当正式验收结论上报。
 
 layer1 主判按 spec §2.3′（任务书 §3.2，优先于 §2.3 冲突部分）：比对目标由卡给出
 （可多目标，如 potri 双目标，全部通过才算过），容差主套用任务书表
 （rtol 2^-10 / atol 2^-16），标准表 2^-13 降为对照（分歧记 T3）；卡另可给出
 「诊断」比对（如 potrf 的 F vs golden F），并报不主判。
+
+S2c 复数增量（S2 spec §4 契约增量表）：residual_ratio 按输入 dtype 自动分流，
+一次调用的全部数组须同为实数或同为复数（混搭抛错）；复数先升 complex128 再取模，
+范数用复模，recon/镜像取共轭（Hermitian），公式形状、ε 与阈值数值同实数书。
+layer1 的复数拆实/虚由判据卡完成（cards_cholesky），judge 拒绝复数数组直接进
+逐元素统计（不合并稀释，复数任务书 §3.2 第 3 条；issue C3 确认，2026-09-24 摘 T7）
+（拆实/虚口径待任务方确认）。
 """
 
 import numpy as np
@@ -46,7 +54,7 @@ def _as_f64(name, arr):
     """
     a = np.asarray(arr)
     if np.issubdtype(a.dtype, np.complexfloating):
-        raise TypeError(f"{name}: 复数不在本片范围（spec §1 不做复数）")
+        raise TypeError(f"{name}: 复数不得进实数通路（S2 spec §4：实/复按 dtype 分流）")
     if not (np.issubdtype(a.dtype, np.floating) or np.issubdtype(a.dtype, np.integer)):
         raise TypeError(f"{name}: 非数值 dtype {a.dtype}")
     if a.ndim != 2:
@@ -55,6 +63,51 @@ def _as_f64(name, arr):
     if not np.isfinite(a).all():
         raise ValueError(f"{name}: 含 NaN/Inf")
     return a
+
+
+def _dtype_class(name, arr):
+    """数值 dtype 分类："real"（浮点/整数）或 "complex"；其余抛 TypeError。"""
+    dt = np.asarray(arr).dtype
+    if np.issubdtype(dt, np.complexfloating):
+        return "complex"
+    if np.issubdtype(dt, np.floating) or np.issubdtype(dt, np.integer):
+        return "real"
+    raise TypeError(f"{name}: 非数值 dtype {dt}")
+
+
+def _resolve_mode(named):
+    """一次残差调用的实/复通路裁定（S2 spec §4 dtype 一致性）。
+
+    全实数走 float64 通路，全复数走 complex128 通路，实/复混搭抛 TypeError
+    （fail-closed：抓「实数阵无意混进复数链路」一类错喂，非对抗防护）。
+    """
+    kinds = {name: _dtype_class(name, arr) for name, arr in named.items()}
+    if len(set(kinds.values())) > 1:
+        raise TypeError(f"实/复混搭输入不允许（S2 spec §4 dtype 一致性）: {kinds}")
+    return next(iter(kinds.values()))
+
+
+def _as_c128(name, arr):
+    """复数通路输入阵：先升 complex128 再进任何取模/范数（S2 spec §4，防 astype
+    直转实数丢虚部的坑）；非 2 维、实部或虚部含 NaN/Inf 一律抛异常，口径同
+    _as_f64（fail-closed）。"""
+    a = np.asarray(arr).astype(np.complex128)
+    if a.ndim != 2:
+        raise ValueError(f"{name}: 期望 2 维数组，得到 shape={a.shape}")
+    if not np.isfinite(a).all():
+        raise ValueError(f"{name}: 含 NaN/Inf")
+    return a
+
+
+def _check_diag_real(name, a):
+    """Hermitian 存储不变量校验（S2 spec §4：对角虚部按 0 处理并校验）。
+
+    gen 按契约把 A 的对角虚部置 0 后入包，此处只抓无意错误（错喂非 Hermitian
+    阵、脏数据混入复数链路）；被测输出不做此校验，其对角虚部经镜像按 0 处理、
+    由 layer1 拆实/虚如实计不符。
+    """
+    if np.any(np.diagonal(a).imag != 0.0):
+        raise ValueError(f"{name}: Hermitian 对角虚部非 0（S2 spec §4）")
 
 
 def _square(name, a):
@@ -69,20 +122,27 @@ def _half(a, uplo):
 
 
 def _mirror_half(half):
-    """半三角镜像成全对称阵（输入必须是另侧已置 0 的半三角，含对角）。"""
-    return half + half.T - np.diag(np.diag(half))
+    """半三角镜像成全阵（输入必须是另侧已置 0 的半三角，含对角）。
+
+    实数镜像成对称阵；复数按 Hermitian 共轭镜像、对角虚部按 0 处理
+    （S2 spec §4）。实数路径与原对称实现逐位等价（conj/.real 对实数恒等）。
+    """
+    return half + half.conj().T - np.diag(np.diag(half).real)
 
 
 def mirror_storage_side(a, uplo):
     """按 uplo 取存储侧半三角并镜像成全对称阵（对侧 stale 不能用的统一口径）。
 
-    residual_ratio 的 DPOT03 与卡的 potri 双目标（A·A⁻¹ 对 I）共用这一份实现。
+    residual_ratio 的 DPOT03 与卡的 potri 双目标（A·A⁻¹ 对 I）共用这一份实现；
+    复数输入按 Hermitian 共轭镜像（S2 spec §4）。
     """
     return _mirror_half(_half(np.asarray(a), uplo))
 
 
 def _sym_norm1_from_half(half):
-    """DLANSY('1') 口径的对称 1-范数：半三角镜像后取最大列绝对和。"""
+    """DLANSY('1') 口径的 1-范数：半三角镜像后取最大列绝对和。
+
+    复数输入即 DLANHE('1') 口径（Hermitian 共轭镜像，绝对值取复模）。"""
     full = _mirror_half(half)
     return float(np.max(np.sum(np.abs(full), axis=0)))
 
@@ -92,19 +152,24 @@ def _sym_norm1_from_half(half):
 # ---------------------------------------------------------------------------
 
 def _dpot01(a, factor, uplo):
-    """DPOT01：ratio = ‖recon−A‖₁ / (n·‖A‖₁·ε)，L 侧 recon=L·Lᵀ、U 侧 recon=Uᵀ·U。
+    """DPOT01：ratio = ‖recon−A‖₁ / (n·‖A‖₁·ε)，L 侧 recon=L·Lᵀ、U 侧 recon=Uᵀ·U；
+    复数通路（S2 spec §4）recon=L·Lᴴ / Uᴴ·U，范数取复模，公式形状与 ε 不变。
 
     因子与差值只用存储侧（另一半是输入残留，无效）；差值与 A 的范数都按
     DLANSY 半三角镜像口径。spotrf 卡约定 a 传 A64（README 1.3 参考链路口径）。
     """
     uplo = normalize_uplo(uplo)
-    a = _as_f64("a", a)
-    f = _as_f64("factor", factor)
+    mode = _resolve_mode({"a": a, "factor": factor})
+    cast = _as_c128 if mode == "complex" else _as_f64
+    a = cast("a", a)
+    f = cast("factor", factor)
+    if mode == "complex":
+        _check_diag_real("a", a)
     n = _square("a", a)
     if f.shape != a.shape:
         raise ValueError(f"shape 不匹配: a{a.shape} vs factor{f.shape}")
     fh = _half(f, uplo)
-    recon = fh @ fh.T if uplo == "L" else fh.T @ fh
+    recon = fh @ fh.conj().T if uplo == "L" else fh.conj().T @ fh
     num = _sym_norm1_from_half(_half(recon - a, uplo))
     anorm = _sym_norm1_from_half(_half(a, uplo))
     if anorm <= 0.0:
@@ -119,9 +184,13 @@ def _dpot02(a, b, x):
     spotrs 卡约定 a/b 传 A32/B32，本函数内部统一升 FP64。
     a 按给定全对称阵使用（‖A‖₁ 取最大列绝对和，对称阵行列和相等）。
     """
-    a = _as_f64("a", a)
-    b = _as_f64("b", b)
-    x = _as_f64("x", x)
+    mode = _resolve_mode({"a": a, "b": b, "x": x})
+    cast = _as_c128 if mode == "complex" else _as_f64
+    a = cast("a", a)
+    b = cast("b", b)
+    x = cast("x", x)
+    if mode == "complex":
+        _check_diag_real("a", a)
     n = _square("a", a)
     if b.shape != x.shape or b.shape[0] != n or b.shape[1] < 1:
         raise ValueError(f"shape 不匹配: a{a.shape}, b{b.shape}, x{x.shape}")
@@ -147,8 +216,12 @@ def _dpot03(a, ainv, uplo):
     取最大列绝对和。spotri 卡约定 a 传 A32（README 3.3：A 用实现实际输入升精度）。
     """
     uplo = normalize_uplo(uplo)
-    a = _as_f64("a", a)
-    c = _as_f64("ainv", ainv)
+    mode = _resolve_mode({"a": a, "ainv": ainv})
+    cast = _as_c128 if mode == "complex" else _as_f64
+    a = cast("a", a)
+    c = cast("ainv", ainv)
+    if mode == "complex":
+        _check_diag_real("a", a)
     n = _square("a", a)
     if c.shape != a.shape:
         raise ValueError(f"shape 不匹配: a{a.shape} vs ainv{c.shape}")
@@ -174,8 +247,10 @@ def residual_ratio(kind, **arrays):
     - DPOT02: a（n×n 全对称阵）, b（n×nrhs 右端）, x（n×nrhs 解）
     - DPOT03: a（n×n 对称阵）, ainv（n×n 逆，存储侧有效）, uplo（"L"/"U"）
 
-    ε 固定 2^-24（spec §0）。NaN/Inf、shape 错、零分母、未知 kind、复数输入、
-    多余/缺失关键字 → 抛异常，不返回数值。
+    ε 固定 2^-24（spec §0，复数不变）。实/复自动分流（S2 spec §4）：一次调用的
+    全部数组须同为实数或同为复数；复数先升 complex128 再取模，a 的对角虚部
+    须为 0（Hermitian 存储校验）。NaN/Inf、shape 错、零分母、未知 kind、
+    实/复混搭、多余/缺失关键字 → 抛异常，不返回数值。
     """
     impl = _KIND_IMPL.get(kind)
     if impl is None:
@@ -188,8 +263,10 @@ def residual_ratio(kind, **arrays):
 # ---------------------------------------------------------------------------
 
 def _null_fallback():
-    # fallback 未运行时 ran=False 其余字段 null（spec §2.3）。
-    return {"ran": False, "ratio": None, "threshold": None, "formula": None, "pass": None}
+    # fallback 未运行时 ran=False 其余字段 null（spec §2.3）。eps 例外，仍披露口径值：
+    # 它是残差 ratio 的归一基准（issue A4，任务书现行文本的 2^-23 有误），不是运行结果，缺省更易误读。
+    return {"ran": False, "ratio": None, "threshold": None, "formula": None,
+            "pass": None, "eps": "2^-24"}
 
 
 def _error_verdict(msg):
@@ -206,49 +283,63 @@ def _error_verdict(msg):
 
 
 def _layer1_stats(actual, golden, rtol, atol):
-    """逐元素混合容差统计（任务书 §3.2 判定式）：返回 (matched_ratio, max_abs)。
+    """逐元素混合容差统计（任务书 §3.2 判定式）：返回 (matched_ratio, max_abs, g_low)。
 
-    比较式 err <= tol 对 NaN 恒为 False，故被测输出中的 NaN/Inf 元素计为不符；
-    err 含非有限值时 max_abs 记为 +inf（两种上限解释必然双双不过）。
+    比对前 golden 先按输出 dtype（float32）RNE 收窄（numpy astype 即 RNE，上溢自然
+    成 ±inf），与「被测 float32 输出升 f64」的 actual 对齐成 float32 值域语义。
+    逐点分类与 ±inf/NaN 规则出处：mixed_tolerance_standard.md §2.1.2（2026-09-24 版
+    收窄比对规则；双方 NaN 视作通过同属该收窄语义）：
+
+    - 双方有限 → |a-g| <= atol + rtol*|g| 判定，并参与 max_abs 选取；
+    - 双方同号 ±inf、双方 NaN → 通过点，不参与 max_abs；
+    - 异号 inf、一方 inf/NaN 一方正常 → 计为不符，不参与 max_abs。
+
+    max_abs 在有限点集上取；g_low 是取到 max_abs 那个点的收窄 golden 值（并列取
+    首个扁平下标，确定性）。有限点集为空时 max_abs=0.0、g_low=None（abs 门空真，
+    matched_ratio 门独立把关）。
     """
-    err = np.abs(actual - golden)
-    tol = atol + rtol * np.abs(golden)
-    ok = err <= tol
-    n_total = int(err.size)
-    n_bad = n_total - int(np.count_nonzero(ok))
-    matched_ratio = 1.0 - n_bad / n_total
-    max_abs = float(np.max(err)) if bool(np.isfinite(err).all()) else float("inf")
-    return matched_ratio, max_abs
+    a = np.asarray(actual, dtype=np.float64)
+    with np.errstate(over="ignore"):
+        g = np.asarray(golden, dtype=np.float64).astype(np.float32).astype(np.float64)
+    finite = np.isfinite(a) & np.isfinite(g)
+    with np.errstate(invalid="ignore"):
+        err = np.abs(a - g)
+        ok = finite & (err <= atol + rtol * np.abs(g))
+        ok |= np.isinf(a) & np.isinf(g) & (np.sign(a) == np.sign(g))
+    ok |= np.isnan(a) & np.isnan(g)
+    n_total = int(a.size)
+    matched_ratio = 1.0 - (n_total - int(np.count_nonzero(ok))) / n_total
+    if not bool(finite.any()):
+        return matched_ratio, 0.0, None
+    idx = int(np.argmax(np.where(finite, err, -1.0)))
+    return matched_ratio, float(err.flat[idx]), float(g.flat[idx])
 
 
-def _gate_pair(matched_ratio, max_abs):
-    """整体双门在两种 max_abs 上限解释下的 (pass_fixed, pass_ulp)。"""
-    ratio_ok = matched_ratio >= thresholds.REQUIRED_MATCHED_RATIO
-    return (
-        bool(ratio_ok and max_abs <= thresholds.MAX_ABS_FIXED),
-        bool(ratio_ok and max_abs <= thresholds.MAX_ABS_ULP32),
-    )
+def _gate(matched_ratio, max_abs, g_low):
+    """整体双门（HT-1 裁定后单口径）：通过率门 AND max_abs 动态上限门。"""
+    return bool(matched_ratio >= thresholds.REQUIRED_MATCHED_RATIO
+                and max_abs <= thresholds.max_abs_limit(g_low))
 
 
 def _target_entry(name, actual, golden):
     """单个比对目标的 layer1 统计：主套（任务书）+ 对照套（标准表）。
 
-    max_abs 与容差无关，两套共用同一个值。
+    max_abs、g_low 与容差无关，两套共用同一个值与同一个动态上限；复数拆出的
+    实/虚目标各自走本函数，锚点与上限天然独立。
     """
-    mr_tb, max_abs = _layer1_stats(
+    mr_tb, max_abs, g_low = _layer1_stats(
         actual, golden, thresholds.TASKBOOK_RTOL_FP32, thresholds.TASKBOOK_ATOL_FP32)
-    tb_fixed, tb_ulp = _gate_pair(mr_tb, max_abs)
-    mr_std, _ = _layer1_stats(
+    mr_std, _, _ = _layer1_stats(
         actual, golden, thresholds.STANDARD_RTOL_FP32, thresholds.STANDARD_ATOL_FP32)
-    std_fixed, std_ulp = _gate_pair(mr_std, max_abs)
     return {
         "name": name,
         "matched_ratio": float(mr_tb),
         "max_abs": max_abs,
-        "pass_fixed": tb_fixed,
-        "pass_ulp": tb_ulp,
+        "max_abs_limit": thresholds.max_abs_limit(g_low),
+        "g_low": g_low,
+        "pass": _gate(mr_tb, max_abs, g_low),
         "standard": {"matched_ratio": float(mr_std),
-                     "pass_fixed": std_fixed, "pass_ulp": std_ulp},
+                     "pass": _gate(mr_std, max_abs, g_low)},
     }
 
 
@@ -267,7 +358,7 @@ def _diagnostics(card, case_arrays, dut_out):
         name = item[0]
         try:
             _, actual, golden = item
-            mr, max_abs = _layer1_stats(
+            mr, max_abs, _ = _layer1_stats(
                 actual, golden,
                 thresholds.TASKBOOK_RTOL_FP32, thresholds.TASKBOOK_ATOL_FP32)
             out.append({"name": name, "matched_ratio": float(mr), "max_abs": max_abs})
@@ -293,11 +384,11 @@ def _run_fallback(card, case_arrays, dut_out):
         ratio = residual_ratio(card.residual_kind, **card.fallback_kwargs(case_arrays, dut_out))
     except Exception as exc:  # 残差算不出 → fail-closed，error 指认原因
         fb = {"ran": True, "ratio": None, "threshold": threshold,
-              "formula": formula, "pass": False}
+              "formula": formula, "pass": False, "eps": "2^-24"}
         return fb, "FAIL", f"fallback 残差不可计算: {type(exc).__name__}: {exc}"
     ok = bool(ratio <= threshold)
     fb = {"ran": True, "ratio": float(ratio), "threshold": threshold,
-          "formula": formula, "pass": ok}
+          "formula": formula, "pass": ok, "eps": "2^-24"}
     return fb, ("PASS" if ok else "FAIL"), None
 
 
@@ -318,45 +409,49 @@ def _judge_inner(card, case_arrays, dut_out):
         return _error_verdict("layer1 无比对目标（卡给出空目标清单）")
     entries = []
     for name, actual, golden in targets:
+        if (np.issubdtype(np.asarray(actual).dtype, np.complexfloating)
+                or np.issubdtype(np.asarray(golden).dtype, np.complexfloating)):
+            return _error_verdict(
+                f"layer1 目标 {name} 含复数数组：复数须由卡拆成实/虚目标再进统计"
+                "（S2 spec §4 不合并稀释）")
         if actual.size == 0:
             return _error_verdict(f"layer1 对比集为空: {name}")
         entries.append(_target_entry(name, actual, golden))
 
     # 多目标聚合（spec §2.3′ potri 双目标：全部通过才算过）：pass 取 AND、
     # matched_ratio 取最差（min）、max_abs 取最差（max）；单目标算子退化为原语义。
-    pass_fixed = all(e["pass_fixed"] for e in entries)
-    pass_ulp = all(e["pass_ulp"] for e in entries)
-    std_fixed = all(e["standard"]["pass_fixed"] for e in entries)
-    std_ulp = all(e["standard"]["pass_ulp"] for e in entries)
+    # 顶层 max_abs_limit/g_low 随聚合 max_abs 所在目标走（并列取首个），保持三元
+    # 自洽；门槛判定在逐目标层完成（复数拆实/虚两侧各自锚点各自上限），顶层字段
+    # 只是证据面。
+    l1_pass = all(e["pass"] for e in entries)
+    std_pass = all(e["standard"]["pass"] for e in entries)
+    worst = max(entries, key=lambda e: e["max_abs"])
 
     layer1 = {
         "matched_ratio": min(e["matched_ratio"] for e in entries),
-        "max_abs": max(e["max_abs"] for e in entries),
-        "max_abs_limits": {"fixed": thresholds.MAX_ABS_FIXED,
-                           "ulp32": thresholds.MAX_ABS_ULP32},
-        "pass_fixed": pass_fixed,
-        "pass_ulp": pass_ulp,
+        "max_abs": worst["max_abs"],
+        "max_abs_limit": worst["max_abs_limit"],
+        "g_low": worst["g_low"],
+        "pass": l1_pass,
         "targets": entries,
         # 标准表对照套并列展示（T3 运行语义：流转按任务书套，对照不参与流转）。
         "standard": {"matched_ratio": min(e["standard"]["matched_ratio"] for e in entries),
-                     "pass_fixed": std_fixed, "pass_ulp": std_ulp},
+                     "pass": std_pass},
         "diagnostics": _diagnostics(card, case_arrays, dut_out),
     }
 
     flags = []
     # T3：任一目标上主套（任务书）与对照套（标准表）门结论分歧。
-    if any((e["pass_fixed"], e["pass_ulp"])
-           != (e["standard"]["pass_fixed"], e["standard"]["pass_ulp"]) for e in entries):
+    if any(e["pass"] != e["standard"]["pass"] for e in entries):
         flags.append("T3")
-    # T4：任一目标上 max_abs 两种上限解释结论分歧（此时聚合必不双过，必走兜底）。
-    if any(e["pass_fixed"] != e["pass_ulp"] for e in entries):
-        flags.append("T4")
+    # T7 已摘（2026-09-24）：拆实/虚口径经 issue C3 评审确认与复数任务书 §3.2 第 3 条
+    # 本意一致，Mr.0 裁定 issue 即书面确认，复数裁决升正式口径、不再挂歧义 flag。
 
-    if pass_fixed and pass_ulp:
-        # layer1 两解释一致且过（全部目标）→ 数值 PASS（终审），fallback 不跑。
+    if l1_pass:
+        # layer1 全部目标双门都过 → 数值 PASS（终审），fallback 不跑。
         fallback, numeric, error = _null_fallback(), "PASS", None
     else:
-        # 两解释不一致或不过 → 走 fallback，fallback 为数值终审。
+        # 任一目标任一门不过 → 走 fallback，fallback 为数值终审。
         fallback, numeric, error = _run_fallback(card, case_arrays, dut_out)
 
     return {"layer1": layer1, "fallback": fallback, "numeric": numeric,
@@ -376,16 +471,19 @@ def judge(card, case_arrays, dut_out):
     - dut_out: {"out32": ndarray, "info": int, "status": "ok"|"prep_failed"|"error"}。
 
     返回 verdict dict：
-    {layer1: {matched_ratio, max_abs, max_abs_limits: {fixed, ulp32}, pass_fixed,
-    pass_ulp, targets: [逐目标统计], standard: {对照套聚合}, diagnostics: [并报项]},
+    {layer1: {matched_ratio, max_abs, max_abs_limit, g_low, pass,
+    targets: [逐目标统计], standard: {对照套聚合}, diagnostics: [并报项]},
     fallback: {ran, ratio, threshold, formula, pass}, numeric: "PASS"|"FAIL",
-    formal: "PENDING_RULING", flags: ["T3"|"T4", ...], error: null|str}。
-    layer1 顶层键是任务书主套的多目标聚合（min/max/AND，见 _judge_inner 注释）。
+    formal: "PENDING_RULING", flags: ["T3", ...], error: null|str}。
+    layer1 顶层键是任务书主套的多目标聚合（min/max/AND，见 _judge_inner 注释）；
+    max_abs_limit/g_low 随聚合 max_abs 所在目标走，g_low 无有限比对点时输出 null。
 
-    数值判定流转（spec §2.3，容差主套按 §2.3′ 换成任务书表）：layer1 两解释
-    （fixed/ulp32）一致且过 → 数值 PASS（终审）；两解释不一致或不过 → 走 fallback，
-    fallback 为数值终审，解释分歧记 flag T4；任务书/标准表两套容差门结论不同记
-    flag T3。formal 本片恒为 PENDING_RULING，绝不输出正式 PASS（T3/T4 未裁）。
+    数值判定流转（spec §2.3，容差主套按 §2.3′ 换成任务书表；max_abs 门按 2026-09-24
+    HT-1 裁定收成单口径 max_abs <= thresholds.max_abs_limit(g_low)）：layer1 全部
+    目标双门都过 → 数值 PASS（终审）；任一不过 → 走 fallback，fallback 为数值终审；
+    任务书/标准表两套容差门结论不同记 flag T3；T7 已摘（issue C3 确认拆实/虚口径）
+    （拆实/虚口径待任务方确认，S2 spec §4）。formal 本片恒为 PENDING_RULING，
+    绝不输出正式 PASS（T1/T3 未裁）。
 
     judge 不外抛异常：任何内部异常收敛为 error 字段 + numeric FAIL（fail-closed）；
     error 非空的 FAIL 属「不可裁/证据问题」，上层不得当精度 FAIL 直接上报。

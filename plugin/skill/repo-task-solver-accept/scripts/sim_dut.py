@@ -3,7 +3,9 @@
 """sim_dut.py —— S1-Cholesky E 卡：模拟被测（accept 骨架的正例/扰动数据源）。
 
 契约：dev-doc/solver/solver-s1-cholesky-spec.md §2.5（CLI 与被测输出目录格式）、
-§1（本片 accept 骨架用模拟被测，不跑真算子/NPU）。模拟量产语义：
+§1（本片 accept 骨架用模拟被测，不跑真算子/NPU）；S2c 复数增量按
+dev-doc/solver/solver-s2-spec.md §4（dtype 映射：out32 与包内 golden32 同 dtype，
+实数 case float32、复数 case complex64，不再强转 float32）。模拟量产语义：
 
 - none（正例）：out32 = 包内 golden32 逐字节复制——理想被测，用于验证判定通路的
   正向可分（E 行断言：数值 PASS 且 formal=待裁）。
@@ -17,11 +19,23 @@
 - nan：out32 = golden32 复制后首元素置 NaN。layer1 统计把 NaN 计为不符且
   max_abs=inf（双门必不过），fallback 对 NaN 拒算 → 数值 FAIL。
 
-扰动施加于包内全部 case；info 恒 0、status 恒 "ok"（扰动只动数值，不模拟接口层
-失败——info/确定性契约在本片记证据不足，spec §2.3′）。输出无随机性，可复跑比对。
+复数专属两类（S2 spec §4 验证增量：纯虚部错误、漏共轭；施加于实数 case 属用法
+错误，逐 case 记 skipped 并以退出码如实表达，不静默降级）：
 
-CLI（spec §2.5，逐字）：
-    sim_dut.py --package <dir> --out <dir> [--perturb none|scale|zero|nan]
+- imag（纯虚部）：out32 = golden32 + i·|golden32|——逐元素加纯虚偏移，幅度取该
+  元素复模（δ=1，与 scale 同定标，兜底残差同量级超阈）。实部逐位不动、误差全在
+  虚部：只比实部或把实虚合并稀释的实现会放过它，拆实虚双门的 im 侧与复模残差
+  必须抓住 → 数值 FAIL。
+- conj（漏共轭）：out32 = conj(golden32)——模拟漏共轭实现（L·Lᵀ 顶替 L·Lᴴ 一类）。
+  误差 = 2·|Im golden32|，golden 虚部非零处全部失守 → 数值 FAIL；虚部恒零的数据
+  数学上区分不了漏共轭，故本扰动只对复数 case 有意义。
+
+扰动施加于包内全部 case；info 恒 0、status 恒 "ok"（扰动只动数值，不模拟接口层
+失败——info/确定性契约在本片记证据不足，spec §2.3′）。输出无随机性，可复跑比对；
+none/scale/zero/nan 对实数 case 的输出与 S1 版逐位一致（S2c 实数字节稳定红线）。
+
+CLI（spec §2.5 基础上 S2c 增两类复数扰动）：
+    sim_dut.py --package <dir> --out <dir> [--perturb none|scale|zero|nan|imag|conj]
 输出：<out>/<case_id>.npz 含 out32/info/status（spec §2.5 被测输出目录格式），另落
 <out>/sim_manifest.json 记录来源包、扰动模式与环境版本（溯源件，accept_run 不消费）。
 """
@@ -35,24 +49,36 @@ from pathlib import Path
 import numpy as np
 
 TOOL = "sim_dut.py"
-TOOL_VER = "s1-E1"
-PERTURBS = ("none", "scale", "zero", "nan")
+TOOL_VER = "s2-E2"
+PERTURBS = ("none", "scale", "zero", "nan", "imag", "conj")
+COMPLEX_ONLY_PERTURBS = ("imag", "conj")
 SCALE_FACTOR = np.float32(2.0)  # 定标依据见模块文档 scale 条
 
 
 def perturb_out32(golden32, mode):
-    """对 golden32 施加扰动，返回 float32 输出阵（语义见模块文档）。"""
-    g = np.asarray(golden32, dtype=np.float32)
+    """对 golden32 施加扰动，返回与其同 dtype 的输出阵（语义见模块文档）。
+
+    dtype 跟随包内 golden32（index/包契约的 dtype：实数 float32、复数 complex64，
+    S2 spec §4 字段名不变）；复数专属扰动喂实数 case 抛 ValueError（fail-closed）。
+    """
+    g = np.asarray(golden32)
+    if mode in COMPLEX_ONLY_PERTURBS and not np.issubdtype(g.dtype, np.complexfloating):
+        raise ValueError(
+            f"扰动 {mode!r} 是复数专属（S2 spec §4），对 dtype={g.dtype} 的 case 不适用")
     if mode == "none":
         return g.copy()
     if mode == "scale":
-        return (g * SCALE_FACTOR).astype(np.float32)
+        return (g * SCALE_FACTOR).astype(g.dtype)
     if mode == "zero":
         return np.zeros_like(g)
     if mode == "nan":
         out = g.copy()
-        out.flat[0] = np.float32("nan")
+        out.flat[0] = np.float32("nan")   # 复数 case 落成 nan+0j，同样触发双门
         return out
+    if mode == "imag":
+        return (g + 1j * np.abs(g)).astype(g.dtype)
+    if mode == "conj":
+        return np.conj(g).astype(g.dtype)
     raise ValueError(f"未知扰动 {mode!r}，只支持 {PERTURBS}")
 
 
@@ -91,7 +117,11 @@ def main(argv=None):
             skipped.append({"case_id": case_id,
                             "reason": f"npz 不可读: {type(exc).__name__}: {exc}"})
             continue
-        out32 = perturb_out32(golden32, args.perturb)
+        try:
+            out32 = perturb_out32(golden32, args.perturb)
+        except ValueError as exc:
+            skipped.append({"case_id": case_id, "reason": str(exc)})
+            continue
         np.savez(out_dir / f"{case_id}.npz",
                  out32=out32, info=np.int64(0), status=np.str_("ok"))
         written.append(case_id)

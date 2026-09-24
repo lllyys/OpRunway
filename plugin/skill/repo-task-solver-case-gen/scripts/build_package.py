@@ -5,7 +5,8 @@
 契约：dev-doc/solver/solver-s1-cholesky-spec.md §2.2（包 schema 与 manifest）、
 §2.5（CLI）、第 3 节 F 行与写入所有权（**F 复用 B 冻结产物逐字节装包，不重生成；
 抽验只核对不覆盖**）。本脚本不含任何数据构造与判据实现：npz 与 perf_baseline
-一律字节复制，golden 抽验用 spec §2.2 声明的 d 前缀链路独立重算后**只比对**。
+一律字节复制，golden 抽验按算子 dtype 走 d 前缀（实数，spec §2.2）或 z 前缀
+（复数，dev-doc/solver/solver-s2-spec.md §4）链路独立重算后**只比对**。
 
 装配来源（--staging 多目录按序发现；任一来源缺失即停，fail-closed，不猜测）：
 
@@ -25,10 +26,13 @@
 包自检清单（spec 第 3 节 F 行「逐项打钩」；任一项不过 → 退出码 3，不出包）：
 
 1. 逐字节复用——npz 与 perf_baseline 落包后 sha256 与源文件相等；
-2. 校验字段（spec §2.2）——全部 case ``A32 == A64.astype(f32)``（B、golden 同理）；
-3. 抽验 3 case——确定性取包内首/中/尾三个 case，按 spec §2.2 的 d 前缀链路
-   （spotrf=dpotrf；spotrs=dpotrf→dpotrs；spotri=dpotrf→dpotri 存储侧半三角另侧置 0）
-   独立重算 golden64/golden32，与冻结值逐字节一致；**只比对，绝不写回**；
+2. 校验字段（spec §2.2）——全部 case ``A32 == A64.astype(f32)``（B、golden 同理；
+   复数 case 按 S2 spec §4 降型到 complex64，字段名不变）；
+3. 抽验 3 case——确定性取包内首/中/尾三个 case，实数按 spec §2.2 的 d 前缀链路
+   （spotrf=dpotrf；spotrs=dpotrf→dpotrs；spotri=dpotrf→dpotri 存储侧半三角另侧置 0）、
+   复数按 S2 spec §4 的 z 前缀链路同构（cpotrf=zpotrf；cpotrs=zpotrf→zpotrs；
+   cpotri=zpotrf→zpotri）独立重算 golden64/golden32，与冻结值逐字节一致；
+   **只比对，绝不写回**；
 4. index 一致——包内 index 条目与源 index 该算子条目逐字段相等，npz/arrays 与实物对得上；
 5. 指纹——manifest.fingerprint 覆盖包内除 manifest.json 外全部文件（含 verify 双件；
    分级消费见 accept_run：cases/ 与 perf_baseline 错配阻断，verify 漂移仅告警）。
@@ -55,8 +59,8 @@ from pathlib import Path
 import numpy as np
 
 TOOL = "build_package.py"
-TOOL_VER = "s1-F1"
-OPS = ("spotrf", "spotrs", "spotri")
+TOOL_VER = "s2-F3"
+OPS = ("spotrf", "spotrs", "spotri", "cpotrf", "cpotrs", "cpotri")
 PACKAGE_VER = "s1"
 STANDARD_REFS = {
     "三层判定": "repos/solver_tasks-main/cholesky_precision/README.md",
@@ -84,11 +88,35 @@ def _sha256_file(path):
 # 来源发现（模块文档「装配来源」；按 --staging 传入顺序取第一个命中）
 # ---------------------------------------------------------------------------
 
+def _index_ratio_filled(index_path):
+    try:
+        with open(index_path, encoding="utf-8") as fh:
+            cases = json.load(fh).get("cases") or []
+        return bool(cases) and all(
+            c.get("ratio_cpu") is not None or c.get("ratio_cpu_status") == "prep_failed"
+            for c in cases)
+    except (OSError, ValueError):
+        return False
+
+
 def find_cases_dir(staging_dirs):
-    for d in staging_dirs:
-        if (d / "cases" / "index.json").is_file():
-            return d / "cases"
-    raise ContractError(f"staging 目录中找不到 cases/index.json：{[str(d) for d in staging_dirs]}")
+    """优先选 ratio_cpu 已回填的 index（B2 产物）；避免命中 B1 骨架造成包内 ratio 全空。"""
+    cands = [d / "cases" for d in staging_dirs if (d / "cases" / "index.json").is_file()]
+    if not cands:
+        raise ContractError(f"staging 目录中找不到 cases/index.json：{[str(d) for d in staging_dirs]}")
+    for c in cands:
+        if _index_ratio_filled(c / "index.json"):
+            return c
+    return cands[0]
+
+
+def find_npz(staging_dirs, index_dir, rel_name):
+    """npz 与 index 允许来自不同 staging（B2 只回填 index 不复制 npz）。"""
+    for base in [index_dir] + [d / "cases" for d in staging_dirs]:
+        cand = base / rel_name
+        if cand.is_file():
+            return cand
+    return None
 
 
 def find_baseline(staging_dirs, op):
@@ -100,11 +128,13 @@ def find_baseline(staging_dirs, op):
 
 
 def find_criteria_dir(staging_dirs):
-    for d in staging_dirs:
-        cand = d / "repo-task-solver-accept" / "criteria"
+    sib = Path(__file__).resolve().parent.parent.parent / "repo-task-solver-accept" / "criteria"
+    cands = [d / "repo-task-solver-accept" / "criteria" for d in staging_dirs] + [sib]
+    for cand in cands:
         if (cand / "render_verify.py").is_file():
             return cand
-    raise ContractError("staging 目录中找不到镜像树 repo-task-solver-accept/criteria/render_verify.py")
+    raise ContractError(
+        "找不到 repo-task-solver-accept/criteria/render_verify.py（staging 或兄弟 skill 目录）")
 
 
 # ---------------------------------------------------------------------------
@@ -116,28 +146,59 @@ def _lapack():
         from scipy.linalg import lapack
     except ImportError as exc:
         raise ContractError(
-            "缺 scipy：golden 抽验走 scipy.linalg.lapack 的 d 前缀例程（spec §1：容器内补装并记录版本）"
+            "缺 scipy：golden 抽验走 scipy.linalg.lapack 的 d/z 前缀例程（spec §1：容器内补装并记录版本）"
         ) from exc
     return lapack
 
 
+def _is_complex_op(op):
+    """算子 dtype 通路：c 前缀 = 复数（z 链路重算），s 前缀 = 实数（d 链路，S2 spec §0/§4）。"""
+    return op.startswith("c")
+
+
+def _dtype32_of(name64, arr64, case_id):
+    """降型目标 dtype（spec §2.2 + S2 spec §4，字段名不变）：float64→float32、
+    complex128→complex64；其余 dtype 属 schema 违约，fail-closed。"""
+    dt = arr64.dtype
+    if dt == np.float64:
+        return np.float32
+    if dt == np.complex128:
+        return np.complex64
+    raise SelfCheckError(
+        f"{case_id}: {name64} dtype={dt} 不在 float64/complex128（spec §2.2 + S2 spec §4）")
+
+
 def recompute_golden(op, arrays, uplo, case_id):
-    """按 spec §2.2 链路独立重算 golden64（C 序）。info!=0 属数据问题，直接抛。"""
+    """按 spec §2.2（实数 d 链路）/ S2 spec §4（复数 z 链路）独立重算 golden64
+    （C 序）。info!=0 属数据问题，直接抛。"""
     lapack = _lapack()
     lower = uplo == "L"
-    F, info = lapack.dpotrf(arrays["A64"], lower=lower, clean=1)
+    a64 = arrays["A64"]
+    if _is_complex_op(op):
+        if a64.dtype != np.complex128:
+            raise SelfCheckError(
+                f"{case_id}: {op} 要求 A64=complex128（S2 spec §4），得到 {a64.dtype}")
+        potrf, potrs, potri, pfx, spd = (
+            lapack.zpotrf, lapack.zpotrs, lapack.zpotri, "z", "HPD")
+    else:
+        if a64.dtype != np.float64:
+            raise SelfCheckError(
+                f"{case_id}: {op} 要求 A64=float64（spec §2.2），得到 {a64.dtype}")
+        potrf, potrs, potri, pfx, spd = (
+            lapack.dpotrf, lapack.dpotrs, lapack.dpotri, "d", "SPD")
+    F, info = potrf(a64, lower=lower, clean=1)
     if info != 0:
-        raise SelfCheckError(f"{case_id}: 抽验 dpotrf info={info}（SPD 冻结输入下应为 0）")
-    if op == "spotrf":
+        raise SelfCheckError(f"{case_id}: 抽验 {pfx}potrf info={info}（{spd} 冻结输入下应为 0）")
+    if op.endswith("potrf"):
         g = F
-    elif op == "spotrs":
-        g, info = lapack.dpotrs(F, arrays["B64"], lower=lower)
+    elif op.endswith("potrs"):
+        g, info = potrs(F, arrays["B64"], lower=lower)
         if info != 0:
-            raise SelfCheckError(f"{case_id}: 抽验 dpotrs info={info}")
-    else:  # spotri
-        C, info = lapack.dpotri(F, lower=lower)
+            raise SelfCheckError(f"{case_id}: 抽验 {pfx}potrs info={info}")
+    else:  # *potri
+        C, info = potri(F, lower=lower)
         if info != 0:
-            raise SelfCheckError(f"{case_id}: 抽验 dpotri info={info}")
+            raise SelfCheckError(f"{case_id}: 抽验 {pfx}potri info={info}")
         g = np.tril(C) if lower else np.triu(C)
     return np.ascontiguousarray(g)
 
@@ -152,7 +213,11 @@ def spot_check_indices(n_cases):
 # ---------------------------------------------------------------------------
 
 def check_cast_fields(arrays, case_id):
-    """spec §2.2 校验字段：32 位数组 == 64 位数组降型，逐字节。"""
+    """spec §2.2 校验字段：32 位数组 == 64 位数组降型，逐字节。
+
+    降型目标由 64 位数组的 dtype 决定（float64→float32、complex128→complex64，
+    S2 spec §4 字段名不变），实数路径与 S1 版逐位同判。
+    """
     pairs = [("A32", "A64"), ("golden32", "golden64")]
     if "B64" in arrays:
         pairs.append(("B32", "B64"))
@@ -160,9 +225,11 @@ def check_cast_fields(arrays, case_id):
         if a32 not in arrays or a64 not in arrays:
             raise SelfCheckError(f"{case_id}: npz 缺数组 {a32}/{a64}（spec §2.2 schema）")
         got = arrays[a32]
-        want = arrays[a64].astype(np.float32)
-        if got.dtype != np.float32 or got.tobytes() != want.tobytes():
-            raise SelfCheckError(f"{case_id}: {a32} != {a64}.astype(float32)（spec §2.2 校验字段）")
+        dt32 = _dtype32_of(a64, arrays[a64], case_id)
+        want = arrays[a64].astype(dt32)
+        if got.dtype != dt32 or got.tobytes() != want.tobytes():
+            raise SelfCheckError(
+                f"{case_id}: {a32} != {a64}.astype({np.dtype(dt32).name})（spec §2.2 校验字段）")
 
 
 def check_entry_vs_npz(entry, arrays):
@@ -201,7 +268,7 @@ def _blas_info():
         return "unknown"
 
 
-def build(staging_dirs, out_dir, op, container_id):
+def build(staging_dirs, out_dir, op, container_id, canonical_path):
     cases_src = find_cases_dir(staging_dirs)
     baseline_src = find_baseline(staging_dirs, op)
     criteria_dir = find_criteria_dir(staging_dirs)
@@ -233,9 +300,13 @@ def build(staging_dirs, out_dir, op, container_id):
         cid, npz_rel = entry["case_id"], entry.get("npz")
         if npz_rel != f"cases/{cid}.npz":
             raise ContractError(f"{cid}: index.npz={npz_rel!r} 不是规范包内路径 cases/{cid}.npz")
-        src = cases_src / f"{cid}.npz"
-        if not src.is_file():
-            raise ContractError(f"{cid}: B 冻结 npz 缺失: {src}（不重生成，fail-closed）")
+        src = find_npz(staging_dirs, cases_src, f"{cid}.npz")
+        if src is None:
+            raise ContractError(f"{cid}: B 冻结 npz 缺失（不重生成，fail-closed）")
+        if entry.get("ratio_cpu") is None and entry.get("ratio_cpu_status") != "prep_failed":
+            raise ContractError(
+                f"{cid}: index 的 ratio_cpu 为空且非 prep_failed——"
+                "staging 命中了未回填的骨架 index，请把 B2 回填件加入 --staging")
         npz_sha[npz_rel] = _copy_bytes(src, out_dir / "cases" / f"{cid}.npz")
         with np.load(out_dir / npz_rel) as z:
             arrays = {k: z[k] for k in z.files}
@@ -244,6 +315,8 @@ def build(staging_dirs, out_dir, op, container_id):
     tick("逐字节复用/npz", f"{len(op_cases)} 个 npz 复制后 sha256 与源相等")
     tick("校验字段", f"{len(op_cases)} 个 case 的 A32/golden32（含 B32）降型逐字节成立")
     tick("index 对账", f"{len(op_cases)} 条 index.arrays 与 npz 实物一致、npz 路径规范")
+    n_pf = sum(1 for c in op_cases if c.get("ratio_cpu_status") == "prep_failed")
+    tick("ratio_cpu 非空", f"{len(op_cases) - n_pf} 条已回填，prep_failed {n_pf} 条按状态入包")
 
     # 3) 抽验 3 case：golden 独立重算，只比对不覆盖
     picked = spot_check_indices(len(op_cases))
@@ -257,12 +330,13 @@ def build(staging_dirs, out_dir, op, container_id):
         if g64.tobytes() != arrays["golden64"].tobytes():
             diff = float(np.max(np.abs(g64 - arrays["golden64"])))
             raise SelfCheckError(f"{cid}: golden64 独立重算与冻结值不一致（max|Δ|={diff:g}）")
-        g32 = g64.astype(np.float32)
+        g32 = g64.astype(_dtype32_of("golden64", g64, cid))
         if g32.tobytes() != arrays["golden32"].tobytes():
             raise SelfCheckError(f"{cid}: golden32 独立重算降型与冻结值不一致")
         spot_detail.append(cid)
+    chain = "z" if _is_complex_op(op) else "d"
     tick("抽验 golden", f"{len(picked)} case（首/中/尾：{'、'.join(spot_detail)}）"
-                        "d 链路独立重算 golden64/golden32 逐字节一致；只比对未写回")
+                        f"{chain} 链路独立重算 golden64/golden32 逐字节一致；只比对未写回")
     checklist["spot_check_cases"] = spot_detail
 
     # 包内 index：顶层元数据保留、条目原样，只做算子子集选取
@@ -291,6 +365,28 @@ def build(staging_dirs, out_dir, op, container_id):
         sys.path.remove(str(criteria_dir))
     tick("verify 渲染", f"verify_accuracy.py / verify_perf.py（criteria {criteria_ver} / "
                         f"renderer {renderer_ver}）经确定性入口渲染入包")
+
+    # 自测配套件：gen_data 副本、canonical 算子切片、sim 副本、README（S2 spec §1）
+    here = Path(__file__).resolve().parent
+    gen_sha = _copy_bytes(here / "gen_data_cholesky.py", out_dir / "gen_data.py")
+    sim_src = criteria_dir.parent / "scripts" / "sim_dut.py"
+    if not sim_src.is_file():
+        raise ContractError(f"sim_dut.py 未找到: {sim_src}")
+    sim_sha = _copy_bytes(sim_src, out_dir / "sim_dut.py")
+    with open(canonical_path, encoding="utf-8") as fh:
+        canon = json.load(fh)
+    slice_doc = {k: v for k, v in canon.items() if k != "cases"}
+    slice_doc["cases"] = [c for c in canon["cases"] if c.get("op") == op]
+    if not slice_doc["cases"]:
+        raise ContractError(f"canonical 中没有 {op} 的 case")
+    with open(out_dir / "canonical_cases.json", "w", encoding="utf-8") as fh:
+        json.dump(slice_doc, fh, ensure_ascii=False, indent=1)
+        fh.write("\n")
+    tpl = here.parent / "assets" / "package-readme-template.md"
+    (out_dir / "README.md").write_text(
+        tpl.read_text(encoding="utf-8").replace("{op}", op), encoding="utf-8")
+    tick("自测配套件", f"gen_data.py（{gen_sha[:12]}…）、sim_dut.py（{sim_sha[:12]}…）、"
+                       f"canonical 切片 {len(slice_doc['cases'])} 条、README.md 渲染入包")
 
     # 5) 指纹 + manifest（spec §2.2）
     fingerprint = {}
@@ -337,6 +433,8 @@ def build(staging_dirs, out_dir, op, container_id):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="S1 正式包装配（spec §2.5 CLI；F 卡）")
+    ap.add_argument("--canonical", required=True,
+                    help="canonical_cases.json 路径（算子切片写入包内）")
     ap.add_argument("--staging", required=True, nargs="+",
                     help="装配来源目录（可多个，按序发现；见模块文档）")
     ap.add_argument("--out", required=True,
@@ -357,7 +455,7 @@ def main(argv=None):
         for d in staging_dirs:
             if not d.is_dir():
                 raise ContractError(f"staging 目录不存在: {d}")
-        checklist = build(staging_dirs, out_dir, op, args.container_id)
+        checklist = build(staging_dirs, out_dir, op, args.container_id, args.canonical)
     except ContractError as exc:
         print(f"[build_package] 契约/输入错误: {exc}", file=sys.stderr)
         return 2

@@ -27,6 +27,15 @@ fallback 残差喂数不变（出处：README 各章公式与参考实现，spec
 case_arrays 的键与 npz/index 对应（spec §2.2）：A64/A32（potrs 另有 B64/B32）、
 golden64/golden32、uplo（canonical）、ratio_cpu/ratio_cpu_status（index.json）。
 golden 存储侧半三角另侧置 0；layer1 半三角目标只取存储侧，天然对齐。
+
+S2c 复数三卡（cpotrf/cpotrs/cpotri，S2 spec §4 契约增量表）：键名与实数完全同构
+（A64/B64/golden64=complex128、A32/B32/golden32/out32=complex64），还原用
+L·Lᴴ（L 侧）/ Uᴴ·U（U 侧），镜像按存储侧 Hermitian 共轭、对角虚部按 0 处理。
+layer1 每个比对目标拆成实/虚两个实数目标（复数任务书 §3.2 第 3 条：实部、虚部
+各自作为 FLOAT32 判定，双侧同时达标，不合并成 2N 元素互相稀释）；cpotri 双目标
+保留并各拆实/虚（共 4 目标）。fallback 仍走 DPOT01/02/03（复模、先升 complex128，
+verdict 按 dtype 分流），阈值公式与数值同实数书。实数阵进复数卡（或反之）按
+实/复混搭抛错（fail-closed），thresholds 零改动。
 """
 
 from dataclasses import dataclass
@@ -40,7 +49,7 @@ except ImportError:  # criteria 目录直接挂 sys.path 时
     import thresholds
     import verdict
 
-OPS = ("spotrf", "spotrs", "spotri")
+OPS = ("spotrf", "spotrs", "spotri", "cpotrf", "cpotrs", "cpotri")
 
 
 def _get(case_arrays, key, op):
@@ -54,7 +63,7 @@ def _to_f64(name, arr):
     只拒复数与非数值 dtype。"""
     a = np.asarray(arr)
     if np.issubdtype(a.dtype, np.complexfloating):
-        raise TypeError(f"{name}: 复数不在本片范围（spec §1 不做复数）")
+        raise TypeError(f"{name}: 复数须走复数卡（S2 spec §4：实/复按 dtype 分流）")
     if not (np.issubdtype(a.dtype, np.floating) or np.issubdtype(a.dtype, np.integer)):
         raise TypeError(f"{name}: 非数值 dtype {a.dtype}")
     return a.astype(np.float64)
@@ -162,10 +171,126 @@ def _potri_fallback_kwargs(case_arrays, dut_out):
     }
 
 
+# ---------------------------------------------------------------------------
+# S2c 复数三卡（cpotrf/cpotrs/cpotri，S2 spec §4）：实数卡不动，追加不改写
+# ---------------------------------------------------------------------------
+
+def _to_c128(name, arr):
+    """layer1 取数用的宽松升型（复数卡）：先升 complex128 再拆实/虚或进乘积
+    （S2 spec §4 防 astype 直转实数丢虚部的坑）；不查有限性（NaN/Inf 要流进
+    统计计为不符），只拒非复数 dtype——实数阵进复数卡即实/复混搭，fail-closed
+    抛错（保实数链路产物不被无意混入）。"""
+    a = np.asarray(arr)
+    if not np.issubdtype(a.dtype, np.complexfloating):
+        raise TypeError(f"{name}: 复数卡要求复数 dtype（S2 spec §4），得到 {a.dtype}")
+    return a.astype(np.complex128)
+
+
+def _reim(name, actual, golden):
+    """把一个复数比对目标拆成实/虚两个实数目标（复数任务书 §3.2 第 3 条：实部、
+    虚部各自作为 FLOAT32 做混合容差判定，双侧同时达标才过——judge 对多目标取
+    AND/min/max 聚合，天然不合并成 2N 元素互相稀释）。
+
+    golden 允许是实数阵（如单位阵目标），其 .imag 即全 0 期望。"""
+    actual = np.asarray(actual)
+    golden = np.asarray(golden)
+    return [(f"{name}_re", actual.real, golden.real),
+            (f"{name}_im", actual.imag, golden.imag)]
+
+
+def _c_tri_pair(case_arrays, dut_out, op):
+    """_tri_pair 的复数版：存储侧半三角逐元素对（vs golden32，升 complex128）。
+
+    只取 uplo 侧的 n(n+1)/2 个元素，另侧（golden 置 0 侧 / 被测输入残留侧）
+    不进统计；cpotri 直审目标与 cpotrf 诊断项共用这一份实现。
+    """
+    golden = _to_c128("golden32", _get(case_arrays, "golden32", op))
+    out = _to_c128("out32", dut_out["out32"])
+    n = _square_like("out32", "golden32", golden, out)
+    uplo = verdict.normalize_uplo(_get(case_arrays, "uplo", op))
+    idx = np.tril_indices(n) if uplo == "L" else np.triu_indices(n)
+    return out[idx], golden[idx]
+
+
+def _cpotrf_targets(case_arrays, dut_out):
+    """cpotrf 主判目标（S2 spec §4）：还原 recon = L·Lᴴ（L 侧）/ Uᴴ·U（U 侧）
+    后取指定三角对原 A（A64=complex128），实/虚各自成目标。
+
+    因子只取存储侧参与还原；A 的 Hermitian 另侧由存储侧共轭镜像定义，比对集
+    即指定三角的 n(n+1)/2 个元素。
+    """
+    a64 = _to_c128("A64", _get(case_arrays, "A64", "cpotrf"))
+    out = _to_c128("out32", dut_out["out32"])
+    n = _square_like("out32", "A64", a64, out)
+    uplo = verdict.normalize_uplo(_get(case_arrays, "uplo", "cpotrf"))
+    if uplo == "L":
+        fh = np.tril(out)
+        recon = fh @ fh.conj().T
+        idx = np.tril_indices(n)
+    else:
+        fh = np.triu(out)
+        recon = fh.conj().T @ fh
+        idx = np.triu_indices(n)
+    return _reim("recon_vs_A", recon[idx], a64[idx])
+
+
+def _cpotrf_diagnostics(case_arrays, dut_out):
+    """cpotrf 诊断项：F vs golden F 直审（拆实/虚），并报不主判。"""
+    actual, golden = _c_tri_pair(case_arrays, dut_out, "cpotrf")
+    return _reim("factor_vs_golden", actual, golden)
+
+
+def _cpotrs_targets(case_arrays, dut_out):
+    """cpotrs 主判目标：解矩阵 X 全量逐元素 vs golden32，实/虚各自成目标。"""
+    golden = _to_c128("golden32", _get(case_arrays, "golden32", "cpotrs"))
+    out = _to_c128("out32", dut_out["out32"])
+    if out.shape != golden.shape:
+        raise ValueError(f"shape 不匹配: out32{out.shape} vs golden32{golden.shape}")
+    return _reim("x_vs_golden", out.ravel(), golden.ravel())
+
+
+def _cpotri_targets(case_arrays, dut_out):
+    """cpotri 主判双目标各拆实/虚，共 4 目标全过才过（S2 spec §4）：
+    ① A⁻¹ 直审（存储侧半三角 vs golden32）；② A·A⁻¹ 对 I——两阵各按存储侧
+    Hermitian 共轭镜像成全阵后相乘，对单位阵（虚部期望全 0）。"""
+    direct_actual, direct_golden = _c_tri_pair(case_arrays, dut_out, "cpotri")
+    a32 = _to_c128("A32", _get(case_arrays, "A32", "cpotri"))
+    out = _to_c128("out32", dut_out["out32"])
+    n = _square_like("out32", "A32", a32, out)
+    uplo = verdict.normalize_uplo(_get(case_arrays, "uplo", "cpotri"))
+    prod = verdict.mirror_storage_side(a32, uplo) @ verdict.mirror_storage_side(out, uplo)
+    return (_reim("ainv_vs_golden", direct_actual, direct_golden)
+            + _reim("a_ainv_vs_identity", prod.ravel(), np.eye(n).ravel()))
+
+
+def _cpotrf_fallback_kwargs(case_arrays, dut_out):
+    return {
+        "a": _get(case_arrays, "A64", "cpotrf"),
+        "factor": dut_out["out32"],
+        "uplo": verdict.normalize_uplo(_get(case_arrays, "uplo", "cpotrf")),
+    }
+
+
+def _cpotrs_fallback_kwargs(case_arrays, dut_out):
+    return {
+        "a": _get(case_arrays, "A32", "cpotrs"),
+        "b": _get(case_arrays, "B32", "cpotrs"),
+        "x": dut_out["out32"],
+    }
+
+
+def _cpotri_fallback_kwargs(case_arrays, dut_out):
+    return {
+        "a": _get(case_arrays, "A32", "cpotri"),
+        "ainv": dut_out["out32"],
+        "uplo": verdict.normalize_uplo(_get(case_arrays, "uplo", "cpotri")),
+    }
+
+
 @dataclass(frozen=True)
 class CriteriaCard:
     """一张判据卡：judge 消费的全部算子特定信息。"""
-    op: str                        # canonical 算子名（s 前缀，spec §0）
+    op: str                        # canonical 算子名（实数 s / 复数 c 前缀，spec §0 + S2 spec §0）
     residual_kind: str             # residual_ratio 的 kind
     fallback_formula: str          # verdict.fallback.formula 的展示串
     fallback_threshold: Callable   # ratio_cpu -> 阈值（thresholds 模块的公式）
@@ -202,6 +327,35 @@ CARDS = {
         layer1_diagnostics=_no_diagnostics,
         fallback_kwargs=_potri_fallback_kwargs,
     ),
+    # 复数三卡：residual kind、阈值公式与数值同实数书（S2 spec §4），
+    # 复数语义（复模/共轭/升精度）由 verdict 的 dtype 分流承担。
+    "cpotrf": CriteriaCard(
+        op="cpotrf",
+        residual_kind="DPOT01",
+        fallback_formula=thresholds.TIGHTEN_FORMULA,
+        fallback_threshold=thresholds.tighten_threshold,
+        layer1_targets=_cpotrf_targets,
+        layer1_diagnostics=_cpotrf_diagnostics,
+        fallback_kwargs=_cpotrf_fallback_kwargs,
+    ),
+    "cpotrs": CriteriaCard(
+        op="cpotrs",
+        residual_kind="DPOT02",
+        fallback_formula=thresholds.FLOATUP_FORMULA,
+        fallback_threshold=thresholds.floatup_threshold,
+        layer1_targets=_cpotrs_targets,
+        layer1_diagnostics=_no_diagnostics,
+        fallback_kwargs=_cpotrs_fallback_kwargs,
+    ),
+    "cpotri": CriteriaCard(
+        op="cpotri",
+        residual_kind="DPOT03",
+        fallback_formula=thresholds.TIGHTEN_FORMULA,
+        fallback_threshold=thresholds.tighten_threshold,
+        layer1_targets=_cpotri_targets,
+        layer1_diagnostics=_no_diagnostics,
+        fallback_kwargs=_cpotri_fallback_kwargs,
+    ),
 }
 
 
@@ -209,5 +363,5 @@ def get_card(op):
     """按 canonical 算子名取判据卡；未知算子抛 ValueError。"""
     card = CARDS.get(op)
     if card is None:
-        raise ValueError(f"未知算子 {op!r}，本片只支持 {OPS}（spec §1）")
+        raise ValueError(f"未知算子 {op!r}，只支持 {OPS}（S1 spec §1 + S2 spec §4）")
     return card
