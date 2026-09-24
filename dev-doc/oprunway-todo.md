@@ -18,14 +18,32 @@
   契约 `blas-msopprof-spec.md` v2、计划 `blas-msopprof-plan.md` v2。真机验过 V1
   （ctpmv 三例读数与独立测量逐例吻合）、截断 fail-closed、复测轮折叠与替代告警。
   预算 lint 退 0，blas 两 skill 行文零拦截，测试 131 全绿，两示例逐字节一致。
-- [ ] **验收者可用性还差三道真机门**，这三条不过就不能说「验收者拿来能用」：
-  - **M1 多 launch 真机正例**：cherk 每次调用 6 个 kernel，是嵌套布局与求和的天然用例，
-    但 a3 上没构建 cherk。当前嵌套路径只有伪造 CSV 的单测覆盖，没有真算子跑过。
-    **这正是出错会把 FAIL 写成 PASS 的那条路径**，阴性证据（ctpmv/sger 单 launch）不算数。
-  - **sparse 回归**：量具是共享的（`render_runtime` 对所有 `harness_profile` 用同一份模板），
-    换后端同时换掉了 sparse 新渲染的量具，至少要跑一次 `sparse_frame` 剖面端到端。
-  - **零上下文 isolated-acceptance 无头通路**：按 `acceptance-roles.md` §8，构建者带着
-    仓规与本轮记忆跑通不等于验收者能跑通。这一步没跑，就不能替验收者下结论。
+- [x] **验收者可用性三道真机门全过**（2026-09-24）：
+  - **M1 多 launch 真机正例**：cherk 在 a3 建不出（只有 arch35，本机是 arch22 档），
+    由 `ssymm/arch22` 顶替。TC_L1_04（m=512 n=512）实测 **194 个 launch、5 种 kernel、
+    194 份 CSV、92866.70 us**；解析器返回的行数与总和逐一对上。同一份产物上
+    **扁平 glob 命中 0 份、递归 glob 命中 194 份**——递归是必需项。
+    截断在这份真实数据上 `--launch-count=194` 触发、`=512` 放行。
+  - **sparse**：a3 上无任何 sparse 材料，改用机械判据关闭——两个 `harness_profile`
+    渲染出的量具**只在 `HARNESS_PROFILE` 与 `BUILD_CONVENTION` 两个常量上不同**，
+    采集通路逐字节相同（`test_profile_parse.py::ProfileSharedCollectionTest` 固化）。
+    所以 blas 的真机证据覆盖 sparse 的采集面；sparse 独有的绑卡面本轮未动。
+  - **零上下文 isolated-acceptance**：无头会话只凭 `SKILL.md` + `references/` + `scripts/`
+    跑完 A1(0) → A2(0) → A4(1)，产出完整结果 JSON，**自报「没有缺口，没有卡在任何一步」**，
+    并正确引用 perf-protocol 的口径变更做保守解读。第一轮因环境未备齐而正确停下并
+    指出缺口（见下条），备齐后一次跑通。
+    注：该轮工程是 **Debug 构建**（`CMAKE_BUILD_TYPE=Debug`），读数比 Release 高约四倍，
+    机制有效但数值不可与 Release 对照，不能当算子结论读。
+- [ ] **零上下文实跑抓到的两个既有文档缺口**（2026-09-24，isolated-acceptance 无头会话，
+  非本轮引入，但确实卡住验收者）：
+  - **skill 怎么到目标机没写。** 文档里的 `<skill>` 指的是本机上放 `SKILL.md` 的目录，
+    而命令要在容器里跑；且 `accept.py:185` 要求 `repo-task-blas-case-gen/scripts/package.py`
+    与它并排存在，文档只说「还原完整 plugin」，没说并排这个硬约束。零上下文会话据此
+    停在 A1 之前，判断正确——目标机上那份旧 case-gen 的 `package.py` 哈希不同，
+    用它会悄悄换掉量具。
+  - **首轮跑在非编译卡上没有通路。** 编译期 `TEST_DEVICE_ID` 固定，`--map-device` 与
+    `--compiled-device` 的重映射只在复测轮有文档，首轮没有。会话按文档拒绝即兴发挥。
+    这与 P7 换卡门控是同一件事的两面。
 - [ ] V7 余下两条跨契约路径未在真机上验：旧历史组合（旧首轮加已有旧复测轮仍折叠）、
   换卡轮。两者都有单测覆盖，缺的是真机证据。
 - [ ] 测试瘦身（低优先，下次动 schema 时顺手做）：`test_fold.py` 的形状违规表驱动

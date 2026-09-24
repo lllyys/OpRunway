@@ -2,6 +2,21 @@
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
+- **2026-09-24 · 验收者可用性三道门全过，msprof op 切换收尾。**
+  **M1**：cherk 在 a3 建不出（只有 arch35），改用 `ssymm/arch22` TC_L1_04 顶替——
+  实测 **194 个 launch、5 种 kernel、92866.70 us**，解析器逐一对上；同一份产物上
+  **扁平 glob 命中 0、递归命中 194**，证明递归 glob 是必需项而非保险；截断在真实
+  数据上 `--launch-count=194` 触发、`=512` 放行。**sparse**：a3 无 sparse 材料，
+  改用机械判据——两个 `harness_profile` 渲染出的量具只在 `HARNESS_PROFILE` 与
+  `BUILD_CONVENTION` 两个常量上不同、采集通路逐字节相同，已固化成测试。
+  **零上下文**：isolated-acceptance 无头会话只凭发布切片跑完 A1(0)→A2(0)→A4(1)，
+  自报「没有缺口」，并正确引用口径变更做保守解读。第一轮因环境未备齐而**正确停下**，
+  顺带抓出两个既有文档缺口（skill 怎么到目标机没写；首轮跑在非编译卡上无通路），
+  都非本轮引入，已记 todo。该轮工程是 Debug 构建，读数比 Release 高约四倍，
+  机制有效但数值不作算子结论。收尾另修 accept 的 A1 探测目标（msprof→msopprof）、
+  `--calls-per-case` 帮助文案、troubleshooting 与 CLAUDE.md 的陈旧描述、
+  开发件契约里「两侧 perf-protocol 都是权威」的说法。测试 132 全绿。
+
 - **2026-09-24 · blas 采集后端换成 `msprof op`（msopprof），端到端完工。**
   量具命令改 `msopprof --output=<目录> --aic-metrics=BasicInfo --launch-count=<N> <二进制> ...`
   （选项必须用 `=` 形式且排在二进制前，空格分隔报 `argument --output miss value`，
