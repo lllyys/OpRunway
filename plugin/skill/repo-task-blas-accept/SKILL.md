@@ -2,9 +2,9 @@
 name: repo-task-blas-accept
 description: >-
   使用任务包（一个 <op>_test.csv 加一张 gpu_baseline.csv）和开发者算子工程
-  （ops-blas / ops-sparse），在 NPU 上完成精度与
-  性能验收并给出证据化结论。当用户提到 ops-blas、ops-sparse、aclblas、aclsparse、
-  任务包、验收、GTest 或 NPU 跑测时使用；只需生成任务包时改用 repo-task-blas-case-gen。
+  （ops-blas），在 NPU 上完成精度与性能验收并给出证据化结论。当用户提到 ops-blas、
+  aclblas、任务包、验收、GTest 或 NPU 跑测时使用；只需生成任务包时改用
+  repo-task-blas-case-gen。
 ---
 
 # BLAS 任务包验收

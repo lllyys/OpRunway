@@ -34,6 +34,13 @@
     指出缺口（见下条），备齐后一次跑通。
     注：该轮工程是 **Debug 构建**（`CMAKE_BUILD_TYPE=Debug`），读数比 Release 高约四倍，
     机制有效但数值不可与 Release 对照，不能当算子结论读。
+- [ ] **blas 两个 skill 里的 sparse 机制面待清理**（Mr.0 2026-09-24 裁定 sparse 不归
+  本 skill 管，本轮只收了 `description` 触发面）。留着的有：`accept.py` 的
+  `DEVICE_BIND_MODES["sparse_frame"]`、`run-chain.md` 的 `cann_ops_sparse.h` 入口头映射、
+  `retest-protocol.md` 的 `sparse_frame` 绑卡行、`facts-schema.md` 的 `harness_profile`
+  字段与 v2 schema、两个示例 `gen_csv.py` 的 registry 条目。
+  **动它之前先和 `feature/sparse-r1` 对齐**——那条线在用这套机制；另有四条测试依赖，
+  示例要重渲。
 - [ ] **零上下文实跑抓到的两个既有文档缺口**（2026-09-24，isolated-acceptance 无头会话，
   非本轮引入，但确实卡住验收者）：
   - **skill 怎么到目标机没写。** 文档里的 `<skill>` 指的是本机上放 `SKILL.md` 的目录，

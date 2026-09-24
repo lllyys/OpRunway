@@ -27,17 +27,18 @@ v1 到 v2 按 Codex 八维评审（2026-09-23，gpt-6-astra，xhigh）与第三�
 - `repo-task-blas-accept` —— `scripts/accept.py` 在 A2 直接 import 上面那个 `package.py`，
   自己一行采集代码都没有；它消费量具产出的轮 JSON。
 
-### 1.1 sparse 共用这条实现路径
+### 1.1 sparse 不归本 skill 管
 
-**本轮不修改任何 sparse 专属代码，但 sparse 的运行时行为会跟着变。** 这两件事必须分开说。
+**范围只有 ops-blas**（Mr.0 裁定 2026-09-24）。两个 skill 的 `description` 原先写着
+ops-sparse 与 aclsparse，本轮一并收窄——`description` 是 skill 发现的触发面，
+写着就会被 sparse 相关的请求选中。
 
-`repo-task-blas-accept` 的适用范围本来就写着 ops-sparse 与 aclsparse，而
-`render_runtime()` 对所有 `harness_profile`（`blas` 与 `sparse_frame`）渲染**同一份**
-性能模板。换模板就是同时换掉 sparse 新渲染出的量具；撤 warmup 与撤落卡核对同样作用在
-共享的消费路径上。
+**触发面收窄了，机制面没动。** `DEVICE_BIND_MODES` 的 `sparse_frame` 档、
+`run-chain.md` 的入口头映射、`retest-protocol.md` 的绑卡表、`facts-schema.md` 的
+`harness_profile` 字段、两个示例 `gen_csv.py` 里的 registry 条目全部原样保留。
 
-sparse 因此要进兼容性检查与回归范围。想让 sparse 行为完全不变就得另做实现隔离，
-那等于长期维护双后端分支，按复杂度维不划算，本轮不做。
+不动的理由是 `feature/sparse-r1` 分支正在用这套机制，拔掉会对撞；而且它们连着
+四条测试与两份逐字节渲染的示例。要不要清理是另一件事，记在待办里。
 
 不碰 `repo-task-atk-accept` 与 `repo-task-case-gen`。
 
