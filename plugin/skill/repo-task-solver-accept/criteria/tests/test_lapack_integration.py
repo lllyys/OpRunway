@@ -5,8 +5,10 @@
 seed = 20250912+n）；ratio_cpu 用「被测即 CPU 参考链路」的自指定义
 （README 2.3 potrs 同款），并用同一 residual_ratio 实现计算（spec §2.4）。
 
-2.3′ 后主判目标随卡走（potrf 还原对 A、potri 双目标）；真实链路允许 layer1
-边缘元素挂靠兜底，健康链路残差在底噪水平，数值终审仍为 PASS。
+HT-7 后主判目标随卡走（potrf F vs golden 直审、还原降诊断；potri 收单目标
+ainv_vs_golden）；三算子主判基准统一 golden64（judge 统计前按 FP32 RNE 收窄，
+与 golden32 判定逐位等价）。真实链路允许 layer1 边缘元素挂靠兜底，健康链路
+残差在底噪水平，数值终审仍为 PASS。
 """
 import pytest
 
@@ -40,16 +42,16 @@ def chain():
 
 
 def test_spotrf_real_chain_numeric_pass(chain):
-    golden32 = np.tril(chain["fg64"]).astype(np.float32)   # 存储侧半三角另侧置 0
+    golden64 = np.tril(chain["fg64"])                      # 存储侧半三角另侧置 0
     ratio_cpu = residual_ratio("DPOT01", a=chain["a64"],
                                factor=chain["f32"], uplo="L")   # s 链路自指
-    case = {"A64": chain["a64"], "A32": chain["a32"], "golden32": golden32,
+    case = {"A64": chain["a64"], "A32": chain["a32"], "golden64": golden64,
             "uplo": "L", "ratio_cpu": ratio_cpu, "ratio_cpu_status": "ok"}
     v = verdict.judge(cards_cholesky.get_card("spotrf"), case,
                       {"out32": chain["f32"], "info": 0, "status": "ok"})
     assert v["error"] is None
-    assert v["layer1"]["targets"][0]["name"] == "recon_vs_A"    # 2.3′ 主判目标
-    assert v["layer1"]["diagnostics"][0]["name"] == "factor_vs_golden"
+    assert v["layer1"]["targets"][0]["name"] == "factor_vs_golden"   # HT-7 直审主判
+    assert v["layer1"]["diagnostics"][0]["name"] == "recon_vs_A"
     assert v["numeric"] == "PASS"
     assert v["formal"] == "PENDING_RULING"
 
@@ -61,10 +63,10 @@ def test_spotrs_real_chain_numeric_pass(chain):
     b32 = b64.astype(np.float32)
     x32, info = spotrs(chain["f32"], b32.copy(), lower=1)
     assert info == 0
-    golden32 = np.linalg.solve(chain["a64"], b64).astype(np.float32)
+    golden64 = np.linalg.solve(chain["a64"], b64)
     ratio_cpu = residual_ratio("DPOT02", a=chain["a32"], b=b32, x=x32)  # 自指
     case = {"A64": chain["a64"], "A32": chain["a32"], "B64": b64, "B32": b32,
-            "golden32": golden32, "uplo": "L",
+            "golden64": golden64, "uplo": "L",
             "ratio_cpu": ratio_cpu, "ratio_cpu_status": "ok"}
     v = verdict.judge(cards_cholesky.get_card("spotrs"), case,
                       {"out32": x32, "info": 0, "status": "ok"})
@@ -78,15 +80,15 @@ def test_spotri_real_chain_numeric_pass(chain):
     assert info == 0
     cg64, info_g = dpotri(chain["fg64"].copy(), lower=1)
     assert info_g == 0
-    golden32 = np.tril(cg64).astype(np.float32)            # 存储侧半三角另侧置 0
+    golden64 = np.tril(cg64)                               # 存储侧半三角另侧置 0
     ratio_cpu = residual_ratio("DPOT03", a=chain["a32"],
                                ainv=np.tril(c32), uplo="L")     # 自指
-    case = {"A64": chain["a64"], "A32": chain["a32"], "golden32": golden32,
+    case = {"A64": chain["a64"], "A32": chain["a32"], "golden64": golden64,
             "uplo": "L", "ratio_cpu": ratio_cpu, "ratio_cpu_status": "ok"}
     v = verdict.judge(cards_cholesky.get_card("spotri"), case,
                       {"out32": np.tril(c32), "info": 0, "status": "ok"})
     assert v["error"] is None
     names = [t["name"] for t in v["layer1"]["targets"]]
-    assert names == ["ainv_vs_golden", "a_ainv_vs_identity"]    # 2.3′ 双目标
+    assert names == ["ainv_vs_golden"]     # HT-7 收单目标（A·A⁻¹ 留 DPOT03 复核层）
     assert v["numeric"] == "PASS"
     assert v["formal"] == "PENDING_RULING"

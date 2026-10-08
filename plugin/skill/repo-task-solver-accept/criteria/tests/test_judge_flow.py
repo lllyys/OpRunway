@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""judge 数值判定流转测试（spotrs 卡为载体）：双门（HT-1 动态锚点）、T3、
-±inf/NaN 收窄口径、上浮豁免、错误面。
+"""judge 数值判定流转测试（spotrs 卡为载体）：双门（HT-1 动态锚点）、
+±inf/NaN 收窄口径、相对线/均值线豁免与缺 mean 兼容（HT-3）、错误面。
 
-容差主套按 spec §2.3′ 是任务书表（rtol 2^-10 / atol 2^-16），标准表 2^-13 为对照。
+容差按 HT-14（issue C1 裁「用新版」）收成标准表单套 rtol = atol = 2^-13，
+原任务书表 2^-10/2^-16 与 T3 双轨已拆除。
 所有用例构造在 FP64 上用精确可表示或可独立手算的数。内核对 dtype 不敏感
 （内部统一升 FP64），故不必先降 FP32 再比。
 """
@@ -18,13 +19,14 @@ import verdict
 CARD = cards_cholesky.get_card("spotrs")
 
 
-def _case(a, b, golden, ratio_cpu=0.0, status="ok"):
+def _case(a, b, golden, ratio_cpu=0.0, status="ok", ratio_cpu_mean=0.0):
     return {
         "A32": np.asarray(a, dtype=np.float64),
         "B32": np.asarray(b, dtype=np.float64),
-        "golden32": np.asarray(golden, dtype=np.float64),
+        "golden64": np.asarray(golden, dtype=np.float64),
         "ratio_cpu": ratio_cpu,
         "ratio_cpu_status": status,
+        "ratio_cpu_mean": ratio_cpu_mean,   # HT-3：potrs 阈值第二支
     }
 
 
@@ -52,14 +54,13 @@ def test_positive_numeric_pass_formal_pending():
     assert l1["max_abs"] == 0.0
     assert l1["pass"] is True
     assert l1["targets"][0]["name"] == "x_vs_golden"        # spotrs 目标不变（2.3′）
-    assert l1["standard"]["matched_ratio"] == 1.0           # 对照套并列展示
     assert l1["diagnostics"] == []                          # spotrs 无诊断项
 
 
 def test_double_gate_matched_ratio_counterexample():
     """双门反例（门 1）：max_abs 门（fixed 解释）满足、通过率门不满足 → layer1 不过。
 
-    n=100 单位阵系统，100 元素里 2 个加 2e-3（> 任务书 tol 2^-16+2^-10≈9.92e-4，
+    n=100 单位阵系统，100 元素里 2 个加 2e-3（> 单套 tol 2^-13+2^-13≈2.44e-4，
     但 ≤ fixed 上限 1e-2）→ matched_ratio=0.98 < 0.99。"""
     n = 100
     a = np.eye(n)
@@ -74,13 +75,13 @@ def test_double_gate_matched_ratio_counterexample():
     assert l1["max_abs"] == pytest.approx(2e-3, rel=1e-9)
     assert l1["max_abs"] <= l1["max_abs_limit"]            # abs 门本身是过的
     assert l1["pass"] is False                             # 败在通过率门
-    assert v["flags"] == []                                # 两套容差结论一致（都不过）
+    assert v["flags"] == []                                # 无 flag 可记（T3 已拆）
     fb = v["fallback"]
     assert fb["ran"] is True
     assert fb["eps"] == "2^-24"            # 残差 ratio 的归一基准披露（issue A4）
     # 手算：‖r‖₁=2·2e-3、‖x‖₁=100+4e-3、‖A‖₁=1 → ratio = 4e-3·2^24/100.004 ≈ 671.06
     assert fb["ratio"] == pytest.approx(4e-3 * 2 ** 24 / (100 + 4e-3), rel=1e-9)
-    assert v["numeric"] == "FAIL"                          # 671.06 > 30
+    assert v["numeric"] == "FAIL"                          # 671.06 > 阈值 0（HT-3 双零）
 
 
 def test_double_gate_max_abs_counterexample():
@@ -100,7 +101,7 @@ def test_double_gate_max_abs_counterexample():
     assert l1["g_low"] == 1.0                              # 锚点即离群点的收窄 golden
     assert l1["max_abs"] > l1["max_abs_limit"]             # 兜底 1e-2 主导的上限
     assert l1["pass"] is False                             # 败在 abs 门
-    assert v["flags"] == []                                # 两套容差结论一致
+    assert v["flags"] == []                                # 无 flag 可记（T3 已拆）
     fb = v["fallback"]
     assert fb["ran"] is True
     # 手算：‖r‖₁=0.5、‖x‖₁=200.5、‖A‖₁=1 → ratio = 0.5·2^24/200.5 ≈ 41838.9
@@ -108,51 +109,49 @@ def test_double_gate_max_abs_counterexample():
     assert v["numeric"] == "FAIL"
 
 
-def test_t3_standard_set_disagreement_only():
-    """T3 分歧例（纯 T3）：golden 为 0 的元素误差 5e-5——超任务书 atol（2^-16≈1.53e-5）
-    但在标准表 atol（2^-13≈1.22e-4）内 → 主套（任务书）判挂、对照套（标准表）判过
-    → flag T3。
-
-    fallback 手算：r=[0, −4·5e-5] → ‖r‖₁=2e-4；‖x‖₁=1+5e-5；‖A‖₁=4 →
-    ratio = 2e-4·2^24/(4·(1+5e-5)) ≈ 838.8 > 30 → 数值 FAIL。"""
+def test_tolerance_boundary_within_passes():
+    """单套容差通过侧（HT-14 重标定，原 T3 分歧例位）：golden 为 0 的元素误差
+    5e-5 < atol（2^-13≈1.22e-4）→ matched 1.0、layer1 过即终审（不走兜底）、
+    数值 PASS。原双套口径下该误差超旧任务书 atol（2^-16）会挂——重标定钉住
+    「标准表单套」的新边界。"""
     golden = np.array([[1.0], [0.0]])
     b = A @ golden                                          # = [[2],[0]]
     out = golden.copy()
     out[1, 0] += 5e-5
     v = verdict.judge(CARD, _case(A, b, golden), _dut(out))
     l1 = v["layer1"]
-    assert l1["matched_ratio"] == 0.5                      # 主套（任务书）：1/2 不符
-    assert l1["standard"]["matched_ratio"] == 1.0          # 对照套（标准表）：全过
-    assert l1["pass"] is False
-    assert l1["standard"]["pass"] is True                  # 对照套判过
-    assert v["flags"] == ["T3"]
-    fb = v["fallback"]
-    assert fb["ran"] is True                               # 主套不过 → 走兜底
-    assert fb["ratio"] == pytest.approx(
-        (4 * 5e-5) * 2 ** 24 / (4 * (1 + 5e-5)), rel=1e-9)          # 手算
-    assert fb["threshold"] == 30.0
-    assert v["numeric"] == "FAIL"
+    assert l1["matched_ratio"] == 1.0                       # 5e-5 在单套 atol 内
+    assert l1["pass"] is True
+    assert v["flags"] == []
+    assert v["fallback"]["ran"] is False
+    assert v["numeric"] == "PASS"
 
 
-def test_t3_main_pass_standard_fail_no_fallback():
-    """T3 分歧例（主套过侧）：误差 3e-4 在标准表 tol（2^-13·2≈2.44e-4）外、任务书
-    tol（2^-16+2^-10≈9.92e-4）内，且 ≤ 上限（g_low=1 → 兜底 1e-2 主导）→ 主套
-    layer1 过（终审、不走兜底）、对照套判挂 → 记 T3、数值 PASS。"""
+def test_tolerance_boundary_outside_falls_back():
+    """单套容差挂起侧（HT-14 重标定，原 T3 分歧例位）：误差 3e-4 > 单套
+    tol（2^-13·2≈2.44e-4）且 ≤ max_abs 兜底 1e-2 → 败在通过率门、走兜底。
+
+    fallback 手算（DPOT02 形：残差 = A·x−b）：r=[2·3e-4, 0] → ‖r‖₁=6e-4；
+    ‖x‖₁=3+3e-4；‖A‖₁=4 → ratio = 6e-4·2^24/(4·(3+3e-4)) ≈ 838.78 > 阈值 0
+    （HT-3 双零）→ FAIL。"""
     out = GOLDEN.copy()
     out[0, 0] += 3e-4
     v = verdict.judge(CARD, _case(A, B, GOLDEN), _dut(out))
     l1 = v["layer1"]
-    assert l1["matched_ratio"] == 1.0                      # 主套（任务书）：全过
-    assert l1["standard"]["matched_ratio"] == 0.5          # 对照套：1/2 元素不符
-    assert l1["pass"] is True and l1["standard"]["pass"] is False
-    assert v["flags"] == ["T3"]
-    assert v["fallback"]["ran"] is False                   # layer1 过即终审
-    assert v["numeric"] == "PASS"
+    assert l1["matched_ratio"] == 0.5                       # 3e-4 在单套 tol 外
+    assert l1["max_abs"] <= l1["max_abs_limit"]             # abs 门过，败在通过率门
+    assert l1["pass"] is False
+    assert v["flags"] == []
+    fb = v["fallback"]
+    assert fb["ran"] is True
+    assert fb["ratio"] == pytest.approx(
+        6e-4 * 2 ** 24 / (4 * (3 + 3e-4)), rel=1e-9)        # 手算
+    assert v["numeric"] == "FAIL"
 
 
 def test_max_abs_dynamic_anchor_large_golden_passes():
     """HT-1 分界例：golden=1e4 处造 2e-2 误差——32·ULP(1e4)=32·2^-10=3.125e-2 ≥ 2e-2
-    → 新口径 layer1 过（旧固定 1e-2 上限会挂）；两套容差都在 tol 内 → 无 flag。"""
+    → 新口径 layer1 过（旧固定 1e-2 上限会挂）；误差在单套容差内 → 无 flag。"""
     golden = np.array([[1e4], [1e4]])
     b = A @ golden
     out = golden.copy()
@@ -171,7 +170,7 @@ def test_max_abs_dynamic_anchor_large_golden_passes():
 
 def test_max_abs_floor_dominates_small_golden():
     """HT-1 兜底例：g_low=1 处 32·ULP=32·2^-23≈3.8e-6 ≪ 兜底 1e-2 → 上限由兜底值
-    主导；误差 2e-4 超 32·ULP 项但在兜底与两套容差内 → PASS、无 flag。"""
+    主导；误差 2e-4 超 32·ULP 项但在兜底与单套容差内 → PASS、无 flag。"""
     out = GOLDEN.copy()
     out[0, 0] += 2e-4
     v = verdict.judge(CARD, _case(A, B, GOLDEN), _dut(out))
@@ -192,7 +191,7 @@ def test_g_low_anchors_max_error_point_not_largest_golden():
     b = A @ golden
     out = golden.copy()
     out[0, 0] += 5e-2
-    v = verdict.judge(CARD, _case(A, b, golden), _dut(out))
+    v = verdict.judge(CARD, _case(A, b, golden, ratio_cpu=0.1), _dut(out))
     l1 = v["layer1"]
     assert l1["matched_ratio"] == 1.0                      # 两套容差内，只挂 abs 门
     assert l1["g_low"] == 10000.0
@@ -200,7 +199,8 @@ def test_g_low_anchors_max_error_point_not_largest_golden():
     assert l1["pass"] is False
     fb = v["fallback"]
     assert fb["ran"] is True
-    # 手算：‖r‖₁=2·5e-2、‖x‖₁=1e4+5e-2+1e6、‖A‖₁=4 → ratio ≈ 0.415 ≤ 30
+    assert fb["threshold"] == pytest.approx(0.5)           # max(5·0.1, 3·0)（HT-3）
+    # 手算：‖r‖₁=2·5e-2、‖x‖₁=1e4+5e-2+1e6、‖A‖₁=4 → ratio ≈ 0.415 ≤ 0.5
     assert fb["ratio"] == pytest.approx(
         0.1 * 2 ** 24 / (4 * (1e4 + 5e-2 + 1e6)), rel=1e-9)
     assert v["numeric"] == "PASS"                          # 兜底为数值终审
@@ -286,10 +286,11 @@ def test_all_inf_points_vacuous_abs_gate():
     assert v["numeric"] == "PASS"
 
 
-def test_floatup_threshold_exempts():
-    """手算 #5（上浮豁免例）：n=100 单位阵系统 2 元素加 2e-3 → 通过率门挂（0.98）
-    走兜底，兜底 ratio = 4e-3·2^24/(100+4e-3) ≈ 671.06。地板 30 时判 FAIL；
-    ratio_cpu=400 → 阈值 max(2·400, 30)=800，上浮豁免 → 数值 PASS。"""
+def test_potrs_relative_line_exempts():
+    """手算 #5（相对线豁免例，HT-3 重标定，原上浮式豁免例位）：n=100 单位阵系统
+    2 元素加 2e-3 → 通过率门挂（0.98）走兜底，兜底 ratio = 4e-3·2^24/(100+4e-3)
+    ≈ 671.06。双零阈值（ratio_cpu=0、mean=0）判 FAIL；ratio_cpu=400 → 相对线
+    5·400=2000 豁免 → 数值 PASS。"""
     n = 100
     a = np.eye(n)
     golden = np.ones((n, 1))
@@ -299,16 +300,79 @@ def test_floatup_threshold_exempts():
     out[1, 0] += 2e-3
     expected_ratio = 4e-3 * 2 ** 24 / (100 + 4e-3)         # 手算 ≈ 671.06
 
-    v_floor = verdict.judge(CARD, _case(a, b, golden, ratio_cpu=0.0), _dut(out.copy()))
-    assert v_floor["layer1"]["pass"] is False              # 通过率门挂 → 走兜底
-    assert v_floor["fallback"]["threshold"] == 30.0
-    assert v_floor["fallback"]["ratio"] == pytest.approx(expected_ratio, rel=1e-12)
-    assert v_floor["numeric"] == "FAIL"
+    v_zero = verdict.judge(CARD, _case(a, b, golden, ratio_cpu=0.0), _dut(out.copy()))
+    assert v_zero["layer1"]["pass"] is False               # 通过率门挂 → 走兜底
+    assert v_zero["fallback"]["threshold"] == 0.0          # max(5·0, 3·0)
+    assert v_zero["fallback"]["ratio"] == pytest.approx(expected_ratio, rel=1e-12)
+    assert v_zero["numeric"] == "FAIL"
 
     v_up = verdict.judge(CARD, _case(a, b, golden, ratio_cpu=400.0), _dut(out.copy()))
-    assert v_up["fallback"]["threshold"] == 800.0          # max(2·400, 30)
+    assert v_up["fallback"]["threshold"] == 2000.0         # max(5·400, 3·0)
     assert v_up["fallback"]["ratio"] == pytest.approx(expected_ratio, rel=1e-12)
     assert v_up["numeric"] == "PASS"
+
+
+def test_potrs_mean_line_dominates():
+    """HT-3 均值线例：单 case ratio_cpu 偏低（0.1）而算子均值偏高（mean=200）→
+    阈值取均值线 3·200=600；兜底 ratio ≈ 671.06 超线 → FAIL（若只看相对线
+    5·0.1=0.5 会误判，均值线托住整体偏难的用例集）。"""
+    n = 100
+    a = np.eye(n)
+    golden = np.ones((n, 1))
+    b = golden.copy()
+    out = golden.copy()
+    out[0, 0] += 2e-3
+    out[1, 0] += 2e-3
+    v = verdict.judge(CARD, _case(a, b, golden, ratio_cpu=0.1, ratio_cpu_mean=200.0),
+                      _dut(out.copy()))
+    assert v["fallback"]["threshold"] == 600.0             # max(5·0.1, 3·200)
+    assert v["numeric"] == "FAIL"
+
+
+def test_missing_mean_single_line_passes():
+    """缺 mean 兼容（HT-3，plan 定义口径）侧 1：case 无 ratio_cpu_mean，兜底残差
+    ≈ 671.06 ≤ 单支 5·ratio_cpu=1000（ratio_cpu=200）→ 数值 PASS，证据注明
+    单支兼容口径。"""
+    n = 100
+    a = np.eye(n)
+    golden = np.ones((n, 1))
+    b = golden.copy()
+    out = golden.copy()
+    out[0, 0] += 2e-3
+    out[1, 0] += 2e-3
+    case = _case(a, b, golden, ratio_cpu=200.0)
+    del case["ratio_cpu_mean"]                             # v2 包无 mean
+    v = verdict.judge(CARD, case, _dut(out))
+    assert v["error"] is None
+    fb = v["fallback"]
+    assert fb["ran"] is True
+    assert fb["threshold"] == 1000.0                       # 单支 5·ratio_cpu
+    assert "单支" in fb["formula"]
+    assert fb["pass"] is True
+    assert v["numeric"] == "PASS"
+
+
+def test_missing_mean_beyond_line_insufficient():
+    """缺 mean 兼容侧 2（fail-closed）：残差超单支 5·ratio_cpu 线 → 不判 FAIL，
+    记证据不足（error 指认缺 ratio_cpu_mean、待 v3 包），layer1 证据保留。"""
+    n = 100
+    a = np.eye(n)
+    golden = np.ones((n, 1))
+    b = golden.copy()
+    out = golden.copy()
+    out[0, 0] += 2e-3
+    out[1, 0] += 2e-3
+    case = _case(a, b, golden, ratio_cpu=0.0)
+    del case["ratio_cpu_mean"]
+    v = verdict.judge(CARD, case, _dut(out))
+    fb = v["fallback"]
+    assert fb["ran"] is True
+    assert fb["threshold"] is None and fb["pass"] is None  # 两支公式不可算
+    assert fb["formula"] == thresholds.POTRF_POTRS_FORMULA
+    assert v["numeric"] == "FAIL"
+    assert v["error"] is not None
+    assert "证据不足" in v["error"] and "ratio_cpu_mean" in v["error"] and "v3" in v["error"]
+    assert v["layer1"] is not None
 
 
 def test_fallback_unavailable_prep_failed():
@@ -366,7 +430,7 @@ def test_judge_never_raises_on_garbage_case():
     """judge 不外抛：case_arrays 缺件收敛为 error verdict（fail-closed）。"""
     v = verdict.judge(CARD, {}, _dut(np.ones((2, 1))))
     assert v["numeric"] == "FAIL" and v["layer1"] is None
-    assert v["error"] is not None and "golden32" in v["error"]
+    assert v["error"] is not None and "golden64" in v["error"]
 
 
 def test_formal_never_pass_across_outcomes():

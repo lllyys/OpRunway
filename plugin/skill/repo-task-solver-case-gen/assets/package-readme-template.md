@@ -55,8 +55,8 @@ python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 
    python3 verify_perf.py --package . --dut-perf my_perf.json --report perf_report.json
    ```
 
-   输出为逐 case 比值（被测 / 参考），仅作参考；正式性能达标按任务书的
-   T_A100 机制另行执行。
+   输出为逐 case 比值（被测 / 参考），正式性能达标判据按任务书执行
+   （T_NPU ≤ T_GPU数据 / 0.35）。
 
 ## 重新生成数据
 

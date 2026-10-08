@@ -27,6 +27,21 @@ fail-closed）；缺登记同样按阻断记证据不足。
 时计算参考比值（方向 被测/基线，基线取 perf_baseline 的 avg_ms/min_ms 并报），
 参考项记待裁（正式门走任务书机制，T1）；文件不存在则参考项如实记证据不足。
 
+S3 批量增量（S3 spec §4/§6，D3 卡）：operator 支持集扩入批量四算子；被测输出的
+info 读取按接口角色分型改形状感知——potrfBatched 族交付 (batch,) infoArray，原
+`.item()` 强转对数组会炸，现数组保数组、0 维转 int，分型合法性由 criteria 的批量
+校验裁决。批量卡判定经 criteria/batched_parallel.judge_parallel（--jobs>1 时按
+矩阵区间多进程分块，结果与串行逐位相同；缺省 1 即串行，旧六包行为不变）。
+批量后补包为纯脚本形态（包内无 cases npz，S3 spec §5）：accept_run 消费包内数组的
+通路对其如实记证据不足，批量数值展示走 stream_check / verify 副本的现场重生成通路；
+HT-2 起 A0 抽样批量条目（materialize=gen+sample_map）同一形态，数值判定经
+criteria/batched_a0 两层判定（先余槽 bit-wise 一致性后 rep_slot 逐内容三层）。
+
+HT-8：case_purpose=="info" 的条目（info 契约用例）走独立结论通路——judge 按
+case_purpose 分流（verdict._judge_info_inner，只比 info==k_expected，不进残差），
+期望项出 KIND_INFO（与接口精度各出独立结论，HT-12 口径）；包内存在 info 用例时，
+固定占位的 KIND_INFO 项（模拟被测未执行场景）由逐 case 结论替代。
+
 退出码：0 = report 已写出（含存在 FAIL/证据不足的情形——结论在 report 里，不用退出
 码表达）；2 = 包不可用（manifest/index 缺失或不可解析、operator 不在支持集），此时
 不产出 report。
@@ -42,7 +57,7 @@ from pathlib import Path
 import numpy as np
 
 TOOL = "accept_run.py"
-TOOL_VER = "s1-E1"
+TOOL_VER = "s3-D4"  # HT-8：info 用例分流（KIND_INFO 独立结论）；承 s3-D3
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 _CRITERIA_DIR = _SCRIPTS_DIR.parent / "criteria"
@@ -51,9 +66,10 @@ for _p in (str(_SCRIPTS_DIR), str(_CRITERIA_DIR)):
         sys.path.insert(0, _p)
 
 import expectations as exp          # noqa: E402  (同目录期望集模块)
+import batched_parallel             # noqa: E402  (criteria judge 的统一入口：单矩阵
+                                    #  直通 verdict.judge，批量卡支持矩阵区间多进程分块)
 import cards_cholesky               # noqa: E402  (criteria 判据卡)
 import thresholds                   # noqa: E402  (criteria 阈值常量, CRITERIA_VER)
-import verdict as verdict_mod       # noqa: E402  (criteria judge)
 
 
 def _fail(msg):
@@ -126,6 +142,13 @@ def load_case_arrays(package, entry):
     返回 (dict, None) 或 (None, 原因)。"""
     npz_rel = entry.get("npz")
     if not npz_rel:
+        if entry.get("materialize") == "gen":
+            kind = ("A0 抽样批量条目（materialize=gen+sample_map，无 npz，HT-2）"
+                    if "sample_map" in entry else
+                    "纯脚本包条目（materialize=gen，S3 spec §5）")
+            return None, (f"{kind}：包内无数组，accept_run 不做现场重生成；数值判定"
+                          "走 stream_check 或包内 verify 副本的现场重生成通路"
+                          "（批量 A0 经 criteria/batched_a0 两层判定）")
         return None, "index 条目无 npz 路径"
     path = package / npz_rel
     if not path.is_file():
@@ -138,6 +161,9 @@ def load_case_arrays(package, entry):
     arrays["uplo"] = entry.get("uplo")
     arrays["ratio_cpu"] = entry.get("ratio_cpu")
     arrays["ratio_cpu_status"] = entry.get("ratio_cpu_status")
+    for meta in ("case_purpose", "k_expected"):   # HT-8：info 用例 judge 分流依据
+        if entry.get(meta) is not None:
+            arrays[meta] = entry[meta]
     return arrays, None
 
 
@@ -152,9 +178,14 @@ def load_dut_out(dut_dir, case_id):
             missing = [k for k in ("out32", "info", "status") if k not in z.files]
             if missing:
                 return None, f"被测输出不完整: 缺 {missing}"
+            # info 形状感知（S3 spec §6）：potrfBatched 族交付 (batch,) infoArray，
+            # 数组保数组、0 维转 int（原 .item() 强转对数组会炸）；分型合法性由
+            # criteria 的批量校验裁决，此处不预判角色。
+            info = np.asarray(z["info"])
+            info = int(info.item()) if info.ndim == 0 else np.array(info)
             return {
                 "out32": z["out32"],
-                "info": int(np.asarray(z["info"]).item()),
+                "info": info,
                 "status": str(np.asarray(z["status"]).item()),
             }, None
     except Exception as exc:
@@ -165,10 +196,19 @@ def load_dut_out(dut_dir, case_id):
 # 期望集装配
 # ---------------------------------------------------------------------------
 
-def accuracy_items(package, dut_dir, operator, index_cases, baseline_rows,
-                   mismatch_blocking):
-    """逐 case 接口精度项：随包 case 送审 judge，未生成/被阻断/证据缺失如实记。"""
+def accuracy_items(package, dut_dir, operator, index, baseline_rows,
+                   mismatch_blocking, jobs=1):
+    """逐 case 接口精度项：随包 case 送审 judge，未生成/被阻断/证据缺失如实记。
+    批量卡经 batched_parallel.judge_parallel（jobs>1 矩阵区间多进程分块，结果与
+    串行逐位相同）；单矩阵卡该入口直通 verdict.judge，行为不变。
+
+    ratio_cpu_mean 从 index 顶层按算子注入 case_arrays（HT-3 消费面；mean 本体
+    由 HT-4 在发包侧预计算固化，index 无该键时注入 None → potrf/potrs 兜底走
+    单支兼容口径，verdict._run_fallback）。批量卡下 mean 为算子级标量，经
+    passthrough 带入每个矩阵（verdict._judge_batched_inner）。"""
     card = cards_cholesky.get_card(operator)
+    op_mean = (index.get("ratio_cpu_mean") or {}).get(operator)
+    index_cases = index.get("cases")
     index_blocked = next(
         (rel for rel in ("cases/index.json",) if rel in mismatch_blocking), None)
     items, flags = [], set()
@@ -179,28 +219,36 @@ def accuracy_items(package, dut_dir, operator, index_cases, baseline_rows,
             items.append(exp.accuracy_item_ungenerated(case_id))
             ungenerated += 1
             continue
+        # HT-8：info 契约用例的证据不足也走 KIND_INFO（独立结论不混入接口精度）
+        is_info = entry.get("case_purpose") == "info"
+        insuff = exp.info_item_insufficient if is_info else exp.accuracy_item_insufficient
         if index_blocked:
-            items.append(exp.accuracy_item_insufficient(
+            items.append(insuff(
                 case_id, "指纹错配",
                 f"{index_blocked} {mismatch_blocking[index_blocked]}，"
                 "阻断全部依赖 index 的接口精度结论（spec §2.2）"))
             continue
         npz_rel = entry.get("npz")
         if npz_rel and npz_rel in mismatch_blocking:
-            items.append(exp.accuracy_item_insufficient(
+            items.append(insuff(
                 case_id, "指纹错配",
                 f"{npz_rel} {mismatch_blocking[npz_rel]}，阻断该 case 结论（spec §2.2）"))
             continue
         arrays, why = load_case_arrays(package, entry)
         if arrays is None:
-            items.append(exp.accuracy_item_insufficient(case_id, "证据缺失", why))
+            items.append(insuff(case_id, "证据缺失", why))
             continue
+        arrays["ratio_cpu_mean"] = op_mean     # HT-3：potrf/potrs 阈值第二支消费
         dut, why = load_dut_out(dut_dir, case_id)
         if dut is None:
-            items.append(exp.accuracy_item_insufficient(case_id, "被测输出缺失", why))
+            items.append(insuff(case_id, "被测输出缺失", why))
             continue
-        v = verdict_mod.judge(card, arrays, dut)
-        item = exp.accuracy_item_from_verdict(case_id, v)
+        v = batched_parallel.judge_parallel(card, arrays, dut, jobs=jobs)
+        if is_info:
+            # HT-8：info 契约用例出独立 KIND_INFO 结论（不混入接口精度项）
+            item = exp.info_item_from_verdict(case_id, v)
+        else:
+            item = exp.accuracy_item_from_verdict(case_id, v)
         flags.update(v.get("flags") or [])
         items.append(item)
     return items, flags, ungenerated
@@ -257,11 +305,12 @@ def perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking):
 # 主流程
 # ---------------------------------------------------------------------------
 
-def build_report(package, dut_dir):
+def build_report(package, dut_dir, jobs=1):
     manifest = _load_json(package / "manifest.json", "manifest.json")
     operator = manifest.get("operator")
-    if operator not in cards_cholesky.OPS:
-        _fail(f"manifest.operator={operator!r} 不在支持集 {cards_cholesky.OPS}")
+    supported = cards_cholesky.OPS + cards_cholesky.BATCHED_OPS
+    if operator not in supported:
+        _fail(f"manifest.operator={operator!r} 不在支持集 {supported}")
     index = _load_json(package / "cases" / "index.json", "cases/index.json")
     index_cases = index.get("cases")
     if not isinstance(index_cases, list):
@@ -273,9 +322,15 @@ def build_report(package, dut_dir):
     mismatch_blocking, warnings = check_fingerprints(package, manifest)
 
     acc_items, verdict_flags, ungenerated = accuracy_items(
-        package, dut_dir, operator, index_cases, baseline_rows, mismatch_blocking)
+        package, dut_dir, operator, index, baseline_rows, mismatch_blocking,
+        jobs=jobs)
     p_items = perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking)
-    items = acc_items + p_items + exp.fixed_insufficient_items(operator)
+    fixed = exp.fixed_insufficient_items(operator)
+    if any(it["kind"] == exp.KIND_INFO for it in acc_items):
+        # HT-8：包内已有逐 case 的 info 契约结论，固定占位项（「未执行该场景」）
+        # 由其替代——两类并存会自相矛盾。
+        fixed = [it for it in fixed if it["kind"] != exp.KIND_INFO]
+    items = acc_items + p_items + fixed
 
     # flags：T 类分歧显式携带（spec §5）；T1 恒在（性能正式门待裁）；告警仅告警。
     flags = sorted(verdict_flags) + ["T1"] + sorted(warnings)
@@ -302,6 +357,9 @@ def main(argv=None):
     ap.add_argument("--package", required=True, help="算子包目录（spec §2.2）")
     ap.add_argument("--dut-out", required=True, help="被测输出目录（<case_id>.npz）")
     ap.add_argument("--report", required=True, help="输出 report.json 路径")
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="批量卡逐矩阵判定的多进程分块数（缺省 1=串行；"
+                         "分块结果与串行逐位相同，S3 并行裁定）")
     args = ap.parse_args(argv)
 
     package, dut_dir = Path(args.package), Path(args.dut_out)
@@ -310,7 +368,7 @@ def main(argv=None):
     if not dut_dir.is_dir():
         _fail(f"被测输出目录不存在: {dut_dir}")
 
-    report = build_report(package, dut_dir)
+    report = build_report(package, dut_dir, jobs=args.jobs)
     out = Path(args.report)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as fh:

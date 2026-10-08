@@ -16,6 +16,10 @@
 - ``bench_key = {"file": 相对 bench-dir 路径, "entry": 该文件 cases 数组 0 起序号}``，
   定位后与 canonical 的 n/uplo/lda（potrs 另含 nrhs/ldb）逐字段核对，不符即报错退出；
   uplo 按 LOWER→L、UPPER→U 对照；
+- batched 四算子（S3 spec §1，canonical 条目带 batch 字段）：匹配键加 batch；
+  nrhs 不核对——bench_result.json 无该字段（cu 固定 nrhs=1），canonical 的 1 是冻结时
+  显式写入。batched 册的 bench_key.file 相对两册共同父目录（canonical 的
+  task_dir.bench_root），``--bench-dir`` 传该父目录即可一次跑四算子；
 - bench 内与定位条目全参数相同的重复条目：取首条的耗时并记 ``dup_count``（含自身）；
   bench_key 指向非首现条目时告警并仍取首条。
 
@@ -74,8 +78,13 @@ def load_cases(canonical_path):
 def check_entry_matches(case, entry):
     """核对定位到的 bench 条目与 canonical 参数，返回不符描述清单（空表示一致）。"""
     expected = [("n", case.get("n")), ("lda", case.get("lda"))]
+    batched = case.get("batch") is not None
+    if batched:
+        expected.append(("batch", case.get("batch")))   # S3 spec §1：匹配键加 batch
     for field in ("nrhs", "ldb"):
         if case.get(field) is not None:
+            if field == "nrhs" and batched:
+                continue    # batched bench 无 nrhs 字段（cu 固定 1，冻结时显式写入 canonical）
             expected.append((field, case.get(field)))
     mismatches = [
         f"{field}: canonical={want!r} bench={entry.get(field)!r}"
