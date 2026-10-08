@@ -4,8 +4,8 @@
 的补充信息。地位：**用户裁定级输入**，与任务书同为设计依据；与既有档案冲突时以本文件为准，
 并回写订正到对应文档。
 
-关联档案：裁决与两 skill 分工见 `solver-0923-context.md` 第 8′ 节；实施分期与十二条硬边界见
-`solver-plan-v3.md`；精度标准侧参考件见 `repos/solver_tasks-main/交接文档.md`。
+关联档案在原工作区、未随交接包；其关键结论已并入交接看板与 plan，残差链蓝本见
+`standards/cholesky_precision-README.md`。
 
 ## 条目
 
