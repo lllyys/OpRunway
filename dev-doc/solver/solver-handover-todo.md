@@ -2,6 +2,9 @@
 
 > 2026-10-08 接管注：交接方不再 push，其本地 git 历史（f5322b4 等）不可得；回交快照（已导入 repos/repo-task-atk-test-evolve 的 evolve-1008）即正史起点，后续演进全部在本方。HT-23 所指的对方交接包仓随之失效：回交内容已存reports/solver-handover-1008-returned/（本仓 ignored 区，无 git 大文件问题）。
 
+> 2026-10-08 范围裁定：任务书与发布物侧事项一概不做（HT-15 补字、solver_1010 提交、HT-28 反馈均移出）；HT-24 搁置不跟进（issue 文档留档）。本方只看 skill 问题；当前唯一开口项=批量 f32 独立实现轴补验（可选）。
+
+
 **怎么用**：先看总表挑活——🟢 直接做，🔴 先去拿裁定。做完一条：状态改 ✅，
 在该条「完成落点」填产物或 commit，**不删条目**。只收录已明示要记的条目。
 
@@ -32,11 +35,11 @@
 | HT-21 | 〔v4 复核〕info 契约派生基座双链口径差异——记录 | ✅ 记录（不改码） | v4 交叉复核（2026-09-27）第 4 项：设计使然非缺陷，判定链用包内切片重造自洽不受损 |
 | HT-22 | 〔对外内容〕任务目录整理优化——产物入位 + 算子目录只留对外件 | ✅ 完成 | 2026-09-27 用户指令：两任务目录各算子只留 cases.json/bench_result.json 参考 + 交付包；cu 脚本/编译脚本/日志/改动报告移 `_internal_archive/` 存档不删除 |
 | HT-23 | 〔git 大文件〕批量包 index 254MB 处置 | ✅ 随对方线关闭（2026-10-08） | 摘要化方案已实作后**整体回退**（revert 8e1d65e，用户拍板暂停）；快装模式（--ratio-source reuse）半成品丢弃；详见逐条说明 |
-| HT-24 | 〔私集验证〕potri 负例定标失效 + 直审双门小幅宽容语义 | 🔴 挂起（2026-10-07 更正） | 初版「分母塌缩」根因更正：判定链无缺陷（_dpot03 与任务书公式一致）；真实机制=spotri 逆元素幅度 ~1/n，scale/zero 绝对差落 max_abs=1e-2 门内、直审按次序放行；sim δ=1 定标声明失效为文档错误；候选甲乙丙重列待拍板，详见逐条说明 |
+| HT-24 | 〔私集验证〕potri 负例定标失效 + 直审双门小幅宽容语义 | ⏸ 搁置（2026-10-08 用户裁定不管） | 初版「分母塌缩」根因更正：判定链无缺陷（_dpot03 与任务书公式一致）；真实机制=spotri 逆元素幅度 ~1/n，scale/zero 绝对差落 max_abs=1e-2 门内、直审按次序放行；sim δ=1 定标声明失效为文档错误；候选甲乙丙重列待拍板，详见逐条说明 |
 | HT-25 | 〔对外对齐〕任务书定稿版回灌——taskbooks/ 两册同步发布版 | ✅ 完成 | 2026-10-08：两册以发布版逐字节替换（md5 一致，实数/复数册），README 产物地图标注契约真源迁移；包本体核实与发布包一致未重产 |
 | HT-26 | 〔对外对齐〕accept skill 性能门禁机制同步（0.35×GPU数据） | ✅ 完成 | 2026-10-08：expectations.py 性能门禁改 0.35+msprof+bench_result 口径、内存证据改「不设门仅存证」；references/perf-collection.md 对齐发布版 PERF_COLLECTION_SUPPLEMENT；两树 SKILL.md、verdict.py/render_verify.py/thresholds.py ε 注释更新；criteria 测试基线无回归（24 failed 为本地环境缺 golden 夹具，stash 前后一致） |
 | HT-27 | 〔对外对齐〕case-gen README 模板对齐发布版 + 十包 README 重渲验证 | ✅ 完成 | 2026-10-08：purescript/batched 模板由发布版 README 反向生成（保留 {op}/{n_cases}/{gram_form}），十包重渲逐字节对齐验证 ALL MATCH；README 回灌 build-v4 packages+delivery 并重算 manifest README 指纹；批量 delivery index 改 gzip 交付形态（36MB，roundtrip 校验过）；两册 DELIVERY_LEDGER 指纹表更新并注明发布版 manifest 差异；注意 assemble_delivery_v4.py 重跑会回退 gzip 形态，需补 gzip 步骤 |
-| HT-28 | 〔对外反馈〕任务书与发布包残留问题反馈任务侧 | 🔴 等任务侧 | ①空问题（n=0/nrhs=0/batchSize=0 成功返回）与维度表下界 1 并存，且包内用例无 n=0/n=1（min n=2）；②§3.3 引用 `gpu_baseline.csv` 但两个 Cholesky 任务目录均无此文件（仅 bench_result.json）；③复数册 CRLF 与实数册 LF 不一致；④发布十包 manifest 的 README.md 指纹过期（README 装包后手改未重算，10/10 全部对不上），需任务侧重算或以本仓重算版为准 |
+| HT-28 | 〔对外反馈〕任务书与发布包残留问题反馈任务侧 | ⏸ 移出本方范围（2026-10-08） | ①空问题（n=0/nrhs=0/batchSize=0 成功返回）与维度表下界 1 并存，且包内用例无 n=0/n=1（min n=2）；②§3.3 引用 `gpu_baseline.csv` 但两个 Cholesky 任务目录均无此文件（仅 bench_result.json）；③复数册 CRLF 与实数册 LF 不一致；④发布十包 manifest 的 README.md 指纹过期（README 装包后手改未重算，10/10 全部对不上），需任务侧重算或以本仓重算版为准 |
 | HT-29 | 〔仓务〕solver-handover-0924_copy 工作记录删除 | ✅ 关闭（不属本项目） | 2026-10-08 确认：solver-handover-0924_copy 为本地单独处理线（其 40 份 README+3 模板的批量替换是本地试验内容），不属本项目交付物；本项目不留该副本的同步/回退义务，后续以主仓 HT-27 产物为唯一基线 |
 | HT-30 | 〔仓务〕skill 权威仓澄清 + accept 增量前向移植 | ✅ 完成 | 2026-10-08 澄清：repo-task-atk-test 为 skill 唯一权威活仓（PR #15 后持续演进：86+137 测试、A0/ratio_cpu_mean/申诉指引、模板对外化+gzip 说明），trees/solver-s4-tree 仅为归并源快照、只承载本仓增量；已把 HT-26 增量前向移植到 atk-test（SKILL.md/verdict/render_verify/thresholds 逐字节拷贝、perf-collection.md 发布版重写、expectations.py 在 s3-D4 版上重放 0.35 门禁+内存不设门），criteria 137/137 全绿；case-gen 侧经核验 atk-test 模板本就正确（{n_info} 参数化，十包渲染逐字节命中发布版 README），无需改动；atk-test 6 文件改动未提交，待用户提交 |
 
