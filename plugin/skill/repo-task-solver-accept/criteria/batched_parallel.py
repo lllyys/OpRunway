@@ -157,9 +157,9 @@ def _merge(parts, batch):
     if cursor != batch:
         raise AssertionError(f"矩阵区间未覆盖整批: 终点 {cursor} != batch {batch}")
 
-    fail_count = error_count = l1_pass = fb_ran = fb_pass = 0
+    fail_count = error_count = 0
     first_fail = first_error = None
-    mr_min = ma_max = None
+    ratio_max = None
     worst_i = worst_v = worst_sev = None
     for lo, hi, v in parts:
         if v.get("fail_count") is None:  # case 级 error verdict → 整体回退串行
@@ -173,15 +173,9 @@ def _merge(parts, batch):
             first_error = _shift_error(v["error"], lo)
         d = v["diagnostics"]
         error_count += d["error_count"]
-        l1_pass += d["layer1_pass_count"]
-        fb_ran += d["fallback_ran_count"]
-        fb_pass += d["fallback_pass_count"]
-        if d["matched_ratio_min"] is not None:
-            mr_min = (d["matched_ratio_min"] if mr_min is None
-                      else min(mr_min, d["matched_ratio_min"]))
-        if d["max_abs_max"] is not None:
-            ma_max = (d["max_abs_max"] if ma_max is None
-                      else max(ma_max, d["max_abs_max"]))
+        if d["ratio_max"] is not None:
+            ratio_max = (d["ratio_max"] if ratio_max is None
+                         else max(ratio_max, d["ratio_max"]))
         sev = verdict._matrix_severity(v["worst"])
         if worst_sev is None or sev > worst_sev:
             worst_i, worst_v, worst_sev = lo + v["worst_index"], v["worst"], sev
@@ -191,11 +185,7 @@ def _merge(parts, batch):
         "pass_count": batch - fail_count,
         "fail_count": fail_count,
         "error_count": error_count,
-        "layer1_pass_count": l1_pass,
-        "fallback_ran_count": fb_ran,
-        "fallback_pass_count": fb_pass,
-        "matched_ratio_min": mr_min,
-        "max_abs_max": ma_max,
+        "ratio_max": ratio_max,
     }
     return {
         "batch": batch,

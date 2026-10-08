@@ -24,7 +24,7 @@ infoArray 逐矩阵独立写入（期望 `infoArray[槽位] == k_expected[内容
 | `canonical_cases.json` | 本包用例的规范清单（本算子精度用例全量清单 {n_cases} 例；info 契约用例不入此清单，由 `gen_data.py` 同规则现场派生） |
 | `cases/index.json` | 用例清单：参数、seed、`materialize: "gen"`、`sample_map` 槽位映射与逐内容 `ratio_cpu` 参考 k 值列表（发布参考；精度判定时 `ratio_cpu` 以检查脚本现场重算值为准，同环境逐位一致）；精度条目另固化 case 级 `ratio_cpu_mean`（Σ(count_j·ratio_j)/batchSize 槽位加权均值，判定时直接读取包内固化值、零重算）；含 {n_info} 例 `case_purpose: "info"` 的 info 契约用例（`k_expected` 入条目）。**本文件以 gzip 压缩存储为 `index.json.gz`**（含 batch=1e6 级槽位映射，原文 250MB+），使用前先解压：`gunzip cases/index.json.gz` |
 | `gen_data.py` | 数据构造脚本（代表内容构造、槽位映射派生与整批展开同用这一份） |
-| `verify_accuracy.py` | 精度检查（A0 两层：先余槽 bit-wise 一致性，后代表槽逐内容三层判定；判定输入现场重造）+ info 契约判定（{n_info} 例，只比 info） |
+| `verify_accuracy.py` | 精度检查（A0 两层：先余槽 bit-wise 一致性，后代表槽逐内容直接残差判定；判定输入现场重造）+ info 契约判定（{n_info} 例，只比 info） |
 | `verify_perf.py` | 性能对照（与 GPU 参考耗时逐 case 比值，GPU 数据为 CUDA cuSolver 实测） |
 | `perf_baseline.json` | 性能参考耗时（CUDA cuSolver 实测摘录） |
 | `sim_dut.py` | 模拟被测输出生成器（形态统一保留；批量 A0 的流程演练见第 2 步说明） |
@@ -97,9 +97,10 @@ python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 
    ```
 
    逐 case 两类判定：精度用例走 A0 两层（先余槽 bit-wise 一致性（同内容槽位
-   `out32` + info 逐位比对），后代表槽逐内容完整三层（直审 + LAPACK 残差复核；
-   序号域为内容下标 0..k-1））。残差阈值 = max(5·ratio_cpu, 3·ratio_cpu_mean)，
-   逐 case `ratio_cpu` 以检查脚本现场重算值为准，`ratio_cpu_mean` 直接读取
+   `out32` + info 逐位比对），后代表槽逐内容直接计算 LAPACK 残差并对
+   max(5·ratio_cpu, 3·ratio_cpu_mean) 判定（复数残差按复模一体判定，不拆实虚；
+   序号域为内容下标 0..k-1））；golden 仅作自测参考，不参与判定。
+   逐内容 `ratio_cpu` 以检查脚本现场重算值为准，`ratio_cpu_mean` 直接读取
    index 条目固化的槽位加权均值（发包侧预计算，零重算）；info 契约用例只比 info——potrfBatched 族把
    `k_expected` 经 `sample_map` 展开到全批槽位逐槽核对（任一槽失配即 FAIL，
    `fail_count` 计失配内容数、`first_fail_index` 报最小失配槽位），potrsBatched

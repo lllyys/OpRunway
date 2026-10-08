@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""A0 抽样判定侧驱动的机械断言（HT-2 Step B）：batched_a0 的两层判定——
-先余槽 bit-wise 一致性，后 rep_slot 逐内容三层判定（复用 verdict 零改动）。
+"""A0 抽样判定侧驱动的机械断言（HT-2 Step B，s2-A1 一段式）：batched_a0 的两层
+判定——先余槽 bit-wise 一致性，后 rep_slot 逐内容残差判定（复用 verdict 零改动）。
 
 覆盖清单 → 具名测试对照：
 
@@ -17,13 +17,16 @@
 
 等价/结论断言用 dict == 与精确相等（同一实现同一输入，机械门口径）。
 基材沿用 test_batched_parallel：A=[[4,2],[2,5]]，L=[[2,0],[1,2]]；扰动幅度
-δ=0.011（越 A6 动态锚点门 → 兜底 FAIL）。
+δ=0.011（残差 ≈ 5e4，远超自指基线的 5× 相对线 → FAIL）。
+ratio_cpu 缺省取自指基线（逐内容 DPOT01(A32, golden32)，一段式下每内容必进阈值，
+基线须与精确输出自洽才可作正例）。
 """
 import numpy as np
 import pytest
 
 import batched_a0
 import cards_cholesky
+import verdict
 
 POTRFB = cards_cholesky.get_card("spotrfBatched")
 POTRSB = cards_cholesky.get_card("spotrsBatched")
@@ -68,10 +71,19 @@ def _potrfb_contents():
     }
 
 
-def _a0_case(contents, ratio_cpu=(0.01, 0.01, 0.01), batch=BATCH, mean=None):
+def _self_ratio(contents):
+    """逐内容自指基线：DPOT01(A32[i], golden32[i])（一段式下正例的自洽基线）。"""
+    return [verdict.residual_ratio("DPOT01", a=contents["A32"][i],
+                                   factor=contents["golden32"][i], uplo="L")
+            for i in range(contents["A32"].shape[0])]
+
+
+def _a0_case(contents, ratio_cpu=None, batch=BATCH, mean=None):
     case = dict(contents)
     case.update({"uplo": "L", "batch": batch,
-                 "ratio_cpu": list(ratio_cpu), "ratio_cpu_status": "ok",
+                 "ratio_cpu": (_self_ratio(contents) if ratio_cpu is None
+                               else list(ratio_cpu)),
+                 "ratio_cpu_status": "ok",
                  "sample_map": SAMPLE_MAP})
     if mean is not None:
         case["ratio_cpu_mean"] = mean
@@ -151,20 +163,19 @@ def test_judge_a0_consistency_fail():
 
 
 def test_judge_a0_prep_failed_content():
-    """内容 1 ratio=null（prep_failed）：layer1 过仍 PASS；layer1 不过则阈值公式
-    有限性校验抛错 → 该内容 error verdict（证据问题不判精度，与全量通路同向）。"""
-    mats = [m.copy() for m in L_MAT]
-    mats[1] = np.asarray(mats[1], dtype=np.float32)
-    mats[1][1, 1] += 0.011
-    case = _a0_case(_potrfb_contents(), ratio_cpu=(0.01, None, 0.01), mean=0.0)
+    """内容 1 ratio=null（prep_failed → NaN）：s2-A1 一段式下该内容必进阈值公式，
+    有限性校验抛错 → 该内容 error verdict（证据问题不判精度，与全量通路同向）——
+    与被测输出好坏无关，即便精确输出也不可裁（基线缺失即证据不足）。"""
+    base = _self_ratio(_potrfb_contents())
+    case = _a0_case(_potrfb_contents(), ratio_cpu=(base[0], None, base[2]), mean=0.0)
     case["ratio_cpu_prep_failed"] = 1     # index 证据字段（判定侧不消费）
-    v = batched_a0.judge_a0(POTRFB, case, _dut(_expand(mats)))
+    v = batched_a0.judge_a0(POTRFB, case, _dut(_expand(L_MAT)))
     assert v["numeric"] == "FAIL" and v["fail_count"] == 1
+    assert v["first_fail_index"] == 1
     assert v["error"] is not None and v["error"].startswith("矩阵 1:")
     assert "非有限值" in v["error"]       # NaN 基线 → 不可裁，不判精度失败
-    # 对照：同基材 layer1 全过（不扰动）时，NaN 基线不触发兜底 → 全 PASS。
-    v2 = batched_a0.judge_a0(POTRFB, case, _dut(_expand(L_MAT)))
-    assert v2["numeric"] == "PASS" and v2["error"] is None
+    assert v["diagnostics"]["error_count"] == 1
+    assert v["diagnostics"]["pass_count"] == 2     # 其余内容照常可裁且 PASS
 
 
 def test_judge_a0_structural_errors():
@@ -177,7 +188,8 @@ def test_judge_a0_structural_errors():
     v = batched_a0.judge_a0(POTRFB, {k: x for k, x in case.items() if k != "sample_map"},
                             _dut(_expand(L_MAT)))
     assert v["fail_count"] is None and "sample_map" in v["error"]
-    v = batched_a0.judge_a0(POTRFB, case, {"out32": _expand(L_MAT), "info": 0, "status": "prep_failed"})
+    v = batched_a0.judge_a0(POTRFB, case,
+                            {"out32": _expand(L_MAT), "info": 0, "status": "prep_failed"})
     assert v["fail_count"] is None and "prep" in v["error"]
 
 
@@ -256,7 +268,7 @@ def test_judge_a0_info_scalar():
         "B64": np.stack([BS] * K), "B32": np.stack([BS.astype(np.float32)] * K),
         "golden64": np.stack([XS] * K), "golden32": np.stack([XS.astype(np.float32)] * K),
     }
-    case = _a0_case(contents)
+    case = _a0_case(contents, ratio_cpu=(0.5, 0.5, 0.5))   # info 路径不消费 ratio
     case.update({"case_purpose": "info", "info_probe": "bad_param_uplo",
                  "k_expected": -1})
     v = batched_a0.judge_a0(POTRSB, case, _dut(_expand([XS] * K), info=-1))

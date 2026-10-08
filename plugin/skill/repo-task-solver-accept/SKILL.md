@@ -1,15 +1,16 @@
 ---
 name: repo-task-solver-accept
-description: 消费 solver 任务包与被测输出，按三层检查（还原或真值直审、LAPACK 残差复核）出具逐 case 数值结论与族级汇总报告。当需要对 solver 算子任务包执行验收复核，或开发者要求核对自测结论时使用；生成任务包改用 repo-task-solver-case-gen。
+description: 消费 solver 任务包与被测输出，按一段式 LAPACK 残差判定出具逐 case 数值结论与族级汇总报告。当需要对 solver 算子任务包执行验收复核，或开发者要求核对自测结论时使用；生成任务包改用 repo-task-solver-case-gen。
 ---
 
 # repo-task-solver-accept
 
 判定标准、判定执行与结论出具全部在本 skill 内完成；任务包内的检查脚本只是自测辅助件，
-其输出不构成验收证据。当前支持 Cholesky 十算子：实数 spotrf、spotrs、spotri，复数
-cpotrf、cpotrs、cpotri（复数按实部、虚部分别判定），以及批量四算子 spotrfBatched、
-spotrsBatched、cpotrfBatched、cpotrsBatched（逐矩阵完整三层判定，case 数值结论 =
-全部矩阵通过）。
+其输出不构成验收证据。精度判定为一段式：逐 case 直接算 LAPACK 残差（DPOT01/02/03，
+输入用实现实际输入 A32/B32）对阈值判；包内 golden 数组不参与判定，降为自测参考件。
+当前支持 Cholesky 十算子：实数 spotrf、spotrs、spotri，复数 cpotrf、cpotrs、cpotri
+（复数残差取复模与共轭转置），以及批量四算子 spotrfBatched、spotrsBatched、
+cpotrfBatched、cpotrsBatched（逐矩阵残差判定，case 数值结论 = 全部矩阵通过）。
 
 批量算子三点差异，其余流程与单矩阵相同：
 
@@ -57,7 +58,7 @@ python3 scripts/stream_check.py --canonical <canonical_cases.json> \
 
 | 条件 | 表现 | 处理方式 |
 | --- | --- | --- |
-| 数值 PASS 与正式结论的分界 | 每项含数值状态；`formal` 恒为 `PENDING_RULING` | 阈值语义（任务书表与开源标准表的取舍、`or 32 * ULP` 释义）待任务方确认前，不出具正式通过 |
+| 数值 PASS 与正式结论的分界 | 每项含数值状态；`formal` 恒为 `PENDING_RULING` | 残差阈值语义待任务方正式裁定前，不出具正式通过 |
 | 期望项缺证据 | 状态为证据不足，族级不判通过 | 补齐对应输入后重新运行 A2；不缩小期望集 |
 | 包数据摘要与 manifest 不符 | 对应项被阻断并写明原因 | 重新取得完整任务包；不手工改 manifest |
 | 检查脚本副本与权威实现不一致 | 报告 `flags` 记告警，判定不受影响 | 以本 skill 内实现为准；提醒包的提供方重新装包 |

@@ -26,5 +26,6 @@ DELIVERY_LEDGER.md。对账表是「交付了什么、怎么验过」的唯一�
 
 ## 已知边界（交付即声明）
 
-- 数值通过 ≠ 正式验收通过（`formal` 恒 `PENDING_RULING`）；复数拆实虚分别判定。
+- 数值通过 ≠ 正式验收通过（`formal` 恒 `PENDING_RULING`）；复数残差按复模一体判定
+  （不拆实虚）。
 - {known_boundaries}

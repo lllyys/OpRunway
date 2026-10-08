@@ -8,18 +8,19 @@ dev-doc/solver/solver-s2-spec.md §4（dtype 映射：out32 与包内 golden32 �
 实数 case float32、复数 case complex64，不再强转 float32）。模拟量产语义：
 
 - none（正例）：out32 = 包内 golden32 逐字节复制——理想被测，用于验证判定通路的
-  正向可分（E 行断言：数值 PASS 且 formal=待裁）。
-- scale：out32 = golden32 × 2（整体相对偏移 δ=1）。倍数这样定标：DPOT03 分母带
-  ‖A‖₁‖C‖₁ ≈ κ₁，均匀相对偏移 δ 的兜底残差 ≈ δ/(n·κ₁·ε)，冻结 S1 集最差
-  n·κ₁·ε ≈ 0.28（spotri-9002，实测 δ=2⁻⁶ 时 ratio 仅 0.056，判 PASS 属判据
-  语义内），δ=1 使全部 case 兜底超阈（最差余量 ≥3.5×）；layer1 的 rtol 2⁻¹³
-  （HT-14 单套）与 max_abs 门更早失守 → 数值 FAIL。
-- zero：out32 = 全零。potrf 还原残差打满；potrs/potri 触发残差零分母
-  （x/‖C‖ 为 0），fallback 记残差不可计算 → 数值 FAIL。
-- nan：out32 = 全块 NaN。layer1 统计把 NaN 计为不符（NaN 点不参与 max_abs），
-  通过率门全挂，fallback 对 NaN 拒算 → 数值 FAIL。（HT-7 复核改强度：主判直审
-  后单点 NaN 在 n≥16 只计 1 个失配点，落进 ≥1% 预算会过 layer1——改全块保证
-  本扰动在全部 case 上可靠 FAIL。）
+  正向可分（E 行断言：数值 PASS 且 formal=待裁）。s2-A1 一段式下其残差在底噪
+  水平（golden32 即合法 FP32 实现），健康阈值必过。
+- scale：out32 = golden32 × 2（整体相对偏移 δ=1）。倍数按一段式残差语义定标：
+  DPOT03 分母带 ‖A‖₁‖C‖₁ ≈ κ₁，均匀相对偏移 δ 的残差 ≈ δ/(n·κ₁·ε)，冻结 S1 集
+  最差 n·κ₁·ε ≈ 0.28（spotri-9002，实测 δ=2⁻⁶ 时 ratio 仅 0.056，判 PASS 属判据
+  语义内），δ=1 使全部 case 残差超阈（最薄处为 potri 绝对线 0.1，余量 ≥3.5×；
+  potrf/potrs 残差 ≈ 3/(nε)、δ/ε 量级，远超 5·ratio_cpu/3·mean）→ 数值 FAIL。
+- zero：out32 = 全零。potrf 还原残差打满（ratio = 1/(n·ε)）→ 数值 FAIL；
+  potrs/potri 触发残差零分母（‖x‖/‖C‖ 为 0），残差不可计算 → 数值 FAIL、
+  error 指认零分母（fail-closed，不崩溃不放行）。
+- nan：out32 = 全块 NaN。残差接口的有限性校验拒算 → 数值 FAIL、error 指认
+  NaN/Inf（s2-A1 一段式下任意单点 NaN 即被拒算；保持全块只为与历史产物字节
+  稳定，不回调强度）。
 
 复数专属两类（S2 spec §4 验证增量：纯虚部错误、漏共轭；施加于实数 case 属用法
 错误，逐 case 记 skipped 并以退出码如实表达，不静默降级）：
@@ -51,12 +52,11 @@ S4 六算子 v2 增量（Mr.0 2026-09-24 裁定：六算子补发纯脚本 v2、
   skip 理由会指回「先造数后测」流程，不再报笼统的「npz 缺失」。
 
 - imag（纯虚部）：out32 = golden32 + i·|golden32|——逐元素加纯虚偏移，幅度取该
-  元素复模（δ=1，与 scale 同定标，兜底残差同量级超阈）。实部逐位不动、误差全在
-  虚部：只比实部或把实虚合并稀释的实现会放过它，拆实虚双门的 im 侧与复模残差
-  必须抓住 → 数值 FAIL。
+  元素复模（δ=1，与 scale 同定标，残差同量级超阈）。实部逐位不动、误差全在
+  虚部：只比实部的实现会放过它，DPOT 复数版的复模残差必须抓住 → 数值 FAIL。
 - conj（漏共轭）：out32 = conj(golden32)——模拟漏共轭实现（L·Lᵀ 顶替 L·Lᴴ 一类）。
-  误差 = 2·|Im golden32|，golden 虚部非零处全部失守 → 数值 FAIL；虚部恒零的数据
-  数学上区分不了漏共轭，故本扰动只对复数 case 有意义。
+  偏差 = 2·|Im golden32|，经共轭转置 recon 在残差分子如实放大 → 数值 FAIL；
+  虚部恒零的数据数学上区分不了漏共轭，故本扰动只对复数 case 有意义。
 
 扰动施加于包内全部 case；info 恒 0、status 恒 "ok"（扰动只动数值，不模拟接口层
 失败——info/确定性契约在本片记证据不足，spec §2.3′）。输出无随机性，可复跑比对；
@@ -66,7 +66,8 @@ CLI（spec §2.5 基础上 S2c 增两类复数扰动、S3 增逐矩阵序号）�
     sim_dut.py --package <dir> --out <dir> [--perturb none|scale|zero|nan|imag|conj]
                [--perturb-index i]
 --package 也可指向 gen_data 的产物目录（纯脚本包「先造数后测」流程的 data 目录，
-同为 cases/index.json + cases/*.npz 布局；纯脚本包只有这一条取材通路）。输出：<out>/<case_id>.npz 含 out32/info/status（spec §2.5 被测输出目录格式），另落
+同为 cases/index.json + cases/*.npz 布局；纯脚本包只有这一条取材通路）。
+输出：<out>/<case_id>.npz 含 out32/info/status（spec §2.5 被测输出目录格式），另落
 <out>/sim_manifest.json 记录来源包、扰动模式与环境版本（溯源件，accept_run 不消费）。
 """
 
@@ -79,7 +80,7 @@ from pathlib import Path
 import numpy as np
 
 TOOL = "sim_dut.py"
-TOOL_VER = "s4-E5"  # HT-8：info 契约用例支路（正例 info=k_expected / 负例错误 info）；承 s4-E4
+TOOL_VER = "s2a1-E6"  # s2-A1：负例预期按一段式残差语义重标（输出字节不变）；承 s4-E5
 PERTURBS = ("none", "scale", "zero", "nan", "imag", "conj")
 COMPLEX_ONLY_PERTURBS = ("imag", "conj")
 SCALE_FACTOR = np.float32(2.0)  # 定标依据见模块文档 scale 条
@@ -102,7 +103,7 @@ def perturb_out32(golden32, mode, matrix_index=None):
     S2 spec §4 字段名不变）；复数专属扰动喂实数 case 抛 ValueError（fail-closed）。
     matrix_index 非空时做逐矩阵扰动（S3 spec §4 负例承诺）：只扰动批量 case 的
     第 matrix_index 个矩阵，其余矩阵逐字节复制；非批量 case（golden32 非三维）或
-    序号越界抛 ValueError。nan 模式递归到子矩阵仍取全块（HT-7 复核后的扰动强度）。
+    序号越界抛 ValueError。nan 模式递归到子矩阵仍取全块（见模块文档 nan 条）。
     """
     g = np.asarray(golden32)
     if mode in COMPLEX_ONLY_PERTURBS and not np.issubdtype(g.dtype, np.complexfloating):
@@ -126,7 +127,7 @@ def perturb_out32(golden32, mode, matrix_index=None):
     if mode == "zero":
         return np.zeros_like(g)
     if mode == "nan":
-        return np.full_like(g, np.nan, dtype=g.dtype)   # 全块（HT-7 复核改强度，见模块文档）
+        return np.full_like(g, np.nan, dtype=g.dtype)   # 全块（强度保持，见模块文档 nan 条）
     if mode == "imag":
         return (g + 1j * np.abs(g)).astype(g.dtype)
     if mode == "conj":

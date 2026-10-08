@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """S3 批量四卡（spotrfBatched/spotrsBatched/cpotrfBatched/cpotrsBatched）criteria
-测试（S3 spec §4 判定卡增量 + §7 验证门 batched 行；阶段 1 新口径重基——golden64
-基准、2⁻¹³ 单套容差、HT-3 新阈值式、HT-16 flags 恒空）。
+测试（S3 spec §4 判定卡增量 + §7 验证门 batched 行；s2-A1 一段式重基——逐矩阵
+残差配对 c_i、diagnostics 收 batch/pass/fail/error/ratio_max、flags 恒空）。
 
 覆盖清单 → 具名测试对照（每项至少一个）：
 
@@ -14,14 +14,14 @@
                                         test_potrf_batched_rejects_scalar_info
 - batch=1 防标量化                    → test_batch1_keeps_batch_dim_and_passes、
                                         test_batch1_scalarized_inputs_rejected
-- 复数批量（拆实/虚，flags 恒空）     → test_cpotrs_batched_pass
+- 复数批量（复模残差，flags 恒空）    → test_cpotrs_batched_pass
 - 整批统计只入 diagnostics            → test_pairing_counterexample_paired_vs_max 的
-                                        matched_ratio_min 统计与 case FAIL 并存断言
+                                        ratio_max 统计与 case FAIL 并存断言
 - 卡接线与既有六卡零漂移              → test_batched_card_wiring
 - canonical batch 对不上被测          → test_batch_field_mismatch_rejected
 
-独立手算期望值 ≥2（带「手算」注释）：配对反例兜底 DPOT01
-ratio = (4δ+δ²)/(14·2⁻²⁴)（δ=0.011）；超限例兜底 ratio = 21/(14·2⁻²⁴) =
+独立手算期望值 ≥2（带「手算」注释）：配对反例残差 DPOT01
+ratio = (4δ+δ²)/(14·2⁻²⁴)（δ=0.011）；超限例残差 ratio = 21/(14·2⁻²⁴) =
 1.5·2²⁴ = 25165824。
 """
 import pytest
@@ -54,6 +54,7 @@ def _stack(mat, batch):
 
 
 def _potrfb_case(batch, ratio_cpu, mean=0.0, uplo="L"):
+    # golden64/golden32 仍随包交付、照常切片，但判定不消费（s2-A1 降为参考件）。
     return {"A64": _stack(A64, batch), "A32": _stack(A64, batch),
             "golden64": _stack(L_GOLD, batch), "golden32": _stack(L_GOLD, batch),
             "uplo": uplo, "batch": batch,
@@ -86,12 +87,11 @@ def _dutsb(out_stack, info=0, status="ok"):
 
 
 def test_pairing_counterexample_paired_vs_max():
-    """逐矩阵配对反例（S3 spec §3/§4，评审反例的新口径版）：矩阵 0 微扰 c₀=1000、
-    矩阵 1 精确 c₁=20000，case 内均值 mean=10500。
+    """逐矩阵配对反例（S3 spec §3/§4）：矩阵 0 微扰 c₀=1000、矩阵 1 精确
+    c₁=20000，case 内均值 mean=10500。
 
     手算（δ=0.011，out[1,1]=2+δ）：recon−A 只在 (1,1) 差 4δ+δ²=0.044121，
-    max_abs=0.011 > max_abs 门（g_low=2 → 0.01）→ layer1 不过走兜底。DPOT01 手算：
-    ratio = (4δ+δ²)/(2·7·2⁻²⁴) = 0.044121/(14·2⁻²⁴) ≈ 5.29e4。
+    DPOT01 ratio = 0.044121/(2·7·2⁻²⁴) = 0.044121/(14·2⁻²⁴) ≈ 5.29e4。
     配对判定：f(c₀)=max(5·1000, 3·10500)=31500 < ratio → 矩阵 0 FAIL → case FAIL。
     反例锋面：若做 max 聚合（阈值取 f(c₁)=max(5·20000, 3·10500)=100000），
     ratio < 100000 会被放过——差矩阵的 c 放宽他家阈值，正是评审否决的聚合。"""
@@ -108,28 +108,26 @@ def test_pairing_counterexample_paired_vs_max():
 
     worst = v["worst"]
     expected = (4 * delta + delta * delta) / (2 * 7 * thresholds.EPS32)   # 手算
-    assert worst["fallback"]["ran"] is True
-    assert worst["fallback"]["ratio"] == pytest.approx(expected, rel=1e-12)
-    assert worst["fallback"]["threshold"] == 31500.0   # 配对 f(c₀)，不是 f(max c)
-    assert worst["fallback"]["formula"] == thresholds.POTRF_POTRS_FORMULA
+    res = worst["residual"]
+    assert res["ran"] is True
+    assert res["ratio"] == pytest.approx(expected, rel=1e-12)
+    assert res["threshold"] == 31500.0              # 配对 f(c₀)，不是 f(max c)
+    assert res["formula"] == thresholds.POTRF_POTRS_FORMULA
     assert worst["numeric"] == "FAIL"
     assert thresholds.potrf_potrs_threshold(20000.0, 10500.0) == 100000.0
-    assert worst["fallback"]["ratio"] < 100000.0    # max 聚合会放过 → 反例成立
+    assert res["ratio"] < 100000.0                  # max 聚合会放过 → 反例成立
 
     d = v["diagnostics"]                            # 整批统计只入 diagnostics
     assert d["pass_count"] == 1 and d["fail_count"] == 1 and d["error_count"] == 0
-    assert d["fallback_ran_count"] == 1 and d["fallback_pass_count"] == 0
-    assert d["layer1_pass_count"] == 1              # 矩阵 1 layer1 直接过
-    assert d["matched_ratio_min"] == pytest.approx(2 / 3)   # 统计与 case FAIL 并存
+    assert d["ratio_max"] == pytest.approx(expected, rel=1e-12)   # 统计与 FAIL 并存
 
 
 def test_single_matrix_overlimit_identifies_index():
-    """负例承诺（S3 spec §4）：单矩阵扰动超出完整判据允许范围（layer1 与
-    兜底都失守）→ 整 case 数值 FAIL 且报告指认矩阵序号。
+    """负例承诺（S3 spec §4）：单矩阵扰动超出判据允许范围 → 整 case 数值 FAIL
+    且报告指认矩阵序号。
 
-    batch=3，矩阵 2 因子整体 ×2：recon=4A，存储侧 3 元素全失配（matched_ratio=0、
-    max_abs=15 超门）；兜底 DPOT01 手算：‖3A‖₁ 存储侧镜像口径 = 21 →
-    ratio = 21/(2·7·2⁻²⁴) = 1.5·2²⁴ = 25165824 > 阈值 max(5·0, 3·0)=0 → FAIL。
+    batch=3，矩阵 2 因子整体 ×2：recon=4A → 残差手算 ‖3A‖₁ 存储侧镜像口径 = 21
+    → ratio = 21/(2·7·2⁻²⁴) = 1.5·2²⁴ = 25165824 > 阈值 max(5·0, 3·0)=0 → FAIL。
     矩阵 0/1 精确。"""
     v = verdict.judge(POTRFB, _potrfb_case(3, [0.0, 0.0, 0.0]),
                       _dutb(np.stack([L_GOLD, L_GOLD, 2.0 * L_GOLD])))
@@ -137,14 +135,14 @@ def test_single_matrix_overlimit_identifies_index():
     assert v["batch"] == 3 and v["fail_count"] == 1
     assert v["first_fail_index"] == 2 and v["worst_index"] == 2
     worst = v["worst"]
-    assert worst["layer1"]["matched_ratio"] == 0.0
-    assert worst["fallback"]["ratio"] == 25165824.0        # 手算精确值 1.5·2²⁴
-    assert worst["fallback"]["threshold"] == 0.0           # max(5·0, 3·0)（HT-3 双零）
+    assert worst["residual"]["ratio"] == 25165824.0        # 手算精确值 1.5·2²⁴
+    assert worst["residual"]["threshold"] == 0.0           # max(5·0, 3·0)（HT-3 双零）
     assert v["diagnostics"]["pass_count"] == 2
+    assert v["diagnostics"]["ratio_max"] == 25165824.0
 
 
 def test_potrs_batched_exact_passes_with_scalar_info():
-    """potrsBatched 正例：nrhs=1 批量精确解 → 逐矩阵三层全过、数值 PASS；标量
+    """potrsBatched 正例：nrhs=1 批量精确解 → 逐矩阵残差 0 全过、数值 PASS；标量
     info=0 是该接口的合法形态（任务书接口说明第 69 行）。"""
     v = verdict.judge(POTRSB, _potrsb_case(2, [0.0, 0.0]), _dutsb(_stack(XS, 2)))
     assert v["error"] is None and v["numeric"] == "PASS"
@@ -152,6 +150,7 @@ def test_potrs_batched_exact_passes_with_scalar_info():
     assert v["first_fail_index"] is None
     assert v["flags"] == []                         # HT-16：flags 恒空
     assert v["worst"]["numeric"] == "PASS"          # 全过时 worst 仍给一行明细
+    assert v["worst"]["residual"]["ratio"] == 0.0
 
 
 def test_potrs_batched_scalar_info_param_error_not_precision():
@@ -245,8 +244,8 @@ def test_batch_field_mismatch_rejected():
 
 
 def test_cpotrs_batched_pass():
-    """复数批量（cpotrsBatched）：精确解逐矩阵 PASS；实/虚拆目标在批内逐矩阵
-    完整成立（issue C3 确认拆实/虚口径，T7 已摘；HT-16 flags 恒空）。"""
+    """复数批量（cpotrsBatched）：精确解逐矩阵残差 0 PASS；复模与共轭语义由
+    residual_ratio 的 dtype 分流在批内逐矩阵完整成立（HT-16 flags 恒空）。"""
     case = {"A64": np.stack([CA, CA]), "A32": np.stack([CA, CA]),
             "B64": np.stack([CB, CB]), "B32": np.stack([CB, CB]),
             "golden64": np.stack([CX, CX]), "golden32": np.stack([CX, CX]),
@@ -260,8 +259,9 @@ def test_cpotrs_batched_pass():
 
 
 def test_batched_card_wiring():
-    """批量卡接线（S3 spec §4）：四卡注册、批维身份与 info 分型对号，判据成员与
-    基卡逐字段同一（零新判据实现）；既有六卡身份零漂移；potri 无 batched 接口。"""
+    """批量卡接线（S3 spec §4，s2-A1 成员名）：四卡注册、批维身份与 info 分型
+    对号，判据成员与基卡逐字段同一（零新判据实现）；既有六卡身份零漂移；
+    potri 无 batched 接口。"""
     expect = {"spotrfBatched": ("spotrf", "array"),
               "spotrsBatched": ("spotrs", "scalar"),
               "cpotrfBatched": ("cpotrf", "array"),
@@ -273,12 +273,10 @@ def test_batched_card_wiring():
         assert card.batched is True and card.info_kind == info_kind
         assert card.base_op == base_op and card.op == op
         assert card.residual_kind == base.residual_kind
-        assert card.fallback_formula == base.fallback_formula
-        assert card.fallback_threshold is base.fallback_threshold
-        assert card.fallback_uses_mean is base.fallback_uses_mean
-        assert card.layer1_targets is base.layer1_targets
-        assert card.layer1_diagnostics is base.layer1_diagnostics
-        assert card.fallback_kwargs is base.fallback_kwargs
+        assert card.formula == base.formula
+        assert card.threshold_fn is base.threshold_fn
+        assert card.uses_mean is base.uses_mean
+        assert card.residual_kwargs is base.residual_kwargs
     for op in cards_cholesky.OPS:
         card = cards_cholesky.get_card(op)
         assert card.batched is False and card.info_kind == "scalar"

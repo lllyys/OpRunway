@@ -55,7 +55,7 @@ Mr.0 2026-09-24 裁定「全都现场造，无论大小」）——**纯脚本�
 - 开发者流程「先造数后测」（S3 spec §5 + HT-2 A0）：批量 case 不落数组，执行器/
   DUT 挂钩按 index 的 sample_map 用包内 gen_data 的 expand_sampled_rows 流式构造
   槽位区间现场喂入；verify 判定时自行重造同一内容并算 golden 与逐内容 ratio
-  （同环境逐位一致），先余槽 bit-wise 一致性、后代表槽三层判定。
+  （同环境逐位一致），先余槽 bit-wise 一致性、后代表槽逐内容残差判定。
 - 包内 canonical 切片按 --scope 二选一（2026-09-27 全量精度用例决策）：full（缺省）
   = 该算子 dedup 全量（A0 抽样零数据，不物化全量数组，n×batch 大 case 也只算
   k=min(5,batch) 个代表内容）；s1 = 二维代表子集六例（v3 前行为，spec §5 README
@@ -109,7 +109,7 @@ from pathlib import Path
 import numpy as np
 
 TOOL = "build_package.py"
-TOOL_VER = "s3-F10"  # 复核修复：s1 slice_note 去硬编码旧对账数、docstring 同步 scope 口径；承 s3-F9
+TOOL_VER = "s3-F11"  # 2026-10-08 换基：index 固化 ratio 时落 ratio_basis:"A32-f64"；承 s3-F10
 OPS = ("spotrf", "spotrs", "spotri", "cpotrf", "cpotrs", "cpotri")
 BATCHED_OPS = ("spotrfBatched", "spotrsBatched", "cpotrfBatched", "cpotrsBatched")
 ALL_OPS = OPS + BATCHED_OPS
@@ -655,6 +655,11 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
                        "条目不计入，HT-8/9）；精度条目另固化 case 级 "
                        f"ratio_cpu_mean（槽位加权，{n_mean} 例，HT-4）")
 
+    # 基版本标记（2026-10-08 换基）：包内 ratio_cpu/ratio_cpu_mean 全族为实现实际
+    # 输入升 f64 的 A32 基（基变更日 2026-10-08；potrf 族旧 A64 基固化值不可与新基
+    # 混用），verify/accept 消费时据此辨新旧——旧包 index 无此字段即 A64 基
+    gen_index["ratio_basis"] = "A32-f64"
+
     # 包内 index：gen 产 index 原样 + 逐条 materialize:"gen"（零数据，S3 spec §5 + HT-2 A0）
     for entry in gen_cases:
         entry["materialize"] = "gen"
@@ -927,6 +932,10 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
     gen_index["ratio_cpu_mean"] = {op: op_mean}
     tick("ratio_cpu_mean", f"算子级均值 {op_mean:.6g} 固化入 index 顶层"
                            f"（{len(ratio_ref)} 精度 case 算术平均，HT-4）")
+    # 基版本标记（2026-10-08 换基）：包内 ratio_cpu/ratio_cpu_mean 全族为实现实际
+    # 输入升 f64 的 A32 基（基变更日 2026-10-08；potrf 族旧 A64 基固化值不可与新基
+    # 混用），verify/accept 消费时据此辨新旧——旧包 index 无此字段即 A64 基
+    gen_index["ratio_basis"] = "A32-f64"
 
     # 包内 index：gen 产 index 原样 + 逐条 materialize:"gen"（零数据）
     for entry in gen_cases:

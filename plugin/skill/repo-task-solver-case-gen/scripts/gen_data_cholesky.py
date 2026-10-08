@@ -100,7 +100,7 @@ S3 批量增量（契约：dev-doc/solver/solver-s3-batched-spec.md，下称 S3 
   index 条目的 sample_map（[{"content_idx","rep_slot","slots"}] 列表，JSON 友好）。
   **不落 npz**（supplement 24e）：现场构造现场使用，执行器/DUT 挂钩逐段取
   expand_sampled_rows 的槽位区间喂入。判定侧先余槽 bit-wise 一致性（同内容槽位
-  输出必须逐位相等），后代表槽三层判定（repo-task-solver-accept 的 A0 驱动）；
+  输出必须逐位相等），后代表槽逐内容残差判定（repo-task-solver-accept 的 A0 驱动）；
   无 sample_map 的旧包走全遍历兼容分支（_build_batched_arrays 全量批维逐矩阵）。
   旧分块/并行机械（边界态预扫描、流式 npz、worker 池）随 A0 摘除。
 - ratio_cpu（S3 spec §3 / HT-2）：逐内容 c_i 经 fill_ratio_cpu.run_chain 同一入口
@@ -983,7 +983,7 @@ def gen_batched_case(case, criteria_dir):
     - ratio：逐内容 c_i（_ratio_rows 同一入口），k 个值列表入 index（prep_failed 记
       null 并计数）；criteria 不可达时如实 not_computed，不静默降级。
 
-    代表槽三层判定与余槽 bit-wise 一致性核对比照在判定侧（repo-task-solver-accept
+    代表槽逐内容残差判定与余槽 bit-wise 一致性核对比照在判定侧（repo-task-solver-accept
     的 A0 驱动）进行：判定时现场重造同一 contents，对被测全批输出先验「同内容槽位
     输出逐位相等」，后按代表槽逐内容判定。"""
     cid, op, uplo = case["case_id"], case["op"], case["uplo"]

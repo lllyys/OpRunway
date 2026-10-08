@@ -1,44 +1,44 @@
 # -*- coding: utf-8 -*-
-"""复数三接口（cpotrf/cpotrs/cpotri）criteria 测试（S2 spec §4 契约增量表）。
+"""复数三接口（cpotrf/cpotrs/cpotri）criteria 测试（S2 spec §4 + s2-A1 一段式）。
 
-S2c 验证增量覆盖清单 → 具名测试对照（每项至少一个）：
+覆盖清单 → 具名测试对照（每项至少一个）：
 
 - 复数手算期望值 ≥2   → test_dpot01_complex_diag_hand_value（2.25/(14ε)）、
                         test_dpot01_complex_offdiag_imag_hand_value（1.0625/(14ε)）、
                         test_dpot02_complex_imag_residual_hand_value（2^21）、
                         test_dpot03_complex_hand_value（2^24/6）
 - 纯虚部错误          → test_dpot01_complex_offdiag_imag_hand_value、
-                        test_cpotrs_judge_pure_imag_error_not_diluted、
+                        test_cpotrs_judge_pure_imag_error_fails、
                         test_cpotri_judge_stored_imag_error_fails
-- 漏共轭              → test_dpot01_complex_missing_conjugate_caught、
-                        test_cpotrf_judge_missing_conjugate_fails
+- 漏共轭（共轭转置路径正负例）
+                      → test_dpot01_complex_missing_conjugate_caught、
+                        test_cpotrf_judge_missing_conjugate_fails（负）、
+                        test_cpotrf_judge_exact_passes 与 c/z 链三正例（正）
 - U/L 双侧            → test_dpot01_complex_upper_equals_lower、
-                        test_dpot03_complex_upper_equals_lower、
-                        test_cpotrf_judge_pass_both_sides_ignore_unstored
+                        test_dpot03_complex_upper_equals_lower
 - 无效半三角污染      → test_dpot01_complex_ignores_unstored_triangle、
                         test_dpot03_complex_ignores_unstored_triangle、
-                        test_cpotrf_judge_pass_both_sides_ignore_unstored、
-                        test_cpotri_judge_single_target_split_pass
+                        test_cpotrf_judge_exact_passes
 - 实/复混搭拒绝       → test_residual_mixed_real_complex_rejected、
                         test_card_dtype_mismatch_error_verdict
                         （complex a + 实数 factor 方向由冻结用例
                         test_residual_ratio.test_complex_rejected 覆盖）
 - 对角虚部校验        → test_diag_imag_nonzero_rejected（S2 spec §4 Hermitian 行）
-- c/z 链路精度        → test_cpotrf_real_chain_numeric_pass /
+- c 链路精度正例      → test_cpotrf_real_chain_numeric_pass /
                         test_cpotrs_real_chain_numeric_pass /
                         test_cpotri_real_chain_numeric_pass
 - 卡接线（阈值同实数）→ test_c_card_wiring
-- HT-1 复数独立锚点   → test_c_sides_independent_anchor_limits
 
-内核对复数宽度不敏感（complex64/complex128 都先升 complex128 再算），故单元
-用例直接用 complex128 构造以保手算精确；c/z 链路测试按包契约用 complex64
-被测数据、complex128 golden（S2 spec §4 dtype 映射行）。
+s2-A1 一段式：复数误差（纯虚部、漏共轭）由 DPOT 复数版的复模与共轭转置天然捕捉，
+原拆实/虚统计层随 layer1 整体拆除。内核对复数宽度不敏感（complex64/complex128 都
+先升 complex128 再算），故单元用例直接用 complex128 构造以保手算精确；c 链路测试
+按包契约用 complex64 被测数据（S2 spec §4 dtype 映射行）。
 """
 import pytest
 
 pytest.importorskip("scipy")  # spec 波 1 A 行：scipy importorskip 守卫
 import numpy as np
-from scipy.linalg.lapack import cpotrf, cpotri, cpotrs, zpotrf, zpotri
+from scipy.linalg.lapack import cpotrf, cpotri, cpotrs
 
 import cards_cholesky
 import thresholds
@@ -187,12 +187,11 @@ def test_complex_returns_python_float():
 
 
 # ---------------------------------------------------------------------------
-# judge × 复数卡：拆实/虚、单目标、错卡拒绝（T7 已摘，issue C3）
+# judge × 复数卡（s2-A1 一段式）：共轭转置路径正负例、纯虚部错误、错卡拒绝
 # ---------------------------------------------------------------------------
 
-def _cpotrf_case(uplo, golden, ratio_cpu=0.0, status="ok", ratio_cpu_mean=0.0):
-    return {"A64": CA.copy(), "A32": CA.astype(np.complex64),
-            "golden64": golden.copy(), "uplo": uplo,
+def _cpotrf_case(uplo, ratio_cpu=0.0, status="ok", ratio_cpu_mean=0.0):
+    return {"A32": CA.astype(np.complex64), "uplo": uplo,
             "ratio_cpu": ratio_cpu, "ratio_cpu_status": status,
             "ratio_cpu_mean": ratio_cpu_mean}   # HT-3：cpotrf 阈值第二支
 
@@ -202,202 +201,130 @@ def _dut(out, info=0, status="ok"):
             "status": status}
 
 
-def test_cpotrf_judge_pass_both_sides_ignore_unstored():
-    """U/L 双侧 + 无效半三角污染（judge 级）：两侧准确因子 F vs golden 直审
-    逐位命中 → PASS；被测非存储侧与 A64 非存储侧的复数垃圾都不进比对集。"""
+def test_cpotrf_judge_exact_passes():
+    """共轭转置路径正例 + 无效半三角污染（judge 级）：两侧准确因子 → DPOT01
+    复数残差 0 → PASS；被测非存储侧的复数垃圾不进比对。"""
     out_l = CL_GOLD.copy()
     out_l[0, 1] = 777.0 + 888.0j             # uplo=L 的上三角是输入残留位
-    case_l = _cpotrf_case("L", CL_GOLD)
-    case_l["A64"][0, 1] = -555.0j            # A64 非存储侧垃圾，不在 tril 比对集
-    v = verdict.judge(CPOTRF, case_l, _dut(out_l))
+    v = verdict.judge(CPOTRF, _cpotrf_case("L"), _dut(out_l))
     assert v["error"] is None
     assert v["numeric"] == "PASS"
-    assert v["layer1"]["max_abs"] == 0.0
-    names = [t["name"] for t in v["layer1"]["targets"]]
-    assert names == ["factor_vs_golden_re", "factor_vs_golden_im"]   # HT-7 直审主判
-    diag_names = [d["name"] for d in v["layer1"]["diagnostics"]]
-    assert diag_names == ["recon_vs_A_re", "recon_vs_A_im"]
-    assert v["fallback"]["ran"] is False
-    assert v["flags"] == []                  # T7 已摘（issue C3 确认拆实/虚口径）
+    assert v["residual"]["ratio"] == 0.0
+    assert v["flags"] == []
 
     out_u = CU_GOLD.copy()
     out_u[1, 0] = -999.0 - 111.0j
-    v_u = verdict.judge(CPOTRF, _cpotrf_case("U", CU_GOLD), _dut(out_u))
+    v_u = verdict.judge(CPOTRF, _cpotrf_case("U"), _dut(out_u))
     assert v_u["error"] is None and v_u["numeric"] == "PASS"
-    assert v_u["layer1"]["max_abs"] == 0.0
-    assert v_u["flags"] == []
+    assert v_u["residual"]["ratio"] == 0.0
 
 
 def test_cpotrf_judge_missing_conjugate_fails():
-    """漏共轭（judge 级，HT-7 直审主判）：被测给出共轭翻转因子 conj(L) →
-    实部目标全命中、虚部目标在 (1,0) 挂（|conj(L)−L| 在 (1,0) 为 |1−(−1)|=2）——
-    纯虚部错误只落在 _im 目标，不被实部合并稀释。兜底 DPOT01（还原对 A）手算：
-    num=4 → ratio=4/(2·7·ε) → 超阈值 0（HT-3 双零）→ 数值 FAIL。"""
-    v = verdict.judge(CPOTRF, _cpotrf_case("L", CL_GOLD), _dut(CL_GOLD.conj()))
-    re_t, im_t = v["layer1"]["targets"]
-    assert re_t["name"] == "factor_vs_golden_re"
-    assert re_t["matched_ratio"] == 1.0 and re_t["max_abs"] == 0.0
-    assert im_t["name"] == "factor_vs_golden_im"
-    assert im_t["matched_ratio"] == pytest.approx(2 / 3)
-    assert im_t["max_abs"] == 2.0
-    assert v["layer1"]["pass"] is False                  # AND 聚合：单侧挂即挂
-    fb = v["fallback"]
-    assert fb["ran"] is True
-    assert fb["ratio"] == pytest.approx(4 / (2 * 7 * EPS), rel=1e-12)   # 手算
-    assert fb["threshold"] == 0.0                        # max(5·0, 3·0)（HT-3 双零）
+    """漏共轭负例（judge 级，共轭转置路径）：被测给出共轭翻转因子 conj(L) →
+    recon = conj(A) ≠ A，手算 num=4 → ratio = 4/(2·7·ε) → 超阈值 0
+    （HT-3 双零）→ 数值 FAIL。误差全在虚部，复模残差天然抓住，无需拆实/虚。"""
+    v = verdict.judge(CPOTRF, _cpotrf_case("L"), _dut(CL_GOLD.conj()))
+    res = v["residual"]
+    assert res["ran"] is True
+    assert res["ratio"] == pytest.approx(4 / (2 * 7 * EPS), rel=1e-12)   # 手算
+    assert res["threshold"] == 0.0                       # max(5·0, 3·0)（HT-3 双零）
     assert v["numeric"] == "FAIL"
+    assert v["error"] is None
     assert v["flags"] == []
 
 
-def test_cpotrs_judge_pure_imag_error_not_diluted():
-    """纯虚部错误不合并稀释（复数任务书 §3.2 第 3 条）：100 元素解向量里
-    2 个元素只在虚部加 2e-3 → 虚部 matched_ratio=0.98 单侧不达标；若按实虚
-    合并 2N=200 元素计数会得 198/200=0.99「恰好达标」——本用例钉死不允许该
-    稀释。实部目标全命中。"""
+def test_cpotrs_judge_pure_imag_error_fails():
+    """纯虚部错误（judge 级手算）：100 元素解向量里 2 个元素只在虚部加 2e-3 →
+    残差 ‖r‖₁=2·2e-3、‖A‖₁=1、‖x‖₁=98+2·|1+2e-3i| → ratio ≈ 671 > 阈值 0 →
+    FAIL；实部逐位不动，复模残差如实捕捉虚部偏差。"""
     n = 100
     a = np.eye(n, dtype=np.complex128)
-    golden = np.ones((n, 1), dtype=np.complex128)
-    b = golden.copy()                        # A=I → B=X
-    out = golden.copy()
+    x = np.ones((n, 1), dtype=np.complex128)
+    b = x.copy()                             # A=I → B=X
+    out = x.copy()
     out[0, 0] += 2e-3j
     out[1, 0] += 2e-3j
-    case = {"A32": a, "B32": b, "golden64": golden,
-            "ratio_cpu": 0.0, "ratio_cpu_status": "ok",
+    case = {"A32": a, "B32": b, "ratio_cpu": 0.0, "ratio_cpu_status": "ok",
             "ratio_cpu_mean": 0.0}               # HT-3：cpotrs 阈值第二支
     v = verdict.judge(CPOTRS, case, _dut(out))
-    re_t, im_t = v["layer1"]["targets"]
-    assert re_t["name"] == "x_vs_golden_re"
-    assert re_t["matched_ratio"] == 1.0 and re_t["max_abs"] == 0.0
-    assert im_t["name"] == "x_vs_golden_im"
-    assert im_t["matched_ratio"] == pytest.approx(0.98)
-    assert im_t["pass"] is False                         # 虚部单侧不达标
-    # min 聚合而非 2N 合并：合并口径是 0.99 ≥ 0.99 会放过。
-    assert v["layer1"]["matched_ratio"] == pytest.approx(0.98)
-    assert v["layer1"]["matched_ratio"] < thresholds.REQUIRED_MATCHED_RATIO
-    assert v["layer1"]["pass"] is False
-    fb = v["fallback"]
-    assert fb["ran"] is True
-    # 手算：‖r‖₁=2·2e-3、‖A‖₁=1、‖x‖₁=98+2·|1+2e-3i| → ratio ≈ 671 > 阈值 0。
+    res = v["residual"]
+    assert res["ran"] is True
     xnorm = 98.0 + 2 * abs(1 + 2e-3j)
-    assert fb["ratio"] == pytest.approx(4e-3 * 2 ** 24 / xnorm, rel=1e-12)
-    assert fb["threshold"] == 0.0                        # max(5·0, 3·0)（HT-3 双零）
+    assert res["ratio"] == pytest.approx(4e-3 * 2 ** 24 / xnorm, rel=1e-12)   # 手算
+    assert res["threshold"] == 0.0                       # max(5·0, 3·0)（HT-3 双零）
     assert v["numeric"] == "FAIL"
     assert v["flags"] == []
 
 
-def test_cpotri_judge_single_target_split_pass():
-    """cpotri 单目标拆实/虚（HT-7 收单，共 2 目标）：准确逆全过；被测非存储
-    侧复数垃圾不进直审比对集。"""
+def test_cpotri_judge_positive_passes():
+    """cpotri 正例：准确逆 → DPOT03 复数残差 0 ≤ 绝对线 0.1 → PASS；被测非存储
+    侧复数垃圾不进比对。"""
     a = np.array([[2.0, 0.0], [0.0, 4.0]], dtype=np.complex128)
-    golden = np.array([[0.5, 0.0], [0.0, 0.25]], dtype=np.complex128)
-    out = golden.copy()
+    out = np.array([[0.5, 0.0], [0.0, 0.25]], dtype=np.complex128)
     out[0, 1] = 66.0 - 77.0j
-    case = {"A32": a, "golden64": golden, "uplo": "L",
-            "ratio_cpu": 0.0, "ratio_cpu_status": "ok"}
+    case = {"A32": a, "uplo": "L", "ratio_cpu": 0.0, "ratio_cpu_status": "ok"}
     v = verdict.judge(CPOTRI, case, _dut(out))
     assert v["error"] is None and v["numeric"] == "PASS"
-    names = [t["name"] for t in v["layer1"]["targets"]]
-    assert names == ["ainv_vs_golden_re", "ainv_vs_golden_im"]
-    assert v["layer1"]["max_abs"] == 0.0
-    assert v["flags"] == []
+    assert v["residual"]["ratio"] == 0.0
+    assert v["residual"]["threshold"] == 0.1
 
 
 def test_cpotri_judge_stored_imag_error_fails():
-    """cpotri 纯虚部错误（judge 级手算，HT-7 单目标）：存储侧 (1,0) 塞 0.25i →
-    直审虚部 matched 2/3、实部目标全命中（虚部错误不被实部稀释）；兜底
-    DPOT03 = 复数手算 #4：ratio = 2^24/6 > 绝对线 0.1（HT-5，cpotri 与实数书
-    同式）→ 数值 FAIL。"""
+    """cpotri 纯虚部错误（judge 级手算）：存储侧 (1,0) 塞 0.25i → 残差 =
+    复数手算 #4：ratio = 2^24/6 > 绝对线 0.1（HT-5，cpotri 与实数书同式）→
+    数值 FAIL。"""
     a = np.array([[2.0, 0.0], [0.0, 4.0]], dtype=np.complex128)
-    golden = np.array([[0.5, 0.0], [0.0, 0.25]], dtype=np.complex128)
-    out = golden.copy()
+    out = np.array([[0.5, 0.0], [0.0, 0.25]], dtype=np.complex128)
     out[1, 0] = 0.25j
-    case = {"A32": a, "golden64": golden, "uplo": "L",
-            "ratio_cpu": 0.0, "ratio_cpu_status": "ok"}
+    case = {"A32": a, "uplo": "L", "ratio_cpu": 0.0, "ratio_cpu_status": "ok"}
     v = verdict.judge(CPOTRI, case, _dut(out))
-    d_re, d_im = v["layer1"]["targets"]
-    assert d_re["matched_ratio"] == 1.0
-    assert d_im["matched_ratio"] == pytest.approx(2 / 3)
-    assert v["layer1"]["matched_ratio"] == pytest.approx(2 / 3)
-    fb = v["fallback"]
-    assert fb["ran"] is True
-    assert fb["ratio"] == pytest.approx(2.0 ** 24 / 6, rel=1e-12)   # 手算
-    assert fb["threshold"] == 0.1                          # HT-5：cpotri 绝对线
+    res = v["residual"]
+    assert res["ratio"] == pytest.approx(2.0 ** 24 / 6, rel=1e-12)   # 手算
+    assert res["threshold"] == 0.1                       # HT-5：cpotri 绝对线
     assert v["numeric"] == "FAIL"
-    assert v["flags"] == []
-
-
-def test_c_sides_independent_anchor_limits():
-    """HT-1 复数两侧独立锚点（HT-14 单套重标定）：同一误差 2e-2，实部锚
-    g_low=1e4（limit 3.125e-2，tol≈1.22）双门都过；虚部锚 g_low=32 下单套
-    tol(32)≈4.03e-3 < 2e-2 → matched 挂，abs limit 兜底 1e-2 < 2e-2 也挂——
-    实/虚各自统计、各自锚点各自上限。（原「虚部容差内只挂 abs 门」设计在
-    单套下不可复现：tol(32) < 兜底 1e-2，该区间为空。）"""
-    a = np.array([[2.0 + 0.0j]], dtype=np.complex128)
-    golden = np.array([[1e4 + 32.0j]], dtype=np.complex128)
-    b = a @ golden
-    out = golden + (2e-2 + 2e-2j)
-    case = {"A32": a, "B32": b, "golden64": golden,
-            "ratio_cpu": 0.0, "ratio_cpu_status": "ok"}
-    v = verdict.judge(CPOTRS, case, _dut(out))
-    re_t, im_t = v["layer1"]["targets"]
-    assert re_t["name"] == "x_vs_golden_re"
-    assert re_t["g_low"] == 10000.0
-    assert re_t["max_abs_limit"] == 0.03125              # 32·ULP(1e4)
-    assert re_t["matched_ratio"] == 1.0
-    assert re_t["pass"] is True
-    assert im_t["name"] == "x_vs_golden_im"
-    assert im_t["matched_ratio"] == 0.0                  # 2e-2 > 单套 tol(32)≈4.03e-3
-    assert im_t["g_low"] == 32.0
-    assert im_t["max_abs_limit"] == thresholds.MAX_ABS_FIXED
-    assert im_t["pass"] is False
-    assert v["layer1"]["pass"] is False                  # AND 聚合
-    assert v["fallback"]["ran"] is True
-    assert v["numeric"] == "FAIL"                        # 兜底残差 ≈ 47.5 > 地板 30
     assert v["flags"] == []
 
 
 def test_card_dtype_mismatch_error_verdict():
     """实/复错卡（S2 spec §4 dtype 一致性）：实数输出进复数卡、复数输出进
-    实数卡，都收敛为 error verdict（fail-closed，judge 不外抛）。"""
+    实数卡，残差混搭拒算收敛为数值 FAIL + error 指认（judge 不外抛）。"""
     real_dut = {"out32": np.eye(2), "info": 0, "status": "ok"}
-    v = verdict.judge(CPOTRF, _cpotrf_case("L", CL_GOLD), real_dut)
-    assert v["numeric"] == "FAIL" and v["layer1"] is None
+    v = verdict.judge(CPOTRF, _cpotrf_case("L"), real_dut)
+    assert v["numeric"] == "FAIL" and v["residual"]["ratio"] is None
     assert v["error"] is not None and "TypeError" in v["error"]
 
     spotrf = cards_cholesky.get_card("spotrf")
-    case_r = {"A64": np.array([[4.0, 2.0], [2.0, 5.0]]),
-              "A32": np.array([[4.0, 2.0], [2.0, 5.0]]),
-              "golden64": np.array([[2.0, 0.0], [1.0, 2.0]]), "uplo": "L",
-              "ratio_cpu": 0.0, "ratio_cpu_status": "ok"}
+    case_r = {"A32": np.array([[4.0, 2.0], [2.0, 5.0]]), "uplo": "L",
+              "ratio_cpu": 0.0, "ratio_cpu_status": "ok", "ratio_cpu_mean": 0.0}
     v2 = verdict.judge(spotrf, case_r, _dut(CL_GOLD.copy()))
-    assert v2["numeric"] == "FAIL" and v2["layer1"] is None
+    assert v2["numeric"] == "FAIL" and v2["residual"]["ratio"] is None
     assert v2["error"] is not None and "TypeError" in v2["error"]
 
 
 def test_c_card_wiring():
     """c 卡接线（S2 spec §4 + HT-3）：残差 kind、阈值公式、mean 消费声明与数值
-    同实数书；z 前缀只用于 golden 链路，不登记卡。"""
+    同实数书；z 前缀只用于参考链路，不登记卡。"""
     assert CPOTRF.residual_kind == "DPOT01"
-    assert CPOTRF.fallback_formula == thresholds.POTRF_POTRS_FORMULA
-    assert CPOTRF.fallback_threshold(0.5, 1.0) == 3.0
-    assert CPOTRF.fallback_uses_mean is True
+    assert CPOTRF.formula == thresholds.POTRF_POTRS_FORMULA
+    assert CPOTRF.threshold_fn(0.5, 1.0) == 3.0
+    assert CPOTRF.uses_mean is True
     assert CPOTRS.residual_kind == "DPOT02"
-    assert CPOTRS.fallback_formula == thresholds.POTRF_POTRS_FORMULA
-    assert CPOTRS.fallback_threshold(0.5, 0.0) == 2.5
-    assert CPOTRS.fallback_uses_mean is True
+    assert CPOTRS.formula == thresholds.POTRF_POTRS_FORMULA
+    assert CPOTRS.threshold_fn(0.5, 0.0) == 2.5
+    assert CPOTRS.uses_mean is True
     assert CPOTRI.residual_kind == "DPOT03"
-    assert CPOTRI.fallback_formula == thresholds.POTRI_FORMULA
-    assert CPOTRI.fallback_threshold(0.0) == 0.1
-    assert CPOTRI.fallback_threshold(2.0) == 10.0
-    assert CPOTRI.fallback_uses_mean is False
+    assert CPOTRI.formula == thresholds.POTRI_FORMULA
+    assert CPOTRI.threshold_fn(0.0) == 0.1
+    assert CPOTRI.threshold_fn(2.0) == 10.0
+    assert CPOTRI.uses_mean is False
     for card in (CPOTRF, CPOTRS, CPOTRI):
-        assert callable(card.layer1_targets) and callable(card.layer1_diagnostics)
+        assert callable(card.residual_kwargs)
     with pytest.raises(ValueError):
         cards_cholesky.get_card("zpotrf")
 
 
 # ---------------------------------------------------------------------------
-# c/z 真实链路（scipy）：c 前缀被测 vs z 前缀 golden（S2 spec §4 LAPACK 链路行）
+# c 真实链路（scipy）：c 前缀被测 + A32 基自指 ratio_cpu（s2-A1 换基口径）
 # ---------------------------------------------------------------------------
 
 N = 16
@@ -416,29 +343,26 @@ def _hpd(n, seed):
 
 @pytest.fixture(scope="module")
 def cchain():
-    """一次性准备三接口共用的 complex64 被测链路与 complex128 golden 链路。"""
+    """一次性准备三接口共用的 complex64 被测链路。"""
     a64 = _hpd(N, 20250912 + N)
     a32 = a64.astype(np.complex64)          # 降型（S2 spec §4 dtype 映射行）
     f32, info_f = cpotrf(a32.copy(), lower=1)
     assert info_f == 0
-    fg64, info_g = zpotrf(a64.copy(), lower=1)
-    assert info_g == 0
-    return {"a64": a64, "a32": a32, "f32": f32, "fg64": fg64}
+    return {"a64": a64, "a32": a32, "f32": f32}
 
 
 def test_cpotrf_real_chain_numeric_pass(cchain):
-    golden64 = np.tril(cchain["fg64"])                     # 存储侧另侧置 0
-    ratio_cpu = residual_ratio("DPOT01", a=cchain["a64"],
-                               factor=cchain["f32"], uplo="L")   # c 链路自指
-    case = {"A64": cchain["a64"], "A32": cchain["a32"], "golden64": golden64,
-            "uplo": "L", "ratio_cpu": ratio_cpu, "ratio_cpu_status": "ok"}
+    """c 链正例（换基自洽）：ratio_cpu 与判定残差同为 A32 基同一实现 → 二者相等，
+    阈值 5·ratio_cpu ≥ ratio → 数值 PASS。"""
+    ratio_cpu = residual_ratio("DPOT01", a=cchain["a32"],
+                               factor=cchain["f32"], uplo="L")   # A32 基自指
+    case = {"A32": cchain["a32"], "uplo": "L",
+            "ratio_cpu": ratio_cpu, "ratio_cpu_status": "ok", "ratio_cpu_mean": 0.0}
     v = verdict.judge(CPOTRF, case,
                       {"out32": cchain["f32"], "info": 0, "status": "ok"})
     assert v["error"] is None
-    names = [t["name"] for t in v["layer1"]["targets"]]
-    assert names == ["factor_vs_golden_re", "factor_vs_golden_im"]   # HT-7 直审主判
+    assert v["residual"]["ratio"] == ratio_cpu           # 同实现同输入，逐位相等
     assert v["numeric"] == "PASS"
-    assert "T7" not in v["flags"]
     assert v["formal"] == "PENDING_RULING"
 
 
@@ -449,33 +373,26 @@ def test_cpotrs_real_chain_numeric_pass(cchain):
     b32 = b64.astype(np.complex64)
     x32, info = cpotrs(cchain["f32"], b32.copy(), lower=1)
     assert info == 0
-    golden64 = np.linalg.solve(cchain["a64"], b64)         # z 链路 golden（HT-7 基准）
     ratio_cpu = residual_ratio("DPOT02", a=cchain["a32"], b=b32, x=x32)   # 自指
-    case = {"A64": cchain["a64"], "A32": cchain["a32"], "B64": b64, "B32": b32,
-            "golden64": golden64, "uplo": "L",
-            "ratio_cpu": ratio_cpu, "ratio_cpu_status": "ok"}
+    case = {"A32": cchain["a32"], "B32": b32,
+            "ratio_cpu": ratio_cpu, "ratio_cpu_status": "ok", "ratio_cpu_mean": 0.0}
     v = verdict.judge(CPOTRS, case, {"out32": x32, "info": 0, "status": "ok"})
     assert v["error"] is None
+    assert v["residual"]["ratio"] == ratio_cpu
     assert v["numeric"] == "PASS"
-    assert "T7" not in v["flags"]
     assert v["formal"] == "PENDING_RULING"
 
 
 def test_cpotri_real_chain_numeric_pass(cchain):
     c32, info = cpotri(cchain["f32"].copy(), lower=1)
     assert info == 0
-    cg64, info_g = zpotri(cchain["fg64"].copy(), lower=1)
-    assert info_g == 0
-    golden64 = np.tril(cg64)                               # 存储侧另侧置 0
     ratio_cpu = residual_ratio("DPOT03", a=cchain["a32"],
                                ainv=np.tril(c32), uplo="L")   # 自指
-    case = {"A64": cchain["a64"], "A32": cchain["a32"], "golden64": golden64,
-            "uplo": "L", "ratio_cpu": ratio_cpu, "ratio_cpu_status": "ok"}
+    case = {"A32": cchain["a32"], "uplo": "L",
+            "ratio_cpu": ratio_cpu, "ratio_cpu_status": "ok"}
     v = verdict.judge(CPOTRI, case,
                       {"out32": np.tril(c32), "info": 0, "status": "ok"})
     assert v["error"] is None
-    names = [t["name"] for t in v["layer1"]["targets"]]
-    assert names == ["ainv_vs_golden_re", "ainv_vs_golden_im"]   # HT-7 收单
+    assert v["residual"]["ratio"] == ratio_cpu
     assert v["numeric"] == "PASS"
-    assert "T7" not in v["flags"]
     assert v["formal"] == "PENDING_RULING"

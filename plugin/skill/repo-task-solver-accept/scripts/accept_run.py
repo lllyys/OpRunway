@@ -57,7 +57,7 @@ from pathlib import Path
 import numpy as np
 
 TOOL = "accept_run.py"
-TOOL_VER = "s3-D4"  # HT-8：info 用例分流（KIND_INFO 独立结论）；承 s3-D3
+TOOL_VER = "s2a1-D5"  # s2-A1 一段式：期望项证据随 residual 单段 schema；承 s3-D4
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 _CRITERIA_DIR = _SCRIPTS_DIR.parent / "criteria"
@@ -204,7 +204,7 @@ def accuracy_items(package, dut_dir, operator, index, baseline_rows,
 
     ratio_cpu_mean 从 index 顶层按算子注入 case_arrays（HT-3 消费面；mean 本体
     由 HT-4 在发包侧预计算固化，index 无该键时注入 None → potrf/potrs 兜底走
-    单支兼容口径，verdict._run_fallback）。批量卡下 mean 为算子级标量，经
+    单支兼容口径，verdict._run_residual）。批量卡下 mean 为算子级标量，经
     passthrough 带入每个矩阵（verdict._judge_batched_inner）。"""
     card = cards_cholesky.get_card(operator)
     op_mean = (index.get("ratio_cpu_mean") or {}).get(operator)

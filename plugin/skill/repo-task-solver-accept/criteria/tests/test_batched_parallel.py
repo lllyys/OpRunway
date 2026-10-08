@@ -14,9 +14,8 @@ batched_parallel.judge_parallel 的输出与 verdict.judge 串行**逐位相同*
 - 区间切分不重不漏                               → test_split_bounds_covers
 
 等价断言用 dict ==（浮点不做近似——同一实现同一输入，要求逐位相同）。
-case 基材与 flags 口径按阶段 1 新 A6 重基（golden64 基准、HT-3 mean 第二支、
-HT-16 flags 恒空）；混合批扰动幅度取 δ=0.011（A6 单套容差 2⁻¹³ + 动态锚点门
-max_abs>0.01 才触发兜底，旧微扰 56·2⁻²⁴ 在 A6 下直接过 layer1 不再 FAIL）。
+case 基材与 flags 口径按 s2-A1 一段式重基（逐矩阵残差配对 c_i、HT-3 mean 第二支、
+HT-16 flags 恒空）；混合批扰动幅度 δ=0.011 使扰动矩阵残差 ≈ 5.29e4 远超阈值。
 """
 import numpy as np
 import pytest
@@ -61,9 +60,9 @@ def _potrsb_case(batch, ratio_cpu, mean=0.0):
 
 
 def _mixed_dut(batch):
-    """混合批：矩阵 1 与 batch-1 各带一处扰动（δ=0.011 越动态锚点门 → 兜底
-    FAIL），其余精确。mean=0 时阈值 = 5·ratio_cpu ≤ 15 ≪ ratio≈5.29e4，
-    扰动矩阵必 FAIL、精确矩阵必 PASS。"""
+    """混合批：矩阵 1 与 batch-1 各带一处扰动（δ=0.011），其余精确。
+    mean=0 时阈值 = 5·ratio_cpu ≤ 15 ≪ ratio≈5.29e4，扰动矩阵必 FAIL、
+    精确矩阵必 PASS（一段式残差判定）。"""
     outs = [L_GOLD.copy() for _ in range(batch)]
     delta = 0.011
     outs[1][1, 1] += delta

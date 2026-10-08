@@ -22,17 +22,16 @@ batched、确定性、info 契约。状态枚举（spec §2.5）：数值PASS｜
   任务书 2026-10 定稿 §3.4 内存不做要求——内存证据仅存证不设门。
 - 确定性 / info 契约：任务书 §3.2 新增两类；本片模拟被测下均记证据不足（spec §2.3′）。
 
-judge verdict → 接口精度状态的映射（spec §2.3 数值判定流转 + judge 的 error 语义）：
+judge verdict → 接口精度状态的映射（s2-A1 一段式残差判定 + judge 的 error 语义）：
 
-1. verdict.layer1 为 None（被测状态非 ok / info≠0 / 输入缺失等，judge 未能开审）
-   → 证据不足：没有可裁的被测输出，不是精度结论。
-2. numeric == PASS → 数值PASS（layer1 双解释一致通过，或 fallback 终审通过）。
-3. numeric == FAIL 且 fallback.ran → 数值FAIL：终审层已对被测数据裁决（fallback 算出
-   超阈，或被测输出退化到残差不可计算——layer1 已给出完整失败统计，指认层随 evidence
-   携带）。
-4. numeric == FAIL 且 fallback 未运行（error 非空，如 ratio_cpu 缺失致兜底不可用）
-   → 证据不足：layer1 未双过而终审层缺证据，按 judge 文档「error 非空的 FAIL 属
-   不可裁/证据问题」不得当精度 FAIL 上报。
+1. numeric == PASS → 数值PASS（残差 ≤ 阈值）。
+2. numeric == FAIL 且 residual.ran 且 pass 非 null → 数值FAIL：残差层已对被测数据
+   裁决（残差超阈，或被测输出退化到残差不可计算——ratio=null，error 指认原因）。
+3. numeric == FAIL 且 residual 未运行（ran=False：被测状态非 ok / info≠0 / 输入
+   缺失 / ratio_cpu 基线不可用 / judge 内部异常）→ 证据不足：没有可裁的证据，
+   按 judge 文档「不可裁/证据问题」不得当精度 FAIL 上报。
+4. numeric == FAIL 且 residual.ran 且 pass 为 null（缺 ratio_cpu_mean、残差超单支
+   5·ratio_cpu，HT-3 兼容口径）→ 证据不足：两支公式只可证一支，待含 mean 的包复判。
 
 formal 恒 PENDING_RULING（spec §2.3：正式裁定待任务方出具），随每个接口精度 item 的
 evidence 携带；族级结论由 family_conclusion 给出且在本片恒为「不得通过」类。
@@ -41,22 +40,22 @@ evidence 携带；族级结论由 family_conclusion 给出且在本片恒为「�
 
 S3 批量增量（S3 spec §4/§6，D3 卡；HT-16 起 T8 暂定聚合标记摘除，批量数值结论升正式）：
 
-- 接口精度项识别批量 verdict schema（顶层含 batch，无 layer1/fallback）：case 级
+- 接口精度项识别批量 verdict schema（顶层含 batch，无 residual 单段）：case 级
   error（fail_count 为 null）→ 证据不足；numeric PASS → 数值PASS；FAIL 中存在真
   数值失败（fail_count > error_count）→ 数值FAIL（evidence 携带 batch/fail_count/
   first_fail_index/worst_index/worst 与整批 diagnostics）；FAIL 全由逐矩阵 error
   构成 → 证据不足（按 judge 文档「error 非空属不可裁」口径）。
 - batched 期望项按算子分型：批量算子数值判定可展示且升正式（接口精度项逐 case
-  携带逐矩阵三层结论）；覆盖缺口如实声明（六例二维代表子集、无 std 蓝本，覆盖
-  类别保留证据不足）；单矩阵算子的 batched 接口由对应 *Batched 后补包独立承载，
-  本包如实记证据不足。
+  携带逐矩阵一段式残差结论）；覆盖缺口如实声明（六例二维代表子集、无 std 蓝本，
+  覆盖类别保留证据不足）；单矩阵算子的 batched 接口由对应 *Batched 后补包独立
+  承载，本包如实记证据不足。
 残差超阈致数值FAIL 的接口精度项，evidence 另附任务书 §3.2.2 注的申诉指引
 （APPEAL_NOTE，纯静态句，不参与判定与状态流转）。
 """
 
 from collections import OrderedDict
 
-EXPECTATIONS_VER = "s3-D4"  # HT-8：新增 info_item_from_verdict（info 契约项）；承 s3-D3
+EXPECTATIONS_VER = "s2a1-D5"  # s2-A1 一段式：接口精度映射改 residual 单层；承 s3-D4
 
 # S3 spec §1：batched 覆盖缺口的统一声明文本（batched 期望项与声明边界共用）。
 BATCHED_COVERAGE_GAP = (
@@ -178,30 +177,29 @@ def accuracy_item_from_verdict(case_id, verdict):
     批量 schema（顶层含 batch，S3）分流到 _accuracy_item_from_batched）。"""
     if "batch" in verdict:
         return _accuracy_item_from_batched(case_id, verdict)
-    layer1 = verdict.get("layer1")
-    fallback = verdict.get("fallback") or {}
+    residual = verdict.get("residual") or {}
     error = verdict.get("error")
-    if layer1 is None:
+    if verdict.get("numeric") != "PASS" and not residual.get("ran"):
         return accuracy_item_insufficient(
             case_id, "不可裁",
-            f"judge 未能开审（被测状态/输入问题）: {error}")
-    if verdict.get("numeric") != "PASS" and not fallback.get("ran"):
+            f"残差未运行（被测状态/输入问题或残差基线不可用）: {error}")
+    if (verdict.get("numeric") != "PASS" and residual.get("ran")
+            and residual.get("pass") is None):
+        # HT-3 缺 mean 兼容口径：超单支线不判 FAIL，证据不足待含 mean 的包复判。
         return accuracy_item_insufficient(
-            case_id, "兜底证据不可用",
-            f"layer1 未双过且 fallback 未运行: {error}")
-    judged_by = "fallback" if fallback.get("ran") else "layer1"
+            case_id, "残差证据不足",
+            f"缺 ratio_cpu_mean 且残差超单支 5·ratio_cpu: {error}")
     status = ST_PASS if verdict.get("numeric") == "PASS" else ST_FAIL
     evidence = {
-        "judged_by": judged_by,          # 指认终审层（spec §2.3 流转）
-        "layer1": layer1,
-        "fallback": fallback,
+        "judged_by": "residual",         # s2-A1 一段式：残差即唯一判定层
+        "residual": residual,
         "flags": list(verdict.get("flags") or []),
         "formal": verdict.get("formal", FORMAL_PENDING),
         "error": error,
     }
-    # 只在「fallback 算出 ratio 且超阈」的数值FAIL 上附申诉指引——任务书注文只覆盖
+    # 只在「残差算出 ratio 且超阈」的数值FAIL 上附申诉指引——任务书注文只覆盖
     # 残差超阈情形；残差不可计算的 FAIL（ratio 为 None）不属申诉通道。
-    if status == ST_FAIL and fallback.get("ratio") is not None:
+    if status == ST_FAIL and residual.get("ratio") is not None:
         evidence["appeal"] = APPEAL_NOTE
     return make_item(KIND_ACCURACY, _accuracy_name(case_id), status, evidence)
 
@@ -282,8 +280,8 @@ def batched_status_item(operator):
         return make_item(
             KIND_BATCHED, f"{KIND_BATCHED}/{operator}", ST_NO_EVIDENCE,
             {"reason": "覆盖类别证据不足",
-             "detail": "数值判定已升正式（接口精度项逐 case 携带逐矩阵三层数值结论，"
-                       "HT-16）；期望集覆盖类别按缺口声明保留证据不足（S3 spec §1）",
+             "detail": "数值判定已升正式（接口精度项逐 case 携带逐矩阵一段式残差"
+                       "结论，HT-16）；期望集覆盖类别按缺口声明保留证据不足（S3 spec §1）",
              "coverage_gap": BATCHED_COVERAGE_GAP,
              "formal": FORMAL_PENDING})
     return make_item(

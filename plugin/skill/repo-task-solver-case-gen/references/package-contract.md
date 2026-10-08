@@ -7,7 +7,7 @@
 | 文件 | 内容 |
 | --- | --- |
 | `cases/index.json` | 逐 case 条目：canonical 全字段 + `npz` 路径 + `arrays` 清单 + `ratio_cpu`（残差参考值）+ `ratio_cpu_status`（`ok`/`prep_failed`）；纯脚本包条目另记 `materialize: "gen"`，info 契约条目（`case_purpose: "info"`）另带 `k_expected`/`info_probe`/`base_case_id`（无 golden/ratio），批量条目另带 `sample_map` 槽位映射、逐内容 `ratio_cpu` k 值列表与 case 级 `ratio_cpu_mean` |
-| `cases/<case_id>.npz` | `A64/A32`（potrs 另 `B64/B32`）+ `golden64/golden32`。实数 float64/float32，复数 complex128/complex64，字段名两域相同 |
+| `cases/<case_id>.npz` | `A64/A32`（potrs 另 `B64/B32`）+ `golden64/golden32`（golden 仅作自测参考，不参与判定）。实数 float64/float32，复数 complex128/complex64，字段名两域相同 |
 | `gen_data.py` | 数据构造脚本副本；与 `canonical_cases.json` 配合可重新生成同批数据 |
 | `canonical_cases.json` | 本算子的规范用例清单切片（含未生成 case 的登记） |
 | `verify_accuracy.py` | 精度检查脚本副本（渲染件，输出不构成验收证据） |
@@ -22,12 +22,18 @@
 纯脚本形态的包不携带任何数据数组：无 `cases/*.npz`（上表该行描述的是 gen_data
 现场生成后的产物形状），`cases/index.json` 条目记 `materialize: "gen"`，其
 `ratio_cpu` 为装包自检运行的参考值——批量为逐内容 k 值列表（A0 抽样，条目另带
-`sample_map` 槽位映射，判定先比余槽 bit-wise 一致性、后代表槽逐内容三层）、单矩阵为
-单个数值（均仅作参考，验收与自测侧判定时现场同法重算）。**ratio_cpu_mean 固化**
+`sample_map` 槽位映射，判定先比余槽 bit-wise 一致性、后代表槽逐内容残差判定）、单矩阵为
+单个数值（均仅作参考，验收与自测侧判定时现场同法重算）。**精度判定为一段式直接
+残差**：唯一判据 `ratio ≤ max(5·ratio_cpu, 3·ratio_cpu_mean)`（potri 为
+`max(5·ratio_cpu, 0.1)`，不消费 mean），复数残差按复模一体判定（不拆实虚）；
+golden 退出判定、仅作自测参考。**ratio_cpu_mean 固化**
 （HT-4）：单矩阵包 index 顶层按算子存全部正定精度用例的算术平均 `{op: mean}`，批量包
 按精度条目存 Σ(count_j·ratio_j)/batchSize 槽位加权均值（与任务书「batch 个矩阵均值」
-数学等价）——判定时只读零重算，作 potrf/potrs 残差阈值第二支
-（`max(5·ratio_cpu, 3·ratio_cpu_mean)`）；info 契约用例与非正定矩阵不计入。
+数学等价）——判定时只读零重算，作上式第二支 `3·ratio_cpu_mean`；
+info 契约用例与非正定矩阵不计入。**ratio_basis 基标记**（2026-10-08 换基）：index
+顶层 `ratio_basis: "A32-f64"` 声明包内 `ratio_cpu` 与 `ratio_cpu_mean` 的残差基——
+全族以实现实际输入（fp32/complex64）升 f64 计算，potrf 族 DPOT01 的 a 自此用 A32；
+verify/accept 消费时据此辨新旧，旧包无此字段即 A64 基，旧固化值不可与新基混用。
 **info 契约用例**（HT-8/9）：`case_purpose: "info"` 条目，单矩阵每算子 3 例（非正定/
 奇异因子/非法参数）、批量每算子 1 例混合（非正定代表内容 + `bad_param_uplo` 探针），
 只比被测 `info == k_expected`、不产 golden/ratio、与数值精度各出独立结论。数据由

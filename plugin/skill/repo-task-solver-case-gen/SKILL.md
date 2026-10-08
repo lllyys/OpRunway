@@ -13,12 +13,16 @@ Cholesky 十算子：实数 spotrf、spotrs、spotri，复数 cpotrf、cpotrs、
 无 golden、无 ratio 数组），开发者按包内 README 的「先造数后测」流程用 `gen_data.py`
 现场生成数据，检查脚本判定时自行重生成、不依赖生成目录。批量四算子走 **A0 抽样**：
 每 case 只固化 `k = min(5, batch)` 个代表内容的槽位映射 `sample_map` 与逐内容 ratio
-参考（数组不落盘，判定先比余槽 bit-wise 一致性、后代表槽逐内容三层）。除精度用例外
+参考（数组不落盘，判定先比余槽 bit-wise 一致性、后代表槽逐内容残差判定）。除精度用例外
 每算子另含 **info 契约用例**（`case_purpose: "info"`，单矩阵每算子 3 例、批量每算子
 1 例混合）：只比被测 `info == k_expected`，与数值精度各出独立结论。发包侧固化
 `ratio_cpu_mean`（单矩阵 index 顶层按算子存全部正定精度用例的算术平均；批量按 case
 条目存 Σ(count_j·ratio_j)/batchSize 槽位加权均值，info 契约用例不计入）——判定时
-只读零重算，作 potrf/potrs 残差阈值第二支。单矩阵六算子自 v2 起同此形态（此前交付的
+只读零重算。精度判定为一段式直接残差：唯一判据 ratio ≤ max(5·ratio_cpu,
+3·ratio_cpu_mean)（potri 为 max(5·ratio_cpu, 0.1)），复数残差按复模一体判定
+（不拆实虚），golden 退出判定、仅作自测参考。残差基全族为实现实际 fp32 输入升
+f64（2026-10-08 换基），index 顶层落 `ratio_basis: "A32-f64"` 标记，旧包无此字段即
+A64 基、其固化值不可与新基混用。单矩阵六算子自 v2 起同此形态（此前交付的
 v1 六包是逐字节复用形态的历史实体，维持原形不动）。
 
 ## 入口参数
@@ -44,7 +48,7 @@ python3 与 numpy、scipy 可用；实际版本由装包阶段写入 manifest，
 | S2 生成数据与参考输出 | `python3 scripts/gen_data_cholesky.py --canonical <输出根>/canonical_cases.json --out <输出根>/staging --select s1` | 退 0（内建校验含单双精度降型一致；批量算子走 A0 抽样现场造，只产 index 记 `sample_map`，不落数组） |
 | S3 补填 ratio_cpu | `python3 scripts/fill_ratio_cpu.py --cases <输出根>/staging/cases --out <输出根>/ratio` | 退 0，`ratio_cpu_report.json` 无 `prep_failed` 之外的异常项；批量条目按代表内容计算、index 落逐内容 k 值列表（A0 抽样） |
 | S4 性能参考耗时表 | `python3 scripts/make_baseline.py --canonical <输出根>/canonical_cases.json --bench-dir <任务目录> --out <输出根>/perf` | 退 0；未匹配条目逐条列报（matched=false、耗时字段为空入包），非 std 未匹配的 case 标性能证据不足；精度数据生成不受 bench 缺失影响 |
-| S5 装包 | `python3 scripts/build_package.py --canonical <输出根>/canonical_cases.json --staging <输出根>/staging <输出根>/ratio <输出根>/perf --out <输出根>/packages/<op> --selfcheck <输出根>/packages/<op>.selfcheck.json` | 自检清单每项通过；逐算子各执行一次；十算子均为纯脚本装包（零数组，index 条目记 `materialize: "gen"`；装包自检内建现场生成（含 info 契约派生）、golden 抽验与 ratio 回填及 `ratio_cpu_mean` 固化，S2/S3 的 staging 产物用于独立核对、不进包） |
+| S5 装包 | `python3 scripts/build_package.py --canonical <输出根>/canonical_cases.json --staging <输出根>/staging <输出根>/ratio <输出根>/perf --out <输出根>/packages/<op> --selfcheck <输出根>/packages/<op>.selfcheck.json` | 自检清单每项通过；逐算子各执行一次；十算子均为纯脚本装包（零数组，index 条目记 `materialize: "gen"`；装包自检内建现场生成（含 info 契约派生）、golden 抽验与 ratio 回填及 `ratio_cpu_mean` 固化、`ratio_basis` 基标记，S2/S3 的 staging 产物用于独立核对、不进包） |
 
 ## 检查条件
 
@@ -62,7 +66,8 @@ python3 与 numpy、scipy 可用；实际版本由装包阶段写入 manifest，
 回填的 `ratio_cpu` 参考单值，index 顶层另固化算子级 `ratio_cpu_mean` 算术平均；批量
 条目携带 `sample_map` 槽位映射与逐内容 `ratio_cpu` k 值列表、条目级 `ratio_cpu_mean`
 槽位加权均值；`case_purpose: "info"` 条目为 info 契约用例，带 `k_expected`、无
-golden/ratio。参考值仅作参考；mean 为阈值第二支的固化消费值，判定只读零重算）、
+golden/ratio。参考值仅作参考；mean 为残差阈值第二支 3·ratio_cpu_mean 的固化消费值，
+判定只读零重算；index 顶层 `ratio_basis: "A32-f64"` 标记残差基，旧包无此字段即 A64 基）、
 `perf_baseline.json`（性能参考耗时）、`verify_accuracy.py` 与 `verify_perf.py`
 （检查脚本副本，判定输入现场重生成，含 info 契约判定，输出不构成验收证据）、
 `gen_data.py` 与

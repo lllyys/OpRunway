@@ -16,8 +16,8 @@ S3 批量 A0 抽样通路（S3 spec §4/§6 + HT-2，D3 卡 A0 化）：批量�
 prep_failed 记 None）；全批输入经 expand_sampled_rows 现场展开喂 sim DUT（DUT 适配
 点契约不变：「输入数组 → {out32, info, status}」）；判定经 criteria/batched_a0.
 judge_a0 两层先后——先余槽 bit-wise 一致性（同内容槽位 out32+info 逐位比对，失配
-数值 FAIL 报槽位号），后 rep_slot 逐内容三层判定（batched_parallel.judge_parallel
-复用，--jobs>1 结果与串行逐位相同）。--perturb-index 透传逐矩阵扰动，序号域为
+数值 FAIL 报槽位号），后 rep_slot 逐内容一段式残差判定（batched_parallel.
+judge_parallel 复用，--jobs>1 结果与串行逐位相同）。--perturb-index 透传逐矩阵扰动，序号域为
 全批槽位号——命中非 rep 槽即触发一致性失配负例（报告 a0_mismatches 带槽位号证据）。
 记录按批量 schema 落 batch/fail_count/first_fail_index/worst_index 与最差矩阵摘要、
 mode=a0 与 sampled_contents，ratio_cpu 落 k 值摘要（prep_failed 不入统计）。
@@ -29,7 +29,7 @@ HT-8 info 契约用例：canonical 在册 case 之外，每单算子另派生 3 
 none 产错误 info，sim_dut.info_dut_value 同一实现）、判定走 verdict 的
 case_purpose 分流支路（_judge_info_inner，只比 info==k_expected，HT-12 独立结论）。
 info 用例不受 --select/--limit 节流（构造开销小、逐算子仅 3 条），受 --ops/--max-n
-约束；记录带 case_purpose:"info" 与 info 比对结果，无 layer1/fallback 字段。
+约束；记录带 case_purpose:"info" 与 info 比对结果，无 residual 字段。
 
 HT-9 批量 info 契约用例：每批量算子另派生 1 个混合 case
 （derive_batched_info_cases：*potrfBatched 族 1~2 个代表内容非正定、k_expected
@@ -73,7 +73,7 @@ import numpy as np
 # ru_maxrss 单位：Linux 为 KB、macOS 为字节（2026-09-24 远程实证抓出的少报 1024 倍）
 _RSS_DIV = 1024 if platform.system() == "Linux" else 1024 * 1024
 TOOL = "stream_check.py"
-TOOL_VER = "s3-d3-r6"  # --rerun N 确定性复跑 + 包内 index 顶层 ratio_cpu_mean 注入（HT-4 消费补全）；承 s3-d3-r5
+TOOL_VER = "s2a1-r7"  # s2-A1 一段式：判定记录改 residual 单段（layer1/fallback 退役）；承 s3-d3-r6
 
 _HERE = Path(__file__).resolve().parent
 _CRITERIA = _HERE.parent / "criteria"
@@ -373,7 +373,7 @@ def main(argv=None):
                         # 包内固化 mean 注入（s3-d3-r6）：兜底双支完整生效
                         case_arrays["ratio_cpu_mean"] = index_mean[op]
                     # 单矩阵卡该入口直通 verdict.judge（零漂移）；无包 index 时兜底走
-                    # 缺 mean 单支兼容口径（verdict._run_fallback）。
+                    # 缺 mean 单支兼容口径（verdict._run_residual）。
                     v = bp_mod.judge_parallel(card, case_arrays, dut, jobs=args.jobs)
             # is_info 的 arrays/dut/case_arrays/v 已在上方 info 支路构造
             rec = {
@@ -397,8 +397,7 @@ def main(argv=None):
                     rec["info"] = v.get("info")
             elif batched:
                 worst = v.get("worst") or {}
-                w_l1 = worst.get("layer1") or {}
-                w_fb = worst.get("fallback") or {}
+                w_res = worst.get("residual") or {}
                 rec.update({
                     "mode": "a0", "sampled_contents": k_contents,
                     "canonical_batch": case.get("batch"),
@@ -407,9 +406,7 @@ def main(argv=None):
                     "first_fail_index": v.get("first_fail_index"),
                     "worst_index": v.get("worst_index"),
                     "worst": {
-                        "layer1": {kk: w_l1.get(kk)
-                                   for kk in ("matched_ratio", "max_abs")},
-                        "fallback": {kk: w_fb.get(kk)
+                        "residual": {kk: w_res.get(kk)
                                      for kk in ("ran", "ratio", "threshold")},
                     },
                     "diagnostics": v.get("diagnostics"),
@@ -420,10 +417,8 @@ def main(argv=None):
                     rec["ratio_cpu_prep_failed"] = pf
             else:
                 rec.update({
-                    "layer1": {kk: v["layer1"].get(kk)
-                               for kk in ("matched_ratio", "max_abs")},
-                    "fallback": {kk: v["fallback"].get(kk)
-                                 for kk in ("ran", "ratio", "threshold")},
+                    "residual": {kk: v["residual"].get(kk)
+                                 for kk in ("ran", "ratio", "threshold", "pass")},
                     "ratio_cpu": ratio_cpu, "ratio_cpu_status": ratio_status,
                 })
             rec["seconds"] = round(time.time() - tc, 3)

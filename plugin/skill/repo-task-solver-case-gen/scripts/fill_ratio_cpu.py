@@ -11,14 +11,19 @@ schema）、第 3 节波 1.5 行。B1 的 gen_data_cholesky.py 生成 npz 与 in
 
 ratio_cpu 语义（spec §2.4）：FP32 s 前缀链路对同一冻结输入跑完整准备链
 （potrs/potri 先 spotrf），用 criteria 的 residual_ratio 同一实现计算——本脚本不含
-任何残差公式，残差只此一份（AGENTS.md §2 机械门纪律）。数组口径与判据卡的
-fallback_kwargs 逐字段相同（cards_cholesky.py，README 各章残差口径）：
+任何残差公式，残差只此一份（AGENTS.md §2 机械门纪律）。残差基全族统一为实现实际
+输入（fp32/complex64）升 f64（2026-10-08 裁定；此前 potrf 族「README 1.3：分子分母
+用 A64」口径自此废止），数组口径与判据卡的 fallback_kwargs 逐字段相同
+（cards_cholesky.py）：
 
-- spotrf: F32 = spotrf(A32)；DPOT01(a=A64, factor=F32, uplo)（README 1.3：分子分母用 A64）
+- spotrf: F32 = spotrf(A32)；DPOT01(a=A32, factor=F32, uplo)
 - spotrs: F32 = spotrf(A32) → X32 = spotrs(F32, B32)；DPOT02(a=A32, b=B32, x=X32)
-  （README 2.3：残差对实现实际输入 A32/B32 升 FP64 算）
 - spotri: F32 = spotrf(A32) → C32 = spotri(F32)；DPOT03(a=A32, ainv=C32, uplo)
-  （README 3.3：A 用实现实际输入升精度）
+
+基变更声明（2026-10-08）：potrf 族（spotrf/cpotrf/spotrfBatched/cpotrfBatched）
+既有冻结 ratio_cpu 与 ratio_cpu_mean 系 A64 基，换基后数值过期，旧固化值不可与
+新基混用（重算与包重产另排）。新基产物在 index 顶层落 ratio_basis:"A32-f64" 标记，
+verify/accept 消费时据此辨新旧——旧包无此字段即 A64 基。
 
 与 README ratio_cpu 定义的关系（如实声明，非冲突）：README potrs 2.2 的 ratio_cpu
 就是 CPU 同精度 FP32 参考链路（本脚本同口径）；README potrf 1.3 / potri 3.2 的
@@ -84,7 +89,7 @@ import gen_data_cholesky as gd    # S3：批维读者/分块常量与 BATCHED_OP
 MAX_WORKERS = 64                  # 旧包批量条目并行 worker 上限（沿 S3 spec §2 裁定）
 
 TOOL = "fill_ratio_cpu.py"
-TOOL_VER = "s3-b4-r2"  # HT-8：info 用例透传不回填；承 s3-b4-r1（HT-2 批量 A0 条目）
+TOOL_VER = "a32base-r1"  # 2026-10-08 换基：DPOT01 a=A32、index 落 ratio_basis；承 s3-b4-r2
 REAL_OPS = ("spotrf", "spotrs", "spotri")
 COMPLEX_OPS = ("cpotrf", "cpotrs", "cpotri")
 SUPPORTED_OPS = REAL_OPS + COMPLEX_OPS
@@ -181,8 +186,8 @@ def run_chain(verdict_mod, lapack, case, arrays):
     f32 = _low_potrf(lapack, a32, uplo, cid, prefix, dt32)
     base = op[1:]                                       # potrf/potrs/potri（s/c 前缀共路）
     if base == "potrf":
-        return verdict_mod.residual_ratio(
-            "DPOT01", a=arrays["A64"], factor=f32, uplo=uplo)
+        # 2026-10-08 换基：a 用实现实际输入 A32（residual_ratio 内升 f64），不再用 A64
+        return verdict_mod.residual_ratio("DPOT01", a=a32, factor=f32, uplo=uplo)
     if base == "potrs":
         b32 = np.ascontiguousarray(arrays["B32"])
         x32, info = getattr(lapack, prefix + "potrs")(f32, b32, lower=(uplo == "L"))
@@ -326,7 +331,10 @@ def batched_fill(entry, npz_path, criteria_dir, workers):
     if pf and summary is not None:
         summary["prep_failed"] = pf
 
-    compare = None                      # gen_data 落过 ratio_cpu 字段时比对（docstring S3 段）
+    # gen_data 落过 ratio_cpu 字段时比对（docstring S3 段）。2026-10-08 换基后，
+    # potrf 族 A64 基旧包存量值在此必然失配并报错——属预期拦截（基变更声明），
+    # 旧包需按新基重算重产，不是环境漂移
+    compare = None
     try:
         meta_r = gd.npz_stored_member_meta(npz_path, "ratio_cpu")
     except KeyError:
@@ -585,6 +593,9 @@ def main(argv=None):
     stats, checks, hard_fail = profile_check(rows_scalar, ops)
 
     import scipy
+    # 基版本标记（2026-10-08 换基）：本次回填的 ratio 全族为实现实际输入升 f64 的
+    # A32 基；旧 index 无此字段即 A64 基，不可与新基混用
+    index["ratio_basis"] = "A32-f64"
     index["ratio_cpu_fill"] = {
         "tool": {"name": TOOL, "ver": TOOL_VER},
         "spec": "dev-doc/solver/solver-s1-cholesky-spec.md#2.4",

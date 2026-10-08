@@ -20,7 +20,7 @@
 | `canonical_cases.json` | 本包用例的规范清单（本算子精度用例全量清单 {n_cases} 例） |
 | `cases/index.json` | 用例清单：参数、seed、`materialize: "gen"`（包内无数组）、逐 case `ratio_cpu` 参考值（CPU 参考实现的残差比，发布参考；精度判定时以检查脚本现场重算值为准，同环境逐位一致）与顶层 `ratio_cpu_mean` 固化均值（全部精度用例 `ratio_cpu` 的算术平均，判定时直接读取包内固化值、零重算）；`case_purpose: "info"` 条目为 info 契约用例（无 golden，不带 ratio_cpu，带 `k_expected`） |
 | `gen_data.py` | 数据构造脚本（第 0 步造数与检查侧现场重生成同用这一份） |
-| `verify_accuracy.py` | 精度检查（三层：直审 + LAPACK 残差复核；判定输入现场重生成） |
+| `verify_accuracy.py` | 精度检查（直接计算 LAPACK 残差并对阈值判定；判定输入现场重生成） |
 | `verify_perf.py` | 性能对照（与 GPU 参考耗时逐 case 比值，GPU 数据为 CUDA cuSolver 实测） |
 | `perf_baseline.json` | 性能参考耗时（CUDA cuSolver 实测摘录） |
 | `sim_dut.py` | 模拟被测输出生成器，仅用于流程演练 |
@@ -41,9 +41,10 @@ python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 
    ```
 
    精度用例的输入与参考输出落 `data/cases/*.npz`（`A64/A32[/B64/B32]/golden64/
-   golden32`，矩阵形状 `(n, n)`，右端 `(n, nrhs)`）；info 契约用例的 npz 只有输入
-   数组（无 golden，构造时已当场自检 `info == k_expected`）。造数阶段不产
-   `ratio_cpu` 参考值——检查脚本判定时会现场重算，不影响造数与自测。
+   golden32`，矩阵形状 `(n, n)`，右端 `(n, nrhs)`；golden 仅作自测参考，不参与
+   判定）；info 契约用例的 npz 只有输入数组（无 golden，构造时已当场自检
+   `info == k_expected`）。造数阶段不产 `ratio_cpu` 参考值——检查脚本判定时会
+   现场重算，不影响造数与自测。
 
 2. 准备被测输出：你的执行器从 `data/cases/*.npz` 读输入，逐 case 产
    `dut_out/<case_id>.npz`，三个键：
@@ -71,9 +72,11 @@ python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 
 
    目标 case = `canonical_cases.json` 的全部条目，另按同一规则现场派生
    {n_info} 个 info 契约用例（合计行区分「精度 X + info 契约 Y」两类条数，
-   info 项单独出结论，与精度项分开计数）。potrf/potrs 的残差阈值 =
-   max(5·ratio_cpu, 3·ratio_cpu_mean)：逐 case `ratio_cpu` 以检查脚本现场重算
-   值为准，`ratio_cpu_mean` 直接读取 index 顶层固化均值（发包侧预计算，零重算）。
+   info 项单独出结论，与精度项分开计数）。verify 直接计算 LAPACK 残差并对
+   max(5·ratio_cpu, 3·ratio_cpu_mean) 判定（potri 为绝对线 0.1，即
+   max(5·ratio_cpu, 0.1)；复数残差按复模一体判定，不拆实虚）：逐 case
+   `ratio_cpu` 以检查脚本现场重算值为准，`ratio_cpu_mean` 直接读取 index 顶层
+   固化均值（发包侧预计算，零重算）。golden 仅作自测参考，不参与判定。
    退 0 = 全部数值通过；退 1 = 存在数值未通过或证据不足（缺被测输出、现场重生
    成失败都记证据不足，读报告 summary 区分）；退 2 = 用例清单读不出或参数错——
    **退 2 时报告文件不落盘**，外层脚本不要无条件读报告。

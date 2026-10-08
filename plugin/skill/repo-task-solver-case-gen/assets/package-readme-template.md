@@ -8,9 +8,9 @@
 | 文件 | 用途 |
 | --- | --- |
 | `cases/index.json` | 用例清单：参数、seed、ratio_cpu 参考值、npz 路径 |
-| `cases/<case_id>.npz` | 冻结输入与参考输出（`A64/A32[/B64/B32]/golden64/golden32`） |
+| `cases/<case_id>.npz` | 冻结输入与参考输出（`A64/A32[/B64/B32]/golden64/golden32`；golden 仅作自测参考，不参与判定） |
 | `gen_data.py` + `canonical_cases.json` | 数据构造脚本与本包用例的规范清单，可重新生成同一批数据 |
-| `verify_accuracy.py` | 精度检查（三层：直审 + LAPACK 残差复核） |
+| `verify_accuracy.py` | 精度检查（直接计算 LAPACK 残差并对阈值判定） |
 | `verify_perf.py` | 性能对照（与竞品参考耗时逐 case 比值） |
 | `perf_baseline.json` | 性能参考耗时（竞品实测摘录） |
 | `sim_dut.py` | 模拟被测输出生成器，仅用于流程演练 |
@@ -44,6 +44,9 @@ python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 
    python3 verify_accuracy.py --package . --dut-out dut_out --report self_report.json
    ```
 
+   verify 直接计算 LAPACK 残差并对 max(5·ratio_cpu, 3·ratio_cpu_mean) 判定
+   （potri 为绝对线 0.1，即 max(5·ratio_cpu, 0.1)；复数残差按复模一体判定，
+   不拆实虚）；golden 仅作自测参考，不参与判定。
    目标 case = `cases/index.json` 的全部条目。退 0 = 全部数值通过；
    退 1 = 存在数值未通过或证据不足（缺被测输出目录、缺单个 npz 都记证据不足，
    读报告 summary 区分）；退 2 = 用例清单读不出或参数错——**退 2 时报告文件
@@ -69,7 +72,6 @@ python3 gen_data.py --canonical canonical_cases.json --out regen --select all
 
 ## 结论含义
 
-- 数值通过 ≠ 正式验收通过：精度阈值语义待任务方最终确认，报告中
-  `formal` 字段恒为 `PENDING_RULING`；`flags` 里的 `T3`/`T4`/`T7` 是待确认的
-  阈值条款编号，不影响本次数值结论。
+- 数值通过 ≠ 正式验收通过：包内检查不构成正式验收结论，报告中 `formal` 字段
+  恒为 `PENDING_RULING`（正式结论由验收方出具）；`flags` 恒空（数值结论不带条款标注）。
 - 单侧未通过先查 `status` 与 `info`：执行失败与数值失败在报告中分开计。

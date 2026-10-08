@@ -5,27 +5,34 @@ residual_ratio 无阈值、无 ratio_cpu 依赖——B 卡算基线、E 卡判�
 不得在别处另建第二套残差实现（AGENTS.md §2 机械门纪律）。
 
 judge 只出「数值判定」（numeric: PASS/FAIL）；正式结论层 formal 本片恒为
-PENDING_RULING（正式裁定待任务方出具，spec §0/§2.3；max_abs 门已按 2026-09-24
-HT-1 裁定收成动态锚点单口径，容差已按 HT-14 收成标准表 2^-13 单套），
-任何调用方不得把 numeric 当正式验收结论上报。
+PENDING_RULING（正式裁定待任务方出具，spec §0/§2.3），任何调用方不得把 numeric
+当正式验收结论上报。
 
-layer1 主判按任务书两步结构（HT-7 对调）：比对目标由卡给出（可多目标——复数卡
-拆实/虚，全部通过才算过），基准统一 golden64（supplement 24h；统计前按 FP32 RNE
-收窄，判定与 golden32 等价），容差单套 2^-13（HT-14：issue C1 裁「用新版」生态
-标准表，T3 双轨拆除）；potrf 主判 F vs golden 直审、还原比对降诊断，potri 收单
-目标（A·A⁻¹ 对 I 只留 DPOT03 复核层）。
+s2-A1 一段式（2026-10-08 用户裁定，去除生态精度标准层）：精度判定收成单步——每个
+accuracy 用例直接算 LAPACK 残差（DPOT01/02/03）对阈值判。原 layer1 逐元素混合容差
+层（比对目标、双门、±inf/NaN 收窄、复数拆实/虚统计）整体拆除，不保留诊断；
+golden32/golden64 不再被 judge 消费（降为自测参考件）。阈值即原 fallback 公式原样
+升为唯一判据：potrf/potrs 取 max(5·ratio_cpu, 3·ratio_cpu_mean)（HT-3，缺 mean 走
+单支 5·ratio_cpu 兼容口径），potri 取 max(5·ratio_cpu, 0.1)（HT-5）。
 
-S2c 复数增量（S2 spec §4 契约增量表）：residual_ratio 按输入 dtype 自动分流，
-一次调用的全部数组须同为实数或同为复数（混搭抛错）；复数先升 complex128 再取模，
-范数用复模，recon/镜像取共轭（Hermitian），公式形状、ε 与阈值数值同实数书。
-layer1 的复数拆实/虚由判据卡完成（cards_cholesky），judge 拒绝复数数组直接进
-逐元素统计（不合并稀释，复数任务书 §3.2 第 3 条；issue C3 确认，2026-09-24 摘 T7）。
+s2-A1 换基：残差的 a 全族传实现实际输入 A32（升 f64 在 residual_ratio 内部统一做），
+README 1.3 的 potrf「a 用 A64」口径废止（推翻旧裁定 24i）。
 
-HT-8 info 契约支路：case_purpose=="info" 的用例（非正定/奇异因子/非法参数
-变体，B2 卡口径）只比 info==k_expected，不进残差不进 layer1/fallback——分解
-中途失败的用例残差无意义，info 契约与数值精度各出独立结论（HT-12 口径）。
-证据问题（dut_out 非 dict、status 非 ok、k_expected 缺失/不可取整、info 非标量）
-一律 error verdict（fail-closed，「证据问题不判精度」）。
+fail-closed 边界（s2-A1）：残差非有限或不可计算（含 DPOT03 零输出零分母、被测含
+NaN/Inf 传染）→ 数值 FAIL 并在 error 指认原因，不崩溃不放行；缺 ratio_cpu →
+证据不足（error verdict，residual.ran=False）；缺 ratio_cpu_mean → 单支 5·ratio_cpu
+从严、过即 PASS、超出记证据不足（HT-3 语义）。
+
+复数通路（S2 spec §4）：residual_ratio 按输入 dtype 自动分流，一次调用的全部数组须
+同为实数或同为复数（混搭抛错）；复数先升 complex128 再取模，范数用复模，recon/镜像
+取共轭（Hermitian），公式形状、ε 与阈值数值同实数书——复数误差（含纯虚部、漏共轭）
+由复模与共轭转置天然捕捉，不再拆实/虚。
+
+HT-8 info 契约支路：case_purpose=="info" 的用例（非正定/奇异因子/非法参数变体，
+B2 卡口径）只比 info==k_expected，不进残差——分解中途失败的用例残差无意义，info
+契约与数值精度各出独立结论（HT-12 口径）。证据问题（dut_out 非 dict、status 非 ok、
+k_expected 缺失/不可取整、info 非标量）一律 error verdict（fail-closed，
+「证据问题不判精度」）。
 """
 
 import numpy as np
@@ -109,8 +116,7 @@ def _check_diag_real(name, a):
     """Hermitian 存储不变量校验（S2 spec §4：对角虚部按 0 处理并校验）。
 
     gen 按契约把 A 的对角虚部置 0 后入包，此处只抓无意错误（错喂非 Hermitian
-    阵、脏数据混入复数链路）；被测输出不做此校验，其对角虚部经镜像按 0 处理、
-    由 layer1 拆实/虚如实计不符。
+    阵、脏数据混入复数链路）；被测输出不做此校验，其偏差由残差如实放大。
     """
     if np.any(np.diagonal(a).imag != 0.0):
         raise ValueError(f"{name}: Hermitian 对角虚部非 0（S2 spec §4）")
@@ -139,7 +145,7 @@ def _mirror_half(half):
 def mirror_storage_side(a, uplo):
     """按 uplo 取存储侧半三角并镜像成全对称阵（对侧 stale 不能用的统一口径）。
 
-    residual_ratio 的 DPOT03 复核（I−A·C 对单位阵，potri 的 A·A⁻¹ 语义在复核层）
+    residual_ratio 的 DPOT03 复核（I−A·C 对单位阵，potri 的 A·A⁻¹ 语义在残差层）
     用这一份实现；复数输入按 Hermitian 共轭镜像（S2 spec §4）。
     """
     return _mirror_half(_half(np.asarray(a), uplo))
@@ -162,7 +168,8 @@ def _dpot01(a, factor, uplo):
     复数通路（S2 spec §4）recon=L·Lᴴ / Uᴴ·U，范数取复模，公式形状与 ε 不变。
 
     因子与差值只用存储侧（另一半是输入残留，无效）；差值与 A 的范数都按
-    DLANSY 半三角镜像口径。spotrf 卡约定 a 传 A64（README 1.3 参考链路口径）。
+    DLANSY 半三角镜像口径。spotrf 卡约定 a 传 A32（s2-A1 换基：全族实际输入
+    A32/B32 升 f64，README 1.3 的 A64 口径废止）。
     """
     uplo = normalize_uplo(uplo)
     mode = _resolve_mode({"a": a, "factor": factor})
@@ -265,22 +272,22 @@ def residual_ratio(kind, **arrays):
 
 
 # ---------------------------------------------------------------------------
-# 数值裁决 judge（spec §2.3/§2.3′）
+# 数值裁决 judge（spec §2.3/§2.3′，s2-A1 一段式）
 # ---------------------------------------------------------------------------
 
-def _null_fallback():
-    # fallback 未运行时 ran=False 其余字段 null（spec §2.3）。eps 例外，仍披露口径值：
-    # 它是残差 ratio 的归一基准（issue A4；任务书 2026-10 定稿已改 ε=2^-24=SLAMCH('E') 口径，与本值一致），不是运行结果，缺省更易误读。
+def _null_residual():
+    # 残差未运行时 ran=False 其余字段 null。eps 例外，仍披露口径值：它是残差 ratio 的
+    # 归一基准（issue A4；任务书 2026-10 定稿 ε=2^-24=SLAMCH('E') 口径，与本值一致），
+    # 不是运行结果，缺省更易误读。
     return {"ran": False, "ratio": None, "threshold": None, "formula": None,
-            "pass": None, "eps": "2^-24"}
+            "ratio_cpu": None, "ratio_cpu_mean": None, "pass": None, "eps": "2^-24"}
 
 
 def _error_verdict(msg):
-    # error 非空时 numeric 恒 FAIL（fail-closed）；上层依 error 区分
+    # error 非空且 residual.ran=False 时 numeric 恒 FAIL（fail-closed）；上层依此区分
     # 「证据不足/环境错」与真精度失败，不得把这种 FAIL 直接当精度结论上报。
     return {
-        "layer1": None,
-        "fallback": _null_fallback(),
+        "residual": _null_residual(),
         "numeric": "FAIL",
         "formal": "PENDING_RULING",
         "flags": [],
@@ -288,136 +295,61 @@ def _error_verdict(msg):
     }
 
 
-def _layer1_stats(actual, golden, rtol, atol):
-    """逐元素混合容差统计（任务书 §3.2 判定式）：返回 (matched_ratio, max_abs, g_low)。
-
-    比对前 golden 先按输出 dtype（float32）RNE 收窄（numpy astype 即 RNE，上溢自然
-    成 ±inf），与「被测 float32 输出升 f64」的 actual 对齐成 float32 值域语义。
-    逐点分类与 ±inf/NaN 规则出处：mixed_tolerance_standard.md §2.1.2（2026-09-24 版
-    收窄比对规则；双方 NaN 视作通过同属该收窄语义）：
-
-    - 双方有限 → |a-g| <= atol + rtol*|g| 判定，并参与 max_abs 选取；
-    - 双方同号 ±inf、双方 NaN → 通过点，不参与 max_abs；
-    - 异号 inf、一方 inf/NaN 一方正常 → 计为不符，不参与 max_abs。
-
-    max_abs 在有限点集上取；g_low 是取到 max_abs 那个点的收窄 golden 值（并列取
-    首个扁平下标，确定性）。有限点集为空时 max_abs=0.0、g_low=None（abs 门空真，
-    matched_ratio 门独立把关）。
-    """
-    a = np.asarray(actual, dtype=np.float64)
-    with np.errstate(over="ignore"):
-        g = np.asarray(golden, dtype=np.float64).astype(np.float32).astype(np.float64)
-    finite = np.isfinite(a) & np.isfinite(g)
-    with np.errstate(invalid="ignore"):
-        err = np.abs(a - g)
-        ok = finite & (err <= atol + rtol * np.abs(g))
-        ok |= np.isinf(a) & np.isinf(g) & (np.sign(a) == np.sign(g))
-    ok |= np.isnan(a) & np.isnan(g)
-    n_total = int(a.size)
-    matched_ratio = 1.0 - (n_total - int(np.count_nonzero(ok))) / n_total
-    if not bool(finite.any()):
-        return matched_ratio, 0.0, None
-    idx = int(np.argmax(np.where(finite, err, -1.0)))
-    return matched_ratio, float(err.flat[idx]), float(g.flat[idx])
-
-
-def _gate(matched_ratio, max_abs, g_low):
-    """整体双门（HT-1 裁定后单口径）：通过率门 AND max_abs 动态上限门。"""
-    return bool(matched_ratio >= thresholds.REQUIRED_MATCHED_RATIO
-                and max_abs <= thresholds.max_abs_limit(g_low))
-
-
-def _target_entry(name, actual, golden):
-    """单个比对目标的 layer1 统计（HT-14 后单套容差）。
-
-    复数拆出的实/虚目标各自走本函数，锚点与上限天然独立。
-    """
-    matched_ratio, max_abs, g_low = _layer1_stats(
-        actual, golden, thresholds.LAYER1_RTOL_FP32, thresholds.LAYER1_ATOL_FP32)
-    return {
-        "name": name,
-        "matched_ratio": float(matched_ratio),
-        "max_abs": max_abs,
-        "max_abs_limit": thresholds.max_abs_limit(g_low),
-        "g_low": g_low,
-        "pass": _gate(matched_ratio, max_abs, g_low),
-    }
-
-
-def _diagnostics(card, case_arrays, dut_out):
-    """诊断比对（spec §2.3′：并报不主判，如 potrf 的还原比对 recon vs A64）。
-
-    只报统计（主套容差的 matched_ratio 与 max_abs），不进任何门；算不出记
-    error 条目，不影响裁决——诊断降级的含义就是它的失败不阻断主判。
-    """
-    try:
-        items = card.layer1_diagnostics(case_arrays, dut_out)
-    except Exception as exc:
-        return [{"name": "diagnostics", "error": f"{type(exc).__name__}: {exc}"}]
-    out = []
-    for item in items:
-        name = item[0]
-        try:
-            _, actual, golden = item
-            mr, max_abs, _ = _layer1_stats(
-                actual, golden,
-                thresholds.LAYER1_RTOL_FP32, thresholds.LAYER1_ATOL_FP32)
-            out.append({"name": name, "matched_ratio": float(mr), "max_abs": max_abs})
-        except Exception as exc:
-            out.append({"name": name, "error": f"{type(exc).__name__}: {exc}"})
-    return out
-
-
-def _run_fallback(card, case_arrays, dut_out):
-    """跑 fallback 残差并对阈值裁决。返回 (fallback dict, numeric, error)。
+def _run_residual(card, case_arrays, dut_out):
+    """一段式残差判定（s2-A1）：算 LAPACK 残差、对阈值判。返回
+    (residual dict, numeric, error)。
 
     阈值消费面（HT-3）：uses_mean 卡（potrf/potrs）按两支式
     max(5·ratio_cpu, 3·ratio_cpu_mean) 裁决，ratio_cpu_mean 从 case_arrays 读
     （accept_run 从 index 顶层按算子注入，HT-4 固化）。缺 mean 的兼容口径
-    （plan 定义，fail-closed 方向，非既定裁定）：残差 ≤ 单支 5·ratio_cpu →
-    PASS（证据注明单支）；超出 → 证据不足不判 FAIL（两支公式只可证一支），
-    待含 mean 的 v3 包复判。"""
+    （fail-closed 方向）：残差 ≤ 单支 5·ratio_cpu → PASS（证据注明单支）；
+    超出 → 证据不足不判 FAIL（两支公式只可证一支），待含 mean 的 v3 包复判。
+
+    ratio_cpu 非有限（如 A0 的 prep_failed 内容转 NaN）由阈值公式的入参校验抛错，
+    judge 外层收敛为「judge 内部异常」error verdict——基线不可用即不可裁。"""
     status = case_arrays.get("ratio_cpu_status")
     ratio_cpu = case_arrays.get("ratio_cpu")
     if status != "ok" or ratio_cpu is None:
         return (
-            _null_fallback(),
+            _null_residual(),
             "FAIL",
-            f"兜底不可用: ratio_cpu_status={status!r}, ratio_cpu={ratio_cpu!r}"
-            "（spec §2.4：准备失败该 case 兜底不可用）",
+            f"残差基线不可用: ratio_cpu_status={status!r}, ratio_cpu={ratio_cpu!r}"
+            "（spec §2.4：准备失败该 case 不可裁）",
         )
-    formula = card.fallback_formula
+    formula = card.formula
     mean = case_arrays.get("ratio_cpu_mean")
-    if not card.fallback_uses_mean:
-        threshold = float(card.fallback_threshold(ratio_cpu))
+    if not card.uses_mean:
+        threshold = float(card.threshold_fn(ratio_cpu))
     elif mean is not None:
-        threshold = float(card.fallback_threshold(ratio_cpu, mean))
+        threshold = float(card.threshold_fn(ratio_cpu, mean))
     else:
         threshold = None        # 缺 mean：残差算出后按单支兼容路径裁决
+    base = {"ran": True, "ratio_cpu": float(ratio_cpu),
+            "ratio_cpu_mean": None if mean is None else float(mean), "eps": "2^-24"}
     try:
-        ratio = residual_ratio(card.residual_kind, **card.fallback_kwargs(case_arrays, dut_out))
-    except Exception as exc:  # 残差算不出 → fail-closed，error 指认原因
-        fb = {"ran": True, "ratio": None, "threshold": threshold,
-              "formula": formula, "pass": False, "eps": "2^-24"}
-        return fb, "FAIL", f"fallback 残差不可计算: {type(exc).__name__}: {exc}"
+        ratio = residual_ratio(card.residual_kind, **card.residual_kwargs(case_arrays, dut_out))
+    except Exception as exc:  # 残差算不出（NaN/Inf 传染、零分母等）→ 数值 FAIL，指认原因
+        res = {**base, "ratio": None, "threshold": threshold,
+               "formula": formula, "pass": False}
+        return res, "FAIL", f"残差不可计算: {type(exc).__name__}: {exc}"
     if threshold is None:
-        # 缺 mean 兼容（HT-3）：单支过即 PASS；超单支 → 证据不足。
+        # 缺 mean 兼容（HT-3）：单支从严、过即 PASS；超单支 → 证据不足。
         line = thresholds.potrf_potrs_single_line(ratio_cpu)
         if ratio <= line:
-            fb = {"ran": True, "ratio": float(ratio), "threshold": line,
-                  "formula": "5*ratio_cpu（缺 ratio_cpu_mean 单支，v2 包兼容口径）",
-                  "pass": True, "eps": "2^-24"}
-            return fb, "PASS", None
-        fb = {"ran": True, "ratio": float(ratio), "threshold": None,
-              "formula": formula, "pass": None, "eps": "2^-24"}
-        return fb, "FAIL", (
-            "fallback 证据不足: 缺 ratio_cpu_mean，"
+            res = {**base, "ratio": float(ratio), "threshold": line,
+                   "formula": "5*ratio_cpu（缺 ratio_cpu_mean 单支，v2 包兼容口径）",
+                   "pass": True}
+            return res, "PASS", None
+        res = {**base, "ratio": float(ratio), "threshold": None,
+               "formula": formula, "pass": None}
+        return res, "FAIL", (
+            "残差证据不足: 缺 ratio_cpu_mean，"
             f"{formula} 第二支不可算；残差 {ratio:.6g} 超单支 "
             f"5·ratio_cpu={line:.6g}，不判 FAIL，待含 mean 的 v3 包复判")
     ok = bool(ratio <= threshold)
-    fb = {"ran": True, "ratio": float(ratio), "threshold": threshold,
-          "formula": formula, "pass": ok, "eps": "2^-24"}
-    return fb, ("PASS" if ok else "FAIL"), None
+    res = {**base, "ratio": float(ratio), "threshold": threshold,
+           "formula": formula, "pass": ok}
+    return res, ("PASS" if ok else "FAIL"), None
 
 
 def _judge_inner(card, case_arrays, dut_out):
@@ -432,58 +364,15 @@ def _judge_inner(card, case_arrays, dut_out):
     if dut_out.get("out32") is None:
         return _error_verdict("dut_out 缺 out32")
 
-    targets = card.layer1_targets(case_arrays, dut_out)
-    if not targets:
-        return _error_verdict("layer1 无比对目标（卡给出空目标清单）")
-    entries = []
-    for name, actual, golden in targets:
-        if (np.issubdtype(np.asarray(actual).dtype, np.complexfloating)
-                or np.issubdtype(np.asarray(golden).dtype, np.complexfloating)):
-            return _error_verdict(
-                f"layer1 目标 {name} 含复数数组：复数须由卡拆成实/虚目标再进统计"
-                "（S2 spec §4 不合并稀释）")
-        if actual.size == 0:
-            return _error_verdict(f"layer1 对比集为空: {name}")
-        entries.append(_target_entry(name, actual, golden))
-
-    # 多目标聚合（复数卡拆实/虚为多目标：全部通过才算过）：pass 取 AND、
-    # matched_ratio 取最差（min）、max_abs 取最差（max）；单目标算子退化为原语义。
-    # 顶层 max_abs_limit/g_low 随聚合 max_abs 所在目标走（并列取首个），保持三元
-    # 自洽；门槛判定在逐目标层完成（复数拆实/虚两侧各自锚点各自上限），顶层字段
-    # 只是证据面。
-    l1_pass = all(e["pass"] for e in entries)
-    worst = max(entries, key=lambda e: e["max_abs"])
-
-    layer1 = {
-        "matched_ratio": min(e["matched_ratio"] for e in entries),
-        "max_abs": worst["max_abs"],
-        "max_abs_limit": worst["max_abs_limit"],
-        "g_low": worst["g_low"],
-        "pass": l1_pass,
-        "targets": entries,
-        "diagnostics": _diagnostics(card, case_arrays, dut_out),
-    }
-
-    # flags：T3 已随 HT-14 拆除（双套容差收成标准表单套，无分歧可记）；T7 已摘
-    # （2026-09-24）：拆实/虚口径经 issue C3 评审确认与复数任务书 §3.2 第 3 条
-    # 本意一致，Mr.0 裁定 issue 即书面确认，复数裁决升正式口径、不再挂歧义 flag。
-    flags = []
-
-    if l1_pass:
-        # layer1 全部目标双门都过 → 数值 PASS（终审），fallback 不跑。
-        fallback, numeric, error = _null_fallback(), "PASS", None
-    else:
-        # 任一目标任一门不过 → 走 fallback，fallback 为数值终审。
-        fallback, numeric, error = _run_fallback(card, case_arrays, dut_out)
-
-    return {"layer1": layer1, "fallback": fallback, "numeric": numeric,
-            "formal": "PENDING_RULING", "flags": flags, "error": error}
+    residual, numeric, error = _run_residual(card, case_arrays, dut_out)
+    return {"residual": residual, "numeric": numeric,
+            "formal": "PENDING_RULING", "flags": [], "error": error}
 
 
 def _judge_info_inner(card, case_arrays, dut_out):
     """HT-8 info 契约支路（case_purpose=="info" 的用例专用）：只比 info，
-    不进残差不进 layer1/fallback（B2 卡口径：非正定/奇异用例分解中途失败，
-    残差无意义；info 契约与数值精度各出独立结论，HT-12）。
+    不进残差（B2 卡口径：非正定/奇异用例分解中途失败，残差无意义；info 契约
+    与数值精度各出独立结论，HT-12）。
 
     fail-closed：dut_out 非 dict、status 非 "ok"、k_expected 缺失/不可取整、
     info 非标量，一律 error verdict（证据问题不判精度，语义同 _error_verdict，
@@ -575,24 +464,22 @@ def _check_batched_info(card, info, batch, allow_nonzero=False):
 
 def _matrix_severity(v):
     """单矩阵 verdict 的「差」序键（越大越差），worst_index 的诊断口径：
-    先 numeric FAIL、再 error 非空、再 matched_ratio 小、再 max_abs 大；
-    error 矩阵无 layer1，按 matched_ratio=-1、max_abs=+inf 参与排序。同差取
-    序号小者（调用方用严格大于替换）。仅供诊断指认，不参与任何门。"""
-    l1 = v["layer1"]
-    mr = l1["matched_ratio"] if l1 is not None else -1.0
-    ma = l1["max_abs"] if l1 is not None else float("inf")
+    先 numeric FAIL、再 error 非空、再残差 ratio 大；ratio 不可得（error 矩阵或
+    残差不可计算）按 +inf 参与排序。同差取序号小者（调用方用严格大于替换）。
+    仅供诊断指认，不参与任何门。"""
+    r = v["residual"]["ratio"]
     return (1 if v["numeric"] == "FAIL" else 0,
             1 if v["error"] is not None else 0,
-            -mr, ma)
+            float("inf") if r is None else float(r))
 
 
 def _judge_batched_inner(card, case_arrays, dut_out):
-    """批量卡裁决主体（S3 spec §4，新任务书口径）。返回批量 verdict dict。
+    """批量卡裁决主体（S3 spec §4）。返回批量 verdict dict。
 
-    逐矩阵流式处理：每个矩阵切出单矩阵 case/dut 后走 _judge_inner 完整三层
-    （golden64 基准、2⁻¹³ 单套容差、HT-3 新阈值式——基卡成员自动继承），只保留
-    聚合统计与最差一行明细，不产逐矩阵明细（百万小矩阵档内存 O(1)）。
-    HT-16：T8 暂定聚合标记摘除，case 数值结论升正式（= 全部矩阵通过）。
+    逐矩阵流式处理：每个矩阵切出单矩阵 case/dut 后走 _judge_inner 一段式残差
+    判定（配对该矩阵自己的 c_i=ratio_cpu[i]，算子级 mean 经 passthrough 带入，
+    HT-3），只保留聚合统计与最差一行明细，不产逐矩阵明细（百万小矩阵档内存
+    O(1)）。case 数值结论 = 全部矩阵通过（HT-16 升正式）。
     """
     if not isinstance(dut_out, dict):
         return _batched_error_verdict(f"dut_out 必须是 dict，得到 {type(dut_out).__name__}")
@@ -650,7 +537,7 @@ def _judge_batched_inner(card, case_arrays, dut_out):
 
     # 逐矩阵 passthrough：ratio_cpu_mean/ratio_cpu_status 等标量元数据原样带到
     # 每个矩阵（HT-3：mean 是算子级预计算值，批内共享；缺 mean 单支兼容口径
-    # 在逐矩阵 fallback 里自然生效）。
+    # 在逐矩阵残差判定里自然生效）。
     passthrough = {k: v for k, v in case_arrays.items()
                    if k not in _BATCH_SLICED_KEYS and k not in ("ratio_cpu", "batch")}
 
@@ -658,11 +545,7 @@ def _judge_batched_inner(card, case_arrays, dut_out):
     first_fail_index = None
     first_error = None
     error_count = 0
-    layer1_pass_count = 0
-    fb_ran = 0
-    fb_pass = 0
-    mr_min = None
-    ma_max = None
+    ratio_max = None
     worst_i, worst_v, worst_sev = None, None, None
 
     for i in range(batch):
@@ -689,34 +572,22 @@ def _judge_batched_inner(card, case_arrays, dut_out):
             error_count += 1
             if first_error is None:
                 first_error = f"矩阵 {i}: {v_i['error']}"
-        l1 = v_i["layer1"]
-        if l1 is not None:
-            mr_min = l1["matched_ratio"] if mr_min is None else min(mr_min, l1["matched_ratio"])
-            ma_max = l1["max_abs"] if ma_max is None else max(ma_max, l1["max_abs"])
-            if l1["pass"]:
-                layer1_pass_count += 1
-        fb = v_i["fallback"]
-        if fb["ran"]:
-            fb_ran += 1
-            if fb["pass"]:
-                fb_pass += 1
+        r_i = v_i["residual"]["ratio"]
+        if r_i is not None:
+            ratio_max = r_i if ratio_max is None else max(ratio_max, r_i)
 
         sev = _matrix_severity(v_i)
         if worst_sev is None or sev > worst_sev:
             worst_i, worst_v, worst_sev = i, v_i, sev
 
     # 整批统计只入 diagnostics（S3 spec §4）：以下都是诊断口径，不作任何门；
-    # case 数值结论只由「全部矩阵通过」决定。
+    # case 数值结论只由「全部矩阵通过」决定。ratio_max 是整批可算残差的最大值。
     diagnostics = {
         "batch": batch,
         "pass_count": batch - fail_count,
         "fail_count": fail_count,
         "error_count": error_count,
-        "layer1_pass_count": layer1_pass_count,
-        "fallback_ran_count": fb_ran,
-        "fallback_pass_count": fb_pass,
-        "matched_ratio_min": mr_min,
-        "max_abs_max": ma_max,
+        "ratio_max": ratio_max,
     }
     return {
         "batch": batch,
@@ -733,42 +604,40 @@ def _judge_batched_inner(card, case_arrays, dut_out):
 
 
 def judge(card, case_arrays, dut_out):
-    """数值裁决（spec §2.3/§2.3′）：judge(card, case_arrays, dut_out) -> verdict。
+    """数值裁决（spec §2.3/§2.3′，s2-A1 一段式）：judge(card, case_arrays, dut_out)
+    -> verdict。
 
     参数：
-    - card: ``cards_cholesky.get_card(op)`` 的判据卡（提供 layer1 比对目标与诊断、
-      fallback 喂数与阈值公式；见 cards_cholesky 模块文档）。
+    - card: ``cards_cholesky.get_card(op)`` 的判据卡（提供残差喂数与阈值公式；
+      见 cards_cholesky 模块文档）。
     - case_arrays: 调用方从 npz 加载并合并了 canonical/index 元数据的 dict。
-      layer1 需要卡指定的基准阵（三算子主判均为 golden64，HT-7；spotrf/spotri
-      另需 "uplo"；potrf 诊断另需 A64）；进入 fallback 时另需各卡 fallback_kwargs
-      的数组（spotrf: A64；spotrs: A32/B32；spotri: A32）与 "ratio_cpu"、
-      "ratio_cpu_status"（index.json，spec §2.2/§2.4）；potrf/potrs 卡阈值第二支
-      另需 "ratio_cpu_mean"（index 顶层按算子注入，HT-3/HT-4；缺走单支兼容口径，
-      见 _run_fallback）。
+      需要各卡 residual_kwargs 的数组（spotrf/spotri: A32 与 "uplo"；spotrs:
+      A32/B32）与 "ratio_cpu"、"ratio_cpu_status"（index.json，spec §2.2/§2.4）；
+      potrf/potrs 卡阈值第二支另需 "ratio_cpu_mean"（index 顶层按算子注入，
+      HT-3/HT-4；缺走单支兼容口径，见 _run_residual）。golden32/golden64 不被
+      judge 消费（s2-A1 降为自测参考件）。
     - dut_out: {"out32": ndarray, "info": int, "status": "ok"|"prep_failed"|"error"}。
 
     返回 verdict dict：
-    {layer1: {matched_ratio, max_abs, max_abs_limit, g_low, pass,
-    targets: [逐目标统计], diagnostics: [并报项]},
-    fallback: {ran, ratio, threshold, formula, pass}, numeric: "PASS"|"FAIL",
-    formal: "PENDING_RULING", flags: [], error: null|str}。
-    layer1 顶层键是多目标聚合（min/max/AND，见 _judge_inner 注释）；
-    max_abs_limit/g_low 随聚合 max_abs 所在目标走，g_low 无有限比对点时输出 null。
+    {residual: {ran, ratio, threshold, formula, ratio_cpu, ratio_cpu_mean, pass,
+    eps}, numeric: "PASS"|"FAIL", formal: "PENDING_RULING", flags: [],
+    error: null|str}。
 
-    数值判定流转（容差按 HT-14 收成标准表 2^-13 单套；max_abs 门按 2026-09-24
-    HT-1 裁定收成单口径 max_abs <= thresholds.max_abs_limit(g_low)）：layer1 全部
-    目标双门都过 → 数值 PASS（终审）；任一不过 → 走 fallback，fallback 为数值终审；
-    双套容差分歧 flag T3 已随 HT-14 拆除；T7 已摘（issue C3 确认拆实/虚口径）。
-    formal 本片恒为 PENDING_RULING，
-    绝不输出正式 PASS（正式裁定待任务方出具）。
+    数值判定（一段式）：ratio = residual_ratio(kind, 实际输入…)，ratio ≤ 阈值 →
+    PASS，否则 FAIL。fail-closed 边界：残差不可计算（NaN/Inf 传染、零分母）→
+    数值 FAIL、residual.ran=True、ratio=null、error 指认原因；缺 ratio_cpu →
+    error verdict（residual.ran=False，证据不足不判精度）；缺 ratio_cpu_mean →
+    单支 5·ratio_cpu 从严、过即 PASS、超出记证据不足（error 指认，pass=null）。
+    formal 本片恒为 PENDING_RULING，绝不输出正式 PASS（正式裁定待任务方出具）。
 
     judge 不外抛异常：任何内部异常收敛为 error 字段 + numeric FAIL（fail-closed）；
-    error 非空的 FAIL 属「不可裁/证据问题」，上层不得当精度 FAIL 直接上报。
+    error 非空且 residual.ran=False 的 FAIL 属「不可裁/证据问题」，上层不得当精度
+    FAIL 直接上报；residual.ran=True 的 FAIL（含 ratio=null 的残差不可计算）是对
+    被测数据的数值裁决。
 
     S3 批量卡（card.batched=True，S3 spec §4）走逐矩阵通路，上述单矩阵语义对
-    批内每个矩阵完整成立（layer1 不过→走 fallback，DPOT 配对该矩阵自己的
-    c_i=ratio_cpu[i]；ratio_cpu_mean 按算子级 passthrough 带入每个矩阵，HT-3），
-    case 数值结论 = 全部矩阵 PASS（HT-16：T8 暂定标记摘除，数值结论升正式）。
+    批内每个矩阵完整成立（残差配对该矩阵自己的 c_i=ratio_cpu[i]；ratio_cpu_mean
+    按算子级 passthrough 带入每个矩阵，HT-3），case 数值结论 = 全部矩阵 PASS。
     批量输入约定：case_arrays 的 A64/A32/B64/B32/golden64/golden32 首维为 batch
     （三维），ratio_cpu 为 (batch,) 数组字段；dut_out.out32 三维；info 按卡的
     info_kind 分型——potrfBatched 族 (batch,) int32 infoArray（逐矩阵消费，
@@ -780,16 +649,14 @@ def judge(card, case_arrays, dut_out):
     {batch, fail_count, first_fail_index（全过为 null）, worst_index,
     worst: <最差矩阵的完整单矩阵 verdict，一行明细>, diagnostics: <整批统计，
     仅诊断不入门（S3 spec §4）：batch/pass_count/fail_count/error_count/
-    layer1_pass_count/fallback_ran_count/fallback_pass_count/
-    matched_ratio_min/max_abs_max>, numeric, formal: "PENDING_RULING",
-    flags: 恒空（HT-16）, error: 首个逐矩阵 error 带「矩阵 i:」前缀，或
-    case 级校验失败原因}。worst_index 的排序口径见 _matrix_severity
-    （诊断指认用，不参与判定）。
+    ratio_max>, numeric, formal: "PENDING_RULING", flags: 恒空（HT-16）,
+    error: 首个逐矩阵 error 带「矩阵 i:」前缀，或 case 级校验失败原因}。
+    worst_index 的排序口径见 _matrix_severity（诊断指认用，不参与判定）。
 
     HT-8 info 契约用例（case_arrays["case_purpose"]=="info"，仅单矩阵）：走
     _judge_info_inner 独立支路，只比 info==k_expected，返回 schema 带 "info"
-    键（{expected, actual, pass}）而无 layer1/fallback；不消费卡的比对目标，
-    不进 mean（HT-4）。
+    键（{expected, actual, pass}）而无 residual；不消费卡的残差成员，不进 mean
+    （HT-4）。
     """
     if getattr(card, "batched", False):
         try:

@@ -16,15 +16,16 @@ derive_sample_map / gen_batched_case）：每 batch 用例只造 k=min(5,batch) 
    error 恒 None（仓库约定 error 非空 = 证据问题不判精度，此处是真实缺陷）；
 2. 代表槽逐内容精度判定（judge_representatives）：按 rep_slot 切出 k 个代表输出，
    与 k 个内容数组配成 batch=k 子批，复用 batched_parallel.judge_parallel
-   （verdict 唯一裁决实现零改动——AGENTS.md §2 机械门纪律）。子批 verdict 的序号
-   域是内容下标 0..k-1（first_fail_index/worst_index 同），不是全批槽位号。
+   （verdict 唯一裁决实现零改动——AGENTS.md §2 机械门纪律；s2-A1 起为一段式
+   残差判定）。子批 verdict 的序号域是内容下标 0..k-1（first_fail_index/
+   worst_index 同），不是全批槽位号。
 
 ratio_cpu 消费口径：A0 条目的 ratio_cpu 是 k 值列表，prep_failed 内容记 null——
-此处转 NaN 进子批（float64 (k,)）。NaN 基线的内容若 layer1 不过，阈值公式的
-有限性校验（thresholds._check_ratio_cpu）抛错 → 该内容 error verdict（「不可裁/
-证据问题」，不判精度），与全量通路「兜底不可用」同向 fail-closed；prep 计数由
-index 的 ratio_cpu_prep_failed 披露。ratio_cpu_status 原样透传：全 prep_failed
-时子批走「兜底不可用」error 语义，与全量通路同口径。
+此处转 NaN 进子批（float64 (k,)）。s2-A1 一段式下每个内容必进阈值公式，NaN 基线
+的内容由有限性校验（thresholds._check_ratio_cpu）抛错 → 该内容 error verdict
+（「不可裁/证据问题」，不判精度），与全量通路「残差基线不可用」同向 fail-closed；
+prep 计数由 index 的 ratio_cpu_prep_failed 披露。ratio_cpu_status 原样透传：
+全 prep_failed 时子批走「残差基线不可用」error 语义，与全量通路同口径。
 
 结构问题（out32 非三维、batch 声明不符、info 分型不符、缺 sample_map 等）沿用
 verdict 约定出 error verdict（fail_count=None），上层不得当精度 FAIL 上报。
@@ -86,7 +87,7 @@ def check_consistency(card, dut_out, sample_map):
 def judge_representatives(card, contents, sample_map, dut_out, ratio_cpu,
                           ratio_cpu_status, ratio_cpu_mean=None, extra=None, jobs=1):
     """第 2 层：rep_slot 切子批，复用 batched_parallel.judge_parallel 出代表槽
-    逐内容 verdict（三层原样，不加开关——HT-2 卡面口径）。
+    逐内容 verdict（一段式残差判定原样，不加开关——HT-2 卡面口径）。
 
     - contents: A0 内容数组 {A64,A32[,B64,B32],golden64,golden32}，批维 k（现场
       重造产物，由消费方保证与包/种子一致——本模块只按形状校验）；
@@ -252,7 +253,7 @@ def _judge_a0_info_inner(card, case_arrays, dut_out):
 def judge_a0(card, case_arrays, dut_out, jobs=1):
     """A0 批量条目顶层判定：① info 契约条目分流（HT-9，case_purpose=="info" →
     _judge_a0_info_inner 只比 info）；② 一致性核对（失配 → 数值 FAIL 带槽位号证据）；
-    ③ 代表槽逐内容判定（复用现有三层原样）。
+    ③ 代表槽逐内容判定（复用一段式残差判定原样）。
 
     case_arrays 为 A0 条目（canonical case + gen_batched_case 增量合并后的 dict）：
     _BATCH_SLICED_KEYS 数组批维 k、ratio_cpu 为 k 值列表、batch 声明为 canonical
