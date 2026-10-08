@@ -1,5 +1,7 @@
 # solver 线交接待办簿
 
+> 2026-10-08 接管注：交接方不再 push，其本地 git 历史（f5322b4 等）不可得；回交快照（已导入 repos/repo-task-atk-test-evolve 的 evolve-1008）即正史起点，后续演进全部在本方。HT-23 所指的对方交接包仓随之失效：回交内容已存reports/solver-handover-1008-returned/（本仓 ignored 区，无 git 大文件问题）。
+
 **怎么用**：先看总表挑活——🟢 直接做，🔴 先去拿裁定。做完一条：状态改 ✅，
 在该条「完成落点」填产物或 commit，**不删条目**。只收录已明示要记的条目。
 
@@ -29,7 +31,7 @@
 | HT-20 | 〔新书比对〕申诉通道句入验收报告 | ✅ 完成 | 落 expectations 逐项 evidence，仅残差超阈 FAIL 附句 |
 | HT-21 | 〔v4 复核〕info 契约派生基座双链口径差异——记录 | ✅ 记录（不改码） | v4 交叉复核（2026-09-27）第 4 项：设计使然非缺陷，判定链用包内切片重造自洽不受损 |
 | HT-22 | 〔对外内容〕任务目录整理优化——产物入位 + 算子目录只留对外件 | ✅ 完成 | 2026-09-27 用户指令：两任务目录各算子只留 cases.json/bench_result.json 参考 + 交付包；cu 脚本/编译脚本/日志/改动报告移 `_internal_archive/` 存档不删除 |
-| HT-23 | 〔git 大文件〕批量包 index 254MB 处置——挂起待拍板 | 🔴 挂起（2026-09-28） | 摘要化方案已实作后**整体回退**（revert 8e1d65e，用户拍板暂停）；快装模式（--ratio-source reuse）半成品丢弃；详见逐条说明 |
+| HT-23 | 〔git 大文件〕批量包 index 254MB 处置 | ✅ 随对方线关闭（2026-10-08） | 摘要化方案已实作后**整体回退**（revert 8e1d65e，用户拍板暂停）；快装模式（--ratio-source reuse）半成品丢弃；详见逐条说明 |
 | HT-24 | 〔私集验证〕potri 负例定标失效 + 直审双门小幅宽容语义 | 🔴 挂起（2026-10-07 更正） | 初版「分母塌缩」根因更正：判定链无缺陷（_dpot03 与任务书公式一致）；真实机制=spotri 逆元素幅度 ~1/n，scale/zero 绝对差落 max_abs=1e-2 门内、直审按次序放行；sim δ=1 定标声明失效为文档错误；候选甲乙丙重列待拍板，详见逐条说明 |
 | HT-25 | 〔对外对齐〕任务书定稿版回灌——taskbooks/ 两册同步发布版 | ✅ 完成 | 2026-10-08：两册以发布版逐字节替换（md5 一致，实数/复数册），README 产物地图标注契约真源迁移；包本体核实与发布包一致未重产 |
 | HT-26 | 〔对外对齐〕accept skill 性能门禁机制同步（0.35×GPU数据） | ✅ 完成 | 2026-10-08：expectations.py 性能门禁改 0.35+msprof+bench_result 口径、内存证据改「不设门仅存证」；references/perf-collection.md 对齐发布版 PERF_COLLECTION_SUPPLEMENT；两树 SKILL.md、verdict.py/render_verify.py/thresholds.py ε 注释更新；criteria 测试基线无回归（24 failed 为本地环境缺 golden 夹具，stash 前后一致） |
