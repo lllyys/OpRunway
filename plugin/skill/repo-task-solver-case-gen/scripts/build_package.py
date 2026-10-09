@@ -83,6 +83,19 @@ v1 从未流通无需兼容）——单矩阵六算子的装包自此走 **build
 - 旧 build()（S1/S2 逐字节复用装包，产出已交付六 v1 包）保留在本文件作 provenance，
   不再被路由——非批量装包一律纯脚本（S3 spec §5 通用数据策）。
 
+负例门（两条纯脚本装包路径的自检末项，2026-10-09）——此前的自检项从不执行包内
+verify，sim_dut 只被复制不被执行，「verify 形同虚设」一类缺陷活得过装包。门在临时
+目录内复刻开发者 README 流程，跑的是**刚装好的包里那几份成品件**：
+
+- 正例（--perturb none）：verify_accuracy 退 0 且全部 case 数值 PASS；
+- 负例：非批量 --perturb scale → 退 1 且全部被扰动 case 数值 FAIL（一段式残差下
+  六算子 scale 必拦，无豁免）；批量 --perturb scale --perturb-index 1 → 退 1 且报告
+  指认到被扰动的槽位或其所属内容（a0_mismatches / first_fail_index / worst_index）；
+- 任一断言不符 → SelfCheckError（装包失败，不写 manifest），错误信息指明哪条断言、
+  实际退出码与实际结论。
+
+限界（成本上限：单包墙钟秒级）与它证不到的事，见 run_negative_gate 的说明。
+
 CLI（spec §2.5 逐字；方括号内为本卡补充的可选项，缺省行为不需要它们）：
 
     build_package.py --staging <目录...> --out reports/solver-packages/<op>/
@@ -100,16 +113,21 @@ CLI（spec §2.5 逐字；方括号内为本卡补充的可选项，缺省行为
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import platform
+import shutil
+import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
 
 TOOL = "build_package.py"
-TOOL_VER = "s3-F11"  # 2026-10-08 换基：index 固化 ratio 时落 ratio_basis:"A32-f64"；承 s3-F10
+TOOL_VER = "s3-F12"  # 2026-10-09 负例门：自检末项真跑包内判定链，正例必绿负例必红；承 s3-F11
 OPS = ("spotrf", "spotrs", "spotri", "cpotrf", "cpotrs", "cpotri")
 BATCHED_OPS = ("spotrfBatched", "spotrsBatched", "cpotrfBatched", "cpotrsBatched")
 ALL_OPS = OPS + BATCHED_OPS
@@ -531,6 +549,305 @@ def batched_case_ratio_cpu_mean(entry):
 
 
 # ---------------------------------------------------------------------------
+# 负例门（纯脚本装包的自检末项；docstring「负例门」段）
+# ---------------------------------------------------------------------------
+
+GATE_CASES_PURESCRIPT = 4    # 非批量门取切片内最小几例精度 case（限界）
+GATE_CASES_BATCHED = 1       # 批量门取 n²·batch 最小几例（整批展开的成本由它定）
+GATE_SLOT = 1                # 批量负例的被扰动槽位（sim_dut --perturb-index）
+GATE_TIMEOUT_S = 900
+_GATE_GEN_MODULE = "_oprunway_gate_pkg_gen_data"
+
+
+def gate_pick_cases(slice_cases, batched, limit):
+    """门内切片：按规模代价升序取前 limit 例精度 case。
+
+    代价 = n²·batch（整批展开的字节数；非批量 batch 记 1，与 n² 同序），平手按
+    case_id——确定性，同一个包每次取同一批。批量另要求 batch > GATE_SLOT：
+    逐矩阵扰动得有被扰动的那个槽位。
+    """
+    pool = [c for c in slice_cases if c.get("case_purpose") != "info"]
+    if batched:
+        pool = [c for c in pool if int(c.get("batch") or 0) > GATE_SLOT]
+    if not pool:
+        raise SelfCheckError(
+            f"负例门：切片内没有可用精度 case（批量门另要求 batch > {GATE_SLOT}）")
+    pool = sorted(pool, key=lambda c: (int(c["n"]) ** 2 * int(c.get("batch") or 1),
+                                       int(c["n"]), str(c["case_id"])))
+    return pool[:limit]
+
+
+def _gate_off_verdict(report, want):
+    """返回数值结论不是 want 的判定行摘要（证据不足行也在内）。"""
+    off = []
+    for row in report.get("cases") or []:
+        numeric = (row.get("verdict") or {}).get("numeric")
+        if numeric != want:
+            off.append(f"{row.get('case_id')}:{row.get('status')}/{numeric}")
+    return off
+
+
+def gate_assert_positive(exit_code, report):
+    """正例断言：verify 退 0 且全部 case 数值 PASS。返回判定条数。"""
+    summary = report.get("summary") or {}
+    total = int(summary.get("total") or 0)
+    off = _gate_off_verdict(report, "PASS")
+    if (exit_code != 0 or total == 0 or off
+            or summary.get("numeric_fail") or summary.get("no_evidence")):
+        raise SelfCheckError(
+            f"负例门/正例断言不符（应退 0 且全 PASS）：verify 退出码 {exit_code}，"
+            f"summary={summary}" + (f"，非 PASS 项 {off}" if off else ""))
+    return total
+
+
+def gate_assert_negative(exit_code, report):
+    """负例断言：verify 退 1 且全部被扰动 case 数值 FAIL。返回判定条数。
+
+    证据不足不算红——那是缺证据，不是判据抓住了偏差，放行它门就等于没有。
+    """
+    summary = report.get("summary") or {}
+    total = int(summary.get("total") or 0)
+    off = _gate_off_verdict(report, "FAIL")
+    if exit_code != 1 or total == 0 or off or summary.get("no_evidence"):
+        raise SelfCheckError(
+            f"负例门/负例断言不符（应退 1 且全 FAIL）：verify 退出码 {exit_code}，"
+            f"summary={summary}" + (f"，非 FAIL 项 {off}" if off else ""))
+    return total
+
+
+def gate_assert_slot_attribution(report, case_id, sample_map, slot=GATE_SLOT):
+    """批量负例的归因断言：报告把 FAIL 指认到被扰动槽位或其所属内容。
+
+    被扰动槽位所属内容由 sample_map 定，判定链两层给出三型可接受证据：
+
+    1. 一致性层命中被扰动槽——a0_mismatches 恰含该槽，first_fail_index 即该槽；
+    2. 一致性层命中代表槽（被扰动槽恰是 rep_slot）——失配落在同内容其余槽位，
+       first_fail_index 为最小失配槽位；
+    3. 残差层（该内容只有这一个槽位，无余槽可比）——无一致性失配，
+       first_fail_index == worst_index == 内容下标。
+
+    返回命中那一型的证据摘要；三型都不成立即 SelfCheckError。
+    """
+    owner = next((e for e in sample_map
+                  if slot in [int(s) for s in e["slots"]]), None)
+    if owner is None:
+        raise SelfCheckError(
+            f"负例门：sample_map 里没有槽位 {slot}（扰动口径与槽位映射不符）")
+    content, rep = int(owner["content_idx"]), int(owner["rep_slot"])
+    siblings = sorted(int(s) for s in owner["slots"] if int(s) != rep)
+    row = next((r for r in report.get("cases") or []
+                if r.get("case_id") == case_id), None)
+    if row is None:
+        raise SelfCheckError(f"负例门：报告里没有 {case_id} 的判定行")
+    verdict = row.get("verdict") or {}
+    first = verdict.get("first_fail_index")
+    worst = verdict.get("worst_index")
+    mismatches = ((verdict.get("diagnostics") or {}).get("a0_mismatches")) or []
+    scene = f"扰动槽位 {slot}（内容 {content}、参照槽 {rep}）"
+    if mismatches:
+        slots = sorted(int(m["slot"]) for m in mismatches)
+        contents = sorted({int(m["content_idx"]) for m in mismatches})
+        want = [slot] if slot != rep else siblings
+        if contents == [content] and slots == want and first == min(want):
+            return (f"一致性层指认槽位 {slots}（内容 {content}、参照槽 {rep}），"
+                    f"first_fail_index={first}")
+        raise SelfCheckError(
+            f"负例门/批量归因不符：{scene}，报告 a0_mismatches 槽位 {slots}、"
+            f"内容 {contents}、first_fail_index={first}（应指认槽位 {want}）")
+    if slot == rep and not siblings and first == content and worst == content:
+        return (f"残差层指认内容 {content}（被扰动槽位 {slot} 是该内容唯一槽位），"
+                f"first_fail_index={first}")
+    raise SelfCheckError(
+        f"负例门/批量归因不符：{scene}未被指认——a0_mismatches 空、"
+        f"first_fail_index={first}、worst_index={worst}")
+
+
+def _gate_run(args, cwd):
+    """以当前解释器执行包内脚本（门的对象是包的成品件，不是 skill 本体）。"""
+    return subprocess.run([sys.executable] + [str(a) for a in args], cwd=str(cwd),
+                          capture_output=True, text=True, timeout=GATE_TIMEOUT_S)
+
+
+def _gate_tail(proc, lines=6):
+    text = (proc.stdout or "") + (proc.stderr or "")
+    return " / ".join(text.strip().splitlines()[-lines:])
+
+
+def _gate_mini_package(out_dir, tmp, picked, index_doc):
+    """门的临时包：包内 gen_data/sim_dut/verify_accuracy 原件 + 最小切片 +
+    index 投影（只留判定消费的 ratio_cpu_mean 与基标记，不复制百 MB 级 index）。
+
+    切片顶层 package_scope 写 "s1" 并给入选 case 置 s1_subset：gen 侧的 info 契约
+    派生与包内 verify 的派生默认同口径（都取 s1 子集），两侧 case_id 才对得上。
+    """
+    pkg = tmp / "pkg"
+    (pkg / "cases").mkdir(parents=True)
+    for name in ("gen_data.py", "sim_dut.py", "verify_accuracy.py"):
+        src = out_dir / name
+        if not src.is_file():
+            raise SelfCheckError(f"负例门：包内缺 {name}，门无对象可执行")
+        shutil.copy2(src, pkg / name)
+    with open(out_dir / "canonical_cases.json", encoding="utf-8") as fh:
+        canon = json.load(fh)
+    mini = {k: v for k, v in canon.items() if k != "cases"}
+    mini["package_scope"] = "s1"
+    mini["slice_note"] = f"负例门临时切片（{len(picked)} 例最小规格，不入包）"
+    mini["cases"] = [dict(c, s1_subset=True) for c in picked]
+    with open(pkg / "canonical_cases.json", "w", encoding="utf-8") as fh:
+        json.dump(mini, fh, ensure_ascii=False, indent=1)
+        fh.write("\n")
+    with open(pkg / "cases" / "index.json", "w", encoding="utf-8") as fh:
+        json.dump(index_doc, fh, ensure_ascii=False, indent=1)
+        fh.write("\n")
+    return pkg
+
+
+def _gate_load_pkg_gen(pkg):
+    """导入包内 gen_data.py——门的对象是成品件，不用 skill 本体那一份。"""
+    spec = importlib.util.spec_from_file_location(_GATE_GEN_MODULE,
+                                                  pkg / "gen_data.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[_GATE_GEN_MODULE] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _gate_batched_dut_input(gen_mod, case, data_dir):
+    """按包 README 第 2 步的执行器挂钩现场构造整批参照输出：k 个代表内容的 golden
+    经 sample_map 展开到全批槽位，落成包内 sim_dut 的取材目录。
+
+    只落 golden32——sim_dut 的批量扰动只读这一个数组，整批 A/B 不必驻留。
+    返回 sample_map（归因断言要用它定位被扰动槽位的所属内容）。
+    """
+    cid, batch = case["case_id"], int(case["batch"])
+    contents = gen_mod.build_batched_contents(case)
+    sample_map = gen_mod.derive_sample_map(case["seed"], batch)
+    full = gen_mod.expand_sampled_rows({"golden32": contents["golden32"]},
+                                       sample_map, 0, batch)
+    cases_dir = data_dir / "cases"
+    cases_dir.mkdir(parents=True, exist_ok=True)
+    np.savez(cases_dir / f"{cid}.npz", golden32=full["golden32"])
+    entry = dict(case)
+    entry["npz"] = f"cases/{cid}.npz"
+    entry["arrays"] = ["golden32"]
+    with open(cases_dir / "index.json", "w", encoding="utf-8") as fh:
+        json.dump({"cases": [entry]}, fh, ensure_ascii=False)
+        fh.write("\n")
+    return sample_map
+
+
+def _gate_round(pkg, tag, sim_extra, verify_args):
+    """一轮：包内 sim_dut 产被测输出 → 包内 verify_accuracy 判定。
+
+    返回 (verify 退出码, 报告 dict)。sim 产不出被测输出，或 verify 退 2 一类
+    报告不落盘，都是门自身的前提坏了——SelfCheckError，不当成判定结论。
+    """
+    dut = f"dut_{tag}"
+    sim = _gate_run(["sim_dut.py", "--package", "data", "--out", dut] + sim_extra, pkg)
+    if sim.returncode != 0:
+        raise SelfCheckError(
+            f"负例门/{tag}：包内 sim_dut 退出码 {sim.returncode}（应 0）"
+            f"：{_gate_tail(sim)}")
+    report_rel = f"{tag}_report.json"
+    ver = _gate_run(verify_args + ["--dut-out", dut, "--report", report_rel], pkg)
+    report_path = pkg / report_rel
+    if not report_path.is_file():
+        raise SelfCheckError(
+            f"负例门/{tag}：包内 verify_accuracy 退出码 {ver.returncode} 且报告未落盘"
+            f"（退 2 一类用法或输入错）：{_gate_tail(ver)}")
+    with open(report_path, encoding="utf-8") as fh:
+        return ver.returncode, json.load(fh)
+
+
+def run_negative_gate(out_dir, op, index_doc, batched):
+    """自检末项：临时目录内复刻开发者 README 流程，正例与负例各执行一轮。
+
+    链路（跑的都是刚装好的包里那几份）：包内 gen_data 造数 → 包内 sim_dut 产被测
+    输出 → 包内 verify_accuracy 判定。断言见 gate_assert_positive /
+    gate_assert_negative / gate_assert_slot_attribution，任一不符即 SelfCheckError。
+
+    限界（门证的是判定链正负双向可分，不是复测全量）：
+
+    - 非批量取切片内最小 GATE_CASES_PURESCRIPT 例精度 case，派生的 info 契约用例
+      随之入门；
+    - 批量取 n²·batch 最小 1 例并以 --case-id 单跑，整批 golden 由包内 gen_data 的
+      expand_sampled_rows 现场展开——该例的 n²·batch 即门的内存上限（冻结十册的
+      最小例都是 n=2 的 1e6 批，f32 整批 16 MB）；
+    - 批量的 info 契约项不入门：包内 sim_dut 的 info 分支只产标量 info，
+      批量 infoArray 分型造不出被测输出；
+    - 门内切片按 s1 口径自洽（见 _gate_mini_package），不核对包内 full 切片下
+      gen 侧与 verify 侧 info 契约 case_id 的派生口径是否一致——那一项另排；
+    - 门只核对判定结论与归因字段，不核对残差数值本身（那是 criteria 的 tests）。
+
+    返回 (tick 文案, 证据摘要)。临时目录在返回前整树删除。
+    """
+    tmp = Path(tempfile.mkdtemp(prefix=f"oprunway-gate-{op}-"))
+    started = time.monotonic()
+    try:
+        with open(out_dir / "canonical_cases.json", encoding="utf-8") as fh:
+            slice_cases = json.load(fh).get("cases") or []
+        picked = gate_pick_cases(
+            slice_cases, batched,
+            GATE_CASES_BATCHED if batched else GATE_CASES_PURESCRIPT)
+        pkg = _gate_mini_package(out_dir, tmp, picked, index_doc)
+        case_ids = [c["case_id"] for c in picked]
+        sample_map = None
+        if batched:
+            case = picked[0]
+            gen_mod = _gate_load_pkg_gen(pkg)
+            try:
+                sample_map = _gate_batched_dut_input(gen_mod, case, pkg / "data")
+            finally:
+                sys.modules.pop(_GATE_GEN_MODULE, None)
+            verify_args = ["verify_accuracy.py", "--package", ".",
+                           "--case-id", case["case_id"]]
+            neg_sim = ["--perturb", "scale", "--perturb-index", str(GATE_SLOT)]
+            bound = (f"n²·batch 最小 1 例 {case['case_id']}"
+                     f"（n={case['n']} batch={case['batch']}），--case-id 单跑，"
+                     "整批 golden 由包内 gen_data 现场展开")
+            neg_desc = f"scale --perturb-index {GATE_SLOT}"
+        else:
+            gen = _gate_run(["gen_data.py", "--canonical", "canonical_cases.json",
+                             "--out", "data", "--select", "all", "--ops", op], pkg)
+            if gen.returncode != 0:
+                raise SelfCheckError(
+                    f"负例门：包内 gen_data 造数退出码 {gen.returncode}（应 0）"
+                    f"：{_gate_tail(gen)}")
+            verify_args = ["verify_accuracy.py", "--package", "."]
+            neg_sim = ["--perturb", "scale"]
+            bound = (f"切片内最小 {len(picked)} 例精度 case"
+                     f"（{'、'.join(case_ids)}，n≤{max(int(c['n']) for c in picked)}）"
+                     "加派生的 info 契约用例")
+            neg_desc = "scale"
+
+        n_pos = gate_assert_positive(*_gate_round(pkg, "pos", [], verify_args))
+        neg_code, neg_report = _gate_round(pkg, "neg", neg_sim, verify_args)
+        n_neg = gate_assert_negative(neg_code, neg_report)
+        attribution = None
+        if batched:
+            attribution = gate_assert_slot_attribution(
+                neg_report, picked[0]["case_id"], sample_map)
+
+        wall = round(time.monotonic() - started, 1)
+        evidence = {
+            "cases": case_ids,
+            "bound": bound,
+            "positive": {"perturb": "none", "exit_code": 0, "numeric_pass": n_pos},
+            "negative": {"perturb": neg_desc, "exit_code": neg_code,
+                         "numeric_fail": n_neg, "attribution": attribution},
+            "wall_seconds": wall,
+        }
+        detail = (f"包内 gen_data→sim_dut→verify_accuracy 真跑两轮（限界：{bound}）："
+                  f"正例 none 全 {n_pos} PASS 且退 0；负例 {neg_desc} 全 {n_neg} FAIL "
+                  f"且退 1")
+        if attribution:
+            detail += f"，{attribution}"
+        return detail + f"；墙钟 {wall} s", evidence
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
 # S3 批量四包：纯脚本装包（S3 spec §5；docstring「S3 批量四包」段）
 # ---------------------------------------------------------------------------
 
@@ -540,8 +857,6 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
     materialize:"gen"，条目（含 sample_map 槽位映射）与逐内容 ratio 参考来自装包
     自检的现场生成运行（自检数据随后删除）。scope：full=该算子 dedup 全量切片
     （2026-09-27 全量精度用例决策），s1=二维代表子集六例（v3 前行为）。"""
-    import shutil
-
     criteria_dir = find_criteria_dir(staging_dirs)
     baseline_src = find_baseline(staging_dirs, op)
     here = Path(__file__).resolve().parent
@@ -725,6 +1040,16 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
         raise SelfCheckError(f"纯脚本包内出现数据文件：{stray}")
     tick("零数据", "包内无 *.npz（golden/ratio 数组随 npz 一并为零，rglob 断言）")
 
+    # 负例门（docstring「负例门」段）：包内判定链真跑一轮，正例必绿、负例必红。
+    # 临时目录在包外，包内不留痕——零数据断言与下面的指纹都不受它影响。
+    gate_index = {"ratio_basis": gen_index.get("ratio_basis"),
+                  "cases": [{"case_id": e["case_id"],
+                             "ratio_cpu_mean": e.get("ratio_cpu_mean")}
+                            for e in gen_cases if e.get("case_purpose") != "info"]}
+    gate_detail, gate_evidence = run_negative_gate(out_dir, op, gate_index, True)
+    tick("负例门", gate_detail)
+    checklist["negative_gate"] = gate_evidence
+
     # 指纹 + manifest
     fingerprint = {}
     for path in sorted(out_dir.rglob("*")):
@@ -780,8 +1105,6 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
     条目与 ratio 参考值来自装包自检的现场生成+回填运行（生成数据随后删除）。
     scope：full=该算子全部精度用例切片（2026-09-27 全量精度用例决策），
     s1=代表子集（v3 前行为）。"""
-    import shutil
-
     criteria_dir = find_criteria_dir(staging_dirs)
     baseline_src = find_baseline(staging_dirs, op)
     here = Path(__file__).resolve().parent
@@ -997,6 +1320,14 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
     if stray:
         raise SelfCheckError(f"纯脚本包内出现数据文件：{stray}")
     tick("零数据", "包内无 *.npz（golden/ratio 数组随 npz 一并为零，rglob 断言）")
+
+    # 负例门（docstring「负例门」段）：包内判定链真跑一轮，正例必绿、负例必红。
+    # 临时目录在包外，包内不留痕——零数据断言与下面的指纹都不受它影响。
+    gate_index = {"ratio_cpu_mean": gen_index.get("ratio_cpu_mean"),
+                  "ratio_basis": gen_index.get("ratio_basis"), "cases": []}
+    gate_detail, gate_evidence = run_negative_gate(out_dir, op, gate_index, False)
+    tick("负例门", gate_detail)
+    checklist["negative_gate"] = gate_evidence
 
     # 指纹 + manifest
     fingerprint = {}
