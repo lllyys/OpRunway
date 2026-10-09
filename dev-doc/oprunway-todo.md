@@ -2,6 +2,30 @@
 
 本页只保留尚未完成且有当前证据的工作。仓规以根 `AGENTS.md` 为准，已完成历史查 changes brief 与 Git。
 
+## P1 · 0923 solver 批次（立项中 @ worktree solver-accept-0923，2026-09-21）
+
+背景与全部证据见 `dev-doc/solver/solver-0923-context.md`。
+**solver 线交接待办细目见 `dev-doc/solver/solver-handover-todo.md`（唯一细目账）。**
+
+- [x] ~~决策点：走哪条验收线~~ → **2026-09-22 Mr.0 裁定走乙：新起
+  `repo-task-solver-accept`，自产 harness 留在验收现场。** 依据与两条翻案条件见
+  `solver/solver-0923-context.md` 第 8′ 节。
+- [ ] 硬边界落地：`solver/solver-plan-v3.md` 第 5 节十二条要进 skill 的 `scripts/` 与 `tests/`，
+  不是人工清单。其中三条被违反即评分作废（裁决实现只在发布 skill 内 / 不复制完整 A1/A5 /
+  参考耗时与门禁基线分开）。
+- [ ] 补齐未验的关键点：`msprof op` kernel 口径实跑、九类必测场景覆盖、验收报告形态。
+- [ ] 竞品基线可用性裁定：H100 采的数据能不能当 `T_A100`，还是标「基线缺失」留白。
+  连带口径差（5 预热/25 采样/min-avg vs 10/30/中位数）要么重采要么在报告里写明。
+- [ ] 歧义定死后才能开跑：`matinvBatched` 的 n 边界四说不一（P-12 恰在争议点且零基线）；
+  分解类「自洽重构 vs golden 比较」优先级；Cholesky/QR 缺输出不唯一的豁免条款。
+- [ ] 外部输入体检门（新想法，未立项）：0923 这类「任务书、用例、harness 全由别人填」的
+  场景，现有 A2 只裁文件有无，缺内容体检——标杆出处、采集口径、用例覆不覆盖判据表、
+  判据自身自相矛盾。产物是逐槽位可信度表（可用 / 可用但标注 / 不可用）。
+  方法论见 `accept-line-adoption-method.md` 第四节。
+- [x] ~~`community_task` 本地落后~~ → 2026-09-22 已拉到 `05a8c04`；0923 目录 diff 全是
+  新增（solver 七目录只加了 `pics/`），任务书正文零改动，已核行号全部有效。
+- [ ] 上游卫生 issue 另议：`cunmqr/改动报告_20260907.md` 在公开仓引用带员工账号的内部路径。
+
 ## P1 · doc-write 改造收尾（checkpoint 终审 + verify 轮遗留，2026-09-17）
 
 verify 判定（thread 01a0b230）：3 FIXED / 7 PARTIAL / 1 NOT_FIXED，一轮即停。

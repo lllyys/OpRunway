@@ -1,13 +1,19 @@
 @AGENTS.md
 
+## 模型分工（token 纪律）
+
+- **主 session（fable）只做脑力活**：规划、设计、裁定承接、任务拆分、subagent 指挥、
+  结果验收与对用户汇总。不亲手做大批量读码、改码、跑测、长探索——这些占 token 的
+  活一律不留在主上下文里。
+- **subagent（固定 opus，settings 已强制）干手上活**：具体实施、代码探索、批量读写、
+  测试执行、侦察调研、文档落盘。
+- **判据：能用 subagent 就用**。无依赖的任务一次并行发多个 agent，既加速又省主上下文；
+  主 session 只保留需要全局上下文或用户裁定衔接的步骤。
+- **指令一次给足**：坐标（文件:行号）、契约（接口/口径逐字钉死）、验收判据（跑什么、
+  数字应是多少）写进 agent 指令，避免来回补问；两条并行线共用的契约在两份指令里
+  逐字一致。
+
 ## 写入通路
 
-cc-suite 可用时，Claude 对本仓工作树内文件的所有写入一律通过 `/cc-suite:implement` 交由 Codex 落盘，
-Claude 不直接使用 Write/Edit 修改仓内文件。判据是仓根存在 `.cc-suite.md` 且 `codex` 在 `PATH` 上；
-不确定时先跑 `/cc-suite:codex-preflight`。
-
-cc-suite 不可用时（未安装、Codex 未认证或 preflight 失败）不阻塞工作：Claude 直接编辑，但必须在回复中
-说明这一轮没有走 Codex 通路，不得默默降级。
-
-两种情况下仓外目标都不受此约束：scratchpad 临时文件，以及远端 NPU session 目录及其 build、安装、
-日志、报告产物（由正式 CLI 产生）。
+现行裁定见 `.claude/rules/codex-review.md`：**Claude 写，Codex 审**（该条覆盖早先
+「写入经 cc-suite implement 落盘」的默认）。评审触发条件与八维同见该文件。

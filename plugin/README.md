@@ -47,7 +47,7 @@
 <tbody>
 
 <tr>
-  <td rowspan="5" align="center" valign="middle">
+  <td rowspan="7" align="center" valign="middle">
     <h3>🧾&nbsp;社区任务<br>辅助</h3>
     <sub>产出算子任务书、测试用例与验收结论</sub>
   </td>
@@ -74,6 +74,16 @@
   <td><a href="skill/repo-task-blas-accept/"><code>repo-task-blas-accept</code></a></td>
   <td>拿任务包在 NPU 上跑精度与性能，出证据化验收结论<br><sub>算子域：ops-blas · ops-sparse，按 include 入口头探测</sub><br><sub>输入：<code>&lt;op&gt;_test.csv</code> 加一张 GPU 基线 CSV</sub></td>
   <td align="center">✅</td>
+</tr>
+<tr>
+  <td><a href="skill/repo-task-solver-case-gen/"><code>repo-task-solver-case-gen</code></a></td>
+  <td>从 solver 任务目录生成任务包：规范用例清单、数据构造脚本与性能参考耗时表<br><sub>算子域：ops-solver（aclsolver）· 当前支持实数 Cholesky 三算子</sub><br><sub>产出：任务包（脚本 + 数据表），开发者自测与验收同包消费</sub></td>
+  <td align="center">—</td>
+</tr>
+<tr>
+  <td><a href="skill/repo-task-solver-accept/"><code>repo-task-solver-accept</code></a></td>
+  <td>消费任务包与被测输出，按三层检查出逐 case 数值结论与族级汇总<br><sub>判定标准、执行与裁决全在本 skill 内；正式结论待阈值语义确认</sub><br><sub>范围：CPU 侧裁决；NPU 执行与性能门禁未含</sub></td>
+  <td align="center">—</td>
 </tr>
 
 <tr>
