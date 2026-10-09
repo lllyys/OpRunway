@@ -5,6 +5,7 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-10-09 · 批量验证参考样例全线闭环（一次性交付件）。** cmatinv_batched 参考样例：本地 scipy 闭环（正例两档/负例三型归因）→ A2/A3 系真机两档 PASS（一致性层真判、n≥32 转发有现场证据）→ 开发者发行版 v2（去 plugin 双实现、25 处注释脱内部化、边界声明按 acceptance-roles角色口径、零语义漂移二进制级证明、脱敏 grep 六类全零）。产物 reports/a2-e2e-cmatinv/：cmatinv-batched-test-sample-v2.tar.gz（16.5K，9 文件）即发行件，internal-evidence/ 留内部证据。用户裁定：样例包只出一次，不进包契约不随批次演进。另：settings 的 subagent=opus 强制项需新会话生效，本会话重启后接管。
 - **2026-10-08b · 工作基座与镜像同步。** solver 施工基座=repos/repo-task-atk-test-evolve（evolve-1008，fork 有备份）；plugin/skill 两目录已从该基座全量同步（37 文件变更，137/137 绿复核），镜像与活仓恢复一致，后续改动两边同步落。
 - **2026-10-08 · 回交接管：solver 线收回本方继续演进。** 对方回交包（md5 验证过）落reports/solver-handover-1008-returned/；两 skill 演进态（criteria s1-A6、批量 A0、0.35 门禁、模板对外化）以快照导入 repos/repo-task-atk-test-evolve 的 evolve-1008 分支（基座 6993e00，血缘待对方 push f5322b4 对齐），本机 criteria 137/137 绿复核过；看板（HT-30）、plan、裁定档案、回执与 spotri 直审 issue 同步回 dev-doc/solver/。对方线已关闭不再 push（血缘止于快照导入，HT-23 随之关闭）。悬置待裁：HT-15 补字（荐甲=A64 落字）、HT-24 potri 直审宽容转研发、HT-28 四条等任务侧、任务书 solver_1010 分支未提交、两仓待 push。
 - **2026-09-24h · 0924 对标裁定群落地 + 交接待办簿建立。** issue 清单（验收方回球）归档并逐条裁定：C1 用新版标准（容差 2⁻¹³）、C2/HT-1 采 opbase 动态锚点（已施工：max_abs 门单口径+±inf/NaN 收窄，86/86）、A5 选项①两步结构（golden 直审主判，待施工）、主判基准 golden64、A4 我方侧 ε 标注与 eps 披露（已施工）、C3 摘 T7（已施工）、C4 确认维持、B1 构造性正定声明（纯文档已落）、HT-20 申诉句（已落）、HT-15 potrf 残差基暂维持 A64 等任务侧补字。交接待办簿 dev-doc/solver/solver-handover-todo.md 建立（20 条带来源标记）；发现 plugin 无批量判定通路（在 s3/s4 树未归并），T8 摘除转挂树归并。CRITERIA_VER 至 s1-A5。
