@@ -30,5 +30,13 @@
       "Bash(claude --plugin-dir:*)",
       "Bash(bash /private/tmp/claude-501/:*)"
     ]
+  },
+  "model": "claude-fable-5",
+  "env": {
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-5",
+    "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1",
+    "CLAUDE_CODE_FORK_SUBAGENT": "0"
   }
 }
