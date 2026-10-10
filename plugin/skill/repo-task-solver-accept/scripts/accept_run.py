@@ -42,9 +42,13 @@ case_purpose 分流（verdict._judge_info_inner，只比 info==k_expected，不�
 期望项出 KIND_INFO（与接口精度各出独立结论，HT-12 口径）；包内存在 info 用例时，
 固定占位的 KIND_INFO 项（模拟被测未执行场景）由逐 case 结论替代。
 
+准入断言（以新为准裁定 2026-10-09）：包内 cases/index.json 顶层 ratio_basis 必须是
+"A32-f64"，否则拒收退 2——缺字段即旧 A64 基，其固化 ratio_cpu/ratio_cpu_mean 与现行
+残差实现不同基，判出来的 PASS/FAIL 都不成立。不做旧包兼容，不在验收侧重算参考值。
+
 退出码：0 = report 已写出（含存在 FAIL/证据不足的情形——结论在 report 里，不用退出
-码表达）；2 = 包不可用（manifest/index 缺失或不可解析、operator 不在支持集），此时
-不产出 report。
+码表达）；2 = 包不可用（manifest/index 缺失或不可解析、operator 不在支持集、
+ratio_basis 非 A32-f64），此时不产出 report。
 """
 
 import argparse
@@ -57,7 +61,8 @@ from pathlib import Path
 import numpy as np
 
 TOOL = "accept_run.py"
-TOOL_VER = "s2a1-D5"  # s2-A1 一段式：期望项证据随 residual 单段 schema；承 s3-D4
+TOOL_VER = "s2a1-D6"  # 2026-10-09 准入断言：只受理 A32-f64 基的包；承 s2a1-D5
+RATIO_BASIS = "A32-f64"  # 受理的唯一残差基（index 顶层 ratio_basis）
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 _CRITERIA_DIR = _SCRIPTS_DIR.parent / "criteria"
@@ -312,6 +317,12 @@ def build_report(package, dut_dir, jobs=1):
     if operator not in supported:
         _fail(f"manifest.operator={operator!r} 不在支持集 {supported}")
     index = _load_json(package / "cases" / "index.json", "cases/index.json")
+    # 准入断言（以新为准裁定 2026-10-09）：只受理 A32-f64 基的包。缺字段即旧 A64 基，
+    # 其 ratio_cpu/ratio_cpu_mean 与现行残差实现不同基，判出来的 PASS/FAIL 都不成立。
+    basis = index.get("ratio_basis")
+    if basis != RATIO_BASIS:
+        _fail(f"旧基包不受理：参考值基准非 {RATIO_BASIS}（以新为准裁定 2026-10-09），"
+              f"请使用更新版任务包（index.ratio_basis={basis!r}）")
     index_cases = index.get("cases")
     if not isinstance(index_cases, list):
         _fail("cases/index.json 无 cases 列表")

@@ -67,12 +67,16 @@ except ImportError:  # criteria 目录直接挂 sys.path 或作为脚本运行�
 # s4-D10：s2-A1 一段式重基（2026-10-08）——layer1 层整体拆除（含双门/收窄/拆实虚），
 #   判定机体收成单步残差；golden 不再消费；DPOT01 的 a 与本地参考 ratio 链换 A32 基；
 #   verdict schema 改 residual 单段。
-RENDERER_VER = "s4-D10"
+# s4-D11：info 派生口径对齐 gen 侧（2026-10-09）——按切片顶层 package_scope 显式传
+#   require_s1，不再吃 derive_info_cases 的 s1 默认；修 full 包两侧 case_id 分叉
+#   （v4 六包命中：开发者算子全对也因「缺被测输出」退 1）。
+RENDERER_VER = "s4-D11"
 # 批量四算子的渲染格式版本（S3 spec §4/§5）：与单矩阵版本号分开。
 # s3-D5：A0 抽样化（HT-2）；s3-D6：HT-9 批量 info 契约支路；s3-D7：HT-4 case 级 mean。
 # s3-D8：s2-A1 一段式重基（同 s4-D10：逐矩阵残差单步、diagnostics 收
 #   batch/pass/fail/error/ratio_max、A32 基参考 ratio 链）。
-BATCHED_RENDERER_VER = "s3-D8"
+# s3-D9：info 派生口径对齐 gen 侧（同 s4-D11，derive_batched_info_cases 支路）。
+BATCHED_RENDERER_VER = "s3-D9"
 
 
 def renderer_ver_for(op):
@@ -1593,6 +1597,13 @@ def _ratio_summary(ratio_cpu):
     return out
 
 
+def info_require_s1(canonical):
+    """info 契约用例的派生基座口径：切片顶层 package_scope 是唯一事实源，判定与
+    包内 gen_data 的 --select 逐字一致。两侧口径不同会派生出不同 case_id，
+    被测输出就对不上——装包自检调本函数对账，不另写一份规则。"""
+    return canonical.get("package_scope") != "full"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=f"{OP} 精度自测辅助件（批量渲染副本，先造数后测）")
@@ -1629,7 +1640,8 @@ def main(argv=None):
     # 选择规则同一随机流；canonical 切片只含精度用例，info 用例由包内 gen_data
     # 现场派生）。--case-id 命中 info 用例 id 时同样可单跑。
     by_id = {e["case_id"]: e for e in canonical["cases"]}
-    info_entries = [e for e in gen_mod.derive_batched_info_cases(canonical["cases"])
+    info_entries = [e for e in gen_mod.derive_batched_info_cases(
+                        canonical["cases"], require_s1=info_require_s1(canonical))
                     if e.get("op") == OP]
     if args.case_id:
         wanted = list(dict.fromkeys(args.case_id))
@@ -1946,6 +1958,13 @@ def _load_dut_out(dut_dir, case_id):
             "status": str(_scalar(status)) if status is not None else None}
 
 
+def info_require_s1(canonical):
+    """info 契约用例的派生基座口径：切片顶层 package_scope 是唯一事实源，判定与
+    包内 gen_data 的 --select 逐字一致。两侧口径不同会派生出不同 case_id，
+    被测输出就对不上——装包自检调本函数对账，不另写一份规则。"""
+    return canonical.get("package_scope") != "full"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=f"{OP} 精度自测辅助件（纯脚本渲染副本，先造数后测）")
@@ -1977,7 +1996,8 @@ def main(argv=None):
     # 随机流；canonical 切片只含精度用例，info 用例由包内 gen_data 现场派生）。
     # --case-id 命中 info 用例 id 时同样可单跑。
     by_id = {e["case_id"]: e for e in canonical["cases"]}
-    info_entries = [e for e in gen_mod.derive_info_cases(canonical["cases"])
+    info_entries = [e for e in gen_mod.derive_info_cases(
+                        canonical["cases"], require_s1=info_require_s1(canonical))
                     if e.get("op") == OP]
     if args.case_id:
         wanted = list(dict.fromkeys(args.case_id))

@@ -96,6 +96,11 @@ verify，sim_dut 只被复制不被执行，「verify 形同虚设」一类缺�
 
 限界（成本上限：单包墙钟秒级）与它证不到的事，见 run_negative_gate 的说明。
 
+info id 对账（两条纯脚本装包路径的自检项，2026-10-09）：index 的 info 契约 id 集合
+必须等于包内 verify 将派生的集合。两侧派生基座都由切片顶层 package_scope 定，口径
+分叉时 verify 要的 case_id 没有被测输出，开发者算子全对也整包退 1（v4 六包命中）。
+判据与实现见 assert_info_ids_reconciled。
+
 CLI（spec §2.5 逐字；方括号内为本卡补充的可选项，缺省行为不需要它们）：
 
     build_package.py --staging <目录...> --out reports/solver-packages/<op>/
@@ -127,7 +132,7 @@ from pathlib import Path
 import numpy as np
 
 TOOL = "build_package.py"
-TOOL_VER = "s3-F12"  # 2026-10-09 负例门：自检末项真跑包内判定链，正例必绿负例必红；承 s3-F11
+TOOL_VER = "s3-F13"  # 2026-10-09 info id 对账：index 与包内 verify 的派生集合必等；承 s3-F12
 OPS = ("spotrf", "spotrs", "spotri", "cpotrf", "cpotrs", "cpotri")
 BATCHED_OPS = ("spotrfBatched", "spotrsBatched", "cpotrfBatched", "cpotrsBatched")
 ALL_OPS = OPS + BATCHED_OPS
@@ -557,6 +562,49 @@ GATE_CASES_BATCHED = 1       # 批量门取 n²·batch 最小几例（整批展�
 GATE_SLOT = 1                # 批量负例的被扰动槽位（sim_dut --perturb-index）
 GATE_TIMEOUT_S = 900
 _GATE_GEN_MODULE = "_oprunway_gate_pkg_gen_data"
+_PKG_VERIFY_MODULE = "_oprunway_pkg_verify_accuracy"
+
+
+def assert_info_ids_reconciled(out_dir, op, gen_cases, slice_doc, gd_mod, batched):
+    """自检：包 index 的 info 契约 id 集合 == 包内 verify 将派生的 id 集合。
+
+    两侧各自从切片顶层 package_scope 推派生基座——index 侧经 gen_data 的 --select，
+    verify 侧经渲染副本的 info_require_s1（本函数调包内那份，不另写一份规则）。
+    口径分叉时 verify 要的 case_id 没有被测输出，开发者算子全对也整包退 1
+    （v4 六包命中）；此处只比两个 id 集合，不跑判定，拦在装包时。
+
+    派生用 gd_mod（skill 本体那份 gen_data）而不是包内副本：包内 gen_data.py 由
+    _copy_bytes 逐字节复用同一文件，两者同一实现，无需为此再加载一个模块。
+    """
+    path = out_dir / "verify_accuracy.py"
+    if not path.is_file():
+        raise SelfCheckError(f"info id 对账：包内缺 {path.name}，无对账对象")
+    spec = importlib.util.spec_from_file_location(_PKG_VERIFY_MODULE, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[_PKG_VERIFY_MODULE] = mod
+    try:
+        spec.loader.exec_module(mod)
+        if not hasattr(mod, "info_require_s1"):
+            raise SelfCheckError(
+                "info id 对账：包内 verify_accuracy.py 无 info_require_s1"
+                "（渲染模板与本对账的协议不符）")
+        require_s1 = bool(mod.info_require_s1(slice_doc))
+    finally:
+        sys.modules.pop(_PKG_VERIFY_MODULE, None)
+    derive = (gd_mod.derive_batched_info_cases if batched
+              else gd_mod.derive_info_cases)
+    verify_ids = sorted(e["case_id"] for e in
+                        derive(slice_doc["cases"], require_s1=require_s1)
+                        if e["op"] == op)
+    index_ids = sorted(e["case_id"] for e in gen_cases
+                       if e.get("case_purpose") == "info")
+    if index_ids != verify_ids:
+        raise SelfCheckError(
+            f"info id 对账不符（package_scope={slice_doc.get('package_scope')!r}，"
+            f"包内 verify require_s1={require_s1}）："
+            f"index 有而 verify 无 {sorted(set(index_ids) - set(verify_ids))}；"
+            f"verify 有而 index 无 {sorted(set(verify_ids) - set(index_ids))}")
+    return require_s1, index_ids
 
 
 def gate_pick_cases(slice_cases, batched, limit):
@@ -677,8 +725,8 @@ def _gate_mini_package(out_dir, tmp, picked, index_doc):
     """门的临时包：包内 gen_data/sim_dut/verify_accuracy 原件 + 最小切片 +
     index 投影（只留判定消费的 ratio_cpu_mean 与基标记，不复制百 MB 级 index）。
 
-    切片顶层 package_scope 写 "s1" 并给入选 case 置 s1_subset：gen 侧的 info 契约
-    派生与包内 verify 的派生默认同口径（都取 s1 子集），两侧 case_id 才对得上。
+    切片顶层 package_scope 原样继承包内切片：gen 侧与 verify 侧的 info 契约派生
+    口径都由它定，门因此跑的是发出去那个包的口径，不是另一套。
     """
     pkg = tmp / "pkg"
     (pkg / "cases").mkdir(parents=True)
@@ -690,9 +738,8 @@ def _gate_mini_package(out_dir, tmp, picked, index_doc):
     with open(out_dir / "canonical_cases.json", encoding="utf-8") as fh:
         canon = json.load(fh)
     mini = {k: v for k, v in canon.items() if k != "cases"}
-    mini["package_scope"] = "s1"
     mini["slice_note"] = f"负例门临时切片（{len(picked)} 例最小规格，不入包）"
-    mini["cases"] = [dict(c, s1_subset=True) for c in picked]
+    mini["cases"] = list(picked)
     with open(pkg / "canonical_cases.json", "w", encoding="utf-8") as fh:
         json.dump(mini, fh, ensure_ascii=False, indent=1)
         fh.write("\n")
@@ -773,10 +820,10 @@ def run_negative_gate(out_dir, op, index_doc, batched):
     - 批量取 n²·batch 最小 1 例并以 --case-id 单跑，整批 golden 由包内 gen_data 的
       expand_sampled_rows 现场展开——该例的 n²·batch 即门的内存上限（冻结十册的
       最小例都是 n=2 的 1e6 批，f32 整批 16 MB）；
-    - 批量的 info 契约项不入门：包内 sim_dut 的 info 分支只产标量 info，
-      批量 infoArray 分型造不出被测输出；
-    - 门内切片按 s1 口径自洽（见 _gate_mini_package），不核对包内 full 切片下
-      gen 侧与 verify 侧 info 契约 case_id 的派生口径是否一致——那一项另排；
+    - 批量的 info 契约项不入门：包内 sim_dut 的 info 分支展开批量 infoArray，但门
+      以 --case-id 单跑精度 case，info 条目不在跑的名单里；
+    - 门内切片继承包内 package_scope（见 _gate_mini_package），两侧 info 派生口径
+      是否一致由 assert_info_ids_reconciled 在全量切片上另判，门不重复那一项；
     - 门只核对判定结论与归因字段，不核对残差数值本身（那是 criteria 的 tests）。
 
     返回 (tick 文案, 证据摘要)。临时目录在返回前整树删除。
@@ -1014,6 +1061,13 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
         sys.path.remove(str(criteria_dir))
     tick("verify 渲染", f"verify_accuracy.py / verify_perf.py（criteria {criteria_ver} / "
                         f"renderer {renderer_ver}）经确定性入口渲染入包")
+
+    # info id 对账（见 assert_info_ids_reconciled）
+    req_s1, recon_ids = assert_info_ids_reconciled(
+        out_dir, op, gen_cases, slice_doc, gd, True)
+    tick("info id 对账", f"index 的 info id 集合 == 包内 verify 将派生的集合"
+                         f"（{len(recon_ids)} 条：{'、'.join(recon_ids) or '无'}；"
+                         f"package_scope={scope}，verify require_s1={req_s1}）")
 
     # 自测配套件：gen_data 副本、sim 副本、batched README（缺模板即停，docstring S3 段）
     gen_sha = _copy_bytes(here / "gen_data_cholesky.py", out_dir / "gen_data.py")
@@ -1296,6 +1350,13 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
         sys.path.remove(str(criteria_dir))
     tick("verify 渲染", f"verify_accuracy.py / verify_perf.py（criteria {criteria_ver} / "
                         f"renderer {renderer_ver}）经确定性入口渲染入包")
+
+    # info id 对账（见 assert_info_ids_reconciled）
+    req_s1, recon_ids = assert_info_ids_reconciled(
+        out_dir, op, gen_cases, slice_doc, gd, False)
+    tick("info id 对账", f"index 的 info id 集合 == 包内 verify 将派生的集合"
+                         f"（{len(recon_ids)} 条：{'、'.join(recon_ids) or '无'}；"
+                         f"package_scope={scope}，verify require_s1={req_s1}）")
 
     # 自测配套件：gen_data 副本、sim 副本、纯脚本 README（缺模板即停）
     gen_sha = _copy_bytes(here / "gen_data_cholesky.py", out_dir / "gen_data.py")

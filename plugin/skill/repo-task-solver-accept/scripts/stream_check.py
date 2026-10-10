@@ -55,8 +55,13 @@ det PASS；确定性 FAIL 的意义在真实 NPU 适配器接入后暴露非确�
                     [--perturb-index i] [--jobs N] [--rerun N]
                     [--dump <case_id> ...] [--dump-dir <目录>]
 
+准入断言（以新为准裁定 2026-10-09）：--canonical 同目录下存在 cases/index.json
+（即包根布局）时，其顶层 ratio_basis 必须是 "A32-f64"，否则拒收退 2——缺字段即旧
+A64 基，固化 ratio_cpu_mean 与现行残差实现不同基。不做旧包兼容、不在读侧重算。
+散册 canonical 冒烟没有 index，不在准入面内。
+
 退出码：0 = 全部数值 PASS（且启用 --rerun 时确定性无失配）；1 = 存在数值 FAIL、
-判定 error 或确定性复跑失配；2 = 输入/契约错误。
+判定 error 或确定性复跑失配；2 = 输入/契约错误（含 ratio_basis 非 A32-f64）。
 formal 恒 PENDING_RULING（阈值语义待裁），本工具不出具正式结论。
 """
 
@@ -73,7 +78,8 @@ import numpy as np
 # ru_maxrss 单位：Linux 为 KB、macOS 为字节（2026-09-24 远程实证抓出的少报 1024 倍）
 _RSS_DIV = 1024 if platform.system() == "Linux" else 1024 * 1024
 TOOL = "stream_check.py"
-TOOL_VER = "s2a1-r7"  # s2-A1 一段式：判定记录改 residual 单段（layer1/fallback 退役）；承 s3-d3-r6
+TOOL_VER = "s2a1-r8"  # 2026-10-09 准入断言：读到包 index 只受理 A32-f64 基；承 s2a1-r7
+RATIO_BASIS = "A32-f64"  # 受理的唯一残差基（index 顶层 ratio_basis）
 
 _HERE = Path(__file__).resolve().parent
 _CRITERIA = _HERE.parent / "criteria"
@@ -202,11 +208,19 @@ def main(argv=None):
         # ratio_cpu_mean（发包侧 build_package 写入）——canonical 与 cases/ 同目录
         # （包根布局）时读出，按算子注入 case_arrays，兜底双支 max(5r, 3m) 完整生效；
         # 无此文件（散册 canonical 冒烟）保持缺 mean 单支兼容口径。
+        # 准入断言（以新为准裁定 2026-10-09）：读到包 index 就只受理 A32-f64 基；
+        # 散册 canonical 冒烟没有 index，不在准入面内（无固化参考值可误用）。
         index_mean = None
         idx_path = Path(args.canonical).parent / "cases" / "index.json"
         if idx_path.is_file():
             with open(idx_path, encoding="utf-8") as fh:
-                index_mean = (json.load(fh) or {}).get("ratio_cpu_mean")
+                index_doc = json.load(fh) or {}
+            basis = index_doc.get("ratio_basis")
+            if basis != RATIO_BASIS:
+                raise ContractError(
+                    f"旧基包不受理：参考值基准非 {RATIO_BASIS}（以新为准裁定 "
+                    f"2026-10-09），请使用更新版任务包（index.ratio_basis={basis!r}）")
+            index_mean = index_doc.get("ratio_cpu_mean")
         ops = set(o.strip() for o in args.ops.split(",")) if args.ops else None
         picked = [c for c in cases
                   if (ops is None or c.get("op") in ops)
@@ -259,20 +273,15 @@ def main(argv=None):
                 ratio_cpu, ratio_status, n_prep_flag = None, "info", False
                 sys.path.insert(0, str(_HERE))
                 try:
-                    from sim_dut import info_dut_value
+                    from sim_dut import info_array_values, info_dut_value
                 finally:
                     sys.path.remove(str(_HERE))
                 batch_n = int(case["batch"])
                 cols = int(case["nrhs"]) if card.base_op.endswith("potrs") \
                     else int(case["n"])
                 if card.info_kind == "array":
-                    k_exp = [int(x) for x in case["k_expected"]]
-                    info_val = np.zeros(batch_n, dtype=np.int32)
-                    for e in sample_map:
-                        val = np.int32(info_dut_value(k_exp[int(e["content_idx"])],
-                                                      args.perturb))
-                        for s in e["slots"]:
-                            info_val[int(s)] = val
+                    info_val = info_array_values(case["k_expected"], sample_map,
+                                                 batch_n, args.perturb)
                 else:
                     info_val = np.int64(info_dut_value(int(case["k_expected"]),
                                                        args.perturb))

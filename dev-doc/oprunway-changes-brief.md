@@ -5,6 +5,15 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-10-09c · accept 侧收尾四件批落地。** ①render_verify require_s1 口径对齐（full 切片
+  info id 两侧派生曾三条全不相交，已发布 v4 六包命中）：口径函数渲染进包内副本
+  （s4-D11/s3-D9），case-gen 装包加 info id 对账门（s3-F13）并去掉 gate 的 package_scope
+  绕行；②sim_dut 批量 infoArray（s3-E7）：逐内容 k 经 sample_map 摊槽、fail-closed 四型，
+  stream_check 去平行副本；③验收准入断言：index.ratio_basis≠A32-f64 退 2 拒收（accept_run
+  D6、stream_check r8，散册冒烟无 index 不受门）；④accept SKILL.md T8 旧句清理 4 处（grep
+  零命中）。tests 183→229（新增 46，对 HEAD 实跑必红验证过非恒绿）。遗留：已发布 v4 包仍旧
+  renderer（重装随 v5 一并）；批量 info 契约项不进负例门（独立增量）。Codex checkpoint
+  （含 build_package 欠账）下一步跑。
 - **2026-10-09b · 装包自检加负例门（s3-F12）+ 终裁纯一段式 + 发布包快照固定。** 负例门：装包末项真跑包内 gen→sim→verify 两轮，正例必全 PASS、负例必全 FAIL 且批量归因命中，任一不符退 3 不写 manifest；单包增量 0.9–2.4s；变异实测拦住 HT-24 同款恒 PASS 的 verify。tests 183 绿（case-gen 34 + accept 149）。门顺带挖出 accept 侧两缺陷：①full 切片 info id 两侧派生口径不一致（require_s1 不对齐），已发布 v4 六包命中——开发者算子全对也会因 info 证据不足退 1；②批量 info 的 sim 造不出输出（k_expected 列表遇 int()）。另：判定架构终裁只维持纯一段式（证书形态不回归）；开发者在手版本快照固定至 community_task 2d3a532 （9-28，仅 Cholesky 两目录，129 文件 sha256）。欠账：build_package +338 行触发 Codex checkpoint，随批次合并评审。
 - **2026-10-09 · 批量验证参考样例全线闭环（一次性交付件）。** cmatinv_batched 参考样例：本地 scipy 闭环（正例两档/负例三型归因）→ A2/A3 系真机两档 PASS（一致性层真判、n≥32 转发有现场证据）→ 开发者发行版 v2（去 plugin 双实现、25 处注释脱内部化、边界声明按 acceptance-roles角色口径、零语义漂移二进制级证明、脱敏 grep 六类全零）。产物 reports/a2-e2e-cmatinv/：cmatinv-batched-test-sample-v2.tar.gz（16.5K，9 文件）即发行件，internal-evidence/ 留内部证据。用户裁定：样例包只出一次，不进包契约不随批次演进。另：settings 的 subagent=opus 强制项需新会话生效，本会话重启后接管。
 - **2026-10-08b · 工作基座与镜像同步。** solver 施工基座=repos/repo-task-atk-test-evolve（evolve-1008，fork 有备份）；plugin/skill 两目录已从该基座全量同步（37 文件变更，137/137 绿复核），镜像与活仓恢复一致，后续改动两边同步落。
