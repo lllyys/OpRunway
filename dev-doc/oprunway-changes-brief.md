@@ -5,6 +5,9 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-10-10g · v6仅修三类必要文档错误。** 按用户“没必要就不改”，撤回解释性补充；
+  仅修求逆info正值、批量求解非法参数调用和msprof op计时口径，脚本/数据未改。
+  同步README指纹、对账表和v6归档；文字diff见reports/v6-packages/document-review.diff。
 - **2026-10-10f · v6十包按最小diff整理。** 用户明确以v5为基、不重算用例/基线；
   保留当前精度判据与批量info修复，恢复0928原verify_perf，收回gen/sim无关文案及README可选说明。
   十包远端现有正负例门全过；gen/sim去docstring后AST与已验证当前版一致，v5三类数据逐字节保留。
