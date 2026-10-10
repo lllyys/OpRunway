@@ -70,18 +70,38 @@ except ImportError:  # criteria 目录直接挂 sys.path 或作为脚本运行�
 # s4-D11：info 派生口径对齐 gen 侧（2026-10-09）——按切片顶层 package_scope 显式传
 #   require_s1，不再吃 derive_info_cases 的 s1 默认；修 full 包两侧 case_id 分叉
 #   （v4 六包命中：开发者算子全对也因「缺被测输出」退 1）。
-RENDERER_VER = "s4-D11"
+# s4-D12：info_require_s1 的 docstring 就地写明 True/False 各取什么条目与缺
+#   package_scope 字段的默认（2026-10-09 冷读：口径函数只说「唯一事实源」，
+#   读者推不出两种取值的选择面）。只动副本内的说明文字，判定行为不变。
+RENDERER_VER = "s4-D12"
 # 批量四算子的渲染格式版本（S3 spec §4/§5）：与单矩阵版本号分开。
 # s3-D5：A0 抽样化（HT-2）；s3-D6：HT-9 批量 info 契约支路；s3-D7：HT-4 case 级 mean。
 # s3-D8：s2-A1 一段式重基（同 s4-D10：逐矩阵残差单步、diagnostics 收
 #   batch/pass/fail/error/ratio_max、A32 基参考 ratio 链）。
 # s3-D9：info 派生口径对齐 gen 侧（同 s4-D11，derive_batched_info_cases 支路）。
-BATCHED_RENDERER_VER = "s3-D9"
+# s3-D10：info_require_s1 的 docstring 就地写明两种取值的选择面（同 s4-D12）。
+BATCHED_RENDERER_VER = "s3-D10"
 
 
 def renderer_ver_for(op):
     """该算子渲染产物的格式版本（manifest.renderer_ver 消费方按算子取值）。"""
     return BATCHED_RENDERER_VER if op in _BATCHED_SPECS else RENDERER_VER
+
+
+def info_require_s1(canonical):
+    """info 契约用例的派生基座口径：切片顶层 package_scope 是唯一事实源。
+
+    返回 True 时派生只取 s1_subset 为 True 的精度条目；返回 False 时取切片内
+    全部精度条目。package_scope 为 "full" 才返回 False，其余取值与缺该字段的
+    旧切片一律返回 True（旧包按 s1 口径）。
+
+    skill 侧（stream_check 的 info 派生）与渲染副本（下面两份模板里逐字相同的
+    那份，供装包自检对账）调同一条规则：口径不同会派生出不同 case_id，被测
+    输出就对不上。
+    """
+    return canonical.get("package_scope") != "full"
+
+
 # s2-D3：渲染产物去内部指称（2026-09-24 冷读演练发现 6：包内查无 spec/accept 可解处）。
 # 只作用于渲染输出，skill 内部注释不受影响；表驱动便于核对与增删。
 _PKG_LOCAL_SUBS = (
@@ -1599,8 +1619,14 @@ def _ratio_summary(ratio_cpu):
 
 def info_require_s1(canonical):
     """info 契约用例的派生基座口径：切片顶层 package_scope 是唯一事实源，判定与
-    包内 gen_data 的 --select 逐字一致。两侧口径不同会派生出不同 case_id，
-    被测输出就对不上——装包自检调本函数对账，不另写一份规则。"""
+    包内 gen_data 的 --select 逐字一致。
+
+    返回 True 时派生只取 s1_subset 为 True 的精度条目；返回 False 时取切片内
+    全部精度条目。package_scope 为 "full" 才返回 False，其余取值与缺该字段的
+    旧切片一律返回 True（旧包按 s1 口径）。
+
+    两侧口径不同会派生出不同 case_id，被测输出就对不上——装包自检调本函数
+    对账，不另写一份规则。"""
     return canonical.get("package_scope") != "full"
 
 
@@ -1960,8 +1986,14 @@ def _load_dut_out(dut_dir, case_id):
 
 def info_require_s1(canonical):
     """info 契约用例的派生基座口径：切片顶层 package_scope 是唯一事实源，判定与
-    包内 gen_data 的 --select 逐字一致。两侧口径不同会派生出不同 case_id，
-    被测输出就对不上——装包自检调本函数对账，不另写一份规则。"""
+    包内 gen_data 的 --select 逐字一致。
+
+    返回 True 时派生只取 s1_subset 为 True 的精度条目；返回 False 时取切片内
+    全部精度条目。package_scope 为 "full" 才返回 False，其余取值与缺该字段的
+    旧切片一律返回 True（旧包按 s1 口径）。
+
+    两侧口径不同会派生出不同 case_id，被测输出就对不上——装包自检调本函数
+    对账，不另写一份规则。"""
     return canonical.get("package_scope") != "full"
 
 

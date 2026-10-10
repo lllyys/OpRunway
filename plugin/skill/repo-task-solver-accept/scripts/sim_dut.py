@@ -47,8 +47,9 @@ HT-9 批量 info 契约用例（k_expected 为逐内容 k 值列表）：按 ind
 sample_map 展开成 int32 shape=(batch,) infoArray——槽位 i 的值取它所属代表内容的
 k，正定内容记 0（LAPACK 约定）。错值规则逐内容复用上一段同一条：非正定内容报
 k+1，正定内容（k=0）报 1，即误报非正定——逐槽全部失配，核对必判 FAIL。out32 恒
-(batch, n, cols) 全零（槽数以条目的 batch 为准，取材 npz 只带 k 个代表内容时同样
-对得上）。*potrsBatched 族的 k_expected 是标量 -1，仍走上一段的标量 info 通路
+(batch, n, cols) 全零：槽数以条目的 batch 为准（取材 npz 只带 k 个代表内容时同样
+对得上），列数按算子族取——求解族（`*potrs*`）取 nrhs，分解与求逆族取 n，与
+stream_check 的批量 info 支路同一条规则。*potrsBatched 族的 k_expected 是标量 -1，仍走上一段的标量 info 通路
 （标量 info 仅报参数错，批维正定性不归该接口）。sample_map 缺失、槽位越界或覆盖
 不恰好一次即逐 case 记 skipped，不写半张 infoArray。
 
@@ -89,7 +90,9 @@ from pathlib import Path
 import numpy as np
 
 TOOL = "sim_dut.py"
-TOOL_VER = "s3-E7"  # 2026-10-09：批量 info 契约用例按 sample_map 展开 infoArray；承 s2a1-E6
+# s3-E8：批量 info 用例的 out32 列数按算子族分型（2026-10-09）——求解族取 nrhs，
+#   与 stream_check 的批量 info 支路同一条形状规则。
+TOOL_VER = "s3-E8"  # 承 s3-E7（批量 info 契约用例按 sample_map 展开 infoArray）
 PERTURBS = ("none", "scale", "zero", "nan", "imag", "conj")
 COMPLEX_ONLY_PERTURBS = ("imag", "conj")
 SCALE_FACTOR = np.float32(2.0)  # 定标依据见模块文档 scale 条
@@ -216,18 +219,23 @@ def main(argv=None):
                 with np.load(path) as z:
                     a32 = z["A32"]
                 k_expected = entry["k_expected"]
-                batched = str(entry.get("op") or "").endswith("Batched")
+                op_name = str(entry.get("op") or "")
+                batched = op_name.endswith("Batched")
                 if batched:
                     batch = int(entry["batch"])
                     # 批量 out32 恒 (batch, n, cols)：取材 npz 可能只带 k 个代表
-                    # 内容，槽数以 index 条目的 batch 为准
-                    out32 = np.zeros((batch,) + a32.shape[-2:], dtype=a32.dtype)
+                    # 内容，槽数以 index 条目的 batch 为准；列数按算子族取——
+                    # 求解族出 (batch, n, nrhs)，分解/求逆族出 (batch, n, n)
+                    # （与 stream_check 批量 info 支路同一条规则）。
+                    n = int(entry["n"])
+                    cols = int(entry["nrhs"]) if "potrs" in op_name else n
+                    out32 = np.zeros((batch, n, cols), dtype=a32.dtype)
                 else:
                     out32 = np.zeros_like(a32)
                 if isinstance(k_expected, (list, tuple)):
                     if not batched:
                         raise ValueError(
-                            f"非批量算子 {entry.get('op')!r} 的 k_expected 不该是"
+                            f"非批量算子 {op_name!r} 的 k_expected 不该是"
                             "逐内容 k 值列表（infoArray 分型只有批量算子有）")
                     info_val = info_array_values(
                         k_expected, entry["sample_map"], batch, args.perturb)

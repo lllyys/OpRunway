@@ -5,6 +5,15 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-10-09e · checkpoint 审计七项修复。** build_package 负例门四项：①负例 FAIL 另要求
+  verdict.error 为空（`_gate_row_off`，不可裁路径不再算检出）、③扰动槽位改 0 并删 batch>1
+  过滤（batch=1 的合法包不再必然失败）、④正负断言并成 `gate_assert_round`（预期退出码 + 门自己
+  清单逐 ID 恰一行 + 每行结论有效，summary 仅诊断）、⑥执行异常（超时/起不来/报告损坏/缺字段）
+  收敛 SelfCheckError 退 3。另：②sim_dut 批量 info 的 out32 列数按算子族取（求解族 nrhs）；
+  ⑤stream_check 两处 info 派生显式传新增的 `render_verify.info_require_s1`（full 册不再静默
+  略过 info 用例）；⑦就地定义 accept SKILL.md 的 A32-f64 与 `info_require_s1` 两种取值。
+  tests 229→237 绿；戳 s3-F13→F14、s3-E7→E8、s2a1-r8→r9、renderer s4-D11→D12 与 s3-D9→D10
+  （副本 docstring 进渲染字节）。
 - **2026-10-09d · 验收接入形态裁定归档（HT-31 立项）。** 端到端验收 + 共享 harness
   （自测与验收同流程）+ 样例换载体（cmatinv v2 降内部参考）+ 任务包不改；Codex
   review-plan 裁 NEEDS REVISION 后按修订五点与五步序定案，ops-solver 只读探测

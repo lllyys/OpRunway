@@ -16,6 +16,8 @@ sample_map 展开 infoArray：
   test_cli_batched_info_missing_sample_map_skipped
 - 非批量 info 用例（标量 k_expected）与 potrsBatched 标量 info 语义不变 →
   test_cli_single_info_scalar_unchanged / test_cli_batched_scalar_info_unchanged
+- 求解族 out32 列数取 nrhs 而非 n（n>1、nrhs=1 的 potrsBatched 条目）→
+  test_cli_batched_solve_info_cols_follow_nrhs
 """
 import importlib.util
 import json
@@ -177,16 +179,41 @@ def test_cli_single_info_scalar_unchanged(tmp_path):
 
 
 def test_cli_batched_scalar_info_unchanged(tmp_path):
-    """potrsBatched 族：k_expected 标量 -1，info 仍是标量；out32 仍按 batch 成三维。"""
+    """potrsBatched 族：k_expected 标量 -1，info 仍是标量；out32 仍按 batch 成三维。
+
+    求解族的列数取 nrhs（接口契约 (batch, n, nrhs)），此处 nrhs=1、n=3，形状
+    与分解族的方阵不同——列数口径另见
+    test_cli_batched_solve_info_cols_follow_nrhs。
+    """
     mod = _sim_dut()
     entry = _batched_entry(case_id="spotrsBatched-x001-info1", op="spotrsBatched",
-                           info_probe="bad_param_uplo", k_expected=-1)
+                           info_probe="bad_param_uplo", k_expected=-1, nrhs=1)
     pkg = _package(tmp_path, entry, np.zeros((2, _N, _N), dtype=np.float32))
     for perturb, want in (("none", -1), ("scale", 0)):
         out = tmp_path / f"dut-{perturb}"
         assert _run(mod, pkg, out, perturb) == 0
         with np.load(out / f"{entry['case_id']}.npz") as z:
-            assert z["out32"].shape == (_BATCH, _N, _N)
+            assert z["out32"].shape == (_BATCH, _N, 1)
             assert np.ndim(z["info"]) == 0 and int(z["info"]) == want
         v = _judge(entry, out / f"{entry['case_id']}.npz")
         assert v["numeric"] == ("PASS" if want == -1 else "FAIL"), v
+
+
+@pytest.mark.parametrize("nrhs", [1, 2])
+def test_cli_batched_solve_info_cols_follow_nrhs(tmp_path, nrhs):
+    """求解族 out32 = (batch, n, nrhs)：n>1 时方阵口径会把列数错写成 n。
+
+    契约在 stream_check 的批量 info 支路已经是「求解族取 nrhs、其余取 n」，
+    sim_dut 此前统一取 A32 的后两维（即 n×n），spotrsBatched/cpotrsBatched 的
+    被测输出因此多出 n-nrhs 列。
+    """
+    mod = _sim_dut()
+    entry = _batched_entry(case_id=f"spotrsBatched-x00{nrhs}-info1",
+                           op="spotrsBatched", info_probe="bad_param_uplo",
+                           k_expected=-1, nrhs=nrhs)
+    pkg = _package(tmp_path, entry, np.zeros((2, _N, _N), dtype=np.float32))
+    out = tmp_path / "dut"
+    assert _run(mod, pkg, out, "none") == 0
+    with np.load(out / f"{entry['case_id']}.npz") as z:
+        assert z["out32"].shape == (_BATCH, _N, nrhs)      # 非 (_BATCH, _N, _N)
+    assert _N > 1 and nrhs < _N                            # 两个口径真的能分开

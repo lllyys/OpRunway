@@ -31,6 +31,10 @@ case_purpose 分流支路（_judge_info_inner，只比 info==k_expected，HT-12 
 info 用例不受 --select/--limit 节流（构造开销小、逐算子仅 3 条），受 --ops/--max-n
 约束；记录带 case_purpose:"info" 与 info 比对结果，无 residual 字段。
 
+两处 info 派生的基座按册顶层 package_scope 取（口径函数 criteria/render_verify.
+info_require_s1）：full 册取全部精度条目，其余取值与无该字段的散册取 s1 子集——
+与包 index 侧和包内 verify 渲染副本同一条规则，三方派生出同一个 id 集合。
+
 HT-9 批量 info 契约用例：每批量算子另派生 1 个混合 case
 （derive_batched_info_cases：*potrfBatched 族 1~2 个代表内容非正定、k_expected
 逐内容 k 值列表；*potrsBatched 族标量仅参数错、k_expected=-1）——现场构造
@@ -78,7 +82,9 @@ import numpy as np
 # ru_maxrss 单位：Linux 为 KB、macOS 为字节（2026-09-24 远程实证抓出的少报 1024 倍）
 _RSS_DIV = 1024 if platform.system() == "Linux" else 1024 * 1024
 TOOL = "stream_check.py"
-TOOL_VER = "s2a1-r8"  # 2026-10-09 准入断言：读到包 index 只受理 A32-f64 基；承 s2a1-r7
+# s2a1-r9：info 派生基座按册顶层 package_scope 显式传（2026-10-09）——full 册不再
+#   整批略过 info 用例，与包 index 侧和 verify 渲染副本三方派生同一个 id 集合。
+TOOL_VER = "s2a1-r9"  # 承 s2a1-r8（准入断言：读到包 index 只受理 A32-f64 基）
 RATIO_BASIS = "A32-f64"  # 受理的唯一残差基（index 顶层 ratio_basis）
 
 _HERE = Path(__file__).resolve().parent
@@ -237,13 +243,21 @@ def main(argv=None):
         lapack = ratio_mod._lapack()
         # HT-8/HT-9：追加派生 info 契约用例（单算子 B2 三变体 + 批量 B3 混合 case；
         # canonical case 之后跑；不受 select/limit 节流——构造开销小；受 ops/max_n 约束）
+        #
+        # 派生基座按册顶层 package_scope 显式传（口径函数 render_verify.
+        # info_require_s1，与包 index 侧和 verify 渲染副本同一条规则，不在此抄一份）：
+        # 不传就吃 derive_info_cases 的 s1 默认，full 册的精度条目没有 s1_subset
+        # 标记，info 用例会被整批静默略过，流式与包/verify 派生出不同 id 集合。
+        import render_verify                       # criteria 已在 sys.path（_load_modules）
+        require_s1 = render_verify.info_require_s1(canonical)
         by_id = {c["case_id"]: c for c in cases}
         picked = picked + [
-            e for e in gen_mod.derive_info_cases(cases)
+            e for e in gen_mod.derive_info_cases(cases, require_s1=require_s1)
             if (ops is None or e.get("op") in ops)
             and (args.max_n is None or e.get("n", 0) <= args.max_n)]
         picked = picked + [
-            e for e in gen_mod.derive_batched_info_cases(cases)
+            e for e in gen_mod.derive_batched_info_cases(cases,
+                                                         require_s1=require_s1)
             if (ops is None or e.get("op") in ops)
             and (args.max_n is None or e.get("n", 0) <= args.max_n)]
     except ContractError as exc:

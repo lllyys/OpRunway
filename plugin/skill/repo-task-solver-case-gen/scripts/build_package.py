@@ -87,12 +87,17 @@ v1 从未流通无需兼容）——单矩阵六算子的装包自此走 **build
 verify，sim_dut 只被复制不被执行，「verify 形同虚设」一类缺陷活得过装包。门在临时
 目录内复刻开发者 README 流程，跑的是**刚装好的包里那几份成品件**：
 
-- 正例（--perturb none）：verify_accuracy 退 0 且全部 case 数值 PASS；
-- 负例：非批量 --perturb scale → 退 1 且全部被扰动 case 数值 FAIL（一段式残差下
-  六算子 scale 必拦，无豁免）；批量 --perturb scale --perturb-index 1 → 退 1 且报告
-  指认到被扰动的槽位或其所属内容（a0_mismatches / first_fail_index / worst_index）；
+- 正例（--perturb none）：verify_accuracy 退 0，门自己那份清单上的每个 case 恰一条
+  判定行且数值 PASS；
+- 负例：非批量 --perturb scale → 退 1 且每条判定行数值 FAIL（一段式残差下六算子
+  scale 必拦，无豁免）；批量 --perturb scale --perturb-index 0 → 退 1 且报告指认到
+  被扰动的槽位或其所属内容（a0_mismatches / first_fail_index / worst_index）；
+- 两轮的 FAIL 都要求 verdict.error 为空——判定链内部异常、残差基线不可用、缺
+  ratio_cpu_mean 等「不可裁」路径同样产 numeric=="FAIL"，只认 numeric 等于把门
+  自己的故障当成偏差被抓住；
 - 任一断言不符 → SelfCheckError（装包失败，不写 manifest），错误信息指明哪条断言、
-  实际退出码与实际结论。
+  实际退出码与实际结论。门执行本身出的岔子（超时、包内脚本起不来、报告 JSON 损坏）
+  同样收敛成 SelfCheckError 走退 3，不外抛退 1。
 
 限界（成本上限：单包墙钟秒级）与它证不到的事，见 run_negative_gate 的说明。
 
@@ -132,7 +137,9 @@ from pathlib import Path
 import numpy as np
 
 TOOL = "build_package.py"
-TOOL_VER = "s3-F13"  # 2026-10-09 info id 对账：index 与包内 verify 的派生集合必等；承 s3-F12
+# s3-F14：负例门收束（2026-10-09）——轮断言按门自己的清单逐 ID 核判定行、FAIL 另
+#   要求 verdict.error 为空、扰动槽位改 0 不再排除 batch=1、门执行异常收敛退 3。
+TOOL_VER = "s3-F14"  # 承 s3-F13（info id 对账：index 与包内 verify 的派生集合必等）
 OPS = ("spotrf", "spotrs", "spotri", "cpotrf", "cpotrs", "cpotri")
 BATCHED_OPS = ("spotrfBatched", "spotrsBatched", "cpotrfBatched", "cpotrsBatched")
 ALL_OPS = OPS + BATCHED_OPS
@@ -559,8 +566,11 @@ def batched_case_ratio_cpu_mean(entry):
 
 GATE_CASES_PURESCRIPT = 4    # 非批量门取切片内最小几例精度 case（限界）
 GATE_CASES_BATCHED = 1       # 批量门取 n²·batch 最小几例（整批展开的成本由它定）
-GATE_SLOT = 1                # 批量负例的被扰动槽位（sim_dut --perturb-index）
+GATE_SLOT = 0                # 批量负例的被扰动槽位（sim_dut --perturb-index）
 GATE_TIMEOUT_S = 900
+# 一轮的预期：(该轮每条判定行的数值结论, verify 的预期退出码)。gate_assert_round
+# 按 tag 取这一对，调用方给不出互相矛盾的组合。
+GATE_ROUNDS = {"pos": ("PASS", 0), "neg": ("FAIL", 1)}
 _GATE_GEN_MODULE = "_oprunway_gate_pkg_gen_data"
 _PKG_VERIFY_MODULE = "_oprunway_pkg_verify_accuracy"
 
@@ -611,56 +621,72 @@ def gate_pick_cases(slice_cases, batched, limit):
     """门内切片：按规模代价升序取前 limit 例精度 case。
 
     代价 = n²·batch（整批展开的字节数；非批量 batch 记 1，与 n² 同序），平手按
-    case_id——确定性，同一个包每次取同一批。批量另要求 batch > GATE_SLOT：
-    逐矩阵扰动得有被扰动的那个槽位。
+    case_id——确定性，同一个包每次取同一批。批量不限 batch 下限：被扰动槽位取 0，
+    batch=1 的包也有这个槽位（它是该内容的唯一槽位，走残差层归因）。
     """
     pool = [c for c in slice_cases if c.get("case_purpose") != "info"]
-    if batched:
-        pool = [c for c in pool if int(c.get("batch") or 0) > GATE_SLOT]
     if not pool:
-        raise SelfCheckError(
-            f"负例门：切片内没有可用精度 case（批量门另要求 batch > {GATE_SLOT}）")
+        raise SelfCheckError("负例门：切片内没有精度 case，门无可扰动的对象")
     pool = sorted(pool, key=lambda c: (int(c["n"]) ** 2 * int(c.get("batch") or 1),
                                        int(c["n"]), str(c["case_id"])))
     return pool[:limit]
 
 
-def _gate_off_verdict(report, want):
-    """返回数值结论不是 want 的判定行摘要（证据不足行也在内）。"""
-    off = []
-    for row in report.get("cases") or []:
-        numeric = (row.get("verdict") or {}).get("numeric")
-        if numeric != want:
-            off.append(f"{row.get('case_id')}:{row.get('status')}/{numeric}")
-    return off
+def _gate_row_off(row, want):
+    """这一行不构成 want 结论时返回原因摘要，构成则返回 None。
 
-
-def gate_assert_positive(exit_code, report):
-    """正例断言：verify 退 0 且全部 case 数值 PASS。返回判定条数。"""
-    summary = report.get("summary") or {}
-    total = int(summary.get("total") or 0)
-    off = _gate_off_verdict(report, "PASS")
-    if (exit_code != 0 or total == 0 or off
-            or summary.get("numeric_fail") or summary.get("no_evidence")):
-        raise SelfCheckError(
-            f"负例门/正例断言不符（应退 0 且全 PASS）：verify 退出码 {exit_code}，"
-            f"summary={summary}" + (f"，非 PASS 项 {off}" if off else ""))
-    return total
-
-
-def gate_assert_negative(exit_code, report):
-    """负例断言：verify 退 1 且全部被扰动 case 数值 FAIL。返回判定条数。
-
-    证据不足不算红——那是缺证据，不是判据抓住了偏差，放行它门就等于没有。
+    两条都要成立：数值结论等于 want，且 verdict.error 为空。error 非空时
+    numeric 恒 FAIL（criteria/verdict.py 的 _error_verdict：判定链内部异常、
+    残差基线不可用、缺 ratio_cpu_mean 超单支等不可裁路径），这种 FAIL 是
+    「没证据」不是「判据抓住了偏差」，负例轮认它等于门自己故障也算通过。
     """
-    summary = report.get("summary") or {}
-    total = int(summary.get("total") or 0)
-    off = _gate_off_verdict(report, "FAIL")
-    if exit_code != 1 or total == 0 or off or summary.get("no_evidence"):
+    verdict = row.get("verdict") or {}
+    numeric = verdict.get("numeric")
+    error = verdict.get("error")
+    if numeric != want:
+        return f"{row.get('case_id')}:{row.get('status')}/{numeric}"
+    if error:
+        return f"{row.get('case_id')}:不可裁/{error}"
+    return None
+
+
+def gate_assert_round(tag, want_ids, exit_code, report):
+    """一轮断言（正负共用）：预期退出码 + 逐 ID 恰一条判定行 + 每行结论有效。
+
+    want_ids 是这一轮该出判定的 case_id 清单——门自己选样/造数落下的那份，不另
+    算一套。判定条数由行推导并返回；summary 只进错误信息做诊断，不参与判据：
+    只信 summary 的话，空 cases 配一份对得上的 summary 能正负双向混过。
+
+    每行的结论有效性见 _gate_row_off（该轮数值结论 + error 为空）。
+    """
+    want_numeric, want_code = GATE_ROUNDS[tag]
+    rows = report.get("cases") or []
+    by_id = {}
+    for row in rows:
+        by_id.setdefault(row.get("case_id"), []).append(row)
+    problems = []
+    if not want_ids:
+        problems.append("预期清单为空（门的选样/造数没落下 case，断言无对象）")
+    if exit_code != want_code:
+        problems.append(f"verify 退出码 {exit_code}（应 {want_code}）")
+    missing = [c for c in want_ids if c not in by_id]
+    if missing:
+        problems.append(f"缺判定行 {missing}")
+    dup = sorted((c for c, rs in by_id.items() if len(rs) > 1), key=str)
+    if dup:
+        problems.append(f"判定行重复 {dup}")
+    extra = sorted((c for c in by_id if c not in set(want_ids)), key=str)
+    if extra:
+        problems.append(f"多出判定行 {extra}")
+    off = [o for o in (_gate_row_off(r, want_numeric) for r in rows) if o]
+    if off:
+        problems.append(f"结论无效 {off}")
+    if problems:
         raise SelfCheckError(
-            f"负例门/负例断言不符（应退 1 且全 FAIL）：verify 退出码 {exit_code}，"
-            f"summary={summary}" + (f"，非 FAIL 项 {off}" if off else ""))
-    return total
+            f"负例门/{tag} 轮断言不符（应退 {want_code} 且 {len(want_ids)} 个 case "
+            f"各一条 {want_numeric} 判定行）：" + "；".join(problems)
+            + f"；summary（仅诊断）={report.get('summary') or {}}")
+    return len(rows)
 
 
 def gate_assert_slot_attribution(report, case_id, sample_map, slot=GATE_SLOT):
@@ -711,9 +737,22 @@ def gate_assert_slot_attribution(report, case_id, sample_map, slot=GATE_SLOT):
 
 
 def _gate_run(args, cwd):
-    """以当前解释器执行包内脚本（门的对象是包的成品件，不是 skill 本体）。"""
-    return subprocess.run([sys.executable] + [str(a) for a in args], cwd=str(cwd),
-                          capture_output=True, text=True, timeout=GATE_TIMEOUT_S)
+    """以当前解释器执行包内脚本（门的对象是包的成品件，不是 skill 本体）。
+
+    超时与起不来（OSError）收敛成 SelfCheckError：两者都是门自身的前提坏了，
+    与断言不符同一出口（退 3）；外抛会退 1，与「判定链漏检」混成一个退出码。
+    """
+    script = str(args[0]) if args else "?"
+    try:
+        return subprocess.run([sys.executable] + [str(a) for a in args], cwd=str(cwd),
+                              capture_output=True, text=True, timeout=GATE_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        raise SelfCheckError(
+            f"负例门：包内 {script} 超过 {GATE_TIMEOUT_S} s 未结束（门的前提坏了，"
+            f"不是判定结论）") from exc
+    except OSError as exc:
+        raise SelfCheckError(
+            f"负例门：包内 {script} 启动失败 {type(exc).__name__}: {exc}") from exc
 
 
 def _gate_tail(proc, lines=6):
@@ -786,8 +825,9 @@ def _gate_batched_dut_input(gen_mod, case, data_dir):
 def _gate_round(pkg, tag, sim_extra, verify_args):
     """一轮：包内 sim_dut 产被测输出 → 包内 verify_accuracy 判定。
 
-    返回 (verify 退出码, 报告 dict)。sim 产不出被测输出，或 verify 退 2 一类
-    报告不落盘，都是门自身的前提坏了——SelfCheckError，不当成判定结论。
+    返回 (verify 退出码, 报告 dict)。sim 产不出被测输出，verify 退 2 一类报告不
+    落盘，报告落了盘但不是合法 JSON，都是门自身的前提坏了——SelfCheckError，
+    不当成判定结论。
     """
     dut = f"dut_{tag}"
     sim = _gate_run(["sim_dut.py", "--package", "data", "--out", dut] + sim_extra, pkg)
@@ -802,16 +842,24 @@ def _gate_round(pkg, tag, sim_extra, verify_args):
         raise SelfCheckError(
             f"负例门/{tag}：包内 verify_accuracy 退出码 {ver.returncode} 且报告未落盘"
             f"（退 2 一类用法或输入错）：{_gate_tail(ver)}")
-    with open(report_path, encoding="utf-8") as fh:
-        return ver.returncode, json.load(fh)
+    try:
+        with open(report_path, encoding="utf-8") as fh:
+            return ver.returncode, json.load(fh)
+    except json.JSONDecodeError as exc:
+        raise SelfCheckError(
+            f"负例门/{tag}：包内 verify_accuracy 的报告 {report_rel} 不是合法 JSON"
+            f"（退出码 {ver.returncode}）：{exc}") from exc
 
 
 def run_negative_gate(out_dir, op, index_doc, batched):
     """自检末项：临时目录内复刻开发者 README 流程，正例与负例各执行一轮。
 
     链路（跑的都是刚装好的包里那几份）：包内 gen_data 造数 → 包内 sim_dut 产被测
-    输出 → 包内 verify_accuracy 判定。断言见 gate_assert_positive /
-    gate_assert_negative / gate_assert_slot_attribution，任一不符即 SelfCheckError。
+    输出 → 包内 verify_accuracy 判定。断言见 gate_assert_round /
+    gate_assert_slot_attribution，任一不符即 SelfCheckError。
+
+    每轮的预期 case_id 清单取门自己那份：非批量取造数落下的 data/cases/index.json
+    （精度 case 加它派生的 info 契约用例），批量取 --case-id 单跑的那一个。
 
     限界（门证的是判定链正负双向可分，不是复测全量）：
 
@@ -839,6 +887,7 @@ def run_negative_gate(out_dir, op, index_doc, batched):
         pkg = _gate_mini_package(out_dir, tmp, picked, index_doc)
         case_ids = [c["case_id"] for c in picked]
         sample_map = None
+        slot = GATE_SLOT                 # 模拟与归因共用这一个槽位，不各取常量
         if batched:
             case = picked[0]
             gen_mod = _gate_load_pkg_gen(pkg)
@@ -848,11 +897,12 @@ def run_negative_gate(out_dir, op, index_doc, batched):
                 sys.modules.pop(_GATE_GEN_MODULE, None)
             verify_args = ["verify_accuracy.py", "--package", ".",
                            "--case-id", case["case_id"]]
-            neg_sim = ["--perturb", "scale", "--perturb-index", str(GATE_SLOT)]
+            neg_sim = ["--perturb", "scale", "--perturb-index", str(slot)]
+            want_ids = [case["case_id"]]
             bound = (f"n²·batch 最小 1 例 {case['case_id']}"
                      f"（n={case['n']} batch={case['batch']}），--case-id 单跑，"
                      "整批 golden 由包内 gen_data 现场展开")
-            neg_desc = f"scale --perturb-index {GATE_SLOT}"
+            neg_desc = f"scale --perturb-index {slot}"
         else:
             gen = _gate_run(["gen_data.py", "--canonical", "canonical_cases.json",
                              "--out", "data", "--select", "all", "--ops", op], pkg)
@@ -860,6 +910,8 @@ def run_negative_gate(out_dir, op, index_doc, batched):
                 raise SelfCheckError(
                     f"负例门：包内 gen_data 造数退出码 {gen.returncode}（应 0）"
                     f"：{_gate_tail(gen)}")
+            with open(pkg / "data" / "cases" / "index.json", encoding="utf-8") as fh:
+                want_ids = [e["case_id"] for e in json.load(fh).get("cases") or []]
             verify_args = ["verify_accuracy.py", "--package", "."]
             neg_sim = ["--perturb", "scale"]
             bound = (f"切片内最小 {len(picked)} 例精度 case"
@@ -867,17 +919,19 @@ def run_negative_gate(out_dir, op, index_doc, batched):
                      "加派生的 info 契约用例")
             neg_desc = "scale"
 
-        n_pos = gate_assert_positive(*_gate_round(pkg, "pos", [], verify_args))
+        n_pos = gate_assert_round("pos", want_ids, *_gate_round(pkg, "pos", [],
+                                                                verify_args))
         neg_code, neg_report = _gate_round(pkg, "neg", neg_sim, verify_args)
-        n_neg = gate_assert_negative(neg_code, neg_report)
+        n_neg = gate_assert_round("neg", want_ids, neg_code, neg_report)
         attribution = None
         if batched:
             attribution = gate_assert_slot_attribution(
-                neg_report, picked[0]["case_id"], sample_map)
+                neg_report, picked[0]["case_id"], sample_map, slot=slot)
 
         wall = round(time.monotonic() - started, 1)
         evidence = {
             "cases": case_ids,
+            "judged": want_ids,
             "bound": bound,
             "positive": {"perturb": "none", "exit_code": 0, "numeric_pass": n_pos},
             "negative": {"perturb": neg_desc, "exit_code": neg_code,
@@ -890,6 +944,13 @@ def run_negative_gate(out_dir, op, index_doc, batched):
         if attribution:
             detail += f"，{attribution}"
         return detail + f"；墙钟 {wall} s", evidence
+    except (json.JSONDecodeError, KeyError, OSError) as exc:
+        # 门执行边界：切片/报告 JSON 损坏、条目缺字段、读写失败——都是门自身的
+        # 前提坏了，收敛成 SelfCheckError 走退 3（文档承诺的门失败出口）；外抛
+        # 会退 1，与「判定链漏检」混成同一个退出码。超时与起不来在 _gate_run 处收。
+        raise SelfCheckError(
+            f"负例门：执行边界异常 {type(exc).__name__}: {exc}"
+            f"（门的前提坏了，不是判定结论）") from exc
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

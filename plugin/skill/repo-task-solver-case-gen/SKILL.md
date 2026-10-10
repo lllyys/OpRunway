@@ -51,8 +51,10 @@ python3 与 numpy、scipy 可用；实际版本由装包阶段写入 manifest，
 | S5 装包 | `python3 scripts/build_package.py --canonical <输出根>/canonical_cases.json --staging <输出根>/staging <输出根>/ratio <输出根>/perf --out <输出根>/packages/<op> --selfcheck <输出根>/packages/<op>.selfcheck.json` | 自检清单每项通过；逐算子各执行一次；十算子均为纯脚本装包（零数组，index 条目记 `materialize: "gen"`；装包自检内建现场生成（含 info 契约派生）、golden 抽验与 ratio 回填及 `ratio_cpu_mean` 固化、`ratio_basis` 基标记、info 用例 id 两侧对账，S2/S3 的 staging 产物用于独立核对、不进包） |
 
 S5 自检的末项是正负例门：临时目录内用包内 `gen_data.py`、`sim_dut.py`、
-`verify_accuracy.py` 执行一轮判定链，正例全部 PASS、负例全部 FAIL 才出包。
-一条从不报错的检查链不可信。
+`verify_accuracy.py` 执行一轮判定链，门自己那份 case 清单上每个 id 恰一条判定行、
+正例全部 PASS、负例全部 FAIL 才出包。负例的 FAIL 还要求判定行的 `error` 为空：
+判定链自己出错（残差基线不可用、内部异常）同样产 FAIL，那是没有证据，不是判据
+抓住了偏差。一条从不报错的检查链不可信。
 
 ## 检查条件
 
@@ -61,7 +63,7 @@ S5 自检的末项是正负例门：临时目录内用包内 `gen_data.py`、`si
 | `--select all` 未经容量核算 | 三算子全量写入文件约 132 GiB，超出常规磁盘预算 | 保持 `s1`；确需全量时先按 canonical 的 n 分布核算容量并取得使用者确认。装包不受此约束：纯脚本形态不装数组，包内切片只含 s1 子集，数据由开发者按「先造数后测」现场生成 |
 | S1 单矩阵算子重复计数非 0 | 任务目录的 cases.json 或 bench_result.json 与既往批次结构不同 | 停止，报告差异，不修改脚本内的选择规则；批量算子去重非零是预期，按打印的对账条数逐一核对 |
 | S3 出现 `prep_failed` | 该 case 前置分解失败，残差参考值缺失 | S3 独立运行时保留状态记录、不删除该 case；装包自检遇 `prep_failed` 即拒绝出包（构造性正定输入下不应发生，先查环境与数据） |
-| 负例门不过 | 装包退 3，打印指明哪条断言、实际退出码与实际结论 | 按打印定位包内判定链（verify 副本、sim_dut、数据重生成）或环境，修好再装；不放宽门的断言 |
+| 负例门不过 | 装包退 3，打印指明哪条断言、实际退出码与实际结论；门自身执行出错（超时、包内脚本起不来、报告 JSON 损坏）同样退 3 并打印「执行边界异常」 | 按打印定位包内判定链（verify 副本、sim_dut、数据重生成）或环境，修好再装；不放宽门的断言 |
 | info id 对账不符 | 装包退 3，打印两侧集合的差集 | index 的 info 用例 id 与包内 `verify_accuracy.py` 将派生的集合必须相等，否则 verify 要的 case 没有被测输出；两侧派生基座都由切片顶层 `package_scope` 定，按差集定位是哪一侧取错了基座 |
 | 脚本非零退出 | 打印中含失败原因与所在 case | 按打印定位；输入不合规时退 2，修输入不改脚本 |
 
