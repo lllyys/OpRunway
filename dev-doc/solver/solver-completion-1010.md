@@ -89,3 +89,9 @@ msprof op 精确符号匹配、30采样、工具预热5次；CSV逐条核kernel/
 均值0.328047892ms、中位数0.330246598ms，不是API墙钟；未绑定GPU基线，
 performance_verdict=NOT_EVALUATED，不能类推Cholesky的GPU/0.35门槛。
 样例包附一键入口、脱敏报告与30份原始CSV；证据在reports/cmatinv-sample-1010/internal-evidence/。
+
+## 样例去除 skill
+
+用户明确「skill 不要放」：样例压缩包已移除 skill/，两个入口通过环境变量
+SOLVER_ACCEPT_DIR/SOLVER_CASE_GEN_DIR 引用外部工具；版本要求与前置检查写入README。
+共享工具独立包未删除；样例保留教学脚本、性能实测报告及CSV。校验摘要重新生成并核对。

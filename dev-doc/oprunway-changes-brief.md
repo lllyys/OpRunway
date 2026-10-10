@@ -5,6 +5,9 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-10-10d · 样例与 skill 分开发送。** 按用户「skill 不要放」移除 cmatinv 样例包内
+  skill/；两个入口改用外部 SOLVER_ACCEPT_DIR/SOLVER_CASE_GEN_DIR，说明与SHA256同步。
+  保留数值教学脚本、性能原始CSV及报告；采集和判定实现未改。
 - **2026-10-10c · cmatinv 样例补性能实采。** 新增 skill 内 profile_cmatinv_sample.py，
   样例一键入口复用共享 harness，msprof op kernel-only 30条采样；mean0.328048ms、
   median0.330247ms，原始CSV随包。未绑定GPU基线，明确NOT_EVALUATED。远端137项通过，
