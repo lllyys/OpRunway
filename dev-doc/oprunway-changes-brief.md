@@ -14,6 +14,17 @@
   略过 info 用例）；⑦就地定义 accept SKILL.md 的 A32-f64 与 `info_require_s1` 两种取值。
   tests 229→237 绿；戳 s3-F13→F14、s3-E7→E8、s2a1-r8→r9、renderer s4-D11→D12 与 s3-D9→D10
   （副本 docstring 进渲染字节）。
+- **2026-10-10 · HT-31 共享 harness v1 落地 + A3 真机最小闭环。** `scripts/harness/` 新建
+  八件（op_abi / harness_exec.cpp / build_dut / exec_case / evidence / run_harness + 单测），
+  关键决策：按调用形状分流（非按算子名）、交付头唯一真相、四条构建纪律进代码、实际加载库取
+  dladdr 运行期事实。A3 容器（CANN 9.0.0、--privileged）全链闭环：构建退 0（29.3s 零告警）→
+  cmatinv_batched 正例三键回传（诊断残差 1.9e-08，本地独立复算同量级）→ 复跑 3 轮 bit-wise
+  一致 → 失败留证七件齐备且独立重判通过 → Device 搬运管道往返逐字一致。新基线 05e6b09 复核
+  （PROBE.md 第 7 节）：三硬依据成立（声明在 extern "C" 外且带 std::complex → C++ 执行器路线
+  不变），「info 死参」结论过期（新基线已写 info），第七算子 cheevj 破同构、印证形状分流。
+  真机当场修掉两缺陷（失败轮输出读回进留证件、run1_ms 重复行）。tests 237→337 绿。
+  遗留 L1–L9 见 reports/harness-build/REPORT.md（Device 调用点待交付头、A1 改写待主线、
+  S0 准入 12 条待真实交付）。
 - **2026-10-09d · 验收接入形态裁定归档（HT-31 立项）。** 端到端验收 + 共享 harness
   （自测与验收同流程）+ 样例换载体（cmatinv v2 降内部参考）+ 任务包不改；Codex
   review-plan 裁 NEEDS REVISION 后按修订五点与五步序定案，ops-solver 只读探测

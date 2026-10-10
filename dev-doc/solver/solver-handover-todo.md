@@ -42,7 +42,7 @@
 | HT-28 | 〔对外反馈〕任务书与发布包残留问题反馈任务侧 | ⏸ 移出本方范围（2026-10-08） | ①空问题（n=0/nrhs=0/batchSize=0 成功返回）与维度表下界 1 并存，且包内用例无 n=0/n=1（min n=2）；②§3.3 引用 `gpu_baseline.csv` 但两个 Cholesky 任务目录均无此文件（仅 bench_result.json）；③复数册 CRLF 与实数册 LF 不一致；④发布十包 manifest 的 README.md 指纹过期（README 装包后手改未重算，10/10 全部对不上），需任务侧重算或以本仓重算版为准 |
 | HT-29 | 〔仓务〕solver-handover-0924_copy 工作记录删除 | ✅ 关闭（不属本项目） | 2026-10-08 确认：solver-handover-0924_copy 为本地单独处理线（其 40 份 README+3 模板的批量替换是本地试验内容），不属本项目交付物；本项目不留该副本的同步/回退义务，后续以主仓 HT-27 产物为唯一基线 |
 | HT-30 | 〔仓务〕skill 权威仓澄清 + accept 增量前向移植 | ✅ 完成 | 2026-10-08 澄清：repo-task-atk-test 为 skill 唯一权威活仓（PR #15 后持续演进：86+137 测试、A0/ratio_cpu_mean/申诉指引、模板对外化+gzip 说明），trees/solver-s4-tree 仅为归并源快照、只承载本仓增量；已把 HT-26 增量前向移植到 atk-test（SKILL.md/verdict/render_verify/thresholds 逐字节拷贝、perf-collection.md 发布版重写、expectations.py 在 s3-D4 版上重放 0.35 门禁+内存不设门），criteria 137/137 全绿；case-gen 侧经核验 atk-test 模板本就正确（{n_info} 参数化，十包渲染逐字节命中发布版 README），无需改动；atk-test 6 文件改动未提交，待用户提交 |
-| HT-31 | 〔验收接入〕共享 harness：端到端验收执行通路（构建段+C++ 执行子进程） | 🟡 裁定已归档、施工待令 | 设计依据=supplement 2026-10-09d（Codex 五步序 + PROBE.md 工程事实）；第 1 步需真实 Cholesky 交付工程（现无交付，S0 准入 14 条随交付核）；对外样例随 harness 首版出，cmatinv v2 不外发 |
+| HT-31 | 〔验收接入〕共享 harness：端到端验收执行通路（构建段+C++ 执行子进程） | 🟡 v1 已落地+A3 真机闭环（2026-10-10），样例/A1/S0 待 | harness v1 落 scripts/harness/（tests 337 绿）；A3 真机五判据全兑现（构建退 0、三键回传、复跑 bit-wise 一致、失败留证独立重判、Device 搬运自检）；遗留 L1–L9 见 reports/harness-build/REPORT.md，Device 口径算子调用点待 Cholesky 交付头，S0 准入 12 条随交付核；对外样例随 harness 首版出，cmatinv v2 不外发 |
 
 ## 逐条说明
 
