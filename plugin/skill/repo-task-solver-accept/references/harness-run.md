@@ -91,7 +91,8 @@ CPU 残差参考值，`ratio_cpu_status` 表示参考链成功或准备失败；
 | determinism | 完成轮数、逐字节一致性与首个失配信息 |
 | formal=PENDING_RULING | 尚未出具正式结论 |
 
-性能按任务书另采，不能把执行器 `run1_ms` 当作 msprof kernel 时间。
+性能通过 [performance-acceptance.md](performance-acceptance.md) 的独立逐 case 通路采集与判定，
+只使用 msprof op，不把执行器 `run1_ms` 当作 kernel 时间。
 族级覆盖、bufferSize 和内存证据缺失时必须在验收报告列出，不从成功 case 外推。
 
 ## 失败现场与独立重判

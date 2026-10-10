@@ -46,3 +46,13 @@ fail-closed 边界：残差不可计算（被测含 NaN/Inf、全零输出触发
 任务包与共享 harness 入口按 case_id 读取冻结的 ratio_cpu、状态和对应均值；
 批量同时读取 sample_map，不以现场重算值替代。入口要求完整冻结字段，缺失时拒绝
 判定；上文底层判据对缺 mean 的兼容行为不意味着不完整任务包可以受理。
+
+## 性能结论
+
+性能入口见 [performance-acceptance.md](performance-acceptance.md)：逐 case 用
+`msprof op` 采集目标 kernel，取单次调用算术平均，与冻结 GPU `avg_ms / 0.35` 比较。
+`performance_verdict` 为 PASS、FAIL 或 INSUFFICIENT；漏采、缺基线或运行条件不符
+保留 INSUFFICIENT，不从期望集删掉。`overall_acceptance=NOT_DETERMINED` 表示
+性能结论不代替精度、确定性与总体验收结论。
+旧 `perf.json` 参考比值仅展示（`required=false`），不进入族级必测统计；
+正式性能门禁项仍参与统计，缺证据仍阻断。

@@ -35,6 +35,7 @@ Cholesky 的 Device 指针调用尚待真实交付头接入。缺接口时停在
 | A0 工程准入 | 按 [harness-run.md](references/harness-run.md) 核对实际交付接口、布局、内存归属、因子准备和目标环境 | 已有适配支持实际入口；未知签名或不支持的布局停止并报告缺项 |
 | A1 构建与执行 | 验收者运行 build_dut.py 与 run_harness.py，命令见同一参考文档 | 本次源码、构建库和实际加载库有取证；输入现场构造，输出来自本次调用 |
 | A2 判定与留证 | 编排器调用本 skill 的判据实现，读取包内固化参考值；失败件自动导出 | 执行、数值、确定性分别记结论，失败现场可独立重判 |
+| A2-P 性能验收 | 按 [performance-acceptance.md](references/performance-acceptance.md) 逐 case 用 msprof op 采集，匹配冻结GPU基线并判断阈值 | 输出性能逐例与汇总结论；未交付接口、缺采集或缺基线保留证据不足 |
 | A3 报告复核 | 失败件运行 run_harness.py --rejudge；族级期望含义见 [verdict-mechanism.md](references/verdict-mechanism.md) | 缺性能、内存、完整覆盖等证据时如实列缺口，局部成功不等于族级正式通过 |
 
 ## 已有输出复核
@@ -89,10 +90,11 @@ info 契约七类期望。两种报告的结构不同，不能把 harness 的结
 
 - [harness-run.md](references/harness-run.md)——A0–A3 的准入、命令、失败留证与边界
 - [verdict-mechanism.md](references/verdict-mechanism.md)——族级期望与判定字段含义
+- [performance-acceptance.md](references/performance-acceptance.md)——性能采集、阈值判定、汇总及离线重判
 - [perf-collection.md](references/perf-collection.md)——性能采集协议及 verify_perf 输入格式
 
 ## 范围之外
 
-尚未交付的 Cholesky Device 接口、大规格完整执行验证、性能正式门禁、批量完整
+尚未交付的 Cholesky Device 接口、大规格完整执行验证、950PR 性能全量实测、批量完整
 覆盖，以及 gels、QR、LU 和特征值族数值判定。Host 求逆入口的结构性演练不扩大
-这些判定范围。性能口径仍为任务书的 NPU msprof 实测 ≤ GPU 参考 / 0.35。
+这些判定范围。性能口径仍为任务书的 NPU msprof op 实测 ≤ GPU 参考 / 0.35。

@@ -5,6 +5,12 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-10-10e · 性能验收流程落地，样例标明接入必补项。** 逐 case 用 msprof op
+  采集、按 case_id/bench_key 匹配冻结GPU基线、按均值≤GPU/0.35判定并汇总；
+  原始CSV重读、全量缺项保留、目标环境/ABI/库身份核对，参考比值退出必测门禁。
+  cmatinv样例新增ADAPTATION.md，明确公开接口适配与C++真实调用两类必补项，包内不含skill。
+  远端464项通过；十包仅同步两份公共性能说明，基线/用例不变。用户收敛范围为流程与样例，
+  不要求完整算子验收实跑；验证详见solver/solver-completion-1010.md。
 - **2026-10-10d · 样例与 skill 分开发送。** 按用户「skill 不要放」移除 cmatinv 样例包内
   skill/；两个入口改用外部 SOLVER_ACCEPT_DIR/SOLVER_CASE_GEN_DIR，说明与SHA256同步。
   保留数值教学脚本、性能原始CSV及报告；采集和判定实现未改。

@@ -95,3 +95,31 @@ performance_verdict=NOT_EVALUATED，不能类推Cholesky的GPU/0.35门槛。
 用户明确「skill 不要放」：样例压缩包已移除 skill/，两个入口通过环境变量
 SOLVER_ACCEPT_DIR/SOLVER_CASE_GEN_DIR 引用外部工具；版本要求与前置检查写入README。
 共享工具独立包未删除；样例保留教学脚本、性能实测报告及CSV。校验摘要重新生成并核对。
+
+## 性能判定链与本轮完成范围
+
+用户要求逐 case 采集→匹配GPU基线→按任务书阈值判断→汇总，明确采集必须用 msprof op。
+新增 criteria/performance.py 与 scripts/harness/run_performance.py；accept_run 消费同份
+采样证据，重新读取CSV并判定，不信任旧PASS或派生均值。全部普通case保留在全集，
+缺基线/漏采/执行异常/目标不符均保留证据不足。正式条件为950PR、列主序、Device ABI；
+GPU源为冻结perf_baseline.json，mean NPU ≤ GPU avg_ms/0.35。性能结论与总体结论分开。
+旧perf.json参考比值为可选展示，不阻断正式性能门禁；正式项缺证据仍阻断。
+
+远端A3真实跑了两个cmatinv case，每例30条目标kernel CSV，共60条，均COLLECTED；
+因A3/Host条件不满足正式任务，两例均INSUFFICIENT，离线重判结果一致。此链路夹具
+的GPU数值为明确标记的合成测试数据，不能当真实GPU基线或算子性能达标证据。
+初轮全套462项通过，文档审查修正均值/中位数旧说法后新增两项可选参考门禁回归。
+独立Codex审查的契约异常、采样计划/构建记录关联问题均修复并复核；最终全套 **464 passed in 21.42s**，测试记录见
+reports/performance-acceptance-1010/performance-full-suite-final.log。
+
+用户随后明确不要求完整算子验收跑通，并授权Codex并行收尾。本轮交付范围为工具
+流程与一个cmatinv样例。Cholesky真实接口适配、950PR完整实跑与cmatinv精度卡接入
+是后续工作，不作为本轮完成条件；既有数值基线待裁不变。
+
+样例新增ADAPTATION.md，逐项强调公开头签名、dtype、布局、Host/Device、workspace、
+前置分解适配，以及C++分支的资源管理/调用/同步/回读；不得依赖开发者测试或判定。
+历史数值教学流程清楚标为独立参考，numeric=NOT_JUDGED边界未改变。重包46个载荷文件，
+无skill，文件与压缩包摘要已核；共享工具独立候选同步更新。
+
+十包候选只修正两份分组PERF_COLLECTION_SUPPLEMENT.md及其公共模板，
+统一均值口径、正式性能入口和基线更新规则；未重渲十包，未改用例或冻结基线。

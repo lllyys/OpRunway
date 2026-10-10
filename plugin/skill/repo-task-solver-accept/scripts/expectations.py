@@ -16,7 +16,7 @@ batched、确定性、info 契约。状态枚举（spec §2.5）：数值PASS｜
   在册但未随包交付的 case 保留为「未生成」→ 证据不足（spec §2.1，不声称全覆盖）。
 - P项性能：参考比值（方向 被测/基线）有被测耗时才算，正式门禁走任务书 §3.3 机制
   （2026-10 定稿：NPU 平均单次 kernel 耗时 ≤ GPU 参考耗时/0.35，GPU 参考值取
-  bench_result.json 预填，NPU 侧 msprof 采集；NPU 实测件未提供，T1）→ 恒待裁；
+  bench_result.json 预填，NPU 侧 msprof op 采集；按采样证据逐 case 判定；缺证据时为证据不足）；
   无被测耗时则参考项证据不足（spec §2.3′）。
 - bufferSize / 内存证据 / batched：本片未实现、未交付 → 证据不足（spec §1/§2.5）；
   任务书 2026-10 定稿 §3.4 内存不做要求——内存证据仅存证不设门。
@@ -55,7 +55,7 @@ S3 批量增量（S3 spec §4/§6，D3 卡；HT-16 起 T8 暂定聚合标记摘�
 
 from collections import OrderedDict
 
-EXPECTATIONS_VER = "s2a1-D5"  # s2-A1 一段式：接口精度映射改 residual 单层；承 s3-D4
+EXPECTATIONS_VER = "s2a1-D6"  # s2-A1 一段式：接口精度映射改 residual 单层；承 s3-D4
 
 # S3 spec §1：batched 覆盖缺口的统一声明文本（batched 期望项与声明边界共用）。
 BATCHED_COVERAGE_GAP = (
@@ -246,21 +246,23 @@ def info_item_insufficient(case_id, reason, detail):
 # P 项性能与其余五类
 # ---------------------------------------------------------------------------
 
-def perf_formal_gate_item(operator):
-    """性能正式门禁项：走任务书 §3.3 机制（0.35×GPU 数据基准），
-    NPU msprof 平均单次 kernel 耗时未提供 → 恒待裁（T1）。"""
-    return make_item(
-        KIND_PERF, f"P项性能/正式门禁/{operator}", ST_PENDING,
-        {"basis": "任务书 §3.3（2026-10 定稿）：NPU平均单次kernel耗时 ≤ GPU参考耗时/0.35，"
-                  "GPU 参考值取各算子目录 bench_result.json 的 perf.avg_ms（发布预采集），"
-                  "NPU 侧 msprof op 采集 OpBasicInfo.csv 按 kernel 名求平均",
-         "ruling": "T1 待裁：NPU 侧 msprof 实测耗时未提供，bench_result 仅自测参考（spec §2.3′）"})
+def perf_formal_gate_item(operator, report=None, error=None):
+    """Formal performance item, recomputed by criteria.performance from sample evidence."""
+    if report is None:
+        return make_item(KIND_PERF, f"P项性能/正式门禁/{operator}", ST_NO_EVIDENCE,
+                         {"reason": error or "未提供 msprof op 性能采集证据",
+                          "performance_verdict": "INSUFFICIENT"})
+    status = {"PASS": ST_PASS, "FAIL": ST_FAIL, "INSUFFICIENT": ST_NO_EVIDENCE}[
+        report["performance_verdict"]]
+    return make_item(KIND_PERF, f"P项性能/正式门禁/{operator}", status, report)
 
 
 def perf_reference_item(operator, status, evidence):
     """性能参考比值项（方向 被测/基线，spec 第 3 节 D 行口径）；状态由调用方定：
     有被测耗时 → 待裁（参考值并报、无独立判据），无 → 证据不足，指纹错配 → 证据不足。"""
-    return make_item(KIND_PERF, f"P项性能/参考比值/{operator}", status, evidence)
+    item = make_item(KIND_PERF, f"P项性能/参考比值/{operator}", status, evidence)
+    item["required"] = False  # 可选展示；正式性能门禁单独进入必测统计。
+    return item
 
 
 def is_batched_operator(operator):
@@ -325,6 +327,8 @@ def family_conclusion(items):
     formal 恒 PENDING_RULING，任何情况下都不构成正式验收结论（spec §2.3/§5）。"""
     counts = {st: 0 for st in STATUSES}
     for it in items:
+        if it.get("required") is False:
+            continue
         counts[it["status"]] += 1
     if counts[ST_FAIL]:
         verdict = f"族级不得通过：存在 数值FAIL {counts[ST_FAIL]} 项"
@@ -357,8 +361,8 @@ def declared_boundary(operator, items, warnings, ungenerated):
     lines.append(f"未证项（spec §5）：{'、'.join(unproven)}——本片模拟被测，均证据不足")
     if is_batched_operator(operator):
         lines.append(f"覆盖缺口：{BATCHED_COVERAGE_GAP}")
-    lines.append("性能正式门禁走任务书 §3.3 机制（NPU ≤ GPU参考/0.35，msprof 口径，"
-                 "bench_result 仅自测参考，T1 待裁）")
+    lines.append("性能项按 msprof op 平均 kernel 耗时 ≤ 冻结 GPU avg_ms/0.35 判定；"
+                 "见正式门禁项逐 case 证据与覆盖统计，性能通过不等于总体验收通过")
     if warnings:
         lines.append(f"告警（仅告警不阻断，spec §2.2 指纹分级）：{'；'.join(warnings)}")
     return lines

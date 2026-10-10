@@ -265,9 +265,20 @@ def accuracy_items(package, dut_dir, operator, index, baseline_rows,
     return items, flags, ungenerated
 
 
-def perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking):
-    """P 项性能两项：参考比值（被测/基线，可选 perf.json）与正式门禁（恒待裁，T1）。"""
-    items = [exp.perf_formal_gate_item(operator)]
+def perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking, performance_evidence=None):
+    """P 项性能两项：参考比值（被测/基线，可选 perf.json）与正式门禁（按完整采样证据判定）。"""
+    evidence_path = Path(performance_evidence) if performance_evidence else dut_dir / "performance-measurements.json"
+    formal_report, formal_error = None, None
+    if evidence_path.is_file():
+        try:
+            import performance
+            contract = performance.load_contract(package)
+            formal_report = performance.judge(contract, performance.load_evidence(evidence_path))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            formal_error = f"性能证据不可裁: {exc}"
+    elif performance_evidence:
+        formal_error = f"性能证据文件不存在: {evidence_path}"
+    items = [exp.perf_formal_gate_item(operator, formal_report, formal_error)]
     if "perf_baseline.json" in mismatch_blocking:
         items.insert(0, exp.perf_reference_item(
             operator, exp.ST_NO_EVIDENCE,
@@ -283,7 +294,7 @@ def perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking):
         items.insert(0, exp.perf_reference_item(
             operator, exp.ST_NO_EVIDENCE,
             {"reason": "被测耗时未交付",
-             "detail": "本片模拟被测不产出耗时；bench_result 基线仅自测参考（spec §2.3′）",
+             "detail": "未提供可选 perf.json 参考数据；正式性能见 msprof op 采样证据门禁",
              "baseline_coverage": coverage}))
         return items
     try:
@@ -308,7 +319,7 @@ def perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking):
         operator, exp.ST_PENDING,
         {"direction": "被测/基线（<1 快于基线）", "baseline_coverage": coverage,
          "cases": ratios,
-         "ruling": "参考比值无独立判据，正式门走任务书 §3.3（T1 待裁）"}))
+         "ruling": "参考比值无独立判据，正式门按另行提供的 msprof op 证据计算"}))
     return items
 
 
@@ -316,7 +327,7 @@ def perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking):
 # 主流程
 # ---------------------------------------------------------------------------
 
-def build_report(package, dut_dir, jobs=1):
+def build_report(package, dut_dir, jobs=1, performance_evidence=None):
     manifest = _load_json(package / "manifest.json", "manifest.json")
     operator = manifest.get("operator")
     supported = cards_cholesky.OPS + cards_cholesky.BATCHED_OPS
@@ -351,7 +362,7 @@ def build_report(package, dut_dir, jobs=1):
     acc_items, verdict_flags, ungenerated = accuracy_items(
         package, dut_dir, operator, index, baseline_rows, mismatch_blocking,
         jobs=jobs)
-    p_items = perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking)
+    p_items = perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking, performance_evidence)
     fixed = exp.fixed_insufficient_items(operator)
     if any(it["kind"] == exp.KIND_INFO for it in acc_items):
         # HT-8：包内已有逐 case 的 info 契约结论，固定占位项（「未执行该场景」）
@@ -359,8 +370,10 @@ def build_report(package, dut_dir, jobs=1):
         fixed = [it for it in fixed if it["kind"] != exp.KIND_INFO]
     items = acc_items + p_items + fixed
 
-    # flags：T 类分歧显式携带（spec §5）；T1 恒在（性能正式门待裁）；告警仅告警。
-    flags = sorted(verdict_flags) + ["T1"] + sorted(warnings)
+    # flags：T 类分歧显式携带（spec §5）；性能缺证据时保留 T1；告警仅告警。
+    perf_missing = any(it["item"].startswith("P项性能/正式门禁/")
+                       and it["status"] == exp.ST_NO_EVIDENCE for it in p_items)
+    flags = sorted(set(verdict_flags) | ({"T1"} if perf_missing else set()) | set(warnings))
     versions = {
         "accept_run": TOOL_VER,
         "expectations": exp.EXPECTATIONS_VER,
@@ -387,6 +400,7 @@ def main(argv=None):
     ap.add_argument("--jobs", type=int, default=1,
                     help="批量卡逐矩阵判定的多进程分块数（缺省 1=串行；"
                          "分块结果与串行逐位相同，S3 并行裁定）")
+    ap.add_argument("--performance-evidence", help="msprof op performance-measurements.json; 重新计算性能结论")
     args = ap.parse_args(argv)
 
     package, dut_dir = Path(args.package), Path(args.dut_out)
@@ -395,7 +409,7 @@ def main(argv=None):
     if not dut_dir.is_dir():
         _fail(f"被测输出目录不存在: {dut_dir}")
 
-    report = build_report(package, dut_dir, jobs=args.jobs)
+    report = build_report(package, dut_dir, jobs=args.jobs, performance_evidence=args.performance_evidence)
     out = Path(args.report)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as fh:

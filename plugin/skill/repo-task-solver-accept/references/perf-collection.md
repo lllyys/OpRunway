@@ -1,13 +1,13 @@
 # 性能自测采集说明
 
-供开发者采集逐 case 耗时并用包内 `verify_perf.py` 做参考对照。正式性能达标不在
-此流程内（见文末）。口径与对外发布版 PERF_COLLECTION_SUPPLEMENT 一致
+供开发者采集逐 case 耗时并用包内 `verify_perf.py` 做参考对照。正式性能验收使用
+[performance-acceptance.md](performance-acceptance.md) 的采集与机械判定入口。口径与对外发布版 PERF_COLLECTION_SUPPLEMENT 一致
 （2026-10-08 同步，任务书定稿版）。
 
-## 采集协议（任务书 §3.3 要求）
+## 采集协议
 
-- 每 case 正式采样 30 次，报**中位数**（预热由 `msprof op` 的 `--warm-up`
-  参数控制，不另行规定预热次数）；
+- 任务书 §3.3 使用**平均 kernel 耗时**；工具采样30次，同时给出均值与中位数，
+  其中30次是工具协议，不是任务书强制次数；预热由 `msprof op --warm-up` 控制；
 - 每轮 Device 同步后计时；不含首次编译、数据生成、H2D/D2H；
 - workspace 与指针数组在正式采样期间复用；
 - 统计对象是 **NPU kernel 耗时**，不是 API 墙钟。
@@ -33,8 +33,8 @@ kernel 归因）、`--warm-up`（预热次数，工具自带预热）、`--launc
 {"spotrf-0001": 0.012}
 ```
 
-字典值按 avg_ms 理解；min_ms/max_ms 可省，省则对应比值不算。中位数填入 avg_ms
-位（包内参考耗时只有 min/avg/max 三档，中位数对 avg 档比较并在报告备注）。
+字典值按 avg_ms 理解；avg_ms 必须是算术平均耗时。min_ms/max_ms 可省，
+省则对应比值不算。中位数只能单列作诊断，不可填入 avg_ms 或替代性能门禁的均值。
 
 ## 对照的含义与边界
 
