@@ -9,6 +9,13 @@
 
 ## 条目
 
+### 2026-10-10 · 对外样例改用 cmatinv
+
+- 用户原话：「出一个 cmatinv 样例包就好」。本条取代 10-09d「必须批内 Cholesky 真算子、cmatinv 不外发」的样例载体约束。
+- 交付 cmatinv_batched 样例：共享 harness 的自建/执行/五轮复跑/留证入口，加既有 v2 数值教学样例与正负例报告。
+- 两条结果边界明确：共享 harness 的 cmatinv 数值字段仍为 NOT_JUDGED；教学样例独立判残差与批内一致性。该包不代表 Cholesky 接入完成，亦不改变十包冻结基线的待裁定状态。
+- 产物：reports/cmatinv-sample-1010/cmatinv-batched-sample.tar.gz。
+
 ### 2026-10-09d · 验收接入形态裁定：端到端 + 共享 harness
 
 - 原话或要点：①「因为我们要端到端进行验收」——验收者拿开发者代码工程亲自构建、执行、

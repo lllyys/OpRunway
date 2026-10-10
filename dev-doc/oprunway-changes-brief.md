@@ -5,6 +5,10 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-10-10b · 按用户新裁定交付 cmatinv 样例包。** 共享 harness 自建/执行/五轮复跑/留证入口
+  加原 v2 数值教学样例；包内命令真机通过，教学正例与三类注入负例符合预期。
+  共享执行 numeric=NOT_JUDGED 与独立数值报告分开说明；不再等待 Cholesky 才出样例。
+  产物 reports/cmatinv-sample-1010/cmatinv-batched-sample.tar.gz，逐文件及压缩包 SHA256 已核。
 - **2026-10-10 · Codex 接续 solver 共享 harness 与冻结判定收尾。** 用户指定仅用 Codex；
   A0–A3 与共享运行说明落地，自测/验收/harness 统一消费冻结参考值，失败留证、复跑未知态、
   进程组取消清理及 ABI 描述核对补齐；一轮独立 audit→fix→verify 已闭环（撤回 info 数组越界

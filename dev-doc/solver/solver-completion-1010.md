@@ -70,3 +70,10 @@ ratio/status/mean/sample_map，不能只换 mean；接受 v5 则须接受全部�
 cgetri n=8 被真实接口 n≥32 限制拒绝，失败及重判均保留执行失败/确定性未知；
 额外 cmatinv n=8、batch=2 尝试返回参数错误，未宣称该形状通过。
 上述 Host 证据不覆盖 Cholesky，也不构成其精度与性能结论。
+
+## 后续裁定：样例载体改为 cmatinv
+
+用户随后指定「出一个 cmatinv 样例包就好」，原「等 Cholesky 批内样例」交付要求由本条取代。
+新包位于 reports/cmatinv-sample-1010/，独立提供共享 harness 执行命令及原 v2 数值教学资料。
+共享执行报告明确 NOT_JUDGED，独立数值样例另出残差/一致性报告，不混合为同一次验收。
+Cholesky 接口接入仍待真实工程，十包基线裁定不变。
