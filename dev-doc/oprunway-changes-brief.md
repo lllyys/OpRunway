@@ -5,6 +5,10 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-10-10c · cmatinv 样例补性能实采。** 新增 skill 内 profile_cmatinv_sample.py，
+  样例一键入口复用共享 harness，msprof op kernel-only 30条采样；mean0.328048ms、
+  median0.330247ms，原始CSV随包。未绑定GPU基线，明确NOT_EVALUATED。远端137项通过，
+  错kernel实跑退2；一轮独立Codex审查修复嵌套进程组超时问题后通过。样例包已更新。
 - **2026-10-10b · 按用户新裁定交付 cmatinv 样例包。** 共享 harness 自建/执行/五轮复跑/留证入口
   加原 v2 数值教学样例；包内命令真机通过，教学正例与三类注入负例符合预期。
   共享执行 numeric=NOT_JUDGED 与独立数值报告分开说明；不再等待 Cholesky 才出样例。

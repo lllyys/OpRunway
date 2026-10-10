@@ -44,3 +44,33 @@ kernel 归因）、`--warm-up`（预热次数，工具自带预热）、`--launc
   （取自各算子目录 `bench_result.json` 的 `perf.avg_ms`，发布预采集），
   T_NPU ≤ T_GPU数据 / 0.35，NPU 侧耗时以 `msprof op` 采集 `OpBasicInfo.csv`
   按 kernel 名求平均，由验收流程执行。
+
+
+## cmatinv 共享样例采集
+
+`cmatinv_batched` 的 n=8、batch=4 样例有独立采集入口：
+
+```bash
+python3 scripts/harness/profile_cmatinv_sample.py \
+  --repo /absolute/path/to/ops-solver \
+  --provenance /absolute/path/to/run-001/build.json \
+  --gen-dir /absolute/path/to/repo-task-solver-case-gen/scripts \
+  --device 0 --out /absolute/path/to/new-perf-run
+```
+
+先运行共享样例完成构建，source 现场 CANN 环境，再使用该次 build.json。
+输出目录必须不存在。入口使用 `msprof op` 的 kernel replay（由 profiler 重放同一 kernel 的采集模式）、5 次工具预热与
+30 次目标 kernel 采样，读取 `OpBasicInfo*.csv` 的 `Task Duration(us)`，
+统计 mean/median/min/max（毫秒），不使用执行器的 API 墙钟时间。
+Host 接口内部的分配、搬运和准备不计入该 kernel-only 指标，不能据此评价 API 总延迟。
+
+当前实现针对已核 n8/b4 单 kernel 通路，默认匹配真实符号
+`_Z22cmatinv_batched_kernelPhS_S_S_S_S_S_`；不同编译版本可通过
+`--kernel-name` 指定相同 kernel 的实际符号。多 kernel 或转发路径需要另行定义
+完整采集范围，不能直接套用本样例。CANN 版本若改变 CSV 格式，解析错误会拒绝产成功结果。
+
+结果 `performance.json` 中 `status=COLLECTED` 只表示完整收到了30条采样。
+报告保留全部样本和原始 CSV 路径；工具退出成功但应用失败、漏采、重复导出、
+错误 kernel/device 或非法耗时均退2。`performance_verdict=NOT_EVALUATED`
+表示未做性能达标判定：该样例未绑定同规格、同口径 GPU 基线。
+不能把 Cholesky 的 GPU/0.35 门槛直接套到 cmatinv 样例。

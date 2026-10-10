@@ -77,3 +77,15 @@ cgetri n=8 被真实接口 n≥32 限制拒绝，失败及重判均保留执行�
 新包位于 reports/cmatinv-sample-1010/，独立提供共享 harness 执行命令及原 v2 数值教学资料。
 共享执行报告明确 NOT_JUDGED，独立数值样例另出残差/一致性报告，不混合为同一次验收。
 Cholesky 接口接入仍待真实工程，十包基线裁定不变。
+
+## cmatinv 性能补齐
+
+按用户追问补入 kernel-only 采集，脚本落发布 skill 内，不在 reports 另建判据。
+msprof op 精确符号匹配、30采样、工具预热5次；CSV逐条核kernel/device/有效耗时，
+缺采/重复/执行失败均拒绝。CANN9实测文件名为 OpBasicInfo_<timestamp>.csv。
+共享harness直接管理profiler→DUT同一进程组，超时和取消不再经过嵌套harness。
+137项harness测试通过（新增15条），真机正例采满30条，错误kernel名负例退2。
+独立一轮audit发现的P2已修并verify；八维5分制为4/4/5/5/5/5/5/5。
+均值0.328047892ms、中位数0.330246598ms，不是API墙钟；未绑定GPU基线，
+performance_verdict=NOT_EVALUATED，不能类推Cholesky的GPU/0.35门槛。
+样例包附一键入口、脱敏报告与30份原始CSV；证据在reports/cmatinv-sample-1010/internal-evidence/。
