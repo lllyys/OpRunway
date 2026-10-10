@@ -4,8 +4,8 @@
 与自测main分开，二者共用同一模块，不增加acceptance目录。验收方使用skill原版协议头和
 固定执行器重新编译该源码，链接从交付源码构建的libops_solver.so；不运行开发者判定代码。
 完整样例在assets/adapter-sample/test/cmatinv_batched。模块不提供golden或PASS/FAIL。
-分发样例时复制assets/adapter-sample目录，再将assets/adapter/solver_adapter.h放到样例的
-include/solver_adapter.h；不把skill、构建产物或环境依赖放进开发者样例包。
+使用scripts/harness/export_cmatinv_sample.py --out <新目录>分发独立开发者样例，
+自动附带固定协议、公共执行器及精度/性能测试入口；不含skill及内部验证记录。
 
 ## 生命周期与数据
 

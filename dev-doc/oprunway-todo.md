@@ -2,6 +2,8 @@
 
 本页只保留尚未完成且有当前证据的工作。仓规以根 `AGENTS.md` 为准，已完成历史查 changes brief 与 Git。
 
+- [ ] 开发者样例回归收尾：SSH恢复后取回新回归与n16检查结果，并停止保留本轮自有容器；见[solver-developer-sample-1010.md](solver/solver-developer-sample-1010.md)。
+
 ## P1 · 0923 solver 批次（立项中 @ worktree solver-accept-0923，2026-09-21）
 
 背景与全部证据见 `dev-doc/solver/solver-0923-context.md`。
