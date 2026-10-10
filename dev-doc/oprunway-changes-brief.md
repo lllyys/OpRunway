@@ -5,6 +5,13 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-10-09d · 验收接入形态裁定归档（HT-31 立项）。** 端到端验收 + 共享 harness
+  （自测与验收同流程）+ 样例换载体（cmatinv v2 降内部参考）+ 任务包不改；Codex
+  review-plan 裁 NEEDS REVISION 后按修订五点与五步序定案，ops-solver 只读探测
+  （PROBE.md）钉死 C++ 执行子进程路线与双口径分流。potrf 换基对照量化完成
+  （reports/ratio-basis-diff/：新基中位小 6–8%、均值降 14%、旧值配新判阈值偏松
+  16–17%，旧固化值确认不可复用；本机 Accelerate 的 potrf 残差大 11–115 倍不可用，
+  复核一律 OpenBLAS）。施工待令。
 - **2026-10-09c · accept 侧收尾四件批落地。** ①render_verify require_s1 口径对齐（full 切片
   info id 两侧派生曾三条全不相交，已发布 v4 六包命中）：口径函数渲染进包内副本
   （s4-D11/s3-D9），case-gen 装包加 info id 对账门（s3-F13）并去掉 gate 的 package_scope
