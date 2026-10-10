@@ -3,11 +3,13 @@
 本包供开发者自测，包内检查脚本的输出是自测参考，
 不构成验收证据；正式验收结论由验收方使用其自带实现出具。
 
-本包为脚本形态，无 `cases/*.npz`、无 golden、有
-`ratio_cpu` /`ratio_cpu_mean`参考值（index 内逐内容 k 值列表与条目固化均值）。开发者可以直接参考本包内的`ratio_cpu`和`ratio_cpu_mean`,数据来源也可以参考下面说明进行「先造数后测」：批量 case 走 **A0 抽样**，每 case 只固化 `k = min(5, batch)`
-个代表内容矩阵的槽位映射（`sample_map`），数组不落盘——执行器/DUT
-挂钩与检查侧都按同一 seed **现场构造现场使用**（同环境
-逐位一致），不读取、不依赖任何造数目录。
+本包不携带输入或 golden 数组。批量 case 使用 A0 抽样：每 case 构造
+`k = min(5, batch)` 个代表内容，由固化的 `sample_map` 映射到整批槽位。
+输入现场构造；判定按 case_id 读取包内固化的逐内容 `ratio_cpu`（CPU 残差参考值）、
+状态与槽位加权 `ratio_cpu_mean`，不以本机重算值替代。
+
+开发者和验收者可使用独立分发的共享 harness 构建、执行和留证；验收证据由验收者
+自己运行产生。harness 不在任务包内，其当前接口支持范围以随工具的运行说明为准。
 
 精度用例之外，本包另含 **{n_info} 例批量 info 契约混合用例**（
 `case_purpose == "info"`，条目在 `cases/index.json`）：从中等规模精度用例派生，
@@ -22,7 +24,7 @@ infoArray 逐矩阵独立写入（期望 `infoArray[槽位] == k_expected[内容
 | 文件 | 用途 |
 | --- | --- |
 | `canonical_cases.json` | 本包用例的规范清单（本算子精度用例全量清单 {n_cases} 例；info 契约用例不入此清单，由 `gen_data.py` 同规则现场派生） |
-| `cases/index.json` | 用例清单：参数、seed、`materialize: "gen"`、`sample_map` 槽位映射与逐内容 `ratio_cpu` 参考 k 值列表（发布参考；精度判定时 `ratio_cpu` 以检查脚本现场重算值为准，同环境逐位一致）；精度条目另固化 case 级 `ratio_cpu_mean`（Σ(count_j·ratio_j)/batchSize 槽位加权均值，判定时直接读取包内固化值、零重算）；含 {n_info} 例 `case_purpose: "info"` 的 info 契约用例（`k_expected` 入条目）。**本文件以 gzip 压缩存储为 `index.json.gz`**（含 batch=1e6 级槽位映射，原文 250MB+），使用前先解压：`gunzip cases/index.json.gz` |
+| `cases/index.json` | 用例清单：参数、seed、`materialize: "gen"`、`sample_map` 槽位映射与逐内容 `ratio_cpu` 参考 k 值列表（判定时读取包内固化值与状态）；精度条目另固化 case 级 `ratio_cpu_mean`（Σ(count_j·ratio_j)/batchSize 槽位加权均值，判定时直接读取包内固化值、零重算）；含 {n_info} 例 `case_purpose: "info"` 的 info 契约用例（`k_expected` 入条目）。**本文件以 gzip 压缩存储为 `index.json.gz`**（含 batch=1e6 级槽位映射，原文 250MB+），检查脚本与 harness 可直接读取 gzip；手工用标准 JSON 工具检查时可先执行 `gunzip cases/index.json.gz` |
 | `gen_data.py` | 数据构造脚本（代表内容构造、槽位映射派生与整批展开同用这一份） |
 | `verify_accuracy.py` | 精度检查（A0 两层：先余槽 bit-wise 一致性，后代表槽逐内容直接残差判定；判定输入现场重造）+ info 契约判定（{n_info} 例，只比 info） |
 | `verify_perf.py` | 性能对照（与 GPU 参考耗时逐 case 比值，GPU 数据为 CUDA cuSolver 实测） |
@@ -38,7 +40,7 @@ infoArray 逐矩阵独立写入（期望 `infoArray[槽位] == k_expected[内容
 python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 `env` 字段，
 环境一致可获得逐位可复现的结果）。生成与检查全在 CPU 上进行。
 
-## 自测步骤（现场构造，先造数后测，可选，如果测试数据和提供的参考数据存在较大出入可以提供相关说明）
+## 自测步骤
 
 1. 核对环境与参考值（在包目录内执行；只产 `cases/index.json`，不落数组）：
 
@@ -49,17 +51,20 @@ python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 
    产出的 `selfcheck/cases/index.json` 记录每 case 的 `sample_map`（内容 → 槽位
    映射，`rep_slot` 为该内容的代表槽）与逐内容 `ratio_cpu` 参考 k 值列表，并含 {n_info}
    例 info 契约用例（`k_expected` 入条目）。缺判据支撑时脚本会提示跳过
-   `ratio_cpu` 参考计算（`not_computed`）——不影响执行与自测，
-   检查脚本判定时会自行重造内容重算。
+   `ratio_cpu` 参考计算（`not_computed`）。该目录只用于检查输入构造；
+   判定必须读取原包已回填的 index，不能拿此处未回填件替换。
 
 2. 接入被测：执行器/DUT 挂钩按 `sample_map` 用包内 `gen_data.py` 现场构造整批
    输入（k 个代表内容铺满 batch 个槽位），逐段喂入被测接口。构造方式（包目录内）：
 
    ```python
-   import json, gen_data as g
-   case = json.load(open("canonical_cases.json"))["cases"][0]
+   import json, gzip, pathlib, gen_data as g
+   index = pathlib.Path("cases/index.json")
+   with (index.open() if index.exists() else gzip.open(str(index) + ".gz", "rt")) as f:
+       entries = json.load(f)["cases"]
+   case = next(c for c in entries if c.get("case_purpose") != "info")
    contents = g.build_batched_contents(case)                     # k 个代表内容（A64/A32[/B64/B32]）
-   smap = g.derive_sample_map(case["seed"], case["batch"])       # 与 index 固化的 sample_map 逐项一致
+   smap = case["sample_map"]                                   # 消费包内固化映射
    full = g.expand_sampled_rows(contents, smap, 0, case["batch"])  # 整批输入 (batch, n, ·)
    ```
 
@@ -67,10 +72,9 @@ python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 
    用条目自带 `k_expected` 构造：
 
    ```python
-   entry = [c for c in json.load(open("cases/index.json"))["cases"]
-            if c.get("case_purpose") == "info"][0]
+   entry = next(c for c in entries if c.get("case_purpose") == "info")
    arrays = g.build_batched_info_arrays(entry)                   # 混合输入（含非正定内容，构造性自检 fail-closed）
-   smap = g.derive_sample_map(entry["seed"], entry["batch"])
+   smap = entry["sample_map"]
    full = g.expand_sampled_rows(arrays, smap, 0, entry["batch"])
    ```
 
@@ -100,7 +104,7 @@ python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 
    `out32` + info 逐位比对），后代表槽逐内容直接计算 LAPACK 残差并对
    max(5·ratio_cpu, 3·ratio_cpu_mean) 判定（复数残差按复模一体判定，不拆实虚；
    序号域为内容下标 0..k-1））；golden 仅作自测参考，不参与判定。
-   逐内容 `ratio_cpu` 以检查脚本现场重算值为准，`ratio_cpu_mean` 直接读取
+   逐内容 `ratio_cpu`、状态和 `sample_map` 读取 index，`ratio_cpu_mean` 直接读取
    index 条目固化的槽位加权均值（发包侧预计算，零重算）；info 契约用例只比 info——potrfBatched 族把
    `k_expected` 经 `sample_map` 展开到全批槽位逐槽核对（任一槽失配即 FAIL，
    `fail_count` 计失配内容数、`first_fail_index` 报最小失配槽位），potrsBatched
@@ -108,7 +112,7 @@ python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 
    最差内容摘要；`--jobs N` 把逐内容判定切成多进程分块（结果与串行逐位相同）。
    合计行区分「精度 X + info 契约 Y」两类条数。
    退 0 = 全部数值通过；退 1 = 存在数值未通过或证据不足（缺被测输出、现场重造
-   失败都记证据不足，读报告 summary 区分）；退 2 = 用例清单读不出或参数错——
+   失败都记证据不足，读报告 summary 区分）；退 2 = 用例清单或固化参考值不可用、参考值基准不符或参数错——
    **退 2 时报告文件不落盘**，外层脚本不要无条件读报告。
 
 4. 性能对照（可选，需你自测的逐 case 耗时 JSON）：
@@ -121,15 +125,14 @@ python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 
    （T_NPU ≤ T_GPU数据 / 0.35）。性能自测按任务书原规格 batch 整批调用——第 2 步的整批
    展开（`expand_sampled_rows`）即你的调用形状。
 
-## 重新生成参考值
+## 输入构造诊断
 
 ```bash
 python3 gen_data.py --canonical canonical_cases.json --out regen --select all
 ```
 
-同一 seed 与依赖版本下 `sample_map` 与逐内容 `ratio_cpu` 参考可复现（数组本就不落盘）。
-本包无冻结 npz：检查侧以判定时的现场重造为准，`selfcheck`/`regen` 目录只用于
-人工核对参考值，不参与判定。
+输入按固定 seed 现场构造，跨环境末位差异可以作为诊断记录。`selfcheck`/`regen`
+目录不参与判定；检查侧使用原包冻结的参考值与映射，不把诊断值写回任务包。
 
 ## 结论含义
 

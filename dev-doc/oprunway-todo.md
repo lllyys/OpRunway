@@ -7,6 +7,8 @@
 背景与全部证据见 `dev-doc/solver/solver-0923-context.md`。
 **solver 线交接待办细目见 `dev-doc/solver/solver-handover-todo.md`（唯一细目账）。**
 
+本轮接续状态见 [solver-completion-1010.md](solver/solver-completion-1010.md)：HT-31 工具收尾、HT-32 候选已完成；仅用 Codex，数值基线裁定与真实 Cholesky 交付仍未完成。
+
 - [x] ~~决策点：走哪条验收线~~ → **2026-09-22 Mr.0 裁定走乙：新起
   `repo-task-solver-accept`，自产 harness 留在验收现场。** 依据与两条翻案条件见
   `solver/solver-0923-context.md` 第 8′ 节。

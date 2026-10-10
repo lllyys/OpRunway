@@ -22,6 +22,7 @@
 """
 import json
 import shutil
+import sys
 
 import pytest
 
@@ -71,14 +72,42 @@ def _gate_index_doc(package, batched):
     """门消费的 index 投影（与装包内部传给 run_negative_gate 的同形）。"""
     with open(package / "cases" / "index.json", encoding="utf-8") as fh:
         index = json.load(fh)
-    if batched:
-        return {"ratio_basis": index.get("ratio_basis"),
-                "cases": [{"case_id": e["case_id"],
-                           "ratio_cpu_mean": e.get("ratio_cpu_mean")}
-                          for e in index["cases"]
-                          if e.get("case_purpose") != "info"]}
-    return {"ratio_cpu_mean": index.get("ratio_cpu_mean"),
-            "ratio_basis": index.get("ratio_basis"), "cases": []}
+    return index
+
+
+def test_gate_projection_preserves_selected_frozen_fields(tmp_path):
+    package = tmp_path / "source"
+    package.mkdir()
+    for name in ("gen_data.py", "sim_dut.py", "verify_accuracy.py"):
+        (package / name).write_text("# package source\n", encoding="utf-8")
+    chosen = {"case_id": "selected", "n": 2}
+    _canonical([chosen], package / "canonical_cases.json")
+    frozen = {"case_id": "selected", "ratio_cpu": [0.125, None],
+              "ratio_cpu_status": "ok", "ratio_cpu_mean": 0.125,
+              "ratio_cpu_prep_failed": 1,
+              "sample_map": [{"content_idx": 0, "rep_slot": 0, "slots": [0, 1]}]}
+    info = {"case_id": "selected-info1", "base_case_id": "selected",
+            "case_purpose": "info", "k_expected": 1,
+            "ratio_cpu": None, "ratio_cpu_status": None}
+    original = {"ratio_basis": "A32-f64", "ratio_cpu_mean": {"spotrf": 0.25},
+                "cases": [frozen, info, {"case_id": "not-selected"}]}
+    mini = bp._gate_mini_package(package, tmp_path / "gate", [chosen], original)
+    projected = json.loads((mini / "cases" / "index.json").read_text())
+    assert projected == {**original, "cases": [frozen, info]}
+    assert len(original["cases"]) == 3
+
+
+def test_gate_imports_do_not_write_bytecode(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    (tmp_path / "gen_data.py").write_text("VALUE = 42\n", encoding="utf-8")
+    try:
+        assert bp._gate_load_pkg_gen(tmp_path).VALUE == 42
+    finally:
+        sys.modules.pop(bp._GATE_GEN_MODULE, None)
+    (tmp_path / "child.py").write_text("import gen_data\n", encoding="utf-8")
+    assert bp._gate_run(["child.py"], tmp_path).returncode == 0
+    assert not list(tmp_path.rglob("__pycache__"))
+    assert not list(tmp_path.rglob("*.pyc"))
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +279,8 @@ def test_gate_slot_attribution():
 # 两条装包路径：最小包真装一次，门随装包执行
 # ---------------------------------------------------------------------------
 
-def test_purescript_package_gate(tmp_path):
+def test_purescript_package_gate(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
     package, checklist = _build(tmp_path, "spotrf", _purescript_cases())
     assert checklist["all_passed"] is True
     assert [i["check"] for i in checklist["items"]][-2:] == ["负例门", "指纹"]
@@ -267,9 +297,12 @@ def test_purescript_package_gate(tmp_path):
     # 门的临时目录在包外：零数据与指纹不受它影响
     assert not list(package.rglob("*.npz"))
     assert not list(package.rglob("dut_*"))
+    assert not list(package.rglob("__pycache__"))
+    assert not list(package.rglob("*.pyc"))
 
 
-def test_batched_package_gate(tmp_path):
+def test_batched_package_gate(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
     package, checklist = _build(tmp_path, "spotrfBatched", _batched_cases())
     assert checklist["all_passed"] is True
     gate = checklist["negative_gate"]
@@ -280,6 +313,8 @@ def test_batched_package_gate(tmp_path):
     assert "槽位" in gate["negative"]["attribution"] or \
         "内容" in gate["negative"]["attribution"]
     assert not list(package.rglob("*.npz"))
+    assert not list(package.rglob("__pycache__"))
+    assert not list(package.rglob("*.pyc"))
 
 
 def test_batched_package_gate_batch_one(tmp_path):

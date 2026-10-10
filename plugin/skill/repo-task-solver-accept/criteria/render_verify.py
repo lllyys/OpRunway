@@ -34,17 +34,15 @@ S3 批量增量（S3 spec §4/§5 + 并行裁定）：批量四算子的精度�
 判定机体（常量、公共件、基算子块、单矩阵裁决）加批量扩展段拼装——逐矩阵一段式
 残差判定同 criteria 批维通路语义、info 按接口角色分型、flags 恒空（HT-16）；
 **A0 抽样 materialize**（HT-2，先造数后测）：包内不携带任何数组，副本判定时调包内
-gen_data.py 与 canonical 切片现场重生成 k=min(5,batch) 个代表内容数组与逐内容参考
-ratio（内容/摆放/填充三条流全部从 case seed 派生，同环境逐位一致，不依赖开发者的
-data 目录）；被测全批输出先过余槽 bit-wise 一致性、后按 rep_slot 逐内容判定
+gen_data.py 与 canonical 切片现场重生成 k=min(5,batch) 个代表内容数组（内容/摆放/填充三条流全部从 case seed 派生，不依赖开发者的
+data 目录），参考值与 sample_map 只读包内冻结 index；被测全批输出先过余槽 bit-wise 一致性、后按 rep_slot 逐内容判定
 （两层先后）。逐矩阵判定支持 --jobs 多进程分块（判定只读共享数组无流耦合，按矩阵
 区间切分，合并结果与串行逐位相同，内建区间覆盖断言）。批量走独立版本号
 BATCHED_RENDERER_VER，拼装只复用、不改写既有模板字面。
 
 S4 六算子 v2（Mr.0 2026-09-24 裁定）：单矩阵六算子的精度副本为**纯脚本（全量
 materialize）形态**——包不携带任何数组，副本判定时调包内 gen_data.py 与 canonical
-切片现场重生成输入与本 case 参考 ratio（低精度准备链 + 本件残差实现，口径与验收侧
-回填一致）。拼装机制与批量段同一套（换头部 docstring、接现场重生成扩展段与纯脚本
+切片现场重生成输入，参考 ratio/status/mean 只读包内冻结 index。拼装机制与批量段同一套（换头部 docstring、接现场重生成扩展段与纯脚本
 CLI），判定机体字面复用不改写。版本戳按算子路由（renderer_ver_for）。
 """
 
@@ -73,14 +71,16 @@ except ImportError:  # criteria 目录直接挂 sys.path 或作为脚本运行�
 # s4-D12：info_require_s1 的 docstring 就地写明 True/False 各取什么条目与缺
 #   package_scope 字段的默认（2026-10-09 冷读：口径函数只说「唯一事实源」，
 #   读者推不出两种取值的选择面）。只动副本内的说明文字，判定行为不变。
-RENDERER_VER = "s4-D12"
+# s4-D13：参考 ratio/status/mean 只读冻结 index；支持 gzip，缺失/旧基拒收。
+RENDERER_VER = "s4-D13"
 # 批量四算子的渲染格式版本（S3 spec §4/§5）：与单矩阵版本号分开。
 # s3-D5：A0 抽样化（HT-2）；s3-D6：HT-9 批量 info 契约支路；s3-D7：HT-4 case 级 mean。
 # s3-D8：s2-A1 一段式重基（同 s4-D10：逐矩阵残差单步、diagnostics 收
 #   batch/pass/fail/error/ratio_max、A32 基参考 ratio 链）。
 # s3-D9：info 派生口径对齐 gen 侧（同 s4-D11，derive_batched_info_cases 支路）。
 # s3-D10：info_require_s1 的 docstring 就地写明两种取值的选择面（同 s4-D12）。
-BATCHED_RENDERER_VER = "s3-D10"
+# s3-D11：同 s4-D13；批量 case mean 与 sample_map 同源读取冻结 index。
+BATCHED_RENDERER_VER = "s3-D11"
 
 
 def renderer_ver_for(op):
@@ -919,8 +919,8 @@ shape=(batch,) infoArray（batch=1 不得标量化）；potrsBatched 族 info �
 __INFO_ROLE_DOC__。
 
 先造数后测（本包不携带任何数据数组）：判定时逐 case 调包内 gen_data.py 与
-canonical_cases.json 现场重生成 k=min(5,batch) 个代表内容数组与逐内容参考 ratio
-（A0 抽样，内容/摆放/填充三条流全部从 case seed 派生，同环境逐位一致），
+canonical_cases.json 现场重生成 k=min(5,batch) 个代表内容数组；逐内容参考
+ratio/status、case mean 与 sample_map 只读 cases/index.json（或 .gz），
 不读取、不依赖开发者自测用的 data 目录。
 
 A0 抽样判定（HT-2）两层先后：先余槽 bit-wise 一致性——同一内容的全部槽位，被测
@@ -962,8 +962,6 @@ import os as _os
 
 INFO_KIND = "__INFO_KIND__"     # info 接口角色："array"=infoArray | "scalar"=标量
 BASE_OP = "__BASE_OP__"         # 单矩阵基算子（判据成员来源）
-PREP_PREFIX = "__PREP_PREFIX__"  # 参考 ratio 低精度准备链的 LAPACK 前缀（s/c）
-_PREP_DT32 = np.complex64 if PREP_PREFIX == "c" else np.float32
 
 # 批量 case 里按首维 batch 切片的数组键；其余键原样透传给逐矩阵裁决。
 _BATCH_SLICED_KEYS = ("A64", "A32", "B64", "B32", "golden64", "golden32")
@@ -1480,12 +1478,8 @@ def _judge_a0_info(case_arrays, dut_out):
 
 
 # ---------------------------------------------------------------------------
-# 先造数后测：包内 gen_data 现场重生成 + 逐内容参考 ratio（A0 抽样，低精度准备链）
+# 输入现场构造；逐内容参考值只读冻结 index
 # ---------------------------------------------------------------------------
-
-
-class _PrepFailed(RuntimeError):
-    """低精度准备链失败（info≠0 或输出非有限）——该内容参考 ratio 不可用。"""
 
 
 def _load_gen_module(pkg_dir):
@@ -1504,47 +1498,8 @@ def _load_gen_module(pkg_dir):
     return mod
 
 
-def _prep_lapack():
-    """scipy 是运行前置：参考 ratio 的低精度准备链走 scipy.linalg.lapack。"""
-    try:
-        from scipy.linalg import lapack
-    except ImportError as exc:
-        raise RuntimeError(
-            "缺 scipy：逐内容参考 ratio 的低精度准备链需要 scipy.linalg.lapack") from exc
-    return lapack
-
-
-def _matrix_ratio(lapack, case_arrays, uplo, i):
-    """第 i 个内容矩阵的参考 ratio：低精度完整准备链（__PREP_PREFIX__potrf，求解类再
-    __PREP_PREFIX__potrs）后用本件残差实现配对计算——逐内容 c_i，不做 max 聚合，
-    与验收侧回填口径同法（A32 基，README 1.3 的 A64 口径已废止）。
-    准备失败抛 _PrepFailed。"""
-    a32 = np.ascontiguousarray(case_arrays["A32"][i])
-    f32, info = getattr(lapack, PREP_PREFIX + "potrf")(a32, lower=(uplo == "L"), clean=1)
-    if info != 0:
-        raise _PrepFailed(f"内容 {i}: {PREP_PREFIX}potrf info={info}")
-    if f32.dtype != _PREP_DT32 or not np.isfinite(f32).all():
-        raise _PrepFailed(f"内容 {i}: F32 dtype/有限性不符（{f32.dtype}）")
-    if BASE_OP.endswith("potrf"):
-        return float(residual_ratio(a=a32, factor=f32, uplo=uplo))
-    b32 = np.ascontiguousarray(case_arrays["B32"][i])
-    x32, info = getattr(lapack, PREP_PREFIX + "potrs")(f32, b32, lower=(uplo == "L"))
-    if info != 0:
-        raise _PrepFailed(f"内容 {i}: {PREP_PREFIX}potrs info={info}")
-    if x32.dtype != _PREP_DT32 or not np.isfinite(x32).all():
-        raise _PrepFailed(f"内容 {i}: X32 dtype/有限性不符（{x32.dtype}）")
-    return float(residual_ratio(a=a32, b=b32, x=x32))
-
-
-def _materialize_case(gen_mod, lapack, entry):
-    """现场重生成一个 case 的 A0 抽样产物（HT-2）：k=min(5,batch) 个代表内容数组
-    （gen_data.build_batched_contents，内容流从 case seed 派生）+ 槽位映射
-    （gen_data.derive_sample_map，摆放/填充子流同源派生）+ 逐内容参考 ratio。
-
-    返回 (case_arrays, note)：case_arrays 含批维 k 的内容数组、canonical batch
-    声明与 sample_map，ratio_cpu 为 k 值列表（prep_failed 记 None，全失败才记
-    prep_failed 状态，与验收侧回填口径一致；本包输入为构造性 SPD/HPD，实际不应
-    触发），note 携带失败明细。"""
+def _materialize_case(gen_mod, entry):
+    """现场构造输入数组；ratio/status/mean 由调用方从冻结 index 注入。"""
     gen_mod.validate_case(entry)
     contents = gen_mod.build_batched_contents(entry)
     sample_map = gen_mod.derive_sample_map(entry["seed"], entry["batch"])
@@ -1552,18 +1507,7 @@ def _materialize_case(gen_mod, lapack, entry):
     for key, v in entry.items():
         case_arrays.setdefault(key, v)
     case_arrays["sample_map"] = sample_map
-    uplo = normalize_uplo(entry["uplo"])
-    ratios, note = [], None
-    for i in range(len(sample_map)):
-        try:
-            ratios.append(_matrix_ratio(lapack, case_arrays, uplo, i))
-        except _PrepFailed as exc:
-            ratios.append(None)
-            note = str(exc)
-    case_arrays["ratio_cpu"] = ratios
-    case_arrays["ratio_cpu_status"] = ("ok" if any(v is not None for v in ratios)
-                                       else "prep_failed")
-    return case_arrays, note'''
+    return case_arrays, None'''
 
 # 批量精度副本的 CLI 段（替换单矩阵 CLI：目标 case 取 canonical 清单，输入现场重生成）。
 _BATCHED_CLI_TEMPLATE = r'''
@@ -1658,7 +1602,6 @@ def main(argv=None):
         return 2
     try:
         gen_mod = _load_gen_module(pkg_dir)
-        lapack = _prep_lapack()
     except Exception as exc:
         print(f"[错误] 现场重生成前置不可用: {exc}", file=sys.stderr)
         return 2
@@ -1684,20 +1627,16 @@ def main(argv=None):
         print(f"[错误] canonical 中没有 {OP} 的 case", file=sys.stderr)
         return 2
     n_info_run = sum(1 for e in entries if e.get("case_purpose") == "info")
-    # HT-4：case 级 ratio_cpu_mean（Σ(count_j·ratio_j)/batchSize 槽位加权，发包侧
-    # 固化）从包内 index 条目按 case_id 读——判定只读、零重算；index 缺失或条目无
-    # 该键时注入 None → potrf/potrs 阈值第二支走缺 mean 单支兼容口径。
     try:
-        with open(pkg_dir / "cases" / "index.json", "r", encoding="utf-8") as fh:
-            mean_by_id = {e.get("case_id"): e.get("ratio_cpu_mean")
-                          for e in (json.load(fh).get("cases") or [])}
-    except OSError:
-        mean_by_id = {}
+        frozen_by_id = _load_frozen_index(pkg_dir, entries, batched=True)
+    except (OSError, EOFError, ValueError, TypeError) as exc:
+        print(f"[错误] 冻结基线契约错误: {exc}", file=sys.stderr)
+        return 2
 
     print(f"# verify_accuracy — {OP}（criteria {CRITERIA_VER} / renderer {RENDERER_VER}）")
     print(f"# {DISCLAIMER}")
-    print("# 先造数后测（A0 抽样，HT-2）：本包不携带数组，判定输入与逐内容参考 "
-          "ratio 均现场重生成（不读取 data 目录）；判定先余槽 bit-wise 一致性、"
+    print("# 先造数后测（A0 抽样，HT-2）：本包不携带数组，判定输入现场重生成，逐内容参考 "
+          "ratio/status/mean/sample_map 只读冻结 index（不读取 data 目录）；判定先余槽 bit-wise 一致性、"
           "后 rep_slot 逐内容一段式残差判定")
     results = []
     n_pass = n_fail = n_noev = 0
@@ -1715,8 +1654,8 @@ def main(argv=None):
                 case_arrays["sample_map"] = smap
                 prep_note = None
             else:
-                arrays, prep_note = _materialize_case(gen_mod, lapack, entry)
-                arrays["ratio_cpu_mean"] = mean_by_id.get(case_id)  # HT-4：只读固化 mean
+                arrays, prep_note = _materialize_case(gen_mod, entry)
+            _apply_frozen(case_arrays if is_info else arrays, frozen_by_id[case_id])
         except Exception as exc:
             n_noev += 1
             results.append({"case_id": case_id, "status": "证据不足",
@@ -1782,7 +1721,7 @@ def main(argv=None):
                      "renderer_ver": RENDERER_VER, "residual_kind": RESIDUAL_KIND},
             "disclaimer": DISCLAIMER,
             "materialize": "gen+A0（先造数后测，HT-2：包内无数组，判定时现场重生成 "
-                           "k=min(5,batch) 个代表内容数组与逐内容参考 ratio；"
+                           "k=min(5,batch) 个代表内容数组，逐内容参考值读取冻结 index；"
                            "精度条目之外另派生 case_purpose==\"info\" 的批量 info 契约"
                            "用例，只比 infoArray[i]==k_expected[i] 或标量 info==-1，"
                            "HT-9）",
@@ -1819,11 +1758,11 @@ _PURESCRIPT_HEAD_DOC = r'''__OP__ 精度自测辅助件（纯脚本包；accept 
 
 一段式残差判定（s2-A1，criteria/verdict.judge 的同语义副本）：每个精度用例直接算
 __KIND__ 残差（实际输入 A32/B32 升 f64）对阈值判——阈值 = __FORMULA__，配对本
-case 现场重算的参考 ratio。残差超阈或不可计算（NaN/Inf、零分母）→ 数值 FAIL
+case 在 cases/index.json（或 .gz）固化的参考 ratio。残差超阈或不可计算（NaN/Inf、零分母）→ 数值 FAIL
 （后者 error 指认原因）；golden 不参与判定（降为自测参考件）。
 
 先造数后测（本包不携带任何数据数组）：判定时逐 case 调包内 gen_data.py 与
-canonical_cases.json 现场重生成输入并计算本 case 参考 ratio（同环境逐位一致），
+canonical_cases.json 现场重生成输入；参考 ratio/status/mean 从 cases/index.json（或 .gz）读取，
 不读取、不依赖开发者自测用的 data 目录。
 
 用法：
@@ -1840,20 +1779,13 @@ canonical_cases.json 现场重生成输入并计算本 case 参考 ratio（同�
 退出码：0 = 全部数值 PASS；1 = 存在数值 FAIL 或证据不足；2 = 用法/输入错误。
 '''
 
-# 纯脚本扩展段：先造数后测的现场重生成 + 本 case 参考 ratio（低精度准备链 + 本件
-# 残差实现，口径与验收侧回填一致）。接在单矩阵判定机体之后（judge 为单矩阵裁决）。
+# 纯脚本扩展段：现场构造输入。冻结参考值由共用 index 读取段注入。
 _PURESCRIPT_EXT_TEMPLATE = r'''# ---------------------------------------------------------------------------
-# 先造数后测：包内 gen_data 现场重生成 + 本 case 参考 ratio（低精度准备链）
+# 输入现场构造；本 case 参考值只读冻结 index
 # ---------------------------------------------------------------------------
 
 import importlib.util as _importlib_util
 
-PREP_PREFIX = "__PREP_PREFIX__"  # 参考 ratio 低精度准备链的 LAPACK 前缀（s/c）
-_PREP_DT32 = np.complex64 if PREP_PREFIX == "c" else np.float32
-
-
-class _PrepFailed(RuntimeError):
-    """低精度准备链失败（info≠0 或输出非有限）——该 case 参考 ratio 不可用。"""
 
 
 def _load_gen_module(pkg_dir):
@@ -1871,59 +1803,8 @@ def _load_gen_module(pkg_dir):
     return mod
 
 
-def _prep_lapack():
-    """scipy 是运行前置：参考 ratio 的低精度准备链走 scipy.linalg.lapack。"""
-    try:
-        from scipy.linalg import lapack
-    except ImportError as exc:
-        raise RuntimeError(
-            "缺 scipy：本 case 参考 ratio 的低精度准备链需要 scipy.linalg.lapack") from exc
-    return lapack
-
-
-def _check_prep(name, arr):
-    """低精度例程输出必须仍是该精度且有限（防 scipy 静默升型/降型的坑）。"""
-    if arr.dtype != _PREP_DT32:
-        raise _PrepFailed(
-            f"{name} dtype 不符（{arr.dtype}，应 {np.dtype(_PREP_DT32).name}）")
-    if not np.isfinite(arr).all():
-        raise _PrepFailed(f"{name} 含 NaN/Inf")
-
-
-def _case_ratio(lapack, case_arrays, uplo):
-    """本 case 的参考 ratio：低精度完整准备链（potrs/potri 先 __PREP_PREFIX__potrf）
-    后用本件残差实现同法计算——口径与验收侧回填一致（包内 ratio_cpu 约定；
-    A32 基，README 1.3 的 A64 口径已废止）。准备失败抛 _PrepFailed。"""
-    a32 = np.ascontiguousarray(case_arrays["A32"])
-    f32, info = getattr(lapack, PREP_PREFIX + "potrf")(a32, lower=(uplo == "L"), clean=1)
-    if info != 0:
-        raise _PrepFailed(f"{PREP_PREFIX}potrf info={info}")
-    _check_prep("F32", f32)
-    if OP.endswith("potrf"):
-        return float(residual_ratio(a=a32, factor=f32, uplo=uplo))
-    if OP.endswith("potrs"):
-        b32 = np.ascontiguousarray(case_arrays["B32"])
-        x32, info = getattr(lapack, PREP_PREFIX + "potrs")(f32, b32, lower=(uplo == "L"))
-        if info != 0:
-            raise _PrepFailed(f"{PREP_PREFIX}potrs info={info}")
-        _check_prep("X32", x32)
-        return float(residual_ratio(a=a32, b=b32, x=x32))
-    c32, info = getattr(lapack, PREP_PREFIX + "potri")(f32, lower=(uplo == "L"))
-    if info != 0:
-        raise _PrepFailed(f"{PREP_PREFIX}potri info={info}")
-    _check_prep("C32", c32)
-    return float(residual_ratio(a=a32, ainv=c32, uplo=uplo))
-
-
-def _materialize_case(gen_mod, lapack, entry, by_id):
-    """现场重生成一个 case：包内 gen_data 构造全部数组 + 本 case 参考 ratio。
-
-    返回 (case_arrays, note)。准备链失败记 prep_failed（该 case 残差基线不可用，
-    判定走「不可裁」error 路径；本包输入为构造性 SPD/HPD，实际不应触发），note
-    携带失败明细。
-    HT-8：info 契约用例（case_purpose=="info"）不产 ratio——按 base case
-    现场构造（构造性自检 fail-closed），judge 只比 info==k_expected。
-    """
+def _materialize_case(gen_mod, entry, by_id):
+    """现场构造输入数组；ratio/status/mean 由调用方从冻结 index 注入。"""
     gen_mod.validate_case(entry)
     if entry.get("case_purpose") == "info":
         base = by_id[entry["base_case_id"]]
@@ -1938,18 +1819,7 @@ def _materialize_case(gen_mod, lapack, entry, by_id):
     case_arrays = dict(arrays)
     for k, v in entry.items():
         case_arrays.setdefault(k, v)
-    uplo = normalize_uplo(entry["uplo"])
-    note = None
-    try:
-        ratio = _case_ratio(lapack, case_arrays, uplo)
-    except _PrepFailed as exc:
-        case_arrays["ratio_cpu"] = None
-        case_arrays["ratio_cpu_status"] = "prep_failed"
-        note = str(exc)
-    else:
-        case_arrays["ratio_cpu"] = ratio
-        case_arrays["ratio_cpu_status"] = "ok"
-    return case_arrays, note'''
+    return case_arrays, None'''
 
 # 纯脚本精度副本的 CLI 段（替换单矩阵 CLI 分节：目标 case 取 canonical 清单，
 # 输入现场重生成；被测输出装载 info 标量）。
@@ -2020,7 +1890,6 @@ def main(argv=None):
         return 2
     try:
         gen_mod = _load_gen_module(pkg_dir)
-        lapack = _prep_lapack()
     except Exception as exc:
         print(f"[错误] 现场重生成前置不可用: {exc}", file=sys.stderr)
         return 2
@@ -2046,26 +1915,23 @@ def main(argv=None):
         print(f"[错误] canonical 中没有 {OP} 的 case", file=sys.stderr)
         return 2
     n_info_run = sum(1 for e in entries if e.get("case_purpose") == "info")
-    # HT-4：算子级 ratio_cpu_mean（全部正定精度用例算术平均，发包侧固化）从包内
-    # index 顶层按算子读——判定只读、零重算；index 缺失或无该键时注入 None →
-    # potrf/potrs 走缺 mean 单支兼容口径（与 accept_run 注入契约一致）。
     try:
-        with open(pkg_dir / "cases" / "index.json", "r", encoding="utf-8") as fh:
-            op_mean = (json.load(fh).get("ratio_cpu_mean") or {}).get(OP)
-    except OSError:
-        op_mean = None
+        frozen_by_id = _load_frozen_index(pkg_dir, entries, batched=False)
+    except (OSError, EOFError, ValueError, TypeError) as exc:
+        print(f"[错误] 冻结基线契约错误: {exc}", file=sys.stderr)
+        return 2
 
     print(f"# verify_accuracy — {OP}（criteria {CRITERIA_VER} / renderer {RENDERER_VER}）")
     print(f"# {DISCLAIMER}")
-    print("# 先造数后测：本包不携带数组，判定输入与本 case 参考 ratio 均"
-          "现场重生成（不读取 data 目录）")
+    print("# 先造数后测：本包不携带数组，判定输入现场重生成；参考 ratio/status/mean "
+          "只读包内冻结 index（不读取 data 目录）")
     results = []
     n_pass = n_fail = n_noev = 0
     for entry in entries:
         case_id = entry["case_id"]
         try:
-            arrays, prep_note = _materialize_case(gen_mod, lapack, entry, by_id)
-            arrays["ratio_cpu_mean"] = op_mean    # HT-4：只读固化 mean（阈值第二支）
+            arrays, prep_note = _materialize_case(gen_mod, entry, by_id)
+            _apply_frozen(arrays, frozen_by_id[case_id])
         except Exception as exc:
             n_noev += 1
             results.append({"case_id": case_id, "status": "证据不足",
@@ -2113,8 +1979,8 @@ def main(argv=None):
                      "criteria_ver": CRITERIA_VER, "renderer_ver": RENDERER_VER,
                      "residual_kind": RESIDUAL_KIND},
             "disclaimer": DISCLAIMER,
-            "materialize": "gen（先造数后测：包内无数组，判定时现场重生成输入与"
-                           "本 case 参考 ratio；精度条目之外另派生 "
+            "materialize": "gen（先造数后测：包内无数组，判定时现场重生成输入，"
+                           "本 case 参考值读取冻结 index；精度条目之外另派生 "
                            "case_purpose==\"info\" 的 info 契约用例，只比 "
                            "info==k_expected，HT-8）",
             "params": {
@@ -2244,6 +2110,101 @@ def _check_batched_card(op, bspec, base_spec):
         raise AssertionError(f"{op}: 模板阈值函数与卡的 threshold_fn 不同源")
 
 
+
+_FROZEN_INDEX_TEMPLATE = r'''
+# 冻结参考值唯一来源；本件不根据本机 LAPACK 重算裁决阈值。
+def _load_frozen_index(pkg_dir, entries, batched=False):
+    import gzip
+    paths = [p for p in (pkg_dir / "cases" / "index.json",
+                        pkg_dir / "cases" / "index.json.gz") if p.is_file()]
+    if len(paths) != 1:
+        raise ValueError("必须恰有一份 cases/index.json 或 index.json.gz")
+    opener = gzip.open if paths[0].suffix == ".gz" else open
+    with opener(paths[0], "rt", encoding="utf-8") as fh:
+        index = json.load(fh)
+    if not isinstance(index, dict) or index.get("ratio_basis") != "A32-f64":
+        raise ValueError("index.ratio_basis 必须为 A32-f64")
+    rows = index.get("cases")
+    if not isinstance(rows, list):
+        raise ValueError("index.cases 必须为列表")
+    lookup = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("case_id"), str):
+            raise ValueError("case_id 缺失或非法")
+        if row["case_id"] in lookup:
+            raise ValueError("case_id 重复")
+        lookup[row["case_id"]] = row
+    def number(value, name):
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
+            raise ValueError(f"{name} 必须为有限非负数")
+    result = {}
+    for entry in entries:
+        cid = entry["case_id"]
+        row = lookup.get(cid)
+        if row is None:
+            raise ValueError(f"index 缺 case {cid}")
+        if row.get("op") != OP:
+            raise ValueError(f"{cid} op 不匹配")
+        if "ratio_cpu" not in row or "ratio_cpu_status" not in row:
+            raise ValueError(f"{cid} 缺 ratio_cpu/status")
+        ratio, status = row["ratio_cpu"], row["ratio_cpu_status"]
+        info = entry.get("case_purpose") == "info"
+        frozen = {"ratio_cpu": ratio, "ratio_cpu_status": status}
+        if info:
+            if (row.get("case_purpose") != "info" or
+                    row.get("k_expected") != entry.get("k_expected") or
+                    ratio is not None or status not in (None, "info")):
+                raise ValueError(f"{cid} info 元数据不匹配")
+        else:
+            if status not in ("ok", "prep_failed"):
+                raise ValueError(f"{cid} ratio_cpu_status 非法")
+            values = ratio if batched else [ratio]
+            if not isinstance(values, list) or not values:
+                raise ValueError(f"{cid} ratio_cpu 形态非法")
+            for value in values:
+                if value is not None:
+                    number(value, f"{cid}.ratio_cpu")
+            if status == "ok" and not any(v is not None for v in values):
+                raise ValueError(f"{cid} ok 基线缺数值")
+            if status == "prep_failed" and any(v is not None for v in values):
+                raise ValueError(f"{cid} prep_failed 与数值冲突")
+            if USES_MEAN:
+                means = index.get("ratio_cpu_mean")
+                mean = row.get("ratio_cpu_mean") if batched else (
+                    means.get(OP) if isinstance(means, dict) else None)
+                number(mean, f"{cid}.ratio_cpu_mean")
+                frozen["ratio_cpu_mean"] = mean
+        if batched:
+            smap = row.get("sample_map")
+            if not isinstance(smap, list) or not smap:
+                raise ValueError(f"{cid} 缺 sample_map")
+            if not info and len(ratio) != len(smap):
+                raise ValueError(f"{cid} ratio_cpu/sample_map 长度不一致")
+            frozen["sample_map"] = smap
+        result[cid] = frozen
+    return result
+
+
+def _apply_frozen(arrays, frozen):
+    if "sample_map" in frozen and arrays.get("sample_map") != frozen["sample_map"]:
+        raise ValueError("sample_map 与现场输入映射不一致")
+    arrays.update(frozen)
+'''
+
+def load_frozen_index(package, entries, op):
+    """原生入口复用随包副本的冻结契约，避免两套字段校验漂移。
+
+    执行的仅是本模块固定模板，不包含包内文本或用户代码；与常量模板自检同法。
+    """
+    import json
+    import math
+    card = cards_cholesky.get_card(op)
+    namespace = {"json": json, "math": math, "OP": op, "USES_MEAN": card.uses_mean}
+    exec(_FROZEN_INDEX_TEMPLATE, namespace)
+    return namespace["_load_frozen_index"](Path(package), entries, batched=card.batched)
+
+
 def _batched_accuracy_template():
     """拼装批量精度模板：单矩阵模板换头部 docstring、切走 CLI 分节标记，接批量
     扩展段与批量 CLI。两处机械操作逐处断言；既有模板字面一字不改。"""
@@ -2255,7 +2216,7 @@ def _batched_accuracy_template():
     if len(head) != 3:
         raise AssertionError("单矩阵精度模板头部 docstring 结构变化，批量换头失败")
     return (head[0] + '"""' + _BATCHED_HEAD_DOC + '"""' + head[2]
-            + _BATCHED_EXT_TEMPLATE + _BATCHED_CLI_TEMPLATE)
+            + _BATCHED_EXT_TEMPLATE + _FROZEN_INDEX_TEMPLATE + _BATCHED_CLI_TEMPLATE)
 
 
 def _purescript_accuracy_template():
@@ -2270,7 +2231,7 @@ def _purescript_accuracy_template():
     if len(head) != 3:
         raise AssertionError("单矩阵精度模板头部 docstring 结构变化，纯脚本换头失败")
     return (head[0] + '"""' + _PURESCRIPT_HEAD_DOC + '"""' + head[2]
-            + _PURESCRIPT_EXT_TEMPLATE + _PURESCRIPT_CLI_TEMPLATE)
+            + _PURESCRIPT_EXT_TEMPLATE + _FROZEN_INDEX_TEMPLATE + _PURESCRIPT_CLI_TEMPLATE)
 
 
 def _finish_render(fname, text, files):

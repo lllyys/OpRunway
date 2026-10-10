@@ -61,6 +61,7 @@ def main(argv):
              "dtype": spec["dtype"], "n": spec["n"], "batch": spec["batch"],
              "nrhs": spec.get("nrhs", "0"), "runs": str(runs),
              "out32_bytes": str(nbytes), "out32_dtype": spec["dtype"],
+             "rerun_runs_requested": str(runs), "rerun_runs_completed": str(runs),
              "info_len": str(info_len), "info_dtype": "int32",
              "lib_path": "/fake/libops_solver.so"}
 
@@ -90,7 +91,8 @@ def main(argv):
 
     if mode == "op_error":
         lines.update({"status": "op_error", "detail": "替身：算子返回 -1",
-                      "run1_ret": "-1", "rerun_consistent": "1",
+                      "run1_ret": "-1", "rerun_consistent": "unknown",
+                      "rerun_runs_completed": "0",
                       "exit": str(EXIT["op_error"])})
         _flush(result_path, lines)
         return EXIT["op_error"]

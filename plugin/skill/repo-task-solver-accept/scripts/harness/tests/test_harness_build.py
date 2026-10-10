@@ -120,7 +120,7 @@ def test_source_identity_without_git(tmp_path):
     ident = build_dut.source_identity(repo)
     assert ident["git"] is None
     assert len(ident["content_anchor"]) == 64
-    assert ident["anchored_files"] == 3        # 两个头 + 一个 src 文件
+    assert ident["anchored_files"] == 5        # 两个头 + 一个 src 文件
 
 
 def test_content_anchor_changes_with_content(tmp_path):

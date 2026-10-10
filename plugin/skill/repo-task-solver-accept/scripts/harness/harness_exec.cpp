@@ -17,16 +17,29 @@
  * spec 是 `key=value` 行文本（`#` 起行为注释），必需键见 kRequired。进程只读它，
  * 不读环境变量里的规格，所以一份 spec 加一组输入 bin 就能脱离编排层独立复跑。
  *
- * 复跑（Q4 裁定）：同一子进程、同一 stream 内重复 runs 次，每轮先从原始副本恢复
- * 输入再调算子，第 2..N 轮与第 1 轮逐键 bit-wise 比对（memcmp 字节域，NaN 按位
- * 等同）。第 1 轮的输出一定落盘；出现失配时该轮输出另存 *.diff.bin 留证。
+ * spec 核验：调用前把 spec 的 dtype、call_shape、批量性与**编译期算子描述**
+ * （kOpDescs，每个编进来的算子一行）逐项比对，不一致就退 spec 错误并说清期望与
+ * 实际。缓冲尺寸的乘法逐步查 size_t 溢出——spec 填错 dtype 会按半尺寸分配再按全
+ * 尺寸读写，那是越界，不是判定问题。
+ *
+ * 复跑：同一子进程、同一 stream 内重复 runs 次，每轮先从原始副本恢复输入再调算子，
+ * 第 2..N 轮与第 1 轮逐键 bit-wise 比对（memcmp 字节域，NaN 按位等同）。纪律三条：
+ *   - 第 1 轮跑完立刻落盘，后面哪一轮崩了首轮现场都还在；
+ *   - 第 2 轮及以后算子返回非成功时，该轮输出另存 *.fail.bin，不覆盖首轮；
+ *   - result 里分开记 rerun_runs_requested 与 rerun_runs_completed，规定轮数没跑完
+ *     时 rerun_consistent 记 `unknown` 而不是 `1`——没做完的比较不许报一致。
+ *   失配时该轮输出另存 *.diff.bin 留证，rerun_consistent 记 `0`。
  *
  * 三键落盘（{out32, info, status}）：out32 与 info 是裸二进制无头文件，形状与 dtype
- * 写在 result 文本里由编排层组装 npz——npz 依赖不进 C++ 侧（PROBE §6.3）。
+ * 写在 result 文本里由编排层组装 npz——npz 依赖不进 C++ 侧。
+ *
+ * 收尾：全部 ACL 释放走同一个 Teardown，逐项查返回值。主流程成功而清理失败时报
+ * ACL 错误（清理失败意味着设备侧状态不明，不能当成功交付）；主流程已失败时保留
+ * 首个主错误，清理失败只进 result 的 teardown_detail。
  *
  * 退出码（编排层按此归类，见 exec_case.py 的 EXIT_KIND）：
  *   0  正常           10 spec 错误      11 I/O 错误        12 口径/算子未实现
- *   13 ACL 前置失败   14 算子返回非成功  15 复跑 bit-wise 失配
+ *   13 ACL 前置或收尾失败              14 算子返回非成功  15 复跑 bit-wise 失配
  */
 
 #include <acl/acl.h>
@@ -119,6 +132,13 @@ class Spec {
 // 字节域工具：FNV-1a 64 摘要（无外部依赖，供 result 文本记逐轮指纹）
 // ---------------------------------------------------------------------------
 
+// 乘法溢出检查：size_t 回绕会先分出一个小缓冲，再按大尺寸读写，直接越界。
+bool MulSize(size_t a, size_t b, size_t *out) {
+    if (a != 0 && b > SIZE_MAX / a) return false;
+    *out = a * b;
+    return true;
+}
+
 uint64_t Fnv1a(const void *data, size_t bytes) {
     const unsigned char *p = static_cast<const unsigned char *>(data);
     uint64_t h = 1469598103934665603ULL;
@@ -185,6 +205,64 @@ int Bail(Result &r, const std::string &result_path, int code,
 }
 
 // ---------------------------------------------------------------------------
+// 统一收尾：每一处释放都查返回值，首个失败连同全部失败明细都记下来
+// ---------------------------------------------------------------------------
+
+class Teardown {
+  public:
+    // 记一次清理调用的返回值。0 忽略；非 0 累进明细，并保留**第一个**失败的返回码。
+    void Note(const char *what, int ret) {
+        if (ret == 0) return;
+        const std::string one = std::string(what) + " ret=" + std::to_string(ret);
+        detail_ = detail_.empty() ? one : detail_ + "; " + one;
+        if (first_ret_ == 0) first_ret_ = ret;
+    }
+    int first_ret() const { return first_ret_; }
+    const std::string &detail() const { return detail_; }
+
+  private:
+    int first_ret_ = 0;
+    std::string detail_;
+};
+
+// ---------------------------------------------------------------------------
+// 编译期算子描述：spec 核验的对照面，每个编进来的算子一行
+// ---------------------------------------------------------------------------
+
+// 与 op_abi.py 的 ABI 表同源（tests/test_harness_exec.py 逐行核对两边不漂移）。
+// spec 说的 dtype/call_shape/批量性必须与这里一致，否则缓冲尺寸就是错的。
+struct OpDesc {
+    const char *op;
+    const char *call_shape;
+    const char *dtype;
+    const char *info_kind;
+    bool batched;
+};
+
+constexpr OpDesc kOpDescs[] = {
+#ifdef HARNESS_OP_CMATINV_BATCHED
+    {"cmatinv_batched", "outofplace_a_ainv", "complex64", "scalar", true},
+#endif
+#ifdef HARNESS_OP_CGETRI_BATCHED
+    {"cgetri_batched", "outofplace_a_ainv", "complex64", "scalar", true},
+#endif
+#ifdef HARNESS_OP_CGETRI
+    {"cgetri", "inplace_a", "complex64", "scalar", false},
+#endif
+#ifdef HARNESS_OP_SGETRI
+    {"sgetri", "inplace_a", "float32", "scalar", false},
+#endif
+    {nullptr, nullptr, nullptr, nullptr, false},
+};
+
+const OpDesc *FindOpDesc(const std::string &op) {
+    for (const OpDesc *d = kOpDescs; d->op != nullptr; ++d) {
+        if (op == d->op) return d;
+    }
+    return nullptr;
+}
+
+// ---------------------------------------------------------------------------
 // Device 口径（任务书 §2.1–2.4）：搬运管道已实做并可自检，算子调用点是唯一 TODO
 // ---------------------------------------------------------------------------
 
@@ -206,7 +284,12 @@ int DeviceRoundTrip(const void *host_src, void *host_dst, size_t bytes,
     if (ret == 0) ret = aclrtSynchronizeStream(stream);
     if (ret == 0) ret = aclrtMemcpy(host_dst, bytes, dev, bytes, ACL_MEMCPY_DEVICE_TO_HOST);
     if (ret != 0) *err = "H2D/D2H ret=" + std::to_string(ret);
-    aclrtFree(dev);
+    const int fret = aclrtFree(dev);     // 释放失败说明设备侧状态不明，不能当没事
+    if (fret != 0) {
+        const std::string one = "aclrtFree ret=" + std::to_string(fret);
+        *err = err->empty() ? one : *err + "; " + one;
+        if (ret == 0) ret = fret;
+    }
     return ret;
 }
 
@@ -303,6 +386,13 @@ int main(int argc, char **argv) {
         return Bail(r, result_path, kSpecError, "spec_error",
                     "n/batch/runs 必须为正");
     }
+    if (spec.Str("layout", "row_major") != "row_major" || lda != n) {
+        return Bail(r, result_path, kSpecError, "spec_error",
+                    "only compact row_major with lda=n is implemented");
+    }
+    r.SetNum("rerun_runs_completed", 0);
+    r.Set("rerun_consistent", "unknown");
+    if (!r.Flush(result_path)) return kIoError;
     const size_t itemsize = (dtype == "complex64") ? 8 : (dtype == "float32") ? 4 : 0;
     if (itemsize == 0) {
         return Bail(r, result_path, kSpecError, "spec_error", "dtype 只支持 float32/complex64");
@@ -316,12 +406,52 @@ int main(int argc, char **argv) {
                     "（见 DeviceRoundTrip 的 TODO）；搬运管道可用 op=_device_selftest 自检");
     }
 
-    const size_t elems = static_cast<size_t>(batch) * static_cast<size_t>(n) *
-                         static_cast<size_t>(n);
-    const size_t bytes = elems * itemsize;
+    // --- spec 核验：spec 说的与编译期算子描述必须一致，否则缓冲尺寸就是错的 ---
+    if (op != "_device_selftest") {
+        const OpDesc *desc = FindOpDesc(op);
+        if (desc == nullptr) {
+            return Bail(r, result_path, kUnsupported, "unsupported",
+                        "算子 " + op + " 没有编进本执行件（缺 -DHARNESS_OP_*，"
+                        "或该算子的调用分支未实现）");
+        }
+        if (spec.Str("info_kind") != desc->info_kind) {
+            return Bail(r, result_path, kSpecError, "spec_error",
+                        "info_kind does not match compiled operator descriptor");
+        }
+        if (dtype != desc->dtype) {
+            return Bail(r, result_path, kSpecError, "spec_error",
+                        "dtype 与算子不符：" + op + " 期望 " + desc->dtype +
+                            "，spec 给的是 " + dtype);
+        }
+        if (shape != desc->call_shape) {
+            return Bail(r, result_path, kSpecError, "spec_error",
+                        "call_shape 与算子不符：" + op + " 期望 " +
+                            desc->call_shape + "，spec 给的是 " + shape);
+        }
+        if (!desc->batched && batch != 1) {
+            return Bail(r, result_path, kSpecError, "spec_error",
+                        "批量性与算子不符：" + op +
+                            " 是非批量入口，期望 batch=1，spec 给的是 batch=" +
+                            std::to_string(batch));
+        }
+    }
+
+    // 缓冲尺寸逐步查溢出：填错 dtype 或超大 n 会回绕成小缓冲，再按大尺寸读写即越界
+    size_t elems = 0;
+    size_t bytes = 0;
+    size_t info_bytes = 0;
     const size_t info_len = (spec.Str("info_kind") == "array")
                                 ? static_cast<size_t>(batch)
                                 : 1;
+    if (!MulSize(static_cast<size_t>(batch), static_cast<size_t>(n), &elems) ||
+        !MulSize(elems, static_cast<size_t>(n), &elems) ||
+        !MulSize(elems, itemsize, &bytes) ||
+        !MulSize(info_len, sizeof(int32_t), &info_bytes)) {
+        return Bail(r, result_path, kSpecError, "spec_error",
+                    "缓冲字节数溢出 size_t：batch=" + std::to_string(batch) +
+                        " n=" + std::to_string(n) + " itemsize=" +
+                        std::to_string(itemsize));
+    }
 
     // --- ACL 前置（调用序与 test/<op>/<op>_test.cpp 惯例逐项对位，PROBE §5.2）---
     int ret = aclInit(nullptr);
@@ -332,15 +462,19 @@ int main(int argc, char **argv) {
     }
     ret = aclrtSetDevice(device_id);
     if (ret != 0) {
-        aclFinalize();
+        Teardown td;
+        td.Note("aclFinalize", aclFinalize());
+        r.Set("teardown_detail", td.detail());
         return Bail(r, result_path, kAclError, "acl_error",
                     "aclrtSetDevice ret=" + std::to_string(ret));
     }
     aclrtStream stream = nullptr;
     ret = aclrtCreateStream(&stream);
     if (ret != 0) {
-        aclrtResetDevice(device_id);
-        aclFinalize();
+        Teardown td;
+        td.Note("aclrtResetDevice", aclrtResetDevice(device_id));
+        td.Note("aclFinalize", aclFinalize());
+        r.Set("teardown_detail", td.detail());
         return Bail(r, result_path, kAclError, "acl_error",
                     "aclrtCreateStream ret=" + std::to_string(ret));
     }
@@ -350,9 +484,13 @@ int main(int argc, char **argv) {
     int screate = aclsolverCreate(&handle);
     if (screate == 0) screate = aclsolverSetStream(handle, stream);
     if (screate != 0) {
-        aclrtDestroyStream(stream);
-        aclrtResetDevice(device_id);
-        aclFinalize();
+        // SetStream 失败时 handle 已经建出来了，必须销毁——只销毁 stream 会漏掉它
+        Teardown td;
+        if (handle != nullptr) td.Note("aclsolverDestroy", aclsolverDestroy(handle));
+        td.Note("aclrtDestroyStream", aclrtDestroyStream(stream));
+        td.Note("aclrtResetDevice", aclrtResetDevice(device_id));
+        td.Note("aclFinalize", aclFinalize());
+        if (!td.detail().empty()) r.Set("teardown_detail", td.detail());
         return Bail(r, result_path, kAclError, "acl_error",
                     "aclsolverCreate/SetStream ret=" + std::to_string(screate));
     }
@@ -367,6 +505,9 @@ int main(int argc, char **argv) {
     void *host_a = nullptr;
     void *host_ainv = nullptr;
     const bool outofplace = (shape == "outofplace_a_ainv");
+    int runs_completed = 0;        // 真正跑完（算子返回 0，且第 2 轮起比对做完）的轮数
+    bool mismatch = false;         // 出现过 bit-wise 失配
+    bool first_written = false;    // 首轮三键是否已落盘
 
     do {
         if (!ReadAll(spec.Str("in_a"), pristine.data(), bytes)) {
@@ -405,7 +546,7 @@ int main(int argc, char **argv) {
         }
 
         for (int run = 1; run <= runs; ++run) {
-            std::memcpy(host_a, pristine.data(), bytes);   // Q4：每轮恢复输入
+            std::memcpy(host_a, pristine.data(), bytes);   // 每轮从原始副本恢复输入
             if (outofplace) std::memset(host_ainv, 0, bytes);
             std::fill(info.begin(), info.end(), 0);
 
@@ -430,33 +571,51 @@ int main(int argc, char **argv) {
             r.SetMs(tag + "_ms", ms);
             r.SetNum(tag + "_ret", op_ret);
             r.SetHex(tag + "_out32_fnv", Fnv1a(out, bytes));
-            r.SetHex(tag + "_info_fnv", Fnv1a(info.data(), info_len * sizeof(int32_t)));
+            r.SetHex(tag + "_info_fnv", Fnv1a(info.data(), info_bytes));
+
+            if (run == 1) {
+                // 首轮现场立刻落盘：后面哪一轮崩了、超时了，这份输出都已经在盘上
+                std::memcpy(first_out.data(), out, bytes);
+                first_info.assign(info.begin(), info.end());
+                if (!WriteAll(spec.Str("out_a"), first_out.data(), bytes) ||
+                    !WriteAll(spec.Str("out_info"), first_info.data(), info_bytes)) {
+                    code = kIoError;
+                    status = "io_error";
+                    detail = "第 1 轮输出写盘失败";
+                    break;
+                }
+                first_written = true;
+            } else if (op_ret != 0) {
+                // 失败轮单独保存，不覆盖首轮现场
+                WriteAll(spec.Str("out_a") + ".fail.bin", out, bytes);
+                WriteAll(spec.Str("out_info") + ".fail.bin", info.data(), info_bytes);
+                r.SetNum("fail_run", run);
+            }
 
             if (op_ret != 0) {
                 code = kOpError;
                 status = "op_error";
                 detail = "算子返回 " + std::to_string(op_ret) + "（第 " +
                          std::to_string(run) + " 轮）";
-                std::memcpy(first_out.data(), out, bytes);
-                first_info.assign(info.begin(), info.end());
-                break;
+                break;                     // 该轮不算跑完：不计入 runs_completed
             }
+            ++runs_completed;
+            r.SetNum("rerun_runs_completed", runs_completed);
+            if (!r.Flush(result_path)) {
+                code = kIoError; status = "io_error"; detail = "result checkpoint failed"; break;
+            }
+            if (run == 1) continue;
 
-            if (run == 1) {
-                std::memcpy(first_out.data(), out, bytes);
-                first_info.assign(info.begin(), info.end());
-                continue;
-            }
             // 逐键 bit-wise 比对（memcmp 字节域：NaN 按位等同、-0.0 与 0.0 不等同）
             const char *diff_key = nullptr;
             if (std::memcmp(first_out.data(), out, bytes) != 0) diff_key = "out32";
-            else if (std::memcmp(first_info.data(), info.data(),
-                                 info_len * sizeof(int32_t)) != 0) diff_key = "info";
+            else if (std::memcmp(first_info.data(), info.data(), info_bytes) != 0)
+                diff_key = "info";
             if (diff_key != nullptr) {
                 // 失配轮的输出另存，两轮都留在证据里才可独立重判
                 WriteAll(spec.Str("out_a") + ".diff.bin", out, bytes);
-                WriteAll(spec.Str("out_info") + ".diff.bin", info.data(),
-                         info_len * sizeof(int32_t));
+                WriteAll(spec.Str("out_info") + ".diff.bin", info.data(), info_bytes);
+                mismatch = true;
                 code = kRerunMismatch;
                 status = "rerun_mismatch";
                 detail = std::string("第 ") + std::to_string(run) + " 轮 " + diff_key +
@@ -466,14 +625,18 @@ int main(int argc, char **argv) {
                 break;
             }
         }
-        r.Set("rerun_consistent", (code == kRerunMismatch) ? "0" : "1");
+        // 确定性结论三态：失配记 0，规定轮数全跑完且无失配记 1，其余记 unknown。
+        // 没做完的比较不许报一致——编排层按 unknown 当「无结论」处理。
+        r.SetNum("rerun_runs_requested", runs);
+        r.SetNum("rerun_runs_completed", runs_completed);
+        r.Set("rerun_consistent",
+              mismatch ? "0" : (runs_completed >= runs ? "1" : "unknown"));
     } while (false);
 
-    // --- 三键落盘：第 1 轮的 out32 与 info 一定写出（失败轮也写，留证优先）---
-    if (code != kSpecError && code != kIoError) {
+    // --- 三键落盘：首轮已在循环里写过；没写过的路径（自检、循环没进去）在这里补 ---
+    if (!first_written && code != kSpecError && code != kIoError) {
         if (!WriteAll(spec.Str("out_a"), first_out.data(), bytes) ||
-            !WriteAll(spec.Str("out_info"), first_info.data(),
-                      info_len * sizeof(int32_t))) {
+            !WriteAll(spec.Str("out_info"), first_info.data(), info_bytes)) {
             if (code == kOk) {
                 code = kIoError;
                 status = "io_error";
@@ -504,12 +667,23 @@ int main(int argc, char **argv) {
     r.SetNum("info_len", static_cast<long long>(info_len));
     r.Set("info_dtype", "int32");
 
-    if (host_a != nullptr) aclrtFreeHost(host_a);
-    if (host_ainv != nullptr) aclrtFreeHost(host_ainv);
-    aclrtDestroyStream(stream);
-    aclsolverDestroy(handle);
-    aclrtResetDevice(device_id);
-    aclFinalize();
+    // --- 统一收尾：逆序释放，逐项查返回值。handle 先于它所用的 stream 销毁 ---
+    Teardown td;
+    if (host_a != nullptr) td.Note("aclrtFreeHost(host_a)", aclrtFreeHost(host_a));
+    if (host_ainv != nullptr)
+        td.Note("aclrtFreeHost(host_ainv)", aclrtFreeHost(host_ainv));
+    if (handle != nullptr) td.Note("aclsolverDestroy", aclsolverDestroy(handle));
+    if (stream != nullptr) td.Note("aclrtDestroyStream", aclrtDestroyStream(stream));
+    td.Note("aclrtResetDevice", aclrtResetDevice(device_id));
+    td.Note("aclFinalize", aclFinalize());
+    r.SetNum("teardown_ret", td.first_ret());
+    r.Set("teardown_detail", td.detail());
+    if (td.first_ret() != 0 && code == kOk) {
+        // 主流程成功但清理失败：设备侧状态不明，不能当成功交付
+        code = kAclError;
+        status = "acl_error";
+        detail = "收尾清理失败: " + td.detail();
+    }
 
     r.Set("status", status);
     r.Set("detail", detail);

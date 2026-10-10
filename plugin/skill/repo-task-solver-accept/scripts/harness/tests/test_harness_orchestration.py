@@ -264,7 +264,8 @@ def test_manual_keep_overrides_discard(mods, tmp_path, fake, monkeypatch):
 
 def _spotrf_case(n=16, seed=923001001):
     return {"case_id": f"spotrf-n{n}", "op": "spotrf", "source": "cu",
-            "uplo": "L", "n": n, "lda": n, "seed": seed}
+            "uplo": "L", "n": n, "lda": n, "seed": seed,
+            "ratio_cpu": 1.0, "ratio_cpu_status": "ok", "ratio_cpu_mean": 1.0}
 
 
 def test_criteria_judge_pass_on_golden(mods, tmp_path, fake, monkeypatch):
@@ -351,14 +352,27 @@ def test_pick_cases_rejects_old_basis(mods, tmp_path):
     assert "旧基包不受理" in str(exc.value)
 
 
+def _sign_package(tmp_path):
+    import gzip
+    import hashlib
+    index = tmp_path / "cases/index.json"
+    payload = index.read_bytes() if index.exists() else gzip.decompress((tmp_path / "cases/index.json.gz").read_bytes())
+    (tmp_path / "perf_baseline.json").write_text("{}")
+    fp = {"cases/index.json": hashlib.sha256(payload).hexdigest(),
+          "perf_baseline.json": hashlib.sha256(b"{}").hexdigest()}
+    (tmp_path / "manifest.json").write_text(json.dumps({"fingerprint": fp}))
+
+
 def test_pick_cases_accepts_new_basis(mods, tmp_path):
     (tmp_path / "cases").mkdir()
     (tmp_path / "cases" / "index.json").write_text(
         json.dumps({"ratio_basis": "A32-f64",
-                    "ratio_cpu_mean": {"spotrf": 0.1}}), encoding="utf-8")
+                    "ratio_cpu_mean": {"spotrf": 0.1},
+                    "cases": [_spotrf_case(), _spotrf_case(n=64)]}), encoding="utf-8")
     (tmp_path / "canonical_cases.json").write_text(
         json.dumps({"cases": [_spotrf_case(), _spotrf_case(n=64)]}),
         encoding="utf-8")
+    _sign_package(tmp_path)
     picked, mean = run_harness._pick_cases(
         mods, tmp_path / "canonical_cases.json", "spotrf", 32, None)
     assert [c["n"] for c in picked] == [16]          # --max-n 生效

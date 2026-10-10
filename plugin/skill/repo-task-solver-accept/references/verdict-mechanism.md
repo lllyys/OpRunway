@@ -9,8 +9,8 @@
 实际输入 A32/B32（内部升 f64；原 README 1.3 的 potrf「A 用 A64」口径废止），阈值：
 
 - potrf/potrs：max(5·ratio_cpu, 3·ratio_cpu_mean)。ratio_cpu 是本 case 的 CPU 参考
-  链残差（随包逐 case），ratio_cpu_mean 是同算子全部正定精度用例 CPU 残差的算术
-  平均（包 index 顶层预计算）。缺 mean 时走单支 5·ratio_cpu 兼容——过即 PASS，
+  链残差（随包逐 case 固化），ratio_cpu_mean 是单矩阵同算子全部正定精度用例的算术
+  平均（index 顶层），或批量本 case 的槽位加权均值（index 条目）。缺 mean 时走单支 5·ratio_cpu 兼容——过即 PASS，
   超出记证据不足不判 FAIL，待含 mean 的包复判。
 - potri：max(5·ratio_cpu, 0.1)。
 - 批量算子逐矩阵判定，配对该矩阵自己的 c_i=ratio_cpu[i]；case 数值结论 = 全部矩阵
@@ -40,3 +40,9 @@ fail-closed 边界：残差不可计算（被测含 NaN/Inf、全零输出触发
 
 包内 `verify_accuracy.py` 是同一判定的渲染副本，供开发者自测；其输出不构成验收
 证据。副本与本 skill 实现不一致时报告记告警，判定照常以本 skill 实现为准。
+
+## 固化参考值入口
+
+任务包与共享 harness 入口按 case_id 读取冻结的 ratio_cpu、状态和对应均值；
+批量同时读取 sample_map，不以现场重算值替代。入口要求完整冻结字段，缺失时拒绝
+判定；上文底层判据对缺 mean 的兼容行为不意味着不完整任务包可以受理。

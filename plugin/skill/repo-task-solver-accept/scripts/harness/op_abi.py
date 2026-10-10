@@ -2,13 +2,25 @@
 """算子 ABI 表与交付头解析（harness 的分流数据面）。
 
 harness 对被测的全部依赖收在这一张表里：算子名 → 入口符号、调用形状、数值域、
-info 形态、内存归属口径。**新增算子是加一行数据，不是加一处特判**——执行子进程
-按调用形状分支，一个形状服务多个算子（现工程六算子同构，PROBE §5.1）。
+info 形态、内存归属口径。执行子进程按**调用形状**分支，一个形状服务多个算子
+（现工程六算子同构）。
+
+## 新增一个算子要改哪里
+
+按调用形状分两种情形，「加一行数据」只覆盖第一种：
+
+| 情形 | 修改点 |
+| --- | --- |
+| 调用形状已在 `EXEC_SHAPES` 里 | ①本表加一行；②`harness_exec.cpp` 的 `Invoke` 里加一个 `#ifdef HARNESS_OP_<OP>` 分支（入口符号写死在 C++ 侧，Python 侧只生成编译宏）；③同文件 `kOpDescs` 加一行（spec 核验用的编译期描述） |
+| 调用形状是新的 | 上面三项之外，还要在 `harness_exec.cpp` 加该形状的调用分支、把形状名加进 `EXEC_SHAPES`，并确认 `OUT32_SOURCE`／`OUT32_LAYOUT` 两张表覆盖它的输出口径 |
+
+②③两项不是数据而是代码：Python 侧按本表生成 `-DHARNESS_OP_*`，但真正的函数调用
+是 C++ 源码里的分支，宏只决定它编不编进来。
 
 两套内存归属口径正交（2026-10-09d 裁定「双口径分流」）：
 
 - `host`——矩阵与 info 都是 Host 指针，算子内部自己 `aclrtMalloc` 与 H2D/D2H。
-  现工程七个算子全是这个口径（PROBE §3.2，新基线 05e6b09 复核仍然成立）。
+  现工程七个算子全是这个口径（基线 05e6b09 逐行复核公开头得出）。
 - `device`——调用方在 Device 上备矩阵、`devInfo` 与 `Workspace`，算子只收指针。
   任务书 §2.1–2.4 要求这一套；Cholesky 十算子尚未交付，表里记
   `status="awaiting_delivery"`，签名以交付头为准、不以任务书钉死。
@@ -16,6 +28,9 @@ info 形态、内存归属口径。**新增算子是加一行数据，不是加�
 交付头是唯一真相：`available_ops()` 只认头文件里真的声明了入口符号的算子，
 `compile_defines()` 按此生成执行子进程的编译宏。头里没有的算子一行代码都不编进去，
 所以不存在「链接期才发现算子不存在」。
+
+文中 `PROBE §x`、`Qn 裁定`、`HT-nn` 是本仓开发记录的编号，随包不可达——判据本身都
+在正文就地写明，编号仅作出处。
 """
 
 import re
@@ -27,6 +42,7 @@ import re
 # - potrs_b_inplace      (handle, uplo, n, nrhs, A, lda, B, ldb, info)  → out32 = B
 # - inplace_a_ipiv       (handle, m, n, A, lda, ipiv, info)             → out32 = A，另有 ipiv
 # - eig_a_w              (handle, jobz, uplo, n, A, lda, W, info)       → out32 = W
+#                        （W 是长度 n 的**实数**特征值向量，形状与 dtype 都不沿矩阵）
 CALL_SHAPES = (
     "inplace_a",
     "outofplace_a_ainv",
@@ -77,6 +93,16 @@ class OpAbi:
     def macro(self):
         return "HARNESS_OP_" + self.op.upper()
 
+    @property
+    def out32_source(self):
+        """三键里 out32 取哪个缓冲（`OUT32_SOURCE` 的查表结果）。"""
+        return OUT32_SOURCE[self.call_shape]
+
+    @property
+    def out32_layout(self):
+        """out32 的形状口径：`matrix` / `rhs` / `vector`，见 `OUT32_LAYOUT`。"""
+        return OUT32_LAYOUT[self.out32_source]
+
     def itemsize(self):
         return DTYPES[self.dtype]
 
@@ -110,7 +136,10 @@ _PRESENT = dict([
     _a("sgetrf", "aclsolverSgetrf", "inplace_a_ipiv", "float32", "scalar",
        False, "host", "present", "第三键 ipiv 未进三键契约，执行段未实现该形状"),
     _a("cheevj", "aclsolverCheevj", "eig_a_w", "complex64", "scalar", False,
-       "host", "present", "新基线 05e6b09 新增；out32 是特征值 W，执行段未实现该形状"),
+       "host", "present",
+       "新基线 05e6b09 新增；out32 是长度 n 的实数特征值向量 W（float32，不是 "
+       "complex64 矩阵）——执行段与形状派生都未实现该口径，`dtype` 一列记的是**输入**"
+       "矩阵的数值域"),
 ])
 
 # Cholesky 十算子（任务书 §2.1–2.4 口径）。签名、入口符号与内存归属以**交付头**为准，
@@ -141,8 +170,8 @@ _AWAITING = dict([
 TABLE = dict(_PRESENT)
 TABLE.update(_AWAITING)
 
-# 三键契约的 out32 来源（SKILL.md 入口参数表「out32、info、status 三键」）：
-# potrf/potri 族取原地覆盖后的 A，potrs 族取 B，求逆族取 Ainv。
+# 三键（被测输出 {out32, info, status}）的 out32 来源：potrf/potri 族取原地覆盖后的
+# A，potrs 族取 B，求逆族取 Ainv，特征值族取 W。
 OUT32_SOURCE = {
     "inplace_a": "A",
     "outofplace_a_ainv": "Ainv",
@@ -151,6 +180,17 @@ OUT32_SOURCE = {
     "inplace_a_ipiv": "A",
     "eig_a_w": "W",
 }
+
+# out32 来源 → 形状口径。消费者是 `run_harness.out32_shape`：
+#
+# | 口径 | 形状 | 谁是这一类 |
+# | --- | --- | --- |
+# | `matrix` | (n, n)，批量在前多一维 | A 与 Ainv |
+# | `rhs` | (n, nrhs) | potrs 族原地覆盖的 B |
+# | `vector` | (n,)，且 dtype 可与矩阵不同（W 是实数） | 特征值 W |
+#
+# `vector` 的形状派生没有实现，`out32_shape` 对它明确拒绝——不拿矩阵形状冒充。
+OUT32_LAYOUT = {"A": "matrix", "Ainv": "matrix", "B": "rhs", "W": "vector"}
 
 
 def get(op):

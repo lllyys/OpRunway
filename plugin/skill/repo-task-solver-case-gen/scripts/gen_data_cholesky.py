@@ -1215,8 +1215,8 @@ def main(argv=None):
         criteria_dir = resolve_criteria(args.criteria)
         if criteria_dir is None:
             print("[gen] criteria 不可达（纯脚本包内独立运行的常态）：批量 case 的 "
-                  "ratio_cpu 跳过——index 记 not_computed；判定不受影响（判定时自行"
-                  "重造内容重算，HT-2 A0 / S3 spec §3）")
+                  "ratio_cpu 跳过——index 记 not_computed；输入仍可构造。"
+                  "判定必须读取原任务包已回填 index，不使用本次未回填件。")
 
     index_cases = []
     by_id = {c["case_id"]: c for c in canonical["cases"]}

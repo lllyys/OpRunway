@@ -49,13 +49,13 @@ Mr.0 2026-09-24 裁定「全都现场造，无论大小」）——**纯脚本�
   装包时对该算子的包内切片（--scope 口径：full=dedup 全量 / s1=二维代表子集）
   逐 case 跑 gen_data（A0 抽样通路，
   HT-2：不落数组，k=min(5,batch) 个代表内容的 golden 与逐内容 ratio_cpu 一并算出），
-  sample_map 槽位映射与 ratio k 值列表写入 index **仅作参考**（S3 spec §3：验收与
-  自测侧判定时现场重造内容重算，不消费包内参考）。自检数据随后整目录删除，包内
+  sample_map 槽位映射与 ratio k 值列表固化入 index；验收与自测读取同一份
+  ratio/status/mean，输入与准备因子仍现场构造。自检数据随后整目录删除，包内
   零数据由 rglob 断言兜底。
 - 开发者流程「先造数后测」（S3 spec §5 + HT-2 A0）：批量 case 不落数组，执行器/
   DUT 挂钩按 index 的 sample_map 用包内 gen_data 的 expand_sampled_rows 流式构造
-  槽位区间现场喂入；verify 判定时自行重造同一内容并算 golden 与逐内容 ratio
-  （同环境逐位一致），先余槽 bit-wise 一致性、后代表槽逐内容残差判定。
+  槽位区间现场喂入；verify 判定时重造输入并读取 index 固化参考值，
+  先余槽 bit-wise 一致性、后代表槽逐内容残差判定。
 - 包内 canonical 切片按 --scope 二选一（2026-09-27 全量精度用例决策）：full（缺省）
   = 该算子 dedup 全量（A0 抽样零数据，不物化全量数组，n×batch 大 case 也只算
   k=min(5,batch) 个代表内容）；s1 = 二维代表子集六例（v3 前行为，spec §5 README
@@ -78,8 +78,8 @@ v1 从未流通无需兼容）——单矩阵六算子的装包自此走 **build
   现场生成包内切片全量（--select all 恰为切片，验证 README 第 0 步自洽）→ 校验字段 +
   index/实物对账 + golden 首/中/尾抽验（d/z 链路独立重算，只比对）→ 低精度准备链
   回填逐 case ratio（残差唯一实现仍在 criteria/verdict，经 fill_ratio_cpu.run_chain
-  同一入口）。自检数据随后整目录删除，包内零数据由 rglob 断言兜底；ratio 仅作参考，
-  判定侧（verify 副本与验收侧）现场同法重算，不消费包内数值。
+  同一入口）。自检数据随后整目录删除，包内零数据由 rglob 断言兜底；
+  判定侧（verify 副本与验收侧）只读包内固化 ratio/status/mean，输入与因子现场构造。
 - 旧 build()（S1/S2 逐字节复用装包，产出已交付六 v1 包）保留在本文件作 provenance，
   不再被路由——非批量装包一律纯脚本（S3 spec §5 通用数据策）。
 
@@ -139,7 +139,7 @@ import numpy as np
 TOOL = "build_package.py"
 # s3-F14：负例门收束（2026-10-09）——轮断言按门自己的清单逐 ID 核判定行、FAIL 另
 #   要求 verdict.error 为空、扰动槽位改 0 不再排除 batch=1、门执行异常收敛退 3。
-TOOL_VER = "s3-F14"  # 承 s3-F13（info id 对账：index 与包内 verify 的派生集合必等）
+TOOL_VER = "s3-F15"  # 包内源码导入不写字节码；负例门消费完整固化参考值
 OPS = ("spotrf", "spotrs", "spotri", "cpotrf", "cpotrs", "cpotri")
 BATCHED_OPS = ("spotrfBatched", "spotrsBatched", "cpotrfBatched", "cpotrsBatched")
 ALL_OPS = OPS + BATCHED_OPS
@@ -575,6 +575,11 @@ _GATE_GEN_MODULE = "_oprunway_gate_pkg_gen_data"
 _PKG_VERIFY_MODULE = "_oprunway_pkg_verify_accuracy"
 
 
+def _exec_package_source(mod, path):
+    """执行待交付源码本身，不读写其旁边的 .pyc，不修改进程级导入开关。"""
+    exec(compile(path.read_bytes(), str(path), "exec"), mod.__dict__)
+
+
 def assert_info_ids_reconciled(out_dir, op, gen_cases, slice_doc, gd_mod, batched):
     """自检：包 index 的 info 契约 id 集合 == 包内 verify 将派生的 id 集合。
 
@@ -593,7 +598,7 @@ def assert_info_ids_reconciled(out_dir, op, gen_cases, slice_doc, gd_mod, batche
     mod = importlib.util.module_from_spec(spec)
     sys.modules[_PKG_VERIFY_MODULE] = mod
     try:
-        spec.loader.exec_module(mod)
+        _exec_package_source(mod, path)
         if not hasattr(mod, "info_require_s1"):
             raise SelfCheckError(
                 "info id 对账：包内 verify_accuracy.py 无 info_require_s1"
@@ -744,7 +749,8 @@ def _gate_run(args, cwd):
     """
     script = str(args[0]) if args else "?"
     try:
-        return subprocess.run([sys.executable] + [str(a) for a in args], cwd=str(cwd),
+        return subprocess.run([sys.executable, "-B"] + [str(a) for a in args], cwd=str(cwd),
+                              env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
                               capture_output=True, text=True, timeout=GATE_TIMEOUT_S)
     except subprocess.TimeoutExpired as exc:
         raise SelfCheckError(
@@ -762,7 +768,7 @@ def _gate_tail(proc, lines=6):
 
 def _gate_mini_package(out_dir, tmp, picked, index_doc):
     """门的临时包：包内 gen_data/sim_dut/verify_accuracy 原件 + 最小切片 +
-    index 投影（只留判定消费的 ratio_cpu_mean 与基标记，不复制百 MB 级 index）。
+    index 投影（所选精度条目及其 info 条目，保留全部固化判定字段）。
 
     切片顶层 package_scope 原样继承包内切片：gen 侧与 verify 侧的 info 契约派生
     口径都由它定，门因此跑的是发出去那个包的口径，不是另一套。
@@ -782,8 +788,14 @@ def _gate_mini_package(out_dir, tmp, picked, index_doc):
     with open(pkg / "canonical_cases.json", "w", encoding="utf-8") as fh:
         json.dump(mini, fh, ensure_ascii=False, indent=1)
         fh.write("\n")
+    selected = {c["case_id"] for c in picked}
+    projection = {k: v for k, v in index_doc.items() if k != "cases"}
+    projection["cases"] = [e for e in index_doc.get("cases", [])
+                           if e.get("case_id") in selected
+                           or (e.get("case_purpose") == "info"
+                               and e.get("base_case_id") in selected)]
     with open(pkg / "cases" / "index.json", "w", encoding="utf-8") as fh:
-        json.dump(index_doc, fh, ensure_ascii=False, indent=1)
+        json.dump(projection, fh, ensure_ascii=False, indent=1)
         fh.write("\n")
     return pkg
 
@@ -794,7 +806,7 @@ def _gate_load_pkg_gen(pkg):
                                                   pkg / "gen_data.py")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[_GATE_GEN_MODULE] = mod
-    spec.loader.exec_module(mod)
+    _exec_package_source(mod, pkg / "gen_data.py")
     return mod
 
 
@@ -1073,8 +1085,8 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
          f"（精度 {n_subset} + info 契约 {n_info}: {'、'.join(info_ids)}，HT-9）；"
          + "；".join(f"{cid}:k={m['contents']}/rep={m['rep_slots']}"
                      for cid, m in a0.items()))
-    tick("ratio 参考", "逐内容 ratio k 值列表写入包内 index 仅作参考"
-                       "（S3 spec §3：判定侧现场重算，不消费包内参考；info 契约"
+    tick("ratio 参考", "逐内容 ratio k 值列表固化入包内 index"
+                       "（自测与验收只读同一参考值；info 契约"
                        "条目不计入，HT-8/9）；精度条目另固化 case 级 "
                        f"ratio_cpu_mean（槽位加权，{n_mean} 例，HT-4）")
 
@@ -1088,7 +1100,7 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
         entry["materialize"] = "gen"
     gen_index["materialize_note"] = (
         "纯脚本包（S3 spec §5 + HT-2 A0 抽样）：包不携带数据数组；批量 case 固化 "
-        "sample_map 槽位映射与逐内容 ratio_cpu k 值列表（仅作参考，判定侧现场重算），"
+        "sample_map 槽位映射与逐内容 ratio_cpu k 值列表（自测与验收只读同一固化参考值），"
         "数组由执行器/DUT 挂钩按 gen_data 的 expand_sampled_rows 现场构造（流式喂入）。"
         "精度条目另固化 case 级 ratio_cpu_mean（HT-4：Σ(count_j·ratio_j)/batchSize "
         "槽位加权，判定时只读、零重算，potrf/potrs 阈值第二支消费）。"
@@ -1157,11 +1169,7 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
 
     # 负例门（docstring「负例门」段）：包内判定链真跑一轮，正例必绿、负例必红。
     # 临时目录在包外，包内不留痕——零数据断言与下面的指纹都不受它影响。
-    gate_index = {"ratio_basis": gen_index.get("ratio_basis"),
-                  "cases": [{"case_id": e["case_id"],
-                             "ratio_cpu_mean": e.get("ratio_cpu_mean")}
-                            for e in gen_cases if e.get("case_purpose") != "info"]}
-    gate_detail, gate_evidence = run_negative_gate(out_dir, op, gate_index, True)
+    gate_detail, gate_evidence = run_negative_gate(out_dir, op, gen_index, True)
     tick("负例门", gate_detail)
     checklist["negative_gate"] = gate_evidence
 
@@ -1195,7 +1203,7 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
             "spec": "dev-doc/solver/solver-s3-batched-spec.md#5",
             "materialize": "gen（A0 抽样，HT-2）",
             "reuse": "纯脚本包（A0 抽样）：不携带数据数组；sample_map 与逐内容 ratio "
-                     "参考固化在 index（仅作参考）；perf_baseline.json 为 C 冻结产物"
+                     "参考固化在 index（判定只读）；perf_baseline.json 为 C 冻结产物"
                      "逐字节复用；verify 双件为 D 渲染器确定性输出",
         },
     }
@@ -1361,8 +1369,8 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
         entry["ratio_cpu_status"] = "ok"
         ratio_ref[cid] = float(r)
     tick("ratio 参考值", f"{len(ratio_ref)} 精度 case 低精度准备链回填完成，全 ok"
-                         f"（info 契约 {n_info} 例不计入，HT-8；仅作参考：判定侧现场"
-                         "同法重算，不消费包内数值）")
+                         f"（info 契约 {n_info} 例不计入，HT-8；自测与验收只读"
+                         "包内固化参考值）")
     # HT-4：算子级 ratio_cpu_mean 固化（该算子全部正定精度用例的算术平均，info
     # 契约条目不计入）——index 顶层 {op: mean} map，accept_run/verify 副本按算子
     # 注入 case_arrays 消费（potrf/potrs 阈值第二支）；只读零重算，随用例集版本重算
@@ -1381,7 +1389,7 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
     gen_index["materialize_note"] = (
         "纯脚本包（v2）：包不携带数据数组；npz/arrays 字段描述 gen_data 现场生成后"
         "的产物（README 第 0 步，--out data 时落 data/cases/）；ratio_cpu 为装包自检"
-        "运行的参考值，仅作参考（判定侧现场同法重算）。index 顶层 ratio_cpu_mean 为"
+        "运行的固化参考值（自测与验收只读，输入与因子仍现场构造）。index 顶层 ratio_cpu_mean 为"
         "算子级固化均值（HT-4：全部正定精度用例的算术平均，判定时只读、零重算）。"
         "case_purpose==\"info\" 的条目"
         "为 info 契约用例（HT-8）：只比被测 info==k_expected，无 golden/ratio，"
@@ -1445,9 +1453,7 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
 
     # 负例门（docstring「负例门」段）：包内判定链真跑一轮，正例必绿、负例必红。
     # 临时目录在包外，包内不留痕——零数据断言与下面的指纹都不受它影响。
-    gate_index = {"ratio_cpu_mean": gen_index.get("ratio_cpu_mean"),
-                  "ratio_basis": gen_index.get("ratio_basis"), "cases": []}
-    gate_detail, gate_evidence = run_negative_gate(out_dir, op, gate_index, False)
+    gate_detail, gate_evidence = run_negative_gate(out_dir, op, gen_index, False)
     tick("负例门", gate_detail)
     checklist["negative_gate"] = gate_evidence
 
@@ -1482,7 +1488,7 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
             "materialize": "gen",
             "reuse": "纯脚本包（v2）：不携带数据数组；perf_baseline.json 为 C 冻结产物"
                      "逐字节复用；verify 双件为 D 渲染器确定性输出；index 与 ratio "
-                     "参考值来自装包自检的现场生成+回填运行（仅作参考）；含 info 契约"
+                     "参考值来自装包自检的现场生成+回填运行（判定只读）；含 info 契约"
                      "用例（case_purpose==\"info\"，HT-8：只比被测 info==k_expected）",
         },
     }

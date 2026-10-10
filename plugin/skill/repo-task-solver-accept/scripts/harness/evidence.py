@@ -14,6 +14,10 @@
 
 留证件的自包含判据是**能独立重判**：导出目录加上 criteria 即可复算结论，不需要
 真机、不需要原 session、不需要重新生成输入。目录里的 `REJUDGE.md` 写着那条命令。
+
+**一件证据只能来自一次运行。** 留证件一律发布进全新目录（`fresh_dir`）——目录已有
+内容就另开 `-2`、`-3` 后缀，绝不往里补文件。否则新 `case.json` 会和上一轮的
+`dut.npz`、`*.diff.bin` 拼成一件看着完整的证据，重判读到的是两次运行的混合物。
 """
 
 import json
@@ -22,9 +26,10 @@ from pathlib import Path
 
 import numpy as np
 
-# 自动留证的触发归类（执行侧），与 exec_case.EXIT_KIND 的取值域对齐。
+# 自动留证的触发归类（执行侧），与 exec_case 的归类取值域对齐（含不由退出码定的
+# `protocol_error`：子进程自报成功但三键读不回来）。
 FAILED_KINDS = ("spec_error", "io_error", "unsupported", "acl_error",
-                "op_error", "crash", "timeout", "unknown")
+                "op_error", "crash", "timeout", "protocol_error", "unknown")
 
 BUNDLE_FILES = ("case.json", "case.spec", "inputs.npz", "exec.log", "REJUDGE.md")
 
@@ -43,11 +48,13 @@ python3 {harness}/run_harness.py --rejudge {bundle} \\
 
 | 文件 | 内容 |
 | --- | --- |
-| `case.json` | case 字段、算子 ABI、执行归类、当场判定结论、构建取证引用 |
+| `case.json` | case 字段、算子 ABI、执行归类、当场判定结论与判定上下文、确定性结论、构建取证引用 |
 | `case.spec` | 喂给 `harness_exec` 的逐字 spec，可直接在真机上复跑同一 case |
 | `inputs.npz` | 实际喂进去的输入数组（不是 seed，是落盘的那一份） |
 | `dut.npz` | 三键 `{{out32, info, status}}`；执行未产出输出时此文件缺席 |
-| `out32.diff.bin` | 复跑失配轮的 out32（仅复跑失配时存在） |
+| `out32.bin.diff.bin` | 复跑失配轮的 out32（仅复跑失配时存在），重判靠它复验确定性 |
+| `out32.bin.fail.bin` | 算子在第 2 轮及以后返回非成功的那一轮输出（首轮现场不被覆盖） |
+| `out32.raw.bin` | 三键读不回来时的原始字节与 `result.txt`，原样留给人看 |
 | `exec.log` | 执行子进程的 stdout 与 stderr 全文 |
 | `provenance.json` | S1 构建取证快照（源码 commit、命令、产物哈希、环境版本） |
 
@@ -98,18 +105,44 @@ def should_keep(kind, numeric, determinism, keep_ids=(), case_id=None):
         return True, f"执行失败：归类 {kind}"
     if kind == "rerun_mismatch":
         return True, "复跑 bit-wise 失配"
-    if determinism is not None and determinism.get("consistent") is False:
-        return True, "确定性复跑失配"
+    if determinism is not None:
+        if determinism.get("consistent") is False:
+            return True, "确定性复跑失配"
+        if determinism.get("consistent") is None:
+            # 规定轮数没跑完：没有确定性结论就不能当通过处理，现场得留下
+            return True, "确定性复跑未跑完规定轮数"
     if numeric is not None and numeric != "PASS":
         return True, f"数值结论 {numeric}"
     return False, None
 
 
+def fresh_dir(path):
+    """返回一个**空的**目录用于发布留证件：已有内容就另开 `-2`、`-3` 后缀。
+
+    不往已有目录里补文件，是为了「一件证据只来自一次运行」这条不变量（审计 #2）。
+    """
+    base = Path(path)
+    base.parent.mkdir(parents=True, exist_ok=True)
+    serial = 1
+    while True:
+        candidate = base if serial == 1 else base.with_name(f"{base.name}-{serial}")
+        try:
+            candidate.mkdir()
+            return candidate
+        except FileExistsError:
+            serial += 1
+
+
 def export_failure(bundle_dir, case, abi, exec_rec, inputs, dut, reason,
-                   provenance=None, verdict=None, harness_dir=None):
-    """把一个 case 的全部现场打成可独立重判的目录，返回目录路径。"""
-    bundle = Path(bundle_dir)
-    bundle.mkdir(parents=True, exist_ok=True)
+                   provenance=None, verdict=None, harness_dir=None,
+                   determinism=None, judge_context=None):
+    """把一个 case 的全部现场打成可独立重判的目录，返回**实际使用的**目录路径。
+
+    `determinism` 与 `judge_context` 是重判的输入契约：前者让重判能复验确定性结论
+    （审计 #4），后者记当场判定真正用的参数（ratio_cpu、sample_map 等，审计 #5），
+    重判照抄而不是重算。
+    """
+    bundle = fresh_dir(bundle_dir)
 
     np.savez(bundle / "inputs.npz",
              **{k: np.asarray(v) for k, v in inputs.items() if v is not None})
@@ -119,12 +152,27 @@ def export_failure(bundle_dir, case, abi, exec_rec, inputs, dut, reason,
                                       encoding="utf-8")
     (bundle / "exec.log").write_text(exec_rec.get("log") or "", encoding="utf-8")
 
-    # 复跑失配轮的输出：子进程写在 case 目录里，搬进留证件才算自包含
+    # 失配轮与失败轮的输出：子进程写在 case 目录里，搬进留证件才算自包含
     case_dir = Path(exec_rec.get("case_dir") or ".")
-    for extra in ("out/out32.bin.diff.bin", "out/info.bin.diff.bin"):
+    copied = []
+    for extra in ("out/out32.bin.diff.bin", "out/info.bin.diff.bin",
+                  "out/out32.bin.fail.bin", "out/info.bin.fail.bin"):
         src = case_dir / extra
         if src.is_file():
             shutil.copyfile(src, bundle / Path(extra).name)
+            copied.append(Path(extra).name)
+
+    # 三键读不回来时把原始字节与 result 全文原样搬过来——解析失败的现场只有原始
+    # 字节能说明问题（审计 #6）
+    raw = []
+    if exec_rec.get("three_key_error"):
+        for src_rel, dst_name in (("out/out32.bin", "out32.raw.bin"),
+                                  ("out/info.bin", "info.raw.bin"),
+                                  ("out/result.txt", "result.txt")):
+            src = case_dir / src_rel
+            if src.is_file():
+                shutil.copyfile(src, bundle / dst_name)
+                raw.append(dst_name)
 
     if provenance is not None:
         with open(bundle / "provenance.json", "w", encoding="utf-8") as fh:
@@ -139,6 +187,11 @@ def export_failure(bundle_dir, case, abi, exec_rec, inputs, dut, reason,
         "exec": {k: v for k, v in exec_rec.items()
                  if k not in ("out32", "info", "log", "spec_text")},
         "verdict": verdict,
+        "determinism": determinism,
+        "judge_context": judge_context,
+        "run_outputs": copied,
+        "raw_outputs": raw,
+        "three_key_error": exec_rec.get("three_key_error"),
         "inputs": {k: {"shape": list(np.asarray(v).shape),
                        "dtype": str(np.asarray(v).dtype)}
                    for k, v in inputs.items() if v is not None},
@@ -165,6 +218,25 @@ def discard(*containers):
                     dropped += 1
                 c.pop(k)
     return dropped
+
+
+def sweep_case_dir(case_dir):
+    """case 现场收尾：删掉全部 `*.bin`，保留 `case.spec`、`exec.log`、`result.txt`。
+
+    一条规则服务两种收尾（审计 #7）——通过即弃时现场没人要，失败导出成功后现场是
+    留证件的重复。删的只有大二进制，小文本日志留着供人直接看现场。返回
+    `{"removed": [...], "freed_bytes": n}`。
+    """
+    case_dir = Path(case_dir)
+    removed, freed = [], 0
+    if not case_dir.is_dir():
+        return {"removed": [], "freed_bytes": 0}
+    for p in sorted(case_dir.rglob("*.bin")):
+        if p.is_file():
+            freed += p.stat().st_size
+            p.unlink()
+            removed.append(str(p.relative_to(case_dir)))
+    return {"removed": removed, "freed_bytes": freed}
 
 
 def bundle_is_self_contained(bundle_dir, require_dut=True):

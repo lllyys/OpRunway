@@ -10,8 +10,8 @@ Cholesky 十算子：实数 spotrf、spotrs、spotri，复数 cpotrf、cpotrs、
 批量四算子 spotrfBatched、spotrsBatched、cpotrfBatched、cpotrsBatched（后补包）。
 
 新装的包（十算子全部）一律是**纯脚本形态**：不携带任何数据数组（无 `cases/*.npz`、
-无 golden、无 ratio 数组），开发者按包内 README 的「先造数后测」流程用 `gen_data.py`
-现场生成数据，检查脚本判定时自行重生成、不依赖生成目录。批量四算子走 **A0 抽样**：
+无 golden 数组；ratio 参考值以 JSON 标量或列表固化），开发者按包内 README 的「先造数后测」流程用 `gen_data.py`
+现场生成数据，检查脚本判定时重生成输入、不依赖生成目录；参考值与状态读取包内固化值。批量四算子走 **A0 抽样**：
 每 case 只固化 `k = min(5, batch)` 个代表内容的槽位映射 `sample_map` 与逐内容 ratio
 参考（数组不落盘，判定先比余槽 bit-wise 一致性、后代表槽逐内容残差判定）。除精度用例外
 每算子另含 **info 契约用例**（`case_purpose: "info"`，单矩阵每算子 3 例、批量每算子
@@ -60,7 +60,7 @@ S5 自检的末项是正负例门：临时目录内用包内 `gen_data.py`、`si
 
 | 条件 | 表现 | 处理方式 |
 | --- | --- | --- |
-| `--select all` 未经容量核算 | 三算子全量写入文件约 132 GiB，超出常规磁盘预算 | 保持 `s1`；确需全量时先按 canonical 的 n 分布核算容量并取得使用者确认。装包不受此约束：纯脚本形态不装数组，包内切片只含 s1 子集，数据由开发者按「先造数后测」现场生成 |
+| `--select all` 未经容量核算 | 三算子全量写入文件约 132 GiB，超出常规磁盘预算 | 保持 `s1`；确需全量时先按 canonical 的 n 分布核算容量并取得使用者确认。装包不受此约束：纯脚本形态不装数组，包内切片由 --scope s1/full 决定，数据由开发者按「先造数后测」现场生成 |
 | S1 单矩阵算子重复计数非 0 | 任务目录的 cases.json 或 bench_result.json 与既往批次结构不同 | 停止，报告差异，不修改脚本内的选择规则；批量算子去重非零是预期，按打印的对账条数逐一核对 |
 | S3 出现 `prep_failed` | 该 case 前置分解失败，残差参考值缺失 | S3 独立运行时保留状态记录、不删除该 case；装包自检遇 `prep_failed` 即拒绝出包（构造性正定输入下不应发生，先查环境与数据） |
 | 负例门不过 | 装包退 3，打印指明哪条断言、实际退出码与实际结论；门自身执行出错（超时、包内脚本起不来、报告 JSON 损坏）同样退 3 并打印「执行边界异常」 | 按打印定位包内判定链（verify 副本、sim_dut、数据重生成）或环境，修好再装；不放宽门的断言 |
@@ -69,20 +69,19 @@ S5 自检的末项是正负例门：临时目录内用包内 `gen_data.py`、`si
 
 ## 产物
 
-`<输出根>/packages/<op>/` 即任务包（纯脚本形态，整包 KB 级），内容：
+`<输出根>/packages/<op>/` 即任务包（纯脚本形态；单矩阵 KB 级，批量含大规模映射，体量以交付表为准），内容：
 `cases/index.json`（用例清单，条目记 `materialize: "gen"`；单矩阵条目携带装包自检
 回填的 `ratio_cpu` 参考单值，index 顶层另固化算子级 `ratio_cpu_mean` 算术平均；批量
 条目携带 `sample_map` 槽位映射与逐内容 `ratio_cpu` k 值列表、条目级 `ratio_cpu_mean`
 槽位加权均值；`case_purpose: "info"` 条目为 info 契约用例，带 `k_expected`、无
-golden/ratio。参考值仅作参考；mean 为残差阈值第二支 3·ratio_cpu_mean 的固化消费值，
+golden/ratio）。参考值与状态按 case_id 消费包内固化值；mean 为残差阈值第二支的固化值，
 判定只读零重算；index 顶层 `ratio_basis: "A32-f64"` 标记残差基，旧包无此字段即 A64 基）、
 `perf_baseline.json`（性能参考耗时）、`verify_accuracy.py` 与 `verify_perf.py`
 （检查脚本副本，判定输入现场重生成，含 info 契约判定，输出不构成验收证据）、
 `gen_data.py` 与
-`canonical_cases.json`（数据构造脚本与本包用例切片：单矩阵 s1 子集 / 批量二维
-代表子集）、`sim_dut.py`（流程演练用模拟被测，读「先造数后测」的 data 目录）、
+`canonical_cases.json`（数据构造脚本与本包用例切片：按 --scope 选择的 s1 子集或 full 全量）、`sim_dut.py`（流程演练用模拟被测，读「先造数后测」的 data 目录）、
 `README.md`（自测说明）、`manifest.json`（环境版本与内容摘要）。包内无
-`cases/*.npz`、无 ratio 数组。检查脚本的权威实现与判定在 `repo-task-solver-accept`。
+`cases/*.npz`。检查脚本的权威实现与判定在 `repo-task-solver-accept`。
 包内每个文件的字段级说明见 [package-contract.md](references/package-contract.md)。
 
 ## 范围之外

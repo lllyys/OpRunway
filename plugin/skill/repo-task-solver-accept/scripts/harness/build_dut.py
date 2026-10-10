@@ -19,20 +19,27 @@
 无增量污染。
 
 构建取证落 `build_provenance.json`，五类证据缺一不可——没有它们，后面的三键结果
-无法回答「这是哪份源码在哪台机上产出的」：
+（被测输出 `{out32, info, status}`）无法回答「这是哪份源码在哪台机上产出的」：
 
-1. 源码身份：git commit 与工作树是否 clean；无 git 元数据时落源码树的内容摘要。
+1. 源码身份：git commit 与工作树是否 clean；无 git 元数据时落源码树的内容摘要，
+   摘要**连构建输入一起算**（`build.sh`、`CMakeLists.txt`、`cmake/`）——同一份
+   `src/` 配不同的构建脚本产出不同的库，漏掉它们的摘要认不出这种差别。
 2. 构建命令：逐字命令、CWD、退出码、stdout/stderr 全文。
 3. 产物哈希：`build/libops_solver.so` 与 `build_out/` 下的库与头，逐个 sha256。
 4. 实际加载库：执行子进程对算子函数地址取 `dladdr` 得到的 `.so` 路径与其 sha256
-   （由 exec_case 回填，本阶段只记产物哈希供对账）。
+   （由 `exec_case.loaded_lib_record` 回填并与本阶段的产物哈希核对）。
 5. 环境版本：CANN 版本、`npu-smi` 回显、g++/cmake/Python 版本、设备号。
+
+**失败也写取证。** 构建非零返回、超时、产物缺失一律先把上面这些写进 `--out` 再按
+退出码返回——构建刚好失败那次没有现场，是最需要现场的一次。记录里的 `status` 字段
+说明是哪种结局（`ok` / `build_failed` / `build_timeout` / `artifacts_missing`）。
 
 用法：
     build_dut.py --repo <ops-solver 仓根> --ops cmatinv_batched --soc ascend910_93
                  --out <取证 JSON 路径> [--device 0] [--skip-build]
 
-退出码：0 构建成功且产物齐备；2 入口参数或纪律违例；3 构建失败或产物缺失。
+退出码：0 构建成功且产物齐备；2 入口参数或纪律违例（此时还没有取证可写）；
+3 构建失败、超时或产物缺失（取证已写进 `--out`）。
 """
 
 import argparse
@@ -46,8 +53,10 @@ import sys
 import time
 from pathlib import Path
 
+import proc
+
 TOOL = "build_dut.py"
-TOOL_VER = "h1-r1"
+TOOL_VER = "h1-r2"
 
 FORBIDDEN_FLAGS = {
     "--run": "收尾会 rm -rf test/<op>/data/{input,output,golden} 抹掉中间证据",
@@ -64,7 +73,15 @@ REQUIRED_ARTIFACTS = (
 
 
 class BuildError(RuntimeError):
-    """构建纪律违例或产物缺失——报错停下，不降级继续。"""
+    """构建纪律违例、构建失败或产物缺失——报错停下，不降级继续。
+
+    `provenance` 带着失败那一刻已经收齐的取证记录：调用方把它写进 `--out` 再退码，
+    所以「构建失败」和「有现场」不矛盾。纪律违例发生在收证之前，该字段是 None。
+    """
+
+    def __init__(self, message, provenance=None):
+        super().__init__(message)
+        self.provenance = provenance
 
 
 def sha256_file(path):
@@ -76,13 +93,11 @@ def sha256_file(path):
 
 
 def _run(cmd, cwd=None, env=None, timeout=3600):
-    t0 = time.time()
-    p = subprocess.run(cmd, cwd=cwd, env=env, timeout=timeout,
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                       text=True, errors="replace")
-    return {"cmd": " ".join(shlex.quote(c) for c in cmd),
-            "cwd": str(cwd) if cwd else None, "returncode": p.returncode,
-            "output": p.stdout, "seconds": round(time.time() - t0, 3)}
+    """跑一条命令，返回取证用的记录。进程组隔离与超时杀组在 `proc.run` 里。"""
+    p = proc.run(cmd, cwd=cwd, env=env, timeout=timeout)
+    return {"cmd": p["cmd"], "cwd": p["cwd"], "returncode": p["returncode"],
+            "output": p["output"], "timed_out": p["timed_out"],
+            "seconds": p["seconds"]}
 
 
 def _tool_version(cmd):
@@ -92,6 +107,12 @@ def _tool_version(cmd):
         return p.stdout.strip().splitlines()[0] if p.stdout.strip() else None
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+# 内容摘要覆盖的构建输入：同一份 src/ 配不同的构建脚本产出不同的库，
+# 只摘 include/ 与 src/ 认不出这种差别。
+BUILD_INPUT_FILES = ("build.sh", "CMakeLists.txt")
+BUILD_INPUT_DIRS = ("include", "src", "cmake")
 
 
 def source_identity(repo):
@@ -108,19 +129,26 @@ def source_identity(repo):
                 git[key] = r["output"].strip()
         git["clean"] = (git.get("porcelain") == "")
         git.pop("porcelain", None)
-    # 内容摘要：src/ 与 include/ 下全部文件按相对路径排序后逐个喂哈希。
+    # 内容摘要：构建输入（build.sh/CMakeLists.txt）加 include//src//cmake/ 下全部
+    # 文件，按相对路径排序后逐个喂哈希。
     h = hashlib.sha256()
-    count = 0
-    for sub in ("include", "src"):
+    files = [repo / name for name in BUILD_INPUT_FILES]
+    for sub in BUILD_INPUT_DIRS:
         root = repo / sub
-        if not root.is_dir():
-            continue
-        for f in sorted(p for p in root.rglob("*") if p.is_file()):
-            h.update(str(f.relative_to(repo)).encode())
-            h.update(sha256_file(f).encode())
-            count += 1
+        if root.is_dir():
+            files.extend(p for p in root.rglob("*") if p.is_file())
+    count = 0
+    anchored_inputs = []
+    for f in sorted(p for p in files if p.is_file()):
+        rel = str(f.relative_to(repo))
+        h.update(rel.encode())
+        h.update(sha256_file(f).encode())
+        count += 1
+        if rel in BUILD_INPUT_FILES:
+            anchored_inputs.append(rel)
     return {"repo": str(repo), "git": git or None,
-            "content_anchor": h.hexdigest(), "anchored_files": count}
+            "content_anchor": h.hexdigest(), "anchored_files": count,
+            "anchored_build_inputs": anchored_inputs}
 
 
 def environment_facts(device_id):
@@ -214,22 +242,32 @@ def build(repo, ops, soc, device_id=0, skip_build=False, timeout=3600):
     }
     if skip_build:
         prov["build"] = {"cmd": " ".join(shlex.quote(c) for c in cmd),
-                         "skipped": True, "returncode": None, "output": None}
+                         "skipped": True, "returncode": None, "output": None,
+                         "timed_out": False}
     else:
         run = _run(cmd, cwd=repo, timeout=timeout)
         prov["build"] = run
         prov["soc_echo"] = soc_echo(run["output"] or "")
-        if run["returncode"] != 0:
+        if run["timed_out"] or run["returncode"] != 0:
+            # 失败也收齐现场：命令、源码身份、全文日志、已有产物都已在 prov 里，
+            # 由调用方写盘后再退码（审计 #9）
             prov["artifacts"], prov["missing"] = collect_artifacts(repo)
+            prov["status"] = "build_timeout" if run["timed_out"] else "build_failed"
+            if run["timed_out"]:
+                raise BuildError(f"构建超时（{timeout}s）；"
+                                 f"日志尾部 {(run['output'] or '')[-800:]!r}", prov)
             raise BuildError(f"构建失败：退出码 {run['returncode']}；"
-                             f"日志尾部 {(run['output'] or '')[-800:]!r}")
+                             f"日志尾部 {(run['output'] or '')[-800:]!r}", prov)
     found, missing = collect_artifacts(repo)
     prov["artifacts"] = found
     prov["missing"] = missing
     prov["test_binaries"] = collect_test_binaries(repo, ops)
-    prov["header_text_sha256"] = sha256_file(repo / "include" / "cann_ops_solver.h")
+    header = repo / "include" / "cann_ops_solver.h"
+    prov["header_text_sha256"] = sha256_file(header) if header.is_file() else None
     if missing:
-        raise BuildError(f"构建后产物缺失：{missing}")
+        prov["status"] = "artifacts_missing"
+        raise BuildError(f"构建后产物缺失：{missing}", prov)
+    prov["status"] = "ok"
     return prov
 
 
@@ -246,20 +284,30 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     ops = [o.strip() for o in args.ops.split(",") if o.strip()]
-    out = Path(args.out)
+    out = Path(args.out).expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
+    prov, code, failure = None, 0, None
     try:
         prov = build(args.repo, ops, args.soc, args.device, args.skip_build,
                      args.timeout)
     except BuildError as exc:
-        print(f"[{TOOL}] 构建段失败: {exc}", file=sys.stderr)
-        return 3
+        prov, failure = exc.provenance, str(exc)
+        code = 3 if prov is not None else 2    # 收证前就停下 = 纪律或入口问题
     except (OSError, subprocess.SubprocessError) as exc:
-        print(f"[{TOOL}] 构建段异常: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 3
+        failure, code = f"{type(exc).__name__}: {exc}", 3
+    if prov is None:
+        # 纪律违例、不是仓根、收证前就抛的异常——没有取证可写，只报错
+        print(f"[{TOOL}] 构建段失败（无取证可写）: {failure}", file=sys.stderr)
+        return code
+    if failure:
+        prov.setdefault("status", "failed")
+        prov["failure"] = failure
     with open(out, "w", encoding="utf-8") as fh:
-        json.dump(prov, fh, ensure_ascii=False, indent=1)
+        json.dump(prov, fh, ensure_ascii=False, indent=1, default=str)
         fh.write("\n")
+    if failure:
+        print(f"[{TOOL}] 构建段失败（取证已写 → {out}）: {failure}", file=sys.stderr)
+        return code
     echo = prov.get("soc_echo") or {}
     print(f"[{TOOL}] 构建成功 ops={','.join(ops)} soc={args.soc} "
           f"回显={echo.get('soc_version')}/{echo.get('npu_arch')} → {out}")

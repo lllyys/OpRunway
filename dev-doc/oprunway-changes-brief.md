@@ -5,6 +5,12 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-10-10 · Codex 接续 solver 共享 harness 与冻结判定收尾。** 用户指定仅用 Codex；
+  A0–A3 与共享运行说明落地，自测/验收/harness 统一消费冻结参考值，失败留证、复跑未知态、
+  进程组取消清理及 ABI 描述核对补齐；一轮独立 audit→fix→verify 已闭环（撤回 info 数组越界
+  误报）。远端两 skill 全套 404 绿，十包不重算数据、重渲与逐包门 59.01 秒全过；性能说明
+  模板旧 0.8/A100 改为现行 GPU/0.35。数值基线仍待裁定、真实 Cholesky 交付与完整样例仍待，
+  候选未发布、未 push。见 solver/solver-completion-1010.md 与 HT-31/32。
 - **2026-10-09e · checkpoint 审计七项修复。** build_package 负例门四项：①负例 FAIL 另要求
   verdict.error 为空（`_gate_row_off`，不可裁路径不再算检出）、③扰动槽位改 0 并删 batch>1
   过滤（batch=1 的合法包不再必然失败）、④正负断言并成 `gate_assert_round`（预期退出码 + 门自己

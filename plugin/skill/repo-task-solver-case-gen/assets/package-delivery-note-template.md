@@ -12,35 +12,35 @@ DELIVERY_NOTE.md；本模板不进任何单包，包内自测说明见 package-r
 ## 包的统一形态（{package_count} 包一致）
 
 1. **纯脚本包（零数组数据）**：包内不带任何数据数组（单矩阵包 KB 级；批量包
-   另含 A0 抽样槽位映射 sample_map——判定余槽一致性的必需数据，最大约 60 MB）。
+   另含 A0 抽样槽位映射 sample_map——判定余槽一致性的必需数据，压缩体量以对账表实测为准）。
    用例数据由包内脚本现场生成——先造数、后测试：
 
    ```bash
    python3 gen_data.py --canonical canonical_cases.json --out data --select all
    ```
 
-   你的执行器从 `data/cases/*.npz` 读输入；`verify_accuracy.py` 判定时自行按同一
-   配方重新生成输入与参考输出（同一环境下与你造的数逐位相同），不依赖你的
+   单矩阵执行器从 `data/cases/*.npz` 读输入；批量按包内 README 现场展开；`verify_accuracy.py` 判定时自行按同一
+   配方重新生成输入，不依赖你的
    `data` 目录。
 2. **verify 双件**：`verify_accuracy.py` 验精度，`verify_perf.py` 验性能（判据取自
    包内 `perf_baseline.json`，采集按《性能自测采集说明》用 msprof op）。
 3. **自测配套件**：`gen_data.py`、`sim_dut.py`（模拟被测输出，供接入自查）、
    `README.md`（接入步骤）。
 
-## 固化口径（{package_count} 包一致，v3）
+## 固化口径（{package_count} 包一致）
 
 1. **ratio_cpu 参考值**：逐 case 由 CPU 同精度参考链预计算并固化在
    `cases/index.json`（字段 `ratio_cpu`），判定只消费、不重算。
 2. **ratio_cpu_mean（A0 第二阈值支）**：批量包按槽位加权平均、单矩阵包按算术
-   平均预计算，固化在 `cases/index.json` 顶层 `ratio_cpu_mean` 字段；阈值式
-   max(5·ratio_cpu, 3·ratio_cpu_mean) 双支消费。极端情况下缺该键时判定自动走
-   单支兼容口径（fail-closed 方向）。
-3. **批量 A0 抽样**：批量包每 case 只固化 k=min(5,batch) 个代表内容矩阵与
+   平均预计算；单矩阵均值在 index 顶层按算子存储，批量均值在各 case 条目。
+   potrf/potrs 使用 max(5·ratio_cpu, 3·ratio_cpu_mean)，potri 使用
+   max(5·ratio_cpu, 0.1)。缺对应固化字段时停止判定，不现场重算补齐。
+3. **批量 A0 抽样**：批量包每 case 只固化 k=min(5,batch) 个代表内容的参考值与
    `sample_map`（槽位映射）；判定先核余槽 bit-wise 一致性、再对代表槽逐内容
    残差判定——「1~2 个矩阵非正定」按代表内容解释。
 4. **info 契约用例**：每算子另含 case_purpose=`info` 的契约用例（无 golden，
    只比 info）：正定场景 info=0、非正定场景 info=第 k 阶（逐内容 k 值列表或
-   标量，按接口分型）；被测 info 与期望不符即数值 FAIL。
+   标量，按接口分型）；被测 info 与期望不符即 info 契约 FAIL，与精度结论分开。
 5. **确定性**：任务书要求合法用例重复执行结果 bit-wise 一致；该证据由验收侧
    复跑出具，不随包交付。
 

@@ -141,7 +141,7 @@ def test_read_three_keys_array_info(tmp_path):
     (tmp_path / "out").mkdir()
     out.tofile(tmp_path / "out" / "out32.bin")
     np.array([0, 3], dtype=np.int32).tofile(tmp_path / "out" / "info.bin")
-    spec = {"dtype": "complex64", "out32_shape": "2,2,2", "info_kind": "array"}
+    spec = {"dtype": "complex64", "out32_shape": "2,2,2", "info_kind": "array", "batch": 2}
     got, info = exec_case.read_three_keys(tmp_path, spec, {})
     assert got.shape == (2, 2, 2) and got.dtype == np.complex64
     assert info.dtype == np.int32 and info.tolist() == [0, 3]
@@ -183,9 +183,9 @@ def test_read_three_keys_shape_mismatch_raises(tmp_path):
 
 def test_rerun_record_shapes():
     assert exec_case.rerun_record({"runs": 1}) is None
-    ok = exec_case.rerun_record({"runs": 3, "rerun_consistent": "1",
+    ok = exec_case.rerun_record({"runs": 3, "rerun_runs_completed": 3, "rerun_consistent": "1",
                                  "run1_out32_fnv": "0x1"})
-    assert ok == {"runs": 3, "consistent": True, "first_diff": None,
+    assert ok == {"runs": 3, "runs_completed": 3, "consistent": True, "first_diff": None,
                   "per_run_fnv": {"run1_out32_fnv": "0x1"}}
     bad = exec_case.rerun_record({"runs": 2, "rerun_consistent": "0",
                                   "rerun_first_diff_run": 2,

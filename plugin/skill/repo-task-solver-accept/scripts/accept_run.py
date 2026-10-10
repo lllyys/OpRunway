@@ -52,6 +52,7 @@ ratio_basis 非 A32-f64），此时不产出 report。
 """
 
 import argparse
+import gzip
 import hashlib
 import json
 import platform
@@ -84,17 +85,19 @@ def _fail(msg):
 
 def _load_json(path, what):
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rt", encoding="utf-8") as fh:
             return json.load(fh)
     except FileNotFoundError:
         _fail(f"{what} 缺失: {path}")
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, EOFError, json.JSONDecodeError) as exc:
         _fail(f"{what} 不可解析: {path}: {exc}")
 
 
 def _sha256(path):
     h = hashlib.sha256()
-    with open(path, "rb") as fh:
+    opener = gzip.open if path.name == "index.json.gz" else open
+    with opener(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
@@ -120,6 +123,8 @@ def check_fingerprints(package, manifest):
         return mismatch, ["WARN:指纹表缺失:manifest.fingerprint"]
     for rel, expected in sorted(fp.items()):
         path = package / rel
+        if rel == "cases/index.json" and not path.is_file():
+            path = package / "cases/index.json.gz"
         if not path.is_file():
             desc = "文件缺失"
         else:
@@ -208,8 +213,8 @@ def accuracy_items(package, dut_dir, operator, index, baseline_rows,
     串行逐位相同）；单矩阵卡该入口直通 verdict.judge，行为不变。
 
     ratio_cpu_mean 从 index 顶层按算子注入 case_arrays（HT-3 消费面；mean 本体
-    由 HT-4 在发包侧预计算固化，index 无该键时注入 None → potrf/potrs 兜底走
-    单支兼容口径，verdict._run_residual）。批量卡下 mean 为算子级标量，经
+    由 HT-4 在发包侧预计算固化，build_report 准入拒绝所需字段缺失）。
+    批量卡下 mean 从 case 条目读取，经
     passthrough 带入每个矩阵（verdict._judge_batched_inner）。"""
     card = cards_cholesky.get_card(operator)
     op_mean = (index.get("ratio_cpu_mean") or {}).get(operator)
@@ -243,7 +248,8 @@ def accuracy_items(package, dut_dir, operator, index, baseline_rows,
         if arrays is None:
             items.append(insuff(case_id, "证据缺失", why))
             continue
-        arrays["ratio_cpu_mean"] = op_mean     # HT-3：potrf/potrs 阈值第二支消费
+        arrays["ratio_cpu_mean"] = (entry.get("ratio_cpu_mean")
+                                    if card.batched else op_mean)
         dut, why = load_dut_out(dut_dir, case_id)
         if dut is None:
             items.append(insuff(case_id, "被测输出缺失", why))
@@ -283,7 +289,7 @@ def perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking):
     try:
         with open(perf_path, "r", encoding="utf-8") as fh:
             dut_ms = json.load(fh)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, EOFError, json.JSONDecodeError) as exc:
         items.insert(0, exp.perf_reference_item(
             operator, exp.ST_NO_EVIDENCE,
             {"reason": "被测耗时不可读", "detail": f"perf.json: {exc}",
@@ -316,7 +322,11 @@ def build_report(package, dut_dir, jobs=1):
     supported = cards_cholesky.OPS + cards_cholesky.BATCHED_OPS
     if operator not in supported:
         _fail(f"manifest.operator={operator!r} 不在支持集 {supported}")
-    index = _load_json(package / "cases" / "index.json", "cases/index.json")
+    index_paths = [p for p in (package / "cases/index.json",
+                               package / "cases/index.json.gz") if p.is_file()]
+    if len(index_paths) != 1:
+        _fail("必须恰有一份 cases/index.json 或 index.json.gz")
+    index = _load_json(index_paths[0], "cases/index.json")
     # 准入断言（以新为准裁定 2026-10-09）：只受理 A32-f64 基的包。缺字段即旧 A64 基，
     # 其 ratio_cpu/ratio_cpu_mean 与现行残差实现不同基，判出来的 PASS/FAIL 都不成立。
     basis = index.get("ratio_basis")
@@ -326,6 +336,12 @@ def build_report(package, dut_dir, jobs=1):
     index_cases = index.get("cases")
     if not isinstance(index_cases, list):
         _fail("cases/index.json 无 cases 列表")
+    # 与随包 verify 共享冻结字段契约；新包入口不走缺 mean 的旧单支兼容。
+    from render_verify import load_frozen_index
+    try:
+        load_frozen_index(package, index_cases, operator)
+    except (OSError, EOFError, ValueError, TypeError) as exc:
+        _fail(f"冻结基线契约错误: {exc}")
     baseline_rows = _load_json(package / "perf_baseline.json", "perf_baseline.json")
     if not isinstance(baseline_rows, list):
         _fail("perf_baseline.json 非列表")
