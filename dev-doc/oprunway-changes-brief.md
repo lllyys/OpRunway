@@ -5,6 +5,11 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-10-10h · 固定开发者适配协议与cmatinv样例落地。** 开发者在test/<op>提供无main适配模块，
+  自测与验收共用；skill独立编译固定执行器、原版协议头与真实库，留存源码/库身份。
+  性能入口支持同版adapter并沿用msprof op；远端469项通过，样例源码构建、五轮复跑、
+  自测与30次性能实采通过；mean0.328084ms，无GPU基线不判性能达标，cm数值仍NOT_JUDGED。
+  独立Codex审查闭环；十包不变，样例不含skill。详见solver/solver-adapter-1010.md。
 - **2026-10-10g · v6仅修三类必要文档错误。** 按用户“没必要就不改”，撤回解释性补充；
   仅修求逆info正值、批量求解非法参数调用和msprof op计时口径，脚本/数据未改。
   同步README指纹、对账表和v6归档；文字diff见reports/v6-packages/document-review.diff。

@@ -63,6 +63,7 @@ def summarize(samples):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--adapter", help="developer cmatinv_batched_adapter.cpp")
     ap.add_argument("--repo", required=True, help="already built ops-solver source directory")
     ap.add_argument("--provenance", required=True, help="build.json from run_harness_sample.sh")
     ap.add_argument("--gen-dir", required=True)
@@ -93,9 +94,10 @@ def main(argv=None):
         ascend_home = os.environ.get("ASCEND_HOME_PATH")
         if not ascend_home:
             raise ValueError("source the CANN set_env.sh first")
-        compiled = exec_case.compile_executor(
-            repo, ascend_home, out / "harness_exec", ops=["cmatinv_batched"],
-            timeout=args.timeout)
+        compiled = (exec_case.compile_adapter(repo, ascend_home, out / "harness_exec",
+            args.adapter, ["cmatinv_batched"], timeout=args.timeout) if args.adapter else
+            exec_case.compile_executor(repo, ascend_home, out / "harness_exec",
+            ops=["cmatinv_batched"], timeout=args.timeout))
         result["compile"] = compiled
         # The profiler is the harness's executor: one process group contains
         # profiler and DUT. No outer profiler wraps a nested harness process.

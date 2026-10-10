@@ -190,11 +190,15 @@ def build_spec(abi, case, runs, device_id, layout="row_major"):
         "op": abi.op, "abi": abi.abi, "call_shape": abi.call_shape,
         "dtype": abi.dtype, "info_kind": abi.info_kind,
         "device_id": device_id, "n": int(case["n"]),
-        "batch": int(case.get("batch") or 1), "nrhs": int(case.get("nrhs") or 0),
-        "lda": int(case.get("lda") or case["n"]),
-        "ldb": int(case.get("ldb") or case.get("nrhs") or case["n"]),
+        "batch": int(case["batch"] if case.get("batch") is not None else 1),
+        "nrhs": int(case["nrhs"] if case.get("nrhs") is not None else 0),
+        "lda": int(case["lda"] if case.get("lda") is not None else case["n"]),
+        "ldb": int(case["ldb"] if case.get("ldb") is not None else
+                   (case["n"] if layout == "column_major" else case.get("nrhs") or case["n"])),
         "uplo": "?" if case.get("info_probe") == "bad_param_uplo" else case.get("uplo") or "L",
         "info_probe": case.get("info_probe"),
+        "input_kind": "cholesky_factor" if ("potrs" in abi.op or "potri" in abi.op)
+                      and (case.get("case_purpose") != "info" or case.get("info_probe") == "singular_factor") else "matrix",
         "runs": int(runs), "layout": layout,
         "out32_shape": ",".join(str(x) for x in shape),
     }
@@ -304,7 +308,7 @@ def criteria_judge(mods, card, case, arrays, dut, ratio_cpu, ratio_status,
 # case 级编排
 # ---------------------------------------------------------------------------
 
-def prepare_case(mods, case, abi):
+def prepare_case(mods, case, abi, adapter=False):
     """现场造输入，返回 (arrays, exec_inputs, sample_map)。
 
     `arrays` 给判定用（含 A64/golden 等），`exec_inputs` 只含要落 bin 的 f32/c64
@@ -333,7 +337,18 @@ def prepare_case(mods, case, abi):
             arrays = gen.build_info_arrays(case, arrays)
     exec_inputs = {"in_a": arrays["A32"]}
     if ("potrs" in abi.op or "potri" in abi.op) and case.get("case_purpose") != "info":
-        raise ContractError("awaiting_delivery: potrs/potri 因子准备与实际交付接口尚未接入")
+        if not adapter:
+            raise ContractError("awaiting_delivery: potrs/potri 因子准备与实际交付接口尚未接入")
+        from scipy.linalg.lapack import get_lapack_funcs
+        source = arrays["A32"]
+        matrices = source if abi.batched else source[None]
+        factors = []
+        for matrix in matrices:
+            factor, info = get_lapack_funcs("potrf", (matrix,))(matrix.copy(), lower=case.get("uplo") == "L", clean=1)
+            if info != 0:
+                raise ContractError("independent input factorization failed")
+            factors.append(factor)
+        exec_inputs["in_a"] = np.ascontiguousarray(np.stack(factors) if abi.batched else factors[0])
     if abi.call_shape == "potrs_b_inplace":
         if "B32" not in arrays:
             raise ContractError(f"{case['case_id']}: potrs 族缺 B32 输入")
@@ -345,10 +360,10 @@ def run_one(mods, case, abi, ctx):
     """跑一个 case 的全程：造输入 → 执行 → 判定 → 取证。返回报告记录。"""
     cid = case["case_id"]
     t0 = time.time()
-    arrays, exec_inputs, sample_map = prepare_case(mods, case, abi)
+    arrays, exec_inputs, sample_map = prepare_case(mods, case, abi, adapter=ctx.get("adapter", False))
     contents = arrays.pop("_contents", None)
 
-    if ctx["layout"] != "row_major":
+    if ctx["layout"] != "row_major" and not ctx.get("adapter"):
         raise ContractError("column_major 尚未实现；不得按 row_major 执行")
     spec = build_spec(abi, case, ctx["rerun"], ctx["device_id"], ctx["layout"])
     exec_rec = exec_case.run_case(
@@ -673,6 +688,7 @@ def main(argv=None):
     mach.add_argument("--repo", help="ops-solver 仓根（S1 已构建）")
     mach.add_argument("--ascend-home", help="缺省取 $ASCEND_HOME_PATH")
     mach.add_argument("--build-dir", default=None, help="缺省 <repo>/build")
+    mach.add_argument("--adapter", help="developer test/<op>/<op>_adapter.cpp using the fixed protocol")
     mach.add_argument("--executor", default=None,
                       help="已编译的执行件；缺省就地编译到 <work>/harness_exec")
     mach.add_argument("--work-dir", default="harness-work",
@@ -726,13 +742,13 @@ def main(argv=None):
 
         ratio_mean = None
         if args.probe_op:
-            op_abi.require_exec(args.probe_op)
+            op_abi.get(args.probe_op) if args.adapter else op_abi.require_exec(args.probe_op)
             cases = [probe_case(mods, args.probe_op, args.n, args.batch, args.seed)]
         else:
             cases, ratio_mean = _pick_cases(mods, args.canonical, args.ops,
                                             args.max_n, args.limit)
             for c in cases:
-                op_abi.require_exec(c["op"])
+                op_abi.get(c["op"]) if args.adapter else op_abi.require_exec(c["op"])
 
         # 每次运行一套独立目录：现场与留证件都带 run id，旧产物进不来（审计 #2）
         rid = run_id()
@@ -742,9 +758,10 @@ def main(argv=None):
         compile_rec = None
         if not executor:
             wanted = sorted({c["op"] for c in cases})
-            compile_rec = exec_case.compile_executor(
-                repo, ascend_home, work / "harness_exec",
-                ops=wanted, build_dir=build_dir)
+            compile_rec = (exec_case.compile_adapter(repo, ascend_home, work / "harness_exec",
+                args.adapter, wanted, build_dir=build_dir) if args.adapter else
+                exec_case.compile_executor(repo, ascend_home, work / "harness_exec",
+                ops=wanted, build_dir=build_dir))
             executor = compile_rec["bin"]
         executor = str(exec_case.abspath(executor))
         provenance = (json.loads(
@@ -759,7 +776,7 @@ def main(argv=None):
            "ascend_home": ascend_home, "build_dir": build_dir,
            "device_id": args.device, "timeout": args.timeout,
            "cwd": repo, "rerun": args.rerun, "jobs": args.jobs,
-           "layout": args.layout, "keep_ids": set(args.keep),
+           "adapter": bool(args.adapter), "layout": args.layout, "keep_ids": set(args.keep),
            "provenance": provenance, "ratio_mean": ratio_mean, "judge": None}
 
     records, t0 = [], time.time()

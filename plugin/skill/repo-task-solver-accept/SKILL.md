@@ -9,13 +9,17 @@ description: 构建并执行已接入的 solver 工程，保存运行证据，�
 harness（构建、执行与取证工具），但自测报告不替代验收者本次运行的证据。
 harness 独立分发，任务包保持设备无关。
 
+新交付要求在 `test/<op>/` 提供无main的薄适配模块，与开发者自测共用；按
+[adapter-contract.md](references/adapter-contract.md) 核对固定协议、源码真实调用与构建。
+验收skill编译交付适配源码，不临时生成替代适配，不使用开发者测试判定。
+
 判定覆盖 Cholesky 十算子：实数与复数的 potrf、potrs、potri，以及 potrfBatched、
 potrsBatched。逐 case 直接计算 LAPACK 残差，输入取实现实际输入 A32/B32，复数按
 复模与共轭转置计算。golden（参考输出）不参与判定。批量采用代表内容残差判定加
 其余槽位逐字节一致性检查，全部矩阵满足条件才判 case 数值通过。
 
 **执行支持与判定覆盖分别核对。** 当前已有 Host 指针接口的小规格真机通路；
-Cholesky 的 Device 指针调用尚待真实交付头接入。缺接口时停在 A0，
+已取得的 Cholesky 公开头可供核对；Device 调用仍需开发者固定协议适配模块及真机验证。缺接口时停在 A0，
 不以模拟输出替代，不因存在判定卡就宣称十算子可端到端运行。
 
 ## 入口参数
@@ -95,6 +99,6 @@ info 契约七类期望。两种报告的结构不同，不能把 harness 的结
 
 ## 范围之外
 
-尚未交付的 Cholesky Device 接口、大规格完整执行验证、950PR 性能全量实测、批量完整
+尚未验证接入的 Cholesky Device 适配模块、大规格完整执行验证、950PR 性能全量实测、批量完整
 覆盖，以及 gels、QR、LU 和特征值族数值判定。Host 求逆入口的结构性演练不扩大
 这些判定范围。性能口径仍为任务书的 NPU msprof op 实测 ≤ GPU 参考 / 0.35。

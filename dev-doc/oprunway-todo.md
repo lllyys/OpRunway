@@ -7,7 +7,7 @@
 背景与全部证据见 `dev-doc/solver/solver-0923-context.md`。
 **solver 线交接待办细目见 `dev-doc/solver/solver-handover-todo.md`（唯一细目账）。**
 
-本轮接续状态见 [solver-completion-1010.md](solver/solver-completion-1010.md)：HT-31 工具收尾、HT-32 候选已完成；仅用 Codex；性能采集/匹配/判定/汇总流程已落地，cmatinv样例标明必补适配项；v6十包已按用户要求基于v5收缩对0928的diff，远端逐包门通过。用户明确完整算子验收跑通不在本轮范围；数值基线裁定与真实 Cholesky 交付保留后续。
+本轮接续状态见 [solver-completion-1010.md](solver/solver-completion-1010.md)：HT-31 工具收尾、HT-32 候选已完成；仅用 Codex；性能采集/匹配/判定/汇总流程已落地，cmatinv样例标明必补适配项；v6十包已按用户要求基于v5收缩对0928的diff，远端逐包门通过。固定开发者适配协议及cmatinv样例已完成，见[solver-adapter-1010.md](solver/solver-adapter-1010.md)；用户明确完整算子验收跑通不在本轮范围；数值基线裁定与真实 Cholesky 交付保留后续。
 
 - [x] ~~决策点：走哪条验收线~~ → **2026-09-22 Mr.0 裁定走乙：新起
   `repo-task-solver-accept`，自产 harness 留在验收现场。** 依据与两条翻案条件见

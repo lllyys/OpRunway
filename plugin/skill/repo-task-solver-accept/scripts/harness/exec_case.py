@@ -148,6 +148,30 @@ def compile_executor(repo, ascend_home, out_bin, ops=None, cxx="g++",
     return rec
 
 
+def compile_adapter(repo, ascend_home, out_bin, adapter, ops, build_dir=None, timeout=600):
+    """Compile fixed executor with developer source, never a developer main/judge."""
+    repo, adapter, out_bin = abspath(repo), abspath(adapter), abspath(out_bin)
+    if len(ops) != 1 or not adapter.is_file():
+        raise ExecError("one operator and one existing adapter.cpp are required")
+    # The protocol header comes only from the skill's canonical include path.
+    cmd = compile_command(repo, ascend_home, out_bin, [], build_dir=build_dir)
+    cmd[cmd.index(str(EXEC_SRC))] = str(HERE / "adapter_exec.cpp")
+    cmd += [str(adapter), "-I" + str(HERE.parent.parent / "assets/adapter"),
+            "-include", str(HERE.parent.parent / "assets/adapter/solver_adapter.h")]
+    out_bin.parent.mkdir(parents=True, exist_ok=True)
+    snapshot = out_bin.with_name(out_bin.name + ".sources")
+    snapshot.mkdir(exist_ok=True)
+    for name, source in (("adapter.cpp", adapter), ("solver_adapter.h", HERE.parent.parent / "assets/adapter/solver_adapter.h"), ("cann_ops_solver.h", repo / "include/cann_ops_solver.h")):
+        (snapshot / name).write_bytes(source.read_bytes())
+    result = proc.run(cmd, timeout=timeout, log_path=out_bin.with_name(out_bin.name + ".compile.log"))
+    if result["timed_out"] or result["returncode"]:
+        raise ExecError("adapter compilation failed: " + result["output"][-2000:])
+    return {"cmd":cmd,"returncode":0,"bin":str(out_bin),"sha256":sha256_file(out_bin),
+            "ops":list(ops),"adapter_source":str(adapter),"adapter_sha256":sha256_file(adapter),
+            "protocol_sha256":sha256_file(HERE.parent.parent / "assets/adapter/solver_adapter.h"),
+            "header_sha256":sha256_file(repo / "include/cann_ops_solver.h")}
+
+
 def sha256_file(path):
     """文件内容摘要。实际加载库与执行件都靠它对账。"""
     h = hashlib.sha256()

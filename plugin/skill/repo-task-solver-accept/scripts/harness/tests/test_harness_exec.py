@@ -205,7 +205,7 @@ def test_runtime_env_puts_build_dir_first(tmp_path, monkeypatch):
 
 def test_exit_kind_matches_cpp_table():
     """C++ 侧的退出码表是唯一真相，Python 侧不许漂移。"""
-    src = exec_case.EXEC_SRC.read_text(encoding="utf-8")
+    src = exec_case.EXEC_SRC.read_text(encoding="utf-8") + (exec_case.HERE / "executor_io.hpp").read_text(encoding="utf-8")
     for code, kind in exec_case.EXIT_KIND.items():
         camel = "k" + "".join(p.capitalize() for p in kind.split("_"))
         assert f"constexpr int {camel} = {code};" in src, (kind, code)

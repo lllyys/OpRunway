@@ -32,7 +32,7 @@ def make_executor(directory, executor, kernel):
 
 
 def collect_case(case, plan, directory, mods, executor, args, provenance):
-    abi = op_abi.require_exec(case["op"])
+    abi = op_abi.get(case["op"]) if getattr(args, "adapter", None) else op_abi.require_exec(case["op"])
     record = {"case_id": case["case_id"], "case": performance.identity(case),
               "status": "ERROR", "collector": "msprof op", "timing_scope": "kernel_only",
               "target": args.target, "device": args.device, "soc": provenance.get("soc"), "layout": args.layout,
@@ -40,7 +40,7 @@ def collect_case(case, plan, directory, mods, executor, args, provenance):
     # Probe recipes exercise the existing Host sample, never a formal Cholesky PASS.
     prepared = (run_harness.probe_case(mods, case["op"], case["n"], case.get("batch", 1), case["seed"])
                 if case.get("case_purpose") == "probe" else dict(case))
-    _, inputs, _ = run_harness.prepare_case(mods, prepared, abi)
+    _, inputs, _ = run_harness.prepare_case(mods, prepared, abi, adapter=bool(getattr(args, "adapter", None)))
     spec = run_harness.build_spec(abi, case, performance.SAMPLES, args.device, args.layout)
     for i, kernel in enumerate(plan):
         work = directory / f"kernel-{i:03}"
@@ -82,6 +82,7 @@ def main(argv=None):
     ap.add_argument("--out", required=True, help="new output directory")
     ap.add_argument("--measurements", help="rejudge saved measurements without running a device")
     ap.add_argument("--repo")
+    ap.add_argument("--adapter", help="developer adapter source for this package operator")
     ap.add_argument("--gen-dir")
     ap.add_argument("--provenance")
     ap.add_argument("--kernel-map", help="JSON {operators:{op:[kernels]}, cases:{case_id:[kernels]}}")
@@ -133,9 +134,9 @@ def main(argv=None):
                     continue
                 record = {"case_id": cid, "case": performance.identity(canonical), "status": "ERROR"}
                 try:
-                    op_abi.require_exec(canonical["op"])
-                    # Current adapter rejects column-major; never run row-major under a column-major label.
-                    if args.layout != "row_major":
+                    op_abi.get(canonical["op"]) if args.adapter else op_abi.require_exec(canonical["op"])
+                    # Only the fixed adapter backend supports native column-major interfaces.
+                    if args.layout != "row_major" and not args.adapter:
                         raise ValueError("column_major adapter awaiting actual delivery")
                     plan = performance.resolve_plan(mapping, canonical)
                     case = dict(canonical)
@@ -147,8 +148,10 @@ def main(argv=None):
                         case["sample_map"] = entry["sample_map"]
                     op = case["op"]
                     if op not in executors:
-                        compiled = exec_case.compile_executor(args.repo, args.ascend_home,
-                                   out / "executors" / op, ops=[op], timeout=args.timeout)
+                        compiled = (exec_case.compile_adapter(args.repo, args.ascend_home,
+                                   out / "executors" / op, args.adapter, [op], timeout=args.timeout) if args.adapter else
+                                   exec_case.compile_executor(args.repo, args.ascend_home,
+                                   out / "executors" / op, ops=[op], timeout=args.timeout))
                         executors[op] = compiled["bin"]
                         measurements.setdefault("compiled", {})[op] = compiled
                     record = collect_case(case, plan, out / f"case-{number:05}", mods,

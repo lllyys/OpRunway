@@ -115,3 +115,6 @@ python3 scripts/harness/run_harness.py --gen-dir "$GEN_DIR" \
 共享工具和接入步骤可独立分发。该批 Cholesky 的真实算子完整样例，需要开发者交付
 公开头与实现后才能生成；此处命令模板不冒充已运行的样例。大规格执行需先核算
 输入、输出、参考数组、复跑副本和失败留证的内存及磁盘峰值，再在目标设备实测。
+
+开发者固定适配模块优先按 [adapter-contract.md](adapter-contract.md) 接入：
+在现有run_harness命令增加--adapter；模块位于test/<op>，无main，与自测共用。
