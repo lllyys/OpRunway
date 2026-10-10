@@ -123,3 +123,13 @@ reports/performance-acceptance-1010/performance-full-suite-final.log。
 
 十包候选只修正两份分组PERF_COLLECTION_SUPPLEMENT.md及其公共模板，
 统一均值口径、正式性能入口和基线更新规则；未重渲十包，未改用例或冻结基线。
+
+## v6：基于v5收缩对0928的diff
+
+用户明确“基于v5”而非回到v4重产。v6复用v5三类冻结数据，保留当前必要精度判据、
+冻结读取和批量info修复；verify_perf恢复v4原件，gen只保留必要运行提示，sim保留
+功能修复但撤回大段解释重写，README去除非必要harness介绍。源skill未修改。
+远端十包现有run_negative_gate全部通过，gen/sim去docstring后AST与已验证当前版
+相同，文件指纹通过；不构成真算子全量验收。独立审查补齐十算子集合断言及diff范围说明。
+旧四批量index实体缺失和旧README/manifest于10月8日修订的限制仍明确记录。
+产物reports/v6-packages/solver-ten-packages-v6.tar.gz；沿用v5数值基线待裁状态，未发布或push。

@@ -5,6 +5,10 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-10-10f · v6十包按最小diff整理。** 用户明确以v5为基、不重算用例/基线；
+  保留当前精度判据与批量info修复，恢复0928原verify_perf，收回gen/sim无关文案及README可选说明。
+  十包远端现有正负例门全过；gen/sim去docstring后AST与已验证当前版一致，v5三类数据逐字节保留。
+  独立Codex audit→fix→verify闭环；产物reports/v6-packages/，原数值基线待裁状态保留，未push。
 - **2026-10-10e · 性能验收流程落地，样例标明接入必补项。** 逐 case 用 msprof op
   采集、按 case_id/bench_key 匹配冻结GPU基线、按均值≤GPU/0.35判定并汇总；
   原始CSV重读、全量缺项保留、目标环境/ABI/库身份核对，参考比值退出必测门禁。
