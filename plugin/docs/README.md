@@ -19,6 +19,7 @@
 | [community-task.md](guide/community-task.md) | 社区算子任务：任务书 → 用例 → NPU 验收结论 |
 | [doc-write-usage.md](guide/doc-write-usage.md) | 上一类第一步的调用命令与示例 |
 | [blas-usage.md](guide/blas-usage.md) | 上一类的 BLAS 分支细则：两个 blas skill 的输入产物、复测与豁免 |
+| [solver-acceptance-usage.md](guide/solver-acceptance-usage.md) | Solver 验收：交付材料、固定适配、精度与确定性、性能采集及结果复核 |
 | [ops-sample-run.md](guide/ops-sample-run.md) | 开源仓算子样例跑测：搭环境 → 挑算子 → 跑样例台账 |
 | [issue-workflow.md](guide/issue-workflow.md) | 社区 issue 处理：起草上报 → 跟踪 → 复测闭环 |
 | [quality-inspect.md](guide/quality-inspect.md) | 开源仓质量巡检：快速入门体检 · 教程查证 · 页面巡检 |
