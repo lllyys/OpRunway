@@ -2,8 +2,6 @@
 
 通过公开接口`aclsolverCmatinvBatched`调用实际算子库。精度和性能测试共用
 `test/cmatinv_batched/cmatinv_batched_adapter.cpp`中的适配模块。
-本包的测试代码、协议头和构建入口均位于`test/`；接入工程时只合入`test/`内容，
-根目录README仅供阅读，不需要覆盖工程的README。
 
 ## 运行
 
@@ -12,13 +10,13 @@
 
 ```bash
 # 精度：默认n=8、batch=4，执行5轮
-bash test/cmatinv_batched/run_sample.sh /path/to/ops-solver ./precision-run --mode precision
+bash run_sample.sh /path/to/ops-solver ./precision-run --mode precision
 
 # 性能：msprof op预热5次，采集30次目标kernel
-bash test/cmatinv_batched/run_sample.sh /path/to/ops-solver ./performance-run --mode performance
+bash run_sample.sh /path/to/ops-solver ./performance-run --mode performance
 
 # 同时测试精度、性能，自定义用例和设备
-bash test/cmatinv_batched/run_sample.sh /path/to/ops-solver ./test-run --mode all --n 16 --batch 8 --seed 42 --device 0
+bash run_sample.sh /path/to/ops-solver ./test-run --mode all --n 16 --batch 8 --seed 42 --device 0
 ```
 
 输出目录必须是新目录。`PYTHON`可指定Python解释器。
@@ -62,7 +60,7 @@ bash test/cmatinv_batched/run_sample.sh /path/to/ops-solver ./test-run --mode al
 
 - `cmatinv_batched_adapter.cpp`：补全公开接口调用、Host/Device指针、布局转换、workspace及资源释放。
   当前样例使用Host指针、行主序complex64、标量info，必须与实际公开接口逐项核对。
-- `test/common/solver_adapter.h`：固定适配接口；保持不变。适配模块不包含main、输入生成或判定逻辑。
+- `include/solver_adapter.h`：固定适配接口；保持不变。适配模块不包含main、输入生成或判定逻辑。
 - `run_tests.py`：精度与性能测试入口；更换算子时补充对应输入、数学判据和性能采集方式。
 - `test/common/`：公共C++调用程序和进程管理；通过适配模块读取实际输出。
 - `CMakeLists.txt`：按工程实际路径调整公开头文件与算子库位置。

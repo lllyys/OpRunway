@@ -16,9 +16,10 @@ def export(destination):
         raise FileExistsError(destination)
     shutil.copytree(ROOT / "assets/adapter-sample", destination,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"))
+    (destination / "include").mkdir()
+    shutil.copy2(ROOT / "assets/adapter/solver_adapter.h", destination / "include/solver_adapter.h")
     common = destination / "test/common"
     common.mkdir()
-    shutil.copy2(ROOT / "assets/adapter/solver_adapter.h", common / "solver_adapter.h")
     for name in ("adapter_exec.cpp", "executor_io.hpp", "proc.py"):
         shutil.copy2(HERE / name, common / name)
     archive = destination.with_name(destination.name + ".tar.gz")

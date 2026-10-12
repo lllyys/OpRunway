@@ -5,7 +5,7 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
-- **2026-10-12c · 开发者样例测试文件统一放test。** 运行入口移入test/cmatinv_batched，协议头随包放test/common；仅调整引用路径和README，精度/性能逻辑不变。按用户要求不再测试，重新打包并推送fork提交be1db25；PR #16已合并，本次改动尚未进入上游。
+- **2026-10-12c · 按用户要求撤回样例目录调整。** 恢复根目录run_sample.sh和include/solver_adapter.h，沿用1010版开发者样例；仅回退本次路径修改，同步fork，不再测试。
 - **2026-10-12b · 修复PR #16合并冲突。** fork分支合入上游main，保留文档地图中的doc-write、BLAS及solver三条指南链接；两个solver skill树指纹不变，提交5727fe6已推送。
 - **2026-10-12 · 补充solver验收使用指南并纳入PR。** docs/guide/solver-acceptance-usage.md
   说明交付材料、助手调用示例、固定适配、精度/确定性/性能流程、报告及常见问题，文档地图增加入口。
