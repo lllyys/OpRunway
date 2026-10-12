@@ -8,8 +8,8 @@ out=$2
 shift 2
 mkdir -- "$out"
 out=$(cd -- "$out" && pwd)
-cmake -S "$sample_root/test/cmatinv_batched" -B "$out/build" -DOPS_SOLVER_REPO="$repo"
+cmake -S "$sample_root" -B "$out/build" -DOPS_SOLVER_REPO="$repo"
 cmake --build "$out/build"
 export LD_LIBRARY_PATH="$repo/build:${LD_LIBRARY_PATH:-}"
 trap - ERR
-"${PYTHON:-python3}" "$sample_root/test/cmatinv_batched/run_tests.py" --executor "$out/build/cmatinv_test" --out "$out/results" "$@"
+"${PYTHON:-python3}" "$sample_root/run_tests.py" --executor "$out/build/cmatinv_test" --out "$out/results" "$@"

@@ -79,9 +79,9 @@ def test_export_is_standalone_without_internal_reports(tmp_path):
     archive=export_cmatinv_sample.export(out)
     for name in ('adapter_exec.cpp','executor_io.hpp','proc.py'):
         assert (out/'test/common'/name).read_bytes()==(export_cmatinv_sample.HERE/name).read_bytes()
-    assert (out/'include/solver_adapter.h').is_file()
+    assert (out/'test/common/solver_adapter.h').is_file()
     assert (out/'test/cmatinv_batched/run_tests.py').is_file()
-    text=(out/'run_sample.sh').read_text()
+    text=(out/'test/cmatinv_batched/run_sample.sh').read_text()
     assert 'SOLVER_ACCEPT_DIR' not in text
     with tarfile.open(archive) as stream:
         names=stream.getnames()
