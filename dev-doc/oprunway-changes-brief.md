@@ -5,6 +5,7 @@
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-10-12b · 修复PR #16合并冲突。** fork分支合入上游main，保留文档地图中的doc-write、BLAS及solver三条指南链接；两个solver skill树指纹不变，提交5727fe6已推送。
 - **2026-10-12 · 补充solver验收使用指南并纳入PR。** docs/guide/solver-acceptance-usage.md
   说明交付材料、助手调用示例、固定适配、精度/确定性/性能流程、报告及常见问题，文档地图增加入口。
   运行命令链接skill权威协议，区分开发者样例与正式验收；同步fork的solver-accept-1010，进入Justbin PR #16。
