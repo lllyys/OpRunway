@@ -1580,8 +1580,6 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
             for k_ in ("ratio_cpu", "ratio_opt_cpu"):
                 entry[k_] = updates.get(k_)
             entry["ratio_cpu_status"] = "ok" if updates else "none"
-            if op in ("sgels", "cgels"):
-                entry["ratio_input_basis"] = "A32-f64"
             if updates:
                 ratio_ref[cid] = float(updates["ratio_cpu"])
             else:

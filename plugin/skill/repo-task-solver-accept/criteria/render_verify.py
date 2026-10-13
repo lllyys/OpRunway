@@ -2754,7 +2754,7 @@ def _luqr_case_ratio(lapack, case_arrays):
     n = a32.shape[1]
     x32 = np.ascontiguousarray(x32[:n, :])
     _check_prep("X32", x32)
-    ratio = float(residual_ratio(a=case_arrays["A32"], b=case_arrays["B32"], x=x32))
+    ratio = float(residual_ratio(a=case_arrays["A64"], b=case_arrays["B64"], x=x32))
     return {"ratio_cpu": ratio, "ratio_opt_cpu": ratio}
 
 
@@ -2763,7 +2763,7 @@ def _materialize_case(gen_mod, entry, by_id, lapack=None):
 
     返回 (case_arrays, note)。只重建判定输入，不计算 CPU 阈值参考。
     ratio_cpu、gels 超定所需 ratio_opt_cpu 及状态由冻结 index 注入；
-    缺失或旧口径参考值不能由现场 LAPACK 计算替代。lapack 参数保留调用兼容。
+    缺失参考值不能由现场 LAPACK 计算替代。lapack 参数保留调用兼容。
     HT-8：info 契约用例（case_purpose=="info"）不产 golden/ratio——按 base case
     现场构造（构造性自检 fail-closed），judge 只比 info==k_expected。
     """
@@ -3366,10 +3366,6 @@ def _load_frozen_index(pkg_dir, entries, batched=False):
             if status == "prep_failed" and any(v is not None for v in values):
                 raise ValueError(f"{cid} prep_failed 与数值冲突")
             if OP in ("sgels", "cgels"):
-                # Legacy LU/QR indexes claimed A32-f64 while freezing A64/B64 residuals.
-                # Only the corrected freeze chain writes this per-case input basis.
-                if status == "ok" and row.get("ratio_input_basis") != "A32-f64":
-                    raise ValueError(f"{cid} gels CPU 参考需按 A32/B32 重新冻结；缺 ratio_input_basis=A32-f64")
                 if entry["m"] > entry["n"]:
                     if "ratio_opt_cpu" not in row:
                         raise ValueError(f"{cid} 缺冻结 ratio_opt_cpu")

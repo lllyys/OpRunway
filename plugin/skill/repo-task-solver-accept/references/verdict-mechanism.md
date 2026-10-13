@@ -46,8 +46,6 @@ float64／complex128，复数使用复模与共轭转置。golden 不参与判�
 matched_ratio 第二层；阈值所需 CPU 参考值从任务包冻结 index 读取。
 
 gels 方阵读取 ratio_cpu，超定读取 ratio_opt_cpu，均要求有效的冻结参考值。
-gels 的 ok 条目须带 ratio_input_basis=A32-f64，表示参考残差按实际 A32/B32
-升精度计算；历史 LU/QR 生成链误用 A64/B64，旧条目必须重新冻结，不能仅补标记。
 缺字段、非有限值或负值属于证据不足，不以现场计算的参考值补洞。
 
 ## 报告字段

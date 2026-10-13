@@ -75,8 +75,7 @@ python3 scripts/accept_run.py --package <任务包目录> \
 ```
 
 该入口不补做构建与执行。LU/QR 的 m/n、side/trans 与冻结 ratio_opt_cpu 由 index
-传入判定；gels 正常参考值须带 ratio_input_basis=A32-f64。旧版 A64/B64 参考值
-需用修正后的 case-gen 重新冻结，不能手工补标记或在验收现场重算替代。纯脚本包没有冻结输入数组时，接口精度项记证据不足；
+传入判定；缺失或无效参考值记证据不足，不在验收现场重算替代。纯脚本包没有冻结输入数组时，接口精度项记证据不足；
 已接入算子的完整运行走 A0–A3；LU/QR 的真实执行仍待接入。报告的 `operator`、`expectation`、`flags`、`versions` 和
 `声明边界` 含义见 [verdict-mechanism.md](references/verdict-mechanism.md)。
 

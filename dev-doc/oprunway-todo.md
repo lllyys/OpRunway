@@ -9,7 +9,7 @@
 合入说明见 [solver-luqr-import-1013.md](solver/solver-luqr-import-1013.md)。本轮按用户要求未测试。
 
 - [ ] 接入共享 harness：LU/QR 生成器／判定卡分流、矩形参数、ipiv/tau 输入输出及逐接口真实适配；现有协议与样例尚不足。
-- [ ] 在服务器CPU重新冻结 sgels/cgels 各166例精度参考：读取与生成链已静态修复，原index未改，新脚本拒旧值；见[solver-gels-frozen-fix-1013.md](solver/solver-gels-frozen-fix-1013.md)。
+- [ ] 核实 LU/QR CPU参考侧与被测侧的参考矩阵口径。gels冻结字段读取已修；未经确认的A32/B32换基、新标记及强制重冻要求已回退，不预设需要重算。见[solver-gels-basis-revert-1013.md](solver/solver-gels-basis-revert-1013.md)。
 - [ ] 接入 LU/QR 正式性能判定，保留 msprof op、均值与 GPU/0.35 口径；补齐 getriBatched/gels 缺失 GPU 基线。
 - [ ] 按交接待裁项完成16包交付：批量索引压缩／切分、私集真实种子、接口适配样例；当前仅复制与修正文档，不重产。
 

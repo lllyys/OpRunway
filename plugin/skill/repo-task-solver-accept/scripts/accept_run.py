@@ -225,8 +225,6 @@ def load_case_arrays(package, entry):
     if (entry.get("op") in ("sgels", "cgels")
             and entry.get("case_purpose") != "info"
             and entry.get("ratio_cpu_status") == "ok"):
-        if entry.get("ratio_input_basis") != "A32-f64":
-            return None, "gels CPU 参考需按 A32/B32 重新冻结；缺 ratio_input_basis=A32-f64"
         m, n = entry.get("m"), entry.get("n")
         if not isinstance(m, int) or not isinstance(n, int) or m < n or n < 1:
             return None, "gels 冻结条目缺有效 m/n"

@@ -107,8 +107,8 @@ python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 
    `*geqrf` 还原 `Q·R` vs `A` 与 `*mqr` 同式 max(5·`ratio_cpu`, 0.1)；
    `*gqr` max(5·`ratio_cpu`, 1.5)；
    `*gels` 方阵 max(5·`ratio_cpu`, 0.015)、超定 10·`ratio_opt_cpu`（无绝对地板）。
-   gels 的冻结参考值须带 `ratio_input_basis: "A32-f64"`；缺失或无效时停止判定，
-   由修正后的 case-gen 重新冻结 CPU 参考值，不能手工补标记或现场重算替代。
+   gels 方阵读取冻结 `ratio_cpu`，超定读取冻结 `ratio_opt_cpu`；
+   缺失或无效时停止判定，不能现场重算替代。
    退 0 = 全部数值通过；退 1 = 存在数值未通过或证据不足（缺被测输出、现场重生
    成失败都记证据不足，读报告 summary 区分）；退 2 = 用例清单读不出或参数错——
    **退 2 时报告文件不落盘**，外层脚本不要无条件读报告。
