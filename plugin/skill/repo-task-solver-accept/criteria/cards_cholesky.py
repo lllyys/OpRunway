@@ -130,6 +130,19 @@ class CriteriaCard:
     batched: bool = False          # True = 批量卡，judge 走逐矩阵通路（S3 spec §4）
     info_kind: str = "scalar"      # info 接口角色："scalar"｜"array"=infoArray（S3 spec §4）
     base_op: Optional[str] = None  # 批量卡的单矩阵基卡名；非批量卡为 None
+    # ---- LU/QR 增量（cards_luqr，lq-plan §1）：全部带默认值，Cholesky 三卡不动 ----
+    residual_kind_of: Optional[Callable] = None
+    # (case_arrays, dut_out) -> kind；用于按 case 形状动态选判据（gels：m=n 走
+    # DQRT16、m>n 走 DQRT17）。None 时用静态 residual_kind。
+    threshold_ref_of: Optional[Callable] = None
+    # (case_arrays) -> float；用于选阈值相对线基准（gels 方阵 ratio_cpu /
+    # 超定 ratio_opt_cpu）。None 时用 case_arrays["ratio_cpu"]。
+    formula_of: Optional[Callable] = None
+    # (case_arrays) -> str；用于按 case 形状给出公式展示串（gels 方阵/超定两支）。
+    # None 时用静态 formula。
+    threshold_of: Optional[Callable] = None
+    # (case_arrays, ref) -> float；整体接管阈值计算，用于按 case 形状分流的算子
+    # （gels 方阵 max(5r,0.015) / 超定 10·ref）。None 时走 threshold_fn（+mean）。
 
 
 CARDS = {

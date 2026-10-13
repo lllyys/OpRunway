@@ -82,9 +82,11 @@ CLI（spec §2.5 基础上 S2c 增两类复数扰动、S3 增逐矩阵序号）�
 """
 
 import argparse
+import gzip
 import json
 import platform
 import sys
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -92,10 +94,35 @@ import numpy as np
 TOOL = "sim_dut.py"
 # s3-E8：批量 info 用例的 out32 列数按算子族分型（2026-10-09）——求解族取 nrhs，
 #   与 stream_check 的批量 info 支路同一条形状规则。
-TOOL_VER = "s3-E8"  # 承 s3-E7（批量 info 契约用例按 sample_map 展开 infoArray）
+# s4-E6：LU/QR 支路（getrf 无 golden → 现场 getrf 合成 LU+ipiv；geqrf 输出带 tau；
+#   批量两族 infoArray）。
+TOOL_VER = "s4-E7"  # 承 s3-E8（批量 info 契约用例分型）与 s4-E6（LU/QR 支路）
 PERTURBS = ("none", "scale", "zero", "nan", "imag", "conj")
 COMPLEX_ONLY_PERTURBS = ("imag", "conj")
 SCALE_FACTOR = np.float32(2.0)  # 定标依据见模块文档 scale 条
+
+# LU/QR 批量两族（lowercase batched 命名）：info 为 (batch,) int32 infoArray（逐矩阵
+# LAPACK 约定，batch=1 不标量化）；与 Cholesky *potrfBatched 族同型，*potrsBatched 反之。
+LUQR_BATCHED_OPS = ("sgetribatched", "cgetribatched",
+                    "smatinvbatched", "cmatinvbatched")
+
+
+def _base_name(op):
+    """去实/复前缀：sgetrf→getrf、cgeqrf→geqrf（与 gen_data_luqr._base_name 同口径）。"""
+    return op[1:] if op[:1] in ("s", "c") else op
+
+
+def synth_getrf(a32, complex_):
+    """LU/QR getrf 无 golden32（因子非唯一，见 cards_luqr dut_out 契约）：模拟被测按
+    LAPACK 低精度前缀例程现场分解 A32 → (打包 LU, 1 基 ipiv)。sgetrf/cgetrf 保持低精度
+    dtype（dgetrf/zgetrf 会升型，勿用）。正例下被测打包 + 主元经 restore_lu 还原回 A。"""
+    from scipy.linalg import lapack
+    a = np.array(a32, order="F")
+    fn = lapack.cgetrf if complex_ else lapack.sgetrf
+    lu, ipiv, info = fn(a)
+    if info != 0:
+        raise ValueError(f"现场 getrf 合成失败: info={info}")
+    return np.ascontiguousarray(lu), (np.asarray(ipiv, dtype=np.int32) + 1)
 
 
 def info_dut_value(k_expected, mode):
@@ -176,6 +203,44 @@ def perturb_out32(golden32, mode, matrix_index=None):
     raise ValueError(f"未知扰动 {mode!r}，只支持 {PERTURBS}")
 
 
+def sim_dut_from_arrays(op, arrays, mode, matrix_index=None):
+    """由现场生成的 case 数组 dict 产出 sim 被测输出（正/负例）。
+
+    sim_dut CLI（读 npz）与 stream_check（现场重生成数组）共用本函数，杜绝平行
+    副本（与 info_dut_value 同纪律）。arrays 须含 A32；getrf 无 golden32（因子非
+    唯一，cards_luqr 契约）→ 现场按低精度前缀例程分解 A32 合成打包 LU + ipiv；
+    geqrf 另附 tau（被测反射子标度）。返回 {"out32", "info", "status"[,"ipiv","tau"]}。
+    """
+    base = _base_name(op)
+    cx = op.startswith("c")
+    golden32 = arrays.get("golden32")
+    ipiv = None
+    if golden32 is not None:
+        ref = golden32
+    elif base == "getrf":
+        a32 = arrays.get("A32")
+        if a32 is None:
+            raise ValueError(f"op={op} 需 A32 现场合成 LU（数组缺该键）")
+        ref, ipiv = synth_getrf(a32, cx)
+    else:
+        raise ValueError(f"op={op} 无 golden32 且非 getrf（缺基准数组）")
+    out32 = perturb_out32(ref, mode, matrix_index)
+    is_array_info = (op in LUQR_BATCHED_OPS
+                     or (op.endswith("Batched") and "potrf" in op))
+    if is_array_info:
+        if out32.ndim != 3:
+            raise ValueError(f"op={op} 但输出非批量三维: shape={out32.shape}")
+        info_val = np.zeros(out32.shape[0], dtype=np.int32)
+    else:
+        info_val = np.int64(0)
+    payload = {"out32": out32, "info": info_val, "status": np.str_("ok")}
+    if ipiv is not None:                    # getrf：被测主元（1 基，cards_luqr 契约）
+        payload["ipiv"] = ipiv
+    if base == "geqrf" and arrays.get("tau32") is not None:
+        payload["tau"] = arrays["tau32"]    # geqrf：被测反射子标度（cards_luqr 契约）
+    return payload
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="S1 模拟被测（spec §2.5 CLI）")
     ap.add_argument("--package", required=True, help="算子包目录（spec §2.2）")
@@ -187,11 +252,19 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     package, out_dir = Path(args.package), Path(args.out)
-    index_path = package / "cases" / "index.json"
+    cases_dir = package / "cases"
+    plain = cases_dir / "index.json"
     try:
-        with open(index_path, "r", encoding="utf-8") as fh:
-            index = json.load(fh)
-    except (OSError, json.JSONDecodeError) as exc:
+        if plain.is_file():
+            index = json.loads(plain.read_text(encoding="utf-8"))
+        else:
+            gz = cases_dir / "index.json.gz"
+            parts = [gz] if gz.is_file() else sorted(cases_dir.glob("index.json.gz.part*"))
+            if not parts:
+                raise FileNotFoundError("cases/index.json（或 index.json.gz / 切分件）缺失")
+            index = json.loads(
+                gzip.decompress(b"".join(p.read_bytes() for p in parts)).decode("utf-8"))
+    except (OSError, EOFError, ValueError, zlib.error) as exc:
         print(f"[sim_dut] 错误: cases/index.json 不可用: {exc}", file=sys.stderr)
         return 2
     cases = index.get("cases")
@@ -250,32 +323,17 @@ def main(argv=None):
                      out32=out32, info=info_val, status=np.str_("ok"))
             written.append(case_id)
             continue
+        op = str(entry.get("op") or "")
         try:
             with np.load(path) as z:
-                golden32 = z["golden32"]
+                arrays = {k: z[k] for k in z.files}
+            payload = sim_dut_from_arrays(op, arrays, args.perturb, args.perturb_index)
         except Exception as exc:
             skipped.append({"case_id": case_id,
-                            "reason": f"npz 不可读: {type(exc).__name__}: {exc}"})
+                            "reason": f"npz 不可读/不可模拟: "
+                                      f"{type(exc).__name__}: {exc}"})
             continue
-        try:
-            out32 = perturb_out32(golden32, args.perturb, args.perturb_index)
-        except ValueError as exc:
-            skipped.append({"case_id": case_id, "reason": str(exc)})
-            continue
-        # info 按接口角色分型（S3 spec §4）：potrfBatched 族产 (batch,) int32
-        # infoArray（batch=1 不标量化）；potrsBatched 族与单矩阵算子产标量。
-        op = str(entry.get("op") or "")
-        if op.endswith("Batched") and "potrf" in op:
-            if out32.ndim != 3:
-                skipped.append({"case_id": case_id,
-                                "reason": f"op={op} 但 golden32 非批量三维: "
-                                          f"shape={out32.shape}"})
-                continue
-            info_val = np.zeros(out32.shape[0], dtype=np.int32)
-        else:
-            info_val = np.int64(0)
-        np.savez(out_dir / f"{case_id}.npz",
-                 out32=out32, info=info_val, status=np.str_("ok"))
+        np.savez(out_dir / f"{case_id}.npz", **payload)
         written.append(case_id)
 
     manifest = {

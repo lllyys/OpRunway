@@ -7,7 +7,7 @@
 | 文件 | 内容 |
 | --- | --- |
 | `cases/index.json` | 逐 case 条目：canonical 全字段 + `npz` 路径 + `arrays` 清单 + `ratio_cpu`（残差参考值）+ `ratio_cpu_status`（`ok`/`prep_failed`）；纯脚本包条目另记 `materialize: "gen"`，info 契约条目（`case_purpose: "info"`）另带 `k_expected`/`info_probe`/`base_case_id`（无 golden/ratio），批量条目另带 `sample_map` 槽位映射、逐内容 `ratio_cpu` k 值列表与 case 级 `ratio_cpu_mean` |
-| `cases/<case_id>.npz` | `A64/A32`（potrs 另 `B64/B32`）+ `golden64/golden32`（golden 仅作自测参考，不参与判定）。实数 float64/float32，复数 complex128/complex64，字段名两域相同 |
+| `cases/<case_id>.npz` | Cholesky：`A64/A32`（potrs 另 `B64/B32`）+ `golden64/golden32`。LU/QR：自 `A64/A32` 起——getrf 仅 `A64/A32`（无 golden，判定侧还原 L·U）；getri 另 `LU64/LU32`+`ipiv`+golden；gels 另 `B64/B32`+golden；getriBatched 另 `LU64/LU32`+`ipiv`（DUT 输入打包 LU）+golden；matinvBatched 仅 `A`+golden；geqrf 另 `tau64/tau32`（golden 即打包 AF）；*gqr 以打包 AF 为 `A64/A32`+`tau64/tau32`+golden(Q)；*mqr 另 `C64/C32`+`q64`+`tau64/tau32`+golden。实数 float64/float32，复数 complex128/complex64，字段名两域相同（golden 仅作自测参考，不参与判定） |
 | `gen_data.py` | 数据构造脚本副本；与 `canonical_cases.json` 配合可重新生成同批数据 |
 | `canonical_cases.json` | 本算子的规范用例清单切片（含未生成 case 的登记） |
 | `verify_accuracy.py` | 精度检查脚本副本（渲染件，输出不构成验收证据） |
@@ -17,7 +17,10 @@
 | `README.md` | 自测说明门面 |
 | `manifest.json` | 环境版本、工具名与版本、逐文件 sha256 摘要 |
 
-## 纯脚本形态（新装包一律如此：批量四算子与单矩阵六算子 v2）
+## 纯脚本形态（新装包一律如此：Cholesky 十算子与 LU/QR 十六接口）
+
+LU/QR 十六接口同样一律纯脚本形态（`--book lu_real|lu_complex|qr_real|qr_complex`），
+`gen_data.py` 即 `gen_data_luqr.py` 副本，字段面见上表 npz 行与「关键约定」的 LU/QR 段。
 
 纯脚本形态的包不携带任何数据数组：无 `cases/*.npz`（上表该行描述的是 gen_data
 现场生成后的产物形状），`cases/index.json` 条目记 `materialize: "gen"`，其
@@ -47,14 +50,19 @@ verify/accept 消费时据此辨新旧，旧包无此字段即 A64 基，旧固�
 ## 关键约定
 
 - 降型一致：`A32 == A64.astype(单精度)`（B、golden 同理），装包自检逐 case 断言；
-- 正定性由构造保证：精度用例的 SPD/HPD 矩阵在构造环节即正定——对角占优构造
+- 正定性由构造保证（**仅 Cholesky**）：精度用例的 SPD/HPD 矩阵在构造环节即正定——对角占优构造
   （`source: cu` 的用例）对角元 ≥ n、非对角幅值 ≤ 0.5，Gershgorin 圆盘给出特征值
   下界 `(n+1)/2`；随机底阵构造（`source: std` 的用例）`A = B·Bᴴ + n·I`，半正定项
   加正定平移，特征值下界 `n`。生成、判定与自测通路都不含运行时正定性检查，
   消费方不必自行验证；有意构造的非正定用例（info 契约用例，构造时打破正定性，只用于 info 契约
   判定）不受本条约束；
+- **LU/QR 输入构造**（lq-plan §2.1，转录自 0923 四册 bench 的唯一 `fillRandom`）：元素
+  `rand()%10000/100 - 50`（U[-50,50)，无对角占优/无 Hermitian 构造；复数每元素先 `.x`
+  后 `.y` 各一次独立 rand）。以 FP64 为母本、`A32` 由 `A64` 降型（装包自检断言一致）；
+  getrf/geqrf 因子非唯一，判定侧按任务书 §3.2.1 条 6 走还原比对（无 golden 直比）；
 - **被测输出三键**：每 case 一个 `<case_id>.npz`，含 `out32`（结果）、`info`（整型
-  状态）、`status`（`ok` 或失败标识）——验收与自测同用这份约定；
+  状态）、`status`（`ok` 或失败标识）——验收与自测同用这份约定；LU/QR 的 getrf 另带
+  `ipiv`（1 基主元）、geqrf 另带 `tau`（反射子系数，长度 min(m,n)），由判定侧透传消费；
 - **摘要分级**：`cases/`、`perf_baseline` 错配阻断对应结论；`verify_*.py` 与权威
   实现不一致只记告警；
 - **包冻结**：交付后不改包。检查阈值若有后续裁定，由验收侧实现更新并另发说明，
@@ -64,5 +72,7 @@ verify/accept 消费时据此辨新旧，旧包无此字段即 A64 基，旧固�
 
 任务包保持设备无关。构建、调用和失败取证使用独立分发的 solver-accept harness，
 开发者自测与验收者使用同一流程，但验收证据由验收者本次运行产生。harness 不进入
-任务包。批量 index 可用 `cases/index.json.gz` 交付；manifest 中 `cases/index.json`
-的摘要针对解压后的内容，压缩方式不改变用例或数值参考值。
+任务包。包内 index 可为明文 `cases/index.json`；超 10 MiB 时按 gzip 落
+`cases/index.json.gz`，仍超限则切分为 `cases/index.json.gz.partNNN`（单件 ≤ 10 MiB，
+按名序拼接即完整 gzip 流）。manifest 中 `cases/index.json` 的摘要恒针对解压后的
+JSON 内容（与磁盘形态无关），压缩/切分不改变用例或数值参考值。

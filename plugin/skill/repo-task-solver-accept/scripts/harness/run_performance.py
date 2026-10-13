@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "criteria"))
 import performance
@@ -15,6 +16,23 @@ import run_harness
 
 
 read_kernel_samples = performance.read_kernel_samples
+
+
+def _read_index_opt(package):
+    """包内 cases/index（明文 / gzip / gzip 切分件 .partNNN）→ dict；缺失返回 None。"""
+    cases = package / "cases"
+    plain = cases / "index.json"
+    if plain.is_file():
+        return json.loads(plain.read_text(encoding="utf-8"))
+    gz = cases / "index.json.gz"
+    parts = [gz] if gz.is_file() else sorted(cases.glob("index.json.gz.part*"))
+    if not parts:
+        return None
+    try:
+        raw = gzip.decompress(b"".join(p.read_bytes() for p in parts))
+    except (OSError, zlib.error) as exc:
+        raise ValueError(f"cases/index 切分件不可解: {exc}") from exc
+    return json.loads(raw.decode("utf-8"))
 
 
 def make_executor(directory, executor, kernel):
@@ -122,12 +140,10 @@ def main(argv=None):
             measurements = {"schema": performance.SCHEMA, "package_fingerprint": contract["fingerprint"],
                             "build": provenance, "kernel_map": mapping, "cases": []}
             mods = run_harness.load_modules(args.gen_dir)
-            index_paths = [p for p in (Path(args.package)/"cases/index.json", Path(args.package)/"cases/index.json.gz") if p.exists()]
             entries = {}
-            if len(index_paths) == 1:
-                path = index_paths[0]
-                with (gzip.open(path, "rt") if path.suffix == ".gz" else path.open()) as f:
-                    entries = performance.unique(json.load(f)["cases"], "input index")
+            index_doc = _read_index_opt(Path(args.package))
+            if index_doc is not None:
+                entries = performance.unique(index_doc["cases"], "input index")
             executors = {}
             for number, (cid, canonical) in enumerate(contract["cases"].items()):
                 if cid not in selected:

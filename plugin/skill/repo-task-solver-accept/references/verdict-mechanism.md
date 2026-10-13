@@ -25,6 +25,26 @@ fail-closed 边界：残差不可计算（被测含 NaN/Inf、全零输出触发
 误伤又保留「劣化于 CPU 参考即不过」的约束。包内 golden32/golden64 不再参与判定，
 降为自测参考件（包内文件与 schema 不变，供开发者比对参考）。
 
+## LU/QR 十六接口（LQ-20/21/22）
+
+判定卡独立成模块 `criteria/cards_luqr.py`（16 接口），经统一取卡分发层
+`render_verify._spec_card` 与 Cholesky 卡汇合（`accepts(op)` 分流，Cholesky 零漂移）。
+
+| 接口 | 残差计算对象 | 残差类型与阈值（r=ratio_cpu，rᵢ=逐内容参考值） |
+| --- | --- | --- |
+| sgetrf/cgetrf | 被测 LU 与 ipiv 逆序回放还原矩阵，与实际输入 A32 比较 | DGET01：max(5r, 0.3 实 / 0.5 复) |
+| sgetri/cgetri | 从输入 LU32 与 ipiv 还原 A，检查被测逆 C 的 I−C·A | DGET03：max(5r, 0.05) |
+| sgetribatched/cgetribatched | 逐矩阵从输入 LU32 与 ipiv 还原 A，检查 I−C·A | DGET03：max(5rᵢ, 0.05) |
+| smatinvbatched/cmatinvbatched | 逐矩阵以实际输入 A32 检查被测逆 C 的 I−C·A | DGET03：max(5rᵢ, 0.5) |
+| sgeqrf/cgeqrf | 从被测反射子与 tau 构造完整 Q，检查 R−Qᴴ·A32 | DQRT01：max(5r, 0.1) |
+| sorgqr/cungqr | 检查被测 Q 的 I−Qᴴ·Q；当前卡仅检查正交性／酉性 | DQRT02：max(5r, 1.5) |
+| sormqr/cunmqr | 按 side/trans 以显式 Q 与 C32 相乘，与被测结果比较 | DQRT03：max(5r, 0.1) |
+| sgels/cgels | 方阵检查 B32−A32·X；超定检查残差 R=B32−A32·X 的 Rᴴ·A32 | DQRT16：max(5r, 0.015)；DQRT17：10·ratio_opt_cpu；实／复同式 |
+
+各残差按矩阵规模、范数和 EPS32=2^-24 归一化，计算时实际单精度输入与输出升到
+float64／complex128，复数使用复模与共轭转置。golden 不参与判定，无混合容差或
+matched_ratio 第二层；阈值所需 CPU 参考值从任务包冻结 index 读取。
+
 ## 报告字段
 
 | 字段 | 取值与含义 |

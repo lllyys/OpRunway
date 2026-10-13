@@ -4,6 +4,9 @@
 执行件对被测工程公开头编译，不调用开发者自带的判据脚本。一次 case 使用一个 C++
 子进程；确定性复跑在同一进程、同一 stream 内逐轮恢复输入。
 
+LU/QR 的生成器和判定卡已提供，但本 harness 尚未接入其输入准备、矩形参数及
+ipiv/tau 输入输出；LU/QR 真实执行请求停在 A0，不能仅凭已有判定卡继续运行。
+
 ## 前置条件
 
 | 核对项 | 准入条件 | 不满足时 |
@@ -73,8 +76,9 @@ python3 scripts/harness/run_harness.py --repo "$DUT_REPO" \
 | --keep case_id | 成功 case 也导出现场 | 用于排错与独立重判 |
 | --timeout | 限制单个执行子进程时间 | 超时终止进程组，保留已有日志与输出 |
 
-包内 index 可以是 `cases/index.json` 或 gzip 文件 `cases/index.json.gz`。
-后者的 manifest 摘要仍针对解压后的 JSON 内容。逐 case 的 `ratio_cpu` 是冻结的
+包内 index 可为明文 `cases/index.json`、gzip `cases/index.json.gz`；超大时按 ≤10 MiB
+切分为 `cases/index.json.gz.partNNN`（按名序拼接即完整 gzip 流）。manifest 摘要恒针对
+解压后的 JSON 内容（与磁盘形态无关）。逐 case 的 `ratio_cpu` 是冻结的
 CPU 残差参考值，`ratio_cpu_status` 表示参考链成功或准备失败；单矩阵的均值取 index
 顶层对应算子，批量均值取该 case 的槽位加权值。批量同时使用该 case 固化的
 `sample_map`（代表内容到批内槽位的映射）。输入现场生成，判定参考值不现场替换。

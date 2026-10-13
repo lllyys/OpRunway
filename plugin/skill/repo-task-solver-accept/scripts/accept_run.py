@@ -57,12 +57,13 @@ import hashlib
 import json
 import platform
 import sys
+import zlib
 from pathlib import Path
 
 import numpy as np
 
 TOOL = "accept_run.py"
-TOOL_VER = "s2a1-D6"  # 2026-10-09 准入断言：只受理 A32-f64 基的包；承 s2a1-D5
+TOOL_VER = "s2a1-D7"  # 2026-10-11：LU/QR 统一取卡（cards_luqr）+ ipiv/tau 透传；只受理 A32-f64 基；承 s2a1-D6
 RATIO_BASIS = "A32-f64"  # 受理的唯一残差基（index 顶层 ratio_basis）
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -75,7 +76,30 @@ import expectations as exp          # noqa: E402  (同目录期望集模块)
 import batched_parallel             # noqa: E402  (criteria judge 的统一入口：单矩阵
                                     #  直通 verdict.judge，批量卡支持矩阵区间多进程分块)
 import cards_cholesky               # noqa: E402  (criteria 判据卡)
+try:                                # LU/QR 16 接口判据卡（lq-plan §1）；缺该模块不致命
+    import cards_luqr               # noqa: E402
+except ImportError:                 # pragma: no cover - 老快照无 LU/QR 卡时退化
+    cards_luqr = None
 import thresholds                   # noqa: E402  (criteria 阈值常量, CRITERIA_VER)
+
+
+def get_card(op):
+    """统一取卡（fail-closed）：LU/QR 16 接口走 cards_luqr，其余走 cards_cholesky。
+
+    与 criteria/render_verify._spec_card 同口径；cards_luqr 未装载时全部落
+    cards_cholesky（旧快照零漂移）。
+    """
+    if cards_luqr is not None and cards_luqr.accepts(op):
+        return cards_luqr.get_card(op)
+    return cards_cholesky.get_card(op)
+
+
+def supported_ops():
+    """本 accept 骨架支持的算子全集（Cholesky 三族 + LU/QR 16 接口）。"""
+    base = list(cards_cholesky.OPS) + list(cards_cholesky.BATCHED_OPS)
+    if cards_luqr is not None:
+        base += [op for op in cards_luqr.OPS if op not in base]
+    return base
 
 
 def _fail(msg):
@@ -103,6 +127,24 @@ def _sha256(path):
     return h.hexdigest()
 
 
+def _index_bytes(package):
+    """包内 cases/index 的逻辑明文：index.json；或 gzip index.json.gz；或 gzip
+    切分件 index.json.gz.partNNN（按名序拼接后解压）。缺失抛 FileNotFoundError，
+    切分件损坏抛 ValueError。"""
+    cases = package / "cases"
+    plain = cases / "index.json"
+    if plain.is_file():
+        return plain.read_bytes()
+    gz = cases / "index.json.gz"
+    parts = [gz] if gz.is_file() else sorted(cases.glob("index.json.gz.part*"))
+    if not parts:
+        raise FileNotFoundError("cases/index.json（或 index.json.gz / 切分件）缺失")
+    try:
+        return gzip.decompress(b"".join(p.read_bytes() for p in parts))
+    except (OSError, EOFError, zlib.error) as exc:
+        raise ValueError(f"cases/index 切分件不可解: {exc}") from exc
+
+
 # ---------------------------------------------------------------------------
 # 指纹核对（spec §2.2 分级）
 # ---------------------------------------------------------------------------
@@ -123,9 +165,14 @@ def check_fingerprints(package, manifest):
         return mismatch, ["WARN:指纹表缺失:manifest.fingerprint"]
     for rel, expected in sorted(fp.items()):
         path = package / rel
-        if rel == "cases/index.json" and not path.is_file():
-            path = package / "cases/index.json.gz"
-        if not path.is_file():
+        if rel == "cases/index.json":
+            # 逻辑明文口径：磁盘可为明文/gz/切分件，指纹恒按解压内容核对。
+            try:
+                actual = hashlib.sha256(_index_bytes(package)).hexdigest()
+                desc = None if actual == expected else f"sha256 错配 {actual[:12]}…"
+            except (OSError, EOFError, ValueError) as exc:
+                desc = f"文件缺失或不可解: {exc}"
+        elif not path.is_file():
             desc = "文件缺失"
         else:
             actual = _sha256(path)
@@ -193,11 +240,17 @@ def load_dut_out(dut_dir, case_id):
             # criteria 的批量校验裁决，此处不预判角色。
             info = np.asarray(z["info"])
             info = int(info.item()) if info.ndim == 0 else np.array(info)
-            return {
+            dut = {
                 "out32": z["out32"],
                 "info": info,
                 "status": str(np.asarray(z["status"]).item()),
-            }, None
+            }
+            # LU/QR 判据卡增量（cards_luqr dut_out 契约）：getrf 另带 ipiv（被测主元，
+            # 1 基）、geqrf 另带 tau（被测反射子标度）；存在即透传（判据卡消费面）。
+            for k in ("ipiv", "tau"):
+                if k in z.files:
+                    dut[k] = z[k]
+            return dut, None
     except Exception as exc:
         return None, f"被测输出不可读: {type(exc).__name__}: {exc}"
 
@@ -216,7 +269,7 @@ def accuracy_items(package, dut_dir, operator, index, baseline_rows,
     由 HT-4 在发包侧预计算固化，build_report 准入拒绝所需字段缺失）。
     批量卡下 mean 从 case 条目读取，经
     passthrough 带入每个矩阵（verdict._judge_batched_inner）。"""
-    card = cards_cholesky.get_card(operator)
+    card = get_card(operator)
     op_mean = (index.get("ratio_cpu_mean") or {}).get(operator)
     index_cases = index.get("cases")
     index_blocked = next(
@@ -330,14 +383,15 @@ def perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking, per
 def build_report(package, dut_dir, jobs=1, performance_evidence=None):
     manifest = _load_json(package / "manifest.json", "manifest.json")
     operator = manifest.get("operator")
-    supported = cards_cholesky.OPS + cards_cholesky.BATCHED_OPS
+    supported = supported_ops()
     if operator not in supported:
         _fail(f"manifest.operator={operator!r} 不在支持集 {supported}")
-    index_paths = [p for p in (package / "cases/index.json",
-                               package / "cases/index.json.gz") if p.is_file()]
-    if len(index_paths) != 1:
-        _fail("必须恰有一份 cases/index.json 或 index.json.gz")
-    index = _load_json(index_paths[0], "cases/index.json")
+    try:
+        index = json.loads(_index_bytes(package).decode("utf-8"))
+    except FileNotFoundError:
+        _fail("必须恰有一份 cases/index.json（或 index.json.gz / 切分件）")
+    except (OSError, EOFError, ValueError) as exc:
+        _fail(f"cases/index.json 不可解析: {exc}")
     # 准入断言（以新为准裁定 2026-10-09）：只受理 A32-f64 基的包。缺字段即旧 A64 基，
     # 其 ratio_cpu/ratio_cpu_mean 与现行残差实现不同基，判出来的 PASS/FAIL 都不成立。
     basis = index.get("ratio_basis")

@@ -55,7 +55,7 @@ S3 批量增量（S3 spec §4/§6，D3 卡；HT-16 起 T8 暂定聚合标记摘�
 
 from collections import OrderedDict
 
-EXPECTATIONS_VER = "s2a1-D6"  # s2-A1 一段式：接口精度映射改 residual 单层；承 s3-D4
+EXPECTATIONS_VER = "s2a1-D7"  # s2-A1 一段式 residual 单层 + LQ-22 lowercase 批量后缀；承 s2a1-D6/s3-D5
 
 # S3 spec §1：batched 覆盖缺口的统一声明文本（batched 期望项与声明边界共用）。
 BATCHED_COVERAGE_GAP = (
@@ -266,8 +266,13 @@ def perf_reference_item(operator, status, evidence):
 
 
 def is_batched_operator(operator):
-    """批量算子判别（S3：*Batched 后缀即批量四算子的命名不变量）。"""
-    return str(operator).endswith("Batched")
+    """批量算子判别（S3：*Batched 后缀即批量四算子的命名不变量）。
+
+    LU/QR 批量两族（getriBatched/matinvBatched）载体的算子名沿用 LAPACK lowercase
+    拼写（sgetribatched 等），故两类后缀「Batched」「batched」同认。
+    """
+    s = str(operator)
+    return s.endswith("Batched") or s.endswith("batched")
 
 
 def batched_status_item(operator):

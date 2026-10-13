@@ -71,6 +71,7 @@ import argparse
 import json
 import gzip
 import uuid
+import zlib
 import os
 import platform
 import sys
@@ -602,14 +603,21 @@ def _pick_cases(mods, canonical_path, ops, max_n, limit):
     if not isinstance(cases, list):
         raise ContractError(f"{canonical_path}: 顶层缺 cases 数组")
     package = Path(canonical_path).parent
-    candidates = [package / "cases" / "index.json", package / "cases" / "index.json.gz"]
-    available = [p for p in candidates if p.is_file()]
-    if len(available) != 1:
-        raise ContractError("任务包必须恰有一份 cases/index.json 或 index.json.gz")
-    idx = available[0]
-    opener = gzip.open if idx.suffix == ".gz" else open
-    with opener(idx, "rt", encoding="utf-8") as fh:
-        index_doc = json.load(fh)
+    cases_dir = package / "cases"
+    plain = cases_dir / "index.json"
+    if plain.is_file():
+        index_doc = json.loads(plain.read_text(encoding="utf-8"))
+    else:
+        gz = cases_dir / "index.json.gz"
+        parts = [gz] if gz.is_file() else sorted(cases_dir.glob("index.json.gz.part*"))
+        if not parts:
+            raise ContractError(
+                "任务包必须恰有一份 cases/index.json（或 index.json.gz / 切分件）")
+        try:
+            raw = gzip.decompress(b"".join(p.read_bytes() for p in parts))
+        except (OSError, zlib.error) as exc:
+            raise ContractError(f"cases/index 切分件不可解: {exc}") from exc
+        index_doc = json.loads(raw.decode("utf-8"))
     if index_doc.get("ratio_basis") != RATIO_BASIS:
         raise ContractError(f"旧基包不受理：index.ratio_basis 必须为 {RATIO_BASIS}")
     manifest_path = package / "manifest.json"

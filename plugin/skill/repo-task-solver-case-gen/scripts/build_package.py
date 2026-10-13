@@ -122,6 +122,7 @@ CLI（spec §2.5 逐字；方括号内为本卡补充的可选项，缺省行为
 """
 
 import argparse
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -142,10 +143,19 @@ TOOL = "build_package.py"
 TOOL_VER = "s3-F15"  # 包内源码导入不写字节码；负例门消费完整固化参考值
 OPS = ("spotrf", "spotrs", "spotri", "cpotrf", "cpotrs", "cpotri")
 BATCHED_OPS = ("spotrfBatched", "spotrsBatched", "cpotrfBatched", "cpotrsBatched")
-ALL_OPS = OPS + BATCHED_OPS
+# LU/QR 16 接口（LQ-13；lq-plan §1）：LU 实/复 getrf/getri/getriBatched/matinvBatched
+# + QR 实/复 geqrf/*gqr/*mqr/gels。单矩阵 12 走 build_purescript，批量 4 走 build_batched。
+LUQR_SINGLE_OPS = ("sgetrf", "sgetri", "sgeqrf", "sorgqr", "sormqr", "sgels",
+                   "cgetrf", "cgetri", "cgeqrf", "cungqr", "cunmqr", "cgels")
+LUQR_BATCHED_OPS = ("sgetribatched", "cgetribatched",
+                    "smatinvbatched", "cmatinvbatched")
+LUQR_OPS = LUQR_SINGLE_OPS + LUQR_BATCHED_OPS
+ALL_OPS = OPS + BATCHED_OPS + LUQR_OPS
 PACKAGE_VER = "s1"
 PACKAGE_VER_BATCHED = "s3-batched"   # 纯脚本形态（S3 spec §5），与逐字节复用形态区分
 PACKAGE_VER_PURESCRIPT = "s4-v2-purescript"  # 单矩阵六算子 v2（纯脚本形态，S4）
+PACKAGE_VER_LUQR = "lq-v1-purescript"        # LU/QR 单矩阵 12（LQ-13，纯脚本形态）
+PACKAGE_VER_LUQR_BATCHED = "lq-batched-v1-purescript"  # LU/QR 批量两族 4
 STANDARD_REFS = {
     "三层判定": "repos/solver_tasks-main/cholesky_precision/README.md",
     "阈值表": "repos/opbase-precision-standard/mixed_tolerance_standard.md",
@@ -166,6 +176,51 @@ def _sha256_file(path):
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+# 单文件上限 10 MiB：超出的 index 先 gzip，仍超出则切分（逐块 ≤ 上限）。
+_INDEX_FILE_LIMIT = 10 * 1024 * 1024
+
+
+def _read_cases_index_bytes(cases_dir):
+    """读包内 index 的逻辑明文：cases/index.json；或 gzip cases/index.json.gz；或
+    gzip 切分件 cases/index.json.gz.partNNN（按名序拼接后解压）。"""
+    plain = cases_dir / "index.json"
+    if plain.is_file():
+        return plain.read_bytes()
+    gz = cases_dir / "index.json.gz"
+    parts = [gz] if gz.is_file() else sorted(cases_dir.glob("index.json.gz.part*"))
+    if not parts:
+        raise ContractError(
+            f"{cases_dir} 下缺 cases/index.json（或 index.json.gz / 切分件）")
+    return gzip.decompress(b"".join(p.read_bytes() for p in parts))
+
+
+def _logical_index_sha(cases_dir):
+    """指纹口径：index 的逻辑明文 sha256（与磁盘形态无关）。"""
+    return hashlib.sha256(_read_cases_index_bytes(cases_dir)).hexdigest()
+
+
+def _write_cases_index(cases_dir, index_obj):
+    """写包内 index，返回逻辑明文 sha256（指纹以此为准，不看磁盘形态）。
+
+    明文 ≤10MiB：保持 cases/index.json；否则 gzip 为 cases/index.json.gz；仍超限则
+    切分 cases/index.json.gz.partNNN（按名序拼接即完整 gzip 流）。"""
+    raw = (json.dumps(index_obj, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    cases_dir.mkdir(parents=True, exist_ok=True)
+    for stale in cases_dir.glob("index.json*"):
+        stale.unlink()
+    if len(raw) <= _INDEX_FILE_LIMIT:
+        (cases_dir / "index.json").write_bytes(raw)
+    else:
+        blob = gzip.compress(raw, compresslevel=6, mtime=0)
+        if len(blob) <= _INDEX_FILE_LIMIT:
+            (cases_dir / "index.json.gz").write_bytes(blob)
+        else:
+            for i in range(0, len(blob), _INDEX_FILE_LIMIT):
+                (cases_dir / f"index.json.gz.part{i // _INDEX_FILE_LIMIT:03d}").write_bytes(
+                    blob[i:i + _INDEX_FILE_LIMIT])
+    return hashlib.sha256(raw).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +295,40 @@ def _is_complex_op(op):
     return op.startswith("c")
 
 
+def _is_luqr(op):
+    """算子族：LU/QR 16 接口走独立生成器/回填链/README 模板。"""
+    return op in LUQR_OPS
+
+
+def _luqr_base(op):
+    """去实/复前缀：sgetrf→getrf、cungqr→ungqr（与 gen_data_luqr._base_name 同口径）。"""
+    return op[1:] if op[:1] in ("s", "c") else op
+
+
+def _luqr_gen_module_name(op):
+    """包内 gen_data 副本与运行时生成器的文件名（LU/QR 与 Cholesky 数据面全独立）。"""
+    return "gen_data_luqr.py" if _is_luqr(op) else "gen_data_cholesky.py"
+
+
+def _expected_a64_shape(entry):
+    """精度用例 A64 的期望形状（矩形口径，LQ-13）：Cholesky 恒 (n,n)；LU/QR 逐算子
+    getri→(n,n)、*gqr→(m,n)、*mqr→(nq,k)、getrf/geqrf/gels→(m,n)。越界或错填即报错。"""
+    op = entry.get("op", "")
+    n = entry.get("n")
+    if not _is_luqr(op):
+        return (n, n)
+    base = _luqr_base(op)
+    m = entry.get("m")
+    if base == "getri":
+        return (n, n)
+    if base in ("ungqr", "orgqr"):
+        return (m, n)
+    if base in ("unmqr", "ormqr"):
+        nq = m if entry.get("side") == "LEFT" else n
+        return (nq, entry.get("k"))
+    return (m, n)                       # getrf/geqrf/gels
+
+
 def _dtype32_of(name64, arr64, case_id):
     """降型目标 dtype（spec §2.2 + S2 spec §4，字段名不变）：float64→float32、
     complex128→complex64；其余 dtype 属 schema 违约，fail-closed。"""
@@ -252,9 +341,11 @@ def _dtype32_of(name64, arr64, case_id):
         f"{case_id}: {name64} dtype={dt} 不在 float64/complex128（spec §2.2 + S2 spec §4）")
 
 
-def recompute_golden(op, arrays, uplo, case_id):
+def recompute_golden(op, arrays, uplo, case_id, entry=None):
     """按 spec §2.2（实数 d 链路）/ S2 spec §4（复数 z 链路）独立重算 golden64
-    （C 序）。info!=0 属数据问题，直接抛。"""
+    （C 序）。info!=0 属数据问题，直接抛。LU/QR 16 接口走 `_recompute_golden_luqr`。"""
+    if _is_luqr(op):
+        return _recompute_golden_luqr(op, arrays, case_id, entry)
     lapack = _lapack()
     lower = uplo == "L"
     a64 = arrays["A64"]
@@ -287,8 +378,69 @@ def recompute_golden(op, arrays, uplo, case_id):
     return np.ascontiguousarray(g)
 
 
+def _recompute_golden_luqr(op, arrays, case_id, entry):
+    """LU/QR golden64 独立重算（LQ-13；只用于抽验比对，绝不落盘）。
+
+    逐算子按四册任务书 §3.2.2 golden 链（实 d / 复 z 前缀）：
+    - getrf：无 golden（因子非唯一）→ 返回 None（抽验侧跳过该算子）；
+    - getri：dgetri(LU64, ipiv 转 0 基) → 逆；
+    - geqrf：dgeqrf → 打包 AF；
+    - *gqr：dorgqr/zungqr(AF,tau) → Q；
+    - *mqr：dormqr/zunmqr(side,trans,AF,tau,C) → op(Q)·C；
+    - gels：dgels(A,B) → 解 X（B_out 前 n 行）。
+    info!=0 属数据问题，直接抛 SelfCheckError。"""
+    lap = _lapack()
+    cx = _is_complex_op(op)
+    pfx = "z" if cx else "d"
+    base = _luqr_base(op)
+    a64 = arrays["A64"]
+    if base == "getrf":
+        return None
+    if base == "getri":
+        lu64 = arrays["LU64"]
+        piv = np.asarray(arrays["ipiv"], dtype=np.int32) - 1
+        g, info = getattr(lap, pfx + "getri")(np.array(lu64, order="F"), piv)
+        if info != 0:
+            raise SelfCheckError(f"{case_id}: 抽验 {pfx}getri info={info}")
+        return np.ascontiguousarray(g)
+    if base == "geqrf":
+        af, _tau, _w, info = getattr(lap, pfx + "geqrf")(a64, overwrite_a=0)
+        if info != 0:
+            raise SelfCheckError(f"{case_id}: 抽验 {pfx}geqrf info={info}")
+        return np.ascontiguousarray(af)
+    if base in ("ungqr", "orgqr"):          # *gqr：A64 即打包 AF（m×n）
+        q, _w, info = getattr(lap, "zungqr" if cx else "dorgqr")(
+            np.array(a64, order="F"), np.asarray(arrays["tau64"]))
+        if info != 0:
+            raise SelfCheckError(f"{case_id}: 抽验 {pfx}orgqr/ungqr info={info}")
+        return np.ascontiguousarray(q)
+    if base in ("unmqr", "ormqr"):
+        nq, k = a64.shape
+        c64 = arrays["C64"]
+        lwork = max(1, 64 * max(nq, c64.shape[0], c64.shape[1], k))
+        out, _w, info = getattr(lap, "zunmqr" if cx else "dormqr")(
+            entry["side"], entry["trans"], np.array(a64, order="F"),
+            np.asarray(arrays["tau64"]), np.array(c64, order="F"),
+            lwork=lwork, overwrite_c=0)
+        if info != 0:
+            raise SelfCheckError(f"{case_id}: 抽验 {pfx}ormqr/unmqr info={info}")
+        return np.ascontiguousarray(out)
+    # gels
+    _a, b_out, info = getattr(lap, pfx + "gels")(
+        a64, arrays["B64"], trans="N", overwrite_a=0, overwrite_b=0)
+    if info != 0:
+        raise SelfCheckError(f"{case_id}: 抽验 {pfx}gels info={info}")
+    n = a64.shape[1]
+    return np.ascontiguousarray(b_out[:n, :])
+
+
 def spot_check_indices(n_cases):
-    """确定性抽样：首/中/尾（case 数 <3 时取全部）。返回有序去重下标。"""
+    """确定性抽样：首/中/尾（case 数 <3 时取全部）。返回有序去重下标。
+
+    LQ-13：LU/QR 的 getrf 无 golden（因子非唯一），其算子切片可能全员无可抽验
+    case——n_cases<=0 返回空表，调用方据此跳过（不得产出越界下标）。"""
+    if n_cases <= 0:
+        return []
     return sorted({0, n_cases // 2, n_cases - 1})
 
 
@@ -296,23 +448,26 @@ def spot_check_indices(n_cases):
 # 自检项
 # ---------------------------------------------------------------------------
 
-def check_cast_fields(arrays, case_id, case_purpose=None):
+def check_cast_fields(arrays, case_id, case_purpose=None, has_golden=True):
     """spec §2.2 校验字段：32 位数组 == 64 位数组降型，逐字节。
 
     降型目标由 64 位数组的 dtype 决定（float64→float32、complex128→complex64，
     S2 spec §4 字段名不变），实数路径与 S1 版逐位同判。
     HT-8：info 契约用例（case_purpose=="info"）不携带 golden——出现 golden 对
     反而属 schema 违约；其余用例 golden 对仍为必需（fail-closed 不放松）。
+    LQ-13：LU/QR 的 getrf 无 golden（因子非唯一，主判走还原 L·U）——has_golden=False；
+    带 C64/C32 的算子（*mqr）同判降型对。
     """
     pairs = [("A32", "A64")]
     if case_purpose == "info":
         if "golden64" in arrays or "golden32" in arrays:
             raise SelfCheckError(
                 f"{case_id}: info 契约用例不应携带 golden（HT-8：只比 info，无残差）")
-    else:
+    elif has_golden:
         pairs.append(("golden32", "golden64"))
-    if "B64" in arrays:
-        pairs.append(("B32", "B64"))
+    for r64, r32 in (("B64", "B32"), ("C64", "C32")):
+        if r64 in arrays:
+            pairs.append((r32, r64))
     for a32, a64 in pairs:
         if a32 not in arrays or a64 not in arrays:
             raise SelfCheckError(f"{case_id}: npz 缺数组 {a32}/{a64}（spec §2.2 schema）")
@@ -330,9 +485,9 @@ def check_entry_vs_npz(entry, arrays):
     actual = sorted(arrays.keys())
     if sorted(declared or []) != actual:
         raise SelfCheckError(f"{cid}: index.arrays={declared} 与 npz 实物 {actual} 不符")
-    n = entry.get("n")
-    if arrays["A64"].shape != (n, n):
-        raise SelfCheckError(f"{cid}: A64 形状 {arrays['A64'].shape} != (n,n)=({n},{n})")
+    want = _expected_a64_shape(entry)
+    if arrays["A64"].shape != want:
+        raise SelfCheckError(f"{cid}: A64 形状 {arrays['A64'].shape} != {want}（LQ-13 矩形口径）")
 
 
 # ---------------------------------------------------------------------------
@@ -436,9 +591,7 @@ def build(staging_dirs, out_dir, op, container_id, canonical_path):
     # 包内 index：顶层元数据保留、条目原样，只做算子子集选取
     op_index = {k: v for k, v in index.items() if k != "cases"}
     op_index["cases"] = op_cases
-    with open(out_dir / "cases" / "index.json", "w", encoding="utf-8") as fh:
-        json.dump(op_index, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
+    _write_cases_index(out_dir / "cases", op_index)
     tick("包内 index", f"{op} 条目 {len(op_cases)} 条逐字段原样入包（源 index 未改写）")
 
     # perf_baseline 逐字节复用
@@ -486,7 +639,11 @@ def build(staging_dirs, out_dir, op, container_id, canonical_path):
     fingerprint = {}
     for path in sorted(out_dir.rglob("*")):
         if path.is_file() and path.name != "manifest.json" and "__pycache__" not in path.parts:
-            fingerprint[path.relative_to(out_dir).as_posix()] = _sha256_file(path)
+            rel = path.relative_to(out_dir).as_posix()
+            if rel.startswith("cases/index.json"):
+                continue  # 物理形态（明文/gz/切分件）不入指纹，改用下方逻辑明文口径
+            fingerprint[rel] = _sha256_file(path)
+    fingerprint["cases/index.json"] = _logical_index_sha(out_dir / "cases")
     try:
         import scipy
         scipy_ver = scipy.__version__
@@ -1034,7 +1191,10 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
     # 装包自检：现场生成子集（gen_data 分块/并行通路，golden+逐矩阵 ratio 一并算出）
     if str(here) not in sys.path:
         sys.path.insert(0, str(here))
-    import gen_data_cholesky as gd
+    if _is_luqr(op):
+        import gen_data_luqr as gd
+    else:
+        import gen_data_cholesky as gd
     tmp = out_dir / ".selfcheck-gen"
     if tmp.exists():
         shutil.rmtree(tmp)
@@ -1058,6 +1218,18 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
     if len(gen_cases) != n_subset + n_info:
         raise SelfCheckError(
             f"现场生成 {len(gen_cases)} case != 子集 {n_subset} + info 契约 {n_info}")
+    # LU/QR 批量两族：gen_data_luqr 不产 ratio（单/批量均留 null），装包自检按
+    # fill_ratio_cpu.batched_fill_a0 同一入口现场重造 A0 内容回填（口径与判定侧同源）。
+    if _is_luqr(op):
+        import fill_ratio_cpu as frc
+        verdict_mod = frc.load_verdict(criteria_dir)
+        lapack = frc._lapack()
+        for entry in gen_cases:
+            if entry.get("case_purpose") == "info":
+                continue
+            ratio, status, _binfo = frc.batched_fill_a0(entry, verdict_mod, lapack)
+            entry["ratio_cpu"] = ratio
+            entry["ratio_cpu_status"] = status
     for entry in gen_cases:
         if entry.get("case_purpose") == "info":
             continue
@@ -1066,20 +1238,25 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
                 or any(v is None for v in ratio)):
             raise SelfCheckError(
                 f"{entry.get('case_id')}: 现场生成 ratio 状态 {entry.get('ratio_cpu_status')!r}"
-                f"（cu 对角占优构造下应全 ok 且无 prep_failed——环境或数据有问题）")
+                f"（构造性输入下应全 ok 且无 prep_failed——环境或数据有问题）")
     a0 = {e["case_id"]: {"contents": e.get("sampled_contents"),
                          "rep_slots": [m["rep_slot"] for m in e.get("sample_map") or []]}
           for e in gen_cases if e.get("case_purpose") != "info"}
     info_ids = [e["case_id"] for e in gen_cases if e.get("case_purpose") == "info"]
     # HT-4：精度条目固化 case 级 ratio_cpu_mean（Σ(count_j·ratio_j)/batchSize 槽位
     # 加权；info 契约条目不适用不计入）——判定侧只读零重算（batched_a0 经
-    # case_arrays 消费，阈值第二支），mean 只随用例集版本重算
+    # case_arrays 消费，potrf/potrs 阈值第二支）。LU/QR 批量两族无 mean 第二支
+    # （阈值按逐内容 ratio），不写该字段（LQ-13）。
     n_mean = 0
-    for entry in gen_cases:
-        if entry.get("case_purpose") == "info":
-            continue
-        entry["ratio_cpu_mean"] = batched_case_ratio_cpu_mean(entry)
-        n_mean += 1
+    if _is_luqr(op):
+        for entry in gen_cases:
+            entry.pop("ratio_cpu_mean", None)
+    else:
+        for entry in gen_cases:
+            if entry.get("case_purpose") == "info":
+                continue
+            entry["ratio_cpu_mean"] = batched_case_ratio_cpu_mean(entry)
+            n_mean += 1
     tick("装包自检/现场生成",
          f"{len(gen_cases)} case A0 抽样生成（不落数组）+golden+逐内容 ratio 完成"
          f"（精度 {n_subset} + info 契约 {n_info}: {'、'.join(info_ids)}，HT-9）；"
@@ -1087,8 +1264,10 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
                      for cid, m in a0.items()))
     tick("ratio 参考", "逐内容 ratio k 值列表固化入包内 index"
                        "（自测与验收只读同一参考值；info 契约"
-                       "条目不计入，HT-8/9）；精度条目另固化 case 级 "
-                       f"ratio_cpu_mean（槽位加权，{n_mean} 例，HT-4）")
+                       "条目不计入，HT-8/9）；"
+                       + (f"精度条目另固化 case 级 ratio_cpu_mean（槽位加权，{n_mean} 例，HT-4）"
+                          if not _is_luqr(op) else
+                          "LU/QR 批量无 case 级 ratio_cpu_mean（阈值按逐内容 ratio）"))
 
     # 基版本标记（2026-10-08 换基）：包内 ratio_cpu/ratio_cpu_mean 全族为实现实际
     # 输入升 f64 的 A32 基（基变更日 2026-10-08；potrf 族旧 A64 基固化值不可与新基
@@ -1098,21 +1277,30 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
     # 包内 index：gen 产 index 原样 + 逐条 materialize:"gen"（零数据，S3 spec §5 + HT-2 A0）
     for entry in gen_cases:
         entry["materialize"] = "gen"
+    if _is_luqr(op):
+        mean_note = ("LU/QR 批量两族无 case 级 ratio_cpu_mean（阈值按逐内容 ratio，"
+                     "LQ-13）。")
+        info_note = (
+            "case_purpose==\"info\" 的条目为批量 info 契约混合用例（HT-9）：只比 info，"
+            "无 golden/ratio——*getriBatched/*matinvBatched 族 k_expected 为逐内容 k 值列表"
+            "（LAPACK 约定：奇异内容记首个零主元阶 k，非奇异记 0），"
+            "经 sample_map 展开即全批期望 infoArray")
+    else:
+        mean_note = ("精度条目另固化 case 级 ratio_cpu_mean（HT-4：Σ(count_j·ratio_j)/"
+                     "batchSize 槽位加权，判定时只读、零重算，potrf/potrs 阈值第二支消费）。")
+        info_note = (
+            "case_purpose==\"info\" 的条目为批量 info 契约混合用例（HT-9）：只比 info，"
+            "无 golden/ratio，不进精度均值——*potrfBatched 族 k_expected 为逐内容 k 值列表"
+            "（LAPACK 约定：非正定内容记首个非正定主子式阶 k，正定记 0），"
+            "经 sample_map 展开即全批期望 infoArray；"
+            "*potrsBatched 族 k_expected=-1（标量 info 仅报参数错）")
     gen_index["materialize_note"] = (
-        "纯脚本包（S3 spec §5 + HT-2 A0 抽样）：包不携带数据数组；批量 case 固化 "
+        "纯脚本包（" + ("LU/QR 批量两族" if _is_luqr(op) else "S3 spec §5") + " + HT-2 A0 抽样）："
+        "包不携带数据数组；批量 case 固化 "
         "sample_map 槽位映射与逐内容 ratio_cpu k 值列表（自测与验收只读同一固化参考值），"
         "数组由执行器/DUT 挂钩按 gen_data 的 expand_sampled_rows 现场构造（流式喂入）。"
-        "精度条目另固化 case 级 ratio_cpu_mean（HT-4：Σ(count_j·ratio_j)/batchSize "
-        "槽位加权，判定时只读、零重算，potrf/potrs 阈值第二支消费）。"
-        "case_purpose==\"info\" 的条目为批量 info 契约混合用例（HT-9）：只比 info，"
-        "无 golden/ratio，不进精度均值——*potrfBatched 族 k_expected 为逐内容 k 值列表"
-        "（LAPACK 约定：非正定内容记首个非正定主子式阶 k，正定记 0），"
-        "经 sample_map 展开即全批期望 infoArray；"
-        "*potrsBatched 族 k_expected=-1（标量 info 仅报参数错）")
-    (out_dir / "cases").mkdir(exist_ok=True)
-    with open(out_dir / "cases" / "index.json", "w", encoding="utf-8") as fh:
-        json.dump(gen_index, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
+        + mean_note + info_note)
+    _write_cases_index(out_dir / "cases", gen_index)
     shutil.rmtree(tmp)
     tick("包内 index", f"{len(gen_cases)} 条全部 materialize:\"gen\"；自检生成数据已删除")
 
@@ -1143,23 +1331,26 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
                          f"package_scope={scope}，verify require_s1={req_s1}）")
 
     # 自测配套件：gen_data 副本、sim 副本、batched README（缺模板即停，docstring S3 段）
-    gen_sha = _copy_bytes(here / "gen_data_cholesky.py", out_dir / "gen_data.py")
+    gen_sha = _copy_bytes(here / _luqr_gen_module_name(op), out_dir / "gen_data.py")
     sim_src = criteria_dir.parent / "scripts" / "sim_dut.py"
     if not sim_src.is_file():
         raise ContractError(f"sim_dut.py 未找到: {sim_src}")
     sim_sha = _copy_bytes(sim_src, out_dir / "sim_dut.py")
-    tpl = here.parent / "assets" / "package-readme-template-batched.md"
+    tpl_name = ("package-readme-template-luqr-batched.md" if _is_luqr(op)
+                else "package-readme-template-batched.md")
+    tpl = here.parent / "assets" / tpl_name
     if not tpl.is_file():
         raise ContractError(
             f"batched README 模板缺失: {tpl}（纯脚本包不得用通用模板，fail-closed）")
-    (out_dir / "README.md").write_text(
-        tpl.read_text(encoding="utf-8")
-        .replace("{op}", op).replace("{n_info}", str(n_info))
-        .replace("{n_cases}", str(n_subset))
-        .replace("{gram_form}", "B·Bᴴ" if op.lower().startswith("c") else "B·Bᵀ"),
-        encoding="utf-8")
+    readme = (tpl.read_text(encoding="utf-8")
+              .replace("{op}", op).replace("{n_info}", str(n_info))
+              .replace("{n_cases}", str(n_subset)))
+    if not _is_luqr(op):
+        readme = readme.replace(
+            "{gram_form}", "B·Bᴴ" if op.lower().startswith("c") else "B·Bᵀ")
+    (out_dir / "README.md").write_text(readme, encoding="utf-8")
     tick("自测配套件", f"gen_data.py（{gen_sha[:12]}…）、sim_dut.py（{sim_sha[:12]}…）、"
-                       f"README.md（batched 模板，info 契约 {n_info} 例）入包")
+                       f"README.md（{tpl_name}，info 契约 {n_info} 例）入包")
 
     # 零数据断言（S3 spec §5：无 npz、无 golden、无 ratio 数组——npz 是唯一数组载体）
     stray = [str(x.relative_to(out_dir)) for x in out_dir.rglob("*.npz")]
@@ -1177,14 +1368,19 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
     fingerprint = {}
     for path in sorted(out_dir.rglob("*")):
         if path.is_file() and path.name != "manifest.json" and "__pycache__" not in path.parts:
-            fingerprint[path.relative_to(out_dir).as_posix()] = _sha256_file(path)
+            rel = path.relative_to(out_dir).as_posix()
+            if rel.startswith("cases/index.json"):
+                continue  # 物理形态（明文/gz/切分件）不入指纹，改用下方逻辑明文口径
+            fingerprint[rel] = _sha256_file(path)
+    fingerprint["cases/index.json"] = _logical_index_sha(out_dir / "cases")
     try:
         import scipy
         scipy_ver = scipy.__version__
     except ImportError:
         scipy_ver = None
     manifest = {
-        "package_ver": PACKAGE_VER_BATCHED,
+        "package_ver": (PACKAGE_VER_LUQR_BATCHED if _is_luqr(op)
+                        else PACKAGE_VER_BATCHED),
         "operator": op,
         "interfaces": [op],
         "criteria_ver": criteria_ver,
@@ -1200,7 +1396,9 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
         "fingerprint": fingerprint,
         "build": {
             "tool": TOOL, "ver": TOOL_VER,
-            "spec": "dev-doc/solver/solver-s3-batched-spec.md#5",
+            "spec": "dev-doc/solver/solver-s3-batched-spec.md#5"
+                    if not _is_luqr(op) else
+                    "community_task（LU/QR 四册任务书 §3.2 / §3.3；纯脚本形态对齐 Cholesky）",
             "materialize": "gen（A0 抽样，HT-2）",
             "reuse": "纯脚本包（A0 抽样）：不携带数据数组；sample_map 与逐内容 ratio "
                      "参考固化在 index（判定只读）；perf_baseline.json 为 C 冻结产物"
@@ -1287,7 +1485,10 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
     # 装包自检①：现场生成切片全量（--select all 恰为切片，验证 README 第 0 步自洽）
     if str(here) not in sys.path:
         sys.path.insert(0, str(here))
-    import gen_data_cholesky as gd
+    if _is_luqr(op):
+        import gen_data_luqr as gd
+    else:
+        import gen_data_cholesky as gd
     tmp = out_dir / ".selfcheck-gen"
     if tmp.exists():
         shutil.rmtree(tmp)
@@ -1321,10 +1522,15 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
         with np.load(tmp / entry["npz"]) as z:
             arrays = {k: z[k] for k in z.files}
         check_entry_vs_npz(entry, arrays)
-        check_cast_fields(arrays, entry["case_id"], entry.get("case_purpose"))
-    tick("校验字段", f"{len(gen_cases)} 个 case 的 A32/golden32（含 B32）降型逐字节成立"
-                     f"（info 契约 {n_info} 例无 golden，豁免该对）；index.arrays 与实物一致")
-    acc_indices = [i for i, e in enumerate(gen_cases) if e.get("case_purpose") != "info"]
+        has_golden = not (_is_luqr(op) and _luqr_base(op) == "getrf")
+        check_cast_fields(arrays, entry["case_id"], entry.get("case_purpose"), has_golden)
+    tick("校验字段", f"{len(gen_cases)} 个 case 的 A32/golden32（含 B32/C32）降型逐字节成立"
+                     f"（info 契约 {n_info} 例无 golden，豁免该对；LU/QR getrf 无 golden，"
+                     "因子非唯一）；index.arrays 与实物一致")
+    # golden 抽验：只挑带 golden 的精度用例（LU/QR 的 getrf 无 golden）
+    acc_indices = [i for i, e in enumerate(gen_cases)
+                   if e.get("case_purpose") != "info"
+                   and not (_is_luqr(op) and _luqr_base(op) == "getrf")]
     picked = [acc_indices[i] for i in spot_check_indices(len(acc_indices))]
     spot_detail = []
     for i in picked:
@@ -1332,7 +1538,7 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
         cid = entry["case_id"]
         with np.load(tmp / entry["npz"]) as z:
             arrays = {k: z[k] for k in z.files}
-        g64 = recompute_golden(op, arrays, entry["uplo"], cid)
+        g64 = recompute_golden(op, arrays, entry.get("uplo"), cid, entry)
         if g64.tobytes() != arrays["golden64"].tobytes():
             diff = float(np.max(np.abs(g64 - arrays["golden64"])))
             raise SelfCheckError(f"{cid}: golden64 独立重算与现场生成不一致（max|Δ|={diff:g}）")
@@ -1341,24 +1547,44 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
             raise SelfCheckError(f"{cid}: golden32 独立重算降型与现场生成不一致")
         spot_detail.append(cid)
     chain = "z" if _is_complex_op(op) else "d"
-    tick("抽验 golden", f"{len(picked)} case（首/中/尾：{'、'.join(spot_detail)}）"
-                        f"{chain} 链路独立重算 golden64/golden32 逐字节一致；只比对未写回")
+    if picked:
+        tick("抽验 golden", f"{len(picked)} case（首/中/尾：{'、'.join(spot_detail)}）"
+                            f"{chain} 链路独立重算 golden64/golden32 逐字节一致；只比对未写回")
+    else:
+        tick("抽验 golden", f"跳过（{op} 无带 golden 的精度用例：getrf 因子非唯一，"
+                            "主判走还原 L·U+ipiv vs A，无 golden 可抽验）")
     checklist["spot_check_cases"] = spot_detail
 
     # 装包自检③：ratio 参考值回填（残差唯一实现在 criteria/verdict，
-    # 经 fill_ratio_cpu.run_chain 同一入口；构造性 SPD/HPD 下应全 ok。
+    # Cholesky 经 fill_ratio_cpu.run_chain、LU/QR 经 run_chain_luqr 同一入口；
     # HT-8：info 契约用例无残差可算——跳过（info==k_expected 的构造性自检已在
     # 生成时当场验证，不成立即 ContractError）
     import fill_ratio_cpu as frc
     verdict_mod = frc.load_verdict(criteria_dir)
     lapack = frc._lapack()
     ratio_ref = {}
+    n_none = 0
     for entry in gen_cases:
         if entry.get("case_purpose") == "info":
             continue
         cid = entry["case_id"]
         with np.load(tmp / entry["npz"]) as z:
             arrays = {k: z[k] for k in z.files}
+        if _is_luqr(op):                    # LU/QR：run_chain_luqr（逐算子准备链）
+            try:
+                updates = frc.run_chain_luqr(verdict_mod, lapack, entry, arrays)
+            except frc.PrepFailed as exc:
+                raise SelfCheckError(
+                    f"{cid}: 装包自检 ratio 准备链失败（{exc}）——"
+                    "构造性输入下应可算，环境或数据有问题")
+            for k_ in ("ratio_cpu", "ratio_opt_cpu"):
+                entry[k_] = updates.get(k_)
+            entry["ratio_cpu_status"] = "ok" if updates else "none"
+            if updates:
+                ratio_ref[cid] = float(updates["ratio_cpu"])
+            else:
+                n_none += 1
+            continue
         try:
             r = frc.run_chain(verdict_mod, lapack, entry, arrays)
         except frc.PrepFailed as exc:
@@ -1369,15 +1595,20 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
         entry["ratio_cpu_status"] = "ok"
         ratio_ref[cid] = float(r)
     tick("ratio 参考值", f"{len(ratio_ref)} 精度 case 低精度准备链回填完成，全 ok"
-                         f"（info 契约 {n_info} 例不计入，HT-8；自测与验收只读"
+                         + (f"（另 {n_none} 例无残差判据记 none）" if n_none else "")
+                         + f"（info 契约 {n_info} 例不计入，HT-8；自测与验收只读"
                          "包内固化参考值）")
-    # HT-4：算子级 ratio_cpu_mean 固化（该算子全部正定精度用例的算术平均，info
-    # 契约条目不计入）——index 顶层 {op: mean} map，accept_run/verify 副本按算子
-    # 注入 case_arrays 消费（potrf/potrs 阈值第二支）；只读零重算，随用例集版本重算
-    op_mean = purescript_ratio_cpu_mean(gen_cases)
-    gen_index["ratio_cpu_mean"] = {op: op_mean}
-    tick("ratio_cpu_mean", f"算子级均值 {op_mean:.6g} 固化入 index 顶层"
-                           f"（{len(ratio_ref)} 精度 case 算术平均，HT-4）")
+    # HT-4：算子级 ratio_cpu_mean 固化仅 Cholesky 消费（potrf/potrs 阈值第二支）；
+    # LU/QR 无 mean 第二支（阈值按逐 case ratio_cpu / ratio_opt_cpu），不写该字段。
+    if _is_luqr(op):
+        gen_index.pop("ratio_cpu_mean", None)
+        tick("ratio_cpu_mean", "LU/QR 无 mean 第二支（阈值按逐 case ratio_cpu / "
+                               "ratio_opt_cpu），不写 index 顶层 ratio_cpu_mean")
+    else:
+        op_mean = purescript_ratio_cpu_mean(gen_cases)
+        gen_index["ratio_cpu_mean"] = {op: op_mean}
+        tick("ratio_cpu_mean", f"算子级均值 {op_mean:.6g} 固化入 index 顶层"
+                               f"（{len(ratio_ref)} 精度 case 算术平均，HT-4）")
     # 基版本标记（2026-10-08 换基）：包内 ratio_cpu/ratio_cpu_mean 全族为实现实际
     # 输入升 f64 的 A32 基（基变更日 2026-10-08；potrf 族旧 A64 基固化值不可与新基
     # 混用），verify/accept 消费时据此辨新旧——旧包 index 无此字段即 A64 基
@@ -1386,18 +1617,19 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
     # 包内 index：gen 产 index 原样 + 逐条 materialize:"gen"（零数据）
     for entry in gen_cases:
         entry["materialize"] = "gen"
+    mean_note = (
+        "LU/QR 无 ratio_cpu_mean 第二支（阈值按逐 case ratio_cpu / ratio_opt_cpu）。"
+        if _is_luqr(op) else
+        "index 顶层 ratio_cpu_mean 为算子级固化均值（HT-4：全部正定精度用例的算术平均，"
+        "判定时只读、零重算）。")
     gen_index["materialize_note"] = (
         "纯脚本包（v2）：包不携带数据数组；npz/arrays 字段描述 gen_data 现场生成后"
         "的产物（README 第 0 步，--out data 时落 data/cases/）；ratio_cpu 为装包自检"
-        "运行的固化参考值（自测与验收只读，输入与因子仍现场构造）。index 顶层 ratio_cpu_mean 为"
-        "算子级固化均值（HT-4：全部正定精度用例的算术平均，判定时只读、零重算）。"
+        "运行的固化参考值（自测与验收只读，输入与因子仍现场构造）。" + mean_note +
         "case_purpose==\"info\" 的条目"
         "为 info 契约用例（HT-8）：只比被测 info==k_expected，无 golden/ratio，"
         "不进精度均值")
-    (out_dir / "cases").mkdir(exist_ok=True)
-    with open(out_dir / "cases" / "index.json", "w", encoding="utf-8") as fh:
-        json.dump(gen_index, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
+    _write_cases_index(out_dir / "cases", gen_index)
     shutil.rmtree(tmp)
     tick("包内 index", f"{len(gen_cases)} 条全部 materialize:\"gen\"；自检生成数据已删除")
 
@@ -1428,12 +1660,14 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
                          f"package_scope={scope}，verify require_s1={req_s1}）")
 
     # 自测配套件：gen_data 副本、sim 副本、纯脚本 README（缺模板即停）
-    gen_sha = _copy_bytes(here / "gen_data_cholesky.py", out_dir / "gen_data.py")
+    gen_sha = _copy_bytes(here / _luqr_gen_module_name(op), out_dir / "gen_data.py")
     sim_src = criteria_dir.parent / "scripts" / "sim_dut.py"
     if not sim_src.is_file():
         raise ContractError(f"sim_dut.py 未找到: {sim_src}")
     sim_sha = _copy_bytes(sim_src, out_dir / "sim_dut.py")
-    tpl = here.parent / "assets" / "package-readme-template-purescript.md"
+    tpl_name = ("package-readme-template-luqr.md" if _is_luqr(op)
+                else "package-readme-template-purescript.md")
+    tpl = here.parent / "assets" / tpl_name
     if not tpl.is_file():
         raise ContractError(
             f"纯脚本 README 模板缺失: {tpl}（纯脚本包不得用逐字节复用模板，fail-closed）")
@@ -1443,7 +1677,7 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
                                        .replace("{n_info}", str(n_info)),
         encoding="utf-8")
     tick("自测配套件", f"gen_data.py（{gen_sha[:12]}…）、sim_dut.py（{sim_sha[:12]}…）、"
-                       f"README.md（纯脚本模板）入包")
+                       f"README.md（{tpl_name}）入包")
 
     # 零数据断言（无 npz、无 golden、无 ratio 数组——npz 是唯一数组载体）
     stray = [str(x.relative_to(out_dir)) for x in out_dir.rglob("*.npz")]
@@ -1461,14 +1695,18 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
     fingerprint = {}
     for path in sorted(out_dir.rglob("*")):
         if path.is_file() and path.name != "manifest.json" and "__pycache__" not in path.parts:
-            fingerprint[path.relative_to(out_dir).as_posix()] = _sha256_file(path)
+            rel = path.relative_to(out_dir).as_posix()
+            if rel.startswith("cases/index.json"):
+                continue  # 物理形态（明文/gz/切分件）不入指纹，改用下方逻辑明文口径
+            fingerprint[rel] = _sha256_file(path)
+    fingerprint["cases/index.json"] = _logical_index_sha(out_dir / "cases")
     try:
         import scipy
         scipy_ver = scipy.__version__
     except ImportError:
         scipy_ver = None
     manifest = {
-        "package_ver": PACKAGE_VER_PURESCRIPT,
+        "package_ver": PACKAGE_VER_LUQR if _is_luqr(op) else PACKAGE_VER_PURESCRIPT,
         "operator": op,
         "interfaces": [op],
         "criteria_ver": criteria_ver,
@@ -1484,7 +1722,9 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
         "fingerprint": fingerprint,
         "build": {
             "tool": TOOL, "ver": TOOL_VER,
-            "spec": "dev-doc/solver/solver-s3-batched-spec.md#5",
+            "spec": "dev-doc/solver/solver-s3-batched-spec.md#5"
+                    if not _is_luqr(op) else
+                    "community_task（LU/QR 四册任务书 §3.2 / §3.3；纯脚本形态对齐 Cholesky）",
             "materialize": "gen",
             "reuse": "纯脚本包（v2）：不携带数据数组；perf_baseline.json 为 C 冻结产物"
                      "逐字节复用；verify 双件为 D 渲染器确定性输出；index 与 ratio "
@@ -1530,7 +1770,8 @@ def main(argv=None):
         for d in staging_dirs:
             if not d.is_dir():
                 raise ContractError(f"staging 目录不存在: {d}")
-        if op in BATCHED_OPS:               # S3 纯脚本装包（spec §5 + HT-2 A0）
+        if op in BATCHED_OPS or op in LUQR_BATCHED_OPS:
+            # S3 纯脚本装包（spec §5 + HT-2 A0）：Cholesky 4 + LU/QR 批量 4
             checklist = build_batched(staging_dirs, out_dir, op, args.container_id,
                                       args.canonical, scope=args.scope)
         else:                               # S4 v2：单矩阵算子一律纯脚本装包

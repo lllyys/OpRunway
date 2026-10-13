@@ -4,6 +4,15 @@
 
 - [ ] 开发者样例回归收尾：SSH恢复后取回新回归与n16检查结果，并停止保留本轮自有容器；见[solver-developer-sample-1010.md](solver/solver-developer-sample-1010.md)。
 
+## LU/QR 交接后续（2026-10-13）
+
+合入说明见 [solver-luqr-import-1013.md](solver/solver-luqr-import-1013.md)。本轮按用户要求未测试。
+
+- [ ] 接入共享 harness：LU/QR 生成器／判定卡分流、矩形参数、ipiv/tau 输入输出及逐接口真实适配；现有协议与样例尚不足。
+- [ ] 补齐 accept_run 已有输出复核的 m/n、side/trans、ratio_opt_cpu 元数据透传。
+- [ ] 接入 LU/QR 正式性能判定，保留 msprof op、均值与 GPU/0.35 口径；补齐 getriBatched/gels 缺失 GPU 基线。
+- [ ] 按交接待裁项完成16包交付：批量索引压缩／切分、私集真实种子、接口适配样例；当前仅复制与修正文档，不重产。
+
 ## P1 · 0923 solver 批次（立项中 @ worktree solver-accept-0923，2026-09-21）
 
 背景与全部证据见 `dev-doc/solver/solver-0923-context.md`。

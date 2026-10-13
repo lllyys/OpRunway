@@ -1,5 +1,7 @@
 # OpRunway 改动简表
 
+- **2026-10-13 · 合入 LU/QR 两 skill 并收纳16包。** 基于共同基线e7820e0导入交接版23804ff；修正性能均值、ipiv/tau、LU输入、冻结ratio及残差文档，明确真实harness/正式性能与备用QR复核限制。产物复制至reports/solver-luqr-1013，16包只修README及manifest摘要，210个来源文件静态核对；未运行测试、未push。见[solver-luqr-import-1013.md](solver/solver-luqr-import-1013.md)。
+
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
