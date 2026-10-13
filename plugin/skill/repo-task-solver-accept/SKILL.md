@@ -33,9 +33,10 @@ harness 独立分发，任务包保持设备无关。当前判定覆盖两族共
 **执行支持与判定覆盖分别核对。** 当前已有 Host 指针接口的小规格真机通路；
 已取得的公开头可供核对；Device 调用仍需开发者固定协议适配模块及真机验证。缺接口时停在 A0，
 不以模拟输出替代，不因存在判定卡就宣称可端到端运行。
-LU/QR 已接入生成与精度判定，尚未接入共享 harness 的输入、调用、附加输出和正式性能判定；
-固定适配协议尚缺矩形参数及 ipiv/tau 通道，仅补开发者适配模块不能完成接入。
-LU/QR 请求真实执行时停在 A0 并报告未接入；已有输出复核与包内自测不替代正式执行证据。
+LU/QR 使用固定 v2 适配协议传递矩形参数与 ipiv/tau 输入输出。
+真实执行仍须开发者提供与公开接口一致的适配模块，准入时按
+[适配协议](references/adapter-contract.md) 核对；缺模块或版本不符则停止。
+通用执行链具备该协议不代表某个开发者的 Device 实现已通过真机验证。
 
 - 被测 `info` 按接口角色分型：potrfBatched 族与 LU/QR 两族（getriBatched/
   matinvBatched）交付 `(batch,)` int32 infoArray（batch=1 也不写成标量，逐矩阵记录
@@ -76,7 +77,7 @@ python3 scripts/accept_run.py --package <任务包目录> \
 
 该入口不补做构建与执行。LU/QR 的 m/n、side/trans 与冻结 ratio_opt_cpu 由 index
 传入判定；缺失或无效参考值记证据不足，不在验收现场重算替代。纯脚本包没有冻结输入数组时，接口精度项记证据不足；
-已接入算子的完整运行走 A0–A3；LU/QR 的真实执行仍待接入。报告的 `operator`、`expectation`、`flags`、`versions` 和
+已接入算子的完整运行走 A0–A3。报告的 `operator`、`expectation`、`flags`、`versions` 和
 `声明边界` 含义见 [verdict-mechanism.md](references/verdict-mechanism.md)。
 
 ## 模拟通路演练
@@ -125,6 +126,6 @@ info 契约七类期望。两种报告的结构不同，不能把 harness 的结
 
 尚未验证接入的 Device 适配模块（Cholesky 与 LU/QR）、大规格完整执行验证、950PR
 性能全量实测、批量完整覆盖，以及特征值族数值判定。Host 求逆入口的结构性演练不扩大
-这些判定范围。LU/QR 的共享 harness 执行与正式性能判定尚未接入。
+这些判定范围。LU/QR 正式性能证据须来自 v2 适配的本次真实运行。
 已接入算子的性能流程由验收侧使用 msprof op 自行采集，按 NPU 平均单次 kernel
 耗时 ≤ GPU 平均耗时 / 0.35 判定；工具支持不代表完成 950PR 全量实测。

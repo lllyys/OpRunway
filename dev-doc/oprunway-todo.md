@@ -6,11 +6,11 @@
 
 ## LU/QR 交接后续（2026-10-13）
 
-合入说明见 [solver-luqr-import-1013.md](solver/solver-luqr-import-1013.md)。本轮按用户要求未测试。
+合入说明见 [solver-luqr-import-1013.md](solver/solver-luqr-import-1013.md)。交接导入时未测试；后续 skill 修复已做远端局部验证，见[修复完成记录](solver/solver-skill-repair-plan-1013.md)。
 
-- [ ] 接入共享 harness：LU/QR 生成器／判定卡分流、矩形参数、ipiv/tau 输入输出及逐接口真实适配；现有协议与样例尚不足。
-- [ ] 核实 LU/QR CPU参考侧与被测侧的参考矩阵口径。gels冻结字段读取已修；未经确认的A32/B32换基、新标记及强制重冻要求已回退，不预设需要重算。见[solver-gels-basis-revert-1013.md](solver/solver-gels-basis-revert-1013.md)。
-- [ ] 接入 LU/QR 正式性能判定，保留 msprof op、均值与 GPU/0.35 口径；补齐 getriBatched/gels 缺失 GPU 基线。
+- [ ] 随开发者实际交付核对并验证 LU/QR Device 适配；共享 harness 的生成器／判定卡分流、矩形参数、ipiv/tau 通道已完成，通用协议验证不代替具体算子真机验证。
+- [x] 用户确认 LU/QR 残差取实际32位输入升64；CPU参考链、判定卡和渲染模板已统一，42矩阵三链核对一致。仅修改skill，产物不在本次范围。见[solver-luqr-input32-skill-1013.md](solver/solver-luqr-input32-skill-1013.md)。
+- [ ] 对实际交付执行 LU/QR 性能采集，补齐 getriBatched/gels 缺失 GPU 基线；skill 已接入 msprof op、均值与 GPU/0.35 逐例及汇总判定。
 - [ ] 按交接待裁项完成16包交付：批量索引压缩／切分、私集真实种子、接口适配样例；当前仅复制与修正文档，不重产。
 
 ## P1 · 0923 solver 批次（立项中 @ worktree solver-accept-0923，2026-09-21）

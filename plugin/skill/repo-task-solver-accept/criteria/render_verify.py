@@ -645,11 +645,13 @@ def residual_ratio(a, lu, ipiv):
 
 
 def layer1_targets(case_arrays, dut_out):
-    """getrf 主判（因子非唯一）：被测打包 LU + 被测 ipiv → restore_lu 还原 vs 原
-    A64 直审（任务书 §3.2.1 条 6）。"""
+    """旧逐元素辅助函数，当前残差判定不调用。
+
+    getrf 主判（因子非唯一）：被测打包 LU + 被测 ipiv → restore_lu 还原 vs 原
+    A32 升精度直审（任务书 §3.2.1 条 6）。"""
     lu = np.asarray(dut_out["out32"])
     recon = restore_lu(lu, dut_out["ipiv"])
-    a64 = np.asarray(_get(case_arrays, "A64"))
+    a64 = np.asarray(_get(case_arrays, "A32"))
     return _split("lu_recon_vs_A", recon, a64)
 
 
@@ -659,7 +661,7 @@ def layer1_diagnostics(case_arrays, dut_out):
 
 
 def fallback_kwargs(case_arrays, dut_out):
-    return {"a": _get(case_arrays, "A64"), "lu": dut_out["out32"],
+    return {"a": _get(case_arrays, "A32"), "lu": dut_out["out32"],
             "ipiv": dut_out["ipiv"]}'''
 
 
@@ -704,6 +706,23 @@ def fallback_kwargs(case_arrays, dut_out):
     return {"a": restore_lu(lu32, ipiv), "ainv": dut_out["out32"]}'''
 
 
+_ORGQR_FULL_THIN = r'''def _orgqr_full(packed, tau, nq, complex_):
+    """由被测打包反射子 (packed, tau) 升精度经 CPU orgqr/ungqr 生成 nq×nq 完整
+    正交/酉矩阵 Q（SQRT01 口径：列数取行数；升精度使构造不引入额外舍入）。"""
+    from scipy.linalg import lapack
+    dt = np.complex128 if complex_ else np.float64
+    p = np.array(packed, dtype=dt, order="F")
+    t = np.asarray(tau, dtype=dt).ravel()
+    k = min(p.shape[1], nq)
+    pad = np.zeros((nq, nq), dtype=p.dtype, order="F")
+    pad[:, :k] = p[:, :k]
+    fn = lapack.zungqr if complex_ else lapack.dorgqr
+    q, _work, info = fn(pad, t[:k])
+    if info != 0:
+        raise ValueError(f"orgqr/ungqr 构造 Q 失败: info={info}")
+    return q'''
+
+
 _GEQRF_THIN = r'''# ---------------------------------------------------------------------------
 # geqrf 专属件（criteria/cards_luqr geqrf 卡 + verdict._dqrt01 的渲染副本）
 # ---------------------------------------------------------------------------
@@ -715,22 +734,6 @@ def fallback_threshold(ratio_cpu):
 
 
 FALLBACK_USES_MEAN = False
-
-
-def _orgqr_full(packed, tau, nq, complex_):
-    """由被测打包反射子 (packed, tau) 升精度经 CPU orgqr/ungqr 生成 nq×nq 完整
-    正交/酉矩阵 Q（SQRT01 口径：列数取行数；升精度使构造不引入额外舍入）。"""
-    from scipy.linalg import lapack
-    p = np.array(packed, order="F")
-    t = np.asarray(tau).ravel()
-    k = min(p.shape[1], nq)
-    pad = np.zeros((nq, nq), dtype=p.dtype, order="F")
-    pad[:, :k] = p[:, :k]
-    fn = lapack.zungqr if complex_ else lapack.dorgqr
-    q, _work, info = fn(pad, t[:k])
-    if info != 0:
-        raise ValueError(f"orgqr/ungqr 构造 Q 失败: info={info}")
-    return q
 
 
 def residual_ratio(a, r, q):
@@ -758,13 +761,15 @@ def residual_ratio(a, r, q):
 
 
 def layer1_targets(case_arrays, dut_out):
-    """geqrf 主判（因子非唯一）：由被测 (v, tau) 构造 m×m Q，Q·R vs 原 A64 直审
+    """旧逐元素辅助函数，当前残差判定不调用。
+
+    geqrf 主判（因子非唯一）：由被测 (v, tau) 构造 m×m Q，Q·R vs 实际输入 A32 升精度 直审
     （R = triu 被测打包输出）。"""
     packed = np.asarray(dut_out["out32"])
     cx = _dtype_class("out32", packed) == "complex"
     q = _orgqr_full(packed, dut_out["tau"], packed.shape[0], cx)
     recon = q @ np.triu(packed)
-    a64 = np.asarray(_get(case_arrays, "A64"))
+    a64 = np.asarray(_get(case_arrays, "A32"))
     return _split("qr_recon_vs_A", recon, a64)
 
 
@@ -777,7 +782,7 @@ def fallback_kwargs(case_arrays, dut_out):
     packed = np.asarray(dut_out["out32"])
     cx = _dtype_class("out32", packed) == "complex"
     q = _orgqr_full(packed, dut_out["tau"], packed.shape[0], cx)
-    return {"a": _get(case_arrays, "A64"), "r": dut_out["out32"], "q": q}'''
+    return {"a": _get(case_arrays, "A32"), "r": dut_out["out32"], "q": q}'''
 
 
 _GQR_THIN = r'''# ---------------------------------------------------------------------------
@@ -807,7 +812,9 @@ def residual_ratio(q):
 
 
 def layer1_targets(case_arrays, dut_out):
-    """*gqr 主判（唯一）：输出 Q 全量逐元素 vs golden64 直审。"""
+    """旧逐元素辅助函数，当前残差判定不调用。
+
+    *gqr 主判（唯一）：输出 Q 全量逐元素 vs golden64 直审。"""
     golden = np.asarray(_get(case_arrays, "golden64"))
     out = np.asarray(dut_out["out32"])
     if out.shape != golden.shape:
@@ -866,7 +873,9 @@ def residual_ratio(c, opq, q, side, trans):
 
 
 def layer1_targets(case_arrays, dut_out):
-    """*mqr 主判（唯一）：输出 op(Q)·C 全量逐元素 vs golden64 直审。"""
+    """旧逐元素辅助函数，当前残差判定不调用。
+
+    *mqr 主判（唯一）：输出 op(Q)·C 全量逐元素 vs golden64 直审。"""
     golden = np.asarray(_get(case_arrays, "golden64"))
     out = np.asarray(dut_out["out32"])
     if out.shape != golden.shape:
@@ -880,8 +889,11 @@ def layer1_diagnostics(case_arrays, dut_out):
 
 
 def fallback_kwargs(case_arrays, dut_out):
-    return {"c": _get(case_arrays, "C64"), "opq": dut_out["out32"],
-            "q": _get(case_arrays, "q64"),
+    packed = np.asarray(_get(case_arrays, "A32"))
+    q = _orgqr_full(packed, _get(case_arrays, "tau32"), packed.shape[0],
+                    _dtype_class("A32", packed) == "complex")
+    return {"c": _get(case_arrays, "C32"), "opq": dut_out["out32"],
+            "q": q,
             "side": _get(case_arrays, "side"), "trans": _get(case_arrays, "trans")}'''
 
 
@@ -939,7 +951,9 @@ def residual_ratio(a, b, x):
 
 
 def layer1_targets(case_arrays, dut_out):
-    """gels 主判（解唯一）：最小二乘解 X（n×nrhs）全量逐元素 vs golden64 直审。"""
+    """旧逐元素辅助函数，当前残差判定不调用。
+
+    gels 主判（解唯一）：最小二乘解 X（n×nrhs）全量逐元素 vs golden64 直审。"""
     golden = np.asarray(_get(case_arrays, "golden64"))
     out = np.asarray(dut_out["out32"])
     if out.shape != golden.shape:
@@ -953,7 +967,7 @@ def layer1_diagnostics(case_arrays, dut_out):
 
 
 def fallback_kwargs(case_arrays, dut_out):
-    return {"a": _get(case_arrays, "A64"), "b": _get(case_arrays, "B64"),
+    return {"a": _get(case_arrays, "A32"), "b": _get(case_arrays, "B32"),
             "x": dut_out["out32"]}
 '''
 
@@ -1060,7 +1074,9 @@ def residual_ratio(a, ainv):
 
 
 def layer1_targets(case_arrays, dut_out):
-    """getriBatched 主判（唯一，逐矩阵）：输出逆 vs golden64[i] 全量逐元素直审。"""
+    """旧逐元素辅助函数，当前残差判定不调用。
+
+    getriBatched 主判（唯一，逐矩阵）：输出逆 vs golden64[i] 全量逐元素直审。"""
     golden = np.asarray(_get(case_arrays, "golden64"))
     out = np.asarray(dut_out["out32"])
     if out.shape != golden.shape:
@@ -1115,7 +1131,9 @@ def residual_ratio(a, ainv):
 
 
 def layer1_targets(case_arrays, dut_out):
-    """matinvBatched 主判（唯一，逐矩阵）：输出逆 vs golden64[i] 全量逐元素直审。"""
+    """旧逐元素辅助函数，当前残差判定不调用。
+
+    matinvBatched 主判（唯一，逐矩阵）：输出逆 vs golden64[i] 全量逐元素直审。"""
     golden = np.asarray(_get(case_arrays, "golden64"))
     out = np.asarray(dut_out["out32"])
     if out.shape != golden.shape:
@@ -1145,7 +1163,7 @@ def _luqr_getri_block():
 
 
 def _luqr_geqrf_block():
-    return _LUQR_KERNELS + "\n\n\n" + _GEQRF_THIN
+    return _LUQR_KERNELS + "\n\n\n" + _ORGQR_FULL_THIN + "\n\n" + _GEQRF_THIN
 
 
 def _luqr_gqr_block():
@@ -1153,7 +1171,7 @@ def _luqr_gqr_block():
 
 
 def _luqr_mqr_block():
-    return _LUQR_KERNELS + "\n\n\n" + _MQR_THIN
+    return _LUQR_KERNELS + "\n\n\n" + _ORGQR_FULL_THIN + "\n\n" + _MQR_THIN
 
 
 def _luqr_gels_block(complex_):
@@ -2679,10 +2697,10 @@ def _luqr_case_ratio(lapack, case_arrays):
     """LU/QR 单矩阵算子的本 case 参考 ratio（低精度完整准备链 + 本件残差实现）。
 
     返回 {键: 值} 更新字典，口径与验收侧回填一致：
-    - getrf：CPU getrf(A32) 得低精度打包 LU/ipiv → DGET01（a=A64）；
-    - geqrf：CPU geqrf(A32) 得 (AF32,tau32) → 由反射子升精度构造 Q → DQRT01（a=A64）；
+    - getrf：CPU getrf(A32) 得低精度打包 LU/ipiv → DGET01（a=A32 升精度）；
+    - geqrf：CPU geqrf(A32) 得 (AF32,tau32) → 由反射子升精度构造 Q → DQRT01（a=A32 升精度）；
     - *gqr：CPU orgqr/ungqr(A32,tau32) → 正交性残差 DQRT02（q=Q32）；
-    - *mqr：CPU ormqr/unmqr(side,trans,A32,tau32,C32) → DQRT03（c=C64, q=q64）；
+    - *mqr：CPU ormqr/unmqr(side,trans,A32,tau32,C32) → DQRT03（c=C32 升精度, q=实际 A32/tau32 升精度构造）；
     - gels：CPU gels(A32,B32) 取解 X32 → 残差式按 m 形状自选，双键同写
       （判据相对线随形状取 ratio_cpu/ratio_opt_cpu）；
     - getri：CPU getri(LU32, ipiv) 得低精度逆 → DGET03（a=restore_lu(LU32, ipiv)）；
@@ -2704,7 +2722,7 @@ def _luqr_case_ratio(lapack, case_arrays):
         if info != 0:
             raise _PrepFailed(f"{PREP_PREFIX}getrf info={info}")
         _check_prep("LU32", lu32)
-        ratio = residual_ratio(a=case_arrays["A64"], lu=lu32,
+        ratio = residual_ratio(a=case_arrays["A32"], lu=lu32,
                                ipiv=np.asarray(ipiv) + 1)
         return {"ratio_cpu": float(ratio)}
     if OP.endswith("geqrf"):
@@ -2715,7 +2733,7 @@ def _luqr_case_ratio(lapack, case_arrays):
         _check_prep("AF32", af32)
         q = _orgqr_full(np.ascontiguousarray(af32).astype(_PREP_DT64), tau,
                         af32.shape[0], PREP_PREFIX == "c")
-        ratio = residual_ratio(a=case_arrays["A64"], r=af32, q=q)
+        ratio = residual_ratio(a=case_arrays["A32"], r=af32, q=q)
         return {"ratio_cpu": float(ratio)}
     if OP.endswith("gqr"):
         a32 = np.ascontiguousarray(case_arrays["A32"])
@@ -2742,8 +2760,9 @@ def _luqr_case_ratio(lapack, case_arrays):
         if info != 0:
             raise _PrepFailed(f"{PREP_PREFIX}ormqr/unmqr info={info}")
         _check_prep("opQ32", opq32)
-        ratio = residual_ratio(c=case_arrays["C64"], opq=opq32,
-                               q=case_arrays["q64"], side=side, trans=trans)
+        ratio = residual_ratio(c=case_arrays["C32"], opq=opq32,
+                               q=_orgqr_full(a32, tau32, nq, PREP_PREFIX == "c"),
+                               side=side, trans=trans)
         return {"ratio_cpu": float(ratio)}
     # gels（sgels/cgels）：双键同写，残差式按 m 形状自选。
     a32 = np.ascontiguousarray(case_arrays["A32"])
@@ -2754,7 +2773,7 @@ def _luqr_case_ratio(lapack, case_arrays):
     n = a32.shape[1]
     x32 = np.ascontiguousarray(x32[:n, :])
     _check_prep("X32", x32)
-    ratio = float(residual_ratio(a=case_arrays["A64"], b=case_arrays["B64"], x=x32))
+    ratio = float(residual_ratio(a=case_arrays["A32"], b=case_arrays["B32"], x=x32))
     return {"ratio_cpu": ratio, "ratio_opt_cpu": ratio}
 
 
@@ -3025,7 +3044,7 @@ _OP_SPECS = {
         "formula": thresholds.GETRF_FORMULA["real"],
         "threshold_fn": functools.partial(thresholds.getrf_threshold, complex_=False),
         "target_doc": "被测打包 LU + 被测 ipiv → 还原 L·U（按 ipiv 逆序回放行交换）"
-                      "vs 原 A64 直审（因子非唯一，任务书 §3.2.1 条 6）。",
+                      "vs 实际输入 A32 升精度 直审（因子非唯一，任务书 §3.2.1 条 6）。",
         "block": _luqr_getrf_block(False),
     },
     "cgetrf": {
@@ -3034,7 +3053,7 @@ _OP_SPECS = {
         "formula": thresholds.GETRF_FORMULA["complex"],
         "threshold_fn": functools.partial(thresholds.getrf_threshold, complex_=True),
         "target_doc": "被测打包 LU + 被测 ipiv → 还原 L·U（按 ipiv 逆序回放行交换）"
-                      "vs 原 A64 直审，实/虚拆两目标、双侧同时达标（因子非唯一，"
+                      "vs 实际输入 A32 升精度 直审，实/虚拆两目标、双侧同时达标（因子非唯一，"
                       "任务书 §3.2.1 条 6）。",
         "block": _luqr_getrf_block(True),
     },
@@ -3063,7 +3082,7 @@ _OP_SPECS = {
         "formula": thresholds.GEQRF_MQR_FORMULA,
         "threshold_fn": thresholds.geqrf_mqr_threshold,
         "target_doc": "由被测打包反射子 (v, tau) 升精度构造 m×m 完整 Q，Q·R"
-                      "（R = triu 被测打包输出）vs 原 A64 直审（因子非唯一，"
+                      "（R = triu 被测打包输出）vs 实际输入 A32 升精度 直审（因子非唯一，"
                       "任务书 §3.2.1 条 6）。",
         "block": _luqr_geqrf_block(),
     },
@@ -3073,7 +3092,7 @@ _OP_SPECS = {
         "formula": thresholds.GEQRF_MQR_FORMULA,
         "threshold_fn": thresholds.geqrf_mqr_threshold,
         "target_doc": "由被测打包反射子 (v, tau) 升精度构造 m×m 完整酉矩阵 Q，Q·R"
-                      "（R = triu 被测打包输出）vs 原 A64 直审，实/虚拆两目标、"
+                      "（R = triu 被测打包输出）vs 实际输入 A32 升精度 直审，实/虚拆两目标、"
                       "双侧同时达标（因子非唯一，任务书 §3.2.1 条 6）。",
         "block": _luqr_geqrf_block(),
     },
@@ -3353,6 +3372,8 @@ def _load_frozen_index(pkg_dir, entries, batched=False):
                     ratio is not None or status not in (None, "info")):
                 raise ValueError(f"{cid} info 元数据不匹配")
         else:
+            if FAMILY == "luqr" and row.get("reference_contract") != "luqr-input32-v1":
+                raise ValueError(f"{cid} 缺当前 LU/QR 参考口径 luqr-input32-v1，须重新冻结")
             if status not in ("ok", "prep_failed"):
                 raise ValueError(f"{cid} ratio_cpu_status 非法")
             values = ratio if batched else [ratio]
@@ -3406,7 +3427,7 @@ def load_frozen_index(package, entries, op):
     import json
     import math
     card = _spec_card(op)
-    namespace = {"json": json, "math": math, "OP": op, "USES_MEAN": card.uses_mean}
+    namespace = {"json": json, "math": math, "OP": op, "USES_MEAN": card.uses_mean, "FAMILY": _family_of(op)}
     exec(_FROZEN_INDEX_TEMPLATE, namespace)
     return namespace["_load_frozen_index"](Path(package), entries, batched=card.batched)
 

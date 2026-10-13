@@ -6,6 +6,12 @@
 extern "C" {
 #endif
 #define SOLVER_ADAPTER_VERSION 1u
+#define SOLVER_ADAPTER_VERSION_V2 2u
+#if defined(__GNUC__)
+#define SOLVER_OPTIONAL __attribute__((weak))
+#else
+#define SOLVER_OPTIONAL
+#endif
 /* Transport: tightly packed row-major Host buffers. complex64 is interleaved
  * float32(real,imag). Actual DUT memory/layout is described separately. */
 typedef struct {
@@ -23,13 +29,32 @@ typedef struct {
 const SolverAdapterDesc *solver_adapter_descriptor(void);
 /* Handle and stream are owned by harness. create must publish partially
  * allocated context through state so destroy can clean it after failure. */
-int solver_adapter_create(const SolverAdapterCase *c, void *handle, void *stream, void **state);
+int solver_adapter_create(const SolverAdapterCase *c, void *handle, void *stream, void **state) SOLVER_OPTIONAL;
 /* Restore all modified inputs, outputs, info; never call the target operator. */
-int solver_adapter_reset(void *state, const void *a, size_t a_bytes, const void *b, size_t b_bytes);
+int solver_adapter_reset(void *state, const void *a, size_t a_bytes, const void *b, size_t b_bytes) SOLVER_OPTIONAL;
 /* Return adapter status; separately return unmodified DUT API return code. */
 int solver_adapter_execute(void *state, int *dut_status);
 /* Harness synchronizes the supplied stream before readback. */
-int solver_adapter_readback(void *state, void *out, size_t out_bytes, int32_t *info, size_t info_count);
+int solver_adapter_readback(void *state, void *out, size_t out_bytes, int32_t *info, size_t info_count) SOLVER_OPTIONAL;
+/* v2 keeps v1 structures/callbacks intact. All buffers remain compact Host
+ * row-major; adapters marshal to the declared DUT layout/memory domain.
+ * ipiv is int32, 1-based. tau has the same dtype as the matrix. */
+typedef struct {
+    SolverAdapterCase base;
+    int64_t m, k, ldc, ldx;
+    char side, trans;
+    size_t in_ipiv_count, in_tau_count, out_ipiv_count, out_tau_count;
+} SolverAdapterCaseV2;
+int solver_adapter_create_v2(const SolverAdapterCaseV2 *c, void *handle, void *stream,
+                             void **state) SOLVER_OPTIONAL;
+int solver_adapter_reset_v2(void *state, const void *a, size_t a_bytes,
+                            const void *b, size_t b_bytes,
+                            const int32_t *ipiv, size_t ipiv_count,
+                            const void *tau, size_t tau_bytes) SOLVER_OPTIONAL;
+int solver_adapter_readback_v2(void *state, void *out, size_t out_bytes,
+                               int32_t *info, size_t info_count,
+                               int32_t *ipiv, size_t ipiv_count,
+                               void *tau, size_t tau_bytes) SOLVER_OPTIONAL;
 int solver_adapter_destroy(void *state); /* null/partially initialized is valid */
 #ifdef __cplusplus
 }

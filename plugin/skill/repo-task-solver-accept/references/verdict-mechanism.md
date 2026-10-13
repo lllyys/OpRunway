@@ -27,12 +27,24 @@ fail-closed 边界：残差不可计算（被测含 NaN/Inf、全零输出触发
 
 ## LU/QR 十六接口（LQ-20/21/22）
 
+CPU 参考链与被测输出均以算子实际输入的低精度数据为残差参考，运算统一升为
+float64/complex128；不使用量化前的 A64/B64/C64。getrf、geqrf、gels 取
+A32（gels 另取 B32）；getri/getriBatched 从实际 LU32 与 ipiv 升精度还原 A；
+matinvBatched 取 A32；mqr 从实际 A32、tau32 升精度构造 Q，配合 C32；
+gqr 对输出 Q 升精度后计算正交性残差。升精度保留低精度数值，不恢复量化前的值。
+
+冻结的 ratio_cpu/ratio_opt_cpu 也必须按同一口径计算。旧 LU/QR 回填版本
+`a32base-lqr1` 的部分支路仍用原始64位值，不能仅凭 `ratio_basis=A32-f64`
+认定其同口径；使用前须按修正后的参考链重新冻结。LU/QR 精度条目须有
+`reference_contract: "luqr-input32-v1"`，缺失时停止，不能只补标记。
+现场验收不自动重算或替换冻结值。
+
 判定卡独立成模块 `criteria/cards_luqr.py`（16 接口），经统一取卡分发层
 `render_verify._spec_card` 与 Cholesky 卡汇合（`accepts(op)` 分流，Cholesky 零漂移）。
 
 | 接口 | 残差计算对象 | 残差类型与阈值（r=ratio_cpu，rᵢ=逐内容参考值） |
 | --- | --- | --- |
-| sgetrf/cgetrf | 被测 LU 与 ipiv 逆序回放还原矩阵，与实际输入 A32 比较 | DGET01：max(5r, 0.3 实 / 0.5 复) |
+| sgetrf/cgetrf | 被测 LU 与 ipiv 逆序回放还原矩阵，与实际输入 A32 比较 | DGET01：max（5r，0.3 实 / 0.5 复） |
 | sgetri/cgetri | 从输入 LU32 与 ipiv 还原 A，检查被测逆 C 的 I−C·A | DGET03：max(5r, 0.05) |
 | sgetribatched/cgetribatched | 逐矩阵从输入 LU32 与 ipiv 还原 A，检查 I−C·A | DGET03：max(5rᵢ, 0.05) |
 | smatinvbatched/cmatinvbatched | 逐矩阵以实际输入 A32 检查被测逆 C 的 I−C·A | DGET03：max(5rᵢ, 0.5) |

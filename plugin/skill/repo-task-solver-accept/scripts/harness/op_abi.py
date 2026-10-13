@@ -50,6 +50,7 @@ CALL_SHAPES = (
     "potrs_b_inplace",
     "inplace_a_ipiv",
     "eig_a_w",
+    "luqr_adapter",
 )
 
 # 执行子进程已实现的调用形状；其余形状的算子表里照记，调用时明确拒绝。
@@ -179,6 +180,7 @@ OUT32_SOURCE = {
     "potrs_b_inplace": "B",
     "inplace_a_ipiv": "A",
     "eig_a_w": "W",
+    "luqr_adapter": "A",
 }
 
 # out32 来源 → 形状口径。消费者是 `run_harness.out32_shape`：
@@ -199,6 +201,22 @@ def get(op):
     except KeyError:
         raise AbiError(
             f"算子 {op!r} 不在 ABI 表内；已登记：{', '.join(sorted(TABLE))}") from None
+
+
+LUQR_OPS = {p + suffix for p in ("s", "c") for suffix in
+            ("getrf", "getri", "getribatched", "matinvbatched", "geqrf", "gels")}
+LUQR_OPS.update(("sorgqr", "cungqr", "sormqr", "cunmqr"))
+
+
+def get_adapter(op):
+    """LU/QR requires the fixed v2 adapter; no guessed direct public signature."""
+    if op not in LUQR_OPS:
+        return get(op)
+    return OpAbi(op, "developer-adapter", "luqr_adapter",
+                 "complex64" if op.startswith("c") else "float32",
+                 "array" if op.endswith("batched") else "scalar",
+                 op.endswith("batched"), "device", "awaiting_delivery",
+                 "requires adapter descriptor version 2")
 
 
 def header_entries(header_text):

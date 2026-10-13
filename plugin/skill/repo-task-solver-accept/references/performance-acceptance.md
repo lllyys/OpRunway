@@ -6,8 +6,8 @@
 
 ## 范围与准入
 
-当前正式性能判定仅支持 Cholesky 十算子。LU/QR 的执行及性能判定尚未接入，
-任务包中的 GPU 基线与自测比值不能替代验收侧实采证据。
+性能判定覆盖 Cholesky 十算子与 LU/QR 十六接口。LU/QR 要求固定 v2 适配的执行证据，
+逐例匹配 m/n/k、side/trans 与步长；任务包中的 GPU 基线与自测比值不能替代实采证据。
 
 - 任务包 `canonical_cases.json` 的全部普通 case 是性能全集，info 契约例不采性能。
   缺基线行、matched=false 或 avg_ms 无效的 case 保留为证据不足，不缩小全集。

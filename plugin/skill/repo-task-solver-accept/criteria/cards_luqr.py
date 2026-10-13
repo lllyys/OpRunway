@@ -14,7 +14,7 @@
 LU/QR 增量字段 residual_kind_of / threshold_ref_of / formula_of / threshold_of）。
 
 一段式残差（与 Cholesky s2-A1 同模型）：每个 accuracy 用例直接算 LAPACK 残差对阈值判。
-残差的原始输入取实现实际 fp32 输入（A32/B32/C32/q32 等），升 f64/c128 在
+残差的原始输入取实现实际 fp32 输入（A32/B32/C32、反射子 A32/tau32 等），升 f64/c128 在
 ``verdict.residual_ratio`` 内部统一做（与 Cholesky 换基口径一致）。
 
 残差喂数与阈值（1014 四册任务书 §3.2.1/§3.2.2）：
@@ -26,7 +26,7 @@ LU/QR 增量字段 residual_kind_of / threshold_ref_of / formula_of / threshold_
 - geqrf（S/CQRT01）：a=A32、r=被测打包、q=由被测 (v,tau) 构造的 m×m Q；
   阈值 max(5r, 0.1)；
 - *gqr（S/CQRT02）：q=被测 Q；阈值 max(5r, 1.5)；
-- *mqr（S/CQRT03）：c=C32、opq=被测输出、q=q32（canonical 显式 Q）、side/trans；
+- *mqr（S/CQRT03）：c=C32、opq=被测输出、q=由实际 A32/tau32 升精度构造 Q、side/trans；
   阈值 max(5r, 0.1)；
 - gels：**双判据按 m 动态选**——m=n 走 DQRT16（方阵）、m>n 走 DQRT17（超定），
   阈值相对线随形状取 ratio_cpu（方阵）/ ratio_opt_cpu（超定）；实/复同式
@@ -143,8 +143,11 @@ def _gqr_kwargs(case_arrays, dut_out):
 
 
 def _mqr_kwargs(case_arrays, dut_out):
+    packed = np.asarray(_get(case_arrays, "A32", "mqr"))
+    q = _orgqr_full(packed, _get(case_arrays, "tau32", "mqr"),
+                    packed.shape[0], _is_cx(packed))
     return {"c": _get(case_arrays, "C32", "mqr"), "opq": dut_out["out32"],
-            "q": _get(case_arrays, "q32", "mqr"),
+            "q": q,
             "side": _get(case_arrays, "side", "mqr"), "trans": _get(case_arrays, "trans", "mqr")}
 
 

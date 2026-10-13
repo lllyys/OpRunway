@@ -4,8 +4,8 @@
 执行件对被测工程公开头编译，不调用开发者自带的判据脚本。一次 case 使用一个 C++
 子进程；确定性复跑在同一进程、同一 stream 内逐轮恢复输入。
 
-LU/QR 的生成器和判定卡已提供，但本 harness 尚未接入其输入准备、矩形参数及
-ipiv/tau 输入输出；LU/QR 真实执行请求停在 A0，不能仅凭已有判定卡继续运行。
+LU/QR 使用固定 v2 适配模块，支持 m/n/k、side/trans、矩形输入输出及 ipiv/tau。
+模块缺失或版本不符时停止；取得开发者模块后仍须核对公开接口并在目标环境验证。
 
 ## 前置条件
 
@@ -14,14 +14,14 @@ ipiv/tau 输入输出；LU/QR 真实执行请求停在 A0，不能仅凭已有�
 | 源码 | 实际交付版本、公开头、build.sh 和算子实现齐备 | 停止，不用另一算子的结构性演练替代 |
 | 接口 | 实参顺序、返回值与已实现适配一致 | 取得交付契约再接入，不猜签名 |
 | 输入归属 | Host 指针由算子内部搬运；Device 指针由调用方分配搬运 | 两口径不能混用 |
-| 布局 | 当前执行器只支持已实现的行主序连续矩阵 | 列主序与非连续 leading dimension 未接入时拒绝 |
+| 布局 | 直接执行器使用行主序；固定适配负责转换实际 DUT 布局与步长 | 列主序与非连续 leading dimension 未接入时拒绝 |
 | 依赖准备 | 求解或求逆入口需要的因子由规定的准备链提供 | 不把原矩阵直接当作分解因子 |
 | 状态输出 | 核对 info 是标量还是逐 batch 数组、返回值是否代表执行成功 | 不以全零模拟状态冒充真实接口输出 |
 | 构建环境 | source 实际 CANN set_env.sh，确认目标 SOC、设备、工具链与可用容量 | 缺环境时停在构建之前 |
-| 判定包 | canonical、manifest 和已回填 index 齐备，ratio_basis=A32-f64 | 不从运行现场新算的参考值补洞 |
+| 判定包 | canonical、manifest 和已回填 index 齐备，ratio_basis=A32-f64；LU/QR 精度条目另需 reference_contract=luqr-input32-v1 | 不从运行现场新算的参考值补洞 |
 | 工具分发 | accept 和 case-gen 两个 skill 同次分发 | 不依赖工作区开发文档或旧 session |
 
-Cholesky 十算子的调用仍为 `awaiting_delivery`（尚无实际交付可绑定），请求运行时退 2。
+Cholesky 直接调用分支仍为 `awaiting_delivery`；实际交付可通过核对后的固定适配模块接入。
 Host 求逆通路可用于工程连接演练；其报告 `numeric=NOT_JUDGED` 表示没有该族的数值
 判定卡。演练成功不能证明 Cholesky 通过，也不能替代该批真实算子完整样例。
 

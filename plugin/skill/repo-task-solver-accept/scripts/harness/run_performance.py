@@ -50,7 +50,7 @@ def make_executor(directory, executor, kernel):
 
 
 def collect_case(case, plan, directory, mods, executor, args, provenance):
-    abi = op_abi.get(case["op"]) if getattr(args, "adapter", None) else op_abi.require_exec(case["op"])
+    abi = op_abi.get_adapter(case["op"]) if getattr(args, "adapter", None) else op_abi.require_exec(case["op"])
     record = {"case_id": case["case_id"], "case": performance.identity(case),
               "status": "ERROR", "collector": "msprof op", "timing_scope": "kernel_only",
               "target": args.target, "device": args.device, "soc": provenance.get("soc"), "layout": args.layout,
@@ -70,7 +70,8 @@ def collect_case(case, plan, directory, mods, executor, args, provenance):
         library = exec_case.loaded_lib_record(execution["result"].get("lib_path"), provenance)
         facts = {"kind": execution["kind"], "completed": det["runs_completed"],
                  "consistent": det["consistent"], "library_match": library.get("match"),
-                 "library_sha256": library.get("sha256")}
+                 "library_sha256": library.get("sha256"),
+                 "adapter_version": execution["result"].get("adapter_version")}
         if (facts["kind"] != "ok" or facts["completed"] != performance.SAMPLES
                 or facts["consistent"] is not True or facts["library_match"] is not True):
             raise ValueError("profiled execution failed/incomplete; inspect case execution artifacts")
@@ -150,7 +151,7 @@ def main(argv=None):
                     continue
                 record = {"case_id": cid, "case": performance.identity(canonical), "status": "ERROR"}
                 try:
-                    op_abi.get(canonical["op"]) if args.adapter else op_abi.require_exec(canonical["op"])
+                    op_abi.get_adapter(canonical["op"]) if args.adapter else op_abi.require_exec(canonical["op"])
                     # Only the fixed adapter backend supports native column-major interfaces.
                     if args.layout != "row_major" and not args.adapter:
                         raise ValueError("column_major adapter awaiting actual delivery")

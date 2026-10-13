@@ -79,7 +79,7 @@ def save_dut_npz(path, dut):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"status": np.array(dut.get("status", "ok"))}
-    for k in ("out32", "info"):
+    for k in ("out32", "info", "ipiv", "tau"):
         if dut.get(k) is not None:
             payload[k] = np.asarray(dut[k])
     np.savez(path, **payload)
@@ -90,10 +90,10 @@ def load_dut_npz(path):
     """读回三键（重判入口）。"""
     with np.load(path, allow_pickle=False) as z:
         dut = {"status": str(z["status"].item()) if "status" in z else "ok"}
-        for k in ("out32", "info"):
+        for k in ("out32", "info", "ipiv", "tau"):
             if k in z:
                 arr = z[k]
-                dut[k] = np.int64(arr.item()) if arr.ndim == 0 else arr
+                dut[k] = np.int64(arr.item()) if k == "info" and arr.ndim == 0 else arr
     return dut
 
 
@@ -155,8 +155,8 @@ def export_failure(bundle_dir, case, abi, exec_rec, inputs, dut, reason,
     # 失配轮与失败轮的输出：子进程写在 case 目录里，搬进留证件才算自包含
     case_dir = Path(exec_rec.get("case_dir") or ".")
     copied = []
-    for extra in ("out/out32.bin.diff.bin", "out/info.bin.diff.bin",
-                  "out/out32.bin.fail.bin", "out/info.bin.fail.bin"):
+    for extra in (f"out/{key}.bin{suffix}" for key in ("out32", "info", "ipiv", "tau")
+                  for suffix in (".diff.bin", ".fail.bin")):
         src = case_dir / extra
         if src.is_file():
             shutil.copyfile(src, bundle / Path(extra).name)
@@ -168,6 +168,8 @@ def export_failure(bundle_dir, case, abi, exec_rec, inputs, dut, reason,
     if exec_rec.get("three_key_error"):
         for src_rel, dst_name in (("out/out32.bin", "out32.raw.bin"),
                                   ("out/info.bin", "info.raw.bin"),
+                                  ("out/ipiv.bin", "ipiv.raw.bin"),
+                                  ("out/tau.bin", "tau.raw.bin"),
                                   ("out/result.txt", "result.txt")):
             src = case_dir / src_rel
             if src.is_file():
@@ -185,7 +187,7 @@ def export_failure(bundle_dir, case, abi, exec_rec, inputs, dut, reason,
         "abi": abi.to_dict() if hasattr(abi, "to_dict") else abi,
         "reason": reason,
         "exec": {k: v for k, v in exec_rec.items()
-                 if k not in ("out32", "info", "log", "spec_text")},
+                 if k not in ("out32", "info", "extras", "log", "spec_text")},
         "verdict": verdict,
         "determinism": determinism,
         "judge_context": judge_context,

@@ -75,6 +75,9 @@ STALE_CASE_OUTPUTS = ("out/out32.bin", "out/info.bin", "out/result.txt",
                       "out/out32.bin.diff.bin", "out/info.bin.diff.bin",
                       "out/out32.bin.fail.bin", "out/info.bin.fail.bin")
 
+STALE_CASE_OUTPUTS += tuple(f"out/{key}.bin{suffix}" for key in ("ipiv", "tau")
+                            for suffix in ("", ".diff.bin", ".fail.bin"))
+
 NP_DTYPE = {"float32": np.float32, "complex64": np.complex64}
 
 
@@ -260,7 +263,7 @@ def parse_result(text):
             except ValueError:
                 pass
         if k in ("n", "batch", "nrhs", "runs", "exit", "out32_bytes", "info_len",
-                 "rerun_first_diff_run", "device_roundtrip_ret") or k.endswith("_ret"):
+                 "rerun_first_diff_run", "device_roundtrip_ret", "adapter_version") or k.endswith("_ret"):
             try:
                 out[k] = int(v)
                 continue
@@ -329,12 +332,18 @@ def run_case(executor, case_dir, spec, inputs, repo, ascend_home,
     spec = dict(spec)
     for key, arr in inputs.items():
         a = np.ascontiguousarray(arr)
+        if spec.get("adapter_version") == 2:
+            expected_dtype = np.dtype(np.int32 if key == "in_ipiv" else NP_DTYPE[spec["dtype"]])
+            if a.dtype != expected_dtype:
+                raise ExecError(f"{key}: dtype {a.dtype} != {expected_dtype}")
         p = case_dir / "in" / f"{key}.bin"
         a.tofile(p)
         spec[key] = str(p)
     spec.setdefault("in_b", None)
     spec["out_a"] = str(case_dir / "out" / "out32.bin")
     spec["out_info"] = str(case_dir / "out" / "info.bin")
+    for key in ("ipiv", "tau"):
+        spec["out_" + key] = str(case_dir / "out" / (key + ".bin"))
     spec["result"] = str(case_dir / "out" / "result.txt")
     spec_text = write_spec(case_dir / "case.spec", spec)
 
@@ -357,6 +366,8 @@ def run_case(executor, case_dir, spec, inputs, repo, ascend_home,
     # 「输入 + 输出 + 日志」缺一角，留证件就不是可独立重判的。
     # 分成员读：out32 读不成也要尽量把 info 读回来，两边各自记错。
     out32, info, key_errors = read_three_keys_members(case_dir, spec, result)
+    extras, extra_errors = read_extras(case_dir, spec)
+    key_errors.extend(extra_errors)
     three_key_error = "；".join(key_errors) if key_errors else None
     if three_key_error and kind in EXECUTED_KINDS:
         # 子进程自报跑完、三键却读不成结构：归执行协议错误，不记 ok（审计 #6）
@@ -370,7 +381,7 @@ def run_case(executor, case_dir, spec, inputs, repo, ascend_home,
         "wall_seconds": p["seconds"], "result": result,
         "spec_text": spec_text, "log": log or "",
         "log_path": str(case_dir / "exec.log"), "case_dir": str(case_dir),
-        "out32": out32, "info": info, "three_key_error": three_key_error,
+        "out32": out32, "info": info, "extras": extras, "three_key_error": three_key_error,
         "cleared_stale": stale,
     }
 
@@ -403,6 +414,26 @@ def read_out32(case_dir, spec, result):
     if out32.size != want:
         raise ExecError(f"{out_bin}: 元素数 {out32.size} 与声明形状 {shape} 不符")
     return out32.reshape(shape)
+
+
+def read_extras(case_dir, spec):
+    """Read required auxiliary outputs; missing/truncated data is a protocol error."""
+    extras, errors = {}, []
+    batch = int(spec.get("batch", 1))
+    for key in ("ipiv", "tau"):
+        count = int(spec.get("out_" + key + "_count", 0))
+        if not count:
+            continue
+        dtype = np.dtype(np.int32 if key == "ipiv" else NP_DTYPE[spec["dtype"]])
+        path = Path(case_dir) / "out" / (key + ".bin")
+        try:
+            if path.stat().st_size != batch * count * dtype.itemsize:
+                raise ExecError(f"{key}: incorrect output byte count")
+            shape = (batch, count) if spec.get("info_kind") == "array" else (count,)
+            extras[key] = np.fromfile(path, dtype=dtype).reshape(shape)
+        except (OSError, ValueError, ExecError) as exc:
+            errors.append(f"{key} 读回失败: {exc}")
+    return extras, errors
 
 
 def read_info(case_dir, spec):

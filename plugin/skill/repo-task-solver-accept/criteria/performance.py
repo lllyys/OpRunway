@@ -8,9 +8,14 @@ from pathlib import Path
 SCHEMA = "solver-performance-v1"
 SAMPLES = 30
 GPU_FACTOR = 0.35
-IDENTITY = ("case_id", "op", "n", "nrhs", "batch", "uplo", "lda", "ldb", "seed", "dtype")
+IDENTITY = ("case_id", "op", "n", "nrhs", "batch", "uplo", "lda", "ldb", "seed", "dtype",
+            "m", "k", "side", "trans", "ldc", "ldda", "lddb", "lddx")
 CHOL_OPS = {p + s for p in ("s", "c") for s in
             ("potrf", "potrs", "potri", "potrfBatched", "potrsBatched")}
+
+LUQR_OPS = {p + s for p in ("s", "c") for s in
+            ("getrf", "getri", "getribatched", "matinvbatched", "geqrf", "gels")}
+LUQR_OPS.update(("sorgqr", "cungqr", "sormqr", "cunmqr"))
 
 
 def positive(value):
@@ -228,14 +233,17 @@ def judge(contract, measurements):
                 if record.get("plan") != plan or record.get("soc") != build.get("soc"):
                     raise ValueError("measurement plan/build does not match collection provenance")
                 row["npu_mean_ms"] = measurement_ms(case, record)
+                if case.get("op") in LUQR_OPS and any(
+                        k["execution"].get("adapter_version") != 2 for k in record["kernels"]):
+                    raise ValueError("LU/QR requires fixed adapter protocol v2 execution evidence")
                 if any(k["execution"].get("library_sha256") not in allowed_libraries for k in record["kernels"]):
                     raise ValueError("kernel execution library is not from the recorded build")
             except (ValueError, TypeError, KeyError, OverflowError) as exc:
                 reasons.append(str(exc))
             if (record.get("target") != "950PR" or record.get("layout") != "column_major"
                     or not str(record.get("soc", "")).lower().startswith("ascend950")
-                    or record.get("abi") != "device" or case.get("op") not in CHOL_OPS):
-                reasons.append("task requires Cholesky on 950PR with column-major Device ABI")
+                    or record.get("abi") != "device" or case.get("op") not in CHOL_OPS | LUQR_OPS):
+                reasons.append("task requires a supported solver on 950PR with column-major Device ABI")
         if not reasons:
             row["ratio_npu_gpu"] = row["npu_mean_ms"] / row["gpu_ms"]
             row["status"] = "PASS" if row["npu_mean_ms"] <= row["limit_ms"] else "FAIL"

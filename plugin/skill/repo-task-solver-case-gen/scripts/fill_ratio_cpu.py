@@ -74,10 +74,10 @@ getriBatched/matinvBatched + QR 实/复 geqrf/*gqr/*mqr/gels）。准备链数�
 _luqr_batched_ratio 逐步对齐（kind 选取、喂数、双键规则一致）：
 
 - getri：CPU getri(LU32, ipiv 转 0 基) → 低精度逆 → DGET03(a=restore_lu(LU32, ipiv))；
-- getrf：CPU getrf(A32) → 打包 LU/ipiv（ipiv 转 1 基）→ DGET01(a=A64)；
-- geqrf：CPU geqrf(A32) → 构造 m×m Q → DQRT01(a=A64, r=AF32, q=Q)；
+- getrf：CPU getrf(A32) → 打包 LU/ipiv（ipiv 转 1 基）→ DGET01(a=A32 升精度)；
+- geqrf：CPU geqrf(A32) → 构造 m×m Q → DQRT01(a=A32 升精度, r=AF32, q=Q)；
 - *gqr：CPU orgqr/ungqr(A32,tau32) → DQRT02(q=Q32)；
-- *mqr：CPU ormqr/unmqr(side,trans,A32,tau32,C32) → DQRT03(c=C64, q=q64)；
+- *mqr：CPU ormqr/unmqr(side,trans,A32,tau32,C32) → DQRT03(c=C32 升精度, q=实际 A32/tau32 升精度构造)；
 - gels：CPU gels(A32,B32) 取解 X32[:n] → m=n 走 DQRT16、m>n 走 DQRT17，
   ratio_cpu/ratio_opt_cpu 双键同写（判据相对线随形状取）；
 - 批量两族：A0 条目现场重造 k 内容（gl.build_batched_contents），getriBatched 以
@@ -103,12 +103,14 @@ from pathlib import Path
 import numpy as np
 
 import gen_data_cholesky as gd    # S3：批维读者/分块常量与 BATCHED_OPS 同源
+from reference_environment import reference_environment
+
 import gen_data_luqr as gl        # LU/QR：A0 内容重建与批量基名（LQ-13）
 
 MAX_WORKERS = 64                  # 旧包批量条目并行 worker 上限（沿 S3 spec §2 裁定）
 
 TOOL = "fill_ratio_cpu.py"
-TOOL_VER = "a32base-lqr1"  # 2026-10-08 换基（DPOT01 a=A32、index 落 ratio_basis）+ LQ-13（扩 LU/QR 回填支路）；承 s3-b4-r2
+TOOL_VER = "a32base-lqr2"  # lqr2：LU/QR 残差统一采用实际低精度输入升精度；此前 lqr1 部分支路仍用原始64位值
 REAL_OPS = ("spotrf", "spotrs", "spotri")
 COMPLEX_OPS = ("cpotrf", "cpotrs", "cpotri")
 CHOLESKY_OPS = REAL_OPS + COMPLEX_OPS
@@ -125,14 +127,14 @@ ACCEPTED_INDEX_SCHEMAS = ("solver-s1/cases-index@1", "solver-luqr/cases-index@1"
 # LU/QR 单矩阵准备链所需 npz 数组（键按 gl._base_name 后的 LAPACK 例程名，实/复
 # 拼写分列：orgqr/ungqr、ormqr/unmqr；run_chain_luqr 逐算子消费）。
 _LUQR_REQUIRED = {
-    "getrf": ("A64", "A32"),
+    "getrf": ("A32",),
     "getri": ("LU32", "ipiv"),
-    "geqrf": ("A64", "A32"),
+    "geqrf": ("A32",),
     "orgqr": ("A32", "tau32"),
     "ungqr": ("A32", "tau32"),
-    "ormqr": ("A32", "C32", "tau32", "C64", "q64"),
-    "unmqr": ("A32", "C32", "tau32", "C64", "q64"),
-    "gels": ("A64", "A32", "B64", "B32"),
+    "ormqr": ("A32", "C32", "tau32"),
+    "unmqr": ("A32", "C32", "tau32"),
+    "gels": ("A32", "B32"),
     "getribatched": ("LU32", "ipiv"),
     "matinvbatched": ("A32",),
 }
@@ -272,10 +274,10 @@ def run_chain_luqr(verdict_mod, lapack, case, arrays):
 
     - getri：CPU getri(LU32, ipiv 转 0 基) → 低精度逆 → DGET03
       （a=restore_lu(LU32, ipiv)）；
-    - getrf：CPU getrf(A32) → 打包 LU/ipiv → DGET01（a=A64，ipiv 转 1 基）；
-    - geqrf：CPU geqrf(A32) → (AF32,tau) → 构造 m×m Q → DQRT01（a=A64）；
+    - getrf：CPU getrf(A32) → 打包 LU/ipiv → DGET01（a=A32→64，ipiv 转 1 基）；
+    - geqrf：CPU geqrf(A32) → (AF32,tau) → 构造 m×m Q → DQRT01（a=A32→64）；
     - *gqr：CPU orgqr/ungqr(A32,tau32) → DQRT02（q=Q32）；
-    - *mqr：CPU ormqr/unmqr(side,trans,A32,tau32,C32) → DQRT03（c=C64,q=q64）；
+    - *mqr：CPU ormqr/unmqr(side,trans,A32,tau32,C32) → DQRT03（c=C32→64,q=Q(A32→64,tau32→64)）；
     - gels：CPU gels(A32,B32) 取解 X32[:n] → 按 m 形状 DQRT16（m=n）/DQRT17（m>n），
       双键同写（ratio_cpu/ratio_opt_cpu，判据相对线随形状取）；
     - 批量两族（getriBatched/matinvBatched）：CPU 逆 + DGET03（a 取实现实际输入升精度：
@@ -303,7 +305,7 @@ def run_chain_luqr(verdict_mod, lapack, case, arrays):
             raise PrepFailed(f"{cid}: {prefix}getrf info={info}")
         _check_low("LU32", lu32, cid, dt32)
         ratio = verdict_mod.residual_ratio(
-            "DGET01", a=arrays["A64"], lu=np.ascontiguousarray(lu32),
+            "DGET01", a=arrays["A32"], lu=np.ascontiguousarray(lu32),
             ipiv=np.asarray(ipiv) + 1)
         return {"ratio_cpu": float(ratio)}
     if base == "geqrf":
@@ -315,7 +317,7 @@ def run_chain_luqr(verdict_mod, lapack, case, arrays):
         dt64 = C128 if dt32 == C64 else F64
         q = _orgqr_full(np.ascontiguousarray(af32).astype(dt64), tau,
                         af32.shape[0], prefix == "c")
-        ratio = verdict_mod.residual_ratio("DQRT01", a=arrays["A64"], r=af32, q=q)
+        ratio = verdict_mod.residual_ratio("DQRT01", a=arrays["A32"], r=af32, q=q)
         return {"ratio_cpu": float(ratio)}
     if base in ("orgqr", "ungqr"):      # *gqr（实 orgqr / 复 ungqr）
         a32 = np.ascontiguousarray(arrays["A32"])
@@ -342,9 +344,11 @@ def run_chain_luqr(verdict_mod, lapack, case, arrays):
         if info != 0:
             raise PrepFailed(f"{cid}: {prefix}ormqr/unmqr info={info}")
         _check_low("opQ32", opq32, cid, dt32)
+        dt64 = C128 if prefix == "c" else F64
+        q = _orgqr_full(a32.astype(dt64), tau32.astype(dt64), nq, prefix == "c")
         ratio = verdict_mod.residual_ratio(
-            "DQRT03", c=arrays["C64"], opq=np.ascontiguousarray(opq32),
-            q=arrays["q64"], side=side, trans=trans)
+            "DQRT03", c=arrays["C32"], opq=np.ascontiguousarray(opq32),
+            q=q, side=side, trans=trans)
         return {"ratio_cpu": float(ratio)}
     if base == "gels":
         a32 = np.ascontiguousarray(arrays["A32"])
@@ -357,7 +361,7 @@ def run_chain_luqr(verdict_mod, lapack, case, arrays):
         _check_low("X32", x32, cid, dt32)
         kind = "DQRT16" if a32.shape[0] == n else "DQRT17"
         ratio = float(verdict_mod.residual_ratio(
-            kind, a=arrays["A64"], b=arrays["B64"], x=x32))
+            kind, a=arrays["A32"], b=arrays["B32"], x=x32))
         return {"ratio_cpu": ratio, "ratio_opt_cpu": ratio}
     if base == "getribatched":
         lu32 = np.ascontiguousarray(arrays["LU32"])
@@ -695,6 +699,7 @@ def main(argv=None):
     criteria_dir = Path(args.criteria) if args.criteria else default_criteria(Path(__file__))
     verdict_mod = load_verdict(criteria_dir)
     lapack = _lapack()
+    reference_env = reference_environment()
 
     selftest = prep_failed_selftest(verdict_mod, lapack)
     for st in selftest:
@@ -821,6 +826,9 @@ def main(argv=None):
     # 基版本标记（2026-10-08 换基）：本次回填的 ratio 全族为实现实际输入升 f64 的
     # A32 基；旧 index 无此字段即 A64 基，不可与新基混用
     index["ratio_basis"] = "A32-f64"
+    for entry in index["cases"]:
+        if entry.get("op") in ops and entry.get("op") in gl.ALL_OPS:
+            entry["reference_contract"] = "luqr-input32-v1"
     families = sorted({("luqr" if o in gl.ALL_OPS else "cholesky") for o in ops})
     index["ratio_cpu_fill"] = {
         "tool": {"name": TOOL, "ver": TOOL_VER},
@@ -831,7 +839,7 @@ def main(argv=None):
                  "gels/getri/matinv 低精度同前缀链路），scipy.linalg.lapack",
         "residual_impl": "repo-task-solver-accept/criteria/verdict.residual_ratio（唯一实现）",
         "families": families,
-        "env": {"numpy": np.__version__, "scipy": scipy.__version__},
+        "env": reference_env,
     }
 
     out_cases = Path(args.out) / "cases"

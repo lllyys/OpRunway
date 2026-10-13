@@ -145,3 +145,17 @@ def test_accept_rejects_missing_frozen_field(tmp_path, field):
     with pytest.raises(SystemExit) as exc:
         accept_run.build_report(tmp_path, tmp_path)
     assert exc.value.code == 2
+
+
+def test_luqr_requires_new_reference_contract(tmp_path):
+    import render_verify
+    row=dict(case_id="lu",op="sgetrf",m=3,n=2,ratio_cpu=1.,ratio_cpu_status="ok")
+    doc=dict(ratio_basis="A32-f64",cases=[row])
+    (tmp_path/"cases").mkdir()
+    path=tmp_path/"cases/index.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError,match="luqr-input32-v1"):
+        render_verify.load_frozen_index(tmp_path,[row],"sgetrf")
+    row["reference_contract"]="luqr-input32-v1"
+    path.write_text(json.dumps(doc))
+    assert render_verify.load_frozen_index(tmp_path,[row],"sgetrf")["lu"]["ratio_cpu"] == 1.

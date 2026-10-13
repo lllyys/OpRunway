@@ -255,3 +255,26 @@ def test_optional_reference_does_not_block_required_performance(reference_status
     assert counts[exp.ST_PENDING] == counts[exp.ST_NO_EVIDENCE] == 0
     _, missing_counts = exp.family_conclusion([reference, exp.perf_formal_gate_item("spotrf")])
     assert missing_counts[exp.ST_NO_EVIDENCE] == 1
+
+
+def test_luqr_protocol_and_matrix_identity(tmp_path):
+    _,contract,data=fixture(tmp_path,count=1)
+    case=contract["cases"]["case-0"]
+    case.update(op="sgels",m=12,n=8,nrhs=2,ldda=16,lddb=16,lddx=8)
+    record=data["cases"][0]; record["case"]=perf.identity(case)
+    data["kernel_map"]["operators"]["sgels"]=data["kernel_map"]["operators"].pop("spotrf")
+    assert perf.judge(contract,data)["performance_verdict"] == "INSUFFICIENT"
+    record["kernels"][0]["execution"]["adapter_version"]=2
+    assert perf.judge(contract,data)["performance_verdict"] == "PASS"
+    record["case"]["m"]=8
+    assert perf.judge(contract,data)["performance_verdict"] == "INSUFFICIENT"
+
+
+@pytest.mark.parametrize("kernels", [None, [None], [{"execution": None}]])
+def test_malformed_luqr_measurements_remain_insufficient(tmp_path, kernels):
+    _,contract,data=fixture(tmp_path,count=1)
+    case=contract["cases"]["case-0"];case.update(op="sgels",m=12,nrhs=2)
+    data["cases"][0]["case"]=perf.identity(case)
+    data["kernel_map"]["operators"]["sgels"]=data["kernel_map"]["operators"].pop("spotrf")
+    data["cases"][0]["kernels"]=kernels
+    assert perf.judge(contract,data)["performance_verdict"] == "INSUFFICIENT"

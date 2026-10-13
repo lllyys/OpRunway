@@ -1,5 +1,13 @@
 # OpRunway 改动简表
 
+- **2026-10-13g · 清理已替代报告产物。** 删除已核对压缩副本的四份v5重复索引、旧候选包、撤回样例及v6样例前归档，共1,347,672,272字节；保留当前十包、LU/QR16包、实验/验收证据与fork工作区，清单见ignored reports/cleanup-20261013.json。
+
+- **2026-10-13f · 复核 solver skill 完成性。** 修正遗漏的harness报告judge_scope及帮助文字，明确判定已覆盖LU/QR；仅文字修正，未追加运行测试，未commit/push。
+
+- **2026-10-13e · 完成 solver skill 修复与 casegen 文档整理。** LU/QR 固定v2适配接入矩形参数、ipiv/tau、失败留证与msprof op性能闭环；冻结参考标记与数值库环境可追溯，保留任务书Q正交性判据。远端局部验证和独立Codex审查闭环；既有包未动，未commit/push，未作完整NPU验收。见[修复计划与完成记录](solver/solver-skill-repair-plan-1013.md)。
+
+- **2026-10-13d · 按用户确认统一 LU/QR skill 残差输入口径。** CPU回填、验收卡及渲染模板统一实际32位输入升64计算，mqr从实际反射子构造Q；远程42矩阵三链一致，独立Codex审查通过。仅改skill及开发记录，已有包未动，未push。见[solver-luqr-input32-skill-1013.md](solver/solver-luqr-input32-skill-1013.md)。
+
 - **2026-10-13c · 回退未经确认的gels参考口径改动。** 恢复原CPU参考链，删除新增逐条口径标记与旧包拒绝逻辑，撤回强制重冻结论；保留冻结ratio_opt_cpu读取和QR参数透传。两包脚本/说明/摘要同步，冻结数据未改，未测试、未push。见[solver-gels-basis-revert-1013.md](solver/solver-gels-basis-revert-1013.md)。
 
 - **2026-10-13b · 修复gels冻结参考读取与生成口径。** 超定改读冻结ratio_opt_cpu，补QR元数据；CPU冻结链改A32/B32并标记新口径，拒用旧值。两个gels包脚本/README/摘要同步，原index和GPU基线不动，CPU参考待服务器重冻。独立Codex静态审查，未运行测试。见[solver-gels-frozen-fix-1013.md](solver/solver-gels-frozen-fix-1013.md)。

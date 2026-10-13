@@ -21,11 +21,11 @@
 
 `--judge auto` 按算子查 criteria 的判定卡：
 
-- Cholesky 十算子有卡 → 走 criteria 一段式残差判定，出数值 PASS/FAIL。
+- Cholesky 十算子与 LU/QR 十六接口有卡 → 走 criteria 一段式残差判定，出数值 PASS/FAIL。
 - 现工程算子（cmatinv_batched 等）无卡 → 只做**结构性验证**：三键落地、形状与
   dtype 合法、数值有限、info 形态合规，并记一个诊断用的求逆残差（两种布局口径
   各算一遍，报哪一种对上）。**结构性验证不是数值判定**，报告里 `numeric` 记
-  `NOT_JUDGED`，真判定等 Cholesky 交付。
+  `NOT_JUDGED`，不能替代对应算子的数值验收。
 
 ## 复跑
 
@@ -118,12 +118,13 @@ def load_modules(gen_dir):
     import accept_run as package_mod
     import batched_a0 as a0_mod                 # noqa: E402
     import batched_parallel as bp_mod           # noqa: E402
-    import cards_cholesky as cards_mod          # noqa: E402
+    import accept_run as cards_mod          # noqa: E402
     import fill_ratio_cpu as ratio_mod          # noqa: E402
+    import gen_data_luqr as luqr_gen
     import gen_data_cholesky as gen_mod         # noqa: E402
     import verdict as verdict_mod               # noqa: E402
     return {"frozen": frozen_mod, "package": package_mod, "a0": a0_mod, "bp": bp_mod, "cards": cards_mod, "ratio": ratio_mod,
-            "gen": gen_mod, "verdict": verdict_mod}
+            "gen": gen_mod, "luqr_gen": luqr_gen, "verdict": verdict_mod}
 
 
 def has_criteria_card(mods, op):
@@ -171,6 +172,11 @@ def out32_shape(abi, case):
     n = int(case["n"])
     batch = int(case.get("batch") or 1)
     nrhs = int(case.get("nrhs") or 0)
+    if abi.call_shape == "luqr_adapter":
+        m = int(case.get("m", n))
+        cols = nrhs if abi.op.endswith("gels") else n
+        rows = n if abi.op.endswith("gels") else m
+        return (batch, rows, cols) if abi.batched else (rows, cols)
     layout = abi.out32_layout
     if layout == "rhs":
         cols = nrhs
@@ -187,7 +193,7 @@ def out32_shape(abi, case):
 def build_spec(abi, case, runs, device_id, layout="row_major"):
     """执行子进程的 spec。`layout` 是双口径分流点：现工程行主序，任务书列主序。"""
     shape = out32_shape(abi, case)
-    return {
+    spec = {
         "op": abi.op, "abi": abi.abi, "call_shape": abi.call_shape,
         "dtype": abi.dtype, "info_kind": abi.info_kind,
         "device_id": device_id, "n": int(case["n"]),
@@ -203,6 +209,29 @@ def build_spec(abi, case, runs, device_id, layout="row_major"):
         "runs": int(runs), "layout": layout,
         "out32_shape": ",".join(str(x) for x in shape),
     }
+    if abi.call_shape == "luqr_adapter":
+        m, n = int(case.get("m", case["n"])), int(case["n"])
+        k = int(case.get("k", min(m, n)))
+        mqr = abi.op.endswith("mqr")
+        nq = m if case.get("side", "LEFT") in ("LEFT", "L") else n
+        spec.update(adapter_version=2, m=m, k=k, side=case.get("side", "LEFT"),
+                    trans=case.get("trans", "N"), ldc=int(case.get("ldc", m)),
+                    ldx=int(case.get("lddx", n)),
+                    a_rows=nq if mqr else m, a_cols=k if mqr else n,
+                    b_rows=m if mqr or abi.op.endswith("gels") else 0,
+                    b_cols=n if mqr else int(case.get("nrhs", 0)),
+                    out_rows=shape[-2], out_cols=shape[-1],
+                    input_kind="lu_factor" if "getri" in abi.op else
+                               "qr_reflectors" if abi.op.endswith(("gqr", "mqr")) else "matrix",
+                    in_ipiv_count=n if "getri" in abi.op else 0,
+                    in_tau_count=k if abi.op.endswith(("gqr", "mqr")) else 0,
+                    out_ipiv_count=min(m, n) if abi.op.endswith("getrf") else 0,
+                    out_tau_count=min(m, n) if abi.op.endswith("geqrf") else 0)
+        spec["lda"] = int(case.get("lda", case.get("ldda", spec["a_rows"] if layout == "column_major" else spec["a_cols"])))
+        spec["ldb"] = int(case.get("ldb", case.get("lddb", m if layout == "column_major" else spec["b_cols"])))
+        spec["ldc"] = int(case.get("ldc", m if layout == "column_major" else n))
+        spec["ldx"] = int(case.get("lddx", n if layout == "column_major" else spec["out_cols"]))
+    return spec
 
 
 # ---------------------------------------------------------------------------
@@ -225,8 +254,8 @@ def _inv_residual(A, C):
 def structural_check(abi, case, inputs, dut):
     """结构性验证：三键落地、形状 dtype 合法、数值有限、info 形态合规。
 
-    **不是数值判定**：返回的 `numeric` 恒为 `NOT_JUDGED`。criteria 的判定卡只覆盖
-    Cholesky 十算子；现工程算子的真判定等 Cholesky 交付后按交付头接入。
+    **不是数值判定**：返回的 `numeric` 恒为 `NOT_JUDGED`。criteria 的判定卡覆盖
+    Cholesky 十算子与 LU/QR 十六接口；无卡算子只记录结构性结论。
     """
     checks, failures = [], []
 
@@ -279,7 +308,7 @@ def structural_check(abi, case, inputs, dut):
                       "layout_match": ("indistinguishable" if indistinguishable
                                        else "direct" if direct <= swapped
                                        else "transpose_conj"),
-                      "note": "诊断证据，不是判据；判定卡覆盖 Cholesky 十算子。"
+                      "note": "诊断证据，不是判据。"
                               "对称/Hermitian 输入下两个残差必然相等，布局判别不出"}
         except (ValueError, TypeError) as exc:
             sanity = {"error": f"{type(exc).__name__}: {exc}"}
@@ -315,7 +344,7 @@ def prepare_case(mods, case, abi, adapter=False):
     `arrays` 给判定用（含 A64/golden 等），`exec_inputs` 只含要落 bin 的 f32/c64
     输入——大数组不重复一份。
     """
-    gen = mods["gen"]
+    gen = mods["luqr_gen"] if case["op"] in op_abi.LUQR_OPS else mods["gen"]
     sample_map = None
     if case.get("case_purpose") == "probe":
         arrays = case.pop("_arrays")
@@ -336,6 +365,15 @@ def prepare_case(mods, case, abi, adapter=False):
         arrays = gen.build_case_arrays(case)
         if case.get("case_purpose") == "info":
             arrays = gen.build_info_arrays(case, arrays)
+    if case["op"] in op_abi.LUQR_OPS:
+        if not adapter:
+            raise ContractError("LU/QR requires the fixed v2 adapter")
+        exec_inputs = {"in_a": arrays["LU32"] if "getri" in case["op"] else arrays["A32"]}
+        for key, member in (("in_b", "C32" if case["op"].endswith("mqr") else "B32"),
+                            ("in_ipiv", "ipiv"), ("in_tau", "tau32")):
+            if member in arrays and (key != "in_tau" or case["op"].endswith(("gqr", "mqr"))):
+                exec_inputs[key] = arrays[member]
+        return arrays, exec_inputs, sample_map
     exec_inputs = {"in_a": arrays["A32"]}
     if ("potrs" in abi.op or "potri" in abi.op) and case.get("case_purpose") != "info":
         if not adapter:
@@ -372,6 +410,7 @@ def run_one(mods, case, abi, ctx):
         ctx["repo"], ctx["ascend_home"], ctx["build_dir"], ctx["timeout"],
         ctx["cwd"])
     dut = evidence.three_key(exec_rec["out32"], exec_rec["info"], exec_rec["status"])
+    dut.update(exec_rec.get("extras", {}))
     det = exec_case.rerun_record(exec_rec["result"])
     loaded_lib = exec_case.loaded_lib_record(exec_rec["result"].get("lib_path"),
                                              ctx.get("provenance"))
@@ -437,7 +476,7 @@ def run_one(mods, case, abi, ctx):
         bundle = evidence.export_failure(
             Path(ctx["evidence_dir"]) / cid, case, abi, exec_rec,
             {k: judge_arrays.get(k) for k in
-             ("A64", "A32", "B64", "B32", "golden64", "golden32")},
+             ("A64", "A32", "B64", "B32", "C32", "LU32", "ipiv", "tau32", "golden64", "golden32")},
             dut, reason, ctx["provenance"], verdict_rec, HERE,
             determinism=det, judge_context=judge_context)
         ok, missing = evidence.bundle_is_self_contained(
@@ -504,7 +543,9 @@ def recheck_determinism(bundle, meta, dut):
                         "逐轮字节不可核"}
     compared, differs = {}, []
     for key, name, dtype in (("out32", "out32.bin.diff.bin", None),
-                             ("info", "info.bin.diff.bin", np.int32)):
+                             ("info", "info.bin.diff.bin", np.int32),
+                             ("ipiv", "ipiv.bin.diff.bin", np.int32),
+                             ("tau", "tau.bin.diff.bin", None)):
         saved_path = bundle / name
         base = dut.get(key)
         if not saved_path.is_file() or base is None:
@@ -543,13 +584,16 @@ def rejudge(bundle_dir, gen_dir, jobs=1):
         raise ContractError(f"{bundle} 不是留证件（缺 case.json）")
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     case, abi_d = meta["case"], meta["abi"]
+    if (case.get("op") in op_abi.LUQR_OPS and case.get("case_purpose") != "info"
+            and case.get("reference_contract") != "luqr-input32-v1"):
+        raise ContractError("LU/QR evidence requires reference_contract=luqr-input32-v1")
     dut_path = bundle / "dut.npz"
     if not dut_path.is_file():
         return {"case_id": case.get("case_id"), "rejudge": "no_dut",
                 "reason": meta.get("reason"),
                 "note": "执行未产出三键，没有可重判的被测输出"}, 1
     mods = load_modules(gen_dir)
-    abi = op_abi.get(abi_d["op"])
+    abi = op_abi.get_adapter(abi_d["op"]) if abi_d.get("call_shape") == "luqr_adapter" else op_abi.get(abi_d["op"])
     dut = evidence.load_dut_npz(dut_path)
     det_rec = recheck_determinism(bundle, meta, dut)
     det_ok = det_rec["class"] in DET_REJUDGE_OK
@@ -632,8 +676,11 @@ def _pick_cases(mods, canonical_path, ops, max_n, limit):
     ratio_mean = index_doc.get("ratio_cpu_mean")
     base_by_id = {c["case_id"]: c for c in cases}
     full = doc.get("package_scope") == "full"
-    derived = (list(mods["gen"].derive_info_cases(cases, require_s1=not full))
-               + list(mods["gen"].derive_batched_info_cases(cases, require_s1=not full)))
+    derived = []
+    for generator, family in ((mods["gen"], [c for c in cases if c["op"] not in op_abi.LUQR_OPS]),
+                              (mods["luqr_gen"], [c for c in cases if c["op"] in op_abi.LUQR_OPS])):
+        derived.extend(generator.derive_info_cases(family, require_s1=not full))
+        derived.extend(generator.derive_batched_info_cases(family, require_s1=not full))
     base_by_id.update({c["case_id"]: c for c in derived})
     cases, seen = [], set()
     for entry in index_doc.get("cases", []):
@@ -642,7 +689,7 @@ def _pick_cases(mods, canonical_path, ops, max_n, limit):
             raise ContractError(f"index case_id 重复或不属于 canonical/info 派生: {cid}")
         seen.add(cid)
         base = base_by_id[cid]
-        for key in ("op", "n", "batch", "seed", "uplo", "nrhs", "info_probe", "k_expected"):
+        for key in ("op", "m", "n", "k", "side", "trans", "batch", "seed", "uplo", "nrhs", "info_probe", "k_expected"):
             if key in entry and key in base and entry[key] != base[key]:
                 raise ContractError(f"{cid}: index.{key} 与 canonical/info 派生不符")
         case = dict(base)
@@ -683,7 +730,7 @@ def main(argv=None):
     ap.add_argument("--rejudge", help="留证目录；只重判不连真机，其余参数忽略")
 
     src = ap.add_argument_group("输入来源")
-    src.add_argument("--canonical", help="canonical_cases.json 路径（Cholesky 任务包）")
+    src.add_argument("--canonical", help="canonical_cases.json 路径（solver 任务包）")
     src.add_argument("--probe-op", help="通路演练：现工程算子名（如 cmatinv_batched）")
     src.add_argument("--n", type=int, default=8, help="演练规格 n")
     src.add_argument("--batch", type=int, default=2, help="演练规格 batch")
@@ -756,7 +803,7 @@ def main(argv=None):
             cases, ratio_mean = _pick_cases(mods, args.canonical, args.ops,
                                             args.max_n, args.limit)
             for c in cases:
-                op_abi.get(c["op"]) if args.adapter else op_abi.require_exec(c["op"])
+                op_abi.get_adapter(c["op"]) if args.adapter else op_abi.require_exec(c["op"])
 
         # 每次运行一套独立目录：现场与留证件都带 run id，旧产物进不来（审计 #2）
         rid = run_id()
@@ -790,7 +837,7 @@ def main(argv=None):
     records, t0 = [], time.time()
     n_ok = n_bad = n_err = n_det_fail = n_det_unknown = n_lib_bad = 0
     for case in cases:
-        abi = op_abi.get(case["op"])
+        abi = op_abi.get_adapter(case["op"]) if args.adapter else op_abi.get(case["op"])
         ctx["judge"] = (args.judge if args.judge != "auto"
                         else ("criteria" if has_criteria_card(mods, case["op"])
                               else "structural"))
@@ -841,8 +888,9 @@ def main(argv=None):
                     "det_unknown": n_det_unknown, "lib_mismatch": n_lib_bad,
                     "wall_seconds": round(time.time() - t0, 1)},
         "formal": "PENDING_RULING",
-        "judge_scope": "criteria 判定卡只覆盖 Cholesky 十算子；其余算子记结构性结论，"
-                       "numeric=NOT_JUDGED，真判定等 Cholesky 交付后按交付头接入",
+        "judge_scope": "criteria 判定卡覆盖 Cholesky 十算子与 LU/QR 十六接口；"
+                       "无卡算子仅记结构性结论，numeric=NOT_JUDGED；"
+                       "数值通过不等于完整算子验收通过",
         "cases": records,
     }
     exec_case.dump_json(args.report, report)

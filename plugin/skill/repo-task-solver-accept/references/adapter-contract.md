@@ -1,4 +1,4 @@
-# 开发者适配模块协议 v1
+# 开发者适配模块协议
 
 开发者在 `test/<op>/<op>_adapter.cpp` 实现 `assets/adapter/solver_adapter.h` 的固定C入口。
 与自测main分开，二者共用同一模块，不增加acceptance目录。验收方使用skill原版协议头和
@@ -49,3 +49,36 @@ std::complex类型放进C协议。它不等于DUT布局：Device指针、列主�
 create/reset/前置分解不能发射被筛选的目标kernel；仅分阶段并不能保证profiler排除它们，须核对
 kernel清单与每调用launch次数。预热、输入恢复、同步搬运不作为API墙钟计入性能。
 cmatinv样例入口profile_cmatinv_sample.py支持--adapter；没有GPU基线时只出实测，不判性能达标。
+
+## LU/QR v2 数据契约
+
+LU/QR descriptor 的 version 为 `SOLVER_ADAPTER_VERSION_V2`，调用 create_v2、
+reset_v2、readback_v2；execute、destroy 与 descriptor 沿用公共入口。
+Cholesky 与已有样例可继续使用 v1。v2 的 base.struct_size 为 sizeof(SolverAdapterCaseV2)。
+
+| 字段或缓冲区 | 含义 |
+| --- | --- |
+| m/n/k、side/trans | 矩形维度、反射子数、左右乘及转置；side 为 L/R，trans 为 N/T/C |
+| base.lda/base.ldb、ldc/ldx | DUT 实际步长；gels 的 ldda/lddb/lddx 分别映射 lda/ldb/ldx |
+| a/b/out | Host 紧凑行主序；传入字节数为整个 batch 总量，适配负责 padding 与布局转换 |
+| in_ipiv/out_ipiv | int32、1 基主元；count 为整个 batch 元素数 |
+| in_tau/out_tau | 与矩阵同 dtype 的反射子系数；Case 中 count 为元素数，reset/readback 参数为字节数 |
+
+| 算子族 | 输入 a、b、附加输入 | 输出 out、附加输出 |
+| --- | --- | --- |
+| getrf | A，m×n | 打包 LU，m×n；ipiv 长 min(m,n) |
+| getri/getribatched | LU32，n×n；ipiv 长 n | 逆矩阵，n×n |
+| matinvbatched | A，n×n | 逆矩阵，n×n |
+| geqrf | A，m×n | 打包 QR，m×n；tau 长 min(m,n) |
+| gqr | 打包反射子 A，m×n；tau 长 k | Q，m×n |
+| mqr | 打包反射子 A，nq×k；b 为 C，m×n；tau 长 k | op(Q)·C 或 C·op(Q)，m×n |
+| gels | A，m×n；b 为 B，m×nrhs | X，n×nrhs |
+
+mqr 的 nq 在左乘时为 m、右乘时为 n。批量数组依次拼接各矩阵，附加数组同序。
+传输 dtype、大小与公开接口须逐项核对；reset 每轮恢复 ipiv/tau，readback 取真实附加输出。
+这些输出与 out/info 一起做字节一致性检查，失败证据保存附加数组供独立重判。
+
+QR 的 info_probe=bad_param 要求适配对公开接口第一个可校验参数执行非法调用，
+原样回传实际 info，与任务用例 k_expected 核对；若该公开接口不能产生约定状态，
+停止并报告契约不兼容，不在适配中填写预期 info。正常调用的维度不得因此修改。
+本协议的局部验证不代替各开发者 Device 适配的真机验证。

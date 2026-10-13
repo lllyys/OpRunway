@@ -74,3 +74,52 @@ def test_adapter_spec_native_leading_dimension_and_input_kind():
     case.update(lda=0,ldb=0)
     spec=run_harness.build_spec(abi,case,5,0,'column_major')
     assert spec['lda']==0 and spec['ldb']==0
+
+
+@pytest.mark.parametrize("op", sorted(op_abi.LUQR_OPS))
+def test_luqr_transport_matches_generated_arrays(op):
+    import gen_data_luqr as gen
+    case = dict(case_id="small", op=op, n=4, seed=17, dtype="complex64" if op[0]=="c" else "float32")
+    if op.endswith("batched"):
+        case.update(batch=3, lda=4, sample_map=gen.derive_sample_map(17,3))
+    elif op.endswith(("getrf", "geqrf", "gqr", "mqr", "gels")):
+        case.update(m=6)
+    if op.endswith(("gqr", "mqr")):
+        case.update(k=2, side="RIGHT", trans="N")
+    if op.endswith("gels"):
+        case.update(nrhs=2, ldda=9, lddb=10, lddx=7)
+    abi=op_abi.get_adapter(op)
+    arrays,inputs,_=run_harness.prepare_case({"luqr_gen":gen},case,abi,adapter=True)
+    spec=run_harness.build_spec(abi,case,3,0,"column_major")
+    batch=case.get("batch",1)
+    assert inputs["in_a"].size == batch*spec["a_rows"]*spec["a_cols"]
+    assert inputs.get("in_b",np.empty(0)).size == batch*spec["b_rows"]*spec["b_cols"]
+    assert inputs.get("in_ipiv",np.empty(0)).size == batch*spec["in_ipiv_count"]
+    assert inputs.get("in_tau",np.empty(0)).size == batch*spec["in_tau_count"]
+    if "getri" in op:
+        np.testing.assert_array_equal(inputs["in_a"],arrays["LU32"])
+    if op.endswith("gels"):
+        assert (spec["lda"],spec["ldb"],spec["ldx"]) == (9,10,7)
+        assert spec["out32_shape"] == "4,2"
+    if op.endswith("mqr"):
+        assert (spec["a_rows"],spec["a_cols"]) == (4,2)
+        np.testing.assert_array_equal(inputs["in_b"],arrays["C32"])
+
+
+def test_auxiliary_output_errors_and_evidence(tmp_path):
+    import evidence
+    (tmp_path/"out").mkdir()
+    spec=dict(batch=1,info_kind="scalar",dtype="complex64",out_tau_count=2,out_ipiv_count=2)
+    ipiv=np.array([1,2],np.int32); tau=np.array([1+2j,3+4j],np.complex64)
+    ipiv.tofile(tmp_path/"out/ipiv.bin");tau.tofile(tmp_path/"out/tau.bin")
+    extras,errors=exec_case.read_extras(tmp_path,spec)
+    assert not errors
+    dut=dict(out32=np.eye(2,dtype=np.complex64),info=0,status="ok",**extras)
+    evidence.save_dut_npz(tmp_path/"dut.npz",dut)
+    loaded=evidence.load_dut_npz(tmp_path/"dut.npz")
+    np.testing.assert_array_equal(loaded["tau"],tau)
+    np.testing.assert_array_equal(loaded["ipiv"],ipiv)
+    (tmp_path/"out/tau.bin").write_bytes(b"bad")
+    extras,errors=exec_case.read_extras(tmp_path,spec)
+    assert "tau" not in extras and errors
+    assert "out/tau.bin" in exec_case.clear_stale_outputs(tmp_path)

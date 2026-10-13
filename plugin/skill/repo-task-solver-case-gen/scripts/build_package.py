@@ -1134,6 +1134,8 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
     materialize:"gen"，条目（含 sample_map 槽位映射）与逐内容 ratio 参考来自装包
     自检的现场生成运行（自检数据随后删除）。scope：full=该算子 dedup 全量切片
     （2026-09-27 全量精度用例决策），s1=二维代表子集六例（v3 前行为）。"""
+    from reference_environment import reference_environment
+    reference_env = reference_environment()
     criteria_dir = find_criteria_dir(staging_dirs)
     baseline_src = find_baseline(staging_dirs, op)
     here = Path(__file__).resolve().parent
@@ -1273,6 +1275,10 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
     # 输入升 f64 的 A32 基（基变更日 2026-10-08；potrf 族旧 A64 基固化值不可与新基
     # 混用），verify/accept 消费时据此辨新旧——旧包 index 无此字段即 A64 基
     gen_index["ratio_basis"] = "A32-f64"
+    gen_index["reference_environment"] = reference_env
+    if _is_luqr(op):
+        for entry in gen_cases:
+            entry["reference_contract"] = "luqr-input32-v1"
 
     # 包内 index：gen 产 index 原样 + 逐条 materialize:"gen"（零数据，S3 spec §5 + HT-2 A0）
     for entry in gen_cases:
@@ -1426,6 +1432,8 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
     条目与 ratio 参考值来自装包自检的现场生成+回填运行（生成数据随后删除）。
     scope：full=该算子全部精度用例切片（2026-09-27 全量精度用例决策），
     s1=代表子集（v3 前行为）。"""
+    from reference_environment import reference_environment
+    reference_env = reference_environment()
     criteria_dir = find_criteria_dir(staging_dirs)
     baseline_src = find_baseline(staging_dirs, op)
     here = Path(__file__).resolve().parent
@@ -1613,6 +1621,10 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
     # 输入升 f64 的 A32 基（基变更日 2026-10-08；potrf 族旧 A64 基固化值不可与新基
     # 混用），verify/accept 消费时据此辨新旧——旧包 index 无此字段即 A64 基
     gen_index["ratio_basis"] = "A32-f64"
+    gen_index["reference_environment"] = reference_env
+    if _is_luqr(op):
+        for entry in gen_cases:
+            entry["reference_contract"] = "luqr-input32-v1"
 
     # 包内 index：gen 产 index 原样 + 逐条 materialize:"gen"（零数据）
     for entry in gen_cases:

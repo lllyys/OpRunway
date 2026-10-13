@@ -237,7 +237,7 @@ def test_gqr_residual_pass_and_fail():
 
 
 def _mqr_fixture(m, n, k, side, trans, seed=5):
-    """构造 (C32, q32)：q 由随机 (nq,k) 阵 geqrf 的反射子经 orgqr 显式生成。"""
+    """构造实际输入 C32、打包反射子 A32 和 tau32，并升精度生成参考 Q。"""
     rng = np.random.default_rng(seed)
     nq = m if side == "LEFT" else n
     M = rng.standard_normal((nq, k))
@@ -245,17 +245,18 @@ def _mqr_fixture(m, n, k, side, trans, seed=5):
     assert info == 0
     C = rng.standard_normal((m, n))
     pad = np.zeros((nq, nq))
-    pad[:, :k] = af[:, :k]
-    q, _w3, info3 = sla.dorgqr(np.array(pad, order="F"), tau[:k])
+    af32, tau32 = af.astype(F32), tau.astype(F32)
+    pad[:, :k] = af32[:, :k].astype(np.float64)
+    q, _w3, info3 = sla.dorgqr(np.array(pad, order="F"), tau32[:k].astype(np.float64))
     assert info3 == 0
-    return C.astype(F32), q.astype(F32)
+    return C.astype(F32), af32, tau32, q
 
 
 def test_mqr_residual_pass_and_fail():
-    C32, q32 = _mqr_fixture(5, 4, 3, "LEFT", "N")
-    ref = q32.astype(np.float64) @ C32.astype(np.float64)   # side=LEFT, trans=N
+    C32, A32, tau32, q64 = _mqr_fixture(5, 4, 3, "LEFT", "N")
+    ref = q64 @ C32.astype(np.float64)   # side=LEFT, trans=N
     card = cards_luqr.get_card("sormqr")
-    case = {"C32": C32, "q32": q32, "golden64": ref, "side": "LEFT", "trans": "N",
+    case = {"C32": C32, "A32": A32, "tau32": tau32, "golden64": ref, "side": "LEFT", "trans": "N",
             "ratio_cpu": 0.0, "ratio_cpu_status": "ok"}
     v = verdict.judge(card, case, _dut(ref))
     assert v["error"] is None and v["numeric"] == "PASS"
