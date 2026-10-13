@@ -209,6 +209,11 @@ def build_spec(abi, case, runs, device_id, layout="row_major"):
         "runs": int(runs), "layout": layout,
         "out32_shape": ",".join(str(x) for x in shape),
     }
+    # Explicit transport dimensions also support v2 Cholesky RHS outputs.
+    spec.update(a_rows=int(case["n"]), a_cols=int(case["n"]),
+                b_rows=int(case["n"]) if "potrs" in abi.op else 0,
+                b_cols=int(case.get("nrhs", 0)) if "potrs" in abi.op else 0,
+                out_rows=shape[-2], out_cols=shape[-1])
     if abi.call_shape == "luqr_adapter":
         m, n = int(case.get("m", case["n"])), int(case["n"])
         k = int(case.get("k", min(m, n)))
@@ -593,7 +598,7 @@ def rejudge(bundle_dir, gen_dir, jobs=1):
                 "reason": meta.get("reason"),
                 "note": "执行未产出三键，没有可重判的被测输出"}, 1
     mods = load_modules(gen_dir)
-    abi = op_abi.get_adapter(abi_d["op"]) if abi_d.get("call_shape") == "luqr_adapter" else op_abi.get(abi_d["op"])
+    abi = op_abi.get_adapter(abi_d["op"], abi_d.get("abi")) if abi_d.get("call_shape") == "luqr_adapter" else op_abi.get(abi_d["op"])
     dut = evidence.load_dut_npz(dut_path)
     det_rec = recheck_determinism(bundle, meta, dut)
     det_ok = det_rec["class"] in DET_REJUDGE_OK
@@ -743,6 +748,7 @@ def main(argv=None):
     mach.add_argument("--repo", help="ops-solver 仓根（S1 已构建）")
     mach.add_argument("--ascend-home", help="缺省取 $ASCEND_HOME_PATH")
     mach.add_argument("--build-dir", default=None, help="缺省 <repo>/build")
+    mach.add_argument("--dut-abi", choices=("host", "device"), help="actual public interface memory domain; adapter only")
     mach.add_argument("--adapter", help="developer test/<op>/<op>_adapter.cpp using the fixed protocol")
     mach.add_argument("--executor", default=None,
                       help="已编译的执行件；缺省就地编译到 <work>/harness_exec")
@@ -837,7 +843,7 @@ def main(argv=None):
     records, t0 = [], time.time()
     n_ok = n_bad = n_err = n_det_fail = n_det_unknown = n_lib_bad = 0
     for case in cases:
-        abi = op_abi.get_adapter(case["op"]) if args.adapter else op_abi.get(case["op"])
+        abi = op_abi.get_adapter(case["op"], getattr(args, "dut_abi", None)) if args.adapter else op_abi.get(case["op"])
         ctx["judge"] = (args.judge if args.judge != "auto"
                         else ("criteria" if has_criteria_card(mods, case["op"])
                               else "structural"))

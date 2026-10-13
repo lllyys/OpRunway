@@ -50,7 +50,7 @@ def make_executor(directory, executor, kernel):
 
 
 def collect_case(case, plan, directory, mods, executor, args, provenance):
-    abi = op_abi.get_adapter(case["op"]) if getattr(args, "adapter", None) else op_abi.require_exec(case["op"])
+    abi = op_abi.get_adapter(case["op"], getattr(args, "dut_abi", None)) if getattr(args, "adapter", None) else op_abi.require_exec(case["op"])
     record = {"case_id": case["case_id"], "case": performance.identity(case),
               "status": "ERROR", "collector": "msprof op", "timing_scope": "kernel_only",
               "target": args.target, "device": args.device, "soc": provenance.get("soc"), "layout": args.layout,
@@ -101,6 +101,7 @@ def main(argv=None):
     ap.add_argument("--out", required=True, help="new output directory")
     ap.add_argument("--measurements", help="rejudge saved measurements without running a device")
     ap.add_argument("--repo")
+    ap.add_argument("--dut-abi", choices=("host", "device"), help="actual public interface memory domain; adapter only")
     ap.add_argument("--adapter", help="developer adapter source for this package operator")
     ap.add_argument("--gen-dir")
     ap.add_argument("--provenance")

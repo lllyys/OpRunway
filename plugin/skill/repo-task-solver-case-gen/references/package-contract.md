@@ -95,3 +95,9 @@ sgels/cgels 方阵使用冻结 ratio_cpu，超定使用冻结 ratio_opt_cpu。
 `cases/index.json.gz`，仍超限则切分为 `cases/index.json.gz.partNNN`（单件 ≤ 10 MiB，
 按名序拼接即完整 gzip 流）。manifest 中 `cases/index.json` 的摘要恒针对解压后的
 JSON 内容（与磁盘形态无关），压缩/切分不改变用例或数值参考值。
+
+## 试生成范围
+
+试运行裁取输入清单时，在 canonical 顶层保留 `trial_scope` 对象，记录筛选范围；
+`max_dimension` 可记录矩阵维度上限。装包将试生成声明写入 README 与 slice_note，
+不改变用例或参考值。`package_scope=full` 仅表示完整消费传入清单，不证明原任务全覆盖。

@@ -1,5 +1,7 @@
 # OpRunway 当前 TODO
 
+- [ ] Solver统一样例真机闭环：定位950上sgetrf小规格执行超时，取得实际输出后重跑msprof op采集；当前仅构建/协议验证通过，证据见reports/solver-unified-sample-1013/。
+
 本页只保留尚未完成且有当前证据的工作。仓规以根 `AGENTS.md` 为准，已完成历史查 changes brief 与 Git。
 
 - [ ] 开发者样例回归收尾：SSH恢复后取回新回归与n16检查结果，并停止保留本轮自有容器；见[solver-developer-sample-1010.md](solver/solver-developer-sample-1010.md)。

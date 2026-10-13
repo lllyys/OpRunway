@@ -208,8 +208,13 @@ LUQR_OPS = {p + suffix for p in ("s", "c") for suffix in
 LUQR_OPS.update(("sorgqr", "cungqr", "sormqr", "cunmqr"))
 
 
-def get_adapter(op):
+def get_adapter(op, dut_abi=None):
     """LU/QR requires the fixed v2 adapter; no guessed direct public signature."""
+    if dut_abi is not None:
+        original = get_adapter(op)
+        values = {name: getattr(original, name) for name in OpAbi.__slots__}
+        values["abi"] = dut_abi
+        return OpAbi(**values)
     if op not in LUQR_OPS:
         return get(op)
     return OpAbi(op, "developer-adapter", "luqr_adapter",

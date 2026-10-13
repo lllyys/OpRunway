@@ -170,6 +170,17 @@ class SelfCheckError(RuntimeError):
     """自检清单有项不过——包不可信（退出码 3），不写 manifest、不覆盖任何源。"""
 
 
+def _package_scope_note(canonical):
+    """Expose a trial input's declared coverage without changing case selection."""
+    trial = canonical.get("trial_scope")
+    if not trial:
+        return ""
+    note = "**本包为试生成子集，仅用于流程验证，不代表完整任务覆盖。**"
+    if isinstance(trial, dict) and trial.get("max_dimension") is not None:
+        note += f" 矩阵维度上限为 {trial['max_dimension']}。"
+    return note
+
+
 def _sha256_file(path):
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -1182,6 +1193,8 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
             f"本切片只含 {op} 的二维代表子集 {n_subset} 例（S3 spec §5：README 第 0 步 "
             f"--select all 即物化这{n_subset}例）；该算子 dedup 全量 {len(op_cases_all)} 条与 "
             "冻结对账见冻结产物 reports/solver-s3/canonical_batched.json")
+    if _package_scope_note(canon):
+        slice_doc["slice_note"] = f"{_package_scope_note(canon)} 本包收录 {op} 精度用例 {n_subset} 例，来源 {Path(canonical_path).name}。"
     slice_doc["cases"] = subset_cases
     with open(out_dir / "canonical_cases.json", "w", encoding="utf-8") as fh:
         json.dump(slice_doc, fh, ensure_ascii=False, indent=1)
@@ -1350,7 +1363,8 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
             f"batched README 模板缺失: {tpl}（纯脚本包不得用通用模板，fail-closed）")
     readme = (tpl.read_text(encoding="utf-8")
               .replace("{op}", op).replace("{n_info}", str(n_info))
-              .replace("{n_cases}", str(n_subset)))
+              .replace("{n_cases}", str(n_subset))
+              .replace("{scope_note}", _package_scope_note(canon)))
     if not _is_luqr(op):
         readme = readme.replace(
             "{gram_form}", "B·Bᴴ" if op.lower().startswith("c") else "B·Bᵀ")
@@ -1483,6 +1497,8 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
             f"本切片只含 {op} 的 s1 子集 {n_subset} 例（纯脚本包 README 第 0 步 "
             f"--select all 即物化这{n_subset}例）；该算子 canonical 全量 "
             f"{len(op_cases_all)} 条见冻结件 {canonical_path.name}，不入包")
+    if _package_scope_note(canon):
+        slice_doc["slice_note"] = f"{_package_scope_note(canon)} 本包收录 {op} 精度用例 {n_subset} 例，来源 {Path(canonical_path).name}。"
     slice_doc["cases"] = subset_cases
     with open(out_dir / "canonical_cases.json", "w", encoding="utf-8") as fh:
         json.dump(slice_doc, fh, ensure_ascii=False, indent=1)
@@ -1686,7 +1702,8 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
     (out_dir / "README.md").write_text(
         tpl.read_text(encoding="utf-8").replace("{op}", op)
                                        .replace("{n_cases}", str(n_subset))
-                                       .replace("{n_info}", str(n_info)),
+                                       .replace("{n_info}", str(n_info))
+                                       .replace("{scope_note}", _package_scope_note(canon)),
         encoding="utf-8")
     tick("自测配套件", f"gen_data.py（{gen_sha[:12]}…）、sim_dut.py（{sim_sha[:12]}…）、"
                        f"README.md（{tpl_name}）入包")

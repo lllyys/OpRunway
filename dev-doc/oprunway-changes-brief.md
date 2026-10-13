@@ -1,5 +1,9 @@
 # OpRunway 改动简表
 
+- **2026-10-13i · 统一 Solver 开发者样例与验收入口。** 26接口共用扩展适配协议和同源测试入口，补sgetrf真实调用示例、Host/Device声明及Cholesky矩形输出尺寸。远端回归和真实构建通过，实际执行超时、性能采集证据不足；见[记录](solver/solver-unified-sample-1013.md)。未commit/push。
+
+- **2026-10-13h · 修正 LU/QR 任务包说明模板并重打 sgels 试生成包。** 澄清冻结参考、info 接入和数值环境；试生成范围同时写入 README 与 canonical。远端两条装包测试及样例正负自检通过，参考值、性能基线与判定脚本未改。产物见 ignored reports/sgels-package-trial-1013/sgels-trial-v2.tar.gz；未commit/push。
+
 - **2026-10-13g · 清理已替代报告产物。** 删除已核对压缩副本的四份v5重复索引、旧候选包、撤回样例及v6样例前归档，共1,347,672,272字节；保留当前十包、LU/QR16包、实验/验收证据与fork工作区，清单见ignored reports/cleanup-20261013.json。
 
 - **2026-10-13f · 复核 solver skill 完成性。** 修正遗漏的harness报告judge_scope及帮助文字，明确判定已覆盖LU/QR；仅文字修正，未追加运行测试，未commit/push。

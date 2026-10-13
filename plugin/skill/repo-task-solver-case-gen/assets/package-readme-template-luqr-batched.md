@@ -3,6 +3,8 @@
 本包供开发者自测，包内检查脚本的输出是自测参考，
 不构成验收证据；正式验收结论由验收方使用其自带实现出具。
 
+{scope_note}
+
 本包为脚本形态，无 `cases/*.npz`、无 golden、有逐内容 `ratio_cpu` 参考值
 （index 内逐内容 k 值列表，无顶层 `ratio_cpu_mean`——LU/QR 四册任务书 §3.2.2
 逐算子为「相对线 + 绝对地板」单式，批量层再逐矩阵取大）。开发者可以先参考
@@ -22,7 +24,7 @@ info 契约用例只比 info，不进数值精度判定。
 
 | 文件 | 用途 |
 | --- | --- |
-| `canonical_cases.json` | 本包用例的规范清单（本算子精度用例全量清单 {n_cases} 例；info 契约用例不入此清单，由 `gen_data.py` 同规则现场派生） |
+| `canonical_cases.json` | 本包用例的规范清单（本包收录的精度用例 {n_cases} 例；info 契约用例不入此清单，由 `gen_data.py` 同规则现场派生） |
 | `cases/index.json` | 用例清单：参数、seed、`materialize: "gen"`、`sample_map` 槽位映射与逐内容 `ratio_cpu` 参考 k 值列表（精度判定只读包内冻结参考值，不现场重算替代）；含 {n_info} 例 `case_purpose: "info"` 的 info 契约用例（`k_expected` 入条目）。磁盘形态可为明文 `cases/index.json`、gzip `cases/index.json.gz` 或切分件 `cases/index.json.gz.partNNN`（单件 ≤ 10 MiB）。明文直接读取；完整 gzip 直接解压；切分件按名序拼接后解压 |
 | `gen_data.py` | 数据构造脚本（代表内容构造、槽位映射派生与整批展开同用这一份） |
 | `verify_accuracy.py` | 精度检查（A0 两层：先余槽 bit-wise 一致性，后代表槽逐内容一段式残差判定；判定输入现场重造）+ info 契约判定（{n_info} 例，只比 info） |
@@ -37,22 +39,22 @@ info 契约用例只比 info，不进数值精度判定。
 
 ## 前置条件
 
-python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 `env` 字段，
-环境一致可获得逐位可复现的结果）。生成与检查全在 CPU 上进行。
+python3、numpy、scipy。版本见 `manifest.json` 的 `env`；实际加载的数值库版本与
+线程数见包内 index 的 `reference_environment`。只匹配 NumPy/SciPy 版本不足以
+保证逐位可复现。生成与检查全在 CPU 上进行，判定参考值始终读取包内冻结值。
 
 ## 自测步骤（现场构造，先造数后测，可选，如果测试数据和提供的参考数据存在较大出入可以提供相关说明）
 
-1. 核对环境与参考值（在包目录内执行；只产 `cases/index.json`，不落数组）：
+1. 生成并核对用例索引（在包目录内执行；只产 `cases/index.json`，不落数组）：
 
    ```bash
    python3 gen_data.py --canonical canonical_cases.json --out selfcheck --select all
    ```
 
    产出的 `selfcheck/cases/index.json` 记录每 case 的 `sample_map`（内容 → 槽位
-   映射，`rep_slot` 为该内容的代表槽）、逐内容 `ratio_cpu` 参考 k 值列表，并含
-   {n_info} 例 info 契约用例（`k_expected` 入条目）。缺判据支撑时脚本会提示跳过
-   `ratio_cpu` 参考计算（`not_computed`）——不影响执行与自测，
-   检查脚本只重造输入，判定参考值读取任务包原有 index。
+   映射，`rep_slot` 为该内容的代表槽），并含 {n_info} 例 info 契约用例
+   （`k_expected` 入条目）。其中 `ratio_cpu` 及参考状态为空占位，不重新计算
+   CPU 残差参考值；判定参考值始终读取任务包原有的冻结 index。
 
 2. 接入被测：执行器/DUT 挂钩按 `sample_map` 用包内 `gen_data.py` 现场构造整批
    输入（k 个代表内容铺满 batch 个槽位），逐段喂入被测接口。构造方式（包目录内）：
@@ -136,9 +138,8 @@ python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 
 python3 gen_data.py --canonical canonical_cases.json --out regen --select all
 ```
 
-同一 seed 与依赖版本下 `sample_map` 与逐内容 `ratio_cpu` 参考可复现（数组本就不落盘）。
-本包无冻结 npz：检查侧以判定时的现场重造为准，`selfcheck`/`regen` 目录只用于
-人工核对参考值，不参与判定。
+输入和槽位映射按冻结清单现场重造；逐内容 `ratio_cpu` 始终读取包内冻结 index，
+不以重造结果替换。`selfcheck`/`regen` 目录供查看生成结果，不作为判定参考来源。
 
 ## 结论含义
 

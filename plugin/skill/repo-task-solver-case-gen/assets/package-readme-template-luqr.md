@@ -3,25 +3,28 @@
 本包供开发者自测，包内检查脚本的输出是自测参考，
 不构成验收证据；正式验收结论由验收方使用其自带实现出具。
 
+{scope_note}
+
 本包为脚本形态，无 `cases/*.npz`、无 golden、有逐 case `ratio_cpu` 参考值
-（index 内，无顶层 `ratio_cpu_mean`——LU/QR 四册任务书 §3.2.2 逐算子为
-「相对线 + 绝对地板」单式，无均值第二支）。开发者可以先参考本包内的 `ratio_cpu`
+（index 内，无顶层 `ratio_cpu_mean`；gels 超定另使用 `ratio_opt_cpu`）。
+阈值按对应算子和形状选取：gels 超定仅有相对线，其他阈值见第 3 步。开发者可以先参考本包内的 `ratio_cpu`
 进行「先造数后测」：先在你的环境用包内脚本造数，再执行被测，最后检查。
-检查脚本当前判定时会**自行现场重生成**同一输入并计算参考值（同环境逐位一致），
-不读取、不依赖你的造数目录。
+检查脚本会**现场重生成输入**，但精度参考值读取包内冻结 index，
+不现场重算替代，也不读取你的造数目录。
 
 精度用例之外，本包另含 **info 契约用例**（index 条目 `case_purpose: "info"`）：
 每算子 {n_info} 例。`*getrf`/`*getri` 构造含零主元的奇异输入（`*getrf` 把
 `U(k,k)` 置 0；`*getri` 把输入 LU 的 `U(k,k)` 置 0），验证被测 `info` 是否等于
-条目的 `k_expected`（正值，第 k 阶零主元）；QR 四算子构造非法枚举参数输入，
-期望 `info == -1`。info 契约用例只比 info，不做残差比对、不进精度结论
+条目的 `k_expected`（正值，第 k 阶零主元）；QR 用例标记 `info_probe: bad_param`，
+期望 `info == -1`。其数组仍为正常输入，调用端须按公开接口传入非法参数，
+并回传实际 info；造数脚本不执行该非法接口调用，不能用期望值代替实际输出。info 契约用例只比 info，不做残差比对、不进精度结论
 （info 契约与数值精度各出独立结论）。
 
 ## 包内容
 
 | 文件 | 用途 |
 | --- | --- |
-| `canonical_cases.json` | 本包用例的规范清单（本算子精度用例全量清单 {n_cases} 例） |
+| `canonical_cases.json` | 本包用例的规范清单（本包收录的精度用例 {n_cases} 例） |
 | `cases/index.json` | 用例清单：参数、seed、`materialize: "gen"`（包内无数组）、逐 case `ratio_cpu` 参考值（CPU 参考实现的残差比，精度判定只读包内冻结参考值，不现场重算替代）；`case_purpose: "info"` 条目为 info 契约用例（无 golden，不带 ratio_cpu，带 `k_expected`） |
 | `gen_data.py` | 数据构造脚本（第 0 步造数与检查侧现场重生成同用这一份） |
 | `verify_accuracy.py` | 精度检查（一段式 LAPACK 残差判定；判定输入现场重生成） |
@@ -32,8 +35,9 @@
 
 ## 前置条件
 
-python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 `env` 字段，
-环境一致可获得逐位可复现的结果）。生成与检查全在 CPU 上进行。
+python3、numpy、scipy。版本见 `manifest.json` 的 `env`；实际加载的数值库版本与
+线程数见包内 index 的 `reference_environment`。只匹配 NumPy/SciPy 版本不足以
+保证逐位可复现。生成与检查全在 CPU 上进行，判定参考值始终读取包内冻结值。
 
 输入填充为唯一函数 `fillRandom`（任务书附 bench `.cu` 口径）：
 `A[i] = (rand()%10000)/100 - 50` → `U[-50,50)`，复数每元素先 `.x` 后 `.y` 各一次
@@ -64,7 +68,7 @@ python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 
    矩阵形状随算子：`*getrf/*geqrf` 为 `(m, n)`，`*getri` 为 `(n,n)`，`*gels` 左端
    `(m,n)`、右端 `(m,nrhs)`，`*gqr` 输入反射子 `(m,n)` 输出 Q `(m,n)`，
    `*mqr` 反射子 `(nq,k)`、`C` 为 `(m,n)`。info 契约用例的 npz 只有输入数组
-   （无 golden，构造时已当场自检 `info == k_expected`）。造数阶段不产 `ratio_cpu`
+   （无 golden；奇异输入在构造时自检，QR 非法参数由实际调用端验证）。造数阶段不产 `ratio_cpu`
    参考值；检查脚本从任务包原有 index 读取冻结值，不影响造数与自测。
 
 2. 准备被测输出：你的执行器从 `data/cases/*.npz` 读输入，逐 case 产
@@ -128,8 +132,8 @@ python3、numpy、scipy（生成本包时的确切版本在 `manifest.json` 的 
 python3 gen_data.py --canonical canonical_cases.json --out regen --select all
 ```
 
-同一 seed 与依赖版本下数组内容可复现。本包无冻结 npz：检查侧以判定时的现场
-重生成为准，你的 `data` 目录只喂执行器与模拟件，不参与判定。
+输入按冻结清单现场重生成，精度参考值始终读取包内冻结 index。
+你的 `data` 目录只喂执行器与模拟件，不作为检查脚本的输入或参考值来源。
 
 ## 结论含义
 

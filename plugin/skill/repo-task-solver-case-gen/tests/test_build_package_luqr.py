@@ -191,7 +191,8 @@ def test_recompute_getri_uses_packed_lu(spy):
 # ---------------------------------------------------------------------------
 
 def _canonical(cases):
-    return {"schema": "solver-luqr/canonical_cases@1", "book": "smoke", "cases": cases}
+    return {"schema": "solver-luqr/canonical_cases@1", "book": "smoke", "cases": cases,
+            "trial_scope": {"max_dimension": 16, "full_task": False}}
 
 
 def _write_staging(tmp, op, cases):
