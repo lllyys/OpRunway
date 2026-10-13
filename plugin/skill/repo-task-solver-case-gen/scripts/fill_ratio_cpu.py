@@ -357,7 +357,7 @@ def run_chain_luqr(verdict_mod, lapack, case, arrays):
         _check_low("X32", x32, cid, dt32)
         kind = "DQRT16" if a32.shape[0] == n else "DQRT17"
         ratio = float(verdict_mod.residual_ratio(
-            kind, a=arrays["A64"], b=arrays["B64"], x=x32))
+            kind, a=arrays["A32"], b=arrays["B32"], x=x32))
         return {"ratio_cpu": ratio, "ratio_opt_cpu": ratio}
     if base == "getribatched":
         lu32 = np.ascontiguousarray(arrays["LU32"])
@@ -778,6 +778,8 @@ def main(argv=None):
                 for k_ in ("ratio_cpu", "ratio_opt_cpu"):
                     entry[k_] = updates.get(k_)
                 entry["ratio_cpu_status"] = "ok" if updates else "none"
+                if base == "gels":
+                    entry["ratio_input_basis"] = "A32-f64"
                 if updates:
                     n_ok += 1
                 else:                                   # 无残差判据的算子（1014 范围内无）

@@ -2754,18 +2754,16 @@ def _luqr_case_ratio(lapack, case_arrays):
     n = a32.shape[1]
     x32 = np.ascontiguousarray(x32[:n, :])
     _check_prep("X32", x32)
-    ratio = float(residual_ratio(a=case_arrays["A64"], b=case_arrays["B64"], x=x32))
+    ratio = float(residual_ratio(a=case_arrays["A32"], b=case_arrays["B32"], x=x32))
     return {"ratio_cpu": ratio, "ratio_opt_cpu": ratio}
 
 
 def _materialize_case(gen_mod, entry, by_id, lapack=None):
     """现场重生成一个 case 的判定输入（先造数后测）。
 
-    返回 (case_arrays, note)。Cholesky 族不现场算参考 ratio——参考值只读包内冻结
-    index（accept-1010 口径，环境无关，故 lapack 缺省 None 即可）。LU/QR 族的参考
-    线含 gels 双键（ratio_cpu/ratio_opt_cpu，判据相对线随形状取），冻结 index 单键
-    schema 不覆盖，故按准备链（需 lapack=scipy）现场算双键；准备失败记 prep_failed，
-    note 携带失败明细。
+    返回 (case_arrays, note)。只重建判定输入，不计算 CPU 阈值参考。
+    ratio_cpu、gels 超定所需 ratio_opt_cpu 及状态由冻结 index 注入；
+    缺失或旧口径参考值不能由现场 LAPACK 计算替代。lapack 参数保留调用兼容。
     HT-8：info 契约用例（case_purpose=="info"）不产 golden/ratio——按 base case
     现场构造（构造性自检 fail-closed），judge 只比 info==k_expected。
     """
@@ -2783,23 +2781,7 @@ def _materialize_case(gen_mod, entry, by_id, lapack=None):
     case_arrays = dict(arrays)
     for k, v in entry.items():
         case_arrays.setdefault(k, v)
-    if FAMILY != "luqr":
-        return case_arrays, None
-    note = None
-    try:
-        updates = _luqr_case_ratio(lapack, case_arrays)
-    except _PrepFailed as exc:
-        updates = {k: None for k in _LUQR_RATIO_KEYS}
-        note = str(exc)
-    for k in _LUQR_RATIO_KEYS:
-        case_arrays[k] = updates.get(k)
-    if note is not None:
-        case_arrays["ratio_cpu_status"] = "prep_failed"
-    elif updates:
-        case_arrays["ratio_cpu_status"] = "ok"
-    else:
-        case_arrays["ratio_cpu_status"] = "none"
-    return case_arrays, note'''
+    return case_arrays, None'''
 
 # 纯脚本精度副本的 CLI 段（替换单矩阵 CLI 分节：目标 case 取 canonical 清单，
 # 输入现场重生成；被测输出装载 info 标量）。
@@ -3383,6 +3365,20 @@ def _load_frozen_index(pkg_dir, entries, batched=False):
                 raise ValueError(f"{cid} ok 基线缺数值")
             if status == "prep_failed" and any(v is not None for v in values):
                 raise ValueError(f"{cid} prep_failed 与数值冲突")
+            if OP in ("sgels", "cgels"):
+                # Legacy LU/QR indexes claimed A32-f64 while freezing A64/B64 residuals.
+                # Only the corrected freeze chain writes this per-case input basis.
+                if status == "ok" and row.get("ratio_input_basis") != "A32-f64":
+                    raise ValueError(f"{cid} gels CPU 参考需按 A32/B32 重新冻结；缺 ratio_input_basis=A32-f64")
+                if entry["m"] > entry["n"]:
+                    if "ratio_opt_cpu" not in row:
+                        raise ValueError(f"{cid} 缺冻结 ratio_opt_cpu")
+                    opt = row["ratio_opt_cpu"]
+                    if status == "ok":
+                        number(opt, f"{cid}.ratio_opt_cpu")
+                    elif opt is not None:
+                        raise ValueError(f"{cid} prep_failed 与 ratio_opt_cpu 冲突")
+                    frozen["ratio_opt_cpu"] = opt
             if USES_MEAN:
                 means = index.get("ratio_cpu_mean")
                 mean = row.get("ratio_cpu_mean") if batched else (

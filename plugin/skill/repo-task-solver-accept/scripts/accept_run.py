@@ -55,6 +55,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import math
 import platform
 import sys
 import zlib
@@ -204,7 +205,7 @@ def load_case_arrays(package, entry):
                     if "sample_map" in entry else
                     "纯脚本包条目（materialize=gen，S3 spec §5）")
             return None, (f"{kind}：包内无数组，accept_run 不做现场重生成；数值判定"
-                          "走 stream_check 或包内 verify 副本的现场重生成通路"
+                          "走包内 verify 副本的现场重生成通路；stream_check 仅为模拟演练"
                           "（批量 A0 经 criteria/batched_a0 两层判定）")
         return None, "index 条目无 npz 路径"
     path = package / npz_rel
@@ -218,6 +219,22 @@ def load_case_arrays(package, entry):
     arrays["uplo"] = entry.get("uplo")
     arrays["ratio_cpu"] = entry.get("ratio_cpu")
     arrays["ratio_cpu_status"] = entry.get("ratio_cpu_status")
+    # Canonical/index metadata takes precedence over fields supplied in the NPZ.
+    for meta in ("m", "n", "side", "trans", "ratio_opt_cpu"):
+        arrays[meta] = entry.get(meta)
+    if (entry.get("op") in ("sgels", "cgels")
+            and entry.get("case_purpose") != "info"
+            and entry.get("ratio_cpu_status") == "ok"):
+        if entry.get("ratio_input_basis") != "A32-f64":
+            return None, "gels CPU 参考需按 A32/B32 重新冻结；缺 ratio_input_basis=A32-f64"
+        m, n = entry.get("m"), entry.get("n")
+        if not isinstance(m, int) or not isinstance(n, int) or m < n or n < 1:
+            return None, "gels 冻结条目缺有效 m/n"
+        if m > n:
+            opt = entry.get("ratio_opt_cpu")
+            if (isinstance(opt, bool) or not isinstance(opt, (int, float))
+                    or not math.isfinite(opt) or opt < 0):
+                return None, "缺有效冻结 ratio_opt_cpu"
     for meta in ("case_purpose", "k_expected"):   # HT-8：info 用例 judge 分流依据
         if entry.get(meta) is not None:
             arrays[meta] = entry[meta]

@@ -1,5 +1,7 @@
 # OpRunway 改动简表
 
+- **2026-10-13b · 修复gels冻结参考读取与生成口径。** 超定改读冻结ratio_opt_cpu，补QR元数据；CPU冻结链改A32/B32并标记新口径，拒用旧值。两个gels包脚本/README/摘要同步，原index和GPU基线不动，CPU参考待服务器重冻。独立Codex静态审查，未运行测试。见[solver-gels-frozen-fix-1013.md](solver/solver-gels-frozen-fix-1013.md)。
+
 - **2026-10-13 · 合入 LU/QR 两 skill 并收纳16包。** 基于共同基线e7820e0导入交接版23804ff；修正性能均值、ipiv/tau、LU输入、冻结ratio及残差文档，明确真实harness/正式性能与备用QR复核限制。产物复制至reports/solver-luqr-1013，16包只修README及manifest摘要，210个来源文件静态核对；未运行测试、未push。见[solver-luqr-import-1013.md](solver/solver-luqr-import-1013.md)。
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
