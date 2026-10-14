@@ -1,8 +1,5 @@
 """Unified protocol geometry and standalone delivery behavior."""
-import importlib.util
 from pathlib import Path
-import subprocess
-import sys
 import numpy as np
 import pytest
 import export_solver_sample
@@ -33,25 +30,15 @@ def test_all_26_transport_shapes(op):
     assert spec["out_rows"]*spec["out_cols"] == np.prod(run_harness.out32_shape(abi,c)[-2:])
 
 
-def test_standalone_export_and_entrypoints(tmp_path):
+def test_developer_export_contains_only_adapter_contract(tmp_path):
     dest = tmp_path/"sample"
-    export_solver_sample.export(dest)
-    assert not list(dest.rglob("SKILL.md"))
-    assert all(p.name == "README.md" or p.name == "test" for p in dest.iterdir())
-    runtime=dest/"test/common/repo-task-solver-accept"
-    for source in (export_solver_sample.ROOT/"scripts/harness/run_harness.py",
-                   export_solver_sample.ROOT/"criteria/verdict.py"):
-        assert (runtime/source.relative_to(export_solver_sample.ROOT)).read_bytes()==source.read_bytes()
-    for tool in ("run_harness.py", "run_performance.py", "build_dut.py"):
-        subprocess.run([sys.executable,str(runtime/"scripts/harness"/tool),"--help"],check=True,capture_output=True)
-    subprocess.run([sys.executable, "-c",
-                    "import sys;sys.path.insert(0,sys.argv[1]);import run_harness;"
-                    "mods=run_harness.load_modules(sys.argv[2]);"
-                    "assert run_harness.has_criteria_card(mods, 'sgetrf')",
-                    str(runtime/"scripts/harness"),
-                    str(dest/"test/common/repo-task-solver-case-gen/scripts")],
-                   check=True, capture_output=True)
-    spec=importlib.util.spec_from_file_location("unified_entry",dest/"test/run_tests.py")
-    entry=importlib.util.module_from_spec(spec);spec.loader.exec_module(entry)
-    cmd=entry.command(["precision","--package","pkg","--repo","repo","--dut-abi","host"])
-    assert "pkg/canonical_cases.json" in cmd and cmd[-2:]==["--dut-abi","host"]
+    archive = export_solver_sample.export(dest)
+    expected = {"test/sgetrf/README.md", "test/sgetrf/sgetrf_adapter.cpp", "test/sgetrf/solver_adapter.h"}
+    assert {str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_file()} == expected
+    assert (dest/"test/sgetrf/solver_adapter.h").read_bytes() == (export_solver_sample.ROOT/"assets/adapter/solver_adapter.h").read_bytes()
+    assert (dest/"test/sgetrf/sgetrf_adapter.cpp").read_bytes() == (export_solver_sample.ROOT/"assets/unified-sample/test/sgetrf/sgetrf_adapter.cpp").read_bytes()
+    import hashlib
+    import tarfile
+    assert archive.with_name(archive.name+".sha256").read_text().split()[0] == hashlib.sha256(archive.read_bytes()).hexdigest()
+    with tarfile.open(archive) as stream:
+        assert {str(Path(p.name).relative_to(dest.name)) for p in stream.getmembers() if p.isfile()} == expected

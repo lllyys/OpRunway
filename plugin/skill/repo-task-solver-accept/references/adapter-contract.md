@@ -5,8 +5,10 @@
 固定执行器重新编译该源码，链接从交付源码构建的libops_solver.so；不运行开发者判定代码。
 统一开发者样例由 `scripts/harness/export_solver_sample.py --out <新目录>` 导出，
 新模块统一使用扩展生命周期接口；Cholesky与LU/QR共用同一入口，无需开发者选择协议版本。
-样例仅含README与test目录，不含SKILL.md；精度/性能代码直接分发权威实现。
+样例只在test/<op>/提供适配源码、固定协议头和说明，不分发公共运行代码或判据。
 `assets/unified-sample/test/sgetrf` 提供真实Host接口示例，其他算子按协议补实际调用。
+需要完整源码示范时，导出增加 `--source-dir <已交付ops-solver工程>`，附带真实sgetrf实现、
+必要依赖、许可证和最小构建入口；不附带公共测试工具。
 旧cmatinv导出入口仅用于已有交付兼容，不作为新交付通用样例。
 
 ## 生命周期与数据
@@ -37,7 +39,7 @@ std::complex类型放进C协议。它不等于DUT布局：Device指针、列主�
 --adapter /delivered/repo/test/cmatinv_batched/cmatinv_batched_adapter.cpp
 ```
 
-一次适配编译只服务一个算子。普通自测通过统一样例test/run_tests.py编译并链接同一源文件；验收编译入口
+一次适配编译只服务一个算子。开发者自测main可链接同一适配源文件；验收编译入口
 不消费开发者main，不允许以开发者自测报告替代输出。记录适配源码、协议头、公开头、编译命令、
 执行件与实际DUT库指纹；后续运行沿用同版适配，不由agent临时改写适配源码。
 
@@ -50,7 +52,7 @@ std::complex类型放进C协议。它不等于DUT布局：Device指针、列主�
 使用同一适配模块的execute调用，经msprof op采集全部目标kernel，统计单次调用总耗时的算术平均。
 create/reset/前置分解不能发射被筛选的目标kernel；仅分阶段并不能保证profiler排除它们，须核对
 kernel清单与每调用launch次数。预热、输入恢复、同步搬运不作为API墙钟计入性能。
-新交付统一通过test/run_tests.py performance运行；缺GPU基线保留证据不足。
+验收侧通过scripts/harness/run_performance.py采集；缺GPU基线保留证据不足。
 历史cmatinv入口profile_cmatinv_sample.py仅供旧交付兼容。
 
 ## LU/QR v2 数据契约

@@ -1,4 +1,28 @@
+## 2026-10-14：样例README补充A5说明
+
+- 增加--soc=ascend950构建命令，明确切换目标不能替代A5源码适配；默认A3和原源码不变。
+- 同步重打最新样例包，核对包内README及SHA256；仅文档变化，未重复验收。
+
+## 2026-10-14：最新开发者源码样例重新打包
+
+- 默认SOC及构建说明改为已验证的A3；README注明旧实现info能力边界。算子源码与依赖15文件和原提交逐字节一致。
+- 远程使用现有导出器生成22文件样例，不携带skill、验收报告或构建产物；test下仅sgetrf目录。
+- 产物：reports/solver-developer-source-sample-1014-final/solver-developer-sample.tar.gz，SHA256已核对。沿用本轮A3实测证据，未重复跑验收。
+
+## 2026-10-14：源码样例 A3 真机验证
+
+- 原源码不改，显式 ascend910_93 重建并通过固定适配调用 sgetrf；普通4×4精度PASS，奇异info例FAIL（应1实0），两例均5轮一致。
+- 原实现正常路径只初始化info=0，未回填奇异位置；适配如实透传，失败离线重判一致。
+- msprof op采集成功，均值0.0323439802ms；A3数据不满足950PR正式性能条件，机械门保留INSUFFICIENT。
+- 证据：reports/solver-source-sample-a3-1014/。仅样例子集验证，未改算子、未宣称正式通过。
+
 # OpRunway 改动简表
+
+- **2026-10-14c · 补完整sgetrf源码样例。** 从已有提交提取真实实现、公开头及必要依赖，保留LICENSE和源码摘要，增加最小构建入口；不附公共测试工具。远端950编译/链接成功，未重跑真机精度性能；产物reports/solver-developer-source-sample-1014。未commit/push。
+
+- **2026-10-14b · 开发者样例精简为三个文件。** 按用户最终范围，只在test/sgetrf下提供真实适配源码、固定协议头和接入说明；移除common及测试入口，验收运行能力留在skill。远端导出清单/摘要测试通过，适配源码与协议不变；产物reports/solver-developer-sample-1014-minimal，未commit/push。
+
+- **2026-10-14 · 收拢开发者样例目录。** test下仅含sgetrf算子目录；common、协议头和测试入口全部移入算子目录，导出目录名改为runner/casegen并同步相对引用。远端独立导出与入口加载验证通过，Codex只读复核通过；重打包见reports/solver-unified-sample-1014-operator-local，未commit/push，未重跑真机。
 
 - **2026-10-13i · 统一 Solver 开发者样例与验收入口。** 26接口共用扩展适配协议和同源测试入口，补sgetrf真实调用示例、Host/Device声明及Cholesky矩形输出尺寸。远端回归和真实构建通过，实际执行超时、性能采集证据不足；见[记录](solver/solver-unified-sample-1013.md)。未commit/push。
 
