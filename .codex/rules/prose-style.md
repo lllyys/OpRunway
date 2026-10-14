@@ -2,7 +2,7 @@
 
 约束本仓所有自己写的 markdown：`SKILL.md`、`references/*.md`、各级 `CLAUDE.md`、
 `README.md`、`docs/skills/**`。
-写这些文件时这份规则常驻上下文，不需要主动去读。
+修改这些文件前显式读取本规则。
 
 ## 病灶
 

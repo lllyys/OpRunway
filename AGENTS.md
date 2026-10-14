@@ -1,11 +1,19 @@
 # AGENTS.md — OpRunway 仓规
 
-**全程中文。** 仓根 `CLAUDE.md` 路由到本文件；面向所有 agent 的共享仓规只在这里维护。
+**全程中文，称呼用户 Mr.0。全程使用 Codex。** 实施、审核和隔离验收均不调用 Claude、Grok 或跨模型委派插件。
+共享仓规只在这里维护；上游或历史文档中的 Claude 分工不适用于本项目。
+
+- 项目 skills 从 `.agents/skills/` 发现；算子 skills 链接到 `plugin/skill/`，不复制实现。
+- 编辑 skill 前使用可用的 `skill-creator`；修改文档时读 `.codex/rules/skill-authoring.md`、
+  `.codex/rules/zh-writing.md` 和 `.codex/rules/prose-style.md`，不依赖自动规则加载。
+- 文档检查使用 `.codex/hooks/doc_style_lint.py`，预算检查使用 `.codex/hooks/skill_budget_lint.py`；
+  按环境规则在远程执行。这些是显式检查命令，不是自动钩子，不要求 Claude 收据。
+- 全局可见的 `cc-suite-*` 和 Grok 委派 skills 不用于本项目；全局设置不改。
 
 ## 1. 这个仓是什么
 
 OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-test`）的开发与运行工作区。
-验收怎么跑、判据是什么，以 `plugin/skill/repo-task-atk-test/SKILL.md` 及其 `references/`、`scripts/`
+验收怎么跑、判据是什么，以 对应的 `plugin/skill/<skill-name>/SKILL.md` 及其 `references/`、`scripts/`
 为准；本文件只管仓的组织、同步与纪律，不重复也不改写 skill 内规则。
 
 ## 2. 结构与镜像
@@ -19,20 +27,13 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
   `README.md` 是开发件，不进任何测试部署。
 - 验收零上下文：一次验收的完整契约就是 `SKILL.md` 加 `references/` 加 `scripts/`，不多一个字。
   `plugin/CLAUDE.md` 与 `plugin/docs/` 是开发件，任何跑测或验收都不得读取、引用或据以判断——
-  隔离通路靠不分发做到物理隔离；在本仓内直接发起验收时子目录记忆会注入 `plugin/CLAUDE.md`，
-  此时必须当它不存在。正式验收一律走 `isolated-acceptance` 的无头通路，不在本仓 session 里跑。
+  隔离通路靠不分发开发件实现，不向验收会话补充开发上下文。正式验收一律走 `isolated-acceptance` 的无头通路，不在本仓 session 里跑。
   若一次验收非读开发件不可，那是 `SKILL.md` 自足性有缺口，应修 skill 并提 PR 回上游，不是补喂上下文。
-- 两个 `.claude-plugin/` 身份不同，别混：仓根那个装 `marketplace.json`，是本机发行清单，不上测试机；
-  `plugin/` 下那个装 `plugin.json`（随上游镜像）与 `upstream.json`（本仓 overlay），是加载器的
-  硬依赖，必须随部署分发——缺 manifest 时 `--plugin-dir` 直接报 "No manifest found"，且上游用单数
-  `skill/` 而非 Claude 约定的复数 `skills/`，只有 manifest 里的 `skills` 数组能指到 skill。
-  `upstream.json` 只含上游 URL 与两个公开 SHA，无私有信息，随包分发同时给测试机留下派生基线的
-  provenance。
+- `.claude-plugin/` 保留上游兼容及镜像身份，不作为 Codex 加载入口。Codex 从
+  `.agents/skills/` 加载；隔离会话只链接仓外发布副本。`upstream.json` 继续记录镜像来源。
 - 上游完整 clone 在 ignored `repos/repo-task-atk-test/`（含 ATK submodule 源码），只读参考。
   上游开发期红线与设计原则随镜像分发：修改 `plugin/` 前先读 `plugin/CLAUDE.md` 与
-  `plugin/docs/development/`；本仓内读写 `plugin/**` 时 `plugin/CLAUDE.md` 会作为子目录记忆自动
-  进入上下文。这些原则约束 skill 开发；与本文件冲突时以本文件为准并记录张力。插件安装态不加载
-  plugin 根 `CLAUDE.md`，`claude plugin validate` 对此的警告是预期行为。
+  `plugin/docs/development/`；开发时显式读取这些文件，不依赖 Claude 子目录记忆。这些原则约束 skill 开发；与本文件冲突时以本文件为准并记录张力。Codex 迁移配置放在本仓根，不改变上游镜像的兼容性。
 - 判据的确定性由 skill 自带 `scripts/`（机械门）与 `tests/` 承担；agent 不得绕过机械门，也不得在
   `plugin/` 外另建一套生成或裁决实现。
 - 同步上游：先 `git -C repos/repo-task-atk-test fetch`，再在仓根执行
@@ -67,5 +68,5 @@ OpRunway 是上游社区算子验收 skill（`gitcode.com/Justbin/repo-task-atk-
 Push 前对自上次 push 以来的改动做一轮 audit → fix → verify；一轮即停，剩余问题如实报告。
 局部证据或单阶段跑通不得描述成算子正式通过。
 
-评审的工作流、八个维度与触发条件见 `.claude/rules/codex-review.md`；audit 的
+评审的工作流、八个维度与触发条件见 `.codex/rules/codex-review.md`；audit 的
 fix 段同受八维约束（见该文件）。

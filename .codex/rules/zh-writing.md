@@ -11,7 +11,7 @@ paths:
 移植自上游 `repo-task-atk-test`（基线 13b3f88）。上游仓根即本仓 `plugin/`：文中 `skill/`、
 `docs/` 对应本仓 `plugin/skill/`、`plugin/docs/`。
 
-适用于 skill 文档与 `docs/guide/`。完整词表与替代写法在 `.claude/hooks/doc_style_lint.py`，
+适用于 skill 文档与 `docs/guide/`。完整词表与替代写法在 `.codex/hooks/doc_style_lint.py`，
 命中时 lint 输出替代写法。规则出处见 `docs/development/skill-authoring-basis.md`。
 
 不检查的内容：代码块、行内代码、链接目标、引用块（`>`）、「」内的引述原话、

@@ -1,12 +1,10 @@
 # Codex 评审纪律
 
-约束本仓改动的评审方式。写这类改动时这份规则常驻上下文，不需要主动去读。
+约束本仓改动的评审方式。开始评审前显式读取本文件。
 
 ## 工作流
 
-**Claude 写，Codex 审。** 仓内文件的改动由 Claude 直接落盘，Codex 只做只读评审。这条覆盖了
-`CLAUDE.md` 默认的「写入经 cc-suite implement 落盘」——用户已明确改成本条。评审用只读的
-`review-plan`（架构/简化类）；真机与正确性核查用 `audit`。
+Codex 负责实施；触发评审时，由独立 Codex agent 做只读审查。不使用 Claude、Grok 或 cc-suite 委派。
 
 audit → fix → verify 轮（含 push 前仓规一轮）的 fix 段同样受八维约束：audit 给出的
 修复清单不照单全收，每项落地前先按下述八维评估，会退化的项调整方案或明确遗留并记录

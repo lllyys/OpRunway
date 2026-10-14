@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """skill 文档的行文、结构与引用检查脚本。
 
-规则正文在 `.claude/rules/zh-writing.md`（ZH-xx）与 `.claude/rules/skill-authoring.md`
+规则正文在 `.codex/rules/zh-writing.md`（ZH-xx）与 `.codex/rules/skill-authoring.md`
 （SA-xx）；每条规则的外部出处与存量标定数据在
 `docs/development/skill-authoring-basis.md`。本文件只存词表、正则与阈值。
 
@@ -16,10 +16,10 @@
 
 用法：
 
-    python3 .claude/hooks/doc_style_lint.py            # 扫全仓
-    python3 .claude/hooks/doc_style_lint.py <文件…>     # 只扫指定文件
-    python3 .claude/hooks/doc_style_lint.py --fix      # 只自动修半角标点
-    python3 .claude/hooks/doc_style_lint.py --baseline # 输出各规则计数
+    python3 .codex/hooks/doc_style_lint.py            # 扫全仓
+    python3 .codex/hooks/doc_style_lint.py <文件…>     # 只扫指定文件
+    python3 .codex/hooks/doc_style_lint.py --fix      # 只自动修半角标点
+    python3 .codex/hooks/doc_style_lint.py --baseline # 输出各规则计数
 
 退出码：0 无拦截项；1 有拦截项。换词由人做，机器换出来的词往往比原文更糟。
 """
@@ -564,7 +564,7 @@ def main():
         print(f"共改 {changed} 份")
         return 0
 
-    synonyms = load_synonyms(root / ".claude" / "rules" / "zh-writing.md")
+    synonyms = load_synonyms(root / ".codex" / "rules" / "zh-writing.md")
     findings = []
     for p in targets:
         findings += check_prose(p, p.read_text(encoding="utf-8"), synonyms)
@@ -605,7 +605,7 @@ def main():
         print(f"\n行文、结构与引用检查通过（{len(targets)} 份文档）")
         return 0
     print(f"\n共 {len(blocking)} 处拦截项，涉及 {len(by_file)} 份文档。规则见 "
-          ".claude/rules/zh-writing.md 与 skill-authoring.md")
+          ".codex/rules/zh-writing.md 与 skill-authoring.md")
     return 1
 
 

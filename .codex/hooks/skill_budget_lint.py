@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """载入预算检查（SA-04）：`SKILL.md` ≤ 12 KB，单阶段最小载入 ≤ 32 KB。
 
-规则在 `.claude/rules/skill-authoring.md`。此前没有检查脚本时，
+规则在 `.codex/rules/skill-authoring.md`。此前没有检查脚本时，
 `repo-task-atk-accept` 的 `SKILL.md` 涨到 26 KB（超限 3.3 倍）没有任何提示，
 表现是每次跑测都在第一步为后面所有阶段的知识付钱。
 
@@ -60,7 +60,7 @@ def main():
         else:
             print(f"{name:28s} SKILL.md {size:6d} B，最大单阶段 {worst[0]:6d} B")
     if bad:
-        print(f"\n共 {bad} 个 skill 超预算。规则见 .claude/rules/skill-authoring.md（SA-04）。")
+        print(f"\n共 {bad} 个 skill 超预算。规则见 .codex/rules/skill-authoring.md（SA-04）。")
         return 1
     return 0
 

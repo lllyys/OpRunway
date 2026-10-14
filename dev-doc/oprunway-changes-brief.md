@@ -1,3 +1,17 @@
+## 2026-10-14：项目迁移为 Codex-only
+
+- 主仓和当前 worktree 的 Claude MCP、Grok 委派插件在项目级禁用；清空收据钩子注册，保留空操作兼容脚本。未修改用户全局配置。
+- 仓规明确 Codex 实施与独立 Codex 审核；规则及文档检查迁至 .codex，15 个算子 skill 以相对链接接入 .agents/skills。
+- 隔离验收入口改为 Codex exec、独立配置目录及仓外发布副本；删除旧 Claude 观察器。上游 plugin 镜像未改。
+- 清理 reports 中8项被替代的样例、v5中间包与旧patch，约154MiB；保留最新样例、v6、LU/QR、验收证据和fork工作区。明细见reports/cleanup-20261014.json。
+- Codex独立审查发现的README旧入口已修；配置解析、链接与diff检查通过。远程检查脚本语法及help入口通过；pytest缺失且安装失败，原测试未运行。
+- 隔离验收入口本轮仅核对命令与静态契约，未发起新的正式NPU验收。
+
+## 2026-10-14: Codex resume configuration repair
+
+Restored the previous transport command for the disabled `claude-code` MCP entry.
+Codex requires a valid transport even when `enabled = false`; Claude remains disabled.
+
 ## 2026-10-14：样例README补充A5说明
 
 - 增加--soc=ascend950构建命令，明确切换目标不能替代A5源码适配；默认A3和原源码不变。

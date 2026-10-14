@@ -6,8 +6,8 @@
 
 用法：
 
-    python3 .claude/hooks/jargon_scan.py --ref <参考语料目录>...
-    python3 .claude/hooks/jargon_scan.py --ref third_party/ATK ../ops-nn --top 200
+    python3 .codex/hooks/jargon_scan.py --ref <参考语料目录>...
+    python3 .codex/hooks/jargon_scan.py --ref third_party/ATK ../ops-nn --top 200
 
 参考语料取人写的领域文档，例如 ATK 文档与 CANN 算子仓文档。目录由调用方
 传入，不写死路径。输出是候选，不是结论：常用词在小语料里也可能罕见。

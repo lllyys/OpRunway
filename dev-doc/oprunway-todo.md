@@ -1,6 +1,10 @@
 # OpRunway 当前 TODO
 
-- [ ] Solver统一样例真机闭环：定位950上sgetrf小规格执行超时，取得实际输出后重跑msprof op采集；当前仅构建/协议验证通过，证据见reports/solver-unified-sample-1013/。
+- [ ] 在具备pytest的远程环境运行迁移后的 `.codex/hooks/test_doc_style_lint.py`；本轮缺依赖，语法和入口检查已执行。
+
+- [ ] 在下一次正式验收中验证迁移后的 Codex 隔离入口（独立认证、上下文及远端终态），不把静态迁移视为完整运行通过。
+
+- [ ] Solver源码样例后续：旧sgetrf只支持A2/A3，A3普通精度、确定性及msprof op采集已验证；A5源码适配及奇异info能力待开发者补齐，证据见reports/solver-source-sample-a3-1014/。
 
 本页只保留尚未完成且有当前证据的工作。仓规以根 `AGENTS.md` 为准，已完成历史查 changes brief 与 Git。
 

@@ -9,14 +9,14 @@ paths:
 移植自上游 `repo-task-atk-test`（基线 13b3f88）。上游仓根即本仓 `plugin/`：文中 `skill/`、
 `docs/` 对应本仓 `plugin/skill/`、`plugin/docs/`。
 
-适用于 `skill/<name>/SKILL.md` 与 `references/*.md`。中文句子怎么写见 `.claude/rules/zh-writing.md`。
+适用于 `skill/<name>/SKILL.md` 与 `references/*.md`。中文句子怎么写见 `.codex/rules/zh-writing.md`。
 规则出处与标定数据见 `docs/development/skill-authoring-basis.md`，只在修改规则时读。
 
 完成标准：
 
 ```bash
-python3 .claude/hooks/doc_style_lint.py <改过的文件>   # 退 0
-python3 .claude/hooks/skill_budget_lint.py             # 退 0
+python3 .codex/hooks/doc_style_lint.py <改过的文件>   # 退 0
+python3 .codex/hooks/skill_budget_lint.py             # 退 0
 ```
 
 ## 规则
@@ -32,7 +32,7 @@ python3 .claude/hooks/skill_budget_lint.py             # 退 0
 | SA-05 | references 全部从 `SKILL.md` 直接链出，只有一级；没有未链出的文件；引用的章节与锚点存在 | `[plugin-authoring.md](references/plugin-authoring.md)` | 是 |
 | SA-06 | reference 超过 100 行时，开头列出各节 | — | 报数 |
 | SA-07 | 链接放在用得上的那一步。执行到这一行时不读就会失败，才在这一行链出 | S2 才用的 reference 在 S2 那一行链出 | 否 |
-| SA-08 | 只写 Claude 不知道的内容：本仓约定、退出码含义、ATK 某版本的实测行为。torch、aclnn、精度比对、NPU 编译部署不解释 | — | 否 |
+| SA-08 | 只写 Codex 不知道的内容：本仓约定、退出码含义、ATK 某版本的实测行为。torch、aclnn、精度比对、NPU 编译部署不解释 | — | 否 |
 | SA-09 | 每个阶段有可检查的完成条件：命令退出码、文件存在、字段取值 | `check_facts.py` 退 0 | 否 |
 | SA-10 | 失败情况写成检查表，三列：条件 / 表现 / 处理方式 | 见下方「内容放置」 | 否 |
 | SA-11 | 每类内容放在固定位置 | 见下方「内容放置」 | 否 |
