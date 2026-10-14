@@ -1,3 +1,26 @@
+## 2026-10-14：精简仓规
+
+- AGENTS.md删除重复迁移描述，保留目录、权限、验收及上游同步规则；删除根CLAUDE.md兼容入口。
+
+## 2026-10-14：仓规对齐当前目录
+
+- AGENTS.md明确仓内.worktrees、主仓集中reports和私有配置定位，区分已删除的根Claude目录与上游plugin兼容目录。
+- 验收契约表述改为skill及明确引用资源，避免遗漏criteria/assets；未更改判据或运行权限。
+
+## 2026-10-14：worktree 改为仓内目录
+
+- 按用户要求将 solver-accept-0923 移至仓根 .worktrees/，Git注册同步更新；主仓及该工作区忽略 /.worktrees/。
+- 产物继续集中在主仓 reports，工作区 reports 链接保持有效；此前仓外路径不再使用。
+
+## 2026-10-14：删除根目录旧 Claude 配置
+
+- 按用户要求删除仓根 .claude-plugin、.claude、.cc-suite；不触及 plugin 内上游兼容文件、全局配置或集中存放的产物。
+
+## 2026-10-14：清空项目根 .claude
+
+- 当前 solver worktree 移至仓库旁 OpRunway-worktrees/solver-accept-0923，Git注册已同步；产物仍集中在主仓reports。
+- 清除根.claude中的旧配置、收据、Claude参考文档、缓存和cc-suite符号链接，目录已空；全局插件目标和plugin上游镜像未改。
+
 ## 2026-10-14：项目迁移为 Codex-only
 
 - 主仓和当前 worktree 的 Claude MCP、Grok 委派插件在项目级禁用；清空收据钩子注册，保留空操作兼容脚本。未修改用户全局配置。
