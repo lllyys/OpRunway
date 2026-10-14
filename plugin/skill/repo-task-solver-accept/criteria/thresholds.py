@@ -25,7 +25,20 @@ import math
 #   ② 残差基换原始 fp32 输入：potrf 族 DPOT01 的 a 从 A64 改 A32（README 1.3 的
 #     A64 口径废止；推翻旧裁定 24i），全族实际输入 A32/B32 升 f64；potrf 族 A64 基
 #     冻结 ratio_cpu/mean 过期需重算（声明，重算另排）。
+# s1-A7：LU/QR 四册判定增量（2026-10-08；1014 口径更新 2026-10-11；2026-10-12 定稿
+#   收紧 getri/getriBatched 地板 0.35→0.05，其余判定数值不变；与 s2-A1 一并
+#   生效，版本号统一沿用 s2-A1）——新增 16 接口判定卡（cards_luqr）与残差内核
+#   DGET01（getrf，还原 L·U + ipiv 行交换回放）/DGET03（getri 单矩阵、getriBatched/
+#   matinvBatched 逐矩阵）/DQRT01·02·03（geqrf/*gqr/*mqr）/DQRT16·17（gels 方阵/
+#   超定双判据）与四册阈值函数（getrf 地板实 0.3/复 0.5、getri 与 getriBatched 0.05、
+#   matinvBatched 0.5、geqrf·mqr 0.1、gqr 1.5、gels 方阵 max(5r,0.015)/超定 10×）
+#   + 统一取卡分发层（cards_luqr.accepts → get_card）。1014 算子集：LU 含 getri、
+#   去 getrs。Cholesky 既有判定数值不变。
 # s1-A6：criteria 快批四项合一（2026-09-26）——HT-5/HT-14/HT-7/HT-3（已随 s2-A1 重构）。
+# s1-A5：0924 任务书批量口径定案摘 T8（核对 criteria 无注入点，判定数值不变）+ 报告申诉指引句。
+# s1-A4：max_abs 门动态锚点（HT-1 裁定）+ golden 收窄与 ±inf/NaN 逐点口径 + T4 双解释拆除。
+# s1-A3：A4 ε 口径标注 + fallback 报告 eps 披露字段（判定数值不变）。
+# s1-A2：spec §2.3′ 修正（任务书阈值为主、potrf 还原比对、potri 双目标）。
 CRITERIA_VER = "s2-A1"
 
 # ---- 残差公式机器精度 ε（spec §0：固定 2^-24，README 口径；非 numpy eps 的 2^-23）----
@@ -109,3 +122,97 @@ def potri_threshold(ratio_cpu):
     """
     r = _check_ratio_cpu(ratio_cpu)
     return max(5.0 * r, 0.1)
+
+
+# ===========================================================================
+# LU/QR 四册残差阈值（lq-plan §1；四册任务书 §3.2.2，1014 定稿口径）
+#
+# 与 Cholesky 的差异：
+# - 无 mean 第二支：四册任务书逐算子只给「5×/10× 相对线 + 绝对地板」单式；
+# - getrf 地板分实数 0.3 / 复数 0.5（SGET01/CGET01 分母口径差）；
+# - getri/getriBatched 地板 0.05（2026-10-12 由 0.35 收紧），实/复同式；
+# - 批量两算子逐矩阵判定（ratio_i vs max(5·ratio_cpu_i, 地板)），本函数按单矩阵
+#   入参构造，批量层逐个矩阵调用；
+# - QR：geqrf 与 *mqr 同式 max(5r,0.1)，*gqr 单独 max(5r,1.5)；
+# - gels：方阵（DQRT16）max(5r, 0.015)、超定（DQRT17）10·ratio_opt_cpu
+#   （无绝对地板），实/复同式（1014 定稿，原复数待定①②已裁决）。
+#
+# 版本号（CRITERIA_VER）随本次 LU/QR 判定增量一并生效，统一沿用 s2-A1（见文件头）。
+# ===========================================================================
+
+# crgetf（S/CGET01）：max(5·ratio_cpu, 地板)——地板实数 0.3、复数 0.5。
+GETRF_FORMULA = {"real": "max(5*ratio_cpu, 0.3)", "complex": "max(5*ratio_cpu, 0.5)"}
+GETRF_FLOOR = {"real": 0.3, "complex": 0.5}
+
+# getri 单矩阵（S/CGET03，1014 新入范围）：max(5·ratio_cpu, 0.05)，实/复同地板。
+GETRI_FORMULA = "max(5*ratio_cpu, 0.05)"
+GETRI_FLOOR = 0.05
+
+# getriBatched（S/CGET03，batch 内逐矩阵）：max(5·ratio_cpu_i, 0.05)。
+GETRIBATCHED_FORMULA = "max(5*ratio_cpu_i, 0.05)"
+GETRIBATCHED_FLOOR = 0.05
+
+# matinvBatched（S/CGET03，batch 内逐矩阵）：max(5·ratio_cpu_i, 0.5)。
+MATINVBATCHED_FORMULA = "max(5*ratio_cpu_i, 0.5)"
+MATINVBATCHED_FLOOR = 0.5
+
+# geqrf（S/CQRT01）与 *mqr（S/CQRT03）同式：max(5·ratio_cpu, 0.1)。
+GEQRF_MQR_FORMULA = "max(5*ratio_cpu, 0.1)"
+GEQRF_MQR_FLOOR = 0.1
+
+# *gqr（S/CQRT02）：max(5·ratio_cpu, 1.5)。
+GQR_FORMULA = "max(5*ratio_cpu, 1.5)"
+GQR_FLOOR = 1.5
+
+# gels（S/CQRT16 方阵 / CQRT17 超定；1014 定稿实/复同式）：
+# - 方阵（m=n，DQRT16）：max(5·ratio_cpu, 0.015)；
+# - 超定（m>n，DQRT17）：10·ratio_opt_cpu（无绝对地板）。
+GELS_SQUARE_FORMULA = "max(5*ratio_cpu, 0.015)"
+GELS_SQUARE_FLOOR = 0.015
+GELS_OVERDET_FORMULA = "10*ratio_opt_cpu"
+GELS_OVERDET_FACTOR = 10.0
+
+
+def getrf_threshold(ratio_cpu, complex_=False):
+    """getrf 阈值：max(5·ratio_cpu, floor)，floor=0.3（实）/0.5（复）。
+    （任务书 §3.2.2.1，SGET01/CGET01 残差式 ‖L·U−A‖₁/(n·‖A‖₁·ε)。）"""
+    r = _check_ratio_cpu(ratio_cpu)
+    return max(5.0 * r, GETRF_FLOOR["complex" if complex_ else "real"])
+
+
+def getri_threshold(ratio_cpu):
+    """getri 单矩阵阈值：max(5·ratio_cpu, 0.05)（S/CGET03，实/复同式）。"""
+    return max(5.0 * _check_ratio_cpu(ratio_cpu), GETRI_FLOOR)
+
+
+def getribatched_threshold(ratio_cpu_i):
+    """getriBatched 第 i 个矩阵阈值：max(5·ratio_cpu_i, 0.05)（CGET03，逐矩阵）。"""
+    return max(5.0 * _check_ratio_cpu(ratio_cpu_i), GETRIBATCHED_FLOOR)
+
+
+def matinvbatched_threshold(ratio_cpu_i):
+    """matinvBatched 第 i 个矩阵阈值：max(5·ratio_cpu_i, 0.5)（CGET03，逐矩阵）。"""
+    return max(5.0 * _check_ratio_cpu(ratio_cpu_i), MATINVBATCHED_FLOOR)
+
+
+def geqrf_mqr_threshold(ratio_cpu):
+    """geqrf 与 *mqr 阈值：max(5·ratio_cpu, 0.1)（SQRT01/SQRT03）。"""
+    return max(5.0 * _check_ratio_cpu(ratio_cpu), GEQRF_MQR_FLOOR)
+
+
+def gqr_threshold(ratio_cpu):
+    """*gqr 阈值：max(5·ratio_cpu, 1.5)（SQRT02）。"""
+    return max(5.0 * _check_ratio_cpu(ratio_cpu), GQR_FLOOR)
+
+
+def gels_threshold(ref_cpu, square):
+    """gels 阈值（实/复同式）。ref_cpu：方阵（m=n）传 ratio_cpu，超定（m>n）传
+    ratio_opt_cpu。
+
+    - 方阵（square=True，DQRT16）：max(5·ref_cpu, 0.015)；
+    - 超定（square=False，DQRT17）：10·ref_cpu。
+    """
+    r = _check_ratio_cpu(ref_cpu)
+    if square:
+        return max(5.0 * r, GELS_SQUARE_FLOOR)
+    return GELS_OVERDET_FACTOR * r

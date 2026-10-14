@@ -1,11 +1,30 @@
 # OpRunway 当前 TODO
 
+- [ ] 在具备pytest的远程环境运行迁移后的 `.codex/hooks/test_doc_style_lint.py`；本轮缺依赖，语法和入口检查已执行。
+
+- [ ] 在下一次正式验收中验证迁移后的 Codex 隔离入口（独立认证、上下文及远端终态），不把静态迁移视为完整运行通过。
+
+- [ ] Solver源码样例后续：旧sgetrf只支持A2/A3，A3普通精度、确定性及msprof op采集已验证；A5源码适配及奇异info能力待开发者补齐，证据见reports/solver-source-sample-a3-1014/。
+
 本页只保留尚未完成且有当前证据的工作。仓规以根 `AGENTS.md` 为准，已完成历史查 changes brief 与 Git。
+
+- [ ] 开发者样例回归收尾：SSH恢复后取回新回归与n16检查结果，并停止保留本轮自有容器；见[solver-developer-sample-1010.md](solver/solver-developer-sample-1010.md)。
+
+## LU/QR 交接后续（2026-10-13）
+
+合入说明见 [solver-luqr-import-1013.md](solver/solver-luqr-import-1013.md)。交接导入时未测试；后续 skill 修复已做远端局部验证，见[修复完成记录](solver/solver-skill-repair-plan-1013.md)。
+
+- [ ] 随开发者实际交付核对并验证 LU/QR Device 适配；共享 harness 的生成器／判定卡分流、矩形参数、ipiv/tau 通道已完成，通用协议验证不代替具体算子真机验证。
+- [x] 用户确认 LU/QR 残差取实际32位输入升64；CPU参考链、判定卡和渲染模板已统一，42矩阵三链核对一致。仅修改skill，产物不在本次范围。见[solver-luqr-input32-skill-1013.md](solver/solver-luqr-input32-skill-1013.md)。
+- [ ] 对实际交付执行 LU/QR 性能采集，补齐 getriBatched/gels 缺失 GPU 基线；skill 已接入 msprof op、均值与 GPU/0.35 逐例及汇总判定。
+- [ ] 按交接待裁项完成16包交付：批量索引压缩／切分、私集真实种子、接口适配样例；当前仅复制与修正文档，不重产。
 
 ## P1 · 0923 solver 批次（立项中 @ worktree solver-accept-0923，2026-09-21）
 
 背景与全部证据见 `dev-doc/solver/solver-0923-context.md`。
 **solver 线交接待办细目见 `dev-doc/solver/solver-handover-todo.md`（唯一细目账）。**
+
+本轮接续状态见 [solver-completion-1010.md](solver/solver-completion-1010.md)：HT-31 工具收尾、HT-32 候选已完成；仅用 Codex；性能采集/匹配/判定/汇总流程已落地，cmatinv样例标明必补适配项；v6十包已按用户要求基于v5收缩对0928的diff，远端逐包门通过。固定开发者适配协议及cmatinv样例已完成，见[solver-adapter-1010.md](solver/solver-adapter-1010.md)；用户明确完整算子验收跑通不在本轮范围；数值基线裁定与真实 Cholesky 交付保留后续。
 
 - [x] ~~决策点：走哪条验收线~~ → **2026-09-22 Mr.0 裁定走乙：新起
   `repo-task-solver-accept`，自产 harness 留在验收现场。** 依据与两条翻案条件见

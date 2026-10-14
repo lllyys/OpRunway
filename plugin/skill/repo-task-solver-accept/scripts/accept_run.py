@@ -42,22 +42,30 @@ case_purpose 分流（verdict._judge_info_inner，只比 info==k_expected，不�
 期望项出 KIND_INFO（与接口精度各出独立结论，HT-12 口径）；包内存在 info 用例时，
 固定占位的 KIND_INFO 项（模拟被测未执行场景）由逐 case 结论替代。
 
+准入断言（以新为准裁定 2026-10-09）：包内 cases/index.json 顶层 ratio_basis 必须是
+"A32-f64"，否则拒收退 2——缺字段即旧 A64 基，其固化 ratio_cpu/ratio_cpu_mean 与现行
+残差实现不同基，判出来的 PASS/FAIL 都不成立。不做旧包兼容，不在验收侧重算参考值。
+
 退出码：0 = report 已写出（含存在 FAIL/证据不足的情形——结论在 report 里，不用退出
-码表达）；2 = 包不可用（manifest/index 缺失或不可解析、operator 不在支持集），此时
-不产出 report。
+码表达）；2 = 包不可用（manifest/index 缺失或不可解析、operator 不在支持集、
+ratio_basis 非 A32-f64），此时不产出 report。
 """
 
 import argparse
+import gzip
 import hashlib
 import json
+import math
 import platform
 import sys
+import zlib
 from pathlib import Path
 
 import numpy as np
 
 TOOL = "accept_run.py"
-TOOL_VER = "s2a1-D5"  # s2-A1 一段式：期望项证据随 residual 单段 schema；承 s3-D4
+TOOL_VER = "s2a1-D7"  # 2026-10-11：LU/QR 统一取卡（cards_luqr）+ ipiv/tau 透传；只受理 A32-f64 基；承 s2a1-D6
+RATIO_BASIS = "A32-f64"  # 受理的唯一残差基（index 顶层 ratio_basis）
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 _CRITERIA_DIR = _SCRIPTS_DIR.parent / "criteria"
@@ -69,7 +77,30 @@ import expectations as exp          # noqa: E402  (同目录期望集模块)
 import batched_parallel             # noqa: E402  (criteria judge 的统一入口：单矩阵
                                     #  直通 verdict.judge，批量卡支持矩阵区间多进程分块)
 import cards_cholesky               # noqa: E402  (criteria 判据卡)
+try:                                # LU/QR 16 接口判据卡（lq-plan §1）；缺该模块不致命
+    import cards_luqr               # noqa: E402
+except ImportError:                 # pragma: no cover - 老快照无 LU/QR 卡时退化
+    cards_luqr = None
 import thresholds                   # noqa: E402  (criteria 阈值常量, CRITERIA_VER)
+
+
+def get_card(op):
+    """统一取卡（fail-closed）：LU/QR 16 接口走 cards_luqr，其余走 cards_cholesky。
+
+    与 criteria/render_verify._spec_card 同口径；cards_luqr 未装载时全部落
+    cards_cholesky（旧快照零漂移）。
+    """
+    if cards_luqr is not None and cards_luqr.accepts(op):
+        return cards_luqr.get_card(op)
+    return cards_cholesky.get_card(op)
+
+
+def supported_ops():
+    """本 accept 骨架支持的算子全集（Cholesky 三族 + LU/QR 16 接口）。"""
+    base = list(cards_cholesky.OPS) + list(cards_cholesky.BATCHED_OPS)
+    if cards_luqr is not None:
+        base += [op for op in cards_luqr.OPS if op not in base]
+    return base
 
 
 def _fail(msg):
@@ -79,20 +110,40 @@ def _fail(msg):
 
 def _load_json(path, what):
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rt", encoding="utf-8") as fh:
             return json.load(fh)
     except FileNotFoundError:
         _fail(f"{what} 缺失: {path}")
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, EOFError, json.JSONDecodeError) as exc:
         _fail(f"{what} 不可解析: {path}: {exc}")
 
 
 def _sha256(path):
     h = hashlib.sha256()
-    with open(path, "rb") as fh:
+    opener = gzip.open if path.name == "index.json.gz" else open
+    with opener(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _index_bytes(package):
+    """包内 cases/index 的逻辑明文：index.json；或 gzip index.json.gz；或 gzip
+    切分件 index.json.gz.partNNN（按名序拼接后解压）。缺失抛 FileNotFoundError，
+    切分件损坏抛 ValueError。"""
+    cases = package / "cases"
+    plain = cases / "index.json"
+    if plain.is_file():
+        return plain.read_bytes()
+    gz = cases / "index.json.gz"
+    parts = [gz] if gz.is_file() else sorted(cases.glob("index.json.gz.part*"))
+    if not parts:
+        raise FileNotFoundError("cases/index.json（或 index.json.gz / 切分件）缺失")
+    try:
+        return gzip.decompress(b"".join(p.read_bytes() for p in parts))
+    except (OSError, EOFError, zlib.error) as exc:
+        raise ValueError(f"cases/index 切分件不可解: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +166,14 @@ def check_fingerprints(package, manifest):
         return mismatch, ["WARN:指纹表缺失:manifest.fingerprint"]
     for rel, expected in sorted(fp.items()):
         path = package / rel
-        if not path.is_file():
+        if rel == "cases/index.json":
+            # 逻辑明文口径：磁盘可为明文/gz/切分件，指纹恒按解压内容核对。
+            try:
+                actual = hashlib.sha256(_index_bytes(package)).hexdigest()
+                desc = None if actual == expected else f"sha256 错配 {actual[:12]}…"
+            except (OSError, EOFError, ValueError) as exc:
+                desc = f"文件缺失或不可解: {exc}"
+        elif not path.is_file():
             desc = "文件缺失"
         else:
             actual = _sha256(path)
@@ -147,7 +205,7 @@ def load_case_arrays(package, entry):
                     if "sample_map" in entry else
                     "纯脚本包条目（materialize=gen，S3 spec §5）")
             return None, (f"{kind}：包内无数组，accept_run 不做现场重生成；数值判定"
-                          "走 stream_check 或包内 verify 副本的现场重生成通路"
+                          "走包内 verify 副本的现场重生成通路；stream_check 仅为模拟演练"
                           "（批量 A0 经 criteria/batched_a0 两层判定）")
         return None, "index 条目无 npz 路径"
     path = package / npz_rel
@@ -161,6 +219,20 @@ def load_case_arrays(package, entry):
     arrays["uplo"] = entry.get("uplo")
     arrays["ratio_cpu"] = entry.get("ratio_cpu")
     arrays["ratio_cpu_status"] = entry.get("ratio_cpu_status")
+    # Canonical/index metadata takes precedence over fields supplied in the NPZ.
+    for meta in ("m", "n", "side", "trans", "ratio_opt_cpu"):
+        arrays[meta] = entry.get(meta)
+    if (entry.get("op") in ("sgels", "cgels")
+            and entry.get("case_purpose") != "info"
+            and entry.get("ratio_cpu_status") == "ok"):
+        m, n = entry.get("m"), entry.get("n")
+        if not isinstance(m, int) or not isinstance(n, int) or m < n or n < 1:
+            return None, "gels 冻结条目缺有效 m/n"
+        if m > n:
+            opt = entry.get("ratio_opt_cpu")
+            if (isinstance(opt, bool) or not isinstance(opt, (int, float))
+                    or not math.isfinite(opt) or opt < 0):
+                return None, "缺有效冻结 ratio_opt_cpu"
     for meta in ("case_purpose", "k_expected"):   # HT-8：info 用例 judge 分流依据
         if entry.get(meta) is not None:
             arrays[meta] = entry[meta]
@@ -183,11 +255,17 @@ def load_dut_out(dut_dir, case_id):
             # criteria 的批量校验裁决，此处不预判角色。
             info = np.asarray(z["info"])
             info = int(info.item()) if info.ndim == 0 else np.array(info)
-            return {
+            dut = {
                 "out32": z["out32"],
                 "info": info,
                 "status": str(np.asarray(z["status"]).item()),
-            }, None
+            }
+            # LU/QR 判据卡增量（cards_luqr dut_out 契约）：getrf 另带 ipiv（被测主元，
+            # 1 基）、geqrf 另带 tau（被测反射子标度）；存在即透传（判据卡消费面）。
+            for k in ("ipiv", "tau"):
+                if k in z.files:
+                    dut[k] = z[k]
+            return dut, None
     except Exception as exc:
         return None, f"被测输出不可读: {type(exc).__name__}: {exc}"
 
@@ -203,10 +281,10 @@ def accuracy_items(package, dut_dir, operator, index, baseline_rows,
     串行逐位相同）；单矩阵卡该入口直通 verdict.judge，行为不变。
 
     ratio_cpu_mean 从 index 顶层按算子注入 case_arrays（HT-3 消费面；mean 本体
-    由 HT-4 在发包侧预计算固化，index 无该键时注入 None → potrf/potrs 兜底走
-    单支兼容口径，verdict._run_residual）。批量卡下 mean 为算子级标量，经
+    由 HT-4 在发包侧预计算固化，build_report 准入拒绝所需字段缺失）。
+    批量卡下 mean 从 case 条目读取，经
     passthrough 带入每个矩阵（verdict._judge_batched_inner）。"""
-    card = cards_cholesky.get_card(operator)
+    card = get_card(operator)
     op_mean = (index.get("ratio_cpu_mean") or {}).get(operator)
     index_cases = index.get("cases")
     index_blocked = next(
@@ -238,7 +316,8 @@ def accuracy_items(package, dut_dir, operator, index, baseline_rows,
         if arrays is None:
             items.append(insuff(case_id, "证据缺失", why))
             continue
-        arrays["ratio_cpu_mean"] = op_mean     # HT-3：potrf/potrs 阈值第二支消费
+        arrays["ratio_cpu_mean"] = (entry.get("ratio_cpu_mean")
+                                    if card.batched else op_mean)
         dut, why = load_dut_out(dut_dir, case_id)
         if dut is None:
             items.append(insuff(case_id, "被测输出缺失", why))
@@ -254,9 +333,20 @@ def accuracy_items(package, dut_dir, operator, index, baseline_rows,
     return items, flags, ungenerated
 
 
-def perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking):
-    """P 项性能两项：参考比值（被测/基线，可选 perf.json）与正式门禁（恒待裁，T1）。"""
-    items = [exp.perf_formal_gate_item(operator)]
+def perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking, performance_evidence=None):
+    """P 项性能两项：参考比值（被测/基线，可选 perf.json）与正式门禁（按完整采样证据判定）。"""
+    evidence_path = Path(performance_evidence) if performance_evidence else dut_dir / "performance-measurements.json"
+    formal_report, formal_error = None, None
+    if evidence_path.is_file():
+        try:
+            import performance
+            contract = performance.load_contract(package)
+            formal_report = performance.judge(contract, performance.load_evidence(evidence_path))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            formal_error = f"性能证据不可裁: {exc}"
+    elif performance_evidence:
+        formal_error = f"性能证据文件不存在: {evidence_path}"
+    items = [exp.perf_formal_gate_item(operator, formal_report, formal_error)]
     if "perf_baseline.json" in mismatch_blocking:
         items.insert(0, exp.perf_reference_item(
             operator, exp.ST_NO_EVIDENCE,
@@ -272,13 +362,13 @@ def perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking):
         items.insert(0, exp.perf_reference_item(
             operator, exp.ST_NO_EVIDENCE,
             {"reason": "被测耗时未交付",
-             "detail": "本片模拟被测不产出耗时；bench_result 基线仅自测参考（spec §2.3′）",
+             "detail": "未提供可选 perf.json 参考数据；正式性能见 msprof op 采样证据门禁",
              "baseline_coverage": coverage}))
         return items
     try:
         with open(perf_path, "r", encoding="utf-8") as fh:
             dut_ms = json.load(fh)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, EOFError, json.JSONDecodeError) as exc:
         items.insert(0, exp.perf_reference_item(
             operator, exp.ST_NO_EVIDENCE,
             {"reason": "被测耗时不可读", "detail": f"perf.json: {exc}",
@@ -297,7 +387,7 @@ def perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking):
         operator, exp.ST_PENDING,
         {"direction": "被测/基线（<1 快于基线）", "baseline_coverage": coverage,
          "cases": ratios,
-         "ruling": "参考比值无独立判据，正式门走任务书 §3.3（T1 待裁）"}))
+         "ruling": "参考比值无独立判据，正式门按另行提供的 msprof op 证据计算"}))
     return items
 
 
@@ -305,16 +395,33 @@ def perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking):
 # 主流程
 # ---------------------------------------------------------------------------
 
-def build_report(package, dut_dir, jobs=1):
+def build_report(package, dut_dir, jobs=1, performance_evidence=None):
     manifest = _load_json(package / "manifest.json", "manifest.json")
     operator = manifest.get("operator")
-    supported = cards_cholesky.OPS + cards_cholesky.BATCHED_OPS
+    supported = supported_ops()
     if operator not in supported:
         _fail(f"manifest.operator={operator!r} 不在支持集 {supported}")
-    index = _load_json(package / "cases" / "index.json", "cases/index.json")
+    try:
+        index = json.loads(_index_bytes(package).decode("utf-8"))
+    except FileNotFoundError:
+        _fail("必须恰有一份 cases/index.json（或 index.json.gz / 切分件）")
+    except (OSError, EOFError, ValueError) as exc:
+        _fail(f"cases/index.json 不可解析: {exc}")
+    # 准入断言（以新为准裁定 2026-10-09）：只受理 A32-f64 基的包。缺字段即旧 A64 基，
+    # 其 ratio_cpu/ratio_cpu_mean 与现行残差实现不同基，判出来的 PASS/FAIL 都不成立。
+    basis = index.get("ratio_basis")
+    if basis != RATIO_BASIS:
+        _fail(f"旧基包不受理：参考值基准非 {RATIO_BASIS}（以新为准裁定 2026-10-09），"
+              f"请使用更新版任务包（index.ratio_basis={basis!r}）")
     index_cases = index.get("cases")
     if not isinstance(index_cases, list):
         _fail("cases/index.json 无 cases 列表")
+    # 与随包 verify 共享冻结字段契约；新包入口不走缺 mean 的旧单支兼容。
+    from render_verify import load_frozen_index
+    try:
+        load_frozen_index(package, index_cases, operator)
+    except (OSError, EOFError, ValueError, TypeError) as exc:
+        _fail(f"冻结基线契约错误: {exc}")
     baseline_rows = _load_json(package / "perf_baseline.json", "perf_baseline.json")
     if not isinstance(baseline_rows, list):
         _fail("perf_baseline.json 非列表")
@@ -324,7 +431,7 @@ def build_report(package, dut_dir, jobs=1):
     acc_items, verdict_flags, ungenerated = accuracy_items(
         package, dut_dir, operator, index, baseline_rows, mismatch_blocking,
         jobs=jobs)
-    p_items = perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking)
+    p_items = perf_items(package, dut_dir, operator, baseline_rows, mismatch_blocking, performance_evidence)
     fixed = exp.fixed_insufficient_items(operator)
     if any(it["kind"] == exp.KIND_INFO for it in acc_items):
         # HT-8：包内已有逐 case 的 info 契约结论，固定占位项（「未执行该场景」）
@@ -332,8 +439,10 @@ def build_report(package, dut_dir, jobs=1):
         fixed = [it for it in fixed if it["kind"] != exp.KIND_INFO]
     items = acc_items + p_items + fixed
 
-    # flags：T 类分歧显式携带（spec §5）；T1 恒在（性能正式门待裁）；告警仅告警。
-    flags = sorted(verdict_flags) + ["T1"] + sorted(warnings)
+    # flags：T 类分歧显式携带（spec §5）；性能缺证据时保留 T1；告警仅告警。
+    perf_missing = any(it["item"].startswith("P项性能/正式门禁/")
+                       and it["status"] == exp.ST_NO_EVIDENCE for it in p_items)
+    flags = sorted(set(verdict_flags) | ({"T1"} if perf_missing else set()) | set(warnings))
     versions = {
         "accept_run": TOOL_VER,
         "expectations": exp.EXPECTATIONS_VER,
@@ -360,6 +469,7 @@ def main(argv=None):
     ap.add_argument("--jobs", type=int, default=1,
                     help="批量卡逐矩阵判定的多进程分块数（缺省 1=串行；"
                          "分块结果与串行逐位相同，S3 并行裁定）")
+    ap.add_argument("--performance-evidence", help="msprof op performance-measurements.json; 重新计算性能结论")
     args = ap.parse_args(argv)
 
     package, dut_dir = Path(args.package), Path(args.dut_out)
@@ -368,7 +478,7 @@ def main(argv=None):
     if not dut_dir.is_dir():
         _fail(f"被测输出目录不存在: {dut_dir}")
 
-    report = build_report(package, dut_dir, jobs=args.jobs)
+    report = build_report(package, dut_dir, jobs=args.jobs, performance_evidence=args.performance_evidence)
     out = Path(args.report)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as fh:

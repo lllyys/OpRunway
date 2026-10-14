@@ -258,14 +258,254 @@ def freeze_batched(args, book):
     return 0
 
 
+# ---------------------------------------------------------------------------
+# LU / QR 四册（--book lu_real|lu_complex|qr_real|qr_complex）
+#
+# 与 Cholesky 三册的差异：无 uplo 轴；几何键按「基础算子字段表」驱动；枚举
+# trans/side 在 cases.json 为 int（N/T/C=0/1/2、LEFT/RIGHT=0/1），在
+# bench_result.json 为字符串（"N"/"T"/"C"、"LEFT"/"RIGHT"）；本册不做 s1 子集
+# 裁剪（纯脚本形态，全部 case 入册，s1_subset 恒 true）。1014 用例目录为每册
+# 四算子（LU: getrf/getri/getriBatched/matinvBatched；QR: geqrf/gqr/mqr/gels），
+# Xlarft 不在范围内（无用例目录）；getri 只提供 cases_brief.json（无 cases.json），
+# 冻结时按此回退。
+# ---------------------------------------------------------------------------
+
+ENUM_TRANS = {0: "N", 1: "T", 2: "C"}       # cases.json int -> 字母
+ENUM_SIDE = {0: "LEFT", 1: "RIGHT"}
+
+# 基础算子 -> 参与几何键与落卡的字段（有序）
+LUQR_OP_FIELDS = {
+    "getrf": ["m", "n", "lda", "pivot"],
+    "getri": ["n", "lda", "pivot"],
+    "getribatched": ["n", "batch", "lda", "ldc"],
+    "matinvbatched": ["n", "batch", "lda", "lda_inv"],
+    "geqrf": ["m", "n", "lda"],
+    "gqr": ["m", "n", "k", "lda"],
+    "mqr": ["m", "n", "k", "side", "trans", "lda", "ldc"],
+    "gels": ["m", "n", "nrhs", "ldda", "lddb", "lddx"],
+}
+
+# 任务书维度范围（LQ-7 网格刷新：越界 case 在冻结阶段裁掉，不进入册；gqr/mqr 的
+# k 允许 0（结构性约束 0<=k<=min(m,n)，不在此表判））
+LUQR_RANGES = {
+    "getrf": {"m": (1, 4096), "n": (1, 4096)},
+    "getri": {"n": (1, 4096)},
+    "getribatched": {"n": (1, 4096), "batch": (1, 1000000)},
+    "matinvbatched": {"n": (1, 32), "batch": (1, 1000000)},
+    "geqrf": {"m": (1, 4096), "n": (1, 4096)},
+    "gqr": {"m": (1, 4096), "n": (1, 4096), "k": (0, 4096)},
+    "mqr": {"m": (1, 4096), "n": (1, 4096), "k": (0, 4096)},
+    "gels": {"m": (1, 4096), "n": (1, 4096), "nrhs": (1, 128)},
+}
+
+# 4GiB 内存约束（假定 A-4 / 任务书「输入数据占用内存 ≤ 4G」）：单 case 主输入字节
+# 下界估计超限即裁（LQ-7）。单元素字节：实数 float32=4、复数 complex64=8。
+FOUR_GIB = 4 * (1024 ** 3)
+LUQR_ITEM_BYTES = {False: 4, True: 8}
+
+
+def _luqr_case_bytes(kind, complex_, c):
+    """单 case 主输入数组字节数下界（LQ-7；与 verify/contract_check.py 同模型，
+    只估矩阵本体，不含 workspace）。字段缺失按 0/缺省计。"""
+    item = LUQR_ITEM_BYTES[bool(complex_)]
+    m, n = c.get("m") or 0, c.get("n") or 0
+    lda = c.get("lda") or m or n
+    batch = c.get("batch") or 1
+    if kind in ("getrf", "geqrf"):
+        return lda * n * item
+    if kind == "getri":
+        return lda * n * item
+    if kind in ("getribatched", "matinvbatched"):
+        return lda * n * item * batch
+    if kind == "gqr":
+        return lda * (c.get("k") or n) * item
+    if kind == "mqr":
+        return (lda * (c.get("k") or n) + c.get("ldc", m) * n) * item
+    if kind == "gels":
+        return (c.get("ldda", m) * n + c.get("lddb", m) * (c.get("nrhs") or 1)) * item
+    return 0
+
+
+def _luqr_refresh_grid(kind, complex_, canon):
+    """网格刷新（LQ-7）：裁掉维度越界与超 4GiB case。
+
+    返回 (kept, dropped_out_of_range, dropped_over_4gib, oor_examples)；
+    oor_examples 至多 5 条，供对账追溯（首个越界字段/值/允许范围）。
+    """
+    ranges = LUQR_RANGES[kind]
+    kept, oor_n, g4_n, examples = [], 0, 0, []
+    for c in canon:
+        bad = [(f, c.get(f), rng) for f, rng in ranges.items()
+               if c.get(f) is None or not (rng[0] <= c[f] <= rng[1])]
+        if bad:
+            oor_n += 1
+            if len(examples) < 5:
+                f, v, rng = bad[0]
+                examples.append({"field": f, "v": v, "range": list(rng)})
+            continue
+        if _luqr_case_bytes(kind, complex_, c) > FOUR_GIB:
+            g4_n += 1
+            continue
+        kept.append(c)
+    return kept, oor_n, g4_n, examples
+
+# 册 -> {family, complex, ops(op->基础算子), op_code, spec, taskbook}
+LUQR_BOOKS = {
+    "lu_real": {
+        "family": "lu", "complex": False,
+        "ops": {"sgetrf": "getrf", "sgetri": "getri",
+                "sgetribatched": "getribatched", "smatinvbatched": "matinvbatched"},
+        "op_code": {"sgetrf": 11, "sgetri": 12, "sgetribatched": 13, "smatinvbatched": 14},
+        "spec": "lq-plan §1（实数 LU 册，任务书 §3.2）",
+        "taskbook": "Atlas950_Sgetrf_Sgetri_SgetriBatched_SmatinvBatched_task_doc.md",
+    },
+    "lu_complex": {
+        "family": "lu", "complex": True,
+        "ops": {"cgetrf": "getrf", "cgetri": "getri",
+                "cgetribatched": "getribatched", "cmatinvbatched": "matinvbatched"},
+        "op_code": {"cgetrf": 15, "cgetri": 16, "cgetribatched": 17, "cmatinvbatched": 18},
+        "spec": "lq-plan §1（复数 LU 册，任务书 §3.2）",
+        "taskbook": "Atlas950_Cgetrf_Cgetri_CgetriBatched_CmatinvBatched_task_doc.md",
+    },
+    "qr_real": {
+        "family": "qr", "complex": False,
+        "ops": {"sgeqrf": "geqrf", "sorgqr": "gqr", "sormqr": "mqr", "sgels": "gels"},
+        "op_code": {"sgeqrf": 19, "sorgqr": 20, "sormqr": 21, "sgels": 22},
+        "spec": "lq-plan §1（实数 QR 册，任务书 §3.2；Xlarft 范围外）",
+        "taskbook": "Atlas950_Sgeqrf_Sorgqr_Sormqr_Xlarft_SSgels_task_doc.md",
+    },
+    "qr_complex": {
+        "family": "qr", "complex": True,
+        "ops": {"cgeqrf": "geqrf", "cungqr": "gqr", "cunmqr": "mqr", "cgels": "gels"},
+        "op_code": {"cgeqrf": 23, "cungqr": 24, "cunmqr": 25, "cgels": 26},
+        "spec": "lq-plan §1（复数 QR 册，任务书 §3.2）",
+        "taskbook": "Atlas950_Cgeqrf_Cungqr_Cunmqr_CCgels_task_doc.md",
+    },
+}
+
+
+def _norm_luqr(kind, rec):
+    """按基础算子字段表归一；cases.json 的 int 枚举转字母，bench 字符串原样保留。"""
+    out = {}
+    for f in LUQR_OP_FIELDS[kind]:
+        v = rec.get(f)
+        if f == "trans" and isinstance(v, int):
+            v = ENUM_TRANS[v]
+        elif f == "side" and isinstance(v, int):
+            v = ENUM_SIDE[v]
+        out[f] = v
+    return out
+
+
+def _geo_luqr(kind, rec):
+    return tuple(_norm_luqr(kind, rec)[f] for f in LUQR_OP_FIELDS[kind])
+
+
+def freeze_luqr(args, book):
+    """LU/QR 册冻结：逐算子去重 → 网格刷新裁剪（维度越界 / 超 4GiB，LQ-7）→ bench
+    匹配；裁剪后全量入册（不裁 s1 子集）。"""
+    global OP_CODE, SEED_BASE
+    OP_CODE = book["op_code"]        # cu_seed 依赖此全局；按册切换 seed 空间
+    SEED_BASE = args.seed_base
+    task_dir = args.task_dir
+    task_label = args.task_dir_label or args.task_dir
+    all_cases, recon = [], {}
+    for op, kind in book["ops"].items():
+        base = os.path.join(task_dir, op)
+        cpath = os.path.join(base, "cases.json")
+        if not os.path.exists(cpath):          # 1014：getri 只提供 cases_brief.json
+            cpath = os.path.join(base, "cases_brief.json")
+        cj = json.load(open(cpath))
+        bj = json.load(open(os.path.join(base, "bench_result.json")))
+        raw = cj["cases"]
+
+        # 去重（键 = 全字段组合，含 iters/check；保首见序）——与 Cholesky 册同规则
+        seen, canon = set(), []
+        for c in raw:
+            key = tuple(sorted((k, v) for k, v in c.items()))
+            if key in seen:
+                continue
+            seen.add(key)
+            canon.append(_norm_luqr(kind, c))
+        dup_removed = len(raw) - len(canon)
+        dedup_total = len(canon)              # 去重后、裁剪前
+
+        # 网格刷新（LQ-7）：裁掉维度越界与超 4GiB 的内存违规 case（任务书 §2.2 /
+        # 「输入数据占用内存 ≤ 4G」）。裁剪在 bench 匹配与编号之前，编号连续无空洞。
+        canon, dropped_oor, dropped_4g, oor_examples = _luqr_refresh_grid(
+            kind, book["complex"], canon)
+
+        # bench 索引：几何键 -> 条目序号（0 起）
+        bench_file = f"{op}/bench_result.json"
+        bindex = {}
+        for i, b in enumerate(bj["cases"]):
+            bindex.setdefault(_geo_luqr(kind, b), []).append(i)
+        bench_dup = sum(len(v) - 1 for v in bindex.values())
+
+        matched = 0
+        for c in canon:
+            hits = bindex.get(_geo_luqr(kind, c), [])
+            c["_bench"] = {"file": bench_file, "entry": hits[0]} if hits else None
+            matched += 1 if hits else 0
+
+        for k, c in enumerate(canon, start=1):
+            entry = {"case_id": f"{op}-{k:04d}", "op": op, "source": "cu"}
+            entry.update({f: c[f] for f in LUQR_OP_FIELDS[kind]})
+            entry["seed"] = cu_seed(op, k)
+            entry["bench_key"] = c["_bench"]
+            entry["s1_subset"] = True          # 本册全量入册（纯脚本形态，不裁子集）
+            all_cases.append(entry)
+
+        # bench 覆盖可小于 case 集（如 sgetribatched 大 batch×n 无 GPU 实测，属预期）；
+        # 未匹配 case 的 bench_key 记 null，由 S4 make_baseline 逐条列报，不作 fail。
+        recon[op] = {
+            "kind": kind, "raw_total": len(raw),
+            "dedup_total": dedup_total, "dup_removed": dup_removed,
+            "dropped_out_of_range": dropped_oor, "dropped_over_4gib": dropped_4g,
+            "out_of_range_examples": oor_examples, "kept_total": len(canon),
+            "bench_total": len(bj["cases"]), "bench_matched": matched,
+            "bench_missing": len(canon) - matched, "bench_dup_entries": bench_dup,
+        }
+
+    doc = {
+        "schema": "solver-luqr/canonical_cases@1",
+        "spec": book["spec"],
+        "frozen_at": datetime.date.today().isoformat(),
+        "task_dir": task_label,
+        "book": args.book,
+        "conventions": {
+            "trans": {"cases.json": ENUM_TRANS, "bench_result.json": {"N": "N", "T": "T", "C": "C"}},
+            "side": {"cases.json": ENUM_SIDE, "bench_result.json": {"LEFT": "LEFT", "RIGHT": "RIGHT"}},
+            "bench_key": "file 相对 task_dir；entry 为该文件 cases 数组 0 起序号；无匹配为 null",
+            "bench_coverage": "bench_result.json 可仅覆盖部分 case（大 batch×n 无 GPU 实测），"
+                              "未匹配记 bench_key=null，由 S4 make_baseline 逐条列报",
+            "seed": {"cu": f"{SEED_BASE} + op_code*1000000 + 编号（op_code: "
+                           + " ".join(f"{o}={book['op_code'][o]}" for o in book["ops"]) + "）"},
+            "s1_subset": "本册全量 case 入册（纯脚本形态不裁子集），s1_subset 恒 true",
+            "scope": "1014 用例目录为每册四算子（LU: getrf/getri/getriBatched/"
+                     "matinvBatched；QR: geqrf/gqr/mqr/gels）；Xlarft 无用例目录，"
+                     "不出现在 ops；getri 只提供 cases_brief.json（无 cases.json）",
+            "grid_refresh": "网格刷新（LQ-7，假定裁掉）：维度越界（任务书 §2.2）与单 case 主输入"
+                            "字节 > 4GiB（假定 A-4）的 case 在冻结阶段裁掉，逐算子入对账"
+                            "（dropped_out_of_range / dropped_over_4gib），不进册",
+        },
+        "reconciliation": recon,
+    }
+    write_canonical(args.out, doc, all_cases)
+    print(json.dumps(recon, ensure_ascii=False, indent=1))
+    print("total cases:", len(all_cases))
+    return 0
+
+
 def write_canonical(out, doc, all_cases):
-    """产物写盘：头部缩进、逐 case 单行（real/complex/batched 三册同一写法）。"""
+    """产物写盘：头部缩进、逐 case 单行（三册/四册同一写法）。"""
     with open(out, "w", encoding="utf-8") as f:
         head = {k: v for k, v in doc.items() if k != "cases"}
         s = json.dumps(head, ensure_ascii=False, indent=2)
         f.write(s[:-2] + ',\n  "cases": [\n')
         f.write(",\n".join("    " + json.dumps(c, ensure_ascii=False) for c in all_cases))
         f.write("\n  ]\n}\n")
+
 
 def main():
     global TASK_DIR, TASK_DIR_REL, OUT, OPS, OP_CODE, STD_CASES, SEED_BASE, STD_SEED_BASE
@@ -279,10 +519,11 @@ def main():
     ap.add_argument("--task-dir-complex-label", default=None,
                     help="batched 册专用：复数目录的相对标识；缺省用 --task-dir-complex 原文")
     ap.add_argument("--out", required=True, help="canonical JSON 输出路径")
-    ap.add_argument("--book", choices=tuple(BOOKS), default="real",
+    ap.add_argument("--book", choices=tuple(BOOKS) + tuple(LUQR_BOOKS), default="real",
                     help="算子册：real=spotrf/spotrs/spotri（缺省，S1 产物同构）；"
                          "complex=cpotrf/cpotrs/cpotri（S2c）；"
-                         "batched=四批量算子（S3，--task-dir=实数册 + --task-dir-complex=复数册）")
+                         "batched=四批量算子（S3，--task-dir=实数册 + --task-dir-complex=复数册）；"
+                         "lu_real|lu_complex|qr_real|qr_complex=LU/QR 四册（lq-plan §1，--task-dir=该册任务目录）")
     ap.add_argument("--seed-base", type=int, default=923000000,
                     help="cu 种子域基值（seed = 基值 + op_code*1000000 + 编号）；"
                          "缺省 923000000=公开域，产物逐字节不变。验收私集"
@@ -291,6 +532,8 @@ def main():
                     help="std 补充卡种子域基值（seed = 基值 + n）；缺省 20250912=公开域。"
                          "batched 册无 std 蓝本，该参数不生效")
     args = ap.parse_args()
+    if args.book in LUQR_BOOKS:
+        return freeze_luqr(args, LUQR_BOOKS[args.book])   # LU/QR 四册独立通路，不动 Cholesky 三册
     book = BOOKS[args.book]
     OPS = book["ops"]
     OP_CODE = book["op_code"]

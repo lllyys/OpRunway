@@ -171,7 +171,7 @@ def test_zero_denominator_raises():
 
 def test_unknown_kind_raises():
     with pytest.raises(ValueError):
-        residual_ratio("DGET01", a=_A2, factor=_F2, uplo="L")
+        residual_ratio("DGET99", a=_A2, factor=_F2, uplo="L")
 
 
 def test_bad_uplo_raises():

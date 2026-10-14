@@ -108,9 +108,12 @@ def judge_representatives(card, contents, sample_map, dut_out, ratio_cpu,
     for key in verdict._BATCH_SLICED_KEYS:
         if key in contents:
             arr = np.asarray(contents[key])
-            if arr.ndim != 3 or arr.shape[0] != k:
+            # 三维 (batch,…)（A/B/golden/LU*）或二维 (batch, n)（ipiv，LU/QR
+            # getriBatched 增量）皆可；首维须等于 k（与 verdict 批量校验同口径）。
+            if arr.ndim not in (2, 3) or arr.shape[0] != k:
                 raise A0StructureError(
-                    f"内容数组 {key} 首维应为 k={k}，得到 shape={arr.shape}")
+                    f"内容数组 {key} 首维应为 k={k}（三维或 ipiv 二维），"
+                    f"得到 shape={arr.shape}")
             sub_case[key] = arr
     if extra:
         sub_case.update(extra)

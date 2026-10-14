@@ -49,13 +49,13 @@ Mr.0 2026-09-24 裁定「全都现场造，无论大小」）——**纯脚本�
   装包时对该算子的包内切片（--scope 口径：full=dedup 全量 / s1=二维代表子集）
   逐 case 跑 gen_data（A0 抽样通路，
   HT-2：不落数组，k=min(5,batch) 个代表内容的 golden 与逐内容 ratio_cpu 一并算出），
-  sample_map 槽位映射与 ratio k 值列表写入 index **仅作参考**（S3 spec §3：验收与
-  自测侧判定时现场重造内容重算，不消费包内参考）。自检数据随后整目录删除，包内
+  sample_map 槽位映射与 ratio k 值列表固化入 index；验收与自测读取同一份
+  ratio/status/mean，输入与准备因子仍现场构造。自检数据随后整目录删除，包内
   零数据由 rglob 断言兜底。
 - 开发者流程「先造数后测」（S3 spec §5 + HT-2 A0）：批量 case 不落数组，执行器/
   DUT 挂钩按 index 的 sample_map 用包内 gen_data 的 expand_sampled_rows 流式构造
-  槽位区间现场喂入；verify 判定时自行重造同一内容并算 golden 与逐内容 ratio
-  （同环境逐位一致），先余槽 bit-wise 一致性、后代表槽逐内容残差判定。
+  槽位区间现场喂入；verify 判定时重造输入并读取 index 固化参考值，
+  先余槽 bit-wise 一致性、后代表槽逐内容残差判定。
 - 包内 canonical 切片按 --scope 二选一（2026-09-27 全量精度用例决策）：full（缺省）
   = 该算子 dedup 全量（A0 抽样零数据，不物化全量数组，n×batch 大 case 也只算
   k=min(5,batch) 个代表内容）；s1 = 二维代表子集六例（v3 前行为，spec §5 README
@@ -78,10 +78,33 @@ v1 从未流通无需兼容）——单矩阵六算子的装包自此走 **build
   现场生成包内切片全量（--select all 恰为切片，验证 README 第 0 步自洽）→ 校验字段 +
   index/实物对账 + golden 首/中/尾抽验（d/z 链路独立重算，只比对）→ 低精度准备链
   回填逐 case ratio（残差唯一实现仍在 criteria/verdict，经 fill_ratio_cpu.run_chain
-  同一入口）。自检数据随后整目录删除，包内零数据由 rglob 断言兜底；ratio 仅作参考，
-  判定侧（verify 副本与验收侧）现场同法重算，不消费包内数值。
+  同一入口）。自检数据随后整目录删除，包内零数据由 rglob 断言兜底；
+  判定侧（verify 副本与验收侧）只读包内固化 ratio/status/mean，输入与因子现场构造。
 - 旧 build()（S1/S2 逐字节复用装包，产出已交付六 v1 包）保留在本文件作 provenance，
   不再被路由——非批量装包一律纯脚本（S3 spec §5 通用数据策）。
+
+负例门（两条纯脚本装包路径的自检末项，2026-10-09）——此前的自检项从不执行包内
+verify，sim_dut 只被复制不被执行，「verify 形同虚设」一类缺陷活得过装包。门在临时
+目录内复刻开发者 README 流程，跑的是**刚装好的包里那几份成品件**：
+
+- 正例（--perturb none）：verify_accuracy 退 0，门自己那份清单上的每个 case 恰一条
+  判定行且数值 PASS；
+- 负例：非批量 --perturb scale → 退 1 且每条判定行数值 FAIL（一段式残差下六算子
+  scale 必拦，无豁免）；批量 --perturb scale --perturb-index 0 → 退 1 且报告指认到
+  被扰动的槽位或其所属内容（a0_mismatches / first_fail_index / worst_index）；
+- 两轮的 FAIL 都要求 verdict.error 为空——判定链内部异常、残差基线不可用、缺
+  ratio_cpu_mean 等「不可裁」路径同样产 numeric=="FAIL"，只认 numeric 等于把门
+  自己的故障当成偏差被抓住；
+- 任一断言不符 → SelfCheckError（装包失败，不写 manifest），错误信息指明哪条断言、
+  实际退出码与实际结论。门执行本身出的岔子（超时、包内脚本起不来、报告 JSON 损坏）
+  同样收敛成 SelfCheckError 走退 3，不外抛退 1。
+
+限界（成本上限：单包墙钟秒级）与它证不到的事，见 run_negative_gate 的说明。
+
+info id 对账（两条纯脚本装包路径的自检项，2026-10-09）：index 的 info 契约 id 集合
+必须等于包内 verify 将派生的集合。两侧派生基座都由切片顶层 package_scope 定，口径
+分叉时 verify 要的 case_id 没有被测输出，开发者算子全对也整包退 1（v4 六包命中）。
+判据与实现见 assert_info_ids_reconciled。
 
 CLI（spec §2.5 逐字；方括号内为本卡补充的可选项，缺省行为不需要它们）：
 
@@ -99,23 +122,40 @@ CLI（spec §2.5 逐字；方括号内为本卡补充的可选项，缺省行为
 """
 
 import argparse
+import gzip
 import hashlib
+import importlib.util
 import json
 import os
 import platform
+import shutil
+import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
 
 TOOL = "build_package.py"
-TOOL_VER = "s3-F11"  # 2026-10-08 换基：index 固化 ratio 时落 ratio_basis:"A32-f64"；承 s3-F10
+# s3-F14：负例门收束（2026-10-09）——轮断言按门自己的清单逐 ID 核判定行、FAIL 另
+#   要求 verdict.error 为空、扰动槽位改 0 不再排除 batch=1、门执行异常收敛退 3。
+TOOL_VER = "s3-F15"  # 包内源码导入不写字节码；负例门消费完整固化参考值
 OPS = ("spotrf", "spotrs", "spotri", "cpotrf", "cpotrs", "cpotri")
 BATCHED_OPS = ("spotrfBatched", "spotrsBatched", "cpotrfBatched", "cpotrsBatched")
-ALL_OPS = OPS + BATCHED_OPS
+# LU/QR 16 接口（LQ-13；lq-plan §1）：LU 实/复 getrf/getri/getriBatched/matinvBatched
+# + QR 实/复 geqrf/*gqr/*mqr/gels。单矩阵 12 走 build_purescript，批量 4 走 build_batched。
+LUQR_SINGLE_OPS = ("sgetrf", "sgetri", "sgeqrf", "sorgqr", "sormqr", "sgels",
+                   "cgetrf", "cgetri", "cgeqrf", "cungqr", "cunmqr", "cgels")
+LUQR_BATCHED_OPS = ("sgetribatched", "cgetribatched",
+                    "smatinvbatched", "cmatinvbatched")
+LUQR_OPS = LUQR_SINGLE_OPS + LUQR_BATCHED_OPS
+ALL_OPS = OPS + BATCHED_OPS + LUQR_OPS
 PACKAGE_VER = "s1"
 PACKAGE_VER_BATCHED = "s3-batched"   # 纯脚本形态（S3 spec §5），与逐字节复用形态区分
 PACKAGE_VER_PURESCRIPT = "s4-v2-purescript"  # 单矩阵六算子 v2（纯脚本形态，S4）
+PACKAGE_VER_LUQR = "lq-v1-purescript"        # LU/QR 单矩阵 12（LQ-13，纯脚本形态）
+PACKAGE_VER_LUQR_BATCHED = "lq-batched-v1-purescript"  # LU/QR 批量两族 4
 STANDARD_REFS = {
     "三层判定": "repos/solver_tasks-main/cholesky_precision/README.md",
     "阈值表": "repos/opbase-precision-standard/mixed_tolerance_standard.md",
@@ -130,12 +170,68 @@ class SelfCheckError(RuntimeError):
     """自检清单有项不过——包不可信（退出码 3），不写 manifest、不覆盖任何源。"""
 
 
+def _package_scope_note(canonical):
+    """Expose a trial input's declared coverage without changing case selection."""
+    trial = canonical.get("trial_scope")
+    if not trial:
+        return ""
+    note = "**本包为试生成子集，仅用于流程验证，不代表完整任务覆盖。**"
+    if isinstance(trial, dict) and trial.get("max_dimension") is not None:
+        note += f" 矩阵维度上限为 {trial['max_dimension']}。"
+    return note
+
+
 def _sha256_file(path):
     h = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+# 单文件上限 10 MiB：超出的 index 先 gzip，仍超出则切分（逐块 ≤ 上限）。
+_INDEX_FILE_LIMIT = 10 * 1024 * 1024
+
+
+def _read_cases_index_bytes(cases_dir):
+    """读包内 index 的逻辑明文：cases/index.json；或 gzip cases/index.json.gz；或
+    gzip 切分件 cases/index.json.gz.partNNN（按名序拼接后解压）。"""
+    plain = cases_dir / "index.json"
+    if plain.is_file():
+        return plain.read_bytes()
+    gz = cases_dir / "index.json.gz"
+    parts = [gz] if gz.is_file() else sorted(cases_dir.glob("index.json.gz.part*"))
+    if not parts:
+        raise ContractError(
+            f"{cases_dir} 下缺 cases/index.json（或 index.json.gz / 切分件）")
+    return gzip.decompress(b"".join(p.read_bytes() for p in parts))
+
+
+def _logical_index_sha(cases_dir):
+    """指纹口径：index 的逻辑明文 sha256（与磁盘形态无关）。"""
+    return hashlib.sha256(_read_cases_index_bytes(cases_dir)).hexdigest()
+
+
+def _write_cases_index(cases_dir, index_obj):
+    """写包内 index，返回逻辑明文 sha256（指纹以此为准，不看磁盘形态）。
+
+    明文 ≤10MiB：保持 cases/index.json；否则 gzip 为 cases/index.json.gz；仍超限则
+    切分 cases/index.json.gz.partNNN（按名序拼接即完整 gzip 流）。"""
+    raw = (json.dumps(index_obj, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    cases_dir.mkdir(parents=True, exist_ok=True)
+    for stale in cases_dir.glob("index.json*"):
+        stale.unlink()
+    if len(raw) <= _INDEX_FILE_LIMIT:
+        (cases_dir / "index.json").write_bytes(raw)
+    else:
+        blob = gzip.compress(raw, compresslevel=6, mtime=0)
+        if len(blob) <= _INDEX_FILE_LIMIT:
+            (cases_dir / "index.json.gz").write_bytes(blob)
+        else:
+            for i in range(0, len(blob), _INDEX_FILE_LIMIT):
+                (cases_dir / f"index.json.gz.part{i // _INDEX_FILE_LIMIT:03d}").write_bytes(
+                    blob[i:i + _INDEX_FILE_LIMIT])
+    return hashlib.sha256(raw).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +306,40 @@ def _is_complex_op(op):
     return op.startswith("c")
 
 
+def _is_luqr(op):
+    """算子族：LU/QR 16 接口走独立生成器/回填链/README 模板。"""
+    return op in LUQR_OPS
+
+
+def _luqr_base(op):
+    """去实/复前缀：sgetrf→getrf、cungqr→ungqr（与 gen_data_luqr._base_name 同口径）。"""
+    return op[1:] if op[:1] in ("s", "c") else op
+
+
+def _luqr_gen_module_name(op):
+    """包内 gen_data 副本与运行时生成器的文件名（LU/QR 与 Cholesky 数据面全独立）。"""
+    return "gen_data_luqr.py" if _is_luqr(op) else "gen_data_cholesky.py"
+
+
+def _expected_a64_shape(entry):
+    """精度用例 A64 的期望形状（矩形口径，LQ-13）：Cholesky 恒 (n,n)；LU/QR 逐算子
+    getri→(n,n)、*gqr→(m,n)、*mqr→(nq,k)、getrf/geqrf/gels→(m,n)。越界或错填即报错。"""
+    op = entry.get("op", "")
+    n = entry.get("n")
+    if not _is_luqr(op):
+        return (n, n)
+    base = _luqr_base(op)
+    m = entry.get("m")
+    if base == "getri":
+        return (n, n)
+    if base in ("ungqr", "orgqr"):
+        return (m, n)
+    if base in ("unmqr", "ormqr"):
+        nq = m if entry.get("side") == "LEFT" else n
+        return (nq, entry.get("k"))
+    return (m, n)                       # getrf/geqrf/gels
+
+
 def _dtype32_of(name64, arr64, case_id):
     """降型目标 dtype（spec §2.2 + S2 spec §4，字段名不变）：float64→float32、
     complex128→complex64；其余 dtype 属 schema 违约，fail-closed。"""
@@ -222,9 +352,11 @@ def _dtype32_of(name64, arr64, case_id):
         f"{case_id}: {name64} dtype={dt} 不在 float64/complex128（spec §2.2 + S2 spec §4）")
 
 
-def recompute_golden(op, arrays, uplo, case_id):
+def recompute_golden(op, arrays, uplo, case_id, entry=None):
     """按 spec §2.2（实数 d 链路）/ S2 spec §4（复数 z 链路）独立重算 golden64
-    （C 序）。info!=0 属数据问题，直接抛。"""
+    （C 序）。info!=0 属数据问题，直接抛。LU/QR 16 接口走 `_recompute_golden_luqr`。"""
+    if _is_luqr(op):
+        return _recompute_golden_luqr(op, arrays, case_id, entry)
     lapack = _lapack()
     lower = uplo == "L"
     a64 = arrays["A64"]
@@ -257,8 +389,69 @@ def recompute_golden(op, arrays, uplo, case_id):
     return np.ascontiguousarray(g)
 
 
+def _recompute_golden_luqr(op, arrays, case_id, entry):
+    """LU/QR golden64 独立重算（LQ-13；只用于抽验比对，绝不落盘）。
+
+    逐算子按四册任务书 §3.2.2 golden 链（实 d / 复 z 前缀）：
+    - getrf：无 golden（因子非唯一）→ 返回 None（抽验侧跳过该算子）；
+    - getri：dgetri(LU64, ipiv 转 0 基) → 逆；
+    - geqrf：dgeqrf → 打包 AF；
+    - *gqr：dorgqr/zungqr(AF,tau) → Q；
+    - *mqr：dormqr/zunmqr(side,trans,AF,tau,C) → op(Q)·C；
+    - gels：dgels(A,B) → 解 X（B_out 前 n 行）。
+    info!=0 属数据问题，直接抛 SelfCheckError。"""
+    lap = _lapack()
+    cx = _is_complex_op(op)
+    pfx = "z" if cx else "d"
+    base = _luqr_base(op)
+    a64 = arrays["A64"]
+    if base == "getrf":
+        return None
+    if base == "getri":
+        lu64 = arrays["LU64"]
+        piv = np.asarray(arrays["ipiv"], dtype=np.int32) - 1
+        g, info = getattr(lap, pfx + "getri")(np.array(lu64, order="F"), piv)
+        if info != 0:
+            raise SelfCheckError(f"{case_id}: 抽验 {pfx}getri info={info}")
+        return np.ascontiguousarray(g)
+    if base == "geqrf":
+        af, _tau, _w, info = getattr(lap, pfx + "geqrf")(a64, overwrite_a=0)
+        if info != 0:
+            raise SelfCheckError(f"{case_id}: 抽验 {pfx}geqrf info={info}")
+        return np.ascontiguousarray(af)
+    if base in ("ungqr", "orgqr"):          # *gqr：A64 即打包 AF（m×n）
+        q, _w, info = getattr(lap, "zungqr" if cx else "dorgqr")(
+            np.array(a64, order="F"), np.asarray(arrays["tau64"]))
+        if info != 0:
+            raise SelfCheckError(f"{case_id}: 抽验 {pfx}orgqr/ungqr info={info}")
+        return np.ascontiguousarray(q)
+    if base in ("unmqr", "ormqr"):
+        nq, k = a64.shape
+        c64 = arrays["C64"]
+        lwork = max(1, 64 * max(nq, c64.shape[0], c64.shape[1], k))
+        out, _w, info = getattr(lap, "zunmqr" if cx else "dormqr")(
+            entry["side"], entry["trans"], np.array(a64, order="F"),
+            np.asarray(arrays["tau64"]), np.array(c64, order="F"),
+            lwork=lwork, overwrite_c=0)
+        if info != 0:
+            raise SelfCheckError(f"{case_id}: 抽验 {pfx}ormqr/unmqr info={info}")
+        return np.ascontiguousarray(out)
+    # gels
+    _a, b_out, info = getattr(lap, pfx + "gels")(
+        a64, arrays["B64"], trans="N", overwrite_a=0, overwrite_b=0)
+    if info != 0:
+        raise SelfCheckError(f"{case_id}: 抽验 {pfx}gels info={info}")
+    n = a64.shape[1]
+    return np.ascontiguousarray(b_out[:n, :])
+
+
 def spot_check_indices(n_cases):
-    """确定性抽样：首/中/尾（case 数 <3 时取全部）。返回有序去重下标。"""
+    """确定性抽样：首/中/尾（case 数 <3 时取全部）。返回有序去重下标。
+
+    LQ-13：LU/QR 的 getrf 无 golden（因子非唯一），其算子切片可能全员无可抽验
+    case——n_cases<=0 返回空表，调用方据此跳过（不得产出越界下标）。"""
+    if n_cases <= 0:
+        return []
     return sorted({0, n_cases // 2, n_cases - 1})
 
 
@@ -266,23 +459,26 @@ def spot_check_indices(n_cases):
 # 自检项
 # ---------------------------------------------------------------------------
 
-def check_cast_fields(arrays, case_id, case_purpose=None):
+def check_cast_fields(arrays, case_id, case_purpose=None, has_golden=True):
     """spec §2.2 校验字段：32 位数组 == 64 位数组降型，逐字节。
 
     降型目标由 64 位数组的 dtype 决定（float64→float32、complex128→complex64，
     S2 spec §4 字段名不变），实数路径与 S1 版逐位同判。
     HT-8：info 契约用例（case_purpose=="info"）不携带 golden——出现 golden 对
     反而属 schema 违约；其余用例 golden 对仍为必需（fail-closed 不放松）。
+    LQ-13：LU/QR 的 getrf 无 golden（因子非唯一，主判走还原 L·U）——has_golden=False；
+    带 C64/C32 的算子（*mqr）同判降型对。
     """
     pairs = [("A32", "A64")]
     if case_purpose == "info":
         if "golden64" in arrays or "golden32" in arrays:
             raise SelfCheckError(
                 f"{case_id}: info 契约用例不应携带 golden（HT-8：只比 info，无残差）")
-    else:
+    elif has_golden:
         pairs.append(("golden32", "golden64"))
-    if "B64" in arrays:
-        pairs.append(("B32", "B64"))
+    for r64, r32 in (("B64", "B32"), ("C64", "C32")):
+        if r64 in arrays:
+            pairs.append((r32, r64))
     for a32, a64 in pairs:
         if a32 not in arrays or a64 not in arrays:
             raise SelfCheckError(f"{case_id}: npz 缺数组 {a32}/{a64}（spec §2.2 schema）")
@@ -300,9 +496,9 @@ def check_entry_vs_npz(entry, arrays):
     actual = sorted(arrays.keys())
     if sorted(declared or []) != actual:
         raise SelfCheckError(f"{cid}: index.arrays={declared} 与 npz 实物 {actual} 不符")
-    n = entry.get("n")
-    if arrays["A64"].shape != (n, n):
-        raise SelfCheckError(f"{cid}: A64 形状 {arrays['A64'].shape} != (n,n)=({n},{n})")
+    want = _expected_a64_shape(entry)
+    if arrays["A64"].shape != want:
+        raise SelfCheckError(f"{cid}: A64 形状 {arrays['A64'].shape} != {want}（LQ-13 矩形口径）")
 
 
 # ---------------------------------------------------------------------------
@@ -406,9 +602,7 @@ def build(staging_dirs, out_dir, op, container_id, canonical_path):
     # 包内 index：顶层元数据保留、条目原样，只做算子子集选取
     op_index = {k: v for k, v in index.items() if k != "cases"}
     op_index["cases"] = op_cases
-    with open(out_dir / "cases" / "index.json", "w", encoding="utf-8") as fh:
-        json.dump(op_index, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
+    _write_cases_index(out_dir / "cases", op_index)
     tick("包内 index", f"{op} 条目 {len(op_cases)} 条逐字段原样入包（源 index 未改写）")
 
     # perf_baseline 逐字节复用
@@ -456,7 +650,11 @@ def build(staging_dirs, out_dir, op, container_id, canonical_path):
     fingerprint = {}
     for path in sorted(out_dir.rglob("*")):
         if path.is_file() and path.name != "manifest.json" and "__pycache__" not in path.parts:
-            fingerprint[path.relative_to(out_dir).as_posix()] = _sha256_file(path)
+            rel = path.relative_to(out_dir).as_posix()
+            if rel.startswith("cases/index.json"):
+                continue  # 物理形态（明文/gz/切分件）不入指纹，改用下方逻辑明文口径
+            fingerprint[rel] = _sha256_file(path)
+    fingerprint["cases/index.json"] = _logical_index_sha(out_dir / "cases")
     try:
         import scipy
         scipy_ver = scipy.__version__
@@ -531,6 +729,413 @@ def batched_case_ratio_cpu_mean(entry):
 
 
 # ---------------------------------------------------------------------------
+# 负例门（纯脚本装包的自检末项；docstring「负例门」段）
+# ---------------------------------------------------------------------------
+
+GATE_CASES_PURESCRIPT = 4    # 非批量门取切片内最小几例精度 case（限界）
+GATE_CASES_BATCHED = 1       # 批量门取 n²·batch 最小几例（整批展开的成本由它定）
+GATE_SLOT = 0                # 批量负例的被扰动槽位（sim_dut --perturb-index）
+GATE_TIMEOUT_S = 900
+# 一轮的预期：(该轮每条判定行的数值结论, verify 的预期退出码)。gate_assert_round
+# 按 tag 取这一对，调用方给不出互相矛盾的组合。
+GATE_ROUNDS = {"pos": ("PASS", 0), "neg": ("FAIL", 1)}
+_GATE_GEN_MODULE = "_oprunway_gate_pkg_gen_data"
+_PKG_VERIFY_MODULE = "_oprunway_pkg_verify_accuracy"
+
+
+def _exec_package_source(mod, path):
+    """执行待交付源码本身，不读写其旁边的 .pyc，不修改进程级导入开关。"""
+    exec(compile(path.read_bytes(), str(path), "exec"), mod.__dict__)
+
+
+def assert_info_ids_reconciled(out_dir, op, gen_cases, slice_doc, gd_mod, batched):
+    """自检：包 index 的 info 契约 id 集合 == 包内 verify 将派生的 id 集合。
+
+    两侧各自从切片顶层 package_scope 推派生基座——index 侧经 gen_data 的 --select，
+    verify 侧经渲染副本的 info_require_s1（本函数调包内那份，不另写一份规则）。
+    口径分叉时 verify 要的 case_id 没有被测输出，开发者算子全对也整包退 1
+    （v4 六包命中）；此处只比两个 id 集合，不跑判定，拦在装包时。
+
+    派生用 gd_mod（skill 本体那份 gen_data）而不是包内副本：包内 gen_data.py 由
+    _copy_bytes 逐字节复用同一文件，两者同一实现，无需为此再加载一个模块。
+    """
+    path = out_dir / "verify_accuracy.py"
+    if not path.is_file():
+        raise SelfCheckError(f"info id 对账：包内缺 {path.name}，无对账对象")
+    spec = importlib.util.spec_from_file_location(_PKG_VERIFY_MODULE, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[_PKG_VERIFY_MODULE] = mod
+    try:
+        _exec_package_source(mod, path)
+        if not hasattr(mod, "info_require_s1"):
+            raise SelfCheckError(
+                "info id 对账：包内 verify_accuracy.py 无 info_require_s1"
+                "（渲染模板与本对账的协议不符）")
+        require_s1 = bool(mod.info_require_s1(slice_doc))
+    finally:
+        sys.modules.pop(_PKG_VERIFY_MODULE, None)
+    derive = (gd_mod.derive_batched_info_cases if batched
+              else gd_mod.derive_info_cases)
+    verify_ids = sorted(e["case_id"] for e in
+                        derive(slice_doc["cases"], require_s1=require_s1)
+                        if e["op"] == op)
+    index_ids = sorted(e["case_id"] for e in gen_cases
+                       if e.get("case_purpose") == "info")
+    if index_ids != verify_ids:
+        raise SelfCheckError(
+            f"info id 对账不符（package_scope={slice_doc.get('package_scope')!r}，"
+            f"包内 verify require_s1={require_s1}）："
+            f"index 有而 verify 无 {sorted(set(index_ids) - set(verify_ids))}；"
+            f"verify 有而 index 无 {sorted(set(verify_ids) - set(index_ids))}")
+    return require_s1, index_ids
+
+
+def gate_pick_cases(slice_cases, batched, limit):
+    """门内切片：按规模代价升序取前 limit 例精度 case。
+
+    代价 = n²·batch（整批展开的字节数；非批量 batch 记 1，与 n² 同序），平手按
+    case_id——确定性，同一个包每次取同一批。批量不限 batch 下限：被扰动槽位取 0，
+    batch=1 的包也有这个槽位（它是该内容的唯一槽位，走残差层归因）。
+    """
+    pool = [c for c in slice_cases if c.get("case_purpose") != "info"]
+    if not pool:
+        raise SelfCheckError("负例门：切片内没有精度 case，门无可扰动的对象")
+    pool = sorted(pool, key=lambda c: (int(c["n"]) ** 2 * int(c.get("batch") or 1),
+                                       int(c["n"]), str(c["case_id"])))
+    return pool[:limit]
+
+
+def _gate_row_off(row, want):
+    """这一行不构成 want 结论时返回原因摘要，构成则返回 None。
+
+    两条都要成立：数值结论等于 want，且 verdict.error 为空。error 非空时
+    numeric 恒 FAIL（criteria/verdict.py 的 _error_verdict：判定链内部异常、
+    残差基线不可用、缺 ratio_cpu_mean 超单支等不可裁路径），这种 FAIL 是
+    「没证据」不是「判据抓住了偏差」，负例轮认它等于门自己故障也算通过。
+    """
+    verdict = row.get("verdict") or {}
+    numeric = verdict.get("numeric")
+    error = verdict.get("error")
+    if numeric != want:
+        return f"{row.get('case_id')}:{row.get('status')}/{numeric}"
+    if error:
+        return f"{row.get('case_id')}:不可裁/{error}"
+    return None
+
+
+def gate_assert_round(tag, want_ids, exit_code, report):
+    """一轮断言（正负共用）：预期退出码 + 逐 ID 恰一条判定行 + 每行结论有效。
+
+    want_ids 是这一轮该出判定的 case_id 清单——门自己选样/造数落下的那份，不另
+    算一套。判定条数由行推导并返回；summary 只进错误信息做诊断，不参与判据：
+    只信 summary 的话，空 cases 配一份对得上的 summary 能正负双向混过。
+
+    每行的结论有效性见 _gate_row_off（该轮数值结论 + error 为空）。
+    """
+    want_numeric, want_code = GATE_ROUNDS[tag]
+    rows = report.get("cases") or []
+    by_id = {}
+    for row in rows:
+        by_id.setdefault(row.get("case_id"), []).append(row)
+    problems = []
+    if not want_ids:
+        problems.append("预期清单为空（门的选样/造数没落下 case，断言无对象）")
+    if exit_code != want_code:
+        problems.append(f"verify 退出码 {exit_code}（应 {want_code}）")
+    missing = [c for c in want_ids if c not in by_id]
+    if missing:
+        problems.append(f"缺判定行 {missing}")
+    dup = sorted((c for c, rs in by_id.items() if len(rs) > 1), key=str)
+    if dup:
+        problems.append(f"判定行重复 {dup}")
+    extra = sorted((c for c in by_id if c not in set(want_ids)), key=str)
+    if extra:
+        problems.append(f"多出判定行 {extra}")
+    off = [o for o in (_gate_row_off(r, want_numeric) for r in rows) if o]
+    if off:
+        problems.append(f"结论无效 {off}")
+    if problems:
+        raise SelfCheckError(
+            f"负例门/{tag} 轮断言不符（应退 {want_code} 且 {len(want_ids)} 个 case "
+            f"各一条 {want_numeric} 判定行）：" + "；".join(problems)
+            + f"；summary（仅诊断）={report.get('summary') or {}}")
+    return len(rows)
+
+
+def gate_assert_slot_attribution(report, case_id, sample_map, slot=GATE_SLOT):
+    """批量负例的归因断言：报告把 FAIL 指认到被扰动槽位或其所属内容。
+
+    被扰动槽位所属内容由 sample_map 定，判定链两层给出三型可接受证据：
+
+    1. 一致性层命中被扰动槽——a0_mismatches 恰含该槽，first_fail_index 即该槽；
+    2. 一致性层命中代表槽（被扰动槽恰是 rep_slot）——失配落在同内容其余槽位，
+       first_fail_index 为最小失配槽位；
+    3. 残差层（该内容只有这一个槽位，无余槽可比）——无一致性失配，
+       first_fail_index == worst_index == 内容下标。
+
+    返回命中那一型的证据摘要；三型都不成立即 SelfCheckError。
+    """
+    owner = next((e for e in sample_map
+                  if slot in [int(s) for s in e["slots"]]), None)
+    if owner is None:
+        raise SelfCheckError(
+            f"负例门：sample_map 里没有槽位 {slot}（扰动口径与槽位映射不符）")
+    content, rep = int(owner["content_idx"]), int(owner["rep_slot"])
+    siblings = sorted(int(s) for s in owner["slots"] if int(s) != rep)
+    row = next((r for r in report.get("cases") or []
+                if r.get("case_id") == case_id), None)
+    if row is None:
+        raise SelfCheckError(f"负例门：报告里没有 {case_id} 的判定行")
+    verdict = row.get("verdict") or {}
+    first = verdict.get("first_fail_index")
+    worst = verdict.get("worst_index")
+    mismatches = ((verdict.get("diagnostics") or {}).get("a0_mismatches")) or []
+    scene = f"扰动槽位 {slot}（内容 {content}、参照槽 {rep}）"
+    if mismatches:
+        slots = sorted(int(m["slot"]) for m in mismatches)
+        contents = sorted({int(m["content_idx"]) for m in mismatches})
+        want = [slot] if slot != rep else siblings
+        if contents == [content] and slots == want and first == min(want):
+            return (f"一致性层指认槽位 {slots}（内容 {content}、参照槽 {rep}），"
+                    f"first_fail_index={first}")
+        raise SelfCheckError(
+            f"负例门/批量归因不符：{scene}，报告 a0_mismatches 槽位 {slots}、"
+            f"内容 {contents}、first_fail_index={first}（应指认槽位 {want}）")
+    if slot == rep and not siblings and first == content and worst == content:
+        return (f"残差层指认内容 {content}（被扰动槽位 {slot} 是该内容唯一槽位），"
+                f"first_fail_index={first}")
+    raise SelfCheckError(
+        f"负例门/批量归因不符：{scene}未被指认——a0_mismatches 空、"
+        f"first_fail_index={first}、worst_index={worst}")
+
+
+def _gate_run(args, cwd):
+    """以当前解释器执行包内脚本（门的对象是包的成品件，不是 skill 本体）。
+
+    超时与起不来（OSError）收敛成 SelfCheckError：两者都是门自身的前提坏了，
+    与断言不符同一出口（退 3）；外抛会退 1，与「判定链漏检」混成一个退出码。
+    """
+    script = str(args[0]) if args else "?"
+    try:
+        return subprocess.run([sys.executable, "-B"] + [str(a) for a in args], cwd=str(cwd),
+                              env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                              capture_output=True, text=True, timeout=GATE_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        raise SelfCheckError(
+            f"负例门：包内 {script} 超过 {GATE_TIMEOUT_S} s 未结束（门的前提坏了，"
+            f"不是判定结论）") from exc
+    except OSError as exc:
+        raise SelfCheckError(
+            f"负例门：包内 {script} 启动失败 {type(exc).__name__}: {exc}") from exc
+
+
+def _gate_tail(proc, lines=6):
+    text = (proc.stdout or "") + (proc.stderr or "")
+    return " / ".join(text.strip().splitlines()[-lines:])
+
+
+def _gate_mini_package(out_dir, tmp, picked, index_doc):
+    """门的临时包：包内 gen_data/sim_dut/verify_accuracy 原件 + 最小切片 +
+    index 投影（所选精度条目及其 info 条目，保留全部固化判定字段）。
+
+    切片顶层 package_scope 原样继承包内切片：gen 侧与 verify 侧的 info 契约派生
+    口径都由它定，门因此跑的是发出去那个包的口径，不是另一套。
+    """
+    pkg = tmp / "pkg"
+    (pkg / "cases").mkdir(parents=True)
+    for name in ("gen_data.py", "sim_dut.py", "verify_accuracy.py"):
+        src = out_dir / name
+        if not src.is_file():
+            raise SelfCheckError(f"负例门：包内缺 {name}，门无对象可执行")
+        shutil.copy2(src, pkg / name)
+    with open(out_dir / "canonical_cases.json", encoding="utf-8") as fh:
+        canon = json.load(fh)
+    mini = {k: v for k, v in canon.items() if k != "cases"}
+    mini["slice_note"] = f"负例门临时切片（{len(picked)} 例最小规格，不入包）"
+    mini["cases"] = list(picked)
+    with open(pkg / "canonical_cases.json", "w", encoding="utf-8") as fh:
+        json.dump(mini, fh, ensure_ascii=False, indent=1)
+        fh.write("\n")
+    selected = {c["case_id"] for c in picked}
+    projection = {k: v for k, v in index_doc.items() if k != "cases"}
+    projection["cases"] = [e for e in index_doc.get("cases", [])
+                           if e.get("case_id") in selected
+                           or (e.get("case_purpose") == "info"
+                               and e.get("base_case_id") in selected)]
+    with open(pkg / "cases" / "index.json", "w", encoding="utf-8") as fh:
+        json.dump(projection, fh, ensure_ascii=False, indent=1)
+        fh.write("\n")
+    return pkg
+
+
+def _gate_load_pkg_gen(pkg):
+    """导入包内 gen_data.py——门的对象是成品件，不用 skill 本体那一份。"""
+    spec = importlib.util.spec_from_file_location(_GATE_GEN_MODULE,
+                                                  pkg / "gen_data.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[_GATE_GEN_MODULE] = mod
+    _exec_package_source(mod, pkg / "gen_data.py")
+    return mod
+
+
+def _gate_batched_dut_input(gen_mod, case, data_dir):
+    """按包 README 第 2 步的执行器挂钩现场构造整批参照输出：k 个代表内容的 golden
+    经 sample_map 展开到全批槽位，落成包内 sim_dut 的取材目录。
+
+    只落 golden32——sim_dut 的批量扰动只读这一个数组，整批 A/B 不必驻留。
+    返回 sample_map（归因断言要用它定位被扰动槽位的所属内容）。
+    """
+    cid, batch = case["case_id"], int(case["batch"])
+    contents = gen_mod.build_batched_contents(case)
+    sample_map = gen_mod.derive_sample_map(case["seed"], batch)
+    full = gen_mod.expand_sampled_rows({"golden32": contents["golden32"]},
+                                       sample_map, 0, batch)
+    cases_dir = data_dir / "cases"
+    cases_dir.mkdir(parents=True, exist_ok=True)
+    np.savez(cases_dir / f"{cid}.npz", golden32=full["golden32"])
+    entry = dict(case)
+    entry["npz"] = f"cases/{cid}.npz"
+    entry["arrays"] = ["golden32"]
+    with open(cases_dir / "index.json", "w", encoding="utf-8") as fh:
+        json.dump({"cases": [entry]}, fh, ensure_ascii=False)
+        fh.write("\n")
+    return sample_map
+
+
+def _gate_round(pkg, tag, sim_extra, verify_args):
+    """一轮：包内 sim_dut 产被测输出 → 包内 verify_accuracy 判定。
+
+    返回 (verify 退出码, 报告 dict)。sim 产不出被测输出，verify 退 2 一类报告不
+    落盘，报告落了盘但不是合法 JSON，都是门自身的前提坏了——SelfCheckError，
+    不当成判定结论。
+    """
+    dut = f"dut_{tag}"
+    sim = _gate_run(["sim_dut.py", "--package", "data", "--out", dut] + sim_extra, pkg)
+    if sim.returncode != 0:
+        raise SelfCheckError(
+            f"负例门/{tag}：包内 sim_dut 退出码 {sim.returncode}（应 0）"
+            f"：{_gate_tail(sim)}")
+    report_rel = f"{tag}_report.json"
+    ver = _gate_run(verify_args + ["--dut-out", dut, "--report", report_rel], pkg)
+    report_path = pkg / report_rel
+    if not report_path.is_file():
+        raise SelfCheckError(
+            f"负例门/{tag}：包内 verify_accuracy 退出码 {ver.returncode} 且报告未落盘"
+            f"（退 2 一类用法或输入错）：{_gate_tail(ver)}")
+    try:
+        with open(report_path, encoding="utf-8") as fh:
+            return ver.returncode, json.load(fh)
+    except json.JSONDecodeError as exc:
+        raise SelfCheckError(
+            f"负例门/{tag}：包内 verify_accuracy 的报告 {report_rel} 不是合法 JSON"
+            f"（退出码 {ver.returncode}）：{exc}") from exc
+
+
+def run_negative_gate(out_dir, op, index_doc, batched):
+    """自检末项：临时目录内复刻开发者 README 流程，正例与负例各执行一轮。
+
+    链路（跑的都是刚装好的包里那几份）：包内 gen_data 造数 → 包内 sim_dut 产被测
+    输出 → 包内 verify_accuracy 判定。断言见 gate_assert_round /
+    gate_assert_slot_attribution，任一不符即 SelfCheckError。
+
+    每轮的预期 case_id 清单取门自己那份：非批量取造数落下的 data/cases/index.json
+    （精度 case 加它派生的 info 契约用例），批量取 --case-id 单跑的那一个。
+
+    限界（门证的是判定链正负双向可分，不是复测全量）：
+
+    - 非批量取切片内最小 GATE_CASES_PURESCRIPT 例精度 case，派生的 info 契约用例
+      随之入门；
+    - 批量取 n²·batch 最小 1 例并以 --case-id 单跑，整批 golden 由包内 gen_data 的
+      expand_sampled_rows 现场展开——该例的 n²·batch 即门的内存上限（冻结十册的
+      最小例都是 n=2 的 1e6 批，f32 整批 16 MB）；
+    - 批量的 info 契约项不入门：包内 sim_dut 的 info 分支展开批量 infoArray，但门
+      以 --case-id 单跑精度 case，info 条目不在跑的名单里；
+    - 门内切片继承包内 package_scope（见 _gate_mini_package），两侧 info 派生口径
+      是否一致由 assert_info_ids_reconciled 在全量切片上另判，门不重复那一项；
+    - 门只核对判定结论与归因字段，不核对残差数值本身（那是 criteria 的 tests）。
+
+    返回 (tick 文案, 证据摘要)。临时目录在返回前整树删除。
+    """
+    tmp = Path(tempfile.mkdtemp(prefix=f"oprunway-gate-{op}-"))
+    started = time.monotonic()
+    try:
+        with open(out_dir / "canonical_cases.json", encoding="utf-8") as fh:
+            slice_cases = json.load(fh).get("cases") or []
+        picked = gate_pick_cases(
+            slice_cases, batched,
+            GATE_CASES_BATCHED if batched else GATE_CASES_PURESCRIPT)
+        pkg = _gate_mini_package(out_dir, tmp, picked, index_doc)
+        case_ids = [c["case_id"] for c in picked]
+        sample_map = None
+        slot = GATE_SLOT                 # 模拟与归因共用这一个槽位，不各取常量
+        if batched:
+            case = picked[0]
+            gen_mod = _gate_load_pkg_gen(pkg)
+            try:
+                sample_map = _gate_batched_dut_input(gen_mod, case, pkg / "data")
+            finally:
+                sys.modules.pop(_GATE_GEN_MODULE, None)
+            verify_args = ["verify_accuracy.py", "--package", ".",
+                           "--case-id", case["case_id"]]
+            neg_sim = ["--perturb", "scale", "--perturb-index", str(slot)]
+            want_ids = [case["case_id"]]
+            bound = (f"n²·batch 最小 1 例 {case['case_id']}"
+                     f"（n={case['n']} batch={case['batch']}），--case-id 单跑，"
+                     "整批 golden 由包内 gen_data 现场展开")
+            neg_desc = f"scale --perturb-index {slot}"
+        else:
+            gen = _gate_run(["gen_data.py", "--canonical", "canonical_cases.json",
+                             "--out", "data", "--select", "all", "--ops", op], pkg)
+            if gen.returncode != 0:
+                raise SelfCheckError(
+                    f"负例门：包内 gen_data 造数退出码 {gen.returncode}（应 0）"
+                    f"：{_gate_tail(gen)}")
+            with open(pkg / "data" / "cases" / "index.json", encoding="utf-8") as fh:
+                want_ids = [e["case_id"] for e in json.load(fh).get("cases") or []]
+            verify_args = ["verify_accuracy.py", "--package", "."]
+            neg_sim = ["--perturb", "scale"]
+            bound = (f"切片内最小 {len(picked)} 例精度 case"
+                     f"（{'、'.join(case_ids)}，n≤{max(int(c['n']) for c in picked)}）"
+                     "加派生的 info 契约用例")
+            neg_desc = "scale"
+
+        n_pos = gate_assert_round("pos", want_ids, *_gate_round(pkg, "pos", [],
+                                                                verify_args))
+        neg_code, neg_report = _gate_round(pkg, "neg", neg_sim, verify_args)
+        n_neg = gate_assert_round("neg", want_ids, neg_code, neg_report)
+        attribution = None
+        if batched:
+            attribution = gate_assert_slot_attribution(
+                neg_report, picked[0]["case_id"], sample_map, slot=slot)
+
+        wall = round(time.monotonic() - started, 1)
+        evidence = {
+            "cases": case_ids,
+            "judged": want_ids,
+            "bound": bound,
+            "positive": {"perturb": "none", "exit_code": 0, "numeric_pass": n_pos},
+            "negative": {"perturb": neg_desc, "exit_code": neg_code,
+                         "numeric_fail": n_neg, "attribution": attribution},
+            "wall_seconds": wall,
+        }
+        detail = (f"包内 gen_data→sim_dut→verify_accuracy 真跑两轮（限界：{bound}）："
+                  f"正例 none 全 {n_pos} PASS 且退 0；负例 {neg_desc} 全 {n_neg} FAIL "
+                  f"且退 1")
+        if attribution:
+            detail += f"，{attribution}"
+        return detail + f"；墙钟 {wall} s", evidence
+    except (json.JSONDecodeError, KeyError, OSError) as exc:
+        # 门执行边界：切片/报告 JSON 损坏、条目缺字段、读写失败——都是门自身的
+        # 前提坏了，收敛成 SelfCheckError 走退 3（文档承诺的门失败出口）；外抛
+        # 会退 1，与「判定链漏检」混成同一个退出码。超时与起不来在 _gate_run 处收。
+        raise SelfCheckError(
+            f"负例门：执行边界异常 {type(exc).__name__}: {exc}"
+            f"（门的前提坏了，不是判定结论）") from exc
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
 # S3 批量四包：纯脚本装包（S3 spec §5；docstring「S3 批量四包」段）
 # ---------------------------------------------------------------------------
 
@@ -540,8 +1145,8 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
     materialize:"gen"，条目（含 sample_map 槽位映射）与逐内容 ratio 参考来自装包
     自检的现场生成运行（自检数据随后删除）。scope：full=该算子 dedup 全量切片
     （2026-09-27 全量精度用例决策），s1=二维代表子集六例（v3 前行为）。"""
-    import shutil
-
+    from reference_environment import reference_environment
+    reference_env = reference_environment()
     criteria_dir = find_criteria_dir(staging_dirs)
     baseline_src = find_baseline(staging_dirs, op)
     here = Path(__file__).resolve().parent
@@ -588,6 +1193,8 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
             f"本切片只含 {op} 的二维代表子集 {n_subset} 例（S3 spec §5：README 第 0 步 "
             f"--select all 即物化这{n_subset}例）；该算子 dedup 全量 {len(op_cases_all)} 条与 "
             "冻结对账见冻结产物 reports/solver-s3/canonical_batched.json")
+    if _package_scope_note(canon):
+        slice_doc["slice_note"] = f"{_package_scope_note(canon)} 本包收录 {op} 精度用例 {n_subset} 例，来源 {Path(canonical_path).name}。"
     slice_doc["cases"] = subset_cases
     with open(out_dir / "canonical_cases.json", "w", encoding="utf-8") as fh:
         json.dump(slice_doc, fh, ensure_ascii=False, indent=1)
@@ -599,7 +1206,10 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
     # 装包自检：现场生成子集（gen_data 分块/并行通路，golden+逐矩阵 ratio 一并算出）
     if str(here) not in sys.path:
         sys.path.insert(0, str(here))
-    import gen_data_cholesky as gd
+    if _is_luqr(op):
+        import gen_data_luqr as gd
+    else:
+        import gen_data_cholesky as gd
     tmp = out_dir / ".selfcheck-gen"
     if tmp.exists():
         shutil.rmtree(tmp)
@@ -623,6 +1233,18 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
     if len(gen_cases) != n_subset + n_info:
         raise SelfCheckError(
             f"现场生成 {len(gen_cases)} case != 子集 {n_subset} + info 契约 {n_info}")
+    # LU/QR 批量两族：gen_data_luqr 不产 ratio（单/批量均留 null），装包自检按
+    # fill_ratio_cpu.batched_fill_a0 同一入口现场重造 A0 内容回填（口径与判定侧同源）。
+    if _is_luqr(op):
+        import fill_ratio_cpu as frc
+        verdict_mod = frc.load_verdict(criteria_dir)
+        lapack = frc._lapack()
+        for entry in gen_cases:
+            if entry.get("case_purpose") == "info":
+                continue
+            ratio, status, _binfo = frc.batched_fill_a0(entry, verdict_mod, lapack)
+            entry["ratio_cpu"] = ratio
+            entry["ratio_cpu_status"] = status
     for entry in gen_cases:
         if entry.get("case_purpose") == "info":
             continue
@@ -631,53 +1253,73 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
                 or any(v is None for v in ratio)):
             raise SelfCheckError(
                 f"{entry.get('case_id')}: 现场生成 ratio 状态 {entry.get('ratio_cpu_status')!r}"
-                f"（cu 对角占优构造下应全 ok 且无 prep_failed——环境或数据有问题）")
+                f"（构造性输入下应全 ok 且无 prep_failed——环境或数据有问题）")
     a0 = {e["case_id"]: {"contents": e.get("sampled_contents"),
                          "rep_slots": [m["rep_slot"] for m in e.get("sample_map") or []]}
           for e in gen_cases if e.get("case_purpose") != "info"}
     info_ids = [e["case_id"] for e in gen_cases if e.get("case_purpose") == "info"]
     # HT-4：精度条目固化 case 级 ratio_cpu_mean（Σ(count_j·ratio_j)/batchSize 槽位
     # 加权；info 契约条目不适用不计入）——判定侧只读零重算（batched_a0 经
-    # case_arrays 消费，阈值第二支），mean 只随用例集版本重算
+    # case_arrays 消费，potrf/potrs 阈值第二支）。LU/QR 批量两族无 mean 第二支
+    # （阈值按逐内容 ratio），不写该字段（LQ-13）。
     n_mean = 0
-    for entry in gen_cases:
-        if entry.get("case_purpose") == "info":
-            continue
-        entry["ratio_cpu_mean"] = batched_case_ratio_cpu_mean(entry)
-        n_mean += 1
+    if _is_luqr(op):
+        for entry in gen_cases:
+            entry.pop("ratio_cpu_mean", None)
+    else:
+        for entry in gen_cases:
+            if entry.get("case_purpose") == "info":
+                continue
+            entry["ratio_cpu_mean"] = batched_case_ratio_cpu_mean(entry)
+            n_mean += 1
     tick("装包自检/现场生成",
          f"{len(gen_cases)} case A0 抽样生成（不落数组）+golden+逐内容 ratio 完成"
          f"（精度 {n_subset} + info 契约 {n_info}: {'、'.join(info_ids)}，HT-9）；"
          + "；".join(f"{cid}:k={m['contents']}/rep={m['rep_slots']}"
                      for cid, m in a0.items()))
-    tick("ratio 参考", "逐内容 ratio k 值列表写入包内 index 仅作参考"
-                       "（S3 spec §3：判定侧现场重算，不消费包内参考；info 契约"
-                       "条目不计入，HT-8/9）；精度条目另固化 case 级 "
-                       f"ratio_cpu_mean（槽位加权，{n_mean} 例，HT-4）")
+    tick("ratio 参考", "逐内容 ratio k 值列表固化入包内 index"
+                       "（自测与验收只读同一参考值；info 契约"
+                       "条目不计入，HT-8/9）；"
+                       + (f"精度条目另固化 case 级 ratio_cpu_mean（槽位加权，{n_mean} 例，HT-4）"
+                          if not _is_luqr(op) else
+                          "LU/QR 批量无 case 级 ratio_cpu_mean（阈值按逐内容 ratio）"))
 
     # 基版本标记（2026-10-08 换基）：包内 ratio_cpu/ratio_cpu_mean 全族为实现实际
     # 输入升 f64 的 A32 基（基变更日 2026-10-08；potrf 族旧 A64 基固化值不可与新基
     # 混用），verify/accept 消费时据此辨新旧——旧包 index 无此字段即 A64 基
     gen_index["ratio_basis"] = "A32-f64"
+    gen_index["reference_environment"] = reference_env
+    if _is_luqr(op):
+        for entry in gen_cases:
+            entry["reference_contract"] = "luqr-input32-v1"
 
     # 包内 index：gen 产 index 原样 + 逐条 materialize:"gen"（零数据，S3 spec §5 + HT-2 A0）
     for entry in gen_cases:
         entry["materialize"] = "gen"
+    if _is_luqr(op):
+        mean_note = ("LU/QR 批量两族无 case 级 ratio_cpu_mean（阈值按逐内容 ratio，"
+                     "LQ-13）。")
+        info_note = (
+            "case_purpose==\"info\" 的条目为批量 info 契约混合用例（HT-9）：只比 info，"
+            "无 golden/ratio——*getriBatched/*matinvBatched 族 k_expected 为逐内容 k 值列表"
+            "（LAPACK 约定：奇异内容记首个零主元阶 k，非奇异记 0），"
+            "经 sample_map 展开即全批期望 infoArray")
+    else:
+        mean_note = ("精度条目另固化 case 级 ratio_cpu_mean（HT-4：Σ(count_j·ratio_j)/"
+                     "batchSize 槽位加权，判定时只读、零重算，potrf/potrs 阈值第二支消费）。")
+        info_note = (
+            "case_purpose==\"info\" 的条目为批量 info 契约混合用例（HT-9）：只比 info，"
+            "无 golden/ratio，不进精度均值——*potrfBatched 族 k_expected 为逐内容 k 值列表"
+            "（LAPACK 约定：非正定内容记首个非正定主子式阶 k，正定记 0），"
+            "经 sample_map 展开即全批期望 infoArray；"
+            "*potrsBatched 族 k_expected=-1（标量 info 仅报参数错）")
     gen_index["materialize_note"] = (
-        "纯脚本包（S3 spec §5 + HT-2 A0 抽样）：包不携带数据数组；批量 case 固化 "
-        "sample_map 槽位映射与逐内容 ratio_cpu k 值列表（仅作参考，判定侧现场重算），"
+        "纯脚本包（" + ("LU/QR 批量两族" if _is_luqr(op) else "S3 spec §5") + " + HT-2 A0 抽样）："
+        "包不携带数据数组；批量 case 固化 "
+        "sample_map 槽位映射与逐内容 ratio_cpu k 值列表（自测与验收只读同一固化参考值），"
         "数组由执行器/DUT 挂钩按 gen_data 的 expand_sampled_rows 现场构造（流式喂入）。"
-        "精度条目另固化 case 级 ratio_cpu_mean（HT-4：Σ(count_j·ratio_j)/batchSize "
-        "槽位加权，判定时只读、零重算，potrf/potrs 阈值第二支消费）。"
-        "case_purpose==\"info\" 的条目为批量 info 契约混合用例（HT-9）：只比 info，"
-        "无 golden/ratio，不进精度均值——*potrfBatched 族 k_expected 为逐内容 k 值列表"
-        "（LAPACK 约定：非正定内容记首个非正定主子式阶 k，正定记 0），"
-        "经 sample_map 展开即全批期望 infoArray；"
-        "*potrsBatched 族 k_expected=-1（标量 info 仅报参数错）")
-    (out_dir / "cases").mkdir(exist_ok=True)
-    with open(out_dir / "cases" / "index.json", "w", encoding="utf-8") as fh:
-        json.dump(gen_index, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
+        + mean_note + info_note)
+    _write_cases_index(out_dir / "cases", gen_index)
     shutil.rmtree(tmp)
     tick("包内 index", f"{len(gen_cases)} 条全部 materialize:\"gen\"；自检生成数据已删除")
 
@@ -700,24 +1342,35 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
     tick("verify 渲染", f"verify_accuracy.py / verify_perf.py（criteria {criteria_ver} / "
                         f"renderer {renderer_ver}）经确定性入口渲染入包")
 
+    # info id 对账（见 assert_info_ids_reconciled）
+    req_s1, recon_ids = assert_info_ids_reconciled(
+        out_dir, op, gen_cases, slice_doc, gd, True)
+    tick("info id 对账", f"index 的 info id 集合 == 包内 verify 将派生的集合"
+                         f"（{len(recon_ids)} 条：{'、'.join(recon_ids) or '无'}；"
+                         f"package_scope={scope}，verify require_s1={req_s1}）")
+
     # 自测配套件：gen_data 副本、sim 副本、batched README（缺模板即停，docstring S3 段）
-    gen_sha = _copy_bytes(here / "gen_data_cholesky.py", out_dir / "gen_data.py")
+    gen_sha = _copy_bytes(here / _luqr_gen_module_name(op), out_dir / "gen_data.py")
     sim_src = criteria_dir.parent / "scripts" / "sim_dut.py"
     if not sim_src.is_file():
         raise ContractError(f"sim_dut.py 未找到: {sim_src}")
     sim_sha = _copy_bytes(sim_src, out_dir / "sim_dut.py")
-    tpl = here.parent / "assets" / "package-readme-template-batched.md"
+    tpl_name = ("package-readme-template-luqr-batched.md" if _is_luqr(op)
+                else "package-readme-template-batched.md")
+    tpl = here.parent / "assets" / tpl_name
     if not tpl.is_file():
         raise ContractError(
             f"batched README 模板缺失: {tpl}（纯脚本包不得用通用模板，fail-closed）")
-    (out_dir / "README.md").write_text(
-        tpl.read_text(encoding="utf-8")
-        .replace("{op}", op).replace("{n_info}", str(n_info))
-        .replace("{n_cases}", str(n_subset))
-        .replace("{gram_form}", "B·Bᴴ" if op.lower().startswith("c") else "B·Bᵀ"),
-        encoding="utf-8")
+    readme = (tpl.read_text(encoding="utf-8")
+              .replace("{op}", op).replace("{n_info}", str(n_info))
+              .replace("{n_cases}", str(n_subset))
+              .replace("{scope_note}", _package_scope_note(canon)))
+    if not _is_luqr(op):
+        readme = readme.replace(
+            "{gram_form}", "B·Bᴴ" if op.lower().startswith("c") else "B·Bᵀ")
+    (out_dir / "README.md").write_text(readme, encoding="utf-8")
     tick("自测配套件", f"gen_data.py（{gen_sha[:12]}…）、sim_dut.py（{sim_sha[:12]}…）、"
-                       f"README.md（batched 模板，info 契约 {n_info} 例）入包")
+                       f"README.md（{tpl_name}，info 契约 {n_info} 例）入包")
 
     # 零数据断言（S3 spec §5：无 npz、无 golden、无 ratio 数组——npz 是唯一数组载体）
     stray = [str(x.relative_to(out_dir)) for x in out_dir.rglob("*.npz")]
@@ -725,18 +1378,29 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
         raise SelfCheckError(f"纯脚本包内出现数据文件：{stray}")
     tick("零数据", "包内无 *.npz（golden/ratio 数组随 npz 一并为零，rglob 断言）")
 
+    # 负例门（docstring「负例门」段）：包内判定链真跑一轮，正例必绿、负例必红。
+    # 临时目录在包外，包内不留痕——零数据断言与下面的指纹都不受它影响。
+    gate_detail, gate_evidence = run_negative_gate(out_dir, op, gen_index, True)
+    tick("负例门", gate_detail)
+    checklist["negative_gate"] = gate_evidence
+
     # 指纹 + manifest
     fingerprint = {}
     for path in sorted(out_dir.rglob("*")):
         if path.is_file() and path.name != "manifest.json" and "__pycache__" not in path.parts:
-            fingerprint[path.relative_to(out_dir).as_posix()] = _sha256_file(path)
+            rel = path.relative_to(out_dir).as_posix()
+            if rel.startswith("cases/index.json"):
+                continue  # 物理形态（明文/gz/切分件）不入指纹，改用下方逻辑明文口径
+            fingerprint[rel] = _sha256_file(path)
+    fingerprint["cases/index.json"] = _logical_index_sha(out_dir / "cases")
     try:
         import scipy
         scipy_ver = scipy.__version__
     except ImportError:
         scipy_ver = None
     manifest = {
-        "package_ver": PACKAGE_VER_BATCHED,
+        "package_ver": (PACKAGE_VER_LUQR_BATCHED if _is_luqr(op)
+                        else PACKAGE_VER_BATCHED),
         "operator": op,
         "interfaces": [op],
         "criteria_ver": criteria_ver,
@@ -752,10 +1416,12 @@ def build_batched(staging_dirs, out_dir, op, container_id, canonical_path,
         "fingerprint": fingerprint,
         "build": {
             "tool": TOOL, "ver": TOOL_VER,
-            "spec": "dev-doc/solver/solver-s3-batched-spec.md#5",
+            "spec": "dev-doc/solver/solver-s3-batched-spec.md#5"
+                    if not _is_luqr(op) else
+                    "community_task（LU/QR 四册任务书 §3.2 / §3.3；纯脚本形态对齐 Cholesky）",
             "materialize": "gen（A0 抽样，HT-2）",
             "reuse": "纯脚本包（A0 抽样）：不携带数据数组；sample_map 与逐内容 ratio "
-                     "参考固化在 index（仅作参考）；perf_baseline.json 为 C 冻结产物"
+                     "参考固化在 index（判定只读）；perf_baseline.json 为 C 冻结产物"
                      "逐字节复用；verify 双件为 D 渲染器确定性输出",
         },
     }
@@ -780,8 +1446,8 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
     条目与 ratio 参考值来自装包自检的现场生成+回填运行（生成数据随后删除）。
     scope：full=该算子全部精度用例切片（2026-09-27 全量精度用例决策），
     s1=代表子集（v3 前行为）。"""
-    import shutil
-
+    from reference_environment import reference_environment
+    reference_env = reference_environment()
     criteria_dir = find_criteria_dir(staging_dirs)
     baseline_src = find_baseline(staging_dirs, op)
     here = Path(__file__).resolve().parent
@@ -831,6 +1497,8 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
             f"本切片只含 {op} 的 s1 子集 {n_subset} 例（纯脚本包 README 第 0 步 "
             f"--select all 即物化这{n_subset}例）；该算子 canonical 全量 "
             f"{len(op_cases_all)} 条见冻结件 {canonical_path.name}，不入包")
+    if _package_scope_note(canon):
+        slice_doc["slice_note"] = f"{_package_scope_note(canon)} 本包收录 {op} 精度用例 {n_subset} 例，来源 {Path(canonical_path).name}。"
     slice_doc["cases"] = subset_cases
     with open(out_dir / "canonical_cases.json", "w", encoding="utf-8") as fh:
         json.dump(slice_doc, fh, ensure_ascii=False, indent=1)
@@ -841,7 +1509,10 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
     # 装包自检①：现场生成切片全量（--select all 恰为切片，验证 README 第 0 步自洽）
     if str(here) not in sys.path:
         sys.path.insert(0, str(here))
-    import gen_data_cholesky as gd
+    if _is_luqr(op):
+        import gen_data_luqr as gd
+    else:
+        import gen_data_cholesky as gd
     tmp = out_dir / ".selfcheck-gen"
     if tmp.exists():
         shutil.rmtree(tmp)
@@ -875,10 +1546,15 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
         with np.load(tmp / entry["npz"]) as z:
             arrays = {k: z[k] for k in z.files}
         check_entry_vs_npz(entry, arrays)
-        check_cast_fields(arrays, entry["case_id"], entry.get("case_purpose"))
-    tick("校验字段", f"{len(gen_cases)} 个 case 的 A32/golden32（含 B32）降型逐字节成立"
-                     f"（info 契约 {n_info} 例无 golden，豁免该对）；index.arrays 与实物一致")
-    acc_indices = [i for i, e in enumerate(gen_cases) if e.get("case_purpose") != "info"]
+        has_golden = not (_is_luqr(op) and _luqr_base(op) == "getrf")
+        check_cast_fields(arrays, entry["case_id"], entry.get("case_purpose"), has_golden)
+    tick("校验字段", f"{len(gen_cases)} 个 case 的 A32/golden32（含 B32/C32）降型逐字节成立"
+                     f"（info 契约 {n_info} 例无 golden，豁免该对；LU/QR getrf 无 golden，"
+                     "因子非唯一）；index.arrays 与实物一致")
+    # golden 抽验：只挑带 golden 的精度用例（LU/QR 的 getrf 无 golden）
+    acc_indices = [i for i, e in enumerate(gen_cases)
+                   if e.get("case_purpose") != "info"
+                   and not (_is_luqr(op) and _luqr_base(op) == "getrf")]
     picked = [acc_indices[i] for i in spot_check_indices(len(acc_indices))]
     spot_detail = []
     for i in picked:
@@ -886,7 +1562,7 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
         cid = entry["case_id"]
         with np.load(tmp / entry["npz"]) as z:
             arrays = {k: z[k] for k in z.files}
-        g64 = recompute_golden(op, arrays, entry["uplo"], cid)
+        g64 = recompute_golden(op, arrays, entry.get("uplo"), cid, entry)
         if g64.tobytes() != arrays["golden64"].tobytes():
             diff = float(np.max(np.abs(g64 - arrays["golden64"])))
             raise SelfCheckError(f"{cid}: golden64 独立重算与现场生成不一致（max|Δ|={diff:g}）")
@@ -895,24 +1571,44 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
             raise SelfCheckError(f"{cid}: golden32 独立重算降型与现场生成不一致")
         spot_detail.append(cid)
     chain = "z" if _is_complex_op(op) else "d"
-    tick("抽验 golden", f"{len(picked)} case（首/中/尾：{'、'.join(spot_detail)}）"
-                        f"{chain} 链路独立重算 golden64/golden32 逐字节一致；只比对未写回")
+    if picked:
+        tick("抽验 golden", f"{len(picked)} case（首/中/尾：{'、'.join(spot_detail)}）"
+                            f"{chain} 链路独立重算 golden64/golden32 逐字节一致；只比对未写回")
+    else:
+        tick("抽验 golden", f"跳过（{op} 无带 golden 的精度用例：getrf 因子非唯一，"
+                            "主判走还原 L·U+ipiv vs A，无 golden 可抽验）")
     checklist["spot_check_cases"] = spot_detail
 
     # 装包自检③：ratio 参考值回填（残差唯一实现在 criteria/verdict，
-    # 经 fill_ratio_cpu.run_chain 同一入口；构造性 SPD/HPD 下应全 ok。
+    # Cholesky 经 fill_ratio_cpu.run_chain、LU/QR 经 run_chain_luqr 同一入口；
     # HT-8：info 契约用例无残差可算——跳过（info==k_expected 的构造性自检已在
     # 生成时当场验证，不成立即 ContractError）
     import fill_ratio_cpu as frc
     verdict_mod = frc.load_verdict(criteria_dir)
     lapack = frc._lapack()
     ratio_ref = {}
+    n_none = 0
     for entry in gen_cases:
         if entry.get("case_purpose") == "info":
             continue
         cid = entry["case_id"]
         with np.load(tmp / entry["npz"]) as z:
             arrays = {k: z[k] for k in z.files}
+        if _is_luqr(op):                    # LU/QR：run_chain_luqr（逐算子准备链）
+            try:
+                updates = frc.run_chain_luqr(verdict_mod, lapack, entry, arrays)
+            except frc.PrepFailed as exc:
+                raise SelfCheckError(
+                    f"{cid}: 装包自检 ratio 准备链失败（{exc}）——"
+                    "构造性输入下应可算，环境或数据有问题")
+            for k_ in ("ratio_cpu", "ratio_opt_cpu"):
+                entry[k_] = updates.get(k_)
+            entry["ratio_cpu_status"] = "ok" if updates else "none"
+            if updates:
+                ratio_ref[cid] = float(updates["ratio_cpu"])
+            else:
+                n_none += 1
+            continue
         try:
             r = frc.run_chain(verdict_mod, lapack, entry, arrays)
         except frc.PrepFailed as exc:
@@ -923,35 +1619,45 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
         entry["ratio_cpu_status"] = "ok"
         ratio_ref[cid] = float(r)
     tick("ratio 参考值", f"{len(ratio_ref)} 精度 case 低精度准备链回填完成，全 ok"
-                         f"（info 契约 {n_info} 例不计入，HT-8；仅作参考：判定侧现场"
-                         "同法重算，不消费包内数值）")
-    # HT-4：算子级 ratio_cpu_mean 固化（该算子全部正定精度用例的算术平均，info
-    # 契约条目不计入）——index 顶层 {op: mean} map，accept_run/verify 副本按算子
-    # 注入 case_arrays 消费（potrf/potrs 阈值第二支）；只读零重算，随用例集版本重算
-    op_mean = purescript_ratio_cpu_mean(gen_cases)
-    gen_index["ratio_cpu_mean"] = {op: op_mean}
-    tick("ratio_cpu_mean", f"算子级均值 {op_mean:.6g} 固化入 index 顶层"
-                           f"（{len(ratio_ref)} 精度 case 算术平均，HT-4）")
+                         + (f"（另 {n_none} 例无残差判据记 none）" if n_none else "")
+                         + f"（info 契约 {n_info} 例不计入，HT-8；自测与验收只读"
+                         "包内固化参考值）")
+    # HT-4：算子级 ratio_cpu_mean 固化仅 Cholesky 消费（potrf/potrs 阈值第二支）；
+    # LU/QR 无 mean 第二支（阈值按逐 case ratio_cpu / ratio_opt_cpu），不写该字段。
+    if _is_luqr(op):
+        gen_index.pop("ratio_cpu_mean", None)
+        tick("ratio_cpu_mean", "LU/QR 无 mean 第二支（阈值按逐 case ratio_cpu / "
+                               "ratio_opt_cpu），不写 index 顶层 ratio_cpu_mean")
+    else:
+        op_mean = purescript_ratio_cpu_mean(gen_cases)
+        gen_index["ratio_cpu_mean"] = {op: op_mean}
+        tick("ratio_cpu_mean", f"算子级均值 {op_mean:.6g} 固化入 index 顶层"
+                               f"（{len(ratio_ref)} 精度 case 算术平均，HT-4）")
     # 基版本标记（2026-10-08 换基）：包内 ratio_cpu/ratio_cpu_mean 全族为实现实际
     # 输入升 f64 的 A32 基（基变更日 2026-10-08；potrf 族旧 A64 基固化值不可与新基
     # 混用），verify/accept 消费时据此辨新旧——旧包 index 无此字段即 A64 基
     gen_index["ratio_basis"] = "A32-f64"
+    gen_index["reference_environment"] = reference_env
+    if _is_luqr(op):
+        for entry in gen_cases:
+            entry["reference_contract"] = "luqr-input32-v1"
 
     # 包内 index：gen 产 index 原样 + 逐条 materialize:"gen"（零数据）
     for entry in gen_cases:
         entry["materialize"] = "gen"
+    mean_note = (
+        "LU/QR 无 ratio_cpu_mean 第二支（阈值按逐 case ratio_cpu / ratio_opt_cpu）。"
+        if _is_luqr(op) else
+        "index 顶层 ratio_cpu_mean 为算子级固化均值（HT-4：全部正定精度用例的算术平均，"
+        "判定时只读、零重算）。")
     gen_index["materialize_note"] = (
         "纯脚本包（v2）：包不携带数据数组；npz/arrays 字段描述 gen_data 现场生成后"
         "的产物（README 第 0 步，--out data 时落 data/cases/）；ratio_cpu 为装包自检"
-        "运行的参考值，仅作参考（判定侧现场同法重算）。index 顶层 ratio_cpu_mean 为"
-        "算子级固化均值（HT-4：全部正定精度用例的算术平均，判定时只读、零重算）。"
+        "运行的固化参考值（自测与验收只读，输入与因子仍现场构造）。" + mean_note +
         "case_purpose==\"info\" 的条目"
         "为 info 契约用例（HT-8）：只比被测 info==k_expected，无 golden/ratio，"
         "不进精度均值")
-    (out_dir / "cases").mkdir(exist_ok=True)
-    with open(out_dir / "cases" / "index.json", "w", encoding="utf-8") as fh:
-        json.dump(gen_index, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
+    _write_cases_index(out_dir / "cases", gen_index)
     shutil.rmtree(tmp)
     tick("包内 index", f"{len(gen_cases)} 条全部 materialize:\"gen\"；自检生成数据已删除")
 
@@ -974,23 +1680,33 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
     tick("verify 渲染", f"verify_accuracy.py / verify_perf.py（criteria {criteria_ver} / "
                         f"renderer {renderer_ver}）经确定性入口渲染入包")
 
+    # info id 对账（见 assert_info_ids_reconciled）
+    req_s1, recon_ids = assert_info_ids_reconciled(
+        out_dir, op, gen_cases, slice_doc, gd, False)
+    tick("info id 对账", f"index 的 info id 集合 == 包内 verify 将派生的集合"
+                         f"（{len(recon_ids)} 条：{'、'.join(recon_ids) or '无'}；"
+                         f"package_scope={scope}，verify require_s1={req_s1}）")
+
     # 自测配套件：gen_data 副本、sim 副本、纯脚本 README（缺模板即停）
-    gen_sha = _copy_bytes(here / "gen_data_cholesky.py", out_dir / "gen_data.py")
+    gen_sha = _copy_bytes(here / _luqr_gen_module_name(op), out_dir / "gen_data.py")
     sim_src = criteria_dir.parent / "scripts" / "sim_dut.py"
     if not sim_src.is_file():
         raise ContractError(f"sim_dut.py 未找到: {sim_src}")
     sim_sha = _copy_bytes(sim_src, out_dir / "sim_dut.py")
-    tpl = here.parent / "assets" / "package-readme-template-purescript.md"
+    tpl_name = ("package-readme-template-luqr.md" if _is_luqr(op)
+                else "package-readme-template-purescript.md")
+    tpl = here.parent / "assets" / tpl_name
     if not tpl.is_file():
         raise ContractError(
             f"纯脚本 README 模板缺失: {tpl}（纯脚本包不得用逐字节复用模板，fail-closed）")
     (out_dir / "README.md").write_text(
         tpl.read_text(encoding="utf-8").replace("{op}", op)
                                        .replace("{n_cases}", str(n_subset))
-                                       .replace("{n_info}", str(n_info)),
+                                       .replace("{n_info}", str(n_info))
+                                       .replace("{scope_note}", _package_scope_note(canon)),
         encoding="utf-8")
     tick("自测配套件", f"gen_data.py（{gen_sha[:12]}…）、sim_dut.py（{sim_sha[:12]}…）、"
-                       f"README.md（纯脚本模板）入包")
+                       f"README.md（{tpl_name}）入包")
 
     # 零数据断言（无 npz、无 golden、无 ratio 数组——npz 是唯一数组载体）
     stray = [str(x.relative_to(out_dir)) for x in out_dir.rglob("*.npz")]
@@ -998,18 +1714,28 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
         raise SelfCheckError(f"纯脚本包内出现数据文件：{stray}")
     tick("零数据", "包内无 *.npz（golden/ratio 数组随 npz 一并为零，rglob 断言）")
 
+    # 负例门（docstring「负例门」段）：包内判定链真跑一轮，正例必绿、负例必红。
+    # 临时目录在包外，包内不留痕——零数据断言与下面的指纹都不受它影响。
+    gate_detail, gate_evidence = run_negative_gate(out_dir, op, gen_index, False)
+    tick("负例门", gate_detail)
+    checklist["negative_gate"] = gate_evidence
+
     # 指纹 + manifest
     fingerprint = {}
     for path in sorted(out_dir.rglob("*")):
         if path.is_file() and path.name != "manifest.json" and "__pycache__" not in path.parts:
-            fingerprint[path.relative_to(out_dir).as_posix()] = _sha256_file(path)
+            rel = path.relative_to(out_dir).as_posix()
+            if rel.startswith("cases/index.json"):
+                continue  # 物理形态（明文/gz/切分件）不入指纹，改用下方逻辑明文口径
+            fingerprint[rel] = _sha256_file(path)
+    fingerprint["cases/index.json"] = _logical_index_sha(out_dir / "cases")
     try:
         import scipy
         scipy_ver = scipy.__version__
     except ImportError:
         scipy_ver = None
     manifest = {
-        "package_ver": PACKAGE_VER_PURESCRIPT,
+        "package_ver": PACKAGE_VER_LUQR if _is_luqr(op) else PACKAGE_VER_PURESCRIPT,
         "operator": op,
         "interfaces": [op],
         "criteria_ver": criteria_ver,
@@ -1025,11 +1751,13 @@ def build_purescript(staging_dirs, out_dir, op, container_id, canonical_path,
         "fingerprint": fingerprint,
         "build": {
             "tool": TOOL, "ver": TOOL_VER,
-            "spec": "dev-doc/solver/solver-s3-batched-spec.md#5",
+            "spec": "dev-doc/solver/solver-s3-batched-spec.md#5"
+                    if not _is_luqr(op) else
+                    "community_task（LU/QR 四册任务书 §3.2 / §3.3；纯脚本形态对齐 Cholesky）",
             "materialize": "gen",
             "reuse": "纯脚本包（v2）：不携带数据数组；perf_baseline.json 为 C 冻结产物"
                      "逐字节复用；verify 双件为 D 渲染器确定性输出；index 与 ratio "
-                     "参考值来自装包自检的现场生成+回填运行（仅作参考）；含 info 契约"
+                     "参考值来自装包自检的现场生成+回填运行（判定只读）；含 info 契约"
                      "用例（case_purpose==\"info\"，HT-8：只比被测 info==k_expected）",
         },
     }
@@ -1071,7 +1799,8 @@ def main(argv=None):
         for d in staging_dirs:
             if not d.is_dir():
                 raise ContractError(f"staging 目录不存在: {d}")
-        if op in BATCHED_OPS:               # S3 纯脚本装包（spec §5 + HT-2 A0）
+        if op in BATCHED_OPS or op in LUQR_BATCHED_OPS:
+            # S3 纯脚本装包（spec §5 + HT-2 A0）：Cholesky 4 + LU/QR 批量 4
             checklist = build_batched(staging_dirs, out_dir, op, args.container_id,
                                       args.canonical, scope=args.scope)
         else:                               # S4 v2：单矩阵算子一律纯脚本装包
