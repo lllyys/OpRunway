@@ -42,7 +42,8 @@ try:  # criteria 作为包被导入时
 except ImportError:  # criteria 目录直接挂 sys.path 时（tests/ 与脚本消费方）
     import thresholds
 
-KINDS = ("DPOT01", "DPOT02", "DPOT03")
+KINDS = ("DPOT01", "DPOT02", "DPOT03", "DGET01", "DGET03",
+         "DQRT01", "DQRT02", "DQRT03", "DQRT16", "DQRT17")
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +58,32 @@ def normalize_uplo(uplo):
     if u not in ("L", "U"):
         raise ValueError(f'uplo 只允许 "L"/"U"（spec §0 枚举），得到 {uplo!r}')
     return u
+
+
+def normalize_trans(trans):
+    """归一 trans 枚举：只认 "N"/"T"/"C"（QR 任务书 §2 枚举），bytes 先解码。
+
+    "C"（共轭转置）在实数链路与 "T" 等价（共轭对实数恒等），调用方无需分流。
+    """
+    if isinstance(trans, bytes):
+        trans = trans.decode("ascii", "replace")
+    t = str(trans).upper()
+    if t not in ("N", "T", "C"):
+        raise ValueError(f'trans 只允许 "N"/"T"/"C"（spec §0 枚举），得到 {trans!r}')
+    return t
+
+
+def normalize_side(side):
+    """归一 side 枚举：只认 "LEFT"/"RIGHT"（QR 任务书 §2 枚举），bytes 先解码；
+    兼容单字母简写，统一返回 "L"/"R"。"""
+    if isinstance(side, bytes):
+        side = side.decode("ascii", "replace")
+    s = str(side).upper()
+    if s in ("L", "LEFT"):
+        return "L"
+    if s in ("R", "RIGHT"):
+        return "R"
+    raise ValueError(f'side 只允许 "LEFT"/"RIGHT"（spec §0 枚举），得到 {side!r}')
 
 
 def _as_f64(name, arr):
@@ -249,16 +276,272 @@ def _dpot03(a, ainv, uplo):
     return num / (n * anorm * cnorm * thresholds.EPS32)
 
 
-_KIND_IMPL = {"DPOT01": _dpot01, "DPOT02": _dpot02, "DPOT03": _dpot03}
+# ---------------------------------------------------------------------------
+# LU 残差（lq-plan §1；LU 两册任务书 §3.2.2.1/.3/.4，2026-10-08 定稿）
+#
+# kind 命名沿用本文件既有 D 前缀「dtype 无关」约定（DPOT01 实/复同一实现）：
+# - DGET01 ← 任务书 SGET01（实）/ CGET01（复），aclsolverS{getrf}
+# - DGET03 ← 任务书 SGET03（实）/ CGET03（复），aclsolverS{getri,getriBatched,
+#   matinvBatched}（getri 本体范围外，getriBatched/matinvBatched batch 内逐矩阵）
+# 公式与 ε 口径见 thresholds.EPS32（2^-24）。
+# ---------------------------------------------------------------------------
+
+def _norm1(m):
+    """矩阵 1-范数 ‖M‖₁ = max_j Σ_i |M_ij|（DLANGE('1') 口径；复数取复模）。"""
+    if m.ndim != 2 or m.shape[1] == 0:
+        raise ValueError(f"1-范数：期望非空 2 维数组，得到 shape={m.shape}")
+    return float(np.max(np.sum(np.abs(m), axis=0)))
+
+
+def _check_ipiv(ipiv, k, m, name="ipiv"):
+    """ipiv 契约校验：长度 = min(m,n)=k，1 基、落在 [1,m]（LAPACK SGETRF：第 i 个
+    主元行下标可为 i..m 间任意行）。返回 int64 向量（仍 1 基，回放时减 1）。"""
+    p = np.asarray(ipiv).ravel()
+    if p.size != k:
+        raise ValueError(f"{name}: 长度应为 min(m,n)={k}，得到 {p.size}")
+    if not np.issubdtype(p.dtype, np.integer):
+        raise TypeError(f"{name}: 应为整数数组，得到 dtype={p.dtype}")
+    p = p.astype(np.int64)
+    if p.size and (p.min() < 1 or p.max() > m):
+        raise ValueError(f"{name}: 取值须在 [1,{m}]（1 基），得到 [{p.min()},{p.max()}]")
+    return p
+
+
+def restore_lu(lu, ipiv):
+    """由打包 LU 与 ipiv 重放 L·U 并按 DLASWP(-1) 逆序回放行交换，还原到 A 的行序。
+
+    返回升精度后的 m×n 矩阵（实数 float64 / 复数 complex128）。DGET01 残差与
+    getrf 判据卡的 layer1 还原比对（任务书 §3.2.1 条 6）共用这一份实现，避免
+    逆序回放逻辑两处漂移。ipiv 契约同 ``_check_ipiv``（1 基、长度 min(m,n)、
+    取值 [1,m]），非法即抛错（fail-closed）。
+    """
+    mode = _dtype_class("lu", lu)
+    cast = _as_c128 if mode == "complex" else _as_f64
+    lu = cast("lu", lu)
+    m, n = lu.shape
+    k = min(m, n)
+    p = _check_ipiv(ipiv, k, m)
+    eye = np.eye(m, k, dtype=lu.dtype)
+    low = np.tril(lu[:, :k], -1)              # m×k 严格下三角
+    L = low + eye                             # m×k 单位下三角（含对角 1）
+    U = np.triu(lu[:k, :])                    # k×n 上三角（含对角）
+    recon = L @ U                             # m×n
+    for i in range(k - 1, -1, -1):            # DLASWP(-1)：i 从 k 到 1
+        pi = int(p[i]) - 1
+        if pi != i:
+            recon[[i, pi], :] = recon[[pi, i], :]
+    return recon
+
+
+def _dget01(a, lu, ipiv):
+    """DGET01（getrf）：ratio = ‖L·U − A‖₁ / (n·‖A‖₁·ε)，n 取列数（m×n 矩形）。
+
+    还原方式对齐 LAPACK SGET01：由打包 LU 重放 L·U，再按 ipiv 逆序回放行交换
+    （DLASWP 方向 −1：i = min(m,n) → 1 依次交换第 i 行与第 ipiv(i) 行）还原到
+    A 的行序，最后取 ‖L·U − A‖₁。复数通路（CGET01）同式、范数取复模，ε 不变。
+    还原逻辑复用 ``restore_lu``（getrf 判据卡 layer1 亦消费）。
+    """
+    mode = _resolve_mode({"a": a, "lu": lu})
+    cast = _as_c128 if mode == "complex" else _as_f64
+    a = cast("a", a)
+    if np.asarray(lu).shape != a.shape:
+        raise ValueError(f"shape 不匹配: a{a.shape} vs lu{np.shape(lu)}")
+    n = a.shape[1]
+    recon = restore_lu(lu, ipiv)              # m×n（复模通路同式）
+    anorm = _norm1(a)
+    if anorm <= 0.0:
+        raise ValueError("零分母：‖A‖₁ = 0")
+    return _norm1(recon - a) / (n * anorm * thresholds.EPS32)
+
+
+def _dget03(a, ainv):
+    """DGET03（getri/getriBatched/matinvBatched）：ratio = ‖I − C·A‖₁ /
+    (n·‖A‖₁·‖C‖₁·ε)。
+
+    - getriBatched：A 传「LU 因子按 ipiv 还原后的矩阵」，C 传输出逆；
+    - matinvBatched：A 传原始输入可逆矩阵，C 传输出逆。
+    复数通路（CGET03）同式、范数取复模，ε 不变。
+    """
+    mode = _resolve_mode({"a": a, "ainv": ainv})
+    cast = _as_c128 if mode == "complex" else _as_f64
+    a = cast("a", a)
+    c = cast("ainv", ainv)
+    n = _square("a", a)
+    if c.shape != a.shape:
+        raise ValueError(f"shape 不匹配: a{a.shape} vs ainv{c.shape}")
+    anorm = _norm1(a)
+    cnorm = _norm1(c)
+    if anorm <= 0.0 or cnorm <= 0.0:
+        raise ValueError("零分母：‖A‖₁ 或 ‖C‖₁ 为 0")
+    w = np.eye(n, dtype=a.dtype) - c @ a
+    return _norm1(w) / (n * anorm * cnorm * thresholds.EPS32)
+
+
+# ---------------------------------------------------------------------------
+# QR 残差（lq-plan §1；QR 两册任务书 §3.2.2.1~.4，2026-10-08 定稿）
+#
+# kind 命名沿用 D 前缀「dtype 无关」约定（strip 实/复字母 S/C 后同形）：
+# - DQRT01 ← SQRT01（实）/ CQRT01（复），geqrf
+# - DQRT02 ← SQRT02 / CQRT02，sorgqr / cungqr
+# - DQRT03 ← SQRT03 / CQRT03，sormqr / cunmqr
+# - DQRT16 ← SQRT16 / CQRT16，gels 方阵判据（m = n）
+# - DQRT17 ← SQRT17 / CQRT17，gels 超定判据（m > n，IRESID=1）
+# 实数取 (ᵀ)、复数取共轭转置 (ᴴ)，本文件统一用 conj().T（实数恒等于 .T）；
+# 矩阵 1-范数 ‖M‖₁ = max_j Σ_i |M_ij|（复模），ε 口径 thresholds.EPS32（2^-24）。
+# ---------------------------------------------------------------------------
+
+def _dqrt01(a, r, q):
+    """DQRT01（geqrf）：ratio = ‖R − Qᴴ·A‖₁ / (m·‖A‖₁·ε)。
+
+    - a：m×n 原始输入矩阵；
+    - r：geqrf 打包输出（m×n），上三角/梯形部分即 R（下三角为反射子，不进比对）；
+    - q：由 geqrf 输出的 (v, tau) 升精度后生成 m×m 完整正交（酉）矩阵 Q
+      （LAPACK SQRT01 口径：升精度构造，残差只反映 geqrf 本身的质量）。
+    m 取行数（分母固定用行数，冗余维度对齐 SQRT01）。
+    """
+    mode = _resolve_mode({"a": a, "r": r, "q": q})
+    cast = _as_c128 if mode == "complex" else _as_f64
+    a = cast("a", a)
+    r = cast("r", r)
+    q = cast("q", q)
+    m, _n = a.shape
+    if r.shape != a.shape:
+        raise ValueError(f"shape 不匹配: a{a.shape} vs r{r.shape}")
+    if q.shape != (m, m):
+        raise ValueError(f"q: 期望 m×m={m}×{m} 完整正交矩阵，得到 shape={q.shape}")
+    anorm = _norm1(a)
+    if anorm <= 0.0:
+        raise ValueError("零分母：‖A‖₁ = 0")
+    R = np.triu(r)                       # m×n 上三角/梯形
+    qa = q.conj().T @ a                  # m×n
+    return _norm1(R - qa) / (m * anorm * thresholds.EPS32)
+
+
+def _dqrt02(q):
+    """DQRT02（sorgqr/cungqr）：ratio = ‖I − Qᴴ·Q‖₁ / (m·ε)。
+
+    - q：m×n 输出（n 为输入列数，k = min(m,n)）；I 为 n 阶单位阵（Qᴴ·Q 为 n×n）；
+    - 分母固定取 Q 的行数 m（任务书 §3.2.2.2：不随 I 的维度 n 变化）。
+    """
+    mode = _resolve_mode({"q": q})
+    cast = _as_c128 if mode == "complex" else _as_f64
+    q = cast("q", q)
+    m, n = q.shape
+    w = np.eye(n, dtype=q.dtype) - q.conj().T @ q
+    return _norm1(w) / (m * thresholds.EPS32)
+
+
+def _dqrt03(c, opq, q, side, trans):
+    """DQRT03（sormqr/cunmqr）：ratio = ‖op2 − op1‖₁ / (m·‖C‖₁·ε)。
+
+    op2 = 反射子形式结果（被测输出 opq）；op1 = 用显式 Q 直接作矩阵乘
+    （LAPACK SQRT03：Q 经 orgqr 显式生成后 SGEMM，与被测 SORMQR 结果相减）。
+    trans = N 用 Q，trans = T/C 用 Qᵀ/Qᴴ；side = LEFT 时 op(Q)·C，RIGHT 时 C·op(Q)。
+
+    - c：输入矩阵 C（side = LEFT 时 m×n，RIGHT 时 n×m）；
+    - opq：被测输出，形状同 c；
+    - q：m×m 显式正交（酉）矩阵；分母 m 取 Q 的阶数（与 C 维数无关）。
+    """
+    side = normalize_side(side)
+    trans = normalize_trans(trans)
+    mode = _resolve_mode({"c": c, "opq": opq, "q": q})
+    cast = _as_c128 if mode == "complex" else _as_f64
+    c = cast("c", c)
+    opq = cast("opq", opq)
+    q = cast("q", q)
+    m = _square("q", q)
+    if opq.shape != c.shape:
+        raise ValueError(f"shape 不匹配: opq{opq.shape} vs c{c.shape}")
+    if side == "L" and c.shape[0] != m:
+        raise ValueError(f"side=LEFT 要求 C 行数 = m={m}，得到 shape={c.shape}")
+    if side == "R" and c.shape[1] != m:
+        raise ValueError(f"side=RIGHT 要求 C 列数 = m={m}，得到 shape={c.shape}")
+    cnorm = _norm1(c)
+    if cnorm <= 0.0:
+        raise ValueError("零分母：‖C‖₁ = 0")
+    qo = q if trans == "N" else q.conj().T
+    ref = qo @ c if side == "L" else c @ qo
+    return _norm1(opq - ref) / (m * cnorm * thresholds.EPS32)
+
+
+def _dqrt16(a, b, x):
+    """DQRT16（gels 方阵判据，m = n）：ratio = max_j ‖B_j − A·X_j‖₁ /
+    (MAX(m,n)·‖A‖₁·‖X_j‖₁·ε)，逐列独立，任何一列超阈值即该用例不通过。
+
+    - a：m×n 原始输入（m ≥ n）；x：n×nrhs 最小二乘解；b：m×nrhs 右端项。
+    """
+    mode = _resolve_mode({"a": a, "b": b, "x": x})
+    cast = _as_c128 if mode == "complex" else _as_f64
+    a = cast("a", a)
+    b = cast("b", b)
+    x = cast("x", x)
+    m, n = a.shape
+    if x.shape[0] != n or b.shape != (m, x.shape[1]):
+        raise ValueError(
+            f"shape 不匹配: a{a.shape}, b{b.shape}, x{x.shape}（a 为 m×n、b 为 m×nrhs、x 为 n×nrhs）")
+    if b.shape[1] < 1:
+        raise ValueError("b: 右端项列数 nrhs ≥ 1")
+    anorm = _norm1(a)
+    if anorm <= 0.0:
+        raise ValueError("零分母：‖A‖₁ = 0")
+    base = max(m, n) * anorm * thresholds.EPS32
+    resid = b - a @ x
+    ratio = 0.0
+    for j in range(b.shape[1]):
+        xnorm = float(np.sum(np.abs(x[:, j])))
+        if xnorm <= 0.0:
+            raise ValueError(f"零分母：x 第 {j} 列 1-范数为 0")
+        ratio = max(ratio, float(np.sum(np.abs(resid[:, j]))) / (base * xnorm))
+    return ratio
+
+
+def _dqrt17(a, b, x):
+    """DQRT17（gels 超定判据，m > n，IRESID=1）：ratio_opt = ‖Rᴴ·A‖₁ /
+    (‖A‖₁·‖B‖₁·MAX(m,n,nrhs)·ε)，R = B − A·X（正规方程最优性残差）。
+
+    - a：m×n 原始输入（m > n）；x：n×nrhs 最小二乘解；b：m×nrhs 右端项；
+    - 实数书 Rᵀ·A、复数书 Rᴴ·A（conj().T 统一），Rᴴ·A 为 nrhs×n。
+    """
+    mode = _resolve_mode({"a": a, "b": b, "x": x})
+    cast = _as_c128 if mode == "complex" else _as_f64
+    a = cast("a", a)
+    b = cast("b", b)
+    x = cast("x", x)
+    m, n = a.shape
+    if x.shape[0] != n or b.shape != (m, x.shape[1]):
+        raise ValueError(
+            f"shape 不匹配: a{a.shape}, b{b.shape}, x{x.shape}（a 为 m×n、b 为 m×nrhs、x 为 n×nrhs）")
+    nrhs = b.shape[1]
+    anorm = _norm1(a)
+    bnorm = _norm1(b)
+    if anorm <= 0.0 or bnorm <= 0.0:
+        raise ValueError("零分母：‖A‖₁ 或 ‖B‖₁ 为 0")
+    resid = b - a @ x                    # m×nrhs
+    num = _norm1(resid.conj().T @ a)     # nrhs×n
+    return num / (anorm * bnorm * max(m, n, nrhs) * thresholds.EPS32)
+
+
+_KIND_IMPL = {"DPOT01": _dpot01, "DPOT02": _dpot02, "DPOT03": _dpot03,
+              "DGET01": _dget01, "DGET03": _dget03,
+              "DQRT01": _dqrt01, "DQRT02": _dqrt02, "DQRT03": _dqrt03,
+              "DQRT16": _dqrt16, "DQRT17": _dqrt17}
 
 
 def residual_ratio(kind, **arrays):
-    """纯残差接口（spec §2.3）：kind ∈ {DPOT01, DPOT02, DPOT03}，返回 float。
+    """纯残差接口（spec §2.3）：kind ∈ KINDS，返回 float。
 
     关键字参数（输入均为内存 ndarray，uplo 除外；I/O 由调用方负责）：
     - DPOT01: a（n×n 对称阵）, factor（n×n 因子，存储侧有效）, uplo（"L"/"U"）
     - DPOT02: a（n×n 全对称阵）, b（n×nrhs 右端）, x（n×nrhs 解）
     - DPOT03: a（n×n 对称阵）, ainv（n×n 逆，存储侧有效）, uplo（"L"/"U"）
+    - DGET01: a（m×n 原始阵）, lu（m×n 打包 LU 输出）, ipiv（长度 min(m,n)，1 基）
+    - DGET03: a（n×n 原始阵或还原阵）, ainv（n×n 逆）
+    - DQRT01: a（m×n 原始阵）, r（m×n geqrf 打包输出）, q（m×m 显式正交/酉矩阵）
+    - DQRT02: q（m×n orgqr/ungqr 输出）
+    - DQRT03: c（输入矩阵 C）, opq（被测输出，形状同 c）, q（m×m 显式正交/酉矩阵）,
+      side（"LEFT"/"RIGHT"）, trans（"N"/"T"/"C"）
+    - DQRT16: a（m×n 原始阵，m≥n）, b（m×nrhs 右端）, x（n×nrhs 最小二乘解）
+    - DQRT17: a（m×n 原始阵，m>n）, b（m×nrhs 右端）, x（n×nrhs 最小二乘解）
 
     ε 固定 2^-24（spec §0，复数不变）。实/复自动分流（S2 spec §4）：一次调用的
     全部数组须同为实数或同为复数；复数先升 complex128 再取模，a 的对角虚部
@@ -306,35 +589,56 @@ def _run_residual(card, case_arrays, dut_out):
     超出 → 证据不足不判 FAIL（两支公式只可证一支），待含 mean 的 v3 包复判。
 
     ratio_cpu 非有限（如 A0 的 prep_failed 内容转 NaN）由阈值公式的入参校验抛错，
-    judge 外层收敛为「judge 内部异常」error verdict——基线不可用即不可裁。"""
+    judge 外层收敛为「judge 内部异常」error verdict——基线不可用即不可裁。
+
+    LU/QR 增量（cards_luqr，lq-plan §1）：相对线基准、判据 kind 与公式展示串可由
+    卡按 case 形状动态给出（gels 方阵 use ratio_cpu/DQRT16、超定 use
+    ratio_opt_cpu/DQRT17）：
+    - ``threshold_ref_of(case_arrays)`` -> 相对线基准 float（None 时用 ratio_cpu）；
+    - ``residual_kind_of(case_arrays, dut_out)`` -> kind（None 时用静态 residual_kind）；
+    - ``formula_of(case_arrays)`` -> 公式展示串（None 时用静态 formula）。
+    Cholesky 三卡这三项均 None，行为逐字节不变。"""
     status = case_arrays.get("ratio_cpu_status")
     ratio_cpu = case_arrays.get("ratio_cpu")
-    if status != "ok" or ratio_cpu is None:
+    if card.threshold_ref_of is not None:
+        try:
+            ref = card.threshold_ref_of(case_arrays)
+        except Exception:
+            ref = None
+    else:
+        ref = ratio_cpu
+    if status != "ok" or ref is None:
         return (
             _null_residual(),
             "FAIL",
             f"残差基线不可用: ratio_cpu_status={status!r}, ratio_cpu={ratio_cpu!r}"
             "（spec §2.4：准备失败该 case 不可裁）",
         )
-    formula = card.formula
+    formula = (card.formula_of(case_arrays)
+               if card.formula_of is not None else card.formula)
     mean = case_arrays.get("ratio_cpu_mean")
-    if not card.uses_mean:
-        threshold = float(card.threshold_fn(ratio_cpu))
+    if card.threshold_of is not None:
+        # 卡整体接管阈值（gels 方阵/超定分流）：threshold_of(case_arrays, ref)。
+        threshold = float(card.threshold_of(case_arrays, ref))
+    elif not card.uses_mean:
+        threshold = float(card.threshold_fn(ref))
     elif mean is not None:
-        threshold = float(card.threshold_fn(ratio_cpu, mean))
+        threshold = float(card.threshold_fn(ref, mean))
     else:
         threshold = None        # 缺 mean：残差算出后按单支兼容路径裁决
-    base = {"ran": True, "ratio_cpu": float(ratio_cpu),
+    base = {"ran": True, "ratio_cpu": float(ref),
             "ratio_cpu_mean": None if mean is None else float(mean), "eps": "2^-24"}
+    kind = (card.residual_kind_of(case_arrays, dut_out)
+            if card.residual_kind_of is not None else card.residual_kind)
     try:
-        ratio = residual_ratio(card.residual_kind, **card.residual_kwargs(case_arrays, dut_out))
+        ratio = residual_ratio(kind, **card.residual_kwargs(case_arrays, dut_out))
     except Exception as exc:  # 残差算不出（NaN/Inf 传染、零分母等）→ 数值 FAIL，指认原因
         res = {**base, "ratio": None, "threshold": threshold,
                "formula": formula, "pass": False}
         return res, "FAIL", f"残差不可计算: {type(exc).__name__}: {exc}"
     if threshold is None:
         # 缺 mean 兼容（HT-3）：单支从严、过即 PASS；超单支 → 证据不足。
-        line = thresholds.potrf_potrs_single_line(ratio_cpu)
+        line = thresholds.potrf_potrs_single_line(ref)
         if ratio <= line:
             res = {**base, "ratio": float(ratio), "threshold": line,
                    "formula": "5*ratio_cpu（缺 ratio_cpu_mean 单支，v2 包兼容口径）",
@@ -407,7 +711,11 @@ def _judge_info_inner(card, case_arrays, dut_out):
     }
 
 
-_BATCH_SLICED_KEYS = ("A64", "A32", "B64", "B32", "golden64", "golden32")
+_BATCH_SLICED_KEYS = ("A64", "A32", "B64", "B32", "golden64", "golden32",
+                      # LU/QR 批量卡增量（cards_luqr，lq-plan §1）：getriBatched 的
+                      # 输入 LU 因子与 ipiv 亦逐矩阵切片（A64/A32/LU* 三维 (batch,n,n)，
+                      # ipiv 二维 (batch, n)）。
+                      "LU64", "LU32", "ipiv")
 
 
 def _batched_error_verdict(msg, batch=None):
@@ -519,9 +827,11 @@ def _judge_batched_inner(card, case_arrays, dut_out):
     for key in _BATCH_SLICED_KEYS:
         if key in case_arrays:
             arr = np.asarray(case_arrays[key])
-            if arr.ndim != 3 or arr.shape[0] != batch:
+            # 三维 (batch,…)（A/B/golden/LU*）或二维 (batch, n)（ipiv）皆可；
+            # 首维须等于 batch，batch=1 不得标量化（fail-closed）。
+            if arr.ndim not in (2, 3) or arr.shape[0] != batch:
                 return _batched_error_verdict(
-                    f"批量卡 {key} 应为首维 batch={batch} 的三维数组（S3 spec §2；"
+                    f"批量卡 {key} 应为首维 batch={batch} 的数组（S3 spec §2；"
                     f"batch=1 不得标量化），得到 shape={arr.shape}", batch)
             sliced[key] = arr
 

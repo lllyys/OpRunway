@@ -9,17 +9,28 @@
 （spec 第 3 节：F 复用冻结产物不重生成）。每份是按 canonical 顺序的 JSON 数组，逐 case::
 
     {case_id, bench_key, min_ms, max_ms, avg_ms, matched, dup_count}
+（LU/QR 算子缺 GPU 计时时额外带 ``perf_evidence="missing_perf"``，见下）
 
 规则（spec 2.2 与 canonical conventions 冻结口径）：
 
 - ``bench_key`` 为 null（无源条目）时 ``matched=false``，耗时字段全 null，``dup_count`` 亦 null；
 - ``bench_key = {"file": 相对 bench-dir 路径, "entry": 该文件 cases 数组 0 起序号}``，
-  定位后与 canonical 的 n/uplo/lda（potrs 另含 nrhs/ldb）逐字段核对，不符即报错退出；
-  uplo 按 LOWER→L、UPPER→U 对照；
-- batched 四算子（S3 spec §1，canonical 条目带 batch 字段）：匹配键加 batch；
-  nrhs 不核对——bench_result.json 无该字段（cu 固定 nrhs=1），canonical 的 1 是冻结时
-  显式写入。batched 册的 bench_key.file 相对两册共同父目录（canonical 的
-  task_dir.bench_root），``--bench-dir`` 传该父目录即可一次跑四算子；
+  定位后与 canonical 的几何键逐字段核对，不符即报错退出；
+- Cholesky 三算子（spotrf/spotrs/spotri + batched 四包）几何键为 n/lda/uplo（对照
+  LOWER→L、UPPER→U），potrs 另含 nrhs/ldb；batched 四算子（S3 spec §1，canonical
+  条目带 batch 字段）匹配键加 batch；nrhs 不核对——bench_result.json 无该字段（cu
+  固定 nrhs=1），canonical 的 1 是冻结时显式写入。batched 册的 bench_key.file 相对
+  两册共同父目录（canonical 的 task_dir.bench_root），``--bench-dir`` 传该父目录即可
+  一次跑四算子；
+- LU/QR 16 接口（LU 实/复 + QR 实/复，见 freeze_canonical.LUQR_BOOKS）几何键取自
+  ``freeze_canonical.LUQR_OP_FIELDS``（与冻结同源）：getrf=m/n/lda/pivot、
+  getri=n/lda/pivot、*getriBatched=n/batch/lda/ldc、
+  *matinvBatched=n/batch/lda/lda_inv、geqrf=m/n/lda、*gqr=m/n/k/lda、
+  *mqr=m/n/k/side/trans/lda/ldc、*gels=m/n/nrhs/ldda/lddb/lddx；无 uplo，
+  trans/side 两侧均为字符串、pivot 为布尔，直接相等比较；
+- 缺 GPU 计时（bench 条目 ``perf`` 非数值字典）**仅对 LU/QR 算子放宽**：记
+  ``matched=false`` + ``perf_evidence="missing_perf"``（性能证据不足，判定侧不 gate，
+  V-8/U-9），不报错不退 2；Cholesky 三算子沿用原口径（缺耗时即退 2，行为不变）；
 - bench 内与定位条目全参数相同的重复条目：取首条的耗时并记 ``dup_count``（含自身）；
   bench_key 指向非首现条目时告警并仍取首条。
 
@@ -32,10 +43,24 @@ import json
 from pathlib import Path
 import sys
 
+from freeze_canonical import LUQR_BOOKS, LUQR_OP_FIELDS
+
 UPLO_FROM_BENCH = {"LOWER": "L", "UPPER": "U"}
 # bench 条目里这些字段是测量元数据，不参与「全参数组合」重复判定
 NON_PARAM_FIELDS = frozenset({"iters", "check", "perf"})
 PERF_FIELDS = ("min_ms", "max_ms", "avg_ms")
+
+# LU/QR 16 接口 -> 基础算子（sorgqr/cungqr->gqr、sormqr/cunmqr->mqr 等），
+# 几何键字段表沿用 freeze_canonical.LUQR_OP_FIELDS（冻结与基线同一事实源）。
+LUQR_OPS = {op: base for book in LUQR_BOOKS.values() for op, base in book["ops"].items()}
+# 缺 GPU 计时（perf=null）时的性能证据标记（LU/QR 专用放宽支路，V-8/U-9）。
+PERF_EVIDENCE_MISSING = "missing_perf"
+
+
+def luqr_geometry_fields(op):
+    """LU/QR 算子的几何键字段（按基础算子）；非 LU/QR 算子返回 None。"""
+    base = LUQR_OPS.get(op)
+    return LUQR_OP_FIELDS[base] if base else None
 
 
 class InputError(Exception):
@@ -76,7 +101,16 @@ def load_cases(canonical_path):
 
 
 def check_entry_matches(case, entry):
-    """核对定位到的 bench 条目与 canonical 参数，返回不符描述清单（空表示一致）。"""
+    """核对定位到的 bench 条目与 canonical 参数，返回不符描述清单（空表示一致）。
+
+    LU/QR 16 接口按 freeze_canonical.LUQR_OP_FIELDS 的几何键逐字段核对（无 uplo；
+    trans/side 在两侧均为字符串、pivot 为布尔，直接相等比较）。Cholesky 三算子沿用
+    原口径（n/lda/uplo→L/U/nrhs/ldb，batched 加 batch），行为逐字节不变。
+    """
+    fields = luqr_geometry_fields(case.get("op"))
+    if fields is not None:
+        return [f"{f}: canonical={case.get(f)!r} bench={entry.get(f)!r}"
+                for f in fields if entry.get(f) != case.get(f)]
     expected = [("n", case.get("n")), ("lda", case.get("lda"))]
     batched = case.get("batch") is not None
     if batched:
@@ -97,7 +131,12 @@ def check_entry_matches(case, entry):
 
 
 def resolve_perf(case, bench_dir, bench_cache):
-    """按 bench_key 定位并核对，返回 (首现序号, dup_count, perf 字典)。"""
+    """按 bench_key 定位并核对，返回 (首现序号, dup_count, perf|None, missing_reason|None)。
+
+    缺 GPU 计时（perf 非数值字典）：LU/QR 算子记 ``perf=None`` 与
+    ``PERF_EVIDENCE_MISSING``（性能证据不足，交由 row.matched=false 表达，V-8/U-9），
+    不抛错；Cholesky 三算子沿用原口径——缺耗时即 InputError 退 2，行为不变。
+    """
     case_id = case.get("case_id")
     key = case["bench_key"]
     if (not isinstance(key, dict) or not isinstance(key.get("file"), str)
@@ -127,8 +166,10 @@ def resolve_perf(case, bench_dir, bench_cache):
     perf = bench.entries[first].get("perf")
     if (not isinstance(perf, dict)
             or any(not isinstance(perf.get(f), (int, float)) for f in PERF_FIELDS)):
+        if luqr_geometry_fields(case.get("op")) is not None:
+            return first, dup_count, None, PERF_EVIDENCE_MISSING
         raise InputError(f"{case_id}: {rel}#{first} 缺少数值耗时字段 perf.min_ms/max_ms/avg_ms")
-    return first, dup_count, perf
+    return first, dup_count, perf, None
 
 
 def build_baseline(cases, bench_dir):
@@ -153,13 +194,16 @@ def build_baseline(cases, bench_dir):
         }
         if case.get("bench_key") is not None:
             try:
-                _, dup_count, perf = resolve_perf(case, bench_dir, bench_cache)
+                _, dup_count, perf, reason = resolve_perf(case, bench_dir, bench_cache)
             except InputError as exc:
                 problems.append(str(exc))
             else:
-                row.update({f: perf[f] for f in PERF_FIELDS})
-                row["matched"] = True
                 row["dup_count"] = dup_count
+                if perf is None:      # LU/QR 缺 GPU 计时：性能证据不足，不 gate（V-8/U-9）
+                    row["perf_evidence"] = reason
+                else:
+                    row.update({f: perf[f] for f in PERF_FIELDS})
+                    row["matched"] = True
         rows_by_op.setdefault(op, []).append(row)
     if problems:
         raise InputError("\n".join(problems))
@@ -198,9 +242,13 @@ def main(argv=None):
     written = write_outputs(rows_by_op, args.out)
     for op, rows in rows_by_op.items():
         matched = sum(1 for r in rows if r["matched"])
+        missing_perf = sum(1 for r in rows
+                           if r.get("perf_evidence") == PERF_EVIDENCE_MISSING)
         dup_ids = [r["case_id"] for r in rows if (r["dup_count"] or 0) > 1]
         line = (f"{op}: 共 {len(rows)} case，matched {matched}，"
                 f"未匹配 {len(rows) - matched}，dup_count>1 共 {len(dup_ids)} 条")
+        if missing_perf:
+            line += f"，缺 perf（性能证据不足，不 gate）{missing_perf} 条"
         if dup_ids:
             line += "：" + ", ".join(dup_ids)
         print(line)

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """stream_check.py —— 流式判定驱动（数据形态裁定 2026-09-23：不落盘，生成即测）。
 
+本入口仅作模拟自检：现场 CPU 参考值不替代任务包冻结基线，输出不是正式验收证据。
+
 逐 case 在同进程内完成：现场生成输入与 golden → 现场算 ratio_cpu（CPU 同精度链）→
 产生被测输出（当前为 sim 通路；真实 NPU 被测经适配器接入，见 DUT 适配点注释）→
 criteria.judge 判定 → 只留判定记录，数组即弃。全程不写数组文件（--dump 例外，调试用）。
@@ -31,6 +33,10 @@ case_purpose 分流支路（_judge_info_inner，只比 info==k_expected，HT-12 
 info 用例不受 --select/--limit 节流（构造开销小、逐算子仅 3 条），受 --ops/--max-n
 约束；记录带 case_purpose:"info" 与 info 比对结果，无 residual 字段。
 
+两处 info 派生的基座按册顶层 package_scope 取（口径函数 criteria/render_verify.
+info_require_s1）：full 册取全部精度条目，其余取值与无该字段的散册取 s1 子集——
+与包 index 侧和包内 verify 渲染副本同一条规则，三方派生出同一个 id 集合。
+
 HT-9 批量 info 契约用例：每批量算子另派生 1 个混合 case
 （derive_batched_info_cases：*potrfBatched 族 1~2 个代表内容非正定、k_expected
 逐内容 k 值列表；*potrsBatched 族标量仅参数错、k_expected=-1）——现场构造
@@ -55,17 +61,24 @@ det PASS；确定性 FAIL 的意义在真实 NPU 适配器接入后暴露非确�
                     [--perturb-index i] [--jobs N] [--rerun N]
                     [--dump <case_id> ...] [--dump-dir <目录>]
 
+准入断言（以新为准裁定 2026-10-09）：--canonical 同目录下存在 cases/index.json
+（即包根布局）时，其顶层 ratio_basis 必须是 "A32-f64"，否则拒收退 2——缺字段即旧
+A64 基，固化 ratio_cpu_mean 与现行残差实现不同基。不做旧包兼容、不在读侧重算。
+散册 canonical 冒烟没有 index，不在准入面内。
+
 退出码：0 = 全部数值 PASS（且启用 --rerun 时确定性无失配）；1 = 存在数值 FAIL、
-判定 error 或确定性复跑失配；2 = 输入/契约错误。
+判定 error 或确定性复跑失配；2 = 输入/契约错误（含 ratio_basis 非 A32-f64）。
 formal 恒 PENDING_RULING（阈值语义待裁），本工具不出具正式结论。
 """
 
 import argparse
+import gzip
 import json
 import platform
 import resource
 import sys
 import time
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -73,7 +86,11 @@ import numpy as np
 # ru_maxrss 单位：Linux 为 KB、macOS 为字节（2026-09-24 远程实证抓出的少报 1024 倍）
 _RSS_DIV = 1024 if platform.system() == "Linux" else 1024 * 1024
 TOOL = "stream_check.py"
-TOOL_VER = "s2a1-r7"  # s2-A1 一段式：判定记录改 residual 单段（layer1/fallback 退役）；承 s3-d3-r6
+# s2a1-r9：info 派生基座按册顶层 package_scope 显式传（2026-10-09）——full 册不再
+#   整批略过 info 用例，与包 index 侧和 verify 渲染副本三方派生同一个 id 集合。
+# s3-d3-r7：LU/QR 生成器/判据卡/ratio 链分流（getrf 无 golden、geqrf tau、批量 A0 ipiv）。
+TOOL_VER = "s3-d3-r8"  # 承 s2a1-r9（package_scope 显式传）与 s3-d3-r7（LU/QR 分流）
+RATIO_BASIS = "A32-f64"  # 受理的唯一残差基（index 顶层 ratio_basis）
 
 _HERE = Path(__file__).resolve().parent
 _CRITERIA = _HERE.parent / "criteria"
@@ -84,7 +101,12 @@ class ContractError(RuntimeError):
 
 
 def _load_modules(gen_dir):
-    """装入同源实现：criteria（权威判定）与 case-gen（生成/ratio 链）。"""
+    """装入同源实现：criteria（权威判定）与 case-gen（生成/ratio 链）。
+
+    LU/QR 增量（LQ-22）：同源实现里另装 cards_luqr（16 接口判据卡）与
+    gen_data_luqr（LU/QR 生成器），按 case 的算子名分流取卡/取生成器（Cholesky
+    通路零漂移）。两个生成器都必须存在（同一 case-gen scripts 目录）。
+    """
     for p in (str(_CRITERIA), str(gen_dir)):
         if p not in sys.path:
             sys.path.insert(0, p)
@@ -94,32 +116,54 @@ def _load_modules(gen_dir):
     import batched_a0 as a0_mod              # noqa: E402  (A0 两层判定驱动)
     import gen_data_cholesky as gen_mod      # noqa: E402
     import fill_ratio_cpu as ratio_mod       # noqa: E402
-    if not (Path(gen_dir) / "gen_data_cholesky.py").is_file():
-        raise ContractError(f"--gen-dir 里找不到 gen_data_cholesky.py: {gen_dir}")
-    return verdict_mod, cards_mod, bp_mod, a0_mod, gen_mod, ratio_mod
+    for name in ("gen_data_cholesky.py", "gen_data_luqr.py"):
+        if not (Path(gen_dir) / name).is_file():
+            raise ContractError(f"--gen-dir 里找不到 {name}: {gen_dir}")
+    import gen_data_luqr as gen_luqr_mod     # noqa: E402  (LU/QR 生成器)
+    try:                                     # LU/QR 判据卡；缺该模块退回 Cholesky 通路
+        import cards_luqr as cards_luqr_mod  # noqa: E402
+    except ImportError:                      # pragma: no cover
+        cards_luqr_mod = None
+    return (verdict_mod, cards_mod, bp_mod, a0_mod, gen_mod, ratio_mod,
+            gen_luqr_mod, cards_luqr_mod)
 
 
-def _sim_dut(golden32, mode, card, perturb_index=None):
-    """sim 通路：复用 sim_dut.perturb_out32（同一实现，不复制逻辑）。
+def _gen_for(op, gen_mod, gen_luqr_mod):
+    """按算子名取生成器：LU/QR 16 接口走 gen_data_luqr，其余走 gen_data_cholesky。"""
+    return gen_luqr_mod if op in gen_luqr_mod.ALL_OPS else gen_mod
 
-    info 按接口角色分型（S3 spec §4）：potrfBatched 族（card.info_kind="array"）给
-    (batch,) int32 全 0 infoArray，potrsBatched 族与单矩阵卡给标量 0；perturb_index
-    透传逐矩阵扰动（批量负例演练）。
 
-    DUT 适配点：真实 NPU 被测接入时，以「输入数组 → {out32, info, status}」的适配器
-    替换本函数（协议同包通路的被测输出三键；采样与性能不在本工具范围）。
+def _card_for(op, cards_mod, cards_luqr_mod):
+    """统一取卡（与 accept_run.get_card / render_verify._spec_card 同口径）。"""
+    if cards_luqr_mod is not None and cards_luqr_mod.accepts(op):
+        return cards_luqr_mod.get_card(op)
+    return cards_mod.get_card(op)
+
+
+def _sim_dut(op, arrays, mode, card, perturb_index=None):
+    """sim 通路：复用 sim_dut.sim_dut_from_arrays（同一实现，不复制逻辑）。
+
+    getrf 无 golden32 → 现场低精度分解合成 LU+ipiv；geqrf 附 tau；info 按接口角色
+    分型（card.info_kind="array" → (batch,) int32 全 0 infoArray，标量卡给 0）。
+    perturb_index 透传逐矩阵扰动（批量负例演练）。
+
+    DUT 适配点：真实 NPU 被测接入时，以「输入数组 → {out32, info, status[,ipiv,tau]}」
+    的适配器替换本函数（协议同包通路的被测输出结构；采样与性能不在本工具范围）。
     """
     sys.path.insert(0, str(_HERE))
     try:
-        from sim_dut import perturb_out32
+        from sim_dut import sim_dut_from_arrays
     finally:
         sys.path.remove(str(_HERE))
-    out32 = perturb_out32(golden32, mode, matrix_index=perturb_index)
-    if getattr(card, "batched", False) and card.info_kind == "array":
-        info = np.zeros(np.asarray(golden32).shape[0], dtype=np.int32)
-    else:
-        info = 0
-    return {"out32": out32, "info": info, "status": "ok"}
+    return sim_dut_from_arrays(op, arrays, mode, perturb_index)
+
+
+def _run_ratio(op, ratio_mod, verdict_mod, lapack, gen_chol, gen_luqr, case, arrays):
+    """按算子族跑参考 ratio 准备链：LU/QR 走 run_chain_luqr（返回更新字典），
+    Cholesky 走 run_chain（返回标量）。两侧 PrepFailed 语义一致。"""
+    if op in gen_luqr.ALL_OPS:
+        return ratio_mod.run_chain_luqr(verdict_mod, lapack, case, arrays)
+    return ratio_mod.run_chain(verdict_mod, lapack, case, arrays)
 
 
 def _bitwise_same(a, b):
@@ -192,7 +236,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     try:
-        verdict_mod, cards_mod, bp_mod, a0_mod, gen_mod, ratio_mod = _load_modules(args.gen_dir)
+        (verdict_mod, cards_mod, bp_mod, a0_mod, gen_mod, ratio_mod,
+         gen_luqr_mod, cards_luqr_mod) = _load_modules(args.gen_dir)
         with open(args.canonical, encoding="utf-8") as fh:
             canonical = json.load(fh)
         cases = canonical.get("cases")
@@ -202,11 +247,31 @@ def main(argv=None):
         # ratio_cpu_mean（发包侧 build_package 写入）——canonical 与 cases/ 同目录
         # （包根布局）时读出，按算子注入 case_arrays，兜底双支 max(5r, 3m) 完整生效；
         # 无此文件（散册 canonical 冒烟）保持缺 mean 单支兼容口径。
+        # 准入断言（以新为准裁定 2026-10-09）：读到包 index 就只受理 A32-f64 基；
+        # 散册 canonical 冒烟没有 index，不在准入面内（无固化参考值可误用）。
         index_mean = None
-        idx_path = Path(args.canonical).parent / "cases" / "index.json"
-        if idx_path.is_file():
-            with open(idx_path, encoding="utf-8") as fh:
-                index_mean = (json.load(fh) or {}).get("ratio_cpu_mean")
+        cases_dir = Path(args.canonical).parent / "cases"
+        plain = cases_dir / "index.json"
+        if plain.is_file():
+            index_doc = json.loads(plain.read_text(encoding="utf-8")) or {}
+        else:
+            gz = cases_dir / "index.json.gz"
+            parts = [gz] if gz.is_file() else sorted(cases_dir.glob("index.json.gz.part*"))
+            if parts:
+                try:
+                    raw = gzip.decompress(b"".join(p.read_bytes() for p in parts))
+                except (OSError, zlib.error) as exc:
+                    raise ContractError(f"cases/index 切分件不可解: {exc}") from exc
+                index_doc = json.loads(raw.decode("utf-8"))
+            else:
+                index_doc = None
+        if index_doc is not None:
+            basis = index_doc.get("ratio_basis")
+            if basis != RATIO_BASIS:
+                raise ContractError(
+                    f"旧基包不受理：参考值基准非 {RATIO_BASIS}（以新为准裁定 "
+                    f"2026-10-09），请使用更新版任务包（index.ratio_basis={basis!r}）")
+            index_mean = index_doc.get("ratio_cpu_mean")
         ops = set(o.strip() for o in args.ops.split(",")) if args.ops else None
         picked = [c for c in cases
                   if (ops is None or c.get("op") in ops)
@@ -223,13 +288,28 @@ def main(argv=None):
         lapack = ratio_mod._lapack()
         # HT-8/HT-9：追加派生 info 契约用例（单算子 B2 三变体 + 批量 B3 混合 case；
         # canonical case 之后跑；不受 select/limit 节流——构造开销小；受 ops/max_n 约束）
+        #
+        # 派生基座按册顶层 package_scope 显式传（口径函数 render_verify.
+        # info_require_s1，与包 index 侧和 verify 渲染副本同一条规则，不在此抄一份）：
+        # 不传就吃 derive_info_cases 的 s1 默认，full 册的精度条目没有 s1_subset
+        # 标记，info 用例会被整批静默略过，流式与包/verify 派生出不同 id 集合。
+        import render_verify                       # criteria 已在 sys.path（_load_modules）
+        require_s1 = render_verify.info_require_s1(canonical)
         by_id = {c["case_id"]: c for c in cases}
+        # 派生 info 用例按算子族分流（LU/QR 走 gen_data_luqr，其余 Cholesky）；两族
+        # 各自的 derive_info_cases/derive_batched_info_cases 只吃本族 canonical 子集。
+        chol_cases = [c for c in cases if c.get("op") not in gen_luqr_mod.ALL_OPS]
+        luqr_cases = [c for c in cases if c.get("op") in gen_luqr_mod.ALL_OPS]
+        derived_info = []
+        for gen, subset in ((gen_mod, chol_cases), (gen_luqr_mod, luqr_cases)):
+            if not subset:
+                continue
+            derived_info += list(gen.derive_info_cases(subset,
+                                                       require_s1=require_s1))
+            derived_info += list(gen.derive_batched_info_cases(subset,
+                                                               require_s1=require_s1))
         picked = picked + [
-            e for e in gen_mod.derive_info_cases(cases)
-            if (ops is None or e.get("op") in ops)
-            and (args.max_n is None or e.get("n", 0) <= args.max_n)]
-        picked = picked + [
-            e for e in gen_mod.derive_batched_info_cases(cases)
+            e for e in derived_info
             if (ops is None or e.get("op") in ops)
             and (args.max_n is None or e.get("n", 0) <= args.max_n)]
     except ContractError as exc:
@@ -243,10 +323,12 @@ def main(argv=None):
         cid, op = case["case_id"], case["op"]
         tc = time.time()
         try:
-            gen_mod.validate_case(case)
-            card = cards_mod.get_card(op)
+            gen = _gen_for(op, gen_mod, gen_luqr_mod)     # LU/QR ↔ Cholesky 生成器分流
+            gen.validate_case(case)
+            card = _card_for(op, cards_mod, cards_luqr_mod)
             batched = getattr(card, "batched", False)
             is_info = case.get("case_purpose") == "info"
+            ratio_updates = {}      # LU/QR 准备链增量（gels 双键）；Cholesky 恒空
             if is_info and batched:
                 # HT-9：批量 info 契约用例——现场构造（build_batched_info_arrays
                 # 逐内容自检 fail-closed）；无 ratio（只比 info，HT-4 mean 不计入）；
@@ -254,25 +336,20 @@ def main(argv=None):
                 # sample_map 展开，扰动非 none 逐内容产错误 info，info_dut_value
                 # 同一实现；out32 占位全零不消费）；judge_a0 按 case_purpose 分流
                 # （_judge_a0_info_inner，infoArray 全批逐槽核对/标量直接比对）。
-                arrays = gen_mod.build_batched_info_arrays(case)
-                sample_map = gen_mod.derive_sample_map(case["seed"], case["batch"])
+                arrays = gen.build_batched_info_arrays(case)
+                sample_map = gen.derive_sample_map(case["seed"], case["batch"])
                 ratio_cpu, ratio_status, n_prep_flag = None, "info", False
                 sys.path.insert(0, str(_HERE))
                 try:
-                    from sim_dut import info_dut_value
+                    from sim_dut import info_array_values, info_dut_value
                 finally:
                     sys.path.remove(str(_HERE))
                 batch_n = int(case["batch"])
                 cols = int(case["nrhs"]) if card.base_op.endswith("potrs") \
                     else int(case["n"])
                 if card.info_kind == "array":
-                    k_exp = [int(x) for x in case["k_expected"]]
-                    info_val = np.zeros(batch_n, dtype=np.int32)
-                    for e in sample_map:
-                        val = np.int32(info_dut_value(k_exp[int(e["content_idx"])],
-                                                      args.perturb))
-                        for s in e["slots"]:
-                            info_val[int(s)] = val
+                    info_val = info_array_values(case["k_expected"], sample_map,
+                                                 batch_n, args.perturb)
                 else:
                     info_val = np.int64(info_dut_value(int(case["k_expected"]),
                                                        args.perturb))
@@ -288,8 +365,8 @@ def main(argv=None):
                 # 可算（只比 info，HT-4 mean 也不计入）；sim 产 info（正例=
                 # k_expected，扰动非 none 产错误 info，sim_dut.info_dut_value 同一
                 # 实现）；verdict 按 case_purpose 分流出 info 独立结论（HT-12）。
-                arrays = gen_mod.build_info_arrays(
-                    case, gen_mod.build_case_arrays(by_id[case["base_case_id"]]))
+                arrays = gen.build_info_arrays(
+                    case, gen.build_case_arrays(by_id[case["base_case_id"]]))
                 ratio_cpu, ratio_status, n_prep_flag = None, "info", False
                 sys.path.insert(0, str(_HERE))
                 try:
@@ -307,36 +384,46 @@ def main(argv=None):
             elif batched:
                 # A0 抽样通路（HT-2）：k=min(5,batch) 个代表内容；ratio 逐内容；
                 # 全批输入现场展开喂 sim DUT；判定 criteria/batched_a0 两层先后。
-                contents = gen_mod.build_batched_contents(case)
-                sample_map = gen_mod.derive_sample_map(case["seed"], case["batch"])
+                contents = gen.build_batched_contents(case)
+                sample_map = gen.derive_sample_map(case["seed"], case["batch"])
                 k_contents = len(sample_map)
                 ratio_cpu, pf = [], 0
                 for i in range(k_contents):
-                    sub_case = {"case_id": f"{cid}#c{i}", "op": card.base_op,
-                                "uplo": case["uplo"]}
-                    sub_arrays = {kk: contents[kk][i]
-                                  for kk in ("A64", "A32", "B64", "B32") if kk in contents}
+                    sub_case = {"case_id": f"{cid}#c{i}", "op": card.base_op}
+                    for extra in ("uplo", "trans", "side"):   # 需者取用（LU/QR 批量无 uplo）
+                        if extra in case:
+                            sub_case[extra] = case[extra]
+                    sub_arrays = {kk: contents[kk][i] for kk in contents}
                     try:
-                        ratio_cpu.append(
-                            float(ratio_mod.run_chain(verdict_mod, lapack, sub_case, sub_arrays)))
+                        upd = _run_ratio(op, ratio_mod, verdict_mod, lapack,
+                                         gen_mod, gen_luqr_mod, sub_case, sub_arrays)
+                        val = upd.get("ratio_cpu") if isinstance(upd, dict) else upd
+                        ratio_cpu.append(float(val) if val is not None else None)
                     except ratio_mod.PrepFailed:
                         ratio_cpu.append(None)
                         pf += 1
                 ratio_status = "ok" if pf < k_contents else "prep_failed"
                 n_prep_flag = pf > 0
-                arrays = gen_mod.expand_sampled_rows(contents, sample_map, 0, int(case["batch"]))
+                arrays = gen.expand_sampled_rows(contents, sample_map, 0, int(case["batch"]))
             else:
-                arrays = gen_mod.build_case_arrays(case)
+                arrays = gen.build_case_arrays(case)
                 try:
-                    ratio_cpu = ratio_mod.run_chain(verdict_mod, lapack, case, arrays)
+                    upd = _run_ratio(op, ratio_mod, verdict_mod, lapack,
+                                     gen_mod, gen_luqr_mod, case, arrays)
+                    # LU/QR 准备链返回更新字典（gels 双键 ratio_cpu/ratio_opt_cpu）；
+                    # Cholesky 返回标量。统一折算：ratio_cpu 标量 + ratio_updates 增量。
+                    if isinstance(upd, dict):
+                        ratio_updates = upd
+                        ratio_cpu = upd.get("ratio_cpu")
+                    else:
+                        ratio_cpu = upd
                     ratio_status = "ok"
                     n_prep_flag = False
                 except ratio_mod.PrepFailed:
                     ratio_cpu, ratio_status, n_prep_flag = None, "prep_failed", True
             det = None      # HT-10：info 契约用例不参与确定性复跑（构造性非正定探针）
             if not is_info:
-                dut = _sim_dut(arrays["golden32"], args.perturb, card,
-                               args.perturb_index)
+                dut = _sim_dut(op, arrays, args.perturb, card, args.perturb_index)
                 # HT-10：确定性复跑——同一输入重复执行，第 2..N 次与第 1 次逐位
                 # 比对（out32/info/status，字节域）；结论独立于数值判定（HT-12），
                 # 首个失配即止并记 run 序号与失配键。
@@ -344,7 +431,7 @@ def main(argv=None):
                     first_diff = None
                     for r in range(2, args.rerun + 1):
                         first_diff = _rerun_compare(
-                            dut, _sim_dut(arrays["golden32"], args.perturb, card,
+                            dut, _sim_dut(op, arrays, args.perturb, card,
                                           args.perturb_index))
                         if first_diff is not None:
                             first_diff["run"] = r
@@ -368,6 +455,7 @@ def main(argv=None):
                     case_arrays = dict(arrays)
                     case_arrays.update(case)
                     case_arrays["ratio_cpu"] = ratio_cpu
+                    case_arrays.update(ratio_updates)   # LU/QR gels 双键（ratio_opt_cpu）
                     case_arrays["ratio_cpu_status"] = ratio_status
                     if index_mean and isinstance(index_mean, dict) and op in index_mean:
                         # 包内固化 mean 注入（s3-d3-r6）：兜底双支完整生效
@@ -421,6 +509,8 @@ def main(argv=None):
                                  for kk in ("ran", "ratio", "threshold", "pass")},
                     "ratio_cpu": ratio_cpu, "ratio_cpu_status": ratio_status,
                 })
+                if "ratio_opt_cpu" in ratio_updates:   # LU/QR gels 超定支（DQRT17）
+                    rec["ratio_opt_cpu"] = ratio_updates["ratio_opt_cpu"]
             rec["seconds"] = round(time.time() - tc, 3)
             if det is not None:
                 rec["determinism"] = det          # HT-10：独立结论（精度用例才有）

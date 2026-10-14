@@ -130,8 +130,8 @@ def test_rerun_detects_nondeterministic_dut(tmp_path):
     real_sim = mod._sim_dut
     state = {"calls": 0}
 
-    def flaky(golden32, mode, card, perturb_index=None):
-        dut = real_sim(golden32, mode, card, perturb_index)
+    def flaky(op, arrays, mode, card, perturb_index=None):
+        dut = real_sim(op, arrays, mode, card, perturb_index)
         state["calls"] += 1
         if state["calls"] >= 2:   # 首次之后每次翻转 out32 首元素——模拟非确定实现
             out = np.array(dut["out32"], copy=True)

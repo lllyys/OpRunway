@@ -67,6 +67,24 @@ spotrfBatched/spotrsBatched/cpotrfBatched/cpotrsBatched。批量条目逐矩阵�
 - HT-8：case_purpose=="info" 的条目（info 契约用例）整条跳过——无残差可算，
   ratio_cpu 保持 gen 侧的 null，不入画像统计（HT-4 mean 口径同样不计入）。
 
+LU/QR 增量（LQ-13，lq-plan §2.1）：算子册扩入 16 接口（LU 实/复 getrf/getri/
+getriBatched/matinvBatched + QR 实/复 geqrf/*gqr/*mqr/gels）。准备链数值域前缀按
+实/复（op[0] = s/c）；残差仍唯一取 criteria 的 verdict.residual_ratio，本脚本只做
+「同精度 CPU 准备链 + 喂同一残差实现」，口径与 render_verify._luqr_case_ratio /
+_luqr_batched_ratio 逐步对齐（kind 选取、喂数、双键规则一致）：
+
+- getri：CPU getri(LU32, ipiv 转 0 基) → 低精度逆 → DGET03(a=restore_lu(LU32, ipiv))；
+- getrf：CPU getrf(A32) → 打包 LU/ipiv（ipiv 转 1 基）→ DGET01(a=A32 升精度)；
+- geqrf：CPU geqrf(A32) → 构造 m×m Q → DQRT01(a=A32 升精度, r=AF32, q=Q)；
+- *gqr：CPU orgqr/ungqr(A32,tau32) → DQRT02(q=Q32)；
+- *mqr：CPU ormqr/unmqr(side,trans,A32,tau32,C32) → DQRT03(c=C32 升精度, q=实际 A32/tau32 升精度构造)；
+- gels：CPU gels(A32,B32) 取解 X32[:n] → m=n 走 DQRT16、m>n 走 DQRT17，
+  ratio_cpu/ratio_opt_cpu 双键同写（判据相对线随形状取）；
+- 批量两族：A0 条目现场重造 k 内容（gl.build_batched_contents），getriBatched 以
+  restore_lu(LU32, ipiv) 还原 A 再 DGET03、matinvBatched 以 A32 走 DGET03。
+
+LU/QR 条目无 uplo（画像硬门只审 spotrf/spotri，对 LU/QR 仅出统计）。
+
 CLI：
     fill_ratio_cpu.py --cases <dir> --out <dir> [--criteria <dir>] [--ops s1,s2]
                       [--workers N]
@@ -85,24 +103,47 @@ from pathlib import Path
 import numpy as np
 
 import gen_data_cholesky as gd    # S3：批维读者/分块常量与 BATCHED_OPS 同源
+from reference_environment import reference_environment
+
+import gen_data_luqr as gl        # LU/QR：A0 内容重建与批量基名（LQ-13）
 
 MAX_WORKERS = 64                  # 旧包批量条目并行 worker 上限（沿 S3 spec §2 裁定）
 
 TOOL = "fill_ratio_cpu.py"
-TOOL_VER = "a32base-r1"  # 2026-10-08 换基：DPOT01 a=A32、index 落 ratio_basis；承 s3-b4-r2
+TOOL_VER = "a32base-lqr2"  # lqr2：LU/QR 残差统一采用实际低精度输入升精度；此前 lqr1 部分支路仍用原始64位值
 REAL_OPS = ("spotrf", "spotrs", "spotri")
 COMPLEX_OPS = ("cpotrf", "cpotrs", "cpotri")
-SUPPORTED_OPS = REAL_OPS + COMPLEX_OPS
-ALL_OPS = SUPPORTED_OPS + gd.BATCHED_OPS
+CHOLESKY_OPS = REAL_OPS + COMPLEX_OPS
+# 单矩阵算子：Cholesky 6 + LU/QR 12（gl.SINGLE_OPS）；批量算子：gd/gl 两族并集。
+SUPPORTED_OPS = CHOLESKY_OPS + gl.SINGLE_OPS
+ALL_OPS = SUPPORTED_OPS + gd.BATCHED_OPS + gl.BATCHED_OPS
 F32 = np.float32
 C64 = np.complex64
-ACCEPTED_INDEX_SCHEMAS = ("solver-s1/cases-index@1",)  # 两册字段形状相同，共用一个 schema
+F64 = np.float64
+C128 = np.complex128
+# LU/QR 册 index schema 与 Cholesky 并列（字段形状不同，判据见 main）。
+ACCEPTED_INDEX_SCHEMAS = ("solver-s1/cases-index@1", "solver-luqr/cases-index@1")
+
+# LU/QR 单矩阵准备链所需 npz 数组（键按 gl._base_name 后的 LAPACK 例程名，实/复
+# 拼写分列：orgqr/ungqr、ormqr/unmqr；run_chain_luqr 逐算子消费）。
+_LUQR_REQUIRED = {
+    "getrf": ("A32",),
+    "getri": ("LU32", "ipiv"),
+    "geqrf": ("A32",),
+    "orgqr": ("A32", "tau32"),
+    "ungqr": ("A32", "tau32"),
+    "ormqr": ("A32", "C32", "tau32"),
+    "unmqr": ("A32", "C32", "tau32"),
+    "gels": ("A32", "B32"),
+    "getribatched": ("LU32", "ipiv"),
+    "matinvbatched": ("A32",),
+}
 
 
 def prep_kinds(op):
-    """准备链数值域：复数走 c 前缀（s2 spec §4：potrs/potri 前置 cpotrf 同精度，
-    complex64），实数走 s 前缀（float32）。"""
-    if op in COMPLEX_OPS:
+    """准备链数值域：复数走 c 前缀（Cholesky s2 spec §4；LU/QR 复册同前缀），
+    complex64；实数走 s 前缀，float32。LU/QR 前缀后缀口径与 gen_data_luqr 一致。"""
+    if op in COMPLEX_OPS or op in gl.COMPLEX_OPS:
         return C64, "c"
     return F32, "s"
 
@@ -205,6 +246,151 @@ def run_chain(verdict_mod, lapack, case, arrays):
 
 
 # ---------------------------------------------------------------------------
+# LU/QR 低精度准备链（LQ-13；口径与 render_verify._luqr_case_ratio /
+# _luqr_batched_ratio 同源——残差仍唯一取 criteria 的 verdict.residual_ratio，
+# 本段只做「同精度 CPU 准备链 + 喂同一残差实现」，不含任何残差公式）。
+# ---------------------------------------------------------------------------
+
+def _orgqr_full(packed, tau, nq, complex_):
+    """由打包反射子 (packed, tau) 升精度经 CPU orgqr/ungqr 生成 nq×nq 完整 Q。
+
+    Q 构造（非残差）——与 render_verify._orgqr_full 同法同形（gekkrf 兜底口径：
+    列数取行数），供 DQRT01 的 q 入参。scipy 报错即按准备链失败记 prep_failed
+    （render 副本此处抛 ValueError；回填侧统一走 prep_failed 便于逐 case 记录）。"""
+    p = np.array(packed, order="F")
+    t = np.asarray(tau).ravel()
+    k = min(p.shape[1], nq)
+    pad = np.zeros((nq, nq), dtype=p.dtype, order="F")
+    pad[:, :k] = p[:, :k]
+    fn = _lapack().zungqr if complex_ else _lapack().dorgqr
+    q, _work, info = fn(pad, t[:k])
+    if info != 0:
+        raise PrepFailed(f"orgqr/ungqr 构造 Q 失败: info={info}")
+    return q
+
+
+def run_chain_luqr(verdict_mod, lapack, case, arrays):
+    """LU/QR 单矩阵/批量逐内容参考 ratio，返回更新字典（与 render_verify 同源）。
+
+    - getri：CPU getri(LU32, ipiv 转 0 基) → 低精度逆 → DGET03
+      （a=restore_lu(LU32, ipiv)）；
+    - getrf：CPU getrf(A32) → 打包 LU/ipiv → DGET01（a=A32→64，ipiv 转 1 基）；
+    - geqrf：CPU geqrf(A32) → (AF32,tau) → 构造 m×m Q → DQRT01（a=A32→64）；
+    - *gqr：CPU orgqr/ungqr(A32,tau32) → DQRT02（q=Q32）；
+    - *mqr：CPU ormqr/unmqr(side,trans,A32,tau32,C32) → DQRT03（c=C32→64,q=Q(A32→64,tau32→64)）；
+    - gels：CPU gels(A32,B32) 取解 X32[:n] → 按 m 形状 DQRT16（m=n）/DQRT17（m>n），
+      双键同写（ratio_cpu/ratio_opt_cpu，判据相对线随形状取）；
+    - 批量两族（getriBatched/matinvBatched）：CPU 逆 + DGET03（a 取实现实际输入升精度：
+      getriBatched 传 restore_lu(LU32, ipiv)，matinvBatched 传 A32）。
+    准备失败抛 PrepFailed（调用方记 prep_failed）。"""
+    cid, op = case["case_id"], case["op"]
+    base = op[1:] if op[:1] in ("s", "c") else op        # 去实/复前缀
+    dt32, prefix = prep_kinds(op)
+    if base == "getri":
+        lu32 = np.ascontiguousarray(arrays["LU32"])
+        ipiv = np.asarray(arrays["ipiv"])
+        inv32, info = getattr(lapack, prefix + "getri")(
+            lu32, np.asarray(ipiv, dtype=np.int32) - 1)
+        if info != 0:
+            raise PrepFailed(f"{cid}: {prefix}getri info={info}")
+        _check_low("INV32", inv32, cid, dt32)
+        a_ref = verdict_mod.restore_lu(arrays["LU32"], ipiv)
+        ratio = verdict_mod.residual_ratio(
+            "DGET03", a=a_ref, ainv=np.ascontiguousarray(inv32))
+        return {"ratio_cpu": float(ratio)}
+    if base == "getrf":
+        a32 = np.ascontiguousarray(arrays["A32"])
+        lu32, ipiv, info = getattr(lapack, prefix + "getrf")(a32)
+        if info != 0:
+            raise PrepFailed(f"{cid}: {prefix}getrf info={info}")
+        _check_low("LU32", lu32, cid, dt32)
+        ratio = verdict_mod.residual_ratio(
+            "DGET01", a=arrays["A32"], lu=np.ascontiguousarray(lu32),
+            ipiv=np.asarray(ipiv) + 1)
+        return {"ratio_cpu": float(ratio)}
+    if base == "geqrf":
+        a32 = np.ascontiguousarray(arrays["A32"])
+        af32, tau, _work, info = getattr(lapack, prefix + "geqrf")(a32)
+        if info != 0:
+            raise PrepFailed(f"{cid}: {prefix}geqrf info={info}")
+        _check_low("AF32", af32, cid, dt32)
+        dt64 = C128 if dt32 == C64 else F64
+        q = _orgqr_full(np.ascontiguousarray(af32).astype(dt64), tau,
+                        af32.shape[0], prefix == "c")
+        ratio = verdict_mod.residual_ratio("DQRT01", a=arrays["A32"], r=af32, q=q)
+        return {"ratio_cpu": float(ratio)}
+    if base in ("orgqr", "ungqr"):      # *gqr（实 orgqr / 复 ungqr）
+        a32 = np.ascontiguousarray(arrays["A32"])
+        tau32 = np.ascontiguousarray(arrays["tau32"])
+        # 低精度前缀例程（sorgqr/cungqr）：dorgqr/zungqr 对低精度输入升型到 64/128，
+        # 会丢同精度链路语义（scipy 静默降型坑，README 1.5 条 7）。
+        fn = lapack.cungqr if prefix == "c" else lapack.sorgqr
+        q32, _work, info = fn(a32, tau32)
+        if info != 0:
+            raise PrepFailed(f"{cid}: {prefix}orgqr/ungqr info={info}")
+        _check_low("Q32", q32, cid, dt32)
+        return {"ratio_cpu": float(verdict_mod.residual_ratio("DQRT02", q=q32))}
+    if base in ("ormqr", "unmqr"):      # *mqr（实 ormqr / 复 unmqr）
+        a32 = np.ascontiguousarray(arrays["A32"])
+        c32 = np.ascontiguousarray(arrays["C32"])
+        tau32 = np.ascontiguousarray(arrays["tau32"])
+        side, trans = case["side"], case["trans"]
+        nq, k = a32.shape
+        lwork = max(1, 64 * max(nq, c32.shape[0], c32.shape[1], k))
+        # 低精度前缀例程（sormqr/cunmqr），同 *gqr 升型说明。
+        fn = lapack.cunmqr if prefix == "c" else lapack.sormqr
+        opq32, _work, info = fn(side, trans, a32, tau32, c32,
+                                lwork=lwork, overwrite_c=0)
+        if info != 0:
+            raise PrepFailed(f"{cid}: {prefix}ormqr/unmqr info={info}")
+        _check_low("opQ32", opq32, cid, dt32)
+        dt64 = C128 if prefix == "c" else F64
+        q = _orgqr_full(a32.astype(dt64), tau32.astype(dt64), nq, prefix == "c")
+        ratio = verdict_mod.residual_ratio(
+            "DQRT03", c=arrays["C32"], opq=np.ascontiguousarray(opq32),
+            q=q, side=side, trans=trans)
+        return {"ratio_cpu": float(ratio)}
+    if base == "gels":
+        a32 = np.ascontiguousarray(arrays["A32"])
+        b32 = np.ascontiguousarray(arrays["B32"])
+        _lqr, x32, info = getattr(lapack, prefix + "gels")(a32, b32, trans="N")
+        if info != 0:
+            raise PrepFailed(f"{cid}: {prefix}gels info={info}")
+        n = a32.shape[1]
+        x32 = np.ascontiguousarray(x32[:n, :])
+        _check_low("X32", x32, cid, dt32)
+        kind = "DQRT16" if a32.shape[0] == n else "DQRT17"
+        ratio = float(verdict_mod.residual_ratio(
+            kind, a=arrays["A32"], b=arrays["B32"], x=x32))
+        return {"ratio_cpu": ratio, "ratio_opt_cpu": ratio}
+    if base == "getribatched":
+        lu32 = np.ascontiguousarray(arrays["LU32"])
+        ipiv = np.asarray(arrays["ipiv"])
+        inv32, info = getattr(lapack, prefix + "getri")(
+            lu32, np.asarray(ipiv, dtype=np.int32) - 1)
+        if info != 0:
+            raise PrepFailed(f"{cid}: {prefix}getri info={info}")
+        _check_low("INV32", inv32, cid, dt32)
+        a_ref = verdict_mod.restore_lu(arrays["LU32"], ipiv)
+        ratio = verdict_mod.residual_ratio(
+            "DGET03", a=a_ref, ainv=np.ascontiguousarray(inv32))
+        return {"ratio_cpu": float(ratio)}
+    if base == "matinvbatched":
+        a32 = np.ascontiguousarray(arrays["A32"])
+        lu, piv, info = getattr(lapack, prefix + "getrf")(a32)
+        if info != 0:
+            raise PrepFailed(f"{cid}: {prefix}getrf info={info}")
+        inv32, info2 = getattr(lapack, prefix + "getri")(lu, piv)
+        if info2 != 0:
+            raise PrepFailed(f"{cid}: {prefix}getri info={info2}")
+        _check_low("INV32", inv32, cid, dt32)
+        ratio = verdict_mod.residual_ratio(
+            "DGET03", a=a32, ainv=np.ascontiguousarray(inv32))
+        return {"ratio_cpu": float(ratio)}
+    raise ContractError(f"{cid}: op={op!r} 不在 LU/QR 单/批量接口（{gl.ALL_OPS}）")
+
+
+# ---------------------------------------------------------------------------
 # S3 批量条目：逐矩阵 c_i（S3 spec §3；分块直读 + 多进程，见模块 docstring S3 段）
 # ---------------------------------------------------------------------------
 
@@ -256,27 +442,41 @@ def _auto_workers(n_chunks, per_chunk_bytes, requested):
 
 
 def batched_fill_a0(entry, verdict_mod, lapack):
-    """A0 批量条目回填（HT-2：新包不落 npz）。现场重造 k 个内容（gd.build_batched_
-    contents，与 gen 侧同一内容流同一函数，天然逐位一致），逐内容 run_chain——与
-    旧包 batched_fill 完全同源的链路入口。返回 (k 值列表（prep_failed 记 null）,
-    status, 运行信息 dict)。"""
+    """A0 批量条目回填（HT-2：新包不落 npz）。现场重造 k 个内容（gd/gl.build_
+    batched_contents，与 gen 侧同一内容流同一函数，天然逐位一致），逐内容跑同源
+    链路入口。返回 (k 值列表（prep_failed 记 null）, status, 运行信息 dict)。
+
+    Cholesky 批量（potrfBatched/potrsBatched）走 run_chain（标量）；LU/QR 批量
+    两族（getriBatched/matinvBatched）走 run_chain_luqr（取 ratio_cpu 键）。"""
     cid, op = entry["case_id"], entry["op"]
-    base_op = gd.batched_base_op(op)
-    contents = gd.build_batched_contents(entry)
-    rows = {name: contents[name] for name in ("A64", "A32", "B64", "B32")
+    if op in gl.BATCHED_OPS:
+        # 保留实/复前缀（run_chain_luqr 自去前缀定数值域）；strip 会丢 dtype 致复算错
+        case_op = op
+        contents = gl.build_batched_contents(entry)
+        runner = run_chain_luqr
+    else:
+        case_op = gd.batched_base_op(op)
+        contents = gd.build_batched_contents(entry)
+        runner = run_chain
+    rows = {name: contents[name] for name in ("A64", "A32", "B64", "B32",
+                                              "LU64", "LU32", "ipiv")
             if name in contents}
     k = int(contents["A64"].shape[0])
     vals = np.empty(k, dtype=np.float64)
     pf = 0
     for i in range(k):
-        case_i = {"case_id": f"{cid}#m{i}", "op": base_op, "uplo": entry["uplo"]}
+        case_i = {"case_id": f"{cid}#m{i}", "op": case_op}
+        if "uplo" in entry:                              # Cholesky 批量有 uplo；LU/QR 无
+            case_i["uplo"] = entry["uplo"]
         try:
-            vals[i] = run_chain(verdict_mod, lapack, case_i,
-                                {name: arr[i] for name, arr in rows.items()})
+            res = runner(verdict_mod, lapack, case_i,
+                         {name: arr[i] for name, arr in rows.items()})
         except PrepFailed as exc:
             vals[i] = np.nan
             pf += 1
             print(f"[b2] {case_i['case_id']}: prep_failed（{exc}）——记 NaN", file=sys.stderr)
+            continue
+        vals[i] = float(res["ratio_cpu"]) if isinstance(res, dict) else float(res)
     ratio = [None if np.isnan(v) else float(v) for v in vals]
     status = "ok" if pf < k else "prep_failed"
     return ratio, status, {"mode": "a0", "contents": k, "prep_failed": pf}
@@ -485,7 +685,8 @@ def main(argv=None):
     parser.add_argument("--criteria", default=None,
                         help="repo-task-solver-accept 的 criteria 目录（缺省按镜像树相对布局解析）")
     parser.add_argument("--ops", default=",".join(ALL_OPS),
-                        help="逗号分隔的算子子集，默认三册十算子（与 index 实际所含取交集）")
+                        help="逗号分隔的算子子集，默认全部（Cholesky 十 + LU/QR 十六；"
+                             "与 index 实际所含取交集）")
     parser.add_argument("--workers", type=int, default=0,
                         help="批量条目并行 worker 数；0=自适应（上限 64，S3 spec §2）")
     args = parser.parse_args(argv)
@@ -498,6 +699,7 @@ def main(argv=None):
     criteria_dir = Path(args.criteria) if args.criteria else default_criteria(Path(__file__))
     verdict_mod = load_verdict(criteria_dir)
     lapack = _lapack()
+    reference_env = reference_environment()
 
     selftest = prep_failed_selftest(verdict_mod, lapack)
     for st in selftest:
@@ -514,7 +716,7 @@ def main(argv=None):
             f"index schema={index.get('schema')!r} 不在 {ACCEPTED_INDEX_SCHEMAS}")
 
     rows = []
-    n_ok = n_prep_failed = 0
+    n_ok = n_prep_failed = n_none = 0
     for entry in index["cases"]:
         if entry["op"] not in ops:
             continue
@@ -523,7 +725,7 @@ def main(argv=None):
             # HT-8：info 契约用例无残差可算（只比 info，不进 mean），原样透传
             print(f"[b2] {cid}: case_purpose=info 跳过（ratio_cpu 保持 null）")
             continue
-        if entry["op"] in gd.BATCHED_OPS:               # S3 批量
+        if entry["op"] in gd.BATCHED_OPS or entry["op"] in gl.BATCHED_OPS:   # S3/LQ 批量
             if entry.get("materialize") == "gen" and "sample_map" in entry:
                 # HT-2 A0 新包：无 npz，现场重造 k 个内容逐内容回填
                 ratio, status, binfo = batched_fill_a0(entry, verdict_mod, lapack)
@@ -533,15 +735,15 @@ def main(argv=None):
                     n_ok += 1
                 else:
                     n_prep_failed += 1
-                row = {k_: entry[k_] for k_ in
+                row = {k_: entry.get(k_) for k_ in
                        ("case_id", "op", "source", "n", "nrhs", "uplo",
                         "ratio_cpu", "ratio_cpu_status")}
                 row["batch"] = entry["batch"]
                 row["batched_fill"] = binfo
                 rows.append(row)
                 print(f"[b2] {cid}: op={entry['op']} n={entry['n']} batch={entry['batch']} "
-                      f"uplo={entry['uplo']} A0 contents={binfo['contents']}/{entry['batch']} "
-                      f"ratio={status}")
+                      f"uplo={entry.get('uplo', '-')} A0 contents={binfo['contents']}/"
+                      f"{entry['batch']} ratio={status}")
                 continue
             npz_path = cases_dir / Path(entry["npz"]).name
             summary, status, binfo = batched_fill(entry, npz_path, criteria_dir, args.workers)
@@ -551,19 +753,47 @@ def main(argv=None):
                 n_ok += 1
             else:
                 n_prep_failed += 1
-            row = {k: entry[k] for k in
+            row = {k: entry.get(k) for k in
                    ("case_id", "op", "source", "n", "nrhs", "uplo",
                     "ratio_cpu", "ratio_cpu_status")}
             row["batch"] = entry["batch"]
             row["batched_fill"] = binfo
             rows.append(row)
             print(f"[b2] {cid}: op={entry['op']} n={entry['n']} batch={entry['batch']} "
-                  f"uplo={entry['uplo']} 逐矩阵 c_i {binfo['mode']}/{binfo['chunks']}chunk "
-                  f"摘要={summary} status={status}")
+                  f"uplo={entry.get('uplo', '-')} 逐矩阵 c_i "
+                  f"{binfo['mode']}/{binfo['chunks']}chunk 摘要={summary} status={status}")
             continue
         npz_path = cases_dir / Path(entry["npz"]).name
         with np.load(npz_path) as npz:
             arrays = {k: npz[k] for k in npz.files}
+        if entry["op"] in gl.SINGLE_OPS:                # LU/QR 单矩阵（LQ-13）
+            base = gl._base_name(entry["op"])
+            missing = set(_LUQR_REQUIRED[base]) - set(arrays)
+            if missing:
+                raise ContractError(f"{cid}: npz 缺数组 {sorted(missing)}（LU/QR 准备链）")
+            try:
+                updates = run_chain_luqr(verdict_mod, lapack, entry, arrays)
+            except PrepFailed as exc:
+                entry["ratio_cpu"] = None
+                entry["ratio_opt_cpu"] = None
+                entry["ratio_cpu_status"] = "prep_failed"
+                n_prep_failed += 1
+                print(f"[b2] {cid}: prep_failed（{exc}）——兜底不可用")
+            else:
+                for k_ in ("ratio_cpu", "ratio_opt_cpu"):
+                    entry[k_] = updates.get(k_)
+                entry["ratio_cpu_status"] = "ok" if updates else "none"
+                if updates:
+                    n_ok += 1
+                else:                                   # 无残差判据的算子（1014 范围内无）
+                    n_none += 1
+                print(f"[b2] {cid}: op={entry['op']} m={entry.get('m')} n={entry['n']} "
+                      f"source={entry['source']} status={entry['ratio_cpu_status']} "
+                      f"ratio_cpu={entry.get('ratio_cpu')}")
+            rows.append({k_: entry.get(k_) for k_ in
+                         ("case_id", "op", "source", "n", "nrhs", "uplo",
+                          "ratio_cpu", "ratio_opt_cpu", "ratio_cpu_status")})
+            continue
         missing = {"A64", "A32"} - set(arrays)
         if entry["op"].endswith("potrs"):
             missing |= {"B64", "B32"} - set(arrays)
@@ -582,7 +812,7 @@ def main(argv=None):
             n_ok += 1
             print(f"[b2] {cid}: op={entry['op']} n={entry['n']} uplo={entry['uplo']} "
                   f"source={entry['source']} ratio_cpu={ratio:.6g}")
-        rows.append({k: entry[k] for k in
+        rows.append({k: entry.get(k) for k in
                      ("case_id", "op", "source", "n", "nrhs", "uplo",
                       "ratio_cpu", "ratio_cpu_status")})
 
@@ -596,13 +826,20 @@ def main(argv=None):
     # 基版本标记（2026-10-08 换基）：本次回填的 ratio 全族为实现实际输入升 f64 的
     # A32 基；旧 index 无此字段即 A64 基，不可与新基混用
     index["ratio_basis"] = "A32-f64"
+    for entry in index["cases"]:
+        if entry.get("op") in ops and entry.get("op") in gl.ALL_OPS:
+            entry["reference_contract"] = "luqr-input32-v1"
+    families = sorted({("luqr" if o in gl.ALL_OPS else "cholesky") for o in ops})
     index["ratio_cpu_fill"] = {
         "tool": {"name": TOOL, "ver": TOOL_VER},
-        "spec": "dev-doc/solver/solver-s1-cholesky-spec.md#2.4",
+        "spec": "dev-doc/solver/solver-s1-cholesky-spec.md#2.4；"
+                "LU/QR 见 lq-plan §2.1（与 render_verify._luqr_case_ratio 同源）",
         "chain": "低精度完整准备链（实数 FP32 s 前缀 / 复数 complex64 c 前缀；"
-                 "potrs/potri 先同前缀 potrf），scipy.linalg.lapack",
+                 "Cholesky potrs/potri 先同前缀 potrf；LU/QR getrf/geqrf/gqr/mqr/"
+                 "gels/getri/matinv 低精度同前缀链路），scipy.linalg.lapack",
         "residual_impl": "repo-task-solver-accept/criteria/verdict.residual_ratio（唯一实现）",
-        "env": {"numpy": np.__version__, "scipy": scipy.__version__},
+        "families": families,
+        "env": reference_env,
     }
 
     out_cases = Path(args.out) / "cases"
@@ -614,11 +851,14 @@ def main(argv=None):
 
     report = {
         "schema": "solver-s1/ratio-cpu-report@1",
-        "spec": "dev-doc/solver/solver-s1-cholesky-spec.md#2.4 + #3 波1.5",
+        "spec": "dev-doc/solver/solver-s1-cholesky-spec.md#2.4 + #3 波1.5；"
+                "LU/QR 见 lq-plan §2.1",
         "tool": index["ratio_cpu_fill"]["tool"],
+        "families": families,
         "env": index["ratio_cpu_fill"]["env"],
         "inputs": {"cases_dir": str(cases_dir), "index": str(index_path)},
-        "filled": {"ok": n_ok, "prep_failed": n_prep_failed, "total": len(rows)},
+        "filled": {"ok": n_ok, "prep_failed": n_prep_failed, "none": n_none,
+                   "total": len(rows)},
         "prep_failed_selftest": selftest,
         "per_case": rows,
         "profile_stats": stats,

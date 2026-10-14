@@ -1,10 +1,150 @@
+## 2026-10-14：项目迁移为 Codex-only
+
+- 主仓和当前 worktree 的 Claude MCP、Grok 委派插件在项目级禁用；清空收据钩子注册，保留空操作兼容脚本。未修改用户全局配置。
+- 仓规明确 Codex 实施与独立 Codex 审核；规则及文档检查迁至 .codex，15 个算子 skill 以相对链接接入 .agents/skills。
+- 隔离验收入口改为 Codex exec、独立配置目录及仓外发布副本；删除旧 Claude 观察器。上游 plugin 镜像未改。
+- 清理 reports 中8项被替代的样例、v5中间包与旧patch，约154MiB；保留最新样例、v6、LU/QR、验收证据和fork工作区。明细见reports/cleanup-20261014.json。
+- Codex独立审查发现的README旧入口已修；配置解析、链接与diff检查通过。远程检查脚本语法及help入口通过；pytest缺失且安装失败，原测试未运行。
+- 隔离验收入口本轮仅核对命令与静态契约，未发起新的正式NPU验收。
+
+## 2026-10-14: Codex resume configuration repair
+
+Restored the previous transport command for the disabled `claude-code` MCP entry.
+Codex requires a valid transport even when `enabled = false`; Claude remains disabled.
+
+## 2026-10-14：样例README补充A5说明
+
+- 增加--soc=ascend950构建命令，明确切换目标不能替代A5源码适配；默认A3和原源码不变。
+- 同步重打最新样例包，核对包内README及SHA256；仅文档变化，未重复验收。
+
+## 2026-10-14：最新开发者源码样例重新打包
+
+- 默认SOC及构建说明改为已验证的A3；README注明旧实现info能力边界。算子源码与依赖15文件和原提交逐字节一致。
+- 远程使用现有导出器生成22文件样例，不携带skill、验收报告或构建产物；test下仅sgetrf目录。
+- 产物：reports/solver-developer-source-sample-1014-final/solver-developer-sample.tar.gz，SHA256已核对。沿用本轮A3实测证据，未重复跑验收。
+
+## 2026-10-14：源码样例 A3 真机验证
+
+- 原源码不改，显式 ascend910_93 重建并通过固定适配调用 sgetrf；普通4×4精度PASS，奇异info例FAIL（应1实0），两例均5轮一致。
+- 原实现正常路径只初始化info=0，未回填奇异位置；适配如实透传，失败离线重判一致。
+- msprof op采集成功，均值0.0323439802ms；A3数据不满足950PR正式性能条件，机械门保留INSUFFICIENT。
+- 证据：reports/solver-source-sample-a3-1014/。仅样例子集验证，未改算子、未宣称正式通过。
+
 # OpRunway 改动简表
+
+- **2026-10-14c · 补完整sgetrf源码样例。** 从已有提交提取真实实现、公开头及必要依赖，保留LICENSE和源码摘要，增加最小构建入口；不附公共测试工具。远端950编译/链接成功，未重跑真机精度性能；产物reports/solver-developer-source-sample-1014。未commit/push。
+
+- **2026-10-14b · 开发者样例精简为三个文件。** 按用户最终范围，只在test/sgetrf下提供真实适配源码、固定协议头和接入说明；移除common及测试入口，验收运行能力留在skill。远端导出清单/摘要测试通过，适配源码与协议不变；产物reports/solver-developer-sample-1014-minimal，未commit/push。
+
+- **2026-10-14 · 收拢开发者样例目录。** test下仅含sgetrf算子目录；common、协议头和测试入口全部移入算子目录，导出目录名改为runner/casegen并同步相对引用。远端独立导出与入口加载验证通过，Codex只读复核通过；重打包见reports/solver-unified-sample-1014-operator-local，未commit/push，未重跑真机。
+
+- **2026-10-13i · 统一 Solver 开发者样例与验收入口。** 26接口共用扩展适配协议和同源测试入口，补sgetrf真实调用示例、Host/Device声明及Cholesky矩形输出尺寸。远端回归和真实构建通过，实际执行超时、性能采集证据不足；见[记录](solver/solver-unified-sample-1013.md)。未commit/push。
+
+- **2026-10-13h · 修正 LU/QR 任务包说明模板并重打 sgels 试生成包。** 澄清冻结参考、info 接入和数值环境；试生成范围同时写入 README 与 canonical。远端两条装包测试及样例正负自检通过，参考值、性能基线与判定脚本未改。产物见 ignored reports/sgels-package-trial-1013/sgels-trial-v2.tar.gz；未commit/push。
+
+- **2026-10-13g · 清理已替代报告产物。** 删除已核对压缩副本的四份v5重复索引、旧候选包、撤回样例及v6样例前归档，共1,347,672,272字节；保留当前十包、LU/QR16包、实验/验收证据与fork工作区，清单见ignored reports/cleanup-20261013.json。
+
+- **2026-10-13f · 复核 solver skill 完成性。** 修正遗漏的harness报告judge_scope及帮助文字，明确判定已覆盖LU/QR；仅文字修正，未追加运行测试，未commit/push。
+
+- **2026-10-13e · 完成 solver skill 修复与 casegen 文档整理。** LU/QR 固定v2适配接入矩形参数、ipiv/tau、失败留证与msprof op性能闭环；冻结参考标记与数值库环境可追溯，保留任务书Q正交性判据。远端局部验证和独立Codex审查闭环；既有包未动，未commit/push，未作完整NPU验收。见[修复计划与完成记录](solver/solver-skill-repair-plan-1013.md)。
+
+- **2026-10-13d · 按用户确认统一 LU/QR skill 残差输入口径。** CPU回填、验收卡及渲染模板统一实际32位输入升64计算，mqr从实际反射子构造Q；远程42矩阵三链一致，独立Codex审查通过。仅改skill及开发记录，已有包未动，未push。见[solver-luqr-input32-skill-1013.md](solver/solver-luqr-input32-skill-1013.md)。
+
+- **2026-10-13c · 回退未经确认的gels参考口径改动。** 恢复原CPU参考链，删除新增逐条口径标记与旧包拒绝逻辑，撤回强制重冻结论；保留冻结ratio_opt_cpu读取和QR参数透传。两包脚本/说明/摘要同步，冻结数据未改，未测试、未push。见[solver-gels-basis-revert-1013.md](solver/solver-gels-basis-revert-1013.md)。
+
+- **2026-10-13b · 修复gels冻结参考读取与生成口径。** 超定改读冻结ratio_opt_cpu，补QR元数据；CPU冻结链改A32/B32并标记新口径，拒用旧值。两个gels包脚本/README/摘要同步，原index和GPU基线不动，CPU参考待服务器重冻。独立Codex静态审查，未运行测试。见[solver-gels-frozen-fix-1013.md](solver/solver-gels-frozen-fix-1013.md)。
+
+- **2026-10-13 · 合入 LU/QR 两 skill 并收纳16包。** 基于共同基线e7820e0导入交接版23804ff；修正性能均值、ipiv/tau、LU输入、冻结ratio及残差文档，明确真实harness/正式性能与备用QR复核限制。产物复制至reports/solver-luqr-1013，16包只修README及manifest摘要，210个来源文件静态核对；未运行测试、未push。见[solver-luqr-import-1013.md](solver/solver-luqr-import-1013.md)。
 
 > 倒序：最新在上。每天一条一句，大白话。`待决` 置顶。
 
 - **待决**：B3/B5 未走满的子场景（拒绝→重生成、四类上游变更单走）是否补走；
   T2 候选对照 golden 自检的改进项落地；solver 两 skill 之间调用点归哪一侧
   （见 context 第 8′ 节末）。
+- **2026-10-12d · 十包按任务书附公共样例。** 实数/复数两个任务书目录各增加一份cmatinv-sample；更新目录和十包README，说明样例接入边界，同步README指纹与对账表并重新归档。用例、基线和脚本不变，未运行测试。
+- **2026-10-12c · 按用户要求撤回样例目录调整。** 恢复根目录run_sample.sh和include/solver_adapter.h，沿用1010版开发者样例；仅回退本次路径修改，同步fork，不再测试。
+- **2026-10-12b · 修复PR #16合并冲突。** fork分支合入上游main，保留文档地图中的doc-write、BLAS及solver三条指南链接；两个solver skill树指纹不变，提交5727fe6已推送。
+- **2026-10-12 · 补充solver验收使用指南并纳入PR。** docs/guide/solver-acceptance-usage.md
+  说明交付材料、助手调用示例、固定适配、精度/确定性/性能流程、报告及常见问题，文档地图增加入口。
+  运行命令链接skill权威协议，区分开发者样例与正式验收；同步fork的solver-accept-1010，进入Justbin PR #16。
+- **2026-10-10i · 样例改为独立开发者精度/性能自测包。** 去内部验证记录、历史耗时和skill依赖，
+  同一适配模块对接固定公共执行器；新增逐矩阵CPU残差精度检查、msprof op均值与可选GPU基线对比。
+  导出入口统一复制协议和公共执行器，包约14KB。默认n8/batch4真机精度与30次性能采集完成；
+  mean0.328422ms，无基线仅MEASURED。独立Codex审查闭环；全套回归及n16复查因远端SSH中断
+  暂未取得最终结果，不能沿用上一版469项作为本版通过数。详见solver/solver-developer-sample-1010.md。
+- **2026-10-10h · 固定开发者适配协议与cmatinv样例落地。** 开发者在test/<op>提供无main适配模块，
+  自测与验收共用；skill独立编译固定执行器、原版协议头与真实库，留存源码/库身份。
+  性能入口支持同版adapter并沿用msprof op；远端469项通过，样例源码构建、五轮复跑、
+  自测与30次性能实采通过；mean0.328084ms，无GPU基线不判性能达标，cm数值仍NOT_JUDGED。
+  独立Codex审查闭环；十包不变，样例不含skill。详见solver/solver-adapter-1010.md。
+- **2026-10-10g · v6仅修三类必要文档错误。** 按用户“没必要就不改”，撤回解释性补充；
+  仅修求逆info正值、批量求解非法参数调用和msprof op计时口径，脚本/数据未改。
+  同步README指纹、对账表和v6归档；文字diff见reports/v6-packages/document-review.diff。
+- **2026-10-10f · v6十包按最小diff整理。** 用户明确以v5为基、不重算用例/基线；
+  保留当前精度判据与批量info修复，恢复0928原verify_perf，收回gen/sim无关文案及README可选说明。
+  十包远端现有正负例门全过；gen/sim去docstring后AST与已验证当前版一致，v5三类数据逐字节保留。
+  独立Codex audit→fix→verify闭环；产物reports/v6-packages/，原数值基线待裁状态保留，未push。
+- **2026-10-10e · 性能验收流程落地，样例标明接入必补项。** 逐 case 用 msprof op
+  采集、按 case_id/bench_key 匹配冻结GPU基线、按均值≤GPU/0.35判定并汇总；
+  原始CSV重读、全量缺项保留、目标环境/ABI/库身份核对，参考比值退出必测门禁。
+  cmatinv样例新增ADAPTATION.md，明确公开接口适配与C++真实调用两类必补项，包内不含skill。
+  远端464项通过；十包仅同步两份公共性能说明，基线/用例不变。用户收敛范围为流程与样例，
+  不要求完整算子验收实跑；验证详见solver/solver-completion-1010.md。
+- **2026-10-10d · 样例与 skill 分开发送。** 按用户「skill 不要放」移除 cmatinv 样例包内
+  skill/；两个入口改用外部 SOLVER_ACCEPT_DIR/SOLVER_CASE_GEN_DIR，说明与SHA256同步。
+  保留数值教学脚本、性能原始CSV及报告；采集和判定实现未改。
+- **2026-10-10c · cmatinv 样例补性能实采。** 新增 skill 内 profile_cmatinv_sample.py，
+  样例一键入口复用共享 harness，msprof op kernel-only 30条采样；mean0.328048ms、
+  median0.330247ms，原始CSV随包。未绑定GPU基线，明确NOT_EVALUATED。远端137项通过，
+  错kernel实跑退2；一轮独立Codex审查修复嵌套进程组超时问题后通过。样例包已更新。
+- **2026-10-10b · 按用户新裁定交付 cmatinv 样例包。** 共享 harness 自建/执行/五轮复跑/留证入口
+  加原 v2 数值教学样例；包内命令真机通过，教学正例与三类注入负例符合预期。
+  共享执行 numeric=NOT_JUDGED 与独立数值报告分开说明；不再等待 Cholesky 才出样例。
+  产物 reports/cmatinv-sample-1010/cmatinv-batched-sample.tar.gz，逐文件及压缩包 SHA256 已核。
+- **2026-10-10 · Codex 接续 solver 共享 harness 与冻结判定收尾。** 用户指定仅用 Codex；
+  A0–A3 与共享运行说明落地，自测/验收/harness 统一消费冻结参考值，失败留证、复跑未知态、
+  进程组取消清理及 ABI 描述核对补齐；一轮独立 audit→fix→verify 已闭环（撤回 info 数组越界
+  误报）。远端两 skill 全套 404 绿，十包不重算数据、重渲与逐包门 59.01 秒全过；性能说明
+  模板旧 0.8/A100 改为现行 GPU/0.35。数值基线仍待裁定、真实 Cholesky 交付与完整样例仍待，
+  候选未发布、未 push。见 solver/solver-completion-1010.md 与 HT-31/32。
+- **2026-10-09e · checkpoint 审计七项修复。** build_package 负例门四项：①负例 FAIL 另要求
+  verdict.error 为空（`_gate_row_off`，不可裁路径不再算检出）、③扰动槽位改 0 并删 batch>1
+  过滤（batch=1 的合法包不再必然失败）、④正负断言并成 `gate_assert_round`（预期退出码 + 门自己
+  清单逐 ID 恰一行 + 每行结论有效，summary 仅诊断）、⑥执行异常（超时/起不来/报告损坏/缺字段）
+  收敛 SelfCheckError 退 3。另：②sim_dut 批量 info 的 out32 列数按算子族取（求解族 nrhs）；
+  ⑤stream_check 两处 info 派生显式传新增的 `render_verify.info_require_s1`（full 册不再静默
+  略过 info 用例）；⑦就地定义 accept SKILL.md 的 A32-f64 与 `info_require_s1` 两种取值。
+  tests 229→237 绿；戳 s3-F13→F14、s3-E7→E8、s2a1-r8→r9、renderer s4-D11→D12 与 s3-D9→D10
+  （副本 docstring 进渲染字节）。
+- **2026-10-10 · HT-31 共享 harness v1 落地 + A3 真机最小闭环。** `scripts/harness/` 新建
+  八件（op_abi / harness_exec.cpp / build_dut / exec_case / evidence / run_harness + 单测），
+  关键决策：按调用形状分流（非按算子名）、交付头唯一真相、四条构建纪律进代码、实际加载库取
+  dladdr 运行期事实。A3 容器（CANN 9.0.0、--privileged）全链闭环：构建退 0（29.3s 零告警）→
+  cmatinv_batched 正例三键回传（诊断残差 1.9e-08，本地独立复算同量级）→ 复跑 3 轮 bit-wise
+  一致 → 失败留证七件齐备且独立重判通过 → Device 搬运管道往返逐字一致。新基线 05e6b09 复核
+  （PROBE.md 第 7 节）：三硬依据成立（声明在 extern "C" 外且带 std::complex → C++ 执行器路线
+  不变），「info 死参」结论过期（新基线已写 info），第七算子 cheevj 破同构、印证形状分流。
+  真机当场修掉两缺陷（失败轮输出读回进留证件、run1_ms 重复行）。tests 237→337 绿。
+  遗留 L1–L9 见 reports/harness-build/REPORT.md（Device 调用点待交付头、A1 改写待主线、
+  S0 准入 12 条待真实交付）。
+- **2026-10-09d · 验收接入形态裁定归档（HT-31 立项）。** 端到端验收 + 共享 harness
+  （自测与验收同流程）+ 样例换载体（cmatinv v2 降内部参考）+ 任务包不改；Codex
+  review-plan 裁 NEEDS REVISION 后按修订五点与五步序定案，ops-solver 只读探测
+  （PROBE.md）钉死 C++ 执行子进程路线与双口径分流。potrf 换基对照量化完成
+  （reports/ratio-basis-diff/：新基中位小 6–8%、均值降 14%、旧值配新判阈值偏松
+  16–17%，旧固化值确认不可复用；本机 Accelerate 的 potrf 残差大 11–115 倍不可用，
+  复核一律 OpenBLAS）。施工待令。
+- **2026-10-09c · accept 侧收尾四件批落地。** ①render_verify require_s1 口径对齐（full 切片
+  info id 两侧派生曾三条全不相交，已发布 v4 六包命中）：口径函数渲染进包内副本
+  （s4-D11/s3-D9），case-gen 装包加 info id 对账门（s3-F13）并去掉 gate 的 package_scope
+  绕行；②sim_dut 批量 infoArray（s3-E7）：逐内容 k 经 sample_map 摊槽、fail-closed 四型，
+  stream_check 去平行副本；③验收准入断言：index.ratio_basis≠A32-f64 退 2 拒收（accept_run
+  D6、stream_check r8，散册冒烟无 index 不受门）；④accept SKILL.md T8 旧句清理 4 处（grep
+  零命中）。tests 183→229（新增 46，对 HEAD 实跑必红验证过非恒绿）。遗留：已发布 v4 包仍旧
+  renderer（重装随 v5 一并）；批量 info 契约项不进负例门（独立增量）。Codex checkpoint
+  （含 build_package 欠账）下一步跑。
+- **2026-10-09b · 装包自检加负例门（s3-F12）+ 终裁纯一段式 + 发布包快照固定。** 负例门：装包末项真跑包内 gen→sim→verify 两轮，正例必全 PASS、负例必全 FAIL 且批量归因命中，任一不符退 3 不写 manifest；单包增量 0.9–2.4s；变异实测拦住 HT-24 同款恒 PASS 的 verify。tests 183 绿（case-gen 34 + accept 149）。门顺带挖出 accept 侧两缺陷：①full 切片 info id 两侧派生口径不一致（require_s1 不对齐），已发布 v4 六包命中——开发者算子全对也会因 info 证据不足退 1；②批量 info 的 sim 造不出输出（k_expected 列表遇 int()）。另：判定架构终裁只维持纯一段式（证书形态不回归）；开发者在手版本快照固定至 community_task 2d3a532 （9-28，仅 Cholesky 两目录，129 文件 sha256）。欠账：build_package +338 行触发 Codex checkpoint，随批次合并评审。
+- **2026-10-09 · 批量验证参考样例全线闭环（一次性交付件）。** cmatinv_batched 参考样例：本地 scipy 闭环（正例两档/负例三型归因）→ A2/A3 系真机两档 PASS（一致性层真判、n≥32 转发有现场证据）→ 开发者发行版 v2（去 plugin 双实现、25 处注释脱内部化、边界声明按 acceptance-roles角色口径、零语义漂移二进制级证明、脱敏 grep 六类全零）。产物 reports/a2-e2e-cmatinv/：cmatinv-batched-test-sample-v2.tar.gz（16.5K，9 文件）即发行件，internal-evidence/ 留内部证据。用户裁定：样例包只出一次，不进包契约不随批次演进。另：settings 的 subagent=opus 强制项需新会话生效，本会话重启后接管。
 - **2026-10-08b · 工作基座与镜像同步。** solver 施工基座=repos/repo-task-atk-test-evolve（evolve-1008，fork 有备份）；plugin/skill 两目录已从该基座全量同步（37 文件变更，137/137 绿复核），镜像与活仓恢复一致，后续改动两边同步落。
 - **2026-10-08 · 回交接管：solver 线收回本方继续演进。** 对方回交包（md5 验证过）落reports/solver-handover-1008-returned/；两 skill 演进态（criteria s1-A6、批量 A0、0.35 门禁、模板对外化）以快照导入 repos/repo-task-atk-test-evolve 的 evolve-1008 分支（基座 6993e00，血缘待对方 push f5322b4 对齐），本机 criteria 137/137 绿复核过；看板（HT-30）、plan、裁定档案、回执与 spotri 直审 issue 同步回 dev-doc/solver/。对方线已关闭不再 push（血缘止于快照导入，HT-23 随之关闭）。悬置待裁：HT-15 补字（荐甲=A64 落字）、HT-24 potri 直审宽容转研发、HT-28 四条等任务侧、任务书 solver_1010 分支未提交、两仓待 push。
 - **2026-09-24h · 0924 对标裁定群落地 + 交接待办簿建立。** issue 清单（验收方回球）归档并逐条裁定：C1 用新版标准（容差 2⁻¹³）、C2/HT-1 采 opbase 动态锚点（已施工：max_abs 门单口径+±inf/NaN 收窄，86/86）、A5 选项①两步结构（golden 直审主判，待施工）、主判基准 golden64、A4 我方侧 ε 标注与 eps 披露（已施工）、C3 摘 T7（已施工）、C4 确认维持、B1 构造性正定声明（纯文档已落）、HT-20 申诉句（已落）、HT-15 potrf 残差基暂维持 A64 等任务侧补字。交接待办簿 dev-doc/solver/solver-handover-todo.md 建立（20 条带来源标记）；发现 plugin 无批量判定通路（在 s3/s4 树未归并），T8 摘除转挂树归并。CRITERIA_VER 至 s1-A5。

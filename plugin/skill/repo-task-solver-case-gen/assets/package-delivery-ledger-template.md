@@ -14,9 +14,9 @@ DELIVERY_LEDGER.md。对账表是「交付了什么、怎么验过」的唯一�
 | --- | --- | --- | --- |
 {fingerprint_size_table}
 
-## 固化字段指纹（v3，防换基/换 mean 的逐包核对）
+## 固化字段逐包核对
 
-| 包 | index 条目数 | info 用例数 | mean 固化（index 顶层） | sample_map 条数（批量包） |
+| 包 | index 条目数 | info 用例数 | mean 固化（单矩阵顶层，批量条目级） | sample_map 条数（批量包） |
 | --- | --- | --- | --- | --- |
 {frozen_fields_table}
 
