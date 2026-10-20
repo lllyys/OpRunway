@@ -5,7 +5,7 @@
 ## 目录
 
 - `plugin/`：上游 `Justbin/repo-task-atk-test` 镜像。保留其 `CLAUDE.md`、`.claude/`、`.claude-plugin/` 兼容文件；本仓根不使用这些入口。
-- `.agents/skills/`：Codex skill 入口，链接到 `plugin/skill/`，不复制实现。
+- `.agents/skills/`：Codex skill 入口。上游 skills 链接到 `plugin/skill/`，不复制实现；项目自有 skills 使用实体目录，与上游镜像及参考仓隔离。
 - `.worktrees/<任务名>/`：并行工作区，由 Git 忽略；使用 `git worktree add/move/remove` 管理。
 - 主仓 `reports/<任务名>/`：集中保存最新交付产物及对应证据；worktree 可通过链接访问。按授权清理旧版本，不删除分支或提交。
 - `dev-doc/`：开发记录；每次修改在 `oprunway-changes-brief.md` 顶部追加摘要，待办只写 `oprunway-todo.md`。
